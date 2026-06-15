@@ -144,7 +144,7 @@ fn login_screen() -> u16 {
 }
 
 /// Affiche l'invite de commande.
-fn print_prompt(cwd: usize) {
+pub fn print_prompt(cwd: usize) {
     vga::set_color(COLOR_GREEN);
     print!("{}@bouchaud-os:", users::session().username());
     vga::set_color(COLOR_CYAN);
@@ -175,6 +175,16 @@ fn session_loop() {
         }
         run_line(trimmed, &mut cwd);
     }
+}
+
+
+/// Execute une commande depuis une application graphique et renvoie la sortie texte.
+pub fn run_line_capture(line: &str, cwd: &mut usize) -> String {
+    history::record(line);
+    dmesg::log("gui-terminal: commande executee");
+    vga::capture_start();
+    run_line(line, cwd);
+    vga::capture_take().unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -306,7 +316,7 @@ fn longest_common_prefix(items: &[String]) -> String {
 // ---------------------------------------------------------------------------
 
 /// Decoupe et execute une ligne (chainage + redirections).
-fn run_line(line: &str, cwd: &mut usize) {
+pub fn run_line(line: &str, cwd: &mut usize) {
     let bytes = line.as_bytes();
     let mut start = 0usize;
     let mut i = 0usize;
@@ -343,7 +353,7 @@ fn run_chained(seg: &str, sep: Sep, cwd: &mut usize) {
 }
 
 /// Execute un segment : gere `$?` et la redirection `>`/`>>`, puis dispatche.
-fn run_segment(seg: &str, cwd: &mut usize) -> i32 {
+pub fn run_segment(seg: &str, cwd: &mut usize) -> i32 {
     let expanded = expand_vars(seg);
     let (cmd, redir) = parse_redirect(&expanded);
     let cmd = trim(cmd);

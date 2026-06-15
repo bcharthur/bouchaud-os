@@ -173,6 +173,7 @@ pub enum Key {
     Down,
     Left,
     Right,
+    Escape,
     Other,
 }
 
@@ -180,6 +181,49 @@ pub enum Key {
 static mut SHIFT: bool = false;
 /// Etat persistant de la touche AltGr (Alt droit, sequence E0 38 / E0 B8).
 static mut ALTGR: bool = false;
+
+
+/// Lecture non bloquante d'une touche logique. Utile pour les applications GUI
+/// qui doivent continuer a redessiner sans bloquer sur le clavier.
+pub fn try_key() -> Option<Key> {
+    interrupts::disable();
+    let sc = pop_scancode();
+    interrupts::enable();
+    let sc = sc?;
+
+    if sc == 0xe0 {
+        interrupts::disable();
+        let ext = pop_scancode();
+        interrupts::enable();
+        return match ext {
+            Some(0x38) => { unsafe { ALTGR = true; } None }
+            Some(0xb8) => { unsafe { ALTGR = false; } None }
+            Some(0x48) => Some(Key::Up),
+            Some(0x50) => Some(Key::Down),
+            Some(0x4b) => Some(Key::Left),
+            Some(0x4d) => Some(Key::Right),
+            Some(0x53) => Some(Key::Backspace),
+            _ => None,
+        };
+    }
+
+    match sc {
+        0x2a | 0x36 => { unsafe { SHIFT = true; } return None; }
+        0xaa | 0xb6 => { unsafe { SHIFT = false; } return None; }
+        _ => {}
+    }
+    if sc & 0x80 != 0 { return None; }
+
+    let shift = unsafe { SHIFT };
+    let altgr = unsafe { ALTGR };
+    scancode_to_char(sc, shift, altgr).map(|ch| match ch {
+        '\n' => Key::Enter,
+        '\x08' => Key::Backspace,
+        '\t' => Key::Tab,
+        '\x1b' => Key::Escape,
+        c => Key::Char(c as u8),
+    })
+}
 
 /// Lit la prochaine touche logique au clavier (gere Shift, AltGr et etendues).
 pub fn read_key() -> Key {
@@ -215,7 +259,7 @@ pub fn read_key() -> Key {
                 '\n' => Key::Enter,
                 '\x08' => Key::Backspace,
                 '\t' => Key::Tab,
-                '\x1b' => Key::Other,
+                '\x1b' => Key::Escape,
                 c => Key::Char(c as u8),
             };
         }
