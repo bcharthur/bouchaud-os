@@ -110,7 +110,8 @@ pub fn enter() {
     crate::serial_println!("[gfx] mode 13h actif (320x200x256)");
 }
 
-/// Restaure le mode texte 80x25 (registres standard mode 03h).
+/// Restaure le mode texte 80x25 (registres standard mode 03h) + recharge la
+/// police texte (detruite par le mode graphique).
 pub fn leave() {
     // Table mode texte 03h.
     const CRTC_03H: [u8; 25] = [
@@ -125,9 +126,51 @@ pub fn leave() {
     unsafe {
         outb(0x3C2, 0x67);
         write_regs_text(&CRTC_03H, &GC_03H, &AC_03H);
+        load_text_font();
         BACK = None;
     }
     crate::serial_println!("[gfx] retour mode texte");
+}
+
+fn reverse_bits(mut b: u8) -> u8 {
+    let mut r = 0u8;
+    for _ in 0..8 {
+        r = (r << 1) | (b & 1);
+        b >>= 1;
+    }
+    r
+}
+
+/// Recharge une police 8x16 dans le plan 2 (generateur de caracteres texte).
+/// On derive la police 8x16 de notre police 8x8 (chaque ligne doublee).
+unsafe fn load_text_font() {
+    // --- Sequence d'acces au plan 2 (generateur de caracteres) ---
+    outb(0x3C4, 0x00); outb(0x3C5, 0x01); // reset synchro
+    outb(0x3C4, 0x02); outb(0x3C5, 0x04); // ecrit dans le plan 2
+    outb(0x3C4, 0x04); outb(0x3C5, 0x07); // memoire etendue, sans odd/even
+    outb(0x3C4, 0x00); outb(0x3C5, 0x03); // fin reset
+    outb(0x3CE, 0x04); outb(0x3CF, 0x02); // lecture plan 2
+    outb(0x3CE, 0x05); outb(0x3CF, 0x00); // mode sans odd/even
+    outb(0x3CE, 0x06); outb(0x3CF, 0x00); // fenetre A0000, 128k
+
+    let base = 0xA0000 as *mut u8;
+    for c in 0u16..256 {
+        let glyph = font::glyph(c as u8); // 8x8 (espace si hors plage)
+        for r in 0..16usize {
+            let src = glyph[r / 2]; // ligne doublee 8 -> 16
+            let byte = reverse_bits(src); // police texte = bit de poids fort a gauche
+            core::ptr::write_volatile(base.add((c as usize) * 32 + r), byte);
+        }
+    }
+
+    // --- Retour a la configuration texte (acces a B8000 en odd/even) ---
+    outb(0x3C4, 0x00); outb(0x3C5, 0x01);
+    outb(0x3C4, 0x02); outb(0x3C5, 0x03); // plans 0 et 1
+    outb(0x3C4, 0x04); outb(0x3C5, 0x03); // odd/even
+    outb(0x3C4, 0x00); outb(0x3C5, 0x03);
+    outb(0x3CE, 0x04); outb(0x3CF, 0x00);
+    outb(0x3CE, 0x05); outb(0x3CF, 0x10); // odd/even actif
+    outb(0x3CE, 0x06); outb(0x3CF, 0x0E); // fenetre B8000, mode texte
 }
 
 unsafe fn write_regs_text(crtc: &[u8; 25], gc: &[u8; 9], ac: &[u8; 21]) {
