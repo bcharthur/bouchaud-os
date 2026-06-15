@@ -13,9 +13,54 @@ use crate::fs::ramfs;
 use crate::kernel::dmesg;
 use crate::users;
 
-/// Boucle principale du shell : affiche le prompt, lit une ligne, l'execute.
+/// Point d'entree du shell : ecran de connexion, puis session, en boucle.
 pub fn run() -> ! {
-    // Demarre dans le repertoire d'accueil de l'utilisateur courant.
+    loop {
+        let uid = login_screen();
+        users::session().set_uid(uid);
+        dmesg::log("shell: session ouverte");
+        session_loop();
+        dmesg::log("shell: session fermee");
+    }
+}
+
+/// Ecran de connexion : demande utilisateur + mot de passe jusqu'a reussite.
+fn login_screen() -> u16 {
+    let mut name_buf = [0u8; 64];
+    let mut pass_buf = [0u8; 64];
+    loop {
+        vga::set_color(COLOR_CYAN);
+        println!("");
+        println!("=== Bouchaud OS - connexion ===");
+        vga::set_color(COLOR_DEFAULT);
+        print!("login: ");
+        let nlen = keyboard::read_line(&mut name_buf);
+        let name = trim(unsafe { core::str::from_utf8_unchecked(&name_buf[..nlen]) });
+        if name.is_empty() { continue; }
+
+        print!("Mot de passe: ");
+        let plen = keyboard::read_secret(&mut pass_buf);
+        println!("");
+        let pass = unsafe { core::str::from_utf8_unchecked(&pass_buf[..plen]) };
+
+        match users::authenticate(name, pass) {
+            Some(uid) => {
+                vga::set_color(COLOR_GREEN);
+                println!("Bienvenue, {} !", name);
+                vga::set_color(COLOR_DEFAULT);
+                return uid;
+            }
+            None => {
+                vga::set_color(COLOR_RED);
+                println!("login: identifiants invalides");
+                vga::set_color(COLOR_DEFAULT);
+            }
+        }
+    }
+}
+
+/// Boucle de session : prompt + execution, jusqu'a `logout`/`exit`.
+fn session_loop() {
     let mut cwd = ramfs::fs().resolve(users::session().home(), 0).unwrap_or(0);
     let mut line_buf = [0u8; 256];
 
@@ -35,6 +80,12 @@ pub fn run() -> ! {
 
         history::record(trimmed);
         dmesg::log("shell: commande executee");
+
+        // logout / exit ferment la session et reviennent a l'ecran de connexion.
+        if trimmed == "logout" || trimmed == "exit" {
+            println!("Deconnexion.");
+            return;
+        }
         dispatch(trimmed, &mut cwd);
     }
 }
@@ -70,8 +121,9 @@ fn dispatch(line: &str, cwd: &mut usize) {
         "whoami" => println!("{}", users::session().username()),
         "id" => c::id(),
         "users" => c::users(),
-        "login" => c::login(argc, &argv, cwd),
-        "logout" => c::logout(cwd),
+        "useradd" => c::useradd(argc, &argv),
+        "userdel" => c::userdel(argc, &argv),
+        "passwd" => c::passwd(argc, &argv),
         "su" => c::su(argc, &argv, cwd),
 
         // Fichiers

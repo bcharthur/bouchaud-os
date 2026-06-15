@@ -99,33 +99,19 @@ impl FileSystem {
         self.nodes[0].gid = 0;
 
         let home = self.mkdir_at(0, "home").unwrap_or(0);
-        let arthur = self.mkdir_at(home, "arthur").unwrap_or(0);
         let tmp = self.mkdir_at(0, "tmp").unwrap_or(0);
         let etc = self.mkdir_at(0, "etc").unwrap_or(0);
         let var = self.mkdir_at(0, "var").unwrap_or(0);
         let _log = self.mkdir_at(var, "log");
+        let _ = home;
 
         let readme = self.touch_at(0, "readme.txt").unwrap_or(0);
-        self.write_node(readme, "Bienvenue dans Bouchaud OS V0.6 - kernel foundation. Tape help.");
+        self.write_node(readme, "Bienvenue dans Bouchaud OS. Connecte-toi (guest/guest ou root/root). Tape help.");
 
         let passwd = self.touch_at(etc, "passwd").unwrap_or(0);
-        self.write_node(passwd, "root:x:0:0:root:/root:/bin/bsh\narthur:x:1000:1000:arthur:/home/arthur:/bin/bsh\nguest:x:65534:65534:guest:/tmp:/bin/bsh");
+        self.write_node(passwd, "root:x:0:0:root:/:/bin/bsh\nguest:x:1000:1000:guest:/home/guest:/bin/bsh");
 
-        let note = self.touch_at(arthur, "note.txt").unwrap_or(0);
-        self.write_node(note, "Carnet prive d'arthur. guest ne doit pas pouvoir lire ceci.");
-
-        // Proprietes et droits : arthur possede son home, ferme aux autres (700).
-        // root garde le reste, /tmp est ouvert a tous (777, sticky-like).
-        if arthur != 0 {
-            self.nodes[arthur].uid = 1000;
-            self.nodes[arthur].gid = 1000;
-            self.nodes[arthur].mode = 0o700;
-        }
-        if note != 0 {
-            self.nodes[note].uid = 1000;
-            self.nodes[note].gid = 1000;
-            self.nodes[note].mode = 0o600;
-        }
+        // /tmp est ouvert a tous (comme sous Unix).
         if tmp != 0 {
             self.nodes[tmp].mode = 0o777;
         }

@@ -22,10 +22,11 @@ pub fn help() {
     println!("  systeme : help, clear, version, uname, sysinfo, cpuinfo, meminfo, devices");
     println!("            dmesg, history, uptime, ticks, interrupts, breakpoint, serial-test");
     println!("            panic-test, roadmap");
-    println!("  session : whoami, id, users, login <user>, su [user], logout  (mot de passe)");
+    println!("  session : whoami, id, users, su [user], logout/exit");
+    println!("  comptes : useradd <nom>, userdel <nom>, passwd [user]   (root pour add/del)");
     println!("  fichiers: pwd, ls [-l] [path], tree [path], cd <path>, mkdir <path>");
     println!("            touch <file>, write <file> <texte>, append <file> <texte>, cat <file>");
-    println!("            nano <file>, stat <path>, chmod <mode> <path>, chown <user> <path>");
+    println!("            nano <file>, stat <path>, chmod <octal|+x|u+w> <path>, chown <user> <path>");
     println!("            cp <src> <dst>, mv <src> <dst>, rm <file>, rmdir <dir>, echo <texte>");
     println!("  materiel: lspci");
     println!("  reseau  : ping <ip> (loopback actif), ifconfig, ip, route, arp");
@@ -175,73 +176,85 @@ pub fn id() {
 }
 
 pub fn users() {
-    println!("root:x:0:0:/root");
-    println!("arthur:x:1000:1000:/home/arthur");
-    println!("guest:x:65534:65534:/tmp");
+    users::list();
 }
 
-/// Demande et verifie un mot de passe pour un utilisateur (sans echo).
-fn prompt_and_auth(user: users::User) -> bool {
-    if users::password(user).is_none() {
-        return true;
-    }
-    print!("Mot de passe: ");
-    let mut buf = [0u8; 64];
-    let len = keyboard::read_secret(&mut buf);
+/// Lit un mot de passe au clavier (saisie masquee) dans `buf`, renvoie le slice.
+fn read_pass<'a>(prompt: &str, buf: &'a mut [u8]) -> &'a str {
+    print!("{}", prompt);
+    let len = keyboard::read_secret(buf);
     println!("");
-    let input = unsafe { core::str::from_utf8_unchecked(&buf[..len]) };
-    users::authenticate(user, input)
+    unsafe { core::str::from_utf8_unchecked(&buf[..len]) }
 }
 
-/// Bascule la session vers `user` et place le cwd sur son repertoire d'accueil.
-fn switch_to(user: users::User, cwd: &mut usize) {
-    users::session().login(user);
-    let home = users::home_path(user);
-    *cwd = ramfs::fs().resolve(home, 0).unwrap_or(0);
-}
-
-pub fn login(argc: usize, argv: &[&str; 12], cwd: &mut usize) {
-    if argc < 2 {
-        println!("usage: login <root|arthur|guest>");
-        return;
-    }
-    let user = match users::user_from_name(argv[1]) {
-        Some(u) => u,
-        None => { println!("login: utilisateur inconnu"); return; }
-    };
-    if !prompt_and_auth(user) {
-        vga::set_color(COLOR_YELLOW);
-        println!("login: mot de passe incorrect");
-        vga::set_color(COLOR_DEFAULT);
-        return;
-    }
-    switch_to(user, cwd);
-    println!("session ouverte: {}", users::session().username());
-}
-
+/// `su [user]` : change d'utilisateur dans la session courante (avec mot de passe).
 pub fn su(argc: usize, argv: &[&str; 12], cwd: &mut usize) {
-    // `su` sans argument -> root, sinon `su <user>`.
-    let user = if argc >= 2 {
-        match users::user_from_name(argv[1]) {
-            Some(u) => u,
-            None => { println!("su: utilisateur inconnu"); return; }
+    let target = if argc >= 2 { argv[1] } else { "root" };
+    let mut buf = [0u8; 64];
+    let pass = read_pass("Mot de passe: ", &mut buf);
+    match users::authenticate(target, pass) {
+        Some(uid) => {
+            users::session().set_uid(uid);
+            *cwd = ramfs::fs().resolve(users::session().home(), 0).unwrap_or(0);
+            println!("session: {}", users::session().username());
         }
-    } else {
-        users::User::Root
-    };
-    if !prompt_and_auth(user) {
-        vga::set_color(COLOR_YELLOW);
-        println!("su: authentification echouee");
-        vga::set_color(COLOR_DEFAULT);
-        return;
+        None => {
+            vga::set_color(COLOR_YELLOW);
+            println!("su: authentification echouee");
+            vga::set_color(COLOR_DEFAULT);
+        }
     }
-    switch_to(user, cwd);
-    println!("session: {}", users::session().username());
 }
 
-pub fn logout(cwd: &mut usize) {
-    switch_to(users::User::Guest, cwd);
-    println!("session: guest");
+/// `useradd <nom>` (root) : cree un utilisateur, demande son mot de passe.
+pub fn useradd(argc: usize, argv: &[&str; 12]) {
+    if argc < 2 { println!("usage: useradd <nom>"); return; }
+    if !users::session().is_root() { println!("useradd: reserve a root"); return; }
+    let mut b1 = [0u8; 64];
+    let mut b2 = [0u8; 64];
+    let p1 = read_pass("Nouveau mot de passe: ", &mut b1);
+    // Copie locale car le second appel reutilise le meme type de tampon.
+    let mut p1buf = [0u8; 64];
+    let p1len = p1.len().min(64);
+    p1buf[..p1len].copy_from_slice(&p1.as_bytes()[..p1len]);
+    let p2 = read_pass("Confirmer: ", &mut b2);
+    if &p1buf[..p1len] != p2.as_bytes() {
+        println!("useradd: les mots de passe different");
+        return;
+    }
+    let pass = unsafe { core::str::from_utf8_unchecked(&p1buf[..p1len]) };
+    match users::add_user(argv[1], pass) {
+        Ok(uid) => {
+            users::create_home_dirs();
+            println!("useradd: {} cree (uid={})", argv[1], uid);
+        }
+        Err(e) => println!("useradd: {}", e),
+    }
+}
+
+/// `userdel <nom>` (root) : supprime un utilisateur.
+pub fn userdel(argc: usize, argv: &[&str; 12]) {
+    if argc < 2 { println!("usage: userdel <nom>"); return; }
+    if !users::session().is_root() { println!("userdel: reserve a root"); return; }
+    match users::remove_user(argv[1]) {
+        Ok(()) => println!("userdel: {} supprime", argv[1]),
+        Err(e) => println!("userdel: {}", e),
+    }
+}
+
+/// `passwd [user]` : change un mot de passe (soi-meme, ou tout compte si root).
+pub fn passwd(argc: usize, argv: &[&str; 12]) {
+    let target = if argc >= 2 { argv[1] } else { users::session().username() };
+    if argc >= 2 && argv[1] != users::session().username() && !users::session().is_root() {
+        println!("passwd: seul root peut changer le mot de passe d'un autre compte");
+        return;
+    }
+    let mut buf = [0u8; 64];
+    let pass = read_pass("Nouveau mot de passe: ", &mut buf);
+    match users::set_password(target, pass) {
+        Ok(()) => println!("passwd: mot de passe mis a jour pour {}", target),
+        Err(e) => println!("passwd: {}", e),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -525,9 +538,67 @@ fn parse_octal(s: &str) -> Option<u16> {
     Some(value)
 }
 
+/// Applique une expression symbolique de chmod (ex. "+x", "u+w", "go-r", "a=rx")
+/// au mode courant. Renvoie le nouveau mode, ou None si la syntaxe est invalide.
+fn apply_symbolic(mut mode: u16, spec: &str) -> Option<u16> {
+    let bytes = spec.as_bytes();
+    let mut i = 0;
+    // Cibles : u(tilisateur) g(roupe) o(autres) a(tous).
+    let mut who_u = false;
+    let mut who_g = false;
+    let mut who_o = false;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'u' => who_u = true,
+            b'g' => who_g = true,
+            b'o' => who_o = true,
+            b'a' => { who_u = true; who_g = true; who_o = true; }
+            _ => break,
+        }
+        i += 1;
+    }
+    if !who_u && !who_g && !who_o {
+        // Aucune cible => 'a' par defaut (comme sous Unix).
+        who_u = true; who_g = true; who_o = true;
+    }
+    if i >= bytes.len() { return None; }
+    let op = bytes[i];
+    if op != b'+' && op != b'-' && op != b'=' { return None; }
+    i += 1;
+    // Permissions demandees.
+    let mut perm = 0u16;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'r' => perm |= 0o4,
+            b'w' => perm |= 0o2,
+            b'x' => perm |= 0o1,
+            _ => return None,
+        }
+        i += 1;
+    }
+    // Masque sur les trois groupes selectionnes.
+    let mut mask = 0u16;
+    if who_u { mask |= perm << 6; }
+    if who_g { mask |= perm << 3; }
+    if who_o { mask |= perm; }
+    match op {
+        b'+' => mode |= mask,
+        b'-' => mode &= !mask,
+        b'=' => {
+            // Remet a zero les groupes vises puis applique.
+            let mut clear = 0u16;
+            if who_u { clear |= 0o700; }
+            if who_g { clear |= 0o070; }
+            if who_o { clear |= 0o007; }
+            mode = (mode & !clear) | mask;
+        }
+        _ => {}
+    }
+    Some(mode)
+}
+
 pub fn chmod(argc: usize, argv: &[&str; 12], cwd: usize) {
-    if argc < 3 { println!("usage: chmod <mode-octal> <path>"); return; }
-    let mode = match parse_octal(argv[1]) { Some(m) => m, None => { println!("chmod: mode invalide"); return; } };
+    if argc < 3 { println!("usage: chmod <octal|+x|u+w|go-r|...> <path>"); return; }
     let fs = ramfs::fs();
     let idx = match fs.resolve_checked(argv[2], cwd) {
         Ok(i) => i,
@@ -539,7 +610,15 @@ pub fn chmod(argc: usize, argv: &[&str; 12], cwd: usize) {
         println!("chmod: operation non permise");
         return;
     }
-    fs.nodes[idx].mode = mode;
+    // Mode octal (ex. 755) ou symbolique (ex. +x, u+w, go-r, a=rx).
+    let new_mode = match parse_octal(argv[1]) {
+        Some(m) => m,
+        None => match apply_symbolic(fs.nodes[idx].mode, argv[1]) {
+            Some(m) => m,
+            None => { println!("chmod: mode invalide"); return; }
+        },
+    };
+    fs.nodes[idx].mode = new_mode;
 }
 
 fn parse_u16(s: &str) -> Option<u16> {
@@ -561,8 +640,8 @@ pub fn chown(argc: usize, argv: &[&str; 12], cwd: usize) {
         return;
     }
     // L'utilisateur peut etre un nom connu ou un uid numerique.
-    let new_uid = match users::user_from_name(argv[1]) {
-        Some(u) => uid_of(u),
+    let new_uid = match users::uid_of_name(argv[1]) {
+        Some(u) => u,
         None => match parse_u16(argv[1]) {
             Some(v) => v,
             None => { println!("chown: utilisateur/uid invalide"); return; }
@@ -575,14 +654,6 @@ pub fn chown(argc: usize, argv: &[&str; 12], cwd: usize) {
     };
     fs.nodes[idx].uid = new_uid;
     fs.nodes[idx].gid = new_uid;
-}
-
-fn uid_of(user: users::User) -> u16 {
-    match user {
-        users::User::Root => 0,
-        users::User::Arthur => 1000,
-        users::User::Guest => 65534,
-    }
 }
 
 // ---------------------------------------------------------------------------
