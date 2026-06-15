@@ -30,6 +30,7 @@ pub fn help() {
     println!("            nano <file>, stat <path>, chmod <octal|+x|u+w> <path>, chown <user> <path>");
     println!("            cp <src> <dst>, mv <src> <dst>, rm <file>, rmdir <dir>, echo <texte>");
     println!("  texte   : grep <motif> [f], wc [f], head [-n N] [f], tail [-n N] [f], find [path]");
+    println!("  env     : export NOM=val, env, unset NOM, $NOM, run <script.bsh>");
     println!("  divers  : date");
     println!("  materiel: lspci");
     println!("  reseau  : ping <ip> (loopback actif), ifconfig, ip, route, arp");

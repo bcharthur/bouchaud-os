@@ -26,6 +26,59 @@ fn set_stdin(data: Option<String>) { unsafe { STDIN = data; } }
 /// Recupere (et consomme) l'entree standard fournie par un pipe.
 pub fn take_stdin() -> Option<String> { unsafe { STDIN.take() } }
 
+// --- Variables d'environnement --------------------------------------------
+
+static mut ENV: Option<Vec<(String, String)>> = None;
+
+fn env_mut() -> &'static mut Vec<(String, String)> {
+    unsafe {
+        if ENV.is_none() { ENV = Some(Vec::new()); }
+        ENV.as_mut().unwrap()
+    }
+}
+
+fn env_set(name: &str, val: &str) {
+    let env = env_mut();
+    for (k, v) in env.iter_mut() {
+        if k == name { *v = val.to_string(); return; }
+    }
+    env.push((name.to_string(), val.to_string()));
+}
+
+fn env_get(name: &str) -> Option<String> {
+    for (k, v) in env_mut().iter() {
+        if k == name { return Some(v.clone()); }
+    }
+    None
+}
+
+fn env_unset(name: &str) {
+    env_mut().retain(|(k, _)| k != name);
+}
+
+fn env_list() {
+    for (k, v) in env_mut().iter() {
+        println!("{}={}", k, v);
+    }
+}
+
+/// Traite `export NOM=valeur` (a partir de la ligne complete).
+fn env_export(line: &str) {
+    let rest = remainder_after_tokens(line, 1);
+    match rest.find('=') {
+        Some(p) => {
+            let name = trim(&rest[..p]);
+            let val = trim(&rest[p + 1..]);
+            if name.is_empty() { println!("usage: export NOM=valeur"); return; }
+            env_set(name, val);
+        }
+        None => {
+            // `export NOM` sans valeur : variable vide.
+            if rest.is_empty() { env_list(); } else { env_set(trim(rest), ""); }
+        }
+    }
+}
+
 /// Liste des commandes connues, pour la tab-completion.
 pub const COMMANDS: &[&str] = &[
     "help", "clear", "version", "uname", "sysinfo", "cpuinfo", "meminfo", "alloctest",
@@ -35,7 +88,8 @@ pub const COMMANDS: &[&str] = &[
     "write", "append", "nano", "rm", "rmdir", "cp", "mv", "stat", "chmod", "chown",
     "echo", "date", "grep", "wc", "head", "tail", "find", "lspci", "ping", "ifconfig",
     "ip", "route", "arp", "dhcp", "dns", "wget", "curl", "mount", "df", "sync",
-    "mkfs.bfs", "true", "false", "logout", "exit",
+    "mkfs.bfs", "true", "false", "logout", "exit", "export", "env", "unset", "run",
+    "source",
 ];
 
 /// Operateur reliant un segment de commande au precedent.
@@ -289,7 +343,7 @@ fn run_chained(seg: &str, sep: Sep, cwd: &mut usize) {
 
 /// Execute un segment : gere `$?` et la redirection `>`/`>>`, puis dispatche.
 fn run_segment(seg: &str, cwd: &mut usize) -> i32 {
-    let expanded = expand_status(seg);
+    let expanded = expand_vars(seg);
     let (cmd, redir) = parse_redirect(&expanded);
     let cmd = trim(cmd);
     if cmd.is_empty() { return 0; }
@@ -340,23 +394,64 @@ fn run_pipeline(cmd: &str, cwd: &mut usize) -> i32 {
     code
 }
 
-/// Remplace `$?` par le code de retour precedent.
-fn expand_status(seg: &str) -> String {
-    if !contains(seg, "$?") { return String::from(seg); }
+/// Developpe `$?`, `$NOM` et `${NOM}` dans un segment de commande.
+fn expand_vars(seg: &str) -> String {
+    if !contains(seg, "$") { return String::from(seg); }
     use core::fmt::Write;
     let mut out = String::new();
-    let bytes = seg.as_bytes();
+    let b = seg.as_bytes();
     let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'?' {
+    while i < b.len() {
+        if b[i] != b'$' { out.push(b[i] as char); i += 1; continue; }
+        // $?
+        if i + 1 < b.len() && b[i + 1] == b'?' {
             let _ = write!(out, "{}", last_status());
             i += 2;
-        } else {
-            out.push(bytes[i] as char);
-            i += 1;
+            continue;
         }
+        // ${NOM}
+        if i + 1 < b.len() && b[i + 1] == b'{' {
+            let mut j = i + 2;
+            while j < b.len() && b[j] != b'}' { j += 1; }
+            let name = &seg[i + 2..j];
+            if let Some(v) = env_get(name) { out.push_str(&v); }
+            i = if j < b.len() { j + 1 } else { j };
+            continue;
+        }
+        // $NOM
+        let mut j = i + 1;
+        while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_') { j += 1; }
+        if j > i + 1 {
+            let name = &seg[i + 1..j];
+            if let Some(v) = env_get(name) { out.push_str(&v); }
+            i = j;
+            continue;
+        }
+        out.push('$');
+        i += 1;
     }
     out
+}
+
+/// Execute un script : chaque ligne non vide (et non commentaire `#`) est lancee.
+fn run_script(argc: usize, argv: &[&str; 12], cwd: &mut usize) -> i32 {
+    if argc < 2 { println!("usage: run <script>"); return 1; }
+    let fs = ramfs::fs();
+    let idx = match fs.resolve_checked(argv[1], *cwd) {
+        Ok(i) => i,
+        Err(e) => { println!("run: {}", e); return 1; }
+    };
+    if fs.nodes[idx].kind != crate::fs::ramfs::NodeKind::File { println!("run: pas un fichier"); return 1; }
+    if !fs.can(idx, crate::fs::ramfs::PERM_R) { println!("run: permission denied"); return 1; }
+    // Copie le contenu (la suite peut modifier le FS pendant l'execution).
+    let mut content = String::new();
+    for k in 0..fs.nodes[idx].content_len { content.push(fs.nodes[idx].content[k] as char); }
+    for raw in content.lines() {
+        let l = trim(raw);
+        if l.is_empty() || l.starts_with('#') { continue; }
+        run_line(l, cwd);
+    }
+    last_status()
 }
 
 fn contains(hay: &str, needle: &str) -> bool {
@@ -395,6 +490,12 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "true" => 0,
         "false" => 1,
         "logout" | "exit" => 0,
+
+        // Environnement & scripts
+        "export" => { env_export(line); 0 }
+        "env" => { env_list(); 0 }
+        "unset" => { if argc >= 2 { env_unset(argv[1]); } 0 }
+        "run" | "source" => run_script(argc, &argv, cwd),
 
         // Aide et systeme
         "help" => { c::help(); 0 }
