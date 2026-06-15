@@ -5,6 +5,7 @@
 //! `commands.rs`.
 
 pub mod commands;
+pub mod history;
 
 use crate::drivers::keyboard;
 use crate::drivers::vga::{self, COLOR_GREEN, COLOR_CYAN, COLOR_DEFAULT, COLOR_RED};
@@ -31,6 +32,7 @@ pub fn run() -> ! {
         let trimmed = trim(line);
         if trimmed.is_empty() { continue; }
 
+        history::record(trimmed);
         dmesg::log("shell: commande executee");
         dispatch(trimmed, &mut cwd);
     }
@@ -54,6 +56,7 @@ fn dispatch(line: &str, cwd: &mut usize) {
         "meminfo" => c::meminfo(),
         "devices" => c::devices(),
         "dmesg" => dmesg::print(),
+        "history" => c::history(argc, &argv),
         "uptime" => c::uptime(),
         "ticks" => c::ticks(),
         "interrupts" => c::interrupts(),

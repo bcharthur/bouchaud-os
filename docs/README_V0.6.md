@@ -25,6 +25,10 @@ existantes restent fonctionnels.
 - **Nouvelles commandes** : `version`, `ticks`, `interrupts`, `serial-test`,
   `panic-test`, `roadmap` ; `uptime`, `sysinfo`, `devices`, `meminfo` enrichies.
 - **Panic handler** dedie (`kernel/panic.rs`) : affichage VGA rouge + COM1.
+- **Historique des commandes** (`shell/history.rs`) : commande `history`
+  (et `history clear`). Chaque commande est aussi recopiee sur COM1 sous la
+  forme `$ <commande>` : avec `-serial stdio`, le terminal QEMU contient un
+  transcript complet de la session, facile a copier/coller et a partager.
 
 ## 2. Ce qui est seulement prepare (stubs / roadmap)
 
@@ -69,6 +73,7 @@ cpuinfo
 meminfo
 devices
 dmesg
+history
 uptime
 ticks
 interrupts

@@ -6,6 +6,7 @@ use crate::drivers::vga::{self, COLOR_CYAN, COLOR_DEFAULT, COLOR_YELLOW};
 use crate::fs::ramfs::{self, NodeKind, CONTENT_LEN, MAX_NODES};
 use crate::kernel::timer;
 use crate::net;
+use crate::shell::history;
 use crate::shell::remainder_after_tokens;
 use crate::users;
 use crate::{serial_println, OS_NAME, VERSION};
@@ -19,7 +20,7 @@ pub fn help() {
     println!("Commandes Bouchaud OS V0.6:");
     vga::set_color(COLOR_DEFAULT);
     println!("  systeme : help, clear, version, uname, sysinfo, cpuinfo, meminfo, devices");
-    println!("            dmesg, uptime, ticks, interrupts, serial-test, panic-test, roadmap");
+    println!("            dmesg, history, uptime, ticks, interrupts, serial-test, panic-test, roadmap");
     println!("  session : whoami, id, users, login <root|arthur|guest>, logout, su");
     println!("  fichiers: pwd, ls [-l] [path], tree [path], cd <path>, mkdir <path>");
     println!("            touch <file>, write <file> <texte>, append <file> <texte>, cat <file>");
@@ -137,6 +138,15 @@ pub fn roadmap() {
     println!("Plus tard: disque persistant BFS, processus, syscalls, securite, GUI");
     println!("");
     net::print_roadmap();
+}
+
+pub fn history(argc: usize, argv: &[&str; 12]) {
+    if argc >= 2 && argv[1] == "clear" {
+        history::clear();
+        println!("history: efface");
+        return;
+    }
+    history::print();
 }
 
 // ---------------------------------------------------------------------------
