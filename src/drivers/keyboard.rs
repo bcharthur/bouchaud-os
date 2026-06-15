@@ -1,18 +1,54 @@
-//! Pilote clavier PS/2 en polling, mapping AZERTY-FR.
+//! Pilote clavier PS/2 pilote par interruptions, mapping AZERTY-FR.
 //!
-//! Tant que les interruptions ne sont pas activees (voir
-//! `arch::x86_64::interrupts`), le clavier est lu en interrogeant le controleur
-//! PS/2. L'editeur de ligne gere Entree, Backspace, Suppr et Tab.
+//! Le gestionnaire d'IRQ1 (voir `arch::x86_64::idt`) lit le scancode et l'empile
+//! ici via `push_scancode`. L'editeur de ligne consomme la file et met le CPU en
+//! veille (`hlt`) quand elle est vide. Gere Entree, Backspace, Suppr et Tab.
 
-use crate::arch::x86_64::ports::inb;
+use x86_64::instructions::interrupts;
 
-/// Attend puis renvoie un scancode brut depuis le controleur PS/2.
+const QUEUE_SIZE: usize = 128;
+
+/// File circulaire de scancodes alimentee par l'IRQ clavier.
+static mut QUEUE: [u8; QUEUE_SIZE] = [0; QUEUE_SIZE];
+static mut Q_HEAD: usize = 0;
+static mut Q_TAIL: usize = 0;
+
+/// Empile un scancode. Appele depuis le gestionnaire d'interruption clavier.
+pub fn push_scancode(sc: u8) {
+    unsafe {
+        let next = (Q_TAIL + 1) % QUEUE_SIZE;
+        if next != Q_HEAD {
+            QUEUE[Q_TAIL] = sc;
+            Q_TAIL = next;
+        }
+        // File pleine : on laisse tomber le scancode (garde-fou simple).
+    }
+}
+
+/// Retire un scancode si disponible (interruptions deja desactivees).
+fn pop_scancode() -> Option<u8> {
+    unsafe {
+        if Q_HEAD == Q_TAIL {
+            None
+        } else {
+            let sc = QUEUE[Q_HEAD];
+            Q_HEAD = (Q_HEAD + 1) % QUEUE_SIZE;
+            Some(sc)
+        }
+    }
+}
+
+/// Attend le prochain scancode, en mettant le CPU en veille si la file est vide.
 fn read_scancode() -> u8 {
     loop {
-        let status = unsafe { inb(0x64) };
-        if status & 1 != 0 {
-            return unsafe { inb(0x60) };
+        interrupts::disable();
+        if let Some(sc) = pop_scancode() {
+            interrupts::enable();
+            return sc;
         }
+        // Active les interruptions puis halt de facon atomique : l'IRQ clavier
+        // reveillera le CPU, qui rebouclera et trouvera le scancode.
+        interrupts::enable_and_hlt();
     }
 }
 
@@ -93,6 +129,17 @@ fn scancode_to_char(sc: u8, shift: bool) -> Option<char> {
 
 /// Lit une ligne complete au clavier dans `buf`, renvoie le nombre d'octets.
 pub fn read_line(buf: &mut [u8]) -> usize {
+    read_into(buf, true)
+}
+
+/// Lit un secret (mot de passe) sans afficher les caracteres : seul `*` est
+/// affiche a l'ecran. Le contenu n'est jamais recopie sur la sortie serie.
+pub fn read_secret(buf: &mut [u8]) -> usize {
+    read_into(buf, false)
+}
+
+/// Implementation commune a `read_line` (echo direct) et `read_secret` (echo `*`).
+fn read_into(buf: &mut [u8], echo: bool) -> usize {
     let mut len = 0usize;
     let mut shift = false;
 
@@ -139,14 +186,14 @@ pub fn read_line(buf: &mut [u8]) -> usize {
                     if len < buf.len() {
                         buf[len] = b' ';
                         len += 1;
-                        print!(" ");
+                        if echo { print!(" "); } else { print!("*"); }
                     }
                 }
                 ch => {
                     if len < buf.len() && ch.is_ascii() {
                         buf[len] = ch as u8;
                         len += 1;
-                        print!("{}", ch);
+                        if echo { print!("{}", ch); } else { print!("*"); }
                     }
                 }
             }

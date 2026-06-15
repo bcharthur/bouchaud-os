@@ -16,6 +16,7 @@
 #![no_main]
 #![allow(dead_code)]
 #![allow(static_mut_refs)]
+#![feature(abi_x86_interrupt)]
 
 use bootloader::{entry_point, BootInfo};
 
@@ -31,7 +32,7 @@ mod shell;
 mod users;
 
 /// Version courante de Bouchaud OS.
-pub const VERSION: &str = "0.6.0";
+pub const VERSION: &str = "0.8.0";
 /// Nom du systeme.
 pub const OS_NAME: &str = "Bouchaud OS";
 
@@ -54,12 +55,12 @@ fn kernel_main(_boot_info: &'static BootInfo) -> ! {
     arch::x86_64::init();
 
     // 4. Pilotes et sous-systemes.
-    kernel::dmesg::log("keyboard: PS/2 polling AZERTY-FR actif");
+    kernel::dmesg::log("keyboard: PS/2 AZERTY-FR pilote par IRQ1");
     fs::ramfs::fs().init();
     kernel::dmesg::log("ramfs: monte sur /");
     users::session().login(users::User::Arthur);
     kernel::dmesg::log("session: utilisateur par defaut arthur");
-    kernel::dmesg::log("net: pile reseau non activee");
+    kernel::dmesg::log("net: loopback lo 127.0.0.1 actif (ping ok); eth0 sans driver");
     kernel::dmesg::log("disk: pilote disque non active");
     kernel::dmesg::log("shell: initialise");
 

@@ -9,6 +9,7 @@ pub mod cpu;
 pub mod gdt;
 pub mod idt;
 pub mod interrupts;
+pub mod pci;
 
 /// Initialise les briques bas niveau de l'architecture au boot.
 ///
@@ -18,4 +19,5 @@ pub fn init() {
     gdt::init();
     idt::init();
     interrupts::init();
+    pci::init();
 }

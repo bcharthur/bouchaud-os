@@ -5,6 +5,7 @@
 //! `commands.rs`.
 
 pub mod commands;
+pub mod history;
 
 use crate::drivers::keyboard;
 use crate::drivers::vga::{self, COLOR_GREEN, COLOR_CYAN, COLOR_DEFAULT, COLOR_RED};
@@ -14,7 +15,8 @@ use crate::users;
 
 /// Boucle principale du shell : affiche le prompt, lit une ligne, l'execute.
 pub fn run() -> ! {
-    let mut cwd = 0usize;
+    // Demarre dans le repertoire d'accueil de l'utilisateur courant.
+    let mut cwd = ramfs::fs().resolve(users::session().home(), 0).unwrap_or(0);
     let mut line_buf = [0u8; 256];
 
     loop {
@@ -31,6 +33,7 @@ pub fn run() -> ! {
         let trimmed = trim(line);
         if trimmed.is_empty() { continue; }
 
+        history::record(trimmed);
         dmesg::log("shell: commande executee");
         dispatch(trimmed, &mut cwd);
     }
@@ -54,9 +57,11 @@ fn dispatch(line: &str, cwd: &mut usize) {
         "meminfo" => c::meminfo(),
         "devices" => c::devices(),
         "dmesg" => dmesg::print(),
+        "history" => c::history(argc, &argv),
         "uptime" => c::uptime(),
         "ticks" => c::ticks(),
         "interrupts" => c::interrupts(),
+        "breakpoint" => c::breakpoint(),
         "serial-test" => c::serial_test(),
         "panic-test" => c::panic_test(),
         "roadmap" => c::roadmap(),
@@ -65,9 +70,9 @@ fn dispatch(line: &str, cwd: &mut usize) {
         "whoami" => println!("{}", users::session().username()),
         "id" => c::id(),
         "users" => c::users(),
-        "login" => c::login(argc, &argv),
-        "logout" => { users::session().login(users::User::Guest); println!("session: guest"); }
-        "su" => { users::session().login(users::User::Root); println!("session: root"); }
+        "login" => c::login(argc, &argv, cwd),
+        "logout" => c::logout(cwd),
+        "su" => c::su(argc, &argv, cwd),
 
         // Fichiers
         "pwd" => { ramfs::print_path(ramfs::fs(), *cwd); println!(""); }
@@ -86,12 +91,17 @@ fn dispatch(line: &str, cwd: &mut usize) {
         "mv" => c::mv(argc, &argv, *cwd),
         "stat" => c::stat(argc, &argv, *cwd),
         "chmod" => c::chmod(argc, &argv, *cwd),
+        "chown" => c::chown(argc, &argv, *cwd),
         "echo" => println!("{}", remainder_after_tokens(line, 1)),
+        "lspci" => crate::arch::x86_64::pci::print_devices(),
 
-        // Reseau (placeholders, pile non activee)
-        "ifconfig" | "ip" | "route" | "arp" | "ping" | "dhcp" | "dns" | "wget" | "curl" => {
-            crate::net::placeholder(argv[0])
-        }
+        // Reseau : loopback actif, eth0/Internet en attente du driver NIC.
+        "ping" => crate::net::ping(argc, &argv),
+        "ifconfig" => crate::net::ifconfig(),
+        "ip" => crate::net::ip_cmd(),
+        "route" => crate::net::route_cmd(),
+        "arp" => crate::net::arp_cmd(),
+        "dhcp" | "dns" | "wget" | "curl" => crate::net::placeholder(argv[0]),
 
         // Disque (placeholders, roadmap BFS)
         "mount" | "df" | "sync" | "mkfs.bfs" => c::disk_placeholder(argv[0]),

@@ -25,6 +25,27 @@ existantes restent fonctionnels.
 - **Nouvelles commandes** : `version`, `ticks`, `interrupts`, `serial-test`,
   `panic-test`, `roadmap` ; `uptime`, `sysinfo`, `devices`, `meminfo` enrichies.
 - **Panic handler** dedie (`kernel/panic.rs`) : affichage VGA rouge + COM1.
+- **Historique des commandes** (`shell/history.rs`) : commande `history`
+  (et `history clear`). Chaque commande est aussi recopiee sur COM1 sous la
+  forme `$ <commande>` : avec `-serial stdio`, le terminal QEMU contient un
+  transcript complet de la session, facile a copier/coller et a partager.
+
+### V0.6.1 — Securite reelle + PCI
+
+- **Permissions Unix appliquees** (`fs/ramfs.rs`) : chaque inode a un proprietaire
+  (uid/gid) et des droits `rwx` (proprietaire/groupe/autres). Les operations
+  fichiers verifient les droits ; la traversee des repertoires exige le droit
+  d'execution. Concretement : `/home/arthur` est en `700` et appartient a arthur,
+  donc **`guest` ne peut ni y entrer ni lire son contenu**. root contourne tout.
+- **Login par mot de passe** (`users/mod.rs`) : `login <user>` et `su [user]`
+  demandent un mot de passe (saisie masquee, non recopiee sur la serie).
+  Mots de passe par defaut : `root` -> `root`, `arthur` -> `arthur`,
+  `guest` -> aucun. Apres connexion, le cwd passe sur le repertoire d'accueil.
+- **`chown`** (root uniquement) pour changer le proprietaire d'un inode.
+- **Scan PCI reel** (`arch/x86_64/pci.rs`) : enumeration du bus via 0xCF8/0xCFC,
+  commande **`lspci`** (vendor/device/classe). C'est la premiere couche concrete
+  de la future pile reseau ; `devices`/`sysinfo` affichent le nombre de
+  peripheriques et si une carte reseau est presente.
 
 ## 2. Ce qui est seulement prepare (stubs / roadmap)
 
@@ -69,6 +90,7 @@ cpuinfo
 meminfo
 devices
 dmesg
+history
 uptime
 ticks
 interrupts
@@ -98,6 +120,38 @@ ping 1.1.1.1         (placeholder reseau)
 mount                (placeholder disque)
 
 panic-test           (root uniquement : declenche une panique volontaire)
+```
+
+### Tester la securite (permissions)
+
+Au boot tu es `arthur`. Verifie l'isolation de son home face a `guest` :
+
+```text
+whoami                       arthur
+cat /home/arthur/note.txt    OK (arthur est proprietaire)
+login guest                  (pas de mot de passe)
+cat /home/arthur/note.txt    -> cat: permission denied
+cd /home/arthur              -> cd: permission denied
+ls /home/arthur              -> ls: permission denied
+login arthur                 (mot de passe: arthur)
+cat /home/arthur/note.txt    OK de nouveau
+su                           (mot de passe: root) -> root contourne tout
+cat /home/arthur/note.txt    OK (root)
+```
+
+### Tester le PCI
+
+```text
+lspci          liste les peripheriques PCI (vendor:device + classe)
+devices        resume, indique si une carte reseau est presente
+```
+
+Pour faire apparaitre une carte reseau dans `lspci`, lance QEMU avec une NIC :
+
+```powershell
+& "C:\Program Files\qemu\qemu-system-x86_64.exe" `
+  -drive format=raw,file=target\x86_64-bouchaud_os\debug\bootimage-bouchaud-os.bin `
+  -serial stdio -device e1000
 ```
 
 Au boot, l'ecran affiche :

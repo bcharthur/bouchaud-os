@@ -5,10 +5,16 @@
 //! une resolution de chemin de style Unix (`/`, `.`, `..`).
 
 use crate::drivers::vga::{self, COLOR_CYAN, COLOR_DEFAULT};
+use crate::users;
 
 pub const MAX_NODES: usize = 96;
 pub const NAME_LEN: usize = 32;
 pub const CONTENT_LEN: usize = 768;
+
+/// Droits, sur le modele Unix : lecture / ecriture / execution(-traversee).
+pub const PERM_R: u16 = 4;
+pub const PERM_W: u16 = 2;
+pub const PERM_X: u16 = 1;
 
 #[derive(Copy, Clone, PartialEq)]
 pub enum NodeKind {
@@ -106,8 +112,20 @@ impl FileSystem {
         self.write_node(passwd, "root:x:0:0:root:/root:/bin/bsh\narthur:x:1000:1000:arthur:/home/arthur:/bin/bsh\nguest:x:65534:65534:guest:/tmp:/bin/bsh");
 
         let note = self.touch_at(arthur, "note.txt").unwrap_or(0);
-        self.write_node(note, "Session utilisateur presente. FS encore en RAM.");
+        self.write_node(note, "Carnet prive d'arthur. guest ne doit pas pouvoir lire ceci.");
 
+        // Proprietes et droits : arthur possede son home, ferme aux autres (700).
+        // root garde le reste, /tmp est ouvert a tous (777, sticky-like).
+        if arthur != 0 {
+            self.nodes[arthur].uid = 1000;
+            self.nodes[arthur].gid = 1000;
+            self.nodes[arthur].mode = 0o700;
+        }
+        if note != 0 {
+            self.nodes[note].uid = 1000;
+            self.nodes[note].gid = 1000;
+            self.nodes[note].mode = 0o600;
+        }
         if tmp != 0 {
             self.nodes[tmp].mode = 0o777;
         }
@@ -140,6 +158,8 @@ impl FileSystem {
         self.nodes[idx].kind = NodeKind::Dir;
         self.nodes[idx].parent = parent;
         self.nodes[idx].mode = 0o755;
+        self.nodes[idx].uid = users::session().uid();
+        self.nodes[idx].gid = users::session().gid();
         if !self.nodes[idx].set_name(name) { return Err("invalid name"); }
         Ok(idx)
     }
@@ -151,6 +171,8 @@ impl FileSystem {
         self.nodes[idx].kind = NodeKind::File;
         self.nodes[idx].parent = parent;
         self.nodes[idx].mode = 0o644;
+        self.nodes[idx].uid = users::session().uid();
+        self.nodes[idx].gid = users::session().gid();
         if !self.nodes[idx].set_name(name) { return Err("invalid name"); }
         Ok(idx)
     }
@@ -226,6 +248,80 @@ impl FileSystem {
                 let name = &path[pos + 1..];
                 let parent = self.resolve(parent_path, cwd)?;
                 Some((parent, name))
+            }
+        }
+    }
+
+    /// Verifie si l'utilisateur courant possede les droits `want` (PERM_R/W/X)
+    /// sur l'inode `idx`. root contourne toutes les verifications.
+    pub fn can(&self, idx: usize, want: u16) -> bool {
+        let s = users::session();
+        if s.is_root() { return true; }
+        let n = &self.nodes[idx];
+        let bits = if s.uid() == n.uid {
+            (n.mode >> 6) & 0o7
+        } else if s.gid() == n.gid {
+            (n.mode >> 3) & 0o7
+        } else {
+            n.mode & 0o7
+        };
+        (bits & want) == want
+    }
+
+    /// Resout un chemin en verifiant le droit d'execution (traversee) sur chaque
+    /// repertoire parcouru, comme sous Unix. C'est ce controle qui empeche
+    /// `guest` d'atteindre le contenu de `/home/arthur` (mode 700).
+    pub fn resolve_checked(&self, path: &str, cwd: usize) -> Result<usize, &'static str> {
+        if path.is_empty() { return Ok(cwd); }
+        let mut current = if path.as_bytes()[0] == b'/' { 0 } else { cwd };
+        let bytes = path.as_bytes();
+        let mut i = 0usize;
+
+        while i < bytes.len() {
+            while i < bytes.len() && bytes[i] == b'/' { i += 1; }
+            if i >= bytes.len() { break; }
+            let start = i;
+            while i < bytes.len() && bytes[i] != b'/' { i += 1; }
+            let comp = &path[start..i];
+
+            if comp == "." {
+                continue;
+            }
+            // Pour franchir le repertoire courant il faut le droit d'execution.
+            if !self.can(current, PERM_X) {
+                return Err("permission denied");
+            }
+            if comp == ".." {
+                current = self.nodes[current].parent;
+            } else {
+                current = self.find_child(current, comp).ok_or("introuvable")?;
+            }
+        }
+        Ok(current)
+    }
+
+    /// Variante verifiee de `resolve_parent_name` : controle la traversee.
+    pub fn resolve_parent_name_checked<'a>(&self, path: &'a str, cwd: usize) -> Result<(usize, &'a str), &'static str> {
+        let mut end = path.len();
+        let bytes = path.as_bytes();
+        while end > 1 && bytes[end - 1] == b'/' { end -= 1; }
+        let path = &path[..end];
+        if path.is_empty() || path == "/" { return Err("chemin invalide"); }
+
+        let bytes = path.as_bytes();
+        let mut last_slash: Option<usize> = None;
+        for i in 0..bytes.len() {
+            if bytes[i] == b'/' { last_slash = Some(i); }
+        }
+
+        match last_slash {
+            None => Ok((cwd, path)),
+            Some(0) => Ok((0, &path[1..])),
+            Some(pos) => {
+                let parent_path = &path[..pos];
+                let name = &path[pos + 1..];
+                let parent = self.resolve_checked(parent_path, cwd)?;
+                Ok((parent, name))
             }
         }
     }
