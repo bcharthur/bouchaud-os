@@ -93,6 +93,17 @@ fn scancode_to_char(sc: u8, shift: bool) -> Option<char> {
 
 /// Lit une ligne complete au clavier dans `buf`, renvoie le nombre d'octets.
 pub fn read_line(buf: &mut [u8]) -> usize {
+    read_into(buf, true)
+}
+
+/// Lit un secret (mot de passe) sans afficher les caracteres : seul `*` est
+/// affiche a l'ecran. Le contenu n'est jamais recopie sur la sortie serie.
+pub fn read_secret(buf: &mut [u8]) -> usize {
+    read_into(buf, false)
+}
+
+/// Implementation commune a `read_line` (echo direct) et `read_secret` (echo `*`).
+fn read_into(buf: &mut [u8], echo: bool) -> usize {
     let mut len = 0usize;
     let mut shift = false;
 
@@ -139,14 +150,14 @@ pub fn read_line(buf: &mut [u8]) -> usize {
                     if len < buf.len() {
                         buf[len] = b' ';
                         len += 1;
-                        print!(" ");
+                        if echo { print!(" "); } else { print!("*"); }
                     }
                 }
                 ch => {
                     if len < buf.len() && ch.is_ascii() {
                         buf[len] = ch as u8;
                         len += 1;
-                        print!("{}", ch);
+                        if echo { print!("{}", ch); } else { print!("*"); }
                     }
                 }
             }

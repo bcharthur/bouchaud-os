@@ -3,7 +3,7 @@
 use crate::arch::x86_64::{cpu, gdt, idt, interrupts};
 use crate::drivers::keyboard;
 use crate::drivers::vga::{self, COLOR_CYAN, COLOR_DEFAULT, COLOR_YELLOW};
-use crate::fs::ramfs::{self, NodeKind, CONTENT_LEN, MAX_NODES};
+use crate::fs::ramfs::{self, NodeKind, CONTENT_LEN, MAX_NODES, PERM_R, PERM_W, PERM_X};
 use crate::kernel::timer;
 use crate::net;
 use crate::shell::history;
@@ -21,11 +21,12 @@ pub fn help() {
     vga::set_color(COLOR_DEFAULT);
     println!("  systeme : help, clear, version, uname, sysinfo, cpuinfo, meminfo, devices");
     println!("            dmesg, history, uptime, ticks, interrupts, serial-test, panic-test, roadmap");
-    println!("  session : whoami, id, users, login <root|arthur|guest>, logout, su");
+    println!("  session : whoami, id, users, login <user>, su [user], logout  (mot de passe)");
     println!("  fichiers: pwd, ls [-l] [path], tree [path], cd <path>, mkdir <path>");
     println!("            touch <file>, write <file> <texte>, append <file> <texte>, cat <file>");
-    println!("            nano <file>, stat <path>, chmod <mode> <path>, cp <src> <dst>");
-    println!("            mv <src> <dst>, rm <file>, rmdir <dir>, echo <texte>");
+    println!("            nano <file>, stat <path>, chmod <mode> <path>, chown <user> <path>");
+    println!("            cp <src> <dst>, mv <src> <dst>, rm <file>, rmdir <dir>, echo <texte>");
+    println!("  materiel: lspci");
     println!("  reseau  : ifconfig, ip, route, arp, ping, dhcp, dns, wget, curl   [roadmap]");
     println!("  disque  : mount, df, sync, mkfs.bfs                                [roadmap]");
 }
@@ -50,7 +51,8 @@ pub fn sysinfo() {
     println!("gdt: {}", gdt::state());
     println!("idt: {}", idt::state());
     println!("interrupts: {}", interrupts::state());
-    println!("security: sessions + permissions simples, no user/kernel split yet");
+    println!("security: sessions + mot de passe + permissions Unix (rwx, uid/gid)");
+    println!("pci: {} peripheriques (lspci)", crate::arch::x86_64::pci::count());
     println!("network: OSI stack planned, driver not enabled yet");
     println!("objectif: OS souverain francais experimental");
 }
@@ -77,8 +79,11 @@ pub fn devices() {
     println!("  kbd0      PS/2 keyboard polling, AZERTY-FR mapping");
     println!("  serial0   {}", serial_state);
     println!("  ramfs0    in-memory filesystem mounted on /");
-    println!("  pci0      planned");
-    println!("  net0      planned: e1000/virtio-net");
+    println!("  pci0      bus scanne ({} peripheriques) - voir 'lspci'", crate::arch::x86_64::pci::count());
+    match crate::arch::x86_64::pci::find_network() {
+        Some(d) => println!("  net0      carte PCI {:04x}:{:04x} detectee, driver non charge", d.vendor, d.device),
+        None => println!("  net0      aucune carte reseau PCI detectee"),
+    }
     println!("  disk0     planned: virtio-blk/BFS persistent FS");
 }
 
@@ -164,18 +169,68 @@ pub fn users() {
     println!("guest:x:65534:65534:/tmp");
 }
 
-pub fn login(argc: usize, argv: &[&str; 12]) {
+/// Demande et verifie un mot de passe pour un utilisateur (sans echo).
+fn prompt_and_auth(user: users::User) -> bool {
+    if users::password(user).is_none() {
+        return true;
+    }
+    print!("Mot de passe: ");
+    let mut buf = [0u8; 64];
+    let len = keyboard::read_secret(&mut buf);
+    println!("");
+    let input = unsafe { core::str::from_utf8_unchecked(&buf[..len]) };
+    users::authenticate(user, input)
+}
+
+/// Bascule la session vers `user` et place le cwd sur son repertoire d'accueil.
+fn switch_to(user: users::User, cwd: &mut usize) {
+    users::session().login(user);
+    let home = users::home_path(user);
+    *cwd = ramfs::fs().resolve(home, 0).unwrap_or(0);
+}
+
+pub fn login(argc: usize, argv: &[&str; 12], cwd: &mut usize) {
     if argc < 2 {
         println!("usage: login <root|arthur|guest>");
         return;
     }
-    match users::user_from_name(argv[1]) {
-        Some(user) => {
-            users::session().login(user);
-            println!("session ouverte: {}", users::session().username());
-        }
-        None => println!("login: utilisateur inconnu"),
+    let user = match users::user_from_name(argv[1]) {
+        Some(u) => u,
+        None => { println!("login: utilisateur inconnu"); return; }
+    };
+    if !prompt_and_auth(user) {
+        vga::set_color(COLOR_YELLOW);
+        println!("login: mot de passe incorrect");
+        vga::set_color(COLOR_DEFAULT);
+        return;
     }
+    switch_to(user, cwd);
+    println!("session ouverte: {}", users::session().username());
+}
+
+pub fn su(argc: usize, argv: &[&str; 12], cwd: &mut usize) {
+    // `su` sans argument -> root, sinon `su <user>`.
+    let user = if argc >= 2 {
+        match users::user_from_name(argv[1]) {
+            Some(u) => u,
+            None => { println!("su: utilisateur inconnu"); return; }
+        }
+    } else {
+        users::User::Root
+    };
+    if !prompt_and_auth(user) {
+        vga::set_color(COLOR_YELLOW);
+        println!("su: authentification echouee");
+        vga::set_color(COLOR_DEFAULT);
+        return;
+    }
+    switch_to(user, cwd);
+    println!("session: {}", users::session().username());
+}
+
+pub fn logout(cwd: &mut usize) {
+    switch_to(users::User::Guest, cwd);
+    println!("session: guest");
 }
 
 // ---------------------------------------------------------------------------
@@ -195,38 +250,47 @@ pub fn ls(argc: usize, argv: &[&str; 12], cwd: usize) {
     }
 
     let fs = ramfs::fs();
-    match fs.resolve(path, cwd) {
-        Some(idx) => {
-            if fs.nodes[idx].kind == NodeKind::File {
-                ramfs::print_node_line(fs, idx, long);
-            } else {
-                for i in 0..MAX_NODES {
-                    if fs.nodes[i].used && i != idx && fs.nodes[i].parent == idx {
-                        ramfs::print_node_line(fs, i, long);
-                    }
-                }
+    let idx = match fs.resolve_checked(path, cwd) {
+        Ok(i) => i,
+        Err(e) => { println!("ls: {}", e); return; }
+    };
+    if fs.nodes[idx].kind == NodeKind::File {
+        ramfs::print_node_line(fs, idx, long);
+    } else {
+        // Lister un repertoire demande le droit de lecture sur celui-ci.
+        if !fs.can(idx, PERM_R) {
+            println!("ls: permission denied");
+            return;
+        }
+        for i in 0..MAX_NODES {
+            if fs.nodes[i].used && i != idx && fs.nodes[i].parent == idx {
+                ramfs::print_node_line(fs, i, long);
             }
         }
-        None => println!("ls: chemin introuvable"),
     }
 }
 
 pub fn tree(argc: usize, argv: &[&str; 12], cwd: usize) {
     let path = if argc >= 2 { argv[1] } else { "." };
     let fs = ramfs::fs();
-    match fs.resolve(path, cwd) {
-        Some(idx) => {
-            ramfs::print_path(fs, idx);
-            println!("");
-            tree_rec(idx, 0);
-        }
-        None => println!("tree: chemin introuvable"),
-    }
+    let idx = match fs.resolve_checked(path, cwd) {
+        Ok(i) => i,
+        Err(e) => { println!("tree: {}", e); return; }
+    };
+    ramfs::print_path(fs, idx);
+    println!("");
+    tree_rec(idx, 0);
 }
 
 fn tree_rec(idx: usize, depth: usize) {
     let fs = ramfs::fs();
     if fs.nodes[idx].kind != NodeKind::Dir { return; }
+    // On n'explore un repertoire que si on a le droit de le lire.
+    if !fs.can(idx, PERM_R) {
+        for _ in 0..depth { print!("  "); }
+        println!("|- [permission denied]");
+        return;
+    }
     for i in 0..MAX_NODES {
         if fs.nodes[i].used && i != idx && fs.nodes[i].parent == idx {
             for _ in 0..depth { print!("  "); }
@@ -243,74 +307,85 @@ fn tree_rec(idx: usize, depth: usize) {
 }
 
 pub fn cd(argc: usize, argv: &[&str; 12], cwd: &mut usize) {
-    if argc < 2 { *cwd = 0; return; }
+    if argc < 2 { *cwd = ramfs::fs().resolve(users::session().home(), 0).unwrap_or(0); return; }
     let fs = ramfs::fs();
-    match fs.resolve(argv[1], *cwd) {
-        Some(idx) if fs.nodes[idx].kind == NodeKind::Dir => *cwd = idx,
-        Some(_) => println!("cd: pas un dossier"),
-        None => println!("cd: chemin introuvable"),
+    let idx = match fs.resolve_checked(argv[1], *cwd) {
+        Ok(i) => i,
+        Err(e) => { println!("cd: {}", e); return; }
+    };
+    if fs.nodes[idx].kind != NodeKind::Dir {
+        println!("cd: pas un dossier");
+        return;
     }
+    // Entrer dans un repertoire demande le droit d'execution dessus.
+    if !fs.can(idx, PERM_X) {
+        println!("cd: permission denied");
+        return;
+    }
+    *cwd = idx;
 }
 
 pub fn mkdir(argc: usize, argv: &[&str; 12], cwd: usize) {
     if argc < 2 { println!("usage: mkdir <path>"); return; }
     let fs = ramfs::fs();
-    match fs.resolve_parent_name(argv[1], cwd) {
-        Some((parent, name)) => match fs.mkdir_at(parent, name) {
-            Ok(_) => {}
-            Err(e) => println!("mkdir: {}", e),
-        },
-        None => println!("mkdir: chemin invalide"),
-    }
+    let (parent, name) = match fs.resolve_parent_name_checked(argv[1], cwd) {
+        Ok(v) => v,
+        Err(e) => { println!("mkdir: {}", e); return; }
+    };
+    if !fs.can(parent, PERM_W) { println!("mkdir: permission denied"); return; }
+    if let Err(e) = fs.mkdir_at(parent, name) { println!("mkdir: {}", e); }
 }
 
 pub fn touch(argc: usize, argv: &[&str; 12], cwd: usize) {
     if argc < 2 { println!("usage: touch <file>"); return; }
     let fs = ramfs::fs();
-    match fs.resolve_parent_name(argv[1], cwd) {
-        Some((parent, name)) => match fs.touch_at(parent, name) {
-            Ok(_) => {}
-            Err(e) => println!("touch: {}", e),
-        },
-        None => println!("touch: chemin invalide"),
-    }
+    let (parent, name) = match fs.resolve_parent_name_checked(argv[1], cwd) {
+        Ok(v) => v,
+        Err(e) => { println!("touch: {}", e); return; }
+    };
+    if !fs.can(parent, PERM_W) { println!("touch: permission denied"); return; }
+    if let Err(e) = fs.touch_at(parent, name) { println!("touch: {}", e); }
 }
 
 pub fn cat(argc: usize, argv: &[&str; 12], cwd: usize) {
     if argc < 2 { println!("usage: cat <file>"); return; }
     let fs = ramfs::fs();
-    match fs.resolve(argv[1], cwd) {
-        Some(idx) if fs.nodes[idx].kind == NodeKind::File => {
-            for i in 0..fs.nodes[idx].content_len {
-                print!("{}", fs.nodes[idx].content[i] as char);
-            }
-            println!("");
-        }
-        Some(_) => println!("cat: dossier"),
-        None => println!("cat: fichier introuvable"),
+    let idx = match fs.resolve_checked(argv[1], cwd) {
+        Ok(i) => i,
+        Err(e) => { println!("cat: {}", e); return; }
+    };
+    if fs.nodes[idx].kind != NodeKind::File { println!("cat: dossier"); return; }
+    if !fs.can(idx, PERM_R) { println!("cat: permission denied"); return; }
+    for i in 0..fs.nodes[idx].content_len {
+        print!("{}", fs.nodes[idx].content[i] as char);
     }
+    println!("");
 }
 
 pub fn write(line: &str, argc: usize, argv: &[&str; 12], cwd: usize) {
     if argc < 3 { println!("usage: write <file> <texte>"); return; }
     let text = remainder_after_tokens(line, 2);
     let fs = ramfs::fs();
-    match fs.resolve(argv[1], cwd) {
-        Some(idx) if fs.nodes[idx].kind == NodeKind::File => fs.write_node(idx, text),
-        Some(_) => println!("write: dossier"),
-        None => println!("write: fichier introuvable"),
-    }
+    let idx = match fs.resolve_checked(argv[1], cwd) {
+        Ok(i) => i,
+        Err(e) => { println!("write: {}", e); return; }
+    };
+    if fs.nodes[idx].kind != NodeKind::File { println!("write: dossier"); return; }
+    if !fs.can(idx, PERM_W) { println!("write: permission denied"); return; }
+    fs.write_node(idx, text);
 }
 
 pub fn append(line: &str, argc: usize, argv: &[&str; 12], cwd: usize) {
     if argc < 3 { println!("usage: append <file> <texte>"); return; }
     let text = remainder_after_tokens(line, 2);
     let fs = ramfs::fs();
-    match fs.resolve(argv[1], cwd) {
-        Some(idx) if fs.nodes[idx].kind == NodeKind::File => fs.append_node(idx, text),
-        Some(_) => println!("append: dossier"),
-        None => println!("append: fichier introuvable"),
-    }
+    let idx = match fs.resolve_checked(argv[1], cwd) {
+        Ok(i) => i,
+        Err(e) => { println!("append: {}", e); return; }
+    };
+    if fs.nodes[idx].kind != NodeKind::File { println!("append: dossier"); return; }
+    if !fs.can(idx, PERM_W) { println!("append: permission denied"); return; }
+    fs.append_node(idx, text);
 }
 
 pub fn nano(argc: usize, argv: &[&str; 12], cwd: usize) {
@@ -321,51 +396,67 @@ pub fn nano(argc: usize, argv: &[&str; 12], cwd: usize) {
     let len = keyboard::read_line(&mut buf);
     let text = unsafe { core::str::from_utf8_unchecked(&buf[..len]) };
     let fs = ramfs::fs();
-    let idx = match fs.resolve(argv[1], cwd) {
-        Some(idx) => idx,
-        None => match fs.resolve_parent_name(argv[1], cwd) {
-            Some((parent, name)) => match fs.touch_at(parent, name) {
+    let idx = match fs.resolve_checked(argv[1], cwd) {
+        Ok(idx) => idx,
+        Err("introuvable") => {
+            // Le fichier n'existe pas : on tente de le creer dans son parent.
+            let (parent, name) = match fs.resolve_parent_name_checked(argv[1], cwd) {
+                Ok(v) => v,
+                Err(e) => { println!("nano: {}", e); return; }
+            };
+            if !fs.can(parent, PERM_W) { println!("nano: permission denied"); return; }
+            match fs.touch_at(parent, name) {
                 Ok(idx) => idx,
                 Err(e) => { println!("nano: {}", e); return; }
-            },
-            None => { println!("nano: chemin invalide"); return; }
-        },
+            }
+        }
+        Err(e) => { println!("nano: {}", e); return; }
     };
-    if fs.nodes[idx].kind == NodeKind::File { fs.write_node(idx, text); }
+    if fs.nodes[idx].kind != NodeKind::File { println!("nano: pas un fichier"); return; }
+    if !fs.can(idx, PERM_W) { println!("nano: permission denied"); return; }
+    fs.write_node(idx, text);
 }
 
 pub fn rm(argc: usize, argv: &[&str; 12], cwd: usize) {
     if argc < 2 { println!("usage: rm <file>"); return; }
     let fs = ramfs::fs();
-    match fs.resolve(argv[1], cwd) {
-        Some(idx) if idx != 0 && fs.nodes[idx].kind == NodeKind::File => fs.nodes[idx].used = false,
-        Some(_) => println!("rm: pas un fichier"),
-        None => println!("rm: introuvable"),
-    }
+    let idx = match fs.resolve_checked(argv[1], cwd) {
+        Ok(i) => i,
+        Err(e) => { println!("rm: {}", e); return; }
+    };
+    if idx == 0 || fs.nodes[idx].kind != NodeKind::File { println!("rm: pas un fichier"); return; }
+    // Supprimer demande le droit d'ecriture sur le repertoire parent.
+    if !fs.can(fs.nodes[idx].parent, PERM_W) { println!("rm: permission denied"); return; }
+    fs.nodes[idx].used = false;
 }
 
 pub fn rmdir(argc: usize, argv: &[&str; 12], cwd: usize) {
     if argc < 2 { println!("usage: rmdir <dir>"); return; }
     let fs = ramfs::fs();
-    match fs.resolve(argv[1], cwd) {
-        Some(idx) if idx != 0 && fs.nodes[idx].kind == NodeKind::Dir && fs.is_empty_dir(idx) => fs.nodes[idx].used = false,
-        Some(idx) if fs.nodes[idx].kind == NodeKind::Dir => println!("rmdir: dossier non vide"),
-        Some(_) => println!("rmdir: pas un dossier"),
-        None => println!("rmdir: introuvable"),
-    }
+    let idx = match fs.resolve_checked(argv[1], cwd) {
+        Ok(i) => i,
+        Err(e) => { println!("rmdir: {}", e); return; }
+    };
+    if idx == 0 || fs.nodes[idx].kind != NodeKind::Dir { println!("rmdir: pas un dossier"); return; }
+    if !fs.is_empty_dir(idx) { println!("rmdir: dossier non vide"); return; }
+    if !fs.can(fs.nodes[idx].parent, PERM_W) { println!("rmdir: permission denied"); return; }
+    fs.nodes[idx].used = false;
 }
 
 pub fn cp(argc: usize, argv: &[&str; 12], cwd: usize) {
     if argc < 3 { println!("usage: cp <src> <dst>"); return; }
     let fs = ramfs::fs();
-    let src = match fs.resolve(argv[1], cwd) {
-        Some(idx) if fs.nodes[idx].kind == NodeKind::File => idx,
-        _ => { println!("cp: source invalide"); return; }
+    let src = match fs.resolve_checked(argv[1], cwd) {
+        Ok(idx) if fs.nodes[idx].kind == NodeKind::File => idx,
+        Ok(_) => { println!("cp: source invalide"); return; }
+        Err(e) => { println!("cp: {}", e); return; }
     };
-    let (parent, name) = match fs.resolve_parent_name(argv[2], cwd) {
-        Some(v) => v,
-        None => { println!("cp: destination invalide"); return; }
+    if !fs.can(src, PERM_R) { println!("cp: permission denied (source)"); return; }
+    let (parent, name) = match fs.resolve_parent_name_checked(argv[2], cwd) {
+        Ok(v) => v,
+        Err(e) => { println!("cp: {}", e); return; }
     };
+    if !fs.can(parent, PERM_W) { println!("cp: permission denied (destination)"); return; }
     let dst = match fs.touch_at(parent, name) {
         Ok(idx) => idx,
         Err(e) => { println!("cp: {}", e); return; }
@@ -378,14 +469,17 @@ pub fn cp(argc: usize, argv: &[&str; 12], cwd: usize) {
 pub fn mv(argc: usize, argv: &[&str; 12], cwd: usize) {
     if argc < 3 { println!("usage: mv <src> <dst>"); return; }
     let fs = ramfs::fs();
-    let src = match fs.resolve(argv[1], cwd) {
-        Some(idx) if idx != 0 => idx,
-        _ => { println!("mv: source invalide"); return; }
+    let src = match fs.resolve_checked(argv[1], cwd) {
+        Ok(idx) if idx != 0 => idx,
+        Ok(_) => { println!("mv: source invalide"); return; }
+        Err(e) => { println!("mv: {}", e); return; }
     };
-    let (parent, name) = match fs.resolve_parent_name(argv[2], cwd) {
-        Some(v) => v,
-        None => { println!("mv: destination invalide"); return; }
+    if !fs.can(fs.nodes[src].parent, PERM_W) { println!("mv: permission denied (source)"); return; }
+    let (parent, name) = match fs.resolve_parent_name_checked(argv[2], cwd) {
+        Ok(v) => v,
+        Err(e) => { println!("mv: {}", e); return; }
     };
+    if !fs.can(parent, PERM_W) { println!("mv: permission denied (destination)"); return; }
     if fs.find_child(parent, name).is_some() {
         println!("mv: destination existe deja");
         return;
@@ -397,18 +491,17 @@ pub fn mv(argc: usize, argv: &[&str; 12], cwd: usize) {
 pub fn stat(argc: usize, argv: &[&str; 12], cwd: usize) {
     if argc < 2 { println!("usage: stat <path>"); return; }
     let fs = ramfs::fs();
-    match fs.resolve(argv[1], cwd) {
-        Some(idx) => {
-            let n = &fs.nodes[idx];
-            print!("path: "); ramfs::print_path(fs, idx); println!("");
-            print!("type: "); println!("{}", if n.kind == NodeKind::Dir { "directory" } else { "file" });
-            print!("mode: "); ramfs::print_mode(n.kind, n.mode); println!("  octal={:o}", n.mode);
-            println!("uid: {}", n.uid);
-            println!("gid: {}", n.gid);
-            println!("size: {}", n.content_len);
-        }
-        None => println!("stat: introuvable"),
-    }
+    let idx = match fs.resolve_checked(argv[1], cwd) {
+        Ok(i) => i,
+        Err(e) => { println!("stat: {}", e); return; }
+    };
+    let n = &fs.nodes[idx];
+    print!("path: "); ramfs::print_path(fs, idx); println!("");
+    print!("type: "); println!("{}", if n.kind == NodeKind::Dir { "directory" } else { "file" });
+    print!("mode: "); ramfs::print_mode(n.kind, n.mode); println!("  octal={:o}", n.mode);
+    println!("uid: {}", n.uid);
+    println!("gid: {}", n.gid);
+    println!("size: {}", n.content_len);
 }
 
 fn parse_octal(s: &str) -> Option<u16> {
@@ -425,9 +518,59 @@ pub fn chmod(argc: usize, argv: &[&str; 12], cwd: usize) {
     if argc < 3 { println!("usage: chmod <mode-octal> <path>"); return; }
     let mode = match parse_octal(argv[1]) { Some(m) => m, None => { println!("chmod: mode invalide"); return; } };
     let fs = ramfs::fs();
-    match fs.resolve(argv[2], cwd) {
-        Some(idx) => fs.nodes[idx].mode = mode,
-        None => println!("chmod: introuvable"),
+    let idx = match fs.resolve_checked(argv[2], cwd) {
+        Ok(i) => i,
+        Err(e) => { println!("chmod: {}", e); return; }
+    };
+    // Seul le proprietaire (ou root) peut changer les droits.
+    let s = users::session();
+    if !s.is_root() && s.uid() != fs.nodes[idx].uid {
+        println!("chmod: operation non permise");
+        return;
+    }
+    fs.nodes[idx].mode = mode;
+}
+
+fn parse_u16(s: &str) -> Option<u16> {
+    let mut value: u32 = 0;
+    if s.is_empty() { return None; }
+    for b in s.bytes() {
+        if !b.is_ascii_digit() { return None; }
+        value = value * 10 + (b - b'0') as u32;
+        if value > 65535 { return None; }
+    }
+    Some(value as u16)
+}
+
+pub fn chown(argc: usize, argv: &[&str; 12], cwd: usize) {
+    if argc < 3 { println!("usage: chown <uid|user> <path>"); return; }
+    // Seul root peut changer le proprietaire (comme sous Linux).
+    if !users::session().is_root() {
+        println!("chown: operation reservee a root");
+        return;
+    }
+    // L'utilisateur peut etre un nom connu ou un uid numerique.
+    let new_uid = match users::user_from_name(argv[1]) {
+        Some(u) => uid_of(u),
+        None => match parse_u16(argv[1]) {
+            Some(v) => v,
+            None => { println!("chown: utilisateur/uid invalide"); return; }
+        },
+    };
+    let fs = ramfs::fs();
+    let idx = match fs.resolve_checked(argv[2], cwd) {
+        Ok(i) => i,
+        Err(e) => { println!("chown: {}", e); return; }
+    };
+    fs.nodes[idx].uid = new_uid;
+    fs.nodes[idx].gid = new_uid;
+}
+
+fn uid_of(user: users::User) -> u16 {
+    match user {
+        users::User::Root => 0,
+        users::User::Arthur => 1000,
+        users::User::Guest => 65534,
     }
 }
 

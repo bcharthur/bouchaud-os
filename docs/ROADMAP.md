@@ -26,6 +26,10 @@ Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 - [~] Stubs propres GDT / IDT / interruptions appeles au boot
 - [~] Roadmap reseau OSI + placeholders detailles
 - [~] Roadmap disque BFS (mount, df, sync, mkfs.bfs)
+- [x] Historique des commandes + transcript serie (`history`)
+- [x] Permissions Unix reelles (rwx, uid/gid, traversee) : home prive par user
+- [x] Login par mot de passe (login / su), repertoire d'accueil
+- [x] Scan PCI reel via 0xCF8/0xCFC (`lspci`) + detection carte reseau
 
 ## V0.7 - CPU & interruptions
 - [ ] GDT maison (segments noyau/utilisateur + TSS)
@@ -41,8 +45,9 @@ Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 - [ ] Heap allocator -> passage progressif a `alloc`
 
 ## V0.9 - Bus & devices
-- [ ] Scan du bus PCI
-- [ ] Enumeration et description des peripheriques
+- [x] Scan du bus PCI (fait en V0.6.1)
+- [x] Enumeration et description des peripheriques (`lspci`)
+- [ ] Acces aux BAR (Base Address Registers) pour piloter un device
 
 ## V1.0 - Reseau & disque
 - [ ] Driver reseau (e1000 ou virtio-net)

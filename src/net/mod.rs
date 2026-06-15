@@ -59,8 +59,14 @@ fn missing_layer(cmd: &str) -> &'static str {
 /// Message standard d'une commande reseau placeholder.
 pub fn placeholder(cmd: &str) {
     vga::set_color(COLOR_YELLOW);
-    println!("{}: pile reseau non activee dans V0.6", cmd);
+    println!("{}: pile reseau non activee", cmd);
     vga::set_color(COLOR_DEFAULT);
+    // Le scan PCI fonctionne deja : on indique si une carte est presente.
+    match crate::arch::x86_64::pci::find_network() {
+        Some(d) => println!("  carte reseau detectee: {:04x}:{:04x} ({}) - driver a ecrire",
+            d.vendor, d.device, crate::arch::x86_64::pci::vendor_name(d.vendor)),
+        None => println!("  aucune carte reseau PCI detectee (essaie QEMU avec -device e1000)"),
+    }
     println!("  couche manquante: {}", missing_layer(cmd));
-    println!("  roadmap: PCI -> driver -> Ethernet -> ARP -> IPv4 -> ICMP -> UDP -> DHCP/DNS -> TCP -> HTTP");
+    println!("  roadmap: PCI[ok] -> driver -> Ethernet -> ARP -> IPv4 -> ICMP -> UDP -> DHCP/DNS -> TCP -> HTTP");
 }

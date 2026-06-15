@@ -15,7 +15,8 @@ use crate::users;
 
 /// Boucle principale du shell : affiche le prompt, lit une ligne, l'execute.
 pub fn run() -> ! {
-    let mut cwd = 0usize;
+    // Demarre dans le repertoire d'accueil de l'utilisateur courant.
+    let mut cwd = ramfs::fs().resolve(users::session().home(), 0).unwrap_or(0);
     let mut line_buf = [0u8; 256];
 
     loop {
@@ -68,9 +69,9 @@ fn dispatch(line: &str, cwd: &mut usize) {
         "whoami" => println!("{}", users::session().username()),
         "id" => c::id(),
         "users" => c::users(),
-        "login" => c::login(argc, &argv),
-        "logout" => { users::session().login(users::User::Guest); println!("session: guest"); }
-        "su" => { users::session().login(users::User::Root); println!("session: root"); }
+        "login" => c::login(argc, &argv, cwd),
+        "logout" => c::logout(cwd),
+        "su" => c::su(argc, &argv, cwd),
 
         // Fichiers
         "pwd" => { ramfs::print_path(ramfs::fs(), *cwd); println!(""); }
@@ -89,7 +90,9 @@ fn dispatch(line: &str, cwd: &mut usize) {
         "mv" => c::mv(argc, &argv, *cwd),
         "stat" => c::stat(argc, &argv, *cwd),
         "chmod" => c::chmod(argc, &argv, *cwd),
+        "chown" => c::chown(argc, &argv, *cwd),
         "echo" => println!("{}", remainder_after_tokens(line, 1)),
+        "lspci" => crate::arch::x86_64::pci::print_devices(),
 
         // Reseau (placeholders, pile non activee)
         "ifconfig" | "ip" | "route" | "arp" | "ping" | "dhcp" | "dns" | "wget" | "curl" => {
