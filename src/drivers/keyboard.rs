@@ -62,9 +62,32 @@ fn ascii_letter(ch: u8, shift: bool) -> char {
 
 /// Traduit un scancode en caractere selon la disposition AZERTY-FR.
 ///
+/// `altgr` active la 3e couche (AltGr) qui fournit les symboles indispensables
+/// au shell ( | < > { } [ ] \ @ # ~ ` ^ ), utile notamment sur les claviers
+/// portables depourvus de la touche ISO `<>` (ex. Dell a pave numerique).
+///
 /// Les caracteres accentues sont translitteres tant que l'affichage reste en
 /// ASCII pur (ex. la touche `é` produit `e`).
-fn scancode_to_char(sc: u8, shift: bool) -> Option<char> {
+fn scancode_to_char(sc: u8, shift: bool, altgr: bool) -> Option<char> {
+    if altgr {
+        // Couche AltGr (FR) + raccourcis Bouchaud OS pour < et > sans touche ISO.
+        return match sc {
+            0x03 => Some('~'),   // AltGr+2
+            0x04 => Some('#'),   // AltGr+3
+            0x05 => Some('{'),   // AltGr+4
+            0x06 => Some('['),   // AltGr+5
+            0x07 => Some('|'),   // AltGr+6
+            0x08 => Some('`'),   // AltGr+7
+            0x09 => Some('\\'),  // AltGr+8
+            0x0a => Some('^'),   // AltGr+9
+            0x0b => Some('@'),   // AltGr+0
+            0x0c => Some(']'),   // AltGr+)
+            0x0d => Some('}'),   // AltGr+=
+            0x32 => Some('<'),   // AltGr+, (touche virgule)
+            0x33 => Some('>'),   // AltGr+; (touche point-virgule)
+            _ => None,
+        };
+    }
     match sc {
         0x01 => Some('\x1b'),
         0x0e => Some('\x08'),
@@ -123,9 +146,13 @@ fn scancode_to_char(sc: u8, shift: bool) -> Option<char> {
         0x33 => Some(if shift { '.' } else { ';' }),
         0x34 => Some(if shift { '/' } else { ':' }),
         0x35 => Some(if shift { '/' } else { '!' }),
+
+        // Touche ISO "<>" (a gauche de W) presente sur la plupart des AZERTY.
+        0x56 => Some(if shift { '>' } else { '<' }),
         _ => None,
     }
 }
+
 
 /// Touche logique renvoyee par `read_key`.
 #[derive(Clone, Copy, PartialEq)]
@@ -143,23 +170,27 @@ pub enum Key {
 
 /// Etat persistant de la touche Shift entre deux appels a `read_key`.
 static mut SHIFT: bool = false;
+/// Etat persistant de la touche AltGr (Alt droit, sequence E0 38 / E0 B8).
+static mut ALTGR: bool = false;
 
-/// Lit la prochaine touche logique au clavier (gere Shift et touches etendues).
+/// Lit la prochaine touche logique au clavier (gere Shift, AltGr et etendues).
 pub fn read_key() -> Key {
     loop {
         let sc = read_scancode();
 
-        // Touches etendues (prefixe 0xE0) : fleches, Suppr...
+        // Touches etendues (prefixe 0xE0) : fleches, Suppr, AltGr...
         if sc == 0xe0 {
             let ext = read_scancode();
-            return match ext {
-                0x48 => Key::Up,
-                0x50 => Key::Down,
-                0x4b => Key::Left,
-                0x4d => Key::Right,
-                0x53 => Key::Backspace, // Suppr traite comme Backspace
+            match ext {
+                0x38 => { unsafe { ALTGR = true; } continue; }  // AltGr enfonce
+                0xb8 => { unsafe { ALTGR = false; } continue; } // AltGr relache
+                0x48 => return Key::Up,
+                0x50 => return Key::Down,
+                0x4b => return Key::Left,
+                0x4d => return Key::Right,
+                0x53 => return Key::Backspace, // Suppr traite comme Backspace
                 _ => continue,
-            };
+            }
         }
 
         match sc {
@@ -170,7 +201,8 @@ pub fn read_key() -> Key {
         if sc & 0x80 != 0 { continue; } // relachement de touche
 
         let shift = unsafe { SHIFT };
-        if let Some(ch) = scancode_to_char(sc, shift) {
+        let altgr = unsafe { ALTGR };
+        if let Some(ch) = scancode_to_char(sc, shift, altgr) {
             return match ch {
                 '\n' => Key::Enter,
                 '\x08' => Key::Backspace,

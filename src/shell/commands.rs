@@ -35,6 +35,7 @@ pub fn help() {
     vga::set_color(COLOR_CYAN);
     println!("  shell   : cmd1 ; cmd2   cmd1 && cmd2   cmd1 || cmd2   cmd > f   cmd >> f");
     println!("            fleches haut/bas = historique, Tab = completion, $? = code retour");
+    println!("            clavier: | = AltGr+6 | < = AltGr+, | > = AltGr+; (ou touche ISO)");
     vga::set_color(COLOR_DEFAULT);
 }
 
