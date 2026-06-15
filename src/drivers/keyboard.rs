@@ -38,6 +38,14 @@ fn pop_scancode() -> Option<u8> {
     }
 }
 
+/// Lecture non bloquante d'un scancode brut (None si rien). Utile pour le GUI.
+pub fn try_scancode() -> Option<u8> {
+    interrupts::disable();
+    let r = pop_scancode();
+    interrupts::enable();
+    r
+}
+
 /// Attend le prochain scancode, en mettant le CPU en veille si la file est vide.
 fn read_scancode() -> u8 {
     loop {

@@ -8,7 +8,7 @@
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 use crate::arch::x86_64::{gdt, ports};
 use crate::arch::x86_64::interrupts::{notify_end_of_interrupt, InterruptIndex};
-use crate::drivers::keyboard;
+use crate::drivers::{keyboard, mouse};
 use crate::kernel::{dmesg, timer};
 use crate::serial_println;
 
@@ -35,6 +35,7 @@ pub fn init() {
         IDT.general_protection_fault.set_handler_fn(general_protection_handler);
         IDT[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
         IDT[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
+        IDT[InterruptIndex::Mouse.as_usize()].set_handler_fn(mouse_interrupt_handler);
         IDT.load();
         READY = true;
     }
@@ -80,4 +81,10 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack: InterruptStackFrame
     let scancode = unsafe { ports::inb(0x60) };
     keyboard::push_scancode(scancode);
     notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
+}
+
+extern "x86-interrupt" fn mouse_interrupt_handler(_stack: InterruptStackFrame) {
+    let byte = unsafe { ports::inb(0x60) };
+    mouse::handle_byte(byte);
+    notify_end_of_interrupt(InterruptIndex::Mouse.as_u8());
 }
