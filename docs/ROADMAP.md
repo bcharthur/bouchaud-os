@@ -39,6 +39,15 @@ Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 - [x] Clavier en interruption IRQ1 (fin du polling)
 - [ ] APIC, plus tard, en remplacement du PIC
 
+## V0.11 - Userland
+- [x] Horloge RTC (commande date)
+- [x] Coreutils : grep, wc, head, tail, find (lisent fichier ou stdin)
+- [x] Pipes cmd1 | cmd2 (capture en pile)
+- [x] Variables d'environnement (export/env/unset, $NOM, ${NOM})
+- [x] Scripts .bsh (run/source)
+- [x] Editeur plein ecran edit (fleches, sauvegarde/quitter)
+- [ ] Horodatage des fichiers (mtime) avec la RTC
+
 ## V0.10 - Tas (alloc) + shell pro
 - [x] Allocateur de tas (linked_list_allocator, 1 MiB) -> Vec/String/BTreeMap
 - [x] Chainage de commandes : ; && ||

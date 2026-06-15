@@ -4,10 +4,15 @@
 //! que la gestion des couleurs et du defilement.
 
 use core::fmt;
+use crate::arch::x86_64::ports::outb;
 
 const VGA_BUFFER: usize = 0xb8000;
 const VGA_WIDTH: usize = 80;
 const VGA_HEIGHT: usize = 25;
+
+/// Dimensions de l'ecran texte, exposees pour l'editeur plein ecran.
+pub const WIDTH: usize = VGA_WIDTH;
+pub const HEIGHT: usize = VGA_HEIGHT;
 
 pub const COLOR_DEFAULT: u8 = 0x0f;
 pub const COLOR_GREEN: u8 = 0x0a;
@@ -124,6 +129,19 @@ pub fn clear() {
 /// Change la couleur d'affichage courante.
 pub fn set_color(color: u8) {
     unsafe { VGA.set_color(color); }
+}
+
+/// Positionne le curseur (texte + curseur materiel) sur (row, col).
+pub fn set_cursor(row: usize, col: usize) {
+    unsafe {
+        VGA.row = if row >= VGA_HEIGHT { VGA_HEIGHT - 1 } else { row };
+        VGA.col = if col >= VGA_WIDTH { VGA_WIDTH - 1 } else { col };
+        let pos = VGA.row * VGA_WIDTH + VGA.col;
+        outb(0x3D4, 0x0F);
+        outb(0x3D5, (pos & 0xFF) as u8);
+        outb(0x3D4, 0x0E);
+        outb(0x3D5, ((pos >> 8) & 0xFF) as u8);
+    }
 }
 
 /// Pile de tampons de capture. Quand elle n'est pas vide, la sortie texte est

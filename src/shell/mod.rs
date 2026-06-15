@@ -5,6 +5,7 @@
 //! `commands.rs`.
 
 pub mod commands;
+pub mod editor;
 pub mod history;
 
 use crate::drivers::keyboard::{self, Key};
@@ -85,7 +86,7 @@ pub const COMMANDS: &[&str] = &[
     "devices", "dmesg", "history", "uptime", "ticks", "interrupts", "breakpoint",
     "serial-test", "panic-test", "roadmap", "whoami", "id", "users", "useradd",
     "userdel", "passwd", "su", "pwd", "ls", "tree", "cd", "mkdir", "touch", "cat",
-    "write", "append", "nano", "rm", "rmdir", "cp", "mv", "stat", "chmod", "chown",
+    "write", "append", "nano", "edit", "rm", "rmdir", "cp", "mv", "stat", "chmod", "chown",
     "echo", "date", "grep", "wc", "head", "tail", "find", "lspci", "ping", "ifconfig",
     "ip", "route", "arp", "dhcp", "dns", "wget", "curl", "mount", "df", "sync",
     "mkfs.bfs", "true", "false", "logout", "exit", "export", "env", "unset", "run",
@@ -537,6 +538,7 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "write" => { c::write(line, argc, &argv, *cwd); 0 }
         "append" => { c::append(line, argc, &argv, *cwd); 0 }
         "nano" => { c::nano(argc, &argv, *cwd); 0 }
+        "edit" => { if argc >= 2 { editor::edit(argv[1], *cwd); } else { println!("usage: edit <fichier>"); } 0 }
         "rm" => c::rm(argc, &argv, *cwd),
         "rmdir" => c::rmdir(argc, &argv, *cwd),
         "cp" => c::cp(argc, &argv, *cwd),

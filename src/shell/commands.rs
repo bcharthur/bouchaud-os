@@ -27,7 +27,7 @@ pub fn help() {
     println!("  comptes : useradd <nom>, userdel <nom>, passwd [user]   (root pour add/del)");
     println!("  fichiers: pwd, ls [-l] [path], tree [path], cd <path>, mkdir <path>");
     println!("            touch <file>, write <file> <texte>, append <file> <texte>, cat <file>");
-    println!("            nano <file>, stat <path>, chmod <octal|+x|u+w> <path>, chown <user> <path>");
+    println!("            nano <file>, edit <file> (plein ecran), stat <path>, chmod <...> <path>, chown <user> <path>");
     println!("            cp <src> <dst>, mv <src> <dst>, rm <file>, rmdir <dir>, echo <texte>");
     println!("  texte   : grep <motif> [f], wc [f], head [-n N] [f], tail [-n N] [f], find [path]");
     println!("  env     : export NOM=val, env, unset NOM, $NOM, run <script.bsh>");
