@@ -106,6 +106,7 @@ fn dispatch(line: &str, cwd: &mut usize) {
         "sysinfo" => c::sysinfo(),
         "cpuinfo" => c::cpuinfo(),
         "meminfo" => c::meminfo(),
+        "alloctest" => c::alloctest(),
         "devices" => c::devices(),
         "dmesg" => dmesg::print(),
         "history" => c::history(argc, &argv),

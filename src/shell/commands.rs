@@ -67,11 +67,28 @@ pub fn cpuinfo() {
 
 pub fn meminfo() {
     let fs = ramfs::fs();
-    println!("memory model: static kernel memory + RAMFS fixed arrays");
+    let (used, free, total) = crate::kernel::heap::stats();
+    println!("memory model: static kernel memory + heap (alloc) + RAMFS");
+    println!("heap: used={} o, free={} o, total={} o", used, free, total);
     println!("ramfs inodes: used={} free={} total={}", fs.used_nodes(), fs.free_nodes(), MAX_NODES);
     println!("ramfs max file size: {} bytes", CONTENT_LEN);
-    println!("heap allocator: not enabled yet");
-    println!("paging/user isolation: roadmap V0.7+");
+    println!("paging/user isolation: roadmap (tas statique pour l'instant)");
+}
+
+pub fn alloctest() {
+    use alloc::vec::Vec;
+    use alloc::string::String;
+    let (u0, _, _) = crate::kernel::heap::stats();
+    let mut v: Vec<u64> = Vec::new();
+    for i in 0..1000u64 { v.push(i * i); }
+    let sum: u64 = v.iter().sum();
+    let mut s = String::new();
+    for i in 0..5 { s.push_str("bouchaud "); let _ = i; }
+    let (u1, free, _) = crate::kernel::heap::stats();
+    println!("alloctest: Vec<u64> de {} elements, somme des carres = {}", v.len(), sum);
+    println!("alloctest: String = \"{}\" (len {})", s.trim(), s.len());
+    println!("alloctest: heap avant={} o, pendant={} o, libre={} o", u0, u1, free);
+    println!("alloctest: OK (alloc fonctionne)");
 }
 
 pub fn devices() {
