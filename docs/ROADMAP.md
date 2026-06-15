@@ -39,6 +39,21 @@ Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 - [x] Clavier en interruption IRQ1 (fin du polling)
 - [ ] APIC, plus tard, en remplacement du PIC
 
+## V0.12 - Bureau graphique (phase 1)
+- [x] Mode VGA 13h (320x200x256) : framebuffer + double-buffer + palette
+- [x] Police bitmap 8x8, primitives (pixel, rect, fill, texte)
+- [x] Souris PS/2 (IRQ12) + curseur
+- [x] Bureau : fond, barre des taches, horloge RTC, fenetre deplacable
+- [x] Commande `desktop` (Echap pour revenir au shell texte)
+- [ ] Fenetre terminal interactive (reutiliser le shell dans le GUI)
+- [ ] Lanceur d'applications + apps natives
+- [ ] Haute resolution (migration bootloader 0.11) [plus tard]
+
+Note de cadrage : un vrai navigateur web (HTML/CSS/JS/HTTPS), l'execution de
+.exe (Windows) ou .jar (JVM), et l'integration d'un compilateur type gcc/rustc
+sont hors de portee d'un OS from-scratch. Cibles realistes : apps maison +
+scripts .bsh, et un mini-navigateur texte HTTP une fois le reseau e1000 pret.
+
 ## V0.11 - Userland
 - [x] Horloge RTC (commande date)
 - [x] Coreutils : grep, wc, head, tail, find (lisent fichier ou stdin)

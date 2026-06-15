@@ -32,6 +32,7 @@ pub fn help() {
     println!("  texte   : grep <motif> [f], wc [f], head [-n N] [f], tail [-n N] [f], find [path]");
     println!("  env     : export NOM=val, env, unset NOM, $NOM, run <script.bsh>");
     println!("  divers  : date");
+    println!("  graphique: desktop (bureau VGA + souris, Echap pour quitter)");
     println!("  materiel: lspci");
     println!("  reseau  : ping <ip> (loopback actif), ifconfig, ip, route, arp");
     println!("            dhcp, dns, wget, curl   [en attente du driver NIC]");

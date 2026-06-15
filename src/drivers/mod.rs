@@ -7,3 +7,5 @@
 pub mod vga;
 pub mod serial;
 pub mod keyboard;
+pub mod gfx;
+pub mod mouse;

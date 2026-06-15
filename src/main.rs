@@ -28,13 +28,14 @@ mod macros;
 mod arch;
 mod drivers;
 mod fs;
+mod gui;
 mod kernel;
 mod net;
 mod shell;
 mod users;
 
 /// Version courante de Bouchaud OS.
-pub const VERSION: &str = "0.11.0";
+pub const VERSION: &str = "0.12.0";
 /// Nom du systeme.
 pub const OS_NAME: &str = "Bouchaud OS";
 

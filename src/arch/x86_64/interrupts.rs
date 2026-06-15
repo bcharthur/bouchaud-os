@@ -20,6 +20,7 @@ static mut ENABLED: bool = false;
 pub enum InterruptIndex {
     Timer = PIC_1_OFFSET,
     Keyboard,
+    Mouse = PIC_1_OFFSET + 12, // IRQ12 (souris PS/2), sur le PIC esclave
 }
 
 impl InterruptIndex {
