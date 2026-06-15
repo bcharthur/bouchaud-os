@@ -32,7 +32,7 @@ mod shell;
 mod users;
 
 /// Version courante de Bouchaud OS.
-pub const VERSION: &str = "0.6.1";
+pub const VERSION: &str = "0.8.0";
 /// Nom du systeme.
 pub const OS_NAME: &str = "Bouchaud OS";
 
@@ -60,7 +60,7 @@ fn kernel_main(_boot_info: &'static BootInfo) -> ! {
     kernel::dmesg::log("ramfs: monte sur /");
     users::session().login(users::User::Arthur);
     kernel::dmesg::log("session: utilisateur par defaut arthur");
-    kernel::dmesg::log("net: pile reseau non activee");
+    kernel::dmesg::log("net: loopback lo 127.0.0.1 actif (ping ok); eth0 sans driver");
     kernel::dmesg::log("disk: pilote disque non active");
     kernel::dmesg::log("shell: initialise");
 

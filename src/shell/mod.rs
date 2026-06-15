@@ -95,10 +95,13 @@ fn dispatch(line: &str, cwd: &mut usize) {
         "echo" => println!("{}", remainder_after_tokens(line, 1)),
         "lspci" => crate::arch::x86_64::pci::print_devices(),
 
-        // Reseau (placeholders, pile non activee)
-        "ifconfig" | "ip" | "route" | "arp" | "ping" | "dhcp" | "dns" | "wget" | "curl" => {
-            crate::net::placeholder(argv[0])
-        }
+        // Reseau : loopback actif, eth0/Internet en attente du driver NIC.
+        "ping" => crate::net::ping(argc, &argv),
+        "ifconfig" => crate::net::ifconfig(),
+        "ip" => crate::net::ip_cmd(),
+        "route" => crate::net::route_cmd(),
+        "arp" => crate::net::arp_cmd(),
+        "dhcp" | "dns" | "wget" | "curl" => crate::net::placeholder(argv[0]),
 
         // Disque (placeholders, roadmap BFS)
         "mount" | "df" | "sync" | "mkfs.bfs" => c::disk_placeholder(argv[0]),

@@ -20,14 +20,16 @@ pub fn help() {
     println!("Commandes Bouchaud OS V0.6:");
     vga::set_color(COLOR_DEFAULT);
     println!("  systeme : help, clear, version, uname, sysinfo, cpuinfo, meminfo, devices");
-    println!("            dmesg, history, uptime, ticks, interrupts, serial-test, panic-test, roadmap");
+    println!("            dmesg, history, uptime, ticks, interrupts, breakpoint, serial-test");
+    println!("            panic-test, roadmap");
     println!("  session : whoami, id, users, login <user>, su [user], logout  (mot de passe)");
     println!("  fichiers: pwd, ls [-l] [path], tree [path], cd <path>, mkdir <path>");
     println!("            touch <file>, write <file> <texte>, append <file> <texte>, cat <file>");
     println!("            nano <file>, stat <path>, chmod <mode> <path>, chown <user> <path>");
     println!("            cp <src> <dst>, mv <src> <dst>, rm <file>, rmdir <dir>, echo <texte>");
     println!("  materiel: lspci");
-    println!("  reseau  : ifconfig, ip, route, arp, ping, dhcp, dns, wget, curl   [roadmap]");
+    println!("  reseau  : ping <ip> (loopback actif), ifconfig, ip, route, arp");
+    println!("            dhcp, dns, wget, curl   [en attente du driver NIC]");
     println!("  disque  : mount, df, sync, mkfs.bfs                                [roadmap]");
 }
 
@@ -53,7 +55,7 @@ pub fn sysinfo() {
     println!("interrupts: {}", interrupts::state());
     println!("security: sessions + mot de passe + permissions Unix (rwx, uid/gid)");
     println!("pci: {} peripheriques (lspci)", crate::arch::x86_64::pci::count());
-    println!("network: OSI stack planned, driver not enabled yet");
+    println!("network: loopback lo actif (ping 127.0.0.1); eth0 en attente du driver NIC");
     println!("objectif: OS souverain francais experimental");
 }
 
@@ -142,12 +144,14 @@ pub fn roadmap() {
     vga::set_color(COLOR_CYAN);
     println!("Roadmap Bouchaud OS - OS souverain francais experimental");
     vga::set_color(COLOR_DEFAULT);
-    println!("V0.6 (actuel): refactor modulaire, serie COM1, dmesg reel, stubs GDT/IDT, timer TSC");
-    println!("V0.7: GDT/IDT reelles, exceptions CPU, PIC, IRQ timer + clavier");
-    println!("V0.8: pagination + heap allocator (passage a alloc)");
-    println!("V0.9: scan PCI + bus devices");
-    println!("V1.0: pile reseau (driver e1000/virtio-net -> Ethernet -> IPv4 -> TCP)");
-    println!("Plus tard: disque persistant BFS, processus, syscalls, securite, GUI");
+    println!("[x] V0.6 refactor modulaire, serie COM1, dmesg, timer, history");
+    println!("[x] V0.6.1 permissions Unix + login mot de passe + scan PCI");
+    println!("[x] V0.7 GDT/IDT, exceptions CPU, PIC, IRQ timer + clavier");
+    println!("[x] V0.8 pile reseau: Ethernet/ARP/IPv4/ICMP + loopback (ping lo)");
+    println!("[ ] driver NIC e1000/virtio-net (RX/TX DMA) -> Internet externe");
+    println!("[ ] pagination + heap allocator (passage a alloc)");
+    println!("[ ] UDP/DHCP/DNS puis TCP/HTTP/TLS");
+    println!("[ ] disque persistant BFS, processus, syscalls, GUI");
     println!("");
     net::print_roadmap();
 }
