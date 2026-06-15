@@ -6,6 +6,7 @@
 
 use crate::drivers::vga::{self, COLOR_CYAN, COLOR_DEFAULT};
 use crate::users;
+use alloc::string::String;
 
 pub const MAX_NODES: usize = 96;
 pub const NAME_LEN: usize = 32;
@@ -348,6 +349,21 @@ fn print_path_rec(fs: &FileSystem, idx: usize) {
     let parent = fs.nodes[idx].parent;
     print_path_rec(fs, parent);
     print!("/{}", fs.nodes[idx].name_str());
+}
+
+/// Construit le chemin absolu d'un inode sous forme de chaine.
+pub fn path_string(fs: &FileSystem, idx: usize) -> String {
+    let mut s = String::new();
+    build_path(fs, idx, &mut s);
+    if s.is_empty() { s.push('/'); }
+    s
+}
+
+fn build_path(fs: &FileSystem, idx: usize, s: &mut String) {
+    if idx == 0 { return; }
+    build_path(fs, fs.nodes[idx].parent, s);
+    s.push('/');
+    s.push_str(fs.nodes[idx].name_str());
 }
 
 /// Affiche les droits de style `ls -l` (ex. `drwxr-xr-x`).
