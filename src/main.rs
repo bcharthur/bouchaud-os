@@ -32,7 +32,7 @@ mod shell;
 mod users;
 
 /// Version courante de Bouchaud OS.
-pub const VERSION: &str = "0.8.0";
+pub const VERSION: &str = "0.9.0";
 /// Nom du systeme.
 pub const OS_NAME: &str = "Bouchaud OS";
 
@@ -47,7 +47,7 @@ fn kernel_main(_boot_info: &'static BootInfo) -> ! {
     // 2. Journal noyau et horloge.
     kernel::timer::init();
     kernel::dmesg::init();
-    kernel::dmesg::log("kernel: boot Bouchaud OS V0.6 - kernel foundation");
+    kernel::dmesg::log("kernel: boot Bouchaud OS");
     kernel::dmesg::log("vga: text mode initialise");
     kernel::dmesg::log("serial: COM1 initialise (debug QEMU)");
 
@@ -56,10 +56,11 @@ fn kernel_main(_boot_info: &'static BootInfo) -> ! {
 
     // 4. Pilotes et sous-systemes.
     kernel::dmesg::log("keyboard: PS/2 AZERTY-FR pilote par IRQ1");
+    users::init();
+    kernel::dmesg::log("users: base initialisee (root, guest)");
     fs::ramfs::fs().init();
+    users::create_home_dirs();
     kernel::dmesg::log("ramfs: monte sur /");
-    users::session().login(users::User::Arthur);
-    kernel::dmesg::log("session: utilisateur par defaut arthur");
     kernel::dmesg::log("net: loopback lo 127.0.0.1 actif (ping ok); eth0 sans driver");
     kernel::dmesg::log("disk: pilote disque non active");
     kernel::dmesg::log("shell: initialise");

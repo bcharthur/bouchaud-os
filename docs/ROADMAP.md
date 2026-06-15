@@ -39,6 +39,15 @@ Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 - [x] Clavier en interruption IRQ1 (fin du polling)
 - [ ] APIC, plus tard, en remplacement du PIC
 
+## V0.9 - Comptes utilisateurs dynamiques
+- [x] Base d'utilisateurs en table fixe (root + guest par defaut)
+- [x] Ecran de connexion au boot (login + mot de passe masque)
+- [x] useradd / userdel / passwd / users / su
+- [x] chmod symbolique (+x, u+w, go-r, a=rx) en plus de l'octal
+- [x] chown base sur la base d'utilisateurs
+- [ ] /etc/passwd persistant (apres FS disque)
+- [ ] groupes multiples par utilisateur
+
 ## V0.8 - Pile reseau (logique + loopback)
 - [x] Ethernet (L2) encode/decode
 - [x] ARP encode/decode
