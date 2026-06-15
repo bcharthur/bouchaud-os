@@ -34,7 +34,7 @@ mod shell;
 mod users;
 
 /// Version courante de Bouchaud OS.
-pub const VERSION: &str = "0.9.0";
+pub const VERSION: &str = "0.10.0";
 /// Nom du systeme.
 pub const OS_NAME: &str = "Bouchaud OS";
 

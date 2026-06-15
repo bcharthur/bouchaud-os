@@ -126,8 +126,28 @@ pub fn set_color(color: u8) {
     unsafe { VGA.set_color(color); }
 }
 
+/// Tampon de capture optionnel : quand il est actif, la sortie texte y est
+/// redirigee au lieu d'aller a l'ecran (utilise par les redirections `>`/`>>`).
+static mut CAPTURE: Option<alloc::string::String> = None;
+
+/// Demarre la capture de la sortie texte dans un tampon.
+pub fn capture_start() {
+    unsafe { CAPTURE = Some(alloc::string::String::new()); }
+}
+
+/// Termine la capture et renvoie le texte accumule.
+pub fn capture_take() -> Option<alloc::string::String> {
+    unsafe { CAPTURE.take() }
+}
+
 /// Implementation reelle derriere les macros `print!` / `println!`.
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
-    unsafe { let _ = VGA.write_fmt(args); }
+    unsafe {
+        if let Some(ref mut buf) = CAPTURE {
+            let _ = buf.write_fmt(args);
+            return;
+        }
+        let _ = VGA.write_fmt(args);
+    }
 }
