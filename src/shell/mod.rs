@@ -178,6 +178,14 @@ fn session_loop() {
 }
 
 
+
+/// Renvoie le chemin courant sous forme de chaine (utilise par le terminal GUI).
+pub fn path_string(cwd: usize) -> String {
+    vga::capture_start();
+    ramfs::print_path(ramfs::fs(), cwd);
+    vga::capture_take().unwrap_or_default()
+}
+
 /// Execute une commande depuis une application graphique et renvoie la sortie texte.
 pub fn run_line_capture(line: &str, cwd: &mut usize) -> String {
     history::record(line);
