@@ -10,6 +10,7 @@ use crate::shell::history;
 use crate::shell::remainder_after_tokens;
 use crate::users;
 use crate::{serial_println, OS_NAME, VERSION};
+use alloc::string::String;
 
 // ---------------------------------------------------------------------------
 // Aide et informations
@@ -28,12 +29,14 @@ pub fn help() {
     println!("            touch <file>, write <file> <texte>, append <file> <texte>, cat <file>");
     println!("            nano <file>, stat <path>, chmod <octal|+x|u+w> <path>, chown <user> <path>");
     println!("            cp <src> <dst>, mv <src> <dst>, rm <file>, rmdir <dir>, echo <texte>");
+    println!("  texte   : grep <motif> [f], wc [f], head [-n N] [f], tail [-n N] [f], find [path]");
+    println!("  divers  : date");
     println!("  materiel: lspci");
     println!("  reseau  : ping <ip> (loopback actif), ifconfig, ip, route, arp");
     println!("            dhcp, dns, wget, curl   [en attente du driver NIC]");
     println!("  disque  : mount, df, sync, mkfs.bfs                                [roadmap]");
     vga::set_color(COLOR_CYAN);
-    println!("  shell   : cmd1 ; cmd2   cmd1 && cmd2   cmd1 || cmd2   cmd > f   cmd >> f");
+    println!("  shell   : cmd1 ; cmd2   &&   ||   cmd > f   cmd >> f   cmd1 | cmd2");
     println!("            fleches haut/bas = historique, Tab = completion, $? = code retour");
     println!("            clavier: | = AltGr+6 | < = AltGr+, | > = AltGr+; (ou touche ISO)");
     vga::set_color(COLOR_DEFAULT);
@@ -398,7 +401,16 @@ pub fn touch(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
 }
 
 pub fn cat(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
-    if argc < 2 { println!("usage: cat <file>"); return 1; }
+    if argc < 2 {
+        // Sans argument : recopie l'entree standard (utile dans un pipe).
+        if let Some(s) = crate::shell::take_stdin() {
+            print!("{}", s);
+            if !s.ends_with('\n') { println!(""); }
+            return 0;
+        }
+        println!("usage: cat <file>");
+        return 1;
+    }
     let fs = ramfs::fs();
     let idx = match fs.resolve_checked(argv[1], cwd) {
         Ok(i) => i,
@@ -718,6 +730,119 @@ pub fn redirect(path: &str, data: &str, append: bool, cwd: usize) -> i32 {
         fs.write_node(idx, data);
     }
     0
+}
+
+// ---------------------------------------------------------------------------
+// Horloge et coreutils (grep / wc / head / tail / find)
+// ---------------------------------------------------------------------------
+
+pub fn date() {
+    let dt = crate::arch::x86_64::rtc::now();
+    println!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+        dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second
+    );
+}
+
+/// Recupere le texte a traiter : depuis un fichier si fourni, sinon depuis le
+/// pipe (stdin). Renvoie None et affiche une erreur si le fichier est invalide.
+fn input_text(path: Option<&str>, cwd: usize, who: &str) -> Option<String> {
+    match path {
+        Some(p) => {
+            let fs = ramfs::fs();
+            let idx = match fs.resolve_checked(p, cwd) {
+                Ok(i) => i,
+                Err(e) => { println!("{}: {}", who, e); return None; }
+            };
+            if fs.nodes[idx].kind != NodeKind::File { println!("{}: pas un fichier", who); return None; }
+            if !fs.can(idx, PERM_R) { println!("{}: permission denied", who); return None; }
+            let n = &fs.nodes[idx];
+            let mut s = String::new();
+            for i in 0..n.content_len { s.push(n.content[i] as char); }
+            Some(s)
+        }
+        None => Some(crate::shell::take_stdin().unwrap_or_default()),
+    }
+}
+
+pub fn grep(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
+    if argc < 2 { println!("usage: grep <motif> [fichier]"); return 1; }
+    let pat = argv[1];
+    let file = if argc >= 3 { Some(argv[2]) } else { None };
+    let content = match input_text(file, cwd, "grep") { Some(c) => c, None => return 2 };
+    let mut found = false;
+    for line in content.lines() {
+        if line.contains(pat) { println!("{}", line); found = true; }
+    }
+    if found { 0 } else { 1 }
+}
+
+pub fn wc(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
+    let file = if argc >= 2 { Some(argv[1]) } else { None };
+    let content = match input_text(file, cwd, "wc") { Some(c) => c, None => return 1 };
+    let lines = content.lines().count();
+    let words = content.split_whitespace().count();
+    let bytes = content.len();
+    println!("{:>6} {:>6} {:>6}", lines, words, bytes);
+    0
+}
+
+/// Analyse une eventuelle option `-n N` et renvoie (nombre, index du fichier).
+fn parse_n(argc: usize, argv: &[&str; 12]) -> (usize, Option<usize>) {
+    if argc >= 3 && argv[1] == "-n" {
+        let n = argv[2].parse::<usize>().unwrap_or(10);
+        let file = if argc >= 4 { Some(3) } else { None };
+        (n, file)
+    } else {
+        let file = if argc >= 2 { Some(1) } else { None };
+        (10, file)
+    }
+}
+
+pub fn head(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
+    let (n, fidx) = parse_n(argc, argv);
+    let content = match input_text(fidx.map(|i| argv[i]), cwd, "head") { Some(c) => c, None => return 1 };
+    for (i, line) in content.lines().enumerate() {
+        if i >= n { break; }
+        println!("{}", line);
+    }
+    0
+}
+
+pub fn tail(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
+    let (n, fidx) = parse_n(argc, argv);
+    let content = match input_text(fidx.map(|i| argv[i]), cwd, "tail") { Some(c) => c, None => return 1 };
+    let total = content.lines().count();
+    let skip = if total > n { total - n } else { 0 };
+    for line in content.lines().skip(skip) {
+        println!("{}", line);
+    }
+    0
+}
+
+pub fn find(argc: usize, argv: &[&str; 12], cwd: usize) {
+    let path = if argc >= 2 { argv[1] } else { "." };
+    let filter = if argc >= 3 { Some(argv[2]) } else { None };
+    let fs = ramfs::fs();
+    let start = match fs.resolve_checked(path, cwd) {
+        Ok(i) => i,
+        Err(e) => { println!("find: {}", e); return; }
+    };
+    find_rec(start, filter);
+}
+
+fn find_rec(idx: usize, filter: Option<&str>) {
+    let fs = ramfs::fs();
+    for i in 0..MAX_NODES {
+        if fs.nodes[i].used && i != idx && fs.nodes[i].parent == idx {
+            let name = fs.nodes[i].name_str();
+            if filter.map_or(true, |f| name.contains(f)) {
+                ramfs::print_path(fs, i);
+                println!("");
+            }
+            if fs.nodes[i].kind == NodeKind::Dir { find_rec(i, filter); }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

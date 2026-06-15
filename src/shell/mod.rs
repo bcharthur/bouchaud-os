@@ -20,6 +20,12 @@ static mut LAST_STATUS: i32 = 0;
 fn last_status() -> i32 { unsafe { LAST_STATUS } }
 fn set_status(c: i32) { unsafe { LAST_STATUS = c; } }
 
+/// Entree standard transmise a une commande via un pipe (`cmd1 | cmd2`).
+static mut STDIN: Option<String> = None;
+fn set_stdin(data: Option<String>) { unsafe { STDIN = data; } }
+/// Recupere (et consomme) l'entree standard fournie par un pipe.
+pub fn take_stdin() -> Option<String> { unsafe { STDIN.take() } }
+
 /// Liste des commandes connues, pour la tab-completion.
 pub const COMMANDS: &[&str] = &[
     "help", "clear", "version", "uname", "sysinfo", "cpuinfo", "meminfo", "alloctest",
@@ -27,8 +33,9 @@ pub const COMMANDS: &[&str] = &[
     "serial-test", "panic-test", "roadmap", "whoami", "id", "users", "useradd",
     "userdel", "passwd", "su", "pwd", "ls", "tree", "cd", "mkdir", "touch", "cat",
     "write", "append", "nano", "rm", "rmdir", "cp", "mv", "stat", "chmod", "chown",
-    "echo", "lspci", "ping", "ifconfig", "ip", "route", "arp", "dhcp", "dns", "wget",
-    "curl", "mount", "df", "sync", "mkfs.bfs", "true", "false", "logout", "exit",
+    "echo", "date", "grep", "wc", "head", "tail", "find", "lspci", "ping", "ifconfig",
+    "ip", "route", "arp", "dhcp", "dns", "wget", "curl", "mount", "df", "sync",
+    "mkfs.bfs", "true", "false", "logout", "exit",
 ];
 
 /// Operateur reliant un segment de commande au precedent.
@@ -290,13 +297,47 @@ fn run_segment(seg: &str, cwd: &mut usize) -> i32 {
     match redir {
         Some((path, append)) => {
             vga::capture_start();
-            let code = dispatch(cmd, cwd);
+            let code = run_pipeline(cmd, cwd);
             let out = vga::capture_take().unwrap_or_default();
             let rc = commands::redirect(trim(path), &out, append, *cwd);
             if rc != 0 { rc } else { code }
         }
-        None => dispatch(cmd, cwd),
+        None => run_pipeline(cmd, cwd),
     }
+}
+
+/// Execute une commande en gerant les pipes `cmd1 | cmd2 | ...`.
+///
+/// La sortie de chaque etage devient l'entree standard (`stdin`) de la suivante.
+fn run_pipeline(cmd: &str, cwd: &mut usize) -> i32 {
+    // Decoupe sur les `|` simples (les `||` ont deja ete traites en amont).
+    let mut stages: Vec<&str> = Vec::new();
+    let b = cmd.as_bytes();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i] == b'|' { stages.push(&cmd[start..i]); i += 1; start = i; }
+        else { i += 1; }
+    }
+    stages.push(&cmd[start..]);
+
+    if stages.len() == 1 {
+        return dispatch(trim(cmd), cwd);
+    }
+
+    let mut input: Option<String> = None;
+    let mut code = 0;
+    let n = stages.len();
+    for (idx, stage) in stages.iter().enumerate() {
+        let stage = trim(stage);
+        let last = idx == n - 1;
+        set_stdin(input.take());
+        if !last { vga::capture_start(); }
+        code = dispatch(stage, cwd);
+        if !last { input = Some(vga::capture_take().unwrap_or_default()); }
+        set_stdin(None);
+    }
+    code
 }
 
 /// Remplace `$?` par le code de retour precedent.
@@ -403,6 +444,12 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "chmod" => c::chmod(argc, &argv, *cwd),
         "chown" => c::chown(argc, &argv, *cwd),
         "echo" => { println!("{}", remainder_after_tokens(line, 1)); 0 }
+        "date" => { c::date(); 0 }
+        "grep" => c::grep(argc, &argv, *cwd),
+        "wc" => c::wc(argc, &argv, *cwd),
+        "head" => c::head(argc, &argv, *cwd),
+        "tail" => c::tail(argc, &argv, *cwd),
+        "find" => { c::find(argc, &argv, *cwd); 0 }
         "lspci" => { crate::arch::x86_64::pci::print_devices(); 0 }
 
         // Reseau : loopback actif, eth0/Internet en attente du driver NIC.

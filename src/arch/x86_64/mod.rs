@@ -10,6 +10,7 @@ pub mod gdt;
 pub mod idt;
 pub mod interrupts;
 pub mod pci;
+pub mod rtc;
 
 /// Initialise les briques bas niveau de l'architecture au boot.
 ///

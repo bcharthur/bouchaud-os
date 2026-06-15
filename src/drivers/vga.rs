@@ -126,27 +126,35 @@ pub fn set_color(color: u8) {
     unsafe { VGA.set_color(color); }
 }
 
-/// Tampon de capture optionnel : quand il est actif, la sortie texte y est
-/// redirigee au lieu d'aller a l'ecran (utilise par les redirections `>`/`>>`).
-static mut CAPTURE: Option<alloc::string::String> = None;
+/// Pile de tampons de capture. Quand elle n'est pas vide, la sortie texte est
+/// ecrite dans le tampon du sommet au lieu d'aller a l'ecran. La pile permet
+/// d'imbriquer redirections (`>`) et pipes (`|`).
+static mut CAPTURE_STACK: Option<alloc::vec::Vec<alloc::string::String>> = None;
 
-/// Demarre la capture de la sortie texte dans un tampon.
+/// Demarre une capture (empile un tampon vide).
 pub fn capture_start() {
-    unsafe { CAPTURE = Some(alloc::string::String::new()); }
+    unsafe {
+        if CAPTURE_STACK.is_none() { CAPTURE_STACK = Some(alloc::vec::Vec::new()); }
+        if let Some(stack) = CAPTURE_STACK.as_mut() {
+            stack.push(alloc::string::String::new());
+        }
+    }
 }
 
-/// Termine la capture et renvoie le texte accumule.
+/// Termine la capture courante et renvoie le texte accumule.
 pub fn capture_take() -> Option<alloc::string::String> {
-    unsafe { CAPTURE.take() }
+    unsafe { CAPTURE_STACK.as_mut().and_then(|s| s.pop()) }
 }
 
 /// Implementation reelle derriere les macros `print!` / `println!`.
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
     unsafe {
-        if let Some(ref mut buf) = CAPTURE {
-            let _ = buf.write_fmt(args);
-            return;
+        if let Some(stack) = CAPTURE_STACK.as_mut() {
+            if let Some(top) = stack.last_mut() {
+                let _ = top.write_fmt(args);
+                return;
+            }
         }
         let _ = VGA.write_fmt(args);
     }
