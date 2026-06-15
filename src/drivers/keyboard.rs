@@ -127,76 +127,89 @@ fn scancode_to_char(sc: u8, shift: bool) -> Option<char> {
     }
 }
 
+/// Touche logique renvoyee par `read_key`.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Key {
+    Char(u8),
+    Enter,
+    Backspace,
+    Tab,
+    Up,
+    Down,
+    Left,
+    Right,
+    Other,
+}
+
+/// Etat persistant de la touche Shift entre deux appels a `read_key`.
+static mut SHIFT: bool = false;
+
+/// Lit la prochaine touche logique au clavier (gere Shift et touches etendues).
+pub fn read_key() -> Key {
+    loop {
+        let sc = read_scancode();
+
+        // Touches etendues (prefixe 0xE0) : fleches, Suppr...
+        if sc == 0xe0 {
+            let ext = read_scancode();
+            return match ext {
+                0x48 => Key::Up,
+                0x50 => Key::Down,
+                0x4b => Key::Left,
+                0x4d => Key::Right,
+                0x53 => Key::Backspace, // Suppr traite comme Backspace
+                _ => continue,
+            };
+        }
+
+        match sc {
+            0x2a | 0x36 => { unsafe { SHIFT = true; } continue; }
+            0xaa | 0xb6 => { unsafe { SHIFT = false; } continue; }
+            _ => {}
+        }
+        if sc & 0x80 != 0 { continue; } // relachement de touche
+
+        let shift = unsafe { SHIFT };
+        if let Some(ch) = scancode_to_char(sc, shift) {
+            return match ch {
+                '\n' => Key::Enter,
+                '\x08' => Key::Backspace,
+                '\t' => Key::Tab,
+                '\x1b' => Key::Other,
+                c => Key::Char(c as u8),
+            };
+        }
+    }
+}
+
 /// Lit une ligne complete au clavier dans `buf`, renvoie le nombre d'octets.
 pub fn read_line(buf: &mut [u8]) -> usize {
     read_into(buf, true)
 }
 
-/// Lit un secret (mot de passe) sans afficher les caracteres : seul `*` est
-/// affiche a l'ecran. Le contenu n'est jamais recopie sur la sortie serie.
+/// Lit un secret (mot de passe) : seul `*` est affiche, jamais recopie ailleurs.
 pub fn read_secret(buf: &mut [u8]) -> usize {
     read_into(buf, false)
 }
 
-/// Implementation commune a `read_line` (echo direct) et `read_secret` (echo `*`).
+/// Editeur de ligne minimal (login, nano, mot de passe). Le shell utilise un
+/// editeur plus riche avec historique et completion (voir `shell`).
 fn read_into(buf: &mut [u8], echo: bool) -> usize {
     let mut len = 0usize;
-    let mut shift = false;
-
     loop {
-        let sc = read_scancode();
-
-        // Certaines touches PS/2 sont envoyees avec le prefixe etendu 0xE0.
-        // Exemple : Suppr/Delete = E0 53. Comme l'editeur de ligne n'a pas encore
-        // de curseur horizontal, on mappe Suppr sur le meme comportement que Backspace.
-        if sc == 0xe0 {
-            let ext = read_scancode();
-            if ext == 0x53 {
-                if len > 0 {
-                    len -= 1;
-                    print!("\x08");
+        match read_key() {
+            Key::Enter => { println!(""); return len; }
+            Key::Backspace => {
+                if len > 0 { len -= 1; print!("\x08"); }
+            }
+            Key::Char(c) => {
+                if len < buf.len() {
+                    buf[len] = c;
+                    len += 1;
+                    if echo { print!("{}", c as char); } else { print!("*"); }
                 }
             }
-            continue;
-        }
-
-        match sc {
-            0x2a | 0x36 => { shift = true; continue; }
-            0xaa | 0xb6 => { shift = false; continue; }
             _ => {}
-        }
-
-        if sc & 0x80 != 0 {
-            continue;
-        }
-
-        if let Some(ch) = scancode_to_char(sc, shift) {
-            match ch {
-                '\n' => {
-                    println!("");
-                    return len;
-                }
-                '\x08' => {
-                    if len > 0 {
-                        len -= 1;
-                        print!("\x08");
-                    }
-                }
-                '\t' => {
-                    if len < buf.len() {
-                        buf[len] = b' ';
-                        len += 1;
-                        if echo { print!(" "); } else { print!("*"); }
-                    }
-                }
-                ch => {
-                    if len < buf.len() && ch.is_ascii() {
-                        buf[len] = ch as u8;
-                        len += 1;
-                        if echo { print!("{}", ch); } else { print!("*"); }
-                    }
-                }
-            }
         }
     }
 }

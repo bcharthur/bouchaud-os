@@ -5,5 +5,6 @@
 //! - `panic` : handler de panique noyau.
 
 pub mod dmesg;
+pub mod heap;
 pub mod timer;
 pub mod panic;

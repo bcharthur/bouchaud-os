@@ -86,3 +86,17 @@ pub fn clear() {
 pub fn total() -> usize {
     unsafe { HISTORY.total }
 }
+
+/// Nombre d'entrees actuellement memorisees.
+pub fn len() -> usize {
+    unsafe { HISTORY.count }
+}
+
+/// Renvoie la n-ieme commande en partant de la plus recente (0 = derniere).
+pub fn nth_recent(n: usize) -> Option<&'static str> {
+    unsafe {
+        if n >= HISTORY.count { return None; }
+        let idx = HISTORY.count - 1 - n;
+        Some(core::str::from_utf8_unchecked(&HISTORY.entries[idx][..HISTORY.lens[idx]]))
+    }
+}

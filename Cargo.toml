@@ -16,6 +16,9 @@ bootloader = "0.9.31"
 x86_64 = "0.14.2"
 pic8259 = "0.10.1"
 
+# Allocateur de tas pour activer `alloc` (Vec/String/BTreeMap).
+linked_list_allocator = "0.10"
+
 [profile.dev]
 panic = "abort"
 

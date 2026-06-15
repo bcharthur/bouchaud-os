@@ -18,6 +18,8 @@
 #![allow(static_mut_refs)]
 #![feature(abi_x86_interrupt)]
 
+extern crate alloc;
+
 use bootloader::{entry_point, BootInfo};
 
 #[macro_use]
@@ -32,7 +34,7 @@ mod shell;
 mod users;
 
 /// Version courante de Bouchaud OS.
-pub const VERSION: &str = "0.9.0";
+pub const VERSION: &str = "0.10.0";
 /// Nom du systeme.
 pub const OS_NAME: &str = "Bouchaud OS";
 
@@ -44,9 +46,10 @@ fn kernel_main(_boot_info: &'static BootInfo) -> ! {
     drivers::serial::init();
     drivers::vga::clear();
 
-    // 2. Journal noyau et horloge.
+    // 2. Horloge, journal noyau, puis tas (alloc).
     kernel::timer::init();
     kernel::dmesg::init();
+    kernel::heap::init();
     kernel::dmesg::log("kernel: boot Bouchaud OS");
     kernel::dmesg::log("vga: text mode initialise");
     kernel::dmesg::log("serial: COM1 initialise (debug QEMU)");

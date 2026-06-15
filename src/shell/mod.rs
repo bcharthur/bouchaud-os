@@ -7,11 +7,33 @@
 pub mod commands;
 pub mod history;
 
-use crate::drivers::keyboard;
+use crate::drivers::keyboard::{self, Key};
 use crate::drivers::vga::{self, COLOR_GREEN, COLOR_CYAN, COLOR_DEFAULT, COLOR_RED};
 use crate::fs::ramfs;
 use crate::kernel::dmesg;
 use crate::users;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
+/// Code de retour de la derniere commande (consultable via `$?`).
+static mut LAST_STATUS: i32 = 0;
+fn last_status() -> i32 { unsafe { LAST_STATUS } }
+fn set_status(c: i32) { unsafe { LAST_STATUS = c; } }
+
+/// Liste des commandes connues, pour la tab-completion.
+pub const COMMANDS: &[&str] = &[
+    "help", "clear", "version", "uname", "sysinfo", "cpuinfo", "meminfo", "alloctest",
+    "devices", "dmesg", "history", "uptime", "ticks", "interrupts", "breakpoint",
+    "serial-test", "panic-test", "roadmap", "whoami", "id", "users", "useradd",
+    "userdel", "passwd", "su", "pwd", "ls", "tree", "cd", "mkdir", "touch", "cat",
+    "write", "append", "nano", "rm", "rmdir", "cp", "mv", "stat", "chmod", "chown",
+    "echo", "lspci", "ping", "ifconfig", "ip", "route", "arp", "dhcp", "dns", "wget",
+    "curl", "mount", "df", "sync", "mkfs.bfs", "true", "false", "logout", "exit",
+];
+
+/// Operateur reliant un segment de commande au precedent.
+#[derive(Clone, Copy, PartialEq)]
+enum Sep { Always, And, Or }
 
 /// Point d'entree du shell : ecran de connexion, puis session, en boucle.
 pub fn run() -> ! {
@@ -59,21 +81,25 @@ fn login_screen() -> u16 {
     }
 }
 
+/// Affiche l'invite de commande.
+fn print_prompt(cwd: usize) {
+    vga::set_color(COLOR_GREEN);
+    print!("{}@bouchaud-os:", users::session().username());
+    vga::set_color(COLOR_CYAN);
+    ramfs::print_path(ramfs::fs(), cwd);
+    vga::set_color(COLOR_GREEN);
+    print!("$ ");
+    vga::set_color(COLOR_DEFAULT);
+}
+
 /// Boucle de session : prompt + execution, jusqu'a `logout`/`exit`.
 fn session_loop() {
     let mut cwd = ramfs::fs().resolve(users::session().home(), 0).unwrap_or(0);
     let mut line_buf = [0u8; 256];
 
     loop {
-        vga::set_color(COLOR_GREEN);
-        print!("{}@bouchaud-os:", users::session().username());
-        vga::set_color(COLOR_CYAN);
-        ramfs::print_path(ramfs::fs(), cwd);
-        vga::set_color(COLOR_GREEN);
-        print!("$ ");
-        vga::set_color(COLOR_DEFAULT);
-
-        let len = keyboard::read_line(&mut line_buf);
+        print_prompt(cwd);
+        let len = read_command(&mut line_buf, cwd);
         let line = unsafe { core::str::from_utf8_unchecked(&line_buf[..len]) };
         let trimmed = trim(line);
         if trimmed.is_empty() { continue; }
@@ -81,62 +107,294 @@ fn session_loop() {
         history::record(trimmed);
         dmesg::log("shell: commande executee");
 
-        // logout / exit ferment la session et reviennent a l'ecran de connexion.
         if trimmed == "logout" || trimmed == "exit" {
             println!("Deconnexion.");
             return;
         }
-        dispatch(trimmed, &mut cwd);
+        run_line(trimmed, &mut cwd);
     }
 }
 
-/// Dispatcher principal : route le premier token vers la bonne commande.
-fn dispatch(line: &str, cwd: &mut usize) {
+// ---------------------------------------------------------------------------
+// Editeur de ligne : historique (fleches) + tab-completion
+// ---------------------------------------------------------------------------
+
+/// Lit une commande avec navigation dans l'historique et completion.
+fn read_command(buf: &mut [u8], cwd: usize) -> usize {
+    let mut len = 0usize;
+    let mut hist: i32 = -1; // -1 = ligne en cours (pas de navigation)
+
+    loop {
+        match keyboard::read_key() {
+            Key::Enter => { println!(""); return len; }
+            Key::Backspace => { if len > 0 { len -= 1; print!("\x08"); } }
+            Key::Char(c) => {
+                if len < buf.len() { buf[len] = c; len += 1; print!("{}", c as char); }
+            }
+            Key::Up => {
+                let n = history::len() as i32;
+                if n > 0 && hist + 1 < n {
+                    hist += 1;
+                    if let Some(e) = history::nth_recent(hist as usize) { line_set(buf, &mut len, e); }
+                }
+            }
+            Key::Down => {
+                if hist > 0 {
+                    hist -= 1;
+                    if let Some(e) = history::nth_recent(hist as usize) { line_set(buf, &mut len, e); }
+                } else if hist == 0 {
+                    hist = -1;
+                    line_set(buf, &mut len, "");
+                }
+            }
+            Key::Tab => complete(buf, &mut len, cwd),
+            _ => {}
+        }
+    }
+}
+
+/// Remplace le contenu affiche de la ligne par `text`.
+fn line_set(buf: &mut [u8], len: &mut usize, text: &str) {
+    for _ in 0..*len { print!("\x08"); }
+    *len = 0;
+    for &b in text.as_bytes() {
+        if *len < buf.len() { buf[*len] = b; *len += 1; print!("{}", b as char); }
+    }
+}
+
+fn append_str(buf: &mut [u8], len: &mut usize, s: &str) {
+    for &b in s.as_bytes() {
+        if *len < buf.len() { buf[*len] = b; *len += 1; print!("{}", b as char); }
+    }
+}
+
+/// Tab-completion : commande (premier mot) ou chemin (mots suivants).
+fn complete(buf: &mut [u8], len: &mut usize, cwd: usize) {
+    let text = unsafe { core::str::from_utf8_unchecked(&buf[..*len]) };
+    let mut tstart = 0usize;
+    for (i, b) in text.bytes().enumerate() {
+        if b == b' ' { tstart = i + 1; }
+    }
+    let prefix = &text[tstart..];
+
+    let mut cands: Vec<String> = Vec::new();
+    if tstart == 0 {
+        for c in COMMANDS {
+            if c.starts_with(prefix) { cands.push(String::from(*c)); }
+        }
+    } else {
+        path_candidates(prefix, cwd, &mut cands);
+    }
+    if cands.is_empty() { return; }
+
+    let lcp = longest_common_prefix(&cands);
+    if lcp.len() > prefix.len() {
+        let suffix = lcp[prefix.len()..].to_string();
+        append_str(buf, len, &suffix);
+    } else if cands.len() > 1 {
+        println!("");
+        for c in &cands { print!("{}  ", c); }
+        println!("");
+        print_prompt(cwd);
+        let cur = unsafe { core::str::from_utf8_unchecked(&buf[..*len]) }.to_string();
+        print!("{}", cur);
+    }
+}
+
+fn path_candidates(prefix: &str, cwd: usize, out: &mut Vec<String>) {
+    // Decoupe en partie repertoire + base a completer.
+    let mut slash: Option<usize> = None;
+    for (i, b) in prefix.bytes().enumerate() {
+        if b == b'/' { slash = Some(i); }
+    }
+    let (dir, base, dir_prefix) = match slash {
+        None => (Some(cwd), prefix, ""),
+        Some(0) => (Some(0), &prefix[1..], &prefix[..1]),
+        Some(p) => (ramfs::fs().resolve(&prefix[..p], cwd), &prefix[p + 1..], &prefix[..p + 1]),
+    };
+    let dir = match dir { Some(d) => d, None => return };
+    let fs = ramfs::fs();
+    for i in 0..ramfs::MAX_NODES {
+        if fs.nodes[i].used && i != dir && fs.nodes[i].parent == dir {
+            let name = fs.nodes[i].name_str();
+            if name.starts_with(base) {
+                let mut s = String::from(dir_prefix);
+                s.push_str(name);
+                out.push(s);
+            }
+        }
+    }
+}
+
+fn longest_common_prefix(items: &[String]) -> String {
+    if items.is_empty() { return String::new(); }
+    let mut prefix = items[0].clone();
+    for it in &items[1..] {
+        let a = prefix.as_bytes();
+        let b = it.as_bytes();
+        let mut k = 0;
+        while k < a.len() && k < b.len() && a[k] == b[k] { k += 1; }
+        prefix.truncate(k);
+    }
+    prefix
+}
+
+// ---------------------------------------------------------------------------
+// Execution : chainage ; && ||, redirections > >>, $?
+// ---------------------------------------------------------------------------
+
+/// Decoupe et execute une ligne (chainage + redirections).
+fn run_line(line: &str, cwd: &mut usize) {
+    let bytes = line.as_bytes();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut sep = Sep::Always;
+
+    while i < bytes.len() {
+        if bytes[i] == b';' {
+            run_chained(&line[start..i], sep, cwd);
+            sep = Sep::Always; i += 1; start = i;
+        } else if bytes[i] == b'&' && i + 1 < bytes.len() && bytes[i + 1] == b'&' {
+            run_chained(&line[start..i], sep, cwd);
+            sep = Sep::And; i += 2; start = i;
+        } else if bytes[i] == b'|' && i + 1 < bytes.len() && bytes[i + 1] == b'|' {
+            run_chained(&line[start..i], sep, cwd);
+            sep = Sep::Or; i += 2; start = i;
+        } else {
+            i += 1;
+        }
+    }
+    run_chained(&line[start..], sep, cwd);
+}
+
+fn run_chained(seg: &str, sep: Sep, cwd: &mut usize) {
+    let seg = trim(seg);
+    if seg.is_empty() { return; }
+    let run = match sep {
+        Sep::Always => true,
+        Sep::And => last_status() == 0,
+        Sep::Or => last_status() != 0,
+    };
+    if !run { return; }
+    let code = run_segment(seg, cwd);
+    set_status(code);
+}
+
+/// Execute un segment : gere `$?` et la redirection `>`/`>>`, puis dispatche.
+fn run_segment(seg: &str, cwd: &mut usize) -> i32 {
+    let expanded = expand_status(seg);
+    let (cmd, redir) = parse_redirect(&expanded);
+    let cmd = trim(cmd);
+    if cmd.is_empty() { return 0; }
+
+    match redir {
+        Some((path, append)) => {
+            vga::capture_start();
+            let code = dispatch(cmd, cwd);
+            let out = vga::capture_take().unwrap_or_default();
+            let rc = commands::redirect(trim(path), &out, append, *cwd);
+            if rc != 0 { rc } else { code }
+        }
+        None => dispatch(cmd, cwd),
+    }
+}
+
+/// Remplace `$?` par le code de retour precedent.
+fn expand_status(seg: &str) -> String {
+    if !contains(seg, "$?") { return String::from(seg); }
+    use core::fmt::Write;
+    let mut out = String::new();
+    let bytes = seg.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'?' {
+            let _ = write!(out, "{}", last_status());
+            i += 2;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
+fn contains(hay: &str, needle: &str) -> bool {
+    let h = hay.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() || n.len() > h.len() { return false; }
+    for w in 0..=h.len() - n.len() {
+        if &h[w..w + n.len()] == n { return true; }
+    }
+    false
+}
+
+/// Separe une commande de sa redirection `>`/`>>` eventuelle.
+fn parse_redirect(s: &str) -> (&str, Option<(&str, bool)>) {
+    let bytes = s.as_bytes();
+    // Cherche ">>" puis ">".
+    for w in 0..bytes.len() {
+        if bytes[w] == b'>' {
+            if w + 1 < bytes.len() && bytes[w + 1] == b'>' {
+                return (&s[..w], Some((&s[w + 2..], true)));
+            }
+            return (&s[..w], Some((&s[w + 1..], false)));
+        }
+    }
+    (s, None)
+}
+
+/// Dispatcher : route le premier token vers la commande, renvoie un code retour.
+fn dispatch(line: &str, cwd: &mut usize) -> i32 {
     let mut argv = [""; 12];
     let argc = tokenize(line, &mut argv);
-    if argc == 0 { return; }
+    if argc == 0 { return 0; }
 
     use commands as c;
     match argv[0] {
+        "true" => 0,
+        "false" => 1,
+        "logout" | "exit" => 0,
+
         // Aide et systeme
-        "help" => c::help(),
-        "clear" => vga::clear(),
-        "version" => c::version(),
-        "uname" => c::uname(),
-        "sysinfo" => c::sysinfo(),
-        "cpuinfo" => c::cpuinfo(),
-        "meminfo" => c::meminfo(),
-        "devices" => c::devices(),
-        "dmesg" => dmesg::print(),
-        "history" => c::history(argc, &argv),
-        "uptime" => c::uptime(),
-        "ticks" => c::ticks(),
-        "interrupts" => c::interrupts(),
-        "breakpoint" => c::breakpoint(),
-        "serial-test" => c::serial_test(),
-        "panic-test" => c::panic_test(),
-        "roadmap" => c::roadmap(),
+        "help" => { c::help(); 0 }
+        "clear" => { vga::clear(); 0 }
+        "version" => { c::version(); 0 }
+        "uname" => { c::uname(); 0 }
+        "sysinfo" => { c::sysinfo(); 0 }
+        "cpuinfo" => { c::cpuinfo(); 0 }
+        "meminfo" => { c::meminfo(); 0 }
+        "alloctest" => { c::alloctest(); 0 }
+        "devices" => { c::devices(); 0 }
+        "dmesg" => { dmesg::print(); 0 }
+        "history" => { c::history(argc, &argv); 0 }
+        "uptime" => { c::uptime(); 0 }
+        "ticks" => { c::ticks(); 0 }
+        "interrupts" => { c::interrupts(); 0 }
+        "breakpoint" => { c::breakpoint(); 0 }
+        "serial-test" => { c::serial_test(); 0 }
+        "panic-test" => { c::panic_test(); 0 }
+        "roadmap" => { c::roadmap(); 0 }
 
         // Sessions / utilisateurs
-        "whoami" => println!("{}", users::session().username()),
-        "id" => c::id(),
-        "users" => c::users(),
-        "useradd" => c::useradd(argc, &argv),
-        "userdel" => c::userdel(argc, &argv),
-        "passwd" => c::passwd(argc, &argv),
-        "su" => c::su(argc, &argv, cwd),
+        "whoami" => { println!("{}", users::session().username()); 0 }
+        "id" => { c::id(); 0 }
+        "users" => { c::users(); 0 }
+        "useradd" => { c::useradd(argc, &argv); 0 }
+        "userdel" => { c::userdel(argc, &argv); 0 }
+        "passwd" => { c::passwd(argc, &argv); 0 }
+        "su" => { c::su(argc, &argv, cwd); 0 }
 
         // Fichiers
-        "pwd" => { ramfs::print_path(ramfs::fs(), *cwd); println!(""); }
+        "pwd" => { ramfs::print_path(ramfs::fs(), *cwd); println!(""); 0 }
         "ls" => c::ls(argc, &argv, *cwd),
-        "tree" => c::tree(argc, &argv, *cwd),
+        "tree" => { c::tree(argc, &argv, *cwd); 0 }
         "cd" => c::cd(argc, &argv, cwd),
         "mkdir" => c::mkdir(argc, &argv, *cwd),
         "touch" => c::touch(argc, &argv, *cwd),
         "cat" => c::cat(argc, &argv, *cwd),
-        "write" => c::write(line, argc, &argv, *cwd),
-        "append" => c::append(line, argc, &argv, *cwd),
-        "nano" => c::nano(argc, &argv, *cwd),
+        "write" => { c::write(line, argc, &argv, *cwd); 0 }
+        "append" => { c::append(line, argc, &argv, *cwd); 0 }
+        "nano" => { c::nano(argc, &argv, *cwd); 0 }
         "rm" => c::rm(argc, &argv, *cwd),
         "rmdir" => c::rmdir(argc, &argv, *cwd),
         "cp" => c::cp(argc, &argv, *cwd),
@@ -144,24 +402,25 @@ fn dispatch(line: &str, cwd: &mut usize) {
         "stat" => c::stat(argc, &argv, *cwd),
         "chmod" => c::chmod(argc, &argv, *cwd),
         "chown" => c::chown(argc, &argv, *cwd),
-        "echo" => println!("{}", remainder_after_tokens(line, 1)),
-        "lspci" => crate::arch::x86_64::pci::print_devices(),
+        "echo" => { println!("{}", remainder_after_tokens(line, 1)); 0 }
+        "lspci" => { crate::arch::x86_64::pci::print_devices(); 0 }
 
         // Reseau : loopback actif, eth0/Internet en attente du driver NIC.
-        "ping" => crate::net::ping(argc, &argv),
-        "ifconfig" => crate::net::ifconfig(),
-        "ip" => crate::net::ip_cmd(),
-        "route" => crate::net::route_cmd(),
-        "arp" => crate::net::arp_cmd(),
-        "dhcp" | "dns" | "wget" | "curl" => crate::net::placeholder(argv[0]),
+        "ping" => { crate::net::ping(argc, &argv); 0 }
+        "ifconfig" => { crate::net::ifconfig(); 0 }
+        "ip" => { crate::net::ip_cmd(); 0 }
+        "route" => { crate::net::route_cmd(); 0 }
+        "arp" => { crate::net::arp_cmd(); 0 }
+        "dhcp" | "dns" | "wget" | "curl" => { crate::net::placeholder(argv[0]); 0 }
 
         // Disque (placeholders, roadmap BFS)
-        "mount" | "df" | "sync" | "mkfs.bfs" => c::disk_placeholder(argv[0]),
+        "mount" | "df" | "sync" | "mkfs.bfs" => { c::disk_placeholder(argv[0]); 0 }
 
         _ => {
             vga::set_color(COLOR_RED);
             println!("{}: commande inconnue", argv[0]);
             vga::set_color(COLOR_DEFAULT);
+            127
         }
     }
 }

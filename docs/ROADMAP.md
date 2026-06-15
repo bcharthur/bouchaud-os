@@ -39,6 +39,15 @@ Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 - [x] Clavier en interruption IRQ1 (fin du polling)
 - [ ] APIC, plus tard, en remplacement du PIC
 
+## V0.10 - Tas (alloc) + shell pro
+- [x] Allocateur de tas (linked_list_allocator, 1 MiB) -> Vec/String/BTreeMap
+- [x] Chainage de commandes : ; && ||
+- [x] Redirections : > et >>
+- [x] Historique navigable (fleches haut/bas) + tab-completion (commandes/chemins)
+- [x] Code de retour $? + builtins true/false
+- [ ] Pipes | (necessite plomberie stdin/stdout)
+- [ ] Variables d'environnement / export
+
 ## V0.9 - Comptes utilisateurs dynamiques
 - [x] Base d'utilisateurs en table fixe (root + guest par defaut)
 - [x] Ecran de connexion au boot (login + mot de passe masque)
