@@ -4,10 +4,15 @@
 //! que la gestion des couleurs et du defilement.
 
 use core::fmt;
+use crate::arch::x86_64::ports::outb;
 
 const VGA_BUFFER: usize = 0xb8000;
 const VGA_WIDTH: usize = 80;
 const VGA_HEIGHT: usize = 25;
+
+/// Dimensions de l'ecran texte, exposees pour l'editeur plein ecran.
+pub const WIDTH: usize = VGA_WIDTH;
+pub const HEIGHT: usize = VGA_HEIGHT;
 
 pub const COLOR_DEFAULT: u8 = 0x0f;
 pub const COLOR_GREEN: u8 = 0x0a;
@@ -126,27 +131,48 @@ pub fn set_color(color: u8) {
     unsafe { VGA.set_color(color); }
 }
 
-/// Tampon de capture optionnel : quand il est actif, la sortie texte y est
-/// redirigee au lieu d'aller a l'ecran (utilise par les redirections `>`/`>>`).
-static mut CAPTURE: Option<alloc::string::String> = None;
-
-/// Demarre la capture de la sortie texte dans un tampon.
-pub fn capture_start() {
-    unsafe { CAPTURE = Some(alloc::string::String::new()); }
+/// Positionne le curseur (texte + curseur materiel) sur (row, col).
+pub fn set_cursor(row: usize, col: usize) {
+    unsafe {
+        VGA.row = if row >= VGA_HEIGHT { VGA_HEIGHT - 1 } else { row };
+        VGA.col = if col >= VGA_WIDTH { VGA_WIDTH - 1 } else { col };
+        let pos = VGA.row * VGA_WIDTH + VGA.col;
+        outb(0x3D4, 0x0F);
+        outb(0x3D5, (pos & 0xFF) as u8);
+        outb(0x3D4, 0x0E);
+        outb(0x3D5, ((pos >> 8) & 0xFF) as u8);
+    }
 }
 
-/// Termine la capture et renvoie le texte accumule.
+/// Pile de tampons de capture. Quand elle n'est pas vide, la sortie texte est
+/// ecrite dans le tampon du sommet au lieu d'aller a l'ecran. La pile permet
+/// d'imbriquer redirections (`>`) et pipes (`|`).
+static mut CAPTURE_STACK: Option<alloc::vec::Vec<alloc::string::String>> = None;
+
+/// Demarre une capture (empile un tampon vide).
+pub fn capture_start() {
+    unsafe {
+        if CAPTURE_STACK.is_none() { CAPTURE_STACK = Some(alloc::vec::Vec::new()); }
+        if let Some(stack) = CAPTURE_STACK.as_mut() {
+            stack.push(alloc::string::String::new());
+        }
+    }
+}
+
+/// Termine la capture courante et renvoie le texte accumule.
 pub fn capture_take() -> Option<alloc::string::String> {
-    unsafe { CAPTURE.take() }
+    unsafe { CAPTURE_STACK.as_mut().and_then(|s| s.pop()) }
 }
 
 /// Implementation reelle derriere les macros `print!` / `println!`.
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
     unsafe {
-        if let Some(ref mut buf) = CAPTURE {
-            let _ = buf.write_fmt(args);
-            return;
+        if let Some(stack) = CAPTURE_STACK.as_mut() {
+            if let Some(top) = stack.last_mut() {
+                let _ = top.write_fmt(args);
+                return;
+            }
         }
         let _ = VGA.write_fmt(args);
     }
