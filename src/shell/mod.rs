@@ -323,6 +323,13 @@ fn longest_common_prefix(items: &[String]) -> String {
 // Execution : chainage ; && ||, redirections > >>, $?
 // ---------------------------------------------------------------------------
 
+/// Execute une ligne en capturant sa sortie texte (pour le terminal graphique).
+pub fn run_capture(line: &str, cwd: &mut usize) -> String {
+    vga::capture_start();
+    run_line(trim(line), cwd);
+    vga::capture_take().unwrap_or_default()
+}
+
 /// Decoupe et execute une ligne (chainage + redirections).
 pub fn run_line(line: &str, cwd: &mut usize) {
     let bytes = line.as_bytes();
