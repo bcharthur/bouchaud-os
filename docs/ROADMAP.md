@@ -39,6 +39,16 @@ Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 - [x] Clavier en interruption IRQ1 (fin du polling)
 - [ ] APIC, plus tard, en remplacement du PIC
 
+## V0.13 - Bureau graphique (phase 2)
+- [x] Correctif retour mode texte : rechargement de la police VGA (plus de
+  rayures), Echap instantane (drainage de la file clavier)
+- [x] Terminal graphique interactif : REPL reutilisant tout le shell
+  (commandes, pipes, redirections, $VAR) avec scrollback
+- [x] Lanceur d'applications dans la barre des taches (Terminal, Quitter)
+- [ ] Plusieurs fenetres/apps simultanees, focus
+- [ ] Haute resolution (migration bootloader 0.11)
+- [ ] Mini-navigateur texte HTTP (apres reseau e1000)
+
 ## V0.12 - Bureau graphique (phase 1)
 - [x] Mode VGA 13h (320x200x256) : framebuffer + double-buffer + palette
 - [x] Police bitmap 8x8, primitives (pixel, rect, fill, texte)
