@@ -14,7 +14,7 @@ use crate::drivers::mouse;
 use crate::arch::x86_64::rtc;
 use crate::fs::ramfs;
 use crate::kernel::timer;
-use crate::users;
+use crate::{fs::ramfs, shell, users};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -22,6 +22,29 @@ use alloc::vec::Vec;
 const WW: i32 = 200;
 const WH: i32 = 110;
 const BAR_H: usize = 11;
+const STATUS_H: usize = 11;
+const MAX_LINES: usize = 96;
+
+#[derive(Clone, Copy, PartialEq)]
+enum App {
+    Terminal,
+    Systeme,
+    Notes,
+    Navigateur,
+}
+
+struct DesktopState {
+    app: App,
+    wx: i32,
+    wy: i32,
+    dragging: bool,
+    offx: i32,
+    offy: i32,
+    prev_left: bool,
+    cwd: usize,
+    input: String,
+    lines: Vec<String>,
+}
 
 struct Rect { x: i32, y: i32, w: i32, h: i32 }
 impl Rect {
@@ -91,20 +114,130 @@ pub fn run() {
         draw_cursor(mxu, myu);
         gfx::present();
     }
+}
 
+fn handle_mouse(state: &mut DesktopState) {
+    let (mxu, myu) = mouse::pos();
+    let mx = mxu as i32;
+    let my = myu as i32;
+    let left = mouse::left_down();
+
+    if left && !state.prev_left && my < BAR_H as i32 {
+        if mx < 76 {
+            switch_app(state, App::Terminal);
+        } else if mx < 146 {
+            switch_app(state, App::Systeme);
+        } else if mx < 208 {
+            switch_app(state, App::Notes);
+        } else if mx < 310 {
+            switch_app(state, App::Navigateur);
+        }
+    }
+    state.prev_left = left;
+
+    let (ww, wh) = app_size(state.app);
+    if left {
+        if !state.dragging
+            && my >= state.wy
+            && my < state.wy + BAR_H as i32
+            && mx >= state.wx
+            && mx < state.wx + ww
+        {
+            state.dragging = true;
+            state.offx = mx - state.wx;
+            state.offy = my - state.wy;
+        }
+        if state.dragging {
+            state.wx = mx - state.offx;
+            state.wy = my - state.offy;
+        }
+    } else {
+        state.dragging = false;
+    }
+    clamp_window(&mut state.wx, &mut state.wy, ww, wh);
+}
+
+fn switch_app(state: &mut DesktopState, app: App) {
+    state.app = app;
+    match app {
+        App::Terminal => { state.wx = 14; state.wy = 28; }
+        App::Systeme => { state.wx = 92; state.wy = 36; }
+        App::Notes => { state.wx = 86; state.wy = 58; }
+        App::Navigateur => { state.wx = 24; state.wy = 42; }
+    }
+}
+
+fn close_gui() {
     gfx::leave();
     crate::serial_println!("[gui] bureau ferme");
 }
 
 fn draw_desktop(wx: usize, wy: usize) {
     gfx::clear(C_DESKTOP);
+    draw_topbar(state.app);
+    match state.app {
+        App::Terminal => draw_terminal(state),
+        App::Systeme => draw_system(state.wx as usize, state.wy as usize),
+        App::Notes => draw_notes(state.wx as usize, state.wy as usize),
+        App::Navigateur => draw_browser(state.wx as usize, state.wy as usize),
+    }
+    gfx::fill_rect(0, HEIGHT - STATUS_H, WIDTH, STATUS_H, C_TITLE);
+    gfx::draw_text(2, HEIGHT - STATUS_H + 2, "Echap=quitter  clic titre=deplacer", C_WHITE);
+}
 
-    // Barre du haut + horloge.
+fn draw_topbar(active: App) {
     gfx::fill_rect(0, 0, WIDTH, BAR_H, C_TITLE);
-    gfx::draw_text(2, 2, "Bouchaud OS", C_WHITE);
+    launcher(2, "Terminal", active == App::Terminal);
+    launcher(78, "Systeme", active == App::Systeme);
+    launcher(150, "Notes", active == App::Notes);
+    launcher(212, "Web", active == App::Navigateur);
     let dt = rtc::now();
-    let clk = format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second);
+    let clk = format!("{:02}:{:02}", dt.hour, dt.minute);
     gfx::draw_text(WIDTH - clk.len() * 8 - 2, 2, &clk, C_YELLOW);
+}
+
+fn launcher(x: usize, label: &str, active: bool) {
+    gfx::fill_rect(x, 1, label.len() * 8 + 6, 9, if active { C_BLUE } else { C_DKGRAY });
+    gfx::draw_text(x + 3, 2, label, C_WHITE);
+}
+
+fn draw_terminal(state: &DesktopState) {
+    let (w, h) = app_size(App::Terminal);
+    let wx = state.wx as usize;
+    let wy = state.wy as usize;
+    window(wx, wy, w as usize, h as usize, "Terminal");
+    gfx::fill_rect(wx + 3, wy + BAR_H + 2, w as usize - 6, h as usize - BAR_H - 5, C_BLACK);
+
+    let max = ((h as usize - BAR_H - 8) / 9).min(state.lines.len());
+    let start = state.lines.len().saturating_sub(max);
+    let mut y = wy + BAR_H + 5;
+    for l in &state.lines[start..] {
+        draw_clipped_text(wx + 6, y, l, 35, if l.starts_with('$') { C_GREEN } else { C_CYAN });
+        y += 9;
+    }
+}
+
+fn draw_system(wx: usize, wy: usize) {
+    let (w, h) = app_size(App::Systeme);
+    window(wx, wy, w as usize, h as usize, "Systeme");
+    let tx = wx + 5;
+    let mut ty = wy + BAR_H + 4;
+    let dt = rtc::now();
+    gfx::draw_text(tx, ty, &format!("Version {}", crate::VERSION), C_WHITE); ty += 10;
+    gfx::draw_text(tx, ty, &format!("User {}", users::session().username()), C_WHITE); ty += 10;
+    gfx::draw_text(tx, ty, &format!("Date {:04}-{:02}-{:02}", dt.year, dt.month, dt.day), C_WHITE); ty += 10;
+    gfx::draw_text(tx, ty, &format!("Uptime {} s", timer::seconds()), C_WHITE); ty += 12;
+    gfx::draw_text(tx, ty, "Souverain FR", C_YELLOW);
+}
+
+fn draw_notes(wx: usize, wy: usize) {
+    let (w, h) = app_size(App::Notes);
+    window(wx, wy, w as usize, h as usize, "Apps maison");
+    gfx::draw_text(wx + 5, wy + BAR_H + 5, "Terminal natif OK", C_YELLOW);
+    gfx::draw_text(wx + 5, wy + BAR_H + 17, "Systeme + Notes OK", C_WHITE);
+    gfx::draw_text(wx + 5, wy + BAR_H + 29, "Web: apres e1000", C_WHITE);
+    gfx::draw_text(wx + 5, wy + BAR_H + 41, "HiDPI: bootloader 0.11", C_WHITE);
+}
 
     // Fenetre "Systeme".
     window(wx, wy, "Systeme");
