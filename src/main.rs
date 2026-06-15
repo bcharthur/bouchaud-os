@@ -161,7 +161,7 @@ pub extern "C" fn _start() -> ! {
     set_color(COLOR_GREEN);
     kprintln!("Bouchaud OS");
     set_color(COLOR_DEFAULT);
-    kprintln!("Version: 0.3.0 - mini Unix-like + RAMFS");
+    kprintln!("Version: 0.4.0 - mini Unix-like + RAMFS + clavier AZERTY FR");
     kprintln!("Commandes: help, uname, ls, tree, pwd, cd, mkdir, touch, write, append,");
     kprintln!("           cat, echo, nano, stat, cp, mv, rm, rmdir, clear");
     kprintln!();
@@ -213,29 +213,41 @@ fn decode_scancode(scancode: u8) -> Option<u8> {
             _ => {}
         }
 
+        // Ignore key release scancodes.
         if scancode & 0x80 != 0 {
             return None;
         }
 
         let shift = SHIFT;
+
+        // Clavier AZERTY français approximatif, PS/2 scancode set 1.
+        // Objectif V0.4 : usage shell français pratique.
+        // Limite volontaire : Bouchaud OS ne gère pas encore l'Unicode,
+        // donc les touches accentuées sont translittérées en ASCII :
+        // é/è -> e, ç -> c, à -> a.
         let ch = match scancode {
             0x01 => 27,
-            0x02 => if shift { b'!' } else { b'1' },
-            0x03 => if shift { b'@' } else { b'2' },
-            0x04 => if shift { b'#' } else { b'3' },
-            0x05 => if shift { b'$' } else { b'4' },
-            0x06 => if shift { b'%' } else { b'5' },
-            0x07 => if shift { b'^' } else { b'6' },
-            0x08 => if shift { b'&' } else { b'7' },
-            0x09 => if shift { b'*' } else { b'8' },
-            0x0a => if shift { b'(' } else { b'9' },
-            0x0b => if shift { b')' } else { b'0' },
-            0x0c => if shift { b'_' } else { b'-' },
+
+            // Rangée chiffres AZERTY : sans Shift = symboles, avec Shift = chiffres.
+            0x02 => if shift { b'1' } else { b'&' },
+            0x03 => if shift { b'2' } else { b'e' }, // é -> e
+            0x04 => if shift { b'3' } else { b'"' },
+            0x05 => if shift { b'4' } else { b'\'' },
+            0x06 => if shift { b'5' } else { b'(' },
+            0x07 => if shift { b'6' } else { b'-' },
+            0x08 => if shift { b'7' } else { b'e' }, // è -> e
+            0x09 => if shift { b'8' } else { b'_' },
+            0x0a => if shift { b'9' } else { b'c' }, // ç -> c
+            0x0b => if shift { b'0' } else { b'a' }, // à -> a
+            0x0c => if shift { b')' } else { b')' },
             0x0d => if shift { b'+' } else { b'=' },
+
             0x0e => 8,
             0x0f => b'\t',
-            0x10 => letter(b'q', shift),
-            0x11 => letter(b'w', shift),
+
+            // Rangée A Z E R T Y U I O P
+            0x10 => letter(b'a', shift),
+            0x11 => letter(b'z', shift),
             0x12 => letter(b'e', shift),
             0x13 => letter(b'r', shift),
             0x14 => letter(b't', shift),
@@ -244,10 +256,12 @@ fn decode_scancode(scancode: u8) -> Option<u8> {
             0x17 => letter(b'i', shift),
             0x18 => letter(b'o', shift),
             0x19 => letter(b'p', shift),
-            0x1a => if shift { b'{' } else { b'[' },
-            0x1b => if shift { b'}' } else { b']' },
+            0x1a => if shift { b'^' } else { b'^' },
+            0x1b => if shift { b'$' } else { b'$' },
             0x1c => b'\n',
-            0x1e => letter(b'a', shift),
+
+            // Rangée Q S D F G H J K L M
+            0x1e => letter(b'q', shift),
             0x1f => letter(b's', shift),
             0x20 => letter(b'd', shift),
             0x21 => letter(b'f', shift),
@@ -256,21 +270,27 @@ fn decode_scancode(scancode: u8) -> Option<u8> {
             0x24 => letter(b'j', shift),
             0x25 => letter(b'k', shift),
             0x26 => letter(b'l', shift),
-            0x27 => if shift { b':' } else { b';' },
-            0x28 => if shift { b'"' } else { b'\'' },
-            0x29 => if shift { b'~' } else { b'`' },
-            0x2b => if shift { b'|' } else { b'\\' },
-            0x2c => letter(b'z', shift),
+            0x27 => letter(b'm', shift),
+            0x28 => if shift { b'%' } else { b'u' }, // ù -> u
+            0x29 => if shift { b'~' } else { b'`' }, // ² non ASCII -> `
+            0x2b => if shift { b'*' } else { b'*' },
+
+            // Rangée W X C V B N , ; : !
+            0x2c => letter(b'w', shift),
             0x2d => letter(b'x', shift),
             0x2e => letter(b'c', shift),
             0x2f => letter(b'v', shift),
             0x30 => letter(b'b', shift),
             0x31 => letter(b'n', shift),
-            0x32 => letter(b'm', shift),
-            0x33 => if shift { b'<' } else { b',' },
-            0x34 => if shift { b'>' } else { b'.' },
-            0x35 => if shift { b'?' } else { b'/' },
+            0x32 => if shift { b'?' } else { b',' },
+            0x33 => if shift { b'.' } else { b';' },
+            0x34 => if shift { b'/' } else { b':' },
+            0x35 => if shift { b'?' } else { b'!' },
             0x39 => b' ',
+
+            // Touche ISO supplémentaire à gauche de W sur beaucoup de claviers FR.
+            0x56 => if shift { b'>' } else { b'<' },
+
             _ => return None,
         };
 
