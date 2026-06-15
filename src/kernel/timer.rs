@@ -24,9 +24,17 @@ pub fn tick() {
     unsafe { TICKS += 1; }
 }
 
+/// Frequence par defaut du PIT (canal 0) non reprogramme : ~18.2065 Hz.
+pub const TICKS_PER_SECOND: u64 = 18;
+
 /// Nombre de ticks timer ecoules (0 tant que le timer n'est pas active).
 pub fn ticks() -> u64 {
     unsafe { TICKS }
+}
+
+/// Duree approximative depuis le boot, en secondes (base PIT par defaut).
+pub fn seconds() -> u64 {
+    ticks() / TICKS_PER_SECOND
 }
 
 /// Cycles CPU ecoules depuis le boot (approximation via TSC).

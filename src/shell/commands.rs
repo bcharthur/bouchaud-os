@@ -89,7 +89,7 @@ pub fn devices() {
 
 pub fn uptime() {
     if timer::timer_enabled() {
-        println!("uptime: {} ticks", timer::ticks());
+        println!("uptime: {} s ({} ticks @ ~{} Hz)", timer::seconds(), timer::ticks(), timer::TICKS_PER_SECOND);
     } else {
         println!("uptime: timer interrupts not enabled yet");
         println!("  mesure brute (TSC): {} cycles depuis le boot", timer::cycles_since_boot());
@@ -98,10 +98,17 @@ pub fn uptime() {
 
 pub fn ticks() {
     println!("timer ticks: {}", timer::ticks());
+    println!("uptime approx: {} s", timer::seconds());
     println!("tsc cycles since boot: {}", timer::cycles_since_boot());
     if !timer::timer_enabled() {
         println!("note: timer interrupts not enabled yet (compteur fige a 0)");
     }
+}
+
+pub fn breakpoint() {
+    println!("breakpoint: declenchement d'une exception int3...");
+    crate::arch::x86_64::idt::trigger_breakpoint();
+    println!("breakpoint: reprise apres l'exception (handler OK)");
 }
 
 pub fn interrupts() {

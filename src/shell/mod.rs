@@ -61,6 +61,7 @@ fn dispatch(line: &str, cwd: &mut usize) {
         "uptime" => c::uptime(),
         "ticks" => c::ticks(),
         "interrupts" => c::interrupts(),
+        "breakpoint" => c::breakpoint(),
         "serial-test" => c::serial_test(),
         "panic-test" => c::panic_test(),
         "roadmap" => c::roadmap(),

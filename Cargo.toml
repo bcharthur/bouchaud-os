@@ -11,6 +11,11 @@ license = "MIT OR Apache-2.0"
 # Objectif futur : écrire/maîtriser notre propre chaîne de boot.
 bootloader = "0.9.31"
 
+# Briques bas niveau standard de l'OSdev Rust (no_std) : structures GDT/IDT,
+# instructions privilegiees, et controleur d'interruptions PIC 8259.
+x86_64 = "0.14.2"
+pic8259 = "0.10.1"
+
 [profile.dev]
 panic = "abort"
 

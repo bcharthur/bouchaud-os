@@ -16,6 +16,7 @@
 #![no_main]
 #![allow(dead_code)]
 #![allow(static_mut_refs)]
+#![feature(abi_x86_interrupt)]
 
 use bootloader::{entry_point, BootInfo};
 
@@ -54,7 +55,7 @@ fn kernel_main(_boot_info: &'static BootInfo) -> ! {
     arch::x86_64::init();
 
     // 4. Pilotes et sous-systemes.
-    kernel::dmesg::log("keyboard: PS/2 polling AZERTY-FR actif");
+    kernel::dmesg::log("keyboard: PS/2 AZERTY-FR pilote par IRQ1");
     fs::ramfs::fs().init();
     kernel::dmesg::log("ramfs: monte sur /");
     users::session().login(users::User::Arthur);
