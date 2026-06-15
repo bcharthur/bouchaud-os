@@ -90,7 +90,7 @@ pub const COMMANDS: &[&str] = &[
     "echo", "date", "grep", "wc", "head", "tail", "find", "lspci", "ping", "ifconfig",
     "ip", "route", "arp", "dhcp", "dns", "wget", "curl", "mount", "df", "sync",
     "mkfs.bfs", "true", "false", "logout", "exit", "export", "env", "unset", "run",
-    "source", "desktop", "gui",
+    "source", "desktop", "gui", "chromium",
 ];
 
 /// Operateur reliant un segment de commande au precedent.
@@ -527,6 +527,7 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "help" => { c::help(); 0 }
         "clear" => { vga::clear(); 0 }
         "desktop" | "gui" => { crate::gui::run(); vga::clear(); 0 }
+        "chromium" => { c::chromium(); 0 }
         "version" => { c::version(); 0 }
         "uname" => { c::uname(); 0 }
         "sysinfo" => { c::sysinfo(); 0 }

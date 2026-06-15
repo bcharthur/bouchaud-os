@@ -103,6 +103,7 @@ impl FileSystem {
         let tmp = self.mkdir_at(0, "tmp").unwrap_or(0);
         let etc = self.mkdir_at(0, "etc").unwrap_or(0);
         let var = self.mkdir_at(0, "var").unwrap_or(0);
+        let apps = self.mkdir_at(0, "apps").unwrap_or(0);
         let _log = self.mkdir_at(var, "log");
         let _ = home;
 
@@ -111,6 +112,17 @@ impl FileSystem {
 
         let passwd = self.touch_at(etc, "passwd").unwrap_or(0);
         self.write_node(passwd, "root:x:0:0:root:/:/bin/bsh\nguest:x:1000:1000:guest:/home/guest:/bin/bsh");
+
+        // Lanceur applicatif experimental. Ce n'est pas encore un vrai binaire
+        // executable : il documente le futur point d'entree du navigateur.
+        if apps != 0 {
+            let chromium = self.touch_at(apps, "chromium.exe").unwrap_or(0);
+            self.write_node(chromium, "Bouchaud OS Chromium launcher\nEtat: manifeste applicatif present.\nExecution native PE/Win32 non supportee dans cette version.\nPrerequis: processus, loader, pile reseau, HTTP/TLS.");
+            self.nodes[apps].mode = 0o755;
+            self.nodes[chromium].mode = 0o755;
+            self.nodes[chromium].uid = 0;
+            self.nodes[chromium].gid = 0;
+        }
 
         // /tmp est ouvert a tous (comme sous Unix).
         if tmp != 0 {
