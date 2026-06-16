@@ -35,7 +35,7 @@ pub fn help() {
     println!("  divers  : date");
     println!("  graphique: desktop (bureau VGA + souris, Echap pour quitter)");
     println!("  materiel: lspci");
-    println!("  reseau  : ping <ip> (loopback actif), ifconfig, ip, route, arp");
+    println!("  reseau  : ifup, ethinfo, arping <ip> (e1000 reel), ping <ip>, ifconfig, ip, route, arp");
     println!("            dhcp, dns, wget, curl   [en attente du driver NIC]");
     println!("  disque  : mount, df, sync, mkfs.bfs                                [roadmap]");
     vga::set_color(COLOR_CYAN);

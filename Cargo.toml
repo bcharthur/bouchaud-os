@@ -9,7 +9,9 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 # Bootloader expérimental x86_64 utilisé uniquement pour la phase 0.
 # Objectif futur : écrire/maîtriser notre propre chaîne de boot.
-bootloader = "0.9.31"
+# map_physical_memory : mappe toute la RAM physique a un offset connu
+# (necessaire pour le MMIO et le DMA du driver reseau e1000).
+bootloader = { version = "0.9.31", features = ["map_physical_memory"] }
 
 # Briques bas niveau standard de l'OSdev Rust (no_std) : structures GDT/IDT,
 # instructions privilegiees, et controleur d'interruptions PIC 8259.

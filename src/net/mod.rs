@@ -18,15 +18,92 @@ pub mod icmp;
 pub mod stack;
 
 use crate::arch::x86_64::pci;
-use crate::drivers::vga::{self, COLOR_CYAN, COLOR_YELLOW, COLOR_DEFAULT};
+use crate::drivers::e1000;
+use crate::drivers::vga::{self, COLOR_CYAN, COLOR_GREEN, COLOR_YELLOW, COLOR_DEFAULT};
 use crate::net::ipv4::Ipv4Addr;
 
 /// Adresse de l'interface loopback.
 pub const LO_ADDR: Ipv4Addr = [127, 0, 0, 1];
+/// Adresse IPv4 statique d'eth0 (reseau utilisateur QEMU SLIRP).
+pub const ETH_IP: Ipv4Addr = [10, 0, 2, 15];
 
 /// Indique si une interface routable vers l'exterieur est active.
 pub fn external_enabled() -> bool {
-    false // tant que le driver NIC n'est pas charge
+    e1000::is_ready()
+}
+
+// ---------------------------------------------------------------------------
+// eth0 / e1000 : activation et ARP reel
+// ---------------------------------------------------------------------------
+
+/// Active l'interface eth0 (initialise le driver e1000).
+pub fn ifup() {
+    if e1000::init() {
+        let m = e1000::mac();
+        vga::set_color(COLOR_GREEN);
+        println!("eth0 active");
+        vga::set_color(COLOR_DEFAULT);
+        println!("  MAC : {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", m[0], m[1], m[2], m[3], m[4], m[5]);
+        crate::print!("  inet: "); ipv4::print_addr(&ETH_IP); println!("  lien={}", if e1000::link_up() { "UP" } else { "DOWN" });
+    } else {
+        vga::set_color(COLOR_YELLOW);
+        println!("ifup: echec d'initialisation e1000 (lance QEMU avec -device e1000 -netdev user,id=n0)");
+        vga::set_color(COLOR_DEFAULT);
+    }
+}
+
+/// Envoie une requete ARP et attend une reponse (commande `arping <ip>`).
+pub fn arping(argc: usize, argv: &[&str; 12]) {
+    if argc < 2 { println!("usage: arping <ip>"); return; }
+    let target = match ipv4::parse_addr(argv[1]) {
+        Some(a) => a,
+        None => { println!("arping: adresse invalide"); return; }
+    };
+    if !e1000::is_ready() && !e1000::init() {
+        println!("arping: carte reseau indisponible (essaie 'ifup')");
+        return;
+    }
+    let mac = e1000::mac();
+
+    // Construit la requete ARP encapsulee dans une trame Ethernet.
+    let mut arp_buf = [0u8; arp::PACKET_LEN];
+    if arp::build(&mut arp_buf, arp::OP_REQUEST, mac, ETH_IP, [0; 6], target).is_none() {
+        println!("arping: erreur ARP");
+        return;
+    }
+    let mut frame = [0u8; ethernet::HEADER_LEN + arp::PACKET_LEN];
+    let flen = match ethernet::build_frame(&mut frame, ethernet::BROADCAST, mac, ethernet::ETHERTYPE_ARP, &arp_buf) {
+        Some(n) => n,
+        None => { println!("arping: erreur trame"); return; }
+    };
+
+    crate::print!("ARP qui a "); ipv4::print_addr(&target); println!(" ?");
+    e1000::send(&frame[..flen]);
+
+    // Attend une reponse ARP correspondant a la cible.
+    let mut buf = [0u8; 2048];
+    for _ in 0..3_000_000u32 {
+        if let Some(n) = e1000::receive(&mut buf) {
+            if n >= ethernet::HEADER_LEN + arp::PACKET_LEN {
+                if let Some(h) = ethernet::parse_header(&buf[..n]) {
+                    if h.ethertype == ethernet::ETHERTYPE_ARP {
+                        if let Some(p) = arp::parse(&buf[ethernet::HEADER_LEN..n]) {
+                            if p.op == arp::OP_REPLY && p.sender_ip == target {
+                                vga::set_color(COLOR_GREEN);
+                                crate::print!("reponse de "); ipv4::print_addr(&target);
+                                println!(" : {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                                    p.sender_mac[0], p.sender_mac[1], p.sender_mac[2],
+                                    p.sender_mac[3], p.sender_mac[4], p.sender_mac[5]);
+                                vga::set_color(COLOR_DEFAULT);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    println!("arping: pas de reponse (timeout)");
 }
 
 // ---------------------------------------------------------------------------
@@ -108,11 +185,20 @@ fn ping_loopback(target: Ipv4Addr) {
 // ---------------------------------------------------------------------------
 
 fn print_eth0_state() {
+    if e1000::is_ready() {
+        let m = e1000::mac();
+        crate::print!("eth0: flags=<UP,RUNNING>  inet ");
+        ipv4::print_addr(&ETH_IP);
+        println!("  lien={}", if e1000::link_up() { "UP" } else { "DOWN" });
+        println!("      ether {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            m[0], m[1], m[2], m[3], m[4], m[5]);
+        return;
+    }
     match pci::find_network() {
         Some(d) => {
             crate::print!("eth0: flags=<DOWN>  carte PCI {:04x}:{:04x} (", d.vendor, d.device);
             crate::print!("{}", pci::vendor_name(d.vendor));
-            println!(") - driver non charge");
+            println!(") - driver non charge (lance 'ifup')");
         }
         None => println!("eth0: absente (aucune carte reseau PCI detectee)"),
     }

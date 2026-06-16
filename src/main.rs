@@ -36,14 +36,14 @@ mod shell;
 mod users;
 
 /// Version courante de Bouchaud OS.
-pub const VERSION: &str = "0.18.0";
+pub const VERSION: &str = "0.19.0";
 /// Nom du systeme.
 pub const OS_NAME: &str = "Bouchaud OS";
 
 entry_point!(kernel_main);
 
 /// Point d'entree appele par le bootloader une fois en long mode 64 bits.
-fn kernel_main(_boot_info: &'static BootInfo) -> ! {
+fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // 1. Sorties de base : serie d'abord (pour tracer le boot), puis VGA.
     drivers::serial::init();
     drivers::vga::clear();
@@ -52,6 +52,7 @@ fn kernel_main(_boot_info: &'static BootInfo) -> ! {
     kernel::timer::init();
     kernel::dmesg::init();
     kernel::heap::init();
+    kernel::memory::init(boot_info);
     kernel::dmesg::log("kernel: boot Bouchaud OS");
     kernel::dmesg::log("vga: text mode initialise");
     kernel::dmesg::log("serial: COM1 initialise (debug QEMU)");

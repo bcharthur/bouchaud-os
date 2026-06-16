@@ -91,6 +91,7 @@ pub const COMMANDS: &[&str] = &[
     "ip", "route", "arp", "dhcp", "dns", "wget", "curl", "mount", "df", "sync",
     "mkfs.bfs", "true", "false", "logout", "exit", "export", "env", "unset", "run",
     "source", "desktop", "gui", "ps", "kill", "free", "syscalls", "apps", "launch",
+    "ifup", "arping", "ethinfo",
 ];
 
 /// Operateur reliant un segment de commande au precedent.
@@ -584,6 +585,9 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "ip" => { crate::net::ip_cmd(); 0 }
         "route" => { crate::net::route_cmd(); 0 }
         "arp" => { crate::net::arp_cmd(); 0 }
+        "ifup" => { crate::net::ifup(); 0 }
+        "arping" => { crate::net::arping(argc, &argv); 0 }
+        "ethinfo" => { crate::drivers::e1000::print_info(); 0 }
         "dhcp" | "dns" | "wget" | "curl" => { crate::net::placeholder(argv[0]); 0 }
 
         // Disque (placeholders, roadmap BFS)

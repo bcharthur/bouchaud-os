@@ -39,6 +39,17 @@ Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 - [x] Clavier en interruption IRQ1 (fin du polling)
 - [ ] APIC, plus tard, en remplacement du PIC
 
+## V0.19 - Driver reseau e1000 (bring-up)
+- [x] map_physical_memory (offset phys) + arene DMA (kernel::memory)
+- [x] PCI: lecture BAR, bus mastering (config write)
+- [x] drivers/e1000.rs : reset, lecture MAC, anneaux RX/TX, send/receive
+- [x] commandes : ifup, ethinfo, arping <ip> (ARP reel via la carte)
+- [x] init a la demande (le boot n'est pas affecte)
+- [ ] IPv4/ICMP reels (ping externe), DHCP, DNS, UDP/TCP, HTTP, TLS
+- Test QEMU : `-device e1000 -netdev user,id=n0`
+
+## V0.18 - Decoupage GUI modulaire (window manager en sous-modules)
+
 ## V0.17 - Resolution superieure (640x480)
 - [x] Bureau en mode VGA 12h : 640x480, 16 couleurs (planaire)
 - [x] Double-buffer lineaire + conversion planaire (4 plans) au present()
