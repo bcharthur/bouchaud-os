@@ -39,6 +39,16 @@ Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 - [x] Clavier en interruption IRQ1 (fin du polling)
 - [ ] APIC, plus tard, en remplacement du PIC
 
+## V0.15 - Window manager + apps natives (Windows-like)
+- [x] Gestionnaire de fenetres : multi-fenetres, focus/z-order, deplacement,
+  fermeture, boucle d'evenements (clavier non bloquant)
+- [x] Menu Demarrer + barre des taches (tuiles par fenetre)
+- [x] Apps natives : Terminal, Fichiers, Moniteur, Bouchaud Browser
+- [x] Bouchaud Browser : about:bouchaud, about:system, file:/<chemin>
+- [x] Modele d'app : /apps/*.bapp (manifestes)
+- [ ] Redimensionnement, drag&drop, themes
+- [ ] Runtime .bapp generique
+
 ## V0.14 - Apps du bureau
 - [x] Lanceur a 4 boutons (Terminal, Fichiers, Moniteur, Quitter)
 - [x] App Fichiers : navigateur a la souris (dossiers, apercu fichier, droits)
