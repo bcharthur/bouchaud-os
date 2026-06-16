@@ -35,6 +35,31 @@ fn config_read32(bus: u8, slot: u8, func: u8, offset: u8) -> u32 {
     }
 }
 
+fn config_write32(bus: u8, slot: u8, func: u8, offset: u8, value: u32) {
+    let address = (1u32 << 31)
+        | ((bus as u32) << 16)
+        | ((slot as u32) << 11)
+        | ((func as u32) << 8)
+        | ((offset as u32) & 0xFC);
+    unsafe {
+        out32(CONFIG_ADDRESS, address);
+        out32(CONFIG_DATA, value);
+    }
+}
+
+/// Lit un BAR (Base Address Register) brut, index 0..5.
+pub fn bar(d: &PciDevice, index: u8) -> u32 {
+    config_read32(d.bus, d.slot, d.func, 0x10 + index * 4)
+}
+
+/// Active le bus mastering + l'espace memoire/IO pour un peripherique (necessaire
+/// au DMA d'une carte reseau).
+pub fn enable_bus_master(d: &PciDevice) {
+    let cmd = config_read32(d.bus, d.slot, d.func, 0x04);
+    // bit0 = I/O space, bit1 = memory space, bit2 = bus master.
+    config_write32(d.bus, d.slot, d.func, 0x04, cmd | 0x07);
+}
+
 unsafe fn out32(port: u16, value: u32) {
     core::arch::asm!("out dx, eax", in("dx") port, in("eax") value, options(nomem, nostack, preserves_flags));
 }

@@ -12,3 +12,4 @@ pub mod mouse;
 pub mod display;
 pub mod disk;
 pub mod net;
+pub mod e1000;
