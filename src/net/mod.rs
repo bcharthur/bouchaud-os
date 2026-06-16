@@ -26,6 +26,8 @@ use crate::net::ipv4::Ipv4Addr;
 pub const LO_ADDR: Ipv4Addr = [127, 0, 0, 1];
 /// Adresse IPv4 statique d'eth0 (reseau utilisateur QEMU SLIRP).
 pub const ETH_IP: Ipv4Addr = [10, 0, 2, 15];
+/// Passerelle par defaut (SLIRP).
+pub const GATEWAY: Ipv4Addr = [10, 0, 2, 2];
 
 /// Indique si une interface routable vers l'exterieur est active.
 pub fn external_enabled() -> bool {
@@ -52,6 +54,34 @@ pub fn ifup() {
     }
 }
 
+/// Resout l'adresse MAC d'une IP via ARP. Renvoie None en cas de timeout.
+fn arp_resolve(target: Ipv4Addr) -> Option<[u8; 6]> {
+    let mac = e1000::mac();
+    let mut arp_buf = [0u8; arp::PACKET_LEN];
+    arp::build(&mut arp_buf, arp::OP_REQUEST, mac, ETH_IP, [0; 6], target)?;
+    let mut frame = [0u8; ethernet::HEADER_LEN + arp::PACKET_LEN];
+    let flen = ethernet::build_frame(&mut frame, ethernet::BROADCAST, mac, ethernet::ETHERTYPE_ARP, &arp_buf)?;
+    e1000::send(&frame[..flen]);
+
+    let mut buf = [0u8; 2048];
+    for _ in 0..3_000_000u32 {
+        if let Some(n) = e1000::receive(&mut buf) {
+            if n >= ethernet::HEADER_LEN + arp::PACKET_LEN {
+                if let Some(h) = ethernet::parse_header(&buf[..n]) {
+                    if h.ethertype == ethernet::ETHERTYPE_ARP {
+                        if let Some(p) = arp::parse(&buf[ethernet::HEADER_LEN..n]) {
+                            if p.op == arp::OP_REPLY && p.sender_ip == target {
+                                return Some(p.sender_mac);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Envoie une requete ARP et attend une reponse (commande `arping <ip>`).
 pub fn arping(argc: usize, argv: &[&str; 12]) {
     if argc < 2 { println!("usage: arping <ip>"); return; }
@@ -63,47 +93,93 @@ pub fn arping(argc: usize, argv: &[&str; 12]) {
         println!("arping: carte reseau indisponible (essaie 'ifup')");
         return;
     }
-    let mac = e1000::mac();
-
-    // Construit la requete ARP encapsulee dans une trame Ethernet.
-    let mut arp_buf = [0u8; arp::PACKET_LEN];
-    if arp::build(&mut arp_buf, arp::OP_REQUEST, mac, ETH_IP, [0; 6], target).is_none() {
-        println!("arping: erreur ARP");
-        return;
-    }
-    let mut frame = [0u8; ethernet::HEADER_LEN + arp::PACKET_LEN];
-    let flen = match ethernet::build_frame(&mut frame, ethernet::BROADCAST, mac, ethernet::ETHERTYPE_ARP, &arp_buf) {
-        Some(n) => n,
-        None => { println!("arping: erreur trame"); return; }
-    };
-
     crate::print!("ARP qui a "); ipv4::print_addr(&target); println!(" ?");
-    e1000::send(&frame[..flen]);
+    match arp_resolve(target) {
+        Some(m) => {
+            vga::set_color(COLOR_GREEN);
+            crate::print!("reponse de "); ipv4::print_addr(&target);
+            println!(" : {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                m[0], m[1], m[2], m[3], m[4], m[5]);
+            vga::set_color(COLOR_DEFAULT);
+        }
+        None => println!("arping: pas de reponse (timeout)"),
+    }
+}
 
-    // Attend une reponse ARP correspondant a la cible.
-    let mut buf = [0u8; 2048];
-    for _ in 0..3_000_000u32 {
-        if let Some(n) = e1000::receive(&mut buf) {
-            if n >= ethernet::HEADER_LEN + arp::PACKET_LEN {
+/// Meme reseau /24 que eth0 ?
+fn same_subnet(ip: &Ipv4Addr) -> bool {
+    ip[0] == ETH_IP[0] && ip[1] == ETH_IP[1] && ip[2] == ETH_IP[2]
+}
+
+/// Ping reel via e1000 : ARP -> ICMP echo sur 4 paquets.
+fn ping_remote(target: Ipv4Addr) {
+    // Adresse de niveau lien : la cible si locale, sinon la passerelle.
+    let next_hop = if same_subnet(&target) { target } else { GATEWAY };
+    let dst_mac = match arp_resolve(next_hop) {
+        Some(m) => m,
+        None => {
+            vga::set_color(COLOR_YELLOW);
+            crate::print!("ping: ARP sans reponse pour "); ipv4::print_addr(&next_hop); println!("");
+            vga::set_color(COLOR_DEFAULT);
+            return;
+        }
+    };
+    let our_mac = e1000::mac();
+    let payload = b"bouchaud-os-ping";
+    let id = 0x4243u16;
+    let mut sent = 0u32;
+    let mut recv = 0u32;
+
+    for seq in 0..4u16 {
+        let mut icmp_buf = [0u8; 64];
+        let il = match icmp::build(&mut icmp_buf, icmp::ECHO_REQUEST, id, seq, payload) {
+            Some(n) => n, None => continue,
+        };
+        let mut ip_buf = [0u8; 128];
+        let ipl = match ipv4::build_packet(&mut ip_buf, ETH_IP, target, ipv4::PROTO_ICMP, seq, &icmp_buf[..il]) {
+            Some(n) => n, None => continue,
+        };
+        let mut frame = [0u8; ethernet::HEADER_LEN + 128];
+        let fl = match ethernet::build_frame(&mut frame, dst_mac, our_mac, ethernet::ETHERTYPE_IPV4, &ip_buf[..ipl]) {
+            Some(n) => n, None => continue,
+        };
+        e1000::send(&frame[..fl]);
+        sent += 1;
+
+        // Attend l'echo reply correspondant.
+        let mut buf = [0u8; 2048];
+        let mut got = false;
+        for _ in 0..3_000_000u32 {
+            if let Some(n) = e1000::receive(&mut buf) {
                 if let Some(h) = ethernet::parse_header(&buf[..n]) {
-                    if h.ethertype == ethernet::ETHERTYPE_ARP {
-                        if let Some(p) = arp::parse(&buf[ethernet::HEADER_LEN..n]) {
-                            if p.op == arp::OP_REPLY && p.sender_ip == target {
-                                vga::set_color(COLOR_GREEN);
-                                crate::print!("reponse de "); ipv4::print_addr(&target);
-                                println!(" : {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                                    p.sender_mac[0], p.sender_mac[1], p.sender_mac[2],
-                                    p.sender_mac[3], p.sender_mac[4], p.sender_mac[5]);
-                                vga::set_color(COLOR_DEFAULT);
-                                return;
+                    if h.ethertype == ethernet::ETHERTYPE_IPV4 {
+                        if let Some(iph) = ipv4::parse_header(&buf[ethernet::HEADER_LEN..n]) {
+                            if iph.proto == ipv4::PROTO_ICMP && iph.src == target {
+                                let off = ethernet::HEADER_LEN + iph.header_len;
+                                if off < n {
+                                    if let Some(m) = icmp::parse(&buf[off..n]) {
+                                        if m.msg_type == icmp::ECHO_REPLY && m.id == id && m.seq == seq {
+                                            recv += 1;
+                                            crate::print!("reponse de "); ipv4::print_addr(&target);
+                                            println!(" : icmp_seq={} ttl=64", seq);
+                                            got = true;
+                                            break;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
         }
+        if !got {
+            println!("  delai depasse pour icmp_seq={}", seq);
+        }
     }
-    println!("arping: pas de reponse (timeout)");
+    let lost = if sent > 0 { (sent - recv) * 100 / sent } else { 100 };
+    println!("--- statistiques ping ---");
+    println!("{} transmis, {} recus, {}% perdus", sent, recv, lost);
 }
 
 // ---------------------------------------------------------------------------
@@ -126,16 +202,17 @@ pub fn ping(argc: usize, argv: &[&str; 12]) {
 
     if ipv4::is_loopback(&target) {
         ping_loopback(target);
+    } else if e1000::is_ready() || e1000::init() {
+        // Ping reel via la carte e1000.
+        ping_remote(target);
     } else {
-        // Pas de driver NIC : aucune interface ne peut router vers l'exterieur.
         vga::set_color(COLOR_YELLOW);
-        println!("ping: no route to host");
+        println!("ping: carte reseau indisponible");
         vga::set_color(COLOR_DEFAULT);
         match pci::find_network() {
-            Some(d) => println!("  eth0 {:04x}:{:04x} detectee mais driver non charge (interface DOWN)", d.vendor, d.device),
+            Some(d) => println!("  eth0 {:04x}:{:04x} detectee ; lance 'ifup' (QEMU -device e1000 -netdev user,id=n0)", d.vendor, d.device),
             None => println!("  aucune carte reseau PCI; lance QEMU avec -device e1000 -netdev user,id=n0"),
         }
-        println!("  seul loopback (127.0.0.1) est routable pour l'instant");
     }
 }
 
