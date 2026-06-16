@@ -32,7 +32,7 @@ pub fn help() {
     println!("  texte   : grep <motif> [f], wc [f], head [-n N] [f], tail [-n N] [f], find [path]");
     println!("  env     : export NOM=val, env, unset NOM, $NOM, run <script.bsh>");
     println!("  divers  : date");
-    println!("  graphique: desktop (bureau VGA + souris, Echap pour quitter), chromium");
+    println!("  graphique: desktop (bureau VGA + souris, Echap pour quitter)");
     println!("  materiel: lspci");
     println!("  reseau  : ping <ip> (loopback actif), ifconfig, ip, route, arp");
     println!("            dhcp, dns, wget, curl   [en attente du driver NIC]");
@@ -166,14 +166,6 @@ pub fn panic_test() {
     println!("panic-test: declenchement volontaire d'une panique noyau...");
     vga::set_color(COLOR_DEFAULT);
     panic!("panic-test demande par l'utilisateur root");
-}
-
-pub fn chromium() {
-    println!("Chromium.exe est reference dans /apps/chromium.exe et visible dans le bureau.");
-    println!("Etat: lanceur pret, execution native non disponible dans cette version.");
-    println!("Pourquoi: Bouchaud OS ne possede pas encore de loader PE/Win32, processus utilisateur,");
-    println!("pile reseau externe, HTTP/TLS ni moteur graphique compatible Chromium.");
-    println!("Prochaine etape realiste: e1000/virtio-net -> TCP/IP -> mini navigateur HTTP natif.");
 }
 
 pub fn roadmap() {
