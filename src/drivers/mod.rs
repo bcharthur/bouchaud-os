@@ -9,3 +9,6 @@ pub mod serial;
 pub mod keyboard;
 pub mod gfx;
 pub mod mouse;
+pub mod display;
+pub mod disk;
+pub mod net;

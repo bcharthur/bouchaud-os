@@ -23,6 +23,7 @@ pub fn help() {
     println!("  systeme : help, clear, version, uname, sysinfo, cpuinfo, meminfo, devices");
     println!("            dmesg, history, uptime, ticks, interrupts, breakpoint, serial-test");
     println!("            panic-test, roadmap");
+    println!("  noyau   : ps, kill <pid>, free, syscalls, apps, launch <app>, df");
     println!("  session : whoami, id, users, su [user], logout/exit");
     println!("  comptes : useradd <nom>, userdel <nom>, passwd [user]   (root pour add/del)");
     println!("  fichiers: pwd, ls [-l] [path], tree [path], cd <path>, mkdir <path>");
