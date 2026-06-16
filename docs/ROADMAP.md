@@ -39,6 +39,13 @@ Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 - [x] Clavier en interruption IRQ1 (fin du polling)
 - [ ] APIC, plus tard, en remplacement du PIC
 
+## V0.17 - Resolution superieure (640x480)
+- [x] Bureau en mode VGA 12h : 640x480, 16 couleurs (planaire)
+- [x] Double-buffer lineaire + conversion planaire (4 plans) au present()
+- [x] Tas porte a 4 MiB (backbuffer ~300 Ko)
+- [x] Sans risque boot : gate derriere `desktop`, shell texte intact
+- [ ] Vraie HD truecolor (1280x720+/32 bits) = migration bootloader 0.11
+
 ## V0.16 - Fenetres avancees
 - [x] Minimiser / maximiser / restaurer (boutons de titre)
 - [x] Redimensionnement (poignee coin bas-droit)

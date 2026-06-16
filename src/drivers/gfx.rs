@@ -1,15 +1,16 @@
-//! Pilote graphique VGA mode 13h (320x200, 256 couleurs, framebuffer 0xA0000).
+//! Pilote graphique VGA mode 12h (640x480, 16 couleurs, planar, FB 0xA0000).
 //!
-//! On reprogramme les registres VGA pour passer du mode texte au mode graphique,
-//! avec un double-buffer en memoire (via `alloc`) pour eviter le scintillement.
+//! On reprogramme les registres VGA pour passer du mode texte au mode graphique.
+//! Un double-buffer lineaire (1 octet d'index couleur par pixel) en memoire
+//! evite le scintillement ; `present()` le convertit en planaire (4 plans VGA).
 //! Fournit primitives (pixels, rectangles) et rendu de texte (police 8x8).
 
 use alloc::vec;
 use alloc::vec::Vec;
 use crate::arch::x86_64::ports::{inb, outb};
 
-pub const WIDTH: usize = 320;
-pub const HEIGHT: usize = 200;
+pub const WIDTH: usize = 640;
+pub const HEIGHT: usize = 480;
 const FB: usize = 0xA0000;
 
 // Palette (index -> couleur), reglee via le DAC. Quelques couleurs utiles.
@@ -26,8 +27,8 @@ pub const C_YELLOW: u8 = 9;
 pub const C_DESKTOP: u8 = 10; // bleu bureau
 pub const C_TITLE: u8 = 11;   // barre de titre
 
-/// (r,g,b) sur 0..63 (DAC 6 bits) pour chaque index utilise.
-const PALETTE: &[(u8, u8, u8)] = &[
+/// (r,g,b) sur 0..63 (DAC 6 bits) pour les 16 index couleur.
+const PALETTE: [(u8, u8, u8); 16] = [
     (0, 0, 0),     // 0 noir
     (63, 63, 63),  // 1 blanc
     (42, 42, 42),  // 2 gris
@@ -40,27 +41,31 @@ const PALETTE: &[(u8, u8, u8)] = &[
     (60, 60, 15),  // 9 jaune
     (12, 26, 52),  // 10 bleu bureau
     (30, 36, 56),  // 11 barre titre
+    (40, 30, 10),  // 12 (libre)
+    (10, 40, 30),  // 13 (libre)
+    (50, 50, 50),  // 14 (libre)
+    (32, 32, 32),  // 15 (libre)
 ];
 
 static mut BACK: Option<Vec<u8>> = None;
 
-// --- Programmation des registres VGA (mode 13h / mode texte 03h) -------------
+// --- Programmation des registres VGA (mode 12h / mode texte 03h) -------------
 
-const MISC: u8 = 0x63;
-const SEQ: [u8; 5] = [0x03, 0x01, 0x0F, 0x00, 0x0E];
-const CRTC_13H: [u8; 25] = [
-    0x5F, 0x4F, 0x50, 0x82, 0x54, 0x80, 0xBF, 0x1F, 0x00, 0x41, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x9C, 0x0E, 0x8F, 0x28, 0x40, 0x96, 0xB9, 0xA3, 0xFF,
+const MISC_12H: u8 = 0xE3;
+const SEQ_12H: [u8; 5] = [0x03, 0x01, 0x08, 0x00, 0x06];
+const CRTC_12H: [u8; 25] = [
+    0x5F, 0x4F, 0x50, 0x82, 0x54, 0x80, 0x0B, 0x3E, 0x00, 0x40, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0xEA, 0x0C, 0xDF, 0x28, 0x00, 0xE7, 0x04, 0xE3, 0xFF,
 ];
-const GC_13H: [u8; 9] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x05, 0x0F, 0xFF];
-const AC_13H: [u8; 21] = [
+const GC_12H: [u8; 9] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x0F, 0xFF];
+const AC_12H: [u8; 21] = [
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C,
-    0x0D, 0x0E, 0x0F, 0x41, 0x00, 0x0F, 0x00, 0x00,
+    0x0D, 0x0E, 0x0F, 0x01, 0x00, 0x0F, 0x00, 0x00,
 ];
 
-unsafe fn write_regs(crtc: &[u8; 25], gc: &[u8; 9], ac: &[u8; 21]) {
-    outb(0x3C2, MISC);
-    for (i, &v) in SEQ.iter().enumerate() {
+unsafe fn write_regs(misc: u8, seq: &[u8; 5], crtc: &[u8; 25], gc: &[u8; 9], ac: &[u8; 21]) {
+    outb(0x3C2, misc);
+    for (i, &v) in seq.iter().enumerate() {
         outb(0x3C4, i as u8);
         outb(0x3C5, v);
     }
@@ -100,14 +105,14 @@ fn set_palette() {
     }
 }
 
-/// Passe en mode graphique 13h et alloue le double-buffer.
+/// Passe en mode graphique 12h (640x480x16) et alloue le double-buffer.
 pub fn enter() {
     unsafe {
-        write_regs(&CRTC_13H, &GC_13H, &AC_13H);
+        write_regs(MISC_12H, &SEQ_12H, &CRTC_12H, &GC_12H, &AC_12H);
         BACK = Some(vec![0u8; WIDTH * HEIGHT]);
     }
     set_palette();
-    crate::serial_println!("[gfx] mode 13h actif (320x200x256)");
+    crate::serial_println!("[gfx] mode 12h actif (640x480x16)");
 }
 
 /// Restaure le mode texte 80x25 (registres standard mode 03h) + recharge la
@@ -236,13 +241,36 @@ pub fn rect(x: usize, y: usize, w: usize, h: usize, color: u8) {
     fill_rect(x + w - 1, y, 1, h, color);
 }
 
-/// Recopie le double-buffer vers la memoire video (presentation).
+/// Convertit le double-buffer lineaire en planaire et l'envoie a la memoire
+/// video. Mode 12h = 4 plans de bits ; chaque octet code 8 pixels pour un plan.
 pub fn present() {
     let buf = back();
     if buf.is_empty() { return; }
+    let bytes = WIDTH * HEIGHT / 8; // 38400
+    let fb = FB as *mut u8;
     unsafe {
-        let dst = FB as *mut u8;
-        core::ptr::copy_nonoverlapping(buf.as_ptr(), dst, WIDTH * HEIGHT);
+        for plane in 0u8..4 {
+            // Map mask : on ecrit uniquement dans le plan courant.
+            outb(0x3C4, 0x02);
+            outb(0x3C5, 1 << plane);
+            let bit = 1u8 << plane;
+            let mut i = 0usize;
+            while i < bytes {
+                let base = i * 8;
+                let mut b = 0u8;
+                // Assemble 8 pixels horizontaux (bit de poids fort = gauche).
+                if buf[base] & bit != 0 { b |= 0x80; }
+                if buf[base + 1] & bit != 0 { b |= 0x40; }
+                if buf[base + 2] & bit != 0 { b |= 0x20; }
+                if buf[base + 3] & bit != 0 { b |= 0x10; }
+                if buf[base + 4] & bit != 0 { b |= 0x08; }
+                if buf[base + 5] & bit != 0 { b |= 0x04; }
+                if buf[base + 6] & bit != 0 { b |= 0x02; }
+                if buf[base + 7] & bit != 0 { b |= 0x01; }
+                core::ptr::write_volatile(fb.add(i), b);
+                i += 1;
+            }
+        }
     }
 }
 

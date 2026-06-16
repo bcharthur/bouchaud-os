@@ -7,8 +7,8 @@
 
 use linked_list_allocator::LockedHeap;
 
-/// Taille du tas noyau (1 MiB).
-pub const HEAP_SIZE: usize = 1024 * 1024;
+/// Taille du tas noyau (4 MiB) : marge pour le framebuffer 640x480 + GUI.
+pub const HEAP_SIZE: usize = 4 * 1024 * 1024;
 
 static mut HEAP_SPACE: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 

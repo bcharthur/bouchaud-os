@@ -244,25 +244,25 @@ fn clamp_win(w: &mut Win) {
 fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
     let n = *spawn_n;
     *spawn_n += 1;
-    let x = 14 + (n % 5) * 10;
-    let y = 16 + (n % 5) * 9;
+    let x = 30 + (n % 6) * 22;
+    let y = 30 + (n % 6) * 18;
     match kind {
         0 => Win {
-            title: "Terminal".to_string(), x, y, w: 220, h: 150, min: false, restore: None,
+            title: "Terminal".to_string(), x, y, w: 380, h: 280, min: false, restore: None,
             app: App::Terminal { sb: { let mut v = Vec::new(); v.push("Bouchaud OS terminal".to_string()); v }, input: String::new(), cwd: home },
         },
         1 => Win {
-            title: "Fichiers".to_string(), x, y, w: 200, h: 150, min: false, restore: None,
+            title: "Fichiers".to_string(), x, y, w: 320, h: 300, min: false, restore: None,
             app: App::Files { cur: home, view: None, name: String::new() },
         },
         2 => {
             let url = "about:bouchaud".to_string();
             let content = load_page(&url);
-            Win { title: "Bouchaud Browser".to_string(), x, y, w: 250, h: 160, min: false, restore: None,
+            Win { title: "Bouchaud Browser".to_string(), x, y, w: 440, h: 320, min: false, restore: None,
                   app: App::Browser { url: url.clone(), input: url, content } }
         }
         _ => Win {
-            title: "Moniteur".to_string(), x, y, w: 200, h: 130, min: false, restore: None,
+            title: "Moniteur".to_string(), x, y, w: 300, h: 200, min: false, restore: None,
             app: App::Monitor,
         },
     }
