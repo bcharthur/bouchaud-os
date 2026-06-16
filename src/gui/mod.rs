@@ -6,8 +6,8 @@
 //! Tout est gate ici : un probleme graphique n'affecte pas l'OS texte.
 
 use crate::drivers::gfx::{
-    self, C_BLACK, C_BLUE, C_DESKTOP, C_DKGRAY, C_GRAY, C_GREEN, C_TITLE, C_WHITE, C_YELLOW,
-    HEIGHT, WIDTH,
+    self, C_BLACK, C_BLUE, C_CYAN, C_DESKTOP, C_DKGRAY, C_GRAY, C_GREEN, C_TITLE, C_WHITE,
+    C_YELLOW, HEIGHT, WIDTH,
 };
 use crate::drivers::keyboard::{self, Key};
 use crate::drivers::mouse;
@@ -30,8 +30,12 @@ impl Rect {
     }
 }
 
-fn term_btn() -> Rect { Rect { x: 2, y: HEIGHT as i32 - BAR_H as i32 + 1, w: 72, h: 9 } }
-fn quit_btn() -> Rect { Rect { x: 78, y: HEIGHT as i32 - BAR_H as i32 + 1, w: 64, h: 9 } }
+/// Applications de la barre des taches.
+const APPS: [&str; 4] = ["Terminal", "Fichiers", "Moniteur", "Quitter"];
+
+fn app_btn(i: usize) -> Rect {
+    Rect { x: 2 + i as i32 * 78, y: HEIGHT as i32 - BAR_H as i32 + 1, w: 76, h: 9 }
+}
 
 /// Lance le bureau graphique (bloquant jusqu'a Echap / bouton Quitter).
 pub fn run() {
@@ -61,13 +65,22 @@ pub fn run() {
         let left = mouse::left_down();
         let click = left && !prev_left;
 
-        if click && term_btn().hit(mx, my) {
-            terminal(&mut cwd);
-            prev_left = false;
-            continue;
-        }
-        if click && quit_btn().hit(mx, my) {
-            break;
+        if click {
+            let mut handled = false;
+            for i in 0..APPS.len() {
+                if app_btn(i).hit(mx, my) {
+                    match i {
+                        0 => { terminal(&mut cwd); }
+                        1 => { files(cwd); }
+                        2 => { monitor(); }
+                        _ => { gfx::leave(); crate::serial_println!("[gui] bureau ferme"); return; }
+                    }
+                    prev_left = false;
+                    handled = true;
+                    break;
+                }
+            }
+            if handled { continue; }
         }
 
         // Deplacement de la fenetre par sa barre de titre.
@@ -118,12 +131,11 @@ fn draw_desktop(wx: usize, wy: usize) {
 
     // Barre des taches : lanceur d'applications.
     gfx::fill_rect(0, HEIGHT - BAR_H, WIDTH, BAR_H, C_TITLE);
-    let tb = term_btn();
-    gfx::fill_rect(tb.x as usize, tb.y as usize, tb.w as usize, tb.h as usize, C_BLUE);
-    gfx::draw_text(tb.x as usize + 3, tb.y as usize + 1, "Terminal", C_WHITE);
-    let qb = quit_btn();
-    gfx::fill_rect(qb.x as usize, qb.y as usize, qb.w as usize, qb.h as usize, C_BLUE);
-    gfx::draw_text(qb.x as usize + 3, qb.y as usize + 1, "Quitter", C_WHITE);
+    for (i, label) in APPS.iter().enumerate() {
+        let b = app_btn(i);
+        gfx::fill_rect(b.x as usize, b.y as usize, b.w as usize, b.h as usize, C_BLUE);
+        gfx::draw_text(b.x as usize + 4, b.y as usize + 1, label, C_WHITE);
+    }
 }
 
 fn window(x: usize, y: usize, title: &str) {
@@ -147,6 +159,139 @@ fn draw_cursor(mx: usize, my: usize) {
                 gfx::pixel(mx + col, my + row, C_WHITE);
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// App "Fichiers" : navigateur de fichiers a la souris
+// ---------------------------------------------------------------------------
+
+const ROW_TOP: usize = 12;
+const ROW_H: usize = 9;
+const LIST_W: usize = 150;
+
+fn files(start: usize) {
+    let mut cur = start;
+    let mut prev_left = false;
+    let mut view: Option<(usize, Vec<String>)> = None; // (idx, lignes)
+
+    loop {
+        while let Some(sc) = keyboard::try_scancode() {
+            if sc == 0x01 { return; }
+        }
+        let (mxu, myu) = mouse::pos();
+        let left = mouse::left_down();
+        let click = left && !prev_left;
+        prev_left = left;
+
+        // Construit la liste : ".." (si pas racine) puis les enfants.
+        let fs = ramfs::fs();
+        let mut entries: Vec<usize> = Vec::new(); // usize::MAX = ".."
+        if cur != 0 { entries.push(usize::MAX); }
+        for i in 0..ramfs::MAX_NODES {
+            if fs.nodes[i].used && i != cur && fs.nodes[i].parent == cur {
+                entries.push(i);
+            }
+        }
+
+        // Clic dans la liste -> action.
+        if click && (mxu as usize) < LIST_W && myu >= ROW_TOP {
+            let row = (myu - ROW_TOP) / ROW_H;
+            if row < entries.len() {
+                let e = entries[row];
+                if e == usize::MAX {
+                    cur = fs.nodes[cur].parent;
+                    view = None;
+                } else if fs.nodes[e].kind == ramfs::NodeKind::Dir {
+                    if fs.can(e, ramfs::PERM_X) { cur = e; view = None; }
+                } else if fs.can(e, ramfs::PERM_R) {
+                    let mut lines: Vec<String> = Vec::new();
+                    let mut s = String::new();
+                    for k in 0..fs.nodes[e].content_len { s.push(fs.nodes[e].content[k] as char); }
+                    for l in s.split('\n') { lines.push(l.to_string()); }
+                    view = Some((e, lines));
+                }
+            }
+        }
+
+        // Rendu.
+        gfx::clear(C_BLACK);
+        gfx::fill_rect(0, 0, WIDTH, 9, C_TITLE);
+        let path = ramfs::path_string(ramfs::fs(), cur);
+        gfx::draw_text(2, 1, &format!("Fichiers  {}", clip(&path, 30)), C_WHITE);
+
+        let fs = ramfs::fs();
+        let mut y = ROW_TOP;
+        for &e in entries.iter() {
+            if y + ROW_H > HEIGHT - 2 { break; }
+            if e == usize::MAX {
+                gfx::draw_text(2, y, "..", C_YELLOW);
+            } else if fs.nodes[e].kind == ramfs::NodeKind::Dir {
+                gfx::draw_text(2, y, &format!("{}/", clip(fs.nodes[e].name_str(), 16)), C_CYAN);
+            } else {
+                gfx::draw_text(2, y, clip(fs.nodes[e].name_str(), 17), C_WHITE);
+            }
+            y += ROW_H;
+        }
+
+        // Panneau de droite : contenu du fichier selectionne.
+        gfx::fill_rect(LIST_W, 10, 1, HEIGHT - 12, C_GRAY);
+        if let Some((idx, lines)) = &view {
+            gfx::draw_text(LIST_W + 4, 11, clip(fs.nodes[*idx].name_str(), 20), C_GREEN);
+            let mut vy = 22;
+            for l in lines.iter() {
+                if vy + 8 > HEIGHT - 2 { break; }
+                gfx::draw_text(LIST_W + 4, vy, clip(l, 20), C_WHITE);
+                vy += 8;
+            }
+        } else {
+            gfx::draw_text(LIST_W + 4, 12, "Clic sur un", C_GRAY);
+            gfx::draw_text(LIST_W + 4, 22, "fichier pour", C_GRAY);
+            gfx::draw_text(LIST_W + 4, 32, "l'afficher", C_GRAY);
+        }
+        gfx::draw_text(2, HEIGHT - 9, "Echap=fermer  clic=ouvrir", C_YELLOW);
+        draw_cursor(mxu, myu);
+        gfx::present();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// App "Moniteur" : informations systeme en direct
+// ---------------------------------------------------------------------------
+
+fn monitor() {
+    loop {
+        while let Some(sc) = keyboard::try_scancode() {
+            if sc == 0x01 { return; }
+        }
+        let (mxu, myu) = mouse::pos();
+
+        gfx::clear(C_BLACK);
+        gfx::fill_rect(0, 0, WIDTH, 9, C_TITLE);
+        gfx::draw_text(2, 1, "Moniteur systeme", C_WHITE);
+
+        let dt = rtc::now();
+        let (used, free, total) = crate::kernel::heap::stats();
+        let vendor = crate::arch::x86_64::cpu::vendor();
+        let mut vs = String::new();
+        for b in vendor.iter() { vs.push(*b as char); }
+        let fs = ramfs::fs();
+
+        let mut y = 14;
+        let line = |s: &str, col: u8, yy: &mut usize| { gfx::draw_text(4, *yy, s, col); *yy += 10; };
+        line(&format!("OS      : Bouchaud OS {}", crate::VERSION), C_YELLOW, &mut y);
+        line(&format!("Heure   : {:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second), C_GREEN, &mut y);
+        line(&format!("Date    : {:04}-{:02}-{:02}", dt.year, dt.month, dt.day), C_WHITE, &mut y);
+        line(&format!("Uptime  : {} s", timer::seconds()), C_WHITE, &mut y);
+        line(&format!("CPU     : {}", vs), C_WHITE, &mut y);
+        line(&format!("Heap    : {}/{} o libres {}", used, total, free), C_WHITE, &mut y);
+        line(&format!("RAMFS   : {} inodes utilises", fs.used_nodes()), C_WHITE, &mut y);
+        line(&format!("PCI     : {} peripheriques", crate::arch::x86_64::pci::count()), C_WHITE, &mut y);
+        line(&format!("Session : {}", users::session().username()), C_CYAN, &mut y);
+
+        gfx::draw_text(2, HEIGHT - 9, "Echap=fermer (mise a jour en direct)", C_YELLOW);
+        draw_cursor(mxu, myu);
+        gfx::present();
     }
 }
 
