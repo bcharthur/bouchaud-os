@@ -3,3 +3,6 @@
 *.iml
 .DS_Store
 *.pdb
+# Local QEMU/session logs
+session.log
+*.log

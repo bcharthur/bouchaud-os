@@ -1,98 +1,85 @@
-//! Gestionnaire de fenetres (Window Manager) de Bouchaud OS — etape Windows-like.
+//! Bureau graphique VGA mode 13h.
 //!
-//! Bureau graphique multi-fenetres en mode VGA 13h : fenetres deplacables et
-//! fermables, focus / z-order, **menu Demarrer**, barre des taches, et des
-//! applications natives (Terminal, Fichiers, Moniteur, Bouchaud Browser).
+//! V0.13.x : bureau simple avec barre des taches, bouton Terminal, bouton
+//! Quitter et terminal graphique interactif. Le terminal graphique reutilise
+//! le shell existant via `shell::run_capture`, donc il garde les commandes,
+//! chainages `; && ||`, pipes `|`, redirections et variables `$VAR`.
 //!
-//! Tout tourne dans une boucle d'evenements unique (entree souris/clavier non
-//! bloquante) ; chaque fenetre porte l'etat de son application.
+//! Important : `gfx::leave()` recharge la police texte VGA avant le retour au
+//! shell texte. Cela evite les rayures verticales observees apres le mode 13h.
 
-use crate::drivers::gfx::{
-    self, C_BLACK, C_BLUE, C_CYAN, C_DESKTOP, C_DKGRAY, C_GRAY, C_GREEN, C_RED, C_TITLE, C_WHITE,
-    C_YELLOW, HEIGHT, WIDTH,
-};
-use crate::drivers::keyboard::{self, Key};
-use crate::drivers::mouse;
 use crate::arch::x86_64::rtc;
-use crate::fs::ramfs;
+use crate::drivers::gfx::{
+    self, C_BLACK, C_BLUE, C_CYAN, C_DESKTOP, C_DKGRAY, C_GRAY, C_GREEN, C_TITLE,
+    C_WHITE, C_YELLOW, HEIGHT, WIDTH,
+};
+use crate::drivers::{keyboard::{self, Key}, mouse};
 use crate::kernel::timer;
-use crate::users;
+use crate::{shell, users};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-const BAR_H: usize = 11; // hauteur des barres haut/bas
-const TITLE_H: i32 = 10; // hauteur barre de titre fenetre
+const BAR_H: usize = 11;
+const WIN_W: usize = 200;
+const WIN_H: usize = 110;
+const MAX_SCROLLBACK: usize = 300;
+const TERM_COLS: usize = WIDTH / 8;          // 40 colonnes en mode 13h
+const TERM_TOP: usize = 10;
+const TERM_ROWS: usize = (HEIGHT - TERM_TOP) / 8;
 
-/// Etat applicatif porte par une fenetre.
-enum App {
-    Terminal { sb: Vec<String>, input: String, cwd: usize },
-    Files { cur: usize, view: Option<Vec<String>>, name: String },
-    Browser { url: String, input: String, content: Vec<String> },
-    Monitor,
-}
-
-struct Win {
-    title: String,
+#[derive(Clone, Copy)]
+struct Rect {
     x: i32,
     y: i32,
     w: i32,
     h: i32,
-    app: App,
 }
 
-struct Rect { x: i32, y: i32, w: i32, h: i32 }
 impl Rect {
     fn hit(&self, mx: i32, my: i32) -> bool {
         mx >= self.x && mx < self.x + self.w && my >= self.y && my < self.y + self.h
     }
 }
 
-/// Entrees du menu Demarrer.
-const MENU: [&str; 5] = ["Terminal", "Fichiers", "Navigateur", "Moniteur", "Quitter"];
-
-fn start_btn() -> Rect {
-    Rect { x: 2, y: HEIGHT as i32 - BAR_H as i32 + 1, w: 38, h: 9 }
+fn term_btn() -> Rect {
+    Rect { x: 2, y: HEIGHT as i32 - BAR_H as i32 + 1, w: 72, h: 9 }
 }
 
-fn menu_rect() -> Rect {
-    let h = MENU.len() as i32 * 10 + 2;
-    Rect { x: 2, y: HEIGHT as i32 - BAR_H as i32 - h, w: 92, h }
+fn chromium_btn() -> Rect {
+    Rect { x: 78, y: HEIGHT as i32 - BAR_H as i32 + 1, w: 82, h: 9 }
 }
 
-/// Lance le bureau (boucle d'evenements, bloquant jusqu'a Quitter).
+fn quit_btn() -> Rect {
+    Rect { x: 164, y: HEIGHT as i32 - BAR_H as i32 + 1, w: 64, h: 9 }
+}
+
+/// Lance le bureau graphique. Echap ou le bouton Quitter reviennent au shell
+/// texte. Le retour appelle `gfx::leave()` pour restaurer le mode texte et la
+/// police VGA.
 pub fn run() {
     gfx::enter();
     mouse::init();
-    crate::serial_println!("[gui] window manager demarre");
+    crate::serial_println!("[gui] bureau demarre");
 
-    let home = ramfs::fs().resolve(users::session().home(), 0).unwrap_or(0);
-    let mut wins: Vec<Win> = Vec::new();
-    let mut menu_open = false;
+    let mut cwd = crate::fs::ramfs::fs().resolve(users::session().home(), 0).unwrap_or(0);
+    let mut wx: i32 = ((WIDTH - WIN_W) / 2) as i32;
+    let mut wy: i32 = 42;
+    let mut dragging = false;
+    let mut offx = 0i32;
+    let mut offy = 0i32;
     let mut prev_left = false;
-    let mut drag: Option<(i32, i32)> = None; // offset pour la fenetre du dessus
-    let mut spawn_n = 0i32;
 
-    // Fenetre d'accueil : le navigateur sur about:bouchaud.
-    wins.push(make_app(2, home, &mut spawn_n));
-
-    let mut quit = false;
-    while !quit {
-        // ---- Clavier (non bloquant) ----
-        while let Some(k) = keyboard::try_key() {
-            match k {
-                Key::Other => {
-                    if menu_open { menu_open = false; }
-                    else if wins.pop().is_none() { quit = true; }
-                }
-                other => {
-                    if let Some(w) = wins.last_mut() {
-                        if key_to_app(w, other, home) {
-                            wins.pop(); // l'app demande sa fermeture (exit)
-                        }
-                    }
-                }
+    loop {
+        // Echap instantane : on draine toute la file clavier a chaque frame.
+        let mut quit = false;
+        while let Some(key) = keyboard::try_key() {
+            if key == Key::Escape {
+                quit = true;
             }
+        }
+        if quit {
+            break;
         }
 
         // ---- Souris ----
@@ -103,97 +90,114 @@ pub fn run() {
         let click = left && !prev_left;
         prev_left = left;
 
+        if click && term_btn().hit(mx, my) {
+            terminal(&mut cwd);
+            // Evite de propager le relachement/clic au bureau.
+            prev_left = false;
+            continue;
+        }
+        if click && chromium_btn().hit(mx, my) {
+            chromium_launcher();
+            prev_left = false;
+            continue;
+        }
+        if click && quit_btn().hit(mx, my) {
+            break;
+        }
+
+        // Fenetre Systeme deplacable par la barre de titre.
         if left {
-            if let Some((ox, oy)) = drag {
-                if let Some(w) = wins.last_mut() {
-                    w.x = mx - ox;
-                    w.y = my - oy;
-                    clamp_win(w);
-                }
+            if !dragging
+                && mx >= wx
+                && mx < wx + WIN_W as i32
+                && my >= wy
+                && my < wy + BAR_H as i32
+            {
+                dragging = true;
+                offx = mx - wx;
+                offy = my - wy;
+            }
+            if dragging {
+                wx = mx - offx;
+                wy = my - offy;
             }
         } else {
-            drag = None;
+            dragging = false;
         }
+        clamp_window(&mut wx, &mut wy, WIN_W as i32, WIN_H as i32);
+        prev_left = left;
 
-        if click {
-            handle_click(mx, my, &mut wins, &mut menu_open, &mut drag, &mut quit, home, &mut spawn_n);
-        }
-
-        // ---- Rendu ----
-        draw_desktop(&wins);
-        if menu_open { draw_menu(); }
-        draw_taskbar(&wins, menu_open);
+        draw_desktop(wx as usize, wy as usize);
         draw_cursor(mxu, myu);
         gfx::present();
     }
 
+    close_gui();
+}
+
+fn close_gui() {
     gfx::leave();
-    crate::serial_println!("[gui] window manager ferme");
+    crate::drivers::vga::clear();
+    crate::serial_println!("[gui] bureau ferme");
 }
 
-fn handle_click(
-    mx: i32, my: i32,
-    wins: &mut Vec<Win>,
-    menu_open: &mut bool,
-    drag: &mut Option<(i32, i32)>,
-    quit: &mut bool,
-    home: usize,
-    spawn_n: &mut i32,
-) {
-    // Menu Demarrer ouvert : clic sur un item ?
-    if *menu_open {
-        let mr = menu_rect();
-        if mr.hit(mx, my) {
-            let row = ((my - mr.y - 1) / 10) as usize;
-            if row < MENU.len() {
-                if row == MENU.len() - 1 { *quit = true; }
-                else { wins.push(make_app(row, home, spawn_n)); }
-            }
-        }
-        *menu_open = false;
-        return;
-    }
-    // Bouton Demarrer.
-    if start_btn().hit(mx, my) { *menu_open = true; return; }
-
-    // Boutons de la barre des taches (focus fenetre).
-    for i in 0..wins.len() {
-        if taskbar_btn(i).hit(mx, my) {
-            let w = wins.remove(i);
-            wins.push(w);
-            return;
-        }
-    }
-
-    // Fenetres, du dessus vers le dessous.
-    let mut hit: Option<usize> = None;
-    for i in (0..wins.len()).rev() {
-        let w = &wins[i];
-        if mx >= w.x && mx < w.x + w.w && my >= w.y && my < w.y + w.h {
-            hit = Some(i);
-            break;
-        }
-    }
-    if let Some(i) = hit {
-        let w = wins.remove(i);
-        wins.push(w);
-        let top = wins.last_mut().unwrap();
-        // Bouton fermer (coin haut droit).
-        if mx >= top.x + top.w - 10 && mx < top.x + top.w - 1 && my >= top.y + 1 && my < top.y + TITLE_H {
-            wins.pop();
-        } else if my < top.y + TITLE_H {
-            *drag = Some((mx - top.x, my - top.y)); // glisser par la barre de titre
-        } else {
-            app_click(top, mx, my, home);
-        }
-    }
+fn clamp_window(wx: &mut i32, wy: &mut i32, ww: i32, wh: i32) {
+    if *wx < 0 { *wx = 0; }
+    if *wy < BAR_H as i32 { *wy = BAR_H as i32; }
+    if *wx + ww > WIDTH as i32 { *wx = WIDTH as i32 - ww; }
+    if *wy + wh > HEIGHT as i32 - BAR_H as i32 { *wy = HEIGHT as i32 - BAR_H as i32 - wh; }
 }
 
-fn clamp_win(w: &mut Win) {
-    if w.x < 0 { w.x = 0; }
-    if w.y < BAR_H as i32 { w.y = BAR_H as i32; }
-    if w.x + w.w > WIDTH as i32 { w.x = WIDTH as i32 - w.w; }
-    if w.y + w.h > HEIGHT as i32 - BAR_H as i32 { w.y = HEIGHT as i32 - BAR_H as i32 - w.h; }
+fn draw_desktop(wx: usize, wy: usize) {
+    gfx::clear(C_DESKTOP);
+    draw_topbar();
+    draw_system_window(wx, wy);
+    draw_taskbar();
+}
+
+fn draw_topbar() {
+    gfx::fill_rect(0, 0, WIDTH, BAR_H, C_TITLE);
+    gfx::draw_text(2, 2, "Bouchaud OS", C_WHITE);
+    let dt = rtc::now();
+    let clk = format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second);
+    gfx::draw_text(WIDTH - clk.len() * 8 - 2, 2, &clk, C_YELLOW);
+}
+
+fn draw_taskbar() {
+    gfx::fill_rect(0, HEIGHT - BAR_H, WIDTH, BAR_H, C_TITLE);
+
+    let tb = term_btn();
+    gfx::fill_rect(tb.x as usize, tb.y as usize, tb.w as usize, tb.h as usize, C_BLUE);
+    gfx::draw_text(tb.x as usize + 3, tb.y as usize + 1, "Terminal", C_WHITE);
+
+    let cb = chromium_btn();
+    gfx::fill_rect(cb.x as usize, cb.y as usize, cb.w as usize, cb.h as usize, C_BLUE);
+    gfx::draw_text(cb.x as usize + 3, cb.y as usize + 1, "Chromium", C_WHITE);
+
+    let qb = quit_btn();
+    gfx::fill_rect(qb.x as usize, qb.y as usize, qb.w as usize, qb.h as usize, C_BLUE);
+    gfx::draw_text(qb.x as usize + 3, qb.y as usize + 1, "Quitter", C_WHITE);
+}
+
+fn draw_system_window(wx: usize, wy: usize) {
+    window(wx, wy, WIN_W, WIN_H, "Systeme");
+    let tx = wx + 5;
+    let mut ty = wy + BAR_H + 4;
+    let dt = rtc::now();
+
+    gfx::draw_text(tx, ty, &format!("Version : {}", crate::VERSION), C_WHITE); ty += 10;
+    gfx::draw_text(tx, ty, &format!("Session : {}", users::session().username()), C_WHITE); ty += 10;
+    gfx::draw_text(tx, ty, &format!("Date    : {:04}-{:02}-{:02}", dt.year, dt.month, dt.day), C_WHITE); ty += 10;
+    gfx::draw_text(tx, ty, &format!("Uptime  : {} s", timer::seconds()), C_WHITE); ty += 12;
+    gfx::draw_text(tx, ty, "OS souverain francais", C_YELLOW);
+}
+
+fn window(x: usize, y: usize, w: usize, h: usize, title: &str) {
+    gfx::fill_rect(x + 3, y + 3, w, h, C_DKGRAY);
+    gfx::fill_rect(x, y, w, h, C_GRAY);
+    gfx::rect(x, y, w, h, C_WHITE);
+    gfx::fill_rect(x, y, w, BAR_H, C_BLUE);
+    gfx::draw_text(x + 3, y + 2, title, C_WHITE);
 }
 
 /// Cree une fenetre d'application a partir d'un index de menu.
@@ -225,30 +229,21 @@ fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
 }
 
 // ---------------------------------------------------------------------------
-// Entree clavier -> application focalisee
+// Lanceur Chromium experimental
 // ---------------------------------------------------------------------------
 
-/// Transmet une touche a l'app de la fenetre active. Renvoie true si l'app
-/// demande sa fermeture.
-fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
-    match &mut w.app {
-        App::Terminal { sb, input, cwd } => match k {
-            Key::Enter => {
-                let prompt = format!("{}:{}$ ", users::session().username(), ramfs::path_string(ramfs::fs(), *cwd));
-                sb.push(format!("{}{}", prompt, input));
-                let cmd = input.trim().to_string();
-                input.clear();
-                if cmd.is_empty() { return false; }
-                if cmd == "exit" { return true; }
-                if cmd == "clear" { sb.clear(); return false; }
-                if is_blocked(&cmd) {
-                    sb.push(format!("{}: a lancer depuis le shell texte", first_word(&cmd)));
-                } else {
-                    let out = crate::shell::run_capture(&cmd, cwd);
-                    for l in out.lines() { sb.push(l.to_string()); }
+fn chromium_launcher() {
+    crate::serial_println!("[gui] chromium launcher ouvert");
+    let mut prev_left = false;
+
+    loop {
+        while let Some(key) = keyboard::try_key() {
+            match key {
+                Key::Escape | Key::Enter | Key::Backspace => {
+                    crate::serial_println!("[gui] chromium launcher ferme");
+                    return;
                 }
-                while sb.len() > 300 { sb.remove(0); }
-                false
+                _ => {}
             }
             Key::Backspace => { input.pop(); false }
             Key::Char(c) => { if input.len() < 120 { input.push(c as char); } false }
@@ -278,244 +273,187 @@ fn is_blocked(cmd: &str) -> bool {
         "edit" | "nano" | "desktop" | "gui" | "su" | "passwd" | "useradd" | "userdel" | "login")
 }
 
-// ---------------------------------------------------------------------------
-// Clic dans le corps d'une application
-// ---------------------------------------------------------------------------
+        let (mxu, myu) = mouse::pos();
+        let mx = mxu as i32;
+        let my = myu as i32;
+        let left = mouse::left_down();
+        let click = left && !prev_left;
+        if click && (term_btn().hit(mx, my) || quit_btn().hit(mx, my)) {
+            crate::serial_println!("[gui] chromium launcher ferme (bouton)");
+            return;
+        }
+        prev_left = left;
 
-fn app_click(w: &mut Win, _mx: i32, my: i32, _home: usize) {
-    if let App::Files { cur, view, name } = &mut w.app {
-        // En mode apercu : un clic revient a la liste.
-        if view.is_some() { *view = None; return; }
-        let by = w.y + TITLE_H + 2;
-        let row = ((my - by) / 9).max(0) as usize;
-        let fs = ramfs::fs();
-        let mut entries: Vec<usize> = Vec::new();
-        if *cur != 0 { entries.push(usize::MAX); }
-        for i in 0..ramfs::MAX_NODES {
-            if fs.nodes[i].used && i != *cur && fs.nodes[i].parent == *cur { entries.push(i); }
-        }
-        if row >= entries.len() { return; }
-        let e = entries[row];
-        if e == usize::MAX {
-            *cur = fs.nodes[*cur].parent;
-        } else if fs.nodes[e].kind == ramfs::NodeKind::Dir {
-            if fs.can(e, ramfs::PERM_X) { *cur = e; }
-        } else if fs.can(e, ramfs::PERM_R) {
-            let mut lines = Vec::new();
-            let mut s = String::new();
-            for k in 0..fs.nodes[e].content_len { s.push(fs.nodes[e].content[k] as char); }
-            for l in s.split('\n') { lines.push(l.to_string()); }
-            *name = fs.nodes[e].name_str().to_string();
-            *view = Some(lines);
-        }
+        draw_chromium_launcher();
+        draw_cursor(mxu, myu);
+        gfx::present();
     }
 }
 
-// ---------------------------------------------------------------------------
-// Bouchaud Browser : pages internes
-// ---------------------------------------------------------------------------
-
-fn load_page(url: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    if url == "about:bouchaud" {
-        out.push("Bouchaud OS".to_string());
-        out.push("OS souverain francais experimental".to_string());
-        out.push("".to_string());
-        out.push(format!("Version : {}", crate::VERSION));
-        out.push("Kernel  : Rust no_std".to_string());
-        out.push("GUI     : window manager VGA".to_string());
-        out.push("Reseau  : loopback (e1000 a venir)".to_string());
-        out.push("".to_string());
-        out.push("Pages: about:system  file:/readme.txt".to_string());
-    } else if url == "about:system" {
-        let dt = rtc::now();
-        let (used, free, total) = crate::kernel::heap::stats();
-        out.push(format!("Heure  : {:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second));
-        out.push(format!("Uptime : {} s", timer::seconds()));
-        out.push(format!("Heap   : {}/{} o (libre {})", used, total, free));
-        out.push(format!("PCI    : {} peripheriques", crate::arch::x86_64::pci::count()));
-        out.push(format!("User   : {}", users::session().username()));
-    } else if let Some(path) = url.strip_prefix("file:") {
-        // file:/chemin ou file:///chemin
-        let p = path.trim_start_matches('/');
-        let full = format!("/{}", p);
-        let fs = ramfs::fs();
-        match fs.resolve_checked(&full, 0) {
-            Ok(idx) if fs.nodes[idx].kind == ramfs::NodeKind::File => {
-                if fs.can(idx, ramfs::PERM_R) {
-                    let mut s = String::new();
-                    for k in 0..fs.nodes[idx].content_len { s.push(fs.nodes[idx].content[k] as char); }
-                    for l in s.split('\n') { out.push(l.to_string()); }
-                } else {
-                    out.push("Erreur: permission denied".to_string());
-                }
-            }
-            _ => out.push(format!("Erreur: introuvable {}", full)),
-        }
-    } else if url.starts_with("http://") || url.starts_with("https://") {
-        out.push("Reseau non disponible.".to_string());
-        out.push("Le driver e1000 (HTTP) arrive plus tard.".to_string());
-    } else {
-        out.push(format!("Page inconnue: {}", url));
-        out.push("Essaie: about:bouchaud, about:system, file:/readme.txt".to_string());
-    }
-    out
-}
-
-// ---------------------------------------------------------------------------
-// Rendu
-// ---------------------------------------------------------------------------
-
-fn draw_desktop(wins: &[Win]) {
+fn draw_chromium_launcher() {
     gfx::clear(C_DESKTOP);
-    gfx::fill_rect(0, 0, WIDTH, BAR_H, C_TITLE);
-    gfx::draw_text(2, 2, "Bouchaud OS", C_WHITE);
-    let dt = rtc::now();
-    let clk = format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second);
-    gfx::draw_text(WIDTH - clk.len() * 8 - 2, 2, &clk, C_YELLOW);
+    draw_topbar();
+    draw_taskbar();
 
-    let top = wins.len();
-    for (i, w) in wins.iter().enumerate() {
-        draw_window(w, i + 1 == top);
-    }
+    let w = 292usize;
+    let h = 132usize;
+    let x = (WIDTH - w) / 2;
+    let y = 32usize;
+    window(x, y, w, h, "Chromium");
+
+    let tx = x + 7;
+    let mut ty = y + BAR_H + 6;
+    gfx::draw_text(tx, ty, "Chromium.exe pret sur /apps", C_YELLOW); ty += 11;
+    gfx::draw_text(tx, ty, "Fichier: /apps/chromium.exe", C_WHITE); ty += 11;
+    gfx::draw_text(tx, ty, "Etat: lanceur bureau installe", C_GREEN); ty += 13;
+
+    gfx::draw_text(tx, ty, "Execution native: pas encore", C_WHITE); ty += 10;
+    gfx::draw_text(tx, ty, "Il manque: processus + loader", C_WHITE); ty += 10;
+    gfx::draw_text(tx, ty, "PE/Win32/Chromium + reseau", C_WHITE); ty += 10;
+    gfx::draw_text(tx, ty, "e1000 -> TCP/IP -> HTTP/TLS", C_CYAN); ty += 13;
+
+    gfx::draw_text(tx, ty, "Entree/Echap: retour bureau", C_YELLOW);
 }
 
-fn draw_window(w: &Win, focused: bool) {
-    let x = w.x.max(0) as usize;
-    let y = w.y.max(0) as usize;
-    let ww = w.w as usize;
-    let wh = w.h as usize;
-    gfx::fill_rect(x + 2, y + 2, ww, wh, C_DKGRAY); // ombre
-    gfx::fill_rect(x, y, ww, wh, C_GRAY);
-    gfx::rect(x, y, ww, wh, C_WHITE);
-    gfx::fill_rect(x, y, ww, TITLE_H as usize, if focused { C_BLUE } else { C_DKGRAY });
-    gfx::draw_text(x + 3, y + 1, clip(&w.title, (ww / 8).saturating_sub(3)), C_WHITE);
-    // Bouton fermer.
-    gfx::fill_rect(x + ww - 10, y + 1, 8, 8, C_RED);
-    gfx::draw_text(x + ww - 9, y + 1, "x", C_WHITE);
+// ---------------------------------------------------------------------------
+// Terminal graphique interactif
+// ---------------------------------------------------------------------------
 
-    draw_app(w);
+fn term_prompt(cwd: usize) -> String {
+    format!("{}@bouchaud-os:{}$ ", users::session().username(), shell::path_string(cwd))
 }
 
-fn draw_app(w: &Win) {
-    let bx = w.x.max(0) as usize + 3;
-    let by = w.y.max(0) as usize + TITLE_H as usize + 2;
-    let bw = w.w as usize - 6;
-    let bh = w.h as usize - TITLE_H as usize - 4;
-    let cols = bw / 8;
-    let rows = bh / 8;
+fn terminal(cwd: &mut usize) {
+    crate::serial_println!("[gui] terminal demarre");
 
-    match &w.app {
-        App::Terminal { sb, input, cwd } => {
-            let shown = rows.saturating_sub(1);
-            let start = if sb.len() > shown { sb.len() - shown } else { 0 };
-            let mut yy = by;
-            for line in &sb[start..] {
-                gfx::draw_text(bx, yy, clip(line, cols), C_GREEN);
-                yy += 8;
-            }
-            let prompt = format!("{}:{}$ ", users::session().username(), ramfs::path_string(ramfs::fs(), *cwd));
-            let cur = format!("{}{}_", prompt, input);
-            gfx::draw_text(bx, yy, clip(&cur, cols), C_WHITE);
-        }
-        App::Files { cur, view, name } => {
-            if let Some(lines) = view {
-                gfx::draw_text(bx, by, clip(name, cols), C_YELLOW);
-                let mut yy = by + 10;
-                for l in lines {
-                    if yy + 8 > by + bh { break; }
-                    gfx::draw_text(bx, yy, clip(l, cols), C_WHITE);
-                    yy += 8;
+    let mut lines: Vec<String> = Vec::new();
+    push_wrapped(&mut lines, "Terminal graphique Bouchaud OS", TERM_COLS - 1);
+    push_wrapped(&mut lines, "Commandes: help, whoami, ls, sysinfo, date, exit", TERM_COLS - 1);
+    push_wrapped(&mut lines, "", TERM_COLS - 1);
+
+    let mut input = String::new();
+
+    loop {
+        // Drain clavier a chaque frame : Echap et saisie repondent immediatement.
+        while let Some(key) = keyboard::try_key() {
+            match key {
+                Key::Escape => {
+                    crate::serial_println!("[gui] terminal ferme (echap)");
+                    return;
                 }
-            } else {
-                let fs = ramfs::fs();
-                let mut yy = by;
-                if *cur != 0 { gfx::draw_text(bx, yy, "..", C_YELLOW); yy += 9; }
-                for i in 0..ramfs::MAX_NODES {
-                    if yy + 9 > by + bh { break; }
-                    if fs.nodes[i].used && i != *cur && fs.nodes[i].parent == *cur {
-                        if fs.nodes[i].kind == ramfs::NodeKind::Dir {
-                            gfx::draw_text(bx, yy, &format!("{}/", clip(fs.nodes[i].name_str(), cols - 1)), C_CYAN);
-                        } else {
-                            gfx::draw_text(bx, yy, clip(fs.nodes[i].name_str(), cols), C_WHITE);
+                Key::Enter => {
+                    let prompt = term_prompt(*cwd);
+                    let cmd = input.clone();
+                    push_wrapped(&mut lines, &format!("{}{}", prompt, cmd), TERM_COLS - 1);
+                    input.clear();
+
+                    let trimmed_owned = shell::trim(&cmd).to_string();
+                    let trimmed = trimmed_owned.as_str();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    if trimmed == "exit" || trimmed == "logout" {
+                        crate::serial_println!("[gui] terminal ferme (exit)");
+                        return;
+                    }
+                    if trimmed == "clear" {
+                        lines.clear();
+                        continue;
+                    }
+                    if command_blocked_in_gui(trimmed) {
+                        push_wrapped(
+                            &mut lines,
+                            "Commande bloquee dans le terminal GUI: utiliser le shell texte.",
+                            TERM_COLS - 1,
+                        );
+                        continue;
+                    }
+
+                    // Reutilise le shell complet : ;, &&, ||, pipes, redirections, $VAR...
+                    let out = shell::run_capture(trimmed, cwd);
+                    if out.is_empty() {
+                        // Commande valide sans sortie : on ne pollue pas le terminal.
+                    } else {
+                        for l in out.lines() {
+                            push_wrapped(&mut lines, l, TERM_COLS - 1);
                         }
-                        yy += 9;
+                    }
+                    trim_scrollback(&mut lines);
+                }
+                Key::Backspace => {
+                    input.pop();
+                }
+                Key::Char(c) => {
+                    if input.len() < 160 {
+                        input.push(c as char);
                     }
                 }
+                _ => {}
             }
         }
-        App::Browser { url, input, content } => {
-            // Barre d'adresse.
-            gfx::fill_rect(bx, by, bw, 9, C_WHITE);
-            let shown = if input == url { format!("{}", input) } else { format!("{}_", input) };
-            gfx::draw_text(bx + 1, by + 1, clip(&shown, cols), C_BLACK);
-            // Contenu.
-            let mut yy = by + 12;
-            for l in content {
-                if yy + 8 > by + bh { break; }
-                gfx::draw_text(bx, yy, clip(l, cols), C_WHITE);
-                yy += 8;
-            }
-        }
-        App::Monitor => {
-            let dt = rtc::now();
-            let (used, free, total) = crate::kernel::heap::stats();
-            let fs = ramfs::fs();
-            let mut yy = by;
-            let mut put = |s: &str, c: u8| { gfx::draw_text(bx, yy, clip(s, cols), c); yy += 10; };
-            put(&format!("Bouchaud OS {}", crate::VERSION), C_YELLOW);
-            put(&format!("Heure  {:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second), C_GREEN);
-            put(&format!("Uptime {} s", timer::seconds()), C_WHITE);
-            put(&format!("Heap   {}/{} o", used, total), C_WHITE);
-            put(&format!("Libre  {} o", free), C_WHITE);
-            put(&format!("PCI    {} dev", crate::arch::x86_64::pci::count()), C_WHITE);
-            put(&format!("RAMFS  {} inodes", fs.used_nodes()), C_WHITE);
-        }
+
+        render_terminal(&lines, &input, *cwd);
+        gfx::present();
     }
 }
 
-fn taskbar_btn(i: usize) -> Rect {
-    Rect { x: 44 + i as i32 * 56, y: HEIGHT as i32 - BAR_H as i32 + 1, w: 54, h: 9 }
+fn command_blocked_in_gui(cmd: &str) -> bool {
+    let mut argv = [""; 12];
+    let argc = shell::tokenize(cmd, &mut argv);
+    if argc == 0 { return false; }
+    matches!(argv[0], "desktop" | "gui" | "edit" | "nano" | "panic-test" | "breakpoint")
 }
 
-fn draw_taskbar(wins: &[Win], menu_open: bool) {
-    gfx::fill_rect(0, HEIGHT - BAR_H, WIDTH, BAR_H, C_TITLE);
-    let sb = start_btn();
-    gfx::fill_rect(sb.x as usize, sb.y as usize, sb.w as usize, sb.h as usize, if menu_open { C_GREEN } else { C_BLUE });
-    gfx::draw_text(sb.x as usize + 3, sb.y as usize + 1, "Start", C_WHITE);
-    for (i, w) in wins.iter().enumerate() {
-        let b = taskbar_btn(i);
-        if b.x + b.w > WIDTH as i32 { break; }
-        gfx::fill_rect(b.x as usize, b.y as usize, b.w as usize, b.h as usize, C_DKGRAY);
-        gfx::draw_text(b.x as usize + 2, b.y as usize + 1, clip(&w.title, 6), C_WHITE);
+fn render_terminal(lines: &[String], input: &str, cwd: usize) {
+    gfx::clear(C_BLACK);
+    gfx::fill_rect(0, 0, WIDTH, 9, C_TITLE);
+    gfx::draw_text(2, 1, "Bouchaud OS - Terminal", C_WHITE);
+
+    let visible_rows = TERM_ROWS.saturating_sub(1);
+    let start = lines.len().saturating_sub(visible_rows);
+    let mut y = TERM_TOP;
+    for line in &lines[start..] {
+        let color = if line.starts_with("root@") || line.starts_with("arthur@") || line.starts_with("guest@") {
+            C_GREEN
+        } else if line.starts_with("Erreur") || line.starts_with("Commande bloquee") {
+            C_YELLOW
+        } else {
+            C_CYAN
+        };
+        draw_clipped(2, y, line, TERM_COLS - 1, color);
+        y += 8;
+    }
+
+    let current = format!("{}{}{}", term_prompt(cwd), input, "_");
+    draw_clipped(2, HEIGHT - 8, &current, TERM_COLS - 1, C_WHITE);
+}
+
+fn push_wrapped(lines: &mut Vec<String>, text: &str, max: usize) {
+    if text.is_empty() {
+        lines.push(String::new());
+        trim_scrollback(lines);
+        return;
+    }
+
+    let bytes = text.as_bytes();
+    let mut start = 0usize;
+    while start < bytes.len() {
+        let end = (start + max).min(bytes.len());
+        // Les sorties Bouchaud OS sont ASCII pour l'instant. Les accents clavier
+        // sont translitteres, donc ce decoupage par octets reste sur.
+        lines.push(String::from(&text[start..end]));
+        start = end;
+    }
+    trim_scrollback(lines);
+}
+
+fn trim_scrollback(lines: &mut Vec<String>) {
+    while lines.len() > MAX_SCROLLBACK {
+        lines.remove(0);
     }
 }
 
-fn draw_menu() {
-    let mr = menu_rect();
-    gfx::fill_rect(mr.x as usize, mr.y as usize, mr.w as usize, mr.h as usize, C_GRAY);
-    gfx::rect(mr.x as usize, mr.y as usize, mr.w as usize, mr.h as usize, C_WHITE);
-    for (i, item) in MENU.iter().enumerate() {
-        let iy = mr.y as usize + 1 + i * 10;
-        let col = if i == MENU.len() - 1 { C_RED } else { C_BLUE };
-        gfx::draw_text(mr.x as usize + 4, iy + 1, item, col);
-    }
-}
-
-fn draw_cursor(mx: usize, my: usize) {
-    const CUR: [u8; 8] = [
-        0b00000001, 0b00000011, 0b00000111, 0b00001111,
-        0b00011111, 0b00000111, 0b00001101, 0b00011000,
-    ];
-    for (row, bits) in CUR.iter().enumerate() {
-        for col in 0..8 {
-            if bits & (1 << col) != 0 {
-                gfx::pixel(mx + col, my + row, C_WHITE);
-            }
-        }
-    }
-}
-
-fn clip(s: &str, n: usize) -> &str {
-    if s.len() > n { &s[..n] } else { s }
+fn draw_clipped(x: usize, y: usize, s: &str, max_chars: usize, color: u8) {
+    let clipped = if s.len() > max_chars { &s[..max_chars] } else { s };
+    gfx::draw_text(x, y, clipped, color);
 }
