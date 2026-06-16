@@ -35,8 +35,8 @@ pub fn help() {
     println!("  divers  : date");
     println!("  graphique: desktop (bureau VGA + souris, Echap pour quitter)");
     println!("  materiel: lspci");
-    println!("  reseau  : ifup, ethinfo, arping <ip> (e1000 reel), ping <ip>, ifconfig, ip, route, arp");
-    println!("            dhcp, dns, wget, curl   [en attente du driver NIC]");
+    println!("  reseau  : ifup, ethinfo, arping <ip>, ping <ip>, ifconfig, ip, route, arp");
+    println!("            dns <nom>, wget/http <url>  (HTTP reel ; HTTPS=TLS a venir), dhcp");
     println!("  disque  : mount, df, sync, mkfs.bfs                                [roadmap]");
     vga::set_color(COLOR_CYAN);
     println!("  shell   : cmd1 ; cmd2   &&   ||   cmd > f   cmd >> f   cmd1 | cmd2");
