@@ -232,44 +232,53 @@ pub fn try_key() -> Option<Key> {
     })
 }
 
-/// Lit la prochaine touche logique au clavier (gere Shift, AltGr et etendues).
-pub fn read_key() -> Key {
-    loop {
-        let sc = read_scancode();
-
-        // Touches etendues (prefixe 0xE0) : fleches, Suppr, AltGr...
-        if sc == 0xe0 {
-            let ext = read_scancode();
-            match ext {
-                0x38 => { unsafe { ALTGR = true; } continue; }  // AltGr enfonce
-                0xb8 => { unsafe { ALTGR = false; } continue; } // AltGr relache
-                0x48 => return Key::Up,
-                0x50 => return Key::Down,
-                0x4b => return Key::Left,
-                0x4d => return Key::Right,
-                0x53 => return Key::Backspace, // Suppr traite comme Backspace
-                _ => continue,
-            }
-        }
-
-        match sc {
-            0x2a | 0x36 => { unsafe { SHIFT = true; } continue; }
-            0xaa | 0xb6 => { unsafe { SHIFT = false; } continue; }
-            _ => {}
-        }
-        if sc & 0x80 != 0 { continue; } // relachement de touche
-
-        let shift = unsafe { SHIFT };
-        let altgr = unsafe { ALTGR };
-        if let Some(ch) = scancode_to_char(sc, shift, altgr) {
-            return match ch {
+/// Decode un scancode (et son eventuel 2e octet etendu) en touche logique.
+/// Renvoie None pour les codes qui ne font que modifier un etat (Shift/AltGr)
+/// ou les relachements.
+fn decode_from(sc: u8) -> Option<Key> {
+    if sc == 0xe0 {
+        let ext = read_scancode(); // le 2e octet arrive immediatement
+        return match ext {
+            0x38 => { unsafe { ALTGR = true; } None }
+            0xb8 => { unsafe { ALTGR = false; } None }
+            0x48 => Some(Key::Up),
+            0x50 => Some(Key::Down),
+            0x4b => Some(Key::Left),
+            0x4d => Some(Key::Right),
+            0x53 => Some(Key::Backspace),
+            _ => None,
+        };
+    }
+    match sc {
+        0x2a | 0x36 => { unsafe { SHIFT = true; } None }
+        0xaa | 0xb6 => { unsafe { SHIFT = false; } None }
+        _ => {
+            if sc & 0x80 != 0 { return None; }
+            let shift = unsafe { SHIFT };
+            let altgr = unsafe { ALTGR };
+            scancode_to_char(sc, shift, altgr).map(|ch| match ch {
                 '\n' => Key::Enter,
                 '\x08' => Key::Backspace,
                 '\t' => Key::Tab,
                 '\x1b' => Key::Escape,
                 c => Key::Char(c as u8),
-            };
+            })
         }
+    }
+}
+
+/// Lit la prochaine touche logique (bloquant).
+pub fn read_key() -> Key {
+    loop {
+        if let Some(k) = decode_from(read_scancode()) { return k; }
+    }
+}
+
+/// Lecture non bloquante d'une touche logique (None si rien). Pour le GUI.
+pub fn try_key() -> Option<Key> {
+    loop {
+        let sc = try_scancode()?;
+        if let Some(k) = decode_from(sc) { return Some(k); }
     }
 }
 

@@ -107,8 +107,21 @@ impl FileSystem {
         let _log = self.mkdir_at(var, "log");
         let _ = home;
 
+        // Catalogue d'applications natives (manifestes .bapp).
+        let apps = self.mkdir_at(0, "apps").unwrap_or(0);
+        if apps != 0 {
+            let t = self.touch_at(apps, "terminal.bapp").unwrap_or(0);
+            self.write_node(t, "name=Terminal\nexec=terminal\ntype=gui\npermission=normal");
+            let f = self.touch_at(apps, "files.bapp").unwrap_or(0);
+            self.write_node(f, "name=Fichiers\nexec=files\ntype=gui\npermission=normal");
+            let b = self.touch_at(apps, "browser.bapp").unwrap_or(0);
+            self.write_node(b, "name=Bouchaud Browser\nexec=browser\ntype=gui\npermission=normal");
+            let s = self.touch_at(apps, "sysinfo.bapp").unwrap_or(0);
+            self.write_node(s, "name=Moniteur\nexec=monitor\ntype=gui\npermission=normal");
+        }
+
         let readme = self.touch_at(0, "readme.txt").unwrap_or(0);
-        self.write_node(readme, "Bienvenue dans Bouchaud OS. Connecte-toi (guest/guest ou root/root). Tape help.");
+        self.write_node(readme, "Bienvenue dans Bouchaud OS. Connecte-toi (guest/guest ou root/root). Tape help, ou desktop pour le bureau graphique.");
 
         let passwd = self.touch_at(etc, "passwd").unwrap_or(0);
         self.write_node(passwd, "root:x:0:0:root:/:/bin/bsh\nguest:x:1000:1000:guest:/home/guest:/bin/bsh");

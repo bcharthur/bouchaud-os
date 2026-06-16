@@ -82,11 +82,13 @@ pub fn run() {
             break;
         }
 
+        // ---- Souris ----
         let (mxu, myu) = mouse::pos();
         let mx = mxu as i32;
         let my = myu as i32;
         let left = mouse::left_down();
         let click = left && !prev_left;
+        prev_left = left;
 
         if click && term_btn().hit(mx, my) {
             terminal(&mut cwd);
@@ -198,17 +200,31 @@ fn window(x: usize, y: usize, w: usize, h: usize, title: &str) {
     gfx::draw_text(x + 3, y + 2, title, C_WHITE);
 }
 
-fn draw_cursor(mx: usize, my: usize) {
-    const CUR: [u8; 8] = [
-        0b00000001, 0b00000011, 0b00000111, 0b00001111,
-        0b00011111, 0b00000111, 0b00001101, 0b00011000,
-    ];
-    for (row, bits) in CUR.iter().enumerate() {
-        for col in 0..8 {
-            if bits & (1 << col) != 0 {
-                gfx::pixel(mx + col, my + row, C_WHITE);
-            }
+/// Cree une fenetre d'application a partir d'un index de menu.
+fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
+    let n = *spawn_n;
+    *spawn_n += 1;
+    let x = 14 + (n % 5) * 10;
+    let y = 16 + (n % 5) * 9;
+    match kind {
+        0 => Win {
+            title: "Terminal".to_string(), x, y, w: 220, h: 150,
+            app: App::Terminal { sb: { let mut v = Vec::new(); v.push("Bouchaud OS terminal".to_string()); v }, input: String::new(), cwd: home },
+        },
+        1 => Win {
+            title: "Fichiers".to_string(), x, y, w: 200, h: 150,
+            app: App::Files { cur: home, view: None, name: String::new() },
+        },
+        2 => {
+            let url = "about:bouchaud".to_string();
+            let content = load_page(&url);
+            Win { title: "Bouchaud Browser".to_string(), x, y, w: 250, h: 160,
+                  app: App::Browser { url: url.clone(), input: url, content } }
         }
+        _ => Win {
+            title: "Moniteur".to_string(), x, y, w: 200, h: 130,
+            app: App::Monitor,
+        },
     }
 }
 
@@ -229,7 +245,33 @@ fn chromium_launcher() {
                 }
                 _ => {}
             }
-        }
+            Key::Backspace => { input.pop(); false }
+            Key::Char(c) => { if input.len() < 120 { input.push(c as char); } false }
+            _ => false,
+        },
+        App::Browser { url, input, content } => match k {
+            Key::Enter => {
+                *url = input.trim().to_string();
+                *content = load_page(url);
+                false
+            }
+            Key::Backspace => { input.pop(); false }
+            Key::Char(c) => { if input.len() < 80 { input.push(c as char); } false }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn first_word(s: &str) -> &str {
+    s.split(' ').next().unwrap_or(s)
+}
+
+/// Commandes interactives a ne pas lancer dans le terminal graphique.
+fn is_blocked(cmd: &str) -> bool {
+    matches!(first_word(cmd),
+        "edit" | "nano" | "desktop" | "gui" | "su" | "passwd" | "useradd" | "userdel" | "login")
+}
 
         let (mxu, myu) = mouse::pos();
         let mx = mxu as i32;
