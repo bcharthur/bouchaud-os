@@ -25,6 +25,7 @@ use bootloader::{entry_point, BootInfo};
 #[macro_use]
 mod macros;
 
+mod app;
 mod arch;
 mod drivers;
 mod fs;
@@ -35,7 +36,7 @@ mod shell;
 mod users;
 
 /// Version courante de Bouchaud OS.
-pub const VERSION: &str = "0.17.0";
+pub const VERSION: &str = "0.18.0";
 /// Nom du systeme.
 pub const OS_NAME: &str = "Bouchaud OS";
 
@@ -65,6 +66,8 @@ fn kernel_main(_boot_info: &'static BootInfo) -> ! {
     fs::ramfs::fs().init();
     users::create_home_dirs();
     kernel::dmesg::log("ramfs: monte sur /");
+    kernel::process::init();
+    kernel::dmesg::log("process: table initialisee (init, desktop, shell)");
     kernel::dmesg::log("net: loopback lo 127.0.0.1 actif (ping ok); eth0 sans driver");
     kernel::dmesg::log("disk: pilote disque non active");
     kernel::dmesg::log("shell: initialise");

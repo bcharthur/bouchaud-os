@@ -90,7 +90,7 @@ pub const COMMANDS: &[&str] = &[
     "echo", "date", "grep", "wc", "head", "tail", "find", "lspci", "ping", "ifconfig",
     "ip", "route", "arp", "dhcp", "dns", "wget", "curl", "mount", "df", "sync",
     "mkfs.bfs", "true", "false", "logout", "exit", "export", "env", "unset", "run",
-    "source", "desktop", "gui",
+    "source", "desktop", "gui", "ps", "kill", "free", "syscalls", "apps", "launch",
 ];
 
 /// Operateur reliant un segment de commande au precedent.
@@ -521,6 +521,21 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "uptime" => { c::uptime(); 0 }
         "ticks" => { c::ticks(); 0 }
         "interrupts" => { c::interrupts(); 0 }
+        "ps" => { crate::kernel::process::print_table(); 0 }
+        "kill" => {
+            match argv.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                Some(pid) => {
+                    if crate::kernel::process::kill(pid) { println!("kill: {} termine", pid); }
+                    else { println!("kill: pid {} introuvable ou protege", pid); }
+                }
+                None => println!("usage: kill <pid>"),
+            }
+            0
+        }
+        "free" => { crate::kernel::memory::print_info(); 0 }
+        "syscalls" => { crate::kernel::syscall::print_table(); 0 }
+        "apps" => { crate::app::launcher::list(); 0 }
+        "launch" => { if argc >= 2 { crate::app::launcher::launch(argv[1]); } else { println!("usage: launch <app>"); } 0 }
         "breakpoint" => { c::breakpoint(); 0 }
         "serial-test" => { c::serial_test(); 0 }
         "panic-test" => { c::panic_test(); 0 }
@@ -572,7 +587,8 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "dhcp" | "dns" | "wget" | "curl" => { crate::net::placeholder(argv[0]); 0 }
 
         // Disque (placeholders, roadmap BFS)
-        "mount" | "df" | "sync" | "mkfs.bfs" => { c::disk_placeholder(argv[0]); 0 }
+        "df" => { crate::drivers::disk::print_df(); 0 }
+        "mount" | "sync" | "mkfs.bfs" => { c::disk_placeholder(argv[0]); 0 }
 
         _ => {
             vga::set_color(COLOR_RED);

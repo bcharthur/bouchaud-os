@@ -6,5 +6,10 @@
 
 pub mod dmesg;
 pub mod heap;
+pub mod memory;
+pub mod handle;
+pub mod process;
+pub mod scheduler;
+pub mod syscall;
 pub mod timer;
 pub mod panic;
