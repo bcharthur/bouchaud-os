@@ -38,8 +38,20 @@ struct Win {
     y: i32,
     w: i32,
     h: i32,
+    min: bool,
+    restore: Option<(i32, i32, i32, i32)>, // rect avant maximisation
     app: App,
 }
+
+/// Mode de manipulation de la fenetre du dessus a la souris.
+#[derive(Clone, Copy)]
+enum Drag {
+    Move(i32, i32),
+    Resize,
+}
+
+const MIN_W: i32 = 90;
+const MIN_H: i32 = 50;
 
 struct Rect { x: i32, y: i32, w: i32, h: i32 }
 impl Rect {
@@ -70,7 +82,7 @@ pub fn run() {
     let mut wins: Vec<Win> = Vec::new();
     let mut menu_open = false;
     let mut prev_left = false;
-    let mut drag: Option<(i32, i32)> = None; // offset pour la fenetre du dessus
+    let mut drag: Option<Drag> = None; // manipulation de la fenetre du dessus
     let mut spawn_n = 0i32;
 
     // Fenetre d'accueil : le navigateur sur about:bouchaud.
@@ -104,10 +116,17 @@ pub fn run() {
         prev_left = left;
 
         if left {
-            if let Some((ox, oy)) = drag {
+            if let Some(d) = drag {
                 if let Some(w) = wins.last_mut() {
-                    w.x = mx - ox;
-                    w.y = my - oy;
+                    match d {
+                        Drag::Move(ox, oy) => { w.x = mx - ox; w.y = my - oy; }
+                        Drag::Resize => {
+                            w.w = (mx - w.x).max(MIN_W);
+                            w.h = (my - w.y).max(MIN_H);
+                            if w.x + w.w > WIDTH as i32 { w.w = WIDTH as i32 - w.x; }
+                            if w.y + w.h > HEIGHT as i32 - BAR_H as i32 { w.h = HEIGHT as i32 - BAR_H as i32 - w.y; }
+                        }
+                    }
                     clamp_win(w);
                 }
             }
@@ -135,7 +154,7 @@ fn handle_click(
     mx: i32, my: i32,
     wins: &mut Vec<Win>,
     menu_open: &mut bool,
-    drag: &mut Option<(i32, i32)>,
+    drag: &mut Option<Drag>,
     quit: &mut bool,
     home: usize,
     spawn_n: &mut i32,
@@ -156,20 +175,21 @@ fn handle_click(
     // Bouton Demarrer.
     if start_btn().hit(mx, my) { *menu_open = true; return; }
 
-    // Boutons de la barre des taches (focus fenetre).
+    // Boutons de la barre des taches : restaure (si minimisee) et donne le focus.
     for i in 0..wins.len() {
         if taskbar_btn(i).hit(mx, my) {
-            let w = wins.remove(i);
+            let mut w = wins.remove(i);
+            w.min = false;
             wins.push(w);
             return;
         }
     }
 
-    // Fenetres, du dessus vers le dessous.
+    // Fenetres visibles, du dessus vers le dessous.
     let mut hit: Option<usize> = None;
     for i in (0..wins.len()).rev() {
         let w = &wins[i];
-        if mx >= w.x && mx < w.x + w.w && my >= w.y && my < w.y + w.h {
+        if !w.min && mx >= w.x && mx < w.x + w.w && my >= w.y && my < w.y + w.h {
             hit = Some(i);
             break;
         }
@@ -178,13 +198,37 @@ fn handle_click(
         let w = wins.remove(i);
         wins.push(w);
         let top = wins.last_mut().unwrap();
-        // Bouton fermer (coin haut droit).
-        if mx >= top.x + top.w - 10 && mx < top.x + top.w - 1 && my >= top.y + 1 && my < top.y + TITLE_H {
-            wins.pop();
+        let r = top.x + top.w;
+        // Boutons de titre : [_] minimiser, [o] maximiser, [x] fermer.
+        let on_title = my >= top.y + 1 && my < top.y + TITLE_H;
+        if on_title && mx >= r - 10 && mx < r - 1 {
+            wins.pop(); // fermer
+        } else if on_title && mx >= r - 19 && mx < r - 10 {
+            toggle_max(top); // maximiser / restaurer
+        } else if on_title && mx >= r - 28 && mx < r - 19 {
+            top.min = true; // minimiser
+            let m = wins.pop().unwrap();
+            wins.insert(0, m); // envoie au fond (perd le focus)
+        } else if my >= top.y + top.h - 8 && mx >= r - 8 {
+            *drag = Some(Drag::Resize); // poignee coin bas-droit
         } else if my < top.y + TITLE_H {
-            *drag = Some((mx - top.x, my - top.y)); // glisser par la barre de titre
+            *drag = Some(Drag::Move(mx - top.x, my - top.y));
         } else {
             app_click(top, mx, my, home);
+        }
+    }
+}
+
+/// Bascule maximiser / restaurer une fenetre.
+fn toggle_max(w: &mut Win) {
+    match w.restore.take() {
+        Some((x, y, ww, hh)) => { w.x = x; w.y = y; w.w = ww; w.h = hh; }
+        None => {
+            w.restore = Some((w.x, w.y, w.w, w.h));
+            w.x = 0;
+            w.y = BAR_H as i32;
+            w.w = WIDTH as i32;
+            w.h = HEIGHT as i32 - 2 * BAR_H as i32;
         }
     }
 }
@@ -204,21 +248,21 @@ fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
     let y = 16 + (n % 5) * 9;
     match kind {
         0 => Win {
-            title: "Terminal".to_string(), x, y, w: 220, h: 150,
+            title: "Terminal".to_string(), x, y, w: 220, h: 150, min: false, restore: None,
             app: App::Terminal { sb: { let mut v = Vec::new(); v.push("Bouchaud OS terminal".to_string()); v }, input: String::new(), cwd: home },
         },
         1 => Win {
-            title: "Fichiers".to_string(), x, y, w: 200, h: 150,
+            title: "Fichiers".to_string(), x, y, w: 200, h: 150, min: false, restore: None,
             app: App::Files { cur: home, view: None, name: String::new() },
         },
         2 => {
             let url = "about:bouchaud".to_string();
             let content = load_page(&url);
-            Win { title: "Bouchaud Browser".to_string(), x, y, w: 250, h: 160,
+            Win { title: "Bouchaud Browser".to_string(), x, y, w: 250, h: 160, min: false, restore: None,
                   app: App::Browser { url: url.clone(), input: url, content } }
         }
         _ => Win {
-            title: "Moniteur".to_string(), x, y, w: 200, h: 130,
+            title: "Moniteur".to_string(), x, y, w: 200, h: 130, min: false, restore: None,
             app: App::Monitor,
         },
     }
@@ -367,16 +411,22 @@ fn load_page(url: &str) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 fn draw_desktop(wins: &[Win]) {
+    // Fond d'ecran : deux tons pour un peu de profondeur.
     gfx::clear(C_DESKTOP);
+    gfx::fill_rect(0, HEIGHT / 2, WIDTH, HEIGHT / 2, 5); // C_DKBLUE
+    gfx::draw_text(WIDTH / 2 - 44, HEIGHT / 2 - 4, "Bouchaud OS", C_DKGRAY);
+
     gfx::fill_rect(0, 0, WIDTH, BAR_H, C_TITLE);
     gfx::draw_text(2, 2, "Bouchaud OS", C_WHITE);
     let dt = rtc::now();
     let clk = format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second);
     gfx::draw_text(WIDTH - clk.len() * 8 - 2, 2, &clk, C_YELLOW);
 
-    let top = wins.len();
+    // Indice de la fenetre focalisee = derniere visible.
+    let focus = wins.iter().rposition(|w| !w.min);
     for (i, w) in wins.iter().enumerate() {
-        draw_window(w, i + 1 == top);
+        if w.min { continue; }
+        draw_window(w, Some(i) == focus);
     }
 }
 
@@ -389,12 +439,19 @@ fn draw_window(w: &Win, focused: bool) {
     gfx::fill_rect(x, y, ww, wh, C_GRAY);
     gfx::rect(x, y, ww, wh, C_WHITE);
     gfx::fill_rect(x, y, ww, TITLE_H as usize, if focused { C_BLUE } else { C_DKGRAY });
-    gfx::draw_text(x + 3, y + 1, clip(&w.title, (ww / 8).saturating_sub(3)), C_WHITE);
-    // Bouton fermer.
+    gfx::draw_text(x + 3, y + 1, clip(&w.title, (ww / 8).saturating_sub(5)), C_WHITE);
+    // Boutons de titre : minimiser, maximiser, fermer.
+    gfx::fill_rect(x + ww - 28, y + 1, 8, 8, C_GRAY);
+    gfx::draw_text(x + ww - 27, y + 1, "_", C_BLACK);
+    gfx::fill_rect(x + ww - 19, y + 1, 8, 8, C_GRAY);
+    gfx::draw_text(x + ww - 18, y + 1, "o", C_BLACK);
     gfx::fill_rect(x + ww - 10, y + 1, 8, 8, C_RED);
     gfx::draw_text(x + ww - 9, y + 1, "x", C_WHITE);
 
     draw_app(w);
+
+    // Poignee de redimensionnement (coin bas-droit).
+    gfx::fill_rect(x + ww - 6, y + wh - 6, 5, 5, C_WHITE);
 }
 
 fn draw_app(w: &Win) {

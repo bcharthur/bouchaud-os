@@ -39,6 +39,13 @@ Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 - [x] Clavier en interruption IRQ1 (fin du polling)
 - [ ] APIC, plus tard, en remplacement du PIC
 
+## V0.16 - Fenetres avancees
+- [x] Minimiser / maximiser / restaurer (boutons de titre)
+- [x] Redimensionnement (poignee coin bas-droit)
+- [x] Fond d'ecran deux tons
+- [x] Barre des taches : restaure les fenetres minimisees
+- [ ] Drag&drop entre apps, themes configurables
+
 ## V0.15 - Window manager + apps natives (Windows-like)
 - [x] Gestionnaire de fenetres : multi-fenetres, focus/z-order, deplacement,
   fermeture, boucle d'evenements (clavier non bloquant)
