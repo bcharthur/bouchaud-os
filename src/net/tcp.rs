@@ -266,6 +266,10 @@ impl TcpConn {
 
     /// Attend qu'au moins `want` octets soient disponibles (ou FIN/timeout).
     /// Renvoie true si `rx.len() >= want`.
+    ///
+    /// Patient : tolere un aller-retour reseau complet (la reponse applicative
+    /// arrive apres un RTT, contrairement au flight de handshake qui suit
+    /// immediatement le ServerHello).
     pub fn fill(&mut self, want: usize) -> bool {
         let mut idle = 0u32;
         while self.rx.len() < want && !self.peer_fin && !self.closed {
@@ -273,7 +277,7 @@ impl TcpConn {
             self.pump(1_000_000);
             if self.rx.len() == before {
                 idle += 1;
-                if idle >= 6 { break; }
+                if idle >= 60 { break; }
             } else {
                 idle = 0;
             }

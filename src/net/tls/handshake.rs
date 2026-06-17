@@ -457,11 +457,19 @@ impl Session {
     /// Renvoie l'integralite du flux applicatif dechiffre.
     pub fn recv_all(&mut self, max: usize) -> Vec<u8> {
         let mut out = core::mem::take(&mut self.rx_plain);
+        // Tolere plusieurs creux (la 1re reponse arrive apres un RTT complet).
+        let mut empty_reads = 0u32;
         loop {
             let rec = match read_raw_record(&mut self.conn) {
                 Some(r) => r,
-                None => break,
+                None => {
+                    if self.conn.peer_fin || self.conn.closed { break; }
+                    empty_reads += 1;
+                    if empty_reads >= 6 { break; }
+                    continue;
+                }
             };
+            empty_reads = 0;
             let (hdr, body) = rec;
             match hdr[0] {
                 record::CT_CHANGE_CIPHER_SPEC => continue,
@@ -482,9 +490,8 @@ impl Session {
                 CT_ALERT => break,
                 _ => break,
             }
-            if self.conn.peer_fin {
-                // Draine ce qui reste deja bufferise puis termine.
-                if self.conn.rx.len() == 0 { break; }
+            if self.conn.peer_fin && self.conn.rx.len() == 0 {
+                break;
             }
         }
         out

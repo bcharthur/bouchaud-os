@@ -69,9 +69,23 @@ chaîne (confiance, correspondance du nom d'hôte, expiration).
 
 - Une seule suite (`TLS_AES_128_GCM_SHA256`) et un seul groupe (`x25519`)
   offerts — suffisant pour la quasi-totalité des serveurs publics.
+- Validation de chaîne : **RSA (SHA-256)** et **ECDSA P-256 (SHA-256)** sont
+  supportés. Les chaînes **ECDSA P-384 / SHA-384** (ex. certaines chaînes
+  Google rootées sur *GTS Root R4*, ou Let's Encrypt ECDSA rooté sur
+  *ISRG Root X2*) ne sont **pas encore validées** : la connexion s'établit et
+  la page se charge, mais le bandeau affiche `[TLS !]` (ancre non vérifiable).
+  Les chaînes RSA de ces mêmes sites s'affichent `[TLS OK]`.
+- Le contenu est affiché même quand la chaîne n'est pas approuvée (comme un
+  navigateur affichant un avertissement) ; le bandeau distingue les deux cas.
 - Pas de reprise de session (PSK / 0-RTT), pas de HelloRetryRequest
   (inutile puisque x25519 est universellement supporté).
 - Implémentation **non *constant-time*** : objectif pédagogique, pas de
   résistance aux attaques par canaux auxiliaires.
-- Magasin de racines volontairement réduit (6 ancres) ; en ajouter via
-  `ca/*.der` + `roots.rs`.
+- Magasin de racines : ~19 ancres courantes (RSA + quelques ECDSA) ; en ajouter
+  via `ca/*.der` + `roots.rs`.
+
+## Pistes d'évolution
+
+- SHA-384/SHA-512 + courbe **P-384** → validation des chaînes ECDSA modernes.
+- Suites supplémentaires (ChaCha20-Poly1305, AES-256-GCM).
+- ECDHE P-256 en plus de x25519 pour le `key_share`.
