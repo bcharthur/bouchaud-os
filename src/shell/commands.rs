@@ -36,7 +36,8 @@ pub fn help() {
     println!("  graphique: desktop (bureau VGA + souris, Echap pour quitter)");
     println!("  materiel: lspci");
     println!("  reseau  : ifup, ethinfo, arping <ip>, ping <ip>, ifconfig, ip, route, arp");
-    println!("            dns <nom>, wget/http <url>  (HTTP reel ; HTTPS=TLS a venir), dhcp");
+    println!("            dns <nom>, wget/http <url>, https <url> (TLS 1.3 reel), dhcp");
+    println!("            tls [hote] (diagnostic + handshake), tls-selftest (vecteurs crypto)");
     println!("  disque  : mount, df, sync, mkfs.bfs                                [roadmap]");
     vga::set_color(COLOR_CYAN);
     println!("  shell   : cmd1 ; cmd2   &&   ||   cmd > f   cmd >> f   cmd1 | cmd2");

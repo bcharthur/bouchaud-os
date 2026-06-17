@@ -164,3 +164,138 @@ pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> boo
     let _ = &mut my_seq;
     true
 }
+
+/// Connexion TCP avec etat (necessaire pour TLS : plusieurs envois/receptions).
+pub struct TcpConn {
+    dst: Ipv4Addr,
+    sport: u16,
+    dport: u16,
+    seq: u32,         // notre prochain numero de sequence
+    ack: u32,         // prochain octet attendu du pair
+    pub rx: Vec<u8>,  // donnees applicatives recues, en attente de lecture
+    pub peer_fin: bool,
+    pub closed: bool,
+}
+
+impl TcpConn {
+    /// Ouvre une connexion (poignee SYN/SYN-ACK/ACK).
+    pub fn connect(dst: Ipv4Addr, port: u16) -> Option<TcpConn> {
+        let sport = 0xC000u16 | (cpu::rdtsc() as u16 & 0x0FFF);
+        let isn = cpu::rdtsc() as u32;
+        let mut seg = [0u8; 64];
+        let mut rb = [0u8; 2048];
+
+        let l = build(&mut seg, &dst, sport, port, isn, 0, SYN, WINDOW, &[]);
+        net::send_ip(dst, 6, &seg[..l]);
+
+        let mut their_seq = 0u32;
+        let mut ok = false;
+        for _ in 0..8_000_000u32 {
+            if let Some((_, n)) = net::poll_ip(6, Some(dst), &mut rb) {
+                if let Some(h) = parse(&rb[..n]) {
+                    if h.dport == sport {
+                        if h.flags & RST != 0 { return None; }
+                        if h.flags & SYN != 0 && h.flags & ACK != 0 {
+                            their_seq = h.seq;
+                            ok = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if !ok { return None; }
+
+        let seq = isn.wrapping_add(1);
+        let ack = their_seq.wrapping_add(1);
+        let a = build(&mut seg, &dst, sport, port, seq, ack, ACK, WINDOW, &[]);
+        net::send_ip(dst, 6, &seg[..a]);
+
+        Some(TcpConn { dst, sport, dport: port, seq, ack, rx: Vec::new(), peer_fin: false, closed: false })
+    }
+
+    /// Envoie des donnees (segmente si necessaire).
+    pub fn send(&mut self, data: &[u8]) -> bool {
+        if self.closed { return false; }
+        let mut seg = [0u8; 1600];
+        let mss = 1400usize;
+        let mut off = 0;
+        while off < data.len() {
+            let end = (off + mss).min(data.len());
+            let chunk = &data[off..end];
+            let l = build(&mut seg, &self.dst, self.sport, self.dport, self.seq, self.ack, PSH | ACK, WINDOW, chunk);
+            net::send_ip(self.dst, 6, &seg[..l]);
+            self.seq = self.seq.wrapping_add(chunk.len() as u32);
+            off = end;
+            // Petite fenetre de drainage des ACK/segments entrants.
+            self.pump(200_000);
+        }
+        true
+    }
+
+    // Traite les segments entrants disponibles pendant `budget` iterations.
+    fn pump(&mut self, budget: u32) {
+        let mut rb = [0u8; 2048];
+        let mut seg = [0u8; 64];
+        for _ in 0..budget {
+            if let Some((_, n)) = net::poll_ip(6, Some(self.dst), &mut rb) {
+                if let Some(h) = parse(&rb[..n]) {
+                    if h.dport != self.sport { continue; }
+                    if h.flags & RST != 0 { self.closed = true; self.peer_fin = true; return; }
+                    let plen = n - h.data_off;
+                    if plen > 0 && h.seq == self.ack {
+                        self.rx.extend_from_slice(&rb[h.data_off..n]);
+                        self.ack = self.ack.wrapping_add(plen as u32);
+                        let a = build(&mut seg, &self.dst, self.sport, self.dport, self.seq, self.ack, ACK, WINDOW, &[]);
+                        net::send_ip(self.dst, 6, &seg[..a]);
+                    } else if plen > 0 {
+                        // Hors sequence : re-ACK.
+                        let a = build(&mut seg, &self.dst, self.sport, self.dport, self.seq, self.ack, ACK, WINDOW, &[]);
+                        net::send_ip(self.dst, 6, &seg[..a]);
+                    }
+                    if h.flags & FIN != 0 && h.seq.wrapping_add(plen as u32) == self.ack {
+                        self.ack = self.ack.wrapping_add(1);
+                        self.peer_fin = true;
+                        let a = build(&mut seg, &self.dst, self.sport, self.dport, self.seq, self.ack, ACK, WINDOW, &[]);
+                        net::send_ip(self.dst, 6, &seg[..a]);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Attend qu'au moins `want` octets soient disponibles (ou FIN/timeout).
+    /// Renvoie true si `rx.len() >= want`.
+    pub fn fill(&mut self, want: usize) -> bool {
+        let mut idle = 0u32;
+        while self.rx.len() < want && !self.peer_fin && !self.closed {
+            let before = self.rx.len();
+            self.pump(1_000_000);
+            if self.rx.len() == before {
+                idle += 1;
+                if idle >= 6 { break; }
+            } else {
+                idle = 0;
+            }
+        }
+        self.rx.len() >= want
+    }
+
+    /// Consomme `n` octets en tete du tampon de reception.
+    pub fn take(&mut self, n: usize) -> Vec<u8> {
+        let n = n.min(self.rx.len());
+        let out = self.rx[..n].to_vec();
+        self.rx.drain(..n);
+        out
+    }
+
+    /// Ferme la connexion (FIN).
+    pub fn close(&mut self) {
+        if self.closed { return; }
+        let mut seg = [0u8; 64];
+        let f = build(&mut seg, &self.dst, self.sport, self.dport, self.seq, self.ack, FIN | ACK, WINDOW, &[]);
+        net::send_ip(self.dst, 6, &seg[..f]);
+        self.seq = self.seq.wrapping_add(1);
+        self.closed = true;
+    }
+}

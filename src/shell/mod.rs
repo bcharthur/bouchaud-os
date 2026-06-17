@@ -91,7 +91,7 @@ pub const COMMANDS: &[&str] = &[
     "ip", "route", "arp", "dhcp", "dns", "wget", "curl", "mount", "df", "sync",
     "mkfs.bfs", "true", "false", "logout", "exit", "export", "env", "unset", "run",
     "source", "desktop", "gui", "ps", "kill", "free", "syscalls", "apps", "launch",
-    "ifup", "arping", "ethinfo", "nslookup", "http",
+    "ifup", "arping", "ethinfo", "nslookup", "http", "https", "tls-selftest", "tls",
 ];
 
 /// Operateur reliant un segment de commande au precedent.
@@ -589,7 +589,9 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "arping" => { crate::net::arping(argc, &argv); 0 }
         "ethinfo" => { crate::drivers::e1000::print_info(); 0 }
         "dns" | "nslookup" => { crate::net::dns_cmd(argc, &argv); 0 }
-        "wget" | "curl" | "http" => { crate::net::wget_cmd(argc, &argv); 0 }
+        "wget" | "curl" | "http" | "https" => { crate::net::wget_cmd(argc, &argv); 0 }
+        "tls-selftest" => { crate::net::tls::selftest(); 0 }
+        "tls" => { crate::net::tls_cmd(argc, &argv); 0 }
         "dhcp" => { crate::net::dhcp::run(); 0 }
 
         // Disque (placeholders, roadmap BFS)
