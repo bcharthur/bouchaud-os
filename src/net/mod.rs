@@ -16,10 +16,16 @@ pub mod arp;
 pub mod ipv4;
 pub mod icmp;
 pub mod stack;
+pub mod udp;
+pub mod dns;
+pub mod tcp;
+pub mod http;
 
 use crate::arch::x86_64::pci;
 use crate::drivers::e1000;
 use crate::drivers::vga::{self, COLOR_CYAN, COLOR_GREEN, COLOR_YELLOW, COLOR_DEFAULT};
+use alloc::format;
+use alloc::string::String;
 use crate::net::ipv4::Ipv4Addr;
 
 /// Adresse de l'interface loopback.
@@ -109,6 +115,185 @@ pub fn arping(argc: usize, argv: &[&str; 12]) {
 /// Meme reseau /24 que eth0 ?
 fn same_subnet(ip: &Ipv4Addr) -> bool {
     ip[0] == ETH_IP[0] && ip[1] == ETH_IP[1] && ip[2] == ETH_IP[2]
+}
+
+/// Serveur DNS (resolveur SLIRP de QEMU).
+pub const DNS_SERVER: Ipv4Addr = [10, 0, 2, 3];
+
+static mut IP_ID: u16 = 0x4000;
+static mut GW_MAC: Option<[u8; 6]> = None;
+
+fn next_ip_id() -> u16 {
+    unsafe { IP_ID = IP_ID.wrapping_add(1); IP_ID }
+}
+
+/// MAC du prochain saut pour atteindre `dst` (cache la MAC de la passerelle).
+fn hop_mac(dst: &Ipv4Addr) -> Option<[u8; 6]> {
+    if same_subnet(dst) {
+        return arp_resolve(*dst);
+    }
+    unsafe {
+        if let Some(m) = GW_MAC { return Some(m); }
+        let m = arp_resolve(GATEWAY)?;
+        GW_MAC = Some(m);
+        Some(m)
+    }
+}
+
+/// Emet un paquet IPv4 (`proto`/`payload`) vers `dst` via e1000.
+pub(crate) fn send_ip(dst: Ipv4Addr, proto: u8, payload: &[u8]) -> bool {
+    if !e1000::is_ready() && !e1000::init() { return false; }
+    let mac = match hop_mac(&dst) { Some(m) => m, None => return false };
+    let mut ip = [0u8; 1500];
+    let ipl = match ipv4::build_packet(&mut ip, ETH_IP, dst, proto, next_ip_id(), payload) {
+        Some(n) => n, None => return false,
+    };
+    let mut frame = [0u8; 1514];
+    let fl = match ethernet::build_frame(&mut frame, mac, e1000::mac(), ethernet::ETHERTYPE_IPV4, &ip[..ipl]) {
+        Some(n) => n, None => return false,
+    };
+    e1000::send(&frame[..fl])
+}
+
+/// Recoit un paquet IPv4 du protocole `proto` (et source optionnelle). Copie la
+/// charge utile dans `out`, renvoie (source, longueur). Non bloquant.
+pub(crate) fn poll_ip(proto: u8, src_filter: Option<Ipv4Addr>, out: &mut [u8]) -> Option<(Ipv4Addr, usize)> {
+    let mut buf = [0u8; 2048];
+    let n = e1000::receive(&mut buf)?;
+    let h = ethernet::parse_header(&buf[..n])?;
+    if h.ethertype != ethernet::ETHERTYPE_IPV4 { return None; }
+    let iph = ipv4::parse_header(&buf[ethernet::HEADER_LEN..n])?;
+    if iph.proto != proto { return None; }
+    if let Some(s) = src_filter {
+        if iph.src != s { return None; }
+    }
+    let start = ethernet::HEADER_LEN + iph.header_len;
+    let end = ethernet::HEADER_LEN + iph.total_len;
+    if start > end || end > n { return None; }
+    let len = end - start;
+    let m = len.min(out.len());
+    out[..m].copy_from_slice(&buf[start..start + m]);
+    Some((iph.src, m))
+}
+
+/// Resout un nom d'hote en IPv4 via DNS (None en cas d'echec/timeout).
+pub fn resolve(name: &str) -> Option<Ipv4Addr> {
+    // Deja une IP ?
+    if let Some(ip) = ipv4::parse_addr(name) { return Some(ip); }
+    if !e1000::is_ready() && !e1000::init() { return None; }
+
+    let id = (next_ip_id() ^ 0x1234) as u16;
+    let mut q = [0u8; 256];
+    let qlen = dns::build_query(&mut q, id, name)?;
+    let mut udp_buf = [0u8; 300];
+    let ulen = udp::build(&mut udp_buf, 0xC000, 53, &q[..qlen])?;
+    send_ip(DNS_SERVER, ipv4::PROTO_UDP, &udp_buf[..ulen]);
+
+    let mut payload = [0u8; 1500];
+    for _ in 0..4_000_000u32 {
+        if let Some((src, n)) = poll_ip(ipv4::PROTO_UDP, Some(DNS_SERVER), &mut payload) {
+            let _ = src;
+            if let Some(u) = udp::parse(&payload[..n]) {
+                if u.dst_port == 0xC000 {
+                    let off = u.payload_off;
+                    if let Some(ip) = dns::parse_response(&payload[off..off + u.payload_len], id) {
+                        return Some(ip);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Commande `dns <nom>` / `nslookup`.
+pub fn dns_cmd(argc: usize, argv: &[&str; 12]) {
+    if argc < 2 { println!("usage: dns <nom>"); return; }
+    if !e1000::is_ready() && !e1000::init() {
+        println!("dns: carte reseau indisponible (essaie 'ifup')");
+        return;
+    }
+    match resolve(argv[1]) {
+        Some(ip) => { crate::print!("{} -> ", argv[1]); ipv4::print_addr(&ip); println!(""); }
+        None => println!("dns: pas de reponse pour {}", argv[1]),
+    }
+}
+
+/// Recupere une URL HTTP et renvoie les lignes a afficher (statut + corps).
+/// Utilise par la commande `wget` et par le navigateur.
+pub fn http_get(url: &str) -> alloc::vec::Vec<String> {
+    use alloc::string::ToString;
+    let mut out: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+
+    let rest = if let Some(r) = url.strip_prefix("http://") {
+        r
+    } else if url.starts_with("https://") {
+        out.push("HTTPS non supporte : TLS pas encore implemente.".to_string());
+        out.push("Utilise http:// pour l'instant.".to_string());
+        return out;
+    } else {
+        url
+    };
+
+    let (host, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    let (hostname, port) = match host.find(':') {
+        Some(i) => (&host[..i], host[i + 1..].parse::<u16>().unwrap_or(80)),
+        None => (host, 80u16),
+    };
+
+    if !e1000::is_ready() && !e1000::init() {
+        out.push("reseau indisponible (lance 'ifup')".to_string());
+        return out;
+    }
+    let ip = match resolve(hostname) {
+        Some(ip) => ip,
+        None => { out.push(format!("DNS: echec pour {}", hostname)); return out; }
+    };
+
+    let req = http::build_get(hostname, path);
+    let mut resp: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    if !tcp::fetch(ip, port, req.as_bytes(), &mut resp) {
+        out.push(format!("connexion TCP echouee vers {}:{}", hostname, port));
+        return out;
+    }
+    if resp.is_empty() {
+        out.push("reponse vide".to_string());
+        return out;
+    }
+
+    // Ligne de statut (premiere ligne de la reponse).
+    let mut status_end = 0;
+    while status_end < resp.len() && resp[status_end] != b'\r' && resp[status_end] != b'\n' {
+        status_end += 1;
+    }
+    let mut status = String::new();
+    for &b in &resp[..status_end] { status.push(b as char); }
+    out.push(status);
+
+    // Corps.
+    let body_off = http::body_offset(&resp).unwrap_or(0);
+    let mut line = String::new();
+    for &b in &resp[body_off..] {
+        match b {
+            b'\n' => { out.push(core::mem::take(&mut line)); if out.len() > 200 { break; } }
+            b'\r' => {}
+            0x20..=0x7e => line.push(b as char),
+            _ => line.push('.'),
+        }
+    }
+    if !line.is_empty() { out.push(line); }
+    out
+}
+
+/// Commande `wget`/`curl`/`http <url>`.
+pub fn wget_cmd(argc: usize, argv: &[&str; 12]) {
+    if argc < 2 { println!("usage: wget http://hote/chemin"); return; }
+    for l in http_get(argv[1]) {
+        println!("{}", l);
+    }
 }
 
 /// Ping reel via e1000 : ARP -> ICMP echo sur 4 paquets.

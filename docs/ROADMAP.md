@@ -39,6 +39,15 @@ Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 - [x] Clavier en interruption IRQ1 (fin du polling)
 - [ ] APIC, plus tard, en remplacement du PIC
 
+## V0.21 - Pile reseau : UDP/DNS/TCP/HTTP
+- [x] UDP (net/udp.rs) + client DNS (net/dns.rs) : commande dns <nom>
+- [x] ping reel IPv4/ICMP via e1000 (V0.20)
+- [x] client TCP minimal (net/tcp.rs) : SYN/SYN-ACK/ACK, envoi, ack, FIN
+- [x] HTTP/1.0 GET (net/http.rs) : commandes wget/http <url>
+- [x] Bouchaud Browser charge les pages http:// reelles
+- [ ] HTTPS = TLS (handshake + crypto) : chantier lourd, plus tard
+- [ ] DHCP (IP auto), retransmission TCP, gestion fine des fenetres
+
 ## V0.19 - Driver reseau e1000 (bring-up)
 - [x] map_physical_memory (offset phys) + arene DMA (kernel::memory)
 - [x] PCI: lecture BAR, bus mastering (config write)

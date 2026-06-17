@@ -51,9 +51,12 @@ pub(crate) fn load_page(url: &str) -> Vec<String> {
             }
             _ => out.push(format!("Erreur: introuvable {}", full)),
         }
-    } else if url.starts_with("http://") || url.starts_with("https://") {
-        out.push("Reseau non disponible.".to_string());
-        out.push("Le driver e1000 (HTTP) arrive plus tard.".to_string());
+    } else if url.starts_with("http://") {
+        // Recuperation HTTP reelle via e1000/TCP.
+        return crate::net::http_get(url);
+    } else if url.starts_with("https://") {
+        out.push("HTTPS non supporte (TLS pas encore implemente).".to_string());
+        out.push("Essaie http://example.com".to_string());
     } else {
         out.push(format!("Page inconnue: {}", url));
         out.push("Essaie: about:bouchaud, about:system, file:/readme.txt".to_string());
