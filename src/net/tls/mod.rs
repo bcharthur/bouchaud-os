@@ -14,6 +14,7 @@ pub mod sha256;
 pub mod sha512;
 pub mod aes;
 pub mod gcm;
+pub mod hash;
 pub mod x25519;
 pub mod ec;
 pub mod p256;
@@ -80,7 +81,7 @@ fn x509_selftest() -> Result<(), &'static str> {
 
 /// Etat d'implementation, pour les messages utilisateur.
 pub fn status() -> &'static str {
-    "TLS 1.3 (X25519/AES-128-GCM/SHA-256/HKDF + X.509 RSA/ECDSA P-256/P-384)"
+    "TLS 1.3 (X25519/AES-128/256-GCM/SHA-256/384/HKDF + X.509 RSA/ECDSA P-256/P-384)"
 }
 
 /// Resultat structure d'une requete HTTPS.
@@ -152,7 +153,7 @@ fn https_get_once(hostname: &str, port: u16, path: &str) -> HttpsResult {
     // Bandeau de securite (resultat de la validation de chaine).
     let r = &sess.report;
     let lock = if r.trusted && r.hostname_ok && !r.expired { "[TLS OK]" } else { "[TLS !]" };
-    banner.push(format!("{} {} (CN={})", lock, r.detail, r.subject_cn));
+    banner.push(format!("{} {} (CN={}, suite={})", lock, r.detail, r.subject_cn, r.cipher_suite));
 
     // Requete HTTP/1.1 sur le canal chiffre. `Accept-Encoding: identity` evite
     // de recevoir uniquement un flux compresse illisible par le navigateur VGA.
