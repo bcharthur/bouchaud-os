@@ -187,11 +187,6 @@ pub struct TcpConn {
     pub closed: bool,
     pub rst_seen: bool,
     pub fin_seen: bool,
-    // Dernier segment TCP observe (debug uniquement).
-    last_peer_seq: u32,
-    last_peer_ack: u32,
-    last_flags: u8,
-    last_plen: usize,
 }
 
 impl TcpConn {
@@ -228,8 +223,7 @@ impl TcpConn {
         let a = build(&mut seg, &dst, sport, port, seq, ack, ACK, WINDOW, &[]);
         net::send_ip(dst, 6, &seg[..a]);
 
-        Some(TcpConn { dst, sport, dport: port, seq, ack, rx: Vec::new(), ooo: Vec::new(), peer_fin: false, closed: false, rst_seen: false, fin_seen: false,
-            last_peer_seq: 0, last_peer_ack: 0, last_flags: 0, last_plen: 0 })
+        Some(TcpConn { dst, sport, dport: port, seq, ack, rx: Vec::new(), ooo: Vec::new(), peer_fin: false, closed: false, rst_seen: false, fin_seen: false })
     }
 
     /// Envoie des donnees (segmente si necessaire).
@@ -251,18 +245,14 @@ impl TcpConn {
         true
     }
 
-
-
-    /// Envoie des donnees sans drainer les ACK/segments entrants.
-    ///
-    /// Utilise pour le Finished TLS 1.3 client : on veut enchainer le premier
-    /// record application_data le plus vite possible, sans laisser une fenetre
-    /// ou un frontal distant peut envoyer FIN avant le GET chiffre.
+    /// Envoie des donnees sans drainer les paquets entrants juste apres.
+    /// Utile pour le Finished TLS 1.3 : on veut enchainer le premier record
+    /// applicatif sans laisser un gros trou temporel cote client.
     pub fn send_no_pump(&mut self, data: &[u8]) -> bool {
         if self.closed { return false; }
         let mut seg = [0u8; 1600];
         let mss = 1400usize;
-        let mut off = 0usize;
+        let mut off = 0;
         while off < data.len() {
             let end = (off + mss).min(data.len());
             let chunk = &data[off..end];
@@ -273,14 +263,6 @@ impl TcpConn {
         }
         true
     }
-
-    /// Numeros TCP courants, utiles pour diagnostiquer si le pair a ACK le GET TLS.
-    pub fn seq_no(&self) -> u32 { self.seq }
-    pub fn ack_no(&self) -> u32 { self.ack }
-    pub fn last_peer_seq(&self) -> u32 { self.last_peer_seq }
-    pub fn last_peer_ack(&self) -> u32 { self.last_peer_ack }
-    pub fn last_flags(&self) -> u8 { self.last_flags }
-    pub fn last_plen(&self) -> usize { self.last_plen }
 
     /// Sonde debug : draine les segments entrants sans consommer `rx`.
     /// Utilise par la trace TLS pour observer l'etat TCP juste apres le Finished client.
@@ -296,12 +278,8 @@ impl TcpConn {
             if let Some((_, n)) = net::poll_ip(6, Some(self.dst), &mut rb) {
                 if let Some(h) = parse(&rb[..n]) {
                     if h.dport != self.sport { continue; }
-                    let plen = n - h.data_off;
-                    self.last_peer_seq = h.seq;
-                    self.last_peer_ack = h.ack;
-                    self.last_flags = h.flags;
-                    self.last_plen = plen;
                     if h.flags & RST != 0 { self.closed = true; self.peer_fin = true; self.rst_seen = true; return; }
+                    let plen = n - h.data_off;
                     if plen > 0 {
                         self.accept_segment(h.seq, &rb[h.data_off..n]);
                         // ACK cumulatif. Si le segment etait hors sequence, on re-ACK

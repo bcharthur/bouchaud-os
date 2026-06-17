@@ -3,8 +3,7 @@
 //! Pile cryptographique ecrite a la main (aucune dependance externe) :
 //!   - SHA-256 / HMAC / HKDF (`sha256`) et SHA-384/SHA-512 (`sha512`)
 //!   - AES-128/256 + GCM AEAD (`aes`, `gcm`)
-//!   - X25519 (`x25519`) et ECDSA P-256/P-384 (courbe generique `ec`, instanciee
-//!     par `p256` et `p384`)
+//!   - X25519 (`x25519`) et ECDSA P-256/P-384 (`p256`, `p384`)
 //!   - RSA + bignum (`bignum`, `rsa`)
 //!   - ASN.1/DER + X.509 + validation de chaine (`asn1`, `x509`, `roots`)
 //!   - CSPRNG (`rng`)
@@ -12,9 +11,9 @@
 
 pub mod sha256;
 pub mod sha512;
+pub mod hash;
 pub mod aes;
 pub mod gcm;
-pub mod hash;
 pub mod x25519;
 pub mod ec;
 pub mod p256;
@@ -42,6 +41,7 @@ pub fn selftest() {
     let tests: &[(&str, fn() -> Result<(), &'static str>)] = &[
         ("SHA-256/HMAC/HKDF", sha256::selftest),
         ("SHA-384/SHA-512", sha512::selftest),
+        ("HMAC/HKDF SHA-256/SHA-384", hash::selftest),
         ("AES-128/256", aes::selftest),
         ("AES-GCM", gcm::selftest),
         ("X25519", x25519::selftest),
@@ -81,118 +81,37 @@ fn x509_selftest() -> Result<(), &'static str> {
 
 /// Etat d'implementation, pour les messages utilisateur.
 pub fn status() -> &'static str {
-    "TLS 1.3 (X25519/AES-128/256-GCM/SHA-256/384/HKDF + X.509 RSA/ECDSA P-256/P-384)"
+    "TLS 1.3 (X25519/AES-128/256-GCM + SHA-256/SHA-384 + X.509 RSA/ECDSA P-256/P-384)"
 }
 
-/// Resultat structure d'une requete HTTPS.
-pub struct HttpsResult {
-    /// Bandeau de securite + (si reponse vide) lignes de trace de diagnostic.
+/// Reponse HTTPS brute : banniere TLS + octets HTTP dechiffres.
+pub struct HttpsFetchResult {
     pub banner: Vec<String>,
-    /// Octets bruts de la reponse HTTP (vide en cas d'echec ou de canal muet).
     pub raw: Vec<u8>,
 }
 
-/// Requete HTTPS -> lignes a afficher (statut + corps decode). Compat. shell.
+/// Resultat d'une requete HTTPS : lignes a afficher.
 pub fn https_get(hostname: &str, port: u16, path: &str) -> Vec<String> {
-    format_https(https_fetch(hostname, port, path))
-}
-
-/// Requete HTTPS structuree (avec repli `www`), pour le suivi de redirections.
-///
-/// Google ferme parfois le canal applicatif sur l'apex `google.com` avec notre
-/// pile TLS/HTTP minimale, alors que le frontend `www` sert bien une page : si
-/// la premiere tentative ne renvoie aucune donnee, on retente en `www.`.
-pub fn https_fetch(hostname: &str, port: u16, path: &str) -> HttpsResult {
-    let first = https_get_once(hostname, port, path);
-    if !first.raw.is_empty() || hostname.starts_with("www.") || hostname.matches('.').count() != 1 {
-        return first;
-    }
-    use alloc::format;
-    let www = format!("www.{}", hostname);
-    let retry = https_get_once(&www, port, path);
-    if !retry.raw.is_empty() { return retry; }
-    first
-}
-
-// Met en forme un HttpsResult : bandeau + statut + corps decode (dechunke /
-// Content-Length). Affiche le brut si l'en-tete est incomplet.
-fn format_https(r: HttpsResult) -> Vec<String> {
+    let r = https_fetch(hostname, port, path);
     let mut out = r.banner;
-    if r.raw.is_empty() { return out; }
-    match crate::net::http::parse_response(&r.raw) {
-        Some(resp) => {
-            out.push(resp.status_line);
-            push_body_lines(&mut out, &resp.body);
+    if r.raw.is_empty() {
+        if !out.iter().any(|l| l.contains("reponse vide")) {
+            out.push("reponse vide (chiffree)".into());
         }
-        None => push_body_lines(&mut out, &r.raw),
+        return out;
     }
-    out
-}
 
-fn https_get_once(hostname: &str, port: u16, path: &str) -> HttpsResult {
-    use alloc::format;
-    use alloc::string::ToString;
-    let mut banner: Vec<String> = Vec::new();
-    let empty = || Vec::new();
+    // Ligne de statut.
+    let mut i = 0;
+    while i < r.raw.len() && r.raw[i] != b'\r' && r.raw[i] != b'\n' { i += 1; }
+    let mut status = String::new();
+    for &b in &r.raw[..i] { status.push(b as char); }
+    out.push(status);
 
-    let ip = match crate::net::resolve(hostname) {
-        Some(ip) => ip,
-        None => { banner.push(format!("DNS: echec pour {}", hostname)); return HttpsResult { banner, raw: empty() }; }
-    };
-
-    let conn = match crate::net::tcp::TcpConn::connect(ip, port) {
-        Some(c) => c,
-        None => { banner.push(format!("connexion TCP echouee vers {}:{}", hostname, port)); return HttpsResult { banner, raw: empty() }; }
-    };
-
-    let mut sess = match handshake::connect(conn, hostname) {
-        Ok(s) => s,
-        Err(e) => { banner.push(format!("handshake TLS echoue: {}", e)); return HttpsResult { banner, raw: empty() }; }
-    };
-
-    // Bandeau de securite (resultat de la validation de chaine).
-    let r = &sess.report;
-    let lock = if r.trusted && r.hostname_ok && !r.expired { "[TLS OK]" } else { "[TLS !]" };
-    banner.push(format!("{} {} (CN={}, suite={})", lock, r.detail, r.subject_cn, r.cipher_suite));
-
-    // Requete HTTP/1.1 sur le canal chiffre. `Accept-Encoding: identity` evite
-    // de recevoir uniquement un flux compresse illisible par le navigateur VGA.
-    let req = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: BouchaudOS-TLS\r\nConnection: close\r\nAccept: text/html,*/*\r\nAccept-Encoding: identity\r\n\r\n",
-        path, hostname
-    );
-    let mut trace: Vec<String> = Vec::new();
-    trace.push(format!(
-        "post_finished: rx={} peer_fin={} closed={} rst={} fin_seen={} tcp_seq={}",
-        sess.post_finished_rx, sess.post_finished_peer_fin, sess.post_finished_closed,
-        sess.post_finished_rst, sess.post_finished_fin_seen, sess.post_finished_tcp_seq,
-    ));
-    let seq_before = sess.conn.seq_no();
-    let sent = sess.send_app(req.as_bytes());
-    let seq_after = sess.conn.seq_no();
-    trace.push(format!(
-        "send_app: sent={} app_tcp_bytes={} rx={} peer_fin={} closed={} rst={} fin_seen={} seq_before={} seq_after={} peer_ack={} last_flags=0x{:02x} last_plen={}",
-        sent, seq_after.wrapping_sub(seq_before), sess.conn.rx.len(), sess.conn.peer_fin, sess.conn.closed, sess.conn.rst_seen, sess.conn.fin_seen,
-        seq_before, seq_after, sess.conn.last_peer_ack(), sess.conn.last_flags(), sess.conn.last_plen(),
-    ));
-    let resp = sess.recv_all_trace(200_000, &mut trace);
-    sess.close();
-
-    if resp.is_empty() {
-        banner.push("reponse vide (chiffree)".to_string());
-        for line in trace {
-            banner.push(format!("  {}", line));
-            if banner.len() >= 24 { break; }
-        }
-    }
-    HttpsResult { banner, raw: resp }
-}
-
-// Ajoute le corps decode a `out`, ligne par ligne (caracteres non imprimables
-// remplaces par '.'), borne a 200 lignes.
-fn push_body_lines(out: &mut Vec<String>, body: &[u8]) {
+    // Corps (apres \r\n\r\n), affichage brut lisible.
+    let body_off = find_body(&r.raw).unwrap_or(0);
     let mut line = String::new();
-    for &b in body {
+    for &b in &r.raw[body_off..] {
         match b {
             b'\n' => { out.push(core::mem::take(&mut line)); if out.len() > 200 { break; } }
             b'\r' => {}
@@ -201,4 +120,99 @@ fn push_body_lines(out: &mut Vec<String>, body: &[u8]) {
         }
     }
     if !line.is_empty() { out.push(line); }
+    out
+}
+
+/// Recupere une URL HTTPS et renvoie les octets HTTP dechiffres.
+/// Utilise par `wget`/`https` et par le navigateur, pour permettre le suivi
+/// des redirections et le decodage `chunked` dans `net::http`.
+pub fn https_fetch(hostname: &str, port: u16, path: &str) -> HttpsFetchResult {
+    let first = https_fetch_once(hostname, port, path);
+    if !first.raw.is_empty() || hostname.starts_with("www.") || hostname.matches('.').count() != 1 {
+        return first;
+    }
+
+    // Petit comportement navigateur : si l'apex reste muet apres un TLS valide,
+    // retente www.<host>. Cela aide google.com -> www.google.com sans casser
+    // les domaines avec plusieurs labels.
+    use alloc::format;
+    let www = format!("www.{}", hostname);
+    let retry = https_fetch_once(&www, port, path);
+    if !retry.raw.is_empty() { return retry; }
+    first
+}
+
+fn https_fetch_once(hostname: &str, port: u16, path: &str) -> HttpsFetchResult {
+    use alloc::format;
+    use alloc::string::ToString;
+
+    let mut banner: Vec<String> = Vec::new();
+
+    let ip = match crate::net::resolve(hostname) {
+        Some(ip) => ip,
+        None => {
+            banner.push(format!("DNS: echec pour {}", hostname));
+            return HttpsFetchResult { banner, raw: Vec::new() };
+        }
+    };
+
+    let conn = match crate::net::tcp::TcpConn::connect(ip, port) {
+        Some(c) => c,
+        None => {
+            banner.push(format!("connexion TCP echouee vers {}:{}", hostname, port));
+            return HttpsFetchResult { banner, raw: Vec::new() };
+        }
+    };
+
+    let mut sess = match handshake::connect(conn, hostname) {
+        Ok(s) => s,
+        Err(e) => {
+            banner.push(format!("handshake TLS echoue: {}", e));
+            return HttpsFetchResult { banner, raw: Vec::new() };
+        }
+    };
+
+    let r = &sess.report;
+    let lock = if r.trusted && r.hostname_ok && !r.expired { "[TLS OK]" } else { "[TLS !]" };
+    banner.push(format!("{} {} (CN={}, suite={})", lock, r.detail, r.subject_cn, r.cipher_suite));
+
+    let req = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36\r\nAccept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8\r\nAccept-Language: fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7\r\nAccept-Encoding: identity\r\nUpgrade-Insecure-Requests: 1\r\nSec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Site: none\r\nSec-Fetch-User: ?1\r\nConnection: close\r\n\r\n",
+        path, hostname
+    );
+
+    let mut trace: Vec<String> = Vec::new();
+    trace.push(format!(
+        "post_finished: rx={} peer_fin={} closed={} rst={} fin_seen={}",
+        sess.post_finished_rx, sess.post_finished_peer_fin, sess.post_finished_closed,
+        sess.post_finished_rst, sess.post_finished_fin_seen,
+    ));
+    let sent = sess.send_app(req.as_bytes());
+    trace.push(format!(
+        "send_app: sent={} rx={} peer_fin={} closed={} rst={} fin_seen={}",
+        sent, sess.conn.rx.len(), sess.conn.peer_fin, sess.conn.closed, sess.conn.rst_seen, sess.conn.fin_seen,
+    ));
+    let raw = sess.recv_all_trace(200_000, &mut trace);
+    sess.close();
+
+    if raw.is_empty() {
+        banner.push("reponse vide (chiffree)".to_string());
+        for line in trace {
+            banner.push(format!("  {}", line));
+            if banner.len() >= 24 { break; }
+        }
+    }
+
+    HttpsFetchResult { banner, raw }
+}
+
+fn find_body(resp: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    while i + 3 < resp.len() {
+        if resp[i] == b'\r' && resp[i + 1] == b'\n' && resp[i + 2] == b'\r' && resp[i + 3] == b'\n' {
+            return Some(i + 4);
+        }
+        i += 1;
+    }
+    None
 }
