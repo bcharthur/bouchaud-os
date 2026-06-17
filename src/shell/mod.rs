@@ -590,7 +590,7 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "ethinfo" => { crate::drivers::e1000::print_info(); 0 }
         "dns" | "nslookup" => { crate::net::dns_cmd(argc, &argv); 0 }
         "wget" | "curl" | "http" => { crate::net::wget_cmd(argc, &argv); 0 }
-        "dhcp" => { crate::net::placeholder(argv[0]); 0 }
+        "dhcp" => { crate::net::dhcp::run(); 0 }
 
         // Disque (placeholders, roadmap BFS)
         "df" => { crate::drivers::disk::print_df(); 0 }

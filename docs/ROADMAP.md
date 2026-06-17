@@ -39,6 +39,15 @@ Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 - [x] Clavier en interruption IRQ1 (fin du polling)
 - [ ] APIC, plus tard, en remplacement du PIC
 
+## V0.22 - Cloture de la couche reseau : DHCP (+ socle TLS)
+- [x] Client DHCP (DORA) : IP/passerelle/DNS automatiques (config dynamique)
+- [x] Config reseau dynamique (our_ip/gateway/dns_server + set_config)
+- [x] Socle TLS honnete (couche record) ; handshake NON implemente
+- Couche reseau consideree COMPLETE pour le perimetre realiste :
+  Ethernet/ARP/IPv4/ICMP/UDP/DNS/DHCP/TCP/HTTP + loopback
+- [ ] HTTPS/TLS = chantier crypto dedie (X25519, AES-GCM, SHA-256, X.509...)
+      hors perimetre from-scratch a court terme
+
 ## V0.21 - Pile reseau : UDP/DNS/TCP/HTTP
 - [x] UDP (net/udp.rs) + client DNS (net/dns.rs) : commande dns <nom>
 - [x] ping reel IPv4/ICMP via e1000 (V0.20)

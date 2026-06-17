@@ -6,7 +6,7 @@
 
 use crate::arch::x86_64::cpu;
 use crate::net::ipv4::Ipv4Addr;
-use crate::net::{self, ETH_IP};
+use crate::net;
 use alloc::vec::Vec;
 
 const FIN: u8 = 0x01;
@@ -51,7 +51,7 @@ fn build(buf: &mut [u8], dst: &Ipv4Addr, sport: u16, dport: u16, seq: u32, ack: 
     buf[16] = 0; buf[17] = 0; // checksum
     buf[18] = 0; buf[19] = 0; // urgent
     buf[20..total].copy_from_slice(payload);
-    let c = checksum(&ETH_IP, dst, &buf[..total]);
+    let c = checksum(&net::our_ip(), dst, &buf[..total]);
     buf[16] = (c >> 8) as u8; buf[17] = c as u8;
     total
 }
