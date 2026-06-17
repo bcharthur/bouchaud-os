@@ -333,7 +333,7 @@ pub fn tls_cmd(argc: usize, argv: &[&str; 12]) {
     vga::set_color(COLOR_DEFAULT);
     println!("  magasin de CA racines : {} ancres de confiance", tls::roots::count());
     println!("  suite : TLS_AES_128_GCM_SHA256, groupe x25519");
-    println!("  signatures : RSA PKCS#1v1.5 / RSA-PSS / ECDSA P-256 (SHA-256)");
+    println!("  signatures : RSA PKCS#1v1.5 / RSA-PSS / ECDSA P-256/SHA-256 + P-384/SHA-384");
     if argc >= 2 {
         println!("");
         println!("test handshake https://{}/ ...", argv[1]);

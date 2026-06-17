@@ -201,15 +201,23 @@ fn parse_server_hello(msg: &[u8]) -> Result<ServerHello, &'static str> {
 }
 
 // Lit un record TLS brut depuis la connexion : renvoie (en-tete 5 octets, corps).
+//
+// Important : on ne consomme pas l'en-tete tant que le record complet n'est pas
+// disponible. Google envoie souvent la reponse HTTP dans un gros record TLS
+// fragmente en plusieurs segments TCP. L'ancienne version faisait `take(5)`
+// avant d'attendre le corps ; en cas de timeout/reception partielle, le flux TLS
+// etait desynchronise et on finissait par afficher "reponse vide (chiffree)"
+// alors que le handshake etait correct.
 fn read_raw_record(conn: &mut TcpConn) -> Option<([u8; 5], Vec<u8>)> {
     if !conn.fill(5) { return None; }
+
     let mut hdr = [0u8; 5];
-    let h = conn.take(5);
-    if h.len() < 5 { return None; }
-    hdr.copy_from_slice(&h);
+    hdr.copy_from_slice(&conn.rx[..5]);
     let len = ((hdr[3] as usize) << 8) | hdr[4] as usize;
-    if len == 0 { return Some((hdr, Vec::new())); }
-    if !conn.fill(len) && conn.rx.len() < len { return None; }
+
+    if !conn.fill(5 + len) { return None; }
+
+    let _ = conn.take(5);
     let body = conn.take(len);
     if body.len() < len { return None; }
     Some((hdr, body))
