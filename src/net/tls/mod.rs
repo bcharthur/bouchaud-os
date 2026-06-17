@@ -83,6 +83,33 @@ pub fn status() -> &'static str {
 
 /// Resultat d'une requete HTTPS : lignes a afficher.
 pub fn https_get(hostname: &str, port: u16, path: &str) -> Vec<String> {
+    // Google ferme parfois le canal applicatif sur l'apex `google.com` avec
+    // notre pile TLS/HTTP minimale, alors que le frontend canonique `www` sert
+    // bien une page HTTP/1.1. Un navigateur reel suit cette canonicalisation ;
+    // on la fait ici uniquement si la premiere tentative TLS valide ne renvoie
+    // aucune donnee applicative.
+    let first = https_get_once(hostname, port, path);
+    if response_has_body_or_status(&first) || hostname.starts_with("www.") || hostname.matches('.').count() != 1 {
+        return first;
+    }
+
+    use alloc::format;
+    let www = format!("www.{}", hostname);
+    let retry = https_get_once(&www, port, path);
+    if response_has_body_or_status(&retry) {
+        return retry;
+    }
+    first
+}
+
+fn response_has_body_or_status(lines: &[String]) -> bool {
+    for l in lines {
+        if l.starts_with("HTTP/") { return true; }
+    }
+    false
+}
+
+fn https_get_once(hostname: &str, port: u16, path: &str) -> Vec<String> {
     use alloc::format;
     use alloc::string::ToString;
     let mut out: Vec<String> = Vec::new();
@@ -107,9 +134,10 @@ pub fn https_get(hostname: &str, port: u16, path: &str) -> Vec<String> {
     let lock = if r.trusted && r.hostname_ok && !r.expired { "[TLS OK]" } else { "[TLS !]" };
     out.push(format!("{} {} (CN={})", lock, r.detail, r.subject_cn));
 
-    // Requete HTTP/1.0 sur le canal chiffre.
+    // Requete HTTP/1.1 sur le canal chiffre. `Accept-Encoding: identity` evite
+    // de recevoir uniquement un flux compresse illisible par le navigateur VGA.
     let req = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: BouchaudOS-TLS\r\nConnection: close\r\nAccept: */*\r\n\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: BouchaudOS-TLS\r\nConnection: close\r\nAccept: text/html,*/*\r\nAccept-Encoding: identity\r\n\r\n",
         path, hostname
     );
     sess.send_app(req.as_bytes());

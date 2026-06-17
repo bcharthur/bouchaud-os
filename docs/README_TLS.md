@@ -79,6 +79,9 @@ chaîne (confiance, correspondance du nom d'hôte, expiration).
   quand l'ancre, le nom d'hôte et la validité temporelle passent.
 - Le contenu est affiché même quand la chaîne n'est pas approuvée (comme un
   navigateur affichant un avertissement) ; le bandeau distingue les deux cas.
+- Les requêtes HTTPS annoncent `Accept-Encoding: identity` et, si un domaine
+  apex minimal comme `google.com` termine TLS sans envoyer de réponse HTTP,
+  le client retente automatiquement le frontend canonique `www.<domaine>`.
 - Pas de reprise de session (PSK / 0-RTT), pas de HelloRetryRequest
   (inutile puisque x25519 est universellement supporté).
 - Implémentation **non *constant-time*** : objectif pédagogique, pas de
