@@ -33,7 +33,7 @@ const REG_RAL0: u32 = 0x5400;
 const REG_RAH0: u32 = 0x5404;
 const REG_MTA: u32 = 0x5200;
 
-const N_RX: usize = 16;
+const N_RX: usize = 64; // Google peut envoyer un burst de segments TLS; 16 etait trop juste.
 const N_TX: usize = 16;
 const BUF: usize = 2048;
 const DESC_SZ: usize = 16;

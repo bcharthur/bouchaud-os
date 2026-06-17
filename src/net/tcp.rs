@@ -81,6 +81,15 @@ fn parse(seg: &[u8]) -> Option<Seg> {
 
 const WINDOW: u16 = 64240;
 
+struct PendingSeg {
+    seq: u32,
+    data: Vec<u8>,
+}
+
+fn seq_less(a: u32, b: u32) -> bool {
+    (a as i32).wrapping_sub(b as i32) < 0
+}
+
 /// Ouvre une connexion, envoie `request`, accumule la reponse dans `out`.
 /// Renvoie true si la poignee de main a reussi.
 pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> bool {
@@ -173,6 +182,7 @@ pub struct TcpConn {
     seq: u32,         // notre prochain numero de sequence
     ack: u32,         // prochain octet attendu du pair
     pub rx: Vec<u8>,  // donnees applicatives recues, en attente de lecture
+    ooo: Vec<PendingSeg>, // petits segments arrives hors ordre, remis en ordre ensuite
     pub peer_fin: bool,
     pub closed: bool,
 }
@@ -211,7 +221,7 @@ impl TcpConn {
         let a = build(&mut seg, &dst, sport, port, seq, ack, ACK, WINDOW, &[]);
         net::send_ip(dst, 6, &seg[..a]);
 
-        Some(TcpConn { dst, sport, dport: port, seq, ack, rx: Vec::new(), peer_fin: false, closed: false })
+        Some(TcpConn { dst, sport, dport: port, seq, ack, rx: Vec::new(), ooo: Vec::new(), peer_fin: false, closed: false })
     }
 
     /// Envoie des donnees (segmente si necessaire).
@@ -243,13 +253,10 @@ impl TcpConn {
                     if h.dport != self.sport { continue; }
                     if h.flags & RST != 0 { self.closed = true; self.peer_fin = true; return; }
                     let plen = n - h.data_off;
-                    if plen > 0 && h.seq == self.ack {
-                        self.rx.extend_from_slice(&rb[h.data_off..n]);
-                        self.ack = self.ack.wrapping_add(plen as u32);
-                        let a = build(&mut seg, &self.dst, self.sport, self.dport, self.seq, self.ack, ACK, WINDOW, &[]);
-                        net::send_ip(self.dst, 6, &seg[..a]);
-                    } else if plen > 0 {
-                        // Hors sequence : re-ACK.
+                    if plen > 0 {
+                        self.accept_segment(h.seq, &rb[h.data_off..n]);
+                        // ACK cumulatif. Si le segment etait hors sequence, on re-ACK
+                        // volontairement le prochain octet attendu.
                         let a = build(&mut seg, &self.dst, self.sport, self.dport, self.seq, self.ack, ACK, WINDOW, &[]);
                         net::send_ip(self.dst, 6, &seg[..a]);
                     }
@@ -261,6 +268,54 @@ impl TcpConn {
                     }
                 }
             }
+        }
+    }
+
+    fn accept_segment(&mut self, seq: u32, data: &[u8]) {
+        if data.is_empty() { return; }
+
+        if seq == self.ack {
+            self.rx.extend_from_slice(data);
+            self.ack = self.ack.wrapping_add(data.len() as u32);
+            self.flush_ooo();
+            return;
+        }
+
+        // Segment deja recu/retransmis. Si c'est un chevauchement, on garde
+        // uniquement la partie nouvelle.
+        if seq_less(seq, self.ack) {
+            let skip = self.ack.wrapping_sub(seq) as usize;
+            if skip >= data.len() { return; }
+            self.rx.extend_from_slice(&data[skip..]);
+            self.ack = self.ack.wrapping_add((data.len() - skip) as u32);
+            self.flush_ooo();
+            return;
+        }
+
+        // Petit tampon de reordonnancement : suffisant pour les bursts TLS de
+        // Google/QEMU sans transformer ce client en pile TCP complete.
+        if self.ooo.len() >= 16 { return; }
+        for p in &self.ooo {
+            if p.seq == seq { return; }
+        }
+        self.ooo.push(PendingSeg { seq, data: data.to_vec() });
+    }
+
+    fn flush_ooo(&mut self) {
+        loop {
+            let mut found = None;
+            let mut i = 0usize;
+            while i < self.ooo.len() {
+                if self.ooo[i].seq == self.ack {
+                    found = Some(i);
+                    break;
+                }
+                i += 1;
+            }
+            let idx = match found { Some(i) => i, None => break };
+            let p = self.ooo.remove(idx);
+            self.rx.extend_from_slice(&p.data);
+            self.ack = self.ack.wrapping_add(p.data.len() as u32);
         }
     }
 
