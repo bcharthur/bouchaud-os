@@ -2,8 +2,7 @@
 //! serveur (chiffre), verification CertificateVerify + Finished, etablissement
 //! des cles applicatives.
 
-use super::sha256::Sha256;
-use super::record::{self, DirKeys, KeySchedule, CT_HANDSHAKE, CT_ALERT, CT_APPLICATION_DATA};
+use super::record::{self, CipherSuite, DirKeys, KeySchedule, CT_HANDSHAKE, CT_ALERT, CT_APPLICATION_DATA};
 use super::{x25519, rng, x509, validate};
 use crate::net::tcp::TcpConn;
 use alloc::vec::Vec;
@@ -12,6 +11,7 @@ use alloc::format;
 
 // Suites et identifiants.
 const TLS_AES_128_GCM_SHA256: u16 = 0x1301;
+const TLS_AES_256_GCM_SHA384: u16 = 0x1302;
 const GROUP_X25519: u16 = 0x001d;
 const SIG_ECDSA_P256_SHA256: u16 = 0x0403;
 const SIG_ECDSA_P384_SHA384: u16 = 0x0503;
@@ -33,6 +33,7 @@ pub struct CertReport {
     pub expired: bool,
     pub detail: String,
     pub subject_cn: String,
+    pub cipher_suite: String,
 }
 
 /// Session TLS etablie : prete pour les donnees applicatives.
@@ -79,15 +80,16 @@ fn build_client_hello(hostname: &str, random: &[u8; 32], session_id: &[u8; 32], 
     let mut body = Vec::new();
     push_u16(&mut body, 0x0303); // legacy_version
     body.extend_from_slice(random);
-    // TLS 1.3 sans mode compatibilite middlebox : session_id vide.
-    // Avant, on envoyait un legacy_session_id de 32 octets tout en supprimant
-    // le dummy ChangeCipherSpec. Certains frontaux acceptent le handshake mais
-    // ferment le canal applicatif apres le premier application_data.
-    let _ = session_id;
-    body.push(0); // legacy_session_id length = 0
-    // cipher_suites : uniquement AES_128_GCM_SHA256 (tout reste en SHA-256).
-    push_u16(&mut body, 2);
-    push_u16(&mut body, TLS_AES_128_GCM_SHA256);
+    // Mode compatibilite middlebox, comme Chrome : session_id non vide + CCS factice.
+    body.push(32);
+    body.extend_from_slice(session_id);
+    // Liste Chrome-like : le serveur TLS 1.3 ne peut choisir que les 0x13xx.
+    let ciphers = [
+        0x0a0a, TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384,
+        0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014, 0x009c, 0x009d, 0x002f, 0x0035,
+    ];
+    push_u16(&mut body, (ciphers.len() * 2) as u16);
+    for c in ciphers { push_u16(&mut body, c); }
     // compression : null
     body.push(1);
     body.push(0);
@@ -107,6 +109,7 @@ fn build_client_hello(hostname: &str, random: &[u8; 32], session_id: &[u8; 32], 
     // supported_groups (10) : x25519
     {
         let mut g = Vec::new();
+        push_u16(&mut g, 0x0a0a); // GREASE
         push_u16(&mut g, GROUP_X25519);
         let body = with_u16_len(&g);
         push_u16(&mut ext, 10);
@@ -115,6 +118,7 @@ fn build_client_hello(hostname: &str, random: &[u8; 32], session_id: &[u8; 32], 
     // signature_algorithms (13)
     {
         let mut s = Vec::new();
+        push_u16(&mut s, 0x0a0a); // GREASE
         push_u16(&mut s, SIG_ECDSA_P256_SHA256);
         push_u16(&mut s, SIG_ECDSA_P384_SHA384);
         push_u16(&mut s, SIG_RSA_PSS_RSAE_SHA256);
@@ -126,7 +130,8 @@ fn build_client_hello(hostname: &str, random: &[u8; 32], session_id: &[u8; 32], 
     // supported_versions (43) : TLS 1.3
     {
         let mut v = Vec::new();
-        v.push(2); // list length (1 octet)
+        v.push(4); // longueur en octets : GREASE(2) + TLS 1.3(2)
+        push_u16(&mut v, 0x0a0a); // GREASE
         push_u16(&mut v, 0x0304);
         push_u16(&mut ext, 43);
         ext.extend_from_slice(&with_u16_len(&v));
@@ -142,6 +147,13 @@ fn build_client_hello(hostname: &str, random: &[u8; 32], session_id: &[u8; 32], 
         push_u16(&mut ext, 16);
         ext.extend_from_slice(&with_u16_len(&list));
     }
+    // status_request (5) : OCSP stapling. Le corps ne peut pas etre vide :
+    // CertificateStatusRequest = status_type(ocsp=1) || responder_id_list<0..2^16-1> || request_extensions<0..2^16-1>.
+    {
+        let status_request = [1u8, 0, 0, 0, 0];
+        push_u16(&mut ext, 5);
+        ext.extend_from_slice(&with_u16_len(&status_request));
+    }
     // key_share (51) : x25519
     {
         let mut entry = Vec::new();
@@ -150,6 +162,12 @@ fn build_client_hello(hostname: &str, random: &[u8; 32], session_id: &[u8; 32], 
         let list = with_u16_len(&entry);
         push_u16(&mut ext, 51);
         ext.extend_from_slice(&with_u16_len(&list));
+    }
+
+    // padding (21) pour stabiliser la taille du ClientHello.
+    {
+        push_u16(&mut ext, 21);
+        ext.extend_from_slice(&with_u16_len(&[0u8; 32]));
     }
 
     body.extend_from_slice(&with_u16_len(&ext));
@@ -325,9 +343,10 @@ pub fn connect(mut conn: TcpConn, hostname: &str) -> Result<Session, &'static st
 
     // 2. ClientHello + transcript.
     let ch = build_client_hello(hostname, &random, &session_id, &pubkey);
-    let mut transcript = Sha256::new();
-    transcript.update(&ch);
+    let mut transcript: Vec<u8> = Vec::new();
+    transcript.extend_from_slice(&ch);
     send_plaintext(&mut conn, CT_HANDSHAKE, &ch);
+    send_plaintext(&mut conn, record::CT_CHANGE_CIPHER_SPEC, &[1]);
 
     // 3. ServerHello (en clair). Ignore d'eventuels ChangeCipherSpec.
     let sh_msg = loop {
@@ -339,25 +358,23 @@ pub fn connect(mut conn: TcpConn, hostname: &str) -> Result<Session, &'static st
             _ => return Err("record inattendu avant ServerHello"),
         }
     };
-    transcript.update(&sh_msg);
+    transcript.extend_from_slice(&sh_msg);
     let sh = parse_server_hello(&sh_msg)?;
-    if sh.cipher != TLS_AES_128_GCM_SHA256 {
-        return Err("le serveur n'a pas choisi AES_128_GCM_SHA256");
-    }
+    let suite = CipherSuite::from_u16(sh.cipher).ok_or("suite TLS 1.3 non supportee")?;
 
     // 4. Secret partage ECDHE.
     let shared = x25519::x25519(&priv_key, &sh.server_pub);
 
     // 5. Cles de handshake.
-    let th_ch_sh = transcript.clone().finalize();
-    let ks = KeySchedule::derive_handshake(&shared, &th_ch_sh);
-    let mut s_hs = DirKeys::new(&ks.server_hs);
+    let th_ch_sh = suite.hash().digest(&transcript);
+    let ks = KeySchedule::derive_handshake(suite, &shared, &th_ch_sh);
+    let mut s_hs = DirKeys::new(suite, &ks.server_hs);
 
     // 6. Lecture du flight serveur chiffre (EE, Certificate, CertVerify, Finished).
     let mut hs_buf: Vec<u8> = Vec::new();
     let mut certs_der: Vec<Vec<u8>> = Vec::new();
     let mut leaf: Option<x509::Certificate> = None;
-    let mut th_through_cert: Option<[u8; 32]> = None;
+    let mut th_through_cert: Option<Vec<u8>> = None;
 
     // Pompe : renvoie de quoi alimenter hs_buf depuis les records chiffres.
     let feed = |conn: &mut TcpConn, hs_buf: &mut Vec<u8>, s_hs: &mut DirKeys| -> Result<(), &'static str> {
@@ -395,42 +412,42 @@ pub fn connect(mut conn: TcpConn, hostname: &str) -> Result<Session, &'static st
 
         match msg_type {
             HS_ENCRYPTED_EXTENSIONS => {
-                transcript.update(&full);
+                transcript.extend_from_slice(&full);
             }
             HS_CERTIFICATE => {
                 parse_certificate_msg(&body, &mut certs_der);
                 if let Some(d) = certs_der.first() {
                     leaf = x509::parse(d);
                 }
-                transcript.update(&full);
-                th_through_cert = Some(transcript.clone().finalize());
+                transcript.extend_from_slice(&full);
+                th_through_cert = Some(suite.hash().digest(&transcript));
             }
             HS_CERTIFICATE_VERIFY => {
-                let th = th_through_cert.ok_or("CertificateVerify sans Certificate")?;
+                let th = th_through_cert.as_ref().ok_or("CertificateVerify sans Certificate")?;
                 let leaf_ref = leaf.as_ref().ok_or("certificat feuille manquant")?;
                 if !verify_cert_verify(&body, leaf_ref, &th) {
                     return Err("CertificateVerify invalide (signature serveur)");
                 }
-                transcript.update(&full);
+                transcript.extend_from_slice(&full);
             }
             HS_FINISHED => {
-                let th_cv = transcript.clone().finalize();
-                let expected = record::finished_verify(&ks.server_hs, &th_cv);
+                let th_cv = suite.hash().digest(&transcript);
+                let expected = record::finished_verify(suite, &ks.server_hs, &th_cv);
                 if body.len() != expected.len() || body[..] != expected[..] {
                     return Err("Finished serveur invalide (verify_data)");
                 }
-                transcript.update(&full);
+                transcript.extend_from_slice(&full);
                 break;
             }
             _ => {
                 // Message handshake inattendu : on l'incorpore au transcript.
-                transcript.update(&full);
+                transcript.extend_from_slice(&full);
             }
         }
     }
 
     // 7. Secrets applicatifs (transcript jusqu'au Finished serveur).
-    let th_sf = transcript.clone().finalize();
+    let th_sf = suite.hash().digest(&transcript);
     let (c_ap_secret, s_ap_secret) = ks.derive_application(&th_sf);
 
     // 8. Validation de la chaine de certificats AVANT le Finished client.
@@ -449,16 +466,17 @@ pub fn connect(mut conn: TcpConn, hostname: &str) -> Result<Session, &'static st
         expired: v.expired,
         detail: String::from(v.detail),
         subject_cn: cn,
+        cipher_suite: String::from(suite.name()),
     };
 
     // 9. Finished client (verify_data sur le meme transcript).
-    let cfin = record::finished_verify(&ks.client_hs, &th_sf);
+    let cfin = record::finished_verify(suite, &ks.client_hs, &th_sf);
     let fin_msg = handshake_msg(HS_FINISHED, &cfin);
     // Finished chiffre avec la cle handshake client.
-    // Pas de dummy ChangeCipherSpec : il est facultatif en TLS 1.3.
+    // Le dummy ChangeCipherSpec de compatibilite middlebox a deja ete envoye apres ClientHello.
     // Envoi sans pump : on ne draine pas les FIN/ACK ici, pour que le GET
     // application_data soit envoye immediatement par https_get_once().
-    let mut c_hs = DirKeys::new(&ks.client_hs);
+    let mut c_hs = DirKeys::new(suite, &ks.client_hs);
     let rec = c_hs.encrypt(CT_HANDSHAKE, &fin_msg);
     conn.send_no_pump(&rec);
 
@@ -472,8 +490,8 @@ pub fn connect(mut conn: TcpConn, hostname: &str) -> Result<Session, &'static st
     let post_finished_tcp_seq = conn.seq_no();
 
     // 10. Passage aux cles applicatives.
-    let c_ap = DirKeys::new(&c_ap_secret);
-    let s_ap = DirKeys::new(&s_ap_secret);
+    let c_ap = DirKeys::new(suite, &c_ap_secret);
+    let s_ap = DirKeys::new(suite, &s_ap_secret);
 
     Ok(Session {
         conn,
