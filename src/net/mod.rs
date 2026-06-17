@@ -237,14 +237,12 @@ pub fn http_get(url: &str) -> alloc::vec::Vec<String> {
     use alloc::string::ToString;
     let mut out: alloc::vec::Vec<String> = alloc::vec::Vec::new();
 
-    let rest = if let Some(r) = url.strip_prefix("http://") {
-        r
-    } else if url.starts_with("https://") {
-        out.push("HTTPS non supporte : TLS pas encore implemente.".to_string());
-        out.push("Utilise http:// pour l'instant.".to_string());
-        return out;
+    let (rest, is_tls, default_port) = if let Some(r) = url.strip_prefix("http://") {
+        (r, false, 80u16)
+    } else if let Some(r) = url.strip_prefix("https://") {
+        (r, true, 443u16)
     } else {
-        url
+        (url, false, 80u16)
     };
 
     let (host, path) = match rest.find('/') {
@@ -252,9 +250,17 @@ pub fn http_get(url: &str) -> alloc::vec::Vec<String> {
         None => (rest, "/"),
     };
     let (hostname, port) = match host.find(':') {
-        Some(i) => (&host[..i], host[i + 1..].parse::<u16>().unwrap_or(80)),
-        None => (host, 80u16),
+        Some(i) => (&host[..i], host[i + 1..].parse::<u16>().unwrap_or(default_port)),
+        None => (host, default_port),
     };
+
+    if is_tls {
+        if !e1000::is_ready() && !e1000::init() {
+            out.push("reseau indisponible (lance 'ifup')".to_string());
+            return out;
+        }
+        return tls::https_get(hostname, port, path);
+    }
 
     if !e1000::is_ready() && !e1000::init() {
         out.push("reseau indisponible (lance 'ifup')".to_string());
@@ -300,11 +306,43 @@ pub fn http_get(url: &str) -> alloc::vec::Vec<String> {
     out
 }
 
-/// Commande `wget`/`curl`/`http <url>`.
+/// Commande `wget`/`curl`/`http`/`https <url>`.
 pub fn wget_cmd(argc: usize, argv: &[&str; 12]) {
-    if argc < 2 { println!("usage: wget http://hote/chemin"); return; }
-    for l in http_get(argv[1]) {
+    if argc < 2 {
+        println!("usage: {} <url>", argv[0]);
+        return;
+    }
+    // La commande `https` force le schema TLS si absent.
+    let url = argv[1];
+    let prefixed: alloc::string::String;
+    let target = if argv[0] == "https" && !url.contains("://") {
+        prefixed = alloc::format!("https://{}", url);
+        prefixed.as_str()
+    } else {
+        url
+    };
+    for l in http_get(target) {
         println!("{}", l);
+    }
+}
+
+/// Commande `tls [hote]` : diagnostics TLS et magasin de CA racines.
+pub fn tls_cmd(argc: usize, argv: &[&str; 12]) {
+    vga::set_color(COLOR_CYAN);
+    println!("TLS : {}", tls::status());
+    vga::set_color(COLOR_DEFAULT);
+    println!("  magasin de CA racines : {} ancres de confiance", tls::roots::count());
+    println!("  suite : TLS_AES_128_GCM_SHA256, groupe x25519");
+    println!("  signatures : RSA PKCS#1v1.5 / RSA-PSS / ECDSA P-256 (SHA-256)");
+    if argc >= 2 {
+        println!("");
+        println!("test handshake https://{}/ ...", argv[1]);
+        for l in tls::https_get(argv[1], 443, "/") {
+            println!("{}", l);
+        }
+    } else {
+        println!("  (astuce : 'tls example.com' teste un vrai handshake)");
+        println!("  (astuce : 'tls-selftest' valide la crypto par vecteurs de reference)");
     }
 }
 
@@ -522,9 +560,10 @@ pub fn print_roadmap() {
     println!("  ICMP           echo (ping loopback)            [actif sur lo]");
     println!("  interface lo   127.0.0.1                       [active]");
     println!("  driver NIC     e1000/virtio-net (RX/TX DMA)    [a ecrire]");
-    println!("  UDP/DHCP/DNS                                   [planifie]");
-    println!("  TCP/HTTP                                       [planifie]");
-    println!("  TLS                                            [plus tard]");
+    println!("  UDP/DHCP/DNS                                   [actif]");
+    println!("  TCP/HTTP                                       [actif]");
+    println!("  TLS 1.3  X25519+AES-GCM+SHA256+HKDF            [actif]");
+    println!("  X.509    ASN.1/DER + chaine RSA/ECDSA          [actif]");
 }
 
 fn missing_layer(cmd: &str) -> &'static str {
