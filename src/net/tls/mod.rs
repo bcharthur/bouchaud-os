@@ -3,7 +3,8 @@
 //! Pile cryptographique ecrite a la main (aucune dependance externe) :
 //!   - SHA-256 / HMAC / HKDF (`sha256`) et SHA-384/SHA-512 (`sha512`)
 //!   - AES-128/256 + GCM AEAD (`aes`, `gcm`)
-//!   - X25519 (`x25519`) et ECDSA P-256/P-384 (`p256`, `p384`)
+//!   - X25519 (`x25519`) et ECDSA P-256/P-384 (courbe generique `ec`, instanciee
+//!     par `p256` et `p384`)
 //!   - RSA + bignum (`bignum`, `rsa`)
 //!   - ASN.1/DER + X.509 + validation de chaine (`asn1`, `x509`, `roots`)
 //!   - CSPRNG (`rng`)
@@ -14,6 +15,7 @@ pub mod sha512;
 pub mod aes;
 pub mod gcm;
 pub mod x25519;
+pub mod ec;
 pub mod p256;
 pub mod p384;
 pub mod bignum;
