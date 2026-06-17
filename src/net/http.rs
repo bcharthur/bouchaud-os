@@ -67,7 +67,15 @@ fn header_value<'a>(head: &'a [u8], name: &str) -> Option<&'a str> {
 pub struct Response {
     pub status_line: String,
     pub status_code: u16,
+    pub location: Option<String>,
     pub body: Vec<u8>,
+}
+
+impl Response {
+    /// True si la reponse est une redirection avec un en-tete `Location`.
+    pub fn is_redirect(&self) -> bool {
+        matches!(self.status_code, 301 | 302 | 303 | 307 | 308) && self.location.is_some()
+    }
 }
 
 /// True si la zone d'en-tete annonce un corps chunked.
@@ -128,6 +136,25 @@ fn parse_hex(s: &[u8]) -> usize {
     v
 }
 
+/// Resout une cible de redirection `Location` en URL absolue, relativement a
+/// l'URL courante (`scheme`, `host`). Gere les formes :
+///   - absolue  : `https://autre.com/x`        -> telle quelle
+///   - //host   : `//autre.com/x`              -> `scheme://autre.com/x`
+///   - /chemin  : `/x`                         -> `scheme://host/x`
+///   - relative : `x`                          -> `scheme://host/x`
+pub fn resolve_location(scheme: &str, host: &str, location: &str) -> String {
+    if location.starts_with("http://") || location.starts_with("https://") {
+        return String::from(location);
+    }
+    if let Some(rest) = location.strip_prefix("//") {
+        return format!("{}://{}", scheme, rest);
+    }
+    if location.starts_with('/') {
+        return format!("{}://{}{}", scheme, host, location);
+    }
+    format!("{}://{}/{}", scheme, host, location)
+}
+
 /// Indique si `raw` contient une reponse HTTP complete (en-tete + corps entier).
 /// Sert a arreter la reception sans attendre le FIN/timeout.
 pub fn is_complete(raw: &[u8]) -> bool {
@@ -161,6 +188,8 @@ pub fn parse_response(raw: &[u8]) -> Option<Response> {
         .and_then(|c| c.parse::<u16>().ok())
         .unwrap_or(0);
 
+    let location = header_value(head, "Location").map(String::from);
+
     let body = if is_chunked(head) {
         dechunk(raw_body).0
     } else if let Some(len) = content_length(head) {
@@ -169,5 +198,5 @@ pub fn parse_response(raw: &[u8]) -> Option<Response> {
         raw_body.to_vec()
     };
 
-    Some(Response { status_line, status_code, body })
+    Some(Response { status_line, status_code, location, body })
 }

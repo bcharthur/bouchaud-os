@@ -231,20 +231,80 @@ pub fn dns_cmd(argc: usize, argv: &[&str; 12]) {
     }
 }
 
-/// Recupere une URL HTTP et renvoie les lignes a afficher (statut + corps).
+/// Recupere une URL HTTP(S) et renvoie les lignes a afficher (statut + corps),
+/// en suivant jusqu'a 5 redirections (301/302/303/307/308 via `Location`).
 /// Utilise par la commande `wget` et par le navigateur.
 pub fn http_get(url: &str) -> alloc::vec::Vec<String> {
     use alloc::string::ToString;
     let mut out: alloc::vec::Vec<String> = alloc::vec::Vec::new();
 
-    let (rest, is_tls, default_port) = if let Some(r) = url.strip_prefix("http://") {
-        (r, false, 80u16)
-    } else if let Some(r) = url.strip_prefix("https://") {
-        (r, true, 443u16)
-    } else {
-        (url, false, 80u16)
-    };
+    if !e1000::is_ready() && !e1000::init() {
+        out.push("reseau indisponible (lance 'ifup')".to_string());
+        return out;
+    }
 
+    let mut current = String::from(url);
+    for hop in 0..6u32 {
+        let (scheme, hostname, port, path) = split_url(&current);
+
+        // Recupere la reponse brute (banniere TLS eventuelle + octets HTTP).
+        let (mut banner, raw) = if scheme == "https" {
+            let r = tls::https_fetch(&hostname, port, &path);
+            (r.banner, r.raw)
+        } else {
+            let ip = match resolve(&hostname) {
+                Some(ip) => ip,
+                None => { out.push(format!("DNS: echec pour {}", hostname)); return out; }
+            };
+            let req = http::build_get(&hostname, &path);
+            let mut resp: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            if !tcp::fetch(ip, port, req.as_bytes(), &mut resp) {
+                out.push(format!("connexion TCP echouee vers {}:{}", hostname, port));
+                return out;
+            }
+            (alloc::vec::Vec::new(), resp)
+        };
+
+        out.append(&mut banner);
+        if raw.is_empty() {
+            // La banniere contient deja la trace de diagnostic (canal muet).
+            if scheme != "https" { out.push("reponse vide".to_string()); }
+            return out;
+        }
+
+        match http::parse_response(&raw) {
+            Some(r) if r.is_redirect() && hop < 5 => {
+                let loc = r.location.clone().unwrap_or_default();
+                out.push(format!("{} -> {}", r.status_code, loc));
+                current = http::resolve_location(scheme, &hostname, &loc);
+            }
+            Some(r) => {
+                out.push(r.status_line);
+                append_body_lines(&mut out, &r.body);
+                return out;
+            }
+            None => {
+                let mut status = String::new();
+                for &b in raw.iter().take_while(|&&b| b != b'\r' && b != b'\n') { status.push(b as char); }
+                out.push(status);
+                return out;
+            }
+        }
+    }
+    out.push("trop de redirections".to_string());
+    out
+}
+
+// Decoupe une URL en (scheme, hostname, port, path).
+fn split_url(url: &str) -> (&'static str, String, u16, String) {
+    use alloc::string::ToString;
+    let (rest, scheme, default_port) = if let Some(r) = url.strip_prefix("https://") {
+        (r, "https", 443u16)
+    } else if let Some(r) = url.strip_prefix("http://") {
+        (r, "http", 80u16)
+    } else {
+        (url, "http", 80u16)
+    };
     let (host, path) = match rest.find('/') {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, "/"),
@@ -253,57 +313,21 @@ pub fn http_get(url: &str) -> alloc::vec::Vec<String> {
         Some(i) => (&host[..i], host[i + 1..].parse::<u16>().unwrap_or(default_port)),
         None => (host, default_port),
     };
+    (scheme, hostname.to_string(), port, path.to_string())
+}
 
-    if is_tls {
-        if !e1000::is_ready() && !e1000::init() {
-            out.push("reseau indisponible (lance 'ifup')".to_string());
-            return out;
-        }
-        return tls::https_get(hostname, port, path);
-    }
-
-    if !e1000::is_ready() && !e1000::init() {
-        out.push("reseau indisponible (lance 'ifup')".to_string());
-        return out;
-    }
-    let ip = match resolve(hostname) {
-        Some(ip) => ip,
-        None => { out.push(format!("DNS: echec pour {}", hostname)); return out; }
-    };
-
-    let req = http::build_get(hostname, path);
-    let mut resp: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-    if !tcp::fetch(ip, port, req.as_bytes(), &mut resp) {
-        out.push(format!("connexion TCP echouee vers {}:{}", hostname, port));
-        return out;
-    }
-    if resp.is_empty() {
-        out.push("reponse vide".to_string());
-        return out;
-    }
-
-    // Decodage HTTP/1.1 : statut + corps (dechunke / Content-Length).
-    match http::parse_response(&resp) {
-        Some(r) => {
-            out.push(r.status_line);
-            let mut line = String::new();
-            for &b in &r.body {
-                match b {
-                    b'\n' => { out.push(core::mem::take(&mut line)); if out.len() > 200 { break; } }
-                    b'\r' => {}
-                    0x20..=0x7e => line.push(b as char),
-                    _ => line.push('.'),
-                }
-            }
-            if !line.is_empty() { out.push(line); }
-        }
-        None => {
-            let mut status = String::new();
-            for &b in resp.iter().take_while(|&&b| b != b'\r' && b != b'\n') { status.push(b as char); }
-            out.push(status);
+// Ajoute un corps de reponse a `out`, ligne par ligne (non imprimables -> '.').
+fn append_body_lines(out: &mut alloc::vec::Vec<String>, body: &[u8]) {
+    let mut line = String::new();
+    for &b in body {
+        match b {
+            b'\n' => { out.push(core::mem::take(&mut line)); if out.len() > 200 { break; } }
+            b'\r' => {}
+            0x20..=0x7e => line.push(b as char),
+            _ => line.push('.'),
         }
     }
-    out
+    if !line.is_empty() { out.push(line); }
 }
 
 /// Commande `wget`/`curl`/`http`/`https <url>`.
