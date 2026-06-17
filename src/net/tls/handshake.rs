@@ -574,6 +574,13 @@ impl Session {
                                 CT_APPLICATION_DATA => {
                                     out.extend_from_slice(&pt);
                                     if out.len() >= max { break; }
+                                    // Arret anticipe des que la reponse HTTP est
+                                    // complete (Content-Length atteint ou dernier
+                                    // chunk recu) : evite d'attendre le FIN/timeout.
+                                    if crate::net::http::is_complete(&out) {
+                                        trace.push(format!("recv: reponse HTTP complete ({} octets)", out.len()));
+                                        break;
+                                    }
                                 }
                                 CT_HANDSHAKE => {
                                     // NewSessionTicket/KeyUpdate : ignore, mais le numero
