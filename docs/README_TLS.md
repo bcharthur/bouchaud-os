@@ -29,8 +29,9 @@ depuis le shell ou le navigateur intégré.
 
 1. Génération d'une paire éphémère **X25519** ; envoi du **ClientHello**
    (SNI, `supported_versions=TLS 1.3`, `supported_groups=x25519`,
-   `signature_algorithms`, `key_share`). Suite unique offerte :
-   `TLS_AES_128_GCM_SHA256` (tout reste en SHA-256).
+   `signature_algorithms`, `application_layer_protocol_negotiation=http/1.1`,
+   `key_share`). Suite unique offerte : `TLS_AES_128_GCM_SHA256`
+   (tout reste en SHA-256 pour la suite TLS).
 2. Réception du **ServerHello**, extraction du `key_share` serveur.
 3. Calcul du secret partagé **ECDHE** puis du *key schedule* HKDF
    (early → handshake → master secrets, trafic client/serveur).

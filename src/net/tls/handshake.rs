@@ -119,6 +119,17 @@ fn build_client_hello(hostname: &str, random: &[u8; 32], session_id: &[u8; 32], 
         push_u16(&mut ext, 43);
         ext.extend_from_slice(&with_u16_len(&v));
     }
+    // application_layer_protocol_negotiation (16) : force HTTP/1.1.
+    // Certains frontaux modernes ferment le canal applicatif si aucun ALPN
+    // n'est annonce, meme apres un handshake TLS valide.
+    {
+        let mut proto = Vec::new();
+        proto.push(8); // longueur de "http/1.1"
+        proto.extend_from_slice(b"http/1.1");
+        let list = with_u16_len(&proto);
+        push_u16(&mut ext, 16);
+        ext.extend_from_slice(&with_u16_len(&list));
+    }
     // key_share (51) : x25519
     {
         let mut entry = Vec::new();
