@@ -10,10 +10,12 @@ depuis le shell ou le navigateur intégré.
 | Brique | Fichier | Détail | Vecteurs de test |
 |--------|---------|--------|------------------|
 | SHA-256 / HMAC / HKDF | `sha256.rs` | + HKDF-Expand-Label TLS 1.3 | FIPS-180, RFC 4231, RFC 5869 |
+| SHA-384 / SHA-512 | `sha512.rs` | SHA-384 pour ECDSA P-384 | FIPS-180 |
 | AES-128 / AES-256 | `aes.rs` | chiffrement de bloc (FIPS-197) | FIPS-197 App. C |
 | AES-GCM (AEAD) | `gcm.rs` | GHASH GF(2^128) + CTR | NIST SP 800-38D |
 | X25519 | `x25519.rs` | ECDH Curve25519 (radix 2^51) | RFC 7748 §5.2 |
 | P-256 / ECDSA | `p256.rs` | corps premier, jacobien, vérif ECDSA | RFC 6979 A.2.5 |
+| P-384 / ECDSA | `p384.rs` | corps premier, jacobien, vérif ECDSA SHA-384 | SEC 2 / FIPS-186 |
 | RSA | `bignum.rs`, `rsa.rs` | grands entiers + PKCS#1 v1.5 + PSS | OpenSSL |
 | ASN.1 / DER | `asn1.rs` | parseur TLV | — |
 | X.509 | `x509.rs` | clé publique, validité, SAN, basicConstraints | vrais certs |
@@ -69,12 +71,11 @@ chaîne (confiance, correspondance du nom d'hôte, expiration).
 
 - Une seule suite (`TLS_AES_128_GCM_SHA256`) et un seul groupe (`x25519`)
   offerts — suffisant pour la quasi-totalité des serveurs publics.
-- Validation de chaîne : **RSA (SHA-256)** et **ECDSA P-256 (SHA-256)** sont
-  supportés. Les chaînes **ECDSA P-384 / SHA-384** (ex. certaines chaînes
-  Google rootées sur *GTS Root R4*, ou Let's Encrypt ECDSA rooté sur
-  *ISRG Root X2*) ne sont **pas encore validées** : la connexion s'établit et
-  la page se charge, mais le bandeau affiche `[TLS !]` (ancre non vérifiable).
-  Les chaînes RSA de ces mêmes sites s'affichent `[TLS OK]`.
+- Validation de chaîne : **RSA (SHA-256)**, **ECDSA P-256 (SHA-256)** et
+  **ECDSA P-384 (SHA-384)** sont supportés. Cela couvre les chaînes modernes
+  courantes (ex. Google rootées sur *GTS Root R4*, ou Let's Encrypt ECDSA
+  rooté sur *ISRG Root X2*) afin que le bandeau puisse afficher `[TLS OK]`
+  quand l'ancre, le nom d'hôte et la validité temporelle passent.
 - Le contenu est affiché même quand la chaîne n'est pas approuvée (comme un
   navigateur affichant un avertissement) ; le bandeau distingue les deux cas.
 - Pas de reprise de session (PSK / 0-RTT), pas de HelloRetryRequest

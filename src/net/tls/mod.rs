@@ -1,19 +1,21 @@
 //! TLS 1.3 from-scratch (HTTPS) pour Bouchaud OS.
 //!
 //! Pile cryptographique ecrite a la main (aucune dependance externe) :
-//!   - SHA-256 / HMAC / HKDF (`sha256`)
+//!   - SHA-256 / HMAC / HKDF (`sha256`) et SHA-384/SHA-512 (`sha512`)
 //!   - AES-128/256 + GCM AEAD (`aes`, `gcm`)
-//!   - X25519 (`x25519`) et P-256/ECDSA (`p256`)
+//!   - X25519 (`x25519`) et ECDSA P-256/P-384 (`p256`, `p384`)
 //!   - RSA + bignum (`bignum`, `rsa`)
 //!   - ASN.1/DER + X.509 + validation de chaine (`asn1`, `x509`, `roots`)
 //!   - CSPRNG (`rng`)
 //!   - handshake et couche record TLS 1.3 (`handshake`, `record`)
 
 pub mod sha256;
+pub mod sha512;
 pub mod aes;
 pub mod gcm;
 pub mod x25519;
 pub mod p256;
+pub mod p384;
 pub mod bignum;
 pub mod rsa;
 pub mod asn1;
@@ -36,10 +38,12 @@ pub const TLS_1_3: u16 = 0x0304;
 pub fn selftest() {
     let tests: &[(&str, fn() -> Result<(), &'static str>)] = &[
         ("SHA-256/HMAC/HKDF", sha256::selftest),
+        ("SHA-384/SHA-512", sha512::selftest),
         ("AES-128/256", aes::selftest),
         ("AES-GCM", gcm::selftest),
         ("X25519", x25519::selftest),
         ("P-256/ECDSA", p256::selftest),
+        ("P-384/ECDSA", p384::selftest),
         ("RSA PKCS#1v1.5 + PSS", rsa::selftest),
         ("X.509 (parsing racines)", x509_selftest),
     ];
@@ -74,7 +78,7 @@ fn x509_selftest() -> Result<(), &'static str> {
 
 /// Etat d'implementation, pour les messages utilisateur.
 pub fn status() -> &'static str {
-    "TLS 1.3 (X25519/AES-128-GCM/SHA-256/HKDF + X.509 RSA/ECDSA)"
+    "TLS 1.3 (X25519/AES-128-GCM/SHA-256/HKDF + X.509 RSA/ECDSA P-256/P-384)"
 }
 
 /// Resultat d'une requete HTTPS : lignes a afficher.
