@@ -168,17 +168,35 @@ fn https_get_once(hostname: &str, port: u16, path: &str) -> Vec<String> {
         return out;
     }
 
-    // Ligne de statut.
-    let mut i = 0;
-    while i < resp.len() && resp[i] != b'\r' && resp[i] != b'\n' { i += 1; }
-    let mut status = String::new();
-    for &b in &resp[..i] { status.push(b as char); }
-    out.push(status);
+    // Decodage HTTP/1.1 reel : statut + corps dechunke (Transfer-Encoding) ou
+    // delimite par Content-Length.
+    match crate::net::http::parse_response(&resp) {
+        Some(r) => {
+            out.push(r.status_line);
+            push_body_lines(&mut out, &r.body);
+        }
+        None => {
+            // En-tete incomplet : on affiche le brut.
+            let mut line = String::new();
+            for &b in &resp {
+                match b {
+                    b'\n' => { out.push(core::mem::take(&mut line)); if out.len() > 200 { break; } }
+                    b'\r' => {}
+                    0x20..=0x7e => line.push(b as char),
+                    _ => line.push('.'),
+                }
+            }
+            if !line.is_empty() { out.push(line); }
+        }
+    }
+    out
+}
 
-    // Corps (apres \r\n\r\n).
-    let body_off = find_body(&resp).unwrap_or(0);
+// Ajoute le corps decode a `out`, ligne par ligne (caracteres non imprimables
+// remplaces par '.'), borne a 200 lignes.
+fn push_body_lines(out: &mut Vec<String>, body: &[u8]) {
     let mut line = String::new();
-    for &b in &resp[body_off..] {
+    for &b in body {
         match b {
             b'\n' => { out.push(core::mem::take(&mut line)); if out.len() > 200 { break; } }
             b'\r' => {}
@@ -187,16 +205,4 @@ fn https_get_once(hostname: &str, port: u16, path: &str) -> Vec<String> {
         }
     }
     if !line.is_empty() { out.push(line); }
-    out
-}
-
-fn find_body(resp: &[u8]) -> Option<usize> {
-    let mut i = 0;
-    while i + 3 < resp.len() {
-        if resp[i] == b'\r' && resp[i + 1] == b'\n' && resp[i + 2] == b'\r' && resp[i + 3] == b'\n' {
-            return Some(i + 4);
-        }
-        i += 1;
-    }
-    None
 }

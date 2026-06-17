@@ -282,27 +282,27 @@ pub fn http_get(url: &str) -> alloc::vec::Vec<String> {
         return out;
     }
 
-    // Ligne de statut (premiere ligne de la reponse).
-    let mut status_end = 0;
-    while status_end < resp.len() && resp[status_end] != b'\r' && resp[status_end] != b'\n' {
-        status_end += 1;
-    }
-    let mut status = String::new();
-    for &b in &resp[..status_end] { status.push(b as char); }
-    out.push(status);
-
-    // Corps.
-    let body_off = http::body_offset(&resp).unwrap_or(0);
-    let mut line = String::new();
-    for &b in &resp[body_off..] {
-        match b {
-            b'\n' => { out.push(core::mem::take(&mut line)); if out.len() > 200 { break; } }
-            b'\r' => {}
-            0x20..=0x7e => line.push(b as char),
-            _ => line.push('.'),
+    // Decodage HTTP/1.1 : statut + corps (dechunke / Content-Length).
+    match http::parse_response(&resp) {
+        Some(r) => {
+            out.push(r.status_line);
+            let mut line = String::new();
+            for &b in &r.body {
+                match b {
+                    b'\n' => { out.push(core::mem::take(&mut line)); if out.len() > 200 { break; } }
+                    b'\r' => {}
+                    0x20..=0x7e => line.push(b as char),
+                    _ => line.push('.'),
+                }
+            }
+            if !line.is_empty() { out.push(line); }
+        }
+        None => {
+            let mut status = String::new();
+            for &b in resp.iter().take_while(|&&b| b != b'\r' && b != b'\n') { status.push(b as char); }
+            out.push(status);
         }
     }
-    if !line.is_empty() { out.push(line); }
     out
 }
 
