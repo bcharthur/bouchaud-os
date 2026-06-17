@@ -1,7 +1,7 @@
 //! X.509 : parsing de certificat et verification de signature (chainage).
 
 use super::asn1::{self, Der};
-use super::{rsa, p256};
+use super::{rsa, p256, p384};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -11,7 +11,9 @@ const OID_SHA256_RSA: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 
 const OID_RSA_PSS: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0a];
 const OID_EC_PUBKEY: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
 const OID_P256: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+const OID_P384: &[u8] = &[0x2b, 0x81, 0x04, 0x00, 0x22];
 const OID_ECDSA_SHA256: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02];
+const OID_ECDSA_SHA384: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x03];
 const OID_SAN: &[u8] = &[0x55, 0x1d, 0x11];
 const OID_BASIC_CONSTRAINTS: &[u8] = &[0x55, 0x1d, 0x13];
 
@@ -20,6 +22,7 @@ pub enum SigAlg {
     RsaPkcs1Sha256,
     RsaPss,
     EcdsaP256Sha256,
+    EcdsaP384Sha384,
     Unknown,
 }
 
@@ -27,6 +30,7 @@ pub enum SigAlg {
 pub enum PubKey {
     Rsa { n: Vec<u8>, e: Vec<u8> },
     EcP256 { point: Vec<u8> },
+    EcP384 { point: Vec<u8> },
     Unknown,
 }
 
@@ -48,6 +52,7 @@ fn alg_from_oid(oid: &[u8]) -> SigAlg {
     if oid == OID_SHA256_RSA { SigAlg::RsaPkcs1Sha256 }
     else if oid == OID_RSA_PSS { SigAlg::RsaPss }
     else if oid == OID_ECDSA_SHA256 { SigAlg::EcdsaP256Sha256 }
+    else if oid == OID_ECDSA_SHA384 { SigAlg::EcdsaP384Sha384 }
     else { SigAlg::Unknown }
 }
 
@@ -99,9 +104,11 @@ fn parse_pubkey(spki: &Der) -> PubKey {
         let mut ai = alg.children();
         let _ = ai.next(); // OID deja lu
         if let Some(curve) = ai.next() {
-            if curve.content != OID_P256 { return PubKey::Unknown; }
+            if curve.content == OID_P256 { return PubKey::EcP256 { point: key_bytes.to_vec() }; }
+            if curve.content == OID_P384 { return PubKey::EcP384 { point: key_bytes.to_vec() }; }
+            return PubKey::Unknown;
         }
-        PubKey::EcP256 { point: key_bytes.to_vec() }
+        PubKey::Unknown
     } else {
         PubKey::Unknown
     }
@@ -225,19 +232,24 @@ pub fn verify_signed_by(child: &Certificate, issuer_pubkey: &PubKey) -> bool {
             let key = rsa::RsaPubKey::new(n, e);
             rsa::verify_pss_sha256(&key, &child.tbs, &child.signature)
         }
-        (SigAlg::EcdsaP256Sha256, PubKey::EcP256 { point }) => {
-            // signature = SEQUENCE { r INTEGER, s INTEGER }
-            if let Some((seq, _)) = asn1::read_tag(&child.signature, asn1::TAG_SEQUENCE) {
-                let mut si = seq.children();
-                if let (Some(r), Some(s)) = (si.next(), si.next()) {
-                    return p256::verify_ecdsa_sha256(point, &child.tbs,
-                        strip0(r.content), strip0(s.content));
-                }
-            }
-            false
-        }
+        (SigAlg::EcdsaP256Sha256, PubKey::EcP256 { point }) => verify_ecdsa_der(&child.signature, |r, s| {
+            p256::verify_ecdsa_sha256(point, &child.tbs, r, s)
+        }),
+        (SigAlg::EcdsaP384Sha384, PubKey::EcP384 { point }) => verify_ecdsa_der(&child.signature, |r, s| {
+            p384::verify_ecdsa_sha384(point, &child.tbs, r, s)
+        }),
         _ => false,
     }
+}
+
+fn verify_ecdsa_der<F: FnOnce(&[u8], &[u8]) -> bool>(sig: &[u8], f: F) -> bool {
+    if let Some((seq, _)) = asn1::read_tag(sig, asn1::TAG_SEQUENCE) {
+        let mut si = seq.children();
+        if let (Some(r), Some(s)) = (si.next(), si.next()) {
+            return f(strip0(r.content), strip0(s.content));
+        }
+    }
+    false
 }
 
 // Retire un eventuel octet de signe 0x00 d'un INTEGER DER.
