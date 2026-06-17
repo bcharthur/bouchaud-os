@@ -8,6 +8,7 @@ use super::{x25519, rng, x509, validate};
 use crate::net::tcp::TcpConn;
 use alloc::vec::Vec;
 use alloc::string::String;
+use alloc::format;
 
 // Suites et identifiants.
 const TLS_AES_128_GCM_SHA256: u16 = 0x1301;
@@ -40,6 +41,13 @@ pub struct Session {
     c_ap: DirKeys,
     s_ap: DirKeys,
     pub report: CertReport,
+    /// Etat TCP observe juste apres le Finished client, avant tout GET HTTP.
+    pub post_finished_rx: usize,
+    pub post_finished_peer_fin: bool,
+    pub post_finished_closed: bool,
+    pub post_finished_rst: bool,
+    pub post_finished_fin_seen: bool,
+    pub post_finished_tcp_seq: u32,
     rx_plain: Vec<u8>,
 }
 
@@ -71,8 +79,12 @@ fn build_client_hello(hostname: &str, random: &[u8; 32], session_id: &[u8; 32], 
     let mut body = Vec::new();
     push_u16(&mut body, 0x0303); // legacy_version
     body.extend_from_slice(random);
-    body.push(32); // legacy_session_id length
-    body.extend_from_slice(session_id);
+    // TLS 1.3 sans mode compatibilite middlebox : session_id vide.
+    // Avant, on envoyait un legacy_session_id de 32 octets tout en supprimant
+    // le dummy ChangeCipherSpec. Certains frontaux acceptent le handshake mais
+    // ferment le canal applicatif apres le premier application_data.
+    let _ = session_id;
+    body.push(0); // legacy_session_id length = 0
     // cipher_suites : uniquement AES_128_GCM_SHA256 (tout reste en SHA-256).
     push_u16(&mut body, 2);
     push_u16(&mut body, TLS_AES_128_GCM_SHA256);
@@ -421,16 +433,12 @@ pub fn connect(mut conn: TcpConn, hostname: &str) -> Result<Session, &'static st
     let th_sf = transcript.clone().finalize();
     let (c_ap_secret, s_ap_secret) = ks.derive_application(&th_sf);
 
-    // 8. Finished client (verify_data sur le meme transcript).
-    let cfin = record::finished_verify(&ks.client_hs, &th_sf);
-    let fin_msg = handshake_msg(HS_FINISHED, &cfin);
-    // ChangeCipherSpec de compatibilite, puis Finished chiffre avec la cle handshake client.
-    send_plaintext(&mut conn, record::CT_CHANGE_CIPHER_SPEC, &[0x01]);
-    let mut c_hs = DirKeys::new(&ks.client_hs);
-    let rec = c_hs.encrypt(CT_HANDSHAKE, &fin_msg);
-    conn.send(&rec);
-
-    // 9. Validation de la chaine de certificats.
+    // 8. Validation de la chaine de certificats AVANT le Finished client.
+    //
+    // Objectif : supprimer le "trou" temporel entre notre Finished TLS 1.3 et
+    // le premier record application_data. Google ferme rapidement si aucun GET
+    // chiffre n'arrive apres le Finished ; on prepare donc tout ce qui est local
+    // avant d'envoyer le dernier record handshake client.
     let chain = validate::parse_chain(&certs_der);
     let now = validate::now_stamp();
     let v = validate::validate(&chain, hostname, now);
@@ -443,11 +451,43 @@ pub fn connect(mut conn: TcpConn, hostname: &str) -> Result<Session, &'static st
         subject_cn: cn,
     };
 
+    // 9. Finished client (verify_data sur le meme transcript).
+    let cfin = record::finished_verify(&ks.client_hs, &th_sf);
+    let fin_msg = handshake_msg(HS_FINISHED, &cfin);
+    // Finished chiffre avec la cle handshake client.
+    // Pas de dummy ChangeCipherSpec : il est facultatif en TLS 1.3.
+    // Envoi sans pump : on ne draine pas les FIN/ACK ici, pour que le GET
+    // application_data soit envoye immediatement par https_get_once().
+    let mut c_hs = DirKeys::new(&ks.client_hs);
+    let rec = c_hs.encrypt(CT_HANDSHAKE, &fin_msg);
+    conn.send_no_pump(&rec);
+
+    // Etat observe immediatement apres l'envoi du Finished client, sans poll.
+    // Si peer_fin=true ici, le FIN etait deja dans l'etat TCP avant notre envoi.
+    let post_finished_rx = conn.rx.len();
+    let post_finished_peer_fin = conn.peer_fin;
+    let post_finished_closed = conn.closed;
+    let post_finished_rst = conn.rst_seen;
+    let post_finished_fin_seen = conn.fin_seen;
+    let post_finished_tcp_seq = conn.seq_no();
+
     // 10. Passage aux cles applicatives.
     let c_ap = DirKeys::new(&c_ap_secret);
     let s_ap = DirKeys::new(&s_ap_secret);
 
-    Ok(Session { conn, c_ap, s_ap, report, rx_plain: Vec::new() })
+    Ok(Session {
+        conn,
+        c_ap,
+        s_ap,
+        report,
+        post_finished_rx,
+        post_finished_peer_fin,
+        post_finished_closed,
+        post_finished_rst,
+        post_finished_fin_seen,
+        post_finished_tcp_seq,
+        rx_plain: Vec::new(),
+    })
 }
 
 fn parse_certificate_msg(body: &[u8], out: &mut Vec<Vec<u8>>) {
@@ -471,23 +511,46 @@ fn parse_certificate_msg(body: &[u8], out: &mut Vec<Vec<u8>>) {
     }
 }
 
+
+fn tls_ct_name(t: u8) -> &'static str {
+    match t {
+        record::CT_CHANGE_CIPHER_SPEC => "ccs",
+        CT_ALERT => "alert",
+        CT_HANDSHAKE => "handshake",
+        CT_APPLICATION_DATA => "application_data",
+        _ => "unknown",
+    }
+}
+
 impl Session {
     /// Envoie des donnees applicatives (chiffrees).
-    pub fn send_app(&mut self, data: &[u8]) {
+    pub fn send_app(&mut self, data: &[u8]) -> bool {
         let rec = self.c_ap.encrypt(CT_APPLICATION_DATA, data);
-        self.conn.send(&rec);
+        self.conn.send(&rec)
     }
 
     /// Recoit des donnees applicatives ; accumule jusqu'a FIN/timeout.
     /// Renvoie l'integralite du flux applicatif dechiffre.
     pub fn recv_all(&mut self, max: usize) -> Vec<u8> {
+        let mut trace_sink: Vec<String> = Vec::new();
+        self.recv_all_trace(max, &mut trace_sink)
+    }
+
+    /// Variante instrumentee : utile pour distinguer un vrai silence TCP,
+    /// une alerte TLS chiffree, un NewSessionTicket, ou un echec AEAD.
+    pub fn recv_all_trace(&mut self, max: usize, trace: &mut Vec<String>) -> Vec<u8> {
         let mut out = core::mem::take(&mut self.rx_plain);
-        // Tolere plusieurs creux (la 1re reponse arrive apres un RTT complet).
         let mut empty_reads = 0u32;
+        let mut records = 0u32;
         loop {
             let rec = match read_raw_record(&mut self.conn) {
                 Some(r) => r,
                 None => {
+                    trace.push(format!(
+                        "recv: pas de record TLS complet (rx={} fin={} closed={} rst={} fin_seen={} empty={} seq={} ack={} peer_ack={} last_flags=0x{:02x} last_plen={})",
+                        self.conn.rx.len(), self.conn.peer_fin, self.conn.closed, self.conn.rst_seen, self.conn.fin_seen, empty_reads + 1,
+                        self.conn.seq_no(), self.conn.ack_no(), self.conn.last_peer_ack(), self.conn.last_flags(), self.conn.last_plen(),
+                    ));
                     if self.conn.peer_fin || self.conn.closed { break; }
                     empty_reads += 1;
                     if empty_reads >= 6 { break; }
@@ -495,30 +558,56 @@ impl Session {
                 }
             };
             empty_reads = 0;
+            records += 1;
             let (hdr, body) = rec;
+            trace.push(format!(
+                "recv: record #{} outer={} len={} reste_tcp={}",
+                records, tls_ct_name(hdr[0]), body.len(), self.conn.rx.len(),
+            ));
             match hdr[0] {
                 record::CT_CHANGE_CIPHER_SPEC => continue,
                 CT_APPLICATION_DATA => {
                     match self.s_ap.decrypt(&hdr, &body) {
-                        Some((inner_type, pt)) => match inner_type {
-                            CT_APPLICATION_DATA => {
-                                out.extend_from_slice(&pt);
-                                if out.len() >= max { break; }
+                        Some((inner_type, pt)) => {
+                            trace.push(format!("recv: inner={} plain={} octets", tls_ct_name(inner_type), pt.len()));
+                            match inner_type {
+                                CT_APPLICATION_DATA => {
+                                    out.extend_from_slice(&pt);
+                                    if out.len() >= max { break; }
+                                }
+                                CT_HANDSHAKE => {
+                                    // NewSessionTicket/KeyUpdate : ignore, mais le numero
+                                    // de sequence AEAD a bien ete consomme par decrypt().
+                                }
+                                CT_ALERT => {
+                                    if pt.len() >= 2 {
+                                        trace.push(format!("recv: alerte TLS niveau={} description={}", pt[0], pt[1]));
+                                    }
+                                    break;
+                                }
+                                _ => {}
                             }
-                            CT_HANDSHAKE => { /* NewSessionTicket/KeyUpdate : ignore */ }
-                            CT_ALERT => break, // close_notify ou autre
-                            _ => {}
-                        },
-                        None => break,
+                        }
+                        None => {
+                            trace.push(format!("recv: echec de dechiffrement AEAD len={}", body.len()));
+                            break;
+                        }
                     }
                 }
-                CT_ALERT => break,
-                _ => break,
+                CT_ALERT => {
+                    trace.push(format!("recv: alerte TLS claire len={}", body.len()));
+                    break;
+                }
+                _ => {
+                    trace.push(format!("recv: record inattendu outer={} len={}", hdr[0], body.len()));
+                    break;
+                }
             }
             if self.conn.peer_fin && self.conn.rx.len() == 0 {
                 break;
             }
         }
+        trace.push(format!("recv: total plaintext={} octets", out.len()));
         out
     }
 

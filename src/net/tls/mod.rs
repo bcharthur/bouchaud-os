@@ -140,12 +140,29 @@ fn https_get_once(hostname: &str, port: u16, path: &str) -> Vec<String> {
         "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: BouchaudOS-TLS\r\nConnection: close\r\nAccept: text/html,*/*\r\nAccept-Encoding: identity\r\n\r\n",
         path, hostname
     );
-    sess.send_app(req.as_bytes());
-    let resp = sess.recv_all(200_000);
+    let mut trace: Vec<String> = Vec::new();
+    trace.push(format!(
+        "post_finished: rx={} peer_fin={} closed={} rst={} fin_seen={} tcp_seq={}",
+        sess.post_finished_rx, sess.post_finished_peer_fin, sess.post_finished_closed,
+        sess.post_finished_rst, sess.post_finished_fin_seen, sess.post_finished_tcp_seq,
+    ));
+    let seq_before = sess.conn.seq_no();
+    let sent = sess.send_app(req.as_bytes());
+    let seq_after = sess.conn.seq_no();
+    trace.push(format!(
+        "send_app: sent={} app_tcp_bytes={} rx={} peer_fin={} closed={} rst={} fin_seen={} seq_before={} seq_after={} peer_ack={} last_flags=0x{:02x} last_plen={}",
+        sent, seq_after.wrapping_sub(seq_before), sess.conn.rx.len(), sess.conn.peer_fin, sess.conn.closed, sess.conn.rst_seen, sess.conn.fin_seen,
+        seq_before, seq_after, sess.conn.last_peer_ack(), sess.conn.last_flags(), sess.conn.last_plen(),
+    ));
+    let resp = sess.recv_all_trace(200_000, &mut trace);
     sess.close();
 
     if resp.is_empty() {
         out.push("reponse vide (chiffree)".to_string());
+        for line in trace {
+            out.push(format!("  {}", line));
+            if out.len() >= 24 { break; }
+        }
         return out;
     }
 
