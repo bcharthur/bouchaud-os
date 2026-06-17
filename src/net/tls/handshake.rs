@@ -130,7 +130,7 @@ fn build_client_hello(hostname: &str, random: &[u8; 32], session_id: &[u8; 32], 
     // supported_versions (43) : TLS 1.3
     {
         let mut v = Vec::new();
-        v.push(4); // longueur en octets : GREASE(2) + TLS 1.3(2)
+        v.push(5); // list length (1 octet)
         push_u16(&mut v, 0x0a0a); // GREASE
         push_u16(&mut v, 0x0304);
         push_u16(&mut ext, 43);
@@ -147,13 +147,8 @@ fn build_client_hello(hostname: &str, random: &[u8; 32], session_id: &[u8; 32], 
         push_u16(&mut ext, 16);
         ext.extend_from_slice(&with_u16_len(&list));
     }
-    // status_request (5) : OCSP stapling. Le corps ne peut pas etre vide :
-    // CertificateStatusRequest = status_type(ocsp=1) || responder_id_list<0..2^16-1> || request_extensions<0..2^16-1>.
-    {
-        let status_request = [1u8, 0, 0, 0, 0];
-        push_u16(&mut ext, 5);
-        ext.extend_from_slice(&with_u16_len(&status_request));
-    }
+    // status_request (5) vide : OCSP stapling, present dans les empreintes navigateur.
+    { push_u16(&mut ext, 5); ext.extend_from_slice(&with_u16_len(&[])); }
     // key_share (51) : x25519
     {
         let mut entry = Vec::new();
