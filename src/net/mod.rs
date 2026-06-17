@@ -18,8 +18,10 @@ pub mod icmp;
 pub mod stack;
 pub mod udp;
 pub mod dns;
+pub mod dhcp;
 pub mod tcp;
 pub mod http;
+pub mod tls;
 
 use crate::arch::x86_64::pci;
 use crate::drivers::e1000;
@@ -30,10 +32,23 @@ use crate::net::ipv4::Ipv4Addr;
 
 /// Adresse de l'interface loopback.
 pub const LO_ADDR: Ipv4Addr = [127, 0, 0, 1];
-/// Adresse IPv4 statique d'eth0 (reseau utilisateur QEMU SLIRP).
-pub const ETH_IP: Ipv4Addr = [10, 0, 2, 15];
-/// Passerelle par defaut (SLIRP).
-pub const GATEWAY: Ipv4Addr = [10, 0, 2, 2];
+
+// Configuration eth0 (par defaut statique SLIRP ; DHCP peut la remplacer).
+static mut OUR_IP: Ipv4Addr = [10, 0, 2, 15];
+static mut GW_IP: Ipv4Addr = [10, 0, 2, 2];
+static mut DNS_IP: Ipv4Addr = [10, 0, 2, 3];
+
+/// Adresse IPv4 d'eth0.
+pub fn our_ip() -> Ipv4Addr { unsafe { OUR_IP } }
+/// Passerelle par defaut.
+pub fn gateway() -> Ipv4Addr { unsafe { GW_IP } }
+/// Serveur DNS configure.
+pub fn dns_server() -> Ipv4Addr { unsafe { DNS_IP } }
+
+/// Applique une configuration reseau (ex. obtenue par DHCP). Invalide le cache ARP.
+pub fn set_config(ip: Ipv4Addr, gw: Ipv4Addr, dns: Ipv4Addr) {
+    unsafe { OUR_IP = ip; GW_IP = gw; DNS_IP = dns; GW_MAC = None; }
+}
 
 /// Indique si une interface routable vers l'exterieur est active.
 pub fn external_enabled() -> bool {
@@ -52,7 +67,7 @@ pub fn ifup() {
         println!("eth0 active");
         vga::set_color(COLOR_DEFAULT);
         println!("  MAC : {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", m[0], m[1], m[2], m[3], m[4], m[5]);
-        crate::print!("  inet: "); ipv4::print_addr(&ETH_IP); println!("  lien={}", if e1000::link_up() { "UP" } else { "DOWN" });
+        crate::print!("  inet: "); ipv4::print_addr(&our_ip()); println!("  lien={}", if e1000::link_up() { "UP" } else { "DOWN" });
     } else {
         vga::set_color(COLOR_YELLOW);
         println!("ifup: echec d'initialisation e1000 (lance QEMU avec -device e1000 -netdev user,id=n0)");
@@ -64,7 +79,7 @@ pub fn ifup() {
 fn arp_resolve(target: Ipv4Addr) -> Option<[u8; 6]> {
     let mac = e1000::mac();
     let mut arp_buf = [0u8; arp::PACKET_LEN];
-    arp::build(&mut arp_buf, arp::OP_REQUEST, mac, ETH_IP, [0; 6], target)?;
+    arp::build(&mut arp_buf, arp::OP_REQUEST, mac, our_ip(), [0; 6], target)?;
     let mut frame = [0u8; ethernet::HEADER_LEN + arp::PACKET_LEN];
     let flen = ethernet::build_frame(&mut frame, ethernet::BROADCAST, mac, ethernet::ETHERTYPE_ARP, &arp_buf)?;
     e1000::send(&frame[..flen]);
@@ -114,11 +129,8 @@ pub fn arping(argc: usize, argv: &[&str; 12]) {
 
 /// Meme reseau /24 que eth0 ?
 fn same_subnet(ip: &Ipv4Addr) -> bool {
-    ip[0] == ETH_IP[0] && ip[1] == ETH_IP[1] && ip[2] == ETH_IP[2]
+    ip[0] == our_ip()[0] && ip[1] == our_ip()[1] && ip[2] == our_ip()[2]
 }
-
-/// Serveur DNS (resolveur SLIRP de QEMU).
-pub const DNS_SERVER: Ipv4Addr = [10, 0, 2, 3];
 
 static mut IP_ID: u16 = 0x4000;
 static mut GW_MAC: Option<[u8; 6]> = None;
@@ -134,7 +146,7 @@ fn hop_mac(dst: &Ipv4Addr) -> Option<[u8; 6]> {
     }
     unsafe {
         if let Some(m) = GW_MAC { return Some(m); }
-        let m = arp_resolve(GATEWAY)?;
+        let m = arp_resolve(gateway())?;
         GW_MAC = Some(m);
         Some(m)
     }
@@ -145,7 +157,7 @@ pub(crate) fn send_ip(dst: Ipv4Addr, proto: u8, payload: &[u8]) -> bool {
     if !e1000::is_ready() && !e1000::init() { return false; }
     let mac = match hop_mac(&dst) { Some(m) => m, None => return false };
     let mut ip = [0u8; 1500];
-    let ipl = match ipv4::build_packet(&mut ip, ETH_IP, dst, proto, next_ip_id(), payload) {
+    let ipl = match ipv4::build_packet(&mut ip, our_ip(), dst, proto, next_ip_id(), payload) {
         Some(n) => n, None => return false,
     };
     let mut frame = [0u8; 1514];
@@ -187,11 +199,11 @@ pub fn resolve(name: &str) -> Option<Ipv4Addr> {
     let qlen = dns::build_query(&mut q, id, name)?;
     let mut udp_buf = [0u8; 300];
     let ulen = udp::build(&mut udp_buf, 0xC000, 53, &q[..qlen])?;
-    send_ip(DNS_SERVER, ipv4::PROTO_UDP, &udp_buf[..ulen]);
+    send_ip(dns_server(), ipv4::PROTO_UDP, &udp_buf[..ulen]);
 
     let mut payload = [0u8; 1500];
     for _ in 0..4_000_000u32 {
-        if let Some((src, n)) = poll_ip(ipv4::PROTO_UDP, Some(DNS_SERVER), &mut payload) {
+        if let Some((src, n)) = poll_ip(ipv4::PROTO_UDP, Some(dns_server()), &mut payload) {
             let _ = src;
             if let Some(u) = udp::parse(&payload[..n]) {
                 if u.dst_port == 0xC000 {
@@ -299,7 +311,7 @@ pub fn wget_cmd(argc: usize, argv: &[&str; 12]) {
 /// Ping reel via e1000 : ARP -> ICMP echo sur 4 paquets.
 fn ping_remote(target: Ipv4Addr) {
     // Adresse de niveau lien : la cible si locale, sinon la passerelle.
-    let next_hop = if same_subnet(&target) { target } else { GATEWAY };
+    let next_hop = if same_subnet(&target) { target } else { gateway() };
     let dst_mac = match arp_resolve(next_hop) {
         Some(m) => m,
         None => {
@@ -321,7 +333,7 @@ fn ping_remote(target: Ipv4Addr) {
             Some(n) => n, None => continue,
         };
         let mut ip_buf = [0u8; 128];
-        let ipl = match ipv4::build_packet(&mut ip_buf, ETH_IP, target, ipv4::PROTO_ICMP, seq, &icmp_buf[..il]) {
+        let ipl = match ipv4::build_packet(&mut ip_buf, our_ip(), target, ipv4::PROTO_ICMP, seq, &icmp_buf[..il]) {
             Some(n) => n, None => continue,
         };
         let mut frame = [0u8; ethernet::HEADER_LEN + 128];
@@ -450,7 +462,7 @@ fn print_eth0_state() {
     if e1000::is_ready() {
         let m = e1000::mac();
         crate::print!("eth0: flags=<UP,RUNNING>  inet ");
-        ipv4::print_addr(&ETH_IP);
+        ipv4::print_addr(&our_ip());
         println!("  lien={}", if e1000::link_up() { "UP" } else { "DOWN" });
         println!("      ether {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
             m[0], m[1], m[2], m[3], m[4], m[5]);
