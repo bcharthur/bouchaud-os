@@ -13,6 +13,7 @@ use alloc::string::String;
 const TLS_AES_128_GCM_SHA256: u16 = 0x1301;
 const GROUP_X25519: u16 = 0x001d;
 const SIG_ECDSA_P256_SHA256: u16 = 0x0403;
+const SIG_ECDSA_P384_SHA384: u16 = 0x0503;
 const SIG_RSA_PSS_RSAE_SHA256: u16 = 0x0804;
 const SIG_RSA_PKCS1_SHA256: u16 = 0x0401;
 
@@ -103,6 +104,7 @@ fn build_client_hello(hostname: &str, random: &[u8; 32], session_id: &[u8; 32], 
     {
         let mut s = Vec::new();
         push_u16(&mut s, SIG_ECDSA_P256_SHA256);
+        push_u16(&mut s, SIG_ECDSA_P384_SHA384);
         push_u16(&mut s, SIG_RSA_PSS_RSAE_SHA256);
         push_u16(&mut s, SIG_RSA_PKCS1_SHA256);
         let body = with_u16_len(&s);
@@ -238,18 +240,22 @@ fn verify_cert_verify(body: &[u8], leaf: &x509::Certificate, transcript_hash: &[
             let key = super::rsa::RsaPubKey::new(n, e);
             super::rsa::verify_pkcs1_sha256(&key, &content, sig)
         }
-        (SIG_ECDSA_P256_SHA256, x509::PubKey::EcP256 { point }) => {
-            // signature DER SEQUENCE { r, s }
-            if let Some((seq, _)) = super::asn1::read_tag(sig, super::asn1::TAG_SEQUENCE) {
-                let mut si = seq.children();
-                if let (Some(r), Some(s)) = (si.next(), si.next()) {
-                    return super::p256::verify_ecdsa_sha256(point, &content, strip0(r.content), strip0(s.content));
-                }
-            }
-            false
-        }
+        (SIG_ECDSA_P256_SHA256, x509::PubKey::EcP256 { point }) => verify_ecdsa_der(sig, |r, s| {
+            super::p256::verify_ecdsa_sha256(point, &content, r, s)
+        }),
+        (SIG_ECDSA_P384_SHA384, x509::PubKey::EcP384 { point }) => verify_ecdsa_der(sig, |r, s| {
+            super::p384::verify_ecdsa_sha384(point, &content, r, s)
+        }),
         _ => false,
     }
+}
+
+fn verify_ecdsa_der<F: FnOnce(&[u8], &[u8]) -> bool>(sig: &[u8], f: F) -> bool {
+    if let Some((seq, _)) = super::asn1::read_tag(sig, super::asn1::TAG_SEQUENCE) {
+        let mut si = seq.children();
+        if let (Some(r), Some(s)) = (si.next(), si.next()) { return f(strip0(r.content), strip0(s.content)); }
+    }
+    false
 }
 
 fn strip0(b: &[u8]) -> &[u8] {
