@@ -22,6 +22,8 @@ depuis le shell ou le navigateur intégré.
 | Magasin de CA | `roots.rs`, `ca/` | 6 racines Mozilla (DER embarqués) | — |
 | Validation chaîne | `validate.rs` | signatures + ancre + hostname + dates | vrais certs |
 | CSPRNG | `rng.rs` | RDRAND + TSC → HASH-DRBG | — |
+| AES-GCM + ChaCha20-Poly1305 | `gcm.rs`, `chacha.rs` | 3 suites TLS 1.3 | NIST SP 800-38D, RFC 8439 |
+| Alertes TLS | `alert.rs` | codes RFC 8446 §6 → noms lisibles | RFC 8446 §6 |
 | Couche record | `record.rs` | protection AEAD + key schedule | RFC 8446 §7 |
 | Handshake | `handshake.rs` | machine d'état client | — |
 
@@ -30,13 +32,16 @@ depuis le shell ou le navigateur intégré.
 1. Génération d'une paire éphémère **X25519** ; envoi du **ClientHello**
    (SNI, `supported_versions=TLS 1.3`, `supported_groups=x25519`,
    `signature_algorithms`, `application_layer_protocol_negotiation=http/1.1`,
-   `key_share`). Suite unique offerte : `TLS_AES_128_GCM_SHA256`
-   (tout reste en SHA-256 pour la suite TLS).
+   `key_share`). Trois suites offertes : `TLS_AES_128_GCM_SHA256`,
+   `TLS_AES_256_GCM_SHA384` et `TLS_CHACHA20_POLY1305_SHA256` ; la fonction de
+   hachage (SHA-256/SHA-384) suit la suite négociée par le serveur.
 2. Réception du **ServerHello**, extraction du `key_share` serveur.
 3. Calcul du secret partagé **ECDHE** puis du *key schedule* HKDF
    (early → handshake → master secrets, trafic client/serveur).
-4. Déchiffrement (AES-128-GCM) du *flight* serveur :
+4. Déchiffrement (AEAD de la suite négociée) du *flight* serveur :
    EncryptedExtensions, **Certificate**, **CertificateVerify**, **Finished**.
+   Une **alerte TLS** reçue à cette étape est décodée en nom lisible
+   (`handshake_failure`, `unknown_ca`, `protocol_version`...) via `alert.rs`.
 5. **Vérification de la signature CertificateVerify** avec la clé publique du
    certificat feuille (RSA-PSS / RSA-PKCS#1 / ECDSA P-256).
 6. **Vérification du `Finished` serveur** (HMAC sur le hash de transcript).
@@ -70,8 +75,9 @@ chaîne (confiance, correspondance du nom d'hôte, expiration).
 
 ## Limites connues
 
-- Une seule suite (`TLS_AES_128_GCM_SHA256`) et un seul groupe (`x25519`)
-  offerts — suffisant pour la quasi-totalité des serveurs publics.
+- Trois suites TLS 1.3 (`AES-128-GCM`, `AES-256-GCM`, `ChaCha20-Poly1305`) mais
+  un seul groupe (`x25519`) offert — suffisant pour la quasi-totalité des
+  serveurs publics.
 - Validation de chaîne : **RSA (SHA-256)**, **ECDSA P-256 (SHA-256)** et
   **ECDSA P-384 (SHA-384)** sont supportés. Cela couvre les chaînes modernes
   courantes (ex. Google rootées sur *GTS Root R4*, ou Let's Encrypt ECDSA
@@ -79,9 +85,10 @@ chaîne (confiance, correspondance du nom d'hôte, expiration).
   quand l'ancre, le nom d'hôte et la validité temporelle passent.
 - Le contenu est affiché même quand la chaîne n'est pas approuvée (comme un
   navigateur affichant un avertissement) ; le bandeau distingue les deux cas.
-- Les requêtes HTTPS annoncent `Accept-Encoding: identity` et, si un domaine
-  apex minimal comme `google.com` termine TLS sans envoyer de réponse HTTP,
-  le client retente automatiquement le frontend canonique `www.<domaine>`.
+- Les requêtes HTTPS annoncent `Accept-Encoding: gzip, deflate` (décodés par
+  `net::inflate`) et, si un domaine apex minimal comme `google.com` termine TLS
+  sans envoyer de réponse HTTP, le client retente automatiquement le frontend
+  canonique `www.<domaine>`.
 - Pas de reprise de session (PSK / 0-RTT), pas de HelloRetryRequest
   (inutile puisque x25519 est universellement supporté).
 - Implémentation **non *constant-time*** : objectif pédagogique, pas de
@@ -91,6 +98,6 @@ chaîne (confiance, correspondance du nom d'hôte, expiration).
 
 ## Pistes d'évolution
 
-- SHA-384/SHA-512 + courbe **P-384** → validation des chaînes ECDSA modernes.
-- Suites supplémentaires (ChaCha20-Poly1305, AES-256-GCM).
-- ECDHE P-256 en plus de x25519 pour le `key_share`.
+- ECDHE P-256 en plus de x25519 pour le `key_share` (HelloRetryRequest).
+- Reprise de session (PSK / NewSessionTicket / 0-RTT).
+- OCSP stapling / Certificate Transparency (SCT).

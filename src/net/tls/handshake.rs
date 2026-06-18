@@ -393,11 +393,17 @@ pub fn connect(mut conn: TcpConn, hostname: &str) -> Result<Session, &'static st
                     let (inner_type, pt) = s_hs.decrypt(&hdr, &body).ok_or("dechiffrement handshake echoue")?;
                     match inner_type {
                         CT_HANDSHAKE => { hs_buf.extend_from_slice(&pt); return Ok(()); }
-                        CT_ALERT => return Err("alerte TLS pendant le handshake"),
+                        CT_ALERT => {
+                            let code = if pt.len() >= 2 { pt[1] } else { 0 };
+                            return Err(super::alert::handshake_error(code));
+                        }
                         _ => continue,
                     }
                 }
-                CT_ALERT => return Err("alerte TLS (clair) pendant le handshake"),
+                CT_ALERT => {
+                    let code = if body.len() >= 2 { body[1] } else { 0 };
+                    return Err(super::alert::handshake_error(code));
+                }
                 _ => return Err("record inattendu dans le flight serveur"),
             }
         }
@@ -578,7 +584,12 @@ impl Session {
                                 }
                                 CT_ALERT => {
                                     if pt.len() >= 2 {
-                                        trace.push(format!("recv: alerte TLS niveau={} description={}", pt[0], pt[1]));
+                                        trace.push(format!(
+                                            "recv: alerte TLS {} {} ({})",
+                                            super::alert::level_name(pt[0]),
+                                            super::alert::description(pt[1]),
+                                            pt[1],
+                                        ));
                                     }
                                     break;
                                 }
@@ -592,7 +603,16 @@ impl Session {
                     }
                 }
                 CT_ALERT => {
-                    trace.push(format!("recv: alerte TLS claire len={}", body.len()));
+                    if body.len() >= 2 {
+                        trace.push(format!(
+                            "recv: alerte TLS claire {} {} ({})",
+                            super::alert::level_name(body[0]),
+                            super::alert::description(body[1]),
+                            body[1],
+                        ));
+                    } else {
+                        trace.push(format!("recv: alerte TLS claire len={}", body.len()));
+                    }
                     break;
                 }
                 _ => {
