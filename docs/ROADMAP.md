@@ -62,8 +62,10 @@ Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 - [x] ECDHE P-256 (secp256r1) + HelloRetryRequest (rejoue le ClientHello)
 - [x] HTTP/2 : ALPN h2, frames, HPACK (table statique+dynamique+Huffman), GET
 - [ ] Reprise de session (PSK / NewSessionTicket)
-- [~] Brotli (`br`) : flux + meta-blocs non compresses ; compresse =
-      necessite le dictionnaire statique 122 Ko (RFC 7932 Annexe A)
+- [x] Brotli (`br`) COMPLET (RFC 7932) : codes simples/complexes, tables
+      statique+dynamique, context maps, distances, dictionnaire 122 Ko + 121
+      transformations ; valide hors-ligne contre python-brotli (q0..11)
+- [x] Police de contenu agrandie (x2) dans le navigateur (lisibilite 720p)
 
 ## V0.22 - Cloture de la couche reseau : DHCP (+ socle TLS)
 - [x] Client DHCP (DORA) : IP/passerelle/DNS automatiques (config dynamique)

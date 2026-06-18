@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 /// La pile sait decompresser `gzip` et `deflate` (cf. `net::inflate`).
 pub fn build_get(host: &str, path: &str) -> String {
     format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: BouchaudOS\r\nAccept: */*\r\nAccept-Encoding: gzip, deflate\r\nConnection: close\r\n\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: BouchaudOS\r\nAccept: */*\r\nAccept-Encoding: gzip, deflate, br\r\nConnection: close\r\n\r\n",
         path, host
     )
 }
