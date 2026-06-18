@@ -39,6 +39,16 @@ Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 - [x] Clavier en interruption IRQ1 (fin du polling)
 - [ ] APIC, plus tard, en remplacement du PIC
 
+## V0.25 - Bureau HD truecolor (Bochs VBE)
+- [x] Framebuffer lineaire HD 1280x720x32 via Bochs VBE/BGA (carte `-vga std`)
+- [x] gfx reecrit en truecolor 32 bits (double-buffer RAM -> LFB), API conservee
+      (le window manager et les apps passent en HD sans modification)
+- [x] LFB localise via le BAR0 PCI de la carte graphique + offset memoire phys
+- [x] Tas porte a 16 MiB (double-buffer HD + tampons reseau/TLS)
+- [x] `desktop` bascule en HD ; `leave()` restaure le mode texte VGA pour le shell
+- [ ] Police mise a l'echelle / polices HD, anti-aliasing
+- [ ] Migration bootloader 0.11 (framebuffer fourni au boot, mode texte FB)
+
 ## V0.24 - Compatibilite web moderne (en cours)
 - [x] HTTPS/TLS 1.3 reel : handshake complet, X.509, magasin de CA
 - [x] 3 suites TLS 1.3 : AES-128-GCM, AES-256-GCM (SHA-384), ChaCha20-Poly1305
