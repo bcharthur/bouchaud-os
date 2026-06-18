@@ -14,6 +14,7 @@ pub mod sha512;
 pub mod hash;
 pub mod aes;
 pub mod gcm;
+pub mod chacha;
 pub mod x25519;
 pub mod ec;
 pub mod p256;
@@ -44,6 +45,7 @@ pub fn selftest() {
         ("HMAC/HKDF SHA-256/SHA-384", hash::selftest),
         ("AES-128/256", aes::selftest),
         ("AES-GCM", gcm::selftest),
+        ("ChaCha20-Poly1305", chacha::selftest),
         ("X25519", x25519::selftest),
         ("P-256/ECDSA", p256::selftest),
         ("P-384/ECDSA", p384::selftest),
@@ -81,7 +83,7 @@ fn x509_selftest() -> Result<(), &'static str> {
 
 /// Etat d'implementation, pour les messages utilisateur.
 pub fn status() -> &'static str {
-    "TLS 1.3 (X25519/AES-128/256-GCM + SHA-256/SHA-384 + X.509 RSA/ECDSA P-256/P-384)"
+    "TLS 1.3 (X25519/AES-128/256-GCM/ChaCha20-Poly1305 + SHA-256/384 + X.509 RSA/ECDSA P-256/P-384)"
 }
 
 /// Reponse HTTPS brute : banniere TLS + octets HTTP dechiffres.

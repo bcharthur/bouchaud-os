@@ -15,6 +15,7 @@ use alloc::format;
 // Suites TLS 1.3 reellement implementees.
 const TLS_AES_128_GCM_SHA256: u16 = record::TLS_AES_128_GCM_SHA256_ID;
 const TLS_AES_256_GCM_SHA384: u16 = record::TLS_AES_256_GCM_SHA384_ID;
+const TLS_CHACHA20_POLY1305_SHA256: u16 = record::TLS_CHACHA20_POLY1305_SHA256_ID;
 
 // Groupes et signatures.
 const GROUP_X25519: u16 = 0x001d;
@@ -109,6 +110,7 @@ fn build_client_hello(hostname: &str, random: &[u8; 32], _session_id: &[u8; 32],
     push_u16(&mut suites, GREASE_0A0A);
     push_u16(&mut suites, TLS_AES_128_GCM_SHA256);
     push_u16(&mut suites, TLS_AES_256_GCM_SHA384);
+    push_u16(&mut suites, TLS_CHACHA20_POLY1305_SHA256);
     // Suites TLS 1.2 presentes pour ressembler a un client moderne, mais
     // supported_versions force TLS 1.3, donc elles ne seront pas negociees.
     for s in [0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0x009e, 0x009c] {

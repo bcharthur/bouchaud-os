@@ -1,7 +1,7 @@
 //! Couche record TLS 1.3 : protection AEAD et schedule de cles.
 //! Support stable : AES-128-GCM/SHA-256 et AES-256-GCM/SHA-384.
 
-use super::{gcm, hash};
+use super::{gcm, chacha, hash};
 use alloc::vec::Vec;
 
 pub const CT_CHANGE_CIPHER_SPEC: u8 = 20;
@@ -11,11 +11,13 @@ pub const CT_APPLICATION_DATA: u8 = 23;
 
 pub const TLS_AES_128_GCM_SHA256_ID: u16 = 0x1301;
 pub const TLS_AES_256_GCM_SHA384_ID: u16 = 0x1302;
+pub const TLS_CHACHA20_POLY1305_SHA256_ID: u16 = 0x1303;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CipherSuite {
     TlsAes128GcmSha256,
     TlsAes256GcmSha384,
+    TlsChacha20Poly1305Sha256,
 }
 
 impl CipherSuite {
@@ -23,6 +25,7 @@ impl CipherSuite {
         match id {
             TLS_AES_128_GCM_SHA256_ID => Some(CipherSuite::TlsAes128GcmSha256),
             TLS_AES_256_GCM_SHA384_ID => Some(CipherSuite::TlsAes256GcmSha384),
+            TLS_CHACHA20_POLY1305_SHA256_ID => Some(CipherSuite::TlsChacha20Poly1305Sha256),
             _ => None,
         }
     }
@@ -31,6 +34,7 @@ impl CipherSuite {
         match self {
             CipherSuite::TlsAes128GcmSha256 => TLS_AES_128_GCM_SHA256_ID,
             CipherSuite::TlsAes256GcmSha384 => TLS_AES_256_GCM_SHA384_ID,
+            CipherSuite::TlsChacha20Poly1305Sha256 => TLS_CHACHA20_POLY1305_SHA256_ID,
         }
     }
 
@@ -38,6 +42,7 @@ impl CipherSuite {
         match self {
             CipherSuite::TlsAes128GcmSha256 => "TLS_AES_128_GCM_SHA256",
             CipherSuite::TlsAes256GcmSha384 => "TLS_AES_256_GCM_SHA384",
+            CipherSuite::TlsChacha20Poly1305Sha256 => "TLS_CHACHA20_POLY1305_SHA256",
         }
     }
 
@@ -45,6 +50,7 @@ impl CipherSuite {
         match self {
             CipherSuite::TlsAes128GcmSha256 => hash::HashAlg::Sha256,
             CipherSuite::TlsAes256GcmSha384 => hash::HashAlg::Sha384,
+            CipherSuite::TlsChacha20Poly1305Sha256 => hash::HashAlg::Sha256,
         }
     }
 
@@ -52,6 +58,7 @@ impl CipherSuite {
         match self {
             CipherSuite::TlsAes128GcmSha256 => 16,
             CipherSuite::TlsAes256GcmSha384 => 32,
+            CipherSuite::TlsChacha20Poly1305Sha256 => 32,
         }
     }
 
@@ -105,6 +112,9 @@ impl DirKeys {
             CipherSuite::TlsAes128GcmSha256 | CipherSuite::TlsAes256GcmSha384 => {
                 gcm::seal(&self.key, &nonce, &header, &mut inner)
             }
+            CipherSuite::TlsChacha20Poly1305Sha256 => {
+                chacha::seal(&self.key, &nonce, &header, &mut inner)
+            }
         };
         self.seq += 1;
         let mut out = Vec::with_capacity(5 + total);
@@ -126,6 +136,9 @@ impl DirKeys {
         let ok = match self.suite {
             CipherSuite::TlsAes128GcmSha256 | CipherSuite::TlsAes256GcmSha384 => {
                 gcm::open(&self.key, &nonce, header, &mut buf, &tag).is_ok()
+            }
+            CipherSuite::TlsChacha20Poly1305Sha256 => {
+                chacha::open(&self.key, &nonce, header, &mut buf, &tag).is_ok()
             }
         };
         if !ok { return None; }
