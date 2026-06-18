@@ -17,7 +17,7 @@ pub(crate) const MENU: [&str; 5] = ["Terminal", "Fichiers", "Navigateur", "Monit
 pub(crate) enum App {
     Terminal { sb: Vec<String>, input: String, cwd: usize },
     Files { cur: usize, view: Option<Vec<String>>, name: String },
-    Browser { url: String, input: String, content: Vec<String> },
+    Browser { url: String, input: String, page: crate::gui::web::Page, scroll: i32 },
     Monitor,
 }
 
@@ -107,9 +107,10 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
         },
         2 => {
             let url = "about:bouchaud".to_string();
-            let content = chromium_stub::load_page(&url);
-            Win { title: "Bouchaud Browser".to_string(), x, y, w: 440, h: 320, min: false, restore: None,
-                  app: App::Browser { url: url.clone(), input: url, content } }
+            let w = 560; let h = 420;
+            let page = chromium_stub::open(&url, w - 6);
+            Win { title: "Bouchaud Browser".to_string(), x, y, w, h, min: false, restore: None,
+                  app: App::Browser { url: url.clone(), input: url, page, scroll: 0 } }
         }
         _ => Win {
             title: "Moniteur".to_string(), x, y, w: 300, h: 200, min: false, restore: None,
