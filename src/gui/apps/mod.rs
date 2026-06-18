@@ -52,8 +52,11 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
         },
         App::Browser { url, input, content } => match k {
             Key::Enter => {
-                *url = input.trim().to_string();
-                *content = chromium_stub::load_page(url);
+                // Un numero seul = suit le lien correspondant affiche ([n] url).
+                let target = chromium_stub::resolve_link(input, content);
+                *url = target.clone();
+                *content = chromium_stub::load_page(&target);
+                *input = target;
                 false
             }
             Key::Backspace => { input.pop(); false }

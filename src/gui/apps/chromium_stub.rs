@@ -61,6 +61,22 @@ pub(crate) fn load_page(url: &str) -> Vec<String> {
     out
 }
 
+/// Resout l'entree de la barre d'adresse : si c'est un numero de lien affiche
+/// (`[n] url`), renvoie l'URL correspondante ; sinon renvoie l'entree telle quelle.
+/// Permet de "cliquer" un lien en tapant son numero.
+pub(crate) fn resolve_link(input: &str, content: &[String]) -> String {
+    let t = input.trim();
+    if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) {
+        let prefix = format!("[{}] ", t);
+        for line in content {
+            if let Some(url) = line.strip_prefix(&prefix) {
+                return url.trim().to_string();
+            }
+        }
+    }
+    t.to_string()
+}
+
 /// Dessine le navigateur (barre d'adresse + contenu).
 pub(crate) fn draw(url: &str, input: &str, content: &[String], bx: usize, by: usize, bw: usize, bh: usize) {
     let cols = bw / 8;
