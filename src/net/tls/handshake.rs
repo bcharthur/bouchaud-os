@@ -6,7 +6,7 @@
 //! client applicatif actuel puisse parler aux frontaux Google/GitHub.
 
 use super::record::{self, CipherSuite, DirKeys, KeySchedule, CT_HANDSHAKE, CT_ALERT, CT_APPLICATION_DATA};
-use super::{hash, x25519, rng, x509, validate};
+use super::{hash, x25519, p256, rng, x509, validate};
 use crate::net::tcp::TcpConn;
 use alloc::vec::Vec;
 use alloc::string::String;
@@ -36,6 +36,68 @@ const HS_CERTIFICATE: u8 = 11;
 const HS_CERTIFICATE_VERIFY: u8 = 15;
 const HS_FINISHED: u8 = 20;
 
+/// Groupe d'echange de cles ECDHE supporte pour le `key_share` TLS 1.3.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KxGroup {
+    X25519,
+    Secp256r1,
+}
+
+impl KxGroup {
+    fn id(self) -> u16 {
+        match self {
+            KxGroup::X25519 => GROUP_X25519,
+            KxGroup::Secp256r1 => GROUP_SECP256R1,
+        }
+    }
+    fn from_id(id: u16) -> Option<KxGroup> {
+        match id {
+            GROUP_X25519 => Some(KxGroup::X25519),
+            GROUP_SECP256R1 => Some(KxGroup::Secp256r1),
+            _ => None,
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            KxGroup::X25519 => "x25519",
+            KxGroup::Secp256r1 => "secp256r1",
+        }
+    }
+}
+
+/// Paire de cles ECDHE ephemere : scalaire prive + cle publique encodee.
+struct KeyPair {
+    group: KxGroup,
+    private: [u8; 32],
+    public: Vec<u8>,
+}
+
+impl KeyPair {
+    /// Genere une paire ephemere pour le groupe demande.
+    fn generate(group: KxGroup) -> KeyPair {
+        let private = rng::random32();
+        let public = match group {
+            KxGroup::X25519 => x25519::base_mul(&private).to_vec(),
+            // Point non compresse 0x04||X||Y (65 octets).
+            KxGroup::Secp256r1 => p256::derive_pubkey(&private),
+        };
+        KeyPair { group, private, public }
+    }
+
+    /// Calcule le secret partage ECDHE a partir de la cle publique du serveur.
+    fn shared(&self, peer: &[u8]) -> Option<Vec<u8>> {
+        match self.group {
+            KxGroup::X25519 => {
+                if peer.len() != 32 { return None; }
+                let mut p = [0u8; 32];
+                p.copy_from_slice(peer);
+                Some(x25519::x25519(&self.private, &p).to_vec())
+            }
+            KxGroup::Secp256r1 => p256::ecdh(&self.private, peer).map(|x| x.to_vec()),
+        }
+    }
+}
+
 /// Rapport sur la validation du certificat serveur.
 pub struct CertReport {
     pub trusted: bool,
@@ -44,6 +106,7 @@ pub struct CertReport {
     pub detail: String,
     pub subject_cn: String,
     pub cipher_suite: &'static str,
+    pub kx_group: &'static str,
 }
 
 /// Session TLS etablie : prete pour les donnees applicatives.
@@ -96,7 +159,10 @@ fn transcript_hash(suite: CipherSuite, transcript: &[u8]) -> Vec<u8> {
 /// Note : ALPN annonce seulement HTTP/1.1. Annoncer `h2` ferait probablement
 /// choisir HTTP/2 par Google/GitHub, mais la couche applicative n'est pas encore
 /// capable d'emettre des frames HTTP/2.
-fn build_client_hello(hostname: &str, random: &[u8; 32], _session_id: &[u8; 32], pubkey: &[u8; 32]) -> Vec<u8> {
+///
+/// `kp` porte le groupe ECDHE et la cle publique du `key_share` offert.
+/// `cookie` (extension 44) est echoe tel quel apres un HelloRetryRequest.
+fn build_client_hello(hostname: &str, random: &[u8; 32], kp: &KeyPair, cookie: Option<&[u8]>) -> Vec<u8> {
     let mut body = Vec::new();
     push_u16(&mut body, 0x0303); // legacy_version
     body.extend_from_slice(random);
@@ -188,11 +254,16 @@ fn build_client_hello(hostname: &str, random: &[u8; 32], _session_id: &[u8; 32],
     // psk_key_exchange_modes : obligatoire pour certains frontaux TLS 1.3.
     push_ext(&mut ext, 45, &[1, 1]);
 
-    // key_share : X25519.
+    // cookie (extension 44) : echo obligatoire apres un HelloRetryRequest.
+    if let Some(c) = cookie {
+        push_ext(&mut ext, 44, c);
+    }
+
+    // key_share : un seul groupe offert (celui de `kp`).
     {
         let mut entry = Vec::new();
-        push_u16(&mut entry, GROUP_X25519);
-        entry.extend_from_slice(&with_u16_len(pubkey));
+        push_u16(&mut entry, kp.group.id());
+        entry.extend_from_slice(&with_u16_len(&kp.public));
         let list = with_u16_len(&entry);
         push_ext(&mut ext, 51, &list);
     }
@@ -209,12 +280,20 @@ fn build_client_hello(hostname: &str, random: &[u8; 32], _session_id: &[u8; 32],
     handshake_msg(HS_CLIENT_HELLO, &body)
 }
 
-struct ServerHello {
-    server_pub: [u8; 32],
-    cipher: u16,
+// Aleatoire magique signalant un HelloRetryRequest (RFC 8446 §4.1.3).
+const HRR_RANDOM: [u8; 32] = [
+    0xcf,0x21,0xad,0x74,0xe5,0x9a,0x61,0x11,0xbe,0x1d,0x8c,0x02,0x1e,0x65,0xb8,0x91,
+    0xc2,0xa2,0x11,0x16,0x7a,0xbb,0x8c,0x5e,0x07,0x9e,0x09,0xe2,0xc8,0xa8,0x33,0x9c,
+];
+
+enum ServerHelloKind {
+    /// ServerHello reel : key_share du serveur (taille variable selon le groupe).
+    Hello { group: u16, server_pub: Vec<u8>, cipher: u16 },
+    /// HelloRetryRequest : le serveur impose un autre groupe (+ cookie eventuel).
+    Retry { cipher: u16, group: u16, cookie: Option<Vec<u8>> },
 }
 
-fn parse_server_hello(msg: &[u8]) -> Result<ServerHello, &'static str> {
+fn parse_server_hello(msg: &[u8]) -> Result<ServerHelloKind, &'static str> {
     if msg.len() < 4 || msg[0] != HS_SERVER_HELLO { return Err("pas un ServerHello"); }
     let body = &msg[4..];
     let mut p = 0usize;
@@ -222,42 +301,61 @@ fn parse_server_hello(msg: &[u8]) -> Result<ServerHello, &'static str> {
         if p + n > body.len() { Err("ServerHello tronque") } else { Ok(()) }
     };
     need(p, 2 + 32 + 1)?;
-    p += 2;
-    const HRR: [u8; 32] = [
-        0xcf,0x21,0xad,0x74,0xe5,0x9a,0x61,0x11,0xbe,0x1d,0x8c,0x02,0x1e,0x65,0xb8,0x91,
-        0xc2,0xa2,0x11,0x16,0x7a,0xbb,0x8c,0x5e,0x07,0x9e,0x09,0xe2,0xc8,0xa8,0x33,0x9c,
-    ];
-    if body[p..p + 32] == HRR { return Err("HelloRetryRequest (groupe non offert)"); }
+    p += 2; // legacy_version
+    let is_hrr = body[p..p + 32] == HRR_RANDOM;
     p += 32;
     let sid_len = body[p] as usize; p += 1;
     need(p, sid_len + 3)?;
     p += sid_len;
     let cipher = ((body[p] as u16) << 8) | body[p + 1] as u16; p += 2;
-    p += 1;
+    p += 1; // legacy_compression_method
     need(p, 2)?;
     let ext_len = ((body[p] as usize) << 8) | body[p + 1] as usize; p += 2;
     need(p, ext_len)?;
     let ext_end = p + ext_len;
-    let mut server_pub = [0u8; 32];
-    let mut found_ks = false;
+
+    let mut server_pub: Option<Vec<u8>> = None;
+    let mut sel_group: Option<u16> = None;
+    let mut cookie: Option<Vec<u8>> = None;
     while p + 4 <= ext_end {
         let etype = ((body[p] as u16) << 8) | body[p + 1] as u16;
         let elen = ((body[p + 2] as usize) << 8) | body[p + 3] as usize;
         p += 4;
         if p + elen > ext_end { return Err("extension SH tronquee"); }
         let edata = &body[p..p + elen];
-        if etype == 51 && edata.len() >= 4 {
-            let g = ((edata[0] as u16) << 8) | edata[1] as u16;
-            let klen = ((edata[2] as usize) << 8) | edata[3] as usize;
-            if g == GROUP_X25519 && klen == 32 && edata.len() >= 4 + 32 {
-                server_pub.copy_from_slice(&edata[4..36]);
-                found_ks = true;
+        match etype {
+            51 => {
+                if is_hrr {
+                    // KeyShareHelloRetryRequest = juste le groupe selectionne.
+                    if edata.len() >= 2 {
+                        sel_group = Some(((edata[0] as u16) << 8) | edata[1] as u16);
+                    }
+                } else if edata.len() >= 4 {
+                    // KeyShareEntry = group(2) || key_exchange<u16>.
+                    let g = ((edata[0] as u16) << 8) | edata[1] as u16;
+                    let klen = ((edata[2] as usize) << 8) | edata[3] as usize;
+                    if edata.len() >= 4 + klen {
+                        sel_group = Some(g);
+                        server_pub = Some(edata[4..4 + klen].to_vec());
+                    }
+                }
             }
+            44 => {
+                // cookie : echo brut (l'extension contient deja sa longueur interne).
+                cookie = Some(edata.to_vec());
+            }
+            _ => {}
         }
         p += elen;
     }
-    if !found_ks { return Err("ServerHello sans key_share x25519"); }
-    Ok(ServerHello { server_pub, cipher })
+
+    if is_hrr {
+        let group = sel_group.ok_or("HelloRetryRequest sans groupe")?;
+        return Ok(ServerHelloKind::Retry { cipher, group, cookie });
+    }
+    let group = sel_group.ok_or("ServerHello sans key_share")?;
+    let server_pub = server_pub.ok_or("ServerHello sans cle publique")?;
+    Ok(ServerHelloKind::Hello { group, server_pub, cipher })
 }
 
 fn read_raw_record(conn: &mut TcpConn) -> Option<([u8; 5], Vec<u8>)> {
@@ -349,32 +447,86 @@ fn subject_cn(cert: &x509::Certificate) -> String {
     out
 }
 
+// Lit un message handshake (ServerHello / HRR) en sautant les CCS, et traduit
+// une alerte recue en message lisible.
+fn read_server_hello(conn: &mut TcpConn) -> Result<Vec<u8>, &'static str> {
+    loop {
+        let (hdr, body) = read_raw_record(conn).ok_or("pas de ServerHello (timeout)")?;
+        match hdr[0] {
+            record::CT_CHANGE_CIPHER_SPEC => continue,
+            CT_ALERT => {
+                let code = if body.len() >= 2 { body[1] } else { 0 };
+                return Err(super::alert::handshake_error(code));
+            }
+            CT_HANDSHAKE => return Ok(body),
+            _ => return Err("record inattendu avant ServerHello"),
+        }
+    }
+}
+
 /// Effectue le handshake TLS 1.3 complet sur une connexion TCP deja ouverte.
 pub fn connect(mut conn: TcpConn, hostname: &str) -> Result<Session, &'static str> {
-    let priv_key = rng::random32();
-    let pubkey = x25519::base_mul(&priv_key);
+    // Premier ClientHello : key_share x25519 (accepte par la quasi-totalite des
+    // serveurs). Si le serveur impose un autre groupe, il repond par un
+    // HelloRetryRequest et on rejoue avec le groupe demande (ex. secp256r1).
+    let mut kp = KeyPair::generate(KxGroup::X25519);
     let random = rng::random32();
-    let session_id = rng::random32();
 
-    let ch = build_client_hello(hostname, &random, &session_id, &pubkey);
+    let ch = build_client_hello(hostname, &random, &kp, None);
     let mut transcript: Vec<u8> = Vec::new();
     transcript.extend_from_slice(&ch);
     send_plaintext(&mut conn, CT_HANDSHAKE, &ch);
 
-    let sh_msg = loop {
-        let (hdr, body) = read_raw_record(&mut conn).ok_or("pas de ServerHello (timeout)")?;
-        match hdr[0] {
-            record::CT_CHANGE_CIPHER_SPEC => continue,
-            CT_ALERT => return Err("alerte TLS pendant ServerHello"),
-            CT_HANDSHAKE => break body,
-            _ => return Err("record inattendu avant ServerHello"),
+    let sh1 = read_server_hello(&mut conn)?;
+
+    let (server_pub, suite) = match parse_server_hello(&sh1)? {
+        ServerHelloKind::Retry { cipher, group, cookie } => {
+            let suite = CipherSuite::from_id(cipher).ok_or("suite TLS 1.3 non implementee (HRR)")?;
+            let new_group = KxGroup::from_id(group)
+                .ok_or("HelloRetryRequest: groupe ECDHE non supporte")?;
+
+            // Transcript apres HRR (RFC 8446 §4.4.1) : ClientHello1 est remplace
+            // par un message synthetique message_hash(254) || len || H(CH1).
+            let ch1_hash = transcript_hash(suite, &transcript);
+            let mut t = Vec::new();
+            t.push(254);
+            t.push(0);
+            t.push((ch1_hash.len() >> 8) as u8);
+            t.push(ch1_hash.len() as u8);
+            t.extend_from_slice(&ch1_hash);
+            t.extend_from_slice(&sh1); // HelloRetryRequest
+
+            // Rejoue le ClientHello avec le groupe impose + echo du cookie.
+            kp = KeyPair::generate(new_group);
+            let ch2 = build_client_hello(hostname, &random, &kp, cookie.as_deref());
+            t.extend_from_slice(&ch2);
+            send_plaintext(&mut conn, CT_HANDSHAKE, &ch2);
+            transcript = t;
+
+            let sh2 = read_server_hello(&mut conn)?;
+            transcript.extend_from_slice(&sh2);
+            match parse_server_hello(&sh2)? {
+                ServerHelloKind::Hello { group, server_pub, cipher } => {
+                    if group != new_group.id() {
+                        return Err("ServerHello apres HRR : groupe inattendu");
+                    }
+                    let suite = CipherSuite::from_id(cipher).ok_or("suite TLS 1.3 non implementee")?;
+                    (server_pub, suite)
+                }
+                ServerHelloKind::Retry { .. } => return Err("deux HelloRetryRequest (interdit)"),
+            }
+        }
+        ServerHelloKind::Hello { group, server_pub, cipher } => {
+            if group != kp.group.id() {
+                return Err("ServerHello : groupe key_share non offert");
+            }
+            transcript.extend_from_slice(&sh1);
+            let suite = CipherSuite::from_id(cipher).ok_or("suite TLS 1.3 non implementee")?;
+            (server_pub, suite)
         }
     };
-    transcript.extend_from_slice(&sh_msg);
-    let sh = parse_server_hello(&sh_msg)?;
-    let suite = CipherSuite::from_id(sh.cipher).ok_or("suite TLS 1.3 non implementee")?;
 
-    let shared = x25519::x25519(&priv_key, &sh.server_pub);
+    let shared = kp.shared(&server_pub).ok_or("echange ECDHE invalide")?;
     let th_ch_sh = transcript_hash(suite, &transcript);
     let ks = KeySchedule::derive_handshake(suite, &shared, &th_ch_sh);
     let mut s_hs = DirKeys::new(suite, &ks.server_hs);
@@ -473,6 +625,7 @@ pub fn connect(mut conn: TcpConn, hostname: &str) -> Result<Session, &'static st
         detail: String::from(v.detail),
         subject_cn: cn,
         cipher_suite: suite.name(),
+        kx_group: kp.group.name(),
     };
 
     // Finished client chiffre avec la cle handshake client, sans pump juste apres.
