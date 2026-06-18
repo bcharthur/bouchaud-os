@@ -39,6 +39,17 @@ Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 - [x] Clavier en interruption IRQ1 (fin du polling)
 - [ ] APIC, plus tard, en remplacement du PIC
 
+## V0.26 - Moteur de rendu web graphique
+- [x] gui/web.rs : HTML -> DOM (parseur tolerant) -> layout flux blocs/inline
+      (retour a la ligne, titres dimensionnes, listes, regles, champs de form)
+      -> liste d'affichage peinte dans le framebuffer HD avec defilement
+- [x] Liens colores cliquables (souris) + navigation par numero/URL au clavier
+- [x] Navigateur graphique : about:/file:/http(s) ; fetch via fetch_document
+- [x] ALPN force HTTP/1.1 (chemin robuste : chunked + gzip/deflate/brotli) pour
+      fiabiliser Google/Cloudflare (h2 contourne)
+- [x] Moteur valide hors-ligne : 0 panic sur HTML malforme/imbrique/gros (320 Ko)
+- [ ] CSS (couleurs/box model), images decodees, formulaires actifs
+
 ## V0.25 - Bureau HD truecolor (Bochs VBE)
 - [x] Framebuffer lineaire HD 1280x720x32 via Bochs VBE/BGA (carte `-vga std`)
 - [x] gfx reecrit en truecolor 32 bits (double-buffer RAM -> LFB), API conservee

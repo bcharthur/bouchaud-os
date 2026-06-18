@@ -236,6 +236,74 @@ pub fn dns_cmd(argc: usize, argv: &[&str; 12]) {
     }
 }
 
+/// Document brut recupere par le navigateur graphique.
+pub struct Document {
+    pub banner: alloc::vec::Vec<String>, // lignes de diagnostic (TLS, statut, erreurs)
+    pub final_url: String,               // URL apres redirections
+    pub content_type: String,
+    pub body: alloc::vec::Vec<u8>,       // corps decode (dechunke + decompresse)
+    pub is_html: bool,
+    pub ok: bool,
+}
+
+/// Recupere une URL HTTP(S) et renvoie le document brut (corps decode), en
+/// suivant les redirections. Utilise par le moteur de rendu graphique.
+pub fn fetch_document(url: &str) -> Document {
+    use alloc::string::ToString;
+    let mut banner: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+
+    if !e1000::is_ready() && !e1000::init() {
+        banner.push("reseau indisponible (lance 'ifup')".to_string());
+        return Document { banner, final_url: url.to_string(), content_type: String::new(), body: alloc::vec::Vec::new(), is_html: false, ok: false };
+    }
+
+    let mut current = String::from(url);
+    for hop in 0..8u32 {
+        let (scheme, hostname, port, path) = split_url(&current);
+        let (mut b, raw) = if scheme == "https" {
+            let r = tls::https_fetch(&hostname, port, &path);
+            (r.banner, r.raw)
+        } else {
+            let ip = match resolve(&hostname) {
+                Some(ip) => ip,
+                None => { banner.push(format!("DNS: echec pour {}", hostname)); return Document { banner, final_url: current, content_type: String::new(), body: alloc::vec::Vec::new(), is_html: false, ok: false }; }
+            };
+            let req = http::build_get(&hostname, &path);
+            let mut resp: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            if !tcp::fetch(ip, port, req.as_bytes(), &mut resp) {
+                banner.push(format!("connexion TCP echouee vers {}:{}", hostname, port));
+                return Document { banner, final_url: current, content_type: String::new(), body: alloc::vec::Vec::new(), is_html: false, ok: false };
+            }
+            (alloc::vec::Vec::new(), resp)
+        };
+        banner.append(&mut b);
+        if raw.is_empty() {
+            return Document { banner, final_url: current, content_type: String::new(), body: alloc::vec::Vec::new(), is_html: false, ok: false };
+        }
+        match http::parse_response(&raw) {
+            Some(r) if r.is_redirect() && hop < 7 => {
+                let loc = r.location.clone().unwrap_or_default();
+                banner.push(format!("{} -> {}", r.status_code, loc));
+                current = http::resolve_location(scheme, &hostname, &loc);
+            }
+            Some(r) => {
+                banner.push(r.status_line.clone());
+                let is_html = r.is_html();
+                let ct = r.content_type.clone().unwrap_or_default();
+                return Document { banner, final_url: current, content_type: ct, body: r.body, is_html, ok: true };
+            }
+            None => {
+                let mut status = String::new();
+                for &c in raw.iter().take_while(|&&c| c != b'\r' && c != b'\n') { status.push(c as char); }
+                banner.push(status);
+                return Document { banner, final_url: current, content_type: String::new(), body: alloc::vec::Vec::new(), is_html: false, ok: false };
+            }
+        }
+    }
+    banner.push("trop de redirections".to_string());
+    Document { banner, final_url: current, content_type: String::new(), body: alloc::vec::Vec::new(), is_html: false, ok: false }
+}
+
 /// Recupere une URL HTTP(S) et renvoie les lignes a afficher (statut + corps),
 /// en suivant jusqu'a 5 redirections (301/302/303/307/308 via `Location`).
 /// Utilise par la commande `wget` et par le navigateur.

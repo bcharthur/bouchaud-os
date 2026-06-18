@@ -253,12 +253,11 @@ fn build_client_hello(hostname: &str, random: &[u8; 32], kp: &KeyPair, cookie: O
         push_ext(&mut ext, 13, &body);
     }
 
-    // ALPN : on propose h2 puis http/1.1. La couche applicative bascule sur
-    // HTTP/2 si le serveur selectionne `h2` (cf. net::http2), sinon HTTP/1.1.
+    // ALPN : HTTP/1.1 uniquement. Le chemin HTTP/1.1 (chunked + gzip/deflate/br)
+    // est robuste et eprouve ; on evite que Google/Cloudflare imposent h2 (dont
+    // la lecture de frames n'est pas encore fiable cote client).
     {
         let mut proto = Vec::new();
-        proto.push(2);
-        proto.extend_from_slice(b"h2");
         proto.push(8);
         proto.extend_from_slice(b"http/1.1");
         let list = with_u16_len(&proto);

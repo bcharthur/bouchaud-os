@@ -1,10 +1,11 @@
-//! Bouchaud Browser (navigateur natif minimal, "chromium stub").
+//! Bouchaud Browser : navigateur graphique.
 //!
-//! Pages internes : `about:bouchaud`, `about:system`, `file:/<chemin>` (lecture
-//! RAMFS). Les URL `http(s)://` afficheront du contenu quand le reseau (e1000 +
-//! TCP/HTTP) sera disponible.
+//! Recupere le HTML (HTTP/1.1 + TLS, gzip/deflate/brotli), le parse en DOM, le
+//! met en page (moteur `gui::web`) et le peint dans le framebuffer HD avec
+//! defilement. Pages internes : `about:bouchaud`, `about:system`, `file:/...`.
 
 use crate::gui::framebuffer as fb;
+use crate::gui::web::{self, Page};
 use crate::gui::window::clip;
 use crate::arch::x86_64::rtc;
 use crate::fs::ramfs;
@@ -12,124 +13,134 @@ use crate::kernel::timer;
 use crate::users;
 use alloc::format;
 use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 
-/// Charge une "page" et renvoie ses lignes.
-pub(crate) fn load_page(url: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+const ADDR_H: usize = 11;
+
+// Echappe le texte brut pour l'injecter dans du HTML synthetise.
+fn esc(s: &str) -> String {
+    let mut o = String::new();
+    for c in s.chars() {
+        match c { '&' => o.push_str("&amp;"), '<' => o.push_str("&lt;"), '>' => o.push_str("&gt;"), _ => o.push(c) }
+    }
+    o
+}
+
+fn page_from_html(html: &[u8], base: &str, width: i32) -> Page {
+    let dom = web::parse(html);
+    web::layout(&dom, base, width)
+}
+
+/// Charge une URL et renvoie la page mise en page pour la largeur donnee.
+pub(crate) fn open(url: &str, width: i32) -> Page {
+    let width = width.max(80);
     if url == "about:bouchaud" {
-        out.push("Bouchaud OS".to_string());
-        out.push("OS souverain francais experimental".to_string());
-        out.push("".to_string());
-        out.push(format!("Version : {}", crate::VERSION));
-        out.push("Kernel  : Rust no_std".to_string());
-        out.push("GUI     : window manager VGA".to_string());
-        out.push("Reseau  : loopback (e1000 a venir)".to_string());
-        out.push("".to_string());
-        out.push("Pages: about:system  file:/readme.txt".to_string());
-    } else if url == "about:system" {
+        let html = format!(
+            "<h1>Bouchaud OS</h1><p>OS souverain francais experimental.</p>\
+             <p>Version : {} &mdash; noyau Rust no_std, bureau HD, pile reseau TLS 1.3.</p>\
+             <h3>Pages</h3><ul><li><a href=\"about:system\">about:system</a></li>\
+             <li><a href=\"file:/readme.txt\">file:/readme.txt</a></li>\
+             <li><a href=\"https://example.com/\">https://example.com/</a></li>\
+             <li><a href=\"https://www.google.com/\">https://www.google.com/</a></li></ul>\
+             <p>Tape une URL dans la barre d'adresse, ou un numero pour suivre un lien.</p>",
+            crate::VERSION);
+        return page_from_html(html.as_bytes(), url, width);
+    }
+    if url == "about:system" {
         let dt = rtc::now();
         let (used, free, total) = crate::kernel::heap::stats();
-        out.push(format!("Heure  : {:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second));
-        out.push(format!("Uptime : {} s", timer::seconds()));
-        out.push(format!("Heap   : {}/{} o (libre {})", used, total, free));
-        out.push(format!("PCI    : {} peripheriques", crate::arch::x86_64::pci::count()));
-        out.push(format!("User   : {}", users::session().username()));
-    } else if let Some(path) = url.strip_prefix("file:") {
+        let html = format!(
+            "<h1>Systeme</h1><ul><li>Heure : {:02}:{:02}:{:02}</li><li>Uptime : {} s</li>\
+             <li>Heap : {}/{} o (libre {})</li><li>PCI : {} peripheriques</li>\
+             <li>User : {}</li></ul>",
+            dt.hour, dt.minute, dt.second, timer::seconds(), used, total, free,
+            crate::arch::x86_64::pci::count(), users::session().username());
+        return page_from_html(html.as_bytes(), url, width);
+    }
+    if let Some(path) = url.strip_prefix("file:") {
         let p = path.trim_start_matches('/');
         let full = format!("/{}", p);
         let fs = ramfs::fs();
-        match fs.resolve_checked(&full, 0) {
-            Ok(idx) if fs.nodes[idx].kind == ramfs::NodeKind::File => {
-                if fs.can(idx, ramfs::PERM_R) {
-                    let mut s = String::new();
-                    for k in 0..fs.nodes[idx].content_len { s.push(fs.nodes[idx].content[k] as char); }
-                    for l in s.split('\n') { out.push(l.to_string()); }
-                } else {
-                    out.push("Erreur: permission denied".to_string());
-                }
+        let body = match fs.resolve_checked(&full, 0) {
+            Ok(idx) if fs.nodes[idx].kind == ramfs::NodeKind::File && fs.can(idx, ramfs::PERM_R) => {
+                let mut s = String::new();
+                for k in 0..fs.nodes[idx].content_len { s.push(fs.nodes[idx].content[k] as char); }
+                format!("<h2>file:{}</h2><pre>{}</pre>", full, esc(&s))
             }
-            _ => out.push(format!("Erreur: introuvable {}", full)),
-        }
-    } else if url.starts_with("http://") || url.starts_with("https://") {
-        // Recuperation HTTP/HTTPS reelle via e1000/TCP (+ TLS 1.3 pour https).
-        return crate::net::http_get(url);
-    } else {
-        out.push(format!("Page inconnue: {}", url));
-        out.push("Essaie: about:bouchaud, about:system, file:/readme.txt".to_string());
+            Ok(_) => format!("<h2>Erreur</h2><p>permission refusee : {}</p>", full),
+            _ => format!("<h2>Erreur</h2><p>introuvable : {}</p>", full),
+        };
+        return page_from_html(body.as_bytes(), url, width);
     }
-    out
+    if url.starts_with("http://") || url.starts_with("https://") {
+        let doc = crate::net::fetch_document(url);
+        if doc.ok && !doc.body.is_empty() {
+            if doc.is_html {
+                return page_from_html(&doc.body, &doc.final_url, width);
+            }
+            // Contenu non-HTML : affichage texte brut.
+            let mut s = String::new();
+            for &b in doc.body.iter().take(40_000) {
+                match b { b'\n' | b'\r' | b'\t' => s.push(b as char), 0x20..=0x7e => s.push(b as char), _ => s.push('.') }
+            }
+            let html = format!("<h3>{} ({} o)</h3><pre>{}</pre>", esc(&doc.content_type), doc.body.len(), esc(&s));
+            return page_from_html(html.as_bytes(), &doc.final_url, width);
+        }
+        // Echec : affiche le diagnostic (TLS, statut, erreurs).
+        let mut html = String::from("<h2>Echec du chargement</h2><pre>");
+        for line in &doc.banner { html.push_str(&esc(line)); html.push('\n'); }
+        html.push_str("</pre>");
+        return page_from_html(html.as_bytes(), url, width);
+    }
+    let html = format!("<h2>Page inconnue</h2><p>{}</p><p>Essaie about:bouchaud, https://example.com/</p>", esc(url));
+    page_from_html(html.as_bytes(), url, width)
 }
 
-/// Resout l'entree de la barre d'adresse : si c'est un numero de lien affiche
-/// (`[n] url`), renvoie l'URL correspondante ; sinon renvoie l'entree telle quelle.
-/// Permet de "cliquer" un lien en tapant son numero.
-pub(crate) fn resolve_link(input: &str, content: &[String]) -> String {
+/// Normalise l'entree de la barre d'adresse en URL. Un numero seul suit le lien
+/// correspondant de la page courante.
+pub(crate) fn resolve_input(input: &str, page: &Page) -> String {
     let t = input.trim();
     if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) {
-        let prefix = format!("[{}] ", t);
-        for line in content {
-            if let Some(url) = line.strip_prefix(&prefix) {
-                return url.trim().to_string();
+        if let Ok(n) = t.parse::<usize>() {
+            if n >= 1 && n <= page.links.len() {
+                return page.links[n - 1].href.clone();
             }
         }
+    }
+    if t.contains("://") || t.starts_with("about:") || t.starts_with("file:") {
+        return t.to_string();
+    }
+    if t.contains('.') && !t.contains(' ') {
+        return format!("https://{}", t);
     }
     t.to_string()
 }
 
-/// Decoupe une ligne logique en rangees de largeur <= `cols` (retour a la ligne
-/// sur les espaces ; coupe les mots trop longs). Compte en caracteres pour ne
-/// jamais couper au milieu d'un caractere multi-octet.
-fn wrap_line(line: &str, cols: usize) -> Vec<String> {
-    let mut rows: Vec<String> = Vec::new();
-    if cols == 0 { rows.push(line.to_string()); return rows; }
-    let mut cur = String::new();
-    let mut cur_len = 0usize;
-    let push_word = |rows: &mut Vec<String>, cur: &mut String, cur_len: &mut usize, word: &str| {
-        let wlen = word.chars().count();
-        if *cur_len == 0 {
-            if wlen <= cols { cur.push_str(word); *cur_len = wlen; return; }
-        } else if *cur_len + 1 + wlen <= cols {
-            cur.push(' '); cur.push_str(word); *cur_len += 1 + wlen; return;
-        } else {
-            rows.push(core::mem::take(cur)); *cur_len = 0;
-            if wlen <= cols { cur.push_str(word); *cur_len = wlen; return; }
-        }
-        // Mot plus long que la largeur : coupe dur, caractere par caractere.
-        for ch in word.chars() {
-            cur.push(ch); *cur_len += 1;
-            if *cur_len == cols { rows.push(core::mem::take(cur)); *cur_len = 0; }
-        }
-    };
-    for word in line.split(' ') {
-        push_word(&mut rows, &mut cur, &mut cur_len, word);
-    }
-    rows.push(cur);
-    rows
+/// Hauteur maximale de defilement pour la zone de contenu donnee.
+pub(crate) fn max_scroll(page: &Page, bh: usize) -> i32 {
+    let view = bh.saturating_sub(ADDR_H) as i32;
+    (page.height - view).max(0)
 }
 
-/// Echelle du texte de contenu (lisibilite en HD 720p). Le chrome (barre
-/// d'adresse) reste en 8 px.
-const CONTENT_SCALE: usize = 2;
-
-/// Dessine le navigateur (barre d'adresse + contenu).
-pub(crate) fn draw(url: &str, input: &str, content: &[String], bx: usize, by: usize, bw: usize, bh: usize) {
-    // Barre d'adresse : police 8 px sur bandeau blanc.
-    let addr_cols = bw / 8;
-    fb::fill_rect(bx, by, bw, 9, fb::C_WHITE);
-    let shown = if input == url { input.to_string() } else { format!("{}_", input) };
-    fb::draw_text(bx + 1, by + 1, clip(&shown, addr_cols), fb::C_BLACK);
-
-    // Contenu : texte agrandi pour la lisibilite, retour a la ligne sur la
-    // largeur disponible a cette echelle.
-    let cell = 8 * CONTENT_SCALE;
-    let cols = (bw / cell).max(1);
-    let mut yy = by + 12;
-    'outer: for l in content {
-        for row in wrap_line(l, cols) {
-            if yy + cell > by + bh { break 'outer; }
-            fb::draw_text_scaled(bx, yy, &row, fb::C_WHITE, CONTENT_SCALE);
-            yy += cell + 2;
+/// Suit un clic dans la zone de contenu : renvoie l'URL du lien touche.
+pub(crate) fn link_at(page: &Page, scroll: i32, rel_x: i32, rel_y: i32) -> Option<String> {
+    let cy = rel_y - ADDR_H as i32 + scroll; // coordonnee dans le contenu
+    let cx = rel_x;
+    for lnk in &page.links {
+        if cx >= lnk.x && cx < lnk.x + lnk.w && cy >= lnk.y && cy < lnk.y + lnk.h {
+            return Some(lnk.href.clone());
         }
     }
+    None
+}
+
+/// Dessine le navigateur : barre d'adresse + contenu peint.
+pub(crate) fn draw(url: &str, input: &str, page: &Page, scroll: i32, bx: usize, by: usize, bw: usize, bh: usize) {
+    // Barre d'adresse.
+    fb::fill_rect(bx, by, bw, ADDR_H - 1, fb::C_WHITE);
+    let shown = if input == url { input.to_string() } else { format!("{}_", input) };
+    fb::draw_text(bx + 1, by + 1, clip(&shown, bw / 8), fb::C_BLACK);
+    // Contenu.
+    let cy = by + ADDR_H;
+    let ch = bh.saturating_sub(ADDR_H);
+    web::paint(page, scroll, bx, cy, bw, ch);
 }

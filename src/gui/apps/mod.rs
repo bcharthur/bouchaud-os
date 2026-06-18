@@ -27,6 +27,8 @@ fn is_blocked(cmd: &str) -> bool {
 /// Transmet une touche a l'app de la fenetre active. Renvoie true si l'app
 /// demande sa fermeture (commande `exit`).
 pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
+    let win_w = w.w;
+    let win_h = w.h;
     match &mut w.app {
         App::Terminal { sb, input, cwd } => match k {
             Key::Enter => {
@@ -50,17 +52,25 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
             Key::Char(c) => { if input.len() < 120 { input.push(c as char); } false }
             _ => false,
         },
-        App::Browser { url, input, content } => match k {
+        App::Browser { url, input, page, scroll } => match k {
             Key::Enter => {
-                // Un numero seul = suit le lien correspondant affiche ([n] url).
-                let target = chromium_stub::resolve_link(input, content);
+                // URL, ou un numero seul pour suivre le lien correspondant.
+                let target = chromium_stub::resolve_input(input, page);
+                *page = chromium_stub::open(&target, win_w - 6);
                 *url = target.clone();
-                *content = chromium_stub::load_page(&target);
                 *input = target;
+                *scroll = 0;
+                false
+            }
+            Key::Up => { *scroll = (*scroll - 48).max(0); false }
+            Key::Down => {
+                let bh = (win_h - TITLE_H - 4).max(1) as usize;
+                let m = chromium_stub::max_scroll(page, bh);
+                *scroll = (*scroll + 48).min(m);
                 false
             }
             Key::Backspace => { input.pop(); false }
-            Key::Char(c) => { if input.len() < 80 { input.push(c as char); } false }
+            Key::Char(c) => { if input.len() < 100 { input.push(c as char); } false }
             _ => false,
         },
         _ => false,
@@ -68,7 +78,21 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
 }
 
 /// Clic dans le corps d'une application (uniquement Fichiers pour l'instant).
-pub(crate) fn app_click(w: &mut Win, _mx: i32, my: i32, _home: usize) {
+pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
+    let win_w = w.w;
+    let bx = w.x + 3;
+    let by = w.y + TITLE_H + 2;
+    if let App::Browser { url, input, page, scroll } = &mut w.app {
+        let rel_x = mx - bx;
+        let rel_y = my - by;
+        if let Some(href) = chromium_stub::link_at(page, *scroll, rel_x, rel_y) {
+            *page = chromium_stub::open(&href, win_w - 6);
+            *url = href.clone();
+            *input = href;
+            *scroll = 0;
+        }
+        return;
+    }
     if let App::Files { cur, view, name } = &mut w.app {
         if view.is_some() { *view = None; return; }
         let by = w.y + TITLE_H + 2;
@@ -105,7 +129,7 @@ pub(crate) fn draw_app(w: &Win) {
     match &w.app {
         App::Terminal { sb, input, cwd } => terminal::draw(sb, input, *cwd, bx, by, bw, bh),
         App::Files { cur, view, name } => file_explorer::draw(*cur, view, name, bx, by, bw, bh),
-        App::Browser { url, input, content } => chromium_stub::draw(url, input, content, bx, by, bw, bh),
+        App::Browser { url, input, page, scroll } => chromium_stub::draw(url, input, page, *scroll, bx, by, bw, bh),
         App::Monitor => system_info::draw(bx, by, bw, bh),
     }
 }
