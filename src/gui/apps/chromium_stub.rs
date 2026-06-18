@@ -77,6 +77,37 @@ pub(crate) fn resolve_link(input: &str, content: &[String]) -> String {
     t.to_string()
 }
 
+/// Decoupe une ligne logique en rangees de largeur <= `cols` (retour a la ligne
+/// sur les espaces ; coupe les mots trop longs). Compte en caracteres pour ne
+/// jamais couper au milieu d'un caractere multi-octet.
+fn wrap_line(line: &str, cols: usize) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::new();
+    if cols == 0 { rows.push(line.to_string()); return rows; }
+    let mut cur = String::new();
+    let mut cur_len = 0usize;
+    let push_word = |rows: &mut Vec<String>, cur: &mut String, cur_len: &mut usize, word: &str| {
+        let wlen = word.chars().count();
+        if *cur_len == 0 {
+            if wlen <= cols { cur.push_str(word); *cur_len = wlen; return; }
+        } else if *cur_len + 1 + wlen <= cols {
+            cur.push(' '); cur.push_str(word); *cur_len += 1 + wlen; return;
+        } else {
+            rows.push(core::mem::take(cur)); *cur_len = 0;
+            if wlen <= cols { cur.push_str(word); *cur_len = wlen; return; }
+        }
+        // Mot plus long que la largeur : coupe dur, caractere par caractere.
+        for ch in word.chars() {
+            cur.push(ch); *cur_len += 1;
+            if *cur_len == cols { rows.push(core::mem::take(cur)); *cur_len = 0; }
+        }
+    };
+    for word in line.split(' ') {
+        push_word(&mut rows, &mut cur, &mut cur_len, word);
+    }
+    rows.push(cur);
+    rows
+}
+
 /// Dessine le navigateur (barre d'adresse + contenu).
 pub(crate) fn draw(url: &str, input: &str, content: &[String], bx: usize, by: usize, bw: usize, bh: usize) {
     let cols = bw / 8;
@@ -84,9 +115,11 @@ pub(crate) fn draw(url: &str, input: &str, content: &[String], bx: usize, by: us
     let shown = if input == url { input.to_string() } else { format!("{}_", input) };
     fb::draw_text(bx + 1, by + 1, clip(&shown, cols), fb::C_BLACK);
     let mut yy = by + 12;
-    for l in content {
-        if yy + 8 > by + bh { break; }
-        fb::draw_text(bx, yy, clip(l, cols), fb::C_WHITE);
-        yy += 8;
+    'outer: for l in content {
+        for row in wrap_line(l, cols) {
+            if yy + 8 > by + bh { break 'outer; }
+            fb::draw_text(bx, yy, &row, fb::C_WHITE);
+            yy += 8;
+        }
     }
 }

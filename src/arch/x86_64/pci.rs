@@ -146,6 +146,19 @@ pub fn print_devices() {
     }
 }
 
+/// Cherche le premier controleur graphique PCI (classe 0x03), p.ex. la carte
+/// VGA `std`/Bochs de QEMU (1234:1111) dont le BAR0 est le framebuffer lineaire.
+pub fn find_display() -> Option<PciDevice> {
+    for slot in 0..32u8 {
+        for func in 0..8u8 {
+            if let Some(d) = read_device(0, slot, func) {
+                if d.class == 0x03 { return Some(d); }
+            }
+        }
+    }
+    None
+}
+
 /// Cherche la premiere carte reseau PCI presente.
 pub fn find_network() -> Option<PciDevice> {
     for slot in 0..32u8 {
