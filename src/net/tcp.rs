@@ -354,15 +354,20 @@ impl TcpConn {
     /// arrive apres un RTT, contrairement au flight de handshake qui suit
     /// immediatement le ServerHello).
     pub fn fill(&mut self, want: usize) -> bool {
-        let mut idle = 0u32;
+        use crate::kernel::timer;
+        // Timeout base sur l'horloge PIT (avance via IRQ0, independamment du
+        // niveau d'optimisation) : abandonne apres ~3 s SANS progres. La date
+        // limite est repoussee a chaque octet recu, donc les gros transferts
+        // par morceaux ne sont jamais coupes.
+        let deadline = 3 * timer::TICKS_PER_SECOND.max(1);
+        let mut last = timer::ticks();
         while self.rx.len() < want && !self.peer_fin && !self.closed {
             let before = self.rx.len();
-            self.pump(1_000_000);
-            if self.rx.len() == before {
-                idle += 1;
-                if idle >= 60 { break; }
-            } else {
-                idle = 0;
+            self.pump(100_000);
+            if self.rx.len() != before {
+                last = timer::ticks();
+            } else if timer::ticks().wrapping_sub(last) >= deadline {
+                break;
             }
         }
         self.rx.len() >= want
