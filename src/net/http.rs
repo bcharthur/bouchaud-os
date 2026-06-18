@@ -13,11 +13,10 @@ use alloc::vec::Vec;
 
 /// Construit une requete `GET` HTTP/1.1 (connexion fermee apres reponse).
 ///
-/// `Accept-Encoding: identity` evite une reponse compressee (gzip/br) que la
-/// pile ne sait pas decompresser.
+/// La pile sait decompresser `gzip` et `deflate` (cf. `net::inflate`).
 pub fn build_get(host: &str, path: &str) -> String {
     format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: BouchaudOS\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: BouchaudOS\r\nAccept: */*\r\nAccept-Encoding: gzip, deflate\r\nConnection: close\r\n\r\n",
         path, host
     )
 }
@@ -68,7 +67,22 @@ pub struct Response {
     pub status_line: String,
     pub status_code: u16,
     pub location: Option<String>,
+    pub content_type: Option<String>,
     pub body: Vec<u8>,
+}
+
+impl Response {
+    /// True si le corps est du HTML (d'apres Content-Type ou un reniflage).
+    pub fn is_html(&self) -> bool {
+        if let Some(ct) = &self.content_type {
+            if ct.to_ascii_lowercase().contains("text/html") { return true; }
+            if ct.to_ascii_lowercase().contains("xhtml") { return true; }
+        }
+        let head = &self.body[..self.body.len().min(512)];
+        let lower: Vec<u8> = head.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let win = |needle: &[u8]| lower.windows(needle.len()).any(|w| w == needle);
+        win(b"<!doctype html") || win(b"<html") || win(b"<head") || win(b"<body")
+    }
 }
 
 impl Response {
@@ -189,6 +203,7 @@ pub fn parse_response(raw: &[u8]) -> Option<Response> {
         .unwrap_or(0);
 
     let location = header_value(head, "Location").map(String::from);
+    let content_type = header_value(head, "Content-Type").map(String::from);
 
     let body = if is_chunked(head) {
         dechunk(raw_body).0
@@ -198,5 +213,14 @@ pub fn parse_response(raw: &[u8]) -> Option<Response> {
         raw_body.to_vec()
     };
 
-    Some(Response { status_line, status_code, location, body })
+    // Decompression si le serveur a applique un Content-Encoding (gzip/deflate),
+    // ce que font beaucoup de CDN meme quand on demande `identity`.
+    let body = match header_value(head, "Content-Encoding") {
+        Some(enc) if !enc.eq_ignore_ascii_case("identity") => {
+            super::inflate::decode_content(enc, &body).unwrap_or(body)
+        }
+        _ => body,
+    };
+
+    Some(Response { status_line, status_code, location, content_type, body })
 }

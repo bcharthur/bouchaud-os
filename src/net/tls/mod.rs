@@ -14,6 +14,7 @@ pub mod sha512;
 pub mod hash;
 pub mod aes;
 pub mod gcm;
+pub mod chacha;
 pub mod x25519;
 pub mod ec;
 pub mod p256;
@@ -44,6 +45,7 @@ pub fn selftest() {
         ("HMAC/HKDF SHA-256/SHA-384", hash::selftest),
         ("AES-128/256", aes::selftest),
         ("AES-GCM", gcm::selftest),
+        ("ChaCha20-Poly1305", chacha::selftest),
         ("X25519", x25519::selftest),
         ("P-256/ECDSA", p256::selftest),
         ("P-384/ECDSA", p384::selftest),
@@ -81,7 +83,7 @@ fn x509_selftest() -> Result<(), &'static str> {
 
 /// Etat d'implementation, pour les messages utilisateur.
 pub fn status() -> &'static str {
-    "TLS 1.3 (X25519/AES-128/256-GCM + SHA-256/SHA-384 + X.509 RSA/ECDSA P-256/P-384)"
+    "TLS 1.3 (X25519/AES-128/256-GCM/ChaCha20-Poly1305 + SHA-256/384 + X.509 RSA/ECDSA P-256/P-384)"
 }
 
 /// Reponse HTTPS brute : banniere TLS + octets HTTP dechiffres.
@@ -101,17 +103,18 @@ pub fn https_get(hostname: &str, port: u16, path: &str) -> Vec<String> {
         return out;
     }
 
-    // Ligne de statut.
-    let mut i = 0;
-    while i < r.raw.len() && r.raw[i] != b'\r' && r.raw[i] != b'\n' { i += 1; }
-    let mut status = String::new();
-    for &b in &r.raw[..i] { status.push(b as char); }
+    // Decode la reponse (dechunk + decompression gzip/deflate) via net::http.
+    let (status, body) = match crate::net::http::parse_response(&r.raw) {
+        Some(resp) => (resp.status_line, resp.body),
+        None => {
+            let mut s = String::new();
+            for &b in r.raw.iter().take_while(|&&b| b != b'\r' && b != b'\n') { s.push(b as char); }
+            (s, r.raw.clone())
+        }
+    };
     out.push(status);
-
-    // Corps (apres \r\n\r\n), affichage brut lisible.
-    let body_off = find_body(&r.raw).unwrap_or(0);
     let mut line = String::new();
-    for &b in &r.raw[body_off..] {
+    for &b in &body {
         match b {
             b'\n' => { out.push(core::mem::take(&mut line)); if out.len() > 200 { break; } }
             b'\r' => {}
@@ -177,7 +180,7 @@ fn https_fetch_once(hostname: &str, port: u16, path: &str) -> HttpsFetchResult {
     banner.push(format!("{} {} (CN={}, suite={})", lock, r.detail, r.subject_cn, r.cipher_suite));
 
     let req = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36\r\nAccept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8\r\nAccept-Language: fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7\r\nAccept-Encoding: identity\r\nUpgrade-Insecure-Requests: 1\r\nSec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Site: none\r\nSec-Fetch-User: ?1\r\nConnection: close\r\n\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36\r\nAccept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8\r\nAccept-Language: fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7\r\nAccept-Encoding: gzip, deflate\r\nUpgrade-Insecure-Requests: 1\r\nSec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Site: none\r\nSec-Fetch-User: ?1\r\nConnection: close\r\n\r\n",
         path, hostname
     );
 
