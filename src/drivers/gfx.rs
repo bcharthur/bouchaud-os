@@ -312,4 +312,27 @@ pub fn draw_text(x: usize, y: usize, s: &str, color: u8) {
     }
 }
 
+/// Dessine un caractere agrandi `scale` fois (chaque pixel de la police 8x8
+/// devient un bloc scale x scale). `scale=1` equivaut a `draw_char`.
+pub fn draw_char_scaled(x: usize, y: usize, c: u8, color: u8, scale: usize) {
+    if scale <= 1 { draw_char(x, y, c, color); return; }
+    let glyph = font::glyph(c);
+    for (row, bits) in glyph.iter().enumerate() {
+        for col in 0..8 {
+            if bits & (1 << col) != 0 {
+                fill_rect(x + col * scale, y + row * scale, scale, scale, color);
+            }
+        }
+    }
+}
+
+/// Dessine une chaine agrandie `scale` fois (cellule de `8*scale` px de large).
+pub fn draw_text_scaled(x: usize, y: usize, s: &str, color: u8, scale: usize) {
+    let mut cx = x;
+    for b in s.bytes() {
+        draw_char_scaled(cx, y, b, color, scale);
+        cx += 8 * scale;
+    }
+}
+
 pub mod font;

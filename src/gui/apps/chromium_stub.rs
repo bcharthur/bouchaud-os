@@ -108,18 +108,28 @@ fn wrap_line(line: &str, cols: usize) -> Vec<String> {
     rows
 }
 
+/// Echelle du texte de contenu (lisibilite en HD 720p). Le chrome (barre
+/// d'adresse) reste en 8 px.
+const CONTENT_SCALE: usize = 2;
+
 /// Dessine le navigateur (barre d'adresse + contenu).
 pub(crate) fn draw(url: &str, input: &str, content: &[String], bx: usize, by: usize, bw: usize, bh: usize) {
-    let cols = bw / 8;
+    // Barre d'adresse : police 8 px sur bandeau blanc.
+    let addr_cols = bw / 8;
     fb::fill_rect(bx, by, bw, 9, fb::C_WHITE);
     let shown = if input == url { input.to_string() } else { format!("{}_", input) };
-    fb::draw_text(bx + 1, by + 1, clip(&shown, cols), fb::C_BLACK);
+    fb::draw_text(bx + 1, by + 1, clip(&shown, addr_cols), fb::C_BLACK);
+
+    // Contenu : texte agrandi pour la lisibilite, retour a la ligne sur la
+    // largeur disponible a cette echelle.
+    let cell = 8 * CONTENT_SCALE;
+    let cols = (bw / cell).max(1);
     let mut yy = by + 12;
     'outer: for l in content {
         for row in wrap_line(l, cols) {
-            if yy + 8 > by + bh { break 'outer; }
-            fb::draw_text(bx, yy, &row, fb::C_WHITE);
-            yy += 8;
+            if yy + cell > by + bh { break 'outer; }
+            fb::draw_text_scaled(bx, yy, &row, fb::C_WHITE, CONTENT_SCALE);
+            yy += cell + 2;
         }
     }
 }
