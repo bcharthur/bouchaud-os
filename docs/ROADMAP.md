@@ -45,6 +45,8 @@ Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 - [x] Decompression gzip/deflate (RFC 1950/1951/1952) cote reponse HTTP
 - [x] HTTP/1.1 : Content-Length, Transfer-Encoding: chunked, redirections 3xx
 - [x] Navigateur texte : HTML->texte, titre, entites, liens numerotes
+- [x] Rendu enrichi : titres (#), listes (-), citations (>), images [img],
+      table d'entites etendue, retour a la ligne auto dans le navigateur GUI
 - [x] Alertes TLS lisibles (RFC 8446 §6) : handshake_failure, unknown_ca... (alert.rs)
 - [x] Post-handshake : NewSessionTicket / KeyUpdate ignores proprement
 - [x] ECDHE P-256 (secp256r1) + HelloRetryRequest (rejoue le ClientHello)

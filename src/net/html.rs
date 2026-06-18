@@ -83,6 +83,14 @@ fn decode_entity(ent: &str) -> Option<char> {
         "ocirc" => 'o', "euml" => 'e', "Eacute" => 'E', "Egrave" => 'E', "agrave2" => 'a',
         "laquo" => '"', "raquo" => '"', "trade" => 't', "deg" => 'o', "middot" => '.',
         "times" => 'x', "euro" => 'E', "pound" => 'L', "cent" => 'c',
+        "ntilde" => 'n', "ocirc2" => 'o', "ouml" => 'o', "auml" => 'a', "uuml" => 'u',
+        "Ouml" => 'O', "Auml" => 'A', "Uuml" => 'U', "szlig" => 's', "aring" => 'a',
+        "aelig" => 'a', "oslash" => 'o', "ocirc3" => 'o', "atilde" => 'a', "otilde" => 'o',
+        "Ccedil" => 'C', "Agrave" => 'A', "Acirc" => 'A', "Ocirc" => 'O', "Ugrave" => 'U',
+        "divide" => '/', "frac12" => ' ', "frac14" => ' ', "frac34" => ' ', "sect" => 'S',
+        "para" => 'P', "bull" => '*', "dagger" => '+', "permil" => '%', "micro" => 'u',
+        "plusmn" => '+', "sup2" => '2', "sup3" => '3', "iquest" => '?', "iexcl" => '!',
+        "shy" => '-', "ensp" | "emsp" | "thinsp" => ' ',
         _ => return None,
     };
     Some(c)
@@ -155,8 +163,33 @@ pub fn render(html: &[u8], base_url: &str) -> Page {
                 }
             }
 
+            // Image : placeholder inline avec le texte alternatif s'il existe.
+            if name == "img" && !closing {
+                buf.push_str(" [img");
+                if let Some(alt) = attr_value(tag, b"alt") {
+                    let a = alt.trim();
+                    if !a.is_empty() {
+                        buf.push_str(": ");
+                        push_decoded(&mut buf, a);
+                    }
+                }
+                buf.push_str("] ");
+            }
+
             if is_block(&name) {
                 buf.push('\n');
+                // Marqueurs de structure sur les balises ouvrantes seulement.
+                if !closing {
+                    match name.as_str() {
+                        "h1" => buf.push_str("# "),
+                        "h2" => buf.push_str("## "),
+                        "h3" => buf.push_str("### "),
+                        "h4" | "h5" | "h6" => buf.push_str("#### "),
+                        "li" => buf.push_str("- "),
+                        "blockquote" => buf.push_str("> "),
+                        _ => {}
+                    }
+                }
             }
             i = end + 1;
         } else {
