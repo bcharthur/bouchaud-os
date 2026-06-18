@@ -21,6 +21,7 @@ pub mod dns;
 pub mod dhcp;
 pub mod tcp;
 pub mod http;
+pub mod html;
 pub mod inflate;
 pub mod tls;
 
@@ -280,8 +281,28 @@ pub fn http_get(url: &str) -> alloc::vec::Vec<String> {
                 current = http::resolve_location(scheme, &hostname, &loc);
             }
             Some(r) => {
+                let is_html = r.is_html();
                 out.push(r.status_line);
-                append_body_lines(&mut out, &r.body);
+                if is_html {
+                    // Rendu type navigateur texte : titre, contenu sans balises,
+                    // entites decodees, et liste numerotee des liens.
+                    let page = html::render(&r.body, &current);
+                    if !page.title.is_empty() { out.push(format!("== {} ==", page.title)); }
+                    for l in page.lines {
+                        out.push(l);
+                        if out.len() > 200 { break; }
+                    }
+                    if !page.links.is_empty() {
+                        out.push(String::new());
+                        out.push(format!("--- {} liens ---", page.links.len()));
+                        for (n, link) in page.links.iter().enumerate() {
+                            out.push(format!("[{}] {}", n + 1, link));
+                            if out.len() > 260 { break; }
+                        }
+                    }
+                } else {
+                    append_body_lines(&mut out, &r.body);
+                }
                 return out;
             }
             None => {
