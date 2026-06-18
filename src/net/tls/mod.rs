@@ -52,6 +52,7 @@ pub fn selftest() {
         ("P-384/ECDSA", p384::selftest),
         ("RSA PKCS#1v1.5 + PSS", rsa::selftest),
         ("Alertes TLS (RFC 8446)", alert::selftest),
+        ("HPACK (RFC 7541)", crate::net::hpack::selftest),
         ("X.509 (parsing racines)", x509_selftest),
     ];
     let mut ok = 0;
@@ -179,7 +180,31 @@ fn https_fetch_once(hostname: &str, port: u16, path: &str) -> HttpsFetchResult {
 
     let r = &sess.report;
     let lock = if r.trusted && r.hostname_ok && !r.expired { "[TLS OK]" } else { "[TLS !]" };
-    banner.push(format!("{} {} (CN={}, suite={}, groupe={})", lock, r.detail, r.subject_cn, r.cipher_suite, r.kx_group));
+    let alpn = sess.alpn.clone();
+    banner.push(format!(
+        "{} {} (CN={}, suite={}, groupe={}, alpn={})",
+        lock, r.detail, r.subject_cn, r.cipher_suite, r.kx_group,
+        if alpn.is_empty() { "http/1.1" } else { alpn.as_str() },
+    ));
+
+    // Si le serveur a choisi HTTP/2 via ALPN, on parle h2 (frames + HPACK) et on
+    // re-synthetise une reponse HTTP/1.1 brute pour le decodage commun.
+    if alpn == "h2" {
+        let mut trace: Vec<String> = Vec::new();
+        let raw = crate::net::http2::fetch(&mut sess, hostname, path, &mut trace);
+        sess.close();
+        match raw {
+            Some(raw) if !raw.is_empty() => return HttpsFetchResult { banner, raw },
+            _ => {
+                banner.push("HTTP/2 : reponse vide".to_string());
+                for line in trace {
+                    banner.push(format!("  {}", line));
+                    if banner.len() >= 24 { break; }
+                }
+                return HttpsFetchResult { banner, raw: Vec::new() };
+            }
+        }
+    }
 
     let req = format!(
         "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36\r\nAccept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8\r\nAccept-Language: fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7\r\nAccept-Encoding: gzip, deflate\r\nUpgrade-Insecure-Requests: 1\r\nSec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Site: none\r\nSec-Fetch-User: ?1\r\nConnection: close\r\n\r\n",

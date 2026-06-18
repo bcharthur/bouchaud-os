@@ -21,6 +21,8 @@ pub mod dns;
 pub mod dhcp;
 pub mod tcp;
 pub mod http;
+pub mod http2;
+pub mod hpack;
 pub mod html;
 pub mod inflate;
 pub mod tls;

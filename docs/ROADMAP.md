@@ -48,7 +48,7 @@ Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 - [x] Alertes TLS lisibles (RFC 8446 §6) : handshake_failure, unknown_ca... (alert.rs)
 - [x] Post-handshake : NewSessionTicket / KeyUpdate ignores proprement
 - [x] ECDHE P-256 (secp256r1) + HelloRetryRequest (rejoue le ClientHello)
-- [ ] HTTP/2 (ALPN h2, HPACK, frames) : debut
+- [x] HTTP/2 : ALPN h2, frames, HPACK (table statique+dynamique+Huffman), GET
 - [ ] Reprise de session (PSK / NewSessionTicket)
 - [ ] Brotli (`br`)
 

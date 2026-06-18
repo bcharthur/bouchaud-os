@@ -121,7 +121,33 @@ pub struct Session {
     pub post_finished_closed: bool,
     pub post_finished_rst: bool,
     pub post_finished_fin_seen: bool,
+    /// Protocole ALPN selectionne par le serveur ("h2", "http/1.1" ou "").
+    pub alpn: String,
     rx_plain: Vec<u8>,
+}
+
+// Extrait le protocole ALPN selectionne d'un message EncryptedExtensions.
+fn parse_alpn(ee_body: &[u8]) -> Option<String> {
+    if ee_body.len() < 2 { return None; }
+    let ext_len = ((ee_body[0] as usize) << 8) | ee_body[1] as usize;
+    let mut p = 2usize;
+    let end = (2 + ext_len).min(ee_body.len());
+    while p + 4 <= end {
+        let etype = ((ee_body[p] as u16) << 8) | ee_body[p + 1] as u16;
+        let elen = ((ee_body[p + 2] as usize) << 8) | ee_body[p + 3] as usize;
+        p += 4;
+        if p + elen > end { break; }
+        if etype == 16 && elen >= 3 {
+            // ProtocolNameList : u16 list_len, puis u8 name_len || name.
+            let name_len = ee_body[p + 2] as usize;
+            if p + 3 + name_len <= p + elen {
+                let name = &ee_body[p + 3..p + 3 + name_len];
+                return core::str::from_utf8(name).ok().map(String::from);
+            }
+        }
+        p += elen;
+    }
+    None
 }
 
 // --- petits utilitaires d'encodage ---
@@ -156,9 +182,8 @@ fn transcript_hash(suite: CipherSuite, transcript: &[u8]) -> Vec<u8> {
 }
 
 /// Construit un ClientHello TLS 1.3 plus proche d'un navigateur.
-/// Note : ALPN annonce seulement HTTP/1.1. Annoncer `h2` ferait probablement
-/// choisir HTTP/2 par Google/GitHub, mais la couche applicative n'est pas encore
-/// capable d'emettre des frames HTTP/2.
+/// ALPN propose `h2` puis `http/1.1` ; la couche applicative choisit la pile
+/// HTTP correspondant au protocole selectionne par le serveur.
 ///
 /// `kp` porte le groupe ECDHE et la cle publique du `key_share` offert.
 /// `cookie` (extension 44) est echoe tel quel apres un HelloRetryRequest.
@@ -228,9 +253,12 @@ fn build_client_hello(hostname: &str, random: &[u8; 32], kp: &KeyPair, cookie: O
         push_ext(&mut ext, 13, &body);
     }
 
-    // ALPN : HTTP/1.1 uniquement pour rester coherent avec la couche HTTP.
+    // ALPN : on propose h2 puis http/1.1. La couche applicative bascule sur
+    // HTTP/2 si le serveur selectionne `h2` (cf. net::http2), sinon HTTP/1.1.
     {
         let mut proto = Vec::new();
+        proto.push(2);
+        proto.extend_from_slice(b"h2");
         proto.push(8);
         proto.extend_from_slice(b"http/1.1");
         let list = with_u16_len(&proto);
@@ -535,6 +563,7 @@ pub fn connect(mut conn: TcpConn, hostname: &str) -> Result<Session, &'static st
     let mut certs_der: Vec<Vec<u8>> = Vec::new();
     let mut leaf: Option<x509::Certificate> = None;
     let mut th_through_cert: Option<Vec<u8>> = None;
+    let mut alpn = String::new();
 
     let feed = |conn: &mut TcpConn, hs_buf: &mut Vec<u8>, s_hs: &mut DirKeys| -> Result<(), &'static str> {
         loop {
@@ -576,6 +605,7 @@ pub fn connect(mut conn: TcpConn, hostname: &str) -> Result<Session, &'static st
 
         match msg_type {
             HS_ENCRYPTED_EXTENSIONS => {
+                if let Some(p) = parse_alpn(&body) { alpn = p; }
                 transcript.extend_from_slice(&full);
             }
             HS_CERTIFICATE => {
@@ -654,6 +684,7 @@ pub fn connect(mut conn: TcpConn, hostname: &str) -> Result<Session, &'static st
         post_finished_closed,
         post_finished_rst,
         post_finished_fin_seen,
+        alpn,
         rx_plain: Vec::new(),
     })
 }
@@ -692,6 +723,41 @@ impl Session {
     pub fn send_app(&mut self, data: &[u8]) -> bool {
         let rec = self.c_ap.encrypt(CT_APPLICATION_DATA, data);
         self.conn.send(&rec)
+    }
+
+    /// Lit le prochain bloc de donnees applicatives dechiffrees (un ou plusieurs
+    /// records), sans attendre la fermeture. Renvoie `None` a la fin du flux
+    /// (peer_fin/closed, alerte, ou plus aucun record disponible). Utilise par la
+    /// pile HTTP/2 qui doit lire/repondre des frames de maniere interactive.
+    pub fn recv_some(&mut self) -> Option<Vec<u8>> {
+        if !self.rx_plain.is_empty() {
+            return Some(core::mem::take(&mut self.rx_plain));
+        }
+        let mut empty_reads = 0u32;
+        loop {
+            match read_raw_record(&mut self.conn) {
+                Some((hdr, body)) => match hdr[0] {
+                    record::CT_CHANGE_CIPHER_SPEC => continue,
+                    CT_APPLICATION_DATA => match self.s_ap.decrypt(&hdr, &body) {
+                        Some((CT_APPLICATION_DATA, pt)) => {
+                            if pt.is_empty() { continue; }
+                            return Some(pt);
+                        }
+                        // NewSessionTicket / KeyUpdate post-handshake : ignores.
+                        Some((CT_HANDSHAKE, _)) => continue,
+                        Some((CT_ALERT, _)) => return None,
+                        _ => continue,
+                    },
+                    CT_ALERT => return None,
+                    _ => return None,
+                },
+                None => {
+                    if self.conn.peer_fin || self.conn.closed { return None; }
+                    empty_reads += 1;
+                    if empty_reads >= 6 { return None; }
+                }
+            }
+        }
     }
 
     pub fn recv_all(&mut self, max: usize) -> Vec<u8> {
