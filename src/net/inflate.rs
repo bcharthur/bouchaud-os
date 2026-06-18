@@ -290,6 +290,10 @@ pub fn decode_content(encoding: &str, body: &[u8]) -> Option<Vec<u8>> {
         // "deflate" HTTP = zlib en theorie ; certains serveurs envoient du DEFLATE
         // brut. On tente zlib puis brut.
         zlib_decode(body).ok().or_else(|| inflate(body).ok())
+    } else if enc.contains("br") {
+        // Brotli : meta-blocs non compresses uniquement pour l'instant
+        // (cf. net::brotli). Repli gzip/deflate si compresse.
+        super::brotli::decode(body)
     } else {
         None
     }

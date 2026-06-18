@@ -53,6 +53,7 @@ pub fn selftest() {
         ("RSA PKCS#1v1.5 + PSS", rsa::selftest),
         ("Alertes TLS (RFC 8446)", alert::selftest),
         ("HPACK (RFC 7541)", crate::net::hpack::selftest),
+        ("Brotli (non compresse)", crate::net::brotli::selftest),
         ("X.509 (parsing racines)", x509_selftest),
     ];
     let mut ok = 0;

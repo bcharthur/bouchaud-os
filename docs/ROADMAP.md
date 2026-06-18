@@ -50,7 +50,8 @@ Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 - [x] ECDHE P-256 (secp256r1) + HelloRetryRequest (rejoue le ClientHello)
 - [x] HTTP/2 : ALPN h2, frames, HPACK (table statique+dynamique+Huffman), GET
 - [ ] Reprise de session (PSK / NewSessionTicket)
-- [ ] Brotli (`br`)
+- [~] Brotli (`br`) : flux + meta-blocs non compresses ; compresse =
+      necessite le dictionnaire statique 122 Ko (RFC 7932 Annexe A)
 
 ## V0.22 - Cloture de la couche reseau : DHCP (+ socle TLS)
 - [x] Client DHCP (DORA) : IP/passerelle/DNS automatiques (config dynamique)

@@ -25,6 +25,7 @@ pub mod http2;
 pub mod hpack;
 pub mod html;
 pub mod inflate;
+pub mod brotli;
 pub mod tls;
 
 use crate::arch::x86_64::pci;
