@@ -291,8 +291,7 @@ pub fn decode_content(encoding: &str, body: &[u8]) -> Option<Vec<u8>> {
         // brut. On tente zlib puis brut.
         zlib_decode(body).ok().or_else(|| inflate(body).ok())
     } else if enc.contains("br") {
-        // Brotli : meta-blocs non compresses uniquement pour l'instant
-        // (cf. net::brotli). Repli gzip/deflate si compresse.
+        // Brotli (RFC 7932) : decodeur complet avec dictionnaire statique.
         super::brotli::decode(body)
     } else {
         None

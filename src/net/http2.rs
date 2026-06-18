@@ -74,7 +74,7 @@ pub fn fetch(sess: &mut Session, host: &str, path: &str, trace: &mut Vec<String>
         (":authority", host),
         ("user-agent", "BouchaudOS"),
         ("accept", "*/*"),
-        ("accept-encoding", "gzip, deflate"),
+        ("accept-encoding", "gzip, deflate, br"),
     ]);
     initial.extend_from_slice(&build_frame(
         FT_HEADERS,

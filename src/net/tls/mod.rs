@@ -53,7 +53,7 @@ pub fn selftest() {
         ("RSA PKCS#1v1.5 + PSS", rsa::selftest),
         ("Alertes TLS (RFC 8446)", alert::selftest),
         ("HPACK (RFC 7541)", crate::net::hpack::selftest),
-        ("Brotli (non compresse)", crate::net::brotli::selftest),
+        ("Brotli (RFC 7932 + dictionnaire)", crate::net::brotli::selftest),
         ("X.509 (parsing racines)", x509_selftest),
     ];
     let mut ok = 0;
@@ -208,7 +208,7 @@ fn https_fetch_once(hostname: &str, port: u16, path: &str) -> HttpsFetchResult {
     }
 
     let req = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36\r\nAccept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8\r\nAccept-Language: fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7\r\nAccept-Encoding: gzip, deflate\r\nUpgrade-Insecure-Requests: 1\r\nSec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Site: none\r\nSec-Fetch-User: ?1\r\nConnection: close\r\n\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36\r\nAccept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8\r\nAccept-Language: fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7\r\nAccept-Encoding: gzip, deflate, br\r\nUpgrade-Insecure-Requests: 1\r\nSec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Site: none\r\nSec-Fetch-User: ?1\r\nConnection: close\r\n\r\n",
         path, hostname
     );
 
