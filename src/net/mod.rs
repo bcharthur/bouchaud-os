@@ -21,6 +21,7 @@ pub mod dns;
 pub mod dhcp;
 pub mod tcp;
 pub mod http;
+pub mod inflate;
 pub mod tls;
 
 use crate::arch::x86_64::pci;

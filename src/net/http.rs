@@ -13,11 +13,10 @@ use alloc::vec::Vec;
 
 /// Construit une requete `GET` HTTP/1.1 (connexion fermee apres reponse).
 ///
-/// `Accept-Encoding: identity` evite une reponse compressee (gzip/br) que la
-/// pile ne sait pas decompresser.
+/// La pile sait decompresser `gzip` et `deflate` (cf. `net::inflate`).
 pub fn build_get(host: &str, path: &str) -> String {
     format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: BouchaudOS\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: BouchaudOS\r\nAccept: */*\r\nAccept-Encoding: gzip, deflate\r\nConnection: close\r\n\r\n",
         path, host
     )
 }
@@ -196,6 +195,15 @@ pub fn parse_response(raw: &[u8]) -> Option<Response> {
         raw_body[..len.min(raw_body.len())].to_vec()
     } else {
         raw_body.to_vec()
+    };
+
+    // Decompression si le serveur a applique un Content-Encoding (gzip/deflate),
+    // ce que font beaucoup de CDN meme quand on demande `identity`.
+    let body = match header_value(head, "Content-Encoding") {
+        Some(enc) if !enc.eq_ignore_ascii_case("identity") => {
+            super::inflate::decode_content(enc, &body).unwrap_or(body)
+        }
+        _ => body,
     };
 
     Some(Response { status_line, status_code, location, body })
