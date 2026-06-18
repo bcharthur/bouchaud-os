@@ -26,6 +26,7 @@ pub mod x509;
 pub mod roots;
 pub mod validate;
 pub mod record;
+pub mod alert;
 pub mod handshake;
 pub mod rng;
 
@@ -50,6 +51,7 @@ pub fn selftest() {
         ("P-256/ECDSA", p256::selftest),
         ("P-384/ECDSA", p384::selftest),
         ("RSA PKCS#1v1.5 + PSS", rsa::selftest),
+        ("Alertes TLS (RFC 8446)", alert::selftest),
         ("X.509 (parsing racines)", x509_selftest),
     ];
     let mut ok = 0;

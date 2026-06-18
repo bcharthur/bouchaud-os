@@ -39,6 +39,18 @@ Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 - [x] Clavier en interruption IRQ1 (fin du polling)
 - [ ] APIC, plus tard, en remplacement du PIC
 
+## V0.24 - Compatibilite web moderne (en cours)
+- [x] HTTPS/TLS 1.3 reel : handshake complet, X.509, magasin de CA
+- [x] 3 suites TLS 1.3 : AES-128-GCM, AES-256-GCM (SHA-384), ChaCha20-Poly1305
+- [x] Decompression gzip/deflate (RFC 1950/1951/1952) cote reponse HTTP
+- [x] HTTP/1.1 : Content-Length, Transfer-Encoding: chunked, redirections 3xx
+- [x] Navigateur texte : HTML->texte, titre, entites, liens numerotes
+- [x] Alertes TLS lisibles (RFC 8446 §6) : handshake_failure, unknown_ca... (alert.rs)
+- [x] Post-handshake : NewSessionTicket / KeyUpdate ignores proprement
+- [ ] HTTP/2 (ALPN h2, HPACK, frames) : debut
+- [ ] ECDHE P-256 + HelloRetryRequest ; reprise de session (PSK)
+- [ ] Brotli (`br`)
+
 ## V0.22 - Cloture de la couche reseau : DHCP (+ socle TLS)
 - [x] Client DHCP (DORA) : IP/passerelle/DNS automatiques (config dynamique)
 - [x] Config reseau dynamique (our_ip/gateway/dns_server + set_config)
