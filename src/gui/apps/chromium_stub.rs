@@ -133,6 +133,14 @@ pub(crate) fn link_at(page: &Page, scroll: i32, rel_x: i32, rel_y: i32) -> Optio
     None
 }
 
+/// Affiche un ecran "Chargement..." (a peindre + present() avant le fetch
+/// bloquant, pour un retour visuel immediat).
+pub(crate) fn draw_loading(url: &str, bx: usize, by: usize, bw: usize, bh: usize) {
+    fb::fill_rect(bx, by, bw, bh, fb::C_WHITE);
+    fb::draw_text_scaled(bx + 8, by + 10, "Chargement...", fb::C_BLACK, 2);
+    fb::draw_text(bx + 8, by + 34, clip(url, bw / 8), fb::C_DKGRAY);
+}
+
 /// Dessine le navigateur : barre d'adresse + contenu peint.
 pub(crate) fn draw(url: &str, input: &str, page: &Page, scroll: i32, bx: usize, by: usize, bw: usize, bh: usize) {
     // Barre d'adresse.

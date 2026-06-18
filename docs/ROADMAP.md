@@ -48,7 +48,11 @@ Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 - [x] ALPN force HTTP/1.1 (chemin robuste : chunked + gzip/deflate/brotli) pour
       fiabiliser Google/Cloudflare (h2 contourne)
 - [x] Moteur valide hors-ligne : 0 panic sur HTML malforme/imbrique/gros (320 Ko)
+- [x] Perf : opt-level=2 en debug (handshake TLS ~20x plus rapide, fin du "lag")
+- [x] Timeouts reseau bases sur l'horloge PIT (robustes quel que soit l'opt-level)
+- [x] Ecran "Chargement..." avant le fetch (retour visuel immediat)
 - [ ] CSS (couleurs/box model), images decodees, formulaires actifs
+- [ ] Google : ferme la connexion sur client minimal (h1) -> piste h2/fingerprint
 
 ## V0.25 - Bureau HD truecolor (Bochs VBE)
 - [x] Framebuffer lineaire HD 1280x720x32 via Bochs VBE/BGA (carte `-vga std`)

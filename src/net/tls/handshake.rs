@@ -753,7 +753,7 @@ impl Session {
                 None => {
                     if self.conn.peer_fin || self.conn.closed { return None; }
                     empty_reads += 1;
-                    if empty_reads >= 6 { return None; }
+                    if empty_reads >= 2 { return None; }
                 }
             }
         }
@@ -778,7 +778,7 @@ impl Session {
                     ));
                     if self.conn.peer_fin || self.conn.closed { break; }
                     empty_reads += 1;
-                    if empty_reads >= 6 { break; }
+                    if empty_reads >= 2 { break; }
                     continue;
                 }
             };

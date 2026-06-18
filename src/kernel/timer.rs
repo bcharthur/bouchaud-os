@@ -21,15 +21,20 @@ pub fn init() {
 
 /// Increment du compteur de ticks. Sera appele par le handler d'IRQ0.
 pub fn tick() {
-    unsafe { TICKS += 1; }
+    unsafe {
+        let t = core::ptr::read_volatile(&TICKS);
+        core::ptr::write_volatile(&mut TICKS, t.wrapping_add(1));
+    }
 }
 
 /// Frequence par defaut du PIT (canal 0) non reprogramme : ~18.2065 Hz.
 pub const TICKS_PER_SECOND: u64 = 18;
 
 /// Nombre de ticks timer ecoules (0 tant que le timer n'est pas active).
+/// Lecture volatile : le compteur est modifie par l'IRQ0, le compilateur ne
+/// doit pas mettre cette lecture en cache (boucles d'attente optimisees).
 pub fn ticks() -> u64 {
-    unsafe { TICKS }
+    unsafe { core::ptr::read_volatile(&TICKS) }
 }
 
 /// Duree approximative depuis le boot, en secondes (base PIT par defaut).

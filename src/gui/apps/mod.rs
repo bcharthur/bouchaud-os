@@ -7,6 +7,7 @@ pub mod system_info;
 pub mod terminal;
 
 use crate::gui::event::Key;
+use crate::gui::framebuffer as fb;
 use crate::gui::window::{App, Win, TITLE_H};
 use crate::fs::ramfs;
 use crate::users;
@@ -29,6 +30,15 @@ fn is_blocked(cmd: &str) -> bool {
 pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
     let win_w = w.w;
     let win_h = w.h;
+    let win_x = w.x;
+    let win_y = w.y;
+    // Geometrie du corps de fenetre (comme draw_app), pour l'ecran de chargement.
+    let body = (
+        (win_x + 3).max(0) as usize,
+        (win_y + TITLE_H + 2).max(0) as usize,
+        (win_w - 6).max(1) as usize,
+        (win_h - TITLE_H - 4).max(1) as usize,
+    );
     match &mut w.app {
         App::Terminal { sb, input, cwd } => match k {
             Key::Enter => {
@@ -56,6 +66,9 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
             Key::Enter => {
                 // URL, ou un numero seul pour suivre le lien correspondant.
                 let target = chromium_stub::resolve_input(input, page);
+                // Retour visuel immediat avant le fetch (bloquant).
+                chromium_stub::draw_loading(&target, body.0, body.1, body.2, body.3);
+                fb::present();
                 *page = chromium_stub::open(&target, win_w - 6);
                 *url = target.clone();
                 *input = target;
@@ -80,12 +93,16 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
 /// Clic dans le corps d'une application (uniquement Fichiers pour l'instant).
 pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
     let win_w = w.w;
+    let win_h = w.h;
     let bx = w.x + 3;
     let by = w.y + TITLE_H + 2;
     if let App::Browser { url, input, page, scroll } = &mut w.app {
         let rel_x = mx - bx;
         let rel_y = my - by;
         if let Some(href) = chromium_stub::link_at(page, *scroll, rel_x, rel_y) {
+            let b = ((bx).max(0) as usize, (by).max(0) as usize, (win_w - 6).max(1) as usize, (win_h - TITLE_H - 4).max(1) as usize);
+            chromium_stub::draw_loading(&href, b.0, b.1, b.2, b.3);
+            fb::present();
             *page = chromium_stub::open(&href, win_w - 6);
             *url = href.clone();
             *input = href;
