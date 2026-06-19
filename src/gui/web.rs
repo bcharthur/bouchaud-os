@@ -793,17 +793,13 @@ pub fn paint(page: &Page, scroll: i32, bx: usize, by: usize, bw: usize, bh: usiz
                 if sy + h <= byi || sy >= byi + bhi { continue; }
                 if let Some(img) = page.images.get(*idx) {
                     let xx = bxi + x;
-                    if xx >= bxi && xx < bxi + bwi {
-                        let top = sy.max(byi);
-                        let bottom = (sy + h).min(byi + bhi);
-                        let src_y = (top - sy).max(0) as usize;
-                        let draw_h = (bottom - top).max(0) as usize;
-                        if draw_h == 0 || src_y >= img.h { continue; }
-                        let draw_h = draw_h.min(img.h - src_y);
-                        let start = src_y.saturating_mul(img.w).min(img.pix.len());
+                    if xx >= bxi {
+                        let skip = (byi - sy).max(0) as usize;
+                        let draw_h = img.h.saturating_sub(skip);
+                        let start = skip.saturating_mul(img.w).min(img.pix.len());
                         fb::blit_rgb(
                             xx as usize,
-                            top as usize,
+                            sy.max(byi) as usize,
                             img.w,
                             draw_h,
                             &img.pix[start..],
