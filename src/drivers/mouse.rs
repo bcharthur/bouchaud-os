@@ -15,7 +15,6 @@ static mut CYCLE: u8 = 0;
 static mut PKT: [u8; 4] = [0; 4];
 static mut HAS_WHEEL: bool = false;
 static mut WHEEL_DELTA: i32 = 0;
-static mut WHEEL_DESYNC: u8 = 0;
 
 fn wait_write() {
     for _ in 0..100_000 {
@@ -71,7 +70,6 @@ pub fn init() {
         MY = (HEIGHT / 2) as i32;
         CYCLE = 0;
         WHEEL_DELTA = 0;
-        WHEEL_DESYNC = 0;
     }
 }
 
@@ -95,24 +93,8 @@ pub fn handle_byte(b: u8) {
                 apply_packet(false);
             }
             3 => {
-                // Si le peripherique a annonce l'ID molette mais continue en
-                // paquets 3 octets, l'octet attendu comme roulette est en fait
-                // le header du paquet suivant (bit de synchro 0x08). Sans ce
-                // garde-fou, la suite est decalee et la roulette ressemble a
-                // un deplacement horizontal de la souris.
-                if b & 0x08 != 0 && b & 0xC0 == 0 {
-                    apply_packet(false);
-                    WHEEL_DESYNC = WHEEL_DESYNC.saturating_add(1);
-                    if WHEEL_DESYNC >= 2 {
-                        HAS_WHEEL = false;
-                    }
-                    PKT[0] = b;
-                    CYCLE = 1;
-                    return;
-                }
                 PKT[3] = b;
                 CYCLE = 0;
-                WHEEL_DESYNC = 0;
                 apply_packet(true);
             }
             _ => {}
