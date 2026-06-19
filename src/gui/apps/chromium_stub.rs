@@ -15,6 +15,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 
 const ADDR_H: usize = 11;
+const SCROLL_W: usize = 6;
 
 // Echappe le texte brut pour l'injecter dans du HTML synthetise.
 fn esc(s: &str) -> String {
@@ -123,6 +124,24 @@ pub(crate) fn max_scroll(page: &Page, bh: usize) -> i32 {
     (page.height - view).max(0)
 }
 
+/// Convertit un clic dans la barre de defilement en position de scroll.
+pub(crate) fn scroll_at(page: &Page, rel_x: i32, rel_y: i32, bw: usize, bh: usize) -> Option<i32> {
+    let content_h = bh.saturating_sub(ADDR_H);
+    let max = max_scroll(page, bh);
+    if max <= 0 || content_h < 12 {
+        return None;
+    }
+    let sx = bw.saturating_sub(SCROLL_W) as i32;
+    if rel_x < sx || rel_x >= bw as i32 || rel_y < ADDR_H as i32 {
+        return None;
+    }
+    let track_h = content_h as i32;
+    let y = (rel_y - ADDR_H as i32).clamp(0, track_h - 1);
+    let thumb_h = ((track_h * track_h) / page.height.max(track_h)).clamp(10, track_h);
+    let travel = (track_h - thumb_h).max(1);
+    Some(((y - thumb_h / 2).clamp(0, travel) * max) / travel)
+}
+
 /// Suit un clic dans la zone de contenu : renvoie l'URL du lien touche.
 pub(crate) fn link_at(page: &Page, scroll: i32, rel_x: i32, rel_y: i32) -> Option<String> {
     let cy = rel_y - ADDR_H as i32 + scroll; // coordonnee dans le contenu
@@ -152,5 +171,22 @@ pub(crate) fn draw(url: &str, input: &str, page: &Page, scroll: i32, bx: usize, 
     // Contenu.
     let cy = by + ADDR_H;
     let ch = bh.saturating_sub(ADDR_H);
-    web::paint(page, scroll, bx, cy, bw, ch);
+    let content_w = if max_scroll(page, bh) > 0 { bw.saturating_sub(SCROLL_W) } else { bw };
+    web::paint(page, scroll, bx, cy, content_w, ch);
+    draw_scrollbar(page, scroll, bx, cy, bw, ch);
+}
+
+fn draw_scrollbar(page: &Page, scroll: i32, bx: usize, cy: usize, bw: usize, ch: usize) {
+    let max = (page.height - ch as i32).max(0);
+    if max <= 0 || ch < 12 || bw < SCROLL_W {
+        return;
+    }
+    let sx = bx + bw - SCROLL_W;
+    fb::fill_rect(sx, cy, SCROLL_W, ch, fb::C_WHITE);
+    fb::rect(sx, cy, SCROLL_W, ch, fb::C_DKGRAY);
+    let track_h = ch as i32;
+    let thumb_h = ((track_h * track_h) / page.height.max(track_h)).clamp(10, track_h);
+    let travel = (track_h - thumb_h).max(1);
+    let thumb_y = cy as i32 + (scroll.clamp(0, max) * travel) / max;
+    fb::fill_rect(sx + 1, thumb_y as usize, SCROLL_W - 2, thumb_h as usize, fb::C_GRAY);
 }

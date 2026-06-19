@@ -99,6 +99,12 @@ pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
     if let App::Browser { url, input, page, scroll } = &mut w.app {
         let rel_x = mx - bx;
         let rel_y = my - by;
+        let bw = (win_w - 6).max(1) as usize;
+        let bh = (win_h - TITLE_H - 4).max(1) as usize;
+        if let Some(s) = chromium_stub::scroll_at(page, rel_x, rel_y, bw, bh) {
+            *scroll = s;
+            return;
+        }
         if let Some(href) = chromium_stub::link_at(page, *scroll, rel_x, rel_y) {
             let b = ((bx).max(0) as usize, (by).max(0) as usize, (win_w - 6).max(1) as usize, (win_h - TITLE_H - 4).max(1) as usize);
             chromium_stub::draw_loading(&href, b.0, b.1, b.2, b.3);
@@ -134,6 +140,24 @@ pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
             *name = fs.nodes[e].name_str().to_string();
             *view = Some(lines);
         }
+    }
+}
+
+/// Transmet un delta de roulette a l'application sous le curseur.
+pub(crate) fn wheel_to_app(w: &mut Win, mx: i32, my: i32, delta: i32) {
+    if delta == 0 {
+        return;
+    }
+    if let App::Browser { page, scroll, .. } = &mut w.app {
+        let bx = w.x + 3;
+        let by = w.y + TITLE_H + 2;
+        let bw = (w.w - 6).max(1) as usize;
+        let bh = (w.h - TITLE_H - 4).max(1) as usize;
+        if mx < bx || mx >= bx + bw as i32 || my < by || my >= by + bh as i32 {
+            return;
+        }
+        let max = chromium_stub::max_scroll(page, bh);
+        *scroll = (*scroll - delta * 48).clamp(0, max);
     }
 }
 
