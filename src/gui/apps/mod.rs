@@ -39,7 +39,10 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
         (win_w - 6).max(1) as usize,
         (win_h - TITLE_H - 4).max(1) as usize,
     );
-    match &mut w.app {
+    // Titre de fenetre a synchroniser apres navigation (style Windows : la
+    // fenetre porte le titre du document).
+    let mut new_title: Option<alloc::string::String> = None;
+    let close = match &mut w.app {
         App::Terminal { sb, input, cwd } => match k {
             Key::Enter => {
                 let prompt = format!("{}:{}$ ", users::session().username(), ramfs::path_string(ramfs::fs(), *cwd));
@@ -62,17 +65,20 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
             Key::Char(c) => { if input.len() < 120 { input.push(c as char); } false }
             _ => false,
         },
-        App::Browser { url, input, page, scroll } => match k {
+        App::Browser { url, input, page, scroll, session } => match k {
             Key::Enter => {
                 // URL, ou un numero seul pour suivre le lien correspondant.
                 let target = chromium_stub::resolve_input(input, page);
                 // Retour visuel immediat avant le fetch (bloquant).
                 chromium_stub::draw_loading(&target, body.0, body.1, body.2, body.3);
                 fb::present();
-                *page = chromium_stub::open(&target, win_w - 6);
+                let (sess, pg) = chromium_stub::open(&target, win_w - 6);
+                *session = sess;
+                *page = pg;
                 *url = target.clone();
                 *input = target;
                 *scroll = 0;
+                new_title = Some(if page.title.is_empty() { (*url).clone() } else { page.title.clone() });
                 false
             }
             Key::Up => { *scroll = (*scroll - 48).max(0); false }
@@ -87,7 +93,9 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
             _ => false,
         },
         _ => false,
-    }
+    };
+    if let Some(t) = new_title { w.title = t; }
+    close
 }
 
 /// Clic dans le corps d'une application (uniquement Fichiers pour l'instant).
@@ -96,7 +104,7 @@ pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
     let win_h = w.h;
     let bx = w.x + 3;
     let by = w.y + TITLE_H + 2;
-    if let App::Browser { url, input, page, scroll } = &mut w.app {
+    if let App::Browser { url, input, page, scroll, session } = &mut w.app {
         let rel_x = mx - bx;
         let rel_y = my - by;
         let bw = (win_w - 6).max(1) as usize;
@@ -106,13 +114,22 @@ pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
             return;
         }
         if let Some(href) = chromium_stub::link_at(page, *scroll, rel_x, rel_y) {
+            // Lien-action `javascript:` -> rejoue le code dans la session (apps
+            // interactives) ; sinon navigation classique.
+            if let Some(code) = href.strip_prefix("javascript:") {
+                *page = session.dispatch(code);
+                return;
+            }
             let b = ((bx).max(0) as usize, (by).max(0) as usize, (win_w - 6).max(1) as usize, (win_h - TITLE_H - 4).max(1) as usize);
             chromium_stub::draw_loading(&href, b.0, b.1, b.2, b.3);
             fb::present();
-            *page = chromium_stub::open(&href, win_w - 6);
+            let (sess, pg) = chromium_stub::open(&href, win_w - 6);
+            *session = sess;
+            *page = pg;
             *url = href.clone();
             *input = href;
             *scroll = 0;
+            w.title = if page.title.is_empty() { (*url).clone() } else { page.title.clone() };
         }
         return;
     }
@@ -170,7 +187,7 @@ pub(crate) fn draw_app(w: &Win) {
     match &w.app {
         App::Terminal { sb, input, cwd } => terminal::draw(sb, input, *cwd, bx, by, bw, bh),
         App::Files { cur, view, name } => file_explorer::draw(*cur, view, name, bx, by, bw, bh),
-        App::Browser { url, input, page, scroll } => chromium_stub::draw(url, input, page, *scroll, bx, by, bw, bh),
+        App::Browser { url, input, page, scroll, .. } => chromium_stub::draw(url, input, page, *scroll, bx, by, bw, bh),
         App::Monitor => system_info::draw(bx, by, bw, bh),
     }
 }

@@ -328,12 +328,45 @@ fn extract_and_strip(html: &[u8], max_len: usize) -> (Vec<u8>, Vec<Rule>) {
     (out, css)
 }
 
-/// Pipeline complet : HTML -> (CSS extrait, DOM nettoye) -> page mise en page.
+/// Pipeline complet : HTML -> (JS inline) -> (CSS extrait, DOM nettoye) -> page.
 pub fn render(html: &[u8], base_url: &str, width: i32) -> Page {
     let scripted = crate::gui::js::execute_inline(html);
-    let (clean, css) = extract_and_strip(&scripted, 1_500_000);
+    render_scripted(&scripted, base_url, width)
+}
+
+// Met en page un HTML deja enrichi par le JS (DOM applique).
+fn render_scripted(scripted: &[u8], base_url: &str, width: i32) -> Page {
+    let (clean, css) = extract_and_strip(scripted, 1_500_000);
     let dom = parse(&clean);
     layout(&dom, base_url, width, &css)
+}
+
+/// Session interactive : conserve le contexte JS (etat + DOM) d'une page pour
+/// rejouer les gestionnaires `onclick` (mini-applications type calculatrice).
+pub struct Session {
+    ctx: crate::gui::js::PageCtx,
+    base: String,
+    width: i32,
+}
+
+impl Session {
+    /// Ouvre une page interactive : execute le JS initial, renvoie (session, page).
+    pub fn open(html: &[u8], base_url: &str, width: i32) -> (Session, Page) {
+        let (ctx, scripted) = crate::gui::js::open_page(html);
+        let page = render_scripted(&scripted, base_url, width);
+        (Session { ctx, base: base_url.to_string(), width }, page)
+    }
+    /// Rejoue un gestionnaire (code d'un lien `javascript:`) et re-rend la page.
+    pub fn dispatch(&mut self, code: &str) -> Page {
+        let scripted = self.ctx.dispatch(code);
+        render_scripted(&scripted, &self.base, self.width)
+    }
+    /// Re-rend a une nouvelle largeur sans rejouer de code.
+    pub fn relayout(&mut self, width: i32) -> Page {
+        self.width = width;
+        let html = self.ctx.html();
+        render_scripted(&html, &self.base, self.width)
+    }
 }
 
 fn sel_matches(sel: &Sel, tag: &str, classes: &str, id: &str) -> bool {
@@ -744,8 +777,20 @@ fn compute(f: &Flow, node: &Node, tag: &str, st: &Style) -> (Style, BoxProps) {
     if tag == "pre" { cst.pre = true; }
     if tag == "a" {
         if let Some(href) = attr(node, "href") {
-            cst.href = Some(resolve_location(&f.ctx.scheme, &f.ctx.host, href));
-            cst.color = 0x1a0dab;
+            if let Some(code) = href.strip_prefix("javascript:") {
+                cst.href = Some(alloc::format!("javascript:{}", code)); // lien-action (non resolu)
+                cst.color = 0x1a0dab;
+            } else {
+                cst.href = Some(resolve_location(&f.ctx.scheme, &f.ctx.host, href));
+                cst.color = 0x1a0dab;
+            }
+        }
+    }
+    // onclick (boutons et autres elements interactifs) -> action JS cliquable.
+    if cst.href.is_none() {
+        if let Some(code) = attr(node, "onclick") {
+            cst.href = Some(alloc::format!("javascript:{}", code));
+            if tag == "button" { cst.color = 0x1a0dab; }
         }
     }
     let classes = attr(node, "class").unwrap_or("").to_string();

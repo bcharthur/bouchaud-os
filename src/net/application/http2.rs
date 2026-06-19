@@ -8,7 +8,7 @@
 //! (`net::http` : Content-Encoding gzip/deflate/br, redirections, is_html).
 
 use super::hpack;
-use super::tls::handshake::Session;
+use crate::net::tls::handshake::Session;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
