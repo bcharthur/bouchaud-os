@@ -1,32 +1,36 @@
-//! Pile reseau de Bouchaud OS.
+//! Pile reseau de Bouchaud OS, organisee par couches du modele OSI.
 //!
-//! Les couches sont implementees comme logique reelle (encodage/decodage sans
-//! allocation) :
-//!   - `ethernet` (L2), `arp`, `ipv4` (L3), `icmp`, `stack` (moteur).
+//! ```text
+//!   link/        L2  liaison       ethernet, arp
+//!   internet/    L3  reseau        ipv4, icmp
+//!   transport/   L4  transport     tcp, udp
+//!   security/    L5/6 session+pres tls (1.3 : handshake, record, crypto, x509)
+//!   encoding/    L6  presentation  inflate (deflate/gzip), brotli
+//!   application/ L7  application   dns, dhcp, http, http2, hpack, html
+//!   stack.rs         moteur de pile (loopback) + ce module : interface,
+//!                    routage, fetch HTTP(S), commandes (ping, ifconfig...).
+//! ```
 //!
-//! Etat actuel :
-//!   - Interface **loopback `lo` (127.0.0.1) active** : `ping 127.0.0.1`
-//!     traverse reellement la pile (ICMP echo request -> reply).
-//!   - Interface **`eth0` : carte detectee par le scan PCI mais driver non
-//!     charge** -> pas encore d'acces Internet externe. C'est la prochaine etape
-//!     (driver e1000/virtio-net : rings RX/TX + DMA).
+//! Etat : loopback `lo` (127.0.0.1) actif ; `eth0` via driver e1000 (ARP/IP/
+//! UDP/TCP reels) ; DNS/DHCP, HTTP/1.1+2, TLS 1.3 fonctionnels.
 
-pub mod ethernet;
-pub mod arp;
-pub mod ipv4;
-pub mod icmp;
+// Couches OSI.
+pub mod link;
+pub mod internet;
+pub mod transport;
+pub mod security;
+pub mod encoding;
+pub mod application;
 pub mod stack;
-pub mod udp;
-pub mod dns;
-pub mod dhcp;
-pub mod tcp;
-pub mod http;
-pub mod http2;
-pub mod hpack;
-pub mod html;
-pub mod inflate;
-pub mod brotli;
-pub mod tls;
+
+// Re-exports a plat : conserve les chemins `net::<module>` historiques tout en
+// rangeant physiquement les fichiers par couche.
+pub use link::{ethernet, arp};
+pub use internet::{ipv4, icmp};
+pub use transport::{tcp, udp};
+pub use security::tls;
+pub use encoding::{inflate, brotli};
+pub use application::{dns, dhcp, http, http2, hpack, html};
 
 use crate::arch::x86_64::pci;
 use crate::drivers::e1000;

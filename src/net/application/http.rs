@@ -217,7 +217,7 @@ pub fn parse_response(raw: &[u8]) -> Option<Response> {
     // ce que font beaucoup de CDN meme quand on demande `identity`.
     let body = match header_value(head, "Content-Encoding") {
         Some(enc) if !enc.eq_ignore_ascii_case("identity") => {
-            super::inflate::decode_content(enc, &body).unwrap_or(body)
+            crate::net::inflate::decode_content(enc, &body).unwrap_or(body)
         }
         _ => body,
     };
