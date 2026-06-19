@@ -13,6 +13,7 @@ pub mod apps;
 pub mod desktop;
 pub mod event;
 pub mod framebuffer;
+pub mod image;
 pub mod mouse;
 pub mod web;
 pub mod widgets;
