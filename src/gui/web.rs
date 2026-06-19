@@ -408,6 +408,7 @@ fn px_to_scale(px: i32) -> usize {
 // Style calcule
 // ----------------------------------------------------------------------------
 
+// Proprietes de texte heritees (cascade).
 #[derive(Clone)]
 struct Style {
     color: u32,
@@ -415,10 +416,36 @@ struct Style {
     bold: bool,
     align: u8,        // 0 gauche, 1 centre, 2 droite
     href: Option<String>,
-    indent: i32,
+    pre: bool,        // white-space: pre (conserve espaces/sauts)
 }
 
-fn default_style() -> Style { Style { color: 0x202124, scale: 2, bold: false, align: 0, href: None, indent: 0 } }
+fn default_style() -> Style { Style { color: 0x202124, scale: 2, bold: false, align: 0, href: None, pre: false } }
+
+#[derive(Clone, Copy, PartialEq)]
+enum Disp { Block, Inline, InlineBlock, Flex, None }
+#[derive(Clone, Copy, PartialEq)]
+enum FloatK { None, Left, Right }
+#[derive(Clone, Copy)]
+enum Len { Px(i32), Pct(i32) }
+impl Len { fn resolve(self, avail: i32) -> i32 { match self { Len::Px(p) => p, Len::Pct(p) => (avail * p / 100).max(0) } } }
+
+fn parse_len(s: &str) -> Option<Len> {
+    let s = s.trim();
+    if let Some(p) = s.strip_suffix('%') { return p.trim().parse::<f32>().ok().map(|v| Len::Pct(v as i32)); }
+    font_px(s).map(Len::Px)
+}
+
+// Proprietes de boite, propres a l'element (non heritees).
+struct BoxProps {
+    hidden: bool,
+    bg: Option<u32>,
+    width: Option<Len>,
+    max_width: Option<Len>,
+    center: bool,          // margin:auto (centre le bloc)
+    disp: Option<Disp>,
+    float: FloatK,
+}
+fn default_box() -> BoxProps { BoxProps { hidden: false, bg: None, width: None, max_width: None, center: false, disp: None, float: FloatK::None } }
 
 // ----------------------------------------------------------------------------
 // Liste d'affichage
@@ -448,134 +475,31 @@ enum LineItem {
     Word { dx: i32, w: i32, s: String, color: u32, scale: usize, bold: bool, href: Option<String> },
     Img { dx: i32, w: i32, h: i32, idx: usize },
     Box { dx: i32, w: i32, h: i32, fill: u32, value: String },
+    Frag { dx: i32, w: i32, h: i32, items: Vec<Item>, links: Vec<Link> },
 }
 
-struct Layout {
-    items: Vec<Item>,
-    links: Vec<Link>,
+// Fragment mis en page dans son propre espace (coordonnees relatives a 0,0).
+struct Frag { items: Vec<Item>, links: Vec<Link>, width: i32, height: i32 }
+
+// Etat partage entre la page et tous les sous-fragments (images, budget, etc.).
+struct Ctx<'a> {
+    css: &'a [Rule],
     images: Vec<Image>,
     img_cache: Vec<(String, usize)>,
     img_budget: u32,
-    width: i32,
-    x: i32,            // position courante sur la ligne (PAD+margin = debut)
-    y: i32,
-    line: Vec<LineItem>,
-    line_h: i32,
-    margin: i32,
-    align: u8,
-    title: String,
     scheme: String,
     host: String,
+    title: String,
+    visited: usize,
 }
 
-impl Layout {
-    fn avail(&self) -> i32 { self.width }
-
-    fn flush_line(&mut self) {
-        if self.line.is_empty() {
-            self.y += self.line_h;
-            self.line_h = 8 * 2 + 6;
-            self.x = PAD + self.margin;
-            return;
-        }
-        let used = self.line.iter().map(|it| match it {
-            LineItem::Word { dx, w, .. } => dx + w,
-            LineItem::Img { dx, w, .. } => dx + w,
-            LineItem::Box { dx, w, .. } => dx + w,
-        }).max().unwrap_or(0);
-        let off = match self.align {
-            1 => ((self.avail() - used) / 2).max(0),
-            2 => (self.avail() - used).max(0),
-            _ => 0,
-        };
-        let base_x = PAD + self.margin + off;
-        let y = self.y;
-        let lh = self.line_h;
-        let line = core::mem::take(&mut self.line);
-        for it in line {
-            match it {
-                LineItem::Word { dx, w, s, color, scale, bold, href } => {
-                    let tx = base_x + dx;
-                    let ty = y + (lh - 8 * scale as i32).max(0); // aligne en bas de ligne
-                    if let Some(h) = href {
-                        self.links.push(Link { x: tx, y, w, h: lh, href: h });
-                    }
-                    self.items.push(Item::Text { x: tx, y: ty, s, color, scale, bold });
-                }
-                LineItem::Img { dx, w, h, idx } => {
-                    self.items.push(Item::Image { x: base_x + dx, y, w, h, idx });
-                }
-                LineItem::Box { dx, w, h, fill, value } => {
-                    self.items.push(Item::Rect { x: base_x + dx, y, w, h, color: 0x9aa0a6 });
-                    self.items.push(Item::Rect { x: base_x + dx + 1, y: y + 1, w: (w - 2).max(0), h: (h - 2).max(0), color: fill });
-                    if !value.is_empty() {
-                        self.items.push(Item::Text { x: base_x + dx + 3, y: y + 3, s: value, color: 0x202124, scale: 2, bold: false });
-                    }
-                }
-            }
-        }
-        self.y += lh;
-        self.x = PAD + self.margin;
-        self.line_h = 8 * 2 + 6;
-    }
-
-    fn line_cursor(&self) -> i32 {
-        // position dx du prochain element = max(dx+w) + espace
-        self.line.iter().map(|it| match it {
-            LineItem::Word { dx, w, .. } => dx + w,
-            LineItem::Img { dx, w, .. } => dx + w,
-            LineItem::Box { dx, w, .. } => dx + w,
-        }).max().unwrap_or(0)
-    }
-
-    fn push_word(&mut self, s: &str, st: &Style) {
-        let cw = 8 * st.scale as i32;
-        let wpx = s.chars().count() as i32 * cw;
-        let lh = 8 * st.scale as i32 + 6;
-        if lh > self.line_h { self.line_h = lh; }
-        let mut cur = self.line_cursor();
-        if cur > 0 { cur += cw; } // espace avant le mot
-        if cur + wpx > self.avail() && cur > 0 {
-            self.flush_line();
-            cur = 0;
-            if lh > self.line_h { self.line_h = lh; }
-        }
-        self.line.push(LineItem::Word { dx: cur, w: wpx, s: s.to_string(), color: st.color, scale: st.scale, bold: st.bold, href: st.href.clone() });
-    }
-
-    fn push_text(&mut self, text: &str, st: &Style) {
-        for w in text.split(|c: char| c == ' ' || c == '\n' || c == '\t' || c == '\r') {
-            if !w.is_empty() { self.push_word(w, st); }
-            if self.items.len() + self.line.len() > 90_000 { return; }
-        }
-    }
-
-    fn push_image(&mut self, idx: usize) {
-        let (iw, ih) = (self.images[idx].w as i32, self.images[idx].h as i32);
-        let lh = ih + 4;
-        if lh > self.line_h { self.line_h = lh; }
-        let mut cur = self.line_cursor();
-        if cur > 0 { cur += 8; }
-        if cur + iw > self.avail() && cur > 0 { self.flush_line(); cur = 0; if lh > self.line_h { self.line_h = lh; } }
-        self.line.push(LineItem::Img { dx: cur, w: iw, h: ih, idx });
-    }
-
-    fn push_box(&mut self, w: i32, h: i32, fill: u32, value: String) {
-        if h > self.line_h { self.line_h = h; }
-        let mut cur = self.line_cursor();
-        if cur > 0 { cur += 16; }
-        if cur + w > self.avail() && cur > 0 { self.flush_line(); cur = 0; }
-        self.line.push(LineItem::Box { dx: cur, w, h, fill, value });
-    }
-
+impl<'a> Ctx<'a> {
     // Charge une image (data:URI ou reseau), downscale, renvoie son index.
-    fn load_image(&mut self, src: &str) -> Option<usize> {
+    fn load_image(&mut self, src: &str, max_w: usize) -> Option<usize> {
         if let Some(&(_, idx)) = self.img_cache.iter().find(|(u, _)| u == src) { return Some(idx); }
         if self.img_budget == 0 { return None; }
-        let max_w = self.avail().max(16) as usize;
         let raw: Vec<u8>;
         if let Some(rest) = src.strip_prefix("data:") {
-            // data:[<mime>][;base64],<data>
             let comma = rest.find(',')?;
             let meta = &rest[..comma];
             let data = &rest[comma + 1..];
@@ -588,12 +512,143 @@ impl Layout {
             raw = doc.body;
         }
         let img = image::decode(&raw)?;
-        let img = image::downscale(&img, max_w, 320);
+        let img = image::downscale(&img, max_w.max(16), 360);
         if img.w == 0 || img.h == 0 { return None; }
         let idx = self.images.len();
         self.images.push(img);
         self.img_cache.push((src.to_string(), idx));
         Some(idx)
+    }
+}
+
+// Layouteur de flux : remplit `items`/`links` en coordonnees locales (origine
+// 0,0). `x0` = decalage gauche (indentation), `avail` = largeur de contenu.
+struct Flow<'c, 'a> {
+    ctx: &'c mut Ctx<'a>,
+    items: Vec<Item>,
+    links: Vec<Link>,
+    x0: i32,
+    avail: i32,
+    y: i32,
+    line: Vec<LineItem>,
+    line_h: i32,
+    align: u8,
+    used_w: i32,
+}
+
+const LINE_GAP: i32 = 6;
+fn base_line_h() -> i32 { 8 * 2 + LINE_GAP }
+
+impl<'c, 'a> Flow<'c, 'a> {
+    fn new(ctx: &'c mut Ctx<'a>, x0: i32, avail: i32) -> Flow<'c, 'a> {
+        Flow { ctx, items: Vec::new(), links: Vec::new(), x0, avail: avail.max(16), y: 0, line: Vec::new(), line_h: base_line_h(), align: 0, used_w: 0 }
+    }
+
+    fn line_cursor(&self) -> i32 {
+        self.line.iter().map(|it| match it {
+            LineItem::Word { dx, w, .. } | LineItem::Img { dx, w, .. } | LineItem::Box { dx, w, .. } | LineItem::Frag { dx, w, .. } => dx + w,
+        }).max().unwrap_or(0)
+    }
+
+    fn flush_line(&mut self) {
+        if self.line.is_empty() { self.y += self.line_h; self.line_h = base_line_h(); return; }
+        let used = self.line_cursor();
+        if used > self.used_w { self.used_w = used; }
+        let off = match self.align {
+            1 => ((self.avail - used) / 2).max(0),
+            2 => (self.avail - used).max(0),
+            _ => 0,
+        };
+        let base_x = self.x0 + off;
+        let y = self.y;
+        let lh = self.line_h;
+        let line = core::mem::take(&mut self.line);
+        for it in line {
+            match it {
+                LineItem::Word { dx, w, s, color, scale, bold, href } => {
+                    let tx = base_x + dx;
+                    let ty = y + (lh - 8 * scale as i32).max(0);
+                    if let Some(h) = href { self.links.push(Link { x: tx, y, w, h: lh, href: h }); }
+                    self.items.push(Item::Text { x: tx, y: ty, s, color, scale, bold });
+                }
+                LineItem::Img { dx, w, h, idx } => {
+                    self.items.push(Item::Image { x: base_x + dx, y, w, h, idx });
+                }
+                LineItem::Box { dx, w, h, fill, value } => {
+                    self.items.push(Item::Rect { x: base_x + dx, y, w, h, color: 0x9aa0a6 });
+                    self.items.push(Item::Rect { x: base_x + dx + 1, y: y + 1, w: (w - 2).max(0), h: (h - 2).max(0), color: fill });
+                    if !value.is_empty() {
+                        self.items.push(Item::Text { x: base_x + dx + 3, y: y + 3, s: value, color: 0x202124, scale: 2, bold: false });
+                    }
+                }
+                LineItem::Frag { dx, items, links, .. } => {
+                    let ox = base_x + dx;
+                    for mut sub in items { translate_item(&mut sub, ox, y); self.items.push(sub); }
+                    for mut lk in links { lk.x += ox; lk.y += y; self.links.push(lk); }
+                }
+            }
+        }
+        self.y += lh;
+        self.line_h = base_line_h();
+    }
+
+    fn push_word(&mut self, s: &str, st: &Style) {
+        let cw = 8 * st.scale as i32;
+        let wpx = s.chars().count() as i32 * cw;
+        let lh = 8 * st.scale as i32 + LINE_GAP;
+        if lh > self.line_h { self.line_h = lh; }
+        let mut cur = self.line_cursor();
+        if cur > 0 { cur += cw; }
+        if cur + wpx > self.avail && cur > 0 { self.flush_line(); cur = 0; if lh > self.line_h { self.line_h = lh; } }
+        self.line.push(LineItem::Word { dx: cur, w: wpx, s: s.to_string(), color: st.color, scale: st.scale, bold: st.bold, href: st.href.clone() });
+    }
+
+    fn push_text(&mut self, text: &str, st: &Style) {
+        if st.pre {
+            // white-space: pre — conserve les sauts de ligne et les espaces.
+            for (n, segline) in text.split('\n').enumerate() {
+                if n > 0 { self.flush_line(); }
+                if !segline.is_empty() { self.push_word(&segline.replace('\t', "    "), st); }
+            }
+            return;
+        }
+        for w in text.split(|c: char| c == ' ' || c == '\n' || c == '\t' || c == '\r') {
+            if !w.is_empty() { self.push_word(w, st); }
+            if self.items.len() + self.line.len() > 90_000 { return; }
+        }
+    }
+
+    fn push_image(&mut self, idx: usize) {
+        let (iw, ih) = { let im = &self.ctx.images[idx]; (im.w as i32, im.h as i32) };
+        let lh = ih + 4;
+        if lh > self.line_h { self.line_h = lh; }
+        let mut cur = self.line_cursor();
+        if cur > 0 { cur += 8; }
+        if cur + iw > self.avail && cur > 0 { self.flush_line(); cur = 0; if lh > self.line_h { self.line_h = lh; } }
+        self.line.push(LineItem::Img { dx: cur, w: iw, h: ih, idx });
+    }
+
+    fn push_box(&mut self, w: i32, h: i32, fill: u32, value: String) {
+        if h > self.line_h { self.line_h = h; }
+        let mut cur = self.line_cursor();
+        if cur > 0 { cur += 16; }
+        if cur + w > self.avail && cur > 0 { self.flush_line(); cur = 0; }
+        self.line.push(LineItem::Box { dx: cur, w, h, fill, value });
+    }
+
+    // Place un fragment (inline-block / float / element flex) sur la ligne.
+    fn push_frag(&mut self, frag: Frag, gap: i32) {
+        if frag.height > self.line_h { self.line_h = frag.height; }
+        let mut cur = self.line_cursor();
+        if cur > 0 { cur += gap; }
+        if cur + frag.width > self.avail && cur > 0 { self.flush_line(); cur = 0; if frag.height > self.line_h { self.line_h = frag.height; } }
+        self.line.push(LineItem::Frag { dx: cur, w: frag.width, h: frag.height, items: frag.items, links: frag.links });
+    }
+}
+
+fn translate_item(it: &mut Item, dx: i32, dy: i32) {
+    match it {
+        Item::Rect { x, y, .. } | Item::Text { x, y, .. } | Item::Image { x, y, .. } => { *x += dx; *y += dy; }
     }
 }
 
@@ -635,135 +690,223 @@ fn layout(dom: &Dom, base_url: &str, width: i32, css: &[Rule]) -> Page {
             }
         }
     }
-    let mut l = Layout {
-        items: Vec::new(), links: Vec::new(), images: Vec::new(), img_cache: Vec::new(), img_budget: 6,
-        width: (width - 2 * PAD).max(40), x: PAD, y: PAD, line: Vec::new(), line_h: 8 * 2 + 6,
-        margin: 0, align: 0, title: String::new(),
-        scheme: scheme.to_string(), host: host.to_string(),
+    let mut ctx = Ctx {
+        css, images: Vec::new(), img_cache: Vec::new(), img_budget: 6,
+        scheme: scheme.to_string(), host: host.to_string(), title: String::new(), visited: 0,
     };
-    walk(dom, 0, &mut l, &default_style(), css, 0);
-    l.flush_line();
-    l.y += PAD;
-    Page { title: l.title, items: l.items, links: l.links, images: l.images, height: l.y, bg }
+    let content_w = (width - 2 * PAD).max(40);
+    let mut f = Flow::new(&mut ctx, PAD, content_w);
+    f.y = PAD;
+    walk(&mut f, dom, 0, &default_style(), 0);
+    f.flush_line();
+    let height = f.y + PAD;
+    let items = core::mem::take(&mut f.items);
+    let links = core::mem::take(&mut f.links);
+    drop(f);
+    Page { title: ctx.title, items, links, images: ctx.images, height, bg }
 }
 
-fn apply_decls(decls: &[(String, String)], st: &mut Style, hidden: &mut bool, bg: &mut Option<u32>) {
+fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps) {
     for (p, v) in decls {
+        let val = v.trim();
         match p.as_str() {
             "color" => { if let Some(c) = parse_color(v) { st.color = c; } }
             "background" | "background-color" => {
-                if let Some(c) = parse_color(v.split(' ').next().unwrap_or(v)) { *bg = Some(c); }
+                if let Some(c) = parse_color(val.split(' ').next().unwrap_or(val)) { bx.bg = Some(c); }
             }
             "font-size" => { if let Some(px) = font_px(v) { st.scale = px_to_scale(px); } }
-            "font-weight" => { let b = v.trim(); if b == "bold" || b == "bolder" || b == "700" || b == "800" || b == "900" { st.bold = true; } else if b == "normal" || b == "400" { st.bold = false; } }
-            "text-align" => { st.align = match v.trim() { "center" => 1, "right" => 2, _ => 0 }; }
-            "display" => { if v.trim() == "none" { *hidden = true; } }
-            "visibility" => { if v.trim() == "hidden" { *hidden = true; } }
+            "font-weight" => { if val == "bold" || val == "bolder" || val == "700" || val == "800" || val == "900" { st.bold = true; } else if val == "normal" || val == "400" { st.bold = false; } }
+            "text-align" => { st.align = match val { "center" => 1, "right" => 2, _ => 0 }; }
+            "white-space" => { if val.starts_with("pre") { st.pre = true; } }
+            "display" => {
+                let d = match val { "none" => Disp::None, "inline" => Disp::Inline, "inline-block" => Disp::InlineBlock,
+                    "flex" | "inline-flex" | "grid" | "inline-grid" => Disp::Flex, _ => Disp::Block };
+                if d == Disp::None { bx.hidden = true; }
+                bx.disp = Some(d);
+            }
+            "visibility" => { if val == "hidden" { bx.hidden = true; } }
+            "width" => { bx.width = parse_len(val); }
+            "max-width" => { bx.max_width = parse_len(val); }
+            "float" => { bx.float = match val { "left" => FloatK::Left, "right" => FloatK::Right, _ => FloatK::None }; }
+            "margin" | "margin-left" | "margin-right" => { if val.contains("auto") { bx.center = true; } }
             _ => {}
         }
     }
 }
 
-fn walk(dom: &Dom, idx: usize, l: &mut Layout, st: &Style, css: &[Rule], depth: u32) {
-    if l.items.len() > 80_000 || depth > 256 { return; }
+// Calcule le style herite + la boite de l'element (cascade CSS + style inline).
+fn compute(f: &Flow, node: &Node, tag: &str, st: &Style) -> (Style, BoxProps) {
+    let mut cst = st.clone();
+    let mut bx = default_box();
+    if let Some(s) = heading_scale(tag) { cst.scale = s; cst.bold = true; }
+    if matches!(tag, "b" | "strong" | "th") { cst.bold = true; }
+    if tag == "center" { cst.align = 1; }
+    if tag == "pre" { cst.pre = true; }
+    if tag == "a" {
+        if let Some(href) = attr(node, "href") {
+            cst.href = Some(resolve_location(&f.ctx.scheme, &f.ctx.host, href));
+            cst.color = 0x1a0dab;
+        }
+    }
+    let classes = attr(node, "class").unwrap_or("").to_string();
+    let id = attr(node, "id").unwrap_or("").to_ascii_lowercase();
+    let mut matched: Vec<&Rule> = f.ctx.css.iter().filter(|r| sel_matches(&r.sel, tag, &classes, &id)).collect();
+    matched.sort_by_key(|r| r.spec);
+    for r in matched { apply_decls(&r.decls, &mut cst, &mut bx); }
+    if let Some(style) = attr(node, "style") { apply_decls(&parse_decls(style), &mut cst, &mut bx); }
+    (cst, bx)
+}
+
+fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
+    f.ctx.visited += 1;
+    if f.ctx.visited > 300_000 || depth > 200 || f.items.len() > 80_000 { return; }
     let node = &dom.nodes[idx];
     if node.tag.is_none() {
-        if !node.text.is_empty() { l.push_text(&node.text, st); }
+        if !node.text.is_empty() { f.push_text(&node.text, st); }
         return;
     }
     let tag = node.tag.as_deref().unwrap_or("");
-    if tag == "style" || tag == "script" || tag == "head" {
-        if tag == "head" { for &c in &node.children { walk(dom, c, l, st, css, depth + 1); } }
-        return;
-    }
+    if tag == "style" || tag == "script" { return; }
+    if tag == "head" { for &c in &node.children { walk(f, dom, c, st, depth + 1); } return; }
     if tag == "title" {
         let mut t = String::new();
         for &c in &node.children { if dom.nodes[c].tag.is_none() { t.push_str(&dom.nodes[c].text); } }
-        l.title = t.trim().to_string();
+        f.ctx.title = t.trim().to_string();
         return;
     }
 
-    // --- cascade : style herite + regles + style inline ---
-    let mut child_st = st.clone();
-    let mut hidden = false;
-    let mut block_bg: Option<u32> = None;
-    if let Some(s) = heading_scale(tag) { child_st.scale = s; child_st.bold = true; }
-    if matches!(tag, "b" | "strong") { child_st.bold = true; }
-    if tag == "center" { child_st.align = 1; }
-    if tag == "a" {
-        if let Some(href) = attr(node, "href") {
-            child_st.href = Some(resolve_location(&l.scheme, &l.host, href));
-            child_st.color = 0x1a0dab; // bleu lien (Google)
-        }
-    }
-    if matches!(tag, "ul" | "ol" | "blockquote" | "dl") { child_st.indent = st.indent + 18; }
-
-    // regles CSS (par specificite)
-    let classes = attr(node, "class").unwrap_or("").to_string();
-    let id = attr(node, "id").unwrap_or("").to_ascii_lowercase();
-    let mut matched: Vec<&Rule> = css.iter().filter(|r| sel_matches(&r.sel, tag, &classes, &id)).collect();
-    matched.sort_by_key(|r| r.spec);
-    for r in matched { apply_decls(&r.decls, &mut child_st, &mut hidden, &mut block_bg); }
-    if let Some(style) = attr(node, "style") { apply_decls(&parse_decls(style), &mut child_st, &mut hidden, &mut block_bg); }
-
-    if hidden { return; }
+    let (cst, bx) = compute(f, node, tag, st);
+    if bx.hidden { return; }
 
     // --- elements speciaux ---
-    if tag == "br" { l.flush_line(); return; }
+    if tag == "br" { f.flush_line(); return; }
     if tag == "hr" {
-        l.flush_line();
-        l.items.push(Item::Rect { x: PAD, y: l.y + 4, w: l.width, h: 2, color: 0xcccccc });
-        l.y += 12;
+        f.flush_line();
+        f.items.push(Item::Rect { x: f.x0, y: f.y + 4, w: f.avail, h: 2, color: 0xcccccc });
+        f.y += 12;
         return;
     }
     if tag == "img" {
+        let maxw = f.avail.max(16) as usize;
         if let Some(src) = attr(node, "src") {
-            if let Some(i) = l.load_image(src) { l.push_image(i); return; }
+            if let Some(i) = f.ctx.load_image(src, maxw) { f.push_image(i); return; }
         }
         let alt = attr(node, "alt").unwrap_or("");
         let label = if alt.is_empty() { "[image]".to_string() } else { alloc::format!("[img: {}]", alt) };
-        let g = Style { color: 0x9aa0a6, ..child_st.clone() };
-        l.push_text(&label, &g);
+        let g = Style { color: 0x9aa0a6, ..cst.clone() };
+        f.push_text(&label, &g);
         return;
     }
-    if tag == "input" {
+    if tag == "input" || tag == "textarea" || tag == "select" {
         let cw = 8 * 2;
         let h = 8 * 2 + 8;
-        let w = (16 * cw).min(l.width / 2);
+        let w = bx.width.map(|l| l.resolve(f.avail)).unwrap_or((16 * cw).min(f.avail / 2)).clamp(cw, f.avail);
         let val = attr(node, "value").unwrap_or("").to_string();
-        l.push_box(w, h, 0xffffff, val);
+        f.push_box(w, h, 0xffffff, val);
         return;
     }
 
-    let is_block = block_tag(tag);
-    if is_block { l.flush_line(); l.margin = child_st.indent; l.x = PAD + l.margin; if heading_scale(tag).is_some() { l.y += 6; } }
+    // Mode d'affichage : explicite (CSS) sinon defaut par balise. tr -> flex.
+    let mut disp = bx.disp.unwrap_or(if block_tag(tag) { Disp::Block } else { Disp::Inline });
+    if tag == "tr" { disp = Disp::Flex; }
+    if bx.float != FloatK::None && disp == Disp::Block { disp = Disp::InlineBlock; }
 
-    let saved_align = l.align;
-    l.align = child_st.align;
-
-    // fond de bloc : on retient l'index + y de depart pour inserer un Rect dessous.
-    let bg_start_y = l.y;
-    let bg_insert = l.items.len();
-
-    if tag == "li" { l.x = PAD + l.margin; let b = Style { color: 0x5f6368, ..child_st.clone() }; l.push_word("*", &b); }
-
-    for &c in &node.children { walk(dom, c, l, &child_st, css, depth + 1); }
-
-    if is_block { l.flush_line(); }
-
-    if let Some(bgc) = block_bg {
-        let h = (l.y - bg_start_y).max(0);
-        if h > 0 {
-            l.items.insert(bg_insert, Item::Rect { x: PAD + child_st.indent, y: bg_start_y, w: (l.width - child_st.indent).max(0), h, color: bgc });
+    match disp {
+        Disp::None => {}
+        Disp::Inline => { for &c in &node.children { walk(f, dom, c, &cst, depth + 1); } }
+        Disp::InlineBlock => {
+            let w = bx.width.map(|l| l.resolve(f.avail)).unwrap_or(f.avail).clamp(8, f.avail);
+            let frag = make_frag(f, dom, node, &cst, &bx, tag, w, !bx.width.is_some(), depth + 1);
+            f.push_frag(frag, 8);
         }
+        Disp::Flex => { f.flush_line(); flex_layout(f, dom, node, &cst, depth); f.y += LINE_GAP; }
+        Disp::Block => { block_layout(f, dom, node, &cst, &bx, tag, depth); }
     }
+}
 
-    l.align = saved_align;
-    if is_block {
-        if matches!(tag, "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "ul" | "ol" | "blockquote" | "table" | "form" | "div") { l.y += 6; }
-        l.margin = st.indent;
-        l.x = PAD + l.margin;
+// Met en page le contenu d'un element dans son propre fragment (largeur `w`).
+// `shrink` : ajuste la largeur finale au contenu (inline-block sans width).
+fn make_frag(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, tag: &str, w: i32, shrink: bool, depth: u32) -> Frag {
+    let mut sub = Flow::new(f.ctx, 0, w);
+    sub.align = cst.align;
+    if tag == "li" { let b = Style { color: 0x5f6368, ..cst.clone() }; sub.push_word("*", &b); }
+    for &c in &node.children { walk(&mut sub, dom, c, cst, depth + 1); }
+    sub.flush_line();
+    let used = sub.used_w.clamp(1, w);
+    let h = sub.y;
+    let mut items = core::mem::take(&mut sub.items);
+    let links = core::mem::take(&mut sub.links);
+    drop(sub);
+    let fw = if shrink { used } else { w };
+    if let Some(c) = bx.bg {
+        let mut v = alloc::vec![Item::Rect { x: 0, y: 0, w: fw, h: h.max(1), color: c }];
+        v.extend(items);
+        items = v;
     }
+    Frag { items, links, width: fw, height: h }
+}
+
+// Bloc en flux normal : nouvelle ligne, largeur eventuellement contrainte
+// (width/max-width) et centree (margin:auto), fond, marges verticales.
+fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, tag: &str, depth: u32) {
+    f.flush_line();
+    if heading_scale(tag).is_some() && f.y > PAD { f.y += LINE_GAP; }
+
+    let mut cw = f.avail;
+    if let Some(wv) = bx.width { cw = wv.resolve(f.avail); }
+    if let Some(mw) = bx.max_width { let m = mw.resolve(f.avail); if cw > m { cw = m; } }
+    cw = cw.clamp(8, f.avail);
+
+    let indent = match tag { "ul" | "ol" | "blockquote" | "dl" | "dd" => 18, _ => 0 };
+    let mut left = indent;
+    if cw < f.avail - indent && bx.center { left = indent + (f.avail - indent - cw) / 2; }
+    let inner = cw.min(f.avail - left).max(8);
+
+    let (sx0, sav, sal) = (f.x0, f.avail, f.align);
+    let bg_start_y = f.y;
+    let bg_insert = f.items.len();
+    f.x0 = sx0 + left;
+    f.avail = inner;
+    f.align = cst.align;
+
+    if tag == "li" { let b = Style { color: 0x5f6368, ..cst.clone() }; f.push_word("*", &b); }
+    for &c in &node.children { walk(f, dom, c, cst, depth + 1); }
+    f.flush_line();
+
+    f.x0 = sx0; f.avail = sav; f.align = sal;
+
+    if let Some(bgc) = bx.bg {
+        let h = (f.y - bg_start_y).max(0);
+        if h > 0 { f.items.insert(bg_insert, Item::Rect { x: sx0 + left, y: bg_start_y, w: inner, h, color: bgc }); }
+    }
+    if matches!(tag, "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "ul" | "ol" | "blockquote" | "table" |
+        "form" | "div" | "section" | "article" | "header" | "footer" | "li" | "tr" | "figure") { f.y += LINE_GAP; }
+}
+
+// Conteneur flex / ligne de tableau : enfants elements places cote a cote,
+// largeur repartie en colonnes egales (avec retour a la ligne si depassement).
+fn flex_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, depth: u32) {
+    let kids: Vec<usize> = node.children.iter().cloned().filter(|&c| dom.nodes[c].tag.is_some()).collect();
+    if kids.is_empty() {
+        let saved = f.align; f.align = cst.align;
+        for &c in &node.children { walk(f, dom, c, cst, depth + 1); }
+        f.flush_line(); f.align = saved;
+        return;
+    }
+    let gap = 8;
+    let n = kids.len() as i32;
+    let colw = ((f.avail - gap * (n - 1)) / n).clamp(24, f.avail);
+    for &c in &kids {
+        let mut sub = Flow::new(f.ctx, 0, colw);
+        walk(&mut sub, dom, c, cst, depth + 1);
+        sub.flush_line();
+        let h = sub.y;
+        let items = core::mem::take(&mut sub.items);
+        let links = core::mem::take(&mut sub.links);
+        drop(sub);
+        f.push_frag(Frag { items, links, width: colw, height: h }, gap);
+    }
+    f.flush_line();
 }
 
 fn scheme_host(base: &str) -> (&str, &str) {
