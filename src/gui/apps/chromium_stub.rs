@@ -51,6 +51,7 @@ pub(crate) fn open(url: &str, width: i32) -> (Session, Page) {
              <p class=\"v\">Systeme souverain experimental &mdash; version {}</p></div>\
              <div class=\"card\"><h3>Applications</h3><ul>\
              <li><a href=\"about:calc\">Calculatrice</a> &mdash; appli native (moteur JS)</li>\
+             <li><a href=\"about:wasm\">Demo WebAssembly</a> &mdash; module wasm appele depuis JS</li>\
              <li><a href=\"about:system\">Informations systeme</a></li>\
              <li><a href=\"file:/readme.txt\">Lecteur de fichiers (readme.txt)</a></li>\
              </ul></div>\
@@ -67,6 +68,9 @@ pub(crate) fn open(url: &str, width: i32) -> (Session, Page) {
     }
     if url == "about:calc" {
         return page_from_html(CALC_APP.as_bytes(), url, width);
+    }
+    if url == "about:wasm" {
+        return page_from_html(WASM_DEMO.as_bytes(), url, width);
     }
     if url == "about:system" {
         let dt = rtc::now();
@@ -157,6 +161,38 @@ function evalExpr(s){
   var r=p[0]||0;
   for(i=1;i<p.length;i+=2){ if(p[i]==='+')r+=p[i+1]; else if(p[i]==='-')r-=p[i+1]; }
   return Math.round(r*1e6)/1e6;
+}
+</script></body></html>"#;
+
+// Demonstration de l'API WebAssembly cote JS : un module wasm (exportant
+// `add(i32,i32)->i32`) est fourni en tableau d'octets, instancie via
+// `WebAssembly.instantiate`, puis appele depuis JavaScript. Le calcul est donc
+// realise par le runtime wasmi embarque (voir `crate::wasm`).
+const WASM_DEMO: &str = r#"<!doctype html><html><head><title>Demo WebAssembly</title>
+<style>
+body{background:#0d1117;color:#e6edf3;font-family:sans-serif;padding:12px}
+h2{color:#58a6ff}
+.card{background:#161b22;border:1px solid #30363d;padding:12px;margin:8px 0}
+code{color:#7ee787}
+#out{font-size:20px;color:#ffa657}
+</style></head><body>
+<h2>WebAssembly dans Bouchaud OS</h2>
+<div class="card">
+<p>Module <code>add(i32,i32)->i32</code> compile en WebAssembly, fourni en octets,
+instancie par le runtime <code>wasmi</code> (no_std) et appele depuis JavaScript :</p>
+<p id="out">calcul en cours...</p>
+</div>
+<script>
+// Octets d'un module WASM minimal exportant add(a,b){return a+b;}
+var bytes = [0,97,115,109,1,0,0,0, 1,7,1,96,2,127,127,1,127, 3,2,1,0,
+             7,7,1,3,97,100,100,0,0, 10,9,1,7,0,32,0,32,1,106,11];
+try {
+  var r = WebAssembly.instantiate(bytes);
+  var a = 21, b = 21;
+  var sum = r.instance.exports.add(a, b);
+  document.getElementById('out').textContent = a + ' + ' + b + ' = ' + sum + '  (calcule par WebAssembly)';
+} catch (e) {
+  document.getElementById('out').textContent = 'Erreur : ' + e;
 }
 </script></body></html>"#;
 

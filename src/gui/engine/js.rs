@@ -604,14 +604,60 @@ pub struct Interp {
     pub out: Vec<String>,                 // console.*
     pub writes: String,                   // document.write (script courant)
     pub dom: DomModel,                    // DOM de la page (lecture + mutations)
+    wasm: Vec<crate::wasm::Instance>,     // instances WebAssembly vivantes (API JS)
+    listeners: Vec<(i64, String, Value)>, // (noeud, type, callback) ; noeud -1 = window/document
+    microtasks: Vec<(Value, Vec<Value>)>, // Promise.then / queueMicrotask
+    macrotasks: Vec<(Value, Vec<Value>)>, // setTimeout / setInterval (un tour)
+    timer_seq: f64,                       // identifiants de timers
 }
 
 impl Interp {
     pub fn new() -> Interp {
         let global = new_scope(None);
-        let mut it = Interp { global: global.clone(), steps: 0, max_steps: 2_000_000, out: Vec::new(), writes: String::new(), dom: DomModel::empty() };
+        let mut it = Interp {
+            global: global.clone(), steps: 0, max_steps: 2_000_000,
+            out: Vec::new(), writes: String::new(), dom: DomModel::empty(),
+            wasm: Vec::new(), listeners: Vec::new(),
+            microtasks: Vec::new(), macrotasks: Vec::new(), timer_seq: 1.0,
+        };
         install(&mut it);
         it
+    }
+
+    // Draine les files de taches : microtaches (Promise) en priorite, puis une
+    // macrotache (setTimeout) a la fois, jusqu'a epuisement (borne anti-boucle).
+    pub fn pump(&mut self) {
+        let mut budget = 200_000u32;
+        loop {
+            let next = if !self.microtasks.is_empty() {
+                Some(self.microtasks.remove(0))
+            } else if !self.macrotasks.is_empty() {
+                Some(self.macrotasks.remove(0))
+            } else {
+                None
+            };
+            match next {
+                Some((cb, args)) => { if budget == 0 { break; } budget -= 1; let _ = self.call(cb, Value::Undefined, &args); }
+                None => break,
+            }
+        }
+    }
+
+    // Declenche tous les ecouteurs enregistres pour (node, type), avec un objet
+    // `event` minimal. node = -1 cible window/document (load, DOMContentLoaded).
+    pub fn fire_event(&mut self, node: i64, ty: &str) {
+        let cbs: Vec<Value> = self.listeners.iter().filter(|(n, t, _)| *n == node && t == ty).map(|(_, _, c)| c.clone()).collect();
+        if cbs.is_empty() { return; }
+        let ev = new_obj(Obj::plain());
+        set(&ev, "type", str_val(ty.to_string()));
+        if node >= 0 { set(&ev, "target", node_handle(node as usize)); }
+        set(&ev, "preventDefault", native_val(|_it, _t, _a| Ok(Value::Undefined)));
+        set(&ev, "stopPropagation", native_val(|_it, _t, _a| Ok(Value::Undefined)));
+        for cb in cbs {
+            let target = if node >= 0 { node_handle(node as usize) } else { Value::Undefined };
+            let _ = self.call(cb, target, &[ev.clone()]);
+        }
+        self.pump();
     }
 
     fn tick(&mut self) -> Result<(), Value> { self.steps += 1; if self.steps > self.max_steps { return Err(str_val("RangeError: trop d'operations")); } Ok(()) }
@@ -771,6 +817,27 @@ impl Interp {
     }
 
     pub fn call(&mut self, func: Value, this: Value, args: &[Value]) -> Result<Value, Value> {
+        // Fonction exportee par un module WebAssembly : route vers le runtime wasm.
+        if let Value::Obj(o) = &func {
+            let bound = { let b = o.borrow(); match (b.props.get("__wasm_inst__"), b.props.get("__wasm_fn__")) {
+                (Some(i), Some(Value::Str(n))) => Some((to_num_simple(i) as usize, (**n).clone())), _ => None } };
+            if let Some((inst, name)) = bound {
+                let argv: Vec<f64> = args.iter().map(|v| self.to_num(v)).collect();
+                return match self.wasm.get_mut(inst).map(|w| w.call(&name, &argv)) {
+                    Some(Ok(Some(v))) => Ok(Value::Num(v)),
+                    Some(Ok(None)) => Ok(Value::Undefined),
+                    Some(Err(e)) => Err(str_val(e)),
+                    None => Err(str_val("WebAssembly: instance invalide")),
+                };
+            }
+            // resolve/reject d'une promesse (lies a leur promesse via __settle__).
+            let settle = { let b = o.borrow(); b.props.get("__settle__").cloned().map(|p| (p, b.props.get("__settle_kind__").map(to_num_simple).unwrap_or(1.0))) };
+            if let Some((p, kind)) = settle {
+                let val = args.get(0).cloned().unwrap_or(Value::Undefined);
+                promise_settle(self, &p, kind, val);
+                return Ok(Value::Undefined);
+            }
+        }
         let (def, fenv, native) = match &func {
             Value::Obj(o) => { let b = o.borrow(); match &b.call { Some(Callable::User { def, env }) => (Some(def.clone()), Some(env.clone()), None), Some(Callable::Native(f)) => (None, None, Some(*f)), None => return Err(str_val("TypeError: not a function")) } }
             _ => return Err(str_val("TypeError: not a function")),
@@ -801,6 +868,12 @@ impl Interp {
             Value::Obj(obj) => {
                 let (class, has_arr) = { let b = obj.borrow(); (b.class, b.arr.is_some()) };
                 if class == "Element" || class == "Document" { if let Some(v) = dom_get(self, obj, name) { return Ok(v); } }
+                if class == "Style" {
+                    if name == "cssText" { return Ok(str_val(serialize_style(obj))); }
+                    let b = obj.borrow();
+                    let key = css_prop_name(name);
+                    return Ok(b.props.get(&key).or_else(|| b.props.get(name)).cloned().unwrap_or(Value::Undefined));
+                }
                 if has_arr {
                     let b = obj.borrow();
                     let arr = b.arr.as_ref().unwrap();
@@ -825,6 +898,18 @@ impl Interp {
         if let Value::Obj(obj) = o {
             let class = { obj.borrow().class };
             if class == "Element" { if dom_set(self, obj, name, &v) { return; } }
+            if class == "Style" && !name.starts_with("__") {
+                let owner = { obj.borrow().props.get("__owner__").map(|x| to_num_simple(x) as i64).unwrap_or(-1) };
+                if name == "cssText" {
+                    let css = self.to_string(&v);
+                    if owner >= 0 { self.dom.set_attr(owner as usize, "style", css); }
+                    obj.borrow_mut().props.insert("cssText".to_string(), v);
+                    return;
+                }
+                obj.borrow_mut().props.insert(css_prop_name(name), v);
+                if owner >= 0 { let css = serialize_style(obj); self.dom.set_attr(owner as usize, "style", css); }
+                return;
+            }
             let mut b = obj.borrow_mut();
             if let Some(arr) = &mut b.arr { if name == "length" { let nl = to_num_simple(&v) as usize; arr.resize(nl.min(1_000_000), Value::Undefined); return; } if let Ok(i) = name.parse::<usize>() { if i < 1_000_000 { if i >= arr.len() { arr.resize(i + 1, Value::Undefined); } arr[i] = v; } return; } }
             b.props.insert(name.to_string(), v);
@@ -1030,20 +1115,316 @@ fn install(it: &mut Interp) {
     set(&doc, "getElementsByClassName", native_val(|it, _t, a| { let c = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); Ok(array_val(it.dom.query(&format!(".{}", c), 0, false).into_iter().map(node_handle).collect())) }));
     set(&doc, "createElement", native_val(|it, _t, a| { let tag = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); Ok(detached_element(&tag)) }));
     set(&doc, "createTextNode", native_val(|it, _t, a| { let txt = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); let el = detached_element("#text"); set(&el, "__html__", str_val(escape_html(&txt))); Ok(el) }));
-    set(&doc, "addEventListener", native_val(|_it, _t, _a| Ok(Value::Undefined)));
+    // addEventListener reel : enregistre l'ecouteur (cible document = noeud -1).
+    set(&doc, "addEventListener", native_val(|it, _t, a| { let ty = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); if let Some(cb) = a.get(1) { it.listeners.push((-1, ty, cb.clone())); } Ok(Value::Undefined) }));
+    set(&doc, "removeEventListener", native_val(|it, _t, a| { let ty = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); it.listeners.retain(|(n, t, _)| !(*n == -1 && t == &ty)); Ok(Value::Undefined) }));
+    set(&doc, "createEvent", native_val(|_it, _t, _a| Ok(new_obj(Obj::plain()))));
+    set(&doc, "readyState", str_val("complete"));
+    set(&doc, "cookie", str_val(""));
     let g2 = it.global.clone();
     scope_declare(&g2, "document", doc);
 
     // window = objet global minimal (alias des globales courantes)
     let window = new_obj(Obj::plain());
-    set(&window, "addEventListener", native_val(|_it, _t, _a| Ok(Value::Undefined)));
-    set(&window, "setTimeout", native_val(|it, _t, a| { if let Some(f) = a.get(0) { let f = f.clone(); let _ = it.call(f, Value::Undefined, &[]); } Ok(Value::Num(0.0)) }));
-    set(&window, "location", { let loc = new_obj(Obj::plain()); set(&loc, "href", str_val("")); set(&loc, "protocol", str_val("https:")); loc });
+    set(&window, "addEventListener", native_val(|it, _t, a| { let ty = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); if let Some(cb) = a.get(1) { it.listeners.push((-1, ty, cb.clone())); } Ok(Value::Undefined) }));
+    set(&window, "removeEventListener", native_val(|it, _t, a| { let ty = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); it.listeners.retain(|(n, t, _)| !(*n == -1 && t == &ty)); Ok(Value::Undefined) }));
+    set(&window, "setTimeout", native_val(native_set_timeout));
+    set(&window, "setInterval", native_val(native_set_timeout));
+    set(&window, "clearTimeout", native_val(|_it, _t, _a| Ok(Value::Undefined)));
+    set(&window, "clearInterval", native_val(|_it, _t, _a| Ok(Value::Undefined)));
+    set(&window, "requestAnimationFrame", native_val(native_set_timeout));
+    set(&window, "queueMicrotask", native_val(native_queue_microtask));
+    set(&window, "location", { let loc = new_obj(Obj::plain()); set(&loc, "href", str_val("")); set(&loc, "protocol", str_val("https:")); set(&loc, "host", str_val("")); set(&loc, "pathname", str_val("/")); set(&loc, "reload", native_val(|_it, _t, _a| Ok(Value::Undefined))); loc });
+    set(&window, "devicePixelRatio", Value::Num(1.0));
+    set(&window, "innerWidth", Value::Num(1024.0));
+    set(&window, "innerHeight", Value::Num(768.0));
     scope_declare(&g2, "window", window);
     // navigator minimal
     let nav = new_obj(Obj::plain());
     set(&nav, "userAgent", str_val("BouchaudOS"));
+    set(&nav, "language", str_val("fr-FR"));
+    set(&nav, "platform", str_val("BouchaudOS"));
     scope_declare(&g2, "navigator", nav);
+
+    // timers + microtaches globaux (remplacent les stubs synchrones)
+    scope_declare(&g2, "setTimeout", native_val(native_set_timeout));
+    scope_declare(&g2, "setInterval", native_val(native_set_timeout));
+    scope_declare(&g2, "clearTimeout", native_val(|_it, _t, _a| Ok(Value::Undefined)));
+    scope_declare(&g2, "clearInterval", native_val(|_it, _t, _a| Ok(Value::Undefined)));
+    scope_declare(&g2, "requestAnimationFrame", native_val(native_set_timeout));
+    scope_declare(&g2, "queueMicrotask", native_val(native_queue_microtask));
+    scope_declare(&g2, "encodeURIComponent", native_val(|it, _t, a| Ok(str_val(uri_encode(&it.to_string(a.get(0).unwrap_or(&Value::Undefined)), false)))));
+    scope_declare(&g2, "encodeURI", native_val(|it, _t, a| Ok(str_val(uri_encode(&it.to_string(a.get(0).unwrap_or(&Value::Undefined)), true)))));
+    scope_declare(&g2, "decodeURIComponent", native_val(|it, _t, a| Ok(str_val(uri_decode(&it.to_string(a.get(0).unwrap_or(&Value::Undefined)))))));
+    scope_declare(&g2, "decodeURI", native_val(|it, _t, a| Ok(str_val(uri_decode(&it.to_string(a.get(0).unwrap_or(&Value::Undefined)))))));
+    scope_declare(&g2, "structuredClone", native_val(|_it, _t, a| Ok(a.get(0).cloned().unwrap_or(Value::Undefined))));
+    // Dispatcher interne pour les ecouteurs "click" (voir dom_add_event_listener).
+    scope_declare(&g2, "__ael", native_val(|it, _t, a| { let n = it.to_num(a.get(0).unwrap_or(&Value::Undefined)) as i64; it.fire_event(n, "click"); Ok(Value::Undefined) }));
+
+    install_promise(&g2);
+    install_date(&g2);
+
+    // WebAssembly : API web standard, branchee sur le runtime wasmi (crate::wasm).
+    let webassembly = new_obj(Obj::plain());
+    set(&webassembly, "validate", native_val(|_it, _t, a| { let bytes = js_to_bytes(a.get(0)); Ok(Value::Bool(crate::wasm::validate(&bytes))) }));
+    set(&webassembly, "instantiate", native_val(|it, _t, a| {
+        let bytes = js_to_bytes(a.get(0));
+        let instance = wasm_instance_obj(it, &bytes)?;
+        let result = new_obj(Obj::plain());
+        set(&result, "instance", instance);
+        set(&result, "module", new_obj(Obj::plain()));
+        Ok(make_resolved_thenable(result))
+    }));
+    set(&webassembly, "compile", native_val(|_it, _t, a| {
+        let bytes = js_to_bytes(a.get(0));
+        let m = new_obj(Obj::plain());
+        set(&m, "__wasm_bytes__", array_val(bytes.iter().map(|b| Value::Num(*b as f64)).collect()));
+        Ok(make_resolved_thenable(m))
+    }));
+    set(&webassembly, "Module", native_val(|_it, _t, a| { let bytes = js_to_bytes(a.get(0)); let m = new_obj(Obj::plain()); set(&m, "__wasm_bytes__", array_val(bytes.iter().map(|b| Value::Num(*b as f64)).collect())); Ok(m) }));
+    set(&webassembly, "Instance", native_val(|it, _t, a| { let bytes = js_to_bytes(a.get(0)); wasm_instance_obj(it, &bytes) }));
+    scope_declare(&g2, "WebAssembly", webassembly);
+}
+
+// ============================================================================
+// Timers, microtaches, URI, Promise, Date, WebAssembly (helpers)
+// ============================================================================
+
+fn native_set_timeout(it: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    if let Some(cb) = a.get(0) {
+        if matches!(cb, Value::Obj(o) if o.borrow().call.is_some()) {
+            let extra: Vec<Value> = if a.len() > 2 { a[2..].to_vec() } else { Vec::new() };
+            it.macrotasks.push((cb.clone(), extra));
+        }
+    }
+    let id = it.timer_seq; it.timer_seq += 1.0; Ok(Value::Num(id))
+}
+
+fn native_queue_microtask(it: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    if let Some(cb) = a.get(0) { it.microtasks.push((cb.clone(), Vec::new())); }
+    Ok(Value::Undefined)
+}
+
+fn hex_up(n: u8) -> char { core::char::from_digit((n & 15) as u32, 16).unwrap_or('0').to_ascii_uppercase() }
+fn uri_encode(s: &str, full: bool) -> String {
+    let mut o = String::new();
+    for b in s.bytes() {
+        let keep = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')')
+            || (full && matches!(b, b';' | b'/' | b'?' | b':' | b'@' | b'&' | b'=' | b'+' | b'$' | b',' | b'#'));
+        if keep { o.push(b as char); } else { o.push('%'); o.push(hex_up(b >> 4)); o.push(hex_up(b)); }
+    }
+    o
+}
+fn uri_decode(s: &str) -> String {
+    let b = s.as_bytes(); let mut out: Vec<u8> = Vec::new(); let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() { out.push((hexv(b[i + 1]) * 16 + hexv(b[i + 2])) as u8); i += 3; }
+        else { out.push(b[i]); i += 1; }
+    }
+    String::from_utf8(out).unwrap_or_default()
+}
+
+// --- Promise ---------------------------------------------------------------
+// Etat : __pstate__ (0 pending / 1 fulfilled / 2 rejected), __pvalue__,
+// __pcbs__ (file de reactions {f, r, next}). Les reactions sont rejouees comme
+// microtaches. Limitation : un handler renvoyant une promesse ne chaine pas.
+
+fn is_promise(v: &Value) -> bool { matches!(v, Value::Obj(o) if o.borrow().props.contains_key("__ispromise__")) }
+
+fn new_promise() -> Value {
+    let p = new_obj(Obj::plain());
+    set(&p, "__ispromise__", Value::Bool(true));
+    set(&p, "__pstate__", Value::Num(0.0));
+    set(&p, "__pvalue__", Value::Undefined);
+    set(&p, "__pcbs__", array_val(Vec::new()));
+    set(&p, "then", native_val(promise_then));
+    set(&p, "catch", native_val(promise_catch));
+    set(&p, "finally", native_val(promise_finally));
+    p
+}
+
+fn promise_settle(it: &mut Interp, p: &Value, kind: f64, value: Value) {
+    if let Value::Obj(o) = p {
+        {
+            let mut b = o.borrow_mut();
+            let st = b.props.get("__pstate__").map(to_num_simple).unwrap_or(0.0);
+            if st != 0.0 { return; }
+            b.props.insert("__pstate__".into(), Value::Num(kind));
+            b.props.insert("__pvalue__".into(), value.clone());
+        }
+        let cbs = { o.borrow().props.get("__pcbs__").cloned() };
+        if let Some(Value::Obj(arr)) = cbs {
+            let reactions: Vec<Value> = arr.borrow().arr.clone().unwrap_or_default();
+            for r in reactions { it.microtasks.push((native_val(promise_react), vec![r, value.clone(), Value::Num(kind)])); }
+            if let Some(slot) = &mut arr.borrow_mut().arr { slot.clear(); }
+        }
+    }
+}
+
+fn promise_react(it: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    let reaction = a.get(0).cloned().unwrap_or(Value::Undefined);
+    let value = a.get(1).cloned().unwrap_or(Value::Undefined);
+    let kind = a.get(2).map(to_num_simple).unwrap_or(1.0);
+    let (handler, next) = if let Value::Obj(o) = &reaction {
+        let b = o.borrow();
+        let h = if kind == 1.0 { b.props.get("f").cloned() } else { b.props.get("r").cloned() };
+        (h, b.props.get("next").cloned())
+    } else { (None, None) };
+    let next = next.unwrap_or(Value::Undefined);
+    match handler {
+        Some(h) if matches!(&h, Value::Obj(o) if o.borrow().call.is_some()) => match it.call(h, Value::Undefined, &[value]) {
+            Ok(res) => promise_settle(it, &next, 1.0, res),
+            Err(e) => promise_settle(it, &next, 2.0, e),
+        },
+        _ => promise_settle(it, &next, kind, value), // pas de handler : propage
+    }
+    Ok(Value::Undefined)
+}
+
+fn promise_then(it: &mut Interp, t: Value, a: &[Value]) -> Result<Value, Value> {
+    let onf = a.get(0).cloned().unwrap_or(Value::Undefined);
+    let onr = a.get(1).cloned().unwrap_or(Value::Undefined);
+    let next = new_promise();
+    let reaction = new_obj(Obj::plain());
+    set(&reaction, "f", onf); set(&reaction, "r", onr); set(&reaction, "next", next.clone());
+    if let Value::Obj(o) = &t {
+        let (st, val) = { let b = o.borrow(); (b.props.get("__pstate__").map(to_num_simple).unwrap_or(0.0), b.props.get("__pvalue__").cloned().unwrap_or(Value::Undefined)) };
+        if st == 0.0 {
+            if let Some(Value::Obj(arr)) = o.borrow().props.get("__pcbs__").cloned() { if let Some(slot) = &mut arr.borrow_mut().arr { slot.push(reaction); } }
+        } else {
+            it.microtasks.push((native_val(promise_react), vec![reaction, val, Value::Num(st)]));
+        }
+    }
+    Ok(next)
+}
+
+fn promise_catch(it: &mut Interp, t: Value, a: &[Value]) -> Result<Value, Value> {
+    promise_then(it, t, &[Value::Undefined, a.get(0).cloned().unwrap_or(Value::Undefined)])
+}
+
+fn promise_finally(it: &mut Interp, t: Value, a: &[Value]) -> Result<Value, Value> {
+    if let Some(cb) = a.get(0) { it.microtasks.push((cb.clone(), Vec::new())); }
+    Ok(t)
+}
+
+fn promise_settle_stub(_it: &mut Interp, _t: Value, _a: &[Value]) -> Result<Value, Value> { Ok(Value::Undefined) }
+
+fn native_promise_ctor(it: &mut Interp, _this: Value, a: &[Value]) -> Result<Value, Value> {
+    let p = new_promise();
+    let resolve = new_obj(Obj { props: OrderedMap::new(), arr: None, call: Some(Callable::Native(promise_settle_stub)), class: "Function" });
+    set(&resolve, "__settle__", p.clone()); set(&resolve, "__settle_kind__", Value::Num(1.0));
+    let reject = new_obj(Obj { props: OrderedMap::new(), arr: None, call: Some(Callable::Native(promise_settle_stub)), class: "Function" });
+    set(&reject, "__settle__", p.clone()); set(&reject, "__settle_kind__", Value::Num(2.0));
+    if let Some(ex) = a.get(0) {
+        if let Err(e) = it.call(ex.clone(), Value::Undefined, &[resolve, reject]) { promise_settle(it, &p, 2.0, e); }
+    }
+    Ok(p)
+}
+
+fn promise_all(it: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    it.pump(); // tente de regler les promesses en attente
+    let items = it.iterable(a.get(0).unwrap_or(&Value::Undefined));
+    let mut out = Vec::new();
+    for v in items {
+        if is_promise(&v) { if let Value::Obj(o) = &v { out.push(o.borrow().props.get("__pvalue__").cloned().unwrap_or(Value::Undefined)); } }
+        else { out.push(v); }
+    }
+    let p = new_promise(); promise_settle(it, &p, 1.0, array_val(out)); Ok(p)
+}
+
+fn install_promise(g: &Env) {
+    let promise = new_obj(Obj { props: OrderedMap::new(), arr: None, call: Some(Callable::Native(native_promise_ctor)), class: "Function" });
+    set(&promise, "resolve", native_val(|it, _t, a| { let p = new_promise(); promise_settle(it, &p, 1.0, a.get(0).cloned().unwrap_or(Value::Undefined)); Ok(p) }));
+    set(&promise, "reject", native_val(|it, _t, a| { let p = new_promise(); promise_settle(it, &p, 2.0, a.get(0).cloned().unwrap_or(Value::Undefined)); Ok(p) }));
+    set(&promise, "all", native_val(promise_all));
+    set(&promise, "race", native_val(promise_all));
+    set(&promise, "allSettled", native_val(promise_all));
+    scope_declare(g, "Promise", promise);
+}
+
+// --- Date ------------------------------------------------------------------
+fn date_now_ms() -> f64 { (crate::kernel::timer::seconds() as f64) * 1000.0 }
+fn two(n: u32) -> String { if n < 10 { format!("0{}", n) } else { format!("{}", n) } }
+fn make_date_obj() -> Value {
+    let dt = crate::arch::x86_64::rtc::now();
+    let o = new_obj(Obj::plain());
+    set(&o, "__y__", Value::Num(dt.year as f64));
+    set(&o, "__mo__", Value::Num((dt.month.saturating_sub(1)) as f64));
+    set(&o, "__d__", Value::Num(dt.day as f64));
+    set(&o, "__h__", Value::Num(dt.hour as f64));
+    set(&o, "__mi__", Value::Num(dt.minute as f64));
+    set(&o, "__s__", Value::Num(dt.second as f64));
+    let iso = format!("{}-{}-{}T{}:{}:{}Z", dt.year, two(dt.month as u32), two(dt.day as u32), two(dt.hour as u32), two(dt.minute as u32), two(dt.second as u32));
+    set(&o, "__iso__", str_val(iso));
+    set(&o, "getFullYear", native_val(|it, t, _a| it.get_prop(&t, "__y__")));
+    set(&o, "getMonth", native_val(|it, t, _a| it.get_prop(&t, "__mo__")));
+    set(&o, "getDate", native_val(|it, t, _a| it.get_prop(&t, "__d__")));
+    set(&o, "getDay", native_val(|_it, _t, _a| Ok(Value::Num(0.0))));
+    set(&o, "getHours", native_val(|it, t, _a| it.get_prop(&t, "__h__")));
+    set(&o, "getMinutes", native_val(|it, t, _a| it.get_prop(&t, "__mi__")));
+    set(&o, "getSeconds", native_val(|it, t, _a| it.get_prop(&t, "__s__")));
+    set(&o, "getMilliseconds", native_val(|_it, _t, _a| Ok(Value::Num(0.0))));
+    set(&o, "getTime", native_val(|_it, _t, _a| Ok(Value::Num(date_now_ms()))));
+    set(&o, "valueOf", native_val(|_it, _t, _a| Ok(Value::Num(date_now_ms()))));
+    set(&o, "toISOString", native_val(|it, t, _a| it.get_prop(&t, "__iso__")));
+    set(&o, "toJSON", native_val(|it, t, _a| it.get_prop(&t, "__iso__")));
+    set(&o, "toString", native_val(|it, t, _a| it.get_prop(&t, "__iso__")));
+    o
+}
+fn install_date(g: &Env) {
+    let date = native_val(|_it, _t, _a| Ok(make_date_obj()));
+    set(&date, "now", native_val(|_it, _t, _a| Ok(Value::Num(date_now_ms()))));
+    set(&date, "parse", native_val(|_it, _t, _a| Ok(Value::Num(date_now_ms()))));
+    set(&date, "UTC", native_val(|_it, _t, _a| Ok(Value::Num(date_now_ms()))));
+    scope_declare(g, "Date", date);
+}
+
+// --- WebAssembly (helpers) -------------------------------------------------
+fn js_to_bytes(v: Option<&Value>) -> Vec<u8> {
+    match v {
+        Some(Value::Obj(o)) => {
+            let b = o.borrow();
+            if let Some(arr) = &b.arr {
+                arr.iter().map(|x| to_num_simple(x) as i64 as u8).collect()
+            } else if let Some(Value::Obj(inner)) = b.props.get("__wasm_bytes__") {
+                inner.borrow().arr.as_ref().map(|a| a.iter().map(|x| to_num_simple(x) as i64 as u8).collect()).unwrap_or_default()
+            } else { Vec::new() }
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn wasm_export_stub(_it: &mut Interp, _t: Value, _a: &[Value]) -> Result<Value, Value> { Ok(Value::Undefined) }
+
+fn wasm_instance_obj(it: &mut Interp, bytes: &[u8]) -> Result<Value, Value> {
+    match crate::wasm::instantiate(bytes) {
+        Ok(inst) => {
+            let idx = it.wasm.len();
+            it.wasm.push(inst);
+            let names: Vec<String> = it.wasm[idx].export_funcs().to_vec();
+            let exports = new_obj(Obj::plain());
+            for name in names {
+                let f = new_obj(Obj { props: OrderedMap::new(), arr: None, call: Some(Callable::Native(wasm_export_stub)), class: "Function" });
+                set(&f, "__wasm_inst__", Value::Num(idx as f64));
+                set(&f, "__wasm_fn__", str_val(name.clone()));
+                set(&exports, &name, f);
+            }
+            let instance = new_obj(Obj::plain());
+            set(&instance, "exports", exports);
+            Ok(instance)
+        }
+        Err(e) => Err(str_val(format!("WebAssembly: {}", e))),
+    }
+}
+
+// Objet "thenable" resolu immediatement : permet `WebAssembly.instantiate(b).then(cb)`
+// sans machinerie Promise complete.
+fn make_resolved_thenable(v: Value) -> Value {
+    if matches!(&v, Value::Obj(_)) {
+        set(&v, "then", native_val(|it, t, a| { if let Some(cb) = a.get(0) { let r = it.call(cb.clone(), Value::Undefined, &[t.clone()])?; return Ok(make_resolved_thenable(r)); } Ok(t) }));
+        set(&v, "catch", native_val(|_it, t, _a| Ok(t)));
+    }
+    v
 }
 
 // PRNG simple (LCG) pour Math.random (deterministe ; suffisant pour le rendu).
@@ -1212,6 +1593,34 @@ fn handle_node(it: &mut Interp, this: &Value) -> i64 {
     if let Value::Obj(o) = this { o.borrow().props.get("__node__").map(|v| it.to_num(v) as i64).unwrap_or(-1) } else { -1 }
 }
 
+// element.addEventListener(type, cb) : enregistre l'ecouteur sur le noeud. Pour
+// "click", injecte un attribut onclick synthetique (`__ael(n)`) afin que le
+// pipeline de liens `javascript:` existant rejoue l'ecouteur au clic.
+fn dom_add_event_listener(it: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    let node = handle_node(it, &this);
+    let ty = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
+    if node >= 0 {
+        if let Some(cb) = a.get(1) { it.listeners.push((node, ty.clone(), cb.clone())); }
+        if ty == "click" {
+            let n = node as usize;
+            let existing = it.dom.attr(n, "onclick").unwrap_or("").to_string();
+            if !existing.contains("__ael(") {
+                let call = format!("__ael({})", node);
+                let val = if existing.is_empty() { call } else { format!("{};{}", existing, call) };
+                it.dom.set_attr(n, "onclick", val);
+            }
+        }
+    }
+    Ok(Value::Undefined)
+}
+
+fn dom_remove_event_listener(it: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    let node = handle_node(it, &this);
+    let ty = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
+    it.listeners.retain(|(n, t, _)| !(*n == node && t == &ty));
+    Ok(Value::Undefined)
+}
+
 // HTML externe d'une valeur (element model-backed, element detache, ou texte).
 fn element_outer(it: &mut Interp, v: &Value) -> String {
     if let Value::Obj(o) = v {
@@ -1253,7 +1662,7 @@ fn dom_get(it: &mut Interp, obj: &Rc<RefCell<Obj>>, name: &str) -> Option<Value>
                 "lastChild" | "lastElementChild" => it.dom.nodes[n].children.last().map(|&c| node_handle(c)).unwrap_or(Value::Null),
                 "parentNode" | "parentElement" => it.dom.parent_of(n).map(node_handle).unwrap_or(Value::Null),
                 "style" => style_object(&this),
-                "dataset" => style_object(&this),
+                "dataset" => dataset_object(&this),
                 "classList" => class_list(n as i64),
                 "getAttribute" => native_val(dom_get_attr),
                 "setAttribute" => native_val(dom_set_attr),
@@ -1264,8 +1673,12 @@ fn dom_get(it: &mut Interp, obj: &Rc<RefCell<Obj>>, name: &str) -> Option<Value>
                 "querySelectorAll" => native_val(dom_qsa),
                 "getElementsByTagName" => native_val(dom_qsa),
                 "getElementsByClassName" => native_val(dom_qsa),
-                "addEventListener" | "removeEventListener" | "removeChild" | "remove" | "replaceChild"
-                | "focus" | "blur" | "click" | "scrollIntoView" | "setAttributeNS" => native_val(|_it, _t, _a| Ok(Value::Undefined)),
+                "addEventListener" => native_val(dom_add_event_listener),
+                "removeEventListener" => native_val(dom_remove_event_listener),
+                "dispatchEvent" => native_val(|it, t, _a| { let n = handle_node(it, &t); if n >= 0 { it.fire_event(n, "click"); } Ok(Value::Bool(true)) }),
+                "click" => native_val(|it, t, _a| { let n = handle_node(it, &t); if n >= 0 { it.fire_event(n, "click"); } Ok(Value::Undefined) }),
+                "removeChild" | "remove" | "replaceChild"
+                | "focus" | "blur" | "scrollIntoView" | "setAttributeNS" => native_val(|_it, _t, _a| Ok(Value::Undefined)),
                 "matches" | "contains" => native_val(|_it, _t, _a| Ok(Value::Bool(false))),
                 _ => { let b = obj.borrow(); b.props.get(name).cloned().unwrap_or(Value::Undefined) }
             });
@@ -1322,15 +1735,55 @@ fn dom_set(it: &mut Interp, obj: &Rc<RefCell<Obj>>, name: &str, v: &Value) -> bo
     }
 }
 
-// objet `style`/`dataset` : memorise sur l'element, les ecritures sont absorbees.
+// Objet `style` live : les ecritures (`el.style.color = ...`) sont re-serialisees
+// vers l'attribut `style=""` du noeud, donc reprises par le moteur de layout.
 fn style_object(this: &Value) -> Value {
     if let Value::Obj(o) = this {
         if let Some(s) = o.borrow().props.get("__style__").cloned() { return s; }
-        let s = new_obj(Obj::plain());
+        let node = o.borrow().props.get("__node__").map(|v| to_num_simple(v) as i64).unwrap_or(-1);
+        let s = new_obj(Obj { props: OrderedMap::new(), arr: None, call: None, class: "Style" });
+        set(&s, "__owner__", Value::Num(node as f64));
+        set(&s, "setProperty", native_val(|it, t, a| { let k = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); let v = a.get(1).cloned().unwrap_or(Value::Undefined); it.set_prop(&t, &k, v); Ok(Value::Undefined) }));
+        set(&s, "removeProperty", native_val(|it, t, a| { let k = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); it.set_prop(&t, &k, str_val(String::new())); Ok(Value::Undefined) }));
+        set(&s, "getPropertyValue", native_val(|it, t, a| { let k = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); it.get_prop(&t, &k) }));
         o.borrow_mut().props.insert("__style__".into(), s.clone());
         return s;
     }
     new_obj(Obj::plain())
+}
+
+// Objet `dataset` : simple memo (data-*), sans effet sur le layout.
+fn dataset_object(this: &Value) -> Value {
+    if let Value::Obj(o) = this {
+        if let Some(s) = o.borrow().props.get("__dataset__").cloned() { return s; }
+        let s = new_obj(Obj::plain());
+        o.borrow_mut().props.insert("__dataset__".into(), s.clone());
+        return s;
+    }
+    new_obj(Obj::plain())
+}
+
+// Convertit un nom de propriete style JS (camelCase) en propriete CSS (kebab).
+fn css_prop_name(name: &str) -> String {
+    let mut o = String::new();
+    for c in name.chars() {
+        if c.is_ascii_uppercase() { o.push('-'); o.push(c.to_ascii_lowercase()); } else { o.push(c); }
+    }
+    o
+}
+
+// Serialise les proprietes d'un objet `style` en chaine CSS (`k:v;...`).
+fn serialize_style(obj: &Rc<RefCell<Obj>>) -> String {
+    let b = obj.borrow();
+    let mut out = String::new();
+    for (k, v) in b.props.iter() {
+        if k.starts_with("__") || k == "setProperty" || k == "removeProperty" || k == "getPropertyValue" || k == "cssText" { continue; }
+        if matches!(v, Value::Obj(o) if o.borrow().call.is_some()) { continue; }
+        let val = match v { Value::Str(s) => (**s).clone(), Value::Num(n) => num_to_str(*n), Value::Bool(b) => if *b { "true".into() } else { "false".into() }, _ => continue };
+        if val.is_empty() { continue; }
+        out.push_str(k); out.push(':'); out.push_str(&val); out.push(';');
+    }
+    out
 }
 
 // classList lie a un noeud (n>=0) ; methodes add/remove/toggle/contains.
@@ -1669,6 +2122,7 @@ impl PageCtx {
     pub fn dispatch(&mut self, code: &str) -> Vec<u8> {
         self.interp.writes.clear();
         let _ = self.interp.run(code);
+        self.interp.pump(); // draine timers + microtaches declenches par le handler
         let mut out = self.interp.dom.rebuild(&self.scripts);
         if out.len() > MAX_OUTPUT { out.truncate(MAX_OUTPUT); }
         out
@@ -1713,6 +2167,13 @@ pub fn open_page(html: &[u8]) -> (PageCtx, Vec<u8>) {
         }
         i += 1;
     }
+    // Boucle d'evenements initiale : draine microtaches/timers puis declenche les
+    // evenements de chargement (beaucoup de pages enveloppent leur init dedans).
+    interp.pump();
+    interp.fire_event(-1, "readystatechange");
+    interp.fire_event(-1, "DOMContentLoaded");
+    interp.fire_event(-1, "load");
+    interp.pump();
     let mut out = interp.dom.rebuild(&scripts);
     if out.len() > MAX_OUTPUT { out.truncate(MAX_OUTPUT); }
     (PageCtx { interp, scripts }, out)
@@ -1749,5 +2210,29 @@ pub fn selftest() -> Result<(), &'static str> {
     let mut it = Interp::new();
     it.run("var a=[1,2,3,4]; var o={n:a.filter(x=>x%2===0).reduce((s,x)=>s+x,0)}; console.log(JSON.stringify(o));").map_err(|_| "run3")?;
     if it.out.last().map(|x| x.as_str()) != Some("{\"n\":6}") { return Err("hof"); }
+    // Promise + microtaches (drainees par pump)
+    let mut it = Interp::new();
+    it.run("var px=0; Promise.resolve(41).then(function(v){ px=v+1; });").map_err(|_| "run4")?;
+    it.pump();
+    it.run("console.log(px);").map_err(|_| "run5")?;
+    if it.out.last().map(|x| x.as_str()) != Some("42") { return Err("promise"); }
+    // setTimeout (macrotache, drainee par pump)
+    let mut it = Interp::new();
+    it.run("var ty=0; setTimeout(function(){ ty=7; }, 0);").map_err(|_| "run6")?;
+    it.pump();
+    it.run("console.log(ty);").map_err(|_| "run7")?;
+    if it.out.last().map(|x| x.as_str()) != Some("7") { return Err("timer"); }
+    // addEventListener('click') + dispatch via element.click()
+    let (mut ctx, _o) = open_page(br#"<button id="b">x</button><script>
+        var n=0;
+        document.getElementById('b').addEventListener('click', function(){ n++; document.getElementById('b').textContent = 'clic'+n; });
+    </script>"#);
+    let html = ctx.dispatch("document.getElementById('b').click()");
+    let s = core::str::from_utf8(&html).unwrap_or("");
+    if !s.contains("clic1") { return Err("event"); }
+    // style live -> attribut style (repris par le layout)
+    let out = execute_inline(br#"<div id="d">hi</div><script>document.getElementById('d').style.color='red';</script>"#);
+    let s = core::str::from_utf8(&out).unwrap_or("");
+    if !s.contains("color:red") { return Err("style"); }
     Ok(())
 }
