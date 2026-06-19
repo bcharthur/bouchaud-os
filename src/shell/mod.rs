@@ -87,7 +87,7 @@ pub const COMMANDS: &[&str] = &[
     "serial-test", "panic-test", "roadmap", "whoami", "id", "users", "useradd",
     "userdel", "passwd", "su", "pwd", "ls", "tree", "cd", "mkdir", "touch", "cat",
     "write", "append", "nano", "edit", "rm", "rmdir", "cp", "mv", "stat", "chmod", "chown",
-    "echo", "date", "js-selftest", "grep", "wc", "head", "tail", "find", "lspci", "ping", "ifconfig",
+    "echo", "date", "js-selftest", "wasm", "wasm-selftest", "grep", "wc", "head", "tail", "find", "lspci", "ping", "ifconfig",
     "ip", "route", "arp", "dhcp", "dns", "wget", "curl", "mount", "df", "sync",
     "mkfs.bfs", "true", "false", "logout", "exit", "export", "env", "unset", "run",
     "source", "desktop", "gui", "ps", "kill", "free", "syscalls", "apps", "launch",
@@ -592,6 +592,8 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "wget" | "curl" | "http" | "https" => { crate::net::wget_cmd(argc, &argv); 0 }
         "tls-selftest" => { crate::net::tls::selftest(); 0 }
         "js-selftest" => { c::js_selftest(); 0 }
+        "wasm" => c::wasm(argc, &argv, *cwd),
+        "wasm-selftest" => { c::wasm_selftest(); 0 }
         "tls" => { crate::net::tls_cmd(argc, &argv); 0 }
         "dhcp" => { crate::net::dhcp::run(); 0 }
 

@@ -32,7 +32,7 @@ pub fn help() {
     println!("            cp <src> <dst>, mv <src> <dst>, rm <file>, rmdir <dir>, echo <texte>");
     println!("  texte   : grep <motif> [f], wc [f], head [-n N] [f], tail [-n N] [f], find [path]");
     println!("  env     : export NOM=val, env, unset NOM, $NOM, run <script.bsh>");
-    println!("  divers  : date, js-selftest");
+    println!("  divers  : date, js-selftest, wasm <f.wasm>, wasm-selftest");
     println!("  graphique: desktop (bureau VGA + souris, Echap pour quitter)");
     println!("  materiel: lspci");
     println!("  reseau  : ifup, ethinfo, arping <ip>, ping <ip>, ifconfig, ip, route, arp");
@@ -744,6 +744,48 @@ pub fn js_selftest() {
     match crate::gui::js::selftest() {
         Ok(()) => println!("js-selftest: OK"),
         Err(e) => println!("js-selftest: ECHEC ({})", e),
+    }
+}
+
+pub fn wasm_selftest() {
+    match crate::wasm::selftest() {
+        Ok(()) => println!("wasm-selftest: OK (add(2,3)=5)"),
+        Err(e) => println!("wasm-selftest: ECHEC ({})", e),
+    }
+}
+
+/// Execute un module WebAssembly (`.wasm`) depuis le systeme de fichiers via le
+/// runtime `wasmi` embarque. Appelle `_start` / `main` / `run`.
+pub fn wasm(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
+    if argc < 2 {
+        println!("usage: wasm <fichier.wasm>");
+        return 1;
+    }
+    let fs = ramfs::fs();
+    let idx = match fs.resolve_checked(argv[1], cwd) {
+        Ok(i) => i,
+        Err(e) => { println!("wasm: {}", e); return 1; }
+    };
+    if fs.nodes[idx].kind != NodeKind::File { println!("wasm: pas un fichier"); return 1; }
+    if !fs.can(idx, PERM_R) { println!("wasm: permission denied"); return 1; }
+    let len = fs.nodes[idx].content_len;
+    let mut bytes = alloc::vec::Vec::with_capacity(len);
+    for i in 0..len { bytes.push(fs.nodes[idx].content[i]); }
+
+    let res = crate::wasm::run_bytes(&bytes);
+    if !res.output.is_empty() {
+        print!("{}", res.output);
+        if !res.output.ends_with('\n') { println!(""); }
+    }
+    if let Some(code) = res.exit_code {
+        println!("wasm: proc_exit({})", code);
+    }
+    if let Some(v) = res.result {
+        println!("wasm: resultat = {}", v);
+    }
+    match res.error {
+        Some(e) => { println!("wasm: {}", e); 1 }
+        None => res.exit_code.unwrap_or(0),
     }
 }
 
