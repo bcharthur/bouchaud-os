@@ -396,11 +396,20 @@ pub fn blit_rgb(x: usize, y: usize, iw: usize, ih: usize, pix: &[u32],
     let cx1 = (clip_x + clip_w).min(WIDTH);
     let cy1 = (clip_y + clip_h).min(HEIGHT);
     for row in 0..ih {
-        let py = y + row;
+        let py = match y.checked_add(row) {
+            Some(v) => v,
+            None => continue,
+        };
         if py < clip_y || py >= cy1 { continue; }
-        let base = row * iw;
+        let base = match row.checked_mul(iw) {
+            Some(v) => v,
+            None => continue,
+        };
         for col in 0..iw {
-            let px = x + col;
+            let px = match x.checked_add(col) {
+                Some(v) => v,
+                None => continue,
+            };
             if px < clip_x || px >= cx1 { continue; }
             if base + col < pix.len() {
                 buf[py * WIDTH + px] = pix[base + col];

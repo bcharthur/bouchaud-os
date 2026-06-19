@@ -794,7 +794,20 @@ pub fn paint(page: &Page, scroll: i32, bx: usize, by: usize, bw: usize, bh: usiz
                 if let Some(img) = page.images.get(*idx) {
                     let xx = bxi + x;
                     if xx >= bxi {
-                        fb::blit_rgb(xx as usize, sy as usize, img.w, img.h, &img.pix, bx, by, bw, bh);
+                        let skip = (byi - sy).max(0) as usize;
+                        let draw_h = img.h.saturating_sub(skip);
+                        let start = skip.saturating_mul(img.w).min(img.pix.len());
+                        fb::blit_rgb(
+                            xx as usize,
+                            sy.max(byi) as usize,
+                            img.w,
+                            draw_h,
+                            &img.pix[start..],
+                            bx,
+                            by,
+                            bw,
+                            bh,
+                        );
                     }
                 }
             }
