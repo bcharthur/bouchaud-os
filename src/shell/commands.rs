@@ -743,7 +743,7 @@ pub fn redirect(path: &str, data: &str, append: bool, cwd: usize) -> i32 {
 pub fn date() {
     let dt = crate::arch::x86_64::rtc::now();
     println!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC+2",
         dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second
     );
 }
