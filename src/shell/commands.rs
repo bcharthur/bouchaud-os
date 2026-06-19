@@ -32,7 +32,7 @@ pub fn help() {
     println!("            cp <src> <dst>, mv <src> <dst>, rm <file>, rmdir <dir>, echo <texte>");
     println!("  texte   : grep <motif> [f], wc [f], head [-n N] [f], tail [-n N] [f], find [path]");
     println!("  env     : export NOM=val, env, unset NOM, $NOM, run <script.bsh>");
-    println!("  divers  : date");
+    println!("  divers  : date, js-selftest");
     println!("  graphique: desktop (bureau VGA + souris, Echap pour quitter)");
     println!("  materiel: lspci");
     println!("  reseau  : ifup, ethinfo, arping <ip>, ping <ip>, ifconfig, ip, route, arp");
@@ -739,6 +739,13 @@ pub fn redirect(path: &str, data: &str, append: bool, cwd: usize) -> i32 {
 // ---------------------------------------------------------------------------
 // Horloge et coreutils (grep / wc / head / tail / find)
 // ---------------------------------------------------------------------------
+
+pub fn js_selftest() {
+    match crate::gui::js::selftest() {
+        Ok(()) => println!("js-selftest: OK"),
+        Err(e) => println!("js-selftest: ECHEC ({})", e),
+    }
+}
 
 pub fn date() {
     let dt = crate::arch::x86_64::rtc::now();
