@@ -143,6 +143,24 @@ pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
     }
 }
 
+/// Transmet un delta de roulette a l'application sous le curseur.
+pub(crate) fn wheel_to_app(w: &mut Win, mx: i32, my: i32, delta: i32) {
+    if delta == 0 {
+        return;
+    }
+    if let App::Browser { page, scroll, .. } = &mut w.app {
+        let bx = w.x + 3;
+        let by = w.y + TITLE_H + 2;
+        let bw = (w.w - 6).max(1) as usize;
+        let bh = (w.h - TITLE_H - 4).max(1) as usize;
+        if mx < bx || mx >= bx + bw as i32 || my < by || my >= by + bh as i32 {
+            return;
+        }
+        let max = chromium_stub::max_scroll(page, bh);
+        *scroll = (*scroll - delta * 48).clamp(0, max);
+    }
+}
+
 /// Dessine le contenu applicatif d'une fenetre.
 pub(crate) fn draw_app(w: &Win) {
     let bx = w.x.max(0) as usize + 3;

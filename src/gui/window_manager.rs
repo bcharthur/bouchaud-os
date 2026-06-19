@@ -51,6 +51,7 @@ pub fn run() {
         let (mxu, myu) = mouse::pos();
         let mx = mxu as i32;
         let my = myu as i32;
+        let wheel = mouse::take_wheel();
         let left = mouse::left_down();
         let click = left && !prev_left;
         prev_left = left;
@@ -77,6 +78,9 @@ pub fn run() {
         if click {
             handle_click(mx, my, &mut wins, &mut menu_open, &mut drag, &mut quit, home, &mut spawn_n);
         }
+        if wheel != 0 {
+            handle_wheel(mx, my, wheel, &mut wins);
+        }
 
         widgets::draw_desktop(&wins);
         if menu_open { widgets::draw_menu(); }
@@ -87,6 +91,16 @@ pub fn run() {
 
     fb::leave();
     crate::serial_println!("[gui] window manager ferme");
+}
+
+fn handle_wheel(mx: i32, my: i32, delta: i32, wins: &mut Vec<Win>) {
+    for i in (0..wins.len()).rev() {
+        let w = &wins[i];
+        if !w.min && mx >= w.x && mx < w.x + w.w && my >= w.y && my < w.y + w.h {
+            apps::wheel_to_app(&mut wins[i], mx, my, delta);
+            break;
+        }
+    }
 }
 
 fn handle_click(
