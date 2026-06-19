@@ -39,7 +39,10 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
         (win_w - 6).max(1) as usize,
         (win_h - TITLE_H - 4).max(1) as usize,
     );
-    match &mut w.app {
+    // Titre de fenetre a synchroniser apres navigation (style Windows : la
+    // fenetre porte le titre du document).
+    let mut new_title: Option<alloc::string::String> = None;
+    let close = match &mut w.app {
         App::Terminal { sb, input, cwd } => match k {
             Key::Enter => {
                 let prompt = format!("{}:{}$ ", users::session().username(), ramfs::path_string(ramfs::fs(), *cwd));
@@ -75,6 +78,7 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
                 *url = target.clone();
                 *input = target;
                 *scroll = 0;
+                new_title = Some(if page.title.is_empty() { (*url).clone() } else { page.title.clone() });
                 false
             }
             Key::Up => { *scroll = (*scroll - 48).max(0); false }
@@ -89,7 +93,9 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
             _ => false,
         },
         _ => false,
-    }
+    };
+    if let Some(t) = new_title { w.title = t; }
+    close
 }
 
 /// Clic dans le corps d'une application (uniquement Fichiers pour l'instant).
@@ -123,6 +129,7 @@ pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
             *url = href.clone();
             *input = href;
             *scroll = 0;
+            w.title = if page.title.is_empty() { (*url).clone() } else { page.title.clone() };
         }
         return;
     }
