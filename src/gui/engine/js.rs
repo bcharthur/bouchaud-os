@@ -1641,10 +1641,19 @@ const MAX_SCRIPT: usize = 256_000;
 
 /// Execute les `<script>` inline sur un DOM partage et renvoie le HTML enrichi :
 /// document.write insere a la position du script, mutations DOM (innerHTML,
-/// textContent, appendChild, setAttribute/classList...) appliquees par plages.
+/// textContent, appendChild...) appliquees par plages.
 pub fn execute_inline(html: &[u8]) -> Vec<u8> {
     let (_ctx, out) = open_page(html);
     out
+}
+
+/// Evalue une expression JS isolee et renvoie son resultat formate (semantique
+/// JS). Utilise par l'application Calculatrice : l'OS calcule via son propre
+/// moteur de langage embarque.
+pub fn eval_expr(src: &str) -> Result<String, String> {
+    let mut interp = Interp::new();
+    let v = interp.run(src)?;
+    Ok(interp.to_string(&v))
 }
 
 /// Contexte JS persistant d'une page : conserve l'interpreteur (donc l'etat des

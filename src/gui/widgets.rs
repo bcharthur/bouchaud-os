@@ -2,15 +2,24 @@
 
 use crate::gui::apps;
 use crate::gui::framebuffer as fb;
-use crate::gui::window::{clip, menu_rect, start_btn, taskbar_btn, Win, BAR_H, MENU, TITLE_H};
+use crate::gui::window::{clip, icon_rect, menu_rect, start_btn, taskbar_btn, Win, BAR_H, ICONS, MENU, TITLE_H};
 use crate::arch::x86_64::rtc;
 use alloc::format;
 
+// Accent + glyphe par icone de bureau (meme ordre que window::ICONS).
+const ICON_STYLE: [(u32, &str); 4] = [
+    (0x1a73e8, "W"),   // Navigateur
+    (0x34a853, "="),   // Calculatrice
+    (0x202124, ">_"),  // Terminal
+    (0xf9ab00, "[]"),  // Fichiers
+];
+
 /// Dessine le fond du bureau, la barre du haut et toutes les fenetres visibles.
 pub(crate) fn draw_desktop(wins: &[Win]) {
-    fb::clear(fb::C_DESKTOP);
-    fb::fill_rect(0, fb::HEIGHT / 2, fb::WIDTH, fb::HEIGHT / 2, fb::C_DKBLUE);
-    fb::draw_text(fb::WIDTH / 2 - 44, fb::HEIGHT / 2 - 4, "Bouchaud OS", fb::C_DKGRAY);
+    draw_wallpaper();
+    fb::draw_text_rgb(fb::WIDTH / 2 - 88, fb::HEIGHT - 60, "Bouchaud OS", 0x33476b, 2);
+
+    draw_icons();
 
     fb::fill_rect(0, 0, fb::WIDTH, BAR_H, fb::C_TITLE);
     fb::draw_text(2, 2, "Bouchaud OS", fb::C_WHITE);
@@ -22,6 +31,44 @@ pub(crate) fn draw_desktop(wins: &[Win]) {
     for (i, w) in wins.iter().enumerate() {
         if w.min { continue; }
         draw_window(w, Some(i) == focus);
+    }
+}
+
+// Degrade vertical bleu nuit -> bleu (fond de bureau).
+fn draw_wallpaper() {
+    const TOP: (u32, u32, u32) = (0x0b, 0x16, 0x2a);
+    const BOT: (u32, u32, u32) = (0x1c, 0x3a, 0x66);
+    let h = fb::HEIGHT.max(1);
+    let mut y = 0;
+    while y < fb::HEIGHT {
+        let t = y * 255 / h; // 0..255
+        let r = TOP.0 + (BOT.0 - TOP.0) * t as u32 / 255;
+        let g = TOP.1 + (BOT.1 - TOP.1) * t as u32 / 255;
+        let b = TOP.2 + (BOT.2 - TOP.2) * t as u32 / 255;
+        fb::fill_rect_rgb(0, y, fb::WIDTH, 1, (r << 16) | (g << 8) | b);
+        y += 1;
+    }
+}
+
+/// Dessine les icones de lancement sur le bureau.
+fn draw_icons() {
+    for (i, (label, _kind)) in ICONS.iter().enumerate() {
+        let r = icon_rect(i);
+        let (accent, glyph) = ICON_STYLE[i];
+        // Vignette 40x40 centree dans la largeur de l'icone.
+        let vw = 40i32;
+        let vx = r.x + (r.w - vw) / 2;
+        let vy = r.y;
+        fb::fill_rect_rgb((vx + 2) as usize, (vy + 2) as usize, vw as usize, vw as usize, 0x101820); // ombre douce
+        fb::fill_rect_rgb(vx as usize, vy as usize, vw as usize, vw as usize, accent);
+        // Liseré clair.
+        fb::fill_rect_rgb(vx as usize, vy as usize, vw as usize, 1, 0xffffff);
+        // Glyphe centre (scale 2).
+        let gw = glyph.len() as i32 * 16;
+        fb::draw_text_rgb((vx + (vw - gw) / 2).max(0) as usize, (vy + 12) as usize, glyph, 0xffffff, 2);
+        // Etiquette sous la vignette.
+        let lw = label.len() as i32 * 8;
+        fb::draw_text(((r.x + (r.w - lw) / 2).max(0)) as usize, (vy + vw + 3) as usize, label, fb::C_WHITE);
     }
 }
 

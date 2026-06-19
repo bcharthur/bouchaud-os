@@ -7,8 +7,8 @@ use crate::gui::framebuffer as fb;
 use crate::gui::mouse;
 use crate::gui::widgets;
 use crate::gui::window::{
-    clamp_win, make_app, menu_rect, start_btn, taskbar_btn, toggle_max, Drag, Win, BAR_H, MENU,
-    MIN_H, MIN_W, TITLE_H,
+    clamp_win, icon_rect, make_app, menu_rect, start_btn, taskbar_btn, toggle_max, Drag, Win,
+    BAR_H, ICONS, MENU, MIN_H, MIN_W, TITLE_H,
 };
 use crate::drivers::keyboard;
 use crate::fs::ramfs;
@@ -143,6 +143,15 @@ fn handle_click(
         if !w.min && mx >= w.x && mx < w.x + w.w && my >= w.y && my < w.y + w.h {
             hit = Some(i);
             break;
+        }
+    }
+    if hit.is_none() {
+        // Clic sur le bureau (aucune fenetre) : lance l'icone touchee.
+        for j in 0..ICONS.len() {
+            if icon_rect(j).hit(mx, my) {
+                wins.push(make_app(ICONS[j].1, home, spawn_n));
+                return;
+            }
         }
     }
     if let Some(i) = hit {
