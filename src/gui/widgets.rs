@@ -16,9 +16,8 @@ const ICON_STYLE: [(u32, &str); 4] = [
 
 /// Dessine le fond du bureau, la barre du haut et toutes les fenetres visibles.
 pub(crate) fn draw_desktop(wins: &[Win]) {
-    fb::clear(fb::C_DESKTOP);
-    fb::fill_rect(0, fb::HEIGHT / 2, fb::WIDTH, fb::HEIGHT / 2, fb::C_DKBLUE);
-    fb::draw_text(fb::WIDTH / 2 - 44, fb::HEIGHT / 2 - 4, "Bouchaud OS", fb::C_DKGRAY);
+    draw_wallpaper();
+    fb::draw_text_rgb(fb::WIDTH / 2 - 88, fb::HEIGHT - 60, "Bouchaud OS", 0x33476b, 2);
 
     draw_icons();
 
@@ -32,6 +31,22 @@ pub(crate) fn draw_desktop(wins: &[Win]) {
     for (i, w) in wins.iter().enumerate() {
         if w.min { continue; }
         draw_window(w, Some(i) == focus);
+    }
+}
+
+// Degrade vertical bleu nuit -> bleu (fond de bureau).
+fn draw_wallpaper() {
+    const TOP: (u32, u32, u32) = (0x0b, 0x16, 0x2a);
+    const BOT: (u32, u32, u32) = (0x1c, 0x3a, 0x66);
+    let h = fb::HEIGHT.max(1);
+    let mut y = 0;
+    while y < fb::HEIGHT {
+        let t = y * 255 / h; // 0..255
+        let r = TOP.0 + (BOT.0 - TOP.0) * t as u32 / 255;
+        let g = TOP.1 + (BOT.1 - TOP.1) * t as u32 / 255;
+        let b = TOP.2 + (BOT.2 - TOP.2) * t as u32 / 255;
+        fb::fill_rect_rgb(0, y, fb::WIDTH, 1, (r << 16) | (g << 8) | b);
+        y += 1;
     }
 }
 

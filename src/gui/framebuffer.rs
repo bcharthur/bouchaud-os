@@ -5,9 +5,9 @@
 //! permet de changer de backend d'affichage sans toucher aux applications.
 
 pub use crate::drivers::gfx::{
-    clear, draw_text, draw_text_scaled, draw_text_rgb, fill_rect_rgb, blit_rgb,
+    draw_text, draw_text_scaled, draw_text_rgb, fill_rect_rgb, blit_rgb,
     enter, fill_rect, leave, pixel, present, rect,
     HEIGHT, WIDTH,
-    C_BLACK, C_BLUE, C_CYAN, C_DESKTOP, C_DKBLUE, C_DKGRAY, C_GRAY, C_GREEN, C_RED, C_TITLE,
+    C_BLACK, C_BLUE, C_CYAN, C_DKGRAY, C_GRAY, C_GREEN, C_RED, C_TITLE,
     C_WHITE, C_YELLOW,
 };

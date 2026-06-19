@@ -38,14 +38,30 @@ pub(crate) fn open(url: &str, width: i32) -> (Session, Page) {
     let width = width.max(80);
     if url == "about:bouchaud" {
         let html = format!(
-            "<h1>Bouchaud OS</h1><p>OS souverain francais experimental.</p>\
-             <p>Version : {} &mdash; noyau Rust no_std, bureau HD, pile reseau TLS 1.3.</p>\
-             <h3>Pages</h3><ul><li><a href=\"about:calc\">about:calc (calculatrice)</a></li>\
-             <li><a href=\"about:system\">about:system</a></li>\
-             <li><a href=\"file:/readme.txt\">file:/readme.txt</a></li>\
+            "<!doctype html><html><head><title>Bouchaud OS</title><style>\
+             body{{background:#f5f7fb;color:#202124}}\
+             .hero{{background:#1a73e8;color:#ffffff;padding:18px;text-align:center}}\
+             .hero h1{{color:#ffffff}}\
+             .v{{color:#d2e3fc}}\
+             .card{{background:#ffffff;border:1px solid #dadce0;padding:10px;margin:8px}}\
+             .card h3{{color:#1a73e8}}\
+             a{{color:#1a73e8}}\
+             </style></head><body>\
+             <div class=\"hero\"><h1>Bouchaud OS</h1>\
+             <p class=\"v\">Systeme souverain experimental &mdash; version {}</p></div>\
+             <div class=\"card\"><h3>Applications</h3><ul>\
+             <li><a href=\"about:calc\">Calculatrice</a> &mdash; appli native (moteur JS)</li>\
+             <li><a href=\"about:system\">Informations systeme</a></li>\
+             <li><a href=\"file:/readme.txt\">Lecteur de fichiers (readme.txt)</a></li>\
+             </ul></div>\
+             <div class=\"card\"><h3>Le Web, en vrai</h3>\
+             <p>Noyau Rust no_std, pile reseau TLS 1.3, moteur de rendu HTML/CSS et\
+             interpreteur JavaScript integres. Essaie une vraie page :</p><ul>\
              <li><a href=\"https://example.com/\">https://example.com/</a></li>\
-             <li><a href=\"https://www.google.com/\">https://www.google.com/</a></li></ul>\
-             <p>Tape une URL dans la barre d'adresse, ou un numero pour suivre un lien.</p>",
+             <li><a href=\"https://www.google.com/\">https://www.google.com/</a></li></ul></div>\
+             <div class=\"card\"><h3>Astuce</h3><p>Tape une URL dans la barre d'adresse,\
+             ou un numero seul pour suivre le lien correspondant.</p></div>\
+             </body></html>",
             crate::VERSION);
         return page_from_html(html.as_bytes(), url, width);
     }
