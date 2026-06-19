@@ -1643,6 +1643,38 @@ const MAX_SCRIPT: usize = 256_000;
 /// document.write insere a la position du script, mutations DOM (innerHTML,
 /// textContent, appendChild, setAttribute/classList...) appliquees par plages.
 pub fn execute_inline(html: &[u8]) -> Vec<u8> {
+    let (_ctx, out) = open_page(html);
+    out
+}
+
+/// Contexte JS persistant d'une page : conserve l'interpreteur (donc l'etat des
+/// variables/fonctions et le DOM mute) entre l'ouverture et les evenements.
+/// Permet des mini-applications interactives (boutons `onclick`).
+pub struct PageCtx {
+    pub interp: Interp,
+    scripts: Vec<(usize, usize, String)>,
+}
+
+impl PageCtx {
+    /// Rejoue un gestionnaire d'evenement (code JS) puis renvoie le HTML a jour.
+    pub fn dispatch(&mut self, code: &str) -> Vec<u8> {
+        self.interp.writes.clear();
+        let _ = self.interp.run(code);
+        let mut out = self.interp.dom.rebuild(&self.scripts);
+        if out.len() > MAX_OUTPUT { out.truncate(MAX_OUTPUT); }
+        out
+    }
+    /// Reconstruit le HTML courant sans rejouer de code (re-rendu).
+    pub fn html(&self) -> Vec<u8> {
+        let mut out = self.interp.dom.rebuild(&self.scripts);
+        if out.len() > MAX_OUTPUT { out.truncate(MAX_OUTPUT); }
+        out
+    }
+}
+
+/// Ouvre une page : construit le DOM, execute les scripts inline une fois, et
+/// renvoie le contexte persistant + le HTML initial enrichi.
+pub fn open_page(html: &[u8]) -> (PageCtx, Vec<u8>) {
     let mut interp = Interp::new();
     interp.dom = DomModel::parse(html);
     let mut scripts: Vec<(usize, usize, String)> = Vec::new();
@@ -1674,7 +1706,7 @@ pub fn execute_inline(html: &[u8]) -> Vec<u8> {
     }
     let mut out = interp.dom.rebuild(&scripts);
     if out.len() > MAX_OUTPUT { out.truncate(MAX_OUTPUT); }
-    out
+    (PageCtx { interp, scripts }, out)
 }
 
 // --- helpers HTML ---

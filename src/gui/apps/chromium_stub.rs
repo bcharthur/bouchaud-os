@@ -5,7 +5,7 @@
 //! defilement. Pages internes : `about:bouchaud`, `about:system`, `file:/...`.
 
 use crate::gui::framebuffer as fb;
-use crate::gui::web::{self, Page};
+use crate::gui::web::{self, Page, Session};
 use crate::gui::window::clip;
 use crate::arch::x86_64::rtc;
 use crate::fs::ramfs;
@@ -26,27 +26,31 @@ fn esc(s: &str) -> String {
     o
 }
 
-fn page_from_html(html: &[u8], base: &str, width: i32) -> Page {
+fn page_from_html(html: &[u8], base: &str, width: i32) -> (Session, Page) {
     // Borne la taille du document analyse (les pages enormes type YouTube
     // depasseraient la memoire). Le rendu reste correct sur l'entete.
     let capped = &html[..html.len().min(4_000_000)];
-    web::render(capped, base, width)
+    Session::open(capped, base, width)
 }
 
-/// Charge une URL et renvoie la page mise en page pour la largeur donnee.
-pub(crate) fn open(url: &str, width: i32) -> Page {
+/// Charge une URL et renvoie la session interactive + la page mise en page.
+pub(crate) fn open(url: &str, width: i32) -> (Session, Page) {
     let width = width.max(80);
     if url == "about:bouchaud" {
         let html = format!(
             "<h1>Bouchaud OS</h1><p>OS souverain francais experimental.</p>\
              <p>Version : {} &mdash; noyau Rust no_std, bureau HD, pile reseau TLS 1.3.</p>\
-             <h3>Pages</h3><ul><li><a href=\"about:system\">about:system</a></li>\
+             <h3>Pages</h3><ul><li><a href=\"about:calc\">about:calc (calculatrice)</a></li>\
+             <li><a href=\"about:system\">about:system</a></li>\
              <li><a href=\"file:/readme.txt\">file:/readme.txt</a></li>\
              <li><a href=\"https://example.com/\">https://example.com/</a></li>\
              <li><a href=\"https://www.google.com/\">https://www.google.com/</a></li></ul>\
              <p>Tape une URL dans la barre d'adresse, ou un numero pour suivre un lien.</p>",
             crate::VERSION);
         return page_from_html(html.as_bytes(), url, width);
+    }
+    if url == "about:calc" {
+        return page_from_html(CALC_APP.as_bytes(), url, width);
     }
     if url == "about:system" {
         let dt = rtc::now();
@@ -97,6 +101,48 @@ pub(crate) fn open(url: &str, width: i32) -> Page {
     let html = format!("<h2>Page inconnue</h2><p>{}</p><p>Essaie about:bouchaud, https://example.com/</p>", esc(url));
     page_from_html(html.as_bytes(), url, width)
 }
+
+// Application calculatrice embarquee (HTML+CSS+JS) : demonstration d'une appli
+// interactive tournant sur le moteur JS/DOM. Les boutons `onclick` rejouent du
+// code dans le contexte JS persistant de la page (voir web::Session).
+const CALC_APP: &str = r#"<!doctype html><html><head><title>Calculatrice</title>
+<style>
+body{background:#202124;color:#e8eaed;text-align:center}
+#disp{background:#111;color:#8ab4f8;font-size:26px;max-width:260px;margin:8px auto;padding:8px}
+.row{display:flex;max-width:260px;margin:0 auto}
+button{background:#3c4043;color:#e8eaed;font-size:20px}
+.op button{color:#fdd663}
+</style></head><body>
+<h2>Calculatrice</h2>
+<div id="disp">0</div>
+<div class="row"><button onclick="press('7')">7</button><button onclick="press('8')">8</button><button onclick="press('9')">9</button><div class="op"><button onclick="press('/')">/</button></div></div>
+<div class="row"><button onclick="press('4')">4</button><button onclick="press('5')">5</button><button onclick="press('6')">6</button><div class="op"><button onclick="press('*')">*</button></div></div>
+<div class="row"><button onclick="press('1')">1</button><button onclick="press('2')">2</button><button onclick="press('3')">3</button><div class="op"><button onclick="press('-')">-</button></div></div>
+<div class="row"><button onclick="press('0')">0</button><button onclick="press('.')">.</button><div class="op"><button onclick="equals()">=</button></div><div class="op"><button onclick="press('+')">+</button></div></div>
+<div class="row"><button onclick="clr()">C</button></div>
+<script>
+var cur='';
+function press(c){ if(cur==='0')cur=''; cur+=c; show(); }
+function clr(){ cur=''; show0(); }
+function show(){ document.getElementById('disp').textContent = cur; }
+function show0(){ document.getElementById('disp').textContent = '0'; }
+function equals(){ cur = String(evalExpr(cur)); show(); }
+// Evaluateur d'expression: tokenise, applique */ puis +-.
+function evalExpr(s){
+  var toks=[], num='';
+  for(var i=0;i<s.length;i++){ var ch=s[i];
+    if(ch>='0'&&ch<='9'||ch==='.'){ num+=ch; }
+    else { if(num!==''){toks.push(parseFloat(num));num='';} toks.push(ch); } }
+  if(num!=='')toks.push(parseFloat(num));
+  var p=[], i=0;
+  while(i<toks.length){ var t=toks[i];
+    if(t==='*'||t==='/'){ var a=p.pop(), b=toks[i+1]; p.push(t==='*'?a*b:a/b); i+=2; }
+    else { p.push(t); i++; } }
+  var r=p[0]||0;
+  for(i=1;i<p.length;i+=2){ if(p[i]==='+')r+=p[i+1]; else if(p[i]==='-')r-=p[i+1]; }
+  return Math.round(r*1e6)/1e6;
+}
+</script></body></html>"#;
 
 /// Normalise l'entree de la barre d'adresse en URL. Un numero seul suit le lien
 /// correspondant de la page courante.
