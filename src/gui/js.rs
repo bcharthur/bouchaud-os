@@ -1,76 +1,1229 @@
-//! Mini moteur JavaScript pour le navigateur graphique.
+//! Moteur JavaScript reel (sous-ensemble ECMAScript) pour le navigateur.
 //!
-//! Objectif volontairement modeste et coherent avec le moteur HTML/CSS actuel :
-//! executer les scripts inline courants qui injectent du HTML pendant le parsing
-//! (`document.write`) ou hydratent un conteneur simple par id (`innerHTML`,
-//! `textContent`). Ce n'est pas un moteur ECMAScript complet : pas de reseau
-//! asynchrone, pas d'evenements, pas de JIT, mais assez pour de nombreuses pages
-//! statiques qui dependent de petits scripts de bootstrap.
+//! Pipeline : lexer -> parser (AST) -> interpreteur arborescent. Couvre
+//! nombres/chaines/templates/booleens/null/undefined, objets & tableaux,
+//! fonctions (declarations, expressions, fleche + closures), `this`,
+//! operateurs (arith/comparaison/logique/bit/ternaire/affectation/++/--),
+//! var/let/const, if/else, for, for-in/of, while, do-while, break/continue,
+//! return, try/catch/throw ; built-ins console/Math/JSON/Array/String/Object.
+//!
+//! Integration page : `execute_inline(html)` execute les `<script>` inline (sur
+//! un contexte partage), injecte la sortie `document.write(...)` a la position
+//! du script et applique `getElementById(id).innerHTML/textContent = ...` sur
+//! le HTML. Sandbox : nombre de pas borne (anti-boucle infinie), erreurs
+//! capturees (un script fautif n'empeche pas le rendu).
 
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use alloc::{format, vec};
+use core::cell::RefCell;
 
-const MAX_SCRIPT: usize = 128_000;
-const MAX_OUTPUT: usize = 2_000_000;
-const MAX_STEPS: usize = 20_000;
+// ============================================================================
+// Valeurs
+// ============================================================================
+
+pub type NativeFn = fn(&mut Interp, Value, &[Value]) -> Result<Value, Value>;
 
 #[derive(Clone)]
-struct Var {
-    name: String,
-    value: String,
+pub enum Value {
+    Undefined,
+    Null,
+    Bool(bool),
+    Num(f64),
+    Str(Rc<String>),
+    Obj(Rc<RefCell<Obj>>),
 }
 
-#[derive(Default)]
-struct JsEnv {
-    vars: Vec<Var>,
-    writes: Vec<String>,
-    patches: Vec<(String, String)>,
-    steps: usize,
+pub struct Obj {
+    pub props: OrderedMap,
+    pub arr: Option<Vec<Value>>,
+    pub call: Option<Callable>,
+    pub class: &'static str,
 }
 
-impl JsEnv {
-    fn get(&self, name: &str) -> String {
-        self.vars
-            .iter()
-            .rev()
-            .find(|v| v.name == name)
-            .map(|v| v.value.clone())
-            .unwrap_or_default()
+/// Table de proprietes preservant l'ordre d'insertion (semantique JS, observable
+/// via Object.keys / for-in / JSON.stringify). Acces lineaire : les objets des
+/// pages web restent petits.
+#[derive(Clone, Default)]
+pub struct OrderedMap { keys: Vec<String>, vals: Vec<Value> }
+impl OrderedMap {
+    pub fn new() -> OrderedMap { OrderedMap { keys: Vec::new(), vals: Vec::new() } }
+    pub fn insert(&mut self, k: String, v: Value) -> Option<Value> {
+        if let Some(i) = self.keys.iter().position(|x| x == &k) {
+            Some(core::mem::replace(&mut self.vals[i], v))
+        } else { self.keys.push(k); self.vals.push(v); None }
+    }
+    pub fn get(&self, k: &str) -> Option<&Value> { self.keys.iter().position(|x| x == k).map(|i| &self.vals[i]) }
+    pub fn get_mut(&mut self, k: &str) -> Option<&mut Value> { let i = self.keys.iter().position(|x| x == k)?; Some(&mut self.vals[i]) }
+    pub fn contains_key(&self, k: &str) -> bool { self.keys.iter().any(|x| x == k) }
+    pub fn is_empty(&self) -> bool { self.keys.is_empty() }
+    pub fn len(&self) -> usize { self.keys.len() }
+    pub fn keys(&self) -> impl Iterator<Item = &String> { self.keys.iter() }
+    pub fn values(&self) -> impl Iterator<Item = &Value> { self.vals.iter() }
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Value)> { self.keys.iter().zip(self.vals.iter()) }
+}
+
+#[derive(Clone)]
+pub enum Callable {
+    User { def: Rc<FuncDef>, env: Env },
+    Native(NativeFn),
+}
+
+impl Obj {
+    fn plain() -> Obj { Obj { props: OrderedMap::new(), arr: None, call: None, class: "Object" } }
+}
+
+fn new_obj(o: Obj) -> Value { Value::Obj(Rc::new(RefCell::new(o))) }
+pub fn str_val(s: impl Into<String>) -> Value { Value::Str(Rc::new(s.into())) }
+fn array_val(items: Vec<Value>) -> Value {
+    new_obj(Obj { props: OrderedMap::new(), arr: Some(items), call: None, class: "Array" })
+}
+fn native_val(f: NativeFn) -> Value {
+    new_obj(Obj { props: OrderedMap::new(), arr: None, call: Some(Callable::Native(f)), class: "Function" })
+}
+
+// ============================================================================
+// AST
+// ============================================================================
+
+#[derive(Clone)]
+pub struct FuncDef {
+    pub params: Vec<String>,
+    pub rest: Option<String>,
+    pub body: Vec<Stmt>,
+    pub arrow: bool,
+    pub expr_body: Option<Box<Expr>>,
+}
+
+#[derive(Clone)]
+pub enum Expr {
+    Num(f64), Str(String), Tpl(Vec<Expr>), Bool(bool), Null, Undef,
+    Ident(String), This,
+    Array(Vec<Expr>), Object(Vec<(String, Expr)>),
+    Unary(String, Box<Expr>), Update(String, bool, Box<Expr>),
+    Bin(String, Box<Expr>, Box<Expr>), Logic(String, Box<Expr>, Box<Expr>),
+    Assign(String, Box<Expr>, Box<Expr>), Cond(Box<Expr>, Box<Expr>, Box<Expr>),
+    Call(Box<Expr>, Vec<Expr>, bool), New(Box<Expr>, Vec<Expr>),
+    Member(Box<Expr>, String, bool), Index(Box<Expr>, Box<Expr>),
+    Func(Rc<FuncDef>), Seq(Vec<Expr>), Spread(Box<Expr>),
+}
+
+#[derive(Clone)]
+pub enum Stmt {
+    Expr(Expr), Var(bool, Vec<(String, Option<Expr>)>), Func(String, Rc<FuncDef>),
+    Return(Option<Expr>), If(Expr, Box<Stmt>, Option<Box<Stmt>>), Block(Vec<Stmt>),
+    While(Expr, Box<Stmt>), DoWhile(Box<Stmt>, Expr),
+    For(Option<Box<Stmt>>, Option<Expr>, Option<Expr>, Box<Stmt>),
+    ForIn(String, Expr, Box<Stmt>, bool), Break, Continue, Throw(Expr),
+    Try(Vec<Stmt>, Option<(String, Vec<Stmt>)>, Option<Vec<Stmt>>), Empty,
+}
+
+// ============================================================================
+// Lexer
+// ============================================================================
+
+#[derive(Clone, PartialEq)]
+enum Tok { Num(f64), Str(String), Tpl(Vec<TplPart>), Ident(String), Keyword(String), Punct(String), Regex, Eof }
+#[derive(Clone, PartialEq)]
+enum TplPart { Str(String), Expr(Vec<Tok>) }
+
+struct Lexer<'a> { s: &'a [u8], i: usize, toks: Vec<(Tok, bool)> }
+
+const KEYWORDS: &[&str] = &["var","let","const","function","return","if","else","for","while","do",
+    "break","continue","new","typeof","instanceof","in","of","this","null","true","false",
+    "undefined","void","delete","throw","try","catch","finally","switch","case","default","class","extends","super"];
+
+fn is_id_start(c: u8) -> bool { c == b'_' || c == b'$' || c.is_ascii_alphabetic() }
+fn is_id_part(c: u8) -> bool { c == b'_' || c == b'$' || c.is_ascii_alphanumeric() }
+fn hexv(c: u8) -> u32 { match c { b'0'..=b'9' => (c - b'0') as u32, b'a'..=b'f' => (c - b'a' + 10) as u32, b'A'..=b'F' => (c - b'A' + 10) as u32, _ => 0 } }
+
+impl<'a> Lexer<'a> {
+    fn new(s: &'a [u8]) -> Lexer<'a> { Lexer { s, i: 0, toks: Vec::new() } }
+
+    fn prev_allows_regex(&self) -> bool {
+        match self.toks.last() {
+            None => true,
+            Some((t, _)) => match t {
+                Tok::Num(_) | Tok::Str(_) | Tok::Tpl(_) | Tok::Regex => false,
+                Tok::Ident(_) => false,
+                Tok::Keyword(k) => k != "this",
+                Tok::Punct(p) => p != ")" && p != "]" && p != "}",
+                Tok::Eof => true,
+            },
+        }
     }
 
-    fn set(&mut self, name: &str, value: String) {
-        if let Some(v) = self.vars.iter_mut().rev().find(|v| v.name == name) {
-            v.value = value;
-            return;
+    fn lex_all(mut self) -> Result<Vec<(Tok, bool)>, String> {
+        let mut nl = false;
+        loop {
+            loop {
+                while self.i < self.s.len() && (self.s[self.i] == b' ' || self.s[self.i] == b'\t' || self.s[self.i] == b'\r' || self.s[self.i] == b'\n') {
+                    if self.s[self.i] == b'\n' { nl = true; }
+                    self.i += 1;
+                }
+                if self.i + 1 < self.s.len() && self.s[self.i] == b'/' && self.s[self.i + 1] == b'/' {
+                    while self.i < self.s.len() && self.s[self.i] != b'\n' { self.i += 1; }
+                    continue;
+                }
+                if self.i + 1 < self.s.len() && self.s[self.i] == b'/' && self.s[self.i + 1] == b'*' {
+                    self.i += 2;
+                    while self.i + 1 < self.s.len() && !(self.s[self.i] == b'*' && self.s[self.i + 1] == b'/') { if self.s[self.i] == b'\n' { nl = true; } self.i += 1; }
+                    self.i += 2;
+                    continue;
+                }
+                break;
+            }
+            if self.i >= self.s.len() { self.toks.push((Tok::Eof, nl)); break; }
+            let c = self.s[self.i];
+            let tok = if c.is_ascii_digit() || (c == b'.' && self.i + 1 < self.s.len() && self.s[self.i + 1].is_ascii_digit()) {
+                self.lex_number()
+            } else if c == b'"' || c == b'\'' { self.lex_string(c)? }
+            else if c == b'`' { self.lex_template()? }
+            else if is_id_start(c) { self.lex_ident() }
+            else if c == b'/' && self.prev_allows_regex() { self.lex_regex() }
+            else { self.lex_punct()? };
+            self.toks.push((tok, nl));
+            nl = false;
+            if self.toks.len() > 1_000_000 { return Err("script trop long".into()); }
         }
-        if self.vars.len() < 256 {
-            self.vars.push(Var {
-                name: name.to_string(),
-                value,
-            });
+        Ok(self.toks)
+    }
+
+    fn lex_number(&mut self) -> Tok {
+        let start = self.i;
+        if self.s[self.i] == b'0' && self.i + 1 < self.s.len() && (self.s[self.i + 1] | 32 == b'x') {
+            self.i += 2; let hs = self.i;
+            while self.i < self.s.len() && self.s[self.i].is_ascii_hexdigit() { self.i += 1; }
+            let v = u64::from_str_radix(core::str::from_utf8(&self.s[hs..self.i]).unwrap_or("0"), 16).unwrap_or(0);
+            return Tok::Num(v as f64);
+        }
+        let (mut seen_dot, mut seen_e) = (false, false);
+        while self.i < self.s.len() {
+            let ch = self.s[self.i];
+            if ch.is_ascii_digit() { self.i += 1; }
+            else if ch == b'.' && !seen_dot && !seen_e { seen_dot = true; self.i += 1; } // un seul point : `10..x` -> Num(10.) puis .x
+            else if (ch | 32) == b'e' && !seen_e { seen_e = true; self.i += 1; }
+            else if (ch == b'+' || ch == b'-') && self.i > start && (self.s[self.i - 1] | 32) == b'e' { self.i += 1; }
+            else { break; }
+        }
+        Tok::Num(core::str::from_utf8(&self.s[start..self.i]).unwrap_or("0").parse::<f64>().unwrap_or(f64::NAN))
+    }
+
+    // Decode un caractere UTF-8 a la position courante (les pages web non-ASCII,
+    // ex. accents francais, doivent etre lues correctement et non octet par octet).
+    fn take_char(&mut self) -> char {
+        let b0 = self.s[self.i];
+        if b0 < 0x80 { self.i += 1; return b0 as char; }
+        let len = if b0 >= 0xF0 { 4 } else if b0 >= 0xE0 { 3 } else { 2 };
+        let end = (self.i + len).min(self.s.len());
+        match core::str::from_utf8(&self.s[self.i..end]).ok().and_then(|s| s.chars().next()) {
+            Some(c) => { self.i += c.len_utf8(); c }
+            None => { self.i += 1; '\u{FFFD}' }
+        }
+    }
+
+    fn lex_string(&mut self, q: u8) -> Result<Tok, String> {
+        self.i += 1; let mut out = String::new();
+        while self.i < self.s.len() && self.s[self.i] != q {
+            if self.s[self.i] == b'\\' { self.i += 1; if self.i >= self.s.len() { break; } let ch = self.escape(); if ch != '\0' { out.push(ch); } }
+            else { out.push(self.take_char()); }
+        }
+        self.i += 1;
+        Ok(Tok::Str(out))
+    }
+
+    fn escape(&mut self) -> char {
+        let e = self.s[self.i]; self.i += 1;
+        match e {
+            b'n' => '\n', b't' => '\t', b'r' => '\r', b'b' => '\u{8}', b'f' => '\u{c}', b'0' => '\0',
+            b'\\' => '\\', b'\'' => '\'', b'"' => '"', b'`' => '`', b'/' => '/',
+            b'x' => char::from_u32(self.take_hex(2)).unwrap_or('?'),
+            b'u' => {
+                if self.i < self.s.len() && self.s[self.i] == b'{' { self.i += 1; let mut v = 0u32; while self.i < self.s.len() && self.s[self.i] != b'}' { v = v * 16 + hexv(self.s[self.i]); self.i += 1; } self.i += 1; char::from_u32(v).unwrap_or('?') }
+                else { char::from_u32(self.take_hex(4)).unwrap_or('?') }
+            }
+            b'\n' => '\0',
+            other => other as char,
+        }
+    }
+    fn take_hex(&mut self, n: usize) -> u32 { let mut v = 0u32; for _ in 0..n { if self.i < self.s.len() && self.s[self.i].is_ascii_hexdigit() { v = v * 16 + hexv(self.s[self.i]); self.i += 1; } } v }
+
+    fn lex_template(&mut self) -> Result<Tok, String> {
+        self.i += 1; let mut parts: Vec<TplPart> = Vec::new(); let mut cur = String::new();
+        while self.i < self.s.len() && self.s[self.i] != b'`' {
+            let c = self.s[self.i];
+            if c == b'\\' { self.i += 1; if self.i < self.s.len() { let ch = self.escape(); if ch != '\0' { cur.push(ch); } } continue; }
+            if c == b'$' && self.i + 1 < self.s.len() && self.s[self.i + 1] == b'{' {
+                parts.push(TplPart::Str(core::mem::take(&mut cur)));
+                self.i += 2; let mut depth = 1; let estart = self.i;
+                while self.i < self.s.len() && depth > 0 { match self.s[self.i] { b'{' => depth += 1, b'}' => depth -= 1, _ => {} } if depth == 0 { break; } self.i += 1; }
+                let sub = &self.s[estart..self.i]; self.i += 1;
+                let subtoks = Lexer::new(sub).lex_all()?;
+                parts.push(TplPart::Expr(subtoks.into_iter().map(|(t, _)| t).collect()));
+            } else { cur.push(self.take_char()); }
+        }
+        self.i += 1; parts.push(TplPart::Str(cur));
+        Ok(Tok::Tpl(parts))
+    }
+
+    fn lex_ident(&mut self) -> Tok {
+        let start = self.i; while self.i < self.s.len() && is_id_part(self.s[self.i]) { self.i += 1; }
+        let w = core::str::from_utf8(&self.s[start..self.i]).unwrap_or("").to_string();
+        if KEYWORDS.contains(&w.as_str()) { Tok::Keyword(w) } else { Tok::Ident(w) }
+    }
+
+    fn lex_regex(&mut self) -> Tok {
+        self.i += 1; let mut in_class = false;
+        while self.i < self.s.len() {
+            let c = self.s[self.i];
+            if c == b'\\' { self.i += 2; continue; }
+            if c == b'[' { in_class = true; } else if c == b']' { in_class = false; }
+            else if c == b'/' && !in_class { self.i += 1; break; } else if c == b'\n' { break; }
+            self.i += 1;
+        }
+        while self.i < self.s.len() && is_id_part(self.s[self.i]) { self.i += 1; }
+        Tok::Regex
+    }
+
+    fn lex_punct(&mut self) -> Result<Tok, String> {
+        let three: &[&str] = &["===","!==","**=","...","<<=",">>=","&&=","||=","??=",">>>"];
+        let two: &[&str] = &["==","!=","<=",">=","&&","||","=>","+=","-=","*=","/=","%=","**","++","--","<<",">>","?.","??","&=","|=","^="];
+        for p in three { if self.s[self.i..].starts_with(p.as_bytes()) { self.i += 3; return Ok(Tok::Punct((*p).to_string())); } }
+        for p in two { if self.s[self.i..].starts_with(p.as_bytes()) { self.i += 2; return Ok(Tok::Punct((*p).to_string())); } }
+        let c = self.s[self.i]; self.i += 1; Ok(Tok::Punct((c as char).to_string()))
+    }
+}
+
+// ============================================================================
+// Parser
+// ============================================================================
+
+struct Parser { toks: Vec<(Tok, bool)>, i: usize }
+
+impl Parser {
+    fn new(toks: Vec<(Tok, bool)>) -> Parser { Parser { toks, i: 0 } }
+    fn peek(&self) -> &Tok { &self.toks[self.i.min(self.toks.len() - 1)].0 }
+    fn nl_before(&self) -> bool { self.toks[self.i.min(self.toks.len() - 1)].1 }
+    fn next(&mut self) -> Tok { let t = self.toks[self.i.min(self.toks.len() - 1)].0.clone(); if self.i < self.toks.len() { self.i += 1; } t }
+    fn is_punct(&self, p: &str) -> bool { matches!(self.peek(), Tok::Punct(x) if x == p) }
+    fn is_kw(&self, k: &str) -> bool { matches!(self.peek(), Tok::Keyword(x) if x == k) }
+    fn eat_punct(&mut self, p: &str) -> bool { if self.is_punct(p) { self.i += 1; true } else { false } }
+    fn expect_punct(&mut self, p: &str) -> Result<(), String> { if self.eat_punct(p) { Ok(()) } else { Err(format!("attendu '{}'", p)) } }
+    fn semi(&mut self) { let _ = self.eat_punct(";"); }
+
+    fn parse_program(&mut self) -> Result<Vec<Stmt>, String> {
+        let mut out = Vec::new();
+        while !matches!(self.peek(), Tok::Eof) { out.push(self.parse_stmt()?); }
+        Ok(out)
+    }
+
+    fn parse_stmt(&mut self) -> Result<Stmt, String> {
+        match self.peek().clone() {
+            Tok::Punct(p) if p == "{" => { self.i += 1; let mut b = Vec::new(); while !self.is_punct("}") && !matches!(self.peek(), Tok::Eof) { b.push(self.parse_stmt()?); } self.expect_punct("}")?; Ok(Stmt::Block(b)) }
+            Tok::Punct(p) if p == ";" => { self.i += 1; Ok(Stmt::Empty) }
+            Tok::Keyword(k) => match k.as_str() {
+                "var" | "let" | "const" => { let block = k != "var"; self.i += 1; let d = self.parse_var_decls()?; self.semi(); Ok(Stmt::Var(block, d)) }
+                "function" => { self.i += 1; let name = self.ident()?; let def = self.parse_func_rest()?; Ok(Stmt::Func(name, Rc::new(def))) }
+                "return" => { self.i += 1; if self.is_punct(";") || self.is_punct("}") || self.nl_before() || matches!(self.peek(), Tok::Eof) { self.semi(); Ok(Stmt::Return(None)) } else { let e = self.parse_expr()?; self.semi(); Ok(Stmt::Return(Some(e))) } }
+                "if" => { self.i += 1; self.expect_punct("(")?; let c = self.parse_expr()?; self.expect_punct(")")?; let t = Box::new(self.parse_stmt()?); let e = if self.is_kw("else") { self.i += 1; Some(Box::new(self.parse_stmt()?)) } else { None }; Ok(Stmt::If(c, t, e)) }
+                "while" => { self.i += 1; self.expect_punct("(")?; let c = self.parse_expr()?; self.expect_punct(")")?; Ok(Stmt::While(c, Box::new(self.parse_stmt()?))) }
+                "do" => { self.i += 1; let body = Box::new(self.parse_stmt()?); if !self.is_kw("while") { return Err("attendu while".into()); } self.i += 1; self.expect_punct("(")?; let c = self.parse_expr()?; self.expect_punct(")")?; self.semi(); Ok(Stmt::DoWhile(body, c)) }
+                "for" => self.parse_for(),
+                "break" => { self.i += 1; self.semi(); Ok(Stmt::Break) }
+                "continue" => { self.i += 1; self.semi(); Ok(Stmt::Continue) }
+                "throw" => { self.i += 1; let e = self.parse_expr()?; self.semi(); Ok(Stmt::Throw(e)) }
+                "try" => self.parse_try(),
+                "class" | "switch" => { self.skip_balanced_after_brace()?; Ok(Stmt::Empty) }
+                _ => { let e = self.parse_expr()?; self.semi(); Ok(Stmt::Expr(e)) }
+            },
+            _ => { let e = self.parse_expr()?; self.semi(); Ok(Stmt::Expr(e)) }
+        }
+    }
+
+    fn skip_balanced_after_brace(&mut self) -> Result<(), String> {
+        while !self.is_punct("{") && !matches!(self.peek(), Tok::Eof) { self.i += 1; }
+        if self.eat_punct("{") { let mut d = 1; while d > 0 && !matches!(self.peek(), Tok::Eof) { if self.is_punct("{") { d += 1; } else if self.is_punct("}") { d -= 1; } self.i += 1; } }
+        Ok(())
+    }
+
+    fn parse_try(&mut self) -> Result<Stmt, String> {
+        self.i += 1; self.expect_punct("{")?;
+        let mut tb = Vec::new(); while !self.is_punct("}") && !matches!(self.peek(), Tok::Eof) { tb.push(self.parse_stmt()?); } self.expect_punct("}")?;
+        let mut catch = None;
+        if self.is_kw("catch") { self.i += 1; let mut param = String::from("e"); if self.eat_punct("(") { param = self.ident()?; self.expect_punct(")")?; } self.expect_punct("{")?; let mut cb = Vec::new(); while !self.is_punct("}") && !matches!(self.peek(), Tok::Eof) { cb.push(self.parse_stmt()?); } self.expect_punct("}")?; catch = Some((param, cb)); }
+        let mut fin = None;
+        if self.is_kw("finally") { self.i += 1; self.expect_punct("{")?; let mut fb = Vec::new(); while !self.is_punct("}") && !matches!(self.peek(), Tok::Eof) { fb.push(self.parse_stmt()?); } self.expect_punct("}")?; fin = Some(fb); }
+        Ok(Stmt::Try(tb, catch, fin))
+    }
+
+    fn parse_for(&mut self) -> Result<Stmt, String> {
+        self.i += 1; self.expect_punct("(")?;
+        let decl = if let Tok::Keyword(k) = self.peek() { if k == "var" || k == "let" || k == "const" { true } else { false } } else { false };
+        let save = self.i;
+        if decl { self.i += 1; }
+        if let Tok::Ident(name) = self.peek().clone() {
+            let after = (self.i + 1).min(self.toks.len() - 1);
+            if matches!(&self.toks[after].0, Tok::Keyword(k) if k == "in" || k == "of") {
+                self.i += 1;
+                let is_of = matches!(self.peek(), Tok::Keyword(k) if k == "of");
+                self.i += 1;
+                let obj = self.parse_expr()?; self.expect_punct(")")?;
+                let body = Box::new(self.parse_stmt()?);
+                return Ok(Stmt::ForIn(name, obj, body, is_of));
+            }
+        }
+        self.i = save;
+        let init = if self.is_punct(";") { self.i += 1; None } else {
+            let s = if let Tok::Keyword(k) = self.peek().clone() { if k == "var" || k == "let" || k == "const" { self.i += 1; Stmt::Var(k != "var", self.parse_var_decls()?) } else { Stmt::Expr(self.parse_expr()?) } } else { Stmt::Expr(self.parse_expr()?) };
+            self.expect_punct(";")?; Some(Box::new(s))
+        };
+        let test = if self.is_punct(";") { None } else { Some(self.parse_expr()?) };
+        self.expect_punct(";")?;
+        let update = if self.is_punct(")") { None } else { Some(self.parse_expr()?) };
+        self.expect_punct(")")?;
+        Ok(Stmt::For(init, test, update, Box::new(self.parse_stmt()?)))
+    }
+
+    fn parse_var_decls(&mut self) -> Result<Vec<(String, Option<Expr>)>, String> {
+        let mut out = Vec::new();
+        loop {
+            // destructuration ignoree (on saute jusqu'a = ou , ou ;)
+            if self.is_punct("{") || self.is_punct("[") { let mut d = 0; loop { if self.is_punct("{") || self.is_punct("[") { d += 1; } if self.is_punct("}") || self.is_punct("]") { d -= 1; } self.i += 1; if d == 0 || matches!(self.peek(), Tok::Eof) { break; } } if self.eat_punct("=") { let _ = self.parse_assign()?; } if !self.eat_punct(",") { break; } continue; }
+            let name = self.ident()?;
+            let init = if self.eat_punct("=") { Some(self.parse_assign()?) } else { None };
+            out.push((name, init));
+            if !self.eat_punct(",") { break; }
+        }
+        Ok(out)
+    }
+
+    fn ident(&mut self) -> Result<String, String> { match self.next() { Tok::Ident(s) => Ok(s), Tok::Keyword(k) => Ok(k), _ => Err("attendu identifiant".into()) } }
+
+    fn parse_func_rest(&mut self) -> Result<FuncDef, String> {
+        self.expect_punct("(")?; let (params, rest) = self.parse_params()?; self.expect_punct(")")?;
+        self.expect_punct("{")?; let mut body = Vec::new(); while !self.is_punct("}") && !matches!(self.peek(), Tok::Eof) { body.push(self.parse_stmt()?); } self.expect_punct("}")?;
+        Ok(FuncDef { params, rest, body, arrow: false, expr_body: None })
+    }
+
+    fn parse_params(&mut self) -> Result<(Vec<String>, Option<String>), String> {
+        let mut params = Vec::new(); let mut rest = None;
+        while !self.is_punct(")") {
+            if self.eat_punct("...") { rest = Some(self.ident()?); break; }
+            let name = self.ident()?;
+            if self.eat_punct("=") { let _ = self.parse_assign()?; }
+            params.push(name);
+            if !self.eat_punct(",") { break; }
+        }
+        Ok((params, rest))
+    }
+
+    fn parse_expr(&mut self) -> Result<Expr, String> {
+        let mut e = self.parse_assign()?;
+        if self.is_punct(",") { let mut seq = vec![e]; while self.eat_punct(",") { seq.push(self.parse_assign()?); } e = Expr::Seq(seq); }
+        Ok(e)
+    }
+
+    fn parse_assign(&mut self) -> Result<Expr, String> {
+        if let Some(a) = self.try_arrow()? { return Ok(a); }
+        let left = self.parse_cond()?;
+        let ops = ["=","+=","-=","*=","/=","%=","**=","<<=",">>=","&=","|=","^=","&&=","||=","??="];
+        if let Tok::Punct(p) = self.peek().clone() { if ops.contains(&p.as_str()) { self.i += 1; let right = self.parse_assign()?; return Ok(Expr::Assign(p, Box::new(left), Box::new(right))); } }
+        Ok(left)
+    }
+
+    fn try_arrow(&mut self) -> Result<Option<Expr>, String> {
+        let save = self.i;
+        if self.is_punct("(") {
+            let mut d = 0; let mut j = self.i;
+            while j < self.toks.len() { match &self.toks[j].0 { Tok::Punct(p) if p == "(" => d += 1, Tok::Punct(p) if p == ")" => { d -= 1; if d == 0 { break; } }, Tok::Eof => break, _ => {} } j += 1; }
+            if j + 1 < self.toks.len() && matches!(&self.toks[j + 1].0, Tok::Punct(p) if p == "=>") {
+                self.i += 1; let (params, rest) = self.parse_params()?; self.expect_punct(")")?; self.expect_punct("=>")?;
+                return Ok(Some(self.arrow_body(params, rest)?));
+            }
+        } else if let Tok::Ident(name) = self.peek().clone() {
+            if matches!(&self.toks[(self.i + 1).min(self.toks.len() - 1)].0, Tok::Punct(p) if p == "=>") { self.i += 2; return Ok(Some(self.arrow_body(vec![name], None)?)); }
+        }
+        self.i = save; Ok(None)
+    }
+
+    fn arrow_body(&mut self, params: Vec<String>, rest: Option<String>) -> Result<Expr, String> {
+        if self.is_punct("{") { self.i += 1; let mut body = Vec::new(); while !self.is_punct("}") && !matches!(self.peek(), Tok::Eof) { body.push(self.parse_stmt()?); } self.expect_punct("}")?; Ok(Expr::Func(Rc::new(FuncDef { params, rest, body, arrow: true, expr_body: None }))) }
+        else { let e = self.parse_assign()?; Ok(Expr::Func(Rc::new(FuncDef { params, rest, body: Vec::new(), arrow: true, expr_body: Some(Box::new(e)) }))) }
+    }
+
+    fn parse_cond(&mut self) -> Result<Expr, String> {
+        let c = self.parse_binary(0)?;
+        if self.eat_punct("?") { let t = self.parse_assign()?; self.expect_punct(":")?; let e = self.parse_assign()?; return Ok(Expr::Cond(Box::new(c), Box::new(t), Box::new(e))); }
+        Ok(c)
+    }
+
+    fn bin_prec(op: &str) -> Option<(u8, bool)> {
+        Some(match op {
+            "??" => (1, true), "||" => (2, true), "&&" => (3, true),
+            "|" => (4, false), "^" => (5, false), "&" => (6, false),
+            "==" | "!=" | "===" | "!==" => (7, false),
+            "<" | ">" | "<=" | ">=" | "instanceof" | "in" => (8, false),
+            "<<" | ">>" | ">>>" => (9, false), "+" | "-" => (10, false),
+            "*" | "/" | "%" => (11, false), "**" => (12, false), _ => return None,
+        })
+    }
+
+    fn parse_binary(&mut self, min_prec: u8) -> Result<Expr, String> {
+        let mut left = self.parse_unary()?;
+        loop {
+            let op = match self.peek() { Tok::Punct(p) => p.clone(), Tok::Keyword(k) if k == "instanceof" || k == "in" => k.clone(), _ => break };
+            let (prec, is_logic) = match Self::bin_prec(&op) { Some(x) => x, None => break };
+            if prec < min_prec { break; }
+            self.i += 1;
+            let right = self.parse_binary(if op == "**" { prec } else { prec + 1 })?;
+            left = if is_logic { Expr::Logic(op, Box::new(left), Box::new(right)) } else { Expr::Bin(op, Box::new(left), Box::new(right)) };
+        }
+        Ok(left)
+    }
+
+    fn parse_unary(&mut self) -> Result<Expr, String> {
+        match self.peek().clone() {
+            Tok::Punct(p) if p == "!" || p == "-" || p == "+" || p == "~" => { self.i += 1; Ok(Expr::Unary(p, Box::new(self.parse_unary()?))) }
+            Tok::Punct(p) if p == "++" || p == "--" => { self.i += 1; Ok(Expr::Update(p, true, Box::new(self.parse_unary()?))) }
+            Tok::Keyword(k) if k == "typeof" || k == "void" || k == "delete" => { self.i += 1; Ok(Expr::Unary(k, Box::new(self.parse_unary()?))) }
+            _ => self.parse_postfix(),
+        }
+    }
+
+    fn parse_postfix(&mut self) -> Result<Expr, String> {
+        let mut e = self.parse_call_member()?;
+        if !self.nl_before() { if let Tok::Punct(p) = self.peek().clone() { if p == "++" || p == "--" { self.i += 1; e = Expr::Update(p, false, Box::new(e)); } } }
+        Ok(e)
+    }
+
+    fn parse_call_member(&mut self) -> Result<Expr, String> {
+        let mut e = if self.is_kw("new") {
+            self.i += 1; let callee = self.parse_member_only()?; let args = if self.is_punct("(") { self.parse_args()? } else { Vec::new() }; Expr::New(Box::new(callee), args)
+        } else { self.parse_primary()? };
+        loop {
+            if self.eat_punct(".") { let name = self.ident()?; e = Expr::Member(Box::new(e), name, false); }
+            else if self.is_punct("?.") { self.i += 1; if self.is_punct("(") { let args = self.parse_args()?; e = Expr::Call(Box::new(e), args, true); } else { let name = self.ident()?; e = Expr::Member(Box::new(e), name, true); } }
+            else if self.eat_punct("[") { let idx = self.parse_expr()?; self.expect_punct("]")?; e = Expr::Index(Box::new(e), Box::new(idx)); }
+            else if self.is_punct("(") { let args = self.parse_args()?; e = Expr::Call(Box::new(e), args, false); }
+            else { break; }
+        }
+        Ok(e)
+    }
+
+    fn parse_member_only(&mut self) -> Result<Expr, String> {
+        let mut e = self.parse_primary()?;
+        loop {
+            if self.eat_punct(".") { let name = self.ident()?; e = Expr::Member(Box::new(e), name, false); }
+            else if self.eat_punct("[") { let idx = self.parse_expr()?; self.expect_punct("]")?; e = Expr::Index(Box::new(e), Box::new(idx)); }
+            else { break; }
+        }
+        Ok(e)
+    }
+
+    fn parse_args(&mut self) -> Result<Vec<Expr>, String> {
+        self.expect_punct("(")?; let mut args = Vec::new();
+        while !self.is_punct(")") {
+            if self.eat_punct("...") { args.push(Expr::Spread(Box::new(self.parse_assign()?))); } else { args.push(self.parse_assign()?); }
+            if !self.eat_punct(",") { break; }
+        }
+        self.expect_punct(")")?; Ok(args)
+    }
+
+    fn parse_primary(&mut self) -> Result<Expr, String> {
+        match self.next() {
+            Tok::Num(n) => Ok(Expr::Num(n)),
+            Tok::Str(s) => Ok(Expr::Str(s)),
+            Tok::Tpl(parts) => { let mut out = Vec::new(); for p in parts { match p { TplPart::Str(s) => out.push(Expr::Str(s)), TplPart::Expr(toks) => { let mut t: Vec<(Tok, bool)> = toks.into_iter().map(|x| (x, false)).collect(); t.push((Tok::Eof, false)); out.push(Parser::new(t).parse_expr()?); } } } Ok(Expr::Tpl(out)) }
+            Tok::Regex => Ok(Expr::Object(Vec::new())),
+            Tok::Ident(s) => Ok(Expr::Ident(s)),
+            Tok::Keyword(k) => match k.as_str() {
+                "true" => Ok(Expr::Bool(true)), "false" => Ok(Expr::Bool(false)), "null" => Ok(Expr::Null),
+                "undefined" => Ok(Expr::Undef), "this" => Ok(Expr::This),
+                "function" => { let _ = if let Tok::Ident(_) = self.peek() { Some(self.next()) } else { None }; let def = self.parse_func_rest()?; Ok(Expr::Func(Rc::new(def))) }
+                _ => Ok(Expr::Ident(k)),
+            },
+            Tok::Punct(p) => match p.as_str() {
+                "(" => { let e = self.parse_expr()?; self.expect_punct(")")?; Ok(e) }
+                "[" => { let mut items = Vec::new(); while !self.is_punct("]") { if self.eat_punct("...") { items.push(Expr::Spread(Box::new(self.parse_assign()?))); } else if self.is_punct(",") { items.push(Expr::Undef); } else { items.push(self.parse_assign()?); } if !self.eat_punct(",") { break; } } self.expect_punct("]")?; Ok(Expr::Array(items)) }
+                "{" => self.parse_object(),
+                _ => Err(format!("token inattendu '{}'", p)),
+            },
+            Tok::Eof => Err("fin inattendue".into()),
+        }
+    }
+
+    fn parse_object(&mut self) -> Result<Expr, String> {
+        let mut props = Vec::new();
+        while !self.is_punct("}") {
+            if self.eat_punct("...") { let _ = self.parse_assign()?; if !self.eat_punct(",") { break; } continue; }
+            let key = match self.next() {
+                Tok::Ident(s) => s, Tok::Keyword(k) => k, Tok::Str(s) => s, Tok::Num(n) => num_to_str(n),
+                Tok::Punct(p) if p == "[" => { let _ = self.parse_assign()?; self.expect_punct("]")?; self.expect_punct(":")?; let _ = self.parse_assign()?; if !self.eat_punct(",") { break; } continue; }
+                _ => return Err("cle d'objet invalide".into()),
+            };
+            if self.is_punct("(") { let def = self.parse_func_rest()?; props.push((key, Expr::Func(Rc::new(def)))); }
+            else if self.eat_punct(":") { props.push((key, self.parse_assign()?)); }
+            else { props.push((key.clone(), Expr::Ident(key))); }
+            if !self.eat_punct(",") { break; }
+        }
+        self.expect_punct("}")?; Ok(Expr::Object(props))
+    }
+}
+
+// ============================================================================
+// Environnement
+// ============================================================================
+
+pub type Env = Rc<RefCell<Scope>>;
+pub struct Scope { vars: BTreeMap<String, Value>, parent: Option<Env> }
+fn new_scope(parent: Option<Env>) -> Env { Rc::new(RefCell::new(Scope { vars: BTreeMap::new(), parent })) }
+fn scope_get(env: &Env, name: &str) -> Option<Value> { let s = env.borrow(); if let Some(v) = s.vars.get(name) { return Some(v.clone()); } if let Some(p) = &s.parent { return scope_get(p, name); } None }
+fn scope_set(env: &Env, name: &str, val: Value) -> bool { let mut s = env.borrow_mut(); if s.vars.contains_key(name) { s.vars.insert(name.to_string(), val); return true; } if let Some(p) = s.parent.clone() { drop(s); return scope_set(&p, name, val); } false }
+fn scope_declare(env: &Env, name: &str, val: Value) { env.borrow_mut().vars.insert(name.to_string(), val); }
+// Cree une portee fille de `outer` en recopiant la valeur courante des `names`
+// depuis `from` (pour la liaison `let` par iteration de boucle).
+fn copy_scope(outer: &Env, from: &Env, names: &[String]) -> Env {
+    let e = new_scope(Some(outer.clone()));
+    for n in names { scope_declare(&e, n, scope_get(from, n).unwrap_or(Value::Undefined)); }
+    e
+}
+
+// ============================================================================
+// Interpreteur
+// ============================================================================
+
+enum Flow { Normal(Value), Return(Value), Break, Continue, Throw(Value) }
+
+pub struct Interp {
+    global: Env,
+    steps: u64,
+    max_steps: u64,
+    pub out: Vec<String>,                 // console.*
+    pub writes: String,                   // document.write
+    pub patches: Vec<(String, String)>,   // (id, html) pour innerHTML/textContent
+}
+
+impl Interp {
+    pub fn new() -> Interp {
+        let global = new_scope(None);
+        let mut it = Interp { global: global.clone(), steps: 0, max_steps: 2_000_000, out: Vec::new(), writes: String::new(), patches: Vec::new() };
+        install(&mut it);
+        it
+    }
+
+    fn tick(&mut self) -> Result<(), Value> { self.steps += 1; if self.steps > self.max_steps { return Err(str_val("RangeError: trop d'operations")); } Ok(()) }
+
+    pub fn run(&mut self, src: &str) -> Result<Value, String> {
+        let toks = Lexer::new(src.as_bytes()).lex_all()?;
+        let prog = Parser::new(toks).parse_program()?;
+        let genv = self.global.clone();
+        self.hoist(&prog, &genv);
+        let mut last = Value::Undefined;
+        for st in &prog {
+            match self.exec(st, &genv) {
+                Flow::Normal(v) => last = v,
+                Flow::Throw(v) => return Err(format!("Uncaught {}", self.to_string(&v))),
+                Flow::Return(_) => break,
+                _ => {}
+            }
+        }
+        Ok(last)
+    }
+
+    fn hoist(&mut self, stmts: &[Stmt], env: &Env) {
+        for s in stmts { if let Stmt::Func(name, def) = s { let f = new_obj(Obj { props: OrderedMap::new(), arr: None, call: Some(Callable::User { def: def.clone(), env: env.clone() }), class: "Function" }); scope_declare(env, name, f); } }
+    }
+
+    fn exec_block(&mut self, stmts: &[Stmt], env: &Env) -> Flow {
+        self.hoist(stmts, env);
+        for s in stmts { match self.exec(s, env) { Flow::Normal(_) => {}, other => return other } }
+        Flow::Normal(Value::Undefined)
+    }
+
+    fn exec(&mut self, s: &Stmt, env: &Env) -> Flow {
+        if let Err(e) = self.tick() { return Flow::Throw(e); }
+        match s {
+            Stmt::Empty | Stmt::Func(..) => Flow::Normal(Value::Undefined),
+            Stmt::Expr(e) => match self.eval(e, env) { Ok(v) => Flow::Normal(v), Err(t) => Flow::Throw(t) },
+            Stmt::Var(_, decls) => { for (name, init) in decls { let v = match init { Some(e) => match self.eval(e, env) { Ok(v) => v, Err(t) => return Flow::Throw(t) }, None => Value::Undefined }; scope_declare(env, name, v); } Flow::Normal(Value::Undefined) }
+            Stmt::Block(b) => { let inner = new_scope(Some(env.clone())); self.exec_block(b, &inner) }
+            Stmt::Return(e) => { let v = match e { Some(e) => match self.eval(e, env) { Ok(v) => v, Err(t) => return Flow::Throw(t) }, None => Value::Undefined }; Flow::Return(v) }
+            Stmt::If(c, t, e) => match self.eval(c, env) { Ok(v) => if truthy(&v) { self.exec(t, env) } else if let Some(e) = e { self.exec(e, env) } else { Flow::Normal(Value::Undefined) }, Err(x) => Flow::Throw(x) },
+            Stmt::While(c, body) => { loop { if let Err(e) = self.tick() { return Flow::Throw(e); } match self.eval(c, env) { Ok(v) => if !truthy(&v) { break; }, Err(t) => return Flow::Throw(t) } match self.exec(body, env) { Flow::Break => break, Flow::Continue => {}, Flow::Normal(_) => {}, other => return other } } Flow::Normal(Value::Undefined) }
+            Stmt::DoWhile(body, c) => { loop { if let Err(e) = self.tick() { return Flow::Throw(e); } match self.exec(body, env) { Flow::Break => break, Flow::Continue => {}, Flow::Normal(_) => {}, other => return other } match self.eval(c, env) { Ok(v) => if !truthy(&v) { break; }, Err(t) => return Flow::Throw(t) } } Flow::Normal(Value::Undefined) }
+            Stmt::For(init, test, update, body) => {
+                let inner = new_scope(Some(env.clone()));
+                // `let`/`const` dans l'init : liaison fraiche par iteration (les
+                // closures creees dans le corps capturent la valeur de leur tour).
+                let mut block_names: Vec<String> = Vec::new();
+                if let Some(i) = init {
+                    if let Stmt::Var(true, decls) = &**i { for (n, _) in decls { block_names.push(n.clone()); } }
+                    match self.exec(i, &inner) { Flow::Normal(_) => {}, other => return other }
+                }
+                let per_iter = !block_names.is_empty();
+                let mut cur = if per_iter { copy_scope(env, &inner, &block_names) } else { inner };
+                loop {
+                    if let Err(e) = self.tick() { return Flow::Throw(e); }
+                    if let Some(t) = test { match self.eval(t, &cur) { Ok(v) => if !truthy(&v) { break; }, Err(x) => return Flow::Throw(x) } }
+                    match self.exec(body, &cur) { Flow::Break => break, Flow::Continue => {}, Flow::Normal(_) => {}, other => return other }
+                    if per_iter { cur = copy_scope(env, &cur, &block_names); }
+                    if let Some(u) = update { if let Err(t) = self.eval(u, &cur) { return Flow::Throw(t); } }
+                }
+                Flow::Normal(Value::Undefined)
+            }
+            Stmt::ForIn(var, obj, body, is_of) => {
+                let o = match self.eval(obj, env) { Ok(v) => v, Err(t) => return Flow::Throw(t) };
+                let items: Vec<Value> = if *is_of { self.iterable(&o) } else { self.keys_of(&o) };
+                for it in items { if let Err(e) = self.tick() { return Flow::Throw(e); } let inner = new_scope(Some(env.clone())); scope_declare(&inner, var, it); match self.exec(body, &inner) { Flow::Break => break, Flow::Continue => {}, Flow::Normal(_) => {}, other => return other } }
+                Flow::Normal(Value::Undefined)
+            }
+            Stmt::Break => Flow::Break,
+            Stmt::Continue => Flow::Continue,
+            Stmt::Throw(e) => match self.eval(e, env) { Ok(v) => Flow::Throw(v), Err(t) => Flow::Throw(t) },
+            Stmt::Try(tb, catch, fin) => {
+                let inner = new_scope(Some(env.clone()));
+                let r = self.exec_block(tb, &inner);
+                let r = if let Flow::Throw(ex) = r { if let Some((p, cb)) = catch { let c = new_scope(Some(env.clone())); scope_declare(&c, p, ex); self.exec_block(cb, &c) } else { Flow::Throw(ex) } } else { r };
+                if let Some(fb) = fin { let f = new_scope(Some(env.clone())); match self.exec_block(fb, &f) { Flow::Normal(_) => r, other => other } } else { r }
+            }
+        }
+    }
+
+    fn keys_of(&self, v: &Value) -> Vec<Value> { match v { Value::Obj(o) => { let b = o.borrow(); if let Some(a) = &b.arr { (0..a.len()).map(|i| str_val(i.to_string())).collect() } else { b.props.keys().map(|k| str_val(k.clone())).collect() } } _ => Vec::new() } }
+    fn iterable(&self, v: &Value) -> Vec<Value> { match v { Value::Obj(o) => { let b = o.borrow(); if let Some(a) = &b.arr { a.clone() } else { Vec::new() } } Value::Str(s) => s.chars().map(|c| str_val(c.to_string())).collect(), _ => Vec::new() } }
+
+    fn eval(&mut self, e: &Expr, env: &Env) -> Result<Value, Value> {
+        self.tick()?;
+        match e {
+            Expr::Num(n) => Ok(Value::Num(*n)),
+            Expr::Str(s) => Ok(str_val(s.clone())),
+            Expr::Bool(b) => Ok(Value::Bool(*b)),
+            Expr::Null => Ok(Value::Null),
+            Expr::Undef => Ok(Value::Undefined),
+            Expr::This => Ok(scope_get(env, "this").unwrap_or(Value::Undefined)),
+            Expr::Tpl(parts) => { let mut s = String::new(); for p in parts { let v = self.eval(p, env)?; s.push_str(&self.to_string(&v)); } Ok(str_val(s)) }
+            Expr::Ident(name) => scope_get(env, name).ok_or_else(|| str_val(format!("ReferenceError: {} is not defined", name))),
+            Expr::Array(items) => { let mut out = Vec::new(); for it in items { if let Expr::Spread(inner) = it { let v = self.eval(inner, env)?; out.extend(self.iterable(&v)); } else { out.push(self.eval(it, env)?); } } Ok(array_val(out)) }
+            Expr::Object(props) => { let mut o = Obj::plain(); for (k, ve) in props { let v = self.eval(ve, env)?; o.props.insert(k.clone(), v); } Ok(new_obj(o)) }
+            Expr::Func(def) => Ok(new_obj(Obj { props: OrderedMap::new(), arr: None, call: Some(Callable::User { def: def.clone(), env: env.clone() }), class: "Function" })),
+            Expr::Spread(e) => self.eval(e, env),
+            Expr::Unary(op, x) => self.eval_unary(op, x, env),
+            Expr::Update(op, prefix, t) => self.eval_update(op, *prefix, t, env),
+            Expr::Bin(op, a, b) => { let l = self.eval(a, env)?; let r = self.eval(b, env)?; self.binop(op, l, r) }
+            Expr::Logic(op, a, b) => { let l = self.eval(a, env)?; match op.as_str() { "&&" => if truthy(&l) { self.eval(b, env) } else { Ok(l) }, "||" => if truthy(&l) { Ok(l) } else { self.eval(b, env) }, "??" => if matches!(l, Value::Undefined | Value::Null) { self.eval(b, env) } else { Ok(l) }, _ => Ok(Value::Undefined) } }
+            Expr::Cond(c, t, e) => { let cv = self.eval(c, env)?; if truthy(&cv) { self.eval(t, env) } else { self.eval(e, env) } }
+            Expr::Assign(op, t, v) => self.eval_assign(op, t, v, env),
+            Expr::Seq(list) => { let mut v = Value::Undefined; for e in list { v = self.eval(e, env)?; } Ok(v) }
+            Expr::Member(obj, name, opt) => { let o = self.eval(obj, env)?; if *opt && matches!(o, Value::Undefined | Value::Null) { return Ok(Value::Undefined); } self.get_prop(&o, name) }
+            Expr::Index(obj, idx) => { let o = self.eval(obj, env)?; let i = self.eval(idx, env)?; let key = self.to_string(&i); self.get_prop(&o, &key) }
+            Expr::Call(callee, args, opt) => self.eval_call(callee, args, *opt, env),
+            Expr::New(callee, args) => self.eval_new(callee, args, env),
+        }
+    }
+
+    fn eval_args(&mut self, args: &[Expr], env: &Env) -> Result<Vec<Value>, Value> {
+        let mut out = Vec::new();
+        for a in args { if let Expr::Spread(inner) = a { let v = self.eval(inner, env)?; out.extend(self.iterable(&v)); } else { out.push(self.eval(a, env)?); } }
+        Ok(out)
+    }
+
+    fn eval_unary(&mut self, op: &str, x: &Expr, env: &Env) -> Result<Value, Value> {
+        if op == "typeof" { let v = self.eval(x, env).unwrap_or(Value::Undefined); return Ok(str_val(type_of(&v))); }
+        let v = self.eval(x, env)?;
+        Ok(match op { "!" => Value::Bool(!truthy(&v)), "-" => Value::Num(-self.to_num(&v)), "+" => Value::Num(self.to_num(&v)), "~" => Value::Num(!to_i32(self.to_num(&v)) as f64), "void" => Value::Undefined, "delete" => Value::Bool(true), _ => Value::Undefined })
+    }
+
+    fn eval_update(&mut self, op: &str, prefix: bool, target: &Expr, env: &Env) -> Result<Value, Value> {
+        let cur = self.eval(target, env)?; let old = self.to_num(&cur);
+        let new = if op == "++" { old + 1.0 } else { old - 1.0 };
+        self.assign_to(target, Value::Num(new), env)?;
+        Ok(Value::Num(if prefix { new } else { old }))
+    }
+
+    fn eval_assign(&mut self, op: &str, target: &Expr, val: &Expr, env: &Env) -> Result<Value, Value> {
+        if op == "=" { let v = self.eval(val, env)?; self.assign_to(target, v.clone(), env)?; return Ok(v); }
+        let cur = self.eval(target, env)?; let rhs = self.eval(val, env)?; let base = &op[..op.len() - 1];
+        let nv = match base { "&&" => if truthy(&cur) { rhs } else { return Ok(cur) }, "||" => if truthy(&cur) { return Ok(cur); } else { rhs }, "??" => if matches!(cur, Value::Undefined | Value::Null) { rhs } else { return Ok(cur) }, _ => self.binop(base, cur, rhs)? };
+        self.assign_to(target, nv.clone(), env)?; Ok(nv)
+    }
+
+    fn assign_to(&mut self, target: &Expr, v: Value, env: &Env) -> Result<(), Value> {
+        match target {
+            Expr::Ident(name) => { if !scope_set(env, name, v.clone()) { scope_declare(&self.global, name, v); } Ok(()) }
+            Expr::Member(obj, name, _) => { let o = self.eval(obj, env)?; self.set_prop(&o, name, v); Ok(()) }
+            Expr::Index(obj, idx) => { let o = self.eval(obj, env)?; let i = self.eval(idx, env)?; let key = self.to_string(&i); self.set_prop(&o, &key, v); Ok(()) }
+            _ => Err(str_val("cible d'affectation invalide")),
+        }
+    }
+
+    fn eval_call(&mut self, callee: &Expr, args: &[Expr], opt: bool, env: &Env) -> Result<Value, Value> {
+        let (func, this) = match callee {
+            Expr::Member(obj, name, mopt) => { let o = self.eval(obj, env)?; if (*mopt || opt) && matches!(o, Value::Undefined | Value::Null) { return Ok(Value::Undefined); } let f = self.get_prop(&o, name)?; (f, o) }
+            Expr::Index(obj, idx) => { let o = self.eval(obj, env)?; let i = self.eval(idx, env)?; let key = self.to_string(&i); let f = self.get_prop(&o, &key)?; (f, o) }
+            _ => (self.eval(callee, env)?, Value::Undefined),
+        };
+        if opt && matches!(func, Value::Undefined | Value::Null) { return Ok(Value::Undefined); }
+        let argv = self.eval_args(args, env)?;
+        self.call(func, this, &argv)
+    }
+
+    pub fn call(&mut self, func: Value, this: Value, args: &[Value]) -> Result<Value, Value> {
+        let (def, fenv, native) = match &func {
+            Value::Obj(o) => { let b = o.borrow(); match &b.call { Some(Callable::User { def, env }) => (Some(def.clone()), Some(env.clone()), None), Some(Callable::Native(f)) => (None, None, Some(*f)), None => return Err(str_val("TypeError: not a function")) } }
+            _ => return Err(str_val("TypeError: not a function")),
+        };
+        if let Some(f) = native { return f(self, this, args); }
+        let def = def.unwrap(); let fenv = fenv.unwrap();
+        let scope = new_scope(Some(fenv));
+        if !def.arrow { scope_declare(&scope, "this", this); }
+        for (i, p) in def.params.iter().enumerate() { scope_declare(&scope, p, args.get(i).cloned().unwrap_or(Value::Undefined)); }
+        if let Some(rest) = &def.rest { let r: Vec<Value> = if args.len() > def.params.len() { args[def.params.len()..].to_vec() } else { Vec::new() }; scope_declare(&scope, rest, array_val(r)); }
+        if !def.arrow { scope_declare(&scope, "arguments", array_val(args.to_vec())); }
+        if let Some(body) = &def.expr_body { return self.eval(body, &scope); }
+        match self.exec_block(&def.body, &scope) { Flow::Return(v) => Ok(v), Flow::Throw(t) => Err(t), _ => Ok(Value::Undefined) }
+    }
+
+    fn eval_new(&mut self, callee: &Expr, args: &[Expr], env: &Env) -> Result<Value, Value> {
+        let func = self.eval(callee, env)?;
+        let argv = self.eval_args(args, env)?;
+        let this = new_obj(Obj::plain());
+        let r = self.call(func, this.clone(), &argv)?;
+        Ok(if matches!(r, Value::Obj(_)) { r } else { this })
+    }
+
+    pub fn get_prop(&mut self, o: &Value, name: &str) -> Result<Value, Value> {
+        match o {
+            Value::Str(s) => Ok(string_prop(s, name)),
+            Value::Num(_) => Ok(number_prop(name)),
+            Value::Obj(obj) => {
+                let (class, has_arr) = { let b = obj.borrow(); (b.class, b.arr.is_some()) };
+                if class == "Element" || class == "Document" { if let Some(v) = dom_get(self, obj, name) { return Ok(v); } }
+                if has_arr {
+                    let b = obj.borrow();
+                    let arr = b.arr.as_ref().unwrap();
+                    if name == "length" { return Ok(Value::Num(arr.len() as f64)); }
+                    if let Ok(i) = name.parse::<usize>() { return Ok(arr.get(i).cloned().unwrap_or(Value::Undefined)); }
+                    if let Some(v) = b.props.get(name) { return Ok(v.clone()); }
+                    drop(b);
+                    return Ok(array_prop(name));
+                }
+                let b = obj.borrow();
+                if let Some(v) = b.props.get(name) { return Ok(v.clone()); }
+                drop(b);
+                Ok(object_prop(name))
+            }
+            Value::Null => Err(str_val("TypeError: Cannot read properties of null")),
+            Value::Undefined => Err(str_val("TypeError: Cannot read properties of undefined")),
+            _ => Ok(Value::Undefined),
+        }
+    }
+
+    pub fn set_prop(&mut self, o: &Value, name: &str, v: Value) {
+        if let Value::Obj(obj) = o {
+            let class = { obj.borrow().class };
+            if class == "Element" { if dom_set(self, obj, name, &v) { return; } }
+            let mut b = obj.borrow_mut();
+            if let Some(arr) = &mut b.arr { if name == "length" { let nl = to_num_simple(&v) as usize; arr.resize(nl.min(1_000_000), Value::Undefined); return; } if let Ok(i) = name.parse::<usize>() { if i < 1_000_000 { if i >= arr.len() { arr.resize(i + 1, Value::Undefined); } arr[i] = v; } return; } }
+            b.props.insert(name.to_string(), v);
+        }
+    }
+
+    fn binop(&mut self, op: &str, l: Value, r: Value) -> Result<Value, Value> {
+        Ok(match op {
+            "+" => { let ls_str = matches!(l, Value::Str(_)); let rs_str = matches!(r, Value::Str(_)); let lo = matches!(l, Value::Obj(_)); let ro = matches!(r, Value::Obj(_)); if ls_str || rs_str || lo || ro { str_val(format!("{}{}", self.to_string(&l), self.to_string(&r))) } else { Value::Num(self.to_num(&l) + self.to_num(&r)) } }
+            "-" => Value::Num(self.to_num(&l) - self.to_num(&r)),
+            "*" => Value::Num(self.to_num(&l) * self.to_num(&r)),
+            "/" => Value::Num(self.to_num(&l) / self.to_num(&r)),
+            "%" => Value::Num(self.to_num(&l) % self.to_num(&r)),
+            "**" => Value::Num(powf(self.to_num(&l), self.to_num(&r))),
+            "==" => Value::Bool(self.loose_eq(&l, &r)),
+            "!=" => Value::Bool(!self.loose_eq(&l, &r)),
+            "===" => Value::Bool(strict_eq(&l, &r)),
+            "!==" => Value::Bool(!strict_eq(&l, &r)),
+            "<" | ">" | "<=" | ">=" => self.compare(op, &l, &r),
+            "&" => Value::Num((to_i32(self.to_num(&l)) & to_i32(self.to_num(&r))) as f64),
+            "|" => Value::Num((to_i32(self.to_num(&l)) | to_i32(self.to_num(&r))) as f64),
+            "^" => Value::Num((to_i32(self.to_num(&l)) ^ to_i32(self.to_num(&r))) as f64),
+            "<<" => Value::Num((to_i32(self.to_num(&l)) << (to_i32(self.to_num(&r)) & 31)) as f64),
+            ">>" => Value::Num((to_i32(self.to_num(&l)) >> (to_i32(self.to_num(&r)) & 31)) as f64),
+            ">>>" => Value::Num(((to_i32(self.to_num(&l)) as u32) >> (to_i32(self.to_num(&r)) & 31)) as f64),
+            "instanceof" => Value::Bool(false),
+            "in" => { let key = self.to_string(&l); Value::Bool(matches!(&r, Value::Obj(o) if o.borrow().props.contains_key(&key))) }
+            _ => Value::Undefined,
+        })
+    }
+
+    fn compare(&mut self, op: &str, l: &Value, r: &Value) -> Value {
+        if let (Value::Str(a), Value::Str(b)) = (l, r) { let c = a.as_str().cmp(b.as_str()); return Value::Bool(match op { "<" => c.is_lt(), ">" => c.is_gt(), "<=" => c.is_le(), _ => c.is_ge() }); }
+        let a = self.to_num(l); let b = self.to_num(r); if a.is_nan() || b.is_nan() { return Value::Bool(false); }
+        Value::Bool(match op { "<" => a < b, ">" => a > b, "<=" => a <= b, _ => a >= b })
+    }
+
+    fn loose_eq(&mut self, l: &Value, r: &Value) -> bool {
+        match (l, r) {
+            (Value::Null, Value::Undefined) | (Value::Undefined, Value::Null) => true,
+            _ => { if matches!(l, Value::Null | Value::Undefined) || matches!(r, Value::Null | Value::Undefined) { return strict_eq(l, r); } if let (Value::Obj(a), Value::Obj(b)) = (l, r) { return Rc::ptr_eq(a, b); } if let (Value::Str(a), Value::Str(b)) = (l, r) { return a == b; } let ln = self.to_num(l); let rn = self.to_num(r); ln == rn && !ln.is_nan() }
+        }
+    }
+
+    pub fn to_num(&self, v: &Value) -> f64 { to_num_simple(v) }
+
+    pub fn to_string(&self, v: &Value) -> String {
+        match v {
+            Value::Undefined => "undefined".into(), Value::Null => "null".into(),
+            Value::Bool(b) => if *b { "true".into() } else { "false".into() },
+            Value::Num(n) => num_to_str(*n), Value::Str(s) => (**s).clone(),
+            Value::Obj(o) => { let b = o.borrow(); if let Some(a) = &b.arr { a.iter().map(|x| if matches!(x, Value::Null | Value::Undefined) { String::new() } else { self.to_string(x) }).collect::<Vec<_>>().join(",") } else if b.call.is_some() { "function".into() } else { "[object Object]".into() } }
+        }
+    }
+
+    fn inspect(&self, v: &Value, depth: u32) -> String {
+        match v {
+            Value::Str(s) => if depth == 0 { (**s).clone() } else { format!("'{}'", s) },
+            Value::Obj(o) => {
+                let b = o.borrow();
+                if let Some(a) = &b.arr { if a.is_empty() { "[]".into() } else { let inner: Vec<String> = a.iter().map(|x| self.inspect(x, depth + 1)).collect(); format!("[ {} ]", inner.join(", ")) } }
+                else if b.call.is_some() { "[Function]".into() }
+                else { if b.props.is_empty() { "{}".into() } else { let inner: Vec<String> = b.props.iter().map(|(k, x)| format!("{}: {}", k, self.inspect(x, depth + 1))).collect(); format!("{{ {} }}", inner.join(", ")) } }
+            }
+            _ => self.to_string(v),
         }
     }
 }
 
-/// Execute les `<script>` inline supportes et renvoie un HTML enrichi.
+// ============================================================================
+// Helpers de valeur
+// ============================================================================
+
+pub fn truthy(v: &Value) -> bool { match v { Value::Undefined | Value::Null => false, Value::Bool(b) => *b, Value::Num(n) => *n != 0.0 && !n.is_nan(), Value::Str(s) => !s.is_empty(), Value::Obj(_) => true } }
+fn type_of(v: &Value) -> &'static str { match v { Value::Undefined => "undefined", Value::Null => "object", Value::Bool(_) => "boolean", Value::Num(_) => "number", Value::Str(_) => "string", Value::Obj(o) => if o.borrow().call.is_some() { "function" } else { "object" } } }
+fn strict_eq(l: &Value, r: &Value) -> bool { match (l, r) { (Value::Undefined, Value::Undefined) | (Value::Null, Value::Null) => true, (Value::Bool(a), Value::Bool(b)) => a == b, (Value::Num(a), Value::Num(b)) => a == b, (Value::Str(a), Value::Str(b)) => a == b, (Value::Obj(a), Value::Obj(b)) => Rc::ptr_eq(a, b), _ => false } }
+fn to_i32(n: f64) -> i32 { if n.is_nan() || n.is_infinite() { return 0; } (trunc_(n) as i64 as u32) as i32 }
+fn to_num_simple(v: &Value) -> f64 { match v { Value::Num(n) => *n, Value::Bool(b) => if *b { 1.0 } else { 0.0 }, Value::Null => 0.0, Value::Undefined => f64::NAN, Value::Str(s) => { let t = s.trim(); if t.is_empty() { 0.0 } else { t.parse::<f64>().unwrap_or(f64::NAN) } } Value::Obj(o) => { let b = o.borrow(); if let Some(a) = &b.arr { if a.is_empty() { 0.0 } else if a.len() == 1 { to_num_simple(&a[0]) } else { f64::NAN } } else { f64::NAN } } } }
+
+pub fn num_to_str(n: f64) -> String { if n.is_nan() { return "NaN".into(); } if n.is_infinite() { return if n > 0.0 { "Infinity".into() } else { "-Infinity".into() }; } if n == 0.0 { return "0".into(); } format!("{}", n) }
+
+fn powf(a: f64, b: f64) -> f64 {
+    if b == 0.0 { return 1.0; } if a == 0.0 { return 0.0; }
+    if fract_(b) == 0.0 && b.abs() < 1024.0 { let mut r = 1.0f64; let mut e = b.abs() as i64; let mut base = a; while e > 0 { if e & 1 == 1 { r *= base; } base *= base; e >>= 1; } return if b < 0.0 { 1.0 / r } else { r }; }
+    if a < 0.0 { return f64::NAN; }
+    exp_(b * ln_(a))
+}
+fn ln_(mut x: f64) -> f64 { if x <= 0.0 { return f64::NAN; } let mut k = 0i32; while x > 1.5 { x /= core::f64::consts::E; k += 1; } while x < 0.5 { x *= core::f64::consts::E; k -= 1; } let t = (x - 1.0) / (x + 1.0); let t2 = t * t; let mut term = t; let mut sum = 0.0; let mut n = 1.0; for _ in 0..30 { sum += term / n; term *= t2; n += 2.0; } 2.0 * sum + k as f64 }
+fn exp_(x: f64) -> f64 { let mut term = 1.0; let mut sum = 1.0; for i in 1..40 { term *= x / i as f64; sum += term; } sum }
+fn sqrt_(x: f64) -> f64 { if x < 0.0 { return f64::NAN; } if x == 0.0 { return 0.0; } let mut g = x; for _ in 0..40 { g = 0.5 * (g + x / g); } g }
+// no_std : pas de f64::floor/ceil/trunc/fract. Implementations maison.
+fn trunc_(x: f64) -> f64 { if x.is_nan() || x.is_infinite() { return x; } if x.abs() >= 9.007199254740992e15 { return x; } x as i64 as f64 }
+fn floor_(x: f64) -> f64 { let t = trunc_(x); if x < 0.0 && t != x { t - 1.0 } else { t } }
+fn ceil_(x: f64) -> f64 { let t = trunc_(x); if x > 0.0 && t != x { t + 1.0 } else { t } }
+fn fract_(x: f64) -> f64 { x - trunc_(x) }
+
+// ============================================================================
+// Built-ins
+// ============================================================================
+
+fn set(obj: &Value, k: &str, v: Value) { if let Value::Obj(o) = obj { o.borrow_mut().props.insert(k.to_string(), v); } }
+
+fn install(it: &mut Interp) {
+    let g = it.global.clone();
+    // console
+    let console = new_obj(Obj::plain());
+    for m in ["log", "info", "warn", "error", "debug"] { set(&console, m, native_val(|it, _t, a| { let s = a.iter().map(|v| it.inspect(v, 0)).collect::<Vec<_>>().join(" "); it.out.push(s); Ok(Value::Undefined) })); }
+    scope_declare(&g, "console", console);
+
+    // Math
+    let math = new_obj(Obj::plain());
+    set(&math, "PI", Value::Num(core::f64::consts::PI));
+    set(&math, "E", Value::Num(core::f64::consts::E));
+    set(&math, "abs", native_val(|it, _t, a| Ok(Value::Num(it.to_num(a.get(0).unwrap_or(&Value::Undefined)).abs()))));
+    set(&math, "floor", native_val(|it, _t, a| Ok(Value::Num(floor_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "ceil", native_val(|it, _t, a| Ok(Value::Num(ceil_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "round", native_val(|it, _t, a| { let x = it.to_num(a.get(0).unwrap_or(&Value::Undefined)); Ok(Value::Num(floor_(x + 0.5))) }));
+    set(&math, "trunc", native_val(|it, _t, a| Ok(Value::Num(trunc_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "sqrt", native_val(|it, _t, a| Ok(Value::Num(sqrt_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "pow", native_val(|it, _t, a| Ok(Value::Num(powf(it.to_num(a.get(0).unwrap_or(&Value::Undefined)), it.to_num(a.get(1).unwrap_or(&Value::Undefined)))))));
+    set(&math, "sign", native_val(|it, _t, a| { let x = it.to_num(a.get(0).unwrap_or(&Value::Undefined)); Ok(Value::Num(if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { x })) }));
+    set(&math, "min", native_val(|it, _t, a| { let mut m = f64::INFINITY; for v in a { let x = it.to_num(v); if x.is_nan() { return Ok(Value::Num(f64::NAN)); } if x < m { m = x; } } Ok(Value::Num(m)) }));
+    set(&math, "max", native_val(|it, _t, a| { let mut m = f64::NEG_INFINITY; for v in a { let x = it.to_num(v); if x.is_nan() { return Ok(Value::Num(f64::NAN)); } if x > m { m = x; } } Ok(Value::Num(m)) }));
+    set(&math, "log", native_val(|it, _t, a| Ok(Value::Num(ln_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "exp", native_val(|it, _t, a| Ok(Value::Num(exp_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "random", native_val(|_it, _t, _a| Ok(Value::Num(prng()))));
+    scope_declare(&g, "Math", math);
+
+    // JSON
+    let json = new_obj(Obj::plain());
+    set(&json, "stringify", native_val(|it, _t, a| { let s = json_stringify(it, a.get(0).unwrap_or(&Value::Undefined)); Ok(match s { Some(s) => str_val(s), None => Value::Undefined }) }));
+    set(&json, "parse", native_val(|_it, _t, a| { let s = match a.get(0) { Some(Value::Str(s)) => (**s).clone(), Some(_) => return Err(str_val("JSON.parse: not a string")), None => return Err(str_val("JSON.parse: undefined")) }; json_parse(&s).ok_or_else(|| str_val("SyntaxError: JSON")) }));
+    scope_declare(&g, "JSON", json);
+
+    // Object
+    let object = native_val(|_it, _t, a| Ok(a.get(0).cloned().unwrap_or_else(|| new_obj(Obj::plain()))));
+    set(&object, "keys", native_val(|_it, _t, a| Ok(match a.get(0) { Some(Value::Obj(o)) => { let b = o.borrow(); if let Some(arr) = &b.arr { array_val((0..arr.len()).map(|i| str_val(i.to_string())).collect()) } else { array_val(b.props.keys().map(|k| str_val(k.clone())).collect()) } } _ => array_val(Vec::new()) })));
+    set(&object, "values", native_val(|_it, _t, a| Ok(match a.get(0) { Some(Value::Obj(o)) => { let b = o.borrow(); if let Some(arr) = &b.arr { array_val(arr.clone()) } else { array_val(b.props.values().cloned().collect()) } } _ => array_val(Vec::new()) })));
+    set(&object, "entries", native_val(|_it, _t, a| Ok(match a.get(0) { Some(Value::Obj(o)) => { let b = o.borrow(); array_val(b.props.iter().map(|(k, v)| array_val(vec![str_val(k.clone()), v.clone()])).collect()) } _ => array_val(Vec::new()) })));
+    set(&object, "assign", native_val(|_it, _t, a| { if let Some(Value::Obj(target)) = a.get(0) { for src in &a[1..] { if let Value::Obj(s) = src { let kv: Vec<(String, Value)> = s.borrow().props.iter().map(|(k, v)| (k.clone(), v.clone())).collect(); for (k, v) in kv { target.borrow_mut().props.insert(k, v); } } } } Ok(a.get(0).cloned().unwrap_or(Value::Undefined)) }));
+    set(&object, "freeze", native_val(|_it, _t, a| Ok(a.get(0).cloned().unwrap_or(Value::Undefined))));
+    scope_declare(&g, "Object", object);
+
+    // Array + Array.isArray, Array.from
+    let array = native_val(|_it, _t, a| { if a.len() == 1 { if let Value::Num(n) = a[0] { return Ok(array_val(vec![Value::Undefined; (n as usize).min(100000)])); } } Ok(array_val(a.to_vec())) });
+    set(&array, "isArray", native_val(|_it, _t, a| Ok(Value::Bool(matches!(a.get(0), Some(Value::Obj(o)) if o.borrow().arr.is_some())))));
+    set(&array, "from", native_val(|it, _t, a| {
+        let v = a.get(0).cloned().unwrap_or(Value::Undefined);
+        // Source : iterable (tableau/chaine) ou array-like ({ length: n }).
+        let mut items = it.iterable(&v);
+        if items.is_empty() {
+            if let Value::Obj(o) = &v {
+                let len = { let b = o.borrow(); b.arr.is_none().then(|| b.props.get("length").map(|l| it.to_num(l))).flatten() };
+                if let Some(len) = len {
+                    let n = (len.max(0.0) as usize).min(1_000_000);
+                    items = (0..n).map(|i| it.get_prop(&v, &i.to_string()).unwrap_or(Value::Undefined)).collect();
+                }
+            }
+        }
+        if let Some(f) = a.get(1) {
+            if matches!(f, Value::Obj(o) if o.borrow().call.is_some()) {
+                let mut out = Vec::with_capacity(items.len());
+                for (i, x) in items.into_iter().enumerate() { out.push(it.call(f.clone(), Value::Undefined, &[x, Value::Num(i as f64)])?); }
+                return Ok(array_val(out));
+            }
+        }
+        Ok(array_val(items))
+    }));
+    set(&array, "of", native_val(|_it, _t, a| Ok(array_val(a.to_vec()))));
+    scope_declare(&g, "Array", array);
+
+    // fonctions globales
+    scope_declare(&g, "parseInt", native_val(|it, _t, a| { let s = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); let radix = a.get(1).map(|v| it.to_num(v) as u32).filter(|r| *r >= 2 && *r <= 36).unwrap_or(10); Ok(Value::Num(parse_int(&s, radix))) }));
+    scope_declare(&g, "parseFloat", native_val(|it, _t, a| { let s = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); Ok(Value::Num(parse_float(&s))) }));
+    scope_declare(&g, "isNaN", native_val(|it, _t, a| Ok(Value::Bool(it.to_num(a.get(0).unwrap_or(&Value::Undefined)).is_nan()))));
+    scope_declare(&g, "isFinite", native_val(|it, _t, a| { let n = it.to_num(a.get(0).unwrap_or(&Value::Undefined)); Ok(Value::Bool(n.is_finite())) }));
+    let string_ctor = native_val(|it, _t, a| Ok(str_val(match a.get(0) { Some(v) => it.to_string(v), None => String::new() })));
+    set(&string_ctor, "fromCharCode", native_val(|it, _t, a| { let mut s = String::new(); for v in a { if let Some(c) = core::char::from_u32(it.to_num(v) as u32) { s.push(c); } } Ok(str_val(s)) }));
+    scope_declare(&g, "String", string_ctor);
+    let number_ctor = native_val(|it, _t, a| Ok(Value::Num(match a.get(0) { Some(v) => it.to_num(v), None => 0.0 })));
+    set(&number_ctor, "isInteger", native_val(|it, _t, a| { let n = it.to_num(a.get(0).unwrap_or(&Value::Undefined)); Ok(Value::Bool(n.is_finite() && fract_(n) == 0.0)) }));
+    set(&number_ctor, "isNaN", native_val(|_it, _t, a| Ok(Value::Bool(matches!(a.get(0), Some(Value::Num(n)) if n.is_nan())))));
+    set(&number_ctor, "parseFloat", native_val(|it, _t, a| Ok(Value::Num(parse_float(&it.to_string(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&number_ctor, "MAX_SAFE_INTEGER", Value::Num(9007199254740991.0));
+    set(&number_ctor, "MIN_SAFE_INTEGER", Value::Num(-9007199254740991.0));
+    scope_declare(&g, "Number", number_ctor);
+    scope_declare(&g, "Boolean", native_val(|_it, _t, a| Ok(Value::Bool(a.get(0).map(truthy).unwrap_or(false)))));
+    scope_declare(&g, "NaN", Value::Num(f64::NAN));
+    scope_declare(&g, "Infinity", Value::Num(f64::INFINITY));
+    scope_declare(&g, "undefined", Value::Undefined);
+    // stubs sans effet
+    scope_declare(&g, "setTimeout", native_val(|it, _t, a| { if let Some(f) = a.get(0) { let f = f.clone(); let _ = it.call(f, Value::Undefined, &[]); } Ok(Value::Num(0.0)) }));
+    scope_declare(&g, "alert", native_val(|it, _t, a| { let s = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); it.out.push(format!("[alert] {}", s)); Ok(Value::Undefined) }));
+
+    // document
+    let doc = new_obj(Obj { props: OrderedMap::new(), arr: None, call: None, class: "Document" });
+    set(&doc, "write", native_val(|it, _t, a| { for v in a { let s = it.to_string(v); it.writes.push_str(&s); } Ok(Value::Undefined) }));
+    set(&doc, "writeln", native_val(|it, _t, a| { for v in a { let s = it.to_string(v); it.writes.push_str(&s); } it.writes.push('\n'); Ok(Value::Undefined) }));
+    set(&doc, "getElementById", native_val(|it, _t, a| { let id = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); let el = new_obj(Obj { props: OrderedMap::new(), arr: None, call: None, class: "Element" }); set(&el, "__id__", str_val(id.clone())); set(&el, "id", str_val(id)); Ok(el) }));
+    set(&doc, "querySelector", native_val(|it, _t, a| { let sel = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); let id = sel.trim_start_matches('#').to_string(); let el = new_obj(Obj { props: OrderedMap::new(), arr: None, call: None, class: "Element" }); set(&el, "__id__", str_val(id.clone())); set(&el, "id", str_val(id)); Ok(el) }));
+    set(&doc, "createElement", native_val(|it, _t, a| { let tag = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); let el = new_obj(Obj { props: OrderedMap::new(), arr: None, call: None, class: "Element" }); set(&el, "tagName", str_val(tag.to_uppercase())); Ok(el) }));
+    set(&doc, "getElementsByTagName", native_val(|_it, _t, _a| Ok(array_val(Vec::new()))));
+    let g2 = it.global.clone();
+    scope_declare(&g2, "document", doc);
+
+    // window = objet global minimal
+    let window = new_obj(Obj::plain());
+    scope_declare(&g2, "window", window);
+}
+
+// PRNG simple (LCG) pour Math.random (deterministe ; suffisant pour le rendu).
+fn prng() -> f64 { use core::sync::atomic::{AtomicU64, Ordering}; static S: AtomicU64 = AtomicU64::new(0x2545F4914F6CDD1D); let mut x = S.load(Ordering::Relaxed); x ^= x << 13; x ^= x >> 7; x ^= x << 17; S.store(x, Ordering::Relaxed); ((x >> 11) as f64) / ((1u64 << 53) as f64) }
+
+fn parse_int(s: &str, radix: u32) -> f64 {
+    let s = s.trim(); let bytes = s.as_bytes(); let mut i = 0; let mut sign = 1.0;
+    if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') { if bytes[i] == b'-' { sign = -1.0; } i += 1; }
+    if radix == 16 && s[i..].starts_with("0x") { i += 2; }
+    let mut val = 0.0f64; let mut any = false;
+    while i < bytes.len() { let d = (bytes[i] as char).to_digit(36); match d { Some(d) if d < radix => { val = val * radix as f64 + d as f64; any = true; i += 1; } _ => break } }
+    if any { sign * val } else { f64::NAN }
+}
+fn parse_float(s: &str) -> f64 {
+    let s = s.trim(); let b = s.as_bytes(); let mut seen_dot = false; let mut seen_e = false; let mut i = 0;
+    if i < b.len() && (b[i] == b'+' || b[i] == b'-') { i += 1; }
+    while i < b.len() { let c = b[i]; if c.is_ascii_digit() { } else if c == b'.' && !seen_dot && !seen_e { seen_dot = true; } else if (c | 32) == b'e' && !seen_e { seen_e = true; if i + 1 < b.len() && (b[i + 1] == b'+' || b[i + 1] == b'-') { i += 1; } } else { break; } i += 1; }
+    s[..i].parse::<f64>().unwrap_or(f64::NAN)
+}
+
+// --- methodes String (this = chaine) ---
+fn string_prop(s: &str, name: &str) -> Value {
+    match name {
+        "length" => Value::Num(s.chars().count() as f64),
+        "toUpperCase" => native_val(|it, t, _a| Ok(str_val(it.to_string(&t).to_uppercase()))),
+        "toLowerCase" => native_val(|it, t, _a| Ok(str_val(it.to_string(&t).to_lowercase()))),
+        "trim" => native_val(|it, t, _a| Ok(str_val(it.to_string(&t).trim().to_string()))),
+        "charAt" => native_val(|it, t, a| { let s = it.to_string(&t); let i = it.to_num(a.get(0).unwrap_or(&Value::Num(0.0))) as usize; Ok(str_val(s.chars().nth(i).map(|c| c.to_string()).unwrap_or_default())) }),
+        "charCodeAt" => native_val(|it, t, a| { let s = it.to_string(&t); let i = it.to_num(a.get(0).unwrap_or(&Value::Num(0.0))) as usize; Ok(s.chars().nth(i).map(|c| Value::Num(c as u32 as f64)).unwrap_or(Value::Num(f64::NAN))) }),
+        "indexOf" => native_val(|it, t, a| { let s = it.to_string(&t); let n = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); Ok(Value::Num(byte_to_char_index(&s, s.find(&n)))) }),
+        "lastIndexOf" => native_val(|it, t, a| { let s = it.to_string(&t); let n = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); Ok(Value::Num(byte_to_char_index(&s, s.rfind(&n)))) }),
+        "includes" => native_val(|it, t, a| { let s = it.to_string(&t); let n = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); Ok(Value::Bool(s.contains(&n))) }),
+        "startsWith" => native_val(|it, t, a| { let s = it.to_string(&t); let n = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); Ok(Value::Bool(s.starts_with(&n))) }),
+        "endsWith" => native_val(|it, t, a| { let s = it.to_string(&t); let n = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); Ok(Value::Bool(s.ends_with(&n))) }),
+        "slice" => native_val(|it, t, a| { let s: Vec<char> = it.to_string(&t).chars().collect(); let (st, en) = slice_bounds(s.len(), a, it); Ok(str_val(s[st..en].iter().collect::<String>())) }),
+        "substring" => native_val(|it, t, a| { let s: Vec<char> = it.to_string(&t).chars().collect(); let mut st = it.to_num(a.get(0).unwrap_or(&Value::Num(0.0))).max(0.0) as usize; let mut en = a.get(1).map(|v| it.to_num(v) as usize).unwrap_or(s.len()).min(s.len()); st = st.min(s.len()); en = en.min(s.len()); if st > en { core::mem::swap(&mut st, &mut en); } Ok(str_val(s[st..en].iter().collect::<String>())) }),
+        "substr" => native_val(|it, t, a| { let s: Vec<char> = it.to_string(&t).chars().collect(); let st = (it.to_num(a.get(0).unwrap_or(&Value::Num(0.0))).max(0.0) as usize).min(s.len()); let len = a.get(1).map(|v| it.to_num(v) as usize).unwrap_or(s.len() - st).min(s.len() - st); Ok(str_val(s[st..st + len].iter().collect::<String>())) }),
+        "split" => native_val(|it, t, a| { let s = it.to_string(&t); match a.get(0) { None | Some(Value::Undefined) => Ok(array_val(vec![str_val(s)])), Some(sep) => { let sep = it.to_string(sep); if sep.is_empty() { Ok(array_val(s.chars().map(|c| str_val(c.to_string())).collect())) } else { Ok(array_val(s.split(&sep as &str).map(|p| str_val(p.to_string())).collect())) } } } }),
+        "replace" => native_val(|it, t, a| { let s = it.to_string(&t); let from = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); let to = it.to_string(a.get(1).unwrap_or(&Value::Undefined)); Ok(str_val(s.replacen(&from as &str, &to, 1))) }),
+        "replaceAll" => native_val(|it, t, a| { let s = it.to_string(&t); let from = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); let to = it.to_string(a.get(1).unwrap_or(&Value::Undefined)); Ok(str_val(if from.is_empty() { s } else { s.replace(&from as &str, &to) })) }),
+        "repeat" => native_val(|it, t, a| { let s = it.to_string(&t); let n = it.to_num(a.get(0).unwrap_or(&Value::Num(0.0))) as usize; Ok(str_val(s.repeat(n.min(100000)))) }),
+        "padStart" => native_val(|it, t, a| { let s = it.to_string(&t); let len = it.to_num(a.get(0).unwrap_or(&Value::Num(0.0))) as usize; let pad = a.get(1).map(|v| it.to_string(v)).unwrap_or_else(|| " ".into()); Ok(str_val(pad_str(&s, len, &pad, true))) }),
+        "padEnd" => native_val(|it, t, a| { let s = it.to_string(&t); let len = it.to_num(a.get(0).unwrap_or(&Value::Num(0.0))) as usize; let pad = a.get(1).map(|v| it.to_string(v)).unwrap_or_else(|| " ".into()); Ok(str_val(pad_str(&s, len, &pad, false))) }),
+        "concat" => native_val(|it, t, a| { let mut s = it.to_string(&t); for v in a { s.push_str(&it.to_string(v)); } Ok(str_val(s)) }),
+        "toString" => native_val(|it, t, _a| Ok(str_val(it.to_string(&t)))),
+        "trimStart" => native_val(|it, t, _a| Ok(str_val(it.to_string(&t).trim_start().to_string()))),
+        "trimEnd" => native_val(|it, t, _a| Ok(str_val(it.to_string(&t).trim_end().to_string()))),
+        _ => { if let Ok(i) = name.parse::<usize>() { return s.chars().nth(i).map(|c| str_val(c.to_string())).unwrap_or(Value::Undefined); } Value::Undefined }
+    }
+}
+fn byte_to_char_index(s: &str, b: Option<usize>) -> f64 { match b { Some(bi) => s[..bi].chars().count() as f64, None => -1.0 } }
+fn pad_str(s: &str, len: usize, pad: &str, start: bool) -> String { let cur = s.chars().count(); if cur >= len || pad.is_empty() { return s.to_string(); } let mut p = String::new(); while cur + p.chars().count() < len { p.push_str(pad); } let p: String = p.chars().take(len - cur).collect(); if start { format!("{}{}", p, s) } else { format!("{}{}", s, p) } }
+fn slice_bounds(len: usize, a: &[Value], it: &Interp) -> (usize, usize) {
+    let norm = |v: f64, len: usize| -> usize { if v < 0.0 { ((len as f64 + v).max(0.0)) as usize } else { (v as usize).min(len) } };
+    let st = a.get(0).map(|v| norm(it.to_num(v), len)).unwrap_or(0);
+    let en = a.get(1).map(|v| if matches!(v, Value::Undefined) { len } else { norm(it.to_num(v), len) }).unwrap_or(len);
+    (st.min(en), en.max(st))
+}
+
+fn number_prop(name: &str) -> Value {
+    match name {
+        "toFixed" => native_val(|it, t, a| { let n = it.to_num(&t); let d = it.to_num(a.get(0).unwrap_or(&Value::Num(0.0))) as usize; Ok(str_val(fixed(n, d))) }),
+        "toString" => native_val(|it, t, a| { let n = it.to_num(&t); let radix = a.get(0).map(|v| it.to_num(v) as u32).unwrap_or(10); if radix == 10 { Ok(str_val(num_to_str(n))) } else { Ok(str_val(to_radix(n, radix))) } }),
+        _ => Value::Undefined,
+    }
+}
+fn fixed(n: f64, d: usize) -> String { if n.is_nan() { return "NaN".into(); } let m = powf(10.0, d as f64); let r = trunc_(n * m + if n >= 0.0 { 0.5 } else { -0.5 }) / m; if d == 0 { return num_to_str(trunc_(r)); } let s = format!("{}", r); if let Some(dot) = s.find('.') { let have = s.len() - dot - 1; if have >= d { s[..dot + 1 + d].to_string() } else { let mut s = s; for _ in 0..(d - have) { s.push('0'); } s } } else { let mut s = s; s.push('.'); for _ in 0..d { s.push('0'); } s } }
+fn to_radix(mut n: f64, radix: u32) -> String { if n == 0.0 { return "0".into(); } let neg = n < 0.0; n = trunc_(n.abs()); let mut out = Vec::new(); let mut x = n as u64; if x == 0 { return "0".into(); } while x > 0 { let d = (x % radix as u64) as u32; out.push(core::char::from_digit(d, radix).unwrap_or('0')); x /= radix as u64; } if neg { out.push('-'); } out.iter().rev().collect() }
+
+// --- methodes Object.prototype (objet simple) ---
+fn object_prop(name: &str) -> Value {
+    match name {
+        "toString" => native_val(|_it, _t, _a| Ok(str_val("[object Object]"))),
+        "valueOf" => native_val(|_it, t, _a| Ok(t)),
+        "hasOwnProperty" => native_val(|it, t, a| { let k = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); Ok(Value::Bool(matches!(&t, Value::Obj(o) if o.borrow().props.contains_key(&k)))) }),
+        _ => Value::Undefined,
+    }
+}
+
+// --- methodes Array (this = tableau) ---
+fn array_prop(name: &str) -> Value {
+    match name {
+        "push" => native_val(|_it, t, a| { if let Value::Obj(o) = &t { if let Some(arr) = &mut o.borrow_mut().arr { for v in a { arr.push(v.clone()); } return Ok(Value::Num(arr.len() as f64)); } } Ok(Value::Num(0.0)) }),
+        "pop" => native_val(|_it, t, _a| { if let Value::Obj(o) = &t { if let Some(arr) = &mut o.borrow_mut().arr { return Ok(arr.pop().unwrap_or(Value::Undefined)); } } Ok(Value::Undefined) }),
+        "shift" => native_val(|_it, t, _a| { if let Value::Obj(o) = &t { if let Some(arr) = &mut o.borrow_mut().arr { if arr.is_empty() { return Ok(Value::Undefined); } return Ok(arr.remove(0)); } } Ok(Value::Undefined) }),
+        "unshift" => native_val(|_it, t, a| { if let Value::Obj(o) = &t { if let Some(arr) = &mut o.borrow_mut().arr { for (i, v) in a.iter().enumerate() { arr.insert(i, v.clone()); } return Ok(Value::Num(arr.len() as f64)); } } Ok(Value::Num(0.0)) }),
+        "join" => native_val(|it, t, a| { let sep = a.get(0).map(|v| if matches!(v, Value::Undefined) { ",".into() } else { it.to_string(v) }).unwrap_or_else(|| ",".into()); if let Value::Obj(o) = &t { let arr = o.borrow().arr.clone().unwrap_or_default(); let parts: Vec<String> = arr.iter().map(|v| if matches!(v, Value::Null | Value::Undefined) { String::new() } else { it.to_string(v) }).collect(); return Ok(str_val(parts.join(&sep))); } Ok(str_val(String::new())) }),
+        "indexOf" => native_val(|_it, t, a| { if let Value::Obj(o) = &t { let arr = o.borrow().arr.clone().unwrap_or_default(); let target = a.get(0).cloned().unwrap_or(Value::Undefined); for (i, v) in arr.iter().enumerate() { if strict_eq(v, &target) { return Ok(Value::Num(i as f64)); } } } Ok(Value::Num(-1.0)) }),
+        "lastIndexOf" => native_val(|_it, t, a| { if let Value::Obj(o) = &t { let arr = o.borrow().arr.clone().unwrap_or_default(); let target = a.get(0).cloned().unwrap_or(Value::Undefined); for (i, v) in arr.iter().enumerate().rev() { if strict_eq(v, &target) { return Ok(Value::Num(i as f64)); } } } Ok(Value::Num(-1.0)) }),
+        "includes" => native_val(|_it, t, a| { if let Value::Obj(o) = &t { let arr = o.borrow().arr.clone().unwrap_or_default(); let target = a.get(0).cloned().unwrap_or(Value::Undefined); for v in &arr { if strict_eq(v, &target) { return Ok(Value::Bool(true)); } } } Ok(Value::Bool(false)) }),
+        "slice" => native_val(|it, t, a| { if let Value::Obj(o) = &t { let arr = o.borrow().arr.clone().unwrap_or_default(); let (st, en) = slice_bounds(arr.len(), a, it); return Ok(array_val(arr[st..en].to_vec())); } Ok(array_val(Vec::new())) }),
+        "concat" => native_val(|it, t, a| { let mut out = Vec::new(); if let Value::Obj(o) = &t { out.extend(o.borrow().arr.clone().unwrap_or_default()); } for v in a { match v { Value::Obj(o) if o.borrow().arr.is_some() => out.extend(o.borrow().arr.clone().unwrap()), _ => out.push(v.clone()) } } let _ = it; Ok(array_val(out)) }),
+        "reverse" => native_val(|_it, t, _a| { if let Value::Obj(o) = &t { if let Some(arr) = &mut o.borrow_mut().arr { arr.reverse(); } } Ok(t) }),
+        "map" => native_val(|it, t, a| { let arr = arr_of(&t); let f = a.get(0).cloned().unwrap_or(Value::Undefined); let mut out = Vec::new(); for (i, v) in arr.iter().enumerate() { out.push(it.call(f.clone(), Value::Undefined, &[v.clone(), Value::Num(i as f64), t.clone()])?); } Ok(array_val(out)) }),
+        "filter" => native_val(|it, t, a| { let arr = arr_of(&t); let f = a.get(0).cloned().unwrap_or(Value::Undefined); let mut out = Vec::new(); for (i, v) in arr.iter().enumerate() { if truthy(&it.call(f.clone(), Value::Undefined, &[v.clone(), Value::Num(i as f64), t.clone()])?) { out.push(v.clone()); } } Ok(array_val(out)) }),
+        "forEach" => native_val(|it, t, a| { let arr = arr_of(&t); let f = a.get(0).cloned().unwrap_or(Value::Undefined); for (i, v) in arr.iter().enumerate() { it.call(f.clone(), Value::Undefined, &[v.clone(), Value::Num(i as f64), t.clone()])?; } Ok(Value::Undefined) }),
+        "reduce" => native_val(|it, t, a| { let arr = arr_of(&t); let f = a.get(0).cloned().unwrap_or(Value::Undefined); let mut acc; let mut start = 0; if a.len() >= 2 { acc = a[1].clone(); } else { if arr.is_empty() { return Err(str_val("Reduce of empty array with no initial value")); } acc = arr[0].clone(); start = 1; } for i in start..arr.len() { acc = it.call(f.clone(), Value::Undefined, &[acc, arr[i].clone(), Value::Num(i as f64), t.clone()])?; } Ok(acc) }),
+        "find" => native_val(|it, t, a| { let arr = arr_of(&t); let f = a.get(0).cloned().unwrap_or(Value::Undefined); for (i, v) in arr.iter().enumerate() { if truthy(&it.call(f.clone(), Value::Undefined, &[v.clone(), Value::Num(i as f64), t.clone()])?) { return Ok(v.clone()); } } Ok(Value::Undefined) }),
+        "findIndex" => native_val(|it, t, a| { let arr = arr_of(&t); let f = a.get(0).cloned().unwrap_or(Value::Undefined); for (i, v) in arr.iter().enumerate() { if truthy(&it.call(f.clone(), Value::Undefined, &[v.clone(), Value::Num(i as f64), t.clone()])?) { return Ok(Value::Num(i as f64)); } } Ok(Value::Num(-1.0)) }),
+        "some" => native_val(|it, t, a| { let arr = arr_of(&t); let f = a.get(0).cloned().unwrap_or(Value::Undefined); for (i, v) in arr.iter().enumerate() { if truthy(&it.call(f.clone(), Value::Undefined, &[v.clone(), Value::Num(i as f64), t.clone()])?) { return Ok(Value::Bool(true)); } } Ok(Value::Bool(false)) }),
+        "every" => native_val(|it, t, a| { let arr = arr_of(&t); let f = a.get(0).cloned().unwrap_or(Value::Undefined); for (i, v) in arr.iter().enumerate() { if !truthy(&it.call(f.clone(), Value::Undefined, &[v.clone(), Value::Num(i as f64), t.clone()])?) { return Ok(Value::Bool(false)); } } Ok(Value::Bool(true)) }),
+        "map_" => Value::Undefined,
+        "sort" => native_val(|it, t, a| { if let Value::Obj(o) = &t { let mut arr = o.borrow().arr.clone().unwrap_or_default(); let cmp = a.get(0).cloned(); // tri a bulles (stable, petites listes)
+            let n = arr.len(); for i in 0..n { for j in 0..n - 1 - i.min(n.saturating_sub(1)) { let swap = if let Some(f) = &cmp { let r = it.call(f.clone(), Value::Undefined, &[arr[j].clone(), arr[j + 1].clone()])?; it.to_num(&r) > 0.0 } else { it.to_string(&arr[j]) > it.to_string(&arr[j + 1]) }; if swap { arr.swap(j, j + 1); } } } if let Some(slot) = &mut o.borrow_mut().arr { *slot = arr; } } Ok(t) }),
+        "fill" => native_val(|_it, t, a| { if let Value::Obj(o) = &t { let v = a.get(0).cloned().unwrap_or(Value::Undefined); if let Some(arr) = &mut o.borrow_mut().arr { for slot in arr.iter_mut() { *slot = v.clone(); } } } Ok(t) }),
+        "flat" => native_val(|_it, t, _a| { let arr = arr_of(&t); let mut out = Vec::new(); for v in arr { match v { Value::Obj(o) if o.borrow().arr.is_some() => out.extend(o.borrow().arr.clone().unwrap()), _ => out.push(v) } } Ok(array_val(out)) }),
+        "keys" => native_val(|_it, t, _a| { let arr = arr_of(&t); Ok(array_val((0..arr.len()).map(|i| Value::Num(i as f64)).collect())) }),
+        "toString" => native_val(|it, t, _a| Ok(str_val(it.to_string(&t)))),
+        _ => Value::Undefined,
+    }
+}
+fn arr_of(t: &Value) -> Vec<Value> { if let Value::Obj(o) = t { o.borrow().arr.clone().unwrap_or_default() } else { Vec::new() } }
+
+// --- JSON ---
+fn json_stringify(it: &Interp, v: &Value) -> Option<String> {
+    match v {
+        Value::Undefined => None,
+        Value::Null => Some("null".into()),
+        Value::Bool(b) => Some(if *b { "true".into() } else { "false".into() }),
+        Value::Num(n) => Some(if n.is_finite() { num_to_str(*n) } else { "null".into() }),
+        Value::Str(s) => Some(json_quote(s)),
+        Value::Obj(o) => { let b = o.borrow(); if let Some(a) = &b.arr { let parts: Vec<String> = a.iter().map(|x| json_stringify(it, x).unwrap_or_else(|| "null".into())).collect(); Some(format!("[{}]", parts.join(","))) } else if b.call.is_some() { None } else { let mut parts = Vec::new(); for (k, val) in b.props.iter() { if let Some(s) = json_stringify(it, val) { parts.push(format!("{}:{}", json_quote(k), s)); } } Some(format!("{{{}}}", parts.join(","))) } }
+    }
+}
+fn json_quote(s: &str) -> String { let mut o = String::from("\""); for c in s.chars() { match c { '"' => o.push_str("\\\""), '\\' => o.push_str("\\\\"), '\n' => o.push_str("\\n"), '\r' => o.push_str("\\r"), '\t' => o.push_str("\\t"), c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)), c => o.push(c) } } o.push('"'); o }
+fn json_parse(s: &str) -> Option<Value> { let b = s.as_bytes(); let mut i = 0; let v = jp_value(b, &mut i)?; jp_ws(b, &mut i); Some(v) }
+fn jp_ws(b: &[u8], i: &mut usize) { while *i < b.len() && (b[*i] == b' ' || b[*i] == b'\t' || b[*i] == b'\n' || b[*i] == b'\r') { *i += 1; } }
+fn jp_value(b: &[u8], i: &mut usize) -> Option<Value> {
+    jp_ws(b, i); if *i >= b.len() { return None; }
+    match b[*i] {
+        b'{' => { *i += 1; let mut o = Obj::plain(); jp_ws(b, i); if *i < b.len() && b[*i] == b'}' { *i += 1; return Some(new_obj(o)); } loop { jp_ws(b, i); let k = if b.get(*i) == Some(&b'"') { jp_string(b, i)? } else { return None }; jp_ws(b, i); if b.get(*i) != Some(&b':') { return None; } *i += 1; let v = jp_value(b, i)?; o.props.insert(k, v); jp_ws(b, i); match b.get(*i) { Some(b',') => { *i += 1; } Some(b'}') => { *i += 1; break; } _ => return None } } Some(new_obj(o)) }
+        b'[' => { *i += 1; let mut arr = Vec::new(); jp_ws(b, i); if *i < b.len() && b[*i] == b']' { *i += 1; return Some(array_val(arr)); } loop { let v = jp_value(b, i)?; arr.push(v); jp_ws(b, i); match b.get(*i) { Some(b',') => { *i += 1; } Some(b']') => { *i += 1; break; } _ => return None } } Some(array_val(arr)) }
+        b'"' => Some(str_val(jp_string(b, i)?)),
+        b't' => { if b[*i..].starts_with(b"true") { *i += 4; Some(Value::Bool(true)) } else { None } }
+        b'f' => { if b[*i..].starts_with(b"false") { *i += 5; Some(Value::Bool(false)) } else { None } }
+        b'n' => { if b[*i..].starts_with(b"null") { *i += 4; Some(Value::Null) } else { None } }
+        _ => { let start = *i; while *i < b.len() && (b[*i].is_ascii_digit() || matches!(b[*i], b'-' | b'+' | b'.' | b'e' | b'E')) { *i += 1; } core::str::from_utf8(&b[start..*i]).ok()?.parse::<f64>().ok().map(Value::Num) }
+    }
+}
+fn jp_string(b: &[u8], i: &mut usize) -> Option<String> {
+    *i += 1; let mut out = String::new();
+    while *i < b.len() && b[*i] != b'"' { if b[*i] == b'\\' { *i += 1; if *i >= b.len() { return None; } match b[*i] { b'"' => out.push('"'), b'\\' => out.push('\\'), b'/' => out.push('/'), b'n' => out.push('\n'), b't' => out.push('\t'), b'r' => out.push('\r'), b'b' => out.push('\u{8}'), b'f' => out.push('\u{c}'), b'u' => { let mut v = 0u32; for _ in 0..4 { *i += 1; if *i < b.len() { v = v * 16 + hexv(b[*i]); } } out.push(char::from_u32(v).unwrap_or('?')); } _ => out.push(b[*i] as char) } *i += 1; } else { out.push(b[*i] as char); *i += 1; } }
+    *i += 1; Some(out)
+}
+
+// ============================================================================
+// Binding DOM (modele HTML-string : voir execute_inline)
+// ============================================================================
+
+fn dom_get(_it: &mut Interp, obj: &Rc<RefCell<Obj>>, name: &str) -> Option<Value> {
+    let b = obj.borrow();
+    match name { "innerHTML" | "textContent" | "innerText" | "value" => Some(b.props.get("__html__").cloned().unwrap_or_else(|| str_val(String::new()))), _ => b.props.get(name).cloned() }
+}
+
+fn dom_set(it: &mut Interp, obj: &Rc<RefCell<Obj>>, name: &str, v: &Value) -> bool {
+    let id = obj.borrow().props.get("__id__").map(|x| it.to_string(x)).unwrap_or_default();
+    match name {
+        "innerHTML" => { let html = it.to_string(v); if !id.is_empty() { it.patches.push((id, html.clone())); } obj.borrow_mut().props.insert("__html__".into(), str_val(html)); true }
+        "textContent" | "innerText" => { let txt = it.to_string(v); let esc = escape_html(&txt); if !id.is_empty() { it.patches.push((id, esc)); } obj.borrow_mut().props.insert("__html__".into(), str_val(txt)); true }
+        _ => false,
+    }
+}
+
+// ============================================================================
+// Integration page : execute_inline
+// ============================================================================
+
+const MAX_OUTPUT: usize = 4_000_000;
+const MAX_SCRIPT: usize = 256_000;
+
+/// Execute les `<script>` inline et renvoie le HTML enrichi (document.write +
+/// patches innerHTML/textContent par id). Un seul contexte JS partage sur la page.
 pub fn execute_inline(html: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(html.len().min(MAX_OUTPUT));
-    let mut env = JsEnv::default();
+    let mut out: Vec<u8> = Vec::with_capacity(html.len().min(MAX_OUTPUT));
+    let mut interp = Interp::new();
     let mut i = 0usize;
     while i < html.len() && out.len() < MAX_OUTPUT {
         if starts_ci(&html[i..], b"<script") {
-            let content_start = find_ci(html, b">", i).map(|p| p + 1).unwrap_or(html.len());
+            let header_end = find_ci(html, b">", i).map(|p| p + 1).unwrap_or(html.len());
+            let header = core::str::from_utf8(&html[i..header_end]).unwrap_or("");
+            let is_external = header.contains("src=") || header.contains("src =");
+            let content_start = header_end;
             let content_end = find_ci(html, b"</script", content_start).unwrap_or(html.len());
-            if content_end > content_start && content_end - content_start <= MAX_SCRIPT {
+            if !is_external && content_end > content_start && content_end - content_start <= MAX_SCRIPT {
                 if let Ok(src) = core::str::from_utf8(&html[content_start..content_end]) {
-                    eval_script(src, &mut env);
-                    flush_writes(&mut out, &mut env);
-                    apply_patches(&mut out, &mut env);
+                    let _ = interp.run(src); // erreurs ignorees (le rendu continue)
+                    flush_writes(&mut out, &mut interp);
+                    apply_patches(&mut out, &mut interp);
                 }
             }
-            i = find_ci(html, b">", content_end)
-                .map(|p| p + 1)
-                .unwrap_or(html.len());
+            i = find_ci(html, b">", content_end).map(|p| p + 1).unwrap_or(html.len());
             continue;
         }
         out.push(html[i]);
@@ -79,230 +1232,35 @@ pub fn execute_inline(html: &[u8]) -> Vec<u8> {
     out
 }
 
-fn flush_writes(out: &mut Vec<u8>, env: &mut JsEnv) {
-    for s in env.writes.drain(..) {
-        if out.len() + s.len() > MAX_OUTPUT {
-            break;
-        }
-        out.extend_from_slice(s.as_bytes());
-    }
+fn flush_writes(out: &mut Vec<u8>, it: &mut Interp) {
+    if it.writes.is_empty() { return; }
+    let w = core::mem::take(&mut it.writes);
+    if out.len() + w.len() <= MAX_OUTPUT { out.extend_from_slice(w.as_bytes()); }
 }
 
-fn apply_patches(out: &mut Vec<u8>, env: &mut JsEnv) {
-    for (id, html) in env.patches.drain(..) {
+fn apply_patches(out: &mut Vec<u8>, it: &mut Interp) {
+    let patches = core::mem::take(&mut it.patches);
+    for (id, html) in patches {
         if let Some((a, b)) = element_inner_range_by_id(out, &id) {
             let mut next = Vec::with_capacity((out.len() + html.len()).min(MAX_OUTPUT));
             next.extend_from_slice(&out[..a]);
             next.extend_from_slice(html.as_bytes());
             next.extend_from_slice(&out[b..]);
-            if next.len() <= MAX_OUTPUT {
-                *out = next;
-            }
+            if next.len() <= MAX_OUTPUT { *out = next; }
         }
     }
 }
 
-fn eval_script(src: &str, env: &mut JsEnv) {
-    for stmt in split_statements(src) {
-        if env.steps >= MAX_STEPS {
-            break;
-        }
-        env.steps += 1;
-        eval_statement(stmt.trim(), env);
-    }
-}
-
-fn eval_statement(stmt: &str, env: &mut JsEnv) {
-    if stmt.is_empty() || stmt.starts_with("//") {
-        return;
-    }
-    if let Some(rest) = stmt
-        .strip_prefix("var ")
-        .or_else(|| stmt.strip_prefix("let "))
-        .or_else(|| stmt.strip_prefix("const "))
-    {
-        if let Some(eq) = rest.find('=') {
-            let name = rest[..eq].trim();
-            if is_ident(name) {
-                env.set(name, eval_expr(&rest[eq + 1..], env));
-            }
-        }
-        return;
-    }
-    if let Some(args) = call_args(stmt, "document.write") {
-        env.writes.push(eval_expr(args, env));
-        return;
-    }
-    if let Some(args) = call_args(stmt, "document.writeln") {
-        let mut s = eval_expr(args, env);
-        s.push('\n');
-        env.writes.push(s);
-        return;
-    }
-    if let Some((id, value)) = dom_assignment(stmt, "innerHTML", env) {
-        env.patches.push((id, value));
-        return;
-    }
-    if let Some((id, value)) = dom_assignment(stmt, "textContent", env) {
-        env.patches.push((id, escape_html(&value)));
-        return;
-    }
-    if let Some(eq) = stmt.find('=') {
-        let name = stmt[..eq].trim();
-        if is_ident(name) {
-            env.set(name, eval_expr(&stmt[eq + 1..], env));
-        }
-    }
-}
-
-fn dom_assignment(stmt: &str, prop: &str, env: &JsEnv) -> Option<(String, String)> {
-    let prefix = "document.getElementById";
-    let args = call_args(stmt, prefix)?;
-    let close = stmt.find(')')?;
-    let after = stmt[close + 1..].trim_start();
-    let want = [".", prop, "="].concat();
-    if !after.starts_with(&want) {
-        return None;
-    }
-    Some((eval_expr(args, env), eval_expr(&after[want.len()..], env)))
-}
-
-fn call_args<'a>(stmt: &'a str, name: &str) -> Option<&'a str> {
-    let p = stmt.find(name)? + name.len();
-    let tail = stmt[p..].trim_start();
-    if !tail.starts_with('(') {
-        return None;
-    }
-    let start = p + stmt[p..].find('(')? + 1;
-    let end = matching_paren(stmt, start - 1)?;
-    Some(&stmt[start..end])
-}
-
-fn matching_paren(s: &str, open: usize) -> Option<usize> {
-    let b = s.as_bytes();
-    let mut q = 0u8;
-    let mut esc = false;
-    let mut depth = 0usize;
-    let mut i = open;
-    while i < b.len() {
-        let c = b[i];
-        if q != 0 {
-            if esc {
-                esc = false;
-            } else if c == b'\\' {
-                esc = true;
-            } else if c == q {
-                q = 0;
-            }
-        } else if c == b'\'' || c == b'"' {
-            q = c;
-        } else if c == b'(' {
-            depth += 1;
-        } else if c == b')' {
-            depth -= 1;
-            if depth == 0 {
-                return Some(i);
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-fn eval_expr(expr: &str, env: &JsEnv) -> String {
-    let mut out = String::new();
-    for part in split_plus(expr) {
-        let p = part.trim();
-        if p.is_empty() {
-            continue;
-        }
-        if let Some(s) = string_lit(p) {
-            out.push_str(&s);
-        } else if is_ident(p) {
-            out.push_str(&env.get(p));
-        } else if p.chars().all(|c| c.is_ascii_digit()) {
-            out.push_str(p);
-        }
-    }
-    out
-}
-
-fn split_statements(src: &str) -> Vec<&str> {
-    split_top_level(src, ';')
-}
-
-fn split_plus(src: &str) -> Vec<&str> {
-    split_top_level(src, '+')
-}
-
-fn split_top_level(src: &str, sep: char) -> Vec<&str> {
-    let b = src.as_bytes();
-    let mut out = Vec::new();
-    let mut q = 0u8;
-    let mut esc = false;
-    let mut start = 0usize;
-    for (i, &c) in b.iter().enumerate() {
-        if q != 0 {
-            if esc {
-                esc = false;
-            } else if c == b'\\' {
-                esc = true;
-            } else if c == q {
-                q = 0;
-            }
-        } else if c == b'\'' || c == b'"' || c == b'`' {
-            q = c;
-        } else if c == sep as u8 {
-            out.push(&src[start..i]);
-            start = i + 1;
-        }
-    }
-    out.push(&src[start..]);
-    out
-}
-
-fn string_lit(s: &str) -> Option<String> {
-    let b = s.as_bytes();
-    if b.len() < 2 || !matches!(b[0], b'\'' | b'"' | b'`') || b.last() != Some(&b[0]) {
-        return None;
-    }
-    let mut out = String::new();
-    let mut i = 1usize;
-    while i + 1 < b.len() {
-        if b[i] == b'\\' && i + 2 < b.len() {
-            i += 1;
-            out.push(match b[i] {
-                b'n' => '\n',
-                b'r' => '\r',
-                b't' => '\t',
-                b'\'' => '\'',
-                b'"' => '"',
-                b'\\' => '\\',
-                x => x as char,
-            });
-        } else {
-            out.push(b[i] as char);
-        }
-        i += 1;
-    }
-    Some(out)
-}
+// --- helpers HTML (repris de l'integration existante) ---
 
 fn element_inner_range_by_id(html: &[u8], id: &str) -> Option<(usize, usize)> {
     let mut pos = 0usize;
     while let Some(lt) = find_ci(html, b"<", pos) {
-        if lt + 1 >= html.len() || html[lt + 1] == b'/' || html[lt + 1] == b'!' {
-            pos = lt + 1;
-            continue;
-        }
+        if lt + 1 >= html.len() || html[lt + 1] == b'/' || html[lt + 1] == b'!' { pos = lt + 1; continue; }
         let gt = find_ci(html, b">", lt)?;
         let tag = core::str::from_utf8(&html[lt + 1..gt]).ok()?;
         if tag_has_id(tag, id) {
-            let name = tag
-                .split(|c: char| c.is_ascii_whitespace() || c == '/' || c == '>')
-                .next()
-                .unwrap_or("")
-                .to_ascii_lowercase();
+            let name = tag.split(|c: char| c.is_ascii_whitespace() || c == '/' || c == '>').next().unwrap_or("").to_ascii_lowercase();
             let close = ["</", &name].concat();
             let end = find_ci(html, close.as_bytes(), gt + 1).unwrap_or(gt + 1);
             return Some((gt + 1, end));
@@ -311,64 +1269,19 @@ fn element_inner_range_by_id(html: &[u8], id: &str) -> Option<(usize, usize)> {
     }
     None
 }
-
 fn tag_has_id(tag: &str, id: &str) -> bool {
     for part in tag.split(|c: char| c.is_ascii_whitespace()) {
-        if let Some(v) = part.strip_prefix("id=") {
-            let v = v.trim_matches(|c| c == '"' || c == '\'' || c == '/');
-            if v == id {
-                return true;
-            }
-        }
+        if let Some(v) = part.strip_prefix("id=") { let v = v.trim_matches(|c| c == '"' || c == '\'' || c == '/'); if v == id { return true; } }
     }
     false
 }
+fn escape_html(s: &str) -> String { let mut out = String::new(); for c in s.chars() { match c { '&' => out.push_str("&amp;"), '<' => out.push_str("&lt;"), '>' => out.push_str("&gt;"), '"' => out.push_str("&quot;"), _ => out.push(c) } } out }
+fn starts_ci(hay: &[u8], needle: &[u8]) -> bool { hay.len() >= needle.len() && hay[..needle.len()].iter().zip(needle).all(|(a, b)| a.to_ascii_lowercase() == b.to_ascii_lowercase()) }
+fn find_ci(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> { if needle.is_empty() || from >= hay.len() { return None; } let mut i = from; while i + needle.len() <= hay.len() { let mut k = 0; while k < needle.len() && hay[i + k].to_ascii_lowercase() == needle[k].to_ascii_lowercase() { k += 1; } if k == needle.len() { return Some(i); } i += 1; } None }
 
-fn escape_html(s: &str) -> String {
-    let mut out = String::new();
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-fn is_ident(s: &str) -> bool {
-    let mut chars = s.chars();
-    matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
-        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
-}
-
-fn starts_ci(hay: &[u8], needle: &[u8]) -> bool {
-    hay.len() >= needle.len()
-        && hay[..needle.len()]
-            .iter()
-            .zip(needle)
-            .all(|(a, b)| a.to_ascii_lowercase() == b.to_ascii_lowercase())
-}
-
-fn find_ci(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
-    if needle.is_empty() || from >= hay.len() {
-        return None;
-    }
-    let mut i = from;
-    while i + needle.len() <= hay.len() {
-        let mut k = 0;
-        while k < needle.len() && hay[i + k].to_ascii_lowercase() == needle[k].to_ascii_lowercase() {
-            k += 1;
-        }
-        if k == needle.len() {
-            return Some(i);
-        }
-        i += 1;
-    }
-    None
-}
+// ============================================================================
+// Selftest
+// ============================================================================
 
 pub fn selftest() -> Result<(), &'static str> {
     let html = br#"<div id="app">old</div><script>
@@ -378,11 +1291,19 @@ pub fn selftest() -> Result<(), &'static str> {
     </script>"#;
     let out = execute_inline(html);
     let s = core::str::from_utf8(&out).map_err(|_| "utf8")?;
-    if !s.contains("<div id=\"app\"><b>Bouchaud</b></div>") {
-        return Err("innerHTML");
-    }
-    if !s.contains("<p>OK</p>") || s.contains("<script>") {
-        return Err("write");
-    }
+    if !s.contains("<div id=\"app\"><b>Bouchaud</b></div>") { return Err("innerHTML"); }
+    if !s.contains("<p>OK</p>") || s.contains("<script>") { return Err("write"); }
+    // langage : arithmetique, boucle, fonction
+    let mut it = Interp::new();
+    it.run("var s=0; for(var i=1;i<=10;i++){s+=i;} function f(x){return x*x;} console.log(s+','+f(5));").map_err(|_| "run")?;
+    if it.out.last().map(|x| x.as_str()) != Some("55,25") { return Err("lang"); }
+    // closures + liaison let par iteration
+    let mut it = Interp::new();
+    it.run("var f=[]; for(let i=0;i<3;i++){f.push(()=>i);} console.log(f[0]()+''+f[1]()+f[2]());").map_err(|_| "run2")?;
+    if it.out.last().map(|x| x.as_str()) != Some("012") { return Err("closure"); }
+    // tableaux d'ordre superieur + objets + JSON
+    let mut it = Interp::new();
+    it.run("var a=[1,2,3,4]; var o={n:a.filter(x=>x%2===0).reduce((s,x)=>s+x,0)}; console.log(JSON.stringify(o));").map_err(|_| "run3")?;
+    if it.out.last().map(|x| x.as_str()) != Some("{\"n\":6}") { return Err("hof"); }
     Ok(())
 }
