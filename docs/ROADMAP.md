@@ -39,6 +39,19 @@ Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 - [x] Clavier en interruption IRQ1 (fin du polling)
 - [ ] APIC, plus tard, en remplacement du PIC
 
+## V0.27 - CSS + couleurs + images
+- [x] Primitives truecolor (fill_rect_rgb / draw_text_rgb / blit_rgb)
+- [x] Moteur CSS (subset) : `<style>` + `style=""`, selecteurs balise/.classe/#id,
+      cascade par specificite ; color, background, font-size, font-weight (gras),
+      text-align, display:none / visibility:hidden
+- [x] Rendu truecolor : couleurs reelles, titres dimensionnes, gras, centrage,
+      fonds de blocs
+- [x] Decodeur PNG from-scratch (via notre zlib) : gris 1/2/4/8b, RGB, RGBA
+      (alpha sur blanc), palette ; valide contre Pillow (vraies images web)
+- [x] Images dans le navigateur : `<img>` data:URI (base64) + fetch reseau
+      (plafonne) ; downscale plus-proche-voisin (rendu pixelise, DA bitmap)
+- [ ] JPEG/GIF/WebP, CSS box-model (margin/padding), flex/grid, formulaires actifs
+
 ## V0.26 - Moteur de rendu web graphique
 - [x] gui/web.rs : HTML -> DOM (parseur tolerant) -> layout flux blocs/inline
       (retour a la ligne, titres dimensionnes, listes, regles, champs de form)

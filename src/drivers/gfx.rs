@@ -336,3 +336,75 @@ pub fn draw_text_scaled(x: usize, y: usize, s: &str, color: u8, scale: usize) {
 }
 
 pub mod font;
+
+// --- Primitives truecolor (RGB direct, 0x00RRGGBB) --------------------------
+// Utilisees par le moteur de rendu web (couleurs CSS + images) ; le framebuffer
+// est deja 32 bits, donc on ecrit la valeur RGB telle quelle.
+
+#[inline]
+pub fn pixel_rgb(x: usize, y: usize, rgb: u32) {
+    if x < WIDTH && y < HEIGHT {
+        back()[y * WIDTH + x] = rgb;
+    }
+}
+
+pub fn fill_rect_rgb(x: usize, y: usize, w: usize, h: usize, rgb: u32) {
+    let buf = back();
+    if buf.is_empty() { return; }
+    let x1 = (x + w).min(WIDTH);
+    let y1 = (y + h).min(HEIGHT);
+    let mut yy = y;
+    while yy < y1 {
+        let row = yy * WIDTH;
+        let mut xx = x;
+        while xx < x1 { buf[row + xx] = rgb; xx += 1; }
+        yy += 1;
+    }
+}
+
+fn draw_char_rgb(x: usize, y: usize, c: u8, rgb: u32, scale: usize) {
+    let glyph = font::glyph(c);
+    for (row, bits) in glyph.iter().enumerate() {
+        for col in 0..8 {
+            if bits & (1 << col) != 0 {
+                if scale <= 1 {
+                    pixel_rgb(x + col, y + row, rgb);
+                } else {
+                    fill_rect_rgb(x + col * scale, y + row * scale, scale, scale, rgb);
+                }
+            }
+        }
+    }
+}
+
+/// Dessine une chaine en couleur RGB arbitraire, agrandie `scale` fois.
+pub fn draw_text_rgb(x: usize, y: usize, s: &str, rgb: u32, scale: usize) {
+    let mut cx = x;
+    let step = 8 * scale.max(1);
+    for b in s.bytes() {
+        draw_char_rgb(cx, y, b, rgb, scale.max(1));
+        cx += step;
+    }
+}
+
+/// Copie un bloc d'image RGB (`pix` de `iw`x`ih`) a la position (x,y), borne
+/// a la zone (clip_x,clip_y,clip_w,clip_h). Pixels hors zone ignores.
+pub fn blit_rgb(x: usize, y: usize, iw: usize, ih: usize, pix: &[u32],
+                clip_x: usize, clip_y: usize, clip_w: usize, clip_h: usize) {
+    let buf = back();
+    if buf.is_empty() { return; }
+    let cx1 = (clip_x + clip_w).min(WIDTH);
+    let cy1 = (clip_y + clip_h).min(HEIGHT);
+    for row in 0..ih {
+        let py = y + row;
+        if py < clip_y || py >= cy1 { continue; }
+        let base = row * iw;
+        for col in 0..iw {
+            let px = x + col;
+            if px < clip_x || px >= cx1 { continue; }
+            if base + col < pix.len() {
+                buf[py * WIDTH + px] = pix[base + col];
+            }
+        }
+    }
+}
