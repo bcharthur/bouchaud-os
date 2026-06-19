@@ -1,6 +1,7 @@
 //! Applications natives du bureau et aiguillage des evenements vers la fenetre
 //! active (entree clavier, clics, rendu).
 
+pub mod calculator;
 pub mod chromium_stub;
 pub mod file_explorer;
 pub mod system_info;
@@ -92,6 +93,15 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
             Key::Char(c) => { if input.len() < 100 { input.push(c as char); } false }
             _ => false,
         },
+        App::Calc { expr } => match k {
+            Key::Enter => { calculator::apply_key(expr, "="); false }
+            Key::Backspace => { calculator::apply_key(expr, "<"); false }
+            Key::Char(c) => {
+                if let Some(lbl) = calculator::key_char(c as char) { calculator::apply_key(expr, lbl); }
+                false
+            }
+            _ => false,
+        },
         _ => false,
     };
     if let Some(t) = new_title { w.title = t; }
@@ -130,6 +140,14 @@ pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
             *input = href;
             *scroll = 0;
             w.title = if page.title.is_empty() { (*url).clone() } else { page.title.clone() };
+        }
+        return;
+    }
+    if let App::Calc { expr } = &mut w.app {
+        let bw = (win_w - 6).max(1);
+        let bh = (win_h - TITLE_H - 4).max(1);
+        if let Some(lbl) = calculator::key_at(bx, by, bw, bh, mx, my) {
+            calculator::apply_key(expr, lbl);
         }
         return;
     }
@@ -188,6 +206,7 @@ pub(crate) fn draw_app(w: &Win) {
         App::Terminal { sb, input, cwd } => terminal::draw(sb, input, *cwd, bx, by, bw, bh),
         App::Files { cur, view, name } => file_explorer::draw(*cur, view, name, bx, by, bw, bh),
         App::Browser { url, input, page, scroll, .. } => chromium_stub::draw(url, input, page, *scroll, bx, by, bw, bh),
+        App::Calc { expr } => calculator::draw(expr, bx, by, bw, bh),
         App::Monitor => system_info::draw(bx, by, bw, bh),
     }
 }

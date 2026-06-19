@@ -10,14 +10,20 @@ pub(crate) const TITLE_H: i32 = 10; // hauteur barre de titre fenetre
 pub(crate) const MIN_W: i32 = 90;
 pub(crate) const MIN_H: i32 = 50;
 
-/// Entrees du menu Demarrer.
-pub(crate) const MENU: [&str; 5] = ["Terminal", "Fichiers", "Navigateur", "Moniteur", "Quitter"];
+/// Entrees du menu Demarrer (l'index = `kind` passe a `make_app`).
+pub(crate) const MENU: [&str; 6] = ["Terminal", "Fichiers", "Navigateur", "Moniteur", "Calculatrice", "Quitter"];
+
+/// Icones du bureau : (libelle, kind). Cliquables pour lancer l'application.
+pub(crate) const ICONS: [(&str, usize); 4] = [
+    ("Navigateur", 2), ("Calculatrice", 4), ("Terminal", 0), ("Fichiers", 1),
+];
 
 /// Etat applicatif porte par une fenetre.
 pub(crate) enum App {
     Terminal { sb: Vec<String>, input: String, cwd: usize },
     Files { cur: usize, view: Option<Vec<String>>, name: String },
     Browser { url: String, input: String, page: crate::gui::web::Page, scroll: i32, session: crate::gui::web::Session },
+    Calc { expr: String },
     Monitor,
 }
 
@@ -69,6 +75,12 @@ pub(crate) fn taskbar_btn(i: usize) -> Rect {
     Rect { x: 44 + i as i32 * 56, y: HEIGHT as i32 - BAR_H as i32 + 1, w: 54, h: 9 }
 }
 
+/// Rectangle de l'icone de bureau `i` (colonne verticale en haut a gauche).
+/// Inclut l'etiquette sous la vignette (zone cliquable complete).
+pub(crate) fn icon_rect(i: usize) -> Rect {
+    Rect { x: 10, y: BAR_H as i32 + 14 + i as i32 * 66, w: 56, h: 60 }
+}
+
 /// Bascule maximiser / restaurer une fenetre.
 pub(crate) fn toggle_max(w: &mut Win) {
     match w.restore.take() {
@@ -112,6 +124,10 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
             Win { title: "Bouchaud Browser".to_string(), x, y, w, h, min: false, restore: None,
                   app: App::Browser { url: url.clone(), input: url, page, scroll: 0, session } }
         }
+        4 => Win {
+            title: "Calculatrice".to_string(), x, y, w: 220, h: 300, min: false, restore: None,
+            app: App::Calc { expr: String::new() },
+        },
         _ => Win {
             title: "Moniteur".to_string(), x, y, w: 300, h: 200, min: false, restore: None,
             app: App::Monitor,

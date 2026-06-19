@@ -2,15 +2,25 @@
 
 use crate::gui::apps;
 use crate::gui::framebuffer as fb;
-use crate::gui::window::{clip, menu_rect, start_btn, taskbar_btn, Win, BAR_H, MENU, TITLE_H};
+use crate::gui::window::{clip, icon_rect, menu_rect, start_btn, taskbar_btn, Win, BAR_H, ICONS, MENU, TITLE_H};
 use crate::arch::x86_64::rtc;
 use alloc::format;
+
+// Accent + glyphe par icone de bureau (meme ordre que window::ICONS).
+const ICON_STYLE: [(u32, &str); 4] = [
+    (0x1a73e8, "W"),   // Navigateur
+    (0x34a853, "="),   // Calculatrice
+    (0x202124, ">_"),  // Terminal
+    (0xf9ab00, "[]"),  // Fichiers
+];
 
 /// Dessine le fond du bureau, la barre du haut et toutes les fenetres visibles.
 pub(crate) fn draw_desktop(wins: &[Win]) {
     fb::clear(fb::C_DESKTOP);
     fb::fill_rect(0, fb::HEIGHT / 2, fb::WIDTH, fb::HEIGHT / 2, fb::C_DKBLUE);
     fb::draw_text(fb::WIDTH / 2 - 44, fb::HEIGHT / 2 - 4, "Bouchaud OS", fb::C_DKGRAY);
+
+    draw_icons();
 
     fb::fill_rect(0, 0, fb::WIDTH, BAR_H, fb::C_TITLE);
     fb::draw_text(2, 2, "Bouchaud OS", fb::C_WHITE);
@@ -22,6 +32,28 @@ pub(crate) fn draw_desktop(wins: &[Win]) {
     for (i, w) in wins.iter().enumerate() {
         if w.min { continue; }
         draw_window(w, Some(i) == focus);
+    }
+}
+
+/// Dessine les icones de lancement sur le bureau.
+fn draw_icons() {
+    for (i, (label, _kind)) in ICONS.iter().enumerate() {
+        let r = icon_rect(i);
+        let (accent, glyph) = ICON_STYLE[i];
+        // Vignette 40x40 centree dans la largeur de l'icone.
+        let vw = 40i32;
+        let vx = r.x + (r.w - vw) / 2;
+        let vy = r.y;
+        fb::fill_rect_rgb((vx + 2) as usize, (vy + 2) as usize, vw as usize, vw as usize, 0x101820); // ombre douce
+        fb::fill_rect_rgb(vx as usize, vy as usize, vw as usize, vw as usize, accent);
+        // Liseré clair.
+        fb::fill_rect_rgb(vx as usize, vy as usize, vw as usize, 1, 0xffffff);
+        // Glyphe centre (scale 2).
+        let gw = glyph.len() as i32 * 16;
+        fb::draw_text_rgb((vx + (vw - gw) / 2).max(0) as usize, (vy + 12) as usize, glyph, 0xffffff, 2);
+        // Etiquette sous la vignette.
+        let lw = label.len() as i32 * 8;
+        fb::draw_text(((r.x + (r.w - lw) / 2).max(0)) as usize, (vy + vw + 3) as usize, label, fb::C_WHITE);
     }
 }
 
