@@ -273,16 +273,49 @@ fn parse_stylesheet(text: &str, out: &mut Vec<Rule>) {
     }
 }
 
-fn collect_css(dom: &Dom) -> Vec<Rule> {
-    let mut rules = Vec::new();
-    for n in &dom.nodes {
-        if n.tag.as_deref() == Some("style") {
-            for &c in &n.children {
-                if dom.nodes[c].tag.is_none() { parse_stylesheet(&dom.nodes[c].text, &mut rules); }
+fn starts_ci(hay: &[u8], needle: &[u8]) -> bool {
+    hay.len() >= needle.len() && hay[..needle.len()].iter().zip(needle).all(|(a, b)| lc(*a) == lc(*b))
+}
+
+/// Pre-traitement bulletproof : retire entierement `<script>...</script>` et
+/// `<style>...</style>` du flux (le contenu CSS est extrait en regles), et
+/// borne la taille. Garantit qu'aucun code ne peut fuiter dans le rendu, meme
+/// si le parseur DOM a un cas limite ou si le flux est partiellement corrompu.
+fn extract_and_strip(html: &[u8], max_len: usize) -> (Vec<u8>, Vec<Rule>) {
+    let mut out: Vec<u8> = Vec::with_capacity(html.len().min(max_len));
+    let mut css: Vec<Rule> = Vec::new();
+    let mut i = 0usize;
+    while i < html.len() {
+        if out.len() >= max_len { break; }
+        if html[i] == b'<' {
+            if starts_ci(&html[i..], b"<script") {
+                i = find_ci(html, b"</script", i + 1)
+                    .map(|p| find_ci(html, b">", p).map(|q| q + 1).unwrap_or(html.len()))
+                    .unwrap_or(html.len());
+                continue;
+            }
+            if starts_ci(&html[i..], b"<style") {
+                let gt = find_ci(html, b">", i).map(|p| p + 1).unwrap_or(html.len());
+                let endc = find_ci(html, b"</style", gt).unwrap_or(html.len());
+                if endc > gt && endc - gt < 400_000 {
+                    let content = core::str::from_utf8(&html[gt..endc]).unwrap_or("");
+                    parse_stylesheet(content, &mut css);
+                }
+                i = find_ci(html, b">", endc).map(|p| p + 1).unwrap_or(html.len());
+                continue;
             }
         }
+        out.push(html[i]);
+        i += 1;
     }
-    rules
+    (out, css)
+}
+
+/// Pipeline complet : HTML -> (CSS extrait, DOM nettoye) -> page mise en page.
+pub fn render(html: &[u8], base_url: &str, width: i32) -> Page {
+    let (clean, css) = extract_and_strip(html, 1_500_000);
+    let dom = parse(&clean);
+    layout(&dom, base_url, width, &css)
 }
 
 fn sel_matches(sel: &Sel, tag: &str, classes: &str, id: &str) -> bool {
@@ -572,13 +605,12 @@ fn heading_scale(t: &str) -> Option<usize> {
     match t { "h1" => Some(4), "h2" => Some(3), "h3" => Some(3), "h4" | "h5" | "h6" => Some(2), _ => None }
 }
 
-/// Construit la page a partir du DOM, pour une largeur de contenu donnee.
-pub fn layout(dom: &Dom, base_url: &str, width: i32) -> Page {
+/// Construit la page a partir du DOM (+ regles CSS pre-extraites).
+fn layout(dom: &Dom, base_url: &str, width: i32, css: &[Rule]) -> Page {
     let (scheme, host) = scheme_host(base_url);
-    let css = collect_css(dom);
     let mut bg = 0xffffff_u32;
     // background du body/html depuis la feuille de style.
-    for r in &css {
+    for r in css {
         if matches!(&r.sel, Sel::Tag(t) if t == "body" || t == "html") {
             for (p, v) in &r.decls {
                 if p == "background" || p == "background-color" { if let Some(c) = parse_color(v.split(' ').next().unwrap_or(v)) { bg = c; } }
@@ -591,7 +623,7 @@ pub fn layout(dom: &Dom, base_url: &str, width: i32) -> Page {
         margin: 0, align: 0, title: String::new(),
         scheme: scheme.to_string(), host: host.to_string(),
     };
-    walk(dom, 0, &mut l, &default_style(), &css, 0);
+    walk(dom, 0, &mut l, &default_style(), css, 0);
     l.flush_line();
     l.y += PAD;
     Page { title: l.title, items: l.items, links: l.links, images: l.images, height: l.y, bg }

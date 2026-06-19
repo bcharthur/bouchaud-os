@@ -39,6 +39,15 @@ Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 - [x] Clavier en interruption IRQ1 (fin du polling)
 - [ ] APIC, plus tard, en remplacement du PIC
 
+## V0.27.1 - Stabilite rendu (anti-crash, anti-fuite)
+- [x] Tas 48 MiB (fin du KERNEL PANIC "allocation failed" sur pages lourdes)
+- [x] Pre-traitement bulletproof : <script>/<style> retires avant parsing
+      (le code CSS/JS ne peut plus fuiter dans le rendu), CSS extrait a part
+- [x] Bornes memoire : corps HTML plafonne (1,5 Mo analyse / 4 Mo lu),
+      images > ~1,2 Mpx refusees (placeholder) pour eviter l'OOM
+- [ ] JavaScript : execution hors de portee (pas de moteur JS) -> les sites
+      entierement rendus cote client (Google/YouTube) restent quasi vides
+
 ## V0.27 - CSS + couleurs + images
 - [x] Primitives truecolor (fill_rect_rgb / draw_text_rgb / blit_rgb)
 - [x] Moteur CSS (subset) : `<style>` + `style=""`, selecteurs balise/.classe/#id,

@@ -26,8 +26,10 @@ fn esc(s: &str) -> String {
 }
 
 fn page_from_html(html: &[u8], base: &str, width: i32) -> Page {
-    let dom = web::parse(html);
-    web::layout(&dom, base, width)
+    // Borne la taille du document analyse (les pages enormes type YouTube
+    // depasseraient la memoire). Le rendu reste correct sur l'entete.
+    let capped = &html[..html.len().min(4_000_000)];
+    web::render(capped, base, width)
 }
 
 /// Charge une URL et renvoie la page mise en page pour la largeur donnee.

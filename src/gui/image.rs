@@ -75,8 +75,11 @@ fn decode_png(data: &[u8]) -> Option<Image> {
     }
 
     if width == 0 || height == 0 || interlace != 0 { return None; }
-    if width > 8192 || height > 8192 { return None; }
-    if width.checked_mul(height)?.checked_mul(4)? > 64 * 1024 * 1024 { return None; }
+    if width > 4096 || height > 4096 { return None; }
+    // Borne la memoire : on refuse les images > ~1,2 Mpx (le buffer de pixels +
+    // les scanlines defiltrees + la sortie zlib resteraient sinon trop gros pour
+    // le tas). Elles s'affichent alors en placeholder.
+    if width.checked_mul(height)? > 1_200_000 { return None; }
 
     let channels = match color_type { 0 => 1, 2 => 3, 3 => 1, 4 => 2, 6 => 4, _ => return None };
     let bd = bit_depth as usize;
