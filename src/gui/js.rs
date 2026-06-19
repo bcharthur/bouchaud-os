@@ -602,14 +602,14 @@ pub struct Interp {
     steps: u64,
     max_steps: u64,
     pub out: Vec<String>,                 // console.*
-    pub writes: String,                   // document.write
-    pub patches: Vec<(String, String)>,   // (id, html) pour innerHTML/textContent
+    pub writes: String,                   // document.write (script courant)
+    pub dom: DomModel,                    // DOM de la page (lecture + mutations)
 }
 
 impl Interp {
     pub fn new() -> Interp {
         let global = new_scope(None);
-        let mut it = Interp { global: global.clone(), steps: 0, max_steps: 2_000_000, out: Vec::new(), writes: String::new(), patches: Vec::new() };
+        let mut it = Interp { global: global.clone(), steps: 0, max_steps: 2_000_000, out: Vec::new(), writes: String::new(), dom: DomModel::empty() };
         install(&mut it);
         it
     }
@@ -1023,16 +1023,27 @@ fn install(it: &mut Interp) {
     let doc = new_obj(Obj { props: OrderedMap::new(), arr: None, call: None, class: "Document" });
     set(&doc, "write", native_val(|it, _t, a| { for v in a { let s = it.to_string(v); it.writes.push_str(&s); } Ok(Value::Undefined) }));
     set(&doc, "writeln", native_val(|it, _t, a| { for v in a { let s = it.to_string(v); it.writes.push_str(&s); } it.writes.push('\n'); Ok(Value::Undefined) }));
-    set(&doc, "getElementById", native_val(|it, _t, a| { let id = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); let el = new_obj(Obj { props: OrderedMap::new(), arr: None, call: None, class: "Element" }); set(&el, "__id__", str_val(id.clone())); set(&el, "id", str_val(id)); Ok(el) }));
-    set(&doc, "querySelector", native_val(|it, _t, a| { let sel = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); let id = sel.trim_start_matches('#').to_string(); let el = new_obj(Obj { props: OrderedMap::new(), arr: None, call: None, class: "Element" }); set(&el, "__id__", str_val(id.clone())); set(&el, "id", str_val(id)); Ok(el) }));
-    set(&doc, "createElement", native_val(|it, _t, a| { let tag = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); let el = new_obj(Obj { props: OrderedMap::new(), arr: None, call: None, class: "Element" }); set(&el, "tagName", str_val(tag.to_uppercase())); Ok(el) }));
-    set(&doc, "getElementsByTagName", native_val(|_it, _t, _a| Ok(array_val(Vec::new()))));
+    set(&doc, "getElementById", native_val(|it, _t, a| { let id = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); Ok(it.dom.find_by_id(&id).map(node_handle).unwrap_or(Value::Null)) }));
+    set(&doc, "querySelector", native_val(|it, _t, a| { let sel = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); Ok(it.dom.query(&sel, 0, true).first().map(|&n| node_handle(n)).unwrap_or(Value::Null)) }));
+    set(&doc, "querySelectorAll", native_val(|it, _t, a| { let sel = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); Ok(array_val(it.dom.query(&sel, 0, false).into_iter().map(node_handle).collect())) }));
+    set(&doc, "getElementsByTagName", native_val(|it, _t, a| { let t = it.to_string(a.get(0).unwrap_or(&Value::Undefined)).to_lowercase(); Ok(array_val(it.dom.query(&t, 0, false).into_iter().map(node_handle).collect())) }));
+    set(&doc, "getElementsByClassName", native_val(|it, _t, a| { let c = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); Ok(array_val(it.dom.query(&format!(".{}", c), 0, false).into_iter().map(node_handle).collect())) }));
+    set(&doc, "createElement", native_val(|it, _t, a| { let tag = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); Ok(detached_element(&tag)) }));
+    set(&doc, "createTextNode", native_val(|it, _t, a| { let txt = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); let el = detached_element("#text"); set(&el, "__html__", str_val(escape_html(&txt))); Ok(el) }));
+    set(&doc, "addEventListener", native_val(|_it, _t, _a| Ok(Value::Undefined)));
     let g2 = it.global.clone();
     scope_declare(&g2, "document", doc);
 
-    // window = objet global minimal
+    // window = objet global minimal (alias des globales courantes)
     let window = new_obj(Obj::plain());
+    set(&window, "addEventListener", native_val(|_it, _t, _a| Ok(Value::Undefined)));
+    set(&window, "setTimeout", native_val(|it, _t, a| { if let Some(f) = a.get(0) { let f = f.clone(); let _ = it.call(f, Value::Undefined, &[]); } Ok(Value::Num(0.0)) }));
+    set(&window, "location", { let loc = new_obj(Obj::plain()); set(&loc, "href", str_val("")); set(&loc, "protocol", str_val("https:")); loc });
     scope_declare(&g2, "window", window);
+    // navigator minimal
+    let nav = new_obj(Obj::plain());
+    set(&nav, "userAgent", str_val("BouchaudOS"));
+    scope_declare(&g2, "navigator", nav);
 }
 
 // PRNG simple (LCG) pour Math.random (deterministe ; suffisant pour le rendu).
@@ -1182,18 +1193,443 @@ fn jp_string(b: &[u8], i: &mut usize) -> Option<String> {
 // Binding DOM (modele HTML-string : voir execute_inline)
 // ============================================================================
 
-fn dom_get(_it: &mut Interp, obj: &Rc<RefCell<Obj>>, name: &str) -> Option<Value> {
-    let b = obj.borrow();
-    match name { "innerHTML" | "textContent" | "innerText" | "value" => Some(b.props.get("__html__").cloned().unwrap_or_else(|| str_val(String::new()))), _ => b.props.get(name).cloned() }
+// --- Element JS <-> noeud DOM ---
+
+fn node_handle(n: usize) -> Value {
+    let el = new_obj(Obj { props: OrderedMap::new(), arr: None, call: None, class: "Element" });
+    set(&el, "__node__", Value::Num(n as f64));
+    el
+}
+fn detached_element(tag: &str) -> Value {
+    let el = new_obj(Obj { props: OrderedMap::new(), arr: None, call: None, class: "Element" });
+    set(&el, "__node__", Value::Num(-1.0));
+    set(&el, "__tag__", str_val(tag.to_lowercase()));
+    set(&el, "__html__", str_val(String::new()));
+    set(&el, "__attrs__", new_obj(Obj::plain()));
+    el
+}
+fn handle_node(it: &mut Interp, this: &Value) -> i64 {
+    if let Value::Obj(o) = this { o.borrow().props.get("__node__").map(|v| it.to_num(v) as i64).unwrap_or(-1) } else { -1 }
+}
+
+// HTML externe d'une valeur (element model-backed, element detache, ou texte).
+fn element_outer(it: &mut Interp, v: &Value) -> String {
+    if let Value::Obj(o) = v {
+        let node = o.borrow().props.get("__node__").map(|x| it.to_num(x) as i64).unwrap_or(-2);
+        if node >= 0 { return it.dom.outer_html(node as usize); }
+        if node == -1 {
+            let (tag, html) = { let b = o.borrow(); (b.props.get("__tag__").map(|x| it.to_string(x)).unwrap_or_default(), b.props.get("__html__").map(|x| it.to_string(x)).unwrap_or_default()) };
+            if tag == "#text" || tag.is_empty() { return html; }
+            let attrs = { let b = o.borrow(); b.props.get("__attrs__").cloned() };
+            let mut av: Vec<(String, String)> = Vec::new();
+            if let Some(Value::Obj(at)) = attrs { for (k, val) in at.borrow().props.iter() { av.push((k.clone(), it.to_string(val))); } }
+            return format!("{}{}</{}>", serialize_open(&tag, &av), html, tag);
+        }
+    }
+    escape_html(&it.to_string(v))
+}
+
+fn dom_get(it: &mut Interp, obj: &Rc<RefCell<Obj>>, name: &str) -> Option<Value> {
+    let node = { let b = obj.borrow(); b.props.get("__node__").map(|v| it.to_num(v) as i64) };
+    let this = Value::Obj(obj.clone());
+    if let Some(n) = node {
+        if n >= 0 {
+            let n = n as usize;
+            if n >= it.dom.nodes.len() { return Some(Value::Undefined); }
+            return Some(match name {
+                "innerHTML" => str_val(it.dom.inner_html(n)),
+                "outerHTML" => str_val(it.dom.outer_html(n)),
+                "textContent" | "innerText" => str_val(it.dom.text_content(n)),
+                "tagName" | "nodeName" => str_val(it.dom.nodes[n].tag.to_uppercase()),
+                "id" => str_val(it.dom.attr(n, "id").unwrap_or("").to_string()),
+                "className" => str_val(it.dom.attr(n, "class").unwrap_or("").to_string()),
+                "value" => str_val(it.dom.attr(n, "value").unwrap_or("").to_string()),
+                "href" => str_val(it.dom.attr(n, "href").unwrap_or("").to_string()),
+                "src" => str_val(it.dom.attr(n, "src").unwrap_or("").to_string()),
+                "nodeType" => Value::Num(1.0),
+                "children" | "childNodes" => array_val(it.dom.nodes[n].children.clone().into_iter().map(node_handle).collect()),
+                "childElementCount" => Value::Num(it.dom.nodes[n].children.len() as f64),
+                "firstChild" | "firstElementChild" => it.dom.nodes[n].children.first().map(|&c| node_handle(c)).unwrap_or(Value::Null),
+                "lastChild" | "lastElementChild" => it.dom.nodes[n].children.last().map(|&c| node_handle(c)).unwrap_or(Value::Null),
+                "parentNode" | "parentElement" => it.dom.parent_of(n).map(node_handle).unwrap_or(Value::Null),
+                "style" => style_object(&this),
+                "dataset" => style_object(&this),
+                "classList" => class_list(n as i64),
+                "getAttribute" => native_val(dom_get_attr),
+                "setAttribute" => native_val(dom_set_attr),
+                "hasAttribute" => native_val(dom_has_attr),
+                "removeAttribute" => native_val(|_it, _t, _a| Ok(Value::Undefined)),
+                "appendChild" | "append" | "prepend" | "insertBefore" => native_val(dom_append_child),
+                "querySelector" => native_val(dom_qs),
+                "querySelectorAll" => native_val(dom_qsa),
+                "getElementsByTagName" => native_val(dom_qsa),
+                "getElementsByClassName" => native_val(dom_qsa),
+                "addEventListener" | "removeEventListener" | "removeChild" | "remove" | "replaceChild"
+                | "focus" | "blur" | "click" | "scrollIntoView" | "setAttributeNS" => native_val(|_it, _t, _a| Ok(Value::Undefined)),
+                "matches" | "contains" => native_val(|_it, _t, _a| Ok(Value::Bool(false))),
+                _ => { let b = obj.borrow(); b.props.get(name).cloned().unwrap_or(Value::Undefined) }
+            });
+        }
+        // element detache (createElement)
+        return Some(match name {
+            "innerHTML" | "textContent" | "innerText" => obj.borrow().props.get("__html__").cloned().unwrap_or_else(|| str_val(String::new())),
+            "tagName" | "nodeName" => str_val(obj.borrow().props.get("__tag__").map(|v| it.to_string(v).to_uppercase()).unwrap_or_default()),
+            "outerHTML" => str_val(element_outer(it, &this)),
+            "nodeType" => Value::Num(1.0),
+            "getAttribute" => native_val(dom_get_attr),
+            "setAttribute" => native_val(dom_set_attr),
+            "hasAttribute" => native_val(dom_has_attr),
+            "appendChild" | "append" | "prepend" => native_val(dom_append_child),
+            "style" => style_object(&this),
+            "classList" => class_list(-1),
+            "addEventListener" | "removeEventListener" | "focus" | "click" => native_val(|_it, _t, _a| Ok(Value::Undefined)),
+            _ => { let b = obj.borrow(); b.props.get(name).cloned().unwrap_or(Value::Undefined) }
+        });
+    }
+    None
 }
 
 fn dom_set(it: &mut Interp, obj: &Rc<RefCell<Obj>>, name: &str, v: &Value) -> bool {
-    let id = obj.borrow().props.get("__id__").map(|x| it.to_string(x)).unwrap_or_default();
-    match name {
-        "innerHTML" => { let html = it.to_string(v); if !id.is_empty() { it.patches.push((id, html.clone())); } obj.borrow_mut().props.insert("__html__".into(), str_val(html)); true }
-        "textContent" | "innerText" => { let txt = it.to_string(v); let esc = escape_html(&txt); if !id.is_empty() { it.patches.push((id, esc)); } obj.borrow_mut().props.insert("__html__".into(), str_val(txt)); true }
-        _ => false,
+    let node = { let b = obj.borrow(); b.props.get("__node__").map(|x| it.to_num(x) as i64) };
+    let node = match node { Some(n) => n, None => return false };
+    if node >= 0 {
+        let n = node as usize;
+        if n >= it.dom.nodes.len() { return true; }
+        match name {
+            "innerHTML" => { let html = it.to_string(v); it.dom.set_inner(n, html); true }
+            "textContent" | "innerText" => { let txt = escape_html(&it.to_string(v)); it.dom.set_inner(n, txt); true }
+            "className" => { let val = it.to_string(v); it.dom.set_attr(n, "class", val); true }
+            "id" => { let val = it.to_string(v); it.dom.set_attr(n, "id", val); true }
+            "value" => { let val = it.to_string(v); it.dom.set_attr(n, "value", val); true }
+            "href" | "src" | "title" | "alt" => { let val = it.to_string(v); it.dom.set_attr(n, name, val); true }
+            // proprietes sans effet visuel : on absorbe (pas d'erreur).
+            "onclick" | "onload" | "onchange" | "hidden" | "checked" | "disabled" | "scrollTop" | "scrollLeft" => true,
+            _ => false,
+        }
+    } else {
+        // element detache
+        match name {
+            "innerHTML" | "textContent" | "innerText" => { let html = if name == "innerHTML" { it.to_string(v) } else { escape_html(&it.to_string(v)) }; obj.borrow_mut().props.insert("__html__".into(), str_val(html)); true }
+            "className" | "id" | "href" | "src" | "value" | "title" | "alt" => {
+                let val = it.to_string(v);
+                let key = if name == "className" { "class".to_string() } else { name.to_string() };
+                let at = obj.borrow().props.get("__attrs__").cloned();
+                if let Some(Value::Obj(a)) = at { a.borrow_mut().props.insert(key, str_val(val)); }
+                true
+            }
+            _ => false,
+        }
     }
+}
+
+// objet `style`/`dataset` : memorise sur l'element, les ecritures sont absorbees.
+fn style_object(this: &Value) -> Value {
+    if let Value::Obj(o) = this {
+        if let Some(s) = o.borrow().props.get("__style__").cloned() { return s; }
+        let s = new_obj(Obj::plain());
+        o.borrow_mut().props.insert("__style__".into(), s.clone());
+        return s;
+    }
+    new_obj(Obj::plain())
+}
+
+// classList lie a un noeud (n>=0) ; methodes add/remove/toggle/contains.
+fn class_list(n: i64) -> Value {
+    let cl = new_obj(Obj::plain());
+    set(&cl, "__node__", Value::Num(n as f64));
+    set(&cl, "add", native_val(|it, t, a| { cl_edit(it, &t, a, 0); Ok(Value::Undefined) }));
+    set(&cl, "remove", native_val(|it, t, a| { cl_edit(it, &t, a, 1); Ok(Value::Undefined) }));
+    set(&cl, "toggle", native_val(|it, t, a| { Ok(Value::Bool(cl_edit(it, &t, a, 2))) }));
+    set(&cl, "contains", native_val(|it, t, a| {
+        let n = handle_node(it, &t); if n < 0 { return Ok(Value::Bool(false)); }
+        let c = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
+        Ok(Value::Bool(it.dom.attr(n as usize, "class").map(|cl| cl.split(' ').any(|x| x == c)).unwrap_or(false)))
+    }));
+    cl
+}
+fn cl_edit(it: &mut Interp, this: &Value, a: &[Value], op: u8) -> bool {
+    let n = handle_node(it, this); if n < 0 { return false; }
+    let n = n as usize;
+    let c = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
+    let cur = it.dom.attr(n, "class").unwrap_or("").to_string();
+    let mut parts: Vec<&str> = cur.split(' ').filter(|x| !x.is_empty()).collect();
+    let present = parts.iter().any(|x| *x == c);
+    let mut added = false;
+    match op {
+        0 => { if !present { parts.push(&c); added = true; } }
+        1 => { parts.retain(|x| *x != c); }
+        _ => { if present { parts.retain(|x| *x != c); } else { parts.push(&c); added = true; } }
+    }
+    it.dom.set_attr(n, "class", parts.join(" "));
+    added
+}
+
+fn dom_get_attr(it: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    let name = it.to_string(a.get(0).unwrap_or(&Value::Undefined)).to_lowercase();
+    let n = handle_node(it, &this);
+    if n >= 0 { return Ok(it.dom.attr(n as usize, &name).map(str_val).unwrap_or(Value::Null)); }
+    if let Value::Obj(o) = &this { if let Some(Value::Obj(at)) = o.borrow().props.get("__attrs__").cloned() { return Ok(at.borrow().props.get(&name).cloned().unwrap_or(Value::Null)); } }
+    Ok(Value::Null)
+}
+fn dom_set_attr(it: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    let name = it.to_string(a.get(0).unwrap_or(&Value::Undefined)).to_lowercase();
+    let val = it.to_string(a.get(1).unwrap_or(&Value::Undefined));
+    let n = handle_node(it, &this);
+    if n >= 0 { it.dom.set_attr(n as usize, &name, val); return Ok(Value::Undefined); }
+    if let Value::Obj(o) = &this { if let Some(Value::Obj(at)) = o.borrow().props.get("__attrs__").cloned() { at.borrow_mut().props.insert(name, str_val(val)); } }
+    Ok(Value::Undefined)
+}
+fn dom_has_attr(it: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    let name = it.to_string(a.get(0).unwrap_or(&Value::Undefined)).to_lowercase();
+    let n = handle_node(it, &this);
+    if n >= 0 { return Ok(Value::Bool(it.dom.attr(n as usize, &name).is_some())); }
+    Ok(Value::Bool(false))
+}
+fn dom_append_child(it: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    let child = a.get(0).cloned().unwrap_or(Value::Undefined);
+    let html = element_outer(it, &child);
+    let n = handle_node(it, &this);
+    if n >= 0 { it.dom.append_html(n as usize, &html); }
+    else if let Value::Obj(o) = &this {
+        let cur = o.borrow().props.get("__html__").map(|x| it.to_string(x)).unwrap_or_default();
+        o.borrow_mut().props.insert("__html__".into(), str_val(format!("{}{}", cur, html)));
+    }
+    Ok(child)
+}
+fn dom_qs(it: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    let sel = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
+    let n = handle_node(it, &this);
+    let from = if n >= 0 { n as usize } else { 0 };
+    Ok(it.dom.query(&sel, from, true).first().map(|&x| node_handle(x)).unwrap_or(Value::Null))
+}
+fn dom_qsa(it: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    let sel = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
+    let n = handle_node(it, &this);
+    let from = if n >= 0 { n as usize } else { 0 };
+    Ok(array_val(it.dom.query(&sel, from, false).into_iter().map(node_handle).collect()))
+}
+
+// ============================================================================
+// Modele DOM (parse HTML -> arbre avec plages d'octets pour les mutations)
+// ============================================================================
+
+struct DomNode {
+    tag: String,
+    attrs: Vec<(String, String)>,
+    open_start: usize,
+    inner_start: usize,
+    inner_end: usize,
+    children: Vec<usize>,
+    pending_inner: Option<String>,
+    appends: String,
+    dirty: bool,
+}
+
+pub struct DomModel { html: Vec<u8>, nodes: Vec<DomNode> }
+
+#[derive(Clone)]
+enum SelKind { Any, Id(String), Class(String), Tag(String) }
+
+fn parse_sel(s: &str) -> SelKind {
+    let s = s.trim();
+    let last = s.split(|c: char| c == ' ' || c == '>' || c == '+' || c == '~').filter(|x| !x.is_empty()).last().unwrap_or(s);
+    let base = last.split(|c: char| c == ':' || c == '[').next().unwrap_or(last);
+    if base == "*" || base.is_empty() { return SelKind::Any; }
+    if let Some(x) = base.strip_prefix('#') { return SelKind::Id(x.to_string()); }
+    if let Some(x) = base.strip_prefix('.') { return SelKind::Class(x.split('.').next().unwrap_or(x).to_string()); }
+    if let Some(p) = base.find(['.', '#']) {
+        let rest = &base[p..];
+        if let Some(c) = rest.strip_prefix('.') { return SelKind::Class(c.split('.').next().unwrap_or(c).to_string()); }
+        if let Some(i) = rest.strip_prefix('#') { return SelKind::Id(i.to_string()); }
+    }
+    SelKind::Tag(base.to_ascii_lowercase())
+}
+
+impl DomModel {
+    fn empty() -> DomModel { DomModel { html: Vec::new(), nodes: Vec::new() } }
+
+    fn parse(html: &[u8]) -> DomModel {
+        let mut nodes = alloc::vec![DomNode { tag: "#root".into(), attrs: Vec::new(), open_start: 0, inner_start: 0, inner_end: html.len(), children: Vec::new(), pending_inner: None, appends: String::new(), dirty: false }];
+        let mut stack: Vec<usize> = alloc::vec![0];
+        let mut i = 0usize;
+        while i < html.len() {
+            if html[i] != b'<' { i += 1; continue; }
+            if html[i..].starts_with(b"<!--") { i = find_ci(html, b"-->", i).map(|p| p + 3).unwrap_or(html.len()); continue; }
+            if i + 1 < html.len() && html[i + 1] == b'!' { i = find_ci(html, b">", i).map(|p| p + 1).unwrap_or(html.len()); continue; }
+            let lt = i;
+            let gt = match find_ci(html, b">", i) { Some(p) => p, None => break };
+            let raw = &html[i + 1..gt];
+            let closing = raw.first() == Some(&b'/');
+            let mut p = if closing { 1 } else { 0 };
+            let ns = p;
+            while p < raw.len() && (raw[p] as char).is_ascii_alphanumeric() { p += 1; }
+            let name: String = raw[ns..p].iter().map(|&c| (c as char).to_ascii_lowercase()).collect();
+            if name.is_empty() { i = gt + 1; continue; }
+            if name == "script" || name == "style" {
+                if !closing {
+                    let close: &[u8] = if name == "script" { b"</script" } else { b"</style" };
+                    let ce = find_ci(html, close, gt + 1).unwrap_or(html.len());
+                    i = find_ci(html, b">", ce).map(|q| q + 1).unwrap_or(html.len());
+                } else { i = gt + 1; }
+                continue;
+            }
+            if closing {
+                if let Some(pos) = stack.iter().rposition(|&n| nodes[n].tag == name) {
+                    let nidx = stack[pos];
+                    nodes[nidx].inner_end = lt;
+                    stack.truncate(pos.max(1));
+                }
+                i = gt + 1;
+                continue;
+            }
+            let attrs = parse_attrs_dom(&raw[p..]);
+            let self_closing = raw.last() == Some(&b'/');
+            let idx = nodes.len();
+            nodes.push(DomNode { tag: name.clone(), attrs, open_start: lt, inner_start: gt + 1, inner_end: gt + 1, children: Vec::new(), pending_inner: None, appends: String::new(), dirty: false });
+            let parent = *stack.last().unwrap_or(&0);
+            nodes[parent].children.push(idx);
+            if !is_void_dom(&name) && !self_closing { stack.push(idx); }
+            i = gt + 1;
+            if nodes.len() > 40_000 { break; }
+        }
+        // ferme les noeuds restes ouverts
+        for &n in stack.iter().skip(1) { if nodes[n].inner_end < nodes[n].inner_start { nodes[n].inner_end = html.len(); } }
+        DomModel { html: html.to_vec(), nodes }
+    }
+
+    fn attr(&self, i: usize, name: &str) -> Option<&str> {
+        self.nodes.get(i)?.attrs.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+    }
+    fn parent_of(&self, n: usize) -> Option<usize> {
+        (1..self.nodes.len()).find(|&p| self.nodes[p].children.contains(&n))
+    }
+    fn find_by_id(&self, id: &str) -> Option<usize> {
+        (1..self.nodes.len()).find(|&n| self.attr(n, "id") == Some(id))
+    }
+    fn query(&self, sel: &str, from: usize, first: bool) -> Vec<usize> {
+        let kind = parse_sel(sel);
+        let mut out = Vec::new();
+        let mut budget = 60_000usize;
+        self.collect(from, &kind, first, &mut out, &mut budget);
+        out
+    }
+    fn collect(&self, node: usize, kind: &SelKind, first: bool, out: &mut Vec<usize>, budget: &mut usize) {
+        if node >= self.nodes.len() { return; }
+        for ci in 0..self.nodes[node].children.len() {
+            if *budget == 0 { return; }
+            *budget -= 1;
+            let c = self.nodes[node].children[ci];
+            if self.matches(c, kind) { out.push(c); if first { return; } }
+            self.collect(c, kind, first, out, budget);
+            if first && !out.is_empty() { return; }
+        }
+    }
+    fn matches(&self, n: usize, kind: &SelKind) -> bool {
+        match kind {
+            SelKind::Any => true,
+            SelKind::Id(x) => self.attr(n, "id") == Some(x.as_str()),
+            SelKind::Tag(t) => &self.nodes[n].tag == t,
+            SelKind::Class(c) => self.attr(n, "class").map(|cl| cl.split(' ').any(|x| x == c)).unwrap_or(false),
+        }
+    }
+    fn inner_html(&self, i: usize) -> String {
+        let n = &self.nodes[i];
+        let base = match &n.pending_inner {
+            Some(s) => s.clone(),
+            None => {
+                let a = n.inner_start.min(self.html.len());
+                let b = n.inner_end.min(self.html.len()).max(a);
+                core::str::from_utf8(&self.html[a..b]).unwrap_or("").to_string()
+            }
+        };
+        if n.appends.is_empty() { base } else { format!("{}{}", base, n.appends) }
+    }
+    fn text_content(&self, i: usize) -> String { strip_tags(&self.inner_html(i)) }
+    fn outer_html(&self, i: usize) -> String {
+        let n = &self.nodes[i];
+        format!("{}{}</{}>", serialize_open(&n.tag, &n.attrs), self.inner_html(i), n.tag)
+    }
+    fn set_inner(&mut self, i: usize, html: String) { if i < self.nodes.len() { let n = &mut self.nodes[i]; n.pending_inner = Some(html); n.appends.clear(); } }
+    fn append_html(&mut self, i: usize, html: &str) { if i < self.nodes.len() { self.nodes[i].appends.push_str(html); } }
+    fn set_attr(&mut self, i: usize, name: &str, val: String) {
+        if i >= self.nodes.len() { return; }
+        let n = &mut self.nodes[i];
+        if let Some(slot) = n.attrs.iter_mut().find(|(k, _)| k == name) { slot.1 = val; } else { n.attrs.push((name.to_string(), val)); }
+        n.dirty = true;
+    }
+    // Reconstruit le HTML : retire/insere les scripts (document.write), applique
+    // les mutations (innerHTML/append/attributs) par plages non chevauchantes.
+    fn rebuild(&self, scripts: &[(usize, usize, String)]) -> Vec<u8> {
+        let mut edits: Vec<(usize, usize, Vec<u8>)> = Vec::new();
+        for &(s, e, ref w) in scripts { edits.push((s, e, w.clone().into_bytes())); }
+        for (i, n) in self.nodes.iter().enumerate() {
+            if i == 0 { continue; }
+            if n.pending_inner.is_some() || !n.appends.is_empty() {
+                edits.push((n.inner_start, n.inner_end, self.inner_html(i).into_bytes()));
+            }
+            if n.dirty {
+                edits.push((n.open_start, n.inner_start, serialize_open(&n.tag, &n.attrs).into_bytes()));
+            }
+        }
+        edits.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+        let mut out = Vec::with_capacity(self.html.len() + 256);
+        let mut pos = 0usize;
+        for (s, e, rep) in edits {
+            if s < pos || e > self.html.len() || s > e { continue; }
+            out.extend_from_slice(&self.html[pos..s]);
+            out.extend_from_slice(&rep);
+            pos = e;
+        }
+        out.extend_from_slice(&self.html[pos.min(self.html.len())..]);
+        out
+    }
+}
+
+fn is_void_dom(t: &str) -> bool { matches!(t, "area" | "base" | "br" | "col" | "embed" | "hr" | "img" | "input" | "link" | "meta" | "param" | "source" | "track" | "wbr") }
+
+fn parse_attrs_dom(raw: &[u8]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        while i < raw.len() && matches!(raw[i], b' ' | b'\t' | b'\n' | b'\r' | b'/') { i += 1; }
+        let ks = i;
+        while i < raw.len() && !matches!(raw[i], b'=' | b' ' | b'\t' | b'\n' | b'\r' | b'>') { i += 1; }
+        if i == ks { break; }
+        let key: String = raw[ks..i].iter().map(|&c| (c as char).to_ascii_lowercase()).collect();
+        let mut val = String::new();
+        while i < raw.len() && matches!(raw[i], b' ' | b'\t') { i += 1; }
+        if i < raw.len() && raw[i] == b'=' {
+            i += 1;
+            while i < raw.len() && matches!(raw[i], b' ' | b'\t') { i += 1; }
+            if i < raw.len() && (raw[i] == b'"' || raw[i] == b'\'') {
+                let q = raw[i]; i += 1; let vs = i;
+                while i < raw.len() && raw[i] != q { i += 1; }
+                val = core::str::from_utf8(&raw[vs..i]).unwrap_or("").to_string(); i += 1;
+            } else {
+                let vs = i;
+                while i < raw.len() && !matches!(raw[i], b' ' | b'>' | b'\t') { i += 1; }
+                val = core::str::from_utf8(&raw[vs..i]).unwrap_or("").to_string();
+            }
+        }
+        out.push((key, val));
+    }
+    out
+}
+
+fn serialize_open(tag: &str, attrs: &[(String, String)]) -> String {
+    let mut s = format!("<{}", tag);
+    for (k, v) in attrs { s.push(' '); s.push_str(k); s.push_str("=\""); s.push_str(&v.replace('"', "&quot;")); s.push('"'); }
+    s.push('>');
+    s
+}
+
+fn strip_tags(html: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0u32;
+    for c in html.chars() {
+        match c { '<' => depth += 1, '>' => { if depth > 0 { depth -= 1; } } _ => if depth == 0 { out.push(c); } }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 // ============================================================================
@@ -1203,78 +1639,45 @@ fn dom_set(it: &mut Interp, obj: &Rc<RefCell<Obj>>, name: &str, v: &Value) -> bo
 const MAX_OUTPUT: usize = 4_000_000;
 const MAX_SCRIPT: usize = 256_000;
 
-/// Execute les `<script>` inline et renvoie le HTML enrichi (document.write +
-/// patches innerHTML/textContent par id). Un seul contexte JS partage sur la page.
+/// Execute les `<script>` inline sur un DOM partage et renvoie le HTML enrichi :
+/// document.write insere a la position du script, mutations DOM (innerHTML,
+/// textContent, appendChild, setAttribute/classList...) appliquees par plages.
 pub fn execute_inline(html: &[u8]) -> Vec<u8> {
-    let mut out: Vec<u8> = Vec::with_capacity(html.len().min(MAX_OUTPUT));
     let mut interp = Interp::new();
+    interp.dom = DomModel::parse(html);
+    let mut scripts: Vec<(usize, usize, String)> = Vec::new();
     let mut i = 0usize;
-    while i < html.len() && out.len() < MAX_OUTPUT {
+    let mut ran = 0u32;
+    while i < html.len() {
         if starts_ci(&html[i..], b"<script") {
+            let outer_start = i;
             let header_end = find_ci(html, b">", i).map(|p| p + 1).unwrap_or(html.len());
             let header = core::str::from_utf8(&html[i..header_end]).unwrap_or("");
             let is_external = header.contains("src=") || header.contains("src =");
             let content_start = header_end;
             let content_end = find_ci(html, b"</script", content_start).unwrap_or(html.len());
-            if !is_external && content_end > content_start && content_end - content_start <= MAX_SCRIPT {
+            let outer_end = find_ci(html, b">", content_end).map(|p| p + 1).unwrap_or(html.len());
+            let mut wr = String::new();
+            if !is_external && content_end > content_start && content_end - content_start <= MAX_SCRIPT && ran < 128 {
                 if let Ok(src) = core::str::from_utf8(&html[content_start..content_end]) {
+                    interp.writes.clear();
                     let _ = interp.run(src); // erreurs ignorees (le rendu continue)
-                    flush_writes(&mut out, &mut interp);
-                    apply_patches(&mut out, &mut interp);
+                    ran += 1;
+                    wr = core::mem::take(&mut interp.writes);
                 }
             }
-            i = find_ci(html, b">", content_end).map(|p| p + 1).unwrap_or(html.len());
+            scripts.push((outer_start, outer_end, wr));
+            i = outer_end;
             continue;
         }
-        out.push(html[i]);
         i += 1;
     }
+    let mut out = interp.dom.rebuild(&scripts);
+    if out.len() > MAX_OUTPUT { out.truncate(MAX_OUTPUT); }
     out
 }
 
-fn flush_writes(out: &mut Vec<u8>, it: &mut Interp) {
-    if it.writes.is_empty() { return; }
-    let w = core::mem::take(&mut it.writes);
-    if out.len() + w.len() <= MAX_OUTPUT { out.extend_from_slice(w.as_bytes()); }
-}
-
-fn apply_patches(out: &mut Vec<u8>, it: &mut Interp) {
-    let patches = core::mem::take(&mut it.patches);
-    for (id, html) in patches {
-        if let Some((a, b)) = element_inner_range_by_id(out, &id) {
-            let mut next = Vec::with_capacity((out.len() + html.len()).min(MAX_OUTPUT));
-            next.extend_from_slice(&out[..a]);
-            next.extend_from_slice(html.as_bytes());
-            next.extend_from_slice(&out[b..]);
-            if next.len() <= MAX_OUTPUT { *out = next; }
-        }
-    }
-}
-
-// --- helpers HTML (repris de l'integration existante) ---
-
-fn element_inner_range_by_id(html: &[u8], id: &str) -> Option<(usize, usize)> {
-    let mut pos = 0usize;
-    while let Some(lt) = find_ci(html, b"<", pos) {
-        if lt + 1 >= html.len() || html[lt + 1] == b'/' || html[lt + 1] == b'!' { pos = lt + 1; continue; }
-        let gt = find_ci(html, b">", lt)?;
-        let tag = core::str::from_utf8(&html[lt + 1..gt]).ok()?;
-        if tag_has_id(tag, id) {
-            let name = tag.split(|c: char| c.is_ascii_whitespace() || c == '/' || c == '>').next().unwrap_or("").to_ascii_lowercase();
-            let close = ["</", &name].concat();
-            let end = find_ci(html, close.as_bytes(), gt + 1).unwrap_or(gt + 1);
-            return Some((gt + 1, end));
-        }
-        pos = gt + 1;
-    }
-    None
-}
-fn tag_has_id(tag: &str, id: &str) -> bool {
-    for part in tag.split(|c: char| c.is_ascii_whitespace()) {
-        if let Some(v) = part.strip_prefix("id=") { let v = v.trim_matches(|c| c == '"' || c == '\'' || c == '/'); if v == id { return true; } }
-    }
-    false
-}
+// --- helpers HTML ---
 fn escape_html(s: &str) -> String { let mut out = String::new(); for c in s.chars() { match c { '&' => out.push_str("&amp;"), '<' => out.push_str("&lt;"), '>' => out.push_str("&gt;"), '"' => out.push_str("&quot;"), _ => out.push(c) } } out }
 fn starts_ci(hay: &[u8], needle: &[u8]) -> bool { hay.len() >= needle.len() && hay[..needle.len()].iter().zip(needle).all(|(a, b)| a.to_ascii_lowercase() == b.to_ascii_lowercase()) }
 fn find_ci(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> { if needle.is_empty() || from >= hay.len() { return None; } let mut i = from; while i + needle.len() <= hay.len() { let mut k = 0; while k < needle.len() && hay[i + k].to_ascii_lowercase() == needle[k].to_ascii_lowercase() { k += 1; } if k == needle.len() { return Some(i); } i += 1; } None }
