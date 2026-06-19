@@ -306,8 +306,8 @@ pub fn draw_char(x: usize, y: usize, c: u8, color: u8) {
 
 pub fn draw_text(x: usize, y: usize, s: &str, color: u8) {
     let mut cx = x;
-    for b in s.bytes() {
-        draw_char(cx, y, b, color);
+    for c in s.chars() {
+        draw_char(cx, y, font::fold(c), color);
         cx += 8;
     }
 }
@@ -329,8 +329,8 @@ pub fn draw_char_scaled(x: usize, y: usize, c: u8, color: u8, scale: usize) {
 /// Dessine une chaine agrandie `scale` fois (cellule de `8*scale` px de large).
 pub fn draw_text_scaled(x: usize, y: usize, s: &str, color: u8, scale: usize) {
     let mut cx = x;
-    for b in s.bytes() {
-        draw_char_scaled(cx, y, b, color, scale);
+    for c in s.chars() {
+        draw_char_scaled(cx, y, font::fold(c), color, scale);
         cx += 8 * scale;
     }
 }
@@ -381,8 +381,8 @@ fn draw_char_rgb(x: usize, y: usize, c: u8, rgb: u32, scale: usize) {
 pub fn draw_text_rgb(x: usize, y: usize, s: &str, rgb: u32, scale: usize) {
     let mut cx = x;
     let step = 8 * scale.max(1);
-    for b in s.bytes() {
-        draw_char_rgb(cx, y, b, rgb, scale.max(1));
+    for c in s.chars() {
+        draw_char_rgb(cx, y, font::fold(c), rgb, scale.max(1));
         cx += step;
     }
 }
