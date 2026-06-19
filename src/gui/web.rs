@@ -1,11 +1,12 @@
 //! Moteur de rendu web : HTML -> DOM -> CSS (subset) -> layout flux blocs/inline
 //! -> liste d'affichage truecolor peinte dans le framebuffer HD.
 //!
-//! Pas un navigateur complet (pas de JS, CSS partiel), mais un vrai moteur :
+//! Pas un navigateur complet (JS volontairement minimal, CSS partiel), mais un vrai moteur :
 //! arbre DOM, feuilles de style (`<style>` + `style=""`), cascade avec
 //! selecteurs simples (balise/.classe/#id), couleurs reelles, tailles de
 //! police, gras, alignement, fonds de blocs, masquage (`display:none`), liens
-//! cliquables, et **images** (PNG / data:URI / fetch reseau) downscalees.
+//! cliquables, **mini-JS inline** (`document.write`, `innerHTML`) et images
+//! (PNG / data:URI / fetch reseau) downscalees.
 
 use crate::gui::framebuffer as fb;
 use crate::gui::image::{self, Image};
@@ -313,7 +314,8 @@ fn extract_and_strip(html: &[u8], max_len: usize) -> (Vec<u8>, Vec<Rule>) {
 
 /// Pipeline complet : HTML -> (CSS extrait, DOM nettoye) -> page mise en page.
 pub fn render(html: &[u8], base_url: &str, width: i32) -> Page {
-    let (clean, css) = extract_and_strip(html, 1_500_000);
+    let scripted = crate::gui::js::execute_inline(html);
+    let (clean, css) = extract_and_strip(&scripted, 1_500_000);
     let dom = parse(&clean);
     layout(&dom, base_url, width, &css)
 }
