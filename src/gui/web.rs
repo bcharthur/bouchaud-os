@@ -62,16 +62,25 @@ fn decode_entities(text: &str) -> String {
     let mut out = String::new();
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'&' {
-            if let Some(semi) = b[i + 1..].iter().take(12).position(|&c| c == b';') {
+        let c = b[i];
+        if c == b'&' {
+            if let Some(semi) = b[i + 1..].iter().take(12).position(|&x| x == b';') {
                 let ent = &text[i + 1..i + 1 + semi];
-                if let Some(c) = entity(ent) { out.push(c); i += 2 + semi; continue; }
+                if let Some(ch) = entity(ent) { out.push(ch); i += 2 + semi; continue; }
             }
             out.push('&'); i += 1;
+        } else if c == b'\t' {
+            out.push(' '); i += 1;
+        } else if c < 0x80 {
+            out.push(c as char); i += 1;
         } else {
-            let c = b[i];
-            if c == b'\t' { out.push(' '); } else { out.push(c as char); }
-            i += 1;
+            // sequence UTF-8 : decode le caractere complet (accents, etc.)
+            let len = if c >= 0xF0 { 4 } else if c >= 0xE0 { 3 } else { 2 };
+            let end = (i + len).min(b.len());
+            match core::str::from_utf8(&b[i..end]).ok().and_then(|s| s.chars().next()) {
+                Some(ch) => { out.push(ch); i += ch.len_utf8(); }
+                None => { i += 1; }
+            }
         }
     }
     out
@@ -82,17 +91,24 @@ fn entity(ent: &str) -> Option<char> {
         let code = if let Some(h) = num.strip_prefix('x').or_else(|| num.strip_prefix('X')) {
             u32::from_str_radix(h, 16).ok()?
         } else { num.parse::<u32>().ok()? };
-        let c = char::from_u32(code)?;
-        return Some(if c.is_ascii() { c } else { '?' });
+        // Conserve le vrai caractere Unicode ; le repli vers l'ASCII se fait au
+        // moment du rendu (police bitmap).
+        return char::from_u32(code);
     }
     Some(match ent {
-        "amp" => '&', "lt" => '<', "gt" => '>', "quot" => '"', "apos" => '\'', "nbsp" => ' ',
-        "copy" => 'c', "reg" => 'r', "hellip" => '.', "mdash" | "ndash" => '-',
-        "rsquo" | "lsquo" => '\'', "rdquo" | "ldquo" | "laquo" | "raquo" => '"',
-        "eacute" | "egrave" | "ecirc" | "euml" => 'e', "agrave" | "acirc" => 'a',
-        "ccedil" => 'c', "ugrave" | "ucirc" => 'u', "icirc" | "iuml" => 'i', "ocirc" => 'o',
-        "Eacute" | "Egrave" => 'E', "times" => 'x', "euro" => 'E', "trade" => 't',
-        "deg" => 'o', "middot" => '.', "bull" => '*',
+        "amp" => '&', "lt" => '<', "gt" => '>', "quot" => '"', "apos" => '\'', "nbsp" => '\u{a0}',
+        "copy" => '©', "reg" => '®', "hellip" => '…', "mdash" => '—', "ndash" => '–',
+        "rsquo" => '’', "lsquo" => '‘', "rdquo" => '”', "ldquo" => '“', "laquo" => '«', "raquo" => '»',
+        "eacute" => 'é', "egrave" => 'è', "ecirc" => 'ê', "euml" => 'ë',
+        "agrave" => 'à', "aacute" => 'á', "acirc" => 'â', "auml" => 'ä', "aring" => 'å', "atilde" => 'ã',
+        "ccedil" => 'ç', "ugrave" => 'ù', "uacute" => 'ú', "ucirc" => 'û', "uuml" => 'ü',
+        "icirc" => 'î', "iuml" => 'ï', "igrave" => 'ì', "iacute" => 'í',
+        "ocirc" => 'ô', "ouml" => 'ö', "ograve" => 'ò', "oacute" => 'ó', "otilde" => 'õ', "oslash" => 'ø',
+        "ntilde" => 'ñ', "yacute" => 'ý', "szlig" => 'ß',
+        "Eacute" => 'É', "Egrave" => 'È', "Ecirc" => 'Ê', "Agrave" => 'À', "Acirc" => 'Â',
+        "Ccedil" => 'Ç', "Ouml" => 'Ö', "Uuml" => 'Ü', "Auml" => 'Ä',
+        "times" => '×', "divide" => '÷', "euro" => '€', "pound" => '£', "yen" => '¥', "cent" => '¢',
+        "trade" => '™', "deg" => '°', "middot" => '·', "bull" => '•', "sect" => '*', "para" => 'P',
         _ => return None,
     })
 }
