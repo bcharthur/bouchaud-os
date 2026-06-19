@@ -15,7 +15,7 @@ pub struct ChainResult {
 
 /// Convertit la date RTC courante en entier AAAAMMJJhhmmss.
 pub fn now_stamp() -> u64 {
-    let dt = crate::arch::x86_64::rtc::now();
+    let dt = crate::arch::x86_64::rtc::now_utc();
     (dt.year as u64) * 10_000_000_000
         + (dt.month as u64) * 100_000_000
         + (dt.day as u64) * 1_000_000
