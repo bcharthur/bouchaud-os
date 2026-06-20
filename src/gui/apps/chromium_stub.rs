@@ -1,4 +1,4 @@
-//! Bouchaud Browser : navigateur graphique.
+//! Nautile : navigateur graphique de Bouchaud OS.
 //!
 //! Recupere le HTML (HTTP/1.1 + TLS, gzip/deflate/brotli), le parse en DOM, le
 //! met en page (moteur `gui::web`) et le peint dans le framebuffer HD avec

@@ -3,6 +3,13 @@ param(
 )
 
 cargo +nightly bootimage
+# Si la generation de l'image echoue (erreur de compilation, llvm-objcopy
+# bloque, .bin verrouille par un QEMU encore ouvert...), on ARRETE ici au lieu
+# de booter silencieusement une ancienne image obsolete.
+if ($LASTEXITCODE -ne 0) {
+  Write-Host "bootimage a echoue (code $LASTEXITCODE) - QEMU non lance." -ForegroundColor Red
+  exit 1
+}
 
 # -serial stdio redirige la sortie serie COM1 du noyau vers ce terminal.
 # -Fullscreen agrandit QEMU en plein ecran Windows.

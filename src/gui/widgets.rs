@@ -8,7 +8,7 @@ use alloc::format;
 
 // Accent + glyphe par icone de bureau (meme ordre que window::ICONS).
 const ICON_STYLE: [(u32, &str); 4] = [
-    (0x1a73e8, "W"),   // Navigateur
+    (0x1a73e8, "N"),   // Nautile
     (0x34a853, "="),   // Calculatrice
     (0x202124, ">_"),  // Terminal
     (0xf9ab00, "[]"),  // Fichiers
