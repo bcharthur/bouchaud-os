@@ -705,8 +705,10 @@ impl<'c, 'a> Flow<'c, 'a> {
     }
 
     fn push_word(&mut self, s: &str, st: &Style) {
-        let cw = 8 * st.scale as i32;
-        let wpx = s.chars().count() as i32 * cw;
+        // Largeurs PROPORTIONNELLES via la police vectorielle (repli monospace).
+        let px = 8 * st.scale as i32;
+        let cw = super::font_ttf::char_width(' ', px).max(1); // espace inter-mots
+        let wpx = super::font_ttf::text_width(s, px);
         let lh = 8 * st.scale as i32 + LINE_GAP;
         if lh > self.line_h { self.line_h = lh; }
         let mut cur = self.line_cursor();
@@ -1109,8 +1111,12 @@ pub fn paint(page: &Page, scroll: i32, bx: usize, by: usize, bw: usize, bh: usiz
                 if sy < byi || sy + h > byi + bhi { continue; }
                 let xx = bxi + x;
                 if xx >= bxi && xx < bxi + bwi {
-                    fb::draw_text_rgb(xx as usize, sy as usize, s, *color, *scale);
-                    if *bold { fb::draw_text_rgb((xx + 1) as usize, sy as usize, s, *color, *scale); }
+                    // Police vectorielle antialiasee si dispo ; sinon repli bitmap.
+                    let px = 8 * *scale as i32;
+                    if !super::font_ttf::draw_text(xx, sy, s, *color, px, *bold) {
+                        fb::draw_text_rgb(xx as usize, sy as usize, s, *color, *scale);
+                        if *bold { fb::draw_text_rgb((xx + 1) as usize, sy as usize, s, *color, *scale); }
+                    }
                 }
             }
             Item::Image { x, y, w: _w, h, idx } => {
