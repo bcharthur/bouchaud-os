@@ -544,8 +544,20 @@ struct BoxProps {
     center: bool,          // margin:auto (centre le bloc)
     disp: Option<Disp>,
     float: FloatK,
+    pad: i32,              // padding uniforme (px) — espace interieur
+    mar_y: i32,            // marge verticale (haut/bas, px)
+    border_w: i32,         // epaisseur de bordure (px)
+    border_color: u32,     // couleur de bordure
 }
-fn default_box() -> BoxProps { BoxProps { hidden: false, bg: None, width: None, max_width: None, center: false, disp: None, float: FloatK::None } }
+fn default_box() -> BoxProps {
+    BoxProps { hidden: false, bg: None, width: None, max_width: None, center: false, disp: None, float: FloatK::None,
+        pad: 0, mar_y: 0, border_w: 0, border_color: 0x000000 }
+}
+
+// Premiere longueur d'une valeur raccourcie (`10px 20px` -> 10).
+fn first_len(val: &str) -> Option<i32> {
+    val.split_whitespace().find_map(|t| parse_len(t).map(|l| l.resolve(0)))
+}
 
 // ----------------------------------------------------------------------------
 // Liste d'affichage
@@ -828,7 +840,24 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps) {
             "width" => { bx.width = parse_len(val); }
             "max-width" => { bx.max_width = parse_len(val); }
             "float" => { bx.float = match val { "left" => FloatK::Left, "right" => FloatK::Right, _ => FloatK::None }; }
-            "margin" | "margin-left" | "margin-right" => { if val.contains("auto") { bx.center = true; } }
+            "margin" => {
+                if val.contains("auto") { bx.center = true; }
+                if let Some(px) = first_len(val) { bx.mar_y = px.max(0); }
+            }
+            "margin-left" | "margin-right" => { if val.contains("auto") { bx.center = true; } }
+            "margin-top" | "margin-bottom" => { if let Some(px) = first_len(val) { bx.mar_y = bx.mar_y.max(px.max(0)); } }
+            "padding" | "padding-top" | "padding-bottom" | "padding-left" | "padding-right" => {
+                if let Some(px) = first_len(val) { bx.pad = bx.pad.max(px.max(0)); }
+            }
+            // `border: 1px solid #ccc` -> epaisseur + couleur ; le style (solid...) est ignore.
+            "border" | "border-width" | "border-top" | "border-bottom" | "border-left" | "border-right" => {
+                for tok in val.split_whitespace() {
+                    if let Some(l) = parse_len(tok) { let w = l.resolve(0); if w > 0 { bx.border_w = w; } }
+                    else if let Some(c) = parse_color(tok) { bx.border_color = c; if bx.border_w == 0 { bx.border_w = 1; } }
+                }
+            }
+            "border-color" => { if let Some(c) = parse_color(val) { bx.border_color = c; if bx.border_w == 0 { bx.border_w = 1; } } }
+            "border-style" => { if val != "none" && bx.border_w == 0 { bx.border_w = 1; } }
             _ => {}
         }
     }
@@ -964,6 +993,10 @@ fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps
     f.flush_line();
     if heading_scale(tag).is_some() && f.y > PAD { f.y += LINE_GAP; }
 
+    // Marge haute (box model).
+    f.y += bx.mar_y;
+
+    // Largeur de la boite bordure incluse.
     let mut cw = f.avail;
     if let Some(wv) = bx.width { cw = wv.resolve(f.avail); }
     if let Some(mw) = bx.max_width { let m = mw.resolve(f.avail); if cw > m { cw = m; } }
@@ -972,25 +1005,46 @@ fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps
     let indent = match tag { "ul" | "ol" | "blockquote" | "dl" | "dd" => 18, _ => 0 };
     let mut left = indent;
     if cw < f.avail - indent && bx.center { left = indent + (f.avail - indent - cw) / 2; }
-    let inner = cw.min(f.avail - left).max(8);
+    let outer = cw.min(f.avail - left).max(8);
 
-    let (sx0, sav, sal) = (f.x0, f.avail, f.align);
-    let bg_start_y = f.y;
+    let bw = bx.border_w.max(0);
+    let pad = bx.pad.max(0);
+    // Largeur du CONTENU = boite - bordures - paddings (gauche + droite).
+    let inner = (outer - 2 * (bw + pad)).max(8);
+
+    let box_top = f.y;
     let bg_insert = f.items.len();
-    f.x0 = sx0 + left;
+    let (sx0, sav, sal) = (f.x0, f.avail, f.align);
+    f.x0 = sx0 + left + bw + pad;   // contenu insere par bordure + padding
     f.avail = inner;
     f.align = cst.align;
+    f.y += bw + pad;                // bordure + padding du haut
 
     if tag == "li" { let b = Style { color: 0x5f6368, ..cst.clone() }; f.push_word("*", &b); }
     for &c in &node.children { walk(f, dom, c, cst, depth + 1); }
     f.flush_line();
 
+    f.y += pad + bw;               // bordure + padding du bas
+    let box_bottom = f.y;
     f.x0 = sx0; f.avail = sav; f.align = sal;
 
+    let h = (box_bottom - box_top).max(0);
+    // Fond : remplit toute la boite (insere SOUS le contenu).
     if let Some(bgc) = bx.bg {
-        let h = (f.y - bg_start_y).max(0);
-        if h > 0 { f.items.insert(bg_insert, Item::Rect { x: sx0 + left, y: bg_start_y, w: inner, h, color: bgc }); }
+        if h > 0 { f.items.insert(bg_insert, Item::Rect { x: sx0 + left, y: box_top, w: outer, h, color: bgc }); }
     }
+    // Bordure : 4 traits dessines PAR-DESSUS (haut, bas, gauche, droite).
+    if bw > 0 && h > 0 {
+        let x = sx0 + left;
+        let bc = bx.border_color;
+        f.items.push(Item::Rect { x, y: box_top, w: outer, h: bw, color: bc });
+        f.items.push(Item::Rect { x, y: box_bottom - bw, w: outer, h: bw, color: bc });
+        f.items.push(Item::Rect { x, y: box_top, w: bw, h, color: bc });
+        f.items.push(Item::Rect { x: x + outer - bw, y: box_top, w: bw, h, color: bc });
+    }
+
+    // Marge basse + espacement par defaut entre blocs.
+    f.y += bx.mar_y;
     if matches!(tag, "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "ul" | "ol" | "blockquote" | "table" |
         "form" | "div" | "section" | "article" | "header" | "footer" | "li" | "tr" | "figure") { f.y += LINE_GAP; }
 }
