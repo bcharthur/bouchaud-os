@@ -2,7 +2,10 @@
 //! active (entree clavier, clics, rendu).
 
 pub mod calculator;
-pub mod chromium_stub;
+// Navigateur Nautile. Le fichier s'appelle encore `chromium_stub.rs` (alias via
+// #[path]) ; le module public est `nautile`. A finaliser : `git mv chromium_stub.rs nautile.rs`.
+#[path = "chromium_stub.rs"]
+pub mod nautile;
 pub mod file_explorer;
 pub mod system_info;
 pub mod terminal;
@@ -69,11 +72,11 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
         App::Browser { url, input, page, scroll, session } => match k {
             Key::Enter => {
                 // URL, ou un numero seul pour suivre le lien correspondant.
-                let target = chromium_stub::resolve_input(input, page);
+                let target = nautile::resolve_input(input, page);
                 // Retour visuel immediat avant le fetch (bloquant).
-                chromium_stub::draw_loading(&target, body.0, body.1, body.2, body.3);
+                nautile::draw_loading(&target, body.0, body.1, body.2, body.3);
                 fb::present();
-                let (sess, pg) = chromium_stub::open(&target, win_w - 6);
+                let (sess, pg) = nautile::open(&target, win_w - 6);
                 *session = sess;
                 *page = pg;
                 *url = target.clone();
@@ -85,7 +88,7 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
             Key::Up => { *scroll = (*scroll - 48).max(0); false }
             Key::Down => {
                 let bh = (win_h - TITLE_H - 4).max(1) as usize;
-                let m = chromium_stub::max_scroll(page, bh);
+                let m = nautile::max_scroll(page, bh);
                 *scroll = (*scroll + 48).min(m);
                 false
             }
@@ -119,11 +122,11 @@ pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
         let rel_y = my - by;
         let bw = (win_w - 6).max(1) as usize;
         let bh = (win_h - TITLE_H - 4).max(1) as usize;
-        if let Some(s) = chromium_stub::scroll_at(page, rel_x, rel_y, bw, bh) {
+        if let Some(s) = nautile::scroll_at(page, rel_x, rel_y, bw, bh) {
             *scroll = s;
             return;
         }
-        if let Some(href) = chromium_stub::link_at(page, *scroll, rel_x, rel_y) {
+        if let Some(href) = nautile::link_at(page, *scroll, rel_x, rel_y) {
             // Lien-action `javascript:` -> rejoue le code dans la session (apps
             // interactives) ; sinon navigation classique.
             if let Some(code) = href.strip_prefix("javascript:") {
@@ -131,9 +134,9 @@ pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
                 return;
             }
             let b = ((bx).max(0) as usize, (by).max(0) as usize, (win_w - 6).max(1) as usize, (win_h - TITLE_H - 4).max(1) as usize);
-            chromium_stub::draw_loading(&href, b.0, b.1, b.2, b.3);
+            nautile::draw_loading(&href, b.0, b.1, b.2, b.3);
             fb::present();
-            let (sess, pg) = chromium_stub::open(&href, win_w - 6);
+            let (sess, pg) = nautile::open(&href, win_w - 6);
             *session = sess;
             *page = pg;
             *url = href.clone();
@@ -191,7 +194,7 @@ pub(crate) fn wheel_to_app(w: &mut Win, mx: i32, my: i32, delta: i32) {
         if mx < bx || mx >= bx + bw as i32 || my < by || my >= by + bh as i32 {
             return;
         }
-        let max = chromium_stub::max_scroll(page, bh);
+        let max = nautile::max_scroll(page, bh);
         *scroll = (*scroll - delta * 48).clamp(0, max);
     }
 }
@@ -205,7 +208,7 @@ pub(crate) fn draw_app(w: &Win) {
     match &w.app {
         App::Terminal { sb, input, cwd } => terminal::draw(sb, input, *cwd, bx, by, bw, bh),
         App::Files { cur, view, name } => file_explorer::draw(*cur, view, name, bx, by, bw, bh),
-        App::Browser { url, input, page, scroll, .. } => chromium_stub::draw(url, input, page, *scroll, bx, by, bw, bh),
+        App::Browser { url, input, page, scroll, .. } => nautile::draw(url, input, page, *scroll, bx, by, bw, bh),
         App::Calc { expr } => calculator::draw(expr, bx, by, bw, bh),
         App::Monitor => system_info::draw(bx, by, bw, bh),
     }

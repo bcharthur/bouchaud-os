@@ -132,39 +132,57 @@ pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> boo
     let mut my_seq = my_seq.wrapping_add(request.len() as u32);
 
     // --- reception ---
-    let mut idle = 0u32;
+    // Econome en CPU : on draine rapidement tous les segments disponibles, et
+    // quand il n'y a RIEN a lire on met le CPU en veille (`hlt`) jusqu'a la
+    // prochaine interruption (timer PIT ~55 ms) au lieu de faire tourner un coeur
+    // a fond. Le service de rendu deporte peut mettre plusieurs secondes a
+    // repondre : timeout d'INACTIVITE base sur l'horloge (repousse a chaque octet
+    // recu, donc un gros transfert n'est jamais coupe).
+    use crate::kernel::timer;
+    let deadline = 30 * timer::TICKS_PER_SECOND.max(1);
+    let mut last = timer::ticks();
     loop {
-        let mut activity = false;
-        for _ in 0..2_000_000u32 {
-            if let Some((_, n)) = net::poll_ip(6, Some(dst), &mut rb) {
-                if let Some(h) = parse(&rb[..n]) {
-                    if h.dport != sport { continue; }
-                    activity = true;
-                    let plen = n - h.data_off;
-                    if plen > 0 {
-                        if h.seq == my_ack {
-                            out.extend_from_slice(&rb[h.data_off..n]);
-                            my_ack = my_ack.wrapping_add(plen as u32);
+        let mut got = false;
+        // Draine tout ce qui est dispo SANS dormir tant qu'il arrive des paquets.
+        for _ in 0..8192u32 {
+            match net::poll_ip(6, Some(dst), &mut rb) {
+                Some((_, n)) => {
+                    if let Some(h) = parse(&rb[..n]) {
+                        if h.dport != sport { continue; }
+                        got = true;
+                        let plen = n - h.data_off;
+                        if plen > 0 {
+                            if h.seq == my_ack {
+                                out.extend_from_slice(&rb[h.data_off..n]);
+                                my_ack = my_ack.wrapping_add(plen as u32);
+                            }
+                            // ACK (ou re-ACK si hors sequence)
+                            let a = build(&mut seg, &dst, sport, port, my_seq, my_ack, ACK, WINDOW, &[]);
+                            net::send_ip(dst, 6, &seg[..a]);
                         }
-                        // ACK (ou re-ACK si hors sequence)
-                        let a = build(&mut seg, &dst, sport, port, my_seq, my_ack, ACK, WINDOW, &[]);
-                        net::send_ip(dst, 6, &seg[..a]);
+                        if h.flags & FIN != 0 {
+                            my_ack = my_ack.wrapping_add(1);
+                            let a = build(&mut seg, &dst, sport, port, my_seq, my_ack, ACK, WINDOW, &[]);
+                            net::send_ip(dst, 6, &seg[..a]);
+                            let f = build(&mut seg, &dst, sport, port, my_seq, my_ack, FIN | ACK, WINDOW, &[]);
+                            net::send_ip(dst, 6, &seg[..f]);
+                            return true;
+                        }
+                        if h.flags & RST != 0 { return true; }
                     }
-                    if h.flags & FIN != 0 {
-                        my_ack = my_ack.wrapping_add(1);
-                        let a = build(&mut seg, &dst, sport, port, my_seq, my_ack, ACK, WINDOW, &[]);
-                        net::send_ip(dst, 6, &seg[..a]);
-                        let f = build(&mut seg, &dst, sport, port, my_seq, my_ack, FIN | ACK, WINDOW, &[]);
-                        net::send_ip(dst, 6, &seg[..f]);
-                        return true;
-                    }
-                    if h.flags & RST != 0 { return true; }
-                    break;
                 }
+                None => break, // plus rien a lire pour l'instant
             }
         }
-        if out.len() > 200_000 { break; }
-        if activity { idle = 0; } else { idle += 1; if idle >= 3 { break; } }
+        // Plafond du corps : assez large pour une image PNG de page rendue.
+        if out.len() > 4_000_000 { break; }
+        if got {
+            last = timer::ticks();
+        } else {
+            // Rien a lire : on dort jusqu'a la prochaine interruption (anti-chauffe).
+            x86_64::instructions::interrupts::enable_and_hlt();
+            if timer::ticks().wrapping_sub(last) > deadline { break; }
+        }
     }
 
     // Fermeture propre.

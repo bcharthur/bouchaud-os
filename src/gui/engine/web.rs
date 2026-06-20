@@ -155,6 +155,22 @@ pub fn parse(html: &[u8]) -> Dom {
                 continue;
             }
 
+            // Le contenu SVG (chemins, defs...) n'est pas rendu : on saute tout le
+            // bloc <svg>...</svg> pour ne pas afficher les coordonnees des
+            // `<path d="...">` en texte (cf. YouTube). Idem <noscript>/<template>.
+            if name == "svg" || name == "noscript" || name == "template" {
+                if !closing && !(raw.last() == Some(&b'/')) {
+                    let close: &[u8] = match name.as_str() {
+                        "svg" => b"</svg",
+                        "noscript" => b"</noscript",
+                        _ => b"</template",
+                    };
+                    let close_pos = find_ci(html, close, i).unwrap_or(html.len());
+                    i = find_ci(html, b">", close_pos).map(|r| r + 1).unwrap_or(html.len());
+                }
+                continue;
+            }
+
             if closing {
                 if let Some(pos) = stack.iter().rposition(|&n| dom.nodes[n].tag.as_deref() == Some(name.as_str())) {
                     stack.truncate(pos.max(1));

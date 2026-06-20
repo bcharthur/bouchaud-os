@@ -1,6 +1,6 @@
 //! Fenetres et types partages du gestionnaire de fenetres.
 
-use crate::gui::apps::chromium_stub;
+use crate::gui::apps::nautile;
 use crate::gui::framebuffer::{HEIGHT, WIDTH};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -120,7 +120,7 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
         2 => {
             let url = "about:bouchaud".to_string();
             let w = 560; let h = 420;
-            let (session, page) = chromium_stub::open(&url, w - 6);
+            let (session, page) = nautile::open(&url, w - 6);
             Win { title: "Nautile".to_string(), x, y, w, h, min: false, restore: None,
                   app: App::Browser { url: url.clone(), input: url, page, scroll: 0, session } }
         }

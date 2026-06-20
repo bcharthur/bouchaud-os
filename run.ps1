@@ -15,6 +15,9 @@ if ($LASTEXITCODE -ne 0) {
 # -Fullscreen agrandit QEMU en plein ecran Windows.
 # La carte e1000 est reliee au reseau utilisateur (SLIRP) : IMPORTANT, le
 # "netdev=net0" sur le -device relie la carte a son backend (sinon "no peer").
+# Le service de rendu (tools/render-proxy) tourne sur l'hote a 127.0.0.1:8080 et
+# est joignable depuis l'OS invite via l'acces hote SLIRP a 10.0.2.2:8080.
+# NB Windows : autoriser node.exe / le port 8080 dans le pare-feu (voir README).
 $qemuArgs = @(
   "-drive", "format=raw,file=target\x86_64-bouchaud_os\debug\bootimage-bouchaud-os.bin",
   "-serial", "stdio",
