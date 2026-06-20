@@ -362,18 +362,74 @@ pub fn fill_rect_rgb(x: usize, y: usize, w: usize, h: usize, rgb: u32) {
     }
 }
 
+/// Mélange `src` sur `dst` selon une couverture `a` (0..=256). Alpha-blending
+/// entier (pas de flottant) pour l'antialiasing du texte.
+#[inline]
+fn blend_px(dst: u32, src: u32, a: u32) -> u32 {
+    if a == 0 { return dst; }
+    if a >= 256 { return src; }
+    let inv = 256 - a;
+    let dr = (dst >> 16) & 0xff; let dg = (dst >> 8) & 0xff; let db = dst & 0xff;
+    let sr = (src >> 16) & 0xff; let sg = (src >> 8) & 0xff; let sb = src & 0xff;
+    let r = (sr * a + dr * inv) >> 8;
+    let g = (sg * a + dg * inv) >> 8;
+    let b = (sb * a + db * inv) >> 8;
+    (r << 16) | (g << 8) | b
+}
+
+/// Valeur d'un pixel du glyphe 8x8 (256 = allume, 0 = eteint), 0 hors limites.
+#[inline]
+fn glyph_on(glyph: &[u8; 8], xi: i32, yi: i32) -> i32 {
+    if xi >= 0 && xi < 8 && yi >= 0 && yi < 8 && (glyph[yi as usize] >> xi) & 1 != 0 { 256 } else { 0 }
+}
+
 fn draw_char_rgb(x: usize, y: usize, c: u8, rgb: u32, scale: usize) {
     let glyph = font::glyph(c);
-    for (row, bits) in glyph.iter().enumerate() {
-        for col in 0..8 {
-            if bits & (1 << col) != 0 {
-                if scale <= 1 {
-                    pixel_rgb(x + col, y + row, rgb);
-                } else {
-                    fill_rect_rgb(x + col * scale, y + row * scale, scale, scale, rgb);
-                }
+    // Petit texte (8 px) : rendu net 1:1, sans antialiasing (eviterait le flou).
+    if scale <= 1 {
+        for (row, bits) in glyph.iter().enumerate() {
+            for col in 0..8 {
+                if bits & (1 << col) != 0 { pixel_rgb(x + col, y + row, rgb); }
             }
         }
+        return;
+    }
+    // Texte agrandi : agrandissement BILINEAIRE du glyphe 1-bit + alpha-blend.
+    // Resultat lisse (antialiase) au lieu de l'escalier "plus proche voisin",
+    // ce qui rapproche le rendu de celui d'un vrai navigateur. 100% entier.
+    let s = scale as i32;
+    let size = 8 * scale;
+    let buf = back();
+    if buf.is_empty() { return; }
+    let mut oy = 0usize;
+    while oy < size {
+        let py = y + oy;
+        if py >= HEIGHT { break; }
+        let qy = (128 * (2 * oy as i32 + 1)) / s - 128;
+        let yi = qy.div_euclid(256);
+        let fy = qy.rem_euclid(256);
+        let row = py * WIDTH;
+        let mut ox = 0usize;
+        while ox < size {
+            let px = x + ox;
+            if px >= WIDTH { ox += 1; continue; }
+            let qx = (128 * (2 * ox as i32 + 1)) / s - 128;
+            let xi = qx.div_euclid(256);
+            let fx = qx.rem_euclid(256);
+            let v00 = glyph_on(&glyph, xi, yi);
+            let v10 = glyph_on(&glyph, xi + 1, yi);
+            let v01 = glyph_on(&glyph, xi, yi + 1);
+            let v11 = glyph_on(&glyph, xi + 1, yi + 1);
+            let top = (v00 * (256 - fx) + v10 * fx) >> 8;
+            let bot = (v01 * (256 - fx) + v11 * fx) >> 8;
+            let cov = ((top * (256 - fy) + bot * fy) >> 8) as u32; // 0..=256
+            if cov > 0 {
+                let idx = row + px;
+                buf[idx] = blend_px(buf[idx], rgb, cov);
+            }
+            ox += 1;
+        }
+        oy += 1;
     }
 }
 

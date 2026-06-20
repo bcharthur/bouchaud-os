@@ -11,11 +11,11 @@ pub(crate) const MIN_W: i32 = 90;
 pub(crate) const MIN_H: i32 = 50;
 
 /// Entrees du menu Demarrer (l'index = `kind` passe a `make_app`).
-pub(crate) const MENU: [&str; 6] = ["Terminal", "Fichiers", "Navigateur", "Moniteur", "Calculatrice", "Quitter"];
+pub(crate) const MENU: [&str; 6] = ["Terminal", "Fichiers", "Nautile", "Moniteur", "Calculatrice", "Quitter"];
 
 /// Icones du bureau : (libelle, kind). Cliquables pour lancer l'application.
 pub(crate) const ICONS: [(&str, usize); 4] = [
-    ("Navigateur", 2), ("Calculatrice", 4), ("Terminal", 0), ("Fichiers", 1),
+    ("Nautile", 2), ("Calculatrice", 4), ("Terminal", 0), ("Fichiers", 1),
 ];
 
 /// Etat applicatif porte par une fenetre.
@@ -121,7 +121,7 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
             let url = "about:bouchaud".to_string();
             let w = 560; let h = 420;
             let (session, page) = chromium_stub::open(&url, w - 6);
-            Win { title: "Bouchaud Browser".to_string(), x, y, w, h, min: false, restore: None,
+            Win { title: "Nautile".to_string(), x, y, w, h, min: false, restore: None,
                   app: App::Browser { url: url.clone(), input: url, page, scroll: 0, session } }
         }
         4 => Win {
