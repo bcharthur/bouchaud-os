@@ -6,3 +6,7 @@
 # Local QEMU/session logs
 session.log
 *.log
+
+# Dependances npm du service de rendu deporte (tools/render-proxy)
+node_modules/
+tools/render-proxy/node_modules/

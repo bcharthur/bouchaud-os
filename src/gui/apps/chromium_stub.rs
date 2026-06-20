@@ -17,6 +17,17 @@ use alloc::string::{String, ToString};
 const ADDR_H: usize = 11;
 const SCROLL_W: usize = 6;
 
+/// Active le mode COMPAT (proxy Chromium) pour TOUTES les URL http/https.
+/// `false` = navigation souveraine locale par defaut (recommande). Le mode compat
+/// reste accessible ponctuellement via le prefixe d'URL `compat:` sans toucher ceci.
+const ENABLE_COMPAT_PROXY: bool = false;
+
+/// Hote du service de rendu deporte du mode COMPAT (cf. `tools/render-proxy`).
+/// Utilise uniquement si `ENABLE_COMPAT_PROXY` ou prefixe `compat:`. A ADAPTER a
+/// ton IP (`ipconfig` -> Adresse IPv4) ; l'acces hote SLIRP `10.0.2.2` ne marche
+/// pas partout, d'ou l'IP LAN reelle de la machine.
+const PROXY_HOST: &str = "192.168.1.187:8080";
+
 // Echappe le texte brut pour l'injecter dans du HTML synthetise.
 fn esc(s: &str) -> String {
     let mut o = String::new();
@@ -98,27 +109,120 @@ pub(crate) fn open(url: &str, width: i32) -> (Session, Page) {
         };
         return page_from_html(body.as_bytes(), url, width);
     }
+    // Mode COMPAT (optionnel, NON souverain) : `compat:https://...` force le
+    // rendu deporte par le proxy Chromium externe (voir `tools/render-proxy`).
+    if let Some(rest) = url.strip_prefix("compat:") {
+        return compat_render(rest, width);
+    }
     if url.starts_with("http://") || url.starts_with("https://") {
-        let doc = crate::net::fetch_document(url);
-        if doc.ok && !doc.body.is_empty() {
-            if doc.is_html {
-                return page_from_html(&doc.body, &doc.final_url, width);
-            }
-            // Contenu non-HTML : affichage texte brut.
-            let mut s = String::new();
-            for &b in doc.body.iter().take(40_000) {
-                match b { b'\n' | b'\r' | b'\t' => s.push(b as char), 0x20..=0x7e => s.push(b as char), _ => s.push('.') }
-            }
-            let html = format!("<h3>{} ({} o)</h3><pre>{}</pre>", esc(&doc.content_type), doc.body.len(), esc(&s));
-            return page_from_html(html.as_bytes(), &doc.final_url, width);
+        // LOCAL-FIRST / souverain : rendu par le moteur web integre de l'OS
+        // (web.rs / js.rs / image.rs). Le proxy Chromium n'est plus utilise par
+        // defaut ; il reste disponible en mode compat (voir `compat_render`).
+        if ENABLE_COMPAT_PROXY {
+            return compat_render(url, width);
         }
-        // Echec : affiche le diagnostic (TLS, statut, erreurs).
-        let mut html = String::from("<h2>Echec du chargement</h2><pre>");
-        for line in &doc.banner { html.push_str(&esc(line)); html.push('\n'); }
-        html.push_str("</pre>");
-        return page_from_html(html.as_bytes(), url, width);
+        return local_render(url, width);
     }
     let html = format!("<h2>Page inconnue</h2><p>{}</p><p>Essaie about:bouchaud, https://example.com/</p>", esc(url));
+    page_from_html(html.as_bytes(), url, width)
+}
+
+// ---------------------------------------------------------------------------
+// Rendu LOCAL (souverain) : moteur web integre (web.rs / js.rs / image.rs)
+// ---------------------------------------------------------------------------
+
+/// Recupere une URL HTTP(S) via la pile reseau de l'OS et la rend avec le moteur
+/// web LOCAL. C'est le chemin par defaut, sans aucune dependance externe.
+fn local_render(url: &str, width: i32) -> (Session, Page) {
+    let doc = crate::net::fetch_document(url);
+    if doc.ok && doc.is_html && !doc.body.is_empty() {
+        // `final_url` (apres redirections) sert de base aux liens et images.
+        return page_from_html(&doc.body, &doc.final_url, width);
+    }
+    if doc.ok {
+        // Document non-HTML (texte, JSON, binaire...) : apercu + metadonnees.
+        let mut preview = String::new();
+        for &b in doc.body.iter().take(40_000) {
+            match b { b'\n' | b'\r' | b'\t' => preview.push(b as char), 0x20..=0x7e => preview.push(b as char), _ => preview.push('.') }
+        }
+        let mut info = String::new();
+        for line in doc.banner.iter().take(6) { info.push_str(&esc(line)); info.push('\n'); }
+        let html = format!(
+            "<h2>Document non-HTML</h2>\
+             <ul><li>URL : {}</li><li>Type : {}</li><li>Taille : {} octets</li></ul>\
+             <pre>{}</pre><hr><pre>{}</pre>",
+            esc(&doc.final_url), esc(&doc.content_type), doc.body.len(), info, esc(&preview));
+        return page_from_html(html.as_bytes(), &doc.final_url, width);
+    }
+    // Echec reseau / DNS / TLS / HTTP : page de diagnostic.
+    let mut info = String::new();
+    for line in doc.banner.iter().take(12) { info.push_str(&esc(line)); info.push('\n'); }
+    let html = format!(
+        "<h2>Echec du chargement</h2>\
+         <p>URL demandee : {}</p>\
+         <pre>{}</pre>\
+         <p><a href=\"about:bouchaud\">Retour a about:bouchaud</a></p>",
+        esc(url), info);
+    page_from_html(html.as_bytes(), url, width)
+}
+
+// ---------------------------------------------------------------------------
+// Mode COMPAT (optionnel, NON souverain) : rendu deporte par un proxy Chromium
+// externe qui renvoie une image PNG de la page. Desactive par defaut. A n'utiliser
+// que pour comparer/depanner ; ce n'est PAS le moteur web souverain de l'OS.
+// ---------------------------------------------------------------------------
+
+fn hexd(n: u8) -> char { core::char::from_digit((n & 0x0f) as u32, 16).unwrap_or('0').to_ascii_uppercase() }
+
+/// Percent-encode une URL pour la passer en parametre de requete au proxy.
+fn pct_encode(s: &str) -> String {
+    let mut o = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') { o.push(b as char); }
+        else { o.push('%'); o.push(hexd(b >> 4)); o.push(hexd(b)); }
+    }
+    o
+}
+
+/// MODE COMPAT (non souverain). Demande a un proxy Chromium externe une image
+/// de la page et l'affiche en plein cadre (defilable). N'est PAS le moteur web
+/// de l'OS : a n'utiliser que pour comparer/depanner (prefixe `compat:`).
+fn compat_render(url: &str, width: i32) -> (Session, Page) {
+    let purl = format!("http://{}/render?url={}", PROXY_HOST, pct_encode(url));
+    let doc = crate::net::fetch_document(&purl);
+    if doc.ok && !doc.body.is_empty() {
+        if let Some(img) = crate::gui::image::decode(&doc.body) {
+            let cw = width.max(1) as usize;
+            // Adapte l'image a la largeur de la fenetre (hauteur libre -> defilement).
+            let scaled = crate::gui::image::downscale(&img, cw, 1_000_000);
+            let iw = scaled.w as i32;
+            let ih = scaled.h as i32;
+            let page = Page {
+                title: url.to_string(),
+                items: alloc::vec![web::Item::Image { x: 0, y: 0, w: iw, h: ih, idx: 0 }],
+                links: alloc::vec::Vec::new(),
+                images: alloc::vec![scaled],
+                height: ih.max(1),
+                bg: 0xffffff,
+            };
+            // Session "vide" : pas de JS local pour une page rendue a distance.
+            let (sess, _) = Session::open(b"", url, width);
+            return (sess, page);
+        }
+    }
+    // Echec : proxy injoignable ou reponse non-image -> page d'aide.
+    let mut info = String::new();
+    for line in doc.banner.iter().take(6) { info.push_str(&esc(line)); info.push('\n'); }
+    let html = format!(
+        "<h2>Mode compat indisponible</h2>\
+         <p>Le mode compat (proxy Chromium externe, optionnel) est injoignable. La\
+         navigation normale utilise le moteur web LOCAL de l'OS, sans proxy.</p>\
+         <p>Pour le mode compat, lance le service sur l'hote :</p>\
+         <pre>cd tools/render-proxy\nnpm run setup   (une fois)\nnpm start</pre>\
+         <p>Proxy attendu : <b>http://{}</b></p>\
+         <p>URL demandee : {}</p><pre>{}</pre>\
+         <p>Pages internes : <a href=\"about:bouchaud\">about:bouchaud</a></p>",
+        PROXY_HOST, esc(url), info);
     page_from_html(html.as_bytes(), url, width)
 }
 
