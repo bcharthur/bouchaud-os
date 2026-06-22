@@ -150,7 +150,6 @@ pub fn enter() {
             }
         }
     }
-    ttf::init();
 }
 
 /// Restaure le mode texte 80x25 (mode 03h) pour rendre la main au shell, apres
@@ -292,7 +291,7 @@ pub fn present() {
     }
 }
 
-// --- Texte bitmap 8x8 (conservé pour load_text_font / mode texte VGA) -------
+// --- Texte bitmap 8×8 (zéro allocation, zéro tas) ---------------------------
 
 fn draw_char_bmp(x: usize, y: usize, c: u8, color: u8) {
     let glyph = font::glyph(c);
@@ -303,42 +302,67 @@ fn draw_char_bmp(x: usize, y: usize, c: u8, color: u8) {
     }
 }
 
-// --- Texte TrueType anti-aliasé (DejaVu via fontdue) ------------------------
-
-/// Dessine une chaîne monospace 8 px, couleur de palette.
+/// Dessine `s` en police bitmap 8×8, couleur de palette (zéro alloc).
 pub fn draw_text(x: usize, y: usize, s: &str, color: u8) {
-    let fg = rgb(color);
-    ttf::draw_cell(back(), x, y, s, fg, 8, ttf::MONO, 8.0);
+    for (i, ch) in s.chars().enumerate() {
+        draw_char_bmp(x + i * 8, y, ch as u8, color);
+    }
 }
 
-/// Version agrandie `scale` fois (cellule 8×scale px).
+/// Police bitmap agrandie `scale` fois, couleur de palette.
 pub fn draw_text_scaled(x: usize, y: usize, s: &str, color: u8, scale: usize) {
     let sc = scale.max(1);
     let fg = rgb(color);
-    ttf::draw_cell(back(), x, y, s, fg, 8 * sc, ttf::MONO, (8 * sc) as f32);
+    for (i, ch) in s.chars().enumerate() {
+        let glyph = font::glyph(ch as u8);
+        for (row, bits) in glyph.iter().enumerate() {
+            for col in 0..8usize {
+                if bits & (1 << col) != 0 {
+                    for dy in 0..sc { for dx in 0..sc {
+                        pixel_rgb(x + i*8*sc + col*sc + dx, y + row*sc + dy, fg);
+                    }}
+                }
+            }
+        }
+    }
 }
 
-/// Dessine une chaîne en couleur RGB, avance fixe 8×scale px.
+/// Police bitmap `scale` fois, couleur RGB 24 bits directe.
 pub fn draw_text_rgb(x: usize, y: usize, s: &str, rgb_color: u32, scale: usize) {
     let sc = scale.max(1);
-    ttf::draw_cell(back(), x, y, s, rgb_color, 8 * sc, ttf::SANS, (8 * sc) as f32);
+    for (i, ch) in s.chars().enumerate() {
+        let glyph = font::glyph(ch as u8);
+        for (row, bits) in glyph.iter().enumerate() {
+            for col in 0..8usize {
+                if bits & (1 << col) != 0 {
+                    for dy in 0..sc { for dx in 0..sc {
+                        pixel_rgb(x + i*8*sc + col*sc + dx, y + row*sc + dy, rgb_color);
+                    }}
+                }
+            }
+        }
+    }
 }
 
-/// Dessine une chaîne en mode proportionnel (avance naturelle).
-/// `bold=true` → DejaVuSans-Bold. Retourne la position X finale.
+/// Dessine `s` en mode **proportionnel** via le rasterizer TTF from-scratch
+/// (DejaVu Sans, antialiasé, BTreeMap cache). Repli bitmap si indisponible.
+/// Retourne la position X finale.
 pub fn draw_text_prop(x: usize, y: usize, s: &str, rgb_color: u32, px: f32, bold: bool) -> usize {
-    let fid = if bold { ttf::SANS_BOLD } else { ttf::SANS };
-    ttf::draw_prop(back(), x, y, s, rgb_color, fid, px)
+    use crate::gui::engine::font_ttf as ftf;
+    if !ftf::draw_text(x as i32, y as i32, s, rgb_color, px as i32, bold) {
+        for (i, ch) in s.chars().enumerate() {
+            draw_char_bmp(x + i * 8, y, ch as u8, 1);
+        }
+    }
+    x + ftf::text_width(s, px as i32) as usize
 }
 
-/// Largeur en pixels d'une chaîne en mode proportionnel (sans dessin).
-pub fn text_width(s: &str, px: f32, bold: bool) -> usize {
-    let fid = if bold { ttf::SANS_BOLD } else { ttf::SANS };
-    ttf::str_width(s, fid, px)
+/// Largeur en pixels d'une chaîne proportionnelle (sans dessin).
+pub fn text_width(s: &str, px: f32, _bold: bool) -> usize {
+    crate::gui::engine::font_ttf::text_width(s, px as i32) as usize
 }
 
 pub mod font;
-mod ttf;
 
 // --- Primitives truecolor (RGB direct, 0x00RRGGBB) --------------------------
 // Utilisees par le moteur de rendu web (couleurs CSS + images) ; le framebuffer
