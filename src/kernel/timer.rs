@@ -51,3 +51,30 @@ pub fn cycles_since_boot() -> u64 {
 pub fn timer_enabled() -> bool {
     interrupts::enabled()
 }
+
+// Suivi de la charge CPU : ticks PIT entre deux appels à mark_frame().
+static mut CPU_LOAD: u8 = 0;
+static mut LAST_TICK_FRAME: u64 = 0;
+
+/// À appeler une fois par frame rendue (dans la boucle principale du GUI).
+/// CPU% ≈ proportion de ticks PIT qui se sont écoulés pendant le rendu.
+/// Un delta = 0 signifie que le rendu est plus rapide que 18 fps (charge faible).
+pub fn mark_frame() {
+    unsafe {
+        let now = core::ptr::read_volatile(&TICKS);
+        let delta = now.wrapping_sub(LAST_TICK_FRAME);
+        LAST_TICK_FRAME = now;
+        // Montée rapide, descente lente (EWMA α=1/4).
+        CPU_LOAD = if delta == 0 {
+            CPU_LOAD.saturating_sub(2)
+        } else {
+            let risen = (CPU_LOAD as u64).saturating_add(delta * 25);
+            risen.min(100) as u8
+        };
+    }
+}
+
+/// Charge CPU estimée (0–100 %). Mise à jour par `mark_frame()`.
+pub fn cpu_load_pct() -> u8 {
+    unsafe { CPU_LOAD }
+}

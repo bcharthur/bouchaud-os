@@ -83,7 +83,7 @@ fn draw_tabbar(state: &BrowserState, bx: usize, by: usize, bw: usize) {
             fb::fill_rect_rgb(tx, by + TABS_H - 2, tab_w.saturating_sub(1), 2, TAB_ACCENT);
         }
 
-        // Titre (tronqué)
+        // Titre (tronqué, police proportionnelle 11 px)
         let fg = if active { TAB_TEXT_ACTIVE } else { TAB_TEXT_INACT };
         let has_close = tab_w >= TAB_MIN_W + TAB_CLOSE_W;
         let title_max_w = if has_close {
@@ -91,15 +91,14 @@ fn draw_tabbar(state: &BrowserState, bx: usize, by: usize, bw: usize) {
         } else {
             tab_w.saturating_sub(4)
         };
-        let max_chars = title_max_w / 8;
+        let max_chars = title_max_w / 7; // ~7 px par glyphe à 11 px
         let title = clip_str(&tab.title, max_chars);
-        fb::draw_text_rgb(tx + 4, by + (TABS_H - 8) / 2, title, fg, 1);
+        fb::draw_text_prop(tx + 4, by + 4, title, fg, 11.0, false);
 
         // Bouton fermer
         if has_close {
             let cx = tx + tab_w - TAB_CLOSE_W + 1;
-            let cy = by + (TABS_H - 8) / 2;
-            fb::draw_text_rgb(cx, cy, "x", TAB_TEXT_INACT, 1);
+            fb::draw_text_prop(cx, by + 4, "×", TAB_TEXT_INACT, 11.0, false);
         }
     }
 
@@ -107,7 +106,7 @@ fn draw_tabbar(state: &BrowserState, bx: usize, by: usize, bw: usize) {
     let nx = bx + state.tabs.len() * tab_w + 3;
     if nx + NEW_TAB_W < bx + bw {
         fb::fill_rect_rgb(nx, by + 4, NEW_TAB_W, TABS_H - 8, 0xe0e4e8);
-        fb::draw_text_rgb(nx + 6, by + (TABS_H - 8) / 2, "+", 0x3c4043, 1);
+        fb::draw_text_prop(nx + 4, by + 4, "+", 0x3c4043, 11.0, false);
     }
 
     // Bordure basse de la barre d'onglets
@@ -148,17 +147,17 @@ fn draw_toolbar(state: &BrowserState, bx: usize, by: usize, bw: usize) {
     fb::fill_rect_rgb(addr_bx, addr_by, addr_w, ADDR_H, ADDR_BG);
     rect_rgb(addr_bx, addr_by, addr_w, ADDR_H, border_c);
 
-    // Icône de protocole (S=HTTPS vert, !=HTTP rouge, @=interne gris)
+    // Icône de protocole (proportionnel 11 px)
     let (proto_icon, proto_fg) = proto_indicator(&tab.url);
-    fb::draw_text_rgb(addr_bx + 2, addr_by + 3, proto_icon, proto_fg, 1);
+    fb::draw_text_prop(addr_bx + 3, addr_by + 2, proto_icon, proto_fg, 11.0, true);
 
-    // Texte de l'URL
-    let text_x  = addr_bx + 12;
-    let max_chars = addr_w.saturating_sub(14) / 8;
+    // Texte de l'URL (proportionnel 11 px, tronqué si trop long)
+    let text_x  = addr_bx + 14;
+    let max_chars = addr_w.saturating_sub(16) / 7; // ~7 px/glyph à 11 px
     let raw_url = if is_typing { &tab.input } else { &tab.url };
     let shown   = if raw_url.len() > max_chars { &raw_url[raw_url.len() - max_chars..] } else { raw_url };
     let display = if is_typing { format!("{}_", shown) } else { shown.to_string() };
-    fb::draw_text_rgb(text_x, addr_by + 3, clip_str(&display, max_chars + 1), ADDR_FG, 1);
+    fb::draw_text_prop(text_x, addr_by + 2, clip_str(&display, max_chars + 1), ADDR_FG, 11.0, false);
 
     // Séparateur bas
     fb::fill_rect_rgb(bx, by + TOOLBAR_H - 1, bw, 1, SEP_COLOR);
@@ -173,9 +172,7 @@ fn proto_indicator(url: &str) -> (&'static str, u32) {
 fn draw_nav_btn(bx: usize, by: usize, label: &str, enabled: bool) {
     let fg = if enabled { BTN_FG_ON } else { BTN_FG_OFF };
     fb::fill_rect_rgb(bx, by, BTN_W, BTN_H, BTN_BG);
-    let tx = bx + (BTN_W - 8) / 2;
-    let ty = by + (BTN_H - 8) / 2;
-    fb::draw_text_rgb(tx, ty, label, fg, 1);
+    fb::draw_text_prop(bx + 3, by + 1, label, fg, 12.0, true);
 }
 
 // ── Ascenseur ─────────────────────────────────────────────────────────────────
@@ -199,9 +196,9 @@ fn draw_scrollbar(page: &web::Page, scroll: i32, bx: usize, by: usize, bw: usize
 /// Affiche un écran de chargement animé (à appeler avant le fetch bloquant).
 pub fn draw_loading(url: &str, bx: usize, by: usize, bw: usize, bh: usize) {
     fb::fill_rect_rgb(bx, by, bw, bh, 0xffffff);
-    fb::draw_text_rgb(bx + 10, by + 20, "Chargement...", 0x1a73e8, 2);
-    let max_u = bw.saturating_sub(10) / 8;
-    fb::draw_text_rgb(bx + 10, by + 46, clip_url(url, max_u), 0x9aa0a6, 1);
+    fb::draw_text_prop(bx + 10, by + 14, "Chargement...", 0x1a73e8, 20.0, false);
+    let max_u = bw.saturating_sub(10) / 7;
+    fb::draw_text_prop(bx + 10, by + 44, clip_url(url, max_u), 0x9aa0a6, 11.0, false);
     // Barre de progression
     let pw = (bw * 2 / 5).max(4);
     fb::fill_rect_rgb(bx, by + bh.saturating_sub(3), pw, LOAD_H, LOAD_FG);
