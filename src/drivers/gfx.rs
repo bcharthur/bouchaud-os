@@ -292,33 +292,40 @@ pub fn present() {
     }
 }
 
-// --- Texte (police bitmap 8x8 — conservée uniquement pour load_text_font) ---
-// Les fonctions publiques draw_text* utilisent TTF ci-dessous.
+// --- Texte bitmap 8x8 (conservé pour load_text_font / mode texte VGA) -------
+
+fn draw_char_bmp(x: usize, y: usize, c: u8, color: u8) {
+    let glyph = font::glyph(c);
+    for (row, bits) in glyph.iter().enumerate() {
+        for col in 0..8 {
+            if bits & (1 << col) != 0 { pixel(x + col, y + row, color); }
+        }
+    }
+}
 
 // --- Texte TrueType anti-aliasé (DejaVu via fontdue) ------------------------
 
-/// Dessine une chaîne avec la police monospace, en couleur de palette.
-/// Avance fixe 8 px par caractère (compatible tous les layouts OS).
+/// Dessine une chaîne monospace 8 px, couleur de palette.
 pub fn draw_text(x: usize, y: usize, s: &str, color: u8) {
     let fg = rgb(color);
     ttf::draw_cell(back(), x, y, s, fg, 8, ttf::MONO, 8.0);
 }
 
-/// Version agrandie de `draw_text` (cellule 8×scale px).
+/// Version agrandie `scale` fois (cellule 8×scale px).
 pub fn draw_text_scaled(x: usize, y: usize, s: &str, color: u8, scale: usize) {
     let sc = scale.max(1);
     let fg = rgb(color);
     ttf::draw_cell(back(), x, y, s, fg, 8 * sc, ttf::MONO, (8 * sc) as f32);
 }
 
-/// Dessine une chaîne en couleur RGB, avance fixe 8×scale px (sans/cell mode).
+/// Dessine une chaîne en couleur RGB, avance fixe 8×scale px.
 pub fn draw_text_rgb(x: usize, y: usize, s: &str, rgb_color: u32, scale: usize) {
     let sc = scale.max(1);
     ttf::draw_cell(back(), x, y, s, rgb_color, 8 * sc, ttf::SANS, (8 * sc) as f32);
 }
 
-/// Dessine une chaîne en mode **proportionnel** (avance naturelle de la police).
-/// `bold=true` sélectionne DejaVuSans-Bold.  Retourne la position X finale.
+/// Dessine une chaîne en mode proportionnel (avance naturelle).
+/// `bold=true` → DejaVuSans-Bold. Retourne la position X finale.
 pub fn draw_text_prop(x: usize, y: usize, s: &str, rgb_color: u32, px: f32, bold: bool) -> usize {
     let fid = if bold { ttf::SANS_BOLD } else { ttf::SANS };
     ttf::draw_prop(back(), x, y, s, rgb_color, fid, px)
@@ -342,6 +349,25 @@ pub fn pixel_rgb(x: usize, y: usize, rgb: u32) {
     if x < WIDTH && y < HEIGHT {
         back()[y * WIDTH + x] = rgb;
     }
+}
+
+/// Melange `rgb` sur le pixel (x,y) selon une couverture `alpha` (0..=255).
+/// Lit le pixel de fond et compose : sert au rendu de police antialiasee.
+pub fn blend_rgb(x: usize, y: usize, rgb: u32, alpha: u8) {
+    if x >= WIDTH || y >= HEIGHT || alpha == 0 { return; }
+    let buf = back();
+    if buf.is_empty() { return; }
+    let idx = y * WIDTH + x;
+    if alpha >= 255 { buf[idx] = rgb & 0x00ff_ffff; return; }
+    let a = alpha as u32;
+    let inv = 255 - a;
+    let dst = buf[idx];
+    let dr = (dst >> 16) & 0xff; let dg = (dst >> 8) & 0xff; let db = dst & 0xff;
+    let sr = (rgb >> 16) & 0xff; let sg = (rgb >> 8) & 0xff; let sb = rgb & 0xff;
+    let r = (sr * a + dr * inv) / 255;
+    let g = (sg * a + dg * inv) / 255;
+    let b = (sb * a + db * inv) / 255;
+    buf[idx] = (r << 16) | (g << 8) | b;
 }
 
 pub fn fill_rect_rgb(x: usize, y: usize, w: usize, h: usize, rgb: u32) {

@@ -27,7 +27,7 @@ linked_list_allocator = "0.10"
 wasmi = { version = "0.31", default-features = false }
 
 # Rastériseur TTF/OTF no_std+alloc (anti-aliasé). `default-features = false`
-# désactive rayon (std) ; on garde uniquement le cœur no_std.
+# désactive rayon (std) ; `hashbrown` active le mode no_std.
 fontdue = { version = "0.9", default-features = false, features = ["hashbrown"] }
 
 [profile.dev]
