@@ -390,7 +390,7 @@ mod jpeg {
                     }
                     i += len;
                 }
-                0xC1..=0xCF => return None, // SOF non baseline (progressif, etc.)
+                0xC1..=0xC3 | 0xC5..=0xCF => return None, // SOF non baseline
                 0xC4 => {
                     let len = rd16(data, i);
                     let end = (i + len).min(data.len());

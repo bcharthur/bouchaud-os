@@ -26,6 +26,10 @@ linked_list_allocator = "0.10"
 # (on fournit notre propre allocateur global + point d'entree). Voir `src/wasm/`.
 wasmi = { version = "0.31", default-features = false }
 
+# Rastériseur TTF/OTF no_std+alloc (anti-aliasé). `default-features = false`
+# désactive rayon (std) ; `hashbrown` active le mode no_std.
+fontdue = { version = "0.9", default-features = false, features = ["hashbrown"] }
+
 [profile.dev]
 panic = "abort"
 # Optimisation activee meme en debug : la crypto TLS (RSA/EC/bignum) devient

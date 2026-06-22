@@ -150,6 +150,7 @@ pub fn enter() {
             }
         }
     }
+    ttf::init();
 }
 
 /// Restaure le mode texte 80x25 (mode 03h) pour rendre la main au shell, apres
@@ -291,51 +292,53 @@ pub fn present() {
     }
 }
 
-// --- Texte (police 8x8) -----------------------------------------------------
+// --- Texte bitmap 8x8 (conservé pour load_text_font / mode texte VGA) -------
 
-pub fn draw_char(x: usize, y: usize, c: u8, color: u8) {
+fn draw_char_bmp(x: usize, y: usize, c: u8, color: u8) {
     let glyph = font::glyph(c);
     for (row, bits) in glyph.iter().enumerate() {
         for col in 0..8 {
-            if bits & (1 << col) != 0 {
-                pixel(x + col, y + row, color);
-            }
+            if bits & (1 << col) != 0 { pixel(x + col, y + row, color); }
         }
     }
 }
 
+// --- Texte TrueType anti-aliasé (DejaVu via fontdue) ------------------------
+
+/// Dessine une chaîne monospace 8 px, couleur de palette.
 pub fn draw_text(x: usize, y: usize, s: &str, color: u8) {
-    let mut cx = x;
-    for c in s.chars() {
-        draw_char(cx, y, font::fold(c), color);
-        cx += 8;
-    }
+    let fg = rgb(color);
+    ttf::draw_cell(back(), x, y, s, fg, 8, ttf::MONO, 8.0);
 }
 
-/// Dessine un caractere agrandi `scale` fois (chaque pixel de la police 8x8
-/// devient un bloc scale x scale). `scale=1` equivaut a `draw_char`.
-pub fn draw_char_scaled(x: usize, y: usize, c: u8, color: u8, scale: usize) {
-    if scale <= 1 { draw_char(x, y, c, color); return; }
-    let glyph = font::glyph(c);
-    for (row, bits) in glyph.iter().enumerate() {
-        for col in 0..8 {
-            if bits & (1 << col) != 0 {
-                fill_rect(x + col * scale, y + row * scale, scale, scale, color);
-            }
-        }
-    }
-}
-
-/// Dessine une chaine agrandie `scale` fois (cellule de `8*scale` px de large).
+/// Version agrandie `scale` fois (cellule 8×scale px).
 pub fn draw_text_scaled(x: usize, y: usize, s: &str, color: u8, scale: usize) {
-    let mut cx = x;
-    for c in s.chars() {
-        draw_char_scaled(cx, y, font::fold(c), color, scale);
-        cx += 8 * scale;
-    }
+    let sc = scale.max(1);
+    let fg = rgb(color);
+    ttf::draw_cell(back(), x, y, s, fg, 8 * sc, ttf::MONO, (8 * sc) as f32);
+}
+
+/// Dessine une chaîne en couleur RGB, avance fixe 8×scale px.
+pub fn draw_text_rgb(x: usize, y: usize, s: &str, rgb_color: u32, scale: usize) {
+    let sc = scale.max(1);
+    ttf::draw_cell(back(), x, y, s, rgb_color, 8 * sc, ttf::SANS, (8 * sc) as f32);
+}
+
+/// Dessine une chaîne en mode proportionnel (avance naturelle).
+/// `bold=true` → DejaVuSans-Bold. Retourne la position X finale.
+pub fn draw_text_prop(x: usize, y: usize, s: &str, rgb_color: u32, px: f32, bold: bool) -> usize {
+    let fid = if bold { ttf::SANS_BOLD } else { ttf::SANS };
+    ttf::draw_prop(back(), x, y, s, rgb_color, fid, px)
+}
+
+/// Largeur en pixels d'une chaîne en mode proportionnel (sans dessin).
+pub fn text_width(s: &str, px: f32, bold: bool) -> usize {
+    let fid = if bold { ttf::SANS_BOLD } else { ttf::SANS };
+    ttf::str_width(s, fid, px)
 }
 
 pub mod font;
+mod ttf;
 
 // --- Primitives truecolor (RGB direct, 0x00RRGGBB) --------------------------
 // Utilisees par le moteur de rendu web (couleurs CSS + images) ; le framebuffer
@@ -378,34 +381,6 @@ pub fn fill_rect_rgb(x: usize, y: usize, w: usize, h: usize, rgb: u32) {
         let mut xx = x;
         while xx < x1 { buf[row + xx] = rgb; xx += 1; }
         yy += 1;
-    }
-}
-
-fn draw_char_rgb(x: usize, y: usize, c: u8, rgb: u32, scale: usize) {
-    // Rendu NET (plus proche voisin) : chaque pixel de la police 8x8 devient un
-    // bloc scale x scale. Le lissage (antialiasing) viendra avec une vraie
-    // police vectorielle ; le bilineaire sur une police 8x8 rendait le texte flou.
-    let glyph = font::glyph(c);
-    for (row, bits) in glyph.iter().enumerate() {
-        for col in 0..8 {
-            if bits & (1 << col) != 0 {
-                if scale <= 1 {
-                    pixel_rgb(x + col, y + row, rgb);
-                } else {
-                    fill_rect_rgb(x + col * scale, y + row * scale, scale, scale, rgb);
-                }
-            }
-        }
-    }
-}
-
-/// Dessine une chaine en couleur RGB arbitraire, agrandie `scale` fois.
-pub fn draw_text_rgb(x: usize, y: usize, s: &str, rgb: u32, scale: usize) {
-    let mut cx = x;
-    let step = 8 * scale.max(1);
-    for c in s.chars() {
-        draw_char_rgb(cx, y, font::fold(c), rgb, scale.max(1));
-        cx += step;
     }
 }
 

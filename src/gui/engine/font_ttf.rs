@@ -17,7 +17,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 // Police embarquee (le fichier est fourni par l'utilisateur, voir `fonts/`).
-static FONT_DATA: &[u8] = include_bytes!("fonts/DejaVuSans.ttf");
+static FONT_DATA: &[u8] = include_bytes!("../../assets/fonts/DejaVuSans.ttf");
 
 // ----------------------------------------------------------------------------
 // Lecture big-endian
