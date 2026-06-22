@@ -203,22 +203,25 @@ pub fn resolve(name: &str) -> Option<Ipv4Addr> {
     if let Some(ip) = ipv4::parse_addr(name) { return Some(ip); }
     if !e1000::is_ready() && !e1000::init() { return None; }
 
-    let id = (next_ip_id() ^ 0x1234) as u16;
-    let mut q = [0u8; 256];
-    let qlen = dns::build_query(&mut q, id, name)?;
-    let mut udp_buf = [0u8; 300];
-    let ulen = udp::build(&mut udp_buf, 0xC000, 53, &q[..qlen])?;
-    send_ip(dns_server(), ipv4::PROTO_UDP, &udp_buf[..ulen]);
-
     let mut payload = [0u8; 1500];
-    for _ in 0..4_000_000u32 {
-        if let Some((src, n)) = poll_ip(ipv4::PROTO_UDP, Some(dns_server()), &mut payload) {
-            let _ = src;
-            if let Some(u) = udp::parse(&payload[..n]) {
-                if u.dst_port == 0xC000 {
-                    let off = u.payload_off;
-                    if let Some(ip) = dns::parse_response(&payload[off..off + u.payload_len], id) {
-                        return Some(ip);
+    // Plusieurs essais : la 1re requete echoue souvent (ARP passerelle a chaud,
+    // reponse DNS manquee/perdue au demarrage). Chaque essai a un ID frais.
+    for _attempt in 0..3u32 {
+        let id = (next_ip_id() ^ 0x1234) as u16;
+        let mut q = [0u8; 256];
+        let qlen = dns::build_query(&mut q, id, name)?;
+        let mut udp_buf = [0u8; 300];
+        let ulen = udp::build(&mut udp_buf, 0xC000, 53, &q[..qlen])?;
+        send_ip(dns_server(), ipv4::PROTO_UDP, &udp_buf[..ulen]);
+
+        for _ in 0..2_500_000u32 {
+            if let Some((_src, n)) = poll_ip(ipv4::PROTO_UDP, Some(dns_server()), &mut payload) {
+                if let Some(u) = udp::parse(&payload[..n]) {
+                    if u.dst_port == 0xC000 {
+                        let off = u.payload_off;
+                        if let Some(ip) = dns::parse_response(&payload[off..off + u.payload_len], id) {
+                            return Some(ip);
+                        }
                     }
                 }
             }

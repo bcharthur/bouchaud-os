@@ -348,6 +348,25 @@ pub fn pixel_rgb(x: usize, y: usize, rgb: u32) {
     }
 }
 
+/// Melange `rgb` sur le pixel (x,y) selon une couverture `alpha` (0..=255).
+/// Lit le pixel de fond et compose : sert au rendu de police antialiasee.
+pub fn blend_rgb(x: usize, y: usize, rgb: u32, alpha: u8) {
+    if x >= WIDTH || y >= HEIGHT || alpha == 0 { return; }
+    let buf = back();
+    if buf.is_empty() { return; }
+    let idx = y * WIDTH + x;
+    if alpha >= 255 { buf[idx] = rgb & 0x00ff_ffff; return; }
+    let a = alpha as u32;
+    let inv = 255 - a;
+    let dst = buf[idx];
+    let dr = (dst >> 16) & 0xff; let dg = (dst >> 8) & 0xff; let db = dst & 0xff;
+    let sr = (rgb >> 16) & 0xff; let sg = (rgb >> 8) & 0xff; let sb = rgb & 0xff;
+    let r = (sr * a + dr * inv) / 255;
+    let g = (sg * a + dg * inv) / 255;
+    let b = (sb * a + db * inv) / 255;
+    buf[idx] = (r << 16) | (g << 8) | b;
+}
+
 pub fn fill_rect_rgb(x: usize, y: usize, w: usize, h: usize, rgb: u32) {
     let buf = back();
     if buf.is_empty() { return; }
