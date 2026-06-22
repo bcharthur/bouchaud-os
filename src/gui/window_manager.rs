@@ -86,6 +86,7 @@ pub fn run() {
         if menu_open { widgets::draw_menu(); }
         widgets::draw_taskbar(&wins, menu_open);
         widgets::draw_cursor(mxu, myu);
+        crate::kernel::timer::mark_frame();
         fb::present();
     }
 
