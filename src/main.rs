@@ -27,6 +27,7 @@ mod macros;
 
 mod app;
 mod arch;
+mod browser;
 mod drivers;
 mod fs;
 mod gui;

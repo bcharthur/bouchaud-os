@@ -1,6 +1,6 @@
 //! Fenetres et types partages du gestionnaire de fenetres.
 
-use crate::gui::apps::nautile;
+use crate::browser::loader;
 use crate::gui::framebuffer::{HEIGHT, WIDTH};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -22,7 +22,7 @@ pub(crate) const ICONS: [(&str, usize); 4] = [
 pub(crate) enum App {
     Terminal { sb: Vec<String>, input: String, cwd: usize },
     Files { cur: usize, view: Option<Vec<String>>, name: String },
-    Browser { url: String, input: String, page: crate::gui::web::Page, scroll: i32, session: crate::gui::web::Session },
+    Browser { state: crate::browser::BrowserState },
     Calc { expr: String },
     Monitor,
 }
@@ -119,10 +119,11 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
         },
         2 => {
             let url = "about:bouchaud".to_string();
-            let w = 560; let h = 420;
-            let (session, page) = nautile::open(&url, w - 6);
-            Win { title: "Nautile".to_string(), x, y, w, h, min: false, restore: None,
-                  app: App::Browser { url: url.clone(), input: url, page, scroll: 0, session } }
+            let bw = 560; let bh = 420;
+            let (session, page) = loader::open(&url, bw - 6);
+            let state = crate::browser::BrowserState::new(url, page, session);
+            Win { title: "Nautile".to_string(), x, y, w: bw, h: bh, min: false, restore: None,
+                  app: App::Browser { state } }
         }
         4 => Win {
             title: "Calculatrice".to_string(), x, y, w: 220, h: 300, min: false, restore: None,
