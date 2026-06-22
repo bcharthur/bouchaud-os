@@ -4,7 +4,10 @@ use crate::gui::apps;
 use crate::gui::framebuffer as fb;
 use crate::gui::window::{clip, icon_rect, menu_rect, start_btn, taskbar_btn, Win, BAR_H, ICONS, MENU, TITLE_H};
 use crate::arch::x86_64::rtc;
+use crate::kernel::timer;
+use crate::fs::ramfs;
 use alloc::format;
+use alloc::string::String;
 
 // Accent + glyphe par icone de bureau (meme ordre que window::ICONS).
 const ICON_STYLE: [(u32, &str); 4] = [
@@ -23,6 +26,13 @@ pub(crate) fn draw_desktop(wins: &[Win]) {
 
     fb::fill_rect(0, 0, fb::WIDTH, BAR_H, fb::C_TITLE);
     fb::draw_text(2, 2, "Bouchaud OS", fb::C_WHITE);
+
+    // Stats système au centre de la barre.
+    let stats = sys_stats_str();
+    let sw = stats.len() * 8;
+    let sx = (fb::WIDTH / 2).saturating_sub(sw / 2);
+    fb::draw_text(sx, 2, &stats, fb::C_CYAN);
+
     let dt = rtc::now();
     let clk = format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second);
     fb::draw_text(fb::WIDTH - clk.len() * 8 - 2, 2, &clk, fb::C_YELLOW);
@@ -31,6 +41,38 @@ pub(crate) fn draw_desktop(wins: &[Win]) {
     for (i, w) in wins.iter().enumerate() {
         if w.min { continue; }
         draw_window(w, Some(i) == focus);
+    }
+}
+
+// Formate les statistiques système pour la barre du haut.
+fn sys_stats_str() -> String {
+    let cpu = timer::cpu_load_pct();
+
+    let (used, _free, total) = crate::kernel::heap::stats();
+    let ram_pct = if total > 0 { (used * 100 / total) as u8 } else { 0 };
+    let ram_used_str = human_bytes(used);
+    let ram_total_str = human_bytes(total);
+
+    let fs = ramfs::fs();
+    let disk_used = fs.used_nodes();
+    let disk_total = crate::fs::ramfs::MAX_NODES;
+    let disk_pct = if disk_total > 0 { (disk_used * 100 / disk_total) as u8 } else { 0 };
+
+    format!(
+        "CPU:{cpu:3}%  RAM:{ram_used_str}/{ram_total_str} {ram_pct:3}%  Disk:{disk_used}/{disk_total} {disk_pct:3}%"
+    )
+}
+
+// Formate un nombre d'octets en B/Ko/Mo/Go lisible.
+fn human_bytes(n: usize) -> String {
+    if n >= 1_073_741_824 {
+        format!("{}Go", n / 1_073_741_824)
+    } else if n >= 1_048_576 {
+        format!("{}Mo", n / 1_048_576)
+    } else if n >= 1_024 {
+        format!("{}Ko", n / 1_024)
+    } else {
+        format!("{}o", n)
     }
 }
 
