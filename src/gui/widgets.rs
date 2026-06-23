@@ -108,9 +108,9 @@ fn draw_icons() {
         // Glyphe centre (scale 2).
         let gw = glyph.len() as i32 * 16;
         fb::draw_text_rgb((vx + (vw - gw) / 2).max(0) as usize, (vy + 12) as usize, glyph, 0xffffff, 2);
-        // Etiquette sous la vignette.
-        let lw = label.len() as i32 * 8;
-        fb::draw_text(((r.x + (r.w - lw) / 2).max(0)) as usize, (vy + vw + 3) as usize, label, fb::C_WHITE);
+        // Etiquette sous la vignette (police vectorielle antialiasée).
+        let lw = fb::text_width(label, 12.0, false) as i32;
+        fb::draw_text_prop(((r.x + (r.w - lw) / 2).max(0)) as usize, (vy + vw + 3) as usize, label, 0xffffff, 12.0, false);
     }
 }
 

@@ -1,8 +1,38 @@
 //! Pages internes de Nautile : about:bouchaud, about:system, about:calc,
-//! about:wasm. Chaque page est du HTML autonome rendu par le moteur web local.
+//! about:wasm, et page Google locale. Chaque page est du HTML autonome
+//! rendu par le moteur web local.
 
 use alloc::format;
 use alloc::string::String;
+
+/// Page d'accueil Google locale : logo coloré + barre de recherche.
+pub fn google_home() -> &'static str {
+    r#"<!doctype html><html><head><title>Google</title>
+<style>
+body{background:#fff;color:#202124;font-family:sans-serif;margin:0;padding:0;text-align:center}
+.logo{margin:60px 0 24px;font-size:64px;letter-spacing:-2px;font-weight:bold}
+.logo .b{color:#4285f4}.logo .r{color:#ea4335}.logo .y{color:#fbbc05}.logo .g{color:#34a853}
+.bar{background:#fff;border:1px solid #dfe1e5;border-radius:24px;padding:10px 20px;
+     font-size:14px;width:460px;display:inline-block;margin:0 auto}
+.row{margin:20px 0}
+.btn{background:#f8f9fa;border:1px solid #dadce0;border-radius:4px;
+     color:#3c4043;padding:8px 16px;font-size:13px;margin:4px;text-decoration:none;display:inline-block}
+.hint{color:#9aa0a6;font-size:12px;margin-top:32px}
+</style>
+</head><body>
+<div class="logo">
+  <span class="b">G</span><span class="r">o</span><span class="y">o</span><span class="b">g</span><span class="g">l</span><span class="r">e</span>
+</div>
+<div class="row">
+  <input class="bar" type="text" placeholder="Rechercher ou saisir une URL" value="">
+</div>
+<div class="row">
+  <a class="btn" href="https://www.google.com/">Recherche Google</a>
+  <a class="btn" href="https://www.google.com/?btnI=I">J'ai de la chance</a>
+</div>
+<div class="hint">Nautile — moteur souverain Bouchaud OS — <a href="about:bouchaud">Accueil</a></div>
+</body></html>"#
+}
 
 pub fn bouchaud_home() -> String {
     format!(
