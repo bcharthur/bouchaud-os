@@ -2446,7 +2446,16 @@ impl PageCtx {
 
 /// Ouvre une page : construit le DOM, execute les scripts inline une fois, et
 /// renvoie le contexte persistant + le HTML initial enrichi.
-pub fn open_page(html: &[u8]) -> (PageCtx, Vec<u8>) {
+pub fn open_page(html: &[u8]) -> (PageCtx, Vec<u8>) { open_page_inner(html, true) }
+
+/// Variante souveraine pour les pages reseau (http/https) : construit le DOM et
+/// retire les scripts SANS les executer. Les sites modernes sont des SPA de
+/// plusieurs Mo de JS obfusque qui ne peuvent pas s'executer dans ce moteur ;
+/// les faire tourner ne produit que du texte en bouillie (donnees de scripts
+/// injectees via document.write/innerHTML). Le rendu statique reste propre.
+pub fn open_page_static(html: &[u8]) -> (PageCtx, Vec<u8>) { open_page_inner(html, false) }
+
+fn open_page_inner(html: &[u8], run: bool) -> (PageCtx, Vec<u8>) {
     let mut interp = Interp::new();
     interp.dom = DomModel::parse(html);
     let mut scripts: Vec<(usize, usize, String)> = Vec::new();
@@ -2462,7 +2471,7 @@ pub fn open_page(html: &[u8]) -> (PageCtx, Vec<u8>) {
             let content_end = find_ci(html, b"</script", content_start).unwrap_or(html.len());
             let outer_end = find_ci(html, b">", content_end).map(|p| p + 1).unwrap_or(html.len());
             let mut wr = String::new();
-            if !is_external && content_end > content_start && content_end - content_start <= MAX_SCRIPT && ran < 128 {
+            if run && !is_external && content_end > content_start && content_end - content_start <= MAX_SCRIPT && ran < 128 {
                 if let Ok(src) = core::str::from_utf8(&html[content_start..content_end]) {
                     interp.writes.clear();
                     let _ = interp.run(src); // erreurs ignorees (le rendu continue)
@@ -2476,13 +2485,15 @@ pub fn open_page(html: &[u8]) -> (PageCtx, Vec<u8>) {
         }
         i += 1;
     }
-    // Boucle d'evenements initiale : draine microtaches/timers puis declenche les
-    // evenements de chargement (beaucoup de pages enveloppent leur init dedans).
-    interp.pump();
-    interp.fire_event(-1, "readystatechange");
-    interp.fire_event(-1, "DOMContentLoaded");
-    interp.fire_event(-1, "load");
-    interp.pump();
+    if run {
+        // Boucle d'evenements initiale : draine microtaches/timers puis declenche
+        // les evenements de chargement (init de beaucoup de pages).
+        interp.pump();
+        interp.fire_event(-1, "readystatechange");
+        interp.fire_event(-1, "DOMContentLoaded");
+        interp.fire_event(-1, "load");
+        interp.pump();
+    }
     let mut out = interp.dom.rebuild(&scripts);
     if out.len() > MAX_OUTPUT { out.truncate(MAX_OUTPUT); }
     (PageCtx { interp, scripts }, out)
