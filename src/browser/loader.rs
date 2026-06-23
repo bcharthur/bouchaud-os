@@ -29,13 +29,7 @@ pub fn open(url: &str, width: i32) -> (Session, Page) {
     if url == "about:bouchaud" {
         return from_html(super::pages::bouchaud_home().as_bytes(), url, width);
     }
-    // Page Google locale (logo + barre de recherche).
-    if url == "https://google.com" || url == "https://www.google.com"
-        || url == "http://google.com" || url == "http://www.google.com"
-        || url == "google.com" || url == "www.google.com"
-    {
-        return from_html(super::pages::google_home().as_bytes(), url, width);
-    }
+
     if url == "about:calc" {
         return from_html(super::pages::CALC_APP.as_bytes(), url, width);
     }

@@ -375,6 +375,14 @@ pub fn pixel_rgb(x: usize, y: usize, rgb: u32) {
     }
 }
 
+/// Lit la couleur RGB du pixel (x,y) dans le backbuffer.
+pub fn get_pixel_rgb(x: usize, y: usize) -> u32 {
+    if x < WIDTH && y < HEIGHT {
+        let b = back();
+        if !b.is_empty() { b[y * WIDTH + x] } else { 0 }
+    } else { 0 }
+}
+
 /// Melange `rgb` sur le pixel (x,y) selon une couverture `alpha` (0..=255).
 /// Lit le pixel de fond et compose : sert au rendu de police antialiasee.
 pub fn blend_rgb(x: usize, y: usize, rgb: u32, alpha: u8) {
