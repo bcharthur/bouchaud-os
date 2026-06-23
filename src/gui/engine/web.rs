@@ -390,8 +390,18 @@ pub struct Session {
 
 impl Session {
     /// Ouvre une page interactive : execute le JS initial, renvoie (session, page).
+    /// Reserve aux pages internes (about:calc, about:wasm...) qui embarquent des
+    /// mini-applications JS.
     pub fn open(html: &[u8], base_url: &str, width: i32) -> (Session, Page) {
         let (ctx, scripted) = crate::gui::js::open_page(html);
+        let page = render_scripted(&scripted, base_url, width);
+        (Session { ctx, base: base_url.to_string(), width }, page)
+    }
+    /// Ouvre une page reseau en mode souverain : DOM + CSS + images, SANS executer
+    /// le JS de la page (les SPA modernes ne peuvent pas tourner ici et ne
+    /// produisent que du texte parasite). Rendu propre et lisible.
+    pub fn open_static(html: &[u8], base_url: &str, width: i32) -> (Session, Page) {
+        let (ctx, scripted) = crate::gui::js::open_page_static(html);
         let page = render_scripted(&scripted, base_url, width);
         (Session { ctx, base: base_url.to_string(), width }, page)
     }
@@ -830,6 +840,24 @@ fn heading_scale(t: &str) -> Option<usize> {
     match t { "h1" => Some(4), "h2" => Some(3), "h3" => Some(3), "h4" | "h5" | "h6" => Some(2), _ => None }
 }
 
+/// Heuristique : un noeud texte ressemble-t-il a du code/CSS/JSON ayant fuite ?
+/// Sert de garde-fou — la prose normale ne declenche aucun de ces marqueurs.
+fn looks_like_code(text: &str) -> bool {
+    let t = text.trim();
+    if t.len() < 12 { return false; }
+    // Marqueurs JS/JSON quasi-absents du texte lisible.
+    for m in ["document.write", "requireLazy", "function(", "=>", "]]]", "})(", "});",
+              "__d(", "rsrc.php", "Preloader_{", "RelayPreloader", ");}", "void 0", "!function"] {
+        if t.contains(m) { return true; }
+    }
+    // CSS : forte densite de { } ; : (selecteurs + declarations).
+    let braces = t.bytes().filter(|&b| b == b'{' || b == b'}').count();
+    let semis = t.bytes().filter(|&b| b == b';').count();
+    let colons = t.bytes().filter(|&b| b == b':').count();
+    if braces >= 2 && semis >= 3 && colons >= 2 { return true; }
+    false
+}
+
 /// Construit la page a partir du DOM (+ regles CSS pre-extraites).
 fn layout(dom: &Dom, base_url: &str, width: i32, css: &[Rule]) -> Page {
     let (scheme, host) = scheme_host(base_url);
@@ -983,7 +1011,9 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
     if f.ctx.visited > 300_000 || depth > 200 || f.items.len() > 80_000 { return; }
     let node = &dom.nodes[idx];
     if node.tag.is_none() {
-        if !node.text.is_empty() { f.push_text(&node.text, st); }
+        // Garde-fou : ne jamais peindre du code/CSS qui aurait fuite en texte
+        // (ex. contenu de <script> apres un `</script>` imbrique dans une chaine).
+        if !node.text.is_empty() && !looks_like_code(&node.text) { f.push_text(&node.text, st); }
         return;
     }
     let tag = node.tag.as_deref().unwrap_or("");

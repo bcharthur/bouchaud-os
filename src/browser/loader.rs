@@ -86,7 +86,8 @@ pub fn resolve_input(input: &str, page: &Page) -> String {
 fn local_render(url: &str, width: i32) -> (Session, Page) {
     let doc = crate::net::fetch_document(url);
     if doc.ok && doc.is_html && !doc.body.is_empty() {
-        return from_html(&doc.body, &doc.final_url, width);
+        // Pages reseau : rendu souverain STATIQUE (sans executer le JS de la page).
+        return from_html_static(&doc.body, &doc.final_url, width);
     }
     if doc.ok {
         // Document non-HTML : aperçu texte + métadonnées
@@ -181,9 +182,18 @@ fn load_file(path: &str, url: &str, width: i32) -> (Session, Page) {
 // ── Utilitaires ───────────────────────────────────────────────────────────────
 
 /// Parse HTML → Session + Page (plafonnée à 4 Mo pour éviter les OOM).
+/// Execute le JS inline : reserve aux pages internes (about:*, file:) qui
+/// embarquent des mini-applications.
 fn from_html(html: &[u8], base: &str, width: i32) -> (Session, Page) {
     let capped = &html[..html.len().min(4_000_000)];
     Session::open(capped, base, width)
+}
+
+/// Variante souveraine pour les pages reseau : DOM + CSS + images SANS executer
+/// le JS de la page. Voir `Session::open_static`.
+fn from_html_static(html: &[u8], base: &str, width: i32) -> (Session, Page) {
+    let capped = &html[..html.len().min(4_000_000)];
+    Session::open_static(capped, base, width)
 }
 
 fn esc(s: &str) -> String {
