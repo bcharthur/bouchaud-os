@@ -284,18 +284,41 @@ fn parse_stylesheet(text: &str, out: &mut Vec<Rule>) {
         }
         cleaned.push(b[i] as char); i += 1;
     }
-    let rest = &cleaned;
+    parse_css_block(&cleaned, out);
+}
+
+// Trouve la fermeture } correspondante (compte les imbrications).
+fn css_find_close(s: &str, open: usize) -> Option<usize> {
+    let b = s.as_bytes();
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < b.len() {
+        if b[i] == b'{' { depth += 1; }
+        else if b[i] == b'}' { if depth == 1 { return Some(i); } depth -= 1; }
+        i += 1;
+    }
+    None
+}
+
+fn parse_css_block(text: &str, out: &mut Vec<Rule>) {
     let mut pos = 0usize;
-    let bytes = rest.as_bytes();
-    while pos < bytes.len() {
-        // saute les @media/@font-face... en sautant jusqu'au { equilibre ou ;
-        // (approche simple : on lit selecteurs jusqu'a '{').
-        let open = match rest[pos..].find('{') { Some(o) => pos + o, None => break };
-        let sel_part = rest[pos..open].trim();
-        let close = match rest[open + 1..].find('}') { Some(c) => open + 1 + c, None => break };
-        let body = &rest[open + 1..close];
+    while pos < text.len() {
+        let open = match text[pos..].find('{') { Some(o) => pos + o, None => break };
+        let sel_part = text[pos..open].trim();
+        let close = match css_find_close(text, open) { Some(c) => c, None => break };
+        let body = &text[open + 1..close];
         pos = close + 1;
-        if sel_part.starts_with('@') { continue; } // @media etc. : on ignore le bloc
+        // @font-face, @keyframes: skip entirely; @media: recurse into body
+        if sel_part.starts_with('@') {
+            let kw = sel_part.split_whitespace().next().unwrap_or("");
+            let kw_lc = kw.to_ascii_lowercase();
+            if kw_lc.starts_with("@media") || kw_lc.starts_with("@supports") || kw_lc.starts_with("@layer") {
+                if out.len() < 4000 { parse_css_block(body, out); }
+            }
+            continue;
+        }
+        // Regle normale: body = declarations CSS simples (pas de '{' imbriques).
+        if body.contains('{') { continue; } // sous-bloc inattendu
         let decls = parse_decls(body);
         if decls.is_empty() { continue; }
         for sel in sel_part.split(',') {
@@ -550,7 +573,10 @@ struct BoxProps {
     hidden: bool,
     bg: Option<u32>,
     width: Option<Len>,
+    height: Option<Len>,
     max_width: Option<Len>,
+    min_width: Option<Len>,
+    min_height: Option<Len>,
     center: bool,          // margin:auto (centre le bloc)
     disp: Option<Disp>,
     float: FloatK,
@@ -560,8 +586,8 @@ struct BoxProps {
     border_color: u32,     // couleur de bordure
 }
 fn default_box() -> BoxProps {
-    BoxProps { hidden: false, bg: None, width: None, max_width: None, center: false, disp: None, float: FloatK::None,
-        pad: 0, mar_y: 0, border_w: 0, border_color: 0x000000 }
+    BoxProps { hidden: false, bg: None, width: None, height: None, max_width: None, min_width: None, min_height: None,
+        center: false, disp: None, float: FloatK::None, pad: 0, mar_y: 0, border_w: 0, border_color: 0x000000 }
 }
 
 // Premiere longueur d'une valeur raccourcie (`10px 20px` -> 10).
@@ -606,6 +632,7 @@ struct Frag { items: Vec<Item>, links: Vec<Link>, width: i32, height: i32 }
 // Etat partage entre la page et tous les sous-fragments (images, budget, etc.).
 struct Ctx<'a> {
     css: &'a [Rule],
+    css_vars: Vec<(String, String)>,
     images: Vec<Image>,
     img_cache: Vec<(String, usize)>,
     img_budget: u32,
@@ -617,7 +644,7 @@ struct Ctx<'a> {
 
 impl<'a> Ctx<'a> {
     // Charge une image (data:URI ou reseau), downscale, renvoie son index.
-    fn load_image(&mut self, src: &str, max_w: usize) -> Option<usize> {
+    fn load_image(&mut self, src: &str, max_w: usize, max_h: usize) -> Option<usize> {
         if let Some(&(_, idx)) = self.img_cache.iter().find(|(u, _)| u == src) { return Some(idx); }
         if self.img_budget == 0 { return None; }
         let raw: Vec<u8>;
@@ -628,13 +655,14 @@ impl<'a> Ctx<'a> {
             raw = if meta.contains("base64") { base64_decode(data) } else { data.bytes().collect() };
         } else {
             let abs = resolve_location(&self.scheme, &self.host, src);
-            self.img_budget -= 1;
             let doc = crate::net::fetch_document(&abs);
             if !doc.ok || doc.body.is_empty() { return None; }
+            self.img_budget -= 1;
             raw = doc.body;
         }
         let img = image::decode(&raw)?;
-        let img = image::downscale(&img, max_w.max(16), 360);
+        let mh = if max_h == 0 { img.h.max(1) } else { max_h };
+        let img = image::downscale(&img, max_w.max(16), mh.max(16));
         if img.w == 0 || img.h == 0 { return None; }
         let idx = self.images.len();
         self.images.push(img);
@@ -806,16 +834,20 @@ fn heading_scale(t: &str) -> Option<usize> {
 fn layout(dom: &Dom, base_url: &str, width: i32, css: &[Rule]) -> Page {
     let (scheme, host) = scheme_host(base_url);
     let mut bg = 0xffffff_u32;
-    // background du body/html depuis la feuille de style.
+    let mut css_vars: Vec<(String, String)> = Vec::new();
     for r in css {
-        if matches!(&r.sel, Sel::Tag(t) if t == "body" || t == "html") {
+        if matches!(&r.sel, Sel::Tag(t) if t == "body" || t == "html")
+            || matches!(&r.sel, Sel::Any) {
             for (p, v) in &r.decls {
-                if p == "background" || p == "background-color" { if let Some(c) = parse_color(v.split(' ').next().unwrap_or(v)) { bg = c; } }
+                if p == "background" || p == "background-color" {
+                    if let Some(c) = parse_color(v.split(' ').next().unwrap_or(v)) { bg = c; }
+                }
+                if p.starts_with("--") { css_vars.push((p.clone(), v.clone())); }
             }
         }
     }
     let mut ctx = Ctx {
-        css, images: Vec::new(), img_cache: Vec::new(), img_budget: 6,
+        css, css_vars, images: Vec::new(), img_cache: Vec::new(), img_budget: 24,
         scheme: scheme.to_string(), host: host.to_string(), title: String::new(), visited: 0,
     };
     let content_w = (width - 2 * PAD).max(40);
@@ -830,15 +862,47 @@ fn layout(dom: &Dom, base_url: &str, width: i32, css: &[Rule]) -> Page {
     Page { title: ctx.title, items, links, images: ctx.images, height, bg }
 }
 
-fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps) {
+// Resout les variables CSS var(--name) dans une valeur.
+fn resolve_var(val: &str, css_vars: &[(String, String)]) -> String {
+    if !val.contains("var(") { return val.to_string(); }
+    let mut result = String::new();
+    let b = val.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if i + 4 <= b.len() && &b[i..i+4] == b"var(" {
+            let start = i + 4;
+            let mut depth = 1usize;
+            let mut j = start;
+            while j < b.len() && depth > 0 {
+                if b[j] == b'(' { depth += 1; } else if b[j] == b')' { depth -= 1; }
+                if depth > 0 { j += 1; } else { break; }
+            }
+            let inner = val[start..j].trim();
+            let (varname, fallback) = if let Some(ci) = inner.find(',') {
+                (inner[..ci].trim(), Some(inner[ci + 1..].trim()))
+            } else { (inner, None) };
+            if let Some((_, v)) = css_vars.iter().find(|(n, _)| n == varname) {
+                result.push_str(v);
+            } else if let Some(fb) = fallback {
+                result.push_str(fb);
+            }
+            i = j + 1;
+        } else { result.push(b[i] as char); i += 1; }
+    }
+    result
+}
+
+fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, css_vars: &[(String, String)]) {
     for (p, v) in decls {
-        let val = v.trim();
+        if p.starts_with("--") { continue; } // proprietes CSS custom (deja collectees)
+        let resolved;
+        let val = if v.contains("var(") { resolved = resolve_var(v, css_vars); resolved.trim() } else { v.trim() };
         match p.as_str() {
-            "color" => { if let Some(c) = parse_color(v) { st.color = c; } }
+            "color" => { if let Some(c) = parse_color(val) { st.color = c; } }
             "background" | "background-color" => {
                 if let Some(c) = parse_color(val.split(' ').next().unwrap_or(val)) { bx.bg = Some(c); }
             }
-            "font-size" => { if let Some(px) = font_px(v) { st.scale = px_to_scale(px); } }
+            "font-size" => { if let Some(px) = font_px(val) { st.scale = px_to_scale(px); } }
             "font-weight" => { if val == "bold" || val == "bolder" || val == "700" || val == "800" || val == "900" { st.bold = true; } else if val == "normal" || val == "400" { st.bold = false; } }
             "text-align" => { st.align = match val { "center" => 1, "right" => 2, _ => 0 }; }
             "white-space" => { if val.starts_with("pre") { st.pre = true; } }
@@ -850,7 +914,10 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps) {
             }
             "visibility" => { if val == "hidden" { bx.hidden = true; } }
             "width" => { bx.width = parse_len(val); }
+            "height" => { bx.height = parse_len(val); }
             "max-width" => { bx.max_width = parse_len(val); }
+            "min-width" => { bx.min_width = parse_len(val); }
+            "min-height" => { bx.min_height = parse_len(val); }
             "float" => { bx.float = match val { "left" => FloatK::Left, "right" => FloatK::Right, _ => FloatK::None }; }
             "margin" => {
                 if val.contains("auto") { bx.center = true; }
@@ -870,6 +937,7 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps) {
             }
             "border-color" => { if let Some(c) = parse_color(val) { bx.border_color = c; if bx.border_w == 0 { bx.border_w = 1; } } }
             "border-style" => { if val != "none" && bx.border_w == 0 { bx.border_w = 1; } }
+            "opacity" => { if val == "0" { bx.hidden = true; } }
             _ => {}
         }
     }
@@ -905,8 +973,8 @@ fn compute(f: &Flow, node: &Node, tag: &str, st: &Style) -> (Style, BoxProps) {
     let id = attr(node, "id").unwrap_or("").to_ascii_lowercase();
     let mut matched: Vec<&Rule> = f.ctx.css.iter().filter(|r| sel_matches(&r.sel, tag, &classes, &id)).collect();
     matched.sort_by_key(|r| r.spec);
-    for r in matched { apply_decls(&r.decls, &mut cst, &mut bx); }
-    if let Some(style) = attr(node, "style") { apply_decls(&parse_decls(style), &mut cst, &mut bx); }
+    for r in matched { apply_decls(&r.decls, &mut cst, &mut bx, &f.ctx.css_vars); }
+    if let Some(style) = attr(node, "style") { apply_decls(&parse_decls(style), &mut cst, &mut bx, &f.ctx.css_vars); }
     (cst, bx)
 }
 
@@ -940,14 +1008,18 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
         return;
     }
     if tag == "img" {
-        let maxw = f.avail.max(16) as usize;
+        let attr_w = attr(node, "width").and_then(|s| s.trim_end_matches("px").parse::<i32>().ok()).unwrap_or(0);
+        let attr_h = attr(node, "height").and_then(|s| s.trim_end_matches("px").parse::<i32>().ok()).unwrap_or(0);
+        let maxw = if attr_w > 0 { attr_w.clamp(16, f.avail) } else { bx.width.map(|l| l.resolve(f.avail)).unwrap_or(f.avail) }.max(16) as usize;
+        let maxh = if attr_h > 0 { attr_h.min(2000) } else { bx.height.map(|l| l.resolve(0)).unwrap_or(1600) }.max(16) as usize;
         if let Some(src) = attr(node, "src") {
-            if let Some(i) = f.ctx.load_image(src, maxw) { f.push_image(i); return; }
+            if let Some(i) = f.ctx.load_image(src, maxw, maxh) { f.push_image(i); return; }
         }
-        let alt = attr(node, "alt").unwrap_or("");
-        let label = if alt.is_empty() { "[image]".to_string() } else { alloc::format!("[img: {}]", alt) };
-        let g = Style { color: 0x9aa0a6, ..cst.clone() };
-        f.push_text(&label, &g);
+        // Placeholder : boite grise avec texte alt
+        let alt = attr(node, "alt").unwrap_or("image");
+        let ph_w = (maxw as i32).clamp(24, f.avail);
+        let ph_h = if attr_h > 0 { attr_h.min(300).max(24) } else { 48 };
+        f.push_box(ph_w, ph_h, 0xe8e8e8, alt.to_string());
         return;
     }
     if tag == "input" || tag == "textarea" || tag == "select" {
@@ -1012,6 +1084,7 @@ fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps
     let mut cw = f.avail;
     if let Some(wv) = bx.width { cw = wv.resolve(f.avail); }
     if let Some(mw) = bx.max_width { let m = mw.resolve(f.avail); if cw > m { cw = m; } }
+    if let Some(mn) = bx.min_width { let m = mn.resolve(f.avail); if cw < m { cw = m; } }
     cw = cw.clamp(8, f.avail);
 
     let indent = match tag { "ul" | "ol" | "blockquote" | "dl" | "dd" => 18, _ => 0 };
@@ -1037,6 +1110,9 @@ fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps
     f.flush_line();
 
     f.y += pad + bw;               // bordure + padding du bas
+    // height / min-height contraignent la hauteur finale de la boite.
+    if let Some(hv) = bx.height { let target = box_top + hv.resolve(0); if f.y < target { f.y = target; } }
+    if let Some(mn) = bx.min_height { let target = box_top + mn.resolve(0); if f.y < target { f.y = target; } }
     let box_bottom = f.y;
     f.x0 = sx0; f.avail = sav; f.align = sal;
 
