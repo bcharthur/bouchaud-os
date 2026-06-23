@@ -7,6 +7,7 @@ use crate::gui::framebuffer as fb;
 use crate::gui::mouse;
 use crate::gui::widgets;
 use crate::gui::window::{
+    self as window,
     clamp_win, icon_rect, make_app, menu_rect, start_btn, taskbar_btn, toggle_max, Drag, Win,
     BAR_H, ICONS, MENU, MIN_H, MIN_W, TITLE_H,
 };
@@ -27,11 +28,16 @@ pub fn run() {
     let mut prev_left = false;
     let mut drag: Option<Drag> = None;
     let mut spawn_n = 0i32;
+    // (icon_idx, offset_x_from_icon, offset_y_from_icon, start_mx, start_my)
+    let mut icon_drag: Option<(usize, i32, i32, i32, i32)> = None;
+    let mut last_icon_tap: Option<(usize, u64)> = None;
 
     wins.push(make_app(2, home, &mut spawn_n)); // navigateur d'accueil
 
     let mut quit = false;
     while !quit {
+        crate::kernel::timer::frame_start();
+
         // ---- Clavier (non bloquant) ----
         while let Some(k) = keyboard::try_key() {
             match k {
@@ -54,6 +60,7 @@ pub fn run() {
         let wheel = mouse::take_wheel();
         let left = mouse::left_down();
         let click = left && !prev_left;
+        let release = !left && prev_left;
         prev_left = left;
 
         if left {
@@ -70,13 +77,34 @@ pub fn run() {
                     }
                     clamp_win(w);
                 }
+            } else if let Some((idx, ox, oy, _, _)) = icon_drag {
+                let new_x = (mx - ox).max(0);
+                let new_y = (my - oy).max(BAR_H as i32);
+                unsafe { window::ICON_POSITIONS[idx] = (new_x, new_y); }
             }
         } else {
             drag = None;
+            if release {
+                if let Some((idx, _, _, smx, smy)) = icon_drag.take() {
+                    let moved = (mx - smx).abs().max((my - smy).abs());
+                    if moved < 6 {
+                        // Clic — verifier double-clic
+                        let tick = crate::kernel::timer::ticks();
+                        let double = last_icon_tap
+                            .map_or(false, |(li, lt)| li == idx && tick.wrapping_sub(lt) < 9);
+                        if double {
+                            wins.push(make_app(ICONS[idx].1, home, &mut spawn_n));
+                            last_icon_tap = None;
+                        } else {
+                            last_icon_tap = Some((idx, tick));
+                        }
+                    }
+                }
+            }
         }
 
         if click {
-            handle_click(mx, my, &mut wins, &mut menu_open, &mut drag, &mut quit, home, &mut spawn_n);
+            handle_click(mx, my, &mut wins, &mut menu_open, &mut drag, &mut quit, home, &mut spawn_n, &mut icon_drag);
         }
         if wheel != 0 {
             handle_wheel(mx, my, wheel, &mut wins);
@@ -114,6 +142,7 @@ fn handle_click(
     quit: &mut bool,
     home: usize,
     spawn_n: &mut i32,
+    icon_drag: &mut Option<(usize, i32, i32, i32, i32)>,
 ) {
     if *menu_open {
         let mr = menu_rect();
@@ -149,10 +178,11 @@ fn handle_click(
         }
     }
     if hit.is_none() {
-        // Clic sur le bureau (aucune fenetre) : lance l'icone touchee.
+        // Clic sur le bureau : commence le drag d'icone (ouverture sur double-clic).
         for j in 0..ICONS.len() {
             if icon_rect(j).hit(mx, my) {
-                wins.push(make_app(ICONS[j].1, home, spawn_n));
+                let (ix, iy) = unsafe { window::ICON_POSITIONS[j] };
+                *icon_drag = Some((j, mx - ix, my - iy, mx, my));
                 return;
             }
         }

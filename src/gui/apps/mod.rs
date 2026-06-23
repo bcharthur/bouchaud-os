@@ -122,29 +122,51 @@ pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
         return;
     }
 
-    if let App::Files { cur, view, name } = &mut w.app {
-        if view.is_some() { *view = None; return; }
-        let by_i = w.y + TITLE_H + 2;
-        let row  = ((my - by_i) / 9).max(0) as usize;
-        let fs   = ramfs::fs();
-        let mut entries: Vec<usize> = Vec::new();
-        if *cur != 0 { entries.push(usize::MAX); }
-        for i in 0..ramfs::MAX_NODES {
-            if fs.nodes[i].used && i != *cur && fs.nodes[i].parent == *cur { entries.push(i); }
+    if let App::Files { cur, scroll, selected } = &mut w.app {
+        let bx  = (w.x + 3).max(0) as usize;
+        let by  = (w.y + TITLE_H + 2).max(0) as usize;
+        let bw  = (win_w - 6).max(1) as usize;
+        let tbh = file_explorer::TOOLBAR_H;
+
+        // Clic sur la barre d'outils
+        let tb_action = file_explorer::toolbar_hit(bx, by, mx, my);
+        match tb_action {
+            file_explorer::ToolbarAction::Up => {
+                let fs = ramfs::fs();
+                if *cur != 0 { *cur = fs.nodes[*cur].parent; *scroll = 0; *selected = None; }
+                return;
+            }
+            file_explorer::ToolbarAction::Back | file_explorer::ToolbarAction::Forward => {
+                // Navigation historique non implementee (placeholder)
+                return;
+            }
+            file_explorer::ToolbarAction::None => {}
         }
-        if row >= entries.len() { return; }
-        let e = entries[row];
-        if e == usize::MAX {
-            *cur = fs.nodes[*cur].parent;
-        } else if fs.nodes[e].kind == ramfs::NodeKind::Dir {
-            if fs.can(e, ramfs::PERM_X) { *cur = e; }
-        } else if fs.can(e, ramfs::PERM_R) {
-            let mut lines = Vec::new();
-            let mut s = alloc::string::String::new();
-            for k in 0..fs.nodes[e].content_len { s.push(fs.nodes[e].content[k] as char); }
-            for l in s.split('\n') { lines.push(l.to_string()); }
-            *name  = fs.nodes[e].name_str().to_string();
-            *view  = Some(lines);
+
+        // Clic dans la grille
+        let grid_y = by + tbh + 1;
+        if (my as usize) < grid_y { return; }
+        let grid_rel_my = my - grid_y as i32;
+        if grid_rel_my < 0 { return; }
+        let hit_idx = file_explorer::grid_hit(*cur, *scroll, bx, grid_y, bw, mx, my);
+        if let Some(idx) = hit_idx {
+            let fs = ramfs::fs();
+            let mut entries: Vec<(usize, bool)> = Vec::new();
+            if *cur != 0 { entries.push((usize::MAX, true)); }
+            for i in 0..ramfs::MAX_NODES {
+                if fs.nodes[i].used && i != *cur && fs.nodes[i].parent == *cur {
+                    entries.push((i, fs.nodes[i].kind == ramfs::NodeKind::Dir));
+                }
+            }
+            if idx >= entries.len() { *selected = None; return; }
+            let (node, is_dir) = entries[idx];
+            if node == usize::MAX {
+                *cur = fs.nodes[*cur].parent; *scroll = 0; *selected = None;
+            } else if is_dir {
+                if fs.can(node, ramfs::PERM_X) { *cur = node; *scroll = 0; *selected = None; }
+            } else {
+                *selected = Some(idx);
+            }
         }
     }
 }
@@ -153,6 +175,10 @@ pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
 
 pub(crate) fn wheel_to_app(w: &mut Win, mx: i32, my: i32, delta: i32) {
     if delta == 0 { return; }
+    if let App::Files { scroll, .. } = &mut w.app {
+        *scroll = (*scroll - delta).max(0);
+        return;
+    }
     if let App::Browser { state } = &mut w.app {
         let bx = w.x + 3;
         let by = w.y + TITLE_H + 2;
@@ -174,7 +200,7 @@ pub(crate) fn draw_app(w: &Win) {
     let bh = w.h as usize - TITLE_H as usize - 4;
     match &w.app {
         App::Terminal { sb, input, cwd }    => terminal::draw(sb, input, *cwd, bx, by, bw, bh),
-        App::Files { cur, view, name }      => file_explorer::draw(*cur, view, name, bx, by, bw, bh),
+        App::Files { cur, scroll, selected } => file_explorer::draw(*cur, *scroll, *selected, bx, by, bw, bh),
         App::Browser { state }              => chrome::draw(state, bx, by, bw, bh),
         App::Calc { expr }                  => calculator::draw(expr, bx, by, bw, bh),
         App::Monitor                        => system_info::draw(bx, by, bw, bh),

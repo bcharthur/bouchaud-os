@@ -18,10 +18,15 @@ pub(crate) const ICONS: [(&str, usize); 4] = [
     ("Nautile", 2), ("Calculatrice", 4), ("Terminal", 0), ("Fichiers", 1),
 ];
 
+/// Positions des icones de bureau (x, y). Modifiables par drag-and-drop.
+pub(crate) static mut ICON_POSITIONS: [(i32, i32); 4] = [
+    (10, 25), (10, 91), (10, 157), (10, 223),
+];
+
 /// Etat applicatif porte par une fenetre.
 pub(crate) enum App {
     Terminal { sb: Vec<String>, input: String, cwd: usize },
-    Files { cur: usize, view: Option<Vec<String>>, name: String },
+    Files { cur: usize, scroll: i32, selected: Option<usize> },
     Browser { state: crate::browser::BrowserState },
     Calc { expr: String },
     Monitor,
@@ -75,10 +80,10 @@ pub(crate) fn taskbar_btn(i: usize) -> Rect {
     Rect { x: 44 + i as i32 * 56, y: HEIGHT as i32 - BAR_H as i32 + 1, w: 54, h: 9 }
 }
 
-/// Rectangle de l'icone de bureau `i` (colonne verticale en haut a gauche).
-/// Inclut l'etiquette sous la vignette (zone cliquable complete).
+/// Rectangle de l'icone de bureau `i`. Position pilotee par ICON_POSITIONS (drag).
 pub(crate) fn icon_rect(i: usize) -> Rect {
-    Rect { x: 10, y: BAR_H as i32 + 14 + i as i32 * 66, w: 56, h: 60 }
+    let (x, y) = unsafe { ICON_POSITIONS[i] };
+    Rect { x, y, w: 56, h: 60 }
 }
 
 /// Bascule maximiser / restaurer une fenetre.
@@ -114,8 +119,8 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
             app: App::Terminal { sb: { let mut v = Vec::new(); v.push("Bouchaud OS terminal".to_string()); v }, input: String::new(), cwd: home },
         },
         1 => Win {
-            title: "Fichiers".to_string(), x, y, w: 320, h: 300, min: false, restore: None,
-            app: App::Files { cur: home, view: None, name: String::new() },
+            title: "Fichiers".to_string(), x, y, w: 420, h: 320, min: false, restore: None,
+            app: App::Files { cur: home, scroll: 0, selected: None },
         },
         2 => {
             let url = "about:bouchaud".to_string();
