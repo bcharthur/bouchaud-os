@@ -119,6 +119,10 @@ pub enum Stmt {
     For(Option<Box<Stmt>>, Option<Expr>, Option<Expr>, Box<Stmt>),
     ForIn(String, Expr, Box<Stmt>, bool), Break, Continue, Throw(Expr),
     Try(Vec<Stmt>, Option<(String, Vec<Stmt>)>, Option<Vec<Stmt>>), Empty,
+    // name, extends_expr, [(is_static, method_name, def)]
+    Class(String, Option<Expr>, Vec<(bool, String, Rc<FuncDef>)>),
+    // discriminant, [(test_or_None_for_default, body_stmts)]
+    Switch(Expr, Vec<(Option<Expr>, Vec<Stmt>)>),
 }
 
 // ============================================================================
@@ -336,7 +340,8 @@ impl Parser {
                 "continue" => { self.i += 1; self.semi(); Ok(Stmt::Continue) }
                 "throw" => { self.i += 1; let e = self.parse_expr()?; self.semi(); Ok(Stmt::Throw(e)) }
                 "try" => self.parse_try(),
-                "class" | "switch" => { self.skip_balanced_after_brace()?; Ok(Stmt::Empty) }
+                "class" => self.parse_class(),
+                "switch" => self.parse_switch(),
                 _ => { let e = self.parse_expr()?; self.semi(); Ok(Stmt::Expr(e)) }
             },
             _ => { let e = self.parse_expr()?; self.semi(); Ok(Stmt::Expr(e)) }
@@ -357,6 +362,73 @@ impl Parser {
         let mut fin = None;
         if self.is_kw("finally") { self.i += 1; self.expect_punct("{")?; let mut fb = Vec::new(); while !self.is_punct("}") && !matches!(self.peek(), Tok::Eof) { fb.push(self.parse_stmt()?); } self.expect_punct("}")?; fin = Some(fb); }
         Ok(Stmt::Try(tb, catch, fin))
+    }
+
+    fn parse_class(&mut self) -> Result<Stmt, String> {
+        self.i += 1; // skip 'class'
+        let name = self.ident()?;
+        let extends = if self.is_kw("extends") {
+            self.i += 1;
+            Some(self.parse_member_only()?)
+        } else { None };
+        self.expect_punct("{")?;
+        let mut methods: Vec<(bool, String, Rc<FuncDef>)> = Vec::new();
+        while !self.is_punct("}") && !matches!(self.peek(), Tok::Eof) {
+            // skip semicolons between methods
+            if self.is_punct(";") { self.i += 1; continue; }
+            let is_static = self.is_kw("static");
+            if is_static { self.i += 1; }
+            // getter/setter: skip 'get'/'set' keyword-idents
+            if let Tok::Ident(kw) = self.peek().clone() { if kw == "get" || kw == "set" { self.i += 1; } }
+            let mname = match self.peek().clone() {
+                Tok::Ident(n) => { self.i += 1; n }
+                Tok::Keyword(k) => { self.i += 1; k }
+                Tok::Str(s) => { self.i += 1; s }
+                _ => { // skip unknown token
+                    self.skip_balanced_after_brace()?; continue;
+                }
+            };
+            if self.is_punct("(") {
+                let def = self.parse_func_rest()?;
+                methods.push((is_static, mname, Rc::new(def)));
+            } else {
+                // property initializer or computed: skip to next }
+                if self.is_punct("=") { self.i += 1; let _ = self.parse_assign(); }
+                self.eat_punct(";");
+            }
+        }
+        self.eat_punct("}");
+        Ok(Stmt::Class(name, extends, methods))
+    }
+
+    fn parse_switch(&mut self) -> Result<Stmt, String> {
+        self.i += 1; // skip 'switch'
+        self.expect_punct("(")?;
+        let disc = self.parse_expr()?;
+        self.expect_punct(")")?;
+        self.expect_punct("{")?;
+        let mut cases: Vec<(Option<Expr>, Vec<Stmt>)> = Vec::new();
+        while !self.is_punct("}") && !matches!(self.peek(), Tok::Eof) {
+            let test = if self.is_kw("case") {
+                self.i += 1;
+                let e = self.parse_expr()?;
+                self.expect_punct(":")?;
+                Some(e)
+            } else if self.is_kw("default") {
+                self.i += 1;
+                self.eat_punct(":");
+                None
+            } else {
+                break;
+            };
+            let mut body = Vec::new();
+            while !self.is_kw("case") && !self.is_kw("default") && !self.is_punct("}") && !matches!(self.peek(), Tok::Eof) {
+                body.push(self.parse_stmt()?);
+            }
+            cases.push((test, body));
+        }
+        self.eat_punct("}");
+        Ok(Stmt::Switch(disc, cases))
     }
 
     fn parse_for(&mut self) -> Result<Stmt, String> {
@@ -680,7 +752,10 @@ impl Interp {
     }
 
     fn hoist(&mut self, stmts: &[Stmt], env: &Env) {
-        for s in stmts { if let Stmt::Func(name, def) = s { let f = new_obj(Obj { props: OrderedMap::new(), arr: None, call: Some(Callable::User { def: def.clone(), env: env.clone() }), class: "Function" }); scope_declare(env, name, f); } }
+        for s in stmts {
+            if let Stmt::Func(name, def) = s { let f = new_obj(Obj { props: OrderedMap::new(), arr: None, call: Some(Callable::User { def: def.clone(), env: env.clone() }), class: "Function" }); scope_declare(env, name, f); }
+            if let Stmt::Class(name, ..) = s { scope_declare(env, name, Value::Undefined); }
+        }
     }
 
     fn exec_block(&mut self, stmts: &[Stmt], env: &Env) -> Flow {
@@ -734,6 +809,61 @@ impl Interp {
                 let r = self.exec_block(tb, &inner);
                 let r = if let Flow::Throw(ex) = r { if let Some((p, cb)) = catch { let c = new_scope(Some(env.clone())); scope_declare(&c, p, ex); self.exec_block(cb, &c) } else { Flow::Throw(ex) } } else { r };
                 if let Some(fb) = fin { let f = new_scope(Some(env.clone())); match self.exec_block(fb, &f) { Flow::Normal(_) => r, other => other } } else { r }
+            }
+            Stmt::Class(name, extends, methods) => {
+                let proto = new_obj(Obj::plain());
+                // Optionally copy parent prototype methods (extends)
+                if let Some(ext_expr) = extends {
+                    if let Ok(parent) = self.eval(ext_expr, env) {
+                        if let Ok(parent_proto) = self.get_prop(&parent, "prototype") {
+                            if let Value::Obj(ref pp) = parent_proto {
+                                let keys: Vec<String> = pp.borrow().props.keys().cloned().collect();
+                                let vals: Vec<Value> = pp.borrow().props.values().cloned().collect();
+                                for (k, v) in keys.into_iter().zip(vals.into_iter()) {
+                                    set(&proto, &k, v);
+                                }
+                            }
+                        }
+                    }
+                }
+                let ctor_def = methods.iter().find(|(_, n, _)| n == "constructor")
+                    .map(|(_, _, d)| d.clone())
+                    .unwrap_or_else(|| Rc::new(FuncDef { params: Vec::new(), rest: None, body: Vec::new(), arrow: false, expr_body: None }));
+                for (is_static, mname, def) in methods {
+                    if mname == "constructor" { continue; }
+                    let mfunc = new_obj(Obj { props: OrderedMap::new(), arr: None, call: Some(Callable::User { def: def.clone(), env: env.clone() }), class: "Function" });
+                    if !is_static { set(&proto, mname, mfunc); }
+                }
+                let ctor = new_obj(Obj { props: OrderedMap::new(), arr: None, call: Some(Callable::User { def: ctor_def, env: env.clone() }), class: "Function" });
+                set(&ctor, "prototype", proto.clone());
+                set(&proto, "constructor", ctor.clone());
+                scope_declare(env, name, ctor);
+                Flow::Normal(Value::Undefined)
+            }
+            Stmt::Switch(disc, cases) => {
+                let dv = match self.eval(disc, env) { Ok(v) => v, Err(t) => return Flow::Throw(t) };
+                let inner = new_scope(Some(env.clone()));
+                let mut found = false;
+                'sw: for (test, body) in cases {
+                    if !found {
+                        if let Some(t) = test {
+                            match self.eval(t, &inner) {
+                                Ok(tv) => { if strict_eq(&dv, &tv) { found = true; } }
+                                Err(e) => return Flow::Throw(e),
+                            }
+                        } else { found = true; } // default
+                    }
+                    if found {
+                        for s in body {
+                            match self.exec(s, &inner) {
+                                Flow::Break => break 'sw,
+                                Flow::Normal(_) | Flow::Continue => {},
+                                other => return other,
+                            }
+                        }
+                    }
+                }
+                Flow::Normal(Value::Undefined) // switch absorbs Break
             }
         }
     }
@@ -856,7 +986,16 @@ impl Interp {
     fn eval_new(&mut self, callee: &Expr, args: &[Expr], env: &Env) -> Result<Value, Value> {
         let func = self.eval(callee, env)?;
         let argv = self.eval_args(args, env)?;
+        // Copy prototype methods onto the fresh instance.
+        let proto = if let Value::Obj(ref o) = func { o.borrow().props.get("prototype").cloned() } else { None };
         let this = new_obj(Obj::plain());
+        if let Some(Value::Obj(ref pp)) = proto {
+            let keys: Vec<String> = pp.borrow().props.keys().cloned().collect();
+            let vals: Vec<Value> = pp.borrow().props.values().cloned().collect();
+            for (k, v) in keys.into_iter().zip(vals.into_iter()) {
+                if k != "constructor" { set(&this, &k, v); }
+            }
+        }
         let r = self.call(func, this.clone(), &argv)?;
         Ok(if matches!(r, Value::Obj(_)) { r } else { this })
     }
@@ -1163,6 +1302,7 @@ fn install(it: &mut Interp) {
 
     install_promise(&g2);
     install_date(&g2);
+    install_map_set(&g2);
 
     // WebAssembly : API web standard, branchee sur le runtime wasmi (crate::wasm).
     let webassembly = new_obj(Obj::plain());
@@ -1377,6 +1517,175 @@ fn install_date(g: &Env) {
     set(&date, "parse", native_val(|_it, _t, _a| Ok(Value::Num(date_now_ms()))));
     set(&date, "UTC", native_val(|_it, _t, _a| Ok(Value::Num(date_now_ms()))));
     scope_declare(g, "Date", date);
+}
+
+fn make_map_obj(items: Vec<(Value, Value)>) -> Value {
+    let o = new_obj(Obj { props: OrderedMap::new(), arr: Some(Vec::new()), call: None, class: "Map" });
+    // store as parallel arrays in __keys__ / __vals__ props
+    let keys: Vec<Value> = items.iter().map(|(k, _)| k.clone()).collect();
+    let vals: Vec<Value> = items.iter().map(|(_, v)| v.clone()).collect();
+    set(&o, "__keys__", array_val(keys));
+    set(&o, "__vals__", array_val(vals));
+    set(&o, "size", Value::Num(items.len() as f64));
+    o
+}
+
+fn map_get_kv(o: &Value) -> (Vec<Value>, Vec<Value>) {
+    let keys = if let Value::Obj(ob) = o { ob.borrow().props.get("__keys__").and_then(|v| if let Value::Obj(a) = v { a.borrow().arr.clone() } else { None }).unwrap_or_default() } else { Vec::new() };
+    let vals = if let Value::Obj(ob) = o { ob.borrow().props.get("__vals__").and_then(|v| if let Value::Obj(a) = v { a.borrow().arr.clone() } else { None }).unwrap_or_default() } else { Vec::new() };
+    (keys, vals)
+}
+
+fn install_map_set(g: &Env) {
+    // Map
+    let map_ctor = native_val(|it, _t, a| {
+        let mut items: Vec<(Value, Value)> = Vec::new();
+        if let Some(init) = a.get(0) {
+            for pair in it.iterable(init) {
+                let kv = it.iterable(&pair);
+                let k = kv.get(0).cloned().unwrap_or(Value::Undefined);
+                let v = kv.get(1).cloned().unwrap_or(Value::Undefined);
+                items.push((k, v));
+            }
+        }
+        let m = make_map_obj(items);
+        set(&m, "get", native_val(|_it, t, a| {
+            let (keys, vals) = map_get_kv(&t);
+            let key = a.get(0).cloned().unwrap_or(Value::Undefined);
+            for (i, k) in keys.iter().enumerate() { if strict_eq(k, &key) { return Ok(vals.get(i).cloned().unwrap_or(Value::Undefined)); } }
+            Ok(Value::Undefined)
+        }));
+        set(&m, "set", native_val(|_it, t, a| {
+            let key = a.get(0).cloned().unwrap_or(Value::Undefined);
+            let val = a.get(1).cloned().unwrap_or(Value::Undefined);
+            if let Value::Obj(ob) = &t {
+                let keys_v = ob.borrow().props.get("__keys__").cloned();
+                let vals_v = ob.borrow().props.get("__vals__").cloned();
+                if let (Some(Value::Obj(kobj)), Some(Value::Obj(vobj))) = (keys_v, vals_v) {
+                    let pos = kobj.borrow().arr.as_ref().map(|a| a.iter().position(|k| strict_eq(k, &key))).flatten();
+                    if let Some(i) = pos {
+                        if let Some(arr) = &mut vobj.borrow_mut().arr { arr[i] = val; }
+                    } else {
+                        let len = kobj.borrow().arr.as_ref().map(|a| a.len()).unwrap_or(0);
+                        if let Some(arr) = &mut kobj.borrow_mut().arr { arr.push(key); }
+                        if let Some(arr) = &mut vobj.borrow_mut().arr { arr.push(val); }
+                        ob.borrow_mut().props.insert("size".to_string(), Value::Num((len + 1) as f64));
+                    }
+                }
+            }
+            Ok(t)
+        }));
+        set(&m, "has", native_val(|_it, t, a| {
+            let (keys, _) = map_get_kv(&t);
+            let key = a.get(0).cloned().unwrap_or(Value::Undefined);
+            Ok(Value::Bool(keys.iter().any(|k| strict_eq(k, &key))))
+        }));
+        set(&m, "delete", native_val(|_it, t, a| {
+            let key = a.get(0).cloned().unwrap_or(Value::Undefined);
+            if let Value::Obj(ob) = &t {
+                let keys_v = ob.borrow().props.get("__keys__").cloned();
+                let vals_v = ob.borrow().props.get("__vals__").cloned();
+                if let (Some(Value::Obj(kobj)), Some(Value::Obj(vobj))) = (keys_v, vals_v) {
+                    let pos = kobj.borrow().arr.as_ref().map(|a| a.iter().position(|k| strict_eq(k, &key))).flatten();
+                    if let Some(i) = pos {
+                        if let Some(arr) = &mut kobj.borrow_mut().arr { arr.remove(i); }
+                        if let Some(arr) = &mut vobj.borrow_mut().arr { arr.remove(i); }
+                        let len = kobj.borrow().arr.as_ref().map(|a| a.len()).unwrap_or(0);
+                        ob.borrow_mut().props.insert("size".to_string(), Value::Num(len as f64));
+                        return Ok(Value::Bool(true));
+                    }
+                }
+            }
+            Ok(Value::Bool(false))
+        }));
+        set(&m, "clear", native_val(|_it, t, _a| {
+            if let Value::Obj(ob) = &t {
+                let keys_v = ob.borrow().props.get("__keys__").cloned();
+                let vals_v = ob.borrow().props.get("__vals__").cloned();
+                if let Some(Value::Obj(k)) = keys_v { k.borrow_mut().arr = Some(Vec::new()); }
+                if let Some(Value::Obj(v)) = vals_v { v.borrow_mut().arr = Some(Vec::new()); }
+                ob.borrow_mut().props.insert("size".to_string(), Value::Num(0.0));
+            }
+            Ok(Value::Undefined)
+        }));
+        set(&m, "forEach", native_val(|it, t, a| {
+            let (keys, vals) = map_get_kv(&t);
+            let f = a.get(0).cloned().unwrap_or(Value::Undefined);
+            for (k, v) in keys.iter().zip(vals.iter()) { it.call(f.clone(), Value::Undefined, &[v.clone(), k.clone(), t.clone()])?; }
+            Ok(Value::Undefined)
+        }));
+        set(&m, "keys", native_val(|_it, t, _a| { let (keys, _) = map_get_kv(&t); Ok(array_val(keys)) }));
+        set(&m, "values", native_val(|_it, t, _a| { let (_, vals) = map_get_kv(&t); Ok(array_val(vals)) }));
+        set(&m, "entries", native_val(|_it, t, _a| { let (keys, vals) = map_get_kv(&t); Ok(array_val(keys.into_iter().zip(vals.into_iter()).map(|(k, v)| array_val(vec![k, v])).collect())) }));
+        Ok(m)
+    });
+    scope_declare(g, "Map", map_ctor);
+
+    // Set
+    let set_ctor = native_val(|it, _t, a| {
+        let mut items: Vec<Value> = Vec::new();
+        if let Some(init) = a.get(0) {
+            for v in it.iterable(init) {
+                if !items.iter().any(|x| strict_eq(x, &v)) { items.push(v); }
+            }
+        }
+        let s = new_obj(Obj { props: OrderedMap::new(), arr: Some(items.clone()), call: None, class: "Set" });
+        set(&s, "size", Value::Num(items.len() as f64));
+        set(&s, "has", native_val(|_it, t, a| {
+            let key = a.get(0).cloned().unwrap_or(Value::Undefined);
+            let items = if let Value::Obj(o) = &t { o.borrow().arr.clone().unwrap_or_default() } else { Vec::new() };
+            Ok(Value::Bool(items.iter().any(|v| strict_eq(v, &key))))
+        }));
+        set(&s, "add", native_val(|_it, t, a| {
+            let key = a.get(0).cloned().unwrap_or(Value::Undefined);
+            if let Value::Obj(o) = &t {
+                let has = o.borrow().arr.as_ref().map(|a| a.iter().any(|v| strict_eq(v, &key))).unwrap_or(false);
+                if !has {
+                    let len = o.borrow().arr.as_ref().map(|a| a.len()).unwrap_or(0);
+                    if let Some(arr) = &mut o.borrow_mut().arr { arr.push(key); }
+                    o.borrow_mut().props.insert("size".to_string(), Value::Num((len + 1) as f64));
+                }
+            }
+            Ok(t)
+        }));
+        set(&s, "delete", native_val(|_it, t, a| {
+            let key = a.get(0).cloned().unwrap_or(Value::Undefined);
+            if let Value::Obj(o) = &t {
+                let pos = o.borrow().arr.as_ref().map(|a| a.iter().position(|v| strict_eq(v, &key))).flatten();
+                if let Some(i) = pos {
+                    if let Some(arr) = &mut o.borrow_mut().arr { arr.remove(i); }
+                    let len = o.borrow().arr.as_ref().map(|a| a.len()).unwrap_or(0);
+                    o.borrow_mut().props.insert("size".to_string(), Value::Num(len as f64));
+                    return Ok(Value::Bool(true));
+                }
+            }
+            Ok(Value::Bool(false))
+        }));
+        set(&s, "clear", native_val(|_it, t, _a| {
+            if let Value::Obj(o) = &t { o.borrow_mut().arr = Some(Vec::new()); o.borrow_mut().props.insert("size".to_string(), Value::Num(0.0)); }
+            Ok(Value::Undefined)
+        }));
+        set(&s, "forEach", native_val(|it, t, a| {
+            let items = if let Value::Obj(o) = &t { o.borrow().arr.clone().unwrap_or_default() } else { Vec::new() };
+            let f = a.get(0).cloned().unwrap_or(Value::Undefined);
+            for v in &items { it.call(f.clone(), Value::Undefined, &[v.clone(), v.clone(), t.clone()])?; }
+            Ok(Value::Undefined)
+        }));
+        set(&s, "values", native_val(|_it, t, _a| {
+            let items = if let Value::Obj(o) = &t { o.borrow().arr.clone().unwrap_or_default() } else { Vec::new() };
+            Ok(array_val(items))
+        }));
+        set(&s, "keys", native_val(|_it, t, _a| {
+            let items = if let Value::Obj(o) = &t { o.borrow().arr.clone().unwrap_or_default() } else { Vec::new() };
+            Ok(array_val(items))
+        }));
+        set(&s, "entries", native_val(|_it, t, _a| {
+            let items = if let Value::Obj(o) = &t { o.borrow().arr.clone().unwrap_or_default() } else { Vec::new() };
+            Ok(array_val(items.iter().map(|v| array_val(vec![v.clone(), v.clone()])).collect()))
+        }));
+        Ok(s)
+    });
+    scope_declare(g, "Set", set_ctor);
 }
 
 // --- WebAssembly (helpers) -------------------------------------------------
