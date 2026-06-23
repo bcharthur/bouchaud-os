@@ -452,6 +452,16 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> u32 {
 
 fn parse_color(s: &str) -> Option<u32> {
     let s = s.trim();
+    // linear-gradient / radial-gradient → extract first color
+    if s.contains("gradient(") {
+        if let Some(pos) = s.find('#') {
+            let end = s[pos + 1..].find(|c: char| !c.is_ascii_hexdigit())
+                .map(|i| pos + 1 + i)
+                .unwrap_or(s.len());
+            return parse_color(&s[pos..end]);
+        }
+        return None;
+    }
     if let Some(h) = s.strip_prefix('#') {
         let h = h.trim();
         if h.len() == 3 {

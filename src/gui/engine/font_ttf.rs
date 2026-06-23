@@ -401,6 +401,11 @@ fn font() -> Option<&'static Font> {
             TRIED = true;
             FONT = Font::parse(FONT_DATA);
             CACHE = Some(BTreeMap::new());
+            if FONT.is_some() {
+                crate::serial_println!("[font_ttf] DejaVuSans charge (upem={})", FONT.as_ref().unwrap().upem as u32);
+            } else {
+                crate::serial_println!("[font_ttf] ERREUR: echec du parsing DejaVuSans.ttf");
+            }
         }
         FONT.as_ref()
     }

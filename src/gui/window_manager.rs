@@ -88,6 +88,8 @@ pub fn run() {
         widgets::draw_cursor(mxu, myu);
         crate::kernel::timer::mark_frame();
         fb::present();
+        // Yield CPU until next interrupt (PIT ~18 Hz, keyboard, mouse).
+        crate::arch::x86_64::cpu::hlt();
     }
 
     fb::leave();

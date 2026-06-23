@@ -9,6 +9,12 @@ pub fn halt_loop() -> ! {
     }
 }
 
+/// Pause le CPU jusqu'a la prochaine interruption (PIT/clavier/souris).
+/// Reduit la charge CPU dans les boucles d'evenements.
+pub fn hlt() {
+    unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)); }
+}
+
 /// Lit le compteur de cycles (Time Stamp Counter).
 ///
 /// Sert de mesure de temps grossiere tant que le timer materiel (PIT/APIC) et
