@@ -7,7 +7,7 @@
 //!  │ state        │ Onglets, historique, session JS           │
 //!  │ loader       │ Pipeline réseau → HTML → Session + Page  │
 //!  │ pages        │ Pages internes (about:*, calc, wasm…)    │
-//!  │ engine/      │ Pont vers gui::engine (web, js, image)   │
+//!  │ engine/      │ Moteur de rendu (web, js, image, font)   │
 //!  │ ui/theme     │ Palette et constantes visuelles          │
 //!  │ ui/chrome    │ Dessin du chrome + gestion événements    │
 //!  └──────────────┴──────────────────────────────────────────┘

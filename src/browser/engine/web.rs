@@ -624,8 +624,15 @@ fn font_px(s: &str) -> Option<i32> {
         "xx-large" => return Some(33), _ => {}
     }
     if let Some(px) = s.strip_suffix("px") { return px.trim().parse::<f32>().ok().map(|v| v as i32); }
+    // `rem` (root em) AVANT `em` car "1rem" se termine aussi par "em".
+    // Taille de police racine = 16px (defaut navigateur).
+    if let Some(rem) = s.strip_suffix("rem") { return rem.trim().parse::<f32>().ok().map(|v| (v * 16.0) as i32); }
     if let Some(em) = s.strip_suffix("em") { return em.trim().parse::<f32>().ok().map(|v| (v * 16.0) as i32); }
     if let Some(pt) = s.strip_suffix("pt") { return pt.trim().parse::<f32>().ok().map(|v| (v * 4.0 / 3.0) as i32); }
+    // `vw` / `vh` : approximation viewport (fenetre Nautile ~ 600x420) pour les
+    // tailles relatives au viewport, courantes sur le web moderne.
+    if let Some(vw) = s.strip_suffix("vw") { return vw.trim().parse::<f32>().ok().map(|v| (v * 6.0) as i32); }
+    if let Some(vh) = s.strip_suffix("vh") { return vh.trim().parse::<f32>().ok().map(|v| (v * 4.2) as i32); }
     s.parse::<f32>().ok().map(|v| v as i32)
 }
 
