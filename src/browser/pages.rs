@@ -36,60 +36,82 @@ body{background:#fff;color:#202124;font-family:sans-serif;margin:0;padding:0;tex
 
 pub fn bouchaud_home() -> String {
     format!(
-        "<!doctype html><html><head><title>Nautile — Bouchaud OS</title><style>\
-         *{{box-sizing:border-box}}\
-         body{{background:#f8f9fa;color:#202124;font-family:sans-serif;margin:0;padding:0}}\
-         .header{{background:linear-gradient(135deg,#1a73e8 0%,#0d47a1 100%);\
-                  color:#fff;padding:24px 20px;text-align:center}}\
-         .header h1{{margin:0 0 4px;font-size:28px;letter-spacing:1px}}\
-         .header .sub{{color:#d2e3fc;font-size:13px}}\
-         .cards{{padding:12px 16px}}\
-         .card{{background:#fff;border:1px solid #dadce0;border-radius:6px;\
-                padding:12px 14px;margin:8px 0;box-shadow:0 1px 3px rgba(0,0,0,.08)}}\
-         .card h3{{margin:0 0 6px;color:#1a73e8;font-size:14px}}\
-         .card p,.card li{{font-size:12px;margin:4px 0;line-height:1.5}}\
-         .card ul{{margin:4px 0;padding-left:16px}}\
-         a{{color:#1a73e8;text-decoration:none}}\
-         a:hover{{text-decoration:underline}}\
-         .badge{{display:inline-block;background:#e8f0fe;color:#1a73e8;\
-                 border-radius:3px;padding:1px 5px;font-size:11px;margin-left:4px}}\
-         .tag-https{{color:#1e8e3e}}.tag-http{{color:#e53935}}\
+        "<!doctype html><html><head><title>Nautile Navigateur</title><style>\
+         *{{box-sizing:border-box;margin:0;padding:0}}\
+         body{{background:#0d1b2a;color:#e0e8f4;font-family:sans-serif}}\
+         .hero{{background:linear-gradient(160deg,#0a2540 0%,#163870 60%,#0d4f7a 100%);\
+                padding:28px 20px 20px;text-align:center;border-bottom:2px solid #1e5f9a}}\
+         .logo{{display:inline-flex;align-items:center;gap:12px;margin-bottom:10px}}\
+         .shell{{font-size:36px;line-height:1}}\
+         .brand{{font-size:26px;font-weight:bold;letter-spacing:2px;\
+                 background:linear-gradient(90deg,#f5c040,#ffa020);-webkit-background-clip:text;\
+                 color:#f5c040}}\
+         .ver{{color:#7ba8d4;font-size:12px;margin-top:6px}}\
+         .tagline{{color:#a8c4e0;font-size:13px;margin-top:4px}}\
+         .grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:14px}}\
+         .card{{background:#0f2035;border:1px solid #1e4060;border-radius:8px;\
+                padding:12px 14px;box-shadow:0 2px 6px rgba(0,0,0,.4)}}\
+         .card.full{{grid-column:1/-1}}\
+         .card h3{{color:#f5c040;font-size:13px;margin-bottom:8px;\
+                   border-bottom:1px solid #1e4060;padding-bottom:5px}}\
+         .card p,.card li{{font-size:12px;color:#b8cfe0;line-height:1.6;margin:3px 0}}\
+         .card ul{{padding-left:14px}}\
+         a{{color:#4fa8f0;text-decoration:none}}\
+         a:hover{{color:#7fc0ff;text-decoration:underline}}\
+         .badge{{display:inline-block;border-radius:3px;padding:1px 5px;\
+                 font-size:10px;margin-left:4px;font-weight:bold}}\
+         .https{{background:#0d3d20;color:#34c26a}}\
+         .info{{background:#0a2f50;color:#4fa8f0}}\
+         .kb{{display:inline-block;background:#1a3a5c;border:1px solid #2a5a8c;\
+              border-radius:3px;padding:1px 5px;font-size:11px;font-family:monospace}}\
          </style></head><body>\
-         <div class=\"header\">\
-           <h1>Nautile</h1>\
-           <div class=\"sub\">Bouchaud OS {ver} — Moteur de rendu souverain</div>\
+         <div class=\"hero\">\
+           <div class=\"logo\">\
+             <span class=\"shell\">&#x1f41a;</span>\
+             <span class=\"brand\">Nautile Navigateur</span>\
+           </div>\
+           <div class=\"ver\">v{ver} &mdash; Bouchaud OS &mdash; Moteur souverain Rust no_std</div>\
+           <div class=\"tagline\">Navigation locale &bull; TLS 1.3 integre &bull; HTML5 &bull; JS &bull; WebAssembly</div>\
          </div>\
-         <div class=\"cards\">\
+         <div class=\"grid\">\
            <div class=\"card\">\
-             <h3>Navigation rapide</h3>\
+             <h3>&#x1f517; Navigation rapide</h3>\
              <ul>\
-               <li><a href=\"https://example.com/\">example.com</a> \
-                   <span class=\"badge tag-https\">HTTPS</span> — page de test</li>\
-               <li><a href=\"https://www.wikipedia.org/\">wikipedia.org</a> — encyclopedie</li>\
-               <li><a href=\"about:calc\">Calculatrice</a> — application JS native</li>\
-               <li><a href=\"about:wasm\">Demo WebAssembly</a> — module wasm integre</li>\
+               <li><a href=\"https://example.com/\">example.com</a>\
+                   <span class=\"badge https\">HTTPS</span></li>\
+               <li><a href=\"https://www.wikipedia.org/\">wikipedia.org</a>\
+                   <span class=\"badge https\">HTTPS</span></li>\
+               <li><a href=\"about:calc\">Calculatrice</a>\
+                   <span class=\"badge info\">JS natif</span></li>\
+               <li><a href=\"about:wasm\">Demo WebAssembly</a>\
+                   <span class=\"badge info\">wasm</span></li>\
                <li><a href=\"about:system\">Informations systeme</a></li>\
-               <li><a href=\"file:/readme.txt\">readme.txt</a> — fichier local (RAMFS)</li>\
+               <li><a href=\"file:/readme.txt\">readme.txt</a>\
+                   <span class=\"badge info\">RAMFS</span></li>\
              </ul>\
            </div>\
            <div class=\"card\">\
-             <h3>Moteur Nautile</h3>\
-             <p>Rendu <b>local et souverain</b> : aucun binaire tiers. \
-                Pile réseau TLS 1.3 intégrée au noyau Rust no_std.</p>\
+             <h3>&#x2328; Raccourcis</h3>\
              <ul>\
-               <li>HTML5 tolérant — DOM + CSS cascade (selecteurs tag / .classe / #id)</li>\
-               <li>Flexbox, marges, paddings, text-align, font-weight</li>\
-               <li>Images PNG décodeées en mémoire</li>\
-               <li>Interpréteur JavaScript (DOM, timers, WebAssembly via wasmi)</li>\
-               <li>HTTP/1.1 + HTTP/2 + TLS 1.3 + DNS + DHCP</li>\
+               <li><span class=\"kb\">Entree</span> naviguer vers l'URL</li>\
+               <li><span class=\"kb\">Alt+Gauche</span> reculer</li>\
+               <li><span class=\"kb\">Alt+Droite</span> avancer</li>\
+               <li><span class=\"kb\">F5</span> recharger</li>\
+               <li><span class=\"kb\">Ctrl+T</span> nouvel onglet</li>\
+               <li><span class=\"kb\">1..9</span> suivre lien n</li>\
+               <li><span class=\"kb\">Molette</span> defiler</li>\
              </ul>\
            </div>\
-           <div class=\"card\">\
-             <h3>Raccourcis clavier</h3>\
+           <div class=\"card full\">\
+             <h3>&#x1f4e1; Moteur Nautile Navigateur</h3>\
+             <p>Navigateur web integre nativement dans Bouchaud OS &mdash; <b>zero dependance externe</b>.\
+                Tout s'execute dans le noyau Rust <code>no_std</code> :</p>\
              <ul>\
-               <li><b>↑ / ↓</b> — défilement de page</li>\
-               <li><b>Entrée</b> — naviguer vers l'URL saisie</li>\
-               <li>Entrer un <b>numéro</b> seul = suivre le lien correspondant</li>\
+               <li>Pile reseau complete : DNS, DHCP, TLS 1.3, HTTP/1.1, HTTP/2</li>\
+               <li>Parseur HTML5 tolerant, DOM complet, CSS cascade (tag / .classe / #id)</li>\
+               <li>Flexbox, marges, paddings, text-align, font-weight, images PNG</li>\
+               <li>Interpreteur JavaScript avec DOM, timers, fetch et WebAssembly (wasmi)</li>\
+               <li>Onglets multiples, historique de navigation, barre d'adresse URL</li>\
              </ul>\
            </div>\
          </div>\

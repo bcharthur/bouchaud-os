@@ -169,12 +169,78 @@ fn draw_icons() {
 /// Dessine l'icone pixel-art de l'application `kind` dans un carre `vw x vw` en (vx, vy).
 fn draw_app_icon(icon_idx: usize, vx: usize, vy: usize, vw: usize) {
     match icon_idx {
-        0 => draw_icon_browser(vx, vy, vw),
+        0 => draw_icon_nautile(vx, vy, vw),
         1 => draw_icon_calculator(vx, vy, vw),
         2 => draw_icon_terminal(vx, vy, vw),
         3 => draw_icon_files(vx, vy, vw),
         4 => draw_icon_rustpad(vx, vy, vw),
         _ => { fb::fill_rect_rgb(vx, vy, vw, vw, 0x555555); }
+    }
+}
+
+/// Remplit un disque plein (cx, cy = coordonnees ecran) clippé dans la zone icone.
+fn fill_circle(scx: i32, scy: i32, r: i32, col: u32, clip_x: usize, clip_y: usize, clip_w: usize) {
+    if r <= 0 { return; }
+    for dy in -r..=r {
+        let hw = isqrt(r * r - dy * dy);
+        let y = scy + dy;
+        if y < clip_y as i32 || y >= (clip_y + clip_w) as i32 { continue; }
+        let x0 = (scx - hw).max(clip_x as i32);
+        let x1 = (scx + hw).min((clip_x + clip_w - 1) as i32);
+        if x0 <= x1 {
+            fb::fill_rect_rgb(x0 as usize, y as usize, (x1 - x0 + 1) as usize, 1, col);
+        }
+    }
+}
+
+/// Logo Nautile Navigateur : coquille nautile en pixel art (spirale logarithmique simplifiee).
+fn draw_icon_nautile(vx: usize, vy: usize, vw: usize) {
+    // Fond : bleu ocean profond
+    fb::fill_rect_rgb(vx, vy, vw, vw, 0x081525);
+
+    let vwi = vw as i32;
+    let cx  = vx as i32 + vwi / 2;
+    let cy  = vy as i32 + vwi / 2;
+    let r   = vwi / 2 - 2;
+
+    // Couche 1 : coque externe (or creme)
+    fill_circle(cx, cy, r, 0xf5c040, vx, vy, vw);
+    // Separateur de chambre (bord fonce)
+    fill_circle(cx - r / 5, cy + r / 5, r * 7 / 10 + 1, 0x050f1c, vx, vy, vw);
+    // Chambre 2 : orange dore
+    fill_circle(cx - r / 5, cy + r / 5, r * 7 / 10, 0xe09010, vx, vy, vw);
+    // Separateur
+    fill_circle(cx - r * 2 / 5, cy + r * 2 / 5, r / 2 + 1, 0x050f1c, vx, vy, vw);
+    // Chambre 3 : orange roux
+    fill_circle(cx - r * 2 / 5, cy + r * 2 / 5, r / 2, 0xb06808, vx, vy, vw);
+    // Separateur
+    fill_circle(cx - r * 3 / 5, cy + r * 3 / 5, r / 4 + 1, 0x050f1c, vx, vy, vw);
+    // Chambre 4 : brun dore (coeur)
+    fill_circle(cx - r * 3 / 5, cy + r * 3 / 5, r / 4, 0x7a3a06, vx, vy, vw);
+    // Oeil central (trou)
+    fill_circle(cx - r * 3 / 4, cy + r * 3 / 4, r / 7 + 1, 0x030a12, vx, vy, vw);
+    // Reflet blanc en haut a gauche de la coque
+    fill_circle(cx - r / 2, cy - r / 2, r / 6, 0xfff5d0, vx, vy, vw);
+}
+
+fn draw_icon_rustpad(vx: usize, vy: usize, vw: usize) {
+    // Fond sombre (éditeur de code)
+    fb::fill_rect_rgb(vx, vy, vw, vw, 0x0d1117);
+    // Fenetre editor (cadre)
+    let pad = vw / 8;
+    fb::fill_rect_rgb(vx + pad, vy + pad, vw - pad*2, vw - pad*2, 0x161b22);
+    // Lignes de code simulées
+    let lh = vw / 8; let lx = vx + pad + 3;
+    fb::fill_rect_rgb(lx, vy + pad + 3,           vw/2, lh.max(2), 0xff7b72);  // rouge (fn)
+    fb::fill_rect_rgb(lx + vw/8, vy + pad + 3 + lh + 2, vw/3, lh.max(2), 0xa5d6ff);  // bleu
+    fb::fill_rect_rgb(lx + vw/8, vy + pad + 3 + (lh+2)*2, vw/4, lh.max(2), 0x3fb950);  // vert
+    fb::fill_rect_rgb(lx + vw/8, vy + pad + 3 + (lh+2)*3, vw/3, lh.max(2), 0xa5d6ff);
+    // Bouton Run ▶ (triangle vert)
+    let bx = vx + vw - pad - vw/5; let by = vy + vy.min(4) + vw/3;
+    let bsize = vw / 5;
+    for row in 0..bsize {
+        let w = (row * 2 + 1).min(bsize);
+        fb::fill_rect_rgb(bx, by + row, w, 1, 0x238636);
     }
 }
 
@@ -186,38 +252,6 @@ fn isqrt(n: i32) -> i32 {
     x
 }
 
-fn draw_icon_browser(vx: usize, vy: usize, vw: usize) {
-    // Fond dégradé bleu
-    for dy in 0..vw {
-        let c = lerp_color(0x1a73e8, 0x0d47a1, dy, vw);
-        fb::fill_rect_rgb(vx, vy + dy, vw, 1, c);
-    }
-    // Globe circulaire
-    let cx = vx + vw / 2;
-    let cy = vy + vw / 2;
-    let r = (vw / 2) as i32 - 3;
-    // Cercle blanc
-    for dy in 0..vw as i32 {
-        let y_off = dy - vw as i32 / 2;
-        if y_off.abs() > r { continue; }
-        let half_w = isqrt(r * r - y_off * y_off) as usize;
-        let left = cx.saturating_sub(half_w);
-        let right = cx + half_w;
-        let y = vy + dy as usize;
-        fb::fill_rect_rgb(left, y, 2, 1, 0xffffff);
-        if right + 2 <= vx + vw { fb::fill_rect_rgb(right, y, 2, 1, 0xffffff); }
-    }
-    // Équateur et méridien
-    fb::fill_rect_rgb(vx + 3, cy - 1, vw - 6, 2, 0xffffff);
-    fb::fill_rect_rgb(cx - 1, vy + 3, 2, vw - 6, 0xffffff);
-    // Parallèles
-    let lat: i32 = r * 6 / 10;
-    let lat_half = isqrt(r * r - lat * lat) as usize;
-    fb::fill_rect_rgb(cx.saturating_sub(lat_half), cy.saturating_sub(lat as usize), lat_half * 2, 1, 0xaad4ff);
-    fb::fill_rect_rgb(cx.saturating_sub(lat_half), cy + lat as usize, lat_half * 2, 1, 0xaad4ff);
-    // Reflet lumineux
-    fb::fill_rect_rgb(vx + 6, vy + 4, vw / 4, 2, 0xffffff80 & 0xffffff);
-}
 
 fn draw_icon_calculator(vx: usize, vy: usize, vw: usize) {
     // Fond gris clair avec dégradé
