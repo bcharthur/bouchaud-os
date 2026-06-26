@@ -86,6 +86,8 @@ pub fn bouchaud_home() -> String {
                    <span class=\"badge info\">JS natif</span></li>\
                <li><a href=\"about:wasm\">Demo WebAssembly</a>\
                    <span class=\"badge info\">wasm</span></li>\
+               <li><a href=\"about:modern\">Demo rendu moderne</a>\
+                   <span class=\"badge info\">flex/grid</span></li>\
                <li><a href=\"about:system\">Informations systeme</a></li>\
                <li><a href=\"file:/readme.txt\">readme.txt</a>\
                    <span class=\"badge info\">RAMFS</span></li>\
@@ -123,6 +125,92 @@ pub fn bouchaud_home() -> String {
         nautile_source = crate::browser::NAUTILE_SOURCE_SHORT,
         nautile_ref = crate::browser::NAUTILE_MERGE_SUBJECT,
     )
+}
+
+/// Page de demonstration du moteur de rendu moderne : exerce flexbox
+/// (row/column, justify-content, align-items, gap), CSS grid (colonnes +
+/// cellules pleine largeur) et le box model par cote (padding/margin).
+/// Sert de banc d'essai visuel directement dans l'interface (about:modern).
+pub fn modern_demo() -> &'static str {
+    r#"<!doctype html><html><head><title>Nautile — Rendu moderne</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0e1726;color:#e6edf6;font-family:sans-serif}
+.nav{display:flex;justify-content:space-between;align-items:center;
+     background:#10243f;padding:12px 18px;border-bottom:2px solid #1e63b0}
+.nav .brand{font-size:18px;font-weight:bold;color:#f5c040}
+.nav .menu{display:flex;gap:16px}
+.nav .menu a{color:#9fc2e8;font-size:13px}
+.hero{display:flex;flex-direction:column;align-items:center;
+      padding:26px 16px;background:linear-gradient(160deg,#13294a,#0b3a5c)}
+.hero h1{font-size:26px;color:#ffffff;margin-bottom:6px}
+.hero p{color:#a8c6e4;font-size:13px}
+.section{padding:16px}
+.section h2{font-size:15px;color:#f5c040;margin-bottom:10px}
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.card{background:#13233c;border:1px solid #25456f;
+      border-radius:8px;padding:14px 16px}
+.card h3{color:#7fb4ee;font-size:14px;margin-bottom:6px}
+.card p{color:#b6cae0;font-size:12px;line-height:1.6}
+.full{grid-column:1/-1;background:#0f2d22;border-color:#2f7a4f}
+.full h3{color:#5fd08a}
+.row{display:flex;gap:12px;margin-top:14px}
+.pill{flex:1;background:#1a2c49;border-radius:6px;padding:16px;text-align:center}
+.pill .n{font-size:22px;font-weight:bold;color:#f5c040}
+.pill .l{font-size:11px;color:#9fc2e8}
+.sidebar-layout{display:flex;gap:14px;margin-top:14px}
+.sidebar{width:140px;background:#15233a;border-radius:6px;padding:12px}
+.sidebar a{display:block;color:#9fc2e8;font-size:12px;padding:4px 0}
+.content{flex:1;background:#13233c;border-radius:6px;padding:14px}
+.content p{color:#b6cae0;font-size:12px;line-height:1.6}
+</style></head><body>
+<div class="nav">
+  <div class="brand">&#x1f41a; Nautile</div>
+  <div class="menu">
+    <a href="about:bouchaud">Accueil</a>
+    <a href="about:system">Systeme</a>
+    <a href="about:wasm">WASM</a>
+  </div>
+</div>
+<div class="hero">
+  <h1>Rendu de pages modernes</h1>
+  <p>Flexbox &bull; CSS Grid &bull; box model par cote &mdash; moteur souverain Rust</p>
+</div>
+<div class="section">
+  <h2>CSS Grid &mdash; repeat(3, 1fr) + gap</h2>
+  <div class="cards">
+    <div class="card"><h3>Flexbox</h3><p>flex-direction, justify-content, align-items et gap sont interpretes nativement.</p></div>
+    <div class="card"><h3>Grid</h3><p>grid-template-columns avec repeat() et retour a la ligne automatique des cellules.</p></div>
+    <div class="card"><h3>Box model</h3><p>padding et margin par cote (1 a 4 valeurs), bordures et rayons.</p></div>
+    <div class="card"><h3>Couleurs</h3><p>hex, rgb(), hsl(), degrades (premiere couleur) et 140+ noms CSS.</p></div>
+    <div class="card"><h3>Typographie</h3><p>police vectorielle TrueType antialiasee, tailles em/px/pt.</p></div>
+    <div class="full"><h3>Cellule pleine largeur (grid-column: 1 / -1)</h3><p>Une cellule peut couvrir toutes les colonnes de la grille, comme dans un tableau de bord moderne.</p></div>
+  </div>
+
+  <h2 style="margin-top:18px">Flexbox &mdash; justify + flex:1</h2>
+  <div class="row">
+    <div class="pill"><div class="n">100%</div><div class="l">Souverain</div></div>
+    <div class="pill"><div class="n">0</div><div class="l">Dependance externe</div></div>
+    <div class="pill"><div class="n">TLS</div><div class="l">1.3 integre</div></div>
+  </div>
+
+  <h2 style="margin-top:18px">Layout sidebar (flex row, largeur fixe + flex:1)</h2>
+  <div class="sidebar-layout">
+    <div class="sidebar">
+      <a href="about:bouchaud">&#x1f3e0; Accueil</a>
+      <a href="about:calc">&#x1f9ee; Calculatrice</a>
+      <a href="about:wasm">&#x26a1; WebAssembly</a>
+      <a href="https://example.com/">&#x1f310; example.com</a>
+    </div>
+    <div class="content">
+      <p>La barre laterale a une largeur fixe (140px) et la zone de contenu occupe
+         l'espace restant via <b>flex:1</b>. C'est le patron de mise en page le
+         plus courant des applications web modernes, desormais rendu nativement
+         par Nautile.</p>
+    </div>
+  </div>
+</div>
+</body></html>"#
 }
 
 pub fn system_info() -> String {
