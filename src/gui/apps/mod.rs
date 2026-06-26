@@ -9,7 +9,6 @@ pub mod file_explorer;
 pub mod rustpad;
 pub mod system_info;
 pub mod terminal;
-// Nautile vit désormais dans src/browser/ — pas de module local.
 
 use crate::browser;
 use crate::browser::ui::chrome::{self, ChromeEvent};

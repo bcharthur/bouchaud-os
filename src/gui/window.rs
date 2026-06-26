@@ -128,7 +128,7 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
             let bw = 560; let bh = 420;
             let (session, page) = loader::open(&url, bw - 6);
             let state = crate::browser::BrowserState::new(url, page, session);
-            Win { title: "Nautile".to_string(), x, y, w: bw, h: bh, min: false, restore: None,
+            Win { title: "Nautile Navigateur".to_string(), x, y, w: bw, h: bh, min: false, restore: None,
                   app: App::Browser { state } }
         }
         4 => Win {
