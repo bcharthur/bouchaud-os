@@ -43,7 +43,16 @@ try {
   Invoke-GitChecked -C $RepoRoot fetch --prune
   Invoke-GitChecked -C $RepoRoot pull --ff-only
 
+  $nautileMerge = (& git -C $RepoRoot log --merges -1 --date=short --format="%h %cd %s" -- src/browser).Trim()
+  if ([string]::IsNullOrWhiteSpace($nautileMerge)) {
+    $nautileMerge = (& git -C $RepoRoot log -1 --date=short --format="%h %cd %s" -- src/browser).Trim()
+  }
+  $nautileSource = (& git -C $RepoRoot log -1 --date=short --format="%h %cd %s" -- src/browser).Trim()
+
   Write-Host "Nautile/Bouchaud OS est a jour avant bootimage." -ForegroundColor Green
+  Write-Host "Nautile dernier merge compile : $nautileMerge" -ForegroundColor Green
+  Write-Host "Nautile dernier changement source : $nautileSource" -ForegroundColor DarkGreen
+  Write-Host "Ces references seront injectees dans la banniere de boot par build.rs." -ForegroundColor DarkCyan
   exit 0
 } catch {
   Write-Host $_.Exception.Message -ForegroundColor Red
