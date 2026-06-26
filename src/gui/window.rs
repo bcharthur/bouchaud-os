@@ -5,10 +5,13 @@ use crate::gui::framebuffer::{HEIGHT, WIDTH};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-pub(crate) const BAR_H: usize = 11; // hauteur des barres haut/bas
-pub(crate) const TITLE_H: i32 = 10; // hauteur barre de titre fenetre
+pub(crate) const BAR_H: usize = 11;        // hauteur des barres haut/bas
+pub(crate) const TITLE_H: i32 = 10;        // hauteur barre de titre fenetre
 pub(crate) const MIN_W: i32 = 90;
 pub(crate) const MIN_H: i32 = 50;
+pub(crate) const MENU_ITEM_H: i32 = 22;    // hauteur d'un item du menu Démarrer
+pub(crate) const MENU_HEADER_H: i32 = 8;   // zone vide en haut du menu
+pub(crate) const MENU_W: i32 = 178;        // largeur du menu Démarrer
 
 /// Entrees du menu Demarrer (l'index = `kind` passe a `make_app`).
 pub(crate) const MENU: [&str; 7] = ["Terminal", "Fichiers", "Nautile", "Moniteur", "Calculatrice", "Rustpad", "Quitter"];
@@ -73,8 +76,8 @@ pub(crate) fn start_btn() -> Rect {
 }
 
 pub(crate) fn menu_rect() -> Rect {
-    let h = MENU.len() as i32 * 10 + 2;
-    Rect { x: 2, y: HEIGHT as i32 - BAR_H as i32 - h, w: 92, h }
+    let h = MENU.len() as i32 * MENU_ITEM_H + MENU_HEADER_H + 8;
+    Rect { x: 2, y: HEIGHT as i32 - BAR_H as i32 - h, w: MENU_W, h }
 }
 
 pub(crate) fn taskbar_btn(i: usize) -> Rect {

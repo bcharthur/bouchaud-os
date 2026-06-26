@@ -9,7 +9,7 @@ use crate::gui::widgets;
 use crate::gui::window::{
     self as window,
     clamp_win, icon_rect, make_app, menu_rect, start_btn, taskbar_btn, toggle_max, Drag, Win,
-    BAR_H, ICONS, MENU, MIN_H, MIN_W, TITLE_H,
+    BAR_H, ICONS, MENU, MENU_HEADER_H, MENU_ITEM_H, MIN_H, MIN_W, TITLE_H,
 };
 use crate::drivers::keyboard;
 use crate::fs::ramfs;
@@ -111,7 +111,7 @@ pub fn run() {
         }
 
         widgets::draw_desktop(&wins);
-        if menu_open { widgets::draw_menu(); }
+        if menu_open { widgets::draw_menu(mx, my); }
         widgets::draw_taskbar(&wins, menu_open);
         widgets::draw_cursor(mxu, myu);
         crate::kernel::timer::mark_frame();
@@ -147,7 +147,7 @@ fn handle_click(
     if *menu_open {
         let mr = menu_rect();
         if mr.hit(mx, my) {
-            let row = ((my - mr.y - 1) / 10) as usize;
+            let row = ((my - mr.y - MENU_HEADER_H) / MENU_ITEM_H).max(0) as usize;
             if row < MENU.len() {
                 if row == MENU.len() - 1 { *quit = true; }
                 else { wins.push(make_app(row, home, spawn_n)); }
