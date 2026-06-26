@@ -16,6 +16,18 @@ function Invoke-GitChecked {
   }
 }
 
+function Invoke-GitText {
+  param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
+  $output = & git @Args
+  if ($LASTEXITCODE -ne 0) {
+    throw "git $($Args -join ' ') a echoue (code $LASTEXITCODE)"
+  }
+  if ($null -eq $output) {
+    return ""
+  }
+  return (($output | Out-String).Trim())
+}
+
 try {
   Write-Host "=== Mise a jour Nautile depuis Git ===" -ForegroundColor Cyan
 
@@ -25,17 +37,19 @@ try {
 
   Invoke-GitChecked -C $RepoRoot rev-parse --is-inside-work-tree | Out-Null
 
-  $branch = (& git -C $RepoRoot rev-parse --abbrev-ref HEAD).Trim()
-  if ($LASTEXITCODE -ne 0) {
-    throw "Impossible de determiner la branche Git courante."
-  }
+  $branch = Invoke-GitText -C $RepoRoot rev-parse --abbrev-ref HEAD
 
   if ($branch -eq "HEAD") {
     throw "Depot en HEAD detache : impossible de savoir quelle branche mettre a jour."
   }
 
-  $upstream = (& git -C $RepoRoot rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>$null).Trim()
-  if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($upstream)) {
+  $upstream = (& git -C $RepoRoot rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>$null)
+  if ($LASTEXITCODE -ne 0 -or $null -eq $upstream) {
+    $upstream = ""
+  } else {
+    $upstream = (($upstream | Out-String).Trim())
+  }
+  if ([string]::IsNullOrWhiteSpace($upstream)) {
     throw "La branche '$branch' n'a pas d'upstream Git. Configure-la avec : git branch --set-upstream-to=origin/$branch $branch"
   }
 
@@ -43,11 +57,11 @@ try {
   Invoke-GitChecked -C $RepoRoot fetch --prune
   Invoke-GitChecked -C $RepoRoot pull --ff-only
 
-  $nautileMerge = (& git -C $RepoRoot log --merges -1 --date=short --format="%h %cd %s" -- src/browser).Trim()
+  $nautileMerge = Invoke-GitText -C $RepoRoot log --merges -1 --date=short --format="%h %cd %s" -- src/browser
   if ([string]::IsNullOrWhiteSpace($nautileMerge)) {
-    $nautileMerge = (& git -C $RepoRoot log -1 --date=short --format="%h %cd %s" -- src/browser).Trim()
+    $nautileMerge = Invoke-GitText -C $RepoRoot log -1 --date=short --format="%h %cd %s" -- src/browser
   }
-  $nautileSource = (& git -C $RepoRoot log -1 --date=short --format="%h %cd %s" -- src/browser).Trim()
+  $nautileSource = Invoke-GitText -C $RepoRoot log -1 --date=short --format="%h %cd %s" -- src/browser
 
   Write-Host "Nautile/Bouchaud OS est a jour avant bootimage." -ForegroundColor Green
   Write-Host "Nautile dernier merge compile : $nautileMerge" -ForegroundColor Green
