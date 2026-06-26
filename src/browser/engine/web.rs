@@ -653,9 +653,43 @@ struct Style {
     align: u8,        // 0 gauche, 1 centre, 2 droite
     href: Option<String>,
     pre: bool,        // white-space: pre (conserve espaces/sauts)
+    transform: u8,    // text-transform: 0 none, 1 uppercase, 2 lowercase, 3 capitalize
 }
 
-fn default_style() -> Style { Style { color: 0x202124, scale: 2, bold: false, align: 0, href: None, pre: false } }
+fn default_style() -> Style { Style { color: 0x202124, scale: 2, bold: false, align: 0, href: None, pre: false, transform: 0 } }
+
+// Marqueur de l'element de liste courant + avance le compteur. `<ol>` -> numero
+// (1. 2. 3.), `<ul>` -> puce (• / rien si list-style:none). None hors liste connue.
+fn li_marker(ctx: &mut Ctx) -> Option<String> {
+    let top = ctx.list_stack.last_mut()?;
+    if top.0 {
+        let i = top.1;
+        top.1 += 1;
+        Some(alloc::format!("{}.", i))
+    } else if top.2 == 1 {
+        None // list-style: none
+    } else {
+        Some("\u{2022}".to_string()) // puce •
+    }
+}
+
+// Applique text-transform a un mot.
+fn apply_transform(s: &str, t: u8) -> String {
+    match t {
+        1 => s.chars().flat_map(|c| c.to_uppercase()).collect(),
+        2 => s.chars().flat_map(|c| c.to_lowercase()).collect(),
+        3 => {
+            let mut out = String::new();
+            let mut first = true;
+            for c in s.chars() {
+                if first { for u in c.to_uppercase() { out.push(u); } first = false; }
+                else { out.push(c); }
+            }
+            out
+        }
+        _ => s.to_string(),
+    }
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Disp { Block, Inline, InlineBlock, Flex, Grid, None }
@@ -672,11 +706,55 @@ enum Justify { Start, Center, End, Between, Around }
 #[derive(Clone, Copy, PartialEq)]
 enum AlignI { Start, Center, End, Stretch }
 #[derive(Clone, Copy)]
-enum Len { Px(i32), Pct(i32) }
-impl Len { fn resolve(self, avail: i32) -> i32 { match self { Len::Px(p) => p, Len::Pct(p) => (avail * p / 100).max(0) } } }
+enum Len { Px(i32), Pct(i32), Calc { pct: i32, px: i32 } }
+impl Len {
+    fn resolve(self, avail: i32) -> i32 {
+        match self {
+            Len::Px(p) => p,
+            Len::Pct(p) => (avail * p / 100).max(0),
+            // calc(pct% +/- px) — composante relative + absolue, comme un vrai moteur.
+            Len::Calc { pct, px } => (avail * pct / 100 + px).max(0),
+        }
+    }
+}
+
+// Evalue un `calc(...)` de longueurs : termes en % et px combines par + et -
+// (les operateurs * et / ne sont pas geres -> None, repli sur auto). Tolere
+// l'absence d'espaces autour des operateurs (CSS minifie).
+fn parse_calc(expr: &str) -> Option<Len> {
+    if expr.contains('*') || expr.contains('/') { return None; }
+    // Normalise : insere des espaces autour de + et - pour tokeniser simplement.
+    let norm = expr.replace('+', " + ").replace('-', " - ");
+    let mut pct = 0i32;
+    let mut px = 0i32;
+    let mut sign = 1i32;
+    let mut seen = false;
+    for tok in norm.split_whitespace() {
+        match tok {
+            "+" => sign = 1,
+            "-" => sign = -1,
+            _ => {
+                if let Some(p) = tok.strip_suffix('%') {
+                    pct += sign * p.trim().parse::<f32>().ok()? as i32;
+                } else if let Some(v) = font_px(tok) {
+                    px += sign * v;
+                } else {
+                    return None;
+                }
+                seen = true;
+                sign = 1;
+            }
+        }
+    }
+    if !seen { return None; }
+    if pct == 0 { Some(Len::Px(px)) } else { Some(Len::Calc { pct, px }) }
+}
 
 fn parse_len(s: &str) -> Option<Len> {
     let s = s.trim();
+    if let Some(inner) = s.strip_prefix("calc(").and_then(|r| r.strip_suffix(')')) {
+        return parse_calc(inner);
+    }
     if let Some(p) = s.strip_suffix('%') { return p.trim().parse::<f32>().ok().map(|v| Len::Pct(v as i32)); }
     font_px(s).map(Len::Px)
 }
@@ -709,6 +787,9 @@ struct BoxProps {
     flex_grow: i32,
     // Enfant grid : nombre de colonnes occupees (grid-column span) ; 0 = 1, 255 = pleine rangee.
     grid_span: u8,
+    // list-style-type : 0 auto (disc/decimal selon ul/ol), 1 none, 2 disc,
+    // 3 circle, 4 square, 5 decimal.
+    list_style: u8,
 }
 fn default_box() -> BoxProps {
     BoxProps { hidden: false, bg: None, width: None, height: None, max_width: None, min_width: None, min_height: None,
@@ -716,7 +797,7 @@ fn default_box() -> BoxProps {
         pad_t: 0, pad_r: 0, pad_b: 0, pad_l: 0, mar_t: 0, mar_b: 0,
         border_w: 0, border_color: 0x000000, radius: 0,
         flex_dir: FlexDir::Row, justify: Justify::Start, align_items: AlignI::Stretch,
-        gap: 0, grid_cols: 0, flex_grow: 0, grid_span: 0 }
+        gap: 0, grid_cols: 0, flex_grow: 0, grid_span: 0, list_style: 0 }
 }
 
 // Premiere longueur d'une valeur raccourcie (`10px 20px` -> 10).
@@ -826,6 +907,8 @@ struct Ctx<'a> {
     // Pile des ancetres de l'element courant (tag, classes, id) — partagee entre
     // tous les sous-fragments pour le matching des selecteurs descendants.
     ancestors: Vec<(String, String, String)>,
+    // Pile de contexte de liste : (ordonnee, prochain index, style de marqueur).
+    list_stack: Vec<(bool, i32, u8)>,
 }
 
 impl<'a> Ctx<'a> {
@@ -929,6 +1012,9 @@ impl<'c, 'a> Flow<'c, 'a> {
     }
 
     fn push_word(&mut self, s: &str, st: &Style) {
+        // text-transform (uppercase/lowercase/capitalize) applique au mot.
+        let owned;
+        let s: &str = if st.transform != 0 { owned = apply_transform(s, st.transform); &owned } else { s };
         // Largeurs PROPORTIONNELLES via la police vectorielle (repli monospace).
         let px = 8 * st.scale as i32;
         let cw = super::font_ttf::char_width(' ', px).max(1); // espace inter-mots
@@ -1057,6 +1143,7 @@ fn layout(dom: &Dom, base_url: &str, width: i32, css: &[Rule]) -> Page {
         css, css_vars, images: Vec::new(), img_cache: Vec::new(), img_budget: 24,
         scheme: scheme.to_string(), host: host.to_string(), title: String::new(), visited: 0,
         ancestors: Vec::new(),
+        list_stack: Vec::new(),
     };
     let content_w = (width - 2 * PAD).max(40);
     let mut f = Flow::new(&mut ctx, PAD, content_w);
@@ -1114,6 +1201,19 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, cs
             "font-weight" => { if val == "bold" || val == "bolder" || val == "700" || val == "800" || val == "900" { st.bold = true; } else if val == "normal" || val == "400" { st.bold = false; } }
             "text-align" => { st.align = match val { "center" => 1, "right" => 2, _ => 0 }; }
             "white-space" => { if val.starts_with("pre") { st.pre = true; } }
+            "text-transform" => {
+                st.transform = match val { "uppercase" => 1, "lowercase" => 2, "capitalize" => 3, _ => 0 };
+            }
+            "list-style-type" | "list-style" => {
+                // `list-style: none` ou un type ; on lit le premier mot reconnu.
+                for tok in val.split_whitespace() {
+                    let s = match tok {
+                        "none" => 1, "disc" => 2, "circle" => 3, "square" => 4,
+                        "decimal" => 5, _ => 0,
+                    };
+                    if s != 0 { bx.list_style = s; break; }
+                }
+            }
             "display" => {
                 let d = match val { "none" => Disp::None, "inline" => Disp::Inline, "inline-block" => Disp::InlineBlock,
                     "flex" | "inline-flex" => Disp::Flex, "grid" | "inline-grid" => Disp::Grid, _ => Disp::Block };
@@ -1326,7 +1426,7 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
 fn make_frag(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, tag: &str, w: i32, shrink: bool, depth: u32) -> Frag {
     let mut sub = Flow::new(f.ctx, 0, w);
     sub.align = cst.align;
-    if tag == "li" { let b = Style { color: 0x5f6368, ..cst.clone() }; sub.push_word("*", &b); }
+    if tag == "li" { let b = Style { color: 0x5f6368, ..cst.clone() }; sub.push_word("\u{2022}", &b); }
     for &c in &node.children { walk(&mut sub, dom, c, cst, depth + 1); }
     sub.flush_line();
     let used = sub.used_w.clamp(1, w);
@@ -1377,16 +1477,35 @@ fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps
     f.align = cst.align;
     f.y += bw + pt;                 // bordure + padding du haut
 
+    // Contexte de liste : ul/ol empilent (ordonnee, index de depart, style) pour
+    // que leurs <li> produisent puces ou numeros.
+    let is_list = tag == "ul" || tag == "ol";
+    if is_list {
+        let ordered = tag == "ol";
+        let start = if ordered {
+            attr(node, "start").and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(1)
+        } else { 1 };
+        f.ctx.list_stack.push((ordered, start, bx.list_style));
+    }
+
     // Contenu : flux normal, ou disposition flex/grid si le conteneur le demande.
     match inner_disp {
         Disp::Flex => flex_inner(f, dom, node, cst, bx, depth),
         Disp::Grid => grid_inner(f, dom, node, cst, bx, depth),
         _ => {
-            if tag == "li" { let b = Style { color: 0x5f6368, ..cst.clone() }; f.push_word("*", &b); }
+            if tag == "li" {
+                let marker = if f.ctx.list_stack.is_empty() { Some("\u{2022}".to_string()) } else { li_marker(f.ctx) };
+                if let Some(m) = marker {
+                    let b = Style { color: 0x5f6368, ..cst.clone() };
+                    f.push_word(&m, &b);
+                }
+            }
             for &c in &node.children { walk(f, dom, c, cst, depth + 1); }
             f.flush_line();
         }
     }
+
+    if is_list { f.ctx.list_stack.pop(); }
 
     f.y += pb + bw;               // bordure + padding du bas
     // height / min-height contraignent la hauteur finale de la boite.
