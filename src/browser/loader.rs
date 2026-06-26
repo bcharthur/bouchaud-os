@@ -36,6 +36,9 @@ pub fn open(url: &str, width: i32) -> (Session, Page) {
     if url == "about:wasm" {
         return from_html(super::pages::WASM_DEMO.as_bytes(), url, width);
     }
+    if url == "about:modern" {
+        return from_html(super::pages::modern_demo().as_bytes(), url, width);
+    }
     if url == "about:system" {
         return from_html(super::pages::system_info().as_bytes(), url, width);
     }

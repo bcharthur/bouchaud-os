@@ -565,9 +565,19 @@ struct Style {
 fn default_style() -> Style { Style { color: 0x202124, scale: 2, bold: false, align: 0, href: None, pre: false } }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Disp { Block, Inline, InlineBlock, Flex, None }
+enum Disp { Block, Inline, InlineBlock, Flex, Grid, None }
 #[derive(Clone, Copy, PartialEq)]
 enum FloatK { None, Left, Right }
+
+// Direction d'un conteneur flex (row par defaut, column si empile verticalement).
+#[derive(Clone, Copy, PartialEq)]
+enum FlexDir { Row, Column }
+// Alignement principal (justify-content) : repartition de l'espace libre.
+#[derive(Clone, Copy, PartialEq)]
+enum Justify { Start, Center, End, Between, Around }
+// Alignement transversal (align-items) : position dans la hauteur de ligne.
+#[derive(Clone, Copy, PartialEq)]
+enum AlignI { Start, Center, End, Stretch }
 #[derive(Clone, Copy)]
 enum Len { Px(i32), Pct(i32) }
 impl Len { fn resolve(self, avail: i32) -> i32 { match self { Len::Px(p) => p, Len::Pct(p) => (avail * p / 100).max(0) } } }
@@ -590,19 +600,89 @@ struct BoxProps {
     center: bool,          // margin:auto (centre le bloc)
     disp: Option<Disp>,
     float: FloatK,
-    pad: i32,              // padding uniforme (px) — espace interieur
-    mar_y: i32,            // marge verticale (haut/bas, px)
+    // Box model par cote (px) — espace interieur (padding) et exterieur (margin).
+    pad_t: i32, pad_r: i32, pad_b: i32, pad_l: i32,
+    mar_t: i32, mar_b: i32,
     border_w: i32,         // epaisseur de bordure (px)
     border_color: u32,     // couleur de bordure
+    radius: i32,           // border-radius (px) — purement indicatif au rendu
+    // Conteneur flex / grid.
+    flex_dir: FlexDir,
+    justify: Justify,
+    align_items: AlignI,
+    gap: i32,              // espacement entre items flex/grid (px)
+    grid_cols: u8,         // nombre de colonnes (grid-template-columns) ; 0 = auto
+    // Enfant flex : facteur de croissance (flex-grow / flex:N).
+    flex_grow: i32,
+    // Enfant grid : nombre de colonnes occupees (grid-column span) ; 0 = 1, 255 = pleine rangee.
+    grid_span: u8,
 }
 fn default_box() -> BoxProps {
     BoxProps { hidden: false, bg: None, width: None, height: None, max_width: None, min_width: None, min_height: None,
-        center: false, disp: None, float: FloatK::None, pad: 0, mar_y: 0, border_w: 0, border_color: 0x000000 }
+        center: false, disp: None, float: FloatK::None,
+        pad_t: 0, pad_r: 0, pad_b: 0, pad_l: 0, mar_t: 0, mar_b: 0,
+        border_w: 0, border_color: 0x000000, radius: 0,
+        flex_dir: FlexDir::Row, justify: Justify::Start, align_items: AlignI::Stretch,
+        gap: 0, grid_cols: 0, flex_grow: 0, grid_span: 0 }
 }
 
 // Premiere longueur d'une valeur raccourcie (`10px 20px` -> 10).
 fn first_len(val: &str) -> Option<i32> {
     val.split_whitespace().find_map(|t| parse_len(t).map(|l| l.resolve(0)))
+}
+
+// Decompose un raccourci CSS 1-4 valeurs en (top, right, bottom, left).
+// `10px` -> tous ; `10px 20px` -> v/h ; `1 2 3` -> t/h/b ; `1 2 3 4` -> t/r/b/l.
+fn parse_sides(val: &str) -> (i32, i32, i32, i32) {
+    let parts: Vec<i32> = val.split_whitespace()
+        .map(|t| parse_len(t).map(|l| l.resolve(0)).unwrap_or(0).max(0))
+        .collect();
+    match parts.len() {
+        1 => (parts[0], parts[0], parts[0], parts[0]),
+        2 => (parts[0], parts[1], parts[0], parts[1]),
+        3 => (parts[0], parts[1], parts[2], parts[1]),
+        n if n >= 4 => (parts[0], parts[1], parts[2], parts[3]),
+        _ => (0, 0, 0, 0),
+    }
+}
+
+// Compte les "pistes" (tracks) de premier niveau d'une liste CSS, en traitant
+// `fonction(...)` (ex. minmax(0, 1fr)) comme une seule piste malgre ses espaces.
+fn count_tracks(s: &str) -> u32 {
+    let mut n = 0u32;
+    let mut depth = 0i32;
+    let mut in_tok = false;
+    for c in s.chars() {
+        match c {
+            '(' => { depth += 1; in_tok = true; }
+            ')' => { if depth > 0 { depth -= 1; } }
+            ' ' | '\t' | ',' if depth == 0 => { if in_tok { n += 1; in_tok = false; } }
+            _ => { in_tok = true; }
+        }
+    }
+    if in_tok { n += 1; }
+    n
+}
+
+// Compte les colonnes declarees par `grid-template-columns`, en developpant
+// `repeat(n, ...)`. Ex : `repeat(3, 1fr)` -> 3 ; `1fr 200px 1fr` -> 3 ;
+// `repeat(4, minmax(0,1fr))` -> 4.
+fn count_grid_cols(val: &str) -> u8 {
+    let v = val.trim();
+    // Grilles responsives : `repeat(auto-fill|auto-fit, ...)` -> heuristique
+    // adaptee aux fenetres etroites de Nautile (2 colonnes lisibles).
+    if v.contains("auto-fill") || v.contains("auto-fit") { return 2; }
+    if let Some(rest) = v.strip_prefix("repeat(") {
+        if let Some(comma) = rest.find(',') {
+            if let Ok(n) = rest[..comma].trim().parse::<u32>() {
+                let inner = &rest[comma + 1..];
+                let inner = inner.strip_suffix(')').unwrap_or(inner);
+                let per = count_tracks(inner).max(1);
+                return (n * per).min(12) as u8;
+            }
+        }
+    }
+    count_tracks(v).min(12) as u8
 }
 
 // ----------------------------------------------------------------------------
@@ -936,9 +1016,45 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, cs
             "white-space" => { if val.starts_with("pre") { st.pre = true; } }
             "display" => {
                 let d = match val { "none" => Disp::None, "inline" => Disp::Inline, "inline-block" => Disp::InlineBlock,
-                    "flex" | "inline-flex" | "grid" | "inline-grid" => Disp::Flex, _ => Disp::Block };
+                    "flex" | "inline-flex" => Disp::Flex, "grid" | "inline-grid" => Disp::Grid, _ => Disp::Block };
                 if d == Disp::None { bx.hidden = true; }
                 bx.disp = Some(d);
+            }
+            "flex-direction" => { if val.starts_with("column") { bx.flex_dir = FlexDir::Column; } else { bx.flex_dir = FlexDir::Row; } }
+            "justify-content" => {
+                bx.justify = match val {
+                    "center" => Justify::Center,
+                    "flex-end" | "end" | "right" => Justify::End,
+                    "space-between" => Justify::Between,
+                    "space-around" | "space-evenly" => Justify::Around,
+                    _ => Justify::Start,
+                };
+            }
+            "align-items" => {
+                bx.align_items = match val {
+                    "center" => AlignI::Center,
+                    "flex-end" | "end" => AlignI::End,
+                    "flex-start" | "start" => AlignI::Start,
+                    _ => AlignI::Stretch,
+                };
+            }
+            "gap" | "grid-gap" | "row-gap" | "column-gap" | "grid-column-gap" | "grid-row-gap" => {
+                if let Some(px) = first_len(val) { bx.gap = bx.gap.max(px.max(0)); }
+            }
+            "grid-template-columns" => { bx.grid_cols = count_grid_cols(val); }
+            "grid-column" => {
+                // `1 / -1` = pleine rangee ; `span N` = N colonnes.
+                if val.contains("-1") { bx.grid_span = 255; }
+                else if let Some(rest) = val.split("span").nth(1) {
+                    if let Ok(nn) = rest.trim().split(|c: char| c == '/' || c == ' ').next().unwrap_or("").trim().parse::<u8>() { bx.grid_span = nn; }
+                }
+            }
+            "flex" | "flex-grow" => {
+                // `flex: 1`, `flex: 1 1 0`, `flex-grow: 2` -> facteur de croissance.
+                if let Some(tok) = val.split_whitespace().next() {
+                    if let Ok(g) = tok.parse::<f32>() { bx.flex_grow = g as i32; }
+                    else if tok == "auto" { bx.flex_grow = 1; }
+                }
             }
             "visibility" => { if val == "hidden" { bx.hidden = true; } }
             "width" => { bx.width = parse_len(val); }
@@ -946,16 +1062,24 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, cs
             "max-width" => { bx.max_width = parse_len(val); }
             "min-width" => { bx.min_width = parse_len(val); }
             "min-height" => { bx.min_height = parse_len(val); }
+            "border-radius" => { if let Some(px) = first_len(val) { bx.radius = px.max(0); } }
             "float" => { bx.float = match val { "left" => FloatK::Left, "right" => FloatK::Right, _ => FloatK::None }; }
             "margin" => {
                 if val.contains("auto") { bx.center = true; }
-                if let Some(px) = first_len(val) { bx.mar_y = px.max(0); }
+                let (t, _r, b, _l) = parse_sides(val);
+                bx.mar_t = t; bx.mar_b = b;
             }
             "margin-left" | "margin-right" => { if val.contains("auto") { bx.center = true; } }
-            "margin-top" | "margin-bottom" => { if let Some(px) = first_len(val) { bx.mar_y = bx.mar_y.max(px.max(0)); } }
-            "padding" | "padding-top" | "padding-bottom" | "padding-left" | "padding-right" => {
-                if let Some(px) = first_len(val) { bx.pad = bx.pad.max(px.max(0)); }
+            "margin-top" => { if let Some(px) = first_len(val) { bx.mar_t = px.max(0); } }
+            "margin-bottom" => { if let Some(px) = first_len(val) { bx.mar_b = px.max(0); } }
+            "padding" => {
+                let (t, r, b, l) = parse_sides(val);
+                bx.pad_t = t; bx.pad_r = r; bx.pad_b = b; bx.pad_l = l;
             }
+            "padding-top" => { if let Some(px) = first_len(val) { bx.pad_t = px.max(0); } }
+            "padding-right" => { if let Some(px) = first_len(val) { bx.pad_r = px.max(0); } }
+            "padding-bottom" => { if let Some(px) = first_len(val) { bx.pad_b = px.max(0); } }
+            "padding-left" => { if let Some(px) = first_len(val) { bx.pad_l = px.max(0); } }
             // `border: 1px solid #ccc` -> epaisseur + couleur ; le style (solid...) est ignore.
             "border" | "border-width" | "border-top" | "border-bottom" | "border-left" | "border-right" => {
                 for tok in val.split_whitespace() {
@@ -1074,8 +1198,9 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
             let frag = make_frag(f, dom, node, &cst, &bx, tag, w, !bx.width.is_some(), depth + 1);
             f.push_frag(frag, 8);
         }
-        Disp::Flex => { f.flush_line(); flex_layout(f, dom, node, &cst, depth); f.y += LINE_GAP; }
-        Disp::Block => { block_layout(f, dom, node, &cst, &bx, tag, depth); }
+        Disp::Flex => { block_layout(f, dom, node, &cst, &bx, tag, Disp::Flex, depth); }
+        Disp::Grid => { block_layout(f, dom, node, &cst, &bx, tag, Disp::Grid, depth); }
+        Disp::Block => { block_layout(f, dom, node, &cst, &bx, tag, Disp::Block, depth); }
     }
 }
 
@@ -1103,12 +1228,12 @@ fn make_frag(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, t
 
 // Bloc en flux normal : nouvelle ligne, largeur eventuellement contrainte
 // (width/max-width) et centree (margin:auto), fond, marges verticales.
-fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, tag: &str, depth: u32) {
+fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, tag: &str, inner_disp: Disp, depth: u32) {
     f.flush_line();
     if heading_scale(tag).is_some() && f.y > PAD { f.y += LINE_GAP; }
 
     // Marge haute (box model).
-    f.y += bx.mar_y;
+    f.y += bx.mar_t;
 
     // Largeur de la boite bordure incluse.
     let mut cw = f.avail;
@@ -1123,23 +1248,30 @@ fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps
     let outer = cw.min(f.avail - left).max(8);
 
     let bw = bx.border_w.max(0);
-    let pad = bx.pad.max(0);
+    let (pt, pr, pb, pl) = (bx.pad_t, bx.pad_r, bx.pad_b, bx.pad_l);
     // Largeur du CONTENU = boite - bordures - paddings (gauche + droite).
-    let inner = (outer - 2 * (bw + pad)).max(8);
+    let inner = (outer - 2 * bw - pl - pr).max(8);
 
     let box_top = f.y;
     let bg_insert = f.items.len();
     let (sx0, sav, sal) = (f.x0, f.avail, f.align);
-    f.x0 = sx0 + left + bw + pad;   // contenu insere par bordure + padding
+    f.x0 = sx0 + left + bw + pl;    // contenu insere par bordure + padding gauche
     f.avail = inner;
     f.align = cst.align;
-    f.y += bw + pad;                // bordure + padding du haut
+    f.y += bw + pt;                 // bordure + padding du haut
 
-    if tag == "li" { let b = Style { color: 0x5f6368, ..cst.clone() }; f.push_word("*", &b); }
-    for &c in &node.children { walk(f, dom, c, cst, depth + 1); }
-    f.flush_line();
+    // Contenu : flux normal, ou disposition flex/grid si le conteneur le demande.
+    match inner_disp {
+        Disp::Flex => flex_inner(f, dom, node, cst, bx, depth),
+        Disp::Grid => grid_inner(f, dom, node, cst, bx, depth),
+        _ => {
+            if tag == "li" { let b = Style { color: 0x5f6368, ..cst.clone() }; f.push_word("*", &b); }
+            for &c in &node.children { walk(f, dom, c, cst, depth + 1); }
+            f.flush_line();
+        }
+    }
 
-    f.y += pad + bw;               // bordure + padding du bas
+    f.y += pb + bw;               // bordure + padding du bas
     // height / min-height contraignent la hauteur finale de la boite.
     if let Some(hv) = bx.height { let target = box_top + hv.resolve(0); if f.y < target { f.y = target; } }
     if let Some(mn) = bx.min_height { let target = box_top + mn.resolve(0); if f.y < target { f.y = target; } }
@@ -1162,14 +1294,43 @@ fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps
     }
 
     // Marge basse + espacement par defaut entre blocs.
-    f.y += bx.mar_y;
+    f.y += bx.mar_b;
     if matches!(tag, "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "ul" | "ol" | "blockquote" | "table" |
         "form" | "div" | "section" | "article" | "header" | "footer" | "li" | "tr" | "figure") { f.y += LINE_GAP; }
 }
 
-// Conteneur flex / ligne de tableau : enfants elements places cote a cote,
-// largeur repartie en colonnes egales (avec retour a la ligne si depassement).
-fn flex_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, depth: u32) {
+// Met en page un enfant dans son propre fragment de largeur `w`.
+fn child_frag(f: &mut Flow, dom: &Dom, c: usize, cst: &Style, align: u8, w: i32, depth: u32) -> Frag {
+    let mut sub = Flow::new(f.ctx, 0, w.max(8));
+    sub.align = align;
+    walk(&mut sub, dom, c, cst, depth + 1);
+    sub.flush_line();
+    let h = sub.y;
+    let items = core::mem::take(&mut sub.items);
+    let links = core::mem::take(&mut sub.links);
+    drop(sub);
+    Frag { items, links, width: w.max(8), height: h }
+}
+
+// Place un fragment a (x, y) absolus dans le flux courant (translation + collecte).
+fn place_frag(f: &mut Flow, frag: Frag, x: i32, y: i32) {
+    for mut sub in frag.items { translate_item(&mut sub, x, y); f.items.push(sub); }
+    for mut lk in frag.links { lk.x += x; lk.y += y; f.links.push(lk); }
+}
+
+// Decalage vertical d'un item selon align-items dans une bande de hauteur `band`.
+fn cross_offset(align: AlignI, item_h: i32, band: i32) -> i32 {
+    match align {
+        AlignI::Center => (band - item_h) / 2,
+        AlignI::End => band - item_h,
+        _ => 0,
+    }
+}
+
+// Conteneur flexbox : `flex-direction` row/column, `gap`, `justify-content`,
+// `align-items` et largeurs/flex-grow des enfants. Le `tr` d'un tableau reutilise
+// ce moteur en mode row.
+fn flex_inner(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, depth: u32) {
     let kids: Vec<usize> = node.children.iter().cloned().filter(|&c| dom.nodes[c].tag.is_some()).collect();
     if kids.is_empty() {
         let saved = f.align; f.align = cst.align;
@@ -1177,20 +1338,126 @@ fn flex_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, depth: u32) {
         f.flush_line(); f.align = saved;
         return;
     }
-    let gap = 8;
-    let n = kids.len() as i32;
-    let colw = ((f.avail - gap * (n - 1)) / n).clamp(24, f.avail);
-    for &c in &kids {
-        let mut sub = Flow::new(f.ctx, 0, colw);
-        walk(&mut sub, dom, c, cst, depth + 1);
-        sub.flush_line();
-        let h = sub.y;
-        let items = core::mem::take(&mut sub.items);
-        let links = core::mem::take(&mut sub.links);
-        drop(sub);
-        f.push_frag(Frag { items, links, width: colw, height: h }, gap);
+
+    // ── Direction colonne : empilement vertical avec gap. ──
+    if bx.flex_dir == FlexDir::Column {
+        for (i, &c) in kids.iter().enumerate() {
+            if i > 0 { f.y += bx.gap; }
+            let frag = child_frag(f, dom, c, cst, cst.align, f.avail, depth);
+            let h = frag.height;
+            // align-items horizontal : start (defaut/stretch) | center | end.
+            let dx = match bx.align_items {
+                AlignI::Center => ((f.avail - frag.width) / 2).max(0),
+                AlignI::End => (f.avail - frag.width).max(0),
+                _ => 0,
+            };
+            place_frag(f, frag, f.x0 + dx, f.y);
+            f.y += h;
+        }
+        return;
     }
-    f.flush_line();
+
+    // ── Direction ligne : calcul des largeurs (fixes + flex-grow). ──
+    let n = kids.len();
+    let gap = bx.gap;
+    let gap_total = gap * (n as i32 - 1).max(0);
+    let avail_inner = (f.avail - gap_total).max(n as i32 * 8);
+
+    let mut fixed: Vec<Option<i32>> = Vec::with_capacity(n);
+    let mut grow: Vec<i32> = Vec::with_capacity(n);
+    let mut sum_fixed = 0;
+    let mut sum_grow = 0;
+    for &c in &kids {
+        let cn = &dom.nodes[c];
+        let ct = cn.tag.as_deref().unwrap_or("");
+        let (_ccst, cbx) = compute(f, cn, ct, cst);
+        if let Some(w) = cbx.width {
+            let wv = w.resolve(avail_inner).clamp(8, avail_inner);
+            fixed.push(Some(wv)); grow.push(0); sum_fixed += wv;
+        } else {
+            let g = if cbx.flex_grow > 0 { cbx.flex_grow } else { 1 };
+            fixed.push(None); grow.push(g); sum_grow += g;
+        }
+    }
+    let remaining = (avail_inner - sum_fixed).max(0);
+    let mut widths: Vec<i32> = Vec::with_capacity(n);
+    for i in 0..n {
+        let w = match fixed[i] {
+            Some(w) => w,
+            None => if sum_grow > 0 { (remaining * grow[i] / sum_grow).max(24) } else { 24 },
+        };
+        widths.push(w);
+    }
+
+    // Mise en page de chaque enfant puis placement avec justify/align.
+    let mut frags: Vec<Frag> = Vec::with_capacity(n);
+    let mut row_h = 0;
+    for (i, &c) in kids.iter().enumerate() {
+        let frag = child_frag(f, dom, c, cst, cst.align, widths[i], depth);
+        if frag.height > row_h { row_h = frag.height; }
+        frags.push(frag);
+    }
+    let used: i32 = widths.iter().sum::<i32>() + gap_total;
+    let free = (f.avail - used).max(0);
+    let (start, between) = match bx.justify {
+        Justify::Center => (free / 2, gap),
+        Justify::End => (free, gap),
+        Justify::Between => (0, gap + if n > 1 { free / (n as i32 - 1) } else { 0 }),
+        Justify::Around => (free / (2 * n as i32), gap + free / n as i32),
+        Justify::Start => (0, gap),
+    };
+    let mut x = f.x0 + start;
+    for (i, frag) in frags.into_iter().enumerate() {
+        let dy = cross_offset(bx.align_items, frag.height, row_h);
+        let w = widths[i];
+        place_frag(f, frag, x, f.y + dy.max(0));
+        x += w + between;
+    }
+    f.y += row_h;
+}
+
+// Conteneur CSS grid : `grid-template-columns` definit le nombre de colonnes ;
+// les items sont disposes en grille avec retour a la ligne et `gap`. Le span
+// `grid-column: 1/-1` (ou `span N`) fait occuper plusieurs colonnes a une cellule.
+fn grid_inner(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, depth: u32) {
+    let kids: Vec<usize> = node.children.iter().cloned().filter(|&c| dom.nodes[c].tag.is_some()).collect();
+    if kids.is_empty() { return; }
+    let cols = (bx.grid_cols as i32).max(1);
+    let gap = bx.gap;
+    let avail = f.avail;
+    let colw = ((avail - gap * (cols - 1)) / cols).clamp(24, avail);
+    // Largeur d'une cellule couvrant `span` colonnes (gaps internes inclus).
+    let span_w = |span: i32| -> i32 { (colw * span + gap * (span - 1)).clamp(24, avail) };
+
+    let mut col = 0i32;          // colonne courante dans la rangee
+    let mut x = f.x0;            // curseur horizontal
+    let mut row_h = 0;           // hauteur max de la rangee courante
+    let mut i = 0usize;
+    while i < kids.len() {
+        // Determine le span de la cellule (compute lit la BoxProps de l'enfant).
+        let cn = &dom.nodes[kids[i]];
+        let ct = cn.tag.as_deref().unwrap_or("");
+        let (_ccst, cbx) = compute(f, cn, ct, cst);
+        let span = match cbx.grid_span { 0 => 1, 255 => cols, s => (s as i32).min(cols) };
+
+        // Retour a la ligne si la cellule ne tient pas dans la rangee.
+        if col > 0 && col + span > cols {
+            f.y += row_h + gap;
+            col = 0; x = f.x0; row_h = 0;
+        }
+
+        let cw = span_w(span);
+        let frag = child_frag(f, dom, kids[i], cst, cst.align, cw, depth);
+        if frag.height > row_h { row_h = frag.height; }
+        place_frag(f, frag, x, f.y);
+
+        x += cw + gap;
+        col += span;
+        i += 1;
+        if col >= cols { f.y += row_h + gap; col = 0; x = f.x0; row_h = 0; }
+    }
+    // Termine la derniere rangee partielle (si non close ci-dessus).
+    if col > 0 { f.y += row_h; } else { f.y -= gap; }
 }
 
 fn scheme_host(base: &str) -> (&str, &str) {
