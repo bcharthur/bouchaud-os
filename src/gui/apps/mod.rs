@@ -6,6 +6,7 @@
 
 pub mod calculator;
 pub mod file_explorer;
+pub mod rustpad;
 pub mod system_info;
 pub mod terminal;
 // Nautile vit désormais dans src/browser/ — pas de module local.
@@ -86,6 +87,7 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
             }
             _ => false,
         },
+        App::Rustpad { state } => rustpad::on_key(state, k),
         _ => false,
     };
 
@@ -189,6 +191,9 @@ pub(crate) fn wheel_to_app(w: &mut Win, mx: i32, my: i32, delta: i32) {
             state.tab_mut().scroll = s;
         }
     }
+    if let App::Rustpad { state } = &mut w.app {
+        rustpad::on_wheel(state, delta);
+    }
 }
 
 // ── Rendu ─────────────────────────────────────────────────────────────────────
@@ -204,6 +209,7 @@ pub(crate) fn draw_app(w: &Win) {
         App::Browser { state }              => chrome::draw(state, bx, by, bw, bh),
         App::Calc { expr }                  => calculator::draw(expr, bx, by, bw, bh),
         App::Monitor                        => system_info::draw(bx, by, bw, bh),
+        App::Rustpad { state }              => rustpad::draw(state, bx, by, bw, bh),
     }
 }
 

@@ -899,6 +899,116 @@ fn find_rec(idx: usize, filter: Option<&str>) {
 }
 
 // ---------------------------------------------------------------------------
+// Rustc / Cargo — interpréteur Rust minimal
+// ---------------------------------------------------------------------------
+
+/// Lance le mini-interpréteur Rust sur un fichier .rs ou un snippet inline.
+/// Usage : `rustc <fichier.rs>` ou `cargo run` (exécute main.rs du repo courant).
+pub fn rustc_run(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
+    let src = if argv[0] == "cargo" {
+        // `cargo run` — cherche main.rs dans src/ ou racine du répertoire courant
+        let fs = ramfs::fs();
+        let src_dir = fs.find_child(cwd, "src");
+        let main_idx = src_dir
+            .and_then(|d| fs.find_child(d, "main.rs"))
+            .or_else(|| fs.find_child(cwd, "main.rs"));
+        match main_idx {
+            Some(idx) if fs.nodes[idx].kind == NodeKind::File => {
+                let n = &fs.nodes[idx];
+                let mut s = alloc::string::String::new();
+                for i in 0..n.content_len { s.push(n.content[i] as char); }
+                s
+            }
+            _ => {
+                println!("cargo: main.rs introuvable (cherche src/main.rs ou ./main.rs)");
+                return 1;
+            }
+        }
+    } else if argc < 2 {
+        println!("usage: rustc <fichier.rs>");
+        return 1;
+    } else {
+        let fs = ramfs::fs();
+        let idx = match fs.resolve_checked(argv[1], cwd) {
+            Ok(i) => i,
+            Err(e) => { println!("rustc: {}: {}", argv[1], e); return 1; }
+        };
+        if fs.nodes[idx].kind != NodeKind::File {
+            println!("rustc: {} n'est pas un fichier", argv[1]);
+            return 1;
+        }
+        if !fs.can(idx, PERM_R) { println!("rustc: permission denied"); return 1; }
+        let n = &fs.nodes[idx];
+        let mut s = alloc::string::String::new();
+        for i in 0..n.content_len { s.push(n.content[i] as char); }
+        s
+    };
+
+    let (output, err) = crate::lang::mini_rust::run(&src);
+    if !output.is_empty() {
+        print!("{}", output);
+        if !output.ends_with('\n') { println!(""); }
+    }
+    match err {
+        Some(e) => {
+            vga::set_color(vga::COLOR_RED);
+            println!("erreur: {}", e);
+            vga::set_color(COLOR_DEFAULT);
+            1
+        }
+        None => 0,
+    }
+}
+
+/// Lance une batterie de tests unitaires sur le mini-interpréteur Rust.
+pub fn rust_selftest() {
+    let mut ok = 0u32;
+    let mut fail = 0u32;
+
+    let cases: &[(&str, &str)] = &[
+        // arithmétique basique
+        ("fn main() { println!(\"{}\", 2 + 3); }", "5\n"),
+        // variables let
+        ("fn main() { let x = 10; let y = x * 2; println!(\"{}\", y); }", "20\n"),
+        // if/else
+        ("fn main() { let x = 5; if x > 3 { println!(\"ok\"); } else { println!(\"ko\"); } }", "ok\n"),
+        // boucle for + range
+        ("fn main() { let mut s = 0; for i in 0..5 { s = s + i; } println!(\"{}\", s); }", "10\n"),
+        // fonction auxiliaire
+        ("fn double(x: i64) -> i64 { x * 2 } fn main() { println!(\"{}\", double(7)); }", "14\n"),
+        // chaîne de caractères
+        ("fn main() { let s = \"bonjour\"; println!(\"{}\", s.len()); }", "7\n"),
+        // while
+        ("fn main() { let mut n = 1; while n < 10 { n = n * 2; } println!(\"{}\", n); }", "16\n"),
+        // booléens
+        ("fn main() { let a = true; let b = false; println!(\"{}\", a && !b); }", "true\n"),
+    ];
+
+    for (src, expected) in cases {
+        let (out, err) = crate::lang::mini_rust::run(src);
+        let pass = err.is_none() && out == *expected;
+        if pass { ok += 1; } else {
+            fail += 1;
+            vga::set_color(vga::COLOR_RED);
+            println!("FAIL: {:?}", src);
+            println!("  attendu:  {:?}", expected);
+            println!("  obtenu:   {:?}", out);
+            if let Some(e) = err { println!("  erreur:   {}", e); }
+            vga::set_color(COLOR_DEFAULT);
+        }
+    }
+
+    if fail == 0 {
+        vga::set_color(vga::COLOR_GREEN);
+        println!("rust-selftest: {}/{} OK", ok, ok);
+    } else {
+        vga::set_color(vga::COLOR_RED);
+        println!("rust-selftest: {}/{} OK, {} echecs", ok, ok + fail, fail);
+    }
+    vga::set_color(COLOR_DEFAULT);
+}
+
+// ---------------------------------------------------------------------------
 // Disque (placeholders, roadmap BFS)
 // ---------------------------------------------------------------------------
 

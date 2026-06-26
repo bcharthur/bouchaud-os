@@ -92,6 +92,7 @@ pub const COMMANDS: &[&str] = &[
     "mkfs.bfs", "true", "false", "logout", "exit", "export", "env", "unset", "run",
     "source", "desktop", "gui", "ps", "kill", "free", "syscalls", "apps", "launch",
     "ifup", "arping", "ethinfo", "nslookup", "http", "https", "tls-selftest", "tls",
+    "git", "rustc", "cargo", "rust-selftest",
 ];
 
 /// Operateur reliant un segment de commande au precedent.
@@ -600,6 +601,13 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         // Disque (placeholders, roadmap BFS)
         "df" => { crate::drivers::disk::print_df(); 0 }
         "mount" | "sync" | "mkfs.bfs" => { c::disk_placeholder(argv[0]); 0 }
+
+        // Git — contrôle de version natif
+        "git" => crate::git::cmd(argc, &argv, *cwd),
+
+        // Rustc / Cargo — interpréteur Rust minimal
+        "rustc" | "cargo" => c::rustc_run(argc, &argv, *cwd),
+        "rust-selftest" => { c::rust_selftest(); 0 }
 
         _ => {
             vga::set_color(COLOR_RED);

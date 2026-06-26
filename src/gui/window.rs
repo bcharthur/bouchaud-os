@@ -11,16 +11,16 @@ pub(crate) const MIN_W: i32 = 90;
 pub(crate) const MIN_H: i32 = 50;
 
 /// Entrees du menu Demarrer (l'index = `kind` passe a `make_app`).
-pub(crate) const MENU: [&str; 6] = ["Terminal", "Fichiers", "Nautile", "Moniteur", "Calculatrice", "Quitter"];
+pub(crate) const MENU: [&str; 7] = ["Terminal", "Fichiers", "Nautile", "Moniteur", "Calculatrice", "Rustpad", "Quitter"];
 
 /// Icones du bureau : (libelle, kind). Cliquables pour lancer l'application.
-pub(crate) const ICONS: [(&str, usize); 4] = [
-    ("Nautile", 2), ("Calculatrice", 4), ("Terminal", 0), ("Fichiers", 1),
+pub(crate) const ICONS: [(&str, usize); 5] = [
+    ("Nautile", 2), ("Calculatrice", 4), ("Terminal", 0), ("Fichiers", 1), ("Rustpad", 5),
 ];
 
 /// Positions des icones de bureau (x, y). Modifiables par drag-and-drop.
-pub(crate) static mut ICON_POSITIONS: [(i32, i32); 4] = [
-    (10, 25), (10, 91), (10, 157), (10, 223),
+pub(crate) static mut ICON_POSITIONS: [(i32, i32); 5] = [
+    (10, 25), (10, 91), (10, 157), (10, 223), (10, 289),
 ];
 
 /// Etat applicatif porte par une fenetre.
@@ -30,6 +30,7 @@ pub(crate) enum App {
     Browser { state: crate::browser::BrowserState },
     Calc { expr: String },
     Monitor,
+    Rustpad { state: crate::gui::apps::rustpad::RustpadState },
 }
 
 pub(crate) struct Win {
@@ -133,6 +134,10 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
         4 => Win {
             title: "Calculatrice".to_string(), x, y, w: 220, h: 300, min: false, restore: None,
             app: App::Calc { expr: String::new() },
+        },
+        5 => Win {
+            title: "Rustpad — Hello World".to_string(), x, y, w: 560, h: 400, min: false, restore: None,
+            app: App::Rustpad { state: crate::gui::apps::rustpad::RustpadState::new() },
         },
         _ => Win {
             title: "Moniteur".to_string(), x, y, w: 300, h: 200, min: false, restore: None,

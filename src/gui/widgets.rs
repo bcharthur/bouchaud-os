@@ -96,7 +96,29 @@ fn draw_app_icon(icon_idx: usize, vx: usize, vy: usize, vw: usize) {
         1 => draw_icon_calculator(vx, vy, vw),
         2 => draw_icon_terminal(vx, vy, vw),
         3 => draw_icon_files(vx, vy, vw),
+        4 => draw_icon_rustpad(vx, vy, vw),
         _ => { fb::fill_rect_rgb(vx, vy, vw, vw, 0x555555); }
+    }
+}
+
+fn draw_icon_rustpad(vx: usize, vy: usize, vw: usize) {
+    // Fond sombre (éditeur de code)
+    fb::fill_rect_rgb(vx, vy, vw, vw, 0x0d1117);
+    // Fenetre editor (cadre)
+    let pad = vw / 8;
+    fb::fill_rect_rgb(vx + pad, vy + pad, vw - pad*2, vw - pad*2, 0x161b22);
+    // Lignes de code simulées
+    let lh = vw / 8; let lx = vx + pad + 3;
+    fb::fill_rect_rgb(lx, vy + pad + 3,           vw/2, lh.max(2), 0xff7b72);  // rouge (fn)
+    fb::fill_rect_rgb(lx + vw/8, vy + pad + 3 + lh + 2, vw/3, lh.max(2), 0xa5d6ff);  // bleu
+    fb::fill_rect_rgb(lx + vw/8, vy + pad + 3 + (lh+2)*2, vw/4, lh.max(2), 0x3fb950);  // vert
+    fb::fill_rect_rgb(lx + vw/8, vy + pad + 3 + (lh+2)*3, vw/3, lh.max(2), 0xa5d6ff);
+    // Bouton Run ▶ (triangle vert)
+    let bx = vx + vw - pad - vw/5; let by = vy + vy.min(4) + vw/3;
+    let bsize = vw / 5;
+    for row in 0..bsize {
+        let w = (row * 2 + 1).min(bsize);
+        fb::fill_rect_rgb(bx, by + row, w, 1, 0x238636);
     }
 }
 
