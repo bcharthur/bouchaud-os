@@ -70,7 +70,8 @@ pub fn bouchaud_home() -> String {
              <span class=\"shell\">&#x1f41a;</span>\
              <span class=\"brand\">Nautile Navigateur</span>\
            </div>\
-           <div class=\"ver\">v{ver} &mdash; Bouchaud OS &mdash; Moteur souverain Rust no_std</div>\
+           <div class=\"ver\">Bouchaud OS v{os_ver} &mdash; Nautile {nautile_merge} ({nautile_date})</div>\
+           <div class=\"ver\">Source {nautile_source} &mdash; {nautile_ref}</div>\
            <div class=\"tagline\">Navigation locale &bull; TLS 1.3 integre &bull; HTML5 &bull; JS &bull; WebAssembly</div>\
          </div>\
          <div class=\"grid\">\
@@ -116,7 +117,11 @@ pub fn bouchaud_home() -> String {
            </div>\
          </div>\
          </body></html>",
-        ver = crate::VERSION
+        os_ver = crate::VERSION,
+        nautile_merge = crate::browser::NAUTILE_MERGE_SHORT,
+        nautile_date = crate::browser::NAUTILE_MERGE_DATE,
+        nautile_source = crate::browser::NAUTILE_SOURCE_SHORT,
+        nautile_ref = crate::browser::NAUTILE_MERGE_SUBJECT,
     )
 }
 
@@ -143,6 +148,9 @@ pub fn system_info() -> String {
            <tr><td>Heap libre</td><td>{free} octets</td></tr>\
            <tr><td>Périphériques PCI</td><td>{pci}</td></tr>\
            <tr><td>Utilisateur</td><td>{user}</td></tr>\
+           <tr><td>Nautile merge</td><td>{nautile_merge} ({nautile_date})</td></tr>\
+           <tr><td>Nautile source</td><td>{nautile_source}</td></tr>\
+           <tr><td>Nautile ref</td><td>{nautile_ref}</td></tr>\
          </table>\
          <p><a href=\"about:bouchaud\">← Accueil</a></p>\
          </body></html>",
@@ -150,6 +158,10 @@ pub fn system_info() -> String {
         h = dt.hour, m = dt.minute, s = dt.second,
         up = uptime, used = used, total = total, free = free,
         pci = pci_n, user = user,
+        nautile_merge = crate::browser::NAUTILE_MERGE_SHORT,
+        nautile_date = crate::browser::NAUTILE_MERGE_DATE,
+        nautile_source = crate::browser::NAUTILE_SOURCE_SHORT,
+        nautile_ref = crate::browser::NAUTILE_MERGE_SUBJECT,
     )
 }
 
