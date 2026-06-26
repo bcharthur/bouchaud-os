@@ -1,17 +1,19 @@
-//! Moteur de rendu web de Nautile.
+//! Moteur de rendu web de Nautile — cœur du navigateur, intégré nativement
+//! dans Bouchaud OS et suivi par le système de version (`build.rs` trace
+//! `src/browser`). C'est ici que vit toute la logique de rendu :
 //!
-//! Pont vers `gui::engine` — la logique réside dans les sous-modules du moteur
-//! (`web`, `js`, `image`). Ce module expose une API stable côté browser sans
-//! dépendre directement de la hiérarchie `gui::`.
+//!   - `web`      : HTML → DOM → CSS (cascade, sélecteurs descendants) → layout
+//!                  (flux blocs/inline, flexbox, CSS grid, box model) → liste
+//!                  d'affichage truecolor ;
+//!   - `js`       : interpréteur JavaScript (DOM, événements, timers, Promise,
+//!                  WebAssembly via wasmi) ;
+//!   - `image`    : décodage + downscale d'images (PNG, JPEG baseline, data:URI) ;
+//!   - `font_ttf` : rasterizer de police vectorielle TrueType (antialiasé).
 //!
-//! Architecture inspirée du pipeline Gecko (Firefox) :
-//!   HTML → tokenizer → DOM → style (cascade CSS) → layout → paint
-//! et de Blink (Chrome) pour la séparation contenu / rendu.
+//! Pipeline inspiré des moteurs modernes (Gecko/Firefox, WebKit/Blink) :
+//!   HTML → tokenizer → DOM → style (cascade CSS) → layout → paint.
 
-// Re-exports stables de l'API moteur (publics pour les consommateurs du crate).
-#[allow(unused_imports)]
-pub use crate::gui::engine::web;
-#[allow(unused_imports)]
-pub use crate::gui::engine::js;
-#[allow(unused_imports)]
-pub use crate::gui::engine::image;
+pub mod web;
+pub mod js;
+pub mod image;
+pub mod font_ttf;
