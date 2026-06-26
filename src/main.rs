@@ -20,6 +20,7 @@
 
 extern crate alloc;
 
+use alloc::format;
 use bootloader::{entry_point, BootInfo};
 
 #[macro_use]
@@ -76,12 +77,44 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     kernel::dmesg::log("net: loopback lo 127.0.0.1 actif (ping ok); eth0 sans driver");
     kernel::dmesg::log("disk: pilote disque non active");
     kernel::dmesg::log("shell: initialise");
+    log_nautile_boot_version();
 
     // 5. Banniere d'accueil.
     banner();
 
     // 6. Boucle interactive.
     shell::run();
+}
+
+/// Journalise aussi sur COM1 la version Nautile compilee dans l'image de boot.
+///
+/// La banniere VGA affiche deja ces informations, mais `boot.ps1` remonte surtout
+/// la sortie serie QEMU dans la console hote. Ces lignes rendent donc la revision
+/// Nautile verifiable sans ouvrir l'ecran VGA.
+fn log_nautile_boot_version() {
+    let merge = format!(
+        "nautile: merge compile {} ({})",
+        browser::NAUTILE_MERGE_SHORT,
+        browser::NAUTILE_MERGE_DATE
+    );
+    kernel::dmesg::log(&merge);
+
+    let source = format!(
+        "nautile: source compilee {} ({})",
+        browser::NAUTILE_SOURCE_SHORT,
+        browser::NAUTILE_SOURCE_DATE
+    );
+    kernel::dmesg::log(&source);
+
+    let reference = format!("nautile: ref {}", browser::NAUTILE_MERGE_SUBJECT);
+    kernel::dmesg::log(&reference);
+
+    let upstream = format!(
+        "nautile upstream: {} ({})",
+        browser::NAUTILE_UPSTREAM_SHORT,
+        browser::NAUTILE_UPSTREAM_DATE
+    );
+    kernel::dmesg::log(&upstream);
 }
 
 /// Affiche la banniere d'accueil de Bouchaud OS.
@@ -91,6 +124,22 @@ fn banner() {
     println!("Bouchaud OS");
     vga::set_color(COLOR_DEFAULT);
     println!("Version: {} - kernel foundation", VERSION);
+    println!(
+        "Nautile: merge {} ({})",
+        browser::NAUTILE_MERGE_SHORT,
+        browser::NAUTILE_MERGE_DATE
+    );
+    println!(
+        "Nautile source: {} ({})",
+        browser::NAUTILE_SOURCE_SHORT,
+        browser::NAUTILE_SOURCE_DATE
+    );
+    println!("Nautile ref: {}", browser::NAUTILE_MERGE_SUBJECT);
+    println!(
+        "Nautile upstream: {} ({})",
+        browser::NAUTILE_UPSTREAM_SHORT,
+        browser::NAUTILE_UPSTREAM_DATE
+    );
     println!("Clavier: AZERTY-FR");
     println!("Shell: Unix-like CLI");
     println!("FS: RAMFS");
