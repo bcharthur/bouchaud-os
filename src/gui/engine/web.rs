@@ -236,6 +236,42 @@ fn attr<'a>(node: &'a Node, name: &str) -> Option<&'a str> {
     node.attrs.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
 }
 
+// Premiere URL d'un attribut `srcset` (`url 1x, url2 2x` ou `url 480w, ...`).
+fn srcset_first(v: &str) -> Option<&str> {
+    v.split(',').next()
+        .and_then(|first| first.trim().split_whitespace().next())
+        .filter(|u| !u.is_empty())
+}
+
+/// Resout la source reelle d'une `<img>` du web moderne : gere le lazy-loading
+/// (`data-src`, `data-original`, `data-lazy-src`) ou `src` n'est qu'un
+/// placeholder transparent, et `srcset`/`data-srcset` (premiere URL). Renvoie
+/// l'URL a charger, ou None.
+fn img_src(node: &Node) -> Option<&str> {
+    let src = attr(node, "src").map(str::trim).filter(|s| !s.is_empty());
+    let src_is_placeholder = src.map_or(true, |s| {
+        s.starts_with("data:image/svg") || s.starts_with("data:image/gif")
+            || s.contains("blank.") || s.contains("spacer") || s.contains("placeholder")
+    });
+    // Sources lazy explicites : prioritaires si `src` est absent/placeholder.
+    if src_is_placeholder {
+        for k in ["data-src", "data-original", "data-lazy-src", "data-lazy"] {
+            if let Some(v) = attr(node, k) {
+                let v = v.trim();
+                if !v.is_empty() { return Some(v); }
+            }
+        }
+        for k in ["srcset", "data-srcset"] {
+            if let Some(v) = attr(node, k) {
+                if let Some(u) = srcset_first(v) { return Some(u); }
+            }
+        }
+    }
+    if let Some(s) = src { return Some(s); }
+    // Dernier recours : srcset meme si src etait un vrai (mais vide) chemin.
+    attr(node, "srcset").and_then(srcset_first)
+}
+
 // ----------------------------------------------------------------------------
 // CSS (subset)
 // ----------------------------------------------------------------------------
@@ -243,7 +279,10 @@ fn attr<'a>(node: &'a Node, name: &str) -> Option<&'a str> {
 #[derive(Clone)]
 enum Sel { Any, Tag(String), Class(String), Id(String), TagClass(String, String) }
 
-struct Rule { sel: Sel, decls: Vec<(String, String)>, spec: u32 }
+// Une regle CSS : chaine de selecteurs simples (combinateur descendant), les
+// declarations, et la specificite cumulee. `chain` est ordonnee ancetre→cible :
+// le DERNIER element doit matcher l'element courant, les precedents ses ancetres.
+struct Rule { chain: Vec<Sel>, decls: Vec<(String, String)>, spec: u32 }
 
 fn parse_decls(body: &str) -> Vec<(String, String)> {
     let mut v = Vec::new();
@@ -257,21 +296,44 @@ fn parse_decls(body: &str) -> Vec<(String, String)> {
     v
 }
 
-fn parse_selector(s: &str) -> (Sel, u32) {
-    let s = s.trim();
-    // On ne gere qu'un selecteur simple (dernier composant si descendant).
-    let last = s.split(|c: char| c == ' ' || c == '>').filter(|x| !x.is_empty()).last().unwrap_or(s);
+// Parse un selecteur simple (un seul composant : `div`, `.x`, `#y`, `a.b`).
+fn parse_simple(comp: &str) -> (Sel, u32) {
+    let last = comp.trim();
     if last == "*" || last.is_empty() { return (Sel::Any, 0); }
     if let Some(id) = last.strip_prefix('#') { return (Sel::Id(id.to_ascii_lowercase()), 100); }
-    if let Some(cl) = last.strip_prefix('.') { return (Sel::Class(cl.to_string()), 10); }
+    if let Some(cl) = last.strip_prefix('.') {
+        // `.a.b` -> garde la premiere classe (matching simple).
+        let cl = cl.split('.').next().unwrap_or(cl);
+        let cl = cl.split(|c: char| c == ':' || c == '[').next().unwrap_or(cl);
+        return (Sel::Class(cl.to_string()), 10);
+    }
     if let Some(dot) = last.find('.') {
         let tag = last[..dot].to_ascii_lowercase();
-        let cl = last[dot + 1..].to_string();
-        return (Sel::TagClass(tag, cl), 11);
+        let cl = last[dot + 1..].split('.').next().unwrap_or(&last[dot + 1..]);
+        let cl = cl.split(|c: char| c == ':' || c == '[').next().unwrap_or(cl);
+        return (Sel::TagClass(tag, cl.to_string()), 11);
     }
     // pseudo/attr non geres -> match par balise si alphanumerique
-    let tag: String = last.chars().take_while(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
+    let tag: String = last.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').collect::<String>().to_ascii_lowercase();
     if tag.is_empty() { (Sel::Any, 0) } else { (Sel::Tag(tag), 1) }
+}
+
+// Parse un selecteur complet en chaine ancetre→cible. Le combinateur `>` est
+// traite comme un descendant (approximation), les pseudo-elements ignores.
+// Limite la profondeur a 4 composants pour borner le cout du matching.
+fn parse_selector(s: &str) -> (Vec<Sel>, u32) {
+    let s = s.trim();
+    let mut chain: Vec<Sel> = Vec::new();
+    let mut spec = 0u32;
+    for comp in s.split(|c: char| c == ' ' || c == '>' || c == '+' || c == '~').filter(|x| !x.is_empty()) {
+        let (sel, sp) = parse_simple(comp);
+        chain.push(sel);
+        spec += sp;
+    }
+    if chain.is_empty() { chain.push(Sel::Any); }
+    // Ne garde que les 4 derniers composants (cible + 3 ancetres) pour le cout.
+    if chain.len() > 4 { let start = chain.len() - 4; chain.drain(0..start); }
+    (chain, spec)
 }
 
 fn parse_stylesheet(text: &str, out: &mut Vec<Rule>) {
@@ -322,8 +384,8 @@ fn parse_css_block(text: &str, out: &mut Vec<Rule>) {
         let decls = parse_decls(body);
         if decls.is_empty() { continue; }
         for sel in sel_part.split(',') {
-            let (s, spec) = parse_selector(sel);
-            out.push(Rule { sel: s, decls: decls.clone(), spec });
+            let (chain, spec) = parse_selector(sel);
+            out.push(Rule { chain, decls: decls.clone(), spec });
         }
         if out.len() > 4000 { break; }
     }
@@ -426,6 +488,30 @@ fn sel_matches(sel: &Sel, tag: &str, classes: &str, id: &str) -> bool {
         Sel::Class(c) => classes.split(' ').any(|cl| cl == c),
         Sel::TagClass(t, c) => t == tag && classes.split(' ').any(|cl| cl == c),
     }
+}
+
+/// Matche une chaine de selecteurs (combinateur descendant) contre l'element
+/// courant + sa pile d'ancetres. Le dernier composant doit matcher l'element ;
+/// les precedents doivent matcher des ancetres, dans l'ordre, de proche en proche
+/// (right-to-left, comme un vrai moteur CSS).
+fn rule_matches(chain: &[Sel], tag: &str, classes: &str, id: &str,
+                ancestors: &[(String, String, String)]) -> bool {
+    let n = chain.len();
+    if n == 0 { return false; }
+    // L'element courant doit matcher le dernier composant.
+    if !sel_matches(&chain[n - 1], tag, classes, id) { return false; }
+    if n == 1 { return true; }
+    // Remonte les ancetres (du plus proche au plus lointain) en satisfaisant
+    // les composants restants chain[0..n-1] dans l'ordre.
+    let mut need = n - 1;            // index du prochain composant a satisfaire (need-1)
+    let mut a = ancestors.len();
+    while need > 0 {
+        if a == 0 { return false; }
+        a -= 1;
+        let (atag, acls, aid) = &ancestors[a];
+        if sel_matches(&chain[need - 1], atag, acls, aid) { need -= 1; }
+    }
+    true
 }
 
 // Couleurs --------------------------------------------------------------------
@@ -730,6 +816,9 @@ struct Ctx<'a> {
     host: String,
     title: String,
     visited: usize,
+    // Pile des ancetres de l'element courant (tag, classes, id) — partagee entre
+    // tous les sous-fragments pour le matching des selecteurs descendants.
+    ancestors: Vec<(String, String, String)>,
 }
 
 impl<'a> Ctx<'a> {
@@ -944,8 +1033,11 @@ fn layout(dom: &Dom, base_url: &str, width: i32, css: &[Rule]) -> Page {
     let mut bg = 0xffffff_u32;
     let mut css_vars: Vec<(String, String)> = Vec::new();
     for r in css {
-        if matches!(&r.sel, Sel::Tag(t) if t == "body" || t == "html")
-            || matches!(&r.sel, Sel::Any) {
+        // Fond global : regles ciblant body/html ou :root/* (dernier composant).
+        let target = r.chain.last();
+        let hits_root = matches!(target, Some(Sel::Tag(t)) if t == "body" || t == "html")
+            || matches!(target, Some(Sel::Any));
+        if hits_root {
             for (p, v) in &r.decls {
                 if p == "background" || p == "background-color" {
                     if let Some(c) = parse_color(v.split(' ').next().unwrap_or(v)) { bg = c; }
@@ -957,6 +1049,7 @@ fn layout(dom: &Dom, base_url: &str, width: i32, css: &[Rule]) -> Page {
     let mut ctx = Ctx {
         css, css_vars, images: Vec::new(), img_cache: Vec::new(), img_budget: 24,
         scheme: scheme.to_string(), host: host.to_string(), title: String::new(), visited: 0,
+        ancestors: Vec::new(),
     };
     let content_w = (width - 2 * PAD).max(40);
     let mut f = Flow::new(&mut ctx, PAD, content_w);
@@ -1123,7 +1216,9 @@ fn compute(f: &Flow, node: &Node, tag: &str, st: &Style) -> (Style, BoxProps) {
     }
     let classes = attr(node, "class").unwrap_or("").to_string();
     let id = attr(node, "id").unwrap_or("").to_ascii_lowercase();
-    let mut matched: Vec<&Rule> = f.ctx.css.iter().filter(|r| sel_matches(&r.sel, tag, &classes, &id)).collect();
+    let mut matched: Vec<&Rule> = f.ctx.css.iter()
+        .filter(|r| rule_matches(&r.chain, tag, &classes, &id, &f.ctx.ancestors))
+        .collect();
     matched.sort_by_key(|r| r.spec);
     for r in matched { apply_decls(&r.decls, &mut cst, &mut bx, &f.ctx.css_vars); }
     if let Some(style) = attr(node, "style") { apply_decls(&parse_decls(style), &mut cst, &mut bx, &f.ctx.css_vars); }
@@ -1142,6 +1237,9 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
     }
     let tag = node.tag.as_deref().unwrap_or("");
     if tag == "style" || tag == "script" { return; }
+    // SVG inline (icones) : non rendable utilement, et son <title> clobberait le
+    // titre de page. On ignore tout le sous-arbre, comme une image sans alt.
+    if tag == "svg" || tag == "template" || tag == "noscript" { return; }
     if tag == "head" { for &c in &node.children { walk(f, dom, c, st, depth + 1); } return; }
     if tag == "title" {
         let mut t = String::new();
@@ -1166,14 +1264,19 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
         let attr_h = attr(node, "height").and_then(|s| s.trim_end_matches("px").parse::<i32>().ok()).unwrap_or(0);
         let maxw = if attr_w > 0 { attr_w.clamp(16, f.avail) } else { bx.width.map(|l| l.resolve(f.avail)).unwrap_or(f.avail) }.max(16) as usize;
         let maxh = if attr_h > 0 { attr_h.min(2000) } else { bx.height.map(|l| l.resolve(0)).unwrap_or(1600) }.max(16) as usize;
-        if let Some(src) = attr(node, "src") {
+        // Resolution lazy-load / srcset (web moderne).
+        if let Some(src) = img_src(node) {
             if let Some(i) = f.ctx.load_image(src, maxw, maxh) { f.push_image(i); return; }
         }
-        // Placeholder : boite grise avec texte alt
-        let alt = attr(node, "alt").unwrap_or("image");
-        let ph_w = (maxw as i32).clamp(24, f.avail);
-        let ph_h = if attr_h > 0 { attr_h.min(300).max(24) } else { 48 };
-        f.push_box(ph_w, ph_h, 0xe8e8e8, alt.to_string());
+        // Echec de chargement / format non supporte (SVG, WebP...) :
+        // comportement d'un vrai navigateur — on affiche le texte `alt` discret
+        // (pas de grosse boite grise). Les images decoratives (alt vide, icones,
+        // pixels de tracking) sont ignorees pour ne pas encombrer la page.
+        let alt = attr(node, "alt").unwrap_or("").trim();
+        if !alt.is_empty() {
+            let muted = Style { color: 0x9aa0a6, scale: cst.scale.min(2), ..cst.clone() };
+            f.push_word(alt, &muted);
+        }
         return;
     }
     if tag == "input" || tag == "textarea" || tag == "select" {
@@ -1190,6 +1293,11 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
     if tag == "tr" { disp = Disp::Flex; }
     if bx.float != FloatK::None && disp == Disp::Block { disp = Disp::InlineBlock; }
 
+    // Empile l'element comme ancetre pour le matching descendant de ses enfants.
+    let a_cls = attr(node, "class").unwrap_or("").to_string();
+    let a_id = attr(node, "id").unwrap_or("").to_ascii_lowercase();
+    f.ctx.ancestors.push((tag.to_string(), a_cls, a_id));
+
     match disp {
         Disp::None => {}
         Disp::Inline => { for &c in &node.children { walk(f, dom, c, &cst, depth + 1); } }
@@ -1202,6 +1310,8 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
         Disp::Grid => { block_layout(f, dom, node, &cst, &bx, tag, Disp::Grid, depth); }
         Disp::Block => { block_layout(f, dom, node, &cst, &bx, tag, Disp::Block, depth); }
     }
+
+    f.ctx.ancestors.pop();
 }
 
 // Met en page le contenu d'un element dans son propre fragment (largeur `w`).
