@@ -1,6 +1,7 @@
 //! Implementation des commandes du shell Bouchaud OS.
 
 use crate::arch::x86_64::{cpu, gdt, idt, interrupts};
+use crate::browser;
 use crate::drivers::keyboard;
 use crate::drivers::vga::{self, COLOR_CYAN, COLOR_DEFAULT, COLOR_YELLOW};
 use crate::fs::ramfs::{self, NodeKind, CONTENT_LEN, MAX_NODES, PERM_R, PERM_W, PERM_X};
@@ -48,6 +49,17 @@ pub fn help() {
 
 pub fn version() {
     println!("{} {} - kernel foundation", OS_NAME, VERSION);
+    println!(
+        "Nautile: merge {} ({})",
+        browser::NAUTILE_MERGE_SHORT,
+        browser::NAUTILE_MERGE_DATE
+    );
+    println!(
+        "Nautile source: {} ({})",
+        browser::NAUTILE_SOURCE_SHORT,
+        browser::NAUTILE_SOURCE_DATE
+    );
+    println!("Nautile ref: {}", browser::NAUTILE_MERGE_SUBJECT);
     println!("Objectif: OS souverain francais experimental");
 }
 
@@ -58,6 +70,13 @@ pub fn uname() {
 pub fn sysinfo() {
     println!("os: {}", OS_NAME);
     println!("version: {} - kernel foundation", VERSION);
+    println!(
+        "nautile: merge {} ({}) / source {} ({})",
+        browser::NAUTILE_MERGE_SHORT,
+        browser::NAUTILE_MERGE_DATE,
+        browser::NAUTILE_SOURCE_SHORT,
+        browser::NAUTILE_SOURCE_DATE
+    );
     println!("arch: x86_64");
     println!("keyboard: AZERTY-FR");
     println!("display: VGA text mode");

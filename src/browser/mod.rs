@@ -20,4 +20,12 @@ pub mod pages;
 pub mod state;
 pub mod ui;
 
+mod version {
+    include!(concat!(env!("OUT_DIR"), "/nautile_version.rs"));
+}
+
 pub use state::BrowserState;
+pub use version::{
+    NAUTILE_MERGE_DATE, NAUTILE_MERGE_SHORT, NAUTILE_MERGE_SUBJECT, NAUTILE_SOURCE_DATE,
+    NAUTILE_SOURCE_SHORT,
+};
