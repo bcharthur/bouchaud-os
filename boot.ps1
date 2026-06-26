@@ -1,6 +1,13 @@
 # Regenere l'image bootable AVEC verification (contrairement a run.ps1 qui lance
 # QEMU meme si bootimage echoue) puis lance QEMU sur l'image fraiche.
 Set-Location $PSScriptRoot
+& "$PSScriptRoot\tools\update-nautile.ps1" -RepoRoot $PSScriptRoot
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "mise a jour Nautile echouee - bootimage non lance." -ForegroundColor Red
+    Read-Host "Entree pour fermer"
+    exit $LASTEXITCODE
+}
+
 Write-Host "=== cargo +nightly bootimage ===" -ForegroundColor Cyan
 cargo +nightly bootimage 2>&1 | Tee-Object -FilePath boot.log
 $code = $LASTEXITCODE

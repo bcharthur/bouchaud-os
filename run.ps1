@@ -2,6 +2,12 @@ param(
   [switch]$Fullscreen
 )
 
+& "$PSScriptRoot\tools\update-nautile.ps1" -RepoRoot $PSScriptRoot
+if ($LASTEXITCODE -ne 0) {
+  Write-Host "mise a jour Nautile echouee - bootimage non lance." -ForegroundColor Red
+  exit $LASTEXITCODE
+}
+
 cargo +nightly bootimage
 # Si la generation de l'image echoue (erreur de compilation, llvm-objcopy
 # bloque, .bin verrouille par un QEMU encore ouvert...), on ARRETE ici au lieu
