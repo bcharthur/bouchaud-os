@@ -163,7 +163,21 @@ body{background:#0e1726;color:#e6edf6;font-family:sans-serif}
 .sidebar a{display:block;color:#9fc2e8;font-size:12px;padding:4px 0}
 .content{flex:1;background:#13233c;border-radius:6px;padding:14px}
 .content p{color:#b6cae0;font-size:12px;line-height:1.6}
+.posrow{display:flex;gap:14px;margin-top:14px}
+.relcard{position:relative;flex:1;background:#13233c;padding:16px;border-radius:8px;
+         box-shadow:0 4px 10px #04101f}
+.relcard h3{color:#7fb4ee;font-size:14px}
+.relcard p{color:#b6cae0;font-size:12px;line-height:1.7}
+.badge-abs{position:absolute;top:8px;right:8px;background:#e0483a;color:#fff;
+           font-size:10px;font-weight:bold;padding:3px 7px;border-radius:10px}
+.clipbox{flex:1;height:90px;overflow:hidden;background:#0f2d22;border:1px solid #2f7a4f;
+         border-radius:8px;padding:12px}
+.clipbox h3{color:#5fd08a;font-size:13px}
+.clipbox p{color:#b6cae0;font-size:12px;line-height:1.7}
+.fixednote{position:fixed;bottom:10px;right:10px;background:#1a73e8;color:#fff;
+           font-size:11px;padding:6px 10px;border-radius:6px;box-shadow:0 2px 6px #02060d}
 </style></head><body>
+<div class="fixednote">position: fixed &#x2693;</div>
 <div class="nav">
   <div class="brand">&#x1f41a; Nautile</div>
   <div class="menu">
@@ -209,6 +223,27 @@ body{background:#0e1726;color:#e6edf6;font-family:sans-serif}
          par Nautile.</p>
     </div>
   </div>
+
+  <h2 style="margin-top:18px">Positionnement &mdash; relative/absolute, overflow, ombre</h2>
+  <div class="posrow">
+    <div class="relcard">
+      <div class="badge-abs">NOUVEAU</div>
+      <h3>position: relative + absolute</h3>
+      <p>Le badge rouge est en <b>position:absolute; top:8px; right:8px</b>, ancre
+         au coin de cette carte <b>position:relative</b>. L'ombre portee vient de
+         <b>box-shadow</b>.</p>
+    </div>
+    <div class="clipbox">
+      <h3>overflow: hidden</h3>
+      <p>Ce conteneur a une hauteur fixe de 90px et <b>overflow:hidden</b> : le
+         texte qui depasse est decoupe au bord de la boite au lieu de deborder.
+         Ligne supplementaire un. Ligne supplementaire deux. Ligne supplementaire
+         trois. Ligne supplementaire quatre. Ligne supplementaire cinq, qui ne
+         doit pas etre visible si le clipping fonctionne correctement.</p>
+    </div>
+  </div>
+  <p style="color:#5f7da0;font-size:11px;margin-top:10px">La pastille bleue en bas
+     a droite reste fixe a l'ecran (position:fixed) meme en defilant.</p>
 </div>
 </body></html>"#
 }

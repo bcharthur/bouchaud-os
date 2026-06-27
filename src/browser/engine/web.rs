@@ -653,9 +653,45 @@ struct Style {
     align: u8,        // 0 gauche, 1 centre, 2 droite
     href: Option<String>,
     pre: bool,        // white-space: pre (conserve espaces/sauts)
+    transform: u8,    // text-transform: 0 none, 1 uppercase, 2 lowercase, 3 capitalize
+    nowrap: bool,     // white-space: nowrap (pas de retour a la ligne automatique)
+    line_h: Option<i32>, // line-height explicite (px) ; None = defaut
 }
 
-fn default_style() -> Style { Style { color: 0x202124, scale: 2, bold: false, align: 0, href: None, pre: false } }
+fn default_style() -> Style { Style { color: 0x202124, scale: 2, bold: false, align: 0, href: None, pre: false, transform: 0, nowrap: false, line_h: None } }
+
+// Marqueur de l'element de liste courant + avance le compteur. `<ol>` -> numero
+// (1. 2. 3.), `<ul>` -> puce (• / rien si list-style:none). None hors liste connue.
+fn li_marker(ctx: &mut Ctx) -> Option<String> {
+    let top = ctx.list_stack.last_mut()?;
+    if top.0 {
+        let i = top.1;
+        top.1 += 1;
+        Some(alloc::format!("{}.", i))
+    } else if top.2 == 1 {
+        None // list-style: none
+    } else {
+        Some("\u{2022}".to_string()) // puce •
+    }
+}
+
+// Applique text-transform a un mot.
+fn apply_transform(s: &str, t: u8) -> String {
+    match t {
+        1 => s.chars().flat_map(|c| c.to_uppercase()).collect(),
+        2 => s.chars().flat_map(|c| c.to_lowercase()).collect(),
+        3 => {
+            let mut out = String::new();
+            let mut first = true;
+            for c in s.chars() {
+                if first { for u in c.to_uppercase() { out.push(u); } first = false; }
+                else { out.push(c); }
+            }
+            out
+        }
+        _ => s.to_string(),
+    }
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Disp { Block, Inline, InlineBlock, Flex, Grid, None }
@@ -671,12 +707,59 @@ enum Justify { Start, Center, End, Between, Around }
 // Alignement transversal (align-items) : position dans la hauteur de ligne.
 #[derive(Clone, Copy, PartialEq)]
 enum AlignI { Start, Center, End, Stretch }
+// Schema de positionnement CSS (position:).
+#[derive(Clone, Copy, PartialEq)]
+enum Pos { Static, Relative, Absolute, Fixed, Sticky }
 #[derive(Clone, Copy)]
-enum Len { Px(i32), Pct(i32) }
-impl Len { fn resolve(self, avail: i32) -> i32 { match self { Len::Px(p) => p, Len::Pct(p) => (avail * p / 100).max(0) } } }
+enum Len { Px(i32), Pct(i32), Calc { pct: i32, px: i32 } }
+impl Len {
+    fn resolve(self, avail: i32) -> i32 {
+        match self {
+            Len::Px(p) => p,
+            Len::Pct(p) => (avail * p / 100).max(0),
+            // calc(pct% +/- px) — composante relative + absolue, comme un vrai moteur.
+            Len::Calc { pct, px } => (avail * pct / 100 + px).max(0),
+        }
+    }
+}
+
+// Evalue un `calc(...)` de longueurs : termes en % et px combines par + et -
+// (les operateurs * et / ne sont pas geres -> None, repli sur auto). Tolere
+// l'absence d'espaces autour des operateurs (CSS minifie).
+fn parse_calc(expr: &str) -> Option<Len> {
+    if expr.contains('*') || expr.contains('/') { return None; }
+    // Normalise : insere des espaces autour de + et - pour tokeniser simplement.
+    let norm = expr.replace('+', " + ").replace('-', " - ");
+    let mut pct = 0i32;
+    let mut px = 0i32;
+    let mut sign = 1i32;
+    let mut seen = false;
+    for tok in norm.split_whitespace() {
+        match tok {
+            "+" => sign = 1,
+            "-" => sign = -1,
+            _ => {
+                if let Some(p) = tok.strip_suffix('%') {
+                    pct += sign * p.trim().parse::<f32>().ok()? as i32;
+                } else if let Some(v) = font_px(tok) {
+                    px += sign * v;
+                } else {
+                    return None;
+                }
+                seen = true;
+                sign = 1;
+            }
+        }
+    }
+    if !seen { return None; }
+    if pct == 0 { Some(Len::Px(px)) } else { Some(Len::Calc { pct, px }) }
+}
 
 fn parse_len(s: &str) -> Option<Len> {
     let s = s.trim();
+    if let Some(inner) = s.strip_prefix("calc(").and_then(|r| r.strip_suffix(')')) {
+        return parse_calc(inner);
+    }
     if let Some(p) = s.strip_suffix('%') { return p.trim().parse::<f32>().ok().map(|v| Len::Pct(v as i32)); }
     font_px(s).map(Len::Px)
 }
@@ -709,6 +792,15 @@ struct BoxProps {
     flex_grow: i32,
     // Enfant grid : nombre de colonnes occupees (grid-column span) ; 0 = 1, 255 = pleine rangee.
     grid_span: u8,
+    // list-style-type : 0 auto (disc/decimal selon ul/ol), 1 none, 2 disc,
+    // 3 circle, 4 square, 5 decimal.
+    list_style: u8,
+    // Positionnement (P1) : schema + decalages + ordre d'empilement + clipping.
+    position: Pos,
+    top: Option<Len>, right: Option<Len>, bottom: Option<Len>, left: Option<Len>,
+    z_index: Option<i32>,
+    overflow_clip: bool,   // overflow: hidden/clip/auto/scroll -> clippe le contenu
+    shadow: Option<u32>,   // box-shadow : couleur de l'ombre portee (offset fixe)
 }
 fn default_box() -> BoxProps {
     BoxProps { hidden: false, bg: None, width: None, height: None, max_width: None, min_width: None, min_height: None,
@@ -716,7 +808,9 @@ fn default_box() -> BoxProps {
         pad_t: 0, pad_r: 0, pad_b: 0, pad_l: 0, mar_t: 0, mar_b: 0,
         border_w: 0, border_color: 0x000000, radius: 0,
         flex_dir: FlexDir::Row, justify: Justify::Start, align_items: AlignI::Stretch,
-        gap: 0, grid_cols: 0, flex_grow: 0, grid_span: 0 }
+        gap: 0, grid_cols: 0, flex_grow: 0, grid_span: 0, list_style: 0,
+        position: Pos::Static, top: None, right: None, bottom: None, left: None,
+        z_index: None, overflow_clip: false, shadow: None }
 }
 
 // Premiere longueur d'une valeur raccourcie (`10px 20px` -> 10).
@@ -790,6 +884,17 @@ pub enum Item {
 
 pub struct Link { pub x: i32, pub y: i32, pub w: i32, pub h: i32, pub href: String }
 
+/// Couche de peinture (stacking layer) : ensemble d'items partageant un ordre
+/// d'empilement `z`, eventuellement ancres au viewport (`fixed`) et/ou clippes
+/// a un rectangle (overflow). Les items sont en coordonnees document.
+pub struct Layer {
+    pub z: i32,
+    pub fixed: bool,
+    pub clip: Option<(i32, i32, i32, i32)>, // (x, y, w, h) en coords document
+    pub items: Vec<Item>,
+    pub links: Vec<Link>,
+}
+
 pub struct Page {
     pub title: String,
     pub items: Vec<Item>,
@@ -797,9 +902,15 @@ pub struct Page {
     pub images: Vec<Image>,
     pub height: i32,
     pub bg: u32,
+    /// Couches positionnees (position: absolute/fixed/relative+z-index), triees
+    /// par `z` croissant. Le flux normal est `items` (z=0 implicite).
+    pub layers: Vec<Layer>,
 }
 
 const PAD: i32 = 8;
+// Hauteur approximative du viewport pour `position: fixed` et le bloc conteneur
+// initial (la fenetre Nautile par defaut fait ~420px, moins le chrome).
+const VIEWPORT_H: i32 = 380;
 
 // Element d'une ligne en cours (positions relatives au debut de ligne).
 enum LineItem {
@@ -826,6 +937,17 @@ struct Ctx<'a> {
     // Pile des ancetres de l'element courant (tag, classes, id) — partagee entre
     // tous les sous-fragments pour le matching des selecteurs descendants.
     ancestors: Vec<(String, String, String)>,
+    // Pile de contexte de liste : (ordonnee, prochain index, style de marqueur).
+    list_stack: Vec<(bool, i32, u8)>,
+    // --- Positionnement (P1) ---
+    // Couches positionnees collectees pendant le layout (absolute/fixed/relative+z).
+    layers: Vec<Layer>,
+    // Pile des blocs conteneurs (content box en coords document) etablis par les
+    // ancetres positionnes ; le sommet sert de reference aux enfants `absolute`.
+    cb_stack: Vec<(i32, i32, i32, i32)>,
+    // Hauteur approximative du viewport (fenetre) pour `position: fixed` et le
+    // bloc conteneur initial.
+    viewport_h: i32,
 }
 
 impl<'a> Ctx<'a> {
@@ -929,15 +1051,20 @@ impl<'c, 'a> Flow<'c, 'a> {
     }
 
     fn push_word(&mut self, s: &str, st: &Style) {
+        // text-transform (uppercase/lowercase/capitalize) applique au mot.
+        let owned;
+        let s: &str = if st.transform != 0 { owned = apply_transform(s, st.transform); &owned } else { s };
         // Largeurs PROPORTIONNELLES via la police vectorielle (repli monospace).
         let px = 8 * st.scale as i32;
         let cw = super::font_ttf::char_width(' ', px).max(1); // espace inter-mots
         let wpx = super::font_ttf::text_width(s, px);
-        let lh = 8 * st.scale as i32 + LINE_GAP;
+        // Hauteur de ligne : line-height explicite, sinon taille + interligne.
+        let lh = st.line_h.map(|l| l.max(px)).unwrap_or(px + LINE_GAP);
         if lh > self.line_h { self.line_h = lh; }
         let mut cur = self.line_cursor();
         if cur > 0 { cur += cw; }
-        if cur + wpx > self.avail && cur > 0 { self.flush_line(); cur = 0; if lh > self.line_h { self.line_h = lh; } }
+        // white-space: nowrap -> jamais de retour a la ligne automatique.
+        if !st.nowrap && cur + wpx > self.avail && cur > 0 { self.flush_line(); cur = 0; if lh > self.line_h { self.line_h = lh; } }
         self.line.push(LineItem::Word { dx: cur, w: wpx, s: s.to_string(), color: st.color, scale: st.scale, bold: st.bold, href: st.href.clone() });
     }
 
@@ -1053,21 +1180,31 @@ fn layout(dom: &Dom, base_url: &str, width: i32, css: &[Rule]) -> Page {
             }
         }
     }
+    let content_w = (width - 2 * PAD).max(40);
     let mut ctx = Ctx {
         css, css_vars, images: Vec::new(), img_cache: Vec::new(), img_budget: 24,
         scheme: scheme.to_string(), host: host.to_string(), title: String::new(), visited: 0,
         ancestors: Vec::new(),
+        list_stack: Vec::new(),
+        layers: Vec::new(),
+        // Bloc conteneur initial = viewport (origine du contenu, largeur, hauteur approx).
+        cb_stack: alloc::vec![(PAD, PAD, content_w, VIEWPORT_H)],
+        viewport_h: VIEWPORT_H,
     };
-    let content_w = (width - 2 * PAD).max(40);
     let mut f = Flow::new(&mut ctx, PAD, content_w);
     f.y = PAD;
     walk(&mut f, dom, 0, &default_style(), 0);
     f.flush_line();
     let height = f.y + PAD;
     let items = core::mem::take(&mut f.items);
-    let links = core::mem::take(&mut f.links);
+    let mut links = core::mem::take(&mut f.links);
     drop(f);
-    Page { title: ctx.title, items, links, images: ctx.images, height, bg }
+    // Recupere les couches positionnees, triees par z (stable = ordre document).
+    let mut layers = core::mem::take(&mut ctx.layers);
+    layers.sort_by_key(|l| l.z);
+    // Les liens des couches participent au hit-testing (coords document).
+    for l in &layers { for lk in &l.links { links.push(Link { x: lk.x, y: lk.y, w: lk.w, h: lk.h, href: lk.href.clone() }); } }
+    Page { title: ctx.title, items, links, images: ctx.images, height, bg, layers }
 }
 
 // Resout les variables CSS var(--name) dans une valeur.
@@ -1113,7 +1250,59 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, cs
             "font-size" => { if let Some(px) = font_px(val) { st.scale = px_to_scale(px); } }
             "font-weight" => { if val == "bold" || val == "bolder" || val == "700" || val == "800" || val == "900" { st.bold = true; } else if val == "normal" || val == "400" { st.bold = false; } }
             "text-align" => { st.align = match val { "center" => 1, "right" => 2, _ => 0 }; }
-            "white-space" => { if val.starts_with("pre") { st.pre = true; } }
+            "white-space" => {
+                if val == "pre" || val == "pre-wrap" { st.pre = true; }
+                if val == "nowrap" || val == "pre" { st.nowrap = true; }
+            }
+            "line-height" => {
+                let v = val.trim();
+                let base = 8 * st.scale as i32;
+                if v == "normal" { st.line_h = None; }
+                else if let Some(px) = v.strip_suffix("px") { st.line_h = px.trim().parse::<f32>().ok().map(|x| x as i32); }
+                else if v.ends_with('%') { st.line_h = v.trim_end_matches('%').trim().parse::<f32>().ok().map(|x| (base as f32 * x / 100.0) as i32); }
+                else if let Some(em) = v.strip_suffix("em") { st.line_h = em.trim().parse::<f32>().ok().map(|x| (base as f32 * x) as i32); }
+                else if let Ok(mult) = v.parse::<f32>() { st.line_h = Some((base as f32 * mult) as i32); } // unitless
+            }
+            "text-transform" => {
+                st.transform = match val { "uppercase" => 1, "lowercase" => 2, "capitalize" => 3, _ => 0 };
+            }
+            "list-style-type" | "list-style" => {
+                // `list-style: none` ou un type ; on lit le premier mot reconnu.
+                for tok in val.split_whitespace() {
+                    let s = match tok {
+                        "none" => 1, "disc" => 2, "circle" => 3, "square" => 4,
+                        "decimal" => 5, _ => 0,
+                    };
+                    if s != 0 { bx.list_style = s; break; }
+                }
+            }
+            // --- Positionnement (P1) ---
+            "position" => {
+                bx.position = match val {
+                    "relative" => Pos::Relative,
+                    "absolute" => Pos::Absolute,
+                    "fixed" => Pos::Fixed,
+                    "sticky" | "-webkit-sticky" => Pos::Sticky,
+                    _ => Pos::Static,
+                };
+            }
+            "top" => { bx.top = parse_len(val); }
+            "right" => { bx.right = parse_len(val); }
+            "bottom" => { bx.bottom = parse_len(val); }
+            "left" => { bx.left = parse_len(val); }
+            "z-index" => { bx.z_index = val.trim().parse::<i32>().ok(); }
+            "overflow" | "overflow-x" | "overflow-y" => {
+                if matches!(val, "hidden" | "clip" | "auto" | "scroll") { bx.overflow_clip = true; }
+            }
+            // box-shadow : on garde uniquement la couleur (ombre portee discrete).
+            "box-shadow" => {
+                if val != "none" {
+                    let col = val.split(',').next().unwrap_or(val)
+                        .split_whitespace().find_map(parse_color)
+                        .unwrap_or(0x30000000 & 0xffffff);
+                    bx.shadow = Some(col);
+                }
+            }
             "display" => {
                 let d = match val { "none" => Disp::None, "inline" => Disp::Inline, "inline-block" => Disp::InlineBlock,
                     "flex" | "inline-flex" => Disp::Flex, "grid" | "inline-grid" => Disp::Grid, _ => Disp::Block };
@@ -1305,6 +1494,21 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
     let a_id = attr(node, "id").unwrap_or("").to_ascii_lowercase();
     f.ctx.ancestors.push((tag.to_string(), a_cls, a_id));
 
+    // --- Positionnement (P1) ---
+    // absolute / fixed : hors flux, place dans une couche dediee (z-index).
+    if matches!(bx.position, Pos::Absolute | Pos::Fixed) {
+        layout_positioned(f, dom, node, &cst, &bx, tag, disp, depth);
+        f.ctx.ancestors.pop();
+        return;
+    }
+
+    // relative / sticky : reste dans le flux, mais on capture la plage produite
+    // pour la decaler (top/left...) et/ou la promouvoir en couche (z-index).
+    let positioned_inflow = matches!(bx.position, Pos::Relative | Pos::Sticky);
+    let it0 = f.items.len();
+    let lk0 = f.links.len();
+    let lay0 = f.ctx.layers.len();
+
     match disp {
         Disp::None => {}
         Disp::Inline => { for &c in &node.children { walk(f, dom, c, &cst, depth + 1); } }
@@ -1318,7 +1522,86 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
         Disp::Block => { block_layout(f, dom, node, &cst, &bx, tag, Disp::Block, depth); }
     }
 
+    if positioned_inflow {
+        // Decalage relatif a la position normale (sticky approxime en relative).
+        let (cbw, cbh) = f.ctx.cb_stack.last().map(|&(_, _, w, h)| (w, h)).unwrap_or((f.avail, f.ctx.viewport_h));
+        let dx = bx.left.map(|l| l.resolve(cbw)).or_else(|| bx.right.map(|l| -l.resolve(cbw))).unwrap_or(0);
+        let dy = bx.top.map(|l| l.resolve(cbh)).or_else(|| bx.bottom.map(|l| -l.resolve(cbh))).unwrap_or(0);
+        if dx != 0 || dy != 0 {
+            for it in &mut f.items[it0..] { translate_item(it, dx, dy); }
+            for lk in &mut f.links[lk0..] { lk.x += dx; lk.y += dy; }
+            for l in &mut f.ctx.layers[lay0..] {
+                for it in &mut l.items { translate_item(it, dx, dy); }
+                for lk in &mut l.links { lk.x += dx; lk.y += dy; }
+                if let Some((cx, cy, cw, ch)) = l.clip { l.clip = Some((cx + dx, cy + dy, cw, ch)); }
+            }
+        }
+        // z-index : promeut la plage produite dans une couche d'empilement.
+        if let Some(z) = bx.z_index {
+            let items: Vec<Item> = f.items.drain(it0..).collect();
+            let links: Vec<Link> = f.links.drain(lk0..).collect();
+            f.ctx.layers.push(Layer { z, fixed: false, clip: None, items, links });
+        }
+    }
+
     f.ctx.ancestors.pop();
+}
+
+// Place un element `position: absolute|fixed` dans une couche dediee. Le sous-arbre
+// est mis en page dans son propre espace (origine 0,0), puis translate a la position
+// calculee depuis le bloc conteneur (absolute) ou le viewport (fixed).
+fn layout_positioned(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, tag: &str, disp: Disp, depth: u32) {
+    let fixed = bx.position == Pos::Fixed;
+    // Bloc conteneur : viewport pour `fixed`, sinon le plus proche ancetre positionne.
+    let (cbx, cby, cbw, cbh) = if fixed {
+        (PAD, 0, f.avail.max(40), f.ctx.viewport_h)
+    } else {
+        *f.ctx.cb_stack.last().unwrap_or(&(PAD, PAD, f.avail, f.ctx.viewport_h))
+    };
+
+    let lft = bx.left.map(|l| l.resolve(cbw));
+    let rgt = bx.right.map(|l| l.resolve(cbw));
+    let top = bx.top.map(|l| l.resolve(cbh));
+    let bot = bx.bottom.map(|l| l.resolve(cbh));
+
+    // Largeur : explicite, sinon left+right impose la largeur, sinon pleine CB.
+    let width = if let Some(w) = bx.width { w.resolve(cbw) }
+        else if let (Some(l), Some(r)) = (lft, rgt) { (cbw - l - r).max(8) }
+        else { cbw };
+    let width = width.clamp(8, cbw.max(8));
+
+    // Mise en page du sous-arbre dans un sous-flux a l'origine (0,0).
+    let inner_disp = match disp { Disp::Flex => Disp::Flex, Disp::Grid => Disp::Grid, _ => Disp::Block };
+    let layer_start = f.ctx.layers.len();
+    // block_layout etablit lui-meme le bloc conteneur local (element positionne).
+    let mut sub = Flow::new(f.ctx, 0, width);
+    sub.y = 0;
+    block_layout(&mut sub, dom, node, cst, bx, tag, inner_disp, depth);
+    sub.flush_line();
+    let h = sub.y.max(1);
+    let mut items = core::mem::take(&mut sub.items);
+    let mut links = core::mem::take(&mut sub.links);
+    drop(sub);
+
+    // Position finale dans le document (ou le viewport pour fixed).
+    let px = if let Some(l) = lft { cbx + l }
+        else if let Some(r) = rgt { cbx + cbw - r - width }
+        else { cbx };
+    let py = if let Some(t) = top { cby + t }
+        else if let Some(b) = bot { cby + cbh - b - h }
+        else { cby };
+
+    for it in &mut items { translate_item(it, px, py); }
+    for lk in &mut links { lk.x += px; lk.y += py; }
+    // Translate aussi les couches imbriquees (descendants absolus) generees.
+    for l in &mut f.ctx.layers[layer_start..] {
+        for it in &mut l.items { translate_item(it, px, py); }
+        for lk in &mut l.links { lk.x += px; lk.y += py; }
+        if let Some((cx, cy, cw, ch)) = l.clip { l.clip = Some((cx + px, cy + py, cw, ch)); }
+    }
+
+    let clip = if bx.overflow_clip { Some((px, py, width, h)) } else { None };
+    f.ctx.layers.push(Layer { z: bx.z_index.unwrap_or(0), fixed, clip, items, links });
 }
 
 // Met en page le contenu d'un element dans son propre fragment (largeur `w`).
@@ -1326,7 +1609,7 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
 fn make_frag(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, tag: &str, w: i32, shrink: bool, depth: u32) -> Frag {
     let mut sub = Flow::new(f.ctx, 0, w);
     sub.align = cst.align;
-    if tag == "li" { let b = Style { color: 0x5f6368, ..cst.clone() }; sub.push_word("*", &b); }
+    if tag == "li" { let b = Style { color: 0x5f6368, ..cst.clone() }; sub.push_word("\u{2022}", &b); }
     for &c in &node.children { walk(&mut sub, dom, c, cst, depth + 1); }
     sub.flush_line();
     let used = sub.used_w.clamp(1, w);
@@ -1377,16 +1660,41 @@ fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps
     f.align = cst.align;
     f.y += bw + pt;                 // bordure + padding du haut
 
+    // Contexte de liste : ul/ol empilent (ordonnee, index de depart, style) pour
+    // que leurs <li> produisent puces ou numeros.
+    let is_list = tag == "ul" || tag == "ol";
+    if is_list {
+        let ordered = tag == "ol";
+        let start = if ordered {
+            attr(node, "start").and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(1)
+        } else { 1 };
+        f.ctx.list_stack.push((ordered, start, bx.list_style));
+    }
+
+    // Bloc conteneur : un element positionne (relative/absolute/fixed/sticky)
+    // sert de reference aux descendants `absolute`. Content box en coords courantes.
+    let establishes_cb = bx.position != Pos::Static;
+    if establishes_cb { f.ctx.cb_stack.push((f.x0, f.y, inner, f.ctx.viewport_h)); }
+
     // Contenu : flux normal, ou disposition flex/grid si le conteneur le demande.
     match inner_disp {
         Disp::Flex => flex_inner(f, dom, node, cst, bx, depth),
         Disp::Grid => grid_inner(f, dom, node, cst, bx, depth),
         _ => {
-            if tag == "li" { let b = Style { color: 0x5f6368, ..cst.clone() }; f.push_word("*", &b); }
+            if tag == "li" {
+                let marker = if f.ctx.list_stack.is_empty() { Some("\u{2022}".to_string()) } else { li_marker(f.ctx) };
+                if let Some(m) = marker {
+                    let b = Style { color: 0x5f6368, ..cst.clone() };
+                    f.push_word(&m, &b);
+                }
+            }
             for &c in &node.children { walk(f, dom, c, cst, depth + 1); }
             f.flush_line();
         }
     }
+
+    if establishes_cb { f.ctx.cb_stack.pop(); }
+    if is_list { f.ctx.list_stack.pop(); }
 
     f.y += pb + bw;               // bordure + padding du bas
     // height / min-height contraignent la hauteur finale de la boite.
@@ -1399,6 +1707,10 @@ fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps
     // Fond : remplit toute la boite (insere SOUS le contenu).
     if let Some(bgc) = bx.bg {
         if h > 0 { f.items.insert(bg_insert, Item::Rect { x: sx0 + left, y: box_top, w: outer, h, color: bgc }); }
+    }
+    // box-shadow : rectangle decale (+4,+4), insere ENCORE en dessous du fond.
+    if let Some(sh) = bx.shadow {
+        if h > 0 { f.items.insert(bg_insert, Item::Rect { x: sx0 + left + 4, y: box_top + 4, w: outer, h, color: sh }); }
     }
     // Bordure : 4 traits dessines PAR-DESSUS (haut, bas, gauche, droite).
     if bw > 0 && h > 0 {
@@ -1591,27 +1903,66 @@ fn scheme_host(base: &str) -> (&str, &str) {
 
 pub fn paint(page: &Page, scroll: i32, bx: usize, by: usize, bw: usize, bh: usize) {
     fb::fill_rect_rgb(bx, by, bw, bh, page.bg);
-    let bxi = bx as i32; let byi = by as i32; let bwi = bw as i32; let bhi = bh as i32;
-    for it in &page.items {
+    let view = (bx as i32, by as i32, bw as i32, bh as i32);
+    // Ordre d'empilement (stacking) : couches z<0, puis flux normal (z=0), puis
+    // couches z>=0. Les couches sont deja triees par z croissant dans layout().
+    for l in &page.layers { if l.z < 0 { paint_layer(l, &page.images, scroll, view); } }
+    paint_list(&page.items, scroll, &page.images, view, view);
+    for l in &page.layers { if l.z >= 0 { paint_layer(l, &page.images, scroll, view); } }
+}
+
+// Peint une couche positionnee : `fixed` ignore le scroll, `clip` restreint le
+// viewport effectif au rectangle d'overflow (intersecte avec la fenetre).
+fn paint_layer(l: &Layer, images: &[Image], scroll: i32, view: (i32, i32, i32, i32)) {
+    let sc = if l.fixed { 0 } else { scroll };
+    let mut vp = view;
+    if let Some((cx, cy, cw, ch)) = l.clip {
+        // Rectangle de clip en coords ecran (decale du scroll si non fixe).
+        let sx = view.0 + cx;
+        let sy = view.1 + cy - sc;
+        vp = intersect(view, (sx, sy, cw, ch));
+    }
+    if vp.2 <= 0 || vp.3 <= 0 { return; }
+    paint_list(&l.items, sc, images, vp, view);
+}
+
+// Intersection de deux rectangles (x, y, w, h).
+fn intersect(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> (i32, i32, i32, i32) {
+    let x0 = a.0.max(b.0);
+    let y0 = a.1.max(b.1);
+    let x1 = (a.0 + a.2).min(b.0 + b.2);
+    let y1 = (a.1 + a.3).min(b.1 + b.3);
+    (x0, y0, (x1 - x0).max(0), (y1 - y0).max(0))
+}
+
+// Peint une liste d'items (coords document) dans le viewport effectif `vp`
+// (coords ecran), avec defilement `scroll`. `blit_view` borne le blit d'images.
+fn paint_list(items: &[Item], scroll: i32, images: &[Image], vp: (i32, i32, i32, i32), _blit_view: (i32, i32, i32, i32)) {
+    let (vx, vy, vw, vh) = vp;
+    if vw <= 0 || vh <= 0 { return; }
+    let bx = vx as usize; let by = vy as usize; let bw = vw as usize; let bh = vh as usize;
+    for it in items {
         match it {
             Item::Rect { x, y, w, h, color } => {
-                let sy = byi + y - scroll;
-                if sy + h <= byi || sy >= byi + bhi { continue; }
-                let yy = sy.max(byi);
-                let hh = (sy + h).min(byi + bhi) - yy;
-                let xx = bxi + x;
-                let ww = (*w).min(bwi - x).max(0);
-                if hh > 0 && ww > 0 && xx >= bxi {
-                    fb::fill_rect_rgb(xx as usize, yy as usize, ww as usize, hh as usize, *color);
+                let sy = vy + y - scroll;
+                if sy + h <= vy || sy >= vy + vh { continue; }
+                let yy = sy.max(vy);
+                let hh = (sy + h).min(vy + vh) - yy;
+                let xx = vx + x;
+                // Clip horizontal au viewport effectif (gauche + droite).
+                let x0 = xx.max(vx);
+                let x1 = (xx + w).min(vx + vw);
+                let ww = (x1 - x0).max(0);
+                if hh > 0 && ww > 0 {
+                    fb::fill_rect_rgb(x0 as usize, yy as usize, ww as usize, hh as usize, *color);
                 }
             }
             Item::Text { x, y, s, color, scale, bold } => {
-                let sy = byi + y - scroll;
+                let sy = vy + y - scroll;
                 let h = 8 * *scale as i32;
-                if sy < byi || sy + h > byi + bhi { continue; }
-                let xx = bxi + x;
-                if xx >= bxi && xx < bxi + bwi {
-                    // Police vectorielle antialiasee si dispo ; sinon repli bitmap.
+                if sy < vy || sy + h > vy + vh { continue; }
+                let xx = vx + x;
+                if xx >= vx && xx < vx + vw {
                     let px = 8 * *scale as i32;
                     if !super::font_ttf::draw_text(xx, sy, s, *color, px, *bold) {
                         fb::draw_text_rgb(xx as usize, sy as usize, s, *color, *scale);
@@ -1620,25 +1971,15 @@ pub fn paint(page: &Page, scroll: i32, bx: usize, by: usize, bw: usize, bh: usiz
                 }
             }
             Item::Image { x, y, w: _w, h, idx } => {
-                let sy = byi + y - scroll;
-                if sy + h <= byi || sy >= byi + bhi { continue; }
-                if let Some(img) = page.images.get(*idx) {
-                    let xx = bxi + x;
-                    if xx >= bxi {
-                        let skip = (byi - sy).max(0) as usize;
+                let sy = vy + y - scroll;
+                if sy + h <= vy || sy >= vy + vh { continue; }
+                if let Some(img) = images.get(*idx) {
+                    let xx = vx + x;
+                    if xx >= vx {
+                        let skip = (vy - sy).max(0) as usize;
                         let draw_h = img.h.saturating_sub(skip);
                         let start = skip.saturating_mul(img.w).min(img.pix.len());
-                        fb::blit_rgb(
-                            xx as usize,
-                            sy.max(byi) as usize,
-                            img.w,
-                            draw_h,
-                            &img.pix[start..],
-                            bx,
-                            by,
-                            bw,
-                            bh,
-                        );
+                        fb::blit_rgb(xx as usize, sy.max(vy) as usize, img.w, draw_h, &img.pix[start..], bx, by, bw, bh);
                     }
                 }
             }

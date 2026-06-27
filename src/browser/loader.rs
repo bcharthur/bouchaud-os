@@ -144,6 +144,7 @@ fn compat_render(url: &str, width: i32) -> (Session, Page) {
                 images: alloc::vec![scaled],
                 height: ih.max(1),
                 bg: 0xffffff,
+                layers: Vec::new(),
             };
             let (sess, _) = Session::open(b"", url, width);
             return (sess, page);
