@@ -654,9 +654,11 @@ struct Style {
     href: Option<String>,
     pre: bool,        // white-space: pre (conserve espaces/sauts)
     transform: u8,    // text-transform: 0 none, 1 uppercase, 2 lowercase, 3 capitalize
+    nowrap: bool,     // white-space: nowrap (pas de retour a la ligne automatique)
+    line_h: Option<i32>, // line-height explicite (px) ; None = defaut
 }
 
-fn default_style() -> Style { Style { color: 0x202124, scale: 2, bold: false, align: 0, href: None, pre: false, transform: 0 } }
+fn default_style() -> Style { Style { color: 0x202124, scale: 2, bold: false, align: 0, href: None, pre: false, transform: 0, nowrap: false, line_h: None } }
 
 // Marqueur de l'element de liste courant + avance le compteur. `<ol>` -> numero
 // (1. 2. 3.), `<ul>` -> puce (• / rien si list-style:none). None hors liste connue.
@@ -1056,11 +1058,13 @@ impl<'c, 'a> Flow<'c, 'a> {
         let px = 8 * st.scale as i32;
         let cw = super::font_ttf::char_width(' ', px).max(1); // espace inter-mots
         let wpx = super::font_ttf::text_width(s, px);
-        let lh = 8 * st.scale as i32 + LINE_GAP;
+        // Hauteur de ligne : line-height explicite, sinon taille + interligne.
+        let lh = st.line_h.map(|l| l.max(px)).unwrap_or(px + LINE_GAP);
         if lh > self.line_h { self.line_h = lh; }
         let mut cur = self.line_cursor();
         if cur > 0 { cur += cw; }
-        if cur + wpx > self.avail && cur > 0 { self.flush_line(); cur = 0; if lh > self.line_h { self.line_h = lh; } }
+        // white-space: nowrap -> jamais de retour a la ligne automatique.
+        if !st.nowrap && cur + wpx > self.avail && cur > 0 { self.flush_line(); cur = 0; if lh > self.line_h { self.line_h = lh; } }
         self.line.push(LineItem::Word { dx: cur, w: wpx, s: s.to_string(), color: st.color, scale: st.scale, bold: st.bold, href: st.href.clone() });
     }
 
@@ -1246,7 +1250,19 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, cs
             "font-size" => { if let Some(px) = font_px(val) { st.scale = px_to_scale(px); } }
             "font-weight" => { if val == "bold" || val == "bolder" || val == "700" || val == "800" || val == "900" { st.bold = true; } else if val == "normal" || val == "400" { st.bold = false; } }
             "text-align" => { st.align = match val { "center" => 1, "right" => 2, _ => 0 }; }
-            "white-space" => { if val.starts_with("pre") { st.pre = true; } }
+            "white-space" => {
+                if val == "pre" || val == "pre-wrap" { st.pre = true; }
+                if val == "nowrap" || val == "pre" { st.nowrap = true; }
+            }
+            "line-height" => {
+                let v = val.trim();
+                let base = 8 * st.scale as i32;
+                if v == "normal" { st.line_h = None; }
+                else if let Some(px) = v.strip_suffix("px") { st.line_h = px.trim().parse::<f32>().ok().map(|x| x as i32); }
+                else if v.ends_with('%') { st.line_h = v.trim_end_matches('%').trim().parse::<f32>().ok().map(|x| (base as f32 * x / 100.0) as i32); }
+                else if let Some(em) = v.strip_suffix("em") { st.line_h = em.trim().parse::<f32>().ok().map(|x| (base as f32 * x) as i32); }
+                else if let Ok(mult) = v.parse::<f32>() { st.line_h = Some((base as f32 * mult) as i32); } // unitless
+            }
             "text-transform" => {
                 st.transform = match val { "uppercase" => 1, "lowercase" => 2, "capitalize" => 3, _ => 0 };
             }
