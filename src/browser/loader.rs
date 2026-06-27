@@ -52,6 +52,12 @@ pub fn open(url: &str, width: i32) -> (Session, Page) {
     }
     // HTTP / HTTPS : rendu local (souverain) par défaut
     if url.starts_with("http://") || url.starts_with("https://") {
+        // La home Google est construite par JS (illisible en rendu statique) :
+        // on sert une page Google locale fonctionnelle. Les autres URL google
+        // (/search, etc.) restent récupérées et rendues normalement.
+        if is_google_home(url) {
+            return from_html(super::pages::google_home().as_bytes(), url, width);
+        }
         if ENABLE_COMPAT_PROXY { return compat_render(url, width); }
         return local_render(url, width);
     }
@@ -75,13 +81,32 @@ pub fn resolve_input(input: &str, page: &Page) -> String {
             }
         }
     }
-    if t.contains("://") || t.starts_with("about:") || t.starts_with("file:") {
+    if t.contains("://") || t.starts_with("about:") || t.starts_with("file:") || t.starts_with("compat:") {
         return t.to_string();
     }
+    // Un mot ressemblant à un domaine (un point, pas d'espace) -> URL directe.
     if t.contains('.') && !t.contains(' ') {
         return format!("https://{}", t);
     }
-    t.to_string()
+    if t.is_empty() { return t.to_string(); }
+    // Sinon : recherche Google (barre d'adresse = barre de recherche, comme les
+    // navigateurs modernes). La page de résultats est rendue par notre moteur.
+    format!("https://www.google.com/search?q={}", pct_encode(t))
+}
+
+/// Vrai si l'URL est la page d'accueil Google (host google.*, chemin racine,
+/// sans requête) — distinguée de `/search?q=...` qui doit être récupérée.
+fn is_google_home(url: &str) -> bool {
+    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")).unwrap_or(url);
+    let (host, after) = match rest.find('/') { Some(i) => (&rest[..i], &rest[i..]), None => (rest, "") };
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    let is_google = host == "google.com" || host == "google.fr"
+        || (host.starts_with("google.") && !host.contains(' '));
+    if !is_google { return false; }
+    // Chemin racine et pas de paramètres de recherche.
+    let path = after.split('?').next().unwrap_or("");
+    let has_query = after.contains('?');
+    (path.is_empty() || path == "/") && !has_query
 }
 
 // ── Rendu local (souverain) ───────────────────────────────────────────────────

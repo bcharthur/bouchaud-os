@@ -5,32 +5,44 @@
 use alloc::format;
 use alloc::string::String;
 
-/// Page d'accueil Google locale : logo coloré + barre de recherche.
+/// Page d'accueil Google locale (souveraine) : la vraie home Google est
+/// construite par JavaScript et illisible en rendu statique. On affiche une
+/// page Google nette et fonctionnelle ; la recherche se fait depuis la barre
+/// d'adresse (qui route vers google.com/search, rendu par notre moteur).
 pub fn google_home() -> &'static str {
     r#"<!doctype html><html><head><title>Google</title>
 <style>
 body{background:#fff;color:#202124;font-family:sans-serif;margin:0;padding:0;text-align:center}
-.logo{margin:60px 0 24px;font-size:64px;letter-spacing:-2px;font-weight:bold}
+.logo{margin:64px 0 22px;font-size:68px;letter-spacing:-3px;font-weight:bold}
 .logo .b{color:#4285f4}.logo .r{color:#ea4335}.logo .y{color:#fbbc05}.logo .g{color:#34a853}
-.bar{background:#fff;border:1px solid #dfe1e5;border-radius:24px;padding:10px 20px;
-     font-size:14px;width:460px;display:inline-block;margin:0 auto}
-.row{margin:20px 0}
-.btn{background:#f8f9fa;border:1px solid #dadce0;border-radius:4px;
-     color:#3c4043;padding:8px 16px;font-size:13px;margin:4px;text-decoration:none;display:inline-block}
-.hint{color:#9aa0a6;font-size:12px;margin-top:32px}
+.bar{background:#fff;border:1px solid #dfe1e5;border-radius:24px;padding:11px 18px;
+     font-size:14px;width:480px;max-width:90%;margin:0 auto;color:#9aa0a6;
+     box-shadow:0 1px 6px rgba(32,33,36,.12);text-align:left}
+.cta{margin:22px 0}
+.btn{background:#f8f9fa;border:1px solid #f8f9fa;border-radius:4px;
+     color:#3c4043;padding:9px 16px;font-size:13px;margin:4px;text-decoration:none;display:inline-block}
+.tip{color:#5f6368;font-size:13px;margin:18px auto;max-width:520px;line-height:1.7}
+.tip b{color:#1a73e8}
+.quick{margin-top:14px}
+.quick a{color:#1a73e8;font-size:13px;margin:0 10px;text-decoration:none}
+.foot{color:#9aa0a6;font-size:12px;margin-top:40px}
 </style>
 </head><body>
 <div class="logo">
   <span class="b">G</span><span class="r">o</span><span class="y">o</span><span class="b">g</span><span class="g">l</span><span class="r">e</span>
 </div>
-<div class="row">
-  <input class="bar" type="text" placeholder="Rechercher ou saisir une URL" value="">
+<div class="bar">&#x1f50d;&nbsp;&nbsp;Rechercher sur Google</div>
+<div class="tip">Tapez votre recherche dans la <b>barre d'adresse</b> tout en haut,
+   puis appuyez sur <b>Entree</b> &mdash; Nautile l'enverra a Google et affichera
+   les resultats.</div>
+<div class="quick">
+  <a href="https://www.google.com/search?q=actualites">Actualites</a>
+  <a href="https://www.google.com/search?q=meteo">Meteo</a>
+  <a href="https://www.wikipedia.org/">Wikipedia</a>
+  <a href="https://example.com/">example.com</a>
 </div>
-<div class="row">
-  <a class="btn" href="https://www.google.com/">Recherche Google</a>
-  <a class="btn" href="https://www.google.com/?btnI=I">J'ai de la chance</a>
-</div>
-<div class="hint">Nautile — moteur souverain Bouchaud OS — <a href="about:bouchaud">Accueil</a></div>
+<div class="foot">Nautile &mdash; moteur de rendu souverain Bouchaud OS &mdash;
+   <a href="about:bouchaud">Accueil</a></div>
 </body></html>"#
 }
 
