@@ -43,6 +43,39 @@ fn is_void(tag: &str) -> bool {
     matches!(tag, "area"|"base"|"br"|"col"|"embed"|"hr"|"img"|"input"|"link"|"meta"|"param"|"source"|"track"|"wbr")
 }
 
+// Liste minimale des balises de bloc (pour la fermeture implicite des <p>).
+fn is_block_name(t: &str) -> bool {
+    matches!(t, "address"|"article"|"aside"|"blockquote"|"details"|"div"|"dl"|"fieldset"|
+        "figcaption"|"figure"|"footer"|"form"|"h1"|"h2"|"h3"|"h4"|"h5"|"h6"|"header"|"hr"|
+        "main"|"nav"|"ol"|"p"|"pre"|"section"|"table"|"ul")
+}
+
+/// Fermetures implicites de l'algorithme de construction d'arbre HTML5 : à
+/// l'ouverture d'un élément, dépile les éléments ouverts qu'il referme
+/// automatiquement (`<li>`, `<p>`, `<td>`, `<tr>`, `<option>`, `<dt>/<dd>`…),
+/// ce qui corrige l'imbrication des pages réelles au balisage relâché.
+fn auto_close(stack: &mut Vec<usize>, dom: &Dom, opening: &str) {
+    loop {
+        let top = match stack.last() {
+            Some(&n) if n != 0 => dom.nodes[n].tag.as_deref().unwrap_or(""),
+            _ => break,
+        };
+        let should_close = match opening {
+            "li" => top == "li",
+            "dt" | "dd" => top == "dt" || top == "dd",
+            "option" => top == "option" || top == "optgroup",
+            "td" | "th" => top == "td" || top == "th",
+            "tr" => top == "td" || top == "th" || top == "tr",
+            "thead" | "tbody" | "tfoot" => top == "td" || top == "th" || top == "tr",
+            "p" => top == "p",
+            // L'ouverture de tout bloc ferme un <p> resté ouvert.
+            _ if is_block_name(opening) => top == "p",
+            _ => false,
+        };
+        if should_close { stack.pop(); } else { break; }
+    }
+}
+
 fn lc(b: u8) -> u8 { b.to_ascii_lowercase() }
 
 fn find_ci(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
@@ -180,14 +213,19 @@ pub fn parse(html: &[u8]) -> Dom {
 
             let attrs = parse_attrs(&raw[p..]);
             let self_closing = raw.last() == Some(&b'/');
+            // Fermetures implicites HTML5 : un <li>/<p>/<td>/<tr>/<option>...
+            // non ferme est clos par l'ouverture d'un element incompatible.
+            auto_close(&mut stack, &dom, &name);
             let parent = *stack.last().unwrap_or(&0);
             let id = dom.push(parent, Node { tag: Some(name.clone()), text: String::new(), attrs, children: Vec::new() });
             if !is_void(&name) && !self_closing { stack.push(id); }
         } else {
             let start = i;
             while i < html.len() && html[i] != b'<' { i += 1; }
-            let frag = core::str::from_utf8(&html[start..i]).unwrap_or("");
-            let decoded = decode_entities(frag);
+            // Decodage UTF-8 tolerant : on ne jette plus tout le run si un octet
+            // est invalide (pages en encodage mixte) — remplacement byte a byte.
+            let frag = String::from_utf8_lossy(&html[start..i]);
+            let decoded = decode_entities(&frag);
             let parent = *stack.last().unwrap_or(&0);
             if decoded.trim().is_empty() {
                 if decoded.contains(|c: char| c == ' ' || c == '\n') {
@@ -516,6 +554,85 @@ fn rule_matches(chain: &[Sel], tag: &str, classes: &str, id: &str,
 
 // Couleurs --------------------------------------------------------------------
 
+// Interpolation lineaire entre deux couleurs RGB (t/max dans [0,1]).
+fn lerp_rgb(c1: u32, c2: u32, t: i32, max: i32) -> u32 {
+    let m = max.max(1);
+    let ch = |sh: u32| -> u32 {
+        let a = ((c1 >> sh) & 0xff) as i32;
+        let b = ((c2 >> sh) & 0xff) as i32;
+        (a + (b - a) * t / m).clamp(0, 255) as u32
+    };
+    (ch(16) << 16) | (ch(8) << 8) | ch(0)
+}
+
+// Decoupe une liste CSS par virgules de premier niveau (respecte les parentheses
+// de rgb()/rgba()/hsl()).
+fn split_top_commas(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    let b = s.as_bytes();
+    for (i, &c) in b.iter().enumerate() {
+        match c {
+            b'(' => depth += 1,
+            b')' => { if depth > 0 { depth -= 1; } }
+            b',' if depth == 0 => { out.push(s[start..i].trim()); start = i + 1; }
+            _ => {}
+        }
+    }
+    if start < s.len() { out.push(s[start..].trim()); }
+    out
+}
+
+// Couleur d'un stop de gradient ("#163870 60%" / "rgba(0,0,0,.4) 50%" / "red").
+fn color_of_stop(part: &str) -> Option<u32> {
+    let p = part.trim();
+    if let Some(c) = parse_color(p) { return Some(c); }
+    if let Some(idx) = p.rfind(char::is_whitespace) { return parse_color(p[..idx].trim()); }
+    None
+}
+
+/// Parse `linear-gradient(...)` en (couleur_debut, couleur_fin, vertical).
+/// La direction (`to bottom`, `160deg`...) determine l'axe ; les stops
+/// intermediaires sont reduits a leurs extremites (gradient 2 teintes).
+fn parse_gradient(s: &str) -> Option<(u32, u32, bool)> {
+    let key = "linear-gradient(";
+    let start = s.find(key)? + key.len();
+    // Trouve la parenthese fermante correspondante.
+    let bytes = s.as_bytes();
+    let mut depth = 1i32;
+    let mut end = start;
+    while end < bytes.len() && depth > 0 {
+        match bytes[end] { b'(' => depth += 1, b')' => depth -= 1, _ => {} }
+        if depth == 0 { break; }
+        end += 1;
+    }
+    let inner = &s[start..end.min(s.len())];
+    let parts = split_top_commas(inner);
+    if parts.is_empty() { return None; }
+
+    let mut vertical = true;
+    let mut colors: Vec<u32> = Vec::new();
+    for (idx, p) in parts.iter().enumerate() {
+        let pt = p.trim();
+        // Premier element : direction eventuelle.
+        if idx == 0 && (pt.ends_with("deg") || pt.starts_with("to ") || pt.ends_with("turn")) {
+            vertical = if let Some(a) = pt.strip_suffix("deg").and_then(|x| x.trim().parse::<f32>().ok()) {
+                let m = ((a % 180.0) + 180.0) % 180.0;
+                m < 45.0 || m > 135.0
+            } else if pt.contains("left") || pt.contains("right") {
+                false
+            } else {
+                true // to bottom / to top / défaut
+            };
+            continue;
+        }
+        if let Some(c) = color_of_stop(pt) { colors.push(c); }
+    }
+    if colors.is_empty() { return None; }
+    Some((colors[0], *colors.last().unwrap(), vertical))
+}
+
 fn named_color(s: &str) -> Option<u32> {
     Some(match s {
         "black" => 0x000000, "white" => 0xffffff, "red" => 0xff0000, "green" => 0x008000,
@@ -656,9 +773,10 @@ struct Style {
     transform: u8,    // text-transform: 0 none, 1 uppercase, 2 lowercase, 3 capitalize
     nowrap: bool,     // white-space: nowrap (pas de retour a la ligne automatique)
     line_h: Option<i32>, // line-height explicite (px) ; None = defaut
+    va: u8,           // vertical-align: 0 baseline, 1 middle, 2 top, 3 bottom
 }
 
-fn default_style() -> Style { Style { color: 0x202124, scale: 2, bold: false, align: 0, href: None, pre: false, transform: 0, nowrap: false, line_h: None } }
+fn default_style() -> Style { Style { color: 0x202124, scale: 2, bold: false, align: 0, href: None, pre: false, transform: 0, nowrap: false, line_h: None, va: 0 } }
 
 // Marqueur de l'element de liste courant + avance le compteur. `<ol>` -> numero
 // (1. 2. 3.), `<ul>` -> puce (• / rien si list-style:none). None hors liste connue.
@@ -801,6 +919,7 @@ struct BoxProps {
     z_index: Option<i32>,
     overflow_clip: bool,   // overflow: hidden/clip/auto/scroll -> clippe le contenu
     shadow: Option<u32>,   // box-shadow : couleur de l'ombre portee (offset fixe)
+    grad: Option<(u32, u32, bool)>, // linear-gradient : (debut, fin, vertical)
 }
 fn default_box() -> BoxProps {
     BoxProps { hidden: false, bg: None, width: None, height: None, max_width: None, min_width: None, min_height: None,
@@ -810,7 +929,7 @@ fn default_box() -> BoxProps {
         flex_dir: FlexDir::Row, justify: Justify::Start, align_items: AlignI::Stretch,
         gap: 0, grid_cols: 0, flex_grow: 0, grid_span: 0, list_style: 0,
         position: Pos::Static, top: None, right: None, bottom: None, left: None,
-        z_index: None, overflow_clip: false, shadow: None }
+        z_index: None, overflow_clip: false, shadow: None, grad: None }
 }
 
 // Premiere longueur d'une valeur raccourcie (`10px 20px` -> 10).
@@ -914,10 +1033,20 @@ const VIEWPORT_H: i32 = 380;
 
 // Element d'une ligne en cours (positions relatives au debut de ligne).
 enum LineItem {
-    Word { dx: i32, w: i32, s: String, color: u32, scale: usize, bold: bool, href: Option<String> },
-    Img { dx: i32, w: i32, h: i32, idx: usize },
+    Word { dx: i32, w: i32, s: String, color: u32, scale: usize, bold: bool, href: Option<String>, va: u8 },
+    Img { dx: i32, w: i32, h: i32, idx: usize, va: u8 },
     Box { dx: i32, w: i32, h: i32, fill: u32, value: String },
     Frag { dx: i32, w: i32, h: i32, items: Vec<Item>, links: Vec<Link> },
+}
+
+// Decalage vertical d'un element inline de hauteur `ih` dans une ligne de
+// hauteur `lh`, selon vertical-align (0 baseline≈bas, 1 middle, 2 top, 3 bottom).
+fn va_offset(va: u8, ih: i32, lh: i32) -> i32 {
+    match va {
+        1 => ((lh - ih) / 2).max(0),     // middle
+        2 => 0,                          // top
+        _ => (lh - ih).max(0),           // baseline / bottom
+    }
 }
 
 // Fragment mis en page dans son propre espace (coordonnees relatives a 0,0).
@@ -1023,14 +1152,15 @@ impl<'c, 'a> Flow<'c, 'a> {
         let line = core::mem::take(&mut self.line);
         for it in line {
             match it {
-                LineItem::Word { dx, w, s, color, scale, bold, href } => {
+                LineItem::Word { dx, w, s, color, scale, bold, href, va } => {
                     let tx = base_x + dx;
-                    let ty = y + (lh - 8 * scale as i32).max(0);
+                    let ty = y + va_offset(va, 8 * scale as i32, lh);
                     if let Some(h) = href { self.links.push(Link { x: tx, y, w, h: lh, href: h }); }
                     self.items.push(Item::Text { x: tx, y: ty, s, color, scale, bold });
                 }
-                LineItem::Img { dx, w, h, idx } => {
-                    self.items.push(Item::Image { x: base_x + dx, y, w, h, idx });
+                LineItem::Img { dx, w, h, idx, va } => {
+                    // Image inline : par defaut alignee sur la ligne de base (bas).
+                    self.items.push(Item::Image { x: base_x + dx, y: y + va_offset(va, h, lh), w, h, idx });
                 }
                 LineItem::Box { dx, w, h, fill, value } => {
                     self.items.push(Item::Rect { x: base_x + dx, y, w, h, color: 0x9aa0a6 });
@@ -1065,7 +1195,7 @@ impl<'c, 'a> Flow<'c, 'a> {
         if cur > 0 { cur += cw; }
         // white-space: nowrap -> jamais de retour a la ligne automatique.
         if !st.nowrap && cur + wpx > self.avail && cur > 0 { self.flush_line(); cur = 0; if lh > self.line_h { self.line_h = lh; } }
-        self.line.push(LineItem::Word { dx: cur, w: wpx, s: s.to_string(), color: st.color, scale: st.scale, bold: st.bold, href: st.href.clone() });
+        self.line.push(LineItem::Word { dx: cur, w: wpx, s: s.to_string(), color: st.color, scale: st.scale, bold: st.bold, href: st.href.clone(), va: st.va });
     }
 
     fn push_text(&mut self, text: &str, st: &Style) {
@@ -1083,14 +1213,14 @@ impl<'c, 'a> Flow<'c, 'a> {
         }
     }
 
-    fn push_image(&mut self, idx: usize) {
+    fn push_image(&mut self, idx: usize, va: u8) {
         let (iw, ih) = { let im = &self.ctx.images[idx]; (im.w as i32, im.h as i32) };
         let lh = ih + 4;
         if lh > self.line_h { self.line_h = lh; }
         let mut cur = self.line_cursor();
         if cur > 0 { cur += 8; }
         if cur + iw > self.avail && cur > 0 { self.flush_line(); cur = 0; if lh > self.line_h { self.line_h = lh; } }
-        self.line.push(LineItem::Img { dx: cur, w: iw, h: ih, idx });
+        self.line.push(LineItem::Img { dx: cur, w: iw, h: ih, idx, va });
     }
 
     fn push_box(&mut self, w: i32, h: i32, fill: u32, value: String) {
@@ -1115,6 +1245,28 @@ fn translate_item(it: &mut Item, dx: i32, dy: i32) {
     match it {
         Item::Rect { x, y, .. } | Item::Text { x, y, .. } | Item::Image { x, y, .. } => { *x += dx; *y += dy; }
     }
+}
+
+// Genere les rectangles d'un degrade lineaire 2 teintes sur la boite (x,y,w,h).
+// `vertical` => variation haut→bas, sinon gauche→droite. ~16 bandes suffisent
+// visuellement pour les fenetres Nautile.
+fn paint_gradient_bands(x: i32, y: i32, w: i32, h: i32, c1: u32, c2: u32, vertical: bool) -> Vec<Item> {
+    let span = if vertical { h } else { w };
+    let n = span.clamp(1, 16);
+    let mut out = Vec::with_capacity(n as usize);
+    for k in 0..n {
+        let col = lerp_rgb(c1, c2, k, n - 1);
+        if vertical {
+            let y0 = y + span * k / n;
+            let y1 = y + span * (k + 1) / n;
+            out.push(Item::Rect { x, y: y0, w, h: (y1 - y0).max(1), color: col });
+        } else {
+            let x0 = x + span * k / n;
+            let x1 = x + span * (k + 1) / n;
+            out.push(Item::Rect { x: x0, y, w: (x1 - x0).max(1), h, color: col });
+        }
+    }
+    out
 }
 
 fn base64_decode(s: &str) -> Vec<u8> {
@@ -1244,8 +1396,15 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, cs
         let val = if v.contains("var(") { resolved = resolve_var(v, css_vars); resolved.trim() } else { v.trim() };
         match p.as_str() {
             "color" => { if let Some(c) = parse_color(val) { st.color = c; } }
-            "background" | "background-color" => {
-                if let Some(c) = parse_color(val.split(' ').next().unwrap_or(val)) { bx.bg = Some(c); }
+            "background" | "background-color" | "background-image" => {
+                if val.contains("linear-gradient(") {
+                    if let Some((c1, c2, vert)) = parse_gradient(val) {
+                        bx.grad = Some((c1, c2, vert));
+                        bx.bg = Some(c1); // couleur de repli (et fond sous le degrade)
+                    }
+                } else if let Some(c) = parse_color(val.split(',').next().unwrap_or(val).split(' ').next().unwrap_or(val)) {
+                    bx.bg = Some(c);
+                }
             }
             "font-size" => { if let Some(px) = font_px(val) { st.scale = px_to_scale(px); } }
             "font-weight" => { if val == "bold" || val == "bolder" || val == "700" || val == "800" || val == "900" { st.bold = true; } else if val == "normal" || val == "400" { st.bold = false; } }
@@ -1265,6 +1424,9 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, cs
             }
             "text-transform" => {
                 st.transform = match val { "uppercase" => 1, "lowercase" => 2, "capitalize" => 3, _ => 0 };
+            }
+            "vertical-align" => {
+                st.va = match val { "middle" => 1, "top" | "text-top" => 2, "bottom" | "text-bottom" => 3, _ => 0 };
             }
             "list-style-type" | "list-style" => {
                 // `list-style: none` ou un type ; on lit le premier mot reconnu.
@@ -1462,7 +1624,7 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
         let maxh = if attr_h > 0 { attr_h.min(2000) } else { bx.height.map(|l| l.resolve(0)).unwrap_or(1600) }.max(16) as usize;
         // Resolution lazy-load / srcset (web moderne).
         if let Some(src) = img_src(node) {
-            if let Some(i) = f.ctx.load_image(src, maxw, maxh) { f.push_image(i); return; }
+            if let Some(i) = f.ctx.load_image(src, maxw, maxh) { f.push_image(i, cst.va); return; }
         }
         // Echec de chargement / format non supporte (SVG, WebP...) :
         // comportement d'un vrai navigateur — on affiche le texte `alt` discret
@@ -1704,9 +1866,15 @@ fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps
     f.x0 = sx0; f.avail = sav; f.align = sal;
 
     let h = (box_bottom - box_top).max(0);
-    // Fond : remplit toute la boite (insere SOUS le contenu).
-    if let Some(bgc) = bx.bg {
-        if h > 0 { f.items.insert(bg_insert, Item::Rect { x: sx0 + left, y: box_top, w: outer, h, color: bgc }); }
+    // Fond : degrade lineaire (bandes interpolees) ou couleur unie, sous le contenu.
+    if h > 0 {
+        if let Some((c1, c2, vert)) = bx.grad {
+            let bx0 = sx0 + left;
+            let bands = paint_gradient_bands(bx0, box_top, outer, h, c1, c2, vert);
+            f.items.splice(bg_insert..bg_insert, bands);
+        } else if let Some(bgc) = bx.bg {
+            f.items.insert(bg_insert, Item::Rect { x: sx0 + left, y: box_top, w: outer, h, color: bgc });
+        }
     }
     // box-shadow : rectangle decale (+4,+4), insere ENCORE en dessous du fond.
     if let Some(sh) = bx.shadow {
