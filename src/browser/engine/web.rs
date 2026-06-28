@@ -8,8 +8,13 @@
 //! cliquables, **mini-JS inline** (`document.write`, `innerHTML`) et images
 //! (PNG / data:URI / fetch reseau) downscalees.
 
-use crate::gui::framebuffer as fb;
 use crate::gui::image::{self, Image};
+use super::display_list::{apply_box_transform, translate_item};
+pub use super::display_list::{Item, Layer, Link, Page};
+pub use super::paint::paint;
+use super::style::{CssIndex, Rule, Sel};
+use super::css_values::parse_transform;
+use super::css_parser::{parse_decls, parse_stylesheet};
 use crate::net::http::resolve_location;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -313,159 +318,6 @@ fn img_src(node: &Node) -> Option<&str> {
 // ----------------------------------------------------------------------------
 // CSS (subset)
 // ----------------------------------------------------------------------------
-
-#[derive(Clone)]
-enum Sel { Any, Tag(String), Class(String), Id(String), TagClass(String, String) }
-
-// Une regle CSS : chaine de selecteurs simples (combinateur descendant), les
-// declarations, et la specificite cumulee. `chain` est ordonnee ancetre→cible :
-// le DERNIER element doit matcher l'element courant, les precedents ses ancetres.
-struct Rule { chain: Vec<Sel>, decls: Vec<(String, String)>, spec: u32 }
-
-struct CssIndex {
-    any: Vec<usize>,
-    tags: Vec<(String, Vec<usize>)>,
-    classes: Vec<(String, Vec<usize>)>,
-    ids: Vec<(String, Vec<usize>)>,
-}
-
-impl CssIndex {
-    fn new(css: &[Rule]) -> CssIndex {
-        let mut idx = CssIndex { any: Vec::new(), tags: Vec::new(), classes: Vec::new(), ids: Vec::new() };
-        for (i, r) in css.iter().enumerate() {
-            match r.chain.last().unwrap_or(&Sel::Any) {
-                Sel::Any => idx.any.push(i),
-                Sel::Tag(t) => push_bucket(&mut idx.tags, t, i),
-                Sel::Class(c) => push_bucket(&mut idx.classes, c, i),
-                Sel::Id(id) => push_bucket(&mut idx.ids, id, i),
-                Sel::TagClass(_, c) => {
-                    // Le tag est teste par rule_matches ; bucket par classe pour rester selectif.
-                    push_bucket(&mut idx.classes, c, i);
-                }
-            }
-        }
-        idx
-    }
-
-    fn bucket<'b>(buckets: &'b [(String, Vec<usize>)], key: &str) -> &'b [usize] {
-        buckets.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_slice()).unwrap_or(&[])
-    }
-}
-
-fn push_bucket(buckets: &mut Vec<(String, Vec<usize>)>, key: &str, idx: usize) {
-    if let Some((_, v)) = buckets.iter_mut().find(|(k, _)| k == key) {
-        v.push(idx);
-    } else {
-        buckets.push((key.to_string(), alloc::vec![idx]));
-    }
-}
-
-fn parse_decls(body: &str) -> Vec<(String, String)> {
-    let mut v = Vec::new();
-    for part in body.split(';') {
-        if let Some(c) = part.find(':') {
-            let prop = part[..c].trim().to_ascii_lowercase();
-            let val = part[c + 1..].trim().to_string();
-            if !prop.is_empty() && !val.is_empty() { v.push((prop, val)); }
-        }
-    }
-    v
-}
-
-// Parse un selecteur simple (un seul composant : `div`, `.x`, `#y`, `a.b`).
-fn parse_simple(comp: &str) -> (Sel, u32) {
-    let last = comp.trim();
-    if last == "*" || last.is_empty() { return (Sel::Any, 0); }
-    if let Some(id) = last.strip_prefix('#') { return (Sel::Id(id.to_ascii_lowercase()), 100); }
-    if let Some(cl) = last.strip_prefix('.') {
-        // `.a.b` -> garde la premiere classe (matching simple).
-        let cl = cl.split('.').next().unwrap_or(cl);
-        let cl = cl.split(|c: char| c == ':' || c == '[').next().unwrap_or(cl);
-        return (Sel::Class(cl.to_string()), 10);
-    }
-    if let Some(dot) = last.find('.') {
-        let tag = last[..dot].to_ascii_lowercase();
-        let cl = last[dot + 1..].split('.').next().unwrap_or(&last[dot + 1..]);
-        let cl = cl.split(|c: char| c == ':' || c == '[').next().unwrap_or(cl);
-        return (Sel::TagClass(tag, cl.to_string()), 11);
-    }
-    // pseudo/attr non geres -> match par balise si alphanumerique
-    let tag: String = last.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').collect::<String>().to_ascii_lowercase();
-    if tag.is_empty() { (Sel::Any, 0) } else { (Sel::Tag(tag), 1) }
-}
-
-// Parse un selecteur complet en chaine ancetre→cible. Le combinateur `>` est
-// traite comme un descendant (approximation), les pseudo-elements ignores.
-// Limite la profondeur a 4 composants pour borner le cout du matching.
-fn parse_selector(s: &str) -> (Vec<Sel>, u32) {
-    let s = s.trim();
-    let mut chain: Vec<Sel> = Vec::new();
-    let mut spec = 0u32;
-    for comp in s.split(|c: char| c == ' ' || c == '>' || c == '+' || c == '~').filter(|x| !x.is_empty()) {
-        let (sel, sp) = parse_simple(comp);
-        chain.push(sel);
-        spec += sp;
-    }
-    if chain.is_empty() { chain.push(Sel::Any); }
-    // Ne garde que les 4 derniers composants (cible + 3 ancetres) pour le cout.
-    if chain.len() > 4 { let start = chain.len() - 4; chain.drain(0..start); }
-    (chain, spec)
-}
-
-fn parse_stylesheet(text: &str, out: &mut Vec<Rule>) {
-    // Retire les commentaires /* */.
-    let mut cleaned = String::new();
-    let mut i = 0; let b = text.as_bytes();
-    while i < b.len() {
-        if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
-            if let Some(e) = find_ci(b, b"*/", i) { i = e + 2; continue; } else { break; }
-        }
-        cleaned.push(b[i] as char); i += 1;
-    }
-    parse_css_block(&cleaned, out);
-}
-
-// Trouve la fermeture } correspondante (compte les imbrications).
-fn css_find_close(s: &str, open: usize) -> Option<usize> {
-    let b = s.as_bytes();
-    let mut depth = 0usize;
-    let mut i = open;
-    while i < b.len() {
-        if b[i] == b'{' { depth += 1; }
-        else if b[i] == b'}' { if depth == 1 { return Some(i); } depth -= 1; }
-        i += 1;
-    }
-    None
-}
-
-fn parse_css_block(text: &str, out: &mut Vec<Rule>) {
-    let mut pos = 0usize;
-    while pos < text.len() {
-        let open = match text[pos..].find('{') { Some(o) => pos + o, None => break };
-        let sel_part = text[pos..open].trim();
-        let close = match css_find_close(text, open) { Some(c) => c, None => break };
-        let body = &text[open + 1..close];
-        pos = close + 1;
-        // @font-face, @keyframes: skip entirely; @media: recurse into body
-        if sel_part.starts_with('@') {
-            let kw = sel_part.split_whitespace().next().unwrap_or("");
-            let kw_lc = kw.to_ascii_lowercase();
-            if kw_lc.starts_with("@media") || kw_lc.starts_with("@supports") || kw_lc.starts_with("@layer") {
-                if out.len() < 4000 { parse_css_block(body, out); }
-            }
-            continue;
-        }
-        // Regle normale: body = declarations CSS simples (pas de '{' imbriques).
-        if body.contains('{') { continue; } // sous-bloc inattendu
-        let decls = parse_decls(body);
-        if decls.is_empty() { continue; }
-        for sel in sel_part.split(',') {
-            let (chain, spec) = parse_selector(sel);
-            out.push(Rule { chain, decls: decls.clone(), spec });
-        }
-        if out.len() > 4000 { break; }
-    }
-}
 
 fn starts_ci(hay: &[u8], needle: &[u8]) -> bool {
     hay.len() >= needle.len() && hay[..needle.len()].iter().zip(needle).all(|(a, b)| lc(*a) == lc(*b))
@@ -1123,38 +975,6 @@ fn count_grid_cols(val: &str) -> u8 {
 // Liste d'affichage
 // ----------------------------------------------------------------------------
 
-pub enum Item {
-    Rect { x: i32, y: i32, w: i32, h: i32, color: u32 },
-    RoundedRect { x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32 },
-    Text { x: i32, y: i32, s: String, color: u32, scale: usize, bold: bool },
-    Image { x: i32, y: i32, w: i32, h: i32, idx: usize },
-}
-
-pub struct Link { pub x: i32, pub y: i32, pub w: i32, pub h: i32, pub href: String }
-
-/// Couche de peinture (stacking layer) : ensemble d'items partageant un ordre
-/// d'empilement `z`, eventuellement ancres au viewport (`fixed`) et/ou clippes
-/// a un rectangle (overflow). Les items sont en coordonnees document.
-pub struct Layer {
-    pub z: i32,
-    pub fixed: bool,
-    pub clip: Option<(i32, i32, i32, i32)>, // (x, y, w, h) en coords document
-    pub items: Vec<Item>,
-    pub links: Vec<Link>,
-}
-
-pub struct Page {
-    pub title: String,
-    pub items: Vec<Item>,
-    pub links: Vec<Link>,
-    pub images: Vec<Image>,
-    pub height: i32,
-    pub bg: u32,
-    /// Couches positionnees (position: absolute/fixed/relative+z-index), triees
-    /// par `z` croissant. Le flux normal est `items` (z=0 implicite).
-    pub layers: Vec<Layer>,
-}
-
 const PAD: i32 = 8;
 // Hauteur approximative du viewport pour `position: fixed` et le bloc conteneur
 // initial (la fenetre Nautile par defaut fait ~420px, moins le chrome).
@@ -1377,49 +1197,6 @@ impl<'c, 'a> Flow<'c, 'a> {
     }
 }
 
-fn translate_item(it: &mut Item, dx: i32, dy: i32) {
-    match it {
-        Item::Rect { x, y, .. } | Item::RoundedRect { x, y, .. } | Item::Text { x, y, .. } | Item::Image { x, y, .. } => { *x += dx; *y += dy; }
-    }
-}
-
-fn scale_item_from(it: &mut Item, ox: i32, oy: i32, pct: i32) {
-    if pct == 100 { return; }
-    let sc = |v: i32| -> i32 { v * pct / 100 };
-    match it {
-        Item::Rect { x, y, w, h, .. } | Item::RoundedRect { x, y, w, h, .. } => {
-            *x = ox + sc(*x - ox); *y = oy + sc(*y - oy);
-            *w = sc(*w).max(1); *h = sc(*h).max(1);
-        }
-        Item::Text { x, y, scale, .. } => {
-            *x = ox + sc(*x - ox); *y = oy + sc(*y - oy);
-            let ns = ((*scale as i32 * pct + 50) / 100).clamp(1, 6) as usize;
-            *scale = ns;
-        }
-        Item::Image { x, y, w, h, .. } => {
-            *x = ox + sc(*x - ox); *y = oy + sc(*y - oy);
-            *w = sc(*w).max(1); *h = sc(*h).max(1);
-        }
-    }
-}
-
-fn apply_box_transform(items: &mut [Item], links: &mut [Link], ox: i32, oy: i32, tx: i32, ty: i32, scale_pct: i32) {
-    if tx == 0 && ty == 0 && scale_pct == 100 { return; }
-    for it in items {
-        scale_item_from(it, ox, oy, scale_pct);
-        translate_item(it, tx, ty);
-    }
-    for lk in links {
-        if scale_pct != 100 {
-            lk.x = ox + (lk.x - ox) * scale_pct / 100;
-            lk.y = oy + (lk.y - oy) * scale_pct / 100;
-            lk.w = (lk.w * scale_pct / 100).max(1);
-            lk.h = (lk.h * scale_pct / 100).max(1);
-        }
-        lk.x += tx; lk.y += ty;
-    }
-}
-
 // Genere les rectangles d'un degrade lineaire 2 teintes sur la boite (x,y,w,h).
 // `vertical` => variation haut→bas, sinon gauche→droite. ~16 bandes suffisent
 // visuellement pour les fenetres Nautile.
@@ -1562,28 +1339,6 @@ fn resolve_var(val: &str, css_vars: &[(String, String)]) -> String {
     result
 }
 
-
-fn parse_transform(val: &str) -> (i32, i32, i32) {
-    let mut tx = 0i32;
-    let mut ty = 0i32;
-    let mut scale = 100i32;
-    for part in val.split(')').filter(|p| !p.trim().is_empty()) {
-        let p = part.trim();
-        if let Some(args) = p.strip_prefix("translate(") {
-            let mut it = args.split(',');
-            tx += it.next().and_then(|v| first_len(v.trim())).unwrap_or(0);
-            ty += it.next().and_then(|v| first_len(v.trim())).unwrap_or(0);
-        } else if let Some(args) = p.strip_prefix("translateX(") {
-            tx += first_len(args.trim()).unwrap_or(0);
-        } else if let Some(args) = p.strip_prefix("translateY(") {
-            ty += first_len(args.trim()).unwrap_or(0);
-        } else if let Some(args) = p.strip_prefix("scale(") {
-            let n = args.split(',').next().unwrap_or(args).trim();
-            if let Ok(v) = n.parse::<f32>() { scale = (scale as f32 * v) as i32; }
-        }
-    }
-    (tx, ty, scale.clamp(10, 400))
-}
 
 fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, css_vars: &[(String, String)]) {
     for (p, v) in decls {
@@ -1782,12 +1537,12 @@ fn compute(f: &Flow, node: &Node, tag: &str, st: &Style) -> (Style, BoxProps) {
         }
     };
     for &ri in &f.ctx.css_index.any { consider(ri, &mut matched); }
-    for &ri in CssIndex::bucket(&f.ctx.css_index.tags, tag) { consider(ri, &mut matched); }
+    for &ri in f.ctx.css_index.tags(tag) { consider(ri, &mut matched); }
     if !id.is_empty() {
-        for &ri in CssIndex::bucket(&f.ctx.css_index.ids, &id) { consider(ri, &mut matched); }
+        for &ri in f.ctx.css_index.ids(&id) { consider(ri, &mut matched); }
     }
     for cl in classes.split(' ').filter(|c| !c.is_empty()) {
-        for &ri in CssIndex::bucket(&f.ctx.css_index.classes, cl) { consider(ri, &mut matched); }
+        for &ri in f.ctx.css_index.classes(cl) { consider(ri, &mut matched); }
     }
     // Cascade CSS : specificite croissante puis ordre source croissant.
     matched.sort_by_key(|&(spec, ri)| (spec, ri));
@@ -2282,122 +2037,3 @@ fn scheme_host(base: &str) -> (&str, &str) {
     (scheme, host)
 }
 
-// ----------------------------------------------------------------------------
-// Peinture
-// ----------------------------------------------------------------------------
-
-pub fn paint(page: &Page, scroll: i32, bx: usize, by: usize, bw: usize, bh: usize) {
-    fb::fill_rect_rgb(bx, by, bw, bh, page.bg);
-    let view = (bx as i32, by as i32, bw as i32, bh as i32);
-    // Ordre d'empilement (stacking) : couches z<0, puis flux normal (z=0), puis
-    // couches z>=0. Les couches sont deja triees par z croissant dans layout().
-    for l in &page.layers { if l.z < 0 { paint_layer(l, &page.images, scroll, view); } }
-    paint_list(&page.items, scroll, &page.images, view, view);
-    for l in &page.layers { if l.z >= 0 { paint_layer(l, &page.images, scroll, view); } }
-}
-
-// Peint une couche positionnee : `fixed` ignore le scroll, `clip` restreint le
-// viewport effectif au rectangle d'overflow (intersecte avec la fenetre).
-fn paint_layer(l: &Layer, images: &[Image], scroll: i32, view: (i32, i32, i32, i32)) {
-    let sc = if l.fixed { 0 } else { scroll };
-    let mut vp = view;
-    if let Some((cx, cy, cw, ch)) = l.clip {
-        // Rectangle de clip en coords ecran (decale du scroll si non fixe).
-        let sx = view.0 + cx;
-        let sy = view.1 + cy - sc;
-        vp = intersect(view, (sx, sy, cw, ch));
-    }
-    if vp.2 <= 0 || vp.3 <= 0 { return; }
-    paint_list(&l.items, sc, images, vp, view);
-}
-
-// Intersection de deux rectangles (x, y, w, h).
-fn intersect(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> (i32, i32, i32, i32) {
-    let x0 = a.0.max(b.0);
-    let y0 = a.1.max(b.1);
-    let x1 = (a.0 + a.2).min(b.0 + b.2);
-    let y1 = (a.1 + a.3).min(b.1 + b.3);
-    (x0, y0, (x1 - x0).max(0), (y1 - y0).max(0))
-}
-
-
-fn paint_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32, vp: (i32, i32, i32, i32)) {
-    let (vx, vy, vw, vh) = vp;
-    if w <= 0 || h <= 0 { return; }
-    let r = radius.min(w / 2).min(h / 2).max(0);
-    let y0 = y.max(vy);
-    let y1 = (y + h).min(vy + vh);
-    for yy in y0..y1 {
-        let local_y = yy - y;
-        let dy = if local_y < r { r - local_y } else if local_y >= h - r { local_y - (h - r - 1) } else { 0 };
-        let mut inset = 0;
-        if r > 0 && dy > 0 {
-            let rr = r * r;
-            let yy2 = dy * dy;
-            let mut xx = 0;
-            while xx < r && xx * xx + yy2 > rr { xx += 1; }
-            inset = xx;
-        }
-        let xs = (x + inset).max(vx);
-        let xe = (x + w - inset).min(vx + vw);
-        if xe > xs { fb::fill_rect_rgb(xs as usize, yy as usize, (xe - xs) as usize, 1, color); }
-    }
-}
-
-// Peint une liste d'items (coords document) dans le viewport effectif `vp`
-// (coords ecran), avec defilement `scroll`. `blit_view` borne le blit d'images.
-fn paint_list(items: &[Item], scroll: i32, images: &[Image], vp: (i32, i32, i32, i32), _blit_view: (i32, i32, i32, i32)) {
-    let (vx, vy, vw, vh) = vp;
-    if vw <= 0 || vh <= 0 { return; }
-    let bx = vx as usize; let by = vy as usize; let bw = vw as usize; let bh = vh as usize;
-    for it in items {
-        match it {
-            Item::Rect { x, y, w, h, color } => {
-                let sy = vy + y - scroll;
-                if sy + h <= vy || sy >= vy + vh { continue; }
-                let yy = sy.max(vy);
-                let hh = (sy + h).min(vy + vh) - yy;
-                let xx = vx + x;
-                // Clip horizontal au viewport effectif (gauche + droite).
-                let x0 = xx.max(vx);
-                let x1 = (xx + w).min(vx + vw);
-                let ww = (x1 - x0).max(0);
-                if hh > 0 && ww > 0 {
-                    fb::fill_rect_rgb(x0 as usize, yy as usize, ww as usize, hh as usize, *color);
-                }
-            }
-            Item::RoundedRect { x, y, w, h, radius, color } => {
-                let sy = vy + y - scroll;
-                if sy + h <= vy || sy >= vy + vh { continue; }
-                let xx = vx + x;
-                paint_rounded_rect(xx, sy, *w, *h, *radius, *color, vp);
-            }
-            Item::Text { x, y, s, color, scale, bold } => {
-                let sy = vy + y - scroll;
-                let h = 8 * *scale as i32;
-                if sy < vy || sy + h > vy + vh { continue; }
-                let xx = vx + x;
-                if xx >= vx && xx < vx + vw {
-                    let px = 8 * *scale as i32;
-                    if !super::font_ttf::draw_text(xx, sy, s, *color, px, *bold) {
-                        fb::draw_text_rgb(xx as usize, sy as usize, s, *color, *scale);
-                        if *bold { fb::draw_text_rgb((xx + 1) as usize, sy as usize, s, *color, *scale); }
-                    }
-                }
-            }
-            Item::Image { x, y, w: _w, h, idx } => {
-                let sy = vy + y - scroll;
-                if sy + h <= vy || sy >= vy + vh { continue; }
-                if let Some(img) = images.get(*idx) {
-                    let xx = vx + x;
-                    if xx >= vx {
-                        let skip = (vy - sy).max(0) as usize;
-                        let draw_h = img.h.saturating_sub(skip);
-                        let start = skip.saturating_mul(img.w).min(img.pix.len());
-                        fb::blit_rgb(xx as usize, sy.max(vy) as usize, img.w, draw_h, &img.pix[start..], bx, by, bw, bh);
-                    }
-                }
-            }
-        }
-    }
-}
