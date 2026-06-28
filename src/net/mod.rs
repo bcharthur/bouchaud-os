@@ -311,6 +311,53 @@ pub fn fetch_document(url: &str) -> Document {
     Document { banner, final_url: current, content_type: String::new(), body: alloc::vec::Vec::new(), is_html: false, ok: false }
 }
 
+// ── Cache de ressources (sous-ressources : CSS, JS, images) ───────────────────
+// Cache global URL -> octets, partage entre toutes les pages et onglets, pour
+// eviter de re-telecharger les feuilles de style / scripts / images. Borne en
+// nombre d'entrees et en memoire (purge FIFO). Acces mono-thread (boucle GUI).
+
+static mut RES_CACHE: Option<alloc::vec::Vec<(String, alloc::vec::Vec<u8>)>> = None;
+const RES_CACHE_MAX_ENTRIES: usize = 128;
+const RES_CACHE_MAX_BYTES: usize = 12_000_000;
+
+/// Recupere une sous-ressource (CSS/JS/image) avec mise en cache. Renvoie les
+/// octets du corps si la requete reussit (ou un hit cache), sinon None.
+pub fn fetch_cached(url: &str) -> Option<alloc::vec::Vec<u8>> {
+    use alloc::string::ToString;
+    unsafe {
+        let slot = &mut *core::ptr::addr_of_mut!(RES_CACHE);
+        if slot.is_none() { *slot = Some(alloc::vec::Vec::new()); }
+        if let Some(c) = slot.as_ref() {
+            if let Some((_, b)) = c.iter().find(|(u, _)| u == url) { return Some(b.clone()); }
+        }
+    }
+    let doc = fetch_document(url);
+    if !doc.ok || doc.body.is_empty() { return None; }
+    let body = doc.body;
+    unsafe {
+        let slot = &mut *core::ptr::addr_of_mut!(RES_CACHE);
+        let c = slot.get_or_insert_with(alloc::vec::Vec::new);
+        let mut total: usize = c.iter().map(|(_, b)| b.len()).sum();
+        // Purge FIFO tant que l'ajout depasse les bornes.
+        while (!c.is_empty()) && (c.len() >= RES_CACHE_MAX_ENTRIES || total + body.len() > RES_CACHE_MAX_BYTES) {
+            let removed = c.remove(0);
+            total = total.saturating_sub(removed.1.len());
+        }
+        if body.len() <= RES_CACHE_MAX_BYTES {
+            c.push((url.to_string(), body.clone()));
+        }
+    }
+    Some(body)
+}
+
+/// Vide le cache de ressources (ex. rechargement force).
+pub fn clear_cache() {
+    unsafe {
+        let slot = &mut *core::ptr::addr_of_mut!(RES_CACHE);
+        if let Some(c) = slot.as_mut() { c.clear(); }
+    }
+}
+
 /// Recupere une URL HTTP(S) et renvoie les lignes a afficher (statut + corps),
 /// en suivant jusqu'a 5 redirections (301/302/303/307/308 via `Location`).
 /// Utilise par la commande `wget` et par le navigateur.

@@ -681,16 +681,18 @@ pub struct Interp {
     microtasks: Vec<(Value, Vec<Value>)>, // Promise.then / queueMicrotask
     macrotasks: Vec<(Value, Vec<Value>)>, // setTimeout / setInterval (un tour)
     timer_seq: f64,                       // identifiants de timers
+    pub base_url: String,                 // URL de base (resolution des <script src>)
 }
 
 impl Interp {
     pub fn new() -> Interp {
         let global = new_scope(None);
         let mut it = Interp {
-            global: global.clone(), steps: 0, max_steps: 2_000_000,
+            global: global.clone(), steps: 0, max_steps: 12_000_000,
             out: Vec::new(), writes: String::new(), dom: DomModel::empty(),
             wasm: Vec::new(), listeners: Vec::new(),
             microtasks: Vec::new(), macrotasks: Vec::new(), timer_seq: 1.0,
+            base_url: String::new(),
         };
         install(&mut it);
         it
@@ -2398,15 +2400,24 @@ fn strip_tags(html: &str) -> String {
 // Integration page : execute_inline
 // ============================================================================
 
-const MAX_OUTPUT: usize = 4_000_000;
-const MAX_SCRIPT: usize = 256_000;
+const MAX_OUTPUT: usize = 8_000_000;
+const MAX_SCRIPT: usize = 4_000_000;
 
 /// Execute les `<script>` inline sur un DOM partage et renvoie le HTML enrichi :
 /// document.write insere a la position du script, mutations DOM (innerHTML,
 /// textContent, appendChild...) appliquees par plages.
-pub fn execute_inline(html: &[u8]) -> Vec<u8> {
-    let (_ctx, out) = open_page(html);
+pub fn execute_inline(html: &[u8], base_url: &str) -> Vec<u8> {
+    let (_ctx, out) = open_page(html, base_url);
     out
+}
+
+// Scheme/host d'une URL de base, pour resoudre les `<script src>` relatifs.
+fn scheme_of(base: &str) -> &str {
+    if base.starts_with("https://") { "https" } else if base.starts_with("http://") { "http" } else { "https" }
+}
+fn host_of(base: &str) -> &str {
+    let rest = base.strip_prefix("https://").or_else(|| base.strip_prefix("http://")).unwrap_or(base);
+    match rest.find('/') { Some(i) => &rest[..i], None => rest }
 }
 
 /// Evalue une expression JS isolee et renvoie son resultat formate (semantique
@@ -2444,19 +2455,40 @@ impl PageCtx {
     }
 }
 
-/// Ouvre une page : construit le DOM, execute les scripts inline une fois, et
-/// renvoie le contexte persistant + le HTML initial enrichi.
-pub fn open_page(html: &[u8]) -> (PageCtx, Vec<u8>) { open_page_inner(html, true) }
+/// Ouvre une page : construit le DOM, execute les scripts (inline ET externes
+/// via `<script src>`, telecharges depuis `base_url`), et renvoie le contexte
+/// persistant + le HTML initial enrichi.
+pub fn open_page(html: &[u8], base_url: &str) -> (PageCtx, Vec<u8>) { open_page_inner(html, base_url, true) }
 
-/// Variante souveraine pour les pages reseau (http/https) : construit le DOM et
-/// retire les scripts SANS les executer. Les sites modernes sont des SPA de
-/// plusieurs Mo de JS obfusque qui ne peuvent pas s'executer dans ce moteur ;
-/// les faire tourner ne produit que du texte en bouillie (donnees de scripts
-/// injectees via document.write/innerHTML). Le rendu statique reste propre.
-pub fn open_page_static(html: &[u8]) -> (PageCtx, Vec<u8>) { open_page_inner(html, false) }
+/// Variante sans execution du JS de la page (rendu statique).
+pub fn open_page_static(html: &[u8], base_url: &str) -> (PageCtx, Vec<u8>) { open_page_inner(html, base_url, false) }
 
-fn open_page_inner(html: &[u8], run: bool) -> (PageCtx, Vec<u8>) {
+// Extrait la valeur d'un attribut (`name="..."`/`name='...'`/`name=x`) d'un
+// fragment d'en-tete de balise.
+fn tag_attr<'a>(header: &'a str, name: &str) -> Option<&'a str> {
+    let lower = header.to_ascii_lowercase();
+    let key = alloc::format!("{}=", name);
+    let pos = lower.find(&key)? + key.len();
+    let rest = &header[pos..];
+    let rest = rest.trim_start();
+    let (quote, body) = match rest.as_bytes().first() {
+        Some(b'"') => ('"', &rest[1..]),
+        Some(b'\'') => ('\'', &rest[1..]),
+        // Valeur non quotee : se termine a l'espace ou au `>` (les URLs
+        // contiennent des `/`, ne pas couper dessus). On retire un `/` final
+        // eventuel issu d'une balise auto-fermante `<.../>`.
+        _ => {
+            let v = rest.split(|c: char| c == ' ' || c == '\t' || c == '\n' || c == '>').next().unwrap_or("");
+            let v = v.strip_suffix('/').unwrap_or(v);
+            return if v.is_empty() { None } else { Some(v) };
+        }
+    };
+    body.split(quote).next().filter(|s| !s.is_empty())
+}
+
+fn open_page_inner(html: &[u8], base_url: &str, run: bool) -> (PageCtx, Vec<u8>) {
     let mut interp = Interp::new();
+    interp.base_url = base_url.to_string();
     interp.dom = DomModel::parse(html);
     let mut scripts: Vec<(usize, usize, String)> = Vec::new();
     let mut i = 0usize;
@@ -2467,16 +2499,36 @@ fn open_page_inner(html: &[u8], run: bool) -> (PageCtx, Vec<u8>) {
             let header_end = find_ci(html, b">", i).map(|p| p + 1).unwrap_or(html.len());
             let header = core::str::from_utf8(&html[i..header_end]).unwrap_or("");
             let is_external = header.contains("src=") || header.contains("src =");
+            // Ne pas executer les scripts non-JS (JSON-LD, templates, modules data).
+            let typ = tag_attr(header, "type").unwrap_or("").to_ascii_lowercase();
+            let is_js = typ.is_empty() || typ.contains("javascript") || typ == "module" || typ == "text/babel";
             let content_start = header_end;
             let content_end = find_ci(html, b"</script", content_start).unwrap_or(html.len());
             let outer_end = find_ci(html, b">", content_end).map(|p| p + 1).unwrap_or(html.len());
             let mut wr = String::new();
-            if run && !is_external && content_end > content_start && content_end - content_start <= MAX_SCRIPT && ran < 128 {
-                if let Ok(src) = core::str::from_utf8(&html[content_start..content_end]) {
-                    interp.writes.clear();
-                    let _ = interp.run(src); // erreurs ignorees (le rendu continue)
-                    ran += 1;
-                    wr = core::mem::take(&mut interp.writes);
+            if run && is_js && ran < 400 {
+                if is_external {
+                    // <script src="..."> : telecharge (avec cache) et execute.
+                    if let Some(src_url) = tag_attr(header, "src") {
+                        let abs = crate::net::http::resolve_location(
+                            scheme_of(base_url), host_of(base_url), src_url);
+                        if let Some(bytes) = crate::net::fetch_cached(&abs) {
+                            if bytes.len() <= MAX_SCRIPT {
+                                let code = alloc::string::String::from_utf8_lossy(&bytes);
+                                interp.writes.clear();
+                                let _ = interp.run(&code);
+                                ran += 1;
+                                wr = core::mem::take(&mut interp.writes);
+                            }
+                        }
+                    }
+                } else if content_end > content_start && content_end - content_start <= MAX_SCRIPT {
+                    if let Ok(src) = core::str::from_utf8(&html[content_start..content_end]) {
+                        interp.writes.clear();
+                        let _ = interp.run(src); // erreurs ignorees (le rendu continue)
+                        ran += 1;
+                        wr = core::mem::take(&mut interp.writes);
+                    }
                 }
             }
             scripts.push((outer_start, outer_end, wr));
@@ -2514,7 +2566,7 @@ pub fn selftest() -> Result<(), &'static str> {
         document.getElementById('app').innerHTML = '<b>' + who + '</b>';
         document.write('<p>OK</p>');
     </script>"#;
-    let out = execute_inline(html);
+    let out = execute_inline(html, "");
     let s = core::str::from_utf8(&out).map_err(|_| "utf8")?;
     if !s.contains("<div id=\"app\"><b>Bouchaud</b></div>") { return Err("innerHTML"); }
     if !s.contains("<p>OK</p>") || s.contains("<script>") { return Err("write"); }
@@ -2546,12 +2598,12 @@ pub fn selftest() -> Result<(), &'static str> {
     let (mut ctx, _o) = open_page(br#"<button id="b">x</button><script>
         var n=0;
         document.getElementById('b').addEventListener('click', function(){ n++; document.getElementById('b').textContent = 'clic'+n; });
-    </script>"#);
+    </script>"#, "");
     let html = ctx.dispatch("document.getElementById('b').click()");
     let s = core::str::from_utf8(&html).unwrap_or("");
     if !s.contains("clic1") { return Err("event"); }
     // style live -> attribut style (repris par le layout)
-    let out = execute_inline(br#"<div id="d">hi</div><script>document.getElementById('d').style.color='red';</script>"#);
+    let out = execute_inline(br#"<div id="d">hi</div><script>document.getElementById('d').style.color='red';</script>"#, "");
     let s = core::str::from_utf8(&out).unwrap_or("");
     if !s.contains("color:red") { return Err("style"); }
     Ok(())

@@ -469,15 +469,85 @@ fn extract_and_strip(html: &[u8], max_len: usize) -> (Vec<u8>, Vec<Rule>) {
 
 /// Pipeline complet : HTML -> (JS inline) -> (CSS extrait, DOM nettoye) -> page.
 pub fn render(html: &[u8], base_url: &str, width: i32) -> Page {
-    let scripted = crate::gui::js::execute_inline(html);
+    let scripted = crate::gui::js::execute_inline(html, base_url);
     render_scripted(&scripted, base_url, width)
 }
 
 // Met en page un HTML deja enrichi par le JS (DOM applique).
 fn render_scripted(scripted: &[u8], base_url: &str, width: i32) -> Page {
-    let (clean, css) = extract_and_strip(scripted, 1_500_000);
+    let (clean, inline_css) = extract_and_strip(scripted, 1_500_000);
     let dom = parse(&clean);
+    // Cascade : feuilles externes (<link rel=stylesheet>) d'abord — priorite plus
+    // faible sur egalite —, puis le CSS inline (<style>/style="") par-dessus.
+    let mut css: Vec<Rule> = Vec::new();
+    load_external_css(&dom, base_url, &mut css);
+    css.extend(inline_css);
     layout(&dom, base_url, width, &css)
+}
+
+/// Telecharge et applique les feuilles de style externes referencees par
+/// `<link rel="stylesheet" href="...">` (la cause n°1 des pages "sans style" :
+/// les sites modernes externalisent leur CSS). Resout les URL relatives, passe
+/// par le cache reseau, et gere `@import` de premier niveau.
+fn load_external_css(dom: &Dom, base_url: &str, css: &mut Vec<Rule>) {
+    let (scheme, host) = scheme_host(base_url);
+    let mut count = 0u32;
+    for node in &dom.nodes {
+        if count >= 12 { break; }
+        if node.tag.as_deref() != Some("link") { continue; }
+        let rel = attr(node, "rel").unwrap_or("");
+        if !rel.split_whitespace().any(|r| r.eq_ignore_ascii_case("stylesheet")) {
+            // <link rel="preload" as="style"> est aussi une feuille de style.
+            let as_attr = attr(node, "as").unwrap_or("");
+            if !as_attr.eq_ignore_ascii_case("style") { continue; }
+        }
+        let href = match attr(node, "href") { Some(h) if !h.trim().is_empty() => h.trim(), _ => continue };
+        let abs = resolve_location(&scheme, &host, href);
+        if let Some(bytes) = crate::net::fetch_cached(&abs) {
+            let text = String::from_utf8_lossy(&bytes);
+            parse_stylesheet_imports(&text, &scheme, &host, css, 0);
+            count += 1;
+        }
+    }
+}
+
+// Parse une feuille externe en suivant ses `@import url(...)` (1 niveau de
+// recursion) avant ses propres regles.
+fn parse_stylesheet_imports(text: &str, scheme: &str, host: &str, css: &mut Vec<Rule>, depth: u32) {
+    if depth < 2 {
+        let mut search = 0usize;
+        let mut imports = 0u32;
+        while let Some(pos) = text[search..].find("@import") {
+            let abs_pos = search + pos;
+            let rest = &text[abs_pos..];
+            let end = rest.find(';').map(|e| abs_pos + e).unwrap_or(text.len());
+            let decl = &text[abs_pos..end];
+            // @import url("x") | @import "x"
+            if let Some(u) = extract_import_url(decl) {
+                let abs = resolve_location(scheme, host, &u);
+                if let Some(bytes) = crate::net::fetch_cached(&abs) {
+                    let sub = String::from_utf8_lossy(&bytes);
+                    parse_stylesheet_imports(&sub, scheme, host, css, depth + 1);
+                }
+            }
+            search = end + 1;
+            imports += 1;
+            if imports >= 8 || search >= text.len() { break; }
+        }
+    }
+    parse_stylesheet(text, css);
+}
+
+// Extrait l'URL d'une declaration `@import` (`url("x")`, `url(x)`, ou `"x"`).
+fn extract_import_url(decl: &str) -> Option<String> {
+    let d = decl.trim_start_matches("@import").trim();
+    let d = if let Some(rest) = d.strip_prefix("url(") {
+        rest.split(')').next().unwrap_or("")
+    } else { d };
+    let d = d.trim().trim_matches('"').trim_matches('\'').trim();
+    // Ignore les requetes media (`@import "x" screen`).
+    let url = d.split_whitespace().next().unwrap_or("").trim_matches('"').trim_matches('\'');
+    if url.is_empty() { None } else { Some(url.to_string()) }
 }
 
 /// Session interactive : conserve le contexte JS (etat + DOM) d'une page pour
@@ -493,7 +563,7 @@ impl Session {
     /// Reserve aux pages internes (about:calc, about:wasm...) qui embarquent des
     /// mini-applications JS.
     pub fn open(html: &[u8], base_url: &str, width: i32) -> (Session, Page) {
-        let (ctx, scripted) = crate::gui::js::open_page(html);
+        let (ctx, scripted) = crate::gui::js::open_page(html, base_url);
         let page = render_scripted(&scripted, base_url, width);
         (Session { ctx, base: base_url.to_string(), width }, page)
     }
@@ -501,7 +571,7 @@ impl Session {
     /// le JS de la page (les SPA modernes ne peuvent pas tourner ici et ne
     /// produisent que du texte parasite). Rendu propre et lisible.
     pub fn open_static(html: &[u8], base_url: &str, width: i32) -> (Session, Page) {
-        let (ctx, scripted) = crate::gui::js::open_page_static(html);
+        let (ctx, scripted) = crate::gui::js::open_page_static(html, base_url);
         let page = render_scripted(&scripted, base_url, width);
         (Session { ctx, base: base_url.to_string(), width }, page)
     }
@@ -1092,10 +1162,10 @@ impl<'a> Ctx<'a> {
             raw = if meta.contains("base64") { base64_decode(data) } else { data.bytes().collect() };
         } else {
             let abs = resolve_location(&self.scheme, &self.host, src);
-            let doc = crate::net::fetch_document(&abs);
-            if !doc.ok || doc.body.is_empty() { return None; }
-            self.img_budget -= 1;
-            raw = doc.body;
+            match crate::net::fetch_cached(&abs) {
+                Some(b) => { self.img_budget -= 1; raw = b; }
+                None => return None,
+            }
         }
         let img = image::decode(&raw)?;
         let mh = if max_h == 0 { img.h.max(1) } else { max_h };
