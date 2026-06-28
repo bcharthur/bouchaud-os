@@ -9,6 +9,11 @@ use linked_list_allocator::LockedHeap;
 
 /// Taille du tas noyau (48 MiB) : framebuffer HD (~3,7 Mo) + GUI + tampons
 /// reseau/TLS + rendu de pages web (DOM + liste d'affichage + images).
+///
+/// Ne pas augmenter ce tas statique sans revoir la carte memoire du bootloader :
+/// a 128 MiB, QEMU/bootloader 0.9 peut paniquer avant le noyau avec
+/// `too many memory regions in memory map`. Les gros bundles JS doivent donc
+/// etre traites par des structures plus compactes, pas par une .bss geante.
 pub const HEAP_SIZE: usize = 48 * 1024 * 1024;
 
 static mut HEAP_SPACE: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
