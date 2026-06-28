@@ -42,6 +42,10 @@ pub fn open(url: &str, width: i32) -> (Session, Page) {
     if url == "about:system" {
         return from_html(super::pages::system_info().as_bytes(), url, width);
     }
+    // Journal d'activite de la pile (devlog) — diagnostic du rendu.
+    if url == "about:log" {
+        return from_html(crate::diag::render_html().as_bytes(), url, width);
+    }
     // Fichier local (RAMFS)
     if let Some(path) = url.strip_prefix("file:") {
         return load_file(path, url, width);
@@ -122,6 +126,7 @@ fn search_url(engine: &str, query: &str) -> String {
 // ── Rendu local (souverain) ───────────────────────────────────────────────────
 
 fn local_render(url: &str, width: i32) -> (Session, Page) {
+    crate::dlog!(crate::diag::Cat::Info, "--- navigation: {} ---", url);
     let doc = crate::net::fetch_document(url);
     if doc.ok && doc.is_html && !doc.body.is_empty() {
         // Pages reseau : on execute le JS inline de la page (best-effort), borne

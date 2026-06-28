@@ -475,14 +475,28 @@ pub fn render(html: &[u8], base_url: &str, width: i32) -> Page {
 
 // Met en page un HTML deja enrichi par le JS (DOM applique).
 fn render_scripted(scripted: &[u8], base_url: &str, width: i32) -> Page {
+    use crate::diag::Cat;
+    let t0 = crate::kernel::timer::cycles_since_boot();
     let (clean, inline_css) = extract_and_strip(scripted, 1_500_000);
     let dom = parse(&clean);
+    let t_parse = crate::kernel::timer::cycles_since_boot();
     // Cascade : feuilles externes (<link rel=stylesheet>) d'abord — priorite plus
     // faible sur egalite —, puis le CSS inline (<style>/style="") par-dessus.
     let mut css: Vec<Rule> = Vec::new();
     load_external_css(&dom, base_url, &mut css);
+    let ext_rules = css.len();
     css.extend(inline_css);
-    layout(&dom, base_url, width, &css)
+    let t_css = crate::kernel::timer::cycles_since_boot();
+    let page = layout(&dom, base_url, width, &css);
+    let t_end = crate::kernel::timer::cycles_since_boot();
+    let layers_items: usize = page.layers.iter().map(|l| l.items.len()).sum();
+    crate::dlog!(Cat::Layout,
+        "DOM {} noeuds | CSS {} regles ({} ext) | {} items +{} couches | h={}px | parse {}Mc, css {}Mc, layout {}Mc",
+        dom.nodes.len(), css.len(), ext_rules, page.items.len(), layers_items, page.height,
+        (t_parse.wrapping_sub(t0)) / 1_000_000,
+        (t_css.wrapping_sub(t_parse)) / 1_000_000,
+        (t_end.wrapping_sub(t_css)) / 1_000_000);
+    page
 }
 
 /// Telecharge et applique les feuilles de style externes referencees par
@@ -503,10 +517,14 @@ fn load_external_css(dom: &Dom, base_url: &str, css: &mut Vec<Rule>) {
         }
         let href = match attr(node, "href") { Some(h) if !h.trim().is_empty() => h.trim(), _ => continue };
         let abs = resolve_location(&scheme, &host, href);
+        let before = css.len();
         if let Some(bytes) = crate::net::fetch_cached(&abs) {
             let text = String::from_utf8_lossy(&bytes);
             parse_stylesheet_imports(&text, &scheme, &host, css, 0);
+            crate::dlog!(crate::diag::Cat::Css, "feuille {} -> +{} regles", abs, css.len() - before);
             count += 1;
+        } else {
+            crate::dlog!(crate::diag::Cat::Warn, "feuille CSS injoignable: {}", abs);
         }
     }
 }
@@ -1164,10 +1182,16 @@ impl<'a> Ctx<'a> {
             let abs = resolve_location(&self.scheme, &self.host, src);
             match crate::net::fetch_cached(&abs) {
                 Some(b) => { self.img_budget -= 1; raw = b; }
-                None => return None,
+                None => { crate::dlog!(crate::diag::Cat::Warn, "image injoignable: {}", abs); return None; }
             }
         }
-        let img = image::decode(&raw)?;
+        let img = match image::decode(&raw) {
+            Some(im) => im,
+            None => {
+                crate::dlog!(crate::diag::Cat::Warn, "image non decodee ({}o, format non supporte?): {}", raw.len(), src);
+                return None;
+            }
+        };
         let mh = if max_h == 0 { img.h.max(1) } else { max_h };
         let img = image::downscale(&img, max_w.max(16), mh.max(16));
         if img.w == 0 || img.h == 0 { return None; }
