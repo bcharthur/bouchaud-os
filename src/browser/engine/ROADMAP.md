@@ -25,7 +25,8 @@ DOM ◀──▶ JS (event loop, DOM bindings, microtâches) ──▶ relayout/
 | `html/` tokenizer  | WHATWG HTML tokenizer             | 🟡 ad-hoc + fermetures implicites + UTF-8 lossy |
 | `html/` tree       | tree construction                 | 🟡 auto-close li/p/td/tr/option/dt/dd |
 | `dom/`             | Node/Element/Document             | ⚠️ `web.rs::Dom` minimal |
-| `css/` parser      | CSSParser                         | 🟡 dans `web.rs` (commentaires, @media) |
+| `css/` parser      | CSSParser                         | 🟡 web.rs + feuilles externes (link/@import) |
+| `loader/` res      | sous-ressources + cache           | 🟢 CSS/JS/img externes, cache réseau global |
 | `css/` values      | CSSPrimitiveValue (px/%/calc…)    | 🟢 `Len`, calc(), rem/vw/vh, gradients |
 | `css/` cascade     | StyleResolver (sélecteurs, spéc.) | 🟢 sélecteurs descendants + spécificité |
 | `style/`           | ComputedStyle / héritage          | 🟢 `Style`/`BoxProps` |
@@ -36,7 +37,7 @@ DOM ◀──▶ JS (event loop, DOM bindings, microtâches) ──▶ relayout/
 | `layout/` position | absolute/relative/fixed/z-index   | 🟢 + sticky, stacking, overflow clip |
 | `layout/` table    | table formatting                  | 🟡 `tr` via flex |
 | `paint/`           | display list + ordre de peinture  | 🟢 `Item`/layers/clip/gradient |
-| `js/`              | JS engine + DOM bindings          | 🟡 `js.rs` (interprète) |
+| `js/`              | JS engine + DOM bindings          | 🟡 inline + `<script src>` externes, budget relevé |
 | `image/`           | décodeurs PNG/JPEG/…              | 🟡 PNG, JPEG baseline, lazy/srcset |
 | `text/`            | shaping + fontes                  | 🟡 `font_ttf` TrueType |
 
@@ -58,9 +59,11 @@ Légende : 🟢 solide · 🟡 partiel · ⚠️ ad-hoc à refondre · 🔴 abse
 - **P4 — Style avancé** 🟡 : box-shadow ✅, gradients linéaires 2-stops ✅.
   Reste : `border-radius` (rendu arrondi), `transform`, `opacity` (alpha),
   gradients multi-stops/radial.
-- **P5 — JS/DOM** : montée en charge de `js.rs` (plus d'APIs DOM, `fetch`,
-  `requestAnimationFrame`), reflow déclenché par mutations.
-- **P6 — Réseau/format** : WebP/AVIF/GIF, HTTP/2 streams, compression.
+- **P5 — JS/DOM** 🟡 : scripts externes `<script src>` exécutés (budget 12M
+  steps, scripts ≤ 4 Mo), cache de ressources. Reste : plus d'APIs DOM/Web,
+  `fetch`, `requestAnimationFrame`, reflow déclenché par mutations.
+- **P6 — Réseau/format** : TLS 1.2 (serveurs sans 1.3), WebP/AVIF/GIF,
+  HTTP/2 streams. Acquis : User-Agent navigateur, cache de sous-ressources.
 
 ## Principe de travail
 
