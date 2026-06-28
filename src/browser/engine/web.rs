@@ -1046,6 +1046,8 @@ struct BoxProps {
     overflow_clip: bool,   // overflow: hidden/clip/auto/scroll -> clippe le contenu
     shadow: Option<u32>,   // box-shadow : couleur de l'ombre portee (offset fixe)
     grad: Option<(u32, u32, bool)>, // linear-gradient : (debut, fin, vertical)
+    tx: i32, ty: i32,       // transform: translate(...) simplifie
+    scale_pct: i32,         // transform: scale(...) en pourcentage (100 = identite)
 }
 fn default_box() -> BoxProps {
     BoxProps { hidden: false, bg: None, width: None, height: None, max_width: None, min_width: None, min_height: None,
@@ -1055,7 +1057,7 @@ fn default_box() -> BoxProps {
         flex_dir: FlexDir::Row, justify: Justify::Start, align_items: AlignI::Stretch,
         gap: 0, grid_cols: 0, flex_grow: 0, grid_span: 0, list_style: 0,
         position: Pos::Static, top: None, right: None, bottom: None, left: None,
-        z_index: None, overflow_clip: false, shadow: None, grad: None }
+        z_index: None, overflow_clip: false, shadow: None, grad: None, tx: 0, ty: 0, scale_pct: 100 }
 }
 
 // Premiere longueur d'une valeur raccourcie (`10px 20px` -> 10).
@@ -1123,6 +1125,7 @@ fn count_grid_cols(val: &str) -> u8 {
 
 pub enum Item {
     Rect { x: i32, y: i32, w: i32, h: i32, color: u32 },
+    RoundedRect { x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32 },
     Text { x: i32, y: i32, s: String, color: u32, scale: usize, bold: bool },
     Image { x: i32, y: i32, w: i32, h: i32, idx: usize },
 }
@@ -1376,7 +1379,44 @@ impl<'c, 'a> Flow<'c, 'a> {
 
 fn translate_item(it: &mut Item, dx: i32, dy: i32) {
     match it {
-        Item::Rect { x, y, .. } | Item::Text { x, y, .. } | Item::Image { x, y, .. } => { *x += dx; *y += dy; }
+        Item::Rect { x, y, .. } | Item::RoundedRect { x, y, .. } | Item::Text { x, y, .. } | Item::Image { x, y, .. } => { *x += dx; *y += dy; }
+    }
+}
+
+fn scale_item_from(it: &mut Item, ox: i32, oy: i32, pct: i32) {
+    if pct == 100 { return; }
+    let sc = |v: i32| -> i32 { v * pct / 100 };
+    match it {
+        Item::Rect { x, y, w, h, .. } | Item::RoundedRect { x, y, w, h, .. } => {
+            *x = ox + sc(*x - ox); *y = oy + sc(*y - oy);
+            *w = sc(*w).max(1); *h = sc(*h).max(1);
+        }
+        Item::Text { x, y, scale, .. } => {
+            *x = ox + sc(*x - ox); *y = oy + sc(*y - oy);
+            let ns = ((*scale as i32 * pct + 50) / 100).clamp(1, 6) as usize;
+            *scale = ns;
+        }
+        Item::Image { x, y, w, h, .. } => {
+            *x = ox + sc(*x - ox); *y = oy + sc(*y - oy);
+            *w = sc(*w).max(1); *h = sc(*h).max(1);
+        }
+    }
+}
+
+fn apply_box_transform(items: &mut [Item], links: &mut [Link], ox: i32, oy: i32, tx: i32, ty: i32, scale_pct: i32) {
+    if tx == 0 && ty == 0 && scale_pct == 100 { return; }
+    for it in items {
+        scale_item_from(it, ox, oy, scale_pct);
+        translate_item(it, tx, ty);
+    }
+    for lk in links {
+        if scale_pct != 100 {
+            lk.x = ox + (lk.x - ox) * scale_pct / 100;
+            lk.y = oy + (lk.y - oy) * scale_pct / 100;
+            lk.w = (lk.w * scale_pct / 100).max(1);
+            lk.h = (lk.h * scale_pct / 100).max(1);
+        }
+        lk.x += tx; lk.y += ty;
     }
 }
 
@@ -1522,6 +1562,29 @@ fn resolve_var(val: &str, css_vars: &[(String, String)]) -> String {
     result
 }
 
+
+fn parse_transform(val: &str) -> (i32, i32, i32) {
+    let mut tx = 0i32;
+    let mut ty = 0i32;
+    let mut scale = 100i32;
+    for part in val.split(')').filter(|p| !p.trim().is_empty()) {
+        let p = part.trim();
+        if let Some(args) = p.strip_prefix("translate(") {
+            let mut it = args.split(',');
+            tx += it.next().and_then(|v| first_len(v.trim())).unwrap_or(0);
+            ty += it.next().and_then(|v| first_len(v.trim())).unwrap_or(0);
+        } else if let Some(args) = p.strip_prefix("translateX(") {
+            tx += first_len(args.trim()).unwrap_or(0);
+        } else if let Some(args) = p.strip_prefix("translateY(") {
+            ty += first_len(args.trim()).unwrap_or(0);
+        } else if let Some(args) = p.strip_prefix("scale(") {
+            let n = args.split(',').next().unwrap_or(args).trim();
+            if let Ok(v) = n.parse::<f32>() { scale = (scale as f32 * v) as i32; }
+        }
+    }
+    (tx, ty, scale.clamp(10, 400))
+}
+
 fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, css_vars: &[(String, String)]) {
     for (p, v) in decls {
         if p.starts_with("--") { continue; } // proprietes CSS custom (deja collectees)
@@ -1647,6 +1710,10 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, cs
             "min-width" => { bx.min_width = parse_len(val); }
             "min-height" => { bx.min_height = parse_len(val); }
             "border-radius" => { if let Some(px) = first_len(val) { bx.radius = px.max(0); } }
+            "transform" => {
+                let (tx, ty, sc) = parse_transform(val);
+                bx.tx += tx; bx.ty += ty; bx.scale_pct = bx.scale_pct * sc / 100;
+            }
             "float" => { bx.float = match val { "left" => FloatK::Left, "right" => FloatK::Right, _ => FloatK::None }; }
             "margin" => {
                 if val.contains("auto") { bx.center = true; }
@@ -1962,6 +2029,7 @@ fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps
 
     let box_top = f.y;
     let bg_insert = f.items.len();
+    let link_insert = f.links.len();
     let (sx0, sav, sal) = (f.x0, f.avail, f.align);
     f.x0 = sx0 + left + bw + pl;    // contenu insere par bordure + padding gauche
     f.avail = inner;
@@ -2019,12 +2087,12 @@ fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps
             let bands = paint_gradient_bands(bx0, box_top, outer, h, c1, c2, vert);
             f.items.splice(bg_insert..bg_insert, bands);
         } else if let Some(bgc) = bx.bg {
-            f.items.insert(bg_insert, Item::Rect { x: sx0 + left, y: box_top, w: outer, h, color: bgc });
+            f.items.insert(bg_insert, if bx.radius > 0 { Item::RoundedRect { x: sx0 + left, y: box_top, w: outer, h, radius: bx.radius, color: bgc } } else { Item::Rect { x: sx0 + left, y: box_top, w: outer, h, color: bgc } });
         }
     }
     // box-shadow : rectangle decale (+4,+4), insere ENCORE en dessous du fond.
     if let Some(sh) = bx.shadow {
-        if h > 0 { f.items.insert(bg_insert, Item::Rect { x: sx0 + left + 4, y: box_top + 4, w: outer, h, color: sh }); }
+        if h > 0 { f.items.insert(bg_insert, if bx.radius > 0 { Item::RoundedRect { x: sx0 + left + 4, y: box_top + 4, w: outer, h, radius: bx.radius, color: sh } } else { Item::Rect { x: sx0 + left + 4, y: box_top + 4, w: outer, h, color: sh } }); }
     }
     // Bordure : 4 traits dessines PAR-DESSUS (haut, bas, gauche, droite).
     if bw > 0 && h > 0 {
@@ -2035,6 +2103,9 @@ fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps
         f.items.push(Item::Rect { x, y: box_top, w: bw, h, color: bc });
         f.items.push(Item::Rect { x: x + outer - bw, y: box_top, w: bw, h, color: bc });
     }
+
+    // Transform CSS simple : applique translate/scale au fragment visuel et aux liens.
+    apply_box_transform(&mut f.items[bg_insert..], &mut f.links[link_insert..], sx0 + left, box_top, bx.tx, bx.ty, bx.scale_pct);
 
     // Marge basse + espacement par defaut entre blocs.
     f.y += bx.mar_b;
@@ -2249,6 +2320,30 @@ fn intersect(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> (i32, i32, i32
     (x0, y0, (x1 - x0).max(0), (y1 - y0).max(0))
 }
 
+
+fn paint_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32, vp: (i32, i32, i32, i32)) {
+    let (vx, vy, vw, vh) = vp;
+    if w <= 0 || h <= 0 { return; }
+    let r = radius.min(w / 2).min(h / 2).max(0);
+    let y0 = y.max(vy);
+    let y1 = (y + h).min(vy + vh);
+    for yy in y0..y1 {
+        let local_y = yy - y;
+        let dy = if local_y < r { r - local_y } else if local_y >= h - r { local_y - (h - r - 1) } else { 0 };
+        let mut inset = 0;
+        if r > 0 && dy > 0 {
+            let rr = r * r;
+            let yy2 = dy * dy;
+            let mut xx = 0;
+            while xx < r && xx * xx + yy2 > rr { xx += 1; }
+            inset = xx;
+        }
+        let xs = (x + inset).max(vx);
+        let xe = (x + w - inset).min(vx + vw);
+        if xe > xs { fb::fill_rect_rgb(xs as usize, yy as usize, (xe - xs) as usize, 1, color); }
+    }
+}
+
 // Peint une liste d'items (coords document) dans le viewport effectif `vp`
 // (coords ecran), avec defilement `scroll`. `blit_view` borne le blit d'images.
 fn paint_list(items: &[Item], scroll: i32, images: &[Image], vp: (i32, i32, i32, i32), _blit_view: (i32, i32, i32, i32)) {
@@ -2270,6 +2365,12 @@ fn paint_list(items: &[Item], scroll: i32, images: &[Image], vp: (i32, i32, i32,
                 if hh > 0 && ww > 0 {
                     fb::fill_rect_rgb(x0 as usize, yy as usize, ww as usize, hh as usize, *color);
                 }
+            }
+            Item::RoundedRect { x, y, w, h, radius, color } => {
+                let sy = vy + y - scroll;
+                if sy + h <= vy || sy >= vy + vh { continue; }
+                let xx = vx + x;
+                paint_rounded_rect(xx, sy, *w, *h, *radius, *color, vp);
             }
             Item::Text { x, y, s, color, scale, bold } => {
                 let sy = vy + y - scroll;
