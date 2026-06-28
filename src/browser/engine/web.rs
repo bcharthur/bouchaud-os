@@ -322,6 +322,44 @@ enum Sel { Any, Tag(String), Class(String), Id(String), TagClass(String, String)
 // le DERNIER element doit matcher l'element courant, les precedents ses ancetres.
 struct Rule { chain: Vec<Sel>, decls: Vec<(String, String)>, spec: u32 }
 
+struct CssIndex {
+    any: Vec<usize>,
+    tags: Vec<(String, Vec<usize>)>,
+    classes: Vec<(String, Vec<usize>)>,
+    ids: Vec<(String, Vec<usize>)>,
+}
+
+impl CssIndex {
+    fn new(css: &[Rule]) -> CssIndex {
+        let mut idx = CssIndex { any: Vec::new(), tags: Vec::new(), classes: Vec::new(), ids: Vec::new() };
+        for (i, r) in css.iter().enumerate() {
+            match r.chain.last().unwrap_or(&Sel::Any) {
+                Sel::Any => idx.any.push(i),
+                Sel::Tag(t) => push_bucket(&mut idx.tags, t, i),
+                Sel::Class(c) => push_bucket(&mut idx.classes, c, i),
+                Sel::Id(id) => push_bucket(&mut idx.ids, id, i),
+                Sel::TagClass(_, c) => {
+                    // Le tag est teste par rule_matches ; bucket par classe pour rester selectif.
+                    push_bucket(&mut idx.classes, c, i);
+                }
+            }
+        }
+        idx
+    }
+
+    fn bucket<'b>(buckets: &'b [(String, Vec<usize>)], key: &str) -> &'b [usize] {
+        buckets.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_slice()).unwrap_or(&[])
+    }
+}
+
+fn push_bucket(buckets: &mut Vec<(String, Vec<usize>)>, key: &str, idx: usize) {
+    if let Some((_, v)) = buckets.iter_mut().find(|(k, _)| k == key) {
+        v.push(idx);
+    } else {
+        buckets.push((key.to_string(), alloc::vec![idx]));
+    }
+}
+
 fn parse_decls(body: &str) -> Vec<(String, String)> {
     let mut v = Vec::new();
     for part in body.split(';') {
@@ -1143,6 +1181,7 @@ struct Frag { items: Vec<Item>, links: Vec<Link>, width: i32, height: i32 }
 // Etat partage entre la page et tous les sous-fragments (images, budget, etc.).
 struct Ctx<'a> {
     css: &'a [Rule],
+    css_index: CssIndex,
     css_vars: Vec<(String, String)>,
     images: Vec<Image>,
     img_cache: Vec<(String, usize)>,
@@ -1428,7 +1467,7 @@ fn layout(dom: &Dom, base_url: &str, width: i32, css: &[Rule]) -> Page {
     }
     let content_w = (width - 2 * PAD).max(40);
     let mut ctx = Ctx {
-        css, css_vars, images: Vec::new(), img_cache: Vec::new(), img_budget: 24,
+        css, css_index: CssIndex::new(css), css_vars, images: Vec::new(), img_cache: Vec::new(), img_budget: 24,
         scheme: scheme.to_string(), host: host.to_string(), title: String::new(), visited: 0,
         ancestors: Vec::new(),
         list_stack: Vec::new(),
@@ -1668,11 +1707,24 @@ fn compute(f: &Flow, node: &Node, tag: &str, st: &Style) -> (Style, BoxProps) {
     }
     let classes = attr(node, "class").unwrap_or("").to_string();
     let id = attr(node, "id").unwrap_or("").to_ascii_lowercase();
-    let mut matched: Vec<&Rule> = f.ctx.css.iter()
-        .filter(|r| rule_matches(&r.chain, tag, &classes, &id, &f.ctx.ancestors))
-        .collect();
-    matched.sort_by_key(|r| r.spec);
-    for r in matched { apply_decls(&r.decls, &mut cst, &mut bx, &f.ctx.css_vars); }
+    let mut matched: Vec<(u32, usize)> = Vec::new();
+    let consider = |ri: usize, matched: &mut Vec<(u32, usize)>| {
+        let r = &f.ctx.css[ri];
+        if rule_matches(&r.chain, tag, &classes, &id, &f.ctx.ancestors) {
+            matched.push((r.spec, ri));
+        }
+    };
+    for &ri in &f.ctx.css_index.any { consider(ri, &mut matched); }
+    for &ri in CssIndex::bucket(&f.ctx.css_index.tags, tag) { consider(ri, &mut matched); }
+    if !id.is_empty() {
+        for &ri in CssIndex::bucket(&f.ctx.css_index.ids, &id) { consider(ri, &mut matched); }
+    }
+    for cl in classes.split(' ').filter(|c| !c.is_empty()) {
+        for &ri in CssIndex::bucket(&f.ctx.css_index.classes, cl) { consider(ri, &mut matched); }
+    }
+    // Cascade CSS : specificite croissante puis ordre source croissant.
+    matched.sort_by_key(|&(spec, ri)| (spec, ri));
+    for (_, ri) in matched { apply_decls(&f.ctx.css[ri].decls, &mut cst, &mut bx, &f.ctx.css_vars); }
     if let Some(style) = attr(node, "style") { apply_decls(&parse_decls(style), &mut cst, &mut bx, &f.ctx.css_vars); }
     (cst, bx)
 }
