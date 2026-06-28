@@ -26,7 +26,7 @@ pub fn init() {
     unsafe {
         ALLOCATOR.lock().init(core::ptr::addr_of_mut!(HEAP_SPACE) as *mut u8, HEAP_SIZE);
     }
-    crate::kernel::dmesg::log("heap: allocateur initialise (48 MiB)");
+    crate::kernel::dmesg::log("heap: allocateur initialise (128 MiB)");
 }
 
 /// Renvoie (octets utilises, octets libres, taille totale) du tas.
