@@ -15,11 +15,24 @@ use alloc::vec::Vec;
 ///
 /// La pile sait decompresser `gzip` et `deflate` (cf. `net::inflate`).
 pub fn build_get(host: &str, path: &str) -> String {
+    // User-Agent d'un navigateur reel : de nombreux services (Google, Bing,
+    // DuckDuckGo…) renvoient une page degradee/bloquee a un UA inconnu. On se
+    // presente comme un navigateur courant pour obtenir le HTML normal, et on
+    // accepte explicitement le HTML.
     format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: BouchaudOS\r\nAccept: */*\r\nAccept-Encoding: gzip, deflate, br\r\nConnection: close\r\n\r\n",
-        path, host
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\n\
+         User-Agent: {ua}\r\n\
+         Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8\r\n\
+         Accept-Language: fr-FR,fr;q=0.9,en;q=0.8\r\n\
+         Accept-Encoding: gzip, deflate, br\r\n\
+         Connection: close\r\n\r\n",
+        path = path, host = host, ua = USER_AGENT
     )
 }
+
+/// User-Agent annonce par Nautile (navigateur reel pour ne pas etre filtre).
+pub const USER_AGENT: &str =
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
 /// Renvoie l'index du debut du corps (apres l'en-tete `\r\n\r\n`).
 pub fn body_offset(resp: &[u8]) -> Option<usize> {
