@@ -113,7 +113,8 @@ pub fn bouchaud_home() -> String {
                    <span class=\"kb\">!w</span> Wikipedia, <span class=\"kb\">!yt</span> YouTube</li>\
                <li><span class=\"kb\">Entree</span> naviguer ; <span class=\"kb\">F5</span> recharger</li>\
                <li><span class=\"kb\">Ctrl+T</span> onglet ; <span class=\"kb\">1..9</span> suivre lien n</li>\
-               <li><span class=\"kb\">Molette</span> defiler</li>\
+               <li><span class=\"kb\">Molette</span> defiler ; \
+                   <a href=\"about:log\">about:log</a> = journal de la pile</li>\
              </ul>\
            </div>\
            <div class=\"card full\">\

@@ -2516,16 +2516,23 @@ fn open_page_inner(html: &[u8], base_url: &str, run: bool) -> (PageCtx, Vec<u8>)
                             if bytes.len() <= MAX_SCRIPT {
                                 let code = alloc::string::String::from_utf8_lossy(&bytes);
                                 interp.writes.clear();
-                                let _ = interp.run(&code);
+                                match interp.run(&code) {
+                                    Ok(_) => crate::dlog!(crate::diag::Cat::Js, "script ext {}o OK {}", bytes.len(), abs),
+                                    Err(e) => crate::dlog!(crate::diag::Cat::Err, "script ext {} : {}", abs, e),
+                                }
                                 ran += 1;
                                 wr = core::mem::take(&mut interp.writes);
+                            } else {
+                                crate::dlog!(crate::diag::Cat::Warn, "script ext ignore ({}o > {}o): {}", bytes.len(), MAX_SCRIPT, abs);
                             }
                         }
                     }
                 } else if content_end > content_start && content_end - content_start <= MAX_SCRIPT {
                     if let Ok(src) = core::str::from_utf8(&html[content_start..content_end]) {
                         interp.writes.clear();
-                        let _ = interp.run(src); // erreurs ignorees (le rendu continue)
+                        if let Err(e) = interp.run(src) {
+                            crate::dlog!(crate::diag::Cat::Err, "script inline ({}o) : {}", src.len(), e);
+                        }
                         ran += 1;
                         wr = core::mem::take(&mut interp.writes);
                     }
@@ -2545,6 +2552,8 @@ fn open_page_inner(html: &[u8], base_url: &str, run: bool) -> (PageCtx, Vec<u8>)
         interp.fire_event(-1, "DOMContentLoaded");
         interp.fire_event(-1, "load");
         interp.pump();
+        let budget = if interp.steps >= interp.max_steps { " (BUDGET ATTEINT)" } else { "" };
+        crate::dlog!(crate::diag::Cat::Js, "{} scripts executes, {} steps{}", ran, interp.steps, budget);
     }
     let mut out = interp.dom.rebuild(&scripts);
     if out.len() > MAX_OUTPUT { out.truncate(MAX_OUTPUT); }
