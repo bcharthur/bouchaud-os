@@ -145,7 +145,16 @@ fn is_id_part(c: u8) -> bool { c == b'_' || c == b'$' || c.is_ascii_alphanumeric
 fn hexv(c: u8) -> u32 { match c { b'0'..=b'9' => (c - b'0') as u32, b'a'..=b'f' => (c - b'a' + 10) as u32, b'A'..=b'F' => (c - b'A' + 10) as u32, _ => 0 } }
 
 impl<'a> Lexer<'a> {
-    fn new(s: &'a [u8]) -> Lexer<'a> { Lexer { s, i: 0, toks: Vec::new() } }
+    fn new(s: &'a [u8]) -> Lexer<'a> {
+        // Les gros bundles modernes (Google sert facilement >1 Mio de JS)
+        // declenchaient une croissance geometrique de Vec pendant le lexing :
+        // quand le tampon approchait ~10 Mio, le realloc suivant demandait
+        // ~20 Mio contigus et pouvait OOM sur le tas noyau de 48 Mio. On
+        // pre-dimensionne d'apres la taille source pour eviter ce pic de
+        // double-buffer tout en gardant le moteur JS actif.
+        let cap = (s.len() / 4).clamp(256, 300_000);
+        Lexer { s, i: 0, toks: Vec::with_capacity(cap) }
+    }
 
     fn prev_allows_regex(&self) -> bool {
         match self.toks.last() {
