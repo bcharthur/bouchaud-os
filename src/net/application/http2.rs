@@ -72,8 +72,9 @@ pub fn fetch(sess: &mut Session, host: &str, path: &str, trace: &mut Vec<String>
         (":path", path),
         (":scheme", "https"),
         (":authority", host),
-        ("user-agent", "BouchaudOS"),
-        ("accept", "*/*"),
+        ("user-agent", super::http::USER_AGENT),
+        ("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+        ("accept-language", "fr-FR,fr;q=0.9,en;q=0.8"),
         ("accept-encoding", "gzip, deflate, br"),
     ]);
     initial.extend_from_slice(&build_frame(

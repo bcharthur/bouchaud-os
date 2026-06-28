@@ -50,14 +50,8 @@ pub fn open(url: &str, width: i32) -> (Session, Page) {
     if let Some(rest) = url.strip_prefix("compat:") {
         return compat_render(rest, width);
     }
-    // HTTP / HTTPS : rendu local (souverain) par défaut
+    // HTTP / HTTPS : récupération + rendu par le moteur intégré (souverain).
     if url.starts_with("http://") || url.starts_with("https://") {
-        // La home Google est construite par JS (illisible en rendu statique) :
-        // on sert une page Google locale fonctionnelle. Les autres URL google
-        // (/search, etc.) restent récupérées et rendues normalement.
-        if is_google_home(url) {
-            return from_html(super::pages::google_home().as_bytes(), url, width);
-        }
         if ENABLE_COMPAT_PROXY { return compat_render(url, width); }
         return local_render(url, width);
     }
@@ -84,29 +78,45 @@ pub fn resolve_input(input: &str, page: &Page) -> String {
     if t.contains("://") || t.starts_with("about:") || t.starts_with("file:") || t.starts_with("compat:") {
         return t.to_string();
     }
+    if t.is_empty() { return t.to_string(); }
+    // Raccourcis moteur "!bang" : !g google, !ddg duckduckgo, !b bing,
+    // !w wikipedia, !yt youtube, !so stackoverflow. Sinon moteur par defaut.
+    if let Some(rest) = t.strip_prefix('!') {
+        let (bang, query) = match rest.find(' ') {
+            Some(i) => (&rest[..i], rest[i + 1..].trim()),
+            None => (rest, ""),
+        };
+        if !query.is_empty() {
+            return search_url(bang, query);
+        }
+    }
     // Un mot ressemblant à un domaine (un point, pas d'espace) -> URL directe.
     if t.contains('.') && !t.contains(' ') {
         return format!("https://{}", t);
     }
-    if t.is_empty() { return t.to_string(); }
-    // Sinon : recherche Google (barre d'adresse = barre de recherche, comme les
-    // navigateurs modernes). La page de résultats est rendue par notre moteur.
-    format!("https://www.google.com/search?q={}", pct_encode(t))
+    // Sinon : recherche via le moteur par defaut (barre d'adresse = recherche).
+    search_url(DEFAULT_ENGINE, t)
 }
 
-/// Vrai si l'URL est la page d'accueil Google (host google.*, chemin racine,
-/// sans requête) — distinguée de `/search?q=...` qui doit être récupérée.
-fn is_google_home(url: &str) -> bool {
-    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")).unwrap_or(url);
-    let (host, after) = match rest.find('/') { Some(i) => (&rest[..i], &rest[i..]), None => (rest, "") };
-    let host = host.strip_prefix("www.").unwrap_or(host);
-    let is_google = host == "google.com" || host == "google.fr"
-        || (host.starts_with("google.") && !host.contains(' '));
-    if !is_google { return false; }
-    // Chemin racine et pas de paramètres de recherche.
-    let path = after.split('?').next().unwrap_or("");
-    let has_query = after.contains('?');
-    (path.is_empty() || path == "/") && !has_query
+/// Moteur de recherche par défaut (clé de `search_url`). Modifiable librement.
+const DEFAULT_ENGINE: &str = "g";
+
+/// Construit l'URL de recherche pour un moteur donné. Couvre les principaux
+/// moteurs ; un bang inconnu retombe sur Google.
+fn search_url(engine: &str, query: &str) -> String {
+    let q = pct_encode(query);
+    match engine {
+        // Endpoint HTML de DuckDuckGo : 100% server-rendered (sans JS), rendu
+        // fiable par le moteur — ideal comme moteur de secours.
+        "ddg" | "d" | "duck" => format!("https://html.duckduckgo.com/html/?q={}", q),
+        "b" | "bing" => format!("https://www.bing.com/search?q={}", q),
+        "w" | "wiki" => format!("https://fr.wikipedia.org/w/index.php?search={}", q),
+        "yt" | "youtube" => format!("https://www.youtube.com/results?search_query={}", q),
+        "so" => format!("https://stackoverflow.com/search?q={}", q),
+        "br" | "brave" => format!("https://search.brave.com/search?q={}", q),
+        "sp" | "startpage" => format!("https://www.startpage.com/sp/search?query={}", q),
+        _ => format!("https://www.google.com/search?q={}", q),
+    }
 }
 
 // ── Rendu local (souverain) ───────────────────────────────────────────────────
@@ -114,8 +124,10 @@ fn is_google_home(url: &str) -> bool {
 fn local_render(url: &str, width: i32) -> (Session, Page) {
     let doc = crate::net::fetch_document(url);
     if doc.ok && doc.is_html && !doc.body.is_empty() {
-        // Pages reseau : rendu souverain STATIQUE (sans executer le JS de la page).
-        return from_html_static(&doc.body, &doc.final_url, width);
+        // Pages reseau : on execute le JS inline de la page (best-effort), borne
+        // par le budget du moteur JS (max steps, scripts > 256 Ko ignores), pour
+        // rendre le contenu construit dynamiquement. Repli statique si le JS echoue.
+        return from_html(&doc.body, &doc.final_url, width);
     }
     if doc.ok {
         // Document non-HTML : aperçu texte + métadonnées

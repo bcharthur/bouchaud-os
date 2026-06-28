@@ -106,14 +106,13 @@ pub fn bouchaud_home() -> String {
              </ul>\
            </div>\
            <div class=\"card\">\
-             <h3>&#x2328; Raccourcis</h3>\
+             <h3>&#x1f50d; Recherche &amp; raccourcis</h3>\
              <ul>\
-               <li><span class=\"kb\">Entree</span> naviguer vers l'URL</li>\
-               <li><span class=\"kb\">Alt+Gauche</span> reculer</li>\
-               <li><span class=\"kb\">Alt+Droite</span> avancer</li>\
-               <li><span class=\"kb\">F5</span> recharger</li>\
-               <li><span class=\"kb\">Ctrl+T</span> nouvel onglet</li>\
-               <li><span class=\"kb\">1..9</span> suivre lien n</li>\
+               <li>Tapez un <b>mot-cle</b> dans la barre d'adresse &rarr; recherche Google</li>\
+               <li>Bangs : <span class=\"kb\">!ddg</span> DuckDuckGo, <span class=\"kb\">!b</span> Bing, \
+                   <span class=\"kb\">!w</span> Wikipedia, <span class=\"kb\">!yt</span> YouTube</li>\
+               <li><span class=\"kb\">Entree</span> naviguer ; <span class=\"kb\">F5</span> recharger</li>\
+               <li><span class=\"kb\">Ctrl+T</span> onglet ; <span class=\"kb\">1..9</span> suivre lien n</li>\
                <li><span class=\"kb\">Molette</span> defiler</li>\
              </ul>\
            </div>\
