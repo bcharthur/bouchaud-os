@@ -1468,7 +1468,7 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, cs
                     else if tok == "auto" { bx.flex_grow = 1; }
                 }
             }
-            "visibility" => { if val == "hidden" { bx.hidden = true; } }
+            "visibility" => { /* non implementee : on ne masque pas (anti-FOUC) */ }
             "width" => { bx.width = parse_len(val); }
             "height" => { bx.height = parse_len(val); }
             "max-width" => { bx.max_width = parse_len(val); }
