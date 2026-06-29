@@ -417,7 +417,8 @@ impl Parser {
 
     fn parse_class(&mut self) -> Result<Stmt, String> {
         self.i += 1; // skip 'class'
-        let name = self.ident()?;
+        // anonymous class expression or named
+        let name = if matches!(self.peek(), Tok::Ident(_) | Tok::Keyword(_)) { self.ident()? } else { "__anon__".into() };
         let extends = if self.is_kw("extends") {
             self.i += 1;
             Some(self.parse_member_only()?)
@@ -425,25 +426,52 @@ impl Parser {
         self.expect_punct("{")?;
         let mut methods: Vec<(bool, String, Rc<FuncDef>)> = Vec::new();
         while !self.is_punct("}") && !matches!(self.peek(), Tok::Eof) {
-            // skip semicolons between methods
             if self.is_punct(";") { self.i += 1; continue; }
             let is_static = self.is_kw("static");
             if is_static { self.i += 1; }
-            // getter/setter: skip 'get'/'set' keyword-idents
-            if let Tok::Ident(kw) = self.peek().clone() { if kw == "get" || kw == "set" { self.i += 1; } }
+            // static { ... } initializer block
+            if is_static && self.is_punct("{") { self.skip_pattern(); continue; }
+            // skip async keyword before method name
+            if self.is_kw("async") {
+                let next_is_name = self.toks.get(self.i + 1).map(|t| !matches!(&t.0, Tok::Punct(p) if p == "(" || p == ";" || p == "}" || p == "=")).unwrap_or(false);
+                if next_is_name { self.i += 1; }
+            }
+            // get/set contextual keywords
+            if let Tok::Keyword(k) | Tok::Ident(k) = self.peek().clone() {
+                if k == "get" || k == "set" {
+                    let next_is_name = self.toks.get(self.i + 1).map(|t| !matches!(&t.0, Tok::Punct(p) if p == "(" || p == ";" || p == "}" || p == "=")).unwrap_or(false);
+                    if next_is_name { self.i += 1; }
+                }
+            }
+            // generator `*`
+            if self.is_punct("*") { self.i += 1; }
             let mname = match self.peek().clone() {
-                Tok::Ident(n) => { self.i += 1; n }
+                Tok::Ident(n)  => { self.i += 1; n }
                 Tok::Keyword(k) => { self.i += 1; k }
-                Tok::Str(s) => { self.i += 1; s }
-                _ => { // skip unknown token
-                    self.skip_balanced_after_brace()?; continue;
+                Tok::Str(s)    => { self.i += 1; s }
+                Tok::Num(n)    => { self.i += 1; format!("{}", n) }
+                // private field: #name
+                Tok::Punct(p) if p == "#" => {
+                    self.i += 1;
+                    if let Tok::Ident(_) | Tok::Keyword(_) = self.peek() { self.ident().unwrap_or_default() } else { "__priv__".into() }
+                }
+                // computed property: [expr]
+                Tok::Punct(p) if p == "[" => {
+                    self.skip_pattern(); "__computed__".into()
+                }
+                _ => {
+                    // unknown token: skip to next ; or }
+                    while !self.is_punct(";") && !self.is_punct("}") && !matches!(self.peek(), Tok::Eof) {
+                        if self.is_punct("{") || self.is_punct("[") { self.skip_pattern(); } else { self.i += 1; }
+                    }
+                    self.eat_punct(";");
+                    continue;
                 }
             };
             if self.is_punct("(") {
                 let def = self.parse_func_rest()?;
                 methods.push((is_static, mname, Rc::new(def)));
             } else {
-                // property initializer or computed: skip to next }
                 if self.is_punct("=") { self.i += 1; let _ = self.parse_assign(); }
                 self.eat_punct(";");
             }
@@ -742,7 +770,8 @@ impl Parser {
                 "(" => { let e = self.parse_expr()?; self.expect_punct(")")?; Ok(e) }
                 "[" => { let mut items = Vec::new(); while !self.is_punct("]") { if self.eat_punct("...") { items.push(Expr::Spread(Box::new(self.parse_assign()?))); } else if self.is_punct(",") { items.push(Expr::Undef); } else { items.push(self.parse_assign()?); } if !self.eat_punct(",") { break; } } self.expect_punct("]")?; Ok(Expr::Array(items)) }
                 "{" => self.parse_object(),
-                _ => Err(format!("token inattendu '{}'", p)),
+                // recovery: skip token and return undefined
+                _ => { Ok(Expr::Undef) }
             },
             Tok::Eof => Err("fin inattendue".into()),
         }
@@ -1512,6 +1541,191 @@ fn install(it: &mut Interp) {
     set(&webassembly, "Module", native_val(|_it, _t, a| { let bytes = js_to_bytes(a.get(0)); let m = new_obj(Obj::plain()); set(&m, "__wasm_bytes__", array_val(bytes.iter().map(|b| Value::Num(*b as f64)).collect())); Ok(m) }));
     set(&webassembly, "Instance", native_val(|it, _t, a| { let bytes = js_to_bytes(a.get(0)); wasm_instance_obj(it, &bytes) }));
     scope_declare(&g2, "WebAssembly", webassembly);
+
+    // Globals fréquemment utilisés par les scripts modernes ----------------
+    // `_` : variable de commodité (lodash/underscore.js ou raccourci Google)
+    scope_declare(&g2, "_", Value::Undefined);
+    // performance.now() : temps monotone (stub retourne 0)
+    let perf = new_obj(Obj::plain());
+    set(&perf, "now", native_val(|_it, _t, _a| Ok(Value::Num(0.0))));
+    set(&perf, "mark", native_val(|_it, _t, _a| Ok(Value::Undefined)));
+    set(&perf, "measure", native_val(|_it, _t, _a| Ok(Value::Undefined)));
+    set(&perf, "getEntriesByName", native_val(|_it, _t, _a| Ok(array_val(Vec::new()))));
+    set(&perf, "getEntriesByType", native_val(|_it, _t, _a| Ok(array_val(Vec::new()))));
+    set(&perf, "clearMarks", native_val(|_it, _t, _a| Ok(Value::Undefined)));
+    set(&perf, "clearMeasures", native_val(|_it, _t, _a| Ok(Value::Undefined)));
+    scope_declare(&g2, "performance", perf);
+    // fetch : renvoie une Promise résolue avec une Response vide
+    scope_declare(&g2, "fetch", native_val(|_it, _t, _a| Ok(make_resolved_thenable(new_obj(Obj::plain())))));
+    // XMLHttpRequest stub
+    scope_declare(&g2, "XMLHttpRequest", native_val(|_it, _t, _a| {
+        let o = new_obj(Obj::plain());
+        set(&o, "open",  native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        set(&o, "send",  native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        set(&o, "setRequestHeader", native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        set(&o, "abort", native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        set(&o, "addEventListener",    native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        set(&o, "removeEventListener", native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        set(&o, "readyState", Value::Num(0.0));
+        set(&o, "status", Value::Num(0.0));
+        set(&o, "responseText", str_val(""));
+        set(&o, "responseURL", str_val(""));
+        Ok(o)
+    }));
+    // URL / URLSearchParams stubs
+    scope_declare(&g2, "URL", native_val(|it, _t, a| {
+        let o = new_obj(Obj::plain());
+        let href = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
+        set(&o, "href", str_val(href.clone()));
+        set(&o, "origin", str_val(""));
+        set(&o, "pathname", str_val(""));
+        set(&o, "search", str_val(""));
+        set(&o, "searchParams", { let sp = new_obj(Obj::plain()); set(&sp, "get", native_val(|_i, _t, _a| Ok(Value::Null))); set(&sp, "set", native_val(|_i, _t, _a| Ok(Value::Undefined))); sp });
+        set(&o, "toString", native_val(|_i, _t, _a| Ok(str_val(""))));
+        Ok(o)
+    }));
+    scope_declare(&g2, "URLSearchParams", native_val(|_it, _t, _a| {
+        let o = new_obj(Obj::plain());
+        set(&o, "get",    native_val(|_i, _t, _a| Ok(Value::Null)));
+        set(&o, "set",    native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        set(&o, "append", native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        set(&o, "has",    native_val(|_i, _t, _a| Ok(Value::Bool(false))));
+        set(&o, "toString", native_val(|_i, _t, _a| Ok(str_val(""))));
+        Ok(o)
+    }));
+    // Event / CustomEvent stubs
+    scope_declare(&g2, "Event", native_val(|it, _t, a| {
+        let o = new_obj(Obj::plain());
+        set(&o, "type", str_val(it.to_string(a.get(0).unwrap_or(&Value::Undefined))));
+        set(&o, "bubbles", Value::Bool(false));
+        set(&o, "cancelable", Value::Bool(false));
+        set(&o, "preventDefault", native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        set(&o, "stopPropagation", native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        Ok(o)
+    }));
+    scope_declare(&g2, "CustomEvent", native_val(|it, _t, a| {
+        let o = new_obj(Obj::plain());
+        set(&o, "type", str_val(it.to_string(a.get(0).unwrap_or(&Value::Undefined))));
+        set(&o, "detail", a.get(1).and_then(|v| if let Value::Obj(o) = v { o.borrow().props.get("detail").cloned() } else { None }).unwrap_or(Value::Undefined));
+        set(&o, "preventDefault", native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        set(&o, "stopPropagation", native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        Ok(o)
+    }));
+    // MutationObserver stub
+    scope_declare(&g2, "MutationObserver", native_val(|_it, _t, _a| {
+        let o = new_obj(Obj::plain());
+        set(&o, "observe",    native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        set(&o, "disconnect", native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        Ok(o)
+    }));
+    // IntersectionObserver / ResizeObserver stubs
+    scope_declare(&g2, "IntersectionObserver", native_val(|_it, _t, _a| {
+        let o = new_obj(Obj::plain());
+        set(&o, "observe",    native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        set(&o, "unobserve",  native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        set(&o, "disconnect", native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        Ok(o)
+    }));
+    scope_declare(&g2, "ResizeObserver", native_val(|_it, _t, _a| {
+        let o = new_obj(Obj::plain());
+        set(&o, "observe",    native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        set(&o, "unobserve",  native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        set(&o, "disconnect", native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        Ok(o)
+    }));
+    // requestIdleCallback / cancelIdleCallback
+    scope_declare(&g2, "requestIdleCallback", native_val(native_set_timeout));
+    scope_declare(&g2, "cancelIdleCallback", native_val(|_it, _t, _a| Ok(Value::Undefined)));
+    // setImmediate / clearImmediate (Node.js compat utilisé par certains bundles)
+    scope_declare(&g2, "setImmediate", native_val(native_set_timeout));
+    scope_declare(&g2, "clearImmediate", native_val(|_it, _t, _a| Ok(Value::Undefined)));
+    // Symbol stub (retourne une string unique)
+    scope_declare(&g2, "Symbol", native_val(|it, _t, a| {
+        let desc = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
+        Ok(str_val(format!("Symbol({})", desc)))
+    }));
+    // Proxy stub : retourne la cible inchangée
+    scope_declare(&g2, "Proxy", native_val(|_it, _t, a| Ok(a.get(0).cloned().unwrap_or(Value::Undefined))));
+    // Reflect stub
+    let reflect = new_obj(Obj::plain());
+    set(&reflect, "apply",  native_val(|it, _t, a| { if let Some(f) = a.get(0) { let this = a.get(1).cloned().unwrap_or(Value::Undefined); let args = if let Some(Value::Obj(o)) = a.get(2) { o.borrow().arr.clone().unwrap_or_default() } else { Vec::new() }; it.call(f.clone(), this, &args) } else { Ok(Value::Undefined) } }));
+    set(&reflect, "has",    native_val(|_it, _t, a| { Ok(Value::Bool(if let Some(Value::Obj(o)) = a.get(0) { if let Some(Value::Str(k)) = a.get(1) { o.borrow().props.contains_key(k.as_str()) } else { false } } else { false })) }));
+    set(&reflect, "ownKeys", native_val(|_it, _t, a| { Ok(if let Some(Value::Obj(o)) = a.get(0) { array_val(o.borrow().props.keys().map(|k| str_val(k.clone())).collect()) } else { array_val(Vec::new()) }) }));
+    scope_declare(&g2, "Reflect", reflect);
+    // Error constructors
+    for ctor in &["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "URIError"] {
+        scope_declare(&g2, ctor, native_val(|it, _t, a| {
+            let o = new_obj(Obj::plain());
+            set(&o, "message", str_val(it.to_string(a.get(0).unwrap_or(&Value::Undefined))));
+            set(&o, "stack", str_val(""));
+            Ok(o)
+        }));
+    }
+    // ArrayBuffer / Uint8Array / Int32Array stubs
+    scope_declare(&g2, "ArrayBuffer", native_val(|it, _t, a| {
+        let n = (it.to_num(a.get(0).unwrap_or(&Value::Undefined)) as usize).min(64 * 1024 * 1024);
+        Ok(array_val(vec![Value::Num(0.0); n]))
+    }));
+    for tname in &["Uint8Array","Uint8ClampedArray","Int8Array","Uint16Array","Int16Array","Uint32Array","Int32Array","Float32Array","Float64Array","BigUint64Array","BigInt64Array"] {
+        scope_declare(&g2, tname, native_val(|it, _t, a| {
+            let n = (it.to_num(a.get(0).unwrap_or(&Value::Undefined)) as usize).min(16 * 1024 * 1024);
+            Ok(array_val(vec![Value::Num(0.0); n]))
+        }));
+    }
+    // DataView stub
+    scope_declare(&g2, "DataView", native_val(|_it, _t, a| {
+        let o = new_obj(Obj::plain());
+        set(&o, "buffer", a.get(0).cloned().unwrap_or(Value::Undefined));
+        set(&o, "getUint8",  native_val(|_i, _t, _a| Ok(Value::Num(0.0))));
+        set(&o, "getUint32", native_val(|_i, _t, _a| Ok(Value::Num(0.0))));
+        set(&o, "setUint8",  native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        set(&o, "setUint32", native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        Ok(o)
+    }));
+    // TextEncoder / TextDecoder stubs
+    scope_declare(&g2, "TextEncoder", native_val(|_it, _t, _a| {
+        let o = new_obj(Obj::plain());
+        set(&o, "encode", native_val(|it, _t, a| {
+            let s = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
+            Ok(array_val(s.bytes().map(|b| Value::Num(b as f64)).collect()))
+        }));
+        Ok(o)
+    }));
+    scope_declare(&g2, "TextDecoder", native_val(|_it, _t, _a| {
+        let o = new_obj(Obj::plain());
+        set(&o, "decode", native_val(|_it, _t, a| {
+            if let Some(Value::Obj(arr)) = a.get(0) {
+                let bytes: Vec<u8> = arr.borrow().arr.as_ref().map(|v| v.iter().map(|x| if let Value::Num(n) = x { *n as u8 } else { 0 }).collect()).unwrap_or_default();
+                Ok(str_val(String::from_utf8_lossy(&bytes).into_owned()))
+            } else { Ok(str_val("")) }
+        }));
+        Ok(o)
+    }));
+    // crypto.getRandomValues stub
+    let crypto = new_obj(Obj::plain());
+    set(&crypto, "getRandomValues", native_val(|_it, _t, a| Ok(a.get(0).cloned().unwrap_or(Value::Undefined))));
+    set(&crypto, "randomUUID", native_val(|_it, _t, _a| Ok(str_val("00000000-0000-0000-0000-000000000000"))));
+    scope_declare(&g2, "crypto", crypto);
+    // atob / btoa stubs
+    scope_declare(&g2, "atob", native_val(|_it, _t, _a| Ok(str_val(""))));
+    scope_declare(&g2, "btoa", native_val(|_it, _t, _a| Ok(str_val(""))));
+    // localStorage / sessionStorage stubs
+    let storage = new_obj(Obj::plain());
+    set(&storage, "getItem",    native_val(|_it, _t, _a| Ok(Value::Null)));
+    set(&storage, "setItem",    native_val(|_it, _t, _a| Ok(Value::Undefined)));
+    set(&storage, "removeItem", native_val(|_it, _t, _a| Ok(Value::Undefined)));
+    set(&storage, "clear",      native_val(|_it, _t, _a| Ok(Value::Undefined)));
+    set(&storage, "length", Value::Num(0.0));
+    scope_declare(&g2, "localStorage", storage.clone());
+    scope_declare(&g2, "sessionStorage", storage);
+    // history stub
+    let history = new_obj(Obj::plain());
+    set(&history, "pushState",    native_val(|_it, _t, _a| Ok(Value::Undefined)));
+    set(&history, "replaceState", native_val(|_it, _t, _a| Ok(Value::Undefined)));
+    set(&history, "back",         native_val(|_it, _t, _a| Ok(Value::Undefined)));
+    set(&history, "forward",      native_val(|_it, _t, _a| Ok(Value::Undefined)));
+    set(&history, "length", Value::Num(1.0));
+    scope_declare(&g2, "history", history);
 }
 
 // ============================================================================
