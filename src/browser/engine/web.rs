@@ -366,26 +366,31 @@ pub fn render(html: &[u8], base_url: &str, width: i32) -> Page {
 // Met en page un HTML deja enrichi par le JS (DOM applique).
 fn render_scripted(scripted: &[u8], base_url: &str, width: i32) -> Page {
     use crate::diag::Cat;
+    let mc = |a: u64, b: u64| -> u64 { b.wrapping_sub(a) / 1_000_000 };
+
+    // ── Phase 1 : tokenizer/tree builder (HTML -> DOM) ──
     let t0 = crate::kernel::timer::cycles_since_boot();
     let (clean, inline_css) = extract_and_strip(scripted, 1_500_000);
     let dom = parse(&clean);
-    let t_parse = crate::kernel::timer::cycles_since_boot();
-    // Cascade : feuilles externes (<link rel=stylesheet>) d'abord — priorite plus
-    // faible sur egalite —, puis le CSS inline (<style>/style="") par-dessus.
+    let t1 = crate::kernel::timer::cycles_since_boot();
+    crate::dlog!(Cat::Dom, "parse HTML: {} noeuds, {}o -> {}Mc", dom.nodes.len(), clean.len(), mc(t0, t1));
+
+    // ── Phase 2 : style (CSS externe + inline -> regles + index) ──
+    // Feuilles externes (<link rel=stylesheet>) d'abord (priorite plus faible sur
+    // egalite), puis le CSS inline (<style>/style="") par-dessus.
     let mut css: Vec<Rule> = Vec::new();
     load_external_css(&dom, base_url, &mut css);
     let ext_rules = css.len();
     css.extend(inline_css);
-    let t_css = crate::kernel::timer::cycles_since_boot();
+    let t2 = crate::kernel::timer::cycles_since_boot();
+    crate::dlog!(Cat::Css, "cascade: {} regles ({} externes) -> {}Mc", css.len(), ext_rules, mc(t1, t2));
+
+    // ── Phase 3 : layout (cascade + box model + flex/grid/position -> items) ──
     let page = layout(&dom, base_url, width, &css);
-    let t_end = crate::kernel::timer::cycles_since_boot();
-    let layers_items: usize = page.layers.iter().map(|l| l.items.len()).sum();
-    crate::dlog!(Cat::Layout,
-        "DOM {} noeuds | CSS {} regles ({} ext) | {} items +{} couches | h={}px | parse {}Mc, css {}Mc, layout {}Mc",
-        dom.nodes.len(), css.len(), ext_rules, page.items.len(), layers_items, page.height,
-        (t_parse.wrapping_sub(t0)) / 1_000_000,
-        (t_css.wrapping_sub(t_parse)) / 1_000_000,
-        (t_end.wrapping_sub(t_css)) / 1_000_000);
+    let t3 = crate::kernel::timer::cycles_since_boot();
+    let capped = if page.layers.len() >= MAX_LAYERS { " [PLAFOND couches atteint]" } else { "" };
+    crate::dlog!(Cat::Layout, "layout: {} items, {} couches{}, h={}px -> {}Mc",
+        page.items.len(), page.layers.len(), capped, page.height, mc(t2, t3));
     page
 }
 
@@ -979,6 +984,11 @@ const PAD: i32 = 8;
 // Hauteur approximative du viewport pour `position: fixed` et le bloc conteneur
 // initial (la fenetre Nautile par defaut fait ~420px, moins le chrome).
 const VIEWPORT_H: i32 = 380;
+// Plafond de couches d'empilement. Les sites complexes (Wikipedia) declarent des
+// milliers d'elements positionnes : sans plafond, `paint` itere toutes les
+// couches a CHAQUE frame -> scroll fige. Au-dela, on rend l'element EN FLUX
+// (contenu visible et defilable, au prix d'un positionnement approximatif).
+const MAX_LAYERS: usize = 256;
 
 // Element d'une ligne en cours (positions relatives au debut de ligne).
 enum LineItem {
@@ -1626,7 +1636,8 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
 
     // --- Positionnement (P1) ---
     // absolute / fixed : hors flux, place dans une couche dediee (z-index).
-    if matches!(bx.position, Pos::Absolute | Pos::Fixed) {
+    // Au-dela du plafond de couches, on retombe en flux normal (cf. MAX_LAYERS).
+    if matches!(bx.position, Pos::Absolute | Pos::Fixed) && f.ctx.layers.len() < MAX_LAYERS {
         layout_positioned(f, dom, node, &cst, &bx, tag, disp, depth);
         f.ctx.ancestors.pop();
         return;
@@ -1666,11 +1677,14 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
                 if let Some((cx, cy, cw, ch)) = l.clip { l.clip = Some((cx + dx, cy + dy, cw, ch)); }
             }
         }
-        // z-index : promeut la plage produite dans une couche d'empilement.
+        // z-index : promeut la plage produite dans une couche d'empilement, sauf
+        // si le plafond est atteint (on garde alors la plage en flux a z=0).
         if let Some(z) = bx.z_index {
-            let items: Vec<Item> = f.items.drain(it0..).collect();
-            let links: Vec<Link> = f.links.drain(lk0..).collect();
-            f.ctx.layers.push(Layer { z, fixed: false, clip: None, items, links });
+            if f.ctx.layers.len() < MAX_LAYERS {
+                let items: Vec<Item> = f.items.drain(it0..).collect();
+                let links: Vec<Link> = f.links.drain(lk0..).collect();
+                f.ctx.layers.push(Layer { z, fixed: false, clip: None, items, links });
+            }
         }
     }
 

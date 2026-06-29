@@ -10,7 +10,11 @@ use super::display_list::{Item, Layer, Page};
 // Peinture
 // ----------------------------------------------------------------------------
 
+// Throttle des logs de peinture lente (ticks du dernier log).
+static mut LAST_PAINT_LOG: u64 = 0;
+
 pub fn paint(page: &Page, scroll: i32, bx: usize, by: usize, bw: usize, bh: usize) {
+    let t0 = crate::kernel::timer::cycles_since_boot();
     fb::fill_rect_rgb(bx, by, bw, bh, page.bg);
     let view = (bx as i32, by as i32, bw as i32, bh as i32);
     // Ordre d'empilement (stacking) : couches z<0, puis flux normal (z=0), puis
@@ -18,6 +22,18 @@ pub fn paint(page: &Page, scroll: i32, bx: usize, by: usize, bw: usize, bh: usiz
     for l in &page.layers { if l.z < 0 { paint_layer(l, &page.images, scroll, view); } }
     paint_list(&page.items, scroll, &page.images, view, view);
     for l in &page.layers { if l.z >= 0 { paint_layer(l, &page.images, scroll, view); } }
+    // Surveillance des frames lentes (lag de scroll), throttle ~1s.
+    let mc = crate::kernel::timer::cycles_since_boot().wrapping_sub(t0) / 1_000_000;
+    if mc > 80 {
+        let now = crate::kernel::timer::ticks();
+        unsafe {
+            if now.wrapping_sub(LAST_PAINT_LOG) >= 18 {
+                LAST_PAINT_LOG = now;
+                crate::dlog!(crate::diag::Cat::Paint, "frame lente: {} items +{} couches -> {}Mc",
+                    page.items.len(), page.layers.len(), mc);
+            }
+        }
+    }
 }
 
 // Peint une couche positionnee : `fixed` ignore le scroll, `clip` restreint le
