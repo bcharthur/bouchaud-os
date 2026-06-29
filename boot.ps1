@@ -16,6 +16,7 @@ if ($code -eq 0) {
     Write-Host "Lancement de QEMU..." -ForegroundColor Green
     & "C:\Program Files\qemu\qemu-system-x86_64.exe" `
         -drive "format=raw,file=target\x86_64-bouchaud_os\debug\bootimage-bouchaud-os.bin" `
+        -m 2048 `
         -serial stdio `
         -netdev "user,id=net0" `
         -device "e1000,netdev=net0"
