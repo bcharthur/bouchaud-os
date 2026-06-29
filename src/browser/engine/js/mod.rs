@@ -2718,10 +2718,11 @@ fn strip_tags(html: &str) -> String {
 // ============================================================================
 
 const MAX_OUTPUT: usize = 16_000_000;
-// Taille max d'un script execute. Le tas a ete porte a 96 MiB et QEMU a 2 GiB
-// (cf. `kernel::heap`), ce qui permet de tokeniser/parser de vrais bundles
-// modernes (frameworks, SPA) au lieu de les ignorer. On vise les gros fichiers
-// `xjs`/`og` de Google (~1 Mo) et les bundles React/Bootstrap.
+// Taille max d'un script execute. Le tas est desormais etendu sur la RAM
+// physique mappee (plusieurs centaines de Mio, cf. `kernel::heap` /
+// `kernel::memory`) et QEMU tourne avec `-m 2048`, ce qui permet de
+// tokeniser/parser de vrais bundles modernes (frameworks, SPA) au lieu de les
+// ignorer. On vise les gros `xjs`/`og` de Google (~1 Mo) et React/Bootstrap.
 const MAX_SCRIPT: usize = 1_300_000;
 // Budget cumule d'octets de script execute par page (borne memoire + vitesse).
 const MAX_TOTAL_SCRIPT: usize = 6_000_000;

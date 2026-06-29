@@ -13,11 +13,16 @@ static mut PHYS_OFFSET: u64 = 0;
 static mut DMA_NEXT: u64 = 0;
 static mut DMA_END: u64 = 0;
 
-/// Initialise l'acces memoire physique et l'arene DMA depuis la memory map.
+/// Reserve en fin de la plus grande region pour l'arene DMA (pilotes).
+const DMA_RESERVE: u64 = 32 * 1024 * 1024;
+
+/// Initialise l'acces memoire physique, etend le tas sur la plus grande region
+/// de RAM libre, et reserve une arene DMA. La memoire physique est entierement
+/// mappee a `PHYS_OFFSET` (feature `map_physical_memory` du bootloader).
 pub fn init(boot: &'static BootInfo) {
     unsafe { PHYS_OFFSET = boot.physical_memory_offset; }
 
-    // Choisit la plus grande region RAM libre (>= 1 MiB) comme arene DMA.
+    // Choisit la plus grande region RAM libre (>= 1 MiB).
     let mut best_start = 0u64;
     let mut best_len = 0u64;
     for region in boot.memory_map.iter() {
@@ -30,11 +35,29 @@ pub fn init(boot: &'static BootInfo) {
             }
         }
     }
-    unsafe {
-        DMA_NEXT = (best_start + 0xFFF) & !0xFFF;
-        DMA_END = best_start + best_len;
+
+    // Decoupe : [debut .. fin-DMA_RESERVE) -> tas, [fin-DMA_RESERVE .. fin) -> DMA.
+    // On exige une region assez grande, sinon on garde le tas bootstrap statique.
+    let heap_start = (best_start + 0xFFF) & !0xFFF;
+    let region_end = best_start + best_len;
+    if best_len > DMA_RESERVE + 16 * 1024 * 1024 {
+        let dma_start = (region_end - DMA_RESERVE) & !0xFFF;
+        let heap_size = (dma_start - heap_start) as usize;
+        unsafe {
+            // Bascule le tas sur la grande arene physique (avant toute
+            // allocation persistante : seul le bootstrap statique a servi).
+            heap::switch_arena(phys_to_virt(heap_start), heap_size);
+            DMA_NEXT = dma_start;
+            DMA_END = region_end;
+        }
+    } else {
+        // Region trop petite : DMA seule, tas bootstrap conserve.
+        unsafe {
+            DMA_NEXT = heap_start;
+            DMA_END = region_end;
+        }
     }
-    crate::kernel::dmesg::log("memory: acces physique + arene DMA prets");
+    crate::kernel::dmesg::log("memory: acces physique + tas etendu + arene DMA prets");
 }
 
 /// Offset de la memoire physique mappee (virtuel = offset + physique).
