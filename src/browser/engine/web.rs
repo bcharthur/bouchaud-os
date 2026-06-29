@@ -1627,11 +1627,29 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
         return;
     }
     if tag == "input" || tag == "textarea" || tag == "select" {
+        let input_type = attr(node, "type").unwrap_or("text").to_ascii_lowercase();
+        // inputs cachés : aucun rendu
+        if input_type == "hidden" { return; }
         let cw = 8 * 2;
-        let h = 8 * 2 + 8;
-        let w = bx.width.map(|l| l.resolve(f.avail)).unwrap_or((16 * cw).min(f.avail / 2)).clamp(cw, f.avail);
-        let val = attr(node, "value").unwrap_or("").to_string();
-        f.push_box(w, h, 0xffffff, val);
+        let h = bx.height.map(|l| l.resolve(0)).unwrap_or(cw + 8).clamp(cw, 60);
+        let default_w = if tag == "textarea" { f.avail } else { (20 * cw).min(f.avail * 3 / 4) };
+        let w = bx.width.map(|l| l.resolve(f.avail)).unwrap_or(default_w).clamp(cw, f.avail);
+        let is_submit = input_type == "submit" || input_type == "button" || input_type == "reset" || tag == "button";
+        if is_submit {
+            // Bouton : fond bleu Google (ou gris) avec texte centré
+            let label = attr(node, "value").unwrap_or(if input_type == "reset" { "Effacer" } else { "Rechercher" }).to_string();
+            let fill = bx.bg.filter(|&c| c != 0xffffff && c != 0).unwrap_or(0xf8f9fa);
+            f.push_box(w.max(label.len() as i32 * 7 + 16), h, fill, label);
+        } else if input_type == "checkbox" || input_type == "radio" {
+            let sz = 14;
+            f.push_box(sz, sz, 0xffffff, String::new());
+        } else {
+            // Champ texte : fond blanc, texte de valeur ou placeholder grisé
+            let val = attr(node, "value").filter(|v| !v.is_empty())
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| attr(node, "placeholder").unwrap_or("").to_string());
+            f.push_box(w, h, 0xffffff, val);
+        }
         return;
     }
 
