@@ -14,6 +14,8 @@
 //!   HTML → tokenizer → DOM → style (cascade CSS) → layout → paint.
 
 pub mod web;
+pub mod html;
+pub mod css;
 pub mod style;
 pub mod css_values;
 pub mod css_parser;

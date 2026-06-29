@@ -26,6 +26,7 @@ if ($LASTEXITCODE -ne 0) {
 # NB Windows : autoriser node.exe / le port 8080 dans le pare-feu (voir README).
 $qemuArgs = @(
   "-drive", "format=raw,file=target\x86_64-bouchaud_os\debug\bootimage-bouchaud-os.bin",
+  "-m", "2048",
   "-serial", "stdio",
   "-netdev", "user,id=net0",
   "-device", "e1000,netdev=net0"
