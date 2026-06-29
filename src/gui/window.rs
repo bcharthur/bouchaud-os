@@ -66,9 +66,15 @@ impl Rect {
     }
 }
 
-/// Tronque une chaine a `n` caracteres (ASCII) pour l'affichage.
+/// Tronque une chaine a `n` octets max en respectant les frontieres UTF-8.
 pub(crate) fn clip(s: &str, n: usize) -> &str {
-    if s.len() > n { &s[..n] } else { s }
+    if s.len() <= n { return s; }
+    let mut end = 0;
+    for (i, _) in s.char_indices() {
+        if i >= n { break; }
+        end = i;
+    }
+    &s[..end]
 }
 
 pub(crate) fn start_btn() -> Rect {
