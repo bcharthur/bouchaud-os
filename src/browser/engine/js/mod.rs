@@ -154,8 +154,49 @@ impl Parser {
 
     fn parse_program(&mut self) -> Result<Vec<Stmt>, String> {
         let mut out = Vec::new();
-        while !matches!(self.peek(), Tok::Eof) { out.push(self.parse_stmt()?); }
+        let mut recovered = 0u32;
+        let mut first_err: Option<String> = None;
+        while !matches!(self.peek(), Tok::Eof) {
+            let start = self.i;
+            match self.parse_stmt() {
+                Ok(s) => out.push(s),
+                Err(e) => {
+                    // Récupération : une seule erreur de syntaxe ne doit pas
+                    // jeter tout un bundle (Google/React font >1 Mo). On saute
+                    // jusqu'à la prochaine frontière de statement et on continue.
+                    if first_err.is_none() { first_err = Some(e); }
+                    if self.i == start { self.i += 1; } // garantit la progression
+                    self.recover_to_stmt_boundary();
+                    recovered += 1;
+                    if recovered > 20_000 { break; }
+                }
+            }
+        }
+        if recovered > 0 {
+            crate::dlog!(crate::diag::Cat::Js, "parser: {} statements ignores (1re erreur: {})",
+                recovered, first_err.as_deref().unwrap_or("?"));
+        }
         Ok(out)
+    }
+
+    // Avance jusqu'au prochain `;` (profondeur 0) ou `}` fermant, en équilibrant
+    // parenthèses/crochets/accolades, pour reprendre le parsing après une erreur.
+    fn recover_to_stmt_boundary(&mut self) {
+        let mut depth = 0i32;
+        while !matches!(self.peek(), Tok::Eof) {
+            let mut stop = false;
+            if let Tok::Punct(p) = self.peek() {
+                match p.as_str() {
+                    "(" | "[" | "{" => depth += 1,
+                    ")" | "]" => { if depth > 0 { depth -= 1; } }
+                    "}" => { if depth == 0 { self.i += 1; return; } depth -= 1; }
+                    ";" => { if depth <= 0 { stop = true; } }
+                    _ => {}
+                }
+            }
+            self.i += 1;
+            if stop { return; }
+        }
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt, String> {
@@ -938,7 +979,21 @@ impl Interp {
         };
         if opt && matches!(func, Value::Undefined | Value::Null) { return Ok(Value::Undefined); }
         let argv = self.eval_args(args, env)?;
-        self.call(func, this, &argv)
+        let r = self.call(func, this, &argv);
+        // Enrichit le diagnostic "not a function" avec le nom de l'appelé.
+        if let Err(e) = &r {
+            if matches!(e, Value::Str(s) if s.as_str() == "TypeError: not a function") {
+                let nm = match callee {
+                    Expr::Member(_, name, _) => Some(name.clone()),
+                    Expr::Ident(name) => Some(name.clone()),
+                    _ => None,
+                };
+                if let Some(nm) = nm {
+                    return Err(str_val(format!("TypeError: {} is not a function", nm)));
+                }
+            }
+        }
+        r
     }
 
     pub fn call(&mut self, func: Value, this: Value, args: &[Value]) -> Result<Value, Value> {
@@ -1022,8 +1077,8 @@ impl Interp {
                 drop(b);
                 Ok(object_prop(name))
             }
-            Value::Null => Err(str_val("TypeError: Cannot read properties of null")),
-            Value::Undefined => Err(str_val("TypeError: Cannot read properties of undefined")),
+            Value::Null => Err(str_val(format!("TypeError: Cannot read properties of null (reading '{}')", name))),
+            Value::Undefined => Err(str_val(format!("TypeError: Cannot read properties of undefined (reading '{}')", name))),
             _ => Ok(Value::Undefined),
         }
     }
