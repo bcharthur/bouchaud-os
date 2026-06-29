@@ -997,6 +997,23 @@ impl Interp {
     }
 
     pub fn call(&mut self, func: Value, this: Value, args: &[Value]) -> Result<Value, Value> {
+        // Fonction liee par Function.prototype.bind : redirige vers la cible
+        // avec le `this` et les arguments pre-lies.
+        if let Value::Obj(o) = &func {
+            let bound = {
+                let b = o.borrow();
+                b.props.get("__bound_target__").cloned().map(|t| (
+                    t,
+                    b.props.get("__bound_this__").cloned().unwrap_or(Value::Undefined),
+                    b.props.get("__bound_args__").and_then(|v| if let Value::Obj(a) = v { a.borrow().arr.clone() } else { None }).unwrap_or_default(),
+                ))
+            };
+            if let Some((target, bthis, bargs)) = bound {
+                let mut all = bargs;
+                all.extend_from_slice(args);
+                return self.call(target, bthis, &all);
+            }
+        }
         // Fonction exportee par un module WebAssembly : route vers le runtime wasm.
         if let Value::Obj(o) = &func {
             let bound = { let b = o.borrow(); match (b.props.get("__wasm_inst__"), b.props.get("__wasm_fn__")) {
@@ -1071,6 +1088,29 @@ impl Interp {
                     if let Some(v) = b.props.get(name) { return Ok(v.clone()); }
                     drop(b);
                     return Ok(array_prop(name));
+                }
+                // Function.prototype : call / apply / bind / name / length.
+                // Les proprietes propres (fn.foo = ...) restent prioritaires.
+                let (is_fn, own, nparams) = {
+                    let b = obj.borrow();
+                    let np = match &b.call {
+                        Some(Callable::User { def, .. }) => def.params.len(),
+                        _ => 0,
+                    };
+                    (b.call.is_some(), b.props.get(name).cloned(), np)
+                };
+                if let Some(v) = own { return Ok(v); }
+                if is_fn {
+                    match name {
+                        "call" => return Ok(native_val(fn_call)),
+                        "apply" => return Ok(native_val(fn_apply)),
+                        "bind" => return Ok(native_val(fn_bind)),
+                        "length" => return Ok(Value::Num(nparams as f64)),
+                        "name" => return Ok(str_val("")),
+                        "toString" => return Ok(native_val(|_it, _t, _a| Ok(str_val("function () { [native code] }")))),
+                        "prototype" => { let p = new_obj(Obj::plain()); set(o, "prototype", p.clone()); return Ok(p); }
+                        _ => {}
+                    }
                 }
                 let b = obj.borrow();
                 if let Some(v) = b.props.get(name) { return Ok(v.clone()); }
@@ -1703,6 +1743,38 @@ fn install(it: &mut Interp) {
 // ============================================================================
 // Timers, microtaches, URI, Promise, Date, WebAssembly (helpers)
 // ============================================================================
+
+// Function.prototype.call(thisArg, ...args). `this` est la fonction cible.
+fn fn_call(it: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    let this_arg = a.get(0).cloned().unwrap_or(Value::Undefined);
+    let rest = if a.len() > 1 { &a[1..] } else { &[][..] };
+    it.call(this, this_arg, rest)
+}
+
+// Function.prototype.apply(thisArg, argsArray).
+fn fn_apply(it: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    let this_arg = a.get(0).cloned().unwrap_or(Value::Undefined);
+    let args: Vec<Value> = match a.get(1) {
+        Some(Value::Obj(o)) => o.borrow().arr.clone().unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    it.call(this, this_arg, &args)
+}
+
+// Function.prototype.bind(thisArg, ...boundArgs) -> fonction liee. On stocke la
+// cible/this/args ; `Interp::call` redirige les objets ainsi marques.
+fn fn_bind(_it: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    let bound = new_obj(Obj::plain());
+    // Doit etre appelable (typeof === "function") : trampoline neutre.
+    if let Value::Obj(o) = &bound {
+        o.borrow_mut().call = Some(Callable::Native(|_it, _t, _a| Ok(Value::Undefined)));
+    }
+    set(&bound, "__bound_target__", this);
+    set(&bound, "__bound_this__", a.get(0).cloned().unwrap_or(Value::Undefined));
+    let bargs: Vec<Value> = if a.len() > 1 { a[1..].to_vec() } else { Vec::new() };
+    set(&bound, "__bound_args__", array_val(bargs));
+    Ok(bound)
+}
 
 fn native_set_timeout(it: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     if let Some(cb) = a.get(0) {
