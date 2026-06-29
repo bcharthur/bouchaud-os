@@ -2410,7 +2410,13 @@ fn strip_tags(html: &str) -> String {
 // ============================================================================
 
 const MAX_OUTPUT: usize = 8_000_000;
-const MAX_SCRIPT: usize = 4_000_000;
+// Taille max d'un script execute. Au-dela, le parsing en AST exploserait la
+// memoire (un bundle minifie de 1 Mo -> ~20 Mo d'AST -> OOM sur le tas de 48 Mo)
+// pour un resultat de toute facon inexploitable (SPA modernes). On execute les
+// scripts raisonnables (inline + petites libs) et on ignore les gros bundles.
+const MAX_SCRIPT: usize = 200_000;
+// Budget cumule d'octets de script execute par page (borne memoire + vitesse).
+const MAX_TOTAL_SCRIPT: usize = 700_000;
 
 /// Execute les `<script>` inline sur un DOM partage et renvoie le HTML enrichi :
 /// document.write insere a la position du script, mutations DOM (innerHTML,
@@ -2502,6 +2508,7 @@ fn open_page_inner(html: &[u8], base_url: &str, run: bool) -> (PageCtx, Vec<u8>)
     let mut scripts: Vec<(usize, usize, String)> = Vec::new();
     let mut i = 0usize;
     let mut ran = 0u32;
+    let mut script_bytes = 0usize; // budget cumule d'octets de script executes
     while i < html.len() {
         if starts_ci(&html[i..], b"<script") {
             let outer_start = i;
@@ -2515,14 +2522,18 @@ fn open_page_inner(html: &[u8], base_url: &str, run: bool) -> (PageCtx, Vec<u8>)
             let content_end = find_ci(html, b"</script", content_start).unwrap_or(html.len());
             let outer_end = find_ci(html, b">", content_end).map(|p| p + 1).unwrap_or(html.len());
             let mut wr = String::new();
-            if run && is_js && ran < 400 {
+            // Budget global atteint -> on n'execute plus de script (anti-OOM).
+            let budget_ok = script_bytes < MAX_TOTAL_SCRIPT;
+            if run && is_js && ran < 400 && budget_ok {
                 if is_external {
-                    // <script src="..."> : telecharge (avec cache) et execute.
+                    // <script src="..."> : telecharge (avec cache) et execute, si
+                    // le bundle reste sous le plafond (sinon il ferait exploser le
+                    // tas au parsing pour rien).
                     if let Some(src_url) = tag_attr(header, "src") {
                         let abs = crate::net::http::resolve_location(
                             scheme_of(base_url), host_of(base_url), src_url);
                         if let Some(bytes) = crate::net::fetch_cached(&abs) {
-                            if bytes.len() <= MAX_SCRIPT {
+                            if bytes.len() <= MAX_SCRIPT && script_bytes + bytes.len() <= MAX_TOTAL_SCRIPT {
                                 let code = alloc::string::String::from_utf8_lossy(&bytes);
                                 interp.writes.clear();
                                 match interp.run(&code) {
@@ -2530,20 +2541,27 @@ fn open_page_inner(html: &[u8], base_url: &str, run: bool) -> (PageCtx, Vec<u8>)
                                     Err(e) => crate::dlog!(crate::diag::Cat::Err, "script ext {} : {}", abs, e),
                                 }
                                 ran += 1;
+                                script_bytes += bytes.len();
                                 wr = core::mem::take(&mut interp.writes);
                             } else {
-                                crate::dlog!(crate::diag::Cat::Warn, "script ext ignore ({}o > {}o): {}", bytes.len(), MAX_SCRIPT, abs);
+                                crate::dlog!(crate::diag::Cat::Warn, "script ext ignore ({}o, plafond {}o): {}", bytes.len(), MAX_SCRIPT, abs);
                             }
                         }
                     }
-                } else if content_end > content_start && content_end - content_start <= MAX_SCRIPT {
-                    if let Ok(src) = core::str::from_utf8(&html[content_start..content_end]) {
-                        interp.writes.clear();
-                        if let Err(e) = interp.run(src) {
-                            crate::dlog!(crate::diag::Cat::Err, "script inline ({}o) : {}", src.len(), e);
+                } else if content_end > content_start {
+                    let len = content_end - content_start;
+                    if len <= MAX_SCRIPT && script_bytes + len <= MAX_TOTAL_SCRIPT {
+                        if let Ok(src) = core::str::from_utf8(&html[content_start..content_end]) {
+                            interp.writes.clear();
+                            if let Err(e) = interp.run(src) {
+                                crate::dlog!(crate::diag::Cat::Err, "script inline ({}o) : {}", src.len(), e);
+                            }
+                            ran += 1;
+                            script_bytes += len;
+                            wr = core::mem::take(&mut interp.writes);
                         }
-                        ran += 1;
-                        wr = core::mem::take(&mut interp.writes);
+                    } else {
+                        crate::dlog!(crate::diag::Cat::Warn, "script inline ignore ({}o, plafond)", len);
                     }
                 }
             }
