@@ -1,38 +1,53 @@
 //! Allocateur de tas du noyau (active `alloc` : Vec, String, BTreeMap...).
 //!
-//! On utilise un tas **statique** de taille fixe place dans le `.bss` (donc
-//! deja mappe par le bootloader, sans manipuler la pagination) confie a
-//! `linked_list_allocator`. Simple et robuste : suffisant pour passer aux
-//! structures dynamiques sans risquer une faute de page au boot.
+//! Deux temps :
+//!   1. **Bootstrap** : un petit tas statique en `.bss` (8 MiB), deja mappe par
+//!      le bootloader, suffisant pour les rares allocations du tout debut du
+//!      boot. On le garde minuscule car un `.bss` trop gros fait paniquer le
+//!      bootloader 0.9 (`too many memory regions in memory map`).
+//!   2. **Extension** : des que `kernel::memory` a lu la carte memoire, on
+//!      bascule l'allocateur sur une grande region de RAM physique mappee
+//!      (cf. `switch_arena`). C'est ainsi qu'on obtient un tas de plusieurs
+//!      centaines de Mio (rendu de pages web, gros bundles JS) sans grossir le
+//!      `.bss` du noyau.
 
 use linked_list_allocator::LockedHeap;
 
-/// Taille du tas noyau (96 MiB) : framebuffer HD (~3,7 Mo) + GUI + tampons
-/// reseau/TLS + rendu de pages web modernes (DOM volumineux + liste
-/// d'affichage + images + gros bundles JS tokenises).
-///
-/// QEMU doit disposer d'au moins ~256 MiB invite (les scripts `.ps1` lancent
-/// desormais `-m 2048`). Plafond pratique du tas statique : rester sous 128 MiB
-/// car le bootloader 0.9 peut paniquer (`too many memory regions in memory
-/// map`) en mappant un `.bss` trop grand. Au-dela, il faudra basculer sur la
-/// RAM physique mappee (cf. `kernel::memory`).
-pub const HEAP_SIZE: usize = 96 * 1024 * 1024;
+/// Taille du tas statique de bootstrap (8 MiB). Volontairement petit : voir
+/// l'explication ci-dessus sur la limite du bootloader.
+pub const BOOTSTRAP_SIZE: usize = 8 * 1024 * 1024;
 
-static mut HEAP_SPACE: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
+static mut HEAP_SPACE: [u8; BOOTSTRAP_SIZE] = [0; BOOTSTRAP_SIZE];
+
+/// Taille reelle du tas actif (mise a jour apres `switch_arena`).
+static mut HEAP_TOTAL: usize = BOOTSTRAP_SIZE;
 
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
-/// Initialise l'allocateur. A appeler une seule fois, tres tot au boot.
+/// Initialise l'allocateur sur le tas statique de bootstrap. A appeler une
+/// seule fois, tres tot au boot (avant toute allocation).
 pub fn init() {
     unsafe {
-        ALLOCATOR.lock().init(core::ptr::addr_of_mut!(HEAP_SPACE) as *mut u8, HEAP_SIZE);
+        ALLOCATOR.lock().init(core::ptr::addr_of_mut!(HEAP_SPACE) as *mut u8, BOOTSTRAP_SIZE);
     }
-    crate::kernel::dmesg::log("heap: allocateur initialise (96 MiB)");
+    crate::kernel::dmesg::log("heap: bootstrap 8 MiB initialise");
+}
+
+/// Bascule l'allocateur sur une grande arene de RAM physique mappee.
+///
+/// # Securite
+/// `start` doit pointer sur `size` octets de memoire valide, mappee pour la
+/// duree de vie du noyau, et inutilisee. Ne doit etre appele qu'avant toute
+/// allocation persistante (sinon les anciens pointeurs deviendraient invalides).
+pub unsafe fn switch_arena(start: *mut u8, size: usize) {
+    ALLOCATOR.lock().init(start, size);
+    HEAP_TOTAL = size;
+    crate::kernel::dmesg::log("heap: arene physique active (RAM etendue)");
 }
 
 /// Renvoie (octets utilises, octets libres, taille totale) du tas.
 pub fn stats() -> (usize, usize, usize) {
     let heap = ALLOCATOR.lock();
-    (heap.used(), heap.free(), HEAP_SIZE)
+    (heap.used(), heap.free(), unsafe { HEAP_TOTAL })
 }
