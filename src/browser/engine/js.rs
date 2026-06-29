@@ -907,7 +907,14 @@ impl Interp {
         for st in &prog {
             match self.exec(st, &genv) {
                 Flow::Normal(v) => last = v,
-                Flow::Throw(v) => return Err(format!("Uncaught {}", self.to_string(&v))),
+                Flow::Throw(v) => {
+                    let msg = if let Value::Obj(o) = &v {
+                        o.borrow().props.get("message").map(|m| self.to_string(m))
+                            .or_else(|| o.borrow().props.get("msg").map(|m| self.to_string(m)))
+                            .unwrap_or_else(|| self.to_string(&v))
+                    } else { self.to_string(&v) };
+                    return Err(format!("Uncaught {}", msg));
+                }
                 Flow::Return(_) => break,
                 _ => {}
             }
@@ -1354,6 +1361,69 @@ fn install(it: &mut Interp) {
     set(&object, "entries", native_val(|_it, _t, a| Ok(match a.get(0) { Some(Value::Obj(o)) => { let b = o.borrow(); array_val(b.props.iter().map(|(k, v)| array_val(vec![str_val(k.clone()), v.clone()])).collect()) } _ => array_val(Vec::new()) })));
     set(&object, "assign", native_val(|_it, _t, a| { if let Some(Value::Obj(target)) = a.get(0) { for src in &a[1..] { if let Value::Obj(s) = src { let kv: Vec<(String, Value)> = s.borrow().props.iter().map(|(k, v)| (k.clone(), v.clone())).collect(); for (k, v) in kv { target.borrow_mut().props.insert(k, v); } } } } Ok(a.get(0).cloned().unwrap_or(Value::Undefined)) }));
     set(&object, "freeze", native_val(|_it, _t, a| Ok(a.get(0).cloned().unwrap_or(Value::Undefined))));
+    set(&object, "seal", native_val(|_it, _t, a| Ok(a.get(0).cloned().unwrap_or(Value::Undefined))));
+    // Object.create(proto, [descriptor]) : crée un objet vide (proto ignoré)
+    set(&object, "create", native_val(|_it, _t, _a| Ok(new_obj(Obj::plain()))));
+    // Object.defineProperty / defineProperties : stub passthrough
+    set(&object, "defineProperty", native_val(|_it, _t, a| Ok(a.get(0).cloned().unwrap_or(Value::Undefined))));
+    set(&object, "defineProperties", native_val(|_it, _t, a| Ok(a.get(0).cloned().unwrap_or(Value::Undefined))));
+    // Object.getOwnPropertyNames / Descriptor / getPrototypeOf stubs
+    set(&object, "getOwnPropertyNames", native_val(|_it, _t, a| Ok(match a.get(0) { Some(Value::Obj(o)) => array_val(o.borrow().props.keys().map(|k| str_val(k.clone())).collect()), _ => array_val(Vec::new()) })));
+    set(&object, "getOwnPropertyDescriptor", native_val(|_it, _t, a| {
+        if let (Some(Value::Obj(o)), Some(Value::Str(k))) = (a.get(0), a.get(1)) {
+            if let Some(v) = o.borrow().props.get(k.as_str()).cloned() {
+                let d = new_obj(Obj::plain());
+                set(&d, "value", v);
+                set(&d, "writable", Value::Bool(true));
+                set(&d, "enumerable", Value::Bool(true));
+                set(&d, "configurable", Value::Bool(true));
+                return Ok(d);
+            }
+        }
+        Ok(Value::Undefined)
+    }));
+    set(&object, "getOwnPropertyDescriptors", native_val(|_it, _t, a| {
+        let o2 = new_obj(Obj::plain());
+        if let Some(Value::Obj(o)) = a.get(0) {
+            let kv: Vec<(String, Value)> = o.borrow().props.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            for (k, v) in kv {
+                let d = new_obj(Obj::plain());
+                set(&d, "value", v);
+                set(&d, "writable", Value::Bool(true));
+                set(&d, "enumerable", Value::Bool(true));
+                set(&d, "configurable", Value::Bool(true));
+                set(&o2, &k, d);
+            }
+        }
+        Ok(o2)
+    }));
+    set(&object, "getPrototypeOf", native_val(|_it, _t, _a| Ok(Value::Null)));
+    set(&object, "setPrototypeOf", native_val(|_it, _t, a| Ok(a.get(0).cloned().unwrap_or(Value::Undefined))));
+    set(&object, "is", native_val(|_it, _t, a| {
+        let x = a.get(0).unwrap_or(&Value::Undefined);
+        let y = a.get(1).unwrap_or(&Value::Undefined);
+        Ok(Value::Bool(strict_eq(x, y)))
+    }));
+    set(&object, "hasOwn", native_val(|_it, _t, a| Ok(Value::Bool(
+        if let (Some(Value::Obj(o)), Some(k)) = (a.get(0), a.get(1)) {
+            let ks = if let Value::Str(s) = k { (**s).clone() } else { return Ok(Value::Bool(false)); };
+            o.borrow().props.contains_key(ks.as_str())
+        } else { false }
+    ))));
+    set(&object, "fromEntries", native_val(|it, _t, a| {
+        let o = new_obj(Obj::plain());
+        for entry in it.iterable(a.get(0).unwrap_or(&Value::Undefined)) {
+            if let Value::Obj(pair) = &entry {
+                let b = pair.borrow();
+                if let Some(arr) = &b.arr {
+                    let k = arr.get(0).map(|v| it.to_string(v)).unwrap_or_default();
+                    let v = arr.get(1).cloned().unwrap_or(Value::Undefined);
+                    set(&o, &k, v);
+                }
+            }
+        }
+        Ok(o)
+    }));
     scope_declare(&g, "Object", object);
 
     // Array + Array.isArray, Array.from
@@ -1417,7 +1487,30 @@ fn install(it: &mut Interp) {
     set(&doc, "getElementsByTagName", native_val(|it, _t, a| { let t = it.to_string(a.get(0).unwrap_or(&Value::Undefined)).to_lowercase(); Ok(array_val(it.dom.query(&t, 0, false).into_iter().map(node_handle).collect())) }));
     set(&doc, "getElementsByClassName", native_val(|it, _t, a| { let c = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); Ok(array_val(it.dom.query(&format!(".{}", c), 0, false).into_iter().map(node_handle).collect())) }));
     set(&doc, "createElement", native_val(|it, _t, a| { let tag = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); Ok(detached_element(&tag)) }));
+    set(&doc, "createElementNS", native_val(|it, _t, a| { let tag = it.to_string(a.get(1).unwrap_or(&Value::Undefined)); Ok(detached_element(&tag)) }));
     set(&doc, "createTextNode", native_val(|it, _t, a| { let txt = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); let el = detached_element("#text"); set(&el, "__html__", str_val(escape_html(&txt))); Ok(el) }));
+    set(&doc, "createComment", native_val(|_it, _t, _a| Ok(detached_element("#comment"))));
+    set(&doc, "createDocumentFragment", native_val(|_it, _t, _a| Ok(detached_element("#fragment"))));
+    set(&doc, "createRange", native_val(|_it, _t, _a| {
+        let o = new_obj(Obj::plain());
+        set(&o, "setStart", native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        set(&o, "setEnd",   native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        set(&o, "getBoundingClientRect", native_val(|_i, _t, _a| {
+            let r = new_obj(Obj::plain());
+            set(&r, "top", Value::Num(0.0)); set(&r, "left", Value::Num(0.0));
+            set(&r, "width", Value::Num(0.0)); set(&r, "height", Value::Num(0.0));
+            Ok(r)
+        }));
+        Ok(o)
+    }));
+    // document.body / document.head stubs
+    set(&doc, "body", detached_element("body"));
+    set(&doc, "head", detached_element("head"));
+    set(&doc, "documentElement", detached_element("html"));
+    set(&doc, "title", str_val(""));
+    set(&doc, "location", { let loc = new_obj(Obj::plain()); set(&loc, "href", str_val("")); set(&loc, "pathname", str_val("/")); loc });
+    set(&doc, "dispatchEvent", native_val(|_it, _t, _a| Ok(Value::Bool(true))));
+    set(&doc, "hasFocus", native_val(|_it, _t, _a| Ok(Value::Bool(false))));
     // addEventListener reel : enregistre l'ecouteur (cible document = noeud -1).
     set(&doc, "addEventListener", native_val(|it, _t, a| { let ty = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); if let Some(cb) = a.get(1) { it.listeners.push((-1, ty, cb.clone())); } Ok(Value::Undefined) }));
     set(&doc, "removeEventListener", native_val(|it, _t, a| { let ty = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); it.listeners.retain(|(n, t, _)| !(*n == -1 && t == &ty)); Ok(Value::Undefined) }));
