@@ -1505,7 +1505,7 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, cs
             }
             "border-color" => { if let Some(c) = parse_color(val) { bx.border_color = c; if bx.border_w == 0 { bx.border_w = 1; } } }
             "border-style" => { if val != "none" && bx.border_w == 0 { bx.border_w = 1; } }
-            "opacity" => { if val == "0" { bx.hidden = true; } }
+            "opacity" => { /* opacity non implémentée ; on ne masque pas le contenu (Google anti-FOUC) */ }
             _ => {}
         }
     }

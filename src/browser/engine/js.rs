@@ -138,7 +138,8 @@ struct Lexer<'a> { s: &'a [u8], i: usize, toks: Vec<(Tok, bool)> }
 
 const KEYWORDS: &[&str] = &["var","let","const","function","return","if","else","for","while","do",
     "break","continue","new","typeof","instanceof","in","of","this","null","true","false",
-    "undefined","void","delete","throw","try","catch","finally","switch","case","default","class","extends","super"];
+    "undefined","void","delete","throw","try","catch","finally","switch","case","default","class","extends","super",
+    "async","await","yield","static","get","set","from"];
 
 fn is_id_start(c: u8) -> bool { c == b'_' || c == b'$' || c.is_ascii_alphabetic() }
 fn is_id_part(c: u8) -> bool { c == b'_' || c == b'$' || c.is_ascii_alphanumeric() }
@@ -351,6 +352,23 @@ impl Parser {
                 "try" => self.parse_try(),
                 "class" => self.parse_class(),
                 "switch" => self.parse_switch(),
+                // async function / async arrow (traitement synchrone : await/async ignorés sémantiquement)
+                "async" => {
+                    self.i += 1;
+                    if self.is_kw("function") {
+                        self.i += 1;
+                        // function anonyme ou nommée
+                        let name_opt = if let Tok::Ident(_) = self.peek() { Some(self.ident()?) } else { None };
+                        let def = self.parse_func_rest()?;
+                        if let Some(n) = name_opt { Ok(Stmt::Func(n, Rc::new(def))) }
+                        else { Ok(Stmt::Expr(Expr::Func(Rc::new(def)))) }
+                    } else {
+                        // async arrow ou expression  ; parse_expr gère la suite
+                        let e = self.parse_expr()?; self.semi(); Ok(Stmt::Expr(e))
+                    }
+                }
+                // export/import : on ignore le mot-clé et on parse le reste normalement
+                "from" | "static" | "get" | "set" => { let e = self.parse_expr()?; self.semi(); Ok(Stmt::Expr(e)) }
                 _ => { let e = self.parse_expr()?; self.semi(); Ok(Stmt::Expr(e)) }
             },
             // Statement etiquete `label: stmt` (tres frequent en JS minifie pour
@@ -375,7 +393,23 @@ impl Parser {
         self.i += 1; self.expect_punct("{")?;
         let mut tb = Vec::new(); while !self.is_punct("}") && !matches!(self.peek(), Tok::Eof) { tb.push(self.parse_stmt()?); } self.expect_punct("}")?;
         let mut catch = None;
-        if self.is_kw("catch") { self.i += 1; let mut param = String::from("e"); if self.eat_punct("(") { param = self.ident()?; self.expect_punct(")")?; } self.expect_punct("{")?; let mut cb = Vec::new(); while !self.is_punct("}") && !matches!(self.peek(), Tok::Eof) { cb.push(self.parse_stmt()?); } self.expect_punct("}")?; catch = Some((param, cb)); }
+        if self.is_kw("catch") {
+            self.i += 1;
+            let mut param = String::from("e");
+            if self.eat_punct("(") {
+                if self.is_punct("{") || self.is_punct("[") {
+                    self.skip_pattern(); // catch ({message}) ou catch ([a, b])
+                } else {
+                    param = self.ident()?;
+                }
+                self.expect_punct(")")?;
+            }
+            self.expect_punct("{")?;
+            let mut cb = Vec::new();
+            while !self.is_punct("}") && !matches!(self.peek(), Tok::Eof) { cb.push(self.parse_stmt()?); }
+            self.expect_punct("}")?;
+            catch = Some((param, cb));
+        }
         let mut fin = None;
         if self.is_kw("finally") { self.i += 1; self.expect_punct("{")?; let mut fb = Vec::new(); while !self.is_punct("}") && !matches!(self.peek(), Tok::Eof) { fb.push(self.parse_stmt()?); } self.expect_punct("}")?; fin = Some(fb); }
         Ok(Stmt::Try(tb, catch, fin))
@@ -453,6 +487,7 @@ impl Parser {
         let decl = if let Tok::Keyword(k) = self.peek() { if k == "var" || k == "let" || k == "const" { true } else { false } } else { false };
         let save = self.i;
         if decl { self.i += 1; }
+        // for (let name of/in expr) — var simple
         if let Tok::Ident(name) = self.peek().clone() {
             let after = (self.i + 1).min(self.toks.len() - 1);
             if matches!(&self.toks[after].0, Tok::Keyword(k) if k == "in" || k == "of") {
@@ -462,6 +497,19 @@ impl Parser {
                 let obj = self.parse_expr()?; self.expect_punct(")")?;
                 let body = Box::new(self.parse_stmt()?);
                 return Ok(Stmt::ForIn(name, obj, body, is_of));
+            }
+        }
+        // for (let {pat}/[pat] of/in expr) — destructuration
+        if self.is_punct("{") || self.is_punct("[") {
+            self.skip_pattern();
+            // éventuel = default pour le motif entier
+            if self.is_punct("=") { self.i += 1; let _ = self.parse_assign()?; }
+            if matches!(self.peek(), Tok::Keyword(k) if k == "of" || k == "in") {
+                let is_of = matches!(self.peek(), Tok::Keyword(k) if k == "of");
+                self.i += 1;
+                let obj = self.parse_expr()?; self.expect_punct(")")?;
+                let body = Box::new(self.parse_stmt()?);
+                return Ok(Stmt::ForIn("__pat__".into(), obj, body, is_of));
             }
         }
         self.i = save;
@@ -602,6 +650,16 @@ impl Parser {
             Tok::Punct(p) if p == "!" || p == "-" || p == "+" || p == "~" => { self.i += 1; Ok(Expr::Unary(p, Box::new(self.parse_unary()?))) }
             Tok::Punct(p) if p == "++" || p == "--" => { self.i += 1; Ok(Expr::Update(p, true, Box::new(self.parse_unary()?))) }
             Tok::Keyword(k) if k == "typeof" || k == "void" || k == "delete" => { self.i += 1; Ok(Expr::Unary(k, Box::new(self.parse_unary()?))) }
+            // await : en contexte synchrone on évalue simplement la valeur immédiatement
+            Tok::Keyword(k) if k == "await" => { self.i += 1; self.parse_unary() }
+            // yield : on évalue l'expression yieldée mais on ne suspend pas
+            Tok::Keyword(k) if k == "yield" => {
+                self.i += 1;
+                if !self.nl_before() && !self.is_punct(";") && !self.is_punct("}") && !matches!(self.peek(), Tok::Eof) {
+                    let _ = self.parse_assign()?;
+                }
+                Ok(Expr::Undef)
+            }
             _ => self.parse_postfix(),
         }
     }
@@ -655,7 +713,29 @@ impl Parser {
             Tok::Keyword(k) => match k.as_str() {
                 "true" => Ok(Expr::Bool(true)), "false" => Ok(Expr::Bool(false)), "null" => Ok(Expr::Null),
                 "undefined" => Ok(Expr::Undef), "this" => Ok(Expr::This),
-                "function" => { let _ = if let Tok::Ident(_) = self.peek() { Some(self.next()) } else { None }; let def = self.parse_func_rest()?; Ok(Expr::Func(Rc::new(def))) }
+                "function" => {
+                    // optionnellement : `function* name` (generateur) — on ignore le `*`
+                    if self.is_punct("*") { self.i += 1; }
+                    let _ = if let Tok::Ident(_) | Tok::Keyword(_) = self.peek() { Some(self.next()) } else { None };
+                    let def = self.parse_func_rest()?;
+                    Ok(Expr::Func(Rc::new(def)))
+                }
+                "async" => {
+                    // async function expression ou async arrow
+                    if self.is_kw("function") {
+                        self.i += 1;
+                        if self.is_punct("*") { self.i += 1; }
+                        let _ = if let Tok::Ident(_) = self.peek() { Some(self.next()) } else { None };
+                        let def = self.parse_func_rest()?;
+                        Ok(Expr::Func(Rc::new(def)))
+                    } else {
+                        // async arrow : async (params) => body  ou  async param => body
+                        // On réutilise try_arrow qui regarde en avant depuis la position courante.
+                        // Si ce n'est pas une arrow, traiter async comme un identifiant.
+                        if let Some(arrow) = self.try_arrow()? { Ok(arrow) }
+                        else { Ok(Expr::Ident("async".into())) }
+                    }
+                }
                 _ => Ok(Expr::Ident(k)),
             },
             Tok::Punct(p) => match p.as_str() {
@@ -672,6 +752,16 @@ impl Parser {
         let mut props = Vec::new();
         while !self.is_punct("}") {
             if self.eat_punct("...") { let _ = self.parse_assign()?; if !self.eat_punct(",") { break; } continue; }
+            // get/set/async/static/from peuvent être clés d'objet (mots-clés contextuels)
+            // Ex: { get foo() {}, set bar(v) {}, async baz() {} }
+            if let Tok::Keyword(k) = self.peek().clone() {
+                if matches!(k.as_str(), "get"|"set"|"async"|"static"|"from") {
+                    let next_is_key = self.toks.get(self.i + 1).map(|t| {
+                        matches!(&t.0, Tok::Ident(_) | Tok::Str(_) | Tok::Num(_) | Tok::Keyword(_))
+                    }).unwrap_or(false);
+                    if next_is_key { self.i += 1; }
+                }
+            }
             let key = match self.next() {
                 Tok::Ident(s) => s, Tok::Keyword(k) => k, Tok::Str(s) => s, Tok::Num(n) => num_to_str(n),
                 Tok::Punct(p) if p == "[" => { let _ = self.parse_assign()?; self.expect_punct("]")?; self.expect_punct(":")?; let _ = self.parse_assign()?; if !self.eat_punct(",") { break; } continue; }
@@ -679,6 +769,8 @@ impl Parser {
             };
             if self.is_punct("(") { let def = self.parse_func_rest()?; props.push((key, Expr::Func(Rc::new(def)))); }
             else if self.eat_punct(":") { props.push((key, self.parse_assign()?)); }
+            // {key = default} : shorthand avec valeur par défaut (pattern destructuring)
+            else if self.eat_punct("=") { let _ = self.parse_assign()?; props.push((key.clone(), Expr::Ident(key))); }
             else { props.push((key.clone(), Expr::Ident(key))); }
             if !self.eat_punct(",") { break; }
         }
@@ -1324,7 +1416,7 @@ fn install(it: &mut Interp) {
     set(&window, "matchMedia", native_val(|_it, _t, _a| { let o = new_obj(Obj::plain()); set(&o, "matches", Value::Bool(false)); set(&o, "media", str_val("")); set(&o, "addListener", native_val(|_i, _t, _a| Ok(Value::Undefined))); set(&o, "removeListener", native_val(|_i, _t, _a| Ok(Value::Undefined))); set(&o, "addEventListener", native_val(|_i, _t, _a| Ok(Value::Undefined))); Ok(o) }));
     // Alias du global (self/globalThis/top/parent/frames pointent sur window).
     let win_alias = window.clone();
-    scope_declare(&g2, "window", window);
+    scope_declare(&g2, "window", window.clone());
     scope_declare(&g2, "self", win_alias.clone());
     scope_declare(&g2, "globalThis", win_alias.clone());
     scope_declare(&g2, "frames", win_alias.clone());
@@ -1365,6 +1457,34 @@ fn install(it: &mut Interp) {
     scope_declare(&g2, "decodeURIComponent", native_val(|it, _t, a| Ok(str_val(uri_decode(&it.to_string(a.get(0).unwrap_or(&Value::Undefined)))))));
     scope_declare(&g2, "decodeURI", native_val(|it, _t, a| Ok(str_val(uri_decode(&it.to_string(a.get(0).unwrap_or(&Value::Undefined)))))));
     scope_declare(&g2, "structuredClone", native_val(|_it, _t, a| Ok(a.get(0).cloned().unwrap_or(Value::Undefined))));
+    // google : namespace global utilise par tous les scripts Google (Search, Maps, Analytics…).
+    // Les scripts Google font `window.google = window.google || {}` puis y attachent des sous-
+    // namespaces (google.search, google.maps, etc.). On précrée un objet vide avec les
+    // sous-objets courants pour que `google.xxx.yyy` ne plante pas même si le script principal
+    // (>200KB) est ignoré.
+    {
+        let g = new_obj(Obj::plain());
+        let mk = |name: &str| -> Value {
+            let o = new_obj(Obj::plain());
+            let _ = name; // évite unused warning
+            set(&o, "log", native_val(|_i, _t, _a| Ok(Value::Undefined)));
+            o
+        };
+        for sub in &["search","maps","loader","accounts","ima","ads","adsense","tagmanager","analytics"] {
+            set(&g, sub, mk(sub));
+        }
+        // google.log(), google.tick(), google.ml() — appelés fréquemment
+        set(&g, "log", native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        set(&g, "tick", native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        set(&g, "ml", native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        set(&g, "timers", new_obj(Obj::plain()));
+        set(&g, "kEI", str_val(""));
+        set(&g, "kCSI", new_obj(Obj::plain()));
+        scope_declare(&g2, "google", g.clone());
+        // win_alias est déjà consommé (moved), on réutilise g2 qui est la portée globale
+        // La clé window y est accessible via scope_get, pas besoin de set dessus directement.
+        let _ = g;
+    }
     // Dispatcher interne pour les ecouteurs "click" (voir dom_add_event_listener).
     scope_declare(&g2, "__ael", native_val(|it, _t, a| { let n = it.to_num(a.get(0).unwrap_or(&Value::Undefined)) as i64; it.fire_event(n, "click"); Ok(Value::Undefined) }));
 
