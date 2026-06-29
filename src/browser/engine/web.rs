@@ -1626,6 +1626,32 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
         }
         return;
     }
+    if tag == "video" || tag == "audio" {
+        // Pas de pile de décodage A/V : on rend un substitut cohérent.
+        // <video poster="..."> -> on charge l'affiche comme image.
+        if tag == "video" {
+            if let Some(poster) = attr(node, "poster") {
+                let maxw = bx.width.map(|l| l.resolve(f.avail)).unwrap_or(f.avail / 2).clamp(32, f.avail) as usize;
+                let maxh = bx.height.map(|l| l.resolve(0)).unwrap_or(360).max(32) as usize;
+                if let Some(i) = f.ctx.load_image(poster, maxw, maxh) { f.push_image(i, cst.va); return; }
+            }
+        }
+        // Libellé déduit du type des <source> ou de l'attribut src.
+        let mut label = if tag == "video" { "▶ Vidéo".to_string() } else { "♪ Audio".to_string() };
+        let kid_src = node.children.iter().find_map(|&c| {
+            let k = &dom.nodes[c];
+            if k.tag.as_deref() == Some("source") { attr(k, "type").or(attr(k, "src")) } else { None }
+        });
+        if let Some(t) = kid_src.or_else(|| attr(node, "type")).or_else(|| attr(node, "src")) {
+            if t.contains('/') && !t.contains('.') {
+                label = alloc::format!("{} — {}", if tag == "video" { "▶" } else { "♪" }, crate::browser::engine::media::label_for_mime(t));
+            }
+        }
+        let w = bx.width.map(|l| l.resolve(f.avail)).unwrap_or((label.len() as i32 * 8 + 32).min(f.avail)).clamp(48, f.avail);
+        let h = bx.height.map(|l| l.resolve(0)).unwrap_or(if tag == "video" { 180 } else { 36 }).clamp(28, 720);
+        f.push_box(w, h, 0xeeeeee, label);
+        return;
+    }
     if tag == "input" || tag == "textarea" || tag == "select" {
         let input_type = attr(node, "type").unwrap_or("text").to_ascii_lowercase();
         // inputs cachés : aucun rendu

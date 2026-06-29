@@ -21,5 +21,6 @@ pub mod display_list;
 pub mod paint;
 pub mod js;
 pub mod image;
+pub mod media;
 pub mod svg;
 pub mod font_ttf;
