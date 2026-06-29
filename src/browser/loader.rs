@@ -125,10 +125,30 @@ fn search_url(engine: &str, query: &str) -> String {
 
 // ── Rendu local (souverain) ───────────────────────────────────────────────────
 
+/// Mettre a `true` pour deverser le HTML brut recu sur la console serie
+/// (boot.log / -serial stdio). Utile pour inspecter ce que renvoie un site.
+const DUMP_PAGE_HTML: bool = true;
+
+/// Deverse le HTML brut sur la console serie, encadre de marqueurs, en
+/// morceaux pour ne pas saturer le tampon UART. A lire dans `boot.log`.
+fn dump_page_to_serial(url: &str, body: &[u8]) {
+    if !DUMP_PAGE_HTML { return; }
+    let text = String::from_utf8_lossy(body);
+    crate::serial_println!("");
+    crate::serial_println!("===== NAUTILE PAGE DUMP BEGIN ({} o) {} =====", body.len(), url);
+    // Ecrit par tranches de lignes pour rester lisible et laisser respirer l'UART.
+    for line in text.split('\n') {
+        crate::serial_println!("{}", line);
+    }
+    crate::serial_println!("===== NAUTILE PAGE DUMP END {} =====", url);
+    crate::serial_println!("");
+}
+
 fn local_render(url: &str, width: i32) -> (Session, Page) {
     crate::dlog!(crate::diag::Cat::Info, "--- navigation: {} ---", url);
     let doc = crate::net::fetch_document(url);
     if doc.ok && doc.is_html && !doc.body.is_empty() {
+        dump_page_to_serial(&doc.final_url, &doc.body);
         // Pages reseau : on execute le JS inline de la page (best-effort), borne
         // par le budget du moteur JS (max steps, scripts > 256 Ko ignores), pour
         // rendre le contenu construit dynamiquement. Repli statique si le JS echoue.
