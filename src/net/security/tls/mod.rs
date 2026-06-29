@@ -149,11 +149,92 @@ pub fn https_fetch(hostname: &str, port: u16, path: &str) -> HttpsFetchResult {
     first
 }
 
+// ── Pool keep-alive HTTPS ─────────────────────────────────────────────────────
+// Une page moderne charge des dizaines de sous-ressources sur le meme hote.
+// Chaque handshake TLS coute plusieurs milliers de Mc (DH + signatures + AEAD).
+// On garde donc UNE session TLS vivante par hote:port et on la reutilise tant
+// que le serveur honore `Connection: keep-alive`. Mono-thread (boucle GUI).
+struct Pooled { host: String, port: u16, sess: handshake::Session }
+static mut HTTPS_POOL: Option<Pooled> = None;
+
+fn pool_take(host: &str, port: u16) -> Option<handshake::Session> {
+    unsafe {
+        let slot = &mut *core::ptr::addr_of_mut!(HTTPS_POOL);
+        if let Some(p) = slot.as_ref() {
+            if p.host == host && p.port == port {
+                let p = slot.take().unwrap();
+                if p.sess.is_alive() { return Some(p.sess); }
+            }
+        }
+    }
+    None
+}
+
+fn pool_put(host: &str, port: u16, sess: handshake::Session) {
+    use alloc::string::ToString;
+    unsafe {
+        // Ferme une eventuelle session pour un autre hote avant d'en garder une.
+        let slot = &mut *core::ptr::addr_of_mut!(HTTPS_POOL);
+        if let Some(mut old) = slot.take() { old.sess.close(); }
+        *slot = Some(Pooled { host: host.to_string(), port, sess });
+    }
+}
+
+/// Ferme et vide la session keep-alive en attente (rechargement force / arret).
+pub fn pool_clear() {
+    unsafe {
+        let slot = &mut *core::ptr::addr_of_mut!(HTTPS_POOL);
+        if let Some(mut old) = slot.take() { old.sess.close(); }
+    }
+}
+
+// Construit la requete GET HTTP/1.1 (keep-alive) pour le navigateur.
+fn build_request(hostname: &str, path: &str) -> alloc::string::String {
+    use alloc::format;
+    format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36\r\nAccept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8\r\nAccept-Language: fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7\r\nAccept-Encoding: gzip, deflate, br\r\nUpgrade-Insecure-Requests: 1\r\nSec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Site: none\r\nSec-Fetch-User: ?1\r\nConnection: keep-alive\r\n\r\n",
+        path, hostname
+    )
+}
+
+// Le serveur demande-t-il la fermeture de la connexion (HTTP/1.1) ?
+fn wants_close(raw: &[u8]) -> bool {
+    let head_len = crate::net::http::body_offset(raw).unwrap_or(raw.len());
+    let head = &raw[..head_len];
+    // Cherche "connection: close" (insensible a la casse) dans les en-tetes.
+    let needle = b"connection:";
+    let lower: Vec<u8> = head.iter().map(|b| b.to_ascii_lowercase()).collect();
+    if let Some(pos) = lower.windows(needle.len()).position(|w| w == needle) {
+        let rest = &lower[pos + needle.len()..];
+        let eol = rest.iter().position(|&b| b == b'\r' || b == b'\n').unwrap_or(rest.len());
+        return rest[..eol].windows(5).any(|w| w == b"close");
+    }
+    false
+}
+
 fn https_fetch_once(hostname: &str, port: u16, path: &str) -> HttpsFetchResult {
     use alloc::format;
     use alloc::string::ToString;
 
     let mut banner: Vec<String> = Vec::new();
+
+    // 1) Reutilisation keep-alive : si une session vivante existe pour cet hote,
+    //    on envoie directement la requete sans refaire de handshake TLS.
+    if let Some(mut sess) = pool_take(hostname, port) {
+        let req = build_request(hostname, path);
+        if sess.send_app(req.as_bytes()) {
+            let raw = sess.recv_http(8_000_000);
+            if !raw.is_empty() && crate::net::http::is_complete(&raw) {
+                crate::dlog!(crate::diag::Cat::Net, "keep-alive HIT {} ({}o)", hostname, raw.len());
+                if sess.is_alive() && !wants_close(&raw) { pool_put(hostname, port, sess); }
+                else { sess.close(); }
+                banner.push(format!("[keep-alive] {} {}o", hostname, raw.len()));
+                return HttpsFetchResult { banner, raw };
+            }
+        }
+        // Connexion morte/incomplete : on l'abandonne et on rouvre proprement.
+        sess.close();
+    }
 
     let ip = match crate::net::resolve(hostname) {
         Some(ip) => ip,
@@ -207,10 +288,7 @@ fn https_fetch_once(hostname: &str, port: u16, path: &str) -> HttpsFetchResult {
         }
     }
 
-    let req = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36\r\nAccept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8\r\nAccept-Language: fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7\r\nAccept-Encoding: gzip, deflate, br\r\nUpgrade-Insecure-Requests: 1\r\nSec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Site: none\r\nSec-Fetch-User: ?1\r\nConnection: close\r\n\r\n",
-        path, hostname
-    );
+    let req = build_request(hostname, path);
 
     let mut trace: Vec<String> = Vec::new();
     trace.push(format!(
@@ -223,8 +301,14 @@ fn https_fetch_once(hostname: &str, port: u16, path: &str) -> HttpsFetchResult {
         "send_app: sent={} rx={} peer_fin={} closed={} rst={} fin_seen={}",
         sent, sess.conn.rx.len(), sess.conn.peer_fin, sess.conn.closed, sess.conn.rst_seen, sess.conn.fin_seen,
     ));
-    let raw = sess.recv_all_trace(200_000, &mut trace);
-    sess.close();
+    // Lit une reponse HTTP complete (cadree) puis CONSERVE la session pour les
+    // sous-ressources suivantes du meme hote, si le serveur garde la connexion.
+    let raw = sess.recv_http(8_000_000);
+    if !raw.is_empty() && crate::net::http::is_complete(&raw) && sess.is_alive() && !wants_close(&raw) {
+        pool_put(hostname, port, sess);
+    } else {
+        sess.close();
+    }
 
     if raw.is_empty() {
         banner.push("reponse vide (chiffree)".to_string());
