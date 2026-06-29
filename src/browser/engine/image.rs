@@ -25,7 +25,7 @@ fn paeth(a: i32, b: i32, c: i32) -> i32 {
     if pa <= pb && pa <= pc { a } else if pb <= pc { b } else { c }
 }
 
-/// Decode une image. Reconnait PNG et JPEG baseline ; renvoie None sinon.
+/// Decode une image. Reconnait PNG, JPEG baseline et SVG ; renvoie None sinon.
 pub fn decode(data: &[u8]) -> Option<Image> {
     if data.len() > 8 && &data[..8] == &[137, 80, 78, 71, 13, 10, 26, 10] {
         return decode_png(data);
@@ -33,7 +33,26 @@ pub fn decode(data: &[u8]) -> Option<Image> {
     if data.len() > 3 && data[0] == 0xFF && data[1] == 0xD8 {
         return jpeg::decode_jpeg(data);
     }
+    if looks_like_svg(data) {
+        return super::svg::rasterize(data);
+    }
     None
+}
+
+/// Detecte un document SVG : `<svg` (eventuellement precede de `<?xml`, d'un BOM
+/// ou d'espaces) dans le prefixe.
+fn looks_like_svg(data: &[u8]) -> bool {
+    let n = data.len().min(512);
+    let head = &data[..n];
+    // Recherche insensible a la casse de "<svg" dans le prefixe.
+    if head.len() < 4 { return false; }
+    for w in head.windows(4) {
+        if w[0] == b'<'
+            && (w[1] | 32) == b's' && (w[2] | 32) == b'v' && (w[3] | 32) == b'g' {
+            return true;
+        }
+    }
+    false
 }
 
 fn decode_png(data: &[u8]) -> Option<Image> {
