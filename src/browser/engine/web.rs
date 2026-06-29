@@ -386,8 +386,14 @@ fn render_scripted(scripted: &[u8], base_url: &str, width: i32) -> Page {
     crate::dlog!(Cat::Css, "cascade: {} regles ({} externes) -> {}Mc", css.len(), ext_rules, mc(t1, t2));
 
     // ── Phase 3 : layout (cascade + box model + flex/grid/position -> items) ──
-    let page = layout(&dom, base_url, width, &css);
+    let mut page = layout(&dom, base_url, width, &css, false);
     let t3 = crate::kernel::timer::cycles_since_boot();
+    // Fallback anti-FOUC : si aucun item n'est rendu (JS n'a pas pu retirer
+    // les classes display:none), relancer le layout en ignorant display:none.
+    if page.items.is_empty() {
+        crate::dlog!(Cat::Layout, "layout: 0 items -> fallback sans display:none");
+        page = layout(&dom, base_url, width, &css, true);
+    }
     let capped = if page.layers.len() >= MAX_LAYERS { " [PLAFOND couches atteint]" } else { "" };
     crate::dlog!(Cat::Layout, "layout: {} items, {} couches{}, h={}px -> {}Mc",
         page.items.len(), page.layers.len(), capped, page.height, mc(t2, t3));
@@ -1037,6 +1043,9 @@ struct Ctx<'a> {
     // Hauteur approximative du viewport (fenetre) pour `position: fixed` et le
     // bloc conteneur initial.
     viewport_h: i32,
+    // Si vrai, display:none est ignoré (fallback quand le JS n'a pas pu retirer
+    // les classes anti-FOUC — ex : Google cache le body jusqu'à JS prêt).
+    no_display_none: bool,
 }
 
 impl<'a> Ctx<'a> {
@@ -1274,7 +1283,7 @@ fn looks_like_code(text: &str) -> bool {
 }
 
 /// Construit la page a partir du DOM (+ regles CSS pre-extraites).
-fn layout(dom: &Dom, base_url: &str, width: i32, css: &[Rule]) -> Page {
+fn layout(dom: &Dom, base_url: &str, width: i32, css: &[Rule], no_display_none: bool) -> Page {
     let (scheme, host) = scheme_host(base_url);
     let mut bg = 0xffffff_u32;
     let mut css_vars: Vec<(String, String)> = Vec::new();
@@ -1302,6 +1311,7 @@ fn layout(dom: &Dom, base_url: &str, width: i32, css: &[Rule]) -> Page {
         // Bloc conteneur initial = viewport (origine du contenu, largeur, hauteur approx).
         cb_stack: alloc::vec![(PAD, PAD, content_w, VIEWPORT_H)],
         viewport_h: VIEWPORT_H,
+        no_display_none,
     };
     let mut f = Flow::new(&mut ctx, PAD, content_w);
     f.y = PAD;
@@ -1350,7 +1360,7 @@ fn resolve_var(val: &str, css_vars: &[(String, String)]) -> String {
 }
 
 
-fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, css_vars: &[(String, String)]) {
+fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, css_vars: &[(String, String)], no_display_none: bool) {
     for (p, v) in decls {
         if p.starts_with("--") { continue; } // proprietes CSS custom (deja collectees)
         let resolved;
@@ -1429,7 +1439,7 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, cs
             "display" => {
                 let d = match val { "none" => Disp::None, "inline" => Disp::Inline, "inline-block" => Disp::InlineBlock,
                     "flex" | "inline-flex" => Disp::Flex, "grid" | "inline-grid" => Disp::Grid, _ => Disp::Block };
-                if d == Disp::None { bx.hidden = true; }
+                if d == Disp::None && !no_display_none { bx.hidden = true; }
                 bx.disp = Some(d);
             }
             "flex-direction" => { if val.starts_with("column") { bx.flex_dir = FlexDir::Column; } else { bx.flex_dir = FlexDir::Row; } }
@@ -1556,8 +1566,9 @@ fn compute(f: &Flow, node: &Node, tag: &str, st: &Style) -> (Style, BoxProps) {
     }
     // Cascade CSS : specificite croissante puis ordre source croissant.
     matched.sort_by_key(|&(spec, ri)| (spec, ri));
-    for (_, ri) in matched { apply_decls(&f.ctx.css[ri].decls, &mut cst, &mut bx, &f.ctx.css_vars); }
-    if let Some(style) = attr(node, "style") { apply_decls(&parse_decls(style), &mut cst, &mut bx, &f.ctx.css_vars); }
+    let ndn = f.ctx.no_display_none;
+    for (_, ri) in matched { apply_decls(&f.ctx.css[ri].decls, &mut cst, &mut bx, &f.ctx.css_vars, ndn); }
+    if let Some(style) = attr(node, "style") { apply_decls(&parse_decls(style), &mut cst, &mut bx, &f.ctx.css_vars, false); }
     (cst, bx)
 }
 
