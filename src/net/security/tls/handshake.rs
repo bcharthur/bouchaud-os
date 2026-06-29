@@ -844,6 +844,37 @@ impl Session {
         out
     }
 
+    /// Lit une reponse HTTP/1.1 complete (cadree par Content-Length ou chunked)
+    /// SANS fermer la connexion, afin de pouvoir la reutiliser (keep-alive).
+    /// S'arrete des que `http::is_complete` est vrai, ou si le flux se termine
+    /// (FIN/alerte/timeout). Renvoie les octets HTTP bruts dechiffres.
+    pub fn recv_http(&mut self, max: usize) -> Vec<u8> {
+        let mut out = core::mem::take(&mut self.rx_plain);
+        if crate::net::http::is_complete(&out) { return out; }
+        let mut empty_reads = 0u32;
+        loop {
+            match self.recv_some() {
+                Some(pt) => {
+                    empty_reads = 0;
+                    out.extend_from_slice(&pt);
+                    if crate::net::http::is_complete(&out) { break; }
+                    if out.len() >= max { break; }
+                }
+                None => {
+                    if self.conn.peer_fin || self.conn.closed { break; }
+                    empty_reads += 1;
+                    if empty_reads >= 2 { break; }
+                }
+            }
+        }
+        out
+    }
+
+    /// Vrai si la connexion sous-jacente est encore exploitable (pas de FIN/RST).
+    pub fn is_alive(&self) -> bool {
+        !self.conn.peer_fin && !self.conn.closed && !self.conn.rst_seen
+    }
+
     pub fn close(&mut self) {
         let rec = self.c_ap.encrypt(CT_ALERT, &[0x01, 0x00]);
         self.conn.send(&rec);

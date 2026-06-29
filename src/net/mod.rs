@@ -197,10 +197,41 @@ pub(crate) fn poll_ip(proto: u8, src_filter: Option<Ipv4Addr>, out: &mut [u8]) -
     Some((iph.src, m))
 }
 
+// ── Cache DNS (nom -> IPv4) ───────────────────────────────────────────────────
+// Une page moderne charge des dizaines de sous-ressources sur le meme hote ;
+// re-resoudre le nom a chaque fois coute un aller-retour UDP (jusqu'a 3 essais
+// de 2,5M iterations). On memorise donc les resolutions reussies. Mono-thread
+// (boucle GUI), borne en nombre d'entrees (purge FIFO).
+static mut DNS_CACHE: Option<alloc::vec::Vec<(String, Ipv4Addr)>> = None;
+const DNS_CACHE_MAX: usize = 64;
+
+fn dns_cache_get(name: &str) -> Option<Ipv4Addr> {
+    unsafe {
+        let slot = &*core::ptr::addr_of!(DNS_CACHE);
+        if let Some(c) = slot.as_ref() {
+            if let Some((_, ip)) = c.iter().find(|(n, _)| n == name) { return Some(*ip); }
+        }
+    }
+    None
+}
+
+fn dns_cache_put(name: &str, ip: Ipv4Addr) {
+    use alloc::string::ToString;
+    unsafe {
+        let slot = &mut *core::ptr::addr_of_mut!(DNS_CACHE);
+        let c = slot.get_or_insert_with(alloc::vec::Vec::new);
+        if c.iter().any(|(n, _)| n == name) { return; }
+        if c.len() >= DNS_CACHE_MAX { c.remove(0); }
+        c.push((name.to_string(), ip));
+    }
+}
+
 /// Resout un nom d'hote en IPv4 via DNS (None en cas d'echec/timeout).
 pub fn resolve(name: &str) -> Option<Ipv4Addr> {
     // Deja une IP ?
     if let Some(ip) = ipv4::parse_addr(name) { return Some(ip); }
+    // Cache : evite un aller-retour DNS par sous-ressource du meme hote.
+    if let Some(ip) = dns_cache_get(name) { return Some(ip); }
     if !e1000::is_ready() && !e1000::init() { return None; }
 
     let mut payload = [0u8; 1500];
@@ -220,6 +251,7 @@ pub fn resolve(name: &str) -> Option<Ipv4Addr> {
                     if u.dst_port == 0xC000 {
                         let off = u.payload_off;
                         if let Some(ip) = dns::parse_response(&payload[off..off + u.payload_len], id) {
+                            dns_cache_put(name, ip);
                             return Some(ip);
                         }
                     }
@@ -376,6 +408,8 @@ pub fn clear_cache() {
         let slot = &mut *core::ptr::addr_of_mut!(RES_CACHE);
         if let Some(c) = slot.as_mut() { c.clear(); }
     }
+    // Abandonne aussi la session HTTPS keep-alive en attente.
+    tls::pool_clear();
 }
 
 /// Recupere une URL HTTP(S) et renvoie les lignes a afficher (statut + corps),

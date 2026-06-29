@@ -353,6 +353,14 @@ impl Parser {
                 "switch" => self.parse_switch(),
                 _ => { let e = self.parse_expr()?; self.semi(); Ok(Stmt::Expr(e)) }
             },
+            // Statement etiquete `label: stmt` (tres frequent en JS minifie pour
+            // les boucles `a:for(...){...break a}`). On consomme l'etiquette et on
+            // parse le statement suivant ; break/continue retombent sur la boucle
+            // la plus proche (suffisant pour la plupart des cas).
+            Tok::Ident(_) if matches!(self.toks.get(self.i + 1).map(|t| &t.0), Some(Tok::Punct(p)) if p == ":") => {
+                self.i += 2; // saute `label` et `:`
+                self.parse_stmt()
+            }
             _ => { let e = self.parse_expr()?; self.semi(); Ok(Stmt::Expr(e)) }
         }
     }
@@ -489,10 +497,34 @@ impl Parser {
         Ok(FuncDef { params, rest, body, arrow: false, expr_body: None })
     }
 
+    /// Saute un pattern de destructuration `{...}` ou `[...]` en gerant
+    /// l'imbrication. S'arrete apres avoir consomme le `}`/`]` correspondant.
+    fn skip_pattern(&mut self) {
+        if !(self.is_punct("{") || self.is_punct("[")) { return; }
+        let mut d = 0;
+        loop {
+            if self.is_punct("{") || self.is_punct("[") { d += 1; }
+            else if self.is_punct("}") || self.is_punct("]") { d -= 1; }
+            self.i += 1;
+            if d == 0 || matches!(self.peek(), Tok::Eof) { break; }
+        }
+    }
+
     fn parse_params(&mut self) -> Result<(Vec<String>, Option<String>), String> {
         let mut params = Vec::new(); let mut rest = None;
         while !self.is_punct(")") {
-            if self.eat_punct("...") { rest = Some(self.ident()?); break; }
+            if self.eat_punct("...") {
+                // rest peut etre un identifiant ou un pattern de destructuration
+                if self.is_punct("{") || self.is_punct("[") { self.skip_pattern(); } else { rest = Some(self.ident()?); }
+                break;
+            }
+            // parametre destructure : `{a, b}` ou `[a, b]` (eventuellement avec defaut)
+            if self.is_punct("{") || self.is_punct("[") {
+                self.skip_pattern();
+                if self.eat_punct("=") { let _ = self.parse_assign()?; }
+                if !self.eat_punct(",") { break; }
+                continue;
+            }
             let name = self.ident()?;
             if self.eat_punct("=") { let _ = self.parse_assign()?; }
             params.push(name);
@@ -1288,7 +1320,32 @@ fn install(it: &mut Interp) {
     set(&window, "devicePixelRatio", Value::Num(1.0));
     set(&window, "innerWidth", Value::Num(1024.0));
     set(&window, "innerHeight", Value::Num(768.0));
+    set(&window, "getComputedStyle", native_val(|_it, _t, _a| { let o = new_obj(Obj::plain()); set(&o, "getPropertyValue", native_val(|_it, _t, _a| Ok(str_val("")))); Ok(o) }));
+    set(&window, "matchMedia", native_val(|_it, _t, _a| { let o = new_obj(Obj::plain()); set(&o, "matches", Value::Bool(false)); set(&o, "media", str_val("")); set(&o, "addListener", native_val(|_i, _t, _a| Ok(Value::Undefined))); set(&o, "removeListener", native_val(|_i, _t, _a| Ok(Value::Undefined))); set(&o, "addEventListener", native_val(|_i, _t, _a| Ok(Value::Undefined))); Ok(o) }));
+    // Alias du global (self/globalThis/top/parent/frames pointent sur window).
+    let win_alias = window.clone();
     scope_declare(&g2, "window", window);
+    scope_declare(&g2, "self", win_alias.clone());
+    scope_declare(&g2, "globalThis", win_alias.clone());
+    scope_declare(&g2, "frames", win_alias.clone());
+    scope_declare(&g2, "top", win_alias.clone());
+    scope_declare(&g2, "parent", win_alias);
+    // Image() : constructeur d'image hors-DOM (preload). Stub avec src/onload.
+    scope_declare(&g2, "Image", native_val(|_it, _t, _a| {
+        let o = new_obj(Obj::plain());
+        set(&o, "src", str_val("")); set(&o, "width", Value::Num(0.0)); set(&o, "height", Value::Num(0.0));
+        set(&o, "onload", Value::Null); set(&o, "onerror", Value::Null);
+        set(&o, "addEventListener", native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        Ok(o)
+    }));
+    // screen : metriques d'ecran (beaucoup de scripts les lisent au demarrage).
+    let screen = new_obj(Obj::plain());
+    set(&screen, "width", Value::Num(1280.0)); set(&screen, "height", Value::Num(720.0));
+    set(&screen, "availWidth", Value::Num(1280.0)); set(&screen, "availHeight", Value::Num(720.0));
+    set(&screen, "colorDepth", Value::Num(24.0)); set(&screen, "pixelDepth", Value::Num(24.0));
+    scope_declare(&g2, "screen", screen);
+    scope_declare(&g2, "getComputedStyle", native_val(|_it, _t, _a| { let o = new_obj(Obj::plain()); set(&o, "getPropertyValue", native_val(|_it, _t, _a| Ok(str_val("")))); Ok(o) }));
+    scope_declare(&g2, "matchMedia", native_val(|_it, _t, _a| { let o = new_obj(Obj::plain()); set(&o, "matches", Value::Bool(false)); set(&o, "addListener", native_val(|_i, _t, _a| Ok(Value::Undefined))); set(&o, "addEventListener", native_val(|_i, _t, _a| Ok(Value::Undefined))); Ok(o) }));
     // navigator minimal
     let nav = new_obj(Obj::plain());
     set(&nav, "userAgent", str_val("BouchaudOS"));
