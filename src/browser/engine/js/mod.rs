@@ -670,7 +670,7 @@ impl Parser {
         } else { self.parse_primary()? };
         loop {
             if self.eat_punct(".") { let name = self.ident()?; e = Expr::Member(Box::new(e), name, false); }
-            else if self.is_punct("?.") { self.i += 1; if self.is_punct("(") { let args = self.parse_args()?; e = Expr::Call(Box::new(e), args, true); } else { let name = self.ident()?; e = Expr::Member(Box::new(e), name, true); } }
+            else if self.is_punct("?.") { self.i += 1; if self.is_punct("(") { let args = self.parse_args()?; e = Expr::Call(Box::new(e), args, true); } else if self.eat_punct("[") { let idx = self.parse_expr()?; self.expect_punct("]")?; e = Expr::Index(Box::new(e), Box::new(idx)); } else { let name = self.ident()?; e = Expr::Member(Box::new(e), name, true); } }
             else if self.eat_punct("[") { let idx = self.parse_expr()?; self.expect_punct("]")?; e = Expr::Index(Box::new(e), Box::new(idx)); }
             else if self.is_punct("(") { let args = self.parse_args()?; e = Expr::Call(Box::new(e), args, false); }
             else { break; }
