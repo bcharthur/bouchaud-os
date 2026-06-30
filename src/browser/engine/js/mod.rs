@@ -113,13 +113,27 @@ pub enum Expr {
     Class(Option<Box<Expr>>, Vec<(bool, String, Rc<FuncDef>)>),
 }
 
+/// Motif de liaison (déclarations `let/var/const`, paramètres, `for…of`).
+/// Permet la déstructuration réelle `[a,b]=…` / `{a,b}=…` (au lieu de la
+/// sauter), indispensable pour le code moderne (`for (let [k,v] of entries)`).
+#[derive(Clone)]
+pub enum Pat {
+    Id(String),
+    // éléments (None = trou `[ ,a]`), reste optionnel `...r`
+    Array(Vec<Option<Pat>>, Option<Box<Pat>>),
+    // (clé source, motif cible), reste optionnel `...r`
+    Object(Vec<(String, Pat)>, Option<String>),
+    // motif = valeur par défaut (appliquée si undefined)
+    Default(Box<Pat>, Box<Expr>),
+}
+
 #[derive(Clone)]
 pub enum Stmt {
-    Expr(Expr), Var(bool, Vec<(String, Option<Expr>)>), Func(String, Rc<FuncDef>),
+    Expr(Expr), Var(bool, Vec<(Pat, Option<Expr>)>), Func(String, Rc<FuncDef>),
     Return(Option<Expr>), If(Expr, Box<Stmt>, Option<Box<Stmt>>), Block(Vec<Stmt>),
     While(Expr, Box<Stmt>), DoWhile(Box<Stmt>, Expr),
     For(Option<Box<Stmt>>, Option<Expr>, Option<Expr>, Box<Stmt>),
-    ForIn(String, Expr, Box<Stmt>, bool), Break, Continue, Throw(Expr),
+    ForIn(Pat, Expr, Box<Stmt>, bool), Break, Continue, Throw(Expr),
     Try(Vec<Stmt>, Option<(String, Vec<Stmt>)>, Option<Vec<Stmt>>), Empty,
     // name, extends_expr, [(is_static, method_name, def)]
     Class(String, Option<Expr>, Vec<(bool, String, Rc<FuncDef>)>),
@@ -438,20 +452,18 @@ impl Parser {
                 self.i += 1;
                 let obj = self.parse_expr()?; self.expect_punct(")")?;
                 let body = Box::new(self.parse_stmt()?);
-                return Ok(Stmt::ForIn(name, obj, body, is_of));
+                return Ok(Stmt::ForIn(Pat::Id(name), obj, body, is_of));
             }
         }
-        // for (let {pat}/[pat] of/in expr) — destructuration
+        // for (let {pat}/[pat] of/in expr) — destructuration réelle
         if self.is_punct("{") || self.is_punct("[") {
-            self.skip_pattern();
-            // éventuel = default pour le motif entier
-            if self.is_punct("=") { self.i += 1; let _ = self.parse_assign()?; }
+            let pat = self.parse_pattern()?;
             if matches!(self.peek(), Tok::Keyword(k) if k == "of" || k == "in") {
                 let is_of = matches!(self.peek(), Tok::Keyword(k) if k == "of");
                 self.i += 1;
                 let obj = self.parse_expr()?; self.expect_punct(")")?;
                 let body = Box::new(self.parse_stmt()?);
-                return Ok(Stmt::ForIn("__pat__".into(), obj, body, is_of));
+                return Ok(Stmt::ForIn(pat, obj, body, is_of));
             }
         }
         self.i = save;
@@ -466,17 +478,57 @@ impl Parser {
         Ok(Stmt::For(init, test, update, Box::new(self.parse_stmt()?)))
     }
 
-    fn parse_var_decls(&mut self) -> Result<Vec<(String, Option<Expr>)>, String> {
+    fn parse_var_decls(&mut self) -> Result<Vec<(Pat, Option<Expr>)>, String> {
         let mut out = Vec::new();
         loop {
-            // destructuration ignoree (on saute jusqu'a = ou , ou ;)
-            if self.is_punct("{") || self.is_punct("[") { let mut d = 0; loop { if self.is_punct("{") || self.is_punct("[") { d += 1; } if self.is_punct("}") || self.is_punct("]") { d -= 1; } self.i += 1; if d == 0 || matches!(self.peek(), Tok::Eof) { break; } } if self.eat_punct("=") { let _ = self.parse_assign()?; } if !self.eat_punct(",") { break; } continue; }
-            let name = self.ident()?;
+            let pat = self.parse_pattern()?;
             let init = if self.eat_punct("=") { Some(self.parse_assign()?) } else { None };
-            out.push((name, init));
+            out.push((pat, init));
             if !self.eat_punct(",") { break; }
         }
         Ok(out)
+    }
+
+    /// Parse un motif de liaison : identifiant, `[…]` (tableau) ou `{…}` (objet),
+    /// avec valeurs par défaut imbriquées et reste `…r`.
+    fn parse_pattern(&mut self) -> Result<Pat, String> {
+        if self.is_punct("[") {
+            self.i += 1;
+            let mut elems: Vec<Option<Pat>> = Vec::new();
+            let mut rest: Option<Box<Pat>> = None;
+            while !self.is_punct("]") {
+                if self.eat_punct(",") { elems.push(None); continue; } // trou
+                if self.eat_punct("...") { rest = Some(Box::new(self.parse_pattern()?)); break; }
+                let mut p = self.parse_pattern()?;
+                if self.eat_punct("=") { p = Pat::Default(Box::new(p), Box::new(self.parse_assign()?)); }
+                elems.push(Some(p));
+                if !self.eat_punct(",") { break; }
+            }
+            self.expect_punct("]")?;
+            Ok(Pat::Array(elems, rest))
+        } else if self.is_punct("{") {
+            self.i += 1;
+            let mut props: Vec<(String, Pat)> = Vec::new();
+            let mut rest: Option<String> = None;
+            while !self.is_punct("}") {
+                if self.eat_punct("...") { rest = Some(self.ident()?); break; }
+                // clé : identifiant / chaîne / nombre / [calculée]
+                let key = match self.next() {
+                    Tok::Ident(s) => s, Tok::Keyword(k) => k, Tok::Str(s) => s, Tok::Num(n) => num_to_str(n),
+                    Tok::Punct(p) if p == "[" => { let _ = self.parse_assign()?; self.expect_punct("]")?; "__computed__".into() }
+                    _ => return Err("cle de motif invalide".into()),
+                };
+                // `{ a: cible }` ou raccourci `{ a }`
+                let mut target = if self.eat_punct(":") { self.parse_pattern()? } else { Pat::Id(key.clone()) };
+                if self.eat_punct("=") { target = Pat::Default(Box::new(target), Box::new(self.parse_assign()?)); }
+                props.push((key, target));
+                if !self.eat_punct(",") { break; }
+            }
+            self.expect_punct("}")?;
+            Ok(Pat::Object(props, rest))
+        } else {
+            Ok(Pat::Id(self.ident()?))
+        }
     }
 
     fn ident(&mut self) -> Result<String, String> { match self.next() { Tok::Ident(s) => Ok(s), Tok::Keyword(k) => Ok(k), _ => Err("attendu identifiant".into()) } }
@@ -737,6 +789,16 @@ fn new_scope(parent: Option<Env>) -> Env { Rc::new(RefCell::new(Scope { vars: BT
 fn scope_get(env: &Env, name: &str) -> Option<Value> { let s = env.borrow(); if let Some(v) = s.vars.get(name) { return Some(v.clone()); } if let Some(p) = &s.parent { return scope_get(p, name); } None }
 fn scope_set(env: &Env, name: &str, val: Value) -> bool { let mut s = env.borrow_mut(); if s.vars.contains_key(name) { s.vars.insert(name.to_string(), val); return true; } if let Some(p) = s.parent.clone() { drop(s); return scope_set(&p, name, val); } false }
 fn scope_declare(env: &Env, name: &str, val: Value) { env.borrow_mut().vars.insert(name.to_string(), val); }
+/// Collecte tous les identifiants liés par un motif (pour la liaison `let` par
+/// itération de boucle `for`).
+fn pat_names(pat: &Pat, out: &mut Vec<String>) {
+    match pat {
+        Pat::Id(n) => out.push(n.clone()),
+        Pat::Default(inner, _) => pat_names(inner, out),
+        Pat::Array(elems, rest) => { for e in elems.iter().flatten() { pat_names(e, out); } if let Some(r) = rest { pat_names(r, out); } }
+        Pat::Object(props, rest) => { for (_, p) in props { pat_names(p, out); } if let Some(r) = rest { out.push(r.clone()); } }
+    }
+}
 // Cree une portee fille de `outer` en recopiant la valeur courante des `names`
 // depuis `from` (pour la liaison `let` par iteration de boucle).
 fn copy_scope(outer: &Env, from: &Env, names: &[String]) -> Env {
@@ -878,6 +940,50 @@ impl Interp {
         ctor
     }
 
+    /// Lie un motif de déstructuration à une valeur en déclarant tous ses noms
+    /// dans `env` (déclarations `let/var/const` et `for…of`).
+    fn bind_pat(&mut self, pat: &Pat, val: Value, env: &Env) -> Result<(), Value> {
+        match pat {
+            Pat::Id(n) => { scope_declare(env, n, val); }
+            Pat::Default(inner, def) => {
+                let v = if matches!(val, Value::Undefined) { self.eval(def, env)? } else { val };
+                self.bind_pat(inner, v, env)?;
+            }
+            Pat::Array(elems, rest) => {
+                let items = self.iterable(&val);
+                for (i, e) in elems.iter().enumerate() {
+                    if let Some(p) = e {
+                        let v = items.get(i).cloned().unwrap_or(Value::Undefined);
+                        self.bind_pat(p, v, env)?;
+                    }
+                }
+                if let Some(r) = rest {
+                    let restv = array_val(items.iter().skip(elems.len()).cloned().collect());
+                    self.bind_pat(r, restv, env)?;
+                }
+            }
+            Pat::Object(props, rest) => {
+                let mut used: Vec<String> = Vec::new();
+                for (key, target) in props {
+                    let v = self.get_prop(&val, key)?;
+                    used.push(key.clone());
+                    self.bind_pat(target, v, env)?;
+                }
+                if let Some(rn) = rest {
+                    let o = new_obj(Obj::plain());
+                    if let Value::Obj(src) = &val {
+                        let kv: Vec<(String, Value)> = src.borrow().props.iter()
+                            .filter(|(k, _)| !used.contains(k))
+                            .map(|(k, v)| (k.clone(), v.clone())).collect();
+                        for (k, v) in kv { set(&o, &k, v); }
+                    }
+                    scope_declare(env, rn, o);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn exec_block(&mut self, stmts: &[Stmt], env: &Env) -> Flow {
         self.hoist(stmts, env);
         for s in stmts { match self.exec(s, env) { Flow::Normal(_) => {}, other => return other } }
@@ -889,7 +995,7 @@ impl Interp {
         match s {
             Stmt::Empty | Stmt::Func(..) => Flow::Normal(Value::Undefined),
             Stmt::Expr(e) => match self.eval(e, env) { Ok(v) => Flow::Normal(v), Err(t) => Flow::Throw(t) },
-            Stmt::Var(_, decls) => { for (name, init) in decls { let v = match init { Some(e) => match self.eval(e, env) { Ok(v) => v, Err(t) => return Flow::Throw(t) }, None => Value::Undefined }; scope_declare(env, name, v); } Flow::Normal(Value::Undefined) }
+            Stmt::Var(_, decls) => { for (pat, init) in decls { let v = match init { Some(e) => match self.eval(e, env) { Ok(v) => v, Err(t) => return Flow::Throw(t) }, None => Value::Undefined }; if let Err(t) = self.bind_pat(pat, v, env) { return Flow::Throw(t); } } Flow::Normal(Value::Undefined) }
             Stmt::Block(b) => { let inner = new_scope(Some(env.clone())); self.exec_block(b, &inner) }
             Stmt::Return(e) => { let v = match e { Some(e) => match self.eval(e, env) { Ok(v) => v, Err(t) => return Flow::Throw(t) }, None => Value::Undefined }; Flow::Return(v) }
             Stmt::If(c, t, e) => match self.eval(c, env) { Ok(v) => if truthy(&v) { self.exec(t, env) } else if let Some(e) = e { self.exec(e, env) } else { Flow::Normal(Value::Undefined) }, Err(x) => Flow::Throw(x) },
@@ -901,7 +1007,7 @@ impl Interp {
                 // closures creees dans le corps capturent la valeur de leur tour).
                 let mut block_names: Vec<String> = Vec::new();
                 if let Some(i) = init {
-                    if let Stmt::Var(true, decls) = &**i { for (n, _) in decls { block_names.push(n.clone()); } }
+                    if let Stmt::Var(true, decls) = &**i { for (p, _) in decls { pat_names(p, &mut block_names); } }
                     match self.exec(i, &inner) { Flow::Normal(_) => {}, other => return other }
                 }
                 let per_iter = !block_names.is_empty();
@@ -915,10 +1021,10 @@ impl Interp {
                 }
                 Flow::Normal(Value::Undefined)
             }
-            Stmt::ForIn(var, obj, body, is_of) => {
+            Stmt::ForIn(pat, obj, body, is_of) => {
                 let o = match self.eval(obj, env) { Ok(v) => v, Err(t) => return Flow::Throw(t) };
                 let items: Vec<Value> = if *is_of { self.iterable(&o) } else { self.keys_of(&o) };
-                for it in items { if let Err(e) = self.tick() { return Flow::Throw(e); } let inner = new_scope(Some(env.clone())); scope_declare(&inner, var, it); match self.exec(body, &inner) { Flow::Break => break, Flow::Continue => {}, Flow::Normal(_) => {}, other => return other } }
+                for it in items { if let Err(e) = self.tick() { return Flow::Throw(e); } let inner = new_scope(Some(env.clone())); if let Err(t) = self.bind_pat(pat, it, &inner) { return Flow::Throw(t); } match self.exec(body, &inner) { Flow::Break => break, Flow::Continue => {}, Flow::Normal(_) => {}, other => return other } }
                 Flow::Normal(Value::Undefined)
             }
             Stmt::Break => Flow::Break,
