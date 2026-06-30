@@ -109,6 +109,8 @@ pub enum Expr {
     Call(Box<Expr>, Vec<Expr>, bool), New(Box<Expr>, Vec<Expr>),
     Member(Box<Expr>, String, bool), Index(Box<Expr>, Box<Expr>),
     Func(Rc<FuncDef>), Seq(Vec<Expr>), Spread(Box<Expr>),
+    // Template balisé `tag`a${x}b`` : (tag, quasis littéraux, expressions).
+    TaggedTpl(Box<Expr>, Vec<String>, Vec<Expr>),
     // Expression de classe : `var X = class [extends Y] { ... }`.
     Class(Option<Box<Expr>>, Vec<(bool, String, Rc<FuncDef>)>),
 }
@@ -700,9 +702,35 @@ impl Parser {
             else if self.is_punct("?.") { self.i += 1; if self.is_punct("(") { let args = self.parse_args()?; e = Expr::Call(Box::new(e), args, true); } else if self.eat_punct("[") { let idx = self.parse_expr()?; self.expect_punct("]")?; e = Expr::Index(Box::new(e), Box::new(idx)); } else { let name = self.ident()?; e = Expr::Member(Box::new(e), name, true); } }
             else if self.eat_punct("[") { let idx = self.parse_expr()?; self.expect_punct("]")?; e = Expr::Index(Box::new(e), Box::new(idx)); }
             else if self.is_punct("(") { let args = self.parse_args()?; e = Expr::Call(Box::new(e), args, false); }
+            else if matches!(self.peek(), Tok::Tpl(_)) {
+                // Template balisé : l'expression courante est la fonction tag,
+                // appelée avec (tableau des chaînes, ...valeurs interpolées).
+                let parts = match self.next() { Tok::Tpl(p) => p, _ => unreachable!() };
+                let (quasis, exprs) = Parser::split_tpl(parts)?;
+                e = Expr::TaggedTpl(Box::new(e), quasis, exprs);
+            }
             else { break; }
         }
         Ok(e)
+    }
+
+    /// Sépare un template lexé en (quasis littéraux, expressions interpolées).
+    fn split_tpl(parts: Vec<TplPart>) -> Result<(Vec<String>, Vec<Expr>), String> {
+        let mut quasis = Vec::new(); let mut exprs = Vec::new();
+        for p in parts {
+            match p {
+                TplPart::Str(s) => quasis.push(s),
+                TplPart::Expr(toks) => {
+                    let mut t: Vec<(Tok, bool)> = toks.into_iter().map(|x| (x, false)).collect();
+                    t.push((Tok::Eof, false));
+                    exprs.push(Parser::new(t).parse_expr()?);
+                }
+            }
+        }
+        // JS garantit quasis.len() == exprs.len()+1.
+        if quasis.is_empty() { quasis.push(String::new()); }
+        while quasis.len() <= exprs.len() { quasis.push(String::new()); }
+        Ok((quasis, exprs))
     }
 
     fn parse_member_only(&mut self) -> Result<Expr, String> {
@@ -1109,6 +1137,21 @@ impl Interp {
             Expr::Undef => Ok(Value::Undefined),
             Expr::This => Ok(scope_get(env, "this").unwrap_or(Value::Undefined)),
             Expr::Tpl(parts) => { let mut s = String::new(); for p in parts { let v = self.eval(p, env)?; s.push_str(&self.to_string(&v)); } Ok(str_val(s)) }
+            Expr::TaggedTpl(tag, quasis, exprs) => {
+                // Construit le 1er argument : tableau des chaînes + `.raw`
+                // (on ne distingue pas les échappements bruts, raw == cooked).
+                let strings = array_val(quasis.iter().map(|s| str_val(s.clone())).collect());
+                self.set_prop(&strings, "raw", strings.clone());
+                let mut argv = vec![strings];
+                for x in exprs { argv.push(self.eval(x, env)?); }
+                // Résout la fonction tag + son `this` comme un appel normal.
+                let (func, this) = match &**tag {
+                    Expr::Member(obj, name, _) => { let o = self.eval(obj, env)?; let f = self.get_prop(&o, name)?; (f, o) }
+                    Expr::Index(obj, idx) => { let o = self.eval(obj, env)?; let i = self.eval(idx, env)?; let key = self.to_string(&i); let f = self.get_prop(&o, &key)?; (f, o) }
+                    _ => (self.eval(tag, env)?, Value::Undefined),
+                };
+                self.call(func, this, &argv)
+            }
             Expr::Ident(name) => scope_get(env, name).ok_or_else(|| str_val(format!("ReferenceError: {} is not defined", name))),
             Expr::Array(items) => { let mut out = Vec::new(); for it in items { if let Expr::Spread(inner) = it { let v = self.eval(inner, env)?; out.extend(self.iterable(&v)); } else { out.push(self.eval(it, env)?); } } Ok(array_val(out)) }
             Expr::Object(props) => { let mut o = Obj::plain(); for (k, ve) in props { let v = self.eval(ve, env)?; o.props.insert(k.clone(), v); } Ok(new_obj(o)) }
