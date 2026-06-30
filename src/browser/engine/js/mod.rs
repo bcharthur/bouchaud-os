@@ -1430,6 +1430,17 @@ fn install(it: &mut Interp) {
     set(&doc, "location", { let loc = new_obj(Obj::plain()); set(&loc, "href", str_val("")); set(&loc, "pathname", str_val("/")); loc });
     set(&doc, "dispatchEvent", native_val(|_it, _t, _a| Ok(Value::Bool(true))));
     set(&doc, "hasFocus", native_val(|_it, _t, _a| Ok(Value::Bool(false))));
+    // document.fonts (FontFaceSet) : load() renvoie une promesse resolue.
+    set(&doc, "fonts", {
+        let fonts = new_obj(Obj::plain());
+        set(&fonts, "load", native_val(|_it, _t, _a| Ok(make_resolved_thenable(array_val(Vec::new())))));
+        set(&fonts, "ready", make_resolved_thenable(Value::Undefined));
+        set(&fonts, "add", native_val(|_it, _t, _a| Ok(Value::Undefined)));
+        set(&fonts, "check", native_val(|_it, _t, _a| Ok(Value::Bool(true))));
+        set(&fonts, "addEventListener", native_val(|_it, _t, _a| Ok(Value::Undefined)));
+        set(&fonts, "status", str_val("loaded"));
+        fonts
+    });
     // addEventListener reel : enregistre l'ecouteur (cible document = noeud -1).
     set(&doc, "addEventListener", native_val(|it, _t, a| { let ty = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); if let Some(cb) = a.get(1) { it.listeners.push((-1, ty, cb.clone())); } Ok(Value::Undefined) }));
     set(&doc, "removeEventListener", native_val(|it, _t, a| { let ty = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); it.listeners.retain(|(n, t, _)| !(*n == -1 && t == &ty)); Ok(Value::Undefined) }));
@@ -1555,8 +1566,9 @@ fn install(it: &mut Interp) {
     scope_declare(&g2, "WebAssembly", webassembly);
 
     // Globals fréquemment utilisés par les scripts modernes ----------------
-    // `_` : variable de commodité (lodash/underscore.js ou raccourci Google)
-    scope_declare(&g2, "_", Value::Undefined);
+    // `_` : raccourci Google (window._ = window._ || {}). Objet vide pour que
+    // `_._DumpException = ...` et `_s._DumpException = _._DumpException` marchent.
+    scope_declare(&g2, "_", new_obj(Obj::plain()));
     // performance.now() : temps monotone (stub retourne 0)
     let perf = new_obj(Obj::plain());
     set(&perf, "now", native_val(|_it, _t, _a| Ok(Value::Num(0.0))));
