@@ -339,6 +339,15 @@ fn extract_and_strip(html: &[u8], max_len: usize) -> (Vec<u8>, Vec<Rule>) {
                     .unwrap_or(html.len());
                 continue;
             }
+            // <noscript> : on execute le JS, donc son contenu (souvent un
+            // `<style>table,div,span,p{display:none}</style>` anti-no-JS) ne doit
+            // JAMAIS s'appliquer, sinon il masque toute la page.
+            if starts_ci(&html[i..], b"<noscript") {
+                i = find_ci(html, b"</noscript", i + 1)
+                    .map(|p| find_ci(html, b">", p).map(|q| q + 1).unwrap_or(html.len()))
+                    .unwrap_or(html.len());
+                continue;
+            }
             if starts_ci(&html[i..], b"<style") {
                 let gt = find_ci(html, b">", i).map(|p| p + 1).unwrap_or(html.len());
                 let endc = find_ci(html, b"</style", gt).unwrap_or(html.len());
