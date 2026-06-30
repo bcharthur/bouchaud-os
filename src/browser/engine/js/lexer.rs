@@ -180,8 +180,10 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_punct(&mut self) -> Result<Tok, String> {
+        let four: &[&str] = &[">>>="];
         let three: &[&str] = &["===","!==","**=","...","<<=",">>=","&&=","||=","??=",">>>"];
         let two: &[&str] = &["==","!=","<=",">=","&&","||","=>","+=","-=","*=","/=","%=","**","++","--","<<",">>","?.","??","&=","|=","^="];
+        for p in four { if self.s[self.i..].starts_with(p.as_bytes()) { self.i += 4; return Ok(Tok::Punct((*p).to_string())); } }
         for p in three { if self.s[self.i..].starts_with(p.as_bytes()) { self.i += 3; return Ok(Tok::Punct((*p).to_string())); } }
         for p in two { if self.s[self.i..].starts_with(p.as_bytes()) { self.i += 2; return Ok(Tok::Punct((*p).to_string())); } }
         let c = self.s[self.i]; self.i += 1; Ok(Tok::Punct((c as char).to_string()))
