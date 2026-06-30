@@ -1265,6 +1265,9 @@ fn install(it: &mut Interp) {
     set(&math, "log", native_val(|it, _t, a| Ok(Value::Num(ln_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
     set(&math, "exp", native_val(|it, _t, a| Ok(Value::Num(exp_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
     set(&math, "random", native_val(|_it, _t, _a| Ok(Value::Num(prng()))));
+    // On conserve une référence (même Rc) pour la poser aussi sur `window`,
+    // afin que la détection Closure `d.Math == Math` réussisse (cf. window).
+    let math_ref = math.clone();
     scope_declare(&g, "Math", math);
 
     // JSON
@@ -1466,6 +1469,19 @@ fn install(it: &mut Interp) {
     set(&window, "innerHeight", Value::Num(768.0));
     set(&window, "getComputedStyle", native_val(|_it, _t, _a| { let o = new_obj(Obj::plain()); set(&o, "getPropertyValue", native_val(|_it, _t, _a| Ok(str_val("")))); Ok(o) }));
     set(&window, "matchMedia", native_val(|_it, _t, _a| { let o = new_obj(Obj::plain()); set(&o, "matches", Value::Bool(false)); set(&o, "media", str_val("")); set(&o, "addListener", native_val(|_i, _t, _a| Ok(Value::Undefined))); set(&o, "removeListener", native_val(|_i, _t, _a| Ok(Value::Undefined))); set(&o, "addEventListener", native_val(|_i, _t, _a| Ok(Value::Undefined))); Ok(o) }));
+    // `window.Math` doit être le MÊME objet (Rc) que le Math global, sinon la
+    // détection Closure-compiler `function(a){...; if(d&&d.Math==Math)return d; throw Error("b")}`
+    // appelée en `x(this)` échoue et lève « Uncaught b ».
+    set(&window, "Math", math_ref);
+    // window référence le document et se référence elle-même (window.window,
+    // window.self, window.globalThis, window.top, window.parent, window.frames).
+    set(&window, "document", { let d = scope_get(&g2, "document").unwrap_or(Value::Undefined); d });
+    set(&window, "window", window.clone());
+    set(&window, "self", window.clone());
+    set(&window, "globalThis", window.clone());
+    set(&window, "top", window.clone());
+    set(&window, "parent", window.clone());
+    set(&window, "frames", window.clone());
     // Alias du global (self/globalThis/top/parent/frames pointent sur window).
     let win_alias = window.clone();
     scope_declare(&g2, "window", window.clone());
@@ -1473,7 +1489,11 @@ fn install(it: &mut Interp) {
     scope_declare(&g2, "globalThis", win_alias.clone());
     scope_declare(&g2, "frames", win_alias.clone());
     scope_declare(&g2, "top", win_alias.clone());
-    scope_declare(&g2, "parent", win_alias);
+    scope_declare(&g2, "parent", win_alias.clone());
+    // `this` au niveau racine d'un script = objet global (window). Permet à
+    // `this.gbar_ = {...}` puis la relecture `this.gbar_` de fonctionner, et à
+    // `x(this)` de retrouver l'objet global (qui possède `.Math == Math`).
+    scope_declare(&g2, "this", win_alias);
     // Image() : constructeur d'image hors-DOM (preload). Stub avec src/onload.
     scope_declare(&g2, "Image", native_val(|_it, _t, _a| {
         let o = new_obj(Obj::plain());
@@ -1530,6 +1550,15 @@ fn install(it: &mut Interp) {
         set(&g, "tick", native_val(|_i, _t, _a| Ok(Value::Undefined)));
         set(&g, "ml", native_val(|_i, _t, _a| Ok(Value::Undefined)));
         set(&g, "timers", new_obj(Obj::plain()));
+        // google.erd : namespace de remontée d'erreurs (error reporting daemon).
+        // Les bundles lisent `google.erd.jsr`, `.deb`, `.bv`… au démarrage.
+        {
+            let erd = new_obj(Obj::plain());
+            set(&erd, "jsr", native_val(|_i, _t, _a| Ok(Value::Undefined)));
+            set(&erd, "deb", str_val(""));
+            set(&erd, "bv", Value::Num(0.0));
+            set(&g, "erd", erd);
+        }
         set(&g, "kEI", str_val(""));
         set(&g, "kCSI", new_obj(Obj::plain()));
         scope_declare(&g2, "google", g.clone());
@@ -2431,6 +2460,7 @@ fn dom_get(it: &mut Interp, obj: &Rc<RefCell<Obj>>, name: &str) -> Option<Value>
                 "firstChild" | "firstElementChild" => it.dom.nodes[n].children.first().map(|&c| node_handle(c)).unwrap_or(Value::Null),
                 "lastChild" | "lastElementChild" => it.dom.nodes[n].children.last().map(|&c| node_handle(c)).unwrap_or(Value::Null),
                 "parentNode" | "parentElement" => it.dom.parent_of(n).map(node_handle).unwrap_or(Value::Null),
+                "ownerDocument" => scope_get(&it.global, "document").unwrap_or(Value::Null),
                 "style" => style_object(&this),
                 "dataset" => dataset_object(&this),
                 "classList" => class_list(n as i64),
@@ -2459,6 +2489,7 @@ fn dom_get(it: &mut Interp, obj: &Rc<RefCell<Obj>>, name: &str) -> Option<Value>
             "tagName" | "nodeName" => str_val(obj.borrow().props.get("__tag__").map(|v| it.to_string(v).to_uppercase()).unwrap_or_default()),
             "outerHTML" => str_val(element_outer(it, &this)),
             "nodeType" => Value::Num(1.0),
+            "ownerDocument" => scope_get(&it.global, "document").unwrap_or(Value::Null),
             "getAttribute" => native_val(dom_get_attr),
             "setAttribute" => native_val(dom_set_attr),
             "hasAttribute" => native_val(dom_has_attr),
