@@ -927,7 +927,7 @@ fn va_offset(va: u8, ih: i32, lh: i32) -> i32 {
 }
 
 // Fragment mis en page dans son propre espace (coordonnees relatives a 0,0).
-struct Frag { items: Vec<Item>, links: Vec<Link>, width: i32, height: i32 }
+struct Frag { items: Vec<Item>, links: Vec<Link>, width: i32, height: i32, nat: i32 }
 
 // Etat partage entre la page et tous les sous-fragments (images, budget, etc.).
 struct Ctx<'a> {
@@ -1719,6 +1719,7 @@ fn make_frag(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, t
     if tag == "li" { let b = Style { color: 0x5f6368, ..cst.clone() }; sub.push_word("\u{2022}", &b); }
     for &c in &node.children { walk(&mut sub, dom, c, cst, depth + 1); }
     sub.flush_line();
+    let nat = sub.used_w.max(1);
     let used = sub.used_w.clamp(1, w);
     let h = sub.y;
     let mut items = core::mem::take(&mut sub.items);
@@ -1730,7 +1731,7 @@ fn make_frag(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, t
         v.extend(items);
         items = v;
     }
-    Frag { items, links, width: fw, height: h }
+    Frag { items, links, width: fw, height: h, nat }
 }
 
 // Bloc en flux normal : nouvelle ligne, largeur eventuellement contrainte
@@ -1852,10 +1853,11 @@ fn child_frag(f: &mut Flow, dom: &Dom, c: usize, cst: &Style, align: u8, w: i32,
     walk(&mut sub, dom, c, cst, depth + 1);
     sub.flush_line();
     let h = sub.y;
+    let nat = sub.used_w.max(1);
     let items = core::mem::take(&mut sub.items);
     let links = core::mem::take(&mut sub.links);
     drop(sub);
-    Frag { items, links, width: w.max(8), height: h }
+    Frag { items, links, width: w.max(8), height: h, nat }
 }
 
 // Place un fragment a (x, y) absolus dans le flux courant (translation + collecte).
@@ -1903,63 +1905,85 @@ fn flex_inner(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, 
         return;
     }
 
-    // ── Direction ligne : calcul des largeurs (fixes + flex-grow). ──
+    // ── Direction ligne : largeur fixe (CSS) ou NATURELLE (contenu) de chaque
+    // enfant, puis distribution flex-grow si ça tient, sinon passage à la ligne
+    // (flex-wrap) — c'est ce qui évite les chevauchements de texte nowrap.
     let n = kids.len();
     let gap = bx.gap;
-    let gap_total = gap * (n as i32 - 1).max(0);
-    let avail_inner = (f.avail - gap_total).max(n as i32 * 8);
 
-    let mut fixed: Vec<Option<i32>> = Vec::with_capacity(n);
+    let mut base: Vec<i32> = Vec::with_capacity(n);
     let mut grow: Vec<i32> = Vec::with_capacity(n);
-    let mut sum_fixed = 0;
-    let mut sum_grow = 0;
     for &c in &kids {
         let cn = &dom.nodes[c];
         let ct = cn.tag.as_deref().unwrap_or("");
         let (_ccst, cbx) = compute(f, cn, ct, cst);
         if let Some(w) = cbx.width {
-            let wv = w.resolve(avail_inner).clamp(8, avail_inner);
-            fixed.push(Some(wv)); grow.push(0); sum_fixed += wv;
+            base.push(w.resolve(f.avail).clamp(8, f.avail));
+            grow.push(0);
         } else {
-            let g = if cbx.flex_grow > 0 { cbx.flex_grow } else { 1 };
-            fixed.push(None); grow.push(g); sum_grow += g;
+            // Mesure la largeur naturelle du contenu (sans le forcer à rétrécir).
+            let m = child_frag(f, dom, c, cst, cst.align, f.avail, depth);
+            base.push(m.nat.clamp(8, f.avail));
+            grow.push(if cbx.flex_grow > 0 { cbx.flex_grow } else { 0 });
         }
     }
-    let remaining = (avail_inner - sum_fixed).max(0);
-    let mut widths: Vec<i32> = Vec::with_capacity(n);
-    for i in 0..n {
-        let w = match fixed[i] {
-            Some(w) => w,
-            None => if sum_grow > 0 { (remaining * grow[i] / sum_grow).max(24) } else { 24 },
-        };
-        widths.push(w);
-    }
+    let gap_total = gap * (n as i32 - 1).max(0);
+    let total: i32 = base.iter().sum::<i32>() + gap_total;
 
-    // Mise en page de chaque enfant puis placement avec justify/align.
-    let mut frags: Vec<Frag> = Vec::with_capacity(n);
-    let mut row_h = 0;
-    for (i, &c) in kids.iter().enumerate() {
-        let frag = child_frag(f, dom, c, cst, cst.align, widths[i], depth);
-        if frag.height > row_h { row_h = frag.height; }
-        frags.push(frag);
+    if total <= f.avail {
+        // Tient sur une ligne : l'espace restant va aux enfants flex-grow.
+        let mut widths = base.clone();
+        let sum_grow: i32 = grow.iter().sum();
+        let free = (f.avail - total).max(0);
+        if sum_grow > 0 {
+            for i in 0..n { if grow[i] > 0 { widths[i] += free * grow[i] / sum_grow; } }
+        }
+        let mut frags: Vec<Frag> = Vec::with_capacity(n);
+        let mut row_h = 0;
+        for (i, &c) in kids.iter().enumerate() {
+            let frag = child_frag(f, dom, c, cst, cst.align, widths[i], depth);
+            if frag.height > row_h { row_h = frag.height; }
+            frags.push(frag);
+        }
+        let used: i32 = widths.iter().sum::<i32>() + gap_total;
+        let leftover = (f.avail - used).max(0);
+        let (start, between) = match bx.justify {
+            Justify::Center => (leftover / 2, gap),
+            Justify::End => (leftover, gap),
+            Justify::Between => (0, gap + if n > 1 { leftover / (n as i32 - 1) } else { 0 }),
+            Justify::Around => (leftover / (2 * n as i32), gap + leftover / n as i32),
+            Justify::Start => (0, gap),
+        };
+        let mut x = f.x0 + start;
+        for (i, frag) in frags.into_iter().enumerate() {
+            let dy = cross_offset(bx.align_items, frag.height, row_h).max(0);
+            place_frag(f, frag, x, f.y + dy);
+            x += widths[i] + between;
+        }
+        f.y += row_h;
+    } else {
+        // Débordement : on passe à la ligne (flex-wrap), au lieu de superposer.
+        let mut x = f.x0;
+        let mut row_h = 0;
+        for &c in &kids {
+            let cn = &dom.nodes[c];
+            let ct = cn.tag.as_deref().unwrap_or("");
+            let (_ccst, cbx) = compute(f, cn, ct, cst);
+            let w = cbx.width.map(|l| l.resolve(f.avail)).unwrap_or_else(|| {
+                child_frag(f, dom, c, cst, cst.align, f.avail, depth).nat
+            }).clamp(8, f.avail);
+            if x > f.x0 && x + w > f.x0 + f.avail {
+                f.y += row_h + gap;
+                x = f.x0;
+                row_h = 0;
+            }
+            let frag = child_frag(f, dom, c, cst, cst.align, w, depth);
+            if frag.height > row_h { row_h = frag.height; }
+            place_frag(f, frag, x, f.y);
+            x += w + gap;
+        }
+        f.y += row_h;
     }
-    let used: i32 = widths.iter().sum::<i32>() + gap_total;
-    let free = (f.avail - used).max(0);
-    let (start, between) = match bx.justify {
-        Justify::Center => (free / 2, gap),
-        Justify::End => (free, gap),
-        Justify::Between => (0, gap + if n > 1 { free / (n as i32 - 1) } else { 0 }),
-        Justify::Around => (free / (2 * n as i32), gap + free / n as i32),
-        Justify::Start => (0, gap),
-    };
-    let mut x = f.x0 + start;
-    for (i, frag) in frags.into_iter().enumerate() {
-        let dy = cross_offset(bx.align_items, frag.height, row_h);
-        let w = widths[i];
-        place_frag(f, frag, x, f.y + dy.max(0));
-        x += w + between;
-    }
-    f.y += row_h;
 }
 
 // Conteneur CSS grid : `grid-template-columns` definit le nombre de colonnes ;
