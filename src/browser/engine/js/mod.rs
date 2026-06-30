@@ -611,7 +611,7 @@ impl Parser {
     fn parse_assign(&mut self) -> Result<Expr, String> {
         if let Some(a) = self.try_arrow()? { return Ok(a); }
         let left = self.parse_cond()?;
-        let ops = ["=","+=","-=","*=","/=","%=","**=","<<=",">>=","&=","|=","^=","&&=","||=","??="];
+        let ops = ["=","+=","-=","*=","/=","%=","**=","<<=",">>=",">>>=","&=","|=","^=","&&=","||=","??="];
         if let Tok::Punct(p) = self.peek().clone() { if ops.contains(&p.as_str()) { self.i += 1; let right = self.parse_assign()?; return Ok(Expr::Assign(p, Box::new(left), Box::new(right))); } }
         Ok(left)
     }
