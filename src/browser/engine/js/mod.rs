@@ -1569,6 +1569,9 @@ fn install(it: &mut Interp) {
     // `_` : raccourci Google (window._ = window._ || {}). Objet vide pour que
     // `_._DumpException = ...` et `_s._DumpException = _._DumpException` marchent.
     scope_declare(&g2, "_", new_obj(Obj::plain()));
+    // `_s` / `_qs` : namespaces sœurs de `_` chez Google (idem).
+    scope_declare(&g2, "_s", new_obj(Obj::plain()));
+    scope_declare(&g2, "_qs", new_obj(Obj::plain()));
     // performance.now() : temps monotone (stub retourne 0)
     let perf = new_obj(Obj::plain());
     set(&perf, "now", native_val(|_it, _t, _a| Ok(Value::Num(0.0))));
