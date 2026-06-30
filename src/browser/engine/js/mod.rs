@@ -155,10 +155,36 @@ fn hexv(c: u8) -> u32 { match c { b'0'..=b'9' => (c - b'0') as u32, b'a'..=b'f' 
 // Parser
 // ============================================================================
 
-struct Parser { toks: Vec<(Tok, bool)>, i: usize, recovered: u32, first_err: Option<String> }
+/// Rend un jeton en texte source approximatif, pour le log de diagnostic.
+fn tok_text(t: &Tok) -> String {
+    match t {
+        Tok::Num(n) => { let mut s = String::new(); let _ = core::fmt::write(&mut s, format_args!("{}", n)); s }
+        Tok::Str(_) => String::from("\"…\""),
+        Tok::Tpl(_) => String::from("`…`"),
+        Tok::Ident(x) | Tok::Keyword(x) | Tok::Punct(x) => x.clone(),
+        Tok::Regex => String::from("/re/"),
+        Tok::Eof => String::from("<eof>"),
+    }
+}
+
+struct Parser { toks: Vec<(Tok, bool)>, i: usize, recovered: u32, first_err: Option<String>, first_ctx: Option<String> }
 
 impl Parser {
-    fn new(toks: Vec<(Tok, bool)>) -> Parser { Parser { toks, i: 0, recovered: 0, first_err: None } }
+    fn new(toks: Vec<(Tok, bool)>) -> Parser { Parser { toks, i: 0, recovered: 0, first_err: None, first_ctx: None } }
+
+    /// Reconstitue ~12 jetons autour de la position courante en source lisible,
+    /// pour diagnostiquer précisément où le parseur a échoué (log verbeux).
+    fn err_ctx(&self) -> String {
+        let lo = self.i.saturating_sub(4);
+        let hi = (self.i + 9).min(self.toks.len());
+        let mut s = String::new();
+        for j in lo..hi {
+            if j == self.i { s.push_str("⟨HERE⟩"); }
+            s.push_str(&tok_text(&self.toks[j].0));
+            s.push(' ');
+        }
+        s
+    }
     fn peek(&self) -> &Tok { &self.toks[self.i.min(self.toks.len() - 1)].0 }
     fn nl_before(&self) -> bool { self.toks[self.i.min(self.toks.len() - 1)].1 }
     fn next(&mut self) -> Tok { let t = self.toks[self.i.min(self.toks.len() - 1)].0.clone(); if self.i < self.toks.len() { self.i += 1; } t }
@@ -179,7 +205,7 @@ impl Parser {
                     // Récupération : une seule erreur de syntaxe ne doit pas
                     // jeter tout un bundle (Google/React font >1 Mo). On saute
                     // jusqu'à la prochaine frontière de statement et on continue.
-                    if self.first_err.is_none() { self.first_err = Some(e); }
+                    if self.first_err.is_none() { self.first_err = Some(e); self.first_ctx = Some(self.err_ctx()); }
                     if self.i == start { self.i += 1; } // garantit la progression
                     self.recover_to_stmt_boundary();
                     self.recovered += 1;
@@ -187,8 +213,9 @@ impl Parser {
             }
         }
         if self.recovered > 0 {
-            crate::dlog!(crate::diag::Cat::Js, "parser: {} statements ignores (1re erreur: {})",
-                self.recovered, self.first_err.as_deref().unwrap_or("?"));
+            crate::dlog!(crate::diag::Cat::Js, "parser: {} statements ignores (1re erreur: {} | contexte: {})",
+                self.recovered, self.first_err.as_deref().unwrap_or("?"),
+                self.first_ctx.as_deref().unwrap_or("?"));
         }
         Ok(out)
     }
@@ -206,7 +233,7 @@ impl Parser {
             match self.parse_stmt() {
                 Ok(s) => b.push(s),
                 Err(e) => {
-                    if self.first_err.is_none() { self.first_err = Some(e); }
+                    if self.first_err.is_none() { self.first_err = Some(e); self.first_ctx = Some(self.err_ctx()); }
                     if self.i == start { self.i += 1; }
                     self.recover_in_block();
                     self.recovered += 1;
