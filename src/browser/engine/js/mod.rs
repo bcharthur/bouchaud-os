@@ -927,6 +927,34 @@ impl Interp {
         }
     }
 
+    // Relie document.body/head/documentElement aux VRAIS noeuds du DOM analyse.
+    // Avant cet appel, `install()` les avait poses comme elements detaches
+    // (crees avant que la page n'existe) : toute mutation/lecture via
+    // `document.body...` (appendChild, querySelectorAll, className...) ne
+    // touchait donc jamais l'arbre reellement rendu, et les methodes de
+    // collection absentes sur un element detache renvoyaient `undefined`
+    // (-> "Cannot read properties of undefined (reading 'length')" des que
+    // Google fait `document.body.querySelectorAll(...)`). A appeler une fois
+    // `self.dom` peuple (juste apres `DomModel::parse`).
+    pub fn rebind_document(&mut self) {
+        let doc = match scope_get(&self.global, "document") { Some(v @ Value::Obj(_)) => v, _ => return };
+        let html_n = self.dom.query("html", 0, true).first().copied();
+        let head_n = self.dom.query("head", 0, true).first().copied();
+        let body_n = self.dom.query("body", 0, true).first().copied();
+        if let Some(n) = html_n { set(&doc, "documentElement", node_handle(n)); }
+        if let Some(n) = head_n { set(&doc, "head", node_handle(n)); }
+        if let Some(n) = body_n { set(&doc, "body", node_handle(n)); }
+        // Collections document.forms/images/links : snapshot pris a l'ouverture de
+        // page (avant l'execution des scripts). Comme document.body plus haut,
+        // mieux vaut un tableau typé figé qu'un `undefined` qui casse `.length`.
+        let forms: Vec<Value> = self.dom.query("form", 0, false).into_iter().map(node_handle).collect();
+        let images: Vec<Value> = self.dom.query("img", 0, false).into_iter().map(node_handle).collect();
+        let links: Vec<Value> = self.dom.query("a", 0, false).into_iter().map(node_handle).collect();
+        set(&doc, "forms", array_val(forms));
+        set(&doc, "images", array_val(images));
+        set(&doc, "links", array_val(links));
+    }
+
     // Declenche tous les ecouteurs enregistres pour (node, type), avec un objet
     // `event` minimal. node = -1 cible window/document (load, DOMContentLoaded).
     pub fn fire_event(&mut self, node: i64, ty: &str) {
@@ -3151,8 +3179,19 @@ fn dom_get(it: &mut Interp, obj: &Rc<RefCell<Obj>>, name: &str) -> Option<Value>
             "hasAttribute" => native_val(dom_has_attr),
             "appendChild" | "append" | "prepend" => native_val(dom_append_child),
             "style" => style_object(&this),
+            "dataset" => dataset_object(&this),
             "classList" => class_list(-1),
             "addEventListener" | "removeEventListener" | "focus" | "click" => native_val(|_it, _t, _a| Ok(Value::Undefined)),
+            // Un element detache (createElement, ou document.body/head avant que la
+            // page n'ait de <body>/<head> reels) n'a pas de descendance connue : les
+            // collections doivent rester typees (tableau/liste vide), jamais
+            // `undefined`, sinon `.length` derriere plante (cf. rebind_document).
+            "querySelectorAll" | "getElementsByTagName" | "getElementsByClassName" => native_val(|_it, _t, _a| Ok(array_val(Vec::new()))),
+            "querySelector" => native_val(|_it, _t, _a| Ok(Value::Null)),
+            "children" | "childNodes" => array_val(Vec::new()),
+            "firstChild" | "firstElementChild" | "lastChild"
+            | "lastElementChild" | "parentNode" | "parentElement" => Value::Null,
+            "childElementCount" => Value::Num(0.0),
             _ => { let b = obj.borrow(); b.props.get(name).cloned().unwrap_or(Value::Undefined) }
         });
     }
@@ -3643,6 +3682,7 @@ fn open_page_inner(html: &[u8], base_url: &str, run: bool) -> (PageCtx, Vec<u8>)
     let mut interp = Interp::new();
     interp.base_url = base_url.to_string();
     interp.dom = DomModel::parse(html);
+    interp.rebind_document();
     let mut scripts: Vec<(usize, usize, String)> = Vec::new();
     let mut i = 0usize;
     let mut ran = 0u32;
