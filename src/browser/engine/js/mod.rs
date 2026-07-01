@@ -1474,8 +1474,71 @@ fn powf(a: f64, b: f64) -> f64 {
     exp_(b * ln_(a))
 }
 fn ln_(mut x: f64) -> f64 { if x <= 0.0 { return f64::NAN; } let mut k = 0i32; while x > 1.5 { x /= core::f64::consts::E; k += 1; } while x < 0.5 { x *= core::f64::consts::E; k -= 1; } let t = (x - 1.0) / (x + 1.0); let t2 = t * t; let mut term = t; let mut sum = 0.0; let mut n = 1.0; for _ in 0..30 { sum += term / n; term *= t2; n += 2.0; } 2.0 * sum + k as f64 }
-fn exp_(x: f64) -> f64 { let mut term = 1.0; let mut sum = 1.0; for i in 1..40 { term *= x / i as f64; sum += term; } sum }
+// exp avec reduction d'argument : exp(x)=E^k · exp(r), k=round(x), r∈[-0.5,0.5].
+// La serie de Taylor ne converge proprement que pour |x| petit ; sans reduction
+// elle diverge pour les grands x (utilise par sinh/cosh).
+fn exp_(x: f64) -> f64 {
+    if x.is_nan() { return f64::NAN; }
+    if x == f64::INFINITY { return f64::INFINITY; }
+    if x == f64::NEG_INFINITY { return 0.0; }
+    let k = floor_(x + 0.5);
+    let r = x - k;
+    let mut term = 1.0; let mut sum = 1.0;
+    for i in 1..20 { term *= r / i as f64; sum += term; }
+    let mut ek = 1.0; let mut n = k as i64; let base = if n < 0 { n = -n; 1.0 / core::f64::consts::E } else { core::f64::consts::E };
+    for _ in 0..n { ek *= base; }
+    sum * ek
+}
 fn sqrt_(x: f64) -> f64 { if x < 0.0 { return f64::NAN; } if x == 0.0 { return 0.0; } let mut g = x; for _ in 0..40 { g = 0.5 * (g + x / g); } g }
+
+// --- Trigonometrie et fonctions transcendantes (no_std : pas d'intrinseques) ---
+// Approche fdlibm/V8 sans matériel : reduction d'argument puis serie de Taylor.
+const PI_: f64 = core::f64::consts::PI;
+
+// sin par reduction dans [-PI, PI] puis serie de Taylor (12 termes suffisent
+// apres reduction car |x| <= PI garantit une convergence rapide).
+fn sin_(x: f64) -> f64 {
+    if x.is_nan() || x.is_infinite() { return f64::NAN; }
+    let two_pi = 2.0 * PI_;
+    let r = x - two_pi * floor_((x + PI_) / two_pi); // -> [-PI, PI]
+    let x2 = r * r;
+    let mut term = r; let mut sum = r; let mut n = 1.0;
+    for _ in 0..14 { term *= -x2 / ((2.0 * n) * (2.0 * n + 1.0)); sum += term; n += 1.0; }
+    sum
+}
+fn cos_(x: f64) -> f64 { sin_(x + PI_ / 2.0) }
+fn tan_(x: f64) -> f64 { let c = cos_(x); if c == 0.0 { f64::NAN } else { sin_(x) / c } }
+
+// atan par reduction de demi-angle (atan(x)=2·atan(x/(1+sqrt(1+x²)))) repetee
+// jusqu'a |x|<=0.2, ou la serie de Taylor converge en quelques termes.
+fn atan_(x0: f64) -> f64 {
+    if x0.is_nan() { return f64::NAN; }
+    if x0.is_infinite() { return if x0 > 0.0 { PI_ / 2.0 } else { -PI_ / 2.0 }; }
+    let neg = x0 < 0.0;
+    let mut x = x0.abs();
+    let mut k = 0u32;
+    while x > 0.2 { x = x / (1.0 + sqrt_(1.0 + x * x)); k += 1; }
+    let x2 = x * x;
+    let mut num = x; let mut sum = 0.0; let mut sign = 1.0; let mut d = 1.0;
+    for _ in 0..16 { sum += sign * num / d; num *= x2; sign = -sign; d += 2.0; }
+    let r = sum * (1u32 << k) as f64;
+    if neg { -r } else { r }
+}
+fn atan2_(y: f64, x: f64) -> f64 {
+    if x > 0.0 { atan_(y / x) }
+    else if x < 0.0 { if y >= 0.0 { atan_(y / x) + PI_ } else { atan_(y / x) - PI_ } }
+    else if y > 0.0 { PI_ / 2.0 }
+    else if y < 0.0 { -PI_ / 2.0 }
+    else { 0.0 }
+}
+fn asin_(x: f64) -> f64 { if x < -1.0 || x > 1.0 { return f64::NAN; } if x == 1.0 { return PI_ / 2.0; } if x == -1.0 { return -PI_ / 2.0; } atan_(x / sqrt_(1.0 - x * x)) }
+fn acos_(x: f64) -> f64 { if x < -1.0 || x > 1.0 { return f64::NAN; } PI_ / 2.0 - asin_(x) }
+fn cbrt_(x: f64) -> f64 { if x == 0.0 { return 0.0; } let s = if x < 0.0 { -1.0 } else { 1.0 }; let a = x.abs(); let mut g = a; for _ in 0..40 { g = (2.0 * g + a / (g * g)) / 3.0; } s * g }
+fn hypot_(a: f64, b: f64) -> f64 { sqrt_(a * a + b * b) }
+fn sinh_(x: f64) -> f64 { (exp_(x) - exp_(-x)) / 2.0 }
+fn cosh_(x: f64) -> f64 { (exp_(x) + exp_(-x)) / 2.0 }
+fn tanh_(x: f64) -> f64 { if x > 20.0 { return 1.0; } if x < -20.0 { return -1.0; } let e2 = exp_(2.0 * x); (e2 - 1.0) / (e2 + 1.0) }
+
 // no_std : pas de f64::floor/ceil/trunc/fract. Implementations maison.
 fn trunc_(x: f64) -> f64 { if x.is_nan() || x.is_infinite() { return x; } if x.abs() >= 9.007199254740992e15 { return x; } x as i64 as f64 }
 fn floor_(x: f64) -> f64 { let t = trunc_(x); if x < 0.0 && t != x { t - 1.0 } else { t } }
@@ -1499,6 +1562,12 @@ fn install(it: &mut Interp) {
     let math = new_obj(Obj::plain());
     set(&math, "PI", Value::Num(core::f64::consts::PI));
     set(&math, "E", Value::Num(core::f64::consts::E));
+    set(&math, "LN2", Value::Num(core::f64::consts::LN_2));
+    set(&math, "LN10", Value::Num(core::f64::consts::LN_10));
+    set(&math, "LOG2E", Value::Num(core::f64::consts::LOG2_E));
+    set(&math, "LOG10E", Value::Num(core::f64::consts::LOG10_E));
+    set(&math, "SQRT2", Value::Num(core::f64::consts::SQRT_2));
+    set(&math, "SQRT1_2", Value::Num(core::f64::consts::FRAC_1_SQRT_2));
     set(&math, "abs", native_val(|it, _t, a| Ok(Value::Num(it.to_num(a.get(0).unwrap_or(&Value::Undefined)).abs()))));
     set(&math, "floor", native_val(|it, _t, a| Ok(Value::Num(floor_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
     set(&math, "ceil", native_val(|it, _t, a| Ok(Value::Num(ceil_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
@@ -1512,6 +1581,29 @@ fn install(it: &mut Interp) {
     set(&math, "log", native_val(|it, _t, a| Ok(Value::Num(ln_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
     set(&math, "exp", native_val(|it, _t, a| Ok(Value::Num(exp_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
     set(&math, "random", native_val(|_it, _t, _a| Ok(Value::Num(prng()))));
+    // Trigonometrie et transcendantes (implementees a la main, cf. sin_/atan_…).
+    set(&math, "sin", native_val(|it, _t, a| Ok(Value::Num(sin_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "cos", native_val(|it, _t, a| Ok(Value::Num(cos_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "tan", native_val(|it, _t, a| Ok(Value::Num(tan_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "asin", native_val(|it, _t, a| Ok(Value::Num(asin_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "acos", native_val(|it, _t, a| Ok(Value::Num(acos_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "atan", native_val(|it, _t, a| Ok(Value::Num(atan_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "atan2", native_val(|it, _t, a| Ok(Value::Num(atan2_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)), it.to_num(a.get(1).unwrap_or(&Value::Undefined)))))));
+    set(&math, "sinh", native_val(|it, _t, a| Ok(Value::Num(sinh_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "cosh", native_val(|it, _t, a| Ok(Value::Num(cosh_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "tanh", native_val(|it, _t, a| Ok(Value::Num(tanh_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "cbrt", native_val(|it, _t, a| Ok(Value::Num(cbrt_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "hypot", native_val(|it, _t, a| match a.len() { 0 => Ok(Value::Num(0.0)), 2 => Ok(Value::Num(hypot_(it.to_num(&a[0]), it.to_num(&a[1])))), _ => { let mut s = 0.0; for v in a { let x = it.to_num(v); s += x * x; } Ok(Value::Num(sqrt_(s))) } }));
+    set(&math, "log2", native_val(|it, _t, a| Ok(Value::Num(ln_(it.to_num(a.get(0).unwrap_or(&Value::Undefined))) / core::f64::consts::LN_2))));
+    set(&math, "log10", native_val(|it, _t, a| Ok(Value::Num(ln_(it.to_num(a.get(0).unwrap_or(&Value::Undefined))) / core::f64::consts::LN_10))));
+    set(&math, "log1p", native_val(|it, _t, a| Ok(Value::Num(ln_(1.0 + it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "expm1", native_val(|it, _t, a| Ok(Value::Num(exp_(it.to_num(a.get(0).unwrap_or(&Value::Undefined))) - 1.0))));
+    // fround : arrondi a la precision simple (round-trip f32).
+    set(&math, "fround", native_val(|it, _t, a| Ok(Value::Num(it.to_num(a.get(0).unwrap_or(&Value::Undefined)) as f32 as f64))));
+    // clz32 : nombre de zeros en tete sur 32 bits.
+    set(&math, "clz32", native_val(|it, _t, a| Ok(Value::Num((it.to_num(a.get(0).unwrap_or(&Value::Undefined)) as i64 as u32).leading_zeros() as f64))));
+    // imul : multiplication entiere 32 bits (semantique C).
+    set(&math, "imul", native_val(|it, _t, a| { let x = it.to_num(a.get(0).unwrap_or(&Value::Undefined)) as i64 as i32; let y = it.to_num(a.get(1).unwrap_or(&Value::Undefined)) as i64 as i32; Ok(Value::Num(x.wrapping_mul(y) as f64)) }));
     // On conserve une référence (même Rc) pour la poser aussi sur `window`,
     // afin que la détection Closure `d.Math == Math` réussisse (cf. window).
     let math_ref = math.clone();
