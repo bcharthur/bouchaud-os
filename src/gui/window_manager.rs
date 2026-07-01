@@ -8,7 +8,7 @@ use crate::gui::mouse;
 use crate::gui::widgets;
 use crate::gui::window::{
     self as window,
-    clamp_win, icon_rect, make_app, menu_rect, start_btn, taskbar_btn, toggle_max, Drag, Win,
+    clamp_win, icon_rect, make_app, menu_rect, start_btn, taskbar_btn, toggle_max, App, Drag, Win,
     BAR_H, ICONS, MENU, MENU_HEADER_H, MENU_ITEM_H, MIN_H, MIN_W, TITLE_H,
 };
 use crate::drivers::keyboard;
@@ -108,6 +108,15 @@ pub fn run() {
         }
         if wheel != 0 {
             handle_wheel(mx, my, wheel, &mut wins);
+        }
+
+        // Re-met en page les navigateurs dont la largeur a change (resize/maximize)
+        // pour que le contenu remplisse la fenetre au lieu de rester en colonne.
+        for w in wins.iter_mut() {
+            if w.min { continue; }
+            if let App::Browser { state } = &mut w.app {
+                state.reflow((w.w - 6).max(1));
+            }
         }
 
         widgets::draw_desktop(&wins);
