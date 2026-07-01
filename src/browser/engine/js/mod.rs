@@ -3116,10 +3116,15 @@ fn dom_get(it: &mut Interp, obj: &Rc<RefCell<Obj>>, name: &str) -> Option<Value>
                 "firstChild" | "firstElementChild" => it.dom.nodes[n].children.first().map(|&c| node_handle(c)).unwrap_or(Value::Null),
                 "lastChild" | "lastElementChild" => it.dom.nodes[n].children.last().map(|&c| node_handle(c)).unwrap_or(Value::Null),
                 "parentNode" | "parentElement" => it.dom.parent_of(n).map(node_handle).unwrap_or(Value::Null),
+                "nextSibling" | "nextElementSibling" => it.dom.sibling(n, 1).map(node_handle).unwrap_or(Value::Null),
+                "previousSibling" | "previousElementSibling" => it.dom.sibling(n, -1).map(node_handle).unwrap_or(Value::Null),
+                "name" | "type" | "placeholder" | "title" | "alt" | "rel" | "role" => str_val(it.dom.attr(n, name).unwrap_or("").to_string()),
+                // form.elements : HTMLCollection des controles descendants (array-like avec length).
+                "elements" => { let mut v = Vec::new(); it.dom.controls(n, &mut v); array_val(v.into_iter().map(node_handle).collect()) }
                 "ownerDocument" => scope_get(&it.global, "document").unwrap_or(Value::Null),
                 "style" => style_object(&this),
                 "dataset" => dataset_object(&this),
-                "classList" => class_list(n as i64),
+                "classList" => class_list(it, n as i64),
                 "getAttribute" => native_val(dom_get_attr),
                 "setAttribute" => native_val(dom_set_attr),
                 "hasAttribute" => native_val(dom_has_attr),
@@ -3149,10 +3154,26 @@ fn dom_get(it: &mut Interp, obj: &Rc<RefCell<Obj>>, name: &str) -> Option<Value>
             "getAttribute" => native_val(dom_get_attr),
             "setAttribute" => native_val(dom_set_attr),
             "hasAttribute" => native_val(dom_has_attr),
-            "appendChild" | "append" | "prepend" => native_val(dom_append_child),
+            "removeAttribute" => native_val(|_it, _t, _a| Ok(Value::Undefined)),
+            "appendChild" | "append" | "prepend" | "insertBefore" => native_val(dom_append_child),
             "style" => style_object(&this),
-            "classList" => class_list(-1),
-            "addEventListener" | "removeEventListener" | "focus" | "click" => native_val(|_it, _t, _a| Ok(Value::Undefined)),
+            "classList" => class_list(it, -1),
+            "dataset" => dataset_object(&this),
+            // Collections vides mais TYPEES : un element detache n'a pas d'enfants
+            // structures dans ce modele (append accumule du texte). On renvoie une
+            // NodeList/HTMLCollection vide (array-like avec .length == 0), jamais
+            // undefined, pour ne pas casser `el.children.length` / iteration.
+            "children" | "childNodes" | "elements" => array_val(Vec::new()),
+            "childElementCount" => Value::Num(0.0),
+            "querySelectorAll" | "getElementsByTagName" | "getElementsByClassName" => native_val(|_it, _t, _a| Ok(array_val(Vec::new()))),
+            "querySelector" => native_val(|_it, _t, _a| Ok(Value::Null)),
+            "firstChild" | "lastChild" | "firstElementChild" | "lastElementChild"
+            | "parentNode" | "parentElement" | "nextSibling" | "previousSibling"
+            | "nextElementSibling" | "previousElementSibling" => Value::Null,
+            "value" | "name" | "type" | "placeholder" => str_val({ let b = obj.borrow(); if let Some(Value::Obj(at)) = b.props.get("__attrs__") { at.borrow().props.get(name).map(|v| it.to_string(v)).unwrap_or_default() } else { String::new() } }),
+            "addEventListener" | "removeEventListener" | "focus" | "blur" | "click"
+            | "removeChild" | "remove" | "replaceChild" | "scrollIntoView" => native_val(|_it, _t, _a| Ok(Value::Undefined)),
+            "matches" | "contains" => native_val(|_it, _t, _a| Ok(Value::Bool(false))),
             _ => { let b = obj.borrow(); b.props.get(name).cloned().unwrap_or(Value::Undefined) }
         });
     }
@@ -3244,9 +3265,25 @@ fn serialize_style(obj: &Rc<RefCell<Obj>>) -> String {
 }
 
 // classList lie a un noeud (n>=0) ; methodes add/remove/toggle/contains.
-fn class_list(n: i64) -> Value {
+fn class_list(it: &mut Interp, n: i64) -> Value {
     let cl = new_obj(Obj::plain());
     set(&cl, "__node__", Value::Num(n as f64));
+    // Snapshot array-like des classes courantes : `length`, indices numeriques et
+    // `value` sont figes a l'acces. Chaque `el.classList` renvoie un objet frais
+    // (dom_get rappelle class_list), donc la valeur reste synchronisee tant qu'on
+    // ne cache pas la reference. Evite `classList.length` == undefined.
+    let classes: Vec<String> = if n >= 0 {
+        it.dom.attr(n as usize, "class").unwrap_or("").split(' ').filter(|x| !x.is_empty()).map(|x| x.to_string()).collect()
+    } else { Vec::new() };
+    set(&cl, "length", Value::Num(classes.len() as f64));
+    set(&cl, "value", str_val(classes.join(" ")));
+    for (i, c) in classes.iter().enumerate() { set(&cl, &i.to_string(), str_val(c.clone())); }
+    set(&cl, "item", native_val(|it, t, a| {
+        let n = handle_node(it, &t); if n < 0 { return Ok(Value::Null); }
+        let i = it.to_num(a.get(0).unwrap_or(&Value::Undefined)) as usize;
+        Ok(it.dom.attr(n as usize, "class").unwrap_or("").split(' ').filter(|x| !x.is_empty()).nth(i).map(str_val).unwrap_or(Value::Null))
+    }));
+    set(&cl, "toString", native_val(|it, t, _a| { let n = handle_node(it, &t); if n < 0 { return Ok(str_val(String::new())); } Ok(str_val(it.dom.attr(n as usize, "class").unwrap_or("").to_string())) }));
     set(&cl, "add", native_val(|it, t, a| { cl_edit(it, &t, a, 0); Ok(Value::Undefined) }));
     set(&cl, "remove", native_val(|it, t, a| { cl_edit(it, &t, a, 1); Ok(Value::Undefined) }));
     set(&cl, "toggle", native_val(|it, t, a| { Ok(Value::Bool(cl_edit(it, &t, a, 2))) }));
@@ -3412,6 +3449,23 @@ impl DomModel {
     }
     fn parent_of(&self, n: usize) -> Option<usize> {
         (1..self.nodes.len()).find(|&p| self.nodes[p].children.contains(&n))
+    }
+    // Frere adjacent (delta = +1 suivant, -1 precedent). Le modele ne traque que
+    // les enfants elements, donc nextSibling == nextElementSibling ici.
+    fn sibling(&self, n: usize, delta: i32) -> Option<usize> {
+        let p = self.parent_of(n)?;
+        let idx = self.nodes[p].children.iter().position(|&c| c == n)? as i32 + delta;
+        if idx < 0 { return None; }
+        self.nodes[p].children.get(idx as usize).copied()
+    }
+    // Controles de formulaire descendants (form.elements) : input/select/textarea/button.
+    fn controls(&self, node: usize, out: &mut Vec<usize>) {
+        if node >= self.nodes.len() { return; }
+        for ci in 0..self.nodes[node].children.len() {
+            let c = self.nodes[node].children[ci];
+            if matches!(self.nodes[c].tag.as_str(), "input" | "select" | "textarea" | "button") { out.push(c); }
+            self.controls(c, out);
+        }
     }
     fn find_by_id(&self, id: &str) -> Option<usize> {
         (1..self.nodes.len()).find(|&n| self.attr(n, "id") == Some(id))
@@ -3798,5 +3852,29 @@ pub fn selftest() -> Result<(), &'static str> {
     it.run("window._ = window._ || {}; window._DumpException = _._DumpException = function(e){ throw e; }; \
             console.log((typeof _DumpException)+','+(typeof window._DumpException)+','+(typeof _._DumpException));").map_err(|_| "run-glob4")?;
     if it.out.last().map(|x| x.as_str()) != Some("function,function,function") { return Err("dumpexception"); }
+    // --- Sprint 2 : collections DOM (length toujours defini, jamais undefined) ---
+    let html = br#"<ul id="l"><li>a</li><li class="x">b</li><li>c</li></ul>
+<form id="f"><input name="q"><button>go</button></form>
+<div id="o"></div>
+<script>
+  var l = document.getElementById('l');
+  var d = document.createElement('div');
+  var f = document.getElementById('f');
+  var r = [l.children.length, document.querySelectorAll('li').length,
+           document.getElementsByTagName('li').length, d.children.length,
+           l.children[0].nextElementSibling.className, f.elements.length,
+           l.firstElementChild.textContent].join('|');
+  document.getElementById('o').textContent = r;
+</script>"#;
+    let out = execute_inline(html, "");
+    let s = core::str::from_utf8(&out).unwrap_or("");
+    if !s.contains("3|3|3|0|x|2|a") { return Err("dom-collections"); }
+    // classList array-like : length, indexation, contains.
+    let out = execute_inline(br#"<div id="c" class="alpha beta"></div><div id="o2"></div><script>
+  var c = document.getElementById('c');
+  document.getElementById('o2').textContent = c.classList.length + ',' + c.classList.contains('beta') + ',' + c.classList[0];
+</script>"#, "");
+    let s = core::str::from_utf8(&out).unwrap_or("");
+    if !s.contains("2,true,alpha") { return Err("classlist"); }
     Ok(())
 }
