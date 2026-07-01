@@ -6,8 +6,60 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+// Combinateur reliant un compound a celui situe a sa GAUCHE dans la chaine.
+// (Comme Servo/WebKit : descendant « a b », enfant « a>b », frere adjacent
+// « a+b », frere general « a~b ».)
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Comb { Descendant, Child, Adjacent, General }
+
+// Operateur d'un selecteur d'attribut : [a] [a=v] [a^=v] [a$=v] [a*=v] [a~=v] [a|=v].
 #[derive(Clone)]
-pub(super) enum Sel { Any, Tag(String), Class(String), Id(String), TagClass(String, String) }
+pub(super) enum AttrOp { Exists, Eq, Prefix, Suffix, Substr, Word, Dash }
+
+#[derive(Clone)]
+pub(super) struct AttrSel { pub name: String, pub op: AttrOp, pub val: String }
+
+// Pseudo-classes structurelles/etat. Les etats non decidables statiquement
+// (:hover/:focus...) ne sont pas stockes ici (traites comme neutres au parse).
+#[derive(Clone)]
+pub(super) enum Pseudo {
+    FirstChild,
+    LastChild,
+    OnlyChild,
+    Empty,
+    Root,
+    NthChild(i32, i32),      // an+b (1-based, depuis le debut)
+    NthLastChild(i32, i32),  // an+b (depuis la fin)
+    Not(Vec<Sel>),           // negation d'un ou plusieurs compounds simples
+}
+
+// Selecteur simple compose (« compound selector ») : un tag optionnel, un id
+// optionnel, N classes, N selecteurs d'attribut, N pseudo-classes, et le
+// combinateur qui le relie au compound de gauche.
+#[derive(Clone)]
+pub(super) struct Sel {
+    pub tag: Option<String>,
+    pub id: Option<String>,
+    pub classes: Vec<String>,
+    pub attrs: Vec<AttrSel>,
+    pub pseudos: Vec<Pseudo>,
+    pub comb: Comb,
+}
+
+impl Sel {
+    pub fn any() -> Sel {
+        Sel { tag: None, id: None, classes: Vec::new(), attrs: Vec::new(), pseudos: Vec::new(), comb: Comb::Descendant }
+    }
+    pub fn is_any(&self) -> bool {
+        self.tag.is_none() && self.id.is_none() && self.classes.is_empty()
+            && self.attrs.is_empty() && self.pseudos.is_empty()
+    }
+    // Cible-t-il la racine (body/html nu) pour la detection du fond global.
+    pub fn is_root_tag(&self) -> bool {
+        self.id.is_none() && self.classes.is_empty() && self.attrs.is_empty() && self.pseudos.is_empty()
+            && matches!(self.tag.as_deref(), Some("body") | Some("html"))
+    }
+}
 
 // Une regle CSS : chaine de selecteurs simples (combinateur descendant), les
 // declarations, et la specificite cumulee. `chain` est ordonnee ancetre→cible :
@@ -25,12 +77,14 @@ impl CssIndex {
     pub fn new(css: &[Rule]) -> CssIndex {
         let mut idx = CssIndex { any: Vec::new(), tags: Vec::new(), classes: Vec::new(), ids: Vec::new() };
         for (i, r) in css.iter().enumerate() {
-            match r.chain.last().unwrap_or(&Sel::Any) {
-                Sel::Any => idx.any.push(i),
-                Sel::Tag(t) => push_bucket(&mut idx.tags, t, i),
-                Sel::Class(c) => push_bucket(&mut idx.classes, c, i),
-                Sel::Id(id) => push_bucket(&mut idx.ids, id, i),
-                Sel::TagClass(_, c) => push_bucket(&mut idx.classes, c, i),
+            // Clé d'indexation = partie la plus discriminante du selecteur cible
+            // (id > 1re classe > tag > universel), comme le « key selector » des
+            // vrais moteurs. Le matching complet est verifie ensuite.
+            match r.chain.last() {
+                Some(s) if s.id.is_some() => push_bucket(&mut idx.ids, s.id.as_ref().unwrap(), i),
+                Some(s) if !s.classes.is_empty() => push_bucket(&mut idx.classes, &s.classes[0], i),
+                Some(s) if s.tag.is_some() => push_bucket(&mut idx.tags, s.tag.as_ref().unwrap(), i),
+                _ => idx.any.push(i),
             }
         }
         idx

@@ -12,7 +12,7 @@ use crate::gui::image::{self, Image};
 use super::display_list::{apply_box_transform, translate_item};
 pub use super::display_list::{Item, Layer, Link, Page};
 pub use super::paint::paint;
-use super::style::{CssIndex, Rule, Sel};
+use super::style::{CssIndex, Rule, Sel, Comb, AttrOp, AttrSel, Pseudo};
 use super::css_values::parse_transform;
 use super::css_parser::{parse_decls, parse_stylesheet};
 use crate::net::http::resolve_location;
@@ -515,38 +515,124 @@ impl Session {
     }
 }
 
-fn sel_matches(sel: &Sel, tag: &str, classes: &str, id: &str) -> bool {
-    match sel {
-        Sel::Any => true,
-        Sel::Tag(t) => t == tag,
-        Sel::Id(x) => x == id,
-        Sel::Class(c) => classes.split(' ').any(|cl| cl == c),
-        Sel::TagClass(t, c) => t == tag && classes.split(' ').any(|cl| cl == c),
+// --- Matching selecteur ↔ element, avec acces DOM complet -------------------
+// `path` = chemin d'index DOM racine→element courant (le dernier est l'element
+// teste). Donne acces aux attributs, aux ancetres (path[..len-1]) et a la
+// fratrie (enfants du parent path[len-2]), comme un vrai moteur.
+
+fn attr_sel_matches(node: &Node, a: &AttrSel) -> bool {
+    let v = match attr(node, &a.name) { Some(v) => v, None => return false };
+    match a.op {
+        AttrOp::Exists => true,
+        AttrOp::Eq => v == a.val,
+        AttrOp::Prefix => !a.val.is_empty() && v.starts_with(&a.val),
+        AttrOp::Suffix => !a.val.is_empty() && v.ends_with(&a.val),
+        AttrOp::Substr => !a.val.is_empty() && v.contains(&a.val),
+        AttrOp::Word => v.split(char::is_whitespace).any(|w| w == a.val),
+        AttrOp::Dash => v == a.val || (v.len() > a.val.len() && v.starts_with(&a.val) && v.as_bytes()[a.val.len()] == b'-'),
     }
 }
 
-/// Matche une chaine de selecteurs (combinateur descendant) contre l'element
-/// courant + sa pile d'ancetres. Le dernier composant doit matcher l'element ;
-/// les precedents doivent matcher des ancetres, dans l'ordre, de proche en proche
-/// (right-to-left, comme un vrai moteur CSS).
-fn rule_matches(chain: &[Sel], tag: &str, classes: &str, id: &str,
-                ancestors: &[(String, String, String)]) -> bool {
-    let n = chain.len();
-    if n == 0 { return false; }
-    // L'element courant doit matcher le dernier composant.
-    if !sel_matches(&chain[n - 1], tag, classes, id) { return false; }
-    if n == 1 { return true; }
-    // Remonte les ancetres (du plus proche au plus lointain) en satisfaisant
-    // les composants restants chain[0..n-1] dans l'ordre.
-    let mut need = n - 1;            // index du prochain composant a satisfaire (need-1)
-    let mut a = ancestors.len();
-    while need > 0 {
-        if a == 0 { return false; }
-        a -= 1;
-        let (atag, acls, aid) = &ancestors[a];
-        if sel_matches(&chain[need - 1], atag, acls, aid) { need -= 1; }
+// Position (1-based) et total de l'element parmi ses FRERES elements.
+fn elem_pos(dom: &Dom, path: &[usize]) -> (usize, usize) {
+    if path.len() < 2 { return (1, 1); }
+    let parent = &dom.nodes[path[path.len() - 2]];
+    let me = path[path.len() - 1];
+    let mut count = 0usize; let mut pos = 0usize;
+    for &c in &parent.children {
+        if dom.nodes[c].tag.is_some() { count += 1; if c == me { pos = count; } }
     }
+    if pos == 0 { (1, count.max(1)) } else { (pos, count) }
+}
+
+// Verifie e == a*k + b pour un entier k >= 0 (semantique :nth-child).
+fn anb_match(a: i32, b: i32, e: i32) -> bool {
+    if a == 0 { return e == b; }
+    let d = e - b;
+    d % a == 0 && d / a >= 0
+}
+
+fn pseudo_matches(p: &Pseudo, dom: &Dom, path: &[usize]) -> bool {
+    match p {
+        Pseudo::Root => path.len() <= 1 || matches!(dom.nodes[path[path.len() - 1]].tag.as_deref(), Some("html")),
+        Pseudo::FirstChild => { let (pos, _) = elem_pos(dom, path); pos == 1 }
+        Pseudo::LastChild => { let (pos, cnt) = elem_pos(dom, path); pos == cnt }
+        Pseudo::OnlyChild => { let (_, cnt) = elem_pos(dom, path); cnt == 1 }
+        Pseudo::NthChild(a, b) => { let (pos, _) = elem_pos(dom, path); anb_match(*a, *b, pos as i32) }
+        Pseudo::NthLastChild(a, b) => { let (pos, cnt) = elem_pos(dom, path); anb_match(*a, *b, (cnt - pos + 1) as i32) }
+        Pseudo::Empty => {
+            let node = &dom.nodes[path[path.len() - 1]];
+            node.children.iter().all(|&c| { let n = &dom.nodes[c]; n.tag.is_none() && n.text.trim().is_empty() })
+        }
+        Pseudo::Not(inner) => !inner.iter().any(|s| compound_matches(s, dom, path)),
+    }
+}
+
+// Un compound (tag+id+classes+attrs+pseudos) matche-t-il l'element en fin de path.
+fn compound_matches(sel: &Sel, dom: &Dom, path: &[usize]) -> bool {
+    let node = &dom.nodes[path[path.len() - 1]];
+    let tag = node.tag.as_deref().unwrap_or("");
+    if let Some(t) = &sel.tag { if !t.eq_ignore_ascii_case(tag) { return false; } }
+    if let Some(x) = &sel.id {
+        match attr(node, "id") { Some(v) if v.eq_ignore_ascii_case(x) => {}, _ => return false }
+    }
+    if !sel.classes.is_empty() {
+        let classes = attr(node, "class").unwrap_or("");
+        for c in &sel.classes { if !classes.split(char::is_whitespace).any(|cl| cl == c) { return false; } }
+    }
+    for a in &sel.attrs { if !attr_sel_matches(node, a) { return false; } }
+    for p in &sel.pseudos { if !pseudo_matches(p, dom, path) { return false; } }
     true
+}
+
+// Frere element immediatement precedent (pour `+`).
+fn prev_elem_sibling(dom: &Dom, path: &[usize]) -> Option<usize> {
+    if path.len() < 2 { return None; }
+    let parent = &dom.nodes[path[path.len() - 2]];
+    let me = path[path.len() - 1];
+    let mut prev = None;
+    for &c in &parent.children {
+        if c == me { break; }
+        if dom.nodes[c].tag.is_some() { prev = Some(c); }
+    }
+    prev
+}
+
+// Matche chain[0..=ci] en terminant sur l'element decrit par `path`.
+fn match_chain(chain: &[Sel], ci: usize, dom: &Dom, path: &[usize]) -> bool {
+    if !compound_matches(&chain[ci], dom, path) { return false; }
+    if ci == 0 { return true; }
+    match chain[ci].comb {
+        Comb::Descendant => {
+            let mut d = path.len();
+            while d > 1 { d -= 1; if match_chain(chain, ci - 1, dom, &path[..d]) { return true; } }
+            false
+        }
+        Comb::Child => path.len() >= 2 && match_chain(chain, ci - 1, dom, &path[..path.len() - 1]),
+        Comb::Adjacent => {
+            match prev_elem_sibling(dom, path) {
+                Some(prev) => { let mut np = path[..path.len() - 1].to_vec(); np.push(prev); match_chain(chain, ci - 1, dom, &np) }
+                None => false,
+            }
+        }
+        Comb::General => {
+            if path.len() < 2 { return false; }
+            let parent = &dom.nodes[path[path.len() - 2]];
+            let me = path[path.len() - 1];
+            for &c in &parent.children {
+                if c == me { break; }
+                if dom.nodes[c].tag.is_some() {
+                    let mut np = path[..path.len() - 1].to_vec(); np.push(c);
+                    if match_chain(chain, ci - 1, dom, &np) { return true; }
+                }
+            }
+            false
+        }
+    }
+}
+
+fn rule_matches(chain: &[Sel], dom: &Dom, path: &[usize]) -> bool {
+    !chain.is_empty() && match_chain(chain, chain.len() - 1, dom, path)
 }
 
 // Couleurs --------------------------------------------------------------------
@@ -941,9 +1027,10 @@ struct Ctx<'a> {
     host: String,
     title: String,
     visited: usize,
-    // Pile des ancetres de l'element courant (tag, classes, id) — partagee entre
-    // tous les sous-fragments pour le matching des selecteurs descendants.
-    ancestors: Vec<(String, String, String)>,
+    // Pile des index DOM des ancetres de l'element courant (racine→parent),
+    // partagee entre tous les sous-fragments. Permet au matcher d'acceder aux
+    // attributs, a la fratrie et aux combinateurs via le DOM.
+    ancestors: Vec<usize>,
     // Pile de contexte de liste : (ordonnee, prochain index, style de marqueur).
     list_stack: Vec<(bool, i32, u8)>,
     // --- Positionnement (P1) ---
@@ -1198,8 +1285,7 @@ fn layout(dom: &Dom, base_url: &str, width: i32, css: &[Rule], no_display_none: 
     for r in css {
         // Fond global : regles ciblant body/html ou :root/* (dernier composant).
         let target = r.chain.last();
-        let hits_root = matches!(target, Some(Sel::Tag(t)) if t == "body" || t == "html")
-            || matches!(target, Some(Sel::Any));
+        let hits_root = matches!(target, Some(s) if s.is_root_tag() || s.is_any());
         if hits_root {
             for (p, v) in &r.decls {
                 if p == "background" || p == "background-color" {
@@ -1430,7 +1516,7 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, cs
 }
 
 // Calcule le style herite + la boite de l'element (cascade CSS + style inline).
-fn compute(f: &Flow, node: &Node, tag: &str, st: &Style) -> (Style, BoxProps) {
+fn compute(f: &Flow, dom: &Dom, idx: usize, node: &Node, tag: &str, st: &Style) -> (Style, BoxProps) {
     let mut cst = st.clone();
     let mut bx = default_box();
     if let Some(s) = heading_scale(tag) { cst.scale = s; cst.bold = true; }
@@ -1457,10 +1543,13 @@ fn compute(f: &Flow, node: &Node, tag: &str, st: &Style) -> (Style, BoxProps) {
     }
     let classes = attr(node, "class").unwrap_or("").to_string();
     let id = attr(node, "id").unwrap_or("").to_ascii_lowercase();
+    // Chemin DOM racine→element courant pour le matcher (attributs + fratrie).
+    let mut path: Vec<usize> = f.ctx.ancestors.clone();
+    path.push(idx);
     let mut matched: Vec<(u32, usize)> = Vec::new();
     let consider = |ri: usize, matched: &mut Vec<(u32, usize)>| {
         let r = &f.ctx.css[ri];
-        if rule_matches(&r.chain, tag, &classes, &id, &f.ctx.ancestors) {
+        if rule_matches(&r.chain, dom, &path) {
             matched.push((r.spec, ri));
         }
     };
@@ -1503,7 +1592,7 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
         return;
     }
 
-    let (cst, bx) = compute(f, node, tag, st);
+    let (cst, bx) = compute(f, dom, idx, node, tag, st);
     if bx.hidden { return; }
 
     // --- elements speciaux ---
@@ -1592,10 +1681,8 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
     if tag == "tr" { disp = Disp::Flex; }
     if bx.float != FloatK::None && disp == Disp::Block { disp = Disp::InlineBlock; }
 
-    // Empile l'element comme ancetre pour le matching descendant de ses enfants.
-    let a_cls = attr(node, "class").unwrap_or("").to_string();
-    let a_id = attr(node, "id").unwrap_or("").to_ascii_lowercase();
-    f.ctx.ancestors.push((tag.to_string(), a_cls, a_id));
+    // Empile l'element (index DOM) comme ancetre pour le matching de ses enfants.
+    f.ctx.ancestors.push(idx);
 
     // --- Positionnement (P1) ---
     // absolute / fixed : hors flux, place dans une couche dediee (z-index).
@@ -1916,7 +2003,7 @@ fn flex_inner(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, 
     for &c in &kids {
         let cn = &dom.nodes[c];
         let ct = cn.tag.as_deref().unwrap_or("");
-        let (_ccst, cbx) = compute(f, cn, ct, cst);
+        let (_ccst, cbx) = compute(f, dom, c, cn, ct, cst);
         if let Some(w) = cbx.width {
             base.push(w.resolve(f.avail).clamp(8, f.avail));
             grow.push(0);
@@ -1968,7 +2055,7 @@ fn flex_inner(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, 
         for &c in &kids {
             let cn = &dom.nodes[c];
             let ct = cn.tag.as_deref().unwrap_or("");
-            let (_ccst, cbx) = compute(f, cn, ct, cst);
+            let (_ccst, cbx) = compute(f, dom, c, cn, ct, cst);
             let w = cbx.width.map(|l| l.resolve(f.avail)).unwrap_or_else(|| {
                 child_frag(f, dom, c, cst, cst.align, f.avail, depth).nat
             }).clamp(8, f.avail);
@@ -2007,7 +2094,7 @@ fn grid_inner(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, 
         // Determine le span de la cellule (compute lit la BoxProps de l'enfant).
         let cn = &dom.nodes[kids[i]];
         let ct = cn.tag.as_deref().unwrap_or("");
-        let (_ccst, cbx) = compute(f, cn, ct, cst);
+        let (_ccst, cbx) = compute(f, dom, kids[i], cn, ct, cst);
         let span = match cbx.grid_span { 0 => 1, 255 => cols, s => (s as i32).min(cols) };
 
         // Retour a la ligne si la cellule ne tient pas dans la rangee.

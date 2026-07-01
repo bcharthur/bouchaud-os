@@ -102,6 +102,8 @@ pub struct FuncDef {
 pub enum Expr {
     Num(f64), Str(String), Tpl(Vec<Expr>), Bool(bool), Null, Undef,
     Ident(String), This,
+    // Litteral d'expression rationnelle : /pattern/flags.
+    Regex(String, String),
     Array(Vec<Expr>), Object(Vec<(String, Expr)>),
     Unary(String, Box<Expr>), Update(String, bool, Box<Expr>),
     Bin(String, Box<Expr>, Box<Expr>), Logic(String, Box<Expr>, Box<Expr>),
@@ -111,6 +113,8 @@ pub enum Expr {
     Func(Rc<FuncDef>), Seq(Vec<Expr>), Spread(Box<Expr>),
     // Template balisé `tag`a${x}b`` : (tag, quasis littéraux, expressions).
     TaggedTpl(Box<Expr>, Vec<String>, Vec<Expr>),
+    // Méta-propriété `new.target`.
+    NewTarget,
     // Expression de classe : `var X = class [extends Y] { ... }`.
     Class(Option<Box<Expr>>, Vec<(bool, String, Rc<FuncDef>)>),
 }
@@ -148,6 +152,7 @@ pub enum Stmt {
 // ============================================================================
 
 mod lexer;
+mod regex;
 use lexer::{Tok, TplPart, Lexer};
 
 // `hexv` est partagé (lexer + décodage URI/JSON), il reste ici.
@@ -164,7 +169,7 @@ fn tok_text(t: &Tok) -> String {
         Tok::Str(_) => String::from("\"…\""),
         Tok::Tpl(_) => String::from("`…`"),
         Tok::Ident(x) | Tok::Keyword(x) | Tok::Punct(x) => x.clone(),
-        Tok::Regex => String::from("/re/"),
+        Tok::Regex(p, f) => { let mut s = String::from("/"); s.push_str(p); s.push('/'); s.push_str(f); s }
         Tok::Eof => String::from("<eof>"),
     }
 }
@@ -695,7 +700,10 @@ impl Parser {
 
     fn parse_call_member(&mut self) -> Result<Expr, String> {
         let mut e = if self.is_kw("new") {
-            self.i += 1; let callee = self.parse_member_only()?; let args = if self.is_punct("(") { self.parse_args()? } else { Vec::new() }; Expr::New(Box::new(callee), args)
+            self.i += 1;
+            // Méta-propriété `new.target` (transpilations de classes ES6).
+            if self.is_punct(".") { self.i += 1; let _ = self.ident()?; Expr::NewTarget }
+            else { let callee = self.parse_member_only()?; let args = if self.is_punct("(") { self.parse_args()? } else { Vec::new() }; Expr::New(Box::new(callee), args) }
         } else { self.parse_primary()? };
         loop {
             if self.eat_punct(".") { let name = self.ident()?; e = Expr::Member(Box::new(e), name, false); }
@@ -757,7 +765,7 @@ impl Parser {
             Tok::Num(n) => Ok(Expr::Num(n)),
             Tok::Str(s) => Ok(Expr::Str(s)),
             Tok::Tpl(parts) => { let mut out = Vec::new(); for p in parts { match p { TplPart::Str(s) => out.push(Expr::Str(s)), TplPart::Expr(toks) => { let mut t: Vec<(Tok, bool)> = toks.into_iter().map(|x| (x, false)).collect(); t.push((Tok::Eof, false)); out.push(Parser::new(t).parse_expr()?); } } } Ok(Expr::Tpl(out)) }
-            Tok::Regex => Ok(Expr::Object(Vec::new())),
+            Tok::Regex(p, f) => Ok(Expr::Regex(p, f)),
             Tok::Ident(s) => Ok(Expr::Ident(s)),
             Tok::Keyword(k) => match k.as_str() {
                 "true" => Ok(Expr::Bool(true)), "false" => Ok(Expr::Bool(false)), "null" => Ok(Expr::Null),
@@ -881,6 +889,7 @@ pub struct Interp {
     macrotasks: Vec<(Value, Vec<Value>)>, // setTimeout / setInterval (un tour)
     timer_seq: f64,                       // identifiants de timers
     pub base_url: String,                 // URL de base (resolution des <script src>)
+    pending_new_target: Option<Value>,    // `new.target` transmis au prochain appel (eval_new)
 }
 
 impl Interp {
@@ -891,7 +900,7 @@ impl Interp {
             out: Vec::new(), writes: String::new(), dom: DomModel::empty(),
             wasm: Vec::new(), listeners: Vec::new(),
             microtasks: Vec::new(), macrotasks: Vec::new(), timer_seq: 1.0,
-            base_url: String::new(),
+            base_url: String::new(), pending_new_target: None,
         };
         install(&mut it);
         it
@@ -1136,6 +1145,8 @@ impl Interp {
             Expr::Null => Ok(Value::Null),
             Expr::Undef => Ok(Value::Undefined),
             Expr::This => Ok(scope_get(env, "this").unwrap_or(Value::Undefined)),
+            Expr::Regex(p, f) => Ok(make_regexp(p, f)),
+            Expr::NewTarget => Ok(scope_get(env, "new.target").unwrap_or(Value::Undefined)),
             Expr::Tpl(parts) => { let mut s = String::new(); for p in parts { let v = self.eval(p, env)?; s.push_str(&self.to_string(&v)); } Ok(str_val(s)) }
             Expr::TaggedTpl(tag, quasis, exprs) => {
                 // Construit le 1er argument : tableau des chaînes + `.raw`
@@ -1275,10 +1286,13 @@ impl Interp {
             Value::Obj(o) => { let b = o.borrow(); match &b.call { Some(Callable::User { def, env }) => (Some(def.clone()), Some(env.clone()), None), Some(Callable::Native(f)) => (None, None, Some(*f)), None => return Err(str_val("TypeError: not a function")) } }
             _ => return Err(str_val("TypeError: not a function")),
         };
+        // `new.target` : positionne par eval_new juste avant l'appel ; consomme
+        // ici pour ce cadre (Undefined pour un appel normal).
+        let new_target = self.pending_new_target.take().unwrap_or(Value::Undefined);
         if let Some(f) = native { return f(self, this, args); }
         let def = def.unwrap(); let fenv = fenv.unwrap();
         let scope = new_scope(Some(fenv));
-        if !def.arrow { scope_declare(&scope, "this", this); }
+        if !def.arrow { scope_declare(&scope, "this", this); scope_declare(&scope, "new.target", new_target); }
         for (i, p) in def.params.iter().enumerate() { scope_declare(&scope, p, args.get(i).cloned().unwrap_or(Value::Undefined)); }
         if let Some(rest) = &def.rest { let r: Vec<Value> = if args.len() > def.params.len() { args[def.params.len()..].to_vec() } else { Vec::new() }; scope_declare(&scope, rest, array_val(r)); }
         if !def.arrow { scope_declare(&scope, "arguments", array_val(args.to_vec())); }
@@ -1299,6 +1313,7 @@ impl Interp {
                 if k != "constructor" { set(&this, &k, v); }
             }
         }
+        self.pending_new_target = Some(func.clone());
         let r = self.call(func, this.clone(), &argv)?;
         Ok(if matches!(r, Value::Obj(_)) { r } else { this })
     }
@@ -1463,8 +1478,71 @@ fn powf(a: f64, b: f64) -> f64 {
     exp_(b * ln_(a))
 }
 fn ln_(mut x: f64) -> f64 { if x <= 0.0 { return f64::NAN; } let mut k = 0i32; while x > 1.5 { x /= core::f64::consts::E; k += 1; } while x < 0.5 { x *= core::f64::consts::E; k -= 1; } let t = (x - 1.0) / (x + 1.0); let t2 = t * t; let mut term = t; let mut sum = 0.0; let mut n = 1.0; for _ in 0..30 { sum += term / n; term *= t2; n += 2.0; } 2.0 * sum + k as f64 }
-fn exp_(x: f64) -> f64 { let mut term = 1.0; let mut sum = 1.0; for i in 1..40 { term *= x / i as f64; sum += term; } sum }
+// exp avec reduction d'argument : exp(x)=E^k · exp(r), k=round(x), r∈[-0.5,0.5].
+// La serie de Taylor ne converge proprement que pour |x| petit ; sans reduction
+// elle diverge pour les grands x (utilise par sinh/cosh).
+fn exp_(x: f64) -> f64 {
+    if x.is_nan() { return f64::NAN; }
+    if x == f64::INFINITY { return f64::INFINITY; }
+    if x == f64::NEG_INFINITY { return 0.0; }
+    let k = floor_(x + 0.5);
+    let r = x - k;
+    let mut term = 1.0; let mut sum = 1.0;
+    for i in 1..20 { term *= r / i as f64; sum += term; }
+    let mut ek = 1.0; let mut n = k as i64; let base = if n < 0 { n = -n; 1.0 / core::f64::consts::E } else { core::f64::consts::E };
+    for _ in 0..n { ek *= base; }
+    sum * ek
+}
 fn sqrt_(x: f64) -> f64 { if x < 0.0 { return f64::NAN; } if x == 0.0 { return 0.0; } let mut g = x; for _ in 0..40 { g = 0.5 * (g + x / g); } g }
+
+// --- Trigonometrie et fonctions transcendantes (no_std : pas d'intrinseques) ---
+// Approche fdlibm/V8 sans matériel : reduction d'argument puis serie de Taylor.
+const PI_: f64 = core::f64::consts::PI;
+
+// sin par reduction dans [-PI, PI] puis serie de Taylor (12 termes suffisent
+// apres reduction car |x| <= PI garantit une convergence rapide).
+fn sin_(x: f64) -> f64 {
+    if x.is_nan() || x.is_infinite() { return f64::NAN; }
+    let two_pi = 2.0 * PI_;
+    let r = x - two_pi * floor_((x + PI_) / two_pi); // -> [-PI, PI]
+    let x2 = r * r;
+    let mut term = r; let mut sum = r; let mut n = 1.0;
+    for _ in 0..14 { term *= -x2 / ((2.0 * n) * (2.0 * n + 1.0)); sum += term; n += 1.0; }
+    sum
+}
+fn cos_(x: f64) -> f64 { sin_(x + PI_ / 2.0) }
+fn tan_(x: f64) -> f64 { let c = cos_(x); if c == 0.0 { f64::NAN } else { sin_(x) / c } }
+
+// atan par reduction de demi-angle (atan(x)=2·atan(x/(1+sqrt(1+x²)))) repetee
+// jusqu'a |x|<=0.2, ou la serie de Taylor converge en quelques termes.
+fn atan_(x0: f64) -> f64 {
+    if x0.is_nan() { return f64::NAN; }
+    if x0.is_infinite() { return if x0 > 0.0 { PI_ / 2.0 } else { -PI_ / 2.0 }; }
+    let neg = x0 < 0.0;
+    let mut x = x0.abs();
+    let mut k = 0u32;
+    while x > 0.2 { x = x / (1.0 + sqrt_(1.0 + x * x)); k += 1; }
+    let x2 = x * x;
+    let mut num = x; let mut sum = 0.0; let mut sign = 1.0; let mut d = 1.0;
+    for _ in 0..16 { sum += sign * num / d; num *= x2; sign = -sign; d += 2.0; }
+    let r = sum * (1u32 << k) as f64;
+    if neg { -r } else { r }
+}
+fn atan2_(y: f64, x: f64) -> f64 {
+    if x > 0.0 { atan_(y / x) }
+    else if x < 0.0 { if y >= 0.0 { atan_(y / x) + PI_ } else { atan_(y / x) - PI_ } }
+    else if y > 0.0 { PI_ / 2.0 }
+    else if y < 0.0 { -PI_ / 2.0 }
+    else { 0.0 }
+}
+fn asin_(x: f64) -> f64 { if x < -1.0 || x > 1.0 { return f64::NAN; } if x == 1.0 { return PI_ / 2.0; } if x == -1.0 { return -PI_ / 2.0; } atan_(x / sqrt_(1.0 - x * x)) }
+fn acos_(x: f64) -> f64 { if x < -1.0 || x > 1.0 { return f64::NAN; } PI_ / 2.0 - asin_(x) }
+fn cbrt_(x: f64) -> f64 { if x == 0.0 { return 0.0; } let s = if x < 0.0 { -1.0 } else { 1.0 }; let a = x.abs(); let mut g = a; for _ in 0..40 { g = (2.0 * g + a / (g * g)) / 3.0; } s * g }
+fn hypot_(a: f64, b: f64) -> f64 { sqrt_(a * a + b * b) }
+fn sinh_(x: f64) -> f64 { (exp_(x) - exp_(-x)) / 2.0 }
+fn cosh_(x: f64) -> f64 { (exp_(x) + exp_(-x)) / 2.0 }
+fn tanh_(x: f64) -> f64 { if x > 20.0 { return 1.0; } if x < -20.0 { return -1.0; } let e2 = exp_(2.0 * x); (e2 - 1.0) / (e2 + 1.0) }
+
 // no_std : pas de f64::floor/ceil/trunc/fract. Implementations maison.
 fn trunc_(x: f64) -> f64 { if x.is_nan() || x.is_infinite() { return x; } if x.abs() >= 9.007199254740992e15 { return x; } x as i64 as f64 }
 fn floor_(x: f64) -> f64 { let t = trunc_(x); if x < 0.0 && t != x { t - 1.0 } else { t } }
@@ -1488,6 +1566,12 @@ fn install(it: &mut Interp) {
     let math = new_obj(Obj::plain());
     set(&math, "PI", Value::Num(core::f64::consts::PI));
     set(&math, "E", Value::Num(core::f64::consts::E));
+    set(&math, "LN2", Value::Num(core::f64::consts::LN_2));
+    set(&math, "LN10", Value::Num(core::f64::consts::LN_10));
+    set(&math, "LOG2E", Value::Num(core::f64::consts::LOG2_E));
+    set(&math, "LOG10E", Value::Num(core::f64::consts::LOG10_E));
+    set(&math, "SQRT2", Value::Num(core::f64::consts::SQRT_2));
+    set(&math, "SQRT1_2", Value::Num(core::f64::consts::FRAC_1_SQRT_2));
     set(&math, "abs", native_val(|it, _t, a| Ok(Value::Num(it.to_num(a.get(0).unwrap_or(&Value::Undefined)).abs()))));
     set(&math, "floor", native_val(|it, _t, a| Ok(Value::Num(floor_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
     set(&math, "ceil", native_val(|it, _t, a| Ok(Value::Num(ceil_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
@@ -1501,6 +1585,29 @@ fn install(it: &mut Interp) {
     set(&math, "log", native_val(|it, _t, a| Ok(Value::Num(ln_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
     set(&math, "exp", native_val(|it, _t, a| Ok(Value::Num(exp_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
     set(&math, "random", native_val(|_it, _t, _a| Ok(Value::Num(prng()))));
+    // Trigonometrie et transcendantes (implementees a la main, cf. sin_/atan_…).
+    set(&math, "sin", native_val(|it, _t, a| Ok(Value::Num(sin_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "cos", native_val(|it, _t, a| Ok(Value::Num(cos_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "tan", native_val(|it, _t, a| Ok(Value::Num(tan_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "asin", native_val(|it, _t, a| Ok(Value::Num(asin_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "acos", native_val(|it, _t, a| Ok(Value::Num(acos_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "atan", native_val(|it, _t, a| Ok(Value::Num(atan_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "atan2", native_val(|it, _t, a| Ok(Value::Num(atan2_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)), it.to_num(a.get(1).unwrap_or(&Value::Undefined)))))));
+    set(&math, "sinh", native_val(|it, _t, a| Ok(Value::Num(sinh_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "cosh", native_val(|it, _t, a| Ok(Value::Num(cosh_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "tanh", native_val(|it, _t, a| Ok(Value::Num(tanh_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "cbrt", native_val(|it, _t, a| Ok(Value::Num(cbrt_(it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "hypot", native_val(|it, _t, a| match a.len() { 0 => Ok(Value::Num(0.0)), 2 => Ok(Value::Num(hypot_(it.to_num(&a[0]), it.to_num(&a[1])))), _ => { let mut s = 0.0; for v in a { let x = it.to_num(v); s += x * x; } Ok(Value::Num(sqrt_(s))) } }));
+    set(&math, "log2", native_val(|it, _t, a| Ok(Value::Num(ln_(it.to_num(a.get(0).unwrap_or(&Value::Undefined))) / core::f64::consts::LN_2))));
+    set(&math, "log10", native_val(|it, _t, a| Ok(Value::Num(ln_(it.to_num(a.get(0).unwrap_or(&Value::Undefined))) / core::f64::consts::LN_10))));
+    set(&math, "log1p", native_val(|it, _t, a| Ok(Value::Num(ln_(1.0 + it.to_num(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&math, "expm1", native_val(|it, _t, a| Ok(Value::Num(exp_(it.to_num(a.get(0).unwrap_or(&Value::Undefined))) - 1.0))));
+    // fround : arrondi a la precision simple (round-trip f32).
+    set(&math, "fround", native_val(|it, _t, a| Ok(Value::Num(it.to_num(a.get(0).unwrap_or(&Value::Undefined)) as f32 as f64))));
+    // clz32 : nombre de zeros en tete sur 32 bits.
+    set(&math, "clz32", native_val(|it, _t, a| Ok(Value::Num((it.to_num(a.get(0).unwrap_or(&Value::Undefined)) as i64 as u32).leading_zeros() as f64))));
+    // imul : multiplication entiere 32 bits (semantique C).
+    set(&math, "imul", native_val(|it, _t, a| { let x = it.to_num(a.get(0).unwrap_or(&Value::Undefined)) as i64 as i32; let y = it.to_num(a.get(1).unwrap_or(&Value::Undefined)) as i64 as i32; Ok(Value::Num(x.wrapping_mul(y) as f64)) }));
     // On conserve une référence (même Rc) pour la poser aussi sur `window`,
     // afin que la détection Closure `d.Math == Math` réussisse (cf. window).
     let math_ref = math.clone();
@@ -1847,6 +1954,8 @@ fn install(it: &mut Interp) {
     set(&perf, "clearMarks", native_val(|_it, _t, _a| Ok(Value::Undefined)));
     set(&perf, "clearMeasures", native_val(|_it, _t, _a| Ok(Value::Undefined)));
     scope_declare(&g2, "performance", perf);
+    // RegExp : constructeur reel (moteur backtracking, cf. module regex).
+    scope_declare(&g2, "RegExp", native_val(regexp_ctor));
     // fetch : renvoie une Promise résolue avec une Response vide
     scope_declare(&g2, "fetch", native_val(|_it, _t, _a| Ok(make_resolved_thenable(new_obj(Obj::plain())))));
     // XMLHttpRequest stub
@@ -2481,6 +2590,184 @@ fn parse_float(s: &str) -> f64 {
 }
 
 // --- methodes String (this = chaine) ---
+// ============================================================================
+// RegExp : objet, methodes, integration aux methodes de String
+// ============================================================================
+
+// Extrait (source, flags) si la valeur est un objet RegExp.
+fn regexp_parts(v: &Value) -> Option<(String, String)> {
+    if let Value::Obj(o) = v {
+        let b = o.borrow();
+        if b.class == "RegExp" {
+            let src = match b.props.get("source") { Some(Value::Str(s)) => (**s).clone(), _ => String::new() };
+            let fl = match b.props.get("flags") { Some(Value::Str(s)) => (**s).clone(), _ => String::new() };
+            return Some((src, fl));
+        }
+    }
+    None
+}
+
+fn re_last_index(t: &Value) -> usize {
+    if let Value::Obj(o) = t { if let Some(Value::Num(n)) = o.borrow().props.get("lastIndex") { return n.max(0.0) as usize; } }
+    0
+}
+fn re_set_last_index(t: &Value, i: usize) {
+    if let Value::Obj(o) = t { o.borrow_mut().props.insert("lastIndex".into(), Value::Num(i as f64)); }
+}
+
+// Construit le tableau resultat exec/match : [full, g1, g2…] + .index + .input.
+fn match_result(chars: &[char], m: &regex::Match, input: &str) -> Value {
+    let mut items = Vec::with_capacity(m.caps.len());
+    for cap in &m.caps {
+        items.push(match cap { Some((a, b)) => str_val(chars[*a..*b].iter().collect::<String>()), None => Value::Undefined });
+    }
+    let arr = array_val(items);
+    let idx = m.caps.get(0).and_then(|c| *c).map(|(a, _)| a).unwrap_or(0);
+    set(&arr, "index", Value::Num(idx as f64));
+    set(&arr, "input", str_val(input.to_string()));
+    arr
+}
+
+fn make_regexp(pattern: &str, flags: &str) -> Value {
+    let o = new_obj(Obj { props: OrderedMap::new(), arr: None, call: None, class: "RegExp" });
+    let re = regex::Regex::new(pattern, flags);
+    set(&o, "source", str_val(pattern.to_string()));
+    set(&o, "flags", str_val(flags.to_string()));
+    set(&o, "global", Value::Bool(re.flags.g));
+    set(&o, "ignoreCase", Value::Bool(re.flags.i));
+    set(&o, "multiline", Value::Bool(re.flags.m));
+    set(&o, "lastIndex", Value::Num(0.0));
+    set(&o, "test", native_val(regex_test));
+    set(&o, "exec", native_val(regex_exec));
+    set(&o, "toString", native_val(|_it, t, _a| { let (s, f) = regexp_parts(&t).unwrap_or_default(); Ok(str_val(format!("/{}/{}", s, f))) }));
+    o
+}
+
+fn regexp_ctor(it: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    let (src, fl) = match a.get(0) {
+        Some(v) if regexp_parts(v).is_some() => {
+            let (s, f) = regexp_parts(v).unwrap();
+            (s, a.get(1).map(|x| it.to_string(x)).unwrap_or(f))
+        }
+        Some(v) => (it.to_string(v), a.get(1).map(|x| it.to_string(x)).unwrap_or_default()),
+        None => (String::new(), String::new()),
+    };
+    Ok(make_regexp(&src, &fl))
+}
+
+fn regex_test(it: &mut Interp, t: Value, a: &[Value]) -> Result<Value, Value> {
+    let (src, fl) = match regexp_parts(&t) { Some(x) => x, None => return Ok(Value::Bool(false)) };
+    let re = regex::Regex::new(&src, &fl);
+    let s = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
+    let chars: Vec<char> = s.chars().collect();
+    let start = if re.flags.g { re_last_index(&t).min(chars.len()) } else { 0 };
+    match re.exec(&chars, start) {
+        Some(m) => { if re.flags.g { re_set_last_index(&t, m.caps[0].map(|(_, b)| b).unwrap_or(start)); } Ok(Value::Bool(true)) }
+        None => { if re.flags.g { re_set_last_index(&t, 0); } Ok(Value::Bool(false)) }
+    }
+}
+
+fn regex_exec(it: &mut Interp, t: Value, a: &[Value]) -> Result<Value, Value> {
+    let (src, fl) = match regexp_parts(&t) { Some(x) => x, None => return Ok(Value::Null) };
+    let re = regex::Regex::new(&src, &fl);
+    let s = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
+    let chars: Vec<char> = s.chars().collect();
+    let start = if re.flags.g { re_last_index(&t).min(chars.len()) } else { 0 };
+    match re.exec(&chars, start) {
+        Some(m) => { if re.flags.g { re_set_last_index(&t, m.caps[0].map(|(_, b)| b).unwrap_or(start)); } Ok(match_result(&chars, &m, &s)) }
+        None => { if re.flags.g { re_set_last_index(&t, 0); } Ok(Value::Null) }
+    }
+}
+
+// Compile un argument de String.match/replace/split : un RegExp ou une chaine
+// interpretee comme motif (semantique `new RegExp(arg)`).
+fn arg_to_regex(it: &Interp, arg: &Value, force_global: bool) -> regex::Regex {
+    let (src, mut fl) = regexp_parts(arg).unwrap_or_else(|| (it.to_string(arg), String::new()));
+    if force_global && !fl.contains('g') { fl.push('g'); }
+    regex::Regex::new(&src, &fl)
+}
+
+// Remplace `$&`, `` $` ``, `$'`, `$1`..`$99`, `$$` dans un modele de remplacement.
+fn expand_repl(templ: &str, chars: &[char], m: &regex::Match) -> String {
+    let tb: Vec<char> = templ.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < tb.len() {
+        if tb[i] == '$' && i + 1 < tb.len() {
+            match tb[i + 1] {
+                '$' => { out.push('$'); i += 2; continue; }
+                '&' => { if let Some((a, b)) = m.caps[0] { out.extend(&chars[a..b]); } i += 2; continue; }
+                '`' => { if let Some((a, _)) = m.caps[0] { out.extend(&chars[..a]); } i += 2; continue; }
+                '\'' => { if let Some((_, b)) = m.caps[0] { out.extend(&chars[b..]); } i += 2; continue; }
+                d if d.is_ascii_digit() => {
+                    let mut num = (d as u8 - b'0') as usize; let mut adv = 2;
+                    if i + 2 < tb.len() && tb[i + 2].is_ascii_digit() {
+                        let two = num * 10 + (tb[i + 2] as u8 - b'0') as usize;
+                        if two < m.caps.len() { num = two; adv = 3; }
+                    }
+                    if num >= 1 && num < m.caps.len() {
+                        if let Some((a, b)) = m.caps[num] { out.extend(&chars[a..b]); }
+                        i += adv; continue;
+                    }
+                }
+                _ => {}
+            }
+        }
+        out.push(tb[i]); i += 1;
+    }
+    out
+}
+
+fn re_replace(it: &mut Interp, re: &regex::Regex, s: &str, repl: &Value, global: bool) -> Result<String, Value> {
+    let chars: Vec<char> = s.chars().collect();
+    let is_fn = matches!(repl, Value::Obj(o) if o.borrow().call.is_some());
+    let mut out = String::new();
+    let mut pos = 0usize; let mut last = 0usize;
+    loop {
+        let m = match re.exec(&chars, pos) { Some(m) => m, None => break };
+        let (a, b) = match m.caps[0] { Some(x) => x, None => break };
+        out.extend(&chars[last..a]);
+        if is_fn {
+            let mut args: Vec<Value> = m.caps.iter()
+                .map(|c| match c { Some((x, y)) => str_val(chars[*x..*y].iter().collect::<String>()), None => Value::Undefined })
+                .collect();
+            args.push(Value::Num(a as f64));
+            args.push(str_val(s.to_string()));
+            let r = it.call(repl.clone(), Value::Undefined, &args)?;
+            out.push_str(&it.to_string(&r));
+        } else {
+            out.push_str(&expand_repl(&it.to_string(repl), &chars, &m));
+        }
+        last = b;
+        if !global { break; }
+        pos = if b > a { b } else { b + 1 };
+        if pos > chars.len() { break; }
+    }
+    out.extend(&chars[last.min(chars.len())..]);
+    Ok(out)
+}
+
+fn re_split(re: &regex::Regex, s: &str, limit: usize) -> Vec<Value> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = Vec::new();
+    let mut last = 0usize; let mut pos = 0usize;
+    while pos <= chars.len() && out.len() < limit {
+        let m = match re.exec(&chars, pos) { Some(m) => m, None => break };
+        let (a, b) = match m.caps[0] { Some(x) => x, None => break };
+        if b == 0 { pos = 1; continue; }         // pas de separateur vide en tete
+        if a >= chars.len() { break; }
+        out.push(str_val(chars[last..a].iter().collect::<String>()));
+        for cap in &m.caps[1..] {                // JS inclut les groupes captures
+            if out.len() >= limit { break; }
+            out.push(match cap { Some((x, y)) => str_val(chars[*x..*y].iter().collect::<String>()), None => Value::Undefined });
+        }
+        last = b;
+        pos = if b > a { b } else { b + 1 };
+    }
+    if out.len() < limit { out.push(str_val(chars[last.min(chars.len())..].iter().collect::<String>())); }
+    out
+}
+
 fn string_prop(s: &str, name: &str) -> Value {
     match name {
         "length" => Value::Num(s.chars().count() as f64),
@@ -2497,9 +2784,88 @@ fn string_prop(s: &str, name: &str) -> Value {
         "slice" => native_val(|it, t, a| { let s: Vec<char> = it.to_string(&t).chars().collect(); let (st, en) = slice_bounds(s.len(), a, it); Ok(str_val(s[st..en].iter().collect::<String>())) }),
         "substring" => native_val(|it, t, a| { let s: Vec<char> = it.to_string(&t).chars().collect(); let mut st = it.to_num(a.get(0).unwrap_or(&Value::Num(0.0))).max(0.0) as usize; let mut en = a.get(1).map(|v| it.to_num(v) as usize).unwrap_or(s.len()).min(s.len()); st = st.min(s.len()); en = en.min(s.len()); if st > en { core::mem::swap(&mut st, &mut en); } Ok(str_val(s[st..en].iter().collect::<String>())) }),
         "substr" => native_val(|it, t, a| { let s: Vec<char> = it.to_string(&t).chars().collect(); let st = (it.to_num(a.get(0).unwrap_or(&Value::Num(0.0))).max(0.0) as usize).min(s.len()); let len = a.get(1).map(|v| it.to_num(v) as usize).unwrap_or(s.len() - st).min(s.len() - st); Ok(str_val(s[st..st + len].iter().collect::<String>())) }),
-        "split" => native_val(|it, t, a| { let s = it.to_string(&t); match a.get(0) { None | Some(Value::Undefined) => Ok(array_val(vec![str_val(s)])), Some(sep) => { let sep = it.to_string(sep); if sep.is_empty() { Ok(array_val(s.chars().map(|c| str_val(c.to_string())).collect())) } else { Ok(array_val(s.split(&sep as &str).map(|p| str_val(p.to_string())).collect())) } } } }),
-        "replace" => native_val(|it, t, a| { let s = it.to_string(&t); let from = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); let to = it.to_string(a.get(1).unwrap_or(&Value::Undefined)); Ok(str_val(s.replacen(&from as &str, &to, 1))) }),
-        "replaceAll" => native_val(|it, t, a| { let s = it.to_string(&t); let from = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); let to = it.to_string(a.get(1).unwrap_or(&Value::Undefined)); Ok(str_val(if from.is_empty() { s } else { s.replace(&from as &str, &to) })) }),
+        "split" => native_val(|it, t, a| {
+            let s = it.to_string(&t);
+            let limit = a.get(1).map(|v| it.to_num(v) as usize).unwrap_or(usize::MAX);
+            match a.get(0) {
+                None | Some(Value::Undefined) => Ok(array_val(vec![str_val(s)])),
+                Some(sep) if regexp_parts(sep).is_some() => { let re = arg_to_regex(it, sep, false); Ok(array_val(re_split(&re, &s, limit))) }
+                Some(sep) => {
+                    let sep = it.to_string(sep);
+                    if sep.is_empty() { Ok(array_val(s.chars().take(limit).map(|c| str_val(c.to_string())).collect())) }
+                    else { Ok(array_val(s.split(&sep as &str).take(limit).map(|p| str_val(p.to_string())).collect())) }
+                }
+            }
+        }),
+        "replace" => native_val(|it, t, a| {
+            let s = it.to_string(&t);
+            let pat = a.get(0).cloned().unwrap_or(Value::Undefined);
+            let repl = a.get(1).cloned().unwrap_or(Value::Undefined);
+            if regexp_parts(&pat).is_some() {
+                let re = arg_to_regex(it, &pat, false);
+                let g = re.flags.g;
+                return Ok(str_val(re_replace(it, &re, &s, &repl, g)?));
+            }
+            // Chaine litterale : remplace la premiere occurrence. Support de $&.
+            let from = it.to_string(&pat);
+            if let Some(pos) = s.find(&from) {
+                let matched: Vec<char> = from.chars().collect();
+                let m = regex::Match { caps: vec![Some((0, matched.len()))] };
+                let to = if matches!(&repl, Value::Obj(o) if o.borrow().call.is_some()) {
+                    let r = it.call(repl.clone(), Value::Undefined, &[str_val(from.clone()), Value::Num(s[..pos].chars().count() as f64), str_val(s.clone())])?;
+                    it.to_string(&r)
+                } else { expand_repl(&it.to_string(&repl), &matched, &m) };
+                Ok(str_val(format!("{}{}{}", &s[..pos], to, &s[pos + from.len()..])))
+            } else { Ok(str_val(s)) }
+        }),
+        "replaceAll" => native_val(|it, t, a| {
+            let s = it.to_string(&t);
+            let pat = a.get(0).cloned().unwrap_or(Value::Undefined);
+            let repl = a.get(1).cloned().unwrap_or(Value::Undefined);
+            if regexp_parts(&pat).is_some() {
+                let re = arg_to_regex(it, &pat, true);
+                return Ok(str_val(re_replace(it, &re, &s, &repl, true)?));
+            }
+            let from = it.to_string(&pat);
+            let to = it.to_string(&repl);
+            Ok(str_val(if from.is_empty() { s } else { s.replace(&from as &str, &to) }))
+        }),
+        "match" => native_val(|it, t, a| {
+            let s = it.to_string(&t);
+            let re = arg_to_regex(it, a.get(0).unwrap_or(&Value::Undefined), false);
+            let chars: Vec<char> = s.chars().collect();
+            if re.flags.g {
+                let mut out = Vec::new(); let mut pos = 0;
+                while pos <= chars.len() {
+                    match re.exec(&chars, pos) {
+                        Some(m) => { let (x, y) = m.caps[0].unwrap(); out.push(str_val(chars[x..y].iter().collect::<String>())); pos = if y > x { y } else { y + 1 }; }
+                        None => break,
+                    }
+                }
+                if out.is_empty() { Ok(Value::Null) } else { Ok(array_val(out)) }
+            } else {
+                match re.exec(&chars, 0) { Some(m) => Ok(match_result(&chars, &m, &s)), None => Ok(Value::Null) }
+            }
+        }),
+        "matchAll" => native_val(|it, t, a| {
+            let s = it.to_string(&t);
+            let re = arg_to_regex(it, a.get(0).unwrap_or(&Value::Undefined), true);
+            let chars: Vec<char> = s.chars().collect();
+            let mut out = Vec::new(); let mut pos = 0;
+            while pos <= chars.len() {
+                match re.exec(&chars, pos) {
+                    Some(m) => { let (x, y) = m.caps[0].unwrap(); out.push(match_result(&chars, &m, &s)); pos = if y > x { y } else { y + 1 }; }
+                    None => break,
+                }
+            }
+            Ok(array_val(out))
+        }),
+        "search" => native_val(|it, t, a| {
+            let s = it.to_string(&t);
+            let re = arg_to_regex(it, a.get(0).unwrap_or(&Value::Undefined), false);
+            let chars: Vec<char> = s.chars().collect();
+            Ok(Value::Num(re.exec(&chars, 0).and_then(|m| m.caps[0]).map(|(a, _)| a as f64).unwrap_or(-1.0)))
+        }),
         "repeat" => native_val(|it, t, a| { let s = it.to_string(&t); let n = it.to_num(a.get(0).unwrap_or(&Value::Num(0.0))) as usize; Ok(str_val(s.repeat(n.min(100000)))) }),
         "padStart" => native_val(|it, t, a| { let s = it.to_string(&t); let len = it.to_num(a.get(0).unwrap_or(&Value::Num(0.0))) as usize; let pad = a.get(1).map(|v| it.to_string(v)).unwrap_or_else(|| " ".into()); Ok(str_val(pad_str(&s, len, &pad, true))) }),
         "padEnd" => native_val(|it, t, a| { let s = it.to_string(&t); let len = it.to_num(a.get(0).unwrap_or(&Value::Num(0.0))) as usize; let pad = a.get(1).map(|v| it.to_string(v)).unwrap_or_else(|| " ".into()); Ok(str_val(pad_str(&s, len, &pad, false))) }),

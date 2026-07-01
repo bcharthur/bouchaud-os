@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use super::hexv;
 
 #[derive(Clone, PartialEq)]
-pub(super) enum Tok { Num(f64), Str(String), Tpl(Vec<TplPart>), Ident(String), Keyword(String), Punct(String), Regex, Eof }
+pub(super) enum Tok { Num(f64), Str(String), Tpl(Vec<TplPart>), Ident(String), Keyword(String), Punct(String), Regex(String, String), Eof }
 #[derive(Clone, PartialEq)]
 pub(super) enum TplPart { Str(String), Expr(Vec<Tok>) }
 
@@ -38,7 +38,7 @@ impl<'a> Lexer<'a> {
         match self.toks.last() {
             None => true,
             Some((t, _)) => match t {
-                Tok::Num(_) | Tok::Str(_) | Tok::Tpl(_) | Tok::Regex => false,
+                Tok::Num(_) | Tok::Str(_) | Tok::Tpl(_) | Tok::Regex(_, _) => false,
                 Tok::Ident(_) => false,
                 Tok::Keyword(k) => k != "this",
                 Tok::Punct(p) => p != ")" && p != "]" && p != "}",
@@ -167,16 +167,21 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_regex(&mut self) -> Tok {
-        self.i += 1; let mut in_class = false;
+        self.i += 1; let body_start = self.i; let mut in_class = false;
+        let mut body_end = self.i;
         while self.i < self.s.len() {
             let c = self.s[self.i];
             if c == b'\\' { self.i += 2; continue; }
             if c == b'[' { in_class = true; } else if c == b']' { in_class = false; }
-            else if c == b'/' && !in_class { self.i += 1; break; } else if c == b'\n' { break; }
+            else if c == b'/' && !in_class { body_end = self.i; self.i += 1; break; }
+            else if c == b'\n' { body_end = self.i; break; }
             self.i += 1;
         }
+        let flags_start = self.i;
         while self.i < self.s.len() && is_id_part(self.s[self.i]) { self.i += 1; }
-        Tok::Regex
+        let body = core::str::from_utf8(&self.s[body_start..body_end]).unwrap_or("").to_string();
+        let flags = core::str::from_utf8(&self.s[flags_start..self.i]).unwrap_or("").to_string();
+        Tok::Regex(body, flags)
     }
 
     fn lex_punct(&mut self) -> Result<Tok, String> {

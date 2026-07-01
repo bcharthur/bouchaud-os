@@ -5,7 +5,7 @@
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use super::style::{Rule, Sel};
+use super::style::{Rule, Sel, Comb, AttrOp, AttrSel, Pseudo};
 
 fn lc(c: u8) -> u8 { if c >= b'A' && c <= b'Z' { c + 32 } else { c } }
 
@@ -25,50 +25,186 @@ pub(super) fn parse_decls(body: &str) -> Vec<(String, String)> {
     for part in body.split(';') {
         if let Some(c) = part.find(':') {
             let prop = part[..c].trim().to_ascii_lowercase();
-            let val = part[c + 1..].trim().to_string();
-            if !prop.is_empty() && !val.is_empty() { v.push((prop, val)); }
+            let mut val = part[c + 1..].trim();
+            // Retire le marqueur `!important` : sinon la valeur ("red !important")
+            // ne se parse plus. La priorite de cascade reste approchee par la
+            // specificite/ordre (les moteurs reels ajoutent un palier dedie).
+            if let Some(bang) = val.rfind('!') {
+                if val[bang + 1..].trim_start().to_ascii_lowercase().starts_with("important") {
+                    val = val[..bang].trim_end();
+                }
+            }
+            if !prop.is_empty() && !val.is_empty() { v.push((prop, val.to_string())); }
         }
     }
     v
 }
 
-// Parse un selecteur simple (un seul composant : `div`, `.x`, `#y`, `a.b`).
+fn is_name(c: u8) -> bool { c.is_ascii_alphanumeric() || c == b'-' || c == b'_' }
+
+fn unquote(s: &str) -> &str {
+    let s = s.trim();
+    let b = s.as_bytes();
+    if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[b.len() - 1] == b[0] { &s[1..s.len() - 1] } else { s }
+}
+
+// Parse un formule `an+b` de :nth-child : `2n+1`, `odd`, `even`, `3`, `-n+3`.
+fn parse_anb(arg: &str) -> (i32, i32) {
+    let s: String = arg.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_lowercase();
+    match s.as_str() {
+        "odd" => return (2, 1),
+        "even" => return (2, 0),
+        _ => {}
+    }
+    if let Some(npos) = s.find('n') {
+        // Coefficient a (avant 'n').
+        let a_str = &s[..npos];
+        let a = match a_str { "" | "+" => 1, "-" => -1, x => x.parse::<i32>().unwrap_or(0) };
+        // Constante b (apres 'n', signe inclus).
+        let b = s[npos + 1..].parse::<i32>().unwrap_or(0);
+        (a, b)
+    } else {
+        (0, s.parse::<i32>().unwrap_or(0))
+    }
+}
+
+// Parse un selecteur d'attribut `[name op val]` (le contenu entre crochets).
+fn parse_attr(inner: &str) -> Option<AttrSel> {
+    let inner = inner.trim();
+    if inner.is_empty() { return None; }
+    // Cherche l'operateur : ^= $= *= ~= |= puis =.
+    for (pat, op) in [("^=", AttrOp::Prefix), ("$=", AttrOp::Suffix), ("*=", AttrOp::Substr), ("~=", AttrOp::Word), ("|=", AttrOp::Dash)] {
+        if let Some(p) = inner.find(pat) {
+            let name = inner[..p].trim().to_ascii_lowercase();
+            let val = unquote(&inner[p + 2..]).to_string();
+            if !name.is_empty() { return Some(AttrSel { name, op, val }); }
+        }
+    }
+    if let Some(p) = inner.find('=') {
+        let name = inner[..p].trim().to_ascii_lowercase();
+        let val = unquote(&inner[p + 1..]).to_string();
+        if !name.is_empty() { return Some(AttrSel { name, op: AttrOp::Eq, val }); }
+    }
+    Some(AttrSel { name: inner.to_ascii_lowercase(), op: AttrOp::Exists, val: String::new() })
+}
+
+// Parse un composant simple compose : `div`, `.x`, `#y`, `a.b.c`, `input[type=text]:checked`.
+// Gere maintenant reellement les selecteurs d'attribut et les pseudo-classes
+// structurelles (:first-child, :nth-child, :not(...)…). Les pseudos d'etat non
+// decidables (:hover, :focus...) sont neutres (n'empechent pas le match).
 fn parse_simple(comp: &str) -> (Sel, u32) {
-    let last = comp.trim();
-    if last == "*" || last.is_empty() { return (Sel::Any, 0); }
-    if let Some(id) = last.strip_prefix('#') { return (Sel::Id(id.to_ascii_lowercase()), 100); }
-    if let Some(cl) = last.strip_prefix('.') {
-        // `.a.b` -> garde la premiere classe (matching simple).
-        let cl = cl.split('.').next().unwrap_or(cl);
-        let cl = cl.split(|c: char| c == ':' || c == '[').next().unwrap_or(cl);
-        return (Sel::Class(cl.to_string()), 10);
+    let comp = comp.trim();
+    let mut sel = Sel::any();
+    let mut spec = 0u32;
+    if comp.is_empty() || comp == "*" { return (sel, 0); }
+    let b = comp.as_bytes();
+    let mut i = 0;
+    // Tag optionnel en tete.
+    let s0 = i;
+    while i < b.len() && is_name(b[i]) { i += 1; }
+    if i > s0 { sel.tag = Some(comp[s0..i].to_ascii_lowercase()); spec += 1; }
+    // Suffixes .classe / #id / :pseudo / [attr].
+    while i < b.len() {
+        match b[i] {
+            b'.' => {
+                i += 1; let s = i;
+                while i < b.len() && is_name(b[i]) { i += 1; }
+                if i > s { sel.classes.push(comp[s..i].to_string()); spec += 10; }
+            }
+            b'#' => {
+                i += 1; let s = i;
+                while i < b.len() && is_name(b[i]) { i += 1; }
+                if i > s { sel.id = Some(comp[s..i].to_ascii_lowercase()); spec += 100; }
+            }
+            b':' => {
+                i += 1; if i < b.len() && b[i] == b':' { i += 1; } // ::before -> pseudo-element (neutre)
+                let ns = i;
+                while i < b.len() && is_name(b[i]) { i += 1; }
+                let name = comp[ns..i].to_ascii_lowercase();
+                // Argument optionnel entre parentheses.
+                let mut arg = "";
+                if i < b.len() && b[i] == b'(' {
+                    let astart = i + 1; let mut depth = 0i32;
+                    while i < b.len() {
+                        if b[i] == b'(' { depth += 1; }
+                        else if b[i] == b')' { depth -= 1; if depth == 0 { break; } }
+                        i += 1;
+                    }
+                    arg = &comp[astart..i.min(comp.len())];
+                    if i < b.len() { i += 1; } // consomme ')'
+                }
+                match name.as_str() {
+                    "first-child" => sel.pseudos.push(Pseudo::FirstChild),
+                    "last-child" => sel.pseudos.push(Pseudo::LastChild),
+                    "only-child" => sel.pseudos.push(Pseudo::OnlyChild),
+                    "empty" => sel.pseudos.push(Pseudo::Empty),
+                    "root" => sel.pseudos.push(Pseudo::Root),
+                    "nth-child" => { let (a, bb) = parse_anb(arg); sel.pseudos.push(Pseudo::NthChild(a, bb)); }
+                    "nth-last-child" => { let (a, bb) = parse_anb(arg); sel.pseudos.push(Pseudo::NthLastChild(a, bb)); }
+                    "not" => {
+                        let mut inner = Vec::new();
+                        for part in arg.split(',') { let (s, _) = parse_simple(part); if !s.is_any() { inner.push(s); } }
+                        if !inner.is_empty() { sel.pseudos.push(Pseudo::Not(inner)); }
+                    }
+                    // Pseudos d'etat/element non decidables : ignorees (neutres).
+                    _ => {}
+                }
+                spec += 10;
+            }
+            b'[' => {
+                let s = i + 1;
+                while i < b.len() && b[i] != b']' { i += 1; }
+                let inner = &comp[s..i.min(comp.len())];
+                if i < b.len() { i += 1; } // consomme ']'
+                if let Some(a) = parse_attr(inner) { sel.attrs.push(a); spec += 10; }
+            }
+            _ => { i += 1; }
+        }
     }
-    if let Some(dot) = last.find('.') {
-        let tag = last[..dot].to_ascii_lowercase();
-        let cl = last[dot + 1..].split('.').next().unwrap_or(&last[dot + 1..]);
-        let cl = cl.split(|c: char| c == ':' || c == '[').next().unwrap_or(cl);
-        return (Sel::TagClass(tag, cl.to_string()), 11);
-    }
-    // pseudo/attr non geres -> match par balise si alphanumerique
-    let tag: String = last.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').collect::<String>().to_ascii_lowercase();
-    if tag.is_empty() { (Sel::Any, 0) } else { (Sel::Tag(tag), 1) }
+    (sel, spec)
 }
 
 // Parse un selecteur complet en chaine ancetre→cible. Le combinateur `>` est
-// traite comme un descendant (approximation), les pseudo-elements ignores.
-// Limite la profondeur a 4 composants pour borner le cout du matching.
+// Parse un selecteur complet en chaine ancetre→cible, en conservant les vrais
+// combinateurs (descendant, enfant `>`, frere adjacent `+`, frere general `~`).
+// Chaque compound porte le combinateur qui le relie a celui de sa gauche. Le
+// decoupage respecte la profondeur `[...]`/`(...)` pour ne pas confondre les
+// espaces internes (`[data-x = y]`, `:not(a b)`) avec des combinateurs.
+// Limite a 4 compounds pour borner le cout du matching.
 fn parse_selector(s: &str) -> (Vec<Sel>, u32) {
     let s = s.trim();
+    let b = s.as_bytes();
     let mut chain: Vec<Sel> = Vec::new();
     let mut spec = 0u32;
-    for comp in s.split(|c: char| c == ' ' || c == '>' || c == '+' || c == '~').filter(|x| !x.is_empty()) {
-        let (sel, sp) = parse_simple(comp);
-        chain.push(sel);
+    let mut comb = Comb::Descendant; // pour le prochain compound
+    let mut i = 0;
+    while i < b.len() {
+        while i < b.len() && (b[i] as char).is_ascii_whitespace() { i += 1; }
+        if i >= b.len() { break; }
+        match b[i] {
+            b'>' => { comb = Comb::Child; i += 1; continue; }
+            b'+' => { comb = Comb::Adjacent; i += 1; continue; }
+            b'~' => { comb = Comb::General; i += 1; continue; }
+            _ => {}
+        }
+        // Lit un compound en respectant les niveaux [] et ().
+        let start = i; let mut depth = 0i32;
+        while i < b.len() {
+            let c = b[i];
+            if c == b'[' || c == b'(' { depth += 1; }
+            else if c == b']' || c == b')' { if depth > 0 { depth -= 1; } }
+            else if depth == 0 && ((c as char).is_ascii_whitespace() || c == b'>' || c == b'+' || c == b'~') { break; }
+            i += 1;
+        }
+        let (mut sel, sp) = parse_simple(&s[start..i]);
+        sel.comb = comb;
         spec += sp;
+        chain.push(sel);
+        comb = Comb::Descendant;
     }
-    if chain.is_empty() { chain.push(Sel::Any); }
-    // Ne garde que les 4 derniers composants (cible + 3 ancetres) pour le cout.
-    if chain.len() > 4 { let start = chain.len() - 4; chain.drain(0..start); }
+    if chain.is_empty() { chain.push(Sel::any()); }
+    // Ne garde que les 4 derniers compounds (cible + 3 ancetres) pour le cout.
+    if chain.len() > 4 { let start = chain.len() - 4; chain.drain(0..start); chain[0].comb = Comb::Descendant; }
     (chain, spec)
 }
 
