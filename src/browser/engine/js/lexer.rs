@@ -190,7 +190,18 @@ impl<'a> Lexer<'a> {
         let two: &[&str] = &["==","!=","<=",">=","&&","||","=>","+=","-=","*=","/=","%=","**","++","--","<<",">>","?.","??","&=","|=","^="];
         for p in four { if self.s[self.i..].starts_with(p.as_bytes()) { self.i += 4; return Ok(Tok::Punct((*p).to_string())); } }
         for p in three { if self.s[self.i..].starts_with(p.as_bytes()) { self.i += 3; return Ok(Tok::Punct((*p).to_string())); } }
-        for p in two { if self.s[self.i..].starts_with(p.as_bytes()) { self.i += 2; return Ok(Tok::Punct((*p).to_string())); } }
+        for p in two {
+            if self.s[self.i..].starts_with(p.as_bytes()) {
+                // `?.` n'est de l'optional chaining que s'il N'est PAS suivi d'un
+                // chiffre : sinon c'est un ternaire avec littéral flottant, ex.
+                // `cond ? .65 : .35` (tres frequent dans le JS minifie de Google).
+                if *p == "?." && self.s.get(self.i + 2).map_or(false, |c| c.is_ascii_digit()) {
+                    continue;
+                }
+                self.i += 2;
+                return Ok(Tok::Punct((*p).to_string()));
+            }
+        }
         let c = self.s[self.i]; self.i += 1; Ok(Tok::Punct((c as char).to_string()))
     }
 }
