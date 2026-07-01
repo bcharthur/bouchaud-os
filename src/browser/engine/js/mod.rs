@@ -1163,7 +1163,17 @@ impl Interp {
                 };
                 self.call(func, this, &argv)
             }
-            Expr::Ident(name) => scope_get(env, name).ok_or_else(|| str_val(format!("ReferenceError: {} is not defined", name))),
+            Expr::Ident(name) => {
+                if let Some(v) = scope_get(env, name) { return Ok(v); }
+                // Repli navigateur : les proprietes de `window` sont des variables
+                // globales (`window.x = ...` cree un global `x` accessible tel quel).
+                // C'est ce qui permet aux scripts Google d'appeler `_DumpException`
+                // apres l'avoir defini via `window._DumpException = ...`.
+                if let Some(Value::Obj(w)) = scope_get(&self.global, "window") {
+                    if let Some(v) = w.borrow().props.get(name.as_str()).cloned() { return Ok(v); }
+                }
+                Err(str_val(format!("ReferenceError: {} is not defined", name)))
+            }
             Expr::Array(items) => { let mut out = Vec::new(); for it in items { if let Expr::Spread(inner) = it { let v = self.eval(inner, env)?; out.extend(self.iterable(&v)); } else { out.push(self.eval(it, env)?); } } Ok(array_val(out)) }
             Expr::Object(props) => { let mut o = Obj::plain(); for (k, ve) in props { let v = self.eval(ve, env)?; o.props.insert(k.clone(), v); } Ok(new_obj(o)) }
             Expr::Func(def) => Ok(new_obj(Obj { props: OrderedMap::new(), arr: None, call: Some(Callable::User { def: def.clone(), env: env.clone() }), class: "Function" })),
