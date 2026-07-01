@@ -111,6 +111,8 @@ pub enum Expr {
     Func(Rc<FuncDef>), Seq(Vec<Expr>), Spread(Box<Expr>),
     // Template balisé `tag`a${x}b`` : (tag, quasis littéraux, expressions).
     TaggedTpl(Box<Expr>, Vec<String>, Vec<Expr>),
+    // Méta-propriété `new.target`.
+    NewTarget,
     // Expression de classe : `var X = class [extends Y] { ... }`.
     Class(Option<Box<Expr>>, Vec<(bool, String, Rc<FuncDef>)>),
 }
@@ -695,7 +697,10 @@ impl Parser {
 
     fn parse_call_member(&mut self) -> Result<Expr, String> {
         let mut e = if self.is_kw("new") {
-            self.i += 1; let callee = self.parse_member_only()?; let args = if self.is_punct("(") { self.parse_args()? } else { Vec::new() }; Expr::New(Box::new(callee), args)
+            self.i += 1;
+            // Méta-propriété `new.target` (transpilations de classes ES6).
+            if self.is_punct(".") { self.i += 1; let _ = self.ident()?; Expr::NewTarget }
+            else { let callee = self.parse_member_only()?; let args = if self.is_punct("(") { self.parse_args()? } else { Vec::new() }; Expr::New(Box::new(callee), args) }
         } else { self.parse_primary()? };
         loop {
             if self.eat_punct(".") { let name = self.ident()?; e = Expr::Member(Box::new(e), name, false); }
@@ -881,6 +886,7 @@ pub struct Interp {
     macrotasks: Vec<(Value, Vec<Value>)>, // setTimeout / setInterval (un tour)
     timer_seq: f64,                       // identifiants de timers
     pub base_url: String,                 // URL de base (resolution des <script src>)
+    pending_new_target: Option<Value>,    // `new.target` transmis au prochain appel (eval_new)
 }
 
 impl Interp {
@@ -891,7 +897,7 @@ impl Interp {
             out: Vec::new(), writes: String::new(), dom: DomModel::empty(),
             wasm: Vec::new(), listeners: Vec::new(),
             microtasks: Vec::new(), macrotasks: Vec::new(), timer_seq: 1.0,
-            base_url: String::new(),
+            base_url: String::new(), pending_new_target: None,
         };
         install(&mut it);
         it
@@ -1136,6 +1142,7 @@ impl Interp {
             Expr::Null => Ok(Value::Null),
             Expr::Undef => Ok(Value::Undefined),
             Expr::This => Ok(scope_get(env, "this").unwrap_or(Value::Undefined)),
+            Expr::NewTarget => Ok(scope_get(env, "new.target").unwrap_or(Value::Undefined)),
             Expr::Tpl(parts) => { let mut s = String::new(); for p in parts { let v = self.eval(p, env)?; s.push_str(&self.to_string(&v)); } Ok(str_val(s)) }
             Expr::TaggedTpl(tag, quasis, exprs) => {
                 // Construit le 1er argument : tableau des chaînes + `.raw`
@@ -1275,10 +1282,13 @@ impl Interp {
             Value::Obj(o) => { let b = o.borrow(); match &b.call { Some(Callable::User { def, env }) => (Some(def.clone()), Some(env.clone()), None), Some(Callable::Native(f)) => (None, None, Some(*f)), None => return Err(str_val("TypeError: not a function")) } }
             _ => return Err(str_val("TypeError: not a function")),
         };
+        // `new.target` : positionne par eval_new juste avant l'appel ; consomme
+        // ici pour ce cadre (Undefined pour un appel normal).
+        let new_target = self.pending_new_target.take().unwrap_or(Value::Undefined);
         if let Some(f) = native { return f(self, this, args); }
         let def = def.unwrap(); let fenv = fenv.unwrap();
         let scope = new_scope(Some(fenv));
-        if !def.arrow { scope_declare(&scope, "this", this); }
+        if !def.arrow { scope_declare(&scope, "this", this); scope_declare(&scope, "new.target", new_target); }
         for (i, p) in def.params.iter().enumerate() { scope_declare(&scope, p, args.get(i).cloned().unwrap_or(Value::Undefined)); }
         if let Some(rest) = &def.rest { let r: Vec<Value> = if args.len() > def.params.len() { args[def.params.len()..].to_vec() } else { Vec::new() }; scope_declare(&scope, rest, array_val(r)); }
         if !def.arrow { scope_declare(&scope, "arguments", array_val(args.to_vec())); }
@@ -1299,6 +1309,7 @@ impl Interp {
                 if k != "constructor" { set(&this, &k, v); }
             }
         }
+        self.pending_new_target = Some(func.clone());
         let r = self.call(func, this.clone(), &argv)?;
         Ok(if matches!(r, Value::Obj(_)) { r } else { this })
     }
