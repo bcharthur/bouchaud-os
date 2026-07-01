@@ -890,6 +890,7 @@ pub struct Interp {
     timer_seq: f64,                       // identifiants de timers
     pub base_url: String,                 // URL de base (resolution des <script src>)
     pending_new_target: Option<Value>,    // `new.target` transmis au prochain appel (eval_new)
+    global_obj: Option<Rc<RefCell<Obj>>>, // objet `window` (pont window <-> portee globale)
 }
 
 impl Interp {
@@ -901,6 +902,7 @@ impl Interp {
             wasm: Vec::new(), listeners: Vec::new(),
             microtasks: Vec::new(), macrotasks: Vec::new(), timer_seq: 1.0,
             base_url: String::new(), pending_new_target: None,
+            global_obj: None,
         };
         install(&mut it);
         it
@@ -1389,6 +1391,14 @@ impl Interp {
                 let b = obj.borrow();
                 if let Some(v) = b.props.get(name) { return Ok(v.clone()); }
                 drop(b);
+                // Pont window -> global : une propriete absente de window est
+                // cherchee dans la portee globale (`var x`, `function f(){}` et
+                // affectations nues `x = ...` deviennent lisibles via `window.x`
+                // / `self[x]`). Evite `window.RenamedGlobal` == undefined puis
+                // `.length` -> "Cannot read properties of undefined".
+                if self.global_obj.as_ref().map_or(false, |g| Rc::ptr_eq(g, obj)) {
+                    if let Some(v) = scope_get(&self.global, name) { return Ok(v); }
+                }
                 Ok(object_prop(name))
             }
             Value::Null => Err(str_val(format!("TypeError: Cannot read properties of null (reading '{}')", name))),
@@ -1413,8 +1423,19 @@ impl Interp {
                 if owner >= 0 { let css = serialize_style(obj); self.dom.set_attr(owner as usize, "style", css); }
                 return;
             }
+            let is_global = self.global_obj.as_ref().map_or(false, |g| Rc::ptr_eq(g, obj));
             let mut b = obj.borrow_mut();
             if let Some(arr) = &mut b.arr { if name == "length" { let nl = to_num_simple(&v) as usize; arr.resize(nl.min(1_000_000), Value::Undefined); return; } if let Ok(i) = name.parse::<usize>() { if i < 1_000_000 { if i >= arr.len() { arr.resize(i + 1, Value::Undefined); } arr[i] = v; } return; } }
+            // Pont window -> global : `window.x = ...` (Member), `window[x] = ...`
+            // (Index) et les ecritures natives creent/mettent a jour la variable
+            // globale `x`, pour que la reference nue `x` et un `var x` hoiste
+            // restent coherents (racine de `_DumpException is not a function`).
+            if is_global {
+                b.props.insert(name.to_string(), v.clone());
+                drop(b);
+                scope_declare(&self.global, name, v);
+                return;
+            }
             b.props.insert(name.to_string(), v);
         }
     }
@@ -1821,6 +1842,10 @@ fn install(it: &mut Interp) {
 
     // window = objet global minimal (alias des globales courantes)
     let window = new_obj(Obj::plain());
+    // Pont window <-> portee globale : memorise le Rc de window pour que get_prop /
+    // set_prop puissent unifier `window.x` avec la variable globale `x` (les deux
+    // sens). Comparaison par pointeur (Rc::ptr_eq), sans surcout de recherche.
+    if let Value::Obj(rc) = &window { it.global_obj = Some(rc.clone()); }
     set(&window, "addEventListener", native_val(|it, _t, a| { let ty = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); if let Some(cb) = a.get(1) { it.listeners.push((-1, ty, cb.clone())); } Ok(Value::Undefined) }));
     set(&window, "removeEventListener", native_val(|it, _t, a| { let ty = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); it.listeners.retain(|(n, t, _)| !(*n == -1 && t == &ty)); Ok(Value::Undefined) }));
     set(&window, "setTimeout", native_val(native_set_timeout));
@@ -3755,5 +3780,23 @@ pub fn selftest() -> Result<(), &'static str> {
     let out = execute_inline(br#"<div id="d">hi</div><script>document.getElementById('d').style.color='red';</script>"#, "");
     let s = core::str::from_utf8(&out).unwrap_or("");
     if !s.contains("color:red") { return Err("style"); }
+    // --- objet global : coherence window/globalThis/self/this + pont var<->window ---
+    // Identite des alias (window === globalThis === self === this racine).
+    let mut it = Interp::new();
+    it.run("console.log((window===globalThis)+','+(window===self)+','+(this===window));").map_err(|_| "run-glob1")?;
+    if it.out.last().map(|x| x.as_str()) != Some("true,true,true") { return Err("global-alias"); }
+    // var global visible via window ; propriete window visible en variable nue.
+    let mut it = Interp::new();
+    it.run("var gx=1; window.gy=2; console.log(window.gx+','+gy);").map_err(|_| "run-glob2")?;
+    if it.out.last().map(|x| x.as_str()) != Some("1,2") { return Err("global-bridge"); }
+    // Ecriture par index (Closure-compiler : window[name]=...) -> variable nue.
+    let mut it = Interp::new();
+    it.run("window['gz']=3; console.log(gz+','+(typeof self.gz));").map_err(|_| "run-glob3")?;
+    if it.out.last().map(|x| x.as_str()) != Some("3,number") { return Err("global-index"); }
+    // Motif d'amorçage Google : _ / _DumpException definis via window puis lus nus.
+    let mut it = Interp::new();
+    it.run("window._ = window._ || {}; window._DumpException = _._DumpException = function(e){ throw e; }; \
+            console.log((typeof _DumpException)+','+(typeof window._DumpException)+','+(typeof _._DumpException));").map_err(|_| "run-glob4")?;
+    if it.out.last().map(|x| x.as_str()) != Some("function,function,function") { return Err("dumpexception"); }
     Ok(())
 }
