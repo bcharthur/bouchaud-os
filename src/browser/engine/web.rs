@@ -516,13 +516,13 @@ impl Session {
 }
 
 fn sel_matches(sel: &Sel, tag: &str, classes: &str, id: &str) -> bool {
-    match sel {
-        Sel::Any => true,
-        Sel::Tag(t) => t == tag,
-        Sel::Id(x) => x == id,
-        Sel::Class(c) => classes.split(' ').any(|cl| cl == c),
-        Sel::TagClass(t, c) => t == tag && classes.split(' ').any(|cl| cl == c),
+    if let Some(t) = &sel.tag { if t != tag { return false; } }
+    if let Some(x) = &sel.id { if x != id { return false; } }
+    // Toutes les classes du selecteur compose doivent etre presentes.
+    for c in &sel.classes {
+        if !classes.split(' ').any(|cl| cl == c) { return false; }
     }
+    true
 }
 
 /// Matche une chaine de selecteurs (combinateur descendant) contre l'element
@@ -1198,8 +1198,7 @@ fn layout(dom: &Dom, base_url: &str, width: i32, css: &[Rule], no_display_none: 
     for r in css {
         // Fond global : regles ciblant body/html ou :root/* (dernier composant).
         let target = r.chain.last();
-        let hits_root = matches!(target, Some(Sel::Tag(t)) if t == "body" || t == "html")
-            || matches!(target, Some(Sel::Any));
+        let hits_root = matches!(target, Some(s) if s.is_root_tag() || s.is_any());
         if hits_root {
             for (p, v) in &r.decls {
                 if p == "background" || p == "background-color" {
