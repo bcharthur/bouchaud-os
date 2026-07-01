@@ -507,6 +507,8 @@ impl Session {
         let scripted = self.ctx.dispatch(code);
         render_scripted(&scripted, &self.base, self.width)
     }
+    /// Largeur de mise en page courante (pour detecter un redimensionnement).
+    pub fn width(&self) -> i32 { self.width }
     /// Re-rend a une nouvelle largeur sans rejouer de code.
     pub fn relayout(&mut self, width: i32) -> Page {
         self.width = width;

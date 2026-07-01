@@ -134,7 +134,10 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
         },
         2 => {
             let url = "about:bouchaud".to_string();
-            let bw = 560; let bh = 420;
+            // Fenetre large par defaut : les pages modernes (Google) ont besoin de
+            // place ; le contenu se re-met en page automatiquement au resize.
+            let bw = (WIDTH as i32 - 80).clamp(600, 1100);
+            let bh = (HEIGHT as i32 - 2 * BAR_H as i32 - 40).clamp(400, 760);
             let (session, page) = loader::open(&url, bw - 6);
             let state = crate::browser::BrowserState::new(url, page, session);
             Win { title: "Nautile Navigateur".to_string(), x, y, w: bw, h: bh, min: false, restore: None,
