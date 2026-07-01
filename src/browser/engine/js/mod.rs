@@ -1222,7 +1222,20 @@ impl Interp {
     fn assign_to(&mut self, target: &Expr, v: Value, env: &Env) -> Result<(), Value> {
         match target {
             Expr::Ident(name) => { if !scope_set(env, name, v.clone()) { scope_declare(&self.global, name, v); } Ok(()) }
-            Expr::Member(obj, name, _) => { let o = self.eval(obj, env)?; self.set_prop(&o, name, v); Ok(()) }
+            Expr::Member(obj, name, _) => {
+                let o = self.eval(obj, env)?;
+                self.set_prop(&o, name, v.clone());
+                // Unification window/global : `window.x = ...` (ou self/globalThis)
+                // doit aussi mettre a jour la variable globale `x`, sinon un `var x`
+                // hoiste a `undefined` masque la propriete et `x(...)` echoue
+                // (cf. `_DumpException is not a function` sur google.com).
+                if let (Value::Obj(target), Some(Value::Obj(w))) = (&o, scope_get(&self.global, "window")) {
+                    if Rc::ptr_eq(target, &w) {
+                        scope_declare(&self.global, name, v);
+                    }
+                }
+                Ok(())
+            }
             Expr::Index(obj, idx) => { let o = self.eval(obj, env)?; let i = self.eval(idx, env)?; let key = self.to_string(&i); self.set_prop(&o, &key, v); Ok(()) }
             _ => Err(str_val("cible d'affectation invalide")),
         }
@@ -1843,6 +1856,12 @@ fn install(it: &mut Interp) {
     scope_declare(&g2, "frames", win_alias.clone());
     scope_declare(&g2, "top", win_alias.clone());
     scope_declare(&g2, "parent", win_alias.clone());
+    // `global` : alias Node/isomorphe. Les detecteurs d'objet global des bundles
+    // (Closure-compiler) iterent `[globalThis, self, window, global]` sans garde
+    // `typeof` — sans cette liaison, la reference bare `global` leve
+    // « global is not defined ».
+    set(&window, "global", window.clone());
+    scope_declare(&g2, "global", win_alias.clone());
     // `this` au niveau racine d'un script = objet global (window). Permet à
     // `this.gbar_ = {...}` puis la relecture `this.gbar_` de fonctionner, et à
     // `x(this)` de retrouver l'objet global (qui possède `.Math == Math`).
