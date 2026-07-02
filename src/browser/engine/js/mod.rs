@@ -1626,7 +1626,7 @@ impl Interp {
         };
         if opt && matches!(func, Value::Undefined | Value::Null) { return Ok(Value::Undefined); }
         let argv = self.eval_args(args, env)?;
-        let r = self.call(func.clone(), this, &argv);
+        let r = self.call(func.clone(), this.clone(), &argv);
         // Enrichit le diagnostic "not a function" avec le nom de l'appelé.
         if let Err(e) = &r {
             if matches!(e, Value::Str(s) if s.as_str() == "TypeError: not a function") {
@@ -1642,7 +1642,14 @@ impl Interp {
                         Value::Obj(o) => { let b = o.borrow(); if b.call.is_some() { String::from("function") } else { format!("object[{}]", b.class) } }
                         v => String::from(type_of(v)),
                     };
-                    return Err(str_val(format!("TypeError: {} is not a function (= {})", nm, desc)));
+                    // Pour un appel membre `x.f()`, precise l'objet porteur :
+                    // distingue « f jamais defini » de « f absent de CET objet ».
+                    let porteur = match (callee, &this) {
+                        (Expr::Member(..), Value::Obj(o)) => { let b = o.borrow(); format!(", sur {}[{} props]", b.class, b.props.len()) }
+                        (Expr::Member(..), v) => format!(", sur {}", type_of(v)),
+                        _ => String::new(),
+                    };
+                    return Err(str_val(format!("TypeError: {} is not a function (= {}{})", nm, desc, porteur)));
                 }
             }
         }
@@ -2408,11 +2415,15 @@ fn install(it: &mut Interp) {
     // d'amorcage non execute / ordre different), l'appel plantait TOUT le bundle.
     // Defaut natif : logge et absorbe. La definition de la page, si elle arrive,
     // le remplace via le pont window<->global (comportement fidele ensuite).
-    scope_declare(&g2, "_DumpException", native_val(|it, _t, a| {
+    let dump_exc = native_val(|it, _t, a| {
         let msg = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
+        // Journal systeme : c'est ICI que se lit l'erreur REELLE du bundle
+        // (l'appel _DumpException n'est que le rapporteur, pas la cause).
+        crate::dlog!(crate::diag::Cat::Js, "[_DumpException] {}", msg);
         it.out.push(format!("[_DumpException] {}", msg));
         Ok(Value::Undefined)
-    }));
+    });
+    scope_declare(&g2, "_DumpException", dump_exc.clone());
     // Dispatcher interne pour les ecouteurs "click" (voir dom_add_event_listener).
     scope_declare(&g2, "__ael", native_val(|it, _t, a| { let n = it.to_num(a.get(0).unwrap_or(&Value::Undefined)) as i64; it.fire_event(n, "click"); Ok(Value::Undefined) }));
 
@@ -2442,12 +2453,20 @@ fn install(it: &mut Interp) {
     scope_declare(&g2, "WebAssembly", webassembly);
 
     // Globals fréquemment utilisés par les scripts modernes ----------------
-    // `_` : raccourci Google (window._ = window._ || {}). Objet vide pour que
-    // `_._DumpException = ...` et `_s._DumpException = _._DumpException` marchent.
-    scope_declare(&g2, "_", new_obj(Obj::plain()));
+    // `_` : raccourci Google (window._ = window._ || {}). Les bundles Closure
+    // font aussi `var _ = {...}` DANS le bundle (namespace module), ecrasant la
+    // copie de la page : chaque namespace porte donc directement le rapporteur
+    // `_DumpException` par defaut, pour que `_._DumpException(e)` reste callable.
+    let ns_underscore = new_obj(Obj::plain());
+    set(&ns_underscore, "_DumpException", dump_exc.clone());
+    scope_declare(&g2, "_", ns_underscore);
     // `_s` / `_qs` : namespaces sœurs de `_` chez Google (idem).
-    scope_declare(&g2, "_s", new_obj(Obj::plain()));
-    scope_declare(&g2, "_qs", new_obj(Obj::plain()));
+    let ns_s = new_obj(Obj::plain());
+    set(&ns_s, "_DumpException", dump_exc.clone());
+    scope_declare(&g2, "_s", ns_s);
+    let ns_qs = new_obj(Obj::plain());
+    set(&ns_qs, "_DumpException", dump_exc);
+    scope_declare(&g2, "_qs", ns_qs);
     // performance.now() : temps monotone (stub retourne 0)
     let perf = new_obj(Obj::plain());
     set(&perf, "now", native_val(|_it, _t, _a| Ok(Value::Num(0.0))));
@@ -2986,7 +3005,10 @@ fn install_map_set(g: &Env) {
         set(&m, "entries", native_val(|_it, t, _a| { let (keys, vals) = map_get_kv(&t); Ok(array_val(keys.into_iter().zip(vals.into_iter()).map(|(k, v)| array_val(vec![k, v])).collect())) }));
         Ok(m)
     });
-    scope_declare(g, "Map", map_ctor);
+    scope_declare(g, "Map", map_ctor.clone());
+    // WeakMap : semantique de collection identique cote script (les cles ne
+    // retiennent pas la memoire dans un vrai moteur, sans incidence ici).
+    scope_declare(g, "WeakMap", map_ctor);
 
     // Set
     let set_ctor = native_val(|it, _t, a| {
@@ -3052,7 +3074,26 @@ fn install_map_set(g: &Env) {
         }));
         Ok(s)
     });
-    scope_declare(g, "Set", set_ctor);
+    scope_declare(g, "Set", set_ctor.clone());
+    scope_declare(g, "WeakSet", set_ctor);
+    // Proxy : pas d'interception (le handler est ignore), on renvoie la cible.
+    // Suffisant pour que les frameworks a reactivite (Vue) s'initialisent sans
+    // « Proxy is not defined » — la reactivite fine n'est simplement pas tracee.
+    scope_declare(g, "Proxy", native_val(|_it, _t, a| Ok(a.get(0).cloned().unwrap_or_else(|| new_obj(Obj::plain())))));
+    // Reflect minimal (get/set/has/ownKeys/defineProperty/getPrototypeOf).
+    let reflect = new_obj(Obj::plain());
+    set(&reflect, "get", native_val(|it, _t, a| { let o = a.get(0).cloned().unwrap_or(Value::Undefined); let k = it.to_string(a.get(1).unwrap_or(&Value::Undefined)); it.get_prop(&o, &k) }));
+    set(&reflect, "set", native_val(|it, _t, a| { let o = a.get(0).cloned().unwrap_or(Value::Undefined); let k = it.to_string(a.get(1).unwrap_or(&Value::Undefined)); it.set_prop(&o, &k, a.get(2).cloned().unwrap_or(Value::Undefined)); Ok(Value::Bool(true)) }));
+    set(&reflect, "has", native_val(|it, _t, a| { let o = a.get(0).cloned().unwrap_or(Value::Undefined); let k = it.to_string(a.get(1).unwrap_or(&Value::Undefined)); Ok(Value::Bool(matches!(&o, Value::Obj(ob) if ob.borrow().props.get(k.as_str()).is_some()))) }));
+    set(&reflect, "ownKeys", native_val(|_it, _t, a| { Ok(array_val(match a.get(0) { Some(Value::Obj(o)) => o.borrow().props.keys().map(|k| str_val(k.clone())).collect(), _ => Vec::new() })) }));
+    set(&reflect, "defineProperty", native_val(|it, _t, a| {
+        let o = a.get(0).cloned().unwrap_or(Value::Undefined);
+        let k = it.to_string(a.get(1).unwrap_or(&Value::Undefined));
+        if let Some(Value::Obj(d)) = a.get(2) { if let Some(v) = d.borrow().props.get("value").cloned() { it.set_prop(&o, &k, v); } }
+        Ok(Value::Bool(true))
+    }));
+    set(&reflect, "getPrototypeOf", native_val(|_it, _t, _a| Ok(Value::Null)));
+    scope_declare(g, "Reflect", reflect);
 }
 
 // --- WebAssembly (helpers) -------------------------------------------------
@@ -3936,7 +3977,8 @@ impl DomModel {
             let closing = raw.first() == Some(&b'/');
             let mut p = if closing { 1 } else { 0 };
             let ns = p;
-            while p < raw.len() && (raw[p] as char).is_ascii_alphanumeric() { p += 1; }
+            // Tiret inclus : noms d'elements custom (audio-recorder, g-menu-item...).
+            while p < raw.len() && ((raw[p] as char).is_ascii_alphanumeric() || (raw[p] == b'-' && p > ns)) { p += 1; }
             let name: String = raw[ns..p].iter().map(|&c| (c as char).to_ascii_lowercase()).collect();
             if name.is_empty() { i = gt + 1; continue; }
             if name == "script" || name == "style" {
@@ -4662,5 +4704,18 @@ pub fn selftest() -> Result<(), &'static str> {
     </script></body>"#, "", 800, 500);
     let v = ctx.interp.run("__s").map_err(|_| "run-script-dom")?;
     if ctx.interp.to_string(&v) != "true|BODY" { return Err("script-in-dom"); }
+    // --- Sprint 7 : WeakMap/WeakSet/Proxy/Reflect + elements custom a tiret ---
+    let mut it = Interp::new();
+    it.run("var w=new WeakSet(); var o={a:1}; w.add(o); var m=new WeakMap(); m.set(o,7); \
+            var p=new Proxy(o,{}); \
+            console.log([w.has(o), m.get(o), p.a, typeof Reflect.get, Reflect.get(o,'a')].join('|'));").map_err(|_| "run-weak")?;
+    if it.out.last().map(|x| x.as_str()) != Some("true|7|1|function|1") { return Err("weakset-proxy"); }
+    // <audio-recorder> ne doit plus etre confondu avec <audio> (tags a tiret).
+    let (mut ctx, _o) = open_page_sized(br#"<body><audio-recorder locale="fr"></audio-recorder><script>
+        window.__t = [document.getElementsByTagName('audio').length,
+                      document.getElementsByTagName('audio-recorder').length].join('|');
+    </script></body>"#, "", 800, 500);
+    let v = ctx.interp.run("__t").map_err(|_| "run-custom-tag")?;
+    if ctx.interp.to_string(&v) != "0|1" { return Err("custom-element-tag"); }
     Ok(())
 }
