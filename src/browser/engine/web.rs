@@ -1424,11 +1424,21 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, cs
                 if matches!(val, "hidden" | "clip" | "auto" | "scroll") { bx.overflow_clip = true; }
             }
             // box-shadow : on garde uniquement la couleur (ombre portee discrete).
+            // La couleur fonctionnelle `rgba(0,0,0,.2)` contient virgules ET
+            // espaces : ni split(',') ni split_whitespace ne peuvent la decouper.
+            // On extrait `rgb(...)/hsl(...)` par parentheses appariees ; sinon
+            // 1er token couleur. Fallback gris clair (l'ancien fallback noir
+            // peignait toutes les ombres Google en barres noires).
             "box-shadow" => {
                 if val != "none" {
-                    let col = val.split(',').next().unwrap_or(val)
-                        .split_whitespace().find_map(parse_color)
-                        .unwrap_or(0x30000000 & 0xffffff);
+                    let func_col = ["rgba(", "rgb(", "hsla(", "hsl("].iter().find_map(|pfx| {
+                        let start = val.find(pfx)?;
+                        let end = val[start..].find(')')? + start + 1;
+                        parse_color(&val[start..end].replace(' ', ""))
+                    });
+                    let col = func_col
+                        .or_else(|| val.split(',').next().unwrap_or(val).split_whitespace().find_map(parse_color))
+                        .unwrap_or(0xd8d8d8);
                     bx.shadow = Some(col);
                 }
             }
@@ -1474,7 +1484,11 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, cs
                     else if tok == "auto" { bx.flex_grow = 1; }
                 }
             }
-            "visibility" => { /* non implementee : on ne masque pas (anti-FOUC) */ }
+            // visibility:hidden/collapse masque (Google cache ainsi sa sidebar
+            // .X1pLC, l'overlay consentement .kJFf0c... qui apparaissaient en
+            // boites fantomes). Meme garde-fou anti-FOUC que display:none : le
+            // fallback "0 items" relance le layout avec no_display_none.
+            "visibility" => { if matches!(val, "hidden" | "collapse") && !no_display_none { bx.hidden = true; } }
             "width" => { bx.width = parse_len(val); }
             "height" => { bx.height = parse_len(val); }
             "max-width" => { bx.max_width = parse_len(val); }
@@ -1511,7 +1525,10 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, cs
             }
             "border-color" => { if let Some(c) = parse_color(val) { bx.border_color = c; if bx.border_w == 0 { bx.border_w = 1; } } }
             "border-style" => { if val != "none" && bx.border_w == 0 { bx.border_w = 1; } }
-            "opacity" => { /* opacity non implémentée ; on ne masque pas le contenu (Google anti-FOUC) */ }
+            // opacity:0 (invisible total) masque ; les valeurs intermediaires
+            // restent non implementees (pas de compositing alpha par item).
+            // Garde-fou anti-FOUC identique a display:none.
+            "opacity" => { if val.trim().parse::<f32>().map_or(false, |o| o <= 0.01) && !no_display_none { bx.hidden = true; } }
             _ => {}
         }
     }
@@ -1586,6 +1603,10 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
     // SVG inline (icones) : non rendable utilement, et son <title> clobberait le
     // titre de page. On ignore tout le sous-arbre, comme une image sans alt.
     if tag == "svg" || tag == "template" || tag == "noscript" { return; }
+    // <dialog> sans attribut `open` : cache par defaut (style UA du standard
+    // HTML). Google en place plusieurs (recherche vocale, partage) qui
+    // apparaissaient en rectangles fantomes bordes.
+    if tag == "dialog" && attr(node, "open").is_none() { return; }
     if tag == "head" { for &c in &node.children { walk(f, dom, c, st, depth + 1); } return; }
     if tag == "title" {
         let mut t = String::new();
