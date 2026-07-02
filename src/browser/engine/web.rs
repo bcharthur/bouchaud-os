@@ -165,12 +165,16 @@ pub fn parse(html: &[u8]) -> Dom {
                 i = find_ci(html, b">", i).map(|p| p + 1).unwrap_or(html.len());
                 continue;
             }
+            let lt = i;
             let end = match find_ci(html, b">", i) { Some(p) => p, None => break };
             let raw = &html[i + 1..end];
             let closing = raw.first() == Some(&b'/');
             let mut name = String::new();
             let mut p = if closing { 1 } else { 0 };
-            while p < raw.len() && (raw[p] as char).is_ascii_alphanumeric() { name.push(lc(raw[p]) as char); p += 1; }
+            // Le tiret fait partie des noms d'elements custom (audio-recorder,
+            // g-menu-item...) : sans lui, `<audio-recorder>` etait parse comme
+            // `<audio>` (faux lecteur audio) et `<g-popup>` comme `<g>`.
+            while p < raw.len() && ((raw[p] as char).is_ascii_alphanumeric() || (raw[p] == b'-' && !name.is_empty())) { name.push(lc(raw[p]) as char); p += 1; }
             i = end + 1;
             if name.is_empty() { continue; }
 
@@ -192,9 +196,11 @@ pub fn parse(html: &[u8]) -> Dom {
                 continue;
             }
 
-            // Le contenu SVG (chemins, defs...) n'est pas rendu : on saute tout le
-            // bloc <svg>...</svg> pour ne pas afficher les coordonnees des
-            // `<path d="...">` en texte (cf. YouTube). Idem <noscript>/<template>.
+            // Le contenu SVG (chemins, defs...) n'est pas rendu comme du texte :
+            // on capture tout le bloc <svg>...</svg> comme SOURCE sur un noeud
+            // feuille "svg" (attribut __svg__), rasterise au layout — c'est ce
+            // qui rend visibles les icones du web moderne. <noscript>/<template>
+            // restent sautes.
             if name == "svg" || name == "noscript" || name == "template" {
                 if !closing && !(raw.last() == Some(&b'/')) {
                     let close: &[u8] = match name.as_str() {
@@ -203,7 +209,15 @@ pub fn parse(html: &[u8]) -> Dom {
                         _ => b"</template",
                     };
                     let close_pos = find_ci(html, close, i).unwrap_or(html.len());
-                    i = find_ci(html, b">", close_pos).map(|r| r + 1).unwrap_or(html.len());
+                    let after = find_ci(html, b">", close_pos).map(|r| r + 1).unwrap_or(html.len());
+                    if name == "svg" {
+                        let src = String::from_utf8_lossy(&html[lt..after]).into_owned();
+                        let mut attrs = parse_attrs(&raw[p..]);
+                        attrs.push(("__svg__".to_string(), src));
+                        let parent = *stack.last().unwrap_or(&0);
+                        dom.push(parent, Node { tag: Some("svg".to_string()), text: String::new(), attrs, children: Vec::new() });
+                    }
+                    i = after;
                 }
                 continue;
             }
@@ -1113,6 +1127,20 @@ impl<'a> Ctx<'a> {
         self.img_cache.push((src.to_string(), idx));
         Some(idx)
     }
+
+    // Rasterise un SVG inline (icones vectorielles). Cache par source complete :
+    // la meme icone repetee (fleches, logos) n'est rasterisee qu'une fois.
+    fn load_svg(&mut self, src: &str, max_w: usize, max_h: usize) -> Option<usize> {
+        if let Some(&(_, idx)) = self.img_cache.iter().find(|(u, _)| u == src) { return Some(idx); }
+        let img = super::svg::rasterize(src.as_bytes())?;
+        if img.w == 0 || img.h == 0 { return None; }
+        let img = image::downscale(&img, max_w.max(8), max_h.max(8));
+        if img.w == 0 || img.h == 0 { return None; }
+        let idx = self.images.len();
+        self.images.push(img);
+        self.img_cache.push((src.to_string(), idx));
+        Some(idx)
+    }
 }
 
 // Layouteur de flux : remplit `items`/`links` en coordonnees locales (origine
@@ -1644,9 +1672,7 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
     }
     let tag = node.tag.as_deref().unwrap_or("");
     if tag == "style" || tag == "script" { return; }
-    // SVG inline (icones) : non rendable utilement, et son <title> clobberait le
-    // titre de page. On ignore tout le sous-arbre, comme une image sans alt.
-    if tag == "svg" || tag == "template" || tag == "noscript" { return; }
+    if tag == "template" || tag == "noscript" { return; }
     // <dialog> sans attribut `open` : cache par defaut (style UA du standard
     // HTML). Google en place plusieurs (recherche vocale, partage) qui
     // apparaissaient en rectangles fantomes bordes.
@@ -1663,6 +1689,18 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
     if bx.hidden { return; }
 
     // --- elements speciaux ---
+    // SVG inline : rasterise (formes/chemins remplis, cf. module svg) et pose
+    // comme une image dans le flux — icones, logos et pictos deviennent visibles.
+    if tag == "svg" {
+        if let Some(srcv) = attr(node, "__svg__") {
+            let attr_w = attr(node, "width").and_then(|s| s.trim_end_matches("px").parse::<i32>().ok()).unwrap_or(0);
+            let attr_h = attr(node, "height").and_then(|s| s.trim_end_matches("px").parse::<i32>().ok()).unwrap_or(0);
+            let maxw = if attr_w > 0 { clamp_dyn(attr_w, 8, f.avail) } else { bx.width.map(|l| l.resolve(f.avail)).unwrap_or(96) }.clamp(8, 512) as usize;
+            let maxh = if attr_h > 0 { attr_h } else { bx.height.map(|l| l.resolve(0)).unwrap_or(96) }.clamp(8, 512) as usize;
+            if let Some(i) = f.ctx.load_svg(srcv, maxw, maxh) { f.push_image(i, cst.va); }
+        }
+        return;
+    }
     if tag == "br" { f.flush_line(); return; }
     if tag == "hr" {
         f.flush_line();
