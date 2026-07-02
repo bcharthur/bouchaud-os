@@ -847,8 +847,19 @@ impl Parser {
 // ============================================================================
 
 pub type Env = Rc<RefCell<Scope>>;
-pub struct Scope { vars: BTreeMap<String, Value>, parent: Option<Env> }
-fn new_scope(parent: Option<Env>) -> Env { Rc::new(RefCell::new(Scope { vars: BTreeMap::new(), parent })) }
+pub struct Scope { vars: BTreeMap<String, Value>, parent: Option<Env>, func_scope: bool }
+fn new_scope(parent: Option<Env>) -> Env { Rc::new(RefCell::new(Scope { vars: BTreeMap::new(), parent, func_scope: false })) }
+// Portee de fonction (ou globale) : frontiere de hoisting `var`. `let`/`const`
+// restent lies au bloc courant, mais `var` remonte jusqu'ici.
+fn new_fn_scope(parent: Option<Env>) -> Env { Rc::new(RefCell::new(Scope { vars: BTreeMap::new(), parent, func_scope: true })) }
+// Remonte a la portee de fonction/globale la plus proche (cible des `var`).
+fn fn_scope_of(env: &Env) -> Env {
+    let mut cur = env.clone();
+    loop {
+        let (is_fn, parent) = { let b = cur.borrow(); (b.func_scope, b.parent.clone()) };
+        match parent { Some(p) if !is_fn => cur = p, _ => return cur }
+    }
+}
 fn scope_get(env: &Env, name: &str) -> Option<Value> { let s = env.borrow(); if let Some(v) = s.vars.get(name) { return Some(v.clone()); } if let Some(p) = &s.parent { return scope_get(p, name); } None }
 fn scope_set(env: &Env, name: &str, val: Value) -> bool { let mut s = env.borrow_mut(); if s.vars.contains_key(name) { s.vars.insert(name.to_string(), val); return true; } if let Some(p) = s.parent.clone() { drop(s); return scope_set(&p, name, val); } false }
 fn scope_declare(env: &Env, name: &str, val: Value) { env.borrow_mut().vars.insert(name.to_string(), val); }
@@ -895,7 +906,7 @@ pub struct Interp {
 
 impl Interp {
     pub fn new() -> Interp {
-        let global = new_scope(None);
+        let global = new_fn_scope(None);
         let mut it = Interp {
             global: global.clone(), steps: 0, max_steps: 60_000_000,
             out: Vec::new(), writes: String::new(), dom: DomModel::empty(),
@@ -951,6 +962,7 @@ impl Interp {
         let prog = Parser::new(toks).parse_program()?;
         let genv = self.global.clone();
         self.hoist(&prog, &genv);
+        self.hoist_vars_deep(&prog, &genv);
         let mut last = Value::Undefined;
         for st in &prog {
             match self.exec(st, &genv) {
@@ -973,7 +985,40 @@ impl Interp {
     fn hoist(&mut self, stmts: &[Stmt], env: &Env) {
         for s in stmts {
             if let Stmt::Func(name, def) = s { let f = new_obj(Obj { props: OrderedMap::new(), arr: None, call: Some(Callable::User { def: def.clone(), env: env.clone() }), class: "Function" }); scope_declare(env, name, f); }
-            if let Stmt::Class(name, ..) = s { scope_declare(env, name, Value::Undefined); }
+            if let Stmt::Class(name, ..) = s { if !env.borrow().vars.contains_key(name) { scope_declare(env, name, Value::Undefined); } }
+        }
+    }
+
+    // Hoisting `var` (portee fonction/globale) : descend dans les structures de
+    // controle SANS entrer dans les fonctions/classes imbriquees (qui ont leur
+    // propre portee), et pre-declare chaque nom `var` a undefined s'il est absent
+    // de `fenv`. Ne touche ni aux `let`/`const` (block==true), ni aux parametres
+    // deja lies. Corrige `ReferenceError: x is not defined` sur reference en avant
+    // et la fuite de `for(var i...)` hors de la boucle.
+    fn hoist_vars_deep(&mut self, stmts: &[Stmt], fenv: &Env) {
+        for s in stmts { self.hoist_var_stmt(s, fenv); }
+    }
+    fn hoist_var_stmt(&mut self, s: &Stmt, fenv: &Env) {
+        match s {
+            Stmt::Var(false, decls) => {
+                for (pat, _) in decls {
+                    let mut names = Vec::new();
+                    pat_names(pat, &mut names);
+                    for n in names { if !fenv.borrow().vars.contains_key(&n) { scope_declare(fenv, &n, Value::Undefined); } }
+                }
+            }
+            Stmt::If(_, t, e) => { self.hoist_var_stmt(t, fenv); if let Some(e) = e { self.hoist_var_stmt(e, fenv); } }
+            Stmt::Block(b) => self.hoist_vars_deep(b, fenv),
+            Stmt::While(_, b) | Stmt::DoWhile(b, _) => self.hoist_var_stmt(b, fenv),
+            Stmt::For(init, _, _, b) => { if let Some(i) = init { self.hoist_var_stmt(i, fenv); } self.hoist_var_stmt(b, fenv); }
+            Stmt::ForIn(_, _, b, _) => self.hoist_var_stmt(b, fenv),
+            Stmt::Try(tb, catch, fin) => {
+                self.hoist_vars_deep(tb, fenv);
+                if let Some((_, cb)) = catch { self.hoist_vars_deep(cb, fenv); }
+                if let Some(fb) = fin { self.hoist_vars_deep(fb, fenv); }
+            }
+            Stmt::Switch(_, cases) => { for (_, body) in cases { self.hoist_vars_deep(body, fenv); } }
+            _ => {}
         }
     }
 
@@ -1061,7 +1106,20 @@ impl Interp {
         match s {
             Stmt::Empty | Stmt::Func(..) => Flow::Normal(Value::Undefined),
             Stmt::Expr(e) => match self.eval(e, env) { Ok(v) => Flow::Normal(v), Err(t) => Flow::Throw(t) },
-            Stmt::Var(_, decls) => { for (pat, init) in decls { let v = match init { Some(e) => match self.eval(e, env) { Ok(v) => v, Err(t) => return Flow::Throw(t) }, None => Value::Undefined }; if let Err(t) = self.bind_pat(pat, v, env) { return Flow::Throw(t); } } Flow::Normal(Value::Undefined) }
+            Stmt::Var(block, decls) => {
+                // `let`/`const` (block==true) : portee du bloc courant. `var`
+                // (block==false) : portee de fonction/globale (deja pre-hoiste).
+                // Le RHS est toujours evalue dans `env` (voit le bloc courant).
+                let target = if *block { env.clone() } else { fn_scope_of(env) };
+                for (pat, init) in decls {
+                    let v = match init { Some(e) => match self.eval(e, env) { Ok(v) => v, Err(t) => return Flow::Throw(t) }, None => Value::Undefined };
+                    // `var x;` sans initialiseur ne doit pas ecraser une valeur deja
+                    // hoistee/affectee ; `let x;` initialise bien a undefined.
+                    if !*block && init.is_none() { continue; }
+                    if let Err(t) = self.bind_pat(pat, v, &target) { return Flow::Throw(t); }
+                }
+                Flow::Normal(Value::Undefined)
+            }
             Stmt::Block(b) => { let inner = new_scope(Some(env.clone())); self.exec_block(b, &inner) }
             Stmt::Return(e) => { let v = match e { Some(e) => match self.eval(e, env) { Ok(v) => v, Err(t) => return Flow::Throw(t) }, None => Value::Undefined }; Flow::Return(v) }
             Stmt::If(c, t, e) => match self.eval(c, env) { Ok(v) => if truthy(&v) { self.exec(t, env) } else if let Some(e) = e { self.exec(e, env) } else { Flow::Normal(Value::Undefined) }, Err(x) => Flow::Throw(x) },
@@ -1316,12 +1374,17 @@ impl Interp {
         let new_target = self.pending_new_target.take().unwrap_or(Value::Undefined);
         if let Some(f) = native { return f(self, this, args); }
         let def = def.unwrap(); let fenv = fenv.unwrap();
-        let scope = new_scope(Some(fenv));
+        let scope = new_fn_scope(Some(fenv));
         if !def.arrow { scope_declare(&scope, "this", this); scope_declare(&scope, "new.target", new_target); }
         for (i, p) in def.params.iter().enumerate() { scope_declare(&scope, p, args.get(i).cloned().unwrap_or(Value::Undefined)); }
         if let Some(rest) = &def.rest { let r: Vec<Value> = if args.len() > def.params.len() { args[def.params.len()..].to_vec() } else { Vec::new() }; scope_declare(&scope, rest, array_val(r)); }
         if !def.arrow { scope_declare(&scope, "arguments", array_val(args.to_vec())); }
         if let Some(body) = &def.expr_body { return self.eval(body, &scope); }
+        // Hoisting `var` fonction-scope : pre-declare a undefined tous les `var`
+        // du corps (y compris ceux niches dans if/for/blocs), pour que les
+        // references en avant renvoient undefined (et non ReferenceError) et que
+        // `for(var b...)` reste visible apres la boucle.
+        self.hoist_vars_deep(&def.body, &scope);
         match self.exec_block(&def.body, &scope) { Flow::Return(v) => Ok(v), Flow::Throw(t) => Err(t), _ => Ok(Value::Undefined) }
     }
 
@@ -3876,5 +3939,13 @@ pub fn selftest() -> Result<(), &'static str> {
 </script>"#, "");
     let s = core::str::from_utf8(&out).unwrap_or("");
     if !s.contains("2,true,alpha") { return Err("classlist"); }
+    // --- Sprint 3 : hoisting `var` fonction-scope (racine de `b is not defined`) ---
+    let mut it = Interp::new();
+    it.run("function f(){ var r=(x===undefined); var x=1; return r; } \
+            function g(){ for(var i=0;i<3;i++){} return i; } \
+            function h(){ { var y=7; } return y; } \
+            function k(){ {let z=1;} try{ return ''+z; }catch(e){ return 'ok'; } } \
+            console.log(f()+','+g()+','+h()+','+k());").map_err(|_| "run-hoist")?;
+    if it.out.last().map(|x| x.as_str()) != Some("true,3,7,ok") { return Err("var-hoisting"); }
     Ok(())
 }
