@@ -1551,7 +1551,23 @@ impl Interp {
             ">>" => Value::Num((to_i32(self.to_num(&l)) >> (to_i32(self.to_num(&r)) & 31)) as f64),
             ">>>" => Value::Num(((to_i32(self.to_num(&l)) as u32) >> (to_i32(self.to_num(&r)) & 31)) as f64),
             "instanceof" => Value::Bool(false),
-            "in" => { let key = self.to_string(&l); Value::Bool(matches!(&r, Value::Obj(o) if o.borrow().props.contains_key(&key))) }
+            "in" => {
+                let key = self.to_string(&l);
+                let mut found = matches!(&r, Value::Obj(o) if o.borrow().props.contains_key(&key));
+                // Pont window -> global (meme logique que get_prop) : les builtins
+                // (Number, Object, Promise...) sont des variables de la portee
+                // globale, pas des props de window. Sans ce pont, le detecteur de
+                // polyfill Closure `if(!(f in c))break` (c == globalThis) croit
+                // que Number n'existe pas et n'installe jamais isSafeInteger & co.
+                if !found {
+                    if let Value::Obj(o) = &r {
+                        if self.global_obj.as_ref().map_or(false, |g| Rc::ptr_eq(g, o)) {
+                            found = scope_get(&self.global, &key).is_some();
+                        }
+                    }
+                }
+                Value::Bool(found)
+            }
             _ => Value::Undefined,
         })
     }
@@ -1764,9 +1780,35 @@ fn install(it: &mut Interp) {
     set(&object, "seal", native_val(|_it, _t, a| Ok(a.get(0).cloned().unwrap_or(Value::Undefined))));
     // Object.create(proto, [descriptor]) : crée un objet vide (proto ignoré)
     set(&object, "create", native_val(|_it, _t, _a| Ok(new_obj(Obj::plain()))));
-    // Object.defineProperty / defineProperties : stub passthrough
-    set(&object, "defineProperty", native_val(|_it, _t, a| Ok(a.get(0).cloned().unwrap_or(Value::Undefined))));
-    set(&object, "defineProperties", native_val(|_it, _t, a| Ok(a.get(0).cloned().unwrap_or(Value::Undefined))));
+    // Object.defineProperty / defineProperties : pose reellement la valeur.
+    // C'est LE mecanisme d'installation des polyfills Closure (Object.assign,
+    // Number.isSafeInteger, Array.prototype.values...) : un passthrough les
+    // faisait echouer en silence. `value` est pose tel quel ; un accesseur
+    // `get` est evalue une fois (pas de vrais accesseurs dans ce moteur).
+    set(&object, "defineProperty", native_val(|it, _t, a| {
+        let target = a.get(0).cloned().unwrap_or(Value::Undefined);
+        let key = it.to_string(a.get(1).unwrap_or(&Value::Undefined));
+        if let Some(Value::Obj(d)) = a.get(2) {
+            let (value, getter) = { let b = d.borrow(); (b.props.get("value").cloned(), b.props.get("get").cloned()) };
+            if let Some(v) = value { it.set_prop(&target, &key, v); }
+            else if let Some(g) = getter { let v = it.call(g, target.clone(), &[]).unwrap_or(Value::Undefined); it.set_prop(&target, &key, v); }
+        }
+        Ok(target)
+    }));
+    set(&object, "defineProperties", native_val(|it, _t, a| {
+        let target = a.get(0).cloned().unwrap_or(Value::Undefined);
+        if let Some(Value::Obj(descs)) = a.get(1) {
+            let kv: Vec<(String, Value)> = descs.borrow().props.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            for (key, desc) in kv {
+                if let Value::Obj(d) = &desc {
+                    let (value, getter) = { let b = d.borrow(); (b.props.get("value").cloned(), b.props.get("get").cloned()) };
+                    if let Some(v) = value { it.set_prop(&target, &key, v); }
+                    else if let Some(g) = getter { let v = it.call(g, target.clone(), &[]).unwrap_or(Value::Undefined); it.set_prop(&target, &key, v); }
+                }
+            }
+        }
+        Ok(target)
+    }));
     // Object.getOwnPropertyNames / Descriptor / getPrototypeOf stubs
     set(&object, "getOwnPropertyNames", native_val(|_it, _t, a| Ok(match a.get(0) { Some(Value::Obj(o)) => array_val(o.borrow().props.keys().map(|k| str_val(k.clone())).collect()), _ => array_val(Vec::new()) })));
     set(&object, "getOwnPropertyDescriptor", native_val(|_it, _t, a| {
@@ -1868,6 +1910,17 @@ fn install(it: &mut Interp) {
     set(&number_ctor, "parseFloat", native_val(|it, _t, a| Ok(Value::Num(parse_float(&it.to_string(a.get(0).unwrap_or(&Value::Undefined)))))));
     set(&number_ctor, "MAX_SAFE_INTEGER", Value::Num(9007199254740991.0));
     set(&number_ctor, "MIN_SAFE_INTEGER", Value::Num(-9007199254740991.0));
+    set(&number_ctor, "MAX_VALUE", Value::Num(f64::MAX));
+    set(&number_ctor, "MIN_VALUE", Value::Num(f64::MIN_POSITIVE));
+    set(&number_ctor, "EPSILON", Value::Num(f64::EPSILON));
+    set(&number_ctor, "POSITIVE_INFINITY", Value::Num(f64::INFINITY));
+    set(&number_ctor, "NEGATIVE_INFINITY", Value::Num(f64::NEG_INFINITY));
+    set(&number_ctor, "NaN", Value::Num(f64::NAN));
+    // Number.isFinite/isSafeInteger : contrairement aux globales isNaN/isFinite,
+    // les versions statiques NE convertissent PAS ("1" -> false).
+    set(&number_ctor, "isFinite", native_val(|_it, _t, a| Ok(Value::Bool(matches!(a.get(0), Some(Value::Num(n)) if n.is_finite())))));
+    set(&number_ctor, "isSafeInteger", native_val(|_it, _t, a| Ok(Value::Bool(matches!(a.get(0), Some(Value::Num(n)) if n.is_finite() && fract_(*n) == 0.0 && n.abs() <= 9007199254740991.0)))));
+    set(&number_ctor, "parseInt", native_val(|it, _t, a| { let s = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); let radix = a.get(1).map(|v| it.to_num(v) as u32).filter(|r| *r >= 2 && *r <= 36).unwrap_or(10); Ok(Value::Num(parse_int(&s, radix))) }));
     scope_declare(&g, "Number", number_ctor);
     scope_declare(&g, "Boolean", native_val(|_it, _t, a| Ok(Value::Bool(a.get(0).map(truthy).unwrap_or(false)))));
     scope_declare(&g, "NaN", Value::Num(f64::NAN));
@@ -2054,6 +2107,17 @@ fn install(it: &mut Interp) {
         // La clé window y est accessible via scope_get, pas besoin de set dessus directement.
         let _ = g;
     }
+    // _DumpException : rapporteur d'erreurs des bundles Closure (xjs/og). Les
+    // bundles l'appellent dans leur catch racine en supposant que la page l'a
+    // defini (window._DumpException = function(e){throw e}). S'il manque (script
+    // d'amorcage non execute / ordre different), l'appel plantait TOUT le bundle.
+    // Defaut natif : logge et absorbe. La definition de la page, si elle arrive,
+    // le remplace via le pont window<->global (comportement fidele ensuite).
+    scope_declare(&g2, "_DumpException", native_val(|it, _t, a| {
+        let msg = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
+        it.out.push(format!("[_DumpException] {}", msg));
+        Ok(Value::Undefined)
+    }));
     // Dispatcher interne pour les ecouteurs "click" (voir dom_add_event_listener).
     scope_declare(&g2, "__ael", native_val(|it, _t, a| { let n = it.to_num(a.get(0).unwrap_or(&Value::Undefined)) as i64; it.fire_event(n, "click"); Ok(Value::Undefined) }));
 
@@ -3976,5 +4040,21 @@ pub fn selftest() -> Result<(), &'static str> {
             function k(){ {let z=1;} try{ return ''+z; }catch(e){ return 'ok'; } } \
             console.log(f()+','+g()+','+h()+','+k());").map_err(|_| "run-hoist")?;
     if it.out.last().map(|x| x.as_str()) != Some("true,3,7,ok") { return Err("var-hoisting"); }
+    // --- Sprint 4 : motif polyfill Closure (`in` sur window, defineProperty, Number statics) ---
+    // Reproduit le detecteur de la page Google : marche le chemin "Number.isSafeInteger"
+    // sur globalThis avec `in`, pose le polyfill via Object.defineProperty, puis l'appelle.
+    let mut it = Interp::new();
+    it.run("var w=('Number' in globalThis)&&('Object' in window); \
+            var q=function(p,f){var c=globalThis;p=p.split('.');for(var i=0;i<p.length-1;i++){if(!(p[i] in c))return 'miss';c=c[p[i]];}var k=p[p.length-1];var e=c[k];var v=f(e);if(v!=e&&v!=null)Object.defineProperty(c,k,{configurable:true,writable:true,value:v});return 'ok';}; \
+            var r1=q('Number.isSafeInteger',function(a){return a?a:function(b){return typeof b==='number'&&b===b&&b<=9007199254740991;}}); \
+            var r2=q('Object.zzTest',function(a){return a?a:function(){return 42;}}); \
+            console.log(w+','+r1+','+Number.isSafeInteger(3)+','+Number.isFinite('1')+','+r2+','+Object.zzTest());").map_err(|_| "run-closure")?;
+    if it.out.last().map(|x| x.as_str()) != Some("true,ok,true,false,ok,42") { return Err("closure-polyfill"); }
+    // _DumpException par defaut : appelable avant que la page le definisse.
+    let mut it = Interp::new();
+    it.run("var d1=(typeof _DumpException); _DumpException(Error('x')); \
+            window._DumpException=function(e){return 'page';}; \
+            console.log(d1+','+_DumpException(0));").map_err(|_| "run-dump")?;
+    if it.out.last().map(|x| x.as_str()) != Some("function,page") { return Err("dumpexception-default"); }
     Ok(())
 }
