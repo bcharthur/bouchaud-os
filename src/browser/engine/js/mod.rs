@@ -847,8 +847,19 @@ impl Parser {
 // ============================================================================
 
 pub type Env = Rc<RefCell<Scope>>;
-pub struct Scope { vars: BTreeMap<String, Value>, parent: Option<Env> }
-fn new_scope(parent: Option<Env>) -> Env { Rc::new(RefCell::new(Scope { vars: BTreeMap::new(), parent })) }
+pub struct Scope { vars: BTreeMap<String, Value>, parent: Option<Env>, func_scope: bool }
+fn new_scope(parent: Option<Env>) -> Env { Rc::new(RefCell::new(Scope { vars: BTreeMap::new(), parent, func_scope: false })) }
+// Portee de fonction (ou globale) : frontiere de hoisting `var`. `let`/`const`
+// restent lies au bloc courant, mais `var` remonte jusqu'ici.
+fn new_fn_scope(parent: Option<Env>) -> Env { Rc::new(RefCell::new(Scope { vars: BTreeMap::new(), parent, func_scope: true })) }
+// Remonte a la portee de fonction/globale la plus proche (cible des `var`).
+fn fn_scope_of(env: &Env) -> Env {
+    let mut cur = env.clone();
+    loop {
+        let (is_fn, parent) = { let b = cur.borrow(); (b.func_scope, b.parent.clone()) };
+        match parent { Some(p) if !is_fn => cur = p, _ => return cur }
+    }
+}
 fn scope_get(env: &Env, name: &str) -> Option<Value> { let s = env.borrow(); if let Some(v) = s.vars.get(name) { return Some(v.clone()); } if let Some(p) = &s.parent { return scope_get(p, name); } None }
 fn scope_set(env: &Env, name: &str, val: Value) -> bool { let mut s = env.borrow_mut(); if s.vars.contains_key(name) { s.vars.insert(name.to_string(), val); return true; } if let Some(p) = s.parent.clone() { drop(s); return scope_set(&p, name, val); } false }
 fn scope_declare(env: &Env, name: &str, val: Value) { env.borrow_mut().vars.insert(name.to_string(), val); }
@@ -895,7 +906,7 @@ pub struct Interp {
 
 impl Interp {
     pub fn new() -> Interp {
-        let global = new_scope(None);
+        let global = new_fn_scope(None);
         let mut it = Interp {
             global: global.clone(), steps: 0, max_steps: 60_000_000,
             out: Vec::new(), writes: String::new(), dom: DomModel::empty(),
@@ -979,6 +990,7 @@ impl Interp {
         let prog = Parser::new(toks).parse_program()?;
         let genv = self.global.clone();
         self.hoist(&prog, &genv);
+        self.hoist_vars_deep(&prog, &genv);
         let mut last = Value::Undefined;
         for st in &prog {
             match self.exec(st, &genv) {
@@ -1001,7 +1013,40 @@ impl Interp {
     fn hoist(&mut self, stmts: &[Stmt], env: &Env) {
         for s in stmts {
             if let Stmt::Func(name, def) = s { let f = new_obj(Obj { props: OrderedMap::new(), arr: None, call: Some(Callable::User { def: def.clone(), env: env.clone() }), class: "Function" }); scope_declare(env, name, f); }
-            if let Stmt::Class(name, ..) = s { scope_declare(env, name, Value::Undefined); }
+            if let Stmt::Class(name, ..) = s { if !env.borrow().vars.contains_key(name) { scope_declare(env, name, Value::Undefined); } }
+        }
+    }
+
+    // Hoisting `var` (portee fonction/globale) : descend dans les structures de
+    // controle SANS entrer dans les fonctions/classes imbriquees (qui ont leur
+    // propre portee), et pre-declare chaque nom `var` a undefined s'il est absent
+    // de `fenv`. Ne touche ni aux `let`/`const` (block==true), ni aux parametres
+    // deja lies. Corrige `ReferenceError: x is not defined` sur reference en avant
+    // et la fuite de `for(var i...)` hors de la boucle.
+    fn hoist_vars_deep(&mut self, stmts: &[Stmt], fenv: &Env) {
+        for s in stmts { self.hoist_var_stmt(s, fenv); }
+    }
+    fn hoist_var_stmt(&mut self, s: &Stmt, fenv: &Env) {
+        match s {
+            Stmt::Var(false, decls) => {
+                for (pat, _) in decls {
+                    let mut names = Vec::new();
+                    pat_names(pat, &mut names);
+                    for n in names { if !fenv.borrow().vars.contains_key(&n) { scope_declare(fenv, &n, Value::Undefined); } }
+                }
+            }
+            Stmt::If(_, t, e) => { self.hoist_var_stmt(t, fenv); if let Some(e) = e { self.hoist_var_stmt(e, fenv); } }
+            Stmt::Block(b) => self.hoist_vars_deep(b, fenv),
+            Stmt::While(_, b) | Stmt::DoWhile(b, _) => self.hoist_var_stmt(b, fenv),
+            Stmt::For(init, _, _, b) => { if let Some(i) = init { self.hoist_var_stmt(i, fenv); } self.hoist_var_stmt(b, fenv); }
+            Stmt::ForIn(_, _, b, _) => self.hoist_var_stmt(b, fenv),
+            Stmt::Try(tb, catch, fin) => {
+                self.hoist_vars_deep(tb, fenv);
+                if let Some((_, cb)) = catch { self.hoist_vars_deep(cb, fenv); }
+                if let Some(fb) = fin { self.hoist_vars_deep(fb, fenv); }
+            }
+            Stmt::Switch(_, cases) => { for (_, body) in cases { self.hoist_vars_deep(body, fenv); } }
+            _ => {}
         }
     }
 
@@ -1089,7 +1134,20 @@ impl Interp {
         match s {
             Stmt::Empty | Stmt::Func(..) => Flow::Normal(Value::Undefined),
             Stmt::Expr(e) => match self.eval(e, env) { Ok(v) => Flow::Normal(v), Err(t) => Flow::Throw(t) },
-            Stmt::Var(_, decls) => { for (pat, init) in decls { let v = match init { Some(e) => match self.eval(e, env) { Ok(v) => v, Err(t) => return Flow::Throw(t) }, None => Value::Undefined }; if let Err(t) = self.bind_pat(pat, v, env) { return Flow::Throw(t); } } Flow::Normal(Value::Undefined) }
+            Stmt::Var(block, decls) => {
+                // `let`/`const` (block==true) : portee du bloc courant. `var`
+                // (block==false) : portee de fonction/globale (deja pre-hoiste).
+                // Le RHS est toujours evalue dans `env` (voit le bloc courant).
+                let target = if *block { env.clone() } else { fn_scope_of(env) };
+                for (pat, init) in decls {
+                    let v = match init { Some(e) => match self.eval(e, env) { Ok(v) => v, Err(t) => return Flow::Throw(t) }, None => Value::Undefined };
+                    // `var x;` sans initialiseur ne doit pas ecraser une valeur deja
+                    // hoistee/affectee ; `let x;` initialise bien a undefined.
+                    if !*block && init.is_none() { continue; }
+                    if let Err(t) = self.bind_pat(pat, v, &target) { return Flow::Throw(t); }
+                }
+                Flow::Normal(Value::Undefined)
+            }
             Stmt::Block(b) => { let inner = new_scope(Some(env.clone())); self.exec_block(b, &inner) }
             Stmt::Return(e) => { let v = match e { Some(e) => match self.eval(e, env) { Ok(v) => v, Err(t) => return Flow::Throw(t) }, None => Value::Undefined }; Flow::Return(v) }
             Stmt::If(c, t, e) => match self.eval(c, env) { Ok(v) => if truthy(&v) { self.exec(t, env) } else if let Some(e) = e { self.exec(e, env) } else { Flow::Normal(Value::Undefined) }, Err(x) => Flow::Throw(x) },
@@ -1344,12 +1402,17 @@ impl Interp {
         let new_target = self.pending_new_target.take().unwrap_or(Value::Undefined);
         if let Some(f) = native { return f(self, this, args); }
         let def = def.unwrap(); let fenv = fenv.unwrap();
-        let scope = new_scope(Some(fenv));
+        let scope = new_fn_scope(Some(fenv));
         if !def.arrow { scope_declare(&scope, "this", this); scope_declare(&scope, "new.target", new_target); }
         for (i, p) in def.params.iter().enumerate() { scope_declare(&scope, p, args.get(i).cloned().unwrap_or(Value::Undefined)); }
         if let Some(rest) = &def.rest { let r: Vec<Value> = if args.len() > def.params.len() { args[def.params.len()..].to_vec() } else { Vec::new() }; scope_declare(&scope, rest, array_val(r)); }
         if !def.arrow { scope_declare(&scope, "arguments", array_val(args.to_vec())); }
         if let Some(body) = &def.expr_body { return self.eval(body, &scope); }
+        // Hoisting `var` fonction-scope : pre-declare a undefined tous les `var`
+        // du corps (y compris ceux niches dans if/for/blocs), pour que les
+        // references en avant renvoient undefined (et non ReferenceError) et que
+        // `for(var b...)` reste visible apres la boucle.
+        self.hoist_vars_deep(&def.body, &scope);
         match self.exec_block(&def.body, &scope) { Flow::Return(v) => Ok(v), Flow::Throw(t) => Err(t), _ => Ok(Value::Undefined) }
     }
 
@@ -3144,10 +3207,15 @@ fn dom_get(it: &mut Interp, obj: &Rc<RefCell<Obj>>, name: &str) -> Option<Value>
                 "firstChild" | "firstElementChild" => it.dom.nodes[n].children.first().map(|&c| node_handle(c)).unwrap_or(Value::Null),
                 "lastChild" | "lastElementChild" => it.dom.nodes[n].children.last().map(|&c| node_handle(c)).unwrap_or(Value::Null),
                 "parentNode" | "parentElement" => it.dom.parent_of(n).map(node_handle).unwrap_or(Value::Null),
+                "nextSibling" | "nextElementSibling" => it.dom.sibling(n, 1).map(node_handle).unwrap_or(Value::Null),
+                "previousSibling" | "previousElementSibling" => it.dom.sibling(n, -1).map(node_handle).unwrap_or(Value::Null),
+                "name" | "type" | "placeholder" | "title" | "alt" | "rel" | "role" => str_val(it.dom.attr(n, name).unwrap_or("").to_string()),
+                // form.elements : HTMLCollection des controles descendants (array-like avec length).
+                "elements" => { let mut v = Vec::new(); it.dom.controls(n, &mut v); array_val(v.into_iter().map(node_handle).collect()) }
                 "ownerDocument" => scope_get(&it.global, "document").unwrap_or(Value::Null),
                 "style" => style_object(&this),
                 "dataset" => dataset_object(&this),
-                "classList" => class_list(n as i64),
+                "classList" => class_list(it, n as i64),
                 "getAttribute" => native_val(dom_get_attr),
                 "setAttribute" => native_val(dom_set_attr),
                 "hasAttribute" => native_val(dom_has_attr),
@@ -3177,21 +3245,26 @@ fn dom_get(it: &mut Interp, obj: &Rc<RefCell<Obj>>, name: &str) -> Option<Value>
             "getAttribute" => native_val(dom_get_attr),
             "setAttribute" => native_val(dom_set_attr),
             "hasAttribute" => native_val(dom_has_attr),
-            "appendChild" | "append" | "prepend" => native_val(dom_append_child),
+            "removeAttribute" => native_val(|_it, _t, _a| Ok(Value::Undefined)),
+            "appendChild" | "append" | "prepend" | "insertBefore" => native_val(dom_append_child),
             "style" => style_object(&this),
+            "classList" => class_list(it, -1),
             "dataset" => dataset_object(&this),
-            "classList" => class_list(-1),
-            "addEventListener" | "removeEventListener" | "focus" | "click" => native_val(|_it, _t, _a| Ok(Value::Undefined)),
-            // Un element detache (createElement, ou document.body/head avant que la
-            // page n'ait de <body>/<head> reels) n'a pas de descendance connue : les
-            // collections doivent rester typees (tableau/liste vide), jamais
-            // `undefined`, sinon `.length` derriere plante (cf. rebind_document).
+            // Collections vides mais TYPEES : un element detache n'a pas d'enfants
+            // structures dans ce modele (append accumule du texte). On renvoie une
+            // NodeList/HTMLCollection vide (array-like avec .length == 0), jamais
+            // undefined, pour ne pas casser `el.children.length` / iteration.
+            "children" | "childNodes" | "elements" => array_val(Vec::new()),
+            "childElementCount" => Value::Num(0.0),
             "querySelectorAll" | "getElementsByTagName" | "getElementsByClassName" => native_val(|_it, _t, _a| Ok(array_val(Vec::new()))),
             "querySelector" => native_val(|_it, _t, _a| Ok(Value::Null)),
-            "children" | "childNodes" => array_val(Vec::new()),
-            "firstChild" | "firstElementChild" | "lastChild"
-            | "lastElementChild" | "parentNode" | "parentElement" => Value::Null,
-            "childElementCount" => Value::Num(0.0),
+            "firstChild" | "lastChild" | "firstElementChild" | "lastElementChild"
+            | "parentNode" | "parentElement" | "nextSibling" | "previousSibling"
+            | "nextElementSibling" | "previousElementSibling" => Value::Null,
+            "value" | "name" | "type" | "placeholder" => str_val({ let b = obj.borrow(); if let Some(Value::Obj(at)) = b.props.get("__attrs__") { at.borrow().props.get(name).map(|v| it.to_string(v)).unwrap_or_default() } else { String::new() } }),
+            "addEventListener" | "removeEventListener" | "focus" | "blur" | "click"
+            | "removeChild" | "remove" | "replaceChild" | "scrollIntoView" => native_val(|_it, _t, _a| Ok(Value::Undefined)),
+            "matches" | "contains" => native_val(|_it, _t, _a| Ok(Value::Bool(false))),
             _ => { let b = obj.borrow(); b.props.get(name).cloned().unwrap_or(Value::Undefined) }
         });
     }
@@ -3283,9 +3356,25 @@ fn serialize_style(obj: &Rc<RefCell<Obj>>) -> String {
 }
 
 // classList lie a un noeud (n>=0) ; methodes add/remove/toggle/contains.
-fn class_list(n: i64) -> Value {
+fn class_list(it: &mut Interp, n: i64) -> Value {
     let cl = new_obj(Obj::plain());
     set(&cl, "__node__", Value::Num(n as f64));
+    // Snapshot array-like des classes courantes : `length`, indices numeriques et
+    // `value` sont figes a l'acces. Chaque `el.classList` renvoie un objet frais
+    // (dom_get rappelle class_list), donc la valeur reste synchronisee tant qu'on
+    // ne cache pas la reference. Evite `classList.length` == undefined.
+    let classes: Vec<String> = if n >= 0 {
+        it.dom.attr(n as usize, "class").unwrap_or("").split(' ').filter(|x| !x.is_empty()).map(|x| x.to_string()).collect()
+    } else { Vec::new() };
+    set(&cl, "length", Value::Num(classes.len() as f64));
+    set(&cl, "value", str_val(classes.join(" ")));
+    for (i, c) in classes.iter().enumerate() { set(&cl, &i.to_string(), str_val(c.clone())); }
+    set(&cl, "item", native_val(|it, t, a| {
+        let n = handle_node(it, &t); if n < 0 { return Ok(Value::Null); }
+        let i = it.to_num(a.get(0).unwrap_or(&Value::Undefined)) as usize;
+        Ok(it.dom.attr(n as usize, "class").unwrap_or("").split(' ').filter(|x| !x.is_empty()).nth(i).map(str_val).unwrap_or(Value::Null))
+    }));
+    set(&cl, "toString", native_val(|it, t, _a| { let n = handle_node(it, &t); if n < 0 { return Ok(str_val(String::new())); } Ok(str_val(it.dom.attr(n as usize, "class").unwrap_or("").to_string())) }));
     set(&cl, "add", native_val(|it, t, a| { cl_edit(it, &t, a, 0); Ok(Value::Undefined) }));
     set(&cl, "remove", native_val(|it, t, a| { cl_edit(it, &t, a, 1); Ok(Value::Undefined) }));
     set(&cl, "toggle", native_val(|it, t, a| { Ok(Value::Bool(cl_edit(it, &t, a, 2))) }));
@@ -3451,6 +3540,23 @@ impl DomModel {
     }
     fn parent_of(&self, n: usize) -> Option<usize> {
         (1..self.nodes.len()).find(|&p| self.nodes[p].children.contains(&n))
+    }
+    // Frere adjacent (delta = +1 suivant, -1 precedent). Le modele ne traque que
+    // les enfants elements, donc nextSibling == nextElementSibling ici.
+    fn sibling(&self, n: usize, delta: i32) -> Option<usize> {
+        let p = self.parent_of(n)?;
+        let idx = self.nodes[p].children.iter().position(|&c| c == n)? as i32 + delta;
+        if idx < 0 { return None; }
+        self.nodes[p].children.get(idx as usize).copied()
+    }
+    // Controles de formulaire descendants (form.elements) : input/select/textarea/button.
+    fn controls(&self, node: usize, out: &mut Vec<usize>) {
+        if node >= self.nodes.len() { return; }
+        for ci in 0..self.nodes[node].children.len() {
+            let c = self.nodes[node].children[ci];
+            if matches!(self.nodes[c].tag.as_str(), "input" | "select" | "textarea" | "button") { out.push(c); }
+            self.controls(c, out);
+        }
     }
     fn find_by_id(&self, id: &str) -> Option<usize> {
         (1..self.nodes.len()).find(|&n| self.attr(n, "id") == Some(id))
@@ -3838,5 +3944,37 @@ pub fn selftest() -> Result<(), &'static str> {
     it.run("window._ = window._ || {}; window._DumpException = _._DumpException = function(e){ throw e; }; \
             console.log((typeof _DumpException)+','+(typeof window._DumpException)+','+(typeof _._DumpException));").map_err(|_| "run-glob4")?;
     if it.out.last().map(|x| x.as_str()) != Some("function,function,function") { return Err("dumpexception"); }
+    // --- Sprint 2 : collections DOM (length toujours defini, jamais undefined) ---
+    let html = br#"<ul id="l"><li>a</li><li class="x">b</li><li>c</li></ul>
+<form id="f"><input name="q"><button>go</button></form>
+<div id="o"></div>
+<script>
+  var l = document.getElementById('l');
+  var d = document.createElement('div');
+  var f = document.getElementById('f');
+  var r = [l.children.length, document.querySelectorAll('li').length,
+           document.getElementsByTagName('li').length, d.children.length,
+           l.children[0].nextElementSibling.className, f.elements.length,
+           l.firstElementChild.textContent].join('|');
+  document.getElementById('o').textContent = r;
+</script>"#;
+    let out = execute_inline(html, "");
+    let s = core::str::from_utf8(&out).unwrap_or("");
+    if !s.contains("3|3|3|0|x|2|a") { return Err("dom-collections"); }
+    // classList array-like : length, indexation, contains.
+    let out = execute_inline(br#"<div id="c" class="alpha beta"></div><div id="o2"></div><script>
+  var c = document.getElementById('c');
+  document.getElementById('o2').textContent = c.classList.length + ',' + c.classList.contains('beta') + ',' + c.classList[0];
+</script>"#, "");
+    let s = core::str::from_utf8(&out).unwrap_or("");
+    if !s.contains("2,true,alpha") { return Err("classlist"); }
+    // --- Sprint 3 : hoisting `var` fonction-scope (racine de `b is not defined`) ---
+    let mut it = Interp::new();
+    it.run("function f(){ var r=(x===undefined); var x=1; return r; } \
+            function g(){ for(var i=0;i<3;i++){} return i; } \
+            function h(){ { var y=7; } return y; } \
+            function k(){ {let z=1;} try{ return ''+z; }catch(e){ return 'ok'; } } \
+            console.log(f()+','+g()+','+h()+','+k());").map_err(|_| "run-hoist")?;
+    if it.out.last().map(|x| x.as_str()) != Some("true,3,7,ok") { return Err("var-hoisting"); }
     Ok(())
 }
