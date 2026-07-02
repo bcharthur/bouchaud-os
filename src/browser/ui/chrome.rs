@@ -325,7 +325,11 @@ fn click_content(state: &BrowserState, rel_x: i32, rel_y: i32, bw: usize, ch: us
             return ChromeEvent::FocusField(i);
         }
     }
-    // Clic ailleurs : retire le focus eventuel.
+    // Clic ailleurs : retire le focus eventuel. Le log donne la position du
+    // clic et le nombre de cibles connues (diagnostic interaction : champs
+    // absents du layout vs hit-test errone).
+    crate::dlog!(crate::diag::Cat::Info, "nautile: clic ({},{}) sans cible ({} liens, {} champs)",
+        rel_x, cy_doc, tab.page.links.len(), tab.page.fields.len());
     if tab.focused_field.is_some() { return ChromeEvent::Blur; }
     ChromeEvent::None
 }

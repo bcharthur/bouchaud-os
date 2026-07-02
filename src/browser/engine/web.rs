@@ -1673,7 +1673,7 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
     if tag == "img" {
         let attr_w = attr(node, "width").and_then(|s| s.trim_end_matches("px").parse::<i32>().ok()).unwrap_or(0);
         let attr_h = attr(node, "height").and_then(|s| s.trim_end_matches("px").parse::<i32>().ok()).unwrap_or(0);
-        let maxw = if attr_w > 0 { attr_w.clamp(16, f.avail) } else { bx.width.map(|l| l.resolve(f.avail)).unwrap_or(f.avail) }.max(16) as usize;
+        let maxw = if attr_w > 0 { clamp_dyn(attr_w, 16, f.avail) } else { bx.width.map(|l| l.resolve(f.avail)).unwrap_or(f.avail) }.max(16) as usize;
         let maxh = if attr_h > 0 { attr_h.min(2000) } else { bx.height.map(|l| l.resolve(0)).unwrap_or(1600) }.max(16) as usize;
         // Resolution lazy-load / srcset (web moderne).
         if let Some(src) = img_src(node) {
@@ -1695,7 +1695,7 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
         // <video poster="..."> -> on charge l'affiche comme image.
         if tag == "video" {
             if let Some(poster) = attr(node, "poster") {
-                let maxw = bx.width.map(|l| l.resolve(f.avail)).unwrap_or(f.avail / 2).clamp(32, f.avail) as usize;
+                let maxw = clamp_dyn(bx.width.map(|l| l.resolve(f.avail)).unwrap_or(f.avail / 2), 32, f.avail) as usize;
                 let maxh = bx.height.map(|l| l.resolve(0)).unwrap_or(360).max(32) as usize;
                 if let Some(i) = f.ctx.load_image(poster, maxw, maxh) { f.push_image(i, cst.va); return; }
             }
@@ -1711,7 +1711,7 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
                 label = alloc::format!("{} — {}", if tag == "video" { "▶" } else { "♪" }, crate::browser::engine::media::label_for_mime(t));
             }
         }
-        let w = bx.width.map(|l| l.resolve(f.avail)).unwrap_or((label.len() as i32 * 8 + 32).min(f.avail)).clamp(48, f.avail);
+        let w = clamp_dyn(bx.width.map(|l| l.resolve(f.avail)).unwrap_or((label.len() as i32 * 8 + 32).min(f.avail)), 48, f.avail);
         let h = bx.height.map(|l| l.resolve(0)).unwrap_or(if tag == "video" { 180 } else { 36 }).clamp(28, 720);
         f.push_box(w, h, 0xeeeeee, label);
         return;
@@ -1723,7 +1723,7 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
         let cw = 8 * 2;
         let h = bx.height.map(|l| l.resolve(0)).unwrap_or(cw + 8).clamp(cw, 60);
         let default_w = if tag == "textarea" { f.avail } else { (20 * cw).min(f.avail * 3 / 4) };
-        let w = bx.width.map(|l| l.resolve(f.avail)).unwrap_or(default_w).clamp(cw, f.avail);
+        let w = clamp_dyn(bx.width.map(|l| l.resolve(f.avail)).unwrap_or(default_w), cw, f.avail);
         let is_submit = input_type == "submit" || input_type == "button" || input_type == "reset" || tag == "button";
         if is_submit {
             // Bouton : fond bleu Google (ou gris) avec texte centré
@@ -1788,7 +1788,7 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
         Disp::None => {}
         Disp::Inline => { for &c in &node.children { walk(f, dom, c, &cst, depth + 1); } }
         Disp::InlineBlock => {
-            let w = bx.width.map(|l| l.resolve(f.avail)).unwrap_or(f.avail).clamp(8, f.avail);
+            let w = clamp_dyn(bx.width.map(|l| l.resolve(f.avail)).unwrap_or(f.avail), 8, f.avail);
             let frag = make_frag(f, dom, node, &cst, &bx, tag, w, !bx.width.is_some(), depth + 1);
             f.push_frag(frag, 8);
         }
@@ -1882,6 +1882,16 @@ fn layout_positioned(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &Box
     f.ctx.layers.push(Layer { z: bx.z_index.unwrap_or(0), fixed, clip, items, links });
 }
 
+/// Clamp sur borne haute DYNAMIQUE (souvent `f.avail`, qui peut descendre a
+/// quelques pixels dans un conteneur tres etroit). `i32::clamp` panique si
+/// min > max — ici on ramene la borne basse dans [1, hi] : jamais de panic,
+/// et l'element se contente de la place disponible.
+#[inline]
+fn clamp_dyn(v: i32, lo: i32, hi: i32) -> i32 {
+    let hi = hi.max(1);
+    v.clamp(lo.min(hi).max(1), hi)
+}
+
 // Met en page le contenu d'un element dans son propre fragment (largeur `w`).
 // `shrink` : ajuste la largeur finale au contenu (inline-block sans width).
 fn make_frag(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, tag: &str, w: i32, shrink: bool, depth: u32) -> Frag {
@@ -1891,7 +1901,7 @@ fn make_frag(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, t
     for &c in &node.children { walk(&mut sub, dom, c, cst, depth + 1); }
     sub.flush_line();
     let nat = sub.used_w.max(1);
-    let used = sub.used_w.clamp(1, w);
+    let used = sub.used_w.clamp(1, w.max(1));
     let h = sub.y;
     let mut items = core::mem::take(&mut sub.items);
     let links = core::mem::take(&mut sub.links);
@@ -1920,7 +1930,7 @@ fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps
     if let Some(wv) = bx.width { cw = wv.resolve(f.avail); }
     if let Some(mw) = bx.max_width { let m = mw.resolve(f.avail); if cw > m { cw = m; } }
     if let Some(mn) = bx.min_width { let m = mn.resolve(f.avail); if cw < m { cw = m; } }
-    cw = cw.clamp(8, f.avail);
+    cw = clamp_dyn(cw, 8, f.avail);
 
     let indent = match tag { "ul" | "ol" | "blockquote" | "dl" | "dd" => 18, _ => 0 };
     let mut left = indent;
@@ -2092,12 +2102,12 @@ fn flex_inner(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, 
         let ct = cn.tag.as_deref().unwrap_or("");
         let (_ccst, cbx) = compute(f, dom, c, cn, ct, cst);
         if let Some(w) = cbx.width {
-            base.push(w.resolve(f.avail).clamp(8, f.avail));
+            base.push(clamp_dyn(w.resolve(f.avail), 8, f.avail));
             grow.push(0);
         } else {
             // Mesure la largeur naturelle du contenu (sans le forcer à rétrécir).
             let m = child_frag(f, dom, c, cst, cst.align, f.avail, depth);
-            base.push(m.nat.clamp(8, f.avail));
+            base.push(clamp_dyn(m.nat, 8, f.avail));
             grow.push(if cbx.flex_grow > 0 { cbx.flex_grow } else { 0 });
         }
     }
@@ -2143,9 +2153,9 @@ fn flex_inner(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, 
             let cn = &dom.nodes[c];
             let ct = cn.tag.as_deref().unwrap_or("");
             let (_ccst, cbx) = compute(f, dom, c, cn, ct, cst);
-            let w = cbx.width.map(|l| l.resolve(f.avail)).unwrap_or_else(|| {
+            let w = clamp_dyn(cbx.width.map(|l| l.resolve(f.avail)).unwrap_or_else(|| {
                 child_frag(f, dom, c, cst, cst.align, f.avail, depth).nat
-            }).clamp(8, f.avail);
+            }), 8, f.avail);
             if x > f.x0 && x + w > f.x0 + f.avail {
                 f.y += row_h + gap;
                 x = f.x0;
@@ -2169,9 +2179,9 @@ fn grid_inner(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, 
     let cols = (bx.grid_cols as i32).max(1);
     let gap = bx.gap;
     let avail = f.avail;
-    let colw = ((avail - gap * (cols - 1)) / cols).clamp(24, avail);
+    let colw = clamp_dyn((avail - gap * (cols - 1)) / cols, 24, avail);
     // Largeur d'une cellule couvrant `span` colonnes (gaps internes inclus).
-    let span_w = |span: i32| -> i32 { (colw * span + gap * (span - 1)).clamp(24, avail) };
+    let span_w = move |span: i32| -> i32 { clamp_dyn(colw * span + gap * (span - 1), 24, avail) };
 
     let mut col = 0i32;          // colonne courante dans la rangee
     let mut x = f.x0;            // curseur horizontal
