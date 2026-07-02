@@ -145,6 +145,13 @@ pub enum Stmt {
     Class(String, Option<Expr>, Vec<(bool, String, Rc<FuncDef>)>),
     // discriminant, [(test_or_None_for_default, body_stmts)]
     Switch(Expr, Vec<(Option<Expr>, Vec<Stmt>)>),
+    // --- Modules ES ---
+    // import defaut / * as ns / {a, b as c} depuis une URL (specifier)
+    Import { default_: Option<String>, ns: Option<String>, named: Vec<(String, String)>, from: String },
+    ExportDecl(Box<Stmt>),                              // export const/let/var/function/class
+    ExportDefault(Expr),                                // export default <expr>
+    ExportNamed(Vec<(String, String)>, Option<String>), // export {local as exporte} [from "u"]
+    ExportAll(String),                                  // export * from "u"
 }
 
 // ============================================================================
@@ -200,6 +207,9 @@ impl Parser {
     fn eat_punct(&mut self, p: &str) -> bool { if self.is_punct(p) { self.i += 1; true } else { false } }
     fn expect_punct(&mut self, p: &str) -> Result<(), String> { if self.eat_punct(p) { Ok(()) } else { Err(format!("attendu '{}'", p)) } }
     fn semi(&mut self) { let _ = self.eat_punct(";"); }
+    // Mot contextuel (`as`...) : identifiant simple, consomme s'il correspond.
+    fn eat_ident(&mut self, w: &str) -> bool { if matches!(self.peek(), Tok::Ident(x) if x == w) { self.i += 1; true } else { false } }
+    fn str_lit(&mut self) -> Result<String, String> { match self.next() { Tok::Str(s) => Ok(s), _ => Err("attendu une chaine".into()) } }
 
     fn parse_program(&mut self) -> Result<Vec<Stmt>, String> {
         let mut out = Vec::new();
@@ -326,6 +336,22 @@ impl Parser {
                 "from" | "static" | "get" | "set" => { let e = self.parse_expr()?; self.semi(); Ok(Stmt::Expr(e)) }
                 _ => { let e = self.parse_expr()?; self.semi(); Ok(Stmt::Expr(e)) }
             },
+            // Modules ES : `import ...` en tete de statement (mais PAS l'import
+            // dynamique `import(...)` ni `import.meta`, qui sont des expressions).
+            Tok::Ident(x) if x == "import"
+                && !matches!(self.toks.get(self.i + 1).map(|t| &t.0), Some(Tok::Punct(p)) if p == "(" || p == ".") => {
+                self.parse_import()
+            }
+            // `export ...` : uniquement devant une forme de module reconnue,
+            // sinon `export` reste un identifiant ordinaire.
+            Tok::Ident(x) if x == "export"
+                && matches!(self.toks.get(self.i + 1).map(|t| &t.0),
+                    Some(Tok::Punct(p)) if p == "{" || p == "*")
+                || x == "export"
+                && matches!(self.toks.get(self.i + 1).map(|t| &t.0),
+                    Some(Tok::Keyword(k)) if matches!(k.as_str(), "var" | "let" | "const" | "function" | "class" | "async" | "default")) => {
+                self.parse_export()
+            }
             // Statement etiquete `label: stmt` (tres frequent en JS minifie pour
             // les boucles `a:for(...){...break a}`). On consomme l'etiquette et on
             // parse le statement suivant ; break/continue retombent sur la boucle
@@ -336,6 +362,79 @@ impl Parser {
             }
             _ => { let e = self.parse_expr()?; self.semi(); Ok(Stmt::Expr(e)) }
         }
+    }
+
+    /// `import "u"` | `import d from "u"` | `import * as ns from "u"` |
+    /// `import {a, b as c} from "u"` | `import d, {a} from "u"` | `import d, * as ns from "u"`
+    fn parse_import(&mut self) -> Result<Stmt, String> {
+        self.i += 1; // 'import'
+        if let Tok::Str(u) = self.peek().clone() {
+            self.i += 1; self.semi();
+            return Ok(Stmt::Import { default_: None, ns: None, named: Vec::new(), from: u });
+        }
+        let mut default_ = None; let mut ns = None; let mut named = Vec::new();
+        loop {
+            match self.peek().clone() {
+                Tok::Punct(p) if p == "*" => {
+                    self.i += 1;
+                    if !self.eat_ident("as") { return Err("import: attendu 'as'".into()); }
+                    ns = Some(self.ident()?);
+                }
+                Tok::Punct(p) if p == "{" => {
+                    self.i += 1;
+                    while !self.is_punct("}") && !matches!(self.peek(), Tok::Eof) {
+                        let imported = self.ident()?;
+                        let local = if self.eat_ident("as") { self.ident()? } else { imported.clone() };
+                        named.push((imported, local));
+                        if !self.eat_punct(",") { break; }
+                    }
+                    self.expect_punct("}")?;
+                }
+                Tok::Ident(_) | Tok::Keyword(_) => { default_ = Some(self.ident()?); }
+                _ => return Err("import invalide".into()),
+            }
+            if !self.eat_punct(",") { break; }
+        }
+        if !self.is_kw("from") { return Err("import: attendu 'from'".into()); }
+        self.i += 1;
+        let from = self.str_lit()?;
+        self.semi();
+        Ok(Stmt::Import { default_, ns, named, from })
+    }
+
+    /// `export default expr` | `export {a as b} [from "u"]` | `export * from "u"` |
+    /// `export const/let/var/function/class/async ...`
+    fn parse_export(&mut self) -> Result<Stmt, String> {
+        self.i += 1; // 'export'
+        if self.is_kw("default") {
+            self.i += 1;
+            let e = self.parse_expr()?; self.semi();
+            return Ok(Stmt::ExportDefault(e));
+        }
+        if self.eat_punct("*") {
+            if self.eat_ident("as") { let _ = self.ident()?; } // `export * as ns` simplifie en export *
+            if !self.is_kw("from") { return Err("export *: attendu 'from'".into()); }
+            self.i += 1;
+            let from = self.str_lit()?; self.semi();
+            return Ok(Stmt::ExportAll(from));
+        }
+        if self.eat_punct("{") {
+            let mut list = Vec::new();
+            while !self.is_punct("}") && !matches!(self.peek(), Tok::Eof) {
+                let local = self.ident()?;
+                let exported = if self.eat_ident("as") { self.ident()? } else { local.clone() };
+                list.push((local, exported));
+                if !self.eat_punct(",") { break; }
+            }
+            self.expect_punct("}")?;
+            let from = if self.is_kw("from") { self.i += 1; Some(self.str_lit()?) } else { None };
+            self.semi();
+            return Ok(Stmt::ExportNamed(list, from));
+        }
+        // export <declaration> : la declaration s'execute normalement, puis ses
+        // noms sont recopies sur l'objet exports du module courant.
+        let inner = self.parse_stmt()?;
+        Ok(Stmt::ExportDecl(Box::new(inner)))
     }
 
     fn skip_balanced_after_brace(&mut self) -> Result<(), String> {
@@ -904,6 +1003,9 @@ pub struct Interp {
     global_obj: Option<Rc<RefCell<Obj>>>, // objet `window` (pont window <-> portee globale)
     vw: i32,                              // viewport : largeur CSS (px)
     vh: i32,                              // viewport : hauteur CSS (px)
+    modules: BTreeMap<String, Value>,     // modules ES charges (URL -> objet namespace)
+    module_stack: Vec<String>,            // URLs des modules en cours (imports relatifs)
+    exports_stack: Vec<Value>,            // objet exports du module en cours d'execution
 }
 
 impl Interp {
@@ -917,6 +1019,7 @@ impl Interp {
             base_url: String::new(), pending_new_target: None,
             global_obj: None,
             vw: 1024, vh: 768,
+            modules: BTreeMap::new(), module_stack: Vec::new(), exports_stack: Vec::new(),
         };
         install(&mut it);
         it
@@ -934,6 +1037,29 @@ impl Interp {
             self.set_prop(&win, "outerWidth", Value::Num(self.vw as f64));
             self.set_prop(&win, "outerHeight", Value::Num(self.vh as f64));
         }
+    }
+
+    /// Installe un objet `location` COMPLET derive de l'URL reelle de la page
+    /// (href/protocol/host/hostname/port/pathname/search/hash/origin) — le meme
+    /// objet sur window.location, document.location et la globale `location`.
+    /// A appeler apres avoir pose `base_url` (racine du crash
+    /// « Cannot read properties of undefined (reading 'match') » :
+    /// location.search etait absent).
+    pub fn install_location(&mut self) {
+        let href = if self.base_url.is_empty() { String::from("https://localhost/") } else { self.base_url.clone() };
+        let loc = make_location_obj(&href);
+        if let Some(w) = scope_get(&self.global, "window") { set(&w, "location", loc.clone()); }
+        if let Some(d) = scope_get(&self.global, "document") { set(&d, "location", loc.clone()); }
+        scope_declare(&self.global, "location", loc);
+        // document.URL / document.domain / document.referrer coherents.
+        if let Some(d) = scope_get(&self.global, "document") {
+            set(&d, "URL", str_val(href.clone()));
+            set(&d, "documentURI", str_val(href.clone()));
+            set(&d, "domain", str_val(host_of(&href).to_string()));
+        }
+        // origin global (window.origin).
+        let (protocol, _, _, host, ..) = split_url(&href);
+        scope_declare(&self.global, "origin", str_val(format!("{}//{}", protocol, host)));
     }
 
     // Draine les files de taches : microtaches (Promise) en priorite, puis une
@@ -1038,8 +1164,74 @@ impl Interp {
         Ok(last)
     }
 
+    /// Charge (avec cache) un module ES et renvoie son objet namespace.
+    /// Le specifier est resolu contre l'URL du module courant (imports
+    /// relatifs `./x.js`, `../x.js`) ou l'URL de la page.
+    fn load_module(&mut self, spec: &str) -> Result<Value, String> {
+        let base = self.module_stack.last().cloned().unwrap_or_else(|| self.base_url.clone());
+        let url = resolve_url(&base, spec);
+        if let Some(v) = self.modules.get(&url) { return Ok(v.clone()); }
+        if self.module_stack.len() >= 32 { return Err(format!("imports trop profonds: {}", url)); }
+        // Namespace enregistre AVANT execution : les cycles d'import voient un
+        // namespace partiel (semantique proche des vrais modules ES).
+        let ns = new_obj(Obj::plain());
+        self.modules.insert(url.clone(), ns.clone());
+        let bytes = crate::net::fetch_cached(&url).ok_or_else(|| format!("module introuvable: {}", url))?;
+        if bytes.len() > MAX_SCRIPT { return Err(format!("module trop gros ({}o): {}", bytes.len(), url)); }
+        let src = alloc::string::String::from_utf8_lossy(&bytes).into_owned();
+        match self.run_module(&src, &url, ns.clone()) {
+            Ok(()) => { crate::dlog!(crate::diag::Cat::Js, "module ES {}o OK {}", bytes.len(), url); Ok(ns) }
+            Err(e) => { crate::dlog!(crate::diag::Cat::Err, "module ES {} : {}", url, e); Err(e) }
+        }
+    }
+
+    /// Execute une source comme module ES : portee propre (les declarations ne
+    /// fuient pas dans le global, mais voient le global), exports collectes
+    /// dans `ns`, imports relatifs resolus contre `url`.
+    pub fn run_module(&mut self, src: &str, url: &str, ns: Value) -> Result<(), String> {
+        let toks = Lexer::new(src.as_bytes()).lex_all()?;
+        let mut parser = Parser::new(toks);
+        let prog = parser.parse_program()?;
+        if parser.recovered > 0 {
+            crate::dlog!(crate::diag::Cat::Js, "module: {} stmt(s) recuperes/sautes ({}o); 1re erreur: {} | ctx: {}",
+                parser.recovered, src.len(),
+                parser.first_err.as_deref().unwrap_or("?"),
+                parser.first_ctx.as_deref().unwrap_or("?"));
+        }
+        let menv = new_fn_scope(Some(self.global.clone()));
+        // `import.meta.url` du module courant (l'identifiant `import` reste
+        // aussi appelable : import dynamique).
+        let imp = native_val(native_dynamic_import);
+        let meta = new_obj(Obj::plain());
+        set(&meta, "url", str_val(url.to_string()));
+        set(&imp, "meta", meta);
+        scope_declare(&menv, "import", imp);
+        self.module_stack.push(url.to_string());
+        self.exports_stack.push(ns);
+        self.hoist(&prog, &menv);
+        self.hoist_vars_deep(&prog, &menv);
+        let mut err = None;
+        for st in &prog {
+            match self.exec(st, &menv) {
+                Flow::Throw(v) => { err = Some(format!("Uncaught {}", self.to_string(&v))); break; }
+                Flow::Return(_) => break,
+                _ => {}
+            }
+        }
+        self.exports_stack.pop();
+        self.module_stack.pop();
+        match err { Some(e) => Err(e), None => Ok(()) }
+    }
+
+    /// Point d'entree d'un `<script type="module">` de page (inline ou externe).
+    pub fn run_module_script(&mut self, src: &str, url: &str) -> Result<(), String> {
+        let ns = new_obj(Obj::plain());
+        self.run_module(src, url, ns)
+    }
+
     fn hoist(&mut self, stmts: &[Stmt], env: &Env) {
         for s in stmts {
+            let s = if let Stmt::ExportDecl(inner) = s { &**inner } else { s };
             if let Stmt::Func(name, def) = s { let f = new_obj(Obj { props: OrderedMap::new(), arr: None, call: Some(Callable::User { def: def.clone(), env: env.clone() }), class: "Function" }); scope_declare(env, name, f); }
             if let Stmt::Class(name, ..) = s { if !env.borrow().vars.contains_key(name) { scope_declare(env, name, Value::Undefined); } }
         }
@@ -1074,6 +1266,7 @@ impl Interp {
                 if let Some(fb) = fin { self.hoist_vars_deep(fb, fenv); }
             }
             Stmt::Switch(_, cases) => { for (_, body) in cases { self.hoist_vars_deep(body, fenv); } }
+            Stmt::ExportDecl(inner) => self.hoist_var_stmt(inner, fenv),
             _ => {}
         }
     }
@@ -1246,6 +1439,74 @@ impl Interp {
                 }
                 Flow::Normal(Value::Undefined) // switch absorbs Break
             }
+            // --- Modules ES ---
+            Stmt::Import { default_, ns, named, from } => {
+                match self.load_module(from) {
+                    Ok(nsval) => {
+                        if let Some(d) = default_ {
+                            let v = self.get_prop(&nsval, "default").unwrap_or(Value::Undefined);
+                            scope_declare(env, d, v);
+                        }
+                        if let Some(n) = ns { scope_declare(env, n, nsval.clone()); }
+                        for (imported, local) in named {
+                            let v = self.get_prop(&nsval, imported).unwrap_or(Value::Undefined);
+                            scope_declare(env, local, v);
+                        }
+                        Flow::Normal(Value::Undefined)
+                    }
+                    Err(e) => Flow::Throw(str_val(e)),
+                }
+            }
+            Stmt::ExportDecl(inner) => {
+                let fl = self.exec(inner, env);
+                if let Some(exp) = self.exports_stack.last().cloned() {
+                    let mut names: Vec<String> = Vec::new();
+                    match &**inner {
+                        Stmt::Var(_, decls) => { for (p, _) in decls { pat_names(p, &mut names); } }
+                        Stmt::Func(n, _) | Stmt::Class(n, ..) => names.push(n.clone()),
+                        _ => {}
+                    }
+                    for n in names { if let Some(v) = scope_get(env, &n) { set(&exp, &n, v); } }
+                }
+                fl
+            }
+            Stmt::ExportDefault(e) => match self.eval(e, env) {
+                Ok(v) => {
+                    if let Some(exp) = self.exports_stack.last().cloned() { set(&exp, "default", v); }
+                    Flow::Normal(Value::Undefined)
+                }
+                Err(t) => Flow::Throw(t),
+            },
+            Stmt::ExportNamed(list, from) => {
+                let src_ns = match from {
+                    Some(u) => match self.load_module(u) { Ok(v) => Some(v), Err(e) => return Flow::Throw(str_val(e)) },
+                    None => None,
+                };
+                if let Some(exp) = self.exports_stack.last().cloned() {
+                    for (local, exported) in list {
+                        let v = match &src_ns {
+                            Some(ns) => self.get_prop(ns, local).unwrap_or(Value::Undefined),
+                            None => scope_get(env, local).unwrap_or(Value::Undefined),
+                        };
+                        set(&exp, exported, v);
+                    }
+                }
+                Flow::Normal(Value::Undefined)
+            }
+            Stmt::ExportAll(from) => {
+                match self.load_module(from) {
+                    Ok(ns) => {
+                        if let (Some(exp), Value::Obj(src)) = (self.exports_stack.last().cloned(), &ns) {
+                            let kv: Vec<(String, Value)> = src.borrow().props.iter()
+                                .filter(|(k, _)| k.as_str() != "default")
+                                .map(|(k, v)| (k.clone(), v.clone())).collect();
+                            for (k, v) in kv { set(&exp, &k, v); }
+                        }
+                        Flow::Normal(Value::Undefined)
+                    }
+                    Err(e) => Flow::Throw(str_val(e)),
+                }
+            }
         }
     }
 
@@ -1365,7 +1626,7 @@ impl Interp {
         };
         if opt && matches!(func, Value::Undefined | Value::Null) { return Ok(Value::Undefined); }
         let argv = self.eval_args(args, env)?;
-        let r = self.call(func, this, &argv);
+        let r = self.call(func.clone(), this, &argv);
         // Enrichit le diagnostic "not a function" avec le nom de l'appelé.
         if let Err(e) = &r {
             if matches!(e, Value::Str(s) if s.as_str() == "TypeError: not a function") {
@@ -1375,7 +1636,13 @@ impl Interp {
                     _ => None,
                 };
                 if let Some(nm) = nm {
-                    return Err(str_val(format!("TypeError: {} is not a function", nm)));
+                    // Le typeof de la valeur resolue tranche le diagnostic :
+                    // undefined = jamais defini ; object = defini mais pas callable.
+                    let desc = match &func {
+                        Value::Obj(o) => { let b = o.borrow(); if b.call.is_some() { String::from("function") } else { format!("object[{}]", b.class) } }
+                        v => String::from(type_of(v)),
+                    };
+                    return Err(str_val(format!("TypeError: {} is not a function (= {})", nm, desc)));
                 }
             }
         }
@@ -2193,6 +2460,34 @@ fn install(it: &mut Interp) {
     scope_declare(&g2, "performance", perf);
     // RegExp : constructeur reel (moteur backtracking, cf. module regex).
     scope_declare(&g2, "RegExp", native_val(regexp_ctor));
+    // URL / URLSearchParams : constructeurs reels (parsing complet). `new URL(u, base)`
+    // resout `u` contre `base` ; expose searchParams.
+    scope_declare(&g2, "URL", native_val(|it, _t, a| {
+        let u = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
+        let abs = match a.get(1) {
+            Some(b) if !matches!(b, Value::Undefined | Value::Null) => { let base = it.to_string(b); resolve_url(&base, &u) }
+            _ if u.contains("://") => u.clone(),
+            _ => resolve_url(&it.base_url.clone(), &u),
+        };
+        let o = make_location_obj(&abs);
+        if let Ok(Value::Str(s)) = it.get_prop(&o, "search") {
+            set(&o, "searchParams", make_url_search_params(&s));
+        } else {
+            set(&o, "searchParams", make_url_search_params(""));
+        }
+        Ok(o)
+    }));
+    scope_declare(&g2, "URLSearchParams", native_val(|it, _t, a| {
+        let init = match a.get(0) { Some(v) if !matches!(v, Value::Undefined | Value::Null) => it.to_string(v), _ => String::new() };
+        Ok(make_url_search_params(&init))
+    }));
+    // `import(...)` dynamique au niveau page (hors module) : charge un module ES.
+    // `import.meta.url` vaut l'URL de la page (les modules recoivent le leur).
+    let imp = native_val(native_dynamic_import);
+    let imp_meta = new_obj(Obj::plain());
+    set(&imp_meta, "url", str_val(String::new()));
+    set(&imp, "meta", imp_meta);
+    scope_declare(&g2, "import", imp);
     // fetch : renvoie une Promise résolue avec une Response vide
     scope_declare(&g2, "fetch", native_val(|_it, _t, _a| Ok(make_resolved_thenable(new_obj(Obj::plain())))));
     // XMLHttpRequest stub
@@ -3648,6 +3943,14 @@ impl DomModel {
                 if !closing {
                     let close: &[u8] = if name == "script" { b"</script" } else { b"</style" };
                     let ce = find_ci(html, close, gt + 1).unwrap_or(html.len());
+                    // Le noeud ENTRE dans l'arbre (getElementsByTagName("script")[0],
+                    // script.parentNode, insertBefore de loaders...) mais son contenu
+                    // reste du texte brut : pas d'enfants, pas de re-execution.
+                    let attrs = parse_attrs_dom(&raw[p..]);
+                    let idx = nodes.len();
+                    nodes.push(DomNode { tag: name.clone(), attrs, open_start: lt, inner_start: gt + 1, inner_end: ce.min(html.len()), children: Vec::new(), pending_inner: None, appends: String::new(), dirty: false });
+                    let parent = *stack.last().unwrap_or(&0);
+                    nodes[parent].children.push(idx);
                     i = find_ci(html, b">", ce).map(|q| q + 1).unwrap_or(html.len());
                 } else { i = gt + 1; }
                 continue;
@@ -3859,6 +4162,180 @@ fn host_of(base: &str) -> &str {
     match rest.find('/') { Some(i) => &rest[..i], None => rest }
 }
 
+/// Resout une URL contre une URL de base COMPLETE (pas seulement scheme+host) :
+/// gere absolu, `//host/...`, `/racine`, `./relatif`, `../parent` — necessaire
+/// pour les imports de modules ES (`import x from "./chunk.js"`).
+fn resolve_url(base: &str, rel: &str) -> String {
+    if rel.starts_with("http://") || rel.starts_with("https://") { return rel.to_string(); }
+    let scheme = scheme_of(base);
+    if let Some(rest) = rel.strip_prefix("//") { return format!("{}://{}", scheme, rest); }
+    let host = host_of(base);
+    if rel.starts_with('/') { return format!("{}://{}{}", scheme, host, rel); }
+    // Repertoire du document/module de base (sans query ni fragment).
+    let after = base.strip_prefix("https://").or_else(|| base.strip_prefix("http://")).unwrap_or(base);
+    let path = match after.find('/') { Some(i) => &after[i..], None => "/" };
+    let path = path.split(['?', '#']).next().unwrap_or("/");
+    let dir = match path.rfind('/') { Some(i) => &path[..i + 1], None => "/" };
+    // Normalisation ./ et ../ segment par segment.
+    let mut segs: Vec<&str> = Vec::new();
+    for s in dir.split('/').chain(rel.split('/')) {
+        match s { "" | "." => {} ".." => { segs.pop(); } x => segs.push(x) }
+    }
+    format!("{}://{}/{}", scheme, host, segs.join("/"))
+}
+
+/// `import("u")` dynamique : charge le module (synchrone dans cet OS) et
+/// renvoie une promesse resolue avec son namespace. En cas d'echec, promesse
+/// resolue avec undefined + log (pas de rejet non gere qui casserait la page).
+fn native_dynamic_import(it: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    let spec = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
+    match it.load_module(&spec) {
+        Ok(ns) => Ok(make_resolved_thenable(ns)),
+        Err(e) => { crate::dlog!(crate::diag::Cat::Err, "import() {} : {}", spec, e); Ok(make_resolved_thenable(new_obj(Obj::plain()))) }
+    }
+}
+
+/// Decompose une URL absolue en composants `location` :
+/// (protocol, hostname, port, host, pathname, search, hash).
+fn split_url(u: &str) -> (String, String, String, String, String, String, String) {
+    let (scheme, rest) = match u.find("://") { Some(p) => (&u[..p], &u[p + 3..]), None => ("https", u) };
+    let cut = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (hostport, pathrest) = (&rest[..cut], &rest[cut..]);
+    let (hostname, port) = match hostport.rfind(':') {
+        Some(p) if !hostport[p + 1..].is_empty() && hostport[p + 1..].bytes().all(|c| c.is_ascii_digit()) =>
+            (&hostport[..p], &hostport[p + 1..]),
+        _ => (hostport, ""),
+    };
+    let (before_hash, hash) = match pathrest.find('#') { Some(p) => (&pathrest[..p], &pathrest[p..]), None => (pathrest, "") };
+    let (path, search) = match before_hash.find('?') { Some(p) => (&before_hash[..p], &before_hash[p..]), None => (before_hash, "") };
+    let pathname = if path.is_empty() { "/" } else { path };
+    (format!("{}:", scheme), hostname.to_string(), port.to_string(), hostport.to_string(),
+     pathname.to_string(), search.to_string(), hash.to_string())
+}
+
+/// Construit un objet `location`/`URL` complet (href, protocol, host, hostname,
+/// port, pathname, search, hash, origin + reload/assign/replace/toString).
+fn make_location_obj(href: &str) -> Value {
+    let loc = new_obj(Obj::plain());
+    let (protocol, hostname, port, host, pathname, search, hash) = split_url(href);
+    let origin = format!("{}//{}", protocol, host);
+    set(&loc, "href", str_val(href.to_string()));
+    set(&loc, "protocol", str_val(protocol));
+    set(&loc, "host", str_val(host));
+    set(&loc, "hostname", str_val(hostname));
+    set(&loc, "port", str_val(port));
+    set(&loc, "pathname", str_val(pathname));
+    set(&loc, "search", str_val(search));
+    set(&loc, "hash", str_val(hash));
+    set(&loc, "origin", str_val(origin));
+    set(&loc, "reload", native_val(|_it, _t, _a| Ok(Value::Undefined)));
+    set(&loc, "assign", native_val(|_it, _t, _a| Ok(Value::Undefined)));
+    set(&loc, "replace", native_val(|_it, _t, _a| Ok(Value::Undefined)));
+    set(&loc, "toString", native_val(|it, t, _a| { let h = it.get_prop(&t, "href")?; Ok(str_val(it.to_string(&h))) }));
+    loc
+}
+
+/// Paires (cle, valeur) d'un URLSearchParams (stockees dans `__pairs`).
+fn usp_pairs(v: &Value) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let Value::Obj(o) = v {
+        if let Some(Value::Obj(p)) = o.borrow().props.get("__pairs") {
+            if let Some(arr) = &p.borrow().arr {
+                for kv in arr {
+                    if let Value::Obj(kvo) = kv {
+                        if let Some(a) = &kvo.borrow().arr {
+                            let k = if let Some(Value::Str(s)) = a.get(0) { (**s).clone() } else { String::new() };
+                            let val = if let Some(Value::Str(s)) = a.get(1) { (**s).clone() } else { String::new() };
+                            out.push((k, val));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+fn usp_store(v: &Value, pairs: Vec<(String, String)>) {
+    let arr: Vec<Value> = pairs.into_iter().map(|(k, val)| array_val(vec![str_val(k), str_val(val)])).collect();
+    set(v, "__pairs", array_val(arr));
+}
+
+/// Objet URLSearchParams : parse `?a=b&c=d`, expose get/getAll/has/set/append/
+/// delete/forEach/toString (suffisant pour location.search et les SERP).
+fn make_url_search_params(init: &str) -> Value {
+    let s = init.strip_prefix('?').unwrap_or(init);
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for kv in s.split('&').filter(|x| !x.is_empty()) {
+        let mut parts = kv.splitn(2, '=');
+        let k = uri_decode(&parts.next().unwrap_or("").replace('+', " "));
+        let v = uri_decode(&parts.next().unwrap_or("").replace('+', " "));
+        pairs.push((k, v));
+    }
+    let o = new_obj(Obj::plain());
+    usp_store(&o, pairs);
+    set(&o, "get", native_val(|it, t, a| {
+        let k = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
+        Ok(usp_pairs(&t).into_iter().find(|(pk, _)| pk == &k).map(|(_, v)| str_val(v)).unwrap_or(Value::Null))
+    }));
+    set(&o, "getAll", native_val(|it, t, a| {
+        let k = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
+        Ok(array_val(usp_pairs(&t).into_iter().filter(|(pk, _)| pk == &k).map(|(_, v)| str_val(v)).collect()))
+    }));
+    set(&o, "has", native_val(|it, t, a| {
+        let k = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
+        Ok(Value::Bool(usp_pairs(&t).iter().any(|(pk, _)| pk == &k)))
+    }));
+    set(&o, "set", native_val(|it, t, a| {
+        let k = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
+        let v = it.to_string(a.get(1).unwrap_or(&Value::Undefined));
+        let mut pairs: Vec<(String, String)> = usp_pairs(&t).into_iter().filter(|(pk, _)| pk != &k).collect();
+        pairs.push((k, v));
+        usp_store(&t, pairs);
+        Ok(Value::Undefined)
+    }));
+    set(&o, "append", native_val(|it, t, a| {
+        let k = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
+        let v = it.to_string(a.get(1).unwrap_or(&Value::Undefined));
+        let mut pairs = usp_pairs(&t);
+        pairs.push((k, v));
+        usp_store(&t, pairs);
+        Ok(Value::Undefined)
+    }));
+    set(&o, "delete", native_val(|it, t, a| {
+        let k = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
+        let pairs: Vec<(String, String)> = usp_pairs(&t).into_iter().filter(|(pk, _)| pk != &k).collect();
+        usp_store(&t, pairs);
+        Ok(Value::Undefined)
+    }));
+    set(&o, "forEach", native_val(|it, t, a| {
+        let cb = a.get(0).cloned().unwrap_or(Value::Undefined);
+        for (k, v) in usp_pairs(&t) { it.call(cb.clone(), Value::Undefined, &[str_val(v), str_val(k)])?; }
+        Ok(Value::Undefined)
+    }));
+    set(&o, "toString", native_val(|_it, t, _a| {
+        let mut s = String::new();
+        for (i, (k, v)) in usp_pairs(&t).into_iter().enumerate() {
+            if i > 0 { s.push('&'); }
+            s.push_str(&uri_encode_component(&k)); s.push('='); s.push_str(&uri_encode_component(&v));
+        }
+        Ok(str_val(s))
+    }));
+    o
+}
+
+/// Encodage x-www-form-urlencoded minimal (toString d'URLSearchParams).
+fn uri_encode_component(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b' ' => out.push('+'),
+            _ => { out.push('%'); out.push_str(&format!("{:02X}", b)); }
+        }
+    }
+    out
+}
+
 /// Evalue une expression JS isolee et renvoie son resultat formate (semantique
 /// JS). Utilise par l'application Calculatrice : l'OS calcule via son propre
 /// moteur de langage embarque.
@@ -3933,6 +4410,7 @@ fn open_page_inner(html: &[u8], base_url: &str, run: bool, vw: i32, vh: i32) -> 
     let mut interp = Interp::new();
     interp.base_url = base_url.to_string();
     interp.set_viewport(vw, vh);
+    interp.install_location();
     interp.dom = DomModel::parse(html);
     interp.rebind_document();
     let mut scripts: Vec<(usize, usize, String)> = Vec::new();
@@ -3966,9 +4444,12 @@ fn open_page_inner(html: &[u8], base_url: &str, run: bool, vw: i32, vh: i32) -> 
                             if bytes.len() <= MAX_SCRIPT && script_bytes + bytes.len() <= MAX_TOTAL_SCRIPT {
                                 let code = alloc::string::String::from_utf8_lossy(&bytes);
                                 interp.writes.clear();
-                                match interp.run(&code) {
-                                    Ok(_) => crate::dlog!(crate::diag::Cat::Js, "script ext {}o OK {}", bytes.len(), abs),
-                                    Err(e) => crate::dlog!(crate::diag::Cat::Err, "script ext {} : {}", abs, e),
+                                // type="module" : execution en module ES (import/export,
+                                // portee propre, imports relatifs a l'URL du script).
+                                let r = if typ == "module" { interp.run_module_script(&code, &abs) } else { interp.run(&code).map(|_| ()) };
+                                match r {
+                                    Ok(_) => crate::dlog!(crate::diag::Cat::Js, "script ext{} {}o OK {}", if typ == "module" { " [module]" } else { "" }, bytes.len(), abs),
+                                    Err(e) => crate::dlog!(crate::diag::Cat::Err, "script ext{} {} : {}", if typ == "module" { " [module]" } else { "" }, abs, e),
                                 }
                                 ran += 1;
                                 script_bytes += bytes.len();
@@ -3983,8 +4464,9 @@ fn open_page_inner(html: &[u8], base_url: &str, run: bool, vw: i32, vh: i32) -> 
                     if len <= MAX_SCRIPT && script_bytes + len <= MAX_TOTAL_SCRIPT {
                         if let Ok(src) = core::str::from_utf8(&html[content_start..content_end]) {
                             interp.writes.clear();
-                            if let Err(e) = interp.run(src) {
-                                crate::dlog!(crate::diag::Cat::Err, "script inline ({}o) : {}", src.len(), e);
+                            let r = if typ == "module" { interp.run_module_script(src, base_url) } else { interp.run(src).map(|_| ()) };
+                            if let Err(e) = r {
+                                crate::dlog!(crate::diag::Cat::Err, "script inline{} ({}o) : {}", if typ == "module" { " [module]" } else { "" }, src.len(), e);
                             }
                             ran += 1;
                             script_bytes += len;
@@ -4147,5 +4629,38 @@ pub fn selftest() -> Result<(), &'static str> {
     let mut ctx = ctx;
     let v = ctx.interp.run("__m").map_err(|_| "run-viewport")?;
     if ctx.interp.to_string(&v) != "800,500,500,number,0" { return Err("viewport"); }
+    // --- Sprint 6 : location complet, URL/URLSearchParams, modules ES ---
+    // location derive de l'URL reelle (search/hash/hostname/origin presents).
+    let mut it = Interp::new();
+    it.base_url = String::from("https://www.ecosia.org/search?q=chat&lang=fr");
+    it.install_location();
+    it.run("console.log([location.hostname, location.pathname, location.search, location.origin, \
+            window.location.search===document.location.search].join('|'));").map_err(|_| "run-location")?;
+    if it.out.last().map(|x| x.as_str()) != Some("www.ecosia.org|/search|?q=chat&lang=fr|https://www.ecosia.org|true") { return Err("location"); }
+    // URLSearchParams + new URL : parsing et resolution relative.
+    it.run("var p=new URLSearchParams(location.search); \
+            var u=new URL('../img/logo.png','https://a.b/c/d/page.html'); \
+            console.log([p.get('q'), p.has('lang'), (p.get('absent')===null), u.href, u.hostname].join('|'));").map_err(|_| "run-url")?;
+    if it.out.last().map(|x| x.as_str()) != Some("chat|true|true|https://a.b/c/img/logo.png|a.b") { return Err("url-searchparams"); }
+    // Modules ES : export (const/function/default/named) collectes dans le
+    // namespace, import consomme le namespace, portee isolee du global.
+    let mut it = Interp::new();
+    let ns = new_obj(Obj::plain());
+    it.run_module("export const a=1; export function double(x){return 2*x;} \
+                   const secret=9; export default 'dflt'; export {secret as s};",
+                  "https://x/m.js", ns.clone()).map_err(|_| "run-module")?;
+    it.modules.insert(String::from("https://x/m.js"), ns);
+    it.run_module("import d, {a, double as dbl, s} from './m.js'; \
+                   window.__mod = [d, a, dbl(21), s, typeof secret].join('|');",
+                  "https://x/main.js", new_obj(Obj::plain())).map_err(|_| "run-import")?;
+    let v = it.run("__mod").map_err(|_| "read-mod")?;
+    if it.to_string(&v) != "dflt|1|42|9|undefined" { return Err("modules-es"); }
+    // Le DOM expose desormais les noeuds <script> (parentNode des loaders).
+    let (mut ctx, _o) = open_page_sized(br#"<body><script>
+        window.__s = (function(){ var t=document.getElementsByTagName('script');
+            return [t.length>0, t[0]&&t[0].parentNode?t[0].parentNode.tagName:'?'].join('|'); })();
+    </script></body>"#, "", 800, 500);
+    let v = ctx.interp.run("__s").map_err(|_| "run-script-dom")?;
+    if ctx.interp.to_string(&v) != "true|BODY" { return Err("script-in-dom"); }
     Ok(())
 }

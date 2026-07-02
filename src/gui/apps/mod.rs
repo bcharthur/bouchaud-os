@@ -313,6 +313,7 @@ fn handle_browser_event(
 
         ChromeEvent::FocusField(i) => {
             let init = state.tab().page.fields.get(i).map(|f| f.value.clone()).unwrap_or_default();
+            crate::dlog!(crate::diag::Cat::Info, "nautile: focus champ {} ({} champs sur la page)", i, state.tab().page.fields.len());
             let tab = state.tab_mut();
             tab.focused_field = Some(i);
             tab.field_text = init;
@@ -357,6 +358,7 @@ fn handle_browser_event(
             };
             if let Some(target) = url {
                 let target = resolve_against(&state.tab().url, &target);
+                crate::dlog!(crate::diag::Cat::Info, "nautile: soumission formulaire -> {}", target);
                 {
                     let tab = state.tab_mut();
                     tab.focused_field = None;
