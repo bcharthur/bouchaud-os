@@ -938,6 +938,34 @@ impl Interp {
         }
     }
 
+    // Relie document.body/head/documentElement aux VRAIS noeuds du DOM analyse.
+    // Avant cet appel, `install()` les avait poses comme elements detaches
+    // (crees avant que la page n'existe) : toute mutation/lecture via
+    // `document.body...` (appendChild, querySelectorAll, className...) ne
+    // touchait donc jamais l'arbre reellement rendu, et les methodes de
+    // collection absentes sur un element detache renvoyaient `undefined`
+    // (-> "Cannot read properties of undefined (reading 'length')" des que
+    // Google fait `document.body.querySelectorAll(...)`). A appeler une fois
+    // `self.dom` peuple (juste apres `DomModel::parse`).
+    pub fn rebind_document(&mut self) {
+        let doc = match scope_get(&self.global, "document") { Some(v @ Value::Obj(_)) => v, _ => return };
+        let html_n = self.dom.query("html", 0, true).first().copied();
+        let head_n = self.dom.query("head", 0, true).first().copied();
+        let body_n = self.dom.query("body", 0, true).first().copied();
+        if let Some(n) = html_n { set(&doc, "documentElement", node_handle(n)); }
+        if let Some(n) = head_n { set(&doc, "head", node_handle(n)); }
+        if let Some(n) = body_n { set(&doc, "body", node_handle(n)); }
+        // Collections document.forms/images/links : snapshot pris a l'ouverture de
+        // page (avant l'execution des scripts). Comme document.body plus haut,
+        // mieux vaut un tableau typé figé qu'un `undefined` qui casse `.length`.
+        let forms: Vec<Value> = self.dom.query("form", 0, false).into_iter().map(node_handle).collect();
+        let images: Vec<Value> = self.dom.query("img", 0, false).into_iter().map(node_handle).collect();
+        let links: Vec<Value> = self.dom.query("a", 0, false).into_iter().map(node_handle).collect();
+        set(&doc, "forms", array_val(forms));
+        set(&doc, "images", array_val(images));
+        set(&doc, "links", array_val(links));
+    }
+
     // Declenche tous les ecouteurs enregistres pour (node, type), avec un objet
     // `event` minimal. node = -1 cible window/document (load, DOMContentLoaded).
     pub fn fire_event(&mut self, node: i64, ty: &str) {
@@ -3760,6 +3788,7 @@ fn open_page_inner(html: &[u8], base_url: &str, run: bool) -> (PageCtx, Vec<u8>)
     let mut interp = Interp::new();
     interp.base_url = base_url.to_string();
     interp.dom = DomModel::parse(html);
+    interp.rebind_document();
     let mut scripts: Vec<(usize, usize, String)> = Vec::new();
     let mut i = 0usize;
     let mut ran = 0u32;
