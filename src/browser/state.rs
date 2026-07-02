@@ -31,6 +31,10 @@ pub struct Tab {
     pub title: String,
     /// Message de la barre de statut (survol de lien, etc.).
     pub status: String,
+    /// Champ de formulaire focalise (index dans page.fields), le cas echeant.
+    pub focused_field: Option<usize>,
+    /// Texte en cours de saisie dans le champ focalise.
+    pub field_text: String,
 }
 
 impl Tab {
@@ -46,6 +50,8 @@ impl Tab {
             scroll:  0,
             title,
             status: String::new(),
+            focused_field: None,
+            field_text: String::new(),
         }
     }
 

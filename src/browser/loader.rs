@@ -203,6 +203,7 @@ fn compat_render(url: &str, width: i32) -> (Session, Page) {
                 title: url.to_string(),
                 items: alloc::vec![crate::gui::web::Item::Image { x: 0, y: 0, w: iw, h: ih, idx: 0 }],
                 links: Vec::new(),
+                fields: Vec::new(),
                 images: alloc::vec![scaled],
                 height: ih.max(1),
                 bg: 0xffffff,

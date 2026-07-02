@@ -902,6 +902,8 @@ pub struct Interp {
     pub base_url: String,                 // URL de base (resolution des <script src>)
     pending_new_target: Option<Value>,    // `new.target` transmis au prochain appel (eval_new)
     global_obj: Option<Rc<RefCell<Obj>>>, // objet `window` (pont window <-> portee globale)
+    vw: i32,                              // viewport : largeur CSS (px)
+    vh: i32,                              // viewport : hauteur CSS (px)
 }
 
 impl Interp {
@@ -914,9 +916,24 @@ impl Interp {
             microtasks: Vec::new(), macrotasks: Vec::new(), timer_seq: 1.0,
             base_url: String::new(), pending_new_target: None,
             global_obj: None,
+            vw: 1024, vh: 768,
         };
         install(&mut it);
         it
+    }
+
+    /// Fixe le viewport CSS (avant execution des scripts) : les scripts de mise
+    /// en page (Google mesure en permanence) lisent window.innerWidth/Height et
+    /// documentElement.clientWidth/Height ; ils doivent voir la vraie taille.
+    pub fn set_viewport(&mut self, w: i32, h: i32) {
+        self.vw = w.max(1); self.vh = h.max(1);
+        if let Some(g) = self.global_obj.clone() {
+            let win = Value::Obj(g);
+            self.set_prop(&win, "innerWidth", Value::Num(self.vw as f64));
+            self.set_prop(&win, "innerHeight", Value::Num(self.vh as f64));
+            self.set_prop(&win, "outerWidth", Value::Num(self.vw as f64));
+            self.set_prop(&win, "outerHeight", Value::Num(self.vh as f64));
+        }
     }
 
     // Draine les files de taches : microtaches (Promise) en priorite, puis une
@@ -987,7 +1004,18 @@ impl Interp {
 
     pub fn run(&mut self, src: &str) -> Result<Value, String> {
         let toks = Lexer::new(src.as_bytes()).lex_all()?;
-        let prog = Parser::new(toks).parse_program()?;
+        let mut parser = Parser::new(toks);
+        let prog = parser.parse_program()?;
+        // Diagnostic de recuperation : si le parser a saute des statements, les
+        // definitions qu'ils contenaient manqueront a l'execution (fonctions
+        // "fantomes" appelees plus loin). Indispensable pour diagnostiquer les
+        // gros bundles (xjs/og ~1 Mo) sans lecture aveugle.
+        if parser.recovered > 0 {
+            crate::dlog!(crate::diag::Cat::Js, "parse: {} stmt(s) recuperes/sautes ({}o); 1re erreur: {} | ctx: {}",
+                parser.recovered, src.len(),
+                parser.first_err.as_deref().unwrap_or("?"),
+                parser.first_ctx.as_deref().unwrap_or("?"));
+        }
         let genv = self.global.clone();
         self.hoist(&prog, &genv);
         self.hoist_vars_deep(&prog, &genv);
@@ -3273,6 +3301,15 @@ fn dom_get(it: &mut Interp, obj: &Rc<RefCell<Obj>>, name: &str) -> Option<Value>
                 "parentNode" | "parentElement" => it.dom.parent_of(n).map(node_handle).unwrap_or(Value::Null),
                 "nextSibling" | "nextElementSibling" => it.dom.sibling(n, 1).map(node_handle).unwrap_or(Value::Null),
                 "previousSibling" | "previousElementSibling" => it.dom.sibling(n, -1).map(node_handle).unwrap_or(Value::Null),
+                // Mesures layout : approximation typee (jamais undefined). html/body
+                // = viewport ; autres elements = 0 (element pas encore mesure).
+                "clientWidth" | "offsetWidth" | "scrollWidth" =>
+                    Value::Num(if matches!(it.dom.nodes[n].tag.as_str(), "html" | "body") { it.vw as f64 } else { 0.0 }),
+                "clientHeight" | "offsetHeight" | "scrollHeight" =>
+                    Value::Num(if matches!(it.dom.nodes[n].tag.as_str(), "html" | "body") { it.vh as f64 } else { 0.0 }),
+                "scrollTop" | "scrollLeft" | "offsetTop" | "offsetLeft" | "clientTop" | "clientLeft" => Value::Num(0.0),
+                "getBoundingClientRect" => native_val(dom_bounding_rect),
+                "offsetParent" => Value::Null,
                 "name" | "type" | "placeholder" | "title" | "alt" | "rel" | "role" => str_val(it.dom.attr(n, name).unwrap_or("").to_string()),
                 // form.elements : HTMLCollection des controles descendants (array-like avec length).
                 "elements" => { let mut v = Vec::new(); it.dom.controls(n, &mut v); array_val(v.into_iter().map(node_handle).collect()) }
@@ -3324,7 +3361,30 @@ fn dom_get(it: &mut Interp, obj: &Rc<RefCell<Obj>>, name: &str) -> Option<Value>
             "querySelector" => native_val(|_it, _t, _a| Ok(Value::Null)),
             "firstChild" | "lastChild" | "firstElementChild" | "lastElementChild"
             | "parentNode" | "parentElement" | "nextSibling" | "previousSibling"
-            | "nextElementSibling" | "previousElementSibling" => Value::Null,
+            | "nextElementSibling" | "previousElementSibling" | "offsetParent" => Value::Null,
+            // document.documentElement / document.body sont des elements detaches
+            // (stubs) : leurs mesures doivent refleter le viewport.
+            "clientWidth" | "offsetWidth" | "scrollWidth" => {
+                let tag = obj.borrow().props.get("__tag__").map(|v| it.to_string(v)).unwrap_or_default();
+                Value::Num(if tag == "html" || tag == "body" { it.vw as f64 } else { 0.0 })
+            }
+            "clientHeight" | "offsetHeight" | "scrollHeight" => {
+                let tag = obj.borrow().props.get("__tag__").map(|v| it.to_string(v)).unwrap_or_default();
+                Value::Num(if tag == "html" || tag == "body" { it.vh as f64 } else { 0.0 })
+            }
+            "scrollTop" | "scrollLeft" | "offsetTop" | "offsetLeft" => Value::Num(0.0),
+            "getBoundingClientRect" => native_val(|it, t, _a| {
+                let (w, h) = if let Value::Obj(o) = &t {
+                    let tg = o.borrow().props.get("__tag__").cloned();
+                    match tg { Some(Value::Str(s)) if s.as_str() == "html" || s.as_str() == "body" => (it.vw as f64, it.vh as f64), _ => (0.0, 0.0) }
+                } else { (0.0, 0.0) };
+                let r = new_obj(Obj::plain());
+                set(&r, "x", Value::Num(0.0)); set(&r, "y", Value::Num(0.0));
+                set(&r, "top", Value::Num(0.0)); set(&r, "left", Value::Num(0.0));
+                set(&r, "width", Value::Num(w)); set(&r, "height", Value::Num(h));
+                set(&r, "right", Value::Num(w)); set(&r, "bottom", Value::Num(h));
+                Ok(r)
+            }),
             "value" | "name" | "type" | "placeholder" => str_val({ let b = obj.borrow(); if let Some(Value::Obj(at)) = b.props.get("__attrs__") { at.borrow().props.get(name).map(|v| it.to_string(v)).unwrap_or_default() } else { String::new() } }),
             "addEventListener" | "removeEventListener" | "focus" | "blur" | "click"
             | "removeChild" | "remove" | "replaceChild" | "scrollIntoView" => native_val(|_it, _t, _a| Ok(Value::Undefined)),
@@ -3464,6 +3524,23 @@ fn cl_edit(it: &mut Interp, this: &Value, a: &[Value], op: u8) -> bool {
     }
     it.dom.set_attr(n, "class", parts.join(" "));
     added
+}
+
+// getBoundingClientRect() : DOMRect approximatif mais complet et type. html/body
+// couvrent le viewport ; les autres elements renvoient un rect nul (0x0 en haut
+// a gauche), ce que les scripts de visibilite interpretent comme "pas visible"
+// sans jamais crasher sur une propriete manquante.
+fn dom_bounding_rect(it: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    let n = handle_node(it, &this);
+    let (w, h) = if n >= 0 && matches!(it.dom.nodes.get(n as usize).map(|x| x.tag.as_str()), Some("html") | Some("body")) {
+        (it.vw as f64, it.vh as f64)
+    } else { (0.0, 0.0) };
+    let r = new_obj(Obj::plain());
+    set(&r, "x", Value::Num(0.0)); set(&r, "y", Value::Num(0.0));
+    set(&r, "top", Value::Num(0.0)); set(&r, "left", Value::Num(0.0));
+    set(&r, "width", Value::Num(w)); set(&r, "height", Value::Num(h));
+    set(&r, "right", Value::Num(w)); set(&r, "bottom", Value::Num(h));
+    Ok(r)
 }
 
 fn dom_get_attr(it: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
@@ -3820,10 +3897,14 @@ impl PageCtx {
 /// Ouvre une page : construit le DOM, execute les scripts (inline ET externes
 /// via `<script src>`, telecharges depuis `base_url`), et renvoie le contexte
 /// persistant + le HTML initial enrichi.
-pub fn open_page(html: &[u8], base_url: &str) -> (PageCtx, Vec<u8>) { open_page_inner(html, base_url, true) }
+pub fn open_page(html: &[u8], base_url: &str) -> (PageCtx, Vec<u8>) { open_page_inner(html, base_url, true, 1024, 768) }
+
+/// Variante avec viewport CSS explicite (taille reelle de la zone de contenu),
+/// pour que les scripts de mesure voient les bonnes dimensions.
+pub fn open_page_sized(html: &[u8], base_url: &str, vw: i32, vh: i32) -> (PageCtx, Vec<u8>) { open_page_inner(html, base_url, true, vw, vh) }
 
 /// Variante sans execution du JS de la page (rendu statique).
-pub fn open_page_static(html: &[u8], base_url: &str) -> (PageCtx, Vec<u8>) { open_page_inner(html, base_url, false) }
+pub fn open_page_static(html: &[u8], base_url: &str) -> (PageCtx, Vec<u8>) { open_page_inner(html, base_url, false, 1024, 768) }
 
 // Extrait la valeur d'un attribut (`name="..."`/`name='...'`/`name=x`) d'un
 // fragment d'en-tete de balise.
@@ -3848,9 +3929,10 @@ fn tag_attr<'a>(header: &'a str, name: &str) -> Option<&'a str> {
     body.split(quote).next().filter(|s| !s.is_empty())
 }
 
-fn open_page_inner(html: &[u8], base_url: &str, run: bool) -> (PageCtx, Vec<u8>) {
+fn open_page_inner(html: &[u8], base_url: &str, run: bool, vw: i32, vh: i32) -> (PageCtx, Vec<u8>) {
     let mut interp = Interp::new();
     interp.base_url = base_url.to_string();
+    interp.set_viewport(vw, vh);
     interp.dom = DomModel::parse(html);
     interp.rebind_document();
     let mut scripts: Vec<(usize, usize, String)> = Vec::new();
@@ -4056,5 +4138,14 @@ pub fn selftest() -> Result<(), &'static str> {
             window._DumpException=function(e){return 'page';}; \
             console.log(d1+','+_DumpException(0));").map_err(|_| "run-dump")?;
     if it.out.last().map(|x| x.as_str()) != Some("function,page") { return Err("dumpexception-default"); }
+    // --- Sprint 5 : viewport + mesures typees ---
+    let (ctx, _o) = open_page_sized(br#"<body><div id="x">t</div><script>
+  var r = document.getElementById('x').getBoundingClientRect();
+  window.__m = [window.innerWidth, window.innerHeight, document.documentElement.clientHeight,
+                typeof r.width, document.getElementById('x').offsetWidth].join(',');
+</script></body>"#, "", 800, 500);
+    let mut ctx = ctx;
+    let v = ctx.interp.run("__m").map_err(|_| "run-viewport")?;
+    if ctx.interp.to_string(&v) != "800,500,500,number,0" { return Err("viewport"); }
     Ok(())
 }

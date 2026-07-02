@@ -10,7 +10,7 @@
 
 use crate::gui::image::{self, Image};
 use super::display_list::{apply_box_transform, translate_item};
-pub use super::display_list::{Item, Layer, Link, Page};
+pub use super::display_list::{FormField, Item, Layer, Link, Page};
 pub use super::paint::paint;
 use super::style::{CssIndex, Rule, Sel, Comb, AttrOp, AttrSel, Pseudo};
 use super::css_values::parse_transform;
@@ -490,7 +490,7 @@ impl Session {
     /// Reserve aux pages internes (about:calc, about:wasm...) qui embarquent des
     /// mini-applications JS.
     pub fn open(html: &[u8], base_url: &str, width: i32) -> (Session, Page) {
-        let (ctx, scripted) = crate::gui::js::open_page(html, base_url);
+        let (ctx, scripted) = crate::gui::js::open_page_sized(html, base_url, width, 620);
         let page = render_scripted(&scripted, base_url, width);
         (Session { ctx, base: base_url.to_string(), width }, page)
     }
@@ -536,6 +536,37 @@ fn attr_sel_matches(node: &Node, a: &AttrSel) -> bool {
 }
 
 // Position (1-based) et total de l'element parmi ses FRERES elements.
+// Vrai si `target` est dans le sous-arbre de `root` (root inclus).
+fn subtree_contains(dom: &Dom, root: usize, target: usize) -> bool {
+    if root == target { return true; }
+    dom.nodes[root].children.iter().any(|&c| subtree_contains(dom, c, target))
+}
+
+// <form> ancetre d'un noeud (le DOM n'a pas de pointeur parent : on cherche le
+// form dont le sous-arbre contient le noeud ; il y a tres peu de forms par page).
+fn ancestor_form(dom: &Dom, target: usize) -> Option<usize> {
+    (1..dom.nodes.len())
+        .filter(|&i| dom.nodes[i].tag.as_deref() == Some("form"))
+        .find(|&i| subtree_contains(dom, i, target))
+}
+
+// Paires (name, value) des <input type="hidden"> d'un form (soumission GET).
+fn collect_hidden(dom: &Dom, form: usize) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut stack = alloc::vec![form];
+    while let Some(i) = stack.pop() {
+        let n = &dom.nodes[i];
+        if n.tag.as_deref() == Some("input")
+            && attr(n, "type").map_or(false, |t| t.eq_ignore_ascii_case("hidden")) {
+            if let Some(name) = attr(n, "name").filter(|s| !s.is_empty()) {
+                out.push((name.to_string(), attr(n, "value").unwrap_or("").to_string()));
+            }
+        }
+        stack.extend(n.children.iter().copied());
+    }
+    out
+}
+
 fn elem_pos(dom: &Dom, path: &[usize]) -> (usize, usize) {
     if path.len() < 2 { return (1, 1); }
     let parent = &dom.nodes[path[path.len() - 2]];
@@ -1000,8 +1031,8 @@ const MAX_LAYERS: usize = 256;
 enum LineItem {
     Word { dx: i32, w: i32, s: String, color: u32, scale: usize, bold: bool, href: Option<String>, va: u8 },
     Img { dx: i32, w: i32, h: i32, idx: usize, va: u8 },
-    Box { dx: i32, w: i32, h: i32, fill: u32, value: String },
-    Frag { dx: i32, w: i32, h: i32, items: Vec<Item>, links: Vec<Link> },
+    Box { dx: i32, w: i32, h: i32, fill: u32, value: String, field: Option<FormField> },
+    Frag { dx: i32, w: i32, h: i32, items: Vec<Item>, links: Vec<Link>, fields: Vec<FormField> },
 }
 
 // Decalage vertical d'un element inline de hauteur `ih` dans une ligne de
@@ -1015,7 +1046,7 @@ fn va_offset(va: u8, ih: i32, lh: i32) -> i32 {
 }
 
 // Fragment mis en page dans son propre espace (coordonnees relatives a 0,0).
-struct Frag { items: Vec<Item>, links: Vec<Link>, width: i32, height: i32, nat: i32 }
+struct Frag { items: Vec<Item>, links: Vec<Link>, fields: Vec<FormField>, width: i32, height: i32, nat: i32 }
 
 // Etat partage entre la page et tous les sous-fragments (images, budget, etc.).
 struct Ctx<'a> {
@@ -1090,6 +1121,7 @@ struct Flow<'c, 'a> {
     ctx: &'c mut Ctx<'a>,
     items: Vec<Item>,
     links: Vec<Link>,
+    fields: Vec<FormField>,
     x0: i32,
     avail: i32,
     y: i32,
@@ -1104,7 +1136,7 @@ fn base_line_h() -> i32 { 8 * 2 + LINE_GAP }
 
 impl<'c, 'a> Flow<'c, 'a> {
     fn new(ctx: &'c mut Ctx<'a>, x0: i32, avail: i32) -> Flow<'c, 'a> {
-        Flow { ctx, items: Vec::new(), links: Vec::new(), x0, avail: avail.max(16), y: 0, line: Vec::new(), line_h: base_line_h(), align: 0, used_w: 0 }
+        Flow { ctx, items: Vec::new(), links: Vec::new(), fields: Vec::new(), x0, avail: avail.max(16), y: 0, line: Vec::new(), line_h: base_line_h(), align: 0, used_w: 0 }
     }
 
     fn line_cursor(&self) -> i32 {
@@ -1138,17 +1170,22 @@ impl<'c, 'a> Flow<'c, 'a> {
                     // Image inline : par defaut alignee sur la ligne de base (bas).
                     self.items.push(Item::Image { x: base_x + dx, y: y + va_offset(va, h, lh), w, h, idx });
                 }
-                LineItem::Box { dx, w, h, fill, value } => {
+                LineItem::Box { dx, w, h, fill, value, field } => {
                     self.items.push(Item::Rect { x: base_x + dx, y, w, h, color: 0x9aa0a6 });
                     self.items.push(Item::Rect { x: base_x + dx + 1, y: y + 1, w: (w - 2).max(0), h: (h - 2).max(0), color: fill });
                     if !value.is_empty() {
                         self.items.push(Item::Text { x: base_x + dx + 3, y: y + 3, s: value, color: 0x202124, scale: 2, bold: false });
                     }
+                    if let Some(mut fld) = field {
+                        fld.x = base_x + dx; fld.y = y; fld.w = w; fld.h = h;
+                        self.fields.push(fld);
+                    }
                 }
-                LineItem::Frag { dx, items, links, .. } => {
+                LineItem::Frag { dx, items, links, fields, .. } => {
                     let ox = base_x + dx;
                     for mut sub in items { translate_item(&mut sub, ox, y); self.items.push(sub); }
                     for mut lk in links { lk.x += ox; lk.y += y; self.links.push(lk); }
+                    for mut fd in fields { fd.x += ox; fd.y += y; self.fields.push(fd); }
                 }
             }
         }
@@ -1200,11 +1237,17 @@ impl<'c, 'a> Flow<'c, 'a> {
     }
 
     fn push_box(&mut self, w: i32, h: i32, fill: u32, value: String) {
+        self.push_box_field(w, h, fill, value, None);
+    }
+
+    // Variante avec champ de formulaire interactif attache : le rect definitif
+    // n'est connu qu'au flush_line, qui remplira les coordonnees du champ.
+    fn push_box_field(&mut self, w: i32, h: i32, fill: u32, value: String, field: Option<FormField>) {
         if h > self.line_h { self.line_h = h; }
         let mut cur = self.line_cursor();
         if cur > 0 { cur += 16; }
         if cur + w > self.avail && cur > 0 { self.flush_line(); cur = 0; }
-        self.line.push(LineItem::Box { dx: cur, w, h, fill, value });
+        self.line.push(LineItem::Box { dx: cur, w, h, fill, value, field });
     }
 
     // Place un fragment (inline-block / float / element flex) sur la ligne.
@@ -1213,7 +1256,7 @@ impl<'c, 'a> Flow<'c, 'a> {
         let mut cur = self.line_cursor();
         if cur > 0 { cur += gap; }
         if cur + frag.width > self.avail && cur > 0 { self.flush_line(); cur = 0; if frag.height > self.line_h { self.line_h = frag.height; } }
-        self.line.push(LineItem::Frag { dx: cur, w: frag.width, h: frag.height, items: frag.items, links: frag.links });
+        self.line.push(LineItem::Frag { dx: cur, w: frag.width, h: frag.height, items: frag.items, links: frag.links, fields: frag.fields });
     }
 }
 
@@ -1316,13 +1359,14 @@ fn layout(dom: &Dom, base_url: &str, width: i32, css: &[Rule], no_display_none: 
     let height = f.y + PAD;
     let items = core::mem::take(&mut f.items);
     let mut links = core::mem::take(&mut f.links);
+    let fields = core::mem::take(&mut f.fields);
     drop(f);
     // Recupere les couches positionnees, triees par z (stable = ordre document).
     let mut layers = core::mem::take(&mut ctx.layers);
     layers.sort_by_key(|l| l.z);
     // Les liens des couches participent au hit-testing (coords document).
     for l in &layers { for lk in &l.links { links.push(Link { x: lk.x, y: lk.y, w: lk.w, h: lk.h, href: lk.href.clone() }); } }
-    Page { title: ctx.title, items, links, images: ctx.images, height, bg, layers }
+    Page { title: ctx.title, items, links, fields, images: ctx.images, height, bg, layers }
 }
 
 // Resout les variables CSS var(--name) dans une valeur.
@@ -1690,11 +1734,28 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
             let sz = 14;
             f.push_box(sz, sz, 0xffffff, String::new());
         } else {
-            // Champ texte : fond blanc, texte de valeur ou placeholder grisé
+            // Champ texte : fond blanc, texte de valeur ou placeholder grisé.
+            // Enregistre un FormField interactif relie au <form> ancetre
+            // (action/method + inputs hidden) : focus + saisie + soumission.
             let val = attr(node, "value").filter(|v| !v.is_empty())
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| attr(node, "placeholder").unwrap_or("").to_string());
-            f.push_box(w, h, 0xffffff, val);
+            let (action, method, hidden) = match ancestor_form(dom, idx) {
+                Some(fi) => {
+                    let fnode = &dom.nodes[fi];
+                    (attr(fnode, "action").unwrap_or("").to_string(),
+                     attr(fnode, "method").unwrap_or("get").to_ascii_lowercase(),
+                     collect_hidden(dom, fi))
+                }
+                None => (String::new(), "get".to_string(), Vec::new()),
+            };
+            let field = FormField {
+                x: 0, y: 0, w, h,
+                name: attr(node, "name").unwrap_or("").to_string(),
+                value: attr(node, "value").unwrap_or("").to_string(),
+                action, method, hidden,
+            };
+            f.push_box_field(w, h, 0xffffff, val, Some(field));
         }
         return;
     }
@@ -1834,6 +1895,7 @@ fn make_frag(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, t
     let h = sub.y;
     let mut items = core::mem::take(&mut sub.items);
     let links = core::mem::take(&mut sub.links);
+    let fields = core::mem::take(&mut sub.fields);
     drop(sub);
     let fw = if shrink { used } else { w };
     if let Some(c) = bx.bg {
@@ -1841,7 +1903,7 @@ fn make_frag(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, t
         v.extend(items);
         items = v;
     }
-    Frag { items, links, width: fw, height: h, nat }
+    Frag { items, links, fields, width: fw, height: h, nat }
 }
 
 // Bloc en flux normal : nouvelle ligne, largeur eventuellement contrainte
@@ -1966,14 +2028,16 @@ fn child_frag(f: &mut Flow, dom: &Dom, c: usize, cst: &Style, align: u8, w: i32,
     let nat = sub.used_w.max(1);
     let items = core::mem::take(&mut sub.items);
     let links = core::mem::take(&mut sub.links);
+    let fields = core::mem::take(&mut sub.fields);
     drop(sub);
-    Frag { items, links, width: w.max(8), height: h, nat }
+    Frag { items, links, fields, width: w.max(8), height: h, nat }
 }
 
 // Place un fragment a (x, y) absolus dans le flux courant (translation + collecte).
 fn place_frag(f: &mut Flow, frag: Frag, x: i32, y: i32) {
     for mut sub in frag.items { translate_item(&mut sub, x, y); f.items.push(sub); }
     for mut lk in frag.links { lk.x += x; lk.y += y; f.links.push(lk); }
+    for mut fd in frag.fields { fd.x += x; fd.y += y; f.fields.push(fd); }
 }
 
 // Decalage vertical d'un item selon align-items dans une bande de hauteur `band`.

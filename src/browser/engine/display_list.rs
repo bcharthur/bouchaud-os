@@ -16,6 +16,19 @@ pub enum Item {
 
 pub struct Link { pub x: i32, pub y: i32, pub w: i32, pub h: i32, pub href: String }
 
+/// Champ de formulaire interactif (input texte / textarea) : zone cliquable
+/// pour prendre le focus, saisir au clavier et soumettre (Entree). `action`,
+/// `method` et `hidden` viennent du <form> englobant, aplatis ici pour que la
+/// soumission construise l'URL complete (ex. /search?q=...&sca_esv=...).
+pub struct FormField {
+    pub x: i32, pub y: i32, pub w: i32, pub h: i32, // rect en coords document
+    pub name: String,                    // attribut name (ex. "q")
+    pub value: String,                   // valeur initiale
+    pub action: String,                  // action du form (resolue plus tard)
+    pub method: String,                  // "get" (seul supporte) / "post"
+    pub hidden: Vec<(String, String)>,   // inputs hidden du meme form
+}
+
 /// Couche de peinture (stacking layer) : ensemble d'items partageant un ordre
 /// d'empilement `z`, eventuellement ancres au viewport (`fixed`) et/ou clippes
 /// a un rectangle (overflow). Les items sont en coordonnees document.
@@ -31,6 +44,7 @@ pub struct Page {
     pub title: String,
     pub items: Vec<Item>,
     pub links: Vec<Link>,
+    pub fields: Vec<FormField>,
     pub images: Vec<Image>,
     pub height: i32,
     pub bg: u32,
