@@ -311,6 +311,95 @@ fn handle_browser_event(
             state.tab_mut().page = pg;
         }
 
+        ChromeEvent::FocusField(i) => {
+            let init = state.tab().page.fields.get(i).map(|f| f.value.clone()).unwrap_or_default();
+            let tab = state.tab_mut();
+            tab.focused_field = Some(i);
+            tab.field_text = init;
+        }
+
+        ChromeEvent::FieldChar(c) => {
+            if state.tab().field_text.len() < 512 { state.tab_mut().field_text.push(c); }
+        }
+
+        ChromeEvent::FieldBackspace => {
+            state.tab_mut().field_text.pop();
+        }
+
+        ChromeEvent::Blur => {
+            let tab = state.tab_mut();
+            tab.focused_field = None;
+            tab.field_text.clear();
+        }
+
+        ChromeEvent::SubmitField => {
+            // Soumission GET du formulaire du champ focalise : construit
+            // action?name=valeur&hidden=..., resout contre l'URL courante,
+            // puis navigue (ex. Google : /search?q=...&sca_esv=...).
+            let url = {
+                let tab = state.tab();
+                tab.focused_field
+                    .and_then(|i| tab.page.fields.get(i))
+                    .map(|f| {
+                        let mut qs = alloc::string::String::new();
+                        if !f.name.is_empty() {
+                            qs.push_str(&f.name); qs.push('=');
+                            qs.push_str(&form_urlencode(&tab.field_text));
+                        }
+                        for (k, v) in &f.hidden {
+                            if !qs.is_empty() { qs.push('&'); }
+                            qs.push_str(k); qs.push('=');
+                            qs.push_str(&form_urlencode(v));
+                        }
+                        let action = if f.action.is_empty() { tab.url.clone() } else { f.action.clone() };
+                        alloc::format!("{}?{}", action, qs)
+                    })
+            };
+            if let Some(target) = url {
+                let target = resolve_against(&state.tab().url, &target);
+                {
+                    let tab = state.tab_mut();
+                    tab.focused_field = None;
+                    tab.field_text.clear();
+                }
+                chrome::draw_loading(&target, bx, by, bw, bh);
+                fb::present();
+                let (sess, pg) = browser::loader::open(&target, bw as i32);
+                state.tab_mut().push_nav(&target);
+                state.tab_mut().apply(&target, pg, sess);
+                *new_title = Some(state.tab().title.clone());
+            }
+        }
+
         ChromeEvent::None => {}
     }
+}
+
+// Encodage application/x-www-form-urlencoded d'une valeur de champ.
+fn form_urlencode(s: &str) -> alloc::string::String {
+    let mut out = alloc::string::String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b' ' => out.push('+'),
+            _ => { out.push('%'); out.push_str(&alloc::format!("{:02X}", b)); }
+        }
+    }
+    out
+}
+
+// Resout une action de formulaire relative ("/search?q=x") contre l'URL de la
+// page courante ; laisse passer les URLs deja absolues.
+fn resolve_against(page_url: &str, target: &str) -> alloc::string::String {
+    if target.starts_with("http://") || target.starts_with("https://") || target.contains("://") {
+        return target.into();
+    }
+    if let Some(rest) = page_url.strip_prefix("https://").or_else(|| page_url.strip_prefix("http://")) {
+        let scheme = if page_url.starts_with("https://") { "https" } else { "http" };
+        let host = rest.split('/').next().unwrap_or(rest);
+        if let Some(abs) = target.strip_prefix("//") { return alloc::format!("{}://{}", scheme, abs); }
+        if target.starts_with('/') { return alloc::format!("{}://{}{}", scheme, host, target); }
+        return alloc::format!("{}://{}/{}", scheme, host, target);
+    }
+    target.into()
 }

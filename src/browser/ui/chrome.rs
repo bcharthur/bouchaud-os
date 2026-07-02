@@ -36,6 +36,11 @@ pub enum ChromeEvent {
     InputChar(char),    // ajouter un caractère dans la barre d'adresse
     InputBackspace,     // supprimer un caractère dans la barre d'adresse
     DispatchJs(String), // exécuter du JS dans la page courante
+    FocusField(usize),  // donner le focus au champ de formulaire i de la page
+    FieldChar(char),    // taper un caractère dans le champ focalisé
+    FieldBackspace,     // effacer un caractère dans le champ focalisé
+    SubmitField,        // soumettre le formulaire du champ focalisé (Entrée)
+    Blur,               // retirer le focus du champ (clic ailleurs)
 }
 
 // ── Dessin principal ──────────────────────────────────────────────────────────
@@ -55,6 +60,7 @@ pub fn draw(state: &BrowserState, bx: usize, by: usize, bw: usize, bh: usize) {
     let cw = if needs_scroll { bw.saturating_sub(SCROLL_W) } else { bw };
 
     web::paint(&tab.page, tab.scroll, bx, cy, cw, ch);
+    draw_focused_field(tab, bx, cy, ch);
 
     if needs_scroll {
         draw_scrollbar(&tab.page, tab.scroll, bx + cw, cy, SCROLL_W, ch);
@@ -177,6 +183,24 @@ fn draw_nav_btn(bx: usize, by: usize, label: &str, enabled: bool) {
 
 // ── Ascenseur ─────────────────────────────────────────────────────────────────
 
+/// Overlay du champ de formulaire focalise : redessine le fond, le texte en
+/// cours de saisie et un caret, par-dessus la page peinte (evite un relayout
+/// complet a chaque frappe).
+fn draw_focused_field(tab: &crate::browser::state::Tab, bx: usize, cy: usize, ch: usize) {
+    let Some(i) = tab.focused_field else { return };
+    let Some(fld) = tab.page.fields.get(i) else { return };
+    let y_scr = fld.y - tab.scroll;
+    if y_scr + fld.h <= 0 || y_scr >= ch as i32 || fld.x < 0 { return; }
+    let (x, y) = (bx as i32 + fld.x, cy as i32 + y_scr);
+    // Fond blanc + bord bleu (focus) + texte + caret.
+    fb::fill_rect_rgb(x as usize, y as usize, fld.w.max(2) as usize, fld.h.max(2) as usize, 0x1a73e8);
+    fb::fill_rect_rgb((x + 1) as usize, (y + 1) as usize, (fld.w - 2).max(1) as usize, (fld.h - 2).max(1) as usize, 0xffffff);
+    let shown: alloc::string::String = alloc::format!("{}_", tab.field_text);
+    let maxc = ((fld.w - 12) / 8).max(1) as usize;
+    let clip = if shown.len() > maxc { &shown[shown.len() - maxc..] } else { &shown[..] };
+    fb::draw_text_prop(x as usize + 6, y as usize + (fld.h.max(18) as usize).saturating_sub(16) / 2, clip, 0x202124, 13.0, false);
+}
+
 fn draw_scrollbar(page: &web::Page, scroll: i32, bx: usize, by: usize, bw: usize, bh: usize) {
     let max_s = (page.height - bh as i32).max(0);
     if max_s <= 0 || bh < 12 { return; }
@@ -295,6 +319,14 @@ fn click_content(state: &BrowserState, rel_x: i32, rel_y: i32, bw: usize, ch: us
             return ChromeEvent::Navigate(href);
         }
     }
+    // Clic sur un champ de formulaire : prend le focus (saisie clavier ensuite).
+    for (i, fld) in tab.page.fields.iter().enumerate() {
+        if rel_x >= fld.x && rel_x < fld.x + fld.w && cy_doc >= fld.y && cy_doc < fld.y + fld.h {
+            return ChromeEvent::FocusField(i);
+        }
+    }
+    // Clic ailleurs : retire le focus eventuel.
+    if tab.focused_field.is_some() { return ChromeEvent::Blur; }
     ChromeEvent::None
 }
 
@@ -303,6 +335,15 @@ pub fn on_key(state: &BrowserState, key: Key, bh: usize) -> ChromeEvent {
     let tab = state.tab();
     let ch  = bh.saturating_sub(CHROME_H);
     let max_s = (tab.page.height - ch as i32).max(0);
+    // Un champ de page a le focus : le clavier tape dedans (Entree = soumettre).
+    if tab.focused_field.is_some() {
+        match key {
+            Key::Enter     => return ChromeEvent::SubmitField,
+            Key::Backspace => return ChromeEvent::FieldBackspace,
+            Key::Char(c)   => return ChromeEvent::FieldChar(c as char),
+            _ => {}
+        }
+    }
     match key {
         Key::Enter    => ChromeEvent::Navigate(tab.input.clone()),
         Key::Up       => ChromeEvent::ScrollTo((tab.scroll - 48).max(0)),
