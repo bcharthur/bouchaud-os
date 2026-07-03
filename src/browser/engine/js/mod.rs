@@ -1368,6 +1368,13 @@ impl Interp {
                         if let Some(n) = ns { scope_declare(env, n, nsval.clone()); }
                         for (imported, local) in named {
                             let v = self.get_prop(&nsval, imported).unwrap_or(Value::Undefined);
+                            let v = if matches!(v, Value::Undefined | Value::Null) {
+                                // Module graph tolerant : si un export minifie a
+                                // ete manque par le parseur, on fournit un callable
+                                // de secours au lieu de stopper toute la SPA sur
+                                // « X is not a function » (cas Ecosia: bold).
+                                modules::module_export_stub(imported)
+                            } else { v };
                             scope_declare(env, local, v);
                         }
                         Flow::Normal(Value::Undefined)
@@ -2502,11 +2509,21 @@ fn install(it: &mut Interp) {
     // setImmediate / clearImmediate (Node.js compat utilisé par certains bundles)
     scope_declare(&g2, "setImmediate", native_val(native_set_timeout));
     scope_declare(&g2, "clearImmediate", native_val(|_it, _t, _a| Ok(Value::Undefined)));
-    // Symbol stub (retourne une string unique)
-    scope_declare(&g2, "Symbol", native_val(|it, _t, a| {
+    // Symbol stub (retourne une string unique) + well-known symbols. Les
+    // polyfills modernes testent `Symbol.iterator`, `Symbol.toStringTag`, etc.
+    let sym_ctor = native_val(|it, _t, a| {
         let desc = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
         Ok(str_val(format!("Symbol({})", desc)))
-    }));
+    });
+    set(&sym_ctor, "iterator", str_val("Symbol.iterator"));
+    set(&sym_ctor, "asyncIterator", str_val("Symbol.asyncIterator"));
+    set(&sym_ctor, "toStringTag", str_val("Symbol.toStringTag"));
+    set(&sym_ctor, "species", str_val("Symbol.species"));
+    set(&sym_ctor, "hasInstance", str_val("Symbol.hasInstance"));
+    set(&sym_ctor, "isConcatSpreadable", str_val("Symbol.isConcatSpreadable"));
+    set(&sym_ctor, "for", native_val(|it, _t, a| Ok(str_val(format!("Symbol({})", it.to_string(a.get(0).unwrap_or(&Value::Undefined)))))));
+    set(&sym_ctor, "keyFor", native_val(|it, _t, a| Ok(str_val(it.to_string(a.get(0).unwrap_or(&Value::Undefined))))));
+    scope_declare(&g2, "Symbol", sym_ctor);
     // BigInt minimal : représentation numérique compatible avec les bundles qui
     // testent simplement son existence ou convertissent de petits entiers.
     scope_declare(&g2, "BigInt", native_val(|it, _t, a| Ok(Value::Num(it.to_num(a.get(0).unwrap_or(&Value::Num(0.0)))))));
@@ -4253,6 +4270,33 @@ pub fn open_page_static(html: &[u8], base_url: &str) -> (PageCtx, Vec<u8>) { ope
 
 // Extrait la valeur d'un attribut (`name="..."`/`name='...'`/`name=x`) d'un
 // fragment d'en-tete de balise.
+fn preload_module_links(interp: &mut Interp, html: &[u8], base_url: &str) {
+    // Preload scanner minimal : les pages Vite/Ecosia exposent tout le graphe
+    // critique via <link rel="modulepreload" href="...">. Les charger avant
+    // l'entry module remplit le cache et pre-seed les namespaces d'exports, ce
+    // qui rapproche le pipeline de Chromium (preload scanner + module map).
+    let mut i = 0usize;
+    let mut count = 0usize;
+    while i < html.len() && count < 128 {
+        if starts_ci(&html[i..], b"<link") {
+            let end = find_ci(html, b">", i).map(|p| p + 1).unwrap_or(html.len());
+            let header = core::str::from_utf8(&html[i..end]).unwrap_or("");
+            let lower = header.to_ascii_lowercase();
+            if lower.contains("modulepreload") {
+                if let Some(href) = tag_attr(header, "href") {
+                    let abs = crate::net::http::resolve_location(scheme_of(base_url), host_of(base_url), href);
+                    let _ = interp.load_module(&abs);
+                    count += 1;
+                }
+            }
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    if count > 0 { crate::dlog!(crate::diag::Cat::Js, "modulepreload: {} module(s) scannes", count); }
+}
+
 fn tag_attr<'a>(header: &'a str, name: &str) -> Option<&'a str> {
     let lower = header.to_ascii_lowercase();
     let key = alloc::format!("{}=", name);
@@ -4281,6 +4325,7 @@ fn open_page_inner(html: &[u8], base_url: &str, run: bool, vw: i32, vh: i32) -> 
     interp.install_location();
     interp.dom = DomModel::parse(html);
     interp.rebind_document();
+    if run { preload_module_links(&mut interp, html, base_url); }
     interp.mark_render_dirty(0, DirtyKind::Subtree);
     interp.flush_render_core();
     // Noeuds <script> du DOM, dans l'ordre du document : le n-ieme <script>

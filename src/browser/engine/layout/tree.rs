@@ -136,8 +136,12 @@ fn layout_node(doc: &DocumentSnapshot, styles: &StyleMap, out: &mut LayoutResult
     let mut child_y = outer_y + pad_t + st.border_width.top;
     let child_w = (w - pad_l - pad_r - border_x).max(1);
 
-    if st.display == Display::Flex && st.flex_direction == 0 {
-        layout_flex_row(doc, styles, out, node, box_id, child_x, child_y, child_w, depth + 1);
+    if st.display == Display::Flex {
+        if st.flex_direction == 1 {
+            layout_flex_column(doc, styles, out, node, box_id, child_x, child_y, child_w, depth + 1);
+        } else {
+            layout_flex_row(doc, styles, out, node, box_id, child_x, child_y, child_w, depth + 1);
+        }
         child_y += max_child_bottom(out, box_id).saturating_sub(child_y).max(line_h(st));
     } else if st.display == Display::Grid {
         layout_grid(doc, styles, out, node, box_id, child_x, child_y, child_w, depth + 1);
@@ -165,10 +169,49 @@ fn layout_node(doc: &DocumentSnapshot, styles: &StyleMap, out: &mut LayoutResult
 fn layout_flex_row(doc: &DocumentSnapshot, styles: &StyleMap, out: &mut LayoutResult, node: &SnapshotNode, parent: LayoutBoxId, x: i32, y: i32, w: i32, depth: u32) {
     let children: Vec<NodeId> = node.children.iter().copied().filter(|&c| styles.get(c).display != Display::None).collect();
     if children.is_empty() { return; }
-    let gap = styles.get(node.id).gap.max(0);
+    let pst = styles.get(node.id);
+    let gap = pst.gap.max(0);
     let each = ((w - gap * (children.len().saturating_sub(1) as i32)) / children.len() as i32).max(1);
     let mut cx = x;
-    for c in children { let _ = layout_node(doc, styles, out, c, parent, cx, y, each, depth); cx += each + gap; }
+    for c in children {
+        let _ = layout_node(doc, styles, out, c, parent, cx, y, each, depth);
+        // Cross-axis alignment approximatif : centre/end/stretch sur la hauteur
+        // de ligne courante. Cela evite les enormes decalages des barres de
+        // recherche et boutons dans les flex row modernes.
+        if let Some(&bid) = out.node_to_box.get(&c) {
+            if let Some(b) = out.boxes.get_mut(bid) {
+                match pst.align_items {
+                    1 => b.rect.y = y + ((line_h(pst) - b.rect.h).max(0) / 2),
+                    2 => b.rect.y = y + (line_h(pst) - b.rect.h).max(0),
+                    3 => b.rect.h = b.rect.h.max(line_h(pst)),
+                    _ => {}
+                }
+            }
+        }
+        cx += each + gap;
+    }
+}
+
+fn layout_flex_column(doc: &DocumentSnapshot, styles: &StyleMap, out: &mut LayoutResult, node: &SnapshotNode, parent: LayoutBoxId, x: i32, y: i32, w: i32, depth: u32) {
+    let children: Vec<NodeId> = node.children.iter().copied().filter(|&c| styles.get(c).display != Display::None).collect();
+    if children.is_empty() { return; }
+    let pst = styles.get(node.id);
+    let gap = pst.gap.max(0);
+    let mut cy = y;
+    for c in children {
+        let next = layout_node(doc, styles, out, c, parent, x, cy, w, depth);
+        if let Some(&bid) = out.node_to_box.get(&c) {
+            if let Some(b) = out.boxes.get_mut(bid) {
+                match pst.align_items {
+                    1 => b.rect.x = x + ((w - b.rect.w).max(0) / 2),
+                    2 => b.rect.x = x + (w - b.rect.w).max(0),
+                    3 => { b.rect.x = x; b.rect.w = w.max(1); },
+                    _ => {}
+                }
+                cy = b.rect.bottom() + gap;
+            } else { cy = next + gap; }
+        } else { cy = next + gap; }
+    }
 }
 
 fn layout_grid(doc: &DocumentSnapshot, styles: &StyleMap, out: &mut LayoutResult, node: &SnapshotNode, parent: LayoutBoxId, x: i32, y: i32, w: i32, depth: u32) {
