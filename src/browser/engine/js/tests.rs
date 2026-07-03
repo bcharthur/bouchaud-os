@@ -224,5 +224,26 @@ pub fn selftest() -> Result<(), &'static str> {
             return Err("button-click-not-dispatched");
         }
     }
+    // --- Sprint 10 : eval() indirect (portee globale) ---
+    // Avant ce sprint : "Uncaught ReferenceError: eval is not defined" faisait
+    // planter net tout script qui y recourt (ex. challenge anti-bot Google
+    // "knitsail" servi sur /search, cause de la page de resultats vide).
+    let mut it = Interp::new();
+    it.run("var ev = eval('40+2'); console.log(ev);").map_err(|_| "eval-run")?;
+    if it.out.last().map(|s| s.as_str()) != Some("42") { return Err("eval-arith"); }
+    // eval() en portee globale : les fonctions/vars qu'il declare restent
+    // visibles ensuite (comportement indirect-eval, suffisant en pratique).
+    let mut it = Interp::new();
+    it.run("eval('function evf(x){return x*2;} var evv=9;'); console.log(evf(evv));").map_err(|_| "eval-run2")?;
+    if it.out.last().map(|s| s.as_str()) != Some("18") { return Err("eval-scope-leak"); }
+    // Une erreur levee DANS eval() est une exception JS normale, attrapable —
+    // elle n'interrompt plus tout le script (cas du script anti-bot).
+    let mut it = Interp::new();
+    it.run("var caught='non'; try { eval('undefinedFn()'); } catch(e) { caught='oui'; } console.log(caught);").map_err(|_| "eval-run3")?;
+    if it.out.last().map(|s| s.as_str()) != Some("oui") { return Err("eval-catchable"); }
+    // eval(valeur non-chaine) renvoie l'argument tel quel (comportement spec).
+    let mut it = Interp::new();
+    it.run("console.log(eval(42));").map_err(|_| "eval-run4")?;
+    if it.out.last().map(|s| s.as_str()) != Some("42") { return Err("eval-passthrough"); }
     Ok(())
 }

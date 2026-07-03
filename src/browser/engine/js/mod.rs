@@ -952,6 +952,7 @@ pub struct Interp {
     module_stack: Vec<String>,            // URLs des modules en cours (imports relatifs)
     exports_stack: Vec<Value>,            // objet exports du module en cours d'execution
     lifecycle: DocumentLifecycle,          // etat Loading/Interactive/Complete + ressources critiques
+    eval_depth: u32,                      // nesting eval() courant (garde-fou pile native)
 }
 
 impl Interp {
@@ -968,6 +969,7 @@ impl Interp {
             style_map: StyleMap::default(), layout_result: LayoutResult::default(), reflow: ReflowState::clean(),
             modules: BTreeMap::new(), module_stack: Vec::new(), exports_stack: Vec::new(),
             lifecycle: DocumentLifecycle::new(),
+            eval_depth: 0,
         };
         install(&mut it);
         it
@@ -1124,6 +1126,26 @@ impl Interp {
     }
 
     fn tick(&mut self) -> Result<(), Value> { self.steps += 1; if self.steps > self.max_steps { return Err(str_val("RangeError: trop d'operations")); } Ok(()) }
+
+    // eval() indirect : execute `src` dans la portee globale (pas d'acces aux
+    // variables locales de l'appelant — l'interprete ne conserve pas de pile
+    // d'environnements accessible depuis les closures natives). Suffisant pour
+    // les scripts anti-bot/obfuscateurs (Google "knitsail" et consorts) qui
+    // eval() du code autonome plutot que de capturer des variables locales.
+    // Garde-fou eval_depth : empeche un eval recursif malveillant de faire
+    // deborder la pile native du noyau (pas de protection materielle ici).
+    fn eval_str(&mut self, src: &str) -> Result<Value, Value> {
+        if self.eval_depth >= 32 {
+            return Err(str_val("RangeError: Maximum call stack size exceeded (eval)"));
+        }
+        self.eval_depth += 1;
+        let r = self.run(src);
+        self.eval_depth -= 1;
+        match r {
+            Ok(v) => Ok(v),
+            Err(e) => Err(str_val(e.strip_prefix("Uncaught ").unwrap_or(&e).to_string())),
+        }
+    }
 
     pub fn run(&mut self, src: &str) -> Result<Value, String> {
         let toks = Lexer::new(src.as_bytes()).lex_all()?;
@@ -2153,6 +2175,13 @@ fn install(it: &mut Interp) {
     scope_declare(&g, "parseFloat", native_val(|it, _t, a| { let s = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); Ok(Value::Num(parse_float(&s))) }));
     scope_declare(&g, "isNaN", native_val(|it, _t, a| Ok(Value::Bool(it.to_num(a.get(0).unwrap_or(&Value::Undefined)).is_nan()))));
     scope_declare(&g, "isFinite", native_val(|it, _t, a| { let n = it.to_num(a.get(0).unwrap_or(&Value::Undefined)); Ok(Value::Bool(n.is_finite())) }));
+    // eval() indirect (portee globale) : cf. Interp::eval_str. Un argument non-
+    // chaine est renvoye tel quel (comportement spec : eval(42) === 42).
+    scope_declare(&g, "eval", native_val(|it, _t, a| {
+        let arg = a.get(0).cloned().unwrap_or(Value::Undefined);
+        let src = match &arg { Value::Str(s) => (**s).clone(), _ => return Ok(arg) };
+        it.eval_str(&src)
+    }));
     let string_ctor = native_val(|it, _t, a| Ok(str_val(match a.get(0) { Some(v) => it.to_string(v), None => String::new() })));
     set(&string_ctor, "fromCharCode", native_val(|it, _t, a| { let mut s = String::new(); for v in a { if let Some(c) = core::char::from_u32(it.to_num(v) as u32) { s.push(c); } } Ok(str_val(s)) }));
     scope_declare(&g, "String", string_ctor);
