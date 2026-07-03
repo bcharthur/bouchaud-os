@@ -66,6 +66,11 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // 3. Briques architecture (stubs propres en V0.6).
     arch::x86_64::init();
 
+    // Calibre le TSC (cycles -> ms reels) maintenant que IRQ0 fait avancer les
+    // ticks PIT : necessaire pour que les logs de diagnostic (reseau, layout,
+    // peinture) affichent un temps reel exploitable, pas juste des "Mc" bruts.
+    kernel::timer::calibrate();
+
     // 4. Pilotes et sous-systemes.
     kernel::dmesg::log("keyboard: PS/2 AZERTY-FR pilote par IRQ1");
     users::init();

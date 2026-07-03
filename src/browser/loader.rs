@@ -149,7 +149,19 @@ fn dump_page_to_serial(url: &str, body: &[u8]) {
     crate::serial_println!("");
 }
 
+// Chronometre le chargement complet (reseau + DOM + CSS + layout) et logge un
+// total en millisecondes reelles a la fin : les logs par phase (Mc/ms dans
+// NET/DOM/CSS/LAYOUT) permettent de reperer QUELLE etape est lente, cette
+// ligne repond directement a "combien de temps a pris ce chargement ?".
 fn local_render(url: &str, width: i32) -> (Session, Page) {
+    let t0 = crate::kernel::timer::cycles_since_boot();
+    let result = local_render_inner(url, width);
+    let ms = crate::kernel::timer::cycles_to_ms(crate::kernel::timer::cycles_since_boot().wrapping_sub(t0));
+    crate::dlog!(crate::diag::Cat::Info, "--- chargement termine: {} en {}ms ---", url, ms);
+    result
+}
+
+fn local_render_inner(url: &str, width: i32) -> (Session, Page) {
     crate::dlog!(crate::diag::Cat::Info, "--- navigation: {} ---", url);
     let doc = crate::net::fetch_document(url);
     if doc.ok && doc.is_html && !doc.body.is_empty() {

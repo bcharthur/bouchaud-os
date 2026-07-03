@@ -387,14 +387,21 @@ pub fn render(html: &[u8], base_url: &str, width: i32) -> Page {
 // Met en page un HTML deja enrichi par le JS (DOM applique).
 fn render_scripted(scripted: &[u8], base_url: &str, width: i32) -> Page {
     use crate::diag::Cat;
-    let mc = |a: u64, b: u64| -> u64 { b.wrapping_sub(a) / 1_000_000 };
+    // Mc = millions de cycles TSC (utile pour comparer deux phases entre
+    // elles) ; ms = temps reel calibre au boot sur la frequence du PIT, donc
+    // independant de la vitesse d'emulation QEMU (voir kernel::timer::calibrate).
+    let mc = |a: u64, b: u64| -> (u64, u64) {
+        let d = b.wrapping_sub(a);
+        (d / 1_000_000, crate::kernel::timer::cycles_to_ms(d))
+    };
 
     // ── Phase 1 : tokenizer/tree builder (HTML -> DOM) ──
     let t0 = crate::kernel::timer::cycles_since_boot();
     let (clean, inline_css) = extract_and_strip(scripted, 1_500_000);
     let dom = parse(&clean);
     let t1 = crate::kernel::timer::cycles_since_boot();
-    crate::dlog!(Cat::Dom, "parse HTML: {} noeuds, {}o -> {}Mc", dom.nodes.len(), clean.len(), mc(t0, t1));
+    let (m, ms) = mc(t0, t1);
+    crate::dlog!(Cat::Dom, "parse HTML: {} noeuds, {}o -> {}Mc ({}ms)", dom.nodes.len(), clean.len(), m, ms);
 
     // ── Phase 2 : style (CSS externe + inline -> regles + index) ──
     // Feuilles externes (<link rel=stylesheet>) d'abord (priorite plus faible sur
@@ -404,7 +411,8 @@ fn render_scripted(scripted: &[u8], base_url: &str, width: i32) -> Page {
     let ext_rules = css.len();
     css.extend(inline_css);
     let t2 = crate::kernel::timer::cycles_since_boot();
-    crate::dlog!(Cat::Css, "cascade: {} regles ({} externes) -> {}Mc", css.len(), ext_rules, mc(t1, t2));
+    let (m, ms) = mc(t1, t2);
+    crate::dlog!(Cat::Css, "cascade: {} regles ({} externes) -> {}Mc ({}ms)", css.len(), ext_rules, m, ms);
 
     // ── Phase 3 : layout (cascade + box model + flex/grid/position -> items) ──
     let mut page = layout(&dom, base_url, width, &css, false);
@@ -416,8 +424,12 @@ fn render_scripted(scripted: &[u8], base_url: &str, width: i32) -> Page {
         page = layout(&dom, base_url, width, &css, true);
     }
     let capped = if page.layers.len() >= MAX_LAYERS { " [PLAFOND couches atteint]" } else { "" };
-    crate::dlog!(Cat::Layout, "layout: {} items, {} couches{}, h={}px -> {}Mc",
-        page.items.len(), page.layers.len(), capped, page.height, mc(t2, t3));
+    let (m, ms) = mc(t2, t3);
+    crate::dlog!(Cat::Layout, "layout: {} items, {} couches{}, h={}px -> {}Mc ({}ms)",
+        page.items.len(), page.layers.len(), capped, page.height, m, ms);
+    // Temps total HTML -> layout (hors reseau, deja logge separement par fetch).
+    let (_, ms_total) = mc(t0, t3);
+    crate::dlog!(Cat::Layout, "pipeline HTML->layout termine en {}ms", ms_total);
     page
 }
 

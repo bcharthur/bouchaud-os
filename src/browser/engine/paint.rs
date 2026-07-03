@@ -23,14 +23,16 @@ pub fn paint(page: &Page, scroll: i32, bx: usize, by: usize, bw: usize, bh: usiz
     paint_list(&page.items, scroll, &page.images, view, view);
     for l in &page.layers { if l.z >= 0 { paint_layer(l, &page.images, scroll, view); } }
     // Surveillance des frames lentes (lag de scroll), throttle ~1s.
-    let mc = crate::kernel::timer::cycles_since_boot().wrapping_sub(t0) / 1_000_000;
+    let delta = crate::kernel::timer::cycles_since_boot().wrapping_sub(t0);
+    let mc = delta / 1_000_000;
     if mc > 80 {
         let now = crate::kernel::timer::ticks();
         unsafe {
             if now.wrapping_sub(LAST_PAINT_LOG) >= 18 {
                 LAST_PAINT_LOG = now;
-                crate::dlog!(crate::diag::Cat::Paint, "frame lente: {} items +{} couches -> {}Mc",
-                    page.items.len(), page.layers.len(), mc);
+                let ms = crate::kernel::timer::cycles_to_ms(delta);
+                crate::dlog!(crate::diag::Cat::Paint, "frame lente: {} items +{} couches -> {}Mc ({}ms)",
+                    page.items.len(), page.layers.len(), mc, ms);
             }
         }
     }

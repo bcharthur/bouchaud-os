@@ -39,6 +39,45 @@ pub fn timer_enabled() -> bool {
     interrupts::enabled()
 }
 
+// ── Calibration TSC -> temps reel ──────────────────────────────────────────
+// Les logs de diagnostic (reseau, DOM, CSS, layout, peinture) affichent des
+// compteurs de cycles bruts ("Mc" = millions de cycles) : utiles pour comparer
+// deux phases entre elles, mais illisibles pour savoir "ca a pris combien de
+// temps ?" en vrai. On calibre donc une fois, au boot, la frequence du TSC en
+// mesurant les cycles ecoules sur quelques ticks PIT (frequence fixe et connue,
+// 18.2 Hz, independante de la vitesse d'emulation QEMU) ; cycles_to_ms()
+// convertit ensuite n'importe quel delta de cycles en millisecondes reelles.
+static mut CYCLES_PER_MS: u64 = 0;
+
+/// Calibre CYCLES_PER_MS. A appeler une fois les interruptions actives (IRQ0
+/// doit deja faire avancer `ticks()`), sinon la calibration echoue silencieusement
+/// (CYCLES_PER_MS reste a 0, cycles_to_ms() renvoie alors 0 au lieu de planter).
+pub fn calibrate() {
+    const CAL_TICKS: u64 = 5; // ~274ms a 18.2 Hz : assez pour lisser le bruit de mesure.
+    let start_tick = ticks();
+    let start_tsc = cpu::rdtsc();
+    let mut spins: u64 = 0;
+    while ticks().wrapping_sub(start_tick) < CAL_TICKS {
+        core::hint::spin_loop();
+        spins += 1;
+        // Garde-fou : abandonne (calibration a 0) plutot que de bloquer le boot
+        // si les interruptions ne tournent pas encore pour une raison quelconque.
+        if spins > 500_000_000 { return; }
+    }
+    let elapsed_ticks = ticks().wrapping_sub(start_tick).max(1);
+    let elapsed_tsc = cpu::rdtsc().wrapping_sub(start_tsc);
+    let elapsed_ms = elapsed_ticks * 1000 / TICKS_PER_SECOND;
+    if elapsed_ms > 0 {
+        unsafe { CYCLES_PER_MS = elapsed_tsc / elapsed_ms; }
+    }
+}
+
+/// Convertit un delta de cycles TSC en millisecondes reelles (0 si non calibre).
+pub fn cycles_to_ms(cycles: u64) -> u64 {
+    let cpm = unsafe { CYCLES_PER_MS };
+    if cpm == 0 { 0 } else { cycles / cpm }
+}
+
 // ── Charge CPU via TSC ────────────────────────────────────────────────────────
 // Mesure le ratio (cycles de rendu) / (cycles totaux de frame).
 // Avec HLT entre frames, le temps total = rendu + sommeil.
