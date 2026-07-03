@@ -20,6 +20,7 @@ pub struct Link { pub x: i32, pub y: i32, pub w: i32, pub h: i32, pub href: Stri
 /// pour prendre le focus, saisir au clavier et soumettre (Entree). `action`,
 /// `method` et `hidden` viennent du <form> englobant, aplatis ici pour que la
 /// soumission construise l'URL complete (ex. /search?q=...&sca_esv=...).
+#[derive(Clone)]
 pub struct FormField {
     pub x: i32, pub y: i32, pub w: i32, pub h: i32, // rect en coords document
     pub name: String,                    // attribut name (ex. "q")
@@ -38,6 +39,9 @@ pub struct Layer {
     pub clip: Option<(i32, i32, i32, i32)>, // (x, y, w, h) en coords document
     pub items: Vec<Item>,
     pub links: Vec<Link>,
+    // Champs produits dans une couche positionnée. Sans ça un input peut être
+    // peint mais jamais ciblable par la souris (hit-test = 0 champs).
+    pub fields: Vec<FormField>,
 }
 
 pub struct Page {
@@ -79,7 +83,7 @@ fn scale_item_from(it: &mut Item, ox: i32, oy: i32, pct: i32) {
     }
 }
 
-pub fn apply_box_transform(items: &mut [Item], links: &mut [Link], ox: i32, oy: i32, tx: i32, ty: i32, scale_pct: i32) {
+pub fn apply_box_transform(items: &mut [Item], links: &mut [Link], fields: &mut [FormField], ox: i32, oy: i32, tx: i32, ty: i32, scale_pct: i32) {
     if tx == 0 && ty == 0 && scale_pct == 100 { return; }
     for it in items {
         scale_item_from(it, ox, oy, scale_pct);
@@ -93,5 +97,14 @@ pub fn apply_box_transform(items: &mut [Item], links: &mut [Link], ox: i32, oy: 
             lk.h = (lk.h * scale_pct / 100).max(1);
         }
         lk.x += tx; lk.y += ty;
+    }
+    for fd in fields {
+        if scale_pct != 100 {
+            fd.x = ox + (fd.x - ox) * scale_pct / 100;
+            fd.y = oy + (fd.y - oy) * scale_pct / 100;
+            fd.w = (fd.w * scale_pct / 100).max(1);
+            fd.h = (fd.h * scale_pct / 100).max(1);
+        }
+        fd.x += tx; fd.y += ty;
     }
 }

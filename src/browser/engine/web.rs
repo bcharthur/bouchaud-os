@@ -920,6 +920,9 @@ fn parse_len(s: &str) -> Option<Len> {
 struct BoxProps {
     hidden: bool,
     bg: Option<u32>,
+    bg_image: Option<String>,  // background-image: url(...)
+    bg_size: u8,               // 0 auto, 1 cover, 2 contain, 3 stretch
+    bg_pos: u8,                // 0 top-left, 1 center
     width: Option<Len>,
     height: Option<Len>,
     max_width: Option<Len>,
@@ -958,7 +961,7 @@ struct BoxProps {
     scale_pct: i32,         // transform: scale(...) en pourcentage (100 = identite)
 }
 fn default_box() -> BoxProps {
-    BoxProps { hidden: false, bg: None, width: None, height: None, max_width: None, min_width: None, min_height: None,
+    BoxProps { hidden: false, bg: None, bg_image: None, bg_size: 0, bg_pos: 0, width: None, height: None, max_width: None, min_width: None, min_height: None,
         center: false, disp: None, float: FloatK::None,
         pad_t: 0, pad_r: 0, pad_b: 0, pad_l: 0, mar_t: 0, mar_b: 0,
         border_w: 0, border_color: 0x000000, radius: 0,
@@ -1094,6 +1097,16 @@ struct Ctx<'a> {
     no_display_none: bool,
 }
 
+fn image_kind(raw: &[u8]) -> &'static str {
+    if raw.starts_with(b"\x89PNG") { "png invalide" }
+    else if raw.starts_with(b"\xff\xd8") { "jpeg non supporte/progressif" }
+    else if raw.len() > 12 && &raw[4..8] == b"ftyp" && (&raw[8..12] == b"avif" || &raw[8..12] == b"avis") { "avif non supporte" }
+    else if raw.len() > 12 && &raw[4..8] == b"ftyp" { "iso-bmff/heif non supporte" }
+    else if raw.starts_with(b"RIFF") && raw.len() > 12 && &raw[8..12] == b"WEBP" { "webp non supporte" }
+    else if raw.starts_with(b"GIF") { "gif invalide" }
+    else { "format non supporte" }
+}
+
 impl<'a> Ctx<'a> {
     // Charge une image (data:URI ou reseau), downscale, renvoie son index.
     fn load_image(&mut self, src: &str, max_w: usize, max_h: usize) -> Option<usize> {
@@ -1115,7 +1128,7 @@ impl<'a> Ctx<'a> {
         let img = match image::decode(&raw) {
             Some(im) => im,
             None => {
-                crate::dlog!(crate::diag::Cat::Warn, "image non decodee ({}o, format non supporte?): {}", raw.len(), src);
+                crate::dlog!(crate::diag::Cat::Warn, "image non decodee ({}o, {}): {}", raw.len(), image_kind(&raw), src);
                 return None;
             }
         };
@@ -1387,13 +1400,16 @@ fn layout(dom: &Dom, base_url: &str, width: i32, css: &[Rule], no_display_none: 
     let height = f.y + PAD;
     let items = core::mem::take(&mut f.items);
     let mut links = core::mem::take(&mut f.links);
-    let fields = core::mem::take(&mut f.fields);
+    let mut fields = core::mem::take(&mut f.fields);
     drop(f);
     // Recupere les couches positionnees, triees par z (stable = ordre document).
     let mut layers = core::mem::take(&mut ctx.layers);
     layers.sort_by_key(|l| l.z);
-    // Les liens des couches participent au hit-testing (coords document).
-    for l in &layers { for lk in &l.links { links.push(Link { x: lk.x, y: lk.y, w: lk.w, h: lk.h, href: lk.href.clone() }); } }
+    // Les liens ET champs des couches participent au hit-testing (coords document).
+    for l in &layers {
+        for lk in &l.links { links.push(Link { x: lk.x, y: lk.y, w: lk.w, h: lk.h, href: lk.href.clone() }); }
+        for fd in &l.fields { fields.push(fd.clone()); }
+    }
     Page { title: ctx.title, items, links, fields, images: ctx.images, height, bg, layers }
 }
 
@@ -1428,6 +1444,19 @@ fn resolve_var(val: &str, css_vars: &[(String, String)]) -> String {
 }
 
 
+fn css_url(val: &str) -> Option<String> {
+    let lower = val.to_ascii_lowercase();
+    let pos = lower.find("url(")?;
+    let rest = &val[pos + 4..];
+    let end = rest.find(')')?;
+    let mut u = rest[..end].trim();
+    if u.len() >= 2 && ((u.starts_with('"') && u.ends_with('"')) || (u.starts_with('\'') && u.ends_with('\''))) {
+        u = &u[1..u.len() - 1];
+    }
+    if u.is_empty() { None } else { Some(u.to_string()) }
+}
+
+
 fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, css_vars: &[(String, String)], no_display_none: bool) {
     for (p, v) in decls {
         if p.starts_with("--") { continue; } // proprietes CSS custom (deja collectees)
@@ -1436,6 +1465,7 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, cs
         match p.as_str() {
             "color" => { if let Some(c) = parse_color(val) { st.color = c; } }
             "background" | "background-color" | "background-image" => {
+                if let Some(u) = css_url(val) { bx.bg_image = Some(u); }
                 if val.contains("linear-gradient(") {
                     if let Some((c1, c2, vert)) = parse_gradient(val) {
                         bx.grad = Some((c1, c2, vert));
@@ -1445,6 +1475,9 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, cs
                     bx.bg = Some(c);
                 }
             }
+            "background-size" => { bx.bg_size = match val { "cover" => 1, "contain" => 2, v if v.contains("100%") => 3, _ => 0 }; }
+            "background-position" => { if val.contains("center") { bx.bg_pos = 1; } }
+            "background-repeat" => { /* no-repeat/repeat sont traites comme no-repeat pour l'instant */ }
             "font-size" => { if let Some(px) = font_px(val) { st.scale = px_to_scale(px); } }
             "font-weight" => { if val == "bold" || val == "bolder" || val == "700" || val == "800" || val == "900" { st.bold = true; } else if val == "normal" || val == "400" { st.bold = false; } }
             "text-align" => { st.align = match val { "center" => 1, "right" => 2, _ => 0 }; }
@@ -1588,15 +1621,23 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, cs
             "padding-right" => { if let Some(px) = first_len(val) { bx.pad_r = px.max(0); } }
             "padding-bottom" => { if let Some(px) = first_len(val) { bx.pad_b = px.max(0); } }
             "padding-left" => { if let Some(px) = first_len(val) { bx.pad_l = px.max(0); } }
-            // `border: 1px solid #ccc` -> epaisseur + couleur ; le style (solid...) est ignore.
-            "border" | "border-width" | "border-top" | "border-bottom" | "border-left" | "border-right" => {
+            // `border: 1px solid #ccc` -> epaisseur + couleur.
+            // Important : les resets modernes font `border-width:0; border-style:solid;
+            // border-color:currentColor`; ni style ni couleur ne doivent rendre la bordure visible.
+            "border" | "border-top" | "border-bottom" | "border-left" | "border-right" => {
+                let mut saw_width = false;
+                let mut saw_none = false;
                 for tok in val.split_whitespace() {
-                    if let Some(l) = parse_len(tok) { let w = l.resolve(0); if w > 0 { bx.border_w = w; } }
-                    else if let Some(c) = parse_color(tok) { bx.border_color = c; if bx.border_w == 0 { bx.border_w = 1; } }
+                    if tok == "none" || tok == "hidden" { saw_none = true; bx.border_w = 0; }
+                    else if tok == "0" || tok == "0px" { saw_width = true; bx.border_w = 0; }
+                    else if let Some(l) = parse_len(tok) { let w = l.resolve(0).max(0); saw_width = true; bx.border_w = w; }
+                    else if let Some(c) = parse_color(tok) { bx.border_color = c; }
                 }
+                if !saw_width && !saw_none && val.contains("solid") && bx.border_w == 0 { bx.border_w = 1; }
             }
-            "border-color" => { if let Some(c) = parse_color(val) { bx.border_color = c; if bx.border_w == 0 { bx.border_w = 1; } } }
-            "border-style" => { if val != "none" && bx.border_w == 0 { bx.border_w = 1; } }
+            "border-width" => { let (t, r, b, l) = parse_sides(val); bx.border_w = t.max(r).max(b).max(l).max(0); }
+            "border-color" => { if let Some(c) = parse_color(val) { bx.border_color = c; } }
+            "border-style" => { if val == "none" || val == "hidden" { bx.border_w = 0; } }
             // opacity:0 (invisible total) masque ; les valeurs intermediaires
             // restent non implementees (pas de compositing alpha par item).
             // Garde-fou anti-FOUC identique a display:none.
@@ -1820,6 +1861,7 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
     let positioned_inflow = matches!(bx.position, Pos::Relative | Pos::Sticky);
     let it0 = f.items.len();
     let lk0 = f.links.len();
+    let fd0 = f.fields.len();
     let lay0 = f.ctx.layers.len();
 
     match disp {
@@ -1846,6 +1888,7 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
             for l in &mut f.ctx.layers[lay0..] {
                 for it in &mut l.items { translate_item(it, dx, dy); }
                 for lk in &mut l.links { lk.x += dx; lk.y += dy; }
+                for fd in &mut l.fields { fd.x += dx; fd.y += dy; }
                 if let Some((cx, cy, cw, ch)) = l.clip { l.clip = Some((cx + dx, cy + dy, cw, ch)); }
             }
         }
@@ -1855,7 +1898,8 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
             if f.ctx.layers.len() < MAX_LAYERS {
                 let items: Vec<Item> = f.items.drain(it0..).collect();
                 let links: Vec<Link> = f.links.drain(lk0..).collect();
-                f.ctx.layers.push(Layer { z, fixed: false, clip: None, items, links });
+                let fields: Vec<FormField> = f.fields.drain(fd0..).collect();
+                f.ctx.layers.push(Layer { z, fixed: false, clip: None, items, links, fields });
             }
         }
     }
@@ -1897,6 +1941,7 @@ fn layout_positioned(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &Box
     let h = sub.y.max(1);
     let mut items = core::mem::take(&mut sub.items);
     let mut links = core::mem::take(&mut sub.links);
+    let mut fields = core::mem::take(&mut sub.fields);
     drop(sub);
 
     // Position finale dans le document (ou le viewport pour fixed).
@@ -1909,15 +1954,17 @@ fn layout_positioned(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &Box
 
     for it in &mut items { translate_item(it, px, py); }
     for lk in &mut links { lk.x += px; lk.y += py; }
+    for fd in &mut fields { fd.x += px; fd.y += py; }
     // Translate aussi les couches imbriquees (descendants absolus) generees.
     for l in &mut f.ctx.layers[layer_start..] {
         for it in &mut l.items { translate_item(it, px, py); }
         for lk in &mut l.links { lk.x += px; lk.y += py; }
+        for fd in &mut l.fields { fd.x += px; fd.y += py; }
         if let Some((cx, cy, cw, ch)) = l.clip { l.clip = Some((cx + px, cy + py, cw, ch)); }
     }
 
     let clip = if bx.overflow_clip { Some((px, py, width, h)) } else { None };
-    f.ctx.layers.push(Layer { z: bx.z_index.unwrap_or(0), fixed, clip, items, links });
+    f.ctx.layers.push(Layer { z: bx.z_index.unwrap_or(0), fixed, clip, items, links, fields });
 }
 
 /// Clamp sur borne haute DYNAMIQUE (souvent `f.avail`, qui peut descendre a
@@ -1983,6 +2030,7 @@ fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps
     let box_top = f.y;
     let bg_insert = f.items.len();
     let link_insert = f.links.len();
+    let field_insert = f.fields.len();
     let (sx0, sav, sal) = (f.x0, f.avail, f.align);
     f.x0 = sx0 + left + bw + pl;    // contenu insere par bordure + padding gauche
     f.avail = inner;
@@ -2042,6 +2090,18 @@ fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps
         } else if let Some(bgc) = bx.bg {
             f.items.insert(bg_insert, if bx.radius > 0 { Item::RoundedRect { x: sx0 + left, y: box_top, w: outer, h, radius: bx.radius, color: bgc } } else { Item::Rect { x: sx0 + left, y: box_top, w: outer, h, color: bgc } });
         }
+        if let Some(src) = &bx.bg_image {
+            let maxw = outer.max(16) as usize;
+            let maxh = h.max(16).min(4096) as usize;
+            if let Some(idx) = f.ctx.load_image(src, maxw, maxh) {
+                let (iw, ih) = { let im = &f.ctx.images[idx]; (im.w as i32, im.h as i32) };
+                let mut ix = sx0 + left;
+                let mut iy = box_top;
+                if bx.bg_pos == 1 { ix += ((outer - iw) / 2).max(0); iy += ((h - ih) / 2).max(0); }
+                let ins = if bx.bg.is_some() { (bg_insert + 1).min(f.items.len()) } else { bg_insert };
+                f.items.insert(ins, Item::Image { x: ix, y: iy, w: iw, h: ih, idx });
+            }
+        }
     }
     // box-shadow : rectangle decale (+4,+4), insere ENCORE en dessous du fond.
     if let Some(sh) = bx.shadow {
@@ -2057,8 +2117,8 @@ fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps
         f.items.push(Item::Rect { x: x + outer - bw, y: box_top, w: bw, h, color: bc });
     }
 
-    // Transform CSS simple : applique translate/scale au fragment visuel et aux liens.
-    apply_box_transform(&mut f.items[bg_insert..], &mut f.links[link_insert..], sx0 + left, box_top, bx.tx, bx.ty, bx.scale_pct);
+    // Transform CSS simple : applique translate/scale au fragment visuel, aux liens et aux champs.
+    apply_box_transform(&mut f.items[bg_insert..], &mut f.links[link_insert..], &mut f.fields[field_insert..], sx0 + left, box_top, bx.tx, bx.ty, bx.scale_pct);
 
     // Marge basse + espacement par defaut entre blocs.
     f.y += bx.mar_b;

@@ -2424,27 +2424,6 @@ fn install(it: &mut Interp) {
         set(&o, "responseURL", str_val(""));
         Ok(o)
     }));
-    // URL / URLSearchParams stubs
-    scope_declare(&g2, "URL", native_val(|it, _t, a| {
-        let o = new_obj(Obj::plain());
-        let href = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
-        set(&o, "href", str_val(href.clone()));
-        set(&o, "origin", str_val(""));
-        set(&o, "pathname", str_val(""));
-        set(&o, "search", str_val(""));
-        set(&o, "searchParams", { let sp = new_obj(Obj::plain()); set(&sp, "get", native_val(|_i, _t, _a| Ok(Value::Null))); set(&sp, "set", native_val(|_i, _t, _a| Ok(Value::Undefined))); sp });
-        set(&o, "toString", native_val(|_i, _t, _a| Ok(str_val(""))));
-        Ok(o)
-    }));
-    scope_declare(&g2, "URLSearchParams", native_val(|_it, _t, _a| {
-        let o = new_obj(Obj::plain());
-        set(&o, "get",    native_val(|_i, _t, _a| Ok(Value::Null)));
-        set(&o, "set",    native_val(|_i, _t, _a| Ok(Value::Undefined)));
-        set(&o, "append", native_val(|_i, _t, _a| Ok(Value::Undefined)));
-        set(&o, "has",    native_val(|_i, _t, _a| Ok(Value::Bool(false))));
-        set(&o, "toString", native_val(|_i, _t, _a| Ok(str_val(""))));
-        Ok(o)
-    }));
     // Event / CustomEvent stubs
     scope_declare(&g2, "Event", native_val(|it, _t, a| {
         let o = new_obj(Obj::plain());
@@ -2496,6 +2475,9 @@ fn install(it: &mut Interp) {
         let desc = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
         Ok(str_val(format!("Symbol({})", desc)))
     }));
+    // BigInt minimal : représentation numérique compatible avec les bundles qui
+    // testent simplement son existence ou convertissent de petits entiers.
+    scope_declare(&g2, "BigInt", native_val(|it, _t, a| Ok(Value::Num(it.to_num(a.get(0).unwrap_or(&Value::Num(0.0)))))));
     // Proxy stub : retourne la cible inchangée
     scope_declare(&g2, "Proxy", native_val(|_it, _t, a| Ok(a.get(0).cloned().unwrap_or(Value::Undefined))));
     // Reflect stub
@@ -3343,6 +3325,9 @@ fn string_prop(s: &str, name: &str) -> Value {
         "padStart" => native_val(|it, t, a| { let s = it.to_string(&t); let len = it.to_num(a.get(0).unwrap_or(&Value::Num(0.0))) as usize; let pad = a.get(1).map(|v| it.to_string(v)).unwrap_or_else(|| " ".into()); Ok(str_val(pad_str(&s, len, &pad, true))) }),
         "padEnd" => native_val(|it, t, a| { let s = it.to_string(&t); let len = it.to_num(a.get(0).unwrap_or(&Value::Num(0.0))) as usize; let pad = a.get(1).map(|v| it.to_string(v)).unwrap_or_else(|| " ".into()); Ok(str_val(pad_str(&s, len, &pad, false))) }),
         "concat" => native_val(|it, t, a| { let mut s = it.to_string(&t); for v in a { s.push_str(&it.to_string(v)); } Ok(str_val(s)) }),
+        "bold" => native_val(|it, t, _a| Ok(str_val(format!("<b>{}</b>", it.to_string(&t))))),
+        "italics" => native_val(|it, t, _a| Ok(str_val(format!("<i>{}</i>", it.to_string(&t))))),
+        "link" => native_val(|it, t, a| Ok(str_val(format!("<a href=\"{}\">{}</a>", it.to_string(a.get(0).unwrap_or(&Value::Undefined)), it.to_string(&t))))),
         "toString" => native_val(|it, t, _a| Ok(str_val(it.to_string(&t)))),
         "trimStart" => native_val(|it, t, _a| Ok(str_val(it.to_string(&t).trim_start().to_string()))),
         "trimEnd" => native_val(|it, t, _a| Ok(str_val(it.to_string(&t).trim_end().to_string()))),
@@ -3390,6 +3375,21 @@ fn array_prop(name: &str) -> Value {
         "lastIndexOf" => native_val(|_it, t, a| { if let Value::Obj(o) = &t { let arr = o.borrow().arr.clone().unwrap_or_default(); let target = a.get(0).cloned().unwrap_or(Value::Undefined); for (i, v) in arr.iter().enumerate().rev() { if strict_eq(v, &target) { return Ok(Value::Num(i as f64)); } } } Ok(Value::Num(-1.0)) }),
         "includes" => native_val(|_it, t, a| { if let Value::Obj(o) = &t { let arr = o.borrow().arr.clone().unwrap_or_default(); let target = a.get(0).cloned().unwrap_or(Value::Undefined); for v in &arr { if strict_eq(v, &target) { return Ok(Value::Bool(true)); } } } Ok(Value::Bool(false)) }),
         "slice" => native_val(|it, t, a| { if let Value::Obj(o) = &t { let arr = o.borrow().arr.clone().unwrap_or_default(); let (st, en) = slice_bounds(arr.len(), a, it); return Ok(array_val(arr[st..en].to_vec())); } Ok(array_val(Vec::new())) }),
+        "splice" => native_val(|it, t, a| {
+            if let Value::Obj(o) = &t {
+                if let Some(arr) = &mut o.borrow_mut().arr {
+                    let len = arr.len();
+                    let start_raw = it.to_num(a.get(0).unwrap_or(&Value::Num(0.0))) as isize;
+                    let start = if start_raw < 0 { len.saturating_sub((-start_raw) as usize) } else { (start_raw as usize).min(len) };
+                    let del = if a.len() >= 2 { it.to_num(a.get(1).unwrap_or(&Value::Num(0.0))).max(0.0) as usize } else { len - start };
+                    let del = del.min(len - start);
+                    let removed: Vec<Value> = arr.drain(start..start + del).collect();
+                    for (i, v) in a.iter().skip(2).cloned().enumerate() { arr.insert(start + i, v); }
+                    return Ok(array_val(removed));
+                }
+            }
+            Ok(array_val(Vec::new()))
+        }),
         "concat" => native_val(|it, t, a| { let mut out = Vec::new(); if let Value::Obj(o) = &t { out.extend(o.borrow().arr.clone().unwrap_or_default()); } for v in a { match v { Value::Obj(o) if o.borrow().arr.is_some() => out.extend(o.borrow().arr.clone().unwrap()), _ => out.push(v.clone()) } } let _ = it; Ok(array_val(out)) }),
         "reverse" => native_val(|_it, t, _a| { if let Value::Obj(o) = &t { if let Some(arr) = &mut o.borrow_mut().arr { arr.reverse(); } } Ok(t) }),
         "map" => native_val(|it, t, a| { let arr = arr_of(&t); let f = a.get(0).cloned().unwrap_or(Value::Undefined); let mut out = Vec::new(); for (i, v) in arr.iter().enumerate() { out.push(it.call(f.clone(), Value::Undefined, &[v.clone(), Value::Num(i as f64), t.clone()])?); } Ok(array_val(out)) }),
