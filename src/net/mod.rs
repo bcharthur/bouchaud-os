@@ -373,6 +373,48 @@ static mut RES_CACHE: Option<alloc::vec::Vec<(String, alloc::vec::Vec<u8>)>> = N
 const RES_CACHE_MAX_ENTRIES: usize = 128;
 const RES_CACHE_MAX_BYTES: usize = 12_000_000;
 
+// ── Budget temps des sous-ressources ───────────────────────────────────────
+// Une page peut referencer des dizaines d'hotes tiers (pub, analytics, CDN de
+// polices...) : chacun d'eux, s'il est injoignable ou lent, coute jusqu'a 3s
+// (TLS, cf. TcpConn::fill) voire 30s (HTTP simple, cf. tcp::fetch) d'attente
+// AVANT d'echouer. Sans plafond global, un budget d'images de 96 (cf. web.rs)
+// peut donc a lui seul faire gonfler un chargement de quelques centaines de
+// ms a plusieurs MINUTES, sans qu'aucune phase individuelle (DOM/CSS/LAYOUT)
+// ne le laisse voir : c'est l'origine du "195004ms" observe en pratique alors
+// que la somme des phases loggees ne faisait que ~3s. On borne donc le temps
+// TOTAL consacre aux sous-ressources d'une page (CSS externe, JS, images) :
+// une fois le budget epuise, les fetch_cached() suivants echouent tout de
+// suite au lieu de retenter une connexion complete.
+static mut SUBRES_DEADLINE_TSC: Option<u64> = None;
+static mut SUBRES_LOGGED: bool = false;
+
+/// (Re)demarre le budget temps des sous-ressources pour une nouvelle page.
+/// A appeler une fois au debut du pipeline HTML->layout (voir web.rs).
+pub fn start_page_budget(ms: u64) {
+    let cycles = crate::kernel::timer::ms_to_cycles(ms);
+    unsafe {
+        SUBRES_DEADLINE_TSC = if cycles == 0 { None } else {
+            Some(crate::kernel::timer::cycles_since_boot().wrapping_add(cycles))
+        };
+        SUBRES_LOGGED = false;
+    }
+}
+
+fn subres_budget_exhausted() -> bool {
+    unsafe {
+        match SUBRES_DEADLINE_TSC {
+            Some(deadline) if crate::kernel::timer::cycles_since_boot() >= deadline => {
+                if !SUBRES_LOGGED {
+                    SUBRES_LOGGED = true;
+                    crate::dlog!(crate::diag::Cat::Warn, "budget reseau sous-ressources epuise : fetch restants ignores");
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Recupere une sous-ressource (CSS/JS/image) avec mise en cache. Renvoie les
 /// octets du corps si la requete reussit (ou un hit cache), sinon None.
 pub fn fetch_cached(url: &str) -> Option<alloc::vec::Vec<u8>> {
@@ -387,6 +429,7 @@ pub fn fetch_cached(url: &str) -> Option<alloc::vec::Vec<u8>> {
             }
         }
     }
+    if subres_budget_exhausted() { return None; }
     let doc = fetch_document(url);
     if !doc.ok || doc.body.is_empty() { return None; }
     let body = doc.body;
@@ -553,6 +596,40 @@ pub fn wget_cmd(argc: usize, argv: &[&str; 12]) {
     for l in http_get(target) {
         println!("{}", l);
     }
+}
+
+/// Commande `smoltest <hote> [port] [chemin]` : test manuel du backend TCP
+/// experimental `transport::smol_tcp` (vraie pile RFC 793 via la crate
+/// `smoltcp`, cf. commentaire en tete de ce module). Non branche par defaut
+/// (fetch_document continue d'utiliser tcp.rs/TcpConn) : sert a verifier a
+/// L'EXECUTION -- ce module n'a ete verifie qu'a la COMPILATION -- avant
+/// d'envisager de le faire remplacer la pile maison en production.
+pub fn smoltest_cmd(argc: usize, argv: &[&str; 12]) {
+    use alloc::string::String;
+    if argc < 2 {
+        println!("usage: smoltest <hote> [port] [chemin]");
+        return;
+    }
+    let host = argv[1];
+    let port: u16 = if argc >= 3 { argv[2].parse().unwrap_or(80) } else { 80 };
+    let path = if argc >= 4 { argv[3] } else { "/" };
+    let ip = match resolve(host) {
+        Some(ip) => ip,
+        None => { println!("DNS: echec pour {}", host); return; }
+    };
+    println!("smoltcp: connexion a {}:{} ({}.{}.{}.{})...", host, port, ip[0], ip[1], ip[2], ip[3]);
+    let req = http::build_get(host, path);
+    let t0 = crate::kernel::timer::cycles_since_boot();
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    let ok = transport::smol_tcp::fetch(ip, port, req.as_bytes(), &mut out);
+    let ms = crate::kernel::timer::cycles_to_ms(crate::kernel::timer::cycles_since_boot().wrapping_sub(t0));
+    if !ok {
+        println!("smoltcp: echec ({}ms)", ms);
+        return;
+    }
+    println!("smoltcp: {} octets recus en {}ms", out.len(), ms);
+    let preview = String::from_utf8_lossy(&out[..out.len().min(300)]);
+    for line in preview.lines().take(8) { println!("  {}", line); }
 }
 
 /// Commande `tls [hote]` : diagnostics TLS et magasin de CA racines.
