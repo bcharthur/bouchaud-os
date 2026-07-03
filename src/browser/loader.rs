@@ -42,6 +42,11 @@ pub fn open(url: &str, width: i32) -> (Session, Page) {
     if url == "about:system" {
         return from_html(super::pages::system_info().as_bytes(), url, width);
     }
+    // Matrice de compatibilite : la page teste le moteur (DOM/URL/events/
+    // modules/JS/storage) et logge son score COMPAT dans le journal.
+    if url == "about:compat" {
+        return from_html(super::pages::COMPAT_SUITE.as_bytes(), url, width);
+    }
     // Journal d'activite de la pile (devlog) — diagnostic du rendu.
     if url == "about:log" {
         return from_html(crate::diag::render_html().as_bytes(), url, width);

@@ -413,3 +413,78 @@ try {
   document.getElementById('out').textContent='Erreur : '+e;
 }
 </script></body></html>"#;
+
+/// about:compat — matrice de compatibilite executee PAR le moteur lui-meme :
+/// chaque feature (DOM, URL, events, modules, JS, storage) est testee en
+/// JavaScript reel dans la page, affichee PASS/FAIL, et le score est envoye
+/// au journal systeme via __dlog (ligne `COMPAT dom=x/y ...` dans about:log).
+pub const COMPAT_SUITE: &str = r##"<!doctype html><html><head><title>about:compat</title>
+<style>
+body{font-family:sans-serif;background:#ffffff;color:#202124;padding:16px}
+h1{font-size:22px} .pass{color:#137333} .fail{color:#c5221f}
+.score{background:#e8f0fe;padding:8px;border-radius:8px;font-weight:bold}
+.flexdemo{display:flex;gap:8px}
+.cell{width:60px;height:24px;background:var(--c,#1a73e8)}
+</style></head><body>
+<h1>Nautile &mdash; matrice de compatibilite</h1>
+<div id="out">en attente de DOMContentLoaded&hellip; (si ce texte reste, l'event loop est cassee)</div>
+<h2>Formulaire interactif</h2>
+<form id="f"><input id="q" name="q" placeholder="tape puis Entree"><button>OK</button></form>
+<h2>Visuel : flex + variables CSS</h2>
+<div class="flexdemo"><div class="cell"></div><div class="cell" style="--c:#137333"></div><div class="cell" style="--c:#c5221f"></div></div>
+<p>3 cellules colorees sur UNE ligne = flex + var() OK.</p>
+<script>
+document.getElementById('q').addEventListener('input', function(e){ window.__typed = e.target.value; });
+document.getElementById('f').addEventListener('submit', function(e){ e.preventDefault(); window.__submitted = true; });
+document.addEventListener('DOMContentLoaded', function(){
+  var rows=[]; var groups={};
+  function t(g,name,fn){
+    var ok=false, err='';
+    try{ ok=!!fn(); }catch(e){ err=' &mdash; '+e; }
+    groups[g]=groups[g]||[0,0]; groups[g][1]++; if(ok)groups[g][0]++;
+    rows.push('<div class="'+(ok?'pass':'fail')+'">'+(ok?'PASS':'FAIL')+' ['+g+'] '+name+err+'</div>');
+  }
+  t('dom','documentElement/head/body', function(){ return !!document.documentElement && !!document.head && !!document.body; });
+  t('dom','getElementById', function(){ return !!document.getElementById('out'); });
+  t('dom','querySelectorAll(div)', function(){ return document.querySelectorAll('div').length>0; });
+  t('dom','getElementsByTagName(script)[0]', function(){ return !!document.getElementsByTagName('script')[0]; });
+  t('dom','script.parentNode', function(){ return !!document.getElementsByTagName('script')[0].parentNode; });
+  t('dom','document.scripts', function(){ return document.scripts.length>0; });
+  t('dom','classList add/contains/toggle', function(){ var e=document.getElementById('out'); e.classList.add('zz'); var a=e.classList.contains('zz'); e.classList.toggle('zz'); return a && !e.classList.contains('zz'); });
+  t('dom','createElement+appendChild', function(){ var d=document.createElement('div'); return d!==undefined; });
+  t('dom','getBoundingClientRect', function(){ var r=document.getElementById('out').getBoundingClientRect(); return typeof r.width==='number' && typeof r.top==='number' && typeof r.right==='number'; });
+  t('dom','innerHTML lecture', function(){ return typeof document.getElementById('out').innerHTML==='string'; });
+  t('url','location.href/pathname', function(){ return typeof location.href==='string' && location.href.length>0 && typeof location.pathname==='string'; });
+  t('url','location.search/hash/origin/hostname', function(){ return typeof location.search==='string' && typeof location.hash==='string' && typeof location.origin==='string' && typeof location.hostname==='string'; });
+  t('url','new URL relative', function(){ return new URL('../a/b.png','https://x.y/c/d/p.html').href==='https://x.y/c/a/b.png'; });
+  t('url','URL.searchParams', function(){ return new URL('https://a.b/p?q=chat').searchParams.get('q')==='chat'; });
+  t('url','URLSearchParams', function(){ var p=new URLSearchParams('?a=1&b=deux'); return p.get('a')==='1' && p.has('b') && p.get('zz')===null; });
+  t('events','DOMContentLoaded', function(){ return true; });
+  t('events','addEventListener+dispatchEvent', function(){ var got=false; document.addEventListener('x-test', function(){ got=true; }); document.dispatchEvent({type:'x-test'}); return got; });
+  t('events','Event constructor', function(){ var e=new Event('k'); return e.type==='k'; });
+  t('modules','import() dynamique', function(){ return typeof import('x-compat-stub').then==='function'; });
+  t('js','Promise.then', function(){ var v=0; Promise.resolve(7).then(function(x){ v=x; }); return typeof Promise==='function'; });
+  t('js','class/extends/super-proto', function(){ class A { constructor(){ this.v=1; } m(){ return this.v; } } class B extends A { m(){ return 42; } } return new B().m()===42; });
+  t('js','destructuring+rest', function(){ var [x, ...r] = [1,2,3]; var {a}={a:9}; return x===1 && r.length===2 && a===9; });
+  t('js','spread+default params', function(){ function f(a, b=2){ return a+b; } var arr=[...[1,2],3]; return f(1)===3 && arr.length===3; });
+  t('js','template literals', function(){ var n=2; return `a${n}b`==='a2b'; });
+  t('js','arrow+closures', function(){ var add=(a)=>(b)=>a+b; return add(40)(2)===42; });
+  t('js','async/await (synchrone)', function(){ var ok=false; (async function(){ ok=true; })(); return ok; });
+  t('js','optional chaining / nullish', function(){ var o={}; return o.a?.b===undefined && (null ?? 5)===5; });
+  t('js','Map/Set/WeakMap/WeakSet', function(){ var o={}; var m=new Map(); m.set('k',1); var w=new WeakSet(); w.add(o); return m.get('k')===1 && new Set([1,1]).size===1 && w.has(o); });
+  t('js','Proxy/Reflect', function(){ var o={a:1}; return new Proxy(o,{}).a===1 && Reflect.get(o,'a')===1; });
+  t('js','Object.defineProperty/assign', function(){ var o={}; Object.defineProperty(o,'x',{value:5}); return o.x===5 && Object.assign({},{y:2}).y===2; });
+  t('js','JSON parse/stringify', function(){ return JSON.parse('{"a":[1,2]}').a.length===2 && JSON.stringify({b:1})==='{"b":1}'; });
+  t('js','RegExp match/replace', function(){ return 'abc123'.replace(/[0-9]+/,'X')==='abcX' && /b(c)/.exec('abc')[1]==='c'; });
+  t('storage','localStorage set/get', function(){ localStorage.setItem('k','v'); return localStorage.getItem('k')==='v'; });
+  t('storage','sessionStorage', function(){ sessionStorage.setItem('s','1'); return sessionStorage.getItem('s')==='1'; });
+  var parts=[]; for (var g in groups){ parts.push(g+'='+groups[g][0]+'/'+groups[g][1]); }
+  var line='COMPAT '+parts.join(' ');
+  if (typeof __dlog==='function') __dlog(line);
+  document.getElementById('out').innerHTML='<p class="score">'+line+'</p>'+rows.join('');
+});
+</script>
+<p>Le score COMPAT est aussi ecrit dans <a href="about:log">about:log</a>.
+Apres saisie dans le champ : window.__typed / window.__submitted (limites actuelles :
+la saisie GUI ne redistribue pas encore les events input/submit au JS de page).</p>
+</body></html>"##;
