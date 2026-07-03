@@ -311,9 +311,17 @@ fn handle_browser_event(
             state.tab_mut().page = pg;
         }
 
+        // Vrai clic DOM (bouton, div role="button", onclick...) trouve par le
+        // hit-test reel de web.rs — plus une simple estimation liens/champs.
+        ChromeEvent::ClickNode(key) => {
+            let pg = state.tab_mut().session.click_node(&key);
+            state.tab_mut().page = pg;
+        }
+
         ChromeEvent::FocusField(i) => {
+            let name = state.tab().page.fields.get(i).map(|f| f.name.clone()).unwrap_or_default();
             let init = state.tab().page.fields.get(i).map(|f| f.value.clone()).unwrap_or_default();
-            crate::dlog!(crate::diag::Cat::Info, "nautile: focus champ {} ({} champs sur la page)", i, state.tab().page.fields.len());
+            crate::dlog!(crate::diag::Cat::Info, "nautile: FOCUS champ {} name={:?} ({} champs sur la page)", i, name, state.tab().page.fields.len());
             let tab = state.tab_mut();
             tab.focused_field = Some(i);
             tab.field_text = init;
@@ -321,10 +329,14 @@ fn handle_browser_event(
 
         ChromeEvent::FieldChar(c) => {
             if state.tab().field_text.len() < 512 { state.tab_mut().field_text.push(c); }
+            let name = state.tab().focused_field.and_then(|i| state.tab().page.fields.get(i)).map(|f| f.name.clone()).unwrap_or_default();
+            crate::dlog!(crate::diag::Cat::Info, "nautile: INPUT {}={:?}", name, state.tab().field_text);
         }
 
         ChromeEvent::FieldBackspace => {
             state.tab_mut().field_text.pop();
+            let name = state.tab().focused_field.and_then(|i| state.tab().page.fields.get(i)).map(|f| f.name.clone()).unwrap_or_default();
+            crate::dlog!(crate::diag::Cat::Info, "nautile: INPUT {}={:?}", name, state.tab().field_text);
         }
 
         ChromeEvent::Blur => {

@@ -4166,6 +4166,16 @@ impl DomModel {
     fn find_by_id(&self, id: &str) -> Option<usize> {
         (1..self.nodes.len()).find(|&n| self.attr(n, "id") == Some(id))
     }
+    /// Resout la cle d'adressage generee par `web.rs::click_key` (id, sinon
+    /// name/aria-label/data-testid) vers le noeud DomModel correspondant.
+    /// Priorite identique aux deux cotes pour que la meme cle designe le meme
+    /// element logique malgre les deux arbres DOM independants du moteur.
+    fn find_by_click_key(&self, key: &str) -> Option<usize> {
+        self.find_by_id(key)
+            .or_else(|| (1..self.nodes.len()).find(|&n| self.attr(n, "name") == Some(key)))
+            .or_else(|| (1..self.nodes.len()).find(|&n| self.attr(n, "aria-label") == Some(key)))
+            .or_else(|| (1..self.nodes.len()).find(|&n| self.attr(n, "data-testid") == Some(key)))
+    }
     fn query(&self, sel: &str, from: usize, first: bool) -> Vec<usize> {
         let kind = parse_sel(sel);
         let mut out = Vec::new();
@@ -4349,6 +4359,33 @@ impl PageCtx {
         self.interp.writes.clear();
         let _ = self.interp.run(code);
         self.interp.pump(); // draine timers + microtaches declenches par le handler
+        self.interp.flush_render_core();
+        let mut out = self.interp.dom.rebuild(&self.scripts);
+        if out.len() > MAX_OUTPUT { out.truncate(MAX_OUTPUT); }
+        out
+    }
+    /// Declenche un vrai clic DOM sur `node` (bouton, div role="button", element
+    /// avec onclick...) sans passer par un texte JS a evaluer — c'est le point
+    /// d'entree du hit-test GUI (chrome.rs) vers le DOM vivant : les elements
+    /// interactifs autres que <a>/<input> (menus, boutons d'icone, dropdowns)
+    /// deviennent enfin cliquables au lieu de finir en "clic sans cible".
+    pub fn click_node(&mut self, key: &str) -> Vec<u8> {
+        let node = match self.interp.dom.find_by_click_key(key) {
+            Some(n) => n,
+            None => {
+                crate::dlog!(crate::diag::Cat::Warn, "nautile: HIT click -> cle {:?} introuvable dans le DOM JS (page mutee entre rendu et clic ?)", key);
+                let mut out = self.interp.dom.rebuild(&self.scripts);
+                if out.len() > MAX_OUTPUT { out.truncate(MAX_OUTPUT); }
+                return out;
+            }
+        };
+        let tag = self.interp.dom.nodes.get(node).map(|n| n.tag.clone()).unwrap_or_default();
+        let n_listeners = self.interp.listeners.iter().filter(|(n, t, _)| *n == node as i64 && t == "click").count();
+        crate::dlog!(crate::diag::Cat::Info, "nautile: HIT click -> cle={:?} node={} <{}> ({} ecouteurs)",
+            key, node, tag, n_listeners);
+        self.interp.writes.clear();
+        self.interp.fire_event(node as i64, "click");
+        self.interp.pump();
         self.interp.flush_render_core();
         let mut out = self.interp.dom.rebuild(&self.scripts);
         if out.len() > MAX_OUTPUT { out.truncate(MAX_OUTPUT); }

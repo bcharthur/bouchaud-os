@@ -5,7 +5,7 @@
 //! externes dans ce resolver devient ensuite une extension naturelle.
 
 use alloc::vec::Vec;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 
 use super::computed::{BoxSizing, ComputedStyle, CssLength, Display, Edges, Overflow, Position};
 use super::color;

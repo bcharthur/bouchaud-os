@@ -115,7 +115,6 @@ fn layout_node(doc: &DocumentSnapshot, styles: &StyleMap, out: &mut LayoutResult
     let pad_t = px(st.padding.top, avail_w, 0).max(0);
     let pad_b = px(st.padding.bottom, avail_w, 0).max(0);
     let border_x = st.border_width.left + st.border_width.right;
-    let border_y = st.border_width.top + st.border_width.bottom;
     let outer_x = x + margin_l;
     let outer_y = y + margin_t;
     let content_avail = (avail_w - margin_l - margin_r - pad_l - pad_r - border_x).max(1);
