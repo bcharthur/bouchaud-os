@@ -261,9 +261,32 @@ pub fn apply_decls_to_computed(decls: &[(String, String)], st: &mut ComputedStyl
             "opacity" => if let Ok(o) = val.parse::<f32>() { st.opacity_pct = ((o * 100.0) as i32).clamp(0, 100); if st.opacity_pct == 0 { st.display = Display::None; } },
             "transform" => { let (tx, ty, sc) = parse_transform(val); st.transform_tx += tx; st.transform_ty += ty; st.transform_scale_pct = st.transform_scale_pct * sc / 100; },
             "flex-direction" => st.flex_direction = if val.contains("column") { 1 } else { 0 },
+            "flex-wrap" => st.flex_wrap = val.starts_with("wrap"),
             "justify-content" => st.justify_content = match val { "center" => 1, "flex-end" | "end" => 2, "space-between" => 3, "space-around" => 4, _ => 0 },
             "align-items" => st.align_items = match val { "center" => 1, "flex-end" | "end" => 2, "stretch" => 3, _ => 0 },
             "gap" | "column-gap" | "row-gap" => if let Some(px) = to_px(val.split_whitespace().next().unwrap_or(val), &ctx) { st.gap = (px as i32).max(0); },
+            "flex-grow" => if let Ok(g) = val.parse::<f32>() { st.flex_grow = g.max(0.0); },
+            "flex-shrink" => if let Ok(s) = val.parse::<f32>() { st.flex_shrink = s.max(0.0); },
+            "flex-basis" => st.flex_basis = parse_length(val, &ctx, vw),
+            // Raccourci `flex: <grow> [<shrink>] [<basis>]` (defauts CSS : shrink=1,
+            // basis=0% si non precise et grow/shrink presents). `flex: none` fige
+            // l'element (grow=0, shrink=0, basis=auto) ; `flex: auto` = 1 1 auto.
+            "flex" => {
+                if val == "none" { st.flex_grow = 0.0; st.flex_shrink = 0.0; st.flex_basis = CssLength::Auto; }
+                else if val == "auto" { st.flex_grow = 1.0; st.flex_shrink = 1.0; st.flex_basis = CssLength::Auto; }
+                else {
+                    let toks: Vec<&str> = val.split_whitespace().collect();
+                    let mut nums: Vec<f32> = Vec::new();
+                    let mut basis: Option<CssLength> = None;
+                    for t in &toks {
+                        if let Ok(n) = t.parse::<f32>() { nums.push(n); }
+                        else { basis = Some(parse_length(t, &ctx, vw)); }
+                    }
+                    if let Some(&g) = nums.get(0) { st.flex_grow = g.max(0.0); }
+                    st.flex_shrink = nums.get(1).copied().unwrap_or(1.0).max(0.0);
+                    st.flex_basis = basis.unwrap_or(CssLength::Px(0));
+                }
+            }
             "visibility" => if matches!(val, "hidden" | "collapse") { st.display = Display::None; },
             _ => {}
         }
