@@ -14,6 +14,7 @@ use super::super::css_parser::{parse_decls, parse_stylesheet};
 use super::super::style::{AttrOp, AttrSel, Comb, Pseudo, Rule, Sel};
 use super::super::css_values::parse_transform;
 use super::super::layout::tree::{DocumentSnapshot, NodeId, SnapshotNode};
+use crate::net::http::resolve_location;
 
 #[derive(Clone, Default)]
 pub struct StyleMap { pub styles: Vec<ComputedStyle> }
@@ -24,10 +25,15 @@ impl StyleMap {
     }
 }
 
-pub fn resolve_snapshot_styles(doc: &DocumentSnapshot, vw: i32, vh: i32) -> StyleMap {
+pub fn resolve_snapshot_styles(doc: &DocumentSnapshot, base_url: &str, vw: i32, vh: i32) -> StyleMap {
     let mut styles: Vec<ComputedStyle> = Vec::new();
     styles.resize_with(doc.nodes.len().max(1), ComputedStyle::initial);
+    // Feuilles externes (<link rel=stylesheet>) d'abord (priorite plus faible
+    // sur egalite de specificite), puis <style>/style="" par-dessus — meme
+    // ordre que le rendu visuel (web.rs::render_scripted). Reutilise le cache
+    // reseau : aucun fetch supplementaire si la page les a deja chargees.
     let mut css_rules = Vec::new();
+    load_external_css_snapshot(doc, base_url, &mut css_rules);
     for n in &doc.nodes {
         if n.tag == "style" && !n.text.trim().is_empty() { parse_stylesheet(&n.text, &mut css_rules); }
     }
@@ -35,6 +41,39 @@ pub fn resolve_snapshot_styles(doc: &DocumentSnapshot, vw: i32, vh: i32) -> Styl
     resolve_node(doc, 0, None, &css_rules, &mut styles, &mut visited, vw, vh);
     for i in 0..doc.nodes.len() { if !visited.contains(&i) { resolve_node(doc, i, None, &css_rules, &mut styles, &mut visited, vw, vh); } }
     StyleMap { styles }
+}
+
+fn scheme_host(base: &str) -> (&str, &str) {
+    let (scheme, rest) = if let Some(r) = base.strip_prefix("https://") { ("https", r) }
+        else if let Some(r) = base.strip_prefix("http://") { ("http", r) }
+        else { ("http", base) };
+    let host = match rest.find('/') { Some(i) => &rest[..i], None => rest };
+    (scheme, host)
+}
+
+/// Telecharge et parse les feuilles `<link rel=stylesheet>` du snapshot, comme
+/// `web.rs::load_external_css` pour le rendu visuel — donne aux APIs JS
+/// (getBoundingClientRect, getComputedStyle) la cascade reelle de la page au
+/// lieu de UA+inline seul (limite documentee du layout tree v1).
+fn load_external_css_snapshot(doc: &DocumentSnapshot, base_url: &str, css: &mut Vec<Rule>) {
+    let (scheme, host) = scheme_host(base_url);
+    let mut count = 0u32;
+    for n in &doc.nodes {
+        if count >= 12 { break; }
+        if n.tag != "link" { continue; }
+        let rel = n.attr("rel").unwrap_or("");
+        if !rel.split_whitespace().any(|r| r.eq_ignore_ascii_case("stylesheet")) {
+            let as_attr = n.attr("as").unwrap_or("");
+            if !as_attr.eq_ignore_ascii_case("style") { continue; }
+        }
+        let href = match n.attr("href") { Some(h) if !h.trim().is_empty() => h.trim(), _ => continue };
+        let abs = resolve_location(scheme, host, href);
+        if let Some(bytes) = crate::net::fetch_cached(&abs) {
+            let text = alloc::string::String::from_utf8_lossy(&bytes);
+            parse_stylesheet(&text, css);
+            count += 1;
+        }
+    }
 }
 
 fn resolve_node(doc: &DocumentSnapshot, id: NodeId, parent: Option<NodeId>, css_rules: &[Rule], styles: &mut [ComputedStyle], visited: &mut Vec<NodeId>, vw: i32, vh: i32) {

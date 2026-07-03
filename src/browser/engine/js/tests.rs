@@ -245,5 +245,24 @@ pub fn selftest() -> Result<(), &'static str> {
     let mut it = Interp::new();
     it.run("console.log(eval(42));").map_err(|_| "eval-run4")?;
     if it.out.last().map(|s| s.as_str()) != Some("42") { return Err("eval-passthrough"); }
+
+    // --- Layout tree v1 : hauteur de texte sensible a la largeur disponible ---
+    // Avant ce correctif, intrinsic_height() comptait le texte par tranches de
+    // 80 caracteres fixes, sans jamais regarder la largeur reelle du
+    // conteneur : un meme texte donnait la meme hauteur qu'il soit dans une
+    // colonne de 100px ou de 900px. Desormais un conteneur etroit doit
+    // produire plus de lignes (donc plus de hauteur) qu'un large.
+    let (mut ctx, _o) = open_page_sized(br#"<body>
+        <div id="narrow" style="width:100px;font-size:16px;">AAAAAAAAAA BBBBBBBBBB CCCCCCCCCC DDDDDDDDDD EEEEEEEEEE FFFFFFFFFF GGGGGGGGGG HHHHHHHHHH</div>
+        <div id="wide" style="width:900px;font-size:16px;">AAAAAAAAAA BBBBBBBBBB CCCCCCCCCC DDDDDDDDDD EEEEEEEEEE FFFFFFFFFF GGGGGGGGGG HHHHHHHHHH</div>
+        <script>
+            var hN = document.getElementById('narrow').offsetHeight;
+            var hW = document.getElementById('wide').offsetHeight;
+            window.__wrap = [hN > hW, hN, hW].join('|');
+        </script>
+    </body>"#, "", 1000, 600);
+    let v = ctx.interp.run("__wrap").map_err(|_| "run-wrap")?;
+    let s = ctx.interp.to_string(&v);
+    if !s.starts_with("true|") { return Err("layout-tree-width-aware-wrap"); }
     Ok(())
 }
