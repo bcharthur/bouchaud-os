@@ -1,6 +1,7 @@
 //! Fenetres et types partages du gestionnaire de fenetres.
 
 use crate::browser::loader;
+use crate::browser::ui::theme::CHROME_H;
 use crate::gui::framebuffer::{HEIGHT, WIDTH};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -138,7 +139,8 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
             // place ; le contenu se re-met en page automatiquement au resize.
             let bw = (WIDTH as i32 - 80).clamp(600, 1100);
             let bh = (HEIGHT as i32 - 2 * BAR_H as i32 - 40).clamp(400, 760);
-            let (session, page) = loader::open(&url, bw - 6);
+            let ch = (bh - TITLE_H - 4 - CHROME_H as i32).max(1);
+            let (session, page) = loader::open(&url, bw - 6, ch);
             let state = crate::browser::BrowserState::new(url, page, session);
             Win { title: "Nautile Navigateur".to_string(), x, y, w: bw, h: bh, min: false, restore: None,
                   app: App::Browser { state } }

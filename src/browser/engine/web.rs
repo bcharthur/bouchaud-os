@@ -379,13 +379,13 @@ fn extract_and_strip(html: &[u8], max_len: usize) -> (Vec<u8>, Vec<Rule>) {
 }
 
 /// Pipeline complet : HTML -> (JS inline) -> (CSS extrait, DOM nettoye) -> page.
-pub fn render(html: &[u8], base_url: &str, width: i32) -> Page {
+pub fn render(html: &[u8], base_url: &str, width: i32, height: i32) -> Page {
     let scripted = crate::gui::js::execute_inline(html, base_url);
-    render_scripted(&scripted, base_url, width)
+    render_scripted(&scripted, base_url, width, height)
 }
 
 // Met en page un HTML deja enrichi par le JS (DOM applique).
-fn render_scripted(scripted: &[u8], base_url: &str, width: i32) -> Page {
+fn render_scripted(scripted: &[u8], base_url: &str, width: i32, height: i32) -> Page {
     use crate::diag::Cat;
     // Mc = millions de cycles TSC (utile pour comparer deux phases entre
     // elles) ; ms = temps reel calibre au boot sur la frequence du PIT, donc
@@ -420,13 +420,13 @@ fn render_scripted(scripted: &[u8], base_url: &str, width: i32) -> Page {
     crate::dlog!(Cat::Css, "cascade: {} regles ({} externes) -> {}Mc ({}ms)", css.len(), ext_rules, m, ms);
 
     // ── Phase 3 : layout (cascade + box model + flex/grid/position -> items) ──
-    let mut page = layout(&dom, base_url, width, &css, false);
+    let mut page = layout(&dom, base_url, width, height, &css, false);
     let t3 = crate::kernel::timer::cycles_since_boot();
     // Fallback anti-FOUC : si aucun item n'est rendu (JS n'a pas pu retirer
     // les classes display:none), relancer le layout en ignorant display:none.
     if page.items.is_empty() {
         crate::dlog!(Cat::Layout, "layout: 0 items -> fallback sans display:none");
-        page = layout(&dom, base_url, width, &css, true);
+        page = layout(&dom, base_url, width, height, &css, true);
     }
     let capped = if page.layers.len() >= MAX_LAYERS { " [PLAFOND couches atteint]" } else { "" };
     let (m, ms) = mc(t2, t3);
@@ -513,46 +513,50 @@ pub struct Session {
     ctx: crate::gui::js::PageCtx,
     base: String,
     width: i32,
+    height: i32,
 }
 
 impl Session {
     /// Ouvre une page interactive : execute le JS initial, renvoie (session, page).
     /// Reserve aux pages internes (about:calc, about:wasm...) qui embarquent des
     /// mini-applications JS.
-    pub fn open(html: &[u8], base_url: &str, width: i32) -> (Session, Page) {
-        let (ctx, scripted) = crate::gui::js::open_page_sized(html, base_url, width, 620);
-        let page = render_scripted(&scripted, base_url, width);
-        (Session { ctx, base: base_url.to_string(), width }, page)
+    pub fn open(html: &[u8], base_url: &str, width: i32, height: i32) -> (Session, Page) {
+        let (ctx, scripted) = crate::gui::js::open_page_sized(html, base_url, width, height.max(200));
+        let page = render_scripted(&scripted, base_url, width, height);
+        (Session { ctx, base: base_url.to_string(), width, height }, page)
     }
     /// Ouvre une page reseau en mode souverain : DOM + CSS + images, SANS executer
     /// le JS de la page (les SPA modernes ne peuvent pas tourner ici et ne
     /// produisent que du texte parasite). Rendu propre et lisible.
-    pub fn open_static(html: &[u8], base_url: &str, width: i32) -> (Session, Page) {
+    pub fn open_static(html: &[u8], base_url: &str, width: i32, height: i32) -> (Session, Page) {
         let (ctx, scripted) = crate::gui::js::open_page_static(html, base_url);
-        let page = render_scripted(&scripted, base_url, width);
-        (Session { ctx, base: base_url.to_string(), width }, page)
+        let page = render_scripted(&scripted, base_url, width, height);
+        (Session { ctx, base: base_url.to_string(), width, height }, page)
     }
     /// Rejoue un gestionnaire (code d'un lien `javascript:`) et re-rend la page.
     pub fn dispatch(&mut self, code: &str) -> Page {
         let scripted = self.ctx.dispatch(code);
-        render_scripted(&scripted, &self.base, self.width)
+        render_scripted(&scripted, &self.base, self.width, self.height)
     }
     /// Declenche un vrai clic DOM sur l'element identifie par `key` (id, ou
     /// name/aria-label/data-testid a defaut — voir `click_key` cote layout)
     /// puis re-rend. Point d'entree du hit-test reel (chrome.rs).
     pub fn click_node(&mut self, key: &str) -> Page {
         let scripted = self.ctx.click_node(key);
-        render_scripted(&scripted, &self.base, self.width)
+        render_scripted(&scripted, &self.base, self.width, self.height)
     }
     /// Largeur de mise en page courante (pour detecter un redimensionnement).
     pub fn width(&self) -> i32 { self.width }
+    /// Hauteur de viewport courante (pour detecter un redimensionnement).
+    pub fn height(&self) -> i32 { self.height }
     /// Sortie `console.*` accumulee (diagnostic + selftests bout-en-bout).
     pub fn console_out(&self) -> &[String] { &self.ctx.interp.out }
-    /// Re-rend a une nouvelle largeur sans rejouer de code.
-    pub fn relayout(&mut self, width: i32) -> Page {
+    /// Re-rend a une nouvelle largeur/hauteur sans rejouer de code.
+    pub fn relayout(&mut self, width: i32, height: i32) -> Page {
         self.width = width;
+        self.height = height;
         let html = self.ctx.html();
-        render_scripted(&html, &self.base, self.width)
+        render_scripted(&html, &self.base, self.width, self.height)
     }
 }
 
@@ -1106,8 +1110,14 @@ fn count_grid_cols(val: &str) -> u8 {
 // ----------------------------------------------------------------------------
 
 const PAD: i32 = 8;
-// Hauteur approximative du viewport pour `position: fixed` et le bloc conteneur
-// initial (la fenetre Nautile par defaut fait ~420px, moins le chrome).
+// Hauteur de repli du viewport pour `position: fixed` et le bloc conteneur
+// initial, utilisee seulement quand l'appelant ne connait pas la vraie
+// hauteur disponible (tests, pages sans fenetre). Le chemin normal (fenetre
+// Nautile) propage la hauteur reelle du contenu depuis gui/apps/mod.rs — voir
+// `layout`/`render_scripted`/`Session` : avant ce fix, cette constante etait
+// utilisee inconditionnellement (380px) alors que la fenetre fait ~600-700px
+// de haut, ce qui faisait resoudre `height:calc(100%-...)`/`vh` bien en
+// dessous de la vraie taille (ex. doodle Google quasi invisible).
 const VIEWPORT_H: i32 = 380;
 // Plafond de couches d'empilement. Les sites complexes (Wikipedia) declarent des
 // milliers d'elements positionnes : sans plafond, `paint` itere toutes les
@@ -1466,7 +1476,7 @@ fn looks_like_code(text: &str) -> bool {
 }
 
 /// Construit la page a partir du DOM (+ regles CSS pre-extraites).
-fn layout(dom: &Dom, base_url: &str, width: i32, css: &[Rule], no_display_none: bool) -> Page {
+fn layout(dom: &Dom, base_url: &str, width: i32, height: i32, css: &[Rule], no_display_none: bool) -> Page {
     let (scheme, host) = scheme_host(base_url);
     let mut bg = 0xffffff_u32;
     let mut css_vars: Vec<(String, String)> = Vec::new();
@@ -1484,15 +1494,17 @@ fn layout(dom: &Dom, base_url: &str, width: i32, css: &[Rule], no_display_none: 
         }
     }
     let content_w = (width - 2 * PAD).max(40);
+    let viewport_h = if height > 0 { height } else { VIEWPORT_H };
     let mut ctx = Ctx {
         css, css_index: CssIndex::new(css), css_vars, images: Vec::new(), img_cache: Vec::new(), img_budget: 96,
         scheme: scheme.to_string(), host: host.to_string(), title: String::new(), visited: 0,
         ancestors: Vec::new(),
         list_stack: Vec::new(),
         layers: Vec::new(),
-        // Bloc conteneur initial = viewport (origine du contenu, largeur, hauteur approx).
-        cb_stack: alloc::vec![(PAD, PAD, content_w, VIEWPORT_H)],
-        viewport_h: VIEWPORT_H,
+        // Bloc conteneur initial = viewport (origine du contenu, largeur, hauteur reelle
+        // de la fenetre propagee par l'appelant -- voir Session/render_scripted).
+        cb_stack: alloc::vec![(PAD, PAD, content_w, viewport_h)],
+        viewport_h,
         no_display_none,
     };
     let mut f = Flow::new(&mut ctx, PAD, content_w);

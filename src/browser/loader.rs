@@ -23,46 +23,47 @@ const PROXY_HOST: &str = "192.168.1.187:8080";
 
 /// Charge une URL et renvoie (Session interactive, Page rendue).
 /// C'est le point d'entrée unique du pipeline de chargement de Nautile.
-pub fn open(url: &str, width: i32) -> (Session, Page) {
+pub fn open(url: &str, width: i32, height: i32) -> (Session, Page) {
     let width = width.max(80);
+    let height = height.max(80);
     // Pages internes
     if url == "about:bouchaud" {
-        return from_html(super::pages::bouchaud_home().as_bytes(), url, width);
+        return from_html(super::pages::bouchaud_home().as_bytes(), url, width, height);
     }
 
     if url == "about:calc" {
-        return from_html(super::pages::CALC_APP.as_bytes(), url, width);
+        return from_html(super::pages::CALC_APP.as_bytes(), url, width, height);
     }
     if url == "about:wasm" {
-        return from_html(super::pages::WASM_DEMO.as_bytes(), url, width);
+        return from_html(super::pages::WASM_DEMO.as_bytes(), url, width, height);
     }
     if url == "about:modern" {
-        return from_html(super::pages::modern_demo().as_bytes(), url, width);
+        return from_html(super::pages::modern_demo().as_bytes(), url, width, height);
     }
     if url == "about:system" {
-        return from_html(super::pages::system_info().as_bytes(), url, width);
+        return from_html(super::pages::system_info().as_bytes(), url, width, height);
     }
     // Matrice de compatibilite : la page teste le moteur (DOM/URL/events/
     // modules/JS/storage) et logge son score COMPAT dans le journal.
     if url == "about:compat" {
-        return from_html(super::pages::COMPAT_SUITE.as_bytes(), url, width);
+        return from_html(super::pages::COMPAT_SUITE.as_bytes(), url, width, height);
     }
     // Journal d'activite de la pile (devlog) — diagnostic du rendu.
     if url == "about:log" {
-        return from_html(crate::diag::render_html().as_bytes(), url, width);
+        return from_html(crate::diag::render_html().as_bytes(), url, width, height);
     }
     // Fichier local (RAMFS)
     if let Some(path) = url.strip_prefix("file:") {
-        return load_file(path, url, width);
+        return load_file(path, url, width, height);
     }
     // Mode compat forcé par préfixe
     if let Some(rest) = url.strip_prefix("compat:") {
-        return compat_render(rest, width);
+        return compat_render(rest, width, height);
     }
     // HTTP / HTTPS : récupération + rendu par le moteur intégré (souverain).
     if url.starts_with("http://") || url.starts_with("https://") {
-        if ENABLE_COMPAT_PROXY { return compat_render(url, width); }
-        return local_render(url, width);
+        if ENABLE_COMPAT_PROXY { return compat_render(url, width, height); }
+        return local_render(url, width, height);
     }
     let html = format!(
         "<h2>Page inconnue</h2><p>{}</p>\
@@ -70,7 +71,7 @@ pub fn open(url: &str, width: i32) -> (Session, Page) {
          ou <a href=\"https://example.com/\">example.com</a>.</p>",
         esc(url)
     );
-    from_html(html.as_bytes(), url, width)
+    from_html(html.as_bytes(), url, width, height)
 }
 
 /// Normalise la saisie de la barre d'adresse en URL.
@@ -153,15 +154,15 @@ fn dump_page_to_serial(url: &str, body: &[u8]) {
 // total en millisecondes reelles a la fin : les logs par phase (Mc/ms dans
 // NET/DOM/CSS/LAYOUT) permettent de reperer QUELLE etape est lente, cette
 // ligne repond directement a "combien de temps a pris ce chargement ?".
-fn local_render(url: &str, width: i32) -> (Session, Page) {
+fn local_render(url: &str, width: i32, height: i32) -> (Session, Page) {
     let t0 = crate::kernel::timer::cycles_since_boot();
-    let result = local_render_inner(url, width);
+    let result = local_render_inner(url, width, height);
     let ms = crate::kernel::timer::cycles_to_ms(crate::kernel::timer::cycles_since_boot().wrapping_sub(t0));
     crate::dlog!(crate::diag::Cat::Info, "--- chargement termine: {} en {}ms ---", url, ms);
     result
 }
 
-fn local_render_inner(url: &str, width: i32) -> (Session, Page) {
+fn local_render_inner(url: &str, width: i32, height: i32) -> (Session, Page) {
     crate::dlog!(crate::diag::Cat::Info, "--- navigation: {} ---", url);
     let doc = crate::net::fetch_document(url);
     if doc.ok && doc.is_html && !doc.body.is_empty() {
@@ -169,7 +170,7 @@ fn local_render_inner(url: &str, width: i32) -> (Session, Page) {
         // Pages reseau : on execute le JS inline de la page (best-effort), borne
         // par le budget du moteur JS (max steps, scripts > 256 Ko ignores), pour
         // rendre le contenu construit dynamiquement. Repli statique si le JS echoue.
-        return from_html(&doc.body, &doc.final_url, width);
+        return from_html(&doc.body, &doc.final_url, width, height);
     }
     if doc.ok {
         // Document non-HTML : aperçu texte + métadonnées
@@ -191,7 +192,7 @@ fn local_render_inner(url: &str, width: i32) -> (Session, Page) {
             u = esc(&doc.final_url), ct = esc(&doc.content_type),
             sz = doc.body.len(), info = info, pv = esc(&preview)
         );
-        return from_html(html.as_bytes(), &doc.final_url, width);
+        return from_html(html.as_bytes(), &doc.final_url, width, height);
     }
     // Erreur réseau / DNS / TLS
     let mut info = String::new();
@@ -202,12 +203,12 @@ fn local_render_inner(url: &str, width: i32) -> (Session, Page) {
          <p><a href=\"about:bouchaud\">← Accueil Nautile</a></p>",
         u = esc(url), info = info
     );
-    from_html(html.as_bytes(), url, width)
+    from_html(html.as_bytes(), url, width, height)
 }
 
 // ── Mode COMPAT (optionnel, non souverain) ────────────────────────────────────
 
-fn compat_render(url: &str, width: i32) -> (Session, Page) {
+fn compat_render(url: &str, width: i32, height: i32) -> (Session, Page) {
     let purl = format!("http://{}/render?url={}", PROXY_HOST, pct_encode(url));
     let doc  = crate::net::fetch_document(&purl);
     if doc.ok && !doc.body.is_empty() {
@@ -226,7 +227,7 @@ fn compat_render(url: &str, width: i32) -> (Session, Page) {
                 bg: 0xffffff,
                 layers: Vec::new(),
             };
-            let (sess, _) = Session::open(b"", url, width);
+            let (sess, _) = Session::open(b"", url, width, height);
             return (sess, page);
         }
     }
@@ -242,12 +243,12 @@ fn compat_render(url: &str, width: i32) -> (Session, Page) {
          <p><a href=\"about:bouchaud\">← Accueil</a></p>",
         host = PROXY_HOST, u = esc(url), info = info
     );
-    from_html(html.as_bytes(), url, width)
+    from_html(html.as_bytes(), url, width, height)
 }
 
 // ── Fichier local ─────────────────────────────────────────────────────────────
 
-fn load_file(path: &str, url: &str, width: i32) -> (Session, Page) {
+fn load_file(path: &str, url: &str, width: i32, height: i32) -> (Session, Page) {
     let p    = path.trim_start_matches('/');
     let full = format!("/{}", p);
     let fs   = ramfs::fs();
@@ -260,7 +261,7 @@ fn load_file(path: &str, url: &str, width: i32) -> (Session, Page) {
         Ok(_) => format!("<h2>Permission refusée</h2><p>{}</p>", full),
         _     => format!("<h2>Fichier introuvable</h2><p>{}</p>", full),
     };
-    from_html(body.as_bytes(), url, width)
+    from_html(body.as_bytes(), url, width, height)
 }
 
 // ── Utilitaires ───────────────────────────────────────────────────────────────
@@ -268,16 +269,16 @@ fn load_file(path: &str, url: &str, width: i32) -> (Session, Page) {
 /// Parse HTML → Session + Page (plafonnée à 4 Mo pour éviter les OOM).
 /// Execute le JS inline : reserve aux pages internes (about:*, file:) qui
 /// embarquent des mini-applications.
-fn from_html(html: &[u8], base: &str, width: i32) -> (Session, Page) {
+fn from_html(html: &[u8], base: &str, width: i32, height: i32) -> (Session, Page) {
     let capped = &html[..html.len().min(4_000_000)];
-    Session::open(capped, base, width)
+    Session::open(capped, base, width, height)
 }
 
 /// Variante souveraine pour les pages reseau : DOM + CSS + images SANS executer
 /// le JS de la page. Voir `Session::open_static`.
-fn from_html_static(html: &[u8], base: &str, width: i32) -> (Session, Page) {
+fn from_html_static(html: &[u8], base: &str, width: i32, height: i32) -> (Session, Page) {
     let capped = &html[..html.len().min(4_000_000)];
-    Session::open_static(capped, base, width)
+    Session::open_static(capped, base, width, height)
 }
 
 fn esc(s: &str) -> String {

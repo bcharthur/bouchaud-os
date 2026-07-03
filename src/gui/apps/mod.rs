@@ -12,6 +12,7 @@ pub mod terminal;
 
 use crate::browser;
 use crate::browser::ui::chrome::{self, ChromeEvent};
+use crate::browser::ui::theme::CHROME_H;
 use crate::gui::event::Key;
 use crate::gui::framebuffer as fb;
 use crate::gui::window::{App, Win, TITLE_H};
@@ -220,6 +221,11 @@ fn handle_browser_event(
     bx: usize, by: usize, bw: usize, bh: usize,
     new_title: &mut Option<alloc::string::String>,
 ) {
+    // Hauteur reelle disponible pour le contenu de page, une fois le chrome
+    // (onglets + barre d'outils) deduit -- propagee au moteur de layout pour
+    // que `height:calc(100%-...)`/`vh` resolvent contre la vraie fenetre
+    // (voir web.rs::VIEWPORT_H).
+    let page_h = bh.saturating_sub(CHROME_H).max(40) as i32;
     match event {
         ChromeEvent::Navigate(href) => {
             let target = if href == state.tab().input {
@@ -230,7 +236,7 @@ fn handle_browser_event(
             };
             chrome::draw_loading(&target, bx, by, bw, bh);
             fb::present();
-            let (sess, pg) = browser::loader::open(&target, bw as i32);
+            let (sess, pg) = browser::loader::open(&target, bw as i32, page_h);
             state.tab_mut().push_nav(&target);
             state.tab_mut().apply(&target, pg, sess);
             *new_title = Some(state.tab().title.clone());
@@ -240,7 +246,7 @@ fn handle_browser_event(
             if let Some(url) = state.tab_mut().go_back() {
                 chrome::draw_loading(&url, bx, by, bw, bh);
                 fb::present();
-                let (sess, pg) = browser::loader::open(&url, bw as i32);
+                let (sess, pg) = browser::loader::open(&url, bw as i32, page_h);
                 state.tab_mut().apply(&url, pg, sess);
                 *new_title = Some(state.tab().title.clone());
             }
@@ -250,7 +256,7 @@ fn handle_browser_event(
             if let Some(url) = state.tab_mut().go_forward() {
                 chrome::draw_loading(&url, bx, by, bw, bh);
                 fb::present();
-                let (sess, pg) = browser::loader::open(&url, bw as i32);
+                let (sess, pg) = browser::loader::open(&url, bw as i32, page_h);
                 state.tab_mut().apply(&url, pg, sess);
                 *new_title = Some(state.tab().title.clone());
             }
@@ -260,7 +266,7 @@ fn handle_browser_event(
             let url = state.tab().url.clone();
             chrome::draw_loading(&url, bx, by, bw, bh);
             fb::present();
-            let (sess, pg) = browser::loader::open(&url, bw as i32);
+            let (sess, pg) = browser::loader::open(&url, bw as i32, page_h);
             state.tab_mut().apply(&url, pg, sess);
             *new_title = Some(state.tab().title.clone());
         }
@@ -269,7 +275,7 @@ fn handle_browser_event(
             let url = "about:bouchaud".to_string();
             chrome::draw_loading(&url, bx, by, bw, bh);
             fb::present();
-            let (sess, pg) = browser::loader::open(&url, bw as i32);
+            let (sess, pg) = browser::loader::open(&url, bw as i32, page_h);
             state.tab_mut().push_nav(&url);
             state.tab_mut().apply(&url, pg, sess);
             *new_title = Some(state.tab().title.clone());
@@ -277,7 +283,7 @@ fn handle_browser_event(
 
         ChromeEvent::NewTab => {
             let url = "about:bouchaud".to_string();
-            let (sess, pg) = browser::loader::open(&url, bw as i32);
+            let (sess, pg) = browser::loader::open(&url, bw as i32, page_h);
             state.add_tab(url, pg, sess);
             *new_title = Some(state.tab().title.clone());
         }
@@ -378,7 +384,7 @@ fn handle_browser_event(
                 }
                 chrome::draw_loading(&target, bx, by, bw, bh);
                 fb::present();
-                let (sess, pg) = browser::loader::open(&target, bw as i32);
+                let (sess, pg) = browser::loader::open(&target, bw as i32, page_h);
                 state.tab_mut().push_nav(&target);
                 state.tab_mut().apply(&target, pg, sess);
                 *new_title = Some(state.tab().title.clone());
