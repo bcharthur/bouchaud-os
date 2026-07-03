@@ -394,6 +394,11 @@ fn render_scripted(scripted: &[u8], base_url: &str, width: i32) -> Page {
         let d = b.wrapping_sub(a);
         (d / 1_000_000, crate::kernel::timer::cycles_to_ms(d))
     };
+    // Plafonne a 5s le temps TOTAL passe a recuperer les sous-ressources (CSS
+    // externe, images) de cette page : au-dela, les hotes lents/injoignables
+    // sont abandonnes plutot que de faire gonfler le chargement de quelques
+    // secondes a plusieurs minutes (voir commentaire sur start_page_budget).
+    crate::net::start_page_budget(5_000);
 
     // ── Phase 1 : tokenizer/tree builder (HTML -> DOM) ──
     let t0 = crate::kernel::timer::cycles_since_boot();

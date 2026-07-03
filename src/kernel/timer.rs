@@ -78,6 +78,14 @@ pub fn cycles_to_ms(cycles: u64) -> u64 {
     if cpm == 0 { 0 } else { cycles / cpm }
 }
 
+/// Convertit des millisecondes reelles en delta de cycles TSC (0 si non calibre,
+/// ce qui desactive tout budget calcule a partir de cette valeur plutot que de
+/// planter ou de bloquer indefiniment).
+pub fn ms_to_cycles(ms: u64) -> u64 {
+    let cpm = unsafe { CYCLES_PER_MS };
+    ms.saturating_mul(cpm)
+}
+
 // ── Charge CPU via TSC ────────────────────────────────────────────────────────
 // Mesure le ratio (cycles de rendu) / (cycles totaux de frame).
 // Avec HLT entre frames, le temps total = rendu + sommeil.

@@ -373,6 +373,48 @@ static mut RES_CACHE: Option<alloc::vec::Vec<(String, alloc::vec::Vec<u8>)>> = N
 const RES_CACHE_MAX_ENTRIES: usize = 128;
 const RES_CACHE_MAX_BYTES: usize = 12_000_000;
 
+// ── Budget temps des sous-ressources ───────────────────────────────────────
+// Une page peut referencer des dizaines d'hotes tiers (pub, analytics, CDN de
+// polices...) : chacun d'eux, s'il est injoignable ou lent, coute jusqu'a 3s
+// (TLS, cf. TcpConn::fill) voire 30s (HTTP simple, cf. tcp::fetch) d'attente
+// AVANT d'echouer. Sans plafond global, un budget d'images de 96 (cf. web.rs)
+// peut donc a lui seul faire gonfler un chargement de quelques centaines de
+// ms a plusieurs MINUTES, sans qu'aucune phase individuelle (DOM/CSS/LAYOUT)
+// ne le laisse voir : c'est l'origine du "195004ms" observe en pratique alors
+// que la somme des phases loggees ne faisait que ~3s. On borne donc le temps
+// TOTAL consacre aux sous-ressources d'une page (CSS externe, JS, images) :
+// une fois le budget epuise, les fetch_cached() suivants echouent tout de
+// suite au lieu de retenter une connexion complete.
+static mut SUBRES_DEADLINE_TSC: Option<u64> = None;
+static mut SUBRES_LOGGED: bool = false;
+
+/// (Re)demarre le budget temps des sous-ressources pour une nouvelle page.
+/// A appeler une fois au debut du pipeline HTML->layout (voir web.rs).
+pub fn start_page_budget(ms: u64) {
+    let cycles = crate::kernel::timer::ms_to_cycles(ms);
+    unsafe {
+        SUBRES_DEADLINE_TSC = if cycles == 0 { None } else {
+            Some(crate::kernel::timer::cycles_since_boot().wrapping_add(cycles))
+        };
+        SUBRES_LOGGED = false;
+    }
+}
+
+fn subres_budget_exhausted() -> bool {
+    unsafe {
+        match SUBRES_DEADLINE_TSC {
+            Some(deadline) if crate::kernel::timer::cycles_since_boot() >= deadline => {
+                if !SUBRES_LOGGED {
+                    SUBRES_LOGGED = true;
+                    crate::dlog!(crate::diag::Cat::Warn, "budget reseau sous-ressources epuise : fetch restants ignores");
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Recupere une sous-ressource (CSS/JS/image) avec mise en cache. Renvoie les
 /// octets du corps si la requete reussit (ou un hit cache), sinon None.
 pub fn fetch_cached(url: &str) -> Option<alloc::vec::Vec<u8>> {
@@ -387,6 +429,7 @@ pub fn fetch_cached(url: &str) -> Option<alloc::vec::Vec<u8>> {
             }
         }
     }
+    if subres_budget_exhausted() { return None; }
     let doc = fetch_document(url);
     if !doc.ok || doc.body.is_empty() { return None; }
     let body = doc.body;
