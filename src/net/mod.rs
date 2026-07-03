@@ -292,6 +292,10 @@ pub fn fetch_document(url: &str) -> Document {
     use crate::diag::Cat;
     let t0 = crate::kernel::timer::cycles_since_boot();
     let mc = || crate::kernel::timer::cycles_since_boot().wrapping_sub(t0) / 1_000_000;
+    // Temps reel (ms) calibre sur le PIT, independant de la vitesse d'emulation
+    // QEMU — voir kernel::timer::calibrate(). Complementaire au Mc (comparaison
+    // relative entre requetes).
+    let ms = || crate::kernel::timer::cycles_to_ms(crate::kernel::timer::cycles_since_boot().wrapping_sub(t0));
     let mut banner: alloc::vec::Vec<String> = alloc::vec::Vec::new();
 
     if !e1000::is_ready() && !e1000::init() {
@@ -309,12 +313,12 @@ pub fn fetch_document(url: &str) -> Document {
         } else {
             let ip = match resolve(&hostname) {
                 Some(ip) => ip,
-                None => { crate::dlog!(Cat::Err, "DNS echec {} ({}Mc)", hostname, mc()); banner.push(format!("DNS: echec pour {}", hostname)); return Document { banner, final_url: current, content_type: String::new(), body: alloc::vec::Vec::new(), is_html: false, ok: false }; }
+                None => { crate::dlog!(Cat::Err, "DNS echec {} ({}Mc, {}ms)", hostname, mc(), ms()); banner.push(format!("DNS: echec pour {}", hostname)); return Document { banner, final_url: current, content_type: String::new(), body: alloc::vec::Vec::new(), is_html: false, ok: false }; }
             };
             let req = http::build_get(&hostname, &path);
             let mut resp: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
             if !tcp::fetch(ip, port, req.as_bytes(), &mut resp) {
-                crate::dlog!(Cat::Err, "TCP echec {}:{} ({}Mc)", hostname, port, mc());
+                crate::dlog!(Cat::Err, "TCP echec {}:{} ({}Mc, {}ms)", hostname, port, mc(), ms());
                 banner.push(format!("connexion TCP echouee vers {}:{}", hostname, port));
                 return Document { banner, final_url: current, content_type: String::new(), body: alloc::vec::Vec::new(), is_html: false, ok: false };
             }
@@ -328,7 +332,7 @@ pub fn fetch_document(url: &str) -> Document {
         }
         banner.append(&mut b);
         if raw.is_empty() {
-            crate::dlog!(Cat::Err, "{} {} : reponse vide ({}Mc)", scheme, hostname, mc());
+            crate::dlog!(Cat::Err, "{} {} : reponse vide ({}Mc, {}ms)", scheme, hostname, mc(), ms());
             return Document { banner, final_url: current, content_type: String::new(), body: alloc::vec::Vec::new(), is_html: false, ok: false };
         }
         match http::parse_response(&raw) {
@@ -341,8 +345,8 @@ pub fn fetch_document(url: &str) -> Document {
             Some(r) => {
                 let is_html = r.is_html();
                 let ct = r.content_type.clone().unwrap_or_default();
-                crate::dlog!(Cat::Net, "{} {} {} {}o {} {}Mc", scheme, r.status_code, hostname,
-                    r.body.len(), if is_html { "html" } else { ct.as_str() }, mc());
+                crate::dlog!(Cat::Net, "{} {} {} {}o {} {}Mc ({}ms)", scheme, r.status_code, hostname,
+                    r.body.len(), if is_html { "html" } else { ct.as_str() }, mc(), ms());
                 banner.push(r.status_line.clone());
                 return Document { banner, final_url: current, content_type: ct, body: r.body, is_html, ok: true };
             }
