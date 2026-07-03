@@ -21,6 +21,11 @@ use alloc::vec::Vec;
 use alloc::{format, vec};
 use core::cell::RefCell;
 
+use super::css::cascade::{resolve_snapshot_styles, StyleMap};
+use super::css::computed::{ComputedStyle, css_prop_name as core_css_prop_name};
+use super::layout::reflow::{DirtyKind, ReflowState};
+use super::layout::tree::{build_layout_tree, DocumentSnapshot, LayoutResult, Rect as LayoutRect, SnapshotNode};
+
 // ============================================================================
 // Valeurs
 // ============================================================================
@@ -939,6 +944,9 @@ pub struct Interp {
     global_obj: Option<Rc<RefCell<Obj>>>, // objet `window` (pont window <-> portee globale)
     vw: i32,                              // viewport : largeur CSS (px)
     vh: i32,                              // viewport : hauteur CSS (px)
+    style_map: StyleMap,                  // CSSOM calcule : NodeId -> ComputedStyle
+    layout_result: LayoutResult,          // Layout tree consultable par JS
+    reflow: ReflowState,                  // invalidation style/layout/paint
     modules: BTreeMap<String, Value>,     // modules ES charges (URL -> objet namespace)
     module_stack: Vec<String>,            // URLs des modules en cours (imports relatifs)
     exports_stack: Vec<Value>,            // objet exports du module en cours d'execution
@@ -955,6 +963,7 @@ impl Interp {
             base_url: String::new(), pending_new_target: None,
             global_obj: None,
             vw: 1024, vh: 768,
+            style_map: StyleMap::default(), layout_result: LayoutResult::default(), reflow: ReflowState::clean(),
             modules: BTreeMap::new(), module_stack: Vec::new(), exports_stack: Vec::new(),
         };
         install(&mut it);
@@ -973,6 +982,29 @@ impl Interp {
             self.set_prop(&win, "outerWidth", Value::Num(self.vw as f64));
             self.set_prop(&win, "outerHeight", Value::Num(self.vh as f64));
         }
+        self.reflow.viewport_changed();
+    }
+
+    /// Marque le coeur rendu comme invalide apres une mutation DOM/style.
+    pub fn mark_render_dirty(&mut self, node: usize, kind: DirtyKind) {
+        self.reflow.mark(node, kind);
+    }
+
+    /// Force le pipeline DOM snapshot -> ComputedStyle -> LayoutTree quand une
+    /// Web API lit des mesures (`getBoundingClientRect`, `offsetWidth`,
+    /// `getComputedStyle`). C'est le debut du comportement navigateur reel : les
+    /// lectures layout flushent les mutations en attente.
+    pub fn flush_render_core(&mut self) {
+        if !self.reflow.needs_style && !self.reflow.needs_layout { return; }
+        let snap = self.dom.snapshot();
+        if self.reflow.needs_style || self.style_map.styles.len() != snap.nodes.len().max(1) {
+            self.style_map = resolve_snapshot_styles(&snap, self.vw, self.vh);
+            self.reflow.needs_layout = true;
+        }
+        if self.reflow.needs_layout {
+            self.layout_result = build_layout_tree(&snap, &self.style_map, self.vw, self.vh);
+        }
+        self.reflow.clear();
     }
 
     /// Installe un objet `location` COMPLET derive de l'URL reelle de la page
@@ -1694,12 +1726,12 @@ impl Interp {
                 let owner = { obj.borrow().props.get("__owner__").map(|x| to_num_simple(x) as i64).unwrap_or(-1) };
                 if name == "cssText" {
                     let css = self.to_string(&v);
-                    if owner >= 0 { self.dom.set_attr(owner as usize, "style", css); }
+                    if owner >= 0 { self.dom.set_attr(owner as usize, "style", css); self.mark_render_dirty(owner as usize, DirtyKind::Style); }
                     obj.borrow_mut().props.insert("cssText".to_string(), v);
                     return;
                 }
                 obj.borrow_mut().props.insert(css_prop_name(name), v);
-                if owner >= 0 { let css = serialize_style(obj); self.dom.set_attr(owner as usize, "style", css); }
+                if owner >= 0 { let css = serialize_style(obj); self.dom.set_attr(owner as usize, "style", css); self.mark_render_dirty(owner as usize, DirtyKind::Style); }
                 return;
             }
             let is_global = self.global_obj.as_ref().map_or(false, |g| Rc::ptr_eq(g, obj));
@@ -2196,7 +2228,7 @@ fn install(it: &mut Interp) {
     set(&window, "devicePixelRatio", Value::Num(1.0));
     set(&window, "innerWidth", Value::Num(1024.0));
     set(&window, "innerHeight", Value::Num(768.0));
-    set(&window, "getComputedStyle", native_val(|_it, _t, _a| { let o = new_obj(Obj::plain()); set(&o, "getPropertyValue", native_val(|_it, _t, _a| Ok(str_val("")))); Ok(o) }));
+    set(&window, "getComputedStyle", native_val(native_get_computed_style));
     set(&window, "matchMedia", native_val(|_it, _t, _a| { let o = new_obj(Obj::plain()); set(&o, "matches", Value::Bool(false)); set(&o, "media", str_val("")); set(&o, "addListener", native_val(|_i, _t, _a| Ok(Value::Undefined))); set(&o, "removeListener", native_val(|_i, _t, _a| Ok(Value::Undefined))); set(&o, "addEventListener", native_val(|_i, _t, _a| Ok(Value::Undefined))); Ok(o) }));
     // `window.Math` doit être le MÊME objet (Rc) que le Math global, sinon la
     // détection Closure-compiler `function(a){...; if(d&&d.Math==Math)return d; throw Error("b")}`
@@ -2243,7 +2275,7 @@ fn install(it: &mut Interp) {
     set(&screen, "availWidth", Value::Num(1280.0)); set(&screen, "availHeight", Value::Num(720.0));
     set(&screen, "colorDepth", Value::Num(24.0)); set(&screen, "pixelDepth", Value::Num(24.0));
     scope_declare(&g2, "screen", screen);
-    scope_declare(&g2, "getComputedStyle", native_val(|_it, _t, _a| { let o = new_obj(Obj::plain()); set(&o, "getPropertyValue", native_val(|_it, _t, _a| Ok(str_val("")))); Ok(o) }));
+    scope_declare(&g2, "getComputedStyle", native_val(native_get_computed_style));
     scope_declare(&g2, "matchMedia", native_val(|_it, _t, _a| { let o = new_obj(Obj::plain()); set(&o, "matches", Value::Bool(false)); set(&o, "addListener", native_val(|_i, _t, _a| Ok(Value::Undefined))); set(&o, "addEventListener", native_val(|_i, _t, _a| Ok(Value::Undefined))); Ok(o) }));
     // navigator minimal
     let nav = new_obj(Obj::plain());
@@ -3482,6 +3514,7 @@ fn dom_add_event_listener(it: &mut Interp, this: Value, a: &[Value]) -> Result<V
                 let call = format!("__ael({})", node);
                 let val = if existing.is_empty() { call } else { format!("{};{}", existing, call) };
                 it.dom.set_attr(n, "onclick", val);
+                it.mark_render_dirty(n, DirtyKind::Paint);
             }
         }
     }
@@ -3512,6 +3545,61 @@ fn element_outer(it: &mut Interp, v: &Value) -> String {
     escape_html(&it.to_string(v))
 }
 
+fn layout_rect_for(it: &mut Interp, n: usize) -> LayoutRect {
+    it.flush_render_core();
+    it.layout_result.rect_for_node(n).unwrap_or_else(|| {
+        if it.dom.nodes.get(n).map(|x| matches!(x.tag.as_str(), "html" | "body" | "#root")).unwrap_or(false) {
+            LayoutRect { x: 0, y: 0, w: it.vw, h: it.vh }
+        } else {
+            LayoutRect { x: 0, y: 0, w: 0, h: 0 }
+        }
+    })
+}
+
+fn rect_value(r: LayoutRect) -> Value {
+    let o = new_obj(Obj::plain());
+    set(&o, "x", Value::Num(r.x as f64)); set(&o, "y", Value::Num(r.y as f64));
+    set(&o, "top", Value::Num(r.y as f64)); set(&o, "left", Value::Num(r.x as f64));
+    set(&o, "width", Value::Num(r.w as f64)); set(&o, "height", Value::Num(r.h as f64));
+    set(&o, "right", Value::Num(r.right() as f64)); set(&o, "bottom", Value::Num(r.bottom() as f64));
+    o
+}
+
+fn computed_style_for_node(it: &mut Interp, n: usize) -> ComputedStyle {
+    it.flush_render_core();
+    it.style_map.styles.get(n).cloned().unwrap_or_else(ComputedStyle::initial)
+}
+
+fn computed_style_object(st: ComputedStyle) -> Value {
+    let o = new_obj(Obj::plain());
+    for name in ComputedStyle::property_names() {
+        set(&o, name, str_val(st.property(name)));
+    }
+    // CamelCase les plus lus par les frameworks.
+    set(&o, "backgroundColor", str_val(st.property("background-color")));
+    set(&o, "fontSize", str_val(st.property("font-size")));
+    set(&o, "fontWeight", str_val(st.property("font-weight")));
+    set(&o, "lineHeight", str_val(st.property("line-height")));
+    set(&o, "zIndex", str_val(st.property("z-index")));
+    set(&o, "boxSizing", str_val(st.property("box-sizing")));
+    set(&o, "getPropertyValue", native_val(|it, t, a| {
+        let name = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
+        let key = core_css_prop_name(&name);
+        if let Value::Obj(o) = &t {
+            if let Some(v) = o.borrow().props.get(&key).cloned() { return Ok(v); }
+            if let Some(v) = o.borrow().props.get(&name).cloned() { return Ok(v); }
+        }
+        Ok(str_val(""))
+    }));
+    o
+}
+
+fn native_get_computed_style(it: &mut Interp, _this: Value, a: &[Value]) -> Result<Value, Value> {
+    let n = a.get(0).map(|v| handle_node(it, v)).unwrap_or(-1);
+    if n >= 0 { Ok(computed_style_object(computed_style_for_node(it, n as usize))) }
+    else { Ok(computed_style_object(ComputedStyle::initial())) }
+}
+
 fn dom_get(it: &mut Interp, obj: &Rc<RefCell<Obj>>, name: &str) -> Option<Value> {
     let node = { let b = obj.borrow(); b.props.get("__node__").map(|v| it.to_num(v) as i64) };
     let this = Value::Obj(obj.clone());
@@ -3537,13 +3625,14 @@ fn dom_get(it: &mut Interp, obj: &Rc<RefCell<Obj>>, name: &str) -> Option<Value>
                 "parentNode" | "parentElement" => it.dom.parent_of(n).map(node_handle).unwrap_or(Value::Null),
                 "nextSibling" | "nextElementSibling" => it.dom.sibling(n, 1).map(node_handle).unwrap_or(Value::Null),
                 "previousSibling" | "previousElementSibling" => it.dom.sibling(n, -1).map(node_handle).unwrap_or(Value::Null),
-                // Mesures layout : approximation typee (jamais undefined). html/body
-                // = viewport ; autres elements = 0 (element pas encore mesure).
-                "clientWidth" | "offsetWidth" | "scrollWidth" =>
-                    Value::Num(if matches!(it.dom.nodes[n].tag.as_str(), "html" | "body") { it.vw as f64 } else { 0.0 }),
-                "clientHeight" | "offsetHeight" | "scrollHeight" =>
-                    Value::Num(if matches!(it.dom.nodes[n].tag.as_str(), "html" | "body") { it.vh as f64 } else { 0.0 }),
-                "scrollTop" | "scrollLeft" | "offsetTop" | "offsetLeft" | "clientTop" | "clientLeft" => Value::Num(0.0),
+                // Mesures layout reelles : flush du coeur rendu puis lecture
+                // dans LayoutResult (NodeId -> LayoutBox). Les scripts modernes
+                // utilisent ces lectures comme point de synchronisation reflow.
+                "clientWidth" | "offsetWidth" | "scrollWidth" => Value::Num(layout_rect_for(it, n).w as f64),
+                "clientHeight" | "offsetHeight" | "scrollHeight" => Value::Num(layout_rect_for(it, n).h as f64),
+                "offsetTop" | "clientTop" => Value::Num(layout_rect_for(it, n).y as f64),
+                "offsetLeft" | "clientLeft" => Value::Num(layout_rect_for(it, n).x as f64),
+                "scrollTop" | "scrollLeft" => Value::Num(0.0),
                 "getBoundingClientRect" => native_val(dom_bounding_rect),
                 "offsetParent" => Value::Null,
                 "name" | "type" | "placeholder" | "title" | "alt" | "rel" | "role" => str_val(it.dom.attr(n, name).unwrap_or("").to_string()),
@@ -3638,12 +3727,12 @@ fn dom_set(it: &mut Interp, obj: &Rc<RefCell<Obj>>, name: &str, v: &Value) -> bo
         let n = node as usize;
         if n >= it.dom.nodes.len() { return true; }
         match name {
-            "innerHTML" => { let html = it.to_string(v); it.dom.set_inner(n, html); true }
-            "textContent" | "innerText" => { let txt = escape_html(&it.to_string(v)); it.dom.set_inner(n, txt); true }
-            "className" => { let val = it.to_string(v); it.dom.set_attr(n, "class", val); true }
-            "id" => { let val = it.to_string(v); it.dom.set_attr(n, "id", val); true }
-            "value" => { let val = it.to_string(v); it.dom.set_attr(n, "value", val); true }
-            "href" | "src" | "title" | "alt" => { let val = it.to_string(v); it.dom.set_attr(n, name, val); true }
+            "innerHTML" => { let html = it.to_string(v); it.dom.set_inner(n, html); it.mark_render_dirty(n, DirtyKind::Subtree); true }
+            "textContent" | "innerText" => { let txt = escape_html(&it.to_string(v)); it.dom.set_inner(n, txt); it.mark_render_dirty(n, DirtyKind::Layout); true }
+            "className" => { let val = it.to_string(v); it.dom.set_attr(n, "class", val); it.mark_render_dirty(n, DirtyKind::Style); true }
+            "id" => { let val = it.to_string(v); it.dom.set_attr(n, "id", val); it.mark_render_dirty(n, DirtyKind::Style); true }
+            "value" => { let val = it.to_string(v); it.dom.set_attr(n, "value", val); it.mark_render_dirty(n, DirtyKind::Paint); true }
+            "href" | "src" | "title" | "alt" => { let val = it.to_string(v); it.dom.set_attr(n, name, val); it.mark_render_dirty(n, DirtyKind::Style); true }
             // proprietes sans effet visuel : on absorbe (pas d'erreur).
             "onclick" | "onload" | "onchange" | "hidden" | "checked" | "disabled" | "scrollTop" | "scrollLeft" => true,
             _ => false,
@@ -3759,24 +3848,16 @@ fn cl_edit(it: &mut Interp, this: &Value, a: &[Value], op: u8) -> bool {
         _ => { if present { parts.retain(|x| *x != c); } else { parts.push(&c); added = true; } }
     }
     it.dom.set_attr(n, "class", parts.join(" "));
+    it.mark_render_dirty(n, DirtyKind::Style);
     added
 }
 
-// getBoundingClientRect() : DOMRect approximatif mais complet et type. html/body
-// couvrent le viewport ; les autres elements renvoient un rect nul (0x0 en haut
-// a gauche), ce que les scripts de visibilite interpretent comme "pas visible"
-// sans jamais crasher sur une propriete manquante.
+// getBoundingClientRect() : DOMRect issu du LayoutTree. Cette lecture force le
+// flush style/layout lorsque le DOM ou les styles ont ete modifies.
 fn dom_bounding_rect(it: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
     let n = handle_node(it, &this);
-    let (w, h) = if n >= 0 && matches!(it.dom.nodes.get(n as usize).map(|x| x.tag.as_str()), Some("html") | Some("body")) {
-        (it.vw as f64, it.vh as f64)
-    } else { (0.0, 0.0) };
-    let r = new_obj(Obj::plain());
-    set(&r, "x", Value::Num(0.0)); set(&r, "y", Value::Num(0.0));
-    set(&r, "top", Value::Num(0.0)); set(&r, "left", Value::Num(0.0));
-    set(&r, "width", Value::Num(w)); set(&r, "height", Value::Num(h));
-    set(&r, "right", Value::Num(w)); set(&r, "bottom", Value::Num(h));
-    Ok(r)
+    if n >= 0 { Ok(rect_value(layout_rect_for(it, n as usize))) }
+    else { Ok(rect_value(LayoutRect { x: 0, y: 0, w: 0, h: 0 })) }
 }
 
 fn dom_get_attr(it: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
@@ -3790,7 +3871,7 @@ fn dom_set_attr(it: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Valu
     let name = it.to_string(a.get(0).unwrap_or(&Value::Undefined)).to_lowercase();
     let val = it.to_string(a.get(1).unwrap_or(&Value::Undefined));
     let n = handle_node(it, &this);
-    if n >= 0 { it.dom.set_attr(n as usize, &name, val); return Ok(Value::Undefined); }
+    if n >= 0 { it.dom.set_attr(n as usize, &name, val); it.mark_render_dirty(n as usize, DirtyKind::Style); return Ok(Value::Undefined); }
     if let Value::Obj(o) = &this { if let Some(Value::Obj(at)) = o.borrow().props.get("__attrs__").cloned() { at.borrow_mut().props.insert(name, str_val(val)); } }
     Ok(Value::Undefined)
 }
@@ -3804,7 +3885,7 @@ fn dom_append_child(it: &mut Interp, this: Value, a: &[Value]) -> Result<Value, 
     let child = a.get(0).cloned().unwrap_or(Value::Undefined);
     let html = element_outer(it, &child);
     let n = handle_node(it, &this);
-    if n >= 0 { it.dom.append_html(n as usize, &html); }
+    if n >= 0 { it.dom.append_html(n as usize, &html); it.mark_render_dirty(n as usize, DirtyKind::Subtree); }
     else if let Value::Obj(o) = &this {
         let cur = o.borrow().props.get("__html__").map(|x| it.to_string(x)).unwrap_or_default();
         o.borrow_mut().props.insert("__html__".into(), str_val(format!("{}{}", cur, html)));
@@ -3924,6 +4005,21 @@ impl DomModel {
     fn attr(&self, i: usize, name: &str) -> Option<&str> {
         self.nodes.get(i)?.attrs.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
     }
+    fn snapshot(&self) -> DocumentSnapshot {
+        let mut nodes = Vec::new();
+        for (i, n) in self.nodes.iter().enumerate() {
+            let text = if i == 0 { String::new() } else { self.text_content(i) };
+            nodes.push(SnapshotNode {
+                id: i,
+                tag: n.tag.clone(),
+                attrs: n.attrs.clone(),
+                text,
+                children: n.children.clone(),
+            });
+        }
+        DocumentSnapshot { nodes }
+    }
+
     fn parent_of(&self, n: usize) -> Option<usize> {
         (1..self.nodes.len()).find(|&p| self.nodes[p].children.contains(&n))
     }
@@ -4130,6 +4226,7 @@ impl PageCtx {
         self.interp.writes.clear();
         let _ = self.interp.run(code);
         self.interp.pump(); // draine timers + microtaches declenches par le handler
+        self.interp.flush_render_core();
         let mut out = self.interp.dom.rebuild(&self.scripts);
         if out.len() > MAX_OUTPUT { out.truncate(MAX_OUTPUT); }
         out
@@ -4184,6 +4281,8 @@ fn open_page_inner(html: &[u8], base_url: &str, run: bool, vw: i32, vh: i32) -> 
     interp.install_location();
     interp.dom = DomModel::parse(html);
     interp.rebind_document();
+    interp.mark_render_dirty(0, DirtyKind::Subtree);
+    interp.flush_render_core();
     // Noeuds <script> du DOM, dans l'ordre du document : le n-ieme <script>
     // rencontre par le scan ci-dessous correspond au n-ieme noeud (pour
     // document.currentScript pendant l'execution).
@@ -4272,6 +4371,7 @@ fn open_page_inner(html: &[u8], base_url: &str, run: bool, vw: i32, vh: i32) -> 
         interp.fire_event(-1, "DOMContentLoaded");
         interp.fire_event(-1, "load");
         interp.pump();
+        interp.flush_render_core();
         let budget = if interp.steps >= interp.max_steps { " (BUDGET ATTEINT)" } else { "" };
         crate::dlog!(crate::diag::Cat::Js, "{} scripts executes ({} modules, {} ecouteurs), {} steps{}",
             ran, interp.modules.len(), interp.listeners.len(), interp.steps, budget);

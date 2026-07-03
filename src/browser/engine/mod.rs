@@ -21,6 +21,8 @@ pub mod css_values;
 pub mod css_parser;
 pub mod display_list;
 pub mod paint;
+pub mod layout;
+pub mod webapi;
 pub mod js;
 pub mod image;
 pub mod media;

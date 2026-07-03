@@ -127,7 +127,19 @@ pub fn selftest() -> Result<(), &'static str> {
 </script></body>"#, "", 800, 500);
     let mut ctx = ctx;
     let v = ctx.interp.run("__m").map_err(|_| "run-viewport")?;
-    if ctx.interp.to_string(&v) != "800,500,500,number,0" { return Err("viewport"); }
+    if ctx.interp.to_string(&v) != "800,500,500,number,800" { return Err("viewport"); }
+    // --- Render Core v1 : ComputedStyle + LayoutTree + reflow force ---
+    let (mut ctx, _o) = open_page_sized(br#"<body><div id="r" style="display:block;width:320px;height:40px;padding:10px;color:red">x</div><script>
+      var e=document.getElementById('r');
+      var r1=e.getBoundingClientRect();
+      e.style.width='360px'; e.style.height='40px'; e.style.color='red';
+      var r2=e.getBoundingClientRect();
+      var cs=getComputedStyle(e);
+      window.__rc=[r1.width,r2.width,cs.getPropertyValue('display'),cs.getPropertyValue('color'),e.offsetHeight].join('|');
+    </script></body>"#, "", 800, 500);
+    let v = ctx.interp.run("__rc").map_err(|_| "run-render-core")?;
+    if ctx.interp.to_string(&v) != "320|360|block|rgb(255, 0, 0)|40" { return Err("render-core-v1"); }
+
     // --- Sprint 6 : location complet, URL/URLSearchParams, modules ES ---
     // location derive de l'URL reelle (search/hash/hostname/origin presents).
     let mut it = Interp::new();
