@@ -2297,15 +2297,6 @@ fn place_frag(f: &mut Flow, frag: Frag, x: i32, y: i32) {
     for mut fd in frag.fields { fd.x += x; fd.y += y; f.fields.push(fd); }
 }
 
-// Decalage vertical d'un item selon align-items dans une bande de hauteur `band`.
-fn cross_offset(align: AlignI, item_h: i32, band: i32) -> i32 {
-    match align {
-        AlignI::Center => (band - item_h) / 2,
-        AlignI::End => band - item_h,
-        _ => 0,
-    }
-}
-
 // Conteneur flexbox : `flex-direction` row/column, `gap`, `justify-content`,
 // `align-items` et largeurs/flex-grow des enfants. Le `tr` d'un tableau reutilise
 // ce moteur en mode row.
@@ -2323,8 +2314,14 @@ fn ordered_element_children(f: &Flow, dom: &Dom, node: &Node, cst: &Style) -> Ve
 }
 
 // Conteneur flexbox : direction, wrap spec, flex-grow/flex-basis, order,
-// justify/align. Par defaut un flex row NE WRAPPE PAS, comme dans les vrais
-// navigateurs ; on ne wrappe que si `flex-wrap:wrap` est demande.
+// justify/align -- via le vrai moteur `taffy` (meme crate que layout/tree.rs,
+// cf. flex_container_style/flex_item_style plus bas), au lieu de la division
+// grow/shrink maison utilisee jusqu'ici. Chaque enfant reste une feuille
+// opaque pour taffy : sa taille intrinseque/mesuree passe par `child_frag`
+// (throwaway lors des passes de mesure, puis reelle pour le placement final),
+// qui gere DEJA le box model complet de l'enfant (padding/marge/bordure) --
+// le style taffy de la feuille ne porte donc que taille/min/max/grow/basis,
+// jamais padding/marge/bordure, pour ne pas les compter deux fois.
 fn flex_inner(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, depth: u32) {
     let kids = ordered_element_children(f, dom, node, cst);
     if kids.is_empty() {
@@ -2334,119 +2331,120 @@ fn flex_inner(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, 
         return;
     }
 
-    if bx.flex_dir == FlexDir::Column {
-        let mut frags: Vec<Frag> = Vec::with_capacity(kids.len());
-        let mut total_h = 0i32;
-        for (i, &c) in kids.iter().enumerate() {
-            let frag = child_frag(f, dom, c, cst, cst.align, f.avail, depth);
-            if i > 0 { total_h += bx.gap; }
-            total_h += frag.height;
-            frags.push(frag);
-        }
-        let hbase = current_cb_h(f);
-        let target_h = bx.height.or(bx.min_height).map(|l| l.resolve(hbase)).unwrap_or(0).max(0);
-        let free = (target_h - total_h).max(0);
-        let n = frags.len() as i32;
-        let (mut cy, between) = match bx.justify {
-            Justify::Center => (f.y + free / 2, bx.gap),
-            Justify::End => (f.y + free, bx.gap),
-            Justify::Between if n > 1 => (f.y, bx.gap + free / (n - 1)),
-            Justify::Around if n > 0 => (f.y + free / (2 * n), bx.gap + free / n),
-            _ => (f.y, bx.gap),
-        };
-        let start_y = f.y;
-        for frag in frags {
-            let dx = match bx.align_items {
-                AlignI::Center => ((f.avail - frag.width) / 2).max(0),
-                AlignI::End => (f.avail - frag.width).max(0),
-                _ => 0,
-            };
-            let h = frag.height;
-            place_frag(f, frag, f.x0 + dx, cy);
-            cy += h + between;
-        }
-        f.y = cy.saturating_sub(between).max(start_y + target_h).max(start_y + total_h);
-        return;
-    }
+    let avail_w = f.avail;
+    let hbase = current_cb_h(f);
+    let start_y = f.y;
 
-    let n = kids.len();
-    let gap = bx.gap;
-    let mut base: Vec<i32> = Vec::with_capacity(n);
-    let mut grow: Vec<i32> = Vec::with_capacity(n);
+    let mut tree: taffy::TaffyTree<usize> = taffy::TaffyTree::new();
+    let mut leaf_ids: Vec<taffy::NodeId> = Vec::with_capacity(kids.len());
     for &c in &kids {
         let cn = &dom.nodes[c];
         let ct = cn.tag.as_deref().unwrap_or("");
         let (_ccst, cbx) = compute(f, dom, c, cn, ct, cst);
-        if let Some(w) = cbx.flex_basis.or(cbx.width) {
-            base.push(clamp_dyn(w.resolve(f.avail), 8, f.avail));
-            grow.push(if cbx.flex_grow > 0 { cbx.flex_grow } else { 0 });
-        } else {
-            let m = child_frag(f, dom, c, cst, cst.align, f.avail, depth);
-            base.push(clamp_dyn(m.nat, 8, f.avail));
-            grow.push(if cbx.flex_grow > 0 { cbx.flex_grow } else { 0 });
-        }
+        let leaf = match tree.new_leaf_with_context(flex_item_style(&cbx, avail_w), c) {
+            Ok(id) => id,
+            Err(_) => return,
+        };
+        leaf_ids.push(leaf);
     }
-    let gap_total = gap * (n as i32 - 1).max(0);
-    let total: i32 = base.iter().sum::<i32>() + gap_total;
+    let mut root_style = flex_container_style(bx);
+    root_style.size.width = taffy::style_helpers::length(avail_w.max(1) as f32);
+    if let Some(hv) = bx.height.or(bx.min_height) {
+        root_style.size.height = taffy::style_helpers::length(hv.resolve(hbase).max(0) as f32);
+    }
+    let root = match tree.new_with_children(root_style, &leaf_ids) {
+        Ok(id) => id,
+        Err(_) => return,
+    };
 
-    if total <= f.avail || !bx.flex_wrap {
-        let mut widths = base.clone();
-        if total <= f.avail {
-            let sum_grow: i32 = grow.iter().sum();
-            let free = (f.avail - total).max(0);
-            if sum_grow > 0 { for i in 0..n { if grow[i] > 0 { widths[i] += free * grow[i] / sum_grow; } } }
-        } else {
-            let over = total - f.avail;
-            let shrinkable: i32 = widths.iter().map(|w| (*w - 8).max(0)).sum();
-            if shrinkable > 0 {
-                for w in &mut widths {
-                    let cap = (*w - 8).max(0);
-                    *w = (*w - over * cap / shrinkable).max(8);
+    // Passes de mesure : appelees par taffy pour chaque feuille dont la taille
+    // n'est pas deja figee par son style (largeur/hauteur explicites). `child_frag`
+    // y fait une VRAIE mise en page jetable (gere texte enveloppe + enfants
+    // imbriques), comme measure_flex_child dans layout/tree.rs.
+    let avail_sp = taffy::Size { width: taffy::AvailableSpace::Definite(avail_w.max(1) as f32), height: taffy::AvailableSpace::MaxContent };
+    let computed = tree.compute_layout_with_measure(root, avail_sp, |known, av, _node_id, ctx, _style| {
+        match ctx {
+            Some(&mut c) => {
+                let cap = match av.width { taffy::AvailableSpace::Definite(v) => v as i32, _ => avail_w };
+                match (known.width, known.height) {
+                    (Some(w), Some(h)) => taffy::Size { width: w, height: h },
+                    (Some(w), None) => {
+                        let h = child_frag(f, dom, c, cst, cst.align, (w as i32).max(8), depth).height.max(1);
+                        taffy::Size { width: w, height: h as f32 }
+                    }
+                    (None, _) => {
+                        let frag = child_frag(f, dom, c, cst, cst.align, cap.max(8), depth);
+                        let w = frag.nat.clamp(8, cap.max(8));
+                        taffy::Size { width: w as f32, height: frag.height.max(1) as f32 }
+                    }
                 }
             }
+            None => taffy::Size::ZERO,
         }
-        let mut frags: Vec<Frag> = Vec::with_capacity(n);
-        let mut row_h = 0;
-        for (i, &c) in kids.iter().enumerate() {
-            let frag = child_frag(f, dom, c, cst, cst.align, widths[i], depth);
-            row_h = row_h.max(frag.height);
-            frags.push(frag);
-        }
-        let used: i32 = widths.iter().sum::<i32>() + gap_total;
-        let leftover = (f.avail - used).max(0);
-        let (start, between) = match bx.justify {
-            Justify::Center => (leftover / 2, gap),
-            Justify::End => (leftover, gap),
-            Justify::Between => (0, gap + if n > 1 { leftover / (n as i32 - 1) } else { 0 }),
-            Justify::Around => (leftover / (2 * n as i32), gap + leftover / n as i32),
-            Justify::Start => (0, gap),
-        };
-        let mut x = f.x0 + start;
-        for (i, frag) in frags.into_iter().enumerate() {
-            let dy = cross_offset(bx.align_items, frag.height, row_h).max(0);
-            place_frag(f, frag, x, f.y + dy);
-            x += widths[i] + between;
-        }
-        f.y += row_h;
-    } else {
-        let mut x = f.x0;
-        let mut row_h = 0;
-        for &c in &kids {
-            let cn = &dom.nodes[c];
-            let ct = cn.tag.as_deref().unwrap_or("");
-            let (_ccst, cbx) = compute(f, dom, c, cn, ct, cst);
-            let w = clamp_dyn(cbx.flex_basis.or(cbx.width).map(|l| l.resolve(f.avail)).unwrap_or_else(|| {
-                child_frag(f, dom, c, cst, cst.align, f.avail, depth).nat
-            }), 8, f.avail);
-            if x > f.x0 && x + w > f.x0 + f.avail { f.y += row_h + gap; x = f.x0; row_h = 0; }
-            let frag = child_frag(f, dom, c, cst, cst.align, w, depth);
-            row_h = row_h.max(frag.height);
-            place_frag(f, frag, x, f.y);
-            x += w + gap;
-        }
-        f.y += row_h;
+    });
+    if computed.is_err() { return; }
+
+    // Placement final : re-layout chaque enfant a la largeur resolue par taffy
+    // (son propre sous-arbre -- texte, blocs, flex/grid imbriques -- est mis
+    // en page normalement), puis translate le fragment a sa position finale.
+    for (i, &c) in kids.iter().enumerate() {
+        let tl = match tree.layout(leaf_ids[i]) { Ok(l) => *l, Err(_) => continue };
+        let cx = f.x0 + round_f32(tl.location.x);
+        let cy = start_y + round_f32(tl.location.y);
+        let cw = round_f32(tl.size.width).max(8);
+        let frag = child_frag(f, dom, c, cst, cst.align, cw, depth);
+        place_frag(f, frag, cx, cy);
+    }
+    let root_h = match tree.layout(root) { Ok(l) => round_f32(l.size.height).max(0), Err(_) => 0 };
+    f.y = start_y + root_h;
+}
+
+fn flex_container_style(bx: &BoxProps) -> taffy::Style {
+    let mut s = taffy::Style::default();
+    s.display = taffy::Display::Flex;
+    s.flex_direction = if bx.flex_dir == FlexDir::Column { taffy::FlexDirection::Column } else { taffy::FlexDirection::Row };
+    s.flex_wrap = if bx.flex_wrap { taffy::FlexWrap::Wrap } else { taffy::FlexWrap::NoWrap };
+    s.align_items = Some(match bx.align_items {
+        AlignI::Center => taffy::AlignItems::CENTER,
+        AlignI::End => taffy::AlignItems::FLEX_END,
+        AlignI::Stretch => taffy::AlignItems::STRETCH,
+        AlignI::Start => taffy::AlignItems::FLEX_START,
+    });
+    s.justify_content = Some(match bx.justify {
+        Justify::Center => taffy::JustifyContent::CENTER,
+        Justify::End => taffy::JustifyContent::FLEX_END,
+        Justify::Between => taffy::JustifyContent::SPACE_BETWEEN,
+        Justify::Around => taffy::JustifyContent::SPACE_AROUND,
+        Justify::Start => taffy::JustifyContent::FLEX_START,
+    });
+    let g = taffy::style_helpers::length(bx.gap.max(0) as f32);
+    s.gap = taffy::Size { width: g, height: g };
+    s
+}
+
+// Ne porte QUE taille/min/max/grow/basis : le box model (padding/marge/bordure)
+// de l'enfant est applique par sa PROPRE passe de layout (child_frag), pas ici
+// -- sinon il serait compte une seconde fois lors du placement final.
+fn flex_item_style(cbx: &BoxProps, avail_w: i32) -> taffy::Style {
+    let mut s = taffy::Style::default();
+    s.size = taffy::Size { width: len_to_dim(cbx.width, avail_w), height: len_to_dim(cbx.height, avail_w) };
+    s.min_size = taffy::Size { width: len_to_dim(cbx.min_width, avail_w), height: len_to_dim(cbx.min_height, avail_w) };
+    s.max_size = taffy::Size { width: len_to_dim(cbx.max_width, avail_w), height: len_to_dim(cbx.max_height, avail_w) };
+    s.flex_grow = cbx.flex_grow.max(0) as f32;
+    s.flex_shrink = 1.0; // BoxProps ne distingue pas encore flex-shrink : defaut CSS (1).
+    s.flex_basis = len_to_dim(cbx.flex_basis, avail_w);
+    s
+}
+
+fn len_to_dim(v: Option<Len>, avail_w: i32) -> taffy::Dimension {
+    match v {
+        Some(l) => taffy::style_helpers::length(l.resolve(avail_w).max(0) as f32),
+        None => taffy::style_helpers::auto(),
     }
 }
+
+// no_std : pas de f32::round() (methode std/libm). Arrondi maison.
+fn round_f32(v: f32) -> i32 { if v >= 0.0 { (v + 0.5) as i32 } else { (v - 0.5) as i32 } }
 
 // Conteneur CSS grid : `grid-template-columns` definit le nombre de colonnes ;
 // les items sont disposes en grille avec retour a la ligne et `gap`. Le span
