@@ -598,6 +598,40 @@ pub fn wget_cmd(argc: usize, argv: &[&str; 12]) {
     }
 }
 
+/// Commande `smoltest <hote> [port] [chemin]` : test manuel du backend TCP
+/// experimental `transport::smol_tcp` (vraie pile RFC 793 via la crate
+/// `smoltcp`, cf. commentaire en tete de ce module). Non branche par defaut
+/// (fetch_document continue d'utiliser tcp.rs/TcpConn) : sert a verifier a
+/// L'EXECUTION -- ce module n'a ete verifie qu'a la COMPILATION -- avant
+/// d'envisager de le faire remplacer la pile maison en production.
+pub fn smoltest_cmd(argc: usize, argv: &[&str; 12]) {
+    use alloc::string::String;
+    if argc < 2 {
+        println!("usage: smoltest <hote> [port] [chemin]");
+        return;
+    }
+    let host = argv[1];
+    let port: u16 = if argc >= 3 { argv[2].parse().unwrap_or(80) } else { 80 };
+    let path = if argc >= 4 { argv[3] } else { "/" };
+    let ip = match resolve(host) {
+        Some(ip) => ip,
+        None => { println!("DNS: echec pour {}", host); return; }
+    };
+    println!("smoltcp: connexion a {}:{} ({}.{}.{}.{})...", host, port, ip[0], ip[1], ip[2], ip[3]);
+    let req = http::build_get(host, path);
+    let t0 = crate::kernel::timer::cycles_since_boot();
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    let ok = transport::smol_tcp::fetch(ip, port, req.as_bytes(), &mut out);
+    let ms = crate::kernel::timer::cycles_to_ms(crate::kernel::timer::cycles_since_boot().wrapping_sub(t0));
+    if !ok {
+        println!("smoltcp: echec ({}ms)", ms);
+        return;
+    }
+    println!("smoltcp: {} octets recus en {}ms", out.len(), ms);
+    let preview = String::from_utf8_lossy(&out[..out.len().min(300)]);
+    for line in preview.lines().take(8) { println!("  {}", line); }
+}
+
 /// Commande `tls [hote]` : diagnostics TLS et magasin de CA racines.
 pub fn tls_cmd(argc: usize, argv: &[&str; 12]) {
     vga::set_color(COLOR_CYAN);
