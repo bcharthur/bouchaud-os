@@ -41,6 +41,7 @@ pub enum ChromeEvent {
     FieldBackspace,     // effacer un caractère dans le champ focalisé
     SubmitField,        // soumettre le formulaire du champ focalisé (Entrée)
     Blur,               // retirer le focus du champ (clic ailleurs)
+    ClickNode(String),  // déclenche un vrai clic DOM sur l'élément identifié par cette clé (id/name/aria-label)
 }
 
 // ── Dessin principal ──────────────────────────────────────────────────────────
@@ -315,6 +316,14 @@ fn click_content(state: &BrowserState, rel_x: i32, rel_y: i32, bw: usize, ch: us
             let href = lnk.href.clone();
             if let Some(code) = href.strip_prefix("javascript:") {
                 return ChromeEvent::DispatchJs(code.to_string());
+            }
+            // Cible de clic non-navigante (bouton, onclick, role=button/tab/
+            // menuitem...) : dispatch un vrai clic DOM sur ce nœud au lieu de
+            // naviguer — voir web.rs::click_key (adressage par attribut, pas
+            // par index : les deux arbres DOM du moteur ne partagent pas la
+            // même numérotation).
+            if let Some(key) = href.strip_prefix("js-click:") {
+                return ChromeEvent::ClickNode(key.to_string());
             }
             return ChromeEvent::Navigate(href);
         }

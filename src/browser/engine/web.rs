@@ -520,8 +520,17 @@ impl Session {
         let scripted = self.ctx.dispatch(code);
         render_scripted(&scripted, &self.base, self.width)
     }
+    /// Declenche un vrai clic DOM sur l'element identifie par `key` (id, ou
+    /// name/aria-label/data-testid a defaut — voir `click_key` cote layout)
+    /// puis re-rend. Point d'entree du hit-test reel (chrome.rs).
+    pub fn click_node(&mut self, key: &str) -> Page {
+        let scripted = self.ctx.click_node(key);
+        render_scripted(&scripted, &self.base, self.width)
+    }
     /// Largeur de mise en page courante (pour detecter un redimensionnement).
     pub fn width(&self) -> i32 { self.width }
+    /// Sortie `console.*` accumulee (diagnostic + selftests bout-en-bout).
+    pub fn console_out(&self) -> &[String] { &self.ctx.interp.out }
     /// Re-rend a une nouvelle largeur sans rejouer de code.
     pub fn relayout(&mut self, width: i32) -> Page {
         self.width = width;
@@ -1392,6 +1401,32 @@ fn base64_decode(s: &str) -> Vec<u8> {
 #[inline]
 fn block_tag(t: &str) -> bool { super::html::tags::is_block(t) }
 
+/// Un element doit-il devenir une cible de clic reelle ? Couvre les vrais
+/// boutons (jusque-la totalement ignores du hit-test — voir `is_submit` plus
+/// bas qui ne traite que input[type=submit/button]), les elements avec un
+/// gestionnaire `onclick` inline, et les roles ARIA interactifs des widgets
+/// modernes (menus, onglets, dropdowns Bootstrap/Google).
+fn wants_click_link(node: &Node, tag: &str) -> bool {
+    if matches!(tag, "button" | "summary" | "label") { return true; }
+    if attr(node, "onclick").is_some() { return true; }
+    matches!(attr(node, "role"), Some("button") | Some("link") | Some("tab") | Some("menuitem") | Some("switch") | Some("checkbox"))
+}
+
+/// Cle d'adressage stable d'un element vers le DOM JS vivant (`DomModel`).
+/// IMPORTANT : le moteur maintient DEUX arbres DOM independants — celui de
+/// web.rs (`Dom`, ce fichier, indices interleaves avec les noeuds texte) et
+/// celui de js/mod.rs (`DomModel`, indices elements-only). Leurs positions
+/// numeriques ne correspondent PAS entre les deux arbres : utiliser l'index
+/// `idx` de web.rs comme "node id" JS serait un bug silencieux (mauvaise
+/// cible, ou aucune). On adresse donc par ATTRIBUT (id/name/aria-label/
+/// data-testid), resolu cote JS via `DomModel::find_by_click_key` — le meme
+/// mecanisme fiable que `getElementById`, jamais par position.
+fn click_key(node: &Node, tag: &str) -> Option<String> {
+    if !wants_click_link(node, tag) { return None; }
+    attr(node, "id").or_else(|| attr(node, "name")).or_else(|| attr(node, "aria-label")).or_else(|| attr(node, "data-testid"))
+        .map(|s| s.to_string())
+}
+
 #[inline]
 fn heading_scale(t: &str) -> Option<usize> { super::html::tags::heading_scale(t) }
 
@@ -1911,7 +1946,10 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
     }
 
     // Mode d'affichage : explicite (CSS) sinon defaut par balise. tr -> flex.
-    let mut disp = bx.disp.unwrap_or(if block_tag(tag) { Disp::Block } else { Disp::Inline });
+    // `button` par defaut est inline-block (comme la feuille UA reelle) : en
+    // pur `Inline` il n'obtenait NI boite NI cible de clic (texte fondu dans
+    // le flux) — c'etait la cause n°1 des boutons totalement inertes.
+    let mut disp = bx.disp.unwrap_or(if tag == "button" { Disp::InlineBlock } else if block_tag(tag) { Disp::Block } else { Disp::Inline });
     if tag == "tr" { disp = Disp::Flex; }
     if bx.float != FloatK::None && disp == Disp::Block { disp = Disp::InlineBlock; }
 
@@ -2065,7 +2103,7 @@ fn make_frag(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, t
     let used = sub.used_w.clamp(1, w.max(1));
     let h = sub.y;
     let mut items = core::mem::take(&mut sub.items);
-    let links = core::mem::take(&mut sub.links);
+    let mut links = core::mem::take(&mut sub.links);
     let fields = core::mem::take(&mut sub.fields);
     drop(sub);
     let fw = if shrink { used } else { w };
@@ -2073,6 +2111,11 @@ fn make_frag(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, t
         let mut v = alloc::vec![Item::Rect { x: 0, y: 0, w: fw, h: h.max(1), color: c }];
         v.extend(items);
         items = v;
+    }
+    // Cible de clic reelle pour les boutons/onclick/role=button rendus en
+    // inline-block (icones flex du web moderne : mic, hamburger, dropdown).
+    if let Some(key) = click_key(node, tag) {
+        if fw > 0 && h > 0 { links.push(Link { x: 0, y: 0, w: fw, h: h.max(1), href: alloc::format!("js-click:{}", key) }); }
     }
     Frag { items, links, fields, width: fw, height: h, nat }
 }
@@ -2161,6 +2204,15 @@ fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps
     f.x0 = sx0; f.avail = sav; f.align = sal;
 
     let h = (box_bottom - box_top).max(0);
+    // Cible de clic reelle (bouton, onclick, role=button/tab/menuitem...) sur
+    // la boite entiere — c'est ce qui fait passer un hit-test de "sans cible"
+    // a un vrai dispatch DOM (chrome.rs -> js-click:<cle> -> PageCtx::click_node).
+    // Adressage par attribut (id/name/aria-label), PAS par index de noeud : voir
+    // le commentaire de `click_key` — les deux arbres DOM du moteur (web.rs et
+    // js/mod.rs) n'ont pas la meme numerotation.
+    if let Some(key) = click_key(node, tag) {
+        if h > 0 { f.links.push(Link { x: sx0 + left, y: box_top, w: outer, h, href: alloc::format!("js-click:{}", key) }); }
+    }
     // Fond : degrade lineaire (bandes interpolees) ou couleur unie, sous le contenu.
     if h > 0 {
         if let Some((c1, c2, vert)) = bx.grad {

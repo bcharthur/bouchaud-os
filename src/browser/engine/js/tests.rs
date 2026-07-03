@@ -203,5 +203,26 @@ pub fn selftest() -> Result<(), &'static str> {
                   "https://x/main.js", new_obj(Obj::plain())).map_err(|_| "run-bare")?;
     let v = it.run("__r").map_err(|_| "read-bare")?;
     if it.to_string(&v) != "object" { return Err("bare-specifier-stub"); }
+    // --- Sprint 9 : hit-test reel — <button> devient une cible de clic DOM ---
+    // Avant ce sprint, <button> ne produisait NI boite NI cible : c'etait la
+    // cause n°1 des "clic sans cible" (icones/boutons Google/Ecosia inertes).
+    {
+        use crate::browser::engine::web::Session;
+        let html = br#"<button id="b">Go</button><script>
+            document.getElementById('b').addEventListener('click', function(){
+                document.getElementById('b').textContent = 'clicked';
+                console.log('button-click-fired');
+            });
+        </script>"#;
+        let (mut session, page) = Session::open(html, "https://t.example/", 800);
+        let target = page.links.iter().find(|l| l.href.starts_with("js-click:"))
+            .ok_or("button-no-click-target")?;
+        let key = target.href.strip_prefix("js-click:").ok_or("button-bad-key")?.to_string();
+        if key != "b" { return Err("button-key-not-id"); }
+        let _page2 = session.click_node(&key);
+        if session.console_out().last().map(|s| s.as_str()) != Some("button-click-fired") {
+            return Err("button-click-not-dispatched");
+        }
+    }
     Ok(())
 }
