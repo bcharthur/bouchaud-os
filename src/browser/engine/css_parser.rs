@@ -22,7 +22,7 @@ fn find_ci(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
 
 pub(super) fn parse_decls(body: &str) -> Vec<(String, String)> {
     let mut v = Vec::new();
-    for part in body.split(';') {
+    for part in split_top_level(body, ';') {
         if let Some(c) = part.find(':') {
             let prop = part[..c].trim().to_ascii_lowercase();
             let mut val = part[c + 1..].trim();
@@ -46,6 +46,38 @@ fn unquote(s: &str) -> &str {
     let s = s.trim();
     let b = s.as_bytes();
     if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[b.len() - 1] == b[0] { &s[1..s.len() - 1] } else { s }
+}
+
+// Split top-level: respecte guillemets, parentheses et crochets. Indispensable
+// pour le CSS moderne minifie (`:not(.a,.b)`, `url(data:...;...)`, rgb(...)).
+fn split_top_level<'a>(s: &'a str, sep: char) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut esc = false;
+    for (i, ch) in s.char_indices() {
+        if let Some(q) = quote {
+            if esc { esc = false; continue; }
+            if ch == '\\' { esc = true; continue; }
+            if ch == q { quote = None; }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' | '[' => depth += 1,
+            ')' | ']' => { if depth > 0 { depth -= 1; } },
+            c if c == sep && depth == 0 => {
+                let part = s[start..i].trim();
+                if !part.is_empty() { out.push(part); }
+                start = i + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    let part = s[start..].trim();
+    if !part.is_empty() { out.push(part); }
+    out
 }
 
 // Parse un formule `an+b` de :nth-child : `2n+1`, `odd`, `even`, `3`, `-n+3`.
@@ -143,7 +175,7 @@ fn parse_simple(comp: &str) -> (Sel, u32) {
                     "nth-last-child" => { let (a, bb) = parse_anb(arg); sel.pseudos.push(Pseudo::NthLastChild(a, bb)); }
                     "not" => {
                         let mut inner = Vec::new();
-                        for part in arg.split(',') { let (s, _) = parse_simple(part); if !s.is_any() { inner.push(s); } }
+                        for part in split_top_level(arg, ',') { let (s, _) = parse_simple(part); if !s.is_any() { inner.push(s); } }
                         if !inner.is_empty() { sel.pseudos.push(Pseudo::Not(inner)); }
                     }
                     // Pseudos d'etat/element non decidables : ignorees (neutres).
@@ -255,7 +287,7 @@ fn parse_css_block(text: &str, out: &mut Vec<Rule>) {
         if body.contains('{') { continue; } // sous-bloc inattendu
         let decls = parse_decls(body);
         if decls.is_empty() { continue; }
-        for sel in sel_part.split(',') {
+        for sel in split_top_level(sel_part, ',') {
             let (chain, spec) = parse_selector(sel);
             out.push(Rule { chain, decls: decls.clone(), spec });
         }

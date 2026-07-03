@@ -13,7 +13,6 @@ use super::display_list::{apply_box_transform, translate_item};
 pub use super::display_list::{FormField, Item, Layer, Link, Page};
 pub use super::paint::paint;
 use super::style::{CssIndex, Rule, Sel, Comb, AttrOp, AttrSel, Pseudo};
-use super::css_values::parse_transform;
 use super::css_parser::{parse_decls, parse_stylesheet};
 use crate::net::http::resolve_location;
 use alloc::string::{String, ToString};
@@ -783,7 +782,11 @@ fn font_px(s: &str) -> Option<i32> {
     // `vw` / `vh` : approximation viewport (fenetre Nautile ~ 600x420) pour les
     // tailles relatives au viewport, courantes sur le web moderne.
     if let Some(vw) = s.strip_suffix("vw") { return vw.trim().parse::<f32>().ok().map(|v| (v * 6.0) as i32); }
-    if let Some(vh) = s.strip_suffix("vh") { return vh.trim().parse::<f32>().ok().map(|v| (v * 4.2) as i32); }
+    for suf in ["dvh", "svh", "lvh", "vh"] {
+        if let Some(vh) = s.strip_suffix(suf) { return vh.trim().parse::<f32>().ok().map(|v| (v * 4.2) as i32); }
+    }
+    if let Some(vm) = s.strip_suffix("vmin") { return vm.trim().parse::<f32>().ok().map(|v| (v * 4.2) as i32); }
+    if let Some(vm) = s.strip_suffix("vmax") { return vm.trim().parse::<f32>().ok().map(|v| (v * 6.0) as i32); }
     s.parse::<f32>().ok().map(|v| v as i32)
 }
 
@@ -846,7 +849,7 @@ fn apply_transform(s: &str, t: u8) -> String {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Disp { Block, Inline, InlineBlock, Flex, Grid, None }
+enum Disp { Block, Inline, InlineBlock, Flex, Grid, Contents, None }
 #[derive(Clone, Copy, PartialEq)]
 enum FloatK { None, Left, Right }
 
@@ -916,6 +919,42 @@ fn parse_len(s: &str) -> Option<Len> {
     font_px(s).map(Len::Px)
 }
 
+fn transform_len(tok: &str) -> (i32, i32) {
+    let t = tok.trim();
+    if let Some(p) = t.strip_suffix('%') { return (0, p.trim().parse::<f32>().unwrap_or(0.0) as i32); }
+    (font_px(t).unwrap_or(0), 0)
+}
+fn parse_transform_box(val: &str) -> (i32, i32, i32, i32, i32) {
+    let mut tx=0; let mut ty=0; let mut txp=0; let mut typ=0; let mut scale=100;
+    for part in val.split(')').filter(|p| !p.trim().is_empty()) {
+        let p = part.trim();
+        if let Some(args) = p.strip_prefix("translate(") {
+            let mut it = args.split(',');
+            let (x,xp)=it.next().map(transform_len).unwrap_or((0,0));
+            let (y,yp)=it.next().map(transform_len).unwrap_or((0,0));
+            tx+=x; txp+=xp; ty+=y; typ+=yp;
+        } else if let Some(args)=p.strip_prefix("translateX(") { let (x,xp)=transform_len(args); tx+=x; txp+=xp;
+        } else if let Some(args)=p.strip_prefix("translateY(") { let (y,yp)=transform_len(args); ty+=y; typ+=yp;
+        } else if let Some(args)=p.strip_prefix("scale(") {
+            let n=args.split(',').next().unwrap_or(args).trim(); if let Ok(v)=n.parse::<f32>() { scale=(scale as f32*v) as i32; }
+        }
+    }
+    (tx,ty,txp,typ,scale.clamp(10,400))
+}
+fn parse_order(val: &str) -> i32 { val.trim().parse::<i32>().unwrap_or(0).clamp(-999,999) }
+fn apply_flex_shorthand(val: &str, bx: &mut BoxProps) {
+    let v=val.trim();
+    if v=="none" { bx.flex_grow=0; bx.flex_basis=Some(Len::Px(0)); return; }
+    if v=="auto" { bx.flex_grow=1; bx.flex_basis=None; return; }
+    let mut seen_num=false;
+    for tok in v.split_whitespace() {
+        if tok=="auto" { bx.flex_basis=None; continue; }
+        if tok=="none" { bx.flex_grow=0; bx.flex_basis=Some(Len::Px(0)); continue; }
+        if !seen_num { if let Ok(g)=tok.parse::<f32>() { bx.flex_grow=g.max(0.0) as i32; seen_num=true; continue; } }
+        if let Some(l)=parse_len(tok) { bx.flex_basis=Some(l); }
+    }
+}
+
 // Proprietes de boite, propres a l'element (non heritees).
 struct BoxProps {
     hidden: bool,
@@ -928,6 +967,8 @@ struct BoxProps {
     max_width: Option<Len>,
     min_width: Option<Len>,
     min_height: Option<Len>,
+    max_height: Option<Len>,
+    border_box: bool,      // box-sizing:border-box
     center: bool,          // margin:auto (centre le bloc)
     disp: Option<Disp>,
     float: FloatK,
@@ -941,10 +982,13 @@ struct BoxProps {
     flex_dir: FlexDir,
     justify: Justify,
     align_items: AlignI,
+    flex_wrap: bool,       // spec: nowrap par defaut, wrap uniquement si demande
     gap: i32,              // espacement entre items flex/grid (px)
     grid_cols: u8,         // nombre de colonnes (grid-template-columns) ; 0 = auto
-    // Enfant flex : facteur de croissance (flex-grow / flex:N).
+    // Enfant flex : facteur de croissance (flex-grow / flex:N) + base/order.
     flex_grow: i32,
+    flex_basis: Option<Len>,
+    order: i32,
     // Enfant grid : nombre de colonnes occupees (grid-column span) ; 0 = 1, 255 = pleine rangee.
     grid_span: u8,
     // list-style-type : 0 auto (disc/decimal selon ul/ol), 1 none, 2 disc,
@@ -957,18 +1001,19 @@ struct BoxProps {
     overflow_clip: bool,   // overflow: hidden/clip/auto/scroll -> clippe le contenu
     shadow: Option<u32>,   // box-shadow : couleur de l'ombre portee (offset fixe)
     grad: Option<(u32, u32, bool)>, // linear-gradient : (debut, fin, vertical)
-    tx: i32, ty: i32,       // transform: translate(...) simplifie
+    tx: i32, ty: i32,       // transform: translate(...) en px
+    tx_pct: i32, ty_pct: i32, // translate(%) relatif a la boite
     scale_pct: i32,         // transform: scale(...) en pourcentage (100 = identite)
 }
 fn default_box() -> BoxProps {
-    BoxProps { hidden: false, bg: None, bg_image: None, bg_size: 0, bg_pos: 0, width: None, height: None, max_width: None, min_width: None, min_height: None,
-        center: false, disp: None, float: FloatK::None,
+    BoxProps { hidden: false, bg: None, bg_image: None, bg_size: 0, bg_pos: 0, width: None, height: None, max_width: None, min_width: None, min_height: None, max_height: None,
+        border_box: false, center: false, disp: None, float: FloatK::None,
         pad_t: 0, pad_r: 0, pad_b: 0, pad_l: 0, mar_t: 0, mar_b: 0,
         border_w: 0, border_color: 0x000000, radius: 0,
-        flex_dir: FlexDir::Row, justify: Justify::Start, align_items: AlignI::Stretch,
-        gap: 0, grid_cols: 0, flex_grow: 0, grid_span: 0, list_style: 0,
+        flex_dir: FlexDir::Row, justify: Justify::Start, align_items: AlignI::Stretch, flex_wrap: false,
+        gap: 0, grid_cols: 0, flex_grow: 0, flex_basis: None, order: 0, grid_span: 0, list_style: 0,
         position: Pos::Static, top: None, right: None, bottom: None, left: None,
-        z_index: None, overflow_clip: false, shadow: None, grad: None, tx: 0, ty: 0, scale_pct: 100 }
+        z_index: None, overflow_clip: false, shadow: None, grad: None, tx: 0, ty: 0, tx_pct: 0, ty_pct: 0, scale_pct: 100 }
 }
 
 // Premiere longueur d'une valeur raccourcie (`10px 20px` -> 10).
@@ -1125,13 +1170,18 @@ impl<'a> Ctx<'a> {
                 None => { crate::dlog!(crate::diag::Cat::Warn, "image injoignable: {}", abs); return None; }
             }
         }
-        let img = match image::decode(&raw) {
+        let img = if image_kind(&raw).starts_with("svg") || raw.iter().take(64).any(|&b| b == b'<') && core::str::from_utf8(&raw[..raw.len().min(256)]).map(|h| h.to_ascii_lowercase().contains("<svg")).unwrap_or(false) {
+            match super::svg::rasterize(&raw) {
+                Some(im) => im,
+                None => { crate::dlog!(crate::diag::Cat::Warn, "svg non decode ({}o): {}", raw.len(), src); return None; }
+            }
+        } else { match image::decode(&raw) {
             Some(im) => im,
             None => {
                 crate::dlog!(crate::diag::Cat::Warn, "image non decodee ({}o, {}): {}", raw.len(), image_kind(&raw), src);
                 return None;
             }
-        };
+        } };
         let mh = if max_h == 0 { img.h.max(1) } else { max_h };
         let img = image::downscale(&img, max_w.max(16), mh.max(16));
         if img.w == 0 || img.h == 0 { return None; }
@@ -1524,6 +1574,20 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, cs
             "right" => { bx.right = parse_len(val); }
             "bottom" => { bx.bottom = parse_len(val); }
             "left" => { bx.left = parse_len(val); }
+            "inset" => {
+                let parts: Vec<Option<Len>> = val.split_whitespace().map(parse_len).collect();
+                match parts.len() {
+                    1 => { bx.top = parts[0]; bx.right = parts[0]; bx.bottom = parts[0]; bx.left = parts[0]; }
+                    2 => { bx.top = parts[0]; bx.bottom = parts[0]; bx.right = parts[1]; bx.left = parts[1]; }
+                    3 => { bx.top = parts[0]; bx.right = parts[1]; bx.left = parts[1]; bx.bottom = parts[2]; }
+                    n if n >= 4 => { bx.top = parts[0]; bx.right = parts[1]; bx.bottom = parts[2]; bx.left = parts[3]; }
+                    _ => {}
+                }
+            }
+            "inset-block-start" => { bx.top = parse_len(val); }
+            "inset-block-end" => { bx.bottom = parse_len(val); }
+            "inset-inline-start" => { bx.left = parse_len(val); }
+            "inset-inline-end" => { bx.right = parse_len(val); }
             "z-index" => { bx.z_index = val.trim().parse::<i32>().ok(); }
             "overflow" | "overflow-x" | "overflow-y" => {
                 if matches!(val, "hidden" | "clip" | "auto" | "scroll") { bx.overflow_clip = true; }
@@ -1548,12 +1612,14 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, cs
                 }
             }
             "display" => {
-                let d = match val { "none" => Disp::None, "inline" => Disp::Inline, "inline-block" => Disp::InlineBlock,
+                let d = match val { "none" => Disp::None, "contents" => Disp::Contents, "inline" => Disp::Inline, "inline-block" => Disp::InlineBlock,
                     "flex" | "inline-flex" => Disp::Flex, "grid" | "inline-grid" => Disp::Grid, _ => Disp::Block };
                 if d == Disp::None && !no_display_none { bx.hidden = true; }
                 bx.disp = Some(d);
             }
             "flex-direction" => { if val.starts_with("column") { bx.flex_dir = FlexDir::Column; } else { bx.flex_dir = FlexDir::Row; } }
+            "flex-wrap" => { bx.flex_wrap = val.contains("wrap"); }
+            "box-sizing" => { bx.border_box = val == "border-box"; }
             "justify-content" => {
                 bx.justify = match val {
                     "center" => Justify::Center,
@@ -1571,6 +1637,10 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, cs
                     _ => AlignI::Stretch,
                 };
             }
+            "place-items" => {
+                let first = val.split_whitespace().next().unwrap_or(val);
+                bx.align_items = match first { "center" => AlignI::Center, "flex-end" | "end" => AlignI::End, "flex-start" | "start" => AlignI::Start, _ => bx.align_items };
+            }
             "gap" | "grid-gap" | "row-gap" | "column-gap" | "grid-column-gap" | "grid-row-gap" => {
                 if let Some(px) = first_len(val) { bx.gap = bx.gap.max(px.max(0)); }
             }
@@ -1582,27 +1652,25 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, cs
                     if let Ok(nn) = rest.trim().split(|c: char| c == '/' || c == ' ').next().unwrap_or("").trim().parse::<u8>() { bx.grid_span = nn; }
                 }
             }
-            "flex" | "flex-grow" => {
-                // `flex: 1`, `flex: 1 1 0`, `flex-grow: 2` -> facteur de croissance.
-                if let Some(tok) = val.split_whitespace().next() {
-                    if let Ok(g) = tok.parse::<f32>() { bx.flex_grow = g as i32; }
-                    else if tok == "auto" { bx.flex_grow = 1; }
-                }
-            }
+            "flex" => { apply_flex_shorthand(val, bx); }
+            "flex-grow" => { bx.flex_grow = val.trim().parse::<f32>().map(|g| g.max(0.0) as i32).unwrap_or(bx.flex_grow); }
+            "flex-basis" => { bx.flex_basis = parse_len(val); }
+            "order" => { bx.order = parse_order(val); }
             // visibility:hidden/collapse masque (Google cache ainsi sa sidebar
             // .X1pLC, l'overlay consentement .kJFf0c... qui apparaissaient en
             // boites fantomes). Meme garde-fou anti-FOUC que display:none : le
             // fallback "0 items" relance le layout avec no_display_none.
             "visibility" => { if matches!(val, "hidden" | "collapse") && !no_display_none { bx.hidden = true; } }
-            "width" => { bx.width = parse_len(val); }
-            "height" => { bx.height = parse_len(val); }
-            "max-width" => { bx.max_width = parse_len(val); }
-            "min-width" => { bx.min_width = parse_len(val); }
-            "min-height" => { bx.min_height = parse_len(val); }
+            "width" | "inline-size" => { bx.width = parse_len(val); }
+            "height" | "block-size" => { bx.height = parse_len(val); }
+            "max-width" | "max-inline-size" => { bx.max_width = parse_len(val); }
+            "min-width" | "min-inline-size" => { bx.min_width = parse_len(val); }
+            "min-height" | "min-block-size" => { bx.min_height = parse_len(val); }
+            "max-height" | "max-block-size" => { bx.max_height = parse_len(val); }
             "border-radius" => { if let Some(px) = first_len(val) { bx.radius = px.max(0); } }
             "transform" => {
-                let (tx, ty, sc) = parse_transform(val);
-                bx.tx += tx; bx.ty += ty; bx.scale_pct = bx.scale_pct * sc / 100;
+                let (tx, ty, txp, typ, sc) = parse_transform_box(val);
+                bx.tx += tx; bx.ty += ty; bx.tx_pct += txp; bx.ty_pct += typ; bx.scale_pct = bx.scale_pct * sc / 100;
             }
             "float" => { bx.float = match val { "left" => FloatK::Left, "right" => FloatK::Right, _ => FloatK::None }; }
             "margin" => {
@@ -1610,17 +1678,20 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, cs
                 let (t, _r, b, _l) = parse_sides(val);
                 bx.mar_t = t; bx.mar_b = b;
             }
-            "margin-left" | "margin-right" => { if val.contains("auto") { bx.center = true; } }
-            "margin-top" => { if let Some(px) = first_len(val) { bx.mar_t = px.max(0); } }
-            "margin-bottom" => { if let Some(px) = first_len(val) { bx.mar_b = px.max(0); } }
+            "margin-left" | "margin-right" | "margin-inline-start" | "margin-inline-end" => { if val.contains("auto") { bx.center = true; } }
+            "margin-block" => { let (t, _r, b, _l) = parse_sides(val); bx.mar_t = t; bx.mar_b = b; }
+            "margin-top" | "margin-block-start" => { if let Some(px) = first_len(val) { bx.mar_t = px.max(0); } }
+            "margin-bottom" | "margin-block-end" => { if let Some(px) = first_len(val) { bx.mar_b = px.max(0); } }
             "padding" => {
                 let (t, r, b, l) = parse_sides(val);
                 bx.pad_t = t; bx.pad_r = r; bx.pad_b = b; bx.pad_l = l;
             }
-            "padding-top" => { if let Some(px) = first_len(val) { bx.pad_t = px.max(0); } }
-            "padding-right" => { if let Some(px) = first_len(val) { bx.pad_r = px.max(0); } }
-            "padding-bottom" => { if let Some(px) = first_len(val) { bx.pad_b = px.max(0); } }
-            "padding-left" => { if let Some(px) = first_len(val) { bx.pad_l = px.max(0); } }
+            "padding-block" => { let (t, _r, b, _l) = parse_sides(val); bx.pad_t = t; bx.pad_b = b; }
+            "padding-inline" => { let (_t, r, _b, l) = parse_sides(val); bx.pad_r = r; bx.pad_l = l; }
+            "padding-top" | "padding-block-start" => { if let Some(px) = first_len(val) { bx.pad_t = px.max(0); } }
+            "padding-right" | "padding-inline-end" => { if let Some(px) = first_len(val) { bx.pad_r = px.max(0); } }
+            "padding-bottom" | "padding-block-end" => { if let Some(px) = first_len(val) { bx.pad_b = px.max(0); } }
+            "padding-left" | "padding-inline-start" => { if let Some(px) = first_len(val) { bx.pad_l = px.max(0); } }
             // `border: 1px solid #ccc` -> epaisseur + couleur.
             // Important : les resets modernes font `border-width:0; border-style:solid;
             // border-color:currentColor`; ni style ni couleur ne doivent rendre la bordure visible.
@@ -1737,7 +1808,7 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
             let attr_w = attr(node, "width").and_then(|s| s.trim_end_matches("px").parse::<i32>().ok()).unwrap_or(0);
             let attr_h = attr(node, "height").and_then(|s| s.trim_end_matches("px").parse::<i32>().ok()).unwrap_or(0);
             let maxw = if attr_w > 0 { clamp_dyn(attr_w, 8, f.avail) } else { bx.width.map(|l| l.resolve(f.avail)).unwrap_or(96) }.clamp(8, 512) as usize;
-            let maxh = if attr_h > 0 { attr_h } else { bx.height.map(|l| l.resolve(0)).unwrap_or(96) }.clamp(8, 512) as usize;
+            let maxh = if attr_h > 0 { attr_h } else { bx.height.map(|l| l.resolve(current_cb_h(f))).unwrap_or(96) }.clamp(8, 512) as usize;
             if let Some(i) = f.ctx.load_svg(srcv, maxw, maxh) { f.push_image(i, cst.va); }
         }
         return;
@@ -1753,7 +1824,7 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
         let attr_w = attr(node, "width").and_then(|s| s.trim_end_matches("px").parse::<i32>().ok()).unwrap_or(0);
         let attr_h = attr(node, "height").and_then(|s| s.trim_end_matches("px").parse::<i32>().ok()).unwrap_or(0);
         let maxw = if attr_w > 0 { clamp_dyn(attr_w, 16, f.avail) } else { bx.width.map(|l| l.resolve(f.avail)).unwrap_or(f.avail) }.max(16) as usize;
-        let maxh = if attr_h > 0 { attr_h.min(2000) } else { bx.height.map(|l| l.resolve(0)).unwrap_or(1600) }.max(16) as usize;
+        let maxh = if attr_h > 0 { attr_h.min(2000) } else { bx.height.map(|l| l.resolve(current_cb_h(f))).unwrap_or(1600) }.max(16) as usize;
         // Resolution lazy-load / srcset (web moderne).
         if let Some(src) = img_src(node) {
             if let Some(i) = f.ctx.load_image(src, maxw, maxh) { f.push_image(i, cst.va); return; }
@@ -1775,7 +1846,7 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
         if tag == "video" {
             if let Some(poster) = attr(node, "poster") {
                 let maxw = clamp_dyn(bx.width.map(|l| l.resolve(f.avail)).unwrap_or(f.avail / 2), 32, f.avail) as usize;
-                let maxh = bx.height.map(|l| l.resolve(0)).unwrap_or(360).max(32) as usize;
+                let maxh = bx.height.map(|l| l.resolve(current_cb_h(f))).unwrap_or(360).max(32) as usize;
                 if let Some(i) = f.ctx.load_image(poster, maxw, maxh) { f.push_image(i, cst.va); return; }
             }
         }
@@ -1791,7 +1862,7 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
             }
         }
         let w = clamp_dyn(bx.width.map(|l| l.resolve(f.avail)).unwrap_or((label.len() as i32 * 8 + 32).min(f.avail)), 48, f.avail);
-        let h = bx.height.map(|l| l.resolve(0)).unwrap_or(if tag == "video" { 180 } else { 36 }).clamp(28, 720);
+        let h = bx.height.map(|l| l.resolve(current_cb_h(f))).unwrap_or(if tag == "video" { 180 } else { 36 }).clamp(28, 720);
         f.push_box(w, h, 0xeeeeee, label);
         return;
     }
@@ -1800,7 +1871,7 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
         // inputs cachés : aucun rendu
         if input_type == "hidden" { return; }
         let cw = 8 * 2;
-        let h = bx.height.map(|l| l.resolve(0)).unwrap_or(cw + 8).clamp(cw, 60);
+        let h = bx.height.map(|l| l.resolve(current_cb_h(f))).unwrap_or(cw + 8).clamp(cw, 60);
         let default_w = if tag == "textarea" { f.avail } else { (20 * cw).min(f.avail * 3 / 4) };
         let w = clamp_dyn(bx.width.map(|l| l.resolve(f.avail)).unwrap_or(default_w), cw, f.avail);
         let is_submit = input_type == "submit" || input_type == "button" || input_type == "reset" || tag == "button";
@@ -1866,6 +1937,7 @@ fn walk(f: &mut Flow, dom: &Dom, idx: usize, st: &Style, depth: u32) {
 
     match disp {
         Disp::None => {}
+        Disp::Contents => { for &c in &node.children { walk(f, dom, c, &cst, depth + 1); } }
         Disp::Inline => { for &c in &node.children { walk(f, dom, c, &cst, depth + 1); } }
         Disp::InlineBlock => {
             let w = clamp_dyn(bx.width.map(|l| l.resolve(f.avail)).unwrap_or(f.avail), 8, f.avail);
@@ -1931,7 +2003,7 @@ fn layout_positioned(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &Box
     let width = width.clamp(8, cbw.max(8));
 
     // Mise en page du sous-arbre dans un sous-flux a l'origine (0,0).
-    let inner_disp = match disp { Disp::Flex => Disp::Flex, Disp::Grid => Disp::Grid, _ => Disp::Block };
+    let inner_disp = match disp { Disp::Flex => Disp::Flex, Disp::Grid => Disp::Grid, Disp::Contents => Disp::Contents, _ => Disp::Block };
     let layer_start = f.ctx.layers.len();
     // block_layout etablit lui-meme le bloc conteneur local (element positionne).
     let mut sub = Flow::new(f.ctx, 0, width);
@@ -1977,6 +2049,10 @@ fn clamp_dyn(v: i32, lo: i32, hi: i32) -> i32 {
     v.clamp(lo.min(hi).max(1), hi)
 }
 
+fn current_cb_h(f: &Flow) -> i32 {
+    f.ctx.cb_stack.last().map(|&(_, _, _, h)| h).unwrap_or(f.ctx.viewport_h).max(1)
+}
+
 // Met en page le contenu d'un element dans son propre fragment (largeur `w`).
 // `shrink` : ajuste la largeur finale au contenu (inline-block sans width).
 fn make_frag(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, tag: &str, w: i32, shrink: bool, depth: u32) -> Frag {
@@ -2015,6 +2091,7 @@ fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps
     if let Some(wv) = bx.width { cw = wv.resolve(f.avail); }
     if let Some(mw) = bx.max_width { let m = mw.resolve(f.avail); if cw > m { cw = m; } }
     if let Some(mn) = bx.min_width { let m = mn.resolve(f.avail); if cw < m { cw = m; } }
+    if bx.width.is_some() && !bx.border_box { cw = cw.saturating_add(bx.pad_l + bx.pad_r + bx.border_w * 2); }
     cw = clamp_dyn(cw, 8, f.avail);
 
     let indent = match tag { "ul" | "ol" | "blockquote" | "dl" | "dd" => 18, _ => 0 };
@@ -2057,6 +2134,7 @@ fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps
     match inner_disp {
         Disp::Flex => flex_inner(f, dom, node, cst, bx, depth),
         Disp::Grid => grid_inner(f, dom, node, cst, bx, depth),
+        Disp::Contents => { for &c in &node.children { walk(f, dom, c, cst, depth + 1); } f.flush_line(); }
         _ => {
             if tag == "li" {
                 let marker = if f.ctx.list_stack.is_empty() { Some("\u{2022}".to_string()) } else { li_marker(f.ctx) };
@@ -2075,8 +2153,10 @@ fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps
 
     f.y += pb + bw;               // bordure + padding du bas
     // height / min-height contraignent la hauteur finale de la boite.
-    if let Some(hv) = bx.height { let target = box_top + hv.resolve(0); if f.y < target { f.y = target; } }
-    if let Some(mn) = bx.min_height { let target = box_top + mn.resolve(0); if f.y < target { f.y = target; } }
+    let hbase = current_cb_h(f);
+    if let Some(hv) = bx.height { let target = box_top + hv.resolve(hbase); if f.y < target { f.y = target; } }
+    if let Some(mn) = bx.min_height { let target = box_top + mn.resolve(hbase); if f.y < target { f.y = target; } }
+    if let Some(mx) = bx.max_height { let target = box_top + mx.resolve(hbase); if target > box_top && f.y > target { f.y = target; } }
     let box_bottom = f.y;
     f.x0 = sx0; f.avail = sav; f.align = sal;
 
@@ -2118,7 +2198,7 @@ fn block_layout(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps
     }
 
     // Transform CSS simple : applique translate/scale au fragment visuel, aux liens et aux champs.
-    apply_box_transform(&mut f.items[bg_insert..], &mut f.links[link_insert..], &mut f.fields[field_insert..], sx0 + left, box_top, bx.tx, bx.ty, bx.scale_pct);
+    apply_box_transform(&mut f.items[bg_insert..], &mut f.links[link_insert..], &mut f.fields[field_insert..], sx0 + left, box_top, bx.tx + bx.tx_pct * outer / 100, bx.ty + bx.ty_pct * h / 100, bx.scale_pct);
 
     // Marge basse + espacement par defaut entre blocs.
     f.y += bx.mar_b;
@@ -2160,8 +2240,24 @@ fn cross_offset(align: AlignI, item_h: i32, band: i32) -> i32 {
 // Conteneur flexbox : `flex-direction` row/column, `gap`, `justify-content`,
 // `align-items` et largeurs/flex-grow des enfants. Le `tr` d'un tableau reutilise
 // ce moteur en mode row.
+fn ordered_element_children(f: &Flow, dom: &Dom, node: &Node, cst: &Style) -> Vec<usize> {
+    let mut tmp: Vec<(i32, usize, usize)> = Vec::new();
+    for (pos, &c) in node.children.iter().enumerate() {
+        if dom.nodes[c].tag.is_none() { continue; }
+        let cn = &dom.nodes[c];
+        let ct = cn.tag.as_deref().unwrap_or("");
+        let (_ccst, cbx) = compute(f, dom, c, cn, ct, cst);
+        tmp.push((cbx.order, pos, c));
+    }
+    tmp.sort_by_key(|&(ord, pos, _)| (ord, pos));
+    tmp.into_iter().map(|(_, _, c)| c).collect()
+}
+
+// Conteneur flexbox : direction, wrap spec, flex-grow/flex-basis, order,
+// justify/align. Par defaut un flex row NE WRAPPE PAS, comme dans les vrais
+// navigateurs ; on ne wrappe que si `flex-wrap:wrap` est demande.
 fn flex_inner(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, depth: u32) {
-    let kids: Vec<usize> = node.children.iter().cloned().filter(|&c| dom.nodes[c].tag.is_some()).collect();
+    let kids = ordered_element_children(f, dom, node, cst);
     if kids.is_empty() {
         let saved = f.align; f.align = cst.align;
         for &c in &node.children { walk(f, dom, c, cst, depth + 1); }
@@ -2169,41 +2265,53 @@ fn flex_inner(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, 
         return;
     }
 
-    // ── Direction colonne : empilement vertical avec gap. ──
     if bx.flex_dir == FlexDir::Column {
+        let mut frags: Vec<Frag> = Vec::with_capacity(kids.len());
+        let mut total_h = 0i32;
         for (i, &c) in kids.iter().enumerate() {
-            if i > 0 { f.y += bx.gap; }
             let frag = child_frag(f, dom, c, cst, cst.align, f.avail, depth);
-            let h = frag.height;
-            // align-items horizontal : start (defaut/stretch) | center | end.
+            if i > 0 { total_h += bx.gap; }
+            total_h += frag.height;
+            frags.push(frag);
+        }
+        let hbase = current_cb_h(f);
+        let target_h = bx.height.or(bx.min_height).map(|l| l.resolve(hbase)).unwrap_or(0).max(0);
+        let free = (target_h - total_h).max(0);
+        let n = frags.len() as i32;
+        let (mut cy, between) = match bx.justify {
+            Justify::Center => (f.y + free / 2, bx.gap),
+            Justify::End => (f.y + free, bx.gap),
+            Justify::Between if n > 1 => (f.y, bx.gap + free / (n - 1)),
+            Justify::Around if n > 0 => (f.y + free / (2 * n), bx.gap + free / n),
+            _ => (f.y, bx.gap),
+        };
+        let start_y = f.y;
+        for frag in frags {
             let dx = match bx.align_items {
                 AlignI::Center => ((f.avail - frag.width) / 2).max(0),
                 AlignI::End => (f.avail - frag.width).max(0),
                 _ => 0,
             };
-            place_frag(f, frag, f.x0 + dx, f.y);
-            f.y += h;
+            let h = frag.height;
+            place_frag(f, frag, f.x0 + dx, cy);
+            cy += h + between;
         }
+        f.y = cy.saturating_sub(between).max(start_y + target_h).max(start_y + total_h);
         return;
     }
 
-    // ── Direction ligne : largeur fixe (CSS) ou NATURELLE (contenu) de chaque
-    // enfant, puis distribution flex-grow si ça tient, sinon passage à la ligne
-    // (flex-wrap) — c'est ce qui évite les chevauchements de texte nowrap.
     let n = kids.len();
     let gap = bx.gap;
-
     let mut base: Vec<i32> = Vec::with_capacity(n);
     let mut grow: Vec<i32> = Vec::with_capacity(n);
     for &c in &kids {
         let cn = &dom.nodes[c];
         let ct = cn.tag.as_deref().unwrap_or("");
         let (_ccst, cbx) = compute(f, dom, c, cn, ct, cst);
-        if let Some(w) = cbx.width {
+        if let Some(w) = cbx.flex_basis.or(cbx.width) {
             base.push(clamp_dyn(w.resolve(f.avail), 8, f.avail));
-            grow.push(0);
+            grow.push(if cbx.flex_grow > 0 { cbx.flex_grow } else { 0 });
         } else {
-            // Mesure la largeur naturelle du contenu (sans le forcer à rétrécir).
             let m = child_frag(f, dom, c, cst, cst.align, f.avail, depth);
             base.push(clamp_dyn(m.nat, 8, f.avail));
             grow.push(if cbx.flex_grow > 0 { cbx.flex_grow } else { 0 });
@@ -2212,19 +2320,27 @@ fn flex_inner(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, 
     let gap_total = gap * (n as i32 - 1).max(0);
     let total: i32 = base.iter().sum::<i32>() + gap_total;
 
-    if total <= f.avail {
-        // Tient sur une ligne : l'espace restant va aux enfants flex-grow.
+    if total <= f.avail || !bx.flex_wrap {
         let mut widths = base.clone();
-        let sum_grow: i32 = grow.iter().sum();
-        let free = (f.avail - total).max(0);
-        if sum_grow > 0 {
-            for i in 0..n { if grow[i] > 0 { widths[i] += free * grow[i] / sum_grow; } }
+        if total <= f.avail {
+            let sum_grow: i32 = grow.iter().sum();
+            let free = (f.avail - total).max(0);
+            if sum_grow > 0 { for i in 0..n { if grow[i] > 0 { widths[i] += free * grow[i] / sum_grow; } } }
+        } else {
+            let over = total - f.avail;
+            let shrinkable: i32 = widths.iter().map(|w| (*w - 8).max(0)).sum();
+            if shrinkable > 0 {
+                for w in &mut widths {
+                    let cap = (*w - 8).max(0);
+                    *w = (*w - over * cap / shrinkable).max(8);
+                }
+            }
         }
         let mut frags: Vec<Frag> = Vec::with_capacity(n);
         let mut row_h = 0;
         for (i, &c) in kids.iter().enumerate() {
             let frag = child_frag(f, dom, c, cst, cst.align, widths[i], depth);
-            if frag.height > row_h { row_h = frag.height; }
+            row_h = row_h.max(frag.height);
             frags.push(frag);
         }
         let used: i32 = widths.iter().sum::<i32>() + gap_total;
@@ -2244,23 +2360,18 @@ fn flex_inner(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, 
         }
         f.y += row_h;
     } else {
-        // Débordement : on passe à la ligne (flex-wrap), au lieu de superposer.
         let mut x = f.x0;
         let mut row_h = 0;
         for &c in &kids {
             let cn = &dom.nodes[c];
             let ct = cn.tag.as_deref().unwrap_or("");
             let (_ccst, cbx) = compute(f, dom, c, cn, ct, cst);
-            let w = clamp_dyn(cbx.width.map(|l| l.resolve(f.avail)).unwrap_or_else(|| {
+            let w = clamp_dyn(cbx.flex_basis.or(cbx.width).map(|l| l.resolve(f.avail)).unwrap_or_else(|| {
                 child_frag(f, dom, c, cst, cst.align, f.avail, depth).nat
             }), 8, f.avail);
-            if x > f.x0 && x + w > f.x0 + f.avail {
-                f.y += row_h + gap;
-                x = f.x0;
-                row_h = 0;
-            }
+            if x > f.x0 && x + w > f.x0 + f.avail { f.y += row_h + gap; x = f.x0; row_h = 0; }
             let frag = child_frag(f, dom, c, cst, cst.align, w, depth);
-            if frag.height > row_h { row_h = frag.height; }
+            row_h = row_h.max(frag.height);
             place_frag(f, frag, x, f.y);
             x += w + gap;
         }
@@ -2272,7 +2383,7 @@ fn flex_inner(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, 
 // les items sont disposes en grille avec retour a la ligne et `gap`. Le span
 // `grid-column: 1/-1` (ou `span N`) fait occuper plusieurs colonnes a une cellule.
 fn grid_inner(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, depth: u32) {
-    let kids: Vec<usize> = node.children.iter().cloned().filter(|&c| dom.nodes[c].tag.is_some()).collect();
+    let kids = ordered_element_children(f, dom, node, cst);
     if kids.is_empty() { return; }
     let cols = (bx.grid_cols as i32).max(1);
     let gap = bx.gap;

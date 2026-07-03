@@ -1722,6 +1722,7 @@ impl Interp {
                 }
                 let b = obj.borrow();
                 if let Some(v) = b.props.get(name) { return Ok(v.clone()); }
+                let prop_count = b.props.len();
                 drop(b);
                 // Pont window -> global : une propriete absente de window est
                 // cherchee dans la portee globale (`var x`, `function f(){}` et
@@ -1731,6 +1732,16 @@ impl Interp {
                 if self.global_obj.as_ref().map_or(false, |g| Rc::ptr_eq(g, obj)) {
                     if let Some(v) = scope_get(&self.global, name) { return Ok(v); }
                 }
+                // Compat navigateur moderne : les bundles Closure/Google creent
+                // beaucoup de namespaces locaux minifies (`_`, `google.c`, `jsl`,
+                // `gbar_`...) puis appellent des hooks optionnels seulement si le
+                // navigateur les a fournis dans le bon ordre. Dans un moteur encore
+                // incomplet, le vrai probleme etait masque par `_DumpException is
+                // not a function` ou `maft is not a function`, ce qui stoppe toute
+                // la suite du bundle defer. Pour les hooks d'observabilite/lifecycle
+                // non critiques, on renvoie une fonction native no-op au lieu
+                // d'Undefined. Les proprietes propres restent prioritaires plus haut.
+                if let Some(v) = compat_optional_method(name, prop_count) { return Ok(v); }
                 Ok(object_prop(name))
             }
             Value::Null => Err(str_val(format!("TypeError: Cannot read properties of null (reading '{}')", name))),
@@ -2357,6 +2368,19 @@ fn install(it: &mut Interp) {
         set(&g, "tick", native_val(|_i, _t, _a| Ok(Value::Undefined)));
         set(&g, "ml", native_val(|_i, _t, _a| Ok(Value::Undefined)));
         set(&g, "timers", new_obj(Obj::plain()));
+        let gc = new_obj(Obj::plain());
+        set(&gc, "cap", Value::Num(2000.0));
+        set(&gc, "timl", Value::Bool(false));
+        set(&gc, "vis", Value::Bool(true));
+        set(&gc, "maft", compat_optional_method("maft", 0).unwrap());
+        set(&gc, "miml", compat_optional_method("miml", 0).unwrap());
+        set(&gc, "mfrvt", compat_optional_method("mfrvt", 0).unwrap());
+        set(&gc, "setup", compat_optional_method("setup", 0).unwrap());
+        set(&gc, "u", compat_optional_method("csiReport", 0).unwrap());
+        set(&gc, "b", compat_optional_method("csiReport", 0).unwrap());
+        set(&gc, "e", compat_optional_method("csiReport", 0).unwrap());
+        set(&gc, "q", native_val(|it, _t, a| { if let Some(cb) = a.get(1) { if matches!(cb, Value::Obj(o) if o.borrow().call.is_some()) { let _ = it.call(cb.clone(), Value::Undefined, &[]); } } Ok(Value::Undefined) }));
+        set(&g, "c", gc);
         // google.erd : namespace de remontée d'erreurs (error reporting daemon).
         // Les bundles lisent `google.erd.jsr`, `.deb`, `.bv`… au démarrage.
         {
@@ -3449,6 +3473,42 @@ fn fixed(n: f64, d: usize) -> String { if n.is_nan() { return "NaN".into(); } le
 fn to_radix(mut n: f64, radix: u32) -> String { if n == 0.0 { return "0".into(); } let neg = n < 0.0; n = trunc_(n.abs()); let mut out = Vec::new(); let mut x = n as u64; if x == 0 { return "0".into(); } while x > 0 { let d = (x % radix as u64) as u32; out.push(core::char::from_digit(d, radix).unwrap_or('0')); x /= radix as u64; } if neg { out.push('-'); } out.iter().rev().collect() }
 
 // --- methodes Object.prototype (objet simple) ---
+
+fn compat_optional_method(name: &str, _owner_props: usize) -> Option<Value> {
+    match name {
+        // Google Closure / XJS / OG error-reporting hooks. Ces fonctions ne sont
+        // pas fonctionnelles pour l'affichage; elles servent a logger/remonter des
+        // erreurs et ne doivent pas tuer le bundle quand l'ordre d'init diverge.
+        "_DumpException" | "maft" | "miml" | "mfrvt" | "setup" | "drty" |
+        "csiReport" | "caft" | "tick" | "startTick" | "log" | "logUrl" |
+        "ml" | "getEI" | "getLEI" | "dclc" | "fce" | "lx" | "x" | "sx" |
+        "_F_installCss" | "loaded_h_0" | "_rtf" | "cancel" | "dispose" => {
+            Some(native_val(|it, _t, a| {
+                // Quelques hooks prennent un callback : on l'appelle quand c'est
+                // sans risque, ce qui laisse les files d'attente Google se vider
+                // au lieu de rester bloquees en attente d'un evenement fictif.
+                if let Some(cb) = a.get(0) {
+                    if matches!(cb, Value::Obj(o) if o.borrow().call.is_some()) { let _ = it.call(cb.clone(), Value::Undefined, &[]); }
+                }
+                if let Some(cb) = a.get(1) {
+                    if matches!(cb, Value::Obj(o) if o.borrow().call.is_some()) { let _ = it.call(cb.clone(), Value::Undefined, &[]); }
+                }
+                if let Some(cb) = a.get(2) {
+                    if matches!(cb, Value::Obj(o) if o.borrow().call.is_some()) { let _ = it.call(cb.clone(), Value::Undefined, &[]); }
+                }
+                Ok(Value::Undefined)
+            }))
+        }
+        // addEventListener/removeEventListener apparaissent aussi sur des objets
+        // MediaQueryList, FontFaceSet, PerformanceObserver-like, etc. Un no-op est
+        // preferable a un crash tant que la cible n'est pas un vrai Node DOM.
+        "addEventListener" | "removeEventListener" | "dispatchEvent" => {
+            Some(native_val(|_it, _t, _a| Ok(Value::Bool(true))))
+        }
+        _ => None,
+    }
+}
+
 fn object_prop(name: &str) -> Value {
     match name {
         "toString" => native_val(|_it, _t, _a| Ok(str_val("[object Object]"))),
