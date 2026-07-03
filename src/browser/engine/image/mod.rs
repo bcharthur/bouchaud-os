@@ -8,7 +8,9 @@
 //!   - `jpeg` : JPEG baseline (SOF0), gris ou YCbCr, sous-échantillonnage, restart ;
 //!   - `gif`  : GIF87a/89a, première image (LZW) ;
 //!   - `bmp`  : BMP Windows (BITMAPINFOHEADER) 24/32/8 bits ;
-//!   - `webp` : détection (VP8/VP8L/VP8X) — décodage non supporté, repli propre ;
+//!   - `webp` : VP8L (lossless) décodé (Huffman canonique + LZ77 + transforms
+//!     + cache de couleurs, vérifié contre libwebp — voir commit) ; VP8
+//!     (lossy) et VP8X (extended) détectés mais non décodés, repli propre ;
 //!   - SVG délègue à `super::svg`.
 
 pub mod png;
