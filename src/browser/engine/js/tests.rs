@@ -264,5 +264,26 @@ pub fn selftest() -> Result<(), &'static str> {
     let v = ctx.interp.run("__wrap").map_err(|_| "run-wrap")?;
     let s = ctx.interp.to_string(&v);
     if !s.starts_with("true|") { return Err("layout-tree-width-aware-wrap"); }
+
+    // --- Layout tree v1 : flexbox reel (taffy) au lieu de la division par n ---
+    // Avant ce correctif, un conteneur flex partageait sa largeur a parts
+    // EGALES entre enfants, quel que soit flex-grow — donc flex-grow:2 se
+    // comportait exactement comme flex-grow:1. Ici, deux enfants (grow:1 et
+    // grow:2) doivent se partager l'espace restant dans un ratio net ~1:2,
+    // pas 1:1.
+    let (mut ctx, _o) = open_page_sized(br#"<body>
+        <div id="c" style="display:flex;width:320px;">
+            <div id="a" style="flex-grow:1;">A</div>
+            <div id="b" style="flex-grow:2;">B</div>
+        </div>
+        <script>
+            var wa = document.getElementById('a').offsetWidth;
+            var wb = document.getElementById('b').offsetWidth;
+            window.__flexgrow = [wa, wb, wb > wa * 1.5].join('|');
+        </script>
+    </body>"#, "", 1000, 600);
+    let v = ctx.interp.run("__flexgrow").map_err(|_| "run-flexgrow")?;
+    let s = ctx.interp.to_string(&v);
+    if !s.ends_with("|true") { return Err("layout-tree-flex-grow"); }
     Ok(())
 }

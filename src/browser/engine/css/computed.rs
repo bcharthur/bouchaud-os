@@ -122,9 +122,13 @@ pub struct ComputedStyle {
     pub transform_ty: i32,
     pub transform_scale_pct: i32,
     pub flex_direction: u8, // 0 row, 1 column
+    pub flex_wrap: bool,
     pub justify_content: u8,
     pub align_items: u8,
     pub gap: i32,
+    pub flex_grow: f32,
+    pub flex_shrink: f32,
+    pub flex_basis: CssLength,
 }
 
 impl ComputedStyle {
@@ -155,9 +159,14 @@ impl ComputedStyle {
             transform_ty: 0,
             transform_scale_pct: 100,
             flex_direction: 0,
+            flex_wrap: false,
             justify_content: 0,
             align_items: 0,
             gap: 0,
+            // Valeurs initiales CSS : flex-grow:0, flex-shrink:1, flex-basis:auto.
+            flex_grow: 0.0,
+            flex_shrink: 1.0,
+            flex_basis: CssLength::Auto,
         }
     }
 
@@ -212,6 +221,10 @@ impl ComputedStyle {
             "transform" => if self.transform_tx == 0 && self.transform_ty == 0 && self.transform_scale_pct == 100 { "none".to_string() } else { alloc::format!("translate({}px, {}px) scale({})", self.transform_tx, self.transform_ty, self.transform_scale_pct as f32 / 100.0) },
             "gap" => alloc::format!("{}px", self.gap),
             "flex-direction" => if self.flex_direction == 1 { "column" } else { "row" }.to_string(),
+            "flex-wrap" => if self.flex_wrap { "wrap" } else { "nowrap" }.to_string(),
+            "flex-grow" => self.flex_grow.to_string(),
+            "flex-shrink" => self.flex_shrink.to_string(),
+            "flex-basis" => self.flex_basis.to_css(),
             _ => String::new(),
         }
     }
@@ -225,6 +238,7 @@ impl ComputedStyle {
             "border-top-width", "border-right-width", "border-bottom-width", "border-left-width",
             "color", "background-color", "font-size", "font-weight", "line-height",
             "overflow", "overflow-x", "overflow-y", "opacity", "z-index", "transform", "gap", "flex-direction",
+            "flex-wrap", "flex-grow", "flex-shrink", "flex-basis",
         ]
     }
 }

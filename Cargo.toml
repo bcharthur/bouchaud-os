@@ -26,6 +26,11 @@ linked_list_allocator = "0.10"
 # (on fournit notre propre allocateur global + point d'entree). Voir `src/wasm/`.
 wasmi = { version = "0.31", default-features = false }
 
+# Moteur flexbox reel (Dioxus/Bevy), no_std+alloc uniquement (`default-features
+# = false`) : remplace l'heuristique flex maison de layout/tree.rs (division
+# equitable sans grow/shrink/wrap) par le vrai algorithme CSS. Le layout grid
+# reste heuristique pour l'instant (feature "grid" non activee).
+taffy = { version = "0.12", default-features = false, features = ["taffy_tree", "flexbox", "alloc"] }
 
 [profile.dev]
 panic = "abort"

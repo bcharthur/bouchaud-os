@@ -136,11 +136,7 @@ fn layout_node(doc: &DocumentSnapshot, styles: &StyleMap, out: &mut LayoutResult
     let child_w = (w - pad_l - pad_r - border_x).max(1);
 
     if st.display == Display::Flex {
-        if st.flex_direction == 1 {
-            layout_flex_column(doc, styles, out, node, box_id, child_x, child_y, child_w, depth + 1);
-        } else {
-            layout_flex_row(doc, styles, out, node, box_id, child_x, child_y, child_w, depth + 1);
-        }
+        layout_flex(doc, styles, out, node, box_id, child_x, child_y, child_w, depth + 1);
         child_y += max_child_bottom(out, box_id).saturating_sub(child_y).max(line_h(st));
     } else if st.display == Display::Grid {
         layout_grid(doc, styles, out, node, box_id, child_x, child_y, child_w, depth + 1);
@@ -165,51 +161,147 @@ fn layout_node(doc: &DocumentSnapshot, styles: &StyleMap, out: &mut LayoutResult
     if matches!(st.position, Position::Absolute | Position::Fixed) { y } else { outer_y + h + margin_b }
 }
 
-fn layout_flex_row(doc: &DocumentSnapshot, styles: &StyleMap, out: &mut LayoutResult, node: &SnapshotNode, parent: LayoutBoxId, x: i32, y: i32, w: i32, depth: u32) {
+// Flexbox reel (crate `taffy`, moteur utilise par Dioxus/Bevy) au lieu de la
+// division equitable maison (chaque enfant prenait 1/n de la largeur, sans
+// grow/shrink/wrap/baseline). On construit un mini-arbre taffy limite au
+// conteneur + ses enfants directs : chaque enfant reste une "feuille" pour
+// taffy (measure_flex_child lui donne sa taille via nos propres heuristiques,
+// y compris une vraie passe de layout imbriquee si l'enfant a des enfants),
+// puis on relance layout_node() sur chaque enfant a la position/largeur
+// finale calculee par taffy pour que son propre sous-arbre (texte, blocs,
+// flex/grid imbriques) soit mis en page normalement.
+fn layout_flex(doc: &DocumentSnapshot, styles: &StyleMap, out: &mut LayoutResult, node: &SnapshotNode, parent: LayoutBoxId, x: i32, y: i32, w: i32, depth: u32) {
     let children: Vec<NodeId> = node.children.iter().copied().filter(|&c| styles.get(c).display != Display::None).collect();
     if children.is_empty() { return; }
     let pst = styles.get(node.id);
-    let gap = pst.gap.max(0);
-    let each = ((w - gap * (children.len().saturating_sub(1) as i32)) / children.len() as i32).max(1);
-    let mut cx = x;
-    for c in children {
-        let _ = layout_node(doc, styles, out, c, parent, cx, y, each, depth);
-        // Cross-axis alignment approximatif : centre/end/stretch sur la hauteur
-        // de ligne courante. Cela evite les enormes decalages des barres de
-        // recherche et boutons dans les flex row modernes.
+    let viewport = out.viewport;
+
+    let mut tree: taffy::TaffyTree<NodeId> = taffy::TaffyTree::new();
+    let mut leaf_ids: Vec<taffy::NodeId> = Vec::with_capacity(children.len());
+    for &c in &children {
+        let leaf = match tree.new_leaf_with_context(flex_item_style(styles.get(c), w), c) {
+            Ok(id) => id,
+            Err(_) => return,
+        };
+        leaf_ids.push(leaf);
+    }
+    let root = match tree.new_with_children(flex_container_style(pst), &leaf_ids) {
+        Ok(id) => id,
+        Err(_) => return,
+    };
+    let avail = taffy::Size { width: taffy::AvailableSpace::Definite(w.max(1) as f32), height: taffy::AvailableSpace::MaxContent };
+    let computed = tree.compute_layout_with_measure(root, avail, |known, avail_sp, _node_id, ctx, _style| {
+        match ctx {
+            Some(&mut id) => measure_flex_child(doc, styles, id, known, avail_sp, w, viewport),
+            None => taffy::Size::ZERO,
+        }
+    });
+    if computed.is_err() { return; }
+
+    for (i, &c) in children.iter().enumerate() {
+        let tl = match tree.layout(leaf_ids[i]) { Ok(l) => *l, Err(_) => continue };
+        let cx = x + round_f32(tl.location.x);
+        let cy = y + round_f32(tl.location.y);
+        let cw = round_f32(tl.size.width).max(1);
+        let ch = round_f32(tl.size.height).max(1);
+        let _ = layout_node(doc, styles, out, c, parent, cx, cy, cw, depth);
         if let Some(&bid) = out.node_to_box.get(&c) {
             if let Some(b) = out.boxes.get_mut(bid) {
-                match pst.align_items {
-                    1 => b.rect.y = y + ((line_h(pst) - b.rect.h).max(0) / 2),
-                    2 => b.rect.y = y + (line_h(pst) - b.rect.h).max(0),
-                    3 => b.rect.h = b.rect.h.max(line_h(pst)),
-                    _ => {}
-                }
+                b.rect.x = cx; b.rect.y = cy; b.rect.w = cw;
+                // align-items:stretch : n'agrandit que si le contenu tient deja
+                // dans la taille etiree (ne coupe jamais du contenu plus grand).
+                if pst.align_items == 3 { b.rect.h = b.rect.h.max(ch); }
             }
         }
-        cx += each + gap;
     }
 }
 
-fn layout_flex_column(doc: &DocumentSnapshot, styles: &StyleMap, out: &mut LayoutResult, node: &SnapshotNode, parent: LayoutBoxId, x: i32, y: i32, w: i32, depth: u32) {
-    let children: Vec<NodeId> = node.children.iter().copied().filter(|&c| styles.get(c).display != Display::None).collect();
-    if children.is_empty() { return; }
-    let pst = styles.get(node.id);
-    let gap = pst.gap.max(0);
-    let mut cy = y;
-    for c in children {
-        let next = layout_node(doc, styles, out, c, parent, x, cy, w, depth);
-        if let Some(&bid) = out.node_to_box.get(&c) {
-            if let Some(b) = out.boxes.get_mut(bid) {
-                match pst.align_items {
-                    1 => b.rect.x = x + ((w - b.rect.w).max(0) / 2),
-                    2 => b.rect.x = x + (w - b.rect.w).max(0),
-                    3 => { b.rect.x = x; b.rect.w = w.max(1); },
-                    _ => {}
-                }
-                cy = b.rect.bottom() + gap;
-            } else { cy = next + gap; }
-        } else { cy = next + gap; }
+// Mesure une feuille flex pour taffy : dimensions explicites si connues,
+// sinon largeur via l'heuristique intrinseque et hauteur via une VRAIE passe
+// de layout jetable (gere texte enveloppe + enfants imbriques correctement,
+// au lieu d'une simple estimation).
+fn measure_flex_child(doc: &DocumentSnapshot, styles: &StyleMap, id: NodeId, known: taffy::Size<Option<f32>>, avail: taffy::Size<taffy::AvailableSpace>, avail_w_fallback: i32, viewport: Rect) -> taffy::Size<f32> {
+    let node = match doc.node(id) { Some(n) => n, None => return taffy::Size::ZERO };
+    let st = styles.get(id);
+    let w = match known.width {
+        Some(v) => v as i32,
+        None => {
+            let cap = match avail.width { taffy::AvailableSpace::Definite(v) => v as i32, _ => avail_w_fallback };
+            intrinsic_width(node, st).min(cap.max(1)).max(1)
+        }
+    };
+    let h = match known.height {
+        Some(v) => v as i32,
+        None => {
+            let mut scratch = LayoutResult { boxes: Vec::new(), node_to_box: BTreeMap::new(), document_height: 0, viewport };
+            let _ = layout_node(doc, styles, &mut scratch, id, 0, 0, 0, w.max(1), 0);
+            scratch.boxes.get(0).map(|b| b.rect.h.max(1)).unwrap_or_else(|| line_h(st))
+        }
+    };
+    taffy::Size { width: (w.max(0)) as f32, height: (h.max(0)) as f32 }
+}
+
+fn flex_container_style(pst: &ComputedStyle) -> taffy::Style {
+    let mut s = taffy::Style::default();
+    s.display = taffy::Display::Flex;
+    s.flex_direction = if pst.flex_direction == 1 { taffy::FlexDirection::Column } else { taffy::FlexDirection::Row };
+    s.flex_wrap = if pst.flex_wrap { taffy::FlexWrap::Wrap } else { taffy::FlexWrap::NoWrap };
+    s.align_items = Some(match pst.align_items {
+        1 => taffy::AlignItems::CENTER,
+        2 => taffy::AlignItems::FLEX_END,
+        3 => taffy::AlignItems::STRETCH,
+        _ => taffy::AlignItems::FLEX_START,
+    });
+    s.justify_content = Some(match pst.justify_content {
+        1 => taffy::JustifyContent::CENTER,
+        2 => taffy::JustifyContent::FLEX_END,
+        3 => taffy::JustifyContent::SPACE_BETWEEN,
+        4 => taffy::JustifyContent::SPACE_AROUND,
+        _ => taffy::JustifyContent::FLEX_START,
+    });
+    let gap = taffy::style_helpers::length(pst.gap.max(0) as f32);
+    s.gap = taffy::Size { width: gap, height: gap };
+    s
+}
+
+fn flex_item_style(cst: &ComputedStyle, avail_w: i32) -> taffy::Style {
+    let mut s = taffy::Style::default();
+    s.size = taffy::Size { width: css_len_to_dim(cst.width, avail_w), height: css_len_to_dim(cst.height, avail_w) };
+    s.min_size = taffy::Size { width: css_len_to_dim(cst.min_width, avail_w), height: css_len_to_dim(cst.min_height, avail_w) };
+    s.max_size = taffy::Size { width: css_len_to_dim(cst.max_width, avail_w), height: css_len_to_dim(cst.max_height, avail_w) };
+    s.margin = taffy::Rect {
+        left: css_len_to_lpa(cst.margin.left, avail_w), right: css_len_to_lpa(cst.margin.right, avail_w),
+        top: css_len_to_lpa(cst.margin.top, avail_w), bottom: css_len_to_lpa(cst.margin.bottom, avail_w),
+    };
+    s.padding = taffy::Rect {
+        left: taffy::style_helpers::length(px(cst.padding.left, avail_w, 0) as f32),
+        right: taffy::style_helpers::length(px(cst.padding.right, avail_w, 0) as f32),
+        top: taffy::style_helpers::length(px(cst.padding.top, avail_w, 0) as f32),
+        bottom: taffy::style_helpers::length(px(cst.padding.bottom, avail_w, 0) as f32),
+    };
+    s.border = taffy::Rect {
+        left: taffy::style_helpers::length(cst.border_width.left as f32),
+        right: taffy::style_helpers::length(cst.border_width.right as f32),
+        top: taffy::style_helpers::length(cst.border_width.top as f32),
+        bottom: taffy::style_helpers::length(cst.border_width.bottom as f32),
+    };
+    s.flex_grow = cst.flex_grow;
+    s.flex_shrink = cst.flex_shrink;
+    s.flex_basis = css_len_to_dim(cst.flex_basis, avail_w);
+    s
+}
+
+fn css_len_to_dim(v: CssLength, avail_w: i32) -> taffy::Dimension {
+    match v {
+        CssLength::Auto => taffy::style_helpers::auto(),
+        _ => taffy::style_helpers::length(px(v, avail_w, 0) as f32),
+    }
+}
+
+fn css_len_to_lpa(v: CssLength, avail_w: i32) -> taffy::LengthPercentageAuto {
+    match v {
+        CssLength::Auto => taffy::style_helpers::auto(),
+        _ => taffy::style_helpers::length(px(v, avail_w, 0) as f32),
     }
 }
 
@@ -236,6 +328,9 @@ fn max_child_bottom(out: &LayoutResult, b: LayoutBoxId) -> i32 {
 }
 
 fn px(v: CssLength, parent: i32, fallback: i32) -> i32 { v.resolve(parent, fallback) }
+
+// no_std : pas de f32::round() (methode std/libm). Arrondi maison.
+fn round_f32(v: f32) -> i32 { if v >= 0.0 { (v + 0.5) as i32 } else { (v - 0.5) as i32 } }
 
 fn constrain_width(w: i32, st: &ComputedStyle, parent: i32) -> i32 {
     let mut out = w;
