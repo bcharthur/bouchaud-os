@@ -25,6 +25,7 @@ use super::css::cascade::{resolve_snapshot_styles, StyleMap};
 use super::css::computed::{ComputedStyle, css_prop_name as core_css_prop_name};
 use super::layout::reflow::{DirtyKind, ReflowState};
 use super::layout::tree::{build_layout_tree, DocumentSnapshot, LayoutResult, Rect as LayoutRect, SnapshotNode};
+use super::webapi::lifecycle::{DocumentLifecycle, ReadyState};
 
 // ============================================================================
 // Valeurs
@@ -950,6 +951,7 @@ pub struct Interp {
     modules: BTreeMap<String, Value>,     // modules ES charges (URL -> objet namespace)
     module_stack: Vec<String>,            // URLs des modules en cours (imports relatifs)
     exports_stack: Vec<Value>,            // objet exports du module en cours d'execution
+    lifecycle: DocumentLifecycle,          // etat Loading/Interactive/Complete + ressources critiques
 }
 
 impl Interp {
@@ -965,6 +967,7 @@ impl Interp {
             vw: 1024, vh: 768,
             style_map: StyleMap::default(), layout_result: LayoutResult::default(), reflow: ReflowState::clean(),
             modules: BTreeMap::new(), module_stack: Vec::new(), exports_stack: Vec::new(),
+            lifecycle: DocumentLifecycle::new(),
         };
         install(&mut it);
         it
@@ -988,6 +991,11 @@ impl Interp {
     /// Marque le coeur rendu comme invalide apres une mutation DOM/style.
     pub fn mark_render_dirty(&mut self, node: usize, kind: DirtyKind) {
         self.reflow.mark(node, kind);
+        match kind {
+            DirtyKind::Style | DirtyKind::Subtree => self.lifecycle.mark_style_dirty(),
+            DirtyKind::Layout => self.lifecycle.mark_layout_dirty(),
+            DirtyKind::Paint => self.lifecycle.mark_paint_dirty(),
+        }
     }
 
     /// Force le pipeline DOM snapshot -> ComputedStyle -> LayoutTree quand une
@@ -1005,6 +1013,7 @@ impl Interp {
             self.layout_result = build_layout_tree(&snap, &self.style_map, self.vw, self.vh);
         }
         self.reflow.clear();
+        self.lifecycle.clear_render_dirty();
     }
 
     /// Installe un objet `location` COMPLET derive de l'URL reelle de la page
@@ -1029,6 +1038,11 @@ impl Interp {
         // origin global (window.origin).
         let (protocol, _, _, host, ..) = split_url(&href);
         scope_declare(&self.global, "origin", str_val(format!("{}//{}", protocol, host)));
+    }
+
+    pub fn set_ready_state(&mut self, st: ReadyState) {
+        self.lifecycle.ready_state = st;
+        if let Some(d) = scope_get(&self.global, "document") { set(&d, "readyState", str_val(st.as_str())); }
     }
 
     // Draine les files de taches : microtaches (Promise) en priorite, puis une
@@ -2211,8 +2225,21 @@ fn install(it: &mut Interp) {
     // addEventListener reel : enregistre l'ecouteur (cible document = noeud -1).
     set(&doc, "addEventListener", native_val(|it, _t, a| { let ty = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); if let Some(cb) = a.get(1) { it.listeners.push((-1, ty, cb.clone())); } Ok(Value::Undefined) }));
     set(&doc, "removeEventListener", native_val(|it, _t, a| { let ty = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); it.listeners.retain(|(n, t, _)| !(*n == -1 && t == &ty)); Ok(Value::Undefined) }));
-    set(&doc, "createEvent", native_val(|_it, _t, _a| Ok(new_obj(Obj::plain()))));
-    set(&doc, "readyState", str_val("complete"));
+    set(&doc, "createEvent", native_val(|_it, _t, a| {
+        let o = new_obj(Obj::plain());
+        set(&o, "type", a.get(0).cloned().unwrap_or_else(|| str_val("Event")));
+        set(&o, "bubbles", Value::Bool(false));
+        set(&o, "cancelable", Value::Bool(false));
+        set(&o, "defaultPrevented", Value::Bool(false));
+        set(&o, "initEvent", native_val(|it, t, a| { set(&t, "type", str_val(it.to_string(a.get(0).unwrap_or(&Value::Undefined)))); Ok(Value::Undefined) }));
+        set(&o, "initCustomEvent", native_val(|it, t, a| { set(&t, "type", str_val(it.to_string(a.get(0).unwrap_or(&Value::Undefined)))); set(&t, "detail", a.get(3).cloned().unwrap_or(Value::Undefined)); Ok(Value::Undefined) }));
+        set(&o, "preventDefault", native_val(|_i, t, _a| { set(&t, "defaultPrevented", Value::Bool(true)); Ok(Value::Undefined) }));
+        set(&o, "stopPropagation", native_val(|_i, _t, _a| Ok(Value::Undefined)));
+        Ok(o)
+    }));
+    set(&doc, "readyState", str_val("loading"));
+    set(&doc, "visibilityState", str_val("visible"));
+    set(&doc, "hidden", Value::Bool(false));
     set(&doc, "cookie", str_val(""));
     let g2 = it.global.clone();
     scope_declare(&g2, "document", doc);
@@ -2224,6 +2251,8 @@ fn install(it: &mut Interp) {
     // sens). Comparaison par pointeur (Rc::ptr_eq), sans surcout de recherche.
     if let Value::Obj(rc) = &window { it.global_obj = Some(rc.clone()); }
     set(&window, "addEventListener", native_val(|it, _t, a| { let ty = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); if let Some(cb) = a.get(1) { it.listeners.push((-1, ty, cb.clone())); } Ok(Value::Undefined) }));
+    set(&window, "removeEventListener", native_val(|it, _t, a| { let ty = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); it.listeners.retain(|(n, t, _)| !(*n == -1 && t == &ty)); Ok(Value::Undefined) }));
+    set(&window, "dispatchEvent", native_val(|it, _t, a| { let ty = match a.get(0) { Some(ev) => { let t = it.get_prop(ev, "type").unwrap_or(Value::Undefined); it.to_string(&t) } None => String::new() }; if !ty.is_empty() { it.fire_event(-1, &ty); } Ok(Value::Bool(true)) }));
     set(&window, "removeEventListener", native_val(|it, _t, a| { let ty = it.to_string(a.get(0).unwrap_or(&Value::Undefined)); it.listeners.retain(|(n, t, _)| !(*n == -1 && t == &ty)); Ok(Value::Undefined) }));
     set(&window, "setTimeout", native_val(native_set_timeout));
     set(&window, "setInterval", native_val(native_set_timeout));
@@ -2244,6 +2273,7 @@ fn install(it: &mut Interp) {
     // window référence le document et se référence elle-même (window.window,
     // window.self, window.globalThis, window.top, window.parent, window.frames).
     set(&window, "document", { let d = scope_get(&g2, "document").unwrap_or(Value::Undefined); d });
+    if let Some(d) = scope_get(&g2, "document") { set(&d, "defaultView", window.clone()); }
     set(&window, "window", window.clone());
     set(&window, "self", window.clone());
     set(&window, "globalThis", window.clone());
@@ -2289,6 +2319,9 @@ fn install(it: &mut Interp) {
     set(&nav, "userAgent", str_val("BouchaudOS"));
     set(&nav, "language", str_val("fr-FR"));
     set(&nav, "platform", str_val("BouchaudOS"));
+    set(&nav, "onLine", Value::Bool(true));
+    set(&nav, "sendBeacon", native_val(|_it, _t, _a| Ok(Value::Bool(true))));
+    set(&nav, "hardwareConcurrency", Value::Num(1.0));
     scope_declare(&g2, "navigator", nav);
 
     // timers + microtaches globaux (remplacent les stubs synchrones)
@@ -2355,6 +2388,7 @@ fn install(it: &mut Interp) {
         Ok(Value::Undefined)
     });
     scope_declare(&g2, "_DumpException", dump_exc.clone());
+    set(&window, "_DumpException", dump_exc.clone());
     // __dlog : passerelle des pages internes (about:compat...) vers le journal
     // systeme — les scores PASS/FAIL des suites de tests arrivent dans about:log
     // et sur la sortie serie, exploitables sans capture d'ecran.
@@ -2415,6 +2449,18 @@ fn install(it: &mut Interp) {
     set(&perf, "getEntriesByType", native_val(|_it, _t, _a| Ok(array_val(Vec::new()))));
     set(&perf, "clearMarks", native_val(|_it, _t, _a| Ok(Value::Undefined)));
     set(&perf, "clearMeasures", native_val(|_it, _t, _a| Ok(Value::Undefined)));
+    let nav_entry = new_obj(Obj::plain());
+    set(&nav_entry, "type", str_val("navigate")); set(&nav_entry, "deliveryType", str_val("network"));
+    set(&nav_entry, "transferSize", Value::Num(0.0)); set(&nav_entry, "nextHopProtocol", str_val("http/1.1"));
+    set(&perf, "getEntriesByType", native_val(|_it, _t, a| {
+        let ty = match a.get(0) { Some(Value::Str(s)) => s.as_str(), _ => "" };
+        if ty == "navigation" { let e = new_obj(Obj::plain()); set(&e, "type", str_val("navigate")); set(&e, "deliveryType", str_val("network")); return Ok(array_val(vec![e])); }
+        Ok(array_val(Vec::new()))
+    }));
+    let timing = new_obj(Obj::plain());
+    for k in ["navigationStart","fetchStart","domainLookupStart","domainLookupEnd","connectStart","connectEnd","requestStart","responseStart","responseEnd","domLoading","domInteractive","domContentLoadedEventStart","domContentLoadedEventEnd","domComplete","loadEventStart","loadEventEnd"] { set(&timing, k, Value::Num(0.0)); }
+    set(&perf, "timing", timing);
+    let navigation = new_obj(Obj::plain()); set(&navigation, "type", Value::Num(0.0)); set(&navigation, "redirectCount", Value::Num(0.0)); set(&perf, "navigation", navigation);
     scope_declare(&g2, "performance", perf);
     // RegExp : constructeur reel (moteur backtracking, cf. module regex).
     scope_declare(&g2, "RegExp", native_val(regexp_ctor));
@@ -4323,9 +4369,15 @@ fn open_page_inner(html: &[u8], base_url: &str, run: bool, vw: i32, vh: i32) -> 
     interp.base_url = base_url.to_string();
     interp.set_viewport(vw, vh);
     interp.install_location();
+    interp.lifecycle.reset_for_navigation(html);
+    interp.set_ready_state(ReadyState::Loading);
     interp.dom = DomModel::parse(html);
     interp.rebind_document();
-    if run { preload_module_links(&mut interp, html, base_url); }
+    if run {
+        preload_module_links(&mut interp, html, base_url);
+        let rp = interp.lifecycle.resources.clone();
+        crate::dlog!(crate::diag::Cat::Info, "lifecycle: {} stylesheet(s) bloquante(s), {} defer, {} module(s)", rp.blocking_styles(), rp.defer_scripts(), rp.module_scripts());
+    }
     interp.mark_render_dirty(0, DirtyKind::Subtree);
     interp.flush_render_core();
     // Noeuds <script> du DOM, dans l'ordre du document : le n-ieme <script>
@@ -4412,9 +4464,15 @@ fn open_page_inner(html: &[u8], base_url: &str, run: bool, vw: i32, vh: i32) -> 
         // Boucle d'evenements initiale : draine microtaches/timers puis declenche
         // les evenements de chargement (init de beaucoup de pages).
         interp.pump();
+        interp.set_ready_state(ReadyState::Interactive);
         interp.fire_event(-1, "readystatechange");
         interp.fire_event(-1, "DOMContentLoaded");
+        interp.lifecycle.dom_content_loaded_fired = true;
+        interp.pump();
+        interp.set_ready_state(ReadyState::Complete);
+        interp.fire_event(-1, "readystatechange");
         interp.fire_event(-1, "load");
+        interp.lifecycle.load_fired = true;
         interp.pump();
         interp.flush_render_core();
         let budget = if interp.steps >= interp.max_steps { " (BUDGET ATTEINT)" } else { "" };

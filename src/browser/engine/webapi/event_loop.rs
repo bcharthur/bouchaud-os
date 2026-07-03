@@ -29,4 +29,7 @@ impl EventLoop {
         self.microtask_queue.pop_front().or_else(|| self.task_queue.pop_front())
     }
     pub fn is_idle(&self) -> bool { self.microtask_queue.is_empty() && self.task_queue.is_empty() && self.animation_callbacks.is_empty() && self.timers.is_empty() }
+    pub fn drain_microtasks_first(&mut self) -> Option<Task> { self.microtask_queue.pop_front().or_else(|| self.task_queue.pop_front()) }
+    pub fn queue_animation_frame(&mut self, callback_id: usize) { self.animation_callbacks.push(Task { kind: TaskKind::AnimationFrame, callback_id }); }
+    pub fn promote_animation_frame(&mut self) { for t in self.animation_callbacks.drain(..) { self.task_queue.push_back(t); } }
 }
