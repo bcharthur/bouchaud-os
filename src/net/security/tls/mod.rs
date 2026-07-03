@@ -150,22 +150,28 @@ pub fn https_fetch(hostname: &str, port: u16, path: &str) -> HttpsFetchResult {
 }
 
 // ── Pool keep-alive HTTPS ─────────────────────────────────────────────────────
-// Une page moderne charge des dizaines de sous-ressources sur le meme hote.
-// Chaque handshake TLS coute plusieurs milliers de Mc (DH + signatures + AEAD).
-// On garde donc UNE session TLS vivante par hote:port et on la reutilise tant
-// que le serveur honore `Connection: keep-alive`. Mono-thread (boucle GUI).
+// Une page moderne charge des dizaines de sous-ressources, souvent reparties
+// sur PLUSIEURS hotes (ex. Google sert son HTML depuis www.google.com mais
+// ses scripts/CSS depuis www.gstatic.com — un choix deliberement fait pour
+// paralleliser les telechargements dans un vrai navigateur). Chaque handshake
+// TLS coute plusieurs milliers de Mc (DH + signatures + AEAD) ; avec un pool a
+// UNE seule place, chaque bascule d'hote fermait la session de l'hote
+// precedent et repayait un handshake complet a son retour — sur une page
+// html+xjs+gstatic+css+gstatic, ca fait un handshake par sous-ressource au
+// lieu d'un seul par hote. On garde desormais plusieurs sessions vivantes en
+// parallele (une par hote:port recent), evincees en FIFO seulement si le pool
+// est plein. Mono-thread (boucle GUI).
 struct Pooled { host: String, port: u16, sess: handshake::Session }
-static mut HTTPS_POOL: Option<Pooled> = None;
+static mut HTTPS_POOL: Option<Vec<Pooled>> = None;
+const HTTPS_POOL_MAX: usize = 4;
 
 fn pool_take(host: &str, port: u16) -> Option<handshake::Session> {
     unsafe {
         let slot = &mut *core::ptr::addr_of_mut!(HTTPS_POOL);
-        if let Some(p) = slot.as_ref() {
-            if p.host == host && p.port == port {
-                let p = slot.take().unwrap();
-                if p.sess.is_alive() { return Some(p.sess); }
-            }
-        }
+        let pool = slot.as_mut()?;
+        let pos = pool.iter().position(|p| p.host == host && p.port == port)?;
+        let p = pool.remove(pos);
+        if p.sess.is_alive() { return Some(p.sess); }
     }
     None
 }
@@ -173,18 +179,29 @@ fn pool_take(host: &str, port: u16) -> Option<handshake::Session> {
 fn pool_put(host: &str, port: u16, sess: handshake::Session) {
     use alloc::string::ToString;
     unsafe {
-        // Ferme une eventuelle session pour un autre hote avant d'en garder une.
         let slot = &mut *core::ptr::addr_of_mut!(HTTPS_POOL);
-        if let Some(mut old) = slot.take() { old.sess.close(); }
-        *slot = Some(Pooled { host: host.to_string(), port, sess });
+        let pool = slot.get_or_insert_with(Vec::new);
+        // Remplace une eventuelle session deja ouverte pour ce meme hote.
+        if let Some(pos) = pool.iter().position(|p| p.host == host && p.port == port) {
+            let mut old = pool.remove(pos);
+            old.sess.close();
+        }
+        // N'evince que si le pool est plein (FIFO, le plus ancien d'abord) —
+        // les autres hotes restent vivants pour etre reutilises juste apres.
+        while pool.len() >= HTTPS_POOL_MAX {
+            let mut old = pool.remove(0);
+            old.sess.close();
+        }
+        pool.push(Pooled { host: host.to_string(), port, sess });
     }
 }
 
-/// Ferme et vide la session keep-alive en attente (rechargement force / arret).
+/// Ferme et vide toutes les sessions keep-alive en attente (rechargement
+/// force / arret).
 pub fn pool_clear() {
     unsafe {
         let slot = &mut *core::ptr::addr_of_mut!(HTTPS_POOL);
-        if let Some(mut old) = slot.take() { old.sess.close(); }
+        if let Some(pool) = slot.as_mut() { for mut old in pool.drain(..) { old.sess.close(); } }
     }
 }
 
