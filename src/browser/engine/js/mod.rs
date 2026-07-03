@@ -85,74 +85,10 @@ fn native_val(f: NativeFn) -> Value {
     new_obj(Obj { props: OrderedMap::new(), arr: None, call: Some(Callable::Native(f)), class: "Function" })
 }
 
-// ============================================================================
-// AST
-// ============================================================================
-
-#[derive(Clone)]
-pub struct FuncDef {
-    pub params: Vec<String>,
-    pub rest: Option<String>,
-    pub body: Vec<Stmt>,
-    pub arrow: bool,
-    pub expr_body: Option<Box<Expr>>,
-}
-
-#[derive(Clone)]
-pub enum Expr {
-    Num(f64), Str(String), Tpl(Vec<Expr>), Bool(bool), Null, Undef,
-    Ident(String), This,
-    // Litteral d'expression rationnelle : /pattern/flags.
-    Regex(String, String),
-    Array(Vec<Expr>), Object(Vec<(String, Expr)>),
-    Unary(String, Box<Expr>), Update(String, bool, Box<Expr>),
-    Bin(String, Box<Expr>, Box<Expr>), Logic(String, Box<Expr>, Box<Expr>),
-    Assign(String, Box<Expr>, Box<Expr>), Cond(Box<Expr>, Box<Expr>, Box<Expr>),
-    Call(Box<Expr>, Vec<Expr>, bool), New(Box<Expr>, Vec<Expr>),
-    Member(Box<Expr>, String, bool), Index(Box<Expr>, Box<Expr>),
-    Func(Rc<FuncDef>), Seq(Vec<Expr>), Spread(Box<Expr>),
-    // Template balisé `tag`a${x}b`` : (tag, quasis littéraux, expressions).
-    TaggedTpl(Box<Expr>, Vec<String>, Vec<Expr>),
-    // Méta-propriété `new.target`.
-    NewTarget,
-    // Expression de classe : `var X = class [extends Y] { ... }`.
-    Class(Option<Box<Expr>>, Vec<(bool, String, Rc<FuncDef>)>),
-}
-
-/// Motif de liaison (déclarations `let/var/const`, paramètres, `for…of`).
-/// Permet la déstructuration réelle `[a,b]=…` / `{a,b}=…` (au lieu de la
-/// sauter), indispensable pour le code moderne (`for (let [k,v] of entries)`).
-#[derive(Clone)]
-pub enum Pat {
-    Id(String),
-    // éléments (None = trou `[ ,a]`), reste optionnel `...r`
-    Array(Vec<Option<Pat>>, Option<Box<Pat>>),
-    // (clé source, motif cible), reste optionnel `...r`
-    Object(Vec<(String, Pat)>, Option<String>),
-    // motif = valeur par défaut (appliquée si undefined)
-    Default(Box<Pat>, Box<Expr>),
-}
-
-#[derive(Clone)]
-pub enum Stmt {
-    Expr(Expr), Var(bool, Vec<(Pat, Option<Expr>)>), Func(String, Rc<FuncDef>),
-    Return(Option<Expr>), If(Expr, Box<Stmt>, Option<Box<Stmt>>), Block(Vec<Stmt>),
-    While(Expr, Box<Stmt>), DoWhile(Box<Stmt>, Expr),
-    For(Option<Box<Stmt>>, Option<Expr>, Option<Expr>, Box<Stmt>),
-    ForIn(Pat, Expr, Box<Stmt>, bool), Break, Continue, Throw(Expr),
-    Try(Vec<Stmt>, Option<(String, Vec<Stmt>)>, Option<Vec<Stmt>>), Empty,
-    // name, extends_expr, [(is_static, method_name, def)]
-    Class(String, Option<Expr>, Vec<(bool, String, Rc<FuncDef>)>),
-    // discriminant, [(test_or_None_for_default, body_stmts)]
-    Switch(Expr, Vec<(Option<Expr>, Vec<Stmt>)>),
-    // --- Modules ES ---
-    // import defaut / * as ns / {a, b as c} depuis une URL (specifier)
-    Import { default_: Option<String>, ns: Option<String>, named: Vec<(String, String)>, from: String },
-    ExportDecl(Box<Stmt>),                              // export const/let/var/function/class
-    ExportDefault(Expr),                                // export default <expr>
-    ExportNamed(Vec<(String, String)>, Option<String>), // export {local as exporte} [from "u"]
-    ExportAll(String),                                  // export * from "u"
-}
+mod ast;
+use modules::native_dynamic_import;
+pub use ast::{Expr, FuncDef, Pat, Stmt};
+mod modules;
 
 // ============================================================================
 // Lexer
@@ -1051,10 +987,11 @@ impl Interp {
         if let Some(w) = scope_get(&self.global, "window") { set(&w, "location", loc.clone()); }
         if let Some(d) = scope_get(&self.global, "document") { set(&d, "location", loc.clone()); }
         scope_declare(&self.global, "location", loc);
-        // document.URL / document.domain / document.referrer coherents.
+        // document.URL / document.domain / document.baseURI coherents.
         if let Some(d) = scope_get(&self.global, "document") {
             set(&d, "URL", str_val(href.clone()));
             set(&d, "documentURI", str_val(href.clone()));
+            set(&d, "baseURI", str_val(href.clone()));
             set(&d, "domain", str_val(host_of(&href).to_string()));
         }
         // origin global (window.origin).
@@ -1107,6 +1044,20 @@ impl Interp {
         set(&doc, "forms", array_val(forms));
         set(&doc, "images", array_val(images));
         set(&doc, "links", array_val(links));
+        // document.scripts : les <script> sont des noeuds DOM reels depuis que
+        // DomModel les inclut — getElementsByTagName("script")[0], currentScript
+        // et les loaders (insertBefore) fonctionnent.
+        let scripts: Vec<Value> = self.dom.query("script", 0, false).into_iter().map(node_handle).collect();
+        set(&doc, "scripts", array_val(scripts));
+        set(&doc, "currentScript", Value::Null);
+    }
+
+    /// Pose document.currentScript sur le noeud DOM du script en cours (Null
+    /// entre deux scripts), comme dans un vrai navigateur.
+    pub fn set_current_script(&mut self, node: Option<usize>) {
+        if let Some(doc) = scope_get(&self.global, "document") {
+            set(&doc, "currentScript", node.map(node_handle).unwrap_or(Value::Null));
+        }
     }
 
     // Declenche tous les ecouteurs enregistres pour (node, type), avec un objet
@@ -1162,71 +1113,6 @@ impl Interp {
             }
         }
         Ok(last)
-    }
-
-    /// Charge (avec cache) un module ES et renvoie son objet namespace.
-    /// Le specifier est resolu contre l'URL du module courant (imports
-    /// relatifs `./x.js`, `../x.js`) ou l'URL de la page.
-    fn load_module(&mut self, spec: &str) -> Result<Value, String> {
-        let base = self.module_stack.last().cloned().unwrap_or_else(|| self.base_url.clone());
-        let url = resolve_url(&base, spec);
-        if let Some(v) = self.modules.get(&url) { return Ok(v.clone()); }
-        if self.module_stack.len() >= 32 { return Err(format!("imports trop profonds: {}", url)); }
-        // Namespace enregistre AVANT execution : les cycles d'import voient un
-        // namespace partiel (semantique proche des vrais modules ES).
-        let ns = new_obj(Obj::plain());
-        self.modules.insert(url.clone(), ns.clone());
-        let bytes = crate::net::fetch_cached(&url).ok_or_else(|| format!("module introuvable: {}", url))?;
-        if bytes.len() > MAX_SCRIPT { return Err(format!("module trop gros ({}o): {}", bytes.len(), url)); }
-        let src = alloc::string::String::from_utf8_lossy(&bytes).into_owned();
-        match self.run_module(&src, &url, ns.clone()) {
-            Ok(()) => { crate::dlog!(crate::diag::Cat::Js, "module ES {}o OK {}", bytes.len(), url); Ok(ns) }
-            Err(e) => { crate::dlog!(crate::diag::Cat::Err, "module ES {} : {}", url, e); Err(e) }
-        }
-    }
-
-    /// Execute une source comme module ES : portee propre (les declarations ne
-    /// fuient pas dans le global, mais voient le global), exports collectes
-    /// dans `ns`, imports relatifs resolus contre `url`.
-    pub fn run_module(&mut self, src: &str, url: &str, ns: Value) -> Result<(), String> {
-        let toks = Lexer::new(src.as_bytes()).lex_all()?;
-        let mut parser = Parser::new(toks);
-        let prog = parser.parse_program()?;
-        if parser.recovered > 0 {
-            crate::dlog!(crate::diag::Cat::Js, "module: {} stmt(s) recuperes/sautes ({}o); 1re erreur: {} | ctx: {}",
-                parser.recovered, src.len(),
-                parser.first_err.as_deref().unwrap_or("?"),
-                parser.first_ctx.as_deref().unwrap_or("?"));
-        }
-        let menv = new_fn_scope(Some(self.global.clone()));
-        // `import.meta.url` du module courant (l'identifiant `import` reste
-        // aussi appelable : import dynamique).
-        let imp = native_val(native_dynamic_import);
-        let meta = new_obj(Obj::plain());
-        set(&meta, "url", str_val(url.to_string()));
-        set(&imp, "meta", meta);
-        scope_declare(&menv, "import", imp);
-        self.module_stack.push(url.to_string());
-        self.exports_stack.push(ns);
-        self.hoist(&prog, &menv);
-        self.hoist_vars_deep(&prog, &menv);
-        let mut err = None;
-        for st in &prog {
-            match self.exec(st, &menv) {
-                Flow::Throw(v) => { err = Some(format!("Uncaught {}", self.to_string(&v))); break; }
-                Flow::Return(_) => break,
-                _ => {}
-            }
-        }
-        self.exports_stack.pop();
-        self.module_stack.pop();
-        match err { Some(e) => Err(e), None => Ok(()) }
-    }
-
-    /// Point d'entree d'un `<script type="module">` de page (inline ou externe).
-    pub fn run_module_script(&mut self, src: &str, url: &str) -> Result<(), String> {
-        let ns = new_obj(Obj::plain());
-        self.run_module(src, url, ns)
     }
 
     fn hoist(&mut self, stmts: &[Stmt], env: &Env) {
@@ -2264,7 +2150,13 @@ fn install(it: &mut Interp) {
     set(&doc, "documentElement", detached_element("html"));
     set(&doc, "title", str_val(""));
     set(&doc, "location", { let loc = new_obj(Obj::plain()); set(&loc, "href", str_val("")); set(&loc, "pathname", str_val("/")); loc });
-    set(&doc, "dispatchEvent", native_val(|_it, _t, _a| Ok(Value::Bool(true))));
+    // dispatchEvent REEL : declenche les ecouteurs enregistres pour ce type sur
+    // document/window (cible -1). Renvoie !defaultPrevented comme le standard.
+    set(&doc, "dispatchEvent", native_val(|it, _t, a| {
+        let ty = match a.get(0) { Some(ev) => { let t = it.get_prop(ev, "type").unwrap_or(Value::Undefined); it.to_string(&t) } None => String::new() };
+        if !ty.is_empty() { it.fire_event(-1, &ty); }
+        Ok(Value::Bool(true))
+    }));
     set(&doc, "hasFocus", native_val(|_it, _t, _a| Ok(Value::Bool(false))));
     // document.fonts (FontFaceSet) : load() renvoie une promesse resolue.
     set(&doc, "fonts", {
@@ -2424,6 +2316,14 @@ fn install(it: &mut Interp) {
         Ok(Value::Undefined)
     });
     scope_declare(&g2, "_DumpException", dump_exc.clone());
+    // __dlog : passerelle des pages internes (about:compat...) vers le journal
+    // systeme — les scores PASS/FAIL des suites de tests arrivent dans about:log
+    // et sur la sortie serie, exploitables sans capture d'ecran.
+    scope_declare(&g2, "__dlog", native_val(|it, _t, a| {
+        let msg = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
+        crate::dlog!(crate::diag::Cat::Info, "{}", msg);
+        Ok(Value::Undefined)
+    }));
     // Dispatcher interne pour les ecouteurs "click" (voir dom_add_event_listener).
     scope_declare(&g2, "__ael", native_val(|it, _t, a| { let n = it.to_num(a.get(0).unwrap_or(&Value::Undefined)) as i64; it.fire_event(n, "click"); Ok(Value::Undefined) }));
 
@@ -4204,179 +4104,8 @@ fn host_of(base: &str) -> &str {
     match rest.find('/') { Some(i) => &rest[..i], None => rest }
 }
 
-/// Resout une URL contre une URL de base COMPLETE (pas seulement scheme+host) :
-/// gere absolu, `//host/...`, `/racine`, `./relatif`, `../parent` — necessaire
-/// pour les imports de modules ES (`import x from "./chunk.js"`).
-fn resolve_url(base: &str, rel: &str) -> String {
-    if rel.starts_with("http://") || rel.starts_with("https://") { return rel.to_string(); }
-    let scheme = scheme_of(base);
-    if let Some(rest) = rel.strip_prefix("//") { return format!("{}://{}", scheme, rest); }
-    let host = host_of(base);
-    if rel.starts_with('/') { return format!("{}://{}{}", scheme, host, rel); }
-    // Repertoire du document/module de base (sans query ni fragment).
-    let after = base.strip_prefix("https://").or_else(|| base.strip_prefix("http://")).unwrap_or(base);
-    let path = match after.find('/') { Some(i) => &after[i..], None => "/" };
-    let path = path.split(['?', '#']).next().unwrap_or("/");
-    let dir = match path.rfind('/') { Some(i) => &path[..i + 1], None => "/" };
-    // Normalisation ./ et ../ segment par segment.
-    let mut segs: Vec<&str> = Vec::new();
-    for s in dir.split('/').chain(rel.split('/')) {
-        match s { "" | "." => {} ".." => { segs.pop(); } x => segs.push(x) }
-    }
-    format!("{}://{}/{}", scheme, host, segs.join("/"))
-}
-
-/// `import("u")` dynamique : charge le module (synchrone dans cet OS) et
-/// renvoie une promesse resolue avec son namespace. En cas d'echec, promesse
-/// resolue avec undefined + log (pas de rejet non gere qui casserait la page).
-fn native_dynamic_import(it: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
-    let spec = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
-    match it.load_module(&spec) {
-        Ok(ns) => Ok(make_resolved_thenable(ns)),
-        Err(e) => { crate::dlog!(crate::diag::Cat::Err, "import() {} : {}", spec, e); Ok(make_resolved_thenable(new_obj(Obj::plain()))) }
-    }
-}
-
-/// Decompose une URL absolue en composants `location` :
-/// (protocol, hostname, port, host, pathname, search, hash).
-fn split_url(u: &str) -> (String, String, String, String, String, String, String) {
-    let (scheme, rest) = match u.find("://") { Some(p) => (&u[..p], &u[p + 3..]), None => ("https", u) };
-    let cut = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let (hostport, pathrest) = (&rest[..cut], &rest[cut..]);
-    let (hostname, port) = match hostport.rfind(':') {
-        Some(p) if !hostport[p + 1..].is_empty() && hostport[p + 1..].bytes().all(|c| c.is_ascii_digit()) =>
-            (&hostport[..p], &hostport[p + 1..]),
-        _ => (hostport, ""),
-    };
-    let (before_hash, hash) = match pathrest.find('#') { Some(p) => (&pathrest[..p], &pathrest[p..]), None => (pathrest, "") };
-    let (path, search) = match before_hash.find('?') { Some(p) => (&before_hash[..p], &before_hash[p..]), None => (before_hash, "") };
-    let pathname = if path.is_empty() { "/" } else { path };
-    (format!("{}:", scheme), hostname.to_string(), port.to_string(), hostport.to_string(),
-     pathname.to_string(), search.to_string(), hash.to_string())
-}
-
-/// Construit un objet `location`/`URL` complet (href, protocol, host, hostname,
-/// port, pathname, search, hash, origin + reload/assign/replace/toString).
-fn make_location_obj(href: &str) -> Value {
-    let loc = new_obj(Obj::plain());
-    let (protocol, hostname, port, host, pathname, search, hash) = split_url(href);
-    let origin = format!("{}//{}", protocol, host);
-    set(&loc, "href", str_val(href.to_string()));
-    set(&loc, "protocol", str_val(protocol));
-    set(&loc, "host", str_val(host));
-    set(&loc, "hostname", str_val(hostname));
-    set(&loc, "port", str_val(port));
-    set(&loc, "pathname", str_val(pathname));
-    set(&loc, "search", str_val(search));
-    set(&loc, "hash", str_val(hash));
-    set(&loc, "origin", str_val(origin));
-    set(&loc, "reload", native_val(|_it, _t, _a| Ok(Value::Undefined)));
-    set(&loc, "assign", native_val(|_it, _t, _a| Ok(Value::Undefined)));
-    set(&loc, "replace", native_val(|_it, _t, _a| Ok(Value::Undefined)));
-    set(&loc, "toString", native_val(|it, t, _a| { let h = it.get_prop(&t, "href")?; Ok(str_val(it.to_string(&h))) }));
-    loc
-}
-
-/// Paires (cle, valeur) d'un URLSearchParams (stockees dans `__pairs`).
-fn usp_pairs(v: &Value) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    if let Value::Obj(o) = v {
-        if let Some(Value::Obj(p)) = o.borrow().props.get("__pairs") {
-            if let Some(arr) = &p.borrow().arr {
-                for kv in arr {
-                    if let Value::Obj(kvo) = kv {
-                        if let Some(a) = &kvo.borrow().arr {
-                            let k = if let Some(Value::Str(s)) = a.get(0) { (**s).clone() } else { String::new() };
-                            let val = if let Some(Value::Str(s)) = a.get(1) { (**s).clone() } else { String::new() };
-                            out.push((k, val));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-fn usp_store(v: &Value, pairs: Vec<(String, String)>) {
-    let arr: Vec<Value> = pairs.into_iter().map(|(k, val)| array_val(vec![str_val(k), str_val(val)])).collect();
-    set(v, "__pairs", array_val(arr));
-}
-
-/// Objet URLSearchParams : parse `?a=b&c=d`, expose get/getAll/has/set/append/
-/// delete/forEach/toString (suffisant pour location.search et les SERP).
-fn make_url_search_params(init: &str) -> Value {
-    let s = init.strip_prefix('?').unwrap_or(init);
-    let mut pairs: Vec<(String, String)> = Vec::new();
-    for kv in s.split('&').filter(|x| !x.is_empty()) {
-        let mut parts = kv.splitn(2, '=');
-        let k = uri_decode(&parts.next().unwrap_or("").replace('+', " "));
-        let v = uri_decode(&parts.next().unwrap_or("").replace('+', " "));
-        pairs.push((k, v));
-    }
-    let o = new_obj(Obj::plain());
-    usp_store(&o, pairs);
-    set(&o, "get", native_val(|it, t, a| {
-        let k = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
-        Ok(usp_pairs(&t).into_iter().find(|(pk, _)| pk == &k).map(|(_, v)| str_val(v)).unwrap_or(Value::Null))
-    }));
-    set(&o, "getAll", native_val(|it, t, a| {
-        let k = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
-        Ok(array_val(usp_pairs(&t).into_iter().filter(|(pk, _)| pk == &k).map(|(_, v)| str_val(v)).collect()))
-    }));
-    set(&o, "has", native_val(|it, t, a| {
-        let k = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
-        Ok(Value::Bool(usp_pairs(&t).iter().any(|(pk, _)| pk == &k)))
-    }));
-    set(&o, "set", native_val(|it, t, a| {
-        let k = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
-        let v = it.to_string(a.get(1).unwrap_or(&Value::Undefined));
-        let mut pairs: Vec<(String, String)> = usp_pairs(&t).into_iter().filter(|(pk, _)| pk != &k).collect();
-        pairs.push((k, v));
-        usp_store(&t, pairs);
-        Ok(Value::Undefined)
-    }));
-    set(&o, "append", native_val(|it, t, a| {
-        let k = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
-        let v = it.to_string(a.get(1).unwrap_or(&Value::Undefined));
-        let mut pairs = usp_pairs(&t);
-        pairs.push((k, v));
-        usp_store(&t, pairs);
-        Ok(Value::Undefined)
-    }));
-    set(&o, "delete", native_val(|it, t, a| {
-        let k = it.to_string(a.get(0).unwrap_or(&Value::Undefined));
-        let pairs: Vec<(String, String)> = usp_pairs(&t).into_iter().filter(|(pk, _)| pk != &k).collect();
-        usp_store(&t, pairs);
-        Ok(Value::Undefined)
-    }));
-    set(&o, "forEach", native_val(|it, t, a| {
-        let cb = a.get(0).cloned().unwrap_or(Value::Undefined);
-        for (k, v) in usp_pairs(&t) { it.call(cb.clone(), Value::Undefined, &[str_val(v), str_val(k)])?; }
-        Ok(Value::Undefined)
-    }));
-    set(&o, "toString", native_val(|_it, t, _a| {
-        let mut s = String::new();
-        for (i, (k, v)) in usp_pairs(&t).into_iter().enumerate() {
-            if i > 0 { s.push('&'); }
-            s.push_str(&uri_encode_component(&k)); s.push('='); s.push_str(&uri_encode_component(&v));
-        }
-        Ok(str_val(s))
-    }));
-    o
-}
-
-/// Encodage x-www-form-urlencoded minimal (toString d'URLSearchParams).
-fn uri_encode_component(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
-            b' ' => out.push('+'),
-            _ => { out.push('%'); out.push_str(&format!("{:02X}", b)); }
-        }
-    }
-    out
-}
+mod url;
+use url::*;
 
 /// Evalue une expression JS isolee et renvoie son resultat formate (semantique
 /// JS). Utilise par l'application Calculatrice : l'OS calcule via son propre
@@ -4455,6 +4184,11 @@ fn open_page_inner(html: &[u8], base_url: &str, run: bool, vw: i32, vh: i32) -> 
     interp.install_location();
     interp.dom = DomModel::parse(html);
     interp.rebind_document();
+    // Noeuds <script> du DOM, dans l'ordre du document : le n-ieme <script>
+    // rencontre par le scan ci-dessous correspond au n-ieme noeud (pour
+    // document.currentScript pendant l'execution).
+    let script_nodes: Vec<usize> = interp.dom.query("script", 0, false);
+    let mut script_seen = 0usize;
     let mut scripts: Vec<(usize, usize, String)> = Vec::new();
     let mut i = 0usize;
     let mut ran = 0u32;
@@ -4472,9 +4206,13 @@ fn open_page_inner(html: &[u8], base_url: &str, run: bool, vw: i32, vh: i32) -> 
             let content_end = find_ci(html, b"</script", content_start).unwrap_or(html.len());
             let outer_end = find_ci(html, b">", content_end).map(|p| p + 1).unwrap_or(html.len());
             let mut wr = String::new();
+            // document.currentScript = noeud DOM du script en cours.
+            let cur_node = script_nodes.get(script_seen).copied();
+            script_seen += 1;
             // Budget global atteint -> on n'execute plus de script (anti-OOM).
             let budget_ok = script_bytes < MAX_TOTAL_SCRIPT;
             if run && is_js && ran < 2000 && budget_ok {
+                interp.set_current_script(cur_node);
                 if is_external {
                     // <script src="..."> : telecharge (avec cache) et execute, si
                     // le bundle reste sous le plafond (sinon il ferait exploser le
@@ -4526,6 +4264,7 @@ fn open_page_inner(html: &[u8], base_url: &str, run: bool, vw: i32, vh: i32) -> 
         i += 1;
     }
     if run {
+        interp.set_current_script(None); // fin du parsing : plus de script courant
         // Boucle d'evenements initiale : draine microtaches/timers puis declenche
         // les evenements de chargement (init de beaucoup de pages).
         interp.pump();
@@ -4534,7 +4273,8 @@ fn open_page_inner(html: &[u8], base_url: &str, run: bool, vw: i32, vh: i32) -> 
         interp.fire_event(-1, "load");
         interp.pump();
         let budget = if interp.steps >= interp.max_steps { " (BUDGET ATTEINT)" } else { "" };
-        crate::dlog!(crate::diag::Cat::Js, "{} scripts executes, {} steps{}", ran, interp.steps, budget);
+        crate::dlog!(crate::diag::Cat::Js, "{} scripts executes ({} modules, {} ecouteurs), {} steps{}",
+            ran, interp.modules.len(), interp.listeners.len(), interp.steps, budget);
     }
     let mut out = interp.dom.rebuild(&scripts);
     if out.len() > MAX_OUTPUT { out.truncate(MAX_OUTPUT); }
@@ -4546,176 +4286,5 @@ fn escape_html(s: &str) -> String { let mut out = String::new(); for c in s.char
 fn starts_ci(hay: &[u8], needle: &[u8]) -> bool { hay.len() >= needle.len() && hay[..needle.len()].iter().zip(needle).all(|(a, b)| a.to_ascii_lowercase() == b.to_ascii_lowercase()) }
 fn find_ci(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> { if needle.is_empty() || from >= hay.len() { return None; } let mut i = from; while i + needle.len() <= hay.len() { let mut k = 0; while k < needle.len() && hay[i + k].to_ascii_lowercase() == needle[k].to_ascii_lowercase() { k += 1; } if k == needle.len() { return Some(i); } i += 1; } None }
 
-// ============================================================================
-// Selftest
-// ============================================================================
-
-pub fn selftest() -> Result<(), &'static str> {
-    let html = br#"<div id="app">old</div><script>
-        var who = 'Bouchaud';
-        document.getElementById('app').innerHTML = '<b>' + who + '</b>';
-        document.write('<p>OK</p>');
-    </script>"#;
-    let out = execute_inline(html, "");
-    let s = core::str::from_utf8(&out).map_err(|_| "utf8")?;
-    if !s.contains("<div id=\"app\"><b>Bouchaud</b></div>") { return Err("innerHTML"); }
-    if !s.contains("<p>OK</p>") || s.contains("<script>") { return Err("write"); }
-    // langage : arithmetique, boucle, fonction
-    let mut it = Interp::new();
-    it.run("var s=0; for(var i=1;i<=10;i++){s+=i;} function f(x){return x*x;} console.log(s+','+f(5));").map_err(|_| "run")?;
-    if it.out.last().map(|x| x.as_str()) != Some("55,25") { return Err("lang"); }
-    // closures + liaison let par iteration
-    let mut it = Interp::new();
-    it.run("var f=[]; for(let i=0;i<3;i++){f.push(()=>i);} console.log(f[0]()+''+f[1]()+f[2]());").map_err(|_| "run2")?;
-    if it.out.last().map(|x| x.as_str()) != Some("012") { return Err("closure"); }
-    // tableaux d'ordre superieur + objets + JSON
-    let mut it = Interp::new();
-    it.run("var a=[1,2,3,4]; var o={n:a.filter(x=>x%2===0).reduce((s,x)=>s+x,0)}; console.log(JSON.stringify(o));").map_err(|_| "run3")?;
-    if it.out.last().map(|x| x.as_str()) != Some("{\"n\":6}") { return Err("hof"); }
-    // Promise + microtaches (drainees par pump)
-    let mut it = Interp::new();
-    it.run("var px=0; Promise.resolve(41).then(function(v){ px=v+1; });").map_err(|_| "run4")?;
-    it.pump();
-    it.run("console.log(px);").map_err(|_| "run5")?;
-    if it.out.last().map(|x| x.as_str()) != Some("42") { return Err("promise"); }
-    // setTimeout (macrotache, drainee par pump)
-    let mut it = Interp::new();
-    it.run("var ty=0; setTimeout(function(){ ty=7; }, 0);").map_err(|_| "run6")?;
-    it.pump();
-    it.run("console.log(ty);").map_err(|_| "run7")?;
-    if it.out.last().map(|x| x.as_str()) != Some("7") { return Err("timer"); }
-    // addEventListener('click') + dispatch via element.click()
-    let (mut ctx, _o) = open_page(br#"<button id="b">x</button><script>
-        var n=0;
-        document.getElementById('b').addEventListener('click', function(){ n++; document.getElementById('b').textContent = 'clic'+n; });
-    </script>"#, "");
-    let html = ctx.dispatch("document.getElementById('b').click()");
-    let s = core::str::from_utf8(&html).unwrap_or("");
-    if !s.contains("clic1") { return Err("event"); }
-    // style live -> attribut style (repris par le layout)
-    let out = execute_inline(br#"<div id="d">hi</div><script>document.getElementById('d').style.color='red';</script>"#, "");
-    let s = core::str::from_utf8(&out).unwrap_or("");
-    if !s.contains("color:red") { return Err("style"); }
-    // --- objet global : coherence window/globalThis/self/this + pont var<->window ---
-    // Identite des alias (window === globalThis === self === this racine).
-    let mut it = Interp::new();
-    it.run("console.log((window===globalThis)+','+(window===self)+','+(this===window));").map_err(|_| "run-glob1")?;
-    if it.out.last().map(|x| x.as_str()) != Some("true,true,true") { return Err("global-alias"); }
-    // var global visible via window ; propriete window visible en variable nue.
-    let mut it = Interp::new();
-    it.run("var gx=1; window.gy=2; console.log(window.gx+','+gy);").map_err(|_| "run-glob2")?;
-    if it.out.last().map(|x| x.as_str()) != Some("1,2") { return Err("global-bridge"); }
-    // Ecriture par index (Closure-compiler : window[name]=...) -> variable nue.
-    let mut it = Interp::new();
-    it.run("window['gz']=3; console.log(gz+','+(typeof self.gz));").map_err(|_| "run-glob3")?;
-    if it.out.last().map(|x| x.as_str()) != Some("3,number") { return Err("global-index"); }
-    // Motif d'amorçage Google : _ / _DumpException definis via window puis lus nus.
-    let mut it = Interp::new();
-    it.run("window._ = window._ || {}; window._DumpException = _._DumpException = function(e){ throw e; }; \
-            console.log((typeof _DumpException)+','+(typeof window._DumpException)+','+(typeof _._DumpException));").map_err(|_| "run-glob4")?;
-    if it.out.last().map(|x| x.as_str()) != Some("function,function,function") { return Err("dumpexception"); }
-    // --- Sprint 2 : collections DOM (length toujours defini, jamais undefined) ---
-    let html = br#"<ul id="l"><li>a</li><li class="x">b</li><li>c</li></ul>
-<form id="f"><input name="q"><button>go</button></form>
-<div id="o"></div>
-<script>
-  var l = document.getElementById('l');
-  var d = document.createElement('div');
-  var f = document.getElementById('f');
-  var r = [l.children.length, document.querySelectorAll('li').length,
-           document.getElementsByTagName('li').length, d.children.length,
-           l.children[0].nextElementSibling.className, f.elements.length,
-           l.firstElementChild.textContent].join('|');
-  document.getElementById('o').textContent = r;
-</script>"#;
-    let out = execute_inline(html, "");
-    let s = core::str::from_utf8(&out).unwrap_or("");
-    if !s.contains("3|3|3|0|x|2|a") { return Err("dom-collections"); }
-    // classList array-like : length, indexation, contains.
-    let out = execute_inline(br#"<div id="c" class="alpha beta"></div><div id="o2"></div><script>
-  var c = document.getElementById('c');
-  document.getElementById('o2').textContent = c.classList.length + ',' + c.classList.contains('beta') + ',' + c.classList[0];
-</script>"#, "");
-    let s = core::str::from_utf8(&out).unwrap_or("");
-    if !s.contains("2,true,alpha") { return Err("classlist"); }
-    // --- Sprint 3 : hoisting `var` fonction-scope (racine de `b is not defined`) ---
-    let mut it = Interp::new();
-    it.run("function f(){ var r=(x===undefined); var x=1; return r; } \
-            function g(){ for(var i=0;i<3;i++){} return i; } \
-            function h(){ { var y=7; } return y; } \
-            function k(){ {let z=1;} try{ return ''+z; }catch(e){ return 'ok'; } } \
-            console.log(f()+','+g()+','+h()+','+k());").map_err(|_| "run-hoist")?;
-    if it.out.last().map(|x| x.as_str()) != Some("true,3,7,ok") { return Err("var-hoisting"); }
-    // --- Sprint 4 : motif polyfill Closure (`in` sur window, defineProperty, Number statics) ---
-    // Reproduit le detecteur de la page Google : marche le chemin "Number.isSafeInteger"
-    // sur globalThis avec `in`, pose le polyfill via Object.defineProperty, puis l'appelle.
-    let mut it = Interp::new();
-    it.run("var w=('Number' in globalThis)&&('Object' in window); \
-            var q=function(p,f){var c=globalThis;p=p.split('.');for(var i=0;i<p.length-1;i++){if(!(p[i] in c))return 'miss';c=c[p[i]];}var k=p[p.length-1];var e=c[k];var v=f(e);if(v!=e&&v!=null)Object.defineProperty(c,k,{configurable:true,writable:true,value:v});return 'ok';}; \
-            var r1=q('Number.isSafeInteger',function(a){return a?a:function(b){return typeof b==='number'&&b===b&&b<=9007199254740991;}}); \
-            var r2=q('Object.zzTest',function(a){return a?a:function(){return 42;}}); \
-            console.log(w+','+r1+','+Number.isSafeInteger(3)+','+Number.isFinite('1')+','+r2+','+Object.zzTest());").map_err(|_| "run-closure")?;
-    if it.out.last().map(|x| x.as_str()) != Some("true,ok,true,false,ok,42") { return Err("closure-polyfill"); }
-    // _DumpException par defaut : appelable avant que la page le definisse.
-    let mut it = Interp::new();
-    it.run("var d1=(typeof _DumpException); _DumpException(Error('x')); \
-            window._DumpException=function(e){return 'page';}; \
-            console.log(d1+','+_DumpException(0));").map_err(|_| "run-dump")?;
-    if it.out.last().map(|x| x.as_str()) != Some("function,page") { return Err("dumpexception-default"); }
-    // --- Sprint 5 : viewport + mesures typees ---
-    let (ctx, _o) = open_page_sized(br#"<body><div id="x">t</div><script>
-  var r = document.getElementById('x').getBoundingClientRect();
-  window.__m = [window.innerWidth, window.innerHeight, document.documentElement.clientHeight,
-                typeof r.width, document.getElementById('x').offsetWidth].join(',');
-</script></body>"#, "", 800, 500);
-    let mut ctx = ctx;
-    let v = ctx.interp.run("__m").map_err(|_| "run-viewport")?;
-    if ctx.interp.to_string(&v) != "800,500,500,number,0" { return Err("viewport"); }
-    // --- Sprint 6 : location complet, URL/URLSearchParams, modules ES ---
-    // location derive de l'URL reelle (search/hash/hostname/origin presents).
-    let mut it = Interp::new();
-    it.base_url = String::from("https://www.ecosia.org/search?q=chat&lang=fr");
-    it.install_location();
-    it.run("console.log([location.hostname, location.pathname, location.search, location.origin, \
-            window.location.search===document.location.search].join('|'));").map_err(|_| "run-location")?;
-    if it.out.last().map(|x| x.as_str()) != Some("www.ecosia.org|/search|?q=chat&lang=fr|https://www.ecosia.org|true") { return Err("location"); }
-    // URLSearchParams + new URL : parsing et resolution relative.
-    it.run("var p=new URLSearchParams(location.search); \
-            var u=new URL('../img/logo.png','https://a.b/c/d/page.html'); \
-            console.log([p.get('q'), p.has('lang'), (p.get('absent')===null), u.href, u.hostname].join('|'));").map_err(|_| "run-url")?;
-    if it.out.last().map(|x| x.as_str()) != Some("chat|true|true|https://a.b/c/img/logo.png|a.b") { return Err("url-searchparams"); }
-    // Modules ES : export (const/function/default/named) collectes dans le
-    // namespace, import consomme le namespace, portee isolee du global.
-    let mut it = Interp::new();
-    let ns = new_obj(Obj::plain());
-    it.run_module("export const a=1; export function double(x){return 2*x;} \
-                   const secret=9; export default 'dflt'; export {secret as s};",
-                  "https://x/m.js", ns.clone()).map_err(|_| "run-module")?;
-    it.modules.insert(String::from("https://x/m.js"), ns);
-    it.run_module("import d, {a, double as dbl, s} from './m.js'; \
-                   window.__mod = [d, a, dbl(21), s, typeof secret].join('|');",
-                  "https://x/main.js", new_obj(Obj::plain())).map_err(|_| "run-import")?;
-    let v = it.run("__mod").map_err(|_| "read-mod")?;
-    if it.to_string(&v) != "dflt|1|42|9|undefined" { return Err("modules-es"); }
-    // Le DOM expose desormais les noeuds <script> (parentNode des loaders).
-    let (mut ctx, _o) = open_page_sized(br#"<body><script>
-        window.__s = (function(){ var t=document.getElementsByTagName('script');
-            return [t.length>0, t[0]&&t[0].parentNode?t[0].parentNode.tagName:'?'].join('|'); })();
-    </script></body>"#, "", 800, 500);
-    let v = ctx.interp.run("__s").map_err(|_| "run-script-dom")?;
-    if ctx.interp.to_string(&v) != "true|BODY" { return Err("script-in-dom"); }
-    // --- Sprint 7 : WeakMap/WeakSet/Proxy/Reflect + elements custom a tiret ---
-    let mut it = Interp::new();
-    it.run("var w=new WeakSet(); var o={a:1}; w.add(o); var m=new WeakMap(); m.set(o,7); \
-            var p=new Proxy(o,{}); \
-            console.log([w.has(o), m.get(o), p.a, typeof Reflect.get, Reflect.get(o,'a')].join('|'));").map_err(|_| "run-weak")?;
-    if it.out.last().map(|x| x.as_str()) != Some("true|7|1|function|1") { return Err("weakset-proxy"); }
-    // <audio-recorder> ne doit plus etre confondu avec <audio> (tags a tiret).
-    let (mut ctx, _o) = open_page_sized(br#"<body><audio-recorder locale="fr"></audio-recorder><script>
-        window.__t = [document.getElementsByTagName('audio').length,
-                      document.getElementsByTagName('audio-recorder').length].join('|');
-    </script></body>"#, "", 800, 500);
-    let v = ctx.interp.run("__t").map_err(|_| "run-custom-tag")?;
-    if ctx.interp.to_string(&v) != "0|1" { return Err("custom-element-tag"); }
-    Ok(())
-}
+mod tests;
+pub use tests::selftest;
