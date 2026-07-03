@@ -149,7 +149,7 @@ fn layout_node(doc: &DocumentSnapshot, styles: &StyleMap, out: &mut LayoutResult
         for &c in &node.children { child_y = layout_node(doc, styles, out, c, box_id, child_x, child_y, child_w, depth + 1); }
     }
 
-    let intrinsic_h = if node.children.is_empty() { intrinsic_height(node, st) } else { child_y - outer_y + pad_b + st.border_width.bottom };
+    let intrinsic_h = if node.children.is_empty() { intrinsic_height(node, st, child_w) } else { child_y - outer_y + pad_b + st.border_width.bottom };
     let mut h = st.height.resolve(out.viewport.h, intrinsic_h.max(line_h(st))).max(1);
     if matches!(node.tag.as_str(), "html" | "body") { h = h.max(out.viewport.h); }
     h = h.max(px(st.min_height, out.viewport.h, 0));
@@ -260,7 +260,12 @@ fn intrinsic_width(node: &SnapshotNode, st: &ComputedStyle) -> i32 {
     }
 }
 
-fn intrinsic_height(node: &SnapshotNode, st: &ComputedStyle) -> i32 {
+// `avail_w` = largeur de contenu disponible (px) : le texte enveloppe (word-wrap)
+// selon la largeur reelle du conteneur, pas un nombre de caracteres fixe — sinon
+// la hauteur estimee est fausse des qu'un conteneur n'a pas la largeur "standard"
+// (colonnes flex/grid etroites, sidebars, cartes) et desynchronise
+// getBoundingClientRect des scripts qui mesurent la mise en page.
+fn intrinsic_height(node: &SnapshotNode, st: &ComputedStyle, avail_w: i32) -> i32 {
     if let Some(h) = attr_px(node, "height") { return h; }
     match node.tag.as_str() {
         "input" | "button" | "select" => 28,
@@ -270,7 +275,10 @@ fn intrinsic_height(node: &SnapshotNode, st: &ComputedStyle) -> i32 {
         "hr" => 12,
         _ => {
             let chars = node.text.chars().count() as i32;
-            if chars == 0 { line_h(st) } else { ((chars / 80) + 1).max(1) * line_h(st) }
+            if chars == 0 { return line_h(st); }
+            let ch_w = (st.font_size / 2).max(6);
+            let per_line = (avail_w.max(1) / ch_w).max(1);
+            ((chars + per_line - 1) / per_line).max(1) * line_h(st)
         }
     }
 }

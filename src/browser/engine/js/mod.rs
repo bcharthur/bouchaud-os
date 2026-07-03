@@ -1008,7 +1008,7 @@ impl Interp {
         if !self.reflow.needs_style && !self.reflow.needs_layout { return; }
         let snap = self.dom.snapshot();
         if self.reflow.needs_style || self.style_map.styles.len() != snap.nodes.len().max(1) {
-            self.style_map = resolve_snapshot_styles(&snap, self.vw, self.vh);
+            self.style_map = resolve_snapshot_styles(&snap, &self.base_url, self.vw, self.vh);
             self.reflow.needs_layout = true;
         }
         if self.reflow.needs_layout {
