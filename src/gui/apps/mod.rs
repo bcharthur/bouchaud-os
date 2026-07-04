@@ -224,7 +224,9 @@ fn handle_browser_event(
     // Hauteur reelle disponible pour le contenu de page, une fois le chrome
     // (onglets + barre d'outils) deduit -- propagee au moteur de layout pour
     // que `height:calc(100%-...)`/`vh` resolvent contre la vraie fenetre
-    // (voir web.rs::VIEWPORT_H).
+    // (voir web.rs::VIEWPORT_H). `bh` ici est deja la hauteur de corps de
+    // fenetre (barre de titre deduite) ; meme plancher (40) que
+    // `window::browser_content_h`, qui part lui de la hauteur de fenetre brute.
     let page_h = bh.saturating_sub(CHROME_H).max(40) as i32;
     match event {
         ChromeEvent::Navigate(href) => {

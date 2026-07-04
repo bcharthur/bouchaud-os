@@ -1,7 +1,6 @@
 //! Boucle d'evenements du gestionnaire de fenetres : entree souris/clavier,
 //! focus / z-order, deplacement / redimensionnement, et rendu.
 
-use crate::browser::ui::theme::CHROME_H;
 use crate::gui::apps;
 use crate::gui::event::Key;
 use crate::gui::framebuffer as fb;
@@ -9,8 +8,8 @@ use crate::gui::mouse;
 use crate::gui::widgets;
 use crate::gui::window::{
     self as window,
-    clamp_win, icon_rect, make_app, menu_rect, start_btn, taskbar_btn, toggle_max, App, Drag, Win,
-    BAR_H, ICONS, MENU, MENU_HEADER_H, MENU_ITEM_H, MIN_H, MIN_W, TITLE_H,
+    browser_content_h, clamp_win, icon_rect, make_app, menu_rect, start_btn, taskbar_btn, toggle_max,
+    App, Drag, Win, BAR_H, ICONS, MENU, MENU_HEADER_H, MENU_ITEM_H, MIN_H, MIN_W, TITLE_H,
 };
 use crate::drivers::keyboard;
 use crate::fs::ramfs;
@@ -116,8 +115,7 @@ pub fn run() {
         for w in wins.iter_mut() {
             if w.min { continue; }
             if let App::Browser { state } = &mut w.app {
-                let ch = (w.h - TITLE_H - 4 - CHROME_H as i32).max(1);
-                state.reflow((w.w - 6).max(1), ch);
+                state.reflow((w.w - 6).max(1), browser_content_h(w.h));
             }
         }
 

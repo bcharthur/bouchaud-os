@@ -14,6 +14,17 @@ pub(crate) const MENU_ITEM_H: i32 = 22;    // hauteur d'un item du menu Démarre
 pub(crate) const MENU_HEADER_H: i32 = 8;   // zone vide en haut du menu
 pub(crate) const MENU_W: i32 = 178;        // largeur du menu Démarrer
 
+/// Hauteur de contenu de page (viewport) disponible dans une fenetre
+/// Navigateur, une fois la barre de titre et le chrome Nautile (onglets +
+/// barre d'outils) deduits. Formule canonique partagee par la creation de
+/// fenetre (`make_app`) et le redimensionnement (`window_manager::run`) --
+/// avant ce partage, les deux recalculaient la meme quantite avec des
+/// planchers differents (.max(1) vs .max(40) cote gui/apps/mod.rs), ce qui
+/// pouvait faire diverger le layout initial du reflow suivant.
+pub(crate) fn browser_content_h(win_h: i32) -> i32 {
+    (win_h - TITLE_H - 4 - CHROME_H as i32).max(40)
+}
+
 /// Entrees du menu Demarrer (l'index = `kind` passe a `make_app`).
 pub(crate) const MENU: [&str; 7] = ["Terminal", "Fichiers", "Nautile", "Moniteur", "Calculatrice", "Rustpad", "Quitter"];
 
@@ -139,7 +150,7 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
             // place ; le contenu se re-met en page automatiquement au resize.
             let bw = (WIDTH as i32 - 80).clamp(600, 1100);
             let bh = (HEIGHT as i32 - 2 * BAR_H as i32 - 40).clamp(400, 760);
-            let ch = (bh - TITLE_H - 4 - CHROME_H as i32).max(1);
+            let ch = browser_content_h(bh);
             let (session, page) = loader::open(&url, bw - 6, ch);
             let state = crate::browser::BrowserState::new(url, page, session);
             Win { title: "Nautile Navigateur".to_string(), x, y, w: bw, h: bh, min: false, restore: None,

@@ -521,7 +521,10 @@ impl Session {
     /// Reserve aux pages internes (about:calc, about:wasm...) qui embarquent des
     /// mini-applications JS.
     pub fn open(html: &[u8], base_url: &str, width: i32, height: i32) -> (Session, Page) {
-        let (ctx, scripted) = crate::gui::js::open_page_sized(html, base_url, width, height.max(200));
+        // Meme hauteur cote JS (window.innerHeight) et cote layout CSS : avant
+        // ce fix, le JS voyait height.max(200) mais le CSS recevait `height`
+        // brut, donc les deux pouvaient diverger pour une petite fenetre.
+        let (ctx, scripted) = crate::gui::js::open_page_sized(html, base_url, width, height);
         let page = render_scripted(&scripted, base_url, width, height);
         (Session { ctx, base: base_url.to_string(), width, height }, page)
     }
