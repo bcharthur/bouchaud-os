@@ -67,7 +67,9 @@ pub fn fetch(sess: &mut Session, host: &str, path: &str, trace: &mut Vec<String>
     let inc: u32 = 0x7fff_0000;
     initial.extend_from_slice(&build_frame(FT_WINDOW_UPDATE, 0, 0, &inc.to_be_bytes()));
 
-    let req = hpack::encode_request(&[
+    // Cookies : meme pot que HTTP/1.1 (application::cookies).
+    let cookie = super::cookies::header_for(host);
+    let mut hdrs: Vec<(&str, &str)> = alloc::vec![
         (":method", "GET"),
         (":path", path),
         (":scheme", "https"),
@@ -76,7 +78,9 @@ pub fn fetch(sess: &mut Session, host: &str, path: &str, trace: &mut Vec<String>
         ("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
         ("accept-language", "fr-FR,fr;q=0.9,en;q=0.8"),
         ("accept-encoding", "gzip, deflate, br"),
-    ]);
+    ];
+    if let Some(c) = &cookie { hdrs.push(("cookie", c.as_str())); }
+    let req = hpack::encode_request(&hdrs);
     initial.extend_from_slice(&build_frame(
         FT_HEADERS,
         FLAG_END_HEADERS | FLAG_END_STREAM,

@@ -399,6 +399,9 @@ fn render_scripted(scripted: &[u8], base_url: &str, width: i32, height: i32) -> 
     // sont abandonnes plutot que de faire gonfler le chargement de quelques
     // secondes a plusieurs minutes (voir commentaire sur start_page_budget).
     crate::net::start_page_budget(5_000);
+    // Viewport pour l'evaluation des conditions @media (min/max-width...) :
+    // sans lui, les feuilles mobile/print s'appliqueraient en plein ecran.
+    super::css_parser::set_media_viewport(width, if height > 0 { height } else { VIEWPORT_H });
 
     // ── Phase 1 : tokenizer/tree builder (HTML -> DOM) ──
     let t0 = crate::kernel::timer::cycles_since_boot();

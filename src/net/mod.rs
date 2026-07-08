@@ -335,6 +335,9 @@ pub fn fetch_document(url: &str) -> Document {
             crate::dlog!(Cat::Err, "{} {} : reponse vide ({}Mc, {}ms)", scheme, hostname, mc(), ms());
             return Document { banner, final_url: current, content_type: String::new(), body: alloc::vec::Vec::new(), is_html: false, ok: false };
         }
+        // Cookies : memorise les Set-Cookie de la reponse (y compris ceux des
+        // redirections -- c'est la que Google pose CONSENT/NID).
+        application::cookies::store_from_raw(&hostname, &raw);
         match http::parse_response(&raw) {
             Some(r) if r.is_redirect() && hop < 7 => {
                 let loc = r.location.clone().unwrap_or_default();
@@ -494,6 +497,9 @@ pub fn http_get(url: &str) -> alloc::vec::Vec<String> {
         };
 
         out.append(&mut banner);
+        if !raw.is_empty() {
+            application::cookies::store_from_raw(&hostname, &raw);
+        }
         if raw.is_empty() {
             // La banniere contient deja la trace de diagnostic (canal muet).
             if scheme != "https" { out.push("reponse vide".to_string()); }

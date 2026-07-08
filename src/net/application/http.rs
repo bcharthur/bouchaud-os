@@ -19,14 +19,20 @@ pub fn build_get(host: &str, path: &str) -> String {
     // DuckDuckGo…) renvoient une page degradee/bloquee a un UA inconnu. On se
     // presente comme un navigateur courant pour obtenir le HTML normal, et on
     // accepte explicitement le HTML.
+    // Cookies : renvoyes a l'hote qui les a poses (consentements, preferences,
+    // sessions) -- voir application::cookies.
+    let cookie_line = match super::cookies::header_for(host) {
+        Some(c) => format!("Cookie: {}\r\n", c),
+        None => String::new(),
+    };
     format!(
         "GET {path} HTTP/1.1\r\nHost: {host}\r\n\
          User-Agent: {ua}\r\n\
          Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8\r\n\
          Accept-Language: fr-FR,fr;q=0.9,en;q=0.8\r\n\
          Accept-Encoding: gzip, deflate, br\r\n\
-         Connection: close\r\n\r\n",
-        path = path, host = host, ua = USER_AGENT
+         {cookie}Connection: close\r\n\r\n",
+        path = path, host = host, ua = USER_AGENT, cookie = cookie_line
     )
 }
 

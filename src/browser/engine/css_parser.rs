@@ -240,6 +240,107 @@ fn parse_selector(s: &str) -> (Vec<Sel>, u32) {
     (chain, spec)
 }
 
+// ----------------------------------------------------------------------------
+// Media queries : evaluation de la condition des blocs `@media`.
+//
+// Avant cet ajout, TOUTES les regles d'un bloc @media etaient incluses sans
+// evaluer la condition : les feuilles mobile (`max-width: 600px`) et meme
+// `print` s'appliquaient en plein ecran -- distorsion majeure des mises en
+// page modernes (colonnes empilees, elements desktop caches).
+//
+// Le viewport est fixe par le pipeline de rendu (render_scripted) via
+// `set_media_viewport` -- meme idiome mono-thread que net::start_page_budget.
+// Quand il n'est PAS fixe (pipeline geometrie JS de cascade.rs, rendu texte),
+// tout est inclus : comportement historique conserve.
+// ----------------------------------------------------------------------------
+static mut MEDIA_VW: i32 = 0;
+static mut MEDIA_VH: i32 = 0;
+
+/// Fixe le viewport utilise pour evaluer les conditions `@media` (0 = inconnu,
+/// tout matche). Appele par le moteur de rendu avant chaque mise en page.
+pub(super) fn set_media_viewport(w: i32, h: i32) {
+    unsafe { MEDIA_VW = w; MEDIA_VH = h; }
+}
+
+// Longueur d'une valeur de media feature -> px (em = 16px, rem idem).
+fn media_len(v: &str) -> Option<i32> {
+    let t = v.trim();
+    if let Some(x) = t.strip_suffix("px") { return x.trim().parse::<f32>().ok().map(|f| f as i32); }
+    if let Some(x) = t.strip_suffix("rem") { return x.trim().parse::<f32>().ok().map(|f| (f * 16.0) as i32); }
+    if let Some(x) = t.strip_suffix("em") { return x.trim().parse::<f32>().ok().map(|f| (f * 16.0) as i32); }
+    t.parse::<f32>().ok().map(|f| f as i32)
+}
+
+// Une feature parenthesee `(name: value)` ou `(name)`. Inconnue -> true
+// (on prefere inclure des regles en trop que perdre du style).
+fn media_feature(inner: &str, vw: i32, vh: i32) -> bool {
+    let (name, val) = match inner.find(':') {
+        Some(i) => (inner[..i].trim().to_ascii_lowercase(), inner[i + 1..].trim()),
+        None => (inner.trim().to_ascii_lowercase(), ""),
+    };
+    match name.as_str() {
+        "min-width" => media_len(val).map(|v| vw >= v).unwrap_or(true),
+        "max-width" => media_len(val).map(|v| vw <= v).unwrap_or(true),
+        "width" => media_len(val).map(|v| vw == v).unwrap_or(true),
+        "min-height" => media_len(val).map(|v| vh >= v).unwrap_or(true),
+        "max-height" => media_len(val).map(|v| vh <= v).unwrap_or(true),
+        "orientation" => {
+            let v = val.to_ascii_lowercase();
+            if v == "portrait" { vh >= vw } else if v == "landscape" { vw > vh } else { true }
+        }
+        // On rend un theme clair, avec une souris qui survole.
+        "prefers-color-scheme" => val.to_ascii_lowercase() != "dark",
+        "hover" => val.to_ascii_lowercase() != "none",
+        "pointer" | "any-pointer" => val.to_ascii_lowercase() != "coarse",
+        "prefers-reduced-motion" => true,
+        _ => true, // feature inconnue : permissif
+    }
+}
+
+// Une branche de la liste (separees par des virgules = OU logique) :
+// `[only|not] <type>? [and (feature)]*`. Toutes les conditions doivent passer.
+fn media_part_matches(part: &str, vw: i32, vh: i32) -> bool {
+    let mut neg = false;
+    let mut ok = true;
+    let p = part.trim();
+    let b = p.as_bytes();
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i] == b'(' {
+            // groupe parenthese (gere l'imbrication de calc() eventuels)
+            let mut depth = 1usize; let start = i + 1; let mut j = i + 1;
+            while j < b.len() && depth > 0 {
+                if b[j] == b'(' { depth += 1; } else if b[j] == b')' { depth -= 1; }
+                j += 1;
+            }
+            let inner = &p[start..j.saturating_sub(1).max(start)];
+            if !media_feature(inner, vw, vh) { ok = false; }
+            i = j;
+        } else if b[i].is_ascii_alphabetic() || b[i] == b'-' {
+            let start = i;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'-') { i += 1; }
+            match p[start..i].to_ascii_lowercase().as_str() {
+                "not" => neg = true,
+                "print" | "speech" => ok = false, // on est un ecran
+                "screen" | "all" | "only" | "and" => {}
+                _ => {} // type inconnu : permissif
+            }
+        } else {
+            i += 1;
+        }
+    }
+    if neg { !ok } else { ok }
+}
+
+// Condition complete d'un bloc `@media` (texte apres le mot-cle).
+fn media_matches(cond: &str) -> bool {
+    let (vw, vh) = unsafe { (MEDIA_VW, MEDIA_VH) };
+    if vw <= 0 { return true; } // viewport inconnu : comportement historique
+    let c = cond.trim();
+    if c.is_empty() { return true; }
+    split_top_level(c, ',').iter().any(|part| media_part_matches(part, vw, vh))
+}
+
 pub(super) fn parse_stylesheet(text: &str, out: &mut Vec<Rule>) {
     // Retire les commentaires /* */.
     let mut cleaned = String::new();
@@ -274,11 +375,15 @@ fn parse_css_block(text: &str, out: &mut Vec<Rule>) {
         let close = match css_find_close(text, open) { Some(c) => c, None => break };
         let body = &text[open + 1..close];
         pos = close + 1;
-        // @font-face, @keyframes: skip entirely; @media: recurse into body
+        // @font-face, @keyframes: skip entirely; @supports/@layer: recurse ;
+        // @media: recurse SEULEMENT si la condition matche le viewport.
         if sel_part.starts_with('@') {
             let kw = sel_part.split_whitespace().next().unwrap_or("");
             let kw_lc = kw.to_ascii_lowercase();
-            if kw_lc.starts_with("@media") || kw_lc.starts_with("@supports") || kw_lc.starts_with("@layer") {
+            if kw_lc.starts_with("@media") {
+                let cond = sel_part[kw.len()..].trim();
+                if media_matches(cond) && out.len() < 4000 { parse_css_block(body, out); }
+            } else if kw_lc.starts_with("@supports") || kw_lc.starts_with("@layer") {
                 if out.len() < 4000 { parse_css_block(body, out); }
             }
             continue;
