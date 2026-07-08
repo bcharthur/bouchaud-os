@@ -26,7 +26,7 @@
 //! aucune des images de test, y compris 800 000 px de bruit aleatoire).
 
 use super::{composite_rgba, Image};
-use alloc::collections::BTreeMap;
+use hashbrown::HashMap;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -61,7 +61,7 @@ impl<'a> BitReader<'a> {
 }
 
 // ── Huffman canonique ────────────────────────────────────────────────────
-fn build_huffman(code_lengths: &[u8]) -> BTreeMap<(u8, u32), u16> {
+fn build_huffman(code_lengths: &[u8]) -> HashMap<(u8, u32), u16> {
     let mut bl_count = [0u32; 16];
     for &l in code_lengths { if l > 0 && l < 16 { bl_count[l as usize] += 1; } }
     let mut code = 0u32;
@@ -70,7 +70,7 @@ fn build_huffman(code_lengths: &[u8]) -> BTreeMap<(u8, u32), u16> {
         code = (code + bl_count[len - 1]) << 1;
         next_code[len] = code;
     }
-    let mut table = BTreeMap::new();
+    let mut table = HashMap::new();
     for (sym, &l) in code_lengths.iter().enumerate() {
         if l == 0 || l >= 16 { continue; }
         let c = next_code[l as usize];
@@ -80,7 +80,7 @@ fn build_huffman(code_lengths: &[u8]) -> BTreeMap<(u8, u32), u16> {
     table
 }
 
-fn decode_symbol(br: &mut BitReader, table: &BTreeMap<(u8, u32), u16>) -> Option<u16> {
+fn decode_symbol(br: &mut BitReader, table: &HashMap<(u8, u32), u16>) -> Option<u16> {
     // Code degenere (un seul symbole non-nul) : consomme ZERO bit, toujours ce
     // symbole (cf. "code.bits = 0" dans BuildHuffmanTable, libwebp). Un oubli
     // ici desynchronise le flux d'un bit a chaque canal degenere (frequent :
@@ -143,7 +143,7 @@ fn read_huffman_code_lengths(br: &mut BitReader, num_symbols: usize) -> Option<V
     Some(code_lengths)
 }
 
-fn read_huffman_code(br: &mut BitReader, alphabet_size: usize) -> Option<BTreeMap<(u8, u32), u16>> {
+fn read_huffman_code(br: &mut BitReader, alphabet_size: usize) -> Option<HashMap<(u8, u32), u16>> {
     let simple = br.read_bits(1)? != 0;
     let code_lengths = if simple {
         let mut cl = vec![0u8; alphabet_size];
@@ -174,11 +174,11 @@ fn read_huffman_code(br: &mut BitReader, alphabet_size: usize) -> Option<BTreeMa
 // bleu, alpha, distance. Alphabet vert = 256 litteraux + 24 codes de longueur
 // + `cache_size` codes de lookup du cache de couleurs (0 si desactive).
 struct HuffGroup {
-    green: BTreeMap<(u8, u32), u16>,
-    red: BTreeMap<(u8, u32), u16>,
-    blue: BTreeMap<(u8, u32), u16>,
-    alpha: BTreeMap<(u8, u32), u16>,
-    dist: BTreeMap<(u8, u32), u16>,
+    green: HashMap<(u8, u32), u16>,
+    red: HashMap<(u8, u32), u16>,
+    blue: HashMap<(u8, u32), u16>,
+    alpha: HashMap<(u8, u32), u16>,
+    dist: HashMap<(u8, u32), u16>,
 }
 
 fn read_huff_group(br: &mut BitReader, cache_size: usize) -> Option<HuffGroup> {

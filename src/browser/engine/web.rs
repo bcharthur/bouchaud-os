@@ -1018,6 +1018,10 @@ struct BoxProps {
     flex_wrap: bool,       // spec: nowrap par defaut, wrap uniquement si demande
     gap: i32,              // espacement entre items flex/grid (px)
     grid_cols: u8,         // nombre de colonnes (grid-template-columns) ; 0 = auto
+    // Valeur brute de grid-template-columns, pour le vrai layout grid (taffy) :
+    // pistes proportionnelles (fr), fixes (px/%), minmax, repeat. `grid_cols`
+    // reste le compte pour l'heuristique de repli.
+    grid_template: Option<String>,
     // Enfant flex : facteur de croissance (flex-grow / flex:N) + base/order.
     flex_grow: i32,
     flex_basis: Option<Len>,
@@ -1044,7 +1048,7 @@ fn default_box() -> BoxProps {
         pad_t: 0, pad_r: 0, pad_b: 0, pad_l: 0, mar_t: 0, mar_b: 0,
         border_w: 0, border_color: 0x000000, radius: 0,
         flex_dir: FlexDir::Row, justify: Justify::Start, align_items: AlignI::Stretch, flex_wrap: false,
-        gap: 0, grid_cols: 0, flex_grow: 0, flex_basis: None, order: 0, grid_span: 0, list_style: 0,
+        gap: 0, grid_cols: 0, grid_template: None, flex_grow: 0, flex_basis: None, order: 0, grid_span: 0, list_style: 0,
         position: Pos::Static, top: None, right: None, bottom: None, left: None,
         z_index: None, overflow_clip: false, shadow: None, grad: None, tx: 0, ty: 0, tx_pct: 0, ty_pct: 0, scale_pct: 100 }
 }
@@ -1711,7 +1715,10 @@ fn apply_decls(decls: &[(String, String)], st: &mut Style, bx: &mut BoxProps, cs
             "gap" | "grid-gap" | "row-gap" | "column-gap" | "grid-column-gap" | "grid-row-gap" => {
                 if let Some(px) = first_len(val) { bx.gap = bx.gap.max(px.max(0)); }
             }
-            "grid-template-columns" => { bx.grid_cols = count_grid_cols(val); }
+            "grid-template-columns" => {
+                bx.grid_cols = count_grid_cols(val);
+                bx.grid_template = Some(val.trim().to_string());
+            }
             "grid-column" => {
                 // `1 / -1` = pleine rangee ; `span N` = N colonnes.
                 if val.contains("-1") { bx.grid_span = 255; }
@@ -2461,10 +2468,190 @@ fn len_to_dim(v: Option<Len>, avail_w: i32) -> taffy::Dimension {
 // no_std : pas de f32::round() (methode std/libm). Arrondi maison.
 fn round_f32(v: f32) -> i32 { if v >= 0.0 { (v + 0.5) as i32 } else { (v - 0.5) as i32 } }
 
-// Conteneur CSS grid : `grid-template-columns` definit le nombre de colonnes ;
-// les items sont disposes en grille avec retour a la ligne et `gap`. Le span
-// `grid-column: 1/-1` (ou `span N`) fait occuper plusieurs colonnes a une cellule.
+// Decoupe une liste de pistes CSS en tokens de premier niveau (les parentheses
+// de `minmax(...)` / `repeat(...)` sont respectees).
+fn split_tracks(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut depth, mut start) = (0i32, 0usize);
+    let b = s.as_bytes();
+    for (i, &c) in b.iter().enumerate() {
+        match c {
+            b'(' => depth += 1,
+            b')' => { if depth > 0 { depth -= 1; } }
+            b' ' | b'\t' if depth == 0 => {
+                if i > start { out.push(&s[start..i]); }
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if start < s.len() { out.push(&s[start..]); }
+    out
+}
+
+// Piste CSS -> fonction de dimensionnement taffy. Tout token inconnu devient
+// `fr(1)` : la colonne existe quand meme (mieux que la perdre).
+fn parse_track(tok: &str) -> taffy::TrackSizingFunction {
+    use taffy::style_helpers::{auto, fr, length, minmax, percent};
+    let t = tok.trim();
+    if let Some(v) = t.strip_suffix("fr") {
+        if let Ok(x) = v.trim().parse::<f32>() { return fr(x.max(0.0)); }
+    }
+    if t == "auto" || t == "min-content" || t == "max-content" || t == "none" {
+        return auto();
+    }
+    if let Some(inner) = t.strip_prefix("minmax(").and_then(|r| r.strip_suffix(")")) {
+        if let Some(comma) = inner.find(',') {
+            let (a, b) = (inner[..comma].trim(), inner[comma + 1..].trim());
+            let min = match parse_len(a) {
+                Some(Len::Px(p)) => length(p.max(0) as f32),
+                Some(Len::Pct(p)) => percent(p as f32 / 100.0),
+                _ => auto(),
+            };
+            let max = if let Some(v) = b.strip_suffix("fr") {
+                v.trim().parse::<f32>().map(|x| fr(x.max(0.0))).unwrap_or_else(|_| auto())
+            } else {
+                match parse_len(b) {
+                    Some(Len::Px(p)) => length(p.max(0) as f32),
+                    Some(Len::Pct(p)) => percent(p as f32 / 100.0),
+                    _ => auto(),
+                }
+            };
+            return minmax(min, max);
+        }
+    }
+    match parse_len(t) {
+        Some(Len::Px(p)) => length(p.max(0) as f32),
+        Some(Len::Pct(p)) => percent(p as f32 / 100.0),
+        _ => fr(1.0f32),
+    }
+}
+
+// `grid-template-columns` -> pistes taffy, `repeat(N, ...)` developpe (plafond
+// 24 pistes). `auto-fill`/`auto-fit` (grilles responsives) : 2 colonnes egales,
+// comme l'heuristique historique -- les fenetres Nautile sont etroites.
+fn parse_grid_tracks(template: &str) -> Vec<taffy::TrackSizingFunction> {
+    use taffy::style_helpers::fr;
+    let v = template.trim();
+    if v.contains("auto-fill") || v.contains("auto-fit") {
+        return alloc::vec![fr(1.0f32), fr(1.0f32)];
+    }
+    let mut tracks = Vec::new();
+    for tok in split_tracks(v) {
+        if let Some(inner) = tok.strip_prefix("repeat(").and_then(|r| r.strip_suffix(")")) {
+            if let Some(comma) = inner.find(',') {
+                if let Ok(n) = inner[..comma].trim().parse::<u32>() {
+                    let inner_tracks: Vec<_> = split_tracks(inner[comma + 1..].trim()).iter().map(|t| parse_track(t)).collect();
+                    for _ in 0..n.min(24) {
+                        for t in &inner_tracks {
+                            if tracks.len() < 24 { tracks.push(*t); }
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
+        if tracks.len() < 24 { tracks.push(parse_track(tok)); }
+    }
+    tracks
+}
+
+// Conteneur CSS grid, layout par TAFFY (meme approche que flex_inner) : les
+// pistes viennent de `grid-template-columns` (fr/px/%/minmax/repeat), les
+// spans de `grid-column`. Mesure des feuilles par vraie mise en page jetable
+// (child_frag), placement final aux positions calculees par taffy. En cas
+// d'echec taffy : repli sur l'heuristique historique ci-dessous.
 fn grid_inner(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, depth: u32) {
+    let kids = ordered_element_children(f, dom, node, cst);
+    if kids.is_empty() { return; }
+
+    let avail_w = f.avail;
+    let start_y = f.y;
+    let ncols = (bx.grid_cols as usize).max(1);
+
+    // Pistes : template explicite, sinon `grid_cols` colonnes egales.
+    let tracks = match &bx.grid_template {
+        Some(t) => {
+            let tr = parse_grid_tracks(t);
+            if tr.is_empty() { alloc::vec![taffy::style_helpers::fr(1.0f32); ncols] } else { tr }
+        }
+        None => alloc::vec![taffy::style_helpers::fr(1.0f32); ncols],
+    };
+    let ncols = tracks.len().max(1);
+
+    let mut tree: taffy::TaffyTree<usize> = taffy::TaffyTree::new();
+    let mut leaf_ids: Vec<taffy::NodeId> = Vec::with_capacity(kids.len());
+    let mut ok = true;
+    for &c in &kids {
+        let cn = &dom.nodes[c];
+        let ct = cn.tag.as_deref().unwrap_or("");
+        let (_ccst, cbx) = compute(f, dom, c, cn, ct, cst);
+        // Meme contrat que flex_item_style : la feuille ne porte que
+        // taille/min/max + span, le box model de l'enfant est applique par sa
+        // propre passe de layout (child_frag).
+        let mut s = taffy::Style::default();
+        s.size = taffy::Size { width: len_to_dim(cbx.width, avail_w), height: len_to_dim(cbx.height, avail_w) };
+        s.min_size = taffy::Size { width: len_to_dim(cbx.min_width, avail_w), height: len_to_dim(cbx.min_height, avail_w) };
+        s.max_size = taffy::Size { width: len_to_dim(cbx.max_width, avail_w), height: len_to_dim(cbx.max_height, avail_w) };
+        let span = match cbx.grid_span { 0 => 1u16, 255 => ncols as u16, n => (n as u16).min(ncols as u16) };
+        if span > 1 { s.grid_column = taffy::style_helpers::span(span); }
+        match tree.new_leaf_with_context(s, c) {
+            Ok(id) => leaf_ids.push(id),
+            Err(_) => { ok = false; break; }
+        }
+    }
+
+    if ok {
+        let mut root_style = taffy::Style::default();
+        root_style.display = taffy::Display::Grid;
+        root_style.grid_template_columns = tracks.iter().map(|&t| taffy::GridTemplateComponent::Single(t)).collect();
+        let g = taffy::style_helpers::length(bx.gap.max(0) as f32);
+        root_style.gap = taffy::Size { width: g, height: g };
+        root_style.size.width = taffy::style_helpers::length(avail_w.max(1) as f32);
+        if let Ok(root) = tree.new_with_children(root_style, &leaf_ids) {
+            let avail_sp = taffy::Size { width: taffy::AvailableSpace::Definite(avail_w.max(1) as f32), height: taffy::AvailableSpace::MaxContent };
+            let computed = tree.compute_layout_with_measure(root, avail_sp, |known, av, _node_id, ctx, _style| {
+                match ctx {
+                    Some(&mut c) => {
+                        let cap = match av.width { taffy::AvailableSpace::Definite(v) => v as i32, _ => avail_w };
+                        match (known.width, known.height) {
+                            (Some(w), Some(h)) => taffy::Size { width: w, height: h },
+                            (Some(w), None) => {
+                                let h = child_frag(f, dom, c, cst, cst.align, (w as i32).max(8), depth).height.max(1);
+                                taffy::Size { width: w, height: h as f32 }
+                            }
+                            (None, _) => {
+                                let frag = child_frag(f, dom, c, cst, cst.align, cap.max(8), depth);
+                                let w = frag.nat.clamp(8, cap.max(8));
+                                taffy::Size { width: w as f32, height: frag.height.max(1) as f32 }
+                            }
+                        }
+                    }
+                    None => taffy::Size::ZERO,
+                }
+            });
+            if computed.is_ok() {
+                for (i, &c) in kids.iter().enumerate() {
+                    let tl = match tree.layout(leaf_ids[i]) { Ok(l) => *l, Err(_) => continue };
+                    let cx = f.x0 + round_f32(tl.location.x);
+                    let cy = start_y + round_f32(tl.location.y);
+                    let cw = round_f32(tl.size.width).max(8);
+                    let frag = child_frag(f, dom, c, cst, cst.align, cw, depth);
+                    place_frag(f, frag, cx, cy);
+                }
+                if let Ok(l) = tree.layout(root) {
+                    f.y = start_y + round_f32(l.size.height).max(0);
+                    return;
+                }
+            }
+        }
+    }
+    grid_inner_heuristic(f, dom, node, cst, bx, depth);
+}
+
+// Heuristique de repli (historique) : colonnes egales issues du COMPTE de
+// `grid-template-columns`, retour a la ligne, `gap`, spans `grid-column`.
+fn grid_inner_heuristic(f: &mut Flow, dom: &Dom, node: &Node, cst: &Style, bx: &BoxProps, depth: u32) {
     let kids = ordered_element_children(f, dom, node, cst);
     if kids.is_empty() { return; }
     let cols = (bx.grid_cols as i32).max(1);

@@ -888,11 +888,15 @@ impl Parser {
 // ============================================================================
 
 pub type Env = Rc<RefCell<Scope>>;
-pub struct Scope { vars: BTreeMap<String, Value>, parent: Option<Env>, func_scope: bool }
-fn new_scope(parent: Option<Env>) -> Env { Rc::new(RefCell::new(Scope { vars: BTreeMap::new(), parent, func_scope: false })) }
+// `vars` en HashMap (hashbrown) et non BTreeMap : la resolution d'identifiant
+// passe ici a CHAQUE variable evaluee (chemin le plus chaud de l'interprete) ;
+// jamais itere, donc l'ordre n'importe pas -- O(1) au lieu de O(log n) +
+// comparaisons de String.
+pub struct Scope { vars: hashbrown::HashMap<String, Value>, parent: Option<Env>, func_scope: bool }
+fn new_scope(parent: Option<Env>) -> Env { Rc::new(RefCell::new(Scope { vars: hashbrown::HashMap::new(), parent, func_scope: false })) }
 // Portee de fonction (ou globale) : frontiere de hoisting `var`. `let`/`const`
 // restent lies au bloc courant, mais `var` remonte jusqu'ici.
-fn new_fn_scope(parent: Option<Env>) -> Env { Rc::new(RefCell::new(Scope { vars: BTreeMap::new(), parent, func_scope: true })) }
+fn new_fn_scope(parent: Option<Env>) -> Env { Rc::new(RefCell::new(Scope { vars: hashbrown::HashMap::new(), parent, func_scope: true })) }
 // Remonte a la portee de fonction/globale la plus proche (cible des `var`).
 fn fn_scope_of(env: &Env) -> Env {
     let mut cur = env.clone();
