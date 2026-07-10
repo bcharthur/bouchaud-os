@@ -569,8 +569,13 @@ pub fn decode(data: &[u8]) -> Option<Image> {
         let body = p + 8;
         if body.checked_add(sz).map_or(true, |end| end > data.len()) { break; }
         if tag == b"VP8L" { return decode_vp8l(&data[body..body + sz]); }
-        // VP8 (lossy) / VP8X (extended, alpha/anim) : non decodes -- repli propre.
-        if tag == b"VP8 " || tag == b"VP8X" { return None; }
+        // VP8 lossy : decodeur intra keyframe complet (voir vp8.rs).
+        if tag == b"VP8 " { return super::vp8::decode_frame(&data[body..body + sz]); }
+        // VP8X (extended) : chunk de metadonnees -- on CONTINUE le balayage
+        // pour trouver le VP8/VP8L qui suit. Le canal alpha (ALPH) n'est pas
+        // decode : l'image est rendue opaque (le framebuffer est opaque de
+        // toute facon) ; les animations (ANMF) n'exposent pas de chunk VP8 au
+        // premier niveau -> repli propre en fin de balayage.
         p = body + sz + (sz & 1); // octet de bourrage si taille impaire
     }
     None

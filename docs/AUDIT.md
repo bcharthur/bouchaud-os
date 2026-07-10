@@ -70,7 +70,7 @@ frame), pas de compositing par fenêtre.
 | Layout flex | ✅ | **taffy** (vrai algorithme) branché sur le rendu réel |
 | Layout grid | ✅ | **taffy grid branché par cet audit** (pistes fr/px/%/minmax/repeat, spans) ; heuristique en repli |
 | Position/couches | 🟡 | absolute/fixed/z-index avec plafond MAX_LAYERS=256 ; hauteurs % imbriquées toujours résolues contre le viewport (limitation single-pass connue) |
-| Images | 🟡 | PNG (maison + **zune-png** pour l'entrelacé), JPEG (maison + **zune-jpeg** pour le progressif), GIF 1re frame, BMP, WebP VP8L exact ; **manquent : WebP VP8 lossy (fréquent !), AVIF, GIF animé** |
+| Images | ✅ | PNG (maison + **zune-png** entrelacé), JPEG (maison + **zune-jpeg** progressif), GIF 1re frame, BMP, WebP **VP8L ET VP8 lossy** (vp8.rs, bit-exact vs libwebp sur 11 images) ; manquent : AVIF, GIF animé, alpha ALPH |
 | Polices | ✅ | **fontdue** primaire (cet audit) + rasterizer maison en repli ; manque : @font-face (webfonts), fallback multi-polices, shaping (rustybuzz validé no_std, à brancher) |
 | JS | 🟡 | interpréteur maison ~4600 lignes, DOM/événements/modules ; async/await *parsés mais synchrones*, pas de vraie event loop ni de vrais timers |
 | Réseau page | ✅ | budget 5 s, CSS externe, sous-ressources |
@@ -110,17 +110,20 @@ frame), pas de compositing par fenêtre.
 ## Priorités recommandées (ordre de valeur/effort)
 
 **Navigateur**
-1. **WebP VP8 lossy** : la majorité des WebP servis par les CDN sont lossy —
-   aucune crate no_std n'existe (testées ci-dessus) ; il faudra l'écrire à la
-   main comme le VP8L (prédiction intra + DCT 4×4 + partition booléenne),
-   c'est le plus gros manque image restant.
-2. **Vraie event loop JS** : `setTimeout`/Promise réels (file de micro/macro
-   tâches pompée par la boucle du bureau) — beaucoup de sites modernes
-   construisent leur DOM dedans.
-3. **@font-face** : télécharger la police de la page et la charger dans
+1. ~~WebP VP8 lossy~~ — **FAIT** : décodeur keyframe complet écrit à la main
+   (vp8.rs : lecteur booléen RFC 6386, segments, tokens DCT, prédiction intra
+   16x16/4x4/chroma, IDCT/IWHT bit-exacts, filtre de boucle simple+normal,
+   suréchantillonnage fancy, YUV→RGB virgule fixe libwebp), vérifié
+   **bit-exact** contre libwebp sur 11 images (1 px → 120 000 px, q10 → q100).
+2. ~~@media queries~~ — **FAIT** : conditions évaluées contre le viewport
+   (min/max-width/height, orientation, print exclu, prefers-color-scheme).
+3. ~~Cookies~~ — **FAIT** : pot en mémoire, envoyé sur h1 + h2.
+4. Event loop JS : les files micro/macrotâches existent déjà (js/mod.rs:944) ;
+   reste à pomper les timers longs APRÈS le premier rendu (progressif).
+5. **@font-face** : télécharger la police de la page et la charger dans
    fontdue (il accepte des bytes arbitraires) — gros gain de fidélité.
-4. **rustybuzz** : shaping (déjà validé no_std).
-5. Cookies + reprise TLS : moins de round-trips, sessions persistantes.
+6. **rustybuzz** : shaping (déjà validé no_std).
+7. Reprise de session TLS : moins de round-trips.
 
 **OS**
 6. **Ordonnanceur préemptif** (voir kernel) — débloque le reste (réseau en

@@ -10,9 +10,9 @@
 //!     restart ; repli `zune` (zune-jpeg) pour le progressif (SOF2) ;
 //!   - `gif`  : GIF87a/89a, première image (LZW) ;
 //!   - `bmp`  : BMP Windows (BITMAPINFOHEADER) 24/32/8 bits ;
-//!   - `webp` : VP8L (lossless) décodé (Huffman canonique + LZ77 + transforms
-//!     + cache de couleurs, vérifié contre libwebp — voir commit) ; VP8
-//!     (lossy) et VP8X (extended) détectés mais non décodés, repli propre ;
+//!   - `webp` : VP8L (lossless, webp.rs) ET VP8 (lossy, vp8.rs) décodés,
+//!     tous deux vérifiés bit-exacts contre libwebp ; VP8X traversé pour
+//!     trouver le flux (alpha ALPH non décodé : rendu opaque) ;
 //!   - SVG délègue à `super::svg`.
 
 pub mod png;
@@ -20,6 +20,8 @@ pub mod jpeg;
 pub mod gif;
 pub mod bmp;
 pub mod webp;
+pub mod vp8;
+pub mod vp8_tables;
 pub mod zune;
 
 use alloc::vec;
