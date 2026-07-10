@@ -1,15 +1,18 @@
-//! Rasterizer de police TrueType (`glyf`) from-scratch, no_std, antialiase.
+//! Rendu de police vectorielle (DejaVu Sans embarquee), no_std, antialiase.
 //!
-//! Lit une police TrueType embarquee (DejaVu Sans), decode les contours
-//! (`head`/`cmap` format 4/`loca`/`glyf` quadratiques/`hmtx`/`hhea`), les
-//! remplit par balayage (scanline) avec couverture sous-pixel, et melange le
-//! resultat dans le framebuffer. Glyphes mis en cache par (glyphe, taille px).
+//! Chemin PRIMAIRE : `fontdue` (rasterizer mature, fuzz-teste, meilleure
+//! qualite d'antialiasing et metriques completes — cmap 4/12, glyphes
+//! composites, courbes cubiques CFF). Glyphes mis en cache par (car, taille).
 //!
-//! Si la police est absente ou illisible, tout renvoie un repli (largeurs
-//! monospace / `draw_text` -> false) et le moteur web retombe sur la police
-//! bitmap 8x8 : le boot n'est jamais casse.
+//! Chemin de REPLI : le rasterizer maison ci-dessous (`glyf` quadratiques,
+//! cmap format 4, scanline), conserve integralement — il prend le relais si
+//! l'init fontdue echoue, et sert de reference. Si les deux echouent, tout
+//! renvoie un repli (largeurs monospace / `draw_text` -> false) et le moteur
+//! web retombe sur la police bitmap 8x8 : le boot n'est jamais casse.
 //!
-//! Seul usage du flottant : `f32` (additions/multiplications, dispo en `core`).
+//! IMPORTANT : `char_width`/`text_width`/`draw_text` doivent avancer le crayon
+//! EXACTEMENT pareil (meme arrondi), sinon le layout et les zones de clic se
+//! desynchronisent du rendu.
 
 use crate::gui::framebuffer as fb;
 use alloc::collections::BTreeMap;
@@ -411,12 +414,64 @@ fn font() -> Option<&'static Font> {
     }
 }
 
+// ----------------------------------------------------------------------------
+// Chemin primaire : fontdue
+// ----------------------------------------------------------------------------
+static mut FD_FONT: Option<fontdue::Font> = None;
+static mut FD_TRIED: bool = false;
+static mut FD_CACHE: Option<hashbrown::HashMap<(char, i32), Glyph>> = None;
+
+fn fd_font() -> Option<&'static fontdue::Font> {
+    unsafe {
+        if !FD_TRIED {
+            FD_TRIED = true;
+            match fontdue::Font::from_bytes(FONT_DATA, fontdue::FontSettings::default()) {
+                Ok(f) => {
+                    crate::serial_println!("[font_ttf] fontdue: DejaVuSans charge ({} glyphes)", f.glyph_count());
+                    FD_FONT = Some(f);
+                    FD_CACHE = Some(hashbrown::HashMap::new());
+                }
+                Err(e) => {
+                    crate::serial_println!("[font_ttf] fontdue: echec ({}), repli rasterizer maison", e);
+                }
+            }
+        }
+        FD_FONT.as_ref()
+    }
+}
+
+// Avance d'un caractere via fontdue, avec le MEME arrondi partout (voir doc de
+// tete) : metrics() et rasterize() renvoient la meme advance_width.
+fn fd_advance(f: &fontdue::Font, c: char, px: i32) -> i32 {
+    (f.metrics(c, px as f32).advance_width + 0.5) as i32
+}
+
+// Rasterise (ou ressort du cache) un glyphe fontdue au format `Glyph` commun.
+// top = hauteur du sommet du bitmap au-dessus de la ligne de base.
+fn fd_glyph(f: &'static fontdue::Font, c: char, px: i32) -> &'static Glyph {
+    unsafe {
+        let cache = FD_CACHE.as_mut().unwrap();
+        cache.entry((c, px)).or_insert_with(|| {
+            let (m, cov) = f.rasterize(c, px as f32);
+            Glyph {
+                w: m.width,
+                h: m.height,
+                left: m.xmin,
+                top: m.ymin + m.height as i32,
+                advance: (m.advance_width + 0.5) as i32,
+                cov,
+            }
+        })
+    }
+}
+
 /// La police vectorielle est-elle disponible ?
-pub fn ready() -> bool { font().is_some() }
+pub fn ready() -> bool { fd_font().is_some() || font().is_some() }
 
 /// Avance (largeur) d'un caractere en pixels a la taille `px`. Repli monospace
 /// (`px` ~ 8*scale = une cellule bitmap) si la police vectorielle est absente.
 pub fn char_width(c: char, px: i32) -> i32 {
+    if let Some(f) = fd_font() { return fd_advance(f, c, px); }
     match font() {
         Some(f) => (f.advance(f.glyph_id(c)) as f32 * px as f32 / f.upem + 0.5) as i32,
         None => px,
@@ -425,6 +480,11 @@ pub fn char_width(c: char, px: i32) -> i32 {
 
 /// Largeur totale d'une chaine en pixels. Repli monospace (`px` par caractere).
 pub fn text_width(s: &str, px: i32) -> i32 {
+    if let Some(f) = fd_font() {
+        let mut w = 0i32;
+        for c in s.chars() { w += fd_advance(f, c, px); }
+        return w;
+    }
     match font() {
         Some(f) => {
             let mut w = 0i32;
@@ -455,6 +515,20 @@ fn blit_glyph(g: &Glyph, gx0: i32, gy0: i32, rgb: u32, bold: bool) {
 /// Dessine `s` a la couleur `rgb`, sommet du texte a `y_top`, taille `px`.
 /// Renvoie `false` si la police vectorielle est indisponible (repli appelant).
 pub fn draw_text(x: i32, y_top: i32, s: &str, rgb: u32, px: i32, bold: bool) -> bool {
+    // Chemin primaire : fontdue.
+    if let Some(f) = fd_font() {
+        let ascent = (f.horizontal_line_metrics(px as f32)
+            .map(|m| m.ascent).unwrap_or(px as f32 * 0.8) + 0.5) as i32;
+        let baseline = y_top + ascent;
+        let mut pen = x;
+        for ch in s.chars() {
+            let g = fd_glyph(f, ch, px);
+            blit_glyph(g, pen + g.left, baseline - g.top, rgb, bold);
+            pen += g.advance;
+        }
+        return true;
+    }
+    // Repli : rasterizer maison.
     let f = match font() { Some(f) => f, None => return false };
     let scale = px as f32 / f.upem;
     let baseline = y_top + (f.ascent * scale + 0.5) as i32;

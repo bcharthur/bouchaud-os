@@ -4,8 +4,10 @@
 //! framebuffer est opaque). Le moteur web downscale ensuite à la largeur utile,
 //! ce qui donne un rendu volontairement pixelisé, dans la même DA que le texte.
 //!
-//!   - `png`  : PNG non entrelacé (toutes profondeurs, gris/RGB/palette/alpha) ;
-//!   - `jpeg` : JPEG baseline (SOF0), gris ou YCbCr, sous-échantillonnage, restart ;
+//!   - `png`  : PNG non entrelacé (toutes profondeurs, gris/RGB/palette/alpha),
+//!     repli `zune` (zune-png) pour l'entrelacé Adam7 ;
+//!   - `jpeg` : JPEG baseline (SOF0), gris ou YCbCr, sous-échantillonnage,
+//!     restart ; repli `zune` (zune-jpeg) pour le progressif (SOF2) ;
 //!   - `gif`  : GIF87a/89a, première image (LZW) ;
 //!   - `bmp`  : BMP Windows (BITMAPINFOHEADER) 24/32/8 bits ;
 //!   - `webp` : VP8L (lossless) décodé (Huffman canonique + LZ77 + transforms
@@ -18,6 +20,7 @@ pub mod jpeg;
 pub mod gif;
 pub mod bmp;
 pub mod webp;
+pub mod zune;
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -32,10 +35,12 @@ pub struct Image {
 /// renvoie None si le format est inconnu ou non supporté (repli propre).
 pub fn decode(data: &[u8]) -> Option<Image> {
     if data.len() > 8 && &data[..8] == &[137, 80, 78, 71, 13, 10, 26, 10] {
-        return png::decode(data);
+        // Maison d'abord (verifie en prod), zune-png en repli (entrelace Adam7).
+        return png::decode(data).or_else(|| zune::decode_png(data));
     }
     if data.len() > 3 && data[0] == 0xFF && data[1] == 0xD8 {
-        return jpeg::decode(data);
+        // Maison d'abord (baseline verifie), zune-jpeg en repli (progressif SOF2).
+        return jpeg::decode(data).or_else(|| zune::decode_jpeg(data));
     }
     if data.len() > 6 && (&data[..6] == b"GIF87a" || &data[..6] == b"GIF89a") {
         return gif::decode(data);

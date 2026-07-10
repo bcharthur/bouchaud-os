@@ -214,7 +214,7 @@ pub fn selftest() -> Result<(), &'static str> {
                 console.log('button-click-fired');
             });
         </script>"#;
-        let (mut session, page) = Session::open(html, "https://t.example/", 800);
+        let (mut session, page) = Session::open(html, "https://t.example/", 800, 620);
         let target = page.links.iter().find(|l| l.href.starts_with("js-click:"))
             .ok_or("button-no-click-target")?;
         let key = target.href.strip_prefix("js-click:").ok_or("button-bad-key")?.to_string();

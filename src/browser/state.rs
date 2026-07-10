@@ -130,14 +130,15 @@ impl BrowserState {
     /// Onglet actif (mutation).
     #[inline] pub fn tab_mut(&mut self) -> &mut Tab { &mut self.tabs[self.active] }
 
-    /// Re-met en page l'onglet actif si la largeur du contenu a change (suite a
-    /// un redimensionnement / une maximisation de la fenetre). Sans effet si la
-    /// largeur est identique — appel a chaque frame, quasi gratuit alors.
-    pub fn reflow(&mut self, width: i32) {
-        if width < 40 { return; }
+    /// Re-met en page l'onglet actif si la largeur ou la hauteur du contenu a
+    /// change (suite a un redimensionnement / une maximisation de la fenetre).
+    /// Sans effet si les deux sont identiques — appel a chaque frame, quasi
+    /// gratuit alors.
+    pub fn reflow(&mut self, width: i32, height: i32) {
+        if width < 40 || height < 40 { return; }
         let tab = self.tab_mut();
-        if tab.session.width() != width {
-            tab.page = tab.session.relayout(width);
+        if tab.session.width() != width || tab.session.height() != height {
+            tab.page = tab.session.relayout(width, height);
             let max_s = (tab.page.height - 1).max(0);
             if tab.scroll > max_s { tab.scroll = max_s; }
         }
