@@ -420,6 +420,13 @@ fn font() -> Option<&'static Font> {
 static mut FD_FONT: Option<fontdue::Font> = None;
 static mut FD_TRIED: bool = false;
 static mut FD_CACHE: Option<hashbrown::HashMap<(char, i32), Glyph>> = None;
+// Cache des avances : fontdue::Font::metrics() EVALUE LE CONTOUR du glyphe a
+// chaque appel (pas une simple lecture de table comme le rasterizer maison),
+// et le layout mesure chaque mot plusieurs fois -> sans ce cache, la mise en
+// page passait de ~1s a 4-6s sur une page reelle (regression mesuree au boot).
+static mut FD_ADV: Option<hashbrown::HashMap<(char, i32), i32>> = None;
+// Idem pour l'ascent par taille de police (une entree par px utilise).
+static mut FD_ASCENT: Option<hashbrown::HashMap<i32, i32>> = None;
 
 fn fd_font() -> Option<&'static fontdue::Font> {
     unsafe {
@@ -430,6 +437,8 @@ fn fd_font() -> Option<&'static fontdue::Font> {
                     crate::serial_println!("[font_ttf] fontdue: DejaVuSans charge ({} glyphes)", f.glyph_count());
                     FD_FONT = Some(f);
                     FD_CACHE = Some(hashbrown::HashMap::new());
+                    FD_ADV = Some(hashbrown::HashMap::new());
+                    FD_ASCENT = Some(hashbrown::HashMap::new());
                 }
                 Err(e) => {
                     crate::serial_println!("[font_ttf] fontdue: echec ({}), repli rasterizer maison", e);
@@ -443,7 +452,21 @@ fn fd_font() -> Option<&'static fontdue::Font> {
 // Avance d'un caractere via fontdue, avec le MEME arrondi partout (voir doc de
 // tete) : metrics() et rasterize() renvoient la meme advance_width.
 fn fd_advance(f: &fontdue::Font, c: char, px: i32) -> i32 {
-    (f.metrics(c, px as f32).advance_width + 0.5) as i32
+    unsafe {
+        let cache = FD_ADV.as_mut().unwrap();
+        *cache.entry((c, px)).or_insert_with(|| (f.metrics(c, px as f32).advance_width + 0.5) as i32)
+    }
+}
+
+// Ascent (position de la ligne de base sous le sommet du texte) par taille.
+fn fd_ascent(f: &fontdue::Font, px: i32) -> i32 {
+    unsafe {
+        let cache = FD_ASCENT.as_mut().unwrap();
+        *cache.entry(px).or_insert_with(|| {
+            (f.horizontal_line_metrics(px as f32)
+                .map(|m| m.ascent).unwrap_or(px as f32 * 0.8) + 0.5) as i32
+        })
+    }
 }
 
 // Rasterise (ou ressort du cache) un glyphe fontdue au format `Glyph` commun.
@@ -517,9 +540,7 @@ fn blit_glyph(g: &Glyph, gx0: i32, gy0: i32, rgb: u32, bold: bool) {
 pub fn draw_text(x: i32, y_top: i32, s: &str, rgb: u32, px: i32, bold: bool) -> bool {
     // Chemin primaire : fontdue.
     if let Some(f) = fd_font() {
-        let ascent = (f.horizontal_line_metrics(px as f32)
-            .map(|m| m.ascent).unwrap_or(px as f32 * 0.8) + 0.5) as i32;
-        let baseline = y_top + ascent;
+        let baseline = y_top + fd_ascent(f, px);
         let mut pen = x;
         for ch in s.chars() {
             let g = fd_glyph(f, ch, px);
