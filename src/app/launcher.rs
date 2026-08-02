@@ -19,7 +19,7 @@ pub fn list() {
             let name = fs.nodes[i].name_str();
             if !name.ends_with(".bapp") { continue; }
             let mut content = String::new();
-            for k in 0..fs.nodes[i].content_len { content.push(fs.nodes[i].content[k] as char); }
+            content.push_str(&fs.nodes[i].content_str());
             let m = manifest::parse(&content);
             crate::println!("  {:<16} exec={:<10} [{}]", m.name, m.exec, m.kind);
             found = true;
@@ -38,7 +38,7 @@ pub fn launch(name: &str) {
     for i in 0..MAX_NODES {
         if fs.nodes[i].used && fs.nodes[i].parent == apps && fs.nodes[i].kind == NodeKind::File {
             let mut content = String::new();
-            for k in 0..fs.nodes[i].content_len { content.push(fs.nodes[i].content[k] as char); }
+            content.push_str(&fs.nodes[i].content_str());
             let m = manifest::parse(&content);
             if m.exec == name || m.name == name {
                 let kind = AppKind::from_exec(&m.exec);

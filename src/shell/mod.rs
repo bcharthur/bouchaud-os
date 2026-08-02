@@ -94,7 +94,7 @@ pub const COMMANDS: &[&str] = &[
     "ifup", "arping", "ethinfo", "nslookup", "http", "https", "tls-selftest", "tls",
     "smoltest",
     "git", "rustc", "cargo", "rust-selftest",
-    "python", "python3",
+    "python", "python3", "pip", "pip3", "python-selftest",
 ];
 
 /// Operateur reliant un segment de commande au precedent.
@@ -456,8 +456,7 @@ fn run_script(argc: usize, argv: &[&str; 12], cwd: &mut usize) -> i32 {
     if fs.nodes[idx].kind != crate::fs::ramfs::NodeKind::File { println!("run: pas un fichier"); return 1; }
     if !fs.can(idx, crate::fs::ramfs::PERM_R) { println!("run: permission denied"); return 1; }
     // Copie le contenu (la suite peut modifier le FS pendant l'execution).
-    let mut content = String::new();
-    for k in 0..fs.nodes[idx].content_len { content.push(fs.nodes[idx].content[k] as char); }
+    let content = fs.nodes[idx].content_str();
     for raw in content.lines() {
         let l = trim(raw);
         if l.is_empty() || l.starts_with('#') { continue; }
@@ -612,8 +611,10 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "rustc" | "cargo" => c::rustc_run(argc, &argv, *cwd),
         "rust-selftest" => { c::rust_selftest(); 0 }
 
-        // Python — interpréteur RustPython embarqué (WASM/WASI, pas de pip)
-        "python" | "python3" => c::python_run(argc, &argv, *cwd),
+        // Python — interpréteur RustPython embarqué (WASM/WASI) + pip
+        "python" | "python3" => c::python_run(line, argc, &argv, *cwd),
+        "pip" | "pip3" => c::pip_cmd(argc, &argv),
+        "python-selftest" => { c::python_selftest(); 0 }
 
         _ => {
             vga::set_color(COLOR_RED);

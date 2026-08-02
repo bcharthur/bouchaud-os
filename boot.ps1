@@ -8,8 +8,8 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-Write-Host "=== cargo +nightly bootimage ===" -ForegroundColor Cyan
-cargo +nightly bootimage 2>&1 | Tee-Object -FilePath boot.log
+Write-Host "=== cargo bootimage (toolchain epinglee par rust-toolchain.toml) ===" -ForegroundColor Cyan
+cargo bootimage 2>&1 | Tee-Object -FilePath boot.log
 $code = $LASTEXITCODE
 Write-Host "=== bootimage EXIT = $code ===" -ForegroundColor Yellow
 if ($code -eq 0) {

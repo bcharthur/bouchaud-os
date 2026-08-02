@@ -128,6 +128,13 @@ fn locate_lfb() -> Option<*mut u32> {
 
 // --- Entree / sortie du mode graphique --------------------------------------
 
+/// Le bureau graphique HD est-il actif ? Utilise par les commandes qui lisent
+/// le clavier en direct (ex. REPL Python) : en mode graphique, le clavier est
+/// pompe par le window manager, une lecture bloquante gelerait le bureau.
+pub fn is_active() -> bool {
+    unsafe { HD_ACTIVE }
+}
+
 /// Passe en mode graphique HD (1280x720x32) et alloue le double-buffer.
 /// Si la carte BGA est absente, le double-buffer existe quand meme mais
 /// `present()` est sans effet (le shell texte reste accessible via Echap).

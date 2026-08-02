@@ -3,22 +3,36 @@
 OS souverain francais experimental, from scratch, en Rust `no_std`.
 Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 
-## Python embarque (RustPython via WASM/WASI)
-- [x] Commande shell `python <fichier.py>` / `python3 <fichier.py>`
-- [x] Vrai interprete Python (RustPython 0.5, stdlib figee) precompile en
-      wasm32-wasip1, execute par le runtime `wasmi` deja existant
-      (`src/wasm/mod.rs`) : fn, classes, exceptions, f-strings, comprehensions,
-      generateurs... (voir `src/lang/python.rs`, recette dans `tools/python-wasm/`)
-- [x] Sous-ensemble WASI preview1 etendu pour l'occasion : `fd_read` (le
-      script est transmis via stdin), `args_get`, `fd_prestat_get`/`path_open`
-      (repondent EBADF -- pas d'acces disque WASI reel), `poll_oneoff`,
-      `sched_yield`, `proc_exit` qui interrompt vraiment l'execution
-- [ ] Pas de `pip` : aucune installation de paquets a l'execution (pas de
-      reseau/FS depuis le WASM). Le noyau n'ayant pas encore de disque
-      persistant (BFS), le binaire (~14 Mo) est embarque via `include_bytes!`
-      comme les polices/CA existantes
-- [ ] Pas d'acces a `os`/`socket`/etc. (rustpython-stdlib, qui les implemente,
-      ne compile pas pour wasm32-wasip1 -- voir `tools/python-wasm/README.md`)
+## V0.32 - Python complet + pip (RustPython via WASM/WASI)
+- [x] Vrai interprete Python 3.13 (RustPython 0.5 + stdlib native : `os`,
+      `open()`, `json`, `re`, `math`, `hashlib`, `zlib`, `csv`, `random`,
+      `struct`, `unicodedata`...) precompile en wasm32-wasip1, execute par le
+      runtime `wasmi` existant. Binaire ~16 Mo embarque via `include_bytes!`
+      (recette : `tools/python-wasm/`)
+- [x] `python` (REPL interactif), `python <f.py> [args]`, `python -c "code"`,
+      `input()`, `sys.argv`, vrais tracebacks, codes de sortie
+- [x] Pont WASI preview1 complet -> RAMFS (`src/wasm/mod.rs`) : path_open,
+      fd_read/write/seek/readdir, mkdir/unlink/rename..., permissions Unix de
+      la session, preouvertures `/` et `.` (chemins relatifs), stdio interactif
+      (clavier/VGA au fil de l'eau), `time.sleep` reel via poll_oneoff + PIT
+- [x] `pip install <paquet>` / `pip list` : installeur cote noyau (PyPI via la
+      pile TLS 1.3 maison, unzip via l'inflate maison) pour les wheels pures
+      `py3-none-any` -> `/usr/lib/python/site-packages`, deps recursives non
+      conditionnelles ; les paquets s'importent normalement (PYTHONPATH)
+- [x] RAMFS refondu : contenu des fichiers dynamique (`Vec<u8>`, 4 Mo max),
+      1024 inodes, noms 64 car. (prerequis scripts/paquets ; l'ancien format
+      768 octets/fichier ne pouvait rien stocker d'utile)
+- [x] Toolchain epinglee (`rust-toolchain.toml`, nightly-2026-06-01) : le
+      nightly flottant cassait la cible custom (rustc-abi renomme, trait Step
+      du crate x86_64 0.14) ; `run.ps1`/`check.ps1`/`boot.ps1` sans `+nightly`
+- [x] Valide en QEMU : boot, login, python-selftest OK, script `.py` depuis le
+      RAMFS, REPL (`1+1` -> `2`, `import six` apres `pip install six`),
+      `pip install six` reel (DHCP + TLS + PyPI) en ~10 s
+- [ ] Demarrage de l'interpreteur lent sous emulation TCG (~30 s : init de la
+      VM Python interpretee par wasmi) ; pistes : accel QEMU (WHPX), wasmi
+      recent (compilation paresseuse), snapshot memoire post-init
+- [ ] Paquets a extensions C (numpy...) hors de portee (pas de cc cible) ;
+      `socket` indisponible dans le bac a sable WASM (pas de sockets WASI p1)
 
 ## V0.1 - Boot
 - [x] Boot x86_64 via bootloader 0.9

@@ -1,16 +1,22 @@
 //! RAMFS : systeme de fichiers en memoire a inodes fixes.
 //!
-//! Aucune allocation dynamique : un tableau statique de `Node` sert de table
-//! d'inodes. Supporte fichiers et dossiers, permissions simples, uid/gid, et
-//! une resolution de chemin de style Unix (`/`, `.`, `..`).
+//! La table d'inodes reste un tableau statique de `Node`, mais le contenu des
+//! fichiers est desormais dynamique (`Vec<u8>` sur le tas) : necessaire pour
+//! les scripts Python, les paquets installes par `pip` et tout fichier
+//! depassant les ~768 octets de l'ancien tampon fixe. Supporte fichiers et
+//! dossiers, permissions simples, uid/gid, et une resolution de chemin de
+//! style Unix (`/`, `.`, `..`).
 
 use crate::drivers::vga::{self, COLOR_CYAN, COLOR_DEFAULT};
 use crate::users;
 use alloc::string::String;
+use alloc::vec::Vec;
 
-pub const MAX_NODES: usize = 96;
-pub const NAME_LEN: usize = 32;
-pub const CONTENT_LEN: usize = 768;
+pub const MAX_NODES: usize = 1024;
+pub const NAME_LEN: usize = 64;
+/// Taille maximale d'un fichier (garde-fou du tas noyau). Assez pour un module
+/// Python volumineux ou une image, sans permettre d'epuiser la memoire.
+pub const MAX_FILE_SIZE: usize = 4 * 1024 * 1024;
 
 /// Droits, sur le modele Unix : lecture / ecriture / execution(-traversee).
 pub const PERM_R: u16 = 4;
@@ -23,15 +29,14 @@ pub enum NodeKind {
     Dir,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct Node {
     pub used: bool,
     pub kind: NodeKind,
     pub parent: usize,
     pub name: [u8; NAME_LEN],
     pub name_len: usize,
-    pub content: [u8; CONTENT_LEN],
-    pub content_len: usize,
+    pub content: Vec<u8>,
     pub mode: u16,
     pub uid: u16,
     pub gid: u16,
@@ -45,12 +50,26 @@ impl Node {
             parent: 0,
             name: [0; NAME_LEN],
             name_len: 0,
-            content: [0; CONTENT_LEN],
-            content_len: 0,
+            content: Vec::new(),
             mode: 0o644,
             uid: 0,
             gid: 0,
         }
+    }
+
+    /// Taille du contenu en octets (remplace l'ancien champ `content_len`).
+    pub fn content_len(&self) -> usize {
+        self.content.len()
+    }
+
+    /// Contenu interprete octet par octet (latin-1), comme les anciens
+    /// lecteurs qui faisaient `content[i] as char`.
+    pub fn content_str(&self) -> String {
+        let mut s = String::with_capacity(self.content.len());
+        for &b in &self.content {
+            s.push(b as char);
+        }
+        s
     }
 
     pub fn name_str(&self) -> &str {
@@ -80,7 +99,7 @@ pub struct FileSystem {
     pub nodes: [Node; MAX_NODES],
 }
 
-static mut FS: FileSystem = FileSystem { nodes: [Node::empty(); MAX_NODES] };
+static mut FS: FileSystem = FileSystem { nodes: [const { Node::empty() }; MAX_NODES] };
 
 /// Accede au systeme de fichiers global.
 pub fn fs() -> &'static mut FileSystem {
@@ -90,7 +109,9 @@ pub fn fs() -> &'static mut FileSystem {
 impl FileSystem {
     /// Monte le RAMFS et cree l'arborescence de base.
     pub fn init(&mut self) {
-        self.nodes = [Node::empty(); MAX_NODES];
+        for n in self.nodes.iter_mut() {
+            *n = Node::empty();
+        }
 
         self.nodes[0].used = true;
         self.nodes[0].kind = NodeKind::Dir;
@@ -178,29 +199,29 @@ impl FileSystem {
     }
 
     pub fn write_node(&mut self, idx: usize, text: &str) {
-        let bytes = text.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() && i < CONTENT_LEN {
-            self.nodes[idx].content[i] = bytes[i];
-            i += 1;
+        self.write_node_bytes(idx, text.as_bytes());
+    }
+
+    /// Remplace le contenu par des octets bruts. Renvoie `false` (sans rien
+    /// ecrire) si la taille depasse `MAX_FILE_SIZE`.
+    pub fn write_node_bytes(&mut self, idx: usize, data: &[u8]) -> bool {
+        if data.len() > MAX_FILE_SIZE {
+            return false;
         }
-        self.nodes[idx].content_len = i;
+        self.nodes[idx].content = data.to_vec();
+        true
     }
 
     pub fn append_node(&mut self, idx: usize, text: &str) {
-        let bytes = text.as_bytes();
-        let mut pos = self.nodes[idx].content_len;
-        if pos > 0 && pos < CONTENT_LEN {
-            self.nodes[idx].content[pos] = b'\n';
-            pos += 1;
+        let node = &mut self.nodes[idx];
+        let extra = text.len() + 1;
+        if node.content.len() + extra > MAX_FILE_SIZE {
+            return;
         }
-        let mut i = 0;
-        while i < bytes.len() && pos < CONTENT_LEN {
-            self.nodes[idx].content[pos] = bytes[i];
-            pos += 1;
-            i += 1;
+        if !node.content.is_empty() {
+            node.content.push(b'\n');
         }
-        self.nodes[idx].content_len = pos;
+        node.content.extend_from_slice(text.as_bytes());
     }
 
     pub fn resolve(&self, path: &str, cwd: usize) -> Option<usize> {
@@ -394,7 +415,7 @@ pub fn print_node_line(fs: &FileSystem, idx: usize, long: bool) {
     let node = &fs.nodes[idx];
     if long {
         print_mode(node.kind, node.mode);
-        print!(" {}:{} {:>4} ", node.uid, node.gid, node.content_len);
+        print!(" {}:{} {:>4} ", node.uid, node.gid, node.content.len());
     }
     if node.kind == NodeKind::Dir {
         vga::set_color(COLOR_CYAN);

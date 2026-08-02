@@ -8,7 +8,7 @@ if ($LASTEXITCODE -ne 0) {
   exit $LASTEXITCODE
 }
 
-cargo +nightly bootimage
+cargo bootimage
 # Si la generation de l'image echoue (erreur de compilation, llvm-objcopy
 # bloque, .bin verrouille par un QEMU encore ouvert...), on ARRETE ici au lieu
 # de booter silencieusement une ancienne image obsolete.

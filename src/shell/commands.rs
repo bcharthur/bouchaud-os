@@ -4,7 +4,7 @@ use crate::arch::x86_64::{cpu, gdt, idt, interrupts};
 use crate::browser;
 use crate::drivers::keyboard;
 use crate::drivers::vga::{self, COLOR_CYAN, COLOR_DEFAULT, COLOR_YELLOW};
-use crate::fs::ramfs::{self, NodeKind, CONTENT_LEN, MAX_NODES, PERM_R, PERM_W, PERM_X};
+use crate::fs::ramfs::{self, NodeKind, MAX_FILE_SIZE, MAX_NODES, PERM_R, PERM_W, PERM_X};
 use crate::kernel::timer;
 use crate::net;
 use crate::shell::history;
@@ -34,7 +34,8 @@ pub fn help() {
     println!("  texte   : grep <motif> [f], wc [f], head [-n N] [f], tail [-n N] [f], find [path]");
     println!("  env     : export NOM=val, env, unset NOM, $NOM, run <script.bsh>");
     println!("  divers  : date, js-selftest, wasm <f.wasm>, wasm-selftest, rustc <f.rs>");
-    println!("            python <f.py> (RustPython embarque, sans pip ni acces disque/reseau)");
+    println!("  python  : python (REPL) | python <f.py> [args] | python -c \"code\"");
+    println!("            pip install <paquet> (wheels pures PyPI), pip list");
     println!("  graphique: desktop (bureau VGA + souris, Echap pour quitter)");
     println!("  materiel: lspci");
     println!("  reseau  : ifup, ethinfo, arping <ip>, ping <ip>, ifconfig, ip, route, arp");
@@ -103,7 +104,7 @@ pub fn meminfo() {
     println!("memory model: static kernel memory + heap (alloc) + RAMFS");
     println!("heap: used={} o, free={} o, total={} o", used, free, total);
     println!("ramfs inodes: used={} free={} total={}", fs.used_nodes(), fs.free_nodes(), MAX_NODES);
-    println!("ramfs max file size: {} bytes", CONTENT_LEN);
+    println!("ramfs max file size: {} bytes", MAX_FILE_SIZE);
     println!("paging/user isolation: roadmap (tas statique pour l'instant)");
 }
 
@@ -442,9 +443,7 @@ pub fn cat(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
     };
     if fs.nodes[idx].kind != NodeKind::File { println!("cat: dossier"); return 1; }
     if !fs.can(idx, PERM_R) { println!("cat: permission denied"); return 1; }
-    for i in 0..fs.nodes[idx].content_len {
-        print!("{}", fs.nodes[idx].content[i] as char);
-    }
+    print!("{}", fs.nodes[idx].content_str());
     println!("");
     0
 }
@@ -550,9 +549,8 @@ pub fn cp(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
         Ok(idx) => idx,
         Err(e) => { println!("cp: {}", e); return 1; }
     };
-    let len = fs.nodes[src].content_len;
-    for i in 0..len { fs.nodes[dst].content[i] = fs.nodes[src].content[i]; }
-    fs.nodes[dst].content_len = len;
+    let data = fs.nodes[src].content.clone();
+    fs.nodes[dst].content = data;
     0
 }
 
@@ -592,7 +590,7 @@ pub fn stat(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
     print!("mode: "); ramfs::print_mode(n.kind, n.mode); println!("  octal={:o}", n.mode);
     println!("uid: {}", n.uid);
     println!("gid: {}", n.gid);
-    println!("size: {}", n.content_len);
+    println!("size: {}", n.content.len());
     0
 }
 
@@ -788,7 +786,7 @@ pub fn wasm(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
     };
     if fs.nodes[idx].kind != NodeKind::File { println!("wasm: pas un fichier"); return 1; }
     if !fs.can(idx, PERM_R) { println!("wasm: permission denied"); return 1; }
-    let len = fs.nodes[idx].content_len;
+    let len = fs.nodes[idx].content.len();
     let mut bytes = alloc::vec::Vec::with_capacity(len);
     for i in 0..len { bytes.push(fs.nodes[idx].content[i]); }
 
@@ -831,7 +829,7 @@ fn input_text(path: Option<&str>, cwd: usize, who: &str) -> Option<String> {
             if !fs.can(idx, PERM_R) { println!("{}: permission denied", who); return None; }
             let n = &fs.nodes[idx];
             let mut s = String::new();
-            for i in 0..n.content_len { s.push(n.content[i] as char); }
+            s.push_str(&n.content_str());
             Some(s)
         }
         None => Some(crate::shell::take_stdin().unwrap_or_default()),
@@ -936,7 +934,7 @@ pub fn rustc_run(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
             Some(idx) if fs.nodes[idx].kind == NodeKind::File => {
                 let n = &fs.nodes[idx];
                 let mut s = alloc::string::String::new();
-                for i in 0..n.content_len { s.push(n.content[i] as char); }
+                s.push_str(&n.content_str());
                 s
             }
             _ => {
@@ -960,7 +958,7 @@ pub fn rustc_run(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
         if !fs.can(idx, PERM_R) { println!("rustc: permission denied"); return 1; }
         let n = &fs.nodes[idx];
         let mut s = alloc::string::String::new();
-        for i in 0..n.content_len { s.push(n.content[i] as char); }
+        s.push_str(&n.content_str());
         s
     };
 
@@ -1029,16 +1027,35 @@ pub fn rust_selftest() {
 }
 
 // ---------------------------------------------------------------------------
-// Python — interpréteur RustPython embarqué (WASM/WASI)
+// Python — interpréteur RustPython embarqué (WASM/WASI) + pip
 // ---------------------------------------------------------------------------
 
-/// Lance l'interpréteur Python embarqué sur un fichier `.py`.
-/// Usage : `python <fichier.py>`. Pas de REPL ni de `pip` (voir `lang::python`).
-pub fn python_run(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
+/// `python` : REPL interactif sans argument, `python -c "code"`, ou
+/// `python <fichier.py> [args...]`. Voir `lang::python`.
+pub fn python_run(line: &str, argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
+    let cwd_path = ramfs::path_string(ramfs::fs(), cwd);
+
     if argc < 2 {
-        println!("usage: python <fichier.py>");
-        return 1;
+        // REPL : lecture clavier bloquante, disponible dans le shell texte.
+        if crate::drivers::gfx::is_active() {
+            println!("python: REPL indisponible dans le bureau graphique (utilise le shell texte)");
+            println!("        (python <fichier.py> et python -c \"code\" restent utilisables)");
+            return 1;
+        }
+        return crate::lang::python::run_repl(cwd, &cwd_path);
     }
+
+    if argv[1] == "-c" {
+        // Le shell ne gere pas les guillemets : tout ce qui suit `-c` est le code.
+        let code = remainder_after_tokens(line, 2);
+        if code.is_empty() {
+            println!("usage: python -c \"code\"");
+            return 1;
+        }
+        return crate::lang::python::run_code(code, cwd, &cwd_path);
+    }
+
+    // Fichier : resolu en chemin absolu, le module WASM l'ouvre via WASI.
     let fs = ramfs::fs();
     let idx = match fs.resolve_checked(argv[1], cwd) {
         Ok(i) => i,
@@ -1049,21 +1066,28 @@ pub fn python_run(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
         return 1;
     }
     if !fs.can(idx, PERM_R) { println!("python: permission denied"); return 1; }
-    let n = &fs.nodes[idx];
-    let mut src = alloc::string::String::new();
-    for i in 0..n.content_len { src.push(n.content[i] as char); }
+    let abs = ramfs::path_string(fs, idx);
+    let mut extra: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+    for i in 2..argc { extra.push(argv[i]); }
+    crate::lang::python::run_file(&abs, &extra, cwd, &cwd_path)
+}
 
-    let res = crate::lang::python::run(&src, argv[1]);
-    if !res.output.is_empty() {
-        print!("{}", res.output);
-        if !res.output.ends_with('\n') { println!(""); }
+/// `pip install <paquet>` / `pip list` : voir `lang::pip`.
+pub fn pip_cmd(argc: usize, argv: &[&str; 12]) -> i32 {
+    crate::lang::pip::cmd(argc, argv)
+}
+
+/// Selftest Python : execute un petit programme via toute la chaine
+/// (wasmi + WASI + RustPython) et verifie la sortie.
+pub fn python_selftest() {
+    match crate::lang::python::selftest() {
+        Ok(()) => println!("python-selftest: OK (sum(x*x)=30)"),
+        Err(e) => {
+            vga::set_color(vga::COLOR_RED);
+            println!("python-selftest: ECHEC ({})", e);
+            vga::set_color(COLOR_DEFAULT);
+        }
     }
-    if let Some(e) = res.error {
-        vga::set_color(vga::COLOR_RED);
-        println!("python: {}", e);
-        vga::set_color(COLOR_DEFAULT);
-    }
-    res.exit_code
 }
 
 // ---------------------------------------------------------------------------

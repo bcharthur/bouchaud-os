@@ -91,9 +91,7 @@ fn load(path: &str, cwd: usize) -> Vec<String> {
     let fs = ramfs::fs();
     if let Ok(idx) = fs.resolve_checked(path, cwd) {
         if fs.nodes[idx].kind == NodeKind::File && fs.can(idx, PERM_R) {
-            let n = &fs.nodes[idx];
-            let mut s = String::new();
-            for i in 0..n.content_len { s.push(n.content[i] as char); }
+            let s = fs.nodes[idx].content_str();
             for line in s.split('\n') { out.push(line.to_string()); }
         }
     }
