@@ -33,7 +33,8 @@ pub fn help() {
     println!("            cp <src> <dst>, mv <src> <dst>, rm <file>, rmdir <dir>, echo <texte>");
     println!("  texte   : grep <motif> [f], wc [f], head [-n N] [f], tail [-n N] [f], find [path]");
     println!("  env     : export NOM=val, env, unset NOM, $NOM, run <script.bsh>");
-    println!("  divers  : date, js-selftest, wasm <f.wasm>, wasm-selftest");
+    println!("  divers  : date, js-selftest, wasm <f.wasm>, wasm-selftest, rustc <f.rs>");
+    println!("            python <f.py> (RustPython embarque, sans pip ni acces disque/reseau)");
     println!("  graphique: desktop (bureau VGA + souris, Echap pour quitter)");
     println!("  materiel: lspci");
     println!("  reseau  : ifup, ethinfo, arping <ip>, ping <ip>, ifconfig, ip, route, arp");
@@ -1025,6 +1026,44 @@ pub fn rust_selftest() {
         println!("rust-selftest: {}/{} OK, {} echecs", ok, ok + fail, fail);
     }
     vga::set_color(COLOR_DEFAULT);
+}
+
+// ---------------------------------------------------------------------------
+// Python — interpréteur RustPython embarqué (WASM/WASI)
+// ---------------------------------------------------------------------------
+
+/// Lance l'interpréteur Python embarqué sur un fichier `.py`.
+/// Usage : `python <fichier.py>`. Pas de REPL ni de `pip` (voir `lang::python`).
+pub fn python_run(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
+    if argc < 2 {
+        println!("usage: python <fichier.py>");
+        return 1;
+    }
+    let fs = ramfs::fs();
+    let idx = match fs.resolve_checked(argv[1], cwd) {
+        Ok(i) => i,
+        Err(e) => { println!("python: {}: {}", argv[1], e); return 1; }
+    };
+    if fs.nodes[idx].kind != NodeKind::File {
+        println!("python: {} n'est pas un fichier", argv[1]);
+        return 1;
+    }
+    if !fs.can(idx, PERM_R) { println!("python: permission denied"); return 1; }
+    let n = &fs.nodes[idx];
+    let mut src = alloc::string::String::new();
+    for i in 0..n.content_len { src.push(n.content[i] as char); }
+
+    let res = crate::lang::python::run(&src, argv[1]);
+    if !res.output.is_empty() {
+        print!("{}", res.output);
+        if !res.output.ends_with('\n') { println!(""); }
+    }
+    if let Some(e) = res.error {
+        vga::set_color(vga::COLOR_RED);
+        println!("python: {}", e);
+        vga::set_color(COLOR_DEFAULT);
+    }
+    res.exit_code
 }
 
 // ---------------------------------------------------------------------------

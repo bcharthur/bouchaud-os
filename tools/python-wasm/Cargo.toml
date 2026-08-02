@@ -1,0 +1,16 @@
+[package]
+name = "python-wasm-builder"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Ce crate n'est PAS compile par le noyau : c'est l'outil hors-ligne qui
+# produit `src/assets/python/rustpython.wasm` (voir README.md a cote).
+[dependencies]
+rustpython-vm = { version = "0.5", default-features = false, features = ["compiler", "freeze-stdlib", "encodings", "importlib", "stdio"] }
+rustpython-pylib = { version = "0.5", features = ["freeze-stdlib"] }
+
+[profile.release]
+opt-level = "z"
+panic = "abort"
+strip = true
