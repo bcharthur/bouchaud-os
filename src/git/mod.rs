@@ -87,21 +87,13 @@ fn read_child(dir_idx: usize, name: &str) -> String {
     let fs = ramfs::fs();
     let fidx = match fs.find_child(dir_idx, name) { Some(i) => i, None => return String::new() };
     if fs.nodes[fidx].kind != NodeKind::File { return String::new(); }
-    let mut s = String::new();
-    for k in 0..fs.nodes[fidx].content_len { s.push(fs.nodes[fidx].content[k] as char); }
-    s
+    fs.nodes[fidx].content_str()
 }
 
 fn write_child(dir_idx: usize, name: &str, content: &str) {
     let fs = ramfs::fs();
-    match fs.touch_at(dir_idx, name) {
-        Ok(fidx) => {
-            let bytes = content.as_bytes();
-            let n = bytes.len().min(ramfs::CONTENT_LEN);
-            fs.nodes[fidx].content_len = n;
-            for i in 0..n { fs.nodes[fidx].content[i] = bytes[i]; }
-        }
-        Err(_) => {}
+    if let Ok(fidx) = fs.touch_at(dir_idx, name) {
+        fs.write_node(fidx, content);
     }
 }
 
@@ -282,7 +274,7 @@ fn cmd_commit(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
     // Ajoute au journal (tronqué si nécessaire)
     let entry = format!("{}|{}|{}\n", hash, author, msg);
     let mut log = read_child(repo, "commits");
-    if log.len() + entry.len() + 5 > ramfs::CONTENT_LEN {
+    if log.len() + entry.len() + 5 > ramfs::MAX_FILE_SIZE {
         // Garde la moitié du journal
         let half = log.len() / 2;
         if let Some(nl) = log[half..].find('\n') { log = log[half + nl + 1..].to_string(); }

@@ -4,9 +4,14 @@
 //! for..in, println!, arithmétique) pour exécuter des programmes Rust simples
 //! directement dans l'OS sans compilateur externe.
 //!
-//! `python` : vrai interpréteur Python (RustPython), précompilé en WASM et
-//! exécuté par le runtime `wasmi` (`crate::wasm`). Pas de `pip` ni d'accès
-//! disque/réseau depuis les scripts (voir `python.rs`).
+//! `python` : vrai interpréteur Python (RustPython + stdlib), précompilé en
+//! WASM et exécuté par le runtime `wasmi` (`crate::wasm`), avec accès fichiers
+//! RAMFS via le pont WASI. REPL, scripts, `-c` (voir `python.rs`).
+//!
+//! `pip` : installeur de paquets Python purs depuis PyPI, côté noyau
+//! (réseau TLS maison + unzip maison), vers `/usr/lib/python/site-packages`
+//! (voir `pip.rs`).
 
 pub mod mini_rust;
+pub mod pip;
 pub mod python;

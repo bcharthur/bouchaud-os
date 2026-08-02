@@ -255,7 +255,7 @@ fn load_file(path: &str, url: &str, width: i32, height: i32) -> (Session, Page) 
     let body = match fs.resolve_checked(&full, 0) {
         Ok(idx) if fs.nodes[idx].kind == ramfs::NodeKind::File && fs.can(idx, ramfs::PERM_R) => {
             let mut s = String::new();
-            for k in 0..fs.nodes[idx].content_len { s.push(fs.nodes[idx].content[k] as char); }
+            s.push_str(&fs.nodes[idx].content_str());
             format!("<h2>file:{}</h2><pre>{}</pre>", full, esc(&s))
         }
         Ok(_) => format!("<h2>Permission refusée</h2><p>{}</p>", full),

@@ -6,9 +6,16 @@ publish = false
 
 # Ce crate n'est PAS compile par le noyau : c'est l'outil hors-ligne qui
 # produit `src/assets/python/rustpython.wasm` (voir README.md a cote).
+#
+# `host_env` (vm) active `posix`/`_io`/`open()` et les imports depuis le
+# systeme de fichiers via WASI -- traduits vers le RAMFS par `src/wasm/mod.rs`.
+# `rustpython-stdlib` apporte les modules natifs purs-Rust qui compilent pour
+# wasm32-wasip1 : json, math, zlib (zlib-rs), hashlib, csv, random, unicodedata,
+# binascii, struct, array... (socket/ssl/mmap etc. sont exclus par cfg).
 [dependencies]
-rustpython-vm = { version = "0.5", default-features = false, features = ["compiler", "freeze-stdlib", "encodings", "importlib", "stdio"] }
+rustpython-vm = { version = "0.5", default-features = false, features = ["compiler", "freeze-stdlib", "encodings", "importlib", "stdio", "host_env"] }
 rustpython-pylib = { version = "0.5", features = ["freeze-stdlib"] }
+rustpython-stdlib = { version = "0.5", default-features = false, features = ["host_env"] }
 
 [profile.release]
 opt-level = "z"

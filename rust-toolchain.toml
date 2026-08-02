@@ -1,3 +1,6 @@
 [toolchain]
-channel = "nightly"
+# Nightly epingle : le canal flottant "nightly" casse regulierement la cible
+# custom (renommage de `rustc-abi`, evolution du trait Step attendue par le
+# crate x86_64 0.14...). rustup installe automatiquement cette version.
+channel = "nightly-2026-06-01"
 components = ["rust-src", "llvm-tools-preview"]
