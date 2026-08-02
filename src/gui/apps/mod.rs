@@ -9,6 +9,7 @@ pub mod file_explorer;
 pub mod rustpad;
 pub mod system_info;
 pub mod terminal;
+pub mod webview;
 
 use crate::browser;
 use crate::browser::ui::chrome::{self, ChromeEvent};
@@ -88,6 +89,11 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
             _ => false,
         },
         App::Rustpad { state } => rustpad::on_key(state, k),
+
+        App::WebView { state } => {
+            webview::on_key(state, k, bx, by, bw, bh);
+            false
+        }
         _ => false,
     };
 
@@ -121,6 +127,13 @@ pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
         if let Some(lbl) = calculator::key_at(bx as i32, by as i32, bwi, bhi, mx, my) {
             calculator::apply_key(expr, lbl);
         }
+        return;
+    }
+
+    if let App::WebView { state } = &mut w.app {
+        let rel_x = mx - bx as i32;
+        let rel_y = my - by as i32;
+        webview::on_click(state, rel_x, rel_y, bx, by, bw, bh);
         return;
     }
 
@@ -194,6 +207,11 @@ pub(crate) fn wheel_to_app(w: &mut Win, mx: i32, my: i32, delta: i32) {
     if let App::Rustpad { state } = &mut w.app {
         rustpad::on_wheel(state, delta);
     }
+    if let App::WebView { state } = &mut w.app {
+        let bw = (w.w - 6).max(1) as usize;
+        let bh = (w.h - TITLE_H - 4).max(1) as usize;
+        webview::on_wheel(state, delta, bw, bh);
+    }
 }
 
 // ── Rendu ─────────────────────────────────────────────────────────────────────
@@ -210,6 +228,7 @@ pub(crate) fn draw_app(w: &Win) {
         App::Calc { expr }                  => calculator::draw(expr, bx, by, bw, bh),
         App::Monitor                        => system_info::draw(bx, by, bw, bh),
         App::Rustpad { state }              => rustpad::draw(state, bx, by, bw, bh),
+        App::WebView { state }              => webview::draw(state, bx, by, bw, bh),
     }
 }
 

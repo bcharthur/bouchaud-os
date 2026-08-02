@@ -16,8 +16,32 @@ use alloc::vec::Vec;
 /// via le préfixe `compat:` sans modifier cette constante.
 const ENABLE_COMPAT_PROXY: bool = false;
 
-/// Hôte du service de rendu déporté (voir `tools/render-proxy`).
-const PROXY_HOST: &str = "192.168.1.187:8080";
+/// Hôtes candidats du service de rendu déporté (voir `tools/render-proxy`),
+/// essayés dans l'ordre : la passerelle SLIRP standard de QEMU (10.0.2.2 =
+/// l'hôte, marche sans configuration réseau) PUIS l'IP LAN de l'hôte (utile si
+/// l'OS tourne sur du matériel réel ou un réseau ponté). Le premier qui répond
+/// à `/healthz` est mémorisé pour la session.
+pub(crate) const PROXY_HOSTS: &[&str] = &["10.0.2.2:8080", "192.168.1.187:8080"];
+
+/// Hôte du proxy effectivement joignable (sondé une fois via /healthz, puis
+/// mémorisé). Tant qu'aucun ne répond, on ne mémorise rien (nouvel essai au
+/// prochain appel — le service a pu être lancé entre-temps).
+pub(crate) fn proxy_host() -> &'static str {
+    static mut CACHED: Option<&'static str> = None;
+    unsafe {
+        if let Some(h) = *core::ptr::addr_of!(CACHED) {
+            return h;
+        }
+    }
+    for h in PROXY_HOSTS {
+        let doc = crate::net::fetch_document(&format!("http://{}/healthz", h));
+        if doc.ok {
+            unsafe { CACHED = Some(h); }
+            return h;
+        }
+    }
+    PROXY_HOSTS[0]
+}
 
 // ── API publique ──────────────────────────────────────────────────────────────
 
@@ -209,7 +233,7 @@ fn local_render_inner(url: &str, width: i32, height: i32) -> (Session, Page) {
 // ── Mode COMPAT (optionnel, non souverain) ────────────────────────────────────
 
 fn compat_render(url: &str, width: i32, height: i32) -> (Session, Page) {
-    let purl = format!("http://{}/render?url={}", PROXY_HOST, pct_encode(url));
+    let purl = format!("http://{}/render?url={}", proxy_host(), pct_encode(url));
     let doc  = crate::net::fetch_document(&purl);
     if doc.ok && !doc.body.is_empty() {
         if let Some(img) = crate::gui::image::decode(&doc.body) {
@@ -241,7 +265,7 @@ fn compat_render(url: &str, width: i32, height: i32) -> (Session, Page) {
          <p>Proxy attendu : <b>http://{host}</b></p>\
          <p>URL : {u}</p><pre>{info}</pre>\
          <p><a href=\"about:bouchaud\">← Accueil</a></p>",
-        host = PROXY_HOST, u = esc(url), info = info
+        host = proxy_host(), u = esc(url), info = info
     );
     from_html(html.as_bytes(), url, width, height)
 }
@@ -289,7 +313,7 @@ fn esc(s: &str) -> String {
     o
 }
 
-fn pct_encode(s: &str) -> String {
+pub(crate) fn pct_encode(s: &str) -> String {
     let mut o = String::new();
     for b in s.bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') { o.push(b as char); }

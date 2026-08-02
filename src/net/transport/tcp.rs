@@ -79,7 +79,37 @@ fn parse(seg: &[u8]) -> Option<Seg> {
     })
 }
 
-const WINDOW: u16 = 64240;
+// Fenetre de reception annoncee, au maximum. Combinee a l'option MSS 1460
+// (segments plus gros -> ~31 segments pour un PNG de 44 Ko, ce qui tient dans
+// l'anneau RX de 64 descripteurs) et au reassemblage HORS-ORDRE ci-dessous, le
+// pair (SLIRP) peut envoyer tout le corps en une rafale qu'on draine en une
+// passe. Une fenetre PLUS PETITE etait contre-productive : elle forcait SLIRP
+// a envoyer par petites tranches espacees de plusieurs secondes (cwnd bloquee),
+// faisant durer un transfert de 44 Ko plus de 2 minutes.
+const WINDOW: u16 = 65535;
+
+/// Construit un segment SYN avec l'option MSS (1460) : sans elle le pair
+/// suppose un MSS de 536 o et fragmente en ~2,7x plus de segments, ce qui
+/// aggrave le risque de debordement de l'anneau RX. Renvoie la longueur.
+fn build_syn(buf: &mut [u8], dst: &Ipv4Addr, sport: u16, dport: u16, isn: u32) -> usize {
+    // En-tete de 24 octets (data offset = 6 mots) : 20 fixes + option MSS 4 o.
+    let total = 24;
+    buf[0] = (sport >> 8) as u8; buf[1] = sport as u8;
+    buf[2] = (dport >> 8) as u8; buf[3] = dport as u8;
+    buf[4..8].copy_from_slice(&isn.to_be_bytes());
+    buf[8..12].copy_from_slice(&0u32.to_be_bytes());
+    buf[12] = 0x60; // data offset = 6 mots (24 octets)
+    buf[13] = SYN;
+    buf[14] = (WINDOW >> 8) as u8; buf[15] = WINDOW as u8;
+    buf[16] = 0; buf[17] = 0; // checksum
+    buf[18] = 0; buf[19] = 0; // urgent
+    // Option MSS : kind=2, len=4, valeur=1460.
+    buf[20] = 2; buf[21] = 4;
+    buf[22] = (1460u16 >> 8) as u8; buf[23] = 1460u16 as u8;
+    let c = checksum(&net::our_ip(), dst, &buf[..total]);
+    buf[16] = (c >> 8) as u8; buf[17] = c as u8;
+    total
+}
 
 struct PendingSeg {
     seq: u32,
@@ -92,14 +122,44 @@ fn seq_less(a: u32, b: u32) -> bool {
 
 /// Ouvre une connexion, envoie `request`, accumule la reponse dans `out`.
 /// Renvoie true si la poignee de main a reussi.
+/// Recolle les segments recus en avance devenus contigus avec `ack` : tant
+/// qu'un segment memorise commence exactement a `ack`, on l'ajoute au flux et
+/// on avance. Les doublons/segments deja couverts sont ecartes.
+fn drain_ooo(ooo: &mut Vec<(u32, Vec<u8>)>, ack: &mut u32, out: &mut Vec<u8>) {
+    loop {
+        let mut best: Option<usize> = None;
+        for (i, (s, _)) in ooo.iter().enumerate() {
+            if *s == *ack {
+                best = Some(i);
+                break;
+            }
+        }
+        match best {
+            Some(i) => {
+                let (_, data) = ooo.remove(i);
+                *ack = ack.wrapping_add(data.len() as u32);
+                out.extend_from_slice(&data);
+            }
+            None => {
+                // Ecarte les segments deja entierement couverts (seq < ack).
+                ooo.retain(|(s, d)| {
+                    let rel = s.wrapping_sub(*ack) as i32;
+                    rel >= 0 || (rel + d.len() as i32) > 0
+                });
+                break;
+            }
+        }
+    }
+}
+
 pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> bool {
     let sport = 0xC000u16 | (cpu::rdtsc() as u16 & 0x0FFF);
     let isn = cpu::rdtsc() as u32;
     let mut seg = [0u8; 1600];
     let mut rb = [0u8; 2048];
 
-    // --- SYN ---
-    let l = build(&mut seg, &dst, sport, port, isn, 0, SYN, WINDOW, &[]);
+    // --- SYN (avec option MSS) ---
+    let l = build_syn(&mut seg, &dst, sport, port, isn);
     net::send_ip(dst, 6, &seg[..l]);
 
     // --- attend SYN-ACK ---
@@ -132,17 +192,24 @@ pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> boo
     let mut my_seq = my_seq.wrapping_add(request.len() as u32);
 
     // --- reception ---
-    // Econome en CPU : on draine rapidement tous les segments disponibles, et
-    // quand il n'y a RIEN a lire on met le CPU en veille (`hlt`) jusqu'a la
-    // prochaine interruption (timer PIT ~55 ms) au lieu de faire tourner un coeur
-    // a fond. Le service de rendu deporte peut mettre plusieurs secondes a
-    // repondre : timeout d'INACTIVITE base sur l'horloge (repousse a chaque octet
-    // recu, donc un gros transfert n'est jamais coupe).
+    // Reassemblage HORS-ORDRE : les segments qui arrivent en avance (gap) sont
+    // MEMORISES (`ooo`) au lieu d'etre jetes. Sans ca, un seul segment reordonne
+    // faisait re-ACKer l'ancienne position et attendre le RTO de retransmission
+    // du pair (backoff exponentiel) -> un PNG de 44 Ko mettait ~250 s. Avec le
+    // buffer, une rafale reordonnee est recollee sans retransmission.
+    //
+    // Econome en CPU : on draine tout ce qui est dispo sans dormir ; quand il
+    // n'arrive plus rien on met le CPU en veille (`hlt`) jusqu'a la prochaine
+    // interruption. Timeout d'INACTIVITE repousse a chaque octet recu (un gros
+    // transfert n'est jamais coupe).
     use crate::kernel::timer;
     let deadline = 30 * timer::TICKS_PER_SECOND.max(1);
     let mut last = timer::ticks();
+    // Segments recus en avance, tries par numero de sequence.
+    let mut ooo: Vec<(u32, Vec<u8>)> = Vec::new();
     loop {
         let mut got = false;
+        let mut advanced = false;
         // Draine tout ce qui est dispo SANS dormir tant qu'il arrive des paquets.
         for _ in 0..8192u32 {
             match net::poll_ip(6, Some(dst), &mut rb) {
@@ -152,15 +219,26 @@ pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> boo
                         got = true;
                         let plen = n - h.data_off;
                         if plen > 0 {
+                            let rel = h.seq.wrapping_sub(my_ack) as i32;
                             if h.seq == my_ack {
+                                // Segment attendu : on l'ajoute puis on recolle
+                                // les segments en avance devenus contigus.
                                 out.extend_from_slice(&rb[h.data_off..n]);
                                 my_ack = my_ack.wrapping_add(plen as u32);
+                                advanced = true;
+                                drain_ooo(&mut ooo, &mut my_ack, out);
+                            } else if rel > 0 && (rel as usize) < 2 * 1024 * 1024 {
+                                // Segment en avance (gap) : on le memorise au lieu
+                                // de le jeter. Dedup par seq, buffer borne.
+                                if !ooo.iter().any(|(s, _)| *s == h.seq) && ooo.len() < 512 {
+                                    ooo.push((h.seq, rb[h.data_off..n].to_vec()));
+                                }
                             }
-                            // ACK (ou re-ACK si hors sequence)
+                            // ACK cumulatif de tout ce qui est en ordre.
                             let a = build(&mut seg, &dst, sport, port, my_seq, my_ack, ACK, WINDOW, &[]);
                             net::send_ip(dst, 6, &seg[..a]);
                         }
-                        if h.flags & FIN != 0 {
+                        if h.flags & FIN != 0 && ooo.is_empty() {
                             my_ack = my_ack.wrapping_add(1);
                             let a = build(&mut seg, &dst, sport, port, my_seq, my_ack, ACK, WINDOW, &[]);
                             net::send_ip(dst, 6, &seg[..a]);
@@ -178,10 +256,34 @@ pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> boo
         if out.len() > 4_000_000 { break; }
         if got {
             last = timer::ticks();
+            let _ = advanced;
         } else {
-            // Rien a lire : on dort jusqu'a la prochaine interruption (anti-chauffe).
-            x86_64::instructions::interrupts::enable_and_hlt();
-            if timer::ticks().wrapping_sub(last) > deadline { break; }
+            // Rien a lire pour l'instant. On NE DORT PAS via `hlt` tant que le
+            // transfert est jeune : `enable_and_hlt` ne rend la main qu'a la
+            // prochaine interruption timer (~55 ms), ce qui RETARDE nos ACK
+            // d'autant -> le pair (SLIRP) mesure un RTT enorme, garde une fenetre
+            // de congestion de 1 segment et envoie ~1 segment/3,7 s (44 Ko en
+            // ~130 s). En occupant le CPU (`pause`) on ACKe instantanement : la
+            // fenetre grossit et le transfert passe a < 1 s. Apres une periode
+            // d'inactivite reelle (le proxy reflechit, page vide...), on repasse
+            // en veille pour ne pas chauffer un coeur inutilement.
+            let idle = timer::ticks().wrapping_sub(last);
+            if idle > deadline { break; }
+            // Busy-poll (ACK a la microseconde) tant que le transfert n'est pas
+            // clairement termine. Le pair (SLIRP) fait grossir sa fenetre de
+            // congestion en fonction du RTT qu'il mesure sur NOS ACK : si on
+            // dort (`hlt`, reveil au tick timer ~55 ms) ses ACK sont retardes,
+            // il garde cwnd=1 et espace ses envois de plusieurs secondes. En
+            // occupant le CPU on ACKe instantanement -> cwnd grossit -> le corps
+            // arrive en rafale. Seuil genereux (8 s) car le proxy de rendu peut
+            // mettre quelques secondes entre la requete et le premier octet.
+            if idle < 8 * timer::TICKS_PER_SECOND.max(1) {
+                for _ in 0..1000 {
+                    unsafe { core::arch::asm!("pause", options(nomem, nostack)); }
+                }
+            } else {
+                x86_64::instructions::interrupts::enable_and_hlt();
+            }
         }
     }
 
