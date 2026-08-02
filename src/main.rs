@@ -42,7 +42,7 @@ mod users;
 mod wasm;
 
 /// Version courante de Bouchaud OS.
-pub const VERSION: &str = "0.33.0";
+pub const VERSION: &str = "0.34.0";
 /// Nom du systeme.
 pub const OS_NAME: &str = "Bouchaud OS";
 

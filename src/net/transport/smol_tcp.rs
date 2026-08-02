@@ -61,7 +61,11 @@ pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> boo
     let handle = sockets.add(socket);
 
     let mut sent = false;
-    let deadline = now_ms() + 15_000;
+    // Deadline GLOBALE (le service de rendu deporte peut mettre quelques
+    // secondes a produire la premiere image) et deadline d'INACTIVITE (repoussee
+    // a chaque octet recu) pour ne pas rester bloque si le pair se tait.
+    let deadline = now_ms() + 30_000;
+    let mut last_rx = now_ms();
     loop {
         let t = Instant::from_millis(now_ms());
         iface.poll(t, &mut device, &mut sockets);
@@ -71,17 +75,21 @@ pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> boo
             let _ = sock.send_slice(request);
             sent = true;
         }
+        let mut got = false;
         while sock.can_recv() {
             let mut buf = [0u8; 2048];
             match sock.recv_slice(&mut buf) {
-                Ok(n) if n > 0 => out.extend_from_slice(&buf[..n]),
+                Ok(n) if n > 0 => { out.extend_from_slice(&buf[..n]); got = true; }
                 _ => break,
             }
         }
+        if got { last_rx = now_ms(); }
         if sent && !sock.may_recv() && !sock.can_recv() { break; }
         if !sock.is_active() && sent { break; }
         if !sock.is_active() && !sent { return false; }
-        if now_ms() > deadline { break; }
+        let nowm = now_ms();
+        if nowm > deadline { break; }
+        if nowm.wrapping_sub(last_rx) > 12_000 { break; } // 12 s sans le moindre octet
     }
     !out.is_empty()
 }

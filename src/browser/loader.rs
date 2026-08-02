@@ -157,7 +157,7 @@ fn search_url(engine: &str, query: &str) -> String {
 
 /// Mettre a `true` pour deverser le HTML brut recu sur la console serie
 /// (boot.log / -serial stdio). Utile pour inspecter ce que renvoie un site.
-const DUMP_PAGE_HTML: bool = true;
+const DUMP_PAGE_HTML: bool = false;
 
 /// Deverse le HTML brut sur la console serie, encadre de marqueurs, en
 /// morceaux pour ne pas saturer le tampon UART. A lire dans `boot.log`.
