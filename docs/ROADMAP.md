@@ -3,11 +3,27 @@
 OS souverain francais experimental, from scratch, en Rust `no_std`.
 Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 
-## V0.34 - WebView navigateur par defaut + reseau rapide (smoltcp)
-- [x] WebView devient le **navigateur principal** du bureau ("Navigateur" :
-      icone, menu Demarrer, fenetre ouverte au demarrage). Nautile (moteur
-      maison) reste accessible en secondaire ("Nautile (local)") pour les pages
-      internes (`about:*`, `file:*`) et la navigation hors-ligne sans proxy.
+## V0.35 - Navigateur AUTONOME par defaut (Nautile), zero proxy
+- [x] Le bureau ouvre par defaut **Nautile**, le moteur web from-scratch de
+      l'OS -> navigation **100% autonome**, aucun service externe requis.
+      "Navigateur" (icone + menu + fenetre d'accueil) = Nautile.
+- [x] Verifie en QEMU que Nautile est reellement autonome : handshake TLS 1.3
+      MAISON avec un vrai site HTTPS (pypi.org), recuperation du HTML + des CSS
+      (90+84+18 Ko) + du JS (107 Ko) et EXECUTION du JS, sans aucun proxy.
+- [x] Recherche par defaut de la barre d'adresse = DuckDuckGo **HTML** (rendu
+      cote serveur, donc affichable par Nautile) au lieu de Google (100% JS).
+      Bangs conserves (`!g` Google, `!w` Wikipedia, `!yt`...).
+- [x] WebView (rendu Chromium deporte) devient l'option **secondaire "compat"**
+      (menu Demarrer -> "WebView (compat)"), a n'utiliser que pour les sites
+      100% JavaScript et seulement si on veut lancer le proxy sur un PC.
+- Limite assumee : Nautile rend fidelement le web rendu cote serveur (docs,
+      wikis, moteurs HTML) mais pas les SPA complexes (Google/YouTube) ni le CSS
+      le plus lourd (pypi.org s'affiche partiellement) -- c'est l'ecart normal
+      d'un moteur from-scratch face a Chromium, et c'est justement ce que couvre
+      le mode WebView compat.
+
+## V0.34 - WebView + reseau rapide (smoltcp)
+- [x] Serveur `tools/render-proxy` v2 (Chromium interactif) + app WebView.
 - [x] Ecran d'accueil propre (titre, instructions), barre d'adresse avec invite
       "Rechercher ou saisir une adresse", messages d'erreur centres, detection
       auto du proxy (`10.0.2.2:8080` puis IP LAN) via `/healthz`.
