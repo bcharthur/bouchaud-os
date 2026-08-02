@@ -3,6 +3,33 @@
 OS souverain francais experimental, from scratch, en Rust `no_std`.
 Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 
+## V0.33 - WebView : navigation web moderne (proxy Chromium)
+- [x] App bureau `WebView` (menu Demarrer + icone) : affiche une page rendue
+      par un vrai Chromium headless sur l'hote et lui renvoie chaque interaction
+      -> JS, SPA, formulaires, connexion a un compte fonctionnent (architecture
+      "cloud" facon Opera Mini / Puffin). Voir `src/gui/apps/webview.rs`.
+- [x] Serveur `tools/render-proxy` v2 : sessions Chromium persistantes,
+      endpoints `/wv/open|shot|click|scroll|type|key|back|forward|reload|url`
+      renvoyant une capture PNG du viewport (coordonnees 1:1 avec la fenetre OS).
+- [x] Barre d'adresse locale, clics/molette/clavier transmis au Chromium
+      distant, boutons precedent/suivant/recharger. Detection auto du proxy
+      (`10.0.2.2:8080` SLIRP puis IP LAN) via `/healthz`.
+- [x] Valide en QEMU : ouverture de l'app, saisie d'URL, rendu reel de
+      pypi.org (logo, texte, barre de recherche), clic-navigation
+      (`pypi.org/` -> `pypi.org/search/`).
+- [x] Reception TCP durcie (`net/transport/tcp.rs`) : reassemblage HORS-ORDRE
+      (les segments en avance ne sont plus jetes) + option MSS 1460 dans le SYN.
+      A ramene un transfert de 44 Ko de ~250 s a ~100 s.
+- [ ] Debit encore faible sous QEMU/SLIRP : diagnostic (logs par segment) =
+      PERTES de segments cote reception + retransmissions au RTO (backoff
+      exponentiel), vraisemblablement l'anneau RX e1000 sature par la rafale.
+      Pistes : agrandir/vider plus vite l'anneau RX, IRQ RX, ou brancher la pile
+      `smoltcp` (deja compilee, RFC 793 complet) sur le chemin `fetch`. Sur
+      matériel reel (vrai NIC, pas SLIRP) le probleme peut ne pas se poser.
+- [ ] Liens rendus a distance non cliquables au pixel pres sur toutes les pages
+      (on s'appuie sur le hit-test de Chromium via /wv/click, ce qui marche) ;
+      pas encore de multi-onglets dans l'app WebView.
+
 ## V0.32 - Python complet + pip (RustPython via WASM/WASI)
 - [x] Vrai interprete Python 3.13 (RustPython 0.5 + stdlib native : `os`,
       `open()`, `json`, `re`, `math`, `hashlib`, `zlib`, `csv`, `random`,

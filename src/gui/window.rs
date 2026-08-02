@@ -26,16 +26,16 @@ pub(crate) fn browser_content_h(win_h: i32) -> i32 {
 }
 
 /// Entrees du menu Demarrer (l'index = `kind` passe a `make_app`).
-pub(crate) const MENU: [&str; 7] = ["Terminal", "Fichiers", "Nautile", "Moniteur", "Calculatrice", "Rustpad", "Quitter"];
+pub(crate) const MENU: [&str; 8] = ["Terminal", "Fichiers", "Nautile", "Moniteur", "Calculatrice", "Rustpad", "WebView", "Quitter"];
 
 /// Icones du bureau : (libelle, kind). Cliquables pour lancer l'application.
-pub(crate) const ICONS: [(&str, usize); 5] = [
-    ("Nautile", 2), ("Calculatrice", 4), ("Terminal", 0), ("Fichiers", 1), ("Rustpad", 5),
+pub(crate) const ICONS: [(&str, usize); 6] = [
+    ("Nautile", 2), ("Calculatrice", 4), ("Terminal", 0), ("Fichiers", 1), ("Rustpad", 5), ("WebView", 6),
 ];
 
 /// Positions des icones de bureau (x, y). Modifiables par drag-and-drop.
-pub(crate) static mut ICON_POSITIONS: [(i32, i32); 5] = [
-    (10, 25), (10, 91), (10, 157), (10, 223), (10, 289),
+pub(crate) static mut ICON_POSITIONS: [(i32, i32); 6] = [
+    (10, 25), (10, 91), (10, 157), (10, 223), (10, 289), (10, 355),
 ];
 
 /// Etat applicatif porte par une fenetre.
@@ -46,6 +46,7 @@ pub(crate) enum App {
     Calc { expr: String },
     Monitor,
     Rustpad { state: crate::gui::apps::rustpad::RustpadState },
+    WebView { state: crate::gui::apps::webview::WebViewState },
 }
 
 pub(crate) struct Win {
@@ -164,6 +165,16 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
             title: "Rustpad — Hello World".to_string(), x, y, w: 560, h: 400, min: false, restore: None,
             app: App::Rustpad { state: crate::gui::apps::rustpad::RustpadState::new() },
         },
+        6 => {
+            // Fenetre large : le viewport Chromium distant est aligne dessus.
+            let bw = (WIDTH as i32 - 120).clamp(640, 1100);
+            let bh = (HEIGHT as i32 - 2 * BAR_H as i32 - 50).clamp(420, 660);
+            Win {
+                title: "WebView — web moderne (proxy Chromium)".to_string(),
+                x, y, w: bw, h: bh, min: false, restore: None,
+                app: App::WebView { state: crate::gui::apps::webview::WebViewState::new() },
+            }
+        }
         _ => Win {
             title: "Moniteur".to_string(), x, y, w: 300, h: 200, min: false, restore: None,
             app: App::Monitor,

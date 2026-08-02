@@ -36,13 +36,35 @@ http://localhost:8080/render?url=https://example.com   -> PNG
 ## Comment Nautile l'utilise
 
 Sous QEMU (réseau utilisateur SLIRP), l'hôte est joignable depuis l'OS à
-l'adresse **`10.0.2.2`**. Nautile appelle donc :
+l'adresse **`10.0.2.2`**. Deux usages :
 
-```
-http://10.0.2.2:8080/render?url=<url-encodée>
-```
+- **Nautile en mode compat** (préfixe `compat:` ou icône Nautile) — rendu
+  statique d'une page en une image :
+  ```
+  http://10.0.2.2:8080/render?url=<url-encodée>
+  ```
+- **App WebView** (bureau) — navigation interactive, une page Chromium
+  persistante pilotée à distance :
+  ```
+  /wv/open?url=&w=&h=     ouvre une URL (règle aussi le viewport)
+  /wv/click?x=&y=&w=&h=   clic aux coordonnées viewport (1:1 avec la fenêtre)
+  /wv/scroll?dy=&w=&h=    molette verticale
+  /wv/type?text=&w=&h=    saisie clavier
+  /wv/key?k=&w=&h=        touche spéciale (Enter, Backspace, Arrow*, …)
+  /wv/back /wv/forward /wv/reload   navigation
+  /wv/url                 URL courante (text/plain, pour la barre d'adresse)
+  ```
+  Chaque action renvoie une capture PNG du viewport (RGB non entrelacé).
 
-L'adresse est définie dans `src/gui/apps/chromium_stub.rs` (constante `PROXY_HOST`).
+Les adresses candidates du proxy sont dans `src/browser/loader.rs`
+(`PROXY_HOSTS` : `10.0.2.2:8080` puis l'IP LAN de l'hôte). L'OS sonde
+`/healthz` et retient le premier qui répond.
+
+### Chromium fourni par l'environnement
+
+Si un Chromium/Playwright est déjà installé, exportez `CHROMIUM_PATH` (chemin du
+binaire `chrome`) avant `npm start` pour éviter un téléchargement. Le serveur
+lit aussi `HTTPS_PROXY`/`NO_PROXY` pour fonctionner derrière un proxy sortant.
 
 ### Pare-feu Windows (important)
 
