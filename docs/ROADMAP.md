@@ -3,6 +3,23 @@
 OS souverain francais experimental, from scratch, en Rust `no_std`.
 Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 
+## Python embarque (RustPython via WASM/WASI)
+- [x] Commande shell `python <fichier.py>` / `python3 <fichier.py>`
+- [x] Vrai interprete Python (RustPython 0.5, stdlib figee) precompile en
+      wasm32-wasip1, execute par le runtime `wasmi` deja existant
+      (`src/wasm/mod.rs`) : fn, classes, exceptions, f-strings, comprehensions,
+      generateurs... (voir `src/lang/python.rs`, recette dans `tools/python-wasm/`)
+- [x] Sous-ensemble WASI preview1 etendu pour l'occasion : `fd_read` (le
+      script est transmis via stdin), `args_get`, `fd_prestat_get`/`path_open`
+      (repondent EBADF -- pas d'acces disque WASI reel), `poll_oneoff`,
+      `sched_yield`, `proc_exit` qui interrompt vraiment l'execution
+- [ ] Pas de `pip` : aucune installation de paquets a l'execution (pas de
+      reseau/FS depuis le WASM). Le noyau n'ayant pas encore de disque
+      persistant (BFS), le binaire (~14 Mo) est embarque via `include_bytes!`
+      comme les polices/CA existantes
+- [ ] Pas d'acces a `os`/`socket`/etc. (rustpython-stdlib, qui les implemente,
+      ne compile pas pour wasm32-wasip1 -- voir `tools/python-wasm/README.md`)
+
 ## V0.1 - Boot
 - [x] Boot x86_64 via bootloader 0.9
 - [x] Rust `no_std`, `panic = abort`

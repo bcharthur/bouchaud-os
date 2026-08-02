@@ -94,6 +94,7 @@ pub const COMMANDS: &[&str] = &[
     "ifup", "arping", "ethinfo", "nslookup", "http", "https", "tls-selftest", "tls",
     "smoltest",
     "git", "rustc", "cargo", "rust-selftest",
+    "python", "python3",
 ];
 
 /// Operateur reliant un segment de commande au precedent.
@@ -610,6 +611,9 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         // Rustc / Cargo — interpréteur Rust minimal
         "rustc" | "cargo" => c::rustc_run(argc, &argv, *cwd),
         "rust-selftest" => { c::rust_selftest(); 0 }
+
+        // Python — interpréteur RustPython embarqué (WASM/WASI, pas de pip)
+        "python" | "python3" => c::python_run(argc, &argv, *cwd),
 
         _ => {
             vga::set_color(COLOR_RED);

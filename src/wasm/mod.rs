@@ -19,7 +19,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use wasmi::core::ValueType;
+use wasmi::core::{Trap, ValueType};
 use wasmi::{Caller, Config, Engine, Extern, ExternType, Linker, Memory, Module as WModule, Store, Value as WVal};
 
 /// Budget d'instructions par invocation (anti-boucle infinie).
@@ -31,11 +31,17 @@ pub struct HostState {
     pub out: String,
     /// Code de sortie demande via `proc_exit`, le cas echeant.
     pub exit_code: Option<i32>,
+    /// Entree standard (fd 0) fournie au module, consommee par `fd_read`.
+    stdin: Vec<u8>,
+    stdin_pos: usize,
+    /// Arguments de programme exposes via `args_sizes_get` / `args_get`
+    /// (argv[0] = nom du programme, puis arguments utilisateur).
+    args: Vec<String>,
 }
 
 impl HostState {
     fn new() -> HostState {
-        HostState { out: String::new(), exit_code: None }
+        HostState { out: String::new(), exit_code: None, stdin: Vec::new(), stdin_pos: 0, args: Vec::new() }
     }
 }
 
@@ -138,6 +144,44 @@ fn wasi_fd_write(caller: &mut Caller<'_, HostState>, _fd: i32, iovs: i32, iovs_l
     0
 }
 
+/// `fd_read` : consomme l'entree standard bufferisee (`HostState::stdin`) selon
+/// les memes iovecs que `fd_write`. Utilise par les interpretes (ex. Python)
+/// qui lisent leur script sur stdin plutot que via le systeme de fichiers.
+fn wasi_fd_read(caller: &mut Caller<'_, HostState>, _fd: i32, iovs: i32, iovs_len: i32, nread: i32) -> i32 {
+    let mem = match caller_mem(caller) {
+        Some(m) => m,
+        None => return 8, // EBADF
+    };
+    let mut total: u32 = 0;
+    let base = iovs.max(0) as usize;
+    for k in 0..(iovs_len.max(0) as usize) {
+        let rec_data = mem.data(&*caller);
+        let rec = base + k * 8;
+        if rec + 8 > rec_data.len() {
+            break;
+        }
+        let p = u32::from_le_bytes([rec_data[rec], rec_data[rec + 1], rec_data[rec + 2], rec_data[rec + 3]]) as usize;
+        let l = u32::from_le_bytes([rec_data[rec + 4], rec_data[rec + 5], rec_data[rec + 6], rec_data[rec + 7]]) as usize;
+        let (pos, remaining) = {
+            let st = caller.data();
+            (st.stdin_pos, st.stdin.len().saturating_sub(st.stdin_pos))
+        };
+        let n = l.min(remaining);
+        if n == 0 {
+            break;
+        }
+        let chunk: Vec<u8> = caller.data().stdin[pos..pos + n].to_vec();
+        write_mem(caller, p as i32, &chunk);
+        caller.data_mut().stdin_pos += n;
+        total += n as u32;
+        if n < l {
+            break; // plus rien a lire pour ce tour
+        }
+    }
+    write_u32(caller, nread, total);
+    0
+}
+
 fn build_linker(engine: &Engine) -> Linker<HostState> {
     let mut l = Linker::new(engine);
 
@@ -169,9 +213,54 @@ fn build_linker(engine: &Engine) -> Linker<HostState> {
         },
     )
     .ok();
-    l.func_wrap("wasi_snapshot_preview1", "proc_exit", |mut caller: Caller<'_, HostState>, code: i32| {
-        caller.data_mut().exit_code = Some(code);
-    })
+    l.func_wrap(
+        "wasi_snapshot_preview1",
+        "fd_read",
+        |mut caller: Caller<'_, HostState>, fd: i32, iovs: i32, iovs_len: i32, nread: i32| -> i32 {
+            wasi_fd_read(&mut caller, fd, iovs, iovs_len, nread)
+        },
+    )
+    .ok();
+    // Pas de repertoires "preouverts" (pas d'acces fichier reel depuis le WASM) :
+    // tout fd >= 3 est absent -> EBADF, comme le ferait un runtime WASI sans
+    // `--dir`. Les interpretes lisent leur script via stdin (fd 0) a la place.
+    l.func_wrap(
+        "wasi_snapshot_preview1",
+        "fd_prestat_get",
+        |_c: Caller<'_, HostState>, _fd: i32, _buf: i32| -> i32 { 8 },
+    )
+    .ok();
+    l.func_wrap(
+        "wasi_snapshot_preview1",
+        "fd_prestat_dir_name",
+        |_c: Caller<'_, HostState>, _fd: i32, _path: i32, _len: i32| -> i32 { 8 },
+    )
+    .ok();
+    l.func_wrap("wasi_snapshot_preview1", "sched_yield", |_c: Caller<'_, HostState>| -> i32 { 0 })
+        .ok();
+    // `poll_oneoff` minimal : ne gere pas vraiment l'attente (pas de threads/IO
+    // asynchrones ici), renvoie "0 evenement pret" pour ne pas bloquer l'appelant.
+    l.func_wrap(
+        "wasi_snapshot_preview1",
+        "poll_oneoff",
+        |mut caller: Caller<'_, HostState>, _in_: i32, _out: i32, _nsubs: i32, nevents: i32| -> i32 {
+            write_u32(&mut caller, nevents, 0);
+            0
+        },
+    )
+    .ok();
+    // `proc_exit` doit arreter l'execution immediatement (comme un vrai
+    // runtime WASI) : on renvoie un trap volontaire pour ne pas laisser le
+    // module continuer jusqu'a l'`unreachable` que les libc placent juste
+    // apres l'appel (sinon `run_bytes` rapporterait une fausse "erreur").
+    l.func_wrap(
+        "wasi_snapshot_preview1",
+        "proc_exit",
+        |mut caller: Caller<'_, HostState>, code: i32| -> Result<(), Trap> {
+            caller.data_mut().exit_code = Some(code);
+            Err(Trap::new("proc_exit"))
+        },
+    )
     .ok();
     l.func_wrap("wasi_snapshot_preview1", "fd_close", |_c: Caller<'_, HostState>, _fd: i32| -> i32 { 0 })
         .ok();
@@ -185,6 +274,38 @@ fn build_linker(engine: &Engine) -> Linker<HostState> {
         "wasi_snapshot_preview1",
         "fd_fdstat_get",
         |_c: Caller<'_, HostState>, _fd: i32, _buf: i32| -> i32 { 0 },
+    )
+    .ok();
+    // Pas d'acces fichier reel (voir fd_prestat_get ci-dessus) : ces trois
+    // syscalls font partie de la surface WASI que les libc (wasi-libc, Rust
+    // std) importent systematiquement, meme si le programme ne les appelle
+    // jamais en pratique faute de repertoire preouvert.
+    l.func_wrap(
+        "wasi_snapshot_preview1",
+        "fd_filestat_get",
+        |_c: Caller<'_, HostState>, _fd: i32, _buf: i32| -> i32 { 8 },
+    )
+    .ok();
+    l.func_wrap(
+        "wasi_snapshot_preview1",
+        "path_filestat_get",
+        |_c: Caller<'_, HostState>, _fd: i32, _flags: i32, _path: i32, _path_len: i32, _buf: i32| -> i32 { 8 },
+    )
+    .ok();
+    l.func_wrap(
+        "wasi_snapshot_preview1",
+        "path_open",
+        |_c: Caller<'_, HostState>,
+         _fd: i32,
+         _dirflags: i32,
+         _path: i32,
+         _path_len: i32,
+         _oflags: i32,
+         _rights_base: i64,
+         _rights_inheriting: i64,
+         _fdflags: i32,
+         _opened_fd: i32|
+         -> i32 { 8 },
     )
     .ok();
     l.func_wrap(
@@ -203,14 +324,32 @@ fn build_linker(engine: &Engine) -> Linker<HostState> {
         "wasi_snapshot_preview1",
         "args_sizes_get",
         |mut caller: Caller<'_, HostState>, count_ptr: i32, size_ptr: i32| -> i32 {
-            write_u32(&mut caller, count_ptr, 0);
-            write_u32(&mut caller, size_ptr, 0);
+            let args = &caller.data().args;
+            let count = args.len() as u32;
+            let size: u32 = args.iter().map(|a| a.len() as u32 + 1).sum();
+            write_u32(&mut caller, count_ptr, count);
+            write_u32(&mut caller, size_ptr, size);
             0
         },
     )
     .ok();
-    l.func_wrap("wasi_snapshot_preview1", "args_get", |_c: Caller<'_, HostState>, _a: i32, _b: i32| -> i32 { 0 })
-        .ok();
+    l.func_wrap(
+        "wasi_snapshot_preview1",
+        "args_get",
+        |mut caller: Caller<'_, HostState>, argv: i32, argv_buf: i32| -> i32 {
+            let args = caller.data().args.clone();
+            let mut buf_off = argv_buf;
+            for (i, a) in args.iter().enumerate() {
+                write_u32(&mut caller, argv + (i as i32) * 4, buf_off as u32);
+                let mut bytes = a.as_bytes().to_vec();
+                bytes.push(0);
+                write_mem(&mut caller, buf_off, &bytes);
+                buf_off += bytes.len() as i32;
+            }
+            0
+        },
+    )
+    .ok();
     l.func_wrap(
         "wasi_snapshot_preview1",
         "random_get",
@@ -295,6 +434,14 @@ fn make_engine() -> Engine {
 /// Instancie et execute un module `.wasm` : appelle `_start` / `main` / `run`,
 /// renvoie la sortie texte et l'eventuel resultat numerique.
 pub fn run_bytes(bytes: &[u8]) -> RunResult {
+    run_bytes_with_io(bytes, Vec::new(), Vec::new())
+}
+
+/// Comme `run_bytes`, mais fournit `argv` (`args_get`/`args_sizes_get`) et le
+/// contenu de l'entree standard (`fd_read`) au module avant de l'executer.
+/// Utilise par la commande shell `python` pour transmettre le script a
+/// executer sans dependre d'un systeme de fichiers WASI (pas de preopens).
+pub fn run_bytes_with_io(bytes: &[u8], args: Vec<String>, stdin: Vec<u8>) -> RunResult {
     let engine = make_engine();
     let module = match WModule::new(&engine, &bytes[..]) {
         Ok(m) => m,
@@ -302,7 +449,10 @@ pub fn run_bytes(bytes: &[u8]) -> RunResult {
             return RunResult { output: String::new(), result: None, exit_code: None, error: Some(format!("module invalide : {}", e)) }
         }
     };
-    let mut store = Store::new(&engine, HostState::new());
+    let mut host = HostState::new();
+    host.args = args;
+    host.stdin = stdin;
+    let mut store = Store::new(&engine, host);
     let _ = store.add_fuel(FUEL);
     let linker = build_linker(&engine);
     let instance = match linker.instantiate(&mut store, &module).and_then(|pre| pre.start(&mut store)) {
@@ -321,6 +471,9 @@ pub fn run_bytes(bytes: &[u8]) -> RunResult {
         let mut results: Vec<WVal> = ty.results().iter().map(zero_val).collect();
         match f.call(&mut store, &params, &mut results) {
             Ok(()) => result = results.first().and_then(wval_to_i64),
+            // Un `proc_exit` volontaire remonte comme un trap (voir wasi_snapshot_preview1::proc_exit
+            // ci-dessus) : ce n'est pas une vraie erreur d'execution, l'exit_code fait foi.
+            Err(_) if store.data().exit_code.is_some() => {}
             Err(e) => error = Some(format!("execution : {}", e)),
         }
     } else {
