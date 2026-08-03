@@ -1,7 +1,5 @@
 //! Fenetres et types partages du gestionnaire de fenetres.
 
-use crate::browser::loader;
-use crate::browser::ui::theme::CHROME_H;
 use crate::gui::framebuffer::{HEIGHT, WIDTH};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -14,40 +12,26 @@ pub(crate) const MENU_ITEM_H: i32 = 22;    // hauteur d'un item du menu Démarre
 pub(crate) const MENU_HEADER_H: i32 = 8;   // zone vide en haut du menu
 pub(crate) const MENU_W: i32 = 178;        // largeur du menu Démarrer
 
-/// Hauteur de contenu de page (viewport) disponible dans une fenetre
-/// Navigateur, une fois la barre de titre et le chrome Nautile (onglets +
-/// barre d'outils) deduits. Formule canonique partagee par la creation de
-/// fenetre (`make_app`) et le redimensionnement (`window_manager::run`) --
-/// avant ce partage, les deux recalculaient la meme quantite avec des
-/// planchers differents (.max(1) vs .max(40) cote gui/apps/mod.rs), ce qui
-/// pouvait faire diverger le layout initial du reflow suivant.
-pub(crate) fn browser_content_h(win_h: i32) -> i32 {
-    (win_h - TITLE_H - 4 - CHROME_H as i32).max(40)
-}
-
 /// Entrees du menu Demarrer (l'index = `kind` passe a `make_app`).
-pub(crate) const MENU: [&str; 8] = ["Terminal", "Fichiers", "Navigateur", "Moniteur", "Calculatrice", "Rustpad", "WebView (compat)", "Quitter"];
+pub(crate) const MENU: [&str; 6] = ["Terminal", "Fichiers", "Moniteur", "Calculatrice", "Rustpad", "Quitter"];
 
 /// Icones du bureau : (libelle, kind). Cliquables pour lancer l'application.
-/// "Navigateur" = WebView (kind 2, navigateur principal).
-pub(crate) const ICONS: [(&str, usize); 5] = [
-    ("Navigateur", 2), ("Calculatrice", 4), ("Terminal", 0), ("Fichiers", 1), ("Rustpad", 5),
+pub(crate) const ICONS: [(&str, usize); 4] = [
+    ("Terminal", 0), ("Fichiers", 1), ("Calculatrice", 4), ("Rustpad", 5),
 ];
 
 /// Positions des icones de bureau (x, y). Modifiables par drag-and-drop.
-pub(crate) static mut ICON_POSITIONS: [(i32, i32); 5] = [
-    (10, 25), (10, 91), (10, 157), (10, 223), (10, 289),
+pub(crate) static mut ICON_POSITIONS: [(i32, i32); 4] = [
+    (10, 25), (10, 91), (10, 157), (10, 223),
 ];
 
 /// Etat applicatif porte par une fenetre.
 pub(crate) enum App {
     Terminal { sb: Vec<String>, input: String, cwd: usize },
     Files { cur: usize, scroll: i32, selected: Option<usize> },
-    Browser { state: crate::browser::BrowserState },
     Calc { expr: String },
     Monitor,
     Rustpad { state: crate::gui::apps::rustpad::RustpadState },
-    WebView { state: crate::gui::apps::webview::WebViewState },
 }
 
 pub(crate) struct Win {
@@ -146,19 +130,6 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
             title: "Fichiers".to_string(), x, y, w: 420, h: 320, min: false, restore: None,
             app: App::Files { cur: home, scroll: 0, selected: None },
         },
-        2 => {
-            // Navigateur PRINCIPAL : Nautile, le moteur web from-scratch de l'OS
-            // (autonome, aucun proxy externe). Rend le web "classique" rendu
-            // cote serveur ; TLS 1.3 maison, HTTP/2, CSS/flex/grid, JS partiel.
-            let url = "about:bouchaud".to_string();
-            let bw = (WIDTH as i32 - 80).clamp(600, 1100);
-            let bh = (HEIGHT as i32 - 2 * BAR_H as i32 - 40).clamp(400, 760);
-            let ch = browser_content_h(bh);
-            let (session, page) = loader::open(&url, bw - 6, ch);
-            let state = crate::browser::BrowserState::new(url, page, session);
-            Win { title: "Navigateur".to_string(), x, y, w: bw, h: bh, min: false, restore: None,
-                  app: App::Browser { state } }
-        }
         4 => Win {
             title: "Calculatrice".to_string(), x, y, w: 220, h: 300, min: false, restore: None,
             app: App::Calc { expr: String::new() },
@@ -167,17 +138,6 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
             title: "Rustpad — Hello World".to_string(), x, y, w: 560, h: 400, min: false, restore: None,
             app: App::Rustpad { state: crate::gui::apps::rustpad::RustpadState::new() },
         },
-        6 => {
-            // WebView (mode "compat") : rendu par un vrai Chromium via le proxy
-            // deporte, pour les sites 100% JavaScript hors de portee de Nautile.
-            let bw = (WIDTH as i32 - 120).clamp(640, 1100);
-            let bh = (HEIGHT as i32 - 2 * BAR_H as i32 - 50).clamp(420, 660);
-            Win {
-                title: "WebView (compat)".to_string(),
-                x, y, w: bw, h: bh, min: false, restore: None,
-                app: App::WebView { state: crate::gui::apps::webview::WebViewState::new() },
-            }
-        }
         _ => Win {
             title: "Moniteur".to_string(), x, y, w: 300, h: 200, min: false, restore: None,
             app: App::Monitor,

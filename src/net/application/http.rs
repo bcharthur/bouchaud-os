@@ -36,7 +36,7 @@ pub fn build_get(host: &str, path: &str) -> String {
     )
 }
 
-/// User-Agent annonce par Nautile (navigateur reel pour ne pas etre filtre).
+/// User-Agent annonce par l'OS (navigateur reel pour ne pas etre filtre).
 pub const USER_AGENT: &str =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 

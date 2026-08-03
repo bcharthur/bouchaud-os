@@ -7,11 +7,11 @@
 //!   - `widgets` : rendu (fenetres, barre des taches, menu, curseur, icones) ;
 //!   - `window_manager` : boucle d'evenements (focus, z-order, drag, resize) ;
 //!   - `desktop` : point d'entree ;
-//!   - `apps/` : applications natives (terminal, fichiers, moniteur, navigateur,
-//!     calculatrice).
+//!   - `apps/` : applications natives (terminal, fichiers, moniteur,
+//!     calculatrice, rustpad).
 //!
-//! Le moteur de rendu web vit desormais dans `crate::browser::engine` (code du
-//! navigateur Nautile). Il reste accessible ici via des re-exports historiques.
+//! Le rasterizer de police (`gui::font`) est un service du systeme : le pilote
+//! graphique s'en sert pour le texte proportionnel.
 
 pub mod apps;
 pub mod desktop;
@@ -22,10 +22,10 @@ pub mod widgets;
 pub mod window;
 pub mod window_manager;
 
-// Le moteur web/JS vit desormais dans `crate::browser::engine` (code du
-// navigateur Nautile, suivi par le systeme de version `build.rs`). On conserve
-// les chemins historiques `crate::gui::engine` / `gui::web` / `gui::js` /
-// `gui::image` via des re-exports pour ne pas toucher les nombreux appelants.
-pub use crate::browser::engine::{self as engine, image, js, web};
+// Rasterizer de police : service du systeme, utilise par le pilote graphique
+// pour le texte proportionnel. C'est la seule piece de l'ancien moteur de rendu
+// que l'OS conserve — le reste vivait dans le navigateur, desormais dans son
+// propre depot.
+pub mod font;
 
 pub use desktop::run;

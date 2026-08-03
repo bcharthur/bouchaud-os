@@ -1,7 +1,7 @@
 //! Application Calculatrice native.
 //!
 //! Interface dessinee au pixel (affichage + grille de touches), evaluation des
-//! expressions par le moteur de langage embarque de l'OS (`gui::js`). Demontre
+//! expressions par un evaluateur arithmetique local. Demontre
 //! le systeme d'execution d'applications : une appl native qui delegue le calcul
 //! a l'interpreteur JavaScript integre.
 
@@ -55,9 +55,9 @@ pub(crate) fn apply_key(expr: &mut String, label: &str) {
         "<" => { expr.pop(); }
         "=" => {
             let src = if expr.is_empty() { "0" } else { expr.as_str() };
-            *expr = match crate::gui::js::eval_expr(src) {
-                Ok(r) => r,
-                Err(_) => String::from("Erreur"),
+            *expr = match eval(src) {
+                Some(r) => format_number(r),
+                None => String::from("Erreur"),
             };
         }
         _ => {
@@ -135,4 +135,150 @@ pub(crate) fn draw(expr: &str, bx: usize, by: usize, bw: usize, bh: usize) {
         let gy = y + (h - 8 * sc as i32) / 2;
         fb::draw_text_rgb(gx.max(0) as usize, gy.max(0) as usize, glyph, fg, sc);
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// Evaluation arithmetique
+// ---------------------------------------------------------------------------
+//
+// Descente recursive sur la grammaire usuelle : une expression est une somme
+// de termes, un terme un produit de facteurs, un facteur un nombre, une
+// parenthese ou une negation. Auparavant la calculatrice appelait le moteur
+// JavaScript du navigateur ; celui-ci ayant quitte l'OS, elle evalue elle-meme.
+
+/// Evalue une expression. `None` si elle est mal formee.
+pub(crate) fn eval(src: &str) -> Option<f64> {
+    let chars: alloc::vec::Vec<char> = src.chars().filter(|c| !c.is_whitespace()).collect();
+    let mut pos = 0usize;
+    let value = parse_sum(&chars, &mut pos)?;
+    // Tout doit avoir ete consomme : `1+2)` est une erreur, pas 3.
+    if pos != chars.len() {
+        return None;
+    }
+    if value.is_nan() || value.is_infinite() {
+        return None;
+    }
+    Some(value)
+}
+
+fn parse_sum(chars: &[char], pos: &mut usize) -> Option<f64> {
+    let mut acc = parse_product(chars, pos)?;
+    while *pos < chars.len() {
+        match chars[*pos] {
+            '+' => { *pos += 1; acc += parse_product(chars, pos)?; }
+            '-' => { *pos += 1; acc -= parse_product(chars, pos)?; }
+            _ => break,
+        }
+    }
+    Some(acc)
+}
+
+fn parse_product(chars: &[char], pos: &mut usize) -> Option<f64> {
+    let mut acc = parse_factor(chars, pos)?;
+    while *pos < chars.len() {
+        match chars[*pos] {
+            '*' => { *pos += 1; acc *= parse_factor(chars, pos)?; }
+            '/' => {
+                *pos += 1;
+                let divisor = parse_factor(chars, pos)?;
+                if divisor == 0.0 {
+                    return None;
+                }
+                acc /= divisor;
+            }
+            '%' => {
+                *pos += 1;
+                let divisor = parse_factor(chars, pos)?;
+                if divisor == 0.0 {
+                    return None;
+                }
+                acc = acc % divisor;
+            }
+            _ => break,
+        }
+    }
+    Some(acc)
+}
+
+fn parse_factor(chars: &[char], pos: &mut usize) -> Option<f64> {
+    if *pos >= chars.len() {
+        return None;
+    }
+    match chars[*pos] {
+        '-' => { *pos += 1; Some(-parse_factor(chars, pos)?) }
+        '+' => { *pos += 1; parse_factor(chars, pos) }
+        '(' => {
+            *pos += 1;
+            let inner = parse_sum(chars, pos)?;
+            if *pos >= chars.len() || chars[*pos] != ')' {
+                return None;
+            }
+            *pos += 1;
+            Some(inner)
+        }
+        _ => parse_number(chars, pos),
+    }
+}
+
+fn parse_number(chars: &[char], pos: &mut usize) -> Option<f64> {
+    let start = *pos;
+    while *pos < chars.len() && (chars[*pos].is_ascii_digit() || chars[*pos] == '.') {
+        *pos += 1;
+    }
+    if *pos == start {
+        return None;
+    }
+    let mut integer = 0f64;
+    let mut fraction = 0f64;
+    let mut scale = 1f64;
+    let mut seen_dot = false;
+    for &c in &chars[start..*pos] {
+        if c == '.' {
+            if seen_dot {
+                return None;
+            }
+            seen_dot = true;
+            continue;
+        }
+        let digit = (c as u8 - b'0') as f64;
+        if seen_dot {
+            scale *= 10.0;
+            fraction += digit / scale;
+        } else {
+            integer = integer * 10.0 + digit;
+        }
+    }
+    Some(integer + fraction)
+}
+
+/// Rend un resultat sans zeros inutiles : `4` et non `4.000000`.
+pub(crate) fn format_number(value: f64) -> String {
+    if value == libm_trunc(value) && value.abs() < 1e15 {
+        let mut n = value as i64;
+        let negative = n < 0;
+        if negative { n = -n; }
+        let mut digits = alloc::vec::Vec::new();
+        if n == 0 { digits.push(b'0'); }
+        while n > 0 {
+            digits.push(b'0' + (n % 10) as u8);
+            n /= 10;
+        }
+        if negative { digits.push(b'-'); }
+        digits.reverse();
+        return String::from_utf8_lossy(&digits).into_owned();
+    }
+    // Six decimales, puis on enleve les zeros de queue.
+    let mut out = alloc::format!("{:.6}", value);
+    while out.ends_with('0') { out.pop(); }
+    if out.ends_with('.') { out.pop(); }
+    out
+}
+
+/// `trunc` sans libm : le noyau n'a pas de bibliotheque mathematique.
+fn libm_trunc(value: f64) -> f64 {
+    if value.abs() >= 9.007_199_254_740_992e15 {
+        return value;
+    }
+    value as i64 as f64
 }

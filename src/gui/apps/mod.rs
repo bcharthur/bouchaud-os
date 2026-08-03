@@ -1,7 +1,7 @@
 //! Applications natives du bureau et aiguillage des événements.
 //!
 //! Ce module connecte le gestionnaire de fenêtres aux applications :
-//! terminal, explorateur de fichiers, Nautile (navigateur), calculatrice,
+//! terminal, explorateur de fichiers, calculatrice,
 //! moniteur système.
 
 pub mod calculator;
@@ -9,13 +9,8 @@ pub mod file_explorer;
 pub mod rustpad;
 pub mod system_info;
 pub mod terminal;
-pub mod webview;
 
-use crate::browser;
-use crate::browser::ui::chrome::{self, ChromeEvent};
-use crate::browser::ui::theme::CHROME_H;
 use crate::gui::event::Key;
-use crate::gui::framebuffer as fb;
 use crate::gui::window::{App, Win, TITLE_H};
 use crate::fs::ramfs;
 use crate::users;
@@ -41,12 +36,12 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
     let win_h = w.h;
     let win_x = w.x;
     let win_y = w.y;
-    let bx = (win_x + 3).max(0) as usize;
-    let by = (win_y + TITLE_H + 2).max(0) as usize;
-    let bw = (win_w - 6).max(1) as usize;
-    let bh = (win_h - TITLE_H - 4).max(1) as usize;
+    let _bx = (win_x + 3).max(0) as usize;
+    let _by = (win_y + TITLE_H + 2).max(0) as usize;
+    let _bw = (win_w - 6).max(1) as usize;
+    let _bh = (win_h - TITLE_H - 4).max(1) as usize;
 
-    let mut new_title: Option<alloc::string::String> = None;
+    let new_title: Option<alloc::string::String> = None;
 
     let close = match &mut w.app {
         App::Terminal { sb, input, cwd } => match k {
@@ -73,12 +68,6 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
             _ => false,
         },
 
-        App::Browser { state } => {
-            let event = chrome::on_key(state, k, bh);
-            handle_browser_event(state, event, bx, by, bw, bh, &mut new_title);
-            false
-        }
-
         App::Calc { expr } => match k {
             Key::Enter     => { calculator::apply_key(expr, "="); false }
             Key::Backspace => { calculator::apply_key(expr, "<"); false }
@@ -90,10 +79,6 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
         },
         App::Rustpad { state } => rustpad::on_key(state, k),
 
-        App::WebView { state } => {
-            webview::on_key(state, k, bx, by, bw, bh);
-            false
-        }
         _ => false,
     };
 
@@ -108,18 +93,9 @@ pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
     let win_h = w.h;
     let bx    = (w.x + 3).max(0) as usize;
     let by    = (w.y + TITLE_H + 2).max(0) as usize;
-    let bw    = (win_w - 6).max(1) as usize;
-    let bh    = (win_h - TITLE_H - 4).max(1) as usize;
+    let _bw    = (win_w - 6).max(1) as usize;
+    let _bh    = (win_h - TITLE_H - 4).max(1) as usize;
 
-    if let App::Browser { state } = &mut w.app {
-        let rel_x = mx - bx as i32;
-        let rel_y = my - by as i32;
-        let event = chrome::on_click(state, rel_x, rel_y, bw, bh);
-        let mut new_title = None;
-        handle_browser_event(state, event, bx, by, bw, bh, &mut new_title);
-        if let Some(t) = new_title { w.title = t; }
-        return;
-    }
 
     if let App::Calc { expr } = &mut w.app {
         let bwi = (win_w - 6).max(1);
@@ -130,12 +106,6 @@ pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
         return;
     }
 
-    if let App::WebView { state } = &mut w.app {
-        let rel_x = mx - bx as i32;
-        let rel_y = my - by as i32;
-        webview::on_click(state, rel_x, rel_y, bx, by, bw, bh);
-        return;
-    }
 
     if let App::Files { cur, scroll, selected } = &mut w.app {
         let bx  = (w.x + 3).max(0) as usize;
@@ -188,29 +158,14 @@ pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
 
 // ── Souris : molette ──────────────────────────────────────────────────────────
 
-pub(crate) fn wheel_to_app(w: &mut Win, mx: i32, my: i32, delta: i32) {
+pub(crate) fn wheel_to_app(w: &mut Win, _mx: i32, _my: i32, delta: i32) {
     if delta == 0 { return; }
     if let App::Files { scroll, .. } = &mut w.app {
         *scroll = (*scroll - delta).max(0);
         return;
     }
-    if let App::Browser { state } = &mut w.app {
-        let bx = w.x + 3;
-        let by = w.y + TITLE_H + 2;
-        let bw = (w.w - 6).max(1) as usize;
-        let bh = (w.h - TITLE_H - 4).max(1) as usize;
-        if mx < bx || mx >= bx + bw as i32 || my < by || my >= by + bh as i32 { return; }
-        if let ChromeEvent::ScrollTo(s) = chrome::on_wheel(state, delta, bh) {
-            state.tab_mut().scroll = s;
-        }
-    }
     if let App::Rustpad { state } = &mut w.app {
         rustpad::on_wheel(state, delta);
-    }
-    if let App::WebView { state } = &mut w.app {
-        let bw = (w.w - 6).max(1) as usize;
-        let bh = (w.h - TITLE_H - 4).max(1) as usize;
-        webview::on_wheel(state, delta, bw, bh);
     }
 }
 
@@ -224,223 +179,11 @@ pub(crate) fn draw_app(w: &Win) {
     match &w.app {
         App::Terminal { sb, input, cwd }    => terminal::draw(sb, input, *cwd, bx, by, bw, bh),
         App::Files { cur, scroll, selected } => file_explorer::draw(*cur, *scroll, *selected, bx, by, bw, bh),
-        App::Browser { state }              => chrome::draw(state, bx, by, bw, bh),
         App::Calc { expr }                  => calculator::draw(expr, bx, by, bw, bh),
         App::Monitor                        => system_info::draw(bx, by, bw, bh),
         App::Rustpad { state }              => rustpad::draw(state, bx, by, bw, bh),
-        App::WebView { state }              => webview::draw(state, bx, by, bw, bh),
     }
 }
 
 // ── Gestionnaire d'événements navigateur ──────────────────────────────────────
 
-fn handle_browser_event(
-    state:     &mut browser::BrowserState,
-    event:     ChromeEvent,
-    bx: usize, by: usize, bw: usize, bh: usize,
-    new_title: &mut Option<alloc::string::String>,
-) {
-    // Hauteur reelle disponible pour le contenu de page, une fois le chrome
-    // (onglets + barre d'outils) deduit -- propagee au moteur de layout pour
-    // que `height:calc(100%-...)`/`vh` resolvent contre la vraie fenetre
-    // (voir web.rs::VIEWPORT_H). `bh` ici est deja la hauteur de corps de
-    // fenetre (barre de titre deduite) ; meme plancher (40) que
-    // `window::browser_content_h`, qui part lui de la hauteur de fenetre brute.
-    let page_h = bh.saturating_sub(CHROME_H).max(40) as i32;
-    match event {
-        ChromeEvent::Navigate(href) => {
-            let target = if href == state.tab().input {
-                // Touche Entrée avec l'URL déjà dans la barre → résoudre
-                browser::loader::resolve_input(&href, &state.tab().page)
-            } else {
-                href
-            };
-            chrome::draw_loading(&target, bx, by, bw, bh);
-            fb::present();
-            let (sess, pg) = browser::loader::open(&target, bw as i32, page_h);
-            state.tab_mut().push_nav(&target);
-            state.tab_mut().apply(&target, pg, sess);
-            *new_title = Some(state.tab().title.clone());
-        }
-
-        ChromeEvent::Back => {
-            if let Some(url) = state.tab_mut().go_back() {
-                chrome::draw_loading(&url, bx, by, bw, bh);
-                fb::present();
-                let (sess, pg) = browser::loader::open(&url, bw as i32, page_h);
-                state.tab_mut().apply(&url, pg, sess);
-                *new_title = Some(state.tab().title.clone());
-            }
-        }
-
-        ChromeEvent::Forward => {
-            if let Some(url) = state.tab_mut().go_forward() {
-                chrome::draw_loading(&url, bx, by, bw, bh);
-                fb::present();
-                let (sess, pg) = browser::loader::open(&url, bw as i32, page_h);
-                state.tab_mut().apply(&url, pg, sess);
-                *new_title = Some(state.tab().title.clone());
-            }
-        }
-
-        ChromeEvent::Refresh => {
-            let url = state.tab().url.clone();
-            chrome::draw_loading(&url, bx, by, bw, bh);
-            fb::present();
-            let (sess, pg) = browser::loader::open(&url, bw as i32, page_h);
-            state.tab_mut().apply(&url, pg, sess);
-            *new_title = Some(state.tab().title.clone());
-        }
-
-        ChromeEvent::Home => {
-            let url = "about:bouchaud".to_string();
-            chrome::draw_loading(&url, bx, by, bw, bh);
-            fb::present();
-            let (sess, pg) = browser::loader::open(&url, bw as i32, page_h);
-            state.tab_mut().push_nav(&url);
-            state.tab_mut().apply(&url, pg, sess);
-            *new_title = Some(state.tab().title.clone());
-        }
-
-        ChromeEvent::NewTab => {
-            let url = "about:bouchaud".to_string();
-            let (sess, pg) = browser::loader::open(&url, bw as i32, page_h);
-            state.add_tab(url, pg, sess);
-            *new_title = Some(state.tab().title.clone());
-        }
-
-        ChromeEvent::CloseTab(i) => {
-            state.close_tab_at(i);
-            *new_title = Some(state.tab().title.clone());
-        }
-
-        ChromeEvent::SelectTab(i) => {
-            state.select(i);
-            *new_title = Some(state.tab().title.clone());
-        }
-
-        ChromeEvent::ScrollTo(s) => {
-            state.tab_mut().scroll = s;
-        }
-
-        ChromeEvent::InputChar(c) => {
-            if state.tab().input.len() < 200 {
-                state.tab_mut().input.push(c);
-            }
-        }
-
-        ChromeEvent::InputBackspace => {
-            state.tab_mut().input.pop();
-        }
-
-        ChromeEvent::DispatchJs(code) => {
-            let pg = state.tab_mut().session.dispatch(&code);
-            state.tab_mut().page = pg;
-        }
-
-        // Vrai clic DOM (bouton, div role="button", onclick...) trouve par le
-        // hit-test reel de web.rs — plus une simple estimation liens/champs.
-        ChromeEvent::ClickNode(key) => {
-            let pg = state.tab_mut().session.click_node(&key);
-            state.tab_mut().page = pg;
-        }
-
-        ChromeEvent::FocusField(i) => {
-            let name = state.tab().page.fields.get(i).map(|f| f.name.clone()).unwrap_or_default();
-            let init = state.tab().page.fields.get(i).map(|f| f.value.clone()).unwrap_or_default();
-            crate::dlog!(crate::diag::Cat::Info, "nautile: FOCUS champ {} name={:?} ({} champs sur la page)", i, name, state.tab().page.fields.len());
-            let tab = state.tab_mut();
-            tab.focused_field = Some(i);
-            tab.field_text = init;
-        }
-
-        ChromeEvent::FieldChar(c) => {
-            if state.tab().field_text.len() < 512 { state.tab_mut().field_text.push(c); }
-            let name = state.tab().focused_field.and_then(|i| state.tab().page.fields.get(i)).map(|f| f.name.clone()).unwrap_or_default();
-            crate::dlog!(crate::diag::Cat::Info, "nautile: INPUT {}={:?}", name, state.tab().field_text);
-        }
-
-        ChromeEvent::FieldBackspace => {
-            state.tab_mut().field_text.pop();
-            let name = state.tab().focused_field.and_then(|i| state.tab().page.fields.get(i)).map(|f| f.name.clone()).unwrap_or_default();
-            crate::dlog!(crate::diag::Cat::Info, "nautile: INPUT {}={:?}", name, state.tab().field_text);
-        }
-
-        ChromeEvent::Blur => {
-            let tab = state.tab_mut();
-            tab.focused_field = None;
-            tab.field_text.clear();
-        }
-
-        ChromeEvent::SubmitField => {
-            // Soumission GET du formulaire du champ focalise : construit
-            // action?name=valeur&hidden=..., resout contre l'URL courante,
-            // puis navigue (ex. Google : /search?q=...&sca_esv=...).
-            let url = {
-                let tab = state.tab();
-                tab.focused_field
-                    .and_then(|i| tab.page.fields.get(i))
-                    .map(|f| {
-                        let mut qs = alloc::string::String::new();
-                        if !f.name.is_empty() {
-                            qs.push_str(&f.name); qs.push('=');
-                            qs.push_str(&form_urlencode(&tab.field_text));
-                        }
-                        for (k, v) in &f.hidden {
-                            if !qs.is_empty() { qs.push('&'); }
-                            qs.push_str(k); qs.push('=');
-                            qs.push_str(&form_urlencode(v));
-                        }
-                        let action = if f.action.is_empty() { tab.url.clone() } else { f.action.clone() };
-                        alloc::format!("{}?{}", action, qs)
-                    })
-            };
-            if let Some(target) = url {
-                let target = resolve_against(&state.tab().url, &target);
-                crate::dlog!(crate::diag::Cat::Info, "nautile: soumission formulaire -> {}", target);
-                {
-                    let tab = state.tab_mut();
-                    tab.focused_field = None;
-                    tab.field_text.clear();
-                }
-                chrome::draw_loading(&target, bx, by, bw, bh);
-                fb::present();
-                let (sess, pg) = browser::loader::open(&target, bw as i32, page_h);
-                state.tab_mut().push_nav(&target);
-                state.tab_mut().apply(&target, pg, sess);
-                *new_title = Some(state.tab().title.clone());
-            }
-        }
-
-        ChromeEvent::None => {}
-    }
-}
-
-// Encodage application/x-www-form-urlencoded d'une valeur de champ.
-fn form_urlencode(s: &str) -> alloc::string::String {
-    let mut out = alloc::string::String::new();
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
-            b' ' => out.push('+'),
-            _ => { out.push('%'); out.push_str(&alloc::format!("{:02X}", b)); }
-        }
-    }
-    out
-}
-
-// Resout une action de formulaire relative ("/search?q=x") contre l'URL de la
-// page courante ; laisse passer les URLs deja absolues.
-fn resolve_against(page_url: &str, target: &str) -> alloc::string::String {
-    if target.starts_with("http://") || target.starts_with("https://") || target.contains("://") {
-        return target.into();
-    }
-    if let Some(rest) = page_url.strip_prefix("https://").or_else(|| page_url.strip_prefix("http://")) {
-        let scheme = if page_url.starts_with("https://") { "https" } else { "http" };
-        let host = rest.split('/').next().unwrap_or(rest);
-        if let Some(abs) = target.strip_prefix("//") { return alloc::format!("{}://{}", scheme, abs); }
-        if target.starts_with('/') { return alloc::format!("{}://{}{}", scheme, host, target); }
-        return alloc::format!("{}://{}/{}", scheme, host, target);
-    }
-    target.into()
-}

@@ -134,8 +134,6 @@ impl FileSystem {
             self.write_node(t, "name=Terminal\nexec=terminal\ntype=gui\npermission=normal");
             let f = self.touch_at(apps, "files.bapp").unwrap_or(0);
             self.write_node(f, "name=Fichiers\nexec=files\ntype=gui\npermission=normal");
-            let b = self.touch_at(apps, "browser.bapp").unwrap_or(0);
-            self.write_node(b, "name=Nautile\nexec=browser\ntype=gui\npermission=normal");
             let s = self.touch_at(apps, "sysinfo.bapp").unwrap_or(0);
             self.write_node(s, "name=Moniteur\nexec=monitor\ntype=gui\npermission=normal");
         }

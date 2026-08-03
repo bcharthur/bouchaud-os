@@ -51,7 +51,7 @@ fn buf() -> &'static mut Vec<Entry> {
 pub fn log(cat: Cat, msg: String) {
     if unsafe { !ENABLED } { return; }
     let tick = crate::kernel::timer::ticks();
-    crate::serial_println!("[nautile/{}] {}", cat.tag(), msg);
+    crate::serial_println!("[bouchaud/{}] {}", cat.tag(), msg);
     let v = buf();
     if v.len() >= MAX_ENTRIES { v.remove(0); }
     v.push(Entry { tick, cat, msg });
@@ -105,7 +105,7 @@ pub fn render_html() -> String {
         ));
     }
     format!(
-        "<!doctype html><html><head><title>Nautile — Journal</title><style>\
+        "<!doctype html><html><head><title>Bouchaud OS — Journal</title><style>\
          body{{background:#0b1220;color:#cdd9e5;font-family:monospace;margin:0;padding:0}}\
          .hd{{position:sticky;top:0;background:#10243f;padding:10px 14px;\
               border-bottom:2px solid #1e63b0}}\
@@ -118,7 +118,7 @@ pub fn render_html() -> String {
          td.c{{font-weight:bold;width:64px}}\
          td.m{{color:#cdd9e5;white-space:pre-wrap}}\
          </style></head><body>\
-         <div class=\"hd\"><h1>&#x1f50e; Journal de la pile Nautile</h1>\
+         <div class=\"hd\"><h1>&#x1f50e; Journal de la pile systeme</h1>\
          <div class=\"sum\">{n} evenements &bull; <span class=\"err\">{errs} erreurs</span> \
          &bull; <span class=\"warn\">{warns} avert.</span> &bull; {net} requetes \
          &bull; {cache} hits cache &bull; <a href=\"about:bouchaud\" style=\"color:#4fa8f0\">accueil</a></div></div>\

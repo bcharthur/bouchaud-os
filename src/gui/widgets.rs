@@ -169,11 +169,10 @@ fn draw_icons() {
 /// Dessine l'icone pixel-art de l'application `kind` dans un carre `vw x vw` en (vx, vy).
 fn draw_app_icon(icon_idx: usize, vx: usize, vy: usize, vw: usize) {
     match icon_idx {
-        0 => draw_icon_nautile(vx, vy, vw),
-        1 => draw_icon_calculator(vx, vy, vw),
-        2 => draw_icon_terminal(vx, vy, vw),
-        3 => draw_icon_files(vx, vy, vw),
-        4 => draw_icon_rustpad(vx, vy, vw),
+        0 => draw_icon_terminal(vx, vy, vw),
+        1 => draw_icon_files(vx, vy, vw),
+        2 => draw_icon_calculator(vx, vy, vw),
+        3 => draw_icon_rustpad(vx, vy, vw),
         _ => { fb::fill_rect_rgb(vx, vy, vw, vw, 0x555555); }
     }
 }
@@ -193,7 +192,8 @@ fn fill_circle(scx: i32, scy: i32, r: i32, col: u32, clip_x: usize, clip_y: usiz
     }
 }
 
-/// Logo Nautile Navigateur : coquille nautile en pixel art (spirale logarithmique simplifiee).
+/// Logo coquille en pixel art. Plus reference depuis le retrait du
+/// navigateur du bureau ; conserve comme motif reutilisable.
 fn draw_icon_nautile(vx: usize, vy: usize, vw: usize) {
     // Fond : bleu ocean profond
     fb::fill_rect_rgb(vx, vy, vw, vw, 0x081525);
@@ -490,7 +490,6 @@ pub(crate) fn draw_menu(mx: i32, my: i32) {
     let icon_colors: &[u32] = &[
         0x28c840, // Terminal
         0xf9ab00, // Fichiers
-        0x1a73e8, // Nautile
         0x00b4d8, // Moniteur
         0x888888, // Calculatrice
         0xff7b72, // Rustpad

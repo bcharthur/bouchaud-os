@@ -355,7 +355,7 @@ pub fn draw_text_rgb(x: usize, y: usize, s: &str, rgb_color: u32, scale: usize) 
 /// (DejaVu Sans, antialiasé, BTreeMap cache). Repli bitmap si indisponible.
 /// Retourne la position X finale.
 pub fn draw_text_prop(x: usize, y: usize, s: &str, rgb_color: u32, px: f32, bold: bool) -> usize {
-    use crate::gui::engine::font_ttf as ftf;
+    use crate::gui::font as ftf;
     if !ftf::draw_text(x as i32, y as i32, s, rgb_color, px as i32, bold) {
         for (i, ch) in s.chars().enumerate() {
             draw_char_bmp(x + i * 8, y, ch as u8, 1);
@@ -366,7 +366,7 @@ pub fn draw_text_prop(x: usize, y: usize, s: &str, rgb_color: u32, px: f32, bold
 
 /// Largeur en pixels d'une chaîne proportionnelle (sans dessin).
 pub fn text_width(s: &str, px: f32, _bold: bool) -> usize {
-    crate::gui::engine::font_ttf::text_width(s, px as i32) as usize
+    crate::gui::font::text_width(s, px as i32) as usize
 }
 
 pub mod font;
