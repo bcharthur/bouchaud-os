@@ -317,10 +317,19 @@ pub fn fetch_document(url: &str) -> Document {
             };
             let req = http::build_get(&hostname, &path);
             let mut resp: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-            if !tcp::fetch(ip, port, req.as_bytes(), &mut resp) {
-                crate::dlog!(Cat::Err, "TCP echec {}:{} ({}Mc, {}ms)", hostname, port, mc(), ms());
-                banner.push(format!("connexion TCP echouee vers {}:{}", hostname, port));
-                return Document { banner, final_url: current, content_type: String::new(), body: alloc::vec::Vec::new(), is_html: false, ok: false };
+            // HTTP en clair : on passe par la VRAIE pile TCP (smoltcp, RFC 793 :
+            // controle de congestion, fast-retransmit, fenetre glissante). La
+            // pile maison (tcp::fetch) souffrait de pertes non recuperees sur
+            // les gros transferts (retransmissions au RTO -> ~250 s pour 44 Ko) ;
+            // smoltcp fait le meme transfert en < 1 s. Repli sur la pile maison
+            // si smoltcp echoue (robustesse).
+            if !transport::smol_tcp::fetch(ip, port, req.as_bytes(), &mut resp) {
+                resp.clear();
+                if !tcp::fetch(ip, port, req.as_bytes(), &mut resp) {
+                    crate::dlog!(Cat::Err, "TCP echec {}:{} ({}Mc, {}ms)", hostname, port, mc(), ms());
+                    banner.push(format!("connexion TCP echouee vers {}:{}", hostname, port));
+                    return Document { banner, final_url: current, content_type: String::new(), body: alloc::vec::Vec::new(), is_html: false, ok: false };
+                }
             }
             (alloc::vec::Vec::new(), resp)
         };

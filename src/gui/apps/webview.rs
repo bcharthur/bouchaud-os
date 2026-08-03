@@ -40,12 +40,10 @@ pub struct WebViewState {
 impl WebViewState {
     pub fn new() -> Self {
         WebViewState {
-            input: "https://example.com".to_string(),
+            input: String::new(),
             url: String::new(),
             img: None,
-            status: "Entre une URL puis Entree. (Proxy Chromium requis sur l'hote : \
-                     cd tools/render-proxy && npm start)"
-                .to_string(),
+            status: String::new(),
             focus_addr: true,
         }
     }
@@ -213,6 +211,10 @@ pub fn draw(state: &WebViewState, bx: usize, by: usize, bw: usize, bh: usize) {
     let abg = if state.focus_addr { 0xffffff } else { 0xf0f0f0 };
     fb::fill_rect_rgb(ax, by + 3, aw, TOOLBAR_H - 6, abg);
     let max_chars = (aw.saturating_sub(10)) / 8;
+    if state.input.is_empty() && state.focus_addr {
+        // Invite discrete quand la barre est vide.
+        fb::draw_text_rgb(ax + 4, by + 8, "Rechercher ou saisir une adresse", 0x9a9a9a, 1);
+    }
     let shown: String = if state.input.len() > max_chars {
         state.input[state.input.len() - max_chars..].to_string()
     } else {
@@ -221,24 +223,62 @@ pub fn draw(state: &WebViewState, bx: usize, by: usize, bw: usize, bh: usize) {
     let caret = if state.focus_addr { "_" } else { "" };
     fb::draw_text_rgb(ax + 4, by + 8, &format!("{}{}", shown, caret), 0x000000, 1);
 
-    // Corps : capture distante ou message d'etat.
+    // Corps : capture distante, message d'etat, ou ecran d'accueil.
     let cy = by + TOOLBAR_H;
     let ch = bh.saturating_sub(TOOLBAR_H);
     fb::fill_rect_rgb(bx, cy, bw, ch, 0xffffff);
     if let Some(img) = &state.img {
         fb::blit_rgb(bx, cy, img.w, img.h.min(ch), &img.pix, bx, cy, bw, ch);
+    } else if state.status.is_empty() {
+        draw_home(bx, cy, bw, ch);
     }
     if !state.status.is_empty() {
-        // Message d'etat sur plusieurs lignes de 8 px.
-        let cols = (bw.saturating_sub(16) / 8).max(10);
-        let mut y = cy + 10;
-        let mut rest = state.status.as_str();
-        while !rest.is_empty() && y + 10 < cy + ch {
-            let n = rest.len().min(cols);
-            let (line, r) = rest.split_at(n);
-            fb::draw_text_rgb(bx + 8, y, line, 0x333333, 1);
-            rest = r;
-            y += 12;
+        // Message d'etat / erreur, centre verticalement, en plusieurs lignes.
+        let cols = (bw.saturating_sub(32) / 8).max(10);
+        let lines = wrap(&state.status, cols);
+        let block_h = lines.len() * 14;
+        let mut y = cy + ch / 3;
+        if y + block_h + 10 > cy + ch { y = cy + 10; }
+        for line in &lines {
+            let w = line.len() * 8;
+            let lx = bx + (bw.saturating_sub(w)) / 2;
+            fb::draw_text_rgb(lx, y, line, 0x444444, 1);
+            y += 14;
         }
     }
+}
+
+/// Ecran d'accueil quand aucune page n'est chargee.
+fn draw_home(bx: usize, cy: usize, bw: usize, ch: usize) {
+    let title = "Navigateur";
+    let tw = title.len() * 16;
+    fb::draw_text_rgb(bx + (bw.saturating_sub(tw)) / 2, cy + ch / 3, title, 0x2d5a88, 2);
+    let hints = [
+        "Saisis une adresse (ex. wikipedia.org) puis Entree,",
+        "ou un mot-cle pour rechercher sur le web.",
+        "",
+        "Rendu par un vrai Chromium via le service de proxy",
+        "(demarre-le sur l'hote : cd tools/render-proxy && npm start).",
+    ];
+    let mut y = cy + ch / 3 + 40;
+    for h in hints {
+        let w = h.len() * 8;
+        fb::draw_text_rgb(bx + (bw.saturating_sub(w)) / 2, y, h, 0x777777, 1);
+        y += 16;
+    }
+}
+
+/// Decoupe un texte en lignes d'au plus `cols` caracteres, sur les espaces.
+fn wrap(s: &str, cols: usize) -> alloc::vec::Vec<String> {
+    let mut out = alloc::vec::Vec::new();
+    let mut line = String::new();
+    for word in s.split(' ') {
+        if !line.is_empty() && line.len() + 1 + word.len() > cols {
+            out.push(core::mem::take(&mut line));
+        }
+        if !line.is_empty() { line.push(' '); }
+        line.push_str(word);
+    }
+    if !line.is_empty() { out.push(line); }
+    out
 }

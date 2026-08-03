@@ -3,32 +3,53 @@
 OS souverain francais experimental, from scratch, en Rust `no_std`.
 Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 
+## V0.35 - Navigateur AUTONOME par defaut (Nautile), zero proxy
+- [x] Le bureau ouvre par defaut **Nautile**, le moteur web from-scratch de
+      l'OS -> navigation **100% autonome**, aucun service externe requis.
+      "Navigateur" (icone + menu + fenetre d'accueil) = Nautile.
+- [x] Verifie en QEMU que Nautile est reellement autonome : handshake TLS 1.3
+      MAISON avec un vrai site HTTPS (pypi.org), recuperation du HTML + des CSS
+      (90+84+18 Ko) + du JS (107 Ko) et EXECUTION du JS, sans aucun proxy.
+- [x] Recherche par defaut de la barre d'adresse = DuckDuckGo **HTML** (rendu
+      cote serveur, donc affichable par Nautile) au lieu de Google (100% JS).
+      Bangs conserves (`!g` Google, `!w` Wikipedia, `!yt`...).
+- [x] WebView (rendu Chromium deporte) devient l'option **secondaire "compat"**
+      (menu Demarrer -> "WebView (compat)"), a n'utiliser que pour les sites
+      100% JavaScript et seulement si on veut lancer le proxy sur un PC.
+- Limite assumee : Nautile rend fidelement le web rendu cote serveur (docs,
+      wikis, moteurs HTML) mais pas les SPA complexes (Google/YouTube) ni le CSS
+      le plus lourd (pypi.org s'affiche partiellement) -- c'est l'ecart normal
+      d'un moteur from-scratch face a Chromium, et c'est justement ce que couvre
+      le mode WebView compat.
+
+## V0.34 - WebView + reseau rapide (smoltcp)
+- [x] Serveur `tools/render-proxy` v2 (Chromium interactif) + app WebView.
+- [x] Ecran d'accueil propre (titre, instructions), barre d'adresse avec invite
+      "Rechercher ou saisir une adresse", messages d'erreur centres, detection
+      auto du proxy (`10.0.2.2:8080` puis IP LAN) via `/healthz`.
+- [x] **Reseau ~200x plus rapide** : le fetch HTTP en clair passe desormais par
+      la vraie pile `smoltcp` (RFC 793 : controle de congestion, fast-retransmit,
+      fenetre glissante) au lieu de la pile maison. Un rendu de page (PNG 44 Ko)
+      tombe de ~250 s a **< 1 s** ; une capture de 264 Ko charge en ~300-900 ms.
+      Repli automatique sur la pile maison si smoltcp echoue. Voir
+      `net/mod.rs::fetch_document` et `net/transport/smol_tcp.rs`.
+      (Diagnostic de la lenteur maison : pertes de segments cote reception +
+      retransmissions au RTO ; smoltcp gere ca nativement.)
+- [x] Valide en QEMU : bureau -> Navigateur ouvert d'office, saisie d'URL,
+      rendu reel de pypi.org en ~1 s, clic-navigation (`/` -> `/search/`),
+      bouton precedent, molette (scroll), barre d'adresse synchronisee.
+
 ## V0.33 - WebView : navigation web moderne (proxy Chromium)
-- [x] App bureau `WebView` (menu Demarrer + icone) : affiche une page rendue
-      par un vrai Chromium headless sur l'hote et lui renvoie chaque interaction
-      -> JS, SPA, formulaires, connexion a un compte fonctionnent (architecture
-      "cloud" facon Opera Mini / Puffin). Voir `src/gui/apps/webview.rs`.
+- [x] App bureau WebView : affiche une page rendue par un vrai Chromium headless
+      sur l'hote et lui renvoie chaque interaction -> JS, SPA, formulaires,
+      connexion a un compte (architecture "cloud" facon Opera Mini / Puffin).
 - [x] Serveur `tools/render-proxy` v2 : sessions Chromium persistantes,
       endpoints `/wv/open|shot|click|scroll|type|key|back|forward|reload|url`
       renvoyant une capture PNG du viewport (coordonnees 1:1 avec la fenetre OS).
-- [x] Barre d'adresse locale, clics/molette/clavier transmis au Chromium
-      distant, boutons precedent/suivant/recharger. Detection auto du proxy
-      (`10.0.2.2:8080` SLIRP puis IP LAN) via `/healthz`.
-- [x] Valide en QEMU : ouverture de l'app, saisie d'URL, rendu reel de
-      pypi.org (logo, texte, barre de recherche), clic-navigation
-      (`pypi.org/` -> `pypi.org/search/`).
-- [x] Reception TCP durcie (`net/transport/tcp.rs`) : reassemblage HORS-ORDRE
-      (les segments en avance ne sont plus jetes) + option MSS 1460 dans le SYN.
-      A ramene un transfert de 44 Ko de ~250 s a ~100 s.
-- [ ] Debit encore faible sous QEMU/SLIRP : diagnostic (logs par segment) =
-      PERTES de segments cote reception + retransmissions au RTO (backoff
-      exponentiel), vraisemblablement l'anneau RX e1000 sature par la rafale.
-      Pistes : agrandir/vider plus vite l'anneau RX, IRQ RX, ou brancher la pile
-      `smoltcp` (deja compilee, RFC 793 complet) sur le chemin `fetch`. Sur
-      matériel reel (vrai NIC, pas SLIRP) le probleme peut ne pas se poser.
-- [ ] Liens rendus a distance non cliquables au pixel pres sur toutes les pages
-      (on s'appuie sur le hit-test de Chromium via /wv/click, ce qui marche) ;
-      pas encore de multi-onglets dans l'app WebView.
+- [x] Reassemblage TCP HORS-ORDRE + option MSS 1460 (`net/transport/tcp.rs`)
+      pour la pile maison (utile en repli et pour les autres chemins).
+- [ ] Pas encore de multi-onglets dans l'app WebView ; liens cliques via le
+      hit-test reel de Chromium (`/wv/click`), pas de carte de liens locale.
 
 ## V0.32 - Python complet + pip (RustPython via WASM/WASI)
 - [x] Vrai interprete Python 3.13 (RustPython 0.5 + stdlib native : `os`,

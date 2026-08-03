@@ -108,8 +108,8 @@ pub fn bouchaud_home() -> String {
            <div class=\"card\">\
              <h3>&#x1f50d; Recherche &amp; raccourcis</h3>\
              <ul>\
-               <li>Tapez un <b>mot-cle</b> dans la barre d'adresse &rarr; recherche Google</li>\
-               <li>Bangs : <span class=\"kb\">!ddg</span> DuckDuckGo, <span class=\"kb\">!b</span> Bing, \
+               <li>Tapez un <b>mot-cle</b> dans la barre d'adresse &rarr; recherche DuckDuckGo (HTML)</li>\
+               <li>Bangs : <span class=\"kb\">!g</span> Google, <span class=\"kb\">!b</span> Bing, \
                    <span class=\"kb\">!w</span> Wikipedia, <span class=\"kb\">!yt</span> YouTube</li>\
                <li><span class=\"kb\">Entree</span> naviguer ; <span class=\"kb\">F5</span> recharger</li>\
                <li><span class=\"kb\">Ctrl+T</span> onglet ; <span class=\"kb\">1..9</span> suivre lien n</li>\
@@ -124,10 +124,14 @@ pub fn bouchaud_home() -> String {
              <ul>\
                <li>Pile reseau complete : DNS, DHCP, TLS 1.3, HTTP/1.1, HTTP/2</li>\
                <li>Parseur HTML5 tolerant, DOM complet, CSS cascade (tag / .classe / #id)</li>\
-               <li>Flexbox, marges, paddings, text-align, font-weight, images PNG</li>\
+               <li>Flexbox, grid, marges, paddings, text-align, font-weight, images PNG/JPEG/WebP</li>\
                <li>Interpreteur JavaScript avec DOM, timers, fetch et WebAssembly (wasmi)</li>\
                <li>Onglets multiples, historique de navigation, barre d'adresse URL</li>\
              </ul>\
+             <p style=\"margin-top:8px\">Rend fidelement les pages <b>rendues cote serveur</b> \
+                (documentation, wikis, moteurs HTML...). Pour les sites 100% JavaScript \
+                (Google, YouTube), le menu <b>Demarrer &rarr; WebView (compat)</b> les affiche \
+                via un rendu deporte optionnel.</p>\
            </div>\
          </div>\
          </body></html>",

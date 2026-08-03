@@ -132,8 +132,11 @@ pub fn resolve_input(input: &str, page: &Page) -> String {
     search_url(DEFAULT_ENGINE, t)
 }
 
-/// Moteur de recherche par défaut (clé de `search_url`). Modifiable librement.
-const DEFAULT_ENGINE: &str = "g";
+/// Moteur de recherche par défaut (clé de `search_url`). DuckDuckGo HTML :
+/// 100% rendu côté serveur (sans JavaScript), donc affichable de façon fiable
+/// par le moteur autonome Nautile — contrairement à Google (page 100% JS que
+/// Nautile ne peut pas rendre). Modifiable via les bangs (`!g`, `!b`, ...).
+const DEFAULT_ENGINE: &str = "ddg";
 
 /// Construit l'URL de recherche pour un moteur donné. Couvre les principaux
 /// moteurs ; un bang inconnu retombe sur Google.
@@ -157,7 +160,7 @@ fn search_url(engine: &str, query: &str) -> String {
 
 /// Mettre a `true` pour deverser le HTML brut recu sur la console serie
 /// (boot.log / -serial stdio). Utile pour inspecter ce que renvoie un site.
-const DUMP_PAGE_HTML: bool = true;
+const DUMP_PAGE_HTML: bool = false;
 
 /// Deverse le HTML brut sur la console serie, encadre de marqueurs, en
 /// morceaux pour ne pas saturer le tampon UART. A lire dans `boot.log`.
