@@ -8,10 +8,14 @@
 //! WASM et exécuté par le runtime `wasmi` (`crate::wasm`), avec accès fichiers
 //! RAMFS via le pont WASI. REPL, scripts, `-c` (voir `python.rs`).
 //!
+//! `pyweb` : pont réseau pour les scripts Python (`/dev/web`) et navigateur
+//! de test `browser.py` (voir `pyweb.rs`).
+//!
 //! `pip` : installeur de paquets Python purs depuis PyPI, côté noyau
 //! (réseau TLS maison + unzip maison), vers `/usr/lib/python/site-packages`
 //! (voir `pip.rs`).
 
 pub mod mini_rust;
 pub mod pip;
+pub mod pyweb;
 pub mod python;

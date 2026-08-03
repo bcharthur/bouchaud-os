@@ -95,7 +95,7 @@ pub const COMMANDS: &[&str] = &[
     "smoltest",
     "git", "rustc", "cargo", "rust-selftest",
     "python", "python3", "pip", "pip3", "python-selftest",
-    "nautile",
+    "pybrowser",
 ];
 
 /// Operateur reliant un segment de commande au precedent.
@@ -617,9 +617,9 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "pip" | "pip3" => c::pip_cmd(argc, &argv),
         "python-selftest" => { c::python_selftest(); 0 }
 
-        // Nautile — navigateur Web ecrit en Python, execute par le meme
-        // interpreteur, avec /dev/nautile comme pont vers le noyau.
-        "nautile" => c::nautile_cmd(argc, &argv, *cwd),
+        // Navigateur Web simpliste en Python : test d'integration des
+        // couches (Python -> WASI -> RAMFS -> TCP/TLS -> console).
+        "pybrowser" => c::pybrowser_cmd(argc, &argv, *cwd),
 
         _ => {
             vga::set_color(COLOR_RED);
