@@ -17,6 +17,7 @@
 pub mod engine;
 pub mod loader;
 pub mod pages;
+pub mod pybridge;
 pub mod state;
 pub mod ui;
 
