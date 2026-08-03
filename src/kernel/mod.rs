@@ -7,6 +7,7 @@
 pub mod dmesg;
 pub mod heap;
 pub mod memory;
+pub mod vm;
 pub mod handle;
 pub mod process;
 pub mod scheduler;

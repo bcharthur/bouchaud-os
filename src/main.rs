@@ -58,6 +58,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     kernel::dmesg::init();
     kernel::heap::init();
     kernel::memory::init(boot_info);
+    kernel::vm::init(boot_info);
     kernel::dmesg::log("kernel: boot Bouchaud OS");
     kernel::dmesg::log("vga: text mode initialise");
     kernel::dmesg::log("serial: COM1 initialise (debug QEMU)");

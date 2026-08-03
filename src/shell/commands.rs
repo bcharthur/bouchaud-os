@@ -1047,6 +1047,135 @@ pub fn python_run(line: &str, argc: usize, argv: &[&str; 12], cwd: usize) -> i32
     crate::lang::python::run_file(&abs, &extra, cwd, &cwd_path)
 }
 
+/// `vm` / `vm test` : etat de la memoire virtuelle et autotest de mappage.
+///
+/// L'autotest est le seul moyen de verifier que la pagination fonctionne
+/// vraiment : on mappe une page a une adresse virtuelle inutilisee, on y
+/// ecrit, on relit par la vue physique (qui passe par un autre chemin de
+/// traduction), puis on demappe et on verifie que l'adresse redevient
+/// intraduisible.
+pub fn vm_cmd(argc: usize, argv: &[&str; 12]) -> i32 {
+    use crate::kernel::vm;
+
+    if !vm::ready() {
+        println!("vm: allocateur de frames non initialise");
+        return 1;
+    }
+
+    if argc >= 2 && argv[1] == "test" {
+        return vm_selftest();
+    }
+
+    let (free_frames, allocated, released) = vm::stats();
+    let (reserved_start, reserved_end) = crate::kernel::memory::reserved_range();
+    println!("memoire virtuelle:");
+    println!("  taille de page   : {} o", vm::FRAME_SIZE);
+    println!(
+        "  frames libres    : {} ({} Mio)",
+        free_frames,
+        free_frames as u64 * vm::FRAME_SIZE / (1024 * 1024)
+    );
+    println!("  frames servies   : {}", allocated);
+    println!("  frames rendues   : {}", released);
+    println!("  offset physique  : {:#x}", crate::kernel::memory::phys_offset());
+    println!("  reserve tas+DMA  : {:#x}..{:#x}", reserved_start, reserved_end);
+    println!("usage: vm | vm test");
+    0
+}
+
+fn vm_selftest() -> i32 {
+    use x86_64::structures::paging::Page;
+    use x86_64::VirtAddr;
+    use crate::kernel::vm;
+
+    // Adresse choisie loin du noyau, du tas et de la fenetre physique.
+    const TEST_ADDR: u64 = 0x0000_5555_0000_0000;
+    let address = VirtAddr::new(TEST_ADDR);
+    let page: Page = Page::containing_address(address);
+
+    let (before, _, _) = vm::stats();
+    println!("vm test: {} frames libres avant", before);
+
+    if vm::translate(address).is_some() {
+        println!("vm test: ECHEC — {:#x} est deja mappee", TEST_ADDR);
+        return 1;
+    }
+
+    let phys = match vm::map_alloc(page, vm::kernel_flags()) {
+        Ok(p) => p,
+        Err(_) => { println!("vm test: ECHEC — mappage impossible"); return 1; }
+    };
+    println!("vm test: {:#x} -> {:#x} mappee", TEST_ADDR, phys.as_u64());
+
+    // Ecriture par l'adresse virtuelle neuve.
+    const MOTIF: u64 = 0xCAFE_BABE_DEAD_BEEF;
+    unsafe { core::ptr::write_volatile(TEST_ADDR as *mut u64, MOTIF); }
+
+    // Relecture par la fenetre physique : un autre chemin de traduction, donc
+    // une preuve que la page pointe bien sur la frame annoncee.
+    let via_phys = unsafe {
+        core::ptr::read_volatile(crate::kernel::memory::phys_to_virt(phys.as_u64()) as *const u64)
+    };
+    if via_phys != MOTIF {
+        println!("vm test: ECHEC — relu {:#x} au lieu de {:#x}", via_phys, MOTIF);
+        let _ = vm::unmap(page);
+        return 1;
+    }
+    println!("vm test: ecriture virtuelle relue par la fenetre physique");
+
+    match vm::translate(address) {
+        Some(p) if p.as_u64() == phys.as_u64() => println!("vm test: traduction coherente"),
+        other => {
+            println!("vm test: ECHEC — traduction {:?}", other.map(|p| p.as_u64()));
+            let _ = vm::unmap(page);
+            return 1;
+        }
+    }
+
+    if vm::unmap(page).is_err() {
+        println!("vm test: ECHEC — demappage impossible");
+        return 1;
+    }
+    if vm::translate(address).is_some() {
+        println!("vm test: ECHEC — {:#x} encore mappee apres demappage", TEST_ADDR);
+        return 1;
+    }
+    println!("vm test: page demappee, adresse redevenue intraduisible");
+
+    // Une plage, pour verifier le chemin multi-pages et le retour des frames.
+    const RANGE_ADDR: u64 = 0x0000_5555_1000_0000;
+    let range = VirtAddr::new(RANGE_ADDR);
+    if vm::map_range(range, 16, vm::kernel_flags()).is_err() {
+        println!("vm test: ECHEC — mappage de plage impossible");
+        return 1;
+    }
+    unsafe {
+        for index in 0..16u64 {
+            core::ptr::write_volatile((RANGE_ADDR + index * vm::FRAME_SIZE) as *mut u64, index);
+        }
+        for index in 0..16u64 {
+            let value = core::ptr::read_volatile((RANGE_ADDR + index * vm::FRAME_SIZE) as *const u64);
+            if value != index {
+                println!("vm test: ECHEC — page {} relue {}", index, value);
+                vm::unmap_range(range, 16);
+                return 1;
+            }
+        }
+    }
+    vm::unmap_range(range, 16);
+    println!("vm test: plage de 16 pages ecrite, relue, demappee");
+
+    let (after, allocated, released) = vm::stats();
+    println!("vm test: {} frames libres apres ({} servies, {} rendues)", after, allocated, released);
+    if after < before {
+        // Les tables intermediaires creees en chemin restent allouees : c'est
+        // attendu, elles resserviront au prochain mappage de la meme zone.
+        println!("vm test: {} frames retenues par les tables intermediaires", before - after);
+    }
+    println!("vm test: OK");
+    0
+}
+
 /// `pybrowser [url|--check]` : navigateur Web simpliste ecrit en Python.
 ///
 /// Sert de test d'integration des couches : interpreteur Python -> pont WASI

@@ -95,7 +95,7 @@ pub const COMMANDS: &[&str] = &[
     "smoltest",
     "git", "rustc", "cargo", "rust-selftest",
     "python", "python3", "pip", "pip3", "python-selftest",
-    "pybrowser",
+    "pybrowser", "vm",
 ];
 
 /// Operateur reliant un segment de commande au precedent.
@@ -619,6 +619,9 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         // Navigateur Web simpliste en Python : test d'integration des
         // couches (Python -> WASI -> RAMFS -> TCP/TLS -> console).
         "pybrowser" => c::pybrowser_cmd(argc, &argv, *cwd),
+
+        // Memoire virtuelle : etat des frames et autotest de mappage.
+        "vm" => c::vm_cmd(argc, &argv),
 
         _ => {
             vga::set_color(COLOR_RED);
