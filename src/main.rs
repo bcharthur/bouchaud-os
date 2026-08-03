@@ -78,8 +78,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     fs::ramfs::fs().init();
     users::create_home_dirs();
     kernel::dmesg::log("ramfs: monte sur /");
-    browser::pybridge::install();
-    kernel::dmesg::log("nautile: paquet Python installe, /dev/nautile pret");
+    lang::pyweb::install();
+    kernel::dmesg::log("pyweb: /dev/web pret, browser.py installe");
     kernel::process::init();
     kernel::dmesg::log("process: table initialisee (init, desktop, shell)");
     kernel::dmesg::log("net: loopback lo 127.0.0.1 actif (ping ok); eth0 sans driver");

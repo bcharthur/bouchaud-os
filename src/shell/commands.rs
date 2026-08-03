@@ -1072,25 +1072,15 @@ pub fn python_run(line: &str, argc: usize, argv: &[&str; 12], cwd: usize) -> i32
     crate::lang::python::run_file(&abs, &extra, cwd, &cwd_path)
 }
 
-/// `nautile [url] [options]` : lance le navigateur Web, ecrit en Python.
+/// `pybrowser [url|--check]` : navigateur Web simpliste ecrit en Python.
 ///
-/// Le paquet vit dans `/usr/lib/python/nautile` (installe au demarrage par
-/// `browser::pybridge`). On l'invoque via `-c` plutot qu'en passant le chemin
-/// de `__main__.py` : un fichier lance directement n'est pas un paquet, et ses
-/// imports relatifs (`from . import backends`) echoueraient.
-pub fn nautile_cmd(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
+/// Sert de test d'integration des couches : interpreteur Python -> pont WASI
+/// -> RAMFS -> pile TCP/TLS du noyau -> console. Le script vit dans
+/// `/usr/lib/python/browser.py`, installe au demarrage par `lang::pyweb`.
+pub fn pybrowser_cmd(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
     let cwd_path = ramfs::path_string(ramfs::fs(), cwd);
 
-    let graphical = crate::drivers::gfx::is_active();
-    if graphical {
-        // Le navigateur peint dans toute la surface disponible.
-        crate::browser::pybridge::set_viewport(
-            0, 0, crate::drivers::gfx::WIDTH, crate::drivers::gfx::HEIGHT,
-        );
-        crate::browser::pybridge::clear_events();
-    }
-
-    // Construction de la liste d'arguments Python.
+    // Liste d'arguments Python, construite depuis argv.
     let mut args = String::from("[");
     let mut count = 0;
     for i in 1..argc {
@@ -1103,8 +1093,8 @@ pub fn nautile_cmd(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
         }
         args.push('"');
         for c in token.chars() {
-            // Les URL ne contiennent ni guillemet ni antislash apres
-            // encodage, mais on ne fait pas confiance a la saisie.
+            // Une URL encodee ne contient ni guillemet ni antislash, mais on
+            // ne fait pas confiance a la saisie.
             if c == '"' || c == '\\' {
                 args.push('\\');
             }
@@ -1113,28 +1103,13 @@ pub fn nautile_cmd(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
         args.push('"');
         count += 1;
     }
-    if !graphical {
-        // Sans framebuffer, le seul rendu possible est le texte.
-        let has_mode = (1..argc).any(|i| argv[i] == "--dump" || argv[i] == "--outline");
-        if !has_mode {
-            if count > 0 {
-                args.push_str(", ");
-            }
-            args.push_str("\"--dump\"");
-        }
-    } else {
-        if count > 0 {
-            args.push_str(", ");
-        }
-        args.push_str("\"--backend\", \"bouchaud\"");
-    }
     args.push(']');
 
     let code = alloc::format!(
         "import sys\n\
          sys.path.insert(0, '/usr/lib/python')\n\
-         from nautile.__main__ import main\n\
-         sys.exit(main({}))\n",
+         import browser\n\
+         sys.exit(browser.main({}))\n",
         args
     );
     crate::lang::python::run_code(&code, cwd, &cwd_path)
