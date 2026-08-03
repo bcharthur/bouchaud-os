@@ -389,6 +389,9 @@ fn wasi_fd_read(caller: &mut Caller<'_, HostState>, fd: i32, iovs: i32, iovs_len
         Some(_) => return errno::ISDIR,
         None => return errno::BADF,
     };
+    // Une lecture au debut d'un peripherique du navigateur consomme le
+    // prochain evenement en attente.
+    crate::browser::pybridge::device_before_read(node, pos);
     let data: Vec<u8> = {
         let fs = ramfs::fs();
         let c = &fs.nodes[node].content;
@@ -413,6 +416,12 @@ fn wasi_fd_write(caller: &mut Caller<'_, HostState>, fd: i32, iovs: i32, iovs_le
         Some(_) => return errno::ISDIR,
         None => return errno::BADF,
     };
+    // Pseudo-peripheriques du navigateur Python : l'ecriture declenche une
+    // action du noyau (requete reseau, dessin) au lieu d'atterrir dans le RAMFS.
+    if crate::browser::pybridge::device_write(node, &bytes) {
+        write_u32(caller, nwritten, bytes.len() as u32);
+        return errno::SUCCESS;
+    }
     {
         let fs = ramfs::fs();
         if !fs.can(node, PERM_W) {
