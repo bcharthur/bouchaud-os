@@ -23,6 +23,7 @@ use crate::kernel::{elf, task, vmm};
 /// `/dev/input/*` correspondent aux peripheriques exposes par `kernel::fd`.
 pub fn default_environment() -> Vec<String> {
     let session = crate::users::session();
+    let (width, height) = crate::drivers::gfx::resolution();
     alloc::vec![
         "PATH=/bin:/usr/bin:/usr/local/bin".to_string(),
         alloc::format!("HOME={}", session.home()),
@@ -31,15 +32,34 @@ pub fn default_environment() -> Vec<String> {
         "TERM=linux".to_string(),
         "LANG=C.UTF-8".to_string(),
         "LD_LIBRARY_PATH=/lib:/usr/lib".to_string(),
+        "TMPDIR=/tmp".to_string(),
+        "XDG_RUNTIME_DIR=/var/run".to_string(),
+
+        // --- Qt -----------------------------------------------------------
+        // linuxfb : le seul backend possible ici (ni X11, ni Wayland, ni DRM).
+        // On lui impose la geometrie pour lui epargner une autodetection, et on
+        // le laisse prendre la main sur le terminal.
         "QT_QPA_PLATFORM=linuxfb".to_string(),
+        alloc::format!("QT_QPA_PLATFORM_PLUGIN_ARGS=fb=/dev/fb0:size={}x{}", width, height),
         "QT_QPA_FB_DRM=0".to_string(),
-        "QT_QPA_FONTDIR=/usr/share/fonts".to_string(),
-        "QT_QPA_EVDEV_KEYBOARD_PARAMETERS=/dev/input/event0".to_string(),
-        "QT_QPA_EVDEV_MOUSE_PARAMETERS=/dev/input/event1".to_string(),
+        "QT_QPA_FB_TTY=/dev/tty0".to_string(),
+        "QT_QPA_FB_HIDECURSOR=0".to_string(),
+        "QT_QPA_FONTDIR=/usr/share/fonts/truetype/dejavu".to_string(),
+        "QT_QPA_EVDEV_KEYBOARD_PARAMETERS=/dev/input/event0:grab=0".to_string(),
+        "QT_QPA_EVDEV_MOUSE_PARAMETERS=/dev/input/event1:grab=0".to_string(),
+        // Sans fontconfig ni dbus dans le systeme, autant le dire tout de suite.
+        "QT_NO_FONTCONFIG=1".to_string(),
+        "QT_LOGGING_RULES=qt.qpa.*=false".to_string(),
+        "DBUS_SESSION_BUS_ADDRESS=disabled:".to_string(),
+
+        // --- SDL ----------------------------------------------------------
         "SDL_VIDEODRIVER=fbcon".to_string(),
         "SDL_FBDEV=/dev/fb0".to_string(),
+
+        // --- Python -------------------------------------------------------
         "PYTHONHOME=/usr".to_string(),
         "PYTHONDONTWRITEBYTECODE=1".to_string(),
+        "PYTHONUNBUFFERED=1".to_string(),
     ]
 }
 

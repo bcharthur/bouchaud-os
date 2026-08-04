@@ -592,18 +592,24 @@ pub fn futex_wait(uaddr: u64, expected: u32, timeout_ticks: u64) -> bool {
             cpu::hlt();
             wake_sleepers();
         }
+        // L'ordre des deux tests compte. `wake_sleepers` remet la tache en
+        // `Ready` des que son echeance est atteinte, exactement comme le ferait
+        // un `FUTEX_WAKE` : tester l'etat en premier ferait passer tout delai
+        // expire pour un reveil. La libc croirait alors avoir ete signalee, se
+        // rendormirait pour la meme duree, et `pthread_cond_timedwait`
+        // attendrait un multiple de ce qu'on lui a demande.
+        let expired = deadline != 0 && crate::kernel::timer::ticks() >= deadline;
         let task = current();
-        if task.state == TaskState::Ready {
-            task.futex_key = 0;
-            task.wake_tick = 0;
-            return true;
-        }
-        if deadline != 0 && crate::kernel::timer::ticks() >= deadline {
-            let task = current();
+        if expired {
             task.futex_key = 0;
             task.wake_tick = 0;
             task.state = TaskState::Ready;
             return false;
+        }
+        if task.state == TaskState::Ready {
+            task.futex_key = 0;
+            task.wake_tick = 0;
+            return true;
         }
     }
 }

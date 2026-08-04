@@ -129,6 +129,19 @@ pub fn left_down() -> bool {
     unsafe { BTN & 0x01 != 0 }
 }
 
+/// Etat brut des boutons : bit 0 gauche, bit 1 droit, bit 2 milieu.
+///
+/// Meme codage que les bits de drapeau du paquet PS/2, ce qui permet a la
+/// couche evdev de detecter les changements par un simple XOR.
+pub fn buttons() -> u8 {
+    unsafe { BTN & 0x07 }
+}
+
+/// Un delta de molette est-il en attente ? (consultation sans consommation)
+pub fn wheel_pending() -> bool {
+    unsafe { WHEEL_DELTA != 0 }
+}
+
 /// Delta de roulette accumule depuis le dernier appel.
 pub fn take_wheel() -> i32 {
     unsafe {

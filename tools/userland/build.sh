@@ -29,6 +29,12 @@ mkdir -p "$OUT"
 CFLAGS_COMMON="-O2 -Wall -fno-stack-protector -fno-asynchronous-unwind-tables"
 LDFLAGS_FIXED="-Wl,-Ttext-segment=$BASE -Wl,-z,noexecstack"
 
+# Les en-tetes `linux/*` et `asm/*` (fb.h, input.h, kd.h, vt.h) decrivent l'ABI
+# du noyau, pas la libc : musl ne les fournit pas. On les prend dans les
+# en-tetes systeme, mais en `-idirafter` pour que ceux de musl restent
+# prioritaires — sans quoi on melangerait deux libc.
+UAPI_INCLUDES="-idirafter /usr/include -idirafter /usr/include/x86_64-linux-gnu"
+
 freestanding() {
     # Sans libc : chaque appel systeme est ecrit a la main. Sert d'autotest de
     # l'ABI du noyau, independamment de toute bibliotheque.
@@ -51,11 +57,11 @@ musl_static() {
     }
     # static-pie : pas d'adresse fixe, donc aucune contrainte d'edition de liens.
     # Necessite un musl >= 1.1.21 et binutils recent.
-    for src in hello.c "$@"; do
+    for src in hello.c qpa-probe.c "$@"; do
         [ -f "$src" ] || continue
         name=$(basename "$src" .c)
         echo "  MUSL $name (static-pie)"
-        musl-gcc $CFLAGS_COMMON -static-pie "$src" -o "$OUT/$name"
+        musl-gcc $CFLAGS_COMMON $UAPI_INCLUDES -static-pie -pthread "$src" -o "$OUT/$name"
     done
 }
 

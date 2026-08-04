@@ -17,6 +17,7 @@ use crate::drivers::keyboard::{self, Key};
 use crate::fs::ramfs::{self, NodeKind};
 use crate::kernel::abi::{errno, user_read, user_read_u64, user_write};
 use crate::kernel::fd::{device_for_path, FdKind, FileDesc};
+use crate::kernel::input;
 use crate::kernel::task;
 
 /// `AT_FDCWD` : chemin relatif au repertoire courant.
@@ -146,9 +147,9 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
             (end - offset) as i64
         }
         FdKind::Dir(_) => -errno::EISDIR,
-        FdKind::Framebuffer => -errno::EINVAL,
-        FdKind::InputKeyboard => read_input_keyboard(buffer, count),
-        FdKind::InputMouse => read_input_mouse(buffer, count),
+        FdKind::Framebuffer | FdKind::VirtualTerminal => -errno::EINVAL,
+        FdKind::InputKeyboard => read_input(buffer, count, input::Device::Keyboard),
+        FdKind::InputMouse => read_input(buffer, count, input::Device::Mouse),
         FdKind::Pipe(shared, readable) => {
             if !readable {
                 return -errno::EBADF;
@@ -162,7 +163,58 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
             drop(guard);
             if user_write(buffer, &data) { len as i64 } else { -errno::EFAULT }
         }
+        FdKind::EventFd(state) => {
+            if count < 8 {
+                return -errno::EINVAL;
+            }
+            let mut state = state.borrow_mut();
+            if state.counter == 0 {
+                return -errno::EAGAIN;
+            }
+            // Mode normal : on rend le compteur entier et on le vide. Mode
+            // semaphore : une unite a la fois.
+            let value = if state.semaphore { 1 } else { state.counter };
+            state.counter -= value;
+            drop(state);
+            if user_write(buffer, &value.to_le_bytes()) { 8 } else { -errno::EFAULT }
+        }
+        FdKind::TimerFd(state) => {
+            if count < 8 {
+                return -errno::EINVAL;
+            }
+            let expired = {
+                let mut state = state.borrow_mut();
+                refresh_timerfd(&mut state);
+                let value = state.expirations;
+                state.expirations = 0;
+                value
+            };
+            if expired == 0 {
+                return -errno::EAGAIN;
+            }
+            if user_write(buffer, &expired.to_le_bytes()) { 8 } else { -errno::EFAULT }
+        }
         FdKind::Epoll(_) => -errno::EINVAL,
+    }
+}
+
+/// Met a jour le compteur d'expirations d'un `timerfd` en fonction de l'heure.
+fn refresh_timerfd(state: &mut crate::kernel::fd::TimerFdState) {
+    if state.deadline == 0 {
+        return;
+    }
+    let now = crate::kernel::timer::ticks();
+    if now < state.deadline {
+        return;
+    }
+    if state.interval == 0 {
+        state.expirations += 1;
+        state.deadline = 0; // one-shot : desarme
+    } else {
+        let late = now - state.deadline;
+        let count = late / state.interval + 1;
+        state.expirations += count;
+        state.deadline += count * state.interval;
     }
 }
 
@@ -215,7 +267,7 @@ pub fn sys_write(fd: i32, buffer: u64, count: usize) -> i64 {
             data.len() as i64
         }
         FdKind::Dir(_) => -errno::EISDIR,
-        FdKind::Framebuffer => -errno::EINVAL,
+        FdKind::Framebuffer | FdKind::VirtualTerminal => -errno::EINVAL,
         FdKind::InputKeyboard | FdKind::InputMouse => count as i64,
         FdKind::Pipe(shared, readable) => {
             if readable {
@@ -224,6 +276,21 @@ pub fn sys_write(fd: i32, buffer: u64, count: usize) -> i64 {
             shared.borrow_mut().extend_from_slice(&data);
             count as i64
         }
+        FdKind::EventFd(state) => {
+            if count < 8 {
+                return -errno::EINVAL;
+            }
+            let mut value = [0u8; 8];
+            value.copy_from_slice(&data[..8]);
+            let value = u64::from_le_bytes(value);
+            // u64::MAX est reserve par l'ABI (valeur interdite en ecriture).
+            if value == u64::MAX {
+                return -errno::EINVAL;
+            }
+            state.borrow_mut().counter += value;
+            8
+        }
+        FdKind::TimerFd(_) => -errno::EINVAL,
         FdKind::Epoll(_) => -errno::EINVAL,
     }
 }
@@ -356,6 +423,13 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
         // restee en mode texte).
         if matches!(kind, FdKind::Framebuffer) && !crate::drivers::gfx::is_active() {
             crate::drivers::gfx::enter();
+        }
+        // De meme pour la souris : son IRQ n'est armee qu'a l'entree du bureau.
+        // Sans cela, /dev/input/event1 resterait muet. On prend ensuite un
+        // instantane de son etat pour que la premiere lecture parte de zero.
+        if matches!(kind, FdKind::InputMouse) {
+            crate::drivers::mouse::init();
+            input::sync_mouse();
         }
         let mut desc = FileDesc::new(kind);
         desc.flags = flags;
@@ -902,6 +976,19 @@ const FBIOGET_FSCREENINFO: u64 = 0x4602;
 const FBIOPAN_DISPLAY: u64 = 0x4606;
 const FBIOBLANK: u64 = 0x4611;
 
+// Console virtuelle : mode graphique et gestion des VT. Le plugin `linuxfb` de
+// Qt ouvre /dev/tty0 et bascule le terminal en KD_GRAPHICS pour que le noyau
+// cesse d'ecrire du texte par-dessus le framebuffer.
+const KDGETMODE: u64 = 0x4B3B;
+const KDSETMODE: u64 = 0x4B3A;
+const KDGKBMODE: u64 = 0x4B44;
+const KDSKBMODE: u64 = 0x4B45;
+const VT_GETMODE: u64 = 0x5601;
+const VT_SETMODE: u64 = 0x5602;
+const VT_GETSTATE: u64 = 0x5603;
+const VT_ACTIVATE: u64 = 0x5606;
+const VT_WAITACTIVE: u64 = 0x5607;
+
 /// `ioctl`.
 pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
     let process = task::current_process();
@@ -962,7 +1049,50 @@ pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
             FBIOPUT_VSCREENINFO | FBIOPAN_DISPLAY | FBIOBLANK => 0,
             _ => -errno::ENOTTY,
         },
-        FdKind::InputKeyboard | FdKind::InputMouse => evdev_ioctl(request, arg, matches!(kind, FdKind::InputKeyboard)),
+        FdKind::VirtualTerminal => vt_ioctl(request, arg),
+        FdKind::InputKeyboard => evdev_ioctl(request, arg, input::Device::Keyboard),
+        FdKind::InputMouse => evdev_ioctl(request, arg, input::Device::Mouse),
+        FdKind::TimerFd(_) | FdKind::EventFd(_) => match request {
+            FIONBIO | FIONREAD => 0,
+            _ => -errno::ENOTTY,
+        },
+        _ => -errno::ENOTTY,
+    }
+}
+
+/// ioctls de console virtuelle.
+///
+/// L'ecran appartient deja au framebuffer : basculer en KD_GRAPHICS n'a rien a
+/// changer materiellement. Mais ces appels doivent **reussir** — le plugin
+/// linuxfb interprete un echec comme « pas de console utilisable » et refuse de
+/// demarrer, ou reactive un curseur texte par-dessus le rendu.
+fn vt_ioctl(request: u64, arg: u64) -> i64 {
+    const KD_TEXT: u32 = 0;
+    const KD_GRAPHICS: u32 = 1;
+    match request {
+        KDGETMODE => {
+            let mode = if crate::drivers::gfx::is_active() { KD_GRAPHICS } else { KD_TEXT };
+            if user_write(arg, &mode.to_le_bytes()) { 0 } else { -errno::EFAULT }
+        }
+        KDSETMODE => 0,
+        KDGKBMODE => {
+            // K_XLATE : le mode par defaut d'une console Linux.
+            if user_write(arg, &1u32.to_le_bytes()) { 0 } else { -errno::EFAULT }
+        }
+        KDSKBMODE => 0,
+        VT_GETMODE => {
+            // `struct vt_mode` : mode, waitv, relsig, acqsig, frsig.
+            let buffer = [0u8; 8];
+            if user_write(arg, &buffer) { 0 } else { -errno::EFAULT }
+        }
+        VT_SETMODE | VT_ACTIVATE | VT_WAITACTIVE => 0,
+        VT_GETSTATE => {
+            // `struct vt_stat` : v_active, v_signal, v_state. Une seule console.
+            let mut buffer = [0u8; 6];
+            buffer[0..2].copy_from_slice(&1u16.to_le_bytes());
+            if user_write(arg, &buffer) { 0 } else { -errno::EFAULT }
+        }
+        TCGETS | TCSETS | TIOCGWINSZ | FIONBIO => 0,
         _ => -errno::ENOTTY,
     }
 }
@@ -1003,102 +1133,89 @@ fn fb_fix_screeninfo() -> [u8; 80] {
     buffer
 }
 
-/// ioctls evdev minimaux : version, identifiant, nom.
-fn evdev_ioctl(request: u64, arg: u64, keyboard_device: bool) -> i64 {
-    const EVIOCGVERSION: u64 = 0x8004_4501;
-    // EVIOCGNAME(len) et EVIOCGBIT(ev, len) encodent la taille : on ne compare
-    // donc que le type et le numero de commande.
-    let number = (request >> 8) & 0xFF;
-    let command = request & 0xFF;
-    if request == EVIOCGVERSION {
-        return if user_write(arg, &0x0001_0001u32.to_le_bytes()) { 0 } else { -errno::EFAULT };
+/// ioctls evdev.
+///
+/// Les codes `EVIOC*` encodent la taille du tampon dans les bits de poids fort
+/// (`_IOR(type, nr, size)`), et `EVIOCGBIT(ev, len)` encode en plus le type
+/// d'evenement dans le numero. On decompose donc la requete au lieu de la
+/// comparer a des constantes figees.
+fn evdev_ioctl(request: u64, arg: u64, device: input::Device) -> i64 {
+    let number = ((request >> 8) & 0xFF) as u8;
+    let command = (request & 0xFF) as u8;
+    let size = ((request >> 16) & 0x3FFF) as usize;
+
+    if number != b'E' {
+        return -errno::ENOTTY;
     }
-    if number == 0x45 && command == 0x06 {
-        // EVIOCGNAME
-        let name: &[u8] = if keyboard_device { b"bouchaud-keyboard\0" } else { b"bouchaud-mouse\0" };
-        return if user_write(arg, name) { name.len() as i64 } else { -errno::EFAULT };
+
+    match command {
+        // EVIOCGVERSION : version du protocole evdev (1.0.1).
+        0x01 => {
+            if user_write(arg, &0x0001_0001u32.to_le_bytes()) { 0 } else { -errno::EFAULT }
+        }
+        // EVIOCGID : `struct input_id`.
+        0x02 => {
+            let id = input::device_id(device);
+            if user_write(arg, &id) { 0 } else { -errno::EFAULT }
+        }
+        // EVIOCGNAME : nom du peripherique.
+        0x06 => write_string(arg, input::device_name(device), size),
+        // EVIOCGPHYS : emplacement physique.
+        0x07 => write_string(arg, input::device_phys(device), size),
+        // EVIOCGUNIQ : identifiant unique — aucun, comme la plupart des
+        // claviers PS/2. On renvoie une chaine vide, pas une erreur.
+        0x08 => write_string(arg, b"\0", size),
+        // EVIOCGPROP : proprietes (INPUT_PROP_*). Aucune : souris classique.
+        0x09 => {
+            let empty = alloc::vec![0u8; size];
+            if user_write(arg, &empty) { size as i64 } else { -errno::EFAULT }
+        }
+        // EVIOCGKEY / EVIOCGLED / EVIOCGSW : etat courant des touches, des
+        // diodes, des interrupteurs. Rien d'enfonce au moment de l'ouverture.
+        0x18 | 0x19 | 0x1B => {
+            let empty = alloc::vec![0u8; size];
+            if user_write(arg, &empty) { size as i64 } else { -errno::EFAULT }
+        }
+        // EVIOCGBIT(type, len) : bitmap des codes supportes.
+        0x20..=0x3F => {
+            let kind = (command - 0x20) as u16;
+            let bits = input::capability_bits(device, kind, size);
+            if user_write(arg, &bits) { bits.len() as i64 } else { -errno::EFAULT }
+        }
+        // EVIOCGABS(axe) : pas d'axe absolu (c'est une souris relative).
+        0x40..=0x7F => -errno::EINVAL,
+        // EVIOCSCLOCKID : choix de l'horloge des horodatages. On n'en a qu'une.
+        0xA0 => 0,
+        // EVIOCGRAB : acces exclusif. Il n'y a qu'un client possible ici, donc
+        // la demande est toujours satisfaite.
+        0x90 => 0,
+        // EVIOCREVOKE, EVIOCSMASK... : sans objet, mais un echec ferait
+        // renoncer certains clients.
+        _ => 0,
     }
-    if number == 0x45 && command == 0x02 {
-        // EVIOCGID : bustype, vendor, product, version.
-        let mut buffer = [0u8; 8];
-        buffer[0..2].copy_from_slice(&0x0011u16.to_le_bytes()); // BUS_I8042
-        return if user_write(arg, &buffer) { 0 } else { -errno::EFAULT };
-    }
-    0
+}
+
+/// Ecrit une chaine dans un tampon utilisateur borne, renvoie sa longueur.
+fn write_string(addr: u64, text: &[u8], max: usize) -> i64 {
+    let len = core::cmp::min(text.len(), max.max(1));
+    if user_write(addr, &text[..len]) { len as i64 } else { -errno::EFAULT }
 }
 
 // --- Peripheriques d'entree --------------------------------------------------
 
-/// Compose un `struct input_event` (24 octets sur x86-64).
-fn input_event(kind: u16, code: u16, value: i32) -> [u8; 24] {
-    let mut buffer = [0u8; 24];
-    let seconds = crate::kernel::abi::unix_time();
-    buffer[0..8].copy_from_slice(&seconds.to_le_bytes());
-    buffer[16..18].copy_from_slice(&kind.to_le_bytes());
-    buffer[18..20].copy_from_slice(&code.to_le_bytes());
-    buffer[20..24].copy_from_slice(&value.to_le_bytes());
-    buffer
-}
-
-/// Lecture non bloquante d'evenements clavier au format evdev.
-fn read_input_keyboard(buffer: u64, count: usize) -> i64 {
-    const EV_KEY: u16 = 1;
-    const EV_SYN: u16 = 0;
-    let mut out: Vec<u8> = Vec::new();
-    while out.len() + 48 <= count {
-        match keyboard::try_key() {
-            Some(Key::Char(byte)) => {
-                out.extend_from_slice(&input_event(EV_KEY, byte as u16, 1));
-                out.extend_from_slice(&input_event(EV_KEY, byte as u16, 0));
-                out.extend_from_slice(&input_event(EV_SYN, 0, 0));
-            }
-            Some(Key::Enter) => {
-                out.extend_from_slice(&input_event(EV_KEY, 28, 1)); // KEY_ENTER
-                out.extend_from_slice(&input_event(EV_KEY, 28, 0));
-                out.extend_from_slice(&input_event(EV_SYN, 0, 0));
-            }
-            Some(_) => {}
-            None => break,
-        }
+/// Lecture non bloquante d'un peripherique d'entree.
+fn read_input(buffer: u64, count: usize, device: input::Device) -> i64 {
+    if count < input::EVENT_SIZE {
+        return -errno::EINVAL;
     }
-    if out.is_empty() {
+    let events = match device {
+        input::Device::Keyboard => input::read_keyboard(count),
+        input::Device::Mouse => input::read_mouse(count),
+    };
+    if events.is_empty() {
         return -errno::EAGAIN;
     }
-    if user_write(buffer, &out) { out.len() as i64 } else { -errno::EFAULT }
-}
-
-/// Lecture d'evenements souris : position absolue et bouton gauche.
-fn read_input_mouse(buffer: u64, count: usize) -> i64 {
-    const EV_KEY: u16 = 1;
-    const EV_ABS: u16 = 3;
-    const EV_SYN: u16 = 0;
-    const ABS_X: u16 = 0;
-    const ABS_Y: u16 = 1;
-    const BTN_LEFT: u16 = 0x110;
-
-    static mut LAST: (usize, usize, bool) = (0, 0, false);
-    let (x, y) = crate::drivers::mouse::pos();
-    let down = crate::drivers::mouse::left_down();
-    let previous = unsafe { LAST };
-    if previous == (x, y, down) {
-        return -errno::EAGAIN;
-    }
-    unsafe { LAST = (x, y, down) };
-
-    let mut out: Vec<u8> = Vec::new();
-    out.extend_from_slice(&input_event(EV_ABS, ABS_X, x as i32));
-    out.extend_from_slice(&input_event(EV_ABS, ABS_Y, y as i32));
-    if previous.2 != down {
-        out.extend_from_slice(&input_event(EV_KEY, BTN_LEFT, if down { 1 } else { 0 }));
-    }
-    out.extend_from_slice(&input_event(EV_SYN, 0, 0));
-    if out.len() > count {
-        out.truncate(count / 24 * 24);
-    }
-    if out.is_empty() {
-        return -errno::EAGAIN;
-    }
-    if user_write(buffer, &out) { out.len() as i64 } else { -errno::EFAULT }
+    if user_write(buffer, &events) { events.len() as i64 } else { -errno::EFAULT }
 }
 
 // --- Attente d'evenements ----------------------------------------------------
@@ -1114,11 +1231,19 @@ fn readable(fd: i32) -> bool {
         None => return false,
     };
     match kind {
-        FdKind::Console => keyboard::try_scancode().is_some(),
+        FdKind::Console => keyboard::has_pending(),
         FdKind::File(_) | FdKind::Dir(_) | FdKind::Zero | FdKind::Random | FdKind::Null => true,
         FdKind::Pipe(shared, true) => !shared.borrow().is_empty(),
-        FdKind::InputKeyboard => keyboard::try_scancode().is_some(),
-        FdKind::InputMouse => true,
+        // Interroger sans consommer : `poll` ne doit pas voler l'evenement au
+        // `read` qui va suivre.
+        FdKind::InputKeyboard => input::keyboard_pending(),
+        FdKind::InputMouse => input::mouse_pending(),
+        FdKind::EventFd(state) => state.borrow().counter > 0,
+        FdKind::TimerFd(state) => {
+            let mut state = state.borrow_mut();
+            refresh_timerfd(&mut state);
+            state.expirations > 0
+        }
         _ => false,
     }
 }
@@ -1128,8 +1253,7 @@ pub fn sys_poll(fds: u64, count: usize, timeout_ms: i32) -> i64 {
     let deadline = if timeout_ms < 0 {
         u64::MAX
     } else {
-        crate::kernel::timer::ticks()
-            + ((timeout_ms as u64) * crate::kernel::timer::TICKS_PER_SECOND).div_ceil(1000)
+        crate::kernel::timer::ticks() + crate::kernel::timer::ms_to_ticks(timeout_ms as u64)
     };
 
     loop {
@@ -1174,7 +1298,7 @@ pub fn sys_select(nfds: i32, read_set: u64, _write_set: u64, _except_set: u64, t
         let seconds = user_read_u64(timeout).unwrap_or(0);
         let micros = user_read_u64(timeout + 8).unwrap_or(0);
         let ms = seconds * 1000 + micros / 1000;
-        crate::kernel::timer::ticks() + (ms * crate::kernel::timer::TICKS_PER_SECOND).div_ceil(1000)
+        crate::kernel::timer::ticks() + crate::kernel::timer::ms_to_ticks(ms)
     };
 
     loop {
@@ -1266,8 +1390,7 @@ pub fn sys_epoll_wait(epfd: i32, events: u64, max: usize, timeout_ms: i32) -> i6
     let deadline = if timeout_ms < 0 {
         u64::MAX
     } else {
-        crate::kernel::timer::ticks()
-            + ((timeout_ms as u64) * crate::kernel::timer::TICKS_PER_SECOND).div_ceil(1000)
+        crate::kernel::timer::ticks() + crate::kernel::timer::ms_to_ticks(timeout_ms as u64)
     };
 
     loop {
@@ -1291,13 +1414,113 @@ pub fn sys_epoll_wait(epfd: i32, events: u64, max: usize, timeout_ms: i32) -> i6
     }
 }
 
-/// `eventfd` : implemente comme un tube (suffisant pour un reveil de boucle).
-pub fn sys_eventfd() -> i64 {
+/// `eventfd2` : compteur de reveils partage entre threads.
+pub fn sys_eventfd(initial: u32, flags: u32) -> i64 {
     use alloc::rc::Rc;
     use core::cell::RefCell;
-    let shared = Rc::new(RefCell::new(Vec::new()));
+    const EFD_SEMAPHORE: u32 = 1;
+    const EFD_CLOEXEC: u32 = 0o2000000;
+    let state = Rc::new(RefCell::new(crate::kernel::fd::EventFdState {
+        counter: initial as u64,
+        semaphore: flags & EFD_SEMAPHORE != 0,
+    }));
+    let mut desc = FileDesc::new(FdKind::EventFd(state));
+    desc.cloexec = flags & EFD_CLOEXEC != 0;
     let process = task::current_process();
-    let desc = FileDesc::new(FdKind::Pipe(shared, true));
     let fd = process.borrow_mut().files.insert(desc);
     fd as i64
+}
+
+/// `timerfd_create`.
+pub fn sys_timerfd_create(flags: u32) -> i64 {
+    use alloc::rc::Rc;
+    use core::cell::RefCell;
+    const TFD_CLOEXEC: u32 = 0o2000000;
+    let state = Rc::new(RefCell::new(crate::kernel::fd::TimerFdState {
+        deadline: 0,
+        interval: 0,
+        expirations: 0,
+    }));
+    let mut desc = FileDesc::new(FdKind::TimerFd(state));
+    desc.cloexec = flags & TFD_CLOEXEC != 0;
+    let process = task::current_process();
+    let fd = process.borrow_mut().files.insert(desc);
+    fd as i64
+}
+
+/// `timerfd_settime` : `struct itimerspec` = periode puis premiere echeance.
+pub fn sys_timerfd_settime(fd: i32, flags: u32, new_value: u64, old_value: u64) -> i64 {
+    const TFD_TIMER_ABSTIME: u32 = 1;
+    let process = task::current_process();
+    let state = match process.borrow().files.get(fd) {
+        Some(desc) => match &desc.kind {
+            FdKind::TimerFd(state) => state.clone(),
+            _ => return -errno::EINVAL,
+        },
+        None => return -errno::EBADF,
+    };
+
+    if old_value != 0 {
+        let previous = state.borrow();
+        let remaining = previous.deadline.saturating_sub(crate::kernel::timer::ticks());
+        write_itimerspec(old_value, previous.interval, remaining);
+    }
+
+    let interval_ns = match read_timespec_ns(new_value) {
+        Some(value) => value,
+        None => return -errno::EFAULT,
+    };
+    let value_ns = match read_timespec_ns(new_value + 16) {
+        Some(value) => value,
+        None => return -errno::EFAULT,
+    };
+
+    let mut state = state.borrow_mut();
+    state.interval = crate::kernel::timer::ms_to_ticks(interval_ns / 1_000_000);
+    state.expirations = 0;
+    state.deadline = if value_ns == 0 {
+        0 // desarmement
+    } else if flags & TFD_TIMER_ABSTIME != 0 {
+        // Echeance absolue sur l'horloge monotone.
+        let target_ms = value_ns / 1_000_000;
+        let now_ms = crate::kernel::timer::monotonic_ms();
+        crate::kernel::timer::ticks() + crate::kernel::timer::ms_to_ticks(target_ms.saturating_sub(now_ms))
+    } else {
+        crate::kernel::timer::ticks() + crate::kernel::timer::ms_to_ticks(value_ns / 1_000_000).max(1)
+    };
+    0
+}
+
+/// `timerfd_gettime`.
+pub fn sys_timerfd_gettime(fd: i32, out: u64) -> i64 {
+    let process = task::current_process();
+    let state = match process.borrow().files.get(fd) {
+        Some(desc) => match &desc.kind {
+            FdKind::TimerFd(state) => state.clone(),
+            _ => return -errno::EINVAL,
+        },
+        None => return -errno::EBADF,
+    };
+    let state = state.borrow();
+    let remaining = state.deadline.saturating_sub(crate::kernel::timer::ticks());
+    write_itimerspec(out, state.interval, remaining);
+    0
+}
+
+/// Lit un `struct timespec` et le convertit en nanosecondes.
+fn read_timespec_ns(addr: u64) -> Option<u64> {
+    let seconds = crate::kernel::abi::user_read_u64(addr)?;
+    let nanos = crate::kernel::abi::user_read_u64(addr + 8)?;
+    Some(seconds.saturating_mul(1_000_000_000).saturating_add(nanos))
+}
+
+/// Ecrit un `struct itimerspec` a partir de durees en ticks.
+fn write_itimerspec(addr: u64, interval_ticks: u64, value_ticks: u64) {
+    let per_second = crate::kernel::timer::TICKS_PER_SECOND;
+    for (offset, ticks) in [(0u64, interval_ticks), (16, value_ticks)] {
+        let seconds = ticks / per_second;
+        let nanos = (ticks % per_second) * (1_000_000_000 / per_second);
+        user_write(addr + offset, &seconds.to_le_bytes());
+        user_write(addr + offset + 8, &nanos.to_le_bytes());
+    }
 }

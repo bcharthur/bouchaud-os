@@ -344,7 +344,16 @@ construction cote utilisateur : `tools/userland/README.md`.
 - [x] **Runtime C++** : STL, exceptions (deroulement), `std::thread`,
       destructeurs — valide avec libstdc++ statique
 - [x] **Serveur graphique** : `/dev/fb0` mmapable sur la VRAM, ioctls fbdev
-      (`FBIOGET_*SCREENINFO`), `/dev/input/event*` au format evdev
+      (`FBIOGET_*SCREENINFO`), `/dev/tty0` avec `KDSETMODE`/`VT_*`, et
+      `/dev/input/event*` en evdev reel (codes de touches Linux, souris
+      relative, bitmaps `EVIOCGBIT`)
+- [x] **Boucle d'evenements** : `eventfd` (compteur), `timerfd`, `poll`/`ppoll`,
+      `epoll`, futex a echeance absolue — valide par `tools/userland/qpa-probe.c`
+      qui rejoue le demarrage du plugin `linuxfb` de Qt
+- [x] **Tick a 1000 Hz** : les 18,2 Hz du PIT par defaut donnaient 55 ms de
+      granularite, inutilisable pour animer une interface
+- [x] **Arborescence systeme** : polices DejaVu dans `/usr/share/fonts`, `/proc`
+      et `/sys` reduits aux fichiers lus au demarrage, `/etc` minimal
 - [ ] `fork` (copie paresseuse de l'espace d'adressage) et `execve`
 - [ ] Signaux reels : livraison a un gestionnaire ring 3, `rt_sigreturn`
 - [ ] Sockets POSIX relies a la pile TCP/IP existante (`src/net/`)

@@ -43,6 +43,35 @@ pub enum FdKind {
     Pipe(Rc<RefCell<Vec<u8>>>, bool),
     /// Instance `epoll` : liste de (fd surveille, evenements demandes, donnee).
     Epoll(Rc<RefCell<Vec<(i32, u32, u64)>>>),
+    /// `eventfd` : compteur 64 bits partage entre threads.
+    EventFd(Rc<RefCell<EventFdState>>),
+    /// `timerfd` : echeance et periode, en ticks du timer noyau.
+    TimerFd(Rc<RefCell<TimerFdState>>),
+    /// Console virtuelle `/dev/tty0` : ne sert qu'a ses ioctls de mode
+    /// graphique, les entrees/sorties passent par la console.
+    VirtualTerminal,
+}
+
+/// Etat d'un `eventfd`.
+///
+/// Ce n'est pas un tube : `read` renvoie la valeur du compteur **et le remet a
+/// zero** (ou le decremente de 1 en mode semaphore), `write` ajoute au
+/// compteur. Une boucle d'evenements s'en sert pour se reveiller elle-meme
+/// depuis un autre thread ; la traiter comme un flux d'octets ferait accumuler
+/// des reveils au lieu de les fusionner.
+pub struct EventFdState {
+    pub counter: u64,
+    pub semaphore: bool,
+}
+
+/// Etat d'un `timerfd`.
+pub struct TimerFdState {
+    /// Tick de la prochaine echeance (0 = desarme).
+    pub deadline: u64,
+    /// Periode en ticks (0 = one-shot).
+    pub interval: u64,
+    /// Expirations non encore lues.
+    pub expirations: u64,
 }
 
 /// Un descripteur ouvert.
@@ -150,6 +179,9 @@ pub fn device_for_path(path: &str) -> Option<FdKind> {
         "/dev/zero" => Some(FdKind::Zero),
         "/dev/random" | "/dev/urandom" => Some(FdKind::Random),
         "/dev/tty" | "/dev/console" | "/dev/stdin" | "/dev/stdout" | "/dev/stderr" => Some(FdKind::Console),
+        // Les consoles virtuelles sont ouvertes par le plugin linuxfb de Qt
+        // pour basculer le terminal en mode graphique.
+        "/dev/tty0" | "/dev/tty1" | "/dev/tty2" | "/dev/vc/0" => Some(FdKind::VirtualTerminal),
         "/dev/fb0" | "/dev/fb" | "/dev/graphics/fb0" => Some(FdKind::Framebuffer),
         "/dev/input/event0" => Some(FdKind::InputKeyboard),
         "/dev/input/event1" => Some(FdKind::InputMouse),

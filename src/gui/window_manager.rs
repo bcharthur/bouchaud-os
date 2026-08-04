@@ -90,8 +90,10 @@ pub fn run() {
                     if moved < 6 {
                         // Clic — verifier double-clic
                         let tick = crate::kernel::timer::ticks();
+                        // Fenetre de double-clic : une demi-seconde.
+                        let window = crate::kernel::timer::TICKS_PER_SECOND / 2;
                         let double = last_icon_tap
-                            .map_or(false, |(li, lt)| li == idx && tick.wrapping_sub(lt) < 9);
+                            .map_or(false, |(li, lt)| li == idx && tick.wrapping_sub(lt) < window);
                         if double {
                             wins.push(make_app(ICONS[idx].1, home, &mut spawn_n));
                             last_icon_tap = None;

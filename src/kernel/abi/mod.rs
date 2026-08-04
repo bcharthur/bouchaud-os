@@ -172,7 +172,11 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         EPOLL_WAIT | EPOLL_PWAIT => {
             file::sys_epoll_wait(args[0] as i32, args[1], args[2] as usize, args[3] as i32)
         }
-        EVENTFD | EVENTFD2 => file::sys_eventfd(),
+        EVENTFD => file::sys_eventfd(args[0] as u32, 0),
+        EVENTFD2 => file::sys_eventfd(args[0] as u32, args[1] as u32),
+        TIMERFD_CREATE => file::sys_timerfd_create(args[1] as u32),
+        TIMERFD_SETTIME => file::sys_timerfd_settime(args[0] as i32, args[1] as u32, args[2], args[3]),
+        TIMERFD_GETTIME => file::sys_timerfd_gettime(args[0] as i32, args[1]),
         FSYNC | FDATASYNC => 0,
         UMASK => 0o022,
         FCHMOD | FCHOWN | CHMOD | CHOWN => 0,
@@ -244,10 +248,10 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
             0
         }
         GETTIMEOFDAY => {
-            let seconds = unix_time();
+            let ms = realtime_ms();
             if args[0] != 0 {
-                user_write(args[0], &seconds.to_le_bytes());
-                user_write(args[0] + 8, &0u64.to_le_bytes());
+                user_write(args[0], &(ms / 1000).to_le_bytes());
+                user_write(args[0] + 8, &((ms % 1000) * 1000).to_le_bytes());
             }
             0
         }
@@ -277,13 +281,46 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
     }
 }
 
-/// Secondes depuis l'epoch Unix, calculees depuis la RTC.
-pub fn unix_time() -> u64 {
+/// Ancrage de l'horloge murale : (secondes Unix, ticks) releves au premier
+/// appel. Voir [`realtime_ms`].
+static mut EPOCH_ANCHOR: Option<(u64, u64)> = None;
+
+/// Lit la RTC et la convertit en secondes depuis l'epoch Unix.
+fn rtc_seconds() -> u64 {
     let now = crate::arch::x86_64::rtc::now_utc();
     days_from_civil(now.year as i64, now.month as i64, now.day as i64) as u64 * 86400
         + now.hour as u64 * 3600
         + now.minute as u64 * 60
         + now.second as u64
+}
+
+/// Horloge murale en millisecondes depuis l'epoch Unix.
+///
+/// La RTC ne donne que des secondes entieres. S'en contenter rendrait toute
+/// echeance sub-seconde inexploitable : un programme qui lit l'heure, y ajoute
+/// 200 ms et attend jusque-la verrait une horloge figee pendant une seconde
+/// entiere, puis un saut. On ancre donc la seconde RTC une fois pour toutes, et
+/// on y ajoute le temps ecoule mesure par le timer — ce qui donne la
+/// milliseconde et, accessoirement, une horloge qui ne recule jamais.
+pub fn realtime_ms() -> u64 {
+    let now_ticks = crate::kernel::timer::ticks();
+    let (base_seconds, base_ticks) = unsafe {
+        match EPOCH_ANCHOR {
+            Some(anchor) => anchor,
+            None => {
+                let anchor = (rtc_seconds(), now_ticks);
+                EPOCH_ANCHOR = Some(anchor);
+                anchor
+            }
+        }
+    };
+    let elapsed_ticks = now_ticks.saturating_sub(base_ticks);
+    base_seconds * 1000 + elapsed_ticks * 1000 / crate::kernel::timer::TICKS_PER_SECOND
+}
+
+/// Secondes depuis l'epoch Unix.
+pub fn unix_time() -> u64 {
+    realtime_ms() / 1000
 }
 
 /// Jours ecoules depuis 1970-01-01 (algorithme de Howard Hinnant).
@@ -299,35 +336,38 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 /// `clock_gettime` : horloge murale ou monotone.
 fn sys_clock_gettime(clock: i32, out: u64) -> i64 {
     const CLOCK_REALTIME: i32 = 0;
-    const CLOCK_MONOTONIC: i32 = 1;
-    let (seconds, nanos) = match clock {
-        CLOCK_REALTIME => (unix_time(), 0u64),
-        _ => {
-            // Monotone : le TSC calibre donne bien mieux que les 18,2 Hz du PIT,
-            // ce dont depend toute animation d'interface.
-            let ms = crate::kernel::timer::cycles_to_ms(crate::kernel::timer::cycles_since_boot());
-            (ms / 1000, (ms % 1000) * 1_000_000)
-        }
+    const CLOCK_REALTIME_COARSE: i32 = 5;
+    const CLOCK_REALTIME_ALARM: i32 = 8;
+    // Toutes les autres horloges (MONOTONIC, MONOTONIC_RAW, BOOTTIME,
+    // les horloges de processus et de thread) partagent la meme base monotone.
+    let ms = match clock {
+        CLOCK_REALTIME | CLOCK_REALTIME_COARSE | CLOCK_REALTIME_ALARM => realtime_ms(),
+        _ => crate::kernel::timer::monotonic_ms(),
     };
-    let _ = CLOCK_MONOTONIC;
     if out == 0 {
         return -errno::EFAULT;
     }
+    let seconds = ms / 1000;
+    let nanos = (ms % 1000) * 1_000_000;
     if !user_write(out, &seconds.to_le_bytes()) || !user_write(out + 8, &nanos.to_le_bytes()) {
         return -errno::EFAULT;
     }
     0
 }
 
-/// Convertit un `struct timespec` utilisateur en ticks du timer.
-fn timespec_ticks(addr: u64) -> Option<u64> {
+/// Lit un `struct timespec` utilisateur et le convertit en millisecondes.
+fn timespec_ms(addr: u64) -> Option<u64> {
     if addr == 0 {
         return None;
     }
     let seconds = user_read_u64(addr)?;
     let nanos = user_read_u64(addr + 8)?;
-    let ms = seconds * 1000 + nanos / 1_000_000;
-    Some((ms * crate::kernel::timer::TICKS_PER_SECOND).div_ceil(1000))
+    Some(seconds.saturating_mul(1000) + nanos / 1_000_000)
+}
+
+/// Convertit un `struct timespec` utilisateur (duree relative) en ticks.
+fn timespec_ticks(addr: u64) -> Option<u64> {
+    Some(crate::kernel::timer::ms_to_ticks(timespec_ms(addr)?))
 }
 
 /// `nanosleep` / `clock_nanosleep`.
@@ -359,12 +399,29 @@ fn sys_futex(args: [u64; 6]) -> i64 {
     const FUTEX_CLOCK_REALTIME: u32 = 256;
 
     let uaddr = args[0];
-    let operation = (args[1] as u32) & !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
+    let raw_operation = args[1] as u32;
+    let operation = raw_operation & !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
     let expected = args[2] as u32;
 
     match operation {
         FUTEX_WAIT | FUTEX_WAIT_BITSET => {
-            let timeout = timespec_ticks(args[3]).unwrap_or(0);
+            // Piege de l'ABI : `FUTEX_WAIT` recoit une duree **relative**,
+            // `FUTEX_WAIT_BITSET` une echeance **absolue** — et c'est cette
+            // seconde forme qu'emploie `pthread_cond_timedwait`. Traiter une
+            // date absolue comme une duree donnerait un delai de plusieurs
+            // decennies : l'attente ne rendrait jamais la main.
+            let timeout = match timespec_ms(args[3]) {
+                None => 0, // sans limite
+                Some(ms) if operation == FUTEX_WAIT => crate::kernel::timer::ms_to_ticks(ms).max(1),
+                Some(deadline_ms) => {
+                    let now_ms = if raw_operation & FUTEX_CLOCK_REALTIME != 0 {
+                        unix_time().saturating_mul(1000)
+                    } else {
+                        crate::kernel::timer::monotonic_ms()
+                    };
+                    crate::kernel::timer::ms_to_ticks(deadline_ms.saturating_sub(now_ms)).max(1)
+                }
+            };
             if task::futex_wait(uaddr, expected, timeout) {
                 0
             } else {

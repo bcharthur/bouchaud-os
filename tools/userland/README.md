@@ -6,7 +6,7 @@ de construction côté utilisateur.
 
 ```
 ./build.sh freestanding    # tests d'ABI sans libc (gcc + ld, aucune dépendance)
-./build.sh musl            # binaires statiques musl
+./build.sh musl            # binaires statiques musl (dont qpa-probe)
 ./build.sh musl-dynamic    # binaires dynamiques + ld-musl-x86_64.so.1
 ```
 
@@ -109,55 +109,116 @@ Les exceptions fonctionnent avec un `libgcc_eh` statique : le déroulement lit
 
 ## 9. Serveur graphique / Qt
 
-Le noyau expose une surface de type Linux, celle qu'attend le plugin `linuxfb`
-de Qt :
+Le noyau expose la surface Linux qu'attend le plugin `linuxfb` de Qt, avec ses
+plugins d'entrée `evdevkeyboard` et `evdevmouse`.
 
 | Chemin | Rôle |
 |---|---|
 | `/dev/fb0` | framebuffer 1280x720 XRGB8888, `mmap`-able sur la VRAM réelle |
-| `/dev/input/event0` | clavier, format `struct input_event` evdev |
-| `/dev/input/event1` | souris (position absolue + bouton) |
+| `/dev/tty0` | console virtuelle : bascule en mode graphique (`KD_GRAPHICS`) |
+| `/dev/input/event0` | clavier, **codes de touches Linux**, format evdev |
+| `/dev/input/event1` | souris, événements **relatifs** `REL_X`/`REL_Y` + boutons |
 
-Ioctls implémentés : `FBIOGET_VSCREENINFO`, `FBIOGET_FSCREENINFO`,
-`FBIOPUT_VSCREENINFO`, `FBIOPAN_DISPLAY`, `EVIOCGVERSION`, `EVIOCGNAME`,
-`EVIOCGID`, plus `TCGETS`/`TIOCGWINSZ` sur la console.
+Ioctls implémentés :
 
-Ouvrir `/dev/fb0` bascule automatiquement la carte en mode graphique ; le mode
-texte est rendu au shell quand le programme se termine.
+* framebuffer — `FBIOGET_VSCREENINFO`, `FBIOGET_FSCREENINFO`,
+  `FBIOPUT_VSCREENINFO`, `FBIOPAN_DISPLAY`, `FBIOBLANK` ;
+* console — `KDGETMODE`, `KDSETMODE`, `KDGKBMODE`, `KDSKBMODE`, `VT_GETSTATE`,
+  `VT_GETMODE`, `VT_SETMODE`, `VT_ACTIVATE`, `TCGETS`, `TIOCGWINSZ` ;
+* evdev — `EVIOCGVERSION`, `EVIOCGID`, `EVIOCGNAME`, `EVIOCGPHYS`, `EVIOCGUNIQ`,
+  `EVIOCGPROP`, `EVIOCGBIT(type)`, `EVIOCGKEY`, `EVIOCGLED`, `EVIOCGRAB`,
+  `EVIOCSCLOCKID`.
 
-`fb-demo.c` valide toute cette chaîne sans aucune bibliothèque : il ouvre le
-framebuffer, lit sa géométrie par ioctl, le mappe et dessine dedans.
+Ouvrir `/dev/fb0` bascule automatiquement la carte en mode graphique ; ouvrir
+`/dev/input/event1` arme l'IRQ de la souris. Le mode texte est rendu au shell
+quand le programme se termine.
 
-Variables d'environnement fournies par défaut à tout programme (voir
-`kernel::exec::default_environment`) :
+### Deux points à connaître sur les entrées
+
+**Le clavier émet des positions physiques, pas des caractères.** Les codes sont
+ceux de Linux (`KEY_A` = 30), ce qui est la seule chose qu'un client evdev sait
+interpréter. Le noyau applique un AZERTY-FR pour son propre shell, mais Qt
+applique sa disposition à lui — `us` par défaut. Pour retrouver l'AZERTY, il
+faut lui passer un keymap :
+`QT_QPA_EVDEV_KEYBOARD_PARAMETERS=/dev/input/event0:keymap=fr.qmap`.
+
+**La souris est relative.** Le pilote PS/2 maintient une position absolue pour
+le bureau du noyau ; la couche evdev en dérive des deltas, car c'est ainsi
+qu'un client distingue une souris d'un écran tactile.
+
+### Boucle d'événements
+
+`QEventDispatcherUNIX` repose sur trois primitives, toutes présentes :
+`eventfd` (compteur de réveils, pas un tube — la distinction compte : les
+réveils doivent fusionner), `poll`/`ppoll`, et `timerfd`. Le tick noyau est à
+**1000 Hz** : sans cela, la granularité de 55 ms du PIT par défaut rendrait
+toute animation saccadée et tout `poll` imprécis.
+
+### Vérification
+
+`qpa-probe.c` rejoue la séquence de démarrage complète — mêmes appels, même
+ordre, mêmes structures — et vérifie 47 points : ouverture de la console et
+bascule en `KD_GRAPHICS`, géométrie et format du framebuffer, `mmap` de la
+VRAM, capacités evdev des deux périphériques, boucle `poll` réveillée par un
+`eventfd` depuis un autre thread, `timerfd` à 120 ms, `pthread_cond_timedwait`
+à échéance absolue, présence des polices et de `/proc`, `/sys`.
+
+```
+exec /qpa-probe
+```
+
+`fb-demo.c` fait le même travail sur le seul framebuffer, sans aucune
+bibliothèque.
+
+### Environnement fourni par défaut
+
+Voir `kernel::exec::default_environment` :
 
 ```
 QT_QPA_PLATFORM=linuxfb
-QT_QPA_EVDEV_KEYBOARD_PARAMETERS=/dev/input/event0
-QT_QPA_EVDEV_MOUSE_PARAMETERS=/dev/input/event1
-SDL_VIDEODRIVER=fbcon  SDL_FBDEV=/dev/fb0
+QT_QPA_PLATFORM_PLUGIN_ARGS=fb=/dev/fb0:size=1280x720
+QT_QPA_FB_TTY=/dev/tty0
+QT_QPA_FONTDIR=/usr/share/fonts/truetype/dejavu
+QT_QPA_EVDEV_KEYBOARD_PARAMETERS=/dev/input/event0:grab=0
+QT_QPA_EVDEV_MOUSE_PARAMETERS=/dev/input/event1:grab=0
+QT_NO_FONTCONFIG=1   DBUS_SESSION_BUS_ADDRESS=disabled:
+SDL_VIDEODRIVER=fbcon   SDL_FBDEV=/dev/fb0
 ```
 
-Pour Qt lui-même, une compilation croisée statique est nécessaire :
+Le noyau installe aussi au boot (`kernel::sysroot`) les polices DejaVu dans
+`/usr/share/fonts/truetype/dejavu`, un `/proc` et un `/sys` réduits aux
+fichiers réellement lus au démarrage (`/sys/devices/system/cpu/online` pour
+`sysconf(_SC_NPROCESSORS_ONLN)`, `/proc/meminfo`, `/proc/cpuinfo`), et un
+`/etc` minimal.
+
+### Compiler Qt
 
 ```sh
 ./configure -static -release -no-opengl -no-xcb -no-feature-vulkan \
+            -no-feature-dbus -no-feature-glib \
             -qpa linuxfb -platform linux-g++ \
             -device-option CROSS_COMPILE=musl- -prefix /usr
 ```
 
-Ce qui manque encore côté noyau pour une pile Qt complète, par ordre
-d'importance :
+`-no-feature-glib` importe : sans lui, Qt utilise le dispatcher GLib, qui
+demande davantage au système que sa propre boucle `poll`.
 
-1. **`execve`** — non implémenté (le shell lance les programmes directement) ;
-2. **`fork`** — non implémenté : demande la copie paresseuse (COW) de l'espace
-   d'adressage. `clone(CLONE_THREAD)` suffit à `pthread`, donc à Qt et Python,
-   mais pas à un shell POSIX ;
-3. **signaux** — `rt_sigaction` accepte et ignore ; aucun gestionnaire n'est
-   appelé. Suffisant tant que le programme n'attend pas `SIGCHLD`/`SIGALRM` ;
-4. **sockets** — la pile TCP/IP du noyau existe (`src/net/`) mais n'est pas
-   reliée à l'ABI POSIX ; il n'y a donc pas encore de `socket()`/`connect()` ;
-5. **cache de pages partagé** pour `mmap` de fichier (voir §7).
+### Ce qui manque encore, par ordre d'importance
+
+1. **`fork`** et **`execve`** — non implémentés. `fork` demande la copie
+   paresseuse (COW) de l'espace d'adressage. `clone(CLONE_THREAD)` suffit à
+   `pthread`, donc à Qt et à Python, mais pas à `QProcess` ni à un shell POSIX ;
+2. **signaux** — `rt_sigaction` accepte et ignore ; aucun gestionnaire ring 3
+   n'est appelé. Seuls les signaux fatals (`SIGABRT`, `SIGKILL`, `SIGSEGV`,
+   `SIGTERM`) agissent, en terminant le processus. Suffisant tant que le
+   programme n'attend pas `SIGCHLD` ou `SIGALRM` ;
+3. **sockets** — la pile TCP/IP du noyau existe (`src/net/`) mais n'est pas
+   reliée à l'ABI POSIX : pas encore de `socket()`/`connect()`, donc pas de
+   `QtNetwork` ni de `QLocalSocket` ;
+4. **cache de pages partagé** pour `mmap` de fichier (voir §7) ;
+5. **accélération** — tout le rendu est logiciel, et `present()` recopie le
+   tampon. Une pile Qt tournera, mais au rythme d'un rendu logiciel en
+   1280x720.
 
 ## Tests d'ABI sans libc
 

@@ -20,7 +20,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 // Police embarquee (le fichier est fourni par l'utilisateur, voir `fonts/`).
-static FONT_DATA: &[u8] = include_bytes!("../../assets/fonts/DejaVuSans.ttf");
+//
+// Publique : `kernel::sysroot` la depose telle quelle dans `/usr/share/fonts`
+// pour les programmes utilisateur, plutot que de l'embarquer une seconde fois.
+pub static FONT_DATA: &[u8] = include_bytes!("../../assets/fonts/DejaVuSans.ttf");
 
 // ----------------------------------------------------------------------------
 // Lecture big-endian

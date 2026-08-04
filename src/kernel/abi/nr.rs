@@ -132,6 +132,9 @@ pub const SIGALTSTACK: u64 = 131;
 pub const RT_SIGSUSPEND: u64 = 130;
 pub const GETPGID: u64 = 121;
 pub const GETSID: u64 = 124;
+pub const TIMERFD_CREATE: u64 = 283;
+pub const TIMERFD_SETTIME: u64 = 286;
+pub const TIMERFD_GETTIME: u64 = 287;
 
 /// Nom symbolique d'un numero (trace et diagnostic).
 pub fn name(number: u64) -> &'static str {
@@ -212,7 +215,11 @@ pub fn name(number: u64) -> &'static str {
         FACCESSAT => "faccessat",
         PPOLL => "ppoll",
         EPOLL_PWAIT => "epoll_pwait",
+        EVENTFD => "eventfd",
         EVENTFD2 => "eventfd2",
+        TIMERFD_CREATE => "timerfd_create",
+        TIMERFD_SETTIME => "timerfd_settime",
+        TIMERFD_GETTIME => "timerfd_gettime",
         EPOLL_CREATE1 => "epoll_create1",
         DUP3 => "dup3",
         PIPE2 => "pipe2",
@@ -231,7 +238,7 @@ pub fn print_implemented() {
     let groups: [(&str, &[u64]); 7] = [
         ("E/S", &[READ, WRITE, OPEN, OPENAT, CLOSE, LSEEK, READV, WRITEV, PREAD64, PWRITE64, DUP, DUP2, DUP3, PIPE, PIPE2, FCNTL, IOCTL, FTRUNCATE]),
         ("fichiers", &[STAT, LSTAT, FSTAT, NEWFSTATAT, STATX, ACCESS, FACCESSAT, READLINK, READLINKAT, GETDENTS64, GETCWD, CHDIR, MKDIR, UNLINK, RENAME]),
-        ("attente", &[POLL, PPOLL, SELECT, EPOLL_CREATE1, EPOLL_CTL, EPOLL_WAIT, EVENTFD2]),
+        ("attente", &[POLL, PPOLL, SELECT, EPOLL_CREATE1, EPOLL_CTL, EPOLL_WAIT, EVENTFD2, TIMERFD_CREATE, TIMERFD_SETTIME, TIMERFD_GETTIME]),
         ("memoire", &[BRK, MMAP, MUNMAP, MPROTECT, MREMAP, MADVISE]),
         ("taches", &[CLONE, EXIT, EXIT_GROUP, GETPID, GETTID, SET_TID_ADDRESS, SCHED_YIELD, FUTEX, NANOSLEEP, CLOCK_NANOSLEEP, ARCH_PRCTL, KILL, TKILL, TGKILL, PRCTL]),
         ("temps", &[CLOCK_GETTIME, CLOCK_GETRES, GETTIMEOFDAY, TIME]),

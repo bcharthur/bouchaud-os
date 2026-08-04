@@ -75,6 +75,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     kernel::timer::calibrate();
 
     // 4. Pilotes et sous-systemes.
+    drivers::keyboard::init();
     kernel::dmesg::log("keyboard: PS/2 AZERTY-FR pilote par IRQ1");
     users::init();
     kernel::dmesg::log("users: base initialisee (root, guest)");
@@ -83,6 +84,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     kernel::dmesg::log("ramfs: monte sur /");
     lang::pyweb::install();
     kernel::dmesg::log("pyweb: /dev/web pret, browser.py installe");
+    kernel::sysroot::install();
     kernel::process::init();
     kernel::dmesg::log("process: table initialisee (init, desktop, shell)");
     kernel::dmesg::log("abi: appels systeme POSIX/Linux x86-64 disponibles (ring 3)");

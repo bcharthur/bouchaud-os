@@ -28,7 +28,7 @@ pub fn paint(page: &Page, scroll: i32, bx: usize, by: usize, bw: usize, bh: usiz
     if mc > 80 {
         let now = crate::kernel::timer::ticks();
         unsafe {
-            if now.wrapping_sub(LAST_PAINT_LOG) >= 18 {
+            if now.wrapping_sub(LAST_PAINT_LOG) >= crate::kernel::timer::TICKS_PER_SECOND {
                 LAST_PAINT_LOG = now;
                 let ms = crate::kernel::timer::cycles_to_ms(delta);
                 crate::dlog!(crate::diag::Cat::Paint, "frame lente: {} items +{} couches -> {}Mc ({}ms)",
