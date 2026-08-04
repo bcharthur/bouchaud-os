@@ -8,8 +8,8 @@ use crate::gui::mouse;
 use crate::gui::widgets;
 use crate::gui::window::{
     self as window,
-    browser_content_h, clamp_win, icon_rect, make_app, menu_rect, start_btn, taskbar_btn, toggle_max,
-    App, Drag, Win, BAR_H, ICONS, MENU, MENU_HEADER_H, MENU_ITEM_H, MIN_H, MIN_W, TITLE_H,
+    clamp_win, icon_rect, make_app, menu_rect, start_btn, taskbar_btn, toggle_max,
+    Drag, Win, BAR_H, ICONS, MENU, MENU_HEADER_H, MENU_ITEM_H, MIN_H, MIN_W, TITLE_H,
 };
 use crate::drivers::keyboard;
 use crate::fs::ramfs;
@@ -112,15 +112,6 @@ pub fn run() {
             handle_wheel(mx, my, wheel, &mut wins);
         }
 
-        // Re-met en page les navigateurs dont la largeur a change (resize/maximize)
-        // pour que le contenu remplisse la fenetre au lieu de rester en colonne.
-        for w in wins.iter_mut() {
-            if w.min { continue; }
-            if let App::Browser { state } = &mut w.app {
-                state.reflow((w.w - 6).max(1), browser_content_h(w.h));
-            }
-        }
-
         widgets::draw_desktop(&wins);
         if menu_open { widgets::draw_menu(mx, my); }
         widgets::draw_taskbar(&wins, menu_open);
@@ -159,9 +150,9 @@ fn handle_click(
         let mr = menu_rect();
         if mr.hit(mx, my) {
             let row = ((my - mr.y - MENU_HEADER_H) / MENU_ITEM_H).max(0) as usize;
-            if row < MENU.len() {
-                if row == MENU.len() - 1 { *quit = true; }
-                else { wins.push(make_app(row, home, spawn_n)); }
+            if let Some(&(_, kind)) = MENU.get(row) {
+                if kind == usize::MAX { *quit = true; }
+                else { wins.push(make_app(kind, home, spawn_n)); }
             }
         }
         *menu_open = false;

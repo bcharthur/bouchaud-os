@@ -32,7 +32,7 @@ use crate::fs::ramfs;
 /// d'alourdir l'image de boot de 750 Kio pour rien.
 fn fonts() -> [(&'static str, &'static [u8]); 3] {
     [
-        ("DejaVuSans.ttf", crate::browser::engine::font_ttf::FONT_DATA),
+        ("DejaVuSans.ttf", crate::gui::font::FONT_DATA),
         ("DejaVuSans-Bold.ttf", include_bytes!("../assets/fonts/DejaVuSans-Bold.ttf")),
         ("DejaVuSansMono.ttf", include_bytes!("../assets/fonts/DejaVuSansMono.ttf")),
     ]

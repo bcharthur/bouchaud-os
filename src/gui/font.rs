@@ -23,7 +23,7 @@ use alloc::vec::Vec;
 //
 // Publique : `kernel::sysroot` la depose telle quelle dans `/usr/share/fonts`
 // pour les programmes utilisateur, plutot que de l'embarquer une seconde fois.
-pub static FONT_DATA: &[u8] = include_bytes!("../../assets/fonts/DejaVuSans.ttf");
+pub static FONT_DATA: &[u8] = include_bytes!("../assets/fonts/DejaVuSans.ttf");
 
 // ----------------------------------------------------------------------------
 // Lecture big-endian

@@ -26,12 +26,6 @@ linked_list_allocator = "0.10"
 # (on fournit notre propre allocateur global + point d'entree). Voir `src/wasm/`.
 wasmi = { version = "0.31", default-features = false }
 
-# Moteur de layout CSS reel (Dioxus/Bevy), no_std+alloc uniquement
-# (`default-features = false`) : flexbox ET grid. `flex_inner` et `grid_inner`
-# (web.rs) construisent un mini-arbre taffy par conteneur ; les pistes grid
-# (fr/px/%/minmax/repeat) viennent de grid-template-columns. Les heuristiques
-# maison restent en repli si taffy echoue.
-taffy = { version = "0.12", default-features = false, features = ["taffy_tree", "flexbox", "grid", "alloc"] }
 
 # Pile TCP/IP reelle (embarque/no_std), no_std+alloc uniquement : backend
 # experimental pour transport::smol_tcp::fetch (RFC 793 correct -- RTT,
@@ -42,16 +36,7 @@ taffy = { version = "0.12", default-features = false, features = ["taffy_tree", 
 # `smoltest <hote>`.
 smoltcp = { version = "0.12", default-features = false, features = ["alloc", "proto-ipv4", "medium-ethernet", "socket-tcp"] }
 
-# Decodeur JPEG complet (baseline + PROGRESSIF), pur Rust, no_std+alloc.
-# Le decodeur maison (image/jpeg.rs) ne gere que le baseline SOF0 : beaucoup
-# de photos du web moderne sont progressives (SOF2) et echouaient. Branche en
-# repli : maison d'abord (verifie en prod), zune-jpeg si le maison renvoie None.
-zune-jpeg = { version = "0.5", default-features = false }
 
-# Decodeur PNG complet (dont ENTRELACE Adam7), pur Rust, no_std+alloc.
-# Le decodeur maison (image/png.rs) rejette l'entrelace. Meme branchement en
-# repli que zune-jpeg.
-zune-png = { version = "0.4", default-features = false }
 
 # Rasterizer de police TrueType/OpenType mature (AA par couverture, metriques
 # completes), no_std+alloc. Remplace le rasterizer maison de font_ttf.rs comme

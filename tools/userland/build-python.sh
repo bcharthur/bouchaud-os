@@ -39,39 +39,55 @@ SYSROOT=$WORK/sysroot
 PYURL=${PYURL:-http://archive.ubuntu.com/ubuntu/pool/main/p/python$PYSHORT/python${PYSHORT}_${PYVER}.orig.tar.xz}
 ZLIBURL=${ZLIBURL:-http://archive.ubuntu.com/ubuntu/pool/main/z/zlib/zlib_1.3.dfsg+really1.3.1.orig.tar.gz}
 
-command -v musl-gcc >/dev/null || {
-    echo "musl-gcc introuvable (paquet musl-tools)" >&2
-    exit 1
-}
+# `LIBC=musl` (defaut) : interprete autonome, sans rien partager avec quoi que
+# ce soit d'autre. `LIBC=glibc` : necessaire des que l'interprete doit etre lie
+# a du C++ — Qt notamment, dont la libstdc++ est celle du systeme et donc liee a
+# la glibc. Les deux libc ne se melangent pas dans un meme binaire.
+CIBLE_LIBC=${LIBC:-musl}
+# `LIBC` est aussi une variable du Makefile de CPython (la bibliotheque a
+# ajouter a l'edition de liens). La laisser dans l'environnement la ferait
+# passer telle quelle au configure, qui reclamerait alors un « -lglibc ».
+unset LIBC
 
 mkdir -p "$WORK"
 cd "$WORK"
 
-# --- Habillage de musl-gcc --------------------------------------------------
-# musl-gcc est un habillage du gcc systeme : interroge sur son « multiarch », il
-# repond « x86_64-linux-gnu » alors que la cible est musl. Le configure de
-# CPython compare les deux et s'arrete sur la contradiction. On le fait taire.
-mkdir -p bin
-cat > bin/mgcc <<'EOF'
+if [ "$CIBLE_LIBC" = musl ]; then
+    command -v musl-gcc >/dev/null || {
+        echo "musl-gcc introuvable (paquet musl-tools)" >&2
+        exit 1
+    }
+    # --- Habillage de musl-gcc ----------------------------------------------
+    # musl-gcc est un habillage du gcc systeme : interroge sur son « multiarch »,
+    # il repond « x86_64-linux-gnu » alors que la cible est musl. Le configure de
+    # CPython compare les deux et s'arrete sur la contradiction. On le fait taire.
+    mkdir -p bin
+    cat > bin/mgcc <<'EOF'
 #!/bin/sh
 for a in "$@"; do
     case "$a" in --print-multiarch|-print-multiarch) exit 0 ;; esac
 done
 exec musl-gcc "$@"
 EOF
-chmod +x bin/mgcc
-CC=$PWD/bin/mgcc
+    chmod +x bin/mgcc
+    CC=$PWD/bin/mgcc
+else
+    CC=gcc
+fi
 
 # --- zlib -------------------------------------------------------------------
-# Necessaire a `zipimport` pour lire une bibliotheque standard compressee. Celle
-# du systeme est liee a la glibc : il faut la reconstruire contre musl.
-if [ ! -f "$SYSROOT/lib/libz.a" ]; then
+# Necessaire a `zipimport` pour lire une bibliotheque standard compressee. En
+# musl il faut la reconstruire : celle du systeme est liee a la glibc.
+if [ "$CIBLE_LIBC" = musl ] && [ ! -f "$SYSROOT/lib/libz.a" ]; then
     echo "== zlib =="
     [ -f zlib.tar.gz ] || curl -sL -o zlib.tar.gz "$ZLIBURL"
     rm -rf zlib-src && mkdir zlib-src
     tar xf zlib.tar.gz -C zlib-src --strip-components=1
     (cd zlib-src && CC="$CC" CFLAGS="-O2 -fPIE" ./configure --prefix="$SYSROOT" --static >/dev/null \
         && make -j"$(nproc)" >/dev/null && make install >/dev/null)
+elif [ "$CIBLE_LIBC" = glibc ]; then
+    # En glibc, celle du systeme convient : on la prend telle quelle.
+    mkdir -p "$SYSROOT/include" "$SYSROOT/lib"
 fi
 
 # --- CPython ----------------------------------------------------------------
@@ -118,18 +134,29 @@ xxlimited
 xxlimited_35
 SETUP
 
+# En musl on produit un interprete autonome, donc lie en static-pie. En glibc on
+# ne cherche que `libpython3.12.a`, destinee a etre embarquee dans le navigateur
+# (c'est lui qui sera lie en static-pie) : l'executable intermediaire, lui, doit
+# simplement tourner sur la machine de construction pendant le `make`. Le lier en
+# static-pie le ferait justement segfauter des la premiere etape qui l'execute.
+if [ "$CIBLE_LIBC" = musl ]; then
+    LIAISON="-static-pie -L$SYSROOT/lib"
+else
+    LIAISON=""
+fi
+
 if [ ! -f Makefile ]; then
     CC="$CC" \
     CFLAGS="-O2 -fPIE -fno-stack-protector -I$SYSROOT/include" \
     CPPFLAGS="-I$SYSROOT/include" \
-    LDFLAGS="-static-pie -L$SYSROOT/lib" \
+    LDFLAGS="$LIAISON" \
     ./configure \
         --prefix=/usr \
         --disable-shared \
         --without-ensurepip \
         --with-ensurepip=no \
         --disable-test-modules \
-        --without-static-libpython \
+        --with-static-libpython \
         --disable-ipv6 \
         ac_cv_func_dlopen=no \
         ac_cv_lib_dl_dlopen=no \
@@ -147,7 +174,16 @@ DEST=$OUT
 
 rm -rf "$DEST"
 mkdir -p "$DEST/usr/bin" "$DEST/usr/lib"
-strip -s "$STAGED/bin/python$PYSHORT" -o "$DEST/usr/bin/python3"
+if [ "$CIBLE_LIBC" = musl ]; then
+    strip -s "$STAGED/bin/python$PYSHORT" -o "$DEST/usr/bin/python3"
+else
+    # Variante d'embarquement : ni interprete autonome, ni depouillement — la
+    # bibliotheque et les en-tetes servent a lier Python dans un autre binaire.
+    cp "$WORK/Python-$PYVER/libpython$PYSHORT.a" "$DEST/usr/lib/"
+    cp -r "$STAGED/include/python$PYSHORT" "$DEST/usr/include" 2>/dev/null \
+        || cp -r "$WORK/Python-$PYVER/Include" "$DEST/usr/include"
+    cp "$WORK/Python-$PYVER/pyconfig.h" "$DEST/usr/include/" 2>/dev/null || true
+fi
 
 # La bibliotheque standard en une archive zip plutot qu'en 2000 fichiers :
 # c'est ce que `zipimport` sait lire, et c'est autant de nœuds que le RAMFS
@@ -176,7 +212,13 @@ EOF
 
 echo ""
 echo "pret dans $OUT/ :"
-ls -la "$DEST/usr/bin/python3" "$DEST/usr/lib/python$PYTAG.zip"
-echo ""
-echo "fabriquer le disque :   ./mkdisk.sh $OUT"
-echo "puis, sous l'OS     :   exec /usr/bin/python3 /mon-script.py"
+if [ "$CIBLE_LIBC" = musl ]; then
+    ls -la "$DEST/usr/bin/python3" "$DEST/usr/lib/python$PYTAG.zip"
+    echo ""
+    echo "fabriquer le disque :   ./mkdisk.sh $OUT"
+    echo "puis, sous l'OS     :   exec /usr/bin/python3 /mon-script.py"
+else
+    ls -la "$DEST/usr/lib/libpython$PYSHORT.a" "$DEST/usr/lib/python$PYTAG.zip"
+    echo ""
+    echo "a lier dans un binaire hote (voir build-navigateur.sh)"
+fi

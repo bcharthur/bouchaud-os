@@ -11,10 +11,14 @@
 //! `pyweb` : pont réseau pour les scripts Python (`/dev/web`) et navigateur
 //! de test `browser.py` (voir `pyweb.rs`).
 //!
+//! `js` : interpréteur d'expressions et de scripts, utilisé par la
+//! calculatrice du bureau et par la commande `js-selftest`.
+//!
 //! `pip` : installeur de paquets Python purs depuis PyPI, côté noyau
 //! (réseau TLS maison + unzip maison), vers `/usr/lib/python/site-packages`
 //! (voir `pip.rs`).
 
+pub mod expr;
 pub mod mini_rust;
 pub mod pip;
 pub mod pyweb;
