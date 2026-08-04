@@ -366,8 +366,15 @@ construction cote utilisateur : `tools/userland/README.md`.
       fond et un demultiplexage par port)
 - [ ] IPv6
 
+- [x] **Installation sans recompilation** : pilote ATA PIO + archive `tar`
+      depliee au demarrage depuis un second disque (`src/drivers/ata.rs`,
+      `src/fs/tar.rs`). Fabriquer l'image avec `tools/userland/mkdisk.sh` ;
+      `run.ps1` l'attache automatiquement. Limites RAMFS relevees a 4096
+      inodes et 64 Mio par fichier.
+- [ ] Ecriture persistante : BFS sur peripherique bloc
+
 Commandes associees : `exec`, `elfinfo`, `usermode`, `tasks`, `vmstat`,
-`syscalls`, `strace`.
+`syscalls`, `strace`, `df`.
 
 ## Au-dela
 - [ ] Permissions completes, audit log

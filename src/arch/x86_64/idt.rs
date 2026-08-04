@@ -39,6 +39,8 @@ pub fn init() {
         IDT[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
         IDT[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
         IDT[InterruptIndex::Mouse.as_usize()].set_handler_fn(mouse_interrupt_handler);
+        IDT[InterruptIndex::AtaPrimary.as_usize()].set_handler_fn(ata_primary_handler);
+        IDT[InterruptIndex::AtaSecondary.as_usize()].set_handler_fn(ata_secondary_handler);
         IDT.load();
         READY = true;
     }
@@ -184,6 +186,23 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(stack: InterruptStackFrame)
     let scancode = unsafe { ports::inb(0x60) };
     keyboard::push_scancode(scancode);
     notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
+}
+
+/// Acquitte une IRQ du controleur ATA.
+///
+/// Le pilote disque lit par interrogation et coupe ces lignes : ce
+/// gestionnaire ne sert qu'a absorber une interruption egaree — le controleur
+/// en emet parfois une au tout premier acces, avant que `nIEN` soit pose.
+extern "x86-interrupt" fn ata_primary_handler(stack: InterruptStackFrame) {
+    let _gs = GsGuard::enter(&stack);
+    let _ = unsafe { ports::inb(0x1F7) }; // lire le statut acquitte le controleur
+    notify_end_of_interrupt(InterruptIndex::AtaPrimary.as_u8());
+}
+
+extern "x86-interrupt" fn ata_secondary_handler(stack: InterruptStackFrame) {
+    let _gs = GsGuard::enter(&stack);
+    let _ = unsafe { ports::inb(0x177) };
+    notify_end_of_interrupt(InterruptIndex::AtaSecondary.as_u8());
 }
 
 extern "x86-interrupt" fn mouse_interrupt_handler(stack: InterruptStackFrame) {

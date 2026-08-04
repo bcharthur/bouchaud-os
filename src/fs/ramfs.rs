@@ -12,11 +12,18 @@ use crate::users;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-pub const MAX_NODES: usize = 1024;
+/// Nombre d'inodes. Une distribution minimale (libc, `ld.so`, quelques
+/// bibliotheques, des polices) depasse largement le millier de fichiers.
+pub const MAX_NODES: usize = 4096;
 pub const NAME_LEN: usize = 64;
-/// Taille maximale d'un fichier (garde-fou du tas noyau). Assez pour un module
-/// Python volumineux ou une image, sans permettre d'epuiser la memoire.
-pub const MAX_FILE_SIZE: usize = 4 * 1024 * 1024;
+/// Taille maximale d'un fichier (garde-fou du tas noyau).
+///
+/// L'ancienne limite de 4 Mio suffisait aux scripts Python mais rendait
+/// impossible le depot d'un vrai binaire : une pile graphique liee
+/// statiquement pese couramment plusieurs dizaines de mega-octets. Le contenu
+/// vit sur le tas noyau, qui fait plusieurs centaines de Mio : 64 Mio par
+/// fichier reste un garde-fou, pas une contrainte de conception.
+pub const MAX_FILE_SIZE: usize = 64 * 1024 * 1024;
 
 /// Droits, sur le modele Unix : lecture / ecriture / execution(-traversee).
 pub const PERM_R: u16 = 4;

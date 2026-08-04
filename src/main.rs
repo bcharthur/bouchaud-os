@@ -85,11 +85,15 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     lang::pyweb::install();
     kernel::dmesg::log("pyweb: /dev/web pret, browser.py installe");
     kernel::sysroot::install();
+    // Archive userland du second disque : c'est ce qui permet d'installer un
+    // programme sans reconstruire le noyau. Le pilote est sonde juste avant,
+    // pour que le journal montre les disques avant ce qu'on en a tire.
+    drivers::ata::probe();
+    fs::tar::mount_data_disk();
     kernel::process::init();
     kernel::dmesg::log("process: table initialisee (init, desktop, shell)");
     kernel::dmesg::log("abi: appels systeme POSIX/Linux x86-64 disponibles (ring 3)");
     kernel::dmesg::log("net: loopback lo 127.0.0.1 actif (ping ok); eth0 sans driver");
-    kernel::dmesg::log("disk: pilote disque non active");
     kernel::dmesg::log("shell: initialise");
     log_nautile_boot_version();
 

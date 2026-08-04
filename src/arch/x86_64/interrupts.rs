@@ -21,6 +21,14 @@ pub enum InterruptIndex {
     Timer = PIC_1_OFFSET,
     Keyboard,
     Mouse = PIC_1_OFFSET + 12, // IRQ12 (souris PS/2), sur le PIC esclave
+    /// IRQ14/15 : controleurs ATA primaire et secondaire.
+    ///
+    /// Le pilote disque fonctionne par interrogation et coupe ces lignes
+    /// (`nIEN`), mais un vecteur non installe transforme la moindre IRQ egaree
+    /// en faute de protection generale, puis en double faute. Les enregistrer
+    /// pour les acquitter coute deux lignes et evite un arret complet.
+    AtaPrimary = PIC_1_OFFSET + 14,
+    AtaSecondary = PIC_1_OFFSET + 15,
 }
 
 impl InterruptIndex {

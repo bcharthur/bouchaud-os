@@ -10,3 +10,7 @@ session.log
 # Dependances npm du service de rendu deporte (tools/render-proxy)
 node_modules/
 tools/render-proxy/node_modules/
+
+# Binaires userland compiles (build.sh) et image du disque de donnees (mkdisk.sh)
+tools/userland/out/
+tools/userland/*.img

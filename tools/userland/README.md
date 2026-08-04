@@ -10,8 +10,18 @@ de construction côté utilisateur.
 ./build.sh musl-dynamic    # binaires dynamiques + ld-musl-x86_64.so.1
 ```
 
-Les binaires produits vont dans `out/`. Il faut ensuite les placer dans le
-RAMFS de l'OS, puis :
+Les binaires produits vont dans `out/`. On les installe sur la machine en
+fabriquant l'image du disque de données :
+
+```
+./mkdisk.sh              # archive out/ dans userland.img
+```
+
+`run.ps1` et `boot.ps1` attachent automatiquement cette image comme second
+disque si elle existe ; le noyau la déplie dans le RAMFS au démarrage. **Il n'y
+a plus besoin de recompiler l'OS pour y installer un programme.**
+
+Puis, dans le shell :
 
 ```
 exec /hello
@@ -20,6 +30,38 @@ tasks                 # threads du programme en cours
 syscalls              # les 107 appels implémentés, par famille
 strace on             # trace des appels système sur COM1
 ```
+
+## Comment les fichiers arrivent sur la machine
+
+Le noyau lit le second disque au démarrage, y cherche une archive `tar` et la
+déplie dans le RAMFS. C'est le principe d'un `initramfs`.
+
+Ce détour n'est pas gratuit : jusqu'ici, déposer un programme imposait de
+l'inclure dans le noyau par `include_bytes!` puis de tout recompiler. Avec une
+image de boot déjà supérieure à 20 Mio, cela rendait matériellement impossible
+d'installer une pile logicielle réelle — et imposait une reconstruction
+complète de l'OS à chaque itération.
+
+Détails d'implémentation :
+
+* **Pilote ATA en PIO** (`src/drivers/ata.rs`), pas virtio-blk. Un virtio
+  serait plus rapide mais réclame une file de descripteurs, des tampons DMA et
+  une négociation de fonctionnalités — beaucoup de surface pour « lire une
+  archive au démarrage ». Le transfert utilise `rep insw`, qui déplace un
+  secteur par instruction : c'est ce qui rend le PIO utilisable pour des
+  dizaines de mégaoctets sous émulation.
+* **Format `tar` ustar** (`src/fs/tar.rs`), pas un système de fichiers. La
+  lecture est séquentielle et unique ; un FAT ou un ext2 demanderait un
+  allocateur de blocs et une table d'inodes pour un besoin qui n'en a pas.
+  L'écriture persistante viendra avec un vrai système de fichiers — ce n'est
+  pas ce qui bloquait.
+* Les limites du RAMFS ont été relevées en conséquence : **4096 inodes** et
+  **64 Mio par fichier** (contre 1024 et 4 Mio). L'ancienne limite de 4 Mio
+  interdisait purement et simplement le dépôt d'un binaire lié statiquement.
+
+Vérifié sous QEMU : archive de 11,4 Mio contenant sept fichiers dont un de
+10 Mio, dépliée au boot, `exec /hello` et la sonde POSIX complète exécutés
+depuis le disque sans aucune recompilation du noyau.
 
 ## Contrainte d'adressage (à lire avant de compiler)
 

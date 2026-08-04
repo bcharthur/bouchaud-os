@@ -5,3 +5,4 @@
 //! virtio-blk, BFS persistant) est documentee dans `docs/ROADMAP.md`.
 
 pub mod ramfs;
+pub mod tar;
