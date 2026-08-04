@@ -419,6 +419,14 @@ construction cote utilisateur : `tools/userland/README.md`.
       `greffe-pywebview.sh`). Le code d'un tutoriel pywebview s'execute sans
       modification. Sans JavaScript (`evaluate_js` leve), et sans les
       applications a fichiers locaux, qui passent par le serveur HTTP interne.
+- [ ] **`load_url` depuis le fil de `webview.start()`** (defaut ouvert). Le
+      travail est bien mis en file pour le fil principal — Qt n'acceptant d'etre
+      touche que depuis lui — mais le chargement n'aboutit pas : l'emulateur
+      reste a ~56 % de CPU sans que la page change, donc quelque chose tourne en
+      rond plutot que d'attendre. Appele depuis le fil principal (chargement
+      initial, clic sur un lien), le meme chemin fonctionne. Piste : la boucle
+      d'attente de `sys_poll` face a une prise UDP passee en non bloquant par le
+      resolveur DNS.
 - [ ] **Sockets serveur : `listen` / `accept`**. C'est ce qui manque au serveur
       HTTP interne de pywebview, donc a toute application webview servant des
       fichiers locaux. Une mise en œuvre limitee au bouclage suffirait : le

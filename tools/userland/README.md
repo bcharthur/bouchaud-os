@@ -510,10 +510,10 @@ moteur natif (§12) sur la toile Qt de l'hôte.
 
 ### Ce qui marche
 
-Création de fenêtre, `load_url`, `load_html`, titre, taille, écrans,
-événements de cycle de vie (`shown`, `loaded`, `closed`), navigation par liens,
-défilement, et la fonction passée à `webview.start()` — qui tourne bien dans son
-propre fil.
+Création de fenêtre, `load_html`, titre, taille, écrans, événements de cycle de
+vie (`shown`, `loaded`, `closed`), navigation par liens et défilement à la
+souris et au clavier, et la fonction passée à `webview.start()` — qui tourne
+bien dans son propre fil et peut lire l'état de la fenêtre.
 
 ### Ce qui ne marche pas
 
@@ -524,6 +524,11 @@ propre fil.
   — pywebview les sert par un serveur HTTP interne, qui a besoin de `listen` et
   `accept`. Le noyau ne les implémente pas encore ; c'est le prochain manque à
   combler pour cette pile.
+- **`load_url` appelé depuis le fil de `webview.start()`** — défaut ouvert. Le
+  travail est bien mis en file pour le fil principal, mais le chargement
+  n'aboutit pas : l'émulateur reste à ~56 % de CPU sans que la page change.
+  Appelé depuis le fil principal — c'est-à-dire au chargement initial et sur un
+  clic de lien — `load_url` fonctionne. Voir la feuille de route.
 - **Plusieurs fenêtres à l'écran en même temps** — le framebuffer n'a pas de
   gestionnaire de fenêtres. Les fenêtres suivantes sont créées et pilotables,
   mais s'affichent l'une après l'autre dans la même surface.
