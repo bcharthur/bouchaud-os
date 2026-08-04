@@ -17,6 +17,7 @@ RAMFS de l'OS, puis :
 exec /hello
 elfinfo /hello        # type ELF, segments, interpréteur requis
 tasks                 # threads du programme en cours
+syscalls              # les 107 appels implémentés, par famille
 strace on             # trace des appels système sur COM1
 ```
 
@@ -45,12 +46,13 @@ Deux façons de s'y conformer :
 | 1. Mémoire virtuelle | frames physiques + espace d'adressage par processus | `src/kernel/vmm.rs` |
 | 2. Ring 3 / TSS / syscall | GDT complète, TSS RSP0, `syscall`/`sysretq`, `iretq` | `src/arch/x86_64/{gdt,usermode}.rs` |
 | 3. Chargeur ELF64 | `PT_LOAD`, `PT_INTERP`, `PT_TLS`, auxv | `src/kernel/elf.rs` |
-| 4. Appels POSIX | ~75 appels, numéros et structures Linux | `src/kernel/abi/` |
-| 5. Processus / threads | `clone(CLONE_THREAD)`, futex, préemption | `src/kernel/task.rs` |
+| 4. Appels POSIX | 107 appels, numéros et structures Linux | `src/kernel/abi/` |
+| 5. Processus / threads | `fork`, `execve`, `wait4`, `clone`, futex, signaux | `src/kernel/{task,signal}.rs` |
 | 6. libc musl | **côté utilisateur** — voir ci-dessous | ce dossier |
 | 7. `ld.so` | chargé par le noyau, résout en ring 3 | `src/kernel/exec.rs` |
 | 8. Runtime C++ | **côté utilisateur** — voir ci-dessous | ce dossier |
-| 9. Serveur graphique | `/dev/fb0` mmap + ioctls fbdev + evdev | `src/kernel/{fd,abi/file}.rs` |
+| 9. Serveur graphique | `/dev/fb0` mmap + ioctls fbdev + evdev | `src/kernel/{fd,input}.rs` |
+| 10. Réseau | sockets TCP/UDP POSIX sur la pile du noyau | `src/kernel/abi/net.rs` |
 
 Les couches 6 et 8 ne sont pas du code noyau : ce sont des bibliothèques à
 compiler avec la chaîne ci-dessus. Le noyau n'a rien à savoir de leur contenu,
@@ -86,9 +88,11 @@ dans le binaire (`elfinfo` l'affiche, typiquement `/lib/ld-musl-x86_64.so.1`),
 ainsi que les `.so` cherchés dans `LD_LIBRARY_PATH` (`/lib:/usr/lib` par
 défaut).
 
-Limite actuelle : `mmap` de fichier est une copie privée, pas un cache de pages
-partagé. Deux processus chargeant la même bibliothèque ne partagent donc pas
-ses pages — correct fonctionnellement (`MAP_PRIVATE`), plus coûteux en mémoire.
+`mmap` de bibliothèque se fait en `MAP_PRIVATE`, donc par copie : deux
+processus chargeant la même `.so` ne partagent pas ses pages. C'est correct
+(`MAP_PRIVATE` le veut ainsi) mais plus coûteux en mémoire qu'un cache
+partagé en lecture seule. Un `MAP_SHARED`, lui, partage réellement les frames
+(voir §10).
 
 ## 8. Runtime C++
 
@@ -168,7 +172,8 @@ exec /qpa-probe
 ```
 
 `fb-demo.c` fait le même travail sur le seul framebuffer, sans aucune
-bibliothèque.
+bibliothèque. `posix-probe.c` couvre les processus, les signaux, la mémoire
+partagée et le réseau (§10).
 
 ### Environnement fourni par défaut
 
@@ -203,22 +208,76 @@ fichiers réellement lus au démarrage (`/sys/devices/system/cpu/online` pour
 `-no-feature-glib` importe : sans lui, Qt utilise le dispatcher GLib, qui
 demande davantage au système que sa propre boucle `poll`.
 
-### Ce qui manque encore, par ordre d'importance
+### Ce qui manque encore
 
-1. **`fork`** et **`execve`** — non implémentés. `fork` demande la copie
-   paresseuse (COW) de l'espace d'adressage. `clone(CLONE_THREAD)` suffit à
-   `pthread`, donc à Qt et à Python, mais pas à `QProcess` ni à un shell POSIX ;
-2. **signaux** — `rt_sigaction` accepte et ignore ; aucun gestionnaire ring 3
-   n'est appelé. Seuls les signaux fatals (`SIGABRT`, `SIGKILL`, `SIGSEGV`,
-   `SIGTERM`) agissent, en terminant le processus. Suffisant tant que le
-   programme n'attend pas `SIGCHLD` ou `SIGALRM` ;
-3. **sockets** — la pile TCP/IP du noyau existe (`src/net/`) mais n'est pas
-   reliée à l'ABI POSIX : pas encore de `socket()`/`connect()`, donc pas de
-   `QtNetwork` ni de `QLocalSocket` ;
-4. **cache de pages partagé** pour `mmap` de fichier (voir §7) ;
-5. **accélération** — tout le rendu est logiciel, et `present()` recopie le
-   tampon. Une pile Qt tournera, mais au rythme d'un rendu logiciel en
-   1280x720.
+1. **`listen`/`accept`** — pas de socket serveur. Voir §10 ;
+2. **IPv6** — `socket(AF_INET6)` répond `EAFNOSUPPORT`, ce qui fait
+   correctement retomber `getaddrinfo` sur IPv4 ;
+3. **accélération graphique** — tout le rendu est logiciel. Une pile Qt tourne,
+   mais au rythme d'un rendu logiciel en 1280x720.
+
+## 10. Processus, signaux et réseau
+
+Ces trois couches sont désormais complètes côté noyau. `posix-probe.c` les
+vérifie toutes (0 échec sous QEMU).
+
+### Processus
+
+`fork`, `vfork`, `execve`, `wait4`/`waitpid`, filiation parent/enfant, zombies
+et récolte du code de sortie. Les descripteurs sont dupliqués par `fork` en
+partageant les objets sous-jacents — c'est ce qui fait marcher `cmd1 | cmd2`.
+
+La copie d'espace d'adressage est **immédiate**, pas en copie-à-l'écriture.
+C'est plus coûteux au moment du `fork` (le cas `fork` + `execve` paie une copie
+inutile), mais cela évite le comptage de références sur chaque frame et le
+traitement des fautes d'écriture, deux sources de corruption silencieuse. Le
+compromis est assumé, pas subi.
+
+### Signaux
+
+Livraison réelle à un gestionnaire ring 3 : le noyau écrit une trame
+(`pretcode`, `ucontext`, `siginfo`) sur la pile utilisateur, détourne
+l'exécution vers le gestionnaire, et `rt_sigreturn` restaure l'état exact.
+`sigaction`, `sigprocmask`, `SIG_IGN`, `SIG_DFL`, masquage pendant le
+gestionnaire, `SA_RESETHAND`, `SA_NODEFER`, `kill`/`tkill`/`tgkill`,
+`sigsuspend`, `pause`, `alarm`/`setitimer` (`SIGALRM`), `SIGCHLD` à la mort
+d'un fils.
+
+Un point à connaître : la livraison a lieu **au retour d'un appel système**,
+seul moment où la trame ring 3 est modifiable. Une tâche qui calcule sans rien
+demander au noyau reçoit donc son signal à son prochain appel système. En
+pratique tout programme en émet constamment ; le seul cas non couvert serait
+une boucle de calcul pur, pour laquelle Linux lui-même ne garantit aucun délai.
+
+### Réseau
+
+`socket`, `connect`, `bind`, `send`/`sendto`/`sendmsg`,
+`recv`/`recvfrom`/`recvmsg`, `shutdown`, `getsockname`/`getpeername`,
+`setsockopt`/`getsockopt`, `socketpair`, en TCP et en UDP, au-dessus de la pile
+de `src/net/`.
+
+C'est suffisant pour que `getaddrinfo` résolve un nom (la libc parle
+elle-même au serveur DNS, en UDP — elle n'appelle pas le résolveur du noyau)
+et pour qu'un client HTTP fonctionne. Vérifié : `example.com` résolu puis
+requête `GET /` avec réponse HTTP lue depuis le ring 3.
+
+Deux formes d'appel comptent, et l'une est facile à oublier : musl émet
+`recvmsg`, pas `recvfrom`, dans son résolveur. Ne fournir que `recvfrom` fait
+échouer toute résolution de nom alors que `sendto` fonctionne.
+
+**Pas de socket serveur.** `listen`/`accept` répondent `ENOSYS`. La pile est
+pilotée par interrogation depuis le contexte appelant : rien ne reçoit de
+paquet tant qu'aucun socket ne lit. Un serveur d'écoute réclamerait d'abord une
+réception en tâche de fond, puis un demultiplexage par port et une file de
+connexions en attente. C'est signalé franchement plutôt que simulé.
+
+### Mémoire partagée
+
+`mmap(MAP_SHARED)` sur fichier passe par un cache de pages global indexé par
+(fichier, numéro de page) : deux processus qui mappent le même fichier
+pointent sur les **mêmes frames physiques**, et `msync` répercute les écritures
+dans le contenu du fichier. `MAP_PRIVATE` reste une copie privée, comme il se
+doit.
 
 ## Tests d'ABI sans libc
 

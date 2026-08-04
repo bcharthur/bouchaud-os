@@ -194,6 +194,17 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
             }
             if user_write(buffer, &expired.to_le_bytes()) { 8 } else { -errno::EFAULT }
         }
+        FdKind::Socket(_) => crate::kernel::abi::net::sys_recvfrom(fd, buffer, count, 0, 0, 0),
+        FdKind::SocketPair(inbox, _) => {
+            let mut guard = inbox.borrow_mut();
+            if guard.is_empty() {
+                return -errno::EAGAIN;
+            }
+            let len = core::cmp::min(count, guard.len());
+            let data: Vec<u8> = guard.drain(..len).collect();
+            drop(guard);
+            if user_write(buffer, &data) { len as i64 } else { -errno::EFAULT }
+        }
         FdKind::Epoll(_) => -errno::EINVAL,
     }
 }
@@ -291,6 +302,11 @@ pub fn sys_write(fd: i32, buffer: u64, count: usize) -> i64 {
             8
         }
         FdKind::TimerFd(_) => -errno::EINVAL,
+        FdKind::Socket(_) => crate::kernel::abi::net::sys_sendto(fd, buffer, count, 0, 0, 0),
+        FdKind::SocketPair(_, outbox) => {
+            outbox.borrow_mut().extend_from_slice(&data);
+            count as i64
+        }
         FdKind::Epoll(_) => -errno::EINVAL,
     }
 }
@@ -1244,6 +1260,8 @@ fn readable(fd: i32) -> bool {
             refresh_timerfd(&mut state);
             state.expirations > 0
         }
+        FdKind::Socket(state) => crate::kernel::abi::net::socket_readable(&state),
+        FdKind::SocketPair(inbox, _) => !inbox.borrow().is_empty(),
         _ => false,
     }
 }

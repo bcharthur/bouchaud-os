@@ -44,6 +44,28 @@ pub const ENODATA: i64 = 61;
 pub const EPROTO: i64 = 71;
 pub const EOVERFLOW: i64 = 75;
 pub const ENOTSUP: i64 = 95;
+
+// --- Reseau ---
+pub const ENOTSOCK: i64 = 88;
+pub const EDESTADDRREQ: i64 = 89;
+pub const EMSGSIZE: i64 = 90;
+pub const EPROTOTYPE: i64 = 91;
+pub const ENOPROTOOPT: i64 = 92;
+pub const EPROTONOSUPPORT: i64 = 93;
+pub const EAFNOSUPPORT: i64 = 97;
+pub const EADDRINUSE: i64 = 98;
+pub const EADDRNOTAVAIL: i64 = 99;
+pub const ENETDOWN: i64 = 100;
+pub const ENETUNREACH: i64 = 101;
+pub const ECONNABORTED: i64 = 103;
+pub const ECONNRESET: i64 = 104;
+pub const ENOBUFS: i64 = 105;
+pub const EISCONN: i64 = 106;
+pub const ENOTCONN: i64 = 107;
+pub const ECONNREFUSED: i64 = 111;
+pub const EHOSTUNREACH: i64 = 113;
+pub const EINPROGRESS: i64 = 115;
+
 pub const ETIMEDOUT: i64 = 110;
 
 /// Libelle court d'un code d'erreur (diagnostic).

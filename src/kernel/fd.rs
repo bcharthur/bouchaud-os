@@ -47,6 +47,13 @@ pub enum FdKind {
     EventFd(Rc<RefCell<EventFdState>>),
     /// `timerfd` : echeance et periode, en ticks du timer noyau.
     TimerFd(Rc<RefCell<TimerFdState>>),
+    /// Socket reseau (TCP ou UDP).
+    Socket(Rc<RefCell<crate::kernel::abi::net::SocketState>>),
+    /// Extremite de `socketpair` : (tampon de lecture, tampon d'ecriture).
+    ///
+    /// Deux tampons et non un : un socket est bidirectionnel, chaque extremite
+    /// lit dans celui que l'autre alimente.
+    SocketPair(Rc<RefCell<Vec<u8>>>, Rc<RefCell<Vec<u8>>>),
     /// Console virtuelle `/dev/tty0` : ne sert qu'a ses ioctls de mode
     /// graphique, les entrees/sorties passent par la console.
     VirtualTerminal,
@@ -93,6 +100,12 @@ impl FileDesc {
 }
 
 /// Table de descripteurs d'un processus.
+///
+/// `Clone` est ce dont `fork` a besoin : les descripteurs sont dupliques mais
+/// les objets sous-jacents (tubes, sockets, `eventfd`) restent partages via
+/// leur `Rc`. C'est le comportement POSIX, et ce sur quoi repose le chainage
+/// `cmd1 | cmd2`.
+#[derive(Clone)]
 pub struct FdTable {
     entries: Vec<Option<FileDesc>>,
 }
@@ -168,6 +181,15 @@ impl FdTable {
     /// Nombre de descripteurs ouverts.
     pub fn open_count(&self) -> usize {
         self.entries.iter().filter(|slot| slot.is_some()).count()
+    }
+
+    /// Ferme les descripteurs marques `FD_CLOEXEC` (appele par `execve`).
+    pub fn close_on_exec(&mut self) {
+        for slot in self.entries.iter_mut() {
+            if slot.as_ref().map_or(false, |desc| desc.cloexec) {
+                *slot = None;
+            }
+        }
     }
 }
 

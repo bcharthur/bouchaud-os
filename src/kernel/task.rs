@@ -63,6 +63,8 @@ pub struct Context {
 /// Ressources partagees par tous les threads d'un meme programme.
 pub struct Process {
     pub pid: u32,
+    /// PID du parent (0 pour le processus lance depuis le shell).
+    pub parent: u32,
     pub name: String,
     pub space: AddressSpace,
     pub files: FdTable,
@@ -75,11 +77,15 @@ pub struct Process {
     pub cwd: usize,
     /// Code de sortie renseigne par `exit_group`.
     pub exit_code: i32,
+    /// Le processus est termine et attend d'etre recolte par son parent.
+    pub zombie: bool,
     /// Nombre de threads encore vivants.
     pub threads: usize,
     /// uid/gid vus par le programme.
     pub uid: u32,
     pub gid: u32,
+    /// Gestionnaires et masques de signaux.
+    pub signals: crate::kernel::signal::SignalState,
 }
 
 /// Un fil d'execution utilisateur.
@@ -105,11 +111,17 @@ pub struct Task {
     pub futex_key: u64,
     /// Tick a partir duquel un sommeil se termine (0 = pas de sommeil).
     pub wake_tick: u64,
+    /// La tache attend la fin d'un processus fils (`wait4`).
+    pub waiting_for_child: bool,
     /// La tache n'a pas encore rejoint le ring 3.
     pub fresh: bool,
 }
 
 static mut TASKS: Option<Vec<Box<Task>>> = None;
+/// Tous les processus vivants ou zombies, y compris ceux dont plus aucune
+/// tache ne tourne : c'est ce qui permet a `wait4` de retrouver un fils
+/// termine longtemps apres sa mort.
+static mut PROCESSES: Option<Vec<Rc<RefCell<Process>>>> = None;
 static mut CURRENT: usize = usize::MAX;
 static mut NEXT_TID: u32 = 100;
 /// Contexte du fil noyau (shell/bureau) qui a lance le programme.
@@ -124,6 +136,26 @@ fn tasks() -> &'static mut Vec<Box<Task>> {
         }
         TASKS.as_mut().unwrap()
     }
+}
+
+/// Table des processus.
+pub fn processes() -> &'static mut Vec<Rc<RefCell<Process>>> {
+    unsafe {
+        if PROCESSES.is_none() {
+            PROCESSES = Some(Vec::new());
+        }
+        PROCESSES.as_mut().unwrap()
+    }
+}
+
+/// Retrouve un processus par son pid.
+pub fn process_by_pid(pid: u32) -> Option<Rc<RefCell<Process>>> {
+    processes().iter().find(|p| p.borrow().pid == pid).cloned()
+}
+
+/// Retrouve le processus auquel appartient un thread donne.
+pub fn process_of_tid(tid: u32) -> Option<Rc<RefCell<Process>>> {
+    tasks().iter().find(|t| t.tid == tid).map(|t| t.process.clone())
 }
 
 /// Alloue un identifiant de tache.
@@ -195,6 +227,7 @@ impl Task {
             clear_child_tid: 0,
             futex_key: 0,
             wake_tick: 0,
+            waiting_for_child: false,
             fresh: true,
         });
 
@@ -398,25 +431,117 @@ pub fn exit_current(code: i32) -> ! {
             process.threads -= 1;
         }
         process.exit_code = code;
+        if process.threads == 0 {
+            // Dernier thread : le processus devient zombie jusqu'a ce que son
+            // parent le recolte par `wait4`. C'est ce qui permet au parent de
+            // recuperer le code de sortie apres coup.
+            process.zombie = true;
+        }
     }
 
-    wake_sleepers();
-    if let Some(next) = pick_next(cur) {
-        if next != cur {
-            // La pile noyau de la tache morte reste vivante jusqu'au nettoyage
-            // fait par `reap` depuis le fil noyau.
-            unsafe {
-                let list = tasks();
-                let from_ptr = &mut **list.get_mut(cur).unwrap() as *mut Task;
-                let to_ptr = &mut **list.get_mut(next).unwrap() as *mut Task;
-                CURRENT = next;
-                install(&mut *to_ptr);
-                switch_context(&mut (*from_ptr).ctx.rsp, (*to_ptr).ctx.rsp);
+    // Previent le parent : SIGCHLD, et reveil s'il attendait dans `wait4`.
+    notify_parent_of_exit();
+
+    // On ne rend la main au noyau que lorsque **plus aucune** tache ne peut
+    // reprendre. Se contenter de « aucune tache prete a cet instant » serait
+    // faux : au moment ou un processus fils se termine, son parent est souvent
+    // endormi (il attend justement cet evenement). Abandonner la aurait
+    // demonte tout le programme au lieu de reveiller le parent.
+    //
+    // Filet de securite : si rien ne redevient executable pendant une longue
+    // duree, c'est un interblocage franc. On termine plutot que de figer le
+    // systeme, faute de Ctrl-C a offrir a l'utilisateur.
+    let patience = 30 * crate::kernel::timer::TICKS_PER_SECOND;
+    let mut idle_since = crate::kernel::timer::ticks();
+    loop {
+        wake_sleepers();
+        if let Some(next) = pick_next(cur) {
+            if next != cur {
+                // La pile noyau de la tache morte reste vivante jusqu'au
+                // nettoyage fait par `reap` depuis le fil noyau.
+                unsafe {
+                    let list = tasks();
+                    let from_ptr = &mut **list.get_mut(cur).unwrap() as *mut Task;
+                    let to_ptr = &mut **list.get_mut(next).unwrap() as *mut Task;
+                    CURRENT = next;
+                    install(&mut *to_ptr);
+                    switch_context(&mut (*from_ptr).ctx.rsp, (*to_ptr).ctx.rsp);
+                }
+                unreachable!("task: reprise d'une tache terminee")
             }
-            unreachable!("task: reprise d'une tache terminee")
+        }
+        if tasks().iter().all(|t| t.state == TaskState::Zombie) {
+            break;
+        }
+        if crate::kernel::timer::ticks().wrapping_sub(idle_since) > patience {
+            crate::kernel::dmesg::log("task: aucune tache executable depuis 30 s, interblocage suppose");
+            for task in tasks().iter_mut() {
+                task.state = TaskState::Zombie;
+            }
+            break;
+        }
+        cpu::hlt();
+        // Le compteur repart des qu'une tache redevient prete.
+        if tasks().iter().any(|t| t.state == TaskState::Ready) {
+            idle_since = crate::kernel::timer::ticks();
         }
     }
     switch_to_kernel()
+}
+
+/// Signale au parent qu'un de ses fils vient de se terminer.
+///
+/// Deux effets distincts, tous deux necessaires : `SIGCHLD` (que le parent
+/// peut avoir choisi d'intercepter) et le reveil d'un `wait4` bloquant.
+fn notify_parent_of_exit() {
+    let (parent_pid, is_zombie) = {
+        let process = current().process.borrow();
+        (process.parent, process.zombie)
+    };
+    if !is_zombie || parent_pid == 0 {
+        return;
+    }
+    for task in tasks().iter_mut() {
+        if task.state == TaskState::Zombie {
+            continue;
+        }
+        let matches = {
+            let mut process = task.process.borrow_mut();
+            if process.pid == parent_pid {
+                process.signals.raise(crate::kernel::signal::SIGCHLD);
+                true
+            } else {
+                false
+            }
+        };
+        if matches && task.waiting_for_child {
+            task.waiting_for_child = false;
+            task.state = TaskState::Ready;
+        }
+    }
+}
+
+/// Recense les processus fils zombies d'un pid donne.
+pub fn zombie_children(parent_pid: u32) -> Vec<(u32, i32)> {
+    let mut out = Vec::new();
+    for process in processes().iter() {
+        let borrowed = process.borrow();
+        if borrowed.parent == parent_pid && borrowed.zombie {
+            out.push((borrowed.pid, borrowed.exit_code));
+        }
+    }
+    out
+}
+
+/// Ce pid a-t-il encore des fils (zombies ou vivants) ?
+pub fn has_children(parent_pid: u32) -> bool {
+    processes().iter().any(|p| p.borrow().parent == parent_pid)
+}
+
+/// Retire un processus zombie de la table (il a ete recolte).
+pub fn collect_child(pid: u32) {
+    processes().retain(|p| p.borrow().pid != pid);
+    crate::kernel::process::kill(pid);
 }
 
 /// Termine tous les threads du processus courant (`exit_group`).
@@ -454,7 +579,12 @@ pub fn run(first: Box<Task>) -> i32 {
         (borrowed.exit_code, borrowed.pid)
     };
     reap();
-    // Retire l'entree de la table `ps` : le programme n'existe plus.
+    // Tout ce qui reste est orphelin : le programme de premier plan est fini,
+    // ses eventuels fils non recoltes n'ont plus personne pour les attendre.
+    for stale in processes().iter() {
+        crate::kernel::process::kill(stale.borrow().pid);
+    }
+    processes().clear();
     crate::kernel::process::kill(pid);
     code
 }
@@ -462,6 +592,47 @@ pub fn run(first: Box<Task>) -> i32 {
 /// Detruit les taches zombies (piles noyau, espaces d'adressage).
 pub fn reap() {
     tasks().retain(|t| t.state != TaskState::Zombie);
+}
+
+/// Termine tous les autres threads du processus courant.
+///
+/// Utilise par `execve` : apres le remplacement de l'image, il ne doit rester
+/// qu'un fil, sinon les autres reprendraient dans un espace d'adressage qui
+/// n'existe plus.
+pub fn terminate_sibling_threads() {
+    let (pid, tid) = {
+        let task = current();
+        (task.process.borrow().pid, task.tid)
+    };
+    for task in tasks().iter_mut() {
+        if task.tid != tid && task.process.borrow().pid == pid {
+            task.state = TaskState::Zombie;
+        }
+    }
+}
+
+/// Reveille les taches d'un processus qui dorment, pour qu'elles constatent
+/// un signal en attente.
+pub fn wake_for_signal(pid: u32) {
+    for task in tasks().iter_mut() {
+        if task.state == TaskState::Blocked && task.process.borrow().pid == pid {
+            task.futex_key = 0;
+            task.wake_tick = 0;
+            task.waiting_for_child = false;
+            task.state = TaskState::Ready;
+        }
+    }
+}
+
+/// Y a-t-il un signal livrable pour la tache courante ?
+///
+/// Consulte par les attentes bloquantes (`poll`, `wait4`, futex) : une attente
+/// sans limite de temps doit pouvoir etre interrompue par un signal.
+pub fn signal_pending() -> bool {
+    match try_current() {
+        Some(task) => task.process.borrow().signals.next_deliverable().is_some(),
+        None => false,
+    }
 }
 
 /// Termine de force toutes les taches (utilise apres une faute fatale).
@@ -531,7 +702,7 @@ pub fn sleep_ticks(ticks: u64) {
     task.state = TaskState::Ready;
 }
 
-/// Reveille les taches dont le sommeil est echu.
+/// Reveille les taches dont le sommeil est echu, et declenche les `SIGALRM`.
 fn wake_sleepers() {
     let now = crate::kernel::timer::ticks();
     for task in tasks().iter_mut() {
@@ -540,6 +711,57 @@ fn wake_sleepers() {
             task.futex_key = 0;
             task.state = TaskState::Ready;
         }
+    }
+    fire_alarms(now);
+}
+
+/// Echeance du prochain `SIGALRM` par processus : (pid, tick).
+static mut ALARMS: Option<Vec<(u32, u64)>> = None;
+
+fn alarms() -> &'static mut Vec<(u32, u64)> {
+    unsafe {
+        if ALARMS.is_none() {
+            ALARMS = Some(Vec::new());
+        }
+        ALARMS.as_mut().unwrap()
+    }
+}
+
+/// Programme (ou annule, avec 0) l'alarme du processus courant.
+/// Renvoie l'echeance precedente, 0 s'il n'y en avait pas.
+pub fn set_alarm(deadline: u64) -> u64 {
+    let pid = current().process.borrow().pid;
+    let list = alarms();
+    let previous = list.iter().find(|(p, _)| *p == pid).map(|(_, t)| *t).unwrap_or(0);
+    list.retain(|(p, _)| *p != pid);
+    if deadline != 0 {
+        list.push((pid, deadline));
+    }
+    previous
+}
+
+/// Echeance de l'alarme du processus courant (0 s'il n'y en a pas).
+pub fn peek_alarm() -> u64 {
+    let pid = current().process.borrow().pid;
+    alarms().iter().find(|(p, _)| *p == pid).map(|(_, t)| *t).unwrap_or(0)
+}
+
+/// Leve les `SIGALRM` dont l'echeance est atteinte.
+fn fire_alarms(now: u64) {
+    let expired: Vec<u32> = alarms()
+        .iter()
+        .filter(|(_, deadline)| now >= *deadline)
+        .map(|(pid, _)| *pid)
+        .collect();
+    if expired.is_empty() {
+        return;
+    }
+    alarms().retain(|(_, deadline)| now < *deadline);
+    for pid in expired {
+        if let Some(process) = process_by_pid(pid) {
+            process.borrow_mut().signals.raise(crate::kernel::signal::SIGALRM);
+        }
+        wake_for_signal(pid);
     }
 }
 
@@ -665,8 +887,9 @@ pub fn print_table() {
 pub fn new_process(name: &str, cwd: usize) -> Option<Rc<RefCell<Process>>> {
     let space = AddressSpace::new()?;
     let pid = crate::kernel::process::spawn(name, crate::users::session().uid());
-    Some(Rc::new(RefCell::new(Process {
+    let process = Rc::new(RefCell::new(Process {
         pid,
+        parent: 0,
         name: name.to_string(),
         space,
         files: FdTable::new(),
@@ -675,8 +898,17 @@ pub fn new_process(name: &str, cwd: usize) -> Option<Rc<RefCell<Process>>> {
         mmap_next: crate::kernel::vmm::user_mmap_base(),
         cwd,
         exit_code: 0,
+        zombie: false,
         threads: 1,
         uid: crate::users::session().uid() as u32,
         gid: crate::users::session().uid() as u32,
-    })))
+        signals: crate::kernel::signal::SignalState::default(),
+    }));
+    processes().push(process.clone());
+    Some(process)
+}
+
+/// Enregistre un processus cree par `fork` (espace deja duplique).
+pub fn register_process(process: Rc<RefCell<Process>>) {
+    processes().push(process);
 }

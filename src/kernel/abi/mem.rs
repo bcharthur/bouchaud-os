@@ -5,11 +5,18 @@
 //! `mmap` de fichier puis ajuste les droits par `mprotect`. Les deux chemins
 //! sont donc necessaires avant meme d'esperer lancer un binaire dynamique.
 //!
-//! `mmap` d'un fichier est ici une **copie** dans des pages privees : le RAMFS
-//! garde ses donnees sur le tas noyau, il n'y a pas de cache de pages partage.
-//! C'est suffisant et correct pour `MAP_PRIVATE` (le cas de `ld.so`), mais un
-//! `MAP_SHARED` sur fichier ne repercute pas les ecritures — sauf pour
-//! `/dev/fb0`, qui est justement mappe sur ses vraies pages physiques.
+//! Deux traitements pour un `mmap` de fichier, selon le mode demande :
+//!
+//! - `MAP_PRIVATE` : copie du contenu dans des pages appartenant au processus.
+//!   C'est le cas de `ld.so` chargeant une bibliotheque ;
+//! - `MAP_SHARED` : les pages viennent d'un **cache global** indexe par
+//!   (fichier, numero de page). Deux processus qui mappent le meme fichier
+//!   pointent alors sur les memes frames physiques, et `msync` repercute les
+//!   ecritures dans le contenu du fichier. Sans ce cache, `MAP_SHARED` serait
+//!   un mensonge : chacun travaillerait sur sa copie.
+//!
+//! `/dev/fb0` suit une troisieme voie : ses pages sont celles de la memoire
+//! video, empruntees telles quelles.
 
 use crate::kernel::abi::errno;
 use crate::kernel::fd::FdKind;
@@ -124,7 +131,6 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, fd: i32, offset: 
     }
 
     if flags & MAP_ANONYMOUS == 0 && fd >= 0 {
-        // Mapping de fichier : copie du contenu (voir la note du module).
         let node = match process.files.get(fd) {
             Some(desc) => match desc.kind {
                 FdKind::File(node) => Some(node),
@@ -133,13 +139,23 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, fd: i32, offset: 
             None => return -errno::EBADF,
         };
         if let Some(node) = node {
-            let fs = crate::fs::ramfs::fs();
-            let content = &fs.nodes[node].content;
-            let start = offset as usize;
-            if start < content.len() {
-                let end = core::cmp::min(content.len(), start + length as usize);
-                let slice = content[start..end].to_vec();
-                process.space.write(base, &slice);
+            if flags & MAP_SHARED != 0 {
+                // Partage reel : les pages viennent du cache global, les memes
+                // frames pour tous les processus qui mappent ce fichier.
+                process.space.unmap(base, length);
+                if !map_shared_file(&mut process, node, base, length, offset) {
+                    return -errno::ENOMEM;
+                }
+            } else {
+                // MAP_PRIVATE : copie du contenu dans des pages a soi.
+                let fs = crate::fs::ramfs::fs();
+                let content = &fs.nodes[node].content;
+                let start = offset as usize;
+                if start < content.len() {
+                    let end = core::cmp::min(content.len(), start + length as usize);
+                    let slice = content[start..end].to_vec();
+                    process.space.write(base, &slice);
+                }
             }
         }
     }
@@ -148,6 +164,103 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, fd: i32, offset: 
         process.space.protect(base, length, prot_to_flags(prot));
     }
     base as i64
+}
+
+/// Cache de pages : (nœud RAMFS, index de page) -> frame physique partagee.
+///
+/// Sans lui, `MAP_SHARED` sur fichier serait un mensonge : chaque processus
+/// travaillerait sur sa copie, et les ecritures ne seraient vues de personne.
+/// Avec lui, deux processus qui mappent le meme fichier pointent sur les memes
+/// frames — c'est le partage que POSIX promet.
+static mut PAGE_CACHE: Option<alloc::vec::Vec<(usize, u64, u64)>> = None;
+
+fn page_cache() -> &'static mut alloc::vec::Vec<(usize, u64, u64)> {
+    unsafe {
+        if PAGE_CACHE.is_none() {
+            PAGE_CACHE = Some(alloc::vec::Vec::new());
+        }
+        PAGE_CACHE.as_mut().unwrap()
+    }
+}
+
+/// Frame partagee d'une page de fichier, creee et remplie au premier acces.
+fn cached_page(node: usize, page_index: u64) -> Option<u64> {
+    if let Some((_, _, frame)) = page_cache().iter().find(|(n, p, _)| *n == node && *p == page_index) {
+        return Some(*frame);
+    }
+    let frame = vmm::alloc_frame()?;
+    // Remplissage depuis le contenu du fichier.
+    let fs = crate::fs::ramfs::fs();
+    let content = &fs.nodes[node].content;
+    let start = (page_index * PAGE_SIZE) as usize;
+    if start < content.len() {
+        let end = core::cmp::min(content.len(), start + PAGE_SIZE as usize);
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                content[start..end].as_ptr(),
+                crate::kernel::memory::phys_to_virt(frame),
+                end - start,
+            );
+        }
+    }
+    page_cache().push((node, page_index, frame));
+    Some(frame)
+}
+
+/// Mappe un fichier en partage sur les frames du cache.
+fn map_shared_file(
+    process: &mut task::Process,
+    node: usize,
+    base: u64,
+    length: u64,
+    offset: u64,
+) -> bool {
+    let flags = vmm::PTE_PRESENT | vmm::PTE_USER | vmm::PTE_WRITE;
+    let mut done = 0u64;
+    while done < length {
+        let page_index = (offset + done) / PAGE_SIZE;
+        let frame = match cached_page(node, page_index) {
+            Some(frame) => frame,
+            None => return false,
+        };
+        // `map_foreign` : la frame appartient au cache, pas au processus. Elle
+        // ne sera donc ni liberee avec lui, ni dupliquee par `fork`.
+        if !process.space.map_foreign(base + done, frame, flags) {
+            return false;
+        }
+        done += PAGE_SIZE;
+    }
+    true
+}
+
+/// Recopie les pages partagees d'un fichier vers son contenu RAMFS.
+///
+/// Appele par `msync` et a la fermeture : c'est ce qui rend les ecritures d'un
+/// `MAP_SHARED` visibles par un `read` ordinaire.
+pub fn writeback(node: usize) {
+    let pages: alloc::vec::Vec<(u64, u64)> = page_cache()
+        .iter()
+        .filter(|(n, _, _)| *n == node)
+        .map(|(_, page, frame)| (*page, *frame))
+        .collect();
+    if pages.is_empty() {
+        return;
+    }
+    let fs = crate::fs::ramfs::fs();
+    for (page_index, frame) in pages {
+        let start = (page_index * PAGE_SIZE) as usize;
+        if start >= fs.nodes[node].content.len() {
+            continue;
+        }
+        let end = core::cmp::min(fs.nodes[node].content.len(), start + PAGE_SIZE as usize);
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                crate::kernel::memory::phys_to_virt(frame),
+                fs.nodes[node].content[start..end].as_mut_ptr(),
+                end - start,
+            );
+        }
+    }
 }
 
 /// Mappe le framebuffer materiel dans l'espace utilisateur.
@@ -217,4 +330,22 @@ pub fn sys_mremap(old_addr: u64, old_size: u64, new_size: u64, _flags: u32) -> i
     }
     process.space.unmap(old_addr, old_size);
     new_addr
+}
+
+/// `msync` : repercute les ecritures d'un `MAP_SHARED` vers le fichier.
+pub fn sys_msync(addr: u64, _length: u64) -> i64 {
+    // On ne sait pas a quel fichier appartient l'adresse ; recopier tout le
+    // cache est correct et sans risque : les frames sont la source de verite,
+    // le contenu RAMFS n'en est que le reflet.
+    let nodes: alloc::vec::Vec<usize> = {
+        let mut list: alloc::vec::Vec<usize> = page_cache().iter().map(|(node, _, _)| *node).collect();
+        list.sort_unstable();
+        list.dedup();
+        list
+    };
+    let _ = addr;
+    for node in nodes {
+        writeback(node);
+    }
+    0
 }

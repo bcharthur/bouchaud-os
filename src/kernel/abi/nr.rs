@@ -136,6 +136,31 @@ pub const TIMERFD_CREATE: u64 = 283;
 pub const TIMERFD_SETTIME: u64 = 286;
 pub const TIMERFD_GETTIME: u64 = 287;
 
+// --- Sockets ---
+pub const SOCKET: u64 = 41;
+pub const CONNECT: u64 = 42;
+pub const ACCEPT: u64 = 43;
+pub const SENDTO: u64 = 44;
+pub const RECVFROM: u64 = 45;
+pub const SENDMSG: u64 = 46;
+pub const RECVMSG: u64 = 47;
+pub const SHUTDOWN: u64 = 48;
+pub const BIND: u64 = 49;
+pub const LISTEN: u64 = 50;
+pub const GETSOCKNAME: u64 = 51;
+pub const GETPEERNAME: u64 = 52;
+pub const SOCKETPAIR: u64 = 53;
+pub const SETSOCKOPT: u64 = 54;
+pub const GETSOCKOPT: u64 = 55;
+pub const ACCEPT4: u64 = 288;
+
+// --- Signaux ---
+pub const PAUSE: u64 = 34;
+pub const ALARM: u64 = 37;
+pub const RT_SIGPENDING: u64 = 127;
+pub const SETITIMER: u64 = 38;
+pub const GETITIMER: u64 = 36;
+
 /// Nom symbolique d'un numero (trace et diagnostic).
 pub fn name(number: u64) -> &'static str {
     match number {
@@ -229,18 +254,46 @@ pub fn name(number: u64) -> &'static str {
         RSEQ => "rseq",
         MEMBARRIER => "membarrier",
         SIGALTSTACK => "sigaltstack",
+        RT_SIGRETURN => "rt_sigreturn",
+        RT_SIGSUSPEND => "rt_sigsuspend",
+        RT_SIGPENDING => "rt_sigpending",
+        PAUSE => "pause",
+        ALARM => "alarm",
+        VFORK => "vfork",
+        SOCKET => "socket",
+        CONNECT => "connect",
+        ACCEPT => "accept",
+        SENDTO => "sendto",
+        RECVFROM => "recvfrom",
+        SENDMSG => "sendmsg",
+        RECVMSG => "recvmsg",
+        SETITIMER => "setitimer",
+        GETITIMER => "getitimer",
+        SHUTDOWN => "shutdown",
+        BIND => "bind",
+        LISTEN => "listen",
+        GETSOCKNAME => "getsockname",
+        GETPEERNAME => "getpeername",
+        SOCKETPAIR => "socketpair",
+        SETSOCKOPT => "setsockopt",
+        GETSOCKOPT => "getsockopt",
+        ACCEPT4 => "accept4",
+        GETPPID => "getppid",
+        MSYNC => "msync",
         _ => "?",
     }
 }
 
 /// Appels systeme implementes, regroupes par famille (commande `syscalls`).
 pub fn print_implemented() {
-    let groups: [(&str, &[u64]); 7] = [
+    let groups: [(&str, &[u64]); 9] = [
         ("E/S", &[READ, WRITE, OPEN, OPENAT, CLOSE, LSEEK, READV, WRITEV, PREAD64, PWRITE64, DUP, DUP2, DUP3, PIPE, PIPE2, FCNTL, IOCTL, FTRUNCATE]),
         ("fichiers", &[STAT, LSTAT, FSTAT, NEWFSTATAT, STATX, ACCESS, FACCESSAT, READLINK, READLINKAT, GETDENTS64, GETCWD, CHDIR, MKDIR, UNLINK, RENAME]),
         ("attente", &[POLL, PPOLL, SELECT, EPOLL_CREATE1, EPOLL_CTL, EPOLL_WAIT, EVENTFD2, TIMERFD_CREATE, TIMERFD_SETTIME, TIMERFD_GETTIME]),
-        ("memoire", &[BRK, MMAP, MUNMAP, MPROTECT, MREMAP, MADVISE]),
-        ("taches", &[CLONE, EXIT, EXIT_GROUP, GETPID, GETTID, SET_TID_ADDRESS, SCHED_YIELD, FUTEX, NANOSLEEP, CLOCK_NANOSLEEP, ARCH_PRCTL, KILL, TKILL, TGKILL, PRCTL]),
+        ("memoire", &[BRK, MMAP, MUNMAP, MPROTECT, MREMAP, MADVISE, MSYNC]),
+        ("taches", &[CLONE, FORK, VFORK, EXECVE, WAIT4, EXIT, EXIT_GROUP, GETPID, GETPPID, GETTID, SET_TID_ADDRESS, SCHED_YIELD, FUTEX, NANOSLEEP, CLOCK_NANOSLEEP, ARCH_PRCTL, PRCTL]),
+        ("signaux", &[RT_SIGACTION, RT_SIGPROCMASK, RT_SIGRETURN, RT_SIGSUSPEND, RT_SIGPENDING, SIGALTSTACK, KILL, TKILL, TGKILL, PAUSE, ALARM, SETITIMER, GETITIMER]),
+        ("reseau", &[SOCKET, CONNECT, BIND, SENDTO, RECVFROM, SENDMSG, RECVMSG, SHUTDOWN, GETSOCKNAME, GETPEERNAME, SOCKETPAIR, SETSOCKOPT, GETSOCKOPT]),
         ("temps", &[CLOCK_GETTIME, CLOCK_GETRES, GETTIMEOFDAY, TIME]),
         ("systeme", &[UNAME, SYSINFO, GETRLIMIT, PRLIMIT64, GETRANDOM, GETUID, GETEUID, GETGID, GETEGID, SCHED_GETAFFINITY]),
     ];

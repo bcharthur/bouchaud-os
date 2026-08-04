@@ -57,7 +57,7 @@ musl_static() {
     }
     # static-pie : pas d'adresse fixe, donc aucune contrainte d'edition de liens.
     # Necessite un musl >= 1.1.21 et binutils recent.
-    for src in hello.c qpa-probe.c "$@"; do
+    for src in hello.c qpa-probe.c posix-probe.c exec-cible.c "$@"; do
         [ -f "$src" ] || continue
         name=$(basename "$src" .c)
         echo "  MUSL $name (static-pie)"

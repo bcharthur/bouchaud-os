@@ -391,7 +391,12 @@ impl TcpConn {
     }
 
     // Traite les segments entrants disponibles pendant `budget` iterations.
-    fn pump(&mut self, budget: u32) {
+    /// Fait avancer la connexion : lit les segments disponibles, acquitte, et
+    /// range les donnees dans `rx`.
+    ///
+    /// Publique parce que la couche socket en a besoin : c'est elle qui decide
+    /// combien de temps un `recv` accepte d'attendre.
+    pub fn pump(&mut self, budget: u32) {
         let mut rb = [0u8; 2048];
         let mut seg = [0u8; 64];
         for _ in 0..budget {

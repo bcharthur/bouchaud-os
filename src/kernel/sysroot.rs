@@ -202,7 +202,10 @@ fn install_etc() {
     }
     write_file(etc, "hostname", "bouchaud\n", 0o644);
     write_file(etc, "hosts", "127.0.0.1\tlocalhost bouchaud\n", 0o644);
-    write_file(etc, "resolv.conf", "nameserver 1.1.1.1\n", 0o644);
+    // Le serveur reellement configure, et non une adresse en dur : une libc
+    // fait sa resolution elle-meme, par ce fichier.
+    let dns = crate::net::dns_server();
+    write_file(etc, "resolv.conf", &format!("nameserver {}.{}.{}.{}\n", dns[0], dns[1], dns[2], dns[3]), 0o644);
     write_file(etc, "passwd", "root:x:0:0:root:/:/bin/sh\nguest:x:1000:1000:guest:/home/guest:/bin/sh\n", 0o644);
     write_file(etc, "group", "root:x:0:\nguest:x:1000:\n", 0o644);
     write_file(etc, "localtime", "", 0o644);

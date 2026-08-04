@@ -354,10 +354,17 @@ construction cote utilisateur : `tools/userland/README.md`.
       granularite, inutilisable pour animer une interface
 - [x] **Arborescence systeme** : polices DejaVu dans `/usr/share/fonts`, `/proc`
       et `/sys` reduits aux fichiers lus au demarrage, `/etc` minimal
-- [ ] `fork` (copie paresseuse de l'espace d'adressage) et `execve`
-- [ ] Signaux reels : livraison a un gestionnaire ring 3, `rt_sigreturn`
-- [ ] Sockets POSIX relies a la pile TCP/IP existante (`src/net/`)
-- [ ] Cache de pages partage pour `mmap` de fichier
+- [x] **Processus complets** : `fork`, `vfork`, `execve`, `wait4`, filiation,
+      zombies et recolte du code de sortie (`src/kernel/abi/proc.rs`)
+- [x] **Signaux reels** : trame ecrite sur la pile utilisateur, gestionnaire
+      ring 3, `rt_sigreturn`, masques, `SIGCHLD`, `SIGALRM` (`src/kernel/signal.rs`)
+- [x] **Sockets POSIX** : TCP et UDP sur la pile de `src/net/` — `getaddrinfo`
+      et un client HTTP fonctionnent depuis le ring 3 (`src/kernel/abi/net.rs`)
+- [x] **Cache de pages partage** : `MAP_SHARED` sur fichier partage les memes
+      frames entre processus, `msync` repercute vers le RAMFS
+- [ ] Sockets serveur : `listen`/`accept` (demande une reception en tache de
+      fond et un demultiplexage par port)
+- [ ] IPv6
 
 Commandes associees : `exec`, `elfinfo`, `usermode`, `tasks`, `vmstat`,
 `syscalls`, `strace`.

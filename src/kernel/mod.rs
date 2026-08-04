@@ -20,6 +20,7 @@ pub mod memory;
 pub mod handle;
 pub mod process;
 pub mod scheduler;
+pub mod signal;
 pub mod syscall;
 pub mod sysroot;
 pub mod task;

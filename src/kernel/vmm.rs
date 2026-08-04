@@ -416,6 +416,97 @@ impl AddressSpace {
         self.pages.len()
     }
 
+    /// Enumere les pages utilisateur mappees : (adresse virtuelle, entree).
+    ///
+    /// Parcourt les quatre niveaux du creneau utilisateur. Sert a `fork`, qui
+    /// doit recopier tout ce que le parent a mappe, et au diagnostic.
+    pub fn iter_user_pages(&self) -> Vec<(u64, u64)> {
+        let mut out = Vec::new();
+        let slot = user_slot();
+        let pml4 = table_at(self.pml4);
+        let entry4 = pml4[slot];
+        if entry4 & PTE_PRESENT == 0 {
+            return out;
+        }
+        let pdpt = table_at(entry4 & ADDR_MASK);
+        for (i3, &entry3) in pdpt.iter().enumerate() {
+            if entry3 & PTE_PRESENT == 0 {
+                continue;
+            }
+            let pd = table_at(entry3 & ADDR_MASK);
+            for (i2, &entry2) in pd.iter().enumerate() {
+                if entry2 & PTE_PRESENT == 0 || entry2 & PTE_HUGE != 0 {
+                    continue;
+                }
+                let pt = table_at(entry2 & ADDR_MASK);
+                for (i1, &entry1) in pt.iter().enumerate() {
+                    if entry1 & PTE_PRESENT == 0 {
+                        continue;
+                    }
+                    let virt = ((slot as u64) << 39)
+                        | ((i3 as u64) << 30)
+                        | ((i2 as u64) << 21)
+                        | ((i1 as u64) << 12);
+                    out.push((virt, entry1));
+                }
+            }
+        }
+        out
+    }
+
+    /// Cette page appartient-elle a l'espace (frame allouee par lui) ?
+    ///
+    /// Les pages qui n'appartiennent pas a l'espace sont celles empruntees a un
+    /// autre proprietaire : framebuffer materiel, cache de pages partage. Elles
+    /// ne doivent etre ni dupliquees ni liberees avec le processus.
+    pub fn owns_frame(&self, phys: u64) -> bool {
+        self.pages.contains(&(phys & ADDR_MASK))
+    }
+
+    /// Mappe une frame qui appartient a quelqu'un d'autre (framebuffer, cache
+    /// de pages partage) : elle ne sera ni liberee ni dupliquee avec l'espace.
+    pub fn map_foreign(&mut self, virt: u64, phys: u64, flags: u64) -> bool {
+        self.map(virt, phys, flags)
+    }
+
+    /// Duplique le contenu utilisateur de `self` dans un espace neuf.
+    ///
+    /// Copie **immediate** de chaque page, sans copie-a-l'ecriture. C'est plus
+    /// couteux qu'un COW au moment du `fork`, mais cela evite d'avoir a
+    /// compter les references sur chaque frame et a traiter les fautes
+    /// d'ecriture : deux sources de corruption silencieuse difficiles a
+    /// diagnostiquer. Le cas d'usage courant (`fork` suivi d'un `execve`)
+    /// paie ici une copie que le COW aurait economisee ; c'est un compromis
+    /// assume, pas un oubli.
+    ///
+    /// Les pages empruntees (framebuffer, cache partage) sont re-mappees sur
+    /// les memes frames plutot que dupliquees : c'est le comportement attendu
+    /// d'un `MAP_SHARED`.
+    pub fn duplicate(&self) -> Option<AddressSpace> {
+        let mut child = AddressSpace::new()?;
+        for (virt, entry) in self.iter_user_pages() {
+            let phys = entry & ADDR_MASK;
+            let flags = entry & !ADDR_MASK;
+            if self.owns_frame(phys) {
+                let frame = alloc_frame()?;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        memory::phys_to_virt(phys),
+                        memory::phys_to_virt(frame),
+                        PAGE_SIZE as usize,
+                    );
+                }
+                child.pages.push(frame);
+                if !child.map(virt, frame, flags) {
+                    return None;
+                }
+            } else if !child.map(virt, phys, flags) {
+                return None;
+            }
+        }
+        Some(child)
+    }
+
     /// Copie `len` octets depuis la memoire utilisateur vers un tampon noyau.
     /// Echoue si une page de la plage n'est pas mappee.
     pub fn read(&mut self, virt: u64, out: &mut [u8]) -> bool {

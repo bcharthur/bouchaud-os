@@ -17,7 +17,9 @@
 pub mod errno;
 pub mod file;
 pub mod mem;
+pub mod net;
 pub mod nr;
+pub mod proc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -68,12 +70,100 @@ pub fn handle(frame: &mut TrapFrame) {
             result
         );
     }
-    frame.rax = result as u64;
+    // `rt_sigreturn` a deja reecrit toute la trame : y remettre une valeur de
+    // retour ecraserait le rax restaure.
+    if number != nr::RT_SIGRETURN {
+        frame.rax = result as u64;
+    }
 
     // Preemption differee : le timer a pu marquer un besoin de commutation
     // pendant l'appel, ou l'appel a pu reveiller une tache plus prioritaire.
     if task::take_need_resched() {
         task::yield_now();
+    }
+
+    // Dernier moment ou la trame ring 3 est modifiable : c'est ici que se
+    // livrent les signaux en attente.
+    proc::deliver_pending(frame);
+}
+
+/// `rt_sigsuspend` / `pause` : attend qu'un signal arrive.
+fn sys_sigsuspend(set: u64) -> i64 {
+    let process = task::current_process();
+    let saved = process.borrow().signals.blocked;
+    if set != 0 {
+        if let Some(mask) = user_read_u64(set) {
+            let mut borrowed = process.borrow_mut();
+            borrowed.signals.blocked = mask & !(1 << (crate::kernel::signal::SIGKILL - 1));
+        }
+    }
+    while !task::signal_pending() {
+        task::yield_now();
+        crate::arch::x86_64::cpu::hlt();
+    }
+    process.borrow_mut().signals.blocked = saved;
+    // POSIX impose ce retour : l'attente s'est terminee par un signal.
+    -errno::EINTR
+}
+
+/// `setitimer` / `getitimer` : `struct itimerval` = periode puis echeance,
+/// chacune en `struct timeval` (secondes puis microsecondes).
+///
+/// C'est par la que passe `alarm()` de musl — pas par l'appel `alarm`, qui
+/// n'est donc jamais emis en pratique.
+fn sys_setitimer(which: u32, new_value: u64, old_value: u64) -> i64 {
+    const ITIMER_REAL: u32 = 0;
+    if which != ITIMER_REAL {
+        // Les minuteurs de temps CPU demanderaient une comptabilite par
+        // processus que l'ordonnanceur ne tient pas.
+        return -errno::ENOSYS;
+    }
+    if old_value != 0 {
+        sys_getitimer(which, old_value);
+    }
+    if new_value == 0 {
+        return 0;
+    }
+    let seconds = user_read_u64(new_value + 16).unwrap_or(0);
+    let micros = user_read_u64(new_value + 24).unwrap_or(0);
+    let deadline = if seconds == 0 && micros == 0 {
+        0 // desarmement
+    } else {
+        crate::kernel::timer::ticks()
+            + crate::kernel::timer::ms_to_ticks(seconds * 1000 + micros / 1000).max(1)
+    };
+    task::set_alarm(deadline);
+    0
+}
+
+fn sys_getitimer(which: u32, out: u64) -> i64 {
+    const ITIMER_REAL: u32 = 0;
+    if which != ITIMER_REAL || out == 0 {
+        return -errno::EINVAL;
+    }
+    let deadline = task::peek_alarm();
+    let remaining_ticks = deadline.saturating_sub(crate::kernel::timer::ticks());
+    let per_second = crate::kernel::timer::TICKS_PER_SECOND;
+    // it_interval reste nul : les alarmes ne se repetent pas.
+    user_write(out, &0u64.to_le_bytes());
+    user_write(out + 8, &0u64.to_le_bytes());
+    user_write(out + 16, &(remaining_ticks / per_second).to_le_bytes());
+    user_write(out + 24, &((remaining_ticks % per_second) * (1_000_000 / per_second)).to_le_bytes());
+    0
+}
+
+/// `alarm` : programme un `SIGALRM`.
+fn sys_alarm(seconds: u32) -> i64 {
+    let previous = task::set_alarm(if seconds == 0 {
+        0
+    } else {
+        crate::kernel::timer::ticks() + seconds as u64 * crate::kernel::timer::TICKS_PER_SECOND
+    });
+    if previous == 0 {
+        0
+    } else {
+        let now = crate::kernel::timer::ticks();
+        (previous.saturating_sub(now) / crate::kernel::timer::TICKS_PER_SECOND) as i64
     }
 }
 
@@ -187,7 +277,14 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         MUNMAP => mem::sys_munmap(args[0], args[1]),
         MPROTECT => mem::sys_mprotect(args[0], args[1], args[2] as u32),
         MREMAP => mem::sys_mremap(args[0], args[1], args[2], args[3] as u32),
-        MADVISE | MSYNC | MLOCK | MUNLOCK | MLOCKALL | MUNLOCKALL => 0,
+        MSYNC => {
+            // Recopie les pages partagees vers le fichier : sans cela, un
+            // MAP_SHARED ne serait visible que des autres mappings, pas d'un
+            // `read` ordinaire.
+            mem::sys_msync(args[0], args[1]);
+            0
+        }
+        MADVISE | MLOCK | MUNLOCK | MLOCKALL | MUNLOCKALL => 0,
 
         // --- Processus, threads, ordonnancement ---
         GETPID => task::current().process.borrow().pid as i64,
@@ -199,11 +296,13 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         }
         SET_ROBUST_LIST | GET_ROBUST_LIST | RSEQ => 0,
         CLONE => proc_clone(args, frame),
-        FORK | VFORK => -errno::ENOSYS,
-        EXECVE => -errno::ENOSYS,
+        // `vfork` partage l'espace d'adressage du parent jusqu'a l'`execve` ;
+        // le dupliquer est plus couteux mais toujours correct.
+        FORK | VFORK => proc::sys_fork(frame),
+        EXECVE => proc::sys_execve(args[0], args[1], args[2]),
         EXIT => task::exit_current(args[0] as i32),
         EXIT_GROUP => task::exit_group(args[0] as i32),
-        WAIT4 => -errno::ECHILD,
+        WAIT4 => proc::sys_wait4(args[0] as i64, args[1], args[2] as u32, args[3]),
         SCHED_YIELD => {
             task::yield_now();
             0
@@ -229,12 +328,46 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         ARCH_PRCTL => sys_arch_prctl(args[0] as i32, args[1]),
         // Le numero de signal n'est pas au meme rang selon l'appel :
         // kill(pid, sig), tkill(tid, sig), mais tgkill(tgid, tid, sig).
-        KILL | TKILL => sys_kill(args[1]),
-        TGKILL => sys_kill(args[2]),
+        KILL => proc::sys_kill(args[0] as i64, args[1] as u32),
+        TKILL => proc::sys_tkill(args[0] as u32, args[1] as u32),
+        TGKILL => proc::sys_kill(args[0] as i64, args[2] as u32),
 
-        // --- Signaux (modele minimal) ---
-        RT_SIGACTION | RT_SIGPROCMASK | SIGALTSTACK | RT_SIGSUSPEND => 0,
-        RT_SIGRETURN => 0,
+        // --- Signaux ---
+        RT_SIGACTION => proc::sys_rt_sigaction(args[0] as u32, args[1], args[2]),
+        RT_SIGPROCMASK => proc::sys_rt_sigprocmask(args[0] as i32, args[1], args[2]),
+        RT_SIGRETURN => proc::sys_rt_sigreturn(frame),
+        RT_SIGSUSPEND => sys_sigsuspend(args[0]),
+        // Pas de pile de signal alternative : la trame est ecrite sur la pile
+        // courante, sous la zone rouge.
+        SIGALTSTACK => 0,
+        RT_SIGPENDING => {
+            let pending = task::current_process().borrow().signals.pending;
+            if args[0] != 0 && !user_write(args[0], &pending.to_le_bytes()) {
+                -errno::EFAULT
+            } else {
+                0
+            }
+        }
+        PAUSE => sys_sigsuspend(0),
+        ALARM => sys_alarm(args[0] as u32),
+        SETITIMER => sys_setitimer(args[0] as u32, args[1], args[2]),
+        GETITIMER => sys_getitimer(args[0] as u32, args[1]),
+
+        // --- Sockets ---
+        SOCKET => net::sys_socket(args[0] as u32, args[1] as u32, args[2] as u32),
+        CONNECT => net::sys_connect(args[0] as i32, args[1], args[2] as usize),
+        BIND => net::sys_bind(args[0] as i32, args[1], args[2] as usize),
+        LISTEN | ACCEPT | ACCEPT4 => net::sys_listen_unsupported(),
+        SENDTO => net::sys_sendto(args[0] as i32, args[1], args[2] as usize, args[3] as u32, args[4], args[5] as usize),
+        RECVFROM => net::sys_recvfrom(args[0] as i32, args[1], args[2] as usize, args[3] as u32, args[4], args[5]),
+        SHUTDOWN => net::sys_shutdown(args[0] as i32, args[1] as u32),
+        GETSOCKNAME => net::sys_getsockname(args[0] as i32, args[1], args[2], false),
+        GETPEERNAME => net::sys_getsockname(args[0] as i32, args[1], args[2], true),
+        SETSOCKOPT => net::sys_setsockopt(args[0] as i32, args[1] as u32, args[2] as u32, args[3], args[4] as usize),
+        GETSOCKOPT => net::sys_getsockopt(args[0] as i32, args[1] as u32, args[2] as u32, args[3], args[4]),
+        SOCKETPAIR => net::sys_socketpair(args[0] as u32, args[1] as u32, args[2] as u32, args[3]),
+        SENDMSG => net::sys_sendmsg(args[0] as i32, args[1], args[2] as u32),
+        RECVMSG => net::sys_recvmsg(args[0] as i32, args[1], args[2] as u32),
 
         // --- Temps ---
         CLOCK_GETTIME => sys_clock_gettime(args[0] as i32, args[1]),
