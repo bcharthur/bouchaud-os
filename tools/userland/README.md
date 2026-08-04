@@ -8,6 +8,8 @@ de construction côté utilisateur.
 ./build.sh freestanding    # tests d'ABI sans libc (gcc + ld, aucune dépendance)
 ./build.sh musl            # binaires statiques musl (dont qpa-probe)
 ./build.sh musl-dynamic    # binaires dynamiques + ld-musl-x86_64.so.1
+./build-python.sh          # CPython 3.12 statique + bibliothèque standard  (§11)
+./build-qt.sh              # Qt 5.15 statique + démonstration linuxfb        (§9)
 ```
 
 Les binaires produits vont dans `out/`. On les installe sur la machine en
@@ -30,6 +32,21 @@ tasks                 # threads du programme en cours
 syscalls              # les 107 appels implémentés, par famille
 strace on             # trace des appels système sur COM1
 ```
+
+## Vérification automatique
+
+```
+./tools/test.sh
+```
+
+Construit le noyau et les sondes, fabrique le disque, démarre QEMU sans
+affichage, analyse le journal série et renvoie un code de retour. Le noyau joue
+le fichier `/autorun` déposé sur le disque au lieu d'ouvrir une session, puis
+éteint la machine en signalant son verdict à l'hôte (voir
+`src/kernel/autorun.rs`).
+
+Si `out-python/` et `out-qt/` existent, la sonde Python et la démonstration Qt
+sont ajoutées au scénario.
 
 ## Comment les fichiers arrivent sur la machine
 
@@ -241,14 +258,37 @@ fichiers réellement lus au démarrage (`/sys/devices/system/cpu/online` pour
 ### Compiler Qt
 
 ```sh
-./configure -static -release -no-opengl -no-xcb -no-feature-vulkan \
-            -no-feature-dbus -no-feature-glib \
-            -qpa linuxfb -platform linux-g++ \
-            -device-option CROSS_COMPILE=musl- -prefix /usr
+./build-qt.sh            # télécharge qtbase 5.15, construit Qt statique + la démo
+./mkdisk.sh out-qt       # fabrique le disque
+# puis, sous l'OS :
+exec /qt-demo
 ```
 
-`-no-feature-glib` importe : sans lui, Qt utilise le dispatcher GLib, qui
-demande davantage au système que sa propre boucle `poll`.
+Une vingtaine de minutes sur quatre cœurs. Le résultat est un binaire
+statique-PIE d'environ 16 Mo qui embarque Qt Core, Gui, Widgets et le plugin de
+plateforme linuxfb, et qui dessine une vraie fenêtre sur `/dev/fb0`.
+
+Trois choix méritent une explication, tous dans l'en-tête de `build-qt.sh` :
+
+- **glibc et non musl.** Qt est du C++ et réclame une `libstdc++` ; la chaîne
+  `musl-tools` n'en fournit pas. Le `g++` du système en apporte une complète,
+  exceptions comprises. L'OS s'en moque : il implémente l'ABI de Linux, pas
+  celle d'une libc en particulier — ce qui a été vérifié avec un binaire C++
+  glibc statique avant de s'engager dans cette voie.
+- **statique.** Un exécutable statique ne peut pas charger de `.so`, donc pas
+  de plugin à découvrir : le plugin linuxfb est lié en dur par `Q_IMPORT_PLUGIN`
+  dans `qt-demo.cpp`. C'est le mode nominal de Qt sur un système embarqué.
+- **`-no-glib`.** Sans cela, Qt utilise le dispatcher GLib, qui demande
+  davantage au système que sa propre boucle `poll`.
+
+La source Ubuntu (`+dfsg`) est expurgée de ses bibliothèques tierces
+embarquées : freetype, libpng, pcre2 et zlib doivent venir du système, en
+version statique (`libfreetype-dev libpng-dev libpcre2-dev zlib1g-dev
+libbrotli-dev libbz2-dev`).
+
+Qt affiche au démarrage deux avertissements `iconv_open failed`. Ils sont sans
+conséquence : la glibc statique n'embarque pas ses modules de conversion
+`gconv`, et Qt retombe sur son codec interne.
 
 ### Ce qui manque encore
 
@@ -256,7 +296,39 @@ demande davantage au système que sa propre boucle `poll`.
 2. **IPv6** — `socket(AF_INET6)` répond `EAFNOSUPPORT`, ce qui fait
    correctement retomber `getaddrinfo` sur IPv4 ;
 3. **accélération graphique** — tout le rendu est logiciel. Une pile Qt tourne,
-   mais au rythme d'un rendu logiciel en 1280x720.
+   mais au rythme d'un rendu logiciel en 1280x720 ;
+4. **QtWebEngine** — hors de portée : c'est Chromium, plusieurs gigaoctets de
+   sources et une couche GPU. Un navigateur en Qt sur cet OS passerait par un
+   moteur léger, pas par WebEngine.
+
+## 11. Python
+
+```sh
+./build-python.sh          # construit CPython 3.12 statique-PIE (musl)
+./mkdisk.sh out-python     # fabrique le disque
+# puis, sous l'OS :
+exec /usr/bin/python3 /mon-script.py
+```
+
+L'interprète fait environ 10 Mo, la bibliothèque standard 2,5 Mo. Deux fichiers
+en tout : `/usr/bin/python3` et `/usr/lib/python312.zip`.
+
+La bibliothèque standard est livrée en archive zip et non en 2000 fichiers :
+c'est ce que `zipimport` sait lire nativement, et c'est autant de nœuds que le
+RAMFS n'a pas à créer au démarrage. CPython la cherche tout seul à
+`<préfixe>/lib/python312.zip` ; `PYTHONHOME=/usr` fait partie de
+l'environnement fourni par défaut.
+
+Toutes les extensions C sont liées dans le binaire (`Modules/Setup.local`) : un
+exécutable statique ne peut pas charger de `.so`. Les modules qui réclament une
+bibliothèque externe (`_ssl`, `_sqlite3`, `_ctypes`, `_lzma`…) sont désactivés ;
+`zlib` est reconstruit contre musl parce que `zipimport` en a besoin.
+
+`python-probe.py` vérifie l'OS depuis l'interprète — fichiers, `fork`, threads,
+horloges, `select`/`poll`, sockets, `getrandom`. C'est l'inverse d'une sonde
+écrite à la main : on laisse CPython utiliser le système comme il en a
+l'habitude, et on regarde ce qui casse. Elle a trouvé trois défauts réels dès sa
+première exécution.
 
 ## 10. Processus, signaux et réseau
 

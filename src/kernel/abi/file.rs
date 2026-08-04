@@ -103,6 +103,20 @@ fn console_read(max: usize) -> Vec<u8> {
     }
 }
 
+/// Drapeaux d'ouverture d'un descripteur (0 s'il n'existe pas).
+///
+/// Lus a chaque tour d'une attente et non une fois pour toutes : `fcntl` peut
+/// basculer un descripteur en non bloquant depuis un autre thread pendant
+/// qu'on attend dessus.
+fn fd_flags(fd: i32) -> u32 {
+    task::current_process()
+        .borrow()
+        .files
+        .get(fd)
+        .map(|desc| desc.flags)
+        .unwrap_or(0)
+}
+
 /// `read`.
 pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
     if count == 0 {
@@ -158,13 +172,34 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
             if !readable {
                 return -errno::EBADF;
             }
-            let mut guard = shared.borrow_mut();
-            if guard.is_empty() {
-                return -errno::EAGAIN;
+            let non_bloquant = fd_flags(fd) & O_NONBLOCK != 0;
+            loop {
+                // L'emprunt du tampon ne doit jamais survivre a l'attente :
+                // l'ecrivain qu'on attend a besoin du meme `RefCell`.
+                let (vide, plus_d_ecrivain) = {
+                    let state = shared.borrow();
+                    (state.buffer.is_empty(), state.writers == 0)
+                };
+                if !vide {
+                    break;
+                }
+                // Tube vide et plus personne pour ecrire : c'est la fin de
+                // fichier, pas une attente.
+                if plus_d_ecrivain {
+                    return 0;
+                }
+                if non_bloquant {
+                    return -errno::EAGAIN;
+                }
+                // Un `read` bloquant attend. Sans cela, tout code qui lit un
+                // tube sans passer par `poll` — c'est-a-dire l'immense
+                // majorite — recevrait EAGAIN sur un tube parfaitement valide.
+                task::yield_now();
             }
-            let len = core::cmp::min(count, guard.len());
-            let data: Vec<u8> = guard.drain(..len).collect();
-            drop(guard);
+            let mut state = shared.borrow_mut();
+            let len = core::cmp::min(count, state.buffer.len());
+            let data: Vec<u8> = state.buffer.drain(..len).collect();
+            drop(state);
             if user_write(buffer, &data) { len as i64 } else { -errno::EFAULT }
         }
         FdKind::EventFd(state) => {
@@ -288,7 +323,15 @@ pub fn sys_write(fd: i32, buffer: u64, count: usize) -> i64 {
             if readable {
                 return -errno::EBADF;
             }
-            shared.borrow_mut().extend_from_slice(&data);
+            let mut state = shared.borrow_mut();
+            // Ecrire dans un tube que plus personne ne lit n'a pas de sens :
+            // Linux leve SIGPIPE et rend EPIPE. Faute de SIGPIPE ici, on rend
+            // l'erreur — c'est ce que voit de toute facon un programme qui
+            // ignore le signal, comme le font Python et Qt.
+            if state.readers == 0 {
+                return -errno::EPIPE;
+            }
+            state.buffer.extend_from_slice(&data);
             count as i64
         }
         FdKind::EventFd(state) => {
@@ -577,9 +620,7 @@ pub fn sys_dup2(old: i32, new: i32) -> i64 {
 
 /// `pipe` / `pipe2`.
 pub fn sys_pipe(addr: u64, flags: u32) -> i64 {
-    use alloc::rc::Rc;
-    use core::cell::RefCell;
-    let shared = Rc::new(RefCell::new(Vec::new()));
+    let shared = crate::kernel::fd::new_pipe();
     let process = task::current_process();
     let mut borrowed = process.borrow_mut();
     let mut read_end = FileDesc::new(FdKind::Pipe(shared.clone(), true));
@@ -1076,7 +1117,48 @@ pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
             FIONBIO | FIONREAD => 0,
             _ => -errno::ENOTTY,
         },
+        // `FIONBIO` bascule un descripteur en mode non bloquant. C'est par la
+        // que passe `socket.settimeout()` de Python et le mode asynchrone de
+        // toute pile reseau : le refuser avec ENOTTY faisait remonter un
+        // « Not a tty » sur une prise parfaitement valide.
+        FdKind::Socket(_) | FdKind::SocketPair(_, _) | FdKind::Pipe(_, _) => match request {
+            FIONBIO => {
+                let actif = match crate::kernel::abi::user_read(arg, 4) {
+                    Some(octets) => octets.iter().any(|&o| o != 0),
+                    None => return -errno::EFAULT,
+                };
+                set_nonblocking(fd, actif);
+                0
+            }
+            FIONREAD => {
+                let en_attente = pending_bytes(&kind) as u32;
+                if user_write(arg, &en_attente.to_le_bytes()) { 0 } else { -errno::EFAULT }
+            }
+            _ => -errno::ENOTTY,
+        },
         _ => -errno::ENOTTY,
+    }
+}
+
+/// Pose ou retire `O_NONBLOCK` sur un descripteur.
+fn set_nonblocking(fd: i32, actif: bool) {
+    let process = task::current_process();
+    let mut borrowed = process.borrow_mut();
+    if let Some(desc) = borrowed.files.get_mut(fd) {
+        if actif {
+            desc.flags |= O_NONBLOCK;
+        } else {
+            desc.flags &= !O_NONBLOCK;
+        }
+    }
+}
+
+/// Octets lisibles immediatement sur un descripteur tamponne (`FIONREAD`).
+fn pending_bytes(kind: &FdKind) -> usize {
+    match kind {
+        FdKind::Pipe(shared, true) => shared.borrow().buffer.len(),
+        FdKind::SocketPair(inbox, _) => inbox.borrow().len(),
+        _ => 0,
     }
 }
 
@@ -1253,7 +1335,13 @@ fn readable(fd: i32) -> bool {
     match kind {
         FdKind::Console => keyboard::has_pending(),
         FdKind::File(_) | FdKind::Dir(_) | FdKind::Zero | FdKind::Random | FdKind::Null => true,
-        FdKind::Pipe(shared, true) => !shared.borrow().is_empty(),
+        // Un tube dont l'ecrivain a disparu est « pret » : la lecture rendra 0.
+        // Le declarer bloque ferait tourner indefiniment une boucle `poll` qui
+        // attend la fin de fichier.
+        FdKind::Pipe(shared, true) => {
+            let state = shared.borrow();
+            !state.buffer.is_empty() || state.writers == 0
+        }
         // Interroger sans consommer : `poll` ne doit pas voler l'evenement au
         // `read` qui va suivre.
         FdKind::InputKeyboard => input::keyboard_pending(),

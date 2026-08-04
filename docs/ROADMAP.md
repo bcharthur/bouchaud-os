@@ -381,6 +381,14 @@ construction cote utilisateur : `tools/userland/README.md`.
       `Process` ne survit a un point de commutation ») est enoncee en tete de
       `src/kernel/abi/mod.rs` et verifiee par un `debug_assert` dans
       `task::schedule` — la panique designe le coupable, pas sa victime.
+- [x] **CPython 3.12 tourne sur la machine** : interprete statique-PIE contre
+      musl, bibliotheque standard en archive zip lue par `zipimport`
+      (`tools/userland/build-python.sh`). Deux fichiers sur le disque de
+      donnees, aucune recompilation du noyau.
+- [x] **Qt 5.15 dessine sur `/dev/fb0`** : qtbase statique, plateforme linuxfb,
+      entrees evdev, lie en dur dans le binaire
+      (`tools/userland/build-qt.sh`, `tools/userland/qt-demo.cpp`). QPainter,
+      anticrenelage, degrades et melange alpha, en ring 3.
 - [ ] Ecriture persistante : BFS sur peripherique bloc
 
 Commandes associees : `exec`, `elfinfo`, `usermode`, `tasks`, `vmstat`,

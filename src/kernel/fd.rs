@@ -39,8 +39,8 @@ pub enum FdKind {
     InputKeyboard,
     /// `/dev/input/event1` (souris).
     InputMouse,
-    /// Extremite d'un tube : (tampon partage, cote lecture ?).
-    Pipe(Rc<RefCell<Vec<u8>>>, bool),
+    /// Extremite d'un tube : (etat partage, cote lecture ?).
+    Pipe(Rc<RefCell<PipeState>>, bool),
     /// Instance `epoll` : liste de (fd surveille, evenements demandes, donnee).
     Epoll(Rc<RefCell<Vec<(i32, u32, u64)>>>),
     /// `eventfd` : compteur 64 bits partage entre threads.
@@ -57,6 +57,33 @@ pub enum FdKind {
     /// Console virtuelle `/dev/tty0` : ne sert qu'a ses ioctls de mode
     /// graphique, les entrees/sorties passent par la console.
     VirtualTerminal,
+}
+
+/// Etat partage d'un tube.
+///
+/// Le tampon ne suffit pas : il faut savoir **combien d'extremites existent
+/// encore**. Un tube vide dont il reste un ecrivain doit faire attendre le
+/// lecteur ; le meme tube vide sans plus aucun ecrivain doit rendre 0, la fin
+/// de fichier. Sans ce comptage, les deux situations sont indiscernables et il
+/// faut choisir la mauvaise reponse dans un cas sur deux.
+pub struct PipeState {
+    pub buffer: Vec<u8>,
+    /// Descripteurs ouverts sur le cote lecture.
+    pub readers: usize,
+    /// Descripteurs ouverts sur le cote ecriture.
+    pub writers: usize,
+}
+
+impl PipeState {
+    fn new() -> Self {
+        // Un `pipe()` cree exactement une extremite de chaque cote.
+        PipeState { buffer: Vec::new(), readers: 1, writers: 1 }
+    }
+}
+
+/// Cree l'etat partage d'un nouveau tube.
+pub fn new_pipe() -> Rc<RefCell<PipeState>> {
+    Rc::new(RefCell::new(PipeState::new()))
 }
 
 /// Etat d'un `eventfd`.
@@ -81,8 +108,38 @@ pub struct TimerFdState {
     pub expirations: u64,
 }
 
+impl FdKind {
+    /// Une extremite de plus existe sur cet objet.
+    fn retain(&self) {
+        if let FdKind::Pipe(state, readable) = self {
+            let mut state = state.borrow_mut();
+            if *readable { state.readers += 1 } else { state.writers += 1 }
+        }
+    }
+
+    /// Une extremite de moins.
+    fn release(&self) {
+        if let FdKind::Pipe(state, readable) = self {
+            let mut state = state.borrow_mut();
+            let compteur = if *readable { &mut state.readers } else { &mut state.writers };
+            *compteur = compteur.saturating_sub(1);
+        }
+    }
+}
+
 /// Un descripteur ouvert.
-#[derive(Clone)]
+///
+/// ## Descripteur contre objet
+///
+/// `FileDesc` est **un descripteur** : le dupliquer (`dup`, `fork`) cree une
+/// extremite de plus, le detruire en retire une. C'est pourquoi `Clone` et
+/// `Drop` sont ecrits a la main plutot que derives — ce sont les deux seuls
+/// endroits ou le comptage doit se faire, et les ecrire ici les rend
+/// impossibles a oublier, quel que soit le chemin qui duplique la table.
+///
+/// [`FdKind`] est **l'objet** designe. Le cloner ne cree pas d'extremite : les
+/// appels systeme en prennent une copie a chaque passage, pour ne pas garder un
+/// emprunt de la table pendant leur travail. Ces copies-la ne comptent pas.
 pub struct FileDesc {
     pub kind: FdKind,
     /// Position de lecture/ecriture.
@@ -96,6 +153,24 @@ pub struct FileDesc {
 impl FileDesc {
     pub fn new(kind: FdKind) -> Self {
         FileDesc { kind, offset: 0, flags: 0, cloexec: false }
+    }
+}
+
+impl Clone for FileDesc {
+    fn clone(&self) -> Self {
+        self.kind.retain();
+        FileDesc {
+            kind: self.kind.clone(),
+            offset: self.offset,
+            flags: self.flags,
+            cloexec: self.cloexec,
+        }
+    }
+}
+
+impl Drop for FileDesc {
+    fn drop(&mut self) {
+        self.kind.release();
     }
 }
 

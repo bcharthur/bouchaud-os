@@ -10,6 +10,10 @@
 #   ./tools/test.sh --quick    reutilise l'image de boot deja construite
 #   ./tools/test.sh --keep     laisse les artefacts dans tools/userland/test-out
 #
+# Si `tools/userland/out-python/` ou `tools/userland/out-qt/` existent (voir
+# build-python.sh et build-qt.sh), la sonde Python et la demonstration Qt sont
+# ajoutees au scenario. Sans eux, le scenario se limite aux trois sondes en C.
+#
 # Comment ca marche : les binaires et un script `/autorun` sont deposes sur le
 # disque de donnees. Au demarrage, le noyau voit `/autorun`, le joue au lieu
 # d'ouvrir une session, recopie tout sur COM1, puis eteint la machine par le
@@ -73,8 +77,8 @@ fi
 
 # --- 2. Scenario ------------------------------------------------------------
 
-# Chaque sonde renvoie 0 quand toutes ses verifications passent. `&&` suffit
-# donc a propager l'echec, et `$?` en fin de script devient le verdict.
+# Chaque sonde renvoie 0 quand toutes ses verifications passent, et le noyau
+# retient le premier echec rencontre (voir shell::run_batch).
 cat > "$WORK/files/autorun" <<'SCENARIO'
 # Scenario joue au demarrage par le noyau (voir src/kernel/autorun.rs).
 uname
@@ -84,6 +88,29 @@ exec /ring3-selftest
 exec /posix-probe
 exec /qpa-probe
 SCENARIO
+
+# Python et Qt ne sont pas construits par ce script : ils demandent une
+# vingtaine de minutes chacun et des sources telechargees. S'ils sont la, on les
+# joue ; sinon on s'en passe. C'est ce qui permet de garder un `test.sh` rapide
+# tout en couvrant la pile complete quand elle est disponible.
+PYTHON_DIR=tools/userland/out-python
+QT_BIN=tools/userland/out-qt/qt-demo
+
+if [ -x "$PYTHON_DIR/usr/bin/python3" ]; then
+    info "  + CPython detecte : la sonde Python est ajoutee au scenario"
+    cp -r "$PYTHON_DIR/usr" "$WORK/files/"
+    cp tools/userland/python-probe.py "$WORK/files/"
+    echo "exec /usr/bin/python3 /python-probe.py" >> "$WORK/files/autorun"
+fi
+
+if [ -x "$QT_BIN" ]; then
+    info "  + Qt detecte : la demonstration graphique est ajoutee au scenario"
+    cp "$QT_BIN" "$WORK/files/qt-demo"
+    # Court : le scenario doit se terminer seul, on ne cherche qu'a prouver que
+    # la boucle d'evenements tourne et que la fenetre s'affiche.
+    echo "export QT_DEMO_DUREE_MS=4000" >> "$WORK/files/autorun"
+    echo "exec /qt-demo" >> "$WORK/files/autorun"
+fi
 
 info "== fabrication du disque de test =="
 if ! (cd tools/userland && IMAGE=../../$DISK ./mkdisk.sh ../../$WORK/files >/dev/null); then
@@ -146,6 +173,13 @@ if grep -q "RESULTAT" "$LOG" 2>/dev/null; then
             *) red "  ECHEC $line"; FAILED=1 ;;
         esac
     done < <(grep "RESULTAT" "$LOG")
+fi
+
+if [ -x "$QT_BIN" ]; then
+    grep -q "plateforme : linuxfb" "$LOG" 2>/dev/null
+    report $? "Qt demarre sur la plateforme linuxfb"
+    grep -q "boucle d'evenements terminee (code 0)" "$LOG" 2>/dev/null
+    report $? "la boucle d'evenements de Qt tourne et se termine"
 fi
 
 # Une panique noyau peut survenir apres un scenario par ailleurs vert.

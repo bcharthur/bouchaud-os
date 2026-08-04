@@ -16,3 +16,9 @@ tools/userland/out/
 tools/userland/*.img
 # Artefacts du lanceur de sondes (tools/test.sh)
 tools/userland/test-out/
+# Chantiers et resultats de build-python.sh / build-qt.sh (sources telechargees,
+# arbres de compilation, binaires produits)
+tools/userland/build-python/
+tools/userland/build-qt/
+tools/userland/out-python/
+tools/userland/out-qt/

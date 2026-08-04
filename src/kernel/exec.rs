@@ -63,6 +63,25 @@ pub fn default_environment() -> Vec<String> {
     ]
 }
 
+/// Environnement transmis a un programme lance depuis le shell.
+///
+/// Les valeurs par defaut ci-dessus decrivent la machine ; celles que
+/// l'utilisateur a posees avec `export` les recouvrent. C'est l'ordre attendu :
+/// sans lui, `export QT_QPA_PLATFORM=vnc` n'aurait aucun effet, la valeur
+/// compilee gagnant toujours.
+pub fn shell_environment() -> Vec<String> {
+    let mut env = default_environment();
+    for entree in crate::shell::exported() {
+        let nom = match entree.find('=') {
+            Some(position) => entree[..position + 1].to_string(),
+            None => continue,
+        };
+        env.retain(|existante| !existante.starts_with(&nom));
+        env.push(entree);
+    }
+    env
+}
+
 /// Lit un fichier du RAMFS.
 fn read_file(path: &str, cwd: usize) -> Result<Vec<u8>, String> {
     let fs = crate::fs::ramfs::fs();

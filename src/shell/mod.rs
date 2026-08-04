@@ -57,6 +57,18 @@ fn env_unset(name: &str) {
     env_mut().retain(|(k, _)| k != name);
 }
 
+/// Variables exportees par le shell, sous la forme `NOM=valeur`.
+///
+/// Ce que `export` a pose doit atteindre le programme lance : sans cela, un
+/// `export QT_QPA_PLATFORM=...` n'aurait aucun effet, ce qui est exactement le
+/// contraire de ce qu'attend quiconque a deja utilise un shell.
+pub fn exported() -> Vec<String> {
+    env_mut()
+        .iter()
+        .map(|(k, v)| alloc::format!("{}={}", k, v))
+        .collect()
+}
+
 fn env_list() {
     for (k, v) in env_mut().iter() {
         println!("{}={}", k, v);

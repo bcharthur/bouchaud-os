@@ -1170,7 +1170,7 @@ pub fn exec_cmd(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
             args.push(String::from(argv[i]));
         }
     }
-    let env = crate::kernel::exec::default_environment();
+    let env = crate::kernel::exec::shell_environment();
     match crate::kernel::exec::exec(argv[1], &args, &env, cwd) {
         Ok(code) => {
             if code != 0 {

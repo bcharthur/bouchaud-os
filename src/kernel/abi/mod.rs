@@ -280,7 +280,22 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         FCNTL => file::sys_fcntl(args[0] as i32, args[1] as u32, args[2]),
         IOCTL => file::sys_ioctl(args[0] as i32, args[1] as u64, args[2]),
         POLL => file::sys_poll(args[0], args[1] as usize, args[2] as i32),
-        PPOLL => file::sys_poll(args[0], args[1] as usize, -1),
+        // `ppoll(fds, n, tmo_p, sigmask, sigsetsize)` : le delai est un
+        // **pointeur sur timespec**, pas un nombre de millisecondes. Le prendre
+        // pour une duree faisait attendre indefiniment toute boucle
+        // d'evenements qui passe par `ppoll` — c'est le cas de Qt via la glibc,
+        // et ses minuteries ne se declenchaient jamais.
+        PPOLL => {
+            let timeout = if args[2] == 0 {
+                -1 // pointeur nul : attente sans limite
+            } else {
+                match timespec_ms(args[2]) {
+                    Some(ms) => ms.min(i32::MAX as u64) as i32,
+                    None => return -errno::EFAULT,
+                }
+            };
+            file::sys_poll(args[0], args[1] as usize, timeout)
+        }
         SELECT | PSELECT6 => file::sys_select(args[0] as i32, args[1], args[2], args[3], args[4]),
         EPOLL_CREATE | EPOLL_CREATE1 => file::sys_epoll_create(),
         EPOLL_CTL => file::sys_epoll_ctl(args[0] as i32, args[1] as u32, args[2] as i32, args[3]),
@@ -334,7 +349,7 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         }
         FUTEX => sys_futex(args),
         NANOSLEEP => sys_nanosleep(args[0], args[1]),
-        CLOCK_NANOSLEEP => sys_nanosleep(args[2], args[3]),
+        CLOCK_NANOSLEEP => sys_clock_nanosleep(args[0] as i32, args[1], args[2], args[3]),
         GETUID | GETEUID => task::current().process.borrow().uid as i64,
         GETGID | GETEGID => task::current().process.borrow().gid as i64,
         SETUID | SETGID | SETPGID | SETSID => 0,
@@ -523,25 +538,62 @@ fn timespec_ms(addr: u64) -> Option<u64> {
     Some(seconds.saturating_mul(1000) + nanos / 1_000_000)
 }
 
-/// Convertit un `struct timespec` utilisateur (duree relative) en ticks.
-fn timespec_ticks(addr: u64) -> Option<u64> {
-    Some(crate::kernel::timer::ms_to_ticks(timespec_ms(addr)?))
+/// `nanosleep` : la duree demandee est toujours **relative**.
+fn sys_nanosleep(request: u64, remain: u64) -> i64 {
+    dors_ms(timespec_ms(request).unwrap_or(0));
+    if remain != 0 {
+        // Le sommeil n'a pas ete interrompu : il ne reste rien a dormir.
+        user_write(remain, &0u64.to_le_bytes());
+        user_write(remain + 8, &0u64.to_le_bytes());
+    }
+    0
 }
 
-/// `nanosleep` / `clock_nanosleep`.
-fn sys_nanosleep(request: u64, remain: u64) -> i64 {
-    let ticks = timespec_ticks(request).unwrap_or(0);
-    if ticks == 0 {
-        // Sommeil sous-tick : on cede simplement le CPU.
-        task::yield_now();
-    } else {
-        task::sleep_ticks(ticks);
+/// `clock_nanosleep(clockid, flags, request, remain)`.
+///
+/// Meme piege que `FUTEX_WAIT_BITSET` : le drapeau `TIMER_ABSTIME` transforme
+/// la duree en **echeance**. C'est cette forme qu'emploie `time.sleep()` de
+/// CPython. Prendre l'echeance pour une duree fait dormir aussi longtemps que
+/// la machine a deja tourne — un `sleep(0,2 s)` demande apres neuf secondes
+/// d'uptime dure alors neuf secondes.
+fn sys_clock_nanosleep(clock: i32, flags: u64, request: u64, remain: u64) -> i64 {
+    const TIMER_ABSTIME: u64 = 1;
+    const CLOCK_REALTIME: i32 = 0;
+    const CLOCK_REALTIME_ALARM: i32 = 8;
+
+    let demande = match timespec_ms(request) {
+        Some(ms) => ms,
+        None => return -errno::EFAULT,
+    };
+
+    if flags & TIMER_ABSTIME != 0 {
+        let maintenant = match clock {
+            CLOCK_REALTIME | CLOCK_REALTIME_ALARM => realtime_ms(),
+            _ => crate::kernel::timer::monotonic_ms(),
+        };
+        // Une echeance deja passee rend la main tout de suite. `remain` n'est
+        // pas ecrit dans cette forme : Linux ne le remplit que pour un sommeil
+        // relatif, l'echeance etant deja connue de l'appelant.
+        dors_ms(demande.saturating_sub(maintenant));
+        return 0;
     }
+
+    dors_ms(demande);
     if remain != 0 {
         user_write(remain, &0u64.to_le_bytes());
         user_write(remain + 8, &0u64.to_le_bytes());
     }
     0
+}
+
+/// Dort `ms` millisecondes, en cedant simplement le CPU sous le tick.
+fn dors_ms(ms: u64) {
+    let ticks = crate::kernel::timer::ms_to_ticks(ms);
+    if ticks == 0 {
+        task::yield_now();
+    } else {
+        task::sleep_ticks(ticks);
+    }
 }
 
 /// `futex` : la primitive d'attente sur laquelle reposent tous les mutex et
