@@ -100,7 +100,11 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // 5. Banniere d'accueil.
     banner();
 
-    // 6. Boucle interactive.
+    // 6. Mode non interactif : si le disque de donnees a depose un `/autorun`,
+    //    on le joue et la machine s'eteint. Ne rend la main que sans script.
+    kernel::autorun::run_if_present();
+
+    // 7. Boucle interactive.
     shell::run();
 }
 

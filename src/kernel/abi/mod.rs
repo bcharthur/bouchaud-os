@@ -13,6 +13,31 @@
 //! Ce module est decoupe en trois : les numeros et constantes ([`nr`], [`errno`]),
 //! les entrees/sorties sur descripteurs ([`file`]), et la memoire du processus
 //! ([`mem`]).
+//!
+//! ## Invariant de non-reentrance
+//!
+//! > **Aucun emprunt du [`Process`](crate::kernel::task::Process) ne doit
+//! > survivre a un point de commutation.**
+//!
+//! Le noyau n'est pas reentrant, et tout le reste s'appuie la-dessus. L'etat
+//! d'un processus vit dans un `Rc<RefCell<Process>>` : le `RefCell` compte les
+//! emprunts a l'execution, pas a la compilation. Un appel systeme qui garderait
+//! un `borrow_mut()` ouvert en appelant quelque chose qui rend la main —
+//! [`yield_now`](crate::kernel::task::yield_now), un `futex` qui attend, une
+//! lecture bloquante — laisserait le compteur d'emprunts arme pendant que la
+//! tache suivante entre dans le meme processus. Le second emprunt paniquerait
+//! sur un `BorrowMutError`, c'est-a-dire une panique noyau, avec une trace
+//! designant la seconde tache et non celle qui a laisse l'emprunt ouvert.
+//!
+//! En pratique : relacher le `borrow` (fin de portee, ou copie de ce dont on a
+//! besoin) **avant** tout appel susceptible de bloquer. Le point de commutation
+//! unique, [`task::schedule`](crate::kernel::task::schedule), verifie
+//! l'invariant par un `debug_assert` : la panique designe alors le fautif au
+//! lieu de sa victime.
+//!
+//! La preemption par le timer, elle, ne peut pas casser l'invariant : elle
+//! n'agit que si l'interruption a surpris du code ring 3, ou aucun emprunt
+//! noyau n'est detenu (voir `arch::x86_64::idt`).
 
 pub mod errno;
 pub mod file;

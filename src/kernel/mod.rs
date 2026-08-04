@@ -10,6 +10,7 @@
 //! (appels systeme POSIX) et `exec` (assemblage de tout cela).
 
 pub mod abi;
+pub mod autorun;
 pub mod dmesg;
 pub mod elf;
 pub mod exec;
@@ -18,6 +19,7 @@ pub mod heap;
 pub mod input;
 pub mod memory;
 pub mod handle;
+pub mod power;
 pub mod process;
 pub mod scheduler;
 pub mod signal;

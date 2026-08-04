@@ -371,10 +371,20 @@ construction cote utilisateur : `tools/userland/README.md`.
       `src/fs/tar.rs`). Fabriquer l'image avec `tools/userland/mkdisk.sh` ;
       `run.ps1` l'attache automatiquement. Limites RAMFS relevees a 4096
       inodes et 64 Mio par fichier.
+- [x] **Mode non interactif** : un `/autorun` sur le disque de donnees est joue
+      au demarrage a la place de la connexion, la sortie est recopiee sur COM1
+      et la machine s'eteint en rendant un verdict a l'hote
+      (`src/kernel/autorun.rs`, `src/kernel/power.rs`). C'est ce qui rend les
+      sondes rejouables : `./tools/test.sh` construit, boote, verifie et renvoie
+      un code de retour.
+- [x] **Invariant de non-reentrance verrouille** : la regle (« aucun emprunt du
+      `Process` ne survit a un point de commutation ») est enoncee en tete de
+      `src/kernel/abi/mod.rs` et verifiee par un `debug_assert` dans
+      `task::schedule` — la panique designe le coupable, pas sa victime.
 - [ ] Ecriture persistante : BFS sur peripherique bloc
 
 Commandes associees : `exec`, `elfinfo`, `usermode`, `tasks`, `vmstat`,
-`syscalls`, `strace`, `df`.
+`syscalls`, `strace`, `df`, `poweroff`.
 
 ## Au-dela
 - [ ] Permissions completes, audit log

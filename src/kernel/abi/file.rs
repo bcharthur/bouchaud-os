@@ -65,8 +65,12 @@ fn resolve(path: &str) -> Option<usize> {
 
 /// Ecrit sur la console : ecran (VGA ou bureau) et port serie de debug.
 fn console_write(data: &[u8]) {
-    for &byte in data {
-        crate::serial_print!("{}", byte as char);
+    // En mode non interactif, `print!` recopie deja tout sur COM1 : ecrire ici
+    // en plus afficherait chaque ligne du programme en double.
+    if !crate::drivers::vga::serial_mirror() {
+        for &byte in data {
+            crate::serial_print!("{}", byte as char);
+        }
     }
     let text = String::from_utf8_lossy(data);
     crate::print!("{}", text);

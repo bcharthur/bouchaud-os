@@ -89,7 +89,8 @@ pub const COMMANDS: &[&str] = &[
     "write", "append", "nano", "edit", "rm", "rmdir", "cp", "mv", "stat", "chmod", "chown",
     "echo", "date", "js-selftest", "wasm", "wasm-selftest", "grep", "wc", "head", "tail", "find", "lspci", "ping", "ifconfig",
     "ip", "route", "arp", "dhcp", "dns", "wget", "curl", "mount", "df", "sync",
-    "mkfs.bfs", "true", "false", "logout", "exit", "export", "env", "unset", "run",
+    "mkfs.bfs", "true", "false", "logout", "exit", "poweroff", "halt", "shutdown",
+    "export", "env", "unset", "run",
     "source", "desktop", "gui", "ps", "kill", "free", "syscalls", "apps", "launch",
     "ifup", "arping", "ethinfo", "nslookup", "http", "https", "tls-selftest", "tls",
     "smoltest",
@@ -310,6 +311,36 @@ fn longest_common_prefix(items: &[String]) -> String {
 // ---------------------------------------------------------------------------
 // Execution : chainage ; && ||, redirections > >>, $?
 // ---------------------------------------------------------------------------
+
+/// Execute un script complet sans clavier ni invite, et renvoie un verdict.
+///
+/// C'est la porte d'entree du mode non interactif ([`crate::kernel::autorun`]).
+/// Chaque commande est reaffichee avant son execution : sans cela, une sortie
+/// brute sur COM1 serait illisible, faute de savoir quelle commande l'a
+/// produite.
+///
+/// Le code rendu n'est pas celui de la derniere commande, comme le ferait un
+/// shell, mais **le premier code d'echec rencontre**. Le script continue apres
+/// une erreur, ce qui est ce qu'on veut d'un scenario de verification : s'il
+/// s'arretait au premier echec, il faudrait autant d'executions que de defauts
+/// pour tous les voir.
+pub fn run_batch(script: &str) -> i32 {
+    let mut cwd = ramfs::fs().resolve("/", 0).unwrap_or(0);
+    let mut verdict = 0;
+    for raw in script.lines() {
+        let line = trim(raw);
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        println!("+ {}", line);
+        set_status(0);
+        run_line(line, &mut cwd);
+        if verdict == 0 && last_status() != 0 {
+            verdict = last_status();
+        }
+    }
+    verdict
+}
 
 /// Execute une ligne en capturant sa sortie texte (pour le terminal graphique).
 pub fn run_capture(line: &str, cwd: &mut usize) -> String {
@@ -541,6 +572,12 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "syscalls" => { crate::kernel::abi::print_table(); 0 }
         "apps" => { crate::app::launcher::list(); 0 }
         "launch" => { if argc >= 2 { crate::app::launcher::launch(argv[1]); } else { println!("usage: launch <app>"); } 0 }
+        "poweroff" | "halt" | "shutdown" => {
+            println!("Arret de la machine.");
+            // Le code ne compte que si l'hote ecoute le peripherique de test de
+            // QEMU ; une extinction demandee a la main est toujours un succes.
+            crate::kernel::power::shutdown(crate::kernel::power::EXIT_OK)
+        }
         "breakpoint" => { c::breakpoint(); 0 }
         "serial-test" => { c::serial_test(); 0 }
         "panic-test" => { c::panic_test(); 0 }

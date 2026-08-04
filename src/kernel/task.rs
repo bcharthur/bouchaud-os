@@ -349,6 +349,34 @@ fn pick_next(after: usize) -> Option<usize> {
     None
 }
 
+/// Verifie l'invariant de non-reentrance avant de commuter.
+///
+/// La regle est enoncee en tete de [`crate::kernel::abi`] : aucun emprunt du
+/// `Process` ne doit survivre a un point de commutation. Elle n'est pas
+/// verifiable a la compilation, `RefCell` comptant ses emprunts a l'execution ;
+/// mais elle l'est ici, et c'est le seul endroit qui compte, puisque toutes les
+/// attentes du noyau — `yield_now`, futex, lecture bloquante — passent par
+/// [`schedule`].
+///
+/// Sans ce controle, un emprunt oublie ne se manifeste qu'au moment ou une
+/// **autre** tache du meme processus tente d'emprunter a son tour : le
+/// `BorrowMutError` designe alors la victime, jamais le coupable, et rien dans
+/// la trace ne mene a l'appel systeme fautif. Le cout est d'un essai d'emprunt
+/// par commutation, uniquement en compilation de debogage.
+#[inline]
+fn debug_assert_borrows_released() {
+    #[cfg(debug_assertions)]
+    {
+        if let Some(task) = try_current() {
+            debug_assert!(
+                task.process.try_borrow_mut().is_ok(),
+                "task: un emprunt du Process est encore actif au moment de commuter \
+                 — relacher le borrow avant toute attente (invariant : voir kernel::abi)"
+            );
+        }
+    }
+}
+
 /// Rend la main : bascule sur une autre tache prete s'il y en a une.
 ///
 /// Renvoie `true` si un changement de tache a eu lieu. Si la tache courante est
@@ -359,6 +387,7 @@ pub fn schedule() -> bool {
     if cur == usize::MAX {
         return false;
     }
+    debug_assert_borrows_released();
     wake_sleepers();
     let next = match pick_next(cur) {
         Some(n) if n != cur => n,
