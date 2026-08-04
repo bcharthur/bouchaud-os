@@ -122,7 +122,9 @@ pub const EVENTFD2: u64 = 290;
 pub const EPOLL_CREATE1: u64 = 291;
 pub const DUP3: u64 = 292;
 pub const PIPE2: u64 = 293;
+pub const RECVMMSG: u64 = 299;
 pub const PRLIMIT64: u64 = 302;
+pub const SENDMMSG: u64 = 307;
 pub const GETRANDOM: u64 = 318;
 pub const MEMBARRIER: u64 = 324;
 pub const STATX: u64 = 332;
@@ -266,6 +268,8 @@ pub fn name(number: u64) -> &'static str {
         SENDTO => "sendto",
         RECVFROM => "recvfrom",
         SENDMSG => "sendmsg",
+        SENDMMSG => "sendmmsg",
+        RECVMMSG => "recvmmsg",
         RECVMSG => "recvmsg",
         SETITIMER => "setitimer",
         GETITIMER => "getitimer",
@@ -293,7 +297,7 @@ pub fn print_implemented() {
         ("memoire", &[BRK, MMAP, MUNMAP, MPROTECT, MREMAP, MADVISE, MSYNC]),
         ("taches", &[CLONE, FORK, VFORK, EXECVE, WAIT4, EXIT, EXIT_GROUP, GETPID, GETPPID, GETTID, SET_TID_ADDRESS, SCHED_YIELD, FUTEX, NANOSLEEP, CLOCK_NANOSLEEP, ARCH_PRCTL, PRCTL]),
         ("signaux", &[RT_SIGACTION, RT_SIGPROCMASK, RT_SIGRETURN, RT_SIGSUSPEND, RT_SIGPENDING, SIGALTSTACK, KILL, TKILL, TGKILL, PAUSE, ALARM, SETITIMER, GETITIMER]),
-        ("reseau", &[SOCKET, CONNECT, BIND, SENDTO, RECVFROM, SENDMSG, RECVMSG, SHUTDOWN, GETSOCKNAME, GETPEERNAME, SOCKETPAIR, SETSOCKOPT, GETSOCKOPT]),
+        ("reseau", &[SOCKET, CONNECT, BIND, SENDTO, RECVFROM, SENDMSG, RECVMSG, SENDMMSG, RECVMMSG, SHUTDOWN, GETSOCKNAME, GETPEERNAME, SOCKETPAIR, SETSOCKOPT, GETSOCKOPT]),
         ("temps", &[CLOCK_GETTIME, CLOCK_GETRES, GETTIMEOFDAY, TIME]),
         ("systeme", &[UNAME, SYSINFO, GETRLIMIT, PRLIMIT64, GETRANDOM, GETUID, GETEUID, GETGID, GETEGID, SCHED_GETAFFINITY]),
     ];

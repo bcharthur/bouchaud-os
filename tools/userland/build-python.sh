@@ -109,8 +109,6 @@ cat > Modules/Setup.local <<'SETUP'
 _lzma
 _bz2
 _sqlite3
-_ssl
-_hashlib
 _curses
 _curses_panel
 _tkinter
@@ -133,6 +131,14 @@ _xxtestfuzz
 xxlimited
 xxlimited_35
 SETUP
+
+# TLS : en glibc, l'OpenSSL statique du systeme convient et donne un `ssl`
+# complet — c'est ce qui permet au navigateur de parler HTTPS. En musl il
+# faudrait reconstruire OpenSSL contre musl : hors sujet pour un interprete
+# autonome, on s'en passe.
+if [ "$CIBLE_LIBC" = musl ]; then
+    printf '_ssl\n_hashlib\n' >> Modules/Setup.local
+fi
 
 # En musl on produit un interprete autonome, donc lie en static-pie. En glibc on
 # ne cherche que `libpython3.12.a`, destinee a etre embarquee dans le navigateur
@@ -158,6 +164,7 @@ if [ ! -f Makefile ]; then
         --disable-test-modules \
         --with-static-libpython \
         --disable-ipv6 \
+        --with-openssl=/usr \
         ac_cv_func_dlopen=no \
         ac_cv_lib_dl_dlopen=no \
         MODULE_BUILDTYPE=static \
@@ -183,6 +190,16 @@ else
     cp -r "$STAGED/include/python$PYSHORT" "$DEST/usr/include" 2>/dev/null \
         || cp -r "$WORK/Python-$PYVER/Include" "$DEST/usr/include"
     cp "$WORK/Python-$PYVER/pyconfig.h" "$DEST/usr/include/" 2>/dev/null || true
+    # `libpython.a` ne contient pas tout : CPython lie separement les objets des
+    # bibliotheques tierces qu'il embarque — expat pour `pyexpat`, HACL* pour
+    # les fonctions de hachage, libmpdec pour `_decimal`. Sans elles, l'edition
+    # de liens de l'hote echoue sur des symboles absents. On les rassemble en
+    # une archive d'appoint.
+    rm -f "$DEST/usr/lib/libpythonaux.a"
+    ar rcs "$DEST/usr/lib/libpythonaux.a" \
+        "$WORK/Python-$PYVER"/Modules/expat/*.o \
+        "$WORK/Python-$PYVER"/Modules/_hacl/*.o \
+        "$WORK/Python-$PYVER"/Modules/_decimal/libmpdec/*.o
 fi
 
 # La bibliotheque standard en une archive zip plutot qu'en 2000 fichiers :

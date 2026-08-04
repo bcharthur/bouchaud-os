@@ -389,6 +389,11 @@ construction cote utilisateur : `tools/userland/README.md`.
       entrees evdev, lie en dur dans le binaire
       (`tools/userland/build-qt.sh`, `tools/userland/qt-demo.cpp`). QPainter,
       anticrenelage, degrades et melange alpha, en ring 3.
+- [ ] **`sendto` non bloquant et resolution d'adresse materielle** (defaut
+      ouvert). Une prise UDP passee en non bloquant fait echouer sa premiere
+      emission vers un hote dont l'adresse materielle n'est pas encore connue :
+      le noyau rend `ENETUNREACH` au lieu de laisser l'ARP aboutir. Contourne
+      cote navigateur en emettant avant de poser le delai d'attente.
 - [ ] **Blocage intermittent apres `clone`** (defaut ouvert). Deux executions sur
       une vingtaine se sont figees juste apres le `pthread_create` de
       `qpa-probe`, sans aucune sortie ensuite et sans que le filet
@@ -403,6 +408,11 @@ construction cote utilisateur : `tools/userland/README.md`.
       emulateurs tournaient de front sur la machine hote. Non reproduit sous
       moniteur QEMU (0 sur 24), ce qui empeche pour l'instant de relever l'etat
       du processeur fige.
+- [x] **Navigateur natif en ring 3** : Nautile supprime du noyau, remplace par
+      `tools/userland/navigateur/` — un binaire unique (Qt + CPython + le
+      moteur) qui analyse HTML et CSS, met en page, et peint par QPainter sur
+      `/dev/fb0`. Reseau HTTP/HTTPS avec resolveur DNS ecrit pour l'occasion.
+      Pas de JavaScript, pas d'images.
 - [ ] Ecriture persistante : BFS sur peripherique bloc
 
 Commandes associees : `exec`, `elfinfo`, `usermode`, `tasks`, `vmstat`,

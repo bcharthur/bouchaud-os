@@ -408,6 +408,8 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         SOCKETPAIR => net::sys_socketpair(args[0] as u32, args[1] as u32, args[2] as u32, args[3]),
         SENDMSG => net::sys_sendmsg(args[0] as i32, args[1], args[2] as u32),
         RECVMSG => net::sys_recvmsg(args[0] as i32, args[1], args[2] as u32),
+        SENDMMSG => net::sys_sendmmsg(args[0] as i32, args[1], args[2] as u32, args[3] as u32),
+        RECVMMSG => net::sys_recvmmsg(args[0] as i32, args[1], args[2] as u32, args[3] as u32, args[4]),
 
         // --- Temps ---
         CLOCK_GETTIME => sys_clock_gettime(args[0] as i32, args[1]),

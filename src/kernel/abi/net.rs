@@ -637,3 +637,56 @@ pub fn socket_readable(state: &Rc<RefCell<SocketState>>) -> bool {
         }
     }
 }
+
+/// Taille de `struct mmsghdr` : un `msghdr` (56 octets) suivi de `msg_len`
+/// (4 octets) puis d'un remplissage d'alignement.
+const MMSGHDR_TAILLE: u64 = 64;
+/// Position de `msg_len` dans `struct mmsghdr`.
+const MMSG_LEN: u64 = 56;
+
+/// `sendmmsg(fd, msgvec, vlen, flags)` : plusieurs messages en un appel.
+///
+/// La glibc s'en sert dans son resolveur de noms — elle interroge tous les
+/// serveurs DNS d'un coup. Sans cet appel, `getaddrinfo` echoue avec
+/// « Temporary failure in name resolution » et rien ne se charge. C'est
+/// exactement le genre de manque qu'une sonde ecrite a la main ne trouve pas :
+/// musl, lui, envoie ses requetes une par une.
+pub fn sys_sendmmsg(fd: i32, msgvec: u64, vlen: u32, flags: u32) -> i64 {
+    if msgvec == 0 {
+        return -errno::EFAULT;
+    }
+    let mut envoyes = 0i64;
+    for index in 0..vlen as u64 {
+        let entree = msgvec + index * MMSGHDR_TAILLE;
+        let resultat = sys_sendmsg(fd, entree, flags);
+        if resultat < 0 {
+            // Linux ne signale l'erreur que si aucun message n'est parti.
+            return if envoyes > 0 { envoyes } else { resultat };
+        }
+        crate::kernel::abi::user_write(entree + MMSG_LEN, &(resultat as u32).to_le_bytes());
+        envoyes += 1;
+    }
+    envoyes
+}
+
+/// `recvmmsg(fd, msgvec, vlen, flags, timeout)`.
+///
+/// Le delai est ignore : chaque `recvmsg` sous-jacent est deja non bloquant, et
+/// l'appelant reessaie. On s'arrete des qu'un message manque, ce qui est le
+/// comportement attendu — `recvmmsg` rend ce qu'il a pu lire.
+pub fn sys_recvmmsg(fd: i32, msgvec: u64, vlen: u32, flags: u32, _timeout: u64) -> i64 {
+    if msgvec == 0 {
+        return -errno::EFAULT;
+    }
+    let mut recus = 0i64;
+    for index in 0..vlen as u64 {
+        let entree = msgvec + index * MMSGHDR_TAILLE;
+        let resultat = sys_recvmsg(fd, entree, flags);
+        if resultat < 0 {
+            return if recus > 0 { recus } else { resultat };
+        }
+        crate::kernel::abi::user_write(entree + MMSG_LEN, &(resultat as u32).to_le_bytes());
+        recus += 1;
+    }
+    recus
+}

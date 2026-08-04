@@ -22,3 +22,6 @@ tools/userland/build-python/
 tools/userland/build-qt/
 tools/userland/out-python/
 tools/userland/out-qt/
+tools/userland/build-navigateur/
+tools/userland/out-navigateur/
+tools/userland/out-python-embed/

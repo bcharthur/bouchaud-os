@@ -403,3 +403,71 @@ doit.
 Version embarquée dans le noyau, sans aucun fichier : la commande `usermode`
 génère un ELF64 en mémoire et l'exécute. C'est le moyen le plus rapide de
 vérifier que le ring 3 est fonctionnel après une modification du noyau.
+
+## 12. Navigateur
+
+```sh
+./build-qt.sh                                   # Qt statique (§9)
+LIBC=glibc OUT=out-python-embed ./build-python.sh   # libpython pour embarquer
+./build-navigateur.sh                           # l'assemble
+./mkdisk.sh out-navigateur
+# puis, sous l'OS :
+exec /bo-navigateur                # page d'accueil
+exec /bo-navigateur http://…       # une adresse directement
+```
+
+Un binaire de 32 Mo qui contient Qt, CPython et le moteur. Il remplace Nautile,
+qui vivait dans le noyau — un moteur web n'a rien à faire en ring 0, où une page
+mal formée a le même pouvoir qu'un pilote.
+
+### Architecture
+
+```
+hote.cpp        Qt : fenêtre, framebuffer, entrées, peinture     (C++)
+   ↕ module `bo`
+navigateur.py   chrome, historique, événements                   (Python)
+moteur/         html · css · mise_en_page · peinture · reseau     (Python)
+```
+
+Qt appelle Python, jamais l'inverse pendant la peinture : `paintEvent` demande
+une **liste d'affichage** — des tuples plats (`rect`, `texte`, `ligne`…) — et la
+peint. Le moteur ne touche jamais un objet Qt, ce qui permet de le tester sans
+écran.
+
+**Pas de PyQt.** PyQt expose les 200 000 lignes d'API de Qt à Python ; un
+navigateur en utilise une poignée : ouvrir une fenêtre, peindre, mesurer du
+texte, recevoir des touches. Le module `bo` fait exactement cela en quelques
+centaines de lignes, se construit en dix secondes, et n'a pas besoin d'un PyQt
+statique — chose qui n'existe pas vraiment.
+
+**Une seule libc.** Qt est du C++ et tire la `libstdc++` du système, donc la
+glibc ; Python doit donc être construit en glibc lui aussi (`LIBC=glibc`). Deux
+libc ne cohabitent pas dans un même binaire.
+
+### Ce que le moteur sait faire
+
+Analyse HTML tolérante (balises non fermées, imbrications interdites, attributs
+sans guillemets, entités) · sélecteurs CSS de balise, classe, identifiant et
+descendance, avec spécificité, cascade et héritage · feuille de l'agent
+utilisateur · modèle de boîte complet · mise en page bloc et en ligne avec
+retour à la ligne mesuré sur la vraie fonte · listes, texte préformaté ·
+HTTP et HTTPS avec redirections et jeux de caractères · `file://` · historique
+avant/arrière, liens cliquables, défilement.
+
+### Ce qu'il ne sait pas faire
+
+**JavaScript** — les pages qui se construisent elles-mêmes s'affichent vides.
+**Images** — remplacées par leur texte de remplacement. **Flexbox et grid** —
+ramenés à un empilement vertical.
+
+### Résolution de noms
+
+`socket.getaddrinfo` ne fonctionne pas dans un binaire glibc statique : la glibc
+y délègue à ses modules NSS, qui sont des bibliothèques partagées chargées par
+`dlopen`. Le navigateur porte donc son propre client DNS (`moteur/reseau.py`) —
+une requête A en UDP vers le serveur de `/etc/resolv.conf`.
+
+La requête part **avant** que le délai d'attente soit posé sur la prise : une
+prise déjà passée en non bloquant fait échouer la première émission vers un hôte
+dont l'adresse matérielle n'est pas encore connue, et le noyau rend alors
+`ENETUNREACH`. C'est un défaut côté noyau, noté dans la feuille de route.
