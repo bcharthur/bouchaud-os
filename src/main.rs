@@ -63,7 +63,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     kernel::dmesg::log("vga: text mode initialise");
     kernel::dmesg::log("serial: COM1 initialise (debug QEMU)");
 
-    // 3. Briques architecture (stubs propres en V0.6).
+    // 3. Briques architecture. La pagination par processus doit etre prete
+    //    avant `usermode::init` (appele par `arch::init`) : c'est elle qui
+    //    fournit les frames et le creneau d'adressage du ring 3.
+    kernel::vmm::init();
     arch::x86_64::init();
 
     // Calibre le TSC (cycles -> ms reels) maintenant que IRQ0 fait avancer les
@@ -82,6 +85,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     kernel::dmesg::log("pyweb: /dev/web pret, browser.py installe");
     kernel::process::init();
     kernel::dmesg::log("process: table initialisee (init, desktop, shell)");
+    kernel::dmesg::log("abi: appels systeme POSIX/Linux x86-64 disponibles (ring 3)");
     kernel::dmesg::log("net: loopback lo 127.0.0.1 actif (ping ok); eth0 sans driver");
     kernel::dmesg::log("disk: pilote disque non active");
     kernel::dmesg::log("shell: initialise");

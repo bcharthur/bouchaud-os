@@ -33,6 +33,9 @@ pub fn init() {
             .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
         IDT.page_fault.set_handler_fn(page_fault_handler);
         IDT.general_protection_fault.set_handler_fn(general_protection_handler);
+        IDT.invalid_opcode.set_handler_fn(invalid_opcode_handler);
+        IDT.divide_error.set_handler_fn(divide_error_handler);
+        IDT.stack_segment_fault.set_handler_fn(stack_segment_handler);
         IDT[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
         IDT[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
         IDT[InterruptIndex::Mouse.as_usize()].set_handler_fn(mouse_interrupt_handler);
@@ -59,31 +62,132 @@ extern "x86-interrupt" fn double_fault_handler(stack: InterruptStackFrame, _code
     panic!("EXCEPTION: double faute\n{:#?}", stack);
 }
 
+/// La faute vient-elle du ring 3 ? Dans ce cas c'est le programme utilisateur
+/// qu'il faut tuer, surtout pas le noyau.
+fn from_user(stack: &InterruptStackFrame) -> bool {
+    stack.code_segment & 3 == 3
+}
+
+/// Garde qui retablit l'invariant GS pendant un gestionnaire.
+///
+/// Une interruption venue du ring 3 arrive avec `GS_BASE` cote utilisateur ;
+/// le noyau, lui, exige que `GS_BASE` designe la structure par-CPU (voir
+/// `arch::x86_64::usermode`). On echange donc a l'entree et on retablit a la
+/// sortie — sauf si le gestionnaire ne revient jamais (tache tuee), auquel cas
+/// le noyau garde l'etat ring 0 qui lui convient.
+struct GsGuard {
+    swapped: bool,
+}
+
+impl GsGuard {
+    fn enter(stack: &InterruptStackFrame) -> Self {
+        let swapped = from_user(stack);
+        if swapped {
+            unsafe { crate::arch::x86_64::usermode::swapgs() };
+        }
+        GsGuard { swapped }
+    }
+}
+
+impl Drop for GsGuard {
+    fn drop(&mut self) {
+        if self.swapped {
+            unsafe { crate::arch::x86_64::usermode::swapgs() };
+        }
+    }
+}
+
+/// Termine la tache utilisateur fautive et rend la main au shell.
+///
+/// Sans ce filet, la moindre erreur d'un programme (dereferencement nul,
+/// instruction illegale) ferait paniquer le noyau : le ring 3 n'aurait alors
+/// aucun interet.
+fn kill_faulting_task(reason: &str, stack: &InterruptStackFrame) -> ! {
+    let cr2 = x86_64::registers::control::Cr2::read().as_u64();
+    crate::println!(
+        "{} dans le programme utilisateur (rip={:#x}) : processus termine",
+        reason,
+        stack.instruction_pointer.as_u64()
+    );
+    serial_println!(
+        "[cpu] {} en ring 3 : rip={:#x} rsp={:#x} cr2={:#x} flags={:#x}",
+        reason,
+        stack.instruction_pointer.as_u64(),
+        stack.stack_pointer.as_u64(),
+        cr2,
+        stack.cpu_flags
+    );
+    crate::kernel::task::exit_group(139)
+}
+
 extern "x86-interrupt" fn general_protection_handler(stack: InterruptStackFrame, code: u64) {
+    let _gs = GsGuard::enter(&stack);
+    if from_user(&stack) && crate::kernel::task::in_user_task() {
+        kill_faulting_task("faute de protection generale", &stack);
+    }
     serial_println!("[cpu] general protection fault, code {}", code);
     panic!("EXCEPTION: general protection fault (code {})\n{:#?}", code, stack);
 }
 
+extern "x86-interrupt" fn invalid_opcode_handler(stack: InterruptStackFrame) {
+    let _gs = GsGuard::enter(&stack);
+    if from_user(&stack) && crate::kernel::task::in_user_task() {
+        kill_faulting_task("instruction illegale", &stack);
+    }
+    panic!("EXCEPTION: instruction illegale\n{:#?}", stack);
+}
+
+extern "x86-interrupt" fn divide_error_handler(stack: InterruptStackFrame) {
+    let _gs = GsGuard::enter(&stack);
+    if from_user(&stack) && crate::kernel::task::in_user_task() {
+        kill_faulting_task("division par zero", &stack);
+    }
+    panic!("EXCEPTION: division par zero\n{:#?}", stack);
+}
+
+extern "x86-interrupt" fn stack_segment_handler(stack: InterruptStackFrame, code: u64) {
+    let _gs = GsGuard::enter(&stack);
+    if from_user(&stack) && crate::kernel::task::in_user_task() {
+        kill_faulting_task("faute de pile", &stack);
+    }
+    panic!("EXCEPTION: faute de segment de pile (code {})\n{:#?}", code, stack);
+}
+
 extern "x86-interrupt" fn page_fault_handler(stack: InterruptStackFrame, code: PageFaultErrorCode) {
+    let _gs = GsGuard::enter(&stack);
     let addr = x86_64::registers::control::Cr2::read();
+    if from_user(&stack) && crate::kernel::task::in_user_task() {
+        crate::println!("faute de page utilisateur @ {:#x} ({:?})", addr.as_u64(), code);
+        kill_faulting_task("faute de page", &stack);
+    }
     serial_println!("[cpu] page fault @ {:?} code {:?}", addr, code);
     panic!("EXCEPTION: page fault @ {:?}\ncode: {:?}\n{:#?}", addr, code, stack);
 }
 
 // --- IRQ materielles --------------------------------------------------------
 
-extern "x86-interrupt" fn timer_interrupt_handler(_stack: InterruptStackFrame) {
+extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
+    let _gs = GsGuard::enter(&stack);
     timer::tick();
     notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
+
+    // Preemption : uniquement si le timer a interrompu du code ring 3. Le noyau
+    // n'est pas reentrant (verrous de l'allocateur et des pilotes) ; une tache
+    // utilisateur, elle, ne detient aucun verrou noyau.
+    if from_user(&stack) && crate::kernel::task::in_user_task() {
+        crate::kernel::task::preempt_from_irq();
+    }
 }
 
-extern "x86-interrupt" fn keyboard_interrupt_handler(_stack: InterruptStackFrame) {
+extern "x86-interrupt" fn keyboard_interrupt_handler(stack: InterruptStackFrame) {
+    let _gs = GsGuard::enter(&stack);
     let scancode = unsafe { ports::inb(0x60) };
     keyboard::push_scancode(scancode);
     notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
 }
 
-extern "x86-interrupt" fn mouse_interrupt_handler(_stack: InterruptStackFrame) {
+extern "x86-interrupt" fn mouse_interrupt_handler(stack: InterruptStackFrame) {
+    let _gs = GsGuard::enter(&stack);
     let byte = unsafe { ports::inb(0x60) };
     mouse::handle_byte(byte);
     notify_end_of_interrupt(InterruptIndex::Mouse.as_u8());

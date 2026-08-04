@@ -62,6 +62,9 @@ fn rgb(index: u8) -> u32 {
 static mut BACK: Option<Vec<u32>> = None;
 static mut LFB: *mut u32 = core::ptr::null_mut();
 static mut HD_ACTIVE: bool = false;
+/// Adresse *physique* du framebuffer lineaire, memorisee pour pouvoir le
+/// remapper dans un espace d'adressage utilisateur (`mmap` de `/dev/fb0`).
+static mut LFB_PHYS: u64 = 0;
 
 // --- Interface DISPI (Bochs VBE Extensions / BGA) ---------------------------
 
@@ -123,7 +126,32 @@ fn locate_lfb() -> Option<*mut u32> {
     // BAR memoire : on masque les 4 bits de poids faible (drapeaux).
     let phys = (bar0 & 0xFFFF_FFF0) as u64;
     if phys == 0 { return None; }
+    unsafe { LFB_PHYS = phys; }
     Some(memory::phys_to_virt(phys) as *mut u32)
+}
+
+/// Adresse physique du framebuffer lineaire, si la carte a ete localisee.
+///
+/// Utilisee par `/dev/fb0` : `mmap` mappe ces pages telles quelles dans
+/// l'espace utilisateur, ce qui evite toute copie entre un serveur graphique
+/// en ring 3 et l'ecran.
+pub fn lfb_phys() -> Option<u64> {
+    let phys = unsafe { LFB_PHYS };
+    if phys == 0 {
+        // Le mode HD n'a pas encore ete active : on interroge le PCI.
+        let dev = pci::find_display()?;
+        let bar0 = pci::bar(&dev, 0);
+        let phys = (bar0 & 0xFFFF_FFF0) as u64;
+        if phys == 0 { return None; }
+        unsafe { LFB_PHYS = phys; }
+        return Some(phys);
+    }
+    Some(phys)
+}
+
+/// Resolution courante du framebuffer (largeur, hauteur) en pixels.
+pub fn resolution() -> (usize, usize) {
+    (WIDTH, HEIGHT)
 }
 
 // --- Entree / sortie du mode graphique --------------------------------------

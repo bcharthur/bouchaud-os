@@ -320,9 +320,40 @@ scripts .bsh, et un mini-navigateur texte HTTP une fois le reseau e1000 pret.
 - [ ] Block device (virtio-blk)
 - [ ] BFS (Bouchaud File System) persistant : mount, df, sync, mkfs.bfs
 
+## Mode utilisateur (ring 3) et ABI Linux
+
+Objectif : executer des binaires Linux x86-64 non modifies, jusqu'a une pile
+graphique complete (navigateur webview / Python / Qt). Detail et chaine de
+construction cote utilisateur : `tools/userland/README.md`.
+
+- [x] **Memoire virtuelle** : allocateur de frames physiques + une PML4 par
+      processus, creneau utilisateur dedie de 512 Gio (`src/kernel/vmm.rs`)
+- [x] **Ring 3** : GDT complete (segments ring 0/3), TSS avec RSP0 par tache,
+      `syscall`/`sysretq` via STAR/LSTAR/FMASK, `iretq`, base FS pour le TLS,
+      SSE actif (`src/arch/x86_64/{gdt,usermode}.rs`)
+- [x] **Chargeur ELF64** : `PT_LOAD` avec droits reels, `.bss`, `PT_TLS`,
+      `PT_INTERP`, vecteur auxiliaire complet (`src/kernel/elf.rs`)
+- [x] **Appels systeme POSIX** : ~75 appels aux numeros et structures Linux
+      (`src/kernel/abi/`)
+- [x] **Processus et threads** : `clone(CLONE_THREAD)`, futex, piles noyau par
+      tache, preemption sur IRQ0 depuis le ring 3 (`src/kernel/task.rs`)
+- [x] **libc musl statique** : valide avec un binaire `musl-gcc -static-pie`
+      non modifie (printf, malloc, stdio, pthread, TLS)
+- [x] **Editeur de liens dynamique** : `ld-musl-x86_64.so.1` charge par le
+      noyau et resolvant les relocations en ring 3
+- [x] **Runtime C++** : STL, exceptions (deroulement), `std::thread`,
+      destructeurs — valide avec libstdc++ statique
+- [x] **Serveur graphique** : `/dev/fb0` mmapable sur la VRAM, ioctls fbdev
+      (`FBIOGET_*SCREENINFO`), `/dev/input/event*` au format evdev
+- [ ] `fork` (copie paresseuse de l'espace d'adressage) et `execve`
+- [ ] Signaux reels : livraison a un gestionnaire ring 3, `rt_sigreturn`
+- [ ] Sockets POSIX relies a la pile TCP/IP existante (`src/net/`)
+- [ ] Cache de pages partage pour `mmap` de fichier
+
+Commandes associees : `exec`, `elfinfo`, `usermode`, `tasks`, `vmstat`,
+`syscalls`, `strace`.
+
 ## Au-dela
-- [ ] Processus et ordonnanceur
-- [ ] Syscalls + split user/kernel
 - [ ] Permissions completes, audit log
 - [ ] Signature du noyau, secure boot
-- [ ] Interface graphique
+- [ ] Multi-CPU (APIC, SMP)

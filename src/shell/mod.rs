@@ -96,6 +96,7 @@ pub const COMMANDS: &[&str] = &[
     "git", "rustc", "cargo", "rust-selftest",
     "python", "python3", "pip", "pip3", "python-selftest",
     "pybrowser",
+    "exec", "elfinfo", "usermode", "tasks", "vmstat", "strace",
 ];
 
 /// Operateur reliant un segment de commande au precedent.
@@ -537,7 +538,7 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
             0
         }
         "free" => { crate::kernel::memory::print_info(); 0 }
-        "syscalls" => { crate::kernel::syscall::print_table(); 0 }
+        "syscalls" => { crate::kernel::abi::print_table(); 0 }
         "apps" => { crate::app::launcher::list(); 0 }
         "launch" => { if argc >= 2 { crate::app::launcher::launch(argv[1]); } else { println!("usage: launch <app>"); } 0 }
         "breakpoint" => { c::breakpoint(); 0 }
@@ -620,6 +621,14 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         // Navigateur Web simpliste en Python : test d'integration des
         // couches (Python -> WASI -> RAMFS -> TCP/TLS -> console).
         "pybrowser" => c::pybrowser_cmd(argc, &argv, *cwd),
+
+        // Mode utilisateur : execution de binaires Linux natifs en ring 3.
+        "exec" => c::exec_cmd(argc, &argv, *cwd),
+        "elfinfo" => c::elfinfo(argc, &argv, *cwd),
+        "usermode" => { crate::kernel::exec::selftest(*cwd); 0 }
+        "tasks" => { crate::kernel::task::print_table(); 0 }
+        "vmstat" => { crate::kernel::vmm::print_info(); 0 }
+        "strace" => { c::strace(argc, &argv); 0 }
 
         _ => {
             vga::set_color(COLOR_RED);

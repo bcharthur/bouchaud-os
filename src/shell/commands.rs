@@ -25,6 +25,8 @@ pub fn help() {
     println!("            dmesg, history, uptime, ticks, interrupts, breakpoint, serial-test");
     println!("            panic-test, roadmap");
     println!("  noyau   : ps, kill <pid>, free, syscalls, apps, launch <app>, df");
+    println!("  ring 3  : exec <elf64> [args], elfinfo <f>, usermode (autotest), tasks");
+    println!("            vmstat (memoire virtuelle), strace on|off");
     println!("  session : whoami, id, users, su [user], logout/exit");
     println!("  comptes : useradd <nom>, userdel <nom>, passwd [user]   (root pour add/del)");
     println!("  fichiers: pwd, ls [-l] [path], tree [path], cd <path>, mkdir <path>");
@@ -87,6 +89,8 @@ pub fn sysinfo() {
     println!("gdt: {}", gdt::state());
     println!("idt: {}", idt::state());
     println!("interrupts: {}", interrupts::state());
+    println!("user-mode: {}", crate::arch::x86_64::usermode::state());
+    println!("abi: Linux x86-64 (exec <elf64>, voir syscalls)");
     println!("security: sessions + mot de passe + permissions Unix (rwx, uid/gid)");
     println!("pci: {} peripheriques (lspci)", crate::arch::x86_64::pci::count());
     println!("network: loopback lo actif (ping 127.0.0.1); eth0 en attente du driver NIC");
@@ -101,11 +105,14 @@ pub fn cpuinfo() {
 pub fn meminfo() {
     let fs = ramfs::fs();
     let (used, free, total) = crate::kernel::heap::stats();
-    println!("memory model: static kernel memory + heap (alloc) + RAMFS");
+    let (fu, ff, ft) = crate::kernel::vmm::frame_stats();
+    println!("memory model: tas noyau + frames physiques 4 KiB + RAMFS");
     println!("heap: used={} o, free={} o, total={} o", used, free, total);
+    println!("frames user: used={} free={} total={} ({} MiB)", fu, ff, ft, ft * 4096 / (1024 * 1024));
     println!("ramfs inodes: used={} free={} total={}", fs.used_nodes(), fs.free_nodes(), MAX_NODES);
     println!("ramfs max file size: {} bytes", MAX_FILE_SIZE);
-    println!("paging/user isolation: roadmap (tas statique pour l'instant)");
+    println!("pagination: une PML4 par processus, creneau user {:#x} (voir vmstat)",
+             crate::kernel::vmm::user_slot_base());
 }
 
 pub fn alloctest() {
@@ -1143,4 +1150,79 @@ pub fn disk_placeholder(cmd: &str) {
     vga::set_color(COLOR_DEFAULT);
     println!("  actuel: RAMFS volatil monte sur /");
     println!("  roadmap: block device -> virtio-blk -> BFS (Bouchaud File System) persistant");
+}
+
+// ---------------------------------------------------------------------------
+// Mode utilisateur : binaires Linux natifs en ring 3
+// ---------------------------------------------------------------------------
+
+/// `exec <binaire> [args...]` : charge un ELF64 et l'execute en ring 3.
+pub fn exec_cmd(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
+    if argc < 2 {
+        println!("usage: exec <binaire-elf64> [arguments...]");
+        println!("  le binaire doit etre statique-PIE, ou lie a {:#x}", crate::kernel::vmm::user_load_base());
+        println!("  voir tools/userland/README.md pour la chaine musl");
+        return 1;
+    }
+    let mut args = alloc::vec::Vec::new();
+    for i in 1..argc {
+        if !argv[i].is_empty() {
+            args.push(String::from(argv[i]));
+        }
+    }
+    let env = crate::kernel::exec::default_environment();
+    match crate::kernel::exec::exec(argv[1], &args, &env, cwd) {
+        Ok(code) => {
+            if code != 0 {
+                println!("exec: {} termine avec le code {}", argv[1], code);
+            }
+            code
+        }
+        Err(message) => {
+            vga::set_color(vga::COLOR_RED);
+            println!("exec: {}", message);
+            vga::set_color(COLOR_DEFAULT);
+            1
+        }
+    }
+}
+
+/// `elfinfo <fichier>` : analyse un binaire sans l'executer.
+pub fn elfinfo(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
+    if argc < 2 {
+        println!("usage: elfinfo <fichier>");
+        return 1;
+    }
+    let fs = ramfs::fs();
+    let idx = match fs.resolve_checked(argv[1], cwd) {
+        Ok(i) => i,
+        Err(e) => { println!("elfinfo: {}", e); return 1; }
+    };
+    if fs.nodes[idx].kind != NodeKind::File {
+        println!("elfinfo: {} n'est pas un fichier", argv[1]);
+        return 1;
+    }
+    let data = fs.nodes[idx].content.clone();
+    crate::kernel::elf::describe(&data);
+    0
+}
+
+/// `strace on|off` : trace les appels systeme sur la sortie serie.
+pub fn strace(argc: usize, argv: &[&str; 12]) {
+    if argc < 2 {
+        println!("usage: strace on|off");
+        println!("etat actuel : {}", if crate::kernel::abi::trace_enabled() { "actif" } else { "inactif" });
+        return;
+    }
+    match argv[1] {
+        "on" => {
+            crate::kernel::abi::set_trace(true);
+            println!("strace: trace des appels systeme activee (sortie serie COM1)");
+        }
+        "off" => {
+            crate::kernel::abi::set_trace(false);
+            println!("strace: trace desactivee");
+        }
+        _ => println!("usage: strace on|off"),
+    }
 }

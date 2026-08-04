@@ -11,14 +11,16 @@ pub mod idt;
 pub mod interrupts;
 pub mod pci;
 pub mod rtc;
+pub mod usermode;
 
 /// Initialise les briques bas niveau de l'architecture au boot.
 ///
-/// Pour l'instant ces appels ne font que journaliser leur etat : aucune table
-/// n'est encore reellement chargee, mais le point d'entree est en place.
+/// L'ordre compte : la GDT doit etre chargee avant que `usermode` ne programme
+/// les MSR de `syscall`, qui referencent ses selecteurs.
 pub fn init() {
     gdt::init();
     idt::init();
     interrupts::init();
+    usermode::init();
     pci::init();
 }
