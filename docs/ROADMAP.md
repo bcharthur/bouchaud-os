@@ -422,8 +422,9 @@ construction cote utilisateur : `tools/userland/README.md`.
 - [ ] **`load_url` depuis le fil de `webview.start()`** (defaut ouvert). Le
       travail est bien mis en file pour le fil principal — Qt n'acceptant d'etre
       touche que depuis lui — mais le chargement n'aboutit pas : l'emulateur
-      reste a ~56 % de CPU sans que la page change, donc quelque chose tourne en
-      rond plutot que d'attendre. Appele depuis le fil principal (chargement
+      reste a ~56 % de CPU sans que la page change, et ce **pendant vingt-cinq
+      minutes** : ce n'est donc pas de la lenteur sous emulation, c'est une
+      boucle. Appele depuis le fil principal (chargement
       initial, clic sur un lien), le meme chemin fonctionne. Piste : la boucle
       d'attente de `sys_poll` face a une prise UDP passee en non bloquant par le
       resolveur DNS.

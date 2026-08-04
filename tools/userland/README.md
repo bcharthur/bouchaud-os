@@ -526,7 +526,8 @@ bien dans son propre fil et peut lire l'état de la fenêtre.
   combler pour cette pile.
 - **`load_url` appelé depuis le fil de `webview.start()`** — défaut ouvert. Le
   travail est bien mis en file pour le fil principal, mais le chargement
-  n'aboutit pas : l'émulateur reste à ~56 % de CPU sans que la page change.
+  n'aboutit pas : l'émulateur reste à ~56 % de CPU sans que la page change, et
+  ce pendant vingt-cinq minutes — ce n'est pas de la lenteur, c'est une boucle.
   Appelé depuis le fil principal — c'est-à-dire au chargement initial et sur un
   clic de lien — `load_url` fonctionne. Voir la feuille de route.
 - **Plusieurs fenêtres à l'écran en même temps** — le framebuffer n'a pas de
