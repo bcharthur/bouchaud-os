@@ -389,6 +389,20 @@ construction cote utilisateur : `tools/userland/README.md`.
       entrees evdev, lie en dur dans le binaire
       (`tools/userland/build-qt.sh`, `tools/userland/qt-demo.cpp`). QPainter,
       anticrenelage, degrades et melange alpha, en ring 3.
+- [ ] **Blocage intermittent apres `clone`** (defaut ouvert). Deux executions sur
+      une vingtaine se sont figees juste apres le `pthread_create` de
+      `qpa-probe`, sans aucune sortie ensuite et sans que le filet
+      anti-interblocage de 30 s se declenche — donc dans une tache vivante, pas
+      dans `exit_current`. Un blocage de `sys_poll` supposerait que
+      `timer::ticks()` cesse d'avancer, ce qui pointe vers les interruptions ou
+      le PIC.
+      Ce qui est etabli : joue seul, le scenario passe 8 fois sur 8 avec le
+      noyau actuel **et** 8 fois sur 8 avec celui d'avant les corrections d'ABI
+      — les deux se comportent donc identiquement, et rien n'impute le defaut a
+      ces corrections. Les deux blocages observes l'ont ete alors que plusieurs
+      emulateurs tournaient de front sur la machine hote. Non reproduit sous
+      moniteur QEMU (0 sur 24), ce qui empeche pour l'instant de relever l'etat
+      du processeur fige.
 - [ ] Ecriture persistante : BFS sur peripherique bloc
 
 Commandes associees : `exec`, `elfinfo`, `usermode`, `tasks`, `vmstat`,
