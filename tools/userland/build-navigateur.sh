@@ -76,9 +76,14 @@ rm -rf "$OUT"
 mkdir -p "$OUT/usr/lib" "$OUT/usr/share/bo-navigateur"
 strip -s "$WORK/bo-navigateur" -o "$OUT/bo-navigateur"
 cp "$PY/usr/lib/python312.zip" "$OUT/usr/lib/"
-cp navigateur/navigateur.py "$OUT/usr/share/bo-navigateur/"
+cp navigateur/navigateur.py navigateur/exemple-webview.py "$OUT/usr/share/bo-navigateur/"
 cp -r navigateur/moteur "$OUT/usr/share/bo-navigateur/"
-find "$OUT/usr/share/bo-navigateur" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+
+# pywebview et son moteur Bouchaud OS : c'est ce qui permet de faire tourner du
+# code pywebview sans le modifier.
+CHANTIER="$WORK/pywebview" navigateur/greffe-pywebview.sh "$OUT/usr/lib/python3/site-packages"
+
+find "$OUT/usr" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 
 # Racines de certification, si la machine de construction en a : sans elles, le
 # navigateur accepte les certificats HTTPS sans les verifier et le dit dans sa

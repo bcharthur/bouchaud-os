@@ -1,9 +1,12 @@
 """Navigateur de Bouchaud OS : interface, navigation, evenements.
 
-Ce module est celui que l'hote Qt appelle. Il ne connait de Qt que le module
-`bo` : mesurer du texte, rendre une liste d'affichage, recevoir des touches et
-des clics. Tout le reste — chrome, historique, mise en page — est ici ou dans
-`moteur/`.
+Programme autonome, lance par l'hote (`hote.cpp`). Il ne connait de Qt que le
+module `bo` : mesurer du texte, rendre une liste d'affichage, recevoir des
+touches et des clics. Tout le reste — chrome, historique, mise en page — est ici
+ou dans `moteur/`.
+
+    exec /bo-navigateur                    page d'accueil
+    exec /bo-navigateur https://…          une adresse
 """
 
 import sys
@@ -241,8 +244,10 @@ class Navigateur:
 
     # --- Evenements ---------------------------------------------------------
 
-    def touche(self, code, texte):
-        ctrl_l = code == K_L and not texte  # Ctrl-L arrive sans caractere
+    def touche(self, code, texte, modificateurs=0):
+        CTRL = 0x04000000
+        ctrl = bool(modificateurs & CTRL)
+        ctrl_l = ctrl and code == K_L
         if self.champ_actif:
             if code in (K_RETOUR, K_ENTREE):
                 self.champ_actif = False
@@ -281,8 +286,6 @@ class Navigateur:
                 return
             return
 
-        if ctrl_l or code == K_F5 and texte == "":
-            pass
         if ctrl_l:
             self.champ_actif = True
             self.curseur_saisie = len(self.saisie)
@@ -291,7 +294,7 @@ class Navigateur:
             if self.onglet.url:
                 self.ouvre(self.onglet.url, empiler=False)
             return
-        if code == K_Q and not texte:
+        if ctrl and code == K_Q:
             bo.quitter()
             return
         if code == K_BAS:
@@ -368,14 +371,6 @@ _navigateur = Navigateur()
 
 # --- Points d'entree appeles par l'hote --------------------------------------
 
-def _demarrer(url):
-    try:
-        _navigateur.ouvre(url or "bo:accueil")
-    except Exception:
-        traceback.print_exc(file=sys.stdout)
-    return True
-
-
 def _peindre(largeur, hauteur):
     try:
         return _navigateur.peint(largeur, hauteur)
@@ -386,9 +381,9 @@ def _peindre(largeur, hauteur):
                  0xFFB3261E, 16, True, False, False, False)]
 
 
-def _touche(code, texte):
+def _touche(code, texte, modificateurs=0):
     try:
-        _navigateur.touche(code, texte)
+        _navigateur.touche(code, texte, modificateurs)
     except Exception:
         traceback.print_exc(file=sys.stdout)
     return True
@@ -418,5 +413,27 @@ def _molette(cran):
     return True
 
 
-def _tic():
+def _fermeture():
     return True
+
+
+def main():
+    bo.enregistrer({
+        "peindre": _peindre,
+        "touche": _touche,
+        "clic": _clic,
+        "survol": _survol,
+        "molette": _molette,
+        "fermeture": _fermeture,
+    })
+    bo.ouvrir("Navigateur — Bouchaud OS")
+    depart = sys.argv[1] if len(sys.argv) > 1 else "bo:accueil"
+    try:
+        _navigateur.ouvre(depart or "bo:accueil")
+    except Exception:
+        traceback.print_exc(file=sys.stdout)
+    return bo.boucle()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

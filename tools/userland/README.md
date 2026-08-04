@@ -471,3 +471,59 @@ La requête part **avant** que le délai d'attente soit posé sur la prise : une
 prise déjà passée en non bloquant fait échouer la première émission vers un hôte
 dont l'adresse matérielle n'est pas encore connue, et le noyau rend alors
 `ENETUNREACH`. C'est un défaut côté noyau, noté dans la feuille de route.
+
+## 13. pywebview — le tuto, tel quel
+
+```sh
+./build-navigateur.sh            # embarque pywebview et son moteur Bouchaud OS
+./mkdisk.sh out-navigateur
+# puis, sous l'OS :
+exec /bo-navigateur /usr/share/bo-navigateur/exemple-webview.py
+```
+
+Le code du tutoriel n'est pas adapté : c'est l'API publique de pywebview,
+inchangée.
+
+```python
+import webview
+
+webview.create_window('Bonjour', html='<h1>…</h1>')
+webview.start()
+```
+
+### Comment ça marche
+
+pywebview est une bibliothèque **à moteurs enfichables** : `webview/platforms/`
+contient un module par système d'affichage (Qt/QtWebEngine, GTK/WebKit, Cocoa,
+EdgeChromium…) et `guilib.initialize()` retient celui qui se charge. Bouchaud OS
+en est un de plus — `webview/platforms/bouchaud.py`, qui rend les pages avec le
+moteur natif (§12) sur la toile Qt de l'hôte.
+
+`greffe-pywebview.sh` télécharge pywebview et ses trois dépendances Python pures
+(`bottle`, `proxy_tools`, `typing_extensions`), y installe le moteur, et applique
+**deux modifications**, les seules :
+
+| Fichier | Modification | Pourquoi |
+|---|---|---|
+| `webview/guilib.py` | ajoute `bouchaud` aux moteurs connus, essayé en premier sous Linux | la liste des moteurs est fermée dans la bibliothèque |
+| `webview/util.py` | `bo:` est classé comme distant | sinon pywebview démarre son serveur HTTP interne pour servir la page, ce qui demande `listen`/`accept` |
+
+### Ce qui marche
+
+Création de fenêtre, `load_url`, `load_html`, titre, taille, écrans,
+événements de cycle de vie (`shown`, `loaded`, `closed`), navigation par liens,
+défilement, et la fonction passée à `webview.start()` — qui tourne bien dans son
+propre fil.
+
+### Ce qui ne marche pas
+
+- **`evaluate_js` et `window.pywebview.api`** — les deux reposent sur
+  l'exécution de JavaScript dans la page, que le moteur natif ne fait pas. Le
+  moteur lève une exception explicite plutôt que de rendre `None` en silence.
+- **Les applications servant des fichiers locaux** (`create_window(url='index.html')`)
+  — pywebview les sert par un serveur HTTP interne, qui a besoin de `listen` et
+  `accept`. Le noyau ne les implémente pas encore ; c'est le prochain manque à
+  combler pour cette pile.
+- **Plusieurs fenêtres à l'écran en même temps** — le framebuffer n'a pas de
+  gestionnaire de fenêtres. Les fenêtres suivantes sont créées et pilotables,
+  mais s'affichent l'une après l'autre dans la même surface.

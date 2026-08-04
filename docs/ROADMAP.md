@@ -413,6 +413,17 @@ construction cote utilisateur : `tools/userland/README.md`.
       moteur) qui analyse HTML et CSS, met en page, et peint par QPainter sur
       `/dev/fb0`. Reseau HTTP/HTTPS avec resolveur DNS ecrit pour l'occasion.
       Pas de JavaScript, pas d'images.
+- [x] **pywebview tourne sur la machine** : la bibliotheque est embarquee telle
+      quelle avec un moteur d'affichage ecrit pour l'OS
+      (`tools/userland/navigateur/webview_bouchaud.py`, greffe par
+      `greffe-pywebview.sh`). Le code d'un tutoriel pywebview s'execute sans
+      modification. Sans JavaScript (`evaluate_js` leve), et sans les
+      applications a fichiers locaux, qui passent par le serveur HTTP interne.
+- [ ] **Sockets serveur : `listen` / `accept`**. C'est ce qui manque au serveur
+      HTTP interne de pywebview, donc a toute application webview servant des
+      fichiers locaux. Une mise en œuvre limitee au bouclage suffirait : le
+      serveur ecoute sur 127.0.0.1 et le moteur s'y connecte, tout reste dans le
+      noyau sans passer par la carte reseau.
 - [ ] Ecriture persistante : BFS sur peripherique bloc
 
 Commandes associees : `exec`, `elfinfo`, `usermode`, `tasks`, `vmstat`,
