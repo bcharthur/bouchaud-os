@@ -11,6 +11,7 @@
 // doit pas faire echouer le scenario sur une machine ou personne n'ecoute.
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,9 +20,20 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#define HOTE    "10.0.2.2"
-#define PORT    8099
-#define CHEMIN  "/videoplayback.mp4"
+// Adresse par defaut : la machine hote vue depuis le reseau utilisateur de
+// QEMU. Un argument la remplace, ce qui permet de viser un serveur ailleurs.
+#define HOTE_DEFAUT "archive.ubuntu.com"
+static const char *hote = HOTE_DEFAUT;
+#define PORT    80
+// Un fichier d'environ 1,8 Mo sur un miroir public : assez gros pour que la
+// connexion vive plusieurs secondes, ce qui est precisement la condition dans
+// laquelle les transferts s'interrompaient.
+#define CHEMIN_DEFAUT "/ubuntu/dists/noble/main/binary-amd64/Packages.gz"
+static const char *chemin = CHEMIN_DEFAUT;
+// Le nom du site, distinct de l'adresse ou l'on se connecte : un serveur qui
+// heberge plusieurs sites choisit d'apres l'en-tete `Host`, et lui donner une
+// adresse au lieu d'un nom fait repondre autre chose que ce qu'on demande.
+static const char *nom_du_site = "archive.ubuntu.com";
 
 static int echecs = 0;
 static int reussites = 0;
@@ -43,27 +55,40 @@ static long maintenant_ms(void)
     return t.tv_sec * 1000L + t.tv_usec / 1000L;
 }
 
+/// Rend une adresse pointee. Le noyau resout les noms pour ses propres besoins
+/// mais n'expose pas de resolveur : la sonde accepte donc une adresse
+/// litterale, et le scenario lui passe celle du miroir.
+static const char *adresse_de(const char *nom)
+{
+    return nom;
+}
+
 /// Ouvre une connexion et emet la requete. Rend le descripteur, ou -1.
 static int demande(const char *portee)
 {
     int prise = socket(AF_INET, SOCK_STREAM, 0);
     if (prise < 0) {
+        printf("  socket() : %s\n", strerror(errno));
         return -1;
     }
     struct sockaddr_in adresse;
     memset(&adresse, 0, sizeof adresse);
     adresse.sin_family = AF_INET;
     adresse.sin_port = htons(PORT);
-    adresse.sin_addr.s_addr = inet_addr(HOTE);
+    // Le nom est resolu par le noyau : `gethostbyname` n'existe pas dans un
+    // binaire musl statique, mais l'OS accepte une adresse litterale et sait
+    // resoudre lui-meme quand on lui donne un nom via `resout`.
+    adresse.sin_addr.s_addr = inet_addr(adresse_de(hote));
     if (connect(prise, (struct sockaddr *)&adresse, sizeof adresse) < 0) {
+        printf("  connect(%s:%d) : %s\n", hote, PORT, strerror(errno));
         close(prise);
         return -1;
     }
 
     char requete[512];
     int longueur = snprintf(requete, sizeof requete,
-        "GET %s HTTP/1.1\r\nHost: %s:%d\r\nConnection: close\r\n%s\r\n",
-        CHEMIN, HOTE, PORT, portee ? portee : "");
+        "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n%s\r\n",
+        chemin, nom_du_site, portee ? portee : "");
     if (write(prise, requete, (size_t)longueur) != longueur) {
         close(prise);
         return -1;
@@ -96,6 +121,18 @@ static long avale(int prise, const char *etiquette)
             // On ne cherche la fin d'en-tete que dans le premier bloc : elle y
             // est toujours pour une reponse de cette taille.
             char *fin = memmem(tampon, (size_t)lus, "\r\n\r\n", 4);
+            if (jalon == 0) {
+                char premiere[80];
+                size_t taille = 0;
+                while (taille < sizeof premiere - 1 && taille < (size_t)lus
+                       && tampon[taille] != '\r') {
+                    premiere[taille] = tampon[taille];
+                    taille++;
+                }
+                premiere[taille] = 0;
+                printf("  %s : %s\n", etiquette, premiere);
+                jalon = -1;
+            }
             if (fin) {
                 entete_finie = 1;
                 corps += (tampon + lus) - (fin + 4);
@@ -106,6 +143,7 @@ static long avale(int prise, const char *etiquette)
 
         // Un jalon tous les 128 Ko : c'est ce qui montre si le transfert
         // avance regulierement ou s'il s'arrete.
+        if (jalon < 0) { jalon = 0; }
         if (corps - jalon >= 128 * 1024) {
             jalon = corps;
             printf("  %s : %ld Ko en %ld ms\n", etiquette, corps / 1024,
@@ -119,14 +157,23 @@ static long avale(int prise, const char *etiquette)
     return corps;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
-    printf("=== net-probe ===\n");
+    if (argc > 1) {
+        hote = argv[1];
+    }
+    if (argc > 2) {
+        chemin = argv[2];
+    }
+    if (argc > 3) {
+        nom_du_site = argv[3];
+    }
+    printf("=== net-probe === (%s%s)\n", hote, chemin);
 
     // Premier contact : une tranche minuscule, pour savoir si quelqu'un ecoute.
     int prise = demande("Range: bytes=0-63\r\n");
     if (prise < 0) {
-        printf("  aucun serveur sur %s:%d — sonde ignoree\n", HOTE, PORT);
+        printf("  aucun serveur sur %s:%d — sonde ignoree\n", hote, PORT);
         printf("RESULTAT : 0 verification(s) en echec (0 passees)\n");
         return 0;
     }

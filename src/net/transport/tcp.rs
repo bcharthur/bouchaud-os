@@ -317,24 +317,40 @@ impl TcpConn {
         let mut seg = [0u8; 64];
         let mut rb = [0u8; 2048];
 
-        let l = build(&mut seg, &dst, sport, port, isn, 0, SYN, WINDOW, &[]);
-        net::send_ip(dst, 6, &seg[..l]);
-
         let mut their_seq = 0u32;
         let mut ok = false;
-        for _ in 0..8_000_000u32 {
-            if let Some((_, n)) = net::poll_ip(6, Some(dst), &mut rb) {
-                if let Some(h) = parse(&rb[..n]) {
-                    if h.dport == sport {
-                        if h.flags & RST != 0 { return None; }
-                        if h.flags & SYN != 0 && h.flags & ACK != 0 {
-                            their_seq = h.seq;
-                            ok = true;
-                            break;
+        let mut refuse = false;
+
+        // Le SYN est retransmis, comme dans tout TCP. Le premier paquet vers un
+        // hote encore inconnu part souvent alors que son adresse materielle
+        // n'est pas resolue : il se perd, et n'envoyer qu'un seul SYN faisait
+        // echouer toute premiere connexion. Le navigateur y echappait sans le
+        // savoir, parce qu'il commencait toujours par une requete DNS — laquelle
+        // resolvait l'ARP au passage.
+        for tentative in 0..5u32 {
+            let l = build(&mut seg, &dst, sport, port, isn, 0, SYN, WINDOW, &[]);
+            net::send_ip(dst, 6, &seg[..l]);
+
+            // Attente croissante d'une tentative a l'autre, comme le veut la
+            // retransmission exponentielle.
+            let patience = 1_500_000u32.saturating_mul(tentative + 1);
+            for _ in 0..patience {
+                if let Some((_, n)) = net::poll_ip(6, Some(dst), &mut rb) {
+                    if let Some(h) = parse(&rb[..n]) {
+                        if h.dport == sport {
+                            // Un RST est une vraie fin de non-recevoir : inutile
+                            // d'insister, personne n'ecoute sur ce port.
+                            if h.flags & RST != 0 { refuse = true; break; }
+                            if h.flags & SYN != 0 && h.flags & ACK != 0 {
+                                their_seq = h.seq;
+                                ok = true;
+                                break;
+                            }
                         }
                     }
                 }
             }
+            if ok || refuse { break; }
         }
         if !ok { return None; }
 

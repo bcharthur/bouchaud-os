@@ -87,6 +87,7 @@ ls /
 exec /ring3-selftest
 exec /posix-probe
 exec /audio-probe
+exec /net-probe 91.189.91.83
 exec /qpa-probe
 SCENARIO
 
