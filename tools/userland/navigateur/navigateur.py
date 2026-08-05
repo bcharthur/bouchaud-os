@@ -14,7 +14,7 @@ import traceback
 
 import bo
 
-from moteur import Document, reseau
+from moteur import Document, lecteur_youtube, reseau
 
 # --- Constantes visuelles ----------------------------------------------------
 
@@ -474,7 +474,22 @@ def _tic():
         traceback.print_exc(file=sys.stdout)
 
 
+def _detour_youtube(url):
+    """Substitue une page de lecture aux adresses YouTube.
+
+    Branche sur la couche reseau plutot qu'appele depuis `ouvre` : ainsi un lien
+    YouTube clique dans une autre page, ou saisi dans la barre d'adresse, passe
+    par le meme chemin.
+    """
+    if not lecteur_youtube.est_pris_en_charge(url):
+        return None
+    return lecteur_youtube.page(
+        url, journal=lambda niveau, texte: print("[yt:%s] %s" % (niveau, texte),
+                                                 flush=True))
+
+
 def main():
+    reseau.installe_detour_youtube(_detour_youtube)
     bo.enregistrer({
         "peindre": _peindre,
         "touche": _touche,

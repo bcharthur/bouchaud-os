@@ -101,7 +101,7 @@ strip -s "$WORK/bo-navigateur" -o "$OUT/bo-navigateur"
 cp "$PY/usr/lib/python312.zip" "$OUT/usr/lib/"
 cp navigateur/navigateur.py navigateur/exemple-webview.py \
    navigateur/test_moteur.py navigateur/media-probe.py "$OUT/usr/share/bo-navigateur/"
-cp navigateur/demo-js.html navigateur/demo-media.html \
+cp navigateur/demo-js.html navigateur/demo-media.html navigateur/demo-h264.html \
    "$OUT/usr/share/bo-navigateur/"
 # La video et le son de la demonstration sont fabriques ici : les
 # telecharger ferait dependre la demo du reseau et de droits d'usage.

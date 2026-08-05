@@ -1,0 +1,45 @@
+<!doctype html>
+<html>
+  <head>
+    <title>H.264 sur HTTP reel</title>
+    <style>
+      body { font-family: sans-serif; margin: 0; background-color: #0f1115;
+             color: #e9edf5 }
+      .tete { padding: 16px 30px; background-color: #1a1f2b }
+      .tete h1 { margin: 0; font-size: 22px }
+      .tete p { margin: 5px 0 0; color: #9aa8bf; font-size: 14px }
+      .scene { padding: 16px 30px }
+      .info { color: #9aa8bf; font-size: 15px; margin: 12px 0 0 }
+      .info b { color: #ffd479 }
+    </style>
+  </head>
+  <body>
+    <div class="tete">
+      <h1>H.264 + AAC, telecharge par tranches</h1>
+      <p>Meme chemin de code qu'une adresse googlevideo.com : requetes Range,
+         decodage par libavcodec, son par le pilote AC'97.</p>
+    </div>
+    <div class="scene">
+      <video id="film" width="480" height="270">
+        <p>Le lecteur n'a pas pu ouvrir ce flux.</p>
+      </video>
+      <p class="info" id="etat">Ouverture…</p>
+    </div>
+    <script>
+      const film = document.getElementById('film');
+      const etat = document.getElementById('etat');
+      film.src = 'http://10.0.2.2:8099/videoplayback.mp4';
+      film.loop = true;
+      film.play();
+      function rafraichis() {
+        etat.innerHTML =
+          'Position <b>' + film.currentTime.toFixed(2) + ' s</b>'
+          + ' — image <b>' + film.videoWidth + '×' + film.videoHeight + '</b>'
+          + ' — H.264 : <b>' + (film.canPlayType('video/mp4; codecs="avc1.42E01E"') || 'non')
+          + '</b> — ' + (film.paused ? 'en pause' : 'en lecture');
+      }
+      setInterval(rafraichis, 200);
+      rafraichis();
+    </script>
+  </body>
+</html>

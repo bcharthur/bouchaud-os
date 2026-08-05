@@ -63,14 +63,70 @@ def charge(url, methode="GET", corps=None, entetes=None, brut=False):
         if url.startswith("bo:"):
             return Reponse(url, _page_interne(url), "text/html")
         if url.startswith("file://"):
-            return _charge_fichier(url)
+            return _charge_fichier(url, brut=brut)
+        # YouTube n'est pas servi tel quel : sa page de lecture est une
+        # application qu'on ne peut pas executer. On lui substitue une page qui
+        # lit le flux — voir `lecteur_youtube`. `brut` court-circuite ce
+        # detour : c'est le lecteur lui-meme qui redemande le media.
+        if not brut and _detour_youtube is not None:
+            substitut = _detour_youtube(url)
+            if substitut is not None:
+                return substitut
         return _charge_http(url, methode=methode, corps=corps,
                             entetes=entetes, brut=brut)
     except Exception as e:  # une page cassee ne doit pas tuer le navigateur
         return Reponse(url, _page_erreur(url, e), "text/html", 0, str(e))
 
 
-def _charge_fichier(url):
+def tranche(url, debut, longueur, entetes=None):
+    """Telecharge un morceau d'une ressource, par une requete `Range`.
+
+    C'est ce qui permet de lire une video sans la tenir entierement en memoire,
+    et de commencer avant la fin du telechargement. Un serveur qui ignore
+    `Range` rend tout le corps avec un code 200 : l'appelant doit donc regarder
+    le code, pas seulement la taille.
+    """
+    demandes = dict(entetes or {})
+    demandes["Range"] = "bytes=%d-%d" % (debut, debut + longueur - 1)
+    return charge(url, entetes=demandes, brut=True)
+
+
+def taille_distante(url, entetes=None):
+    """Taille totale d'une ressource, par une tranche d'un octet.
+
+    `HEAD` serait plus direct, mais beaucoup de serveurs de media le refusent ou
+    repondent sans `Content-Length` ; une tranche d'un octet donne un
+    `Content-Range` qui porte la taille exacte.
+    """
+    reponse = tranche(url, 0, 1, entetes)
+    portee = reponse.entetes.get("content-range", "")
+    if "/" in portee:
+        try:
+            return int(portee.rsplit("/", 1)[1])
+        except ValueError:
+            pass
+    longueur = reponse.entetes.get("content-length")
+    if longueur and reponse.code == 200:
+        try:
+            return int(longueur)
+        except ValueError:
+            pass
+    return 0
+
+
+# Rappel installe par le navigateur pour detourner les adresses YouTube. Il
+# reste `None` quand le moteur tourne sans lecteur — dans les verifications hors
+# ligne, par exemple.
+_detour_youtube = None
+
+
+def installe_detour_youtube(rappel):
+    """Branche (ou debranche, avec `None`) la substitution des pages YouTube."""
+    global _detour_youtube
+    _detour_youtube = rappel
+
+
+def _charge_fichier(url, brut=False):
     chemin = url[len("file://"):] or "/"
     if os.path.isdir(chemin):
         entrees = sorted(os.listdir(chemin))
@@ -83,11 +139,32 @@ def _charge_fichier(url):
         lignes.append("</ul>")
         return Reponse(url, "".join(lignes), "text/html")
     with open(chemin, "rb") as f:
-        brut = f.read()
-    texte = brut.decode("utf-8", "replace")
+        donnees = f.read()
+    if brut:
+        # Une image, un son, une video : le contenu doit rester binaire, et
+        # l'enrober de HTML le rendrait indecodable.
+        return Reponse(url, "", _type_mime_du_chemin(chemin), 200, octets=donnees)
+    texte = donnees.decode("utf-8", "replace")
     if chemin.endswith((".html", ".htm")):
-        return Reponse(url, texte, "text/html")
-    return Reponse(url, "<pre>%s</pre>" % _echappe(texte), "text/html")
+        return Reponse(url, texte, "text/html", octets=donnees)
+    return Reponse(url, "<pre>%s</pre>" % _echappe(texte), "text/html",
+                   octets=donnees)
+
+
+def _type_mime_du_chemin(chemin):
+    """Type deduit de l'extension : `file://` n'en annonce aucun."""
+    minuscule = chemin.lower()
+    for suffixe, type_mime in (
+        (".avi", "video/x-msvideo"), (".mp4", "video/mp4"),
+        (".webm", "video/webm"), (".mkv", "video/x-matroska"),
+        (".wav", "audio/wav"), (".mp3", "audio/mpeg"),
+        (".ogg", "audio/ogg"), (".opus", "audio/opus"),
+        (".png", "image/png"), (".jpg", "image/jpeg"),
+        (".jpeg", "image/jpeg"), (".gif", "image/gif"),
+    ):
+        if minuscule.endswith(suffixe):
+            return type_mime
+    return "application/octet-stream"
 
 
 # --- Resolution de noms ------------------------------------------------------

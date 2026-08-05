@@ -575,6 +575,235 @@ def verifie_mse_api():
     contexte.ferme()
 
 
+# --- YouTube ------------------------------------------------------------------
+#
+# Le reseau de ce bac a sable n'atteint pas YouTube. Ce qui suit eprouve donc
+# tout ce qui ne demande pas le reseau : l'analyse des adresses, l'extraction de
+# la reponse du lecteur, le choix du format, et — le point le plus delicat — le
+# dechiffrement d'une signature en executant du code de la forme exacte de
+# `base.js` dans QuickJS.
+
+# Une reponse de lecteur reduite a ce qui compte, de la forme reelle.
+REPONSE_YOUTUBE = {
+    "playabilityStatus": {"status": "OK"},
+    "videoDetails": {
+        "videoId": "aqz-KE-bpKQ",
+        "title": "Big Buck Bunny",
+        "author": "Blender Foundation",
+        "lengthSeconds": "635",
+        "shortDescription": "Un lapin geant et trois rongeurs.",
+        "viewCount": "12345678",
+        "thumbnail": {"thumbnails": [{"url": "https://i.ytimg.com/vi/x/hq.jpg"}]},
+    },
+    "streamingData": {
+        "formats": [
+            {"itag": 18, "mimeType": 'video/mp4; codecs="avc1.42001E, mp4a.40.2"',
+             "height": 360, "contentLength": "12345678",
+             "url": "https://rr1.googlevideo.com/videoplayback?itag=18"},
+            {"itag": 22, "mimeType": 'video/mp4; codecs="avc1.64001F, mp4a.40.2"',
+             "height": 720, "contentLength": "45678901",
+             "url": "https://rr1.googlevideo.com/videoplayback?itag=22"},
+        ],
+        "adaptiveFormats": [
+            {"itag": 137, "mimeType": 'video/mp4; codecs="avc1.640028"',
+             "height": 1080, "contentLength": "99999999",
+             "url": "https://rr1.googlevideo.com/videoplayback?itag=137"},
+            {"itag": 160, "mimeType": 'video/mp4; codecs="avc1.4d400c"',
+             "height": 144, "contentLength": "1111111",
+             "url": "https://rr1.googlevideo.com/videoplayback?itag=160"},
+            {"itag": 140, "mimeType": 'audio/mp4; codecs="mp4a.40.2"',
+             "contentLength": "2222222",
+             "url": "https://rr1.googlevideo.com/videoplayback?itag=140"},
+            {"itag": 251, "mimeType": 'audio/webm; codecs="opus"',
+             "contentLength": "1500000",
+             "url": "https://rr1.googlevideo.com/videoplayback?itag=251"},
+        ],
+    },
+}
+
+
+def verifie_youtube_adresses():
+    from moteur import youtube
+
+    for adresse, attendu in (
+        ("https://www.youtube.com/watch?v=aqz-KE-bpKQ", "aqz-KE-bpKQ"),
+        ("https://youtube.com/watch?v=aqz-KE-bpKQ&t=42", "aqz-KE-bpKQ"),
+        ("http://m.youtube.com/watch?v=aqz-KE-bpKQ", "aqz-KE-bpKQ"),
+        ("https://youtu.be/aqz-KE-bpKQ", "aqz-KE-bpKQ"),
+        ("https://youtu.be/aqz-KE-bpKQ?t=90", "aqz-KE-bpKQ"),
+        ("https://www.youtube.com/embed/aqz-KE-bpKQ", "aqz-KE-bpKQ"),
+        ("https://www.youtube.com/shorts/aqz-KE-bpKQ", "aqz-KE-bpKQ"),
+        ("https://www.youtube.com/live/aqz-KE-bpKQ", "aqz-KE-bpKQ"),
+        ("https://www.youtube-nocookie.com/embed/aqz-KE-bpKQ", "aqz-KE-bpKQ"),
+    ):
+        egal("yt: %s" % adresse, youtube.identifiant(adresse), attendu)
+
+    for adresse in (
+        "https://www.youtube.com/", "https://www.youtube.com/watch?v=trop-court",
+        "https://exemple.test/watch?v=aqz-KE-bpKQ", "https://youtu.be/",
+        "", None,
+    ):
+        verifie("yt: rejette %r" % adresse, youtube.identifiant(adresse) is None)
+
+    verifie("yt: est_youtube reconnait",
+            youtube.est_youtube("https://youtu.be/aqz-KE-bpKQ"))
+    verifie("yt: est_youtube rejette",
+            not youtube.est_youtube("https://exemple.test/"))
+
+
+def verifie_youtube_formats():
+    from moteur import youtube
+
+    video, audio = youtube.choisit_flux(REPONSE_YOUTUBE, hauteur_max=480)
+    egal("yt: le progressif est prefere", video.itag, 18)
+    verifie("yt: le progressif n'a pas de piste separee", audio is None)
+    egal("yt: codec video reconnu", video.codec_video, "h264")
+    egal("yt: codec audio reconnu", video.codec_audio, "aac")
+    verifie("yt: marque progressif", video.progressif)
+
+    # Une hauteur plus large laisse passer le 720p, lui aussi progressif.
+    video, _ = youtube.choisit_flux(REPONSE_YOUTUBE, hauteur_max=720)
+    egal("yt: la hauteur maximale est respectee", video.itag, 22)
+
+    # Sans progressif, on retombe sur l'adaptatif : image et son separes.
+    sans_progressif = dict(REPONSE_YOUTUBE)
+    sans_progressif["streamingData"] = dict(REPONSE_YOUTUBE["streamingData"])
+    sans_progressif["streamingData"]["formats"] = []
+    video, audio = youtube.choisit_flux(sans_progressif, hauteur_max=480)
+    egal("yt: adaptatif, image sous la limite", video.itag, 160)
+    verifie("yt: adaptatif, une piste audio est choisie", audio is not None)
+    egal("yt: la piste audio la plus legere gagne", audio.itag, 251)
+
+    # Un decodeur absent doit ecarter le format.
+    video, audio = youtube.choisit_flux(REPONSE_YOUTUBE, hauteur_max=480,
+                                        codecs=("vp9", "opus"))
+    verifie("yt: un format non decodable est ecarte",
+            video is None or video.codec_video == "vp9")
+
+    infos = youtube.details(REPONSE_YOUTUBE)
+    egal("yt: titre", infos["titre"], "Big Buck Bunny")
+    egal("yt: auteur", infos["auteur"], "Blender Foundation")
+    egal("yt: duree", infos["duree"], 635)
+    egal("yt: duree lisible", youtube.duree_lisible(635), "10:35")
+    egal("yt: duree lisible avec heures", youtube.duree_lisible(3725), "1:02:05")
+
+
+def verifie_youtube_extraction_json():
+    """`ytInitialPlayerResponse` se lit en comptant les accolades, pas au motif."""
+    from moteur import youtube
+
+    page = ('<script>var ytInitialPlayerResponse = '
+            '{"a": {"b": "}{ piege \\" encore }"}, "c": [1, 2, {"d": 3}]};'
+            'var autre = 1;</script>')
+    donnees = youtube._objet_apres(page, "ytInitialPlayerResponse")
+    verifie("yt: l'objet est extrait malgre les accolades dans les chaines",
+            donnees is not None, page)
+    if donnees:
+        egal("yt: structure imbriquee preservee", donnees["c"][2]["d"], 3)
+
+    verifie("yt: absence signalee",
+            youtube._objet_apres("<script>rien</script>", "ytInitialPlayerResponse")
+            is None)
+
+
+# Un `base.js` de la forme exacte du vrai : un objet de trois operations
+# elementaires et une fonction qui les enchaine. C'est la structure que YouTube
+# emploie depuis des annees ; seuls les noms et l'ordre changent.
+BASE_JS_ESSAI = """
+var _yt_player={};(function(g){var window=this;
+var Ln={
+ wZ:function(a){a.reverse()},
+ j9:function(a,b){var c=a[0];a[0]=a[b%a.length];a[b%a.length]=c},
+ Qt:function(a,b){a.splice(0,b)}
+};
+var xk=function(a){a=a.split("");Ln.wZ(a,52);Ln.Qt(a,3);Ln.j9(a,17);Ln.wZ(a,8);
+return a.join("")};
+g.xk=xk;})(_yt_player);
+"""
+
+
+def _signature_attendue(chaine):
+    """La meme transformation, ecrite en Python : la reference du test."""
+    a = list(chaine)
+    a.reverse()                      # wZ
+    a = a[3:]                        # Qt(3)
+    b = 17 % len(a)                  # j9(17)
+    a[0], a[b] = a[b], a[0]
+    a.reverse()                      # wZ
+    return "".join(a)
+
+
+def verifie_youtube_signature():
+    """Le point delicat : executer la fonction de YouTube pour dechiffrer.
+
+    On ne reimplemente pas la transformation — elle change plusieurs fois par
+    mois. On l'extrait et on l'execute, ce que le moteur JavaScript permet. La
+    verification compare le resultat a la meme transformation ecrite a la main.
+    """
+    from moteur import signature
+
+    source = signature.extrait_fonction_signature(BASE_JS_ESSAI)
+    verifie("signature: la fonction est retrouvee dans base.js",
+            source is not None, BASE_JS_ESSAI[:80])
+    if source is None:
+        return
+    verifie("signature: l'objet auxiliaire est embarque avec elle",
+            "Ln" in source and "splice" in source, source[:200])
+
+    dechiffreur = signature.Dechiffreur(BASE_JS_ESSAI)
+    verifie("signature: le dechiffreur est utilisable", dechiffreur.utilisable())
+
+    for entree in ("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+                   "aXbYcZ_-0123456789abcdefghijABCDEFGH",
+                   "0123456789"):
+        obtenu = dechiffreur.signature(entree)
+        egal("signature: %s..." % entree[:10], obtenu, _signature_attendue(entree))
+    dechiffreur.ferme()
+
+
+def verifie_youtube_base_js():
+    """L'adresse de `base.js` se retrouve sous ses formes courantes."""
+    from moteur import signature
+
+    for page, attendu in (
+        ('{"jsUrl":"/s/player/abc123/fr_FR/base.js"}',
+         "https://www.youtube.com/s/player/abc123/fr_FR/base.js"),
+        ('x = "/s/player/deadbeef/player_ias.vflset/fr_FR/base.js";',
+         "https://www.youtube.com/s/player/deadbeef/player_ias.vflset/fr_FR/base.js"),
+        ('<script src="https://www.youtube.com/s/player/z/base.js"></script>',
+         "https://www.youtube.com/s/player/z/base.js"),
+    ):
+        egal("base.js: %s" % page[:28], signature.adresse_du_lecteur(page), attendu)
+    verifie("base.js: absence signalee",
+            signature.adresse_du_lecteur("<html>rien</html>") is None)
+
+
+def verifie_youtube_page():
+    """La page de lecture batie a partir d'une reponse enregistree."""
+    from moteur import lecteur_youtube, youtube
+
+    video, audio = youtube.choisit_flux(REPONSE_YOUTUBE, hauteur_max=480)
+    infos = youtube.details(REPONSE_YOUTUBE)
+    html_page = lecteur_youtube._html(
+        "https://youtu.be/aqz-KE-bpKQ", infos, video, audio,
+        {"video": video.url}, "IOS")
+
+    for attendu in ("<video", "Big Buck Bunny", "Blender Foundation",
+                    "itag 18", "10:35", "googlevideo.com"):
+        verifie("page yt: contient %r" % attendu, attendu in html_page,
+                html_page[:150])
+
+    # Et cette page doit reellement se mettre en page, script compris.
+    doc = document(html_page, "https://youtu.be/aqz-KE-bpKQ")
+    egal("page yt: le titre est celui de la video", doc.titre, "Big Buck Bunny")
+    verifie("page yt: le lecteur existe dans l'arbre",
+            any(isinstance(n, html.Element) and n.balise == "video"
+                for n in doc.racine.parcours()))
+    textes = [e[3] for e in doc.liste_affichage(0, 1000, 700) if e[0] == "texte"]
+    verifie("page yt: le titre est peint",
+            any("Big Buck Bunny" in t for t in textes), textes[:8])
+
+
 def verifie_bac_a_sable():
     """Une page ne doit pas pouvoir atteindre le systeme."""
     doc = document("<body></body>")
@@ -626,6 +855,12 @@ def principal():
         verifie_images,
         verifie_media_api,
         verifie_mse_api,
+        verifie_youtube_adresses,
+        verifie_youtube_formats,
+        verifie_youtube_extraction_json,
+        verifie_youtube_signature,
+        verifie_youtube_base_js,
+        verifie_youtube_page,
         verifie_bac_a_sable,
         verifie_hote_reel,
     ):

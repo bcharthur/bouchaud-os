@@ -693,16 +693,28 @@ class Contexte:
         if not source:
             return False
         absolue = urllib.parse.urljoin(self.document.url, source)
-        try:
-            reponse = reseau.charge(absolue, brut=True)
-        except Exception as e:  # noqa: BLE001
-            self.journal("warn", "media %s : %s" % (absolue, e))
-            return False
-        if reponse.code and reponse.code >= 400:
-            self.journal("warn", "media %s : code %s" % (absolue, reponse.code))
-            return False
-        if not lecteur.charge(reponse.octets):
-            return False
+
+        # Une piste audio dissociee, quand la page en declare une : c'est le cas
+        # des flux adaptatifs, ou image et son sont deux ressources.
+        audio = element.attributs.get("data-audio") or None
+        if audio:
+            audio = urllib.parse.urljoin(self.document.url, audio)
+
+        # Le distant se lit par tranches ; le local, d'un bloc.
+        if absolue.startswith(("http://", "https://")):
+            if not lecteur.ouvre_distant(absolue, audio):
+                return False
+        else:
+            try:
+                reponse = reseau.charge(absolue, brut=True)
+            except Exception as e:  # noqa: BLE001
+                self.journal("warn", "media %s : %s" % (absolue, e))
+                return False
+            if reponse.code and reponse.code >= 400:
+                self.journal("warn", "media %s : code %s" % (absolue, reponse.code))
+                return False
+            if not lecteur.charge(reponse.octets):
+                return False
         self._appelle("__bo_media", [identifiant, "loadedmetadata"])
         self._appelle("__bo_media", [identifiant, "canplay"])
         return True

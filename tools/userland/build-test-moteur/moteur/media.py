@@ -156,9 +156,27 @@ class SortieAudio:
 class Lecteur:
     """Un `<video>` ou un `<audio>` : son flux, son horloge, son image."""
 
+    # Taille d'une tranche telechargee. Assez grande pour amortir le cout d'une
+    # requete, assez petite pour que la lecture demarre vite.
+    TRANCHE = 512 * 1024
+    # Avance visee : on garde ce nombre de tranches devant la position de
+    # lecture, sans jamais tout telecharger d'avance.
+    TRANCHES_D_AVANCE = 3
+
     def __init__(self, largeur=0, hauteur=0, journal=None):
         self.journal = journal or (lambda niveau, texte: None)
         self.source = None
+        # Telechargement progressif : adresse, taille totale, position atteinte.
+        self._url = None
+        self._taille_totale = 0
+        self._recu = 0
+        self._entetes = {}
+        # Piste audio separee, pour les flux adaptatifs ou image et son sont
+        # dissocies (le cas general chez YouTube au-dela de 360p).
+        self.source_audio = None
+        self._url_audio = None
+        self._recu_audio = 0
+        self._taille_audio = 0
         self.info = {}
         self.largeur = largeur
         self.hauteur = hauteur
@@ -221,7 +239,89 @@ class Lecteur:
             return False
         return True
 
+    # --- Telechargement progressif --------------------------------------------
+
+    def ouvre_distant(self, url, url_audio=None, entetes=None):
+        """Ouvre un flux distant, telecharge par tranches.
+
+        Ne ramene que le debut : de quoi reconnaitre le conteneur et ses
+        pistes. Le reste arrive au fil de la lecture, dans [`bat`]. C'est ce qui
+        permet de lire une video de cent megaoctets sans la tenir en memoire, et
+        de commencer avant la fin du telechargement.
+        """
+        if not DISPONIBLE:
+            return False
+        self.ferme()
+        self._url = url
+        self._entetes = dict(entetes or {})
+        self._taille_totale = reseau.taille_distante(url, self._entetes)
+
+        premiere = reseau.tranche(url, 0, self.TRANCHE, self._entetes)
+        if not premiere.octets:
+            self.journal("warn", "media: %s ne rend rien" % url)
+            return False
+        # Un serveur qui ignore `Range` a rendu tout le corps d'un coup.
+        self._recu = len(premiere.octets)
+        if premiere.code == 200 and self._taille_totale == 0:
+            self._taille_totale = self._recu
+
+        if not self.charge(premiere.octets):
+            return False
+
+        if url_audio:
+            self._url_audio = url_audio
+            self._taille_audio = reseau.taille_distante(url_audio, self._entetes)
+            debut = reseau.tranche(url_audio, 0, self.TRANCHE, self._entetes)
+            if debut.octets:
+                self._recu_audio = len(debut.octets)
+                try:
+                    self.source_audio = bomedia.ouvre(debut.octets)
+                    self.info["a_audio"] = True
+                except Exception as e:  # noqa: BLE001
+                    self.journal("warn", "media: piste audio illisible : %s" % e)
+                    self.source_audio = None
+        return True
+
+    def _telecharge_la_suite(self):
+        """Ramene une tranche de plus si la lecture s'en approche."""
+        if self._url is None or self.source is None:
+            return
+        if self._taille_totale and self._recu >= self._taille_totale:
+            return
+        # On ne prend de l'avance que si le decodeur en a besoin : sans ce
+        # frein, la lecture d'une minute telechargerait le fichier entier.
+        if len(self._pcm_en_attente) > 0 and \
+                len(self._images_en_attente) >= IMAGES_EN_ATTENTE_MAX:
+            return
+
+        suite = reseau.tranche(self._url, self._recu, self.TRANCHE, self._entetes)
+        if not suite.octets:
+            self._taille_totale = self._recu  # plus rien a lire
+            return
+        self._recu += len(suite.octets)
+        try:
+            bomedia.alimente(self.source, suite.octets)
+        except Exception as e:  # noqa: BLE001
+            self.journal("warn", "media: alimentation refusee : %s" % e)
+
+        if self.source_audio is not None and self._url_audio:
+            if not self._taille_audio or self._recu_audio < self._taille_audio:
+                morceau = reseau.tranche(self._url_audio, self._recu_audio,
+                                         self.TRANCHE, self._entetes)
+                if morceau.octets:
+                    self._recu_audio += len(morceau.octets)
+                    try:
+                        bomedia.alimente(self.source_audio, morceau.octets)
+                    except Exception:  # noqa: BLE001
+                        pass
+
     def ferme(self):
+        if self.source_audio is not None:
+            try:
+                bomedia.ferme(self.source_audio)
+            except Exception:  # noqa: BLE001
+                pass
+            self.source_audio = None
         if self.source is not None:
             self._sortie.rend(self)
             try:
@@ -290,6 +390,7 @@ class Lecteur:
         if self.source is None or not self.en_lecture:
             return False
 
+        self._telecharge_la_suite()
         self._remplit()
         self._pousse_son()
         return self._choisit_image()
@@ -313,6 +414,13 @@ class Lecteur:
                 return
             if trame["type"] == "audio":
                 self._pcm_en_attente += self._applique_volume(trame["donnees"])
+            elif self.source_audio is not None:
+                # Piste audio dissociee : l'image vient d'ici, le son de la
+                # seconde source, et l'horloge reste celle du son.
+                self._images_en_attente.append(
+                    (trame["horodatage"], trame["donnees"],
+                     trame["largeur"], trame["hauteur"]))
+                self._remplit_audio_separe()
             else:
                 self._images_en_attente.append(
                     (trame["horodatage"], trame["donnees"],
@@ -321,6 +429,23 @@ class Lecteur:
             # PCM : les images suffisent.
             if not self.info.get("a_audio") and self._images_en_attente:
                 return
+
+    def _remplit_audio_separe(self):
+        """Decode la piste audio dissociee jusqu'a l'avance visee."""
+        if self.source_audio is None:
+            return
+        cible = int(FREQUENCE * OCTETS_PAR_TRAME * AVANCE_MS / 1000.0)
+        gardes = 0
+        while len(self._pcm_en_attente) < cible and gardes < 32:
+            gardes += 1
+            try:
+                trame = bomedia.trame(self.source_audio)
+            except Exception:  # noqa: BLE001
+                return
+            if trame is None:
+                return
+            if trame["type"] == "audio":
+                self._pcm_en_attente += self._applique_volume(trame["donnees"])
 
     def _applique_volume(self, pcm):
         """Attenue le PCM. Le materiel n'a pas de reglage par flux."""
