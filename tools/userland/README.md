@@ -10,6 +10,8 @@ de construction côté utilisateur.
 ./build.sh musl-dynamic    # binaires dynamiques + ld-musl-x86_64.so.1
 ./build-python.sh          # CPython 3.12 statique + bibliothèque standard  (§11)
 ./build-qt.sh              # Qt 5.15 statique + démonstration linuxfb        (§9)
+./build-quickjs.sh         # QuickJS statique : le moteur JavaScript         (§12)
+./build-navigateur.sh      # le navigateur : Qt + CPython + QuickJS en un binaire
 ```
 
 Les binaires produits vont dans `out/`. On les installe sur la machine en
@@ -45,8 +47,22 @@ le fichier `/autorun` déposé sur le disque au lieu d'ouvrir une session, puis
 éteint la machine en signalant son verdict à l'hôte (voir
 `src/kernel/autorun.rs`).
 
-Si `out-python/` et `out-qt/` existent, la sonde Python et la démonstration Qt
-sont ajoutées au scénario.
+Si `out-python/`, `out-qt/` et `out-navigateur/` existent, la sonde Python, la
+démonstration Qt et les vérifications du moteur web sont ajoutées au scénario.
+
+Le moteur web se vérifie aussi **sans l'OS**, en quelques secondes :
+
+```
+./test-moteur.sh
+```
+
+Le module `bo` — d'ordinaire fourni par l'hôte Qt — y est remplacé par un
+bouchon : la mesure du texte devient une règle de trois, le décodage d'image se
+limite à lire l'en-tête PNG. Tout le reste du moteur est le vrai, JavaScript
+compris. Reconstruire le navigateur et démarrer l'émulateur prend plusieurs
+minutes ; ce script quelques secondes, et c'est ce qui en fait un filet utile
+pendant qu'on écrit. Le même fichier (`navigateur/test_moteur.py`) tourne sous
+l'OS avec le vrai hôte — c'est là qu'il devient une preuve.
 
 ## Comment les fichiers arrivent sur la machine
 
@@ -524,12 +540,15 @@ bien dans son propre fil et peut lire l'état de la fenêtre.
   — pywebview les sert par un serveur HTTP interne, qui a besoin de `listen` et
   `accept`. Le noyau ne les implémente pas encore ; c'est le prochain manque à
   combler pour cette pile.
-- **`load_url` appelé depuis le fil de `webview.start()`** — défaut ouvert. Le
-  travail est bien mis en file pour le fil principal, mais le chargement
-  n'aboutit pas : l'émulateur reste à ~56 % de CPU sans que la page change, et
-  ce pendant vingt-cinq minutes — ce n'est pas de la lenteur, c'est une boucle.
-  Appelé depuis le fil principal — c'est-à-dire au chargement initial et sur un
-  clic de lien — `load_url` fonctionne. Voir la feuille de route.
+- **JavaScript : le langage, pas tout le navigateur.** QuickJS exécute
+  l'ECMAScript en entier, et `moteur/js.py` expose le DOM, les événements, les
+  minuteries, `XMLHttpRequest` et `fetch`. Ce qui n'y est pas : `canvas`, WebGL,
+  Web Components et Shadow DOM, `IntersectionObserver`, et le style calculé au
+  sens strict — `getComputedStyle` rend le style en ligne. Les grandes
+  applications web, qui reposent sur ces API, restent hors de portée.
+- **Ni vidéo ni audio** — il faudrait un décodeur H.264/VP9, Media Source
+  Extensions et un pilote de son, dont l'OS n'a rien. Les sites de lecture vidéo
+  ne fonctionneront pas, et ce n'est pas une question de moteur web.
 - **Plusieurs fenêtres à l'écran en même temps** — le framebuffer n'a pas de
   gestionnaire de fenêtres. Les fenêtres suivantes sont créées et pilotables,
   mais s'affichent l'une après l'autre dans la même surface.

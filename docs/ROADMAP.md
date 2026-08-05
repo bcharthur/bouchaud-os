@@ -433,10 +433,55 @@ construction cote utilisateur : `tools/userland/README.md`.
       cœurs — donc en surcharge constante —, 24 succes. Et le tutoriel
       pywebview va jusqu'a sa derniere ligne, page distante chargee et peinte.
 - [x] **Navigateur natif en ring 3** : Nautile supprime du noyau, remplace par
-      `tools/userland/navigateur/` — un binaire unique (Qt + CPython + le
-      moteur) qui analyse HTML et CSS, met en page, et peint par QPainter sur
-      `/dev/fb0`. Reseau HTTP/HTTPS avec resolveur DNS ecrit pour l'occasion.
-      Pas de JavaScript, pas d'images.
+      `tools/userland/navigateur/` — un binaire unique (Qt + CPython + QuickJS +
+      le moteur) qui analyse HTML et CSS, execute le JavaScript, met en page, et
+      peint par QPainter sur `/dev/fb0`. Reseau HTTP/HTTPS avec resolveur DNS
+      ecrit pour l'occasion.
+- [x] **JavaScript reel** : QuickJS lie en statique (`build-quickjs.sh`). Ecrire
+      un interprete complet — analyse, machine virtuelle, ramasse-miettes,
+      expressions rationnelles, Unicode, `Promise` — aurait represente plus de
+      travail que tout le reste du navigateur ; QuickJS fait cela en C portable
+      et sans dependance, donc dans la seule forme qu'un OS sans chargeur
+      dynamique puisse accueillir.
+
+      Le pont C (`bojs.cpp`) n'expose qu'**une** fonction au JavaScript :
+      `__bo_appel(operation, …)`. Tout le DOM est ecrit par-dessus, en
+      JavaScript (`moteur/prelude.js`) et en Python (`moteur/js.py`) —
+      `document`, `Element`, `classList`, `style`, les selecteurs (y compris
+      `>` et les attributs), les trois phases de distribution des evenements,
+      `setTimeout`/`setInterval`, `XMLHttpRequest`, `fetch`, `localStorage`,
+      `location`, `history`. Ajouter une methode ne demande donc pas de
+      recompiler.
+
+      Deux garde-fous, faute d'onglet a fermer ou de gestionnaire de taches :
+      un budget de temps qui interrompt un script qui boucle, et un plafond
+      memoire par page. Le bac a sable est celui de QuickJS — une page
+      n'atteint ni fichiers ni sockets, seulement ce que `js.py` lui tend.
+- [x] **Images** : Qt reconstruit avec libjpeg et le greffon GIF, declares par
+      `Q_IMPORT_PLUGIN` puisqu'un binaire statique ne charge aucun greffon. PNG,
+      JPEG, GIF, BMP et ICO, decodes une fois par adresse (`bo.image`) ; la
+      liste d'affichage ne porte qu'un numero, sans quoi chaque rafraichissement
+      redecoderait toute la page. Dimensions dans l'ordre des navigateurs : CSS,
+      puis attributs, puis taille naturelle, proportions conservees.
+- [x] **`test-moteur.sh`** : le moteur tourne sur la machine de developpement
+      avec un bouchon a la place de l'hote Qt — 92 verifications en quelques
+      secondes, contre plusieurs minutes pour reconstruire et demarrer
+      l'emulateur. Le meme fichier tourne sous l'OS avec le vrai hote. Il a paye
+      des le premier essai en revelant deux defauts avant tout demarrage : le
+      combinateur `>` qui se comportait comme un descendant, et
+      `DOMContentLoaded` qui n'atteignait pas les ecouteurs poses sur
+      `document`, c'est-a-dire la moitie du JavaScript du web.
+- [ ] **Ce que le JavaScript ne couvre pas** (limite assumee). Le moteur execute
+      le langage en entier, mais n'expose du navigateur que ce que `js.py`
+      implemente : pas de `canvas`, pas de WebGL, pas de Web Components ni de
+      Shadow DOM, pas de `IntersectionObserver`, pas de CSS calcule au sens
+      strict (`getComputedStyle` rend le style en ligne). Les applications web
+      qui reposent sur ces API — donc les grandes SPA — restent hors de portee ;
+      le web documentaire et les pages a rehaussement progressif, non.
+- [ ] **Video et audio** : hors de portee, et ce n'est pas une question de
+      moteur. Il faudrait un decodeur H.264/VP9, Media Source Extensions et un
+      pilote de son — dont l'OS n'a rien. YouTube et les sites de lecture
+      video ne fonctionneront pas.
 - [x] **pywebview tourne sur la machine** : la bibliotheque est embarquee telle
       quelle avec un moteur d'affichage ecrit pour l'OS
       (`tools/userland/navigateur/webview_bouchaud.py`, greffe par

@@ -544,13 +544,16 @@ def principal():
         print("  %s  %s" % (etat, nom))
 
     print()
+    # La forme de cette ligne est celle qu'attend `tools/test.sh`, qui compte
+    # les bilans plutot que de se fier au seul code de sortie — celui-ci ne dit
+    # pas quelle sonde a lache.
     if _echecs:
-        print("%d verification(s) en echec sur %d :"
-              % (len(_echecs), len(_echecs) + _reussites))
         for echec in _echecs:
             print("  - %s" % echec)
+        print("RESULTAT : %d verification(s) en echec sur %d"
+              % (len(_echecs), len(_echecs) + _reussites))
         return 1
-    print("RESULTAT : %d verification(s), 0 en echec" % _reussites)
+    print("RESULTAT : 0 verification(s) en echec (%d passees)" % _reussites)
     return 0
 
 

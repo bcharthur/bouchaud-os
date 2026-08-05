@@ -112,6 +112,24 @@ if [ -x "$QT_BIN" ]; then
     echo "exec /qt-demo" >> "$WORK/files/autorun"
 fi
 
+# Le moteur web se verifie deja sur la machine de developpement
+# (`tools/userland/test-moteur.sh`), mais avec un bouchon a la place de l'hote
+# Qt. Le jouer ici le confronte au vrai : metriques de fonte reelles, decodage
+# d'image par libpng et libjpeg, QuickJS en ring 3.
+NAVIGATEUR_DIR=tools/userland/out-navigateur
+
+if [ -x "$NAVIGATEUR_DIR/bo-navigateur" ]; then
+    info "  + navigateur detecte : les verifications du moteur web sont ajoutees"
+    cp "$NAVIGATEUR_DIR/bo-navigateur" "$WORK/files/"
+    mkdir -p "$WORK/files/usr/lib" "$WORK/files/usr/share"
+    cp -r "$NAVIGATEUR_DIR/usr/share/bo-navigateur" "$WORK/files/usr/share/"
+    cp "$NAVIGATEUR_DIR/usr/lib/python312.zip" "$WORK/files/usr/lib/"
+    cp -r "$NAVIGATEUR_DIR/usr/lib/python3" "$WORK/files/usr/lib/"
+    echo "export BO_PREFIXE=/usr" >> "$WORK/files/autorun"
+    echo "exec /bo-navigateur /usr/share/bo-navigateur/test_moteur.py" \
+        >> "$WORK/files/autorun"
+fi
+
 info "== fabrication du disque de test =="
 if ! (cd tools/userland && IMAGE=../../$DISK ./mkdisk.sh ../../$WORK/files >/dev/null); then
     red "mkdisk a echoue"
