@@ -427,6 +427,11 @@ construction cote utilisateur : `tools/userland/README.md`.
       possible. Un `debug_assert` dans `schedule` verrouille l'invariant : on ne
       commute jamais interruptions coupees, et la panique arrive dans le
       coupable plutot que dans la victime.
+
+      Valide dans les conditions qui faisaient apparaitre le defaut : 24 boots
+      du scenario complet, joues six de front sur une machine hote a quatre
+      cœurs — donc en surcharge constante —, 24 succes. Et le tutoriel
+      pywebview va jusqu'a sa derniere ligne, page distante chargee et peinte.
 - [x] **Navigateur natif en ring 3** : Nautile supprime du noyau, remplace par
       `tools/userland/navigateur/` — un binaire unique (Qt + CPython + le
       moteur) qui analyse HTML et CSS, met en page, et peint par QPainter sur
