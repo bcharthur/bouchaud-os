@@ -29,6 +29,8 @@ import time
 
 import bo
 
+from . import reseau
+
 try:
     import bomedia
     DISPONIBLE = True
@@ -56,6 +58,10 @@ AVANCE_MS = 300
 # Au-dela, on cesse de decoder : une video entierement decodee en memoire
 # tiendrait des centaines de mega-octets.
 IMAGES_EN_ATTENTE_MAX = 8
+# Plafond absolu, atteint quand on continue de decoder pour trouver du son dans
+# un flux entrelace. Une image de 1280x720 en BGRA pese 3,5 Mo : ce nombre est
+# ce qui separe une avance confortable d'un epuisement de la memoire.
+IMAGES_MAX_ABSOLU = 24
 
 
 class SortieAudio:
@@ -158,7 +164,7 @@ class Lecteur:
 
     # Taille d'une tranche telechargee. Assez grande pour amortir le cout d'une
     # requete, assez petite pour que la lecture demarre vite.
-    TRANCHE = 512 * 1024
+    TRANCHE = 64 * 1024
     # Avance visee : on garde ce nombre de tranches devant la position de
     # lecture, sans jamais tout telecharger d'avance.
     TRANCHES_D_AVANCE = 3
@@ -398,10 +404,24 @@ class Lecteur:
     def _remplit(self):
         """Decode jusqu'a avoir assez d'avance, sans jamais tout decoder."""
         cible = int(FREQUENCE * OCTETS_PAR_TRAME * AVANCE_MS / 1000.0)
+        avec_son = bool(self.info.get("a_audio"))
         gardes = 0
-        while (len(self._pcm_en_attente) < cible
-               and len(self._images_en_attente) < IMAGES_EN_ATTENTE_MAX
-               and gardes < 64):
+        while gardes < 128:
+            # Les deux besoins sont independants, et c'est tout l'enjeu : un
+            # `et` entre eux arretait la boucle des que la file d'images etait
+            # pleine — donc avant qu'aucun son n'ait ete decode. L'horloge, qui
+            # est celle du son, ne demarrait jamais ; aucune image n'arrivait
+            # donc a echeance, la file ne se vidait pas, et la lecture restait
+            # figee sur sa premiere image.
+            besoin_son = avec_son and len(self._pcm_en_attente) < cible
+            besoin_image = len(self._images_en_attente) < IMAGES_EN_ATTENTE_MAX
+            if not besoin_son and not besoin_image:
+                break
+            # Un flux entrelace rend l'image et le son en alternance : chercher
+            # du son accumule forcement des images. On les accepte au-dela de la
+            # cible, mais pas sans fin.
+            if not besoin_image and len(self._images_en_attente) >= IMAGES_MAX_ABSOLU:
+                break
             gardes += 1
             try:
                 trame = bomedia.trame(self.source)
@@ -425,10 +445,7 @@ class Lecteur:
                 self._images_en_attente.append(
                     (trame["horodatage"], trame["donnees"],
                      trame["largeur"], trame["hauteur"]))
-            # Sans piste audio, la boucle n'aurait pas de critere d'arret par le
-            # PCM : les images suffisent.
-            if not self.info.get("a_audio") and self._images_en_attente:
-                return
+
 
     def _remplit_audio_separe(self):
         """Decode la piste audio dissociee jusqu'a l'avance visee."""

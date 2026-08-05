@@ -107,6 +107,16 @@ cp navigateur/demo-js.html navigateur/demo-media.html navigateur/demo-h264.html 
 # telecharger ferait dependre la demo du reseau et de droits d'usage.
 if command -v cjpeg >/dev/null 2>&1; then
     python3 fabrique-media-demo.py "$OUT/usr/share/bo-navigateur" || true
+    # Un vrai flux H.264 + AAC, de la forme d'un flux progressif YouTube
+    # (itag 18). Il faut un encodeur, que seule la machine de construction a.
+    if command -v ffmpeg >/dev/null 2>&1; then
+        ffmpeg -y -f lavfi -i "testsrc2=size=480x270:rate=15:duration=8" \
+               -f lavfi -i "sine=frequency=440:duration=8" \
+               -c:v libx264 -profile:v baseline -level 3.0 -pix_fmt yuv420p \
+               -b:v 250k -c:a aac -b:a 64k -ar 44100 -ac 2 -movflags +faststart \
+               "$OUT/usr/share/bo-navigateur/demo-h264.mp4" >/dev/null 2>&1 \
+            && echo "  demo-h264.mp4 : H.264 baseline + AAC"
+    fi
 else
     echo "  cjpeg absent : la video de demonstration n'est pas fabriquee"
 fi

@@ -505,12 +505,51 @@ construction cote utilisateur : `tools/userland/README.md`.
       `appendBuffer` et `URL.createObjectURL`. C'est l'API par laquelle les
       sites de lecture alimentent leur lecteur : ils recuperent les segments
       eux-memes et les poussent, sans jamais donner d'URL de media au lecteur.
-- [ ] **Ce qui manque encore pour un site de lecture video reel**. La chaine est
-      la, mais ces sites demandent davantage : `canvas` et Web Components pour
-      leur interface, le chiffrement (EME/Widevine) pour leur catalogue, et le
-      debit qu'une machine emulee sans acceleration materielle ne tient pas sur
-      du 1080p. Le decodage H.264 est verifie present et fonctionnel ; le lire a
-      pleine cadence est un autre sujet.
+- [x] **YouTube** : `moteur/youtube.py`, `moteur/signature.py`,
+      `moteur/lecteur_youtube.py`. On n'execute pas la page de YouTube — c'est
+      une application de deux megaoctets de JavaScript, et l'executer
+      demanderait d'implementer une fraction enorme d'un navigateur moderne pour
+      un resultat inutilisable sous emulation. On fait ce que font les clients
+      contraints (NewPipe, lecteurs embarques, televiseurs) : demander **ou est
+      le flux** et le lire nativement.
+
+      L'identifiant est tire de l'adresse (watch, youtu.be, embed, shorts,
+      live) ; la reponse du lecteur vient de l'API interne, plusieurs contextes
+      de client essayes a la suite — ceux de television et d'appareil mobile
+      rendent le plus souvent des adresses non signees ; la page de lecture sert
+      de dernier recours. Le format retenu privilegie le **progressif** (image
+      et son dans un fichier, donc ni DASH ni segments), plafonne a 480p : mieux
+      vaut une image fluide en 360p qu'une image saccadee en 1080p.
+
+      Quand l'adresse arrive signee, la fonction de transformation est extraite
+      de `base.js` et **executee dans QuickJS**, dans un contexte neuf et vide —
+      sans `document`, sans `fetch`. La reimplementer serait sans fin : elle
+      change plusieurs fois par mois. Le parametre `n` recoit le meme
+      traitement, sans quoi le flux est servi a debit reduit.
+
+      Sur le DRM, la note precedente etait **fausse** : YouTube ne chiffre pas
+      la lecture ordinaire. Widevine ne concerne que les films loues ou achetes.
+- [x] **H.264 lu et joue sur la machine** : verifie sous QEMU sur un flux
+      baseline 480x270 + AAC. Le timecode incruste dans l'image concorde avec
+      `currentTime` — l'image est donc bien calee sur l'horloge audio.
+
+      Un defaut trouve a cette occasion, et corrige : la boucle de decodage
+      s'arretait des que **l'une** des deux files etait pleine. La file d'images
+      se remplissant la premiere, aucun son n'etait decode ; l'horloge, qui est
+      celle du son, ne demarrait jamais ; aucune image n'arrivait a echeance, la
+      file ne se vidait pas. La lecture restait figee sur sa premiere image.
+- [ ] **Gros transferts HTTP** (defaut ouvert). Une requete `Range` de 512 Ko
+      vers un serveur local n'aboutit pas : le serveur repond, le client reste
+      en lecture. Les transferts de quelques kilo-octets — pages, images — n'ont
+      jamais pose de probleme, ce qui situe le defaut du cote de la reception
+      d'un flux TCP soutenu. C'est ce qui empeche aujourd'hui de lire une video
+      **depuis le reseau**, alors que le meme fichier en local se lit sans
+      difficulte. Piste : fenetre de reception et reassemblage dans
+      `net/transport/`.
+- [ ] **Ce qui manque encore pour l'interface de YouTube elle-meme** : `canvas`
+      et Web Components. Sans objet pour la lecture — la page de lecture batie
+      ici s'en passe — mais necessaire si l'on voulait un jour afficher leur
+      site plutot que le flux.
 - [x] **pywebview tourne sur la machine** : la bibliotheque est embarquee telle
       quelle avec un moteur d'affichage ecrit pour l'OS
       (`tools/userland/navigateur/webview_bouchaud.py`, greffe par
