@@ -103,6 +103,13 @@ fn arp_resolve(target: Ipv4Addr) -> Option<[u8; 6]> {
                             if p.op == arp::OP_REPLY && p.sender_ip == target {
                                 return Some(p.sender_mac);
                             }
+                            // Le pair nous interroge en meme temps qu'on
+                            // l'interroge : c'est le cas normal d'une premiere
+                            // prise de contact, et ne pas repondre ici ferait
+                            // echouer sa moitie de la resolution.
+                            if p.op == arp::OP_REQUEST {
+                                repond_arp(&buf[..n]);
+                            }
                         }
                     }
                 }
@@ -178,23 +185,81 @@ pub(crate) fn send_ip(dst: Ipv4Addr, proto: u8, payload: &[u8]) -> bool {
 
 /// Recoit un paquet IPv4 du protocole `proto` (et source optionnelle). Copie la
 /// charge utile dans `out`, renvoie (source, longueur). Non bloquant.
+/// Repond a une requete ARP qui nous designe.
+///
+/// Sans cela, un transfert un peu long s'arrete net au milieu. La passerelle
+/// revalide periodiquement son entree ARP ; si personne ne repond, elle
+/// l'oublie et cesse de nous router les paquets. Un petit transfert se termine
+/// avant l'echeance, un gros non — d'ou un defaut qui n'apparaissait que sur
+/// les gros fichiers, et jamais sur une page.
+fn repond_arp(trame: &[u8]) -> bool {
+    let entete = match ethernet::parse_header(trame) {
+        Some(h) => h,
+        None => return false,
+    };
+    if entete.ethertype != ethernet::ETHERTYPE_ARP {
+        return false;
+    }
+    let paquet = match arp::parse(&trame[ethernet::HEADER_LEN..]) {
+        Some(p) => p,
+        None => return false,
+    };
+    if paquet.op != arp::OP_REQUEST || paquet.target_ip != our_ip() {
+        return true; // c'est de l'ARP, mais pas pour nous : deja consomme
+    }
+
+    let mac = e1000::mac();
+    let mut reponse = [0u8; arp::PACKET_LEN];
+    if arp::build(&mut reponse, arp::OP_REPLY, mac, our_ip(),
+                  paquet.sender_mac, paquet.sender_ip).is_none() {
+        return true;
+    }
+    let mut sortie = [0u8; ethernet::HEADER_LEN + arp::PACKET_LEN];
+    if let Some(longueur) = ethernet::build_frame(
+        &mut sortie, paquet.sender_mac, mac, ethernet::ETHERTYPE_ARP, &reponse) {
+        e1000::send(&sortie[..longueur]);
+    }
+    true
+}
+
+/// Nombre de trames examinees par appel.
+///
+/// Une seule trame par appel obligeait l'appelant a boucler pour trouver ce
+/// qu'il attend, et faisait passer chaque paquet non pertinent pour une absence
+/// de trafic. En traiter plusieurs vide l'anneau de reception plus vite, ce qui
+/// compte quand l'emetteur envoie par rafales.
+const TRAMES_PAR_PASSAGE: usize = 32;
+
 pub(crate) fn poll_ip(proto: u8, src_filter: Option<Ipv4Addr>, out: &mut [u8]) -> Option<(Ipv4Addr, usize)> {
     let mut buf = [0u8; 2048];
-    let n = e1000::receive(&mut buf)?;
-    let h = ethernet::parse_header(&buf[..n])?;
-    if h.ethertype != ethernet::ETHERTYPE_IPV4 { return None; }
-    let iph = ipv4::parse_header(&buf[ethernet::HEADER_LEN..n])?;
-    if iph.proto != proto { return None; }
-    if let Some(s) = src_filter {
-        if iph.src != s { return None; }
+    for _ in 0..TRAMES_PAR_PASSAGE {
+        let n = match e1000::receive(&mut buf) {
+            Some(n) => n,
+            None => return None, // plus rien a lire
+        };
+        // L'ARP passe avant tout : c'est du service de lien, il ne doit jamais
+        // etre jete au motif qu'on attendait autre chose.
+        if repond_arp(&buf[..n]) {
+            continue;
+        }
+        let h = match ethernet::parse_header(&buf[..n]) { Some(h) => h, None => continue };
+        if h.ethertype != ethernet::ETHERTYPE_IPV4 { continue; }
+        let iph = match ipv4::parse_header(&buf[ethernet::HEADER_LEN..n]) {
+            Some(h) => h, None => continue,
+        };
+        if iph.proto != proto { continue; }
+        if let Some(s) = src_filter {
+            if iph.src != s { continue; }
+        }
+        let start = ethernet::HEADER_LEN + iph.header_len;
+        let end = ethernet::HEADER_LEN + iph.total_len;
+        if start > end || end > n { continue; }
+        let len = end - start;
+        let m = len.min(out.len());
+        out[..m].copy_from_slice(&buf[start..start + m]);
+        return Some((iph.src, m));
     }
-    let start = ethernet::HEADER_LEN + iph.header_len;
-    let end = ethernet::HEADER_LEN + iph.total_len;
-    if start > end || end > n { return None; }
-    let len = end - start;
-    let m = len.min(out.len());
-    out[..m].copy_from_slice(&buf[start..start + m]);
-    Some((iph.src, m))
+    None
 }
 
 // ── Cache DNS (nom -> IPv4) ───────────────────────────────────────────────────

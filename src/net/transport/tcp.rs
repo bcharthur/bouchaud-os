@@ -445,9 +445,13 @@ impl TcpConn {
             return;
         }
 
-        // Petit tampon de reordonnancement : suffisant pour les bursts TLS de
-        // Google/QEMU sans transformer ce client en pile TCP complete.
-        if self.ooo.len() >= 16 { return; }
+        // Tampon de reordonnancement. Il doit couvrir une fenetre entiere en
+        // vol : a 65535 octets annonces et 1460 par segment, cela fait
+        // quarante-cinq segments. Le plafond de seize d'origine suffisait aux
+        // rafales d'un echange TLS, mais un transfert soutenu le depassait —
+        // et tout ce qui deborde ici doit etre retransmis, ce qui suffit a
+        // effondrer le debit.
+        if self.ooo.len() >= 64 { return; }
         for p in &self.ooo {
             if p.seq == seq { return; }
         }
