@@ -88,6 +88,13 @@ cp "$SRC/quickjs.h" "$SRC/quickjs-atom.h" "$SRC/quickjs-opcode.h" \
    "$SRC/libregexp.h" "$SRC/libregexp-opcode.h" "$SRC/libunicode.h" \
    "$SRC/cutils.h" "$SRC/libbf.h" "$SRC/list.h" "$OUT/include/"
 echo "$VERSION" > "$OUT/VERSION"
+# La version n'est connue que des unites de QuickJS (macro `CONFIG_VERSION`).
+# Un en-tete la porte jusqu'au pont, sans passer par les guillemets de qmake.
+cat > "$OUT/include/bojs_version.h" <<EOF
+// Genere par build-quickjs.sh — ne pas modifier a la main.
+#pragma once
+#define BOJS_VERSION_QUICKJS "$VERSION"
+EOF
 
 echo ""
 echo "pret dans $OUT/ :"

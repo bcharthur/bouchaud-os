@@ -88,7 +88,9 @@ rm -rf "$OUT"
 mkdir -p "$OUT/usr/lib" "$OUT/usr/share/bo-navigateur"
 strip -s "$WORK/bo-navigateur" -o "$OUT/bo-navigateur"
 cp "$PY/usr/lib/python312.zip" "$OUT/usr/lib/"
-cp navigateur/navigateur.py navigateur/exemple-webview.py "$OUT/usr/share/bo-navigateur/"
+cp navigateur/navigateur.py navigateur/exemple-webview.py \
+   navigateur/test_moteur.py "$OUT/usr/share/bo-navigateur/"
+cp navigateur/demo-js.html "$OUT/usr/share/bo-navigateur/"
 cp -r navigateur/moteur "$OUT/usr/share/bo-navigateur/"
 # `prelude.js` est du code, pas une ressource optionnelle : sans lui le
 # JavaScript d'une page ne trouve ni `document` ni `setTimeout`.

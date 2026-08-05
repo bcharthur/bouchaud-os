@@ -104,6 +104,35 @@ class Navigateur:
 
     # --- Navigation ---------------------------------------------------------
 
+    def _journal_js(self, niveau, texte):
+        """`console.log` d'une page : sur la sortie serie, pas a l'ecran.
+
+        Une page ne doit pas pouvoir ecrire dans l'interface du navigateur — et
+        le journal reste lisible pendant un demarrage sous emulation.
+        """
+        print("[js:%s] %s" % (niveau, texte), flush=True)
+
+    def bat(self):
+        """Battement : minuteries de la page, et remise en page si besoin.
+
+        C'est ce qui fait qu'un `setTimeout` qui modifie le DOM se voit
+        reellement a l'ecran, et que `location.href = …` navigue.
+        """
+        document = self.onglet.document
+        if document is None:
+            return
+        if document.rafraichis():
+            bo.redessiner()
+        demande = document.navigation_demandee
+        if isinstance(demande, tuple):
+            pas = demande[1]
+            if pas < 0:
+                self.recule()
+            elif pas > 0:
+                self.avance()
+        elif demande:
+            self.ouvre(demande)
+
     def ouvre(self, url, empiler=True):
         url = reseau.normalise(url, self.onglet.url or None)
         if not url:
@@ -113,13 +142,18 @@ class Navigateur:
         bo.redessiner()
         bo.traiter_evenements()
         try:
-            document = Document(reseau.charge(url), self.largeur_vue)
+            document = Document(reseau.charge(url), self.largeur_vue,
+                                journal=self._journal_js)
         except Exception as e:
             traceback.print_exc(file=sys.stdout)
             self.etat = "Erreur interne : %s" % e
             self.chargement = None
             return
         self.chargement = None
+        # La page precedente rend son interprete : sans cela, ses minuteries
+        # continueraient de tourner derriere celle qu'on vient d'ouvrir.
+        if self.onglet.document is not None and self.onglet.document is not document:
+            self.onglet.document.ferme()
         self.onglet.document = document
         self.onglet.defilement = 0.0
         if empiler:
@@ -344,7 +378,20 @@ class Navigateur:
         document = self.onglet.document
         if not document:
             return
-        lien = document.lien_a(x, y - HAUTEUR_CHROME + self.onglet.defilement)
+
+        page_y = y - HAUTEUR_CHROME + self.onglet.defilement
+        # Le script de la page voit le clic en premier, et peut l'annuler : un
+        # `preventDefault()` sur un lien est la facon dont la moitie des sites
+        # detournent la navigation.
+        cible = document.element_a(x, page_y)
+        if cible is not None and not document.evenement_js(
+                cible, "click", {"clientX": x, "clientY": y - HAUTEUR_CHROME,
+                                 "pageX": x, "pageY": page_y}):
+            bo.redessiner()
+            return
+        self.bat()
+
+        lien = document.lien_a(x, page_y)
         if lien:
             self.ouvre(lien)
 
@@ -417,6 +464,16 @@ def _fermeture():
     return True
 
 
+def _tic():
+    # Battement de l'hote, toutes les 16 ms. C'est par lui que vivent les
+    # minuteries de la page : sans ce branchement, un `setTimeout` serait
+    # enregistre et jamais echu.
+    try:
+        _navigateur.bat()
+    except Exception:
+        traceback.print_exc(file=sys.stdout)
+
+
 def main():
     bo.enregistrer({
         "peindre": _peindre,
@@ -425,6 +482,7 @@ def main():
         "survol": _survol,
         "molette": _molette,
         "fermeture": _fermeture,
+        "tic": _tic,
     })
     bo.ouvrir("Navigateur — Bouchaud OS")
     depart = sys.argv[1] if len(sys.argv) > 1 else "bo:accueil"

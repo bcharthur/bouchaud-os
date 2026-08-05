@@ -39,6 +39,10 @@ extern "C" {
 #include "quickjs.h"
 }
 
+// `CONFIG_VERSION` n'est defini que pour les unites de QuickJS lui-meme :
+// `build-quickjs.sh` en depose la valeur dans cet en-tete.
+#include "bojs_version.h"
+
 #include <cstring>
 #include <ctime>
 #include <vector>
@@ -553,13 +557,6 @@ PyObject *bojs_detruit(PyObject *, PyObject *args)
     g_contextes[indice] = nullptr;
     Py_RETURN_NONE;
 }
-
-// `CONFIG_VERSION` n'est defini que pour les unites de QuickJS lui-meme ; la
-// chaine est donc passee a la compilation de ce fichier, et vaut « inconnue »
-// si personne ne l'a fournie.
-#ifndef BOJS_VERSION_QUICKJS
-#define BOJS_VERSION_QUICKJS "inconnue"
-#endif
 
 PyObject *bojs_version(PyObject *, PyObject *)
 {

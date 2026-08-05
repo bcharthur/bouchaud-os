@@ -30,7 +30,6 @@ mkdir -p "$WORK"
 if [ ! -f "$WORK/bojs.so" ] || [ navigateur/bojs.cpp -nt "$WORK/bojs.so" ]; then
     echo "== compilation de bojs pour le Python local =="
     g++ -O1 -shared -fPIC -DBOJS_MODULE_PARTAGE \
-        -DBOJS_VERSION_QUICKJS="\"$(cat "$JS/VERSION")\"" \
         $(python3-config --includes) -I"$JS/include" -I navigateur \
         navigateur/bojs.cpp "$JS/lib/libquickjs.a" \
         -o "$WORK/bojs.so"

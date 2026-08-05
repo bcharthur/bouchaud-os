@@ -1,21 +1,29 @@
-"""Verifications du moteur web, hors de l'OS.
+"""Verifications du moteur web.
 
-Lance par `tools/userland/test-moteur.sh`. Le module `bo` — d'ordinaire fourni
-par l'hote Qt — est remplace ici par un bouchon : la mesure du texte devient une
-regle de trois, et le decodage d'image se contente de lire l'en-tete PNG. Tout
-le reste du moteur est le vrai.
+Le meme fichier sert dans les deux environnements, et c'est voulu :
 
-Ce que ces verifications couvrent : l'analyse HTML, les selecteurs, le DOM vu
-depuis JavaScript, les evenements, les minuteries, et la mise en page. Ce
-qu'elles ne couvrent pas : le rendu a l'ecran et le reseau, qui demandent l'un
-la machine, l'autre le monde exterieur.
+- sur la machine de developpement (`tools/userland/test-moteur.sh`), l'hote Qt
+  n'existe pas ; le module `bo` est remplace par un bouchon qui mesure le texte
+  a la regle de trois et lit la taille d'un PNG dans son en-tete ;
+- sous Bouchaud OS (`exec /bo-navigateur /usr/share/bo-navigateur/test_moteur.py`),
+  le vrai `bo` est la : vraies metriques de fonte, vrai decodage d'image par Qt.
+
+Tout le reste du moteur est le vrai dans les deux cas. Les verifications qui
+suivent ne dependent d'aucune mesure au pixel pres, justement pour que le
+resultat soit le meme des deux cotes — ce qui fait de l'execution locale un
+filet utile, et de celle sous l'OS une preuve.
+
+Ce qu'elles couvrent : l'analyse HTML, les selecteurs, le DOM vu depuis
+JavaScript, les evenements, les minuteries, les promesses, le bac a sable, les
+images et la mise en page. Ce qu'elles ne couvrent pas : le rendu a l'ecran et
+le reseau, qui demandent l'un un ecran, l'autre le monde exterieur.
 """
 
 import struct
 import sys
 import types
 
-# --- Bouchon de l'hote --------------------------------------------------------
+# --- L'hote : le vrai s'il est la, un bouchon sinon --------------------------
 
 _images = []
 
@@ -35,15 +43,20 @@ def _image(octets):
     return None
 
 
-bo = types.ModuleType("bo")
-bo.largeur_texte = _largeur_texte
-bo.hauteur_ligne = lambda taille, fixe=False: taille * 1.35
-bo.taille = lambda: (1280, 720)
-bo.titre = lambda _: None
-bo.redessiner = lambda: None
-bo.image = _image
-bo.formats_images = lambda: ["png"]
-sys.modules["bo"] = bo
+try:
+    import bo  # fourni par l'hote Qt quand on tourne sous l'OS
+    HOTE_REEL = True
+except ImportError:
+    bo = types.ModuleType("bo")
+    bo.largeur_texte = _largeur_texte
+    bo.hauteur_ligne = lambda taille, fixe=False: taille * 1.35
+    bo.taille = lambda: (1280, 720)
+    bo.titre = lambda _: None
+    bo.redessiner = lambda: None
+    bo.image = _image
+    bo.formats_images = lambda: ["png"]
+    sys.modules["bo"] = bo
+    HOTE_REEL = False
 
 sys.path.insert(0, ".")
 
@@ -435,10 +448,13 @@ def verifie_images():
     import base64
     from moteur import images
 
-    # PNG 2x2 valide, en clair dans le fichier pour ne dependre de rien.
+    # PNG 2x2 reel — quatre pixels de couleurs differentes —, en clair dans le
+    # fichier pour ne dependre d'aucun outil. Il doit etre valide au sens strict
+    # (CRC de chaque bloc, flux zlib coherent) : sous l'OS c'est le vrai libpng
+    # de Qt qui le lit, et il refuse ce qu'un bouchon laisserait passer.
     png = base64.b64decode(
-        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGP8z8"
-        "DAwMDAwMDAwMAAAA8AAf9jHkAAAAAASUVORK5CYII=")
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFElEQVR42mP4"
+        "z8DAAMIM////ZwAAHu8E/HMcU8wAAAAASUVORK5CYII=")
     images.vide()
     source = "data:image/png;base64," + base64.b64encode(png).decode()
     doc = document('<body><img src="%s" alt="deux pixels"></body>' % source)
@@ -477,9 +493,27 @@ def verifie_bac_a_sable():
 
 # --- Execution ----------------------------------------------------------------
 
+def verifie_hote_reel():
+    """Ce qui ne se verifie que sur la machine : les formats d'image de Qt.
+
+    Sur la machine de developpement, l'hote est un bouchon et il n'y a rien a
+    prouver ; sous l'OS, cette verification atteste que les greffons JPEG et GIF
+    sont bien lies en dur — ce qu'un binaire statique ne peut pas obtenir
+    autrement.
+    """
+    if not HOTE_REEL:
+        return
+    formats = [f.lower() for f in bo.formats_images()]
+    for attendu in ("png", "jpeg", "gif", "bmp"):
+        verifie("hote: format %s reconnu" % attendu, attendu in formats, formats)
+    largeur = bo.largeur_texte("Bouchaud", 16.0, False, False)
+    verifie("hote: la mesure de texte est reelle", largeur > 0, largeur)
+
+
 def principal():
     import bojs
     print("QuickJS %s, CPython %s" % (bojs.version(), sys.version.split()[0]))
+    print("hote : %s" % ("Qt reel" if HOTE_REEL else "bouchon local"))
     print()
 
     for verification in (
@@ -496,6 +530,7 @@ def principal():
         verifie_evenement_apres_chargement,
         verifie_images,
         verifie_bac_a_sable,
+        verifie_hote_reel,
     ):
         nom = verification.__name__.replace("verifie_", "")
         avant = len(_echecs)
