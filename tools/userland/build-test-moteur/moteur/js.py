@@ -864,8 +864,11 @@ class Contexte:
 
     def _recupere(self, methode, url, corps, entetes):
         try:
+            # `brut=True` : une requete du script veut le corps tel quel, pas
+            # la page d'habillage que le navigateur fabrique pour l'affichage.
+            # Sans cela, un `fetch` de JSON recevait « Type non affichable ».
             reponse = reseau.charge(url, methode=methode, corps=corps,
-                                    entetes=entetes or {})
+                                    entetes=entetes or {}, brut=True)
         except Exception as e:  # noqa: BLE001
             self.journal("warn", "requete %s : %s" % (url, e))
             return {"status": 0, "statusText": str(e), "text": "", "url": url,

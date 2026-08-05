@@ -804,6 +804,37 @@ def verifie_youtube_page():
             any("Big Buck Bunny" in t for t in textes), textes[:8])
 
 
+def verifie_requete_brute():
+    """`fetch` et `XMLHttpRequest` doivent rendre le corps, pas une page.
+
+    Le moteur enrobe de HTML ce qu'il ne sait pas afficher — c'est ce qui permet
+    d'ouvrir un fichier texte dans une fenetre. Mais une requete faite par un
+    script veut la ressource elle-meme : lui rendre « Type non affichable »
+    casse tout `fetch` de JSON.
+    """
+    from moteur import reseau
+
+    vues = {}
+    vrai_charge = reseau.charge
+
+    def faux_charge(url, methode="GET", corps=None, entetes=None, brut=False):
+        vues["brut"] = brut
+        return reseau.Reponse(url, '{"x": 1}', "application/json", 200,
+                              octets=b'{"x": 1}')
+
+    doc = document("<body></body>")
+    contexte = js.Contexte(doc)
+    reseau.charge = faux_charge
+    try:
+        contexte.appel("requete", 1, "GET", "https://exemple.test/donnees.json",
+                       None, {}, True)
+    finally:
+        reseau.charge = vrai_charge
+    verifie("requete: le corps est demande tel quel", vues.get("brut") is True,
+            vues)
+    contexte.ferme()
+
+
 def verifie_bac_a_sable():
     """Une page ne doit pas pouvoir atteindre le systeme."""
     doc = document("<body></body>")
@@ -861,6 +892,7 @@ def principal():
         verifie_youtube_signature,
         verifie_youtube_base_js,
         verifie_youtube_page,
+        verifie_requete_brute,
         verifie_bac_a_sable,
         verifie_hote_reel,
     ):

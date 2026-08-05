@@ -538,14 +538,35 @@ construction cote utilisateur : `tools/userland/README.md`.
       se remplissant la premiere, aucun son n'etait decode ; l'horloge, qui est
       celle du son, ne demarrait jamais ; aucune image n'arrivait a echeance, la
       file ne se vidait pas. La lecture restait figee sur sa premiere image.
-- [ ] **Gros transferts HTTP** (defaut ouvert). Une requete `Range` de 512 Ko
-      vers un serveur local n'aboutit pas : le serveur repond, le client reste
-      en lecture. Les transferts de quelques kilo-octets — pages, images — n'ont
-      jamais pose de probleme, ce qui situe le defaut du cote de la reception
-      d'un flux TCP soutenu. C'est ce qui empeche aujourd'hui de lire une video
-      **depuis le reseau**, alors que le meme fichier en local se lit sans
-      difficulte. Piste : fenetre de reception et reassemblage dans
-      `net/transport/`.
+- [x] **Gros transferts HTTP** : corriges. Deux defauts, tous deux dans la pile,
+      et aucun n'etait la ou la premiere hypothese le placait.
+
+      **Le noyau ne repondait a aucune requete ARP** — il ne faisait qu'en
+      emettre. La passerelle revalide periodiquement son entree ; sans reponse,
+      elle l'oublie et cesse de router vers nous. Un court transfert se termine
+      avant l'echeance, un long non : la difference de taille etait en realite
+      une difference de duree. `poll_ip` sert desormais l'ARP avant tout le
+      reste, et examine jusqu'a trente-deux trames par passage au lieu d'une.
+
+      **`connect` n'emettait qu'un seul SYN.** Le premier paquet vers un hote
+      inconnu part souvent avant que son adresse materielle soit resolue : il se
+      perd, et sans retransmission la connexion echouait — en rendant
+      « connexion refusee », ce qui egarait le diagnostic. Le navigateur y
+      echappait sans le savoir, commencant toujours par une requete DNS qui
+      resolvait l'ARP au passage. Le SYN est retransmis jusqu'a cinq fois, un
+      RST restant une fin de non-recevoir immediate.
+
+      Le tampon de reordonnancement passe de seize a soixante-quatre segments :
+      il doit couvrir une fenetre entiere en vol.
+
+      Mesure, depuis un miroir public : 64 octets en 165 ms, 512 Ko en 226 ms,
+      **1 808 488 octets d'une traite en 285 ms**. Et depuis le navigateur, par
+      `XMLHttpRequest`, une tranche de 512 Ko avec le statut 206.
+- [x] **`fetch` et `XMLHttpRequest` rendent le corps** : ils recevaient la page
+      d'habillage que le moteur fabrique pour ce qu'il ne sait pas afficher.
+      Utile pour ouvrir un fichier texte dans une fenetre, desastreux pour un
+      script qui recupere du JSON — et c'est precisement ce que fait l'API de
+      YouTube.
 - [ ] **Ce qui manque encore pour l'interface de YouTube elle-meme** : `canvas`
       et Web Components. Sans objet pour la lecture — la page de lecture batie
       ici s'en passe — mais necessaire si l'on voulait un jour afficher leur
