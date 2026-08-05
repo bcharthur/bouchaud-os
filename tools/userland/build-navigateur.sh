@@ -32,8 +32,10 @@ OUT=${OUT:-out-navigateur}
 WORK=${WORK:-build-navigateur}
 QT=${QT:-$ROOT/build-qt/install}
 PY=${PY:-$ROOT/out-python-embed}
+JS=${JS:-$ROOT/out-quickjs}
 case "$WORK" in /*) ;; *) WORK=$ROOT/$WORK ;; esac
 case "$OUT" in /*) ;; *) OUT=$ROOT/$OUT ;; esac
+case "$JS" in /*) ;; *) JS=$ROOT/$JS ;; esac
 
 [ -x "$QT/bin/qmake" ] || {
     echo "Qt statique introuvable dans $QT — lancer ./build-qt.sh" >&2
@@ -44,9 +46,13 @@ case "$OUT" in /*) ;; *) OUT=$ROOT/$OUT ;; esac
     echo "  LIBC=glibc OUT=out-python-embed ./build-python.sh" >&2
     exit 1
 }
+[ -f "$JS/lib/libquickjs.a" ] || {
+    echo "libquickjs.a introuvable dans $JS — lancer ./build-quickjs.sh" >&2
+    exit 1
+}
 
 rm -rf "$WORK" && mkdir -p "$WORK"
-cp navigateur/hote.cpp "$WORK/"
+cp navigateur/hote.cpp navigateur/bojs.cpp navigateur/bojs.h "$WORK/"
 
 cat > "$WORK/bo-navigateur.pro" <<EOF
 TEMPLATE = app
@@ -54,9 +60,9 @@ TARGET   = bo-navigateur
 QT      += core gui widgets
 CONFIG  += console static
 CONFIG  -= app_bundle
-SOURCES += hote.cpp
+SOURCES += hote.cpp bojs.cpp
 
-INCLUDEPATH += $PY/usr/include
+INCLUDEPATH += $PY/usr/include $JS/include
 
 # static-pie : l'OS charge le binaire ou il veut dans son creneau utilisateur.
 QMAKE_LFLAGS   += -static-pie
@@ -65,7 +71,13 @@ QMAKE_CXXFLAGS += -fPIE
 # L'ordre compte : libpython vient avant les bibliotheques qu'elle reclame.
 # OpenSSL est la pour le module \`ssl\` — c'est lui qui donne HTTPS au
 # navigateur. brotli et bz2 sont les dependances statiques de freetype.
+# Les greffons d'image sont des archives statiques : `Q_IMPORT_PLUGIN` les
+# declare, encore faut-il les fournir a l'editeur de liens.
+GREFFONS = $QT/plugins/imageformats
 QMAKE_LIBS += $PY/usr/lib/libpython3.12.a $PY/usr/lib/libpythonaux.a \\
+              $JS/lib/libquickjs.a \\
+              \$\$GREFFONS/libqjpeg.a \$\$GREFFONS/libqgif.a \$\$GREFFONS/libqico.a \\
+              -ljpeg \\
               -lssl -lcrypto -lutil -lm -lbrotlidec -lbrotlicommon -lbz2
 EOF
 
@@ -78,6 +90,12 @@ strip -s "$WORK/bo-navigateur" -o "$OUT/bo-navigateur"
 cp "$PY/usr/lib/python312.zip" "$OUT/usr/lib/"
 cp navigateur/navigateur.py navigateur/exemple-webview.py "$OUT/usr/share/bo-navigateur/"
 cp -r navigateur/moteur "$OUT/usr/share/bo-navigateur/"
+# `prelude.js` est du code, pas une ressource optionnelle : sans lui le
+# JavaScript d'une page ne trouve ni `document` ni `setTimeout`.
+[ -f "$OUT/usr/share/bo-navigateur/moteur/prelude.js" ] || {
+    echo "prelude.js manquant dans le paquet" >&2
+    exit 1
+}
 
 # pywebview et son moteur Bouchaud OS : c'est ce qui permet de faire tourner du
 # code pywebview sans le modifier.

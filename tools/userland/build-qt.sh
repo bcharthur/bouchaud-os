@@ -49,12 +49,12 @@ QTURL=${QTURL:-http://archive.ubuntu.com/ubuntu/pool/universe/q/qtbase-opensourc
 # systeme, en version statique.
 verifie_dependances() {
     local manquantes=""
-    for lib in libfreetype.a libpng.a libpcre2-16.a libz.a libbrotlidec.a libbz2.a; do
+    for lib in libfreetype.a libpng.a libjpeg.a libpcre2-16.a libz.a libbrotlidec.a libbz2.a; do
         [ -f "/usr/lib/x86_64-linux-gnu/$lib" ] || manquantes="$manquantes $lib"
     done
     if [ -n "$manquantes" ]; then
         echo "bibliotheques statiques manquantes :$manquantes" >&2
-        echo "  apt install libfreetype-dev libpng-dev libpcre2-dev zlib1g-dev libbrotli-dev libbz2-dev" >&2
+        echo "  apt install libfreetype-dev libpng-dev libjpeg-dev libpcre2-dev zlib1g-dev libbrotli-dev libbz2-dev" >&2
         exit 1
     fi
 }
@@ -99,9 +99,9 @@ EOF
             -no-opengl -no-egl -no-eglfs -no-gbm -no-kms -no-vulkan \
             -no-xcb -no-feature-xlib \
             -no-glib -no-dbus -no-icu -no-fontconfig -no-openssl -no-cups \
-            -no-harfbuzz -no-libjpeg -no-libudev -no-libinput -no-mtdev -no-tslib \
-            -no-gif \
-            -system-zlib -system-libpng -system-freetype -system-pcre \
+            -no-harfbuzz -no-libudev -no-libinput -no-mtdev -no-tslib \
+            -system-zlib -system-libpng -system-libjpeg -system-freetype -system-pcre \
+            -gif \
             -no-sql-sqlite -no-sql-mysql -no-sql-psql -no-sql-odbc \
             -nomake examples -nomake tests \
             -silent > configure.log 2>&1 || { tail -25 configure.log; exit 1; }

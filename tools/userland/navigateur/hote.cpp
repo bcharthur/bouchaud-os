@@ -45,10 +45,14 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
+#include "bojs.h"
+
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QWidget>
 #include <QtGui/QPainter>
 #include <QtGui/QFontMetricsF>
+#include <QtGui/QImage>
+#include <QtGui/QImageReader>
 #include <QtGui/QGuiApplication>
 #include <QtGui/QScreen>
 #include <QtGui/QKeyEvent>
@@ -63,6 +67,14 @@
 #include <cstring>
 
 Q_IMPORT_PLUGIN(QLinuxFbIntegrationPlugin)
+
+// Les formats d'image sont des greffons Qt, et un binaire statique ne charge
+// aucun greffon : sans ces trois lignes, `QImage::loadFromData` ne saurait lire
+// que le PNG et le BMP, qui sont dans QtGui meme. Les declarer ici les lie en
+// dur, comme la plateforme d'affichage.
+Q_IMPORT_PLUGIN(QJpegPlugin)
+Q_IMPORT_PLUGIN(QGifPlugin)
+Q_IMPORT_PLUGIN(QICOPlugin)
 
 namespace {
 
@@ -80,6 +92,24 @@ QColor couleurDepuisEntier(long valeur)
     const int a = (valeur >> 24) & 0xFF;
     return QColor((valeur >> 16) & 0xFF, (valeur >> 8) & 0xFF, valeur & 0xFF,
                   a == 0 ? 255 : a);
+}
+
+// --- Cache d'images ---------------------------------------------------------
+
+/// Images decodees, designees par leur indice dans ce tableau.
+///
+/// Le decodage a lieu une fois, au chargement ; la liste d'affichage ne porte
+/// qu'un entier. Sans ce detour, chaque rafraichissement redecoderait tous les
+/// PNG de la page — a 60 trames par seconde et sous emulation, c'est la
+/// difference entre une page qui defile et une page qui rame.
+QVector<QImage> g_images;
+
+const QImage *imageParIdentifiant(int identifiant)
+{
+    if (identifiant < 0 || identifiant >= g_images.size())
+        return nullptr;
+    const QImage &image = g_images.at(identifiant);
+    return image.isNull() ? nullptr : &image;
 }
 
 QFont fabriqueFonte(double taille, bool gras, bool italique, bool fixe)
@@ -297,16 +327,15 @@ private:
         } else if (!std::strcmp(operation, "declip")) {
             p.setClipping(false);
         } else if (!std::strcmp(operation, "image")) {
-            // Donnees brutes d'un format que Qt sait lire (PNG, BMP, XPM...).
+            // L'image a ete decodee une fois par `bo.image` ; ici on ne fait que
+            // la poser. Redecoder a chaque trame couterait un decodage PNG
+            // complet par image et par rafraichissement.
             double x, y, l, h;
-            Py_buffer donnees;
-            if (PyArg_ParseTuple(element, "sdddds*", &operation, &x, &y, &l, &h, &donnees)) {
-                QImage image;
-                if (image.loadFromData(reinterpret_cast<const uchar *>(donnees.buf),
-                                       int(donnees.len))) {
-                    p.drawImage(QRectF(x, y, l, h), image);
-                }
-                PyBuffer_Release(&donnees);
+            int identifiant;
+            if (PyArg_ParseTuple(element, "sddddi", &operation, &x, &y, &l, &h,
+                                 &identifiant)) {
+                if (const QImage *image = imageParIdentifiant(identifiant))
+                    p.drawImage(QRectF(x, y, l, h), *image);
             }
         }
         PyErr_Clear();
@@ -433,6 +462,41 @@ PyObject *bo_traiter_evenements(PyObject *, PyObject *)
     Py_RETURN_NONE;
 }
 
+PyObject *bo_image(PyObject *, PyObject *args)
+{
+    Py_buffer donnees;
+    if (!PyArg_ParseTuple(args, "y*", &donnees))
+        return nullptr;
+
+    QImage image;
+    const bool lue = image.loadFromData(
+        reinterpret_cast<const uchar *>(donnees.buf), int(donnees.len));
+    PyBuffer_Release(&donnees);
+
+    if (!lue || image.isNull())
+        // Format inconnu ou donnees tronquees : l'appelant retombe sur le
+        // texte de remplacement, comme le ferait n'importe quel navigateur.
+        Py_RETURN_NONE;
+
+    g_images.append(image);
+    return Py_BuildValue("(iii)", g_images.size() - 1, image.width(), image.height());
+}
+
+PyObject *bo_formats_images(PyObject *, PyObject *)
+{
+    PyObject *liste = PyList_New(0);
+    if (!liste)
+        return nullptr;
+    for (const QByteArray &format : QImageReader::supportedImageFormats()) {
+        PyObject *nom = PyUnicode_FromString(format.constData());
+        if (nom) {
+            PyList_Append(liste, nom);
+            Py_DECREF(nom);
+        }
+    }
+    return liste;
+}
+
 PyMethodDef bo_methodes[] = {
     {"enregistrer", bo_enregistrer, METH_VARARGS,
      "enregistrer({'peindre': f, 'touche': f, 'clic': f, ...})"},
@@ -448,6 +512,10 @@ PyMethodDef bo_methodes[] = {
     {"quitter", bo_quitter, METH_NOARGS, "termine la boucle d'evenements"},
     {"traiter_evenements", bo_traiter_evenements, METH_NOARGS,
      "laisse Qt traiter sa file pendant un travail long"},
+    {"image", bo_image, METH_VARARGS,
+     "image(octets) -> (identifiant, largeur, hauteur), ou None si illisible"},
+    {"formats_images", bo_formats_images, METH_NOARGS,
+     "formats_images() -> formats que l'hote sait decoder"},
     {nullptr, nullptr, 0, nullptr},
 };
 
@@ -477,9 +545,10 @@ int main(int argc, char **argv)
 {
     QApplication app(argc, argv);
 
-    // Le module doit exister avant l'initialisation de l'interprete : un
+    // Les modules doivent exister avant l'initialisation de l'interprete : un
     // executable statique ne peut pas charger d'extension apres coup.
     PyImport_AppendInittab("bo", initialise_bo);
+    PyImport_AppendInittab("bojs", initialise_bojs);
 
     const char *prefixe = std::getenv("BO_PREFIXE");
     if (!prefixe)
