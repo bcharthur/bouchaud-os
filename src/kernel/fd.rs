@@ -39,6 +39,8 @@ pub enum FdKind {
     InputKeyboard,
     /// `/dev/input/event1` (souris).
     InputMouse,
+    /// `/dev/dsp` : sortie audio PCM, facon OSS.
+    Audio,
     /// Extremite d'un tube : (etat partage, cote lecture ?).
     Pipe(Rc<RefCell<PipeState>>, bool),
     /// Instance `epoll` : liste de (fd surveille, evenements demandes, donnee).
@@ -282,6 +284,9 @@ pub fn device_for_path(path: &str) -> Option<FdKind> {
         "/dev/fb0" | "/dev/fb" | "/dev/graphics/fb0" => Some(FdKind::Framebuffer),
         "/dev/input/event0" => Some(FdKind::InputKeyboard),
         "/dev/input/event1" => Some(FdKind::InputMouse),
+        // Sortie audio. `/dev/dsp` est le nom OSS, `/dev/audio` son alias
+        // historique : les deux menent au meme pilote AC'97.
+        "/dev/dsp" | "/dev/dsp0" | "/dev/audio" | "/dev/sound/dsp" => Some(FdKind::Audio),
         _ => None,
     }
 }

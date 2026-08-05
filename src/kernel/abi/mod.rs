@@ -231,6 +231,18 @@ pub fn user_write_u32(addr: u64, value: u32) -> bool {
     user_write(addr, &value.to_le_bytes())
 }
 
+/// Lit une valeur 32 bits depuis l'espace utilisateur.
+///
+/// Symetrique de [`user_write_u32`] : les ioctls qui echangent un entier — le
+/// reglage d'un flux audio, par exemple — lisent la demande puis reecrivent au
+/// meme endroit ce que le pilote a reellement retenu.
+pub fn user_read_u32(addr: u64) -> Option<u32> {
+    let bytes = user_read(addr, 4)?;
+    let mut value = [0u8; 4];
+    value.copy_from_slice(&bytes);
+    Some(u32::from_le_bytes(value))
+}
+
 /// Lit une valeur 64 bits depuis l'espace utilisateur.
 pub fn user_read_u64(addr: u64) -> Option<u64> {
     let bytes = user_read(addr, 8)?;

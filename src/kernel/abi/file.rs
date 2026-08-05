@@ -137,6 +137,10 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
             data.len() as i64
         }
         FdKind::Null => 0,
+        // Pas de capture : la sortie audio ne se lit pas. Rendre 0 vaut « fin
+        // de fichier », ce qu'un programme sait interpreter, alors qu'une
+        // erreur le ferait renoncer.
+        FdKind::Audio => 0,
         FdKind::Zero => {
             let zeros = alloc::vec![0u8; count];
             if user_write(buffer, &zeros) { count as i64 } else { -errno::EFAULT }
@@ -291,6 +295,36 @@ pub fn sys_write(fd: i32, buffer: u64, count: usize) -> i64 {
         FdKind::Null => count as i64,
         FdKind::Zero => count as i64,
         FdKind::Random => count as i64,
+        FdKind::Audio => {
+            if !crate::drivers::ac97::pret() && !crate::drivers::ac97::init() {
+                return -errno::ENODEV;
+            }
+            let ecrits = crate::drivers::ac97::ecrit(&data);
+            if ecrits == 0 {
+                // Les tampons sont pleins. En mode bloquant on attend qu'un
+                // tampon se libere plutot que de rendre une erreur : c'est ce
+                // qu'attend un programme qui pousse du son en boucle.
+                let bloquant = {
+                    let borrowed = process.borrow();
+                    borrowed.files.get(fd).map(|d| d.flags & O_NONBLOCK == 0).unwrap_or(true)
+                };
+                if !bloquant {
+                    return -errno::EAGAIN;
+                }
+                let echeance = crate::kernel::timer::ticks()
+                    + crate::kernel::timer::ms_to_ticks(200);
+                while crate::drivers::ac97::libres() == 0
+                    && crate::kernel::timer::ticks() < echeance
+                {
+                    task::yield_now();
+                    crate::arch::x86_64::cpu::wait_for_interrupt();
+                }
+                let ecrits = crate::drivers::ac97::ecrit(&data);
+                if ecrits == 0 { -errno::EAGAIN } else { ecrits as i64 }
+            } else {
+                ecrits as i64
+            }
+        }
         FdKind::File(node) => {
             let (offset, append) = {
                 let borrowed = process.borrow();
@@ -1024,6 +1058,26 @@ pub fn sys_ftruncate(fd: i32, length: usize) -> i64 {
 
 // --- ioctl -------------------------------------------------------------------
 
+// --- Sortie audio, protocole OSS --------------------------------------------
+// Les numeros portent leur taille et leur sens de transfert, comme tout ioctl
+// Linux : `0xC0045002` = lecture+ecriture d'un entier de 4 octets, groupe 'P',
+// numero 2.
+const SNDCTL_DSP_RESET: u64 = 0x0000_5000;
+const SNDCTL_DSP_SYNC: u64 = 0x0000_5001;
+const SNDCTL_DSP_SPEED: u64 = 0xC004_5002;
+const SNDCTL_DSP_STEREO: u64 = 0xC004_5003;
+const SNDCTL_DSP_GETBLKSIZE: u64 = 0xC004_5004;
+const SNDCTL_DSP_SETFMT: u64 = 0xC004_5005;
+const SNDCTL_DSP_CHANNELS: u64 = 0xC004_5006;
+const SNDCTL_DSP_POST: u64 = 0x0000_5008;
+const SNDCTL_DSP_GETFMTS: u64 = 0x8004_500B;
+const SNDCTL_DSP_GETOSPACE: u64 = 0x800C_500C;
+const SNDCTL_DSP_GETODELAY: u64 = 0x8004_5017;
+/// PCM 8 bits non signe.
+const AFMT_U8: u32 = 0x0000_0008;
+/// PCM 16 bits signe, petit-boutiste.
+const AFMT_S16_LE: u32 = 0x0000_0010;
+
 const TCGETS: u64 = 0x5401;
 const TCSETS: u64 = 0x5402;
 const TIOCGWINSZ: u64 = 0x5413;
@@ -1052,6 +1106,12 @@ const VT_WAITACTIVE: u64 = 0x5607;
 
 /// `ioctl`.
 pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
+    // Le numero d'ioctl est un `int` cote appelant. Ceux dont le bit de poids
+    // fort est mis — c'est-a-dire tous ceux qui transferent des donnees vers
+    // l'appelant, dont la famille OSS `SNDCTL_*` — arrivent donc **etendus en
+    // signe** sur 64 bits : `0xC0045002` devient `0xFFFFFFFFC0045002`, et
+    // aucune comparaison ne correspond plus. On ne garde que les 32 bits utiles.
+    let request = request & 0xFFFF_FFFF;
     let process = task::current_process();
     let kind = match process.borrow().files.get(fd) {
         Some(desc) => desc.kind.clone(),
@@ -1059,6 +1119,123 @@ pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
     };
 
     match kind {
+        // --- Sortie audio, protocole OSS -------------------------------------
+        //
+        // OSS plutot qu'ALSA : quatre ioctls suffisent a regler un flux, alors
+        // qu'ALSA demande une machine a etats et une zone de controle partagee.
+        // C'est aussi ce que SDL et la plupart des lecteurs essaient en premier
+        // quand ils ne trouvent pas mieux.
+        FdKind::Audio => {
+            if !crate::drivers::ac97::pret() && !crate::drivers::ac97::init() {
+                return -errno::ENODEV;
+            }
+            match request {
+                SNDCTL_DSP_RESET | SNDCTL_DSP_SYNC | SNDCTL_DSP_POST => {
+                    if request == SNDCTL_DSP_RESET {
+                        crate::drivers::ac97::arrete();
+                    }
+                    0
+                }
+                SNDCTL_DSP_SPEED => {
+                    let demande = match super::user_read_u32(arg) {
+                        Some(v) => v,
+                        None => return -errno::EFAULT,
+                    };
+                    let (_, voies, bits) = crate::drivers::ac97::format();
+                    let (retenue, _, _) =
+                        crate::drivers::ac97::configure(demande, voies, bits);
+                    if !user_write(arg, &retenue.to_le_bytes()) {
+                        return -errno::EFAULT;
+                    }
+                    0
+                }
+                SNDCTL_DSP_CHANNELS => {
+                    let demande = match super::user_read_u32(arg) {
+                        Some(v) => v,
+                        None => return -errno::EFAULT,
+                    };
+                    let (frequence, _, bits) = crate::drivers::ac97::format();
+                    let (_, retenues, _) = crate::drivers::ac97::configure(
+                        frequence, demande.min(255) as u8, bits);
+                    if !user_write(arg, &(retenues as u32).to_le_bytes()) {
+                        return -errno::EFAULT;
+                    }
+                    0
+                }
+                SNDCTL_DSP_STEREO => {
+                    let demande = match super::user_read_u32(arg) {
+                        Some(v) => v,
+                        None => return -errno::EFAULT,
+                    };
+                    let (frequence, _, bits) = crate::drivers::ac97::format();
+                    let voies = if demande != 0 { 2 } else { 1 };
+                    let (_, retenues, _) =
+                        crate::drivers::ac97::configure(frequence, voies, bits);
+                    if !user_write(arg, &((retenues as u32 - 1)).to_le_bytes()) {
+                        return -errno::EFAULT;
+                    }
+                    0
+                }
+                SNDCTL_DSP_SETFMT => {
+                    let demande = match super::user_read_u32(arg) {
+                        Some(v) => v,
+                        None => return -errno::EFAULT,
+                    };
+                    let (frequence, voies, _) = crate::drivers::ac97::format();
+                    // On ne sait produire que ces deux-la ; toute autre demande
+                    // se voit repondre ce qu'on fera reellement, comme le veut
+                    // le protocole.
+                    let bits = if demande == AFMT_U8 { 8 } else { 16 };
+                    let (_, _, retenus) =
+                        crate::drivers::ac97::configure(frequence, voies, bits);
+                    let format = if retenus == 8 { AFMT_U8 } else { AFMT_S16_LE };
+                    if !user_write(arg, &format.to_le_bytes()) {
+                        return -errno::EFAULT;
+                    }
+                    0
+                }
+                SNDCTL_DSP_GETFMTS => {
+                    if !user_write(arg, &(AFMT_U8 | AFMT_S16_LE).to_le_bytes()) {
+                        return -errno::EFAULT;
+                    }
+                    0
+                }
+                SNDCTL_DSP_GETBLKSIZE => {
+                    if !user_write(arg, &4096u32.to_le_bytes()) {
+                        return -errno::EFAULT;
+                    }
+                    0
+                }
+                SNDCTL_DSP_GETOSPACE => {
+                    // `struct audio_buf_info` : fragments libres, total, taille,
+                    // octets libres.
+                    let libres = crate::drivers::ac97::libres() as u32;
+                    let octets = crate::drivers::ac97::place_disponible() as u32;
+                    let mut buffer = [0u8; 16];
+                    buffer[0..4].copy_from_slice(&libres.to_le_bytes());
+                    buffer[4..8].copy_from_slice(&32u32.to_le_bytes());
+                    buffer[8..12].copy_from_slice(&4096u32.to_le_bytes());
+                    buffer[12..16].copy_from_slice(&octets.to_le_bytes());
+                    if !user_write(arg, &buffer) {
+                        return -errno::EFAULT;
+                    }
+                    0
+                }
+                SNDCTL_DSP_GETODELAY => {
+                    // Octets encore en vol : c'est ce qui permet a un lecteur de
+                    // savoir de combien l'image est en avance sur le son.
+                    let (frequence, voies, bits) = crate::drivers::ac97::format();
+                    let (_, _, _, _, en_vol, _) = crate::drivers::ac97::resume();
+                    let par_tampon = 2048 * voies as u32 * (bits as u32 / 8)
+                        * frequence / crate::drivers::ac97::FREQUENCE_NATIVE;
+                    if !user_write(arg, &(en_vol as u32 * par_tampon).to_le_bytes()) {
+                        return -errno::EFAULT;
+                    }
+                    0
+                }
+                _ => -errno::EINVAL,
+            }
+        }
         FdKind::Console => match request {
             TCGETS => {
                 // `struct termios` **version noyau** : quatre drapeaux, `c_line`,

@@ -86,6 +86,7 @@ df
 ls /
 exec /ring3-selftest
 exec /posix-probe
+exec /audio-probe
 exec /qpa-probe
 SCENARIO
 
@@ -152,6 +153,7 @@ timeout "$TIMEOUT" qemu-system-x86_64 \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -netdev user,id=net0 \
     -device e1000,netdev=net0 \
+    -audiodev none,id=muet -device AC97,audiodev=muet \
     -serial "file:$LOG"
 QEMU_STATUS=$?
 
