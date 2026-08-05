@@ -11,6 +11,7 @@ de construction côté utilisateur.
 ./build-python.sh          # CPython 3.12 statique + bibliothèque standard  (§11)
 ./build-qt.sh              # Qt 5.15 statique + démonstration linuxfb        (§9)
 ./build-quickjs.sh         # QuickJS statique : le moteur JavaScript         (§12)
+./build-ffmpeg.sh          # FFmpeg statique : H.264, VP9, AAC, Opus         (§13)
 ./build-navigateur.sh      # le navigateur : Qt + CPython + QuickJS en un binaire
 ```
 
@@ -546,9 +547,12 @@ bien dans son propre fil et peut lire l'état de la fenêtre.
   Web Components et Shadow DOM, `IntersectionObserver`, et le style calculé au
   sens strict — `getComputedStyle` rend le style en ligne. Les grandes
   applications web, qui reposent sur ces API, restent hors de portée.
-- **Ni vidéo ni audio** — il faudrait un décodeur H.264/VP9, Media Source
-  Extensions et un pilote de son, dont l'OS n'a rien. Les sites de lecture vidéo
-  ne fonctionneront pas, et ce n'est pas une question de moteur web.
+- **Vidéo et audio : la chaîne existe, les sites de lecture non.** Le son sort
+  par le pilote AC'97 (`/dev/dsp`), libavcodec décode H.264, VP9, AAC et Opus, et
+  `<video>`, `<audio>`, `MediaSource` et `SourceBuffer` sont implémentés. Ce qui
+  manque à un site de lecture réel est ailleurs : `canvas` et Web Components pour
+  son interface, le chiffrement (EME/Widevine) pour son catalogue, et le débit
+  qu'une machine émulée sans accélération matérielle ne tient pas en 1080p.
 - **Plusieurs fenêtres à l'écran en même temps** — le framebuffer n'a pas de
   gestionnaire de fenêtres. Les fenêtres suivantes sont créées et pilotables,
   mais s'affichent l'une après l'autre dans la même surface.

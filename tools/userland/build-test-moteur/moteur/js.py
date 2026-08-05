@@ -234,6 +234,10 @@ class Contexte:
 
         self._minuteries = {}      # identifiant -> (echeance, delai, repete)
         self._reponses = []        # (identifiant, reponse) a livrer au battement
+        self._lecteurs = {}        # identifiant de nœud -> Lecteur
+        self._sources_mse = {}     # identifiant MediaSource -> Lecteur
+        self._types_mse = {}       # identifiant MediaSource -> type MIME
+        self._segments_mse = {}    # segments recus avant rattachement
 
         with open(_chemin_prelude(), "r", encoding="utf-8") as f:
             bojs.evalue(self._contexte, f.read(), "prelude.js")
@@ -289,6 +293,18 @@ class Contexte:
             if not encore and repete:
                 self._minuteries.pop(identifiant, None)
 
+        # Les lecteurs media avancent au meme rythme : decodage, son pousse
+        # vers la carte, image retenue pour la peinture.
+        for identifiant, lecteur in list(self._lecteurs.items()):
+            try:
+                if lecteur.bat():
+                    self.sale = True
+                if lecteur.termine and not lecteur.__dict__.get("_fin_signalee"):
+                    lecteur._fin_signalee = True
+                    self._appelle("__bo_media", [identifiant, "ended"])
+            except Exception as e:  # noqa: BLE001
+                self.journal("warn", "media: %s" % e)
+
         try:
             bojs.pompe(self._contexte)
         except Exception:
@@ -300,6 +316,9 @@ class Contexte:
         return self._appelle("__bo_evenement", [identifiant, type_, details or {}])
 
     def ferme(self):
+        for lecteur in self._lecteurs.values():
+            lecteur.ferme()
+        self._lecteurs.clear()
         bojs.detruit(self._contexte)
 
     def _appelle(self, nom, arguments):
@@ -639,6 +658,177 @@ class Contexte:
         if encode:
             return base64.b64encode(texte.encode("latin-1", "replace")).decode("ascii")
         return base64.b64decode(texte.encode("ascii")).decode("latin-1", "replace")
+
+    # --- Operations : media ---------------------------------------------------
+    #
+    # Un `<video>` ou un `<audio>` a un lecteur, cree a la premiere demande. Les
+    # `MediaSource` en ont un aussi, indexe a part : le JavaScript les cree
+    # avant de les rattacher a un element, et parfois sans jamais le faire.
+
+    def _lecteur(self, identifiant, cree=True):
+        element = self._element(identifiant)
+        if element is None:
+            return None
+        existant = self._lecteurs.get(identifiant)
+        if existant is not None or not cree:
+            return existant
+        from . import media
+        if not media.DISPONIBLE:
+            return None
+        lecteur = media.Lecteur(journal=self.journal)
+        self._lecteurs[identifiant] = lecteur
+        return lecteur
+
+    def _op_mediaCharge(self, identifiant):
+        """Ouvre ce que designe `src` : une adresse, ou un `MediaSource`."""
+        element = self._element(identifiant)
+        lecteur = self._lecteur(identifiant)
+        if element is None or lecteur is None:
+            return False
+        source = element.attributs.get("src", "")
+        if source.startswith("bo-media:"):
+            # Media Source Extensions : c'est la page qui alimentera le flux.
+            self._sources_mse[source[len("bo-media:"):]] = lecteur
+            return True
+        if not source:
+            return False
+        absolue = urllib.parse.urljoin(self.document.url, source)
+        try:
+            reponse = reseau.charge(absolue, brut=True)
+        except Exception as e:  # noqa: BLE001
+            self.journal("warn", "media %s : %s" % (absolue, e))
+            return False
+        if reponse.code and reponse.code >= 400:
+            self.journal("warn", "media %s : code %s" % (absolue, reponse.code))
+            return False
+        if not lecteur.charge(reponse.octets):
+            return False
+        self._appelle("__bo_media", [identifiant, "loadedmetadata"])
+        self._appelle("__bo_media", [identifiant, "canplay"])
+        return True
+
+    def _op_mediaJoue(self, identifiant):
+        lecteur = self._lecteur(identifiant)
+        if lecteur is None:
+            return False
+        if lecteur.source is None:
+            self._op_mediaCharge(identifiant)
+        lecteur.joue()
+        return True
+
+    def _op_mediaPause(self, identifiant):
+        lecteur = self._lecteur(identifiant, cree=False)
+        if lecteur is not None:
+            lecteur.pause()
+        return True
+
+    def _op_mediaCherche(self, identifiant, seconde):
+        lecteur = self._lecteur(identifiant, cree=False)
+        if lecteur is not None:
+            lecteur.cherche(float(seconde))
+        return True
+
+    def _op_mediaPosition(self, identifiant):
+        lecteur = self._lecteur(identifiant, cree=False)
+        return lecteur.position() if lecteur else 0.0
+
+    def _op_mediaDuree(self, identifiant):
+        lecteur = self._lecteur(identifiant, cree=False)
+        return lecteur.duree() if lecteur else 0.0
+
+    def _op_mediaEnLecture(self, identifiant):
+        lecteur = self._lecteur(identifiant, cree=False)
+        return bool(lecteur and lecteur.en_lecture)
+
+    def _op_mediaTermine(self, identifiant):
+        lecteur = self._lecteur(identifiant, cree=False)
+        return bool(lecteur and lecteur.termine)
+
+    def _op_mediaPret(self, identifiant):
+        lecteur = self._lecteur(identifiant, cree=False)
+        return bool(lecteur and lecteur.source is not None)
+
+    def _op_mediaTampon(self, identifiant):
+        lecteur = self._lecteur(identifiant, cree=False)
+        return lecteur.duree() if lecteur else 0.0
+
+    def _op_mediaTaille(self, identifiant):
+        lecteur = self._lecteur(identifiant, cree=False)
+        if lecteur is None:
+            return [0, 0]
+        return [lecteur.largeur, lecteur.hauteur]
+
+    def _op_mediaVolume(self, identifiant, valeur):
+        lecteur = self._lecteur(identifiant, cree=False)
+        if lecteur is None:
+            return None
+        if valeur is None:
+            return lecteur.volume
+        lecteur.volume = float(valeur)
+        return lecteur.volume
+
+    def _op_mediaMuet(self, identifiant, valeur):
+        lecteur = self._lecteur(identifiant, cree=False)
+        if lecteur is None:
+            return None
+        if valeur is None:
+            return lecteur.muet
+        lecteur.muet = bool(valeur)
+        return lecteur.muet
+
+    def _op_mediaBoucle(self, identifiant, valeur):
+        lecteur = self._lecteur(identifiant, cree=False)
+        if lecteur is not None:
+            lecteur.boucle = bool(valeur)
+        return True
+
+    def image_video(self, nœud):
+        """Image courante du lecteur attache a ce nœud, pour la mise en page."""
+        identifiant = self._identifiants.get(id(nœud))
+        if identifiant is None:
+            return None
+        lecteur = self._lecteurs.get(identifiant)
+        if lecteur is None or lecteur.image is None:
+            return None
+        return (lecteur.image, lecteur.largeur, lecteur.hauteur)
+
+    def _op_mediaSaitLire(self, type_mime):
+        from . import media
+        return media.sait_lire(type_mime)
+
+    # --- Operations : Media Source Extensions ---------------------------------
+
+    def _op_mseCree(self, identifiant):
+        self._sources_mse.setdefault(str(identifiant), None)
+        return True
+
+    def _op_mseType(self, identifiant, type_mime):
+        self._types_mse[str(identifiant)] = type_mime
+        return True
+
+    def _op_mseAjoute(self, identifiant, octets):
+        """`SourceBuffer.appendBuffer` : un segment de plus dans le flux."""
+        cle = str(identifiant)
+        lecteur = self._sources_mse.get(cle)
+        if lecteur is None:
+            # L'element ne s'est pas encore rattache : on garde le segment, il
+            # sera pousse au rattachement.
+            self._segments_mse.setdefault(cle, bytearray())
+            self._segments_mse[cle] += bytes(bytearray(octets))
+            return len(self._segments_mse[cle])
+        donnees = bytes(bytearray(octets))
+        en_attente = self._segments_mse.pop(cle, None)
+        if en_attente:
+            donnees = bytes(en_attente) + donnees
+        lecteur.alimente(donnees)
+        return len(donnees)
+
+    def _op_mseTampon(self, identifiant):
+        lecteur = self._sources_mse.get(str(identifiant))
+        return lecteur.duree() if lecteur else 0.0
+
+    def _op_mseFin(self, identifiant):
+        return True
 
     # --- Operations : minuteries et reseau ------------------------------------
 

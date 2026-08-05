@@ -147,7 +147,13 @@ class Document:
     def remet_en_page(self, largeur):
         self.largeur = largeur
         self.boite, self.hauteur = mise_en_page.construit(
-            self.racine, self.regles, largeur, self.url)
+            self.racine, self.regles, largeur, self.url, self._image_video)
+
+    def _image_video(self, nœud):
+        """Image courante d'un `<video>`, ou `None` s'il n'y en a pas encore."""
+        if self.contexte_js is None:
+            return None
+        return self.contexte_js.image_video(nœud)
 
     def liste_affichage(self, defilement, largeur_vue, hauteur_vue):
         self.zones_liens = []

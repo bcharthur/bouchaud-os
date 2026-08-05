@@ -478,10 +478,39 @@ construction cote utilisateur : `tools/userland/README.md`.
       strict (`getComputedStyle` rend le style en ligne). Les applications web
       qui reposent sur ces API — donc les grandes SPA — restent hors de portee ;
       le web documentaire et les pages a rehaussement progressif, non.
-- [ ] **Video et audio** : hors de portee, et ce n'est pas une question de
-      moteur. Il faudrait un decodeur H.264/VP9, Media Source Extensions et un
-      pilote de son — dont l'OS n'a rien. YouTube et les sites de lecture
-      video ne fonctionneront pas.
+- [x] **Sortie audio** : pilote AC'97 (`src/drivers/ac97.rs`) et `/dev/dsp` a la
+      mode OSS. AC'97 plutot qu'Intel HDA parce que deux espaces d'E/S et une
+      liste de descripteurs suffisent, la ou HDA demanderait les anneaux CORB et
+      RIRB et l'enumeration des verbes du codec — pour le meme resultat sur une
+      machine emulee. Le controleur lit lui-meme la memoire ; le pilote remplit
+      devant la tete de lecture et n'active aucune interruption, l'index courant
+      du materiel etant de toute facon la source de verite. La puce ne connait
+      que 48 kHz stereo 16 bits : le reste est converti a l'ecriture.
+- [x] **Codecs H.264, VP9, AAC, Opus** : FFmpeg 6.1.1 construit en statique pour
+      la cible (`build-ffmpeg.sh`), decodage seul, formats du web seulement.
+      Ecrire un decodeur H.264 a la main — CABAC, deblocage, compensation de
+      mouvement au quart de pixel, trames B hierarchiques — represente plusieurs
+      annees-homme pour un resultat plus lent et moins juste ; porter le
+      decodeur de reference est la reponse d'ingenierie, pas un renoncement.
+- [x] **Chaine media** : `bomedia` ouvre un flux **en memoire** (pas un fichier :
+      le contenu arrive par le reseau ou par `appendBuffer`) et rend des trames
+      horodatees — image en BGRA, son en PCM 48 kHz pret pour `/dev/dsp`. Le
+      lecteur Python (`moteur/media.py`) decide quand les montrer : l'image se
+      cale sur l'horloge audio, jamais l'inverse, et l'image en retard est
+      sautee. Un son qui derive s'entend ; une image de deux centiemes en retard
+      ne se voit pas.
+- [x] **HTMLMediaElement et Media Source Extensions** : `<video>` et `<audio>`
+      avec `play`, `pause`, `currentTime`, `duration`, `volume`, `loop`,
+      `canPlayType` et leurs evenements ; puis `MediaSource`, `SourceBuffer`,
+      `appendBuffer` et `URL.createObjectURL`. C'est l'API par laquelle les
+      sites de lecture alimentent leur lecteur : ils recuperent les segments
+      eux-memes et les poussent, sans jamais donner d'URL de media au lecteur.
+- [ ] **Ce qui manque encore pour un site de lecture video reel**. La chaine est
+      la, mais ces sites demandent davantage : `canvas` et Web Components pour
+      leur interface, le chiffrement (EME/Widevine) pour leur catalogue, et le
+      debit qu'une machine emulee sans acceleration materielle ne tient pas sur
+      du 1080p. Le decodage H.264 est verifie present et fonctionnel ; le lire a
+      pleine cadence est un autre sujet.
 - [x] **pywebview tourne sur la machine** : la bibliotheque est embarquee telle
       quelle avec un moteur d'affichage ecrit pour l'OS
       (`tools/userland/navigateur/webview_bouchaud.py`, greffe par

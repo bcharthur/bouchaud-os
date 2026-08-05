@@ -63,14 +63,14 @@ def charge(url, methode="GET", corps=None, entetes=None, brut=False):
         if url.startswith("bo:"):
             return Reponse(url, _page_interne(url), "text/html")
         if url.startswith("file://"):
-            return _charge_fichier(url)
+            return _charge_fichier(url, brut=brut)
         return _charge_http(url, methode=methode, corps=corps,
                             entetes=entetes, brut=brut)
     except Exception as e:  # une page cassee ne doit pas tuer le navigateur
         return Reponse(url, _page_erreur(url, e), "text/html", 0, str(e))
 
 
-def _charge_fichier(url):
+def _charge_fichier(url, brut=False):
     chemin = url[len("file://"):] or "/"
     if os.path.isdir(chemin):
         entrees = sorted(os.listdir(chemin))
@@ -83,11 +83,32 @@ def _charge_fichier(url):
         lignes.append("</ul>")
         return Reponse(url, "".join(lignes), "text/html")
     with open(chemin, "rb") as f:
-        brut = f.read()
-    texte = brut.decode("utf-8", "replace")
+        donnees = f.read()
+    if brut:
+        # Une image, un son, une video : le contenu doit rester binaire, et
+        # l'enrober de HTML le rendrait indecodable.
+        return Reponse(url, "", _type_mime_du_chemin(chemin), 200, octets=donnees)
+    texte = donnees.decode("utf-8", "replace")
     if chemin.endswith((".html", ".htm")):
-        return Reponse(url, texte, "text/html")
-    return Reponse(url, "<pre>%s</pre>" % _echappe(texte), "text/html")
+        return Reponse(url, texte, "text/html", octets=donnees)
+    return Reponse(url, "<pre>%s</pre>" % _echappe(texte), "text/html",
+                   octets=donnees)
+
+
+def _type_mime_du_chemin(chemin):
+    """Type deduit de l'extension : `file://` n'en annonce aucun."""
+    minuscule = chemin.lower()
+    for suffixe, type_mime in (
+        (".avi", "video/x-msvideo"), (".mp4", "video/mp4"),
+        (".webm", "video/webm"), (".mkv", "video/x-matroska"),
+        (".wav", "audio/wav"), (".mp3", "audio/mpeg"),
+        (".ogg", "audio/ogg"), (".opus", "audio/opus"),
+        (".png", "image/png"), (".jpg", "image/jpeg"),
+        (".jpeg", "image/jpeg"), (".gif", "image/gif"),
+    ):
+        if minuscule.endswith(suffixe):
+            return type_mime
+    return "application/octet-stream"
 
 
 # --- Resolution de noms ------------------------------------------------------

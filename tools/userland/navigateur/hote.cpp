@@ -46,6 +46,7 @@
 #include <Python.h>
 
 #include "bojs.h"
+#include "bomedia.h"
 
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QWidget>
@@ -482,6 +483,36 @@ PyObject *bo_image(PyObject *, PyObject *args)
     return Py_BuildValue("(iii)", g_images.size() - 1, image.width(), image.height());
 }
 
+PyObject *bo_image_brute(PyObject *, PyObject *args)
+{
+    Py_buffer donnees;
+    int largeur, hauteur, identifiant = -1;
+    if (!PyArg_ParseTuple(args, "y*ii|i", &donnees, &largeur, &hauteur, &identifiant))
+        return nullptr;
+
+    const qsizetype attendu = qsizetype(largeur) * qsizetype(hauteur) * 4;
+    if (largeur <= 0 || hauteur <= 0 || donnees.len < attendu) {
+        PyBuffer_Release(&donnees);
+        PyErr_SetString(PyExc_ValueError, "bo.image_brute : tampon trop court");
+        return nullptr;
+    }
+
+    // Copie : le tampon Python peut disparaitre avant le prochain rendu.
+    QImage image(reinterpret_cast<const uchar *>(donnees.buf), largeur, hauteur,
+                 largeur * 4, QImage::Format_ARGB32);
+    QImage copie = image.copy();
+    PyBuffer_Release(&donnees);
+
+    // Reutiliser l'emplacement est ce qui rend la video tenable : une trame par
+    // seizieme de seconde ferait grossir le cache de 1500 images en une minute.
+    if (identifiant >= 0 && identifiant < g_images.size()) {
+        g_images[identifiant] = copie;
+        return Py_BuildValue("(iii)", identifiant, largeur, hauteur);
+    }
+    g_images.append(copie);
+    return Py_BuildValue("(iii)", g_images.size() - 1, largeur, hauteur);
+}
+
 PyObject *bo_formats_images(PyObject *, PyObject *)
 {
     PyObject *liste = PyList_New(0);
@@ -514,6 +545,8 @@ PyMethodDef bo_methodes[] = {
      "laisse Qt traiter sa file pendant un travail long"},
     {"image", bo_image, METH_VARARGS,
      "image(octets) -> (identifiant, largeur, hauteur), ou None si illisible"},
+    {"image_brute", bo_image_brute, METH_VARARGS,
+     "image_brute(octets_bgra, largeur, hauteur, identifiant=-1) -> (id, l, h)"},
     {"formats_images", bo_formats_images, METH_NOARGS,
      "formats_images() -> formats que l'hote sait decoder"},
     {nullptr, nullptr, 0, nullptr},
@@ -549,6 +582,7 @@ int main(int argc, char **argv)
     // executable statique ne peut pas charger d'extension apres coup.
     PyImport_AppendInittab("bo", initialise_bo);
     PyImport_AppendInittab("bojs", initialise_bojs);
+    PyImport_AppendInittab("bomedia", initialise_bomedia);
 
     const char *prefixe = std::getenv("BO_PREFIXE");
     if (!prefixe)

@@ -78,9 +78,14 @@
         if (identifiant === null || identifiant === undefined) return null;
         let objet = enveloppes.get(identifiant);
         if (!objet) {
-            objet = appel("type", identifiant) === 3
-                ? new Texte(identifiant)
-                : new Element(identifiant);
+            if (appel("type", identifiant) === 3) {
+                objet = new Texte(identifiant);
+            } else {
+                const balise = appel("balise", identifiant);
+                objet = (balise === "video" || balise === "audio")
+                    ? new ElementMedia(identifiant)
+                    : new Element(identifiant);
+            }
             enveloppes.set(identifiant, objet);
         }
         return objet;
@@ -347,6 +352,225 @@
         scrollIntoView() {}
         click() { distribue(this, new Event("click", { bubbles: true, cancelable: true })); }
     }
+
+    // --- Elements media -----------------------------------------------------
+    //
+    // `<video>` et `<audio>` ne different que par ce qu'ils montrent : meme
+    // etat, memes commandes, memes evenements. Une seule classe les couvre donc,
+    // et Python decide s'il y a une image a peindre.
+
+    class ElementMedia extends Element {
+        play() {
+            appel("mediaJoue", this.__id);
+            declencheMedia(this, "play");
+            return Promise.resolve();
+        }
+        pause() {
+            appel("mediaPause", this.__id);
+            declencheMedia(this, "pause");
+        }
+        load() { appel("mediaCharge", this.__id); }
+        canPlayType(type) { return appel("mediaSaitLire", String(type)) || ""; }
+
+        get currentTime() { return appel("mediaPosition", this.__id) || 0; }
+        set currentTime(valeur) {
+            appel("mediaCherche", this.__id, Number(valeur) || 0);
+            declencheMedia(this, "seeked");
+            declencheMedia(this, "timeupdate");
+        }
+        get duration() {
+            const d = appel("mediaDuree", this.__id);
+            return d > 0 ? d : NaN;
+        }
+        get paused() { return !appel("mediaEnLecture", this.__id); }
+        get ended() { return !!appel("mediaTermine", this.__id); }
+        get seeking() { return false; }
+
+        get volume() {
+            const v = appel("mediaVolume", this.__id, null);
+            return v === null ? 1 : v;
+        }
+        set volume(valeur) {
+            appel("mediaVolume", this.__id, Math.max(0, Math.min(1, Number(valeur))));
+            declencheMedia(this, "volumechange");
+        }
+        get muted() { return !!appel("mediaMuet", this.__id, null); }
+        set muted(valeur) {
+            appel("mediaMuet", this.__id, !!valeur);
+            declencheMedia(this, "volumechange");
+        }
+        get loop() { return this.hasAttribute("loop"); }
+        set loop(valeur) {
+            if (valeur) this.setAttribute("loop", ""); else this.removeAttribute("loop");
+            appel("mediaBoucle", this.__id, !!valeur);
+        }
+
+        get videoWidth() { return appel("mediaTaille", this.__id)[0] || 0; }
+        get videoHeight() { return appel("mediaTaille", this.__id)[1] || 0; }
+
+        // `readyState` et `networkState` : les valeurs de la norme, ramenees a
+        // ce que le lecteur sait reellement dire.
+        get readyState() { return appel("mediaPret", this.__id) ? 4 : 0; }
+        get networkState() { return appel("mediaPret", this.__id) ? 1 : 0; }
+        get buffered() {
+            const fin = appel("mediaTampon", this.__id) || 0;
+            return {
+                length: fin > 0 ? 1 : 0,
+                start() { return 0; },
+                end() { return fin; },
+            };
+        }
+        get played() { return this.buffered; }
+        get seekable() { return this.buffered; }
+        get error() { return null; }
+        get currentSrc() { return this.getAttribute("src") || ""; }
+
+        get src() { return this.getAttribute("src") || ""; }
+        set src(valeur) {
+            this.setAttribute("src", String(valeur));
+            appel("mediaCharge", this.__id);
+        }
+        get srcObject() { return this.__srcObject || null; }
+        set srcObject(valeur) {
+            this.__srcObject = valeur;
+            if (valeur && valeur.__urlObjet) {
+                this.setAttribute("src", valeur.__urlObjet);
+                appel("mediaCharge", this.__id);
+            }
+        }
+    }
+    globalThis.HTMLMediaElement = ElementMedia;
+    globalThis.HTMLVideoElement = ElementMedia;
+    globalThis.HTMLAudioElement = ElementMedia;
+
+    globalThis.Audio = function (source) {
+        const element = document.createElement("audio");
+        if (source) element.src = source;
+        return element;
+    };
+
+    function declencheMedia(cible, type) {
+        distribue(cible, new Event(type, { bubbles: false, cancelable: false }));
+    }
+
+    // Appele par Python quand l'etat d'un lecteur change : c'est ce qui donne
+    // `timeupdate`, `ended`, `canplay`… sans que le JavaScript ait a sonder.
+    globalThis.__bo_media = function (identifiant, type) {
+        const cible = noeud(identifiant);
+        if (cible) declencheMedia(cible, type);
+    };
+
+    // --- Media Source Extensions --------------------------------------------
+    //
+    // C'est l'API par laquelle un site de lecture alimente son lecteur : il
+    // recupere les segments lui-meme, en HTTP, et les pousse dans un
+    // `SourceBuffer`. Le lecteur ne connait donc jamais d'URL de media.
+
+    class SourceBuffer {
+        constructor(source, type) {
+            this.__source = source;
+            this.mode = "segments";
+            this.updating = false;
+            this.timestampOffset = 0;
+            this.appendWindowStart = 0;
+            this.appendWindowEnd = Infinity;
+            this.__type = type;
+            this.__ecouteurs = null;
+        }
+        appendBuffer(donnees) {
+            this.updating = true;
+            const octets = appel("mseAjoute", this.__source.__id,
+                                 versTableau(donnees));
+            this.updating = false;
+            // `updateend` doit partir apres le retour de `appendBuffer` : les
+            // lecteurs enchainent souvent un `appendBuffer` dans ce gestionnaire,
+            // et le declencher tout de suite les ferait recursers.
+            const buffer = this;
+            Promise.resolve().then(function () {
+                emet(buffer, "update");
+                emet(buffer, "updateend");
+            });
+            return octets;
+        }
+        abort() { this.updating = false; }
+        remove() { }
+        get buffered() {
+            const fin = appel("mseTampon", this.__source.__id) || 0;
+            return { length: fin > 0 ? 1 : 0, start() { return 0; }, end() { return fin; } };
+        }
+        addEventListener(type, f) { Nœud.prototype.addEventListener.call(this, type, f); }
+        removeEventListener(type, f) { Nœud.prototype.removeEventListener.call(this, type, f); }
+    }
+
+    function emet(cible, type) {
+        const evenement = new Event(type, {});
+        evenement.target = cible;
+        for (const f of ecouteursDe(cible, type, false)) invoque(f, cible, evenement);
+        const enLigne = cible["on" + type];
+        if (typeof enLigne === "function") invoque(enLigne, cible, evenement);
+    }
+
+    function versTableau(donnees) {
+        // `appendBuffer` recoit un `ArrayBuffer` ou une vue dessus ; le pont ne
+        // fait traverser que des tableaux de nombres.
+        if (donnees instanceof ArrayBuffer) return Array.from(new Uint8Array(donnees));
+        if (ArrayBuffer.isView(donnees))
+            return Array.from(new Uint8Array(donnees.buffer, donnees.byteOffset,
+                                             donnees.byteLength));
+        if (Array.isArray(donnees)) return donnees;
+        return [];
+    }
+
+    let prochaineSource = 1;
+
+    class MediaSource {
+        constructor() {
+            this.__id = prochaineSource++;
+            this.__urlObjet = "bo-media:" + this.__id;
+            this.readyState = "closed";
+            this.duration = NaN;
+            this.sourceBuffers = [];
+            this.activeSourceBuffers = [];
+            this.__ecouteurs = null;
+            appel("mseCree", this.__id);
+            // `sourceopen` part au tour suivant : le code appelant vient tout
+            // juste de construire l'objet et n'a pas encore pose son ecouteur.
+            const source = this;
+            Promise.resolve().then(function () {
+                source.readyState = "open";
+                emet(source, "sourceopen");
+            });
+        }
+        addSourceBuffer(type) {
+            const tampon = new SourceBuffer(this, type);
+            this.sourceBuffers.push(tampon);
+            this.activeSourceBuffers.push(tampon);
+            appel("mseType", this.__id, String(type));
+            return tampon;
+        }
+        removeSourceBuffer() { }
+        endOfStream() {
+            this.readyState = "ended";
+            appel("mseFin", this.__id);
+            emet(this, "sourceended");
+        }
+        setLiveSeekableRange() { }
+        clearLiveSeekableRange() { }
+        addEventListener(type, f) { Nœud.prototype.addEventListener.call(this, type, f); }
+        removeEventListener(type, f) { Nœud.prototype.removeEventListener.call(this, type, f); }
+        static isTypeSupported(type) {
+            return appel("mediaSaitLire", String(type)) !== "";
+        }
+    }
+    globalThis.MediaSource = MediaSource;
+    globalThis.SourceBuffer = SourceBuffer;
+
+    globalThis.URL = globalThis.URL || {};
+    globalThis.URL.createObjectURL = function (objet) {
+        if (objet && objet.__urlObjet) return objet.__urlObjet;
+        return "bo-blob:" + (prochaineSource++);
+    };
+    globalThis.URL.revokeObjectURL = function () {};
 
     globalThis.Node = Nœud;
     globalThis.Element = Element;

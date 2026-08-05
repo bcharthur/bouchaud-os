@@ -82,16 +82,18 @@ def _longueur(style, propriete, reference, taille):
 class Contexte:
     """Ce qui ne change pas d'une boite a l'autre pendant une mise en page."""
 
-    def __init__(self, regles, largeur_page, url=""):
+    def __init__(self, regles, largeur_page, url="", image_video=None):
         self.regles = regles
         self.largeur_page = largeur_page
         # Adresse de la page : les `src` relatifs des images s'y resolvent.
         self.url = url
+        # Rappel qui rend l'image courante d'un `<video>`, ou `None`.
+        self.image_video = image_video
 
 
-def construit(racine, regles, largeur_page, url=""):
+def construit(racine, regles, largeur_page, url="", image_video=None):
     """Construit l'arbre de boites et rend (racine, hauteur totale)."""
-    contexte = Contexte(regles, largeur_page, url)
+    contexte = Contexte(regles, largeur_page, url, image_video)
     style_initial = {
         "color": "#202124", "font-size": "16px", "line-height": "1.5",
         "display": "block",
@@ -249,6 +251,31 @@ def _dispose_ligne(boite, nœuds, x, y, largeur, style_parent, contexte):
             curseur_y += hauteur_ligne_courante or bo.hauteur_ligne(
                 _taille_police(style), _est_fixe(style))
             hauteur_ligne_courante = 0.0
+            continue
+        if nœud.balise == "video":
+            # L'image courante du lecteur, s'il y en a une. Le lecteur vit dans
+            # le contexte JavaScript : la mise en page ne fait que demander ce
+            # qu'il y a a montrer.
+            trame = getattr(contexte, "image_video", None)
+            trame = trame(nœud) if trame else None
+            if trame is not None:
+                identifiant, largeur_v, hauteur_v = trame
+                largeur_a, hauteur_a = images.dimensions(
+                    (identifiant, largeur_v, hauteur_v), nœud.attributs,
+                    style_enfant, largeur)
+                if largeur_a > 0 and hauteur_a > 0:
+                    if curseur_x > x and curseur_x + largeur_a > x + largeur:
+                        curseur_x = x
+                        curseur_y += hauteur_ligne_courante
+                        hauteur_ligne_courante = 0.0
+                    boite.images.append((curseur_x, curseur_y, largeur_a,
+                                         hauteur_a, identifiant, lien_enfant))
+                    curseur_x += largeur_a
+                    hauteur_ligne_courante = max(hauteur_ligne_courante, hauteur_a)
+                    continue
+            # Pas encore d'image : les enfants du `<video>` (le texte de repli)
+            # prennent sa place, comme le veut la norme.
+            pile = [(e, style_enfant, lien_enfant) for e in nœud.enfants] + pile
             continue
         if nœud.balise == "img":
             curseur_x, curseur_y, hauteur_ligne_courante = _pose_image(

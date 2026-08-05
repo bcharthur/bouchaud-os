@@ -129,6 +129,9 @@ if [ -x "$NAVIGATEUR_DIR/bo-navigateur" ]; then
     echo "export BO_PREFIXE=/usr" >> "$WORK/files/autorun"
     echo "exec /bo-navigateur /usr/share/bo-navigateur/test_moteur.py" \
         >> "$WORK/files/autorun"
+    # Le decodage audio et video, avec le vrai libavcodec.
+    echo "exec /bo-navigateur /usr/share/bo-navigateur/media-probe.py" \
+        >> "$WORK/files/autorun"
 fi
 
 info "== fabrication du disque de test =="

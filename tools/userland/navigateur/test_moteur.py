@@ -480,6 +480,101 @@ def verifie_images():
         verifie("images: attributs width/height obeis", False, "aucune image peinte")
 
 
+def verifie_media_api():
+    """L'API media telle que la page la voit, sans decoder quoi que ce soit."""
+    doc = document("""
+        <body>
+          <video id="v" width="320" height="240"><p>repli</p></video>
+          <audio id="a"></audio>
+        </body>""")
+    contexte = js.Contexte(doc)
+    execute = contexte.execute
+
+    egal("media: <video> est un HTMLMediaElement",
+         execute("document.getElementById('v') instanceof HTMLMediaElement"), True)
+    egal("media: <audio> aussi",
+         execute("document.getElementById('a') instanceof HTMLMediaElement"), True)
+    egal("media: un div ne l'est pas",
+         execute("document.createElement('div') instanceof HTMLMediaElement"), False)
+
+    egal("media: paused au depart", execute("document.getElementById('v').paused"), True)
+    egal("media: currentTime au depart",
+         execute("document.getElementById('v').currentTime"), 0)
+    egal("media: duration vaut NaN sans flux",
+         execute("Number.isNaN(document.getElementById('v').duration)"), True)
+    egal("media: le volume par defaut est 1",
+         execute("document.getElementById('v').volume"), 1)
+    egal("media: muted par defaut", execute("document.getElementById('v').muted"), False)
+
+    egal("media: play() rend une promesse",
+         execute("document.getElementById('v').play() instanceof Promise"), True)
+    egal("media: Audio() fabrique un element",
+         execute("new Audio() instanceof HTMLMediaElement"), True)
+
+    # Les evenements de cycle de vie doivent partir.
+    execute("""
+        globalThis.vus = [];
+        const v = document.getElementById('v');
+        for (const nom of ['play', 'pause', 'volumechange']) {
+            v.addEventListener(nom, () => vus.push(nom));
+        }
+        v.play(); v.pause(); v.volume = 0.5;
+    """)
+    egal("media: play, pause et volumechange sont emis",
+         execute("vus.join(',')"), "play,pause,volumechange")
+
+    egal("media: canPlayType refuse un format inconnu",
+         execute("document.getElementById('v').canPlayType('video/quicktime')"), "")
+    contexte.ferme()
+
+
+def verifie_mse_api():
+    """MediaSource et SourceBuffer : le chemin des sites de lecture video."""
+    doc = document("<body><video id='v'></video></body>")
+    contexte = js.Contexte(doc)
+    execute = contexte.execute
+
+    egal("mse: MediaSource existe", execute("typeof MediaSource"), "function")
+    egal("mse: isTypeSupported est une fonction",
+         execute("typeof MediaSource.isTypeSupported"), "function")
+    egal("mse: createObjectURL rend l'adresse de la source", execute("""(function () {
+        const source = new MediaSource();
+        return URL.createObjectURL(source) === source.__urlObjet;
+    })()"""), True)
+
+    # Le deroulement complet, tel qu'un lecteur l'ecrit.
+    execute("""
+        globalThis.etapes = [];
+        globalThis.source = new MediaSource();
+        globalThis.video = document.getElementById('v');
+        video.src = URL.createObjectURL(source);
+        source.addEventListener('sourceopen', function () {
+            etapes.push('sourceopen:' + source.readyState);
+            const tampon = source.addSourceBuffer('video/mp4; codecs="avc1.42E01E"');
+            tampon.addEventListener('updateend', function () {
+                etapes.push('updateend');
+            });
+            tampon.appendBuffer(new Uint8Array([1, 2, 3, 4]).buffer);
+            etapes.push('append');
+        });
+    """)
+    # `sourceopen` part au tour de boucle suivant, comme dans un navigateur.
+    contexte.tic()
+    contexte.tic()
+    verifie("mse: sourceopen est emis avec readyState 'open'",
+            "sourceopen:open" in (execute("etapes.join(',')") or ""),
+            execute("etapes.join(',')"))
+    verifie("mse: appendBuffer puis updateend",
+            "append" in (execute("etapes.join(',')") or "")
+            and "updateend" in (execute("etapes.join(',')") or ""),
+            execute("etapes.join(',')"))
+    egal("mse: le tampon est rattache a la source",
+         execute("source.sourceBuffers.length"), 1)
+    egal("mse: endOfStream change l'etat",
+         execute("source.endOfStream(); source.readyState"), "ended")
+    contexte.ferme()
+
+
 def verifie_bac_a_sable():
     """Une page ne doit pas pouvoir atteindre le systeme."""
     doc = document("<body></body>")
@@ -529,6 +624,8 @@ def principal():
         verifie_page_complete,
         verifie_evenement_apres_chargement,
         verifie_images,
+        verifie_media_api,
+        verifie_mse_api,
         verifie_bac_a_sable,
         verifie_hote_reel,
     ):
