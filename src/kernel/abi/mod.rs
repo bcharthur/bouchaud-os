@@ -124,7 +124,7 @@ fn sys_sigsuspend(set: u64) -> i64 {
     }
     while !task::signal_pending() {
         task::yield_now();
-        crate::arch::x86_64::cpu::hlt();
+        crate::arch::x86_64::cpu::wait_for_interrupt();
     }
     process.borrow_mut().signals.blocked = saved;
     // POSIX impose ce retour : l'attente s'est terminee par un signal.

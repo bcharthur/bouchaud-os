@@ -119,7 +119,7 @@ pub fn run() {
         crate::kernel::timer::mark_frame();
         fb::present();
         // Yield CPU until next interrupt (PIT ~18 Hz, keyboard, mouse).
-        crate::arch::x86_64::cpu::hlt();
+        crate::arch::x86_64::cpu::wait_for_interrupt();
     }
 
     fb::leave();

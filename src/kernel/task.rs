@@ -25,6 +25,17 @@
 //! allocateur et ses pilotes prennent des verrous tournants), et le preempter
 //! provoquerait des interblocages sur un CPU unique. Une tache utilisateur, en
 //! revanche, ne detient aucun verrou noyau : la preempter est sans risque.
+//!
+//! ## Ce qu'une commutation doit emporter
+//!
+//! Ces deux chemins n'arrivent pas dans le meme etat de processeur : le premier
+//! interruptions actives, le second interruptions coupees par la porte d'IRQ.
+//! RFLAGS fait donc partie du contexte a sauvegarder au meme titre que les
+//! registres callee-saved — voir [`switch_context`], qui explique ce que coutait
+//! son oubli. L'invariant qui en decoule, verifie par [`schedule`] en
+//! compilation de debogage : **on ne commute jamais interruptions coupees**, et
+//! toute attente passe par [`cpu::wait_for_interrupt`] plutot que par un `hlt`
+//! nu.
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;
@@ -232,11 +243,19 @@ impl Task {
         });
 
         // Amorce de pile noyau : le premier `switch_context` vers cette tache
-        // depile six registres callee-saved puis fait `ret` sur le trampoline.
+        // depile six registres callee-saved et un RFLAGS, puis fait `ret` sur
+        // le trampoline. La disposition doit etre le miroir exact des `push`
+        // de `switch_context`.
         unsafe {
             let mut sp = task.kstack_top as *mut u64;
             sp = sp.sub(1);
             *sp = task_trampoline as *const () as usize as u64; // adresse de retour
+            sp = sp.sub(1);
+            // RFLAGS de depart : bit 1 reserve a 1, `IF` a 0. Le trampoline n'a
+            // pas besoin des interruptions — `resume_usermode` commence par un
+            // `cli` — et l'`iretq` qui l'acheve rendra a la tache le RFLAGS de
+            // sa trame ring 3.
+            *sp = 0x0000_0002;
             for _ in 0..6 {
                 sp = sp.sub(1);
                 *sp = 0; // rbp, rbx, r12, r13, r14, r15
@@ -282,9 +301,30 @@ fn ready_count() -> usize {
 
 // --- Changement de contexte --------------------------------------------------
 
-/// Sauvegarde les registres callee-saved sur la pile courante, bascule sur la
-/// pile `to`, et y restaure les registres. Le retour se fait sur l'adresse
-/// empilee par la sauvegarde symetrique (ou par l'amorce de `Task::new`).
+/// Sauvegarde RFLAGS et les registres callee-saved sur la pile courante,
+/// bascule sur la pile `to`, et y restaure le tout. Le retour se fait sur
+/// l'adresse empilee par la sauvegarde symetrique (ou par l'amorce de
+/// [`Task::new`]).
+///
+/// ## Pourquoi RFLAGS fait partie du contexte
+///
+/// `IF` — le drapeau d'interruption — est un etat du CPU, pas de la pile : sans
+/// ce `pushfq`/`popfq`, il traverse la commutation et suit la **nouvelle**
+/// tache. Or les deux appelants n'ont pas le meme etat : [`schedule`] commute
+/// depuis un appel systeme, interruptions actives, tandis que
+/// [`preempt_from_irq`] commute depuis le gestionnaire du timer, ou le CPU les a
+/// coupees en franchissant la porte d'interruption. La preemption d'une tache
+/// livrait donc son `IF=0` a celle qui reprenait la main, au beau milieu de son
+/// appel systeme. La suite dependait de ce qu'elle y faisait : le plus souvent
+/// rien de visible — elle rendait la main en ring 3, ou `sysretq` remet un
+/// RFLAGS correct —, mais si elle attendait dans un `poll`, un `futex` ou un
+/// sommeil, son `hlt` arretait le CPU alors que plus aucune interruption ne
+/// pouvait le reveiller. Machine gelee, sans faute ni message.
+///
+/// Sauvegarder RFLAGS rend chaque tache a l'etat d'interruption qui etait le
+/// sien : la tache preemptee reprend dans son gestionnaire d'IRQ avec `IF=0`
+/// (et c'est `iretq` qui le retablira), celle qui dormait dans un appel systeme
+/// reprend avec `IF=1`.
 ///
 /// # Securite
 /// `from` doit pointer sur un `Context` valide et `to` sur une pile noyau
@@ -292,6 +332,7 @@ fn ready_count() -> usize {
 #[unsafe(naked)]
 unsafe extern "C" fn switch_context(from: *mut u64, to: u64) {
     core::arch::naked_asm!(
+        "pushfq",
         "push r15",
         "push r14",
         "push r13",
@@ -306,6 +347,7 @@ unsafe extern "C" fn switch_context(from: *mut u64, to: u64) {
         "pop r13",
         "pop r14",
         "pop r15",
+        "popfq",
         "ret",
     )
 }
@@ -377,6 +419,30 @@ fn debug_assert_borrows_released() {
     }
 }
 
+/// Second invariant du meme point de passage : **on ne commute jamais
+/// interruptions coupees**.
+///
+/// [`schedule`] n'est appelee que depuis du code de tache — un appel systeme,
+/// une attente volontaire —, jamais depuis un gestionnaire d'interruption (la
+/// preemption sur IRQ0 passe par [`preempt_from_irq`], qui ne vient pas ici).
+/// Dans ce contexte `IF` vaut toujours 1, et il le faut : la tache qui attend
+/// s'arrete sur un `hlt` dont seul le tick du timer la tirera.
+///
+/// Un `IF=0` a cet endroit signalerait une fuite du drapeau — un `cli` sans
+/// `sti`, ou une commutation qui ne rendrait pas son RFLAGS a la tache reprise
+/// (voir [`switch_context`]). La panique arrive alors dans le coupable, au lieu
+/// du gel silencieux qu'on constaterait autrement plusieurs instructions plus
+/// loin, sur le `hlt` de la victime.
+#[inline]
+fn debug_assert_interrupts_enabled() {
+    #[cfg(debug_assertions)]
+    debug_assert!(
+        cpu::interrupts_enabled(),
+        "task: commutation demandee interruptions coupees — le `hlt` d'attente \
+         figerait la machine (invariant : voir switch_context)"
+    );
+}
+
 /// Rend la main : bascule sur une autre tache prete s'il y en a une.
 ///
 /// Renvoie `true` si un changement de tache a eu lieu. Si la tache courante est
@@ -388,6 +454,7 @@ pub fn schedule() -> bool {
         return false;
     }
     debug_assert_borrows_released();
+    debug_assert_interrupts_enabled();
     wake_sleepers();
     let next = match pick_next(cur) {
         Some(n) if n != cur => n,
@@ -395,7 +462,7 @@ pub fn schedule() -> bool {
             // Personne d'autre : si la tache courante est bloquee, on attend une
             // interruption plutot que de bruler du CPU.
             if tasks()[cur].state != TaskState::Ready {
-                cpu::hlt();
+                cpu::wait_for_interrupt();
             }
             return false;
         }
@@ -509,7 +576,7 @@ pub fn exit_current(code: i32) -> ! {
             }
             break;
         }
-        cpu::hlt();
+        cpu::wait_for_interrupt();
         // Le compteur repart des qu'une tache redevient prete.
         if tasks().iter().any(|t| t.state == TaskState::Ready) {
             idle_since = crate::kernel::timer::ticks();
@@ -720,7 +787,7 @@ pub fn sleep_ticks(ticks: u64) {
     }
     while crate::kernel::timer::ticks() < deadline {
         if !schedule() {
-            cpu::hlt();
+            cpu::wait_for_interrupt();
         }
         if current().state == TaskState::Ready {
             break; // reveille par un signal / un futex
@@ -840,7 +907,7 @@ pub fn futex_wait(uaddr: u64, expected: u32, timeout_ticks: u64) -> bool {
 
     loop {
         if !schedule() {
-            cpu::hlt();
+            cpu::wait_for_interrupt();
             wake_sleepers();
         }
         // L'ordre des deux tests compte. `wake_sleepers` remet la tache en

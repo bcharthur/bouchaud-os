@@ -99,7 +99,7 @@ fn console_read(max: usize) -> Vec<u8> {
         }
         // Rien a lire : on rend la main plutot que de monopoliser le CPU.
         task::yield_now();
-        crate::arch::x86_64::cpu::hlt();
+        crate::arch::x86_64::cpu::wait_for_interrupt();
     }
 }
 
@@ -1396,7 +1396,7 @@ pub fn sys_poll(fds: u64, count: usize, timeout_ms: i32) -> i64 {
             return ready;
         }
         task::yield_now();
-        crate::arch::x86_64::cpu::hlt();
+        crate::arch::x86_64::cpu::wait_for_interrupt();
     }
 }
 
@@ -1435,7 +1435,7 @@ pub fn sys_select(nfds: i32, read_set: u64, _write_set: u64, _except_set: u64, t
             return ready;
         }
         task::yield_now();
-        crate::arch::x86_64::cpu::hlt();
+        crate::arch::x86_64::cpu::wait_for_interrupt();
     }
 }
 
@@ -1520,7 +1520,7 @@ pub fn sys_epoll_wait(epfd: i32, events: u64, max: usize, timeout_ms: i32) -> i6
             return written as i64;
         }
         task::yield_now();
-        crate::arch::x86_64::cpu::hlt();
+        crate::arch::x86_64::cpu::wait_for_interrupt();
     }
 }
 

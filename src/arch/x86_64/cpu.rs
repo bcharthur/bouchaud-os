@@ -11,8 +11,34 @@ pub fn halt_loop() -> ! {
 
 /// Pause le CPU jusqu'a la prochaine interruption (PIT/clavier/souris).
 /// Reduit la charge CPU dans les boucles d'evenements.
+///
+/// N'appeler que si les interruptions sont **actives** : un `hlt` avec `IF=0`
+/// arrete la machine pour de bon. Dans une attente de tache, preferer
+/// [`wait_for_interrupt`], qui garantit la condition.
 pub fn hlt() {
     unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)); }
+}
+
+/// Attend la prochaine interruption, interruptions actives quoi qu'il arrive.
+///
+/// C'est la primitive d'attente des boucles bloquantes du noyau (`poll`,
+/// `select`, `futex`, sommeil, attente d'un fils). Un `hlt` seul y serait un
+/// piege : il suffit que l'appelant ait herite d'un `IF=0` pour que le CPU
+/// s'arrete sans plus jamais recevoir le tick qui devait le reveiller — la
+/// machine entiere gele, sans faute ni message.
+///
+/// `sti` ne prend effet qu'apres l'instruction suivante : la paire `sti; hlt`
+/// est donc indivisible, aucune interruption ne peut se glisser entre les deux
+/// et etre perdue.
+pub fn wait_for_interrupt() {
+    unsafe { asm!("sti; hlt", options(nomem, nostack, preserves_flags)); }
+}
+
+/// Les interruptions sont-elles actives (drapeau `IF` de RFLAGS) ?
+pub fn interrupts_enabled() -> bool {
+    let flags: u64;
+    unsafe { asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags)); }
+    flags & (1 << 9) != 0
 }
 
 /// Lit le compteur de cycles (Time Stamp Counter).

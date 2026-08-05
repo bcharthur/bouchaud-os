@@ -394,20 +394,39 @@ construction cote utilisateur : `tools/userland/README.md`.
       emission vers un hote dont l'adresse materielle n'est pas encore connue :
       le noyau rend `ENETUNREACH` au lieu de laisser l'ARP aboutir. Contourne
       cote navigateur en emettant avant de poser le delai d'attente.
-- [ ] **Blocage intermittent apres `clone`** (defaut ouvert). Deux executions sur
-      une vingtaine se sont figees juste apres le `pthread_create` de
-      `qpa-probe`, sans aucune sortie ensuite et sans que le filet
-      anti-interblocage de 30 s se declenche — donc dans une tache vivante, pas
-      dans `exit_current`. Un blocage de `sys_poll` supposerait que
-      `timer::ticks()` cesse d'avancer, ce qui pointe vers les interruptions ou
-      le PIC.
-      Ce qui est etabli : joue seul, le scenario passe 8 fois sur 8 avec le
-      noyau actuel **et** 8 fois sur 8 avec celui d'avant les corrections d'ABI
-      — les deux se comportent donc identiquement, et rien n'impute le defaut a
-      ces corrections. Les deux blocages observes l'ont ete alors que plusieurs
-      emulateurs tournaient de front sur la machine hote. Non reproduit sous
-      moniteur QEMU (0 sur 24), ce qui empeche pour l'instant de relever l'etat
-      du processeur fige.
+- [x] **Le drapeau d'interruption traversait les commutations de tache**. C'est
+      la cause des deux gels qu'on avait notes comme distincts : le blocage
+      intermittent apres le `pthread_create` de `qpa-probe`, et celui de
+      `load_url` appele depuis le fil de `webview.start()`.
+
+      `switch_context` sauvegardait les registres callee-saved mais pas RFLAGS.
+      Or `IF` est un etat du processeur, pas de la pile : il suivait donc la
+      **nouvelle** tache. Les deux appelants n'ont pas le meme etat —
+      `schedule` commute depuis un appel systeme, interruptions actives, tandis
+      que `preempt_from_irq` commute depuis le gestionnaire du timer, ou le CPU
+      les a coupees en franchissant la porte d'interruption. Preempter une tache
+      livrait donc `IF=0` a celle qui reprenait la main, au beau milieu de son
+      appel systeme. Le plus souvent sans consequence visible — elle rendait la
+      main en ring 3, et `sysretq` y remet un RFLAGS correct. Mais si elle
+      attendait dans un `poll`, un `futex` ou un sommeil, son `hlt` arretait le
+      processeur alors que plus aucune interruption ne pouvait le reveiller :
+      machine gelee, sans faute ni message, `timer::ticks()` fige pour de bon.
+      D'ou le caractere intermittent — il fallait que la preemption tombe
+      exactement sur une tache en attente — et l'aggravation sous charge de la
+      machine hote.
+
+      Releve sous moniteur QEMU : `RIP` juste apres le `hlt` de `sys_poll`,
+      `RFL=0x00000006` (donc `IF=0`), `HLT=1`, `CPL=0`.
+
+      Corrige a deux niveaux. `switch_context` encadre desormais sa sauvegarde
+      d'un `pushfq`/`popfq` : chaque tache retrouve l'etat d'interruption qui
+      etait le sien, et l'amorce de pile de `Task::new` porte le RFLAGS de
+      depart correspondant. Et les attentes bloquantes du noyau appellent
+      `cpu::wait_for_interrupt` (`sti; hlt`, paire indivisible) au lieu d'un
+      `hlt` nu, de sorte qu'aucune ne puisse plus s'endormir sans reveil
+      possible. Un `debug_assert` dans `schedule` verrouille l'invariant : on ne
+      commute jamais interruptions coupees, et la panique arrive dans le
+      coupable plutot que dans la victime.
 - [x] **Navigateur natif en ring 3** : Nautile supprime du noyau, remplace par
       `tools/userland/navigateur/` — un binaire unique (Qt + CPython + le
       moteur) qui analyse HTML et CSS, met en page, et peint par QPainter sur
@@ -419,15 +438,13 @@ construction cote utilisateur : `tools/userland/README.md`.
       `greffe-pywebview.sh`). Le code d'un tutoriel pywebview s'execute sans
       modification. Sans JavaScript (`evaluate_js` leve), et sans les
       applications a fichiers locaux, qui passent par le serveur HTTP interne.
-- [ ] **`load_url` depuis le fil de `webview.start()`** (defaut ouvert). Le
-      travail est bien mis en file pour le fil principal — Qt n'acceptant d'etre
-      touche que depuis lui — mais le chargement n'aboutit pas : l'emulateur
-      reste a ~56 % de CPU sans que la page change, et ce **pendant vingt-cinq
-      minutes** : ce n'est donc pas de la lenteur sous emulation, c'est une
-      boucle. Appele depuis le fil principal (chargement
-      initial, clic sur un lien), le meme chemin fonctionne. Piste : la boucle
-      d'attente de `sys_poll` face a une prise UDP passee en non bloquant par le
-      resolveur DNS.
+- [x] **`load_url` depuis le fil de `webview.start()`** : le tutoriel pywebview
+      se deroule maintenant en entier, sans modification. Le fil de travail
+      appelle `load_url`, le fil principal depile la demande a son battement, le
+      moteur resout le nom, ouvre la connexion, recoit la page et la peint ; le
+      fil de travail retrouve `events.loaded`, puis `get_current_url()` et la
+      taille de la fenetre. Le gel etait celui du drapeau d'interruption
+      ci-dessus, pas un defaut du backend.
 - [ ] **Sockets serveur : `listen` / `accept`**. C'est ce qui manque au serveur
       HTTP interne de pywebview, donc a toute application webview servant des
       fichiers locaux. Une mise en œuvre limitee au bouclage suffirait : le
