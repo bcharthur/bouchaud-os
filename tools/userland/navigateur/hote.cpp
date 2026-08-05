@@ -258,6 +258,10 @@ private:
             PyErr_Clear();
             return;
         }
+        // Une liste d'affichage commence toujours sans rognage en cours : la
+        // pile est videe ici pour qu'une liste mal fermee ne contamine pas la
+        // trame suivante.
+        pileRognage.clear();
         for (Py_ssize_t i = 0; i < n; ++i) {
             PyObject *element = PySequence_GetItem(liste, i);
             if (!element)
@@ -322,11 +326,26 @@ private:
                 p.drawLine(QPointF(x1, y1), QPointF(x2, y2));
             }
         } else if (!std::strcmp(operation, "clip")) {
+            // Les rognages s'emboitent : la page rogne d'abord la zone de
+            // contenu sous la barre d'outils, puis chaque `overflow: hidden`
+            // rogne a l'interieur. Un simple `setClipRect` remplacerait le
+            // precedent, et le contenu d'un bloc deborderait sur le chrome —
+            // d'ou l'intersection, et la pile qui permet de revenir en arriere.
             double x, y, l, h;
-            if (PyArg_ParseTuple(element, "sdddd", &operation, &x, &y, &l, &h))
-                p.setClipRect(QRectF(x, y, l, h));
+            if (PyArg_ParseTuple(element, "sdddd", &operation, &x, &y, &l, &h)) {
+                QRectF zone(x, y, l, h);
+                if (!pileRognage.isEmpty())
+                    zone = zone.intersected(pileRognage.last());
+                pileRognage.append(zone);
+                p.setClipRect(zone);
+            }
         } else if (!std::strcmp(operation, "declip")) {
-            p.setClipping(false);
+            if (!pileRognage.isEmpty())
+                pileRognage.removeLast();
+            if (pileRognage.isEmpty())
+                p.setClipping(false);
+            else
+                p.setClipRect(pileRognage.last());
         } else if (!std::strcmp(operation, "image")) {
             // L'image a ete decodee une fois par `bo.image` ; ici on ne fait que
             // la poser. Redecoder a chaque trame couterait un decodage PNG
@@ -342,6 +361,9 @@ private:
         PyErr_Clear();
         Py_DECREF(tete);
     }
+
+    /// Zones de rognage en cours, de la plus exterieure a la plus interieure.
+    QVector<QRectF> pileRognage;
 };
 
 // --- Module Python `bo` -----------------------------------------------------

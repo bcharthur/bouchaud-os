@@ -1,10 +1,14 @@
 """Feuilles de style : analyse, specificite, cascade et heritage.
 
 Le sous-ensemble couvert est celui qui change vraiment l'apparence d'une page :
-les selecteurs simples et descendants, le modele de boite, les couleurs, la
-typographie. Ce qui manque (media queries, flex, grid, animations) est ignore
-proprement plutot que mal interprete — une declaration inconnue est laissee de
-cote, elle ne fait pas echouer la regle qui la contient.
+les selecteurs simples, descendants et enfants directs, le modele de boite, les
+couleurs, la typographie, les proprietes de disposition flexible et en grille,
+les `@media` — evaluees contre la taille de fenetre reelle — et les
+pseudo-elements `::before`/`::after`.
+
+Ce qui manque (animations, transformations, variables) est ignore proprement
+plutot que mal interprete : une declaration inconnue est laissee de cote, elle
+ne fait pas echouer la regle qui la contient.
 """
 
 import re
@@ -78,11 +82,34 @@ def _canal(texte):
 
 # --- Longueurs ---------------------------------------------------------------
 
+# Taille de la fenetre, posee par le document avant chaque mise en page.
+#
+# `vw` et `vh` s'y rapportent, et les media queries aussi. C'est une variable de
+# module parce que la longueur se calcule en dizaines d'endroits : la faire
+# circuler en argument jusqu'a chacun d'eux couterait plus qu'il ne rapporte,
+# et elle ne change qu'une fois par mise en page.
+_FENETRE = [1280.0, 720.0]
+
+
+def pose_fenetre(largeur, hauteur):
+    """Declare la taille de la fenetre. A appeler avant toute mise en page."""
+    _FENETRE[0] = float(largeur) or 1280.0
+    _FENETRE[1] = float(hauteur) or 720.0
+
+
+def fenetre():
+    return (_FENETRE[0], _FENETRE[1])
+
+
 def longueur(valeur, reference=0.0, taille_police=16.0):
     """Traduit une longueur CSS en pixels. `None` si non exprimable."""
+    if valeur is None:
+        return None
     v = valeur.strip().lower()
     if not v or v in ("auto", "inherit", "initial", "none"):
         return None
+    if v.startswith("calc(") and v.endswith(")"):
+        return _calcule(v[5:-1], reference, taille_police)
     try:
         if v.endswith("px"):
             return float(v[:-2])
@@ -94,29 +121,92 @@ def longueur(valeur, reference=0.0, taille_police=16.0):
             return float(v[:-1]) * reference / 100.0
         if v.endswith("pt"):
             return float(v[:-2]) * 96.0 / 72.0
+        # Les unites de fenetre se rapportent a la fenetre, pas au bloc
+        # contenant : les confondre donnait des bandeaux de la hauteur de leur
+        # parent au lieu de la hauteur de l'ecran.
         if v.endswith("vw"):
-            return float(v[:-2]) * reference / 100.0
-        if v.endswith(("vh", "ex", "ch", "cm", "mm", "in", "pc")):
-            return float(re.sub(r"[a-z]+$", "", v))
+            return float(v[:-2]) * _FENETRE[0] / 100.0
+        if v.endswith("vh"):
+            return float(v[:-2]) * _FENETRE[1] / 100.0
+        if v.endswith("vmin"):
+            return float(v[:-4]) * min(_FENETRE) / 100.0
+        if v.endswith("vmax"):
+            return float(v[:-4]) * max(_FENETRE) / 100.0
+        if v.endswith("ex"):
+            return float(v[:-2]) * taille_police * 0.5
+        if v.endswith("ch"):
+            return float(v[:-2]) * taille_police * 0.5
+        if v.endswith("cm"):
+            return float(v[:-2]) * 96.0 / 2.54
+        if v.endswith("mm"):
+            return float(v[:-2]) * 96.0 / 25.4
+        if v.endswith("in"):
+            return float(v[:-2]) * 96.0
+        if v.endswith("pc"):
+            return float(v[:-2]) * 16.0
         return float(v)
     except ValueError:
+        return None
+
+
+_JETON_CALC = re.compile(r"([0-9.]+[a-z%]*|[-+*/()])")
+
+
+def _calcule(expression, reference, taille_police):
+    """Evalue un `calc()`. `None` si l'expression n'est pas evaluable.
+
+    Les longueurs y sont d'abord converties en pixels, ce qui ramene le calcul a
+    de l'arithmetique ordinaire — `calc(100% - 2rem)` devient `1280 - 32`. Sans
+    cela il faudrait porter les unites jusqu'au bout, pour un resultat identique.
+    """
+    morceaux = []
+    for jeton in _JETON_CALC.findall(expression):
+        if jeton in "+-*/()":
+            morceaux.append(jeton)
+            continue
+        if jeton.replace(".", "", 1).isdigit():
+            morceaux.append(jeton)
+            continue
+        mesure = longueur(jeton, reference, taille_police)
+        if mesure is None:
+            return None
+        morceaux.append(repr(mesure))
+    rendu = " ".join(morceaux)
+    if not rendu or not re.fullmatch(r"[0-9.eE+\-*/() ]+", rendu):
+        return None
+    try:
+        # L'expression ne contient plus que des chiffres et des operateurs :
+        # elle a ete reconstruite jeton par jeton, aucun texte de la page n'y
+        # subsiste.
+        return float(eval(rendu, {"__builtins__": {}}, {}))  # noqa: S307
+    except Exception:  # noqa: BLE001
         return None
 
 
 # --- Selecteurs --------------------------------------------------------------
 
 class Simple:
-    """Un maillon de selecteur : balise, classes, identifiant."""
+    """Un maillon de selecteur : balise, classes, identifiant, pseudo-element."""
 
-    __slots__ = ("balise", "classes", "identifiant")
+    __slots__ = ("balise", "classes", "identifiant", "pseudo")
 
     def __init__(self, texte):
         self.balise = None
         self.classes = []
         self.identifiant = None
-        # On ignore les pseudo-classes : `a:hover` se comporte comme `a`. Les
-        # prendre au pied de la lettre demanderait un etat d'interaction que le
-        # moteur n'a pas ; les rejeter perdrait la regle entiere.
+        # `::before` et `::after` designent une boite qui n'existe pas dans le
+        # document : il faut donc les retenir, la mise en page les fabriquera.
+        # C'est ainsi que la moitie des sites posent leurs icones et leurs
+        # separateurs — les effacer, comme on le faisait, revenait a jeter cette
+        # moitie-la.
+        self.pseudo = None
+        trouve = re.search(r"::?(before|after)\b", texte)
+        if trouve:
+            self.pseudo = trouve.group(1)
+        # Les pseudo-classes, elles, restent ignorees : `a:hover` se comporte
+        # comme `a`. Les prendre au pied de la lettre demanderait un etat
+        # d'interaction que le moteur ne tient pas ; les rejeter perdrait la
+        # regle entiere.
         texte = re.sub(r"::?[a-zA-Z-]+(\([^)]*\))?", "", texte)
         texte = re.sub(r"\[[^\]]*\]", "", texte)
         for morceau in re.findall(r"[.#]?[^.#]+", texte):
@@ -145,7 +235,7 @@ class Simple:
 class Selecteur:
     """Une suite de maillons separes par des espaces (descendance)."""
 
-    __slots__ = ("maillons", "specificite")
+    __slots__ = ("maillons", "specificite", "pseudo")
 
     def __init__(self, texte):
         # `>`, `+` et `~` sont ramenes a la descendance : moins precis, mais
@@ -157,6 +247,9 @@ class Selecteur:
             pa, pb, pc = maillon.poids()
             a, b, c = a + pa, b + pb, c + pc
         self.specificite = (a, b, c)
+        # Le pseudo-element est porte par le dernier maillon : dans
+        # `.carte > p::after`, c'est le `p` qui recoit la boite.
+        self.pseudo = self.maillons[-1].pseudo if self.maillons else None
 
     def correspond(self, chemin):
         """`chemin` est la liste des ancetres, du plus lointain a l'element."""
@@ -200,10 +293,20 @@ def analyse(source, ordre_depart=0):
             break
         prelude = source[position:accolade].strip()
 
-        # Regles @ : on saute leur bloc. Sauf @media, dont on garde le contenu —
-        # une page dont tout le style est sous @media serait sinon nue.
+        # Regles @. `@media` est **evaluee** : garder son contenu sans le
+        # verifier, comme on le faisait, appliquait la mise en page telephone
+        # par-dessus celle du bureau — les regles de la derniere requete
+        # l'emportaient, quelle que soit la largeur reelle.
         if prelude.startswith("@"):
-            if prelude.lower().startswith("@media"):
+            tete = prelude.lower()
+            if tete.startswith("@media"):
+                if requete_verifiee(prelude[len("@media"):]):
+                    position = accolade + 1
+                else:
+                    position = _saute_bloc(source, accolade)
+                continue
+            if tete.startswith("@supports"):
+                # On sait faire l'essentiel de ce qui s'y teste : on entre.
                 position = accolade + 1
                 continue
             position = _saute_bloc(source, accolade)
@@ -222,6 +325,66 @@ def analyse(source, ordre_depart=0):
         position = fin + 1
 
     return regles
+
+
+_CONDITION = re.compile(r"\(\s*([a-z-]+)\s*(?::\s*([^)]+))?\)")
+
+
+def requete_verifiee(requete):
+    """La requete media est-elle vraie pour la fenetre courante ?
+
+    Ce qui est reconnu : les largeurs et hauteurs minimales et maximales, le
+    type de media, l'orientation, et les conjonctions `and`. Les disjonctions
+    (`,`) sont vraies des qu'un de leurs termes l'est. Ce qui ne l'est pas —
+    resolution, preference de theme, pointeur — est considere comme vrai : mieux
+    vaut appliquer une regle de trop qu'ecarter la mise en page entiere.
+    """
+    largeur, hauteur = fenetre()
+    for terme in requete.split(","):
+        terme = terme.strip().lower()
+        if not terme:
+            continue
+        if _terme_verifie(terme, largeur, hauteur):
+            return True
+    return not requete.strip()
+
+
+def _terme_verifie(terme, largeur, hauteur):
+    negation = terme.startswith("not ")
+    if negation:
+        terme = terme[4:].strip()
+
+    resultat = True
+    # Type de media : `print` ne nous concerne pas, `screen` et `all` oui.
+    tete = terme.split("(")[0].strip().split(" and ")[0].strip()
+    if tete in ("print", "speech"):
+        resultat = False
+
+    for nom, valeur in _CONDITION.findall(terme):
+        if not _condition_verifiee(nom, valeur, largeur, hauteur):
+            resultat = False
+            break
+    return not resultat if negation else resultat
+
+
+def _condition_verifiee(nom, valeur, largeur, hauteur):
+    mesure = longueur(valeur, largeur, 16.0) if valeur else None
+    if nom == "min-width":
+        return mesure is None or largeur >= mesure
+    if nom == "max-width":
+        return mesure is None or largeur <= mesure
+    if nom == "min-height":
+        return mesure is None or hauteur >= mesure
+    if nom == "max-height":
+        return mesure is None or hauteur <= mesure
+    if nom == "width":
+        return mesure is None or abs(largeur - mesure) < 1.0
+    if nom == "orientation":
+        voulue = (valeur or "").strip()
+        return voulue == ("landscape" if largeur >= hauteur else "portrait")
+    # Tout le reste — resolution, prefers-color-scheme, hover, pointer — est
+    # tenu pour vrai : la regle s'applique, ce qui est le moindre mal.
+    return True
 
 
 def _saute_bloc(source, accolade):
@@ -259,25 +422,91 @@ HERITEES = {
 }
 
 
-def applique(regles, element, chemin, style_parent):
-    """Calcule le style d'un element : heritage, regles, style en ligne."""
+def applique(regles, element, chemin, style_parent, pseudo=None):
+    """Calcule le style d'un element : heritage, regles, style en ligne.
+
+    `pseudo` vaut `"before"` ou `"after"` pour calculer le style de la boite
+    engendree plutot que celui de l'element lui-meme. Le style en ligne ne s'y
+    applique pas : l'attribut `style` vise l'element, pas ses boites engendrees.
+    """
     style = {p: v for p, v in style_parent.items() if p in HERITEES}
 
     correspondantes = []
     for regle in regles:
+        if regle.selecteur.pseudo != pseudo:
+            continue
         if regle.selecteur.correspond(chemin):
             correspondantes.append(regle)
     correspondantes.sort(key=lambda r: (r.selecteur.specificite, r.ordre))
     for regle in correspondantes:
         style.update(_developpe(regle.declarations))
 
-    en_ligne = element.attributs.get("style")
-    if en_ligne:
-        style.update(_developpe(_declarations(en_ligne)))
+    if pseudo is None:
+        en_ligne = element.attributs.get("style")
+        if en_ligne:
+            style.update(_developpe(_declarations(en_ligne)))
     return style
 
 
+def contenu_engendre(regles, element, chemin, style_parent, pseudo):
+    """Style d'un `::before`/`::after`, ou `None` s'il n'y en a pas.
+
+    Une boite engendree n'existe que si une regle lui donne un `content` : c'est
+    la norme, et c'est ce qui evite d'en fabriquer une pour chaque element de la
+    page.
+    """
+    style = applique(regles, element, chemin, style_parent, pseudo)
+    if "content" not in style:
+        return None
+    if style.get("display", "inline") == "none":
+        return None
+    return style
+
+
+def texte_du_contenu(valeur):
+    """Traduit la valeur de `content` en texte affichable.
+
+    `attr()` est reconnu par l'appelant, qui seul connait l'element ; les
+    guillemets sont retires, et les fonctions qu'on ne sait pas evaluer —
+    `counter()`, `url()` — rendent une chaine vide plutot qu'un texte parasite.
+    """
+    valeur = (valeur or "").strip()
+    if not valeur or valeur in ("none", "normal"):
+        return ""
+    if valeur[:1] in "\"'" and valeur[-1:] == valeur[:1]:
+        return _echappements(valeur[1:-1])
+    if valeur.startswith(("url(", "counter(", "counters(")):
+        return ""
+    return ""
+
+
+def _echappements(texte):
+    """`\\2014` devient un tiret cadratin : c'est ainsi qu'on ecrit un
+    caractere dans un `content`."""
+    def remplace(m):
+        try:
+            return chr(int(m.group(1), 16))
+        except ValueError:
+            return ""
+    return re.sub(r"\\([0-9a-fA-F]{1,6})\s?", remplace, texte)
+
+
 _RACCOURCIS_BOITE = ("margin", "padding")
+
+# Proprietes que la disposition consulte et qui ne doivent surtout pas etre
+# heritees : un `display: flex` herite ferait de chaque descendant un conteneur
+# flexible. La liste sert de garde-fou lisible plus que de mecanisme — c'est
+# `HERITEES` qui decide — mais elle documente l'intention.
+NON_HERITEES = (
+    "display", "position", "top", "right", "bottom", "left", "z-index",
+    "flex-direction", "flex-wrap", "flex-grow", "flex-shrink", "flex-basis",
+    "justify-content", "align-items", "align-self", "align-content",
+    "grid-template-columns", "grid-template-rows", "grid-column-start",
+    "grid-column-end", "grid-row-start", "grid-row-end",
+    "row-gap", "column-gap", "overflow", "overflow-x", "overflow-y",
+    "box-sizing", "min-width", "max-width", "min-height", "max-height",
+    "content", "border-radius", "opacity",
+)
 
 
 def _developpe(declarations):
@@ -304,6 +533,58 @@ def _developpe(declarations):
                 if couleur(morceau) is not None:
                     resultat["background-color"] = morceau
                     break
+        elif nom == "flex":
+            # `flex: 1` vaut `1 1 0%`, `flex: auto` vaut `1 1 auto`. C'est la
+            # forme sous laquelle la propriete s'ecrit presque toujours.
+            parties = valeur.split()
+            if valeur.strip() == "auto":
+                parties = ["1", "1", "auto"]
+            elif valeur.strip() == "none":
+                parties = ["0", "0", "auto"]
+            resultat["flex-grow"] = parties[0] if parties else "0"
+            resultat["flex-shrink"] = parties[1] if len(parties) > 1 else "1"
+            resultat["flex-basis"] = parties[2] if len(parties) > 2 else (
+                "auto" if len(parties) > 1 and not parties[1][:1].isdigit() else "0%")
+        elif nom == "flex-flow":
+            parties = valeur.split()
+            for morceau in parties:
+                if morceau in ("wrap", "nowrap", "wrap-reverse"):
+                    resultat["flex-wrap"] = morceau
+                else:
+                    resultat["flex-direction"] = morceau
+        elif nom == "gap":
+            parties = valeur.split()
+            resultat["row-gap"] = parties[0]
+            resultat["column-gap"] = parties[1] if len(parties) > 1 else parties[0]
+        elif nom == "place-items":
+            parties = valeur.split()
+            resultat["align-items"] = parties[0]
+            resultat["justify-items"] = parties[1] if len(parties) > 1 else parties[0]
+        elif nom == "place-content":
+            parties = valeur.split()
+            resultat["align-content"] = parties[0]
+            resultat["justify-content"] = parties[1] if len(parties) > 1 else parties[0]
+        elif nom == "inset":
+            haut, droite, bas, gauche = _quatre(valeur.split())
+            resultat["top"], resultat["right"] = haut, droite
+            resultat["bottom"], resultat["left"] = bas, gauche
+        elif nom == "grid-area":
+            parties = [p.strip() for p in valeur.split("/")]
+            for cle, part in zip(("grid-row-start", "grid-column-start",
+                                  "grid-row-end", "grid-column-end"), parties):
+                resultat[cle] = part
+        elif nom in ("grid-row", "grid-column"):
+            parties = [p.strip() for p in valeur.split("/")]
+            resultat["%s-start" % nom] = parties[0]
+            if len(parties) > 1:
+                resultat["%s-end" % nom] = parties[1]
+        elif nom == "grid-template":
+            parties = [p.strip() for p in valeur.split("/")]
+            resultat["grid-template-rows"] = parties[0]
+            if len(parties) > 1:
+                resultat["grid-template-columns"] = parties[1]
+        elif nom == "border-radius":
+            resultat["border-radius"] = valeur.split()[0] if valeur.split() else "0"
         elif nom == "font":
             for morceau in valeur.split():
                 if morceau in ("bold", "bolder"):

@@ -25,3 +25,9 @@ tools/userland/out-qt/
 tools/userland/build-navigateur/
 tools/userland/out-navigateur/
 tools/userland/out-python-embed/
+tools/userland/build-quickjs/
+tools/userland/out-quickjs/
+tools/userland/build-ffmpeg/
+tools/userland/out-ffmpeg/
+# Copie de travail de test-moteur.sh (le moteur y est recopie avant execution)
+tools/userland/build-test-moteur/

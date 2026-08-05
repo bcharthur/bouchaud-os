@@ -835,6 +835,315 @@ def verifie_requete_brute():
     contexte.ferme()
 
 
+# --- Disposition --------------------------------------------------------------
+
+def boite_de(doc, identifiant):
+    """La boite mise en page d'un element, par son `id`."""
+    pile = [doc.boite]
+    while pile:
+        boite = pile.pop(0)
+        element = boite.element
+        if isinstance(element, html.Element) \
+                and element.attributs.get("id") == identifiant:
+            return boite
+        pile.extend(boite.enfants)
+    return None
+
+
+def proche(a, b, marge=1.5):
+    return abs(a - b) <= marge
+
+
+def verifie_flex():
+    """La disposition flexible : repartition, justification, retour a la ligne."""
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #barre { display: flex; }
+          #barre > div { flex: 1; }
+        </style>
+        <body>
+          <div id="barre">
+            <div id="a">A</div><div id="b">B</div><div id="c">C</div>
+          </div>
+        </body>""")
+    barre = boite_de(doc, "barre")
+    a, b, c = (boite_de(doc, n) for n in "abc")
+    verifie("flex: les trois articles existent", None not in (barre, a, b, c))
+    verifie("flex: meme ligne", proche(a.y, b.y) and proche(b.y, c.y),
+            (a.y, b.y, c.y))
+    verifie("flex: ordre de gauche a droite", a.x < b.x < c.x, (a.x, b.x, c.x))
+    verifie("flex: parts egales", proche(a.largeur, b.largeur)
+            and proche(b.largeur, c.largeur), (a.largeur, b.largeur, c.largeur))
+    verifie("flex: la ligne remplit le conteneur",
+            proche(a.largeur + b.largeur + c.largeur, barre.largeur, 3.0),
+            (a.largeur + b.largeur + c.largeur, barre.largeur))
+    verifie("flex: le conteneur a une hauteur", barre.hauteur > 0, barre.hauteur)
+
+    # Justification a droite : le dernier article touche le bord.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #barre { display: flex; justify-content: flex-end; }
+          #barre > div { width: 100px; }
+        </style>
+        <body><div id="barre"><div id="a">A</div><div id="b">B</div></div></body>""")
+    barre = boite_de(doc, "barre")
+    b = boite_de(doc, "b")
+    verifie("flex: justify-content colle a droite",
+            proche(b.x + b.largeur, barre.x + barre.largeur, 2.0),
+            (b.x + b.largeur, barre.x + barre.largeur))
+
+    # Centrage : autant d'espace des deux cotes.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #barre { display: flex; justify-content: center; }
+          #barre > div { width: 100px; }
+        </style>
+        <body><div id="barre"><div id="a">A</div><div id="b">B</div></div></body>""")
+    barre = boite_de(doc, "barre")
+    a, b = boite_de(doc, "a"), boite_de(doc, "b")
+    gauche = a.x - barre.x
+    droite = (barre.x + barre.largeur) - (b.x + b.largeur)
+    verifie("flex: justify-content centre", proche(gauche, droite, 2.0),
+            (gauche, droite))
+
+    # Retour a la ligne : trois blocs de 400 dans 1000 tiennent sur deux lignes.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #barre { display: flex; flex-wrap: wrap; }
+          #barre > div { width: 400px; flex: 0 0 400px; }
+        </style>
+        <body>
+          <div id="barre">
+            <div id="a">A</div><div id="b">B</div><div id="c">C</div>
+          </div>
+        </body>""")
+    a, b, c = (boite_de(doc, n) for n in "abc")
+    verifie("flex: wrap garde a et b sur la premiere ligne", proche(a.y, b.y),
+            (a.y, b.y))
+    verifie("flex: wrap renvoie c a la ligne", c.y > a.y, (a.y, c.y))
+    verifie("flex: wrap ramene c a gauche", proche(c.x, a.x), (a.x, c.x))
+
+    # Colonne : les articles s'empilent, et la hauteur du conteneur suit.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #pile { display: flex; flex-direction: column; }
+          #pile > div { height: 50px; }
+        </style>
+        <body>
+          <div id="pile"><div id="a">A</div><div id="b">B</div></div>
+        </body>""")
+    pile = boite_de(doc, "pile")
+    a, b = boite_de(doc, "a"), boite_de(doc, "b")
+    verifie("flex: colonne empile", b.y > a.y and proche(a.x, b.x),
+            (a.x, a.y, b.x, b.y))
+    verifie("flex: colonne, hauteur du conteneur", pile.hauteur >= 100,
+            pile.hauteur)
+
+    # Un article contient sa propre descendance : elle doit suivre le
+    # deplacement de son parent, pas rester a l'origine.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #barre { display: flex; }
+          #barre > div { flex: 1; }
+        </style>
+        <body>
+          <div id="barre">
+            <div id="a">A</div>
+            <div id="b"><p id="dedans">texte</p></div>
+          </div>
+        </body>""")
+    b, dedans = boite_de(doc, "b"), boite_de(doc, "dedans")
+    verifie("flex: la descendance suit son article",
+            dedans is not None and dedans.x >= b.x - 1,
+            (dedans.x if dedans else None, b.x))
+    textes = [e[3] for e in doc.liste_affichage(0, 1000, 700) if e[0] == "texte"]
+    egal("flex: le texte n'est peint qu'une fois",
+         sum(1 for t in textes if t.strip() == "texte"), 1)
+
+
+def verifie_grille():
+    """La disposition en grille : pistes, espacement, passage a la ligne."""
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #g { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+        </style>
+        <body>
+          <div id="g">
+            <div id="a">A</div><div id="b">B</div>
+            <div id="c">C</div><div id="d">D</div>
+          </div>
+        </body>""")
+    g = boite_de(doc, "g")
+    a, b, c, d = (boite_de(doc, n) for n in "abcd")
+    verifie("grille: quatre cases posees", None not in (a, b, c, d))
+    verifie("grille: trois colonnes egales",
+            proche(a.largeur, b.largeur) and proche(b.largeur, c.largeur),
+            (a.largeur, b.largeur, c.largeur))
+    verifie("grille: l'espacement separe les colonnes",
+            proche(b.x - a.x, a.largeur + 10, 2.0), (b.x - a.x, a.largeur))
+    verifie("grille: trois colonnes plus deux espaces remplissent",
+            proche(3 * a.largeur + 20, g.largeur, 3.0),
+            (3 * a.largeur + 20, g.largeur))
+    verifie("grille: la quatrieme case passe a la ligne", d.y > a.y, (a.y, d.y))
+    verifie("grille: elle revient a gauche", proche(d.x, a.x), (a.x, d.x))
+
+    # Pistes de largeur fixe et placement explicite.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #g { display: grid; grid-template-columns: 200px 300px; }
+          #b { grid-column: 1 / span 2; }
+        </style>
+        <body>
+          <div id="g"><div id="a">A</div><div id="b">B</div></div>
+        </body>""")
+    a, b = boite_de(doc, "a"), boite_de(doc, "b")
+    verifie("grille: piste fixe", proche(a.largeur, 200.0), a.largeur)
+    verifie("grille: une case peut s'etendre", proche(b.largeur, 500.0), b.largeur)
+
+
+def verifie_position():
+    """`position: absolute` sort du flux et se cale sur son bloc contenant."""
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #cadre { position: relative; width: 400px; height: 300px; }
+          #coin { position: absolute; left: 20px; top: 30px; width: 50px; }
+          #suivant { height: 10px; }
+        </style>
+        <body>
+          <div id="cadre">
+            <div id="coin">coin</div>
+            <div id="suivant">suivant</div>
+          </div>
+        </body>""")
+    cadre = boite_de(doc, "cadre")
+    coin = boite_de(doc, "coin")
+    suivant = boite_de(doc, "suivant")
+    verifie("position: la boite absolue existe", coin is not None)
+    verifie("position: left applique", proche(coin.x, cadre.x + 20), coin.x)
+    verifie("position: top applique", proche(coin.y, cadre.y + 30), coin.y)
+    verifie("position: elle ne pousse pas le flux",
+            proche(suivant.y, cadre.y), (suivant.y, cadre.y))
+
+    # `right`/`bottom` se comptent depuis le bord oppose.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #cadre { position: relative; width: 400px; height: 300px; }
+          #coin { position: absolute; right: 20px; width: 50px; }
+        </style>
+        <body><div id="cadre"><div id="coin">c</div></div></body>""")
+    cadre, coin = boite_de(doc, "cadre"), boite_de(doc, "coin")
+    verifie("position: right applique",
+            proche(coin.x + coin.largeur, cadre.x + cadre.largeur - 20, 2.0),
+            (coin.x + coin.largeur, cadre.x + cadre.largeur - 20))
+
+
+def verifie_pseudo_elements():
+    """`::before` et `::after` engendrent du contenu que la page n'ecrit pas."""
+    doc = document("""
+        <style>
+          #note::before { content: "Note : "; }
+          #note::after { content: " (fin)"; }
+          #lien::after { content: attr(data-suffixe); }
+        </style>
+        <body>
+          <p id="note">le corps</p>
+          <p id="lien" data-suffixe="[ext]">ancre</p>
+        </body>""")
+    textes = [e[3] for e in doc.liste_affichage(0, 1000, 700) if e[0] == "texte"]
+    joint = " ".join(textes)
+    verifie("pseudo: ::before est peint", "Note" in joint, textes[:8])
+    verifie("pseudo: ::after est peint", "(fin)" in joint, textes[:8])
+    verifie("pseudo: attr() est resolu", "[ext]" in joint, textes[:8])
+
+    # Sans `content`, aucune boite ne doit apparaitre.
+    doc = document("""
+        <style>#vide::before { color: red; }</style>
+        <body><p id="vide">seul</p></body>""")
+    textes = [e[3] for e in doc.liste_affichage(0, 1000, 700) if e[0] == "texte"]
+    egal("pseudo: pas de content, pas de boite",
+         [t for t in textes if t.strip()], ["seul"])
+
+
+def verifie_requetes_media():
+    """Les `@media` sont evaluees contre la taille de fenetre reelle."""
+    source = """
+        <style>
+          body { margin: 0; }
+          #t { width: 100px; }
+          @media (min-width: 800px) { #t { width: 300px; } }
+          @media (max-width: 500px) { #t { width: 50px; } }
+        </style>
+        <body><div id="t">t</div></body>"""
+
+    doc = document(source)
+    egal("media: min-width retenu a 1000px", round(boite_de(doc, "t").largeur), 300)
+
+    # La meme page dans une fenetre etroite retient l'autre regle.
+    reponse = reseau.Reponse("http://exemple.test/p", source, "text/html", 200)
+    doc = moteur.Document(reponse, 400, hauteur_fenetre=800.0)
+    egal("media: max-width retenu a 400px", round(boite_de(doc, "t").largeur), 50)
+
+    # Et un redimensionnement rebascule.
+    doc.remet_en_page(1000)
+    egal("media: le redimensionnement rebascule",
+         round(boite_de(doc, "t").largeur), 300)
+
+
+def verifie_longueurs():
+    """`calc()`, unites de fenetre, `box-sizing`, bornes de largeur."""
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #c { width: calc(100% - 40px); }
+          #v { width: 50vw; }
+          #h { height: 10vh; }
+          #b { width: 200px; padding: 10px; border-width: 5px;
+               box-sizing: border-box; }
+          #n { width: 200px; padding: 10px; border-width: 5px; }
+          #m { max-width: 600px; margin-left: auto; margin-right: auto; }
+        </style>
+        <body>
+          <div id="c">c</div><div id="v">v</div><div id="h">h</div>
+          <div id="b">b</div><div id="n">n</div><div id="m">m</div>
+        </body>""")
+    egal("longueur: calc(100% - 40px)", round(boite_de(doc, "c").largeur), 960)
+    egal("longueur: 50vw sur une fenetre de 1000", round(boite_de(doc, "v").largeur), 500)
+    egal("longueur: 10vh sur une fenetre de 720", round(boite_de(doc, "h").hauteur), 72)
+    egal("longueur: border-box englobe bordure et remplissage",
+         round(boite_de(doc, "b").largeur), 200)
+    egal("longueur: content-box ajoute bordure et remplissage",
+         round(boite_de(doc, "n").largeur), 230)
+
+    m = boite_de(doc, "m")
+    egal("longueur: max-width borne la largeur", round(m.largeur), 600)
+    verifie("longueur: margin auto centre", proche(m.x, 200.0, 2.0), m.x)
+
+    # `overflow: hidden` demande a l'hote de rogner ce qui depasse.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #cadre { overflow: hidden; height: 40px; }
+        </style>
+        <body><div id="cadre"><p>un</p><p>deux</p><p>trois</p></div></body>""")
+    verifie("overflow: la boite est marquee", boite_de(doc, "cadre").rogne)
+    liste = doc.liste_affichage(0, 1000, 700)
+    operations = [e[0] for e in liste]
+    verifie("overflow: la liste d'affichage rogne", "clip" in operations, operations[:8])
+    verifie("overflow: et derogne ensuite", "declip" in operations, operations[-4:])
+    egal("overflow: autant de clip que de declip",
+         operations.count("clip"), operations.count("declip"))
+
+
 def verifie_bac_a_sable():
     """Une page ne doit pas pouvoir atteindre le systeme."""
     doc = document("<body></body>")
@@ -893,6 +1202,12 @@ def principal():
         verifie_youtube_base_js,
         verifie_youtube_page,
         verifie_requete_brute,
+        verifie_flex,
+        verifie_grille,
+        verifie_position,
+        verifie_pseudo_elements,
+        verifie_requetes_media,
+        verifie_longueurs,
         verifie_bac_a_sable,
         verifie_hote_reel,
     ):

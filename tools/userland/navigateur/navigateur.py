@@ -143,7 +143,8 @@ class Navigateur:
         bo.traiter_evenements()
         try:
             document = Document(reseau.charge(url), self.largeur_vue,
-                                journal=self._journal_js)
+                                journal=self._journal_js,
+                                hauteur_fenetre=self.hauteur_vue)
         except Exception as e:
             traceback.print_exc(file=sys.stdout)
             self.etat = "Erreur interne : %s" % e
@@ -182,7 +183,8 @@ class Navigateur:
 
     def _recharge_position(self):
         url = self.onglet.historique[self.onglet.position]
-        document = Document(reseau.charge(url), self.largeur_vue)
+        document = Document(reseau.charge(url), self.largeur_vue,
+                            hauteur_fenetre=self.hauteur_vue)
         self.onglet.document = document
         self.onglet.defilement = 0.0
         self.saisie = url
@@ -202,11 +204,14 @@ class Navigateur:
     # --- Peinture -----------------------------------------------------------
 
     def peint(self, largeur, hauteur):
-        remise_en_page = largeur != self.largeur
+        # La hauteur compte autant que la largeur : les `@media` et les
+        # unites `vh` s'y rapportent, une fenetre seulement raccourcie peut
+        # donc changer la page.
+        remise_en_page = largeur != self.largeur or hauteur != self.hauteur
         self.largeur, self.hauteur = largeur, hauteur
         document = self.onglet.document
         if document and remise_en_page:
-            document.remet_en_page(self.largeur_vue)
+            document.remet_en_page(self.largeur_vue, self.hauteur_vue)
 
         liste = [("rect", 0, 0, largeur, hauteur, FOND_PAGE)]
 

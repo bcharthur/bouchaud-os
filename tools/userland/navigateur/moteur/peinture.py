@@ -64,8 +64,20 @@ def _peint_boite(boite, liste, defilement, largeur_vue, hauteur_vue, zones_liens
             if lien:
                 zones_liens.append((x, y_page, l, h, lien))
 
+    # `overflow: hidden` rogne ce qui depasse. Les zones s'emboitent — l'hote
+    # les empile et les intersecte — ce qui rend la paire toujours sure : la
+    # sortie d'un rognage rend celui qui l'englobait, jamais l'absence de
+    # rognage.
+    rogne_ici = boite.rogne and boite.hauteur > 0 and boite.largeur > 0
+    if rogne_ici:
+        liste.append(("clip", boite.x, haut, boite.largeur, boite.hauteur))
+
     for enfant in boite.enfants:
-        _peint_boite(enfant, liste, defilement, largeur_vue, hauteur_vue, zones_liens)
+        _peint_boite(enfant, liste, defilement, largeur_vue, hauteur_vue,
+                     zones_liens)
+
+    if rogne_ici:
+        liste.append(("declip",))
 
 
 def _peint_fragment(fragment, liste, defilement, hauteur_vue, zones_liens):

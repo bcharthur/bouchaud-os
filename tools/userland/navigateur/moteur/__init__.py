@@ -35,12 +35,18 @@ __all__ = ["css", "html", "images", "js", "mise_en_page", "peinture", "reseau",
 class Document:
     """Une page chargee : son arbre, ses regles, ses scripts, sa mise en page."""
 
-    def __init__(self, reponse, largeur, scripts=True, journal=None):
+    def __init__(self, reponse, largeur, scripts=True, journal=None,
+                 hauteur_fenetre=720.0):
         self.url = reponse.url
         self.code = reponse.code
         self.erreur = reponse.erreur
         self.racine = html.analyse(reponse.contenu)
         self.titre = self._titre()
+        # La taille de la fenetre doit etre connue **avant** l'analyse des
+        # feuilles : c'est elle qui decide quelles regles `@media` sont
+        # retenues, et `vw`/`vh` s'y rapportent.
+        self.hauteur_fenetre = float(hauteur_fenetre) or 720.0
+        css.pose_fenetre(largeur, self.hauteur_fenetre)
         self.regles = self._regles()
         self.largeur = largeur
         self.boite = None
@@ -144,8 +150,16 @@ class Document:
                 ordre += len(nouvelles) + 1
         return regles
 
-    def remet_en_page(self, largeur):
+    def remet_en_page(self, largeur, hauteur_fenetre=None):
         self.largeur = largeur
+        if hauteur_fenetre:
+            self.hauteur_fenetre = float(hauteur_fenetre)
+        # Une fenetre redimensionnee change les `@media` retenues : les regles
+        # sont donc reanalysees, pas seulement reappliquees.
+        ancienne = css.fenetre()
+        css.pose_fenetre(largeur, self.hauteur_fenetre)
+        if ancienne != css.fenetre():
+            self.regles = self._regles()
         self.boite, self.hauteur = mise_en_page.construit(
             self.racine, self.regles, largeur, self.url, self._image_video)
 

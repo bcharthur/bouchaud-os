@@ -443,7 +443,8 @@ mal formée a le même pouvoir qu'un pilote.
 hote.cpp        Qt : fenêtre, framebuffer, entrées, peinture     (C++)
    ↕ module `bo`
 navigateur.py   chrome, historique, événements                   (Python)
-moteur/         html · css · mise_en_page · peinture · reseau     (Python)
+moteur/         html · css · flex · grille · mise_en_page · peinture
+                images · js · media · reseau · youtube            (Python)
 ```
 
 Qt appelle Python, jamais l'inverse pendant la peinture : `paintEvent` demande
@@ -464,18 +465,33 @@ libc ne cohabitent pas dans un même binaire.
 ### Ce que le moteur sait faire
 
 Analyse HTML tolérante (balises non fermées, imbrications interdites, attributs
-sans guillemets, entités) · sélecteurs CSS de balise, classe, identifiant et
-descendance, avec spécificité, cascade et héritage · feuille de l'agent
-utilisateur · modèle de boîte complet · mise en page bloc et en ligne avec
-retour à la ligne mesuré sur la vraie fonte · listes, texte préformaté ·
-HTTP et HTTPS avec redirections et jeux de caractères · `file://` · historique
-avant/arrière, liens cliquables, défilement.
+sans guillemets, entités) · sélecteurs CSS de balise, classe, identifiant,
+attribut, descendance et enfant direct, avec spécificité, cascade et héritage ·
+feuille de l'agent utilisateur · modèle de boîte complet, `box-sizing`, bornes
+`min-*`/`max-*`, `calc()`, unités de fenêtre · règles `@media` évaluées contre
+la taille réelle de la fenêtre · pseudo-éléments `::before`/`::after`, `attr()`
+compris · mise en page bloc et en ligne avec retour à la ligne mesuré sur la
+vraie fonte · **disposition flexible** (base, `grow`/`shrink`, `wrap`,
+`justify-content`, `align-items`, colonnes) · **grille** (`repeat()`,
+`minmax()`, `fr`, `gap`, placement automatique et explicite) ·
+`position: absolute`/`fixed` avec `top`/`right`/`bottom`/`left` ·
+`overflow: hidden` réellement rogné · listes, texte préformaté · **JavaScript**
+(QuickJS : DOM, événements à trois phases, minuteries, promesses, XHR/fetch) ·
+**images** PNG/JPEG/GIF/BMP décodées par Qt · **vidéo et audio** H.264/AAC via
+libavcodec, avec Media Source Extensions et sortie AC'97 · HTTP et HTTPS avec
+redirections et jeux de caractères · `file://` · historique avant/arrière,
+liens cliquables, défilement.
 
 ### Ce qu'il ne sait pas faire
 
-**JavaScript** — les pages qui se construisent elles-mêmes s'affichent vides.
-**Images** — remplacées par leur texte de remplacement. **Flexbox et grid** —
-ramenés à un empilement vertical.
+**Animations et transformations** — `transition`, `animation`, `transform` sont
+ignorés ; la page s'affiche à son état final, ce qui est presque toujours l'état
+utile. **Variables CSS** — `var()` n'est pas résolu. **Lignes et zones nommées
+de grille** — `grid-template-areas` retombe sur le placement automatique.
+**`order` en flexbox** — les articles restent dans l'ordre du source.
+**Composants web** — pas de Custom Elements ni de Shadow DOM. **Canvas** — pas
+de contexte 2D. Ce qui manque est listé, avec le reste, dans la feuille de
+route (`docs/ROADMAP.md`).
 
 ### Résolution de noms
 

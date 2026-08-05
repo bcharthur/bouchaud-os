@@ -15,7 +15,7 @@ fait ici.
 
 import bo
 
-from . import css, images
+from . import css, flex, grille, images
 from .html import Element, Texte
 
 
@@ -23,7 +23,8 @@ class Boite:
     """Une boite positionnee, prete a peindre."""
 
     __slots__ = ("element", "style", "x", "y", "largeur", "hauteur",
-                 "enfants", "lignes", "lien", "puce", "images")
+                 "enfants", "lignes", "lien", "puce", "images",
+                 "hors_flux", "rogne")
 
     def __init__(self, element, style):
         self.element = element
@@ -39,6 +40,11 @@ class Boite:
         self.puce = None
         # Images posees dans le flux en ligne : (x, y, largeur, hauteur, id, lien)
         self.images = []
+        # Boites sorties du flux (`position: absolute`/`fixed`), placees apres
+        # coup par rapport a leur bloc contenant.
+        self.hors_flux = []
+        # `overflow: hidden`/`auto`/`scroll` : la peinture y rognera.
+        self.rogne = False
 
 
 class Fragment:
@@ -106,8 +112,21 @@ def construit(racine, regles, largeur_page, url="", image_video=None):
     return boite, boite.hauteur
 
 
+def _style_de(element, style_parent, chemin, contexte):
+    """Style calcule d'un element, ou celui deja fixe d'une boite engendree.
+
+    Un `::before` n'est pas dans l'arbre : la cascade ne peut pas le retrouver a
+    partir de son chemin, on lui attache donc son style au moment ou on le
+    fabrique et on le reprend tel quel ici.
+    """
+    fixe = getattr(element, "style_engendre", None)
+    if fixe is not None:
+        return fixe
+    return css.applique(contexte.regles, element, chemin, style_parent)
+
+
 def _boite_pour(element, style_parent, chemin, contexte):
-    style = css.applique(contexte.regles, element, chemin, style_parent)
+    style = _style_de(element, style_parent, chemin, contexte)
     if style.get("display", "inline") == "none":
         return None
     boite = Boite(element, style)
@@ -116,10 +135,101 @@ def _boite_pour(element, style_parent, chemin, contexte):
     return boite
 
 
-def _dispose_bloc(boite, x, y, largeur_disponible, contexte):
-    """Positionne une boite de type bloc et tout ce qu'elle contient."""
+def _engendre(boite, contexte, pseudo):
+    """Fabrique le nœud d'un `::before`/`::after`, ou `None`.
+
+    La boite engendree est un element de synthese portant son texte et son
+    style : le reste de la mise en page ne fait alors aucune difference entre
+    elle et un element du document, ce qui evite un second chemin de code.
+    """
+    element = boite.element
+    if not isinstance(element, Element):
+        return None
+    style = css.contenu_engendre(contexte.regles, element, _chemin(element),
+                                 boite.style, pseudo)
+    if style is None:
+        return None
+
+    valeur = style.get("content", "")
+    texte = css.texte_du_contenu(valeur)
+    if not texte and valeur.strip().startswith("attr("):
+        nom = valeur.strip()[5:].rstrip(")").strip().strip("\"'")
+        texte = element.attributs.get(nom, "")
+
+    engendree = Element("::" + pseudo)
+    engendree.parent = element
+    if texte:
+        engendree.ajoute(Texte(texte))
+    engendree.style_engendre = style
+    return engendree
+
+
+def _enfants(boite, contexte):
+    """Les enfants a disposer : ceux du document, encadres par les engendres."""
+    if not isinstance(boite.element, Element):
+        return []
+    liste = list(boite.element.enfants)
+    avant = _engendre(boite, contexte, "before")
+    if avant is not None:
+        liste.insert(0, avant)
+    apres = _engendre(boite, contexte, "after")
+    if apres is not None:
+        liste.append(apres)
+    return liste
+
+
+def _boites_enfants(boite, contexte):
+    """Construit les boites des enfants d'un conteneur flexible ou en grille.
+
+    La disposition en bloc les fabrique au fil de l'eau, en meme temps qu'elle
+    les pose. Flex et grille, elles, doivent toutes les connaitre avant de
+    decider ou chacune va : d'ou cette passe separee.
+    """
+    for enfant in _enfants(boite, contexte):
+        if isinstance(enfant, Texte):
+            if not enfant.contenu.strip():
+                continue
+            # Du texte nu dans un conteneur flexible forme un article anonyme :
+            # la norme l'exige, et sans cela une barre faite de mots seuls
+            # disparaitrait.
+            enveloppe = Element("span")
+            enveloppe.parent = boite.element
+            enveloppe.ajoute(Texte(enfant.contenu))
+            style_anonyme = dict(boite.style)
+            style_anonyme["display"] = "block"
+            enveloppe.style_engendre = style_anonyme
+            enfant = enveloppe
+
+        chemin = _chemin(enfant)
+        sous_boite = _boite_pour(enfant, boite.style, chemin, contexte)
+        if sous_boite is None:
+            continue
+        if sous_boite.style.get("position", "static") in ("absolute", "fixed"):
+            boite.hors_flux.append((sous_boite, chemin))
+            continue
+        # Les enfants d'un conteneur flexible ou en grille sont « blocifies » :
+        # un `<span>` y devient une boite a part entiere, pas un bout de ligne.
+        if sous_boite.style.get("display", "inline") in ("inline", "inline-block"):
+            sous_boite.style["display"] = "block"
+        boite.enfants.append(sous_boite)
+
+
+def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None):
+    """Positionne une boite de type bloc et tout ce qu'elle contient.
+
+    `largeur_forcee` court-circuite le calcul de largeur : flex et grille
+    attribuent aux articles une taille que la boite ne peut pas deduire seule.
+    """
     style = boite.style
     taille = _taille_police(style)
+
+    # Une boite peut etre disposee deux fois — flex et grille la mesurent avant
+    # de la poser. Sans cette remise a zero, la seconde passe empilerait ses
+    # fragments sur ceux de la premiere et tout le texte serait double.
+    del boite.enfants[:]
+    del boite.lignes[:]
+    del boite.images[:]
+    del boite.hors_flux[:]
 
     marge_g = _longueur(style, "margin-left", largeur_disponible, taille)
     marge_d = _longueur(style, "margin-right", largeur_disponible, taille)
@@ -135,7 +245,15 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte):
     boite.y = y + marge_h
     largeur = largeur_disponible - marge_g - marge_d
     imposee = css.longueur(style.get("width", "auto"), largeur_disponible, taille)
-    if imposee is not None and imposee > 0:
+    if largeur_forcee is not None:
+        largeur = largeur_forcee
+    elif imposee is not None and imposee > 0:
+        # `box-sizing: border-box` : la largeur declaree comprend deja bordures
+        # et remplissage — c'est ce que pose la quasi-totalite des feuilles de
+        # style modernes, souvent sur `*`. Le defaut de CSS, lui, veut que
+        # `width` designe le seul contenu et que le reste s'y ajoute.
+        if style.get("box-sizing", "content-box") != "border-box":
+            imposee += pad_g + pad_d + 2 * bordure
         largeur = min(largeur, imposee)
     boite.largeur = max(0.0, largeur)
 
@@ -147,7 +265,25 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte):
     compteur = 0
     ordonnee = boite.element.balise == "ol" if isinstance(boite.element, Element) else False
 
-    enfants = boite.element.enfants if isinstance(boite.element, Element) else []
+    boite.rogne = style.get("overflow", "visible") in ("hidden", "auto", "scroll") \
+        or style.get("overflow-y", "visible") in ("hidden", "auto", "scroll")
+
+    mode = style.get("display", "block")
+    if mode in ("flex", "inline-flex", "grid", "inline-grid"):
+        _boites_enfants(boite, contexte)
+
+        def pose(sous, largeur, px=0.0, py=0.0, forcee=None):
+            _dispose_bloc(sous, px, py, max(0.0, largeur), contexte, forcee)
+            return (sous.largeur, sous.hauteur)
+
+        module = flex if mode in ("flex", "inline-flex") else grille
+        curseur += module.dispose(boite, interieur_x, curseur, interieur_l,
+                                  contexte, pose)
+        _termine_bloc(boite, style, curseur, pad_b, bordure, taille, interieur_l)
+        _pose_hors_flux(boite, contexte)
+        return
+
+    enfants = _enfants(boite, contexte)
     en_attente = []  # suite de nœuds en ligne a disposer ensemble
 
     def vide_en_attente():
@@ -166,7 +302,7 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte):
             continue
 
         chemin = _chemin(enfant)
-        style_enfant = css.applique(contexte.regles, enfant, chemin, boite.style)
+        style_enfant = _style_de(enfant, boite.style, chemin, contexte)
         affichage = style_enfant.get("display", "inline")
         if affichage == "none":
             continue
@@ -179,6 +315,11 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte):
         sous_boite = _boite_pour(enfant, boite.style, chemin, contexte)
         if sous_boite is None:
             continue
+        # Positionnement absolu : la boite quitte le flux. On la garde de cote,
+        # elle sera placee quand le bloc contenant connaitra sa taille.
+        if style_enfant.get("position", "static") in ("absolute", "fixed"):
+            boite.hors_flux.append((sous_boite, chemin))
+            continue
         if affichage == "list-item":
             compteur += 1
             sous_boite.puce = "%d." % compteur if ordonnee else "•"
@@ -190,15 +331,75 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte):
                    + _longueur(style_s, "margin-bottom", interieur_l, taille_s))
 
     vide_en_attente()
+    _termine_bloc(boite, style, curseur, pad_b, bordure, taille, interieur_l)
+    _pose_hors_flux(boite, contexte)
 
+
+def _termine_bloc(boite, style, curseur, pad_b, bordure, taille, reference):
+    """Arrete la hauteur d'un bloc, bornes comprises."""
     hauteur = curseur + pad_b + bordure - boite.y
     imposee = css.longueur(style.get("height", "auto"), 0.0, taille)
     if imposee is not None and imposee > hauteur:
         hauteur = imposee
-    if boite.element.balise == "hr":
+
+    minimum = css.longueur(style.get("min-height", "auto"), 0.0, taille)
+    if minimum is not None:
+        hauteur = max(hauteur, minimum)
+    maximum = css.longueur(style.get("max-height", "none"), 0.0, taille)
+    if maximum is not None:
+        hauteur = min(hauteur, maximum)
+
+    if isinstance(boite.element, Element) and boite.element.balise == "hr":
         hauteur = max(hauteur, bordure if bordure else 1.0)
+
+    # Les bornes de largeur s'appliquent ici aussi : `max-width: 900px` centre
+    # sur une colonne large est la forme la plus repandue de mise en page.
+    minimum = css.longueur(style.get("min-width", "auto"), reference, taille)
+    if minimum is not None:
+        boite.largeur = max(boite.largeur, minimum)
+    maximum = css.longueur(style.get("max-width", "none"), reference, taille)
+    if maximum is not None and boite.largeur > maximum:
+        # `margin: auto` centre ce qui est plus etroit que son contenant.
+        if style.get("margin-left") == "auto" and style.get("margin-right") == "auto":
+            boite.x += (boite.largeur - maximum) / 2.0
+        boite.largeur = maximum
+
     boite.hauteur = max(0.0, hauteur)
-    boite.hauteur += 0.0 if marge_b else 0.0
+
+
+def _pose_hors_flux(boite, contexte):
+    """Place les enfants `position: absolute`/`fixed` de cette boite.
+
+    Le bloc contenant est celui-ci des lors qu'il est lui-meme positionne — ce
+    que `position: relative` sert precisement a declarer. `fixed` se rapporte a
+    la fenetre, ce qui revient ici au meme puisque la peinture applique le
+    defilement a tout le reste.
+    """
+    if not boite.hors_flux:
+        return
+    for sous_boite, chemin in boite.hors_flux:
+        style = sous_boite.style
+        taille = _taille_police(style)
+        largeur_ref = boite.largeur or 0.0
+        hauteur_ref = boite.hauteur or 0.0
+
+        _dispose_bloc(sous_boite, boite.x, boite.y, largeur_ref, contexte)
+
+        gauche = css.longueur(style.get("left", "auto"), largeur_ref, taille)
+        droite = css.longueur(style.get("right", "auto"), largeur_ref, taille)
+        haut = css.longueur(style.get("top", "auto"), hauteur_ref, taille)
+        bas = css.longueur(style.get("bottom", "auto"), hauteur_ref, taille)
+
+        if gauche is not None:
+            sous_boite.x = boite.x + gauche
+        elif droite is not None:
+            sous_boite.x = boite.x + largeur_ref - droite - sous_boite.largeur
+        if haut is not None:
+            sous_boite.y = boite.y + haut
+        elif bas is not None:
+            sous_boite.y = boite.y + hauteur_ref - bas - sous_boite.hauteur
+
+        boite.enfants.append(sous_boite)
 
 
 def _preserve_espaces(style):
@@ -240,7 +441,7 @@ def _dispose_ligne(boite, nœuds, x, y, largeur, style_parent, contexte):
             continue
 
         chemin = _chemin(nœud)
-        style_enfant = css.applique(contexte.regles, nœud, chemin, style)
+        style_enfant = _style_de(nœud, style, chemin, contexte)
         if style_enfant.get("display", "inline") == "none":
             continue
         lien_enfant = lien

@@ -166,12 +166,13 @@ class Fenetre:
         # l'autre.
         url = reseau.normalise(url, self.url or None)
         self.etat = 'Chargement de %s…' % url
-        self._pose(Document(reseau.charge(url), self.largeur))
+        self._pose(Document(reseau.charge(url), self.largeur,
+                            hauteur_fenetre=self.hauteur))
 
     def charge_html(self, contenu, base=''):
         # `load_html` recoit le document tel quel : pas de reseau, pas d'URL.
         self._pose(Document(reseau.Reponse(base or 'about:blank', contenu),
-                            self.largeur))
+                            self.largeur, hauteur_fenetre=self.hauteur))
 
     def _pose(self, document):
         self.document = document
@@ -188,8 +189,8 @@ class Fenetre:
     # --- Peinture -----------------------------------------------------------
 
     def peint(self, largeur, hauteur):
-        if largeur != self.largeur and self.document:
-            self.document.remet_en_page(largeur)
+        if (largeur, hauteur) != (self.largeur, self.hauteur) and self.document:
+            self.document.remet_en_page(largeur, hauteur)
         self.largeur, self.hauteur = largeur, hauteur
 
         liste = [('rect', 0, 0, largeur, hauteur, 0xFFFFFFFF)]
