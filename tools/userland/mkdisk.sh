@@ -50,7 +50,21 @@ if [ "$PADDED" -gt "$SIZE" ]; then
     dd if=/dev/zero bs=1 count=$((PADDED - SIZE)) >> "$IMAGE" 2>/dev/null
 fi
 
-echo "image : $IMAGE ($((PADDED / 1024)) Kio, $((PADDED / 512)) secteurs)"
+# Zone persistante : 8 Mio a la FIN de l'image (voir `src/fs/persistance.rs`).
+# L'archive se lit depuis le debut, la zone s'ecrit depuis la fin ; tant que
+# l'image porte les deux, elles ne se rencontrent jamais. On complete donc
+# l'image de la taille de la zone plus une marge, et le noyau y ecrit ce qui
+# doit survivre a l'extinction.
+#
+# Les secteurs ajoutes sont nuls, donc sans magie : le premier demarrage trouve
+# une zone vierge, ce qui est exactement ce qu'il faut.
+ZONE_SECTEURS=16384
+ZONE=$((ZONE_SECTEURS * 512))
+dd if=/dev/zero bs=1M count=$((ZONE / 1024 / 1024)) >> "$IMAGE" 2>/dev/null
+TOTAL=$(wc -c < "$IMAGE")
+
+echo "image : $IMAGE ($((TOTAL / 1024)) Kio, $((TOTAL / 512)) secteurs)"
+echo "  dont archive $((PADDED / 1024)) Kio et zone persistante $((ZONE / 1024)) Kio"
 echo "contenu :"
 tar -tf "$IMAGE" | sed 's|^\./|  /|' | grep -v '^  /$' | head -40
 COUNT=$(tar -tf "$IMAGE" | wc -l)

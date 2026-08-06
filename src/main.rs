@@ -88,6 +88,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // pour que le journal montre les disques avant ce qu'on en a tire.
     drivers::ata::probe();
     fs::tar::mount_data_disk();
+    // Ce que la machine a retenu du demarrage precedent. Vient apres l'archive :
+    // un fichier persistant doit pouvoir remplacer celui que l'archive depose,
+    // pas l'inverse.
+    fs::persistance::monte();
     kernel::process::init();
     kernel::dmesg::log("process: table initialisee (init, desktop, shell)");
     kernel::dmesg::log("abi: appels systeme POSIX/Linux x86-64 disponibles (ring 3)");

@@ -319,7 +319,30 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         TIMERFD_CREATE => file::sys_timerfd_create(args[1] as u32),
         TIMERFD_SETTIME => file::sys_timerfd_settime(args[0] as i32, args[1] as u32, args[2], args[3]),
         TIMERFD_GETTIME => file::sys_timerfd_gettime(args[0] as i32, args[1]),
-        FSYNC | FDATASYNC => 0,
+        // `fsync` sur un fichier persistant ecrit reellement la zone du
+        // disque ; ailleurs il ne coute rien, car un programme en emet sans
+        // compter et le RAMFS n'a rien a vider.
+        FSYNC | FDATASYNC => {
+            let noeud = match crate::kernel::task::current_process()
+                .borrow()
+                .files
+                .get(args[0] as i32)
+                .map(|desc| desc.kind.clone())
+            {
+                Some(crate::kernel::fd::FdKind::File(idx)) => Some(idx),
+                _ => None,
+            };
+            match noeud {
+                Some(idx) if crate::fs::persistance::sous_racine(idx) => {
+                    if crate::fs::persistance::synchronise() < 0 { -5 } else { 0 }
+                }
+                _ => 0,
+            }
+        }
+        // `sync` ecrit tout ce qui doit survivre a l'extinction.
+        SYNC => {
+            if crate::fs::persistance::synchronise() < 0 { -5 } else { 0 }
+        }
         UMASK => 0o022,
         FCHMOD | FCHOWN | CHMOD | CHOWN => 0,
 

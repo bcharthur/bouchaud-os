@@ -43,6 +43,10 @@ const ST_READY: u8 = 0x40;
 const ST_BUSY: u8 = 0x80;
 
 const CMD_READ_SECTORS: u8 = 0x20;
+const CMD_WRITE_SECTORS: u8 = 0x30;
+/// Vide le cache d'ecriture du disque : sans elle, une image peut ne pas
+/// porter ce qu'on vient d'y ecrire quand la machine s'arrete.
+const CMD_FLUSH_CACHE: u8 = 0xE7;
 const CMD_IDENTIFY: u8 = 0xEC;
 
 /// Disque du controleur primaire.
@@ -273,6 +277,97 @@ unsafe fn read_sector_into(out: &mut [u8]) {
         "rep insw",
         in("dx") DATA,
         inout("rdi") out.as_mut_ptr() => _,
+        inout("rcx") SECTOR_SIZE / 2 => _,
+        options(nostack)
+    );
+}
+
+/// Ecrit `count` secteurs a partir du secteur `lba`. Rend le nombre ecrit.
+///
+/// Symetrique de [`read`], memes limites : LBA28, et 256 secteurs par commande.
+/// Le cache du disque est vide a la fin — une ecriture qui reste dans le cache
+/// du controleur n'est pas une ecriture persistante, et c'est precisement ce
+/// qu'on cherche ici.
+pub fn write(drive: Drive, lba: u64, count: usize, data: &[u8]) -> usize {
+    probe();
+    if !present(drive) || count == 0 {
+        return 0;
+    }
+    let mut done = 0usize;
+    while done < count {
+        let batch = core::cmp::min(count - done, 256);
+        let sector = lba + done as u64;
+        if sector >= (1 << 28) {
+            break;
+        }
+        let offset = done * SECTOR_SIZE;
+        if offset + batch * SECTOR_SIZE > data.len() {
+            break;
+        }
+        if !write_batch(drive, sector, batch, &data[offset..]) {
+            break;
+        }
+        done += batch;
+    }
+    if done > 0 {
+        flush(drive);
+    }
+    done
+}
+
+/// Ecrit un lot d'au plus 256 secteurs (une seule commande ATA).
+fn write_batch(drive: Drive, lba: u64, count: usize, data: &[u8]) -> bool {
+    if !wait_not_busy() {
+        return false;
+    }
+    unsafe {
+        outb(DEVICE_CONTROL, CTRL_NIEN);
+        outb(DRIVE_HEAD, drive.select_bits() | (((lba >> 24) & 0x0F) as u8));
+        outb(ERROR, 0);
+        outb(SECTOR_COUNT, if count == 256 { 0 } else { count as u8 });
+        outb(LBA_LOW, (lba & 0xFF) as u8);
+        outb(LBA_MID, ((lba >> 8) & 0xFF) as u8);
+        outb(LBA_HIGH, ((lba >> 16) & 0xFF) as u8);
+        outb(COMMAND, CMD_WRITE_SECTORS);
+    }
+
+    for index in 0..count {
+        if !wait_data_ready() {
+            return false;
+        }
+        let start = index * SECTOR_SIZE;
+        unsafe {
+            write_sector_from(&data[start..start + SECTOR_SIZE]);
+        }
+    }
+    wait_not_busy()
+}
+
+/// Demande au disque de vider son cache d'ecriture.
+fn flush(drive: Drive) {
+    if !wait_not_busy() {
+        return;
+    }
+    unsafe {
+        outb(DRIVE_HEAD, drive.select_bits());
+        outb(COMMAND, CMD_FLUSH_CACHE);
+    }
+    wait_not_busy();
+}
+
+/// Transfere un secteur vers le port de donnees.
+///
+/// `rep outsw` pour la meme raison que `rep insw` a la lecture : un acces par
+/// mot rendrait l'ecriture de quelques mega-octets interminable sous emulation.
+///
+/// # Securite
+/// `data` doit faire exactement [`SECTOR_SIZE`] octets.
+unsafe fn write_sector_from(data: &[u8]) {
+    debug_assert_eq!(data.len(), SECTOR_SIZE);
+    core::arch::asm!(
+        "rep outsw",
+        in("dx") DATA,
+        inout("rsi") data.as_ptr() => _,
         inout("rcx") SECTOR_SIZE / 2 => _,
         options(nostack)
     );

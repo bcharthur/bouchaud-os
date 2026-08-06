@@ -88,6 +88,7 @@ exec /ring3-selftest
 exec /posix-probe
 exec /audio-probe
 exec /net-probe 91.189.91.83
+exec /persist-probe
 exec /qpa-probe
 SCENARIO
 
@@ -148,18 +149,31 @@ info "== boot QEMU (sans affichage, delai max ${TIMEOUT}s) =="
 #   QEMU sort avec (code << 1) | 1, soit 33 pour un succes et 35 pour un echec.
 # -no-reboot : sans lui, une triple faute rebooterait en boucle au lieu de
 #   terminer, et le scenario tournerait jusqu'au delai.
-timeout "$TIMEOUT" qemu-system-x86_64 \
-    -drive "format=raw,file=$BOOTIMG" \
-    -drive "format=raw,file=$DISK" \
-    -m 2048 \
-    -display none \
-    -no-reboot \
-    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-    -netdev user,id=net0 \
-    -device e1000,netdev=net0 \
-    -audiodev none,id=muet -device AC97,audiodev=muet \
-    -serial "file:$LOG"
+demarre() { # demarre <fichier de journal>
+    timeout "$TIMEOUT" qemu-system-x86_64 \
+        -drive "format=raw,file=$BOOTIMG" \
+        -drive "format=raw,file=$DISK" \
+        -m 2048 \
+        -display none \
+        -no-reboot \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+        -netdev user,id=net0 \
+        -device e1000,netdev=net0 \
+        -audiodev none,id=muet -device AC97,audiodev=muet \
+        -serial "file:$1"
+}
+
+demarre "$LOG"
 QEMU_STATUS=$?
+
+# Second demarrage, sur la MEME image. C'est la seule facon de prouver la
+# persistance : le premier passage ecrit dans `/persist`, le second doit y
+# retrouver ce qu'il y a laisse. Refabriquer l'image entre les deux effacerait
+# justement ce qu'on verifie — d'ou la sonde qui reconnait seule son passage.
+LOG2="$WORK/serial-2.log"
+info "== second boot (persistance : la machine doit se souvenir) =="
+demarre "$LOG2"
+QEMU_STATUS_2=$?
 
 # --- 4. Verdict -------------------------------------------------------------
 
@@ -197,6 +211,23 @@ if grep -q "RESULTAT" "$LOG" 2>/dev/null; then
             *) red "  ECHEC $line"; FAILED=1 ;;
         esac
     done < <(grep "RESULTAT" "$LOG")
+fi
+
+# Le second demarrage : c'est lui qui atteste la persistance.
+if [ "$QEMU_STATUS_2" = 124 ]; then
+    red "le second boot n'a pas rendu la main en ${TIMEOUT}s"
+    FAILED=1
+else
+    grep -q "passage 2" "$LOG2" 2>/dev/null
+    report $? "la sonde a reconnu un second demarrage (donc /persist a tenu)"
+    if grep -q "RESULTAT" "$LOG2" 2>/dev/null; then
+        while IFS= read -r line; do
+            case "$line" in
+                *"0 verification(s) en echec"*) green "  ok   [boot 2] $line" ;;
+                *) red "  ECHEC [boot 2] $line"; FAILED=1 ;;
+            esac
+        done < <(grep "RESULTAT" "$LOG2")
+    fi
 fi
 
 if [ -x "$QT_BIN" ]; then

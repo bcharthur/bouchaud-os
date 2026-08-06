@@ -1823,6 +1823,172 @@ def verifie_modules():
          doc.contexte_js.execute("visibleGlobalement"), 42)
 
 
+# --- Persistance --------------------------------------------------------------
+
+def verifie_temoins():
+    """Le bocal a temoins : ce qu'on retient, a qui on le renvoie, et a qui non."""
+    from moteur import stockage
+
+    bocal = stockage.Temoins()
+    bocal.oublie_tout()
+
+    bocal.absorbe("https://exemple.test/connexion",
+                  {"set-cookie": "session=abc123; Path=/; Secure"})
+    egal("temoins: renvoye au meme site",
+         bocal.pour("https://exemple.test/compte"), "session=abc123")
+    egal("temoins: pas a un autre site",
+         bocal.pour("https://autre.test/compte"), "")
+    # `Secure` reserve le temoin a HTTPS : le renvoyer en clair le donnerait a
+    # quiconque ecoute la ligne.
+    egal("temoins: Secure retient en clair",
+         bocal.pour("http://exemple.test/compte"), "")
+
+    # Un sous-domaine recoit ce qui a ete pose pour le domaine parent.
+    bocal.absorbe("https://exemple.test/",
+                  {"set-cookie": "theme=sombre; Domain=exemple.test"})
+    verifie("temoins: le sous-domaine recoit",
+            "theme=sombre" in bocal.pour("https://api.exemple.test/x"),
+            bocal.pour("https://api.exemple.test/x"))
+
+    # Un site ne pose pas de temoin pour un domaine dont il ne fait pas partie.
+    bocal.absorbe("https://mechant.test/", {"set-cookie": "vol=1; Domain=banque.test"})
+    egal("temoins: pas de depot pour un domaine etranger",
+         bocal.pour("https://banque.test/"), "")
+
+    # Le chemin restreint la portee.
+    bocal.absorbe("https://exemple.test/admin/page",
+                  {"set-cookie": "jeton=zzz; Path=/admin"})
+    verifie("temoins: rendu sous le bon chemin",
+            "jeton=zzz" in bocal.pour("https://exemple.test/admin/outil"))
+    verifie("temoins: pas ailleurs",
+            "jeton=zzz" not in bocal.pour("https://exemple.test/public"))
+
+    # `Max-Age=0` efface.
+    bocal.absorbe("https://exemple.test/", {"set-cookie": "session=; Max-Age=0; Path=/"})
+    verifie("temoins: Max-Age=0 efface",
+            "session=" not in bocal.pour("https://exemple.test/compte"),
+            bocal.pour("https://exemple.test/compte"))
+
+    # Un temoin expire ne ressort pas.
+    bocal.absorbe("https://exemple.test/",
+                  {"set-cookie": "vieux=1; Path=/; Expires=Wed, 21 Oct 2015 07:28:00 GMT"})
+    verifie("temoins: un temoin expire ne ressort pas",
+            "vieux=1" not in bocal.pour("https://exemple.test/"),
+            bocal.pour("https://exemple.test/"))
+
+    # Et la date HTTP est lue correctement.
+    egal("temoins: date HTTP",
+         int(stockage._date_http("Thu, 01 Jan 1970 00:00:10 GMT")), 10)
+    verifie("temoins: date HTTP bissextile",
+            stockage._date_http("Mon, 29 Feb 2016 00:00:00 GMT") > 0)
+
+    bocal.oublie_tout()
+
+
+def verifie_cache_http():
+    """Une reponse cachable resssert ; une reponse interdite de cache, non."""
+    from moteur import stockage
+
+    egal("cache: max-age est lu",
+         stockage._duree_de_vie({"cache-control": "public, max-age=600"}), 600.0)
+    egal("cache: no-store interdit",
+         stockage._duree_de_vie({"cache-control": "no-store, max-age=600"}), 0)
+    egal("cache: no-cache aussi",
+         stockage._duree_de_vie({"cache-control": "no-cache"}), 0)
+    egal("cache: private aussi",
+         stockage._duree_de_vie({"cache-control": "private, max-age=600"}), 0)
+    egal("cache: sans directive, rien n'est garde",
+         stockage._duree_de_vie({}), 0)
+    verifie("cache: Expires dans le futur donne une duree",
+            stockage._duree_de_vie(
+                {"expires": "Fri, 01 Jan 2100 00:00:00 GMT"}) > 0)
+    egal("cache: Expires passe ne donne rien",
+         stockage._duree_de_vie({"expires": "Wed, 21 Oct 2015 07:28:00 GMT"}), 0.0)
+
+    if not stockage.disponible():
+        # Sans zone persistante — le cas de la machine de developpement — le
+        # cache ne retient rien, et c'est le comportement voulu : mieux vaut
+        # aucun cache qu'un cache qui ment.
+        egal("cache: sans zone persistante, rien n'est garde",
+             stockage.Cache().depose("http://x.test/a", b"abc",
+                                     {"cache-control": "max-age=600"}), False)
+        return
+
+    boite = stockage.Cache()
+    boite.vide()
+    egal("cache: une reponse cachable est gardee",
+         boite.depose("http://exemple.test/logo.png", b"PNGPNGPNG",
+                      {"cache-control": "max-age=600", "content-type": "image/png"}),
+         True)
+    garde = boite.lit("http://exemple.test/logo.png")
+    verifie("cache: elle resssert", garde is not None)
+    if garde:
+        egal("cache: a l'identique", garde[0], b"PNGPNGPNG")
+        egal("cache: avec son type", garde[1].get("content-type"), "image/png")
+    egal("cache: une reponse interdite de cache n'est pas gardee",
+         boite.depose("http://exemple.test/prive", b"secret",
+                      {"cache-control": "no-store"}), False)
+    egal("cache: et ne resssert pas", boite.lit("http://exemple.test/prive"), None)
+    boite.vide()
+    egal("cache: le vidage vide", boite.lit("http://exemple.test/logo.png"), None)
+
+
+def verifie_stockage_local():
+    """`localStorage` : cloisonne par origine, et rendu au JavaScript."""
+    from moteur import stockage
+
+    local = stockage.StockageLocal()
+    local.efface("https://a.test/page")
+    local.efface("https://b.test/page")
+
+    local.ecrit("https://a.test/page", "theme", "sombre")
+    egal("stockage: relu depuis la meme origine",
+         local.lit("https://a.test/autre", "theme"), "sombre")
+    # Le cloisonnement n'est pas une commodite : sans lui, une page lirait le
+    # jeton de session qu'une autre a range.
+    egal("stockage: invisible depuis une autre origine",
+         local.lit("https://b.test/page", "theme"), None)
+    egal("stockage: le port fait partie de l'origine",
+         local.lit("https://a.test:8443/page", "theme"), None)
+    egal("stockage: les cles sont listees",
+         local.cles("https://a.test/page"), ["theme"])
+    local.retire("https://a.test/page", "theme")
+    egal("stockage: retire", local.lit("https://a.test/page", "theme"), None)
+
+    # Et le chemin complet depuis le JavaScript.
+    doc = document("""
+        <body>
+          <script>
+            localStorage.setItem('compteur', '7');
+            window.__lu = localStorage.getItem('compteur');
+            window.__taille = localStorage.length;
+            window.__absent = localStorage.getItem('jamais-pose');
+            localStorage.removeItem('compteur');
+            window.__apres = localStorage.getItem('compteur');
+          </script>
+        </body>""")
+    contexte = doc.contexte_js
+    egal("stockage: setItem puis getItem", contexte.execute("window.__lu"), "7")
+    egal("stockage: length", contexte.execute("window.__taille"), 1)
+    egal("stockage: une cle absente rend null",
+         contexte.execute("window.__absent"), None)
+    egal("stockage: removeItem", contexte.execute("window.__apres"), None)
+
+    # `document.cookie` fait le tour complet, lui aussi.
+    stockage.temoins().oublie_tout()
+    doc = document("""
+        <body>
+          <script>
+            document.cookie = 'gout=vanille; Path=/';
+            window.__biscuits = document.cookie;
+          </script>
+        </body>""", url="http://exemple.test/page")
+    verifie("stockage: document.cookie fait le tour",
+            "gout=vanille" in (doc.contexte_js.execute("window.__biscuits") or ""),
+            doc.contexte_js.execute("window.__biscuits"))
+    stockage.temoins().oublie_tout()
+
+
 def verifie_bac_a_sable():
     """Une page ne doit pas pouvoir atteindre le systeme."""
     doc = document("<body></body>")
@@ -1895,6 +2061,9 @@ def principal():
         verifie_ombre,
         verifie_toile,
         verifie_modules,
+        verifie_temoins,
+        verifie_cache_http,
+        verifie_stockage_local,
         verifie_flex,
         verifie_grille,
         verifie_position,

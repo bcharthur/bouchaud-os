@@ -1159,8 +1159,11 @@
         set title(valeur) { appel("poseTitre", String(valeur)); }
         get URL() { return appel("url"); }
         get location() { return globalThis.location; }
-        get cookie() { return ""; }
-        set cookie(_) {}
+        // Les temoins sont ceux du bocal persistant, pas une chaine vide :
+        // une page qui lit `document.cookie` pour savoir si elle a une session
+        // en tirait la conclusion inverse de la verite.
+        get cookie() { return appel("temoins") || ""; }
+        set cookie(declaration) { appel("poseTemoin", String(declaration)); }
 
         getElementById(identifiant) { return noeud(appel("parId", String(identifiant))); }
         querySelector(selecteur) {
@@ -1370,7 +1373,25 @@
     /// Un stockage qui ne survit pas a la page : il n'y a pas de disque
     /// inscriptible sous cet OS, et une page qui l'utilise doit fonctionner
     /// plutot que lever.
-    function stockage() {
+    /// `localStorage` : cloisonne par origine, ecrit sur le disque.
+    ///
+    /// Une page range la son etat — le theme choisi, un panier, un brouillon —
+    /// et s'attend a le retrouver au retour. Une table en memoire, comme
+    /// auparavant, ne survivait meme pas au changement de page.
+    const stockageLocal = {
+        getItem(cle) {
+            const valeur = appel("stockage", "lit", String(cle));
+            return valeur === undefined ? null : valeur;
+        },
+        setItem(cle, valeur) { appel("stockage", "ecrit", String(cle), String(valeur)); },
+        removeItem(cle) { appel("stockage", "retire", String(cle)); },
+        clear() { appel("stockage", "efface"); },
+        key(index) { return (appel("stockage", "cles") || [])[index] || null; },
+        get length() { return (appel("stockage", "cles") || []).length; },
+    };
+
+    /// `sessionStorage` ne survit pas a la page : c'est sa definition.
+    function stockageDeSession() {
         const donnees = new Map();
         return {
             getItem: (c) => (donnees.has(String(c)) ? donnees.get(String(c)) : null),
@@ -1381,8 +1402,10 @@
             get length() { return donnees.size; },
         };
     }
-    globalThis.localStorage = stockage();
-    globalThis.sessionStorage = stockage();
+
+    globalThis.localStorage = stockageLocal;
+    globalThis.sessionStorage = stockageDeSession();
+    globalThis.Storage = Object;
 
     globalThis.navigator = {
         userAgent: "Mozilla/5.0 (Bouchaud OS; x86_64) BoNavigateur/1.0",
@@ -1391,7 +1414,7 @@
         language: "fr-FR",
         languages: ["fr-FR", "fr", "en"],
         onLine: true,
-        cookieEnabled: false,
+        cookieEnabled: true,
         userAgentData: undefined,
     };
 

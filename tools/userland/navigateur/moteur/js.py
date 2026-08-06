@@ -33,7 +33,7 @@ import urllib.parse
 import bo
 import bojs
 
-from . import css, html, reseau
+from . import css, html, reseau, stockage
 
 # Types de nœuds, comme dans la norme DOM.
 ELEMENT = 1
@@ -669,6 +669,36 @@ class Contexte:
         except Exception:  # noqa: BLE001
             return {}
         return dict(style)
+
+    # --- Operations : persistance ---------------------------------------------
+
+    def _op_temoins(self):
+        """L'en-tete `Cookie` de la page, tel que `document.cookie` le rend."""
+        return stockage.temoins().pour(self.document.url)
+
+    def _op_poseTemoin(self, declaration):
+        """`document.cookie = "nom=valeur; …"` — un seul temoin a la fois."""
+        entetes = {"set-cookie": str(declaration)}
+        return stockage.temoins().absorbe(self.document.url, entetes) > 0
+
+    def _op_stockage(self, action, cle=None, valeur=None):
+        """`localStorage`, cloisonne par origine et ecrit sur le disque."""
+        local = stockage.local()
+        url = self.document.url
+        if action == "lit":
+            return local.lit(url, cle)
+        if action == "ecrit":
+            local.ecrit(url, cle, valeur)
+            return True
+        if action == "retire":
+            local.retire(url, cle)
+            return True
+        if action == "cles":
+            return local.cles(url)
+        if action == "efface":
+            local.efface(url)
+            return True
+        return None
 
     def _op_moduleAdresse(self, base, nom):
         """Resout une specification d'`import` en adresse absolue.

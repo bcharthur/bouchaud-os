@@ -46,6 +46,7 @@ pub const WAIT4: u64 = 61;
 pub const KILL: u64 = 62;
 pub const UNAME: u64 = 63;
 pub const FCNTL: u64 = 72;
+pub const SYNC: u64 = 162;
 pub const FSYNC: u64 = 74;
 pub const FDATASYNC: u64 = 75;
 pub const FTRUNCATE: u64 = 77;
@@ -284,6 +285,7 @@ pub fn name(number: u64) -> &'static str {
         ACCEPT4 => "accept4",
         GETPPID => "getppid",
         MSYNC => "msync",
+        SYNC => "sync",
         _ => "?",
     }
 }

@@ -31,6 +31,8 @@ import ssl
 import urllib.parse
 import zlib
 
+from . import stockage
+
 DELAI = 20.0
 AGENT = "BouchaudOS/1.0 (navigateur natif; Qt/Python)"
 REDIRECTIONS_MAX = 5
@@ -163,6 +165,15 @@ def charge(url, methode="GET", corps=None, entetes=None, brut=False):
             avance = _reprend(url)
             if avance is not None:
                 return avance
+            # Puis le cache du disque : une ressource encore valable ne
+            # justifie pas un aller-retour reseau.
+            garde = stockage.cache().lit(url)
+            if garde is not None:
+                octets, entetes_gardes = garde
+                type_mime = entetes_gardes.get("content-type", "").split(";")[0]
+                return Reponse(url, octets.decode("utf-8", "replace"),
+                               type_mime or "application/octet-stream", 200,
+                               entetes=entetes_gardes, octets=octets)
         # YouTube n'est pas servi tel quel : sa page de lecture est une
         # application qu'on ne peut pas executer. On lui substitue une page qui
         # lit le flux — voir `lecteur_youtube`. `brut` court-circuite ce
@@ -404,6 +415,12 @@ def _charge_http(url, restantes=REDIRECTIONS_MAX, methode="GET", corps=None,
         "Accept-Encoding": "gzip, deflate",
         "Connection": "keep-alive",
     }
+    # Les temoins du site, s'il en a depose : c'est ce qui fait qu'une
+    # session ouverte le reste d'une page a l'autre, et d'un demarrage au
+    # suivant.
+    biscuits = stockage.temoins().pour(url)
+    if biscuits:
+        entetes_envoyes["Cookie"] = biscuits
     # Ce que la page a demande passe devant : un `fetch` qui pose son
     # `Content-Type` ou son `Authorization` doit etre obei.
     for nom, valeur in (entetes or {}).items():
@@ -436,6 +453,8 @@ def _charge_http(url, restantes=REDIRECTIONS_MAX, methode="GET", corps=None,
             connexion = None
             if not recyclee or tentative == 1:
                 raise
+
+    stockage.temoins().absorbe(url, entetes)
 
     detendu = _decompresse(reponse_corps, entetes.get("content-encoding", ""))
     if detendu is not reponse_corps:
@@ -485,7 +504,10 @@ def _charge_http(url, restantes=REDIRECTIONS_MAX, methode="GET", corps=None,
 
     if brut:
         # Image, script, feuille de style : l'appelant sait quoi en faire, et
-        # l'enrober de HTML le rendrait inutilisable.
+        # l'enrober de HTML le rendrait inutilisable. C'est aussi ce qui merite
+        # d'etre garde : une page change, une icone non.
+        if code == 200 and methode == "GET":
+            stockage.cache().depose(url, donnees, entetes)
         return Reponse(url, texte, type_mime, code, entetes=entetes, octets=donnees)
 
     if type_mime not in ("text/html", "application/xhtml+xml"):
