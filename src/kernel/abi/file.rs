@@ -480,6 +480,32 @@ pub fn sys_pwrite(fd: i32, buffer: u64, count: usize, offset: i64) -> i64 {
 // --- Ouverture / fermeture ---------------------------------------------------
 
 /// `openat` (et `open`, avec `AT_FDCWD`).
+/// `memfd_create` : un fichier anonyme en memoire.
+///
+/// Sans nom dans l'arborescence, mais mappable en `MAP_SHARED` — et c'est tout
+/// l'interet. Un moteur web multi-processus s'en sert pour ses tampons
+/// d'image : le processus qui dessine et celui qui compose voient la meme
+/// memoire physique, sans copie. Le nœud etant anonyme, il disparait quand le
+/// dernier descripteur se ferme.
+pub fn sys_memfd_create(nom_addr: u64, _flags: u32) -> i64 {
+    let nom = match super::user_string(nom_addr) {
+        Some(nom) => nom,
+        None => return -errno::EFAULT,
+    };
+    let idx = match crate::fs::ramfs::fs().cree_anonyme(&nom) {
+        Ok(idx) => idx,
+        Err(_) => return -errno::ENFILE,
+    };
+    let process = task::current_process();
+    let mut borrowed = process.borrow_mut();
+    // `MFD_CLOEXEC` vaut 1 : c'est le seul drapeau que les appelants posent en
+    // pratique, et le respecter evite qu'un tampon fuie dans un `execve`.
+    let mut desc = FileDesc::new(FdKind::File(idx));
+    desc.cloexec = _flags & 1 != 0;
+    let fd = borrowed.files.insert(desc);
+    if fd < 0 { -errno::EMFILE } else { fd as i64 }
+}
+
 pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
     let path = match crate::kernel::abi::resolve_user_path(path_addr) {
         Some(path) => path,

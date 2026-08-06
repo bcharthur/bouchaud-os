@@ -130,6 +130,16 @@ pub const GETRANDOM: u64 = 318;
 pub const MEMBARRIER: u64 = 324;
 pub const STATX: u64 = 332;
 pub const RSEQ: u64 = 334;
+/// `memfd_create` : un fichier anonyme en memoire, partageable par `mmap`.
+///
+/// C'est la primitive sur laquelle repose la memoire partagee des moteurs web
+/// multi-processus : un descripteur sans nom, mappable en `MAP_SHARED`, et
+/// transmissible a un autre processus par `SCM_RIGHTS`.
+pub const MEMFD_CREATE: u64 = 319;
+pub const STATFS: u64 = 137;
+pub const FSTATFS: u64 = 138;
+pub const UTIMENSAT: u64 = 280;
+pub const SYMLINK: u64 = 88;
 pub const SETRLIMIT: u64 = 160;
 pub const SIGALTSTACK: u64 = 131;
 pub const RT_SIGSUSPEND: u64 = 130;
@@ -286,6 +296,11 @@ pub fn name(number: u64) -> &'static str {
         GETPPID => "getppid",
         MSYNC => "msync",
         SYNC => "sync",
+        MEMFD_CREATE => "memfd_create",
+        STATFS => "statfs",
+        FSTATFS => "fstatfs",
+        UTIMENSAT => "utimensat",
+        SYMLINK => "symlink",
         _ => "?",
     }
 }

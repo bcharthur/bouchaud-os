@@ -193,7 +193,7 @@ fn sys_alarm(seconds: u32) -> i64 {
 }
 
 /// Copie une chaine C depuis l'espace utilisateur.
-fn user_string(addr: u64) -> Option<String> {
+pub(crate) fn user_string(addr: u64) -> Option<String> {
     if addr == 0 {
         return None;
     }
@@ -322,6 +322,7 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         // `fsync` sur un fichier persistant ecrit reellement la zone du
         // disque ; ailleurs il ne coute rien, car un programme en emet sans
         // compter et le RAMFS n'a rien a vider.
+        MEMFD_CREATE => file::sys_memfd_create(args[0], args[1] as u32),
         FSYNC | FDATASYNC => {
             let noeud = match crate::kernel::task::current_process()
                 .borrow()

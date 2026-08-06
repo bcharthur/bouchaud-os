@@ -134,6 +134,15 @@ impl FileSystem {
         let _log = self.mkdir_at(var, "log");
         let _ = home;
 
+        // `/dev/shm` : c'est la que `shm_open` cree ses segments. Sans ce
+        // repertoire, toute la memoire partagee POSIX echoue a l'ouverture —
+        // et c'est sur elle que reposent les moteurs web multi-processus, qui
+        // s'y passent leurs tampons d'image sans les copier.
+        let dev = self.mkdir_at(0, "dev").unwrap_or(0);
+        if dev != 0 {
+            let _ = self.mkdir_at(dev, "shm");
+        }
+
         // Catalogue d'applications natives (manifestes .bapp).
         let apps = self.mkdir_at(0, "apps").unwrap_or(0);
         if apps != 0 {
@@ -189,6 +198,29 @@ impl FileSystem {
         self.nodes[idx].uid = users::session().uid();
         self.nodes[idx].gid = users::session().gid();
         if !self.nodes[idx].set_name(name) { return Err("invalid name"); }
+        Ok(idx)
+    }
+
+    /// Cree un fichier sans parent ni nom visible : un `memfd`.
+    ///
+    /// Il n'apparait dans aucun repertoire — c'est ce qui le distingue d'un
+    /// fichier ordinaire — mais il occupe un inode et se comporte comme tel
+    /// pour la lecture, l'ecriture et surtout `mmap`. Le partage de memoire
+    /// entre processus repose entierement la-dessus : le cache de pages est
+    /// indexe par nœud, deux mappages `MAP_SHARED` du meme nœud voient donc
+    /// les memes frames physiques.
+    pub fn cree_anonyme(&mut self, nom: &str) -> Result<usize, &'static str> {
+        let idx = self.alloc_node().ok_or("no free inode")?;
+        self.nodes[idx].kind = NodeKind::File;
+        // Son propre parent : la remontee d'arborescence s'arrete sur lui, et
+        // il ne peut donc pas etre pris pour un descendant de la racine.
+        self.nodes[idx].parent = idx;
+        self.nodes[idx].mode = 0o600;
+        self.nodes[idx].uid = users::session().uid();
+        self.nodes[idx].gid = users::session().gid();
+        let mut etiquette = String::from("memfd:");
+        etiquette.push_str(nom);
+        self.nodes[idx].set_name(&etiquette);
         Ok(idx)
     }
 
