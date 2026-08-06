@@ -46,7 +46,7 @@ qu'exigent WebKit et sa chaîne de dépendances.
 
 | Manque | Pourquoi c'est bloquant |
 |---|---|
-| **`SCM_RIGHTS`** sur `sendmsg`/`recvmsg` | WebKit sépare UIProcess, WebProcess et NetworkProcess, et se passe des descripteurs — tampons partagés, sockets — d'un processus à l'autre. Sans passage de descripteurs, l'IPC ne s'établit pas. **C'est le prochain chantier.** |
+| ~~**`SCM_RIGHTS`**~~ | **Fait** — voir phase 2. |
 | `listen` / `accept` / `accept4` sur `AF_UNIX` | Le canal de contrôle entre processus. `socketpair` couvre le cas hérité par `fork` ; pas celui d'un processus lancé séparément. |
 
 ### Bloquant pour la chaîne de dépendances (GLib, GIO, ICU)
@@ -88,10 +88,36 @@ puis écrit, le père voit l'écriture du fils, sur la première page **et** sur
 seconde. Si cette dernière échouait, chaque processus aurait sa copie et le
 partage serait un mensonge.
 
+## Phase 2 — faite
+
+**Le passage de descripteurs entre processus.** Partager de la mémoire ne sert à
+rien si l'on ne peut pas confier ce qui la désigne : `SCM_RIGHTS` est la seule
+façon pour deux processus de s'échanger autre chose que des octets.
+
+Un socket local porte désormais deux files : les octets, et les descripteurs.
+Ceux-ci sont **copiés** dans le canal — l'émetteur garde le sien, le récepteur en
+obtient un à lui — ce qui évite qu'un envoi ferme un fichier sous les pieds de
+celui qui l'envoie.
+
+Trois défauts trouvés en chemin, tous invisibles jusqu'à ce qu'on les exerce :
+
+- **la lecture d'une paire de sockets ne bloquait pas.** Elle rendait `EAGAIN`
+  immédiatement, ce qui faisait échouer le premier `recvmsg` d'un dialogue —
+  celui qui arrive avant que le pair ait eu la main ;
+- **`sendmsg` passait par `sendto`,** qui ne connaît ni les paires de sockets ni
+  leur absence d'adresse. Les descripteurs partaient, l'octet qui les accompagne
+  échouait, et l'émetteur en concluait que rien n'était parti ;
+- un `recvmsg` qui ne reçoit **que** des descripteurs — le cas courant — rendait
+  une erreur faute d'octets, alors qu'il venait d'obtenir ce qu'on attendait.
+
+Éprouvé par `shm-probe.c` : 21 vérifications, dont celle qui compte — le fils
+crée un tampon, y écrit, passe **le descripteur** par un socket ; le père, qui
+n'a jamais ouvert ce tampon, le projette et y lit ce que le fils a écrit.
+
 ## Phases suivantes
 
-2. **`SCM_RIGHTS` et `AF_UNIX` complet** — passage de descripteurs, `listen`,
-   `accept`. Sans quoi aucun moteur multi-processus ne démarre.
+2. **`AF_UNIX` complet** — `listen`, `accept`, sockets nommés, pour les
+   processus lancés séparément plutôt qu'hérités par `fork`.
 3. **Système de fichiers inscriptible** à blocs, sur le pilote ATA qui sait déjà
    écrire.
 4. **Compléter la couche POSIX** — `statfs`, `utimensat`, `symlink`, `clone3`.

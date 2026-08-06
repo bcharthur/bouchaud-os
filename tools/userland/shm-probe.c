@@ -25,6 +25,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
+#include <sys/uio.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -54,6 +56,119 @@ static int memfd(const char *nom)
 
 #define TAILLE 8192
 static const char TEMOIN[] = "ecrit par le fils, lu par le pere";
+static const char PASSE[] = "tampon cree par le fils, projete par le pere";
+
+// Envoie un descripteur sur un socket, facon `SCM_RIGHTS`.
+static int envoie_descripteur(int socket, int fd)
+{
+    char octet = 'x';
+    struct iovec iov = { .iov_base = &octet, .iov_len = 1 };
+    char place[CMSG_SPACE(sizeof(int))];
+    memset(place, 0, sizeof place);
+
+    struct msghdr message;
+    memset(&message, 0, sizeof message);
+    message.msg_iov = &iov;
+    message.msg_iovlen = 1;
+    message.msg_control = place;
+    message.msg_controllen = sizeof place;
+
+    struct cmsghdr *entete = CMSG_FIRSTHDR(&message);
+    entete->cmsg_level = SOL_SOCKET;
+    entete->cmsg_type = SCM_RIGHTS;
+    entete->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(entete), &fd, sizeof(int));
+
+    return sendmsg(socket, &message, 0) >= 0 ? 0 : -1;
+}
+
+// Recoit un descripteur, ou -1.
+static int recoit_descripteur(int socket)
+{
+    char octet = 0;
+    struct iovec iov = { .iov_base = &octet, .iov_len = 1 };
+    char place[CMSG_SPACE(sizeof(int))];
+    memset(place, 0, sizeof place);
+
+    struct msghdr message;
+    memset(&message, 0, sizeof message);
+    message.msg_iov = &iov;
+    message.msg_iovlen = 1;
+    message.msg_control = place;
+    message.msg_controllen = sizeof place;
+
+    if (recvmsg(socket, &message, 0) < 0)
+        return -1;
+    struct cmsghdr *entete = CMSG_FIRSTHDR(&message);
+    if (!entete || entete->cmsg_level != SOL_SOCKET
+            || entete->cmsg_type != SCM_RIGHTS)
+        return -1;
+    int recu = -1;
+    memcpy(&recu, CMSG_DATA(entete), sizeof(int));
+    return recu;
+}
+
+// Le fils cree un tampon, y ecrit, et **passe le descripteur** au pere par un
+// socket. Le pere le projette et doit y voir l'ecriture : partager de la
+// memoire ne sert a rien si l'on ne peut pas confier ce qui la designe.
+static void verifie_passage(void)
+{
+    int paire[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, paire) != 0) {
+        verifie("socketpair pour le passage", 0, NULL);
+        return;
+    }
+    verifie("socketpair pour le passage", 1, NULL);
+
+    pid_t enfant = fork();
+    if (enfant < 0) {
+        verifie("fork pour le passage", 0, NULL);
+        return;
+    }
+
+    if (enfant == 0) {
+        close(paire[0]);
+        int tampon = memfd("passe-par-le-fils");
+        if (tampon < 0 || ftruncate(tampon, 4096) != 0)
+            _exit(2);
+        char *zone = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED,
+                          tampon, 0);
+        if (zone == MAP_FAILED)
+            _exit(3);
+        strcpy(zone, PASSE);
+        munmap(zone, 4096);
+        if (envoie_descripteur(paire[1], tampon) != 0)
+            _exit(4);
+        close(tampon);
+        close(paire[1]);
+        _exit(0);
+    }
+
+    close(paire[1]);
+    int recu = recoit_descripteur(paire[0]);
+    verifie("un descripteur traverse le socket", recu >= 0, NULL);
+
+    if (recu >= 0) {
+        char *zone = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED,
+                          recu, 0);
+        verifie("le descripteur recu se projette", zone != MAP_FAILED, NULL);
+        if (zone != MAP_FAILED) {
+            // Le pere n'a jamais ouvert ce tampon : il ne l'a recu que par le
+            // socket. S'il y lit ce que le fils a ecrit, le descripteur designe
+            // bien la meme memoire.
+            verifie("et porte ce que le fils y avait ecrit",
+                    strcmp(zone, PASSE) == 0, zone);
+            munmap(zone, 4096);
+        }
+        close(recu);
+    }
+
+    int statut = 0;
+    waitpid(enfant, &statut, 0);
+    verifie("le fils qui a passe le descripteur a fini normalement",
+            WIFEXITED(statut) && WEXITSTATUS(statut) == 0, NULL);
+    close(paire[0]);
+}
 
 int main(void)
 {
@@ -145,6 +260,9 @@ int main(void)
         close(nomme);
         unlink("/dev/shm/essai");
     }
+
+    // 6. Le passage de descripteurs — l'autre moitie du multi-processus.
+    verifie_passage();
 
     printf("RESULTAT : %d verification(s) en echec (%d passees)\n",
            echecs, reussites);

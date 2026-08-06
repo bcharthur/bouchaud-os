@@ -401,6 +401,109 @@ const MSG_NAME: u64 = 0;
 const MSG_NAMELEN: u64 = 8;
 const MSG_IOV: u64 = 16;
 const MSG_IOVLEN: u64 = 24;
+const MSG_CONTROL: u64 = 32;
+const MSG_CONTROLLEN: u64 = 40;
+const MSG_FLAGS: u64 = 48;
+
+const SOL_SOCKET: u32 = 1;
+const SCM_RIGHTS: u32 = 1;
+
+/// En-tete d'un message de controle : `{ len: u64, level: i32, type: i32 }`.
+const CMSG_ENTETE: usize = 16;
+
+/// Lit les descripteurs qu'un `sendmsg` veut faire passer.
+///
+/// `SCM_RIGHTS` est la seule facon pour deux processus de se partager autre
+/// chose que des octets : un tampon anonyme, une extremite de socket, un
+/// fichier deja ouvert. L'architecture multi-processus d'un moteur web repose
+/// entierement la-dessus — sans elle, chaque processus devrait tout recopier.
+fn lit_descripteurs_envoyes(msghdr: u64) -> Vec<i32> {
+    let mut fds = Vec::new();
+    let controle = match crate::kernel::abi::user_read_u64(msghdr + MSG_CONTROL) {
+        Some(adresse) if adresse != 0 => adresse,
+        _ => return fds,
+    };
+    let longueur = crate::kernel::abi::user_read_u64(msghdr + MSG_CONTROLLEN)
+        .unwrap_or(0) as usize;
+    if longueur < CMSG_ENTETE {
+        return fds;
+    }
+
+    let mut position = 0usize;
+    while position + CMSG_ENTETE <= longueur {
+        let base = controle + position as u64;
+        let taille = match crate::kernel::abi::user_read_u64(base) {
+            Some(valeur) => valeur as usize,
+            None => break,
+        };
+        if taille < CMSG_ENTETE || position + taille > longueur {
+            break;
+        }
+        let niveau = crate::kernel::abi::user_read(base + 8, 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .unwrap_or(0);
+        let genre = crate::kernel::abi::user_read(base + 12, 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .unwrap_or(0);
+
+        if niveau == SOL_SOCKET && genre == SCM_RIGHTS {
+            let mut decalage = CMSG_ENTETE;
+            while decalage + 4 <= taille {
+                if let Some(brut) = crate::kernel::abi::user_read(
+                    base + decalage as u64, 4) {
+                    fds.push(i32::from_le_bytes([brut[0], brut[1], brut[2], brut[3]]));
+                }
+                decalage += 4;
+            }
+        }
+        // Alignement sur huit octets, comme le veut `CMSG_NXTHDR`.
+        position += (taille + 7) & !7;
+    }
+    fds
+}
+
+/// Ecrit dans le `msghdr` les descripteurs recus. Rend le nombre ecrit.
+fn ecrit_descripteurs_recus(msghdr: u64, fds: &[i32]) -> usize {
+    if fds.is_empty() {
+        let _ = user_write(msghdr + MSG_CONTROLLEN, &0u64.to_le_bytes());
+        return 0;
+    }
+    let controle = match crate::kernel::abi::user_read_u64(msghdr + MSG_CONTROL) {
+        Some(adresse) if adresse != 0 => adresse,
+        _ => return 0,
+    };
+    let disponible = crate::kernel::abi::user_read_u64(msghdr + MSG_CONTROLLEN)
+        .unwrap_or(0) as usize;
+
+    // On n'ecrit que ce qui tient : l'appelant a dimensionne son tampon, et
+    // deborder ecraserait sa pile.
+    let tiennent = if disponible < CMSG_ENTETE + 4 {
+        0
+    } else {
+        core::cmp::min(fds.len(), (disponible - CMSG_ENTETE) / 4)
+    };
+    if tiennent == 0 {
+        let _ = user_write(msghdr + MSG_CONTROLLEN, &0u64.to_le_bytes());
+        // `MSG_CTRUNC` : le recepteur doit savoir qu'il a perdu des
+        // descripteurs, sinon il attendrait indefiniment ce qui n'arrivera pas.
+        let _ = user_write(msghdr + MSG_FLAGS, &8u32.to_le_bytes());
+        return 0;
+    }
+
+    let taille = CMSG_ENTETE + tiennent * 4;
+    let _ = user_write(controle, &(taille as u64).to_le_bytes());
+    let _ = user_write(controle + 8, &SOL_SOCKET.to_le_bytes());
+    let _ = user_write(controle + 12, &SCM_RIGHTS.to_le_bytes());
+    for (index, fd) in fds.iter().take(tiennent).enumerate() {
+        let _ = user_write(controle + CMSG_ENTETE as u64 + (index * 4) as u64,
+                           &fd.to_le_bytes());
+    }
+    let _ = user_write(msghdr + MSG_CONTROLLEN, &(taille as u64).to_le_bytes());
+    if tiennent < fds.len() {
+        let _ = user_write(msghdr + MSG_FLAGS, &8u32.to_le_bytes());
+    }
+    tiennent
+}
 
 /// Lit les `iovec` d'un `msghdr` : (adresse, longueur) pour chacun.
 fn read_iovecs(msghdr: u64) -> Option<Vec<(u64, usize)>> {
@@ -439,6 +542,49 @@ pub fn sys_sendmsg(fd: i32, msghdr: u64, flags: u32) -> i64 {
             None => return -errno::EFAULT,
         }
     }
+    // Les descripteurs que l'appelant veut faire passer partent avec le
+    // message. Un envoi peut n'etre *que* cela : `SCM_RIGHTS` accompagne
+    // souvent un octet unique, parfois aucun.
+    let a_passer = lit_descripteurs_envoyes(msghdr);
+    if !a_passer.is_empty() {
+        let process = task::current_process();
+        let sortant = match process.borrow().files.get(fd).map(|d| d.kind.clone()) {
+            Some(FdKind::SocketPair(_, sortant)) => Some(sortant),
+            // Passer un descripteur n'a de sens que sur un socket local.
+            _ => return -errno::EINVAL,
+        };
+        if let Some(canal) = sortant {
+            for fd_source in &a_passer {
+                // Le descripteur est **copie** dans le canal : le recepteur en
+                // obtiendra un a lui, et l'emetteur garde le sien. C'est ce que
+                // dit la norme, et c'est ce qui evite qu'un envoi ferme un
+                // fichier sous les pieds de celui qui l'envoie.
+                let copie = process.borrow().files.get(*fd_source).cloned();
+                match copie {
+                    Some(desc) => canal.borrow_mut().descripteurs.push(desc),
+                    None => return -errno::EBADF,
+                }
+            }
+        }
+    }
+
+    // Une paire de sockets n'a ni adresse ni pile TCP : le corps s'ecrit
+    // directement dans le canal sortant. Le faire passer par `sendto`, comme on
+    // le faisait, echouait — et l'appelant en concluait que son envoi n'etait
+    // pas parti, alors que les descripteurs, eux, etaient bien arrives.
+    {
+        let process = task::current_process();
+        let sortant = match process.borrow().files.get(fd).map(|d| d.kind.clone()) {
+            Some(FdKind::SocketPair(_, sortant)) => Some(sortant),
+            _ => None,
+        };
+        if let Some(canal) = sortant {
+            let ecrits = payload.len();
+            canal.borrow_mut().octets.extend_from_slice(&payload);
+            return ecrits as i64;
+        }
+    }
+
     if payload.is_empty() {
         return 0;
     }
@@ -508,10 +654,57 @@ pub fn sys_recvmsg(fd: i32, msghdr: u64, flags: u32) -> i64 {
         None => return 0,
     };
     let name = crate::kernel::abi::user_read_u64(msghdr + MSG_NAME).unwrap_or(0);
+
+    // Les descripteurs arrives par `SCM_RIGHTS` sont installes dans ce
+    // processus avant la lecture des octets : c'est ce qui permet a un
+    // `recvmsg` qui ne recoit *que* des descripteurs — le cas courant — de les
+    // rendre malgre un corps vide.
+    let process = task::current_process();
+    let entrant = match process.borrow().files.get(fd).map(|d| d.kind.clone()) {
+        Some(FdKind::SocketPair(entrant, _)) => Some(entrant),
+        _ => None,
+    };
+    let mut installes: Vec<i32> = Vec::new();
+    if let Some(canal) = &entrant {
+        // Meme attente que pour les octets : le pair n'a peut-etre pas encore
+        // eu la main. Sans elle, le premier `recvmsg` d'un dialogue echoue.
+        let bloquant = process.borrow().files.get(fd)
+            .map(|d| d.flags & 0o4000 == 0).unwrap_or(true);
+        if bloquant && canal.borrow().descripteurs.is_empty()
+            && canal.borrow().octets.is_empty()
+        {
+            let echeance = crate::kernel::timer::ticks()
+                + crate::kernel::timer::ms_to_ticks(2000);
+            while canal.borrow().descripteurs.is_empty()
+                && canal.borrow().octets.is_empty()
+                && crate::kernel::timer::ticks() < echeance
+            {
+                task::yield_now();
+                crate::arch::x86_64::cpu::wait_for_interrupt();
+            }
+        }
+    }
+    if let Some(canal) = entrant {
+        let recus: Vec<_> = canal.borrow_mut().descripteurs.drain(..).collect();
+        for desc in recus {
+            let numero = process.borrow_mut().files.insert(desc);
+            if numero >= 0 {
+                installes.push(numero);
+            }
+        }
+    }
+    ecrit_descripteurs_recus(msghdr, &installes);
+
     let received = sys_recvfrom(fd, base, len, flags, name, 0);
     if received >= 0 && name != 0 {
         // `msg_namelen` doit refleter la taille reellement ecrite.
         user_write(msghdr + MSG_NAMELEN, &16u32.to_le_bytes());
+    }
+    // Des descripteurs sans octets ne sont pas une fin de flux : rendre une
+    // erreur ferait croire a l'appelant qu'il n'a rien recu, alors qu'il vient
+    // d'obtenir ce qu'il attendait.
+    if received < 0 && !installes.is_empty() {
+        return 0;
     }
     received
 }
@@ -588,8 +781,8 @@ pub fn sys_socketpair(_domain: u32, kind: u32, _protocol: u32, out: u64) -> i64 
     let cloexec = kind & SOCK_CLOEXEC != 0;
     // Un socket est bidirectionnel : il faut donc deux tampons, chacun lu d'un
     // cote et ecrit de l'autre.
-    let a_to_b = Rc::new(RefCell::new(Vec::new()));
-    let b_to_a = Rc::new(RefCell::new(Vec::new()));
+    let a_to_b = crate::kernel::fd::Canal::neuf();
+    let b_to_a = crate::kernel::fd::Canal::neuf();
 
     let process = task::current_process();
     let (first, second) = {
