@@ -1,5 +1,14 @@
 param(
-  [switch]$Fullscreen
+  [switch]$Fullscreen,
+  # Sortie audio de l'hote. "dsound" sur Windows, "sdl" ou "pa" sur Linux ;
+  # "none" pour une machine muette. Sans carte AC97 branchee sur un vrai
+  # backend, l'OS ne trouve aucun peripherique et toute video est silencieuse —
+  # ce qui se prend facilement pour un defaut du pilote.
+  [string]$Audio = "dsound",
+  # Acceleration materielle. Sans elle, QEMU emule chaque instruction et le
+  # decodage H.264 ne suit pas le temps reel : l'image saccade, et c'est le
+  # processeur emule qui est en cause, pas le decodeur.
+  [string]$Accel = "auto"
 )
 
 & "$PSScriptRoot\tools\update-nautile.ps1" -RepoRoot $PSScriptRoot
@@ -43,6 +52,26 @@ $qemuArgs += @(
   "-netdev", "user,id=net0",
   "-device", "e1000,netdev=net0"
 )
+
+# Carte son AC'97 : c'est le seul modele que le pilote de l'OS connait
+# (src/drivers/ac97.rs). Elle doit etre reliee a un backend, comme la carte
+# reseau a son netdev.
+if ($Audio -eq "none") {
+  $qemuArgs += @("-audiodev", "none,id=snd0", "-device", "AC97,audiodev=snd0")
+} else {
+  $qemuArgs += @("-audiodev", "$Audio,id=snd0", "-device", "AC97,audiodev=snd0")
+}
+
+# Acceleration : WHPX sous Windows (activer « Plateforme d'hyperviseur Windows »
+# dans les fonctionnalites facultatives), KVM sous Linux. "auto" laisse QEMU
+# choisir et retomber sur l'emulation pure si rien n'est disponible.
+if ($Accel -ne "none") {
+  if ($Accel -eq "auto") {
+    $qemuArgs += @("-accel", "whpx,kernel-irqchip=off", "-accel", "tcg")
+  } else {
+    $qemuArgs += @("-accel", $Accel)
+  }
+}
 
 if ($Fullscreen) {
   $qemuArgs += "-full-screen"

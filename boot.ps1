@@ -29,7 +29,11 @@ if ($code -eq 0) {
         "-m", "2048",
         "-serial", "stdio",
         "-netdev", "user,id=net0",
-        "-device", "e1000,netdev=net0"
+        "-device", "e1000,netdev=net0",
+        # Meme raison que dans run.ps1 : sans carte AC97 reliee a un backend,
+        # l'OS ne trouve aucune sortie audio et toute video est silencieuse.
+        "-audiodev", "dsound,id=snd0",
+        "-device", "AC97,audiodev=snd0"
     )
     & "C:\Program Files\qemu\qemu-system-x86_64.exe" @qemuArgs
 } else {
