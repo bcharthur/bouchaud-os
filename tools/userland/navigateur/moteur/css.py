@@ -231,17 +231,50 @@ class Simple:
     def poids(self):
         return (1 if self.identifiant else 0, len(self.classes), 1 if self.balise else 0)
 
+    def cle(self):
+        """Le trait le plus discriminant du maillon, pour l'indexation.
+
+        L'identifiant d'abord, une classe ensuite, la balise a defaut. `None`
+        pour un maillon universel, qu'aucun index ne peut restreindre.
+        """
+        if self.identifiant:
+            return ("#", self.identifiant)
+        if self.classes:
+            return (".", self.classes[0])
+        if self.balise:
+            return ("b", self.balise)
+        return None
+
 
 class Selecteur:
-    """Une suite de maillons separes par des espaces (descendance)."""
+    """Une suite de maillons, relies par la descendance ou par `>`."""
 
-    __slots__ = ("maillons", "specificite", "pseudo")
+    __slots__ = ("maillons", "combinateurs", "specificite", "pseudo")
 
     def __init__(self, texte):
-        # `>`, `+` et `~` sont ramenes a la descendance : moins precis, mais
-        # infiniment plus proche du resultat attendu que de tout jeter.
-        texte = re.sub(r"\s*[>+~]\s*", " ", texte)
-        self.maillons = [Simple(m) for m in texte.split() if m]
+        # `+` et `~` designent des freres ; la mise en page ne connait de chaque
+        # element que sa lignee, pas sa fratrie, donc ils sont ramenes a la
+        # descendance — moins precis, mais bien plus proche du resultat attendu
+        # que de jeter la regle entiere.
+        texte = re.sub(r"\s*[+~]\s*", " ", texte)
+        # `>` en revanche est tenu : `.menu > li` ne doit pas atteindre les `li`
+        # d'un sous-menu, et le confondre avec la descendance donnait a des
+        # elements imbriques la mise en forme de leur parent.
+        texte = re.sub(r"\s*>\s*", " > ", texte)
+
+        self.maillons = []
+        # `combinateurs[i]` relie `maillons[i-1]` a `maillons[i]`. La premiere
+        # case ne sert pas ; elle existe pour que les indices coincident.
+        self.combinateurs = []
+        enfant_direct = False
+        for morceau in texte.split():
+            if morceau == ">":
+                enfant_direct = True
+                continue
+            self.maillons.append(Simple(morceau))
+            self.combinateurs.append(">" if enfant_direct else " ")
+            enfant_direct = False
+
         a = b = c = 0
         for maillon in self.maillons:
             pa, pb, pc = maillon.poids()
@@ -250,6 +283,10 @@ class Selecteur:
         # Le pseudo-element est porte par le dernier maillon : dans
         # `.carte > p::after`, c'est le `p` qui recoit la boite.
         self.pseudo = self.maillons[-1].pseudo if self.maillons else None
+
+    def cle(self):
+        """La cle d'indexation du selecteur : celle de son dernier maillon."""
+        return self.maillons[-1].cle() if self.maillons else None
 
     def correspond(self, chemin):
         """`chemin` est la liste des ancetres, du plus lointain a l'element."""
@@ -260,11 +297,68 @@ class Selecteur:
             return False
         index -= 1
         position = len(chemin) - 2
-        while index >= 0 and position >= 0:
-            if self.maillons[index].correspond(chemin[position]):
+        while index >= 0:
+            if position < 0:
+                return False
+            if self.combinateurs[index + 1] == ">":
+                # Enfant direct : ce maillon-ci doit correspondre au parent
+                # immediat, sans quoi la regle ne s'applique pas du tout.
+                if not self.maillons[index].correspond(chemin[position]):
+                    return False
+                index -= 1
+            elif self.maillons[index].correspond(chemin[position]):
                 index -= 1
             position -= 1
-        return index < 0
+        return True
+
+
+class Index:
+    """Les regles rangees par ce que leur dernier maillon exige.
+
+    Sans index, styler un element coute un essai par regle de la feuille : sur
+    une page de trois mille elements et une feuille de deux mille regles, cela
+    fait six millions d'essais par mise en page — et la mise en page est refaite
+    a chaque battement du JavaScript. L'index ne laisse passer que les regles
+    dont le dernier maillon peut correspondre, ce qui en ecarte la quasi-
+    totalite d'un seul coup de dictionnaire.
+
+    Ce que l'index ne change pas : le resultat. Une regle ecartee ici est une
+    regle dont le dernier maillon exige un identifiant, une classe ou une balise
+    que l'element n'a pas — elle n'aurait pas correspondu.
+    """
+
+    __slots__ = ("par_id", "par_classe", "par_balise", "universelles")
+
+    def __init__(self, regles):
+        self.par_id = {}
+        self.par_classe = {}
+        self.par_balise = {}
+        self.universelles = []
+        for regle in regles:
+            cle = regle.selecteur.cle()
+            if cle is None:
+                self.universelles.append(regle)
+                continue
+            genre, valeur = cle
+            table = (self.par_id if genre == "#"
+                     else self.par_classe if genre == "." else self.par_balise)
+            table.setdefault(valeur, []).append(regle)
+
+    def candidates(self, element):
+        """Les regles susceptibles de s'appliquer a cet element."""
+        liste = list(self.universelles)
+        identifiant = element.identifiant
+        if identifiant:
+            liste.extend(self.par_id.get(identifiant, ()))
+        for classe in element.classes:
+            liste.extend(self.par_classe.get(classe, ()))
+        liste.extend(self.par_balise.get(element.balise, ()))
+        return liste
+
+
+def indexe(regles):
+    """Range une liste de regles pour la consultation. Voir [`Index`]."""
+    return Index(regles)
 
 
 class Regle:
@@ -431,8 +525,13 @@ def applique(regles, element, chemin, style_parent, pseudo=None):
     """
     style = {p: v for p, v in style_parent.items() if p in HERITEES}
 
+    # `regles` est soit un [`Index`], soit une liste brute. La liste reste
+    # acceptee pour que le moteur soit utilisable sans preparation, mais toute
+    # mise en page reelle passe par l'index.
+    candidates = regles.candidates(element) if isinstance(regles, Index) else regles
+
     correspondantes = []
-    for regle in regles:
+    for regle in candidates:
         if regle.selecteur.pseudo != pseudo:
             continue
         if regle.selecteur.correspond(chemin):

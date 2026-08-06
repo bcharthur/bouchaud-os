@@ -493,6 +493,29 @@ de grille** — `grid-template-areas` retombe sur le placement automatique.
 de contexte 2D. Ce qui manque est listé, avec le reste, dans la feuille de
 route (`docs/ROADMAP.md`).
 
+### Ce qui le rend rapide
+
+Sous émulation, avec la pile TCP du noyau, l'essentiel du temps de chargement
+n'était ni le calcul ni le transfert : c'était l'attente.
+
+| Mesure | Avant | Après |
+|---|---|---|
+| Connexions pour une page de 20 images | 20 TCP + 20 TLS | 4, réutilisées |
+| Sous-ressources | une à la fois | 4 en parallèle |
+| Corps HTML | tel quel | `gzip` (÷5 environ) |
+| Mise en page, feuille de 1600 règles | 3,57 s | 0,059 s (**×60**) |
+
+Le facteur soixante vient de l'index : sans lui, styler un élément coûtait un
+essai **par règle de la feuille**. Sur une page de 800 éléments et une feuille
+de 1600 règles, cela faisait plus d'un million d'essais par mise en page — et la
+mise en page est refaite à chaque battement du JavaScript. L'index range les
+règles par ce que leur dernier maillon exige (identifiant, classe, balise) et
+n'en propose qu'une poignée par élément. Il ne change jamais le résultat : une
+règle qu'il écarte est une règle qui n'aurait pas correspondu.
+
+La cascade elle-même n'est reconstruite que si les feuilles ont changé — un
+`setTimeout` qui touche au DOM ne réanalyse plus 1600 règles à chaque tour.
+
 ### Résolution de noms
 
 `socket.getaddrinfo` ne fonctionne pas dans un binaire glibc statique : la glibc

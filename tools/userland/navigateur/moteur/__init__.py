@@ -49,6 +49,9 @@ class Document:
         # Feuilles liees deja rapportees, par adresse : la cascade est
         # rejouee a chaque redimensionnement, pas le telechargement.
         self._feuilles = {}
+        # Index des regles, et signature des feuilles dont il est issu.
+        self._index = None
+        self._signature = None
 
         # Les sous-ressources partent maintenant, ensemble, pendant qu'on
         # analyse les feuilles : quand la mise en page reclamera une image, elle
@@ -162,23 +165,35 @@ class Document:
         apparaissent, et non par categorie. Une feuille liee qui suit un
         `<style>` doit pouvoir le contredire, comme dans tout navigateur.
         """
-        regles = css.analyse(css.FEUILLE_PAR_DEFAUT)
-        ordre = len(regles) + 1000
+        sources = []
         for element in self.racine.parcours():
             if not isinstance(element, html.Element):
                 continue
             if element.balise == "style":
-                source = element.texte()
+                sources.append(element.texte())
             elif element.balise == "link":
-                source = self._feuille_liee(element)
-            else:
-                continue
+                sources.append(self._feuille_liee(element))
+
+        # Analyser une feuille de deux mille regles a chaque battement du
+        # JavaScript coute plus que toute la mise en page. Tant que les feuilles
+        # sont les memes — texte compris, car un script peut reecrire un
+        # `<style>` — on garde l'index deja construit.
+        signature = tuple(sources)
+        if signature == self._signature and self._index is not None:
+            return self._index
+
+        regles = css.analyse(css.FEUILLE_PAR_DEFAUT)
+        ordre = len(regles) + 1000
+        for source in sources:
             if not source:
                 continue
             nouvelles = css.analyse(source, ordre)
             regles.extend(nouvelles)
             ordre += len(nouvelles) + 1
-        return regles
+
+        self._signature = signature
+        self._index = css.indexe(regles)
+        return self._index
 
     def _feuille_liee(self, element):
         """Le texte d'un `<link rel="stylesheet">`, ou `""`.
@@ -221,6 +236,9 @@ class Document:
         ancienne = css.fenetre()
         css.pose_fenetre(largeur, self.hauteur_fenetre)
         if ancienne != css.fenetre():
+            # Les feuilles n'ont pas change, mais les `@media` retenues si :
+            # l'index memorise ne vaut plus, il faut le reconstruire.
+            self._signature = None
             self.regles = self._regles()
         self.boite, self.hauteur = mise_en_page.construit(
             self.racine, self.regles, largeur, self.url, self._image_video)

@@ -1350,6 +1350,128 @@ def verifie_feuilles_liees():
         reseau.charge = ancien
 
 
+def verifie_index_regles():
+    """L'index doit ecarter beaucoup de regles sans jamais changer le resultat."""
+    from moteur import css
+
+    feuille = """
+        * { line-height: 1.5; }
+        p { color: #111111; }
+        .carte { color: #222222; }
+        #unique { color: #333333; }
+        div.carte p { color: #444444; }
+    """
+    regles = css.analyse(feuille)
+    index = css.indexe(regles)
+
+    page = html.analyse('<body><div class="carte"><p id="unique">t</p></div></body>')
+    cible = next(n for n in page.parcours()
+                 if isinstance(n, html.Element) and n.balise == "p")
+    chemin = []
+    courant = cible
+    while courant is not None:
+        chemin.append(courant)
+        courant = courant.parent
+    chemin.reverse()
+
+    # Le meme style, que l'on passe par l'index ou par la liste entiere : c'est
+    # la seule chose que l'index n'a pas le droit de changer.
+    par_index = css.applique(index, cible, chemin, {})
+    par_liste = css.applique(regles, cible, chemin, {})
+    egal("index: meme resultat que la liste", par_index, par_liste)
+    egal("index: la regle la plus specifique gagne", par_index.get("color"), "#333333")
+
+    # Et il ecarte reellement : un `p` ne doit pas voir les regles de `.carte`
+    # ni celles de `#unique` portees par un autre element.
+    autre = html.analyse('<body><span class="ailleurs">x</span></body>')
+    span = next(n for n in autre.parcours()
+                if isinstance(n, html.Element) and n.balise == "span")
+    candidates = index.candidates(span)
+    egal("index: seules les regles universelles restent",
+         [r.selecteur.maillons[-1].balise for r in candidates], [None])
+    verifie("index: il ecarte la majorite des regles",
+            len(candidates) < len(regles), (len(candidates), len(regles)))
+
+    # Une feuille large : c'est la que l'index compte.
+    large = "\n".join(".c%d { color: #010101; }" % i for i in range(500))
+    index_large = css.indexe(css.analyse(large + "\n" + feuille))
+    egal("index: une feuille de 500 classes n'en propose que l'utile",
+         len(index_large.candidates(span)), 1)
+
+
+def verifie_enfant_direct():
+    """`>` doit designer l'enfant direct, pas n'importe quel descendant."""
+    # `background-color` ne s'herite pas : c'est ce qui permet de distinguer un
+    # element reellement atteint par la regle d'un element qui tient sa valeur
+    # de son parent. Avec `color`, la verification ne prouverait rien.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          .menu > li { background-color: #ff0000; }
+          .menu li { border-color: #0000ff; }
+        </style>
+        <body>
+          <ul class="menu">
+            <li id="direct">un
+              <ul><li id="imbrique">deux</li></ul>
+            </li>
+          </ul>
+        </body>""")
+    direct = boite_de(doc, "direct")
+    imbrique = boite_de(doc, "imbrique")
+    egal("enfant direct: l'enfant immediat est atteint",
+         direct.style.get("background-color"), "#ff0000")
+    egal("enfant direct: le petit-fils ne l'est pas",
+         imbrique.style.get("background-color"), None)
+    # La descendance, elle, atteint bien les deux.
+    egal("enfant direct: la descendance atteint le petit-fils",
+         imbrique.style.get("border-color"), "#0000ff")
+
+    # Une chaine de plusieurs `>` doit se verifier de bout en bout.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          .a > .b > .c { background-color: #00ff00; }
+        </style>
+        <body>
+          <div class="a"><div class="b"><div id="oui" class="c">x</div></div></div>
+          <div class="a"><div><div class="b"><div id="non" class="c">x</div></div></div></div>
+        </body>""")
+    egal("enfant direct: chaine complete",
+         boite_de(doc, "oui").style.get("background-color"), "#00ff00")
+    egal("enfant direct: chaine rompue",
+         boite_de(doc, "non").style.get("background-color"), None)
+
+
+def verifie_cascade_memorisee():
+    """La cascade n'est reconstruite que si les feuilles ont change."""
+    doc = document("""
+        <style>#t { width: 200px; }</style>
+        <body><div id="t">t</div><script>document.title = 'ok';</script></body>""")
+    premier = doc.regles
+    doc.remet_en_page(1000)
+    verifie("cascade: pas de reconstruction a taille egale", doc.regles is premier)
+
+    # Un redimensionnement, lui, peut faire basculer des `@media` : l'index doit
+    # etre refait.
+    doc.remet_en_page(600)
+    verifie("cascade: reconstruite quand la fenetre change",
+            doc.regles is not premier)
+
+    # Et un script qui insere une feuille doit etre pris en compte.
+    doc = document("""
+        <body>
+          <div id="t">t</div>
+          <script>
+            const feuille = document.createElement('style');
+            feuille.textContent = '#t { width: 250px; }';
+            document.body.appendChild(feuille);
+          </script>
+        </body>""")
+    egal("cascade: une feuille posee par le script s'applique",
+         round(boite_de(doc, "t").largeur), 250)
+
+
 def verifie_bac_a_sable():
     """Une page ne doit pas pouvoir atteindre le systeme."""
     doc = document("<body></body>")
@@ -1412,6 +1534,9 @@ def principal():
         verifie_reserve_connexions,
         verifie_prechargement,
         verifie_feuilles_liees,
+        verifie_index_regles,
+        verifie_enfant_direct,
+        verifie_cascade_memorisee,
         verifie_flex,
         verifie_grille,
         verifie_position,
