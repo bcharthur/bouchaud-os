@@ -867,9 +867,18 @@ class Contexte:
         if audio:
             audio = urllib.parse.urljoin(self.document.url, audio)
 
+        # Certains serveurs de media lient l'adresse au client qui l'a
+        # demandee — Google le fait pour YouTube — et rendent 403 des que
+        # l'en-tete ne correspond plus. La page qui connait ce client le declare
+        # ici, et la lecture le reemet a chaque tranche.
+        entetes = None
+        agent = element.attributs.get("data-agent")
+        if agent:
+            entetes = {"User-Agent": agent}
+
         # Le distant se lit par tranches ; le local, d'un bloc.
         if absolue.startswith(("http://", "https://")):
-            if not lecteur.ouvre_distant(absolue, audio):
+            if not lecteur.ouvre_distant(absolue, audio, entetes):
                 return False
         else:
             try:

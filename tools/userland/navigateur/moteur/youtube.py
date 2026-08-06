@@ -47,10 +47,35 @@ CLEF_INNERTUBE = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
 
 API = "https://www.youtube.com/youtubei/v1/player"
 
-# Contextes de client essayes dans l'ordre. Les clients de television et
-# d'appareil mobile rendent le plus souvent des adresses **non signees**, ce qui
-# evite le detour par `base.js` ; le client web sert de dernier recours.
+# Contextes de client essayes dans l'ordre.
+#
+# L'ordre n'est pas indifferent, et c'est meme tout l'enjeu. YouTube exige
+# depuis 2024 une **preuve d'origine** (`poToken`) de ses clients web : sans
+# elle, la reponse est un refus poli — « confirmez que vous n'etes pas un
+# robot » — ou des adresses qui rendent 403. Cette preuve se fabrique en
+# executant du code d'attestation que nous ne pouvons pas faire tourner.
+#
+# Restent les clients qui n'en demandent pas. `ANDROID_VR` est le plus large :
+# il ne reclame ni preuve d'origine ni attestation d'application, et rend des
+# adresses non signees. Le client de television le suit, puis les clients
+# mobiles ordinaires, et le web en tout dernier — il fonctionne encore pour les
+# videos anciennes, et un refus coute une requete, pas la lecture.
 CLIENTS = (
+    {
+        "nom": "ANDROID_VR",
+        "contexte": {
+            "clientName": "ANDROID_VR",
+            "clientVersion": "1.60.19",
+            "deviceMake": "Oculus",
+            "deviceModel": "Quest 3",
+            "osName": "Android",
+            "osVersion": "12L",
+            "androidSdkVersion": 32,
+            "hl": "fr", "gl": "FR",
+        },
+        "agent": "com.google.android.apps.youtube.vr.oculus/1.60.19 "
+                 "(Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+    },
     {
         "nom": "IOS",
         "contexte": {
@@ -192,6 +217,11 @@ def reponse_lecteur(video, journal=None):
         statut = (donnees.get("playabilityStatus") or {}).get("status", "")
         if statut and statut != "OK":
             raison = (donnees.get("playabilityStatus") or {}).get("reason", statut)
+            # Le refus par preuve d'origine se reconnait a son texte : le dire
+            # tel quel evite de chercher une panne la ou il n'y en a pas.
+            if _est_preuve_exigee(raison):
+                raison = ("%s — ce client exige une preuve d'origine (poToken)"
+                          % raison)
             journal("warn", "youtube: %s refuse (%s)" % (client["nom"], raison))
             derniere = raison
             continue
@@ -208,9 +238,32 @@ def reponse_lecteur(video, journal=None):
     raise LookupError(derniere or "aucun client n'a rendu de flux")
 
 
+def agent_du_client(nom):
+    """L'agent utilisateur du client nomme, ou celui du web a defaut.
+
+    Il compte au-dela de l'extraction : Google lie l'adresse d'un flux au client
+    qui l'a demandee, et la meme adresse reclamee sous un autre agent rend 403.
+    """
+    for client in CLIENTS:
+        if client["nom"] == nom:
+            return client["agent"]
+    return CLIENTS[-1]["agent"]
+
+
 def _numero_client(nom):
     return {"WEB": "1", "ANDROID": "3", "IOS": "5",
-            "TVHTML5_SIMPLY_EMBEDDED_PLAYER": "85"}.get(nom, "1")
+            "TVHTML5_SIMPLY_EMBEDDED_PLAYER": "85",
+            "ANDROID_VR": "28"}.get(nom, "1")
+
+
+# Textes par lesquels YouTube signale qu'il attend une preuve d'origine.
+_REFUS_PREUVE = ("confirm you", "not a bot", "sign in to confirm",
+                 "connectez-vous pour confirmer")
+
+
+def _est_preuve_exigee(raison):
+    minuscule = (raison or "").lower()
+    return any(marque in minuscule for marque in _REFUS_PREUVE)
 
 
 def _depuis_la_page(video, journal):

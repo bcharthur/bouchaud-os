@@ -19,6 +19,7 @@ images et la mise en page. Ce qu'elles ne couvrent pas : le rendu a l'ecran et
 le reseau, qui demandent l'un un ecran, l'autre le monde exterieur.
 """
 
+import json
 import os
 import shutil
 import struct
@@ -807,6 +808,167 @@ def verifie_youtube_page():
     textes = [e[3] for e in doc.liste_affichage(0, 1000, 700) if e[0] == "texte"]
     verifie("page yt: le titre est peint",
             any("Big Buck Bunny" in t for t in textes), textes[:8])
+
+
+def verifie_youtube_client():
+    """Le client qui obtient l'adresse doit etre celui qui la reclame.
+
+    Google lie l'adresse d'un flux au client qui l'a demandee : la meme adresse
+    reclamee sous un autre agent rend 403. C'est la panne la plus courante d'une
+    extraction par ailleurs correcte — l'adresse est bonne, seul l'en-tete ne
+    l'est pas.
+    """
+    from moteur import lecteur_youtube, youtube
+
+    # L'ordre des clients compte : ceux qui n'exigent pas de preuve d'origine
+    # passent devant.
+    noms = [c["nom"] for c in youtube.CLIENTS]
+    egal("client yt: ANDROID_VR est essaye en premier", noms[0], "ANDROID_VR")
+    verifie("client yt: le web reste en dernier recours", noms[-1] == "WEB", noms)
+    verifie("client yt: chaque client a un agent",
+            all(c.get("agent") for c in youtube.CLIENTS))
+    verifie("client yt: chaque client a un numero",
+            all(youtube._numero_client(n) for n in noms))
+
+    verifie("client yt: l'agent d'ANDROID_VR est celui de l'application",
+            "vr.oculus" in youtube.agent_du_client("ANDROID_VR"),
+            youtube.agent_du_client("ANDROID_VR"))
+    verifie("client yt: un client inconnu retombe sur un agent utilisable",
+            youtube.agent_du_client("INEXISTANT").startswith("Mozilla/"),
+            youtube.agent_du_client("INEXISTANT"))
+
+    # La page produite doit porter l'agent, sinon la lecture le perd.
+    video, audio = youtube.choisit_flux(REPONSE_YOUTUBE, hauteur_max=480)
+    html_page = lecteur_youtube._html(
+        "https://youtu.be/aqz-KE-bpKQ", youtube.details(REPONSE_YOUTUBE),
+        video, audio, {"video": video.url}, "ANDROID_VR")
+    verifie("client yt: la page declare l'agent", "data-agent=" in html_page,
+            html_page[:200])
+    verifie("client yt: et c'est celui du client qui a servi",
+            youtube.agent_du_client("ANDROID_VR") in html_page)
+
+    # Et le moteur doit reellement le reemettre a chaque tranche.
+    doc = document(html_page, "https://youtu.be/aqz-KE-bpKQ")
+    element = next(n for n in doc.racine.parcours()
+                   if isinstance(n, html.Element) and n.balise == "video")
+    egal("client yt: l'attribut survit a l'analyse",
+         element.attributs.get("data-agent"),
+         youtube.agent_du_client("ANDROID_VR"))
+
+    demandes = []
+
+    def charge(url, methode="GET", corps=None, entetes=None, brut=False):
+        demandes.append((url, dict(entetes or {})))
+        return reseau.Reponse(url, "", "video/mp4", 206, entetes={}, octets=b"")
+
+    from moteur import media as module_media
+    ancien = reseau.charge
+    ancien_dispo = module_media.DISPONIBLE
+    try:
+        reseau.charge = charge
+        module_media.DISPONIBLE = True
+        lecteur = module_media.Lecteur()
+        lecteur.ouvre_distant("https://r1.googlevideo.com/videoplayback?x=1",
+                              None, {"User-Agent": "agent-de-test"})
+    except Exception:  # noqa: BLE001 — l'ouverture echoue, seuls les en-tetes comptent
+        pass
+    finally:
+        reseau.charge = ancien
+        module_media.DISPONIBLE = ancien_dispo
+
+    verifie("client yt: une tranche part avec l'agent demande",
+            demandes and all(d[1].get("User-Agent") == "agent-de-test"
+                             for d in demandes), demandes[:2])
+
+
+def verifie_youtube_chaine():
+    """La chaine entiere : adresse -> API -> choix du flux -> page de lecture.
+
+    Le reseau est substitue : ce bac a sable n'atteint pas YouTube, et une
+    verification qui en dependrait ne prouverait rien de reproductible. Ce qui
+    est eprouve ici est tout le reste — la negociation des clients, ce qu'on
+    leur envoie, ce qu'on fait de leur reponse, et la page qui en sort.
+    """
+    from moteur import lecteur_youtube, youtube
+
+    envoyees = []
+
+    def charge(url, methode="GET", corps=None, entetes=None, brut=False):
+        envoyees.append({"url": url, "methode": methode, "corps": corps,
+                         "entetes": dict(entetes or {})})
+        if "/youtubei/v1/player" not in url:
+            return reseau.Reponse(url, "", "text/html", 404)
+        demande = json.loads(corps)
+        nom = demande["context"]["client"]["clientName"]
+        # Les deux premiers clients refusent, comme le fait YouTube quand il
+        # attend une preuve d'origine ; le troisieme sert.
+        if nom in ("ANDROID_VR", "IOS"):
+            refus = {"playabilityStatus": {
+                "status": "LOGIN_REQUIRED",
+                "reason": "Sign in to confirm you're not a bot"}}
+            return reseau.Reponse(url, json.dumps(refus), "application/json", 200,
+                                  octets=json.dumps(refus).encode())
+        brut_json = json.dumps(REPONSE_YOUTUBE)
+        return reseau.Reponse(url, brut_json, "application/json", 200,
+                              octets=brut_json.encode())
+
+    journal = []
+    ancien = reseau.charge
+    try:
+        reseau.charge = charge
+        reponse = lecteur_youtube.page(
+            "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+            journal=lambda niveau, texte: journal.append((niveau, texte)))
+    finally:
+        reseau.charge = ancien
+
+    verifie("chaine yt: une page est produite", reponse is not None)
+    if reponse is None:
+        return
+
+    # Chaque client refuse doit avoir ete essaye, dans l'ordre, avec ses
+    # propres en-tetes.
+    essayes = [json.loads(d["corps"])["context"]["client"]["clientName"]
+               for d in envoyees if d["corps"]]
+    egal("chaine yt: les clients sont essayes dans l'ordre",
+         essayes[:3], ["ANDROID_VR", "IOS", "ANDROID"])
+    egal("chaine yt: la requete est un POST", envoyees[0]["methode"], "POST")
+    egal("chaine yt: avec l'agent du client essaye",
+         envoyees[0]["entetes"].get("User-Agent"),
+         youtube.agent_du_client("ANDROID_VR"))
+    verifie("chaine yt: et le numero de client",
+            envoyees[0]["entetes"].get("X-Youtube-Client-Name") == "28",
+            envoyees[0]["entetes"])
+
+    # Le refus par preuve d'origine est nomme dans le journal.
+    verifie("chaine yt: le refus est explique",
+            any("preuve d'origine" in texte for _, texte in journal),
+            journal[:4])
+
+    # Et la page finale porte le flux du client qui a servi.
+    verifie("chaine yt: la page cite le flux", "googlevideo.com" in reponse.contenu)
+    verifie("chaine yt: elle declare l'agent d'ANDROID",
+            youtube.agent_du_client("ANDROID") in reponse.contenu)
+    verifie("chaine yt: et nomme le client qui a servi",
+            "ANDROID" in reponse.contenu, reponse.contenu[:200])
+
+    # La page se met reellement en page.
+    doc = document(reponse.contenu, "https://www.youtube.com/watch?v=aqz-KE-bpKQ")
+    egal("chaine yt: le titre est celui de la video", doc.titre, "Big Buck Bunny")
+
+
+def verifie_youtube_refus():
+    """Un refus par preuve d'origine doit etre nomme, pas confondu avec une panne."""
+    from moteur import youtube
+
+    for raison in ("Sign in to confirm you're not a bot",
+                   "Connectez-vous pour confirmer que vous n'etes pas un robot",
+                   "Please sign in to confirm you are not a bot"):
+        verifie("refus yt: reconnu — %r" % raison[:28],
+                youtube._est_preuve_exigee(raison))
+    for raison in ("Video unavailable", "This video is private", ""):
+        verifie("refus yt: pas confondu — %r" % raison,
+                not youtube._est_preuve_exigee(raison))
 
 
 def verifie_requete_brute():
@@ -2222,6 +2384,9 @@ def principal():
         verifie_youtube_signature,
         verifie_youtube_base_js,
         verifie_youtube_page,
+        verifie_youtube_client,
+        verifie_youtube_refus,
+        verifie_youtube_chaine,
         verifie_requete_brute,
         verifie_compression,
         verifie_reserve_connexions,

@@ -70,14 +70,22 @@ def _html(url, details, flux_video, flux_audio, adresses, client):
     principal = adresses.get("video") or adresses.get("audio", "")
     flux = flux_video or flux_audio
 
+    # L'agent du client qui a obtenu les adresses voyage avec elles : Google
+    # lie un flux au client qui l'a demande, et la meme adresse reclamee sous un
+    # autre agent rend 403. C'est la panne la plus courante d'une extraction
+    # par ailleurs correcte — l'adresse est bonne, seul l'en-tete ne l'est pas.
+    agent = ' data-agent="%s"' % e(youtube.agent_du_client(client))
+
     if flux_video is not None:
-        media = ('<video id="lecteur" src="%s" width="854" height="480"%s>'
+        media = ('<video id="lecteur" src="%s" width="854" height="480"%s%s>'
                  '<p>Le lecteur n\'a pas pu ouvrir ce flux.</p></video>'
                  % (e(principal),
                     (' data-audio="%s"' % e(adresses["audio"]))
-                    if flux_audio is not None and "audio" in adresses else ""))
+                    if flux_audio is not None and "audio" in adresses else "",
+                    agent))
     else:
-        media = '<audio id="lecteur" src="%s"></audio>' % e(principal)
+        media = ('<audio id="lecteur" src="%s"%s></audio>'
+                 % (e(principal), agent))
 
     description = e(details["description"])[:1200].replace("\n", "<br>")
     piste = ("%s, %s" % (flux.codec_video or "son seul",
