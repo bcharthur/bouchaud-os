@@ -540,6 +540,31 @@ prise déjà passée en non bloquant fait échouer la première émission vers u
 dont l'adresse matérielle n'est pas encore connue, et le noyau rend alors
 `ENETUNREACH`. C'est un défaut côté noyau, noté dans la feuille de route.
 
+### Éprouver YouTube contre le vrai service
+
+```sh
+python3 navigateur/youtube-probe.py                     # sur la machine
+exec /bo-navigateur /usr/share/bo-navigateur/youtube-probe.py   # sous l'OS
+```
+
+Les vérifications de `test_moteur.py` substituent le réseau : elles établissent
+que le moteur fait ce qu'il faut d'une réponse donnée, jamais que YouTube rend
+cette réponse-là aujourd'hui. Cette sonde fait l'inverse — elle parle au vrai
+service et dit **à quelle étape** ça s'arrête : joignabilité, réponse du
+lecteur (quel client sert, lequel refuse et pourquoi), choix du flux,
+signature, puis lecture réelle d'une tranche.
+
+La dernière étape est celle qui prouve le plus : elle demande la même tranche
+avec l'agent du client qui a obtenu l'adresse, puis avec un autre. Google lie
+l'adresse au client — si le second rend 403 et le premier 206, c'est exactement
+le défaut que la propagation de l'agent corrige.
+
+**Derrière un mandataire à liste blanche**, il faut y autoriser
+`www.youtube.com`, `youtubei.googleapis.com`, `*.googlevideo.com`, `s.ytimg.com`
+et `i.ytimg.com`. Sans le joker sur `googlevideo.com`, l'extraction réussit et
+la lecture échoue : les noms d'hôte du média sont tirés au sort à chaque
+requête.
+
 ### Ce qui survit à l'extinction
 
 Le RAMFS oublie tout. `/persist` est la zone qui n'oublie pas : le noyau la
