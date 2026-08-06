@@ -18,7 +18,8 @@ tools/userland/*.img
 tools/userland/test-out/
 # Chantiers et resultats de build-python.sh / build-qt.sh (sources telechargees,
 # arbres de compilation, binaires produits)
-tools/userland/build-python/
+tools/userland/build-python-musl/
+tools/userland/build-python-glibc/
 tools/userland/build-qt/
 tools/userland/out-python/
 tools/userland/out-qt/

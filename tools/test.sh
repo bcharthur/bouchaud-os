@@ -134,6 +134,10 @@ if [ -x "$NAVIGATEUR_DIR/bo-navigateur" ]; then
     # Le decodage audio et video, avec le vrai libavcodec.
     echo "exec /bo-navigateur /usr/share/bo-navigateur/media-probe.py" \
         >> "$WORK/files/autorun"
+    # Ce que le navigateur retient d'un demarrage a l'autre : temoins, cache,
+    # stockage local. Verifiable seulement ici, la ou `/persist` existe.
+    echo "exec /bo-navigateur /usr/share/bo-navigateur/persist-probe.py" \
+        >> "$WORK/files/autorun"
 fi
 
 info "== fabrication du disque de test =="

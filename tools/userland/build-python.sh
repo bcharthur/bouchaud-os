@@ -27,12 +27,6 @@ PYVER=${PYVER:-3.12.3}
 PYSHORT=$(echo "$PYVER" | cut -d. -f1,2)     # 3.12
 PYTAG=$(echo "$PYSHORT" | tr -d .)           # 312
 OUT=${OUT:-out-python}
-WORK=${WORK:-build-python}
-# Un chemin relatif est compris depuis ce repertoire ; un chemin absolu est
-# garde tel quel, ce qui permet de construire ailleurs que dans les sources.
-case "$WORK" in /*) ;; *) WORK=$ROOT/$WORK ;; esac
-case "$OUT" in /*) ;; *) OUT=$ROOT/$OUT ;; esac
-SYSROOT=$WORK/sysroot
 
 # Ubuntu publie les sources amont telles quelles ; c'est le miroir le plus
 # accessible depuis une machine de construction Debian/Ubuntu.
@@ -48,6 +42,17 @@ CIBLE_LIBC=${LIBC:-musl}
 # ajouter a l'edition de liens). La laisser dans l'environnement la ferait
 # passer telle quelle au configure, qui reclamerait alors un « -lglibc ».
 unset LIBC
+
+# Le chantier depend de la libc visee : les deux constructions produisent des
+# objets incompatibles a partir des memes sources. Les faire cohabiter dans un
+# meme repertoire donne une edition de liens qui melange les deux — un
+# `__flt_rounds` de musl reclame par un binaire glibc, et rien pour l'expliquer.
+WORK=${WORK:-build-python-$CIBLE_LIBC}
+# Un chemin relatif est compris depuis ce repertoire ; un chemin absolu est
+# garde tel quel, ce qui permet de construire ailleurs que dans les sources.
+case "$WORK" in /*) ;; *) WORK=$ROOT/$WORK ;; esac
+case "$OUT" in /*) ;; *) OUT=$ROOT/$OUT ;; esac
+SYSROOT=$WORK/sysroot
 
 mkdir -p "$WORK"
 cd "$WORK"
