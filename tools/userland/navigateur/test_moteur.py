@@ -19,6 +19,8 @@ images et la mise en page. Ce qu'elles ne couvrent pas : le rendu a l'ecran et
 le reseau, qui demandent l'un un ecran, l'autre le monde exterieur.
 """
 
+import os
+import shutil
 import struct
 import sys
 import types
@@ -1825,10 +1827,52 @@ def verifie_modules():
 
 # --- Persistance --------------------------------------------------------------
 
+def isole_le_stockage():
+    """Detourne le stockage persistant vers un dossier a jeter.
+
+    Sans cela, ces verifications ecriraient — et surtout **effaceraient** — les
+    vrais temoins, le vrai cache et le vrai stockage local de la machine. C'est
+    exactement ce qui est arrive : jouees sous l'OS avant la sonde de
+    persistance, elles supprimaient ce que celle-ci venait de deposer, et la
+    sonde concluait que rien n'avait survecu au redemarrage.
+
+    Une suite de verifications ne doit pas detruire les donnees de qui
+    l'execute. Rend une fonction qui remet tout en place.
+    """
+    from moteur import stockage
+
+    ancienne = stockage.RACINE
+    stockage.RACINE = os.path.join(
+        os.environ.get("BO_TMP", "/tmp"), "bo-verifications-stockage")
+    try:
+        shutil.rmtree(stockage.RACINE)
+    except OSError:
+        pass
+    stockage.reinitialise()
+
+    def restaure():
+        try:
+            shutil.rmtree(stockage.RACINE)
+        except OSError:
+            pass
+        stockage.RACINE = ancienne
+        stockage.reinitialise()
+
+    return restaure
+
+
 def verifie_temoins():
     """Le bocal a temoins : ce qu'on retient, a qui on le renvoie, et a qui non."""
     from moteur import stockage
 
+    restaure = isole_le_stockage()
+    try:
+        _temoins(stockage)
+    finally:
+        restaure()
+
+
+def _temoins(stockage):
     bocal = stockage.Temoins()
     bocal.oublie_tout()
 
@@ -1889,6 +1933,15 @@ def verifie_cache_http():
     """Une reponse cachable resssert ; une reponse interdite de cache, non."""
     from moteur import stockage
 
+    restaure = isole_le_stockage()
+    try:
+        _cache_http(stockage)
+    finally:
+        restaure()
+
+
+def _cache_http(stockage):
+
     egal("cache: max-age est lu",
          stockage._duree_de_vie({"cache-control": "public, max-age=600"}), 600.0)
     egal("cache: no-store interdit",
@@ -1936,6 +1989,15 @@ def verifie_cache_http():
 def verifie_stockage_local():
     """`localStorage` : cloisonne par origine, et rendu au JavaScript."""
     from moteur import stockage
+
+    restaure = isole_le_stockage()
+    try:
+        _stockage_local(stockage)
+    finally:
+        restaure()
+
+
+def _stockage_local(stockage):
 
     local = stockage.StockageLocal()
     local.efface("https://a.test/page")
