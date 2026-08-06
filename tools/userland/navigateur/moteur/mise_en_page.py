@@ -109,8 +109,27 @@ def construit(racine, regles, largeur_page, url="", image_video=None, toile=None
         "color": "#202124", "font-size": "16px", "line-height": "1.5",
         "display": "block",
     }
+    # Le style de l'element racine se calcule avant celui du corps, et il
+    # compte : c'est sur `<html>` — donc sur `:root` — qu'une page moderne pose
+    # ses variables de theme, et c'est la aussi que `font-size` fixe la
+    # reference de tous les `rem`. Partir directement du corps, comme on le
+    # faisait, jetait les deux.
     corps = racine.trouve("body") or racine
-    boite = _boite_pour(corps, style_initial, [corps], contexte)
+    # L'element racine est le nœud racine lui-meme quand l'analyse a produit un
+    # `<html>` implicite — ce qui est le cas ordinaire ; `trouve` ne le rendrait
+    # pas, puisqu'il ne cherche que dans la descendance.
+    element_racine = racine if getattr(racine, "balise", "") == "html" \
+        else racine.trouve("html")
+    css.pose_taille_racine(16.0)
+    if element_racine is not None and element_racine is not corps:
+        style_initial = css.applique(contexte.regles, element_racine,
+                                     [element_racine], style_initial)
+        # `rem` se rapporte a cette taille-la, pas a 16 px par principe. Le
+        # pourcentage s'y compte depuis la valeur par defaut du navigateur.
+        css.pose_taille_racine(
+            css.longueur(style_initial.get("font-size", "16px"), 16.0, 16.0))
+    # Le chemin complet, et non le seul corps : `html body` doit correspondre.
+    boite = _boite_pour(corps, style_initial, _chemin(corps), contexte)
     if boite is None:
         boite = Boite(corps, style_initial)
     _dispose_bloc(boite, 0.0, 0.0, largeur_page, contexte)

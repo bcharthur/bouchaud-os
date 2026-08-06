@@ -1401,6 +1401,120 @@ def verifie_index_regles():
          len(index_large.candidates(span)), 1)
 
 
+def verifie_variables_css():
+    """Les proprietes personnalisees, sans lesquelles une page moderne est nue.
+
+    Un site d'aujourd'hui range ses couleurs, ses espacements et ses rayons dans
+    des `--variables` posees sur `:root`, puis n'ecrit plus que `var(...)`.
+    Ignorer `var()` ne degrade pas un peu la page : elle s'affiche sans aucune
+    de ses couleurs et sans aucun de ses espacements.
+    """
+    doc = document("""
+        <style>
+          :root { --fond: #223344; --marge: 12px; --large: 300px; }
+          body { margin: 0; }
+          #a { background-color: var(--fond); padding: var(--marge);
+               width: var(--large); }
+          #b { background-color: var(--absente, #ff0000); }
+          #c { background-color: var(--absente); }
+          .theme { --fond: #00ff00; }
+          #d { background-color: var(--fond); }
+          #e { width: calc(var(--large) + 20px); }
+        </style>
+        <body>
+          <div id="a">a</div>
+          <div id="b">b</div>
+          <div id="c">c</div>
+          <div class="theme"><div id="d">d</div></div>
+          <div id="e">e</div>
+        </body>""")
+
+    a = boite_de(doc, "a")
+    egal("variables: la couleur vient de la variable",
+         a.style.get("background-color"), "#223344")
+    # 300 de contenu plus 12 de remplissage de chaque cote : c'est
+    # `content-box`, le defaut de CSS, et c'est bien ce qu'on veut verifier.
+    egal("variables: la longueur aussi", round(a.largeur), 324)
+    egal("variables: et le remplissage",
+         a.style.get("padding-left"), "12px")
+
+    egal("variables: la valeur de secours sert quand la variable manque",
+         boite_de(doc, "b").style.get("background-color"), "#ff0000")
+    # Sans secours, la declaration devient inexploitable — c'est ce que dit la
+    # norme, et une couleur vide est deja ignoree partout ailleurs.
+    verifie("variables: sans secours, rien n'est peint",
+            not css_couleur(boite_de(doc, "c").style.get("background-color", "")),
+            boite_de(doc, "c").style.get("background-color"))
+
+    # Une variable redefinie plus bas dans l'arbre l'emporte, par heritage.
+    egal("variables: une redefinition locale l'emporte",
+         boite_de(doc, "d").style.get("background-color"), "#00ff00")
+
+    # Et `var()` doit survivre a son enrobage dans `calc()`.
+    egal("variables: var() dans calc()", round(boite_de(doc, "e").largeur), 320)
+
+    # Une variable qui se refere a elle-meme ne doit pas faire boucler.
+    doc = document("""
+        <style>
+          :root { --boucle: var(--boucle); }
+          body { margin: 0; }
+          #x { width: var(--boucle); }
+        </style>
+        <body><div id="x">x</div></body>""")
+    verifie("variables: un cycle ne fait pas boucler", boite_de(doc, "x") is not None)
+
+    # Le style en ligne peut definir une variable comme n'importe quelle regle.
+    doc = document("""
+        <style>body { margin: 0 } #y { width: var(--w) }</style>
+        <body><div id="y" style="--w: 250px">y</div></body>""")
+    egal("variables: definie en ligne", round(boite_de(doc, "y").largeur), 250)
+
+
+def verifie_racine():
+    """`<html>` compte : ses variables, et la reference des `rem`."""
+    # `font-size: 62.5%` sur la racine est la facon la plus repandue de faire
+    # valoir 1 rem pour 10 px. La supposer a 16 px sortait toute la page une
+    # fois et demie trop grande.
+    doc = document("""
+        <style>
+          html { font-size: 62.5%; }
+          body { margin: 0; }
+          #a { width: 30rem; }
+        </style>
+        <body><div id="a">a</div></body>""")
+    egal("racine: rem suit font-size de html", round(boite_de(doc, "a").largeur), 300)
+
+    # Sans declaration, 1 rem vaut 16 px.
+    doc = document("""
+        <style>body { margin: 0 } #a { width: 10rem }</style>
+        <body><div id="a">a</div></body>""")
+    egal("racine: rem vaut 16 px par defaut",
+         round(boite_de(doc, "a").largeur), 160)
+
+    # Et `em` reste relatif a l'element, pas a la racine.
+    doc = document("""
+        <style>
+          html { font-size: 10px; }
+          body { margin: 0; font-size: 20px; }
+          #a { width: 10em; }
+        </style>
+        <body><div id="a">a</div></body>""")
+    egal("racine: em reste relatif a l'element",
+         round(boite_de(doc, "a").largeur), 200)
+
+    # Une regle sur `html` s'applique reellement, et s'herite.
+    doc = document("""
+        <style>html { color: #123456 } body { margin: 0 }</style>
+        <body><p id="p">texte</p></body>""")
+    egal("racine: une regle sur html s'herite",
+         boite_de(doc, "p").style.get("color"), "#123456")
+
+
+def css_couleur(valeur):
+    from moteur import css
+    return css.couleur(valeur or "")
+
+
 def verifie_enfant_direct():
     """`>` doit designer l'enfant direct, pas n'importe quel descendant."""
     # `background-color` ne s'herite pas : c'est ce qui permet de distinguer un
@@ -2114,6 +2228,8 @@ def principal():
         verifie_prechargement,
         verifie_feuilles_liees,
         verifie_index_regles,
+        verifie_variables_css,
+        verifie_racine,
         verifie_enfant_direct,
         verifie_cascade_memorisee,
         verifie_style_calcule,

@@ -6,9 +6,13 @@ couleurs, la typographie, les proprietes de disposition flexible et en grille,
 les `@media` — evaluees contre la taille de fenetre reelle — et les
 pseudo-elements `::before`/`::after`.
 
-Ce qui manque (animations, transformations, variables) est ignore proprement
-plutot que mal interprete : une declaration inconnue est laissee de cote, elle
-ne fait pas echouer la regle qui la contient.
+Les proprietes personnalisees (`--fond`) et `var()` en font partie : c'est sur
+elles que repose la mise en forme de tout site recent, et les ignorer n'affichait
+pas une page approximative mais une page sans couleurs ni espacements.
+
+Ce qui manque (animations, transformations) est ignore proprement plutot que mal
+interprete : une declaration inconnue est laissee de cote, elle ne fait pas
+echouer la regle qui la contient.
 """
 
 import re
@@ -101,6 +105,23 @@ def fenetre():
     return (_FENETRE[0], _FENETRE[1])
 
 
+# Taille de police de l'element racine, a laquelle `rem` se rapporte.
+#
+# La supposer a 16 px etait faux des qu'une page ecrit `html { font-size: 62.5% }`
+# — la facon la plus repandue de faire valoir 1 rem pour 10 px. Tout le document
+# sortait alors une fois et demie trop grand.
+_RACINE = [16.0]
+
+
+def pose_taille_racine(pixels):
+    """Declare la taille de police de `<html>`. A appeler avant la mise en page."""
+    _RACINE[0] = float(pixels) if pixels and pixels > 0 else 16.0
+
+
+def taille_racine():
+    return _RACINE[0]
+
+
 def longueur(valeur, reference=0.0, taille_police=16.0):
     """Traduit une longueur CSS en pixels. `None` si non exprimable."""
     if valeur is None:
@@ -114,7 +135,7 @@ def longueur(valeur, reference=0.0, taille_police=16.0):
         if v.endswith("px"):
             return float(v[:-2])
         if v.endswith("rem"):
-            return float(v[:-3]) * 16.0
+            return float(v[:-3]) * _RACINE[0]
         if v.endswith("em"):
             return float(v[:-2]) * taille_police
         if v.endswith("%"):
@@ -203,6 +224,12 @@ class Simple:
         trouve = re.search(r"::?(before|after)\b", texte)
         if trouve:
             self.pseudo = trouve.group(1)
+        # `:root` designe l'element racine, donc `<html>` en HTML. Le laisser
+        # tomber avec les autres pseudo-classes en faisait un selecteur
+        # universel : les variables qu'une page y pose etaient alors reposees
+        # sur **chaque** element, ou elles ecrasaient celles qu'un theme local
+        # avait redefinies plus haut dans l'arbre.
+        texte = re.sub(r":root\b", "html", texte)
         # Les pseudo-classes, elles, restent ignorees : `a:hover` se comporte
         # comme `a`. Les prendre au pied de la lettre demanderait un etat
         # d'interaction que le moteur ne tient pas ; les rejeter perdrait la
@@ -524,6 +551,9 @@ def applique(regles, element, chemin, style_parent, pseudo=None):
     applique pas : l'attribut `style` vise l'element, pas ses boites engendrees.
     """
     style = {p: v for p, v in style_parent.items() if p in HERITEES}
+    # Les proprietes personnalisees s'heritent toutes, sans liste : c'est ce qui
+    # permet a `:root { --fond: … }` de servir a toute la page.
+    variables = {p: v for p, v in style_parent.items() if p.startswith("--")}
 
     # `regles` est soit un [`Index`], soit une liste brute. La liste reste
     # acceptee pour que le moteur soit utilisable sans preparation, mais toute
@@ -537,14 +567,84 @@ def applique(regles, element, chemin, style_parent, pseudo=None):
         if regle.selecteur.correspond(chemin):
             correspondantes.append(regle)
     correspondantes.sort(key=lambda r: (r.selecteur.specificite, r.ordre))
-    for regle in correspondantes:
-        style.update(_developpe(regle.declarations))
 
+    en_ligne = {}
     if pseudo is None:
-        en_ligne = element.attributs.get("style")
-        if en_ligne:
-            style.update(_developpe(_declarations(en_ligne)))
+        brut = element.attributs.get("style")
+        if brut:
+            en_ligne = _declarations(brut)
+
+    # Les variables se resolvent en deux temps, comme le veut la norme : toute
+    # la cascade des `--*` d'abord, les valeurs qui s'y referent ensuite. Sans
+    # cela, une regle placee avant celle qui definit la variable verrait une
+    # valeur vide alors que la cascade la lui donne.
+    for source in (r.declarations for r in correspondantes):
+        for nom, valeur in source.items():
+            if nom.startswith("--"):
+                variables[nom] = valeur.strip()
+    for nom, valeur in en_ligne.items():
+        if nom.startswith("--"):
+            variables[nom] = valeur.strip()
+    style.update(variables)
+
+    for regle in correspondantes:
+        style.update(_developpe(_resout_variables(regle.declarations, variables)))
+    if en_ligne:
+        style.update(_developpe(_resout_variables(en_ligne, variables)))
     return style
+
+
+# `var(--nom)` ou `var(--nom, valeur de secours)`. La valeur de secours peut
+# elle-meme contenir des parentheses — un `var()` imbrique, un `calc()` — d'ou
+# le motif qui accepte un niveau de parentheses en son sein.
+_VAR = re.compile(
+    r"var\(\s*(--[A-Za-z0-9_-]+)\s*(?:,\s*((?:[^()]|\([^()]*\))*))?\)")
+
+# Au-dela, on cesse de substituer : une variable qui se refere a elle-meme
+# boucherait sinon indefiniment, et la norme declare ce cycle invalide.
+_PROFONDEUR_VAR = 8
+
+
+def _resout_variables(declarations, variables):
+    """Remplace les `var()` d'un bloc de declarations par leur valeur.
+
+    Une variable sans valeur ni secours rend une chaine vide : la declaration
+    devient alors inexploitable, ce qui est le comportement voulu — la norme la
+    dit invalide, et une longueur ou une couleur vide est deja ignoree partout
+    ailleurs dans ce module.
+    """
+    if not variables:
+        # Aucun `--*` en vue : la quasi-totalite des pages n'en ont pas sur la
+        # plupart de leurs elements, et parcourir chaque valeur pour rien
+        # couterait a chaque mise en page.
+        resultat = {}
+        for nom, valeur in declarations.items():
+            if not nom.startswith("--"):
+                resultat[nom] = valeur
+        return resultat
+
+    resultat = {}
+    for nom, valeur in declarations.items():
+        if nom.startswith("--"):
+            continue
+        resultat[nom] = _substitue(valeur, variables) if "var(" in valeur else valeur
+    return resultat
+
+
+def _substitue(valeur, variables):
+    def remplace(trouve):
+        nom = trouve.group(1)
+        secours = (trouve.group(2) or "").strip()
+        if nom in variables:
+            return variables[nom]
+        return secours
+
+    for _ in range(_PROFONDEUR_VAR):
+        suivante = _VAR.sub(remplace, valeur)
+        if suivante == valeur:
+            break
+        valeur = suivante
+    return valeur.strip()
 
 
 def contenu_engendre(regles, element, chemin, style_parent, pseudo):
@@ -715,8 +815,12 @@ def _quatre(parties):
 # CSS serait un bloc de texte uniforme : ce sont ces regles qui donnent aux
 # titres leur taille et aux paragraphes leur respiration.
 FEUILLE_PAR_DEFAUT = """
-html, body { display: block; color: #202124; font-size: 16px; line-height: 1.5; }
-body { margin: 8px; background-color: #ffffff; }
+/* Les valeurs de depart vont sur la racine seule, et non sur `html, body` :
+   les poser aussi sur le corps les y rendait explicites, et une page qui ecrit
+   `html { color: … }` voyait sa declaration battue par la notre au lieu de
+   descendre par heritage. */
+html { display: block; color: #202124; font-size: 16px; line-height: 1.5; }
+body { display: block; margin: 8px; background-color: #ffffff; }
 div, p, section, article, header, footer, nav, main, aside, figure,
 form, fieldset, blockquote, pre, ul, ol, dl, dd, dt, li, table, tr,
 h1, h2, h3, h4, h5, h6, hr, address, details, summary { display: block; }
