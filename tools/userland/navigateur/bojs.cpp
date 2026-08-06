@@ -312,6 +312,84 @@ JSValue passage(JSContext *ctx, JSValueConst, int nombre, JSValueConst *argument
     return converti;
 }
 
+// --- Modules ES ---------------------------------------------------------------
+//
+// `import` a besoin de deux choses du dehors : transformer une specification en
+// adresse absolue, et rapporter le texte qui s'y trouve. Ni l'une ni l'autre
+// n'est du ressort de QuickJS — la premiere demande de connaitre l'URL de la
+// page, la seconde le reseau. Les deux passent donc par le meme pont que le
+// reste, avec deux operations de plus.
+//
+// Le chargement est **synchrone**, comme l'exige QuickJS : le graphe entier est
+// rapporte avant que le module principal ne s'execute. C'est plus lent qu'un
+// navigateur, qui telecharge en parallele, mais c'est correct — et le
+// prechargement a de bonnes chances d'avoir deja les fichiers.
+
+/// Appelle le pont Python et rend une chaine, ou `nullptr`.
+///
+/// L'erreur Python, s'il y en a une, est effacee : l'appelant traduit l'absence
+/// de resultat en exception JavaScript, ce qui donne un message plus utile.
+char *demandeTexte(JSContext *ctx, const char *operation, const char *a,
+                   const char *b)
+{
+    Contexte *etat = static_cast<Contexte *>(JS_GetContextOpaque(ctx));
+    if (!etat || !etat->pont)
+        return nullptr;
+
+    PyObject *arguments = b
+        ? Py_BuildValue("(sss)", operation, a, b)
+        : Py_BuildValue("(ss)", operation, a);
+    if (!arguments) {
+        PyErr_Clear();
+        return nullptr;
+    }
+    PyObject *resultat = PyObject_CallObject(etat->pont, arguments);
+    Py_DECREF(arguments);
+    if (!resultat) {
+        PyErr_Clear();
+        return nullptr;
+    }
+    char *copie = nullptr;
+    if (PyUnicode_Check(resultat)) {
+        const char *texte = PyUnicode_AsUTF8(resultat);
+        if (texte)
+            copie = js_strdup(ctx, texte);
+    }
+    Py_DECREF(resultat);
+    PyErr_Clear();
+    return copie;
+}
+
+char *normaliseModule(JSContext *ctx, const char *base, const char *nom, void *)
+{
+    char *resolu = demandeTexte(ctx, "moduleAdresse", base ? base : "", nom);
+    // Sans resolution possible, on garde la specification telle quelle : le
+    // chargeur echouera avec un message qui la nomme, ce qui est plus parlant
+    // qu'une erreur de normalisation.
+    return resolu ? resolu : js_strdup(ctx, nom);
+}
+
+JSModuleDef *chargeModule(JSContext *ctx, const char *nom, void *)
+{
+    char *source = demandeTexte(ctx, "moduleSource", nom, nullptr);
+    if (!source) {
+        JS_ThrowReferenceError(ctx, "module introuvable : %s", nom);
+        return nullptr;
+    }
+
+    JSValue compile = JS_Eval(ctx, source, std::strlen(source), nom,
+                              JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+    js_free(ctx, source);
+    if (JS_IsException(compile))
+        return nullptr;
+
+    // En compilation seule, la valeur rendue **est** le module : c'est le
+    // contrat de QuickJS, et c'est ce que fait son propre chargeur.
+    JSModuleDef *module = static_cast<JSModuleDef *>(JS_VALUE_GET_PTR(compile));
+    JS_FreeValue(ctx, compile);
+    return module;
+}
+
 /// Gardien : arrete un script qui depasse son budget.
 ///
 /// Sans lui, `while (true) {}` dans une page figerait la fenetre, et donc la
@@ -415,6 +493,10 @@ PyObject *bojs_cree(PyObject *, PyObject *args)
                       JS_NewCFunction(etat->contexte, passage, "__bo_appel", 1));
     JS_FreeValue(etat->contexte, global);
 
+    // Le chargeur de modules : `import` passera par Python pour resoudre les
+    // adresses et rapporter les sources.
+    JS_SetModuleLoaderFunc(etat->execution, normaliseModule, chargeModule, nullptr);
+
     g_contextes.push_back(etat);
     return PyLong_FromLong(long(g_contextes.size() - 1));
 }
@@ -444,7 +526,8 @@ PyObject *bojs_evalue(PyObject *, PyObject *args)
     const char *source;
     Py_ssize_t taille;
     const char *nom = "<page>";
-    if (!PyArg_ParseTuple(args, "is#|s", &indice, &source, &taille, &nom))
+    int module = 0;
+    if (!PyArg_ParseTuple(args, "is#|sp", &indice, &source, &taille, &nom, &module))
         return nullptr;
     Contexte *etat = contexte_par_indice(indice);
     if (!etat)
@@ -453,7 +536,7 @@ PyObject *bojs_evalue(PyObject *, PyObject *args)
     etat->interrompu = false;
     etat->echeance = maintenant_ms() + etat->budget;
     JSValue resultat = JS_Eval(etat->contexte, source, size_t(taille), nom,
-                               JS_EVAL_TYPE_GLOBAL);
+                               module ? JS_EVAL_TYPE_MODULE : JS_EVAL_TYPE_GLOBAL);
     if (JS_IsException(resultat)) {
         JS_FreeValue(etat->contexte, resultat);
         etat->echeance = 0;
@@ -569,7 +652,7 @@ PyMethodDef bojs_methodes[] = {
     {"pont", bojs_pont, METH_VARARGS,
      "pont(ctx, fonction) : installe l'appelable derriere __bo_appel"},
     {"evalue", bojs_evalue, METH_VARARGS,
-     "evalue(ctx, source, nom='<page>') -> valeur du dernier calcul"},
+     "evalue(ctx, source, nom='<page>', module=False) -> valeur du dernier calcul"},
     {"appelle", bojs_appelle, METH_VARARGS,
      "appelle(ctx, nom_global, arguments=None) -> valeur rendue"},
     {"pompe", bojs_pompe, METH_VARARGS,

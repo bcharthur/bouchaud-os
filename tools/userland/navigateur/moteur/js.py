@@ -236,6 +236,7 @@ class Contexte:
         self._reponses = []        # (identifiant, reponse) a livrer au battement
         self._lecteurs = {}        # identifiant de nœud -> Lecteur
         self._toiles = {}          # element <canvas> -> operations dessinees
+        self._modules = {}         # adresse de module -> source (ou None)
         self._sources_mse = {}     # identifiant MediaSource -> Lecteur
         self._types_mse = {}       # identifiant MediaSource -> type MIME
         self._segments_mse = {}    # segments recus avant rattachement
@@ -258,12 +259,18 @@ class Contexte:
             code = self._telecharge_script(source) if source else element.texte()
             if not code:
                 continue
-            self.execute(code, source or "<page>")
+            # Un module a ses propres regles : portee close, `import` resolu au
+            # chargement, `this` a `undefined`. L'executer comme un script
+            # ordinaire ferait echouer sa premiere ligne.
+            module = type_ == "module"
+            nom = urllib.parse.urljoin(self.document.url, source) if source \
+                else self.document.url + "#script"
+            self.execute(code, nom, module=module)
 
-    def execute(self, code, nom="<page>"):
+    def execute(self, code, nom="<page>", module=False):
         """Execute du code, en signalant les erreurs plutot qu'en tombant."""
         try:
-            return bojs.evalue(self._contexte, code, nom)
+            return bojs.evalue(self._contexte, code, nom, module)
         except bojs.Erreur as e:
             self.journal("error", "%s : %s" % (nom, e))
         except Exception as e:  # noqa: BLE001 — une page ne doit pas tuer le navigateur
@@ -662,6 +669,51 @@ class Contexte:
         except Exception:  # noqa: BLE001
             return {}
         return dict(style)
+
+    def _op_moduleAdresse(self, base, nom):
+        """Resout une specification d'`import` en adresse absolue.
+
+        QuickJS ne sait pas ce qu'est une URL : c'est ici que `./util.js` vu
+        depuis `https://site/app/main.js` devient `https://site/app/util.js`.
+        Une specification nue — `import 'lodash'` — n'a pas de sens sans carte
+        d'import ; elle est rendue telle quelle, et le chargement echouera en la
+        nommant, ce qui est plus parlant qu'une adresse inventee.
+        """
+        nom = str(nom or "")
+        if nom.startswith(("http://", "https://", "data:")):
+            return nom
+        if not nom.startswith((".", "/")):
+            return nom
+        depart = str(base or "") or self.document.url
+        return urllib.parse.urljoin(depart, nom)
+
+    def _op_moduleSource(self, adresse):
+        """Rapporte le texte d'un module. `None` s'il est introuvable.
+
+        Le chargement est synchrone, comme l'exige QuickJS : le graphe entier
+        est rapporte avant que le module principal ne s'execute. Chaque adresse
+        n'est demandee qu'une fois — un module importe par trois autres n'est
+        ni retelecharge ni reevalue.
+        """
+        adresse = str(adresse or "")
+        if adresse in self._modules:
+            return self._modules[adresse]
+        if not adresse.startswith(("http://", "https://", "file://")):
+            self.journal("warn", "module non resoluble : %s" % adresse)
+            self._modules[adresse] = None
+            return None
+        try:
+            reponse = reseau.charge(adresse, brut=True)
+        except Exception as e:  # noqa: BLE001
+            self.journal("warn", "module %s : %s" % (adresse, e))
+            self._modules[adresse] = None
+            return None
+        if reponse.code and reponse.code >= 400:
+            self.journal("warn", "module %s : code %d" % (adresse, reponse.code))
+            self._modules[adresse] = None
+            return None
+        self._modules[adresse] = reponse.contenu
+        return reponse.contenu
 
     def _op_largeurTexte(self, texte, taille, gras=False, fixe=False):
         """Largeur d'un texte dans la fonte reelle, pour `measureText`."""

@@ -1762,6 +1762,67 @@ def verifie_toile():
     egal("toile: clearRect repart de rien", boite_de(doc, "dessin").toile, [])
 
 
+def verifie_modules():
+    """`<script type="module">` doit resoudre et executer ses `import`."""
+    charge, demandes = sert({
+        "http://exemple.test/lib/somme.js": (
+            "export function somme(a, b) { return a + b; }\n"
+            "export const nom = 'somme';\n", "text/javascript"),
+        "http://exemple.test/lib/outils.js": (
+            "import { somme } from './somme.js';\n"
+            "export function triple(x) { return somme(somme(x, x), x); }\n",
+            "text/javascript"),
+    })
+    ancien = reseau.charge
+    try:
+        reseau.charge = charge
+        doc = document("""
+            <body>
+              <div id="sortie"></div>
+              <script type="module">
+                import { somme, nom } from './lib/somme.js';
+                import { triple } from './lib/outils.js';
+                document.getElementById('sortie').textContent =
+                    nom + ' ' + somme(2, 3) + ' ' + triple(4);
+              </script>
+            </body>""")
+    finally:
+        reseau.charge = ancien
+
+    cible = next(n for n in doc.racine.parcours()
+                 if isinstance(n, html.Element) and n.attributs.get("id") == "sortie")
+    egal("modules: import resolu et execute", cible.texte(), "somme 5 12")
+    egal("modules: chaque module n'est demande qu'une fois",
+         sorted(demandes), ["http://exemple.test/lib/outils.js",
+                            "http://exemple.test/lib/somme.js"])
+
+    # Un module absent ne doit pas tuer la page.
+    charge, _ = sert({})
+    ancien = reseau.charge
+    try:
+        reseau.charge = charge
+        doc = document("""
+            <body>
+              <p id="reste">visible</p>
+              <script type="module">import { x } from './absent.js'; window.__x = x;</script>
+            </body>""")
+    finally:
+        reseau.charge = ancien
+    textes = [e[3] for e in doc.liste_affichage(0, 1000, 700) if e[0] == "texte"]
+    verifie("modules: un module absent n'arrete pas la page",
+            any("visible" in t for t in textes), textes[:5])
+    verifie("modules: et l'echec est consigne",
+            any(niveau in ("warn", "error") for niveau, _ in doc.messages),
+            doc.messages[:4])
+
+    # Un script ordinaire reste ordinaire : `import` y serait une erreur de
+    # syntaxe, et une declaration `var` doit rester visible globalement.
+    doc = document("""
+        <body><script>var visibleGlobalement = 42;</script></body>""")
+    egal("modules: un script ordinaire garde la portee globale",
+         doc.contexte_js.execute("visibleGlobalement"), 42)
+
+
 def verifie_bac_a_sable():
     """Une page ne doit pas pouvoir atteindre le systeme."""
     doc = document("<body></body>")
@@ -1833,6 +1894,7 @@ def principal():
         verifie_composants,
         verifie_ombre,
         verifie_toile,
+        verifie_modules,
         verifie_flex,
         verifie_grille,
         verifie_position,

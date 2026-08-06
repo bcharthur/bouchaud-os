@@ -481,7 +481,8 @@ vraie fonte · **disposition flexible** (base, `grow`/`shrink`, `wrap`,
 `MutationObserver`, `IntersectionObserver`, `ResizeObserver` ·
 **composants** (`customElements.define`, cycle de vie complet, `attachShadow`) ·
 **canvas 2D** (rectangles, chemins, arcs, textes, images, `measureText` sur la
-vraie fonte) ·
+vraie fonte) · **modules ES** (`<script type="module">`, `import` résolu et
+chargé sur le réseau) ·
 **images** PNG/JPEG/GIF/BMP décodées par Qt · **vidéo et audio** H.264/AAC via
 libavcodec, avec Media Source Extensions et sortie AC'97 · HTTP et HTTPS avec
 redirections et jeux de caractères · `file://` · historique avant/arrière,
@@ -498,8 +499,9 @@ de grille** — `grid-template-areas` retombe sur le placement automatique.
 mais les sélecteurs de la page l'atteignent, et `:host` comme `<slot>` ne sont
 pas interprétés. **Pixels de canvas** — `getImageData`, les dégradés et les
 ombres demanderaient un vrai tampon, que l'hôte ne prête pas ; le reste du
-contexte 2D est enregistré et peint. **Modules ES** — `<script type="module">`
-est exécuté comme un script ordinaire, `import` n'est pas résolu. Ce qui manque
+contexte 2D est enregistré et peint. **Chargement parallèle des modules** — le
+graphe d'`import` est rapporté module par module, comme l'exige le chargeur
+synchrone de QuickJS ; un navigateur les téléchargerait de front. Ce qui manque
 est listé, avec le reste, dans la feuille de route (`docs/ROADMAP.md`).
 
 ### Ce qui le rend rapide
