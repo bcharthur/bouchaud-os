@@ -540,6 +540,43 @@ prise déjà passée en non bloquant fait échouer la première émission vers u
 dont l'adresse matérielle n'est pas encore connue, et le noyau rend alors
 `ENETUNREACH`. C'est un défaut côté noyau, noté dans la feuille de route.
 
+### Le client léger — 100 % du web, rendu ailleurs
+
+Le moteur natif affiche beaucoup, et il n'affichera jamais tout : une
+application qui compile son interface, un lecteur qui pousse ses segments, une
+page qui dessine en WebGL demandent Blink ou WebKit. Le client léger prend
+l'autre chemin, celui d'Opera Mini et de Puffin — **le rendu se fait sur
+l'hôte**, avec un vrai Chromium, et l'OS n'affiche que l'image.
+
+```sh
+cd tools/render-proxy && npm run setup && npm start   # sur l'hôte
+```
+
+Puis, dans le navigateur : **F2** bascule la page courante entre moteur natif
+et rendu distant, ou `distant:https://…` dans la barre d'adresse.
+
+| | Moteur natif | Rendu distant |
+|---|---|---|
+| Couverture | large, jamais totale | **tout le web** |
+| Page | un arbre vivant | une image |
+| Sélection, recherche | oui | non |
+| Dépendance | aucune | un hôte qui tourne |
+
+Ni l'un ni l'autre ne remplace l'autre, d'où la bascule plutôt qu'un choix
+définitif.
+
+Le protocole tient en sept requêtes (`/wv/open`, `/wv/shot`, `/wv/click`,
+`/wv/scroll`, `/wv/type`, `/wv/key`, `/wv/info`). Les images partent en **JPEG**
+— 48 ko contre 300 ko en PNG, ce qui sur le lien d'une machine émulée fait la
+différence entre dix images par seconde et une — et une image identique n'est
+**pas** retransmise : le client joint la signature de celle qu'il a, le service
+répond 304. Une page immobile ne coûte donc rien, et toute la bande passante
+reste aux pages qui bougent.
+
+```sh
+BO_RENDU=http://127.0.0.1:8080 python3 navigateur/distant-probe.py https://pypi.org
+```
+
 ### Éprouver YouTube contre le vrai service
 
 ```sh

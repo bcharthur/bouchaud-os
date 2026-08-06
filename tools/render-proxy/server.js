@@ -41,7 +41,17 @@ const RENDER_H = 820;     // hauteur de viewport initiale (mode /render)
 let browserPromise = null;
 function getBrowser() {
   if (!browserPromise) {
-    const opts = { args: ["--no-sandbox", "--disable-dev-shm-usage"] };
+    const opts = { args: [
+      "--no-sandbox", "--disable-dev-shm-usage",
+      // Sans cela une video ne demarre jamais : Chromium exige un geste de
+      // l'utilisateur, et le notre arrive par une requete HTTP, pas par un
+      // clic qu'il reconnaisse.
+      "--autoplay-policy=no-user-gesture-required",
+      // Le client leger n'a pas de haut-parleur cote hote : le son sort par
+      // la carte de la machine invitee, ou pas du tout. Le couper ici evite
+      // qu'un serveur sans peripherique audio refuse de lire.
+      "--mute-audio",
+    ] };
     // Chromium fourni par l'environnement (CHROMIUM_PATH ou installation
     // Playwright partagée) : évite un `playwright install` si un binaire
     // compatible existe déjà.
@@ -205,6 +215,34 @@ const WV_KEYS = new Set([
   "Home", "End",
 ]);
 
+// Signature de la derniere image envoyee, pour ne pas la renvoyer deux fois.
+let derniereSignature = "";
+
+const crypto = require("crypto");
+
+function signature(buffer) {
+  return crypto.createHash("sha1").update(buffer).digest("hex").slice(0, 16);
+}
+
+// Capture le viewport au format demande.
+//
+// JPEG par defaut, et ce n'est pas un detail : une image de client leger fait
+// 40 a 80 ko en JPEG contre 300 ko a 1 Mo en PNG. Sur le lien SLIRP d'une
+// machine emulee, c'est la difference entre dix images par seconde et une.
+// Le PNG reste disponible pour ce qui doit rester net — du texte fin, une
+// capture qu'on veut fidele au pixel.
+async function capture(page, q) {
+  const format = (q.get("fmt") || "jpeg").toLowerCase();
+  if (format === "png") {
+    return { buffer: await page.screenshot({ type: "png" }), type: "image/png" };
+  }
+  const qualite = Math.max(20, Math.min(95, parseInt(q.get("q") || "72", 10)));
+  return {
+    buffer: await page.screenshot({ type: "jpeg", quality: qualite }),
+    type: "image/jpeg",
+  };
+}
+
 // Execute une action webview et renvoie la capture du viewport.
 async function wvAction(pathname, q) {
   const page = await getWv();
@@ -267,7 +305,7 @@ async function wvAction(pathname, q) {
       default:
         throw new Error("action inconnue");
     }
-    return await page.screenshot({ type: "png" });
+    return await capture(page, q);
   } catch (e) {
     if (page.isClosed && page.isClosed()) resetWv();
     throw e;
@@ -281,7 +319,6 @@ const server = http.createServer(async (req, res) => {
       "Content-Type": type,
       "Content-Length": Buffer.byteLength(body),
       "Cache-Control": "no-store",
-      "Connection": "close",
     });
     res.end(body);
   };
@@ -297,15 +334,49 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // Etat de la page : de quoi tenir une barre d'adresse et des boutons.
+  if (u.pathname === "/wv/info") {
+    try {
+      const page = await getWv();
+      const info = {
+        url: page.url() || "",
+        titre: await page.title().catch(() => ""),
+        signature: derniereSignature,
+      };
+      return send(200, "application/json", JSON.stringify(info));
+    } catch (e) {
+      return send(502, "text/plain", "erreur: " + (e && e.message ? e.message : e));
+    }
+  }
+
   if (u.pathname.startsWith("/wv/")) {
     const t0 = Date.now();
     try {
-      const raw = await queue(() => wvAction(u.pathname, u.searchParams));
-      const png = await fitForOs(raw, false); // viewport deja au budget : pas de resize
-      send(200, "image/png", png);
-      console.log(`[wv] ${u.pathname}${u.search} -> ${png.length} o en ${Date.now() - t0} ms`);
+      const rendu = await queue(() => wvAction(u.pathname, u.searchParams));
+      const signee = signature(rendu.buffer);
+
+      // Rien n'a bouge depuis l'image que le client a deja : on le lui dit en
+      // trois octets plutot qu'en cinquante kilo-octets. C'est ce qui rend une
+      // page immobile gratuite, et laisse la bande passante a celles qui
+      // bougent vraiment.
+      if (u.searchParams.get("sig") === signee) {
+        res.writeHead(304, { "Cache-Control": "no-store" });
+        res.end();
+        return;
+      }
+      derniereSignature = signee;
+
+      res.writeHead(200, {
+        "Content-Type": rendu.type,
+        "Content-Length": rendu.buffer.length,
+        "Cache-Control": "no-store",
+        "X-Bo-Signature": signee,
+      });
+      res.end(rendu.buffer);
+      console.log(`[wv] ${u.pathname}${u.search} -> ${rendu.buffer.length} o `
+                  + `en ${Date.now() - t0} ms`);
     } catch (e) {
-      console.error(`[wv erreur] ${u.pathname}: ${e && e.message ? e.message : e}`);
+      console.error(`[wv erreur] ${u.pathname}:`, e && e.stack ? e.stack : e);
       send(502, "text/plain", "echec webview: " + (e && e.message ? e.message : String(e)));
     }
     return;
@@ -327,6 +398,12 @@ const server = http.createServer(async (req, res) => {
     send(502, "text/plain", "echec du rendu: " + (e && e.message ? e.message : String(e)));
   }
 });
+
+// Le client leger demande une image plusieurs fois par seconde : sans
+// connexion persistante, chaque image coute une poignee de main TCP, ce qui sur
+// le lien d'une machine emulee pese plus que l'image elle-meme.
+server.keepAliveTimeout = 30_000;
+server.headersTimeout = 35_000;
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`Nautile render proxy a l'ecoute sur http://0.0.0.0:${PORT}`);

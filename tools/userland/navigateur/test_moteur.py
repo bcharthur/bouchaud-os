@@ -2327,6 +2327,90 @@ def _stockage_local(stockage):
     stockage.temoins().oublie_tout()
 
 
+def verifie_client_leger():
+    """Le client leger : protocole, images, et ce qu'il fait d'un service muet.
+
+    Le service lui-meme n'est pas lance ici — il demande Node et un Chromium.
+    Ce qui est eprouve, c'est tout ce qui se passe de notre cote : les adresses
+    formees, la signature qui evite de retransmettre une image identique, et le
+    fait qu'un service absent ne fasse pas tomber le navigateur.
+    """
+    from moteur import distant
+
+    demandes = []
+
+    def sert(reponses):
+        def charge(url, methode="GET", corps=None, entetes=None, brut=False):
+            demandes.append(url)
+            for motif, faire in reponses:
+                if motif in url:
+                    return faire(url)
+            return reseau.Reponse(url, "", "text/plain", 404)
+        return charge
+
+    image = b"\xff\xd8\xff\xe0" + b"x" * 200 + b"\xff\xd9"
+
+    def png(url):
+        return reseau.Reponse(url, "", "image/jpeg", 200, octets=image,
+                              entetes={"x-bo-signature": "abc123"})
+
+    ancien = reseau.charge
+    try:
+        reseau.charge = sert([("/wv/", png)])
+        session = distant.Session(service="http://hote:8080")
+
+        egal("client leger: l'ouverture rapporte une image",
+             session.ouvre("https://exemple.test", 800, 600), True)
+        egal("client leger: les octets sont gardes", session.octets, image)
+        egal("client leger: la signature aussi", session.signature, "abc123")
+
+        # L'adresse formee doit porter la taille et le format.
+        derniere = demandes[-1]
+        verifie("client leger: l'action est nommee", "/wv/open" in derniere, derniere)
+        for attendu in ("w=800", "h=600", "fmt=jpeg", "url=https"):
+            verifie("client leger: la demande porte %s" % attendu,
+                    attendu in derniere, derniere)
+
+        # Le sondage joint la signature ; une action, non — sinon un 304
+        # ferait manquer le changement qu'elle vient de provoquer.
+        session.rafraichis()
+        verifie("client leger: le sondage joint la signature",
+                "sig=abc123" in demandes[-1], demandes[-1])
+        session.clic(4, 5)
+        verifie("client leger: une action ne la joint pas",
+                "sig=" not in demandes[-1], demandes[-1])
+        verifie("client leger: le clic porte ses coordonnees",
+                "x=4" in demandes[-1] and "y=5" in demandes[-1], demandes[-1])
+
+        # Une touche inconnue du service ne part pas.
+        egal("client leger: une touche inconnue est refusee",
+             session.touche("Truc"), False)
+        egal("client leger: une touche connue part", session.touche("Enter"), True)
+
+        # 304 : rien n'a change, et cela ne doit pas passer pour une panne.
+        def inchange(url):
+            return reseau.Reponse(url, "", "", 304, octets=b"")
+        reseau.charge = sert([("/wv/", inchange)])
+        egal("client leger: 304 veut dire « rien de neuf »",
+             session.rafraichis(), False)
+        egal("client leger: l'image precedente est gardee", session.octets, image)
+        egal("client leger: et ce n'est pas une erreur", session.erreur, None)
+
+        # Service muet : le navigateur doit continuer de tourner.
+        def muet(url):
+            raise OSError("connexion refusee")
+        reseau.charge = sert([("/wv/", muet), ("/healthz", muet)])
+        egal("client leger: un service muet ne leve pas",
+             session.rafraichis(), False)
+        verifie("client leger: et la raison est retenue", session.erreur)
+        egal("client leger: il se declare injoignable", session.joignable(), False)
+    finally:
+        reseau.charge = ancien
+
+    egal("client leger: traduction d'une touche", distant.touche_pour("entree"), "Enter")
+    egal("client leger: touche sans equivalent", distant.touche_pour("truc"), None)
+
+
 def verifie_bac_a_sable():
     """Une page ne doit pas pouvoir atteindre le systeme."""
     doc = document("<body></body>")
@@ -2413,6 +2497,7 @@ def principal():
         verifie_pseudo_elements,
         verifie_requetes_media,
         verifie_longueurs,
+        verifie_client_leger,
         verifie_bac_a_sable,
         verifie_hote_reel,
     ):
