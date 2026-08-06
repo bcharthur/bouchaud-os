@@ -529,6 +529,28 @@ construction cote utilisateur : `tools/userland/README.md`.
 
       Sur le DRM, la note precedente etait **fausse** : YouTube ne chiffre pas
       la lecture ordinaire. Widevine ne concerne que les films loues ou achetes.
+
+      **Ce qui manquait, et qui a ete corrige.** Google lie l'adresse d'un flux
+      au client qui l'a demandee : une adresse obtenue avec le contexte ANDROID
+      puis reclamee avec l'agent du navigateur rend 403. L'extraction etait
+      correcte et la lecture echouait quand meme, sans que rien ne le dise.
+      L'agent du client qui a servi voyage desormais avec les adresses, de
+      `lecteur_youtube` jusqu'a **chaque** tranche telechargee.
+
+      **Preuve d'origine.** Depuis 2024, YouTube reclame un `poToken` de ses
+      clients web ; il se fabrique en executant du code d'attestation que nous
+      ne pouvons pas faire tourner. L'ordre des clients en tient compte :
+      `ANDROID_VR` passe en premier — ni preuve d'origine, ni attestation
+      d'application, adresses non signees — et le web reste en dernier recours.
+      Un refus de ce type est **nomme** dans le journal plutot que confondu avec
+      une panne.
+
+      **Non verifie ici** : la lecture contre le vrai YouTube. La politique
+      reseau du bac a sable de developpement refuse `youtube.com` et
+      `googlevideo.com` (403 sur CONNECT). Tout le reste de la chaine est
+      eprouve avec le reseau substitue — negociation des clients dans l'ordre,
+      en-tetes emis, refus reconnu, bascule, choix du flux, page produite et
+      mise en page.
 - [x] **H.264 lu et joue sur la machine** : verifie sous QEMU sur un flux
       baseline 480x270 + AAC. Le timecode incruste dans l'image concorde avec
       `currentTime` — l'image est donc bien calee sur l'horloge audio.

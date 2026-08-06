@@ -469,8 +469,9 @@ sans guillemets, entités) · sélecteurs CSS de balise, classe, identifiant,
 attribut, descendance et enfant direct, avec spécificité, cascade et héritage ·
 feuille de l'agent utilisateur · modèle de boîte complet, `box-sizing`, bornes
 `min-*`/`max-*`, `calc()`, unités de fenêtre · règles `@media` évaluées contre
-la taille réelle de la fenêtre · pseudo-éléments `::before`/`::after`, `attr()`
-compris · mise en page bloc et en ligne avec retour à la ligne mesuré sur la
+la taille réelle de la fenêtre · **propriétés personnalisées** (`--x` / `var()`,
+avec valeur de secours) · `:root` et le style de `<html>`, dont `rem` tire sa
+référence · pseudo-éléments `::before`/`::after`, `attr()` compris · mise en page bloc et en ligne avec retour à la ligne mesuré sur la
 vraie fonte · **disposition flexible** (base, `grow`/`shrink`, `wrap`,
 `justify-content`, `align-items`, colonnes) · **grille** (`repeat()`,
 `minmax()`, `fr`, `gap`, placement automatique et explicite) ·
@@ -493,8 +494,7 @@ liens cliquables, défilement.
 
 **Animations et transformations** — `transition`, `animation`, `transform` sont
 ignorés ; la page s'affiche à son état final, ce qui est presque toujours l'état
-utile. **Variables CSS** — `var()` n'est pas résolu. **Lignes et zones nommées
-de grille** — `grid-template-areas` retombe sur le placement automatique.
+utile. **Lignes et zones nommées de grille** — `grid-template-areas` retombe sur le placement automatique.
 **`order` en flexbox** — les articles restent dans l'ordre du source.
 **Isolement du DOM d'ombre** — la racine d'ombre porte et affiche son contenu,
 mais les sélecteurs de la page l'atteignent, et `:host` comme `<slot>` ne sont
