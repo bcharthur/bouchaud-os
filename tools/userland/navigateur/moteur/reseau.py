@@ -3,18 +3,110 @@
 Rien de special au moteur ici : on se sert de `http.client` et de `ssl`, qui
 sont dans la bibliotheque standard de l'interprete embarque. C'est le noyau de
 Bouchaud OS qui porte les sockets sous-jacentes.
+
+## Ce qui rend le chargement rapide
+
+Trois choses, et elles comptent plus ici qu'ailleurs parce que la pile TCP est
+celle du noyau et que tout tourne sous emulation.
+
+**Les connexions sont reutilisees.** Une page cite trente ressources sur le
+meme hote ; sans reserve, c'est trente poignees de main TCP et trente poignees
+de main TLS. La reserve les ramene a quelques-unes. C'est de loin le gain le
+plus gros.
+
+**Les corps sont compresses.** `gzip` divise une page HTML par cinq ou six. Sur
+un lien lent — et le notre l'est — cela se voit directement.
+
+**Les sous-ressources partent ensemble.** Voir `prechargement.py` : elles sont
+demandees en parallele et deposees ici, pretes a etre reprises sans reseau.
 """
 
+import gzip
 import http.client
 import os
 import socket
+import threading
 import time
 import ssl
 import urllib.parse
+import zlib
 
 DELAI = 20.0
 AGENT = "BouchaudOS/1.0 (navigateur natif; Qt/Python)"
 REDIRECTIONS_MAX = 5
+
+# --- Reserve de connexions ----------------------------------------------------
+
+# Connexions gardees ouvertes, par `(securise, hote, port)`. Bornee : au-dela,
+# on ferme plutot que de retenir des prises qu'on ne rouvrira jamais.
+PRISES_PAR_HOTE = 4
+_reserve = {}
+_verrou = threading.Lock()
+
+
+def _emprunte(cle):
+    """Rend une connexion deja ouverte vers cet hote, ou `None`."""
+    with _verrou:
+        libres = _reserve.get(cle)
+        while libres:
+            connexion = libres.pop()
+            if connexion.sock is not None:
+                return connexion
+            _ferme(connexion)
+    return None
+
+
+def _rend(cle, connexion):
+    """Remet une connexion dans la reserve, ou la ferme si elle est de trop."""
+    if connexion.sock is None:
+        _ferme(connexion)
+        return
+    with _verrou:
+        libres = _reserve.setdefault(cle, [])
+        if len(libres) < PRISES_PAR_HOTE:
+            libres.append(connexion)
+            return
+    _ferme(connexion)
+
+
+def _ferme(connexion):
+    try:
+        connexion.close()
+    except Exception:  # noqa: BLE001 — fermer ne doit jamais faire echouer
+        pass
+
+
+def ferme_connexions():
+    """Ferme toute la reserve. Appele en quittant une page."""
+    with _verrou:
+        restantes = [c for libres in _reserve.values() for c in libres]
+        _reserve.clear()
+    for connexion in restantes:
+        _ferme(connexion)
+
+
+# --- Reponses prechargees -----------------------------------------------------
+
+# Deposees par `prechargement`, reprises par `charge`. Chaque entree ne sert
+# qu'une fois : le prechargement anticipe une demande, il ne remplace pas un
+# cache — celui-ci viendra avec la persistance sur disque.
+_precharges = {}
+
+
+def depose(url, reponse):
+    """Range une reponse obtenue d'avance, pour la prochaine demande."""
+    with _verrou:
+        _precharges[url] = reponse
+
+
+def _reprend(url):
+    with _verrou:
+        return _precharges.pop(url, None)
+
+
+def oublie_precharges():
+    with _verrou:
+        _precharges.clear()
 
 
 class Reponse:
@@ -64,6 +156,13 @@ def charge(url, methode="GET", corps=None, entetes=None, brut=False):
             return Reponse(url, _page_interne(url), "text/html")
         if url.startswith("file://"):
             return _charge_fichier(url, brut=brut)
+        # Le prechargement a peut-etre deja rapporte cette ressource. Il ne sert
+        # que les demandes qu'il a pu anticiper : une lecture simple, sans corps
+        # ni en-tetes propres a l'appelant.
+        if brut and methode == "GET" and corps is None and not entetes:
+            avance = _reprend(url)
+            if avance is not None:
+                return avance
         # YouTube n'est pas servi tel quel : sa page de lecture est une
         # application qu'on ne peut pas executer. On lui substitue une page qui
         # lit le flux — voir `lecteur_youtube`. `brut` court-circuite ce
@@ -88,6 +187,10 @@ def tranche(url, debut, longueur, entetes=None):
     """
     demandes = dict(entetes or {})
     demandes["Range"] = "bytes=%d-%d" % (debut, debut + longueur - 1)
+    # Pas de compression sur une tranche : les octets demandes sont ceux du
+    # fichier, et un serveur qui compresserait la tranche rendrait les decalages
+    # faux — or c'est sur eux que le lecteur video s'appuie.
+    demandes["Accept-Encoding"] = "identity"
     return charge(url, entetes=demandes, brut=True)
 
 
@@ -288,35 +391,18 @@ def _charge_http(url, restantes=REDIRECTIONS_MAX, methode="GET", corps=None,
     if morceaux.query:
         chemin += "?" + morceaux.query
 
-    adresse = resout(hote)
     securise = morceaux.scheme == "https"
     port = morceaux.port or (443 if securise else 80)
-
-    prise = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    prise.settimeout(DELAI)
-    prise.connect((adresse, port))
-
-    if securise:
-        contexte = ssl.create_default_context()
-        # Sans magasin de racines sur la machine, toute connexion echouerait.
-        # On verifie donc la chaine quand un magasin existe, et on s'en passe
-        # sinon — la barre d'etat le dit.
-        if not _magasin_disponible(contexte):
-            contexte.check_hostname = False
-            contexte.verify_mode = ssl.CERT_NONE
-        prise = contexte.wrap_socket(prise, server_hostname=hote)
-
-    # La prise est deja ouverte : `http.client` s'en sert telle quelle au lieu
-    # d'appeler `connect()`, donc sans repasser par `getaddrinfo`.
-    connexion = http.client.HTTPConnection(hote, port, timeout=DELAI)
-    connexion.sock = prise
+    cle = (securise, hote, port)
 
     entetes_envoyes = {
         "Host": morceaux.netloc,
         "User-Agent": AGENT,
         "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
-        "Accept-Encoding": "identity",
-        "Connection": "close",
+        # Un corps compresse arrive plusieurs fois plus vite. `http.client` ne
+        # decompresse pas de lui-meme : c'est `_decompresse` qui s'en charge.
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "keep-alive",
     }
     # Ce que la page a demande passe devant : un `fetch` qui pose son
     # `Content-Type` ou son `Authorization` doit etre obei.
@@ -325,16 +411,49 @@ def _charge_http(url, restantes=REDIRECTIONS_MAX, methode="GET", corps=None,
     if corps is not None and "Content-Type" not in entetes_envoyes:
         entetes_envoyes["Content-Type"] = "text/plain;charset=UTF-8"
 
-    try:
-        connexion.request(methode, chemin,
-                          body=corps.encode("utf-8") if isinstance(corps, str) else corps,
-                          headers=entetes_envoyes)
-        reponse = connexion.getresponse()
-        entetes = {k.lower(): v for k, v in reponse.getheaders()}
-        reponse_corps = reponse.read()
-        code = reponse.status
-    finally:
-        connexion.close()
+    charge_utile = corps.encode("utf-8") if isinstance(corps, str) else corps
+
+    # Une connexion tiree de la reserve peut avoir ete fermee par le serveur
+    # entre-temps, et rien ne le dit avant qu'on ecrive dedans. On reessaie donc
+    # une fois sur une connexion neuve : c'est la reprise que doit avoir tout
+    # client persistant, et sans elle la reserve serait moins fiable que pas de
+    # reserve du tout.
+    connexion = _emprunte(cle)
+    for tentative in (0, 1):
+        recyclee = connexion is not None
+        if not recyclee:
+            connexion = _ouvre(hote, port, securise)
+        try:
+            connexion.request(methode, chemin, body=charge_utile,
+                              headers=entetes_envoyes)
+            reponse = connexion.getresponse()
+            entetes = {k.lower(): v for k, v in reponse.getheaders()}
+            reponse_corps = reponse.read()
+            code = reponse.status
+            break
+        except Exception:  # noqa: BLE001
+            _ferme(connexion)
+            connexion = None
+            if not recyclee or tentative == 1:
+                raise
+
+    detendu = _decompresse(reponse_corps, entetes.get("content-encoding", ""))
+    if detendu is not reponse_corps:
+        # Les en-tetes decrivent maintenant ce que l'appelant tient vraiment :
+        # laisser `content-length` a la taille compressee ferait mentir tout
+        # code qui s'y fie, `XMLHttpRequest` le premier.
+        reponse_corps = detendu
+        entetes.pop("content-encoding", None)
+        entetes["content-length"] = str(len(reponse_corps))
+
+    # C'est le serveur qui decide s'il garde la connexion, et `http.client` a
+    # deja tranche : `will_close` tient compte de la version du protocole, de
+    # l'en-tete `Connection` et du mode de delimitation du corps. Le refaire a
+    # la main ne ferait que diverger.
+    if reponse.will_close:
+        _ferme(connexion)
+    else:
+        _rend(cle, connexion)
 
     if code in (301, 302, 303, 307, 308) and restantes > 0:
         cible = entetes.get("location")
@@ -342,10 +461,16 @@ def _charge_http(url, restantes=REDIRECTIONS_MAX, methode="GET", corps=None,
             # Une redirection apres POST se poursuit en GET, comme le veut la
             # norme pour 301/302/303.
             suite = "GET" if code in (301, 302, 303) else methode
+            # Les en-tetes propres a la connexion precedente ne suivent pas :
+            # reemettre le `Host` de l'ancien hote vers un autre domaine fait
+            # servir la mauvaise page, ou aucune.
+            reprises = {n: v for n, v in entetes_envoyes.items()
+                        if n.lower() not in ("host", "connection", "accept-encoding",
+                                             "content-length")}
             return _charge_http(urllib.parse.urljoin(url, cible), restantes - 1,
                                 methode=suite,
                                 corps=None if suite == "GET" else corps,
-                                entetes=entetes_envoyes, brut=brut)
+                                entetes=reprises, brut=brut)
 
     type_mime = entetes.get("content-type", "text/html").split(";")[0].strip()
     jeu = "utf-8"
@@ -372,6 +497,55 @@ def _charge_http(url, restantes=REDIRECTIONS_MAX, methode="GET", corps=None,
         type_mime = "text/html"
 
     return Reponse(url, texte, type_mime, code, entetes=entetes, octets=donnees)
+
+
+def _ouvre(hote, port, securise):
+    """Ouvre une connexion neuve, TLS compris s'il le faut."""
+    adresse = resout(hote)
+    prise = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    prise.settimeout(DELAI)
+    prise.connect((adresse, port))
+
+    if securise:
+        contexte = ssl.create_default_context()
+        # Sans magasin de racines sur la machine, toute connexion echouerait.
+        # On verifie donc la chaine quand un magasin existe, et on s'en passe
+        # sinon — la barre d'etat le dit.
+        if not _magasin_disponible(contexte):
+            contexte.check_hostname = False
+            contexte.verify_mode = ssl.CERT_NONE
+        prise = contexte.wrap_socket(prise, server_hostname=hote)
+
+    # La prise est deja ouverte : `http.client` s'en sert telle quelle au lieu
+    # d'appeler `connect()`, donc sans repasser par `getaddrinfo`.
+    connexion = http.client.HTTPConnection(hote, port, timeout=DELAI)
+    connexion.sock = prise
+    return connexion
+
+
+def _decompresse(donnees, encodage):
+    """Rend le corps en clair. Un encodage inconnu laisse les octets tels quels.
+
+    Un corps annonce compresse mais illisible est rendu tel quel plutot que
+    remplace par du vide : mieux vaut une page mal affichee qu'une page vide, et
+    certains serveurs annoncent `gzip` sur des reponses qui ne le sont pas — les
+    pages d'erreur surtout.
+    """
+    encodage = (encodage or "").strip().lower()
+    if not donnees or not encodage or encodage == "identity":
+        return donnees
+    try:
+        if encodage == "gzip":
+            return gzip.decompress(donnees)
+        if encodage == "deflate":
+            try:
+                return zlib.decompress(donnees)
+            except zlib.error:
+                # Certains serveurs emettent du deflate brut, sans en-tete zlib.
+                return zlib.decompress(donnees, -zlib.MAX_WBITS)
+    except Exception:  # noqa: BLE001
+        return donnees
+    return donnees
 
 
 def _magasin_disponible(contexte):

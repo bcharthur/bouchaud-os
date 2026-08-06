@@ -85,7 +85,10 @@ def document(source, url="http://exemple.test/page"):
     """Construit un Document depuis du HTML, sans reseau."""
     journal = []
     reponse = reseau.Reponse(url, source, "text/html", 200)
-    doc = moteur.Document(reponse, 1000,
+    # Pas de prechargement : ces pages n'ont pas de sous-ressource reelle, et
+    # une resolution de nom vers un domaine inexistant ferait attendre chaque
+    # verification pour rien. Le prechargement a ses propres epreuves.
+    doc = moteur.Document(reponse, 1000, precharge=False,
                           journal=lambda niveau, texte: journal.append((niveau, texte)))
     doc.messages = journal
     return doc
@@ -1090,7 +1093,7 @@ def verifie_requetes_media():
 
     # La meme page dans une fenetre etroite retient l'autre regle.
     reponse = reseau.Reponse("http://exemple.test/p", source, "text/html", 200)
-    doc = moteur.Document(reponse, 400, hauteur_fenetre=800.0)
+    doc = moteur.Document(reponse, 400, hauteur_fenetre=800.0, precharge=False)
     egal("media: max-width retenu a 400px", round(boite_de(doc, "t").largeur), 50)
 
     # Et un redimensionnement rebascule.
@@ -1142,6 +1145,209 @@ def verifie_longueurs():
     verifie("overflow: et derogne ensuite", "declip" in operations, operations[-4:])
     egal("overflow: autant de clip que de declip",
          operations.count("clip"), operations.count("declip"))
+
+
+# --- Vitesse de chargement ----------------------------------------------------
+
+class _PriseFictive:
+    """Le minimum qu'attend la reserve de connexions : un etat et une fermeture."""
+
+    def __init__(self, ouverte=True):
+        self.sock = object() if ouverte else None
+        self.fermee = False
+
+    def close(self):
+        self.fermee = True
+        self.sock = None
+
+
+def sert(reponses):
+    """Remplace le reseau par une table `url -> (octets, type)`.
+
+    Le noyau n'a ni `listen` ni `accept` : aucune de ces verifications ne peut
+    monter un serveur local, sous l'OS comme ici. On substitue donc le
+    chargement lui-meme, ce qui eprouve exactement ce qui nous interesse — le
+    cheminement des ressources dans le moteur — sans dependre du monde exterieur.
+    """
+    demandes = []
+
+    def charge(url, methode="GET", corps=None, entetes=None, brut=False):
+        demandes.append(url)
+        if url not in reponses:
+            return reseau.Reponse(url, "", "text/plain", 404)
+        contenu, type_mime = reponses[url]
+        octets = contenu.encode("utf-8") if isinstance(contenu, str) else contenu
+        return reseau.Reponse(url, octets.decode("utf-8", "replace"), type_mime,
+                              200, octets=octets)
+
+    return charge, demandes
+
+
+def verifie_compression():
+    """Un corps `gzip` ou `deflate` doit arriver en clair."""
+    import gzip
+    import zlib
+
+    clair = b"<h1>Bouchaud</h1>" * 40
+    egal("compression: gzip", reseau._decompresse(gzip.compress(clair), "gzip"), clair)
+    egal("compression: deflate", reseau._decompresse(zlib.compress(clair), "deflate"),
+         clair)
+    # Certains serveurs emettent du deflate brut, sans en-tete zlib.
+    brut = zlib.compressobj(9, zlib.DEFLATED, -zlib.MAX_WBITS)
+    cru = brut.compress(clair) + brut.flush()
+    egal("compression: deflate brut", reseau._decompresse(cru, "deflate"), clair)
+
+    egal("compression: identity intacte", reseau._decompresse(clair, "identity"), clair)
+    egal("compression: sans encodage", reseau._decompresse(clair, ""), clair)
+    # Un corps annonce compresse mais qui ne l'est pas revient tel quel plutot
+    # que vide : mieux vaut une page mal affichee qu'une page blanche.
+    egal("compression: annonce mensongere", reseau._decompresse(clair, "gzip"), clair)
+    egal("compression: encodage inconnu", reseau._decompresse(clair, "br"), clair)
+
+    verifie("compression: le gzip vaut la peine",
+            len(gzip.compress(clair)) < len(clair) / 4,
+            (len(gzip.compress(clair)), len(clair)))
+
+
+def verifie_reserve_connexions():
+    """Une connexion rendue est reprise ; une connexion morte ne l'est pas."""
+    reseau.ferme_connexions()
+    cle = (False, "exemple.test", 80)
+
+    vivante = _PriseFictive()
+    reseau._rend(cle, vivante)
+    egal("reserve: la connexion rendue est reprise", reseau._emprunte(cle), vivante)
+    egal("reserve: elle n'est reprise qu'une fois", reseau._emprunte(cle), None)
+
+    # Une prise fermee par le serveur ne doit jamais ressortir de la reserve.
+    morte = _PriseFictive(ouverte=False)
+    reseau._rend(cle, morte)
+    egal("reserve: une connexion morte n'est pas reprise", reseau._emprunte(cle), None)
+    verifie("reserve: elle est fermee", morte.fermee)
+
+    # La reserve est bornee : au-dela, on ferme.
+    prises = [_PriseFictive() for _ in range(reseau.PRISES_PAR_HOTE + 2)]
+    for prise in prises:
+        reseau._rend(cle, prise)
+    egal("reserve: bornee", sum(1 for p in prises if not p.fermee),
+         reseau.PRISES_PAR_HOTE)
+
+    reseau.ferme_connexions()
+    egal("reserve: la fermeture vide tout", reseau._emprunte(cle), None)
+    verifie("reserve: tout est referme", all(p.fermee for p in prises))
+
+
+def verifie_prechargement():
+    """Les sous-ressources sont relevees, demandees ensemble, et reprises."""
+    from moteur import prechargement
+
+    racine = html.analyse("""
+        <link rel="stylesheet" href="/style.css">
+        <link rel="preload" href="/pas-une-feuille.css">
+        <body>
+          <img src="/a.png"><img src="/b.png"><img src="/a.png">
+          <img src="data:image/png;base64,AAAA">
+          <img src="#ancre">
+          <script src="/app.js"></script>
+        </body>""")
+    trouvees = prechargement.adresses(racine, "http://exemple.test/page")
+    egal("prechargement: les adresses relevees", trouvees, [
+        "http://exemple.test/style.css",
+        "http://exemple.test/a.png",
+        "http://exemple.test/b.png",
+        "http://exemple.test/app.js",
+    ])
+
+    # `data:` porte deja ses octets, une ancre n'est pas une ressource, et un
+    # `rel` qui n'est pas `stylesheet` ne se precharge pas.
+    verifie("prechargement: pas de data:",
+            not any(u.startswith("data:") for u in trouvees), trouvees)
+    verifie("prechargement: pas de rel etranger",
+            not any("pas-une-feuille" in u for u in trouvees), trouvees)
+
+    # Le depot rend la ressource disponible sans reseau, une seule fois.
+    reseau.oublie_precharges()
+    avance = reseau.Reponse("http://exemple.test/a.png", "", "image/png",
+                            200, octets=b"PNG")
+    reseau.depose("http://exemple.test/a.png", avance)
+    egal("prechargement: la reponse deposee est reprise",
+         reseau.charge("http://exemple.test/a.png", brut=True), avance)
+
+    # Une seconde demande ne doit pas resservir l'entree : le prechargement
+    # anticipe une requete, il ne tient pas lieu de cache.
+    charge, demandes = sert({})
+    ancien = reseau.charge
+    try:
+        reseau.charge = charge
+        prechargement.reseau.charge("http://exemple.test/a.png", brut=True)
+    finally:
+        reseau.charge = ancien
+    egal("prechargement: l'entree n'est servie qu'une fois", demandes,
+         ["http://exemple.test/a.png"])
+
+    # Et le prechargement complet remplit bien la reserve.
+    reseau.oublie_precharges()
+    charge, demandes = sert({
+        "http://exemple.test/style.css": ("p { color: red; }", "text/css"),
+        "http://exemple.test/a.png": ("octets", "image/png"),
+    })
+    ancien = reseau.charge
+    try:
+        reseau.charge = charge
+        obtenues = prechargement.precharge(racine, "http://exemple.test/page")
+    finally:
+        reseau.charge = ancien
+    egal("prechargement: deux ressources sur quatre existent", obtenues, 2)
+    egal("prechargement: les quatre ont ete demandees", len(demandes), 4)
+    reseau.oublie_precharges()
+
+
+def verifie_feuilles_liees():
+    """Un `<link rel=stylesheet>` doit reellement s'appliquer."""
+    charge, demandes = sert({
+        "http://exemple.test/style.css": (
+            "body { margin: 0; } #t { width: 300px; color: #ff0000; }", "text/css"),
+    })
+    ancien = reseau.charge
+    try:
+        reseau.charge = charge
+        source = """
+            <link rel="stylesheet" href="style.css">
+            <body><div id="t">t</div></body>"""
+        reponse = reseau.Reponse("http://exemple.test/page", source, "text/html", 200)
+        doc = moteur.Document(reponse, 1000, precharge=False)
+        egal("feuille liee: la largeur vient de la feuille",
+             round(boite_de(doc, "t").largeur), 300)
+        egal("feuille liee: la couleur aussi",
+             boite_de(doc, "t").style.get("color"), "#ff0000")
+        egal("feuille liee: telechargee une fois", len(demandes), 1)
+
+        # Un redimensionnement rejoue la cascade sans redemander le fichier.
+        doc.remet_en_page(800)
+        egal("feuille liee: pas de second telechargement", len(demandes), 1)
+        egal("feuille liee: toujours appliquee",
+             round(boite_de(doc, "t").largeur), 300)
+
+        # L'ordre du document tranche : ce qui suit l'emporte.
+        source = """
+            <style>#t { width: 100px; }</style>
+            <link rel="stylesheet" href="style.css">
+            <body><div id="t">t</div></body>"""
+        reponse = reseau.Reponse("http://exemple.test/page", source, "text/html", 200)
+        doc = moteur.Document(reponse, 1000, precharge=False)
+        egal("feuille liee: elle l'emporte sur le style qui la precede",
+             round(boite_de(doc, "t").largeur), 300)
+
+        # Et une feuille absente ne casse pas la page.
+        source = """
+            <link rel="stylesheet" href="/introuvable.css">
+            <body><div id="t">t</div></body>"""
+        reponse = reseau.Reponse("http://exemple.test/page", source, "text/html", 200)
+        doc = moteur.Document(reponse, 1000, precharge=False)
+        verifie("feuille liee: une feuille absente n'arrete pas la page",
+                boite_de(doc, "t") is not None)
+    finally:
+        reseau.charge = ancien
 
 
 def verifie_bac_a_sable():
@@ -1202,6 +1408,10 @@ def principal():
         verifie_youtube_base_js,
         verifie_youtube_page,
         verifie_requete_brute,
+        verifie_compression,
+        verifie_reserve_connexions,
+        verifie_prechargement,
+        verifie_feuilles_liees,
         verifie_flex,
         verifie_grille,
         verifie_position,

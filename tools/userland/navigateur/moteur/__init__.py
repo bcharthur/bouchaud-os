@@ -26,22 +26,37 @@ Une page sans script ne paie rien : le contexte JavaScript n'est cree que si
 elle en contient au moins un.
 """
 
-from . import css, html, images, mise_en_page, peinture, reseau
+import urllib.parse
 
-__all__ = ["css", "html", "images", "js", "mise_en_page", "peinture", "reseau",
-           "Document"]
+from . import (css, html, images, mise_en_page, peinture, prechargement,
+               reseau)
+
+__all__ = ["css", "html", "images", "js", "mise_en_page", "peinture",
+           "prechargement", "reseau", "Document"]
 
 
 class Document:
     """Une page chargee : son arbre, ses regles, ses scripts, sa mise en page."""
 
     def __init__(self, reponse, largeur, scripts=True, journal=None,
-                 hauteur_fenetre=720.0):
+                 hauteur_fenetre=720.0, precharge=True):
         self.url = reponse.url
         self.code = reponse.code
         self.erreur = reponse.erreur
         self.racine = html.analyse(reponse.contenu)
         self.titre = self._titre()
+        self.journal = journal or (lambda niveau, texte: None)
+        # Feuilles liees deja rapportees, par adresse : la cascade est
+        # rejouee a chaque redimensionnement, pas le telechargement.
+        self._feuilles = {}
+
+        # Les sous-ressources partent maintenant, ensemble, pendant qu'on
+        # analyse les feuilles : quand la mise en page reclamera une image, elle
+        # sera deja la. C'est le seul endroit ou l'ordre compte — precharger
+        # apres la mise en page ne servirait plus a rien.
+        if precharge:
+            prechargement.precharge(self.racine, self.url, self.journal)
+
         # La taille de la fenetre doit etre connue **avant** l'analyse des
         # feuilles : c'est elle qui decide quelles regles `@media` sont
         # retenues, et `vw`/`vh` s'y rapportent.
@@ -52,7 +67,6 @@ class Document:
         self.boite = None
         self.hauteur = 0.0
         self.zones_liens = []
-        self.journal = journal or (lambda niveau, texte: None)
         self.contexte_js = None
 
         if scripts:
@@ -141,14 +155,62 @@ class Document:
         return self.url
 
     def _regles(self):
+        """Cascade complete : feuille de l'agent, feuilles liees, feuilles en ligne.
+
+        L'ordre du document decide entre deux regles de meme specificite ; un
+        `<link>` et un `<style>` sont donc numerotes dans l'ordre ou ils
+        apparaissent, et non par categorie. Une feuille liee qui suit un
+        `<style>` doit pouvoir le contredire, comme dans tout navigateur.
+        """
         regles = css.analyse(css.FEUILLE_PAR_DEFAUT)
         ordre = len(regles) + 1000
         for element in self.racine.parcours():
-            if isinstance(element, html.Element) and element.balise == "style":
-                nouvelles = css.analyse(element.texte(), ordre)
-                regles.extend(nouvelles)
-                ordre += len(nouvelles) + 1
+            if not isinstance(element, html.Element):
+                continue
+            if element.balise == "style":
+                source = element.texte()
+            elif element.balise == "link":
+                source = self._feuille_liee(element)
+            else:
+                continue
+            if not source:
+                continue
+            nouvelles = css.analyse(source, ordre)
+            regles.extend(nouvelles)
+            ordre += len(nouvelles) + 1
         return regles
+
+    def _feuille_liee(self, element):
+        """Le texte d'un `<link rel="stylesheet">`, ou `""`.
+
+        Le prechargement a en principe deja rapporte le fichier ; sinon on le
+        demande ici. Une feuille absente ne fait pas echouer la page : elle
+        s'affiche avec les regles qu'on a, ce que fait aussi un navigateur quand
+        une requete echoue.
+        """
+        rel = element.attributs.get("rel", "").lower().split()
+        if "stylesheet" not in rel:
+            return ""
+        adresse = (element.attributs.get("href") or "").strip()
+        if not adresse:
+            return ""
+        media = element.attributs.get("media", "")
+        if media and not css.requete_verifiee(media):
+            return ""
+
+        url = urllib.parse.urljoin(self.url or "", adresse)
+        cle = url
+        if cle in self._feuilles:
+            return self._feuilles[cle]
+        try:
+            reponse = reseau.charge(url, brut=True)
+        except Exception as e:  # noqa: BLE001
+            self.journal("warn", "feuille %s : %s" % (adresse, e))
+            self._feuilles[cle] = ""
+            return ""
+        texte = "" if (reponse.code and reponse.code >= 400) else reponse.contenu
+        self._feuilles[cle] = texte
+        return texte
 
     def remet_en_page(self, largeur, hauteur_fenetre=None):
         self.largeur = largeur
