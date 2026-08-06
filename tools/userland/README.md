@@ -482,7 +482,8 @@ vraie fonte · **disposition flexible** (base, `grow`/`shrink`, `wrap`,
 **composants** (`customElements.define`, cycle de vie complet, `attachShadow`) ·
 **canvas 2D** (rectangles, chemins, arcs, textes, images, `measureText` sur la
 vraie fonte) · **modules ES** (`<script type="module">`, `import` résolu et
-chargé sur le réseau) ·
+chargé sur le réseau) · **témoins**, **cache HTTP** et **`localStorage`**
+persistés sur le disque ·
 **images** PNG/JPEG/GIF/BMP décodées par Qt · **vidéo et audio** H.264/AAC via
 libavcodec, avec Media Source Extensions et sortie AC'97 · HTTP et HTTPS avec
 redirections et jeux de caractères · `file://` · historique avant/arrière,
@@ -538,6 +539,37 @@ La requête part **avant** que le délai d'attente soit posé sur la prise : une
 prise déjà passée en non bloquant fait échouer la première émission vers un hôte
 dont l'adresse matérielle n'est pas encore connue, et le noyau rend alors
 `ENETUNREACH`. C'est un défaut côté noyau, noté dans la feuille de route.
+
+### Ce qui survit à l'extinction
+
+Le RAMFS oublie tout. `/persist` est la zone qui n'oublie pas : le noyau la
+déplie du disque au démarrage et l'y réécrit sur `sync`.
+
+```
+disque de données (hdb)
+├── archive tar          lue au démarrage, depuis le début
+└── zone persistante     8 Mio, écrite depuis la fin
+```
+
+Les deux ne se rencontrent jamais tant que l'image porte les deux, ce dont
+`mkdisk.sh` se charge. La zone est réécrite en entier à chaque `sync` — ni
+allocateur de blocs ni table d'inodes, ce qui convient à quelques mégaoctets
+écrits rarement. L'en-tête part **en dernier** : jusque-là la zone porte encore
+l'ancienne magie, donc l'ancien contenu, et une coupure laisse la version
+précédente plutôt qu'un mélange des deux.
+
+`sync` écrit tout ; `fsync` n'écrit que si le descripteur désigne un fichier de
+`/persist` — un programme en émet sans compter, et chacun coûterait sinon une
+réécriture complète.
+
+Le navigateur y range ses témoins, son cache HTTP et son `localStorage`
+(`moteur/stockage.py`). Sans zone persistante — sur la machine de
+développement — tout continue en mémoire seule.
+
+`tools/test.sh` démarre **deux fois** sur la même image : le premier passage
+écrit, le second doit retrouver. La sonde reconnaît seule son passage, ce qui
+évite de refabriquer l'image entre les deux — refabriquer effacerait justement
+ce qu'on vérifie.
 
 ## 13. pywebview — le tuto, tel quel
 

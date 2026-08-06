@@ -29,10 +29,10 @@ elle en contient au moins un.
 import urllib.parse
 
 from . import (css, html, images, mise_en_page, peinture, prechargement,
-               reseau)
+               reseau, stockage)
 
 __all__ = ["css", "html", "images", "js", "mise_en_page", "peinture",
-           "prechargement", "reseau", "Document"]
+           "prechargement", "reseau", "stockage", "Document"]
 
 
 class Document:
