@@ -164,6 +164,23 @@ pub fn capture_take() -> Option<alloc::string::String> {
     unsafe { CAPTURE_STACK.as_mut().and_then(|s| s.pop()) }
 }
 
+/// Recopie sur COM1 tout ce qui part a l'ecran.
+///
+/// Sert au mode non interactif : la sortie des commandes doit atteindre l'hote
+/// pour qu'il puisse l'analyser. La recopie se fait au fil de l'eau et non a la
+/// fin, de sorte qu'une panique laisse quand meme voir tout ce qui l'a precedee.
+static mut SERIAL_MIRROR: bool = false;
+
+/// Active ou coupe la recopie de la sortie texte vers COM1.
+pub fn set_serial_mirror(on: bool) {
+    unsafe { SERIAL_MIRROR = on; }
+}
+
+/// La sortie texte est-elle recopiee sur COM1 ?
+pub fn serial_mirror() -> bool {
+    unsafe { SERIAL_MIRROR }
+}
+
 /// Implementation reelle derriere les macros `print!` / `println!`.
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
@@ -173,6 +190,12 @@ pub fn _print(args: fmt::Arguments) {
                 let _ = top.write_fmt(args);
                 return;
             }
+        }
+        // Seul ce qui atteint reellement l'ecran est recopie : une sortie
+        // capturee part vers un pipe ou un fichier, la dupliquer sur COM1
+        // ferait apparaitre deux fois ce que l'utilisateur n'a vu qu'une.
+        if SERIAL_MIRROR {
+            crate::drivers::serial::_print(args);
         }
         let _ = VGA.write_fmt(args);
     }

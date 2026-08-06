@@ -10,3 +10,25 @@ session.log
 # Dependances npm du service de rendu deporte (tools/render-proxy)
 node_modules/
 tools/render-proxy/node_modules/
+
+# Binaires userland compiles (build.sh) et image du disque de donnees (mkdisk.sh)
+tools/userland/out/
+tools/userland/*.img
+# Artefacts du lanceur de sondes (tools/test.sh)
+tools/userland/test-out/
+# Chantiers et resultats de build-python.sh / build-qt.sh (sources telechargees,
+# arbres de compilation, binaires produits)
+tools/userland/build-python-musl/
+tools/userland/build-python-glibc/
+tools/userland/build-qt/
+tools/userland/out-python/
+tools/userland/out-qt/
+tools/userland/build-navigateur/
+tools/userland/out-navigateur/
+tools/userland/out-python-embed/
+tools/userland/build-quickjs/
+tools/userland/out-quickjs/
+tools/userland/build-ffmpeg/
+tools/userland/out-ffmpeg/
+# Copie de travail de test-moteur.sh (le moteur y est recopie avant execution)
+tools/userland/build-test-moteur/

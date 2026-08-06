@@ -55,7 +55,7 @@ pub(crate) fn apply_key(expr: &mut String, label: &str) {
         "<" => { expr.pop(); }
         "=" => {
             let src = if expr.is_empty() { "0" } else { expr.as_str() };
-            *expr = match crate::gui::js::eval_expr(src) {
+            *expr = match crate::lang::expr::eval(src) {
                 Ok(r) => r,
                 Err(_) => String::from("Erreur"),
             };

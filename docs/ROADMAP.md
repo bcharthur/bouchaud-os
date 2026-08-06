@@ -320,9 +320,303 @@ scripts .bsh, et un mini-navigateur texte HTTP une fois le reseau e1000 pret.
 - [ ] Block device (virtio-blk)
 - [ ] BFS (Bouchaud File System) persistant : mount, df, sync, mkfs.bfs
 
+## Mode utilisateur (ring 3) et ABI Linux
+
+Objectif : executer des binaires Linux x86-64 non modifies, jusqu'a une pile
+graphique complete (navigateur webview / Python / Qt). Detail et chaine de
+construction cote utilisateur : `tools/userland/README.md`.
+
+- [x] **Memoire virtuelle** : allocateur de frames physiques + une PML4 par
+      processus, creneau utilisateur dedie de 512 Gio (`src/kernel/vmm.rs`)
+- [x] **Ring 3** : GDT complete (segments ring 0/3), TSS avec RSP0 par tache,
+      `syscall`/`sysretq` via STAR/LSTAR/FMASK, `iretq`, base FS pour le TLS,
+      SSE actif (`src/arch/x86_64/{gdt,usermode}.rs`)
+- [x] **Chargeur ELF64** : `PT_LOAD` avec droits reels, `.bss`, `PT_TLS`,
+      `PT_INTERP`, vecteur auxiliaire complet (`src/kernel/elf.rs`)
+- [x] **Appels systeme POSIX** : ~75 appels aux numeros et structures Linux
+      (`src/kernel/abi/`)
+- [x] **Processus et threads** : `clone(CLONE_THREAD)`, futex, piles noyau par
+      tache, preemption sur IRQ0 depuis le ring 3 (`src/kernel/task.rs`)
+- [x] **libc musl statique** : valide avec un binaire `musl-gcc -static-pie`
+      non modifie (printf, malloc, stdio, pthread, TLS)
+- [x] **Editeur de liens dynamique** : `ld-musl-x86_64.so.1` charge par le
+      noyau et resolvant les relocations en ring 3
+- [x] **Runtime C++** : STL, exceptions (deroulement), `std::thread`,
+      destructeurs — valide avec libstdc++ statique
+- [x] **Serveur graphique** : `/dev/fb0` mmapable sur la VRAM, ioctls fbdev
+      (`FBIOGET_*SCREENINFO`), `/dev/tty0` avec `KDSETMODE`/`VT_*`, et
+      `/dev/input/event*` en evdev reel (codes de touches Linux, souris
+      relative, bitmaps `EVIOCGBIT`)
+- [x] **Boucle d'evenements** : `eventfd` (compteur), `timerfd`, `poll`/`ppoll`,
+      `epoll`, futex a echeance absolue — valide par `tools/userland/qpa-probe.c`
+      qui rejoue le demarrage du plugin `linuxfb` de Qt
+- [x] **Tick a 1000 Hz** : les 18,2 Hz du PIT par defaut donnaient 55 ms de
+      granularite, inutilisable pour animer une interface
+- [x] **Arborescence systeme** : polices DejaVu dans `/usr/share/fonts`, `/proc`
+      et `/sys` reduits aux fichiers lus au demarrage, `/etc` minimal
+- [x] **Processus complets** : `fork`, `vfork`, `execve`, `wait4`, filiation,
+      zombies et recolte du code de sortie (`src/kernel/abi/proc.rs`)
+- [x] **Signaux reels** : trame ecrite sur la pile utilisateur, gestionnaire
+      ring 3, `rt_sigreturn`, masques, `SIGCHLD`, `SIGALRM` (`src/kernel/signal.rs`)
+- [x] **Sockets POSIX** : TCP et UDP sur la pile de `src/net/` — `getaddrinfo`
+      et un client HTTP fonctionnent depuis le ring 3 (`src/kernel/abi/net.rs`)
+- [x] **Cache de pages partage** : `MAP_SHARED` sur fichier partage les memes
+      frames entre processus, `msync` repercute vers le RAMFS
+- [ ] Sockets serveur : `listen`/`accept` (demande une reception en tache de
+      fond et un demultiplexage par port)
+- [ ] IPv6
+
+- [x] **Installation sans recompilation** : pilote ATA PIO + archive `tar`
+      depliee au demarrage depuis un second disque (`src/drivers/ata.rs`,
+      `src/fs/tar.rs`). Fabriquer l'image avec `tools/userland/mkdisk.sh` ;
+      `run.ps1` l'attache automatiquement. Limites RAMFS relevees a 4096
+      inodes et 64 Mio par fichier.
+- [x] **Mode non interactif** : un `/autorun` sur le disque de donnees est joue
+      au demarrage a la place de la connexion, la sortie est recopiee sur COM1
+      et la machine s'eteint en rendant un verdict a l'hote
+      (`src/kernel/autorun.rs`, `src/kernel/power.rs`). C'est ce qui rend les
+      sondes rejouables : `./tools/test.sh` construit, boote, verifie et renvoie
+      un code de retour.
+- [x] **Invariant de non-reentrance verrouille** : la regle (« aucun emprunt du
+      `Process` ne survit a un point de commutation ») est enoncee en tete de
+      `src/kernel/abi/mod.rs` et verifiee par un `debug_assert` dans
+      `task::schedule` — la panique designe le coupable, pas sa victime.
+- [x] **CPython 3.12 tourne sur la machine** : interprete statique-PIE contre
+      musl, bibliotheque standard en archive zip lue par `zipimport`
+      (`tools/userland/build-python.sh`). Deux fichiers sur le disque de
+      donnees, aucune recompilation du noyau.
+- [x] **Qt 5.15 dessine sur `/dev/fb0`** : qtbase statique, plateforme linuxfb,
+      entrees evdev, lie en dur dans le binaire
+      (`tools/userland/build-qt.sh`, `tools/userland/qt-demo.cpp`). QPainter,
+      anticrenelage, degrades et melange alpha, en ring 3.
+- [ ] **`sendto` non bloquant et resolution d'adresse materielle** (defaut
+      ouvert). Une prise UDP passee en non bloquant fait echouer sa premiere
+      emission vers un hote dont l'adresse materielle n'est pas encore connue :
+      le noyau rend `ENETUNREACH` au lieu de laisser l'ARP aboutir. Contourne
+      cote navigateur en emettant avant de poser le delai d'attente.
+- [x] **Le drapeau d'interruption traversait les commutations de tache**. C'est
+      la cause des deux gels qu'on avait notes comme distincts : le blocage
+      intermittent apres le `pthread_create` de `qpa-probe`, et celui de
+      `load_url` appele depuis le fil de `webview.start()`.
+
+      `switch_context` sauvegardait les registres callee-saved mais pas RFLAGS.
+      Or `IF` est un etat du processeur, pas de la pile : il suivait donc la
+      **nouvelle** tache. Les deux appelants n'ont pas le meme etat —
+      `schedule` commute depuis un appel systeme, interruptions actives, tandis
+      que `preempt_from_irq` commute depuis le gestionnaire du timer, ou le CPU
+      les a coupees en franchissant la porte d'interruption. Preempter une tache
+      livrait donc `IF=0` a celle qui reprenait la main, au beau milieu de son
+      appel systeme. Le plus souvent sans consequence visible — elle rendait la
+      main en ring 3, et `sysretq` y remet un RFLAGS correct. Mais si elle
+      attendait dans un `poll`, un `futex` ou un sommeil, son `hlt` arretait le
+      processeur alors que plus aucune interruption ne pouvait le reveiller :
+      machine gelee, sans faute ni message, `timer::ticks()` fige pour de bon.
+      D'ou le caractere intermittent — il fallait que la preemption tombe
+      exactement sur une tache en attente — et l'aggravation sous charge de la
+      machine hote.
+
+      Releve sous moniteur QEMU : `RIP` juste apres le `hlt` de `sys_poll`,
+      `RFL=0x00000006` (donc `IF=0`), `HLT=1`, `CPL=0`.
+
+      Corrige a deux niveaux. `switch_context` encadre desormais sa sauvegarde
+      d'un `pushfq`/`popfq` : chaque tache retrouve l'etat d'interruption qui
+      etait le sien, et l'amorce de pile de `Task::new` porte le RFLAGS de
+      depart correspondant. Et les attentes bloquantes du noyau appellent
+      `cpu::wait_for_interrupt` (`sti; hlt`, paire indivisible) au lieu d'un
+      `hlt` nu, de sorte qu'aucune ne puisse plus s'endormir sans reveil
+      possible. Un `debug_assert` dans `schedule` verrouille l'invariant : on ne
+      commute jamais interruptions coupees, et la panique arrive dans le
+      coupable plutot que dans la victime.
+
+      Valide dans les conditions qui faisaient apparaitre le defaut : 24 boots
+      du scenario complet, joues six de front sur une machine hote a quatre
+      cœurs — donc en surcharge constante —, 24 succes. Et le tutoriel
+      pywebview va jusqu'a sa derniere ligne, page distante chargee et peinte.
+- [x] **Navigateur natif en ring 3** : Nautile supprime du noyau, remplace par
+      `tools/userland/navigateur/` — un binaire unique (Qt + CPython + QuickJS +
+      le moteur) qui analyse HTML et CSS, execute le JavaScript, met en page, et
+      peint par QPainter sur `/dev/fb0`. Reseau HTTP/HTTPS avec resolveur DNS
+      ecrit pour l'occasion.
+- [x] **JavaScript reel** : QuickJS lie en statique (`build-quickjs.sh`). Ecrire
+      un interprete complet — analyse, machine virtuelle, ramasse-miettes,
+      expressions rationnelles, Unicode, `Promise` — aurait represente plus de
+      travail que tout le reste du navigateur ; QuickJS fait cela en C portable
+      et sans dependance, donc dans la seule forme qu'un OS sans chargeur
+      dynamique puisse accueillir.
+
+      Le pont C (`bojs.cpp`) n'expose qu'**une** fonction au JavaScript :
+      `__bo_appel(operation, …)`. Tout le DOM est ecrit par-dessus, en
+      JavaScript (`moteur/prelude.js`) et en Python (`moteur/js.py`) —
+      `document`, `Element`, `classList`, `style`, les selecteurs (y compris
+      `>` et les attributs), les trois phases de distribution des evenements,
+      `setTimeout`/`setInterval`, `XMLHttpRequest`, `fetch`, `localStorage`,
+      `location`, `history`. Ajouter une methode ne demande donc pas de
+      recompiler.
+
+      Deux garde-fous, faute d'onglet a fermer ou de gestionnaire de taches :
+      un budget de temps qui interrompt un script qui boucle, et un plafond
+      memoire par page. Le bac a sable est celui de QuickJS — une page
+      n'atteint ni fichiers ni sockets, seulement ce que `js.py` lui tend.
+- [x] **Images** : Qt reconstruit avec libjpeg et le greffon GIF, declares par
+      `Q_IMPORT_PLUGIN` puisqu'un binaire statique ne charge aucun greffon. PNG,
+      JPEG, GIF, BMP et ICO, decodes une fois par adresse (`bo.image`) ; la
+      liste d'affichage ne porte qu'un numero, sans quoi chaque rafraichissement
+      redecoderait toute la page. Dimensions dans l'ordre des navigateurs : CSS,
+      puis attributs, puis taille naturelle, proportions conservees.
+- [x] **`test-moteur.sh`** : le moteur tourne sur la machine de developpement
+      avec un bouchon a la place de l'hote Qt — 92 verifications en quelques
+      secondes, contre plusieurs minutes pour reconstruire et demarrer
+      l'emulateur. Le meme fichier tourne sous l'OS avec le vrai hote. Il a paye
+      des le premier essai en revelant deux defauts avant tout demarrage : le
+      combinateur `>` qui se comportait comme un descendant, et
+      `DOMContentLoaded` qui n'atteignait pas les ecouteurs poses sur
+      `document`, c'est-a-dire la moitie du JavaScript du web.
+- [ ] **Ce que le JavaScript ne couvre pas** (limite assumee). Le moteur execute
+      le langage en entier, mais n'expose du navigateur que ce que `js.py`
+      implemente : pas de `canvas`, pas de WebGL, pas de Web Components ni de
+      Shadow DOM, pas de `IntersectionObserver`, pas de CSS calcule au sens
+      strict (`getComputedStyle` rend le style en ligne). Les applications web
+      qui reposent sur ces API — donc les grandes SPA — restent hors de portee ;
+      le web documentaire et les pages a rehaussement progressif, non.
+- [x] **Sortie audio** : pilote AC'97 (`src/drivers/ac97.rs`) et `/dev/dsp` a la
+      mode OSS. AC'97 plutot qu'Intel HDA parce que deux espaces d'E/S et une
+      liste de descripteurs suffisent, la ou HDA demanderait les anneaux CORB et
+      RIRB et l'enumeration des verbes du codec — pour le meme resultat sur une
+      machine emulee. Le controleur lit lui-meme la memoire ; le pilote remplit
+      devant la tete de lecture et n'active aucune interruption, l'index courant
+      du materiel etant de toute facon la source de verite. La puce ne connait
+      que 48 kHz stereo 16 bits : le reste est converti a l'ecriture.
+- [x] **Codecs H.264, VP9, AAC, Opus** : FFmpeg 6.1.1 construit en statique pour
+      la cible (`build-ffmpeg.sh`), decodage seul, formats du web seulement.
+      Ecrire un decodeur H.264 a la main — CABAC, deblocage, compensation de
+      mouvement au quart de pixel, trames B hierarchiques — represente plusieurs
+      annees-homme pour un resultat plus lent et moins juste ; porter le
+      decodeur de reference est la reponse d'ingenierie, pas un renoncement.
+- [x] **Chaine media** : `bomedia` ouvre un flux **en memoire** (pas un fichier :
+      le contenu arrive par le reseau ou par `appendBuffer`) et rend des trames
+      horodatees — image en BGRA, son en PCM 48 kHz pret pour `/dev/dsp`. Le
+      lecteur Python (`moteur/media.py`) decide quand les montrer : l'image se
+      cale sur l'horloge audio, jamais l'inverse, et l'image en retard est
+      sautee. Un son qui derive s'entend ; une image de deux centiemes en retard
+      ne se voit pas.
+- [x] **HTMLMediaElement et Media Source Extensions** : `<video>` et `<audio>`
+      avec `play`, `pause`, `currentTime`, `duration`, `volume`, `loop`,
+      `canPlayType` et leurs evenements ; puis `MediaSource`, `SourceBuffer`,
+      `appendBuffer` et `URL.createObjectURL`. C'est l'API par laquelle les
+      sites de lecture alimentent leur lecteur : ils recuperent les segments
+      eux-memes et les poussent, sans jamais donner d'URL de media au lecteur.
+- [x] **YouTube** : `moteur/youtube.py`, `moteur/signature.py`,
+      `moteur/lecteur_youtube.py`. On n'execute pas la page de YouTube — c'est
+      une application de deux megaoctets de JavaScript, et l'executer
+      demanderait d'implementer une fraction enorme d'un navigateur moderne pour
+      un resultat inutilisable sous emulation. On fait ce que font les clients
+      contraints (NewPipe, lecteurs embarques, televiseurs) : demander **ou est
+      le flux** et le lire nativement.
+
+      L'identifiant est tire de l'adresse (watch, youtu.be, embed, shorts,
+      live) ; la reponse du lecteur vient de l'API interne, plusieurs contextes
+      de client essayes a la suite — ceux de television et d'appareil mobile
+      rendent le plus souvent des adresses non signees ; la page de lecture sert
+      de dernier recours. Le format retenu privilegie le **progressif** (image
+      et son dans un fichier, donc ni DASH ni segments), plafonne a 480p : mieux
+      vaut une image fluide en 360p qu'une image saccadee en 1080p.
+
+      Quand l'adresse arrive signee, la fonction de transformation est extraite
+      de `base.js` et **executee dans QuickJS**, dans un contexte neuf et vide —
+      sans `document`, sans `fetch`. La reimplementer serait sans fin : elle
+      change plusieurs fois par mois. Le parametre `n` recoit le meme
+      traitement, sans quoi le flux est servi a debit reduit.
+
+      Sur le DRM, la note precedente etait **fausse** : YouTube ne chiffre pas
+      la lecture ordinaire. Widevine ne concerne que les films loues ou achetes.
+
+      **Ce qui manquait, et qui a ete corrige.** Google lie l'adresse d'un flux
+      au client qui l'a demandee : une adresse obtenue avec le contexte ANDROID
+      puis reclamee avec l'agent du navigateur rend 403. L'extraction etait
+      correcte et la lecture echouait quand meme, sans que rien ne le dise.
+      L'agent du client qui a servi voyage desormais avec les adresses, de
+      `lecteur_youtube` jusqu'a **chaque** tranche telechargee.
+
+      **Preuve d'origine.** Depuis 2024, YouTube reclame un `poToken` de ses
+      clients web ; il se fabrique en executant du code d'attestation que nous
+      ne pouvons pas faire tourner. L'ordre des clients en tient compte :
+      `ANDROID_VR` passe en premier — ni preuve d'origine, ni attestation
+      d'application, adresses non signees — et le web reste en dernier recours.
+      Un refus de ce type est **nomme** dans le journal plutot que confondu avec
+      une panne.
+
+      **Non verifie ici** : la lecture contre le vrai YouTube. La politique
+      reseau du bac a sable de developpement refuse `youtube.com` et
+      `googlevideo.com` (403 sur CONNECT). Tout le reste de la chaine est
+      eprouve avec le reseau substitue — negociation des clients dans l'ordre,
+      en-tetes emis, refus reconnu, bascule, choix du flux, page produite et
+      mise en page.
+- [x] **H.264 lu et joue sur la machine** : verifie sous QEMU sur un flux
+      baseline 480x270 + AAC. Le timecode incruste dans l'image concorde avec
+      `currentTime` — l'image est donc bien calee sur l'horloge audio.
+
+      Un defaut trouve a cette occasion, et corrige : la boucle de decodage
+      s'arretait des que **l'une** des deux files etait pleine. La file d'images
+      se remplissant la premiere, aucun son n'etait decode ; l'horloge, qui est
+      celle du son, ne demarrait jamais ; aucune image n'arrivait a echeance, la
+      file ne se vidait pas. La lecture restait figee sur sa premiere image.
+- [x] **Gros transferts HTTP** : corriges. Deux defauts, tous deux dans la pile,
+      et aucun n'etait la ou la premiere hypothese le placait.
+
+      **Le noyau ne repondait a aucune requete ARP** — il ne faisait qu'en
+      emettre. La passerelle revalide periodiquement son entree ; sans reponse,
+      elle l'oublie et cesse de router vers nous. Un court transfert se termine
+      avant l'echeance, un long non : la difference de taille etait en realite
+      une difference de duree. `poll_ip` sert desormais l'ARP avant tout le
+      reste, et examine jusqu'a trente-deux trames par passage au lieu d'une.
+
+      **`connect` n'emettait qu'un seul SYN.** Le premier paquet vers un hote
+      inconnu part souvent avant que son adresse materielle soit resolue : il se
+      perd, et sans retransmission la connexion echouait — en rendant
+      « connexion refusee », ce qui egarait le diagnostic. Le navigateur y
+      echappait sans le savoir, commencant toujours par une requete DNS qui
+      resolvait l'ARP au passage. Le SYN est retransmis jusqu'a cinq fois, un
+      RST restant une fin de non-recevoir immediate.
+
+      Le tampon de reordonnancement passe de seize a soixante-quatre segments :
+      il doit couvrir une fenetre entiere en vol.
+
+      Mesure, depuis un miroir public : 64 octets en 165 ms, 512 Ko en 226 ms,
+      **1 808 488 octets d'une traite en 285 ms**. Et depuis le navigateur, par
+      `XMLHttpRequest`, une tranche de 512 Ko avec le statut 206.
+- [x] **`fetch` et `XMLHttpRequest` rendent le corps** : ils recevaient la page
+      d'habillage que le moteur fabrique pour ce qu'il ne sait pas afficher.
+      Utile pour ouvrir un fichier texte dans une fenetre, desastreux pour un
+      script qui recupere du JSON — et c'est precisement ce que fait l'API de
+      YouTube.
+- [ ] **Ce qui manque encore pour l'interface de YouTube elle-meme** : `canvas`
+      et Web Components. Sans objet pour la lecture — la page de lecture batie
+      ici s'en passe — mais necessaire si l'on voulait un jour afficher leur
+      site plutot que le flux.
+- [x] **pywebview tourne sur la machine** : la bibliotheque est embarquee telle
+      quelle avec un moteur d'affichage ecrit pour l'OS
+      (`tools/userland/navigateur/webview_bouchaud.py`, greffe par
+      `greffe-pywebview.sh`). Le code d'un tutoriel pywebview s'execute sans
+      modification. Sans JavaScript (`evaluate_js` leve), et sans les
+      applications a fichiers locaux, qui passent par le serveur HTTP interne.
+- [x] **`load_url` depuis le fil de `webview.start()`** : le tutoriel pywebview
+      se deroule maintenant en entier, sans modification. Le fil de travail
+      appelle `load_url`, le fil principal depile la demande a son battement, le
+      moteur resout le nom, ouvre la connexion, recoit la page et la peint ; le
+      fil de travail retrouve `events.loaded`, puis `get_current_url()` et la
+      taille de la fenetre. Le gel etait celui du drapeau d'interruption
+      ci-dessus, pas un defaut du backend.
+- [ ] **Sockets serveur : `listen` / `accept`**. C'est ce qui manque au serveur
+      HTTP interne de pywebview, donc a toute application webview servant des
+      fichiers locaux. Une mise en œuvre limitee au bouclage suffirait : le
+      serveur ecoute sur 127.0.0.1 et le moteur s'y connecte, tout reste dans le
+      noyau sans passer par la carte reseau.
+- [ ] Ecriture persistante : BFS sur peripherique bloc
+
+Commandes associees : `exec`, `elfinfo`, `usermode`, `tasks`, `vmstat`,
+`syscalls`, `strace`, `df`, `poweroff`.
+
 ## Au-dela
-- [ ] Processus et ordonnanceur
-- [ ] Syscalls + split user/kernel
 - [ ] Permissions completes, audit log
 - [ ] Signature du noyau, secure boot
-- [ ] Interface graphique
+- [ ] Multi-CPU (APIC, SMP)

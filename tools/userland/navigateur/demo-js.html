@@ -1,0 +1,119 @@
+<!doctype html>
+<html>
+  <head>
+    <title>JavaScript sur Bouchaud OS</title>
+    <style>
+      body { font-family: sans-serif; margin: 0; background-color: #f4f6fa;
+             color: #1a1f2b }
+      .bandeau { background-color: #12203c; color: #ffffff; padding: 24px 36px }
+      .bandeau h1 { margin: 0; font-size: 30px }
+      .bandeau p { margin: 6px 0 0; color: #a9c4ee }
+      .corps { padding: 22px 36px }
+      h2 { font-size: 20px; margin: 22px 0 8px }
+      .carte { background-color: #ffffff; border-width: 1px;
+               border-color: #d7dde8; padding: 14px 18px; margin: 10px 0 }
+      .compte { color: #0b6b3a; font-weight: bold }
+      .rouge { color: #b3261e }
+      code { font-family: monospace; background-color: #eef1f6 }
+      li { margin: 3px 0 }
+    </style>
+  </head>
+  <body>
+    <div class="bandeau">
+      <h1>Une page qui se construit toute seule</h1>
+      <p>Tout ce qui suit la ligne grise est fabrique par le script de la page.</p>
+    </div>
+    <div class="corps">
+      <div class="carte">
+        <b>Sans JavaScript</b>, il n'y aurait que ce paragraphe : le reste de la
+        page n'existe pas dans le HTML envoye par le serveur.
+      </div>
+
+      <hr>
+
+      <div id="racine"></div>
+    </div>
+
+    <script>
+      // --- Ce que le moteur doit savoir faire pour que cette page s'affiche ---
+      const cible = document.getElementById('racine');
+
+      function ajoute(balise, texte, classe) {
+        const element = document.createElement(balise);
+        if (texte) element.textContent = texte;
+        if (classe) element.className = classe;
+        cible.appendChild(element);
+        return element;
+      }
+
+      ajoute('h2', 'Construit par le script');
+
+      const carte = ajoute('div', null, 'carte');
+      carte.innerHTML =
+        '<b>innerHTML</b> : ce fragment a ete analyse et insere par le script.';
+
+      // Objets, classes, fonctions flechees, gabarits, `reduce`.
+      class Mesure {
+        constructor(nom, valeur) { this.nom = nom; this.valeur = valeur; }
+        get ligne() { return `${this.nom} : ${this.valeur}`; }
+      }
+      const mesures = [
+        new Mesure('moteur', 'QuickJS'),
+        new Mesure('interprete', 'CPython 3.12'),
+        new Mesure('surface', 'Qt sur /dev/fb0'),
+        new Mesure('anneau', 'ring 3'),
+      ];
+      const liste = ajoute('ul');
+      mesures.forEach((m) => {
+        const element = document.createElement('li');
+        element.textContent = m.ligne;
+        liste.appendChild(element);
+      });
+
+      const somme = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].reduce((a, b) => a + b, 0);
+      ajoute('p', 'Somme de 1 a 10, calculee en JavaScript : ' + somme);
+
+      // JSON, expressions rationnelles.
+      const donnees = JSON.parse('{"ville": "Paris", "code": 75000}');
+      ajoute('p', `JSON : ${donnees.ville}, ${donnees.code}`);
+      const version = '5.15.13'.match(/^(\d+)\.(\d+)/);
+      ajoute('p', 'Expression rationnelle sur « 5.15.13 » : majeure ' + version[1]
+                  + ', mineure ' + version[2]);
+
+      // --- Minuteries : la preuve que la page reste vivante apres l'analyse ---
+      ajoute('h2', 'Apres le chargement');
+      const compteur = ajoute('p', 'setInterval n\'a pas encore battu.');
+
+      let battements = 0;
+      const minuterie = setInterval(function () {
+        battements += 1;
+        compteur.innerHTML = 'setInterval a battu <span class="compte">'
+                           + battements + '</span> fois.';
+        if (battements >= 5) {
+          clearInterval(minuterie);
+          const fin = ajoute('p', 'clearInterval a bien arrete le compteur.');
+          fin.style.color = '#0b6b3a';
+        }
+      }, 200);
+
+      setTimeout(function () {
+        const tardif = ajoute('div', null, 'carte');
+        tardif.innerHTML = 'Ce bloc est arrive par <code>setTimeout</code>, '
+                         + 'une seconde apres le reste.';
+      }, 1000);
+
+      // --- Evenements et cycle de vie ---
+      document.addEventListener('DOMContentLoaded', function () {
+        ajoute('p', 'DOMContentLoaded : recu.');
+      });
+      window.addEventListener('load', function () {
+        ajoute('p', 'load : recu. La page est complete.');
+      });
+
+      // --- Promesses ---
+      Promise.resolve('resolue').then(function (etat) {
+        ajoute('p', 'Une promesse s\'est ' + etat + '.');
+      });
+    </script>
+  </body>
+</html>

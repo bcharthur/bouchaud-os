@@ -490,7 +490,6 @@ pub(crate) fn draw_menu(mx: i32, my: i32) {
     let icon_colors: &[u32] = &[
         0x28c840, // Terminal
         0xf9ab00, // Fichiers
-        0x1a73e8, // Nautile
         0x00b4d8, // Moniteur
         0x888888, // Calculatrice
         0xff7b72, // Rustpad
@@ -514,7 +513,7 @@ pub(crate) fn draw_menu(mx: i32, my: i32) {
     // Zone vide en haut
     // (optionnel: on pourrait y mettre un logo)
 
-    for (i, item) in MENU.iter().enumerate() {
+    for (i, (item, _kind)) in MENU.iter().enumerate() {
         let iy = myi + MENU_HEADER_H as usize + i * MENU_ITEM_H as usize;
 
         // Séparateur avant Quitter

@@ -317,24 +317,40 @@ impl TcpConn {
         let mut seg = [0u8; 64];
         let mut rb = [0u8; 2048];
 
-        let l = build(&mut seg, &dst, sport, port, isn, 0, SYN, WINDOW, &[]);
-        net::send_ip(dst, 6, &seg[..l]);
-
         let mut their_seq = 0u32;
         let mut ok = false;
-        for _ in 0..8_000_000u32 {
-            if let Some((_, n)) = net::poll_ip(6, Some(dst), &mut rb) {
-                if let Some(h) = parse(&rb[..n]) {
-                    if h.dport == sport {
-                        if h.flags & RST != 0 { return None; }
-                        if h.flags & SYN != 0 && h.flags & ACK != 0 {
-                            their_seq = h.seq;
-                            ok = true;
-                            break;
+        let mut refuse = false;
+
+        // Le SYN est retransmis, comme dans tout TCP. Le premier paquet vers un
+        // hote encore inconnu part souvent alors que son adresse materielle
+        // n'est pas resolue : il se perd, et n'envoyer qu'un seul SYN faisait
+        // echouer toute premiere connexion. Le navigateur y echappait sans le
+        // savoir, parce qu'il commencait toujours par une requete DNS — laquelle
+        // resolvait l'ARP au passage.
+        for tentative in 0..5u32 {
+            let l = build(&mut seg, &dst, sport, port, isn, 0, SYN, WINDOW, &[]);
+            net::send_ip(dst, 6, &seg[..l]);
+
+            // Attente croissante d'une tentative a l'autre, comme le veut la
+            // retransmission exponentielle.
+            let patience = 1_500_000u32.saturating_mul(tentative + 1);
+            for _ in 0..patience {
+                if let Some((_, n)) = net::poll_ip(6, Some(dst), &mut rb) {
+                    if let Some(h) = parse(&rb[..n]) {
+                        if h.dport == sport {
+                            // Un RST est une vraie fin de non-recevoir : inutile
+                            // d'insister, personne n'ecoute sur ce port.
+                            if h.flags & RST != 0 { refuse = true; break; }
+                            if h.flags & SYN != 0 && h.flags & ACK != 0 {
+                                their_seq = h.seq;
+                                ok = true;
+                                break;
+                            }
                         }
                     }
                 }
             }
+            if ok || refuse { break; }
         }
         if !ok { return None; }
 
@@ -391,7 +407,12 @@ impl TcpConn {
     }
 
     // Traite les segments entrants disponibles pendant `budget` iterations.
-    fn pump(&mut self, budget: u32) {
+    /// Fait avancer la connexion : lit les segments disponibles, acquitte, et
+    /// range les donnees dans `rx`.
+    ///
+    /// Publique parce que la couche socket en a besoin : c'est elle qui decide
+    /// combien de temps un `recv` accepte d'attendre.
+    pub fn pump(&mut self, budget: u32) {
         let mut rb = [0u8; 2048];
         let mut seg = [0u8; 64];
         for _ in 0..budget {
@@ -440,9 +461,13 @@ impl TcpConn {
             return;
         }
 
-        // Petit tampon de reordonnancement : suffisant pour les bursts TLS de
-        // Google/QEMU sans transformer ce client en pile TCP complete.
-        if self.ooo.len() >= 16 { return; }
+        // Tampon de reordonnancement. Il doit couvrir une fenetre entiere en
+        // vol : a 65535 octets annonces et 1460 par segment, cela fait
+        // quarante-cinq segments. Le plafond de seize d'origine suffisait aux
+        // rafales d'un echange TLS, mais un transfert soutenu le depassait —
+        // et tout ce qui deborde ici doit etre retransmis, ce qui suffit a
+        // effondrer le debit.
+        if self.ooo.len() >= 64 { return; }
         for p in &self.ooo {
             if p.seq == seq { return; }
         }

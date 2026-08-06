@@ -1,0 +1,74 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Video et son sur Bouchaud OS</title>
+    <style>
+      body { font-family: sans-serif; margin: 0; background-color: #10151f;
+             color: #e8eef7 }
+      .bandeau { padding: 18px 32px; background-color: #16233c }
+      .bandeau h1 { margin: 0; font-size: 24px }
+      .bandeau p { margin: 5px 0 0; color: #9db4d8 }
+      .scene { padding: 18px 32px }
+      .etat { margin: 12px 0 0; color: #9db4d8 }
+      .valeur { color: #ffd479; font-weight: bold }
+      code { font-family: monospace; color: #a8e6c0 }
+    </style>
+  </head>
+  <body>
+    <div class="bandeau">
+      <h1>Une video decodee par libavcodec, en ring 3</h1>
+      <p>Le son sort par le pilote AC'97 ecrit pour cet OS.</p>
+    </div>
+
+    <div class="scene">
+      <video id="film" width="480" height="270">
+        <p>Le lecteur n'a pas pu ouvrir le film.</p>
+      </video>
+      <audio id="musique"></audio>
+
+      <p class="etat" id="etat">Chargement…</p>
+      <p class="etat" id="pistes"></p>
+    </div>
+
+    <script>
+      const film = document.getElementById('film');
+      const musique = document.getElementById('musique');
+      const etat = document.getElementById('etat');
+      const pistes = document.getElementById('pistes');
+
+      film.src = 'demo-media.avi';
+      film.loop = true;
+      musique.src = 'demo-media.wav';
+      musique.loop = true;
+
+      // Ce que le moteur declare savoir lire : la reponse vient de libavcodec.
+      const formats = [
+        ['video/mp4; codecs="avc1.42E01E"', 'H.264 en MP4'],
+        ['video/webm; codecs="vp9"', 'VP9 en WebM'],
+        ['audio/mp4; codecs="mp4a.40.2"', 'AAC'],
+        ['audio/webm; codecs="opus"', 'Opus'],
+      ];
+      pistes.innerHTML = formats
+        .map(([type, nom]) => nom + ' : <span class="valeur">'
+             + (film.canPlayType(type) || 'non') + '</span>')
+        .join(' — ');
+
+      film.play();
+      musique.play();
+
+      function rafraichis() {
+        const seconde = film.currentTime.toFixed(2);
+        etat.innerHTML =
+          'Image <span class="valeur">' + film.videoWidth + '×' + film.videoHeight
+          + '</span> — position <span class="valeur">' + seconde + ' s</span>'
+          + ' — <code>MediaSource</code> : <span class="valeur">'
+          + (typeof MediaSource === 'function' ? 'present' : 'absent') + '</span>'
+          + ' — son : <span class="valeur">'
+          + (musique.paused ? 'en pause' : 'en lecture') + '</span>';
+      }
+
+      setInterval(rafraichis, 200);
+      rafraichis();
+    </script>
+  </body>
+</html>

@@ -20,7 +20,6 @@
 
 extern crate alloc;
 
-use alloc::format;
 use bootloader::{entry_point, BootInfo};
 
 #[macro_use]
@@ -28,7 +27,6 @@ mod macros;
 
 mod app;
 mod arch;
-mod browser;
 mod diag;
 mod drivers;
 mod fs;
@@ -63,7 +61,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     kernel::dmesg::log("vga: text mode initialise");
     kernel::dmesg::log("serial: COM1 initialise (debug QEMU)");
 
-    // 3. Briques architecture (stubs propres en V0.6).
+    // 3. Briques architecture. La pagination par processus doit etre prete
+    //    avant `usermode::init` (appele par `arch::init`) : c'est elle qui
+    //    fournit les frames et le creneau d'adressage du ring 3.
+    kernel::vmm::init();
     arch::x86_64::init();
 
     // Calibre le TSC (cycles -> ms reels) maintenant que IRQ0 fait avancer les
@@ -72,6 +73,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     kernel::timer::calibrate();
 
     // 4. Pilotes et sous-systemes.
+    drivers::keyboard::init();
     kernel::dmesg::log("keyboard: PS/2 AZERTY-FR pilote par IRQ1");
     users::init();
     kernel::dmesg::log("users: base initialisee (root, guest)");
@@ -80,42 +82,31 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     kernel::dmesg::log("ramfs: monte sur /");
     lang::pyweb::install();
     kernel::dmesg::log("pyweb: /dev/web pret, browser.py installe");
+    kernel::sysroot::install();
+    // Archive userland du second disque : c'est ce qui permet d'installer un
+    // programme sans reconstruire le noyau. Le pilote est sonde juste avant,
+    // pour que le journal montre les disques avant ce qu'on en a tire.
+    drivers::ata::probe();
+    fs::tar::mount_data_disk();
+    // Ce que la machine a retenu du demarrage precedent. Vient apres l'archive :
+    // un fichier persistant doit pouvoir remplacer celui que l'archive depose,
+    // pas l'inverse.
+    fs::persistance::monte();
     kernel::process::init();
     kernel::dmesg::log("process: table initialisee (init, desktop, shell)");
+    kernel::dmesg::log("abi: appels systeme POSIX/Linux x86-64 disponibles (ring 3)");
     kernel::dmesg::log("net: loopback lo 127.0.0.1 actif (ping ok); eth0 sans driver");
-    kernel::dmesg::log("disk: pilote disque non active");
     kernel::dmesg::log("shell: initialise");
-    log_nautile_boot_version();
 
     // 5. Banniere d'accueil.
     banner();
 
-    // 6. Boucle interactive.
+    // 6. Mode non interactif : si le disque de donnees a depose un `/autorun`,
+    //    on le joue et la machine s'eteint. Ne rend la main que sans script.
+    kernel::autorun::run_if_present();
+
+    // 7. Boucle interactive.
     shell::run();
-}
-
-/// Journalise aussi sur COM1 la version Nautile compilee dans l'image de boot.
-///
-/// La banniere VGA affiche deja ces informations, mais `boot.ps1` remonte surtout
-/// la sortie serie QEMU dans la console hote. Ces lignes rendent donc la revision
-/// Nautile verifiable sans ouvrir l'ecran VGA.
-fn log_nautile_boot_version() {
-    let merge = format!(
-        "nautile: merge compile {} ({})",
-        browser::NAUTILE_MERGE_SHORT,
-        browser::NAUTILE_MERGE_DATE
-    );
-    kernel::dmesg::log(&merge);
-
-    let source = format!(
-        "nautile: source compilee {} ({})",
-        browser::NAUTILE_SOURCE_SHORT,
-        browser::NAUTILE_SOURCE_DATE
-    );
-    kernel::dmesg::log(&source);
-
-    let reference = format!("nautile: ref {}", browser::NAUTILE_MERGE_SUBJECT);
-    kernel::dmesg::log(&reference);
 }
 
 /// Affiche la banniere d'accueil de Bouchaud OS.
@@ -125,17 +116,6 @@ fn banner() {
     println!("Bouchaud OS");
     vga::set_color(COLOR_DEFAULT);
     println!("Version: {} - kernel foundation", VERSION);
-    println!(
-        "Nautile: merge {} ({})",
-        browser::NAUTILE_MERGE_SHORT,
-        browser::NAUTILE_MERGE_DATE
-    );
-    println!(
-        "Nautile source: {} ({})",
-        browser::NAUTILE_SOURCE_SHORT,
-        browser::NAUTILE_SOURCE_DATE
-    );
-    println!("Nautile ref: {}", browser::NAUTILE_MERGE_SUBJECT);
     println!("Clavier: AZERTY-FR");
     println!("Shell: Unix-like CLI");
     println!("FS: RAMFS");

@@ -159,6 +159,29 @@ pub fn find_display() -> Option<PciDevice> {
     None
 }
 
+/// Cherche le premier peripherique audio PCI (classe 0x04, sous-classe 0x01).
+///
+/// C'est ainsi que se declarent aussi bien l'AC'97 d'Intel que l'ES1370
+/// d'Ensoniq ; le pilote verifie ensuite qu'il sait parler a celui qu'il a
+/// trouve.
+pub fn find_audio() -> Option<PciDevice> {
+    for slot in 0..32u8 {
+        for func in 0..8u8 {
+            if let Some(d) = read_device(0, slot, func) {
+                if d.class == 0x04 && (d.subclass == 0x01 || d.subclass == 0x03) {
+                    return Some(d);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Ligne d'interruption affectee au peripherique (registre 0x3C).
+pub fn interrupt_line(d: &PciDevice) -> u8 {
+    (config_read32(d.bus, d.slot, d.func, 0x3C) & 0xFF) as u8
+}
+
 /// Cherche la premiere carte reseau PCI presente.
 pub fn find_network() -> Option<PciDevice> {
     for slot in 0..32u8 {

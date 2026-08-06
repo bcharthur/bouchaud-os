@@ -13,6 +13,65 @@ static mut QUEUE: [u8; QUEUE_SIZE] = [0; QUEUE_SIZE];
 static mut Q_HEAD: usize = 0;
 static mut Q_TAIL: usize = 0;
 
+/// Prepare le controleur 8042 pour le clavier.
+///
+/// Deux choses indispensables, et une seule est evidente.
+///
+/// L'evidente : reactiver l'interface clavier et l'IRQ1 dans la configuration
+/// du controleur, au cas ou le BIOS les aurait laissees fermees.
+///
+/// La moins evidente : **vider le tampon de sortie du controleur**. Le 8042
+/// n'emet une nouvelle IRQ1 que lorsque son tampon a ete lu. Si le BIOS y
+/// laisse un octet — un accuse de commande, une reponse d'autotest — et que
+/// personne ne le lit, le controleur reste bloque sur cet octet : plus aucune
+/// touche n'arrivera jamais, alors que tout le reste du systeme fonctionne.
+/// Que cet octet soit present ou non depend du chemin exact suivi par le BIOS,
+/// ce qui rend la panne intermittente d'un demarrage a l'autre.
+pub fn init() {
+    use crate::arch::x86_64::ports::{inb, outb};
+    unsafe {
+        // 1. Vide le tampon de sortie (borne : on ne boucle pas sur un
+        //    controleur absent ou defaillant).
+        for _ in 0..64 {
+            if inb(0x64) & 0x01 == 0 {
+                break;
+            }
+            let _ = inb(0x60);
+        }
+
+        // 2. Reactive l'interface clavier.
+        outb(0x64, 0xAE);
+
+        // 3. Relit la configuration et s'assure que l'IRQ1 est active et que
+        //    l'horloge du clavier n'est pas coupee.
+        outb(0x64, 0x20);
+        let mut waited = 0;
+        while inb(0x64) & 0x01 == 0 && waited < 100_000 {
+            waited += 1;
+        }
+        if inb(0x64) & 0x01 != 0 {
+            let mut config = inb(0x60);
+            config |= 0x01; // IRQ1 active
+            config &= !0x10; // horloge clavier active
+            outb(0x64, 0x60);
+            let mut waited = 0;
+            while inb(0x64) & 0x02 != 0 && waited < 100_000 {
+                waited += 1;
+            }
+            outb(0x60, config);
+        }
+
+        // 4. Un dernier octet a pu arriver pendant la reconfiguration.
+        for _ in 0..8 {
+            if inb(0x64) & 0x01 == 0 {
+                break;
+            }
+            let _ = inb(0x60);
+        }
+    }
+    crate::kernel::dmesg::log("keyboard: 8042 purge, interface et IRQ1 actives");
+}
+
 /// Empile un scancode. Appele depuis le gestionnaire d'interruption clavier.
 pub fn push_scancode(sc: u8) {
     unsafe {
@@ -36,6 +95,15 @@ fn pop_scancode() -> Option<u8> {
             Some(sc)
         }
     }
+}
+
+/// Y a-t-il un scancode en attente ? (consultation sans consommation)
+///
+/// Necessaire a `poll`/`select` : signaler qu'un descripteur est lisible ne
+/// doit pas retirer l'evenement de la file, sinon la lecture qui suit ne
+/// trouverait plus rien.
+pub fn has_pending() -> bool {
+    unsafe { core::ptr::read_volatile(&Q_HEAD) != core::ptr::read_volatile(&Q_TAIL) }
 }
 
 /// Lecture non bloquante d'un scancode brut (None si rien). Utile pour le GUI.

@@ -66,6 +66,13 @@ pub fn log(msg: &str) {
     serial_println!("[kernel] {}", msg);
 }
 
+/// Variante formatee de [`log`] (`log_fmt(format_args!("..."))`).
+///
+/// Necessite le tas : a n'utiliser qu'apres `heap::init`.
+pub fn log_fmt(args: core::fmt::Arguments) {
+    log(&alloc::format!("{}", args));
+}
+
 /// Affiche tout le journal noyau (commande `dmesg`).
 pub fn print() {
     unsafe { DMESG.print(); }
