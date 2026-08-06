@@ -54,6 +54,15 @@ def _peint_boite(boite, liste, defilement, largeur_vue, hauteur_vue, zones_liens
         for fragment in boite.lignes:
             _peint_fragment(fragment, liste, defilement, hauteur_vue, zones_liens)
 
+        # Le dessin d'une toile est une liste d'affichage a part entiere,
+        # exprimee dans les coordonnees de la toile : la poser revient a la
+        # decaler et a la rogner a ses bords.
+        if boite.toile:
+            liste.append(("clip", boite.x, haut, boite.largeur, boite.hauteur))
+            for operation in boite.toile:
+                liste.append(_decale(operation, boite.x, haut))
+            liste.append(("declip",))
+
         for x, y_page, l, h, identifiant, lien in boite.images:
             y = y_page - defilement
             if y + h < 0 or y > hauteur_vue:
@@ -107,3 +116,18 @@ def _peint_fragment(fragment, liste, defilement, hauteur_vue, zones_liens):
         largeur = bo.largeur_texte(fragment.texte, taille, gras, fixe)
         zones_liens.append((fragment.x, fragment.y, largeur, fragment.hauteur,
                             fragment.lien))
+
+
+def _decale(operation, dx, dy):
+    """Deplace une operation de toile a l'emplacement de sa boite."""
+    genre = operation[0]
+    if genre == "rect":
+        return (genre, operation[1] + dx, operation[2] + dy) + tuple(operation[3:])
+    if genre == "image":
+        return (genre, operation[1] + dx, operation[2] + dy) + tuple(operation[3:])
+    if genre == "texte":
+        return (genre, operation[1] + dx, operation[2] + dy) + tuple(operation[3:])
+    if genre == "ligne":
+        return (genre, operation[1] + dx, operation[2] + dy,
+                operation[3] + dx, operation[4] + dy) + tuple(operation[5:])
+    return operation

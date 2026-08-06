@@ -241,7 +241,14 @@ class Document:
             self._signature = None
             self.regles = self._regles()
         self.boite, self.hauteur = mise_en_page.construit(
-            self.racine, self.regles, largeur, self.url, self._image_video)
+            self.racine, self.regles, largeur, self.url, self._image_video,
+            self._toile)
+
+    def _toile(self, nœud):
+        """Ce qu'un `<canvas>` a dessine, ou `None` s'il n'a rien dessine."""
+        if self.contexte_js is None:
+            return None
+        return self.contexte_js.toile(nœud)
 
     def _image_video(self, nœud):
         """Image courante d'un `<video>`, ou `None` s'il n'y en a pas encore."""

@@ -1472,6 +1472,296 @@ def verifie_cascade_memorisee():
          round(boite_de(doc, "t").largeur), 250)
 
 
+# --- Web applicatif -----------------------------------------------------------
+
+def verifie_style_calcule():
+    """`getComputedStyle` doit rendre le style resolu, pas l'attribut `style`."""
+    doc = document("""
+        <style>
+          #t { color: #ff0000; width: 300px; }
+          .herite { font-size: 22px; }
+        </style>
+        <body>
+          <div class="herite">
+            <div id="t" style="padding-left: 7px">t</div>
+          </div>
+          <script>
+            const cible = document.getElementById('t');
+            const calcule = getComputedStyle(cible);
+            window.__couleur = calcule.color;
+            window.__largeur = calcule.width;
+            window.__police = calcule.fontSize;
+            window.__marge = calcule.getPropertyValue('padding-left');
+            window.__enLigne = cible.style.color;
+          </script>
+        </body>""")
+    contexte = doc.contexte_js
+    egal("style calcule: la couleur vient de la feuille",
+         contexte.execute("window.__couleur"), "#ff0000")
+    egal("style calcule: la largeur aussi", contexte.execute("window.__largeur"),
+         "300px")
+    egal("style calcule: l'heritage est resolu",
+         contexte.execute("window.__police"), "22px")
+    egal("style calcule: le style en ligne y figure aussi",
+         contexte.execute("window.__marge"), "7px")
+    # Et `element.style` reste ce qu'il est : le seul attribut `style`.
+    egal("style calcule: element.style ne connait que l'attribut",
+         contexte.execute("window.__enLigne"), "")
+
+
+def verifie_observateur_mutations():
+    """`MutationObserver` doit voir les changements de l'arbre."""
+    doc = document("""
+        <body>
+          <div id="cible"><span>un</span></div>
+          <script>
+            window.__lots = [];
+            const observateur = new MutationObserver(function (lot, moi) {
+              window.__lots.push(lot);
+              window.__moi = (moi === observateur);
+            });
+            observateur.observe(document.getElementById('cible'),
+                                { childList: true, attributes: true,
+                                  characterData: true, subtree: true });
+
+            const cible = document.getElementById('cible');
+            cible.appendChild(document.createElement('p'));
+            cible.appendChild(document.createElement('p'));
+            cible.setAttribute('data-etat', 'ouvert');
+
+            // Ce qui se passe hors de la cible ne doit pas etre rapporte.
+            document.body.appendChild(document.createElement('hr'));
+            window.__observateur = observateur;
+          </script>
+        </body>""")
+    contexte = doc.contexte_js
+    # Les enregistrements sont livres en micro-tache : un battement suffit.
+    contexte.tic()
+
+    egal("mutations: un seul lot pour la salve",
+         contexte.execute("window.__lots.length"), 1)
+    egal("mutations: trois enregistrements",
+         contexte.execute("window.__lots[0].length"), 3)
+    egal("mutations: le premier est un ajout",
+         contexte.execute("window.__lots[0][0].type"), "childList")
+    egal("mutations: le nœud ajoute est rapporte",
+         contexte.execute("window.__lots[0][0].addedNodes[0].tagName"), "P")
+    egal("mutations: le changement d'attribut est rapporte",
+         contexte.execute("window.__lots[0][2].type"), "attributes")
+    egal("mutations: avec son nom",
+         contexte.execute("window.__lots[0][2].attributeName"), "data-etat")
+    egal("mutations: l'observateur se recoit lui-meme",
+         contexte.execute("window.__moi"), True)
+
+    # `disconnect` doit reellement debrancher.
+    contexte.execute("""
+        window.__observateur.disconnect();
+        document.getElementById('cible').appendChild(document.createElement('b'));
+    """)
+    contexte.tic()
+    egal("mutations: disconnect debranche", contexte.execute("window.__lots.length"), 1)
+
+
+def verifie_observateur_visibilite():
+    """`IntersectionObserver` doit signaler ce qui entre dans la fenetre."""
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #haut { height: 100px; }
+          #loin { height: 100px; margin-top: 4000px; }
+        </style>
+        <body>
+          <div id="haut">visible</div>
+          <div id="loin">hors ecran</div>
+          <script>
+            window.__vus = [];
+            const observateur = new IntersectionObserver(function (entrees) {
+              for (const entree of entrees)
+                window.__vus.push(entree.target.id + ':' + entree.isIntersecting);
+            });
+            observateur.observe(document.getElementById('haut'));
+            observateur.observe(document.getElementById('loin'));
+          </script>
+        </body>""")
+    contexte = doc.contexte_js
+    contexte.tic()
+    vus = contexte.execute("window.__vus.join(',')")
+    verifie("visibilite: l'element en haut de page est vu",
+            "haut:true" in vus, vus)
+    verifie("visibilite: celui qui est a 4000 px ne l'est pas",
+            "loin:true" not in vus, vus)
+
+    # Un defilement le fait entrer : c'est tout l'interet de l'observateur.
+    doc.defilement = 4000.0
+    contexte.tic()
+    vus = contexte.execute("window.__vus.join(',')")
+    verifie("visibilite: le defilement le fait entrer", "loin:true" in vus, vus)
+
+
+def verifie_composants():
+    """Un composant declare doit etre instancie, connecte, et s'afficher."""
+    doc = document("""
+        <body>
+          <mon-titre texte="premier"></mon-titre>
+          <script>
+            window.__trace = [];
+            class MonTitre extends HTMLElement {
+              static get observedAttributes() { return ['texte']; }
+              constructor() {
+                super();
+                window.__trace.push('construit');
+              }
+              connectedCallback() {
+                window.__trace.push('connecte');
+                this.textContent = 'Titre : ' + (this.getAttribute('texte') || '');
+              }
+              disconnectedCallback() { window.__trace.push('deconnecte'); }
+              attributeChangedCallback(nom, ancienne, nouvelle) {
+                window.__trace.push('attribut:' + nom + '=' + nouvelle);
+              }
+              salue() { return 'bonjour'; }
+            }
+            customElements.define('mon-titre', MonTitre);
+            window.__classe = (customElements.get('mon-titre') === MonTitre);
+            window.__instance = (document.querySelector('mon-titre') instanceof MonTitre);
+            window.__methode = document.querySelector('mon-titre').salue();
+
+            // Un element cree apres coup doit l'etre aussi.
+            const second = document.createElement('mon-titre');
+            second.setAttribute('texte', 'second');
+            document.body.appendChild(second);
+            window.__second = (second instanceof MonTitre);
+          </script>
+        </body>""")
+    contexte = doc.contexte_js
+    egal("composants: la classe est retrouvee", contexte.execute("window.__classe"), True)
+    egal("composants: l'element existant est instancie",
+         contexte.execute("window.__instance"), True)
+    egal("composants: ses methodes sont la",
+         contexte.execute("window.__methode"), "bonjour")
+    egal("composants: un element cree apres coup l'est aussi",
+         contexte.execute("window.__second"), True)
+
+    trace = contexte.execute("window.__trace.join(',')")
+    verifie("composants: le constructeur a tourne", "construit" in trace, trace)
+    verifie("composants: connectedCallback aussi", "connecte" in trace, trace)
+    verifie("composants: attributeChangedCallback aussi",
+            "attribut:texte=second" in trace, trace)
+
+    # Et le contenu pose par le composant est reellement mis en page.
+    textes = [e[3] for e in doc.liste_affichage(0, 1000, 700) if e[0] == "texte"]
+    verifie("composants: le contenu s'affiche",
+            any("Titre : premier" in t for t in textes), textes[:8])
+
+    # Le retrait doit declencher `disconnectedCallback`.
+    contexte.execute("document.querySelector('mon-titre').remove();")
+    verifie("composants: disconnectedCallback",
+            "deconnecte" in contexte.execute("window.__trace.join(',')"))
+
+    # Un nom sans tiret n'est pas un nom de composant.
+    egal("composants: un nom sans tiret est refuse", contexte.execute("""
+        (function () {
+          try { customElements.define('simple', class extends HTMLElement {}); return 'accepte'; }
+          catch (e) { return 'refuse'; }
+        })()"""), "refuse")
+
+
+def verifie_ombre():
+    """Une racine d'ombre doit porter du contenu, et ce contenu doit s'afficher."""
+    doc = document("""
+        <body>
+          <ma-carte></ma-carte>
+          <script>
+            class MaCarte extends HTMLElement {
+              connectedCallback() {
+                const ombre = this.attachShadow({ mode: 'open' });
+                ombre.innerHTML = '<p class="dedans">contenu d ombre</p>';
+              }
+            }
+            customElements.define('ma-carte', MaCarte);
+            const carte = document.querySelector('ma-carte');
+            window.__mode = carte.shadowRoot.mode;
+            window.__hote = (carte.shadowRoot.host === carte);
+            window.__trouve = carte.shadowRoot.querySelector('.dedans') !== null;
+          </script>
+        </body>""")
+    contexte = doc.contexte_js
+    egal("ombre: le mode est retenu", contexte.execute("window.__mode"), "open")
+    egal("ombre: l'hote est retrouve", contexte.execute("window.__hote"), True)
+    egal("ombre: on y cherche par selecteur", contexte.execute("window.__trouve"), True)
+
+    textes = [e[3] for e in doc.liste_affichage(0, 1000, 700) if e[0] == "texte"]
+    verifie("ombre: son contenu s'affiche",
+            any("contenu d ombre" in t for t in textes), textes[:8])
+
+
+def verifie_toile():
+    """Ce qu'un contexte 2D dessine doit se retrouver dans la liste d'affichage."""
+    doc = document("""
+        <body>
+          <canvas id="dessin" width="200" height="120"></canvas>
+          <script>
+            const ctx = document.getElementById('dessin').getContext('2d');
+            ctx.fillStyle = '#ff0000';
+            ctx.fillRect(10, 20, 50, 30);
+            ctx.strokeStyle = '#0000ff';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(100, 60);
+            ctx.stroke();
+            ctx.fillStyle = '#008000';
+            ctx.font = 'bold 14px sans-serif';
+            ctx.fillText('etiquette', 5, 100);
+            window.__mesure = ctx.measureText('etiquette').width;
+          </script>
+        </body>""")
+    contexte = doc.contexte_js
+    # Les operations partent en micro-tache : un battement les livre.
+    contexte.tic()
+    doc.rafraichis()
+
+    boite = boite_de(doc, "dessin")
+    verifie("toile: la boite a la taille declaree",
+            proche(boite.largeur, 200.0) and proche(boite.hauteur, 120.0),
+            (boite.largeur, boite.hauteur))
+    verifie("toile: les operations sont retenues", boite.toile is not None
+            and len(boite.toile) >= 3, boite.toile)
+
+    liste = doc.liste_affichage(0, 1000, 700)
+    rectangles = [e for e in liste if e[0] == "rect" and e[5] == 0xFFFF0000]
+    verifie("toile: le rectangle rouge est peint", len(rectangles) == 1, len(rectangles))
+    if rectangles:
+        _, x, y, l, h, _ = rectangles[0]
+        verifie("toile: il est decale a l'emplacement de la toile",
+                proche(x, boite.x + 10) and proche(l, 50.0) and proche(h, 30.0),
+                (x, boite.x, l, h))
+
+    lignes = [e for e in liste if e[0] == "ligne"]
+    verifie("toile: la ligne est peinte", len(lignes) >= 1, len(lignes))
+    textes = [e[3] for e in liste if e[0] == "texte"]
+    verifie("toile: le texte dessine est peint", "etiquette" in textes, textes[:6])
+
+    verifie("toile: measureText mesure sur la vraie fonte",
+            contexte.execute("window.__mesure") > 0,
+            contexte.execute("window.__mesure"))
+
+    # Le rognage encadre le dessin : ce qui deborde de la toile ne doit pas
+    # peindre le reste de la page.
+    operations = [e[0] for e in liste]
+    egal("toile: autant de clip que de declip",
+         operations.count("clip"), operations.count("declip"))
+
+    # Effacer toute la toile repart de rien.
+    contexte.execute("""
+        const c = document.getElementById('dessin').getContext('2d');
+        c.clearRect(0, 0, 200, 120);
+    """)
+    contexte.tic()
+    doc.rafraichis()
+    egal("toile: clearRect repart de rien", boite_de(doc, "dessin").toile, [])
+
+
 def verifie_bac_a_sable():
     """Une page ne doit pas pouvoir atteindre le systeme."""
     doc = document("<body></body>")
@@ -1537,6 +1827,12 @@ def principal():
         verifie_index_regles,
         verifie_enfant_direct,
         verifie_cascade_memorisee,
+        verifie_style_calcule,
+        verifie_observateur_mutations,
+        verifie_observateur_visibilite,
+        verifie_composants,
+        verifie_ombre,
+        verifie_toile,
         verifie_flex,
         verifie_grille,
         verifie_position,

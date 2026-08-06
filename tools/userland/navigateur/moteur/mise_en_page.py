@@ -24,7 +24,7 @@ class Boite:
 
     __slots__ = ("element", "style", "x", "y", "largeur", "hauteur",
                  "enfants", "lignes", "lien", "puce", "images",
-                 "hors_flux", "rogne")
+                 "hors_flux", "rogne", "toile")
 
     def __init__(self, element, style):
         self.element = element
@@ -45,6 +45,8 @@ class Boite:
         self.hors_flux = []
         # `overflow: hidden`/`auto`/`scroll` : la peinture y rognera.
         self.rogne = False
+        # Operations dessinees par un contexte 2D, si c'est un `<canvas>`.
+        self.toile = None
 
 
 class Fragment:
@@ -88,18 +90,21 @@ def _longueur(style, propriete, reference, taille):
 class Contexte:
     """Ce qui ne change pas d'une boite a l'autre pendant une mise en page."""
 
-    def __init__(self, regles, largeur_page, url="", image_video=None):
+    def __init__(self, regles, largeur_page, url="", image_video=None,
+                 toile=None):
         self.regles = regles
         self.largeur_page = largeur_page
         # Adresse de la page : les `src` relatifs des images s'y resolvent.
         self.url = url
         # Rappel qui rend l'image courante d'un `<video>`, ou `None`.
         self.image_video = image_video
+        # Rappel qui rend ce qu'un `<canvas>` a dessine, ou `None`.
+        self.toile = toile
 
 
-def construit(racine, regles, largeur_page, url="", image_video=None):
+def construit(racine, regles, largeur_page, url="", image_video=None, toile=None):
     """Construit l'arbre de boites et rend (racine, hauteur totale)."""
-    contexte = Contexte(regles, largeur_page, url, image_video)
+    contexte = Contexte(regles, largeur_page, url, image_video, toile)
     style_initial = {
         "color": "#202124", "font-size": "16px", "line-height": "1.5",
         "display": "block",
@@ -230,6 +235,7 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None
     del boite.lignes[:]
     del boite.images[:]
     del boite.hors_flux[:]
+    boite.toile = None
 
     marge_g = _longueur(style, "margin-left", largeur_disponible, taille)
     marge_d = _longueur(style, "margin-right", largeur_disponible, taille)
@@ -267,6 +273,14 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None
 
     boite.rogne = style.get("overflow", "visible") in ("hidden", "auto", "scroll") \
         or style.get("overflow-y", "visible") in ("hidden", "auto", "scroll")
+
+    # Une toile est une boite de taille declaree qui porte un dessin, pas du
+    # contenu : ses enfants sont le repli qu'on montre a qui ne sait pas la
+    # dessiner, et nous savons.
+    if isinstance(boite.element, Element) and boite.element.balise == "canvas":
+        _dispose_toile(boite, style, taille, curseur, pad_b, bordure,
+                       interieur_l, contexte)
+        return
 
     mode = style.get("display", "block")
     if mode in ("flex", "inline-flex", "grid", "inline-grid"):
@@ -333,6 +347,39 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None
     vide_en_attente()
     _termine_bloc(boite, style, curseur, pad_b, bordure, taille, interieur_l)
     _pose_hors_flux(boite, contexte)
+
+
+def _dispose_toile(boite, style, taille, curseur, pad_b, bordure, reference,
+                   contexte):
+    """Donne a un `<canvas>` sa taille et le dessin qu'il porte.
+
+    La taille vient des attributs `width`/`height`, comme le veut la norme —
+    ce sont les dimensions du dessin, pas de l'affichage. Une regle CSS peut
+    les remplacer, et c'est alors elle qui gagne.
+    """
+    attributs = boite.element.attributs
+    largeur = _entier(attributs.get("width"), 300.0)
+    hauteur = _entier(attributs.get("height"), 150.0)
+
+    imposee = css.longueur(style.get("width", "auto"), reference, taille)
+    if imposee is not None and imposee > 0:
+        largeur = imposee
+    boite.largeur = max(0.0, min(largeur, boite.largeur) if imposee is None else largeur)
+
+    hauteur_css = css.longueur(style.get("height", "auto"), 0.0, taille)
+    if hauteur_css is not None and hauteur_css > 0:
+        hauteur = hauteur_css
+    boite.hauteur = max(0.0, (curseur - boite.y) + hauteur + pad_b + bordure)
+
+    rappel = getattr(contexte, "toile", None)
+    boite.toile = rappel(boite.element) if rappel else None
+
+
+def _entier(valeur, defaut):
+    try:
+        return float(str(valeur).strip())
+    except (TypeError, ValueError, AttributeError):
+        return defaut
 
 
 def _termine_bloc(boite, style, curseur, pad_b, bordure, taille, reference):

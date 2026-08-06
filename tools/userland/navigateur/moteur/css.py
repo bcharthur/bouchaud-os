@@ -720,6 +720,12 @@ body { margin: 8px; background-color: #ffffff; }
 div, p, section, article, header, footer, nav, main, aside, figure,
 form, fieldset, blockquote, pre, ul, ol, dl, dd, dt, li, table, tr,
 h1, h2, h3, h4, h5, h6, hr, address, details, summary { display: block; }
+/* `bo-ombre` porte le contenu d'une racine d'ombre, `bo-fragment` celui d'un
+   fragment de document. Ni l'un ni l'autre n'existe dans le HTML : ce sont des
+   supports que le prelude fabrique, et ils doivent se comporter comme la boite
+   transparente qu'ils representent. Sans cette regle, ils seraient en ligne et
+   le contenu d'un composant s'afficherait a la suite du texte voisin. */
+bo-ombre, bo-fragment, canvas { display: block; }
 head, script, style, title, meta, link, noscript, template { display: none; }
 span, a, b, i, em, strong, small, code, label, abbr, cite, q, sub, sup,
 time, mark, u, s, br, img, input, button, select, textarea { display: inline; }

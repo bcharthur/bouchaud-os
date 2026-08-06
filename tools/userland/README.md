@@ -477,6 +477,11 @@ vraie fonte · **disposition flexible** (base, `grow`/`shrink`, `wrap`,
 `position: absolute`/`fixed` avec `top`/`right`/`bottom`/`left` ·
 `overflow: hidden` réellement rogné · listes, texte préformaté · **JavaScript**
 (QuickJS : DOM, événements à trois phases, minuteries, promesses, XHR/fetch) ·
+`getComputedStyle` **résolu** — cascade, héritage et style en ligne réunis ·
+`MutationObserver`, `IntersectionObserver`, `ResizeObserver` ·
+**composants** (`customElements.define`, cycle de vie complet, `attachShadow`) ·
+**canvas 2D** (rectangles, chemins, arcs, textes, images, `measureText` sur la
+vraie fonte) ·
 **images** PNG/JPEG/GIF/BMP décodées par Qt · **vidéo et audio** H.264/AAC via
 libavcodec, avec Media Source Extensions et sortie AC'97 · HTTP et HTTPS avec
 redirections et jeux de caractères · `file://` · historique avant/arrière,
@@ -489,9 +494,13 @@ ignorés ; la page s'affiche à son état final, ce qui est presque toujours l'�
 utile. **Variables CSS** — `var()` n'est pas résolu. **Lignes et zones nommées
 de grille** — `grid-template-areas` retombe sur le placement automatique.
 **`order` en flexbox** — les articles restent dans l'ordre du source.
-**Composants web** — pas de Custom Elements ni de Shadow DOM. **Canvas** — pas
-de contexte 2D. Ce qui manque est listé, avec le reste, dans la feuille de
-route (`docs/ROADMAP.md`).
+**Isolement du DOM d'ombre** — la racine d'ombre porte et affiche son contenu,
+mais les sélecteurs de la page l'atteignent, et `:host` comme `<slot>` ne sont
+pas interprétés. **Pixels de canvas** — `getImageData`, les dégradés et les
+ombres demanderaient un vrai tampon, que l'hôte ne prête pas ; le reste du
+contexte 2D est enregistré et peint. **Modules ES** — `<script type="module">`
+est exécuté comme un script ordinaire, `import` n'est pas résolu. Ce qui manque
+est listé, avec le reste, dans la feuille de route (`docs/ROADMAP.md`).
 
 ### Ce qui le rend rapide
 

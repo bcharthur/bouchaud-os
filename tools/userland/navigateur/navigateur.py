@@ -200,6 +200,10 @@ class Navigateur:
             return
         maximum = max(0.0, document.hauteur - self.hauteur_vue + 40)
         self.onglet.defilement = min(maximum, max(0.0, self.onglet.defilement + pixels))
+        # Le document connait sa position : c'est ce que lisent
+        # `IntersectionObserver` et `window.scrollY`, et c'est ce qui fait
+        # qu'une image se charge quand elle arrive a l'ecran.
+        document.defilement = self.onglet.defilement
 
     # --- Peinture -----------------------------------------------------------
 

@@ -33,7 +33,7 @@ import urllib.parse
 import bo
 import bojs
 
-from . import html, reseau
+from . import css, html, reseau
 
 # Types de nœuds, comme dans la norme DOM.
 ELEMENT = 1
@@ -235,6 +235,7 @@ class Contexte:
         self._minuteries = {}      # identifiant -> (echeance, delai, repete)
         self._reponses = []        # (identifiant, reponse) a livrer au battement
         self._lecteurs = {}        # identifiant de nœud -> Lecteur
+        self._toiles = {}          # element <canvas> -> operations dessinees
         self._sources_mse = {}     # identifiant MediaSource -> Lecteur
         self._types_mse = {}       # identifiant MediaSource -> type MIME
         self._segments_mse = {}    # segments recus avant rattachement
@@ -304,6 +305,13 @@ class Contexte:
                     self._appelle("__bo_media", [identifiant, "ended"])
             except Exception as e:  # noqa: BLE001
                 self.journal("warn", "media: %s" % e)
+
+        # Les observateurs de geometrie s'examinent apres la mise en page, pas
+        # avant : les boites qu'ils lisent sont celles du dernier passage, et un
+        # element cree a l'instant n'en a pas encore.
+        if self.document.boite is not None:
+            self._appelle("__bo_guette", [])
+            self._appelle("__bo_redimensionne", [])
 
         try:
             bojs.pompe(self._contexte)
@@ -614,6 +622,83 @@ class Contexte:
         return {"x": boite.x, "y": boite.y,
                 "width": boite.largeur, "height": boite.hauteur}
 
+    def _op_styleCalcule(self, identifiant):
+        """Le style resolu d'un element : cascade, heritage et style en ligne.
+
+        C'est ce que `getComputedStyle` doit rendre, et ce qui le distingue de
+        `element.style` — lequel ne connait que l'attribut `style`. Une page qui
+        lit une couleur de theme ou une hauteur posee par une feuille recevait
+        jusqu'ici une chaine vide, et se croyait sur une page sans mise en
+        forme.
+
+        La mise en page a deja fait ce calcul : on prend son resultat quand il
+        existe. Un element qui n'a pas de boite — parce qu'il vient d'etre cree,
+        ou parce qu'il est `display: none` — le fait refaire ici, ce qui est le
+        cas rare.
+        """
+        element = self._element(identifiant)
+        if element is None:
+            return {}
+        boite = _boite_de(self.document.boite, element)
+        if boite is not None:
+            return dict(boite.style)
+
+        chemin = []
+        courant = element
+        while courant is not None:
+            chemin.append(courant)
+            courant = courant.parent
+        chemin.reverse()
+
+        # L'heritage se resout de la racine vers l'element : prendre le style du
+        # parent seul ne suffirait pas, puisque lui-meme n'est pas encore
+        # calcule. C'est le chemin entier qu'on rejoue, ce qui reste peu de
+        # travail — un appel isole, sur une lignee de quelques nœuds.
+        style = {}
+        try:
+            for profondeur in range(len(chemin)):
+                style = css.applique(self.document.regles, chemin[profondeur],
+                                     chemin[:profondeur + 1], style)
+        except Exception:  # noqa: BLE001
+            return {}
+        return dict(style)
+
+    def _op_largeurTexte(self, texte, taille, gras=False, fixe=False):
+        """Largeur d'un texte dans la fonte reelle, pour `measureText`."""
+        try:
+            return float(bo.largeur_texte(str(texte), float(taille),
+                                          bool(gras), bool(fixe)))
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    def _op_toile(self, identifiant, operations):
+        """Retient ce qu'un contexte 2D a dessine, pour la prochaine peinture.
+
+        Les operations arrivent dans le vocabulaire de la liste d'affichage —
+        rectangles, lignes, textes, images — a ceci pres que les couleurs y sont
+        encore des chaines CSS. On les traduit ici, une fois, plutot qu'a chaque
+        trame peinte.
+        """
+        element = self._element(identifiant)
+        if element is None:
+            return False
+        traduites = []
+        for operation in operations or []:
+            traduite = _operation_toile(operation)
+            if traduite is not None:
+                traduites.append(traduite)
+        self._toiles[element] = traduites
+        self.sale = True
+        return True
+
+    def toile(self, element):
+        """Les operations dessinees sur cette toile, ou `None`."""
+        return self._toiles.get(element)
+
+    def _op_defilement(self):
+        """Position de defilement de la page, en pixels."""
+        return float(getattr(self.document, "defilement", 0.0) or 0.0)
+
     # --- Operations : environnement -------------------------------------------
 
     def _op_titre(self):
@@ -922,3 +1007,40 @@ def _boite_de(boite, element):
 def _chemin_prelude():
     import os
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "prelude.js")
+
+
+def _operation_toile(operation):
+    """Traduit une operation de toile en element de liste d'affichage.
+
+    Les couleurs arrivent en CSS et repartent en entier ARGB ; une operation
+    mal formee est ecartee plutot que de faire tomber la peinture, parce que
+    c'est du JavaScript de page qui l'a produite.
+    """
+    try:
+        genre = operation[0]
+        if genre == "rect":
+            _, x, y, l, h, teinte = operation
+            couleur = css.couleur(str(teinte))
+            if couleur is None:
+                return None
+            return ("rect", float(x), float(y), float(l), float(h), couleur)
+        if genre == "ligne":
+            _, x1, y1, x2, y2, epaisseur, teinte = operation
+            couleur = css.couleur(str(teinte))
+            if couleur is None:
+                return None
+            return ("ligne", float(x1), float(y1), float(x2), float(y2),
+                    float(epaisseur), couleur)
+        if genre == "texte":
+            _, x, y, texte, teinte, taille, gras, italique, fixe = operation
+            couleur = css.couleur(str(teinte))
+            if couleur is None:
+                couleur = 0xFF000000
+            return ("texte", float(x), float(y), str(texte), couleur,
+                    float(taille), bool(gras), bool(italique), bool(fixe), False)
+        if genre == "image":
+            _, x, y, l, h, identifiant = operation
+            return ("image", float(x), float(y), float(l), float(h), int(identifiant))
+    except (TypeError, ValueError, IndexError):
+        return None
+    return None
