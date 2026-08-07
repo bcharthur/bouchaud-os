@@ -104,7 +104,13 @@ ABI_DIR=tools/userland/out-abi-linux
 if [ -x "$ABI_DIR/glibc-probe" ]; then
     info "  + sysroot glibc detecte : la sonde d'ABI dynamique est ajoutee"
     cp -r "$ABI_DIR"/* "$WORK/files/"
+    # La trace est active pour cette sonde et pour elle seule. Le chargeur
+    # dynamique de la glibc ne dit rien quand il s'arrete : sans trace on ne
+    # voit qu'un silence, avec elle on lit l'appel exact qui manque. C'est ce
+    # qui a permis de trouver `rseq`, et c'est ce qui nommera le suivant.
+    echo "strace on" >> "$WORK/files/autorun"
     echo "exec /glibc-probe" >> "$WORK/files/autorun"
+    echo "strace off" >> "$WORK/files/autorun"
 fi
 
 PYTHON_DIR=tools/userland/out-python
