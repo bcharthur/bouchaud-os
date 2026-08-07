@@ -12,21 +12,24 @@ pub(crate) const MENU_ITEM_H: i32 = 22;    // hauteur d'un item du menu Démarre
 pub(crate) const MENU_HEADER_H: i32 = 8;   // zone vide en haut du menu
 pub(crate) const MENU_W: i32 = 178;        // largeur du menu Démarrer
 
+/// `kind` du navigateur. Il ne fabrique pas une fenetre : le navigateur vit en
+/// ring 3 (`tools/userland/navigateur/`) et prend l'ecran entier par Qt. Le
+/// gestionnaire de fenetres rend donc la main au binaire, puis la reprend.
+pub(crate) const KIND_NAVIGATEUR: usize = 6;
+
 /// Entrees du menu Demarrer : (libelle, `kind` passe a `make_app`).
 ///
 /// Le `kind` est explicite et non deduit de la position : retirer une entree ne
 /// doit pas decaler silencieusement les autres vers la mauvaise application.
-///
-/// Le navigateur n'y figure plus : il ne vit plus dans le noyau mais en ring 3
-/// (`tools/userland/navigateur/`), et prend l'ecran entier par Qt. On le lance
-/// depuis le shell, par `exec /bo-navigateur`.
-pub(crate) const MENU: [(&str, usize); 6] = [
+pub(crate) const MENU: [(&str, usize); 7] = [
+    ("Navigateur", KIND_NAVIGATEUR),
     ("Terminal", 0), ("Fichiers", 1), ("Moniteur", 3),
     ("Calculatrice", 4), ("Rustpad", 5), ("Quitter", usize::MAX),
 ];
 
 /// Icones du bureau : (libelle, kind). Cliquables pour lancer l'application.
-pub(crate) const ICONS: [(&str, usize); 4] = [
+pub(crate) const ICONS: [(&str, usize); 5] = [
+    ("Navigateur", KIND_NAVIGATEUR),
     ("Calculatrice", 4), ("Terminal", 0), ("Fichiers", 1), ("Rustpad", 5),
 ];
 

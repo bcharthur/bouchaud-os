@@ -1213,6 +1213,41 @@ def verifie_ordre_et_zones():
     egal("grille: une zone haute s'etend", boites["b"], (2, 0, 1, 2))
 
 
+def verifie_regles_arobase():
+    """Les regles @ groupent ou conditionnent ; aucune ne doit avaler sa voisine."""
+    def classes(feuille):
+        return [m.classes[0] for r in css.analyse(feuille)
+                for m in r.selecteur.maillons if m.classes]
+
+    # Une regle @ sans bloc se termine par un point-virgule. Ne pas la
+    # reconnaitre collait son texte au selecteur suivant, et la regle d'apres
+    # etait perdue : un `@import` en tete de feuille emportait la premiere.
+    egal("arobase: @import n'avale plus la suivante",
+         classes('@import url("a.css");\n.foo { color: red }'), ["foo"])
+    egal("arobase: @charset non plus",
+         classes('@charset "utf-8";\n.foo { color: red }'), ["foo"])
+    egal("arobase: @layer declaratif",
+         classes('@layer base, composants;\n.bar { color: blue }'), ["bar"])
+
+    # `@layer` avec bloc : les cadres CSS recents y rangent toute leur feuille.
+    # La sauter revenait a afficher la page sans style du tout.
+    egal("arobase: @layer garde son contenu",
+         classes('@layer base { .baz { color: green } }'), ["baz"])
+    egal("arobase: @supports garde le sien",
+         classes('@supports (display: grid) { .qux { color: teal } }'), ["qux"])
+    egal("arobase: @container aussi",
+         classes('@container (min-width: 10px) { .c { color: teal } }'), ["c"])
+
+    # Celles qu'on ne sait pas rendre sont sautees — bloc imbrique compris —
+    # sans emporter ce qui suit.
+    egal("arobase: @keyframes saute sans mordre",
+         classes('@keyframes a { from { opacity: 0 } to { opacity: 1 } }'
+                 '\n.apres { color: pink }'), ["apres"])
+    egal("arobase: @font-face de meme",
+         classes('@font-face { font-family: x; src: url(y) }\n.ok { color: gray }'),
+         ["ok"])
+
+
 # --- Disposition --------------------------------------------------------------
 
 def boite_de(doc, identifiant):
@@ -2710,6 +2745,7 @@ def principal():
         verifie_transformations,
         verifie_collant,
         verifie_ordre_et_zones,
+        verifie_regles_arobase,
         verifie_pseudo_elements,
         verifie_requetes_media,
         verifie_longueurs,

@@ -1101,6 +1101,13 @@ def bordures(style, reference=0.0, taille_police=16.0):
     return resultat
 
 
+# Regles @ que l'on traverse : elles groupent des regles sans conditionner ce
+# que le moteur sait faire. `@layer` est la plus importante — les cadres CSS
+# recents y rangent toute leur feuille. `@supports` teste des proprietes dont
+# nous couvrons l'essentiel ; `@container` et `@scope` demanderaient un contexte
+# que la mise en page ne tient pas, et entrer vaut mieux que tout jeter.
+_TRANSPARENTES = ("@layer", "@supports", "@container", "@scope")
+
 _COMMENTAIRE = re.compile(r"/\*.*?\*/", re.S)
 
 
@@ -1116,6 +1123,17 @@ def analyse(source, ordre_depart=0):
         accolade = source.find("{", position)
         if accolade < 0:
             break
+
+        # Une regle @ sans bloc se termine par un point-virgule : `@charset`,
+        # `@import url(…);`, et la forme qui declare l'ordre des couches,
+        # `@layer base, composants;`. Ne pas la reconnaitre collait son texte
+        # au selecteur suivant, et la regle d'apres etait perdue avec elle —
+        # un `@import` en tete de feuille emportait ainsi la premiere regle.
+        point_virgule = source.find(";", position)
+        if 0 <= point_virgule < accolade:
+            position = point_virgule + 1
+            continue
+
         prelude = source[position:accolade].strip()
 
         # Regles @. `@media` est **evaluee** : garder son contenu sans le
@@ -1130,8 +1148,12 @@ def analyse(source, ordre_depart=0):
                 else:
                     position = _saute_bloc(source, accolade)
                 continue
-            if tete.startswith("@supports"):
-                # On sait faire l'essentiel de ce qui s'y teste : on entre.
+            if tete.split("(")[0].split()[0] in _TRANSPARENTES:
+                # Ces regles groupent sans conditionner ce que le moteur sait
+                # faire : on entre, et leur contenu vaut comme s'il etait ecrit
+                # au premier niveau. `@layer` surtout — les cadres CSS recents y
+                # rangent la totalite de leur feuille, et la sauter revenait a
+                # afficher la page sans style du tout.
                 position = accolade + 1
                 continue
             position = _saute_bloc(source, accolade)
