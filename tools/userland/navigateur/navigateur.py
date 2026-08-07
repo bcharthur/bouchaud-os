@@ -14,7 +14,7 @@ import traceback
 
 import bo
 
-from moteur import Document, lecteur_youtube, reseau
+from moteur import Document, distant, lecteur_youtube, reseau
 
 # --- Constantes visuelles ----------------------------------------------------
 
@@ -39,6 +39,7 @@ K_SUPPR = 0x01000007
 K_GAUCHE, K_HAUT, K_DROITE, K_BAS = 0x01000012, 0x01000013, 0x01000014, 0x01000015
 K_PAGE_HAUT, K_PAGE_BAS = 0x01000016, 0x01000017
 K_DEBUT, K_FIN = 0x01000010, 0x01000011
+K_F2 = 0x01000031
 K_F5 = 0x01000034
 K_L, K_Q, K_R = 0x4C, 0x51, 0x52
 
@@ -49,6 +50,10 @@ class Onglet:
         self.position = -1
         self.document = None
         self.defilement = 0.0
+        # Rendu distant : la page n'est plus un arbre mais une image, rendue
+        # par un vrai navigateur sur l'hote. Voir `moteur/distant.py`.
+        self.distant = None
+        self.image_distante = None
 
     @property
     def url(self):
@@ -118,6 +123,9 @@ class Navigateur:
         C'est ce qui fait qu'un `setTimeout` qui modifie le DOM se voit
         reellement a l'ecran, et que `location.href = …` navigue.
         """
+        if self.onglet.distant is not None:
+            self.bat_distant()
+            return
         document = self.onglet.document
         if document is None:
             return
@@ -134,6 +142,12 @@ class Navigateur:
             self.ouvre(demande)
 
     def ouvre(self, url, empiler=True):
+        # `distant:` demande explicitement le rendu deporte. C'est ce qui permet
+        # de le viser depuis la barre d'adresse, sans passer par la bascule.
+        brut = (url or "").strip()
+        if brut.startswith("distant:"):
+            return self.ouvre_distant(
+                reseau.normalise(brut[len("distant:"):], self.onglet.url or None))
         url = reseau.normalise(url, self.onglet.url or None)
         if not url:
             return
@@ -171,12 +185,112 @@ class Navigateur:
                 document.titre, int(document.hauteur),
                 "" if document.url.startswith("https://") else " — connexion en clair")
 
+    # --- Rendu distant --------------------------------------------------------
+
+    def ouvre_distant(self, url):
+        """Ouvre une adresse dans le Chromium deporte. Rend `True` si l'image vient.
+
+        C'est la seule facon d'afficher ce qu'aucun moteur ecrit ici ne rendra :
+        une application qui compile son interface, un lecteur qui pousse ses
+        segments, une page qui dessine en WebGL. La page cesse d'etre un arbre
+        pour devenir une image — on ne peut plus la selectionner ni la chercher,
+        et il faut un hote qui tourne. C'est le marche, et il est explicite.
+        """
+        session = self.onglet.distant
+        if session is None:
+            session = distant.Session(journal=self._journal_js)
+            self.onglet.distant = session
+
+        self.etat = "Rendu distant : %s…" % url
+        bo.redessiner()
+        bo.traiter_evenements()
+
+        if not session.ouvre(url, self.largeur_vue, self.hauteur_vue):
+            self.etat = ("Service de rendu injoignable (%s) — %s"
+                         % (session.service, session.erreur or "sans reponse"))
+            self.onglet.distant = None
+            return False
+
+        self._prend_image()
+        session.etat()
+        self.onglet.defilement = 0.0
+        if self.onglet.document is not None:
+            self.onglet.document.ferme()
+            self.onglet.document = None
+        self.onglet.empile(session.url or url)
+        self.saisie = session.url or url
+        self.curseur_saisie = len(self.saisie)
+        bo.titre("%s — Navigateur (distant)" % (session.titre or url))
+        self.etat = "%s — rendu distant" % (session.titre or url)
+        return True
+
+    def bascule_distant(self):
+        """Passe la page courante du moteur natif au rendu distant, et retour.
+
+        Le choix reste a l'utilisateur, et c'est voulu : le moteur natif donne
+        une page vivante — texte selectionnable, defilement instantane, aucune
+        dependance — la ou le rendu distant donne une image de tout le web. Ni
+        l'un ni l'autre ne remplace l'autre.
+        """
+        url = self.onglet.url
+        if self.onglet.distant is not None:
+            self.onglet.distant = None
+            self.onglet.image_distante = None
+            if url:
+                self.ouvre(url, empiler=False)
+            else:
+                self.etat = "Retour au moteur natif."
+            return
+        if not url:
+            self.etat = "Rien a rendre."
+            return
+        self.ouvre_distant(url)
+
+    def _prend_image(self):
+        """Fait decoder la derniere image recue par l'hote Qt."""
+        session = self.onglet.distant
+        if session is None or not session.octets:
+            self.onglet.image_distante = None
+            return
+        try:
+            self.onglet.image_distante = bo.image(session.octets)
+        except Exception as e:  # noqa: BLE001
+            self._journal_js("warn", "image distante illisible : %s" % e)
+            self.onglet.image_distante = None
+
+    def bat_distant(self):
+        """Redemande l'image si la page distante a bouge.
+
+        Le service ne repond que lorsqu'il a autre chose a montrer : une page
+        immobile ne coute rien, une video se rafraichit d'elle-meme.
+        """
+        session = self.onglet.distant
+        if session is None:
+            return
+        if session.rafraichis():
+            self._prend_image()
+            bo.redessiner()
+
+    def _agit_distant(self, action):
+        """Joue une action sur la page distante et reprend l'image."""
+        if action():
+            self._prend_image()
+            self.onglet.distant.etat()
+            self.saisie = self.onglet.distant.url or self.saisie
+            bo.redessiner()
+
     def recule(self):
+        if self.onglet.distant is not None:
+            self._agit_distant(self.onglet.distant.recule)
+            return
         if self.onglet.peut_reculer():
             self.onglet.position -= 1
             self._recharge_position()
 
     def avance(self):
+        if self.onglet.distant is not None:
+            self._agit_distant(self.onglet.distant.avance)
+            return
         if self.onglet.peut_avancer():
             self.onglet.position += 1
             self._recharge_position()
@@ -195,6 +309,9 @@ class Navigateur:
     # --- Defilement ---------------------------------------------------------
 
     def defile(self, pixels):
+        if self.onglet.distant is not None:
+            self._agit_distant(lambda: self.onglet.distant.defile(int(pixels)))
+            return
         document = self.onglet.document
         if not document:
             return
@@ -218,6 +335,21 @@ class Navigateur:
             document.remet_en_page(self.largeur_vue, self.hauteur_vue)
 
         liste = [("rect", 0, 0, largeur, hauteur, FOND_PAGE)]
+
+        # Rendu distant : il n'y a pas d'arbre a peindre, seulement l'image que
+        # le Chromium de l'hote a produite. Elle est posee telle quelle, calee
+        # en haut de la zone de contenu.
+        if self.onglet.distant is not None:
+            image = self.onglet.image_distante
+            liste.append(("clip", 0, HAUTEUR_CHROME, largeur, self.hauteur_vue))
+            if image is not None:
+                identifiant, image_l, image_h = image
+                liste.append(("image", 0, HAUTEUR_CHROME, image_l, image_h,
+                              identifiant))
+            liste.append(("declip",))
+            self._chrome(liste)
+            self._barre_etat(liste)
+            return liste
 
         if document:
             liste.append(("clip", 0, HAUTEUR_CHROME, largeur, self.hauteur_vue))
@@ -356,12 +488,28 @@ class Navigateur:
             self.recule()
         elif code == K_DROITE:
             self.avance()
+        elif code == K_F2:
+            self.bascule_distant()
+        elif self.onglet.distant is not None:
+            # En rendu distant, ce qui n'est pas un raccourci du navigateur
+            # appartient a la page : elle a ses propres champs et ses propres
+            # raccourcis, et les garder ici les lui volerait.
+            nomme = distant.touche_pour(_nom_de_touche(code))
+            if nomme:
+                self._agit_distant(lambda: self.onglet.distant.touche(nomme))
+            elif texte and texte.isprintable():
+                self._agit_distant(lambda: self.onglet.distant.saisis(texte))
         elif texte in ("/", ":"):
             self.champ_actif = True
             self.saisie = ""
             self.curseur_saisie = 0
 
     def clic(self, x, y):
+        if y >= HAUTEUR_CHROME and self.onglet.distant is not None:
+            self.champ_actif = False
+            page_y = y - HAUTEUR_CHROME
+            self._agit_distant(lambda: self.onglet.distant.clic(x, page_y))
+            return
         if y < HAUTEUR_CHROME:
             for nom, bx, by, bl, bh in self._boutons():
                 if bx <= x <= bx + bl and by <= y <= by + bh:
@@ -371,7 +519,10 @@ class Navigateur:
                     elif nom == "avancer":
                         self.avance()
                     elif nom == "recharger" and self.onglet.url:
-                        self.ouvre(self.onglet.url, empiler=False)
+                        if self.onglet.distant is not None:
+                            self._agit_distant(self.onglet.distant.recharge)
+                        else:
+                            self.ouvre(self.onglet.url, empiler=False)
                     elif nom == "accueil":
                         self.ouvre("bo:accueil")
                     return
@@ -420,6 +571,17 @@ class Navigateur:
     def molette(self, cran):
         # Qt compte en huitiemes de degre ; un cran vaut 120.
         self.defile(-cran / 120.0 * 90.0)
+
+
+def _nom_de_touche(code):
+    """Nom interne d'une touche speciale de Qt, ou `""`."""
+    return {
+        K_ENTREE: "entree", K_RETOUR: "entree", K_EFFACE: "retour",
+        K_SUPPR: "suppr", K_ECHAP: "echap",
+        K_HAUT: "haut", K_BAS: "bas", K_GAUCHE: "gauche", K_DROITE: "droite",
+        K_PAGE_HAUT: "page_haut", K_PAGE_BAS: "page_bas",
+        K_DEBUT: "debut", K_FIN: "fin",
+    }.get(code, "")
 
 
 _navigateur = Navigateur()

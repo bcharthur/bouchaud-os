@@ -239,12 +239,27 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
         }
         FdKind::Socket(_) => crate::kernel::abi::net::sys_recvfrom(fd, buffer, count, 0, 0, 0),
         FdKind::SocketPair(inbox, _) => {
+            // Une lecture bloquante attend que l'autre bout ecrive. Rendre
+            // `EAGAIN` tout de suite, comme on le faisait, obligeait chaque
+            // appelant a boucler lui-meme — et surtout, cela faisait echouer le
+            // premier `recvmsg` d'un dialogue entre deux processus, celui qui
+            // arrive avant que le pair ait eu la main.
+            if inbox.borrow().octets.is_empty() && fd_flags(fd) & O_NONBLOCK == 0 {
+                let echeance = crate::kernel::timer::ticks()
+                    + crate::kernel::timer::ms_to_ticks(2000);
+                while inbox.borrow().octets.is_empty()
+                    && crate::kernel::timer::ticks() < echeance
+                {
+                    task::yield_now();
+                    crate::arch::x86_64::cpu::wait_for_interrupt();
+                }
+            }
             let mut guard = inbox.borrow_mut();
-            if guard.is_empty() {
+            if guard.octets.is_empty() {
                 return -errno::EAGAIN;
             }
-            let len = core::cmp::min(count, guard.len());
-            let data: Vec<u8> = guard.drain(..len).collect();
+            let len = core::cmp::min(count, guard.octets.len());
+            let data: Vec<u8> = guard.octets.drain(..len).collect();
             drop(guard);
             if user_write(buffer, &data) { len as i64 } else { -errno::EFAULT }
         }
@@ -385,7 +400,7 @@ pub fn sys_write(fd: i32, buffer: u64, count: usize) -> i64 {
         FdKind::TimerFd(_) => -errno::EINVAL,
         FdKind::Socket(_) => crate::kernel::abi::net::sys_sendto(fd, buffer, count, 0, 0, 0),
         FdKind::SocketPair(_, outbox) => {
-            outbox.borrow_mut().extend_from_slice(&data);
+            outbox.borrow_mut().octets.extend_from_slice(&data);
             count as i64
         }
         FdKind::Epoll(_) => -errno::EINVAL,
@@ -480,6 +495,32 @@ pub fn sys_pwrite(fd: i32, buffer: u64, count: usize, offset: i64) -> i64 {
 // --- Ouverture / fermeture ---------------------------------------------------
 
 /// `openat` (et `open`, avec `AT_FDCWD`).
+/// `memfd_create` : un fichier anonyme en memoire.
+///
+/// Sans nom dans l'arborescence, mais mappable en `MAP_SHARED` — et c'est tout
+/// l'interet. Un moteur web multi-processus s'en sert pour ses tampons
+/// d'image : le processus qui dessine et celui qui compose voient la meme
+/// memoire physique, sans copie. Le nœud etant anonyme, il disparait quand le
+/// dernier descripteur se ferme.
+pub fn sys_memfd_create(nom_addr: u64, _flags: u32) -> i64 {
+    let nom = match super::user_string(nom_addr) {
+        Some(nom) => nom,
+        None => return -errno::EFAULT,
+    };
+    let idx = match crate::fs::ramfs::fs().cree_anonyme(&nom) {
+        Ok(idx) => idx,
+        Err(_) => return -errno::ENFILE,
+    };
+    let process = task::current_process();
+    let mut borrowed = process.borrow_mut();
+    // `MFD_CLOEXEC` vaut 1 : c'est le seul drapeau que les appelants posent en
+    // pratique, et le respecter evite qu'un tampon fuie dans un `execve`.
+    let mut desc = FileDesc::new(FdKind::File(idx));
+    desc.cloexec = _flags & 1 != 0;
+    let fd = borrowed.files.insert(desc);
+    if fd < 0 { -errno::EMFILE } else { fd as i64 }
+}
+
 pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
     let path = match crate::kernel::abi::resolve_user_path(path_addr) {
         Some(path) => path,
@@ -1334,7 +1375,7 @@ fn set_nonblocking(fd: i32, actif: bool) {
 fn pending_bytes(kind: &FdKind) -> usize {
     match kind {
         FdKind::Pipe(shared, true) => shared.borrow().buffer.len(),
-        FdKind::SocketPair(inbox, _) => inbox.borrow().len(),
+        FdKind::SocketPair(inbox, _) => inbox.borrow().octets.len(),
         _ => 0,
     }
 }
@@ -1530,7 +1571,7 @@ fn readable(fd: i32) -> bool {
             state.expirations > 0
         }
         FdKind::Socket(state) => crate::kernel::abi::net::socket_readable(&state),
-        FdKind::SocketPair(inbox, _) => !inbox.borrow().is_empty(),
+        FdKind::SocketPair(inbox, _) => !inbox.borrow().octets.is_empty(),
         _ => false,
     }
 }

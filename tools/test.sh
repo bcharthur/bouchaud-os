@@ -89,6 +89,7 @@ exec /posix-probe
 exec /audio-probe
 exec /net-probe 91.189.91.83
 exec /persist-probe
+exec /shm-probe
 exec /qpa-probe
 SCENARIO
 
@@ -96,6 +97,22 @@ SCENARIO
 # vingtaine de minutes chacun et des sources telechargees. S'ils sont la, on les
 # joue ; sinon on s'en passe. C'est ce qui permet de garder un `test.sh` rapide
 # tout en couvrant la pile complete quand elle est disponible.
+# La question qui decide de la suite : un binaire Linux **dynamique**, lie a la
+# glibc et non recompile, s'execute-t-il ? Si oui, amener un moteur web revient
+# a honorer les appels que son binaire emet, et non a le reecrire.
+ABI_DIR=tools/userland/out-abi-linux
+if [ -x "$ABI_DIR/glibc-probe" ]; then
+    info "  + sysroot glibc detecte : la sonde d'ABI dynamique est ajoutee"
+    cp -r "$ABI_DIR"/* "$WORK/files/"
+    # La trace est active pour cette sonde et pour elle seule. Le chargeur
+    # dynamique de la glibc ne dit rien quand il s'arrete : sans trace on ne
+    # voit qu'un silence, avec elle on lit l'appel exact qui manque. C'est ce
+    # qui a permis de trouver `rseq`, et c'est ce qui nommera le suivant.
+    echo "strace on" >> "$WORK/files/autorun"
+    echo "exec /glibc-probe" >> "$WORK/files/autorun"
+    echo "strace off" >> "$WORK/files/autorun"
+fi
+
 PYTHON_DIR=tools/userland/out-python
 QT_BIN=tools/userland/out-qt/qt-demo
 

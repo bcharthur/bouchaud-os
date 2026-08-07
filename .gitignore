@@ -30,5 +30,12 @@ tools/userland/build-quickjs/
 tools/userland/out-quickjs/
 tools/userland/build-ffmpeg/
 tools/userland/out-ffmpeg/
+# Bac a sable glibc de build-abi-linux.sh : la sonde compilee et une copie des
+# bibliotheques de l'hote. Rien de tout cela n'a sa place dans le depot.
+tools/userland/out-abi-linux/
 # Copie de travail de test-moteur.sh (le moteur y est recopie avant execution)
 tools/userland/build-test-moteur/
+
+# Bytecode Python
+__pycache__/
+*.pyc

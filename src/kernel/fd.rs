@@ -55,7 +55,7 @@ pub enum FdKind {
     ///
     /// Deux tampons et non un : un socket est bidirectionnel, chaque extremite
     /// lit dans celui que l'autre alimente.
-    SocketPair(Rc<RefCell<Vec<u8>>>, Rc<RefCell<Vec<u8>>>),
+    SocketPair(Rc<RefCell<Canal>>, Rc<RefCell<Canal>>),
     /// Console virtuelle `/dev/tty0` : ne sert qu'a ses ioctls de mode
     /// graphique, les entrees/sorties passent par la console.
     VirtualTerminal,
@@ -142,6 +142,31 @@ impl FdKind {
 /// [`FdKind`] est **l'objet** designe. Le cloner ne cree pas d'extremite : les
 /// appels systeme en prennent une copie a chaque passage, pour ne pas garder un
 /// emprunt de la table pendant leur travail. Ces copies-la ne comptent pas.
+/// Un sens d'une paire de sockets : les octets en transit, et les descripteurs.
+///
+/// Un socket local ne transporte pas que des donnees : `SCM_RIGHTS` lui fait
+/// aussi passer des **descripteurs de fichier** d'un processus a l'autre. C'est
+/// ce dont vit l'architecture multi-processus d'un moteur web — celui qui met
+/// en page ouvre un tampon partage et en confie le descripteur a celui qui
+/// compose, sans jamais recopier les pixels.
+///
+/// Les descripteurs voyagent dans une file separee des octets. La norme les lie
+/// au message qui les accompagne ; les separer rendrait possible qu'un
+/// `recvmsg` recoive les descripteurs d'un envoi et les octets d'un autre. En
+/// pratique les deux bouts s'echangent un message a la fois, et l'ecart ne
+/// s'observe pas.
+#[derive(Default)]
+pub struct Canal {
+    pub octets: Vec<u8>,
+    pub descripteurs: Vec<FileDesc>,
+}
+
+impl Canal {
+    pub fn neuf() -> Rc<RefCell<Canal>> {
+        Rc::new(RefCell::new(Canal::default()))
+    }
+}
+
 pub struct FileDesc {
     pub kind: FdKind,
     /// Position de lecture/ecriture.
