@@ -97,6 +97,16 @@ SCENARIO
 # vingtaine de minutes chacun et des sources telechargees. S'ils sont la, on les
 # joue ; sinon on s'en passe. C'est ce qui permet de garder un `test.sh` rapide
 # tout en couvrant la pile complete quand elle est disponible.
+# La question qui decide de la suite : un binaire Linux **dynamique**, lie a la
+# glibc et non recompile, s'execute-t-il ? Si oui, amener un moteur web revient
+# a honorer les appels que son binaire emet, et non a le reecrire.
+ABI_DIR=tools/userland/out-abi-linux
+if [ -x "$ABI_DIR/glibc-probe" ]; then
+    info "  + sysroot glibc detecte : la sonde d'ABI dynamique est ajoutee"
+    cp -r "$ABI_DIR"/* "$WORK/files/"
+    echo "exec /glibc-probe" >> "$WORK/files/autorun"
+fi
+
 PYTHON_DIR=tools/userland/out-python
 QT_BIN=tools/userland/out-qt/qt-demo
 

@@ -370,7 +370,21 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
             task::current().clear_child_tid = args[0];
             task::current().tid as i64
         }
-        SET_ROBUST_LIST | GET_ROBUST_LIST | RSEQ => 0,
+        // `set_robust_list` peut legitimement etre accepte sans effet : la glibc
+        // s'en sert pour nettoyer les verrous d'un fil mort, ce qui degrade
+        // proprement quand personne ne le fait.
+        SET_ROBUST_LIST | GET_ROBUST_LIST => 0,
+        // `rseq`, lui, doit etre **refuse**.
+        //
+        // Repondre « reussi » a ce qu'on n'implemente pas est pire que de
+        // l'avouer : la glibc en conclut que sa zone est enregistree, pose son
+        // `__rseq_size`, et lit ensuite un `cpu_id` que le noyau ne tient pas a
+        // jour. Le chargeur dynamique s'y figeait sans un mot — c'est
+        // exactement la ou s'arretait tout binaire glibc du monde reel, apres
+        // avoir pourtant mappe la libc, monte le TLS et fait son RELRO.
+        //
+        // `ENOSYS` la fait retomber proprement sur son chemin sans rseq.
+        RSEQ => -errno::ENOSYS,
         CLONE => proc_clone(args, frame),
         // `vfork` partage l'espace d'adressage du parent jusqu'a l'`execve` ;
         // le dupliquer est plus couteux mais toujours correct.
