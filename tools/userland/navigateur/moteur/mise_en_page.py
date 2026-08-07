@@ -264,7 +264,10 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None
     pad_d = _longueur(style, "padding-right", largeur_disponible, taille)
     pad_h = _longueur(style, "padding-top", largeur_disponible, taille)
     pad_b = _longueur(style, "padding-bottom", largeur_disponible, taille)
-    bordure = _longueur(style, "border-width", largeur_disponible, taille)
+    # Chaque bord a son epaisseur : un `border-bottom` seul ne doit pas decaler
+    # le contenu des trois autres cotes.
+    (b_h, _), (b_d, _), (b_b, _), (b_g, _) = css.bordures(style, largeur_disponible,
+                                                          taille)
 
     boite.x = x + marge_g
     boite.y = y + marge_h
@@ -278,13 +281,13 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None
         # style modernes, souvent sur `*`. Le defaut de CSS, lui, veut que
         # `width` designe le seul contenu et que le reste s'y ajoute.
         if style.get("box-sizing", "content-box") != "border-box":
-            imposee += pad_g + pad_d + 2 * bordure
+            imposee += pad_g + pad_d + b_g + b_d
         largeur = min(largeur, imposee)
     boite.largeur = max(0.0, largeur)
 
-    interieur_x = boite.x + pad_g + bordure
-    interieur_l = max(0.0, boite.largeur - pad_g - pad_d - 2 * bordure)
-    curseur = boite.y + pad_h + bordure
+    interieur_x = boite.x + pad_g + b_g
+    interieur_l = max(0.0, boite.largeur - pad_g - pad_d - b_g - b_d)
+    curseur = boite.y + pad_h + b_h
 
     # Une liste numerotee ou a puces compte ses elements pour les marquer.
     compteur = 0
@@ -297,7 +300,7 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None
     # contenu : ses enfants sont le repli qu'on montre a qui ne sait pas la
     # dessiner, et nous savons.
     if isinstance(boite.element, Element) and boite.element.balise == "canvas":
-        _dispose_toile(boite, style, taille, curseur, pad_b, bordure,
+        _dispose_toile(boite, style, taille, curseur, pad_b, b_b,
                        interieur_l, contexte)
         return
 
@@ -312,7 +315,7 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None
         module = flex if mode in ("flex", "inline-flex") else grille
         curseur += module.dispose(boite, interieur_x, curseur, interieur_l,
                                   contexte, pose)
-        _termine_bloc(boite, style, curseur, pad_b, bordure, taille, interieur_l)
+        _termine_bloc(boite, style, curseur, pad_b, b_b, taille, interieur_l)
         _pose_hors_flux(boite, contexte)
         return
 
@@ -364,7 +367,7 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None
                    + _longueur(style_s, "margin-bottom", interieur_l, taille_s))
 
     vide_en_attente()
-    _termine_bloc(boite, style, curseur, pad_b, bordure, taille, interieur_l)
+    _termine_bloc(boite, style, curseur, pad_b, b_b, taille, interieur_l)
     _pose_hors_flux(boite, contexte)
 
 
@@ -416,7 +419,8 @@ def _termine_bloc(boite, style, curseur, pad_b, bordure, taille, reference):
         hauteur = min(hauteur, maximum)
 
     if isinstance(boite.element, Element) and boite.element.balise == "hr":
-        hauteur = max(hauteur, bordure if bordure else 1.0)
+        trait = max(e for e, _ in css.bordures(style, reference, taille))
+        hauteur = max(hauteur, trait if trait else 1.0)
 
     # Les bornes de largeur s'appliquent ici aussi : `max-width: 900px` centre
     # sur une colonne large est la forme la plus repandue de mise en page.

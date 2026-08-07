@@ -15,7 +15,7 @@ l'ordre du source, ligne par ligne. Le placement explicite (`grid-column`,
 
 ## Ce qui ne l'est pas
 
-Les lignes nommees, les zones nommees (`grid-template-areas`), le placement
+Les lignes nommees, le placement
 dense, et les pistes implicites au-dela d'un remplissage simple. Une page qui en
 depend s'affichera avec ses elements dans l'ordre, ce qui reste lisible — c'est
 la degradation qu'on veut, pas un ecroulement.
@@ -57,12 +57,20 @@ def dispose(boite, x, y, largeur_disponible, contexte, pose_enfant):
     espace_colonne = _longueur(style, "column-gap", largeur_disponible, taille_police)
     espace_ligne = _longueur(style, "row-gap", largeur_disponible, taille_police)
 
+    zones_nommees, colonnes_nommees = zones(style.get("grid-template-areas", ""))
+
     colonnes = _pistes(style.get("grid-template-columns", "none"),
                        largeur_disponible, taille_police)
     if not colonnes:
-        # Sans colonnes declarees, la grille se comporte comme une colonne
-        # unique : c'est ce que fait un navigateur, et cela reste lisible.
-        colonnes = [Piste("fraction", 1.0)]
+        if colonnes_nommees:
+            # Le gabarit dit combien de colonnes il faut, meme sans
+            # `grid-template-columns` : chaque piste est un objet distinct,
+            # puisque la mesure les modifie une a une.
+            colonnes = [Piste("fraction", 1.0) for _ in range(colonnes_nommees)]
+        else:
+            # Sans colonnes declarees, la grille se comporte comme une colonne
+            # unique : c'est ce que fait un navigateur, et cela reste lisible.
+            colonnes = [Piste("fraction", 1.0)]
 
     enfants = list(boite.enfants)
     if not enfants:
@@ -70,7 +78,7 @@ def dispose(boite, x, y, largeur_disponible, contexte, pose_enfant):
 
     _mesure_colonnes(colonnes, largeur_disponible, espace_colonne)
 
-    placements = _place(enfants, len(colonnes))
+    placements = _place(enfants, len(colonnes), zones_nommees)
     nombre_lignes = max((p[1] + p[3] for p in placements), default=1)
 
     lignes = _pistes(style.get("grid-template-rows", "none"),
@@ -201,7 +209,39 @@ def _mesure_colonnes(colonnes, disponible, espace):
 
 # --- Placement ----------------------------------------------------------------
 
-def _place(enfants, nombre_colonnes):
+def zones(declaration):
+    """`grid-template-areas` en `(nom -> (colonne, ligne, etendue_c, etendue_l), colonnes)`.
+
+    Une zone nommee sur plusieurs cases devient un rectangle : son coin haut
+    gauche et son etendue. Le point `.` marque une case vide.
+    """
+    rangees = []
+    for guillemets, apostrophes in re.findall(r'"([^"]*)"|\'([^\']*)\'',
+                                              declaration or ""):
+        noms = (guillemets or apostrophes).split()
+        if noms:
+            rangees.append(noms)
+    if not rangees:
+        return {}, 0
+
+    colonnes = max(len(r) for r in rangees)
+    boites = {}
+    for index_ligne, rangee in enumerate(rangees):
+        for index_colonne, nom in enumerate(rangee):
+            if nom == ".":
+                continue
+            if nom in boites:
+                c0, l0, ec, el = boites[nom]
+                droite = max(c0 + ec, index_colonne + 1)
+                bas = max(l0 + el, index_ligne + 1)
+                c0, l0 = min(c0, index_colonne), min(l0, index_ligne)
+                boites[nom] = (c0, l0, droite - c0, bas - l0)
+            else:
+                boites[nom] = (index_colonne, index_ligne, 1, 1)
+    return boites, colonnes
+
+
+def _place(enfants, nombre_colonnes, zones_nommees=None):
     """Rend, pour chaque enfant, `(colonne, ligne, etendue_colonne, etendue_ligne)`."""
     placements = []
     colonne_courante = 0
@@ -209,6 +249,11 @@ def _place(enfants, nombre_colonnes):
 
     for enfant in enfants:
         style = enfant.style
+        # Une zone nommee decide de tout : place et etendue, sur les deux axes.
+        nom = (style.get("grid-area") or "").strip()
+        if zones_nommees and nom in zones_nommees:
+            placements.append(zones_nommees[nom])
+            continue
         colonne, etendue_colonne = _position(style, "grid-column", nombre_colonnes)
         ligne, etendue_ligne = _position(style, "grid-row", 0)
 

@@ -64,7 +64,7 @@ except ImportError:
 sys.path.insert(0, ".")
 
 import moteur  # noqa: E402
-from moteur import css, html, js, reseau  # noqa: E402
+from moteur import css, grille, html, js, reseau  # noqa: E402
 
 # --- Cadre de verification ----------------------------------------------------
 
@@ -1031,6 +1031,188 @@ def verifie_requete_brute():
     contexte.ferme()
 
 
+def verifie_decoration():
+    """Coins, ombres, degrades, bords par cote, opacite : l'allure moderne."""
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #carte {
+            width: 300px; height: 120px;
+            background: #ffffff;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+          }
+          #trait { height: 40px; border-bottom: 2px solid #ff0000; }
+          #pente { height: 60px; background: linear-gradient(to right, #000000, #ffffff); }
+          #cadre { height: 30px; border: 1px solid #00ff00; }
+          #pale { height: 20px; opacity: 0.5; background: #123456; }
+        </style>
+        <body>
+          <div id="carte">carte</div>
+          <div id="trait">trait</div>
+          <div id="pente">pente</div>
+          <div id="cadre">cadre</div>
+          <div id="pale">pale</div>
+        </body>""")
+    liste = doc.liste_affichage(0, 1000, 700)
+    genres = [e[0] for e in liste]
+
+    # Un fond arrondi passe par `rond`, pas par `rect` : sinon les coins
+    # restaient carres alors que la feuille les demandait ronds.
+    ronds = [e for e in liste if e[0] == "rond"]
+    verifie("decoration: fond arrondi", any(proche(e[5], 12) for e in ronds),
+            [e[5] for e in ronds])
+    verifie("decoration: ombre portee", "ombre" in genres, genres[:12])
+    verifie("decoration: degrade", "degrade" in genres, genres[:12])
+
+    # `border-bottom` seul ne peignait rien : le moteur ne lisait qu'une
+    # bordure unique pour toute la boite.
+    trait = boite_de(doc, "trait")
+    rouges = [e for e in liste if e[0] == "rect" and e[5] == 0xFFFF0000]
+    verifie("decoration: bord bas seul peint", len(rouges) == 1, len(rouges))
+    if rouges:
+        verifie("decoration: le bord bas est en bas",
+                proche(rouges[0][2], trait.y + trait.hauteur - 2), rouges[0][2])
+        verifie("decoration: son epaisseur est la sienne",
+                proche(rouges[0][4], 2), rouges[0][4])
+
+    # Un cadre uniforme se trace en contour, sans deborder des coins.
+    verifie("decoration: cadre uniforme", "contour" in genres or
+            sum(1 for e in liste if e[0] == "rect" and e[5] == 0xFF00FF00) == 4,
+            genres[:20])
+
+    # L'opacite enveloppe la boite et se referme.
+    verifie("decoration: opacite posee", "opacite" in genres, genres[:20])
+    egal("decoration: enveloppes refermees",
+         genres.count("desenveloppe"),
+         genres.count("opacite") + genres.count("transforme"))
+
+    # Les bords se cascadent par cote : trois rouges et un efface.
+    style = css._developpe({"border": "1px solid red"})
+    style.update(css._developpe({"border-bottom": "none"}))
+    bords = css.bordures(style, 100, 16)
+    egal("decoration: cascade des bords",
+         [round(e) for e, _ in bords], [1, 1, 0, 1])
+
+
+def verifie_transformations():
+    """`transform` deplace la boite, et le clic la suit."""
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #glisse { height: 50px; transform: translate(40px, 25px); }
+          #droit { height: 50px; }
+        </style>
+        <body>
+          <div id="glisse"><a href="/cible">lien</a></div>
+          <div id="droit">droit</div>
+        </body>""")
+    liste = doc.liste_affichage(0, 1000, 700)
+    transformes = [e for e in liste if e[0] == "transforme"]
+    verifie("transform: une enveloppe posee", len(transformes) == 1, len(transformes))
+    if transformes:
+        egal("transform: la translation est la bonne",
+             (round(transformes[0][5]), round(transformes[0][6])), (40, 25))
+
+    # La boite reste a sa place dans le flux : `transform` ne remet pas en page.
+    glisse, droit = boite_de(doc, "glisse"), boite_de(doc, "droit")
+    verifie("transform: le flux n'est pas touche",
+            proche(droit.y, glisse.y + glisse.hauteur), (droit.y, glisse.y))
+
+    # Le lien doit etre cliquable la ou il est peint, pas la ou il serait sans
+    # la transformation.
+    zones = [z for z in doc.zones_liens if z[4] == "/cible"]
+    verifie("transform: le lien existe", bool(zones), doc.zones_liens)
+    if zones:
+        verifie("transform: la zone du lien suit la translation",
+                proche(zones[0][1], glisse.y + 25, 3), (zones[0][1], glisse.y))
+
+    egal("transform: rotation reconnue",
+         tuple(round(v, 3) for v in css.transformation("rotate(90deg)")),
+         (0.0, 1.0, -1.0, 0.0, 0.0, 0.0))
+    egal("transform: enchainement", css.transformation("translate(10px) scale(2)"),
+         (2.0, 0.0, 0.0, 2.0, 10.0, 0.0))
+    egal("transform: la 3D est laissee de cote",
+         css.transformation("rotateX(45deg)"), None)
+
+
+def verifie_collant():
+    """`position: sticky` se colle a son ancrage, `fixed` ne defile pas."""
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #haut { height: 400px; }
+          #barre { position: sticky; top: 0; height: 40px; background: #ffffff; }
+          #suite { height: 900px; }
+        </style>
+        <body>
+          <div id="haut">haut</div>
+          <div id="barre">barre</div>
+          <div id="suite">suite</div>
+        </body>""")
+    barre = boite_de(doc, "barre")
+
+    # Tant qu'elle est visible, elle ne bouge pas.
+    sans = [e for e in doc.liste_affichage(0, 1000, 700) if e[0] == "transforme"]
+    egal("sticky: immobile tant qu'elle est visible", len(sans), 0)
+
+    # Une fois depassee, elle se colle en haut de la vue.
+    defilement = barre.y + 200
+    avec = [e for e in doc.liste_affichage(defilement, 1000, 700)
+            if e[0] == "transforme"]
+    verifie("sticky: collee une fois depassee", len(avec) == 1, len(avec))
+    if avec:
+        verifie("sticky: elle remonte du defilement", proche(avec[0][6], 200, 2),
+                avec[0][6])
+
+
+def verifie_ordre_et_zones():
+    """`order` en flexbox et les zones nommees de grille."""
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #barre { display: flex; }
+          #barre > div { width: 100px; }
+          #a { order: 2; } #b { order: 1; }
+        </style>
+        <body><div id="barre"><div id="a">a</div><div id="b">b</div></div></body>""")
+    a, b = boite_de(doc, "a"), boite_de(doc, "b")
+    verifie("flex: `order` reordonne", b.x < a.x, (a.x, b.x))
+
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #page {
+            display: grid;
+            grid-template-columns: 200px 400px;
+            grid-template-areas: "cote entete" "cote corps";
+          }
+          #entete { grid-area: entete; height: 50px; }
+          #cote   { grid-area: cote;   height: 30px; }
+          #corps  { grid-area: corps;  height: 60px; }
+        </style>
+        <body>
+          <div id="page">
+            <div id="entete">entete</div>
+            <div id="cote">cote</div>
+            <div id="corps">corps</div>
+          </div>
+        </body>""")
+    entete, cote, corps = (boite_de(doc, n) for n in ("entete", "cote", "corps"))
+    verifie("grille: la zone nommee place a gauche", proche(cote.x, 0, 2), cote.x)
+    verifie("grille: la zone nommee place a droite",
+            proche(entete.x, 200, 2), entete.x)
+    verifie("grille: le corps est sous l'entete", corps.y > entete.y,
+            (entete.y, corps.y))
+    verifie("grille: le corps est dans la colonne de droite",
+            proche(corps.x, 200, 2), corps.x)
+
+    boites, colonnes = grille.zones('"a a b" "c . b"')
+    egal("grille: le gabarit compte ses colonnes", colonnes, 3)
+    egal("grille: une zone large s'etend", boites["a"], (0, 0, 2, 1))
+    egal("grille: une zone haute s'etend", boites["b"], (2, 0, 1, 2))
+
+
 # --- Disposition --------------------------------------------------------------
 
 def boite_de(doc, identifiant):
@@ -1303,9 +1485,9 @@ def verifie_longueurs():
           #c { width: calc(100% - 40px); }
           #v { width: 50vw; }
           #h { height: 10vh; }
-          #b { width: 200px; padding: 10px; border-width: 5px;
+          #b { width: 200px; padding: 10px; border: 5px solid #000000;
                box-sizing: border-box; }
-          #n { width: 200px; padding: 10px; border-width: 5px; }
+          #n { width: 200px; padding: 10px; border: 5px solid #000000; }
           #m { max-width: 600px; margin-left: auto; margin-right: auto; }
         </style>
         <body>
@@ -1730,9 +1912,10 @@ def verifie_enfant_direct():
          direct.style.get("background-color"), "#ff0000")
     egal("enfant direct: le petit-fils ne l'est pas",
          imbrique.style.get("background-color"), None)
-    # La descendance, elle, atteint bien les deux.
+    # La descendance, elle, atteint bien les deux. `border-color` se developpe
+    # maintenant par cote, d'ou la lecture de l'un d'eux.
     egal("enfant direct: la descendance atteint le petit-fils",
-         imbrique.style.get("border-color"), "#0000ff")
+         imbrique.style.get("border-top-color"), "#0000ff")
 
     # Une chaine de plusieurs `>` doit se verifier de bout en bout.
     doc = document("""
@@ -2523,6 +2706,10 @@ def principal():
         verifie_flex,
         verifie_grille,
         verifie_position,
+        verifie_decoration,
+        verifie_transformations,
+        verifie_collant,
+        verifie_ordre_et_zones,
         verifie_pseudo_elements,
         verifie_requetes_media,
         verifie_longueurs,

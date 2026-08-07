@@ -10,11 +10,17 @@ Les proprietes personnalisees (`--fond`) et `var()` en font partie : c'est sur
 elles que repose la mise en forme de tout site recent, et les ignorer n'affichait
 pas une page approximative mais une page sans couleurs ni espacements.
 
-Ce qui manque (animations, transformations) est ignore proprement plutot que mal
-interprete : une declaration inconnue est laissee de cote, elle ne fait pas
-echouer la regle qui la contient.
+Les coins arrondis, les ombres portees, les degrades lineaires, les
+transformations et l'opacite en font partie aussi : ce sont eux qui separent
+l'allure d'une page d'aujourd'hui de celle d'une page d'il y a vingt ans.
+
+Ce qui manque (animations, degrades radiaux, transformations en trois
+dimensions) est ignore proprement plutot que mal interprete : une declaration
+inconnue est laissee de cote, elle ne fait pas echouer la regle qui la
+contient.
 """
 
+import math
 import re
 
 # --- Couleurs ----------------------------------------------------------------
@@ -787,6 +793,314 @@ class Regle:
         self.ordre = ordre
 
 
+# --- Decoration ---------------------------------------------------------------
+#
+# Coins arrondis, ombres portees, degrades, transformations et opacite. Ce sont
+# les cinq proprietes qui separent une page de 1998 d'une page d'aujourd'hui :
+# une carte moderne est un rectangle arrondi, pose sur une ombre douce, parfois
+# rempli d'un degrade. Le moteur les analysait deja pour `border-radius` — sans
+# jamais s'en servir — et laissait tomber les quatre autres.
+
+
+def separe(texte, separateur=","):
+    """Decoupe en respectant les parentheses : `rgb(1, 2, 3)` reste entier."""
+    morceaux = []
+    courant = ""
+    profondeur = 0
+    for caractere in texte:
+        if caractere == "(":
+            profondeur += 1
+        elif caractere == ")":
+            profondeur -= 1
+        if caractere == separateur and profondeur == 0:
+            morceaux.append(courant)
+            courant = ""
+            continue
+        courant += caractere
+    if courant.strip():
+        morceaux.append(courant)
+    return [m.strip() for m in morceaux if m.strip()]
+
+
+def rayons(valeur, reference=0.0, taille_police=16.0):
+    """`border-radius` en quatre rayons, dans l'ordre des coins CSS.
+
+    Haut-gauche, haut-droit, bas-droit, bas-gauche. La forme elliptique
+    (`10px / 20px`) est ramenee a son premier terme : le moteur ne peint que
+    des coins circulaires.
+    """
+    if not valeur:
+        return (0.0, 0.0, 0.0, 0.0)
+    valeur = valeur.split("/")[0]
+    parties = [longueur(p, reference, taille_police) or 0.0 for p in valeur.split()]
+    if not parties:
+        return (0.0, 0.0, 0.0, 0.0)
+    if len(parties) == 1:
+        return (parties[0],) * 4
+    if len(parties) == 2:
+        return (parties[0], parties[1], parties[0], parties[1])
+    if len(parties) == 3:
+        return (parties[0], parties[1], parties[2], parties[1])
+    return tuple(parties[:4])
+
+
+def ombres(valeur, taille_police=16.0):
+    """`box-shadow` en liste de `(dx, dy, flou, etendue, couleur, interieure)`."""
+    if not valeur or valeur.strip() in ("none", "initial"):
+        return []
+    resultat = []
+    for morceau in separe(valeur):
+        interieure = False
+        longueurs = []
+        teinte = None
+        for jeton in separe(morceau, " "):
+            if jeton == "inset":
+                interieure = True
+                continue
+            mesure = longueur(jeton, 0.0, taille_police)
+            # Une couleur peut s'ecrire `#0003` ou `rgb(…)` ; une longueur
+            # commence toujours par un chiffre ou un signe.
+            if mesure is not None and jeton[:1] in "+-.0123456789":
+                longueurs.append(mesure)
+            elif teinte is None:
+                teinte = couleur(jeton)
+        if len(longueurs) < 2:
+            continue
+        dx, dy = longueurs[0], longueurs[1]
+        flou = longueurs[2] if len(longueurs) > 2 else 0.0
+        etendue = longueurs[3] if len(longueurs) > 3 else 0.0
+        resultat.append((dx, dy, flou, etendue,
+                         teinte if teinte is not None else 0x40000000, interieure))
+    return resultat
+
+
+# `linear-gradient(…)`, avec ou sans prefixe de fabricant.
+_DEGRADE = re.compile(r"(?:repeating-)?linear-gradient\(", re.I)
+
+
+def degrade(valeur):
+    """`linear-gradient(…)` en `(angle, [(position, couleur), …])`.
+
+    L'angle suit la norme CSS : 0 degre pointe vers le haut, et le sens est
+    celui des aiguilles d'une montre. `None` si la valeur n'est pas un degrade
+    lineaire — les degrades radiaux et coniques ne sont pas peints.
+    """
+    if not valeur:
+        return None
+    trouve = _DEGRADE.search(valeur)
+    if not trouve:
+        return None
+    interieur = _entre_parentheses(valeur, trouve.end() - 1)
+    if interieur is None:
+        return None
+    morceaux = separe(interieur)
+    if not morceaux:
+        return None
+
+    angle = 180.0          # `to bottom`, le defaut de CSS
+    premier = morceaux[0].lower()
+    if premier.startswith("to "):
+        angle = _angle_vers(premier[3:])
+        morceaux = morceaux[1:]
+    elif premier.endswith(("deg", "turn", "rad", "grad")):
+        angle = _angle(premier)
+        morceaux = morceaux[1:]
+
+    etapes = []
+    for index, morceau in enumerate(morceaux):
+        parties = morceau.split()
+        teinte = couleur(parties[0]) if parties else None
+        if teinte is None and parties:
+            # `rgb(1 2 3)` a pu etre coupe : on retente sur le morceau entier.
+            teinte = couleur(morceau)
+        if teinte is None:
+            continue
+        position = None
+        for part in parties[1:]:
+            if part.endswith("%"):
+                try:
+                    position = float(part[:-1]) / 100.0
+                except ValueError:
+                    position = None
+        if position is None:
+            position = index / max(1.0, len(morceaux) - 1.0)
+        etapes.append((max(0.0, min(1.0, position)), teinte))
+    if len(etapes) < 2:
+        return None
+    return (angle, etapes)
+
+
+def _entre_parentheses(texte, ouvrante):
+    profondeur = 0
+    for index in range(ouvrante, len(texte)):
+        if texte[index] == "(":
+            profondeur += 1
+        elif texte[index] == ")":
+            profondeur -= 1
+            if profondeur == 0:
+                return texte[ouvrante + 1:index]
+    return None
+
+
+_VERS = {
+    "top": 0.0, "right": 90.0, "bottom": 180.0, "left": 270.0,
+    "top right": 45.0, "right top": 45.0,
+    "bottom right": 135.0, "right bottom": 135.0,
+    "bottom left": 225.0, "left bottom": 225.0,
+    "top left": 315.0, "left top": 315.0,
+}
+
+
+def _angle_vers(mots):
+    return _VERS.get(" ".join(mots.split()), 180.0)
+
+
+def _angle(texte):
+    """Un angle CSS en degres."""
+    texte = texte.strip().lower()
+    try:
+        if texte.endswith("deg"):
+            return float(texte[:-3])
+        if texte.endswith("turn"):
+            return float(texte[:-4]) * 360.0
+        if texte.endswith("rad"):
+            return float(texte[:-3]) * 180.0 / 3.141592653589793
+        if texte.endswith("grad"):
+            return float(texte[:-4]) * 0.9
+        return float(texte)
+    except ValueError:
+        return 0.0
+
+
+_FONCTION = re.compile(r"([a-zA-Z0-9]+)\(([^()]*)\)")
+
+
+def transformation(valeur, largeur=0.0, hauteur=0.0, taille_police=16.0):
+    """`transform` en matrice `(a, b, c, d, e, f)`, ou `None`.
+
+    La convention est celle de CSS et de Qt :
+    `x' = a·x + c·y + e` et `y' = b·x + d·y + f`.
+
+    Les pourcentages d'une translation se rapportent a la taille de l'element
+    lui-meme, d'ou `largeur` et `hauteur`.
+    """
+    if not valeur or valeur.strip() in ("none", "initial"):
+        return None
+    matrice = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+    vue = False
+    for nom, arguments in _FONCTION.findall(valeur):
+        parties = [p.strip() for p in arguments.split(",") if p.strip()]
+        nom = nom.lower()
+        suivante = _fonction_transform(nom, parties, largeur, hauteur, taille_police)
+        if suivante is None:
+            continue
+        matrice = _compose(matrice, suivante)
+        vue = True
+    return matrice if vue else None
+
+
+def _fonction_transform(nom, parties, largeur, hauteur, taille_police):
+    def mesure(texte, reference):
+        if texte.endswith("%"):
+            try:
+                return float(texte[:-1]) / 100.0 * reference
+            except ValueError:
+                return 0.0
+        return longueur(texte, reference, taille_police) or 0.0
+
+    def nombre(texte, defaut=0.0):
+        try:
+            return float(texte)
+        except (ValueError, TypeError):
+            return defaut
+
+    if nom in ("translate", "translate3d"):
+        dx = mesure(parties[0], largeur) if parties else 0.0
+        dy = mesure(parties[1], hauteur) if len(parties) > 1 else 0.0
+        return (1.0, 0.0, 0.0, 1.0, dx, dy)
+    if nom == "translatex":
+        return (1.0, 0.0, 0.0, 1.0, mesure(parties[0], largeur) if parties else 0.0, 0.0)
+    if nom == "translatey":
+        return (1.0, 0.0, 0.0, 1.0, 0.0, mesure(parties[0], hauteur) if parties else 0.0)
+    if nom in ("scale", "scale3d"):
+        sx = nombre(parties[0], 1.0) if parties else 1.0
+        sy = nombre(parties[1], sx) if len(parties) > 1 else sx
+        return (sx, 0.0, 0.0, sy, 0.0, 0.0)
+    if nom == "scalex":
+        return (nombre(parties[0], 1.0) if parties else 1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+    if nom == "scaley":
+        return (1.0, 0.0, 0.0, nombre(parties[0], 1.0) if parties else 1.0, 0.0, 0.0)
+    if nom in ("rotate", "rotatez"):
+        radians = math.radians(_angle(parties[0])) if parties else 0.0
+        cos, sin = math.cos(radians), math.sin(radians)
+        return (cos, sin, -sin, cos, 0.0, 0.0)
+    if nom in ("skew", "skewx", "skewy"):
+        premier = math.tan(math.radians(_angle(parties[0]))) if parties else 0.0
+        second = math.tan(math.radians(_angle(parties[1]))) if len(parties) > 1 else 0.0
+        if nom == "skewx":
+            return (1.0, 0.0, premier, 1.0, 0.0, 0.0)
+        if nom == "skewy":
+            return (1.0, premier, 0.0, 1.0, 0.0, 0.0)
+        return (1.0, second, premier, 1.0, 0.0, 0.0)
+    if nom == "matrix" and len(parties) >= 6:
+        return tuple(nombre(p) for p in parties[:6])
+    # `rotateX`, `perspective`, `matrix3d`… demandent une troisieme dimension
+    # que la peinture n'a pas. Les ignorer vaut mieux que de les aplatir a tort.
+    return None
+
+
+def _compose(gauche, droite):
+    """Applique `droite` puis `gauche`, comme l'exige l'ordre de CSS."""
+    a1, b1, c1, d1, e1, f1 = gauche
+    a2, b2, c2, d2, e2, f2 = droite
+    return (
+        a1 * a2 + c1 * b2,
+        b1 * a2 + d1 * b2,
+        a1 * c2 + c1 * d2,
+        b1 * c2 + d1 * d2,
+        a1 * e2 + c1 * f2 + e1,
+        b1 * e2 + d1 * f2 + f1,
+    )
+
+
+def opacite(valeur):
+    """`opacity` en flottant borne, `1.0` par defaut."""
+    if valeur is None or valeur == "":
+        return 1.0
+    texte = valeur.strip()
+    try:
+        if texte.endswith("%"):
+            return max(0.0, min(1.0, float(texte[:-1]) / 100.0))
+        return max(0.0, min(1.0, float(texte)))
+    except ValueError:
+        return 1.0
+
+
+COTES = ("top", "right", "bottom", "left")
+
+
+def bordures(style, reference=0.0, taille_police=16.0):
+    """Les quatre bords, chacun en `(epaisseur, couleur)`.
+
+    Le moteur ne lisait qu'une epaisseur et une couleur pour toute la boite :
+    un `border-bottom: 1px solid #eee` — le separateur le plus repandu du web —
+    ne peignait donc rien du tout, et un `border-left` d'accent non plus.
+    """
+    resultat = []
+    for cote in COTES:
+        style_cote = style.get("border-%s-style" % cote, "none")
+        epaisseur = longueur(style.get("border-%s-width" % cote, "0"),
+                             reference, taille_police) or 0.0
+        if style_cote in ("none", "hidden"):
+            epaisseur = 0.0
+        teinte = couleur(style.get("border-%s-color" % cote, ""))
+        if teinte is None:
+            # La norme veut que la couleur par defaut soit celle du texte.
+            teinte = couleur(style.get("color", "")) or 0xFF202124
+        resultat.append((epaisseur, teinte))
+    return resultat
+
+
 _COMMENTAIRE = re.compile(r"/\*.*?\*/", re.S)
 
 
@@ -1082,6 +1396,34 @@ def _echappements(texte):
 
 _RACCOURCIS_BOITE = ("margin", "padding")
 
+_BORDS = ("border-top", "border-right", "border-bottom", "border-left")
+
+# Une position de grille : un numero de ligne, un `span`, ou `auto`.
+_EST_LIGNE = re.compile(r"(auto|span\b|[-+]?\d)", re.I)
+
+_STYLES_TRAIT = ("none", "hidden", "solid", "dashed", "dotted", "double",
+                 "groove", "ridge", "inset", "outset")
+
+
+def _trait(valeur):
+    """`1px solid #eee` en `(epaisseur, style, couleur)`, chacun facultatif."""
+    largeur = style = teinte = None
+    for morceau in separe(valeur, " "):
+        bas = morceau.lower()
+        if bas in _STYLES_TRAIT:
+            style = bas
+            if bas in ("none", "hidden") and largeur is None:
+                largeur = "0"
+        elif longueur(morceau) is not None and bas[:1] in "+-.0123456789":
+            largeur = morceau
+        elif couleur(morceau) is not None:
+            teinte = morceau
+    # `border: solid red` sans epaisseur vaut 3 px dans la norme ; c'est aussi
+    # ce que fait tout navigateur.
+    if style not in (None, "none", "hidden") and largeur is None:
+        largeur = "3px"
+    return largeur, style, teinte
+
 # Proprietes que la disposition consulte et qui ne doivent surtout pas etre
 # heritees : un `display: flex` herite ferait de chaque descendant un conteneur
 # flexible. La liste sert de garde-fou lisible plus que de mecanisme — c'est
@@ -1094,8 +1436,10 @@ NON_HERITEES = (
     "grid-column-end", "grid-row-start", "grid-row-end",
     "row-gap", "column-gap", "overflow", "overflow-x", "overflow-y",
     "box-sizing", "min-width", "max-width", "min-height", "max-height",
-    "content", "border-radius", "opacity",
-)
+    "content", "border-radius", "opacity", "transform", "box-shadow",
+    "background-image", "order",
+) + tuple("border-%s-%s" % (c, t) for c in COTES
+          for t in ("width", "style", "color"))
 
 
 def _developpe(declarations):
@@ -1109,19 +1453,34 @@ def _developpe(declarations):
             resultat["%s-right" % nom] = droite
             resultat["%s-bottom" % nom] = bas
             resultat["%s-left" % nom] = gauche
-        elif nom == "border":
-            for morceau in valeur.split():
-                if couleur(morceau) is not None:
-                    resultat["border-color"] = morceau
-                elif morceau.endswith(("px", "em", "rem")) or morceau.isdigit():
-                    resultat["border-width"] = morceau
-                elif morceau in ("none", "hidden"):
-                    resultat["border-width"] = "0"
+        elif nom == "border" or nom in _BORDS:
+            # Un bord se decrit d'un trait : `1px solid #eee`. Le developper en
+            # trois proprietes par cote est ce qui permet a la cascade de faire
+            # son travail — `border: 1px solid red; border-bottom: none` doit
+            # laisser trois bords rouges et en effacer un seul.
+            largeur_b, style_b, couleur_b = _trait(valeur)
+            cotes = COTES if nom == "border" else (nom.split("-", 1)[1],)
+            for cote in cotes:
+                if largeur_b is not None:
+                    resultat["border-%s-width" % cote] = largeur_b
+                if style_b is not None:
+                    resultat["border-%s-style" % cote] = style_b
+                if couleur_b is not None:
+                    resultat["border-%s-color" % cote] = couleur_b
+        elif nom in ("border-width", "border-style", "border-color"):
+            trait = nom.split("-", 1)[1]
+            haut, droite, bas, gauche = _quatre(valeur.split())
+            for cote, part in zip(COTES, (haut, droite, bas, gauche)):
+                resultat["border-%s-%s" % (cote, trait)] = part
         elif nom == "background":
-            for morceau in valeur.split():
-                if couleur(morceau) is not None:
-                    resultat["background-color"] = morceau
-                    break
+            degrade_trouve = _DEGRADE.search(valeur)
+            if degrade_trouve:
+                resultat["background-image"] = valeur
+            else:
+                for morceau in separe(valeur, " "):
+                    if couleur(morceau) is not None:
+                        resultat["background-color"] = morceau
+                        break
         elif nom == "flex":
             # `flex: 1` vaut `1 1 0%`, `flex: auto` vaut `1 1 auto`. C'est la
             # forme sous laquelle la propriete s'ecrit presque toujours.
@@ -1159,9 +1518,15 @@ def _developpe(declarations):
             resultat["bottom"], resultat["left"] = bas, gauche
         elif nom == "grid-area":
             parties = [p.strip() for p in valeur.split("/")]
-            for cle, part in zip(("grid-row-start", "grid-column-start",
-                                  "grid-row-end", "grid-column-end"), parties):
-                resultat[cle] = part
+            # `grid-area: entete` nomme une zone du gabarit ; `grid-area: 1 / 2`
+            # donne des lignes. Confondre les deux rangeait le nom dans
+            # `grid-row-start`, ou plus rien ne le reconnaissait.
+            if len(parties) == 1 and not _EST_LIGNE.match(parties[0]):
+                resultat["grid-area"] = parties[0]
+            else:
+                for cle, part in zip(("grid-row-start", "grid-column-start",
+                                      "grid-row-end", "grid-column-end"), parties):
+                    resultat[cle] = part
         elif nom in ("grid-row", "grid-column"):
             parties = [p.strip() for p in valeur.split("/")]
             resultat["%s-start" % nom] = parties[0]
@@ -1172,8 +1537,6 @@ def _developpe(declarations):
             resultat["grid-template-rows"] = parties[0]
             if len(parties) > 1:
                 resultat["grid-template-columns"] = parties[1]
-        elif nom == "border-radius":
-            resultat["border-radius"] = valeur.split()[0] if valeur.split() else "0"
         elif nom == "font":
             for morceau in valeur.split():
                 if morceau in ("bold", "bolder"):
@@ -1241,7 +1604,7 @@ code, kbd, samp { font-family: monospace; }
 b, strong { font-weight: bold; }
 i, em, cite, address { font-style: italic; }
 a { color: #1a56db; text-decoration: underline; }
-hr { margin: 8px 0; border-width: 1px; border-color: #d0d7de; }
+hr { margin: 8px 0; border-top: 1px solid #d0d7de; }
 table { margin: 8px 0; }
 th { font-weight: bold; }
 td, th { padding: 4px 8px; }

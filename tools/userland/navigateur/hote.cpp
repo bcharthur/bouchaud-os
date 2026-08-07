@@ -59,9 +59,13 @@
 #include <QtGui/QKeyEvent>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QWheelEvent>
+#include <QtGui/QLinearGradient>
+#include <QtGui/QTransform>
 #include <QtCore/QTimer>
 #include <QtCore/QtPlugin>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -262,12 +266,19 @@ private:
         // pile est videe ici pour qu'une liste mal fermee ne contamine pas la
         // trame suivante.
         pileRognage.clear();
+        enveloppes = 0;
         for (Py_ssize_t i = 0; i < n; ++i) {
             PyObject *element = PySequence_GetItem(liste, i);
             if (!element)
                 break;
             peintElement(p, element);
             Py_DECREF(element);
+        }
+        // Une liste tronquee — page changee en cours de peinture — laisserait
+        // des etats empiles, et la trame suivante peindrait transformee.
+        while (enveloppes > 0) {
+            p.restore();
+            --enveloppes;
         }
     }
 
@@ -298,6 +309,108 @@ private:
                 p.setPen(Qt::NoPen);
                 p.setBrush(couleurDepuisEntier(couleur));
                 p.drawRoundedRect(QRectF(x, y, l, h), rayon, rayon);
+            }
+        } else if (!std::strcmp(operation, "ombre")) {
+            // Qt ne floute pas un rectangle. L'ombre est donc empilee en
+            // couches concentriques, chacune un peu plus grande et n'apportant
+            // qu'une fraction de l'opacite : leur somme redonne un bord doux,
+            // pour le prix de quelques `drawRoundedRect`.
+            double x, y, l, h, rayon, flou;
+            long couleur;
+            if (PyArg_ParseTuple(element, "sddddddl", &operation, &x, &y, &l, &h,
+                                 &rayon, &flou, &couleur)) {
+                const int couches = std::max(1, std::min(16, int(std::ceil(flou))));
+                QColor teinte = couleurDepuisEntier(couleur);
+                const double part = teinte.alphaF() / double(couches + 1);
+                p.setPen(Qt::NoPen);
+                for (int i = couches; i >= 0; --i) {
+                    const double extension = flou * double(i) / double(couches);
+                    QColor couche = teinte;
+                    couche.setAlphaF(part);
+                    p.setBrush(couche);
+                    p.drawRoundedRect(
+                        QRectF(x - extension, y - extension,
+                               l + 2 * extension, h + 2 * extension),
+                        rayon + extension, rayon + extension);
+                }
+            }
+        } else if (!std::strcmp(operation, "degrade")) {
+            double x, y, l, h, rayon, angle;
+            PyObject *etapes = nullptr;
+            if (PyArg_ParseTuple(element, "sddddddO", &operation, &x, &y, &l, &h,
+                                 &rayon, &angle, &etapes)) {
+                // L'angle de CSS part du haut et tourne dans le sens des
+                // aiguilles ; celui de Qt est un simple couple de points. La
+                // ligne du degrade passe par le centre, et sa longueur est
+                // celle de la projection de la boite sur sa direction.
+                const double radians = angle * 3.14159265358979323846 / 180.0;
+                const double dx = std::sin(radians);
+                const double dy = -std::cos(radians);
+                const double portee = std::fabs(l * dx) + std::fabs(h * dy);
+                const QPointF centre(x + l / 2.0, y + h / 2.0);
+                QLinearGradient pente(centre - QPointF(dx, dy) * portee / 2.0,
+                                      centre + QPointF(dx, dy) * portee / 2.0);
+                const Py_ssize_t nb = PySequence_Size(etapes);
+                for (Py_ssize_t k = 0; k < nb; ++k) {
+                    PyObject *etape = PySequence_GetItem(etapes, k);
+                    if (!etape)
+                        break;
+                    double position = 0.0;
+                    long teinte = 0;
+                    if (PyArg_ParseTuple(etape, "dl", &position, &teinte))
+                        pente.setColorAt(position, couleurDepuisEntier(teinte));
+                    else
+                        PyErr_Clear();
+                    Py_DECREF(etape);
+                }
+                p.setPen(Qt::NoPen);
+                p.setBrush(pente);
+                if (rayon > 0.0)
+                    p.drawRoundedRect(QRectF(x, y, l, h), rayon, rayon);
+                else
+                    p.drawRect(QRectF(x, y, l, h));
+            }
+        } else if (!std::strcmp(operation, "contour")) {
+            double x, y, l, h, rayon, epaisseur;
+            long couleur;
+            if (PyArg_ParseTuple(element, "sddddddl", &operation, &x, &y, &l, &h,
+                                 &rayon, &epaisseur, &couleur)) {
+                QPen stylo(couleurDepuisEntier(couleur));
+                stylo.setWidthF(epaisseur);
+                p.setPen(stylo);
+                p.setBrush(Qt::NoBrush);
+                // Le trait est centre sur le chemin : le rentrer d'une
+                // demi-epaisseur le garde a l'interieur de la boite.
+                const double moitie = epaisseur / 2.0;
+                p.drawRoundedRect(
+                    QRectF(x + moitie, y + moitie, l - epaisseur, h - epaisseur),
+                    std::max(0.0, rayon - moitie), std::max(0.0, rayon - moitie));
+            }
+        } else if (!std::strcmp(operation, "transforme")) {
+            // `transform` et `opacity` valent pour la boite et sa descendance :
+            // l'etat du peintre est empile ici et rendu par « desenveloppe ».
+            double a, b, c, d, e, f, ox, oy;
+            if (PyArg_ParseTuple(element, "sdddddddd", &operation, &a, &b, &c, &d,
+                                 &e, &f, &ox, &oy)) {
+                p.save();
+                // L'origine par defaut de CSS est le centre de la boite : on s'y
+                // place, on transforme, on revient.
+                p.translate(ox, oy);
+                p.setWorldTransform(QTransform(a, b, c, d, e, f), true);
+                p.translate(-ox, -oy);
+                ++enveloppes;
+            }
+        } else if (!std::strcmp(operation, "opacite")) {
+            double alpha;
+            if (PyArg_ParseTuple(element, "sd", &operation, &alpha)) {
+                p.save();
+                p.setOpacity(p.opacity() * alpha);
+                ++enveloppes;
+            }
+        } else if (!std::strcmp(operation, "desenveloppe")) {
+            if (enveloppes > 0) {
+                p.restore();
+                --enveloppes;
             }
         } else if (!std::strcmp(operation, "texte")) {
             double x, y, taille;
@@ -364,6 +477,8 @@ private:
 
     /// Zones de rognage en cours, de la plus exterieure a la plus interieure.
     QVector<QRectF> pileRognage;
+    /// Etats de peintre empiles par « transforme » et « opacite ».
+    int enveloppes = 0;
 };
 
 // --- Module Python `bo` -----------------------------------------------------
