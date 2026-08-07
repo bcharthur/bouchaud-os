@@ -13,6 +13,53 @@ Il n'existe aucune bibliothèque Python ou Qt qui l'évite — `PyQtWebEngine`,
 `cefpython`, `QtWebEngine` sont toutes des liaisons vers ces mêmes moteurs. Le
 raccourci n'existe pas ; il faut porter.
 
+## Le changement d'approche : ne pas porter, **exécuter**
+
+Je parlais de « porter » WebKit. C'était l'erreur de départ.
+
+Bouchaud OS **implémente l'ABI Linux x86-64**. On n'a donc pas à porter : on
+exécute le binaire Linux existant, comme le linuxulator de FreeBSD, WSL1 et
+gVisor. La preuve était déjà là — Qt tourne, des millions de lignes de C++ sans
+une ligne modifiée — et `libwpewebkit-1.0-3` existe en paquet Ubuntu.
+
+Le travail devient : **honorer les appels que le binaire émet**. Mesurable,
+incrémental, vérifiable à chaque pas. `build-abi-linux.sh` et
+`abi-linux-probe.c` établissent le banc d'essai ; `strace on` nomme l'appel qui
+manque.
+
+## Premier verrou levé : `rseq`
+
+Un simple programme C lié à la glibc **se figeait sans un mot**. La trace a
+répondu en trente lignes : le chargeur allait très loin — `libc.so.6` ouverte,
+ses cinq segments mappés, TLS monté par `arch_prctl`, `set_tid_address`,
+`set_robust_list`, RELRO par trois `mprotect`. Puis plus rien.
+
+```
+[syscall] 334 (rseq) (0x404000214a60, 0x20, 0x0) = 0
+```
+
+`rseq` renvoyait **0 — succès** — alors que le noyau ne l'implémente pas. La
+glibc en concluait que sa zone était enregistrée et lisait ensuite un `cpu_id`
+que personne ne tient à jour.
+
+**Répondre « réussi » à ce qu'on n'implémente pas est pire que de l'avouer.**
+`ENOSYS` la fait retomber proprement. Le piège est à rechercher partout où un
+appel non implémenté rend une valeur de succès.
+
+## Où ça en est exactement
+
+`rseq` corrigé, le chargeur **va plus loin mais ne rend toujours pas la main à
+`main()`**. Il reste donc au moins un blocage après `prlimit64`, non identifié à
+ce jour. La méthode pour le nommer est établie et prend une exécution :
+
+```sh
+# dans le scénario, avant la sonde
+strace on
+exec /glibc-probe
+```
+
+C'est le prochain geste, et il ne demande pas de deviner.
+
 ## Le candidat
 
 **WPE WebKit.** Conçu pour l'embarqué : pas de serveur graphique, il rend dans
