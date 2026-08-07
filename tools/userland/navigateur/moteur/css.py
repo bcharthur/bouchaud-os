@@ -205,11 +205,131 @@ def _calcule(expression, reference, taille_police):
 
 
 # --- Selecteurs --------------------------------------------------------------
+#
+# Un seul moteur sert la cascade et `querySelector`. C'etaient deux
+# implementations paralleles, avec deux jeux de limites differents : une regle
+# pouvait styler un element que `document.querySelectorAll` ne trouvait pas.
+# Elles repondent maintenant la meme chose, et tout ce qui est ajoute ici
+# profite aux deux.
+#
+# Ce qui est reconnu : les combinateurs ` `, `>`, `+`, `~` ; les selecteurs
+# d'attribut avec leurs six operateurs et le drapeau d'insensibilite ; les
+# pseudo-classes structurelles (`nth-child` et sa famille, `first-child`,
+# `empty`, `root`…) ; les pseudo-classes fonctionnelles `:is()`, `:where()`,
+# `:not()` et `:has()`.
+
+# Un nom de classe ou d'identifiant. Les echappements comptent : les cadres CSS
+# les plus repandus produisent des classes comme `md\:flex` ou `w-1\/2`, et un
+# nom coupe au `\` ne designe plus rien.
+_NOM = r"(?:\\.|[^\\.#:\[\]()>+~,\s])+"
+
+# Les morceaux d'un selecteur compose (`a.b#c[d]:e`). Les pseudo-classes
+# passent avant les classes : sans cela `.a:not(.b)` se lirait comme deux
+# classes, dont l'une nommee `not(`.
+_JETON = re.compile(r"""
+      ::?[a-zA-Z-]+ (?: \( (?: [^()] | \( [^()]* \) )* \) )?
+    | \[ [^\]]* \]
+    | \.""" + _NOM + r"""
+    | \#""" + _NOM + r"""
+    | \*
+    | [A-Za-z][A-Za-z0-9_-]*
+""", re.X)
+
+_ATTRIBUT = re.compile(r"""\[\s*([A-Za-z_:][-A-Za-z0-9_:.]*)\s*
+                           (?:([~^$*|]?=)\s*("[^"]*"|'[^']*'|[^\]\s]*))?\s*
+                           ([iIsS])?\s*\]""", re.X)
+
+# Pseudo-classes d'etat. Au repos, elles ne designent rien — et c'est la
+# reponse juste : les ignorer, ce que faisait le moteur, appliquait en
+# permanence le style de survol, si bien qu'un bouton portait la couleur qu'il
+# n'aurait du prendre que sous le pointeur.
+_ETATS = {
+    "hover", "active", "focus", "focus-visible", "focus-within",
+    "target", "target-within", "visited", "user-invalid", "user-valid",
+    "autofill", "placeholder-shown", "default", "indeterminate",
+}
+
+# Pseudo-elements engendres par la mise en page.
+_ENGENDRES = {"before", "after"}
+
+_STRUCTURELLES = {
+    "root", "empty", "first-child", "last-child", "only-child",
+    "first-of-type", "last-of-type", "only-of-type", "checked", "disabled",
+    "enabled", "required", "optional", "read-only", "read-write",
+    "link", "any-link", "scope",
+}
+
+_FONCTIONS_NTH = {
+    "nth-child", "nth-last-child", "nth-of-type", "nth-last-of-type",
+}
+
+
+def _desechappe(nom):
+    return re.sub(r"\\(.)", r"\1", nom)
+
+
+def _est_element(nœud):
+    """Un nœud d'element se reconnait a sa balise ; un nœud de texte n'en a pas.
+
+    Duck-typing plutot qu'un `isinstance` : `css` ne doit pas dependre de
+    `html`, sans quoi les deux modules ne peuvent plus s'importer l'un l'autre.
+    """
+    return getattr(nœud, "balise", None) is not None
+
+
+def _parent(element):
+    parent = getattr(element, "parent", None)
+    return parent if parent is not None and _est_element(parent) else None
+
+
+def _fratrie(element):
+    parent = _parent(element)
+    if parent is None:
+        return [element]
+    return [n for n in parent.enfants if _est_element(n)]
+
+
+def _descendants(element):
+    pile = [n for n in getattr(element, "enfants", ()) if _est_element(n)]
+    while pile:
+        nœud = pile.pop()
+        yield nœud
+        pile.extend(n for n in nœud.enfants if _est_element(n))
+
+
+def _analyse_nth(argument):
+    """`2n+1`, `odd`, `-n+3`, `4`… en couple `(a, b)` tel que `an + b`."""
+    texte = argument.strip().lower().replace(" ", "")
+    if texte == "odd":
+        return 2, 1
+    if texte == "even":
+        return 2, 0
+    m = re.fullmatch(r"([+-]?\d*)n([+-]\d+)?", texte)
+    if m:
+        tete = m.group(1)
+        a = 1 if tete in ("", "+") else -1 if tete == "-" else int(tete)
+        return a, int(m.group(2) or 0)
+    try:
+        return 0, int(texte)
+    except ValueError:
+        # Un argument incomprehensible ne doit designer personne, plutot que
+        # tout le monde.
+        return 0, 0
+
+
+def _rang_verifie(a, b, rang):
+    """`rang` est compte a partir de 1, comme dans la norme."""
+    if a == 0:
+        return rang == b
+    reste = rang - b
+    return reste % a == 0 and reste // a >= 0
+
 
 class Simple:
-    """Un maillon de selecteur : balise, classes, identifiant, pseudo-element."""
+    """Un selecteur compose : balise, classes, identifiant, attributs, pseudos."""
 
-    __slots__ = ("balise", "classes", "identifiant", "pseudo")
+    __slots__ = ("balise", "classes", "identifiant", "pseudo", "attributs",
+                 "structurelles", "nth", "groupes", "jamais", "_poids")
 
     def __init__(self, texte):
         self.balise = None
@@ -218,33 +338,94 @@ class Simple:
         # `::before` et `::after` designent une boite qui n'existe pas dans le
         # document : il faut donc les retenir, la mise en page les fabriquera.
         # C'est ainsi que la moitie des sites posent leurs icones et leurs
-        # separateurs — les effacer, comme on le faisait, revenait a jeter cette
-        # moitie-la.
+        # separateurs.
         self.pseudo = None
-        trouve = re.search(r"::?(before|after)\b", texte)
-        if trouve:
-            self.pseudo = trouve.group(1)
-        # `:root` designe l'element racine, donc `<html>` en HTML. Le laisser
-        # tomber avec les autres pseudo-classes en faisait un selecteur
-        # universel : les variables qu'une page y pose etaient alors reposees
-        # sur **chaque** element, ou elles ecrasaient celles qu'un theme local
-        # avait redefinies plus haut dans l'arbre.
-        texte = re.sub(r":root\b", "html", texte)
-        # Les pseudo-classes, elles, restent ignorees : `a:hover` se comporte
-        # comme `a`. Les prendre au pied de la lettre demanderait un etat
-        # d'interaction que le moteur ne tient pas ; les rejeter perdrait la
-        # regle entiere.
-        texte = re.sub(r"::?[a-zA-Z-]+(\([^)]*\))?", "", texte)
-        texte = re.sub(r"\[[^\]]*\]", "", texte)
-        for morceau in re.findall(r"[.#]?[^.#]+", texte):
-            if morceau.startswith("."):
-                self.classes.append(morceau[1:])
-            elif morceau.startswith("#"):
-                self.identifiant = morceau[1:]
-            elif morceau != "*":
-                self.balise = morceau.lower()
+        self.attributs = []
+        self.structurelles = []
+        self.nth = []
+        self.groupes = []
+        # Vrai quand le maillon ne peut designer personne au repos : une
+        # pseudo-classe d'etat, ou un pseudo-element que le moteur ne peint pas.
+        self.jamais = False
+
+        a = b = c = 0
+        for jeton in _JETON.findall(texte):
+            if jeton.startswith("["):
+                m = _ATTRIBUT.match(jeton)
+                if m:
+                    valeur = m.group(3)
+                    if valeur and valeur[:1] in "\"'":
+                        valeur = valeur[1:-1]
+                    insensible = (m.group(4) or "").lower() == "i"
+                    self.attributs.append(
+                        (m.group(1).lower(), m.group(2), valeur, insensible))
+                    b += 1
+                continue
+            if jeton.startswith(":"):
+                pa, pb, pc = self._pseudo(jeton)
+                a, b, c = a + pa, b + pb, c + pc
+                continue
+            if jeton.startswith("."):
+                self.classes.append(_desechappe(jeton[1:]))
+                b += 1
+            elif jeton.startswith("#"):
+                self.identifiant = _desechappe(jeton[1:])
+                a += 1
+            elif jeton != "*":
+                self.balise = jeton.lower()
+                c += 1
+        self._poids = (a, b, c)
+
+    def _pseudo(self, jeton):
+        """Range une pseudo-classe et rend ce qu'elle pese."""
+        double = jeton.startswith("::")
+        corps = jeton.lstrip(":")
+        argument = None
+        ouvrante = corps.find("(")
+        if ouvrante >= 0:
+            argument = corps[ouvrante + 1:-1]
+            corps = corps[:ouvrante]
+        corps = corps.lower()
+
+        if corps in _ENGENDRES:
+            self.pseudo = corps
+            return 0, 0, 1
+        if double:
+            # `::placeholder`, `::selection`, `::-webkit-…` visent une boite que
+            # le moteur ne peint pas. Les ignorer reportait leur mise en forme
+            # sur l'element lui-meme — la couleur du texte d'invite devenait
+            # celle du champ.
+            self.jamais = True
+            return 0, 0, 1
+        if corps == "root":
+            self.structurelles.append("root")
+            return 0, 1, 0
+        if corps in _ETATS:
+            self.jamais = True
+            return 0, 1, 0
+        if corps in ("is", "where", "not", "has") and argument is not None:
+            sous = groupes(argument)
+            self.groupes.append((corps, sous))
+            if corps == "where" or not sous:
+                return 0, 0, 0
+            pire = max(s.specificite for s in sous)
+            return pire
+        if corps in _FONCTIONS_NTH and argument is not None:
+            # `nth-child(2n of .x)` n'est pas reconnu : seul le rang l'est.
+            self.nth.append((corps, _analyse_nth(argument.split(" of ")[0])))
+            return 0, 1, 0
+        if corps in _STRUCTURELLES:
+            self.structurelles.append(corps)
+            return 0, 1, 0
+        # Une pseudo-classe inconnue est ignoree plutot que rejetee : elle ne
+        # doit pas emporter la regle qui la contient.
+        return 0, 1, 0
+
+    # -- Correspondance --------------------------------------------------------
 
     def correspond(self, element):
+        if self.jamais:
+            return False
         if self.balise and element.balise != self.balise:
             return False
         if self.identifiant and element.identifiant != self.identifiant:
@@ -253,16 +434,129 @@ class Simple:
             presentes = set(element.classes)
             if not all(c in presentes for c in self.classes):
                 return False
+        for nom, operateur, valeur, insensible in self.attributs:
+            if not self._attribut(element, nom, operateur, valeur, insensible):
+                return False
+        for nom in self.structurelles:
+            if not self._structurelle(element, nom):
+                return False
+        for fonction, (a, b) in self.nth:
+            if not self._nth(element, fonction, a, b):
+                return False
+        for genre, sous in self.groupes:
+            if not self._groupe(element, genre, sous):
+                return False
         return True
 
+    def _attribut(self, element, nom, operateur, valeur, insensible):
+        if nom not in element.attributs:
+            return False
+        if operateur is None:
+            return True
+        presente = element.attributs[nom]
+        if insensible:
+            presente, valeur = presente.lower(), (valeur or "").lower()
+        if operateur == "=":
+            return presente == valeur
+        if operateur == "^=":
+            return bool(valeur) and presente.startswith(valeur)
+        if operateur == "$=":
+            return bool(valeur) and presente.endswith(valeur)
+        if operateur == "*=":
+            return bool(valeur) and valeur in presente
+        if operateur == "~=":
+            return valeur in presente.split()
+        if operateur == "|=":
+            return presente == valeur or presente.startswith(valeur + "-")
+        return True
+
+    def _structurelle(self, element, nom):
+        if nom == "root":
+            return _parent(element) is None
+        if nom == "scope":
+            return True
+        if nom == "empty":
+            return not any(
+                _est_element(n) or getattr(n, "contenu", "").strip()
+                for n in getattr(element, "enfants", ()))
+        if nom in ("link", "any-link"):
+            return element.balise in ("a", "area") and "href" in element.attributs
+        if nom == "checked":
+            return "checked" in element.attributs or "selected" in element.attributs
+        if nom == "disabled":
+            return "disabled" in element.attributs
+        if nom == "enabled":
+            return "disabled" not in element.attributs
+        if nom == "required":
+            return "required" in element.attributs
+        if nom == "optional":
+            return "required" not in element.attributs
+        if nom == "read-only":
+            return "readonly" in element.attributs or element.balise not in (
+                "input", "textarea", "select")
+        if nom == "read-write":
+            return "readonly" not in element.attributs and element.balise in (
+                "input", "textarea", "select")
+
+        fratrie = _fratrie(element)
+        if nom == "first-child":
+            return bool(fratrie) and fratrie[0] is element
+        if nom == "last-child":
+            return bool(fratrie) and fratrie[-1] is element
+        if nom == "only-child":
+            return len(fratrie) == 1
+        memes = [n for n in fratrie if n.balise == element.balise]
+        if nom == "first-of-type":
+            return bool(memes) and memes[0] is element
+        if nom == "last-of-type":
+            return bool(memes) and memes[-1] is element
+        if nom == "only-of-type":
+            return len(memes) == 1
+        return True
+
+    def _nth(self, element, fonction, a, b):
+        fratrie = _fratrie(element)
+        if fonction.endswith("of-type"):
+            fratrie = [n for n in fratrie if n.balise == element.balise]
+        try:
+            rang = fratrie.index(element) + 1
+        except ValueError:
+            return False
+        if "last" in fonction:
+            rang = len(fratrie) - rang + 1
+        return _rang_verifie(a, b, rang)
+
+    def _groupe(self, element, genre, sous):
+        if genre == "not":
+            return not any(s.correspond_element(element) for s in sous)
+        if genre in ("is", "where"):
+            return any(s.correspond_element(element) for s in sous)
+        if genre == "has":
+            return self._has(element, sous)
+        return True
+
+    def _has(self, element, sous):
+        for selecteur in sous:
+            portee = selecteur.portee
+            if portee == ">":
+                candidats = [n for n in element.enfants if _est_element(n)]
+            elif portee in ("+", "~"):
+                candidats = _suivants(element, un_seul=portee == "+")
+            else:
+                candidats = _descendants(element)
+            for candidat in candidats:
+                if selecteur.correspond_element(candidat, ancre=element):
+                    return True
+        return False
+
     def poids(self):
-        return (1 if self.identifiant else 0, len(self.classes), 1 if self.balise else 0)
+        return self._poids
 
     def cle(self):
         """Le trait le plus discriminant du maillon, pour l'indexation.
 
         L'identifiant d'abord, une classe ensuite, la balise a defaut. `None`
-        pour un maillon universel, qu'aucun index ne peut restreindre.
+        pour un maillon qu'aucun index ne peut restreindre.
         """
         if self.identifiant:
             return ("#", self.identifiant)
@@ -273,34 +567,50 @@ class Simple:
         return None
 
 
-class Selecteur:
-    """Une suite de maillons, relies par la descendance ou par `>`."""
+def _precedents(element, un_seul):
+    """Les freres qui precedent, du plus proche au plus lointain."""
+    fratrie = _fratrie(element)
+    try:
+        rang = fratrie.index(element)
+    except ValueError:
+        return []
+    avant = fratrie[:rang][::-1]
+    return avant[:1] if un_seul else avant
 
-    __slots__ = ("maillons", "combinateurs", "specificite", "pseudo")
+
+def _suivants(element, un_seul):
+    fratrie = _fratrie(element)
+    try:
+        rang = fratrie.index(element)
+    except ValueError:
+        return []
+    apres = fratrie[rang + 1:]
+    return apres[:1] if un_seul else apres
+
+
+# Un combinateur en tete (`> .x` dans un `:has()`) donne sa portee au selecteur.
+_TETE = re.compile(r"^\s*([>+~])\s*")
+
+
+class Selecteur:
+    """Une suite de maillons relies par ` `, `>`, `+` ou `~`."""
+
+    __slots__ = ("maillons", "combinateurs", "specificite", "pseudo", "portee")
 
     def __init__(self, texte):
-        # `+` et `~` designent des freres ; la mise en page ne connait de chaque
-        # element que sa lignee, pas sa fratrie, donc ils sont ramenes a la
-        # descendance — moins precis, mais bien plus proche du resultat attendu
-        # que de jeter la regle entiere.
-        texte = re.sub(r"\s*[+~]\s*", " ", texte)
-        # `>` en revanche est tenu : `.menu > li` ne doit pas atteindre les `li`
-        # d'un sous-menu, et le confondre avec la descendance donnait a des
-        # elements imbriques la mise en forme de leur parent.
-        texte = re.sub(r"\s*>\s*", " > ", texte)
+        texte = texte.strip()
+        tete = _TETE.match(texte)
+        self.portee = tete.group(1) if tete else ""
+        if tete:
+            texte = texte[tete.end():]
 
         self.maillons = []
         # `combinateurs[i]` relie `maillons[i-1]` a `maillons[i]`. La premiere
         # case ne sert pas ; elle existe pour que les indices coincident.
         self.combinateurs = []
-        enfant_direct = False
-        for morceau in texte.split():
-            if morceau == ">":
-                enfant_direct = True
-                continue
+        for morceau, lien in _decoupe(texte):
             self.maillons.append(Simple(morceau))
-            self.combinateurs.append(">" if enfant_direct else " ")
-            enfant_direct = False
+            self.combinateurs.append(lien)
 
         a = b = c = 0
         for maillon in self.maillons:
@@ -316,27 +626,107 @@ class Selecteur:
         return self.maillons[-1].cle() if self.maillons else None
 
     def correspond(self, chemin):
-        """`chemin` est la liste des ancetres, du plus lointain a l'element."""
+        """`chemin` est la lignee de l'element, du plus lointain a lui-meme."""
+        if not chemin:
+            return False
+        return self.correspond_element(chemin[-1])
+
+    def correspond_element(self, element, ancre=None):
+        """L'element est-il designe ?
+
+        `ancre` borne la remontee : dans `:has(.a .b)`, `.a` ne doit pas etre
+        cherche au-dessus de l'element qui porte le `:has()`.
+        """
         if not self.maillons:
             return False
-        index = len(self.maillons) - 1
-        if not self.maillons[index].correspond(chemin[-1]):
+        return self._verifie(len(self.maillons) - 1, element, ancre)
+
+    def _verifie(self, index, element, ancre):
+        if element is None or not self.maillons[index].correspond(element):
             return False
-        index -= 1
-        position = len(chemin) - 2
-        while index >= 0:
-            if position < 0:
+        if index == 0:
+            return True
+        lien = self.combinateurs[index]
+        precedent = index - 1
+        if lien == ">":
+            parent = _parent(element)
+            if parent is None or parent is ancre:
                 return False
-            if self.combinateurs[index + 1] == ">":
-                # Enfant direct : ce maillon-ci doit correspondre au parent
-                # immediat, sans quoi la regle ne s'applique pas du tout.
-                if not self.maillons[index].correspond(chemin[position]):
-                    return False
-                index -= 1
-            elif self.maillons[index].correspond(chemin[position]):
-                index -= 1
-            position -= 1
-        return True
+            return self._verifie(precedent, parent, ancre)
+        if lien == "+":
+            freres = _precedents(element, un_seul=True)
+            return bool(freres) and self._verifie(precedent, freres[0], ancre)
+        if lien == "~":
+            return any(self._verifie(precedent, frere, ancre)
+                       for frere in _precedents(element, un_seul=False))
+        # Descendance : on remonte la lignee, avec retour en arriere. Le
+        # parcours glouton d'avant se trompait des qu'un ancetre correspondait
+        # sans que la suite du selecteur suive.
+        courant = element
+        while True:
+            courant = _parent(courant)
+            if courant is None or courant is ancre:
+                return False
+            if self._verifie(precedent, courant, ancre):
+                return True
+
+
+def _decoupe(texte):
+    """Decoupe un selecteur en couples `(compose, lien au precedent)`.
+
+    Le decoupage respecte les parentheses et les crochets : l'espace de
+    `:not(.a .b)` ou de `[title="a b"]` ne separe pas deux maillons.
+    """
+    morceaux = []
+    courant = ""
+    lien = " "
+    profondeur = 0
+    for caractere in texte:
+        if profondeur == 0 and caractere in " \t\n\r\f>+~":
+            if courant:
+                morceaux.append((courant, lien))
+                courant = ""
+                lien = " "
+            if caractere in ">+~":
+                lien = caractere
+            continue
+        if caractere in "([":
+            profondeur += 1
+        elif caractere in ")]":
+            profondeur -= 1
+        courant += caractere
+    if courant:
+        morceaux.append((courant, lien))
+    if morceaux:
+        # Le premier maillon n'est relie a rien.
+        morceaux[0] = (morceaux[0][0], " ")
+    return morceaux
+
+
+def groupes(texte):
+    """Les selecteurs d'une liste separee par des virgules."""
+    resultat = []
+    courant = ""
+    profondeur = 0
+    for caractere in texte:
+        if caractere == "," and profondeur == 0:
+            if courant.strip():
+                resultat.append(Selecteur(courant))
+            courant = ""
+            continue
+        if caractere in "([":
+            profondeur += 1
+        elif caractere in ")]":
+            profondeur -= 1
+        courant += caractere
+    if courant.strip():
+        resultat.append(Selecteur(courant))
+    return [s for s in resultat if s.maillons]
+
+
+def correspond_un(liste, element):
+    """L'element est-il designe par l'un de ces selecteurs ?"""
+    return any(s.correspond_element(element) for s in liste)
 
 
 class Index:

@@ -64,7 +64,7 @@ except ImportError:
 sys.path.insert(0, ".")
 
 import moteur  # noqa: E402
-from moteur import html, js, reseau  # noqa: E402
+from moteur import css, html, js, reseau  # noqa: E402
 
 # --- Cadre de verification ----------------------------------------------------
 
@@ -144,10 +144,39 @@ def verifie_selecteurs():
     egal("select: attribut faux", len(select('[data-role="autre"]')), 0)
     egal("select: attribut prefixe", len(select('[href^="/x"]')), 1)
     egal("select: groupe", len(select("a, li")), 4)
-    egal("select: pseudo-classe ignoree", len(select("a:hover")), 2)
+    # Au repos, `:hover` ne designe rien. Le moteur l'ignorait, et peignait donc
+    # en permanence le style que la page reservait au pointeur.
+    egal("select: pseudo-classe d'etat", len(select("a:hover")), 0)
     egal("select: universel dans contexte", len(select("*")),
          len([n for n in doc.racine.parcours() if isinstance(n, html.Element)]))
+
+    # Freres, rangs et pseudo-classes fonctionnelles : `querySelector` et la
+    # cascade partagent desormais le meme moteur, donc les memes reponses.
+    egal("select: frere adjacent", len(select("a + a")), 1)
+    egal("select: frere general", len(select("li ~ li")), 1)
+    egal("select: premier enfant", len(select("li:first-child")), 1)
+    egal("select: dernier enfant", len(select("li:last-child")), 1)
+    egal("select: rang impair", len(select("li:nth-child(odd)")), 1)
+    egal("select: rang calcule", len(select("li:nth-child(2n)")), 1)
+    egal("select: negation", len(select("a:not(.actif)")), 1)
+    egal("select: negation composee", len(select("li:not(.special):not(.autre)")), 1)
+    egal("select: is", len(select("a:is(.actif, .absent)")), 1)
+    egal("select: where sans poids", len(select(":where(a).lien")), 2)
+    egal("select: has descendant", len(select("div:has(a)")), 1)
+    egal("select: has enfant direct", len(select("ul:has(> li)")), 1)
+    egal("select: has absent", len(select("ul:has(a)")), 0)
+    egal("select: attribut sous-chaine", len(select('[data-role*="en"]')), 1)
+    egal("select: attribut insensible", len(select('[data-role="MENU" i]')), 1)
     contexte.ferme()
+
+    # La specificite suit la norme : `:is()` prend celle de son argument le plus
+    # fort, `:where()` ne pese rien, `:not()` pese ce qu'il nie.
+    egal("specificite: is", css.groupes(":is(#a, .b)")[0].specificite, (1, 0, 0))
+    egal("specificite: where", css.groupes(":where(#a)")[0].specificite, (0, 0, 0))
+    egal("specificite: not", css.groupes("p:not(.b)")[0].specificite, (0, 1, 1))
+    # Une classe echappee — `md\:flex`, `w-1\/2` — est un seul nom, pas deux.
+    egal("selecteur: classe echappee",
+         css.groupes(r".md\:flex")[0].maillons[0].classes, ["md:flex"])
 
 
 # --- JavaScript ---------------------------------------------------------------
