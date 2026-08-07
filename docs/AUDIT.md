@@ -1,139 +1,297 @@
-# Audit des couches — Bouchaud OS + Nautile (juillet 2026)
+# Audit — Bouchaud OS et son navigateur (août 2026)
 
-Méthode : lecture de chaque couche, compilation contre la cible réelle
-(`x86_64-bouchaud_os.json`), et pour chaque bibliothèque externe candidate un
-**test empirique** (compile-t-elle vraiment en no_std contre cette cible ?)
-suivi d'une **vérification pixel-exacte** en harnais std quand c'est du
-décodage (mêmes fichiers sources que le noyau, comparés à la référence).
+Cet audit remplace celui de juillet 2026, devenu faux : il décrivait **Nautile**,
+le moteur web qui vivait dans le noyau, supprimé depuis (`b2d2615`).
 
-Barème : ✅ solide · 🟡 fonctionne avec des manques connus · 🔴 embryonnaire.
+**Méthode.** Rien n'est repris sur parole, y compris de la documentation du
+dépôt. Chaque ligne ci-dessous est soit une compilation réelle contre la cible
+`x86_64-bouchaud_os.json`, soit une exécution de la suite de vérifications, soit
+une lecture du code qui décide. Ce qui n'a pas pu être exécuté est marqué comme
+tel plutôt que supposé.
+
+**Limite de cet audit.** QEMU n'est pas disponible dans l'environnement où il a
+été mené : **aucune vérification à l'exécution sous l'OS** n'a pu être faite. Les
+affirmations sur le comportement au démarrage viennent du code et du journal des
+commits, pas d'un boot observé. Le harnais existe (`tools/test.sh`) et reste le
+seul juge sur ce plan.
+
+Barème : ✅ vérifié ici · 🟢 solide (lecture) · 🟡 fonctionne, manques connus ·
+🔴 embryonnaire ou bloqué.
 
 ---
 
-## Couche par couche
+## 1. Ce qui a été vérifié par exécution
 
-### arch/x86_64 — ✅ socle sain
-GDT/IDT/ports/instructions via les crates standard de l'OSdev Rust
-(`x86_64`, `pic8259`). **Manques** : APIC/IOAPIC (on est sur le PIC 8259
-hérité), SMP (mono-cœur), ACPI (pas d'extinction propre ni d'énumération).
-
-### kernel — 🔴 la couche la plus mince de l'OS
-- `heap`/`memory` : allocateur `linked_list_allocator` sur toute la RAM
-  mappée, bascule d'arène au boot. Correct.
-- `timer` : PIT + TSC calibré, millisecondes réelles indépendantes de la
-  vitesse QEMU. Correct.
-- `dmesg`/`panic` : journal circulaire + handler. Correct.
-- `scheduler` : **placeholder assumé** — coopératif, `yield_now()` est un
-  no-op, pas de préemption, pas de changement de contexte, pas de piles par
-  tâche. `process`/`syscall`/`handle` : embryonnaires.
-- **Priorité OS n°1** : ordonnanceur préemptif round-robin sur IRQ0
-  (sauvegarde/restauration de registres, une pile par tâche). Sans lui, un
-  chargement de page fige tout le bureau — c'est le plafond de verre actuel.
-
-### drivers — 🟡 suffisant pour QEMU, rien pour le matériel réel
-e1000 (réseau), VGA/framebuffer, clavier, souris, série : OK pour QEMU.
-**Manques** : disque (`disk.rs` = 20 lignes, pas d'ATA/AHCI/NVMe → aucune
-persistance), USB, audio, virtio (perfs QEMU bien meilleures que l'émulation
-e1000/VGA).
-
-### fs — 🔴 RAM uniquement
-`ramfs` avec permissions basiques. Tout est perdu à l'extinction.
-**Manques** : driver bloc + FS persistant (FAT32 est le plus simple ;
-crates candidates : `fatfs` — à tester en no_std), VFS, montage.
-
-### net — ✅ remarquablement complet
-Du lien à l'application : Ethernet/ARP/IPv4/ICMP/DHCP/DNS, TCP maison,
-**TLS 1.3 maison** (X25519, AES-GCM, ChaCha20-Poly1305, X.509 RSA/ECDSA
-P-256/384), HTTP/1.1 avec gzip/deflate/**brotli** maison, HTTP/2 (HPACK)
-négocié par ALPN, cache mémoire, budget réseau par page (5 s).
-`smoltcp` compilé et branché sur une commande de test (`smoltest`) mais pas
-encore chemin par défaut.
-**Manques** : IPv6, reprise de session TLS (0-RTT/tickets), cookies
-persistants, WebSocket, QUIC/HTTP-3 (hors de portée raisonnable).
-**Reco** : après un `smoltest` concluant en exécution réelle, basculer
-`fetch_document` sur smoltcp (retransmission/fenêtres RFC 793 correctes,
-là où le TCP maison est fragile sur pertes).
-
-### wasm — ✅ `wasmi` 0.31 no_std, fonctionne.
-
-### gui — 🟡 fonctionnel
-Framebuffer double-buffer, gestionnaire de fenêtres (drag/resize/z-order),
-apps natives. **Manques** : rectangles sales (on repeint tout à chaque
-frame), pas de compositing par fenêtre.
-
-### browser/Nautile — 🟡 le plus gros investissement, des manques ciblés
-
-| Sous-système | État | Détail |
+| Vérification | Commande | Résultat |
 |---|---|---|
-| HTML | ✅ | tokenizer/tree-builder maison, entités, auto-close |
-| CSS | 🟡 | cascade + index par clé (id/classe/tag), calc(), var(), nth/attributs/combinateurs ; manque @media complet, ::before/::after, animations |
-| Layout flex | ✅ | **taffy** (vrai algorithme) branché sur le rendu réel |
-| Layout grid | ✅ | **taffy grid branché par cet audit** (pistes fr/px/%/minmax/repeat, spans) ; heuristique en repli |
-| Position/couches | 🟡 | absolute/fixed/z-index avec plafond MAX_LAYERS=256 ; hauteurs % imbriquées toujours résolues contre le viewport (limitation single-pass connue) |
-| Images | ✅ | PNG (maison + **zune-png** entrelacé), JPEG (maison + **zune-jpeg** progressif), GIF 1re frame, BMP, WebP **VP8L ET VP8 lossy** (vp8.rs, bit-exact vs libwebp sur 11 images) ; manquent : AVIF, GIF animé, alpha ALPH |
-| Polices | ✅ | **fontdue** primaire (cet audit) + rasterizer maison en repli ; manque : @font-face (webfonts), fallback multi-polices, shaping (rustybuzz validé no_std, à brancher) |
-| JS | 🟡 | interpréteur maison ~4600 lignes, DOM/événements/modules ; async/await *parsés mais synchrones*, pas de vraie event loop ni de vrais timers |
-| Réseau page | ✅ | budget 5 s, CSS externe, sous-ressources |
+| Compilation du noyau | `cargo build` | ✅ **succès, 0 warning**, 1 min 09 s |
+| Moteur du navigateur | `tools/userland/test-moteur.sh` | ✅ **388/388**, 0 échec |
+| Toolchain épinglée | `rust-toolchain.toml` | ✅ nightly-2026-06-01 s'installe seule |
+
+Deux résultats à souligner. Un noyau `no_std` de 32 700 lignes qui compile
+**sans un seul avertissement** n'est pas la norme. Et les 388 vérifications du
+moteur tournent avec le **vrai QuickJS**, pas un bouchon : seul l'hôte Qt est
+simulé, tout le reste du moteur est celui qui tourne sous l'OS.
+
+Le chiffre de « 92 vérifications » annoncé dans `docs/ROADMAP.md` est périmé
+d'un facteur quatre.
 
 ---
 
-## Bibliothèques externes : testées empiriquement sur cette cible
+## 2. Il y a trois navigateurs dans ce dépôt, et c'est le principal problème
 
-### Intégrées (cet audit)
-| Crate | Rôle | Vérification |
+C'est la découverte structurante de cet audit. Trois programmes portent le nom
+de navigateur, deux sont morts, et rien dans l'arborescence ne le dit.
+
+| # | Chemin | Ce que c'est | État |
+|---|---|---|---|
+| 1 | `tools/userland/navigateur/` | Moteur Python + hôte Qt + QuickJS + ffmpeg, ring 3 | 🟢 **le vrai** |
+| 2 | `src/assets/python/browser.py` | Mode texte, RustPython/WASM, via `/dev/web` | 🟡 doublon vivant |
+| 3 | `tools/qt-browser/browser.py` | PyQt5 + QtWebEngine | 🔴 **ne tournera jamais ici** |
+
+**Le n° 3 est un leurre.** C'est le tutoriel `QWebEngineView` recopié tel quel.
+Son propre en-tête admet qu'il ne peut pas tourner sous Bouchaud OS — il lui
+faudrait Chromium, un serveur graphique et un éditeur de liens dynamique. Il ne
+sert qu'à documenter d'où vient l'idée. Placé dans `tools/` sans distinction, il
+laisse croire que « le navigateur Qt » du projet est celui-là.
+
+**Le n° 2 est un doublon.** `pybrowser` affiche des pages en texte dans la
+console du noyau, via un pont `/dev/web` et un RustPython de **16,4 Mo embarqué
+dans le binaire du noyau** par `include_bytes!`. Il a été écrit pour prouver que
+les couches s'enchaînaient, à une époque où le n° 1 n'existait pas. Depuis que le
+n° 1 tourne, il coûte 16 Mo d'image de boot pour une fonction que le n° 1 remplit
+mieux.
+
+**Le n° 1 est bon, et sous-estimé.** L'architecture est juste : Qt ne fait que
+la fenêtre, le framebuffer et la peinture ; le moteur est du Python pur qui rend
+une liste d'affichage plate. Le moteur ne touche jamais un objet Qt — c'est
+précisément ce qui permet aux 388 vérifications de tourner sans écran. Refuser
+PyQt au profit d'un module `bo` de quelques centaines de lignes est le bon appel :
+PyQt statique n'existe pas vraiment.
+
+---
+
+## 3. Le navigateur (n° 1) — ce qui marche
+
+Vérifié par les 388 tests, sauf mention contraire.
+
+**Analyse et style.** HTML tolérant (balises non fermées, imbrications
+interdites, entités). Sélecteurs de balise, classe, identifiant, attribut,
+descendance, enfant direct, avec spécificité, cascade et héritage. Feuille de
+l'agent utilisateur. Propriétés personnalisées (`--x`/`var()` avec secours),
+`:root`, `rem`. `@media` évalué contre la fenêtre réelle. `::before`/`::after`
+avec `attr()`. `calc()`, unités de fenêtre, `box-sizing`, bornes `min-*`/`max-*`.
+
+**Mise en page.** Bloc et en ligne avec retour à la ligne mesuré sur la vraie
+fonte. Flex complet (base, `grow`/`shrink`, `wrap`, `justify-content`,
+`align-items`, colonnes). Grille (`repeat()`, `minmax()`, `fr`, `gap`, placement
+auto et explicite). `position: absolute`/`fixed`. `overflow: hidden` réellement
+rogné.
+
+**JavaScript.** QuickJS lié en statique — donc l'ECMAScript entier, ramasse-miettes
+et expressions rationnelles compris. Par-dessus : DOM, événements à trois phases,
+minuteries, promesses, XHR/fetch, `getComputedStyle` **résolu**,
+`MutationObserver`/`IntersectionObserver`/`ResizeObserver`, `customElements` avec
+cycle de vie, `attachShadow`, canvas 2D, modules ES avec `import` chargé sur le
+réseau.
+
+**Réseau et état.** HTTP/HTTPS, redirections, jeux de caractères, `file://`.
+Connexions réutilisées, 4 sous-ressources en parallèle, corps `gzip`. Témoins,
+cache HTTP et `localStorage` **persistés sur le disque**. Client DNS écrit sur
+mesure (la glibc statique ne sait pas résoudre : elle délègue à NSS par `dlopen`).
+
+**Médias.** H.264/VP9/AAC/Opus par libavcodec, `<video>`/`<audio>`, Media Source
+Extensions, sortie AC'97. Images PNG/JPEG/GIF/BMP/ICO décodées par Qt.
+
+**Performance.** L'index de règles fait tomber la mise en page d'une feuille de
+1 600 règles de **3,57 s à 0,059 s** (×60). C'est la bonne optimisation : sans
+index, styler un élément coûtait un essai par règle de la feuille — plus d'un
+million d'essais par mise en page sur une page de 800 éléments, refaits à chaque
+battement du JavaScript.
+
+---
+
+## 4. Le navigateur — ce qui ne marche pas
+
+| Manque | Portée | Coût estimé |
 |---|---|---|
-| `zune-jpeg` 0.5 | JPEG **progressif** (SOF2), en repli du décodeur maison | 0/5917 px d'écart vs libjpeg (harnais) |
-| `zune-png` 0.4 | PNG **entrelacé** (Adam7), en repli du maison | 0/1650 px, exact |
-| `fontdue` 0.9 | rendu de police primaire (AA mature, cmap 4/12, composites) | conversion métriques vérifiée (ascent/ymin/avance, rendu accents) |
-| `hashbrown` 0.15 | HashMap O(1) : scopes JS (chemin le plus chaud de l'interpréteur) + tables Huffman WebP | WebP re-vérifié pixel-exact après bascule |
-| `taffy` 0.12 + feature **grid** | vrai CSS Grid dans `grid_inner` | parsing des pistes vérifié valeur par valeur |
+| **`transition`, `animation`, `transform`** | Le web moderne *bouge*. La page s'affiche à son état final. | moyen |
+| **`getImageData`, dégradés, ombres (canvas)** | L'hôte ne prête pas de tampon de pixels | moyen |
+| **`grid-template-areas`** | Retombe sur le placement automatique | faible |
+| **`order` en flexbox** | Ordre du source conservé | faible |
+| **Isolement du Shadow DOM** | Les sélecteurs de la page atteignent la racine d'ombre ; `:host` et `<slot>` ignorés | moyen |
+| **Chargement parallèle des modules ES** | Graphe d'`import` rapporté module par module (chargeur QuickJS synchrone) | moyen |
+| **WebGL, WebAssembly, EME/Widevine** | Hors de portée, et assumé comme tel | — |
 
-### Déjà en place (sessions précédentes)
-`taffy` (flex), `smoltcp` (TCP expérimental), `wasmi` (WebAssembly).
+**L'absence de `transform` et d'`animation` est le manque le plus visible.**
+Ce n'est pas une question de fidélité de rendu : une page moderne sur deux place
+son menu, ses cartes ou son en-tête avec `transform: translate(...)`. Les ignorer
+ne dégrade pas l'animation, cela **déplace des éléments au mauvais endroit**.
 
-### Validées no_std mais PAS branchées (prochaines étapes naturelles)
-- `rustybuzz` 0.20 : shaping OpenType (ligatures, arabe/indic, kerning) —
-  compile sur la cible ; le brancher = passer le pipeline texte des `char`
-  aux glyph IDs.
-
-### Testées et REJETÉES (dépendance transitive exigeant `std`)
-| Crate | Bloqueur |
-|---|---|
-| `boa_engine` (JS) | `serde_core`, ~5800 erreurs |
-| `cssparser` (Servo) | `phf` avec feature `std` forcée (unification cargo) |
-| `image-webp` | `byteorder-lite` |
-| `png` 0.17 | `fdeflate`/`miniz_oxide` en mode std |
-| `gif` 0.13 | `weezl` |
+**Un défaut de méthode, aussi.** Le §13 du README (`pywebview`) affirme que le
+moteur « ne fait pas de JavaScript », qu'il n'a ni canvas, ni Web Components, ni
+`IntersectionObserver`, et que `getComputedStyle` rend le style en ligne. Le §12
+du même fichier — et les 388 tests — disent le contraire pour chacun de ces
+points. Le §13 n'a pas été relu après l'arrivée de QuickJS. Une documentation qui
+sous-estime le produit fait le même tort qu'une qui le surestime.
 
 ---
 
-## Priorités recommandées (ordre de valeur/effort)
+## 5. Le système — ce qui marche
 
-**Navigateur**
-1. ~~WebP VP8 lossy~~ — **FAIT** : décodeur keyframe complet écrit à la main
-   (vp8.rs : lecteur booléen RFC 6386, segments, tokens DCT, prédiction intra
-   16x16/4x4/chroma, IDCT/IWHT bit-exacts, filtre de boucle simple+normal,
-   suréchantillonnage fancy, YUV→RGB virgule fixe libwebp), vérifié
-   **bit-exact** contre libwebp sur 11 images (1 px → 120 000 px, q10 → q100).
-2. ~~@media queries~~ — **FAIT** : conditions évaluées contre le viewport
-   (min/max-width/height, orientation, print exclu, prefers-color-scheme).
-3. ~~Cookies~~ — **FAIT** : pot en mémoire, envoyé sur h1 + h2.
-4. Event loop JS : les files micro/macrotâches existent déjà (js/mod.rs:944) ;
-   reste à pomper les timers longs APRÈS le premier rendu (progressif).
-5. **@font-face** : télécharger la police de la page et la charger dans
-   fontdue (il accepte des bytes arbitraires) — gros gain de fidélité.
-6. **rustybuzz** : shaping (déjà validé no_std).
-7. Reprise de session TLS : moins de round-trips.
+| Couche | État | Note |
+|---|---|---|
+| `arch/x86_64` | 🟢 | GDT complète, TSS RSP0, `syscall`/`sysretq`, `iretq`, PCI, RTC |
+| Mémoire virtuelle | 🟢 | Frames physiques, espace d'adressage par processus (`vmm.rs`, 614 l.) |
+| **Ordonnanceur** | 🟢 | **Préemptif** sur IRQ0 pour le ring 3 (`task.rs`, 1 010 l.) |
+| Chargeur ELF64 | 🟢 | `PT_LOAD`, `PT_INTERP`, `PT_TLS`, auxv complet |
+| ABI Linux | 🟢 | ~125 branches de dispatch, numéros et structures Linux |
+| Processus / signaux | 🟢 | `fork`, `execve`, `wait4`, `clone`, futex, signaux |
+| Réseau | 🟢 | Ethernet→TLS 1.3 **maison**, HTTP/2, brotli ; sockets POSIX par-dessus |
+| Graphique (ring 3) | 🟢 | `/dev/fb0` mmap, ioctls fbdev, evdev clavier/souris, tick 1000 Hz |
+| **Persistance** | 🟢 | Pilote ATA (374 l.) + zone inscriptible (`persistance.rs`) |
+| Bureau natif | 🟡 | Fenêtres, glisser/redimensionner, z-order ; repeint tout à chaque frame |
 
-**OS**
-6. **Ordonnanceur préemptif** (voir kernel) — débloque le reste (réseau en
-   tâche de fond, UI fluide pendant les chargements).
-7. **Persistance** : driver ATA + FAT32 (`fatfs` à tester).
-8. virtio-net/virtio-gpu pour QEMU.
+Deux de ces lignes contredisent l'audit de juillet, qui datait d'avant le
+travail correspondant : l'ordonnanceur **est** préemptif, et la persistance
+**existe**. C'est la raison d'être de cette révision.
+
+Le tick à 1000 Hz mérite une mention : sans lui, la granularité de 55 ms du PIT
+par défaut rendrait toute animation saccadée et tout `poll` imprécis. C'est ce
+qui rend la boucle d'événements de Qt utilisable.
 
 ---
 
-*Audit réalisé et intégrations appliquées le 2026-07-08 sur la branche
-`claude/bouchaud-os-audit-erast2`. Toutes les intégrations compilent contre
-la cible réelle et gardent le chemin maison en repli : le boot ne peut pas
-être cassé par une régression de crate externe.*
+## 6. Le système — ce qui ne marche pas
+
+### 6.1 Bloquant, par ordre de gravité
+
+**`listen`/`accept` ne sont pas implémentés** (`abi/net.rs:803`). Conséquence
+directe et mesurable : toute application pywebview servant des fichiers locaux
+(`create_window(url='index.html')`) échoue, parce que pywebview démarre un
+serveur HTTP interne. Plus largement, l'OS ne peut héberger aucun service.
+
+**Le chargeur dynamique de la glibc n'atteint pas `main()`.** C'est l'état
+consigné par le dernier commit sur le sujet (`4df176b`) : blocage après
+`prlimit64`, cause non identifiée. Cela ferme la voie la plus prometteuse du
+projet — exécuter les binaires Linux du monde réel (dont WebKit, disponible en
+paquet Ubuntu) plutôt que porter du code.
+
+Cette voie mérite d'être défendue : elle est juste. C'est la méthode du
+linuxulator de FreeBSD, de WSL1 et de gVisor. Et la preuve est déjà faite —
+Qt tourne, des millions de lignes de C++ sans une ligne modifiée. Il ne manque
+que la glibc.
+
+Le journal de bord contient au passage la meilleure leçon d'ingénierie du dépôt :
+`rseq` renvoyait **0 (succès)** pour un appel non implémenté, et la glibc
+avançait dans le vide. Répondre « réussi » à ce qu'on n'implémente pas est pire
+que de l'avouer. **Ce piège est à rechercher systématiquement** — partout où un
+appel non implémenté rend une valeur de succès.
+
+**Aucun gestionnaire de fenêtres pour le ring 3.** Un binaire Qt prend
+`/dev/fb0` en entier. Les fenêtres suivantes s'affichent l'une après l'autre dans
+la même surface. Il y a donc deux mondes graphiques disjoints : le bureau du
+noyau (avec son WM, ses apps natives) et le plein écran des applications ring 3.
+
+**Le navigateur n'est nulle part dans le bureau.** Le menu Démarrer
+(`gui/window.rs:24`) propose Terminal, Fichiers, Moniteur, Calculatrice, Rustpad.
+Pas de navigateur. Le seul moyen de le lancer est `exec /bo-navigateur` depuis le
+shell. Le produit phare du projet est invisible depuis son interface.
+
+### 6.2 Structurel
+
+**Le navigateur n'est pas constructible à partir d'un dépôt frais.** Il exige
+Qt 5.15 statique **et** un CPython glibc embarquable, tous deux à compiler
+(`build-qt.sh`, `build-python.sh`) — des heures. `out-quickjs/` et `out-ffmpeg/`
+sont présents ici mais **ignorés par git** : ils viennent de l'environnement, pas
+du dépôt. Il n'existe aucune intégration continue, aucune image préconstruite.
+En pratique, une seule machine au monde peut produire ce binaire de 32 Mo.
+
+**Code mort qui ment.** `kernel/scheduler.rs` déclare
+`« coopératif (pas de préemption ; round-robin sur timer planifié) »` alors que
+`task.rs` préempte réellement depuis IRQ0. Avec `syscall.rs` (44 l.) et
+`handle.rs` (48 l.) — **zéro utilisation externe, vérifié** — ce sont des vestiges
+de la V0.6 que `kernel/abi/` a remplacés.
+
+**Documentation périmée à trois endroits.** Le `README.md` racine décrit encore
+la « phase 0 » : il annonce un écran VGA texte, et sa feuille de route laisse
+GDT, IDT, interruptions, mémoire et shell **décochés** — tous faits depuis
+longtemps. Il présente `tools/qt-browser/` comme la référence et `pybrowser`
+comme le navigateur de l'OS, sans mentionner le vrai. `docs/WEB_ENGINE_MODULES.md`
+décrit l'architecture cible de Nautile, supprimé. `docs/ROADMAP.md` s'ouvre sur
+un V0.35 qui annonce « le bureau ouvre par défaut Nautile ».
+
+C'est le README racine qui compte le plus : c'est la première page que voit un
+visiteur, et elle décrit un projet dix fois moins avancé que le vrai.
+
+---
+
+## 7. Ce que je recommande, par valeur rendue
+
+L'ordre suit le rapport entre ce que ça débloque et ce que ça coûte.
+
+### Rendre visible et honnête ce qui existe déjà — quelques heures
+
+1. **Réécrire le `README.md` racine.** Le projet est très en avance sur sa
+   vitrine. Aucun code à écrire, effet immédiat.
+2. **Mettre le navigateur dans le menu Démarrer.** Une entrée qui fait
+   `exec /bo-navigateur`.
+3. **Supprimer `tools/qt-browser/`** (ou le déplacer sous `docs/` en l'annonçant
+   comme référence historique) et **retirer `pybrowser`** avec son RustPython :
+   **−16 Mo sur l'image de boot**, et un seul navigateur au lieu de trois.
+4. **Supprimer `scheduler.rs`, `syscall.rs`, `handle.rs`** ; router `GetPid` vers
+   `task.rs`.
+5. **Corriger le §13 du README userland**, qui sous-estime le moteur.
+
+### Rendre le navigateur moderne — le vrai chantier
+
+6. **`transform` et `transition`/`animation`.** Le manque le plus visible.
+   `transform` d'abord : c'est de la mise en page, pas de l'animation, et son
+   absence place des éléments au mauvais endroit. `transition` ensuite, en
+   s'appuyant sur les minuteries qui existent déjà.
+7. **Isolement du Shadow DOM** (`:host`, `<slot>`, portée des sélecteurs) : sans
+   lui, les composants d'une page moderne fuient les uns dans les autres.
+8. **Tampon de pixels pour le canvas** (`getImageData`, dégradés, ombres).
+
+### Débloquer le système
+
+9. **`listen`/`accept`.** Le README les annonce comme « le prochain manque à
+   combler », et c'est juste : ils débloquent pywebview servant des fichiers
+   locaux, et tout service local.
+10. **Reprendre le banc d'essai glibc** avec la méthode qui a trouvé `rseq` :
+    tracer, lire l'appel exact, ne rien supposer. En balayant d'abord tous les
+    appels non implémentés qui renvoient un succès — c'est la classe de défaut
+    qui a déjà mordu une fois.
+11. **Un gestionnaire de fenêtres pour le ring 3**, ou à défaut assumer le plein
+    écran et le documenter comme un choix.
+
+### Rendre le tout reproductible
+
+12. **Une intégration continue** qui lance au minimum `cargo build` et
+    `test-moteur.sh` — les deux tournent en moins de deux minutes et auraient
+    attrapé la dérive de documentation relevée ici.
+13. **Publier les artefacts** (`out-qt`, `out-python-embed`) ou fournir un
+    conteneur de compilation, pour que le navigateur soit constructible ailleurs
+    que sur une seule machine.
+
+---
+
+## 8. En un paragraphe
+
+Le projet est bien plus solide que sa documentation ne le laisse croire. Le
+noyau compile sans un avertissement, l'ABI Linux est assez complète pour faire
+tourner Qt sans modification, la pile TLS 1.3 est écrite à la main, et le moteur
+du navigateur passe 388 vérifications avec un vrai moteur JavaScript. La décision
+d'avoir sorti le moteur web du ring 0 était la bonne, et celle d'exécuter les
+binaires Linux plutôt que de les porter l'est aussi. Ce qui manque n'est pas de
+la puissance : c'est de la **finition** — un navigateur qu'on ne peut pas lancer
+depuis le bureau, trois navigateurs dont deux morts, une vitrine qui décrit la
+phase 0, et une chaîne de construction qui ne fonctionne que sur une machine. Le
+plus grand pas en avant disponible ne demande pas d'écrire un moteur de rendu :
+il demande de faire le ménage, puis d'ajouter `transform`.
+
+---
+
+*Audit mené le 2026-08-07 sur la branche `claude/audit-qt-browser-0fd4eu`.
+Compilation et suite de vérifications exécutées ; aucun démarrage sous QEMU
+(émulateur absent de l'environnement).*
