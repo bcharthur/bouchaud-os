@@ -25,16 +25,17 @@ Barème : ✅ vérifié ici · 🟢 solide (lecture) · 🟡 fonctionne, manques
 | Vérification | Commande | Résultat |
 |---|---|---|
 | Compilation du noyau | `cargo build` | ✅ **succès, 0 warning**, 1 min 09 s |
-| Moteur du navigateur | `tools/userland/test-moteur.sh` | ✅ **388/388**, 0 échec |
+| Moteur du navigateur | `tools/userland/test-moteur.sh` | ✅ **444/444**, 0 échec |
 | Toolchain épinglée | `rust-toolchain.toml` | ✅ nightly-2026-06-01 s'installe seule |
 
 Deux résultats à souligner. Un noyau `no_std` de 32 700 lignes qui compile
-**sans un seul avertissement** n'est pas la norme. Et les 388 vérifications du
+**sans un seul avertissement** n'est pas la norme. Et les vérifications du
 moteur tournent avec le **vrai QuickJS**, pas un bouchon : seul l'hôte Qt est
 simulé, tout le reste du moteur est celui qui tourne sous l'OS.
 
 Le chiffre de « 92 vérifications » annoncé dans `docs/ROADMAP.md` est périmé
-d'un facteur quatre.
+d'un facteur cinq. *(388 au moment de l'audit ; 444 après le chantier
+« web moderne » décrit au §9.)*
 
 ---
 
@@ -65,7 +66,7 @@ mieux.
 **Le n° 1 est bon, et sous-estimé.** L'architecture est juste : Qt ne fait que
 la fenêtre, le framebuffer et la peinture ; le moteur est du Python pur qui rend
 une liste d'affichage plate. Le moteur ne touche jamais un objet Qt — c'est
-précisément ce qui permet aux 388 vérifications de tourner sans écran. Refuser
+précisément ce qui permet aux vérifications de tourner sans écran. Refuser
 PyQt au profit d'un module `bo` de quelques centaines de lignes est le bon appel :
 PyQt statique n'existe pas vraiment.
 
@@ -73,7 +74,7 @@ PyQt statique n'existe pas vraiment.
 
 ## 3. Le navigateur (n° 1) — ce qui marche
 
-Vérifié par les 388 tests, sauf mention contraire.
+Vérifié par la suite de tests, sauf mention contraire.
 
 **Analyse et style.** HTML tolérant (balises non fermées, imbrications
 interdites, entités). Sélecteurs de balise, classe, identifiant, attribut,
@@ -113,27 +114,28 @@ battement du JavaScript.
 
 ## 4. Le navigateur — ce qui ne marche pas
 
-| Manque | Portée | Coût estimé |
+*Les quatre premières lignes de ce tableau ont été traitées depuis — voir le
+§9. Elles sont laissées ici parce qu'elles disent ce que l'audit a trouvé.*
+
+| Manque | Portée | Suite donnée |
 |---|---|---|
-| **`transition`, `animation`, `transform`** | Le web moderne *bouge*. La page s'affiche à son état final. | moyen |
-| **`getImageData`, dégradés, ombres (canvas)** | L'hôte ne prête pas de tampon de pixels | moyen |
-| **`grid-template-areas`** | Retombe sur le placement automatique | faible |
-| **`order` en flexbox** | Ordre du source conservé | faible |
-| **Isolement du Shadow DOM** | Les sélecteurs de la page atteignent la racine d'ombre ; `:host` et `<slot>` ignorés | moyen |
-| **Chargement parallèle des modules ES** | Graphe d'`import` rapporté module par module (chargeur QuickJS synchrone) | moyen |
+| ~~**`transform`**~~ | Le manque le plus grave : du placement, pas de la décoration | **fait** (§9) |
+| ~~**`grid-template-areas`**~~ | Retombait sur le placement automatique | **fait** (§9) |
+| ~~**`order` en flexbox**~~ | Ordre du source conservé | **fait** (§9) |
+| ~~**Bords par côté, coins, ombres, dégradés**~~ | `border-bottom` ne peignait rien | **fait** (§9) |
+| **`transition`, `animation`** | La page s'affiche à son état final | ouvert |
+| **`getImageData`, dégradés, ombres (canvas)** | L'hôte ne prête pas de tampon de pixels | ouvert |
+| **Isolement du Shadow DOM** | Les sélecteurs de la page atteignent la racine d'ombre ; `:host` et `<slot>` ignorés | ouvert |
+| **Chargement parallèle des modules ES** | Graphe d'`import` rapporté module par module (chargeur QuickJS synchrone) | ouvert |
 | **WebGL, WebAssembly, EME/Widevine** | Hors de portée, et assumé comme tel | — |
 
-**L'absence de `transform` et d'`animation` est le manque le plus visible.**
-Ce n'est pas une question de fidélité de rendu : une page moderne sur deux place
-son menu, ses cartes ou son en-tête avec `transform: translate(...)`. Les ignorer
-ne dégrade pas l'animation, cela **déplace des éléments au mauvais endroit**.
-
-**Un défaut de méthode, aussi.** Le §13 du README (`pywebview`) affirme que le
-moteur « ne fait pas de JavaScript », qu'il n'a ni canvas, ni Web Components, ni
-`IntersectionObserver`, et que `getComputedStyle` rend le style en ligne. Le §12
-du même fichier — et les 388 tests — disent le contraire pour chacun de ces
-points. Le §13 n'a pas été relu après l'arrivée de QuickJS. Une documentation qui
-sous-estime le produit fait le même tort qu'une qui le surestime.
+**Un défaut de méthode, aussi.** Le §13 du README (`pywebview`) affirmait que le
+moteur « ne fait pas de JavaScript », qu'il n'avait ni canvas, ni Web Components,
+ni `IntersectionObserver`, et que `getComputedStyle` rendait le style en ligne.
+Le §12 du même fichier — et les tests — disaient le contraire pour chacun de ces
+points : le §13 n'avait pas été relu après l'arrivée de QuickJS. Une
+documentation qui sous-estime le produit fait le même tort qu'une qui le
+surestime. *(Corrigé depuis, voir §9.)*
 
 ---
 
@@ -289,6 +291,50 @@ depuis le bureau, trois navigateurs dont deux morts, une vitrine qui décrit la
 phase 0, et une chaîne de construction qui ne fonctionne que sur une machine. Le
 plus grand pas en avant disponible ne demande pas d'écrire un moteur de rendu :
 il demande de faire le ménage, puis d'ajouter `transform`.
+
+---
+
+---
+
+## 9. Ce qui a été fait après l'audit
+
+L'audit a été suivi d'un chantier sur la même branche, dont le but était de
+rendre le moteur capable d'afficher les sites récents. Ce qui a changé :
+
+**Un seul moteur de sélecteurs**, servant la cascade et `querySelector` — ils
+étaient deux, avec deux jeux de limites, si bien qu'une règle pouvait styler un
+élément qu'un script ne trouvait pas. Y sont entrés les combinateurs `+` et `~`
+(ramenés jusque-là à la descendance), les pseudo-classes structurelles
+(`:nth-child()` et sa famille), les fonctionnelles (`:not()`, `:is()`,
+`:where()`, `:has()`), les sélecteurs d'attribut côté cascade, et les noms de
+classe échappés (`md\:flex`) que produisent les cadres CSS répandus. Les
+pseudo-classes d'état ne désignent plus personne au repos : les effacer, ce que
+faisait le moteur, peignait en permanence la couleur réservée au survol — et
+faisait de `:not(.x)` un sélecteur qui désignait tout ce qu'il devait exclure.
+
+**Le placement** : `transform`, `position: sticky`, `fixed` qui ne défile plus,
+`order` en flexbox, zones nommées de grille.
+
+**La décoration** : coins arrondis, ombres portées, dégradés linéaires,
+opacité, et bords par côté — `border-bottom: 1px solid #eee`, le séparateur le
+plus répandu du web, ne peignait rien.
+
+**Les règles `@`** : une règle sans bloc (`@import url(…);`, `@layer a, b;`)
+collait son texte au sélecteur suivant, et la règle d'après était perdue avec
+elle. `@layer` avec bloc était sautée entièrement — or les cadres CSS récents y
+rangent la totalité de leur feuille.
+
+**Le navigateur est atteignable depuis le bureau** : menu Démarrer et icône.
+
+Cinq opérations de peinture ont été ajoutées à l'hôte Qt. **Elles n'ont pas été
+compilées** : Qt est absent de l'environnement et sa construction prend des
+heures. Le C++ a été vérifié contre des bouchons déclarant les mêmes signatures,
+ce qui éprouve la syntaxe et les types, pas le rendu. **Le rendu réel reste à
+constater sous l'OS** — c'est la première chose à faire au prochain démarrage.
+
+Reste ouvert, par ordre de valeur : `transition`/`animation`, l'isolement du
+Shadow DOM, le tampon de pixels du canvas, `listen`/`accept`, et la reprise du
+banc d'essai glibc.
 
 ---
 
