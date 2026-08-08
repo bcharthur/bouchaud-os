@@ -192,13 +192,19 @@ def _peint_contenu(boite, liste, defilement, largeur_vue, hauteur_vue, zones_lie
                 liste.append(_decale(operation, boite.x, haut))
             liste.append(("declip",))
 
-        for x, y_page, l_img, h_img, identifiant, lien in boite.images:
+        for x, y_page, l_img, h_img, identifiant, lien, source in boite.images:
             y = y_page - defilement
             if y + h_img < 0 or y > hauteur_vue:
                 continue
             # L'image est deja decodee : la liste d'affichage ne porte que son
             # numero, l'hote la retrouve dans son cache.
-            liste.append(("image", x, y, l_img, h_img, identifiant))
+            if source is None:
+                liste.append(("image", x, y, l_img, h_img, identifiant))
+            else:
+                # `object-fit: cover` prend une portion de l'image : l'hote a
+                # besoin du rectangle source, sans quoi il l'etirerait.
+                liste.append(("imagepart", x, y, l_img, h_img, identifiant)
+                             + tuple(source))
             if lien:
                 zones_liens.append(
                     _zone_transformee(matrice, x, y_page, l_img, h_img) + (lien,))

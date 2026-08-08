@@ -459,6 +459,17 @@ private:
                 p.setClipping(false);
             else
                 p.setClipRect(pileRognage.last());
+        } else if (!std::strcmp(operation, "imagepart")) {
+            // `object-fit: cover` ne montre qu'une portion de l'image. Sans le
+            // rectangle source, Qt l'etirerait a la boite — ce qui est
+            // exactement ce que la propriete sert a eviter.
+            double x, y, l, h, sx, sy, sl, sh;
+            int identifiant;
+            if (PyArg_ParseTuple(element, "sddddidddd", &operation, &x, &y, &l, &h,
+                                 &identifiant, &sx, &sy, &sl, &sh)) {
+                if (const QImage *image = imageParIdentifiant(identifiant))
+                    p.drawImage(QRectF(x, y, l, h), *image, QRectF(sx, sy, sl, sh));
+            }
         } else if (!std::strcmp(operation, "image")) {
             // L'image a ete decodee une fois par `bo.image` ; ici on ne fait que
             // la poser. Redecoder a chaque trame couterait un decodage PNG

@@ -1542,6 +1542,67 @@ def verifie_isolement_ombre():
          boite_de(ordinaire, "p").style.get("color"), "#123456")
 
 
+def verifie_ajustement_images():
+    """`object-fit` et `aspect-ratio` : l'image n'est plus etiree a sa boite."""
+    a = moteur.images.ajuste
+
+    # `fill` etire, c'est le defaut de CSS et l'ancien comportement unique.
+    egal("object-fit: fill etire", a("fill", 200, 100, 50, 50)[:4],
+         (0.0, 0.0, 200, 100))
+
+    # `contain` tient dedans, centre, sans rien rogner.
+    dx, dy, l, h, source = a("contain", 200, 100, 50, 50)
+    egal("object-fit: contain garde les proportions", (round(l), round(h)), (100, 100))
+    egal("object-fit: contain centre", (round(dx), round(dy)), (50, 0))
+    egal("object-fit: contain ne rogne pas", source, None)
+
+    # `cover` remplit et rogne : c'est la que le rectangle source sert.
+    dx, dy, l, h, source = a("cover", 200, 100, 50, 50)
+    egal("object-fit: cover remplit", (round(l), round(h)), (200, 100))
+    verifie("object-fit: cover rogne", source is not None, source)
+    if source:
+        sx, sy, sl, sh = source
+        egal("object-fit: la portion est centree", (round(sx), round(sy)), (0, 12))
+        egal("object-fit: la portion a le bon rapport",
+             (round(sl), round(sh)), (50, 25))
+
+    # `none` garde la taille reelle ; `scale-down` ne grandit jamais.
+    egal("object-fit: none garde la taille", a("none", 200, 100, 50, 50)[2:4],
+         (50, 50))
+    egal("object-fit: scale-down ne grandit pas",
+         a("scale-down", 200, 100, 50, 50)[2:4], (50, 50))
+    egal("object-fit: scale-down retrecit au besoin",
+         tuple(round(v) for v in a("scale-down", 40, 40, 80, 80)[2:4]), (40, 40))
+
+    # `aspect-ratio` sous ses trois ecritures.
+    p = moteur.images.proportion
+    egal("aspect-ratio: fraction", round(p("16 / 9"), 4), round(9 / 16.0, 4))
+    egal("aspect-ratio: nombre", round(p("2"), 4), 0.5)
+    egal("aspect-ratio: absent", p("auto"), None)
+
+    # Sur une boite ordinaire, la largeur decide de la hauteur.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #cadre { width: 320px; aspect-ratio: 16 / 9; }
+        </style>
+        <body><div id="cadre"></div></body>""")
+    cadre = boite_de(doc, "cadre")
+    verifie("aspect-ratio: la hauteur suit la largeur",
+            proche(cadre.hauteur, 180, 2), cadre.hauteur)
+
+    # Une hauteur declaree l'emporte : le rapport ne fait que combler un vide.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #cadre { width: 320px; height: 50px; aspect-ratio: 16 / 9; }
+        </style>
+        <body><div id="cadre"></div></body>""")
+    verifie("aspect-ratio: une hauteur declaree gagne",
+            proche(boite_de(doc, "cadre").hauteur, 50, 2),
+            boite_de(doc, "cadre").hauteur)
+
+
 # --- Disposition --------------------------------------------------------------
 
 def boite_de(doc, identifiant):
@@ -3044,6 +3105,7 @@ def principal():
         verifie_animations,
         verifie_transitions,
         verifie_isolement_ombre,
+        verifie_ajustement_images,
         verifie_pseudo_elements,
         verifie_requetes_media,
         verifie_longueurs,

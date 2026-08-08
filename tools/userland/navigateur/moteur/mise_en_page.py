@@ -504,6 +504,14 @@ def _termine_bloc(boite, style, curseur, pad_b, bordure, taille, reference):
     if imposee is not None and imposee > hauteur:
         hauteur = imposee
 
+    # `aspect-ratio` sur une boite sans hauteur declaree : la largeur decide.
+    # C'est ainsi que les pages recentes reservent la place d'une video ou
+    # d'une carte avant d'en connaitre le contenu.
+    if imposee is None:
+        rapport = images.proportion(style.get("aspect-ratio"))
+        if rapport is not None and boite.largeur > 0:
+            hauteur = max(hauteur, boite.largeur * rapport)
+
     minimum = css.longueur(style.get("min-height", "auto"), 0.0, taille)
     if minimum is not None:
         hauteur = max(hauteur, minimum)
@@ -633,7 +641,8 @@ def _dispose_ligne(boite, nœuds, x, y, largeur, style_parent, contexte):
                         curseur_y += hauteur_ligne_courante
                         hauteur_ligne_courante = 0.0
                     boite.images.append((curseur_x, curseur_y, largeur_a,
-                                         hauteur_a, identifiant, lien_enfant))
+                                         hauteur_a, identifiant, lien_enfant,
+                                         None))
                     curseur_x += largeur_a
                     hauteur_ligne_courante = max(hauteur_ligne_courante, hauteur_a)
                     continue
@@ -676,8 +685,14 @@ def _pose_image(boite, nœud, style, lien, gauche, largeur,
         curseur_y += hauteur_ligne
         hauteur_ligne = 0.0
 
-    boite.images.append((curseur_x, curseur_y, largeur_image, hauteur_image,
-                         naturelle[0], lien))
+    # `object-fit` decide de ce qu'on voit de l'image dans la place qu'elle
+    # occupe. Sans lui, toute image etait etiree a sa boite : une vignette
+    # carree sur une carte large s'en trouvait deformee.
+    dx, dy, peinte_l, peinte_h, source = images.ajuste(
+        style.get("object-fit"), largeur_image, hauteur_image,
+        naturelle[1], naturelle[2])
+    boite.images.append((curseur_x + dx, curseur_y + dy, peinte_l, peinte_h,
+                         naturelle[0], lien, source))
     return (curseur_x + largeur_image, curseur_y,
             max(hauteur_ligne, hauteur_image))
 
