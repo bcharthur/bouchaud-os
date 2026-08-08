@@ -299,7 +299,7 @@ _STRUCTURELLES = {
     "root", "empty", "first-child", "last-child", "only-child",
     "first-of-type", "last-of-type", "only-of-type", "checked", "disabled",
     "enabled", "required", "optional", "read-only", "read-write",
-    "link", "any-link", "scope",
+    "link", "any-link", "scope", "host",
 }
 
 _FONCTIONS_NTH = {
@@ -450,6 +450,12 @@ class Simple:
         if corps in _ETATS_ABSENTS:
             self.jamais = True
             return 0, 1, 0
+        if corps == "host" and argument is not None:
+            # `:host(.sombre)` vise l'hote a condition qu'il corresponde ; la
+            # portee, elle, verifie que c'est bien *cet* hote.
+            self.groupes.append(("is", groupes(argument)))
+            self.structurelles.append("host")
+            return 0, 1, 0
         if corps in ("is", "where", "not", "has") and argument is not None:
             sous = groupes(argument)
             self.groupes.append((corps, sous))
@@ -533,7 +539,9 @@ class Simple:
     def _structurelle(self, element, nom):
         if nom == "root":
             return _parent(element) is None
-        if nom == "scope":
+        if nom in ("scope", "host"):
+            # La correspondance reelle est faite par la portee : ici, l'element
+            # a deja ete retenu comme candidat.
             return True
         if nom == "empty":
             return not any(
@@ -656,7 +664,7 @@ class Selecteur:
     """Une suite de maillons relies par ` `, `>`, `+` ou `~`."""
 
     __slots__ = ("maillons", "combinateurs", "specificite", "pseudo", "portee",
-                 "sensible")
+                 "sensible", "vise_hote")
 
     def __init__(self, texte):
         texte = texte.strip()
@@ -687,6 +695,9 @@ class Selecteur:
         self.sensible = any(m.etats or
                             any(s.sensible for _, sous in m.groupes for s in sous)
                             for m in self.maillons)
+        # `:host` designe l'hote, qui vit hors de l'ombre : la portee doit le
+        # savoir pour l'autoriser malgre la frontiere.
+        self.vise_hote = bool(self.maillons) and "host" in self.maillons[0].structurelles
 
     def cle(self):
         """La cle d'indexation du selecteur : celle de son dernier maillon."""
@@ -848,12 +859,15 @@ def indexe(regles):
 
 
 class Regle:
-    __slots__ = ("selecteur", "declarations", "ordre")
+    """Une regle, et l'ombre d'ou elle vient (`None` pour la page)."""
 
-    def __init__(self, selecteur, declarations, ordre):
+    __slots__ = ("selecteur", "declarations", "ordre", "ombre")
+
+    def __init__(self, selecteur, declarations, ordre, ombre=None):
         self.selecteur = selecteur
         self.declarations = declarations
         self.ordre = ordre
+        self.ombre = ombre
 
 
 # --- Decoration ---------------------------------------------------------------
@@ -1174,7 +1188,7 @@ _TRANSPARENTES = ("@layer", "@supports", "@container", "@scope")
 _COMMENTAIRE = re.compile(r"/\*.*?\*/", re.S)
 
 
-def analyse(source, ordre_depart=0, keyframes=None):
+def analyse(source, ordre_depart=0, keyframes=None, ombre=None):
     """Analyse une feuille de style et rend la liste de ses regles.
 
     `keyframes`, s'il est fourni, recoit les gabarits `@keyframes` rencontres :
@@ -1246,7 +1260,7 @@ def analyse(source, ordre_depart=0, keyframes=None):
             for brut in prelude.split(","):
                 brut = brut.strip()
                 if brut:
-                    regles.append(Regle(Selecteur(brut), declarations, ordre))
+                    regles.append(Regle(Selecteur(brut), declarations, ordre, ombre))
                     ordre += 1
         position = fin + 1
 
@@ -1403,9 +1417,16 @@ def applique(regles, element, chemin, style_parent, pseudo=None):
     # mise en page reelle passe par l'index.
     candidates = regles.candidates(element) if isinstance(regles, Index) else regles
 
+    # Une racine d'ombre isole : les regles de la page ne l'atteignent pas, et
+    # les siennes ne sortent pas. Sans cette frontiere, deux composants poses
+    # sur la meme page se repeignaient l'un l'autre.
+    ombre = ombre_de(element)
+
     correspondantes = []
     for regle in candidates:
         if regle.selecteur.pseudo != pseudo:
+            continue
+        if _OMBRES[0] and not _portee_admet(regle, element, ombre):
             continue
         if regle.selecteur.correspond(chemin):
             correspondantes.append(regle)
@@ -1442,6 +1463,21 @@ def applique(regles, element, chemin, style_parent, pseudo=None):
     if animateur is not None:
         style = animateur.applique(element, style, pseudo)
     return style
+
+
+def _portee_admet(regle, element, ombre):
+    """La regle a-t-elle le droit de styler cet element ?"""
+    portee = regle.ombre
+    if portee is PORTEE_AGENT:
+        return True
+    if portee is None:
+        # Regle de la page : elle s'arrete a la frontiere de toute ombre.
+        return ombre is None
+    if ombre is portee:
+        return True
+    # `:host` est la seule qui traverse, et dans un seul sens : vers l'hote,
+    # qui est le parent du support.
+    return regle.selecteur.vise_hote and element is _parent(portee)
 
 
 # `var(--nom)` ou `var(--nom, valeur de secours)`. La valeur de secours peut
@@ -1549,6 +1585,42 @@ _ANIMATEUR = [None]
 def pose_animateur(animateur):
     """Declare qui anime. `None` pour n'animer rien."""
     _ANIMATEUR[0] = animateur
+
+
+# Portee de la feuille de l'agent utilisateur. Elle n'appartient a aucun arbre :
+# elle vaut pour la page **et** pour l'interieur de chaque racine d'ombre. La
+# traiter comme une feuille de page la faisait s'arreter a la frontiere, et le
+# contenu d'ombre se retrouvait sans `display` du tout — donc invisible.
+PORTEE_AGENT = "agent"
+
+# La balise support d'une racine d'ombre. `attachShadow` en cree une et y range
+# le contenu : c'est donc elle qui marque la frontiere.
+SUPPORT_OMBRE = "bo-ombre"
+
+# Y a-t-il seulement une ombre dans ce document ? Presque aucune page n'en a ;
+# quand il n'y en a pas, tout le calcul de portee est saute.
+_OMBRES = [False]
+
+
+def pose_ombres(presentes):
+    """Declare si le document contient au moins une racine d'ombre."""
+    _OMBRES[0] = bool(presentes)
+
+
+def ombre_de(element):
+    """La racine d'ombre qui contient cet element, ou `None`.
+
+    Un element du document ordinaire n'en a pas ; un element pose par
+    `attachShadow` a pour ancetre le support de son ombre.
+    """
+    if not _OMBRES[0]:
+        return None
+    courant = element
+    while courant is not None:
+        if getattr(courant, "balise", None) == SUPPORT_OMBRE:
+            return courant
+        courant = _parent(courant)
+    return None
 
 
 _RACCOURCIS_BOITE = ("margin", "padding")
@@ -1855,6 +1927,7 @@ b, strong { font-weight: bold; }
 i, em, cite, address { font-style: italic; }
 a { color: #1a56db; text-decoration: underline; }
 hr { margin: 8px 0; border-top: 1px solid #d0d7de; }
+bo-ombre { display: block; }
 table { margin: 8px 0; }
 th { font-weight: bold; }
 td, th { padding: 4px 8px; }

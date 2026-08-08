@@ -181,30 +181,52 @@ class Document:
         apparaissent, et non par categorie. Une feuille liee qui suit un
         `<style>` doit pouvoir le contredire, comme dans tout navigateur.
         """
+        # Chaque feuille est retenue avec l'ombre d'ou elle vient : une feuille
+        # posee dans une racine d'ombre ne doit styler que ce qu'elle contient.
         sources = []
+        ombres = False
         for element in self.racine.parcours():
             if not isinstance(element, html.Element):
                 continue
+            if element.balise == css.SUPPORT_OMBRE:
+                ombres = True
+                continue
             if element.balise == "style":
-                sources.append(element.texte())
+                sources.append((element.texte(), css.ombre_de(element)))
             elif element.balise == "link":
-                sources.append(self._feuille_liee(element))
+                sources.append((self._feuille_liee(element), None))
+        # A poser avant toute cascade : c'est ce drapeau qui decide si la
+        # frontiere est calculee ou sautee.
+        css.pose_ombres(ombres)
+        if ombres:
+            # Les ombres ont pu apparaitre apres la premiere lecture des
+            # feuilles : `ombre_de` ne repondait juste qu'une fois le drapeau
+            # leve, donc on refait la passe.
+            sources = []
+            for element in self.racine.parcours():
+                if not isinstance(element, html.Element):
+                    continue
+                if element.balise == "style":
+                    sources.append((element.texte(), css.ombre_de(element)))
+                elif element.balise == "link":
+                    sources.append((self._feuille_liee(element), None))
 
         # Analyser une feuille de deux mille regles a chaque battement du
         # JavaScript coute plus que toute la mise en page. Tant que les feuilles
         # sont les memes — texte compris, car un script peut reecrire un
         # `<style>` — on garde l'index deja construit.
-        signature = tuple(sources)
+        signature = tuple((texte, id(ombre)) for texte, ombre in sources)
         if signature == self._signature and self._index is not None:
             return self._index
 
         keyframes = {}
-        regles = css.analyse(css.FEUILLE_PAR_DEFAUT, keyframes=keyframes)
+        regles = css.analyse(css.FEUILLE_PAR_DEFAUT, keyframes=keyframes,
+                             ombre=css.PORTEE_AGENT)
         ordre = len(regles) + 1000
-        for source in sources:
+        for source, ombre in sources:
             if not source:
                 continue
-            nouvelles = css.analyse(source, ordre, keyframes=keyframes)
+            nouvelles = css.analyse(source, ordre, keyframes=keyframes, ombre=ombre)
             regles.extend(nouvelles)
             ordre += len(nouvelles) + 1
         self.animateur.keyframes = keyframes

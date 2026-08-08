@@ -146,7 +146,49 @@ def _style_de(element, style_parent, chemin, contexte):
     fixe = getattr(element, "style_engendre", None)
     if fixe is not None:
         return fixe
-    return css.applique(contexte.regles, element, chemin, style_parent)
+    style = css.applique(contexte.regles, element, chemin, style_parent)
+
+    # Un element en ligne qui porte un bloc devient un bloc. La norme, elle,
+    # decoupe l'element en ligne autour de son bloc et engendre des boites
+    # anonymes ; le resultat visible est le meme dans presque tous les cas, et
+    # ce qu'on faisait avant ne l'etait pas du tout : le bloc et tout son
+    # contenu disparaissaient. `<span><p>…</p></span>` n'affichait rien, et une
+    # balise inconnue — donc tout composant web — non plus.
+    if style.get("display", "inline") in ("inline", "inline-block") \
+            and _porte_un_bloc(element):
+        style = dict(style)
+        style["display"] = "block"
+    return style
+
+
+# Les balises qui font une boite de bloc dans la feuille de l'agent utilisateur.
+# Une table suffit ici : il ne s'agit pas de decider de la mise en page, mais de
+# reperer qu'un enfant direct en reclame une.
+_BLOCS = frozenset((
+    "address", "article", "aside", "blockquote", "canvas", "dd", "div", "dl",
+    "dt", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2",
+    "h3", "h4", "h5", "h6", "header", "hr", "li", "main", "nav", "ol", "p",
+    "pre", "section", "table", "tbody", "td", "tfoot", "th", "thead", "tr",
+    "ul", "video", css.SUPPORT_OMBRE,
+))
+
+
+def _porte_un_bloc(element):
+    # Une fente n'a pas d'enfants a elle : ce qu'elle affiche lui est confie.
+    # Sans ce detour, un `<slot>` restait en ligne et le contenu clair qu'il
+    # devait poser ne recevait jamais de boite.
+    enfants = _distribues(element) if element.balise == "slot" else element.enfants
+    for enfant in enfants:
+        if not isinstance(enfant, Element):
+            continue
+        if enfant.balise in _BLOCS:
+            return True
+        # Un style en ligne peut faire un bloc de n'importe quoi ; les
+        # composants se declarent souvent ainsi.
+        declare = enfant.attributs.get("style", "")
+        if "display" in declare and "block" in declare:
+            return True
+    return False
 
 
 def _boite_pour(element, style_parent, chemin, contexte):
@@ -189,10 +231,26 @@ def _engendre(boite, contexte, pseudo):
 
 
 def _enfants(boite, contexte):
-    """Les enfants a disposer : ceux du document, encadres par les engendres."""
-    if not isinstance(boite.element, Element):
+    """Les enfants a disposer : ceux du document, encadres par les engendres.
+
+    Deux detours, tous deux dus au DOM d'ombre. Un element qui porte une racine
+    d'ombre n'affiche **que** cette racine : ses enfants clairs ne s'affichent
+    que la ou un `<slot>` les reclame. Et un `<slot>`, justement, affiche les
+    enfants clairs de son hote plutot que les siens — les siens ne sont que le
+    repli montre quand personne ne lui en confie.
+    """
+    element = boite.element
+    if not isinstance(element, Element):
         return []
-    liste = list(boite.element.enfants)
+
+    if element.balise == "slot":
+        liste = _distribues(element)
+    else:
+        liste = list(element.enfants)
+        support = _racine_ombre(element)
+        if support is not None:
+            liste = [support]
+
     avant = _engendre(boite, contexte, "before")
     if avant is not None:
         liste.insert(0, avant)
@@ -200,6 +258,41 @@ def _enfants(boite, contexte):
     if apres is not None:
         liste.append(apres)
     return liste
+
+
+def _racine_ombre(element):
+    """Le support d'ombre porte par cet element, s'il en a un."""
+    for enfant in element.enfants:
+        if isinstance(enfant, Element) and enfant.balise == css.SUPPORT_OMBRE:
+            return enfant
+    return None
+
+
+def _distribues(fente):
+    """Les nœuds clairs que ce `<slot>` affiche, ou son repli s'il n'y en a pas.
+
+    Le nom decide : `<slot name="titre">` prend les enfants portant
+    `slot="titre"`, la fente sans nom prend tous les autres.
+    """
+    support = css.ombre_de(fente)
+    hote = support.parent if support is not None else None
+    if hote is None:
+        return list(fente.enfants)
+
+    nom = fente.attributs.get("name", "")
+    retenus = []
+    for enfant in hote.enfants:
+        if isinstance(enfant, Element):
+            if enfant.balise == css.SUPPORT_OMBRE:
+                continue
+            if enfant.attributs.get("slot", "") != nom:
+                continue
+        elif nom:
+            # Un nœud de texte n'a pas d'attribut : il ne va qu'a la fente
+            # sans nom.
+            continue
+        retenus.append(enfant)
+    return retenus or list(fente.enfants)
 
 
 def _boites_enfants(boite, contexte):

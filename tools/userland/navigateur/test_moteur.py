@@ -1415,6 +1415,133 @@ def verifie_transitions():
          (m("block", "flex", 0.4), m("block", "flex", 0.6)), ("block", "flex"))
 
 
+def verifie_isolement_ombre():
+    """Une racine d'ombre isole : rien n'entre, rien ne sort, sauf `:host`."""
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          p { color: #ff0000; }              /* ne doit pas entrer dans l'ombre */
+          ma-carte { color: #000000; }
+        </style>
+        <body>
+          <ma-carte><div id="clair">clair</div></ma-carte>
+          <p id="dehors">dehors</p>
+          <script>
+            class MaCarte extends HTMLElement {
+              connectedCallback() {
+                const o = this.attachShadow({ mode: 'open' });
+                o.innerHTML = '<style>' +
+                  'p { color: #00ff00 }' +
+                  ':host { background-color: #0000ff }' +
+                  '</style>' +
+                  '<p id="dedans">dedans</p><slot></slot>';
+              }
+            }
+            customElements.define('ma-carte', MaCarte);
+          </script>
+        </body>""")
+
+    dedans = boite_de(doc, "dedans")
+    dehors = boite_de(doc, "dehors")
+    verifie("ombre: le contenu d'ombre est mis en page", dedans is not None)
+
+    # La regle de la page ne franchit pas la frontiere...
+    egal("ombre: la page n'entre pas", dedans.style.get("color"), "#00ff00")
+    # ...et celle de l'ombre n'en sort pas.
+    egal("ombre: l'ombre ne sort pas", dehors.style.get("color"), "#ff0000")
+
+    # `:host` est la seule a traverser, et vers l'hote seulement.
+    hote = None
+    for n in doc.racine.parcours():
+        if isinstance(n, html.Element) and n.balise == "ma-carte":
+            hote = n
+    verifie("ombre: l'hote existe", hote is not None)
+    boite_hote = None
+    pile = [doc.boite]
+    while pile:
+        b = pile.pop(0)
+        if b.element is hote:
+            boite_hote = b
+            break
+        pile.extend(b.enfants)
+    verifie("ombre: l'hote est mis en page", boite_hote is not None)
+    if boite_hote:
+        egal("ombre: `:host` atteint l'hote",
+             boite_hote.style.get("background-color"), "#0000ff")
+
+    # Le contenu clair passe par la fente, et une seule fois.
+    clairs = []
+    pile = [doc.boite]
+    while pile:
+        b = pile.pop(0)
+        el = b.element
+        if isinstance(el, html.Element) and el.attributs.get("id") == "clair":
+            clairs.append(b)
+        pile.extend(b.enfants)
+    egal("ombre: le contenu clair est distribue une fois", len(clairs), 1)
+
+    # Sans fente, le contenu clair ne s'affiche pas du tout.
+    muet = document("""
+        <body>
+          <ma-boite><div id="perdu">perdu</div></ma-boite>
+          <script>
+            class MaBoite extends HTMLElement {
+              connectedCallback() {
+                this.attachShadow({ mode: 'open' }).innerHTML = '<div id="seul">seul</div>';
+              }
+            }
+            customElements.define('ma-boite', MaBoite);
+          </script>
+        </body>""")
+    verifie("ombre: sans fente, le clair reste cache",
+            boite_de(muet, "perdu") is None)
+    verifie("ombre: le contenu d'ombre s'affiche",
+            boite_de(muet, "seul") is not None)
+
+    # Fente nommee : chaque enfant va a la sienne.
+    nomme = document("""
+        <body>
+          <ma-fiche>
+            <h2 slot="titre" id="t">titre</h2>
+            <div id="c">corps</div>
+          </ma-fiche>
+          <script>
+            class MaFiche extends HTMLElement {
+              connectedCallback() {
+                this.attachShadow({ mode: 'open' }).innerHTML =
+                  '<header><slot name="titre"></slot></header>' +
+                  '<main><slot></slot></main>';
+              }
+            }
+            customElements.define('ma-fiche', MaFiche);
+          </script>
+        </body>""")
+
+    def ancetres(doc_, identifiant):
+        cible = boite_de(doc_, identifiant)
+        if cible is None:
+            return []
+        noms = []
+        pile = [(doc_.boite, [])]
+        while pile:
+            b, chemin = pile.pop(0)
+            if b is cible:
+                return chemin
+            nouveau = chemin + [getattr(b.element, "balise", "?")]
+            pile.extend((e, nouveau) for e in b.enfants)
+        return noms
+
+    verifie("ombre: la fente nommee recoit le sien",
+            "header" in ancetres(nomme, "t"), ancetres(nomme, "t"))
+    verifie("ombre: la fente sans nom recoit le reste",
+            "main" in ancetres(nomme, "c"), ancetres(nomme, "c"))
+
+    # Une page sans ombre ne paie rien : le drapeau reste baisse.
+    ordinaire = document("<style>p{color:#123456}</style><body><p id='p'>x</p></body>")
+    egal("ombre: une page sans ombre garde ses regles",
+         boite_de(ordinaire, "p").style.get("color"), "#123456")
+
+
 # --- Disposition --------------------------------------------------------------
 
 def boite_de(doc, identifiant):
@@ -2916,6 +3043,7 @@ def principal():
         verifie_etats,
         verifie_animations,
         verifie_transitions,
+        verifie_isolement_ombre,
         verifie_pseudo_elements,
         verifie_requetes_media,
         verifie_longueurs,
