@@ -448,6 +448,21 @@ def verifie_erreurs():
     contexte.ferme()
 
 
+def verifie_diagnostics_compatibilite():
+    """Le rapport mesure des appels executes, pas des occurrences du source."""
+    doc = document("<body></body>")
+    contexte = js.Contexte(doc)
+    contexte.execute("new AbortController(); new AbortController();", "page.js")
+    # Le premier ReferenceError arrete le script : une seule tentative a donc
+    # reellement eu lieu, bien que le texte contienne deux occurrences.
+    egal("diagnostic: API absente observee",
+         contexte.rapport_compatibilite().get("api_absente:AbortController"), 1)
+    contexte.execute("null.x", "type.js")
+    egal("diagnostic: autres erreurs separees",
+         contexte.rapport_compatibilite().get("erreur_js"), 1)
+    contexte.ferme()
+
+
 def verifie_budget():
     doc = document("<body></body>")
     messages = []
@@ -3450,6 +3465,7 @@ def principal():
         verifie_minuteries,
         verifie_promesses,
         verifie_erreurs,
+        verifie_diagnostics_compatibilite,
         verifie_budget,
         verifie_page_complete,
         verifie_evenement_apres_chargement,

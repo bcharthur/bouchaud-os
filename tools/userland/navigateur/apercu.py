@@ -673,6 +673,12 @@ def principal(argv=None):
                                      hauteur))))
     for niveau, texte in journal[:8]:
         print("  [%s] %s" % (niveau, texte))
+    if document.contexte_js is not None:
+        diagnostic = document.contexte_js.rapport_compatibilite()
+        if diagnostic:
+            print("  [compatibilite]")
+            for nom, nombre in diagnostic.items():
+                print("    %s: %d" % (nom, nombre))
     return 0
 
 

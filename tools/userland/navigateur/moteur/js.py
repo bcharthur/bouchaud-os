@@ -26,6 +26,7 @@ son script est hostile.
 """
 
 import base64
+import collections
 import re
 import time
 import urllib.parse
@@ -104,6 +105,9 @@ class Contexte:
         self.journal = journal or (lambda niveau, texte: None)
         self.sale = False
         self.navigation = None
+        # Manques effectivement rencontres par cette page. Une API simplement
+        # absente du moteur n'est pas comptee tant qu'un script ne l'appelle pas.
+        self.diagnostics = collections.Counter()
 
         self._contexte = bojs.cree(budget_ms)
         bojs.pont(self._contexte, self.appel)
@@ -152,8 +156,10 @@ class Contexte:
         try:
             return bojs.evalue(self._contexte, code, nom, module)
         except bojs.Erreur as e:
+            self._diagnostique_erreur(e)
             self.journal("error", "%s : %s" % (nom, e))
         except Exception as e:  # noqa: BLE001 — une page ne doit pas tuer le navigateur
+            self._diagnostique_erreur(e)
             self.journal("error", "%s : %s" % (nom, e))
         return None
 
@@ -220,10 +226,28 @@ class Contexte:
         try:
             return bojs.appelle(self._contexte, nom, arguments)
         except bojs.Erreur as e:
+            self._diagnostique_erreur(e)
             self.journal("error", str(e))
         except Exception as e:  # noqa: BLE001
+            self._diagnostique_erreur(e)
             self.journal("error", str(e))
         return None
+
+    def _diagnostique_erreur(self, erreur):
+        """Classe une erreur reelle sans attribuer un nom que QuickJS omet."""
+        texte = str(erreur)
+        trouve = re.search(r"(?:ReferenceError:\s*)?['\"]?([A-Za-z_$][\w$]*)['\"]?"
+                           r"\s+is not defined", texte)
+        if trouve:
+            self.diagnostics["api_absente:%s" % trouve.group(1)] += 1
+        elif "not a function" in texte or "is not callable" in texte:
+            self.diagnostics["methode_absente:inconnue"] += 1
+        else:
+            self.diagnostics["erreur_js"] += 1
+
+    def rapport_compatibilite(self):
+        """Compteurs observes, stables et directement serialisables."""
+        return dict(sorted(self.diagnostics.items()))
 
     # --- Table des nœuds ------------------------------------------------------
 
@@ -971,9 +995,12 @@ class Contexte:
             reponse = reseau.charge(url, methode=methode, corps=corps,
                                     entetes=entetes or {}, brut=True)
         except Exception as e:  # noqa: BLE001
+            self.diagnostics["ressource_echouee"] += 1
             self.journal("warn", "requete %s : %s" % (url, e))
             return {"status": 0, "statusText": str(e), "text": "", "url": url,
                     "headers": {}}
+        if not reponse.code or reponse.code >= 400:
+            self.diagnostics["ressource_echouee"] += 1
         return {
             "status": reponse.code,
             "statusText": reponse.erreur or "",
