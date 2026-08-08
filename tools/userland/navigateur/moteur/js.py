@@ -985,7 +985,11 @@ class Contexte:
     def _telecharge_script(self, source):
         absolue = urllib.parse.urljoin(self.document.url, source)
         try:
-            reponse = reseau.charge(absolue)
+            # `brut` est indispensable : sans lui, le reseau enrobe tout ce qui
+            # n'est pas du HTML dans un `<pre>` et en echappe les `&` et les
+            # `<`. Chaque `<script src=…>` arrivait donc au moteur JavaScript
+            # commencant par un chevron, et mourait sur le premier jeton.
+            reponse = reseau.charge(absolue, brut=True)
         except Exception as e:  # noqa: BLE001
             self.journal("warn", "script %s : %s" % (absolue, e))
             return ""

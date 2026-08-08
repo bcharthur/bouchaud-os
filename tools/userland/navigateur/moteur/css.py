@@ -1218,6 +1218,17 @@ def analyse(source, ordre_depart=0, keyframes=None, ombre=None):
     longueur_source = len(source)
 
     while position < longueur_source:
+        # L'accolade qui ferme un groupe dans lequel on etait entre — `@media`,
+        # `@layer`, `@supports` — doit etre consommee ici. Sans cela elle se
+        # collait au selecteur suivant, qui devenait `} .barre` et ne designait
+        # plus rien : toutes les regles d'un `@layer` suivi d'autre chose
+        # etaient perdues, et la page s'affichait a moitie stylee.
+        while position < longueur_source and source[position] in " \t\r\n\f":
+            position += 1
+        if position < longueur_source and source[position] == "}":
+            position += 1
+            continue
+
         accolade = source.find("{", position)
         if accolade < 0:
             break

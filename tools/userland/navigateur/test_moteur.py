@@ -1279,6 +1279,24 @@ def verifie_regles_arobase():
          classes('@font-face { font-family: x; src: url(y) }\n.ok { color: gray }'),
          ["ok"])
 
+    # L'accolade qui ferme un groupe doit etre consommee. Sans cela elle se
+    # collait au selecteur suivant — qui devenait `} .apres` et ne designait
+    # plus rien — et toutes les regles suivant un `@layer` ou un `@media`
+    # etaient perdues. C'est-a-dire presque toute feuille moderne.
+    egal("arobase: ce qui suit un @layer survit",
+         classes('@layer base { .dedans { color: red } }\n.apres { color: blue }'),
+         ["dedans", "apres"])
+    egal("arobase: ce qui suit un @media survit",
+         classes('@media (min-width: 10px) { .dedans { color: red } }'
+                 '\n.apres { color: blue }'), ["dedans", "apres"])
+    egal("arobase: deux groupes de suite",
+         classes('@layer a { .un { color: red } }'
+                 '@layer b { .deux { color: blue } }'
+                 '.trois { color: teal }'), ["un", "deux", "trois"])
+    egal("arobase: un groupe non retenu n'emporte rien",
+         classes('@media (min-width: 99999px) { .jamais { color: red } }'
+                 '\n.apres { color: blue }'), ["apres"])
+
 
 def verifie_etats():
     """`:hover`, `:active`, `:focus` : la page se restyle sous le pointeur."""
