@@ -33,6 +33,7 @@ import zlib
 
 from . import securite
 from . import stockage
+from . import telemetrie
 
 DELAI = 20.0
 AGENT = "BouchaudOS/1.0 (navigateur natif; Qt/Python)"
@@ -167,6 +168,7 @@ def charge(url, methode="GET", corps=None, entetes=None, brut=False,
         try:
             securite.verifie(requete)
         except securite.Refus as refus:
+            telemetrie.note("securite_refus", requete.destination, url)
             return Reponse(url, "", "text/plain", 0, erreur=str(refus))
     try:
         if url.startswith("bo:"):
@@ -200,6 +202,7 @@ def charge(url, methode="GET", corps=None, entetes=None, brut=False,
         return _charge_http(url, methode=methode, corps=corps,
                             entetes=entetes, brut=brut)
     except Exception as e:  # une page cassee ne doit pas tuer le navigateur
+        telemetrie.ressource_echouee(url, 0, destination or "document")
         return Reponse(url, _page_erreur(url, e), "text/html", 0, str(e))
 
 

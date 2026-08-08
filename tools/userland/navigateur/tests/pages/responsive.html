@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Mise en page adaptative</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; color: #0f172a;
+         background: #fff; font-size: 15px; line-height: 1.5; }
+
+  .enveloppe { display: grid; grid-template-columns: 260px 1fr; gap: 20px;
+               padding: 20px; }
+  aside { background: #f1f5f9; padding: 16px; border-radius: 8px; }
+  aside h2 { font-size: 14px; margin: 0 0 10px; }
+  aside a { display: block; padding: 6px 0; font-size: 14px; color: #334155;
+            text-decoration: none; }
+  main h1 { margin: 0 0 12px; font-size: 26px; }
+  .colonnes { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+  @media (max-width: 900px) {
+    .enveloppe { grid-template-columns: 1fr; }
+    .colonnes { grid-template-columns: 1fr; }
+    aside { order: 2; }
+  }
+  @media (max-width: 600px) { body { font-size: 14px; } main h1 { font-size: 20px; } }
+
+</style></head><body>
+
+<div class="enveloppe">
+  <aside><h2>Sections</h2><a href="#">Introduction</a><a href="#">Installation</a>
+  <a href="#">Configuration</a><a href="#">Depannage</a></aside>
+  <main><h1>Documentation</h1>
+    <div class="colonnes">
+      <p>Colonne de gauche. Sous 900 pixels, les deux colonnes s'empilent et la
+      barre laterale passe apres le contenu principal grace a <code>order</code>.</p>
+      <p>Colonne de droite. La mesure a 1280 et a 480 pixels doit donner deux
+      structures differentes : c'est ce qui prouve que les requetes media sont
+      evaluees et pas seulement lues.</p>
+    </div>
+  </main>
+</div>
+
+</body></html>

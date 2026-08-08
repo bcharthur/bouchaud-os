@@ -23,6 +23,8 @@ contient.
 import math
 import re
 
+from . import telemetrie
+
 # --- Couleurs ----------------------------------------------------------------
 
 NOMS_COULEURS = {
@@ -136,7 +138,10 @@ def longueur(valeur, reference=0.0, taille_police=16.0):
     if not v or v in ("auto", "inherit", "initial", "none"):
         return None
     if v.startswith("calc(") and v.endswith(")"):
-        return _calcule(v[5:-1], reference, taille_police)
+        calculee = _calcule(v[5:-1], reference, taille_police)
+        if calculee is None and telemetrie.ACTIVE:
+            telemetrie.valeur_rejetee("calc()", v[:40], "expression non evaluable")
+        return calculee
     try:
         if v.endswith("px"):
             return float(v[:-2])
@@ -173,7 +178,34 @@ def longueur(valeur, reference=0.0, taille_police=16.0):
             return float(v[:-2]) * 16.0
         return float(v)
     except ValueError:
-        return None
+        pass
+    if telemetrie.ACTIVE and _ressemble_a_longueur(v):
+        # `min()`, `max()`, `clamp()`, `env()`, `100dvh` : chacun rend une
+        # dimension nulle et un bloc qui s'effondre. C'est la categorie de
+        # manque la plus couteuse et la moins visible dans une capture. Les
+        # couleurs et les mots-cles passent aussi par ici — les noter ferait du
+        # bruit, pas de la mesure.
+        telemetrie.valeur_rejetee("<longueur>", v[:40], "unite ou fonction non evaluee")
+    return None
+
+
+_FONCTIONS_LONGUEUR = ("min(", "max(", "clamp(", "env(", "var(", "calc(",
+                       "fit-content(", "minmax(", "anchor-size(")
+
+
+def _ressemble_a_longueur(v):
+    """Cette valeur pretendait-elle etre une longueur ?
+
+    `longueur()` sert de convertisseur general : on lui passe aussi bien
+    `12px` que `#cbd5e1` ou `sans-serif`, et rendre `None` sur les seconds est
+    le comportement attendu. Seul ce qui commence par un nombre ou par une
+    fonction de calcul merite d'etre signale comme non compris.
+    """
+    if not v:
+        return False
+    if v[0].isdigit() or v[0] in "+-." :
+        return True
+    return any(v.startswith(f) for f in _FONCTIONS_LONGUEUR)
 
 
 _JETON_CALC = re.compile(r"([0-9.]+[a-z%]*|[-+*/()])")
@@ -440,6 +472,7 @@ class Simple:
             # sur l'element lui-meme — la couleur du texte d'invite devenait
             # celle du champ.
             self.jamais = True
+            telemetrie.selecteur_ignore("::" + corps, "pseudo-element non peint")
             return 0, 0, 1
         if corps == "root":
             self.structurelles.append("root")
@@ -465,6 +498,9 @@ class Simple:
             return pire
         if corps in _FONCTIONS_NTH and argument is not None:
             # `nth-child(2n of .x)` n'est pas reconnu : seul le rang l'est.
+            if " of " in argument:
+                telemetrie.selecteur_ignore(":%s(… of …)" % corps,
+                                            "filtre « of » ignore")
             self.nth.append((corps, _analyse_nth(argument.split(" of ")[0])))
             return 0, 1, 0
         if corps in _STRUCTURELLES:
@@ -472,6 +508,7 @@ class Simple:
             return 0, 1, 0
         # Une pseudo-classe inconnue est ignoree plutot que rejetee : elle ne
         # doit pas emporter la regle qui la contient.
+        telemetrie.selecteur_ignore(":" + corps, "pseudo-classe inconnue")
         return 0, 1, 0
 
     # -- Correspondance --------------------------------------------------------
@@ -1296,6 +1333,7 @@ def analyse(source, ordre_depart=0, keyframes=None, ombre=None, polices=None):
                 # afficher la page sans style du tout.
                 position = accolade + 1
                 continue
+            telemetrie.arobase_ignoree(tete.split("(")[0].split()[0], prelude)
             position = _saute_bloc(source, accolade)
             continue
 
@@ -1434,6 +1472,8 @@ def _declarations(bloc):
         valeur = valeur.strip()
         if nom and valeur:
             resultat[nom] = valeur
+            if telemetrie.ACTIVE:
+                telemetrie.propriete_ignoree(nom, valeur)
     return resultat
 
 

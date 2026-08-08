@@ -23,6 +23,7 @@ import urllib.parse
 import bo
 
 from . import reseau
+from . import telemetrie
 
 # Au-dela, on renonce : decoder une image de plusieurs dizaines de mega-octets
 # sous emulation coute plus que ce qu'elle apporte.
@@ -77,7 +78,8 @@ def _octets(url, document=None):
                                 destination="image")
     except Exception:  # noqa: BLE001 — une image cassee n'est pas une panne
         return None
-    if reponse.code and reponse.code >= 400:
+    if reponse.code is not None and (not reponse.code or reponse.code >= 400):
+        telemetrie.ressource_echouee(url, reponse.code, "image")
         return None
     donnees = reponse.octets
     if not donnees or len(donnees) > TAILLE_MAX:

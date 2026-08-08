@@ -199,7 +199,16 @@
             const cle = type + (capture ? "capture" : "");
             if (!this.__ecouteurs.has(cle)) this.__ecouteurs.set(cle, []);
             const liste = this.__ecouteurs.get(cle);
-            if (liste.indexOf(fonction) < 0) liste.push(fonction);
+            if (liste.indexOf(fonction) < 0) {
+                liste.push(fonction);
+                // Compte tenu a jour pour la mesure de compatibilite : c'est le
+                // seul indicateur de l'interactivite reelle d'une page qui ne
+                // demande pas de la piloter.
+                globalThis.__bo_ecouteurs = (globalThis.__bo_ecouteurs || 0) + 1;
+                const seau = globalThis.__bo_ecouteurs_types ||
+                    (globalThis.__bo_ecouteurs_types = {});
+                seau[type] = (seau[type] || 0) + 1;
+            }
         }
         removeEventListener(type, fonction, options) {
             if (!this.__ecouteurs) return;
@@ -1877,6 +1886,105 @@
             invoque(f, globalThis, evenement);
         return !evenement.defaultPrevented;
     };
+
+
+    // --- Mesure de compatibilite --------------------------------------------
+    //
+    // Le moteur ne sait pas tout faire, et jusqu'ici il ne savait pas dire ce
+    // qui lui manquait : une page cassee laissait deviner. Ce bloc installe,
+    // sur chaque nom de la plate-forme que le moteur ne fournit pas, un
+    // accesseur qui **note l'acces et rend `undefined`**.
+    //
+    // Rendre `undefined` n'est pas un detail. Poser un objet factice ferait
+    // reussir `if (window.WebSocket)` et la page prendrait le chemin qu'elle
+    // n'aurait pas du prendre — la mesure changerait le comportement mesure.
+    // Ici le script voit exactement ce qu'il voyait avant, la detection de
+    // fonctionnalite continue de retomber sur sa solution de repli, et le
+    // rapport apprend qu'on lui a demande quelque chose.
+    //
+    // La liste ne se veut pas exhaustive : ce qu'elle rate finit dans les
+    // erreurs JavaScript, qui sont notees aussi.
+
+    const NOMS_FENETRE = [
+        "WebSocket", "EventSource", "Worker", "SharedWorker", "ServiceWorker",
+        "indexedDB", "IDBFactory", "IDBKeyRange", "caches", "CacheStorage",
+        "BroadcastChannel", "MessageChannel", "MessagePort", "SharedArrayBuffer",
+        "Notification", "PushManager", "RTCPeerConnection", "WebGLRenderingContext",
+        "WebGL2RenderingContext", "OffscreenCanvas", "createImageBitmap",
+        "ImageBitmap", "ImageData", "Path2D",
+        "FileReader", "Blob", "File", "FileList", "FormData",
+        "URLSearchParams", "AbortController", "AbortSignal",
+        "Headers", "Request", "Response",
+        "ReadableStream", "WritableStream", "TransformStream", "TextEncoderStream",
+        "structuredClone", "requestIdleCallback", "cancelIdleCallback",
+        "reportError", "queueMicrotask",
+        "IntersectionObserver", "PerformanceObserver", "ReportingObserver",
+        "crypto", "TextEncoder", "TextDecoder", "Intl",
+        "matchMedia", "getSelection", "getComputedStyle",
+        "DOMParser", "XSLTProcessor", "XPathEvaluator", "Range", "Selection",
+        "NodeFilter", "TreeWalker", "NodeIterator",
+        "performance", "screen", "visualViewport", "scrollTo", "scrollBy",
+        "open", "close", "print", "alert", "confirm", "prompt",
+        "postMessage", "focus", "blur", "getScreenDetails",
+        "CSS", "CSSStyleSheet", "FontFace", "speechSynthesis",
+        "customElements", "HTMLTemplateElement", "DocumentFragment",
+        "trustedTypes", "navigation", "scheduler",
+    ];
+
+    const MEMBRES = [
+        ["Element", "closest matches webkitMatchesSelector insertAdjacentHTML " +
+            "insertAdjacentElement insertAdjacentText scrollIntoView scrollIntoViewIfNeeded " +
+            "getBoundingClientRect getClientRects animate attachShadow " +
+            "replaceChildren replaceWith toggleAttribute requestFullscreen " +
+            "setPointerCapture releasePointerCapture computedStyleMap " +
+            "checkVisibility scrollTo scrollBy"],
+        ["Node", "compareDocumentPosition isEqualNode isSameNode normalize " +
+            "getRootNode lookupNamespaceURI"],
+        ["Event", "composedPath stopImmediatePropagation"],
+    ];
+
+    function surveille(objet, nom, chemin) {
+        let deja;
+        try { deja = objet[nom]; } catch (e) { return; }
+        if (deja !== undefined) return;
+        try {
+            Object.defineProperty(objet, nom, {
+                configurable: true,
+                get: function () { appel("manque", chemin); return undefined; },
+                set: function (v) {
+                    // Une page qui installe sa propre implementation — un
+                    // « polyfill » — a le droit de le faire : on s'efface.
+                    Object.defineProperty(objet, nom, {
+                        configurable: true, writable: true,
+                        enumerable: true, value: v,
+                    });
+                },
+            });
+        } catch (e) { /* non configurable : rien a surveiller */ }
+    }
+
+    for (const nom of NOMS_FENETRE) surveille(globalThis, nom, nom);
+    for (const [porteur, liste] of MEMBRES) {
+        const cible = globalThis[porteur];
+        if (!cible || !cible.prototype) continue;
+        for (const nom of liste.split(" ")) {
+            if (nom) surveille(cible.prototype, nom, porteur + ".prototype." + nom);
+        }
+    }
+    for (const [objet, prefixe] of [[globalThis.navigator, "navigator"],
+                                    [globalThis.history, "history"],
+                                    [globalThis.location, "location"]]) {
+        if (!objet) continue;
+        const noms = prefixe === "navigator"
+            ? ["clipboard", "geolocation", "mediaDevices", "serviceWorker",
+               "permissions", "credentials", "storage", "share", "sendBeacon",
+               "connection", "hardwareConcurrency", "deviceMemory", "onLine",
+               "languages", "cookieEnabled", "webdriver"]
+            : prefixe === "history"
+                ? ["pushState", "replaceState", "state", "scrollRestoration", "go"]
+                : ["replace", "assign", "reload", "ancestorOrigins"];
+        for (const nom of noms) surveille(objet, nom, prefixe + "." + nom);
+    }
 
     // Etat du document, mis a jour par Python quand l'analyse est finie.
     globalThis.__bo_pret = function () {

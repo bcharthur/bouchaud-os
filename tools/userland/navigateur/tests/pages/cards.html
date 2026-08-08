@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Grille de cartes</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; color: #0f172a;
+         background: #fff; font-size: 15px; line-height: 1.5; }
+
+  .grille { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px;
+            padding: 24px; }
+  .carte { border: 1px solid #e2e8f0; border-radius: 10px; overflow: hidden;
+           display: flex; flex-direction: column; }
+  .vignette { height: 120px; background: linear-gradient(135deg, #38bdf8, #6366f1); }
+  .corps { padding: 16px; flex: 1; }
+  .carte h2 { margin: 0 0 8px; font-size: 16px; }
+  .carte p { margin: 0; font-size: 13px; color: #475569; }
+  .pied { padding: 12px 16px; border-top: 1px solid #e2e8f0; font-size: 12px;
+          color: #64748b; display: flex; justify-content: space-between; }
+
+</style></head><body>
+
+<div class="grille">
+  <article class="carte">
+    <div class="vignette"></div>
+    <div class="corps"><h2>Carte 1</h2><p>Un texte de longueur variable pour
+    que les cartes n'aient pas toutes la meme hauteur naturelle. Le pied doit
+    rester aligne en bas.</p></div>
+    <div class="pied"><span>v1.1</span><span>MIT</span></div>
+  </article>
+  <article class="carte">
+    <div class="vignette"></div>
+    <div class="corps"><h2>Carte 2</h2><p>Un texte de longueur variable pour
+    que les cartes n'aient pas toutes la meme hauteur naturelle. Le pied doit
+    rester aligne en bas.</p></div>
+    <div class="pied"><span>v1.2</span><span>MIT</span></div>
+  </article>
+  <article class="carte">
+    <div class="vignette"></div>
+    <div class="corps"><h2>Carte 3</h2><p>Un texte de longueur variable pour
+    que les cartes n'aient pas toutes la meme hauteur naturelle. Le pied doit
+    rester aligne en bas.</p></div>
+    <div class="pied"><span>v1.3</span><span>MIT</span></div>
+  </article>
+  <article class="carte">
+    <div class="vignette"></div>
+    <div class="corps"><h2>Carte 4</h2><p>Un texte de longueur variable pour
+    que les cartes n'aient pas toutes la meme hauteur naturelle. Le pied doit
+    rester aligne en bas.</p></div>
+    <div class="pied"><span>v1.4</span><span>MIT</span></div>
+  </article>
+  <article class="carte">
+    <div class="vignette"></div>
+    <div class="corps"><h2>Carte 5</h2><p>Un texte de longueur variable pour
+    que les cartes n'aient pas toutes la meme hauteur naturelle. Le pied doit
+    rester aligne en bas.</p></div>
+    <div class="pied"><span>v1.5</span><span>MIT</span></div>
+  </article>
+  <article class="carte">
+    <div class="vignette"></div>
+    <div class="corps"><h2>Carte 6</h2><p>Un texte de longueur variable pour
+    que les cartes n'aient pas toutes la meme hauteur naturelle. Le pied doit
+    rester aligne en bas.</p></div>
+    <div class="pied"><span>v1.6</span><span>MIT</span></div>
+  </article>
+</div>
+</body></html>

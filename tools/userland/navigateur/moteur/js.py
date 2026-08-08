@@ -33,7 +33,7 @@ import urllib.parse
 import bo
 import bojs
 
-from . import css, html, reseau, stockage
+from . import css, html, reseau, securite, stockage, telemetrie
 
 # Types de nœuds, comme dans la norme DOM.
 ELEMENT = 1
@@ -152,8 +152,10 @@ class Contexte:
         try:
             return bojs.evalue(self._contexte, code, nom, module)
         except bojs.Erreur as e:
+            telemetrie.erreur_js(e, nom)
             self.journal("error", "%s : %s" % (nom, e))
         except Exception as e:  # noqa: BLE001 — une page ne doit pas tuer le navigateur
+            telemetrie.erreur_js(e, nom)
             self.journal("error", "%s : %s" % (nom, e))
         return None
 
@@ -220,9 +222,23 @@ class Contexte:
         try:
             return bojs.appelle(self._contexte, nom, arguments)
         except bojs.Erreur as e:
+            telemetrie.erreur_js(e, nom)
             self.journal("error", str(e))
         except Exception as e:  # noqa: BLE001
+            telemetrie.erreur_js(e, nom)
             self.journal("error", str(e))
+        return None
+
+    # --- Mesure ---------------------------------------------------------------
+
+    def _op_manque(self, nom):
+        """Un script est alle chercher une API que le moteur ne fournit pas.
+
+        Appele depuis les accesseurs poses par le prelude. La valeur rendue
+        reste `undefined` cote JavaScript : la mesure n'infléchit pas ce qui
+        est mesure.
+        """
+        telemetrie.api_manquante(str(nom))
         return None
 
     # --- Table des nœuds ------------------------------------------------------
@@ -251,6 +267,11 @@ class Contexte:
 
     def appel(self, operation, *arguments):
         """Point d'entree de `__bo_appel`, cote Python."""
+        if telemetrie.ACTIVE and operation != "manque":
+            # Ce que la page utilise vraiment, et pas seulement ce qui lui
+            # manque : sans ce compteur, on ne saurait pas si une API implementee
+            # sert a dix sites ou a aucun, donc pas ou porter l'effort suivant.
+            telemetrie.note("api_utilisee", operation)
         methode = getattr(self, "_op_" + operation, None)
         if methode is None:
             self.journal("warn", "operation JavaScript inconnue : %s" % operation)
@@ -983,9 +1004,12 @@ class Contexte:
                                     document=self.document.url,
                                     destination="fetch")
         except Exception as e:  # noqa: BLE001
+            telemetrie.ressource_echouee(url, 0, "fetch")
             self.journal("warn", "requete %s : %s" % (url, e))
             return {"status": 0, "statusText": str(e), "text": "", "url": url,
                     "headers": {}}
+        if not reponse.code or reponse.code >= 400:
+            telemetrie.ressource_echouee(url, reponse.code, "fetch")
         return {
             "status": reponse.code,
             "statusText": reponse.erreur or "",

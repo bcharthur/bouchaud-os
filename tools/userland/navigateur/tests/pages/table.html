@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Tableau de donnees</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; color: #0f172a;
+         background: #fff; font-size: 15px; line-height: 1.5; }
+
+  .page { padding: 24px; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  caption { text-align: left; font-weight: 600; margin-bottom: 12px; }
+  th, td { border: 1px solid #e2e8f0; padding: 8px 12px; text-align: left; }
+  thead th { background: #f8fafc; }
+  tbody tr:nth-child(even) { background: #fafafa; }
+  td.nombre { text-align: right; font-variant-numeric: tabular-nums; }
+  tfoot td { font-weight: 600; border-top: 2px solid #cbd5e1; }
+
+</style></head><body>
+
+<div class="page">
+<table>
+  <caption>Telechargements par version</caption>
+  <thead><tr><th>Version</th><th>Date</th><th class="nombre">Telechargements</th><th>Etat</th></tr></thead>
+  <tbody>
+    <tr><td>2.1.0</td><td>2026-01-01</td><td class="nombre">1000</td><td>stable</td></tr>
+    <tr><td>2.2.0</td><td>2026-02-01</td><td class="nombre">10000</td><td>stable</td></tr>
+    <tr><td>2.3.0</td><td>2026-03-01</td><td class="nombre">100000</td><td>stable</td></tr>
+    <tr><td>2.4.0</td><td>2026-04-01</td><td class="nombre">1000000</td><td>stable</td></tr>
+    <tr><td>2.5.0</td><td>2026-05-01</td><td class="nombre">10000000</td><td>stable</td></tr>
+    <tr><td>2.6.0</td><td>2026-06-01</td><td class="nombre">100000000</td><td>stable</td></tr>
+  </tbody>
+  <tfoot><tr><td colspan="2">Total</td><td class="nombre">1111100</td><td></td></tr></tfoot>
+</table>
+</div>
+
+</body></html>

@@ -17,6 +17,7 @@ import bo
 
 from . import css, flex, grille, images, police, tableau
 from .html import Element, Texte
+from . import telemetrie
 
 
 class Boite:
@@ -433,6 +434,11 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None
         return
 
     mode = style.get("display", "block")
+    if telemetrie.ACTIVE and mode not in DISPLAY_CONNUS:
+        # Une valeur de `display` non reconnue retombe en bloc. `flow-root`
+        # s'en accommode ; `contents` ou `ruby` non, et le rapport doit le dire
+        # plutot que de laisser croire que `display` est supporte.
+        telemetrie.valeur_rejetee("display", mode, "traitee comme block")
 
     # Un tableau aligne ses colonnes d'une ligne a l'autre : ni le bloc ni la
     # grille ne savent le faire, parce que la largeur d'une colonne depend de
@@ -632,6 +638,18 @@ def _termine_bloc(boite, style, curseur, pad_b, bordure, taille, reference):
         boite.largeur = maximum
 
     boite.hauteur = max(0.0, hauteur)
+
+
+# Toutes les valeurs de `display` que la mise en page distingue reellement.
+# Ce qui n'y figure pas retombe en bloc et se retrouve dans le rapport de
+# compatibilite.
+DISPLAY_CONNUS = frozenset((
+    "block", "inline", "inline-block", "none", "flex", "inline-flex",
+    "grid", "inline-grid", "list-item", "flow-root",
+    "table", "inline-table", "table-row", "table-cell", "table-row-group",
+    "table-header-group", "table-footer-group", "table-column",
+    "table-column-group", "table-caption",
+))
 
 
 # Les valeurs de `display` qui font d'un element une ligne, un groupe ou une
