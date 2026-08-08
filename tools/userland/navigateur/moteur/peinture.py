@@ -137,13 +137,15 @@ def _peint_contenu(boite, liste, defilement, largeur_vue, hauteur_vue, zones_lie
         coins = css.rayons(style.get("border-radius", ""), l, taille)
         rayon = max(coins) if coins else 0.0
 
-        # L'ombre portee se peint sous la boite, donc avant elle.
+        # Les ombres portees se peignent sous la boite, donc avant elle ; les
+        # ombres interieures apres son fond, donc plus bas.
+        interieures = []
         for dx, dy, flou, etendue, teinte, interieure in css.ombres(
                 style.get("box-shadow", ""), taille):
-            if interieure or h <= 0:
-                # Une ombre interieure demanderait de peindre le pourtour du
-                # fond, pas une forme posee dessous : elle est laissee de cote
-                # plutot que dessinee a l'exterieur, ou elle serait fausse.
+            if h <= 0:
+                continue
+            if interieure:
+                interieures.append((dx, dy, flou, etendue, teinte))
                 continue
             liste.append(("ombre", boite.x + dx - etendue, haut + dy - etendue,
                           l + 2 * etendue, h + 2 * etendue, rayon, flou, teinte))
@@ -152,13 +154,21 @@ def _peint_contenu(boite, liste, defilement, largeur_vue, hauteur_vue, zones_lie
         pente = css.degrade(style.get("background-image", ""))
         fond = css.couleur(style.get("background-color", ""))
         if h > 0 and pente is not None:
-            angle, etapes = pente
-            liste.append(("degrade", boite.x, haut, l, h, rayon, angle, etapes))
+            genre, angle, etapes = pente
+            operation = "degrade_radial" if genre == "radial" else "degrade"
+            liste.append((operation, boite.x, haut, l, h, rayon, angle, etapes))
         elif fond is not None and h > 0:
             if rayon > 0:
                 liste.append(("rond", boite.x, haut, l, h, rayon, fond))
             else:
                 liste.append(("rect", boite.x, haut, l, h, fond))
+
+        # Une ombre interieure se peint par-dessus le fond, rognee a la boite :
+        # c'est un halo pose le long du bord interne, pas une forme posee
+        # dessous. Elle etait laissee de cote faute de savoir la rogner.
+        for dx, dy, flou, etendue, teinte in interieures:
+            liste.append(("ombre_interne", boite.x, haut, l, h, rayon,
+                          dx, dy, flou, etendue, teinte))
 
         # Les quatre bords, chacun avec son epaisseur et sa couleur. Un
         # `border-bottom` seul — le separateur le plus repandu du web — ne

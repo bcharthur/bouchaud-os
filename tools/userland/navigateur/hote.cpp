@@ -60,6 +60,8 @@
 #include <QtGui/QMouseEvent>
 #include <QtGui/QWheelEvent>
 #include <QtGui/QLinearGradient>
+#include <QtGui/QRadialGradient>
+#include <QtGui/QPainterPath>
 #include <QtGui/QTransform>
 #include <QtCore/QTimer>
 #include <QtCore/QtPlugin>
@@ -350,25 +352,71 @@ private:
                 const QPointF centre(x + l / 2.0, y + h / 2.0);
                 QLinearGradient pente(centre - QPointF(dx, dy) * portee / 2.0,
                                       centre + QPointF(dx, dy) * portee / 2.0);
-                const Py_ssize_t nb = PySequence_Size(etapes);
-                for (Py_ssize_t k = 0; k < nb; ++k) {
-                    PyObject *etape = PySequence_GetItem(etapes, k);
-                    if (!etape)
-                        break;
-                    double position = 0.0;
-                    long teinte = 0;
-                    if (PyArg_ParseTuple(etape, "dl", &position, &teinte))
-                        pente.setColorAt(position, couleurDepuisEntier(teinte));
-                    else
-                        PyErr_Clear();
-                    Py_DECREF(etape);
-                }
+                remplitEtapes(pente, etapes);
                 p.setPen(Qt::NoPen);
                 p.setBrush(pente);
                 if (rayon > 0.0)
                     p.drawRoundedRect(QRectF(x, y, l, h), rayon, rayon);
                 else
                     p.drawRect(QRectF(x, y, l, h));
+            }
+        } else if (!std::strcmp(operation, "degrade_radial")) {
+            double x, y, l, h, rayon, angle;
+            PyObject *etapes = nullptr;
+            if (PyArg_ParseTuple(element, "sddddddO", &operation, &x, &y, &l, &h,
+                                 &rayon, &angle, &etapes)) {
+                // Un cercle centre, de rayon la demi-diagonale : c'est le
+                // `farthest-corner` de CSS, son defaut, et ce que demandent
+                // presque toutes les pages.
+                const QPointF centre(x + l / 2.0, y + h / 2.0);
+                const double portee = std::sqrt(l * l + h * h) / 2.0;
+                QRadialGradient pente(centre, portee);
+                remplitEtapes(pente, etapes);
+                p.setPen(Qt::NoPen);
+                p.setBrush(pente);
+                if (rayon > 0.0)
+                    p.drawRoundedRect(QRectF(x, y, l, h), rayon, rayon);
+                else
+                    p.drawRect(QRectF(x, y, l, h));
+            }
+        } else if (!std::strcmp(operation, "ombre_interne")) {
+            // Une ombre interieure est un halo le long du bord interne. On la
+            // dessine comme l'ombre portee — des couches concentriques — mais
+            // rognee a la boite et **decalee vers l'exterieur** : ce qui reste
+            // visible est la frange qui rentre.
+            double x, y, l, h, rayon, dx, dy, flou, etendue;
+            long couleur;
+            if (PyArg_ParseTuple(element, "sdddddddddl", &operation, &x, &y, &l, &h,
+                                 &rayon, &dx, &dy, &flou, &etendue, &couleur)) {
+                p.save();
+                QPainterPath dedans;
+                if (rayon > 0.0)
+                    dedans.addRoundedRect(QRectF(x, y, l, h), rayon, rayon);
+                else
+                    dedans.addRect(QRectF(x, y, l, h));
+                p.setClipPath(dedans, Qt::IntersectClip);
+
+                const int couches = std::max(1, std::min(16, int(std::ceil(flou + etendue))));
+                QColor teinte = couleurDepuisEntier(couleur);
+                const double part = teinte.alphaF() / double(couches + 1);
+                QPen stylo;
+                stylo.setColor(teinte);
+                p.setBrush(Qt::NoBrush);
+                for (int i = couches; i >= 0; --i) {
+                    const double epaisseur = (flou + etendue) * double(i + 1)
+                                             / double(couches + 1);
+                    QColor couche = teinte;
+                    couche.setAlphaF(part);
+                    stylo.setColor(couche);
+                    stylo.setWidthF(std::max(1.0, epaisseur));
+                    p.setPen(stylo);
+                    const double moitie = stylo.widthF() / 2.0;
+                    p.drawRoundedRect(
+                        QRectF(x + dx + moitie, y + dy + moitie,
+                               l - stylo.widthF(), h - stylo.widthF()),
+                        std::max(0.0, rayon - moitie), std::max(0.0, rayon - moitie));
+                }
+                p.restore();
             }
         } else if (!std::strcmp(operation, "contour")) {
             double x, y, l, h, rayon, epaisseur;
@@ -484,6 +532,24 @@ private:
         }
         PyErr_Clear();
         Py_DECREF(tete);
+    }
+
+    /// Pose les arrets de couleur d'un degrade, lineaire ou radial.
+    void remplitEtapes(QGradient &pente, PyObject *etapes)
+    {
+        const Py_ssize_t nb = PySequence_Size(etapes);
+        for (Py_ssize_t k = 0; k < nb; ++k) {
+            PyObject *etape = PySequence_GetItem(etapes, k);
+            if (!etape)
+                break;
+            double position = 0.0;
+            long teinte = 0;
+            if (PyArg_ParseTuple(etape, "dl", &position, &teinte))
+                pente.setColorAt(position, couleurDepuisEntier(teinte));
+            else
+                PyErr_Clear();
+            Py_DECREF(etape);
+        }
     }
 
     /// Zones de rognage en cours, de la plus exterieure a la plus interieure.

@@ -1603,6 +1603,46 @@ def verifie_ajustement_images():
             boite_de(doc, "cadre").hauteur)
 
 
+def verifie_degrades_et_ombres():
+    """Degrades radiaux et ombres interieures : la decoration est complete."""
+    d = css.degrade
+    egal("degrade: lineaire reconnu", d("linear-gradient(to right, #fff, #000)")[0],
+         "lineaire")
+    egal("degrade: radial reconnu", d("radial-gradient(#fff, #000)")[0], "radial")
+    egal("degrade: la forme radiale est sautee",
+         len(d("radial-gradient(circle at center, red, blue)")[2]), 2)
+    egal("degrade: ellipse et portee aussi",
+         len(d("radial-gradient(ellipse farthest-corner, #abc, #def)")[2]), 2)
+    egal("degrade: le conique reste hors de portee", d("conic-gradient(red, blue)"),
+         None)
+    egal("degrade: l'angle lineaire est lu",
+         d("linear-gradient(45deg, red, blue)")[1], 45.0)
+
+    o = css.ombres
+    portee = o("0 2px 4px #000000")
+    egal("ombre: portee par defaut", portee[0][5], False)
+    interne = o("inset 0 2px 4px #000000")
+    egal("ombre: `inset` est reconnu", interne[0][5], True)
+    egal("ombre: plusieurs ombres", len(o("0 1px #111, inset 0 -1px #222")), 2)
+
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #radial { height: 40px; background: radial-gradient(#ffffff, #000000); }
+          #creuse { height: 40px; box-shadow: inset 0 2px 6px rgba(0,0,0,.5); }
+          #plate  { height: 40px; box-shadow: 0 2px 6px rgba(0,0,0,.5); }
+        </style>
+        <body>
+          <div id="radial">r</div><div id="creuse">c</div><div id="plate">p</div>
+        </body>""")
+    genres = [e[0] for e in doc.liste_affichage(0, 1000, 700)]
+    verifie("degrade: l'operation radiale est emise", "degrade_radial" in genres,
+            genres[:14])
+    verifie("ombre: l'operation interne est emise", "ombre_interne" in genres,
+            genres[:20])
+    verifie("ombre: la portee reste distincte", "ombre" in genres, genres[:20])
+
+
 # --- Disposition --------------------------------------------------------------
 
 def boite_de(doc, identifiant):
@@ -3106,6 +3146,7 @@ def principal():
         verifie_transitions,
         verifie_isolement_ombre,
         verifie_ajustement_images,
+        verifie_degrades_et_ombres,
         verifie_pseudo_elements,
         verifie_requetes_media,
         verifie_longueurs,

@@ -951,22 +951,25 @@ def ombres(valeur, taille_police=16.0):
     return resultat
 
 
-# `linear-gradient(…)`, avec ou sans prefixe de fabricant.
-_DEGRADE = re.compile(r"(?:repeating-)?linear-gradient\(", re.I)
+# `linear-gradient(…)` et `radial-gradient(…)`, avec ou sans repetition.
+_DEGRADE = re.compile(r"(?:repeating-)?(?:linear|radial)-gradient\(", re.I)
+_RADIAL = re.compile(r"(?:repeating-)?radial-gradient\(", re.I)
 
 
 def degrade(valeur):
-    """`linear-gradient(…)` en `(angle, [(position, couleur), …])`.
+    """Un degrade en `(genre, angle, [(position, couleur), …])`.
 
-    L'angle suit la norme CSS : 0 degre pointe vers le haut, et le sens est
-    celui des aiguilles d'une montre. `None` si la valeur n'est pas un degrade
-    lineaire — les degrades radiaux et coniques ne sont pas peints.
+    `genre` vaut `"lineaire"` ou `"radial"`. L'angle suit la norme CSS pour le
+    premier : 0 degre pointe vers le haut, dans le sens des aiguilles ; il ne
+    sert pas au second. `None` si la valeur n'est pas un degrade que l'on peint
+    — les degrades coniques n'en sont pas.
     """
     if not valeur:
         return None
     trouve = _DEGRADE.search(valeur)
     if not trouve:
         return None
+    radial = bool(_RADIAL.match(valeur, trouve.start()))
     interieur = _entre_parentheses(valeur, trouve.end() - 1)
     if interieur is None:
         return None
@@ -976,7 +979,13 @@ def degrade(valeur):
 
     angle = 180.0          # `to bottom`, le defaut de CSS
     premier = morceaux[0].lower()
-    if premier.startswith("to "):
+    if radial:
+        # `circle`, `ellipse at center`, `farthest-corner`… decrivent la forme
+        # et le centre. On peint un cercle centre : c'est ce que la quasi-
+        # totalite des pages demande, et le reste ne s'en distingue guere.
+        if not _est_etape(premier):
+            morceaux = morceaux[1:]
+    elif premier.startswith("to "):
         angle = _angle_vers(premier[3:])
         morceaux = morceaux[1:]
     elif premier.endswith(("deg", "turn", "rad", "grad")):
@@ -1004,7 +1013,13 @@ def degrade(valeur):
         etapes.append((max(0.0, min(1.0, position)), teinte))
     if len(etapes) < 2:
         return None
-    return (angle, etapes)
+    return ("radial" if radial else "lineaire", angle, etapes)
+
+
+def _est_etape(morceau):
+    """Ce morceau est-il une couleur, plutot qu'une description de forme ?"""
+    premier = morceau.split()[0] if morceau.split() else ""
+    return couleur(premier) is not None or couleur(morceau) is not None
 
 
 def _entre_parentheses(texte, ouvrante):
