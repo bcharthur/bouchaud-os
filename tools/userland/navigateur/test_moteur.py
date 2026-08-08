@@ -929,7 +929,8 @@ def verifie_youtube_client():
 
     demandes = []
 
-    def charge(url, methode="GET", corps=None, entetes=None, brut=False):
+    def charge(url, methode="GET", corps=None, entetes=None, brut=False,
+               document=None, destination=None):
         demandes.append((url, dict(entetes or {})))
         return reseau.Reponse(url, "", "video/mp4", 206, entetes={}, octets=b"")
 
@@ -965,7 +966,8 @@ def verifie_youtube_chaine():
 
     envoyees = []
 
-    def charge(url, methode="GET", corps=None, entetes=None, brut=False):
+    def charge(url, methode="GET", corps=None, entetes=None, brut=False,
+               document=None, destination=None):
         envoyees.append({"url": url, "methode": methode, "corps": corps,
                          "entetes": dict(entetes or {})})
         if "/youtubei/v1/player" not in url:
@@ -1056,8 +1058,11 @@ def verifie_requete_brute():
     vues = {}
     vrai_charge = reseau.charge
 
-    def faux_charge(url, methode="GET", corps=None, entetes=None, brut=False):
+    def faux_charge(url, methode="GET", corps=None, entetes=None, brut=False,
+                    document=None, destination=None):
         vues["brut"] = brut
+        vues["document"] = document
+        vues["destination"] = destination
         return reseau.Reponse(url, '{"x": 1}', "application/json", 200,
                               octets=b'{"x": 1}')
 
@@ -1071,6 +1076,9 @@ def verifie_requete_brute():
         reseau.charge = vrai_charge
     verifie("requete: le corps est demande tel quel", vues.get("brut") is True,
             vues)
+    egal("requete: elle se declare emise par le document", vues.get("document"),
+         doc.url)
+    egal("requete: sa destination est nommee", vues.get("destination"), "fetch")
     contexte.ferme()
 
 
@@ -2328,7 +2336,8 @@ def sert(reponses):
     """
     demandes = []
 
-    def charge(url, methode="GET", corps=None, entetes=None, brut=False):
+    def charge(url, methode="GET", corps=None, entetes=None, brut=False,
+               document=None, destination=None):
         demandes.append(url)
         if url not in reponses:
             return reseau.Reponse(url, "", "text/plain", 404)
@@ -3334,7 +3343,8 @@ def verifie_client_leger():
     demandes = []
 
     def sert(reponses):
-        def charge(url, methode="GET", corps=None, entetes=None, brut=False):
+        def charge(url, methode="GET", corps=None, entetes=None, brut=False,
+               document=None, destination=None):
             demandes.append(url)
             for motif, faire in reponses:
                 if motif in url:
@@ -3414,6 +3424,300 @@ def verifie_bac_a_sable():
                        "typeof Deno", "typeof __loadScript"):
         egal("bac a sable: %s" % expression, contexte.execute(expression), "undefined")
     contexte.ferme()
+
+
+# --- Securite web -------------------------------------------------------------
+
+def verifie_politique_ressources():
+    """Une page distante ne lit pas le disque ; l'utilisateur, si.
+
+    C'est la distinction que la politique doit tenir : `file://` reste ouvert a
+    qui tape l'adresse, et ferme a qui l'ecrit dans un `fetch`. Une regle qui
+    supprimerait `file://` partout casserait le gestionnaire de fichiers ; une
+    regle qui l'autoriserait partout donnerait `/etc/shadow` a la premiere page
+    venue.
+    """
+    from moteur import images, securite
+
+    dossier = os.path.join(os.environ.get("BO_TMP", "/tmp"), "bo-verif-securite")
+    os.makedirs(dossier, exist_ok=True)
+    secret = os.path.join(dossier, "secret.txt")
+    with open(secret, "w") as f:
+        f.write("mot-de-passe-de-l-utilisateur")
+    adresse = "file://" + secret
+
+    # 1. La navigation de l'utilisateur reste possible : aucun `document`.
+    ouverte = reseau.charge(adresse)
+    verifie("securite: l'utilisateur ouvre encore un fichier local",
+            "mot-de-passe" in ouverte.contenu, ouverte.contenu[:60])
+
+    # 2. Le meme fichier, demande par une page distante, est refuse — quelle
+    #    que soit la destination invoquee.
+    for destination in ("fetch", "script", "style", "image", "font", "media"):
+        refus = reseau.charge(adresse, brut=True,
+                              document="https://mechant.test/page",
+                              destination=destination)
+        egal("securite: %s distant refuse file://" % destination, refus.code, 0)
+        verifie("securite: %s refuse sans divulguer le contenu" % destination,
+                "mot-de-passe" not in (refus.contenu or "")
+                and b"mot-de-passe" not in (refus.octets or b""),
+                destination)
+
+    # 3. Une page locale garde le droit de charger ses voisines : sans cela,
+    #    ouvrir un fichier HTML du disque n'afficherait plus ses images.
+    voisine = reseau.charge(adresse, brut=True,
+                            document="file:///home/utilisateur/page.html",
+                            destination="image")
+    egal("securite: une page locale charge sa voisine locale", voisine.code, 200)
+
+    # 4. `bo:` est du chrome de navigateur, pas une ressource du Web.
+    interne = reseau.charge("bo:accueil", document="https://mechant.test/page",
+                            destination="fetch")
+    egal("securite: une page distante n'atteint pas bo:", interne.code, 0)
+
+    # 5. Le chemin reel du moteur : `fetch("file:///…")` depuis du JavaScript.
+    doc = document("<body></body>", url="https://mechant.test/page")
+    contexte = js.Contexte(doc)
+    try:
+        contexte.execute(
+            "globalThis.__vu = null;"
+            "fetch(%s).then(r => r.text()).then(t => { globalThis.__vu = t; });"
+            % json.dumps(adresse))
+        for _ in range(4):
+            contexte.tic()
+        vu = contexte.execute("String(globalThis.__vu)")
+        verifie("securite: fetch(file://) ne rend pas le fichier",
+                "mot-de-passe" not in vu, vu[:60])
+    finally:
+        contexte.ferme()
+
+    # 6. Et le chemin des images, qui passe par son propre cache.
+    images.vide()
+    egal("securite: <img src=file://> distant refuse",
+         images.charge("https://mechant.test/page", adresse), None)
+
+    # 7. La politique elle-meme, testee directement.
+    egal("securite: origine d'une adresse https",
+         securite.origine("https://a.test:8443/x"), ("https", "a.test", 8443))
+    egal("securite: port implicite d'https",
+         securite.origine("https://a.test/x"), ("https", "a.test", 443))
+    egal("securite: un fichier n'a pas d'origine",
+         securite.origine("file:///etc/passwd"), None)
+    verifie("securite: deux origines opaques ne sont pas egales",
+            not securite.meme_origine("file:///a", "file:///a"))
+    verifie("securite: meme origine reconnue",
+            securite.meme_origine("https://a.test/x", "https://a.test/y"))
+    verifie("securite: un port different change l'origine",
+            not securite.meme_origine("https://a.test:1/x", "https://a.test:2/y"))
+    try:
+        shutil.rmtree(dossier)
+    except OSError:
+        pass
+
+
+def verifie_tls_ferme():
+    """Sans magasin de racines, HTTPS echoue. Il ne se degrade pas."""
+    import ssl
+
+    from moteur import reseau as _reseau
+
+    anciens = _reseau.MAGASINS
+    ancien_env = {nom: os.environ.pop(nom, None)
+                  for nom in ("BO_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR")}
+    ancien_defaut = ssl.create_default_context
+
+    def contexte_vide(*args, **kwargs):
+        # Un contexte sans racine, comme sur une image OS qui n'en embarque pas.
+        return ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+    try:
+        _reseau.MAGASINS = ("/inexistant/aucun-magasin.crt",)
+        ssl.create_default_context = contexte_vide
+        leve = None
+        try:
+            _reseau.contexte_tls()
+        except _reseau.MagasinAbsent as e:
+            leve = e
+        verifie("tls: sans magasin, la connexion est refusee", leve is not None)
+        verifie("tls: le refus se nomme",
+                leve is not None and "magasin" in str(leve).lower(), str(leve))
+    finally:
+        ssl.create_default_context = ancien_defaut
+        _reseau.MAGASINS = anciens
+        for nom, valeur in ancien_env.items():
+            if valeur is not None:
+                os.environ[nom] = valeur
+
+    # Et avec un magasin, le contexte verifie vraiment quelque chose.
+    try:
+        contexte = _reseau.contexte_tls()
+    except _reseau.MagasinAbsent:
+        contexte = None
+    if contexte is not None:
+        egal("tls: la chaine est exigee", contexte.verify_mode, ssl.CERT_REQUIRED)
+        egal("tls: le nom d'hote est verifie", contexte.check_hostname, True)
+
+    # La regression a interdire : que le code se remette a fabriquer un
+    # contexte permissif quelque part.
+    source = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "moteur", "reseau.py")).read()
+    verifie("tls: le transport ne desarme plus la verification",
+            "verify_mode = ssl.CERT_NONE" not in source)
+    verifie("tls: le transport ne desactive plus le nom d'hote",
+            "check_hostname = False" not in source)
+
+
+def verifie_temoins_httponly():
+    """`HttpOnly` : le serveur le recoit, `document.cookie` ne le voit jamais."""
+    from moteur import stockage
+
+    restaure = isole_le_stockage()
+    try:
+        bocal = stockage.Temoins()
+        bocal.oublie_tout()
+        bocal.absorbe("https://banque.test/compte", {
+            "set-cookie": "session=secret-de-session; Path=/; HttpOnly, "
+                          "theme=sombre; Path=/",
+        })
+
+        reseau_vu = bocal.pour("https://banque.test/compte")
+        verifie("httponly: le serveur recoit le temoin", "session=secret-de-session" in reseau_vu, reseau_vu)
+        verifie("httponly: le serveur recoit aussi les autres", "theme=sombre" in reseau_vu, reseau_vu)
+
+        script_vu = bocal.pour("https://banque.test/compte", javascript=True)
+        verifie("httponly: document.cookie ne le voit pas",
+                "secret-de-session" not in script_vu, script_vu)
+        verifie("httponly: document.cookie voit le reste",
+                "theme=sombre" in script_vu, script_vu)
+
+        # Un script ne doit pas non plus pouvoir l'ecraser : proteger la lecture
+        # sans proteger l'ecriture laisserait fixer la session.
+        bocal.absorbe("https://banque.test/compte",
+                      {"set-cookie": "session=vole; Path=/"}, javascript=True)
+        verifie("httponly: un script ne l'ecrase pas",
+                "session=secret-de-session" in bocal.pour("https://banque.test/compte"),
+                bocal.pour("https://banque.test/compte"))
+        verifie("httponly: il reste invisible apres la tentative",
+                "vole" not in bocal.pour("https://banque.test/compte", javascript=True))
+
+        # Ni le poser lui-meme, ce qui reviendrait a se cacher de soi-meme.
+        bocal.absorbe("https://banque.test/compte",
+                      {"set-cookie": "jeton=x; Path=/; HttpOnly"}, javascript=True)
+        verifie("httponly: un script ne pose pas de temoin HttpOnly",
+                "jeton=x" in bocal.pour("https://banque.test/compte", javascript=True),
+                bocal.pour("https://banque.test/compte", javascript=True))
+
+        # Le chemin, corrige : `/admin` ne couvre pas `/administrateur`.
+        bocal.oublie_tout()
+        bocal.absorbe("https://site.test/admin/", {"set-cookie": "a=1; Path=/admin"})
+        verifie("temoins: /admin couvre /admin",
+                "a=1" in bocal.pour("https://site.test/admin"))
+        verifie("temoins: /admin couvre /admin/outils",
+                "a=1" in bocal.pour("https://site.test/admin/outils"))
+        verifie("temoins: /admin ne couvre pas /administrateur",
+                "a=1" not in bocal.pour("https://site.test/administrateur"),
+                bocal.pour("https://site.test/administrateur"))
+
+        # Le domaine, corrige : sans `Domain`, le temoin ne descend pas.
+        bocal.oublie_tout()
+        bocal.absorbe("https://site.test/", {"set-cookie": "b=1; Path=/"})
+        verifie("temoins: sans Domain, l'hote seul le recoit",
+                "b=1" in bocal.pour("https://site.test/"))
+        verifie("temoins: sans Domain, pas de sous-domaine",
+                "b=1" not in bocal.pour("https://compte.site.test/"),
+                bocal.pour("https://compte.site.test/"))
+        bocal.absorbe("https://site.test/", {"set-cookie": "c=1; Path=/; Domain=site.test"})
+        verifie("temoins: avec Domain, le sous-domaine le recoit",
+                "c=1" in bocal.pour("https://compte.site.test/"))
+    finally:
+        restaure()
+
+
+def verifie_temoins_document():
+    """`document.cookie` passe bien par le chemin protege."""
+    from moteur import stockage
+
+    restaure = isole_le_stockage()
+    try:
+        stockage.temoins().absorbe("https://banque.test/", {
+            "set-cookie": "session=secret; Path=/; HttpOnly, public=oui; Path=/",
+        })
+        doc = document("<body></body>", url="https://banque.test/")
+        contexte = js.Contexte(doc)
+        try:
+            lu = contexte.execute("document.cookie")
+            verifie("document.cookie: le HttpOnly est absent",
+                    "secret" not in lu, lu)
+            verifie("document.cookie: le reste est present", "public=oui" in lu, lu)
+            contexte.execute('document.cookie = "session=vole; Path=/"')
+            verifie("document.cookie: l'ecrasement est refuse",
+                    "secret" in stockage.temoins().pour("https://banque.test/"),
+                    stockage.temoins().pour("https://banque.test/"))
+        finally:
+            contexte.ferme()
+    finally:
+        restaure()
+
+
+def verifie_redirection_entetes():
+    """Une redirection vers un autre hote ne reporte pas les secrets."""
+    vues = []
+
+    class _Fausse:
+        will_close = True
+        status = 200
+
+        def __init__(self, code, entetes):
+            self.status = code
+            self._entetes = entetes
+
+        def getheaders(self):
+            return list(self._entetes.items())
+
+        def read(self):
+            return b"corps"
+
+    class _Connexion:
+        def __init__(self, hote, port, timeout=None):
+            self.hote = hote
+            self.sock = object()
+            self._reponse = None
+
+        def request(self, methode, chemin, body=None, headers=None):
+            vues.append((self.hote, dict(headers or {})))
+            if self.hote == "depart.test":
+                self._reponse = _Fausse(302, {
+                    "Location": "https://arrivee.test/cible",
+                    "Content-Type": "text/plain",
+                })
+            else:
+                self._reponse = _Fausse(200, {"Content-Type": "text/plain"})
+
+        def getresponse(self):
+            return self._reponse
+
+        def close(self):
+            self.sock = None
+
+    ancien = reseau._ouvre
+    reseau._ouvre = lambda hote, port, securise: _Connexion(hote, port)
+    try:
+        reseau.charge("https://depart.test/a", brut=True,
+                      entetes={"Authorization": "Bearer jeton-secret",
+                               "Cookie": "session=abc"})
+    finally:
+        reseau._ouvre = ancien
+
+    egal("redirection: les deux hotes ont ete joints", len(vues), 2)
+    if len(vues) == 2:
+        _, seconde = vues[1]
+        envoyes = {n.lower(): v for n, v in seconde.items()}
+        verifie("redirection: Authorization ne suit pas vers un autre hote",
+                "authorization" not in envoyes, envoyes)
+        verifie("redirection: le Cookie du depart ne suit pas",
+                "session=abc" not in envoyes.get("cookie", ""), envoyes)
+        egal("redirection: l'hote demande est bien le nouveau",
+             vues[1][0], "arrivee.test")
 
 
 # --- Execution ----------------------------------------------------------------
@@ -3509,6 +3813,11 @@ def principal():
         verifie_longueurs,
         verifie_client_leger,
         verifie_bac_a_sable,
+        verifie_politique_ressources,
+        verifie_tls_ferme,
+        verifie_temoins_httponly,
+        verifie_temoins_document,
+        verifie_redirection_entetes,
         verifie_hote_reel,
     ):
         nom = verification.__name__.replace("verifie_", "")

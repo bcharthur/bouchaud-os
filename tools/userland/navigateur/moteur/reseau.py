@@ -31,6 +31,7 @@ import ssl
 import urllib.parse
 import zlib
 
+from . import securite
 from . import stockage
 
 DELAI = 20.0
@@ -145,14 +146,28 @@ def normalise(saisie, base=None):
     return "https://duckduckgo.com/html/?q=" + urllib.parse.quote(saisie)
 
 
-def charge(url, methode="GET", corps=None, entetes=None, brut=False):
+def charge(url, methode="GET", corps=None, entetes=None, brut=False,
+           document=None, destination=None):
     """Charge une URL et rend une [`Reponse`]. N'echoue jamais par exception.
 
     `methode`, `corps` et `entetes` servent aux requetes que le JavaScript de la
     page emet (`XMLHttpRequest`, `fetch`). `brut` demande a ne pas convertir le
     corps en HTML affichable : c'est ce qu'il faut pour une image ou un script,
     dont le contenu n'a pas a etre enrobe dans un `<pre>`.
+
+    `document` est l'adresse du document qui demande la ressource. Le donner
+    range la requete en provenance `DOCUMENT` : c'est la page qui demande, pas
+    l'utilisateur, et la politique de `securite.py` s'applique. L'omettre decrit
+    une navigation voulue par l'utilisateur, qui reste libre d'ouvrir un
+    fichier local.
     """
+    if document is not None:
+        requete = securite.requete_document(url, document,
+                                            destination or "fetch")
+        try:
+            securite.verifie(requete)
+        except securite.Refus as refus:
+            return Reponse(url, "", "text/plain", 0, erreur=str(refus))
     try:
         if url.startswith("bo:"):
             return Reponse(url, _page_interne(url), "text/html")
@@ -392,6 +407,11 @@ def _saute_nom(paquet, position):
     return position
 
 
+def _meme_hote(depart, arrivee):
+    """Vrai si les deux adresses partagent schema, hote et port."""
+    return securite.meme_origine(depart, arrivee)
+
+
 def _charge_http(url, restantes=REDIRECTIONS_MAX, methode="GET", corps=None,
                  entetes=None, brut=False):
     morceaux = urllib.parse.urlsplit(url)
@@ -480,13 +500,25 @@ def _charge_http(url, restantes=REDIRECTIONS_MAX, methode="GET", corps=None,
             # Une redirection apres POST se poursuit en GET, comme le veut la
             # norme pour 301/302/303.
             suite = "GET" if code in (301, 302, 303) else methode
+            suivante = urllib.parse.urljoin(url, cible)
             # Les en-tetes propres a la connexion precedente ne suivent pas :
             # reemettre le `Host` de l'ancien hote vers un autre domaine fait
             # servir la mauvaise page, ou aucune.
+            abandonnes = {"host", "connection", "accept-encoding",
+                          "content-length",
+                          # `Cookie` est recalcule pour l'adresse d'arrivee par
+                          # `temoins().pour()`. Le reprendre tel quel enverrait
+                          # les temoins de l'hote de depart a celui d'arrivee.
+                          "cookie"}
+            if not _meme_hote(url, suivante):
+                # Un `Authorization` est destine a l'hote qui l'a demande. Une
+                # redirection vers un autre domaine ne lui donne pas le droit
+                # de le lire : c'est ainsi qu'un jeton s'exfiltre.
+                abandonnes.add("authorization")
+                abandonnes.add("proxy-authorization")
             reprises = {n: v for n, v in entetes_envoyes.items()
-                        if n.lower() not in ("host", "connection", "accept-encoding",
-                                             "content-length")}
-            return _charge_http(urllib.parse.urljoin(url, cible), restantes - 1,
+                        if n.lower() not in abandonnes}
+            return _charge_http(suivante, restantes - 1,
                                 methode=suite,
                                 corps=None if suite == "GET" else corps,
                                 entetes=reprises, brut=brut)
@@ -529,13 +561,7 @@ def _ouvre(hote, port, securise):
     prise.connect((adresse, port))
 
     if securise:
-        contexte = ssl.create_default_context()
-        # Sans magasin de racines sur la machine, toute connexion echouerait.
-        # On verifie donc la chaine quand un magasin existe, et on s'en passe
-        # sinon — la barre d'etat le dit.
-        if not _magasin_disponible(contexte):
-            contexte.check_hostname = False
-            contexte.verify_mode = ssl.CERT_NONE
+        contexte = contexte_tls()
         prise = contexte.wrap_socket(prise, server_hostname=hote)
 
     # La prise est deja ouverte : `http.client` s'en sert telle quelle au lieu
@@ -570,10 +596,73 @@ def _decompresse(donnees, encodage):
     return donnees
 
 
-def _magasin_disponible(contexte):
+# Emplacements ou l'image de Bouchaud OS peut deposer ses racines. Le premier
+# qui existe gagne. `BO_CA_BUNDLE` passe devant tout : c'est ce que la
+# construction de l'image renseigne.
+MAGASINS = (
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/cert.pem",
+    "/usr/share/bouchaud/ca-bundle.crt",
+)
+
+
+class MagasinAbsent(Exception):
+    """Aucune racine de confiance : HTTPS ne peut pas etre verifie."""
+
+
+def contexte_tls():
+    """Un contexte TLS qui verifie la chaine et le nom, ou leve.
+
+    Le navigateur est **fail-closed**. Il fut un temps ou cette fonction
+    retombait sur `CERT_NONE` quand la machine n'avait pas de magasin de
+    racines : la page s'affichait, la barre d'etat le mentionnait, et
+    n'importe quel intermediaire pouvait lire et reecrire le trafic sans que
+    rien ne casse. Une securite qui s'efface toute seule quand elle gene ne
+    protege personne — c'est meme pire qu'aucune securite, parce qu'on croit
+    l'avoir.
+
+    Une image sans racines doit donc echouer bruyamment, et la reparation est
+    d'embarquer un magasin, pas d'assouplir le controle.
+    """
+    contexte = ssl.create_default_context()
+    contexte.check_hostname = True
+    contexte.verify_mode = ssl.CERT_REQUIRED
+
+    if _magasin_charge(contexte):
+        return contexte
+
+    for chemin in _magasins_candidats():
+        if not chemin or not os.path.exists(chemin):
+            continue
+        try:
+            if os.path.isdir(chemin):
+                contexte.load_verify_locations(capath=chemin)
+            else:
+                contexte.load_verify_locations(cafile=chemin)
+        except Exception:  # noqa: BLE001 — magasin illisible : on essaie le suivant
+            continue
+        if _magasin_charge(contexte):
+            return contexte
+
+    raise MagasinAbsent(
+        "aucun magasin de racines de confiance : HTTPS refuse. Deposez un "
+        "faisceau de certificats a l'un des emplacements attendus ou nommez-le "
+        "dans BO_CA_BUNDLE.")
+
+
+def _magasins_candidats():
+    yield os.environ.get("BO_CA_BUNDLE")
+    yield os.environ.get("SSL_CERT_FILE")
+    yield os.environ.get("SSL_CERT_DIR")
+    for chemin in MAGASINS:
+        yield chemin
+
+
+def _magasin_charge(contexte):
     try:
         return bool(contexte.get_ca_certs())
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
 
 

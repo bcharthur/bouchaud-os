@@ -551,13 +551,19 @@ class Contexte:
     # --- Operations : persistance ---------------------------------------------
 
     def _op_temoins(self):
-        """L'en-tete `Cookie` de la page, tel que `document.cookie` le rend."""
-        return stockage.temoins().pour(self.document.url)
+        """L'en-tete `Cookie` de la page, tel que `document.cookie` le rend.
+
+        `javascript=True` : les temoins `HttpOnly` restent invisibles ici tout
+        en continuant de partir au serveur. C'est exactement ce que l'attribut
+        promet, et sans ce drapeau il ne promettait rien.
+        """
+        return stockage.temoins().pour(self.document.url, javascript=True)
 
     def _op_poseTemoin(self, declaration):
         """`document.cookie = "nom=valeur; …"` — un seul temoin a la fois."""
         entetes = {"set-cookie": str(declaration)}
-        return stockage.temoins().absorbe(self.document.url, entetes) > 0
+        return stockage.temoins().absorbe(self.document.url, entetes,
+                                          javascript=True) > 0
 
     def _op_stockage(self, action, cle=None, valeur=None):
         """`localStorage`, cloisonne par origine et ecrit sur le disque."""
@@ -611,7 +617,9 @@ class Contexte:
             self._modules[adresse] = None
             return None
         try:
-            reponse = reseau.charge(adresse, brut=True)
+            reponse = reseau.charge(adresse, brut=True,
+                                    document=self.document.url,
+                                    destination="script")
         except Exception as e:  # noqa: BLE001
             self.journal("warn", "module %s : %s" % (adresse, e))
             self._modules[adresse] = None
@@ -807,7 +815,9 @@ class Contexte:
                 return False
         else:
             try:
-                reponse = reseau.charge(absolue, brut=True)
+                reponse = reseau.charge(absolue, brut=True,
+                                        document=self.document.url,
+                                        destination="media")
             except Exception as e:  # noqa: BLE001
                 self.journal("warn", "media %s : %s" % (absolue, e))
                 return False
@@ -969,7 +979,9 @@ class Contexte:
             # la page d'habillage que le navigateur fabrique pour l'affichage.
             # Sans cela, un `fetch` de JSON recevait « Type non affichable ».
             reponse = reseau.charge(url, methode=methode, corps=corps,
-                                    entetes=entetes or {}, brut=True)
+                                    entetes=entetes or {}, brut=True,
+                                    document=self.document.url,
+                                    destination="fetch")
         except Exception as e:  # noqa: BLE001
             self.journal("warn", "requete %s : %s" % (url, e))
             return {"status": 0, "statusText": str(e), "text": "", "url": url,
@@ -989,7 +1001,9 @@ class Contexte:
             # n'est pas du HTML dans un `<pre>` et en echappe les `&` et les
             # `<`. Chaque `<script src=…>` arrivait donc au moteur JavaScript
             # commencant par un chevron, et mourait sur le premier jeton.
-            reponse = reseau.charge(absolue, brut=True)
+            reponse = reseau.charge(absolue, brut=True,
+                                    document=self.document.url,
+                                    destination="script")
         except Exception as e:  # noqa: BLE001
             self.journal("warn", "script %s : %s" % (absolue, e))
             return ""

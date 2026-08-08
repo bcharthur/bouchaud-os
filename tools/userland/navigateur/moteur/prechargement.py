@@ -103,7 +103,8 @@ def precharge(racine, base, journal=None):
 
     def demande(url):
         try:
-            reponse = reseau.charge(url, brut=True)
+            reponse = reseau.charge(url, brut=True, document=base,
+                                    destination="subresource")
         except Exception:  # noqa: BLE001
             return
         if reponse.code and reponse.code < 400:

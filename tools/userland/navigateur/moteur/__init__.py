@@ -289,7 +289,8 @@ class Document:
                              % famille)
                 continue
             url = urllib.parse.urljoin(base or self.url or "", choix[0])
-            reponse = reseau.charge(url, brut=True)
+            reponse = reseau.charge(url, brut=True, document=self.url,
+                                    destination="font")
             ouverte = police.ouvre(reponse.octets or b"") if reponse.code == 200 else None
             if not ouverte:
                 self._polices[cle] = False
@@ -334,7 +335,8 @@ class Document:
         if cle in self._feuilles:
             return self._feuilles[cle]
         try:
-            reponse = reseau.charge(url, brut=True)
+            reponse = reseau.charge(url, brut=True, document=self.url,
+                                    destination="style")
         except Exception as e:  # noqa: BLE001
             self.journal("warn", "feuille %s : %s" % (adresse, e))
             self._feuilles[cle] = ""
