@@ -1174,8 +1174,14 @@ _TRANSPARENTES = ("@layer", "@supports", "@container", "@scope")
 _COMMENTAIRE = re.compile(r"/\*.*?\*/", re.S)
 
 
-def analyse(source, ordre_depart=0):
-    """Analyse une feuille de style et rend la liste de ses regles."""
+def analyse(source, ordre_depart=0, keyframes=None):
+    """Analyse une feuille de style et rend la liste de ses regles.
+
+    `keyframes`, s'il est fourni, recoit les gabarits `@keyframes` rencontres :
+    `nom -> [(position entre 0 et 1, declarations), …]`. Ils ne sont pas des
+    regles — ils ne designent aucun element — mais une table que l'animation
+    consulte, d'ou ce second canal plutot qu'un melange dans la liste.
+    """
     source = _COMMENTAIRE.sub(" ", source)
     regles = []
     ordre = ordre_depart
@@ -1210,6 +1216,16 @@ def analyse(source, ordre_depart=0):
                     position = accolade + 1
                 else:
                     position = _saute_bloc(source, accolade)
+                continue
+            if tete.startswith("@keyframes") or tete.startswith("@-webkit-keyframes"):
+                fin_bloc = _saute_bloc(source, accolade)
+                if keyframes is not None:
+                    nom = prelude.split(None, 1)[1].strip() if " " in prelude else ""
+                    if nom:
+                        etapes = _etapes_keyframes(source[accolade + 1:fin_bloc - 1])
+                        if etapes:
+                            keyframes[nom] = etapes
+                position = fin_bloc
                 continue
             if tete.split("(")[0].split()[0] in _TRANSPARENTES:
                 # Ces regles groupent sans conditionner ce que le moteur sait
@@ -1297,6 +1313,44 @@ def _condition_verifiee(nom, valeur, largeur, hauteur):
     return True
 
 
+def _etapes_keyframes(corps):
+    """Les etapes d'un `@keyframes`, triees par position.
+
+    `from` vaut 0 %, `to` vaut 100 %, et une etape peut porter plusieurs
+    positions (`0%, 100% { … }`) — c'est la forme qu'on rencontre des qu'une
+    animation revient a son point de depart.
+    """
+    etapes = []
+    position = 0
+    while True:
+        accolade = corps.find("{", position)
+        if accolade < 0:
+            break
+        fin = corps.find("}", accolade)
+        if fin < 0:
+            break
+        declarations = _developpe(_declarations(corps[accolade + 1:fin]))
+        for morceau in corps[position:accolade].split(","):
+            morceau = morceau.strip().lower()
+            if not morceau:
+                continue
+            if morceau == "from":
+                arret = 0.0
+            elif morceau == "to":
+                arret = 1.0
+            elif morceau.endswith("%"):
+                try:
+                    arret = float(morceau[:-1]) / 100.0
+                except ValueError:
+                    continue
+            else:
+                continue
+            etapes.append((max(0.0, min(1.0, arret)), declarations))
+        position = fin + 1
+    etapes.sort(key=lambda e: e[0])
+    return etapes
+
+
 def _saute_bloc(source, accolade):
     profondeur = 0
     for index in range(accolade, len(source)):
@@ -1380,6 +1434,13 @@ def applique(regles, element, chemin, style_parent, pseudo=None):
         style.update(_developpe(_resout_variables(regle.declarations, variables)))
     if en_ligne:
         style.update(_developpe(_resout_variables(en_ligne, variables)))
+
+    # Les animations et les transitions se posent apres la cascade : c'est le
+    # seul moment ou l'on connait a la fois ce que la feuille demande et ce que
+    # l'element affichait au tour precedent.
+    animateur = _ANIMATEUR[0]
+    if animateur is not None:
+        style = animateur.applique(element, style, pseudo)
     return style
 
 
@@ -1479,6 +1540,17 @@ def _echappements(texte):
     return re.sub(r"\\([0-9a-fA-F]{1,6})\s?", remplace, texte)
 
 
+# L'animateur du document en cours, pose par [`Document`]. Variable de module
+# comme la taille de fenetre : `applique` est appelee en dizaines d'endroits, et
+# la faire circuler en argument jusqu'a chacun couterait plus qu'il ne rapporte.
+_ANIMATEUR = [None]
+
+
+def pose_animateur(animateur):
+    """Declare qui anime. `None` pour n'animer rien."""
+    _ANIMATEUR[0] = animateur
+
+
 _RACCOURCIS_BOITE = ("margin", "padding")
 
 _BORDS = ("border-top", "border-right", "border-bottom", "border-left")
@@ -1522,7 +1594,10 @@ NON_HERITEES = (
     "row-gap", "column-gap", "overflow", "overflow-x", "overflow-y",
     "box-sizing", "min-width", "max-width", "min-height", "max-height",
     "content", "border-radius", "opacity", "transform", "box-shadow",
-    "background-image", "order",
+    "background-image", "order", "animation-name", "animation-duration",
+    "animation-timing-function", "animation-delay", "animation-iteration-count",
+    "animation-direction", "animation-fill-mode", "transition-property",
+    "transition-duration", "transition-timing-function", "transition-delay",
 ) + tuple("border-%s-%s" % (c, t) for c in COTES
           for t in ("width", "style", "color"))
 
@@ -1622,6 +1697,10 @@ def _developpe(declarations):
             resultat["grid-template-rows"] = parties[0]
             if len(parties) > 1:
                 resultat["grid-template-columns"] = parties[1]
+        elif nom == "animation":
+            resultat.update(_raccourci_animation(valeur))
+        elif nom == "transition":
+            resultat.update(_raccourci_transition(valeur))
         elif nom == "font":
             for morceau in valeur.split():
                 if morceau in ("bold", "bolder"):
@@ -1633,6 +1712,92 @@ def _developpe(declarations):
         else:
             resultat[nom] = valeur
     return resultat
+
+
+_DIRECTIONS = ("normal", "reverse", "alternate", "alternate-reverse")
+_REMPLISSAGES = ("none", "forwards", "backwards", "both")
+_RYTHMES = ("linear", "ease", "ease-in", "ease-out", "ease-in-out",
+            "step-start", "step-end")
+
+
+def _est_duree(jeton):
+    return jeton.endswith(("s", "ms")) and jeton[:1] in "+-.0123456789"
+
+
+def _est_rythme(jeton):
+    return jeton in _RYTHMES or jeton.startswith(("cubic-bezier(", "steps("))
+
+
+def _raccourci_animation(valeur):
+    """`animation: 2s ease-in 1s infinite alternate both glisse` en longhands.
+
+    L'ordre des composants est libre dans la norme, sauf pour les deux durees :
+    la premiere est la duree, la seconde le retard. C'est la seule ambiguite
+    reelle, et elle se leve en comptant.
+    """
+    resultat = {}
+    durees = []
+    for jeton in separe(valeur.strip(), " "):
+        bas = jeton.lower()
+        if _est_duree(bas):
+            durees.append(jeton)
+        elif _est_rythme(bas):
+            resultat["animation-timing-function"] = jeton
+        elif bas == "infinite" or _est_nombre(bas):
+            resultat["animation-iteration-count"] = jeton
+        elif bas in _DIRECTIONS:
+            resultat["animation-direction"] = bas
+        elif bas in _REMPLISSAGES and "animation-fill-mode" not in resultat:
+            resultat["animation-fill-mode"] = bas
+        elif bas in ("running", "paused"):
+            resultat["animation-play-state"] = bas
+        else:
+            resultat["animation-name"] = jeton
+    if durees:
+        resultat["animation-duration"] = durees[0]
+    if len(durees) > 1:
+        resultat["animation-delay"] = durees[1]
+    return resultat
+
+
+def _raccourci_transition(valeur):
+    """`transition: color .3s ease, transform .2s` en longhands paralleles."""
+    proprietes, durees, rythmes, retards = [], [], [], []
+    for morceau in separe(valeur):
+        nom, duree, courbe, retard = "all", "0s", "ease", "0s"
+        vues = []
+        for jeton in separe(morceau.strip(), " "):
+            bas = jeton.lower()
+            if _est_duree(bas):
+                vues.append(jeton)
+            elif _est_rythme(bas):
+                courbe = jeton
+            else:
+                nom = bas
+        if vues:
+            duree = vues[0]
+        if len(vues) > 1:
+            retard = vues[1]
+        proprietes.append(nom)
+        durees.append(duree)
+        rythmes.append(courbe)
+        retards.append(retard)
+    if not proprietes:
+        return {}
+    return {
+        "transition-property": ", ".join(proprietes),
+        "transition-duration": ", ".join(durees),
+        "transition-timing-function": ", ".join(rythmes),
+        "transition-delay": ", ".join(retards),
+    }
+
+
+def _est_nombre(jeton):
+    try:
+        float(jeton)
+        return True
+    except ValueError:
+        return False
 
 
 def _quatre(parties):

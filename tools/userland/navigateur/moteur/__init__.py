@@ -26,13 +26,14 @@ Une page sans script ne paie rien : le contexte JavaScript n'est cree que si
 elle en contient au moins un.
 """
 
+import time
 import urllib.parse
 
-from . import (css, html, images, mise_en_page, peinture, prechargement,
-               reseau, stockage)
+from . import (animation, css, html, images, mise_en_page, peinture,
+               prechargement, reseau, stockage)
 
-__all__ = ["css", "html", "images", "js", "mise_en_page", "peinture",
-           "prechargement", "reseau", "stockage", "Document"]
+__all__ = ["animation", "css", "html", "images", "js", "mise_en_page",
+           "peinture", "prechargement", "reseau", "stockage", "Document"]
 
 
 class Document:
@@ -55,6 +56,10 @@ class Document:
         # Dernier element survole, retenu pour que `:active` et `:hover` se
         # composent au lieu de s'effacer l'un l'autre.
         self._survole = None
+        # Ce qui bouge : gabarits `@keyframes`, animations en cours,
+        # transitions engagees. Neuf a chaque page, donc rien ne survit a une
+        # navigation.
+        self.animateur = animation.Animateur()
 
         # Les sous-ressources partent maintenant, ensemble, pendant qu'on
         # analyse les feuilles : quand la mise en page reclamera une image, elle
@@ -113,17 +118,25 @@ class Document:
         A appeler au battement du navigateur : c'est ce qui fait qu'un
         `setTimeout` qui change le DOM se voit reellement a l'ecran.
         """
+        self.animateur.pose_temps(time.monotonic() * 1000.0)
+
+        sale = False
         contexte = self.contexte_js
-        if contexte is None:
+        if contexte is not None:
+            contexte.tic()
+            if contexte.sale:
+                contexte.sale = False
+                # Les regles peuvent avoir change : un script qui insere un
+                # `<style>` est un cas courant des bibliotheques de composants.
+                self.regles = self._regles()
+                self.titre = self.titre or self._titre()
+                sale = True
+
+        # Une animation en cours redemande une mise en page a chaque battement :
+        # c'est elle qui fait avancer le mouvement. Quand plus rien ne bouge,
+        # l'animateur baisse son drapeau et le navigateur cesse de redessiner.
+        if not sale and not self.animateur.anime():
             return False
-        contexte.tic()
-        if not contexte.sale:
-            return False
-        contexte.sale = False
-        # Les regles peuvent avoir change : un script qui insere un `<style>`
-        # est un cas courant des bibliotheques de composants.
-        self.regles = self._regles()
-        self.titre = self.titre or self._titre()
         self.remet_en_page(self.largeur)
         return True
 
@@ -185,14 +198,16 @@ class Document:
         if signature == self._signature and self._index is not None:
             return self._index
 
-        regles = css.analyse(css.FEUILLE_PAR_DEFAUT)
+        keyframes = {}
+        regles = css.analyse(css.FEUILLE_PAR_DEFAUT, keyframes=keyframes)
         ordre = len(regles) + 1000
         for source in sources:
             if not source:
                 continue
-            nouvelles = css.analyse(source, ordre)
+            nouvelles = css.analyse(source, ordre, keyframes=keyframes)
             regles.extend(nouvelles)
             ordre += len(nouvelles) + 1
+        self.animateur.keyframes = keyframes
 
         self._signature = signature
         self._index = css.indexe(regles)
@@ -243,9 +258,18 @@ class Document:
             # l'index memorise ne vaut plus, il faut le reconstruire.
             self._signature = None
             self.regles = self._regles()
-        self.boite, self.hauteur = mise_en_page.construit(
-            self.racine, self.regles, largeur, self.url, self._image_video,
-            self._toile)
+        # L'animateur n'est pose que le temps de la mise en page : hors de la,
+        # un `getComputedStyle` appele par un script rejouerait la cascade et
+        # ferait croire a une valeur changee, ce qui declencherait des
+        # transitions que la page n'a pas demandees.
+        self.animateur.nouveau_tour()
+        css.pose_animateur(self.animateur)
+        try:
+            self.boite, self.hauteur = mise_en_page.construit(
+                self.racine, self.regles, largeur, self.url, self._image_video,
+                self._toile)
+        finally:
+            css.pose_animateur(None)
 
     def _toile(self, nœud):
         """Ce qu'un `<canvas>` a dessine, ou `None` s'il n'a rien dessine."""

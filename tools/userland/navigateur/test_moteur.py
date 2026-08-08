@@ -1312,6 +1312,109 @@ def verifie_etats():
          boite_de(doc2, "b").style.get("color"), "#ff0000")
 
 
+def verifie_animations():
+    """`@keyframes` et `animation` : la page bouge toute seule."""
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          @keyframes apparait {
+            from { opacity: 0; }
+            to   { opacity: 1; }
+          }
+          #x { height: 40px; animation: apparait 1s linear; }
+        </style>
+        <body><div id="x">x</div></body>""")
+
+    egal("animation: le gabarit est retenu",
+         sorted(doc.animateur.keyframes), ["apparait"])
+
+    # L'horloge est pilotee a la main : les verifications ne doivent pas
+    # dependre de la vitesse de la machine qui les joue.
+    def a(ms):
+        doc.animateur.pose_temps(ms)
+        doc.remet_en_page(doc.largeur)
+        return boite_de(doc, "x").style.get("opacity")
+
+    egal("animation: au depart", a(0), "0")
+    verifie("animation: a mi-course", proche(float(a(500)), 0.5, 0.05), a(500))
+    verifie("animation: elle est declaree en cours", doc.animateur.anime())
+    # Une fois finie, sans `forwards`, la valeur de la regle reprend la main.
+    a(2000)
+    verifie("animation: terminee, plus rien ne bouge", not doc.animateur.anime())
+
+    # `forwards` retient la derniere image.
+    doc2 = document("""
+        <style>
+          body { margin: 0; }
+          @keyframes monte { from { opacity: .2 } to { opacity: .9 } }
+          #y { height: 20px; animation: monte 100ms linear forwards; }
+        </style>
+        <body><div id="y">y</div></body>""")
+    doc2.animateur.pose_temps(5000)
+    doc2.remet_en_page(doc2.largeur)
+    verifie("animation: `forwards` retient la fin",
+            proche(float(boite_de(doc2, "y").style.get("opacity")), 0.9, 0.02),
+            boite_de(doc2, "y").style.get("opacity"))
+
+    # Le rythme deforme la fraction, mais jamais ses bornes.
+    egal("rythme: lineaire", round(moteur.animation.rythme("linear", 0.25), 3), 0.25)
+    verifie("rythme: ease-in demarre plus lentement",
+            moteur.animation.rythme("ease-in", 0.5) < 0.5)
+    verifie("rythme: ease-out demarre plus vite",
+            moteur.animation.rythme("ease-out", 0.5) > 0.5)
+    egal("rythme: les bornes tiennent",
+         (moteur.animation.rythme("ease", 0.0), moteur.animation.rythme("ease", 1.0)),
+         (0.0, 1.0))
+    egal("rythme: steps", moteur.animation.rythme("steps(4, end)", 0.6), 0.5)
+
+
+def verifie_transitions():
+    """`transition` : un changement de valeur se parcourt au lieu de sauter."""
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #b { height: 30px; background-color: #000000; transition: background-color 1s linear; }
+          #b:hover { background-color: #ffffff; }
+        </style>
+        <body><div id="b">b</div></body>""")
+
+    def pose(ms):
+        doc.animateur.pose_temps(ms)
+        doc.remet_en_page(doc.largeur)
+        return boite_de(doc, "b").style.get("background-color")
+
+    egal("transition: la propriete est developpee",
+         boite_de(doc, "b").style.get("transition-property"), "background-color")
+
+    pose(0)
+    cible = boite_de(doc, "b")
+    # Le pointeur arrive : la couleur ne saute pas, elle part.
+    doc.animateur.pose_temps(0)
+    doc.survole(cible.x + 2, cible.y + 2)
+    milieu = pose(500)
+    verifie("transition: a mi-course, une teinte intermediaire",
+            milieu.startswith("rgba(") and "127" in milieu or "128" in milieu, milieu)
+    verifie("transition: elle est declaree en cours", doc.animateur.anime())
+
+    fin = pose(2000)
+    egal("transition: elle atteint sa cible", css.couleur(fin), 0xFFFFFFFF)
+    verifie("transition: puis s'arrete", not doc.animateur.anime())
+
+    # Les melanges eux-memes, sans passer par une page.
+    m = moteur.animation.melange
+    egal("melange: longueurs", m("10px", "20px", 0.5), "15px")
+    egal("melange: nombres sans unite", m("0", "1", 0.25), "0.250")
+    egal("melange: unites incompatibles bascule",
+         m("10px", "50%", 0.4), "10px")
+    egal("melange: zero s'accorde a toute unite", m("0", "10px", 0.5), "5px")
+    egal("melange: couleurs", css.couleur(m("#000000", "#ffffff", 0.5)) & 0xFF, 128)
+    verifie("melange: transformations",
+            m("translateX(0px)", "translateX(10px)", 0.5).startswith("matrix("),
+            m("translateX(0px)", "translateX(10px)", 0.5))
+    egal("melange: l'indissociable bascule a mi-parcours",
+         (m("block", "flex", 0.4), m("block", "flex", 0.6)), ("block", "flex"))
+
+
 # --- Disposition --------------------------------------------------------------
 
 def boite_de(doc, identifiant):
@@ -2811,6 +2914,8 @@ def principal():
         verifie_ordre_et_zones,
         verifie_regles_arobase,
         verifie_etats,
+        verifie_animations,
+        verifie_transitions,
         verifie_pseudo_elements,
         verifie_requetes_media,
         verifie_longueurs,
