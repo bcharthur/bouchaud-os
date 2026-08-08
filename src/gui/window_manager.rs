@@ -14,6 +14,7 @@ use crate::gui::window::{
 use crate::drivers::keyboard;
 use crate::fs::ramfs;
 use crate::users;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 /// Lance le bureau (bloquant jusqu'a Quitter).
@@ -32,7 +33,7 @@ pub fn run() {
     let mut icon_drag: Option<(usize, i32, i32, i32, i32)> = None;
     let mut last_icon_tap: Option<(usize, u64)> = None;
 
-    wins.push(make_app(2, home, &mut spawn_n)); // navigateur d'accueil
+    wins.push(make_app(0, home, &mut spawn_n)); // un terminal pour commencer
 
     let mut quit = false;
     while !quit {
@@ -95,7 +96,12 @@ pub fn run() {
                         let double = last_icon_tap
                             .map_or(false, |(li, lt)| li == idx && tick.wrapping_sub(lt) < window);
                         if double {
-                            wins.push(make_app(ICONS[idx].1, home, &mut spawn_n));
+                            let kind = ICONS[idx].1;
+                            if kind == window::KIND_NAVIGATEUR {
+                                lance_navigateur(home);
+                            } else {
+                                wins.push(make_app(kind, home, &mut spawn_n));
+                            }
                             last_icon_tap = None;
                         } else {
                             last_icon_tap = Some((idx, tick));
@@ -126,6 +132,39 @@ pub fn run() {
     crate::serial_println!("[gui] window manager ferme");
 }
 
+/// Rend l'ecran au navigateur, puis le reprend.
+///
+/// Le navigateur ne vit pas dans le noyau : c'est un binaire ring 3 qui ouvre
+/// `/dev/fb0` et le peint entierement par Qt. Deux surfaces ne peuvent pas se
+/// partager le framebuffer, donc le bureau sort du mode graphique, execute le
+/// binaire, et y rentre quand celui-ci se termine.
+///
+/// L'existence du fichier est verifiee **avant** de quitter le mode graphique :
+/// sinon un disque sans navigateur ferait clignoter l'ecran pour finir sur un
+/// message que personne ne lit.
+fn lance_navigateur(cwd: usize) {
+    const CHEMIN: &str = "/bo-navigateur";
+
+    if ramfs::fs().resolve_checked(CHEMIN, cwd).is_err() {
+        crate::kernel::dmesg::log(
+            "gui: /bo-navigateur absent — voir tools/userland/build-navigateur.sh");
+        return;
+    }
+
+    fb::leave();
+    let args = { let mut v = Vec::new(); v.push(String::from(CHEMIN)); v };
+    let env = crate::kernel::exec::shell_environment();
+    match crate::kernel::exec::exec(CHEMIN, &args, &env, cwd) {
+        Ok(code) if code != 0 => {
+            crate::println!("navigateur: termine avec le code {}", code);
+        }
+        Ok(_) => {}
+        Err(message) => crate::println!("navigateur: {}", message),
+    }
+    fb::enter();
+    mouse::init();
+}
+
 fn handle_wheel(mx: i32, my: i32, delta: i32, wins: &mut Vec<Win>) {
     for i in (0..wins.len()).rev() {
         let w = &wins[i];
@@ -152,6 +191,7 @@ fn handle_click(
             let row = ((my - mr.y - MENU_HEADER_H) / MENU_ITEM_H).max(0) as usize;
             if let Some(&(_, kind)) = MENU.get(row) {
                 if kind == usize::MAX { *quit = true; }
+                else if kind == window::KIND_NAVIGATEUR { lance_navigateur(home); }
                 else { wins.push(make_app(kind, home, spawn_n)); }
             }
         }

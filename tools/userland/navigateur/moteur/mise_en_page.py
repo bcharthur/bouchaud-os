@@ -15,7 +15,7 @@ fait ici.
 
 import bo
 
-from . import css, flex, grille, images
+from . import css, flex, grille, images, police, tableau
 from .html import Element, Texte
 
 
@@ -76,6 +76,21 @@ def _est_gras(style):
         return int(poids) >= 600
     except ValueError:
         return False
+
+
+def famille(style):
+    """La famille de police a demander pour ce style.
+
+    On rend la premiere que la page a reellement chargee, faute de quoi la
+    premiere citee : l'hote fera sa propre substitution. Sans cette valeur, le
+    peintre ne connaissait que « avec ou sans empattement fixe » — une page ne
+    pouvait donc jamais s'afficher dans sa police.
+    """
+    noms = css.familles(style.get("font-family", ""))
+    for nom in noms:
+        if police.connue(nom):
+            return nom
+    return noms[0] if noms else ""
 
 
 def _est_fixe(style):
@@ -146,7 +161,49 @@ def _style_de(element, style_parent, chemin, contexte):
     fixe = getattr(element, "style_engendre", None)
     if fixe is not None:
         return fixe
-    return css.applique(contexte.regles, element, chemin, style_parent)
+    style = css.applique(contexte.regles, element, chemin, style_parent)
+
+    # Un element en ligne qui porte un bloc devient un bloc. La norme, elle,
+    # decoupe l'element en ligne autour de son bloc et engendre des boites
+    # anonymes ; le resultat visible est le meme dans presque tous les cas, et
+    # ce qu'on faisait avant ne l'etait pas du tout : le bloc et tout son
+    # contenu disparaissaient. `<span><p>…</p></span>` n'affichait rien, et une
+    # balise inconnue — donc tout composant web — non plus.
+    if style.get("display", "inline") in ("inline", "inline-block") \
+            and _porte_un_bloc(element):
+        style = dict(style)
+        style["display"] = "block"
+    return style
+
+
+# Les balises qui font une boite de bloc dans la feuille de l'agent utilisateur.
+# Une table suffit ici : il ne s'agit pas de decider de la mise en page, mais de
+# reperer qu'un enfant direct en reclame une.
+_BLOCS = frozenset((
+    "address", "article", "aside", "blockquote", "canvas", "dd", "div", "dl",
+    "dt", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2",
+    "h3", "h4", "h5", "h6", "header", "hr", "li", "main", "nav", "ol", "p",
+    "pre", "section", "table", "tbody", "td", "tfoot", "th", "thead", "tr",
+    "ul", "video", css.SUPPORT_OMBRE,
+))
+
+
+def _porte_un_bloc(element):
+    # Une fente n'a pas d'enfants a elle : ce qu'elle affiche lui est confie.
+    # Sans ce detour, un `<slot>` restait en ligne et le contenu clair qu'il
+    # devait poser ne recevait jamais de boite.
+    enfants = _distribues(element) if element.balise == "slot" else element.enfants
+    for enfant in enfants:
+        if not isinstance(enfant, Element):
+            continue
+        if enfant.balise in _BLOCS:
+            return True
+        # Un style en ligne peut faire un bloc de n'importe quoi ; les
+        # composants se declarent souvent ainsi.
+        declare = enfant.attributs.get("style", "")
+        if "display" in declare and "block" in declare:
+            return True
+    return False
 
 
 def _boite_pour(element, style_parent, chemin, contexte):
@@ -189,10 +246,31 @@ def _engendre(boite, contexte, pseudo):
 
 
 def _enfants(boite, contexte):
-    """Les enfants a disposer : ceux du document, encadres par les engendres."""
-    if not isinstance(boite.element, Element):
+    """Les enfants a disposer : ceux du document, encadres par les engendres.
+
+    Deux detours, tous deux dus au DOM d'ombre. Un element qui porte une racine
+    d'ombre n'affiche **que** cette racine : ses enfants clairs ne s'affichent
+    que la ou un `<slot>` les reclame. Et un `<slot>`, justement, affiche les
+    enfants clairs de son hote plutot que les siens — les siens ne sont que le
+    repli montre quand personne ne lui en confie.
+    """
+    element = boite.element
+    if not isinstance(element, Element):
         return []
-    liste = list(boite.element.enfants)
+
+    if element.balise in ("input", "textarea"):
+        # Un champ n'a pas d'enfants : ce qu'il montre est son contenu, sa
+        # valeur ou son texte d'invite. Sans ce nœud fabrique, la boite existait
+        # mais restait vide et sans hauteur.
+        liste = [Texte(_texte_du_champ(element))]
+    elif element.balise == "slot":
+        liste = _distribues(element)
+    else:
+        liste = list(element.enfants)
+        support = _racine_ombre(element)
+        if support is not None:
+            liste = [support]
+
     avant = _engendre(boite, contexte, "before")
     if avant is not None:
         liste.insert(0, avant)
@@ -200,6 +278,56 @@ def _enfants(boite, contexte):
     if apres is not None:
         liste.append(apres)
     return liste
+
+
+def _texte_du_champ(element):
+    """Ce qu'un champ affiche : sa valeur, a defaut son invite."""
+    if element.balise == "textarea":
+        return element.texte() or element.attributs.get("placeholder", "")
+    type_ = element.attributs.get("type", "text").lower()
+    if type_ in ("checkbox", "radio", "hidden", "file", "color", "range"):
+        return ""
+    valeur = element.attributs.get("value")
+    if valeur:
+        return valeur
+    if type_ in ("submit", "button", "reset"):
+        return {"submit": "Envoyer", "reset": "Reinitialiser"}.get(type_, "")
+    return element.attributs.get("placeholder", "")
+
+
+def _racine_ombre(element):
+    """Le support d'ombre porte par cet element, s'il en a un."""
+    for enfant in element.enfants:
+        if isinstance(enfant, Element) and enfant.balise == css.SUPPORT_OMBRE:
+            return enfant
+    return None
+
+
+def _distribues(fente):
+    """Les nœuds clairs que ce `<slot>` affiche, ou son repli s'il n'y en a pas.
+
+    Le nom decide : `<slot name="titre">` prend les enfants portant
+    `slot="titre"`, la fente sans nom prend tous les autres.
+    """
+    support = css.ombre_de(fente)
+    hote = support.parent if support is not None else None
+    if hote is None:
+        return list(fente.enfants)
+
+    nom = fente.attributs.get("name", "")
+    retenus = []
+    for enfant in hote.enfants:
+        if isinstance(enfant, Element):
+            if enfant.balise == css.SUPPORT_OMBRE:
+                continue
+            if enfant.attributs.get("slot", "") != nom:
+                continue
+        elif nom:
+            # Un nœud de texte n'a pas d'attribut : il ne va qu'a la fente
+            # sans nom.
+            continue
+        retenus.append(enfant)
+    return retenus or list(fente.enfants)
 
 
 def _boites_enfants(boite, contexte):
@@ -264,7 +392,10 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None
     pad_d = _longueur(style, "padding-right", largeur_disponible, taille)
     pad_h = _longueur(style, "padding-top", largeur_disponible, taille)
     pad_b = _longueur(style, "padding-bottom", largeur_disponible, taille)
-    bordure = _longueur(style, "border-width", largeur_disponible, taille)
+    # Chaque bord a son epaisseur : un `border-bottom` seul ne doit pas decaler
+    # le contenu des trois autres cotes.
+    (b_h, _), (b_d, _), (b_b, _), (b_g, _) = css.bordures(style, largeur_disponible,
+                                                          taille)
 
     boite.x = x + marge_g
     boite.y = y + marge_h
@@ -278,13 +409,13 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None
         # style modernes, souvent sur `*`. Le defaut de CSS, lui, veut que
         # `width` designe le seul contenu et que le reste s'y ajoute.
         if style.get("box-sizing", "content-box") != "border-box":
-            imposee += pad_g + pad_d + 2 * bordure
+            imposee += pad_g + pad_d + b_g + b_d
         largeur = min(largeur, imposee)
     boite.largeur = max(0.0, largeur)
 
-    interieur_x = boite.x + pad_g + bordure
-    interieur_l = max(0.0, boite.largeur - pad_g - pad_d - 2 * bordure)
-    curseur = boite.y + pad_h + bordure
+    interieur_x = boite.x + pad_g + b_g
+    interieur_l = max(0.0, boite.largeur - pad_g - pad_d - b_g - b_d)
+    curseur = boite.y + pad_h + b_h
 
     # Une liste numerotee ou a puces compte ses elements pour les marquer.
     compteur = 0
@@ -297,11 +428,33 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None
     # contenu : ses enfants sont le repli qu'on montre a qui ne sait pas la
     # dessiner, et nous savons.
     if isinstance(boite.element, Element) and boite.element.balise == "canvas":
-        _dispose_toile(boite, style, taille, curseur, pad_b, bordure,
+        _dispose_toile(boite, style, taille, curseur, pad_b, b_b,
                        interieur_l, contexte)
         return
 
     mode = style.get("display", "block")
+
+    # Un tableau aligne ses colonnes d'une ligne a l'autre : ni le bloc ni la
+    # grille ne savent le faire, parce que la largeur d'une colonne depend de
+    # toutes les cellules qui la composent.
+    if isinstance(boite.element, Element) and tableau.est_tableau(style,
+                                                                 boite.element.balise):
+        def pose_cellule(sous, largeur, px=0.0, py=0.0, forcee=None):
+            _dispose_bloc(sous, px, py, max(0.0, largeur), contexte, forcee)
+            return (sous.largeur, sous.hauteur)
+
+        lignes = _lignes_tableau(boite, contexte)
+        if lignes:
+            curseur += tableau.dispose(boite, lignes, interieur_x, curseur,
+                                       interieur_l, contexte, pose_cellule)
+            _termine_bloc(boite, style, curseur, pad_b, b_b, taille, interieur_l)
+            _pose_hors_flux(boite, contexte)
+            return
+        # Aucune cellule : ce n'est un tableau que de nom. On repart en bloc
+        # plutot que de rendre une boite vide — c'est ce qui faisait disparaitre
+        # des pans entiers de page.
+        del boite.enfants[:]
+
     if mode in ("flex", "inline-flex", "grid", "inline-grid"):
         _boites_enfants(boite, contexte)
 
@@ -312,25 +465,37 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None
         module = flex if mode in ("flex", "inline-flex") else grille
         curseur += module.dispose(boite, interieur_x, curseur, interieur_l,
                                   contexte, pose)
-        _termine_bloc(boite, style, curseur, pad_b, bordure, taille, interieur_l)
+        _termine_bloc(boite, style, curseur, pad_b, b_b, taille, interieur_l)
         _pose_hors_flux(boite, contexte)
         return
 
     enfants = _enfants(boite, contexte)
     en_attente = []  # suite de nœuds en ligne a disposer ensemble
+    flottants = Flottants()
 
     def vide_en_attente():
         nonlocal curseur
         if not en_attente:
             return
-        hauteur = _dispose_ligne(boite, en_attente, interieur_x, curseur,
-                                 interieur_l, boite.style, contexte)
+        # Le contenu se serre a cote des flottants encore actifs.
+        gauche_ligne, largeur_ligne = flottants.bande(curseur, interieur_x,
+                                                      interieur_l)
+        hauteur = _dispose_ligne(boite, en_attente, gauche_ligne, curseur,
+                                 largeur_ligne, boite.style, contexte)
         curseur += hauteur
         en_attente.clear()
 
     for enfant in enfants:
         if isinstance(enfant, Texte):
+            # Un nœud de texte purement blanc entre deux elements en ligne
+            # **compte** : il se reduit a une espace, et c'est elle qui separe
+            # `<span>Un</span> <span>Deux</span>`. Le jeter, ce que l'on
+            # faisait, collait les mots de deux balises voisines — le defaut le
+            # plus visible du rendu. Entre deux blocs, en revanche, il ne
+            # produit rien : d'ou la condition sur ce qui precede.
             if enfant.contenu.strip() or _preserve_espaces(boite.style):
+                en_attente.append(enfant)
+            elif en_attente:
                 en_attente.append(enfant)
             continue
 
@@ -340,11 +505,28 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None
         if affichage == "none":
             continue
 
+        # Une boite flottante quitte le flux vertical : elle se colle a un bord
+        # et le contenu suivant se serre a cote d'elle. C'est ce qui met un logo
+        # et sa navigation sur une meme ligne.
+        cote = _flottement(style_enfant)
+        if cote and style_enfant.get("position", "static") not in ("absolute", "fixed"):
+            vide_en_attente()
+            _pose_flottant(boite, enfant, style_enfant, chemin, flottants,
+                           interieur_x, curseur, interieur_l, contexte, cote)
+            continue
+
         if affichage in ("inline", "inline-block"):
             en_attente.append(enfant)
             continue
 
         vide_en_attente()
+
+        # `clear` renvoie sous les flottants du cote demande.
+        degage = (style_enfant.get("clear") or "none").strip().lower()
+        if degage in ("left", "right", "both"):
+            bas = flottants.bas(degage)
+            if bas is not None and bas > curseur:
+                curseur = bas
         sous_boite = _boite_pour(enfant, boite.style, chemin, contexte)
         if sous_boite is None:
             continue
@@ -357,14 +539,24 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None
             compteur += 1
             sous_boite.puce = "%d." % compteur if ordonnee else "•"
         boite.enfants.append(sous_boite)
-        _dispose_bloc(sous_boite, interieur_x, curseur, interieur_l, contexte)
+        # Le bloc se serre dans la place que les flottants laissent.
+        gauche_bloc, largeur_bloc = flottants.bande(curseur, interieur_x,
+                                                    interieur_l)
+        _dispose_bloc(sous_boite, gauche_bloc, curseur, largeur_bloc, contexte)
         style_s = sous_boite.style
         taille_s = _taille_police(style_s)
         curseur = (sous_boite.y + sous_boite.hauteur
                    + _longueur(style_s, "margin-bottom", interieur_l, taille_s))
 
     vide_en_attente()
-    _termine_bloc(boite, style, curseur, pad_b, bordure, taille, interieur_l)
+    # Un flottant plus haut que le contenu deborderait de son parent et
+    # recouvrirait ce qui suit. On etend donc la boite jusqu'a son bas — ce que
+    # la norme reserve aux contextes de formatage, et que tout site obtient par
+    # un `clearfix`. Mieux vaut un bloc un peu haut qu'un chevauchement.
+    bas_flottants = flottants.bas()
+    if bas_flottants is not None and bas_flottants > curseur:
+        curseur = bas_flottants
+    _termine_bloc(boite, style, curseur, pad_b, b_b, taille, interieur_l)
     _pose_hors_flux(boite, contexte)
 
 
@@ -408,6 +600,14 @@ def _termine_bloc(boite, style, curseur, pad_b, bordure, taille, reference):
     if imposee is not None and imposee > hauteur:
         hauteur = imposee
 
+    # `aspect-ratio` sur une boite sans hauteur declaree : la largeur decide.
+    # C'est ainsi que les pages recentes reservent la place d'une video ou
+    # d'une carte avant d'en connaitre le contenu.
+    if imposee is None:
+        rapport = images.proportion(style.get("aspect-ratio"))
+        if rapport is not None and boite.largeur > 0:
+            hauteur = max(hauteur, boite.largeur * rapport)
+
     minimum = css.longueur(style.get("min-height", "auto"), 0.0, taille)
     if minimum is not None:
         hauteur = max(hauteur, minimum)
@@ -416,7 +616,8 @@ def _termine_bloc(boite, style, curseur, pad_b, bordure, taille, reference):
         hauteur = min(hauteur, maximum)
 
     if isinstance(boite.element, Element) and boite.element.balise == "hr":
-        hauteur = max(hauteur, bordure if bordure else 1.0)
+        trait = max(e for e, _ in css.bordures(style, reference, taille))
+        hauteur = max(hauteur, trait if trait else 1.0)
 
     # Les bornes de largeur s'appliquent ici aussi : `max-width: 900px` centre
     # sur une colonne large est la forme la plus repandue de mise en page.
@@ -431,6 +632,205 @@ def _termine_bloc(boite, style, curseur, pad_b, bordure, taille, reference):
         boite.largeur = maximum
 
     boite.hauteur = max(0.0, hauteur)
+
+
+# Les valeurs de `display` qui font d'un element une ligne, un groupe ou une
+# cellule. Un `<div style="display: table">` est aussi repandu qu'un vrai
+# `<table>` : la disposition doit reconnaitre les deux.
+_LIGNES_TABLEAU = ("table-row",)
+_GROUPES_TABLEAU = ("table-row-group", "table-header-group", "table-footer-group")
+_CELLULES_TABLEAU = ("table-cell",)
+
+
+class Flottants:
+    """Les boites flottantes actives, et la place qu'elles laissent.
+
+    `float` sort une boite du flux et la colle a un bord ; le contenu qui suit
+    se serre a cote d'elle, puis reprend toute la largeur une fois passe son
+    bas. Le moteur l'ignorait entierement — 45 declarations rien que dans la
+    feuille de pypi —, si bien qu'un logo et sa barre de navigation
+    s'empilaient au lieu de tenir sur une ligne.
+
+    Ce qui est rendu : le placement cote a cote, le passage a la ligne quand la
+    place manque, le retrecissement du contenu qui suit, et `clear`. Ce qui ne
+    l'est pas : le texte qui epouse le contour d'une image ligne par ligne — le
+    contenu se serre en bloc, pas ligne a ligne.
+    """
+
+    __slots__ = ("gauche", "droite")
+
+    def __init__(self):
+        self.gauche = []   # (x_droite, y_bas)
+        self.droite = []   # (x_gauche, y_bas)
+
+    def actifs(self, y):
+        """Les flottants encore rencontres a cette hauteur."""
+        return ([f for f in self.gauche if f[1] > y + 0.5],
+                [f for f in self.droite if f[1] > y + 0.5])
+
+    def bande(self, y, gauche, largeur):
+        """La portion libre a cette hauteur : `(x, largeur)`."""
+        actifs_g, actifs_d = self.actifs(y)
+        bord_g = max([gauche] + [f[0] for f in actifs_g])
+        bord_d = min([gauche + largeur] + [f[0] for f in actifs_d])
+        return bord_g, max(0.0, bord_d - bord_g)
+
+    def bas(self, cote="both"):
+        """Le bas du flottant le plus profond du cote demande."""
+        candidats = []
+        if cote in ("left", "both"):
+            candidats += [f[1] for f in self.gauche]
+        if cote in ("right", "both"):
+            candidats += [f[1] for f in self.droite]
+        return max(candidats) if candidats else None
+
+    def pose(self, cote, y, x_bande, largeur_bande, largeur, hauteur):
+        """Place une boite flottante. Rend son coin haut gauche."""
+        if cote == "right":
+            x = x_bande + largeur_bande - largeur
+            self.droite.append((x, y + hauteur))
+        else:
+            x = x_bande
+            self.gauche.append((x + largeur, y + hauteur))
+        return x, y
+
+
+def _pose_flottant(boite, element, style, chemin, flottants, gauche, y,
+                   largeur, contexte, cote):
+    """Colle une boite au bord demande, et retient la place qu'elle prend."""
+    sous_boite = _boite_pour(element, style, chemin, contexte)
+    if sous_boite is None:
+        return
+
+    taille = _taille_police(style)
+    marge_g = _longueur(style, "margin-left", largeur, taille)
+    marge_d = _longueur(style, "margin-right", largeur, taille)
+    declaree = css.longueur(style.get("width", "auto"), largeur, taille)
+
+    # Une boite flottante prend la largeur de son contenu, pas celle de son
+    # parent : sans cela, la premiere occuperait toute la ligne et les
+    # suivantes descendraient sous elle.
+    _dispose_bloc(sous_boite, gauche, y, max(1.0, largeur), contexte)
+    voulue = declaree if declaree is not None else etendue_contenu(sous_boite)
+    voulue = max(0.0, min(voulue, largeur))
+    occupee = voulue + marge_g + marge_d
+
+    # Elle ne tient pas a cote des precedentes : elle passe dessous.
+    x_bande, largeur_bande = flottants.bande(y, gauche, largeur)
+    if occupee > largeur_bande + 0.5:
+        bas = flottants.bas()
+        if bas is not None and bas > y:
+            y = bas
+            x_bande, largeur_bande = flottants.bande(y, gauche, largeur)
+
+    _dispose_bloc(sous_boite, gauche, y, max(1.0, largeur), contexte, voulue)
+    x, sommet = flottants.pose(cote, y, x_bande, largeur_bande, occupee,
+                               sous_boite.hauteur)
+    _dispose_bloc(sous_boite, x + marge_g, sommet, max(1.0, largeur), contexte,
+                  voulue)
+    boite.enfants.append(sous_boite)
+
+
+def _flottement(style):
+    """Le `float` d'un style, `""` s'il n'en a pas."""
+    valeur = (style.get("float") or "none").strip().lower()
+    return valeur if valeur in ("left", "right") else ""
+
+
+def _lignes_tableau(boite, contexte):
+    """Les boites des cellules, ligne par ligne. Vide si ce n'en est pas un.
+
+    Les groupes `<thead>`, `<tbody>` et `<tfoot>` sont traverses : ils
+    organisent le document, pas l'affichage, et une colonne doit s'aligner d'un
+    groupe a l'autre.
+
+    Une cellule posee sans ligne — ce que fait tout `display: table` sur des
+    `div` — recoit une rangee anonyme, comme le veut la norme. Sans cela, la
+    disposition ne trouvait aucune ligne et **perdait tout le contenu**.
+    """
+    lignes = []
+    anonyme = []
+
+    def cellule_de(element):
+        chemin = _chemin(element)
+        cellule = _boite_pour(element, boite.style, chemin, contexte)
+        if cellule is None:
+            return None
+        boite.enfants.append(cellule)
+        return cellule
+
+    def rangee_de(element):
+        cellules = []
+        for enfant in element.enfants:
+            if not isinstance(enfant, Element):
+                continue
+            affichage = _style_de(enfant, boite.style, _chemin(enfant),
+                                  contexte).get("display", "inline")
+            if affichage == "none":
+                continue
+            if enfant.balise in ("td", "th") or affichage in _CELLULES_TABLEAU:
+                cellule = cellule_de(enfant)
+                if cellule is not None:
+                    cellules.append(cellule)
+        return cellules
+
+    for enfant in boite.element.enfants:
+        if not isinstance(enfant, Element):
+            continue
+        affichage = _style_de(enfant, boite.style, _chemin(enfant),
+                              contexte).get("display", "inline")
+        if affichage == "none":
+            continue
+        if enfant.balise in ("thead", "tbody", "tfoot") or affichage in _GROUPES_TABLEAU:
+            for rangee in enfant.enfants:
+                if not isinstance(rangee, Element):
+                    continue
+                cellules = rangee_de(rangee)
+                if cellules:
+                    lignes.append(cellules)
+        elif enfant.balise == "tr" or affichage in _LIGNES_TABLEAU:
+            cellules = rangee_de(enfant)
+            if cellules:
+                lignes.append(cellules)
+        elif enfant.balise in ("td", "th") or affichage in _CELLULES_TABLEAU:
+            cellule = cellule_de(enfant)
+            if cellule is not None:
+                anonyme.append(cellule)
+
+    if anonyme:
+        lignes.append(anonyme)
+    return lignes
+
+
+def etendue_contenu(boite):
+    """Ce que le contenu d'une boite occupe reellement en largeur.
+
+    Une boite de bloc prend toute la largeur qu'on lui donne : la mesurer rend
+    donc la largeur du conteneur, pas celle de son contenu. La disposition
+    flexible avait besoin de la seconde — sans quoi trois articles « au
+    contenu » reclamaient chacun la largeur entiere, et se la partageaient en
+    trois parts egales quel que soit ce qu'ils portaient. Une barre de
+    navigation s'etalait ainsi sur toute la page.
+    """
+    droite = boite.x
+    for fragment in boite.lignes:
+        style = fragment.style
+        largeur = bo.largeur_texte(fragment.texte, _taille_police(style),
+                                   _est_gras(style), _est_fixe(style))
+        droite = max(droite, fragment.x + largeur)
+    for image in boite.images:
+        droite = max(droite, image[0] + image[2])
+    for enfant in boite.enfants:
+        marge = _longueur(enfant.style, "margin-right", boite.largeur,
+                          _taille_police(enfant.style))
+        droite = max(droite, etendue_contenu(enfant), enfant.x + enfant.largeur + marge)
+    if boite.toile:
+        droite = max(droite, boite.x + boite.largeur)
+
+    taille = _taille_police(boite.style)
+    (_, _), (bord_d, _), (_, _), (_, _) = css.bordures(boite.style, boite.largeur, taille)
+    remplissage = _longueur(boite.style, "padding-right", boite.largeur, taille)
+    return droite - boite.x + remplissage + bord_d
 
 
 def _pose_hors_flux(boite, contexte):
@@ -492,7 +892,7 @@ def _dispose_ligne(boite, nœuds, x, y, largeur, style_parent, contexte):
     # La puce d'un element de liste occupe le debut de la premiere ligne.
     if boite.puce:
         taille = _taille_police(style_parent)
-        largeur_puce = bo.largeur_texte(boite.puce, taille, False, False)
+        largeur_puce = bo.largeur_texte(boite.puce, taille, False, False, famille(style_parent))
         boite.lignes.append(Fragment(x - largeur_puce - 6, y, boite.puce,
                                      bo.hauteur_ligne(taille, False), style_parent, None))
 
@@ -536,7 +936,8 @@ def _dispose_ligne(boite, nœuds, x, y, largeur, style_parent, contexte):
                         curseur_y += hauteur_ligne_courante
                         hauteur_ligne_courante = 0.0
                     boite.images.append((curseur_x, curseur_y, largeur_a,
-                                         hauteur_a, identifiant, lien_enfant))
+                                         hauteur_a, identifiant, lien_enfant,
+                                         None))
                     curseur_x += largeur_a
                     hauteur_ligne_courante = max(hauteur_ligne_courante, hauteur_a)
                     continue
@@ -549,10 +950,57 @@ def _dispose_ligne(boite, nœuds, x, y, largeur, style_parent, contexte):
                 boite, nœud, style_enfant, lien_enfant, x, largeur,
                 curseur_x, curseur_y, hauteur_ligne_courante, contexte)
             continue
+
+        # `display: inline-block` : une boite a part entiere, posee dans le fil
+        # du texte. Le moteur la traitait comme du simple contenu en ligne, si
+        # bien qu'elle n'avait ni fond, ni bordure, ni remplissage — un bouton
+        # se reduisait a son mot, un champ de saisie a rien du tout.
+        if style_enfant.get("display", "inline") == "inline-block":
+            curseur_x, curseur_y, hauteur_ligne_courante = _pose_en_ligne_bloc(
+                boite, nœud, style_enfant, chemin, x, largeur,
+                curseur_x, curseur_y, hauteur_ligne_courante, contexte)
+            continue
+
         # Les enfants prennent la place du nœud, en tete de file.
         pile = [(e, style_enfant, lien_enfant) for e in nœud.enfants] + pile
 
     return (curseur_y - y) + hauteur_ligne_courante
+
+
+def _pose_en_ligne_bloc(boite, nœud, style, chemin, gauche, largeur,
+                        curseur_x, curseur_y, hauteur_ligne, contexte):
+    """Pose une boite `inline-block` dans le fil du texte.
+
+    Elle est disposee comme un bloc — donc avec son fond, ses bords et son
+    remplissage — puis placee au curseur, et le curseur avance de sa largeur.
+    Sa largeur est celle de son contenu, sauf si la feuille en declare une :
+    sans cela elle prendrait toute la ligne, comme n'importe quel bloc.
+    """
+    sous_boite = _boite_pour(nœud, style, chemin, contexte)
+    if sous_boite is None:
+        return curseur_x, curseur_y, hauteur_ligne
+
+    taille = _taille_police(style)
+    reste = max(0.0, gauche + largeur - curseur_x)
+    declaree = css.longueur(style.get("width", "auto"), largeur, taille)
+
+    _dispose_bloc(sous_boite, curseur_x, curseur_y, max(1.0, largeur), contexte)
+    voulue = declaree if declaree is not None else etendue_contenu(sous_boite)
+    marge_g = _longueur(style, "margin-left", largeur, taille)
+    marge_d = _longueur(style, "margin-right", largeur, taille)
+    voulue = max(0.0, min(voulue, largeur))
+
+    # Elle ne tient pas sur la fin de ligne : on passe a la suivante.
+    if curseur_x > gauche and voulue + marge_g + marge_d > reste:
+        curseur_x = gauche
+        curseur_y += hauteur_ligne
+        hauteur_ligne = 0.0
+
+    _dispose_bloc(sous_boite, curseur_x + marge_g, curseur_y, max(1.0, largeur),
+                  contexte, voulue)
+    boite.enfants.append(sous_boite)
+    curseur_x += voulue + marge_g + marge_d
+    return curseur_x, curseur_y, max(hauteur_ligne, sous_boite.hauteur)
 
 
 def _pose_image(boite, nœud, style, lien, gauche, largeur,
@@ -579,8 +1027,14 @@ def _pose_image(boite, nœud, style, lien, gauche, largeur,
         curseur_y += hauteur_ligne
         hauteur_ligne = 0.0
 
-    boite.images.append((curseur_x, curseur_y, largeur_image, hauteur_image,
-                         naturelle[0], lien))
+    # `object-fit` decide de ce qu'on voit de l'image dans la place qu'elle
+    # occupe. Sans lui, toute image etait etiree a sa boite : une vignette
+    # carree sur une carte large s'en trouvait deformee.
+    dx, dy, peinte_l, peinte_h, source = images.ajuste(
+        style.get("object-fit"), largeur_image, hauteur_image,
+        naturelle[1], naturelle[2])
+    boite.images.append((curseur_x + dx, curseur_y + dy, peinte_l, peinte_h,
+                         naturelle[0], lien, source))
     return (curseur_x + largeur_image, curseur_y,
             max(hauteur_ligne, hauteur_image))
 
@@ -603,14 +1057,20 @@ def _pose_texte(boite, texte, style, lien, gauche, largeur,
             if ligne:
                 boite.lignes.append(Fragment(curseur_x, curseur_y, ligne,
                                              hauteur, style, lien))
-                curseur_x += bo.largeur_texte(ligne, taille, gras, fixe)
+                curseur_x += bo.largeur_texte(ligne, taille, gras, fixe, famille(style))
         return curseur_x, curseur_y, hauteur_ligne
+
+    nom_police = famille(style)
+    espace = bo.largeur_texte(" ", taille, gras, fixe, nom_police)
 
     mots = texte.split()
     if not mots:
+        # Rien que du blanc. En milieu de ligne, cela vaut une espace — c'est
+        # ce qui separe deux elements en ligne voisins ; en debut de ligne,
+        # cela ne vaut rien, comme le veut la norme.
+        if curseur_x > gauche:
+            curseur_x += espace
         return curseur_x, curseur_y, hauteur_ligne
-
-    espace = bo.largeur_texte(" ", taille, gras, fixe)
     tampon = []
     tampon_largeur = 0.0
 
@@ -629,7 +1089,7 @@ def _pose_texte(boite, texte, style, lien, gauche, largeur,
         curseur_x += espace
 
     for mot in mots:
-        largeur_mot = bo.largeur_texte(mot, taille, gras, fixe)
+        largeur_mot = bo.largeur_texte(mot, taille, gras, fixe, nom_police)
         supplement = largeur_mot + (espace if tampon else 0.0)
         if curseur_x + tampon_largeur + supplement > gauche + largeur and (tampon or curseur_x > gauche):
             ecrit()

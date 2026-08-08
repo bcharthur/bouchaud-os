@@ -28,7 +28,7 @@ des positions plutot que des decalages.
 
 ## Ce qui est simplifie
 
-Pas de `order`, pas de `align-content` entre lignes multiples autre que le
+Pas de `align-content` entre lignes multiples autre que le
 simple empilement, pas de tailles intrinseques calculees par un vrai
 `min-content` — on prend la largeur du contenu telle que la mise en page en
 ligne la produit. Ces ecarts se voient sur des dispositions inhabituelles ; ils
@@ -44,7 +44,7 @@ class Article:
 
     __slots__ = ("boite", "base", "grandir", "retrecir", "taille", "travers",
                  "marge_avant", "marge_apres", "marge_travers_avant",
-                 "marge_travers_apres", "alignement")
+                 "marge_travers_apres", "alignement", "rang")
 
     def __init__(self, boite):
         self.boite = boite
@@ -151,8 +151,21 @@ def _prepare(boite, largeur_disponible, taille_police, horizontal, pose_enfant):
 
         article.base = _base(article, largeur_disponible, taille_enfant,
                              horizontal, pose_enfant)
+        article.rang = _entier(style.get("order"), 0)
         articles.append(article)
+
+    # `order` reordonne l'affichage sans toucher au document. Le tri est stable :
+    # a rang egal, l'ordre du source est conserve, comme l'exige la norme.
+    if any(a.rang for a in articles):
+        articles.sort(key=lambda a: a.rang)
     return articles
+
+
+def _entier(valeur, defaut):
+    try:
+        return int(str(valeur).strip())
+    except (TypeError, ValueError):
+        return defaut
 
 
 def _base(article, largeur_disponible, taille_police, horizontal, pose_enfant):
@@ -170,8 +183,17 @@ def _base(article, largeur_disponible, taille_police, horizontal, pose_enfant):
         return max(0.0, mesure)
 
     # Ni base ni taille declaree : on demande au contenu ce qu'il occupe.
+    #
+    # Sur l'axe horizontal, ce que rend la pose est la largeur de la **boite**,
+    # et une boite de bloc prend tout ce qu'on lui donne : trois articles
+    # reclamaient donc chacun la largeur entiere, et se la partageaient en
+    # trois parts egales. C'est l'etendue du contenu qu'il faut, pas celle du
+    # contenant.
     largeur, hauteur = pose_enfant(article.boite, largeur_disponible, 0.0, 0.0, None)
-    return largeur if horizontal else hauteur
+    if not horizontal:
+        return hauteur
+    from .mise_en_page import etendue_contenu
+    return max(0.0, min(largeur, etendue_contenu(article.boite)))
 
 
 # --- Lignes et repartition ----------------------------------------------------

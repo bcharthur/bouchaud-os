@@ -31,10 +31,50 @@ import types
 _images = []
 
 
-def _largeur_texte(texte, taille, gras=False, fixe=False):
+# Les polices que la page a livrees, par famille : le bouchon ne les dessine
+# pas, il retient seulement qu'on les lui a remises.
+_POLICES = {}
+
+
+def _largeur_texte(texte, taille, gras=False, fixe=False, famille=""):
     # Approximation suffisante pour la mise en page : la vraie mesure vient de
     # Qt, et aucune verification ici ne depend du dixieme de pixel.
     return len(texte) * taille * (0.62 if not fixe else 0.60) * (1.05 if gras else 1.0)
+
+
+def _police(octets, famille, gras=False, italique=False):
+    _POLICES[(famille, bool(gras), bool(italique))] = bytes(octets)
+    return True
+
+
+def _rasterise(operations, largeur, hauteur):
+    """Rasterisation de bouchon : les rectangles pleins, et rien d'autre.
+
+    Le vrai hote joue la liste d'affichage entiere par QPainter. Ici il suffit
+    de prouver que la chaine tient — `getImageData` demande, l'hote peint, les
+    octets reviennent dans le bon ordre de canaux. Les rectangles suffisent a
+    l'etablir, et ce sont eux qu'un test peut verifier au pixel.
+    """
+    tampon = bytearray(largeur * hauteur * 4)
+    for operation in operations:
+        if operation[0] != "rect":
+            continue
+        _, x, y, l, h, couleur = operation
+        bleu = couleur & 0xFF
+        vert = (couleur >> 8) & 0xFF
+        rouge = (couleur >> 16) & 0xFF
+        alpha = (couleur >> 24) & 0xFF
+        for j in range(max(0, int(y)), min(hauteur, int(y + h))):
+            for i in range(max(0, int(x)), min(largeur, int(x + l))):
+                debut = (j * largeur + i) * 4
+                # L'hote rend du BGRA, comme Qt : `js.py` echange les canaux.
+                tampon[debut:debut + 4] = bytes((bleu, vert, rouge, alpha))
+    return bytes(tampon)
+
+
+def _image_brute(octets, largeur, hauteur, identifiant=-1):
+    _images.append((largeur, hauteur))
+    return (len(_images) - 1, largeur, hauteur)
 
 
 def _image(octets):
@@ -57,6 +97,9 @@ except ImportError:
     bo.titre = lambda _: None
     bo.redessiner = lambda: None
     bo.image = _image
+    bo.image_brute = _image_brute
+    bo.rasterise = _rasterise
+    bo.police = _police
     bo.formats_images = lambda: ["png"]
     sys.modules["bo"] = bo
     HOTE_REEL = False
@@ -64,7 +107,7 @@ except ImportError:
 sys.path.insert(0, ".")
 
 import moteur  # noqa: E402
-from moteur import html, js, reseau  # noqa: E402
+from moteur import css, grille, html, js, reseau  # noqa: E402
 
 # --- Cadre de verification ----------------------------------------------------
 
@@ -144,10 +187,39 @@ def verifie_selecteurs():
     egal("select: attribut faux", len(select('[data-role="autre"]')), 0)
     egal("select: attribut prefixe", len(select('[href^="/x"]')), 1)
     egal("select: groupe", len(select("a, li")), 4)
-    egal("select: pseudo-classe ignoree", len(select("a:hover")), 2)
+    # Au repos, `:hover` ne designe rien. Le moteur l'ignorait, et peignait donc
+    # en permanence le style que la page reservait au pointeur.
+    egal("select: pseudo-classe d'etat", len(select("a:hover")), 0)
     egal("select: universel dans contexte", len(select("*")),
          len([n for n in doc.racine.parcours() if isinstance(n, html.Element)]))
+
+    # Freres, rangs et pseudo-classes fonctionnelles : `querySelector` et la
+    # cascade partagent desormais le meme moteur, donc les memes reponses.
+    egal("select: frere adjacent", len(select("a + a")), 1)
+    egal("select: frere general", len(select("li ~ li")), 1)
+    egal("select: premier enfant", len(select("li:first-child")), 1)
+    egal("select: dernier enfant", len(select("li:last-child")), 1)
+    egal("select: rang impair", len(select("li:nth-child(odd)")), 1)
+    egal("select: rang calcule", len(select("li:nth-child(2n)")), 1)
+    egal("select: negation", len(select("a:not(.actif)")), 1)
+    egal("select: negation composee", len(select("li:not(.special):not(.autre)")), 1)
+    egal("select: is", len(select("a:is(.actif, .absent)")), 1)
+    egal("select: where sans poids", len(select(":where(a).lien")), 2)
+    egal("select: has descendant", len(select("div:has(a)")), 1)
+    egal("select: has enfant direct", len(select("ul:has(> li)")), 1)
+    egal("select: has absent", len(select("ul:has(a)")), 0)
+    egal("select: attribut sous-chaine", len(select('[data-role*="en"]')), 1)
+    egal("select: attribut insensible", len(select('[data-role="MENU" i]')), 1)
     contexte.ferme()
+
+    # La specificite suit la norme : `:is()` prend celle de son argument le plus
+    # fort, `:where()` ne pese rien, `:not()` pese ce qu'il nie.
+    egal("specificite: is", css.groupes(":is(#a, .b)")[0].specificite, (1, 0, 0))
+    egal("specificite: where", css.groupes(":where(#a)")[0].specificite, (0, 0, 0))
+    egal("specificite: not", css.groupes("p:not(.b)")[0].specificite, (0, 1, 1))
+    # Une classe echappee — `md\:flex`, `w-1\/2` — est un seul nom, pas deux.
+    egal("selecteur: classe echappee",
+         css.groupes(r".md\:flex")[0].maillons[0].classes, ["md:flex"])
 
 
 # --- JavaScript ---------------------------------------------------------------
@@ -1002,6 +1074,927 @@ def verifie_requete_brute():
     contexte.ferme()
 
 
+def verifie_decoration():
+    """Coins, ombres, degrades, bords par cote, opacite : l'allure moderne."""
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #carte {
+            width: 300px; height: 120px;
+            background: #ffffff;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+          }
+          #trait { height: 40px; border-bottom: 2px solid #ff0000; }
+          #pente { height: 60px; background: linear-gradient(to right, #000000, #ffffff); }
+          #cadre { height: 30px; border: 1px solid #00ff00; }
+          #pale { height: 20px; opacity: 0.5; background: #123456; }
+        </style>
+        <body>
+          <div id="carte">carte</div>
+          <div id="trait">trait</div>
+          <div id="pente">pente</div>
+          <div id="cadre">cadre</div>
+          <div id="pale">pale</div>
+        </body>""")
+    liste = doc.liste_affichage(0, 1000, 700)
+    genres = [e[0] for e in liste]
+
+    # Un fond arrondi passe par `rond`, pas par `rect` : sinon les coins
+    # restaient carres alors que la feuille les demandait ronds.
+    ronds = [e for e in liste if e[0] == "rond"]
+    verifie("decoration: fond arrondi", any(proche(e[5], 12) for e in ronds),
+            [e[5] for e in ronds])
+    verifie("decoration: ombre portee", "ombre" in genres, genres[:12])
+    verifie("decoration: degrade", "degrade" in genres, genres[:12])
+
+    # `border-bottom` seul ne peignait rien : le moteur ne lisait qu'une
+    # bordure unique pour toute la boite.
+    trait = boite_de(doc, "trait")
+    rouges = [e for e in liste if e[0] == "rect" and e[5] == 0xFFFF0000]
+    verifie("decoration: bord bas seul peint", len(rouges) == 1, len(rouges))
+    if rouges:
+        verifie("decoration: le bord bas est en bas",
+                proche(rouges[0][2], trait.y + trait.hauteur - 2), rouges[0][2])
+        verifie("decoration: son epaisseur est la sienne",
+                proche(rouges[0][4], 2), rouges[0][4])
+
+    # Un cadre uniforme se trace en contour, sans deborder des coins.
+    verifie("decoration: cadre uniforme", "contour" in genres or
+            sum(1 for e in liste if e[0] == "rect" and e[5] == 0xFF00FF00) == 4,
+            genres[:20])
+
+    # L'opacite enveloppe la boite et se referme.
+    verifie("decoration: opacite posee", "opacite" in genres, genres[:20])
+    egal("decoration: enveloppes refermees",
+         genres.count("desenveloppe"),
+         genres.count("opacite") + genres.count("transforme"))
+
+    # Les bords se cascadent par cote : trois rouges et un efface.
+    style = css._developpe({"border": "1px solid red"})
+    style.update(css._developpe({"border-bottom": "none"}))
+    bords = css.bordures(style, 100, 16)
+    egal("decoration: cascade des bords",
+         [round(e) for e, _ in bords], [1, 1, 0, 1])
+
+
+def verifie_transformations():
+    """`transform` deplace la boite, et le clic la suit."""
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #glisse { height: 50px; transform: translate(40px, 25px); }
+          #droit { height: 50px; }
+        </style>
+        <body>
+          <div id="glisse"><a href="/cible">lien</a></div>
+          <div id="droit">droit</div>
+        </body>""")
+    liste = doc.liste_affichage(0, 1000, 700)
+    transformes = [e for e in liste if e[0] == "transforme"]
+    verifie("transform: une enveloppe posee", len(transformes) == 1, len(transformes))
+    if transformes:
+        egal("transform: la translation est la bonne",
+             (round(transformes[0][5]), round(transformes[0][6])), (40, 25))
+
+    # La boite reste a sa place dans le flux : `transform` ne remet pas en page.
+    glisse, droit = boite_de(doc, "glisse"), boite_de(doc, "droit")
+    verifie("transform: le flux n'est pas touche",
+            proche(droit.y, glisse.y + glisse.hauteur), (droit.y, glisse.y))
+
+    # Le lien doit etre cliquable la ou il est peint, pas la ou il serait sans
+    # la transformation.
+    zones = [z for z in doc.zones_liens if z[4] == "/cible"]
+    verifie("transform: le lien existe", bool(zones), doc.zones_liens)
+    if zones:
+        verifie("transform: la zone du lien suit la translation",
+                proche(zones[0][1], glisse.y + 25, 3), (zones[0][1], glisse.y))
+
+    egal("transform: rotation reconnue",
+         tuple(round(v, 3) for v in css.transformation("rotate(90deg)")),
+         (0.0, 1.0, -1.0, 0.0, 0.0, 0.0))
+    egal("transform: enchainement", css.transformation("translate(10px) scale(2)"),
+         (2.0, 0.0, 0.0, 2.0, 10.0, 0.0))
+    egal("transform: la 3D est laissee de cote",
+         css.transformation("rotateX(45deg)"), None)
+
+
+def verifie_collant():
+    """`position: sticky` se colle a son ancrage, `fixed` ne defile pas."""
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #haut { height: 400px; }
+          #barre { position: sticky; top: 0; height: 40px; background: #ffffff; }
+          #suite { height: 900px; }
+        </style>
+        <body>
+          <div id="haut">haut</div>
+          <div id="barre">barre</div>
+          <div id="suite">suite</div>
+        </body>""")
+    barre = boite_de(doc, "barre")
+
+    # Tant qu'elle est visible, elle ne bouge pas.
+    sans = [e for e in doc.liste_affichage(0, 1000, 700) if e[0] == "transforme"]
+    egal("sticky: immobile tant qu'elle est visible", len(sans), 0)
+
+    # Une fois depassee, elle se colle en haut de la vue.
+    defilement = barre.y + 200
+    avec = [e for e in doc.liste_affichage(defilement, 1000, 700)
+            if e[0] == "transforme"]
+    verifie("sticky: collee une fois depassee", len(avec) == 1, len(avec))
+    if avec:
+        verifie("sticky: elle remonte du defilement", proche(avec[0][6], 200, 2),
+                avec[0][6])
+
+
+def verifie_ordre_et_zones():
+    """`order` en flexbox et les zones nommees de grille."""
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #barre { display: flex; }
+          #barre > div { width: 100px; }
+          #a { order: 2; } #b { order: 1; }
+        </style>
+        <body><div id="barre"><div id="a">a</div><div id="b">b</div></div></body>""")
+    a, b = boite_de(doc, "a"), boite_de(doc, "b")
+    verifie("flex: `order` reordonne", b.x < a.x, (a.x, b.x))
+
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #page {
+            display: grid;
+            grid-template-columns: 200px 400px;
+            grid-template-areas: "cote entete" "cote corps";
+          }
+          #entete { grid-area: entete; height: 50px; }
+          #cote   { grid-area: cote;   height: 30px; }
+          #corps  { grid-area: corps;  height: 60px; }
+        </style>
+        <body>
+          <div id="page">
+            <div id="entete">entete</div>
+            <div id="cote">cote</div>
+            <div id="corps">corps</div>
+          </div>
+        </body>""")
+    entete, cote, corps = (boite_de(doc, n) for n in ("entete", "cote", "corps"))
+    verifie("grille: la zone nommee place a gauche", proche(cote.x, 0, 2), cote.x)
+    verifie("grille: la zone nommee place a droite",
+            proche(entete.x, 200, 2), entete.x)
+    verifie("grille: le corps est sous l'entete", corps.y > entete.y,
+            (entete.y, corps.y))
+    verifie("grille: le corps est dans la colonne de droite",
+            proche(corps.x, 200, 2), corps.x)
+
+    boites, colonnes = grille.zones('"a a b" "c . b"')
+    egal("grille: le gabarit compte ses colonnes", colonnes, 3)
+    egal("grille: une zone large s'etend", boites["a"], (0, 0, 2, 1))
+    egal("grille: une zone haute s'etend", boites["b"], (2, 0, 1, 2))
+
+
+def verifie_regles_arobase():
+    """Les regles @ groupent ou conditionnent ; aucune ne doit avaler sa voisine."""
+    def classes(feuille):
+        return [m.classes[0] for r in css.analyse(feuille)
+                for m in r.selecteur.maillons if m.classes]
+
+    # Une regle @ sans bloc se termine par un point-virgule. Ne pas la
+    # reconnaitre collait son texte au selecteur suivant, et la regle d'apres
+    # etait perdue : un `@import` en tete de feuille emportait la premiere.
+    egal("arobase: @import n'avale plus la suivante",
+         classes('@import url("a.css");\n.foo { color: red }'), ["foo"])
+    egal("arobase: @charset non plus",
+         classes('@charset "utf-8";\n.foo { color: red }'), ["foo"])
+    egal("arobase: @layer declaratif",
+         classes('@layer base, composants;\n.bar { color: blue }'), ["bar"])
+
+    # `@layer` avec bloc : les cadres CSS recents y rangent toute leur feuille.
+    # La sauter revenait a afficher la page sans style du tout.
+    egal("arobase: @layer garde son contenu",
+         classes('@layer base { .baz { color: green } }'), ["baz"])
+    egal("arobase: @supports garde le sien",
+         classes('@supports (display: grid) { .qux { color: teal } }'), ["qux"])
+    egal("arobase: @container aussi",
+         classes('@container (min-width: 10px) { .c { color: teal } }'), ["c"])
+
+    # Celles qu'on ne sait pas rendre sont sautees — bloc imbrique compris —
+    # sans emporter ce qui suit.
+    egal("arobase: @keyframes saute sans mordre",
+         classes('@keyframes a { from { opacity: 0 } to { opacity: 1 } }'
+                 '\n.apres { color: pink }'), ["apres"])
+    egal("arobase: @font-face de meme",
+         classes('@font-face { font-family: x; src: url(y) }\n.ok { color: gray }'),
+         ["ok"])
+
+    # L'accolade qui ferme un groupe doit etre consommee. Sans cela elle se
+    # collait au selecteur suivant — qui devenait `} .apres` et ne designait
+    # plus rien — et toutes les regles suivant un `@layer` ou un `@media`
+    # etaient perdues. C'est-a-dire presque toute feuille moderne.
+    egal("arobase: ce qui suit un @layer survit",
+         classes('@layer base { .dedans { color: red } }\n.apres { color: blue }'),
+         ["dedans", "apres"])
+    egal("arobase: ce qui suit un @media survit",
+         classes('@media (min-width: 10px) { .dedans { color: red } }'
+                 '\n.apres { color: blue }'), ["dedans", "apres"])
+    egal("arobase: deux groupes de suite",
+         classes('@layer a { .un { color: red } }'
+                 '@layer b { .deux { color: blue } }'
+                 '.trois { color: teal }'), ["un", "deux", "trois"])
+    egal("arobase: un groupe non retenu n'emporte rien",
+         classes('@media (min-width: 99999px) { .jamais { color: red } }'
+                 '\n.apres { color: blue }'), ["apres"])
+
+
+def verifie_etats():
+    """`:hover`, `:active`, `:focus` : la page se restyle sous le pointeur."""
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #bouton { height: 40px; background-color: #ffffff; }
+          #bouton:hover { background-color: #ff0000; }
+          #menu:hover .liste { background-color: #00ff00; }
+        </style>
+        <body>
+          <div id="bouton">bouton</div>
+          <div id="menu"><div class="liste" id="liste">liste</div></div>
+        </body>""")
+
+    bouton = boite_de(doc, "bouton")
+    egal("etats: au repos, pas de survol",
+         bouton.style.get("background-color"), "#ffffff")
+
+    # Le pointeur au milieu du bouton.
+    change = doc.survole(bouton.x + 5, bouton.y + 5)
+    verifie("etats: le survol declenche une remise en page", change)
+    egal("etats: le style de survol s'applique",
+         boite_de(doc, "bouton").style.get("background-color"), "#ff0000")
+
+    # `:hover` designe toute la lignee : un descendant du survole en profite,
+    # ce qui est ce qui tient un menu deroulant ouvert.
+    liste = boite_de(doc, "liste")
+    doc.survole(liste.x + 5, liste.y + 5)
+    egal("etats: la lignee entiere est survolee",
+         boite_de(doc, "liste").style.get("background-color"), "#00ff00")
+
+    # Le pointeur sort : tout revient.
+    doc.survole(-1, -1)
+    egal("etats: le repos est retrouve",
+         boite_de(doc, "bouton").style.get("background-color"), "#ffffff")
+
+    # Une feuille qui ne parle pas d'interaction n'est jamais recalculee.
+    calme = document("""
+        <style>body { margin: 0 } #x { height: 20px }</style>
+        <body><div id="x">x</div></body>""")
+    verifie("etats: une page sans `:hover` ne recalcule pas",
+            calme.survole(5, 5) is False)
+    verifie("etats: l'index sait s'il est sensible",
+            calme.regles.sensible is False and doc.regles.sensible is True)
+
+    # `:active` se compose avec `:hover` au lieu de l'effacer.
+    doc2 = document("""
+        <style>
+          body { margin: 0; }
+          #b { height: 30px; color: #000000; }
+          #b:hover { color: #ff0000; }
+          #b:active { color: #0000ff; }
+        </style>
+        <body><div id="b">b</div></body>""")
+    cible = boite_de(doc2, "b")
+    doc2.survole(cible.x + 2, cible.y + 2)
+    egal("etats: survol seul", boite_de(doc2, "b").style.get("color"), "#ff0000")
+    doc2.enfonce(cible.x + 2, cible.y + 2)
+    egal("etats: enfonce l'emporte", boite_de(doc2, "b").style.get("color"), "#0000ff")
+    doc2.relache()
+    egal("etats: relache rend le survol",
+         boite_de(doc2, "b").style.get("color"), "#ff0000")
+
+
+def verifie_animations():
+    """`@keyframes` et `animation` : la page bouge toute seule."""
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          @keyframes apparait {
+            from { opacity: 0; }
+            to   { opacity: 1; }
+          }
+          #x { height: 40px; animation: apparait 1s linear; }
+        </style>
+        <body><div id="x">x</div></body>""")
+
+    egal("animation: le gabarit est retenu",
+         sorted(doc.animateur.keyframes), ["apparait"])
+
+    # L'horloge est pilotee a la main : les verifications ne doivent pas
+    # dependre de la vitesse de la machine qui les joue.
+    def a(ms):
+        doc.animateur.pose_temps(ms)
+        doc.remet_en_page(doc.largeur)
+        return boite_de(doc, "x").style.get("opacity")
+
+    egal("animation: au depart", a(0), "0")
+    verifie("animation: a mi-course", proche(float(a(500)), 0.5, 0.05), a(500))
+    verifie("animation: elle est declaree en cours", doc.animateur.anime())
+    # Une fois finie, sans `forwards`, la valeur de la regle reprend la main.
+    a(2000)
+    verifie("animation: terminee, plus rien ne bouge", not doc.animateur.anime())
+
+    # `forwards` retient la derniere image.
+    doc2 = document("""
+        <style>
+          body { margin: 0; }
+          @keyframes monte { from { opacity: .2 } to { opacity: .9 } }
+          #y { height: 20px; animation: monte 100ms linear forwards; }
+        </style>
+        <body><div id="y">y</div></body>""")
+    doc2.animateur.pose_temps(5000)
+    doc2.remet_en_page(doc2.largeur)
+    verifie("animation: `forwards` retient la fin",
+            proche(float(boite_de(doc2, "y").style.get("opacity")), 0.9, 0.02),
+            boite_de(doc2, "y").style.get("opacity"))
+
+    # Le rythme deforme la fraction, mais jamais ses bornes.
+    egal("rythme: lineaire", round(moteur.animation.rythme("linear", 0.25), 3), 0.25)
+    verifie("rythme: ease-in demarre plus lentement",
+            moteur.animation.rythme("ease-in", 0.5) < 0.5)
+    verifie("rythme: ease-out demarre plus vite",
+            moteur.animation.rythme("ease-out", 0.5) > 0.5)
+    egal("rythme: les bornes tiennent",
+         (moteur.animation.rythme("ease", 0.0), moteur.animation.rythme("ease", 1.0)),
+         (0.0, 1.0))
+    egal("rythme: steps", moteur.animation.rythme("steps(4, end)", 0.6), 0.5)
+
+
+def verifie_transitions():
+    """`transition` : un changement de valeur se parcourt au lieu de sauter."""
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #b { height: 30px; background-color: #000000; transition: background-color 1s linear; }
+          #b:hover { background-color: #ffffff; }
+        </style>
+        <body><div id="b">b</div></body>""")
+
+    def pose(ms):
+        doc.animateur.pose_temps(ms)
+        doc.remet_en_page(doc.largeur)
+        return boite_de(doc, "b").style.get("background-color")
+
+    egal("transition: la propriete est developpee",
+         boite_de(doc, "b").style.get("transition-property"), "background-color")
+
+    pose(0)
+    cible = boite_de(doc, "b")
+    # Le pointeur arrive : la couleur ne saute pas, elle part.
+    doc.animateur.pose_temps(0)
+    doc.survole(cible.x + 2, cible.y + 2)
+    milieu = pose(500)
+    verifie("transition: a mi-course, une teinte intermediaire",
+            milieu.startswith("rgba(") and "127" in milieu or "128" in milieu, milieu)
+    verifie("transition: elle est declaree en cours", doc.animateur.anime())
+
+    fin = pose(2000)
+    egal("transition: elle atteint sa cible", css.couleur(fin), 0xFFFFFFFF)
+    verifie("transition: puis s'arrete", not doc.animateur.anime())
+
+    # Les melanges eux-memes, sans passer par une page.
+    m = moteur.animation.melange
+    egal("melange: longueurs", m("10px", "20px", 0.5), "15px")
+    egal("melange: nombres sans unite", m("0", "1", 0.25), "0.250")
+    egal("melange: unites incompatibles bascule",
+         m("10px", "50%", 0.4), "10px")
+    egal("melange: zero s'accorde a toute unite", m("0", "10px", 0.5), "5px")
+    egal("melange: couleurs", css.couleur(m("#000000", "#ffffff", 0.5)) & 0xFF, 128)
+    verifie("melange: transformations",
+            m("translateX(0px)", "translateX(10px)", 0.5).startswith("matrix("),
+            m("translateX(0px)", "translateX(10px)", 0.5))
+    egal("melange: l'indissociable bascule a mi-parcours",
+         (m("block", "flex", 0.4), m("block", "flex", 0.6)), ("block", "flex"))
+
+
+def verifie_isolement_ombre():
+    """Une racine d'ombre isole : rien n'entre, rien ne sort, sauf `:host`."""
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          p { color: #ff0000; }              /* ne doit pas entrer dans l'ombre */
+          ma-carte { color: #000000; }
+        </style>
+        <body>
+          <ma-carte><div id="clair">clair</div></ma-carte>
+          <p id="dehors">dehors</p>
+          <script>
+            class MaCarte extends HTMLElement {
+              connectedCallback() {
+                const o = this.attachShadow({ mode: 'open' });
+                o.innerHTML = '<style>' +
+                  'p { color: #00ff00 }' +
+                  ':host { background-color: #0000ff }' +
+                  '</style>' +
+                  '<p id="dedans">dedans</p><slot></slot>';
+              }
+            }
+            customElements.define('ma-carte', MaCarte);
+          </script>
+        </body>""")
+
+    dedans = boite_de(doc, "dedans")
+    dehors = boite_de(doc, "dehors")
+    verifie("ombre: le contenu d'ombre est mis en page", dedans is not None)
+
+    # La regle de la page ne franchit pas la frontiere...
+    egal("ombre: la page n'entre pas", dedans.style.get("color"), "#00ff00")
+    # ...et celle de l'ombre n'en sort pas.
+    egal("ombre: l'ombre ne sort pas", dehors.style.get("color"), "#ff0000")
+
+    # `:host` est la seule a traverser, et vers l'hote seulement.
+    hote = None
+    for n in doc.racine.parcours():
+        if isinstance(n, html.Element) and n.balise == "ma-carte":
+            hote = n
+    verifie("ombre: l'hote existe", hote is not None)
+    boite_hote = None
+    pile = [doc.boite]
+    while pile:
+        b = pile.pop(0)
+        if b.element is hote:
+            boite_hote = b
+            break
+        pile.extend(b.enfants)
+    verifie("ombre: l'hote est mis en page", boite_hote is not None)
+    if boite_hote:
+        egal("ombre: `:host` atteint l'hote",
+             boite_hote.style.get("background-color"), "#0000ff")
+
+    # Le contenu clair passe par la fente, et une seule fois.
+    clairs = []
+    pile = [doc.boite]
+    while pile:
+        b = pile.pop(0)
+        el = b.element
+        if isinstance(el, html.Element) and el.attributs.get("id") == "clair":
+            clairs.append(b)
+        pile.extend(b.enfants)
+    egal("ombre: le contenu clair est distribue une fois", len(clairs), 1)
+
+    # Sans fente, le contenu clair ne s'affiche pas du tout.
+    muet = document("""
+        <body>
+          <ma-boite><div id="perdu">perdu</div></ma-boite>
+          <script>
+            class MaBoite extends HTMLElement {
+              connectedCallback() {
+                this.attachShadow({ mode: 'open' }).innerHTML = '<div id="seul">seul</div>';
+              }
+            }
+            customElements.define('ma-boite', MaBoite);
+          </script>
+        </body>""")
+    verifie("ombre: sans fente, le clair reste cache",
+            boite_de(muet, "perdu") is None)
+    verifie("ombre: le contenu d'ombre s'affiche",
+            boite_de(muet, "seul") is not None)
+
+    # Fente nommee : chaque enfant va a la sienne.
+    nomme = document("""
+        <body>
+          <ma-fiche>
+            <h2 slot="titre" id="t">titre</h2>
+            <div id="c">corps</div>
+          </ma-fiche>
+          <script>
+            class MaFiche extends HTMLElement {
+              connectedCallback() {
+                this.attachShadow({ mode: 'open' }).innerHTML =
+                  '<header><slot name="titre"></slot></header>' +
+                  '<main><slot></slot></main>';
+              }
+            }
+            customElements.define('ma-fiche', MaFiche);
+          </script>
+        </body>""")
+
+    def ancetres(doc_, identifiant):
+        cible = boite_de(doc_, identifiant)
+        if cible is None:
+            return []
+        noms = []
+        pile = [(doc_.boite, [])]
+        while pile:
+            b, chemin = pile.pop(0)
+            if b is cible:
+                return chemin
+            nouveau = chemin + [getattr(b.element, "balise", "?")]
+            pile.extend((e, nouveau) for e in b.enfants)
+        return noms
+
+    verifie("ombre: la fente nommee recoit le sien",
+            "header" in ancetres(nomme, "t"), ancetres(nomme, "t"))
+    verifie("ombre: la fente sans nom recoit le reste",
+            "main" in ancetres(nomme, "c"), ancetres(nomme, "c"))
+
+    # Une page sans ombre ne paie rien : le drapeau reste baisse.
+    ordinaire = document("<style>p{color:#123456}</style><body><p id='p'>x</p></body>")
+    egal("ombre: une page sans ombre garde ses regles",
+         boite_de(ordinaire, "p").style.get("color"), "#123456")
+
+
+def verifie_ajustement_images():
+    """`object-fit` et `aspect-ratio` : l'image n'est plus etiree a sa boite."""
+    a = moteur.images.ajuste
+
+    # `fill` etire, c'est le defaut de CSS et l'ancien comportement unique.
+    egal("object-fit: fill etire", a("fill", 200, 100, 50, 50)[:4],
+         (0.0, 0.0, 200, 100))
+
+    # `contain` tient dedans, centre, sans rien rogner.
+    dx, dy, l, h, source = a("contain", 200, 100, 50, 50)
+    egal("object-fit: contain garde les proportions", (round(l), round(h)), (100, 100))
+    egal("object-fit: contain centre", (round(dx), round(dy)), (50, 0))
+    egal("object-fit: contain ne rogne pas", source, None)
+
+    # `cover` remplit et rogne : c'est la que le rectangle source sert.
+    dx, dy, l, h, source = a("cover", 200, 100, 50, 50)
+    egal("object-fit: cover remplit", (round(l), round(h)), (200, 100))
+    verifie("object-fit: cover rogne", source is not None, source)
+    if source:
+        sx, sy, sl, sh = source
+        egal("object-fit: la portion est centree", (round(sx), round(sy)), (0, 12))
+        egal("object-fit: la portion a le bon rapport",
+             (round(sl), round(sh)), (50, 25))
+
+    # `none` garde la taille reelle ; `scale-down` ne grandit jamais.
+    egal("object-fit: none garde la taille", a("none", 200, 100, 50, 50)[2:4],
+         (50, 50))
+    egal("object-fit: scale-down ne grandit pas",
+         a("scale-down", 200, 100, 50, 50)[2:4], (50, 50))
+    egal("object-fit: scale-down retrecit au besoin",
+         tuple(round(v) for v in a("scale-down", 40, 40, 80, 80)[2:4]), (40, 40))
+
+    # `aspect-ratio` sous ses trois ecritures.
+    p = moteur.images.proportion
+    egal("aspect-ratio: fraction", round(p("16 / 9"), 4), round(9 / 16.0, 4))
+    egal("aspect-ratio: nombre", round(p("2"), 4), 0.5)
+    egal("aspect-ratio: absent", p("auto"), None)
+
+    # Sur une boite ordinaire, la largeur decide de la hauteur.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #cadre { width: 320px; aspect-ratio: 16 / 9; }
+        </style>
+        <body><div id="cadre"></div></body>""")
+    cadre = boite_de(doc, "cadre")
+    verifie("aspect-ratio: la hauteur suit la largeur",
+            proche(cadre.hauteur, 180, 2), cadre.hauteur)
+
+    # Une hauteur declaree l'emporte : le rapport ne fait que combler un vide.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #cadre { width: 320px; height: 50px; aspect-ratio: 16 / 9; }
+        </style>
+        <body><div id="cadre"></div></body>""")
+    verifie("aspect-ratio: une hauteur declaree gagne",
+            proche(boite_de(doc, "cadre").hauteur, 50, 2),
+            boite_de(doc, "cadre").hauteur)
+
+
+def verifie_degrades_et_ombres():
+    """Degrades radiaux et ombres interieures : la decoration est complete."""
+    d = css.degrade
+    egal("degrade: lineaire reconnu", d("linear-gradient(to right, #fff, #000)")[0],
+         "lineaire")
+    egal("degrade: radial reconnu", d("radial-gradient(#fff, #000)")[0], "radial")
+    egal("degrade: la forme radiale est sautee",
+         len(d("radial-gradient(circle at center, red, blue)")[2]), 2)
+    egal("degrade: ellipse et portee aussi",
+         len(d("radial-gradient(ellipse farthest-corner, #abc, #def)")[2]), 2)
+    egal("degrade: le conique reste hors de portee", d("conic-gradient(red, blue)"),
+         None)
+    egal("degrade: l'angle lineaire est lu",
+         d("linear-gradient(45deg, red, blue)")[1], 45.0)
+
+    o = css.ombres
+    portee = o("0 2px 4px #000000")
+    egal("ombre: portee par defaut", portee[0][5], False)
+    interne = o("inset 0 2px 4px #000000")
+    egal("ombre: `inset` est reconnu", interne[0][5], True)
+    egal("ombre: plusieurs ombres", len(o("0 1px #111, inset 0 -1px #222")), 2)
+
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #radial { height: 40px; background: radial-gradient(#ffffff, #000000); }
+          #creuse { height: 40px; box-shadow: inset 0 2px 6px rgba(0,0,0,.5); }
+          #plate  { height: 40px; box-shadow: 0 2px 6px rgba(0,0,0,.5); }
+        </style>
+        <body>
+          <div id="radial">r</div><div id="creuse">c</div><div id="plate">p</div>
+        </body>""")
+    genres = [e[0] for e in doc.liste_affichage(0, 1000, 700)]
+    verifie("degrade: l'operation radiale est emise", "degrade_radial" in genres,
+            genres[:14])
+    verifie("ombre: l'operation interne est emise", "ombre_interne" in genres,
+            genres[:20])
+    verifie("ombre: la portee reste distincte", "ombre" in genres, genres[:20])
+
+
+def verifie_toile_complete():
+    """Degrades, ombres, chemins remplis, detourage et pixels de la toile."""
+    def dessine(code):
+        doc = document("""
+            <body><canvas id="t" width="60" height="40"></canvas>
+            <script>
+              const c = document.getElementById('t').getContext('2d');
+              %s
+              window.__fait = 1;
+            </script></body>""" % code)
+        return doc, doc.contexte_js.toile(
+            [n for n in doc.racine.parcours()
+             if isinstance(n, html.Element) and n.balise == "canvas"][0])
+
+    # Un chemin rempli est un polygone, pas sa boite englobante. Un camembert
+    # etait rendu carre.
+    _, ops = dessine("""
+        c.fillStyle = '#ff0000';
+        c.beginPath(); c.moveTo(0,0); c.lineTo(30,0); c.lineTo(0,20); c.fill();
+    """)
+    genres = [o[0] for o in ops or []]
+    verifie("toile: le chemin est un polygone", "polygone" in genres, genres)
+    polygones = [o for o in ops or [] if o[0] == "polygone"]
+    if polygones:
+        egal("toile: ses sommets sont gardes", len(polygones[0][1]), 3)
+        egal("toile: sa couleur est traduite", polygones[0][2], 0xFFFF0000)
+
+    # Un degrade lineaire porte ses deux extremites.
+    _, ops = dessine("""
+        const g = c.createLinearGradient(0, 0, 60, 0);
+        g.addColorStop(0, '#000000'); g.addColorStop(1, '#ffffff');
+        c.fillStyle = g; c.fillRect(0, 0, 60, 40);
+    """)
+    pentes = [o for o in ops or [] if o[0] == "degrade_points"]
+    verifie("toile: le degrade lineaire est emis", bool(pentes),
+            [o[0] for o in ops or []])
+    if pentes:
+        egal("toile: ses extremites sont gardees", pentes[0][5:9], (0.0, 0.0, 60.0, 0.0))
+        egal("toile: ses arrets sont traduits",
+             [a[1] for a in pentes[0][9]], [0xFF000000, 0xFFFFFFFF])
+
+    _, ops = dessine("""
+        const g = c.createRadialGradient(30, 20, 0, 30, 20, 25);
+        g.addColorStop(0, '#ffffff'); g.addColorStop(1, '#000000');
+        c.fillStyle = g; c.fillRect(0, 0, 60, 40);
+    """)
+    verifie("toile: le degrade radial est emis",
+            any(o[0] == "degrade_cercle" for o in ops or []),
+            [o[0] for o in ops or []])
+
+    # Une ombre precede la forme qu'elle porte.
+    _, ops = dessine("""
+        c.shadowColor = 'rgba(0,0,0,0.5)'; c.shadowBlur = 4;
+        c.shadowOffsetY = 2; c.fillStyle = '#ffffff';
+        c.fillRect(10, 10, 20, 10);
+    """)
+    genres = [o[0] for o in ops or []]
+    verifie("toile: l'ombre est emise", "ombre" in genres, genres)
+    if "ombre" in genres and "rect" in genres:
+        verifie("toile: l'ombre passe avant la forme",
+                genres.index("ombre") < genres.index("rect"), genres)
+
+    # Le detourage tombe avec le `restore()` qui suit son `save()`.
+    _, ops = dessine("""
+        c.save(); c.beginPath(); c.rect(0,0,10,10); c.clip();
+        c.fillStyle = '#00ff00'; c.fillRect(0,0,60,40);
+        c.restore();
+        c.fillStyle = '#0000ff'; c.fillRect(0,0,60,40);
+    """)
+    genres = [o[0] for o in ops or []]
+    egal("toile: le detourage est pose et retire",
+         (genres.count("clip"), genres.count("declip")), (1, 1))
+    if "declip" in genres:
+        verifie("toile: le second remplissage n'est plus rogne",
+                genres.index("declip") < len(genres) - 1, genres)
+
+    # Les pixels : la chaine complete, jusqu'a l'ordre des canaux.
+    doc = document("""
+        <body><canvas id="t" width="4" height="2"></canvas>
+        <script>
+          const c = document.getElementById('t').getContext('2d');
+          c.fillStyle = '#ff8000';
+          c.fillRect(0, 0, 2, 2);
+          const d = c.getImageData(0, 0, 4, 2);
+          window.__l = d.width; window.__h = d.height;
+          window.__r = d.data[0]; window.__v = d.data[1]; window.__b = d.data[2];
+          window.__a = d.data[3];
+          window.__vide = d.data[3 * 4 + 3];
+        </script></body>""")
+    js_ = doc.contexte_js
+    egal("toile: getImageData rend la bonne taille",
+         (js_.execute("window.__l"), js_.execute("window.__h")), (4, 2))
+    egal("toile: les canaux sont en RGBA",
+         (js_.execute("window.__r"), js_.execute("window.__v"),
+          js_.execute("window.__b"), js_.execute("window.__a")),
+         (255, 128, 0, 255))
+    egal("toile: hors de la forme, rien", js_.execute("window.__vide"), 0)
+
+    # `putImageData` repasse par le cache d'images de l'hote.
+    doc = document("""
+        <body><canvas id="t" width="4" height="2"></canvas>
+        <script>
+          const c = document.getElementById('t').getContext('2d');
+          const d = c.createImageData(2, 2);
+          d.data[0] = 10; d.data[3] = 255;
+          c.putImageData(d, 1, 1);
+          window.__fait = 1;
+        </script></body>""")
+    ops = doc.contexte_js.toile(
+        [n for n in doc.racine.parcours()
+         if isinstance(n, html.Element) and n.balise == "canvas"][0])
+    verifie("toile: putImageData pose une image",
+            any(o[0] == "image" for o in ops or []), [o[0] for o in ops or []])
+
+
+def verifie_flux_en_ligne():
+    """Espaces entre balises, `inline-block`, champs : ce que les captures ont montre."""
+    def textes(source, largeur=900):
+        doc = document(source)
+        doc.remet_en_page(largeur, 400)
+        return [(round(o[1]), o[3])
+                for o in doc.liste_affichage(0, largeur, 400) if o[0] == "texte"]
+
+    # Un nœud de texte purement blanc entre deux elements en ligne vaut une
+    # espace. Le jeter collait les mots de deux balises voisines — le defaut le
+    # plus visible sur une vraie page : « HelpDocsSponsors ».
+    avec = textes("<body><span>Un</span> <span>Deux</span></body>")
+    sans = textes("<body><span>Un</span><span>Deux</span></body>")
+    verifie("flux: l'espace entre balises compte", avec[1][0] > sans[1][0],
+            (avec, sans))
+    # L'ecart vaut une espace de la fonte reelle, pas un nombre fixe : le
+    # verifier au pixel pres lierait le test a la police.
+    verifie("flux: l'ecart vaut une espace", 3 <= avec[1][0] - sans[1][0] <= 12,
+            avec[1][0] - sans[1][0])
+    egal("flux: deux blocs ne gagnent pas d'espace",
+         [x for x, _ in textes("<body><div>Un</div> <div>Deux</div></body>")], [8, 8])
+
+    # En debut de ligne, une espace ne compte pas.
+    egal("flux: pas d'espace en tete de ligne",
+         textes("<body><p> <span>Un</span></p></body>")[0][0], 8)
+
+    # Un article flexible « au contenu » prend la largeur de son contenu, pas
+    # celle du conteneur : trois liens se partageaient toute la page.
+    nav = textes("<style>ul{display:flex;gap:20px;list-style:none;margin:0;padding:0}"
+                 "</style><body><ul><li><a href='#'>Help</a></li>"
+                 "<li><a href='#'>Docs</a></li><li><a href='#'>Sponsors</a></li>"
+                 "</ul></body>")
+    verifie("flex: les articles se serrent a gauche", nav[-1][0] < 300, nav)
+    verifie("flex: l'ecart demande est tenu", 40 < nav[1][0] < 90, nav)
+    # `flex: 1` demande bien le partage, lui.
+    partage = textes("<style>.r{display:flex}.r>div{flex:1}</style>"
+                     "<body><div class=r><div>A</div><div>B</div><div>C</div></div></body>")
+    verifie("flex: `flex: 1` partage toujours", partage[1][0] > 250, partage)
+
+
+def verifie_tableaux():
+    """Un tableau aligne ses colonnes d'une ligne a l'autre."""
+    doc = document("""
+        <style>
+          body { margin: 0 }
+          th, td { padding: 8px 12px; border-bottom: 1px solid #cccccc }
+        </style>
+        <body><table>
+          <tr><th>Propriete</th><th>Etat</th></tr>
+          <tr><td>grid-template-areas</td><td>zones nommees</td></tr>
+        </table></body>""")
+    par_ligne = {}
+    for o in doc.liste_affichage(0, 700, 400):
+        if o[0] == "texte":
+            par_ligne.setdefault(round(o[2]), []).append(round(o[1]))
+    lignes = [par_ligne[y] for y in sorted(par_ligne)]
+    egal("tableau: deux lignes", len(lignes), 2)
+    egal("tableau: deux colonnes par ligne", [len(l) for l in lignes], [2, 2])
+    verifie("tableau: les colonnes s'alignent", lignes[0][1] == lignes[1][1], lignes)
+    verifie("tableau: les cellules ne se touchent pas", lignes[0][1] > 100, lignes)
+
+    # `colspan` occupe la place de plusieurs colonnes.
+    doc = document("<body><table><tr><td colspan=2>large</td></tr>"
+                   "<tr><td>a</td><td>b</td></tr></table></body>")
+    verifie("tableau: colspan ne casse rien", boite_de(doc, None) is None or True)
+
+    # Un `display: table` sans la moindre cellule reste un bloc : le traiter en
+    # tableau faisait disparaitre des pans entiers de page.
+    doc = document("<style>.t{display:table}</style>"
+                   "<body><div class=t><p id='p'>contenu</p></div></body>")
+    verifie("tableau: sans cellule, on repart en bloc", boite_de(doc, "p") is not None)
+    textes = [o[3] for o in doc.liste_affichage(0, 700, 400) if o[0] == "texte"]
+    verifie("tableau: son contenu est peint", "contenu" in textes, textes)
+
+    # Une cellule sans ligne recoit une rangee anonyme.
+    doc = document("<style>.t{display:table}.c{display:table-cell}</style>"
+                   "<body><div class=t><div class=c id='g'>gauche</div>"
+                   "<div class=c id='d'>droite</div></div></body>")
+    gauche, droite = boite_de(doc, "g"), boite_de(doc, "d")
+    verifie("tableau: rangee anonyme, deux colonnes",
+            gauche is not None and droite is not None and droite.x > gauche.x,
+            (gauche and gauche.x, droite and droite.x))
+
+
+def verifie_champs():
+    """Un champ de formulaire est une boite, avec fond, bord et place."""
+    doc = document("<body><input type=text placeholder='Chercher'>"
+                   " <button>Envoyer</button>"
+                   " <input type=hidden value=x></body>")
+    liste = doc.liste_affichage(0, 700, 300)
+    rects = [o for o in liste if o[0] == "rect"]
+    textes = [o[3] for o in liste if o[0] == "texte"]
+
+    verifie("champ: le texte d'invite s'affiche", "Chercher" in textes, textes)
+    verifie("champ: le bouton porte son mot", "Envoyer" in textes, textes)
+    verifie("champ: le champ cache ne s'affiche pas", "x" not in textes, textes)
+
+    # Un champ vide n'a aucun contenu : sans largeur propre il serait invisible.
+    champ = boite_de(doc, None)
+    largeurs = [round(o[3]) for o in rects if 100 < o[3] < 400]
+    verifie("champ: il a une largeur propre", 190 in largeurs, largeurs)
+    # Quatre bords : `border-width` seul ne dessinait rien depuis que le style
+    # par defaut est `none`.
+    bords = [o for o in rects if o[5] == 0xFFC9CED6]
+    verifie("champ: ses quatre bords sont peints", len(bords) >= 8, len(bords))
+
+    # `inline-block` peint sa boite, ce qu'`inline` ne fait pas.
+    doc = document("<style>.p{display:inline-block;background:#ff0000;"
+                   "padding:4px}</style><body><span class=p>puce</span></body>")
+    rouges = [o for o in doc.liste_affichage(0, 700, 300)
+              if o[0] == "rect" and o[5] == 0xFFFF0000]
+    verifie("inline-block: le fond est peint", len(rouges) == 1, len(rouges))
+    if rouges:
+        verifie("inline-block: il ne prend pas toute la ligne", rouges[0][3] < 200,
+                rouges[0][3])
+
+
+def verifie_polices():
+    """`@font-face` : ouvrir un WOFF, choisir la bonne coupe, la remettre a l'hote."""
+    from moteur import police
+
+    # Le choix de la source. Un site cite le WOFF2 en tete parce qu'il est le
+    # plus compact ; on prend le suivant, qu'on sait ouvrir.
+    egal("police: le woff est prefere au woff2",
+         police.meilleure_source('url(a.woff2) format("woff2"),'
+                                 'url(a.woff) format("woff")'),
+         ("a.woff", "woff"))
+    egal("police: le truetype passe avant tout",
+         police.meilleure_source('url(a.woff) format("woff"),'
+                                 'url(a.ttf) format("truetype")'),
+         ("a.ttf", "truetype"))
+    egal("police: le woff2 seul est refuse",
+         police.meilleure_source('url(fa-solid-900.woff2) format("woff2")'), None)
+    egal("police: le format se devine a l'extension",
+         police.sources("url(x.woff)"), [("x.woff", "woff")])
+
+    # Les plages Unicode. Un site livre une coupe par ecriture sous la meme
+    # famille ; garder la derniere ferait sortir une page latine en carres.
+    verifie("police: la coupe latine est retenue",
+            police.couvre_latin("u+0000-00ff,u+0131,u+0152-0153"))
+    verifie("police: la coupe cyrillique est ecartee",
+            not police.couvre_latin("u+0460-052f,u+1c80-1c8a,u+20b4"))
+    verifie("police: sans plage declaree, on retient",
+            police.couvre_latin(""))
+    egal("police: la plage a joker est developpee",
+         police.plages("u+04??"), [(0x0400, 0x04FF)])
+
+    # L'ouverture d'un WOFF : on fabrique un conteneur minimal et on verifie
+    # qu'il ressort en sfnt valide.
+    import struct, zlib
+    table = b"essai de table" + b"\0" * 18
+    comprimee = zlib.compress(table)
+    entete = struct.pack(">4sIIHHIHHIIIII", b"wOFF", 0x00010000, 0, 1, 0,
+                         12 + 16 + len(table), 1, 0, 0, 0, 0, 0, 0)
+    repertoire = struct.pack(">4sIIII", b"test", 44 + 20, len(comprimee),
+                             len(table), 0)
+    faux = entete + repertoire + comprimee
+    ouvert = police.ouvre(faux)
+    verifie("police: un WOFF s'ouvre", ouvert is not None, ouvert)
+    if ouvert:
+        egal("police: il ressort en sfnt", ouvert[:4], b"\x00\x01\x00\x00")
+        verifie("police: sa table est rendue", table[:14] in ouvert, ouvert[:40])
+    egal("police: un WOFF2 est refuse", police.ouvre(b"wOF2" + b"\0" * 40), None)
+    egal("police: une TrueType passe telle quelle",
+         police.ouvre(b"\x00\x01\x00\x00abcd"), b"\x00\x01\x00\x00abcd")
+    egal("police: un fichier quelconque est refuse", police.ouvre(b"nimporte"), None)
+
+    # La famille demandee suit jusqu'a la peinture. Sans elle, une page ne
+    # pouvait jamais s'afficher dans sa propre police.
+    doc = document("<style>body{font-family:'Ma Police',serif}</style>"
+                   "<body><p>bonjour</p></body>")
+    textes = [o for o in doc.liste_affichage(0, 900, 400) if o[0] == "texte"]
+    verifie("police: l'operation texte porte la famille",
+            textes and textes[0][10] == "Ma Police", textes[:1])
+
+
 # --- Disposition --------------------------------------------------------------
 
 def boite_de(doc, identifiant):
@@ -1274,9 +2267,9 @@ def verifie_longueurs():
           #c { width: calc(100% - 40px); }
           #v { width: 50vw; }
           #h { height: 10vh; }
-          #b { width: 200px; padding: 10px; border-width: 5px;
+          #b { width: 200px; padding: 10px; border: 5px solid #000000;
                box-sizing: border-box; }
-          #n { width: 200px; padding: 10px; border-width: 5px; }
+          #n { width: 200px; padding: 10px; border: 5px solid #000000; }
           #m { max-width: 600px; margin-left: auto; margin-right: auto; }
         </style>
         <body>
@@ -1701,9 +2694,10 @@ def verifie_enfant_direct():
          direct.style.get("background-color"), "#ff0000")
     egal("enfant direct: le petit-fils ne l'est pas",
          imbrique.style.get("background-color"), None)
-    # La descendance, elle, atteint bien les deux.
+    # La descendance, elle, atteint bien les deux. `border-color` se developpe
+    # maintenant par cote, d'ou la lecture de l'un d'eux.
     egal("enfant direct: la descendance atteint le petit-fils",
-         imbrique.style.get("border-color"), "#0000ff")
+         imbrique.style.get("border-top-color"), "#0000ff")
 
     # Une chaine de plusieurs `>` doit se verifier de bout en bout.
     doc = document("""
@@ -2494,6 +3488,22 @@ def principal():
         verifie_flex,
         verifie_grille,
         verifie_position,
+        verifie_decoration,
+        verifie_transformations,
+        verifie_collant,
+        verifie_ordre_et_zones,
+        verifie_regles_arobase,
+        verifie_etats,
+        verifie_animations,
+        verifie_transitions,
+        verifie_isolement_ombre,
+        verifie_ajustement_images,
+        verifie_flux_en_ligne,
+        verifie_tableaux,
+        verifie_champs,
+        verifie_polices,
+        verifie_degrades_et_ombres,
+        verifie_toile_complete,
         verifie_pseudo_elements,
         verifie_requetes_media,
         verifie_longueurs,

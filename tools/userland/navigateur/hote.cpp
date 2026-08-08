@@ -59,9 +59,17 @@
 #include <QtGui/QKeyEvent>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QWheelEvent>
+#include <QtGui/QLinearGradient>
+#include <QtGui/QRadialGradient>
+#include <QtGui/QPainterPath>
+#include <QtGui/QPolygonF>
+#include <QtGui/QFontDatabase>
+#include <QtGui/QTransform>
 #include <QtCore/QTimer>
 #include <QtCore/QtPlugin>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -76,6 +84,9 @@ Q_IMPORT_PLUGIN(QLinuxFbIntegrationPlugin)
 Q_IMPORT_PLUGIN(QJpegPlugin)
 Q_IMPORT_PLUGIN(QGifPlugin)
 Q_IMPORT_PLUGIN(QICOPlugin)
+// Le SVG vient du module QtSvg, pas de qtbase : un site recent y met son logo,
+// ses icones et ses pictogrammes, et ils manquaient tous en silence.
+Q_IMPORT_PLUGIN(QSvgPlugin)
 
 namespace {
 
@@ -113,10 +124,16 @@ const QImage *imageParIdentifiant(int identifiant)
     return image.isNull() ? nullptr : &image;
 }
 
-QFont fabriqueFonte(double taille, bool gras, bool italique, bool fixe)
+QFont fabriqueFonte(double taille, bool gras, bool italique, bool fixe,
+                    const QString &famille = QString())
 {
     QFont f;
-    if (fixe)
+    // La famille demandee par la page passe avant tout : c'est elle que
+    // `@font-face` a chargee, et sans elle un site s'affichait toujours dans la
+    // police du systeme. Qt substitue de lui-meme si elle est absente.
+    if (!famille.isEmpty())
+        f.setFamily(famille);
+    else if (fixe)
         f.setFamily(QStringLiteral("DejaVu Sans Mono"));
     f.setPixelSize(qMax(1, int(taille + 0.5)));
     f.setBold(gras);
@@ -174,7 +191,8 @@ public:
 
     /// Mesure un texte avec la fonte demandee. Le rendu en a besoin pour la
     /// mise en page — c'est la seule chose que Python ne peut pas calculer seul.
-    double largeurTexte(const QString &texte, double taille, bool gras, bool fixe)
+    double largeurTexte(const QString &texte, double taille, bool gras, bool fixe,
+                        const QString &famille = QString())
     {
         QFontMetricsF metriques(fabriqueFonte(taille, gras, false, fixe));
         return metriques.horizontalAdvance(texte);
@@ -262,12 +280,19 @@ private:
         // pile est videe ici pour qu'une liste mal fermee ne contamine pas la
         // trame suivante.
         pileRognage.clear();
+        enveloppes = 0;
         for (Py_ssize_t i = 0; i < n; ++i) {
             PyObject *element = PySequence_GetItem(liste, i);
             if (!element)
                 break;
             peintElement(p, element);
             Py_DECREF(element);
+        }
+        // Une liste tronquee — page changee en cours de peinture — laisserait
+        // des etats empiles, et la trame suivante peindrait transformee.
+        while (enveloppes > 0) {
+            p.restore();
+            --enveloppes;
         }
     }
 
@@ -299,14 +324,215 @@ private:
                 p.setBrush(couleurDepuisEntier(couleur));
                 p.drawRoundedRect(QRectF(x, y, l, h), rayon, rayon);
             }
+        } else if (!std::strcmp(operation, "ombre")) {
+            // Qt ne floute pas un rectangle. L'ombre est donc empilee en
+            // couches concentriques, chacune un peu plus grande et n'apportant
+            // qu'une fraction de l'opacite : leur somme redonne un bord doux,
+            // pour le prix de quelques `drawRoundedRect`.
+            double x, y, l, h, rayon, flou;
+            long couleur;
+            if (PyArg_ParseTuple(element, "sddddddl", &operation, &x, &y, &l, &h,
+                                 &rayon, &flou, &couleur)) {
+                const int couches = std::max(1, std::min(16, int(std::ceil(flou))));
+                QColor teinte = couleurDepuisEntier(couleur);
+                const double part = teinte.alphaF() / double(couches + 1);
+                p.setPen(Qt::NoPen);
+                for (int i = couches; i >= 0; --i) {
+                    const double extension = flou * double(i) / double(couches);
+                    QColor couche = teinte;
+                    couche.setAlphaF(part);
+                    p.setBrush(couche);
+                    p.drawRoundedRect(
+                        QRectF(x - extension, y - extension,
+                               l + 2 * extension, h + 2 * extension),
+                        rayon + extension, rayon + extension);
+                }
+            }
+        } else if (!std::strcmp(operation, "degrade")) {
+            double x, y, l, h, rayon, angle;
+            PyObject *etapes = nullptr;
+            if (PyArg_ParseTuple(element, "sddddddO", &operation, &x, &y, &l, &h,
+                                 &rayon, &angle, &etapes)) {
+                // L'angle de CSS part du haut et tourne dans le sens des
+                // aiguilles ; celui de Qt est un simple couple de points. La
+                // ligne du degrade passe par le centre, et sa longueur est
+                // celle de la projection de la boite sur sa direction.
+                const double radians = angle * 3.14159265358979323846 / 180.0;
+                const double dx = std::sin(radians);
+                const double dy = -std::cos(radians);
+                const double portee = std::fabs(l * dx) + std::fabs(h * dy);
+                const QPointF centre(x + l / 2.0, y + h / 2.0);
+                QLinearGradient pente(centre - QPointF(dx, dy) * portee / 2.0,
+                                      centre + QPointF(dx, dy) * portee / 2.0);
+                remplitEtapes(pente, etapes);
+                p.setPen(Qt::NoPen);
+                p.setBrush(pente);
+                if (rayon > 0.0)
+                    p.drawRoundedRect(QRectF(x, y, l, h), rayon, rayon);
+                else
+                    p.drawRect(QRectF(x, y, l, h));
+            }
+        } else if (!std::strcmp(operation, "degrade_radial")) {
+            double x, y, l, h, rayon, angle;
+            PyObject *etapes = nullptr;
+            if (PyArg_ParseTuple(element, "sddddddO", &operation, &x, &y, &l, &h,
+                                 &rayon, &angle, &etapes)) {
+                // Un cercle centre, de rayon la demi-diagonale : c'est le
+                // `farthest-corner` de CSS, son defaut, et ce que demandent
+                // presque toutes les pages.
+                const QPointF centre(x + l / 2.0, y + h / 2.0);
+                const double portee = std::sqrt(l * l + h * h) / 2.0;
+                QRadialGradient pente(centre, portee);
+                remplitEtapes(pente, etapes);
+                p.setPen(Qt::NoPen);
+                p.setBrush(pente);
+                if (rayon > 0.0)
+                    p.drawRoundedRect(QRectF(x, y, l, h), rayon, rayon);
+                else
+                    p.drawRect(QRectF(x, y, l, h));
+            }
+        } else if (!std::strcmp(operation, "ombre_interne")) {
+            // Une ombre interieure est un halo le long du bord interne. On la
+            // dessine comme l'ombre portee — des couches concentriques — mais
+            // rognee a la boite et **decalee vers l'exterieur** : ce qui reste
+            // visible est la frange qui rentre.
+            double x, y, l, h, rayon, dx, dy, flou, etendue;
+            long couleur;
+            if (PyArg_ParseTuple(element, "sdddddddddl", &operation, &x, &y, &l, &h,
+                                 &rayon, &dx, &dy, &flou, &etendue, &couleur)) {
+                p.save();
+                QPainterPath dedans;
+                if (rayon > 0.0)
+                    dedans.addRoundedRect(QRectF(x, y, l, h), rayon, rayon);
+                else
+                    dedans.addRect(QRectF(x, y, l, h));
+                p.setClipPath(dedans, Qt::IntersectClip);
+
+                const int couches = std::max(1, std::min(16, int(std::ceil(flou + etendue))));
+                QColor teinte = couleurDepuisEntier(couleur);
+                const double part = teinte.alphaF() / double(couches + 1);
+                QPen stylo;
+                stylo.setColor(teinte);
+                p.setBrush(Qt::NoBrush);
+                for (int i = couches; i >= 0; --i) {
+                    const double epaisseur = (flou + etendue) * double(i + 1)
+                                             / double(couches + 1);
+                    QColor couche = teinte;
+                    couche.setAlphaF(part);
+                    stylo.setColor(couche);
+                    stylo.setWidthF(std::max(1.0, epaisseur));
+                    p.setPen(stylo);
+                    const double moitie = stylo.widthF() / 2.0;
+                    p.drawRoundedRect(
+                        QRectF(x + dx + moitie, y + dy + moitie,
+                               l - stylo.widthF(), h - stylo.widthF()),
+                        std::max(0.0, rayon - moitie), std::max(0.0, rayon - moitie));
+                }
+                p.restore();
+            }
+        } else if (!std::strcmp(operation, "polygone")) {
+            // Un chemin rempli, exactement. La toile rendait jusqu'ici sa boite
+            // englobante : juste pour un `rect()`, faux pour un camembert.
+            PyObject *points = nullptr;
+            long couleur;
+            if (PyArg_ParseTuple(element, "sOl", &operation, &points, &couleur)) {
+                QPolygonF forme;
+                const Py_ssize_t nb = PySequence_Size(points);
+                for (Py_ssize_t k = 0; k < nb; ++k) {
+                    PyObject *point = PySequence_GetItem(points, k);
+                    if (!point)
+                        break;
+                    double px = 0.0, py = 0.0;
+                    if (PyArg_ParseTuple(point, "dd", &px, &py))
+                        forme << QPointF(px, py);
+                    else
+                        PyErr_Clear();
+                    Py_DECREF(point);
+                }
+                if (forme.size() >= 3) {
+                    p.setPen(Qt::NoPen);
+                    p.setBrush(couleurDepuisEntier(couleur));
+                    p.drawPolygon(forme);
+                }
+            }
+        } else if (!std::strcmp(operation, "degrade_points")) {
+            // Le degrade d'une toile porte ses deux extremites, pas un angle :
+            // les ramener a un angle perdrait la longueur de la ligne, donc
+            // l'endroit exact ou chaque couleur tombe.
+            double x, y, l, h, x0, y0, x1, y1;
+            PyObject *etapes = nullptr;
+            if (PyArg_ParseTuple(element, "sddddddddO", &operation, &x, &y, &l, &h,
+                                 &x0, &y0, &x1, &y1, &etapes)) {
+                QLinearGradient pente(QPointF(x0, y0), QPointF(x1, y1));
+                remplitEtapes(pente, etapes);
+                p.setPen(Qt::NoPen);
+                p.setBrush(pente);
+                p.drawRect(QRectF(x, y, l, h));
+            }
+        } else if (!std::strcmp(operation, "degrade_cercle")) {
+            double x, y, l, h, cx, cy, rayon;
+            PyObject *etapes = nullptr;
+            if (PyArg_ParseTuple(element, "sdddddddO", &operation, &x, &y, &l, &h,
+                                 &cx, &cy, &rayon, &etapes)) {
+                QRadialGradient pente(QPointF(cx, cy), rayon > 0.0 ? rayon : 1.0);
+                remplitEtapes(pente, etapes);
+                p.setPen(Qt::NoPen);
+                p.setBrush(pente);
+                p.drawRect(QRectF(x, y, l, h));
+            }
+        } else if (!std::strcmp(operation, "contour")) {
+            double x, y, l, h, rayon, epaisseur;
+            long couleur;
+            if (PyArg_ParseTuple(element, "sddddddl", &operation, &x, &y, &l, &h,
+                                 &rayon, &epaisseur, &couleur)) {
+                QPen stylo(couleurDepuisEntier(couleur));
+                stylo.setWidthF(epaisseur);
+                p.setPen(stylo);
+                p.setBrush(Qt::NoBrush);
+                // Le trait est centre sur le chemin : le rentrer d'une
+                // demi-epaisseur le garde a l'interieur de la boite.
+                const double moitie = epaisseur / 2.0;
+                p.drawRoundedRect(
+                    QRectF(x + moitie, y + moitie, l - epaisseur, h - epaisseur),
+                    std::max(0.0, rayon - moitie), std::max(0.0, rayon - moitie));
+            }
+        } else if (!std::strcmp(operation, "transforme")) {
+            // `transform` et `opacity` valent pour la boite et sa descendance :
+            // l'etat du peintre est empile ici et rendu par « desenveloppe ».
+            double a, b, c, d, e, f, ox, oy;
+            if (PyArg_ParseTuple(element, "sdddddddd", &operation, &a, &b, &c, &d,
+                                 &e, &f, &ox, &oy)) {
+                p.save();
+                // L'origine par defaut de CSS est le centre de la boite : on s'y
+                // place, on transforme, on revient.
+                p.translate(ox, oy);
+                p.setWorldTransform(QTransform(a, b, c, d, e, f), true);
+                p.translate(-ox, -oy);
+                ++enveloppes;
+            }
+        } else if (!std::strcmp(operation, "opacite")) {
+            double alpha;
+            if (PyArg_ParseTuple(element, "sd", &operation, &alpha)) {
+                p.save();
+                p.setOpacity(p.opacity() * alpha);
+                ++enveloppes;
+            }
+        } else if (!std::strcmp(operation, "desenveloppe")) {
+            if (enveloppes > 0) {
+                p.restore();
+                --enveloppes;
+            }
         } else if (!std::strcmp(operation, "texte")) {
             double x, y, taille;
             long couleur;
             int gras, italique, fixe, souligne;
             const char *texte;
-            if (PyArg_ParseTuple(element, "sddsldpppp", &operation, &x, &y, &texte,
-                                 &couleur, &taille, &gras, &italique, &fixe, &souligne)) {
-                QFont f = fabriqueFonte(taille, gras, italique, fixe);
+            const char *famille = "";
+            if (PyArg_ParseTuple(element, "sddsldpppps", &operation, &x, &y, &texte,
+                                 &couleur, &taille, &gras, &italique, &fixe,
+                                 &souligne, &famille)) {
+                QFont f = fabriqueFonte(taille, gras, italique, fixe,
+                                        QString::fromUtf8(famille));
                 f.setUnderline(souligne);
                 p.setFont(f);
                 p.setPen(couleurDepuisEntier(couleur));
@@ -346,6 +572,17 @@ private:
                 p.setClipping(false);
             else
                 p.setClipRect(pileRognage.last());
+        } else if (!std::strcmp(operation, "imagepart")) {
+            // `object-fit: cover` ne montre qu'une portion de l'image. Sans le
+            // rectangle source, Qt l'etirerait a la boite — ce qui est
+            // exactement ce que la propriete sert a eviter.
+            double x, y, l, h, sx, sy, sl, sh;
+            int identifiant;
+            if (PyArg_ParseTuple(element, "sddddidddd", &operation, &x, &y, &l, &h,
+                                 &identifiant, &sx, &sy, &sl, &sh)) {
+                if (const QImage *image = imageParIdentifiant(identifiant))
+                    p.drawImage(QRectF(x, y, l, h), *image, QRectF(sx, sy, sl, sh));
+            }
         } else if (!std::strcmp(operation, "image")) {
             // L'image a ete decodee une fois par `bo.image` ; ici on ne fait que
             // la poser. Redecoder a chaque trame couterait un decodage PNG
@@ -362,8 +599,47 @@ private:
         Py_DECREF(tete);
     }
 
+public:
+    /// Peint une liste d'affichage dans une image et rend ses octets ARGB32.
+    ///
+    /// C'est ce qui donne enfin des pixels a `getImageData` : la toile
+    /// n'enregistrait que des operations, et lire ses pixels demandait de les
+    /// jouer pour de vrai. On reutilise le meme peintre que l'ecran, donc le
+    /// resultat est celui qu'on voit.
+    QImage rasterise(PyObject *liste, int largeur, int hauteur)
+    {
+        QImage image(largeur, hauteur, QImage::Format_ARGB32);
+        image.fill(Qt::transparent);
+        QPainter peintre(&image);
+        peintre.setRenderHint(QPainter::Antialiasing, true);
+        peintre.setRenderHint(QPainter::TextAntialiasing, true);
+        peintListe(peintre, liste);
+        return image;
+    }
+
+private:
+    /// Pose les arrets de couleur d'un degrade, lineaire ou radial.
+    void remplitEtapes(QGradient &pente, PyObject *etapes)
+    {
+        const Py_ssize_t nb = PySequence_Size(etapes);
+        for (Py_ssize_t k = 0; k < nb; ++k) {
+            PyObject *etape = PySequence_GetItem(etapes, k);
+            if (!etape)
+                break;
+            double position = 0.0;
+            long teinte = 0;
+            if (PyArg_ParseTuple(etape, "dl", &position, &teinte))
+                pente.setColorAt(position, couleurDepuisEntier(teinte));
+            else
+                PyErr_Clear();
+            Py_DECREF(etape);
+        }
+    }
+
     /// Zones de rognage en cours, de la plus exterieure a la plus interieure.
     QVector<QRectF> pileRognage;
+    /// Etats de peintre empiles par « transforme » et « opacite ».
+    int enveloppes = 0;
 };
 
 // --- Module Python `bo` -----------------------------------------------------
@@ -420,12 +696,36 @@ PyObject *bo_largeur_texte(PyObject *, PyObject *args)
     const char *texte;
     double taille;
     int gras = 0, fixe = 0;
-    if (!PyArg_ParseTuple(args, "sd|pp", &texte, &taille, &gras, &fixe))
+    const char *famille = "";
+    if (!PyArg_ParseTuple(args, "sd|pps", &texte, &taille, &gras, &fixe, &famille))
         return nullptr;
     if (!g_toile)
         return PyFloat_FromDouble(0.0);
     return PyFloat_FromDouble(
-        g_toile->largeurTexte(QString::fromUtf8(texte), taille, gras, fixe));
+        g_toile->largeurTexte(QString::fromUtf8(texte), taille, gras, fixe,
+                              QString::fromUtf8(famille)));
+}
+
+/// `bo.police(octets, famille, gras=False, italique=False) -> bool`
+///
+/// Range une police livree par la page (`@font-face`) dans la base de Qt, d'ou
+/// `QFont` la retrouvera par son nom. Le moteur a deja ouvert le conteneur
+/// WOFF : ce qui arrive ici est du TrueType ou de l'OpenType, les deux seuls
+/// formats que Qt lit.
+PyObject *bo_police(PyObject *, PyObject *args)
+{
+    Py_buffer donnees;
+    const char *famille = "";
+    int gras = 0, italique = 0;
+    if (!PyArg_ParseTuple(args, "y*s|pp", &donnees, &famille, &gras, &italique))
+        return nullptr;
+    const QByteArray octets(static_cast<const char *>(donnees.buf),
+                            int(donnees.len));
+    PyBuffer_Release(&donnees);
+    const int identifiant = QFontDatabase::addApplicationFontFromData(octets);
+    if (identifiant < 0)
+        Py_RETURN_FALSE;
+    Py_RETURN_TRUE;
 }
 
 PyObject *bo_hauteur_ligne(PyObject *, PyObject *args)
@@ -550,6 +850,29 @@ PyObject *bo_formats_images(PyObject *, PyObject *)
     return liste;
 }
 
+/// `bo.rasterise(operations, largeur, hauteur) -> octets ARGB32`
+///
+/// Joue une liste d'affichage dans une image hors ecran et rend ses pixels.
+/// `getImageData` en depend : la toile n'enregistre que des operations, et il
+/// faut les peindre pour de vrai avant d'en lire un seul pixel.
+PyObject *bo_rasterise(PyObject *, PyObject *args)
+{
+    PyObject *liste = nullptr;
+    int largeur = 0, hauteur = 0;
+    if (!PyArg_ParseTuple(args, "Oii", &liste, &largeur, &hauteur))
+        return nullptr;
+    if (!g_toile || largeur <= 0 || hauteur <= 0 || largeur > 8192 || hauteur > 8192) {
+        PyErr_SetString(PyExc_ValueError, "bo.rasterise : taille hors bornes");
+        return nullptr;
+    }
+    const QImage image = g_toile->rasterise(liste, largeur, hauteur);
+    if (image.isNull())
+        Py_RETURN_NONE;
+    return PyBytes_FromStringAndSize(
+        reinterpret_cast<const char *>(image.constBits()),
+        Py_ssize_t(image.sizeInBytes()));
+}
+
 PyMethodDef bo_methodes[] = {
     {"enregistrer", bo_enregistrer, METH_VARARGS,
      "enregistrer({'peindre': f, 'touche': f, 'clic': f, ...})"},
@@ -569,6 +892,10 @@ PyMethodDef bo_methodes[] = {
      "image(octets) -> (identifiant, largeur, hauteur), ou None si illisible"},
     {"image_brute", bo_image_brute, METH_VARARGS,
      "image_brute(octets_bgra, largeur, hauteur, identifiant=-1) -> (id, l, h)"},
+    {"police", bo_police, METH_VARARGS,
+     "police(octets, famille, gras=False, italique=False) -> bool"},
+    {"rasterise", bo_rasterise, METH_VARARGS,
+     "rasterise(operations, largeur, hauteur) -> octets ARGB32"},
     {"formats_images", bo_formats_images, METH_NOARGS,
      "formats_images() -> formats que l'hote sait decoder"},
     {nullptr, nullptr, 0, nullptr},

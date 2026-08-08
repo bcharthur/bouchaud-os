@@ -431,6 +431,10 @@ LIBC=glibc OUT=out-python-embed ./build-python.sh   # libpython pour embarquer
 # puis, sous l'OS :
 exec /bo-navigateur                # page d'accueil
 exec /bo-navigateur http://…       # une adresse directement
+
+# ou, depuis le bureau : menu Démarrer → « Navigateur », ou l'icône du même nom.
+# Le bureau quitte le mode graphique, rend l'écran au binaire, et le reprend
+# quand celui-ci se termine — deux surfaces ne partagent pas le framebuffer.
 ```
 
 Un binaire de 32 Mo qui contient Qt, CPython et le moteur. Il remplace Nautile,
@@ -466,7 +470,12 @@ libc ne cohabitent pas dans un même binaire.
 
 Analyse HTML tolérante (balises non fermées, imbrications interdites, attributs
 sans guillemets, entités) · sélecteurs CSS de balise, classe, identifiant,
-attribut, descendance et enfant direct, avec spécificité, cascade et héritage ·
+attribut (six opérateurs, drapeau `i`), descendance, enfant direct et **frères
+`+` / `~`**, avec spécificité, cascade et héritage · **pseudo-classes
+structurelles** (`:nth-child()` et sa famille, `:first-child`, `:empty`…) et
+**fonctionnelles** (`:is()`, `:where()`, `:not()`, `:has()`) — un seul moteur de
+sélecteurs sert la cascade et `querySelector`, donc les deux répondent la même
+chose ·
 feuille de l'agent utilisateur · modèle de boîte complet, `box-sizing`, bornes
 `min-*`/`max-*`, `calc()`, unités de fenêtre · règles `@media` évaluées contre
 la taille réelle de la fenêtre · **propriétés personnalisées** (`--x` / `var()`,
@@ -475,7 +484,27 @@ référence · pseudo-éléments `::before`/`::after`, `attr()` compris · mise 
 vraie fonte · **disposition flexible** (base, `grow`/`shrink`, `wrap`,
 `justify-content`, `align-items`, colonnes) · **grille** (`repeat()`,
 `minmax()`, `fr`, `gap`, placement automatique et explicite) ·
-`position: absolute`/`fixed` avec `top`/`right`/`bottom`/`left` ·
+`position: absolute`/`fixed`/**`sticky`** avec `top`/`right`/`bottom`/`left` ·
+**`order`** en flexbox et **zones nommées** de grille (`grid-template-areas`) ·
+**`transform`** (`translate`, `scale`, `rotate`, `skew`, `matrix`) appliqué à la
+peinture, zones de liens comprises · **coins arrondis**, **ombres portées et
+intérieures**, **dégradés linéaires et radiaux**, **opacité**, et **bords par
+côté** — le `border-bottom: 1px solid #eee` qui sépare la moitié des pages du
+web · **`object-fit`** et **`aspect-ratio`** · `@layer`, `@supports` et
+`@container` traversés plutôt que sautés ·
+**`float` et `clear`** — placement côte à côte, passage à la ligne, contenu qui
+se serre, dégagement · **tableaux** : colonnes mesurées sur la plus large de
+leurs cellules, `colspan`, rangée anonyme pour une cellule sans ligne ·
+**`display: inline-block`** peint enfin sa boîte, et les **champs de
+formulaire** avec · **`@font-face`** : la police de la page est téléchargée,
+son conteneur **WOFF ouvert** (`moteur/police.py`) et remise à l'hôte ·
+**pseudo-classes d'état réelles** — `:hover`, `:active`, `:focus` suivent le
+pointeur, et la lignée entière est survolée, ce qui tient un menu déroulant
+ouvert · **`@keyframes` et `animation`**, **`transition`**, avec les rythmes
+`ease*`, `cubic-bezier()` et `steps()` — longueurs, couleurs et transformations
+interpolées · **DOM d'ombre isolé** : les règles de la page s'arrêtent à la
+frontière, `:host` la traverse vers l'hôte, et les `<slot>` distribuent le
+contenu clair, par nom s'il y en a ·
 `overflow: hidden` réellement rogné · listes, texte préformaté · **JavaScript**
 (QuickJS : DOM, événements à trois phases, minuteries, promesses, XHR/fetch) ·
 `getComputedStyle` **résolu** — cascade, héritage et style en ligne réunis ·
@@ -492,18 +521,32 @@ liens cliquables, défilement.
 
 ### Ce qu'il ne sait pas faire
 
-**Animations et transformations** — `transition`, `animation`, `transform` sont
-ignorés ; la page s'affiche à son état final, ce qui est presque toujours l'état
-utile. **Lignes et zones nommées de grille** — `grid-template-areas` retombe sur le placement automatique.
-**`order` en flexbox** — les articles restent dans l'ordre du source.
-**Isolement du DOM d'ombre** — la racine d'ombre porte et affiche son contenu,
-mais les sélecteurs de la page l'atteignent, et `:host` comme `<slot>` ne sont
-pas interprétés. **Pixels de canvas** — `getImageData`, les dégradés et les
-ombres demanderaient un vrai tampon, que l'hôte ne prête pas ; le reste du
-contexte 2D est enregistré et peint. **Chargement parallèle des modules** — le
-graphe d'`import` est rapporté module par module, comme l'exige le chargeur
-synchrone de QuickJS ; un navigateur les téléchargerait de front. Ce qui manque
-est listé, avec le reste, dans la feuille de route (`docs/ROADMAP.md`).
+**Transformations en trois dimensions** — `rotateX`, `perspective`, `matrix3d`
+sont laissés de côté plutôt qu'aplatis à tort.
+**Dégradés coniques** — `linear-gradient` et `radial-gradient` sont peints,
+`conic-gradient` non.
+**Interpolation exacte des rotations** — une `transition` sur un `transform`
+mélange les matrices, ce qui est exact pour les translations et les homothéties
+mais passe par l'aplatissement pour un demi-tour.
+**Motifs et composition de canvas** — `createPattern` et
+`globalCompositeOperation` ne sont pas rendus ; tout le reste du contexte 2D
+l'est, pixels compris. **Détourage par forme** — `clip()` suit la boîte du
+chemin, ce qui est exact après un `rect()` et approximatif au-delà.
+**Polices en WOFF2** — le conteneur WOFF est ouvert (zlib), le WOFF2 non : il
+demande brotli et une transformation des tables `glyf`/`loca`. Une police
+d'icônes livrée en WOFF2 seul sort donc en carrés, et le journal le dit.
+**Coupes par écriture** — un site qui livre une police par plage Unicode sous
+la même famille ne voit retenue que celle qui écrit du latin, faute de choisir
+la coupe caractère par caractère.
+**Texte qui épouse un flottant** — le contenu se serre à côté d'un `float` en
+bloc, pas ligne à ligne autour de son contour. **`rowspan`** — une cellule qui
+descend sur plusieurs lignes occupe la sienne.
+**Chargement parallèle des modules** — le graphe d'`import` est rapporté module
+par module, comme l'exige le chargeur synchrone de QuickJS ; un navigateur les
+téléchargerait de front.
+**Lignes nommées de grille**, **placement dense**, et
+**`animation-composition`**. Ce qui manque est listé, avec le reste, dans la
+feuille de route (`docs/ROADMAP.md`).
 
 ### Ce qui le rend rapide
 
@@ -678,25 +721,27 @@ bien dans son propre fil et peut lire l'état de la fenêtre.
 
 ### Ce qui ne marche pas
 
-- **`evaluate_js` et `window.pywebview.api`** — les deux reposent sur
-  l'exécution de JavaScript dans la page, que le moteur natif ne fait pas. Le
-  moteur lève une exception explicite plutôt que de rendre `None` en silence.
+- **`evaluate_js` et `window.pywebview.api`** — le moteur exécute bien le
+  JavaScript de la page (QuickJS, §12), mais l'adaptateur pywebview ne branche
+  pas encore l'évaluation à la demande depuis Python. Il lève une exception
+  explicite plutôt que de rendre `None` en silence.
 - **Les applications servant des fichiers locaux** (`create_window(url='index.html')`)
   — pywebview les sert par un serveur HTTP interne, qui a besoin de `listen` et
   `accept`. Le noyau ne les implémente pas encore ; c'est le prochain manque à
   combler pour cette pile.
-- **JavaScript : le langage, pas tout le navigateur.** QuickJS exécute
+- **JavaScript : le langage, et une bonne part du navigateur.** QuickJS exécute
   l'ECMAScript en entier, et `moteur/js.py` expose le DOM, les événements, les
-  minuteries, `XMLHttpRequest` et `fetch`. Ce qui n'y est pas : `canvas`, WebGL,
-  Web Components et Shadow DOM, `IntersectionObserver`, et le style calculé au
-  sens strict — `getComputedStyle` rend le style en ligne. Les grandes
-  applications web, qui reposent sur ces API, restent hors de portée.
+  minuteries, `XMLHttpRequest`, `fetch`, le canvas 2D — pixels, dégradés et
+  ombres compris —, les Web Components avec un DOM d'ombre réellement isolé, les
+  trois observateurs et un `getComputedStyle` résolu ; la liste exacte est au
+  §12, et 532 vérifications la tiennent. Ce qui reste hors de portée : WebGL, le
+  chiffrement du contenu, et les applications qui compilent leur interface.
 - **Vidéo et audio : la chaîne existe, les sites de lecture non.** Le son sort
   par le pilote AC'97 (`/dev/dsp`), libavcodec décode H.264, VP9, AAC et Opus, et
   `<video>`, `<audio>`, `MediaSource` et `SourceBuffer` sont implémentés. Ce qui
-  manque à un site de lecture réel est ailleurs : `canvas` et Web Components pour
-  son interface, le chiffrement (EME/Widevine) pour son catalogue, et le débit
-  qu'une machine émulée sans accélération matérielle ne tient pas en 1080p.
+  manque à un site de lecture réel est ailleurs : le chiffrement (EME/Widevine)
+  pour son catalogue, et le débit qu'une machine émulée sans accélération
+  matérielle ne tient pas en 1080p.
 - **Plusieurs fenêtres à l'écran en même temps** — le framebuffer n'a pas de
   gestionnaire de fenêtres. Les fenêtres suivantes sont créées et pilotables,
   mais s'affichent l'une après l'autre dans la même surface.

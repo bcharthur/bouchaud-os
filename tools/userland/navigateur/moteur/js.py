@@ -50,137 +50,17 @@ _SANS_FERMETURE = html.VIDES
 # `querySelector`, ca ne suffit pas — `[data-role="menu"]` doit designer ce
 # qu'il designe, sinon un script recupere l'arbre entier et se trompe partout.
 
-_MAILLON = re.compile(r"""
-    (?P<balise>[*a-zA-Z][a-zA-Z0-9_-]*)?
-    (?P<reste>(?:
-        \#[A-Za-z0-9_-]+
-      | \.[A-Za-z0-9_-]+
-      | \[[^\]]*\]
-      | ::?[a-zA-Z-]+(?:\([^)]*\))?
-    )*)
-""", re.X)
-
-_ATTRIBUT = re.compile(r"""\[\s*([A-Za-z_:][-A-Za-z0-9_:.]*)\s*
-                           (?:([~^$*|]?=)\s*("[^"]*"|'[^']*'|[^\]]*?))?\s*\]""", re.X)
-
-
-class _Simple:
-    """Un maillon : balise, identifiant, classes, attributs."""
-
-    __slots__ = ("balise", "identifiant", "classes", "attributs")
-
-    def __init__(self, texte):
-        self.balise = None
-        self.identifiant = None
-        self.classes = []
-        self.attributs = []
-
-        m = _MAILLON.match(texte)
-        if m:
-            balise = m.group("balise")
-            if balise and balise != "*":
-                self.balise = balise.lower()
-            reste = m.group("reste") or ""
-        else:
-            reste = texte
-
-        for m in _ATTRIBUT.finditer(reste):
-            nom, operateur, valeur = m.group(1).lower(), m.group(2), m.group(3)
-            if valeur and valeur[:1] in "\"'":
-                valeur = valeur[1:-1]
-            self.attributs.append((nom, operateur, valeur))
-        reste = _ATTRIBUT.sub("", reste)
-        # Les pseudo-classes sont ignorees, comme dans la cascade : `:hover`
-        # demanderait un etat d'interaction que le moteur ne tient pas.
-        reste = re.sub(r"::?[a-zA-Z-]+(\([^)]*\))?", "", reste)
-        for morceau in re.findall(r"[.#][A-Za-z0-9_-]+", reste):
-            if morceau[0] == ".":
-                self.classes.append(morceau[1:])
-            else:
-                self.identifiant = morceau[1:]
-
-    def correspond(self, element):
-        if self.balise and element.balise != self.balise:
-            return False
-        if self.identifiant and element.attributs.get("id") != self.identifiant:
-            return False
-        if self.classes:
-            presentes = set(element.attributs.get("class", "").split())
-            if not all(c in presentes for c in self.classes):
-                return False
-        for nom, operateur, valeur in self.attributs:
-            if nom not in element.attributs:
-                return False
-            if operateur is None:
-                continue
-            presente = element.attributs[nom]
-            if operateur == "=" and presente != valeur:
-                return False
-            if operateur == "^=" and not presente.startswith(valeur):
-                return False
-            if operateur == "$=" and not presente.endswith(valeur):
-                return False
-            if operateur == "*=" and valeur not in presente:
-                return False
-            if operateur == "~=" and valeur not in presente.split():
-                return False
-            if operateur == "|=" and presente != valeur \
-                    and not presente.startswith(valeur + "-"):
-                return False
-        return True
-
-
-class _Selecteur:
-    """Une suite de maillons, avec la distinction descendant / enfant direct.
-
-    Chaque etape porte le lien qui la rattache a la **precedente** : `div > p`
-    donne `[(div, descendant), (p, enfant)]`. C'est ce qui permet de verifier
-    de droite a gauche — le sens naturel, puisqu'on part de l'element candidat.
-    """
-
-    __slots__ = ("etapes",)
-
-    def __init__(self, texte):
-        # `+` et `~` (freres) sont ramenes a la descendance : approximatif, mais
-        # plus proche du resultat attendu que de rejeter la regle.
-        texte = re.sub(r"\s*[+~]\s*", " ", texte.strip())
-        self.etapes = []
-        enfant_direct = False
-        for morceau in re.split(r"\s*(>)\s*|\s+", texte):
-            if not morceau:
-                continue
-            if morceau == ">":
-                enfant_direct = True
-                continue
-            self.etapes.append((_Simple(morceau), enfant_direct))
-            enfant_direct = False
-
-    def correspond(self, element, parent_de):
-        """`parent_de` rend le parent d'un element (ou None)."""
-        if not self.etapes:
-            return False
-        if not self.etapes[-1][0].correspond(element):
-            return False
-
-        courant = element
-        for index in range(len(self.etapes) - 2, -1, -1):
-            maillon = self.etapes[index][0]
-            # Le lien a verifier est celui porte par l'etape de droite.
-            direct = self.etapes[index + 1][1]
-            courant = parent_de(courant)
-            if direct:
-                if courant is None or not maillon.correspond(courant):
-                    return False
-                continue
-            while courant is not None and not maillon.correspond(courant):
-                courant = parent_de(courant)
-            if courant is None:
-                return False
-        return True
-
-
 def _groupes(selecteur):
-    return [_Selecteur(m) for m in selecteur.split(",") if m.strip()]
+    """Les selecteurs d'une liste, analyses par le moteur de la cascade.
+
+    `querySelector` et la cascade partageaient un probleme et deux solutions :
+    chacune avait son analyseur, ses combinateurs reconnus et ses
+    pseudo-classes ignorees. Un script pouvait donc ne pas trouver un element
+    que la feuille de style venait de peindre. Il n'y a plus qu'un moteur —
+    celui de [`css`] — et `:nth-child`, `:not()`, `:is()`, `:has()`, `+` et `~`
+    valent des deux cotes.
+    """
+    return css.groupes(selecteur)
 
 
 # --- Serialisation ------------------------------------------------------------
@@ -589,12 +469,11 @@ class Contexte:
         groupes = _groupes(selecteur)
         if not groupes:
             return [] if tous else None
-        parent_de = lambda e: e.parent  # noqa: E731 — lisible tel quel
         trouves = []
         for nœud in racine.parcours():
             if not isinstance(nœud, html.Element):
                 continue
-            if any(g.correspond(nœud, parent_de) for g in groupes):
+            if css.correspond_un(groupes, nœud):
                 if not tous:
                     return self._identifiant(nœud)
                 trouves.append(self._identifiant(nœud))
@@ -604,8 +483,7 @@ class Contexte:
         element = self._element(identifiant)
         if not element:
             return False
-        parent_de = lambda e: e.parent  # noqa: E731
-        return any(g.correspond(element, parent_de) for g in _groupes(selecteur))
+        return css.correspond_un(_groupes(selecteur), element)
 
     def _op_parBalise(self, identifiant, nom):
         racine = self._racine_de(identifiant)
@@ -776,6 +654,53 @@ class Contexte:
     def toile(self, element):
         """Les operations dessinees sur cette toile, ou `None`."""
         return self._toiles.get(element)
+
+    def _op_rasterise(self, operations, largeur, hauteur):
+        """Peint des operations de toile hors ecran et rend ses pixels RGBA.
+
+        C'est ce qui donne enfin des pixels a `getImageData` : le contexte 2D
+        n'enregistre que des operations, et il faut les jouer pour de vrai avant
+        d'en lire un seul. Qt range ses pixels en BGRA ; la norme veut du RGBA,
+        d'ou l'echange des deux canaux extremes.
+        """
+        rasterise = getattr(bo, "rasterise", None)
+        if rasterise is None:
+            return None
+        traduites = []
+        for operation in operations or []:
+            traduite = _operation_toile(operation)
+            if traduite is not None:
+                traduites.append(traduite)
+        try:
+            octets = rasterise(traduites, int(largeur), int(hauteur))
+        except Exception as e:  # noqa: BLE001
+            self.journal("warn", "rasterise : %s" % e)
+            return None
+        if not octets:
+            return None
+        pixels = bytearray(octets)
+        pixels[0::4], pixels[2::4] = pixels[2::4], pixels[0::4]
+        return list(pixels)
+
+    def _op_imageBrute(self, pixels, largeur, hauteur):
+        """Range des pixels RGBA dans le cache d'images et rend leur identifiant.
+
+        Le chemin de retour de `putImageData` : l'hote attend du BGRA, comme
+        `rasterise` en rend.
+        """
+        brute = getattr(bo, "image_brute", None)
+        if brute is None:
+            return None
+        octets = bytearray(int(v) & 0xFF for v in pixels)
+        if len(octets) < int(largeur) * int(hauteur) * 4:
+            return None
+        octets[0::4], octets[2::4] = octets[2::4], octets[0::4]
+        try:
+            resultat = brute(bytes(octets), int(largeur), int(hauteur))
+        except Exception as e:  # noqa: BLE001
+            self.journal("warn", "image_brute : %s" % e)
+            return None
+        return int(resultat[0]) if resultat else None
 
     def _op_defilement(self):
         """Position de defilement de la page, en pixels."""
@@ -1060,7 +985,11 @@ class Contexte:
     def _telecharge_script(self, source):
         absolue = urllib.parse.urljoin(self.document.url, source)
         try:
-            reponse = reseau.charge(absolue)
+            # `brut` est indispensable : sans lui, le reseau enrobe tout ce qui
+            # n'est pas du HTML dans un `<pre>` et en echappe les `&` et les
+            # `<`. Chaque `<script src=…>` arrivait donc au moteur JavaScript
+            # commencant par un chevron, et mourait sur le premier jeton.
+            reponse = reseau.charge(absolue, brut=True)
         except Exception as e:  # noqa: BLE001
             self.journal("warn", "script %s : %s" % (absolue, e))
             return ""
@@ -1128,10 +1057,55 @@ def _operation_toile(operation):
             if couleur is None:
                 couleur = 0xFF000000
             return ("texte", float(x), float(y), str(texte), couleur,
-                    float(taille), bool(gras), bool(italique), bool(fixe), False)
+                    float(taille), bool(gras), bool(italique), bool(fixe), False,
+                    "")
         if genre == "image":
             _, x, y, l, h, identifiant = operation
             return ("image", float(x), float(y), float(l), float(h), int(identifiant))
+        if genre == "polygone":
+            _, points, teinte = operation
+            couleur = css.couleur(str(teinte))
+            if couleur is None or len(points) < 3:
+                return None
+            return ("polygone",
+                    tuple((float(p[0]), float(p[1])) for p in points), couleur)
+        if genre == "degrade_points":
+            _, x, y, l, h, x0, y0, x1, y1, arrets = operation
+            etapes = _arrets(arrets)
+            if etapes is None:
+                return None
+            return ("degrade_points", float(x), float(y), float(l), float(h),
+                    float(x0), float(y0), float(x1), float(y1), etapes)
+        if genre == "degrade_cercle":
+            _, x, y, l, h, cx, cy, rayon, arrets = operation
+            etapes = _arrets(arrets)
+            if etapes is None:
+                return None
+            return ("degrade_cercle", float(x), float(y), float(l), float(h),
+                    float(cx), float(cy), float(rayon), etapes)
+        if genre == "ombre":
+            _, x, y, l, h, rayon, flou, teinte = operation
+            couleur = css.couleur(str(teinte))
+            if couleur is None:
+                return None
+            return ("ombre", float(x), float(y), float(l), float(h),
+                    float(rayon), float(flou), couleur)
+        if genre == "clip":
+            _, x, y, l, h = operation
+            return ("clip", float(x), float(y), float(l), float(h))
+        if genre == "declip":
+            return ("declip",)
     except (TypeError, ValueError, IndexError):
         return None
     return None
+
+
+def _arrets(bruts):
+    """Les arrets d'un degrade de toile, couleurs traduites. `None` si moins de deux."""
+    etapes = []
+    for position, teinte in bruts or []:
+        couleur = css.couleur(str(teinte))
+        if couleur is None:
+            continue
+        etapes.append((max(0.0, min(1.0, float(position))), couleur))
+    return tuple(etapes) if len(etapes) >= 2 else None

@@ -558,14 +558,26 @@ class Navigateur:
     def survole(self, x, y):
         document = self.onglet.document
         if not document or y < HAUTEUR_CHROME:
+            change = document.survole(-1, -1) if document else False
             if self.survol:
                 self.survol = None
+                change = True
+            if change:
                 bo.redessiner()
             return
-        lien = document.lien_a(x, y - HAUTEUR_CHROME + self.onglet.defilement)
+        page_y = y - HAUTEUR_CHROME + self.onglet.defilement
+
+        # `:hover` : la page se restyle sous le pointeur. Le document ne
+        # recalcule que si sa feuille parle d'interaction, donc un mouvement
+        # ordinaire ne coute qu'un test de position.
+        change = document.survole(x, page_y)
+
+        lien = document.lien_a(x, page_y)
         nouveau = ("→ " + lien) if lien else None
         if nouveau != self.survol:
             self.survol = nouveau
+            change = True
+        if change:
             bo.redessiner()
 
     def molette(self, cran):

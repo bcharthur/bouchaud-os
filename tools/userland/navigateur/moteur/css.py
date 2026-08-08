@@ -10,11 +10,17 @@ Les proprietes personnalisees (`--fond`) et `var()` en font partie : c'est sur
 elles que repose la mise en forme de tout site recent, et les ignorer n'affichait
 pas une page approximative mais une page sans couleurs ni espacements.
 
-Ce qui manque (animations, transformations) est ignore proprement plutot que mal
-interprete : une declaration inconnue est laissee de cote, elle ne fait pas
-echouer la regle qui la contient.
+Les coins arrondis, les ombres portees, les degrades lineaires, les
+transformations et l'opacite en font partie aussi : ce sont eux qui separent
+l'allure d'une page d'aujourd'hui de celle d'une page d'il y a vingt ans.
+
+Ce qui manque (animations, degrades radiaux, transformations en trois
+dimensions) est ignore proprement plutot que mal interprete : une declaration
+inconnue est laissee de cote, elle ne fait pas echouer la regle qui la
+contient.
 """
 
+import math
 import re
 
 # --- Couleurs ----------------------------------------------------------------
@@ -205,11 +211,168 @@ def _calcule(expression, reference, taille_police):
 
 
 # --- Selecteurs --------------------------------------------------------------
+#
+# Un seul moteur sert la cascade et `querySelector`. C'etaient deux
+# implementations paralleles, avec deux jeux de limites differents : une regle
+# pouvait styler un element que `document.querySelectorAll` ne trouvait pas.
+# Elles repondent maintenant la meme chose, et tout ce qui est ajoute ici
+# profite aux deux.
+#
+# Ce qui est reconnu : les combinateurs ` `, `>`, `+`, `~` ; les selecteurs
+# d'attribut avec leurs six operateurs et le drapeau d'insensibilite ; les
+# pseudo-classes structurelles (`nth-child` et sa famille, `first-child`,
+# `empty`, `root`…) ; les pseudo-classes fonctionnelles `:is()`, `:where()`,
+# `:not()` et `:has()`.
+
+# Un nom de classe ou d'identifiant. Les echappements comptent : les cadres CSS
+# les plus repandus produisent des classes comme `md\:flex` ou `w-1\/2`, et un
+# nom coupe au `\` ne designe plus rien.
+_NOM = r"(?:\\.|[^\\.#:\[\]()>+~,\s])+"
+
+# Les morceaux d'un selecteur compose (`a.b#c[d]:e`). Les pseudo-classes
+# passent avant les classes : sans cela `.a:not(.b)` se lirait comme deux
+# classes, dont l'une nommee `not(`.
+_JETON = re.compile(r"""
+      ::?[a-zA-Z-]+ (?: \( (?: [^()] | \( [^()]* \) )* \) )?
+    | \[ [^\]]* \]
+    | \.""" + _NOM + r"""
+    | \#""" + _NOM + r"""
+    | \*
+    | [A-Za-z][A-Za-z0-9_-]*
+""", re.X)
+
+_ATTRIBUT = re.compile(r"""\[\s*([A-Za-z_:][-A-Za-z0-9_:.]*)\s*
+                           (?:([~^$*|]?=)\s*("[^"]*"|'[^']*'|[^\]\s]*))?\s*
+                           ([iIsS])?\s*\]""", re.X)
+
+# Pseudo-classes d'etat que le moteur **tient** : le navigateur lui dit quels
+# elements sont sous le pointeur, lesquels ont le foyer, lequel est enfonce.
+_ETATS_TENUS = {"hover", "active", "focus", "focus-visible", "focus-within"}
+
+# Pseudo-classes d'etat qu'il ne tient pas. Au repos, elles ne designent rien —
+# et c'est la reponse juste : les ignorer, ce que faisait le moteur, appliquait
+# en permanence le style de survol.
+_ETATS_ABSENTS = {
+    "target", "target-within", "visited", "user-invalid", "user-valid",
+    "autofill", "placeholder-shown", "default", "indeterminate",
+}
+
+_ETATS = _ETATS_TENUS | _ETATS_ABSENTS
+
+# --- Etat d'interaction -------------------------------------------------------
+#
+# Les elements sous le pointeur, avec leurs ancetres : `:hover` designe toute la
+# lignee, c'est ce qui permet a un menu de rester ouvert quand la souris passe
+# de son bouton a sa liste. Range par identite (`id()`), parce qu'un nœud n'est
+# pas hachable de facon stable et que c'est bien l'objet qu'on vise.
+_SURVOLES = set()
+_ACTIFS = set()
+_FOYER = set()
+
+
+def pose_interaction(survoles=(), actifs=(), foyer=()):
+    """Declare les elements survoles, enfonces et au foyer, eux et leurs ancetres."""
+    global _SURVOLES, _ACTIFS, _FOYER
+    _SURVOLES = {id(e) for e in survoles}
+    _ACTIFS = {id(e) for e in actifs}
+    _FOYER = {id(e) for e in foyer}
+
+
+def interaction():
+    """Les trois ensembles courants, pour comparaison."""
+    return (frozenset(_SURVOLES), frozenset(_ACTIFS), frozenset(_FOYER))
+
+
+def lignee(element):
+    """L'element et tous ses ancetres, du plus proche au plus lointain."""
+    chaine = []
+    courant = element
+    while courant is not None and _est_element(courant):
+        chaine.append(courant)
+        courant = _parent(courant)
+    return chaine
+
+# Pseudo-elements engendres par la mise en page.
+_ENGENDRES = {"before", "after"}
+
+_STRUCTURELLES = {
+    "root", "empty", "first-child", "last-child", "only-child",
+    "first-of-type", "last-of-type", "only-of-type", "checked", "disabled",
+    "enabled", "required", "optional", "read-only", "read-write",
+    "link", "any-link", "scope", "host",
+}
+
+_FONCTIONS_NTH = {
+    "nth-child", "nth-last-child", "nth-of-type", "nth-last-of-type",
+}
+
+
+def _desechappe(nom):
+    return re.sub(r"\\(.)", r"\1", nom)
+
+
+def _est_element(nœud):
+    """Un nœud d'element se reconnait a sa balise ; un nœud de texte n'en a pas.
+
+    Duck-typing plutot qu'un `isinstance` : `css` ne doit pas dependre de
+    `html`, sans quoi les deux modules ne peuvent plus s'importer l'un l'autre.
+    """
+    return getattr(nœud, "balise", None) is not None
+
+
+def _parent(element):
+    parent = getattr(element, "parent", None)
+    return parent if parent is not None and _est_element(parent) else None
+
+
+def _fratrie(element):
+    parent = _parent(element)
+    if parent is None:
+        return [element]
+    return [n for n in parent.enfants if _est_element(n)]
+
+
+def _descendants(element):
+    pile = [n for n in getattr(element, "enfants", ()) if _est_element(n)]
+    while pile:
+        nœud = pile.pop()
+        yield nœud
+        pile.extend(n for n in nœud.enfants if _est_element(n))
+
+
+def _analyse_nth(argument):
+    """`2n+1`, `odd`, `-n+3`, `4`… en couple `(a, b)` tel que `an + b`."""
+    texte = argument.strip().lower().replace(" ", "")
+    if texte == "odd":
+        return 2, 1
+    if texte == "even":
+        return 2, 0
+    m = re.fullmatch(r"([+-]?\d*)n([+-]\d+)?", texte)
+    if m:
+        tete = m.group(1)
+        a = 1 if tete in ("", "+") else -1 if tete == "-" else int(tete)
+        return a, int(m.group(2) or 0)
+    try:
+        return 0, int(texte)
+    except ValueError:
+        # Un argument incomprehensible ne doit designer personne, plutot que
+        # tout le monde.
+        return 0, 0
+
+
+def _rang_verifie(a, b, rang):
+    """`rang` est compte a partir de 1, comme dans la norme."""
+    if a == 0:
+        return rang == b
+    reste = rang - b
+    return reste % a == 0 and reste // a >= 0
+
 
 class Simple:
-    """Un maillon de selecteur : balise, classes, identifiant, pseudo-element."""
+    """Un selecteur compose : balise, classes, identifiant, attributs, pseudos."""
 
-    __slots__ = ("balise", "classes", "identifiant", "pseudo")
+    __slots__ = ("balise", "classes", "identifiant", "pseudo", "attributs",
+                 "structurelles", "nth", "groupes", "etats", "jamais", "_poids")
 
     def __init__(self, texte):
         self.balise = None
@@ -218,33 +381,104 @@ class Simple:
         # `::before` et `::after` designent une boite qui n'existe pas dans le
         # document : il faut donc les retenir, la mise en page les fabriquera.
         # C'est ainsi que la moitie des sites posent leurs icones et leurs
-        # separateurs — les effacer, comme on le faisait, revenait a jeter cette
-        # moitie-la.
+        # separateurs.
         self.pseudo = None
-        trouve = re.search(r"::?(before|after)\b", texte)
-        if trouve:
-            self.pseudo = trouve.group(1)
-        # `:root` designe l'element racine, donc `<html>` en HTML. Le laisser
-        # tomber avec les autres pseudo-classes en faisait un selecteur
-        # universel : les variables qu'une page y pose etaient alors reposees
-        # sur **chaque** element, ou elles ecrasaient celles qu'un theme local
-        # avait redefinies plus haut dans l'arbre.
-        texte = re.sub(r":root\b", "html", texte)
-        # Les pseudo-classes, elles, restent ignorees : `a:hover` se comporte
-        # comme `a`. Les prendre au pied de la lettre demanderait un etat
-        # d'interaction que le moteur ne tient pas ; les rejeter perdrait la
-        # regle entiere.
-        texte = re.sub(r"::?[a-zA-Z-]+(\([^)]*\))?", "", texte)
-        texte = re.sub(r"\[[^\]]*\]", "", texte)
-        for morceau in re.findall(r"[.#]?[^.#]+", texte):
-            if morceau.startswith("."):
-                self.classes.append(morceau[1:])
-            elif morceau.startswith("#"):
-                self.identifiant = morceau[1:]
-            elif morceau != "*":
-                self.balise = morceau.lower()
+        self.attributs = []
+        self.structurelles = []
+        self.nth = []
+        self.groupes = []
+        self.etats = []
+        # Vrai quand le maillon ne peut designer personne au repos : une
+        # pseudo-classe d'etat, ou un pseudo-element que le moteur ne peint pas.
+        self.jamais = False
+
+        a = b = c = 0
+        for jeton in _JETON.findall(texte):
+            if jeton.startswith("["):
+                m = _ATTRIBUT.match(jeton)
+                if m:
+                    valeur = m.group(3)
+                    if valeur and valeur[:1] in "\"'":
+                        valeur = valeur[1:-1]
+                    insensible = (m.group(4) or "").lower() == "i"
+                    self.attributs.append(
+                        (m.group(1).lower(), m.group(2), valeur, insensible))
+                    b += 1
+                continue
+            if jeton.startswith(":"):
+                pa, pb, pc = self._pseudo(jeton)
+                a, b, c = a + pa, b + pb, c + pc
+                continue
+            if jeton.startswith("."):
+                self.classes.append(_desechappe(jeton[1:]))
+                b += 1
+            elif jeton.startswith("#"):
+                self.identifiant = _desechappe(jeton[1:])
+                a += 1
+            elif jeton != "*":
+                self.balise = jeton.lower()
+                c += 1
+        self._poids = (a, b, c)
+
+    def _pseudo(self, jeton):
+        """Range une pseudo-classe et rend ce qu'elle pese."""
+        double = jeton.startswith("::")
+        corps = jeton.lstrip(":")
+        argument = None
+        ouvrante = corps.find("(")
+        if ouvrante >= 0:
+            argument = corps[ouvrante + 1:-1]
+            corps = corps[:ouvrante]
+        corps = corps.lower()
+
+        if corps in _ENGENDRES:
+            self.pseudo = corps
+            return 0, 0, 1
+        if double:
+            # `::placeholder`, `::selection`, `::-webkit-…` visent une boite que
+            # le moteur ne peint pas. Les ignorer reportait leur mise en forme
+            # sur l'element lui-meme — la couleur du texte d'invite devenait
+            # celle du champ.
+            self.jamais = True
+            return 0, 0, 1
+        if corps == "root":
+            self.structurelles.append("root")
+            return 0, 1, 0
+        if corps in _ETATS_TENUS:
+            self.etats.append(corps)
+            return 0, 1, 0
+        if corps in _ETATS_ABSENTS:
+            self.jamais = True
+            return 0, 1, 0
+        if corps == "host" and argument is not None:
+            # `:host(.sombre)` vise l'hote a condition qu'il corresponde ; la
+            # portee, elle, verifie que c'est bien *cet* hote.
+            self.groupes.append(("is", groupes(argument)))
+            self.structurelles.append("host")
+            return 0, 1, 0
+        if corps in ("is", "where", "not", "has") and argument is not None:
+            sous = groupes(argument)
+            self.groupes.append((corps, sous))
+            if corps == "where" or not sous:
+                return 0, 0, 0
+            pire = max(s.specificite for s in sous)
+            return pire
+        if corps in _FONCTIONS_NTH and argument is not None:
+            # `nth-child(2n of .x)` n'est pas reconnu : seul le rang l'est.
+            self.nth.append((corps, _analyse_nth(argument.split(" of ")[0])))
+            return 0, 1, 0
+        if corps in _STRUCTURELLES:
+            self.structurelles.append(corps)
+            return 0, 1, 0
+        # Une pseudo-classe inconnue est ignoree plutot que rejetee : elle ne
+        # doit pas emporter la regle qui la contient.
+        return 0, 1, 0
+
+    # -- Correspondance --------------------------------------------------------
 
     def correspond(self, element):
+        if self.jamais:
+            return False
         if self.balise and element.balise != self.balise:
             return False
         if self.identifiant and element.identifiant != self.identifiant:
@@ -253,16 +487,144 @@ class Simple:
             presentes = set(element.classes)
             if not all(c in presentes for c in self.classes):
                 return False
+        for nom, operateur, valeur, insensible in self.attributs:
+            if not self._attribut(element, nom, operateur, valeur, insensible):
+                return False
+        for nom in self.etats:
+            if not self._etat(element, nom):
+                return False
+        for nom in self.structurelles:
+            if not self._structurelle(element, nom):
+                return False
+        for fonction, (a, b) in self.nth:
+            if not self._nth(element, fonction, a, b):
+                return False
+        for genre, sous in self.groupes:
+            if not self._groupe(element, genre, sous):
+                return False
         return True
 
+    def _attribut(self, element, nom, operateur, valeur, insensible):
+        if nom not in element.attributs:
+            return False
+        if operateur is None:
+            return True
+        presente = element.attributs[nom]
+        if insensible:
+            presente, valeur = presente.lower(), (valeur or "").lower()
+        if operateur == "=":
+            return presente == valeur
+        if operateur == "^=":
+            return bool(valeur) and presente.startswith(valeur)
+        if operateur == "$=":
+            return bool(valeur) and presente.endswith(valeur)
+        if operateur == "*=":
+            return bool(valeur) and valeur in presente
+        if operateur == "~=":
+            return valeur in presente.split()
+        if operateur == "|=":
+            return presente == valeur or presente.startswith(valeur + "-")
+        return True
+
+    def _etat(self, element, nom):
+        marque = id(element)
+        if nom == "hover":
+            return marque in _SURVOLES
+        if nom == "active":
+            return marque in _ACTIFS
+        # `:focus-within` designe l'ancetre d'un element au foyer, ce que le
+        # navigateur exprime deja en posant toute la lignee.
+        return marque in _FOYER
+
+    def _structurelle(self, element, nom):
+        if nom == "root":
+            return _parent(element) is None
+        if nom in ("scope", "host"):
+            # La correspondance reelle est faite par la portee : ici, l'element
+            # a deja ete retenu comme candidat.
+            return True
+        if nom == "empty":
+            return not any(
+                _est_element(n) or getattr(n, "contenu", "").strip()
+                for n in getattr(element, "enfants", ()))
+        if nom in ("link", "any-link"):
+            return element.balise in ("a", "area") and "href" in element.attributs
+        if nom == "checked":
+            return "checked" in element.attributs or "selected" in element.attributs
+        if nom == "disabled":
+            return "disabled" in element.attributs
+        if nom == "enabled":
+            return "disabled" not in element.attributs
+        if nom == "required":
+            return "required" in element.attributs
+        if nom == "optional":
+            return "required" not in element.attributs
+        if nom == "read-only":
+            return "readonly" in element.attributs or element.balise not in (
+                "input", "textarea", "select")
+        if nom == "read-write":
+            return "readonly" not in element.attributs and element.balise in (
+                "input", "textarea", "select")
+
+        fratrie = _fratrie(element)
+        if nom == "first-child":
+            return bool(fratrie) and fratrie[0] is element
+        if nom == "last-child":
+            return bool(fratrie) and fratrie[-1] is element
+        if nom == "only-child":
+            return len(fratrie) == 1
+        memes = [n for n in fratrie if n.balise == element.balise]
+        if nom == "first-of-type":
+            return bool(memes) and memes[0] is element
+        if nom == "last-of-type":
+            return bool(memes) and memes[-1] is element
+        if nom == "only-of-type":
+            return len(memes) == 1
+        return True
+
+    def _nth(self, element, fonction, a, b):
+        fratrie = _fratrie(element)
+        if fonction.endswith("of-type"):
+            fratrie = [n for n in fratrie if n.balise == element.balise]
+        try:
+            rang = fratrie.index(element) + 1
+        except ValueError:
+            return False
+        if "last" in fonction:
+            rang = len(fratrie) - rang + 1
+        return _rang_verifie(a, b, rang)
+
+    def _groupe(self, element, genre, sous):
+        if genre == "not":
+            return not any(s.correspond_element(element) for s in sous)
+        if genre in ("is", "where"):
+            return any(s.correspond_element(element) for s in sous)
+        if genre == "has":
+            return self._has(element, sous)
+        return True
+
+    def _has(self, element, sous):
+        for selecteur in sous:
+            portee = selecteur.portee
+            if portee == ">":
+                candidats = [n for n in element.enfants if _est_element(n)]
+            elif portee in ("+", "~"):
+                candidats = _suivants(element, un_seul=portee == "+")
+            else:
+                candidats = _descendants(element)
+            for candidat in candidats:
+                if selecteur.correspond_element(candidat, ancre=element):
+                    return True
+        return False
+
     def poids(self):
-        return (1 if self.identifiant else 0, len(self.classes), 1 if self.balise else 0)
+        return self._poids
 
     def cle(self):
         """Le trait le plus discriminant du maillon, pour l'indexation.
 
         L'identifiant d'abord, une classe ensuite, la balise a defaut. `None`
-        pour un maillon universel, qu'aucun index ne peut restreindre.
+        pour un maillon qu'aucun index ne peut restreindre.
         """
         if self.identifiant:
             return ("#", self.identifiant)
@@ -273,34 +635,51 @@ class Simple:
         return None
 
 
-class Selecteur:
-    """Une suite de maillons, relies par la descendance ou par `>`."""
+def _precedents(element, un_seul):
+    """Les freres qui precedent, du plus proche au plus lointain."""
+    fratrie = _fratrie(element)
+    try:
+        rang = fratrie.index(element)
+    except ValueError:
+        return []
+    avant = fratrie[:rang][::-1]
+    return avant[:1] if un_seul else avant
 
-    __slots__ = ("maillons", "combinateurs", "specificite", "pseudo")
+
+def _suivants(element, un_seul):
+    fratrie = _fratrie(element)
+    try:
+        rang = fratrie.index(element)
+    except ValueError:
+        return []
+    apres = fratrie[rang + 1:]
+    return apres[:1] if un_seul else apres
+
+
+# Un combinateur en tete (`> .x` dans un `:has()`) donne sa portee au selecteur.
+_TETE = re.compile(r"^\s*([>+~])\s*")
+
+
+class Selecteur:
+    """Une suite de maillons relies par ` `, `>`, `+` ou `~`."""
+
+    __slots__ = ("maillons", "combinateurs", "specificite", "pseudo", "portee",
+                 "sensible", "vise_hote")
 
     def __init__(self, texte):
-        # `+` et `~` designent des freres ; la mise en page ne connait de chaque
-        # element que sa lignee, pas sa fratrie, donc ils sont ramenes a la
-        # descendance — moins precis, mais bien plus proche du resultat attendu
-        # que de jeter la regle entiere.
-        texte = re.sub(r"\s*[+~]\s*", " ", texte)
-        # `>` en revanche est tenu : `.menu > li` ne doit pas atteindre les `li`
-        # d'un sous-menu, et le confondre avec la descendance donnait a des
-        # elements imbriques la mise en forme de leur parent.
-        texte = re.sub(r"\s*>\s*", " > ", texte)
+        texte = texte.strip()
+        tete = _TETE.match(texte)
+        self.portee = tete.group(1) if tete else ""
+        if tete:
+            texte = texte[tete.end():]
 
         self.maillons = []
         # `combinateurs[i]` relie `maillons[i-1]` a `maillons[i]`. La premiere
         # case ne sert pas ; elle existe pour que les indices coincident.
         self.combinateurs = []
-        enfant_direct = False
-        for morceau in texte.split():
-            if morceau == ">":
-                enfant_direct = True
-                continue
+        for morceau, lien in _decoupe(texte):
             self.maillons.append(Simple(morceau))
-            self.combinateurs.append(">" if enfant_direct else " ")
-            enfant_direct = False
+            self.combinateurs.append(lien)
 
         a = b = c = 0
         for maillon in self.maillons:
@@ -310,33 +689,122 @@ class Selecteur:
         # Le pseudo-element est porte par le dernier maillon : dans
         # `.carte > p::after`, c'est le `p` qui recoit la boite.
         self.pseudo = self.maillons[-1].pseudo if self.maillons else None
+        # Ce selecteur depend-il de l'interaction ? Une page qui n'en contient
+        # aucun n'a pas a etre recalculee quand la souris bouge — et c'est
+        # l'immense majorite des mouvements.
+        self.sensible = any(m.etats or
+                            any(s.sensible for _, sous in m.groupes for s in sous)
+                            for m in self.maillons)
+        # `:host` designe l'hote, qui vit hors de l'ombre : la portee doit le
+        # savoir pour l'autoriser malgre la frontiere.
+        self.vise_hote = bool(self.maillons) and "host" in self.maillons[0].structurelles
 
     def cle(self):
         """La cle d'indexation du selecteur : celle de son dernier maillon."""
         return self.maillons[-1].cle() if self.maillons else None
 
     def correspond(self, chemin):
-        """`chemin` est la liste des ancetres, du plus lointain a l'element."""
+        """`chemin` est la lignee de l'element, du plus lointain a lui-meme."""
+        if not chemin:
+            return False
+        return self.correspond_element(chemin[-1])
+
+    def correspond_element(self, element, ancre=None):
+        """L'element est-il designe ?
+
+        `ancre` borne la remontee : dans `:has(.a .b)`, `.a` ne doit pas etre
+        cherche au-dessus de l'element qui porte le `:has()`.
+        """
         if not self.maillons:
             return False
-        index = len(self.maillons) - 1
-        if not self.maillons[index].correspond(chemin[-1]):
+        return self._verifie(len(self.maillons) - 1, element, ancre)
+
+    def _verifie(self, index, element, ancre):
+        if element is None or not self.maillons[index].correspond(element):
             return False
-        index -= 1
-        position = len(chemin) - 2
-        while index >= 0:
-            if position < 0:
+        if index == 0:
+            return True
+        lien = self.combinateurs[index]
+        precedent = index - 1
+        if lien == ">":
+            parent = _parent(element)
+            if parent is None or parent is ancre:
                 return False
-            if self.combinateurs[index + 1] == ">":
-                # Enfant direct : ce maillon-ci doit correspondre au parent
-                # immediat, sans quoi la regle ne s'applique pas du tout.
-                if not self.maillons[index].correspond(chemin[position]):
-                    return False
-                index -= 1
-            elif self.maillons[index].correspond(chemin[position]):
-                index -= 1
-            position -= 1
-        return True
+            return self._verifie(precedent, parent, ancre)
+        if lien == "+":
+            freres = _precedents(element, un_seul=True)
+            return bool(freres) and self._verifie(precedent, freres[0], ancre)
+        if lien == "~":
+            return any(self._verifie(precedent, frere, ancre)
+                       for frere in _precedents(element, un_seul=False))
+        # Descendance : on remonte la lignee, avec retour en arriere. Le
+        # parcours glouton d'avant se trompait des qu'un ancetre correspondait
+        # sans que la suite du selecteur suive.
+        courant = element
+        while True:
+            courant = _parent(courant)
+            if courant is None or courant is ancre:
+                return False
+            if self._verifie(precedent, courant, ancre):
+                return True
+
+
+def _decoupe(texte):
+    """Decoupe un selecteur en couples `(compose, lien au precedent)`.
+
+    Le decoupage respecte les parentheses et les crochets : l'espace de
+    `:not(.a .b)` ou de `[title="a b"]` ne separe pas deux maillons.
+    """
+    morceaux = []
+    courant = ""
+    lien = " "
+    profondeur = 0
+    for caractere in texte:
+        if profondeur == 0 and caractere in " \t\n\r\f>+~":
+            if courant:
+                morceaux.append((courant, lien))
+                courant = ""
+                lien = " "
+            if caractere in ">+~":
+                lien = caractere
+            continue
+        if caractere in "([":
+            profondeur += 1
+        elif caractere in ")]":
+            profondeur -= 1
+        courant += caractere
+    if courant:
+        morceaux.append((courant, lien))
+    if morceaux:
+        # Le premier maillon n'est relie a rien.
+        morceaux[0] = (morceaux[0][0], " ")
+    return morceaux
+
+
+def groupes(texte):
+    """Les selecteurs d'une liste separee par des virgules."""
+    resultat = []
+    courant = ""
+    profondeur = 0
+    for caractere in texte:
+        if caractere == "," and profondeur == 0:
+            if courant.strip():
+                resultat.append(Selecteur(courant))
+            courant = ""
+            continue
+        if caractere in "([":
+            profondeur += 1
+        elif caractere in ")]":
+            profondeur -= 1
+        courant += caractere
+    if courant.strip():
+        resultat.append(Selecteur(courant))
+    return [s for s in resultat if s.maillons]
+
+
+def correspond_un(liste, element):
+    """L'element est-il designe par l'un de ces selecteurs ?"""
+    return any(s.correspond_element(element) for s in liste)
 
 
 class Index:
@@ -354,9 +822,11 @@ class Index:
     que l'element n'a pas — elle n'aurait pas correspondu.
     """
 
-    __slots__ = ("par_id", "par_classe", "par_balise", "universelles")
+    __slots__ = ("par_id", "par_classe", "par_balise", "universelles", "sensible")
 
     def __init__(self, regles):
+        # Vrai des qu'une regle depend du survol, du foyer ou de l'enfoncement.
+        self.sensible = any(r.selecteur.sensible for r in regles)
         self.par_id = {}
         self.par_classe = {}
         self.par_balise = {}
@@ -389,19 +859,371 @@ def indexe(regles):
 
 
 class Regle:
-    __slots__ = ("selecteur", "declarations", "ordre")
+    """Une regle, et l'ombre d'ou elle vient (`None` pour la page)."""
 
-    def __init__(self, selecteur, declarations, ordre):
+    __slots__ = ("selecteur", "declarations", "ordre", "ombre")
+
+    def __init__(self, selecteur, declarations, ordre, ombre=None):
         self.selecteur = selecteur
         self.declarations = declarations
         self.ordre = ordre
+        self.ombre = ombre
 
+
+# --- Decoration ---------------------------------------------------------------
+#
+# Coins arrondis, ombres portees, degrades, transformations et opacite. Ce sont
+# les cinq proprietes qui separent une page de 1998 d'une page d'aujourd'hui :
+# une carte moderne est un rectangle arrondi, pose sur une ombre douce, parfois
+# rempli d'un degrade. Le moteur les analysait deja pour `border-radius` — sans
+# jamais s'en servir — et laissait tomber les quatre autres.
+
+
+def separe(texte, separateur=","):
+    """Decoupe en respectant les parentheses : `rgb(1, 2, 3)` reste entier."""
+    morceaux = []
+    courant = ""
+    profondeur = 0
+    for caractere in texte:
+        if caractere == "(":
+            profondeur += 1
+        elif caractere == ")":
+            profondeur -= 1
+        if caractere == separateur and profondeur == 0:
+            morceaux.append(courant)
+            courant = ""
+            continue
+        courant += caractere
+    if courant.strip():
+        morceaux.append(courant)
+    return [m.strip() for m in morceaux if m.strip()]
+
+
+def rayons(valeur, reference=0.0, taille_police=16.0):
+    """`border-radius` en quatre rayons, dans l'ordre des coins CSS.
+
+    Haut-gauche, haut-droit, bas-droit, bas-gauche. La forme elliptique
+    (`10px / 20px`) est ramenee a son premier terme : le moteur ne peint que
+    des coins circulaires.
+    """
+    if not valeur:
+        return (0.0, 0.0, 0.0, 0.0)
+    valeur = valeur.split("/")[0]
+    parties = [longueur(p, reference, taille_police) or 0.0 for p in valeur.split()]
+    if not parties:
+        return (0.0, 0.0, 0.0, 0.0)
+    if len(parties) == 1:
+        return (parties[0],) * 4
+    if len(parties) == 2:
+        return (parties[0], parties[1], parties[0], parties[1])
+    if len(parties) == 3:
+        return (parties[0], parties[1], parties[2], parties[1])
+    return tuple(parties[:4])
+
+
+def ombres(valeur, taille_police=16.0):
+    """`box-shadow` en liste de `(dx, dy, flou, etendue, couleur, interieure)`."""
+    if not valeur or valeur.strip() in ("none", "initial"):
+        return []
+    resultat = []
+    for morceau in separe(valeur):
+        interieure = False
+        longueurs = []
+        teinte = None
+        for jeton in separe(morceau, " "):
+            if jeton == "inset":
+                interieure = True
+                continue
+            mesure = longueur(jeton, 0.0, taille_police)
+            # Une couleur peut s'ecrire `#0003` ou `rgb(…)` ; une longueur
+            # commence toujours par un chiffre ou un signe.
+            if mesure is not None and jeton[:1] in "+-.0123456789":
+                longueurs.append(mesure)
+            elif teinte is None:
+                teinte = couleur(jeton)
+        if len(longueurs) < 2:
+            continue
+        dx, dy = longueurs[0], longueurs[1]
+        flou = longueurs[2] if len(longueurs) > 2 else 0.0
+        etendue = longueurs[3] if len(longueurs) > 3 else 0.0
+        resultat.append((dx, dy, flou, etendue,
+                         teinte if teinte is not None else 0x40000000, interieure))
+    return resultat
+
+
+# `linear-gradient(…)` et `radial-gradient(…)`, avec ou sans repetition.
+_DEGRADE = re.compile(r"(?:repeating-)?(?:linear|radial)-gradient\(", re.I)
+_RADIAL = re.compile(r"(?:repeating-)?radial-gradient\(", re.I)
+
+
+def degrade(valeur):
+    """Un degrade en `(genre, angle, [(position, couleur), …])`.
+
+    `genre` vaut `"lineaire"` ou `"radial"`. L'angle suit la norme CSS pour le
+    premier : 0 degre pointe vers le haut, dans le sens des aiguilles ; il ne
+    sert pas au second. `None` si la valeur n'est pas un degrade que l'on peint
+    — les degrades coniques n'en sont pas.
+    """
+    if not valeur:
+        return None
+    trouve = _DEGRADE.search(valeur)
+    if not trouve:
+        return None
+    radial = bool(_RADIAL.match(valeur, trouve.start()))
+    interieur = _entre_parentheses(valeur, trouve.end() - 1)
+    if interieur is None:
+        return None
+    morceaux = separe(interieur)
+    if not morceaux:
+        return None
+
+    angle = 180.0          # `to bottom`, le defaut de CSS
+    premier = morceaux[0].lower()
+    if radial:
+        # `circle`, `ellipse at center`, `farthest-corner`… decrivent la forme
+        # et le centre. On peint un cercle centre : c'est ce que la quasi-
+        # totalite des pages demande, et le reste ne s'en distingue guere.
+        if not _est_etape(premier):
+            morceaux = morceaux[1:]
+    elif premier.startswith("to "):
+        angle = _angle_vers(premier[3:])
+        morceaux = morceaux[1:]
+    elif premier.endswith(("deg", "turn", "rad", "grad")):
+        angle = _angle(premier)
+        morceaux = morceaux[1:]
+
+    etapes = []
+    for index, morceau in enumerate(morceaux):
+        parties = morceau.split()
+        teinte = couleur(parties[0]) if parties else None
+        if teinte is None and parties:
+            # `rgb(1 2 3)` a pu etre coupe : on retente sur le morceau entier.
+            teinte = couleur(morceau)
+        if teinte is None:
+            continue
+        position = None
+        for part in parties[1:]:
+            if part.endswith("%"):
+                try:
+                    position = float(part[:-1]) / 100.0
+                except ValueError:
+                    position = None
+        if position is None:
+            position = index / max(1.0, len(morceaux) - 1.0)
+        etapes.append((max(0.0, min(1.0, position)), teinte))
+    if len(etapes) < 2:
+        return None
+    return ("radial" if radial else "lineaire", angle, etapes)
+
+
+def _est_etape(morceau):
+    """Ce morceau est-il une couleur, plutot qu'une description de forme ?"""
+    premier = morceau.split()[0] if morceau.split() else ""
+    return couleur(premier) is not None or couleur(morceau) is not None
+
+
+def _entre_parentheses(texte, ouvrante):
+    profondeur = 0
+    for index in range(ouvrante, len(texte)):
+        if texte[index] == "(":
+            profondeur += 1
+        elif texte[index] == ")":
+            profondeur -= 1
+            if profondeur == 0:
+                return texte[ouvrante + 1:index]
+    return None
+
+
+_VERS = {
+    "top": 0.0, "right": 90.0, "bottom": 180.0, "left": 270.0,
+    "top right": 45.0, "right top": 45.0,
+    "bottom right": 135.0, "right bottom": 135.0,
+    "bottom left": 225.0, "left bottom": 225.0,
+    "top left": 315.0, "left top": 315.0,
+}
+
+
+def _angle_vers(mots):
+    return _VERS.get(" ".join(mots.split()), 180.0)
+
+
+def _angle(texte):
+    """Un angle CSS en degres."""
+    texte = texte.strip().lower()
+    try:
+        if texte.endswith("deg"):
+            return float(texte[:-3])
+        if texte.endswith("turn"):
+            return float(texte[:-4]) * 360.0
+        if texte.endswith("rad"):
+            return float(texte[:-3]) * 180.0 / 3.141592653589793
+        if texte.endswith("grad"):
+            return float(texte[:-4]) * 0.9
+        return float(texte)
+    except ValueError:
+        return 0.0
+
+
+_FONCTION = re.compile(r"([a-zA-Z0-9]+)\(([^()]*)\)")
+
+
+def transformation(valeur, largeur=0.0, hauteur=0.0, taille_police=16.0):
+    """`transform` en matrice `(a, b, c, d, e, f)`, ou `None`.
+
+    La convention est celle de CSS et de Qt :
+    `x' = a·x + c·y + e` et `y' = b·x + d·y + f`.
+
+    Les pourcentages d'une translation se rapportent a la taille de l'element
+    lui-meme, d'ou `largeur` et `hauteur`.
+    """
+    if not valeur or valeur.strip() in ("none", "initial"):
+        return None
+    matrice = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+    vue = False
+    for nom, arguments in _FONCTION.findall(valeur):
+        parties = [p.strip() for p in arguments.split(",") if p.strip()]
+        nom = nom.lower()
+        suivante = _fonction_transform(nom, parties, largeur, hauteur, taille_police)
+        if suivante is None:
+            continue
+        matrice = _compose(matrice, suivante)
+        vue = True
+    return matrice if vue else None
+
+
+def _fonction_transform(nom, parties, largeur, hauteur, taille_police):
+    def mesure(texte, reference):
+        if texte.endswith("%"):
+            try:
+                return float(texte[:-1]) / 100.0 * reference
+            except ValueError:
+                return 0.0
+        return longueur(texte, reference, taille_police) or 0.0
+
+    def nombre(texte, defaut=0.0):
+        try:
+            return float(texte)
+        except (ValueError, TypeError):
+            return defaut
+
+    if nom in ("translate", "translate3d"):
+        dx = mesure(parties[0], largeur) if parties else 0.0
+        dy = mesure(parties[1], hauteur) if len(parties) > 1 else 0.0
+        return (1.0, 0.0, 0.0, 1.0, dx, dy)
+    if nom == "translatex":
+        return (1.0, 0.0, 0.0, 1.0, mesure(parties[0], largeur) if parties else 0.0, 0.0)
+    if nom == "translatey":
+        return (1.0, 0.0, 0.0, 1.0, 0.0, mesure(parties[0], hauteur) if parties else 0.0)
+    if nom in ("scale", "scale3d"):
+        sx = nombre(parties[0], 1.0) if parties else 1.0
+        sy = nombre(parties[1], sx) if len(parties) > 1 else sx
+        return (sx, 0.0, 0.0, sy, 0.0, 0.0)
+    if nom == "scalex":
+        return (nombre(parties[0], 1.0) if parties else 1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+    if nom == "scaley":
+        return (1.0, 0.0, 0.0, nombre(parties[0], 1.0) if parties else 1.0, 0.0, 0.0)
+    if nom in ("rotate", "rotatez"):
+        radians = math.radians(_angle(parties[0])) if parties else 0.0
+        cos, sin = math.cos(radians), math.sin(radians)
+        return (cos, sin, -sin, cos, 0.0, 0.0)
+    if nom in ("skew", "skewx", "skewy"):
+        premier = math.tan(math.radians(_angle(parties[0]))) if parties else 0.0
+        second = math.tan(math.radians(_angle(parties[1]))) if len(parties) > 1 else 0.0
+        if nom == "skewx":
+            return (1.0, 0.0, premier, 1.0, 0.0, 0.0)
+        if nom == "skewy":
+            return (1.0, premier, 0.0, 1.0, 0.0, 0.0)
+        return (1.0, second, premier, 1.0, 0.0, 0.0)
+    if nom == "matrix" and len(parties) >= 6:
+        return tuple(nombre(p) for p in parties[:6])
+    # `rotateX`, `perspective`, `matrix3d`… demandent une troisieme dimension
+    # que la peinture n'a pas. Les ignorer vaut mieux que de les aplatir a tort.
+    return None
+
+
+def _compose(gauche, droite):
+    """Applique `droite` puis `gauche`, comme l'exige l'ordre de CSS."""
+    a1, b1, c1, d1, e1, f1 = gauche
+    a2, b2, c2, d2, e2, f2 = droite
+    return (
+        a1 * a2 + c1 * b2,
+        b1 * a2 + d1 * b2,
+        a1 * c2 + c1 * d2,
+        b1 * c2 + d1 * d2,
+        a1 * e2 + c1 * f2 + e1,
+        b1 * e2 + d1 * f2 + f1,
+    )
+
+
+def opacite(valeur):
+    """`opacity` en flottant borne, `1.0` par defaut."""
+    if valeur is None or valeur == "":
+        return 1.0
+    texte = valeur.strip()
+    try:
+        if texte.endswith("%"):
+            return max(0.0, min(1.0, float(texte[:-1]) / 100.0))
+        return max(0.0, min(1.0, float(texte)))
+    except ValueError:
+        return 1.0
+
+
+def familles(valeur):
+    """Les familles d'un `font-family`, dans l'ordre, guillemets retires."""
+    resultat = []
+    for morceau in separe(valeur or ""):
+        nom = morceau.strip().strip("\"'").replace("\\", "").strip()
+        if nom:
+            resultat.append(nom)
+    return resultat
+
+
+COTES = ("top", "right", "bottom", "left")
+
+
+def bordures(style, reference=0.0, taille_police=16.0):
+    """Les quatre bords, chacun en `(epaisseur, couleur)`.
+
+    Le moteur ne lisait qu'une epaisseur et une couleur pour toute la boite :
+    un `border-bottom: 1px solid #eee` — le separateur le plus repandu du web —
+    ne peignait donc rien du tout, et un `border-left` d'accent non plus.
+    """
+    resultat = []
+    for cote in COTES:
+        style_cote = style.get("border-%s-style" % cote, "none")
+        epaisseur = longueur(style.get("border-%s-width" % cote, "0"),
+                             reference, taille_police) or 0.0
+        if style_cote in ("none", "hidden"):
+            epaisseur = 0.0
+        teinte = couleur(style.get("border-%s-color" % cote, ""))
+        if teinte is None:
+            # La norme veut que la couleur par defaut soit celle du texte.
+            teinte = couleur(style.get("color", "")) or 0xFF202124
+        resultat.append((epaisseur, teinte))
+    return resultat
+
+
+# Regles @ que l'on traverse : elles groupent des regles sans conditionner ce
+# que le moteur sait faire. `@layer` est la plus importante — les cadres CSS
+# recents y rangent toute leur feuille. `@supports` teste des proprietes dont
+# nous couvrons l'essentiel ; `@container` et `@scope` demanderaient un contexte
+# que la mise en page ne tient pas, et entrer vaut mieux que tout jeter.
+_TRANSPARENTES = ("@layer", "@supports", "@container", "@scope")
 
 _COMMENTAIRE = re.compile(r"/\*.*?\*/", re.S)
 
 
-def analyse(source, ordre_depart=0):
-    """Analyse une feuille de style et rend la liste de ses regles."""
+def analyse(source, ordre_depart=0, keyframes=None, ombre=None, polices=None):
+    """Analyse une feuille de style et rend la liste de ses regles.
+
+    `keyframes`, s'il est fourni, recoit les gabarits `@keyframes` rencontres :
+    `nom -> [(position entre 0 et 1, declarations), …]`. Ils ne sont pas des
+    regles — ils ne designent aucun element — mais une table que l'animation
+    consulte, d'ou ce second canal plutot qu'un melange dans la liste.
+
+    `polices` recoit de meme les `@font-face`, en liste de declarations : ce
+    sont des polices a telecharger, pas des elements a styler.
+    """
     source = _COMMENTAIRE.sub(" ", source)
     regles = []
     ordre = ordre_depart
@@ -409,9 +1231,31 @@ def analyse(source, ordre_depart=0):
     longueur_source = len(source)
 
     while position < longueur_source:
+        # L'accolade qui ferme un groupe dans lequel on etait entre — `@media`,
+        # `@layer`, `@supports` — doit etre consommee ici. Sans cela elle se
+        # collait au selecteur suivant, qui devenait `} .barre` et ne designait
+        # plus rien : toutes les regles d'un `@layer` suivi d'autre chose
+        # etaient perdues, et la page s'affichait a moitie stylee.
+        while position < longueur_source and source[position] in " \t\r\n\f":
+            position += 1
+        if position < longueur_source and source[position] == "}":
+            position += 1
+            continue
+
         accolade = source.find("{", position)
         if accolade < 0:
             break
+
+        # Une regle @ sans bloc se termine par un point-virgule : `@charset`,
+        # `@import url(…);`, et la forme qui declare l'ordre des couches,
+        # `@layer base, composants;`. Ne pas la reconnaitre collait son texte
+        # au selecteur suivant, et la regle d'apres etait perdue avec elle —
+        # un `@import` en tete de feuille emportait ainsi la premiere regle.
+        point_virgule = source.find(";", position)
+        if 0 <= point_virgule < accolade:
+            position = point_virgule + 1
+            continue
+
         prelude = source[position:accolade].strip()
 
         # Regles @. `@media` est **evaluee** : garder son contenu sans le
@@ -426,8 +1270,30 @@ def analyse(source, ordre_depart=0):
                 else:
                     position = _saute_bloc(source, accolade)
                 continue
-            if tete.startswith("@supports"):
-                # On sait faire l'essentiel de ce qui s'y teste : on entre.
+            if tete.startswith("@font-face"):
+                fin_bloc = _saute_bloc(source, accolade)
+                if polices is not None:
+                    declaration = _declarations(source[accolade + 1:fin_bloc - 1])
+                    if declaration.get("src") and declaration.get("font-family"):
+                        polices.append(declaration)
+                position = fin_bloc
+                continue
+            if tete.startswith("@keyframes") or tete.startswith("@-webkit-keyframes"):
+                fin_bloc = _saute_bloc(source, accolade)
+                if keyframes is not None:
+                    nom = prelude.split(None, 1)[1].strip() if " " in prelude else ""
+                    if nom:
+                        etapes = _etapes_keyframes(source[accolade + 1:fin_bloc - 1])
+                        if etapes:
+                            keyframes[nom] = etapes
+                position = fin_bloc
+                continue
+            if tete.split("(")[0].split()[0] in _TRANSPARENTES:
+                # Ces regles groupent sans conditionner ce que le moteur sait
+                # faire : on entre, et leur contenu vaut comme s'il etait ecrit
+                # au premier niveau. `@layer` surtout — les cadres CSS recents y
+                # rangent la totalite de leur feuille, et la sauter revenait a
+                # afficher la page sans style du tout.
                 position = accolade + 1
                 continue
             position = _saute_bloc(source, accolade)
@@ -441,7 +1307,7 @@ def analyse(source, ordre_depart=0):
             for brut in prelude.split(","):
                 brut = brut.strip()
                 if brut:
-                    regles.append(Regle(Selecteur(brut), declarations, ordre))
+                    regles.append(Regle(Selecteur(brut), declarations, ordre, ombre))
                     ordre += 1
         position = fin + 1
 
@@ -508,6 +1374,44 @@ def _condition_verifiee(nom, valeur, largeur, hauteur):
     return True
 
 
+def _etapes_keyframes(corps):
+    """Les etapes d'un `@keyframes`, triees par position.
+
+    `from` vaut 0 %, `to` vaut 100 %, et une etape peut porter plusieurs
+    positions (`0%, 100% { … }`) — c'est la forme qu'on rencontre des qu'une
+    animation revient a son point de depart.
+    """
+    etapes = []
+    position = 0
+    while True:
+        accolade = corps.find("{", position)
+        if accolade < 0:
+            break
+        fin = corps.find("}", accolade)
+        if fin < 0:
+            break
+        declarations = _developpe(_declarations(corps[accolade + 1:fin]))
+        for morceau in corps[position:accolade].split(","):
+            morceau = morceau.strip().lower()
+            if not morceau:
+                continue
+            if morceau == "from":
+                arret = 0.0
+            elif morceau == "to":
+                arret = 1.0
+            elif morceau.endswith("%"):
+                try:
+                    arret = float(morceau[:-1]) / 100.0
+                except ValueError:
+                    continue
+            else:
+                continue
+            etapes.append((max(0.0, min(1.0, arret)), declarations))
+        position = fin + 1
+    etapes.sort(key=lambda e: e[0])
+    return etapes
+
+
 def _saute_bloc(source, accolade):
     profondeur = 0
     for index in range(accolade, len(source)):
@@ -560,9 +1464,16 @@ def applique(regles, element, chemin, style_parent, pseudo=None):
     # mise en page reelle passe par l'index.
     candidates = regles.candidates(element) if isinstance(regles, Index) else regles
 
+    # Une racine d'ombre isole : les regles de la page ne l'atteignent pas, et
+    # les siennes ne sortent pas. Sans cette frontiere, deux composants poses
+    # sur la meme page se repeignaient l'un l'autre.
+    ombre = ombre_de(element)
+
     correspondantes = []
     for regle in candidates:
         if regle.selecteur.pseudo != pseudo:
+            continue
+        if _OMBRES[0] and not _portee_admet(regle, element, ombre):
             continue
         if regle.selecteur.correspond(chemin):
             correspondantes.append(regle)
@@ -591,7 +1502,29 @@ def applique(regles, element, chemin, style_parent, pseudo=None):
         style.update(_developpe(_resout_variables(regle.declarations, variables)))
     if en_ligne:
         style.update(_developpe(_resout_variables(en_ligne, variables)))
+
+    # Les animations et les transitions se posent apres la cascade : c'est le
+    # seul moment ou l'on connait a la fois ce que la feuille demande et ce que
+    # l'element affichait au tour precedent.
+    animateur = _ANIMATEUR[0]
+    if animateur is not None:
+        style = animateur.applique(element, style, pseudo)
     return style
+
+
+def _portee_admet(regle, element, ombre):
+    """La regle a-t-elle le droit de styler cet element ?"""
+    portee = regle.ombre
+    if portee is PORTEE_AGENT:
+        return True
+    if portee is None:
+        # Regle de la page : elle s'arrete a la frontiere de toute ombre.
+        return ombre is None
+    if ombre is portee:
+        return True
+    # `:host` est la seule qui traverse, et dans un seul sens : vers l'hote,
+    # qui est le parent du support.
+    return regle.selecteur.vise_hote and element is _parent(portee)
 
 
 # `var(--nom)` ou `var(--nom, valeur de secours)`. La valeur de secours peut
@@ -690,7 +1623,82 @@ def _echappements(texte):
     return re.sub(r"\\([0-9a-fA-F]{1,6})\s?", remplace, texte)
 
 
+# L'animateur du document en cours, pose par [`Document`]. Variable de module
+# comme la taille de fenetre : `applique` est appelee en dizaines d'endroits, et
+# la faire circuler en argument jusqu'a chacun couterait plus qu'il ne rapporte.
+_ANIMATEUR = [None]
+
+
+def pose_animateur(animateur):
+    """Declare qui anime. `None` pour n'animer rien."""
+    _ANIMATEUR[0] = animateur
+
+
+# Portee de la feuille de l'agent utilisateur. Elle n'appartient a aucun arbre :
+# elle vaut pour la page **et** pour l'interieur de chaque racine d'ombre. La
+# traiter comme une feuille de page la faisait s'arreter a la frontiere, et le
+# contenu d'ombre se retrouvait sans `display` du tout — donc invisible.
+PORTEE_AGENT = "agent"
+
+# La balise support d'une racine d'ombre. `attachShadow` en cree une et y range
+# le contenu : c'est donc elle qui marque la frontiere.
+SUPPORT_OMBRE = "bo-ombre"
+
+# Y a-t-il seulement une ombre dans ce document ? Presque aucune page n'en a ;
+# quand il n'y en a pas, tout le calcul de portee est saute.
+_OMBRES = [False]
+
+
+def pose_ombres(presentes):
+    """Declare si le document contient au moins une racine d'ombre."""
+    _OMBRES[0] = bool(presentes)
+
+
+def ombre_de(element):
+    """La racine d'ombre qui contient cet element, ou `None`.
+
+    Un element du document ordinaire n'en a pas ; un element pose par
+    `attachShadow` a pour ancetre le support de son ombre.
+    """
+    if not _OMBRES[0]:
+        return None
+    courant = element
+    while courant is not None:
+        if getattr(courant, "balise", None) == SUPPORT_OMBRE:
+            return courant
+        courant = _parent(courant)
+    return None
+
+
 _RACCOURCIS_BOITE = ("margin", "padding")
+
+_BORDS = ("border-top", "border-right", "border-bottom", "border-left")
+
+# Une position de grille : un numero de ligne, un `span`, ou `auto`.
+_EST_LIGNE = re.compile(r"(auto|span\b|[-+]?\d)", re.I)
+
+_STYLES_TRAIT = ("none", "hidden", "solid", "dashed", "dotted", "double",
+                 "groove", "ridge", "inset", "outset")
+
+
+def _trait(valeur):
+    """`1px solid #eee` en `(epaisseur, style, couleur)`, chacun facultatif."""
+    largeur = style = teinte = None
+    for morceau in separe(valeur, " "):
+        bas = morceau.lower()
+        if bas in _STYLES_TRAIT:
+            style = bas
+            if bas in ("none", "hidden") and largeur is None:
+                largeur = "0"
+        elif longueur(morceau) is not None and bas[:1] in "+-.0123456789":
+            largeur = morceau
+        elif couleur(morceau) is not None:
+            teinte = morceau
+    # `border: solid red` sans epaisseur vaut 3 px dans la norme ; c'est aussi
+    # ce que fait tout navigateur.
+    if style not in (None, "none", "hidden") and largeur is None:
+        largeur = "3px"
+    return largeur, style, teinte
 
 # Proprietes que la disposition consulte et qui ne doivent surtout pas etre
 # heritees : un `display: flex` herite ferait de chaque descendant un conteneur
@@ -704,8 +1712,13 @@ NON_HERITEES = (
     "grid-column-end", "grid-row-start", "grid-row-end",
     "row-gap", "column-gap", "overflow", "overflow-x", "overflow-y",
     "box-sizing", "min-width", "max-width", "min-height", "max-height",
-    "content", "border-radius", "opacity",
-)
+    "content", "border-radius", "opacity", "transform", "box-shadow",
+    "background-image", "order", "animation-name", "animation-duration",
+    "animation-timing-function", "animation-delay", "animation-iteration-count",
+    "animation-direction", "animation-fill-mode", "transition-property",
+    "transition-duration", "transition-timing-function", "transition-delay",
+) + tuple("border-%s-%s" % (c, t) for c in COTES
+          for t in ("width", "style", "color"))
 
 
 def _developpe(declarations):
@@ -719,19 +1732,34 @@ def _developpe(declarations):
             resultat["%s-right" % nom] = droite
             resultat["%s-bottom" % nom] = bas
             resultat["%s-left" % nom] = gauche
-        elif nom == "border":
-            for morceau in valeur.split():
-                if couleur(morceau) is not None:
-                    resultat["border-color"] = morceau
-                elif morceau.endswith(("px", "em", "rem")) or morceau.isdigit():
-                    resultat["border-width"] = morceau
-                elif morceau in ("none", "hidden"):
-                    resultat["border-width"] = "0"
+        elif nom == "border" or nom in _BORDS:
+            # Un bord se decrit d'un trait : `1px solid #eee`. Le developper en
+            # trois proprietes par cote est ce qui permet a la cascade de faire
+            # son travail — `border: 1px solid red; border-bottom: none` doit
+            # laisser trois bords rouges et en effacer un seul.
+            largeur_b, style_b, couleur_b = _trait(valeur)
+            cotes = COTES if nom == "border" else (nom.split("-", 1)[1],)
+            for cote in cotes:
+                if largeur_b is not None:
+                    resultat["border-%s-width" % cote] = largeur_b
+                if style_b is not None:
+                    resultat["border-%s-style" % cote] = style_b
+                if couleur_b is not None:
+                    resultat["border-%s-color" % cote] = couleur_b
+        elif nom in ("border-width", "border-style", "border-color"):
+            trait = nom.split("-", 1)[1]
+            haut, droite, bas, gauche = _quatre(valeur.split())
+            for cote, part in zip(COTES, (haut, droite, bas, gauche)):
+                resultat["border-%s-%s" % (cote, trait)] = part
         elif nom == "background":
-            for morceau in valeur.split():
-                if couleur(morceau) is not None:
-                    resultat["background-color"] = morceau
-                    break
+            degrade_trouve = _DEGRADE.search(valeur)
+            if degrade_trouve:
+                resultat["background-image"] = valeur
+            else:
+                for morceau in separe(valeur, " "):
+                    if couleur(morceau) is not None:
+                        resultat["background-color"] = morceau
+                        break
         elif nom == "flex":
             # `flex: 1` vaut `1 1 0%`, `flex: auto` vaut `1 1 auto`. C'est la
             # forme sous laquelle la propriete s'ecrit presque toujours.
@@ -769,9 +1797,15 @@ def _developpe(declarations):
             resultat["bottom"], resultat["left"] = bas, gauche
         elif nom == "grid-area":
             parties = [p.strip() for p in valeur.split("/")]
-            for cle, part in zip(("grid-row-start", "grid-column-start",
-                                  "grid-row-end", "grid-column-end"), parties):
-                resultat[cle] = part
+            # `grid-area: entete` nomme une zone du gabarit ; `grid-area: 1 / 2`
+            # donne des lignes. Confondre les deux rangeait le nom dans
+            # `grid-row-start`, ou plus rien ne le reconnaissait.
+            if len(parties) == 1 and not _EST_LIGNE.match(parties[0]):
+                resultat["grid-area"] = parties[0]
+            else:
+                for cle, part in zip(("grid-row-start", "grid-column-start",
+                                      "grid-row-end", "grid-column-end"), parties):
+                    resultat[cle] = part
         elif nom in ("grid-row", "grid-column"):
             parties = [p.strip() for p in valeur.split("/")]
             resultat["%s-start" % nom] = parties[0]
@@ -782,8 +1816,10 @@ def _developpe(declarations):
             resultat["grid-template-rows"] = parties[0]
             if len(parties) > 1:
                 resultat["grid-template-columns"] = parties[1]
-        elif nom == "border-radius":
-            resultat["border-radius"] = valeur.split()[0] if valeur.split() else "0"
+        elif nom == "animation":
+            resultat.update(_raccourci_animation(valeur))
+        elif nom == "transition":
+            resultat.update(_raccourci_transition(valeur))
         elif nom == "font":
             for morceau in valeur.split():
                 if morceau in ("bold", "bolder"):
@@ -795,6 +1831,92 @@ def _developpe(declarations):
         else:
             resultat[nom] = valeur
     return resultat
+
+
+_DIRECTIONS = ("normal", "reverse", "alternate", "alternate-reverse")
+_REMPLISSAGES = ("none", "forwards", "backwards", "both")
+_RYTHMES = ("linear", "ease", "ease-in", "ease-out", "ease-in-out",
+            "step-start", "step-end")
+
+
+def _est_duree(jeton):
+    return jeton.endswith(("s", "ms")) and jeton[:1] in "+-.0123456789"
+
+
+def _est_rythme(jeton):
+    return jeton in _RYTHMES or jeton.startswith(("cubic-bezier(", "steps("))
+
+
+def _raccourci_animation(valeur):
+    """`animation: 2s ease-in 1s infinite alternate both glisse` en longhands.
+
+    L'ordre des composants est libre dans la norme, sauf pour les deux durees :
+    la premiere est la duree, la seconde le retard. C'est la seule ambiguite
+    reelle, et elle se leve en comptant.
+    """
+    resultat = {}
+    durees = []
+    for jeton in separe(valeur.strip(), " "):
+        bas = jeton.lower()
+        if _est_duree(bas):
+            durees.append(jeton)
+        elif _est_rythme(bas):
+            resultat["animation-timing-function"] = jeton
+        elif bas == "infinite" or _est_nombre(bas):
+            resultat["animation-iteration-count"] = jeton
+        elif bas in _DIRECTIONS:
+            resultat["animation-direction"] = bas
+        elif bas in _REMPLISSAGES and "animation-fill-mode" not in resultat:
+            resultat["animation-fill-mode"] = bas
+        elif bas in ("running", "paused"):
+            resultat["animation-play-state"] = bas
+        else:
+            resultat["animation-name"] = jeton
+    if durees:
+        resultat["animation-duration"] = durees[0]
+    if len(durees) > 1:
+        resultat["animation-delay"] = durees[1]
+    return resultat
+
+
+def _raccourci_transition(valeur):
+    """`transition: color .3s ease, transform .2s` en longhands paralleles."""
+    proprietes, durees, rythmes, retards = [], [], [], []
+    for morceau in separe(valeur):
+        nom, duree, courbe, retard = "all", "0s", "ease", "0s"
+        vues = []
+        for jeton in separe(morceau.strip(), " "):
+            bas = jeton.lower()
+            if _est_duree(bas):
+                vues.append(jeton)
+            elif _est_rythme(bas):
+                courbe = jeton
+            else:
+                nom = bas
+        if vues:
+            duree = vues[0]
+        if len(vues) > 1:
+            retard = vues[1]
+        proprietes.append(nom)
+        durees.append(duree)
+        rythmes.append(courbe)
+        retards.append(retard)
+    if not proprietes:
+        return {}
+    return {
+        "transition-property": ", ".join(proprietes),
+        "transition-duration": ", ".join(durees),
+        "transition-timing-function": ", ".join(rythmes),
+        "transition-delay": ", ".join(retards),
+    }
+
+
+def _est_nombre(jeton):
+    try:
+        float(jeton)
+        return True
+    except ValueError:
+        return False
 
 
 def _quatre(parties):
@@ -851,12 +1973,30 @@ code, kbd, samp { font-family: monospace; }
 b, strong { font-weight: bold; }
 i, em, cite, address { font-style: italic; }
 a { color: #1a56db; text-decoration: underline; }
-hr { margin: 8px 0; border-width: 1px; border-color: #d0d7de; }
+hr { margin: 8px 0; border-top: 1px solid #d0d7de; }
+bo-ombre { display: block; }
+td, th { display: block; }
 table { margin: 8px 0; }
 th { font-weight: bold; }
 td, th { padding: 4px 8px; }
 small { font-size: 13px; }
+/* Champs de formulaire. La mise en forme etait deja la ; ce qui manquait, ce
+   sont les trois choses sans lesquelles elle ne se voyait pas : une boite
+   (`inline-block`, et non `inline`, qui ne peint ni fond ni bord), un style de
+   trait — `border-width` seul ne dessine rien — et une largeur propre, un
+   champ vide n'ayant aucun contenu pour lui en donner une. Une barre de
+   recherche se reduisait ainsi a son etiquette. */
 button, input, select, textarea { background-color: #f3f4f6; padding: 4px 8px;
-                                  border-width: 1px; border-color: #c9ced6; }
+                                  border-width: 1px; border-color: #c9ced6;
+                                  border-style: solid; display: inline-block;
+                                  color: #202124; }
+input, select { width: 190px; }
+input[type=text], input[type=search], input[type=email], input[type=url],
+input[type=password], input[type=tel], input[type=number] { background-color: #ffffff; }
+textarea { width: 280px; height: 64px; }
+button, input[type=submit], input[type=button], input[type=reset] {
+  width: auto; text-align: center; }
+input[type=checkbox], input[type=radio] { width: 13px; height: 13px; padding: 0; }
+input[type=hidden] { display: none; }
 mark { background-color: #fff3a3; }
 """

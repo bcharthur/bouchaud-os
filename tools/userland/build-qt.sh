@@ -44,6 +44,12 @@ PREFIX=$WORK/install
 SRC=$WORK/qtbase-everywhere-src-$QTVER
 QTURL=${QTURL:-http://archive.ubuntu.com/ubuntu/pool/universe/q/qtbase-opensource-src/qtbase-opensource-src_${QTVER}+dfsg.orig.tar.xz}
 
+# QtSvg est un module a part, absent de qtbase. Sans lui, `QImage` ne lit pas le
+# SVG — et un site recent y met son logo, ses icones et ses pictogrammes. Ils
+# manquaient tous a l'affichage, sans le moindre message.
+SRC_SVG=$WORK/qtsvg-everywhere-src-$QTVER
+SVGURL=${SVGURL:-http://archive.ubuntu.com/ubuntu/pool/universe/q/qtsvg-opensource-src/qtsvg-opensource-src_${QTVER}.orig.tar.xz}
+
 # La source Ubuntu est expurgee de ses bibliotheques tierces embarquees (c'est
 # le sens du suffixe `+dfsg`) : freetype, libpng, pcre2 et zlib doivent venir du
 # systeme, en version statique.
@@ -109,6 +115,33 @@ EOF
 
     echo "== compilation (une vingtaine de minutes) =="
     make -j"$(nproc)" > make.log 2>&1 || { grep -m5 -i "error" make.log; exit 1; }
+    make install > install.log 2>&1
+    cd "$ROOT"
+
+    construit_svg
+}
+
+# QtSvg se construit apres qtbase, avec le qmake que celui-ci vient d'installer.
+# Il produit `plugins/imageformats/libqsvg.a`, que le navigateur lie en dur
+# comme les autres greffons d'image.
+construit_svg() {
+    if [ -f "$PREFIX/plugins/imageformats/libqsvg.a" ]; then
+        return
+    fi
+    cd "$WORK"
+    [ -f qtsvg.tar.xz ] || curl -fL -o qtsvg.tar.xz "$SVGURL" || {
+        echo "qtsvg introuvable : le navigateur se passera du SVG" >&2
+        cd "$ROOT"; return
+    }
+    [ -d "qtsvg-everywhere-src-$QTVER" ] || tar xf qtsvg.tar.xz
+
+    echo "== module SVG =="
+    mkdir -p build-svg && cd build-svg
+    "$PREFIX/bin/qmake" "$SRC_SVG" > qmake.log 2>&1 || {
+        echo "qmake a echoue sur qtsvg — voir $PWD/qmake.log" >&2
+        cd "$ROOT"; return
+    }
+    make -j"$(nproc)" > make.log 2>&1 || { grep -m5 -i "error" make.log; cd "$ROOT"; return; }
     make install > install.log 2>&1
     cd "$ROOT"
 }
