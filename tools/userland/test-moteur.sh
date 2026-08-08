@@ -37,6 +37,10 @@ fi
 
 cp -r navigateur/moteur "$WORK/"
 cp navigateur/test_moteur.py "$WORK/"
+# `suivi.py` voyage avec : ses verifications protegent le tableau de bord
+# lui-meme, qui n'affiche pas d'erreur quand il lit mal — seulement
+# « indisponible », ce qui se lit comme une journee calme.
+cp navigateur/suivi.py "$WORK/"
 # Les pages temoins voyagent avec les verifications : sans elles, le scenario
 # de formulaire se croyait absent et se sautait en silence — une verification
 # qui ne s'execute pas est pire qu'une verification qui echoue.

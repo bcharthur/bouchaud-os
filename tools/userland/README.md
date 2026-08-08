@@ -36,6 +36,55 @@ syscalls              # les 107 appels implémentés, par famille
 strace on             # trace des appels système sur COM1
 ```
 
+## Suivi — la commande à lancer d'abord
+
+```
+./tools/userland/suivi.sh              # tout : moteur, hôte Qt, témoins, sites réels
+./tools/userland/suivi.sh --rapide     # sans réseau ni Qt, quelques secondes
+./tools/userland/suivi.sh --histoire   # la trajectoire, sans rien relancer
+./tools/userland/suivi.sh --strict     # sort en erreur si une mesure surveillée recule
+```
+
+Le dépôt savait déjà se vérifier, mais en trois commandes qui ne se parlaient
+pas : `test-moteur.sh` comptait des assertions, `verifie-hote.sh` des pixels,
+`compatibilite.py` des manques. Aucune ne disait si le navigateur allait **mieux
+qu'hier**, et c'est pourtant la seule question qui compte sur la durée.
+
+`suivi.sh` les lance toutes, range leurs nombres au même endroit, et les compare
+à la dernière exécution de même portée. Chaque ligne porte donc la valeur,
+l'écart, et le sens de cet écart :
+
+```
+  Compatibilite CSS
+    declarations ignorees                           322          -48  mieux
+      dont proprietes BLOQUANTES                      3           -8  mieux
+    selecteurs non compiles                          34          -52  mieux
+
+  JavaScript et interactivite
+    erreurs JavaScript                                0           -1  mieux
+    ecouteurs poses par les pages                    16          +16  mieux
+```
+
+Toutes les mesures ne s'améliorent pas dans la même direction — les
+déclarations ignorées doivent baisser, les écouteurs posés doivent monter — donc
+chacune déclare son sens et le tableau dit « mieux » ou « pire » plutôt que de
+laisser deviner.
+
+L'historique vit dans `tools/userland/navigateur/tests/suivi.jsonl`, versionné
+avec le code. `git log -p` sur ce fichier raconte l'histoire de la compatibilité
+mieux qu'un journal écrit à la main, parce qu'il ne peut pas mentir.
+
+Une exécution `--rapide` n'est comparée qu'à une autre `--rapide` : la mettre
+en regard d'une exécution complète ferait passer l'absence des sites réels pour
+une amélioration spectaculaire.
+
+Ce qui n'est pas mesurable sur la machine — l'hôte Qt sans `qtbase5-dev`, les
+sites réels derrière un proxy fermé — est annoncé comme **non mesuré**, jamais
+compté comme réussi.
+
+Codes de retour : `0` tout passe, `1` des vérifications échouent, `2` recul sur
+une mesure surveillée en mode `--strict`.
+
 ## Vérification automatique
 
 ```

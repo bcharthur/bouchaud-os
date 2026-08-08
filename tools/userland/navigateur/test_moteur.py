@@ -3896,6 +3896,84 @@ def verifie_pointeur_transparent():
          identifiant_a(48.0, 48.0), "dedans")
 
 
+def verifie_tableau_de_bord():
+    """Le suivi lui-meme : s'il lit mal, il annonce « tout va bien » a tort.
+
+    Un tableau de bord qui echoue a extraire un chiffre n'affiche pas d'erreur,
+    il affiche « indisponible » — et une suite de « indisponible » se lit comme
+    une suite de journees calmes. Ces verifications-la protegent donc le
+    dernier endroit ou personne ne penserait a regarder.
+    """
+    import importlib.util
+
+    chemin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "suivi.py")
+    if not os.path.exists(chemin):
+        verifie("suivi: le programme est present", False, chemin)
+        return
+    cahier = importlib.util.spec_from_file_location("suivi", chemin)
+    suivi = importlib.util.module_from_spec(cahier)
+    cahier.loader.exec_module(suivi)
+
+    # Les deux formes que produisent `test_moteur.py` et `verifie_hote.cpp`.
+    egal("suivi: lecture d'un bilan reussi",
+         suivi._bilan("RESULTAT : 0 verification(s) en echec (731 passees)"),
+         (731, 0))
+    egal("suivi: lecture d'un bilan en echec",
+         suivi._bilan("RESULTAT : 3 verification(s) en echec sur 731"),
+         (728, 3))
+    egal("suivi: une sortie sans bilan ne s'invente pas",
+         suivi._bilan("la compilation a echoue"), None)
+    egal("suivi: le bilan se trouve au milieu du bruit",
+         suivi._bilan("bla\nRESULTAT : 0 verification(s) en echec (12 passees)\nbla"),
+         (12, 0))
+
+    # Le sens des ecarts : c'est lui qui decide si un chiffre est une bonne ou
+    # une mauvaise nouvelle, et se tromper de sens rendrait le tableau nuisible.
+    style = suivi.Style(False)
+    for cle, avant, apres, attendu in (
+            ("css.declarations_ignorees", 370, 322, "mieux"),
+            ("css.declarations_ignorees", 322, 370, "pire"),
+            ("moteur.passees", 658, 731, "mieux"),
+            ("moteur.passees", 731, 658, "pire"),
+            ("interactions.ecouteurs", 0, 16, "mieux"),
+            ("js.erreurs", 0, 1, "pire"),
+            ("page.boites", 100, 200, None)):
+        _, jugement = suivi._ecart(cle, apres, {cle: avant}, style)
+        egal("suivi: %s %d->%d" % (cle, avant, apres), jugement, attendu)
+
+    _, jugement = suivi._ecart("js.erreurs", 3, {"js.erreurs": 3}, style)
+    egal("suivi: une valeur inchangee n'est ni mieux ni pire", jugement, None)
+    texte, jugement = suivi._ecart("js.erreurs", 3, None, style)
+    egal("suivi: sans passe, rien a comparer", jugement, None)
+    egal("suivi: et cela se dit", texte, "nouveau")
+
+    # Chaque mesure affichee doit declarer un sens connu, sinon elle s'imprime
+    # sans jugement et le lecteur doit deviner.
+    for cle, libelle, sens in suivi.MESURES:
+        if cle == "__section__":
+            continue
+        verifie("suivi: %s a un sens declare" % cle,
+                sens in (suivi.BAS, suivi.HAUT, None), sens)
+        verifie("suivi: %s porte un libelle" % cle, bool(libelle))
+
+    # Les mesures surveillees par `--strict` doivent exister dans la table.
+    connues = {cle for cle, _, _ in suivi.MESURES}
+    for cle in suivi.SURVEILLEES:
+        verifie("suivi: la mesure surveillee %s existe" % cle, cle in connues)
+
+    # Comparer deux portees differentes ferait passer l'absence des sites reels
+    # pour une amelioration spectaculaire.
+    histoire = [{"portee": "complet", "mesures": {"a": 1}},
+                {"portee": "rapide", "mesures": {"a": 2}},
+                {"portee": "complet", "mesures": {"a": 3}}]
+    egal("suivi: on ne compare qu'a une execution de meme portee",
+         suivi.precedente(histoire, "complet")["mesures"]["a"], 3)
+    egal("suivi: et la portee rapide a la sienne",
+         suivi.precedente(histoire, "rapide")["mesures"]["a"], 2)
+    egal("suivi: une portee jamais vue n'a pas de passe",
+         suivi.precedente(histoire, "inconnue"), None)
+
+
 # --- Securite web -------------------------------------------------------------
 
 def verifie_politique_ressources():
@@ -4298,6 +4376,7 @@ def principal():
         verifie_temoins_httponly,
         verifie_temoins_document,
         verifie_redirection_entetes,
+        verifie_tableau_de_bord,
         verifie_hote_reel,
     ):
         nom = verification.__name__.replace("verifie_", "")

@@ -4,10 +4,25 @@ Ce document remplace l'intuition par la mesure. Chaque affirmation qu'il
 contient est reproductible avec les outils du dépôt :
 
 ```bash
-./tools/userland/test-moteur.sh                       # 731 vérifications
+./tools/userland/suivi.sh                    # tout, avec l'écart depuis la dernière fois
+./tools/userland/suivi.sh --rapide           # sans réseau ni Qt, quelques secondes
+./tools/userland/suivi.sh --histoire         # la trajectoire
+```
+
+`suivi.sh` est le point d'entrée : il enchaîne les trois vérifications
+ci-dessous, range leurs nombres au même endroit et les compare à la dernière
+exécution de même portée, en disant pour chaque ligne si l'écart est « mieux »
+ou « pire ». L'historique est versionné dans
+`tools/userland/navigateur/tests/suivi.jsonl`. `--strict` sort en erreur sur un
+recul, ce qui en fait une barrière utilisable en intégration continue.
+
+Les outils qu'il appelle restent utilisables seuls :
+
+```bash
+./tools/userland/test-moteur.sh                       # 805 vérifications
 ./tools/userland/verifie-hote.sh                      # 31 contrôles de pixels, Qt réel
 cd tools/userland/navigateur
-python3 compatibilite.py --corpus --fixtures          # rapport de compatibilité
+python3 compatibilite.py --corpus --fixtures          # rapport de compatibilité détaillé
 python3 apercu.py https://pypi.org/ -o pypi.png       # rendu, sans Qt
 ```
 
