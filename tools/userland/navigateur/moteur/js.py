@@ -307,6 +307,28 @@ class Contexte:
         parent = nœud.parent if nœud else None
         return self._identifiant(parent) if parent else None
 
+    def _op_contient(self, identifiant_ancetre, identifiant):
+        """L'ancetre contient-il ce nœud ? Un seul passage du pont, pas un par niveau.
+
+        La remontee se faisait cote JavaScript, `parentNode` apres
+        `parentNode`, donc un aller-retour par niveau d'arbre. Comme chaque
+        `setAttribute` demande a chaque `MutationObserver` a portee d'arbre s'il
+        est concerne, et qu'un cadre applicatif en pose un sur la racine, une
+        page de pypi.org faisait **900 000 traversees du pont** pour se
+        construire. La remontee est la meme ; c'est le nombre d'appels qui
+        change.
+        """
+        ancetre = self._noeud(identifiant_ancetre)
+        nœud = self._noeud(identifiant)
+        if ancetre is None or nœud is None:
+            return False
+        courant = nœud
+        while courant is not None:
+            if courant is ancetre:
+                return True
+            courant = courant.parent
+        return False
+
     def _op_enfants(self, identifiant, elements_seulement):
         element = self._element(identifiant)
         if not element:

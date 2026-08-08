@@ -37,6 +37,11 @@ fi
 
 cp -r navigateur/moteur "$WORK/"
 cp navigateur/test_moteur.py "$WORK/"
+# Les pages temoins voyagent avec les verifications : sans elles, le scenario
+# de formulaire se croyait absent et se sautait en silence — une verification
+# qui ne s'execute pas est pire qu'une verification qui echoue.
+rm -rf "$WORK/tests"
+cp -r navigateur/tests "$WORK/"
 
 cd "$WORK"
 exec python3 test_moteur.py "$@"

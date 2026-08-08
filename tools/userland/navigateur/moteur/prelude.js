@@ -40,8 +40,38 @@
         }
     }
 
+    // `console.error("%s\n\n%o", message, objet)` est la forme qu'emploient les
+    // cadres applicatifs pour leurs messages d'erreur. Sans substitution, le
+    // diagnostic arrivait litteralement sous la forme « %s\n\n%o » suivi des
+    // valeurs — illisible au moment precis ou l'on en a le plus besoin.
+    const _SUBSTITUTION = /%[sdifoOc%]/g;
+
+    function substitue(gabarit, arguments_) {
+        let index = 1;
+        const rendu = gabarit.replace(_SUBSTITUTION, (marque) => {
+            if (marque === "%%") return "%";
+            if (marque === "%c") { index++; return ""; }  // style CSS : ignore
+            if (index >= arguments_.length) return marque;
+            const valeur = arguments_[index++];
+            if (marque === "%s") return String(valeur);
+            if (marque === "%d" || marque === "%i") return String(parseInt(valeur, 10));
+            if (marque === "%f") return String(parseFloat(valeur));
+            return formate(valeur, 1);
+        });
+        const restants = Array.prototype.slice.call(arguments_, index)
+            .map((v) => formate(v));
+        return restants.length ? rendu + " " + restants.join(" ") : rendu;
+    }
+
     function journalise(niveau) {
         return function () {
+            if (typeof arguments[0] === "string" &&
+                    _SUBSTITUTION.test(arguments[0])) {
+                _SUBSTITUTION.lastIndex = 0;
+                appel("console", niveau, substitue(arguments[0], arguments));
+                return;
+            }
+            _SUBSTITUTION.lastIndex = 0;
             const morceaux = Array.prototype.map.call(arguments, (v) => formate(v));
             appel("console", niveau, morceaux.join(" "));
         };
@@ -181,12 +211,9 @@
             deconnecte(this);
         }
         contains(autre) {
-            let courant = autre;
-            while (courant) {
-                if (courant === this) return true;
-                courant = courant.parentNode;
-            }
-            return false;
+            if (!autre || autre.__id === undefined) return false;
+            if (autre.__id === this.__id) return true;
+            return !!appel("contient", this.__id, autre.__id);
         }
         cloneNode(profond) { return noeud(appel("clone", this.__id, !!profond)); }
 
@@ -266,6 +293,61 @@
     }
 
     /// `element.classList`.
+    /// `element.dataset` : la vue objet des attributs `data-*`.
+    ///
+    /// Absent, il ne degradait pas — il arretait. `t.dataset.dropdownBound`
+    /// leve une `TypeError` sur `undefined`, et le script entier de la page
+    /// meurt a cette ligne. C'est ainsi que pypi.org perdait ses menus, ses
+    /// onglets et ses dix-huit ecouteurs.
+    ///
+    /// Un `Proxy` plutot qu'une copie : les attributs changent sous nos pieds
+    /// — un autre script, un `setAttribute`, le moteur lui-meme — et une copie
+    /// rendrait des valeurs perimees. La conversion de nom suit la norme :
+    /// `data-dropdown-bound` devient `dropdownBound` et retour.
+    function nomDeDonnee(cle) {
+        return "data-" + String(cle).replace(/[A-Z]/g, (c) => "-" + c.toLowerCase());
+    }
+
+    function cleDeDonnee(nom) {
+        return nom.slice("data-".length)
+            .replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+    }
+
+    function fabriqueDataset(element) {
+        return new Proxy({}, {
+            get(_, cle) {
+                if (typeof cle !== "string") return undefined;
+                const valeur = element.getAttribute(nomDeDonnee(cle));
+                return valeur === null ? undefined : valeur;
+            },
+            set(_, cle, valeur) {
+                element.setAttribute(nomDeDonnee(cle), String(valeur));
+                return true;
+            },
+            has(_, cle) {
+                return typeof cle === "string" &&
+                    element.getAttribute(nomDeDonnee(cle)) !== null;
+            },
+            deleteProperty(_, cle) {
+                element.removeAttribute(nomDeDonnee(cle));
+                return true;
+            },
+            ownKeys() {
+                const noms = appel("attributs", element.__id) || {};
+                return Object.keys(noms)
+                    .filter((n) => n.startsWith("data-"))
+                    .map(cleDeDonnee);
+            },
+            getOwnPropertyDescriptor(_, cle) {
+                if (typeof cle !== "string") return undefined;
+                const valeur = element.getAttribute(nomDeDonnee(cle));
+                if (valeur === null) return undefined;
+                return { value: valeur, writable: true, enumerable: true,
+                         configurable: true };
+            },
+        });
+    }
+
     class ListeClasses {
         constructor(element) { this.__element = element; }
         __lit() {
@@ -330,6 +412,14 @@
         set className(valeur) { this.setAttribute("class", valeur); }
         get classList() { return new ListeClasses(this); }
 
+        get dataset() {
+            // Memorise par element : `el.dataset.a = 1; el.dataset.b = 2` doit
+            // agir sur le meme objet, et un `Proxy` neuf a chaque lecture
+            // fonctionnerait mais couterait pour rien.
+            if (!this.__dataset) this.__dataset = fabriqueDataset(this);
+            return this.__dataset;
+        }
+
         get innerHTML() { return appel("html", this.__id); }
         set innerHTML(valeur) {
             appel("poseHtml", this.__id, String(valeur));
@@ -389,8 +479,77 @@
 
         // Champs de formulaire : `value` est ce que le JavaScript lit et ecrit
         // le plus souvent apres le texte.
-        get value() { return this.getAttribute("value") || ""; }
-        set value(v) { this.setAttribute("value", v); }
+        //
+        // Trois elements ne rangent pas leur valeur dans un attribut `value`,
+        // et les traiter comme les autres rendait la chaine vide : un `<select>`
+        // porte la sienne dans l'option choisie, un `<textarea>` dans son texte,
+        // une `<option>` sans attribut vaut son propre libelle. C'est le
+        // scenario de connexion qui l'a montre — `espace` revenait vide alors
+        // que la page avait bien preselectionne « equipe ».
+        get value() {
+            const balise = this.tagName.toLowerCase();
+            if (balise === "select") {
+                const choisie = this.__optionChoisie();
+                return choisie ? choisie.value : "";
+            }
+            if (balise === "textarea") {
+                return this.hasAttribute("value")
+                    ? this.getAttribute("value") : this.textContent;
+            }
+            if (balise === "option") {
+                return this.hasAttribute("value")
+                    ? this.getAttribute("value") : (this.textContent || "").trim();
+            }
+            return this.getAttribute("value") || "";
+        }
+        set value(v) {
+            if (this.tagName.toLowerCase() === "select") {
+                // Choisir par valeur, comme le fait `select.value = "x"` :
+                // l'option correspondante devient la selectionnee, et aucune
+                // autre ne l'est.
+                let trouvee = false;
+                for (const option of this.__options()) {
+                    const correspond = !trouvee && option.value === String(v);
+                    if (correspond) trouvee = true;
+                    if (correspond) option.setAttribute("selected", "");
+                    else option.removeAttribute("selected");
+                }
+                return;
+            }
+            this.setAttribute("value", String(v));
+        }
+        __options() {
+            return this.getElementsByTagName
+                ? Array.prototype.slice.call(this.querySelectorAll("option"))
+                : [];
+        }
+        __optionChoisie() {
+            const options = this.__options();
+            for (const option of options)
+                if (option.hasAttribute("selected")) return option;
+            // Sans attribut `selected`, un `<select>` simple choisit sa premiere
+            // option — c'est ce qu'affiche le navigateur, donc ce que le
+            // formulaire enverra.
+            return options.length && !this.hasAttribute("multiple") ? options[0] : null;
+        }
+        get options() { return this.__options(); }
+        get selectedIndex() {
+            const options = this.__options();
+            const choisie = this.__optionChoisie();
+            return choisie ? options.indexOf(choisie) : -1;
+        }
+        set selectedIndex(index) {
+            const options = this.__options();
+            options.forEach((option, rang) => {
+                if (rang === Number(index)) option.setAttribute("selected", "");
+                else option.removeAttribute("selected");
+            });
+        }
+        get selected() { return this.hasAttribute("selected"); }
+        set selected(v) {
+            if (v) this.setAttribute("selected", "");
+            else this.removeAttribute("selected");
+        }
         get checked() { return this.hasAttribute("checked"); }
         set checked(v) { if (v) this.setAttribute("checked", ""); else this.removeAttribute("checked"); }
         get disabled() { return this.hasAttribute("disabled"); }
@@ -1555,15 +1714,39 @@
     globalThis.sessionStorage = stockageDeSession();
     globalThis.Storage = Object;
 
+    // `navigator` porte une trentaine de champs dont la plupart ne servent a
+    // rien — sauf qu'un script les lit sans les tester. `appVersion` en est
+    // l'exemple exact : `navigator.appVersion.includes(…)` est la ligne qui
+    // tuait tout le JavaScript de pypi.org, et avec lui les dix-huit ecouteurs
+    // que la page voulait poser. Un champ absent ne degrade pas, il arrete.
+    const AGENT = "Mozilla/5.0 (Bouchaud OS; x86_64) BoNavigateur/1.0";
     globalThis.navigator = {
-        userAgent: "Mozilla/5.0 (Bouchaud OS; x86_64) BoNavigateur/1.0",
+        userAgent: AGENT,
+        // `appVersion` est l'agent utilisateur ampute de son prefixe
+        // « Mozilla/ », ce que tout navigateur rend depuis trente ans.
+        appVersion: AGENT.slice("Mozilla/".length),
         appName: "Netscape",
+        appCodeName: "Mozilla",
+        product: "Gecko",
+        productSub: "20030107",
+        vendor: "",
+        vendorSub: "",
         platform: "BouchaudOS",
+        oscpu: "BouchaudOS x86_64",
         language: "fr-FR",
         languages: ["fr-FR", "fr", "en"],
         onLine: true,
         cookieEnabled: true,
+        doNotTrack: null,
+        webdriver: false,
+        maxTouchPoints: 0,
+        hardwareConcurrency: 1,
+        pdfViewerEnabled: false,
+        plugins: [],
+        mimeTypes: [],
         userAgentData: undefined,
+        javaEnabled: function () { return false; },
+        taintEnabled: function () { return false; },
     };
 
     const taille = appel("tailleVue") || { width: 1280, height: 720 };
@@ -1737,12 +1920,8 @@
     }
 
     function descendDe(nœud, ancetre) {
-        let courant = nœud && nœud.parentNode;
-        while (courant) {
-            if (courant.__id === ancetre.__id) return true;
-            courant = courant.parentNode;
-        }
-        return false;
+        if (!nœud || !ancetre || nœud.__id === ancetre.__id) return false;
+        return !!appel("contient", ancetre.__id, nœud.__id);
     }
 
     globalThis.MutationObserver = MutationObserver;
@@ -1888,6 +2067,93 @@
     };
 
 
+    // --- Formulaires --------------------------------------------------------
+    //
+    // `new FormData(formulaire)` est la facon dont un site envoie un
+    // formulaire sans recharger la page. Sans elle, le code de soumission
+    // leve, et c'est tout l'envoi qui tombe — pas seulement l'encodage.
+    //
+    // Les regles d'inclusion sont celles de la norme, et elles comptent :
+    // un champ sans `name` n'est pas envoye, une case non cochee non plus,
+    // un champ desactive non plus. Les inclure ferait recevoir au serveur des
+    // valeurs que l'utilisateur n'a pas donnees.
+
+    function champsDuFormulaire(formulaire) {
+        if (!formulaire || !formulaire.querySelectorAll) return [];
+        const champs = formulaire.querySelectorAll("input, select, textarea");
+        const retenus = [];
+        for (const champ of champs) {
+            const nom = champ.getAttribute("name");
+            if (!nom || champ.disabled) continue;
+            const type = (champ.getAttribute("type") || "").toLowerCase();
+            if (type === "submit" || type === "button" || type === "reset"
+                    || type === "image" || type === "file") continue;
+            if ((type === "checkbox" || type === "radio") && !champ.checked) continue;
+            let valeur = champ.value;
+            if ((type === "checkbox" || type === "radio") && valeur === "")
+                valeur = "on";
+            retenus.push([nom, valeur]);
+        }
+        return retenus;
+    }
+
+    class FormData {
+        constructor(formulaire) {
+            this.__paires = formulaire ? champsDuFormulaire(formulaire) : [];
+        }
+        append(nom, valeur) { this.__paires.push([String(nom), String(valeur)]); }
+        set(nom, valeur) {
+            this.delete(nom);
+            this.append(nom, valeur);
+        }
+        get(nom) {
+            for (const [cle, valeur] of this.__paires)
+                if (cle === String(nom)) return valeur;
+            return null;
+        }
+        getAll(nom) {
+            return this.__paires.filter(([cle]) => cle === String(nom))
+                .map(([, valeur]) => valeur);
+        }
+        has(nom) { return this.get(nom) !== null; }
+        delete(nom) {
+            this.__paires = this.__paires.filter(([cle]) => cle !== String(nom));
+        }
+        forEach(fonction, contexte) {
+            for (const [cle, valeur] of this.__paires.slice())
+                fonction.call(contexte, valeur, cle, this);
+        }
+        *entries() { for (const paire of this.__paires.slice()) yield paire; }
+        *keys() { for (const [cle] of this.__paires.slice()) yield cle; }
+        *values() { for (const [, valeur] of this.__paires.slice()) yield valeur; }
+        [Symbol.iterator]() { return this.entries(); }
+        toString() {
+            // Ce que `fetch(url, {body: formData})` envoie faute de contenu
+            // multipart : la meme chose qu'un formulaire ordinaire.
+            return this.__paires
+                .map(([c, v]) => encodeURIComponent(c) + "=" + encodeURIComponent(v))
+                .join("&");
+        }
+    }
+
+    globalThis.FormData = FormData;
+
+    globalThis.URLSearchParams = class URLSearchParams extends FormData {
+        constructor(source) {
+            super(null);
+            const texte = String(source || "").replace(/^[?]/, "");
+            if (!texte) return;
+            for (const morceau of texte.split("&")) {
+                if (!morceau) continue;
+                const coupe = morceau.indexOf("=");
+                const cle = coupe < 0 ? morceau : morceau.slice(0, coupe);
+                const valeur = coupe < 0 ? "" : morceau.slice(coupe + 1);
+                this.__paires.push([decodeURIComponent(cle.replace(/\+/g, " ")),
+                                    decodeURIComponent(valeur.replace(/\+/g, " "))]);
+            }
+        }
+    };
+
     // --- Mesure de compatibilite --------------------------------------------
     //
     // Le moteur ne sait pas tout faire, et jusqu'ici il ne savait pas dire ce
@@ -1978,8 +2244,9 @@
         const noms = prefixe === "navigator"
             ? ["clipboard", "geolocation", "mediaDevices", "serviceWorker",
                "permissions", "credentials", "storage", "share", "sendBeacon",
-               "connection", "hardwareConcurrency", "deviceMemory", "onLine",
-               "languages", "cookieEnabled", "webdriver"]
+               "connection", "deviceMemory", "locks", "usb", "bluetooth",
+               "wakeLock", "xr", "gpu", "presentation", "scheduling",
+               "registerProtocolHandler", "getBattery", "vibrate", "buildID"]
             : prefixe === "history"
                 ? ["pushState", "replaceState", "state", "scrollRestoration", "go"]
                 : ["replace", "assign", "reload", "ancestorOrigins"];

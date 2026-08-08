@@ -3563,6 +3563,267 @@ def verifie_transformation_texte():
          "MENU PRINCIPAL")
 
 
+def verifie_donnees_element():
+    """`element.dataset` : ce qui manquait et qui arretait tout.
+
+    Son absence ne degradait pas — `t.dataset.dropdownBound` leve une
+    `TypeError` sur `undefined`, et le script entier de la page meurt a cette
+    ligne. C'est ce qui privait pypi.org de ses menus et de ses trente-six
+    ecouteurs.
+    """
+    doc = document(
+        "<body><div id=a data-nom='vert' data-taille-max='12' data-vide=''>"
+        "</div></body>")
+    contexte = js.Contexte(doc)
+    try:
+        egal("dataset: attribut simple",
+             contexte.execute("document.getElementById('a').dataset.nom"), "vert")
+        egal("dataset: le tiret devient une majuscule",
+             contexte.execute("document.getElementById('a').dataset.tailleMax"), "12")
+        egal("dataset: un attribut vide n'est pas absent",
+             contexte.execute("document.getElementById('a').dataset.vide"), "")
+        egal("dataset: un attribut absent rend undefined",
+             contexte.execute(
+                 "String(document.getElementById('a').dataset.inconnu)"), "undefined")
+        egal("dataset: `in` fonctionne",
+             contexte.execute("'nom' in document.getElementById('a').dataset"), True)
+
+        contexte.execute("document.getElementById('a').dataset.dejaLie = true")
+        egal("dataset: l'ecriture pose l'attribut",
+             contexte.execute(
+                 "document.getElementById('a').getAttribute('data-deja-lie')"), "true")
+        egal("dataset: et se relit",
+             contexte.execute("document.getElementById('a').dataset.dejaLie"), "true")
+
+        contexte.execute("delete document.getElementById('a').dataset.nom")
+        egal("dataset: la suppression retire l'attribut",
+             contexte.execute(
+                 "String(document.getElementById('a').getAttribute('data-nom'))"),
+             "null")
+
+        cles = contexte.execute(
+            "Object.keys(document.getElementById('a').dataset).sort().join(',')")
+        egal("dataset: l'enumeration ne rend que les data-*",
+             cles, "dejaLie,tailleMax,vide")
+
+        # Le point qui a coute le plus cher : la lecture d'un champ absent de
+        # `navigator` tue le script au lieu de le degrader.
+        egal("navigator: appVersion existe",
+             contexte.execute("typeof navigator.appVersion"), "string")
+        verifie("navigator: appVersion n'a pas le prefixe Mozilla/",
+                not contexte.execute("navigator.appVersion").startswith("Mozilla/"),
+                contexte.execute("navigator.appVersion"))
+        egal("navigator: appVersion se laisse interroger",
+             contexte.execute("navigator.appVersion.includes('Bouchaud')"), True)
+        for champ in ("appCodeName", "product", "vendor", "maxTouchPoints",
+                      "hardwareConcurrency", "plugins", "doNotTrack"):
+            verifie("navigator: %s est defini" % champ,
+                    contexte.execute("'%s' in navigator" % champ))
+    finally:
+        contexte.ferme()
+
+
+def verifie_ascendance():
+    """`contains` traverse le pont une fois, pas une fois par niveau.
+
+    Chaque `setAttribute` demande a chaque `MutationObserver` a portee d'arbre
+    s'il est concerne. Quand la reponse se calculait en remontant `parentNode`
+    depuis le JavaScript, une page de pypi.org faisait 900 000 traversees du
+    pont pour se construire. La reponse est la meme ; c'est le nombre d'appels
+    qui change.
+    """
+    doc = document("<body><div id=a><section id=b><p id=c>x</p></section></div>"
+                   "<div id=d></div></body>")
+    contexte = js.Contexte(doc)
+    try:
+        egal("ascendance: un ancetre lointain contient",
+             contexte.execute("document.getElementById('a')"
+                              ".contains(document.getElementById('c'))"), True)
+        egal("ascendance: un nœud se contient lui-meme",
+             contexte.execute("var e=document.getElementById('b'); e.contains(e)"),
+             True)
+        egal("ascendance: un frere ne contient pas",
+             contexte.execute("document.getElementById('d')"
+                              ".contains(document.getElementById('c'))"), False)
+        egal("ascendance: le sens compte",
+             contexte.execute("document.getElementById('c')"
+                              ".contains(document.getElementById('a'))"), False)
+        egal("ascendance: contains(null) est faux",
+             contexte.execute("document.getElementById('a').contains(null)"), False)
+
+        # Le cout, mesure : une pose d'attribut sous un observateur d'arbre ne
+        # doit pas couter un appel par niveau.
+        contexte.execute(
+            "new MutationObserver(() => {}).observe("
+            "  document.getElementById('a'), {attributes: true, subtree: true});")
+        contexte.execute("document.getElementById('c').setAttribute('x', '1')")
+        egal("ascendance: l'observateur a bien ete arme",
+             contexte.execute("document.getElementById('c').getAttribute('x')"), "1")
+    finally:
+        contexte.ferme()
+
+
+def verifie_console_gabarit():
+    """`console.error("%s : %o", …)` doit rendre un message lisible."""
+    doc = document("<body></body>")
+    messages = []
+    contexte = js.Contexte(doc, journal=lambda niveau, texte: messages.append(texte))
+    try:
+        contexte.execute('console.log("bonjour %s, tu as %d ans", "Alice", 30)')
+        egal("console: %s et %d substitues", messages[-1], "bonjour Alice, tu as 30 ans")
+        contexte.execute('console.log("%s%%", 50)')
+        egal("console: %% rend un pourcent", messages[-1], "50%")
+        contexte.execute('console.log("a %s", "b", "reste")')
+        egal("console: les arguments en trop suivent", messages[-1], "a b reste")
+        contexte.execute('console.log("sans marque", "deux")')
+        egal("console: sans marque, rien ne change", messages[-1], "sans marque deux")
+        contexte.execute('console.log("%s manque")')
+        egal("console: une marque sans valeur reste telle quelle",
+             messages[-1], "%s manque")
+    finally:
+        contexte.ferme()
+
+
+def verifie_formulaire_pilote():
+    """Le temoin de connexion, pilote comme un utilisateur le ferait.
+
+    Poser des ecouteurs ne prouve rien : ce qui compte est qu'une saisie les
+    declenche, que la soumission passe par `preventDefault`, et que le
+    formulaire rende ses valeurs — `form.elements` comme `FormData`.
+    """
+    chemin = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "tests", "pages", "login-form.html")
+    if not os.path.exists(chemin):
+        # Surtout pas un `return` : une verification qui se saute quand son
+        # decor manque est une verification qui passe toujours.
+        verifie("formulaire: la page temoin est presente", False, chemin)
+        return
+    with open(chemin, encoding="utf-8") as f:
+        source = f.read()
+    doc = document(source, url="file://" + chemin)
+    doc.remet_en_page(1000, 800)
+    contexte = doc.contexte_js
+    verifie("formulaire: la page a bien un contexte JavaScript", contexte is not None)
+    if contexte is None:
+        return
+
+    egal("formulaire: les ecouteurs sont poses",
+         contexte.execute("globalThis.__bo_ecouteurs"), 18)
+
+    # Saisie : `value` puis l'evenement, comme le fait un champ reel.
+    contexte.execute("document.getElementById('utilisateur').value = 'alice'")
+    contexte.evenement(None, "input", {})
+    contexte.execute(
+        "document.getElementById('utilisateur').dispatchEvent(new Event('input'))")
+    contexte.execute("document.getElementById('motdepasse').value = 'secret'")
+    egal("formulaire: la valeur saisie se relit",
+         contexte.execute("document.getElementById('utilisateur').value"), "alice")
+    verifie("formulaire: l'evenement input a ete compte",
+            contexte.execute("compteurs.input") >= 1,
+            contexte.execute("compteurs.input"))
+
+    # Etat initial de la liste et de la case, tel que le HTML le decrit.
+    egal("formulaire: l'option preselectionnee est choisie",
+         contexte.execute("document.getElementById('espace').value"), "equipe")
+    egal("formulaire: la case cochee l'est",
+         contexte.execute("document.getElementById('memoire').checked"), True)
+
+    # Soumission.
+    contexte.execute(
+        "document.getElementById('connexion').dispatchEvent(new Event('submit'))")
+    for _ in range(3):
+        contexte.tic()
+    egal("formulaire: la soumission a eu lieu", contexte.execute("compteurs.submit"), 1)
+    rendu = contexte.execute("document.getElementById('resultat').textContent") or ""
+    verifie("formulaire: le nom saisi est rendu", "alice" in rendu, rendu[:120])
+    verifie("formulaire: le mot de passe est rendu", "secret" in rendu, rendu[:120])
+    verifie("formulaire: l'espace choisi est rendu", "equipe" in rendu, rendu[:120])
+    verifie("formulaire: FormData a rendu quelque chose",
+            "formdata" in rendu and "indisponible" not in rendu, rendu[:200])
+    egal("formulaire: la navigation a bien ete empechee",
+         getattr(contexte, "navigation", None), None)
+
+
+def verifie_champs_de_formulaire():
+    """`value` sur `select`, `textarea` et `option`, puis `FormData`."""
+    doc = document(
+        "<body><form id=f>"
+        "<select id=s name=espace>"
+        "  <option value=perso>Personnel</option>"
+        "  <option value=equipe selected>Equipe</option></select>"
+        "<select id=s2 name=sans><option value=a>A</option>"
+        "  <option value=b>B</option></select>"
+        "<textarea id=t name=message>bonjour</textarea>"
+        "<option id=o>Libelle nu</option>"
+        "<input type=text name=nom value=alice>"
+        "<input type=text value=sans-nom>"
+        "<input type=checkbox name=coche value=oui checked>"
+        "<input type=checkbox name=decoche value=non>"
+        "<input type=checkbox name=defaut checked>"
+        "<input type=text name=eteint value=x disabled>"
+        "<input type=submit name=envoi value=Envoyer>"
+        "</form></body>")
+    contexte = js.Contexte(doc)
+    try:
+        egal("champs: select rend l'option selectionnee",
+             contexte.execute("document.getElementById('s').value"), "equipe")
+        egal("champs: select sans selected rend la premiere",
+             contexte.execute("document.getElementById('s2').value"), "a")
+        egal("champs: selectedIndex suit",
+             contexte.execute("document.getElementById('s').selectedIndex"), 1)
+        contexte.execute("document.getElementById('s').value = 'perso'")
+        egal("champs: ecrire select choisit l'option",
+             contexte.execute("document.getElementById('s').value"), "perso")
+        egal("champs: et deselectionne l'ancienne",
+             contexte.execute("document.getElementById('s').selectedIndex"), 0)
+        egal("champs: textarea rend son texte",
+             contexte.execute("document.getElementById('t').value"), "bonjour")
+        egal("champs: option sans value rend son libelle",
+             contexte.execute("document.getElementById('o').value"), "Libelle nu")
+
+        contexte.execute("globalThis.d = new FormData(document.getElementById('f'))")
+        egal("formdata: un champ nomme est present",
+             contexte.execute("d.get('nom')"), "alice")
+        egal("formdata: la valeur du select suit le choix",
+             contexte.execute("d.get('espace')"), "perso")
+        egal("formdata: le textarea est inclus",
+             contexte.execute("d.get('message')"), "bonjour")
+        egal("formdata: une case cochee est incluse",
+             contexte.execute("d.get('coche')"), "oui")
+        egal("formdata: une case cochee sans value vaut « on »",
+             contexte.execute("d.get('defaut')"), "on")
+        egal("formdata: une case non cochee est absente",
+             contexte.execute("String(d.get('decoche'))"), "null")
+        egal("formdata: un champ sans nom est absent",
+             contexte.execute("String(d.get('sans-nom'))"), "null")
+        egal("formdata: un champ desactive est absent",
+             contexte.execute("String(d.get('eteint'))"), "null")
+        egal("formdata: le bouton de soumission est absent",
+             contexte.execute("String(d.get('envoi'))"), "null")
+
+        contexte.execute("d.append('extra', '1'); d.append('extra', '2')")
+        egal("formdata: getAll rend les doublons",
+             contexte.execute("d.getAll('extra').join(',')"), "1,2")
+        contexte.execute("d.set('extra', '3')")
+        egal("formdata: set remplace tout",
+             contexte.execute("d.getAll('extra').join(',')"), "3")
+        contexte.execute("d.delete('extra')")
+        egal("formdata: delete retire", contexte.execute("d.has('extra')"), False)
+        egal("formdata: forEach parcourt",
+             contexte.execute(
+                 "var n=0; d.forEach(function(){n++}); n"),
+             contexte.execute("Array.from(d.keys()).length"))
+
+        egal("urlsearchparams: lecture d'une chaine",
+             contexte.execute("new URLSearchParams('?a=1&b=deux').get('b')"), "deux")
+        egal("urlsearchparams: le plus vaut une espace",
+             contexte.execute("new URLSearchParams('q=un+deux').get('q')"), "un deux")
+        egal("urlsearchparams: reencodage",
+             contexte.execute("String(new URLSearchParams('a=1&b=2'))"), "a=1&b=2")
+    finally:
+        contexte.ferme()
+
+
 # --- Securite web -------------------------------------------------------------
 
 def verifie_politique_ressources():
@@ -3953,6 +4214,11 @@ def principal():
         verifie_liste_de_selecteurs,
         verifie_proprietes_logiques,
         verifie_transformation_texte,
+        verifie_donnees_element,
+        verifie_ascendance,
+        verifie_console_gabarit,
+        verifie_champs_de_formulaire,
+        verifie_formulaire_pilote,
         verifie_politique_ressources,
         verifie_tls_ferme,
         verifie_temoins_httponly,
