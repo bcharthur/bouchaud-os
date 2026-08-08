@@ -26,6 +26,7 @@ son script est hostile.
 """
 
 import base64
+import collections
 import re
 import time
 import urllib.parse
@@ -96,6 +97,37 @@ def _ouvrante(element, morceaux):
 
 # --- Contexte -----------------------------------------------------------------
 
+# `Uncaught ReferenceError: foo is not defined`, sous les formes que QuickJS et
+# l'hote produisent.
+_NON_DEFINI = re.compile(
+    r"(?:ReferenceError:\s*)?['\"`]?([A-Za-z_$][\w$]*)['\"`]?\s+is not defined")
+
+# `x.closest is not a function` — on retient `closest`, le membre reclame. Un
+# `not a function` sans nom ne dit rien d'exploitable, et lui en inventer un
+# serait pire que d'admettre l'ignorance.
+_MEMBRE_NON_FONCTION = re.compile(
+    r"[\w$\].]*?\.([A-Za-z_$][\w$]*)\s+is not a function")
+
+# `TypeError: cannot read property 'includes' of undefined` — QuickJS nomme la
+# propriete ici, et c'est la forme la plus utile de toutes : c'est exactement
+# celle qui tuait le JavaScript de pypi.org. Le message ne dit pas si le trou
+# est dans le moteur ou dans la page, mais il nomme ce qu'il faut aller voir,
+# et l'exemple conserve garde la phrase entiere pour trancher.
+_PROPRIETE_INDEFINIE = re.compile(
+    r"cannot read property ['\"`]([^'\"`]+)['\"`] of (?:undefined|null)")
+
+_GENRES_ERREUR = ("TypeError", "RangeError", "SyntaxError", "ReferenceError",
+                  "URIError", "EvalError", "InternalError", "AggregateError")
+
+
+def _genre_erreur(texte):
+    """Le nom de l'erreur, pour regrouper. `Error` si rien ne se reconnait."""
+    for genre in _GENRES_ERREUR:
+        if genre in texte:
+            return genre
+    return "Error"
+
+
 class Contexte:
     """Le JavaScript d'un document : son interprete, ses nœuds, ses minuteries."""
 
@@ -104,6 +136,9 @@ class Contexte:
         self.journal = journal or (lambda niveau, texte: None)
         self.sale = False
         self.navigation = None
+        # Manques effectivement rencontres par cette page. Une API simplement
+        # absente du moteur n'est pas comptee tant qu'un script ne l'appelle pas.
+        self.diagnostics = collections.Counter()
 
         self._contexte = bojs.cree(budget_ms)
         bojs.pont(self._contexte, self.appel)
@@ -153,10 +188,11 @@ class Contexte:
             with telemetrie.chrono("javascript"):
                 return bojs.evalue(self._contexte, code, nom, module)
         except bojs.Erreur as e:
-            telemetrie.erreur_js(e, nom)
+            self._diagnostique_erreur(e, nom)
             self.journal("error", "%s : %s" % (nom, e))
         except Exception as e:  # noqa: BLE001 — une page ne doit pas tuer le navigateur
-            telemetrie.erreur_js(e, nom)
+            self._diagnostique_erreur(e, nom)
+            self.journal("error", "%s : %s" % (nom, e))
             self.journal("error", "%s : %s" % (nom, e))
         return None
 
@@ -223,10 +259,10 @@ class Contexte:
         try:
             return bojs.appelle(self._contexte, nom, arguments)
         except bojs.Erreur as e:
-            telemetrie.erreur_js(e, nom)
+            self._diagnostique_erreur(e, nom)
             self.journal("error", str(e))
         except Exception as e:  # noqa: BLE001
-            telemetrie.erreur_js(e, nom)
+            self._diagnostique_erreur(e, nom)
             self.journal("error", str(e))
         return None
 
@@ -236,11 +272,93 @@ class Contexte:
         """Un script est alle chercher une API que le moteur ne fournit pas.
 
         Appele depuis les accesseurs poses par le prelude. La valeur rendue
-        reste `undefined` cote JavaScript : la mesure n'infléchit pas ce qui
+        reste `undefined` cote JavaScript : la mesure n'inflechit pas ce qui
         est mesure.
         """
-        telemetrie.api_manquante(str(nom))
+        self.note(telemetrie.API_ABSENTE, str(nom))
         return None
+
+    def _op_creux(self, nom):
+        """Une API que le moteur *fournit* sans la faire.
+
+        Un moignon est souvent pire qu'une absence. La page ecrit
+        `if (history.pushState)`, obtient `true`, prend le chemin moderne — et
+        poursuit avec un navigateur dont l'etat ne correspond plus a ce qu'elle
+        croit. Une absence, elle, l'aurait fait retomber sur son plan de
+        secours. C'est pourquoi ces appels-la se comptent a part.
+        """
+        self.note(telemetrie.MOIGNON, str(nom))
+        return None
+
+    def note(self, categorie, cle, exemple=None):
+        """Enregistre un manque, pour cette page et pour la mesure globale.
+
+        Deux destinataires, un seul point d'appel. `self.diagnostics` sert le
+        rapport de la page — c'est lui que `rapport_compatibilite()` rend et que
+        l'apercu imprime. `telemetrie` sert l'agregation sur tout un corpus. Les
+        tenir a jour separement les aurait fait diverger au premier oubli.
+        """
+        self.diagnostics["%s:%s" % (categorie, cle)] += 1
+        telemetrie.note(categorie, cle, exemple)
+
+    def echec_ressource(self, destination, url, code, genre=""):
+        """Une sous-ressource qui n'est pas arrivee, quelle qu'elle soit.
+
+        Le compteur d'origine ne voyait que `fetch` et `XMLHttpRequest`. Or la
+        ressource dont l'echec compte le plus est ailleurs : un `<script src>`
+        principal en 404 vide la page de tout comportement, et le rapport
+        n'en disait rien. Chaque chargeur passe donc par ici, en nommant sa
+        destination — `script`, `module`, `stylesheet`, `image`, `font`,
+        `media`, `fetch`, `xhr` — pour qu'un bundle manquant se voie
+        immediatement.
+        """
+        self.diagnostics["ressource_echouee:%s" % destination] += 1
+        telemetrie.note(telemetrie.RESSOURCE_ECHOUEE, destination,
+                        "%s %s %s" % (code or 0, genre or "", url))
+
+    def _diagnostique_erreur(self, erreur, source=None):
+        """Classe une erreur reelle sans lui attribuer un role qu'elle n'a pas.
+
+        La version d'origine rangeait tout `X is not defined` en API navigateur
+        absente. C'est faux la plupart du temps : `currentUsr` non defini est un
+        defaut de la page, ou la consequence d'un bundle qui n'a pas charge, pas
+        une lacune du moteur. Confondre les deux remplirait la feuille de route
+        de noms qui n'ont d'equivalent dans aucun navigateur.
+
+        Un nom n'est donc classe en API navigateur que s'il figure au registre
+        des surfaces connues. Sinon il est range comme identifiant applicatif
+        inconnu : utile a savoir, jamais a implementer.
+        """
+        texte = str(erreur)
+        trouve = _NON_DEFINI.search(texte)
+        if trouve:
+            nom = trouve.group(1)
+            categorie = (telemetrie.API_ABSENTE if telemetrie.est_surface_web(nom)
+                         else telemetrie.IDENTIFIANT_INCONNU)
+            self.note(categorie, nom, source)
+            return
+        trouve = _PROPRIETE_INDEFINIE.search(texte)
+        if trouve:
+            self.note(telemetrie.METHODE_ABSENTE, trouve.group(1), texte[:140])
+            return
+        trouve = _MEMBRE_NON_FONCTION.search(texte)
+        if trouve:
+            # `objet.membre is not a function` nomme le membre : exploitable.
+            # `not a function` tout court ne nomme rien, et inventer un nom
+            # serait pire que d'admettre qu'on ne sait pas lequel.
+            self.note(telemetrie.METHODE_ABSENTE, trouve.group(1), source)
+            return
+        if "not a function" in texte or "is not callable" in texte:
+            # QuickJS ne nomme pas le membre pour `x.y()` : le message est un
+            # « TypeError: not a function » nu. Lui inventer un nom serait pire
+            # que de compter les cas anonymes a part et de garder la trace.
+            self.note(telemetrie.METHODE_ABSENTE, "<anonyme>", texte[:120])
+            return
+        self.note(telemetrie.ERREUR_JS, _genre_erreur(texte), texte[:160])
+
+    def rapport_compatibilite(self):
+        """Compteurs observes, stables et directement serialisables."""
+        return dict(sorted(self.diagnostics.items()))
 
     # --- Table des nœuds ------------------------------------------------------
 
@@ -665,11 +783,13 @@ class Contexte:
                                     document=self.document.url,
                                     destination="script")
         except Exception as e:  # noqa: BLE001
+            self.echec_ressource("module", adresse, 0, type(e).__name__)
             self.journal("warn", "module %s : %s" % (adresse, e))
             self._modules[adresse] = None
             return None
-        if reponse.code and reponse.code >= 400:
-            self.journal("warn", "module %s : code %d" % (adresse, reponse.code))
+        if not reponse.code or reponse.code >= 400:
+            self.echec_ressource("module", adresse, reponse.code, "http")
+            self.journal("warn", "module %s : code %s" % (adresse, reponse.code))
             self._modules[adresse] = None
             return None
         self._modules[adresse] = reponse.contenu
@@ -863,6 +983,7 @@ class Contexte:
                                         document=self.document.url,
                                         destination="media")
             except Exception as e:  # noqa: BLE001
+                self.echec_ressource("media", absolue, 0, type(e).__name__)
                 self.journal("warn", "media %s : %s" % (absolue, e))
                 return False
             if reponse.code and reponse.code >= 400:
@@ -1027,12 +1148,13 @@ class Contexte:
                                     document=self.document.url,
                                     destination="fetch")
         except Exception as e:  # noqa: BLE001
-            telemetrie.ressource_echouee(url, 0, "fetch")
+            self.echec_ressource("fetch", url, 0, type(e).__name__)
             self.journal("warn", "requete %s : %s" % (url, e))
             return {"status": 0, "statusText": str(e), "text": "", "url": url,
                     "headers": {}}
         if not reponse.code or reponse.code >= 400:
-            telemetrie.ressource_echouee(url, reponse.code, "fetch")
+            self.echec_ressource("fetch", reponse.url or url, reponse.code,
+                                 reponse.erreur or "http")
         return {
             "status": reponse.code,
             "statusText": reponse.erreur or "",
@@ -1052,9 +1174,13 @@ class Contexte:
                                     document=self.document.url,
                                     destination="script")
         except Exception as e:  # noqa: BLE001
+            self.echec_ressource("script", absolue, 0, type(e).__name__)
             self.journal("warn", "script %s : %s" % (absolue, e))
             return ""
-        if reponse.code and reponse.code >= 400:
+        if not reponse.code or reponse.code >= 400:
+            # Le bundle principal d'une page passe par ici. Son absence vide la
+            # page de tout comportement, et le rapport n'en disait rien.
+            self.echec_ressource("script", absolue, reponse.code, "http")
             self.journal("warn", "script %s : code %s" % (absolue, reponse.code))
             return ""
         return reponse.contenu

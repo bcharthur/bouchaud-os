@@ -107,7 +107,7 @@ except ImportError:
 sys.path.insert(0, ".")
 
 import moteur  # noqa: E402
-from moteur import css, grille, html, js, reseau  # noqa: E402
+from moteur import css, grille, html, js, reseau, telemetrie  # noqa: E402
 
 # --- Cadre de verification ----------------------------------------------------
 
@@ -446,6 +446,166 @@ def verifie_erreurs():
 
     egal("erreurs: le contexte reste utilisable", contexte.execute("1 + 1"), 2)
     contexte.ferme()
+
+
+def verifie_diagnostics_compatibilite():
+    """Le rapport mesure des appels executes, et nomme correctement ce qu'il voit.
+
+    Deux defauts de la premiere version sont verrouilles ici.
+
+    Le premier : tout `X is not defined` etait range en API navigateur absente.
+    `currentUsr` devenait donc une lacune du moteur, alors que c'est un defaut
+    de la page — ou la consequence d'un bundle qui n'a pas charge. Une feuille
+    de route batie la-dessus aurait ete pleine de noms qu'aucun navigateur ne
+    fournit.
+
+    Le second : seuls `fetch` et `XMLHttpRequest` alimentaient le compteur de
+    ressources. Un `<script src>` principal en 404 vidait la page de tout
+    comportement sans que le rapport n'en dise un mot.
+    """
+    doc = document("<body></body>")
+    contexte = js.Contexte(doc)
+    try:
+        contexte.execute("new AbortController();", "page.js")
+        egal("diagnostic: API absente observee",
+             contexte.rapport_compatibilite().get("api_absente:AbortController"), 1)
+
+        # A — un identifiant applicatif n'est pas une API navigateur.
+        contexte.execute("console.log(currentUsr);", "app.js")
+        egal("diagnostic: un identifiant inconnu n'est pas une API",
+             contexte.rapport_compatibilite().get("identifiant_inconnu:currentUsr"), 1)
+        egal("diagnostic: et il n'apparait pas comme API absente",
+             contexte.rapport_compatibilite().get("api_absente:currentUsr"), None)
+
+        for nom in ("webpackChunk", "myApplication", "foo"):
+            contexte.execute("void %s;" % nom, "app.js")
+            egal("diagnostic: %s reste applicatif" % nom,
+                 contexte.rapport_compatibilite().get("api_absente:%s" % nom), None)
+
+        # A bis — les vrais noms de la plate-forme, eux, sont bien reconnus.
+        for nom in ("WebSocket", "indexedDB", "TextEncoder"):
+            verifie("diagnostic: %s est une surface Web" % nom,
+                    telemetrie.est_surface_web(nom))
+        for nom in ("currentUsr", "webpackChunk", "myApplication", "foo",
+                    "__webpack_require__", "MonComposant"):
+            verifie("diagnostic: %s n'est pas une surface Web" % nom,
+                    not telemetrie.est_surface_web(nom))
+
+    finally:
+        contexte.ferme()
+
+    # Un contexte neuf par forme d'erreur : sans cela les compteurs se melent
+    # et une verification qui compte « 1 » pourrait passer pour la mauvaise
+    # raison.
+    for code, cle, quoi in (
+            ("new Array(-1)", "erreur_js:RangeError",
+             "les erreurs sont classees par genre"),
+            ("JSON.parse('{')", "erreur_js:SyntaxError",
+             "une erreur de syntaxe garde son genre"),
+            # QuickJS ne nomme pas le membre d'un `x.y()` : le message est un
+            # « TypeError: not a function » nu. On compte le cas sans lui
+            # inventer de nom, ce serait plus trompeur que de l'admettre.
+            ("document.body.tourneEnRond()", "methode_absente:<anonyme>",
+             "une methode anonyme est comptee sans etre nommee"),
+            # L'autre forme nomme la propriete, et c'est la plus utile de
+            # toutes : c'est exactement celle qui tuait le JavaScript de
+            # pypi.org.
+            ("var vide; vide.includes('x')", "methode_absente:includes",
+             "la propriete lue sur undefined est nommee")):
+        neuf = js.Contexte(document("<body></body>"))
+        try:
+            neuf.execute(code, "cas.js")
+            egal("diagnostic: %s" % quoi, neuf.rapport_compatibilite().get(cle), 1)
+        finally:
+            neuf.ferme()
+
+
+def verifie_moignons():
+    """Une API presente mais vide doit se denoncer elle-meme.
+
+    C'est le pire des trois etats. Absente, la page retombe sur son plan de
+    secours ; presente et juste, tout va bien ; presente et vide, la page teste
+    `if (history.pushState)`, obtient `true`, prend le chemin moderne et
+    poursuit avec un navigateur dont l'etat ne correspond plus a ce qu'elle
+    croit. Sans cette categorie, ce cas-la n'apparaissait nulle part.
+    """
+    doc = document("<body><div id=a>x</div></body>")
+    contexte = js.Contexte(doc)
+    try:
+        # Le test de detection doit continuer de reussir : le moignon reste
+        # present, sinon on changerait le comportement en le mesurant.
+        egal("moignon: history.pushState se detecte encore",
+             contexte.execute("typeof history.pushState"), "function")
+
+        contexte.execute("history.pushState({}, '', '/x')")
+        contexte.execute("history.replaceState({}, '', '/y')")
+        contexte.execute("document.getElementById('a').focus()")
+        contexte.execute("window.scrollTo(0, 100)")
+        rapport = contexte.rapport_compatibilite()
+        for cle in ("moignon_appele:history.pushState",
+                    "moignon_appele:history.replaceState",
+                    "moignon_appele:element.focus",
+                    "moignon_appele:window.scrollTo"):
+            egal("moignon: %s est compte" % cle.split(":")[1], rapport.get(cle), 1)
+
+        # Et un moignon n'est pas une API absente : les deux se corrigent
+        # differemment et ne doivent pas se melanger.
+        verifie("moignon: aucun moignon n'est classe API absente",
+                not any(c.startswith("api_absente:history") for c in rapport),
+                [c for c in rapport if c.startswith("api_absente")])
+    finally:
+        contexte.ferme()
+
+
+def verifie_ressources_echouees():
+    """B — toutes les destinations comptent, pas seulement `fetch`."""
+    from moteur import reseau as _reseau
+
+    doc = document("<body></body>", url="http://exemple.test/page")
+    contexte = js.Contexte(doc)
+    ancien = _reseau.charge
+
+    def absente(url, methode="GET", corps=None, entetes=None, brut=False,
+                document=None, destination=None):
+        return _reseau.Reponse(url, "", "text/plain", 404)
+
+    _reseau.charge = absente
+    try:
+        # Le cas qui manquait : le bundle principal de la page.
+        contexte._telecharge_script("http://exemple.test/app.js")
+        egal("ressources: un script en 404 est compte",
+             contexte.rapport_compatibilite().get("ressource_echouee:script"), 1)
+
+        contexte._op_moduleSource("http://exemple.test/mod.js")
+        egal("ressources: un module en 404 est compte",
+             contexte.rapport_compatibilite().get("ressource_echouee:module"), 1)
+
+        contexte._recupere("GET", "http://exemple.test/api", None, {})
+        egal("ressources: un fetch en 404 est compte",
+             contexte.rapport_compatibilite().get("ressource_echouee:fetch"), 1)
+    finally:
+        _reseau.charge = ancien
+        contexte.ferme()
+
+    # Les chargeurs hors JavaScript passent par la telemetrie globale, avec la
+    # meme cle de destination.
+    telemetrie.reinitialise()
+    telemetrie.active(True)
+    try:
+        for destination in ("stylesheet", "image", "font", "media"):
+            telemetrie.ressource_echouee("http://exemple.test/x", 404, destination)
+        vues = {e["cle"]: e["n"]
+                for e in telemetrie.rapport().get(telemetrie.RESSOURCE_ECHOUEE, [])}
+        for destination in ("stylesheet", "image", "font", "media"):
+            egal("ressources: %s est une destination connue" % destination,
+                 vues.get(destination), 1)
+        verifie("ressources: la note porte le code et l'adresse",
+                any("404" in ex and "exemple.test" in ex
+                    for e in telemetrie.rapport()[telemetrie.RESSOURCE_ECHOUEE]
+                    for ex in e["exemples"]))
+    finally:
+        telemetrie.active(False)
+        telemetrie.reinitialise()
 
 
 def verifie_budget():
@@ -4302,6 +4462,9 @@ def principal():
         verifie_minuteries,
         verifie_promesses,
         verifie_erreurs,
+        verifie_diagnostics_compatibilite,
+        verifie_ressources_echouees,
+        verifie_moignons,
         verifie_budget,
         verifie_page_complete,
         verifie_evenement_apres_chargement,

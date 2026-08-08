@@ -298,6 +298,8 @@ class Document:
                                     destination="font")
             ouverte = police.ouvre(reponse.octets or b"") if reponse.code == 200 else None
             if not ouverte:
+                if not reponse.code or reponse.code >= 400:
+                    telemetrie.ressource_echouee(url, reponse.code, "font")
                 self._polices[cle] = False
                 self.journal("warn", "police %s : %s illisible" % (famille, choix[1]))
                 continue
@@ -343,9 +345,14 @@ class Document:
             reponse = reseau.charge(url, brut=True, document=self.url,
                                     destination="style")
         except Exception as e:  # noqa: BLE001
+            telemetrie.ressource_echouee(url, 0, "stylesheet")
             self.journal("warn", "feuille %s : %s" % (adresse, e))
             self._feuilles[cle] = ""
             return ""
+        if not reponse.code or reponse.code >= 400:
+            # Une feuille perdue, c'est une page qui s'affiche nue. Le rapport
+            # doit le dire aussi fort qu'un script perdu.
+            telemetrie.ressource_echouee(url, reponse.code, "stylesheet")
         texte = "" if (reponse.code and reponse.code >= 400) else reponse.contenu
         self._feuilles[cle] = texte
         return texte

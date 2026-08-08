@@ -242,10 +242,13 @@ def mesure(cible, largeur=1280, hauteur=900, battements=4):
                                   + operations.get("imagepart", 0)),
         },
         "JAVASCRIPT": {
-            "erreurs": somme("js_erreur"),
-            "erreurs_distinctes": len(notes.get("js_erreur", [])),
-            "apis_manquantes": somme("api"),
-            "apis_manquantes_distinctes": len(notes.get("api", [])),
+            "erreurs": somme(telemetrie.ERREUR_JS),
+            "erreurs_distinctes": len(notes.get(telemetrie.ERREUR_JS, [])),
+            "apis_manquantes": somme(telemetrie.API_ABSENTE),
+            "apis_manquantes_distinctes": len(notes.get(telemetrie.API_ABSENTE, [])),
+            "identifiants_inconnus": somme(telemetrie.IDENTIFIANT_INCONNU),
+            "methodes_absentes": somme(telemetrie.METHODE_ABSENTE),
+            "moignons_appeles": somme(telemetrie.MOIGNON),
             "appels_moteur": somme("api_utilisee"),
         },
         "FORMULAIRES": {
@@ -382,11 +385,16 @@ def imprime_agrege(total, sites):
         if len(liste) > 25:
             print("    ... %d autres" % (len(liste) - 25))
 
-    for categorie, titre in (("api", "APIs Web absentes"),
+    from moteur import telemetrie as _t
+    for categorie, titre in ((_t.API_ABSENTE, "APIs Web absentes"),
+                             (_t.IDENTIFIANT_INCONNU,
+                              "Identifiants applicatifs non definis"),
+                             (_t.METHODE_ABSENTE, "Methodes absentes"),
+                             (_t.MOIGNON, "Moignons appeles"),
                              ("css_valeur", "Valeurs CSS non comprises"),
                              ("css_selecteur", "Selecteurs non compiles"),
                              ("css_arobase", "Regles @ ignorees"),
-                             ("js_erreur", "Erreurs JavaScript"),
+                             (_t.ERREUR_JS, "Erreurs JavaScript"),
                              ("ressource", "Ressources non chargees"),
                              ("api_utilisee", "APIs du moteur reellement appelees")):
         seau = total.get(categorie)

@@ -649,7 +649,8 @@ def principal(argv=None):
     installe_hote(arguments.largeur, arguments.hauteur)
 
     import moteur
-    from moteur import reseau
+    from moteur import reseau, telemetrie
+    telemetrie.active_par_environnement()
     installe_reseau(reseau)
 
     cible = arguments.cible
@@ -681,6 +682,17 @@ def principal(argv=None):
                                      hauteur))))
     for niveau, texte in journal[:8]:
         print("  [%s] %s" % (niveau, texte))
+    if document.contexte_js is not None:
+        diagnostic = document.contexte_js.rapport_compatibilite()
+        if diagnostic:
+            print("  [compatibilite]")
+            for nom, nombre in diagnostic.items():
+                print("    %s: %d" % (nom, nombre))
+    if telemetrie.ACTIVE:
+        # Le rapport complet — celui qui range les manques par nature plutot
+        # que par ordre alphabetique — quand la collecte a ete demandee.
+        print()
+        print(telemetrie.rapport_plateforme())
     return 0
 
 

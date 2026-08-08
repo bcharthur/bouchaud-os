@@ -573,9 +573,9 @@
                 this.insertBefore(typeof element === "string"
                     ? document.createTextNode(element) : element, premier);
         }
-        focus() {}
-        blur() {}
-        scrollIntoView() {}
+        focus() { appel("creux", "element.focus"); }
+        blur() { appel("creux", "element.blur"); }
+        scrollIntoView() { appel("creux", "element.scrollIntoView"); }
         click() { distribue(this, new Event("click", { bubbles: true, cancelable: true })); }
     }
 
@@ -1390,7 +1390,7 @@
         getResponseHeader(nom) {
             return this.__reponseEntetes[String(nom).toLowerCase()] || null;
         }
-        abort() {}
+        abort() { appel("creux", "XMLHttpRequest.abort"); }
         send(corps) {
             const identifiant = prochaineRequete++;
             requetes.set(identifiant, this);
@@ -1758,7 +1758,10 @@
 
     globalThis.history = {
         length: 1,
-        pushState() {}, replaceState() {},
+        pushState: creux("history.pushState"),
+        replaceState: creux("history.replaceState"),
+        state: null,
+        scrollRestoration: "auto",
         back() { appel("historique", -1); },
         forward() { appel("historique", 1); },
         go(n) { appel("historique", Number(n) || 0); },
@@ -1790,12 +1793,12 @@
     globalThis.alert = function (message) { appel("console", "alerte", formate(message)); };
     globalThis.confirm = function () { return false; };
     globalThis.prompt = function () { return null; };
-    globalThis.scrollTo = function () {};
-    globalThis.scrollBy = function () {};
-    globalThis.open = function () { return null; };
-    globalThis.close = function () {};
-    globalThis.focus = function () {};
-    globalThis.blur = function () {};
+    globalThis.scrollTo = creux("window.scrollTo");
+    globalThis.scrollBy = creux("window.scrollBy");
+    globalThis.open = creux("window.open", null);
+    globalThis.close = creux("window.close");
+    globalThis.focus = creux("window.focus");
+    globalThis.blur = creux("window.blur");
     globalThis.matchMedia = function (requete) {
         return { matches: false, media: String(requete),
                  addListener() {}, removeListener() {},
@@ -2170,6 +2173,21 @@
     //
     // La liste ne se veut pas exhaustive : ce qu'elle rate finit dans les
     // erreurs JavaScript, qui sont notees aussi.
+
+    // Un moignon signale son propre vide. Le nom part au rapport, la valeur
+    // rendue ne change pas — la page continue exactement comme avant.
+    //
+    // Pourquoi les compter separement des APIs absentes : une page qui teste
+    // `if (history.pushState)` obtient `true`, prend le chemin moderne, et
+    // poursuit avec un navigateur dont l'etat ne correspond plus a ce qu'elle
+    // croit. Une absence l'aurait fait retomber sur son plan de secours. Le
+    // moignon est donc souvent le plus couteux des deux, et le plus invisible.
+    function creux(nom, rendu) {
+        return function () {
+            appel("creux", nom);
+            return rendu;
+        };
+    }
 
     const NOMS_FENETRE = [
         "WebSocket", "EventSource", "Worker", "SharedWorker", "ServiceWorker",
