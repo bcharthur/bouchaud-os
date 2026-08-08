@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Connexion — page temoin</title>
+<!--
+  Page temoin des formulaires.
+
+  Elle n'est pas jolie par hasard : chaque element y est le plus petit
+  representant d'une chose que tout site de connexion fait, et que le moteur
+  doit savoir faire. Si cette page marche entierement, la moitie du Web
+  applicatif devient utilisable ; si un seul de ses points echoue, le meme
+  point echouera partout ailleurs.
+
+  Les onze points verifies sont numerotes dans le HTML et repris par
+  `test_moteur.py`. Rien n'est aleatoire, rien ne depend du reseau ni de
+  l'heure : deux executions doivent donner exactement le meme resultat.
+-->
+<style>
+  :root { --bord: #cbd5e1; --accent: #2563eb; --texte: #0f172a; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 40px 20px;
+    font-family: system-ui, sans-serif; color: var(--texte);
+    background: #f1f5f9;
+  }
+  .carte {
+    width: 380px; margin: 0 auto; padding: 28px;
+    background: #fff; border: 1px solid var(--bord); border-radius: 10px;
+  }
+  h1 { margin: 0 0 20px; font-size: 22px; }
+  .champ { margin-bottom: 16px; }
+  label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 600; }
+  input[type="text"], input[type="password"], select {
+    display: block; width: 100%; height: 38px; padding: 0 10px;
+    border: 1px solid var(--bord); border-radius: 6px; font-size: 14px;
+    background: #fff; color: var(--texte);
+  }
+  input:focus, select:focus, button:focus { outline: 2px solid var(--accent); }
+  .ligne { display: flex; align-items: center; gap: 8px; margin-bottom: 20px; }
+  button {
+    width: 100%; height: 40px; border: 0; border-radius: 6px;
+    background: var(--accent); color: #fff; font-size: 15px; font-weight: 600;
+  }
+  #resultat {
+    margin: 18px auto 0; width: 380px; padding: 12px;
+    border: 1px dashed var(--bord); border-radius: 6px;
+    font-family: ui-monospace, monospace; font-size: 12px; white-space: pre-wrap;
+    background: #fff;
+  }
+  .compteurs { color: #64748b; }
+</style>
+</head>
+<body>
+
+<form class="carte" id="connexion" action="/session" method="post">
+  <h1>Connexion</h1>
+
+  <!-- 1. champ texte, avec son etiquette liee -->
+  <div class="champ">
+    <label for="utilisateur">Nom d'utilisateur</label>
+    <input type="text" id="utilisateur" name="utilisateur" value="" autocomplete="username">
+  </div>
+
+  <!-- 2. champ mot de passe : le texte ne doit jamais etre peint en clair -->
+  <div class="champ">
+    <label for="motdepasse">Mot de passe</label>
+    <input type="password" id="motdepasse" name="motdepasse" value="" autocomplete="current-password">
+  </div>
+
+  <!-- 3. liste deroulante : la valeur choisie doit partir avec le formulaire -->
+  <div class="champ">
+    <label for="espace">Espace de travail</label>
+    <select id="espace" name="espace">
+      <option value="perso">Personnel</option>
+      <option value="equipe" selected>Equipe</option>
+      <option value="archive">Archives</option>
+    </select>
+  </div>
+
+  <!-- 4. case a cocher : presente dans FormData seulement si cochee -->
+  <div class="ligne">
+    <input type="checkbox" id="memoire" name="memoire" value="oui" checked>
+    <label for="memoire" style="margin:0;font-weight:400">Rester connecte</label>
+  </div>
+
+  <!-- 5. bouton de soumission -->
+  <button type="submit" id="valider">Se connecter</button>
+</form>
+
+<div id="resultat">en attente</div>
+
+<script>
+// 6. evenements `input` et `change` : c'est ce qui fait vivre une validation
+//    de formulaire, et rien n'en depend plus qu'un ecran de connexion.
+var compteurs = { input: 0, change: 0, focus: 0, keydown: 0, click: 0, submit: 0 };
+
+function relie(id) {
+  var element = document.getElementById(id);
+  if (!element) return;
+  element.addEventListener("input", function () { compteurs.input++; peint(); });
+  element.addEventListener("change", function () { compteurs.change++; peint(); });
+  element.addEventListener("focus", function () { compteurs.focus++; peint(); });
+  element.addEventListener("keydown", function () { compteurs.keydown++; peint(); });
+}
+relie("utilisateur");
+relie("motdepasse");
+relie("espace");
+relie("memoire");
+
+document.getElementById("valider").addEventListener("click", function () {
+  compteurs.click++;
+  peint();
+});
+
+// 7. soumission : `preventDefault` doit empecher la navigation, et le
+//    formulaire doit rendre ses valeurs.
+document.getElementById("connexion").addEventListener("submit", function (e) {
+  e.preventDefault();
+  compteurs.submit++;
+  var f = e.target || document.getElementById("connexion");
+  var lu = {
+    utilisateur: (f.elements ? f.elements.utilisateur : document.getElementById("utilisateur")).value,
+    motdepasse: document.getElementById("motdepasse").value,
+    espace: document.getElementById("espace").value,
+    memoire: document.getElementById("memoire").checked,
+  };
+  // 8. FormData : la voie normale d'un envoi asynchrone.
+  var parFormData = "";
+  try {
+    var donnees = new FormData(f);
+    var morceaux = [];
+    donnees.forEach(function (valeur, cle) { morceaux.push(cle + "=" + valeur); });
+    parFormData = morceaux.join("&");
+  } catch (err) {
+    parFormData = "FormData indisponible: " + err;
+  }
+  document.getElementById("resultat").textContent =
+    "soumis " + JSON.stringify(lu) + "\n" +
+    "formdata " + parFormData + "\n" +
+    "compteurs " + JSON.stringify(compteurs);
+  document.getElementById("resultat").setAttribute("data-soumis", "1");
+});
+
+function peint() {
+  var zone = document.getElementById("resultat");
+  if (zone.getAttribute("data-soumis")) return;
+  zone.textContent = "compteurs " + JSON.stringify(compteurs);
+}
+
+// 9. valeurs par defaut visibles pour la mesure : ce que la page rapporte
+//    d'elle-meme, sans intervention.
+document.getElementById("resultat").className = "compteurs";
+peint();
+</script>
+</body>
+</html>

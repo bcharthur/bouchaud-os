@@ -36,6 +36,55 @@ syscalls              # les 107 appels implémentés, par famille
 strace on             # trace des appels système sur COM1
 ```
 
+## Suivi — la commande à lancer d'abord
+
+```
+./tools/userland/suivi.sh              # tout : moteur, hôte Qt, témoins, sites réels
+./tools/userland/suivi.sh --rapide     # sans réseau ni Qt, quelques secondes
+./tools/userland/suivi.sh --histoire   # la trajectoire, sans rien relancer
+./tools/userland/suivi.sh --strict     # sort en erreur si une mesure surveillée recule
+```
+
+Le dépôt savait déjà se vérifier, mais en trois commandes qui ne se parlaient
+pas : `test-moteur.sh` comptait des assertions, `verifie-hote.sh` des pixels,
+`compatibilite.py` des manques. Aucune ne disait si le navigateur allait **mieux
+qu'hier**, et c'est pourtant la seule question qui compte sur la durée.
+
+`suivi.sh` les lance toutes, range leurs nombres au même endroit, et les compare
+à la dernière exécution de même portée. Chaque ligne porte donc la valeur,
+l'écart, et le sens de cet écart :
+
+```
+  Compatibilite CSS
+    declarations ignorees                           322          -48  mieux
+      dont proprietes BLOQUANTES                      3           -8  mieux
+    selecteurs non compiles                          34          -52  mieux
+
+  JavaScript et interactivite
+    erreurs JavaScript                                0           -1  mieux
+    ecouteurs poses par les pages                    16          +16  mieux
+```
+
+Toutes les mesures ne s'améliorent pas dans la même direction — les
+déclarations ignorées doivent baisser, les écouteurs posés doivent monter — donc
+chacune déclare son sens et le tableau dit « mieux » ou « pire » plutôt que de
+laisser deviner.
+
+L'historique vit dans `tools/userland/navigateur/tests/suivi.jsonl`, versionné
+avec le code. `git log -p` sur ce fichier raconte l'histoire de la compatibilité
+mieux qu'un journal écrit à la main, parce qu'il ne peut pas mentir.
+
+Une exécution `--rapide` n'est comparée qu'à une autre `--rapide` : la mettre
+en regard d'une exécution complète ferait passer l'absence des sites réels pour
+une amélioration spectaculaire.
+
+Ce qui n'est pas mesurable sur la machine — l'hôte Qt sans `qtbase5-dev`, les
+sites réels derrière un proxy fermé — est annoncé comme **non mesuré**, jamais
+compté comme réussi.
+
+Codes de retour : `0` tout passe, `1` des vérifications échouent, `2` recul sur
+une mesure surveillée en mode `--strict`.
+
 ## Vérification automatique
 
 ```
@@ -496,8 +545,9 @@ web · **`object-fit`** et **`aspect-ratio`** · `@layer`, `@supports` et
 se serre, dégagement · **tableaux** : colonnes mesurées sur la plus large de
 leurs cellules, `colspan`, rangée anonyme pour une cellule sans ligne ·
 **`display: inline-block`** peint enfin sa boîte, et les **champs de
-formulaire** avec · **`@font-face`** : la police de la page est téléchargée,
-son conteneur **WOFF ouvert** (`moteur/police.py`) et remise à l'hôte ·
+formulaire** avec · **`@font-face`** : la police de la page est téléchargée, son conteneur **WOFF
+et WOFF2 ouvert** (`moteur/police.py` — transformation `glyf`/`loca` comprise,
+vérifiée glyphe par glyphe contre fontTools) et remise à l'hôte ·
 **pseudo-classes d'état réelles** — `:hover`, `:active`, `:focus` suivent le
 pointeur, et la lignée entière est survolée, ce qui tient un menu déroulant
 ouvert · **`@keyframes` et `animation`**, **`transition`**, avec les rythmes
@@ -532,9 +582,6 @@ mais passe par l'aplatissement pour un demi-tour.
 `globalCompositeOperation` ne sont pas rendus ; tout le reste du contexte 2D
 l'est, pixels compris. **Détourage par forme** — `clip()` suit la boîte du
 chemin, ce qui est exact après un `rect()` et approximatif au-delà.
-**Polices en WOFF2** — le conteneur WOFF est ouvert (zlib), le WOFF2 non : il
-demande brotli et une transformation des tables `glyf`/`loca`. Une police
-d'icônes livrée en WOFF2 seul sort donc en carrés, et le journal le dit.
 **Coupes par écriture** — un site qui livre une police par plage Unicode sous
 la même famille ne voit retenue que celle qui écrit du latin, faute de choisir
 la coupe caractère par caractère.

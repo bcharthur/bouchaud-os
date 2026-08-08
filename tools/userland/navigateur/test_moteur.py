@@ -929,7 +929,8 @@ def verifie_youtube_client():
 
     demandes = []
 
-    def charge(url, methode="GET", corps=None, entetes=None, brut=False):
+    def charge(url, methode="GET", corps=None, entetes=None, brut=False,
+               document=None, destination=None):
         demandes.append((url, dict(entetes or {})))
         return reseau.Reponse(url, "", "video/mp4", 206, entetes={}, octets=b"")
 
@@ -965,7 +966,8 @@ def verifie_youtube_chaine():
 
     envoyees = []
 
-    def charge(url, methode="GET", corps=None, entetes=None, brut=False):
+    def charge(url, methode="GET", corps=None, entetes=None, brut=False,
+               document=None, destination=None):
         envoyees.append({"url": url, "methode": methode, "corps": corps,
                          "entetes": dict(entetes or {})})
         if "/youtubei/v1/player" not in url:
@@ -1056,8 +1058,11 @@ def verifie_requete_brute():
     vues = {}
     vrai_charge = reseau.charge
 
-    def faux_charge(url, methode="GET", corps=None, entetes=None, brut=False):
+    def faux_charge(url, methode="GET", corps=None, entetes=None, brut=False,
+                    document=None, destination=None):
         vues["brut"] = brut
+        vues["document"] = document
+        vues["destination"] = destination
         return reseau.Reponse(url, '{"x": 1}', "application/json", 200,
                               octets=b'{"x": 1}')
 
@@ -1071,6 +1076,9 @@ def verifie_requete_brute():
         reseau.charge = vrai_charge
     verifie("requete: le corps est demande tel quel", vues.get("brut") is True,
             vues)
+    egal("requete: elle se declare emise par le document", vues.get("document"),
+         doc.url)
+    egal("requete: sa destination est nommee", vues.get("destination"), "fetch")
     contexte.ferme()
 
 
@@ -1942,16 +1950,18 @@ def verifie_polices():
 
     # Le choix de la source. Un site cite le WOFF2 en tete parce qu'il est le
     # plus compact ; on prend le suivant, qu'on sait ouvrir.
-    egal("police: le woff est prefere au woff2",
+    # Le WOFF2 se lit desormais : c'est lui qu'on prend, comme un navigateur.
+    egal("police: le woff2 est pris quand il est offert",
          police.meilleure_source('url(a.woff2) format("woff2"),'
                                  'url(a.woff) format("woff")'),
-         ("a.woff", "woff"))
+         ("a.woff2", "woff2"))
     egal("police: le truetype passe avant tout",
          police.meilleure_source('url(a.woff) format("woff"),'
                                  'url(a.ttf) format("truetype")'),
          ("a.ttf", "truetype"))
-    egal("police: le woff2 seul est refuse",
-         police.meilleure_source('url(fa-solid-900.woff2) format("woff2")'), None)
+    egal("police: une source unique en woff2 est retenue",
+         police.meilleure_source('url(fa-solid-900.woff2) format("woff2")'),
+         ("fa-solid-900.woff2", "woff2"))
     egal("police: le format se devine a l'extension",
          police.sources("url(x.woff)"), [("x.woff", "woff")])
 
@@ -2328,7 +2338,8 @@ def sert(reponses):
     """
     demandes = []
 
-    def charge(url, methode="GET", corps=None, entetes=None, brut=False):
+    def charge(url, methode="GET", corps=None, entetes=None, brut=False,
+               document=None, destination=None):
         demandes.append(url)
         if url not in reponses:
             return reseau.Reponse(url, "", "text/plain", 404)
@@ -3334,7 +3345,8 @@ def verifie_client_leger():
     demandes = []
 
     def sert(reponses):
-        def charge(url, methode="GET", corps=None, entetes=None, brut=False):
+        def charge(url, methode="GET", corps=None, entetes=None, brut=False,
+               document=None, destination=None):
             demandes.append(url)
             for motif, faire in reponses:
                 if motif in url:
@@ -3414,6 +3426,846 @@ def verifie_bac_a_sable():
                        "typeof Deno", "typeof __loadScript"):
         egal("bac a sable: %s" % expression, contexte.execute(expression), "undefined")
     contexte.ferme()
+
+
+def verifie_liste_de_selecteurs():
+    """Une virgule dans `:not(…)` ne separe pas deux regles.
+
+    C'est la telemetrie qui a trouve ce defaut : neuf groupes de regles de
+    pypi.org detruits en silence. `li:not(:first-child, :last-child)` etait
+    coupe en `li:not(:first-child` et `:last-child)`, deux selecteurs qui ne
+    designent rien — et une regle au selecteur incomprehensible est ignoree
+    sans le moindre message.
+    """
+    regles = css.analyse(
+        "li:not(:first-child, :last-child) { color: red }"
+        ".a:is(.b, .c) .d { color: green }"
+        "[title=\"un, deux\"] { color: blue }"
+        "h1, h2 { color: black }")
+    egal("liste: la virgule interne ne coupe pas la regle", len(regles), 5)
+
+    doc = document(
+        "<style>"
+        "li { color: #000000 }"
+        "li:not(:first-child, :last-child) { color: #ff0000 }"
+        ".a:is(.b, .c) .d { color: #00ff00 }"
+        "</style>"
+        "<body><ul><li id=un>1</li><li id=deux>2</li><li id=trois>3</li></ul>"
+        "<div class='a b'><div class='d' id=dedans>x</div></div></body>")
+    doc.remet_en_page(1000, 800)
+    for identifiant, attendu, quoi in (("un", "#000000", "epargne le premier"),
+                                       ("deux", "#ff0000", "atteint le milieu"),
+                                       ("trois", "#000000", "epargne le dernier"),
+                                       ("dedans", "#00ff00", ":is descend bien")):
+        boite = boite_de(doc, identifiant)
+        egal("liste: %s" % quoi,
+             css_couleur(boite.style.get("color")) if boite else None,
+             css_couleur(attendu))
+
+
+def verifie_proprietes_logiques():
+    """`margin-inline-start` vaut `margin-left` en ecriture latine."""
+    doc = document(
+        "<style>"
+        "#a { margin-inline-start: 10px; margin-inline-end: 20px;"
+        "     padding-block: 5px 7px }"
+        "#b { margin-inline: 12px; padding-inline-start: 9px;"
+        "     inline-size: 300px; block-size: 40px }"
+        "#c { position: absolute; inset: 1px 2px 3px 4px }"
+        "#d { position: absolute; inset-inline-start: 8px; inset-block-end: 6px }"
+        "#e { border-inline-start-width: 4px; border-inline-start-color: #ff0000;"
+        "     border-inline-start-style: solid }"
+        "#f { grid-gap: 11px; -webkit-box-sizing: border-box }"
+        "#x { margin-left: 1px; margin-inline-start: 2px }"
+        "#y { margin-inline-start: 3px; margin-left: 4px }"
+        "</style>"
+        "<body><div id=a>a</div><div id=b>b</div><div id=c>c</div>"
+        "<div id=d>d</div><div id=e>e</div><div id=f>f</div>"
+        "<div id=x>x</div><div id=y>y</div></body>")
+    doc.remet_en_page(1000, 800)
+
+    def style(identifiant):
+        boite = boite_de(doc, identifiant)
+        return boite.style if boite else {}
+
+    attendus = [
+        ("a", "margin-left", "10px", "margin-inline-start"),
+        ("a", "margin-right", "20px", "margin-inline-end"),
+        ("a", "padding-top", "5px", "padding-block debut"),
+        ("a", "padding-bottom", "7px", "padding-block fin"),
+        ("b", "margin-left", "12px", "margin-inline a gauche"),
+        ("b", "margin-right", "12px", "margin-inline a droite"),
+        ("b", "padding-left", "9px", "padding-inline-start"),
+        ("b", "width", "300px", "inline-size"),
+        ("b", "height", "40px", "block-size"),
+        ("c", "top", "1px", "inset haut"),
+        ("c", "right", "2px", "inset droite"),
+        ("c", "bottom", "3px", "inset bas"),
+        ("c", "left", "4px", "inset gauche"),
+        ("d", "left", "8px", "inset-inline-start"),
+        ("d", "bottom", "6px", "inset-block-end"),
+        ("e", "border-left-width", "4px", "border-inline-start-width"),
+        ("e", "border-left-color", "#ff0000", "border-inline-start-color"),
+        ("f", "row-gap", "11px", "grid-gap vaut gap"),
+        ("f", "column-gap", "11px", "grid-gap vaut gap dans les deux sens"),
+        ("f", "box-sizing", "border-box", "-webkit-box-sizing"),
+        # La cascade doit continuer a trancher : la derniere declaration gagne.
+        ("x", "margin-left", "2px", "la logique posee apres l'emporte"),
+        ("y", "margin-left", "4px", "la physique posee apres l'emporte"),
+    ]
+    for identifiant, propriete, attendu, quoi in attendus:
+        egal("logique: %s" % quoi, style(identifiant).get(propriete), attendu)
+
+    # La mise en page doit en tenir compte pour de vrai, pas seulement la cascade.
+    boite = boite_de(doc, "b")
+    # 300 de contenu plus les 9 de `padding-inline-start` : `box-sizing` vaut
+    # `content-box`, donc la boite mesure bien 309.
+    verifie("logique: inline-size pose vraiment la largeur",
+            boite is not None and abs(boite.largeur - 309.0) < 1.0,
+            None if boite is None else boite.largeur)
+
+
+def verifie_transformation_texte():
+    """`text-transform` doit agir avant la mesure, pas au moment de peindre."""
+    doc = document(
+        "<style>"
+        "#haut { text-transform: uppercase }"
+        "#bas { text-transform: lowercase }"
+        "#capi { text-transform: capitalize }"
+        "#herite { text-transform: uppercase }"
+        "#rien { text-transform: none }"
+        "</style>"
+        "<body><p id=haut>menu principal</p><p id=bas>MENU Principal</p>"
+        "<p id=capi>l'accueil du site</p>"
+        "<div id=herite><p id=fils>herite</p></div>"
+        "<p id=rien>Inchange</p></body>")
+    doc.remet_en_page(1000, 800)
+
+    def texte_de(identifiant):
+        boite = boite_de(doc, identifiant)
+        if boite is None:
+            return None
+        return " ".join(f.texte for f in boite.lignes)
+
+    egal("transform: uppercase", texte_de("haut"), "MENU PRINCIPAL")
+    egal("transform: lowercase", texte_de("bas"), "menu principal")
+    egal("transform: capitalize garde l'apostrophe",
+         texte_de("capi"), "L'accueil Du Site")
+    egal("transform: la valeur s'herite", texte_de("fils"), "HERITE")
+    egal("transform: none laisse tel quel", texte_de("rien"), "Inchange")
+
+    # Le point qui compte vraiment : la largeur mesuree est celle du texte
+    # transforme. Mesurer « menu » et peindre « MENU » ferait deborder chaque
+    # libelle de bouton du Web.
+    large = boite_de(doc, "haut")
+    egal("transform: le fragment porte le texte transforme",
+         large.lignes[0].texte if large and large.lignes else None,
+         "MENU PRINCIPAL")
+
+
+def verifie_donnees_element():
+    """`element.dataset` : ce qui manquait et qui arretait tout.
+
+    Son absence ne degradait pas — `t.dataset.dropdownBound` leve une
+    `TypeError` sur `undefined`, et le script entier de la page meurt a cette
+    ligne. C'est ce qui privait pypi.org de ses menus et de ses trente-six
+    ecouteurs.
+    """
+    doc = document(
+        "<body><div id=a data-nom='vert' data-taille-max='12' data-vide=''>"
+        "</div></body>")
+    contexte = js.Contexte(doc)
+    try:
+        egal("dataset: attribut simple",
+             contexte.execute("document.getElementById('a').dataset.nom"), "vert")
+        egal("dataset: le tiret devient une majuscule",
+             contexte.execute("document.getElementById('a').dataset.tailleMax"), "12")
+        egal("dataset: un attribut vide n'est pas absent",
+             contexte.execute("document.getElementById('a').dataset.vide"), "")
+        egal("dataset: un attribut absent rend undefined",
+             contexte.execute(
+                 "String(document.getElementById('a').dataset.inconnu)"), "undefined")
+        egal("dataset: `in` fonctionne",
+             contexte.execute("'nom' in document.getElementById('a').dataset"), True)
+
+        contexte.execute("document.getElementById('a').dataset.dejaLie = true")
+        egal("dataset: l'ecriture pose l'attribut",
+             contexte.execute(
+                 "document.getElementById('a').getAttribute('data-deja-lie')"), "true")
+        egal("dataset: et se relit",
+             contexte.execute("document.getElementById('a').dataset.dejaLie"), "true")
+
+        contexte.execute("delete document.getElementById('a').dataset.nom")
+        egal("dataset: la suppression retire l'attribut",
+             contexte.execute(
+                 "String(document.getElementById('a').getAttribute('data-nom'))"),
+             "null")
+
+        cles = contexte.execute(
+            "Object.keys(document.getElementById('a').dataset).sort().join(',')")
+        egal("dataset: l'enumeration ne rend que les data-*",
+             cles, "dejaLie,tailleMax,vide")
+
+        # Le point qui a coute le plus cher : la lecture d'un champ absent de
+        # `navigator` tue le script au lieu de le degrader.
+        egal("navigator: appVersion existe",
+             contexte.execute("typeof navigator.appVersion"), "string")
+        verifie("navigator: appVersion n'a pas le prefixe Mozilla/",
+                not contexte.execute("navigator.appVersion").startswith("Mozilla/"),
+                contexte.execute("navigator.appVersion"))
+        egal("navigator: appVersion se laisse interroger",
+             contexte.execute("navigator.appVersion.includes('Bouchaud')"), True)
+        for champ in ("appCodeName", "product", "vendor", "maxTouchPoints",
+                      "hardwareConcurrency", "plugins", "doNotTrack"):
+            verifie("navigator: %s est defini" % champ,
+                    contexte.execute("'%s' in navigator" % champ))
+    finally:
+        contexte.ferme()
+
+
+def verifie_ascendance():
+    """`contains` traverse le pont une fois, pas une fois par niveau.
+
+    Chaque `setAttribute` demande a chaque `MutationObserver` a portee d'arbre
+    s'il est concerne. Quand la reponse se calculait en remontant `parentNode`
+    depuis le JavaScript, une page de pypi.org faisait 900 000 traversees du
+    pont pour se construire. La reponse est la meme ; c'est le nombre d'appels
+    qui change.
+    """
+    doc = document("<body><div id=a><section id=b><p id=c>x</p></section></div>"
+                   "<div id=d></div></body>")
+    contexte = js.Contexte(doc)
+    try:
+        egal("ascendance: un ancetre lointain contient",
+             contexte.execute("document.getElementById('a')"
+                              ".contains(document.getElementById('c'))"), True)
+        egal("ascendance: un nœud se contient lui-meme",
+             contexte.execute("var e=document.getElementById('b'); e.contains(e)"),
+             True)
+        egal("ascendance: un frere ne contient pas",
+             contexte.execute("document.getElementById('d')"
+                              ".contains(document.getElementById('c'))"), False)
+        egal("ascendance: le sens compte",
+             contexte.execute("document.getElementById('c')"
+                              ".contains(document.getElementById('a'))"), False)
+        egal("ascendance: contains(null) est faux",
+             contexte.execute("document.getElementById('a').contains(null)"), False)
+
+        # Le cout, mesure : une pose d'attribut sous un observateur d'arbre ne
+        # doit pas couter un appel par niveau.
+        contexte.execute(
+            "new MutationObserver(() => {}).observe("
+            "  document.getElementById('a'), {attributes: true, subtree: true});")
+        contexte.execute("document.getElementById('c').setAttribute('x', '1')")
+        egal("ascendance: l'observateur a bien ete arme",
+             contexte.execute("document.getElementById('c').getAttribute('x')"), "1")
+    finally:
+        contexte.ferme()
+
+
+def verifie_console_gabarit():
+    """`console.error("%s : %o", …)` doit rendre un message lisible."""
+    doc = document("<body></body>")
+    messages = []
+    contexte = js.Contexte(doc, journal=lambda niveau, texte: messages.append(texte))
+    try:
+        contexte.execute('console.log("bonjour %s, tu as %d ans", "Alice", 30)')
+        egal("console: %s et %d substitues", messages[-1], "bonjour Alice, tu as 30 ans")
+        contexte.execute('console.log("%s%%", 50)')
+        egal("console: %% rend un pourcent", messages[-1], "50%")
+        contexte.execute('console.log("a %s", "b", "reste")')
+        egal("console: les arguments en trop suivent", messages[-1], "a b reste")
+        contexte.execute('console.log("sans marque", "deux")')
+        egal("console: sans marque, rien ne change", messages[-1], "sans marque deux")
+        contexte.execute('console.log("%s manque")')
+        egal("console: une marque sans valeur reste telle quelle",
+             messages[-1], "%s manque")
+    finally:
+        contexte.ferme()
+
+
+def verifie_formulaire_pilote():
+    """Le temoin de connexion, pilote comme un utilisateur le ferait.
+
+    Poser des ecouteurs ne prouve rien : ce qui compte est qu'une saisie les
+    declenche, que la soumission passe par `preventDefault`, et que le
+    formulaire rende ses valeurs — `form.elements` comme `FormData`.
+    """
+    chemin = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "tests", "pages", "login-form.html")
+    if not os.path.exists(chemin):
+        # Surtout pas un `return` : une verification qui se saute quand son
+        # decor manque est une verification qui passe toujours.
+        verifie("formulaire: la page temoin est presente", False, chemin)
+        return
+    with open(chemin, encoding="utf-8") as f:
+        source = f.read()
+    doc = document(source, url="file://" + chemin)
+    doc.remet_en_page(1000, 800)
+    contexte = doc.contexte_js
+    verifie("formulaire: la page a bien un contexte JavaScript", contexte is not None)
+    if contexte is None:
+        return
+
+    egal("formulaire: les ecouteurs sont poses",
+         contexte.execute("globalThis.__bo_ecouteurs"), 18)
+
+    # Saisie : `value` puis l'evenement, comme le fait un champ reel.
+    contexte.execute("document.getElementById('utilisateur').value = 'alice'")
+    contexte.evenement(None, "input", {})
+    contexte.execute(
+        "document.getElementById('utilisateur').dispatchEvent(new Event('input'))")
+    contexte.execute("document.getElementById('motdepasse').value = 'secret'")
+    egal("formulaire: la valeur saisie se relit",
+         contexte.execute("document.getElementById('utilisateur').value"), "alice")
+    verifie("formulaire: l'evenement input a ete compte",
+            contexte.execute("compteurs.input") >= 1,
+            contexte.execute("compteurs.input"))
+
+    # Etat initial de la liste et de la case, tel que le HTML le decrit.
+    egal("formulaire: l'option preselectionnee est choisie",
+         contexte.execute("document.getElementById('espace').value"), "equipe")
+    egal("formulaire: la case cochee l'est",
+         contexte.execute("document.getElementById('memoire').checked"), True)
+
+    # Soumission.
+    contexte.execute(
+        "document.getElementById('connexion').dispatchEvent(new Event('submit'))")
+    for _ in range(3):
+        contexte.tic()
+    egal("formulaire: la soumission a eu lieu", contexte.execute("compteurs.submit"), 1)
+    rendu = contexte.execute("document.getElementById('resultat').textContent") or ""
+    verifie("formulaire: le nom saisi est rendu", "alice" in rendu, rendu[:120])
+    verifie("formulaire: le mot de passe est rendu", "secret" in rendu, rendu[:120])
+    verifie("formulaire: l'espace choisi est rendu", "equipe" in rendu, rendu[:120])
+    verifie("formulaire: FormData a rendu quelque chose",
+            "formdata" in rendu and "indisponible" not in rendu, rendu[:200])
+    egal("formulaire: la navigation a bien ete empechee",
+         getattr(contexte, "navigation", None), None)
+
+
+def verifie_champs_de_formulaire():
+    """`value` sur `select`, `textarea` et `option`, puis `FormData`."""
+    doc = document(
+        "<body><form id=f>"
+        "<select id=s name=espace>"
+        "  <option value=perso>Personnel</option>"
+        "  <option value=equipe selected>Equipe</option></select>"
+        "<select id=s2 name=sans><option value=a>A</option>"
+        "  <option value=b>B</option></select>"
+        "<textarea id=t name=message>bonjour</textarea>"
+        "<option id=o>Libelle nu</option>"
+        "<input type=text name=nom value=alice>"
+        "<input type=text value=sans-nom>"
+        "<input type=checkbox name=coche value=oui checked>"
+        "<input type=checkbox name=decoche value=non>"
+        "<input type=checkbox name=defaut checked>"
+        "<input type=text name=eteint value=x disabled>"
+        "<input type=submit name=envoi value=Envoyer>"
+        "</form></body>")
+    contexte = js.Contexte(doc)
+    try:
+        egal("champs: select rend l'option selectionnee",
+             contexte.execute("document.getElementById('s').value"), "equipe")
+        egal("champs: select sans selected rend la premiere",
+             contexte.execute("document.getElementById('s2').value"), "a")
+        egal("champs: selectedIndex suit",
+             contexte.execute("document.getElementById('s').selectedIndex"), 1)
+        contexte.execute("document.getElementById('s').value = 'perso'")
+        egal("champs: ecrire select choisit l'option",
+             contexte.execute("document.getElementById('s').value"), "perso")
+        egal("champs: et deselectionne l'ancienne",
+             contexte.execute("document.getElementById('s').selectedIndex"), 0)
+        egal("champs: textarea rend son texte",
+             contexte.execute("document.getElementById('t').value"), "bonjour")
+        egal("champs: option sans value rend son libelle",
+             contexte.execute("document.getElementById('o').value"), "Libelle nu")
+
+        contexte.execute("globalThis.d = new FormData(document.getElementById('f'))")
+        egal("formdata: un champ nomme est present",
+             contexte.execute("d.get('nom')"), "alice")
+        egal("formdata: la valeur du select suit le choix",
+             contexte.execute("d.get('espace')"), "perso")
+        egal("formdata: le textarea est inclus",
+             contexte.execute("d.get('message')"), "bonjour")
+        egal("formdata: une case cochee est incluse",
+             contexte.execute("d.get('coche')"), "oui")
+        egal("formdata: une case cochee sans value vaut « on »",
+             contexte.execute("d.get('defaut')"), "on")
+        egal("formdata: une case non cochee est absente",
+             contexte.execute("String(d.get('decoche'))"), "null")
+        egal("formdata: un champ sans nom est absent",
+             contexte.execute("String(d.get('sans-nom'))"), "null")
+        egal("formdata: un champ desactive est absent",
+             contexte.execute("String(d.get('eteint'))"), "null")
+        egal("formdata: le bouton de soumission est absent",
+             contexte.execute("String(d.get('envoi'))"), "null")
+
+        contexte.execute("d.append('extra', '1'); d.append('extra', '2')")
+        egal("formdata: getAll rend les doublons",
+             contexte.execute("d.getAll('extra').join(',')"), "1,2")
+        contexte.execute("d.set('extra', '3')")
+        egal("formdata: set remplace tout",
+             contexte.execute("d.getAll('extra').join(',')"), "3")
+        contexte.execute("d.delete('extra')")
+        egal("formdata: delete retire", contexte.execute("d.has('extra')"), False)
+        egal("formdata: forEach parcourt",
+             contexte.execute(
+                 "var n=0; d.forEach(function(){n++}); n"),
+             contexte.execute("Array.from(d.keys()).length"))
+
+        egal("urlsearchparams: lecture d'une chaine",
+             contexte.execute("new URLSearchParams('?a=1&b=deux').get('b')"), "deux")
+        egal("urlsearchparams: le plus vaut une espace",
+             contexte.execute("new URLSearchParams('q=un+deux').get('q')"), "un deux")
+        egal("urlsearchparams: reencodage",
+             contexte.execute("String(new URLSearchParams('a=1&b=2'))"), "a=1&b=2")
+    finally:
+        contexte.ferme()
+
+
+def verifie_priorite_important():
+    """`!important` : la declaration etait perdue en entier, pas seulement sa priorite."""
+    doc = document(
+        "<style>"
+        "#a { width: 300px }"
+        "div#a.large { width: 120px!important }"
+        "#b { color: #0000ff }"
+        ".rouge { color: #ff0000 !important }"
+        "#c.fort { display: none !important }"
+        "#c { display: block }"
+        "</style>"
+        "<body><div id=a class=large>a</div>"
+        "<div id=b class=rouge>b</div>"
+        "<div id=c class=fort>c</div>"
+        "<div id=d style='width: 50px !important'>d</div></body>")
+    doc.remet_en_page(1000, 800)
+
+    a = boite_de(doc, "a")
+    egal("important: la valeur est nettoyee de son drapeau",
+         a.style.get("width") if a else None, "120px")
+    verifie("important: et la largeur est vraiment posee",
+            a is not None and abs(a.largeur - 120.0) < 1.0,
+            None if a is None else a.largeur)
+
+    b = boite_de(doc, "b")
+    egal("important: il l'emporte sur une specificite superieure",
+         css_couleur(b.style.get("color")) if b else None, css_couleur("#ff0000"))
+
+    verifie("important: display:none important masque bien",
+            boite_de(doc, "c") is None)
+
+    d = boite_de(doc, "d")
+    egal("important: en style en ligne aussi",
+         d.style.get("width") if d else None, "50px")
+
+    # Ce que le drapeau ne doit pas faire : apparaitre comme une propriete.
+    verifie("important: la marque ne fuit pas dans le style",
+            a is not None and not any(nom.startswith("!") for nom in a.style),
+            None if a is None else [n for n in a.style if n.startswith("!")])
+
+
+def verifie_pointeur_transparent():
+    """`pointer-events: none` laisse le clic traverser."""
+    # Les enfants absolus vivent dans une zone qui a sa propre hauteur : le
+    # test de pointage descend par les boites, et une boite sans surface n'est
+    # jamais atteinte.
+    doc = document(
+        "<style>"
+        "#zone { position: relative; width: 200px; height: 200px }"
+        "#dessous { position: absolute; left: 0; top: 0; width: 200px; height: 200px }"
+        "#calque { position: absolute; left: 0; top: 0; width: 200px; height: 200px;"
+        "          pointer-events: none }"
+        "#dedans { position: absolute; left: 20px; top: 20px; width: 40px; height: 40px;"
+        "          pointer-events: auto }"
+        "</style>"
+        "<body><div id=zone><div id=dessous>dessous</div>"
+        "<div id=calque><div id=dedans>dedans</div></div></div></body>")
+    doc.remet_en_page(1000, 800)
+
+    def identifiant_a(x, y):
+        element = doc.element_a(x, y)
+        while element is not None and not getattr(element, "attributs", None):
+            element = getattr(element, "parent", None)
+        return None if element is None else element.attributs.get("id")
+
+    verifie("pointeur: le calque transparent laisse passer",
+            identifiant_a(150.0, 150.0) in ("dessous", "zone"),
+            identifiant_a(150.0, 150.0))
+    egal("pointeur: un enfant a auto reste cliquable",
+         identifiant_a(48.0, 48.0), "dedans")
+
+
+def verifie_tableau_de_bord():
+    """Le suivi lui-meme : s'il lit mal, il annonce « tout va bien » a tort.
+
+    Un tableau de bord qui echoue a extraire un chiffre n'affiche pas d'erreur,
+    il affiche « indisponible » — et une suite de « indisponible » se lit comme
+    une suite de journees calmes. Ces verifications-la protegent donc le
+    dernier endroit ou personne ne penserait a regarder.
+    """
+    import importlib.util
+
+    chemin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "suivi.py")
+    if not os.path.exists(chemin):
+        verifie("suivi: le programme est present", False, chemin)
+        return
+    cahier = importlib.util.spec_from_file_location("suivi", chemin)
+    suivi = importlib.util.module_from_spec(cahier)
+    cahier.loader.exec_module(suivi)
+
+    # Les deux formes que produisent `test_moteur.py` et `verifie_hote.cpp`.
+    egal("suivi: lecture d'un bilan reussi",
+         suivi._bilan("RESULTAT : 0 verification(s) en echec (731 passees)"),
+         (731, 0))
+    egal("suivi: lecture d'un bilan en echec",
+         suivi._bilan("RESULTAT : 3 verification(s) en echec sur 731"),
+         (728, 3))
+    egal("suivi: une sortie sans bilan ne s'invente pas",
+         suivi._bilan("la compilation a echoue"), None)
+    egal("suivi: le bilan se trouve au milieu du bruit",
+         suivi._bilan("bla\nRESULTAT : 0 verification(s) en echec (12 passees)\nbla"),
+         (12, 0))
+
+    # Le sens des ecarts : c'est lui qui decide si un chiffre est une bonne ou
+    # une mauvaise nouvelle, et se tromper de sens rendrait le tableau nuisible.
+    style = suivi.Style(False)
+    for cle, avant, apres, attendu in (
+            ("css.declarations_ignorees", 370, 322, "mieux"),
+            ("css.declarations_ignorees", 322, 370, "pire"),
+            ("moteur.passees", 658, 731, "mieux"),
+            ("moteur.passees", 731, 658, "pire"),
+            ("interactions.ecouteurs", 0, 16, "mieux"),
+            ("js.erreurs", 0, 1, "pire"),
+            ("page.boites", 100, 200, None)):
+        _, jugement = suivi._ecart(cle, apres, {cle: avant}, style)
+        egal("suivi: %s %d->%d" % (cle, avant, apres), jugement, attendu)
+
+    _, jugement = suivi._ecart("js.erreurs", 3, {"js.erreurs": 3}, style)
+    egal("suivi: une valeur inchangee n'est ni mieux ni pire", jugement, None)
+    texte, jugement = suivi._ecart("js.erreurs", 3, None, style)
+    egal("suivi: sans passe, rien a comparer", jugement, None)
+    egal("suivi: et cela se dit", texte, "nouveau")
+
+    # Chaque mesure affichee doit declarer un sens connu, sinon elle s'imprime
+    # sans jugement et le lecteur doit deviner.
+    for cle, libelle, sens in suivi.MESURES:
+        if cle == "__section__":
+            continue
+        verifie("suivi: %s a un sens declare" % cle,
+                sens in (suivi.BAS, suivi.HAUT, None), sens)
+        verifie("suivi: %s porte un libelle" % cle, bool(libelle))
+
+    # Les mesures surveillees par `--strict` doivent exister dans la table.
+    connues = {cle for cle, _, _ in suivi.MESURES}
+    for cle in suivi.SURVEILLEES:
+        verifie("suivi: la mesure surveillee %s existe" % cle, cle in connues)
+
+    # Comparer deux portees differentes ferait passer l'absence des sites reels
+    # pour une amelioration spectaculaire.
+    histoire = [{"portee": "complet", "mesures": {"a": 1}},
+                {"portee": "rapide", "mesures": {"a": 2}},
+                {"portee": "complet", "mesures": {"a": 3}}]
+    egal("suivi: on ne compare qu'a une execution de meme portee",
+         suivi.precedente(histoire, "complet")["mesures"]["a"], 3)
+    egal("suivi: et la portee rapide a la sienne",
+         suivi.precedente(histoire, "rapide")["mesures"]["a"], 2)
+    egal("suivi: une portee jamais vue n'a pas de passe",
+         suivi.precedente(histoire, "inconnue"), None)
+
+
+# --- Securite web -------------------------------------------------------------
+
+def verifie_politique_ressources():
+    """Une page distante ne lit pas le disque ; l'utilisateur, si.
+
+    C'est la distinction que la politique doit tenir : `file://` reste ouvert a
+    qui tape l'adresse, et ferme a qui l'ecrit dans un `fetch`. Une regle qui
+    supprimerait `file://` partout casserait le gestionnaire de fichiers ; une
+    regle qui l'autoriserait partout donnerait `/etc/shadow` a la premiere page
+    venue.
+    """
+    from moteur import images, securite
+
+    dossier = os.path.join(os.environ.get("BO_TMP", "/tmp"), "bo-verif-securite")
+    os.makedirs(dossier, exist_ok=True)
+    secret = os.path.join(dossier, "secret.txt")
+    with open(secret, "w") as f:
+        f.write("mot-de-passe-de-l-utilisateur")
+    adresse = "file://" + secret
+
+    # 1. La navigation de l'utilisateur reste possible : aucun `document`.
+    ouverte = reseau.charge(adresse)
+    verifie("securite: l'utilisateur ouvre encore un fichier local",
+            "mot-de-passe" in ouverte.contenu, ouverte.contenu[:60])
+
+    # 2. Le meme fichier, demande par une page distante, est refuse — quelle
+    #    que soit la destination invoquee.
+    for destination in ("fetch", "script", "style", "image", "font", "media"):
+        refus = reseau.charge(adresse, brut=True,
+                              document="https://mechant.test/page",
+                              destination=destination)
+        egal("securite: %s distant refuse file://" % destination, refus.code, 0)
+        verifie("securite: %s refuse sans divulguer le contenu" % destination,
+                "mot-de-passe" not in (refus.contenu or "")
+                and b"mot-de-passe" not in (refus.octets or b""),
+                destination)
+
+    # 3. Une page locale garde le droit de charger ses voisines : sans cela,
+    #    ouvrir un fichier HTML du disque n'afficherait plus ses images.
+    voisine = reseau.charge(adresse, brut=True,
+                            document="file:///home/utilisateur/page.html",
+                            destination="image")
+    egal("securite: une page locale charge sa voisine locale", voisine.code, 200)
+
+    # 4. `bo:` est du chrome de navigateur, pas une ressource du Web.
+    interne = reseau.charge("bo:accueil", document="https://mechant.test/page",
+                            destination="fetch")
+    egal("securite: une page distante n'atteint pas bo:", interne.code, 0)
+
+    # 5. Le chemin reel du moteur : `fetch("file:///…")` depuis du JavaScript.
+    doc = document("<body></body>", url="https://mechant.test/page")
+    contexte = js.Contexte(doc)
+    try:
+        contexte.execute(
+            "globalThis.__vu = null;"
+            "fetch(%s).then(r => r.text()).then(t => { globalThis.__vu = t; });"
+            % json.dumps(adresse))
+        for _ in range(4):
+            contexte.tic()
+        vu = contexte.execute("String(globalThis.__vu)")
+        verifie("securite: fetch(file://) ne rend pas le fichier",
+                "mot-de-passe" not in vu, vu[:60])
+    finally:
+        contexte.ferme()
+
+    # 6. Et le chemin des images, qui passe par son propre cache.
+    images.vide()
+    egal("securite: <img src=file://> distant refuse",
+         images.charge("https://mechant.test/page", adresse), None)
+
+    # 7. La politique elle-meme, testee directement.
+    egal("securite: origine d'une adresse https",
+         securite.origine("https://a.test:8443/x"), ("https", "a.test", 8443))
+    egal("securite: port implicite d'https",
+         securite.origine("https://a.test/x"), ("https", "a.test", 443))
+    egal("securite: un fichier n'a pas d'origine",
+         securite.origine("file:///etc/passwd"), None)
+    verifie("securite: deux origines opaques ne sont pas egales",
+            not securite.meme_origine("file:///a", "file:///a"))
+    verifie("securite: meme origine reconnue",
+            securite.meme_origine("https://a.test/x", "https://a.test/y"))
+    verifie("securite: un port different change l'origine",
+            not securite.meme_origine("https://a.test:1/x", "https://a.test:2/y"))
+    try:
+        shutil.rmtree(dossier)
+    except OSError:
+        pass
+
+
+def verifie_tls_ferme():
+    """Sans magasin de racines, HTTPS echoue. Il ne se degrade pas."""
+    import ssl
+
+    from moteur import reseau as _reseau
+
+    anciens = _reseau.MAGASINS
+    ancien_env = {nom: os.environ.pop(nom, None)
+                  for nom in ("BO_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR")}
+    ancien_defaut = ssl.create_default_context
+
+    def contexte_vide(*args, **kwargs):
+        # Un contexte sans racine, comme sur une image OS qui n'en embarque pas.
+        return ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+    try:
+        _reseau.MAGASINS = ("/inexistant/aucun-magasin.crt",)
+        ssl.create_default_context = contexte_vide
+        leve = None
+        try:
+            _reseau.contexte_tls()
+        except _reseau.MagasinAbsent as e:
+            leve = e
+        verifie("tls: sans magasin, la connexion est refusee", leve is not None)
+        verifie("tls: le refus se nomme",
+                leve is not None and "magasin" in str(leve).lower(), str(leve))
+    finally:
+        ssl.create_default_context = ancien_defaut
+        _reseau.MAGASINS = anciens
+        for nom, valeur in ancien_env.items():
+            if valeur is not None:
+                os.environ[nom] = valeur
+
+    # Et avec un magasin, le contexte verifie vraiment quelque chose.
+    try:
+        contexte = _reseau.contexte_tls()
+    except _reseau.MagasinAbsent:
+        contexte = None
+    if contexte is not None:
+        egal("tls: la chaine est exigee", contexte.verify_mode, ssl.CERT_REQUIRED)
+        egal("tls: le nom d'hote est verifie", contexte.check_hostname, True)
+
+    # La regression a interdire : que le code se remette a fabriquer un
+    # contexte permissif quelque part.
+    source = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "moteur", "reseau.py")).read()
+    verifie("tls: le transport ne desarme plus la verification",
+            "verify_mode = ssl.CERT_NONE" not in source)
+    verifie("tls: le transport ne desactive plus le nom d'hote",
+            "check_hostname = False" not in source)
+
+
+def verifie_temoins_httponly():
+    """`HttpOnly` : le serveur le recoit, `document.cookie` ne le voit jamais."""
+    from moteur import stockage
+
+    restaure = isole_le_stockage()
+    try:
+        bocal = stockage.Temoins()
+        bocal.oublie_tout()
+        bocal.absorbe("https://banque.test/compte", {
+            "set-cookie": "session=secret-de-session; Path=/; HttpOnly, "
+                          "theme=sombre; Path=/",
+        })
+
+        reseau_vu = bocal.pour("https://banque.test/compte")
+        verifie("httponly: le serveur recoit le temoin", "session=secret-de-session" in reseau_vu, reseau_vu)
+        verifie("httponly: le serveur recoit aussi les autres", "theme=sombre" in reseau_vu, reseau_vu)
+
+        script_vu = bocal.pour("https://banque.test/compte", javascript=True)
+        verifie("httponly: document.cookie ne le voit pas",
+                "secret-de-session" not in script_vu, script_vu)
+        verifie("httponly: document.cookie voit le reste",
+                "theme=sombre" in script_vu, script_vu)
+
+        # Un script ne doit pas non plus pouvoir l'ecraser : proteger la lecture
+        # sans proteger l'ecriture laisserait fixer la session.
+        bocal.absorbe("https://banque.test/compte",
+                      {"set-cookie": "session=vole; Path=/"}, javascript=True)
+        verifie("httponly: un script ne l'ecrase pas",
+                "session=secret-de-session" in bocal.pour("https://banque.test/compte"),
+                bocal.pour("https://banque.test/compte"))
+        verifie("httponly: il reste invisible apres la tentative",
+                "vole" not in bocal.pour("https://banque.test/compte", javascript=True))
+
+        # Ni le poser lui-meme, ce qui reviendrait a se cacher de soi-meme.
+        bocal.absorbe("https://banque.test/compte",
+                      {"set-cookie": "jeton=x; Path=/; HttpOnly"}, javascript=True)
+        verifie("httponly: un script ne pose pas de temoin HttpOnly",
+                "jeton=x" in bocal.pour("https://banque.test/compte", javascript=True),
+                bocal.pour("https://banque.test/compte", javascript=True))
+
+        # Le chemin, corrige : `/admin` ne couvre pas `/administrateur`.
+        bocal.oublie_tout()
+        bocal.absorbe("https://site.test/admin/", {"set-cookie": "a=1; Path=/admin"})
+        verifie("temoins: /admin couvre /admin",
+                "a=1" in bocal.pour("https://site.test/admin"))
+        verifie("temoins: /admin couvre /admin/outils",
+                "a=1" in bocal.pour("https://site.test/admin/outils"))
+        verifie("temoins: /admin ne couvre pas /administrateur",
+                "a=1" not in bocal.pour("https://site.test/administrateur"),
+                bocal.pour("https://site.test/administrateur"))
+
+        # Le domaine, corrige : sans `Domain`, le temoin ne descend pas.
+        bocal.oublie_tout()
+        bocal.absorbe("https://site.test/", {"set-cookie": "b=1; Path=/"})
+        verifie("temoins: sans Domain, l'hote seul le recoit",
+                "b=1" in bocal.pour("https://site.test/"))
+        verifie("temoins: sans Domain, pas de sous-domaine",
+                "b=1" not in bocal.pour("https://compte.site.test/"),
+                bocal.pour("https://compte.site.test/"))
+        bocal.absorbe("https://site.test/", {"set-cookie": "c=1; Path=/; Domain=site.test"})
+        verifie("temoins: avec Domain, le sous-domaine le recoit",
+                "c=1" in bocal.pour("https://compte.site.test/"))
+    finally:
+        restaure()
+
+
+def verifie_temoins_document():
+    """`document.cookie` passe bien par le chemin protege."""
+    from moteur import stockage
+
+    restaure = isole_le_stockage()
+    try:
+        stockage.temoins().absorbe("https://banque.test/", {
+            "set-cookie": "session=secret; Path=/; HttpOnly, public=oui; Path=/",
+        })
+        doc = document("<body></body>", url="https://banque.test/")
+        contexte = js.Contexte(doc)
+        try:
+            lu = contexte.execute("document.cookie")
+            verifie("document.cookie: le HttpOnly est absent",
+                    "secret" not in lu, lu)
+            verifie("document.cookie: le reste est present", "public=oui" in lu, lu)
+            contexte.execute('document.cookie = "session=vole; Path=/"')
+            verifie("document.cookie: l'ecrasement est refuse",
+                    "secret" in stockage.temoins().pour("https://banque.test/"),
+                    stockage.temoins().pour("https://banque.test/"))
+        finally:
+            contexte.ferme()
+    finally:
+        restaure()
+
+
+def verifie_redirection_entetes():
+    """Une redirection vers un autre hote ne reporte pas les secrets."""
+    vues = []
+
+    class _Fausse:
+        will_close = True
+        status = 200
+
+        def __init__(self, code, entetes):
+            self.status = code
+            self._entetes = entetes
+
+        def getheaders(self):
+            return list(self._entetes.items())
+
+        def read(self):
+            return b"corps"
+
+    class _Connexion:
+        def __init__(self, hote, port, timeout=None):
+            self.hote = hote
+            self.sock = object()
+            self._reponse = None
+
+        def request(self, methode, chemin, body=None, headers=None):
+            vues.append((self.hote, dict(headers or {})))
+            if self.hote == "depart.test":
+                self._reponse = _Fausse(302, {
+                    "Location": "https://arrivee.test/cible",
+                    "Content-Type": "text/plain",
+                })
+            else:
+                self._reponse = _Fausse(200, {"Content-Type": "text/plain"})
+
+        def getresponse(self):
+            return self._reponse
+
+        def close(self):
+            self.sock = None
+
+    ancien = reseau._ouvre
+    reseau._ouvre = lambda hote, port, securise: _Connexion(hote, port)
+    try:
+        reseau.charge("https://depart.test/a", brut=True,
+                      entetes={"Authorization": "Bearer jeton-secret",
+                               "Cookie": "session=abc"})
+    finally:
+        reseau._ouvre = ancien
+
+    egal("redirection: les deux hotes ont ete joints", len(vues), 2)
+    if len(vues) == 2:
+        _, seconde = vues[1]
+        envoyes = {n.lower(): v for n, v in seconde.items()}
+        verifie("redirection: Authorization ne suit pas vers un autre hote",
+                "authorization" not in envoyes, envoyes)
+        verifie("redirection: le Cookie du depart ne suit pas",
+                "session=abc" not in envoyes.get("cookie", ""), envoyes)
+        egal("redirection: l'hote demande est bien le nouveau",
+             vues[1][0], "arrivee.test")
 
 
 # --- Execution ----------------------------------------------------------------
@@ -3509,6 +4361,22 @@ def principal():
         verifie_longueurs,
         verifie_client_leger,
         verifie_bac_a_sable,
+        verifie_liste_de_selecteurs,
+        verifie_proprietes_logiques,
+        verifie_transformation_texte,
+        verifie_donnees_element,
+        verifie_ascendance,
+        verifie_console_gabarit,
+        verifie_priorite_important,
+        verifie_pointeur_transparent,
+        verifie_champs_de_formulaire,
+        verifie_formulaire_pilote,
+        verifie_politique_ressources,
+        verifie_tls_ferme,
+        verifie_temoins_httponly,
+        verifie_temoins_document,
+        verifie_redirection_entetes,
+        verifie_tableau_de_bord,
         verifie_hote_reel,
     ):
         nom = verification.__name__.replace("verifie_", "")

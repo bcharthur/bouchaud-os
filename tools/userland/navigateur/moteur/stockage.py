@@ -106,8 +106,15 @@ class Temoins:
         self._temoins = [t for t in self._temoins
                          if not t.get("expire") or t["expire"] > maintenant]
 
-    def pour(self, url):
-        """L'en-tete `Cookie` a envoyer pour cette adresse, ou `""`."""
+    def pour(self, url, javascript=False):
+        """L'en-tete `Cookie` a envoyer pour cette adresse, ou `""`.
+
+        `javascript=True` decrit la lecture de `document.cookie` : les temoins
+        marques `HttpOnly` en sont exclus. C'est toute la raison d'etre de cet
+        attribut — un jeton de session part au serveur a chaque requete sans
+        qu'aucun script de la page ne puisse le lire, donc sans qu'une faille
+        d'injection suffise a le voler.
+        """
         morceaux = urllib.parse.urlsplit(url)
         hote = (morceaux.hostname or "").lower()
         chemin = morceaux.path or "/"
@@ -118,17 +125,45 @@ class Temoins:
         self._nettoie()
         retenus = []
         for temoin in self._temoins:
+            if javascript and temoin.get("httponly"):
+                continue
             if temoin.get("secure") and not securise:
                 continue
-            if not _domaine_correspond(hote, temoin.get("domaine", "")):
+            if not _domaine_correspond(hote, temoin.get("domaine", ""),
+                                       temoin.get("hote_seul", False)):
                 continue
-            if not chemin.startswith(temoin.get("chemin", "/")):
+            if not _chemin_correspond(chemin, temoin.get("chemin", "/")):
                 continue
             retenus.append("%s=%s" % (temoin["nom"], temoin["valeur"]))
         return "; ".join(retenus)
 
-    def absorbe(self, url, entetes):
-        """Retient les `Set-Cookie` d'une reponse. Rend le nombre retenu."""
+    def cache_javascript(self, url, nom):
+        """Vrai si un temoin de ce nom existe ici mais est cache aux scripts.
+
+        `document.cookie = "session=vole"` ne doit pas remplacer un temoin
+        `HttpOnly` : sinon l'attribut protegerait la lecture mais pas
+        l'ecrasement, et une page injectee pourrait fixer la session.
+        """
+        self._nettoie()
+        morceaux = urllib.parse.urlsplit(url)
+        hote = (morceaux.hostname or "").lower()
+        chemin = morceaux.path or "/"
+        for temoin in self._temoins:
+            if temoin["nom"] != nom or not temoin.get("httponly"):
+                continue
+            if not _domaine_correspond(hote, temoin.get("domaine", ""),
+                                       temoin.get("hote_seul", False)):
+                continue
+            if _chemin_correspond(chemin, temoin.get("chemin", "/")):
+                return True
+        return False
+
+    def absorbe(self, url, entetes, javascript=False):
+        """Retient les `Set-Cookie` d'une reponse. Rend le nombre retenu.
+
+        `javascript=True` decrit `document.cookie = …`. Un script ne peut alors
+        ni poser un temoin `HttpOnly`, ni ecraser celui qui l'est deja.
+        """
         brut = entetes.get("set-cookie")
         if not brut:
             return 0
@@ -142,6 +177,13 @@ class Temoins:
             temoin = _analyse_temoin(declaration, hote, morceaux.path or "/")
             if temoin is None:
                 continue
+            if javascript:
+                if self.cache_javascript(url, temoin["nom"]):
+                    # Protection en ecriture, pas seulement en lecture : sans
+                    # elle, une page injectee fixerait la session au lieu de la
+                    # lire, ce qui suffit deja a prendre le compte.
+                    continue
+                temoin["httponly"] = False
             # Un temoin de meme nom, domaine et chemin remplace le precedent.
             self._temoins = [t for t in self._temoins
                              if not (t["nom"] == temoin["nom"]
@@ -162,11 +204,33 @@ class Temoins:
         _ecrit(self.FICHIER, self._temoins)
 
 
-def _domaine_correspond(hote, domaine):
+def _domaine_correspond(hote, domaine, hote_seul=False):
     domaine = (domaine or "").lstrip(".").lower()
     if not domaine:
         return False
+    if hote_seul:
+        # Sans attribut `Domain`, un temoin n'appartient qu'a l'hote exact qui
+        # l'a pose. `compte.site.fr` ne recoit pas celui de `site.fr`.
+        return hote == domaine
     return hote == domaine or hote.endswith("." + domaine)
+
+
+def _chemin_correspond(chemin, motif):
+    """Le « path-match » de la RFC 6265, §5.1.4.
+
+    `startswith` seul est faux et c'etait le cas ici : un temoin pose sur
+    `/admin` partait vers `/administrateur`, qui peut appartenir a une toute
+    autre application du meme hote. La regle exacte veut l'egalite, ou un
+    prefixe qui se termine sur une frontiere de segment.
+    """
+    motif = motif or "/"
+    if chemin == motif:
+        return True
+    if not chemin.startswith(motif):
+        return False
+    if motif.endswith("/"):
+        return True
+    return chemin[len(motif):].startswith("/")
 
 
 def _separe_temoins(brut):
@@ -203,8 +267,13 @@ def _analyse_temoin(declaration, hote, chemin_defaut):
         "nom": nom,
         "valeur": valeur.strip(),
         "domaine": hote,
+        # Sans `Domain`, le temoin est « host-only » : il ne descend pas vers
+        # les sous-domaines. La norme distingue les deux cas, et les confondre
+        # elargit silencieusement la portee de chaque temoin de session.
+        "hote_seul": True,
         "chemin": _chemin_parent(chemin_defaut),
         "secure": False,
+        "httponly": False,
         "expire": 0,
     }
     for attribut in parties[1:]:
@@ -218,10 +287,13 @@ def _analyse_temoin(declaration, hote, chemin_defaut):
             # pourrait en poser un pour n'importe quel autre.
             if _domaine_correspond(hote, candidat):
                 temoin["domaine"] = candidat
+                temoin["hote_seul"] = False
         elif cle == "path" and contenu.startswith("/"):
             temoin["chemin"] = contenu
         elif cle == "secure":
             temoin["secure"] = True
+        elif cle == "httponly":
+            temoin["httponly"] = True
         elif cle == "max-age":
             try:
                 temoin["expire"] = time.time() + float(contenu)

@@ -26,6 +26,7 @@ Barème : ✅ vérifié ici · 🟢 solide (lecture) · 🟡 fonctionne, manques
 |---|---|---|
 | Compilation du noyau | `cargo build` | ✅ **succès, 0 warning**, 1 min 09 s |
 | Moteur du navigateur | `tools/userland/test-moteur.sh` | ✅ **573/573**, 0 échec |
+| **Hôte Qt** | `tools/userland/verifie-hote.sh` | ✅ **31/31** au pixel, contre Qt réel |
 | Toolchain épinglée | `rust-toolchain.toml` | ✅ nightly-2026-06-01 s'installe seule |
 
 Deux résultats à souligner. Un noyau `no_std` de 32 700 lignes qui compile
@@ -390,8 +391,24 @@ et l'autre repérées en comparant les captures : un `display: table` sans cellu
 qui perdait tout son contenu, et une police retenue par écriture qui faisait
 sortir la page entière en carrés.
 
-Reste ouvert, par ordre de valeur : les polices en **WOFF2** (brotli et la
-transformation `glyf`/`loca`), le chargement parallèle des modules ES,
+### Le C++ n'est plus écrit à l'aveugle
+
+Toutes les opérations de peinture ajoutées à `hote.cpp` l'avaient été sans
+jamais être exécutées : Qt manquait à l'environnement. `verifie-hote.sh`
+compile désormais le vrai `hote.cpp` contre le Qt du système, le fait peindre
+hors écran et **relit les pixels** — 31 vérifications. Il n'a besoin que de
+`qtbase5-dev`, `python3-dev` et `libbrotli-dev`.
+
+Il a trouvé son premier défaut à la première exécution : `largeurTexte`
+ignorait la famille de police, donc la mise en page aurait mesuré dans une
+police et la peinture dessiné dans une autre.
+
+**WOFF2 est lu**, transformation `glyf`/`loca` comprise, et le résultat est
+identique glyphe par glyphe à celui de fontTools sur une police réelle. La
+décompression brotli vient de l'hôte (`bo.debrotli`), qui liait déjà
+`libbrotlidec` pour freetype. Les polices d'icônes s'affichent.
+
+Reste ouvert, par ordre de valeur : le chargement parallèle des modules ES,
 `listen`/`accept`, et la reprise du banc d'essai glibc.
 
 ---

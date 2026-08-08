@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Menu deroulant</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; color: #0f172a;
+         background: #fff; font-size: 15px; line-height: 1.5; }
+
+  .barre { display: flex; gap: 4px; padding: 12px 20px; background: #f1f5f9; }
+  .menu { position: relative; }
+  .menu > button { padding: 8px 14px; border: 0; background: transparent;
+                   font-size: 14px; border-radius: 6px; }
+  .menu > button:hover { background: #e2e8f0; }
+  .panneau { position: absolute; left: 0; top: 100%; min-width: 200px;
+             background: #fff; border: 1px solid #e2e8f0; border-radius: 8px;
+             box-shadow: 0 8px 24px rgba(15,23,42,0.12); padding: 6px;
+             display: none; z-index: 5; }
+  .menu.ouvert .panneau { display: block; }
+  .panneau a { display: block; padding: 8px 10px; font-size: 14px;
+               color: #0f172a; text-decoration: none; border-radius: 5px; }
+  .panneau a:hover { background: #f1f5f9; }
+  .separateur { height: 1px; background: #e2e8f0; margin: 6px 0; }
+
+</style></head><body>
+
+<div class="barre">
+  <div class="menu ouvert" id="fichier"><button>Fichier</button>
+    <div class="panneau"><a href="#">Nouveau</a><a href="#">Ouvrir…</a>
+      <div class="separateur"></div><a href="#">Enregistrer</a>
+      <a href="#">Enregistrer sous…</a></div></div>
+  <div class="menu" id="edition"><button>Edition</button>
+    <div class="panneau"><a href="#">Annuler</a><a href="#">Retablir</a></div></div>
+  <div class="menu" id="aide"><button>Aide</button>
+    <div class="panneau"><a href="#">Documentation</a></div></div>
+</div>
+<p style="padding:20px">Un seul menu est ouvert dans l'etat initial : la mesure
+doit etre la meme a chaque execution. Le panneau ouvert se superpose au texte,
+ce qui eprouve <code>position: absolute</code>, <code>z-index</code> et
+<code>display: none</code> sur un descendant.</p>
+<script>
+for (const menu of document.querySelectorAll(".menu")) {
+  menu.querySelector("button").addEventListener("click", function () {
+    menu.classList.toggle("ouvert");
+  });
+}
+</script>
+
+</body></html>

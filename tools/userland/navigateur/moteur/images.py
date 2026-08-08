@@ -23,6 +23,7 @@ import urllib.parse
 import bo
 
 from . import reseau
+from . import telemetrie
 
 # Au-dela, on renonce : decoder une image de plusieurs dizaines de mega-octets
 # sous emulation coute plus que ce qu'elle apporte.
@@ -62,19 +63,28 @@ def charge(base, source):
     if len(_cache) >= ENTREES_MAX:
         _cache.clear()
 
-    resultat = _decode(_octets(url))
+    resultat = _decode(_octets(url, base))
+    if telemetrie.ACTIVE:
+        # Compter ici, et pas les operations peintes : la liste d'affichage est
+        # elaguee au viewport, donc une page de 11 000 pixels de haut n'y montre
+        # qu'une poignee d'images alors qu'elle en a charge des dizaines.
+        telemetrie.note("image", "chargee" if resultat else "echouee", url)
     _cache[url] = resultat
     return resultat
 
 
-def _octets(url):
+def _octets(url, document=None):
     if url.startswith("data:"):
         return _octets_data(url)
     try:
-        reponse = reseau.charge(url, brut=True)
+        # `document` range la demande en provenance « document » : une page
+        # distante n'obtiendra pas `file:///…` en la nommant dans un `<img>`.
+        reponse = reseau.charge(url, brut=True, document=document,
+                                destination="image")
     except Exception:  # noqa: BLE001 — une image cassee n'est pas une panne
         return None
-    if reponse.code and reponse.code >= 400:
+    if reponse.code is not None and (not reponse.code or reponse.code >= 400):
+        telemetrie.ressource_echouee(url, reponse.code, "image")
         return None
     donnees = reponse.octets
     if not donnees or len(donnees) > TAILLE_MAX:

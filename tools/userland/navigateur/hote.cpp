@@ -68,6 +68,8 @@
 #include <QtCore/QTimer>
 #include <QtCore/QtPlugin>
 
+#include <brotli/decode.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdarg>
@@ -194,7 +196,9 @@ public:
     double largeurTexte(const QString &texte, double taille, bool gras, bool fixe,
                         const QString &famille = QString())
     {
-        QFontMetricsF metriques(fabriqueFonte(taille, gras, false, fixe));
+        // La famille compte ici autant qu'a la peinture : mesurer dans une
+        // police et peindre dans une autre decale tout le texte de la page.
+        QFontMetricsF metriques(fabriqueFonte(taille, gras, false, fixe, famille));
         return metriques.horizontalAdvance(texte);
     }
 
@@ -873,6 +877,44 @@ PyObject *bo_rasterise(PyObject *, PyObject *args)
         Py_ssize_t(image.sizeInBytes()));
 }
 
+/// `bo.debrotli(octets) -> bytes`
+///
+/// Decompresse un flux brotli. Le navigateur lie deja `libbrotlidec` — freetype
+/// en depend — mais Python n'y avait pas acces. C'est ce qui manquait pour lire
+/// une police en WOFF2, c'est-a-dire la quasi-totalite de celles que les sites
+/// livrent aujourd'hui, dont les polices d'icones.
+PyObject *bo_debrotli(PyObject *, PyObject *args)
+{
+    Py_buffer entree;
+    if (!PyArg_ParseTuple(args, "y*", &entree))
+        return nullptr;
+
+    // La taille decompressee n'est pas connue d'avance : on double le tampon
+    // tant que le decodeur en reclame. Une police depasse rarement quelques
+    // centaines de kilo-octets, d'ou le plafond.
+    const size_t plafond = 64u * 1024u * 1024u;
+    size_t capacite = std::max<size_t>(size_t(entree.len) * 4, 64u * 1024u);
+    QByteArray sortie;
+    BrotliDecoderResult resultat = BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT;
+
+    while (resultat == BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT && capacite <= plafond) {
+        sortie.resize(int(capacite));
+        size_t taille = capacite;
+        resultat = BrotliDecoderDecompress(
+            size_t(entree.len), static_cast<const uint8_t *>(entree.buf), &taille,
+            reinterpret_cast<uint8_t *>(sortie.data()));
+        if (resultat == BROTLI_DECODER_RESULT_SUCCESS) {
+            sortie.resize(int(taille));
+            PyBuffer_Release(&entree);
+            return PyBytes_FromStringAndSize(sortie.constData(), sortie.size());
+        }
+        capacite *= 2;
+    }
+    PyBuffer_Release(&entree);
+    PyErr_SetString(PyExc_ValueError, "bo.debrotli : flux illisible ou trop gros");
+    return nullptr;
+}
+
 PyMethodDef bo_methodes[] = {
     {"enregistrer", bo_enregistrer, METH_VARARGS,
      "enregistrer({'peindre': f, 'touche': f, 'clic': f, ...})"},
@@ -892,6 +934,8 @@ PyMethodDef bo_methodes[] = {
      "image(octets) -> (identifiant, largeur, hauteur), ou None si illisible"},
     {"image_brute", bo_image_brute, METH_VARARGS,
      "image_brute(octets_bgra, largeur, hauteur, identifiant=-1) -> (id, l, h)"},
+    {"debrotli", bo_debrotli, METH_VARARGS,
+     "debrotli(octets) -> bytes : decompresse un flux brotli"},
     {"police", bo_police, METH_VARARGS,
      "police(octets, famille, gras=False, italique=False) -> bool"},
     {"rasterise", bo_rasterise, METH_VARARGS,

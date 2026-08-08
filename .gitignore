@@ -39,3 +39,8 @@ tools/userland/build-test-moteur/
 # Bytecode Python
 __pycache__/
 *.pyc
+# Banc de verification de l'hote Qt (verifie-hote.sh)
+tools/userland/build-verifie-hote/
+
+# Fichier de travail du tableau de bord, efface a la fin de chaque execution.
+tools/userland/navigateur/.suivi-observations.jsonl

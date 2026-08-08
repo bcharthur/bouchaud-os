@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Article long</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; color: #0f172a;
+         background: #fff; font-size: 15px; line-height: 1.5; }
+
+  .page { max-width: 720px; margin: 0 auto; padding: 40px 24px; }
+  h1 { font-size: 32px; margin: 0 0 8px; }
+  .chapeau { color: #64748b; font-size: 17px; margin: 0 0 32px; }
+  h2 { font-size: 22px; margin: 32px 0 12px; }
+  p { margin: 0 0 16px; }
+  blockquote { margin: 24px 0; padding: 12px 20px; border-left: 4px solid #38bdf8;
+               background: #f8fafc; color: #334155; font-style: italic; }
+  code { background: #f1f5f9; padding: 2px 5px; border-radius: 4px;
+         font-family: ui-monospace, monospace; font-size: 13px; }
+  ul { margin: 0 0 16px; padding-left: 24px; }
+  li { margin-bottom: 6px; }
+  figure { margin: 24px 0; }
+  figcaption { font-size: 13px; color: #64748b; margin-top: 8px; }
+
+</style></head><body>
+
+<div class="page">
+<h1>Ce que le moteur doit savoir composer</h1>
+<p class="chapeau">Un article ordinaire : des titres, des paragraphes, une
+citation, du code en ligne, une liste et une figure.</p>
+<p>Le texte doit se couper aux bons endroits, les marges verticales des
+paragraphes voisins doivent fusionner, et la largeur maximale doit centrer la
+colonne quelle que soit la fenetre.</p>
+<h2>Une premiere section</h2>
+<p>Une propriete comme <code>max-width</code> combinee a <code>margin: 0 auto</code>
+est la facon dont la quasi-totalite des sites de lecture centrent leur colonne.
+Si elle echoue, chaque article du Web devient illisible sur grand ecran.</p>
+<blockquote>Une citation en retrait, avec sa barre a gauche et son fond clair.</blockquote>
+<h2>Une seconde section</h2>
+<ul><li>Un premier point.</li><li>Un deuxieme point, plus long, pour qu'il passe
+a la ligne et que l'indentation de la puce reste visible sur la seconde
+ligne.</li><li>Un troisieme.</li></ul>
+<figure><div style="height:160px;background:#e2e8f0;border-radius:8px"></div>
+<figcaption>Figure 1 — un bloc de remplacement et sa legende.</figcaption></figure>
+<p>Enfin un dernier paragraphe, pour que la page depasse la hauteur de la
+fenetre et que le defilement ait quelque chose a montrer.</p>
+</div>
+
+</body></html>

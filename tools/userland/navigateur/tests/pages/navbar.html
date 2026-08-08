@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Barre de navigation</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; color: #0f172a;
+         background: #fff; font-size: 15px; line-height: 1.5; }
+
+  .barre { display: flex; align-items: center; gap: 20px; height: 56px;
+           padding: 0 24px; background: #0f172a; color: #fff; }
+  .marque { font-weight: 700; font-size: 18px; margin-right: auto; }
+  .barre a { color: #cbd5e1; text-decoration: none; font-size: 14px; }
+  .barre a.actif { color: #fff; border-bottom: 2px solid #38bdf8; padding-bottom: 4px; }
+  .action { background: #38bdf8; color: #0f172a; padding: 7px 14px;
+            border-radius: 6px; font-weight: 600; }
+
+</style></head><body>
+
+<nav class="barre">
+  <span class="marque">Bouchaud</span>
+  <a href="#" class="actif">Accueil</a>
+  <a href="#">Documentation</a>
+  <a href="#">Telechargements</a>
+  <a href="#">A propos</a>
+  <a href="#" class="action">Se connecter</a>
+</nav>
+<p style="padding:24px">La barre au-dessus doit tenir sur une seule ligne, les
+liens groupes a droite et la marque a gauche. C'est la structure d'en-tete la
+plus repandue du Web : elle repose entierement sur <code>flex</code>,
+<code>gap</code> et <code>margin-right: auto</code>.</p>
+
+</body></html>

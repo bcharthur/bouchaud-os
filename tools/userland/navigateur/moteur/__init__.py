@@ -32,7 +32,7 @@ import urllib.parse
 import bo
 
 from . import (animation, css, html, images, mise_en_page, peinture,
-               police, prechargement, reseau, stockage)
+               police, prechargement, reseau, stockage, telemetrie)
 
 __all__ = ["animation", "css", "html", "images", "js", "mise_en_page",
            "peinture", "police", "prechargement", "reseau", "stockage",
@@ -47,7 +47,8 @@ class Document:
         self.url = reponse.url
         self.code = reponse.code
         self.erreur = reponse.erreur
-        self.racine = html.analyse(reponse.contenu)
+        with telemetrie.chrono("html"):
+            self.racine = html.analyse(reponse.contenu)
         self.titre = self._titre()
         self.journal = journal or (lambda niveau, texte: None)
         # Feuilles liees deja rapportees, par adresse : la cascade est
@@ -180,6 +181,10 @@ class Document:
         return self.url
 
     def _regles(self):
+        with telemetrie.chrono("css"):
+            return self._regles_reellement()
+
+    def _regles_reellement(self):
         """Cascade complete : feuille de l'agent, feuilles liees, feuilles en ligne.
 
         L'ordre du document decide entre deux regles de meme specificite ; un
@@ -289,7 +294,8 @@ class Document:
                              % famille)
                 continue
             url = urllib.parse.urljoin(base or self.url or "", choix[0])
-            reponse = reseau.charge(url, brut=True)
+            reponse = reseau.charge(url, brut=True, document=self.url,
+                                    destination="font")
             ouverte = police.ouvre(reponse.octets or b"") if reponse.code == 200 else None
             if not ouverte:
                 self._polices[cle] = False
@@ -334,7 +340,8 @@ class Document:
         if cle in self._feuilles:
             return self._feuilles[cle]
         try:
-            reponse = reseau.charge(url, brut=True)
+            reponse = reseau.charge(url, brut=True, document=self.url,
+                                    destination="style")
         except Exception as e:  # noqa: BLE001
             self.journal("warn", "feuille %s : %s" % (adresse, e))
             self._feuilles[cle] = ""
@@ -363,9 +370,10 @@ class Document:
         self.animateur.nouveau_tour()
         css.pose_animateur(self.animateur)
         try:
-            self.boite, self.hauteur = mise_en_page.construit(
-                self.racine, self.regles, largeur, self.url, self._image_video,
-                self._toile)
+            with telemetrie.chrono("mise_en_page"):
+                self.boite, self.hauteur = mise_en_page.construit(
+                    self.racine, self.regles, largeur, self.url,
+                    self._image_video, self._toile)
         finally:
             css.pose_animateur(None)
 
@@ -383,8 +391,9 @@ class Document:
 
     def liste_affichage(self, defilement, largeur_vue, hauteur_vue):
         self.zones_liens = []
-        return peinture.peint(self.boite, defilement, largeur_vue, hauteur_vue,
-                              self.zones_liens)
+        with telemetrie.chrono("peinture"):
+            return peinture.peint(self.boite, defilement, largeur_vue,
+                                  hauteur_vue, self.zones_liens)
 
     def lien_a(self, x, y):
         """URL du lien sous ce point, en coordonnees de page. `None` sinon."""
@@ -447,11 +456,30 @@ def _element_a(boite, x, y):
     if not (boite.x <= x <= boite.x + boite.largeur
             and boite.y <= y <= boite.y + boite.hauteur):
         return None
-    # Le plus profond gagne : c'est lui que l'utilisateur vise.
-    for enfant in boite.enfants:
+
+    style = getattr(boite, "style", None) or {}
+    transparente = (style.get("pointer-events", "auto").strip().lower() == "none")
+
+    # Le plus profond gagne : c'est lui que l'utilisateur vise. Et parmi les
+    # freres qui se recouvrent, le dernier — celui que la peinture a pose
+    # par-dessus. Prendre le premier, comme on le faisait, rendait un calque
+    # place plus haut dans le document toujours vainqueur, alors qu'il est
+    # dessous a l'ecran.
+    #
+    # `pointer-events` n'est pas heritee par le test de pointage : un enfant
+    # peut remettre `auto` sous un parent a `none`, et c'est meme l'usage le
+    # plus courant — un calque qui laisse passer les clics sauf sur son contenu.
+    for enfant in reversed(boite.enfants):
         trouve = _element_a(enfant, x, y)
         if trouve is not None:
             return trouve
+
+    # `pointer-events: none` rend la boite transparente au pointeur : le clic
+    # traverse et atteint ce qui est dessous. Sans cela, un calque de modale ou
+    # une icone decorative avalait chaque clic, et la page devenait inerte sans
+    # qu'aucune erreur ne le signale.
+    if transparente:
+        return None
     return boite.element
 
 

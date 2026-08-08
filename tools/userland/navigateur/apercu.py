@@ -541,6 +541,14 @@ def installe_hote(largeur, hauteur):
     bo.image = image
     bo.image_brute = image_brute
     bo.rasterise = rasterise
+
+    def debrotli(octets):
+        # Cote OS c'est `libbrotlidec`, deja liee au navigateur ; ici le module
+        # Python du meme nom. Sans elle, pas de WOFF2, donc pas d'icones.
+        import brotli
+        return brotli.decompress(bytes(octets))
+
+    bo.debrotli = debrotli
     bo.police = lambda octets, famille, gras=False, italique=False: (
         FONTES.enregistre(bytes(octets), famille, gras, italique))
     bo.formats_images = lambda: ["png", "jpeg", "jpg", "gif", "bmp", "webp",

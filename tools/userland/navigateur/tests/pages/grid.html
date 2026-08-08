@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Dispositions grille</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; color: #0f172a;
+         background: #fff; font-size: 15px; line-height: 1.5; }
+
+  section { padding: 16px 24px; border-bottom: 1px solid #e2e8f0; }
+  h2 { font-size: 14px; text-transform: uppercase; color: #64748b; margin: 0 0 10px; }
+  .g { display: grid; gap: 8px; background: #f8fafc; padding: 8px; }
+  .g > div { background: #a5b4fc; padding: 10px; border-radius: 5px; font-size: 13px; }
+  .trois { grid-template-columns: repeat(3, 1fr); }
+  .mixte { grid-template-columns: 200px 1fr 100px; }
+  .zones { grid-template-columns: 180px 1fr;
+           grid-template-areas: "tete tete" "cote corps" "pied pied"; }
+  .zones .t { grid-area: tete; } .zones .c { grid-area: cote; }
+  .zones .p { grid-area: corps; } .zones .b { grid-area: pied; }
+  .etendu > .large { grid-column: span 2; }
+
+</style></head><body>
+
+<section><h2>trois colonnes egales</h2><div class="g trois">
+<div>1</div><div>2</div><div>3</div><div>4</div><div>5</div><div>6</div></div></section>
+<section><h2>colonnes mixtes</h2><div class="g mixte">
+<div>fixe</div><div>souple</div><div>fixe</div></div></section>
+<section><h2>zones nommees</h2><div class="g zones">
+<div class="t">en-tete</div><div class="c">cote</div><div class="p">corps</div>
+<div class="b">pied</div></div></section>
+<section><h2>cellule etendue</h2><div class="g trois etendu">
+<div class="large">occupe deux colonnes</div><div>3</div>
+<div>4</div><div>5</div><div>6</div></div></section>
+
+</body></html>

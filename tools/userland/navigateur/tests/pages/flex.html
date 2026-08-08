@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Dispositions flex</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; color: #0f172a;
+         background: #fff; font-size: 15px; line-height: 1.5; }
+
+  section { padding: 16px 24px; border-bottom: 1px solid #e2e8f0; }
+  h2 { font-size: 14px; text-transform: uppercase; color: #64748b; margin: 0 0 10px; }
+  .boite { display: flex; gap: 8px; background: #f8fafc; padding: 8px; min-height: 70px; }
+  .boite > div { background: #38bdf8; color: #0f172a; padding: 8px 12px;
+                 border-radius: 5px; font-size: 13px; }
+  .centre { align-items: center; justify-content: center; }
+  .espace { justify-content: space-between; }
+  .colonne { flex-direction: column; }
+  .enroule { flex-wrap: wrap; width: 240px; }
+  .grandit > .a { flex: 1; } .grandit > .b { flex: 2; } .grandit > .c { flex: 0 0 60px; }
+
+</style></head><body>
+<section><h2>par defaut</h2><div class="boite ">
+<div class="a">A</div><div class="b">B</div><div class="c">C</div>
+<div>D</div><div>E</div></div></section>
+<section><h2>centre</h2><div class="boite centre">
+<div class="a">A</div><div class="b">B</div><div class="c">C</div>
+<div>D</div><div>E</div></div></section>
+<section><h2>espace reparti</h2><div class="boite espace">
+<div class="a">A</div><div class="b">B</div><div class="c">C</div>
+<div>D</div><div>E</div></div></section>
+<section><h2>colonne</h2><div class="boite colonne">
+<div class="a">A</div><div class="b">B</div><div class="c">C</div>
+<div>D</div><div>E</div></div></section>
+<section><h2>enroulement</h2><div class="boite enroule">
+<div class="a">A</div><div class="b">B</div><div class="c">C</div>
+<div>D</div><div>E</div></div></section>
+<section><h2>facteurs de croissance</h2><div class="boite grandit">
+<div class="a">A</div><div class="b">B</div><div class="c">C</div>
+<div>D</div><div>E</div></div></section>
+
+</body></html>

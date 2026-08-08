@@ -33,7 +33,7 @@ import urllib.parse
 import bo
 import bojs
 
-from . import css, html, reseau, stockage
+from . import css, html, reseau, securite, stockage, telemetrie
 
 # Types de nœuds, comme dans la norme DOM.
 ELEMENT = 1
@@ -150,10 +150,13 @@ class Contexte:
     def execute(self, code, nom="<page>", module=False):
         """Execute du code, en signalant les erreurs plutot qu'en tombant."""
         try:
-            return bojs.evalue(self._contexte, code, nom, module)
+            with telemetrie.chrono("javascript"):
+                return bojs.evalue(self._contexte, code, nom, module)
         except bojs.Erreur as e:
+            telemetrie.erreur_js(e, nom)
             self.journal("error", "%s : %s" % (nom, e))
         except Exception as e:  # noqa: BLE001 — une page ne doit pas tuer le navigateur
+            telemetrie.erreur_js(e, nom)
             self.journal("error", "%s : %s" % (nom, e))
         return None
 
@@ -220,9 +223,23 @@ class Contexte:
         try:
             return bojs.appelle(self._contexte, nom, arguments)
         except bojs.Erreur as e:
+            telemetrie.erreur_js(e, nom)
             self.journal("error", str(e))
         except Exception as e:  # noqa: BLE001
+            telemetrie.erreur_js(e, nom)
             self.journal("error", str(e))
+        return None
+
+    # --- Mesure ---------------------------------------------------------------
+
+    def _op_manque(self, nom):
+        """Un script est alle chercher une API que le moteur ne fournit pas.
+
+        Appele depuis les accesseurs poses par le prelude. La valeur rendue
+        reste `undefined` cote JavaScript : la mesure n'infléchit pas ce qui
+        est mesure.
+        """
+        telemetrie.api_manquante(str(nom))
         return None
 
     # --- Table des nœuds ------------------------------------------------------
@@ -251,6 +268,11 @@ class Contexte:
 
     def appel(self, operation, *arguments):
         """Point d'entree de `__bo_appel`, cote Python."""
+        if telemetrie.ACTIVE and operation != "manque":
+            # Ce que la page utilise vraiment, et pas seulement ce qui lui
+            # manque : sans ce compteur, on ne saurait pas si une API implementee
+            # sert a dix sites ou a aucun, donc pas ou porter l'effort suivant.
+            telemetrie.note("api_utilisee", operation)
         methode = getattr(self, "_op_" + operation, None)
         if methode is None:
             self.journal("warn", "operation JavaScript inconnue : %s" % operation)
@@ -284,6 +306,28 @@ class Contexte:
         nœud = self._noeud(identifiant)
         parent = nœud.parent if nœud else None
         return self._identifiant(parent) if parent else None
+
+    def _op_contient(self, identifiant_ancetre, identifiant):
+        """L'ancetre contient-il ce nœud ? Un seul passage du pont, pas un par niveau.
+
+        La remontee se faisait cote JavaScript, `parentNode` apres
+        `parentNode`, donc un aller-retour par niveau d'arbre. Comme chaque
+        `setAttribute` demande a chaque `MutationObserver` a portee d'arbre s'il
+        est concerne, et qu'un cadre applicatif en pose un sur la racine, une
+        page de pypi.org faisait **900 000 traversees du pont** pour se
+        construire. La remontee est la meme ; c'est le nombre d'appels qui
+        change.
+        """
+        ancetre = self._noeud(identifiant_ancetre)
+        nœud = self._noeud(identifiant)
+        if ancetre is None or nœud is None:
+            return False
+        courant = nœud
+        while courant is not None:
+            if courant is ancetre:
+                return True
+            courant = courant.parent
+        return False
 
     def _op_enfants(self, identifiant, elements_seulement):
         element = self._element(identifiant)
@@ -551,13 +595,19 @@ class Contexte:
     # --- Operations : persistance ---------------------------------------------
 
     def _op_temoins(self):
-        """L'en-tete `Cookie` de la page, tel que `document.cookie` le rend."""
-        return stockage.temoins().pour(self.document.url)
+        """L'en-tete `Cookie` de la page, tel que `document.cookie` le rend.
+
+        `javascript=True` : les temoins `HttpOnly` restent invisibles ici tout
+        en continuant de partir au serveur. C'est exactement ce que l'attribut
+        promet, et sans ce drapeau il ne promettait rien.
+        """
+        return stockage.temoins().pour(self.document.url, javascript=True)
 
     def _op_poseTemoin(self, declaration):
         """`document.cookie = "nom=valeur; …"` — un seul temoin a la fois."""
         entetes = {"set-cookie": str(declaration)}
-        return stockage.temoins().absorbe(self.document.url, entetes) > 0
+        return stockage.temoins().absorbe(self.document.url, entetes,
+                                          javascript=True) > 0
 
     def _op_stockage(self, action, cle=None, valeur=None):
         """`localStorage`, cloisonne par origine et ecrit sur le disque."""
@@ -611,7 +661,9 @@ class Contexte:
             self._modules[adresse] = None
             return None
         try:
-            reponse = reseau.charge(adresse, brut=True)
+            reponse = reseau.charge(adresse, brut=True,
+                                    document=self.document.url,
+                                    destination="script")
         except Exception as e:  # noqa: BLE001
             self.journal("warn", "module %s : %s" % (adresse, e))
             self._modules[adresse] = None
@@ -807,7 +859,9 @@ class Contexte:
                 return False
         else:
             try:
-                reponse = reseau.charge(absolue, brut=True)
+                reponse = reseau.charge(absolue, brut=True,
+                                        document=self.document.url,
+                                        destination="media")
             except Exception as e:  # noqa: BLE001
                 self.journal("warn", "media %s : %s" % (absolue, e))
                 return False
@@ -969,11 +1023,16 @@ class Contexte:
             # la page d'habillage que le navigateur fabrique pour l'affichage.
             # Sans cela, un `fetch` de JSON recevait « Type non affichable ».
             reponse = reseau.charge(url, methode=methode, corps=corps,
-                                    entetes=entetes or {}, brut=True)
+                                    entetes=entetes or {}, brut=True,
+                                    document=self.document.url,
+                                    destination="fetch")
         except Exception as e:  # noqa: BLE001
+            telemetrie.ressource_echouee(url, 0, "fetch")
             self.journal("warn", "requete %s : %s" % (url, e))
             return {"status": 0, "statusText": str(e), "text": "", "url": url,
                     "headers": {}}
+        if not reponse.code or reponse.code >= 400:
+            telemetrie.ressource_echouee(url, reponse.code, "fetch")
         return {
             "status": reponse.code,
             "statusText": reponse.erreur or "",
@@ -989,7 +1048,9 @@ class Contexte:
             # n'est pas du HTML dans un `<pre>` et en echappe les `&` et les
             # `<`. Chaque `<script src=…>` arrivait donc au moteur JavaScript
             # commencant par un chevron, et mourait sur le premier jeton.
-            reponse = reseau.charge(absolue, brut=True)
+            reponse = reseau.charge(absolue, brut=True,
+                                    document=self.document.url,
+                                    destination="script")
         except Exception as e:  # noqa: BLE001
             self.journal("warn", "script %s : %s" % (absolue, e))
             return ""
