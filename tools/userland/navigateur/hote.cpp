@@ -194,7 +194,9 @@ public:
     double largeurTexte(const QString &texte, double taille, bool gras, bool fixe,
                         const QString &famille = QString())
     {
-        QFontMetricsF metriques(fabriqueFonte(taille, gras, false, fixe));
+        // La famille compte ici autant qu'a la peinture : mesurer dans une
+        // police et peindre dans une autre decale tout le texte de la page.
+        QFontMetricsF metriques(fabriqueFonte(taille, gras, false, fixe, famille));
         return metriques.horizontalAdvance(texte);
     }
 

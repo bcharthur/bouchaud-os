@@ -39,3 +39,5 @@ tools/userland/build-test-moteur/
 # Bytecode Python
 __pycache__/
 *.pyc
+# Banc de verification de l'hote Qt (verifie-hote.sh)
+tools/userland/build-verifie-hote/
