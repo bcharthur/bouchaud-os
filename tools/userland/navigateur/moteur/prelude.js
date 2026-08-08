@@ -426,10 +426,15 @@
     // reste de la page.
     //
     // Ce que cela donne : les graphiques, les jauges, les frises et les petits
-    // jeux dessines a coups de `fillRect` et de `fillText` s'affichent
-    // reellement. Ce que cela ne donne pas : la lecture des pixels
-    // (`getImageData`), les degrades, les ombres et le detourage par chemin —
-    // il faudrait un vrai tampon de pixels, que l'hote ne nous prete pas.
+    // jeux s'affichent reellement — y compris les degrades, les ombres, le
+    // detourage et les chemins remplis exactement, chacun ayant son operation
+    // dans la liste d'affichage.
+    //
+    // La lecture des pixels marche aussi, mais differemment : `getImageData`
+    // demande a l'hote de **jouer** les operations dans une image hors ecran et
+    // d'en rendre les octets. C'est le meme peintre que l'ecran, donc ce qu'on
+    // lit est ce qu'on voit. Ce qui reste dehors : les motifs
+    // (`createPattern`) et le mode de composition.
 
     function nombre(valeur) {
         const n = Number(valeur);
@@ -444,6 +449,7 @@
             this.__pile = [];
             this.__dx = 0;
             this.__dy = 0;
+            this.__rognages = 0;
             this.__envoiPrevu = false;
             this.fillStyle = "#000000";
             this.strokeStyle = "#000000";
@@ -452,6 +458,10 @@
             this.textAlign = "left";
             this.textBaseline = "alphabetic";
             this.globalAlpha = 1;
+            this.shadowColor = "transparent";
+            this.shadowBlur = 0;
+            this.shadowOffsetX = 0;
+            this.shadowOffsetY = 0;
         }
 
         // --- Etat ---
@@ -460,6 +470,13 @@
                 fillStyle: this.fillStyle, strokeStyle: this.strokeStyle,
                 lineWidth: this.lineWidth, font: this.font,
                 textAlign: this.textAlign, dx: this.__dx, dy: this.__dy,
+                shadowColor: this.shadowColor, shadowBlur: this.shadowBlur,
+                shadowOffsetX: this.shadowOffsetX,
+                shadowOffsetY: this.shadowOffsetY,
+                // Un `clip()` posee apres ce `save()` doit tomber avec lui :
+                // sans ce compte, le detourage survivrait au `restore()` et
+                // rognerait tout le reste du dessin.
+                rognages: this.__rognages,
             });
         }
         restore() {
@@ -472,6 +489,15 @@
             this.textAlign = etat.textAlign;
             this.__dx = etat.dx;
             this.__dy = etat.dy;
+            this.shadowColor = etat.shadowColor;
+            this.shadowBlur = etat.shadowBlur;
+            this.shadowOffsetX = etat.shadowOffsetX;
+            this.shadowOffsetY = etat.shadowOffsetY;
+            while (this.__rognages > etat.rognages) {
+                this.__operations.push(["declip"]);
+                this.__rognages--;
+            }
+            this.__envoie();
         }
         translate(x, y) { this.__dx += nombre(x); this.__dy += nombre(y); }
         setTransform(a, b, c, d, e, f) { this.__dx = nombre(e); this.__dy = nombre(f); }
@@ -481,8 +507,14 @@
 
         // --- Rectangles ---
         fillRect(x, y, l, h) {
-            this.__pose(["rect", nombre(x) + this.__dx, nombre(y) + this.__dy,
-                         nombre(l), nombre(h), String(this.fillStyle)]);
+            const gx = nombre(x) + this.__dx;
+            const gy = nombre(y) + this.__dy;
+            const gl = nombre(l);
+            const gh = nombre(h);
+            this.__ombre(gx, gy, gl, gh);
+            const pente = this.__pente(this.fillStyle, gx, gy, gl, gh);
+            if (pente) { this.__pose(pente); return; }
+            this.__pose(["rect", gx, gy, gl, gh, String(this.fillStyle)]);
         }
         strokeRect(x, y, l, h) {
             const gx = nombre(x) + this.__dx;
@@ -555,18 +587,21 @@
             }
         }
         fill() {
-            // Sans rasterisation, un chemin rempli se rend par sa boite : c'est
-            // exact pour un `rect()`, approximatif pour le reste.
             if (this.__chemin.length < 2) return;
-            let x0 = this.__chemin[0][0], y0 = this.__chemin[0][1];
-            let x1 = x0, y1 = y0;
-            for (const [x, y] of this.__chemin) {
-                if (x < x0) x0 = x;
-                if (y < y0) y0 = y;
-                if (x > x1) x1 = x;
-                if (y > y1) y1 = y;
+            const b = this.__boite();
+            this.__ombre(b.x, b.y, b.l, b.h);
+            // Un degrade se rend sur la boite du chemin : l'hote sait remplir un
+            // rectangle d'un degrade, pas un polygone.
+            const pente = this.__pente(this.fillStyle, b.x, b.y, b.l, b.h);
+            if (pente) { this.__pose(pente); return; }
+            if (this.__chemin.length >= 3) {
+                // Le chemin est rempli tel quel. Sa boite englobante suffisait
+                // pour un `rect()` et faisait d'un camembert un carre.
+                this.__pose(["polygone", this.__chemin.map((p) => [p[0], p[1]]),
+                             String(this.fillStyle)]);
+                return;
             }
-            this.__pose(["rect", x0, y0, x1 - x0, y1 - y0, String(this.fillStyle)]);
+            this.__pose(["rect", b.x, b.y, b.l, b.h, String(this.fillStyle)]);
         }
 
         // --- Texte ---
@@ -599,17 +634,108 @@
                          identifiant]);
         }
 
+        // --- Degrades ---
+        createLinearGradient(x0, y0, x1, y1) {
+            return new DegradeToile("lineaire", [nombre(x0), nombre(y0),
+                                                 nombre(x1), nombre(y1)]);
+        }
+        createRadialGradient(x0, y0, r0, x1, y1, r1) {
+            // Le cercle interieur n'est pas rendu : l'hote n'a qu'un centre et
+            // un rayon, et c'est le cercle exterieur qui dessine le degrade.
+            return new DegradeToile("radial", [nombre(x1), nombre(y1), nombre(r1)]);
+        }
+
+        // --- Detourage ---
+        clip() {
+            if (this.__chemin.length < 2) return;
+            const b = this.__boite();
+            // Le detourage suit la boite du chemin : l'hote empile des
+            // rectangles, pas des formes. Un `clip()` apres `rect()` — de loin
+            // le cas le plus courant — est donc exact.
+            this.__operations.push(["clip", b.x, b.y, b.l, b.h]);
+            this.__rognages++;
+            this.__envoie();
+        }
+
+        // --- Pixels ---
+        getImageData(x, y, l, h) {
+            const largeur = Math.max(1, Math.round(nombre(this.canvas.width)));
+            const hauteur = Math.max(1, Math.round(nombre(this.canvas.height)));
+            const tout = appel("rasterise", this.__operations, largeur, hauteur);
+            const rx = Math.max(0, Math.round(nombre(x)));
+            const ry = Math.max(0, Math.round(nombre(y)));
+            const rl = Math.max(0, Math.min(Math.round(nombre(l)), largeur - rx));
+            const rh = Math.max(0, Math.min(Math.round(nombre(h)), hauteur - ry));
+            const donnees = new Uint8ClampedArray(rl * rh * 4);
+            if (tout) {
+                for (let j = 0; j < rh; j++) {
+                    const source = ((ry + j) * largeur + rx) * 4;
+                    const cible = j * rl * 4;
+                    for (let i = 0; i < rl * 4; i++) {
+                        donnees[cible + i] = tout[source + i];
+                    }
+                }
+            }
+            return { data: donnees, width: rl, height: rh };
+        }
+        putImageData(image, x, y) {
+            if (!image || !image.data) return;
+            const identifiant = appel("imageBrute", Array.from(image.data),
+                                      nombre(image.width), nombre(image.height));
+            if (identifiant === null || identifiant === undefined) return;
+            this.__pose(["image", nombre(x) + this.__dx, nombre(y) + this.__dy,
+                         nombre(image.width), nombre(image.height), identifiant]);
+        }
+        createImageData(l, h) {
+            const largeur = Math.max(0, Math.round(nombre(l)));
+            const hauteur = Math.max(0, Math.round(nombre(h)));
+            return { data: new Uint8ClampedArray(largeur * hauteur * 4),
+                     width: largeur, height: hauteur };
+        }
+
         // --- Ce qui n'est pas tenu, mais ne doit pas faire tomber la page ---
-        createLinearGradient() { return { addColorStop() {} }; }
-        createRadialGradient() { return { addColorStop() {} }; }
         createPattern() { return null; }
-        clip() {}
         setLineDash() {}
         getLineDash() { return []; }
         quadraticCurveTo(_, __, x, y) { this.lineTo(x, y); }
         bezierCurveTo(_, __, ___, ____, x, y) { this.lineTo(x, y); }
-        getImageData() { return { data: new Uint8ClampedArray(0), width: 0, height: 0 }; }
-        putImageData() {}
+
+        // --- Rouages ---
+        __boite() {
+            let x0 = this.__chemin[0][0], y0 = this.__chemin[0][1];
+            let x1 = x0, y1 = y0;
+            for (const [x, y] of this.__chemin) {
+                if (x < x0) x0 = x;
+                if (y < y0) y0 = y;
+                if (x > x1) x1 = x;
+                if (y > y1) y1 = y;
+            }
+            return { x: x0, y: y0, l: x1 - x0, h: y1 - y0 };
+        }
+
+        __pente(style, x, y, l, h) {
+            if (!(style instanceof DegradeToile) || style.__arrets.length < 2) {
+                return null;
+            }
+            if (style.__genre === "radial") {
+                const [cx, cy, r] = style.__geometrie;
+                return ["degrade_cercle", x, y, l, h,
+                        cx + this.__dx, cy + this.__dy, r, style.__arrets];
+            }
+            const [x0, y0, x1, y1] = style.__geometrie;
+            return ["degrade_points", x, y, l, h,
+                    x0 + this.__dx, y0 + this.__dy,
+                    x1 + this.__dx, y1 + this.__dy, style.__arrets];
+        }
+
+        __ombre(x, y, l, h) {
+            const flou = nombre(this.shadowBlur);
+            const dx = nombre(this.shadowOffsetX);
+            const dy = nombre(this.shadowOffsetY);
+            const teinte = String(this.shadowColor || "transparent");
+            if (teinte === "transparent" || (!flou && !dx && !dy)) return;
+            this.__operations.push(["ombre", x + dx, y + dy, l, h, 0, flou, teinte]);
+        }
 
         __police() {
             const police = String(this.font);
@@ -640,6 +766,18 @@
         }
     }
 
+    class DegradeToile {
+        constructor(genre, geometrie) {
+            this.__genre = genre;
+            this.__geometrie = geometrie;
+            this.__arrets = [];
+        }
+        addColorStop(position, couleur) {
+            this.__arrets.push([nombre(position), String(couleur)]);
+            this.__arrets.sort((a, b) => a[0] - b[0]);
+        }
+    }
+
     class ElementToile extends Element {
         get width() { return parseInt(this.getAttribute("width") || "300", 10); }
         set width(valeur) { this.setAttribute("width", String(valeur)); }
@@ -655,6 +793,7 @@
 
     globalThis.HTMLCanvasElement = ElementToile;
     globalThis.CanvasRenderingContext2D = ContexteToile;
+    globalThis.CanvasGradient = DegradeToile;
 
     class ElementMedia extends Element {
         play() {

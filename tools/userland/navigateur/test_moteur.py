@@ -37,6 +37,36 @@ def _largeur_texte(texte, taille, gras=False, fixe=False):
     return len(texte) * taille * (0.62 if not fixe else 0.60) * (1.05 if gras else 1.0)
 
 
+def _rasterise(operations, largeur, hauteur):
+    """Rasterisation de bouchon : les rectangles pleins, et rien d'autre.
+
+    Le vrai hote joue la liste d'affichage entiere par QPainter. Ici il suffit
+    de prouver que la chaine tient — `getImageData` demande, l'hote peint, les
+    octets reviennent dans le bon ordre de canaux. Les rectangles suffisent a
+    l'etablir, et ce sont eux qu'un test peut verifier au pixel.
+    """
+    tampon = bytearray(largeur * hauteur * 4)
+    for operation in operations:
+        if operation[0] != "rect":
+            continue
+        _, x, y, l, h, couleur = operation
+        bleu = couleur & 0xFF
+        vert = (couleur >> 8) & 0xFF
+        rouge = (couleur >> 16) & 0xFF
+        alpha = (couleur >> 24) & 0xFF
+        for j in range(max(0, int(y)), min(hauteur, int(y + h))):
+            for i in range(max(0, int(x)), min(largeur, int(x + l))):
+                debut = (j * largeur + i) * 4
+                # L'hote rend du BGRA, comme Qt : `js.py` echange les canaux.
+                tampon[debut:debut + 4] = bytes((bleu, vert, rouge, alpha))
+    return bytes(tampon)
+
+
+def _image_brute(octets, largeur, hauteur, identifiant=-1):
+    _images.append((largeur, hauteur))
+    return (len(_images) - 1, largeur, hauteur)
+
+
 def _image(octets):
     """Lit la taille d'un PNG sans decoder : c'est tout ce dont on a besoin."""
     if len(octets) > 24 and octets[:8] == b"\x89PNG\r\n\x1a\n":
@@ -57,6 +87,8 @@ except ImportError:
     bo.titre = lambda _: None
     bo.redessiner = lambda: None
     bo.image = _image
+    bo.image_brute = _image_brute
+    bo.rasterise = _rasterise
     bo.formats_images = lambda: ["png"]
     sys.modules["bo"] = bo
     HOTE_REEL = False
@@ -1643,6 +1675,121 @@ def verifie_degrades_et_ombres():
     verifie("ombre: la portee reste distincte", "ombre" in genres, genres[:20])
 
 
+def verifie_toile_complete():
+    """Degrades, ombres, chemins remplis, detourage et pixels de la toile."""
+    def dessine(code):
+        doc = document("""
+            <body><canvas id="t" width="60" height="40"></canvas>
+            <script>
+              const c = document.getElementById('t').getContext('2d');
+              %s
+              window.__fait = 1;
+            </script></body>""" % code)
+        return doc, doc.contexte_js.toile(
+            [n for n in doc.racine.parcours()
+             if isinstance(n, html.Element) and n.balise == "canvas"][0])
+
+    # Un chemin rempli est un polygone, pas sa boite englobante. Un camembert
+    # etait rendu carre.
+    _, ops = dessine("""
+        c.fillStyle = '#ff0000';
+        c.beginPath(); c.moveTo(0,0); c.lineTo(30,0); c.lineTo(0,20); c.fill();
+    """)
+    genres = [o[0] for o in ops or []]
+    verifie("toile: le chemin est un polygone", "polygone" in genres, genres)
+    polygones = [o for o in ops or [] if o[0] == "polygone"]
+    if polygones:
+        egal("toile: ses sommets sont gardes", len(polygones[0][1]), 3)
+        egal("toile: sa couleur est traduite", polygones[0][2], 0xFFFF0000)
+
+    # Un degrade lineaire porte ses deux extremites.
+    _, ops = dessine("""
+        const g = c.createLinearGradient(0, 0, 60, 0);
+        g.addColorStop(0, '#000000'); g.addColorStop(1, '#ffffff');
+        c.fillStyle = g; c.fillRect(0, 0, 60, 40);
+    """)
+    pentes = [o for o in ops or [] if o[0] == "degrade_points"]
+    verifie("toile: le degrade lineaire est emis", bool(pentes),
+            [o[0] for o in ops or []])
+    if pentes:
+        egal("toile: ses extremites sont gardees", pentes[0][5:9], (0.0, 0.0, 60.0, 0.0))
+        egal("toile: ses arrets sont traduits",
+             [a[1] for a in pentes[0][9]], [0xFF000000, 0xFFFFFFFF])
+
+    _, ops = dessine("""
+        const g = c.createRadialGradient(30, 20, 0, 30, 20, 25);
+        g.addColorStop(0, '#ffffff'); g.addColorStop(1, '#000000');
+        c.fillStyle = g; c.fillRect(0, 0, 60, 40);
+    """)
+    verifie("toile: le degrade radial est emis",
+            any(o[0] == "degrade_cercle" for o in ops or []),
+            [o[0] for o in ops or []])
+
+    # Une ombre precede la forme qu'elle porte.
+    _, ops = dessine("""
+        c.shadowColor = 'rgba(0,0,0,0.5)'; c.shadowBlur = 4;
+        c.shadowOffsetY = 2; c.fillStyle = '#ffffff';
+        c.fillRect(10, 10, 20, 10);
+    """)
+    genres = [o[0] for o in ops or []]
+    verifie("toile: l'ombre est emise", "ombre" in genres, genres)
+    if "ombre" in genres and "rect" in genres:
+        verifie("toile: l'ombre passe avant la forme",
+                genres.index("ombre") < genres.index("rect"), genres)
+
+    # Le detourage tombe avec le `restore()` qui suit son `save()`.
+    _, ops = dessine("""
+        c.save(); c.beginPath(); c.rect(0,0,10,10); c.clip();
+        c.fillStyle = '#00ff00'; c.fillRect(0,0,60,40);
+        c.restore();
+        c.fillStyle = '#0000ff'; c.fillRect(0,0,60,40);
+    """)
+    genres = [o[0] for o in ops or []]
+    egal("toile: le detourage est pose et retire",
+         (genres.count("clip"), genres.count("declip")), (1, 1))
+    if "declip" in genres:
+        verifie("toile: le second remplissage n'est plus rogne",
+                genres.index("declip") < len(genres) - 1, genres)
+
+    # Les pixels : la chaine complete, jusqu'a l'ordre des canaux.
+    doc = document("""
+        <body><canvas id="t" width="4" height="2"></canvas>
+        <script>
+          const c = document.getElementById('t').getContext('2d');
+          c.fillStyle = '#ff8000';
+          c.fillRect(0, 0, 2, 2);
+          const d = c.getImageData(0, 0, 4, 2);
+          window.__l = d.width; window.__h = d.height;
+          window.__r = d.data[0]; window.__v = d.data[1]; window.__b = d.data[2];
+          window.__a = d.data[3];
+          window.__vide = d.data[3 * 4 + 3];
+        </script></body>""")
+    js_ = doc.contexte_js
+    egal("toile: getImageData rend la bonne taille",
+         (js_.execute("window.__l"), js_.execute("window.__h")), (4, 2))
+    egal("toile: les canaux sont en RGBA",
+         (js_.execute("window.__r"), js_.execute("window.__v"),
+          js_.execute("window.__b"), js_.execute("window.__a")),
+         (255, 128, 0, 255))
+    egal("toile: hors de la forme, rien", js_.execute("window.__vide"), 0)
+
+    # `putImageData` repasse par le cache d'images de l'hote.
+    doc = document("""
+        <body><canvas id="t" width="4" height="2"></canvas>
+        <script>
+          const c = document.getElementById('t').getContext('2d');
+          const d = c.createImageData(2, 2);
+          d.data[0] = 10; d.data[3] = 255;
+          c.putImageData(d, 1, 1);
+          window.__fait = 1;
+        </script></body>""")
+    ops = doc.contexte_js.toile(
+        [n for n in doc.racine.parcours()
+         if isinstance(n, html.Element) and n.balise == "canvas"][0])
+    verifie("toile: putImageData pose une image",
+            any(o[0] == "image" for o in ops or []), [o[0] for o in ops or []])
+
+
 # --- Disposition --------------------------------------------------------------
 
 def boite_de(doc, identifiant):
@@ -3147,6 +3294,7 @@ def principal():
         verifie_isolement_ombre,
         verifie_ajustement_images,
         verifie_degrades_et_ombres,
+        verifie_toile_complete,
         verifie_pseudo_elements,
         verifie_requetes_media,
         verifie_longueurs,

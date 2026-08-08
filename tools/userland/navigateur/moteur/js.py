@@ -655,6 +655,53 @@ class Contexte:
         """Les operations dessinees sur cette toile, ou `None`."""
         return self._toiles.get(element)
 
+    def _op_rasterise(self, operations, largeur, hauteur):
+        """Peint des operations de toile hors ecran et rend ses pixels RGBA.
+
+        C'est ce qui donne enfin des pixels a `getImageData` : le contexte 2D
+        n'enregistre que des operations, et il faut les jouer pour de vrai avant
+        d'en lire un seul. Qt range ses pixels en BGRA ; la norme veut du RGBA,
+        d'ou l'echange des deux canaux extremes.
+        """
+        rasterise = getattr(bo, "rasterise", None)
+        if rasterise is None:
+            return None
+        traduites = []
+        for operation in operations or []:
+            traduite = _operation_toile(operation)
+            if traduite is not None:
+                traduites.append(traduite)
+        try:
+            octets = rasterise(traduites, int(largeur), int(hauteur))
+        except Exception as e:  # noqa: BLE001
+            self.journal("warn", "rasterise : %s" % e)
+            return None
+        if not octets:
+            return None
+        pixels = bytearray(octets)
+        pixels[0::4], pixels[2::4] = pixels[2::4], pixels[0::4]
+        return list(pixels)
+
+    def _op_imageBrute(self, pixels, largeur, hauteur):
+        """Range des pixels RGBA dans le cache d'images et rend leur identifiant.
+
+        Le chemin de retour de `putImageData` : l'hote attend du BGRA, comme
+        `rasterise` en rend.
+        """
+        brute = getattr(bo, "image_brute", None)
+        if brute is None:
+            return None
+        octets = bytearray(int(v) & 0xFF for v in pixels)
+        if len(octets) < int(largeur) * int(hauteur) * 4:
+            return None
+        octets[0::4], octets[2::4] = octets[2::4], octets[0::4]
+        try:
+            resultat = brute(bytes(octets), int(largeur), int(hauteur))
+        except Exception as e:  # noqa: BLE001
+            self.journal("warn", "image_brute : %s" % e)
+            return None
+        return int(resultat[0]) if resultat else None
+
     def _op_defilement(self):
         """Position de defilement de la page, en pixels."""
         return float(getattr(self.document, "defilement", 0.0) or 0.0)
@@ -1010,6 +1057,50 @@ def _operation_toile(operation):
         if genre == "image":
             _, x, y, l, h, identifiant = operation
             return ("image", float(x), float(y), float(l), float(h), int(identifiant))
+        if genre == "polygone":
+            _, points, teinte = operation
+            couleur = css.couleur(str(teinte))
+            if couleur is None or len(points) < 3:
+                return None
+            return ("polygone",
+                    tuple((float(p[0]), float(p[1])) for p in points), couleur)
+        if genre == "degrade_points":
+            _, x, y, l, h, x0, y0, x1, y1, arrets = operation
+            etapes = _arrets(arrets)
+            if etapes is None:
+                return None
+            return ("degrade_points", float(x), float(y), float(l), float(h),
+                    float(x0), float(y0), float(x1), float(y1), etapes)
+        if genre == "degrade_cercle":
+            _, x, y, l, h, cx, cy, rayon, arrets = operation
+            etapes = _arrets(arrets)
+            if etapes is None:
+                return None
+            return ("degrade_cercle", float(x), float(y), float(l), float(h),
+                    float(cx), float(cy), float(rayon), etapes)
+        if genre == "ombre":
+            _, x, y, l, h, rayon, flou, teinte = operation
+            couleur = css.couleur(str(teinte))
+            if couleur is None:
+                return None
+            return ("ombre", float(x), float(y), float(l), float(h),
+                    float(rayon), float(flou), couleur)
+        if genre == "clip":
+            _, x, y, l, h = operation
+            return ("clip", float(x), float(y), float(l), float(h))
+        if genre == "declip":
+            return ("declip",)
     except (TypeError, ValueError, IndexError):
         return None
     return None
+
+
+def _arrets(bruts):
+    """Les arrets d'un degrade de toile, couleurs traduites. `None` si moins de deux."""
+    etapes = []
+    for position, teinte in bruts or []:
+        couleur = css.couleur(str(teinte))
+        if couleur is None:
+            continue
+        etapes.append((max(0.0, min(1.0, float(position))), couleur))
+    return tuple(etapes) if len(etapes) >= 2 else None

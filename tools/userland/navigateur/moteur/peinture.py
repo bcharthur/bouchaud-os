@@ -278,4 +278,18 @@ def _decale(operation, dx, dy):
     if genre == "ligne":
         return (genre, operation[1] + dx, operation[2] + dy,
                 operation[3] + dx, operation[4] + dy) + tuple(operation[5:])
+    if genre in ("ombre", "clip"):
+        return (genre, operation[1] + dx, operation[2] + dy) + tuple(operation[3:])
+    if genre == "polygone":
+        return (genre, tuple((x + dx, y + dy) for x, y in operation[1]),
+                operation[2])
+    if genre == "degrade_points":
+        # La boite **et** les deux extremites de la ligne se deplacent.
+        return (genre, operation[1] + dx, operation[2] + dy, operation[3],
+                operation[4], operation[5] + dx, operation[6] + dy,
+                operation[7] + dx, operation[8] + dy, operation[9])
+    if genre == "degrade_cercle":
+        return (genre, operation[1] + dx, operation[2] + dy, operation[3],
+                operation[4], operation[5] + dx, operation[6] + dy,
+                operation[7], operation[8])
     return operation

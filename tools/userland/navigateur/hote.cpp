@@ -62,6 +62,7 @@
 #include <QtGui/QLinearGradient>
 #include <QtGui/QRadialGradient>
 #include <QtGui/QPainterPath>
+#include <QtGui/QPolygonF>
 #include <QtGui/QTransform>
 #include <QtCore/QTimer>
 #include <QtCore/QtPlugin>
@@ -418,6 +419,56 @@ private:
                 }
                 p.restore();
             }
+        } else if (!std::strcmp(operation, "polygone")) {
+            // Un chemin rempli, exactement. La toile rendait jusqu'ici sa boite
+            // englobante : juste pour un `rect()`, faux pour un camembert.
+            PyObject *points = nullptr;
+            long couleur;
+            if (PyArg_ParseTuple(element, "sOl", &operation, &points, &couleur)) {
+                QPolygonF forme;
+                const Py_ssize_t nb = PySequence_Size(points);
+                for (Py_ssize_t k = 0; k < nb; ++k) {
+                    PyObject *point = PySequence_GetItem(points, k);
+                    if (!point)
+                        break;
+                    double px = 0.0, py = 0.0;
+                    if (PyArg_ParseTuple(point, "dd", &px, &py))
+                        forme << QPointF(px, py);
+                    else
+                        PyErr_Clear();
+                    Py_DECREF(point);
+                }
+                if (forme.size() >= 3) {
+                    p.setPen(Qt::NoPen);
+                    p.setBrush(couleurDepuisEntier(couleur));
+                    p.drawPolygon(forme);
+                }
+            }
+        } else if (!std::strcmp(operation, "degrade_points")) {
+            // Le degrade d'une toile porte ses deux extremites, pas un angle :
+            // les ramener a un angle perdrait la longueur de la ligne, donc
+            // l'endroit exact ou chaque couleur tombe.
+            double x, y, l, h, x0, y0, x1, y1;
+            PyObject *etapes = nullptr;
+            if (PyArg_ParseTuple(element, "sddddddddO", &operation, &x, &y, &l, &h,
+                                 &x0, &y0, &x1, &y1, &etapes)) {
+                QLinearGradient pente(QPointF(x0, y0), QPointF(x1, y1));
+                remplitEtapes(pente, etapes);
+                p.setPen(Qt::NoPen);
+                p.setBrush(pente);
+                p.drawRect(QRectF(x, y, l, h));
+            }
+        } else if (!std::strcmp(operation, "degrade_cercle")) {
+            double x, y, l, h, cx, cy, rayon;
+            PyObject *etapes = nullptr;
+            if (PyArg_ParseTuple(element, "sdddddddO", &operation, &x, &y, &l, &h,
+                                 &cx, &cy, &rayon, &etapes)) {
+                QRadialGradient pente(QPointF(cx, cy), rayon > 0.0 ? rayon : 1.0);
+                remplitEtapes(pente, etapes);
+                p.setPen(Qt::NoPen);
+                p.setBrush(pente);
+                p.drawRect(QRectF(x, y, l, h));
+            }
         } else if (!std::strcmp(operation, "contour")) {
             double x, y, l, h, rayon, epaisseur;
             long couleur;
@@ -534,6 +585,25 @@ private:
         Py_DECREF(tete);
     }
 
+public:
+    /// Peint une liste d'affichage dans une image et rend ses octets ARGB32.
+    ///
+    /// C'est ce qui donne enfin des pixels a `getImageData` : la toile
+    /// n'enregistrait que des operations, et lire ses pixels demandait de les
+    /// jouer pour de vrai. On reutilise le meme peintre que l'ecran, donc le
+    /// resultat est celui qu'on voit.
+    QImage rasterise(PyObject *liste, int largeur, int hauteur)
+    {
+        QImage image(largeur, hauteur, QImage::Format_ARGB32);
+        image.fill(Qt::transparent);
+        QPainter peintre(&image);
+        peintre.setRenderHint(QPainter::Antialiasing, true);
+        peintre.setRenderHint(QPainter::TextAntialiasing, true);
+        peintListe(peintre, liste);
+        return image;
+    }
+
+private:
     /// Pose les arrets de couleur d'un degrade, lineaire ou radial.
     void remplitEtapes(QGradient &pente, PyObject *etapes)
     {
@@ -742,6 +812,29 @@ PyObject *bo_formats_images(PyObject *, PyObject *)
     return liste;
 }
 
+/// `bo.rasterise(operations, largeur, hauteur) -> octets ARGB32`
+///
+/// Joue une liste d'affichage dans une image hors ecran et rend ses pixels.
+/// `getImageData` en depend : la toile n'enregistre que des operations, et il
+/// faut les peindre pour de vrai avant d'en lire un seul pixel.
+PyObject *bo_rasterise(PyObject *, PyObject *args)
+{
+    PyObject *liste = nullptr;
+    int largeur = 0, hauteur = 0;
+    if (!PyArg_ParseTuple(args, "Oii", &liste, &largeur, &hauteur))
+        return nullptr;
+    if (!g_toile || largeur <= 0 || hauteur <= 0 || largeur > 8192 || hauteur > 8192) {
+        PyErr_SetString(PyExc_ValueError, "bo.rasterise : taille hors bornes");
+        return nullptr;
+    }
+    const QImage image = g_toile->rasterise(liste, largeur, hauteur);
+    if (image.isNull())
+        Py_RETURN_NONE;
+    return PyBytes_FromStringAndSize(
+        reinterpret_cast<const char *>(image.constBits()),
+        Py_ssize_t(image.sizeInBytes()));
+}
+
 PyMethodDef bo_methodes[] = {
     {"enregistrer", bo_enregistrer, METH_VARARGS,
      "enregistrer({'peindre': f, 'touche': f, 'clic': f, ...})"},
@@ -761,6 +854,8 @@ PyMethodDef bo_methodes[] = {
      "image(octets) -> (identifiant, largeur, hauteur), ou None si illisible"},
     {"image_brute", bo_image_brute, METH_VARARGS,
      "image_brute(octets_bgra, largeur, hauteur, identifiant=-1) -> (id, l, h)"},
+    {"rasterise", bo_rasterise, METH_VARARGS,
+     "rasterise(operations, largeur, hauteur) -> octets ARGB32"},
     {"formats_images", bo_formats_images, METH_NOARGS,
      "formats_images() -> formats que l'hote sait decoder"},
     {nullptr, nullptr, 0, nullptr},
