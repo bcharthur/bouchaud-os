@@ -32,7 +32,7 @@ import urllib.parse
 import bo
 
 from . import (animation, css, html, images, mise_en_page, peinture,
-               police, prechargement, reseau, stockage)
+               police, prechargement, reseau, stockage, telemetrie)
 
 __all__ = ["animation", "css", "html", "images", "js", "mise_en_page",
            "peinture", "police", "prechargement", "reseau", "stockage",
@@ -47,7 +47,8 @@ class Document:
         self.url = reponse.url
         self.code = reponse.code
         self.erreur = reponse.erreur
-        self.racine = html.analyse(reponse.contenu)
+        with telemetrie.chrono("html"):
+            self.racine = html.analyse(reponse.contenu)
         self.titre = self._titre()
         self.journal = journal or (lambda niveau, texte: None)
         # Feuilles liees deja rapportees, par adresse : la cascade est
@@ -180,6 +181,10 @@ class Document:
         return self.url
 
     def _regles(self):
+        with telemetrie.chrono("css"):
+            return self._regles_reellement()
+
+    def _regles_reellement(self):
         """Cascade complete : feuille de l'agent, feuilles liees, feuilles en ligne.
 
         L'ordre du document decide entre deux regles de meme specificite ; un
@@ -365,9 +370,10 @@ class Document:
         self.animateur.nouveau_tour()
         css.pose_animateur(self.animateur)
         try:
-            self.boite, self.hauteur = mise_en_page.construit(
-                self.racine, self.regles, largeur, self.url, self._image_video,
-                self._toile)
+            with telemetrie.chrono("mise_en_page"):
+                self.boite, self.hauteur = mise_en_page.construit(
+                    self.racine, self.regles, largeur, self.url,
+                    self._image_video, self._toile)
         finally:
             css.pose_animateur(None)
 
@@ -385,8 +391,9 @@ class Document:
 
     def liste_affichage(self, defilement, largeur_vue, hauteur_vue):
         self.zones_liens = []
-        return peinture.peint(self.boite, defilement, largeur_vue, hauteur_vue,
-                              self.zones_liens)
+        with telemetrie.chrono("peinture"):
+            return peinture.peint(self.boite, defilement, largeur_vue,
+                                  hauteur_vue, self.zones_liens)
 
     def lien_a(self, x, y):
         """URL du lien sous ce point, en coordonnees de page. `None` sinon."""

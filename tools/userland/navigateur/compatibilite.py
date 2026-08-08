@@ -183,6 +183,7 @@ def mesure(cible, largeur=1280, hauteur=900, battements=4):
         operations[nom] = operations.get(nom, 0) + 1
 
     notes = telemetrie.rapport()
+    phases = telemetrie.temps()
 
     def somme(categorie):
         return sum(e["n"] for e in notes.get(categorie, []))
@@ -224,6 +225,7 @@ def mesure(cible, largeur=1280, hauteur=900, battements=4):
             "boites_debordantes": _debordements(boite, largeur) if boite else 0,
             "secondes_total": round(total, 3),
         },
+        "TEMPS": {p["phase"]: "%sms/%d" % (p["ms"], p["appels"]) for p in phases},
         "POLICES": {
             "font_face_declares": len(getattr(document, "_polices_declarees", ()) or ()),
             "polices_posees": sum(1 for v in getattr(document, "_polices", {}).values() if v),
@@ -311,7 +313,7 @@ def _note_de(notes, categorie, cle):
 
 # --- Rendu du rapport ---------------------------------------------------------
 
-AXES = ("RESEAU", "HTML", "CSS", "MISE_EN_PAGE", "POLICES", "IMAGES",
+AXES = ("RESEAU", "HTML", "CSS", "MISE_EN_PAGE", "TEMPS", "POLICES", "IMAGES",
         "JAVASCRIPT", "FORMULAIRES", "NAVIGATION", "INTERACTIONS", "STOCKAGE")
 
 

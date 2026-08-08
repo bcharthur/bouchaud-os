@@ -47,6 +47,7 @@ donc pas la mesure.
 
 import json
 import os
+import time
 
 # --- Etat ---------------------------------------------------------------------
 
@@ -74,6 +75,7 @@ def active_par_environnement():
 def reinitialise():
     """Vide ce qui a ete note. Une page par mesure, sinon rien n'est comparable."""
     _notes.clear()
+    _chronos.clear()
 
 
 def note(categorie, cle, exemple=None):
@@ -92,6 +94,50 @@ def note(categorie, cle, exemple=None):
             texte_exemple = texte_exemple[:117] + "..."
         if texte_exemple not in entree["exemples"]:
             entree["exemples"].append(texte_exemple)
+
+
+# --- Temps passe --------------------------------------------------------------
+
+_chronos = {}
+
+
+class chrono:
+    """Mesure une phase du moteur. Ne coute rien quand la collecte est eteinte.
+
+    Instrumenter avant d'optimiser : sans ces nombres, « le moteur est lent »
+    ne designe aucun code en particulier, et l'optimisation se porte sur ce
+    qu'on croit couteux plutot que sur ce qui l'est.
+    """
+
+    __slots__ = ("nom", "_depart")
+
+    def __init__(self, nom):
+        self.nom = nom
+        self._depart = 0.0
+
+    def __enter__(self):
+        if ACTIVE:
+            self._depart = time.perf_counter()
+        return self
+
+    def __exit__(self, *_):
+        if not ACTIVE:
+            return False
+        ecoule = time.perf_counter() - self._depart
+        entree = _chronos.get(self.nom)
+        if entree is None:
+            _chronos[self.nom] = [1, ecoule]
+        else:
+            entree[0] += 1
+            entree[1] += ecoule
+        return False
+
+
+def temps():
+    """`phase -> (appels, millisecondes cumulees)`, du plus couteux au moins."""
+    ordonne = sorted(_chronos.items(), key=lambda t: -t[1][1])
+    return [{"phase": nom, "appels": n, "ms": round(total * 1000.0, 2)}
+            for nom, (n, total) in ordonne]
 
 
 # --- Classement des manques CSS -----------------------------------------------

@@ -150,7 +150,8 @@ class Contexte:
     def execute(self, code, nom="<page>", module=False):
         """Execute du code, en signalant les erreurs plutot qu'en tombant."""
         try:
-            return bojs.evalue(self._contexte, code, nom, module)
+            with telemetrie.chrono("javascript"):
+                return bojs.evalue(self._contexte, code, nom, module)
         except bojs.Erreur as e:
             telemetrie.erreur_js(e, nom)
             self.journal("error", "%s : %s" % (nom, e))
