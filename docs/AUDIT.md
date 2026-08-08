@@ -25,7 +25,7 @@ Barème : ✅ vérifié ici · 🟢 solide (lecture) · 🟡 fonctionne, manques
 | Vérification | Commande | Résultat |
 |---|---|---|
 | Compilation du noyau | `cargo build` | ✅ **succès, 0 warning**, 1 min 09 s |
-| Moteur du navigateur | `tools/userland/test-moteur.sh` | ✅ **444/444**, 0 échec |
+| Moteur du navigateur | `tools/userland/test-moteur.sh` | ✅ **532/532**, 0 échec |
 | Toolchain épinglée | `rust-toolchain.toml` | ✅ nightly-2026-06-01 s'installe seule |
 
 Deux résultats à souligner. Un noyau `no_std` de 32 700 lignes qui compile
@@ -34,8 +34,8 @@ moteur tournent avec le **vrai QuickJS**, pas un bouchon : seul l'hôte Qt est
 simulé, tout le reste du moteur est celui qui tourne sous l'OS.
 
 Le chiffre de « 92 vérifications » annoncé dans `docs/ROADMAP.md` est périmé
-d'un facteur cinq. *(388 au moment de l'audit ; 444 après le chantier
-« web moderne » décrit au §9.)*
+d'un facteur six. *(388 au moment de l'audit ; 532 après les deux chantiers
+« web moderne » décrits au §9.)*
 
 ---
 
@@ -123,10 +123,11 @@ battement du JavaScript.
 | ~~**`grid-template-areas`**~~ | Retombait sur le placement automatique | **fait** (§9) |
 | ~~**`order` en flexbox**~~ | Ordre du source conservé | **fait** (§9) |
 | ~~**Bords par côté, coins, ombres, dégradés**~~ | `border-bottom` ne peignait rien | **fait** (§9) |
-| **`transition`, `animation`** | La page s'affiche à son état final | ouvert |
-| **`getImageData`, dégradés, ombres (canvas)** | L'hôte ne prête pas de tampon de pixels | ouvert |
-| **Isolement du Shadow DOM** | Les sélecteurs de la page atteignent la racine d'ombre ; `:host` et `<slot>` ignorés | ouvert |
+| ~~**`transition`, `animation`**~~ | La page s'affichait à son état final | **fait** (§9) |
+| ~~**`getImageData`, dégradés, ombres (canvas)**~~ | L'hôte ne prêtait pas de pixels | **fait** (§9) |
+| ~~**Isolement du Shadow DOM**~~ | Les sélecteurs de la page atteignaient la racine d'ombre | **fait** (§9) |
 | **Chargement parallèle des modules ES** | Graphe d'`import` rapporté module par module (chargeur QuickJS synchrone) | ouvert |
+| **Dégradés coniques, `createPattern`, composition** | Manques ciblés, nommés dans le README | ouvert |
 | **WebGL, WebAssembly, EME/Widevine** | Hors de portée, et assumé comme tel | — |
 
 **Un défaut de méthode, aussi.** Le §13 du README (`pywebview`) affirmait que le
@@ -332,9 +333,42 @@ heures. Le C++ a été vérifié contre des bouchons déclarant les mêmes signa
 ce qui éprouve la syntaxe et les types, pas le rendu. **Le rendu réel reste à
 constater sous l'OS** — c'est la première chose à faire au prochain démarrage.
 
-Reste ouvert, par ordre de valeur : `transition`/`animation`, l'isolement du
-Shadow DOM, le tampon de pixels du canvas, `listen`/`accept`, et la reprise du
-banc d'essai glibc.
+### Second chantier : ce qui fait qu'une page vit
+
+**Les pseudo-classes d'état** (`:hover`, `:active`, `:focus`) suivent le
+pointeur. `:hover` désigne l'élément **et toute sa lignée**, ce qui tient un
+menu déroulant ouvert. Une page dont aucune règle ne parle d'interaction n'est
+jamais recalculée : sans ce court-circuit, bouger la souris relancerait la
+cascade complète à chaque pixel.
+
+**Les animations et les transitions** (`moteur/animation.py`) : `@keyframes`
+était sauté comme une règle `@` inconnue. Les deux mécanismes partagent une
+interpolation — longueurs et nombres avec leur unité, couleurs canal par canal,
+transformations matrice par matrice — et les rythmes `ease*`, `cubic-bezier()`
+et `steps()`. L'horloge ne dépend pas du JavaScript et s'arrête quand plus rien
+ne bouge.
+
+**Le DOM d'ombre isole** vraiment : les règles de la page s'arrêtent à la
+frontière, celles de l'ombre n'en sortent pas, `:host` traverse vers l'hôte, et
+les `<slot>` distribuent le contenu clair. Deux défauts plus larges ont été
+trouvés là : la feuille de l'agent utilisateur était elle aussi bloquée à la
+frontière (le contenu d'ombre se retrouvait sans `display`, donc invisible), et
+**un bloc dans un élément en ligne disparaissait** — `<span><p>…</p></span>`
+n'affichait rien, ni aucune balise inconnue, donc aucun composant web.
+
+**`object-fit` et `aspect-ratio`** : toute image était étirée à sa boîte.
+
+**La toile rend ses pixels.** `getImageData` fait jouer les opérations par
+l'hôte dans une image hors écran — le même peintre que l'écran, donc ce qu'on
+lit est ce qu'on voit. Avec les dégradés, les ombres, le détourage, et les
+chemins remplis exactement au lieu de leur boîte englobante.
+
+**Les règles `@` sans bloc** (`@import url(…);`, `@layer a, b;`) avalaient la
+règle suivante, et `@layer` avec bloc était sautée entièrement — or les cadres
+CSS récents y rangent toute leur feuille.
+
+Reste ouvert, par ordre de valeur : le chargement parallèle des modules ES,
+`listen`/`accept`, et la reprise du banc d'essai glibc.
 
 ---
 

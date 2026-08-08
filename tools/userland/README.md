@@ -487,10 +487,18 @@ vraie fonte · **disposition flexible** (base, `grow`/`shrink`, `wrap`,
 `position: absolute`/`fixed`/**`sticky`** avec `top`/`right`/`bottom`/`left` ·
 **`order`** en flexbox et **zones nommées** de grille (`grid-template-areas`) ·
 **`transform`** (`translate`, `scale`, `rotate`, `skew`, `matrix`) appliqué à la
-peinture, zones de liens comprises · **coins arrondis**, **ombres portées**,
-**dégradés linéaires**, **opacité**, et **bords par côté** — le
-`border-bottom: 1px solid #eee` qui sépare la moitié des pages du web ·
-`@layer`, `@supports` et `@container` traversés plutôt que sautés ·
+peinture, zones de liens comprises · **coins arrondis**, **ombres portées et
+intérieures**, **dégradés linéaires et radiaux**, **opacité**, et **bords par
+côté** — le `border-bottom: 1px solid #eee` qui sépare la moitié des pages du
+web · **`object-fit`** et **`aspect-ratio`** · `@layer`, `@supports` et
+`@container` traversés plutôt que sautés ·
+**pseudo-classes d'état réelles** — `:hover`, `:active`, `:focus` suivent le
+pointeur, et la lignée entière est survolée, ce qui tient un menu déroulant
+ouvert · **`@keyframes` et `animation`**, **`transition`**, avec les rythmes
+`ease*`, `cubic-bezier()` et `steps()` — longueurs, couleurs et transformations
+interpolées · **DOM d'ombre isolé** : les règles de la page s'arrêtent à la
+frontière, `:host` la traverse vers l'hôte, et les `<slot>` distribuent le
+contenu clair, par nom s'il y en a ·
 `overflow: hidden` réellement rogné · listes, texte préformaté · **JavaScript**
 (QuickJS : DOM, événements à trois phases, minuteries, promesses, XHR/fetch) ·
 `getComputedStyle` **résolu** — cascade, héritage et style en ligne réunis ·
@@ -507,26 +515,23 @@ liens cliquables, défilement.
 
 ### Ce qu'il ne sait pas faire
 
-**Animations** — `transition` et `animation` sont ignorés ; la page s'affiche à
-son état final, ce qui est presque toujours l'état utile. `transform`, lui, est
-appliqué : ce n'est pas de la décoration mais du placement, et l'ignorer posait
-les éléments au mauvais endroit.
 **Transformations en trois dimensions** — `rotateX`, `perspective`, `matrix3d`
 sont laissés de côté plutôt qu'aplatis à tort.
-**Dégradés radiaux et coniques** — seul `linear-gradient` est peint.
-**Ombres intérieures** — `box-shadow: inset` demanderait de peindre le pourtour
-du fond, pas une forme posée dessous.
-**Isolement du DOM d'ombre** — la racine d'ombre porte et affiche son contenu,
-mais les sélecteurs de la page l'atteignent, et `:host` comme `<slot>` ne sont
-pas interprétés. **Pixels de canvas** — `getImageData`, les dégradés et les
-ombres demanderaient un vrai tampon, que l'hôte ne prête pas ; le reste du
-contexte 2D est enregistré et peint. **Chargement parallèle des modules** — le
-graphe d'`import` est rapporté module par module, comme l'exige le chargeur
-synchrone de QuickJS ; un navigateur les téléchargerait de front.
-**Pseudo-classes d'état** — `:hover`, `:focus` et leurs voisines ne désignent
-personne au repos. C'est le rendu juste d'une page immobile ; le moteur ne tient
-pas encore l'état d'interaction qui les rendrait vivantes. Ce qui manque
-est listé, avec le reste, dans la feuille de route (`docs/ROADMAP.md`).
+**Dégradés coniques** — `linear-gradient` et `radial-gradient` sont peints,
+`conic-gradient` non.
+**Interpolation exacte des rotations** — une `transition` sur un `transform`
+mélange les matrices, ce qui est exact pour les translations et les homothéties
+mais passe par l'aplatissement pour un demi-tour.
+**Motifs et composition de canvas** — `createPattern` et
+`globalCompositeOperation` ne sont pas rendus ; tout le reste du contexte 2D
+l'est, pixels compris. **Détourage par forme** — `clip()` suit la boîte du
+chemin, ce qui est exact après un `rect()` et approximatif au-delà.
+**Chargement parallèle des modules** — le graphe d'`import` est rapporté module
+par module, comme l'exige le chargeur synchrone de QuickJS ; un navigateur les
+téléchargerait de front.
+**Lignes nommées de grille**, **placement dense**, et
+**`animation-composition`**. Ce qui manque est listé, avec le reste, dans la
+feuille de route (`docs/ROADMAP.md`).
 
 ### Ce qui le rend rapide
 
@@ -711,9 +716,10 @@ bien dans son propre fil et peut lire l'état de la fenêtre.
   combler pour cette pile.
 - **JavaScript : le langage, et une bonne part du navigateur.** QuickJS exécute
   l'ECMAScript en entier, et `moteur/js.py` expose le DOM, les événements, les
-  minuteries, `XMLHttpRequest`, `fetch`, le canvas 2D, les Web Components, les
-  trois observateurs et un `getComputedStyle` résolu — la liste exacte est au
-  §12, et 444 vérifications la tiennent. Ce qui reste hors de portée : WebGL, le
+  minuteries, `XMLHttpRequest`, `fetch`, le canvas 2D — pixels, dégradés et
+  ombres compris —, les Web Components avec un DOM d'ombre réellement isolé, les
+  trois observateurs et un `getComputedStyle` résolu ; la liste exacte est au
+  §12, et 532 vérifications la tiennent. Ce qui reste hors de portée : WebGL, le
   chiffrement du contenu, et les applications qui compilent leur interface.
 - **Vidéo et audio : la chaîne existe, les sites de lecture non.** Le son sort
   par le pilote AC'97 (`/dev/dsp`), libavcodec décode H.264, VP9, AAC et Opus, et
