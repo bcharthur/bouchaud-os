@@ -1248,6 +1248,70 @@ def verifie_regles_arobase():
          ["ok"])
 
 
+def verifie_etats():
+    """`:hover`, `:active`, `:focus` : la page se restyle sous le pointeur."""
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #bouton { height: 40px; background-color: #ffffff; }
+          #bouton:hover { background-color: #ff0000; }
+          #menu:hover .liste { background-color: #00ff00; }
+        </style>
+        <body>
+          <div id="bouton">bouton</div>
+          <div id="menu"><div class="liste" id="liste">liste</div></div>
+        </body>""")
+
+    bouton = boite_de(doc, "bouton")
+    egal("etats: au repos, pas de survol",
+         bouton.style.get("background-color"), "#ffffff")
+
+    # Le pointeur au milieu du bouton.
+    change = doc.survole(bouton.x + 5, bouton.y + 5)
+    verifie("etats: le survol declenche une remise en page", change)
+    egal("etats: le style de survol s'applique",
+         boite_de(doc, "bouton").style.get("background-color"), "#ff0000")
+
+    # `:hover` designe toute la lignee : un descendant du survole en profite,
+    # ce qui est ce qui tient un menu deroulant ouvert.
+    liste = boite_de(doc, "liste")
+    doc.survole(liste.x + 5, liste.y + 5)
+    egal("etats: la lignee entiere est survolee",
+         boite_de(doc, "liste").style.get("background-color"), "#00ff00")
+
+    # Le pointeur sort : tout revient.
+    doc.survole(-1, -1)
+    egal("etats: le repos est retrouve",
+         boite_de(doc, "bouton").style.get("background-color"), "#ffffff")
+
+    # Une feuille qui ne parle pas d'interaction n'est jamais recalculee.
+    calme = document("""
+        <style>body { margin: 0 } #x { height: 20px }</style>
+        <body><div id="x">x</div></body>""")
+    verifie("etats: une page sans `:hover` ne recalcule pas",
+            calme.survole(5, 5) is False)
+    verifie("etats: l'index sait s'il est sensible",
+            calme.regles.sensible is False and doc.regles.sensible is True)
+
+    # `:active` se compose avec `:hover` au lieu de l'effacer.
+    doc2 = document("""
+        <style>
+          body { margin: 0; }
+          #b { height: 30px; color: #000000; }
+          #b:hover { color: #ff0000; }
+          #b:active { color: #0000ff; }
+        </style>
+        <body><div id="b">b</div></body>""")
+    cible = boite_de(doc2, "b")
+    doc2.survole(cible.x + 2, cible.y + 2)
+    egal("etats: survol seul", boite_de(doc2, "b").style.get("color"), "#ff0000")
+    doc2.enfonce(cible.x + 2, cible.y + 2)
+    egal("etats: enfonce l'emporte", boite_de(doc2, "b").style.get("color"), "#0000ff")
+    doc2.relache()
+    egal("etats: relache rend le survol",
+         boite_de(doc2, "b").style.get("color"), "#ff0000")
+
+
 # --- Disposition --------------------------------------------------------------
 
 def boite_de(doc, identifiant):
@@ -2746,6 +2810,7 @@ def principal():
         verifie_collant,
         verifie_ordre_et_zones,
         verifie_regles_arobase,
+        verifie_etats,
         verifie_pseudo_elements,
         verifie_requetes_media,
         verifie_longueurs,

@@ -245,15 +245,52 @@ _ATTRIBUT = re.compile(r"""\[\s*([A-Za-z_:][-A-Za-z0-9_:.]*)\s*
                            (?:([~^$*|]?=)\s*("[^"]*"|'[^']*'|[^\]\s]*))?\s*
                            ([iIsS])?\s*\]""", re.X)
 
-# Pseudo-classes d'etat. Au repos, elles ne designent rien — et c'est la
-# reponse juste : les ignorer, ce que faisait le moteur, appliquait en
-# permanence le style de survol, si bien qu'un bouton portait la couleur qu'il
-# n'aurait du prendre que sous le pointeur.
-_ETATS = {
-    "hover", "active", "focus", "focus-visible", "focus-within",
+# Pseudo-classes d'etat que le moteur **tient** : le navigateur lui dit quels
+# elements sont sous le pointeur, lesquels ont le foyer, lequel est enfonce.
+_ETATS_TENUS = {"hover", "active", "focus", "focus-visible", "focus-within"}
+
+# Pseudo-classes d'etat qu'il ne tient pas. Au repos, elles ne designent rien —
+# et c'est la reponse juste : les ignorer, ce que faisait le moteur, appliquait
+# en permanence le style de survol.
+_ETATS_ABSENTS = {
     "target", "target-within", "visited", "user-invalid", "user-valid",
     "autofill", "placeholder-shown", "default", "indeterminate",
 }
+
+_ETATS = _ETATS_TENUS | _ETATS_ABSENTS
+
+# --- Etat d'interaction -------------------------------------------------------
+#
+# Les elements sous le pointeur, avec leurs ancetres : `:hover` designe toute la
+# lignee, c'est ce qui permet a un menu de rester ouvert quand la souris passe
+# de son bouton a sa liste. Range par identite (`id()`), parce qu'un nœud n'est
+# pas hachable de facon stable et que c'est bien l'objet qu'on vise.
+_SURVOLES = set()
+_ACTIFS = set()
+_FOYER = set()
+
+
+def pose_interaction(survoles=(), actifs=(), foyer=()):
+    """Declare les elements survoles, enfonces et au foyer, eux et leurs ancetres."""
+    global _SURVOLES, _ACTIFS, _FOYER
+    _SURVOLES = {id(e) for e in survoles}
+    _ACTIFS = {id(e) for e in actifs}
+    _FOYER = {id(e) for e in foyer}
+
+
+def interaction():
+    """Les trois ensembles courants, pour comparaison."""
+    return (frozenset(_SURVOLES), frozenset(_ACTIFS), frozenset(_FOYER))
+
+
+def lignee(element):
+    """L'element et tous ses ancetres, du plus proche au plus lointain."""
+    chaine = []
+    courant = element
+    while courant is not None and _est_element(courant):
+        chaine.append(courant)
+        courant = _parent(courant)
+    return chaine
 
 # Pseudo-elements engendres par la mise en page.
 _ENGENDRES = {"before", "after"}
@@ -335,7 +372,7 @@ class Simple:
     """Un selecteur compose : balise, classes, identifiant, attributs, pseudos."""
 
     __slots__ = ("balise", "classes", "identifiant", "pseudo", "attributs",
-                 "structurelles", "nth", "groupes", "jamais", "_poids")
+                 "structurelles", "nth", "groupes", "etats", "jamais", "_poids")
 
     def __init__(self, texte):
         self.balise = None
@@ -350,6 +387,7 @@ class Simple:
         self.structurelles = []
         self.nth = []
         self.groupes = []
+        self.etats = []
         # Vrai quand le maillon ne peut designer personne au repos : une
         # pseudo-classe d'etat, ou un pseudo-element que le moteur ne peint pas.
         self.jamais = False
@@ -406,7 +444,10 @@ class Simple:
         if corps == "root":
             self.structurelles.append("root")
             return 0, 1, 0
-        if corps in _ETATS:
+        if corps in _ETATS_TENUS:
+            self.etats.append(corps)
+            return 0, 1, 0
+        if corps in _ETATS_ABSENTS:
             self.jamais = True
             return 0, 1, 0
         if corps in ("is", "where", "not", "has") and argument is not None:
@@ -443,6 +484,9 @@ class Simple:
         for nom, operateur, valeur, insensible in self.attributs:
             if not self._attribut(element, nom, operateur, valeur, insensible):
                 return False
+        for nom in self.etats:
+            if not self._etat(element, nom):
+                return False
         for nom in self.structurelles:
             if not self._structurelle(element, nom):
                 return False
@@ -475,6 +519,16 @@ class Simple:
         if operateur == "|=":
             return presente == valeur or presente.startswith(valeur + "-")
         return True
+
+    def _etat(self, element, nom):
+        marque = id(element)
+        if nom == "hover":
+            return marque in _SURVOLES
+        if nom == "active":
+            return marque in _ACTIFS
+        # `:focus-within` designe l'ancetre d'un element au foyer, ce que le
+        # navigateur exprime deja en posant toute la lignee.
+        return marque in _FOYER
 
     def _structurelle(self, element, nom):
         if nom == "root":
@@ -601,7 +655,8 @@ _TETE = re.compile(r"^\s*([>+~])\s*")
 class Selecteur:
     """Une suite de maillons relies par ` `, `>`, `+` ou `~`."""
 
-    __slots__ = ("maillons", "combinateurs", "specificite", "pseudo", "portee")
+    __slots__ = ("maillons", "combinateurs", "specificite", "pseudo", "portee",
+                 "sensible")
 
     def __init__(self, texte):
         texte = texte.strip()
@@ -626,6 +681,12 @@ class Selecteur:
         # Le pseudo-element est porte par le dernier maillon : dans
         # `.carte > p::after`, c'est le `p` qui recoit la boite.
         self.pseudo = self.maillons[-1].pseudo if self.maillons else None
+        # Ce selecteur depend-il de l'interaction ? Une page qui n'en contient
+        # aucun n'a pas a etre recalculee quand la souris bouge — et c'est
+        # l'immense majorite des mouvements.
+        self.sensible = any(m.etats or
+                            any(s.sensible for _, sous in m.groupes for s in sous)
+                            for m in self.maillons)
 
     def cle(self):
         """La cle d'indexation du selecteur : celle de son dernier maillon."""
@@ -750,9 +811,11 @@ class Index:
     que l'element n'a pas — elle n'aurait pas correspondu.
     """
 
-    __slots__ = ("par_id", "par_classe", "par_balise", "universelles")
+    __slots__ = ("par_id", "par_classe", "par_balise", "universelles", "sensible")
 
     def __init__(self, regles):
+        # Vrai des qu'une regle depend du survol, du foyer ou de l'enfoncement.
+        self.sensible = any(r.selecteur.sensible for r in regles)
         self.par_id = {}
         self.par_classe = {}
         self.par_balise = {}

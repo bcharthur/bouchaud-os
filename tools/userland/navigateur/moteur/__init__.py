@@ -52,6 +52,9 @@ class Document:
         # Index des regles, et signature des feuilles dont il est issu.
         self._index = None
         self._signature = None
+        # Dernier element survole, retenu pour que `:active` et `:hover` se
+        # composent au lieu de s'effacer l'un l'autre.
+        self._survole = None
 
         # Les sous-ressources partent maintenant, ensemble, pendant qu'on
         # analyse les feuilles : quand la mise en page reclamera une image, elle
@@ -267,6 +270,45 @@ class Document:
             if zx <= x <= zx + zl and zy <= y <= zy + zh:
                 return url
         return None
+
+    def survole(self, x, y):
+        """Declare la position du pointeur. Rend `True` si l'affichage change.
+
+        `:hover` designe l'element **et toute sa lignee** : c'est ce qui permet
+        a un menu deroulant de rester ouvert quand la souris quitte son bouton
+        pour sa liste.
+
+        Une page dont aucune regle ne parle d'interaction n'est pas recalculee —
+        et c'est l'immense majorite des mouvements de souris. Sans ce
+        court-circuit, bouger le pointeur relancerait la cascade complete a
+        chaque pixel.
+        """
+        return self._interaction(survoles=self.element_a(x, y))
+
+    def enfonce(self, x, y):
+        """Declare le bouton enfonce sous ce point (`:active`)."""
+        cible = self.element_a(x, y) if x is not None else None
+        return self._interaction(survoles=self._survole, actifs=cible)
+
+    def relache(self):
+        """Le bouton n'est plus enfonce."""
+        return self._interaction(survoles=self._survole, actifs=None)
+
+    def _interaction(self, survoles=None, actifs=None):
+        self._survole = survoles
+        if not getattr(self.regles, "sensible", False):
+            # La feuille ne parle pas d'interaction : rien a recalculer. L'etat
+            # est quand meme retenu, pour le jour ou un script insere un
+            # `<style>` qui, lui, en parle.
+            return False
+        etat = (css.lignee(survoles) if survoles is not None else [],
+                css.lignee(actifs) if actifs is not None else [])
+        avant = css.interaction()
+        css.pose_interaction(survoles=etat[0], actifs=etat[1])
+        if css.interaction() == avant:
+            return False
+        self.remet_en_page(self.largeur)
+        return True
 
     def element_a(self, x, y):
         """Element sous ce point, en coordonnees de page. `None` sinon.
