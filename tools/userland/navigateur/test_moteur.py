@@ -1950,16 +1950,18 @@ def verifie_polices():
 
     # Le choix de la source. Un site cite le WOFF2 en tete parce qu'il est le
     # plus compact ; on prend le suivant, qu'on sait ouvrir.
-    egal("police: le woff est prefere au woff2",
+    # Le WOFF2 se lit desormais : c'est lui qu'on prend, comme un navigateur.
+    egal("police: le woff2 est pris quand il est offert",
          police.meilleure_source('url(a.woff2) format("woff2"),'
                                  'url(a.woff) format("woff")'),
-         ("a.woff", "woff"))
+         ("a.woff2", "woff2"))
     egal("police: le truetype passe avant tout",
          police.meilleure_source('url(a.woff) format("woff"),'
                                  'url(a.ttf) format("truetype")'),
          ("a.ttf", "truetype"))
-    egal("police: le woff2 seul est refuse",
-         police.meilleure_source('url(fa-solid-900.woff2) format("woff2")'), None)
+    egal("police: une source unique en woff2 est retenue",
+         police.meilleure_source('url(fa-solid-900.woff2) format("woff2")'),
+         ("fa-solid-900.woff2", "woff2"))
     egal("police: le format se devine a l'extension",
          police.sources("url(x.woff)"), [("x.woff", "woff")])
 

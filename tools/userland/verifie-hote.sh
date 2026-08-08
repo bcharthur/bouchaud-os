@@ -12,7 +12,7 @@
 # peindre. Il ne demande ni l'OS, ni framebuffer, ni QuickJS, ni ffmpeg —
 # seulement Qt5 et les en-tetes de Python :
 #
-#   apt install qtbase5-dev python3-dev
+#   apt install qtbase5-dev python3-dev libbrotli-dev
 #
 # Ce qu'il ne prouve pas : que le binaire du navigateur se construit. Cela
 # demande Qt statique, CPython embarque, QuickJS et ffmpeg — c'est le travail
@@ -46,7 +46,7 @@ echo "== compilation de l'hote =="
 g++ -std=c++17 -fPIC -Wall -Wextra \
     $INCLUDES_QT $INCLUDES_PY \
     navigateur/verifie_hote.cpp -o "$SORTIE/verifie_hote" \
-    $LIENS_QT $LIENS_PY
+    $LIENS_QT $LIENS_PY -lbrotlidec
 
 echo "== peinture hors ecran =="
 QT_QPA_PLATFORM=offscreen "$SORTIE/verifie_hote"

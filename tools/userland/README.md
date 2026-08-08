@@ -496,8 +496,9 @@ web · **`object-fit`** et **`aspect-ratio`** · `@layer`, `@supports` et
 se serre, dégagement · **tableaux** : colonnes mesurées sur la plus large de
 leurs cellules, `colspan`, rangée anonyme pour une cellule sans ligne ·
 **`display: inline-block`** peint enfin sa boîte, et les **champs de
-formulaire** avec · **`@font-face`** : la police de la page est téléchargée,
-son conteneur **WOFF ouvert** (`moteur/police.py`) et remise à l'hôte ·
+formulaire** avec · **`@font-face`** : la police de la page est téléchargée, son conteneur **WOFF
+et WOFF2 ouvert** (`moteur/police.py` — transformation `glyf`/`loca` comprise,
+vérifiée glyphe par glyphe contre fontTools) et remise à l'hôte ·
 **pseudo-classes d'état réelles** — `:hover`, `:active`, `:focus` suivent le
 pointeur, et la lignée entière est survolée, ce qui tient un menu déroulant
 ouvert · **`@keyframes` et `animation`**, **`transition`**, avec les rythmes
@@ -532,9 +533,6 @@ mais passe par l'aplatissement pour un demi-tour.
 `globalCompositeOperation` ne sont pas rendus ; tout le reste du contexte 2D
 l'est, pixels compris. **Détourage par forme** — `clip()` suit la boîte du
 chemin, ce qui est exact après un `rect()` et approximatif au-delà.
-**Polices en WOFF2** — le conteneur WOFF est ouvert (zlib), le WOFF2 non : il
-demande brotli et une transformation des tables `glyf`/`loca`. Une police
-d'icônes livrée en WOFF2 seul sort donc en carrés, et le journal le dit.
 **Coupes par écriture** — un site qui livre une police par plage Unicode sous
 la même famille ne voit retenue que celle qui écrit du latin, faute de choisir
 la coupe caractère par caractère.
