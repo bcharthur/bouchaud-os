@@ -818,15 +818,38 @@ def _decoupe(texte):
     return morceaux
 
 
-def groupes(texte):
-    """Les selecteurs d'une liste separee par des virgules."""
-    resultat = []
+def separe_liste(texte):
+    """Decoupe une liste de selecteurs sur les virgules qui la separent vraiment.
+
+    Toutes les virgules ne separent pas : celles de `:not(a, b)`, de
+    `:is(h1, h2)` ou de `[title="a, b"]` appartiennent a leur selecteur. Un
+    `split(",")` naif coupait `li:not(:first-child, :last-child)` en deux
+    moities qui ne designaient plus rien — et comme une regle au selecteur
+    incomprehensible est simplement ignoree, la mise en forme disparaissait
+    sans le moindre message.
+
+    C'est la telemetrie qui l'a montre : neuf groupes de regles de pypi.org
+    detruits en silence, dont toute la pagination et les blocs d'alerte. Le
+    decoupage correct existait deja pour l'interieur des pseudo-classes ; il
+    manquait la ou les feuilles entrent.
+    """
+    morceaux = []
     courant = ""
     profondeur = 0
+    guillemet = ""
     for caractere in texte:
+        if guillemet:
+            courant += caractere
+            if caractere == guillemet:
+                guillemet = ""
+            continue
+        if caractere in "\"'":
+            guillemet = caractere
+            courant += caractere
+            continue
         if caractere == "," and profondeur == 0:
             if courant.strip():
-                resultat.append(Selecteur(courant))
+                morceaux.append(courant.strip())
             courant = ""
             continue
         if caractere in "([":
@@ -835,8 +858,14 @@ def groupes(texte):
             profondeur -= 1
         courant += caractere
     if courant.strip():
-        resultat.append(Selecteur(courant))
-    return [s for s in resultat if s.maillons]
+        morceaux.append(courant.strip())
+    return morceaux
+
+
+def groupes(texte):
+    """Les selecteurs d'une liste separee par des virgules."""
+    compiles = [Selecteur(morceau) for morceau in separe_liste(texte)]
+    return [selecteur for selecteur in compiles if selecteur.maillons]
 
 
 def correspond_un(liste, element):
@@ -1342,11 +1371,9 @@ def analyse(source, ordre_depart=0, keyframes=None, ombre=None, polices=None):
             break
         declarations = _declarations(source[accolade + 1:fin])
         if declarations:
-            for brut in prelude.split(","):
-                brut = brut.strip()
-                if brut:
-                    regles.append(Regle(Selecteur(brut), declarations, ordre, ombre))
-                    ordre += 1
+            for brut in separe_liste(prelude):
+                regles.append(Regle(Selecteur(brut), declarations, ordre, ombre))
+                ordre += 1
         position = fin + 1
 
     return regles
@@ -1483,8 +1510,41 @@ def _declarations(bloc):
 HERITEES = {
     "color", "font-size", "font-family", "font-weight", "font-style",
     "line-height", "text-align", "text-decoration", "white-space",
-    "list-style-type", "visibility",
+    "list-style-type", "visibility", "text-transform",
 }
+
+
+def transforme_texte(texte, style):
+    """Applique `text-transform` au texte avant qu'il soit mesure et peint.
+
+    La transformation doit avoir lieu avant la mesure, pas au moment de peindre :
+    « ACCUEIL » est plus large que « Accueil », et transformer apres la mise en
+    page donnerait des libelles qui debordent de leur bouton. C'est le meme
+    piege que la famille de police — mesurer dans un etat et dessiner dans un
+    autre.
+    """
+    mode = (style.get("text-transform") or "none").strip().lower()
+    if mode in ("none", "", "inherit", "initial"):
+        return texte
+    if mode == "uppercase":
+        return texte.upper()
+    if mode == "lowercase":
+        return texte.lower()
+    if mode == "capitalize":
+        # `str.title()` ne convient pas : il coupe aussi sur l'apostrophe et
+        # rendrait « L'Accueil » a partir de « l'accueil ». La norme veut la
+        # premiere lettre de chaque *mot*, et un mot se separe par du blanc.
+        morceaux = []
+        debut_de_mot = True
+        for caractere in texte:
+            if caractere.isspace():
+                debut_de_mot = True
+                morceaux.append(caractere)
+                continue
+            morceaux.append(caractere.upper() if debut_de_mot else caractere)
+            debut_de_mot = False
+        return "".join(morceaux)
+    return texte
 
 
 def applique(regles, element, chemin, style_parent, pseudo=None):
@@ -1761,10 +1821,99 @@ NON_HERITEES = (
           for t in ("width", "style", "color"))
 
 
+# --- Proprietes logiques ------------------------------------------------------
+#
+# `margin-inline-start` veut dire « du cote ou le texte commence ». En ecriture
+# horizontale de gauche a droite — la seule que la mise en page connaisse — c'est
+# `margin-left`, exactement. Traduire ici plutot que dans la mise en page a deux
+# vertus : la cascade continue de trancher entre `margin-left` et
+# `margin-inline-start` par specificite et par ordre, comme le veut la norme, et
+# tout le reste du moteur ignore que ces proprietes existent.
+#
+# Ce que cette traduction ne fait pas : l'arabe et l'hebreu, ou `inline-start`
+# est la droite, et l'ecriture verticale. Le jour ou `direction: rtl` sera
+# honore, c'est cette table qui devra devenir dependante du style — pas les
+# quinze endroits qui lisent `margin-left`.
+_COTES_LOGIQUES = {
+    "block-start": "top", "block-end": "bottom",
+    "inline-start": "left", "inline-end": "right",
+}
+
+_AXES_LOGIQUES = {"block": ("top", "bottom"), "inline": ("left", "right")}
+
+_TAILLES_LOGIQUES = {"inline-size": "width", "block-size": "height",
+                     "min-inline-size": "min-width", "min-block-size": "min-height",
+                     "max-inline-size": "max-width", "max-block-size": "max-height"}
+
+# Ce que d'anciennes feuilles ecrivent encore, et qui a un equivalent exact.
+_ALIAS = {
+    "grid-gap": "gap", "grid-row-gap": "row-gap", "grid-column-gap": "column-gap",
+    "-webkit-box-sizing": "box-sizing", "-moz-box-sizing": "box-sizing",
+    "-webkit-border-radius": "border-radius", "-moz-border-radius": "border-radius",
+    "-webkit-box-shadow": "box-shadow", "-moz-box-shadow": "box-shadow",
+    "-webkit-transform": "transform", "-moz-transform": "transform",
+    "-ms-transform": "transform", "-o-transform": "transform",
+    "-webkit-transition": "transition", "-moz-transition": "transition",
+    "-webkit-animation": "animation", "-moz-animation": "animation",
+    "-webkit-flex": "flex", "-webkit-flex-direction": "flex-direction",
+    "-webkit-justify-content": "justify-content",
+    "-webkit-align-items": "align-items", "-webkit-order": "order",
+    "word-wrap": "overflow-wrap",
+}
+
+
+def _logiques(nom, valeur, resultat):
+    """Traduit une propriete logique en propriete physique. Vrai si c'en etait une."""
+    physique = _TAILLES_LOGIQUES.get(nom)
+    if physique:
+        resultat[physique] = valeur
+        return True
+
+    if nom == "inset":
+        haut, droite, bas, gauche = _quatre(valeur.split())
+        resultat["top"], resultat["right"] = haut, droite
+        resultat["bottom"], resultat["left"] = bas, gauche
+        return True
+
+    for prefixe in ("margin", "padding", "inset", "border"):
+        if not nom.startswith(prefixe + "-"):
+            continue
+        reste = nom[len(prefixe) + 1:]
+        cote = _COTES_LOGIQUES.get(reste)
+        if cote:
+            resultat[_physique(prefixe, cote)] = valeur
+            return True
+        axe = _AXES_LOGIQUES.get(reste)
+        if axe:
+            # `margin-inline: 10px 20px` donne debut puis fin ; une seule valeur
+            # vaut pour les deux.
+            parties = valeur.split()
+            debut = parties[0]
+            fin = parties[1] if len(parties) > 1 else parties[0]
+            resultat[_physique(prefixe, axe[0])] = debut
+            resultat[_physique(prefixe, axe[1])] = fin
+            return True
+        if prefixe == "border":
+            # `border-inline-start-width`, `-style`, `-color`.
+            for logique, physique_cote in _COTES_LOGIQUES.items():
+                if reste.startswith(logique + "-"):
+                    resultat["border-%s-%s" % (physique_cote,
+                                               reste[len(logique) + 1:])] = valeur
+                    return True
+    return False
+
+
+def _physique(prefixe, cote):
+    return cote if prefixe == "inset" else "%s-%s" % (prefixe, cote)
+
+
 def _developpe(declarations):
     """Developpe les raccourcis (`margin`, `padding`, `border`, `font`)."""
     resultat = {}
     for nom, valeur in declarations.items():
+        nom = _ALIAS.get(nom, nom)
+        if _logiques(nom, valeur, resultat):
+            continue
         if nom in _RACCOURCIS_BOITE:
             parties = valeur.split()
             haut, droite, bas, gauche = _quatre(parties)

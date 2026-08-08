@@ -136,6 +136,28 @@ src text-align text-decoration top transform
 transition transition-delay transition-duration transition-property
 transition-timing-function
 unicode-range vertical-align visibility white-space width z-index
+text-transform
+inset inset-block inset-inline inset-block-start inset-block-end
+inset-inline-start inset-inline-end
+margin-block margin-inline margin-block-start margin-block-end
+margin-inline-start margin-inline-end
+padding-block padding-inline padding-block-start padding-block-end
+padding-inline-start padding-inline-end
+border-block-start-width border-block-end-width
+border-inline-start-width border-inline-end-width
+border-block-start-color border-block-end-color
+border-inline-start-color border-inline-end-color
+border-block-start-style border-block-end-style
+border-inline-start-style border-inline-end-style
+block-size inline-size max-block-size max-inline-size
+min-block-size min-inline-size
+grid-gap grid-row-gap grid-column-gap
+-webkit-box-sizing -moz-box-sizing -webkit-border-radius -moz-border-radius
+-webkit-box-shadow -moz-box-shadow
+-webkit-transform -moz-transform -ms-transform -o-transform
+-webkit-transition -moz-transition -webkit-animation -moz-animation
+-webkit-flex -webkit-flex-direction -webkit-justify-content
+-webkit-align-items -webkit-order
 """.split())
 
 # Le reste de la plate-forme, avec l'effet qu'a son absence. Ce qui n'est ni

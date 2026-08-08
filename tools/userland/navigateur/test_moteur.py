@@ -3426,6 +3426,141 @@ def verifie_bac_a_sable():
     contexte.ferme()
 
 
+def verifie_liste_de_selecteurs():
+    """Une virgule dans `:not(…)` ne separe pas deux regles.
+
+    C'est la telemetrie qui a trouve ce defaut : neuf groupes de regles de
+    pypi.org detruits en silence. `li:not(:first-child, :last-child)` etait
+    coupe en `li:not(:first-child` et `:last-child)`, deux selecteurs qui ne
+    designent rien — et une regle au selecteur incomprehensible est ignoree
+    sans le moindre message.
+    """
+    regles = css.analyse(
+        "li:not(:first-child, :last-child) { color: red }"
+        ".a:is(.b, .c) .d { color: green }"
+        "[title=\"un, deux\"] { color: blue }"
+        "h1, h2 { color: black }")
+    egal("liste: la virgule interne ne coupe pas la regle", len(regles), 5)
+
+    doc = document(
+        "<style>"
+        "li { color: #000000 }"
+        "li:not(:first-child, :last-child) { color: #ff0000 }"
+        ".a:is(.b, .c) .d { color: #00ff00 }"
+        "</style>"
+        "<body><ul><li id=un>1</li><li id=deux>2</li><li id=trois>3</li></ul>"
+        "<div class='a b'><div class='d' id=dedans>x</div></div></body>")
+    doc.remet_en_page(1000, 800)
+    for identifiant, attendu, quoi in (("un", "#000000", "epargne le premier"),
+                                       ("deux", "#ff0000", "atteint le milieu"),
+                                       ("trois", "#000000", "epargne le dernier"),
+                                       ("dedans", "#00ff00", ":is descend bien")):
+        boite = boite_de(doc, identifiant)
+        egal("liste: %s" % quoi,
+             css_couleur(boite.style.get("color")) if boite else None,
+             css_couleur(attendu))
+
+
+def verifie_proprietes_logiques():
+    """`margin-inline-start` vaut `margin-left` en ecriture latine."""
+    doc = document(
+        "<style>"
+        "#a { margin-inline-start: 10px; margin-inline-end: 20px;"
+        "     padding-block: 5px 7px }"
+        "#b { margin-inline: 12px; padding-inline-start: 9px;"
+        "     inline-size: 300px; block-size: 40px }"
+        "#c { position: absolute; inset: 1px 2px 3px 4px }"
+        "#d { position: absolute; inset-inline-start: 8px; inset-block-end: 6px }"
+        "#e { border-inline-start-width: 4px; border-inline-start-color: #ff0000;"
+        "     border-inline-start-style: solid }"
+        "#f { grid-gap: 11px; -webkit-box-sizing: border-box }"
+        "#x { margin-left: 1px; margin-inline-start: 2px }"
+        "#y { margin-inline-start: 3px; margin-left: 4px }"
+        "</style>"
+        "<body><div id=a>a</div><div id=b>b</div><div id=c>c</div>"
+        "<div id=d>d</div><div id=e>e</div><div id=f>f</div>"
+        "<div id=x>x</div><div id=y>y</div></body>")
+    doc.remet_en_page(1000, 800)
+
+    def style(identifiant):
+        boite = boite_de(doc, identifiant)
+        return boite.style if boite else {}
+
+    attendus = [
+        ("a", "margin-left", "10px", "margin-inline-start"),
+        ("a", "margin-right", "20px", "margin-inline-end"),
+        ("a", "padding-top", "5px", "padding-block debut"),
+        ("a", "padding-bottom", "7px", "padding-block fin"),
+        ("b", "margin-left", "12px", "margin-inline a gauche"),
+        ("b", "margin-right", "12px", "margin-inline a droite"),
+        ("b", "padding-left", "9px", "padding-inline-start"),
+        ("b", "width", "300px", "inline-size"),
+        ("b", "height", "40px", "block-size"),
+        ("c", "top", "1px", "inset haut"),
+        ("c", "right", "2px", "inset droite"),
+        ("c", "bottom", "3px", "inset bas"),
+        ("c", "left", "4px", "inset gauche"),
+        ("d", "left", "8px", "inset-inline-start"),
+        ("d", "bottom", "6px", "inset-block-end"),
+        ("e", "border-left-width", "4px", "border-inline-start-width"),
+        ("e", "border-left-color", "#ff0000", "border-inline-start-color"),
+        ("f", "row-gap", "11px", "grid-gap vaut gap"),
+        ("f", "column-gap", "11px", "grid-gap vaut gap dans les deux sens"),
+        ("f", "box-sizing", "border-box", "-webkit-box-sizing"),
+        # La cascade doit continuer a trancher : la derniere declaration gagne.
+        ("x", "margin-left", "2px", "la logique posee apres l'emporte"),
+        ("y", "margin-left", "4px", "la physique posee apres l'emporte"),
+    ]
+    for identifiant, propriete, attendu, quoi in attendus:
+        egal("logique: %s" % quoi, style(identifiant).get(propriete), attendu)
+
+    # La mise en page doit en tenir compte pour de vrai, pas seulement la cascade.
+    boite = boite_de(doc, "b")
+    # 300 de contenu plus les 9 de `padding-inline-start` : `box-sizing` vaut
+    # `content-box`, donc la boite mesure bien 309.
+    verifie("logique: inline-size pose vraiment la largeur",
+            boite is not None and abs(boite.largeur - 309.0) < 1.0,
+            None if boite is None else boite.largeur)
+
+
+def verifie_transformation_texte():
+    """`text-transform` doit agir avant la mesure, pas au moment de peindre."""
+    doc = document(
+        "<style>"
+        "#haut { text-transform: uppercase }"
+        "#bas { text-transform: lowercase }"
+        "#capi { text-transform: capitalize }"
+        "#herite { text-transform: uppercase }"
+        "#rien { text-transform: none }"
+        "</style>"
+        "<body><p id=haut>menu principal</p><p id=bas>MENU Principal</p>"
+        "<p id=capi>l'accueil du site</p>"
+        "<div id=herite><p id=fils>herite</p></div>"
+        "<p id=rien>Inchange</p></body>")
+    doc.remet_en_page(1000, 800)
+
+    def texte_de(identifiant):
+        boite = boite_de(doc, identifiant)
+        if boite is None:
+            return None
+        return " ".join(f.texte for f in boite.lignes)
+
+    egal("transform: uppercase", texte_de("haut"), "MENU PRINCIPAL")
+    egal("transform: lowercase", texte_de("bas"), "menu principal")
+    egal("transform: capitalize garde l'apostrophe",
+         texte_de("capi"), "L'accueil Du Site")
+    egal("transform: la valeur s'herite", texte_de("fils"), "HERITE")
+    egal("transform: none laisse tel quel", texte_de("rien"), "Inchange")
+
+    # Le point qui compte vraiment : la largeur mesuree est celle du texte
+    # transforme. Mesurer « menu » et peindre « MENU » ferait deborder chaque
+    # libelle de bouton du Web.
+    large = boite_de(doc, "haut")
+    egal("transform: le fragment porte le texte transforme",
+         large.lignes[0].texte if large and large.lignes else None,
+         "MENU PRINCIPAL")
+
+
 # --- Securite web -------------------------------------------------------------
 
 def verifie_politique_ressources():
@@ -3813,6 +3948,9 @@ def principal():
         verifie_longueurs,
         verifie_client_leger,
         verifie_bac_a_sable,
+        verifie_liste_de_selecteurs,
+        verifie_proprietes_logiques,
+        verifie_transformation_texte,
         verifie_politique_ressources,
         verifie_tls_ferme,
         verifie_temoins_httponly,

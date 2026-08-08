@@ -1060,6 +1060,7 @@ def _pose_image(boite, nœud, style, lien, gauche, largeur,
 def _pose_texte(boite, texte, style, lien, gauche, largeur,
                 curseur_x, curseur_y, hauteur_ligne):
     """Coupe le texte en mots et les pose en revenant a la ligne au besoin."""
+    texte = css.transforme_texte(texte, style)
     taille = _taille_police(style)
     gras = _est_gras(style)
     fixe = _est_fixe(style)
