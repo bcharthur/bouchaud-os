@@ -182,7 +182,7 @@ src text-align text-decoration top transform
 transition transition-delay transition-duration transition-property
 transition-timing-function
 unicode-range vertical-align visibility white-space width z-index
-text-transform
+text-transform pointer-events
 inset inset-block inset-inline inset-block-start inset-block-end
 inset-inline-start inset-inline-end
 margin-block margin-inline margin-block-start margin-block-end

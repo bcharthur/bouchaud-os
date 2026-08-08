@@ -3824,6 +3824,78 @@ def verifie_champs_de_formulaire():
         contexte.ferme()
 
 
+def verifie_priorite_important():
+    """`!important` : la declaration etait perdue en entier, pas seulement sa priorite."""
+    doc = document(
+        "<style>"
+        "#a { width: 300px }"
+        "div#a.large { width: 120px!important }"
+        "#b { color: #0000ff }"
+        ".rouge { color: #ff0000 !important }"
+        "#c.fort { display: none !important }"
+        "#c { display: block }"
+        "</style>"
+        "<body><div id=a class=large>a</div>"
+        "<div id=b class=rouge>b</div>"
+        "<div id=c class=fort>c</div>"
+        "<div id=d style='width: 50px !important'>d</div></body>")
+    doc.remet_en_page(1000, 800)
+
+    a = boite_de(doc, "a")
+    egal("important: la valeur est nettoyee de son drapeau",
+         a.style.get("width") if a else None, "120px")
+    verifie("important: et la largeur est vraiment posee",
+            a is not None and abs(a.largeur - 120.0) < 1.0,
+            None if a is None else a.largeur)
+
+    b = boite_de(doc, "b")
+    egal("important: il l'emporte sur une specificite superieure",
+         css_couleur(b.style.get("color")) if b else None, css_couleur("#ff0000"))
+
+    verifie("important: display:none important masque bien",
+            boite_de(doc, "c") is None)
+
+    d = boite_de(doc, "d")
+    egal("important: en style en ligne aussi",
+         d.style.get("width") if d else None, "50px")
+
+    # Ce que le drapeau ne doit pas faire : apparaitre comme une propriete.
+    verifie("important: la marque ne fuit pas dans le style",
+            a is not None and not any(nom.startswith("!") for nom in a.style),
+            None if a is None else [n for n in a.style if n.startswith("!")])
+
+
+def verifie_pointeur_transparent():
+    """`pointer-events: none` laisse le clic traverser."""
+    # Les enfants absolus vivent dans une zone qui a sa propre hauteur : le
+    # test de pointage descend par les boites, et une boite sans surface n'est
+    # jamais atteinte.
+    doc = document(
+        "<style>"
+        "#zone { position: relative; width: 200px; height: 200px }"
+        "#dessous { position: absolute; left: 0; top: 0; width: 200px; height: 200px }"
+        "#calque { position: absolute; left: 0; top: 0; width: 200px; height: 200px;"
+        "          pointer-events: none }"
+        "#dedans { position: absolute; left: 20px; top: 20px; width: 40px; height: 40px;"
+        "          pointer-events: auto }"
+        "</style>"
+        "<body><div id=zone><div id=dessous>dessous</div>"
+        "<div id=calque><div id=dedans>dedans</div></div></div></body>")
+    doc.remet_en_page(1000, 800)
+
+    def identifiant_a(x, y):
+        element = doc.element_a(x, y)
+        while element is not None and not getattr(element, "attributs", None):
+            element = getattr(element, "parent", None)
+        return None if element is None else element.attributs.get("id")
+
+    verifie("pointeur: le calque transparent laisse passer",
+            identifiant_a(150.0, 150.0) in ("dessous", "zone"),
+            identifiant_a(150.0, 150.0))
+    egal("pointeur: un enfant a auto reste cliquable",
+         identifiant_a(48.0, 48.0), "dedans")
+
+
 # --- Securite web -------------------------------------------------------------
 
 def verifie_politique_ressources():
@@ -4217,6 +4289,8 @@ def principal():
         verifie_donnees_element,
         verifie_ascendance,
         verifie_console_gabarit,
+        verifie_priorite_important,
+        verifie_pointeur_transparent,
         verifie_champs_de_formulaire,
         verifie_formulaire_pilote,
         verifie_politique_ressources,

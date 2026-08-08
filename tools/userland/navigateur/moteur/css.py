@@ -1489,18 +1489,44 @@ def _saute_bloc(source, accolade):
     return len(source)
 
 
+# Le drapeau `!important` d'une declaration. Il colle souvent a la valeur —
+# `120px!important` — d'ou l'espace facultatif.
+_IMPORTANT = re.compile(r"!\s*important\s*$", re.I)
+
+# Cle reservee ou `_declarations` range les noms marques `!important`. Elle ne
+# peut pas entrer en collision avec une propriete : aucune ne commence par `!`.
+PRIORITAIRES = "!important"
+
+
 def _declarations(bloc):
     resultat = {}
+    prioritaires = None
     for morceau in bloc.split(";"):
         if ":" not in morceau:
             continue
         nom, _, valeur = morceau.partition(":")
         nom = nom.strip().lower()
         valeur = valeur.strip()
-        if nom and valeur:
-            resultat[nom] = valeur
-            if telemetrie.ACTIVE:
-                telemetrie.propriete_ignoree(nom, valeur)
+        if not nom or not valeur:
+            continue
+        sans_drapeau = _IMPORTANT.sub("", valeur).strip()
+        if sans_drapeau != valeur:
+            # Le drapeau restait colle a la valeur : `width: 120px!important`
+            # etait rangee telle quelle, et chaque lecteur — longueur, couleur,
+            # display — echouait a la comprendre. La declaration etait donc
+            # perdue en entier, alors qu'elle etait justement celle que l'auteur
+            # tenait le plus a imposer.
+            valeur = sans_drapeau
+            if not valeur:
+                continue
+            if prioritaires is None:
+                prioritaires = set()
+            prioritaires.add(nom)
+        resultat[nom] = valeur
+        if telemetrie.ACTIVE:
+            telemetrie.propriete_ignoree(nom, valeur)
+    if prioritaires:
+        resultat[PRIORITAIRES] = prioritaires
     return resultat
 
 
@@ -1603,6 +1629,17 @@ def applique(regles, element, chemin, style_parent, pseudo=None):
     if en_ligne:
         style.update(_developpe(_resout_variables(en_ligne, variables)))
 
+    # Seconde passe : les declarations `!important` repassent par-dessus, dans
+    # le meme ordre. C'est ce que dit la norme — la priorite l'emporte sur la
+    # specificite — et c'est ce qui permet a une regle utilitaire de contredire
+    # un composant, l'usage meme du drapeau.
+    for source in [r.declarations for r in correspondantes] + ([en_ligne] if en_ligne else []):
+        noms = source.get(PRIORITAIRES)
+        if not noms:
+            continue
+        forcees = {nom: source[nom] for nom in noms if nom in source}
+        style.update(_developpe(_resout_variables(forcees, variables)))
+
     # Les animations et les transitions se posent apres la cascade : c'est le
     # seul moment ou l'on connait a la fois ce que la feuille demande et ce que
     # l'element affichait au tour precedent.
@@ -1652,13 +1689,13 @@ def _resout_variables(declarations, variables):
         # couterait a chaque mise en page.
         resultat = {}
         for nom, valeur in declarations.items():
-            if not nom.startswith("--"):
+            if not nom.startswith("--") and nom != PRIORITAIRES:
                 resultat[nom] = valeur
         return resultat
 
     resultat = {}
     for nom, valeur in declarations.items():
-        if nom.startswith("--"):
+        if nom.startswith("--") or nom == PRIORITAIRES:
             continue
         resultat[nom] = _substitue(valeur, variables) if "var(" in valeur else valeur
     return resultat
@@ -1911,6 +1948,10 @@ def _developpe(declarations):
     """Developpe les raccourcis (`margin`, `padding`, `border`, `font`)."""
     resultat = {}
     for nom, valeur in declarations.items():
+        if nom == PRIORITAIRES:
+            # La marque des declarations prioritaires n'est pas une propriete :
+            # elle porte un ensemble de noms, pas une valeur.
+            continue
         nom = _ALIAS.get(nom, nom)
         if _logiques(nom, valeur, resultat):
             continue

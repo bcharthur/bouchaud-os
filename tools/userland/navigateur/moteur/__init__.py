@@ -456,11 +456,30 @@ def _element_a(boite, x, y):
     if not (boite.x <= x <= boite.x + boite.largeur
             and boite.y <= y <= boite.y + boite.hauteur):
         return None
-    # Le plus profond gagne : c'est lui que l'utilisateur vise.
-    for enfant in boite.enfants:
+
+    style = getattr(boite, "style", None) or {}
+    transparente = (style.get("pointer-events", "auto").strip().lower() == "none")
+
+    # Le plus profond gagne : c'est lui que l'utilisateur vise. Et parmi les
+    # freres qui se recouvrent, le dernier — celui que la peinture a pose
+    # par-dessus. Prendre le premier, comme on le faisait, rendait un calque
+    # place plus haut dans le document toujours vainqueur, alors qu'il est
+    # dessous a l'ecran.
+    #
+    # `pointer-events` n'est pas heritee par le test de pointage : un enfant
+    # peut remettre `auto` sous un parent a `none`, et c'est meme l'usage le
+    # plus courant — un calque qui laisse passer les clics sauf sur son contenu.
+    for enfant in reversed(boite.enfants):
         trouve = _element_a(enfant, x, y)
         if trouve is not None:
             return trouve
+
+    # `pointer-events: none` rend la boite transparente au pointeur : le clic
+    # traverse et atteint ce qui est dessous. Sans cela, un calque de modale ou
+    # une icone decorative avalait chaque clic, et la page devenait inerte sans
+    # qu'aucune erreur ne le signale.
+    if transparente:
+        return None
     return boite.element
 
 
