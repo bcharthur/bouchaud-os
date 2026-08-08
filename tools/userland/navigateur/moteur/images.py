@@ -64,6 +64,11 @@ def charge(base, source):
         _cache.clear()
 
     resultat = _decode(_octets(url, base))
+    if telemetrie.ACTIVE:
+        # Compter ici, et pas les operations peintes : la liste d'affichage est
+        # elaguee au viewport, donc une page de 11 000 pixels de haut n'y montre
+        # qu'une poignee d'images alors qu'elle en a charge des dizaines.
+        telemetrie.note("image", "chargee" if resultat else "echouee", url)
     _cache[url] = resultat
     return resultat
 

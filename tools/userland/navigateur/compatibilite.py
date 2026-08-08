@@ -233,7 +233,13 @@ def mesure(cible, largeur=1280, hauteur=900, battements=4):
         },
         "IMAGES": {
             "balises_img": balises.get("img", 0),
-            "images_peintes": operations.get("image", 0) + operations.get("imagepart", 0),
+            "chargees": _note_de(notes, "image", "chargee"),
+            "echouees": _note_de(notes, "image", "echouee"),
+            # Peintes dans le premier ecran seulement : la liste d'affichage est
+            # elaguee au viewport, ce compte n'est donc pas comparable aux deux
+            # precedents et ne dit rien de la reussite du chargement.
+            "peintes_a_l_ecran": (operations.get("image", 0)
+                                  + operations.get("imagepart", 0)),
         },
         "JAVASCRIPT": {
             "erreurs": somme("js_erreur"),
