@@ -466,9 +466,12 @@ def verifie_diagnostics_compatibilite():
     doc = document("<body></body>")
     contexte = js.Contexte(doc)
     try:
-        contexte.execute("new AbortController();", "page.js")
+        # `WebSocket` n'existe pas : l'accesseur du prelude le note et rend
+        # `undefined`, donc la detection de fonctionnalite de la page continue
+        # de retomber sur son plan de secours.
+        contexte.execute("void WebSocket;", "page.js")
         egal("diagnostic: API absente observee",
-             contexte.rapport_compatibilite().get("api_absente:AbortController"), 1)
+             contexte.rapport_compatibilite().get("api_absente:WebSocket"), 1)
 
         # A — un identifiant applicatif n'est pas une API navigateur.
         contexte.execute("console.log(currentUsr);", "app.js")
@@ -537,22 +540,30 @@ def verifie_moignons():
         egal("moignon: history.pushState se detecte encore",
              contexte.execute("typeof history.pushState"), "function")
 
-        contexte.execute("history.pushState({}, '', '/x')")
-        contexte.execute("history.replaceState({}, '', '/y')")
-        contexte.execute("document.getElementById('a').focus()")
         contexte.execute("window.scrollTo(0, 100)")
+        contexte.execute("window.open('/x')")
+        contexte.execute("var x = new XMLHttpRequest(); x.abort()")
         rapport = contexte.rapport_compatibilite()
-        for cle in ("moignon_appele:history.pushState",
-                    "moignon_appele:history.replaceState",
-                    "moignon_appele:element.focus",
-                    "moignon_appele:window.scrollTo"):
+        for cle in ("moignon_appele:window.scrollTo",
+                    "moignon_appele:window.open",
+                    "moignon_appele:XMLHttpRequest.abort"):
             egal("moignon: %s est compte" % cle.split(":")[1], rapport.get(cle), 1)
 
-        # Et un moignon n'est pas une API absente : les deux se corrigent
+        # Un moignon n'est pas une API absente : les deux se corrigent
         # differemment et ne doivent pas se melanger.
         verifie("moignon: aucun moignon n'est classe API absente",
-                not any(c.startswith("api_absente:history") for c in rapport),
+                not any(c.startswith("api_absente:window") for c in rapport),
                 [c for c in rapport if c.startswith("api_absente")])
+
+        # Et la reciproque, qui est la vraie valeur de cette categorie : ce qui
+        # a ete implemente ne doit plus s'y trouver. Le jour ou `pushState`
+        # redeviendrait vide, cette ligne le dirait.
+        contexte.execute("history.pushState({}, '', '/x')")
+        contexte.execute("document.getElementById('a').focus()")
+        rapport = contexte.rapport_compatibilite()
+        for nom in ("history.pushState", "element.focus"):
+            egal("moignon: %s n'est plus un moignon" % nom,
+                 rapport.get("moignon_appele:%s" % nom), None)
     finally:
         contexte.ferme()
 
@@ -4134,6 +4145,493 @@ def verifie_tableau_de_bord():
          suivi.precedente(histoire, "inconnue"), None)
 
 
+# --- Plate-forme comportementale ----------------------------------------------
+
+def _sur_serveur(chemin, largeur=1000, hauteur=800, battements=8, attente=0.02):
+    """Charge une page du serveur de fixtures et rend `(document, arret)`.
+
+    Le serveur local remplace Internet pour tout ce qui compte ici : une
+    redirection, un 404, un POST, une reponse lente. Aucun de ces cas n'a besoin
+    du reseau exterieur, et les faire dependre de lui rendait la moitie du
+    comportement du navigateur intestable.
+    """
+    import time as _time
+
+    from moteur import reseau as _reseau
+    import serveur_test
+
+    serveur, base = serveur_test.demarre(0)
+    ancien = _reseau._charge_http
+    try:
+        import apercu
+        apercu.installe_reseau(_reseau)
+    except Exception:  # noqa: BLE001 — sans `apercu`, le client maison suffit
+        pass
+    doc = moteur.charge(base + chemin, largeur, journal=lambda n, t: None)
+    doc.remet_en_page(largeur, hauteur)
+    for _ in range(battements):
+        doc.rafraichis()
+        _time.sleep(attente)
+
+    def arrete():
+        _reseau._charge_http = ancien
+        serveur_test.arrete(serveur)
+
+    doc.base = base
+    return doc, arrete
+
+
+def verifie_foyer():
+    """Le foyer : `activeElement`, `focus`, `blur`, `Tab`.
+
+    Rien de tout cela n'existait. `focus()` etait vide et `activeElement`
+    rendait `null` en toutes circonstances — donc aucun formulaire n'etait
+    remplissable au clavier, et `:focus` ne peignait jamais rien.
+    """
+    doc = document(
+        "<style>input:focus { background: #ffff00 }</style>"
+        "<body><input id=un><input id=deux><input id=trois disabled>"
+        "<a id=lien href='/x'>lien</a><div id=inerte>texte</div>"
+        "<script>1</script></body>")
+    doc.remet_en_page(1000, 800)
+    contexte = doc.contexte_js
+    verifie("foyer: la page a un contexte", contexte is not None)
+    if contexte is None:
+        return
+
+    egal("foyer: sans foyer, activeElement vaut body",
+         contexte.execute("document.activeElement.tagName"), "BODY")
+
+    contexte.execute("document.getElementById('un').focus()")
+    egal("foyer: focus() designe l'element",
+         contexte.execute("document.activeElement.id"), "un")
+    egal("foyer: le document est d'accord",
+         doc.foyer_actuel().attributs.get("id"), "un")
+
+    # Les evenements partent, et dans le bon ordre : `blur` sur l'ancien avant
+    # `focus` sur le nouveau. Une page qui valide un champ au `blur` avant
+    # d'afficher le suivant en depend.
+    contexte.execute(
+        "globalThis.__ordre = [];"
+        "for (const nom of ['un','deux']) {"
+        "  const e = document.getElementById(nom);"
+        "  e.addEventListener('focus', () => __ordre.push('focus:'+nom));"
+        "  e.addEventListener('blur', () => __ordre.push('blur:'+nom));"
+        "}")
+    contexte.execute("document.getElementById('deux').focus()")
+    egal("foyer: blur de l'ancien precede focus du nouveau",
+         contexte.execute("__ordre.join(',')"), "blur:un,focus:deux")
+
+    contexte.execute("document.getElementById('deux').blur()")
+    egal("foyer: blur() rend le foyer au document",
+         contexte.execute("document.activeElement.tagName"), "BODY")
+
+    # `Tab` suit l'ordre du document, saute ce qui est desactive, et fait le
+    # tour en fin de page.
+    doc.pose_foyer(None)
+    atteints = []
+    for _ in range(4):
+        atteint = doc.deplace_foyer(1)
+        atteints.append(None if atteint is None else atteint.attributs.get("id"))
+    egal("foyer: Tab suit l'ordre du document et saute le desactive",
+         ",".join(str(a) for a in atteints), "un,deux,lien,un")
+
+    arriere = doc.deplace_foyer(-1)
+    egal("foyer: Maj+Tab revient en arriere",
+         arriere.attributs.get("id") if arriere else None, "lien")
+
+    # Un element desactive ne prend pas le foyer, meme si on le lui demande.
+    contexte.execute("document.getElementById('trois').focus()")
+    verifie("foyer: un champ desactive ne prend pas le foyer",
+            contexte.execute("document.activeElement.id") != "trois",
+            contexte.execute("document.activeElement.id"))
+
+    # Et le style suit : `:focus` doit peindre.
+    doc.pose_foyer(None)
+    contexte.execute("document.getElementById('un').focus()")
+    doc.remet_en_page(1000, 800)
+    boite = boite_de(doc, "un")
+    egal("foyer: :focus est applique",
+         css_couleur(boite.style.get("background-color")) if boite else None,
+         css_couleur("#ffff00"))
+
+
+def verifie_formulaire_plateforme():
+    """`form.elements`, `action`, `method`, `submit`, `label.control`."""
+    doc = document(
+        "<body><form id=f action='/session' method=POST>"
+        "<label id=et for=nom>Nom</label>"
+        "<input id=nom name=nom value=alice>"
+        "<input id=mdp name=mdp type=password value=secret>"
+        "<input id=coche name=coche type=checkbox checked>"
+        "<button id=envoi type=submit>Envoyer</button></form>"
+        "<script>1</script></body>",
+        url="http://exemple.test/page/")
+    doc.remet_en_page(1000, 800)
+    contexte = doc.contexte_js
+
+    egal("formulaire: action est resolue en absolu",
+         contexte.execute("document.getElementById('f').action"),
+         "http://exemple.test/session")
+    egal("formulaire: method est en minuscules",
+         contexte.execute("document.getElementById('f').method"), "post")
+    egal("formulaire: elements compte les controles",
+         contexte.execute("document.getElementById('f').elements.length"), 4)
+    egal("formulaire: elements est indexable par nom",
+         contexte.execute("document.getElementById('f').elements.nom.value"),
+         "alice")
+    egal("formulaire: input.form remonte au formulaire",
+         contexte.execute("document.getElementById('nom').form.id"), "f")
+    egal("formulaire: label.htmlFor",
+         contexte.execute("document.getElementById('et').htmlFor"), "nom")
+    egal("formulaire: label.control designe le champ",
+         contexte.execute("document.getElementById('et').control.id"), "nom")
+
+    # `required` : la seule regle de validation implementee, et la seule qui
+    # serve aujourd'hui.
+    contexte.execute("document.getElementById('nom').required = true")
+    egal("formulaire: un champ requis rempli est valide",
+         contexte.execute("document.getElementById('nom').checkValidity()"), True)
+    contexte.execute("document.getElementById('nom').value = ''")
+    egal("formulaire: un champ requis vide ne l'est pas",
+         contexte.execute("document.getElementById('nom').checkValidity()"), False)
+    contexte.execute("document.getElementById('nom').value = 'alice'")
+
+    # `requestSubmit()` passe par l'evenement, `submit()` ne le declenche pas :
+    # c'est la difference que la norme etablit, et du code s'en sert pour
+    # contourner sa propre validation.
+    contexte.execute("globalThis.__vus = 0;"
+                     "document.getElementById('f').addEventListener('submit',"
+                     " e => { __vus++; e.preventDefault(); })")
+    contexte.execute("document.getElementById('f').requestSubmit()")
+    egal("formulaire: requestSubmit declenche l'evenement",
+         contexte.execute("__vus"), 1)
+    egal("formulaire: et preventDefault empeche la navigation",
+         contexte.navigation, None)
+
+    contexte.execute("document.getElementById('f').submit()")
+    egal("formulaire: submit() ne declenche pas l'evenement",
+         contexte.execute("__vus"), 1)
+    navigation = contexte.navigation
+    verifie("formulaire: submit() prepare bien un POST",
+            isinstance(navigation, tuple) and navigation[0] == "soumission"
+            and navigation[2] == "POST", navigation)
+    verifie("formulaire: le corps porte les champs remplis",
+            "nom=alice" in navigation[3] and "mdp=secret" in navigation[3]
+            and "coche=on" in navigation[3], navigation[3])
+    egal("formulaire: la cible est l'action resolue",
+         navigation[1], "http://exemple.test/session")
+
+    # En GET, les champs partent dans la chaine de requete, et **remplacent**
+    # celle qui s'y trouvait : deux envois ne doivent pas l'accumuler.
+    contexte.navigation = None
+    contexte.execute("var f = document.getElementById('f');"
+                     "f.setAttribute('method', 'get');"
+                     "f.setAttribute('action', '/chercher?ancien=1');"
+                     "f.submit()")
+    verifie("formulaire: GET met les champs dans la requete",
+            "nom=alice" in contexte.navigation, contexte.navigation)
+    verifie("formulaire: et remplace l'ancienne chaine",
+            "ancien=1" not in contexte.navigation, contexte.navigation)
+
+
+def verifie_historique_session():
+    """`pushState`, `replaceState`, `popstate`, et l'adresse qui suit."""
+    doc = document("<body><script>1</script></body>",
+                   url="http://exemple.test/depart")
+    doc.remet_en_page(1000, 800)
+    contexte = doc.contexte_js
+    contexte.execute("globalThis.__pops = [];"
+                     "addEventListener('popstate', e =>"
+                     " __pops.push(JSON.stringify(e.state)))")
+
+    egal("historique: longueur initiale",
+         contexte.execute("history.length"), 1)
+
+    contexte.execute("history.pushState({vue:'a'}, '', '/a')")
+    egal("historique: l'adresse du document a change", doc.url,
+         "http://exemple.test/a")
+    egal("historique: location.pathname suit",
+         contexte.execute("location.pathname"), "/a")
+    egal("historique: history.state porte l'etat",
+         contexte.execute("JSON.stringify(history.state)"), '{"vue":"a"}')
+    egal("historique: la longueur augmente",
+         contexte.execute("history.length"), 2)
+    verifie("historique: aucune navigation reelle n'est demandee",
+            contexte.navigation is None, contexte.navigation)
+
+    contexte.execute("history.pushState({vue:'b'}, '', '/b?x=1')")
+    egal("historique: la requete suit aussi",
+         contexte.execute("location.search"), "?x=1")
+
+    # `replaceState` ecrase, il n'empile pas.
+    contexte.execute("history.replaceState({vue:'b2'}, '', '/b2')")
+    egal("historique: replaceState n'allonge pas la pile",
+         contexte.execute("history.length"), 3)
+    egal("historique: mais change l'adresse",
+         contexte.execute("location.pathname"), "/b2")
+
+    # Retour : `popstate` part avec l'etat memorise.
+    contexte.execute("history.back()")
+    egal("historique: back revient a l'entree precedente",
+         contexte.execute("location.pathname"), "/a")
+    egal("historique: popstate a recu l'etat",
+         contexte.execute("__pops.join('|')"), '{"vue":"a"}')
+
+    contexte.execute("history.forward()")
+    egal("historique: forward avance",
+         contexte.execute("location.pathname"), "/b2")
+
+    # Un `pushState` apres un retour tronque ce qui suivait : on ne peut plus
+    # avancer, exactement comme dans un navigateur.
+    contexte.execute("history.back(); history.pushState({vue:'c'}, '', '/c')")
+    egal("historique: pushState apres retour tronque la suite",
+         contexte.execute("history.length"), 3)
+    contexte.execute("history.forward()")
+    egal("historique: et il n'y a plus rien devant",
+         contexte.execute("location.pathname"), "/c")
+
+    # Sortir de la plage reste une vraie navigation, deleguee au navigateur.
+    contexte.navigation = None
+    for _ in range(5):
+        contexte.execute("history.back()")
+    verifie("historique: au-dela, c'est une navigation du navigateur",
+            contexte.navigation is not None, contexte.navigation)
+
+
+def verifie_reseau_asynchrone():
+    """Le fil de l'interface doit vivre pendant qu'une requete est en vol.
+
+    `fetch` rendait bien une promesse, mais partait sur le fil de l'interface :
+    zero battement de minuterie, zero evenement, zero repeinture pendant tout
+    le vol. La promesse ne faisait que masquer un gel.
+    """
+    doc, arrete = _sur_serveur("/page/reseau-lent.html", battements=0)
+    try:
+        import time as _time
+        for _ in range(120):
+            doc.rafraichis()
+            _time.sleep(0.02)
+        etat = doc.contexte_js.execute("JSON.stringify(globalThis.__lent)")
+        import json as _json
+        lu = _json.loads(etat)
+        verifie("reseau: l'interface a continue de battre pendant le vol",
+                lu["battements"] > 10, lu)
+        verifie("reseau: la reponse est bien arrivee",
+                lu["recu"] is not None, lu)
+        verifie("reseau: et elle a pris le temps annonce",
+                lu["ms"] >= 900, lu)
+    finally:
+        arrete()
+
+
+def verifie_fetch_reel():
+    """La surface de `Response`, contre un vrai serveur."""
+    import json as _json
+    import time as _time
+
+    doc, arrete = _sur_serveur("/page/event-loop.html")
+    try:
+        contexte = doc.contexte_js
+        base = doc.base
+
+        def joue(code, attente=8):
+            contexte.execute(code)
+            for _ in range(attente):
+                contexte.tic()
+                _time.sleep(0.03)
+
+        joue("globalThis.__r = {};"
+             "fetch('%s/json').then(r => {"
+             "  __r.ok = r.ok; __r.status = r.status; __r.url = r.url;"
+             "  __r.type = r.headers.get('content-type');"
+             "  return r.json();"
+             "}).then(j => { __r.json = j.nom; })" % base)
+        lu = _json.loads(contexte.execute("JSON.stringify(__r)"))
+        egal("fetch: ok", lu.get("ok"), True)
+        egal("fetch: status", lu.get("status"), 200)
+        egal("fetch: le type de contenu se lit",
+             (lu.get("type") or "").split(";")[0], "application/json")
+        egal("fetch: json() rend l'objet", lu.get("json"), "bouchaud")
+
+        joue("globalThis.__c = [];"
+             "fetch('%s/status/404').then(r => __c.push(r.status + ':' + r.ok));"
+             "fetch('%s/status/500').then(r => __c.push(String(r.status)));"
+             "fetch('%s/redirect?to=/json&n=3').then(r => __c.push('r' + r.status));"
+             % (base, base, base))
+        codes = contexte.execute("__c.slice().sort().join(',')")
+        verifie("fetch: un 404 arrive comme reponse, pas comme rejet",
+                "404:false" in codes, codes)
+        verifie("fetch: un 500 aussi", "500" in codes, codes)
+        verifie("fetch: une chaine de redirections aboutit", "r200" in codes, codes)
+
+        joue("globalThis.__p = '';"
+             "fetch('%s/echo', {method:'POST',"
+             " headers:{'Content-Type':'application/json'},"
+             " body: JSON.stringify({a:1})}).then(r => r.json())"
+             ".then(j => { __p = j.corps; })" % base)
+        egal("fetch: un POST envoie bien son corps",
+             contexte.execute("__p"), '{"a":1}')
+
+        # L'annulation doit etre reelle : un moignon d'`AbortController` aurait
+        # laisse la page croire qu'elle sait annuler.
+        joue("globalThis.__a = '';"
+             "var ac = new AbortController();"
+             "fetch('%s/delay/2', {signal: ac.signal})"
+             " .then(() => { __a = 'PAS-ANNULE'; })"
+             " .catch(e => { __a = e.name; });"
+             "ac.abort();" % base, attente=4)
+        egal("fetch: abort() rejette avec AbortError",
+             contexte.execute("__a"), "AbortError")
+    finally:
+        arrete()
+
+
+def verifie_serveur_fixtures():
+    """Le serveur local lui-meme : sans lui, rien de ce qui precede n'est testable."""
+    import urllib.request
+
+    import serveur_test
+
+    serveur, base = serveur_test.demarre(0)
+    try:
+        def code_de(chemin):
+            try:
+                return urllib.request.urlopen(base + chemin, timeout=5).status
+            except Exception as e:  # noqa: BLE001
+                return getattr(e, "code", 0)
+
+        egal("serveur: l'accueil repond", code_de("/"), 200)
+        egal("serveur: /json repond", code_de("/json"), 200)
+        egal("serveur: /status/404 rend 404", code_de("/status/404"), 404)
+        egal("serveur: /status/500 rend 500", code_de("/status/500"), 500)
+        egal("serveur: une chaine de redirections aboutit",
+             code_de("/redirect?to=/json&n=3"), 200)
+        egal("serveur: les modules sont servis", code_de("/module/main.js"), 200)
+        egal("serveur: y compris ceux d'un sous-dossier",
+             code_de("/module/lib/util.js"), 200)
+        egal("serveur: une page temoin du depot est servie",
+             code_de("/page/login-form.html"), 200)
+        egal("serveur: un bundle absent rend 404", code_de("/404.js"), 404)
+
+        # Deterministe : deux lectures rendent exactement les memes octets.
+        premier = urllib.request.urlopen(base + "/json", timeout=5).read()
+        second = urllib.request.urlopen(base + "/json", timeout=5).read()
+        egal("serveur: deux lectures rendent la meme chose", premier, second)
+    finally:
+        serveur_test.arrete(serveur)
+
+
+def verifie_parcours_complet():
+    """Le parcours entier : de l'ouverture a `popstate`, sans rien sauter.
+
+    C'est la verification qui compte le plus de tout le fichier, parce que
+    c'est la seule qui ressemble a ce qu'un utilisateur fait. Quinze etapes
+    liees : chacune depend de la precedente, et une seule qui casse rend la
+    suite sans objet.
+
+    Elle ne remplace pas les verifications unitaires — elle dit si elles
+    suffisent.
+    """
+    import json as _json
+    import time as _time
+
+    doc, arrete = _sur_serveur("/page/parcours-complet.html", battements=4)
+    try:
+        contexte = doc.contexte_js
+        verifie("parcours: la page a un contexte JavaScript", contexte is not None)
+        if contexte is None:
+            return
+
+        def bat(tours=6, pause=0.02):
+            for _ in range(tours):
+                doc.rafraichis()
+                _time.sleep(pause)
+
+        # 3. L'utilisateur clique dans le champ : le foyer suit vraiment.
+        courriel = doc.racine.trouve_par_id("email") \
+            if hasattr(doc.racine, "trouve_par_id") else None
+        contexte.execute("document.getElementById('email').focus()")
+        egal("parcours: le foyer est dans le champ",
+             contexte.execute("document.activeElement.id"), "email")
+
+        # 4. Il ecrit.
+        contexte.execute("var e = document.getElementById('email');"
+                         "e.value = 'alice@exemple.fr';"
+                         "e.dispatchEvent(new Event('input'))")
+
+        # 5. Tab vers le champ suivant — par le modele de foyer du document,
+        #    comme le ferait une vraie frappe.
+        atteint = doc.deplace_foyer(1)
+        egal("parcours: Tab atteint le mot de passe",
+             atteint.attributs.get("id") if atteint else None, "motdepasse")
+
+        # 6. Il ecrit son mot de passe.
+        contexte.execute("var m = document.getElementById('motdepasse');"
+                         "m.value = 'secret42';"
+                         "m.dispatchEvent(new Event('input'))")
+
+        # 7. Il coche la case.
+        contexte.execute("var c = document.getElementById('memoire');"
+                         "c.checked = true;"
+                         "c.dispatchEvent(new Event('change'))")
+
+        # 8. Il soumet.
+        contexte.execute("document.getElementById('connexion')"
+                         ".dispatchEvent(new Event('submit', {cancelable: true}))")
+        bat(60, 0.03)
+
+        parcours = _json.loads(
+            contexte.execute("JSON.stringify(globalThis.__parcours)"))
+        etapes = parcours["etapes"]
+        vues = {e.split("=")[0]: e.partition("=")[2] for e in etapes}
+
+        attendues = [
+            ("js-execute", "le script de la page s'execute"),
+            ("focus", "le foyer arrive dans le champ"),
+            ("saisie-email", "la saisie declenche input"),
+            ("saisie-mdp", "le mot de passe aussi"),
+            ("case", "la case declenche change"),
+            ("formdata", "FormData rassemble les champs"),
+            ("post-status", "le POST recoit une reponse"),
+            ("serveur-a-recu", "le serveur a bien recu le corps"),
+            ("api-json", "une seconde requete rend du JSON"),
+            ("dom-maj", "le DOM est mis a jour depuis la reponse"),
+            ("pushstate", "l'adresse change sans rechargement"),
+        ]
+        for cle, quoi in attendues:
+            verifie("parcours: %s" % quoi, cle in vues,
+                    " | ".join(etapes))
+
+        egal("parcours: le champ saisi arrive au serveur",
+             "alice%40exemple.fr" in vues.get("serveur-a-recu", "")
+             or "alice@exemple.fr" in vues.get("serveur-a-recu", ""), True)
+        verifie("parcours: la case cochee part avec le formulaire",
+                "memoire=oui" in vues.get("formdata", ""), vues.get("formdata"))
+        egal("parcours: le POST a reussi", vues.get("post-status"), "200")
+        egal("parcours: le DOM porte le bloc ajoute", vues.get("dom-maj"), "1")
+        egal("parcours: l'adresse est la nouvelle", vues.get("pushstate"), "/tableau")
+        egal("parcours: et le document est d'accord",
+             contexte.execute("location.pathname"), "/tableau")
+
+        # 14. Retour : `popstate` part avec l'etat.
+        contexte.execute("history.back()")
+        bat(4)
+        parcours = _json.loads(
+            contexte.execute("JSON.stringify(globalThis.__parcours)"))
+        verifie("parcours: back declenche popstate",
+                len(parcours["popstates"]) >= 1, parcours["popstates"])
+        verifie("parcours: et l'adresse revient",
+                contexte.execute("location.pathname").endswith("parcours-complet.html"),
+                contexte.execute("location.pathname"))
+
+        # 15. L'interface a battu pendant tout le reseau.
+        verifie("parcours: l'interface est restee vivante pendant le reseau",
+                parcours["battements"] > 10, parcours["battements"])
+    finally:
+        arrete()
+
+
 # --- Securite web -------------------------------------------------------------
 
 def verifie_politique_ressources():
@@ -4465,6 +4963,13 @@ def principal():
         verifie_diagnostics_compatibilite,
         verifie_ressources_echouees,
         verifie_moignons,
+        verifie_serveur_fixtures,
+        verifie_foyer,
+        verifie_formulaire_plateforme,
+        verifie_historique_session,
+        verifie_fetch_reel,
+        verifie_reseau_asynchrone,
+        verifie_parcours_complet,
         verifie_budget,
         verifie_page_complete,
         verifie_evenement_apres_chargement,

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Ordre de la boucle d'evenements</title>
+<!--
+  Ce que le Web garantit, et que nous devons reproduire.
+
+  QuickJS apporte les micro-taches : `Promise.then` et `queueMicrotask`
+  s'executent apres le code synchrone et avant toute tache. Ce qu'il n'apporte
+  pas, c'est l'orchestration du navigateur — quand une minuterie echoit, quand
+  une reponse reseau revient, quand une trame se dessine.
+
+  L'ordre attendu d'un navigateur, au chargement :
+
+      sync  →  microtask  →  promise  →  timer  →  raf
+
+  Deux points comptent plus que les autres :
+
+  * les micro-taches passent avant les taches, toujours, et se vident
+    entierement avant la tache suivante ;
+  * `requestAnimationFrame` n'est pas `setTimeout(…, 16)` : il s'execute avant
+    la peinture d'une trame, apres la mise en page. Une page qui ecrit un style
+    puis lit une geometrie dans un `rAF` compte dessus.
+
+  La page n'affirme rien : elle enregistre ce qui s'est reellement passe dans
+  `globalThis.__ordre`, et la verification compare.
+-->
+</head><body>
+<h1>Ordre observe</h1>
+<pre id="journal">…</pre>
+<script>
+globalThis.__ordre = [];
+function note(quoi) {
+  globalThis.__ordre.push(quoi);
+  var zone = document.getElementById("journal");
+  if (zone) zone.textContent = globalThis.__ordre.join("\n");
+}
+
+note("sync-debut");
+setTimeout(function () { note("timer-0"); }, 0);
+setTimeout(function () { note("timer-1"); }, 1);
+Promise.resolve().then(function () { note("promise"); });
+queueMicrotask(function () { note("microtask"); });
+requestAnimationFrame(function () { note("raf"); });
+note("sync-fin");
+
+// Une micro-tache qui en pose une autre : les deux doivent passer avant la
+// premiere minuterie, sinon la file de micro-taches n'est pas vidangee.
+Promise.resolve().then(function () {
+  note("promise-1");
+  Promise.resolve().then(function () { note("promise-2"); });
+});
+</script>
+</body></html>

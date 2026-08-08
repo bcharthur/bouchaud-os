@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Reseau lent</title>
+<!--
+  Pendant qu'une requete lente est en vol, le reste doit continuer.
+
+  `fetch` se presente comme asynchrone : il rend une promesse. Mais si la
+  requete elle-meme est synchrone sous le capot, le fil qui porte l'interface
+  reste bloque jusqu'a la reponse — les minuteries n'echoient pas, les
+  evenements ne partent pas, rien ne se repeint. La promesse ne fait alors que
+  masquer un blocage.
+
+  Cette page compte les battements de minuterie pendant le vol. Un navigateur
+  correct en compte beaucoup ; un navigateur bloquant en compte zero.
+-->
+</head><body>
+<h1>Reseau lent</h1>
+<pre id="journal">en cours…</pre>
+<script>
+globalThis.__lent = { battements: 0, recu: null, ms: 0 };
+const depart = Date.now();
+
+const tic = setInterval(function () {
+  globalThis.__lent.battements++;
+  const zone = document.getElementById("journal");
+  if (zone) zone.textContent = "battements : " + globalThis.__lent.battements;
+}, 10);
+
+fetch("/delay/1").then(function (r) { return r.json(); }).then(function (charge) {
+  globalThis.__lent.recu = charge;
+  globalThis.__lent.ms = Date.now() - depart;
+  clearInterval(tic);
+  document.getElementById("journal").textContent =
+    "recu apres " + globalThis.__lent.ms + " ms, " +
+    globalThis.__lent.battements + " battements pendant le vol";
+});
+</script>
+</body></html>

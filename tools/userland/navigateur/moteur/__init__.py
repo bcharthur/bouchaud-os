@@ -86,6 +86,8 @@ class Document:
         self.hauteur = 0.0
         self.zones_liens = []
         self.contexte_js = None
+        # L'element au foyer. Un seul par document, comme le veut la norme.
+        self._foyer = None
 
         if scripts:
             self._demarre_scripts()
@@ -118,6 +120,8 @@ class Document:
         except Exception as e:  # noqa: BLE001 — un script ne tue pas la page
             self.journal("error", "JavaScript : %s" % e)
             self.contexte_js = None
+        # L'element au foyer. Un seul par document, comme le veut la norme.
+        self._foyer = None
 
     def rafraichis(self):
         """Remet en page si le JavaScript a touche a l'arbre. Rend `True` alors.
@@ -169,6 +173,8 @@ class Document:
         if self.contexte_js is not None:
             self.contexte_js.ferme()
             self.contexte_js = None
+        # L'element au foyer. Un seul par document, comme le veut la norme.
+        self._foyer = None
 
     # --- Arbre et mise en page ------------------------------------------------
 
@@ -432,6 +438,86 @@ class Document:
         """Le bouton n'est plus enfonce."""
         return self._interaction(survoles=self._survole, actifs=None)
 
+    # --- Foyer ----------------------------------------------------------------
+    #
+    # Le foyer appartient au **document**, pas au JavaScript ni au chrome. Les
+    # deux le deplacent — un clic reel d'un cote, un `element.focus()` de
+    # l'autre — et les deux doivent lire le meme. Le mettre ailleurs qu'ici
+    # aurait donne deux verites, donc un `document.activeElement` qui contredit
+    # ce que l'utilisateur voit surligne.
+
+    def foyer_actuel(self):
+        """L'element au foyer, ou `None`."""
+        return self._foyer
+
+    def pose_foyer(self, element, notifie=True):
+        """Deplace le foyer. Rend `True` si quelque chose a change.
+
+        Emet `blur` sur l'ancien puis `focus` sur le nouveau, dans cet ordre —
+        c'est celui de la norme, et une page qui valide un champ au `blur`
+        avant d'afficher le suivant en depend.
+        """
+        if element is self._foyer:
+            return False
+        ancien, self._foyer = self._foyer, element
+        contexte = self.contexte_js
+        if notifie and contexte is not None:
+            if ancien is not None:
+                contexte.evenement(ancien, "blur", {})
+                contexte.evenement(ancien, "focusout", {})
+            if element is not None:
+                contexte.evenement(element, "focus", {})
+                contexte.evenement(element, "focusin", {})
+        self._interaction(survoles=self._survole, actifs=None)
+        return True
+
+    def elements_focalisables(self):
+        """Les elements que `Tab` peut atteindre, dans l'ordre du document.
+
+        L'ordre par `tabindex` positif n'est pas gere : il est rare, souvent
+        deconseille, et le simuler a moitie serait pire que de suivre l'ordre du
+        document — qui est ce que font les pages bien construites, et donc la
+        quasi-totalite des formulaires.
+        """
+        focalisables = []
+        for nœud in self.racine.parcours():
+            if not isinstance(nœud, html.Element):
+                continue
+            if "disabled" in nœud.attributs or "hidden" in nœud.attributs:
+                continue
+            tabindex = nœud.attributs.get("tabindex")
+            if tabindex is not None:
+                try:
+                    if int(tabindex) < 0:
+                        continue
+                except ValueError:
+                    pass
+                focalisables.append(nœud)
+                continue
+            if nœud.balise in ("input", "select", "textarea", "button"):
+                if (nœud.attributs.get("type") or "").lower() == "hidden":
+                    continue
+                focalisables.append(nœud)
+            elif nœud.balise in ("a", "area") and "href" in nœud.attributs:
+                focalisables.append(nœud)
+        return focalisables
+
+    def deplace_foyer(self, sens=1):
+        """`Tab` et `Maj+Tab`. Rend l'element atteint, ou `None`."""
+        liste = self.elements_focalisables()
+        if not liste:
+            return None
+        if self._foyer in liste:
+            depart = liste.index(self._foyer) + sens
+        else:
+            depart = 0 if sens > 0 else len(liste) - 1
+        # Le foyer fait le tour : c'est ce que fait un navigateur en fin de
+        # document, et une page de connexion a trois champs en depend pour
+        # revenir au premier.
+        cible = liste[depart % len(liste)]
+        self.pose_foyer(cible)
+        return cible
+
     def _interaction(self, survoles=None, actifs=None):
         self._survole = survoles
         if not getattr(self.regles, "sensible", False):
@@ -440,9 +526,10 @@ class Document:
             # `<style>` qui, lui, en parle.
             return False
         etat = (css.lignee(survoles) if survoles is not None else [],
-                css.lignee(actifs) if actifs is not None else [])
+                css.lignee(actifs) if actifs is not None else [],
+                css.lignee(self._foyer) if self._foyer is not None else [])
         avant = css.interaction()
-        css.pose_interaction(survoles=etat[0], actifs=etat[1])
+        css.pose_interaction(survoles=etat[0], actifs=etat[1], foyer=etat[2])
         if css.interaction() == avant:
             return False
         self.remet_en_page(self.largeur)

@@ -41,6 +41,10 @@ cp navigateur/test_moteur.py "$WORK/"
 # lui-meme, qui n'affiche pas d'erreur quand il lit mal — seulement
 # « indisponible », ce qui se lit comme une journee calme.
 cp navigateur/suivi.py "$WORK/"
+# Le serveur de fixtures voyage avec : la moitie du comportement du
+# navigateur — redirections, 404, POST, reponse lente — ne se teste
+# pas sans lui, et le faire dependre d'Internet le rendait intestable.
+cp navigateur/serveur_test.py navigateur/apercu.py "$WORK/"
 # Les pages temoins voyagent avec les verifications : sans elles, le scenario
 # de formulaire se croyait absent et se sautait en silence — une verification
 # qui ne s'execute pas est pire qu'une verification qui echoue.

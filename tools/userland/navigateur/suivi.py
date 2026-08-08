@@ -81,6 +81,9 @@ MESURES = [
     ("__section__", "JavaScript et interactivite", None),
     ("js.erreurs", "erreurs JavaScript", BAS),
     ("js.apis_manquantes", "APIs Web absentes demandees", BAS),
+    ("js.identifiants_inconnus", "identifiants applicatifs non definis", BAS),
+    ("js.methodes_absentes", "methodes absentes ou non appelables", BAS),
+    ("js.moignons", "moignons appeles (API presente mais vide)", BAS),
     ("js.appels_moteur", "appels du pont Python/JS", BAS),
     ("interactions.ecouteurs", "ecouteurs poses par les pages", HAUT),
 
@@ -109,6 +112,7 @@ SURVEILLEES = (
     "css.declarations_ignorees", "css.proprietes_bloquantes",
     "css.selecteurs_ignores", "css.valeurs_rejetees",
     "js.erreurs", "page.boites_effondrees", "polices.refusees",
+    "js.moignons",
 )
 
 
@@ -267,6 +271,10 @@ def assemble(moteur, hote, compat):
             "css.valeurs_rejetees": _somme(pages, "CSS", "valeurs_rejetees"),
             "css.arobases_ignorees": _somme(pages, "CSS", "arobases_ignorees"),
             "js.erreurs": _somme(pages, "JAVASCRIPT", "erreurs"),
+            "js.identifiants_inconnus": _somme(pages, "JAVASCRIPT",
+                                               "identifiants_inconnus"),
+            "js.methodes_absentes": _somme(pages, "JAVASCRIPT", "methodes_absentes"),
+            "js.moignons": _somme(pages, "JAVASCRIPT", "moignons_appeles"),
             "js.apis_manquantes": _somme(pages, "JAVASCRIPT", "apis_manquantes"),
             "js.appels_moteur": _somme(pages, "JAVASCRIPT", "appels_moteur"),
             "interactions.ecouteurs": _somme(pages, "INTERACTIONS", "ecouteurs_poses"),

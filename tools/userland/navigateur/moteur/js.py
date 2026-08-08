@@ -28,6 +28,7 @@ son script est hostile.
 import base64
 import collections
 import re
+import threading
 import time
 import urllib.parse
 
@@ -136,6 +137,14 @@ class Contexte:
         self.journal = journal or (lambda niveau, texte: None)
         self.sale = False
         self.navigation = None
+        # Vrai quand un `pushState`/`popstate` a change l'adresse sans
+        # recharger : le navigateur doit rafraichir sa barre d'adresse sans
+        # refaire de requete.
+        self.url_changee = False
+        # L'historique de session du document, construit paresseusement : une
+        # page qui n'appelle jamais `pushState` n'en paie pas le prix.
+        self._historique = None
+        self._index_historique = 0
         # Manques effectivement rencontres par cette page. Une API simplement
         # absente du moteur n'est pas comptee tant qu'un script ne l'appelle pas.
         self.diagnostics = collections.Counter()
@@ -149,6 +158,10 @@ class Contexte:
 
         self._minuteries = {}      # identifiant -> (echeance, delai, repete)
         self._reponses = []        # (identifiant, reponse) a livrer au battement
+        # Les reponses arrivent depuis les fils reseau : la file se partage.
+        self._verrou_reponses = threading.Lock()
+        self._annulees = set()
+        self._fils = None
         self._lecteurs = {}        # identifiant de nœud -> Lecteur
         self._toiles = {}          # element <canvas> -> operations dessinees
         self._modules = {}         # adresse de module -> source (ou None)
@@ -202,8 +215,12 @@ class Contexte:
 
     def tic(self):
         """A appeler regulierement : minuteries echues et reponses en attente."""
-        for identifiant, reponse in self._reponses[:]:
-            self._reponses.remove((identifiant, reponse))
+        # La file est vidangee d'un coup, sous verrou, puis livree hors verrou :
+        # un rappel de page peut emettre une nouvelle requete, et tenir le
+        # verrou pendant son execution serait un blocage certain.
+        with self._verrou_reponses:
+            arrivees, self._reponses = self._reponses, []
+        for identifiant, reponse in arrivees:
             self._appelle("__bo_reponse", [identifiant, reponse])
 
         maintenant = time.monotonic() * 1000.0
@@ -250,6 +267,11 @@ class Contexte:
         return self._appelle("__bo_evenement", [identifiant, type_, details or {}])
 
     def ferme(self):
+        if self._fils is not None:
+            # Sans attendre : une page qu'on quitte ne doit pas retenir le
+            # navigateur le temps qu'une requete lente veuille bien finir.
+            self._fils.shutdown(wait=False)
+            self._fils = None
         for lecteur in self._lecteurs.values():
             lecteur.ferme()
         self._lecteurs.clear()
@@ -911,8 +933,192 @@ class Contexte:
         # milieu d'une execution detruirait l'arbre sous les pieds du moteur.
         self.navigation = urllib.parse.urljoin(self.document.url, url)
 
+    # --- Historique de session -----------------------------------------------
+    #
+    # `pushState` etait un moignon : la page appelait, rien ne bougeait, et
+    # `location.pathname` rendait eternellement l'adresse de depart. Toute
+    # application a page unique — c'est-a-dire la forme dominante du Web
+    # applicatif — se retrouvait avec une barre d'adresse figee, un bouton
+    # « precedent » sans effet, et aucun `popstate`.
+    #
+    # Ce qui suit tient l'historique **du document** : une liste d'entrees
+    # `(adresse, etat, titre)` et un index courant. Il ne remplace pas
+    # l'historique du chrome, il le double — et les deux doivent rester
+    # d'accord, d'ou `self.navigation` qui reste le canal par lequel une vraie
+    # navigation est demandee.
+
+    def _entrees_historique(self):
+        if self._historique is None:
+            self._historique = [[self.document.url, None, ""]]
+            self._index_historique = 0
+        return self._historique
+
+    def _op_poseEtat(self, etat, titre, url, remplace):
+        """`history.pushState` et `history.replaceState`.
+
+        La difference tient en une ligne : `replaceState` ecrase l'entree
+        courante, `pushState` en ajoute une et **tronque tout ce qui suit** —
+        c'est ce qui fait qu'apres un retour puis une nouvelle navigation, on
+        ne peut plus avancer.
+
+        Aucune requete n'est emise, aucun document n'est recharge : c'est
+        exactement ce que la norme demande, et ce que les applications a page
+        unique attendent.
+        """
+        entrees = self._entrees_historique()
+        adresse = self.document.url
+        if url is not None and str(url) != "":
+            adresse = urllib.parse.urljoin(self.document.url, str(url))
+        entree = [adresse, etat, str(titre or "")]
+        if remplace:
+            entrees[self._index_historique] = entree
+        else:
+            del entrees[self._index_historique + 1:]
+            entrees.append(entree)
+            self._index_historique = len(entrees) - 1
+        # L'adresse du document suit : c'est elle que lisent `location`, la
+        # resolution des liens relatifs et la barre d'adresse.
+        self.document.url = adresse
+        self.url_changee = True
+        return adresse
+
     def _op_historique(self, pas):
-        self.navigation = ("historique", int(pas))
+        """`history.back()`, `forward()`, `go(n)`.
+
+        Deux cas a ne pas confondre. Si le deplacement reste dans les entrees
+        posees par `pushState`, il se resout ici : l'adresse change, `popstate`
+        part avec l'etat memorise, et le document n'est pas recharge. S'il sort
+        de cette plage — retour vers la page precedente, au sens du chrome —
+        c'est une vraie navigation, et elle est deleguee comme avant.
+        """
+        pas = int(pas)
+        entrees = self._entrees_historique()
+        cible = self._index_historique + pas
+        if pas == 0:
+            cible = self._index_historique
+        if 0 <= cible < len(entrees):
+            self._index_historique = cible
+            adresse, etat, _ = entrees[cible]
+            self.document.url = adresse
+            self.url_changee = True
+            self._appelle("__bo_popstate", [etat])
+            return True
+        # Hors de notre plage : c'est au navigateur de reculer d'une page.
+        self.navigation = ("historique", pas)
+        return False
+
+    def _op_longueurHistorique(self):
+        return len(self._entrees_historique())
+
+    def _op_etatHistorique(self):
+        entrees = self._entrees_historique()
+        return entrees[self._index_historique][1]
+
+    def _op_resout(self, adresse):
+        """Une adresse relative resolue contre celle du document."""
+        return urllib.parse.urljoin(self.document.url, str(adresse or ""))
+
+    # --- Soumission -----------------------------------------------------------
+
+    def _op_soumets(self, identifiant, avec_evenement):
+        """Envoie un formulaire, comme le ferait un clic sur son bouton.
+
+        Deux methodes, deux formes tres differentes, et les confondre casse
+        l'une ou l'autre :
+
+        * `GET` place les champs dans la chaine de requete et **remplace** celle
+          qui s'y trouvait — un formulaire de recherche soumis deux fois ne doit
+          pas accumuler `?q=a&q=b` ;
+        * `POST` les met dans le corps, en `application/x-www-form-urlencoded`.
+
+        `requestSubmit()` passe par l'evenement `submit`, donc la page peut
+        annuler avec `preventDefault`. `submit()` ne le declenche pas : c'est la
+        difference que la norme etablit, et du code s'en sert pour eviter sa
+        propre validation.
+        """
+        formulaire = self._element(identifiant)
+        if formulaire is None:
+            return False
+
+        if avec_evenement:
+            permis = self._appelle("__bo_soumission", [identifiant])
+            if permis is False:
+                return False
+
+        methode = (formulaire.attributs.get("method") or "get").strip().lower()
+        action = (formulaire.attributs.get("action") or "").strip()
+        cible = urllib.parse.urljoin(self.document.url, action) if action \
+            else self.document.url
+
+        champs = self._appelle("__bo_champsSoumis", [identifiant]) or []
+        paires = [(str(nom), str(valeur)) for nom, valeur in champs]
+        encode = urllib.parse.urlencode(paires)
+
+        if methode == "post":
+            self.navigation = ("soumission", cible, "POST", encode)
+        else:
+            morceaux = urllib.parse.urlsplit(cible)
+            # La chaine de requete est remplacee, pas completee : c'est ce que
+            # fait un navigateur, et l'inverse ferait grossir l'adresse a chaque
+            # envoi.
+            cible = urllib.parse.urlunsplit(
+                (morceaux.scheme, morceaux.netloc, morceaux.path, encode, ""))
+            self.navigation = cible
+        return True
+
+    # --- Foyer ----------------------------------------------------------------
+
+    def _op_foyer(self):
+        """`document.activeElement`. `None` quand rien n'est au foyer."""
+        actuel = self.document.foyer_actuel()
+        return None if actuel is None else self._identifiant(actuel)
+
+    def _op_poseFoyer(self, identifiant):
+        """`element.focus()`, et `element.blur()` avec `None`."""
+        element = None if identifiant is None else self._element(identifiant)
+        if identifiant is not None and element is None:
+            return False
+        if element is not None and "disabled" in element.attributs:
+            # Un champ desactive ne prend pas le foyer, et le lui donner
+            # laisserait la page croire qu'on peut y ecrire.
+            return False
+        return self.document.pose_foyer(element)
+
+    def _op_foyerSuivant(self, sens):
+        """`Tab` et `Maj+Tab`, pilotes depuis le JavaScript ou le chrome."""
+        atteint = self.document.deplace_foyer(1 if int(sens) >= 0 else -1)
+        return None if atteint is None else self._identifiant(atteint)
+
+    def _op_champsFormulaire(self, identifiant):
+        """Les controles d'un formulaire, dans l'ordre du document.
+
+        Sert a `form.elements`, que toute soumission asynchrone traverse.
+        """
+        formulaire = self._element(identifiant)
+        if formulaire is None:
+            return []
+        controles = []
+        for nœud in formulaire.parcours():
+            if not isinstance(nœud, html.Element):
+                continue
+            if nœud.balise in ("input", "select", "textarea", "button",
+                               "fieldset", "output"):
+                controles.append(self._identifiant(nœud))
+        return controles
+
+    def _op_formulaireDe(self, identifiant):
+        """Le `<form>` qui contient ce controle, ou `None`.
+
+        C'est ce qui fait marcher `input.form` et, surtout, la soumission par
+        `Entree` depuis un champ : le navigateur doit savoir quel formulaire
+        envoyer.
+        """
+        element = self._element(identifiant)
+        while element is not None:
+            if getattr(element, "balise", None) == "form":
+                return self._identifiant(element)
+            element = getattr(element, "parent", None)
+        return None
 
     def _op_tailleVue(self):
         largeur, hauteur = bo.taille()
@@ -1128,15 +1334,74 @@ class Contexte:
         self._minuteries.pop(int(identifiant), None)
 
     def _op_requete(self, identifiant, methode, url, corps, entetes, synchrone):
+        """`fetch` et `XMLHttpRequest`.
+
+        Le defaut que cette methode corrigeait : la requete rendait bien une
+        promesse, mais partait **sur le fil de l'interface**. Le JavaScript
+        reprenait la main a l'arrivee de la reponse, pas avant. Mesure sur une
+        reponse d'une seconde : zero battement de minuterie, zero evenement,
+        zero repeinture pendant tout le vol. La page etait gelee, et la promesse
+        ne faisait que masquer le gel.
+
+        Une requete asynchrone part maintenant vers un petit groupe de fils et
+        depose sa reponse dans la file que `tic()` vidait deja. Rien d'autre ne
+        change : l'ordre de livraison reste « au battement suivant », donc le
+        code de retour ne tourne toujours pas avant que `send()` ait rendu la
+        main.
+
+        `synchrone` reste synchrone : c'est ce que `XMLHttpRequest` promet dans
+        ce mode, et le rendre asynchrone casserait les pages qui s'en servent.
+        """
         absolue = urllib.parse.urljoin(self.document.url, url)
-        reponse = self._recupere(methode, absolue, corps, entetes)
+        identifiant = int(identifiant)
+
         if synchrone:
-            self._appelle("__bo_reponse", [int(identifiant), reponse])
-        else:
-            # Livree au battement suivant : une reponse rendue pendant l'appel
-            # ferait tourner le code de retour avant que `send()` ait rendu la
-            # main, ce qu'aucune page n'attend.
-            self._reponses.append((int(identifiant), reponse))
+            reponse = self._recupere(methode, absolue, corps, entetes)
+            self._appelle("__bo_reponse", [identifiant, reponse])
+            return
+
+        def travaille():
+            reponse = self._recupere(methode, absolue, corps, entetes)
+            with self._verrou_reponses:
+                if identifiant in self._annulees:
+                    # Annulee pendant le vol : la reponse est jetee, et le
+                    # rappel n'aura jamais lieu — c'est ce qu'attend un
+                    # `abort()`.
+                    self._annulees.discard(identifiant)
+                    return
+                self._reponses.append((identifiant, reponse))
+
+        self._pool().submit(travaille)
+
+    def _pool(self):
+        """Le groupe de fils reseau, cree au premier besoin.
+
+        Quatre fils : c'est l'ordre de grandeur du budget de connexions par
+        hote d'un navigateur, et au-dela le goulot n'est plus le nombre de fils
+        mais la reserve de connexions, qui porte deja son propre verrou.
+
+        Cree paresseusement : une page sans requete ne paie aucun fil.
+        """
+        if self._fils is None:
+            from concurrent.futures import ThreadPoolExecutor
+            self._fils = ThreadPoolExecutor(max_workers=4,
+                                            thread_name_prefix="bo-reseau")
+        return self._fils
+
+    def _op_annuleRequete(self, identifiant):
+        """`xhr.abort()` et `AbortController.abort()`.
+
+        La requete peut etre deja partie : on ne l'interrompt pas au milieu, on
+        s'engage a ne jamais livrer sa reponse. Du point de vue de la page,
+        c'est la meme chose — et c'est infiniment plus simple que d'aller
+        fermer une prise depuis un autre fil.
+        """
+        identifiant = int(identifiant)
+        with self._verrou_reponses:
+            self._annulees.add(identifiant)
+            self._reponses[:] = [(i, r) for i, r in self._reponses
+                                 if i != identifiant]
+        return True
 
     def _recupere(self, methode, url, corps, entetes):
         try:

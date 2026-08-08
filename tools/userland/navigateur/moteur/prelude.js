@@ -293,6 +293,51 @@
     }
 
     /// `element.classList`.
+    /// Le formulaire : ce qu'il contient, ou il envoie, et comment.
+    ///
+    /// `form.elements`, `action`, `method` et `submit()` n'existaient pas. Une
+    /// page pouvait afficher un formulaire, pas l'envoyer : tout le chemin
+    /// entre « l'utilisateur a rempli » et « le serveur a recu » manquait.
+    function installeFormulaire(classe) {
+        Object.defineProperty(classe.prototype, "elements", {
+            configurable: true,
+            get() {
+                const liste = noeuds(appel("champsFormulaire", this.__id));
+                // Les controles nommes sont aussi accessibles par leur nom,
+                // comme `f.elements.utilisateur` — la forme que prend la
+                // moitie du code de formulaire du Web.
+                for (const controle of liste) {
+                    const nom = controle.getAttribute("name");
+                    if (nom && !(nom in liste)) liste[nom] = controle;
+                }
+                return liste;
+            },
+        });
+        Object.defineProperty(classe.prototype, "length", {
+            configurable: true,
+            get() { return this.elements.length; },
+        });
+        classe.prototype.submit = function () {
+            appel("soumets", this.__id, false);
+        };
+        classe.prototype.requestSubmit = function () {
+            // La difference avec `submit()` : `requestSubmit()` declenche
+            // l'evenement `submit`, donc laisse la page annuler. C'est ce que
+            // fait un vrai bouton, et `submit()` est justement celui qui ne le
+            // fait pas.
+            appel("soumets", this.__id, true);
+        };
+        classe.prototype.reset = function () {
+            for (const controle of this.elements) {
+                const type = (controle.type || "").toLowerCase();
+                if (type === "checkbox" || type === "radio")
+                    controle.checked = controle.hasAttribute("checked");
+                else if (controle.tagName.toLowerCase() !== "button")
+                    controle.value = controle.getAttribute("value") || "";
+            }
+        };
+    }
+
     /// `element.dataset` : la vue objet des attributs `data-*`.
     ///
     /// Absent, il ne degradait pas — il arretait. `t.dataset.dropdownBound`
@@ -573,9 +618,100 @@
                 this.insertBefore(typeof element === "string"
                     ? document.createTextNode(element) : element, premier);
         }
-        focus() { appel("creux", "element.focus"); }
-        blur() { appel("creux", "element.blur"); }
+        /// Le foyer, pour de vrai.
+        ///
+        /// C'etait un moignon : la page appelait `focus()`, rien ne se passait,
+        /// `document.activeElement` restait `null`, et `:focus` ne peignait
+        /// jamais rien. Un formulaire ou l'on ne peut pas designer le champ
+        /// courant n'est pas remplissable — c'est la premiere marche de tout
+        /// le reste : clavier, `Tab`, accessibilite.
+        focus() { appel("poseFoyer", this.__id); }
+        blur() {
+            // `blur()` ne deplace le foyer que si c'est bien nous qui l'avons :
+            // un `blur` appele sur un element quelconque ne doit pas voler le
+            // foyer a un autre.
+            if (appel("foyer") === this.__id) appel("poseFoyer", null);
+        }
         scrollIntoView() { appel("creux", "element.scrollIntoView"); }
+
+        /// Le formulaire qui contient ce controle. `null` hors formulaire.
+        get form() { return noeud(appel("formulaireDe", this.__id)); }
+
+        get tabIndex() {
+            const brut = this.getAttribute("tabindex");
+            if (brut !== null && brut !== "") return parseInt(brut, 10) || 0;
+            return ["input", "select", "textarea", "button", "a", "area"]
+                .indexOf(this.tagName.toLowerCase()) >= 0 ? 0 : -1;
+        }
+        set tabIndex(valeur) { this.setAttribute("tabindex", String(valeur)); }
+
+        get required() { return this.hasAttribute("required"); }
+        set required(v) {
+            if (v) this.setAttribute("required", "");
+            else this.removeAttribute("required");
+        }
+        get readOnly() { return this.hasAttribute("readonly"); }
+        set readOnly(v) {
+            if (v) this.setAttribute("readonly", "");
+            else this.removeAttribute("readonly");
+        }
+        get placeholder() { return this.getAttribute("placeholder") || ""; }
+        set placeholder(v) { this.setAttribute("placeholder", String(v)); }
+        get name() { return this.getAttribute("name") || ""; }
+        set name(v) { this.setAttribute("name", String(v)); }
+        get type() {
+            const balise = this.tagName.toLowerCase();
+            if (balise === "input") return (this.getAttribute("type") || "text").toLowerCase();
+            if (balise === "button") return (this.getAttribute("type") || "submit").toLowerCase();
+            return balise;
+        }
+        set type(v) { this.setAttribute("type", String(v)); }
+
+        /// `required` non rempli : la seule regle de validation qui compte
+        /// aujourd'hui. Le reste de la validation HTML5 — motifs, bornes,
+        /// types — attendra que celle-ci serve reellement.
+        ///
+        /// Un `<form>` valide tous ses controles ; tout le reste se valide
+        /// lui-meme. Poser deux `checkValidity` distincts, l'un sur le
+        /// formulaire et l'autre sur les champs, faisait que le premier
+        /// installe ecrasait le second — et chaque champ repondait alors comme
+        /// un formulaire vide, c'est-a-dire toujours valide.
+        checkValidity() {
+            if (this.tagName.toLowerCase() === "form") {
+                return this.elements.every(
+                    (c) => typeof c.checkValidity !== "function" || c.checkValidity());
+            }
+            if (!this.required) return true;
+            if (this.type === "checkbox" || this.type === "radio")
+                return !!this.checked;
+            return String(this.value || "").length > 0;
+        }
+        reportValidity() { return this.checkValidity(); }
+        get validity() {
+            const rempli = this.checkValidity();
+            return { valid: rempli, valueMissing: !rempli, customError: false,
+                     typeMismatch: false, patternMismatch: false };
+        }
+        setCustomValidity() {}
+
+        /// Selection minimale dans un champ. Le curseur n'a pas de rendu, mais
+        /// `selectionStart` est lu par toute bibliotheque de masque de saisie,
+        /// et rendre `undefined` la faisait lever.
+        get selectionStart() { return this.__selDebut === undefined
+            ? String(this.value || "").length : this.__selDebut; }
+        set selectionStart(v) { this.__selDebut = Number(v) || 0; }
+        get selectionEnd() { return this.__selFin === undefined
+            ? String(this.value || "").length : this.__selFin; }
+        set selectionEnd(v) { this.__selFin = Number(v) || 0; }
+        setSelectionRange(debut, fin) {
+            this.__selDebut = Number(debut) || 0;
+            this.__selFin = Number(fin) || 0;
+        }
+        select() {
+            this.__selDebut = 0;
+            this.__selFin = String(this.value || "").length;
+            this.focus();
+        }
         click() { distribue(this, new Event("click", { bubbles: true, cancelable: true })); }
     }
 
@@ -1176,6 +1312,46 @@
     };
     globalThis.URL.revokeObjectURL = function () {};
 
+    // `action` et `method` doivent etre resolus, pas rendus bruts : une page
+    // qui lit `form.action` attend une adresse absolue, et un `method` en
+    // minuscules — c'est ce que la norme garantit et ce dont depend tout code
+    // qui reconstruit la requete lui-meme.
+    Object.defineProperty(Element.prototype, "action", {
+        configurable: true,
+        get() {
+            if (this.tagName.toLowerCase() !== "form") return this.getAttribute("action");
+            const brut = this.getAttribute("action");
+            return brut ? appel("resout", brut) : appel("url");
+        },
+        set(v) { this.setAttribute("action", String(v)); },
+    });
+    Object.defineProperty(Element.prototype, "method", {
+        configurable: true,
+        get() {
+            if (this.tagName.toLowerCase() !== "form") return this.getAttribute("method");
+            return (this.getAttribute("method") || "get").toLowerCase();
+        },
+        set(v) { this.setAttribute("method", String(v)); },
+    });
+    Object.defineProperty(Element.prototype, "htmlFor", {
+        configurable: true,
+        get() { return this.getAttribute("for") || ""; },
+        set(v) { this.setAttribute("for", String(v)); },
+    });
+    Object.defineProperty(Element.prototype, "control", {
+        configurable: true,
+        get() {
+            // `label.control` : le controle que cette etiquette designe, soit
+            // par `for`, soit parce qu'il est a l'interieur. C'est ce lien qui
+            // fait qu'un clic sur le libelle donne le foyer au champ.
+            if (this.tagName.toLowerCase() !== "label") return null;
+            const cible = this.getAttribute("for");
+            if (cible) return document.getElementById(cible);
+            return this.querySelector("input, select, textarea, button");
+        },
+    });
+    installeFormulaire(Element);
+
     globalThis.Node = Nœud;
     globalThis.Element = Element;
     globalThis.HTMLElement = Element;
@@ -1439,19 +1615,87 @@
         json() { return Promise.resolve(JSON.parse(this.__texte)); }
     }
 
+    /// `AbortSignal` / `AbortController` — annuler une requete en vol.
+    ///
+    /// Poser `window.AbortController = function () {}` aurait fait reussir la
+    /// detection de fonctionnalite et laisse la page croire qu'elle sait
+    /// annuler. Ici le signal porte reellement l'annulation jusqu'au fil
+    /// reseau : la requete n'est pas interrompue au milieu — on ne va pas
+    /// fermer une prise depuis un autre fil — mais sa reponse ne sera jamais
+    /// livree, et la promesse est rejetee avec un `AbortError`. Du point de vue
+    /// de la page, c'est exactement une annulation.
+    class AbortSignal {
+        constructor() {
+            this.aborted = false;
+            this.reason = undefined;
+            this.__ecouteurs = new Map();
+            this.onabort = null;
+        }
+        addEventListener(type, f, o) {
+            Nœud.prototype.addEventListener.call(this, type, f, o);
+        }
+        removeEventListener(type, f, o) {
+            Nœud.prototype.removeEventListener.call(this, type, f, o);
+        }
+        throwIfAborted() { if (this.aborted) throw this.reason; }
+        __declenche(raison) {
+            if (this.aborted) return;
+            this.aborted = true;
+            this.reason = raison;
+            const evenement = new Event("abort");
+            for (const f of ecouteursDe(this, "abort", false))
+                invoque(f, this, evenement);
+            if (typeof this.onabort === "function") this.onabort(evenement);
+        }
+    }
+
+    function erreurAnnulation(raison) {
+        if (raison !== undefined) return raison;
+        const e = new Error("The operation was aborted.");
+        e.name = "AbortError";
+        return e;
+    }
+
+    class AbortController {
+        constructor() { this.signal = new AbortSignal(); }
+        abort(raison) { this.signal.__declenche(erreurAnnulation(raison)); }
+    }
+
+    globalThis.AbortSignal = AbortSignal;
+    globalThis.AbortController = AbortController;
+
     globalThis.fetch = function (url, options) {
         options = options || {};
+        const signal = options.signal;
         return new Promise(function (resoud, rejette) {
+            if (signal && signal.aborted) {
+                // Deja annule avant de partir : aucune requete n'est emise.
+                rejette(erreurAnnulation(signal.reason));
+                return;
+            }
             const identifiant = prochaineRequete++;
+            let fini = false;
             requetes.set(identifiant, function (reponse) {
+                if (fini) return;
+                fini = true;
                 if (reponse.status > 0) resoud(new Reponse(reponse));
                 else rejette(new TypeError("echec du chargement : " + url));
             });
+            if (signal && typeof signal.addEventListener === "function") {
+                signal.addEventListener("abort", function () {
+                    if (fini) return;
+                    fini = true;
+                    requetes.delete(identifiant);
+                    appel("annuleRequete", identifiant);
+                    rejette(erreurAnnulation(signal.reason));
+                });
+            }
+            let corps = options.body;
+            if (corps === undefined || corps === null) corps = null;
+            else if (typeof corps !== "string") corps = String(corps);
             appel("requete", identifiant,
                   String(options.method || "GET").toUpperCase(), String(url),
-                  options.body === undefined || options.body === null
-                      ? null : String(options.body),
-                  options.headers || {}, false);
+                  corps, options.headers || {}, false);
         });
     };
 
@@ -1459,6 +1703,18 @@
 
     class Document extends Nœud {
         constructor() { super(appel("racine")); this.readyState = "loading"; }
+
+        /// `document.activeElement` — l'element qui recevra la prochaine
+        /// frappe. Il rendait `null` en toutes circonstances, ce qui rend
+        /// impossible tout pilotage au clavier et toute gestion de foyer.
+        ///
+        /// La norme veut `body` quand rien n'a le foyer, jamais `null` sur un
+        /// document charge : du code ecrit `document.activeElement.tagName`
+        /// sans garde, et `null` le tue.
+        get activeElement() {
+            return noeud(appel("foyer")) || this.body || null;
+        }
+        hasFocus() { return true; }
         get documentElement() { return noeud(appel("racine")); }
         get body() { return noeud(appel("corps")); }
         get head() { return noeud(appel("tete")); }
@@ -1643,7 +1899,15 @@
         get children() { return this.__support.children; }
         get firstChild() { return this.__support.firstChild; }
         get lastChild() { return this.__support.lastChild; }
-        get activeElement() { return null; }
+        get activeElement() {
+            // Dans une racine d'ombre, `activeElement` ne designe le foyer que
+            // s'il se trouve a l'interieur : c'est tout l'interet de
+            // l'encapsulation, et rendre le foyer du document ferait fuir une
+            // information que l'ombre est censee cacher.
+            const actuel = noeud(appel("foyer"));
+            if (!actuel) return null;
+            return this.__support && this.__support.contains(actuel) ? actuel : null;
+        }
         appendChild(enfant) { return this.__support.appendChild(enfant); }
         insertBefore(enfant, avant) { return this.__support.insertBefore(enfant, avant); }
         removeChild(enfant) { return this.__support.removeChild(enfant); }
@@ -1668,6 +1932,27 @@
         reload() { appel("navigue", appel("url")); },
         toString() { return appel("url"); },
     };
+    Object.defineProperty(location, "hash", {
+        get() { return appel("urlPartie", "hash"); },
+        set(valeur) {
+            // Changer le fragment ne recharge pas le document : cela ajoute une
+            // entree d'historique et emet `hashchange`. Le confondre avec une
+            // navigation rechargeait la page a chaque ancre cliquee.
+            let fragment = String(valeur);
+            if (fragment && fragment[0] !== "#") fragment = "#" + fragment;
+            const avant = appel("url");
+            appel("poseEtat", null, "", fragment || "#", false);
+            const apres = appel("url");
+            if (avant !== apres) {
+                const evenement = new Event("hashchange");
+                evenement.oldURL = avant;
+                evenement.newURL = apres;
+                globalThis.dispatchEvent(evenement);
+            }
+        },
+        enumerable: true,
+        configurable: true,
+    });
     for (const partie of ["protocol", "host", "hostname", "port", "pathname",
                           "search", "hash", "origin"]) {
         Object.defineProperty(location, partie, {
@@ -1756,15 +2041,45 @@
         colorDepth: 32, pixelDepth: 32,
     };
 
+    /// `window.history` — l'historique de session du document.
+    ///
+    /// `pushState` et `replaceState` etaient vides. Une application a page
+    /// unique appelait, rien ne bougeait, et `location.pathname` rendait
+    /// eternellement l'adresse de depart : barre d'adresse figee, bouton
+    /// « precedent » sans effet, aucun `popstate`. C'est-a-dire, en pratique,
+    /// une forme entiere du Web applicatif inutilisable.
+    ///
+    /// Le troisieme argument est facultatif et peut valoir `null` ou `""`, ce
+    /// qui veut dire « garde l'adresse actuelle » — a ne pas confondre avec
+    /// « va a la racine ».
     globalThis.history = {
-        length: 1,
-        pushState: creux("history.pushState"),
-        replaceState: creux("history.replaceState"),
-        state: null,
+        get length() { return appel("longueurHistorique"); },
+        get state() { return appel("etatHistorique"); },
         scrollRestoration: "auto",
+        pushState(etat, titre, url) {
+            appel("poseEtat", etat === undefined ? null : etat,
+                  titre === undefined ? "" : titre,
+                  url === undefined || url === null ? null : String(url), false);
+        },
+        replaceState(etat, titre, url) {
+            appel("poseEtat", etat === undefined ? null : etat,
+                  titre === undefined ? "" : titre,
+                  url === undefined || url === null ? null : String(url), true);
+        },
         back() { appel("historique", -1); },
         forward() { appel("historique", 1); },
         go(n) { appel("historique", Number(n) || 0); },
+    };
+
+    /// Appele par Python quand un deplacement a change l'entree courante.
+    /// L'evenement porte l'etat memorise, comme le veut la norme — c'est lui
+    /// qui permet a l'application de retrouver la vue qu'elle affichait.
+    globalThis.__bo_popstate = function (etat) {
+        const evenement = new Event("popstate");
+        evenement.state = etat === undefined ? null : etat;
+        globalThis.dispatchEvent(evenement);
+        if (typeof globalThis.onpopstate === "function")
+            globalThis.onpopstate(evenement);
     };
 
     globalThis.console = console;
@@ -2270,6 +2585,24 @@
                 : ["replace", "assign", "reload", "ancestorOrigins"];
         for (const nom of noms) surveille(objet, nom, prefixe + "." + nom);
     }
+
+    // Appele par Python avant d'envoyer un formulaire : la page a le droit
+    // d'annuler. Rend `false` si elle l'a fait.
+    globalThis.__bo_soumission = function (identifiant) {
+        const formulaire = noeud(identifiant);
+        if (!formulaire) return false;
+        const evenement = new Event("submit", { cancelable: true });
+        evenement.submitter = null;
+        return formulaire.dispatchEvent(evenement);
+    };
+
+    // Les paires `nom=valeur` qu'un formulaire enverrait. Memes regles
+    // d'inclusion que `FormData` — un seul endroit ou elles sont ecrites,
+    // sinon la soumission et `FormData` finiraient par diverger.
+    globalThis.__bo_champsSoumis = function (identifiant) {
+        const formulaire = noeud(identifiant);
+        return formulaire ? champsDuFormulaire(formulaire) : [];
+    };
 
     // Etat du document, mis a jour par Python quand l'analyse est finie.
     globalThis.__bo_pret = function () {

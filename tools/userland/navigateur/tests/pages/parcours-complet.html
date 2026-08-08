@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Parcours complet</title>
+<!--
+  Le parcours que doit reussir un navigateur, et pas seulement un moteur de
+  rendu. Quinze etapes, toutes liees : si une seule casse, la suivante n'a plus
+  de sens.
+
+    ouverture → JS execute → clic dans un champ → frappe → Tab → frappe →
+    case a cocher → soumission → FormData/POST → reponse du serveur →
+    appel d'une API JSON → DOM mis a jour → pushState → back/popstate →
+    et l'interface qui reste vivante pendant le reseau
+
+  La page ne prouve rien toute seule : elle enregistre son parcours dans
+  `globalThis.__parcours`, et la verification compare a ce qui devait arriver.
+-->
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; }
+  .carte { max-width: 420px; }
+  label { display: block; margin: 12px 0 4px; font-size: 13px; font-weight: 600; }
+  input[type=text], input[type=password] { display: block; width: 100%; height: 34px; }
+  input:focus { outline: 2px solid #2563eb; }
+  #etat { margin-top: 16px; font-family: ui-monospace, monospace; font-size: 12px; }
+</style>
+</head><body>
+<div class="carte">
+  <h1>Connexion</h1>
+  <form id="connexion" action="/form/post" method="post">
+    <label for="email">Adresse</label>
+    <input type="text" id="email" name="email" placeholder="vous@exemple.fr" required>
+    <label for="motdepasse">Mot de passe</label>
+    <input type="password" id="motdepasse" name="motdepasse" required>
+    <label><input type="checkbox" id="memoire" name="memoire" value="oui"> Rester connecte</label>
+    <button type="submit" id="valider">Se connecter</button>
+  </form>
+  <div id="profil"></div>
+  <pre id="etat">pret</pre>
+</div>
+<script>
+globalThis.__parcours = { etapes: [], battements: 0, popstates: [] };
+function etape(nom, detail) {
+  globalThis.__parcours.etapes.push(detail === undefined ? nom : nom + "=" + detail);
+  document.getElementById("etat").textContent =
+    globalThis.__parcours.etapes.join("\n");
+}
+etape("js-execute");
+
+// Une minuterie qui bat en continu : c'est elle qui prouve que l'interface
+// reste vivante pendant que le reseau travaille.
+setInterval(function () { globalThis.__parcours.battements++; }, 10);
+
+document.getElementById("email").addEventListener("focus", function () {
+  etape("focus", document.activeElement.id);
+});
+document.getElementById("email").addEventListener("input", function (e) {
+  etape("saisie-email", e.target.value);
+});
+document.getElementById("motdepasse").addEventListener("input", function (e) {
+  etape("saisie-mdp", e.target.value.length);
+});
+document.getElementById("memoire").addEventListener("change", function (e) {
+  etape("case", e.target.checked);
+});
+
+document.getElementById("connexion").addEventListener("submit", function (e) {
+  e.preventDefault();
+  const donnees = new FormData(e.target || document.getElementById("connexion"));
+  const morceaux = [];
+  donnees.forEach(function (v, k) { morceaux.push(k + "=" + v); });
+  etape("formdata", morceaux.join("&"));
+
+  fetch("/echo", { method: "POST", body: morceaux.join("&") })
+    .then(function (r) { etape("post-status", r.status); return r.json(); })
+    .then(function (recu) {
+      etape("serveur-a-recu", recu.corps);
+      return fetch("/json");
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (profil) {
+      etape("api-json", profil.nom);
+      // Le DOM est mis a jour depuis la reponse.
+      const bloc = document.createElement("div");
+      bloc.className = "profil";
+      bloc.textContent = "bonjour " + profil.nom;
+      document.getElementById("profil").append(bloc);
+      etape("dom-maj", document.querySelectorAll(".profil").length);
+      // Puis l'adresse change, sans rechargement.
+      history.pushState({ vue: "tableau" }, "", "/tableau");
+      etape("pushstate", location.pathname);
+    })
+    .catch(function (err) { etape("erreur", String(err)); });
+});
+
+globalThis.addEventListener("popstate", function (e) {
+  globalThis.__parcours.popstates.push((e.state && e.state.vue) || "aucun");
+  etape("popstate", location.pathname);
+});
+</script>
+</body></html>

@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Navigation sans rechargement</title>
+<!--
+  Une mini application a page unique.
+
+  Ce qu'elle eprouve : `pushState` et `replaceState` doivent changer l'adresse
+  *sans* recharger le document, `location.pathname` et `location.search` doivent
+  suivre, `back()` doit declencher `popstate` avec l'etat qu'on avait pose, et
+  l'historique du navigateur ne doit pas contredire celui du JavaScript.
+
+  Aucun reseau : tout se joue dans la barre d'adresse et dans le DOM.
+-->
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; }
+  nav a { margin-right: 12px; }
+  .actif { font-weight: 700; text-decoration: underline; }
+  #vue { margin-top: 20px; padding: 16px; border: 1px solid #cbd5e1; border-radius: 8px; }
+</style>
+</head><body>
+<nav>
+  <a href="/accueil" data-vue="accueil">Accueil</a>
+  <a href="/projets" data-vue="projets">Projets</a>
+  <a href="/contact?de=nav" data-vue="contact">Contact</a>
+</nav>
+<div id="vue">vue initiale</div>
+<pre id="journal"></pre>
+<script>
+globalThis.__spa = { poussees: 0, popstates: [], adresses: [] };
+
+function rend(nom) {
+  document.getElementById("vue").textContent = "vue : " + nom;
+  for (const lien of document.querySelectorAll("nav a")) {
+    if (lien.dataset.vue === nom) lien.classList.add("actif");
+    else lien.classList.remove("actif");
+  }
+  globalThis.__spa.adresses.push(location.pathname + location.search);
+  const journal = document.getElementById("journal");
+  if (journal) journal.textContent = globalThis.__spa.adresses.join("\n");
+}
+
+for (const lien of document.querySelectorAll("nav a")) {
+  lien.addEventListener("click", function (e) {
+    e.preventDefault();
+    const nom = lien.dataset.vue;
+    history.pushState({ vue: nom }, "", lien.getAttribute("href"));
+    globalThis.__spa.poussees++;
+    rend(nom);
+  });
+}
+
+globalThis.addEventListener("popstate", function (e) {
+  const nom = (e.state && e.state.vue) || "accueil";
+  globalThis.__spa.popstates.push(nom);
+  rend(nom);
+});
+
+globalThis.addEventListener("hashchange", function () {
+  globalThis.__spa.adresses.push("hash:" + location.hash);
+});
+
+history.replaceState({ vue: "accueil" }, "", "/accueil");
+rend("accueil");
+</script>
+</body></html>
