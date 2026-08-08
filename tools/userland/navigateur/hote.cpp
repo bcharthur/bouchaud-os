@@ -83,6 +83,9 @@ Q_IMPORT_PLUGIN(QLinuxFbIntegrationPlugin)
 Q_IMPORT_PLUGIN(QJpegPlugin)
 Q_IMPORT_PLUGIN(QGifPlugin)
 Q_IMPORT_PLUGIN(QICOPlugin)
+// Le SVG vient du module QtSvg, pas de qtbase : un site recent y met son logo,
+// ses icones et ses pictogrammes, et ils manquaient tous en silence.
+Q_IMPORT_PLUGIN(QSvgPlugin)
 
 namespace {
 

@@ -1954,11 +1954,28 @@ i, em, cite, address { font-style: italic; }
 a { color: #1a56db; text-decoration: underline; }
 hr { margin: 8px 0; border-top: 1px solid #d0d7de; }
 bo-ombre { display: block; }
+td, th { display: block; }
 table { margin: 8px 0; }
 th { font-weight: bold; }
 td, th { padding: 4px 8px; }
 small { font-size: 13px; }
+/* Champs de formulaire. La mise en forme etait deja la ; ce qui manquait, ce
+   sont les trois choses sans lesquelles elle ne se voyait pas : une boite
+   (`inline-block`, et non `inline`, qui ne peint ni fond ni bord), un style de
+   trait — `border-width` seul ne dessine rien — et une largeur propre, un
+   champ vide n'ayant aucun contenu pour lui en donner une. Une barre de
+   recherche se reduisait ainsi a son etiquette. */
 button, input, select, textarea { background-color: #f3f4f6; padding: 4px 8px;
-                                  border-width: 1px; border-color: #c9ced6; }
+                                  border-width: 1px; border-color: #c9ced6;
+                                  border-style: solid; display: inline-block;
+                                  color: #202124; }
+input, select { width: 190px; }
+input[type=text], input[type=search], input[type=email], input[type=url],
+input[type=password], input[type=tel], input[type=number] { background-color: #ffffff; }
+textarea { width: 280px; height: 64px; }
+button, input[type=submit], input[type=button], input[type=reset] {
+  width: auto; text-align: center; }
+input[type=checkbox], input[type=radio] { width: 13px; height: 13px; padding: 0; }
+input[type=hidden] { display: none; }
 mark { background-color: #fff3a3; }
 """

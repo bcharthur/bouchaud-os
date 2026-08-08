@@ -183,8 +183,17 @@ def _base(article, largeur_disponible, taille_police, horizontal, pose_enfant):
         return max(0.0, mesure)
 
     # Ni base ni taille declaree : on demande au contenu ce qu'il occupe.
+    #
+    # Sur l'axe horizontal, ce que rend la pose est la largeur de la **boite**,
+    # et une boite de bloc prend tout ce qu'on lui donne : trois articles
+    # reclamaient donc chacun la largeur entiere, et se la partageaient en
+    # trois parts egales. C'est l'etendue du contenu qu'il faut, pas celle du
+    # contenant.
     largeur, hauteur = pose_enfant(article.boite, largeur_disponible, 0.0, 0.0, None)
-    return largeur if horizontal else hauteur
+    if not horizontal:
+        return hauteur
+    from .mise_en_page import etendue_contenu
+    return max(0.0, min(largeur, etendue_contenu(article.boite)))
 
 
 # --- Lignes et repartition ----------------------------------------------------

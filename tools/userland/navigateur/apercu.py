@@ -469,8 +469,20 @@ def installe_hote(largeur, hauteur):
 
     def image(octets):
         import io
+        donnees = bytes(octets)
+        tete = donnees[:512].lstrip()
+        if tete.startswith(b"<svg") or (tete.startswith(b"<?xml") and b"<svg" in tete):
+            # Pillow ne lit pas le SVG. Cote OS c'est le greffon `qsvg` de Qt
+            # qui s'en charge ; ici on passe par cairosvg, present sur la
+            # machine de developpement. Sans cela, les logos et les icones de
+            # tout site recent manquent — c'est ce qui se voyait le plus.
+            try:
+                import cairosvg
+                donnees = cairosvg.svg2png(bytestring=donnees)
+            except Exception:  # noqa: BLE001
+                return None
         try:
-            ouverte = Image.open(io.BytesIO(bytes(octets)))
+            ouverte = Image.open(io.BytesIO(donnees))
             ouverte.load()
         except Exception:  # noqa: BLE001
             return None
@@ -499,7 +511,8 @@ def installe_hote(largeur, hauteur):
     bo.image = image
     bo.image_brute = image_brute
     bo.rasterise = rasterise
-    bo.formats_images = lambda: ["png", "jpeg", "jpg", "gif", "bmp", "webp", "ico"]
+    bo.formats_images = lambda: ["png", "jpeg", "jpg", "gif", "bmp", "webp",
+                                 "ico", "svg"]
     sys.modules["bo"] = bo
 
     # `bojs` n'est fourni que si QuickJS a ete construit. Sans lui, la page est

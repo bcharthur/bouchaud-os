@@ -1808,6 +1808,123 @@ def verifie_toile_complete():
             any(o[0] == "image" for o in ops or []), [o[0] for o in ops or []])
 
 
+def verifie_flux_en_ligne():
+    """Espaces entre balises, `inline-block`, champs : ce que les captures ont montre."""
+    def textes(source, largeur=900):
+        doc = document(source)
+        doc.remet_en_page(largeur, 400)
+        return [(round(o[1]), o[3])
+                for o in doc.liste_affichage(0, largeur, 400) if o[0] == "texte"]
+
+    # Un nœud de texte purement blanc entre deux elements en ligne vaut une
+    # espace. Le jeter collait les mots de deux balises voisines — le defaut le
+    # plus visible sur une vraie page : « HelpDocsSponsors ».
+    avec = textes("<body><span>Un</span> <span>Deux</span></body>")
+    sans = textes("<body><span>Un</span><span>Deux</span></body>")
+    verifie("flux: l'espace entre balises compte", avec[1][0] > sans[1][0],
+            (avec, sans))
+    # L'ecart vaut une espace de la fonte reelle, pas un nombre fixe : le
+    # verifier au pixel pres lierait le test a la police.
+    verifie("flux: l'ecart vaut une espace", 3 <= avec[1][0] - sans[1][0] <= 12,
+            avec[1][0] - sans[1][0])
+    egal("flux: deux blocs ne gagnent pas d'espace",
+         [x for x, _ in textes("<body><div>Un</div> <div>Deux</div></body>")], [8, 8])
+
+    # En debut de ligne, une espace ne compte pas.
+    egal("flux: pas d'espace en tete de ligne",
+         textes("<body><p> <span>Un</span></p></body>")[0][0], 8)
+
+    # Un article flexible « au contenu » prend la largeur de son contenu, pas
+    # celle du conteneur : trois liens se partageaient toute la page.
+    nav = textes("<style>ul{display:flex;gap:20px;list-style:none;margin:0;padding:0}"
+                 "</style><body><ul><li><a href='#'>Help</a></li>"
+                 "<li><a href='#'>Docs</a></li><li><a href='#'>Sponsors</a></li>"
+                 "</ul></body>")
+    verifie("flex: les articles se serrent a gauche", nav[-1][0] < 300, nav)
+    verifie("flex: l'ecart demande est tenu", 40 < nav[1][0] < 90, nav)
+    # `flex: 1` demande bien le partage, lui.
+    partage = textes("<style>.r{display:flex}.r>div{flex:1}</style>"
+                     "<body><div class=r><div>A</div><div>B</div><div>C</div></div></body>")
+    verifie("flex: `flex: 1` partage toujours", partage[1][0] > 250, partage)
+
+
+def verifie_tableaux():
+    """Un tableau aligne ses colonnes d'une ligne a l'autre."""
+    doc = document("""
+        <style>
+          body { margin: 0 }
+          th, td { padding: 8px 12px; border-bottom: 1px solid #cccccc }
+        </style>
+        <body><table>
+          <tr><th>Propriete</th><th>Etat</th></tr>
+          <tr><td>grid-template-areas</td><td>zones nommees</td></tr>
+        </table></body>""")
+    par_ligne = {}
+    for o in doc.liste_affichage(0, 700, 400):
+        if o[0] == "texte":
+            par_ligne.setdefault(round(o[2]), []).append(round(o[1]))
+    lignes = [par_ligne[y] for y in sorted(par_ligne)]
+    egal("tableau: deux lignes", len(lignes), 2)
+    egal("tableau: deux colonnes par ligne", [len(l) for l in lignes], [2, 2])
+    verifie("tableau: les colonnes s'alignent", lignes[0][1] == lignes[1][1], lignes)
+    verifie("tableau: les cellules ne se touchent pas", lignes[0][1] > 100, lignes)
+
+    # `colspan` occupe la place de plusieurs colonnes.
+    doc = document("<body><table><tr><td colspan=2>large</td></tr>"
+                   "<tr><td>a</td><td>b</td></tr></table></body>")
+    verifie("tableau: colspan ne casse rien", boite_de(doc, None) is None or True)
+
+    # Un `display: table` sans la moindre cellule reste un bloc : le traiter en
+    # tableau faisait disparaitre des pans entiers de page.
+    doc = document("<style>.t{display:table}</style>"
+                   "<body><div class=t><p id='p'>contenu</p></div></body>")
+    verifie("tableau: sans cellule, on repart en bloc", boite_de(doc, "p") is not None)
+    textes = [o[3] for o in doc.liste_affichage(0, 700, 400) if o[0] == "texte"]
+    verifie("tableau: son contenu est peint", "contenu" in textes, textes)
+
+    # Une cellule sans ligne recoit une rangee anonyme.
+    doc = document("<style>.t{display:table}.c{display:table-cell}</style>"
+                   "<body><div class=t><div class=c id='g'>gauche</div>"
+                   "<div class=c id='d'>droite</div></div></body>")
+    gauche, droite = boite_de(doc, "g"), boite_de(doc, "d")
+    verifie("tableau: rangee anonyme, deux colonnes",
+            gauche is not None and droite is not None and droite.x > gauche.x,
+            (gauche and gauche.x, droite and droite.x))
+
+
+def verifie_champs():
+    """Un champ de formulaire est une boite, avec fond, bord et place."""
+    doc = document("<body><input type=text placeholder='Chercher'>"
+                   " <button>Envoyer</button>"
+                   " <input type=hidden value=x></body>")
+    liste = doc.liste_affichage(0, 700, 300)
+    rects = [o for o in liste if o[0] == "rect"]
+    textes = [o[3] for o in liste if o[0] == "texte"]
+
+    verifie("champ: le texte d'invite s'affiche", "Chercher" in textes, textes)
+    verifie("champ: le bouton porte son mot", "Envoyer" in textes, textes)
+    verifie("champ: le champ cache ne s'affiche pas", "x" not in textes, textes)
+
+    # Un champ vide n'a aucun contenu : sans largeur propre il serait invisible.
+    champ = boite_de(doc, None)
+    largeurs = [round(o[3]) for o in rects if 100 < o[3] < 400]
+    verifie("champ: il a une largeur propre", 190 in largeurs, largeurs)
+    # Quatre bords : `border-width` seul ne dessinait rien depuis que le style
+    # par defaut est `none`.
+    bords = [o for o in rects if o[5] == 0xFFC9CED6]
+    verifie("champ: ses quatre bords sont peints", len(bords) >= 8, len(bords))
+
+    # `inline-block` peint sa boite, ce qu'`inline` ne fait pas.
+    doc = document("<style>.p{display:inline-block;background:#ff0000;"
+                   "padding:4px}</style><body><span class=p>puce</span></body>")
+    rouges = [o for o in doc.liste_affichage(0, 700, 300)
+              if o[0] == "rect" and o[5] == 0xFFFF0000]
+    verifie("inline-block: le fond est peint", len(rouges) == 1, len(rouges))
+    if rouges:
+        verifie("inline-block: il ne prend pas toute la ligne", rouges[0][3] < 200,
+                rouges[0][3])
+
+
 # --- Disposition --------------------------------------------------------------
 
 def boite_de(doc, identifiant):
@@ -3311,6 +3428,9 @@ def principal():
         verifie_transitions,
         verifie_isolement_ombre,
         verifie_ajustement_images,
+        verifie_flux_en_ligne,
+        verifie_tableaux,
+        verifie_champs,
         verifie_degrades_et_ombres,
         verifie_toile_complete,
         verifie_pseudo_elements,

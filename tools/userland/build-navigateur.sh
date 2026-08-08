@@ -88,6 +88,7 @@ QMAKE_LIBS += $PY/usr/lib/libpython3.12.a $PY/usr/lib/libpythonaux.a \\
               $AV/lib/libavformat.a $AV/lib/libavcodec.a \\
               $AV/lib/libswscale.a $AV/lib/libswresample.a $AV/lib/libavutil.a \\
               \$\$GREFFONS/libqjpeg.a \$\$GREFFONS/libqgif.a \$\$GREFFONS/libqico.a \\
+              \$\$GREFFONS/libqsvg.a $QT/lib/libQt5Svg.a \\
               -ljpeg \\
               -lssl -lcrypto -lutil -lm -lbrotlidec -lbrotlicommon -lbz2
 EOF
