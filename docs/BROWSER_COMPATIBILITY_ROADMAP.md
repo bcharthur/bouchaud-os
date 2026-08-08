@@ -4,7 +4,7 @@ Ce document remplace l'intuition par la mesure. Chaque affirmation qu'il
 contient est reproductible avec les outils du dépôt :
 
 ```bash
-./tools/userland/test-moteur.sh                       # 658 vérifications
+./tools/userland/test-moteur.sh                       # 731 vérifications
 ./tools/userland/verifie-hote.sh                      # 31 contrôles de pixels, Qt réel
 cd tools/userland/navigateur
 python3 compatibilite.py --corpus --fixtures          # rapport de compatibilité
@@ -41,6 +41,8 @@ des modules noyau sans rapport (`src/net`, `src/gui`).
 | JavaScript | QuickJS ; DOM, événements, minuteries, promesses, `fetch`, `XMLHttpRequest`, modules ES, `MutationObserver`, `IntersectionObserver`, `ResizeObserver`, `customElements` |
 | Réseau | DNS maison, TCP, TLS (fail-closed depuis cette session), HTTP/1.1, gzip/deflate, réserve de connexions, préchargement, cache disque |
 | Persistance | témoins (avec `HttpOnly`, chemin RFC 6265, `host-only`), `localStorage` cloisonné par origine, cache HTTP |
+| Formulaires | `value` de `select`/`textarea`/`option`, `selectedIndex`, `FormData`, `URLSearchParams` |
+| CSS — priorité | `!important`, seconde passe de cascade |
 | Média | ffmpeg, H.264, MSE partiel, lecteur YouTube de substitution |
 
 ### Ce qui n'existe pas
@@ -48,7 +50,8 @@ des modules noyau sans rapport (`src/net`, `src/gui`).
 `iframe` comme contexte de navigation (zéro occurrence dans `moteur/`),
 WebSocket, Workers, Service Workers, IndexedDB, CSP, SRI, Referrer-Policy,
 permissions, arbre d'accessibilité, impression, HTTP/2 côté navigateur,
-`ReadableStream`, `FormData` complet, annulation réelle de `fetch`/XHR.
+`ReadableStream`, `Blob`/`File`, annulation réelle de `fetch`/XHR, pointage du
+contenu positionné hors de son parent.
 
 ### Ce qui ne peut pas être vérifié ici
 
@@ -286,16 +289,16 @@ Complété par **onze témoins locaux déterministes** — `article`, `navbar`,
 |---|---|
 | RESEAU | code 200, 7 ressources non chargées (images), 10,1 s de chargement |
 | HTML | 6 074 nœuds, 2 307 éléments, 45 balises distinctes, 6 scripts, 10 feuilles |
-| CSS | 4 096 règles, 322 déclarations ignorées, 34 propriétés distinctes, 48 valeurs rejetées, 34 sélecteurs non compilés |
+| CSS | 4 096 règles, 306 déclarations ignorées, 33 propriétés distinctes, 72 valeurs rejetées, 34 sélecteurs non compilés |
 | MISE_EN_PAGE | 1 074 boîtes, 11 574 px de haut, 189 opérations peintes, 1 boîte effondrée |
 | TEMPS | mise en page 5 116 ms, CSS 492 ms, HTML 21 ms, JS 16 ms, peinture 4 ms |
 | POLICES | 8 posées, 0 refusée |
 | IMAGES | 183 `<img>` pour 17 adresses distinctes ; 3 chargées, 7 échouées (hôte bloqué) |
-| JAVASCRIPT | 1 erreur, 16 appels moteur |
+| JAVASCRIPT | 0 erreur, 77 863 appels moteur |
 | FORMULAIRES | 3 formulaires, 3 champs, 3 listes, 27 boutons |
 | NAVIGATION | 288 liens |
-| INTERACTIONS | 0 écouteur posé — la page ne devient jamais interactive |
-| STOCKAGE | aucun accès |
+| INTERACTIONS | 36 écouteurs posés (`click:16, keydown:8, change:3, keyup:2`) |
+| STOCKAGE | `localStorage` et témoins consultés une fois chacun |
 
 ### Une mesure qu'il a fallu corriger
 
@@ -313,8 +316,9 @@ qu'un décompte d'opérations peintes — et le P0 retiré. C'est le genre d'err
 qu'une métrique mal posée produit sans bruit, et la raison pour laquelle chaque
 chiffre de ce document doit rester reproductible.
 
-Reste un chiffre qui, lui, tient : **zéro écouteur d'événement posé** alors que la
-page charge six scripts. Traité en §17, P0-2.
+Reste un chiffre qui, lui, tenait : **zéro écouteur d'événement posé** alors que
+la page charge six scripts. Il a mené à six défauts réels — §17, P0-2 — et vaut
+maintenant 36.
 
 ---
 
@@ -582,43 +586,74 @@ Chaque entrée porte : **Preuve** — ce qui la justifie dans les mesures de ce
 document ; **Sites/tests touchés** ; **Gain de compatibilité attendu** ;
 **Complexité** ; **Dépendances**.
 
-### P0 — immédiat
+### P0 — traité pendant cette session
 
-**P0-1. `cursor` et `pointer-events`.**
-*Preuve* : 248 déclarations FONCTIONNELLES sur 4 sites du corpus — `cursor`
-168 fois, `pointer-events` 64 fois.
-*Sites/tests* : tout le corpus réel, témoins `dropdown` et `modal`.
-*Gain* : `pointer-events: none` change le résultat d'un clic — c'est
-fonctionnel, pas décoratif ; un fond de modale qui ne laisse pas passer les
-clics rend une page inutilisable. `cursor` demande un appui de l'hôte Qt.
-*Complexité* : faible côté moteur, petite côté hôte.
-*Dépendances* : `hote.cpp` pour la forme du curseur.
+Les quatre P0 identifiés par la première mesure sont faits. Ce qu'ils ont
+révélé en chemin est plus instructif que ce qu'ils annonçaient.
 
-**P0-2. `TypeError: cannot read property 'includes' of undefined`, 4 pages sur 5.**
-*Preuve* : axe JAVASCRIPT, une erreur unique qui tue tout le script de la page,
-donc les 0 écouteurs posés.
-*Sites/tests* : tout le corpus réel.
-*Gain* : c'est ce qui sépare une page morte d'une page interactive. Le manque est
-en amont de toute API : une propriété DOM qui rend `undefined` là où un
-navigateur rend une valeur.
-*Complexité* : faible à moyenne, entièrement du diagnostic.
-*Dépendances* : aucune.
+**P0-1. `pointer-events`. — Fait.**
+*Preuve* : 248 déclarations FONCTIONNELLES, `pointer-events` 64 fois sur
+4 sites. `pointer-events: none` rend la boîte transparente au pointeur ; sans
+lui, un calque de modale avalait chaque clic et la page devenait inerte sans
+qu'aucune erreur ne le signale.
+*Trouvé en chemin* : le test de pointage prenait le **premier** frère couvrant
+le point, donc celui que la peinture pose **dessous**. Corrigé en ordre de
+peinture. `cursor` (168 déclarations) reste ouvert : il demande un appui de
+`hote.cpp` et ne change rien au comportement, seulement à l'apparence du
+pointeur. Redescendu P1.
 
-**P0-3. Scénario de pilotage du témoin `login-form`.**
-*Preuve* : §6 — les écouteurs sont posés, mais saisie, `Tab`, soumission et
-`FormData` ne sont prouvés par aucun test.
-*Sites/tests* : `tests/pages/login-form.html`, nouveau scénario dans
-`test_moteur.py`.
-*Gain* : ne change rien en soi, rend vérifiable tout ce qui suivra sur les
-formulaires.
-*Complexité* : faible.
-*Dépendances* : aucune.
+**P0-2. `TypeError: cannot read property 'includes' of undefined`. — Fait.**
+*Preuve* : une erreur unique qui tuait tout le script, sur 4 pages sur 5.
+*Cause* : `navigator.appVersion` n'existait pas. Puis, une fois passée,
+`element.dataset` non plus. Un champ absent de `navigator` ou du DOM ne dégrade
+pas — il arrête. Les deux sont implémentés.
+*Trouvé en chemin* : la remontée d'ancêtres traversait le pont Python↔JavaScript
+une fois par niveau d'arbre. Comme chaque `setAttribute` interroge chaque
+`MutationObserver` à portée d'arbre, et qu'un cadre applicatif en pose un sur la
+racine, une page faisait **908 430 appels du moteur** pour se construire. Un
+seul appel suffit : **77 863** après.
+*Mesure, avant → après* : erreurs 1 → 0 ; appels moteur 12 → 165 ; écouteurs
+posés 0 → 16 ; accès au stockage 0 → 1.
 
-**P0-4. Retirer le `!important` avant l'analyse des longueurs.**
-*Preuve* : `<longueur>: 120px!important` rejetée 4 fois — la déclaration est
-simplement perdue.
-*Complexité* : très faible.
-*Dépendances* : aucune. (La cascade `!important` complète reste P2.)
+**P0-3. Scénario de pilotage du témoin `login-form`. — Fait.**
+*Trouvé en chemin* : le scénario cherchait sa page témoin dans un dossier que le
+lanceur ne copiait pas, ne la trouvait pas, et **sortait en silence**. Il passait
+donc toujours. Une fois le décor livré et l'absence rendue fatale, il a échoué —
+et révélé deux manques réels : `select.value` rendait la chaîne vide (un
+`<select>` porte sa valeur dans l'option choisie, un `<textarea>` dans son texte,
+une `<option>` nue dans son libellé), et `FormData` n'existait pas. Les deux sont
+implémentés, `URLSearchParams` avec.
+
+**P0-4. `!important`. — Fait, et plus grave qu'annoncé.**
+*Preuve* : `<longueur>: 120px!important` rejetée.
+*Ce que c'était vraiment* : le drapeau restait collé à la valeur, donc **toute**
+déclaration marquée était perdue — pas seulement sa priorité, et pas seulement
+les longueurs. La priorité est maintenant honorée par une seconde passe de
+cascade.
+
+### P0 — reste ouvert
+
+**P0-5. `cursor`.**
+*Preuve* : 168 déclarations sur 4 sites, la propriété FONCTIONNELLE la plus
+fréquente du corpus.
+*Complexité* : faible côté moteur, petite côté hôte (`QCursor`).
+*Dépendances* : `hote.cpp`.
+
+**P0-6. `fit-content()`, `min()`, `max()`, `clamp()` dans les longueurs.**
+*Preuve* : `fit-content(40%)` rejetée 288 fois sur 4 sites — la valeur la plus
+rejetée du corpus, et une longueur non comprise vaut zéro, donc un bloc effondré.
+*Complexité* : faible pour `min`/`max`/`clamp` (arithmétique déjà présente dans
+`calc`), moyenne pour `fit-content` (dépend de la largeur intrinsèque).
+
+**P0-7. Le test de pointage n'atteint pas le contenu positionné hors de son
+parent.**
+*Preuve* : trouvé en écrivant le test de `pointer-events` — un enfant `absolute`
+sorti de la boîte de son parent n'est jamais atteint, parce que la descente
+s'arrête au premier ancêtre qui ne contient pas le point.
+*Gain* : tout menu, toute infobulle, toute modale sortie de son conteneur est
+aujourd'hui incliquable.
+*Complexité* : moyenne — il faut un ordre de pointage qui suive les contextes
+d'empilement plutôt que l'arbre des boîtes.
 
 ### P1 — le trimestre
 
