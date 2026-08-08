@@ -67,17 +67,47 @@ class Fontes:
 
     def __init__(self):
         self._cache = {}
+        # Polices de la page, par famille puis par graisse et style. Ce sont
+        # celles que `@font-face` a livrees : sans elles, un site s'affiche dans
+        # la police du systeme, et ses icones en carres.
+        self._page = {}
 
-    def prend(self, taille, gras=False, fixe=False):
+    def enregistre(self, octets, famille, gras, italique):
+        self._page.setdefault(famille.strip().lower(), {})[(bool(gras),
+                                                            bool(italique))] = octets
+        self._cache.clear()
+        return True
+
+    def prend(self, taille, gras=False, fixe=False, famille=""):
         taille = max(1, int(round(float(taille))))
-        cle = (taille, bool(gras), bool(fixe))
-        if cle not in self._cache:
-            chemin = os.path.join(POLICES, self.FICHIERS[(bool(gras), bool(fixe))])
-            try:
-                self._cache[cle] = ImageFont.truetype(chemin, taille)
-            except OSError:
-                self._cache[cle] = ImageFont.load_default()
-        return self._cache[cle]
+        cle = (taille, bool(gras), bool(fixe), (famille or "").strip().lower())
+        if cle in self._cache:
+            return self._cache[cle]
+
+        octets = self._octets_de_page(famille, gras)
+        try:
+            if octets is not None:
+                import io as _io
+                fonte = ImageFont.truetype(_io.BytesIO(octets), taille)
+            else:
+                chemin = os.path.join(POLICES,
+                                      self.FICHIERS[(bool(gras), bool(fixe))])
+                fonte = ImageFont.truetype(chemin, taille)
+        except OSError:
+            fonte = ImageFont.load_default()
+        self._cache[cle] = fonte
+        return fonte
+
+    def _octets_de_page(self, famille, gras):
+        variantes = self._page.get((famille or "").strip().lower())
+        if not variantes:
+            return None
+        # La graisse demandee, a defaut celle qu'on a.
+        for cle in ((bool(gras), False), (bool(gras), True),
+                    (False, False), (True, False)):
+            if cle in variantes:
+                return variantes[cle]
+        return next(iter(variantes.values()))
 
 
 FONTES = Fontes()
@@ -334,11 +364,11 @@ class Peintre:
     # -- Texte -----------------------------------------------------------------
 
     def _op_texte(self, x, y, texte, couleur, taille, gras, italique, fixe,
-                  souligne):
+                  souligne, famille=""):
         if not texte:
             return
         echelle = self._echelle()
-        fonte = FONTES.prend(float(taille) * echelle, gras, fixe)
+        fonte = FONTES.prend(float(taille) * echelle, gras, fixe, famille)
         origine = self._applique(x, y)
         largeur = fonte.getlength(texte)
         hauteur = float(taille) * echelle * 1.6
@@ -459,8 +489,8 @@ def installe_hote(largeur, hauteur):
     """Pose un module `bo` adosse a Pillow, avant tout import du moteur."""
     bo = types.ModuleType("bo")
 
-    def largeur_texte(texte, taille, gras=False, fixe=False):
-        return FONTES.prend(taille, gras, fixe).getlength(str(texte))
+    def largeur_texte(texte, taille, gras=False, fixe=False, famille=""):
+        return FONTES.prend(taille, gras, fixe, famille).getlength(str(texte))
 
     def hauteur_ligne(taille, fixe=False):
         fonte = FONTES.prend(taille, False, fixe)
@@ -511,6 +541,8 @@ def installe_hote(largeur, hauteur):
     bo.image = image
     bo.image_brute = image_brute
     bo.rasterise = rasterise
+    bo.police = lambda octets, famille, gras=False, italique=False: (
+        FONTES.enregistre(bytes(octets), famille, gras, italique))
     bo.formats_images = lambda: ["png", "jpeg", "jpg", "gif", "bmp", "webp",
                                  "ico", "svg"]
     sys.modules["bo"] = bo

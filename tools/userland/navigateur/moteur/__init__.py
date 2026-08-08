@@ -29,11 +29,14 @@ elle en contient au moins un.
 import time
 import urllib.parse
 
+import bo
+
 from . import (animation, css, html, images, mise_en_page, peinture,
-               prechargement, reseau, stockage)
+               police, prechargement, reseau, stockage)
 
 __all__ = ["animation", "css", "html", "images", "js", "mise_en_page",
-           "peinture", "prechargement", "reseau", "stockage", "Document"]
+           "peinture", "police", "prechargement", "reseau", "stockage",
+           "Document"]
 
 
 class Document:
@@ -60,6 +63,9 @@ class Document:
         # transitions engagees. Neuf a chaque page, donc rien ne survit a une
         # navigation.
         self.animateur = animation.Animateur()
+        # Polices deja demandees, par (famille, gras, italique). Une page qui se
+        # remet en page dix fois ne les retelecharge pas.
+        self._polices = {}
 
         # Les sous-ressources partent maintenant, ensemble, pendant qu'on
         # analyse les feuilles : quand la mise en page reclamera une image, elle
@@ -192,9 +198,10 @@ class Document:
                 ombres = True
                 continue
             if element.balise == "style":
-                sources.append((element.texte(), css.ombre_de(element)))
+                sources.append((element.texte(), css.ombre_de(element), self.url))
             elif element.balise == "link":
-                sources.append((self._feuille_liee(element), None))
+                sources.append((self._feuille_liee(element), None,
+                                self._adresse_feuille(element)))
         # A poser avant toute cascade : c'est ce drapeau qui decide si la
         # frontiere est calculee ou sautee.
         css.pose_ombres(ombres)
@@ -207,33 +214,102 @@ class Document:
                 if not isinstance(element, html.Element):
                     continue
                 if element.balise == "style":
-                    sources.append((element.texte(), css.ombre_de(element)))
+                    sources.append((element.texte(), css.ombre_de(element),
+                                    self.url))
                 elif element.balise == "link":
-                    sources.append((self._feuille_liee(element), None))
+                    sources.append((self._feuille_liee(element), None,
+                                    self._adresse_feuille(element)))
 
         # Analyser une feuille de deux mille regles a chaque battement du
         # JavaScript coute plus que toute la mise en page. Tant que les feuilles
         # sont les memes — texte compris, car un script peut reecrire un
         # `<style>` — on garde l'index deja construit.
-        signature = tuple((texte, id(ombre)) for texte, ombre in sources)
+        signature = tuple((texte, id(ombre)) for texte, ombre, _ in sources)
         if signature == self._signature and self._index is not None:
             return self._index
 
         keyframes = {}
+        polices = []
         regles = css.analyse(css.FEUILLE_PAR_DEFAUT, keyframes=keyframes,
                              ombre=css.PORTEE_AGENT)
         ordre = len(regles) + 1000
-        for source, ombre in sources:
+        for source, ombre, base in sources:
             if not source:
                 continue
-            nouvelles = css.analyse(source, ordre, keyframes=keyframes, ombre=ombre)
+            declarees = []
+            nouvelles = css.analyse(source, ordre, keyframes=keyframes, ombre=ombre,
+                                    polices=declarees)
             regles.extend(nouvelles)
             ordre += len(nouvelles) + 1
+            # Une police se resout contre la feuille qui la cite, non contre la
+            # page : `url(../webfonts/x.woff)` d'une feuille rangee dans
+            # `/static/css/` ne designe pas le meme fichier vu de la racine.
+            polices.extend((declaration, base) for declaration in declarees)
         self.animateur.keyframes = keyframes
+        self._charge_polices(polices)
 
         self._signature = signature
         self._index = css.indexe(regles)
         return self._index
+
+    def _charge_polices(self, declarations):
+        """Telecharge les `@font-face` de la page et les remet a l'hote.
+
+        Sans elles, un site s'affiche dans la police du systeme : passe encore
+        pour du texte, fatal pour une police d'icones, dont les glyphes vivent
+        dans une zone privee d'Unicode et sortent en carres.
+
+        Une police n'est demandee qu'une fois par adresse, et une famille deja
+        chargee n'est pas rechargee : la cascade est rejouee a chaque
+        redimensionnement.
+        """
+        remet = getattr(bo, "police", None)
+        if remet is None or not declarations:
+            return
+        for declaration, base in declarations:
+            noms = css.familles(declaration.get("font-family", ""))
+            if not noms:
+                continue
+            famille = noms[0]
+            gras = _poids_gras(declaration.get("font-weight", "400"))
+            italique = declaration.get("font-style", "normal").strip() == "italic"
+            cle = (famille.lower(), gras, italique)
+            if cle in self._polices:
+                continue
+            # Une coupe qui n'ecrit pas de latin n'est pas retenue : plusieurs
+            # `@font-face` partagent la meme famille, chacun pour une ecriture,
+            # et garder le dernier ferait sortir toute la page en carres.
+            if not police.couvre_latin(declaration.get("unicode-range", "")):
+                continue
+
+            choix = police.meilleure_source(declaration.get("src", ""))
+            if choix is None:
+                self._polices[cle] = False
+                self.journal("info", "police %s : aucun format lisible (WOFF2 seul)"
+                             % famille)
+                continue
+            url = urllib.parse.urljoin(base or self.url or "", choix[0])
+            reponse = reseau.charge(url, brut=True)
+            ouverte = police.ouvre(reponse.octets or b"") if reponse.code == 200 else None
+            if not ouverte:
+                self._polices[cle] = False
+                self.journal("warn", "police %s : %s illisible" % (famille, choix[1]))
+                continue
+            try:
+                pose = bool(remet(ouverte, famille, gras, italique))
+            except Exception as e:  # noqa: BLE001
+                self.journal("warn", "police %s : %s" % (famille, e))
+                pose = False
+            self._polices[cle] = pose
+            if pose:
+                police.retiens(famille)
+
+    def _adresse_feuille(self, element):
+        """L'adresse absolue d'un `<link rel=stylesheet>`, ou celle de la page."""
+        adresse = (element.attributs.get("href") or "").strip()
+        if not adresse:
+            return self.url
+        return urllib.parse.urljoin(self.url or "", adresse)
 
     def _feuille_liee(self, element):
         """Le texte d'un `<link rel="stylesheet">`, ou `""`.
@@ -377,6 +453,17 @@ def _element_a(boite, x, y):
         if trouve is not None:
             return trouve
     return boite.element
+
+
+def _poids_gras(valeur):
+    """Un `font-weight` de `@font-face` est-il gras ?"""
+    texte = str(valeur).strip().lower()
+    if texte in ("bold", "bolder"):
+        return True
+    try:
+        return int(texte.split()[0]) >= 600
+    except (ValueError, IndexError):
+        return False
 
 
 def charge(url, largeur, scripts=True, journal=None):

@@ -492,6 +492,12 @@ intérieures**, **dégradés linéaires et radiaux**, **opacité**, et **bords p
 côté** — le `border-bottom: 1px solid #eee` qui sépare la moitié des pages du
 web · **`object-fit`** et **`aspect-ratio`** · `@layer`, `@supports` et
 `@container` traversés plutôt que sautés ·
+**`float` et `clear`** — placement côte à côte, passage à la ligne, contenu qui
+se serre, dégagement · **tableaux** : colonnes mesurées sur la plus large de
+leurs cellules, `colspan`, rangée anonyme pour une cellule sans ligne ·
+**`display: inline-block`** peint enfin sa boîte, et les **champs de
+formulaire** avec · **`@font-face`** : la police de la page est téléchargée,
+son conteneur **WOFF ouvert** (`moteur/police.py`) et remise à l'hôte ·
 **pseudo-classes d'état réelles** — `:hover`, `:active`, `:focus` suivent le
 pointeur, et la lignée entière est survolée, ce qui tient un menu déroulant
 ouvert · **`@keyframes` et `animation`**, **`transition`**, avec les rythmes
@@ -526,6 +532,15 @@ mais passe par l'aplatissement pour un demi-tour.
 `globalCompositeOperation` ne sont pas rendus ; tout le reste du contexte 2D
 l'est, pixels compris. **Détourage par forme** — `clip()` suit la boîte du
 chemin, ce qui est exact après un `rect()` et approximatif au-delà.
+**Polices en WOFF2** — le conteneur WOFF est ouvert (zlib), le WOFF2 non : il
+demande brotli et une transformation des tables `glyf`/`loca`. Une police
+d'icônes livrée en WOFF2 seul sort donc en carrés, et le journal le dit.
+**Coupes par écriture** — un site qui livre une police par plage Unicode sous
+la même famille ne voit retenue que celle qui écrit du latin, faute de choisir
+la coupe caractère par caractère.
+**Texte qui épouse un flottant** — le contenu se serre à côté d'un `float` en
+bloc, pas ligne à ligne autour de son contour. **`rowspan`** — une cellule qui
+descend sur plusieurs lignes occupe la sienne.
 **Chargement parallèle des modules** — le graphe d'`import` est rapporté module
 par module, comme l'exige le chargeur synchrone de QuickJS ; un navigateur les
 téléchargerait de front.

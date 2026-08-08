@@ -63,6 +63,7 @@
 #include <QtGui/QRadialGradient>
 #include <QtGui/QPainterPath>
 #include <QtGui/QPolygonF>
+#include <QtGui/QFontDatabase>
 #include <QtGui/QTransform>
 #include <QtCore/QTimer>
 #include <QtCore/QtPlugin>
@@ -123,10 +124,16 @@ const QImage *imageParIdentifiant(int identifiant)
     return image.isNull() ? nullptr : &image;
 }
 
-QFont fabriqueFonte(double taille, bool gras, bool italique, bool fixe)
+QFont fabriqueFonte(double taille, bool gras, bool italique, bool fixe,
+                    const QString &famille = QString())
 {
     QFont f;
-    if (fixe)
+    // La famille demandee par la page passe avant tout : c'est elle que
+    // `@font-face` a chargee, et sans elle un site s'affichait toujours dans la
+    // police du systeme. Qt substitue de lui-meme si elle est absente.
+    if (!famille.isEmpty())
+        f.setFamily(famille);
+    else if (fixe)
         f.setFamily(QStringLiteral("DejaVu Sans Mono"));
     f.setPixelSize(qMax(1, int(taille + 0.5)));
     f.setBold(gras);
@@ -184,7 +191,8 @@ public:
 
     /// Mesure un texte avec la fonte demandee. Le rendu en a besoin pour la
     /// mise en page — c'est la seule chose que Python ne peut pas calculer seul.
-    double largeurTexte(const QString &texte, double taille, bool gras, bool fixe)
+    double largeurTexte(const QString &texte, double taille, bool gras, bool fixe,
+                        const QString &famille = QString())
     {
         QFontMetricsF metriques(fabriqueFonte(taille, gras, false, fixe));
         return metriques.horizontalAdvance(texte);
@@ -519,9 +527,12 @@ private:
             long couleur;
             int gras, italique, fixe, souligne;
             const char *texte;
-            if (PyArg_ParseTuple(element, "sddsldpppp", &operation, &x, &y, &texte,
-                                 &couleur, &taille, &gras, &italique, &fixe, &souligne)) {
-                QFont f = fabriqueFonte(taille, gras, italique, fixe);
+            const char *famille = "";
+            if (PyArg_ParseTuple(element, "sddsldpppps", &operation, &x, &y, &texte,
+                                 &couleur, &taille, &gras, &italique, &fixe,
+                                 &souligne, &famille)) {
+                QFont f = fabriqueFonte(taille, gras, italique, fixe,
+                                        QString::fromUtf8(famille));
                 f.setUnderline(souligne);
                 p.setFont(f);
                 p.setPen(couleurDepuisEntier(couleur));
@@ -685,12 +696,36 @@ PyObject *bo_largeur_texte(PyObject *, PyObject *args)
     const char *texte;
     double taille;
     int gras = 0, fixe = 0;
-    if (!PyArg_ParseTuple(args, "sd|pp", &texte, &taille, &gras, &fixe))
+    const char *famille = "";
+    if (!PyArg_ParseTuple(args, "sd|pps", &texte, &taille, &gras, &fixe, &famille))
         return nullptr;
     if (!g_toile)
         return PyFloat_FromDouble(0.0);
     return PyFloat_FromDouble(
-        g_toile->largeurTexte(QString::fromUtf8(texte), taille, gras, fixe));
+        g_toile->largeurTexte(QString::fromUtf8(texte), taille, gras, fixe,
+                              QString::fromUtf8(famille)));
+}
+
+/// `bo.police(octets, famille, gras=False, italique=False) -> bool`
+///
+/// Range une police livree par la page (`@font-face`) dans la base de Qt, d'ou
+/// `QFont` la retrouvera par son nom. Le moteur a deja ouvert le conteneur
+/// WOFF : ce qui arrive ici est du TrueType ou de l'OpenType, les deux seuls
+/// formats que Qt lit.
+PyObject *bo_police(PyObject *, PyObject *args)
+{
+    Py_buffer donnees;
+    const char *famille = "";
+    int gras = 0, italique = 0;
+    if (!PyArg_ParseTuple(args, "y*s|pp", &donnees, &famille, &gras, &italique))
+        return nullptr;
+    const QByteArray octets(static_cast<const char *>(donnees.buf),
+                            int(donnees.len));
+    PyBuffer_Release(&donnees);
+    const int identifiant = QFontDatabase::addApplicationFontFromData(octets);
+    if (identifiant < 0)
+        Py_RETURN_FALSE;
+    Py_RETURN_TRUE;
 }
 
 PyObject *bo_hauteur_ligne(PyObject *, PyObject *args)
@@ -857,6 +892,8 @@ PyMethodDef bo_methodes[] = {
      "image(octets) -> (identifiant, largeur, hauteur), ou None si illisible"},
     {"image_brute", bo_image_brute, METH_VARARGS,
      "image_brute(octets_bgra, largeur, hauteur, identifiant=-1) -> (id, l, h)"},
+    {"police", bo_police, METH_VARARGS,
+     "police(octets, famille, gras=False, italique=False) -> bool"},
     {"rasterise", bo_rasterise, METH_VARARGS,
      "rasterise(operations, largeur, hauteur) -> octets ARGB32"},
     {"formats_images", bo_formats_images, METH_NOARGS,

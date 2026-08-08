@@ -25,7 +25,7 @@ Barème : ✅ vérifié ici · 🟢 solide (lecture) · 🟡 fonctionne, manques
 | Vérification | Commande | Résultat |
 |---|---|---|
 | Compilation du noyau | `cargo build` | ✅ **succès, 0 warning**, 1 min 09 s |
-| Moteur du navigateur | `tools/userland/test-moteur.sh` | ✅ **532/532**, 0 échec |
+| Moteur du navigateur | `tools/userland/test-moteur.sh` | ✅ **573/573**, 0 échec |
 | Toolchain épinglée | `rust-toolchain.toml` | ✅ nightly-2026-06-01 s'installe seule |
 
 Deux résultats à souligner. Un noyau `no_std` de 32 700 lignes qui compile
@@ -367,7 +367,31 @@ chemins remplis exactement au lieu de leur boîte englobante.
 règle suivante, et `@layer` avec bloc était sautée entièrement — or les cadres
 CSS récents y rangent toute leur feuille.
 
-Reste ouvert, par ordre de valeur : le chargement parallèle des modules ES,
+### Troisième chantier : ce que de vraies pages ont montré
+
+Un outil d'aperçu (`tools/userland/navigateur/apercu.py`) exécute le moteur et
+peint sa liste d'affichage sans Qt ni QEMU. Rendre pypi.org a révélé, en une
+soirée, plus de défauts que la suite de tests n'en couvrait — les tests posaient
+des cas propres, une page réelle pose des cas sales :
+
+- l'**espace entre deux balises** était jeté (« HelpDocsSponsors ») ;
+- un **article flex « au contenu »** réclamait la largeur entière ;
+- les **cellules de tableau** étaient en ligne, sans colonnes ;
+- **`display: inline-block`** ne peignait jamais sa boîte, ni les **champs de
+  formulaire** ;
+- le **SVG** n'était pas lu (module QtSvg absent de la construction) ;
+- **`float` et `clear`** n'existaient pas — 45 déclarations dans la seule
+  feuille de pypi, d'où un en-tête empilé et des onglets verticaux ;
+- **`@font-face`** n'existait pas non plus, et la famille demandée n'atteignait
+  même pas le peintre : une page ne pouvait jamais s'afficher dans sa police.
+
+Deux régressions ont été introduites puis rattrapées dans la même session, l'une
+et l'autre repérées en comparant les captures : un `display: table` sans cellule
+qui perdait tout son contenu, et une police retenue par écriture qui faisait
+sortir la page entière en carrés.
+
+Reste ouvert, par ordre de valeur : les polices en **WOFF2** (brotli et la
+transformation `glyf`/`loca`), le chargement parallèle des modules ES,
 `listen`/`accept`, et la reprise du banc d'essai glibc.
 
 ---

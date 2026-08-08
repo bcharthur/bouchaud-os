@@ -1057,7 +1057,8 @@ def _operation_toile(operation):
             if couleur is None:
                 couleur = 0xFF000000
             return ("texte", float(x), float(y), str(texte), couleur,
-                    float(taille), bool(gras), bool(italique), bool(fixe), False)
+                    float(taille), bool(gras), bool(italique), bool(fixe), False,
+                    "")
         if genre == "image":
             _, x, y, l, h, identifiant = operation
             return ("image", float(x), float(y), float(l), float(h), int(identifiant))

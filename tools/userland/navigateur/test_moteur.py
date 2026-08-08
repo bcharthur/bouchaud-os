@@ -31,10 +31,20 @@ import types
 _images = []
 
 
-def _largeur_texte(texte, taille, gras=False, fixe=False):
+# Les polices que la page a livrees, par famille : le bouchon ne les dessine
+# pas, il retient seulement qu'on les lui a remises.
+_POLICES = {}
+
+
+def _largeur_texte(texte, taille, gras=False, fixe=False, famille=""):
     # Approximation suffisante pour la mise en page : la vraie mesure vient de
     # Qt, et aucune verification ici ne depend du dixieme de pixel.
     return len(texte) * taille * (0.62 if not fixe else 0.60) * (1.05 if gras else 1.0)
+
+
+def _police(octets, famille, gras=False, italique=False):
+    _POLICES[(famille, bool(gras), bool(italique))] = bytes(octets)
+    return True
 
 
 def _rasterise(operations, largeur, hauteur):
@@ -89,6 +99,7 @@ except ImportError:
     bo.image = _image
     bo.image_brute = _image_brute
     bo.rasterise = _rasterise
+    bo.police = _police
     bo.formats_images = lambda: ["png"]
     sys.modules["bo"] = bo
     HOTE_REEL = False
@@ -1925,6 +1936,65 @@ def verifie_champs():
                 rouges[0][3])
 
 
+def verifie_polices():
+    """`@font-face` : ouvrir un WOFF, choisir la bonne coupe, la remettre a l'hote."""
+    from moteur import police
+
+    # Le choix de la source. Un site cite le WOFF2 en tete parce qu'il est le
+    # plus compact ; on prend le suivant, qu'on sait ouvrir.
+    egal("police: le woff est prefere au woff2",
+         police.meilleure_source('url(a.woff2) format("woff2"),'
+                                 'url(a.woff) format("woff")'),
+         ("a.woff", "woff"))
+    egal("police: le truetype passe avant tout",
+         police.meilleure_source('url(a.woff) format("woff"),'
+                                 'url(a.ttf) format("truetype")'),
+         ("a.ttf", "truetype"))
+    egal("police: le woff2 seul est refuse",
+         police.meilleure_source('url(fa-solid-900.woff2) format("woff2")'), None)
+    egal("police: le format se devine a l'extension",
+         police.sources("url(x.woff)"), [("x.woff", "woff")])
+
+    # Les plages Unicode. Un site livre une coupe par ecriture sous la meme
+    # famille ; garder la derniere ferait sortir une page latine en carres.
+    verifie("police: la coupe latine est retenue",
+            police.couvre_latin("u+0000-00ff,u+0131,u+0152-0153"))
+    verifie("police: la coupe cyrillique est ecartee",
+            not police.couvre_latin("u+0460-052f,u+1c80-1c8a,u+20b4"))
+    verifie("police: sans plage declaree, on retient",
+            police.couvre_latin(""))
+    egal("police: la plage a joker est developpee",
+         police.plages("u+04??"), [(0x0400, 0x04FF)])
+
+    # L'ouverture d'un WOFF : on fabrique un conteneur minimal et on verifie
+    # qu'il ressort en sfnt valide.
+    import struct, zlib
+    table = b"essai de table" + b"\0" * 18
+    comprimee = zlib.compress(table)
+    entete = struct.pack(">4sIIHHIHHIIIII", b"wOFF", 0x00010000, 0, 1, 0,
+                         12 + 16 + len(table), 1, 0, 0, 0, 0, 0, 0)
+    repertoire = struct.pack(">4sIIII", b"test", 44 + 20, len(comprimee),
+                             len(table), 0)
+    faux = entete + repertoire + comprimee
+    ouvert = police.ouvre(faux)
+    verifie("police: un WOFF s'ouvre", ouvert is not None, ouvert)
+    if ouvert:
+        egal("police: il ressort en sfnt", ouvert[:4], b"\x00\x01\x00\x00")
+        verifie("police: sa table est rendue", table[:14] in ouvert, ouvert[:40])
+    egal("police: un WOFF2 est refuse", police.ouvre(b"wOF2" + b"\0" * 40), None)
+    egal("police: une TrueType passe telle quelle",
+         police.ouvre(b"\x00\x01\x00\x00abcd"), b"\x00\x01\x00\x00abcd")
+    egal("police: un fichier quelconque est refuse", police.ouvre(b"nimporte"), None)
+
+    # La famille demandee suit jusqu'a la peinture. Sans elle, une page ne
+    # pouvait jamais s'afficher dans sa propre police.
+    doc = document("<style>body{font-family:'Ma Police',serif}</style>"
+                   "<body><p>bonjour</p></body>")
+    textes = [o for o in doc.liste_affichage(0, 900, 400) if o[0] == "texte"]
+    verifie("police: l'operation texte porte la famille",
+            textes and textes[0][10] == "Ma Police", textes[:1])
+
+
 # --- Disposition --------------------------------------------------------------
 
 def boite_de(doc, identifiant):
@@ -3431,6 +3501,7 @@ def principal():
         verifie_flux_en_ligne,
         verifie_tableaux,
         verifie_champs,
+        verifie_polices,
         verifie_degrades_et_ombres,
         verifie_toile_complete,
         verifie_pseudo_elements,

@@ -1168,6 +1168,16 @@ def opacite(valeur):
         return 1.0
 
 
+def familles(valeur):
+    """Les familles d'un `font-family`, dans l'ordre, guillemets retires."""
+    resultat = []
+    for morceau in separe(valeur or ""):
+        nom = morceau.strip().strip("\"'").replace("\\", "").strip()
+        if nom:
+            resultat.append(nom)
+    return resultat
+
+
 COTES = ("top", "right", "bottom", "left")
 
 
@@ -1203,13 +1213,16 @@ _TRANSPARENTES = ("@layer", "@supports", "@container", "@scope")
 _COMMENTAIRE = re.compile(r"/\*.*?\*/", re.S)
 
 
-def analyse(source, ordre_depart=0, keyframes=None, ombre=None):
+def analyse(source, ordre_depart=0, keyframes=None, ombre=None, polices=None):
     """Analyse une feuille de style et rend la liste de ses regles.
 
     `keyframes`, s'il est fourni, recoit les gabarits `@keyframes` rencontres :
     `nom -> [(position entre 0 et 1, declarations), …]`. Ils ne sont pas des
     regles — ils ne designent aucun element — mais une table que l'animation
     consulte, d'ou ce second canal plutot qu'un melange dans la liste.
+
+    `polices` recoit de meme les `@font-face`, en liste de declarations : ce
+    sont des polices a telecharger, pas des elements a styler.
     """
     source = _COMMENTAIRE.sub(" ", source)
     regles = []
@@ -1256,6 +1269,14 @@ def analyse(source, ordre_depart=0, keyframes=None, ombre=None):
                     position = accolade + 1
                 else:
                     position = _saute_bloc(source, accolade)
+                continue
+            if tete.startswith("@font-face"):
+                fin_bloc = _saute_bloc(source, accolade)
+                if polices is not None:
+                    declaration = _declarations(source[accolade + 1:fin_bloc - 1])
+                    if declaration.get("src") and declaration.get("font-family"):
+                        polices.append(declaration)
+                position = fin_bloc
                 continue
             if tete.startswith("@keyframes") or tete.startswith("@-webkit-keyframes"):
                 fin_bloc = _saute_bloc(source, accolade)

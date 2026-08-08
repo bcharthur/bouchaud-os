@@ -11,7 +11,7 @@ fond — couleur ou degrade —, puis les quatre bords, puis le contenu. Un
 """
 
 from . import css
-from .mise_en_page import _est_fixe, _est_gras, _taille_police
+from .mise_en_page import _est_fixe, _est_gras, _taille_police, famille
 
 # Couleur du soulignement et du texte des liens quand la feuille n'en donne pas.
 COULEUR_LIEN = 0xFF1A56DB
@@ -256,11 +256,12 @@ def _peint_fragment(fragment, liste, defilement, hauteur_vue, zones_liens,
             teinte = COULEUR_LIEN
 
     liste.append(("texte", fragment.x, y, fragment.texte, teinte, taille,
-                  gras, italique, fixe, souligne))
+                  gras, italique, fixe, souligne, famille(style)))
 
     if fragment.lien:
         import bo
-        largeur = bo.largeur_texte(fragment.texte, taille, gras, fixe)
+        largeur = bo.largeur_texte(fragment.texte, taille, gras, fixe,
+                                   famille(style))
         zones_liens.append(
             _zone_transformee(matrice, fragment.x, fragment.y, largeur,
                               fragment.hauteur) + (fragment.lien,))
