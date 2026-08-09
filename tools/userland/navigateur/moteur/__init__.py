@@ -31,8 +31,9 @@ import urllib.parse
 
 import bo
 
-from . import (animation, css, html, images, mise_en_page, peinture,
-               police, prechargement, reseau, stockage, telemetrie)
+from . import (animation, css, edition, html, images, mise_en_page,
+               peinture, police, prechargement, reseau, stockage,
+               telemetrie)
 
 __all__ = ["animation", "css", "html", "images", "js", "mise_en_page",
            "peinture", "police", "prechargement", "reseau", "stockage",
@@ -88,6 +89,11 @@ class Document:
         self.contexte_js = None
         # L'element au foyer. Un seul par document, comme le veut la norme.
         self._foyer = None
+        # L'etat d'edition de chaque champ touche, par identite d'element.
+        self._editions = {}
+        # Vrai quand le curseur a bouge sans que la valeur change : il faut
+        # repeindre, pas remettre en page.
+        self.sale_curseur = False
 
         if scripts:
             self._demarre_scripts()
@@ -122,6 +128,11 @@ class Document:
             self.contexte_js = None
         # L'element au foyer. Un seul par document, comme le veut la norme.
         self._foyer = None
+        # L'etat d'edition de chaque champ touche, par identite d'element.
+        self._editions = {}
+        # Vrai quand le curseur a bouge sans que la valeur change : il faut
+        # repeindre, pas remettre en page.
+        self.sale_curseur = False
 
     def rafraichis(self):
         """Remet en page si le JavaScript a touche a l'arbre. Rend `True` alors.
@@ -175,6 +186,11 @@ class Document:
             self.contexte_js = None
         # L'element au foyer. Un seul par document, comme le veut la norme.
         self._foyer = None
+        # L'etat d'edition de chaque champ touche, par identite d'element.
+        self._editions = {}
+        # Vrai quand le curseur a bouge sans que la valeur change : il faut
+        # repeindre, pas remettre en page.
+        self.sale_curseur = False
 
     # --- Arbre et mise en page ------------------------------------------------
 
@@ -387,6 +403,7 @@ class Document:
                 self.boite, self.hauteur = mise_en_page.construit(
                     self.racine, self.regles, largeur, self.url,
                     self._image_video, self._toile)
+            self.pose_curseur_visuel()
         finally:
             css.pose_animateur(None)
 
@@ -450,6 +467,280 @@ class Document:
         """L'element au foyer, ou `None`."""
         return self._foyer
 
+    # --- Edition de texte -----------------------------------------------------
+
+    def edition_de(self, element, cree=True):
+        """L'etat d'edition d'un champ : valeur courante, curseur, selection.
+
+        Cree a la premiere demande, a partir de l'attribut `value` — qui reste
+        la valeur **par defaut**, celle que `form.reset()` restaure. La valeur
+        courante vit ici. Les confondre, comme avant, rendait `reset()`
+        incapable de restaurer quoi que ce soit puisqu'il avait lui-meme ecrase
+        ce qu'il devait remettre.
+        """
+        if element is None or not edition.est_editable(element):
+            return None
+        etat = self._editions.get(id(element))
+        if etat is None and cree:
+            depart = (element.texte() if element.balise == "textarea"
+                      else element.attributs.get("value", ""))
+            etat = edition.Edition(depart,
+                                   multiligne=edition.multiligne(element),
+                                   masque=edition.est_masque(element))
+            self._editions[id(element)] = etat
+        return etat
+
+    def frappe(self, touche, texte="", maj=False, ctrl=False):
+        """Une touche reelle, adressee a l'element au foyer.
+
+        L'ordre des evenements est celui du Web, et il compte : `keydown`
+        d'abord — la page peut annuler et rien ne sera insere —, la valeur
+        ensuite, `input` apres la valeur, `keyup` en dernier. Emettre `input`
+        avant la mutation, ou `keydown` apres, ferait lire a la page un etat qui
+        n'existe pas encore.
+
+        Rend `True` si la valeur a change.
+        """
+        cible = self._foyer
+        contexte = self.contexte_js
+        details = {"key": touche, "shiftKey": bool(maj), "ctrlKey": bool(ctrl)}
+
+        if contexte is not None and cible is not None:
+            # `keydown` est annulable : `e.preventDefault()` dans un `keydown`
+            # doit empecher l'insertion, et c'est la forme la plus repandue de
+            # filtrage de saisie du Web.
+            if contexte.evenement(cible, "keydown", details) is False:
+                contexte.evenement(cible, "keyup", details)
+                return False
+
+        etat = self.edition_de(cible)
+        change = bouge = False
+        if etat is not None:
+            change, bouge = edition.applique_touche(etat, touche, texte,
+                                                    maj=maj, ctrl=ctrl)
+            if change:
+                self._synchronise_champ(cible, etat)
+
+        if touche == "Tab":
+            self.deplace_foyer(-1 if maj else 1)
+            bouge = True
+        elif touche == "Enter" and etat is not None and not etat.multiligne:
+            self._entree_soumet(cible)
+        elif touche in (" ", "Spacebar") and etat is None:
+            # Sur une case ou un bouton, l'espace agit comme un clic. C'est le
+            # seul moyen de cocher au clavier.
+            self.active(cible)
+
+        if contexte is not None and cible is not None:
+            if change:
+                contexte.evenement(cible, "input", details)
+            contexte.evenement(cible, "keyup", details)
+
+        if change or bouge:
+            self.sale_curseur = True
+        if change:
+            self.remet_en_page(self.largeur)
+        return change
+
+    def _synchronise_champ(self, element, etat):
+        """Reporte la valeur courante la ou la mise en page la lira."""
+        element.valeur_courante = etat.valeur
+
+    def _entree_soumet(self, champ):
+        """`Entree` dans un champ envoie le formulaire qui le contient."""
+        contexte = self.contexte_js
+        if contexte is None:
+            return
+        formulaire = champ
+        while formulaire is not None and getattr(formulaire, "balise", None) != "form":
+            formulaire = getattr(formulaire, "parent", None)
+        if formulaire is None:
+            return
+        contexte.appel("soumets", contexte._identifiant(formulaire), True)
+
+    def active(self, element):
+        """L'action par defaut d'un clic ou d'un espace : cocher, choisir, envoyer.
+
+        Ces trois-la n'ont rien d'accessoire : sans elles, une case ne se coche
+        pas, un bouton n'envoie rien, et un formulaire n'est qu'un dessin.
+        """
+        if element is None or "disabled" in getattr(element, "attributs", {}):
+            return False
+        contexte = self.contexte_js
+        balise = getattr(element, "balise", None)
+        type_ = (element.attributs.get("type") or "").lower() if balise == "input" else ""
+
+        if balise == "input" and type_ in ("checkbox", "radio"):
+            if type_ == "radio":
+                # Un seul bouton coche par nom : c'est la definition meme d'un
+                # groupe radio, et sans cela on peut tout cocher a la fois.
+                nom = element.attributs.get("name")
+                if nom:
+                    for autre in self.racine.parcours():
+                        if (isinstance(autre, html.Element)
+                                and autre is not element
+                                and autre.balise == "input"
+                                and (autre.attributs.get("type") or "").lower() == "radio"
+                                and autre.attributs.get("name") == nom):
+                            autre.attributs.pop("checked", None)
+                element.attributs["checked"] = ""
+            elif "checked" in element.attributs:
+                element.attributs.pop("checked")
+            else:
+                element.attributs["checked"] = ""
+            if contexte is not None:
+                contexte.evenement(element, "input", {})
+                contexte.evenement(element, "change", {})
+            self.remet_en_page(self.largeur)
+            return True
+
+        if (balise == "button" and (element.attributs.get("type") or "submit").lower()
+                == "submit") or (balise == "input" and type_ == "submit"):
+            formulaire = element
+            while formulaire is not None \
+                    and getattr(formulaire, "balise", None) != "form":
+                formulaire = getattr(formulaire, "parent", None)
+            if formulaire is not None and contexte is not None:
+                contexte.appel("soumets", contexte._identifiant(formulaire), True)
+                return True
+        return False
+
+    def clique(self, x, y):
+        """Un clic reel : trouve la cible, deplace le foyer, pose le curseur.
+
+        C'est le chemin qui manquait entierement. Le foyer ne se deplacait que
+        par `element.focus()` — donc jamais dans l'usage normal, ou l'on clique.
+        """
+        cible = self.element_a(x, y)
+        focalisable = cible
+        while focalisable is not None:
+            if isinstance(focalisable, html.Element):
+                balise = focalisable.balise
+                if (balise in ("input", "select", "textarea", "button")
+                        or (balise in ("a", "area") and "href" in focalisable.attributs)
+                        or "tabindex" in focalisable.attributs):
+                    break
+                if balise == "label":
+                    # Cliquer une etiquette donne le foyer au controle qu'elle
+                    # designe : c'est ce que tout formulaire suppose, et sans
+                    # cela la moitie des cases a cocher sont inatteignables.
+                    designe = self._controle_de_label(focalisable)
+                    if designe is not None:
+                        focalisable = designe
+                        break
+            focalisable = getattr(focalisable, "parent", None)
+
+        if focalisable is None or "disabled" in getattr(focalisable, "attributs", {}):
+            # Cliquer dans le vide retire le foyer, comme dans un navigateur.
+            self.pose_foyer(None)
+            return None
+
+        self.pose_foyer(focalisable)
+        etat = self.edition_de(focalisable)
+        if etat is not None:
+            etat.pose_curseur(self._curseur_a(focalisable, etat, x))
+            self.sale_curseur = True
+        return focalisable
+
+    def _controle_de_label(self, etiquette):
+        cible = etiquette.attributs.get("for")
+        if cible:
+            for nœud in self.racine.parcours():
+                if isinstance(nœud, html.Element) \
+                        and nœud.attributs.get("id") == cible:
+                    return nœud
+            return None
+        for nœud in etiquette.parcours():
+            if isinstance(nœud, html.Element) \
+                    and nœud.balise in ("input", "select", "textarea", "button"):
+                return nœud
+        return None
+
+    def _curseur_a(self, element, etat, x):
+        """L'indice de caractere le plus proche du point clique.
+
+        On mesure les prefixes successifs et on prend celui dont le bord est le
+        plus proche : c'est exact au caractere pres, et la mesure passe par
+        l'hote, donc par la vraie fonte — la seule facon d'etre juste avec une
+        police proportionnelle.
+        """
+        boite = self._boite_de(element)
+        if boite is None:
+            return len(etat.valeur)
+        style = boite.style
+        taille = mise_en_page._taille_police(style)
+        gras = mise_en_page._est_gras(style)
+        fixe = mise_en_page._est_fixe(style)
+        famille = mise_en_page.famille(style)
+        # Le texte commence apres la bordure et le remplissage gauche : mesurer
+        # depuis le bord de la boite decalerait le curseur d'autant.
+        depart = boite.x + (css.longueur(style.get("padding-left"), 0.0, taille) or 0.0) \
+            + (css.longueur(style.get("border-left-width"), 0.0, taille) or 0.0)
+        affiche = etat.texte_affiche()
+
+        meilleur, ecart_min = 0, abs(x - depart)
+        for index in range(1, len(affiche) + 1):
+            largeur = bo.largeur_texte(affiche[:index], taille, gras, fixe, famille)
+            ecart = abs(x - (depart + largeur))
+            if ecart < ecart_min:
+                meilleur, ecart_min = index, ecart
+        return meilleur
+
+    def pose_curseur_visuel(self):
+        """Place le trait du curseur dans la boite du champ au foyer.
+
+        Apres la mise en page, pas pendant : la position du curseur depend de
+        la largeur du texte qui le precede, donc de la boite finale. La calculer
+        en cours de disposition obligerait a la refaire des que la boite bouge.
+
+        Le curseur n'est pas un caractere. Il est pose a cote du texte, dans un
+        champ de la boite que la peinture lit. L'inserer dans la valeur — ce que
+        fait la barre d'adresse du chrome — partirait avec le formulaire et
+        changerait la largeur mesuree a chaque clignotement.
+        """
+        cible = self._foyer
+        etat = self.edition_de(cible, cree=False) if cible is not None else None
+        if etat is None:
+            return False
+        boite = self._boite_de(cible)
+        if boite is None:
+            return False
+        style = boite.style
+        taille = mise_en_page._taille_police(style)
+        gras = mise_en_page._est_gras(style)
+        fixe = mise_en_page._est_fixe(style)
+        famille = mise_en_page.famille(style)
+        gauche = boite.x \
+            + (css.longueur(style.get("padding-left"), 0.0, taille) or 0.0) \
+            + (css.longueur(style.get("border-left-width"), 0.0, taille) or 0.0)
+        haut = boite.y \
+            + (css.longueur(style.get("padding-top"), 0.0, taille) or 0.0) \
+            + (css.longueur(style.get("border-top-width"), 0.0, taille) or 0.0)
+        hauteur = bo.hauteur_ligne(taille, fixe)
+        affiche = etat.texte_affiche()
+
+        def largeur(jusqua):
+            if jusqua <= 0:
+                return 0.0
+            return bo.largeur_texte(affiche[:jusqua], taille, gras, fixe, famille)
+
+        debut, fin = etat.selection()
+        selection = None
+        if debut != fin:
+            x_debut = largeur(debut)
+            selection = (gauche + x_debut, largeur(fin) - x_debut)
+        boite.curseur = (gauche + largeur(etat.curseur), haut, hauteur, selection)
+        return True
+
+    def _boite_de(self, element):
+        pile = [self.boite] if self.boite is not None else []
+        while pile:
+            boite = pile.pop()
+            if boite.element is element:
+                return boite
+            pile.extend(getattr(boite, "enfants", ()) or ())
+        return None
+
     def pose_foyer(self, element, notifie=True):
         """Deplace le foyer. Rend `True` si quelque chose a change.
 
@@ -460,6 +751,10 @@ class Document:
         if element is self._foyer:
             return False
         ancien, self._foyer = self._foyer, element
+        # Un champ editable qui prend le foyer doit avoir un curseur : c'est la
+        # que son etat d'edition nait, s'il n'existait pas encore.
+        if element is not None:
+            self.edition_de(element)
         contexte = self.contexte_js
         if notifie and contexte is not None:
             if ancien is not None:

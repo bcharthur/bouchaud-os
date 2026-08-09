@@ -1014,6 +1014,48 @@ class Contexte:
         entrees = self._entrees_historique()
         return entrees[self._index_historique][1]
 
+    # --- Edition ---------------------------------------------------------------
+    #
+    # `input.value` passe par le modele d'edition, pas par l'attribut. C'est ce
+    # qui permet a la valeur tapee et a la valeur lue par le script d'etre la
+    # meme chose — sans quoi une frappe reelle et un `input.value` se seraient
+    # ecrases mutuellement selon l'ordre des operations.
+
+    def _op_valeurChamp(self, identifiant):
+        element = self._element(identifiant)
+        etat = self.document.edition_de(element) if element is not None else None
+        if etat is not None:
+            return etat.valeur
+        return None
+
+    def _op_poseValeurChamp(self, identifiant, valeur):
+        element = self._element(identifiant)
+        etat = self.document.edition_de(element) if element is not None else None
+        if etat is None:
+            return False
+        change = etat.remplace_tout(valeur)
+        self.document._synchronise_champ(element, etat)
+        if change:
+            self.sale = True
+        return change
+
+    def _op_selectionChamp(self, identifiant):
+        element = self._element(identifiant)
+        etat = self.document.edition_de(element) if element is not None else None
+        if etat is None:
+            return None
+        debut, fin = etat.selection()
+        return {"debut": debut, "fin": fin}
+
+    def _op_poseSelectionChamp(self, identifiant, debut, fin):
+        element = self._element(identifiant)
+        etat = self.document.edition_de(element) if element is not None else None
+        if etat is None:
+            return False
+        etat.pose_selection(debut, fin)
+        self.document.sale_curseur = True
+        return True
+
     def _op_resout(self, adresse):
         """Une adresse relative resolue contre celle du document."""
         return urllib.parse.urljoin(self.document.url, str(adresse or ""))

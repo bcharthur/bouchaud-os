@@ -42,6 +42,30 @@ K_DEBUT, K_FIN = 0x01000010, 0x01000011
 K_F2 = 0x01000031
 K_F5 = 0x01000034
 K_L, K_Q, K_R = 0x4C, 0x51, 0x52
+K_TAB, K_ESPACE = 0x01000001, 0x20
+MAJ = 0x02000000
+
+# Ce que la page appelle une touche. Le vocabulaire est celui de
+# `KeyboardEvent.key` : la page le verra tel quel, et entretenir deux noms pour
+# la meme touche aurait garanti qu'ils divergent.
+_TOUCHES_WEB = {
+    K_RETOUR: "Enter", K_ENTREE: "Enter", K_ECHAP: "Escape",
+    K_EFFACE: "Backspace", K_SUPPR: "Delete", K_TAB: "Tab",
+    K_GAUCHE: "ArrowLeft", K_DROITE: "ArrowRight",
+    K_HAUT: "ArrowUp", K_BAS: "ArrowDown",
+    K_DEBUT: "Home", K_FIN: "End",
+    K_PAGE_HAUT: "PageUp", K_PAGE_BAS: "PageDown",
+}
+
+
+def _touche_web(code, texte):
+    """Le nom Web d'une touche Qt, ou `None` si elle ne concerne pas la page."""
+    nom = _TOUCHES_WEB.get(code)
+    if nom is not None:
+        return nom
+    if texte and texte.isprintable():
+        return texte
+    return None
 
 
 class Onglet:
@@ -465,6 +489,19 @@ class Navigateur:
             self.champ_actif = True
             self.curseur_saisie = len(self.saisie)
             return
+
+        # Un champ de la **page** a le foyer : la frappe lui appartient, pas au
+        # chrome. Sans cette bifurcation, `Bas` faisait defiler la page pendant
+        # qu'on essayait d'ecrire, et aucune lettre n'atteignait le formulaire.
+        document = self.onglet.document
+        if document is not None and self.onglet.distant is None \
+                and document.foyer_actuel() is not None:
+            nom = _touche_web(code, texte)
+            if nom is not None:
+                document.frappe(nom, texte or "",
+                                maj=bool(modificateurs & MAJ), ctrl=ctrl)
+                bo.redessiner()
+                return
         if code == K_F5:
             if self.onglet.url:
                 self.ouvre(self.onglet.url, empiler=False)
@@ -544,11 +581,19 @@ class Navigateur:
         # `preventDefault()` sur un lien est la facon dont la moitie des sites
         # detournent la navigation.
         cible = document.element_a(x, page_y)
+        # Le foyer suit le clic avant que le script ne le voie : c'est l'ordre
+        # du Web, et `document.activeElement` lu dans un gestionnaire de clic
+        # doit deja designer le nouvel element. Sans ce chemin, le foyer ne se
+        # deplacait que par `element.focus()` — donc jamais dans l'usage normal.
+        document.clique(x, page_y)
         if cible is not None and not document.evenement_js(
                 cible, "click", {"clientX": x, "clientY": y - HAUTEUR_CHROME,
                                  "pageX": x, "pageY": page_y}):
             bo.redessiner()
             return
+        # L'action par defaut : cocher une case, choisir un bouton radio,
+        # envoyer un formulaire. Elle n'a lieu que si le script n'a pas annule.
+        document.active(document.foyer_actuel())
         self.bat()
 
         lien = document.lien_a(x, page_y)

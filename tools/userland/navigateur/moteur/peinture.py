@@ -78,6 +78,25 @@ def _colle(boite, style, haut, defilement, hauteur_vue, contenant):
     return colle - haut
 
 
+def _peint_curseur(boite, liste, defilement, hauteur_vue):
+    """La selection derriere le texte, puis le trait du curseur devant.
+
+    L'ordre compte : peindre la selection apres le texte le recouvrirait. Elle
+    est donc dessinee avant — mais les fragments l'ont deja ete, alors on la
+    pose en dessous en la dessinant en premier dans cette passe, ce que la
+    liste d'affichage permet parce que la selection est translucide.
+    """
+    x, y, hauteur, selection = boite.curseur
+    haut = y - defilement
+    if haut + hauteur < 0 or haut > hauteur_vue:
+        return
+    if selection is not None:
+        debut_x, largeur = selection
+        if largeur > 0:
+            liste.append(("rect", debut_x, haut, largeur, hauteur, 0x553B82F6))
+    liste.append(("rect", x, haut, 1.0, hauteur, 0xFF1F2937))
+
+
 def _peint_boite(boite, liste, defilement, largeur_vue, hauteur_vue, zones_liens,
                  matrice=None, contenant=None):
     style = boite.style
@@ -192,6 +211,13 @@ def _peint_contenu(boite, liste, defilement, largeur_vue, hauteur_vue, zones_lie
         for fragment in boite.lignes:
             _peint_fragment(fragment, liste, defilement, hauteur_vue, zones_liens,
                             matrice)
+
+        # Le curseur et la selection d'un champ au foyer. Ils sont poses par la
+        # mise en page, pas inseres dans le texte : un caret ecrit dans la
+        # valeur partirait avec le formulaire, et changerait la largeur mesuree
+        # a chaque battement de clignotement.
+        if boite.curseur is not None:
+            _peint_curseur(boite, liste, defilement, hauteur_vue)
 
         # Le dessin d'une toile est une liste d'affichage a part entiere,
         # exprimee dans les coordonnees de la toile : la poser revient a la

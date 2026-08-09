@@ -4145,6 +4145,373 @@ def verifie_tableau_de_bord():
          suivi.precedente(histoire, "inconnue"), None)
 
 
+# --- Interaction utilisateur reelle -------------------------------------------
+
+def verifie_modele_edition():
+    """Le modele d'edition, seul : valeur, curseur, selection.
+
+    Il ne connait ni le DOM ni Qt, donc il s'eprouve directement — et c'est
+    tout l'interet de l'avoir isole.
+    """
+    from moteur import edition
+
+    e = edition.Edition("abc")
+    egal("edition: le curseur part a la fin", e.curseur, 3)
+    egal("edition: insertion a la fin", (e.insere("d"), e.valeur), (True, "abcd"))
+    e.pose_curseur(2)
+    egal("edition: insertion au milieu", (e.insere("X"), e.valeur), (True, "abXcd"))
+    egal("edition: le curseur suit l'insertion", e.curseur, 3)
+
+    egal("edition: retour arriere", (e.efface_avant(), e.valeur), (True, "abcd"))
+    e.pose_curseur(0)
+    egal("edition: retour arriere en tete ne fait rien",
+         (e.efface_avant(), e.valeur), (False, "abcd"))
+    egal("edition: suppr avance", (e.efface_apres(), e.valeur), (True, "bcd"))
+    e.pose_curseur(3)
+    egal("edition: suppr en fin ne fait rien",
+         (e.efface_apres(), e.valeur), (False, "bcd"))
+
+    # Les fleches, avec et sans Maj.
+    e = edition.Edition("bonjour")
+    e.pose_curseur(3)
+    e.deplace(-1)
+    egal("edition: fleche gauche", e.curseur, 2)
+    e.deplace(1, etend=True)
+    e.deplace(1, etend=True)
+    egal("edition: Maj etend la selection", e.selection(), (2, 4))
+    egal("edition: le texte selectionne est le bon", e.texte_selectionne(), "nj")
+    e.deplace(-1, etend=True)
+    egal("edition: Maj en sens inverse reduit", e.selection(), (2, 3))
+
+    # Une fleche sans Maj sur une selection l'effondre a son bord, elle ne
+    # deplace pas d'un caractere : c'est ce que fait tout editeur.
+    e.pose_selection(2, 5)
+    e.deplace(1)
+    egal("edition: la fleche effondre la selection au bord", e.curseur, 5)
+    e.pose_selection(2, 5)
+    e.deplace(-1)
+    egal("edition: et a l'autre bord dans l'autre sens", e.curseur, 2)
+
+    # Taper sur une selection la remplace.
+    e.pose_selection(0, 3)
+    egal("edition: taper remplace la selection",
+         (e.insere("X"), e.valeur), (True, "Xjour"))
+
+    e.tout_selectionner()
+    egal("edition: tout selectionner", e.selection(), (0, 5))
+    egal("edition: retour arriere efface la selection",
+         (e.efface_avant(), e.valeur), (True, ""))
+
+    # Home et End, sur plusieurs lignes.
+    m = edition.Edition("une\ndeux\ntrois", multiligne=True)
+    m.pose_curseur(6)
+    m.au_debut()
+    egal("edition: Home va au debut de la ligne", m.curseur, 4)
+    m.a_la_fin()
+    egal("edition: End va a la fin de la ligne", m.curseur, 8)
+
+    # Un `<input>` est monoligne : un collage multiligne s'aplatit.
+    mono = edition.Edition("", multiligne=False)
+    mono.insere("un\ndeux")
+    egal("edition: un input aplatit les retours", mono.valeur, "un deux")
+    egal("edition: un textarea les garde",
+         (edition.Edition("", multiligne=True).insere("un\ndeux"), True)[1], True)
+
+    # Entree : rien dans un input, un retour dans un textarea.
+    egal("edition: Entree n'insere rien dans un input",
+         edition.applique_touche(edition.Edition("a"), "Enter"), (False, False))
+    ligne = edition.Edition("a", multiligne=True)
+    egal("edition: Entree insere dans un textarea",
+         edition.applique_touche(ligne, "Enter")[0], True)
+    egal("edition: et la valeur porte le retour", ligne.valeur, "a\n")
+
+    # Le masque ne touche pas la valeur : elle doit partir au serveur.
+    secret = edition.Edition("hunter2", masque=True)
+    egal("edition: la valeur reste en clair dans le modele", secret.valeur, "hunter2")
+    egal("edition: mais l'affichage est masque",
+         secret.texte_affiche(), edition.PUCE * 7)
+    egal("edition: et la longueur correspond",
+         len(secret.texte_affiche()), len("hunter2"))
+
+    egal("edition: Ctrl+A selectionne tout",
+         edition.applique_touche(edition.Edition("abc"), "a", ctrl=True), (False, True))
+    egal("edition: Ctrl+lettre n'insere pas",
+         edition.applique_touche(edition.Edition(""), "z", "z", ctrl=True)[0], False)
+
+
+def _page_saisie(source=None, url="http://exemple.test/page"):
+    doc = document(source or (
+        "<style>label { display: block }</style>"
+        "<body><form id=f action='/session' method=post>"
+        "<label id=et for=courriel>Adresse</label>"
+        "<input id=courriel name=courriel type=text>"
+        "<input id=mdp name=mdp type=password>"
+        "<input id=coche name=coche type=checkbox>"
+        "<textarea id=note name=note></textarea>"
+        "<button id=envoi type=submit>Envoyer</button>"
+        "</form><script>1</script></body>"), url=url)
+    doc.remet_en_page(1000, 800)
+    return doc
+
+
+def tape(doc, texte):
+    """Tape un texte caractere par caractere, comme un utilisateur."""
+    for caractere in texte:
+        doc.frappe(caractere, caractere)
+
+
+def verifie_saisie_reelle():
+    """Taper dans un champ, pour de vrai : frappe par frappe."""
+    doc = _page_saisie()
+    contexte = doc.contexte_js
+    doc.pose_foyer(_par_id(doc, "courriel"))
+
+    tape(doc, "alice")
+    egal("saisie: la valeur se construit lettre par lettre",
+         contexte.execute("document.getElementById('courriel').value"), "alice")
+    egal("saisie: le curseur suit",
+         contexte.execute("document.getElementById('courriel').selectionStart"), 5)
+
+    doc.frappe("Backspace")
+    egal("saisie: retour arriere retire la derniere lettre",
+         contexte.execute("document.getElementById('courriel').value"), "alic")
+
+    doc.frappe("Home")
+    tape(doc, "M")
+    egal("saisie: Home puis frappe insere en tete",
+         contexte.execute("document.getElementById('courriel').value"), "Malic")
+
+    doc.frappe("End")
+    tape(doc, "e")
+    egal("saisie: End puis frappe insere en queue",
+         contexte.execute("document.getElementById('courriel').value"), "Malice")
+
+    # `Entree` n'insere rien dans un `<input>`.
+    avant = contexte.execute("document.getElementById('courriel').value")
+    doc.frappe("Enter")
+    egal("saisie: Entree n'ajoute pas de retour dans un input",
+         contexte.execute("document.getElementById('courriel').value"), avant)
+
+    # Mais bien dans un `<textarea>`.
+    doc.pose_foyer(_par_id(doc, "note"))
+    tape(doc, "un")
+    doc.frappe("Enter")
+    tape(doc, "deux")
+    egal("saisie: Entree insere un retour dans un textarea",
+         contexte.execute("document.getElementById('note').value"), "un\ndeux")
+
+    # Le mot de passe garde sa valeur et n'affiche que des puces.
+    doc.pose_foyer(_par_id(doc, "mdp"))
+    tape(doc, "hunter2")
+    egal("saisie: la valeur du mot de passe est en clair pour le script",
+         contexte.execute("document.getElementById('mdp').value"), "hunter2")
+    boite = boite_de(doc, "mdp")
+    peint = " ".join(f.texte for f in boite.lignes) if boite else ""
+    verifie("saisie: mais le mot de passe n'est jamais peint en clair",
+            "hunter2" not in peint, peint)
+    verifie("saisie: il est peint en puces de meme longueur",
+            peint.count("\u2022") == 7, peint)
+
+
+def verifie_ordre_des_evenements_de_frappe():
+    """`keydown` → valeur → `input` → `keyup`, et `preventDefault` obei."""
+    doc = _page_saisie()
+    contexte = doc.contexte_js
+    doc.pose_foyer(_par_id(doc, "courriel"))
+    contexte.execute(
+        "globalThis.__ordre = [];"
+        "var c = document.getElementById('courriel');"
+        "c.addEventListener('keydown', e => __ordre.push('keydown:' + e.key + ':' + c.value));"
+        "c.addEventListener('input', () => __ordre.push('input:' + c.value));"
+        "c.addEventListener('keyup', () => __ordre.push('keyup:' + c.value));")
+
+    doc.frappe("a", "a")
+    egal("frappe: l'ordre est keydown, input, keyup",
+         contexte.execute("__ordre.join('|')"),
+         "keydown:a:|input:a|keyup:a")
+
+    # `keydown` voit la valeur d'avant, `input` celle d'apres. Emettre `input`
+    # avant la mutation ferait lire a la page un etat qui n'existe pas.
+    contexte.execute("__ordre = []")
+    doc.frappe("b", "b")
+    egal("frappe: keydown voit l'ancienne valeur, input la nouvelle",
+         contexte.execute("__ordre.join('|')"),
+         "keydown:b:a|input:ab|keyup:ab")
+
+    # Une touche qui ne change rien n'emet pas `input` : sinon toute validation
+    # « au changement » se declencherait a chaque appui de fleche.
+    contexte.execute("__ordre = []")
+    doc.frappe("ArrowLeft")
+    verifie("frappe: une fleche n'emet pas input",
+            "input" not in contexte.execute("__ordre.join('|')"),
+            contexte.execute("__ordre.join('|')"))
+
+    # `preventDefault()` dans `keydown` empeche l'insertion.
+    contexte.execute(
+        "__ordre = [];"
+        "c.addEventListener('keydown', e => { if (e.key === 'x') e.preventDefault(); });")
+    avant = contexte.execute("c.value")
+    doc.frappe("x", "x")
+    egal("frappe: preventDefault empeche l'insertion",
+         contexte.execute("c.value"), avant)
+    verifie("frappe: et aucun input n'est emis",
+            "input" not in contexte.execute("__ordre.join('|')"),
+            contexte.execute("__ordre.join('|')"))
+    verifie("frappe: mais keyup part quand meme",
+            "keyup" in contexte.execute("__ordre.join('|')"),
+            contexte.execute("__ordre.join('|')"))
+
+
+def verifie_curseur_visible():
+    """Le caret est peint, et il n'est pas un caractere de la valeur."""
+    doc = _page_saisie()
+    champ = _par_id(doc, "courriel")
+
+    boite = boite_de(doc, "courriel")
+    egal("curseur: sans foyer, pas de curseur",
+         boite.curseur if boite else "pas de boite", None)
+
+    doc.pose_foyer(champ)
+    doc.remet_en_page(1000, 800)
+    boite = boite_de(doc, "courriel")
+    verifie("curseur: le foyer fait apparaitre un curseur",
+            boite is not None and boite.curseur is not None)
+    x_vide, _, hauteur, selection = boite.curseur
+    verifie("curseur: il a une hauteur", hauteur > 0, hauteur)
+    egal("curseur: sans selection, rien a surligner", selection, None)
+    verifie("curseur: il est dans la boite du champ",
+            boite.x <= x_vide <= boite.x + boite.largeur, (boite.x, x_vide))
+
+    tape(doc, "abc")
+    boite = boite_de(doc, "courriel")
+    x_apres = boite.curseur[0]
+    verifie("curseur: il avance quand on tape", x_apres > x_vide, (x_vide, x_apres))
+
+    # Le curseur n'entre jamais dans la valeur : c'est ce qui le distingue de
+    # la barre d'adresse du chrome, qui l'y insere.
+    egal("curseur: la valeur ne contient pas le caret",
+         doc.contexte_js.execute("document.getElementById('courriel').value"), "abc")
+    peint = " ".join(f.texte for f in boite.lignes)
+    egal("curseur: ni le texte peint", peint, "abc")
+
+    # La selection donne un rectangle a peindre.
+    doc.frappe("ArrowLeft", maj=True)
+    doc.frappe("ArrowLeft", maj=True)
+    doc.pose_curseur_visuel()
+    boite = boite_de(doc, "courriel")
+    verifie("curseur: une selection est surlignee",
+            boite.curseur[3] is not None, boite.curseur)
+    verifie("curseur: et le surlignage a une largeur",
+            boite.curseur[3][1] > 0, boite.curseur[3])
+
+    # Le curseur disparait avec le foyer.
+    doc.pose_foyer(None)
+    doc.remet_en_page(1000, 800)
+    boite = boite_de(doc, "courriel")
+    egal("curseur: il disparait avec le foyer", boite.curseur, None)
+
+
+def verifie_clic_donne_le_foyer():
+    """Le chemin reel : clic → test de pointage → focalisable → foyer → caret."""
+    doc = _page_saisie()
+    contexte = doc.contexte_js
+
+    def clique_sur(identifiant, decalage=4.0):
+        boite = boite_de(doc, identifiant)
+        verifie("clic: la boite de %s existe" % identifiant, boite is not None)
+        if boite is None:
+            return None
+        return doc.clique(boite.x + decalage, boite.y + boite.hauteur / 2.0)
+
+    clique_sur("courriel")
+    egal("clic: le champ prend le foyer",
+         contexte.execute("document.activeElement.id"), "courriel")
+    tape(doc, "bonjour")
+    egal("clic: on peut ecrire dedans juste apres",
+         contexte.execute("document.getElementById('courriel').value"), "bonjour")
+
+    clique_sur("mdp")
+    egal("clic: un autre champ reprend le foyer",
+         contexte.execute("document.activeElement.id"), "mdp")
+
+    clique_sur("envoi")
+    egal("clic: un bouton prend le foyer aussi",
+         contexte.execute("document.activeElement.id"), "envoi")
+
+    # Cliquer une etiquette donne le foyer au controle qu'elle designe.
+    clique_sur("et")
+    egal("clic: une etiquette passe le foyer a son controle",
+         contexte.execute("document.activeElement.id"), "courriel")
+
+    # Le clic pose le curseur la ou l'on a clique, pas systematiquement en fin.
+    boite = boite_de(doc, "courriel")
+    doc.clique(boite.x + 2.0, boite.y + boite.hauteur / 2.0)
+    egal("clic: cliquer a gauche met le curseur en tete",
+         contexte.execute("document.getElementById('courriel').selectionStart"), 0)
+
+    # Cliquer dans le vide retire le foyer.
+    doc.clique(5.0, doc.hauteur - 1.0)
+    egal("clic: cliquer hors de tout controle retire le foyer",
+         contexte.execute("document.activeElement.tagName"), "BODY")
+
+
+def verifie_cases_et_radios():
+    """Cocher, decocher, et un seul radio coche par groupe."""
+    doc = _page_saisie(
+        "<body><form id=f>"
+        "<input id=c1 type=checkbox name=c1>"
+        "<input id=c2 type=checkbox name=c2 disabled>"
+        "<input id=r1 type=radio name=choix value=a>"
+        "<input id=r2 type=radio name=choix value=b>"
+        "<input id=r3 type=radio name=autre value=c>"
+        "</form><script>1</script></body>")
+    contexte = doc.contexte_js
+    contexte.execute(
+        "globalThis.__vus = [];"
+        "for (const n of ['c1','r1','r2']) {"
+        "  const e = document.getElementById(n);"
+        "  e.addEventListener('input', () => __vus.push('input:' + n));"
+        "  e.addEventListener('change', () => __vus.push('change:' + n));"
+        "}")
+
+    doc.active(_par_id(doc, "c1"))
+    egal("case: un clic coche", contexte.execute("document.getElementById('c1').checked"),
+         True)
+    egal("case: input puis change sont emis",
+         contexte.execute("__vus.join('|')"), "input:c1|change:c1")
+    doc.active(_par_id(doc, "c1"))
+    egal("case: un second clic decoche",
+         contexte.execute("document.getElementById('c1').checked"), False)
+
+    doc.active(_par_id(doc, "c2"))
+    egal("case: une case desactivee ne bouge pas",
+         contexte.execute("document.getElementById('c2').checked"), False)
+
+    doc.active(_par_id(doc, "r1"))
+    doc.active(_par_id(doc, "r2"))
+    egal("radio: le second est coche",
+         contexte.execute("document.getElementById('r2').checked"), True)
+    egal("radio: et le premier ne l'est plus",
+         contexte.execute("document.getElementById('r1').checked"), False)
+    doc.active(_par_id(doc, "r3"))
+    egal("radio: un autre groupe n'est pas affecte",
+         contexte.execute("document.getElementById('r2').checked"), True)
+
+    # Au clavier : l'espace agit comme un clic.
+    doc.pose_foyer(_par_id(doc, "c1"))
+    doc.frappe(" ", " ")
+    egal("case: l'espace coche au clavier",
+         contexte.execute("document.getElementById('c1').checked"), True)
+
+
+def _par_id(doc, identifiant):
+    for nœud in doc.racine.parcours():
+        if isinstance(nœud, html.Element) \
+                and nœud.attributs.get("id") == identifiant:
+            return nœud
+    return None
+
+
 # --- Plate-forme comportementale ----------------------------------------------
 
 def _sur_serveur(chemin, largeur=1000, hauteur=800, battements=8, attente=0.02):
@@ -4435,18 +4802,30 @@ def verifie_fetch_reel():
         contexte = doc.contexte_js
         base = doc.base
 
-        def joue(code, attente=8):
+        def joue(code, jusqua=None, secondes=10.0):
+            """Execute, puis bat jusqu'a ce que la condition tienne.
+
+            Attendre un nombre fixe de battements rendait ces verifications
+            instables : sous charge, une reponse arrivait apres le dernier tour
+            et le test echouait sans que rien ne soit casse. Un test instable
+            est pire qu'absent — il apprend a ignorer les echecs.
+            """
             contexte.execute(code)
-            for _ in range(attente):
+            limite = _time.perf_counter() + secondes
+            while _time.perf_counter() < limite:
                 contexte.tic()
-                _time.sleep(0.03)
+                if jusqua is not None and contexte.execute(jusqua):
+                    return True
+                _time.sleep(0.02)
+            return jusqua is None
 
         joue("globalThis.__r = {};"
              "fetch('%s/json').then(r => {"
              "  __r.ok = r.ok; __r.status = r.status; __r.url = r.url;"
              "  __r.type = r.headers.get('content-type');"
              "  return r.json();"
-             "}).then(j => { __r.json = j.nom; })" % base)
+             "}).then(j => { __r.json = j.nom; })" % base,
+             jusqua="__r.json !== undefined")
         lu = _json.loads(contexte.execute("JSON.stringify(__r)"))
         egal("fetch: ok", lu.get("ok"), True)
         egal("fetch: status", lu.get("status"), 200)
@@ -4458,7 +4837,7 @@ def verifie_fetch_reel():
              "fetch('%s/status/404').then(r => __c.push(r.status + ':' + r.ok));"
              "fetch('%s/status/500').then(r => __c.push(String(r.status)));"
              "fetch('%s/redirect?to=/json&n=3').then(r => __c.push('r' + r.status));"
-             % (base, base, base))
+             % (base, base, base), jusqua="__c.length >= 3")
         codes = contexte.execute("__c.slice().sort().join(',')")
         verifie("fetch: un 404 arrive comme reponse, pas comme rejet",
                 "404:false" in codes, codes)
@@ -4469,7 +4848,7 @@ def verifie_fetch_reel():
              "fetch('%s/echo', {method:'POST',"
              " headers:{'Content-Type':'application/json'},"
              " body: JSON.stringify({a:1})}).then(r => r.json())"
-             ".then(j => { __p = j.corps; })" % base)
+             ".then(j => { __p = j.corps; })" % base, jusqua="__p !== ''")
         egal("fetch: un POST envoie bien son corps",
              contexte.execute("__p"), '{"a":1}')
 
@@ -4480,7 +4859,7 @@ def verifie_fetch_reel():
              "fetch('%s/delay/2', {signal: ac.signal})"
              " .then(() => { __a = 'PAS-ANNULE'; })"
              " .catch(e => { __a = e.name; });"
-             "ac.abort();" % base, attente=4)
+             "ac.abort();" % base, jusqua="__a !== ''")
         egal("fetch: abort() rejette avec AbortError",
              contexte.execute("__a"), "AbortError")
     finally:
@@ -4628,6 +5007,139 @@ def verifie_parcours_complet():
         # 15. L'interface a battu pendant tout le reseau.
         verifie("parcours: l'interface est restee vivante pendant le reseau",
                 parcours["battements"] > 10, parcours["battements"])
+    finally:
+        arrete()
+
+
+def verifie_parcours_utilisateur():
+    """Le parcours de connexion, joue comme un utilisateur le jouerait.
+
+    C'est la difference avec `verifie_parcours_complet`, qui posait les valeurs
+    par script. Ici rien n'est ecrit dans `input.value` : on clique, on tape
+    caractere par caractere, on tabule, on coche, on valide. Ce que le test
+    prouve alors n'est plus « les methodes existent » mais « on peut s'en
+    servir ».
+
+    C'est la verification de reference du navigateur. Si elle passe, une page de
+    connexion ordinaire est utilisable ; si elle casse, plus rien ne l'est.
+    """
+    import json as _json
+    import time as _time
+
+    doc, arrete = _sur_serveur("/page/parcours-complet.html", battements=4)
+    try:
+        contexte = doc.contexte_js
+        verifie("utilisateur: la page a un contexte", contexte is not None)
+        if contexte is None:
+            return
+
+        def clique(identifiant):
+            boite = boite_de(doc, identifiant)
+            if boite is None:
+                verifie("utilisateur: la boite de %s existe" % identifiant, False)
+                return
+            doc.clique(boite.x + 5.0, boite.y + boite.hauteur / 2.0)
+
+        def bat(secondes=6.0, jusqua=None):
+            limite = _time.perf_counter() + secondes
+            while _time.perf_counter() < limite:
+                doc.rafraichis()
+                if jusqua is not None and contexte.execute(jusqua):
+                    return True
+                _time.sleep(0.02)
+            return jusqua is None
+
+        # 2. Clic dans le champ d'adresse.
+        clique("email")
+        egal("utilisateur: le clic donne le foyer au champ",
+             contexte.execute("document.activeElement.id"), "email")
+
+        # 3. Le caret est visible.
+        boite = boite_de(doc, "email")
+        verifie("utilisateur: un caret est pose", boite.curseur is not None)
+
+        # 4. Frappe reelle, caractere par caractere.
+        tape(doc, "alice@exemple.fr")
+        egal("utilisateur: la valeur vient de la frappe",
+             contexte.execute("document.getElementById('email').value"),
+             "alice@exemple.fr")
+
+        # 5. Retour arriere, puis correction.
+        doc.frappe("Backspace")
+        doc.frappe("Backspace")
+        tape(doc, "com")
+        egal("utilisateur: retour arriere puis correction",
+             contexte.execute("document.getElementById('email').value"),
+             "alice@exemple.com")
+
+        # 6. Tab vers le mot de passe.
+        doc.frappe("Tab")
+        egal("utilisateur: Tab passe au champ suivant",
+             contexte.execute("document.activeElement.id"), "motdepasse")
+
+        # 7. Mot de passe tape reellement.
+        tape(doc, "secret42")
+        egal("utilisateur: le mot de passe est saisi",
+             contexte.execute("document.getElementById('motdepasse').value"),
+             "secret42")
+        boite = boite_de(doc, "motdepasse")
+        peint = " ".join(f.texte for f in boite.lignes) if boite else ""
+        verifie("utilisateur: il n'est pas peint en clair",
+                "secret42" not in peint, peint)
+
+        # 8. La case, au clavier.
+        doc.frappe("Tab")
+        egal("utilisateur: Tab atteint la case",
+             contexte.execute("document.activeElement.id"), "memoire")
+        doc.frappe(" ", " ")
+        egal("utilisateur: l'espace coche la case",
+             contexte.execute("document.getElementById('memoire').checked"), True)
+
+        # 9. Soumission par le bouton.
+        doc.frappe("Tab")
+        egal("utilisateur: Tab atteint le bouton",
+             contexte.execute("document.activeElement.id"), "valider")
+        doc.active(doc.foyer_actuel())
+        bat(8.0, jusqua="globalThis.__parcours.etapes."
+                        "some(e => e.indexOf('pushstate') === 0)")
+
+        parcours = _json.loads(
+            contexte.execute("JSON.stringify(globalThis.__parcours)"))
+        vues = {e.split("=")[0]: e.partition("=")[2] for e in parcours["etapes"]}
+
+        # 10-14. Ce que la soumission a reellement produit.
+        verifie("utilisateur: FormData porte l'adresse tapee",
+                "email=alice%40exemple.com" in vues.get("formdata", "")
+                or "email=alice@exemple.com" in vues.get("formdata", ""),
+                vues.get("formdata"))
+        verifie("utilisateur: et le mot de passe tape",
+                "secret42" in vues.get("formdata", ""), vues.get("formdata"))
+        verifie("utilisateur: et la case cochee",
+                "memoire=oui" in vues.get("formdata", ""), vues.get("formdata"))
+        egal("utilisateur: le POST a abouti", vues.get("post-status"), "200")
+        verifie("utilisateur: le serveur a recu ce qui a ete tape",
+                "secret42" in vues.get("serveur-a-recu", ""),
+                vues.get("serveur-a-recu"))
+        egal("utilisateur: une API JSON a repondu", vues.get("api-json"), "bouchaud")
+        egal("utilisateur: le DOM a ete mis a jour", vues.get("dom-maj"), "1")
+        egal("utilisateur: l'adresse a change sans rechargement",
+             vues.get("pushstate"), "/tableau")
+        # Le serveur local repond en quelques millisecondes : le vol est trop
+        # court pour compter beaucoup de battements, et exiger un grand nombre
+        # ici rendrait la verification dependante de la vitesse de la machine.
+        # La preuve que le reseau ne bloque pas est ailleurs, sur une reponse
+        # d'une seconde — `verifie_reseau_asynchrone`. Ici on verifie seulement
+        # que la minuterie a continue d'echoir pendant la sequence.
+        verifie("utilisateur: la minuterie a continue de battre",
+                parcours["battements"] > 0, parcours["battements"])
+
+        # 15. Retour arriere du navigateur.
+        contexte.execute("history.back()")
+        bat(1.5)
+        parcours = _json.loads(
+            contexte.execute("JSON.stringify(globalThis.__parcours)"))
+        verifie("utilisateur: back declenche popstate",
+                len(parcours["popstates"]) >= 1, parcours["popstates"])
     finally:
         arrete()
 
@@ -4964,12 +5476,19 @@ def principal():
         verifie_ressources_echouees,
         verifie_moignons,
         verifie_serveur_fixtures,
+        verifie_modele_edition,
+        verifie_saisie_reelle,
+        verifie_ordre_des_evenements_de_frappe,
+        verifie_curseur_visible,
+        verifie_clic_donne_le_foyer,
+        verifie_cases_et_radios,
         verifie_foyer,
         verifie_formulaire_plateforme,
         verifie_historique_session,
         verifie_fetch_reel,
         verifie_reseau_asynchrone,
         verifie_parcours_complet,
+        verifie_parcours_utilisateur,
         verifie_budget,
         verifie_page_complete,
         verifie_evenement_apres_chargement,

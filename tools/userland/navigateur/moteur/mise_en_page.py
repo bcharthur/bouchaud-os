@@ -15,7 +15,7 @@ fait ici.
 
 import bo
 
-from . import css, flex, grille, images, police, tableau
+from . import css, edition, flex, grille, images, police, tableau
 from .html import Element, Texte
 from . import telemetrie
 
@@ -25,7 +25,7 @@ class Boite:
 
     __slots__ = ("element", "style", "x", "y", "largeur", "hauteur",
                  "enfants", "lignes", "lien", "puce", "images",
-                 "hors_flux", "rogne", "toile")
+                 "hors_flux", "rogne", "toile", "curseur")
 
     def __init__(self, element, style):
         self.element = element
@@ -48,6 +48,9 @@ class Boite:
         self.rogne = False
         # Operations dessinees par un contexte 2D, si c'est un `<canvas>`.
         self.toile = None
+        # `(x, y, hauteur, selection)` quand ce champ est au foyer et doit
+        # montrer un curseur. `selection` vaut `(x, largeur)` ou `None`.
+        self.curseur = None
 
 
 class Fragment:
@@ -282,15 +285,30 @@ def _enfants(boite, contexte):
 
 
 def _texte_du_champ(element):
-    """Ce qu'un champ affiche : sa valeur, a defaut son invite."""
+    """Ce qu'un champ affiche : sa valeur courante, a defaut son invite.
+
+    `valeur_courante` est ce que l'utilisateur a tape ; l'attribut `value` reste
+    la valeur par defaut, celle que `form.reset()` restaure. Un champ de mot de
+    passe rend des puces : la vraie valeur ne sort jamais du modele d'edition,
+    et n'a donc aucune occasion d'etre peinte par megarde.
+    """
+    courante = getattr(element, "valeur_courante", None)
     if element.balise == "textarea":
+        if courante is not None:
+            return courante or element.attributs.get("placeholder", "")
         return element.texte() or element.attributs.get("placeholder", "")
     type_ = element.attributs.get("type", "text").lower()
     if type_ in ("checkbox", "radio", "hidden", "file", "color", "range"):
         return ""
+    if courante is not None:
+        if courante and type_ == "password":
+            return edition.PUCE * len(courante)
+        if courante:
+            return courante
+        return element.attributs.get("placeholder", "")
     valeur = element.attributs.get("value")
     if valeur:
-        return valeur
+        return edition.PUCE * len(valeur) if type_ == "password" else valeur
     if type_ in ("submit", "button", "reset"):
         return {"submit": "Envoyer", "reset": "Reinitialiser"}.get(type_, "")
     return element.attributs.get("placeholder", "")

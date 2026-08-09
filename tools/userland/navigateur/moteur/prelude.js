@@ -533,6 +533,13 @@
         // que la page avait bien preselectionne « equipe ».
         get value() {
             const balise = this.tagName.toLowerCase();
+            // Un champ editable tient sa valeur dans le modele d'edition, la ou
+            // la frappe l'ecrit. La lire dans l'attribut rendrait la valeur par
+            // defaut et perdrait tout ce que l'utilisateur a tape.
+            if (balise === "input" || balise === "textarea") {
+                const courante = appel("valeurChamp", this.__id);
+                if (courante !== null && courante !== undefined) return courante;
+            }
             if (balise === "select") {
                 const choisie = this.__optionChoisie();
                 return choisie ? choisie.value : "";
@@ -548,7 +555,12 @@
             return this.getAttribute("value") || "";
         }
         set value(v) {
-            if (this.tagName.toLowerCase() === "select") {
+            const balise = this.tagName.toLowerCase();
+            if ((balise === "input" || balise === "textarea")
+                    && appel("poseValeurChamp", this.__id, String(v)) !== false) {
+                return;
+            }
+            if (balise === "select") {
                 // Choisir par valeur, comme le fait `select.value = "x"` :
                 // l'option correspondante devient la selectionnee, et aucune
                 // autre ne l'est.
@@ -697,19 +709,29 @@
         /// Selection minimale dans un champ. Le curseur n'a pas de rendu, mais
         /// `selectionStart` est lu par toute bibliotheque de masque de saisie,
         /// et rendre `undefined` la faisait lever.
-        get selectionStart() { return this.__selDebut === undefined
-            ? String(this.value || "").length : this.__selDebut; }
-        set selectionStart(v) { this.__selDebut = Number(v) || 0; }
-        get selectionEnd() { return this.__selFin === undefined
-            ? String(this.value || "").length : this.__selFin; }
-        set selectionEnd(v) { this.__selFin = Number(v) || 0; }
+        get selectionStart() {
+            const s = appel("selectionChamp", this.__id);
+            return s ? s.debut : null;
+        }
+        set selectionStart(v) {
+            const s = appel("selectionChamp", this.__id) || { fin: 0 };
+            appel("poseSelectionChamp", this.__id, Number(v) || 0, s.fin);
+        }
+        get selectionEnd() {
+            const s = appel("selectionChamp", this.__id);
+            return s ? s.fin : null;
+        }
+        set selectionEnd(v) {
+            const s = appel("selectionChamp", this.__id) || { debut: 0 };
+            appel("poseSelectionChamp", this.__id, s.debut, Number(v) || 0);
+        }
         setSelectionRange(debut, fin) {
-            this.__selDebut = Number(debut) || 0;
-            this.__selFin = Number(fin) || 0;
+            appel("poseSelectionChamp", this.__id, Number(debut) || 0,
+                  Number(fin) || 0);
         }
         select() {
-            this.__selDebut = 0;
-            this.__selFin = String(this.value || "").length;
+            appel("poseSelectionChamp", this.__id, 0,
+                  String(this.value || "").length);
             this.focus();
         }
         click() { distribue(this, new Event("click", { bubbles: true, cancelable: true })); }
