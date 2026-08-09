@@ -888,11 +888,20 @@ class Index:
     que l'element n'a pas — elle n'aurait pas correspondu.
     """
 
-    __slots__ = ("par_id", "par_classe", "par_balise", "universelles", "sensible")
+    __slots__ = ("par_id", "par_classe", "par_balise", "universelles", "sensible",
+                 "pseudos")
 
     def __init__(self, regles):
         # Vrai des qu'une regle depend du survol, du foyer ou de l'enfoncement.
         self.sensible = any(r.selecteur.sensible for r in regles)
+        # Les pseudo-elements pour lesquels une regle existe. Sans cette liste,
+        # la mise en page calculait deux cascades supplementaires — `::before`
+        # et `::after` — pour **chaque** element de la page, y compris sur une
+        # feuille qui n'en contient aucune. Mesure sur pypi.org : 12 876
+        # cascades de pseudo-elements pour 2 307 elements, dont l'ecrasante
+        # majorite ne pouvaient designer personne.
+        self.pseudos = frozenset(r.selecteur.pseudo for r in regles
+                                 if r.selecteur.pseudo)
         self.par_id = {}
         self.par_classe = {}
         self.par_balise = {}
@@ -1724,6 +1733,7 @@ def contenu_engendre(regles, element, chemin, style_parent, pseudo):
     la norme, et c'est ce qui evite d'en fabriquer une pour chaque element de la
     page.
     """
+    telemetrie.compte("layout.cascade_pseudo")
     style = applique(regles, element, chemin, style_parent, pseudo)
     if "content" not in style:
         return None

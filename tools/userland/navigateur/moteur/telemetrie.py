@@ -76,6 +76,7 @@ def reinitialise():
     """Vide ce qui a ete note. Une page par mesure, sinon rien n'est comparable."""
     _notes.clear()
     _chronos.clear()
+    _compteurs.clear()
 
 
 def note(categorie, cle, exemple=None):
@@ -131,6 +132,28 @@ class chrono:
             entree[0] += 1
             entree[1] += ecoule
         return False
+
+
+# --- Compteurs bruts ----------------------------------------------------------
+
+_compteurs = {}
+
+
+def compte(nom, combien=1):
+    """Incremente un compteur. Le prix d'un test de booleen quand c'est eteint.
+
+    Distinct de `note()` : ici il n'y a ni cle secondaire ni exemple, seulement
+    un nombre. C'est ce qu'il faut pour compter des dizaines de milliers
+    d'evenements par mise en page sans que la mesure coute plus que ce qu'elle
+    mesure.
+    """
+    if not ACTIVE:
+        return
+    _compteurs[nom] = _compteurs.get(nom, 0) + combien
+
+
+def compteurs():
+    return dict(sorted(_compteurs.items(), key=lambda p: -p[1]))
 
 
 def temps():

@@ -13,11 +13,35 @@ reelle. C'est la seule chose que le moteur demande a l'hote Qt, par
 fait ici.
 """
 
-import bo
+import bo as _bo
 
 from . import css, edition, flex, grille, images, police, tableau
 from .html import Element, Texte
 from . import telemetrie
+
+
+class _BoMesure:
+    """Enrobe l'hote pour compter les mesures de texte.
+
+    Chaque appel traverse le pont vers Qt (ou vers Pillow hors OS) : c'est
+    l'operation la plus chere que la mise en page fasse a l'unite, et la
+    seule qu'on ne puisse pas rendre moins chere — seulement moins frequente.
+    Il faut donc savoir combien il y en a.
+    """
+
+    def __getattr__(self, nom):
+        return getattr(_bo, nom)
+
+    def largeur_texte(self, *args, **kwargs):
+        telemetrie.compte("layout.mesures_texte")
+        return _bo.largeur_texte(*args, **kwargs)
+
+    def hauteur_ligne(self, *args, **kwargs):
+        telemetrie.compte("layout.hauteurs_ligne")
+        return _bo.hauteur_ligne(*args, **kwargs)
+
+
+bo = _BoMesure()
 
 
 class Boite:
@@ -112,6 +136,22 @@ class Contexte:
     def __init__(self, regles, largeur_page, url="", image_video=None,
                  toile=None):
         self.regles = regles
+        # Le style deja calcule pendant **cette** passe, par element.
+        #
+        # Ce n'est pas un cache d'invalidation : il nait et meurt avec la passe,
+        # donc il ne peut pas rendre une valeur perimee — les regles, la
+        # fenetre et l'etat d'interaction sont fixes pendant toute sa duree.
+        #
+        # Il existe parce que la mesure l'a montre : `_style_de` est appele une
+        # premiere fois par `_dispose_ligne`, qui doit savoir si l'element est en
+        # ligne ou en bloc, puis une seconde par `_boite_pour`, qui fabrique la
+        # boite. Sur pypi.org, 2,66 appels de cascade par cle distincte, et
+        # 9 189 cles demandees plus d'une fois.
+        self._styles = {}
+        # Meme chose pour les boites engendrees, par `(element, pseudo)` : elles
+        # sont demandees une fois pour decider si elles existent, une autre pour
+        # les poser.
+        self._engendres = {}
         self.largeur_page = largeur_page
         # Adresse de la page : les `src` relatifs des images s'y resolvent.
         self.url = url
@@ -123,6 +163,7 @@ class Contexte:
 
 def construit(racine, regles, largeur_page, url="", image_video=None, toile=None):
     """Construit l'arbre de boites et rend (racine, hauteur totale)."""
+    telemetrie.compte("layout.passes")
     contexte = Contexte(regles, largeur_page, url, image_video, toile)
     style_initial = {
         "color": "#202124", "font-size": "16px", "line-height": "1.5",
@@ -165,6 +206,14 @@ def _style_de(element, style_parent, chemin, contexte):
     fixe = getattr(element, "style_engendre", None)
     if fixe is not None:
         return fixe
+
+    cle = id(element)
+    deja = contexte._styles.get(cle)
+    if deja is not None:
+        telemetrie.compte("layout.cascade_evitee")
+        return deja
+
+    telemetrie.compte("layout.cascade_element")
     style = css.applique(contexte.regles, element, chemin, style_parent)
 
     # Un element en ligne qui porte un bloc devient un bloc. La norme, elle,
@@ -177,6 +226,7 @@ def _style_de(element, style_parent, chemin, contexte):
             and _porte_un_bloc(element):
         style = dict(style)
         style["display"] = "block"
+    contexte._styles[cle] = style
     return style
 
 
@@ -230,8 +280,21 @@ def _engendre(boite, contexte, pseudo):
     element = boite.element
     if not isinstance(element, Element):
         return None
-    style = css.contenu_engendre(contexte.regles, element, _chemin(element),
-                                 boite.style, pseudo)
+    # Aucune regle de la page ne parle de ce pseudo-element : il ne peut
+    # designer personne, et la cascade rendrait toujours « pas de contenu ».
+    pseudos = getattr(contexte.regles, "pseudos", None)
+    if pseudos is not None and pseudo not in pseudos:
+        telemetrie.compte("layout.pseudo_evite")
+        return None
+
+    cle = (id(element), pseudo)
+    if cle in contexte._engendres:
+        telemetrie.compte("layout.pseudo_evite")
+        style = contexte._engendres[cle]
+    else:
+        style = css.contenu_engendre(contexte.regles, element, _chemin(element),
+                                     boite.style, pseudo)
+        contexte._engendres[cle] = style
     if style is None:
         return None
 
@@ -451,6 +514,7 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None
                        interieur_l, contexte)
         return
 
+    telemetrie.compte("layout.boites")
     mode = style.get("display", "block")
     if telemetrie.ACTIVE and mode not in DISPLAY_CONNUS:
         # Une valeur de `display` non reconnue retombe en bloc. `flow-root`
@@ -839,6 +903,7 @@ def _lignes_tableau(boite, contexte):
 
 
 def etendue_contenu(boite):
+    telemetrie.compte("layout.etendue_contenu")
     """Ce que le contenu d'une boite occupe reellement en largeur.
 
     Une boite de bloc prend toute la largeur qu'on lui donne : la mesurer rend
@@ -1078,6 +1143,7 @@ def _pose_image(boite, nœud, style, lien, gauche, largeur,
 def _pose_texte(boite, texte, style, lien, gauche, largeur,
                 curseur_x, curseur_y, hauteur_ligne):
     """Coupe le texte en mots et les pose en revenant a la ligne au besoin."""
+    telemetrie.compte("layout.textes_poses")
     texte = css.transforme_texte(texte, style)
     taille = _taille_police(style)
     gras = _est_gras(style)
