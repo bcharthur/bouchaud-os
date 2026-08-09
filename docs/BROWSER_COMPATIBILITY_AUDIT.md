@@ -1,13 +1,13 @@
 # Audit de compatibilité fonctionnelle de Bouchaud Browser
 
-**Révision étudiée :** `8f1b872`, 8 août 2026. **Priorité :** compatibilité
+**Révision étudiée :** `7b74bdc`, 9 août 2026. **Priorité :** compatibilité
 réelle (70 %), performance/outillage (20 %), sécurité fondamentale (10 %).
 
 Tout ce que ce document affirme se reproduit :
 
 ```bash
 ./tools/userland/suivi.sh              # tout, avec l'écart depuis la dernière fois
-./tools/userland/test-moteur.sh        # 926 vérifications
+./tools/userland/test-moteur.sh        # 1 029 vérifications
 cd tools/userland/navigateur
 python3 serveur_test.py                # le serveur de fixtures, à la main
 python3 compatibilite.py --corpus --fixtures
@@ -429,12 +429,142 @@ complet (il n'y a jamais deux contextes de navigation vivants — voir
 
 ---
 
+## 15. Interaction utilisateur et profil du layout
+
+### 15.1 L'edition de texte, pour de vrai
+
+Le parcours de connexion passait deja, mais en trichant : le test posait
+`input.value = "alice"`. Il tape maintenant, caractere par caractere, et plus
+une seule valeur n'est ecrite par script dans la verification de reference.
+
+`moteur/edition.py` porte ce qu'aucun attribut ne peut porter : la valeur
+courante, le curseur, la selection. La distinction avec l'attribut `value`
+n'est pas cosmetique — la norme separe la valeur **par defaut**, que
+`form.reset()` restaure, de la valeur **courante**, que l'utilisateur tape. Les
+confondre rendait `reset()` incapable de restaurer quoi que ce soit.
+
+| Surface | Etat |
+|---|---|
+| valeur, curseur, selection pour `input` text/search/email/password/url/tel/number et `textarea` | fait |
+| caret peint par le moteur, jamais insere dans la valeur | fait |
+| clic → test de pointage → focalisable → blur → focus → `activeElement` → caret | fait |
+| clic sur une etiquette → foyer sur son controle | fait |
+| position du caret au clic, mesuree dans la vraie fonte | fait |
+| lettres, chiffres, ponctuation, espace, `Backspace`, `Delete` | fait |
+| `Enter` : rien dans un `input`, retour dans un `textarea`, soumission du formulaire | fait |
+| `ArrowLeft/Right`, `Home`, `End` | fait |
+| `Shift+fleche`, `Ctrl+A`, `setSelectionRange` | fait |
+| `keydown` → valeur → `input` → `keyup`, `preventDefault` obei | fait |
+| mot de passe : valeur en clair dans le modele, puces a l'ecran | fait |
+| case a cocher, groupe radio exclusif, `disabled` respecte | fait |
+| `beforeinput` | **non** — voir ci-dessous |
+| presse-papiers `Ctrl+C/X/V` | **non** — voir ci-dessous |
+| `select` : liste deroulante native | **non** |
+
+**`beforeinput` est absent, et c'est assume pour cette passe.** Il s'insere
+entre `keydown` et la mutation, au meme endroit ou `keydown` decide deja
+d'annuler. L'architecture l'accueille sans deplacement : `Document.frappe`
+emet ses evenements en sequence explicite, et l'ajout tient en un appel
+supplementaire avant `edition.applique_touche`. Ce qui manque n'est pas la
+place mais `InputEvent` avec `inputType` et `data`, dont aucune page du corpus
+n'a encore fait usage.
+
+**Le presse-papiers est absent** : `hote.cpp` n'expose pas `QClipboard`. C'est
+une addition de quelques lignes cote hote plus trois touches cote modele —
+`Ctrl+C` lit `texte_selectionne()`, `Ctrl+X` y ajoute `efface_avant()`,
+`Ctrl+V` appelle `insere()`. Rangé comme etape suivante immediate du chantier
+d'edition, pas comme chantier a part.
+
+**Un choix a signaler :** l'ordre de tabulation ignore `tabindex` positif. Il
+est rare, deconseille par les guides d'accessibilite, et le simuler a moitie
+serait pire que de suivre l'ordre du document. `tabindex="-1"` et
+`tabindex="0"`, eux, sont respectes.
+
+### 15.2 Profil du layout
+
+Question posee : pourquoi 14,7 secondes ? Compteurs ajoutes dans la
+telemetrie, mesure sur `pypi.org/project/requests` (2 307 elements, 3 passes).
+
+| Compteur | Avant |
+|---|---|
+| passes de mise en page | 3 |
+| cascades d'element | 14 691 |
+| cascades de pseudo-element | 12 876 |
+| mesures de texte | 11 970 |
+| boites posees | 6 945 |
+| hauteurs de ligne | 5 946 |
+| textes poses | 5 538 |
+| `etendue_contenu` | 2 307 |
+| **appels de cascade par cle distincte** | **2,66** |
+
+Le dernier chiffre est la reponse. 27 570 appels pour 10 350
+`(generation, element, pseudo)` distincts : **9 189 cles etaient demandees plus
+d'une fois dans la meme passe**.
+
+La trace nomme les coupables. `_style_de` est appele une premiere fois par
+`_dispose_ligne`, qui doit savoir si l'element est en ligne ou en bloc, puis
+une seconde par `_boite_pour`, qui fabrique la boite. Meme chose pour les
+boites engendrees : une fois pour savoir si elles existent, une autre pour les
+poser.
+
+Second constat : la mise en page calculait `::before` et `::after` pour
+**chaque** element, meme sur une feuille qui n'en contient aucune.
+
+### 15.3 L'optimisation, et ce qu'elle a rendu
+
+Un cache **borne a la passe**, qui nait et meurt avec elle. Ce n'est pas de
+l'invalidation incrementale : il ne peut pas rendre une valeur perimee, puisque
+les regles, la fenetre et l'etat d'interaction sont fixes pendant toute sa
+duree. Plus un court-circuit quand l'index n'a aucune regle pour le
+pseudo-element demande.
+
+Mesure sur exactement les memes pages, avant puis apres :
+
+| | BEFORE | AFTER | |
+|---|---|---|---|
+| mise en page cumulee, corpus | 14 693 ms | **8 207 ms** | −44 % |
+| `pypi.org/project/requests` | 8 363 ms | **4 530 ms** | −46 % |
+| appels de cascade par cle | 2,66 | **1,00** | zero doublon |
+| cascades d'element | 14 691 | 4 845 | −67 % |
+| cascades de pseudo-element | 12 876 | 5 500 | −57 % |
+| verifications | 1 029 passent | 1 029 passent | resultat visuel inchange |
+
+Ce que le profil dit aussi, et qui **ne justifie pas encore** de travail :
+11 970 mesures de texte pour 5 538 poses, soit 2,2 par pose. Une mesure
+anterieure situait le cout total de la mesure de texte a 4 % de la mise en
+page ; le rapport gain/risque n'y est pas. Le prochain gain de layout n'est
+donc plus un cache, mais le nombre de passes — trois par chargement — et le
+cout unitaire du placement.
+
+### 15.4 Les cinq blocages suivants
+
+| # | Blocage | Preuve | Recommandation |
+|---|---|---|---|
+| 1 | **Trois passes de mise en page par chargement** — 8,2 s restants pour un travail qui, une fois deduplique, se fait en une passe et demie | `layout.passes = 3`, compteur permanent | le prochain chantier de performance, et le seul qui reste gros |
+| 2 | **`<select>` sans liste deroulante** — on ne peut pas choisir une option a la souris | §15.1 ; le clavier n'est pas branche non plus | petit, et il ferme le dernier trou des formulaires |
+| 3 | **`beforeinput` et presse-papiers** | §15.1 | petit, suite immediate de l'edition |
+| 4 | **`<iframe>` n'est pas un contexte de navigation** — et c'est lui qui commande SOP | §6, zero occurrence dans `moteur/` | gros, et **a concevoir avant d'ecrire** : `BrowsingContext` doit servir `window`, `iframe`, l'origine, `postMessage` et la navigation, pas seulement dessiner une sous-page |
+| 5 | **`cursor`, `fit-content()`/`min()`/`max()`/`clamp()`** — 168 et 288 occurrences sur 4/5 sites | rapport CSS | petits, mesures, sans dependance |
+
+**Recommandation.** Le prochain chantier est le **blocage 1**, la reduction du
+nombre de passes. Raison : c'est le seul des cinq dont la mesure montre qu'il
+pese encore des secondes, et le chantier d'edition vient de rendre
+l'interactivite reelle — donc la latence devient perceptible la ou elle ne
+l'etait pas. Les blocages 2, 3 et 5 sont petits et peuvent voyager avec.
+
+L'iframe reste explicitement **hors chantier** tant que l'abstraction
+`BrowsingContext` n'est pas concue : la coder comme « une sous-page dessinee »
+couterait deux fois, une premiere pour la faire, une seconde pour la defaire
+quand `window`, l'origine et `postMessage` devront s'y adosser.
+
+---
+
 ## Handoff
 
-Le prochain chantier le mieux justifié est le **blocage 1**, l'édition clavier :
-c'est la seule étape du parcours de connexion qui reste simulée par script
-plutôt que par une frappe. Les blocages 2 et 5 sont petits et touchent le même
-code hôte, ils peuvent voyager avec.
+L'édition clavier est faite (§15.1) et le layout profilé puis réduit de 44 %
+(§15.2, §15.3). Le prochain chantier recommandé est la réduction du **nombre de
+passes de mise en page** — voir §15.4, où les cinq blocages restants sont
+classés par ce que la mesure justifie.
 
 La règle reste : `suivi.sh --strict` avant de pousser, et une fonctionnalité
 n'est finie que lorsqu'une fixture la joue, qu'un test comportemental la garde,
