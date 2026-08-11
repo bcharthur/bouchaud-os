@@ -14,12 +14,12 @@ entiere. C'est exactement le probleme que l'architecture multi-processus de
 Chromium et de WebKit resout — et la question posee ici est de savoir si ce
 noyau peut la porter.
 
-La reponse courte est **oui pour l'isolation des pannes et de la memoire, non
-pour celle du temps de calcul**. Separer le renderer sur cet OS empecherait un
-site de faire tomber le navigateur, et — depuis que `RLIMIT_AS` est applique —
-d'epuiser la memoire de la machine. Cela ne l'empecherait toujours **pas** de le
-rendre lent : un seul cœur, un tourniquet, aucune priorite. Le reste du document
-dit pourquoi, avec les lignes de code a l'appui.
+La reponse courte est **oui sur les trois axes** : un renderer separe
+n'emporterait plus le navigateur en plantant, ni la machine en fuyant
+(`RLIMIT_AS`), ni l'interface en calculant (deux classes d'ordonnancement). Le
+dernier point etait le manque que la premiere version de ce document
+identifiait comme decisif ; il est leve. Le reste du document dit comment, avec
+les lignes de code a l'appui.
 
 La methode est celle des autres audits du depot : lire le dispatch d'appels
 systeme, lire les implementations, et ne rien affirmer qui ne soit verifiable.
@@ -180,9 +180,10 @@ et elle est deja la, pour une raison qui n'avait rien a voir.
 - **Un seul CPU.** `sched_getaffinity` rend un masque a 1 (`abi/mod.rs:407`).
   Pas de SMP. Deux processus ne calculent jamais en parallele : ils se
   partagent le meme temps.
-- **Pas de priorites.** `sched_setscheduler`, `sched_setparam` et
-  `sched_setaffinity` rendent 0 sans rien faire ; `sched_get_priority_max` rend
-  0 (`abi/mod.rs:414`). Un renderer ne peut etre ni privilegie ni relegue.
+- **Pas de priorites POSIX completes.** `sched_setscheduler`, `sched_setparam`
+  et `sched_setaffinity` rendent toujours 0 sans rien faire. Ce qui existe
+  passe par `setpriority`/`getpriority` et se resume au signe de `nice` : deux
+  classes, pas vingt niveaux.
 - **Tourniquet simple**, commutation aux points de blocage volontaires et sur
   IRQ0 uniquement si le timer a interrompu du code ring 3 (`task.rs:17-27`). Le
   noyau lui-meme n'est jamais preempte : il n'est pas reentrant.
@@ -191,17 +192,21 @@ et elle est deja la, pour une raison qui n'avait rien a voir.
   depassement. C'est delibere — c'est le seul quota qui change quelque chose au
   projet de processus separes. Rien ne borne en revanche le temps CPU, le
   nombre de descripteurs, ni la taille cumulee des tampons IPC.
+- **Deux classes de priorite**, `Interactive` et `Normale`, posees par
+  `setpriority`. Le tourniquet sert d'abord les taches interactives pretes, et
+  rend la main apres huit tours consecutifs pour qu'aucune tache normale ne soit
+  affamee. Ce n'est pas un ordonnanceur different : c'est le meme, avec un ordre
+  de service.
 
-Consequence a enoncer clairement, parce qu'elle contredit l'argument habituel :
-sur cet OS, sortir le rendu dans un processus separe **n'empeche pas une page
-lourde de rendre l'interface lente**. Le renderer et l'interface se disputent le
-meme cœur en tourniquet, sans qu'aucun mecanisme ne favorise le second.
+La consequence que la premiere version de ce document enoncait — « sortir le
+rendu n'empechera pas une page lourde de rendre l'interface lente » — n'est plus
+vraie. Elle l'etait tant que le tourniquet servait tout le monde a egalite ;
+elle cesse de l'etre des lors qu'une classe passe avant l'autre.
 
-Ce que la separation apporte, en revanche : un renderer qui segfault ou qu'on
-tue laisse l'interface debout, avec un onglet mort au lieu d'une application
-morte — et, depuis `RLIMIT_AS`, un renderer qui fuit meurt seul au lieu
-d'emporter la machine. C'est deux benefices sur trois ; le troisieme demande des
-priorites d'ordonnancement, pas une architecture.
+Ce qui reste vrai : un seul cœur veut dire que l'interface passe **avant**, pas
+qu'elle tourne **en meme temps**. C'est suffisant pour la reactivite — un reveil
+servi a l'heure —, ce ne l'est pas pour le debit. Le SMP repond a la seconde
+question, et seulement a elle.
 
 ## 7. Attente d'evenements
 
@@ -268,11 +273,11 @@ est prete.
 
 ---
 
-## Renderer isolation readiness — le verdict, apres les correctifs
+## Renderer isolation readiness — le verdict
 
 *Mis a jour le 11 aout 2026, apres l'eviction du cache de pages, `POLLOUT`
-honnete et `RLIMIT_AS`. Le renderer n'existe toujours pas — ce qui suit dit
-seulement ce qu'il trouverait s'il etait ecrit.*
+honnete, `RLIMIT_AS` et les deux classes d'ordonnancement. Le renderer n'existe
+toujours pas — ce qui suit dit ce qu'il trouverait.*
 
 Le prototype minimal honnete : **un processus d'interface, un processus de
 rendu**. Le renderer construit une liste d'affichage et peint dans une surface
@@ -282,69 +287,62 @@ partagee ; l'interface compose et gere les entrees.
 
 | Axe | Etat | Ce qui le porte |
 |---|---|---|
-| **Memory safety** | **pret** | Le cache de pages compte descripteurs ouverts, mappages vivants et possession des pages ; les frames ne partent que lorsque les deux premiers comptes sont a zero. `Drop for Process` couvre la mort brutale — tuer un renderer ne fait plus fuir ses surfaces. Un mappage vivant survit a la fermeture de son descripteur, ce qui est ce que POSIX promet. |
-| **IPC backpressure** | **pret** | Tubes et paires de sockets ont une capacite (64 KiB). Plein : pas de `POLLOUT`, `EAGAIN` a l'ecriture non bloquante, ecriture courte quand il reste un peu de place. Lecteur ferme : `POLLHUP`/`POLLERR` sans qu'on les demande, et `EPIPE`. Un protocole de controle peut enfin ralentir au lieu de gonfler. |
-| **Process lifecycle** | **pret** | `fork` + `execve` + `wait4` + `SIGCHLD` de bout en bout ; `kill(pid, SIGKILL)` tue et se recolte. Reserve inchangee : `fork` copie l'espace d'adressage **immediatement**, sans copie a l'ecriture. Il faut donc forker tot — le *zygote* de Chromium — avant que le tas ne grossisse. |
-| **Shared surfaces** | **pret** | `memfd_create` + `ftruncate` + `mmap(MAP_SHARED)` sur des frames reellement partagees, transmises par `SCM_RIGHTS`, synchronisees par un `futex` dont la cle est l'**adresse physique** — donc valable entre deux processus qui voient la surface a deux adresses virtuelles differentes. `shm-probe` etablit la chaine entiere, cycle de vie compris. |
-| **Resource quota** | **partiel** | `RLIMIT_AS` se pose, se relit et s'applique dans `brk` et `mmap` : un renderer qui fuit meurt seul au lieu d'emporter la machine. Mais c'est le **seul** quota. Rien ne borne le temps CPU, le nombre de descripteurs ni la taille des tampons IPC cumules. |
+| **crash isolation** | **READY** | `fork` + `execve` + `wait4` + `SIGCHLD` de bout en bout ; `kill(pid, SIGKILL)` tue et se recolte. Un renderer qui plante ou qu'on tue laisse l'interface debout. Reserve inchangee : `fork` copie l'espace d'adressage immediatement, sans copie a l'ecriture — il faut donc forker tot, avant que le tas ne grossisse. |
+| **memory quota** | **READY** | `RLIMIT_AS` se pose, se relit et s'applique dans `brk` et `mmap`. Un renderer qui fuit meurt seul au lieu d'emporter la machine. C'est le seul quota : ni temps CPU, ni descripteurs, ni tampons IPC cumules. |
+| **IPC backpressure** | **READY** | Tubes et paires de sockets bornes a 64 KiB. Plein : pas de `POLLOUT`, `EAGAIN` a l'ecriture non bloquante, ecriture courte quand il reste un peu de place. Lecteur ferme : `POLLHUP`/`POLLERR` sans qu'on les demande, et `EPIPE`. |
+| **shared buffers** | **READY** | `memfd_create` + `ftruncate` + `mmap(MAP_SHARED)` sur des frames reellement partagees, transmises par `SCM_RIGHTS`, synchronisees par un `futex` dont la cle est l'**adresse physique**. Le cycle de vie est complet : les frames reviennent quand le dernier descripteur **et** le dernier mappage ont disparu. |
+| **scheduler priority** | **READY** | Deux classes, `Interactive` et `Normale`, posees par `setpriority(PRIO_PROCESS, 0, nice)`. Le tourniquet sert d'abord les taches interactives pretes ; au-dela de huit tours consecutifs, il rend la main pour un tour, ce qui empeche la famine. Un programme portable n'a rien de special a faire : `nice(-5)` suffit. |
 
-### Ce qui reste manquant, et ce que cela coute
+### Ce qui manque encore
 
-* **Un seul CPU, pas de priorites.** `sched_getaffinity` rend toujours un
-  masque a 1 ; `sched_setscheduler` rend toujours 0 sans rien faire. C'est le
-  manque qui decide de la valeur du renderer separe : **la separation
-  n'achetera pas la reactivite**. Un renderer qui calcule prend le cœur au
-  meme titre que l'interface, et rien ne permet de le reculer.
+* **Un seul CPU.** `sched_getaffinity` rend toujours un masque a 1. Les
+  priorites font que l'interface passe **avant**, pas qu'elle tourne **en meme
+  temps**. C'est suffisant pour la reactivite ; ce ne l'est pas pour le debit.
 * **`poll` et `epoll_wait` attendent activement.** Une tache bloquee reste
-  `Ready` et se fait reordonnancer pour re-tester. Invisible avec un
-  processus ; a surveiller des qu'il y en aura plusieurs qui attendent chacun
-  sur son canal. Le cout n'est pas mesure aujourd'hui parce qu'il n'y a rien a
-  mesurer — c'est le premier chiffre a prendre le jour ou le renderer existe.
+  `Ready` et se fait reordonnancer pour re-tester. Invisible avec un processus,
+  a mesurer des qu'il y en aura plusieurs qui attendent chacun sur son canal —
+  c'est le premier chiffre a prendre le jour ou le renderer existe.
 * **`clone(CLONE_VFORK)` en `ENOSYS`**, donc pas de `posix_spawn`. Contournable
-  par `fork` + `execve`, qui est le chemin qu'emploie deja `subprocess`.
-* **Le cache de pages reste un `Vec` parcouru lineairement.** Correct, mais en
-  O(pages) par mappage. A revoir si une surface depasse quelques mebioctets.
+  par `fork` + `execve`.
+* **Le cache de pages reste un `Vec` parcouru lineairement**, en O(pages) par
+  mappage. A revoir si une surface depasse quelques mebioctets.
 
 ### Verdict
 
-**Le prototype est constructible, et il achete maintenant deux choses au lieu
-d'une.** Avant les correctifs, separer le rendu donnait l'isolation des pannes
-et rien de plus — avec, en prime, une fuite de memoire physique a chaque
-surface recreee et un canal IPC incapable de ralentir. Ces deux defauts sont
-corriges et eprouves.
+**Les cinq axes sont prets.** Le dernier obstacle que cet audit avait
+identifie — « la separation n'achetera pas la reactivite » — est leve : deux
+classes d'ordonnancement suffisent a faire passer l'interface devant le calcul,
+sur un cœur unique et sans remplacer le tourniquet.
 
-Ce qu'on obtiendrait aujourd'hui :
+Ce qu'un renderer separe achete desormais :
 
-* un onglet qui plante ou qu'on tue laisse l'interface debout ; **oui** ;
-* un onglet qui fuit meurt seul, sans emporter la machine ; **oui**, sous
-  `RLIMIT_AS` ;
-* un onglet qui calcule laisse l'interface fluide ; **non**, et cela ne
-  changera pas sans priorites d'ordonnancement.
+* un onglet qui plante ou qu'on tue laisse l'interface debout — **oui** ;
+* un onglet qui fuit meurt seul, sans emporter la machine — **oui** ;
+* un onglet qui calcule laisse l'interface fluide — **oui**, sous reserve que
+  la sonde le confirme sur la machine reelle (voir ci-dessous).
 
-La troisieme ligne est celle qui doit decider du calendrier. Tant qu'elle est
-fausse, le renderer separe est un chantier lourd pour un benefice reel mais
-partiel — et le moteur, lui, a encore des gains a prendre sans changer
-d'architecture.
+**La reserve, et elle est importante.** `ordonnanceur-probe` mesure la latence
+d'un processus qui se reveille toutes les 16 ms pendant qu'un autre calcule,
+avec et sans priorite. Elle est ecrite, elle est branchee dans `tools/test.sh`,
+et elle refuse de conclure sur une machine a plusieurs cœurs — ou la charge ne
+degrade rien, et ou comparer « avec » et « sans » ne mesurerait que du bruit.
+Elle n'a donc pas encore ete jouee sous Bouchaud OS, faute de QEMU dans
+l'environnement de developpement courant. **Le mecanisme est ecrit et compile ;
+son effet reste a constater.** Tant que ce chiffre n'existe pas, `scheduler
+priority` est READY par construction, pas par mesure — et la difference merite
+d'etre dite.
 
 ## Ordre de travail suggere
 
-Les deux correctifs qui devaient preceder le renderer sont faits :
-l'eviction du cache de pages et `POLLOUT` honnete. `RLIMIT_AS` s'y est ajoute
-parce qu'il s'est revele reellement local — quelques lignes dans `sys_mmap` et
-`sys_brk`, et « le renderer a fui » cesse d'etre « la machine est morte ».
+Les quatre chantiers que cet audit demandait sont faits : eviction du cache de
+pages, `POLLOUT` honnete, `RLIMIT_AS`, priorites d'ordonnancement. Ce qui
+vient ensuite :
 
-Ce qui vient ensuite, dans l'ordre du rapport qualite/prix :
-
-1. **Des priorites d'ordonnancement minimales** — deux classes suffiraient :
-   interface et arriere-plan. C'est **la** prochaine amelioration rentable de
-   l'ordonnanceur, et elle l'est bien avant le SMP : sur un cœur unique, c'est
-   le seul moyen de rendre la separation utile a la reactivite, et cela se
-   greffe sur le tourniquet existant sans le remplacer. Un `nice` honnete
-   plutot qu'un ordonnanceur entierement different.
-2. **Instrumenter l'attente active** de `poll`/`epoll_wait` le jour ou
-   plusieurs processus attendent. Si le cout reste negligeable, ne rien faire ;
-   s'il grimpe, remplacer la boucle par de vraies files d'attente devient le
-   chantier OS prioritaire.
-3. **Le SMP**, qui rend la separation *rentable* sans la rendre *possible*.
-   C'est un chantier d'un autre ordre, et il n'est un prealable a rien.
-
+1. **Jouer `ordonnanceur-probe` sous QEMU** et consigner le chiffre. C'est la
+   derniere chose qui separe « pret par construction » de « pret, mesure ».
+2. **Le prototype de renderer**, si le chiffre est bon. Le protocole est
+   esquisse dans `docs/BROWSER_RENDERER_PROTOCOL.md`.
+3. **Instrumenter l'attente active** de `poll`/`epoll_wait` le jour ou
+   plusieurs processus attendent. Si le cout reste negligeable, ne rien faire.
+4. **Le SMP**, qui rend la separation *rentable* sans la rendre *possible*.
+   Chantier d'un autre ordre, prealable a rien.

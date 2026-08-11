@@ -52,6 +52,40 @@ use crate::kernel::vmm::AddressSpace;
 /// Taille de la pile noyau d'une tache (64 KiB).
 const KSTACK_SIZE: usize = 64 * 1024;
 
+/// Classe d'ordonnancement d'une tache.
+///
+/// Deux, pas davantage. L'audit OS avait identifie l'absence de priorites comme
+/// le dernier manque avant un processus de rendu separe : sur un cœur unique et
+/// un tourniquet strict, sortir le rendu d'un processus n'empeche pas une page
+/// lourde de rendre l'interface lente, parce que rien ne favorise l'interface.
+///
+/// Ce qu'il fallait n'etait pas un ordonnanceur different — le tourniquet
+/// convient — mais un moyen de dire lequel des deux compte quand les deux sont
+/// prets. Deux classes suffisent a le dire, et une troisieme n'ajouterait que
+/// des questions sans reponse.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Priorite {
+    /// Ce qui repond a l'utilisateur : l'interface du navigateur, le serveur
+    /// graphique. Servi en premier quand plusieurs taches sont pretes.
+    Interactive,
+    /// Tout le reste : calcul, rendu, travail de fond. Jamais affame.
+    Normale,
+}
+
+/// Nombre maximal de tours consecutifs accordes aux taches interactives.
+///
+/// Sans cette borne, une tache interactive qui calcule sans jamais se bloquer
+/// affamerait tout le reste — et « l'interface reste fluide » deviendrait
+/// « rien d'autre ne tourne ». Au-dela du compte, le tourniquet reprend ses
+/// droits pour un tour, ce qui garantit une progression a toute tache prete.
+///
+/// Huit : assez pour que l'interface enchaine plusieurs reveils courts sans
+/// interruption, assez peu pour qu'une tache de fond conserve au moins un
+/// neuvieme du temps dans le pire des cas.
+const TOURS_INTERACTIFS_MAX: u32 = 8;
+
+static mut TOURS_INTERACTIFS: u32 = 0;
+
 /// Etat d'ordonnancement d'une tache.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum TaskState {
@@ -189,6 +223,8 @@ pub struct Task {
     pub tid: u32,
     pub process: Rc<RefCell<Process>>,
     pub state: TaskState,
+    /// Classe d'ordonnancement. Voir [`Priorite`].
+    pub priorite: Priorite,
     /// Etat ring 3 quand la tache n'est pas en cours d'execution.
     pub frame: TrapFrame,
     /// Contexte noyau (pile) pour le changement de tache.
@@ -313,6 +349,10 @@ impl Task {
             tid: alloc_tid(),
             process,
             state: TaskState::Ready,
+            // Toute tache nait normale. C'est a elle de se declarer
+            // interactive — un programme qui ne demande rien ne doit pas
+            // pouvoir prendre le pas sur l'interface par accident.
+            priorite: Priorite::Normale,
             frame,
             ctx: Context::default(),
             kstack,
@@ -460,20 +500,74 @@ fn install(task: &mut Task) {
     }
 }
 
-/// Choisit la prochaine tache prete apres `after` (tourniquet).
+/// Choisit la prochaine tache prete apres `after`.
+///
+/// Un tourniquet a deux etages. On cherche d'abord une tache **interactive**
+/// prete, en repartant de `after` pour que plusieurs taches interactives se
+/// relaient equitablement entre elles. A defaut, on prend la premiere prete,
+/// quelle qu'elle soit.
+///
+/// La borne `TOURS_INTERACTIFS_MAX` est ce qui separe une priorite d'une
+/// famine : passe ce nombre de tours consecutifs, l'etage interactif est
+/// ignore pour un tour et le tourniquet ordinaire reprend. Une tache normale
+/// avance donc toujours, meme face a une tache interactive qui ne se bloque
+/// jamais.
 fn pick_next(after: usize) -> Option<usize> {
-    let list = tasks();
-    let len = list.len();
+    let len = tasks().len();
     if len == 0 {
         return None;
     }
+
+    let force_partage = unsafe { TOURS_INTERACTIFS >= TOURS_INTERACTIFS_MAX };
+    if !force_partage {
+        for offset in 1..=len {
+            let index = (after.wrapping_add(offset)) % len;
+            let candidate = &tasks()[index];
+            if candidate.state == TaskState::Ready
+                && candidate.priorite == Priorite::Interactive
+            {
+                unsafe { TOURS_INTERACTIFS += 1 };
+                return Some(index);
+            }
+        }
+    }
+
     for offset in 1..=len {
         let index = (after.wrapping_add(offset)) % len;
-        if list[index].state == TaskState::Ready {
+        if tasks()[index].state == TaskState::Ready {
+            // Une tache normale a eu la main : le compte repart. C'est ce qui
+            // rend la borne glissante plutot que definitive.
+            if tasks()[index].priorite == Priorite::Normale {
+                unsafe { TOURS_INTERACTIFS = 0 };
+            } else {
+                unsafe { TOURS_INTERACTIFS += 1 };
+            }
             return Some(index);
         }
     }
     None
+}
+
+/// Change la classe d'ordonnancement du processus courant.
+///
+/// Rend l'ancienne. Toutes les taches du processus suivent : une priorite
+/// s'applique a un programme, pas a l'un de ses fils — un navigateur dont
+/// seule la moitie des fils serait prioritaire aurait une interface qui saccade
+/// une fois sur deux.
+pub fn pose_priorite(priorite: Priorite) -> Priorite {
+    let pid = current().process.borrow().pid;
+    let ancienne = current().priorite;
+    for task in tasks().iter_mut() {
+        if task.process.borrow().pid == pid {
+            task.priorite = priorite;
+        }
+    }
+    ancienne
+}
+
+/// La classe d'ordonnancement du processus courant.
+pub fn priorite() -> Priorite {
+    current().priorite
 }
 
 /// Verifie l'invariant de non-reentrance avant de commuter.

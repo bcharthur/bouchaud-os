@@ -90,6 +90,14 @@ pub const MUNLOCK: u64 = 150;
 pub const MLOCKALL: u64 = 151;
 pub const MUNLOCKALL: u64 = 152;
 pub const PRCTL: u64 = 157;
+/// `setpriority` / `getpriority` : la « gentillesse » d'un processus.
+///
+/// C'est l'ABI par laquelle un programme se declare interactif. On ne reprend
+/// pas les vingt niveaux de Linux — le noyau n'en a que deux — mais le signe
+/// suffit a les distinguer, et un programme portable n'a rien de special a
+/// faire : `nice(-5)` marche ici comme ailleurs.
+pub const SETPRIORITY: u64 = 141;
+pub const GETPRIORITY: u64 = 140;
 pub const ARCH_PRCTL: u64 = 158;
 pub const GETTID: u64 = 186;
 pub const FUTEX: u64 = 202;
@@ -231,6 +239,8 @@ pub fn name(number: u64) -> &'static str {
         GETEUID => "geteuid",
         GETEGID => "getegid",
         PRCTL => "prctl",
+        SETPRIORITY => "setpriority",
+        GETPRIORITY => "getpriority",
         ARCH_PRCTL => "arch_prctl",
         GETTID => "gettid",
         FUTEX => "futex",
@@ -316,7 +326,7 @@ pub fn print_implemented() {
         ("signaux", &[RT_SIGACTION, RT_SIGPROCMASK, RT_SIGRETURN, RT_SIGSUSPEND, RT_SIGPENDING, SIGALTSTACK, KILL, TKILL, TGKILL, PAUSE, ALARM, SETITIMER, GETITIMER]),
         ("reseau", &[SOCKET, CONNECT, BIND, SENDTO, RECVFROM, SENDMSG, RECVMSG, SENDMMSG, RECVMMSG, SHUTDOWN, GETSOCKNAME, GETPEERNAME, SOCKETPAIR, SETSOCKOPT, GETSOCKOPT]),
         ("temps", &[CLOCK_GETTIME, CLOCK_GETRES, GETTIMEOFDAY, TIME]),
-        ("systeme", &[UNAME, SYSINFO, GETRLIMIT, PRLIMIT64, GETRANDOM, GETUID, GETEUID, GETGID, GETEGID, SCHED_GETAFFINITY]),
+        ("systeme", &[UNAME, SYSINFO, GETRLIMIT, PRLIMIT64, GETRANDOM, GETUID, GETEUID, GETGID, GETEGID, SCHED_GETAFFINITY, SETPRIORITY, GETPRIORITY]),
     ];
     let mut total = 0;
     for (title, numbers) in groups.iter() {

@@ -412,6 +412,31 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
             8
         }
         SCHED_SETAFFINITY | SCHED_SETSCHEDULER | SCHED_SETPARAM => 0,
+        // `setpriority(which, who, nice)` : le seul moyen pour un programme de
+        // se declarer interactif. Le noyau n'a que deux classes, mais le signe
+        // de `nice` suffit a les distinguer — et un programme portable n'a rien
+        // de special a faire, `nice(-5)` marche ici comme ailleurs.
+        //
+        // Seule la valeur compte, pas la cible : `which`/`who` designent
+        // toujours le processus courant faute de groupes de processus reels.
+        SETPRIORITY => {
+            let gentillesse = args[2] as i32;
+            let voulue = if gentillesse < 0 {
+                task::Priorite::Interactive
+            } else {
+                task::Priorite::Normale
+            };
+            task::pose_priorite(voulue);
+            0
+        }
+        GETPRIORITY => {
+            // Linux decale la valeur rendue de 20 pour distinguer une erreur ;
+            // musl la remet en place. On rend donc `20 - nice`.
+            match task::priorite() {
+                task::Priorite::Interactive => 25, // nice = -5
+                task::Priorite::Normale => 20,     // nice = 0
+            }
+        }
         SCHED_GETSCHEDULER => 0,
         SCHED_GET_PRIORITY_MAX | SCHED_GET_PRIORITY_MIN => 0,
         PRCTL => 0,
