@@ -2737,6 +2737,113 @@ def verifie_index_regles():
     egal("index: une feuille de 500 classes n'en propose que l'utile",
          len(index_large.candidates(span)), 1)
 
+    verifie_index_cles()
+
+
+def verifie_index_cles():
+    """Les cles d'indexation : ce qui est range ou, et surtout ce qui ne l'est pas.
+
+    Un index de selecteurs a un mode de defaillance particulier : il ne casse
+    rien bruyamment, il **perd des styles**. Une regle rangee sous une cle que
+    l'element ne porte pas n'est jamais essayee, et la page s'affiche presque
+    bien — c'est le pire genre de bogue a diagnostiquer.
+
+    Chaque cas ci-dessous verifie donc la meme chose sous deux angles : que le
+    style calcule par l'index est identique a celui calcule sans lui, et que le
+    filtrage a bien eu lieu.
+    """
+    def chemin_de(source, balise):
+        page = html.analyse(source)
+        cible = next(n for n in page.parcours()
+                     if isinstance(n, html.Element) and n.balise == balise)
+        chemin, courant = [], cible
+        while courant is not None:
+            chemin.append(courant)
+            courant = courant.parent
+        chemin.reverse()
+        return cible, chemin
+
+    def meme_style(nom, feuille, source, balise, attendu_couleur):
+        regles = css.analyse(feuille)
+        index = css.indexe(regles)
+        cible, chemin = chemin_de(source, balise)
+        par_index = css.applique(index, cible, chemin, {})
+        par_liste = css.applique(regles, cible, chemin, {})
+        egal("index %s: meme resultat que sans index" % nom, par_index, par_liste)
+        egal("index %s: la regle s'applique" % nom,
+             par_index.get("color"), attendu_couleur)
+
+    # --- Attribut : la cle la plus rentable de la mesure ---------------------
+    # 34 des 116 regles non indexables de pypi.org tenaient a `[type]`.
+    meme_style("attribut", "[type=text] { color: #aa0000; }",
+               '<body><input type="text"></body>', "input", "#aa0000")
+    index = css.indexe(css.analyse("[type=text] { color: #aa0000; }"))
+    _, chemin = chemin_de('<body><p>x</p></body>', "p")
+    egal("index attribut: un element sans l'attribut ne voit pas la regle",
+         len(index.candidates(chemin[-1])), 0)
+
+    # --- `:is()` prete ses cles ---------------------------------------------
+    meme_style("is", ":is(input, select, textarea) { color: #00aa00; }",
+               '<body><select></select></body>', "select", "#00aa00")
+    index = css.indexe(css.analyse(":is(input, select) { color: #00aa00; }"))
+    _, chemin = chemin_de('<body><p>x</p></body>', "p")
+    egal("index is: une balise hors du groupe ne voit pas la regle",
+         len(index.candidates(chemin[-1])), 0)
+
+    # --- `:not()` ne prete PAS les siennes -----------------------------------
+    # C'est le cas ou une erreur d'indexation serait invisible en test naif :
+    # `:not(.modal)` designe TOUT SAUF `.modal`. Le ranger sous `.modal` le
+    # rendrait invisible pour tous les autres — c'est-a-dire presque tous.
+    meme_style("not", ":not(.modal) { color: #0000aa; }",
+               '<body><p>x</p></body>', "p", "#0000aa")
+    index = css.indexe(css.analyse(":not(.modal) { color: #0000aa; }"))
+    _, chemin = chemin_de('<body><p>x</p></body>', "p")
+    verifie("index not: la regle reste universelle",
+            len(index.candidates(chemin[-1])) == 1,
+            len(index.candidates(chemin[-1])))
+
+    # --- `:is()` dont une branche est libre reste universel ------------------
+    index = css.indexe(css.analyse(":is(p, [hidden]) { color: #111; }"))
+    _, chemin = chemin_de('<body><span hidden>x</span></body>', "span")
+    verifie("index is: une branche par attribut range sous cet attribut",
+            len(index.candidates(chemin[-1])) == 1,
+            len(index.candidates(chemin[-1])))
+
+    # --- Partition par pseudo-element ---------------------------------------
+    # 53 % des cascades de pypi.org visaient un pseudo-element et essayaient
+    # quand meme toutes les regles de l'element porteur.
+    feuille = """
+        p { color: #101010; }
+        p::before { content: "a"; color: #202020; }
+        p::after  { content: "b"; color: #303030; }
+    """
+    regles = css.analyse(feuille)
+    index = css.indexe(regles)
+    cible, chemin = chemin_de('<body><p>x</p></body>', "p")
+    egal("index pseudo: l'element ne voit que ses regles",
+         len(index.candidates(cible, None)), 1)
+    egal("index pseudo: ::before ne voit que les siennes",
+         len(index.candidates(cible, "before")), 1)
+    egal("index pseudo: le style de ::before est le bon",
+         css.applique(index, cible, chemin, {}, "before").get("color"), "#202020")
+    egal("index pseudo: celui de ::after aussi",
+         css.applique(index, cible, chemin, {}, "after").get("color"), "#303030")
+    egal("index pseudo: et celui de l'element n'a pas bouge",
+         css.applique(index, cible, chemin, {}).get("color"), "#101010")
+
+    # --- `:root` ne designe que la racine ------------------------------------
+    index = css.indexe(css.analyse(":root { color: #404040; }"))
+    _, chemin = chemin_de('<body><p>x</p></body>', "p")
+    egal("index root: un element ordinaire ne voit pas la regle",
+         len(index.candidates(chemin[-1])), 0)
+
+    # --- Aucune regle rendue deux fois ---------------------------------------
+    # Un `:is()` range sous plusieurs classes que l'element porte toutes.
+    index = css.indexe(css.analyse(":is(.fas, .far) { color: #505050; }"))
+    _, chemin = chemin_de('<body><i class="fas far">x</i></body>', "i")
+    egal("index is: une regle rangee sous deux cles n'est rendue qu'une fois",
+         len(index.candidates(chemin[-1])), 1)
+
 
 def verifie_variables_css():
     """Les proprietes personnalisees, sans lesquelles une page moderne est nue.

@@ -697,19 +697,49 @@ class Simple:
     def poids(self):
         return self._poids
 
-    def cle(self):
-        """Le trait le plus discriminant du maillon, pour l'indexation.
+    def cles(self):
+        """Les traits discriminants du maillon, pour l'indexation.
 
-        L'identifiant d'abord, une classe ensuite, la balise a defaut. `None`
-        pour un maillon qu'aucun index ne peut restreindre.
+        Rend une liste : un element doit porter **l'un** de ces traits pour que
+        le maillon puisse le designer. Liste vide = aucun index ne restreint.
+
+        L'ordre de preference va du plus selectif au moins selectif :
+        l'identifiant, une classe, la balise, un nom d'attribut. Le dernier
+        n'est pas un raffinement gratuit — mesure sur pypi.org : 34 des 116
+        regles qu'aucun index ne restreignait tenaient a `[type]`, `[hidden]`
+        ou `[tabindex]`, essayees contre les 10 344 elements de la page alors
+        qu'une poignee porte ces attributs.
+
+        Faute de trait propre, un `:is()` ou un `:where()` prete les siens :
+        `:is(input, select, textarea)` ne designe que ces trois balises, donc
+        ranger la regle sous chacune est exact. `:not()` en est exclu, et la
+        distinction est essentielle : `:not(.modal)` designe **tout sauf**
+        `.modal` — ranger la regle sous `.modal` la rendrait invisible pour
+        l'immense majorite des elements qu'elle doit styler.
         """
         if self.identifiant:
-            return ("#", self.identifiant)
+            return [("#", self.identifiant)]
         if self.classes:
-            return (".", self.classes[0])
+            return [(".", self.classes[0])]
         if self.balise:
-            return ("b", self.balise)
-        return None
+            return [("b", self.balise)]
+        if self.attributs:
+            return [("[", self.attributs[0][0])]
+        # `:root` ne peut designer que la racine du document.
+        if "root" in self.structurelles and not self.etats:
+            return [("b", "html")]
+        empruntees = []
+        for genre, sous in self.groupes:
+            if genre not in ("is", "where"):
+                return []
+            for selecteur in sous:
+                cles = selecteur.cles()
+                if not cles:
+                    # Une seule branche non restreinte, et le groupe entier
+                    # redevient universel : l'union doit couvrir tous les cas.
+                    return []
+                empruntees.extend(cles)
+        return empruntees
 
 
 def _precedents(element, un_seul):
@@ -776,9 +806,14 @@ class Selecteur:
         # savoir pour l'autoriser malgre la frontiere.
         self.vise_hote = bool(self.maillons) and "host" in self.maillons[0].structurelles
 
-    def cle(self):
-        """La cle d'indexation du selecteur : celle de son dernier maillon."""
-        return self.maillons[-1].cle() if self.maillons else None
+    def cles(self):
+        """Les cles d'indexation du selecteur : celles de son dernier maillon.
+
+        Seul le dernier maillon compte : c'est lui qui decrit l'element style.
+        `nav > ul > li` se range sous `li`, et sera essaye contre les `li` de la
+        page — pas contre ses `nav`.
+        """
+        return self.maillons[-1].cles() if self.maillons else []
 
     def correspond(self, chemin):
         """`chemin` est la lignee de l'element, du plus lointain a lui-meme."""
@@ -913,6 +948,68 @@ def correspond_un(liste, element):
     return any(s.correspond_element(element) for s in liste)
 
 
+class _Tables:
+    """Les regles d'un meme pseudo-element, rangees par cle.
+
+    Cinq casiers, consultes par un coup de dictionnaire chacun. Le dernier —
+    `universelles` — est celui qu'on paie : ses regles sont essayees contre
+    **tous** les elements, et c'est donc lui qu'il faut vider.
+    """
+
+    __slots__ = ("par_id", "par_classe", "par_balise", "par_attribut",
+                 "universelles", "multi")
+
+    def __init__(self):
+        self.par_id = {}
+        self.par_classe = {}
+        self.par_balise = {}
+        self.par_attribut = {}
+        self.universelles = []
+        # Vrai si une regle a ete rangee sous plusieurs cles (un `:is()`). Un
+        # element peut alors la recevoir deux fois, et il faut dedupliquer.
+        self.multi = False
+
+    def range(self, regle, cles):
+        if not cles:
+            self.universelles.append(regle)
+            return
+        if len(cles) > 1:
+            self.multi = True
+        for genre, valeur in cles:
+            table = (self.par_id if genre == "#"
+                     else self.par_classe if genre == "."
+                     else self.par_attribut if genre == "["
+                     else self.par_balise)
+            table.setdefault(valeur, []).append(regle)
+
+    def candidates(self, element):
+        liste = list(self.universelles)
+        identifiant = element.identifiant
+        if identifiant:
+            liste.extend(self.par_id.get(identifiant, ()))
+        for classe in element.classes:
+            liste.extend(self.par_classe.get(classe, ()))
+        liste.extend(self.par_balise.get(element.balise, ()))
+        if self.par_attribut:
+            for nom in element.attributs:
+                regles = self.par_attribut.get(nom)
+                if regles:
+                    liste.extend(regles)
+        if self.multi:
+            # Une regle rangee sous deux classes que l'element porte toutes
+            # deux reviendrait deux fois. Sans consequence sur le style calcule
+            # — les memes declarations appliquees deux fois donnent la meme
+            # chose — mais c'est du travail paye deux fois.
+            vues = set()
+            uniques = []
+            for regle in liste:
+                if id(regle) not in vues:
+                    vues.add(id(regle))
+                    uniques.append(regle)
+            return uniques
+        return liste
+
+
 class Index:
     """Les regles rangees par ce que leur dernier maillon exige.
 
@@ -924,12 +1021,26 @@ class Index:
     totalite d'un seul coup de dictionnaire.
 
     Ce que l'index ne change pas : le resultat. Une regle ecartee ici est une
-    regle dont le dernier maillon exige un identifiant, une classe ou une balise
-    que l'element n'a pas — elle n'aurait pas correspondu.
+    regle dont le dernier maillon exige quelque chose que l'element n'a pas —
+    elle n'aurait pas correspondu. Le tri final — origine, specificite, ordre
+    d'apparition, `!important`, frontiere d'ombre — se fait exactement comme
+    avant, sur les seules regles retenues. **L'index est un filtre, pas une
+    semantique.**
+
+    ## Le partitionnement par pseudo-element
+
+    Une meme feuille sert trois cascades par element : l'element lui-meme,
+    son `::before`, son `::after`. Les trois consultaient le meme casier, puis
+    jetaient ce qui ne concernait pas leur pseudo — c'est-a-dire presque tout,
+    puisque l'immense majorite des regles n'en visent aucun.
+
+    Mesure sur pypi.org : 5 502 des 10 344 cascades — 53 % — etaient faites
+    pour un pseudo-element, chacune essayant les 74 regles candidates de
+    l'element porteur pour n'en retenir qu'une ou deux. Partitionner l'index
+    par pseudo rend ces 53 % presque gratuits.
     """
 
-    __slots__ = ("par_id", "par_classe", "par_balise", "universelles", "sensible",
-                 "pseudos")
+    __slots__ = ("par_pseudo", "sensible", "pseudos")
 
     def __init__(self, regles):
         # Vrai des qu'une regle depend du survol, du foyer ou de l'enfoncement.
@@ -937,35 +1048,21 @@ class Index:
         # Les pseudo-elements pour lesquels une regle existe. Sans cette liste,
         # la mise en page calculait deux cascades supplementaires — `::before`
         # et `::after` — pour **chaque** element de la page, y compris sur une
-        # feuille qui n'en contient aucune. Mesure sur pypi.org : 12 876
-        # cascades de pseudo-elements pour 2 307 elements, dont l'ecrasante
-        # majorite ne pouvaient designer personne.
+        # feuille qui n'en contient aucune.
         self.pseudos = frozenset(r.selecteur.pseudo for r in regles
                                  if r.selecteur.pseudo)
-        self.par_id = {}
-        self.par_classe = {}
-        self.par_balise = {}
-        self.universelles = []
+        self.par_pseudo = {}
         for regle in regles:
-            cle = regle.selecteur.cle()
-            if cle is None:
-                self.universelles.append(regle)
-                continue
-            genre, valeur = cle
-            table = (self.par_id if genre == "#"
-                     else self.par_classe if genre == "." else self.par_balise)
-            table.setdefault(valeur, []).append(regle)
+            tables = self.par_pseudo.get(regle.selecteur.pseudo)
+            if tables is None:
+                tables = _Tables()
+                self.par_pseudo[regle.selecteur.pseudo] = tables
+            tables.range(regle, regle.selecteur.cles())
 
-    def candidates(self, element):
-        """Les regles susceptibles de s'appliquer a cet element."""
-        liste = list(self.universelles)
-        identifiant = element.identifiant
-        if identifiant:
-            liste.extend(self.par_id.get(identifiant, ()))
-        for classe in element.classes:
-            liste.extend(self.par_classe.get(classe, ()))
-        liste.extend(self.par_balise.get(element.balise, ()))
-        return liste
+    def candidates(self, element, pseudo=None):
+        """Les regles susceptibles de styler cet element (ou son pseudo)."""
+        tables = self.par_pseudo.get(pseudo)
+        return tables.candidates(element) if tables is not None else []
 
 
 def indexe(regles):
@@ -1637,7 +1734,8 @@ def applique(regles, element, chemin, style_parent, pseudo=None):
     # `regles` est soit un [`Index`], soit une liste brute. La liste reste
     # acceptee pour que le moteur soit utilisable sans preparation, mais toute
     # mise en page reelle passe par l'index.
-    candidates = regles.candidates(element) if isinstance(regles, Index) else regles
+    indexe = isinstance(regles, Index)
+    candidates = regles.candidates(element, pseudo) if indexe else regles
 
     # Une racine d'ombre isole : les regles de la page ne l'atteignent pas, et
     # les siennes ne sortent pas. Sans cette frontiere, deux composants poses
@@ -1646,7 +1744,9 @@ def applique(regles, element, chemin, style_parent, pseudo=None):
 
     correspondantes = []
     for regle in candidates:
-        if regle.selecteur.pseudo != pseudo:
+        # L'index partitionne deja par pseudo ; le filtre ne sert plus que la
+        # liste brute.
+        if not indexe and regle.selecteur.pseudo != pseudo:
             continue
         if _OMBRES[0] and not _portee_admet(regle, element, ombre):
             continue
