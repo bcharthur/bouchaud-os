@@ -372,16 +372,25 @@ pub fn sys_write(fd: i32, buffer: u64, count: usize) -> i64 {
             if readable {
                 return -errno::EBADF;
             }
+            let non_bloquant = fd_flags(fd) & O_NONBLOCK != 0;
+            let place = match attends_place(
+                || {
+                    let state = shared.borrow();
+                    if state.readers == 0 { Capacite::Rompu } else { Capacite::Place(state.place()) }
+                },
+                non_bloquant,
+            ) {
+                Ok(place) => place,
+                Err(erreur) => return erreur,
+            };
+            // Ecriture courte : on ecrit ce qui tient et on le dit. C'est la
+            // semantique POSIX d'un tube presque plein, et c'est elle qui donne
+            // sa contre-pression a l'appelant — un `write` qui rendrait `count`
+            // sans avoir tout ecrit ferait perdre des octets en silence.
             let mut state = shared.borrow_mut();
-            // Ecrire dans un tube que plus personne ne lit n'a pas de sens :
-            // Linux leve SIGPIPE et rend EPIPE. Faute de SIGPIPE ici, on rend
-            // l'erreur — c'est ce que voit de toute facon un programme qui
-            // ignore le signal, comme le font Python et Qt.
-            if state.readers == 0 {
-                return -errno::EPIPE;
-            }
-            state.buffer.extend_from_slice(&data);
-            count as i64
+            let ecrits = core::cmp::min(place, data.len());
+            state.buffer.extend_from_slice(&data[..ecrits]);
+            ecrits as i64
         }
         FdKind::EventFd(state) => {
             if count < 8 {
@@ -400,8 +409,21 @@ pub fn sys_write(fd: i32, buffer: u64, count: usize) -> i64 {
         FdKind::TimerFd(_) => -errno::EINVAL,
         FdKind::Socket(_) => crate::kernel::abi::net::sys_sendto(fd, buffer, count, 0, 0, 0),
         FdKind::SocketPair(_, outbox) => {
-            outbox.borrow_mut().octets.extend_from_slice(&data);
-            count as i64
+            let non_bloquant = fd_flags(fd) & O_NONBLOCK != 0;
+            let place = match attends_place(
+                || {
+                    let canal = outbox.borrow();
+                    if canal.lecteurs == 0 { Capacite::Rompu } else { Capacite::Place(canal.place()) }
+                },
+                non_bloquant,
+            ) {
+                Ok(place) => place,
+                Err(erreur) => return erreur,
+            };
+            let mut canal = outbox.borrow_mut();
+            let ecrits = core::cmp::min(place, data.len());
+            canal.octets.extend_from_slice(&data[..ecrits]);
+            ecrits as i64
         }
         FdKind::Epoll(_) => -errno::EINVAL,
     }
@@ -454,6 +476,13 @@ pub fn sys_writev(fd: i32, iov: u64, count: usize) -> i64 {
             return if total > 0 { total } else { result };
         }
         total += result;
+        // Ecriture courte : le canal est plein. Passer au vecteur suivant
+        // laisserait un trou au milieu du flux — l'appelant croirait avoir
+        // transmis une suite continue alors qu'il manquerait sa fin. On rend ce
+        // qui est parti, et c'est a lui de reprendre a cet endroit.
+        if (result as usize) < len {
+            break;
+        }
     }
     total
 }
@@ -1541,7 +1570,105 @@ fn read_input(buffer: u64, count: usize, device: input::Device) -> i64 {
 // --- Attente d'evenements ----------------------------------------------------
 
 const POLLIN: u32 = 0x001;
+const POLLERR: u32 = 0x008;
+const POLLHUP: u32 = 0x010;
 const POLLOUT: u32 = 0x004;
+
+/// Ce qu'un canal repond quand on lui demande s'il accepte des octets.
+pub enum Capacite {
+    /// Place disponible, en octets (0 = sature).
+    Place(usize),
+    /// Plus personne ne lit : ecrire n'a plus de sens.
+    Rompu,
+}
+
+/// Delai au-dela duquel une ecriture bloquante renonce, en millisecondes.
+///
+/// POSIX ferait attendre indefiniment. Ce noyau ne le peut pas honnetement :
+/// une ecriture bloquee n'est reveillee par rien d'autre que l'ordonnanceur, et
+/// un processus mono-thread qui remplit son propre tube s'y perdrait sans
+/// qu'aucun signal ne puisse l'en sortir. On attend donc longtemps — assez pour
+/// que tout lecteur normal ait eu la main plusieurs fois — puis on rend
+/// `EAGAIN`. C'est une divergence assumee, et elle est visible : le programme
+/// recoit une erreur au lieu de se figer.
+const ATTENTE_ECRITURE_MS: u64 = 5_000;
+
+/// Attend qu'un canal ait de la place. Rend la place obtenue, ou l'erreur.
+fn attends_place<F: Fn() -> Capacite>(etat: F, non_bloquant: bool) -> Result<usize, i64> {
+    let echeance = crate::kernel::timer::ticks()
+        + crate::kernel::timer::ms_to_ticks(ATTENTE_ECRITURE_MS);
+    loop {
+        match etat() {
+            // Ecrire dans un canal que plus personne ne lit n'a pas de sens :
+            // Linux leve SIGPIPE et rend EPIPE. Faute de SIGPIPE ici, on rend
+            // l'erreur — c'est ce que voit de toute facon un programme qui
+            // ignore le signal, comme le font Python et Qt.
+            Capacite::Rompu => return Err(-errno::EPIPE),
+            Capacite::Place(place) if place > 0 => return Ok(place),
+            Capacite::Place(_) => {}
+        }
+        if non_bloquant {
+            return Err(-errno::EAGAIN);
+        }
+        if crate::kernel::timer::ticks() >= echeance {
+            return Err(-errno::EAGAIN);
+        }
+        // Ceder la main est ce qui permet au lecteur de vider le canal : c'est
+        // tout le mecanisme de contre-pression sur un noyau a un seul cœur.
+        task::yield_now();
+    }
+}
+
+/// Un descripteur accepte-t-il des octets ? (pour `poll`/`select`)
+///
+/// La reponse etait « toujours oui », ce qui privait tout protocole de sa
+/// contre-pression : un producteur interrogeait `poll`, recevait un feu vert
+/// permanent, et remplissait le tampon jusqu'a la memoire. Les canaux bornes
+/// repondent maintenant selon leur place reelle.
+fn writable(fd: i32) -> bool {
+    let process = task::current_process();
+    let kind = match process.borrow().files.get(fd) {
+        Some(desc) => desc.kind.clone(),
+        None => return false,
+    };
+    match kind {
+        // Un tube dont plus personne ne lit est « pret » : l'ecriture doit
+        // echouer tout de suite en EPIPE, pas attendre une place qui ne
+        // servira jamais.
+        FdKind::Pipe(state, false) => {
+            let state = state.borrow();
+            state.readers == 0 || state.place() > 0
+        }
+        FdKind::Pipe(_, true) => false,
+        FdKind::SocketPair(_, outbox) => {
+            let canal = outbox.borrow();
+            canal.lecteurs == 0 || canal.place() > 0
+        }
+        // Les autres n'ont pas de tampon borne : ils acceptent toujours.
+        _ => true,
+    }
+}
+
+/// Bits que le noyau rend sans qu'on les demande : `POLLHUP`, `POLLERR`.
+///
+/// La distinction n'est pas decorative. Cote **lecture**, un pair disparu est
+/// une fin de fichier ordinaire : `POLLHUP` seul, et le `read` rendra 0. Cote
+/// **ecriture**, c'est une erreur : le `write` rendra `EPIPE`, et `POLLERR`
+/// l'annonce — sans quoi un producteur verrait `POLLOUT` (la place est libre,
+/// puisque personne ne consomme) et croirait pouvoir continuer.
+fn etat_pair(fd: i32) -> u32 {
+    let process = task::current_process();
+    let kind = match process.borrow().files.get(fd) {
+        Some(desc) => desc.kind.clone(),
+        None => return 0,
+    };
+    match kind {
+        FdKind::Pipe(state, true) if state.borrow().writers == 0 => POLLHUP,
+        FdKind::Pipe(state, false) if state.borrow().readers == 0 => POLLHUP | POLLERR,
+        FdKind::SocketPair(_, outbox) if outbox.borrow().lecteurs == 0 => POLLHUP | POLLERR,
+        _ => 0,
+    }
+}
 
 /// Un descripteur est-il pret en lecture ?
 fn readable(fd: i32) -> bool {
@@ -1601,9 +1728,14 @@ pub fn sys_poll(fds: u64, count: usize, timeout_ms: i32) -> i64 {
                 if events & POLLIN != 0 && readable(fd) {
                     revents |= POLLIN;
                 }
-                if events & POLLOUT != 0 {
-                    revents |= POLLOUT; // les ecritures ne bloquent jamais ici
+                if events & POLLOUT != 0 && writable(fd) {
+                    revents |= POLLOUT;
                 }
+                // `POLLHUP` et `POLLERR` ne se demandent pas : le noyau les
+                // rend toujours. Un ecrivain dont le lecteur a ferme doit
+                // l'apprendre de son `poll`, meme s'il n'a demande que
+                // `POLLOUT` — sinon il boucle sur un canal mort.
+                revents |= etat_pair(fd);
             }
             if revents != 0 {
                 ready += 1;
@@ -1727,9 +1859,17 @@ pub fn sys_epoll_wait(epfd: i32, events: u64, max: usize, timeout_ms: i32) -> i6
             if written >= max {
                 break;
             }
+            let mut prets = 0u32;
             if wanted & POLLIN != 0 && readable(fd) {
+                prets |= POLLIN;
+            }
+            if wanted & POLLOUT != 0 && writable(fd) {
+                prets |= POLLOUT;
+            }
+            prets |= etat_pair(fd);
+            if prets != 0 {
                 let base = events + (written * 12) as u64;
-                user_write(base, &POLLIN.to_le_bytes());
+                user_write(base, &prets.to_le_bytes());
                 user_write(base + 4, &data.to_le_bytes());
                 written += 1;
             }

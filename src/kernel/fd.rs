@@ -81,6 +81,11 @@ impl PipeState {
         // Un `pipe()` cree exactement une extremite de chaque cote.
         PipeState { buffer: Vec::new(), readers: 1, writers: 1 }
     }
+
+    /// Place restante avant saturation.
+    pub fn place(&self) -> usize {
+        CAPACITE_CANAL.saturating_sub(self.buffer.len())
+    }
 }
 
 /// Cree l'etat partage d'un nouveau tube.
@@ -113,18 +118,36 @@ pub struct TimerFdState {
 impl FdKind {
     /// Une extremite de plus existe sur cet objet.
     fn retain(&self) {
-        if let FdKind::Pipe(state, readable) = self {
-            let mut state = state.borrow_mut();
-            if *readable { state.readers += 1 } else { state.writers += 1 }
+        match self {
+            FdKind::Pipe(state, readable) => {
+                let mut state = state.borrow_mut();
+                if *readable { state.readers += 1 } else { state.writers += 1 }
+            }
+            // Le nœud d'un fichier compte ses descripteurs : c'est la moitie du
+            // critere qui autorise a evincer ses pages partagees.
+            FdKind::File(node) => crate::kernel::partage::ouvre(*node),
+            // Chaque extremite lit dans sa boite aux lettres. Compter les
+            // lecteurs de ce canal-la, c'est savoir si l'ecrivain d'en face
+            // parle encore a quelqu'un.
+            FdKind::SocketPair(inbox, _) => inbox.borrow_mut().lecteurs += 1,
+            _ => {}
         }
     }
 
     /// Une extremite de moins.
     fn release(&self) {
-        if let FdKind::Pipe(state, readable) = self {
-            let mut state = state.borrow_mut();
-            let compteur = if *readable { &mut state.readers } else { &mut state.writers };
-            *compteur = compteur.saturating_sub(1);
+        match self {
+            FdKind::Pipe(state, readable) => {
+                let mut state = state.borrow_mut();
+                let compteur = if *readable { &mut state.readers } else { &mut state.writers };
+                *compteur = compteur.saturating_sub(1);
+            }
+            FdKind::File(node) => crate::kernel::partage::ferme(*node),
+            FdKind::SocketPair(inbox, _) => {
+                let mut canal = inbox.borrow_mut();
+                canal.lecteurs = canal.lecteurs.saturating_sub(1);
+            }
+            _ => {}
         }
     }
 }
@@ -159,11 +182,33 @@ impl FdKind {
 pub struct Canal {
     pub octets: Vec<u8>,
     pub descripteurs: Vec<FileDesc>,
+    /// Descripteurs qui lisent dans ce canal.
+    ///
+    /// Un canal est unidirectionnel : une extremite y ecrit, l'autre y lit. Ce
+    /// compteur repond a la seule question qui compte pour l'ecrivain — « ce
+    /// que j'ecris sera-t-il lu par quelqu'un ? ». A zero, l'ecriture rend
+    /// `EPIPE` et `poll` leve `POLLHUP` au lieu de faire attendre pour rien.
+    pub lecteurs: usize,
 }
 
+/// Capacite d'un canal ou d'un tube, en octets.
+///
+/// Sans plafond, un ecrivain plus rapide que son lecteur fait grossir le tampon
+/// jusqu'a epuiser la memoire — et `poll` ne peut jamais dire « attends ». La
+/// valeur est celle de Linux, et elle n'est pas arbitraire : trop basse, elle
+/// multiplie les reveils ; trop haute, elle laisse la contre-pression arriver
+/// bien apres que le producteur ait pris trop d'avance.
+pub const CAPACITE_CANAL: usize = 64 * 1024;
+
 impl Canal {
+    /// Un canal neuf a exactement un lecteur : l'extremite d'en face.
     pub fn neuf() -> Rc<RefCell<Canal>> {
-        Rc::new(RefCell::new(Canal::default()))
+        Rc::new(RefCell::new(Canal { lecteurs: 1, ..Canal::default() }))
+    }
+
+    /// Place restante avant saturation.
+    pub fn place(&self) -> usize {
+        CAPACITE_CANAL.saturating_sub(self.octets.len())
     }
 }
 
@@ -179,6 +224,13 @@ pub struct FileDesc {
 
 impl FileDesc {
     pub fn new(kind: FdKind) -> Self {
+        // Les objets qui comptent leurs extremites le font des leur creation :
+        // `PipeState::new` part a 1/1, `Canal::neuf` a un lecteur. Un nœud de
+        // fichier n'a pas de constructeur a lui — c'est donc ici qu'il prend sa
+        // premiere reference, et `clone`/`drop` s'occupent des suivantes.
+        if let FdKind::File(node) = kind {
+            crate::kernel::partage::ouvre(node);
+        }
         FileDesc { kind, offset: 0, flags: 0, cloexec: false }
     }
 }

@@ -97,6 +97,91 @@ pub struct Process {
     pub gid: u32,
     /// Gestionnaires et masques de signaux.
     pub signals: crate::kernel::signal::SignalState,
+    /// Plages `MAP_SHARED` vivantes, chacune tenant une reference sur le cache
+    /// de pages partage.
+    pub partages: Vec<Partage>,
+    /// Taille maximale de l'espace d'adressage (`RLIMIT_AS`), 0 = illimite.
+    pub limite_as: u64,
+}
+
+/// Une plage `MAP_SHARED` projetee dans un processus.
+///
+/// Elle existe pour une seule raison : savoir quelle reference rendre au cache
+/// de pages quand la plage disparait — par `munmap`, par `execve` ou avec le
+/// processus. Sans cette trace, `munmap` ne saurait pas quel nœud il vient de
+/// lacher, et les frames resteraient allouees pour toujours.
+#[derive(Clone, Copy)]
+pub struct Partage {
+    pub base: u64,
+    pub length: u64,
+    pub node: usize,
+}
+
+impl Process {
+    /// Le nœud partage qui couvre cette adresse, s'il y en a un.
+    pub fn partage_a(&self, addr: u64) -> Option<usize> {
+        self.partages
+            .iter()
+            .find(|p| addr >= p.base && addr < p.base + p.length)
+            .map(|p| p.node)
+    }
+
+    /// Retire les plages entierement couvertes par `[addr, addr+len)` et rend
+    /// les nœuds dont la reference est a relacher.
+    ///
+    /// Un recouvrement **partiel** ne relache rien : la plage reste inscrite
+    /// telle quelle. C'est deliberement conservateur. Un `munmap` de la moitie
+    /// d'une surface partagee est assez rare pour qu'une fuite bornee soit
+    /// preferable a la seule autre erreur possible ici — liberer une frame
+    /// qu'un mappage vivant designe encore.
+    pub fn retire_partages(&mut self, addr: u64, len: u64) -> Vec<usize> {
+        let fin = addr + len;
+        let mut rendus = Vec::new();
+        self.partages.retain(|p| {
+            if addr <= p.base && p.base + p.length <= fin {
+                rendus.push(p.node);
+                false
+            } else {
+                true
+            }
+        });
+        rendus
+    }
+
+    /// Relache toutes les plages partagees (`execve`, fin du processus).
+    pub fn relache_partages(&mut self) {
+        let nœuds: Vec<usize> = self.partages.iter().map(|p| p.node).collect();
+        self.partages.clear();
+        for node in nœuds {
+            crate::kernel::partage::demappe(node);
+        }
+    }
+
+    /// Taille actuelle de l'espace d'adressage, en octets.
+    ///
+    /// Ce noyau n'a pas d'allocation paresseuse : `mmap` et `brk` mappent
+    /// immediatement ce qu'ils promettent. Taille virtuelle et taille residente
+    /// coincident donc, et compter les pages possedees est une mesure exacte de
+    /// ce que `RLIMIT_AS` borne.
+    pub fn taille_as(&self) -> u64 {
+        self.space.mapped_pages() as u64 * crate::kernel::vmm::PAGE_SIZE
+    }
+
+    /// Cette croissance tiendrait-elle sous `RLIMIT_AS` ?
+    pub fn tient_sous_limite(&self, croissance: u64) -> bool {
+        self.limite_as == 0 || self.taille_as() + croissance <= self.limite_as
+    }
+}
+
+impl Drop for Process {
+    /// Un processus qui disparait rend ses references sur le cache partage.
+    ///
+    /// C'est le filet : `munmap` couvre le cas ordinaire, celui-ci couvre la
+    /// mort brutale — un `SIGKILL`, une faute de page fatale, un `exit` sans
+    /// menage. Sans lui, tuer un renderer suffirait a faire fuir ses surfaces.
+    fn drop(&mut self) {
+        self.relache_partages();
+    }
 }
 
 /// Un fil d'execution utilisateur.
@@ -999,6 +1084,8 @@ pub fn new_process(name: &str, cwd: usize) -> Option<Rc<RefCell<Process>>> {
         uid: crate::users::session().uid() as u32,
         gid: crate::users::session().uid() as u32,
         signals: crate::kernel::signal::SignalState::default(),
+        partages: Vec::new(),
+        limite_as: 0,
     }));
     processes().push(process.clone());
     Some(process)

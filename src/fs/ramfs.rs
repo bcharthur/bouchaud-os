@@ -92,6 +92,16 @@ impl Node {
         true
     }
 
+    /// Le nom commence-t-il par ce prefixe ? Sert a reconnaitre l'etiquette
+    /// `memfd:` sans allouer.
+    pub fn name_starts_with(&self, prefixe: &[u8]) -> bool {
+        if self.name_len < prefixe.len() { return false; }
+        for i in 0..prefixe.len() {
+            if self.name[i] != prefixe[i] { return false; }
+        }
+        true
+    }
+
     pub fn set_name(&mut self, name: &str) -> bool {
         let bytes = name.as_bytes();
         if bytes.is_empty() || bytes.len() > NAME_LEN { return false; }
@@ -222,6 +232,33 @@ impl FileSystem {
         etiquette.push_str(nom);
         self.nodes[idx].set_name(&etiquette);
         Ok(idx)
+    }
+
+    /// Ce nœud est-il un `memfd` — donc destructible des que plus rien ne le
+    /// designe ?
+    ///
+    /// Deux marques, pas une : etre son propre parent, et porter l'etiquette
+    /// posee par `cree_anonyme`. La seconde est redondante aujourd'hui ; elle
+    /// evite qu'un futur nœud auto-parent soit detruit par surprise.
+    pub fn est_anonyme(&self, idx: usize) -> bool {
+        idx != 0
+            && idx < MAX_NODES
+            && self.nodes[idx].used
+            && self.nodes[idx].parent == idx
+            && self.nodes[idx].name_starts_with(b"memfd:")
+    }
+
+    /// Rend l'inode d'un `memfd` dont plus aucun descripteur ni mappage ne
+    /// depend.
+    ///
+    /// N'agit que sur un nœud anonyme : appele par erreur sur un fichier nomme,
+    /// il ne ferait rien plutot que d'effacer quelque chose qui a un chemin.
+    pub fn libere_anonyme(&mut self, idx: usize) -> bool {
+        if !self.est_anonyme(idx) {
+            return false;
+        }
+        self.nodes[idx] = Node::empty();
+        true
     }
 
     pub fn touch_at(&mut self, parent: usize, name: &str) -> Result<usize, &'static str> {

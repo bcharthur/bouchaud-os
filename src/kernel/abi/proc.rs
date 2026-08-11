@@ -25,7 +25,8 @@ use crate::kernel::{elf, vmm};
 pub fn sys_fork(frame: &TrapFrame) -> i64 {
     let parent = task::current_process();
 
-    let (space, files, brk_start, brk, mmap_next, cwd, uid, gid, name, parent_pid, signals) = {
+    let (space, files, brk_start, brk, mmap_next, cwd, uid, gid, name, parent_pid, signals,
+         partages, limite_as) = {
         let borrowed = parent.borrow();
         let space = match borrowed.space.duplicate() {
             Some(space) => space,
@@ -43,8 +44,18 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
             borrowed.name.clone(),
             borrowed.pid,
             borrowed.signals.clone(),
+            borrowed.partages.clone(),
+            borrowed.limite_as,
         )
     };
+
+    // `duplicate` a re-mappe les pages empruntees sur les memes frames — c'est
+    // la semantique de `MAP_SHARED` a travers `fork`. Le fils tient donc
+    // reellement ces plages, et doit en prendre les references : sans cela, le
+    // premier `munmap` du pere evincerait des frames que le fils lit encore.
+    for plage in &partages {
+        crate::kernel::partage::mappe(plage.node);
+    }
 
     let pid = crate::kernel::process::spawn(&name, uid as u16);
     let mut child_signals = signals;
@@ -67,6 +78,8 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
         uid,
         gid,
         signals: child_signals,
+        partages,
+        limite_as,
     }));
     task::register_process(child.clone());
 
@@ -190,6 +203,9 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
         borrowed.files.close_on_exec();
         borrowed.signals.reset_for_exec();
         borrowed.threads = 1;
+        // L'ancien espace disparait avec ses mappages : les references qu'il
+        // tenait sur le cache partage doivent partir avec lui.
+        borrowed.relache_partages();
         // L'ancien espace est detruit ici. Son `Drop` remet CR3 sur la table du
         // noyau s'il etait actif : c'est pour cela qu'on active le nouveau
         // juste apres, avant de retourner en ring 3.

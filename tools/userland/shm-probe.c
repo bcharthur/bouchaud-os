@@ -29,6 +29,7 @@
 #include <sys/uio.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/sysinfo.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -170,6 +171,131 @@ static void verifie_passage(void)
     close(paire[0]);
 }
 
+// Memoire physique encore libre, en kibioctets.
+//
+// `sysinfo` interroge l'allocateur de frames en direct — contrairement a
+// `/proc/meminfo`, qui n'est qu'un instantane pris au demarrage. C'est la seule
+// observation qui puisse distinguer « le descripteur a disparu » de « les pages
+// sont revenues », et c'est la seconde qui nous interesse.
+static unsigned long libre_kb(void)
+{
+    struct sysinfo info;
+    if (sysinfo(&info) != 0)
+        return 0;
+    return (unsigned long)(info.freeram / 1024);
+}
+
+#define CYCLES 1000
+#define PAGES_PAR_CYCLE 8
+
+// Le cycle de vie complet d'une surface partagee, mille fois.
+//
+// C'est le scenario d'un compositeur qui recree son tampon a chaque
+// redimensionnement. Chaque tour alloue huit pages, les projette, y ecrit, les
+// relit, puis rend tout. Si le cache de pages ne rendait rien — ce qui etait le
+// cas —, mille tours coutent 32 MiB qui ne reviennent jamais, et la centieme
+// fenetre redimensionnee tue la machine.
+//
+// Le test ne se contente pas de verifier que `close` rend 0 : il compare la
+// memoire physique libre avant et apres. C'est la seule chose qui prouve que
+// les frames sont revenues.
+static void verifie_eviction(void)
+{
+    printf("  cycle de vie : %d creations/destructions de surface\n", CYCLES);
+
+    // Un tour a blanc d'abord : la premiere iteration peut faire grossir des
+    // structures du noyau (table de nœuds, vecteur du cache) qui ne
+    // retrecissent pas. Les mesurer comme une fuite serait une fausse alerte.
+    for (int i = 0; i < 4; i++) {
+        int fd = memfd("prechauffage");
+        if (fd < 0)
+            return;
+        if (ftruncate(fd, PAGES_PAR_CYCLE * 4096) != 0) {
+            close(fd);
+            return;
+        }
+        char *z = mmap(NULL, PAGES_PAR_CYCLE * 4096, PROT_READ | PROT_WRITE,
+                       MAP_SHARED, fd, 0);
+        if (z != MAP_FAILED)
+            munmap(z, PAGES_PAR_CYCLE * 4096);
+        close(fd);
+    }
+
+    unsigned long avant = libre_kb();
+    verifie("sysinfo rend la memoire libre", avant > 0, NULL);
+    if (avant == 0)
+        return;
+
+    int rates = 0;
+    int perdus = 0;
+    for (int tour = 0; tour < CYCLES; tour++) {
+        int fd = memfd("surface");
+        if (fd < 0) {
+            rates++;
+            break;
+        }
+        if (ftruncate(fd, PAGES_PAR_CYCLE * 4096) != 0) {
+            rates++;
+            close(fd);
+            break;
+        }
+        char *zone = mmap(NULL, PAGES_PAR_CYCLE * 4096, PROT_READ | PROT_WRITE,
+                          MAP_SHARED, fd, 0);
+        if (zone == MAP_FAILED) {
+            rates++;
+            close(fd);
+            break;
+        }
+        // Toucher chaque page : sans cela le cache pourrait n'en materialiser
+        // aucune, et le test ne prouverait rien.
+        for (int page = 0; page < PAGES_PAR_CYCLE; page++)
+            zone[page * 4096] = (char)(tour + page);
+        for (int page = 0; page < PAGES_PAR_CYCLE; page++) {
+            if (zone[page * 4096] != (char)(tour + page))
+                perdus++;
+        }
+        munmap(zone, PAGES_PAR_CYCLE * 4096);
+        close(fd);
+    }
+
+    verifie("les mille cycles se sont tous ouverts", rates == 0, NULL);
+    verifie("chaque page relue porte ce qu'on y a ecrit", perdus == 0, NULL);
+
+    unsigned long apres = libre_kb();
+    // Le budget total qui aurait fui sans eviction.
+    unsigned long fuite_totale = (unsigned long)CYCLES * PAGES_PAR_CYCLE * 4;
+    // On tolere un dixieme de ce budget : le noyau alloue aussi pour ses
+    // propres structures, et exiger l'egalite stricte ferait un test instable —
+    // ce qui est pire qu'un test absent, parce qu'il apprend a ignorer les
+    // echecs.
+    unsigned long seuil = fuite_totale / 10;
+    unsigned long consomme = apres < avant ? avant - apres : 0;
+
+    char detail[128];
+    snprintf(detail, sizeof detail,
+             "%lu KiB avant, %lu KiB apres (%lu consommes, budget de fuite %lu)",
+             avant, apres, consomme, fuite_totale);
+    verifie("la memoire physique revient apres chaque surface",
+            consomme < seuil, detail);
+
+    // Et la contre-epreuve : un mappage encore vivant ne doit **pas** etre
+    // evince par la fermeture de son descripteur. Liberer la, ce serait
+    // corrompre la memoire d'un processus qui travaille.
+    int fd = memfd("survivante");
+    if (fd >= 0 && ftruncate(fd, 4096) == 0) {
+        char *zone = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (zone != MAP_FAILED) {
+            strcpy(zone, "toujours la");
+            close(fd); // le descripteur part, le mappage reste
+            verifie("un mappage vivant survit a la fermeture du descripteur",
+                    strcmp(zone, "toujours la") == 0, zone);
+            munmap(zone, 4096);
+        } else {
+            close(fd);
+        }
+    }
+}
+
 int main(void)
 {
     printf("shm-probe: memoire partagee entre processus\n");
@@ -263,6 +389,9 @@ int main(void)
 
     // 6. Le passage de descripteurs — l'autre moitie du multi-processus.
     verifie_passage();
+
+    // 7. Le cycle de vie : partager ne suffit pas, il faut aussi rendre.
+    verifie_eviction();
 
     printf("RESULTAT : %d verification(s) en echec (%d passees)\n",
            echecs, reussites);
