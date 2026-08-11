@@ -62,6 +62,11 @@ class Document:
         # Dernier element survole, retenu pour que `:active` et `:hover` se
         # composent au lieu de s'effacer l'un l'autre.
         self._survole = None
+        # Les lignees d'interaction du tour precedent. Elles servent a
+        # retrouver les objets d'un element qui **quitte** un etat : son
+        # identifiant figure dans la difference, mais plus dans les lignees
+        # courantes.
+        self._lignees_interaction = ([], [], [])
         # Ce qui bouge : gabarits `@keyframes`, animations en cours,
         # transitions engagees. Neuf a chaque page, donc rien ne survit a une
         # navigation.
@@ -278,6 +283,30 @@ class Document:
     # descente qu'il faut borner.
     ELEMENTS_RESTYLE_MAX = 256
 
+    def _sans_effet_interaction(self, element):
+        """Le style de cet element peut-il dependre de l'etat d'interaction ?
+
+        Rend `True` quand aucune regle sensible ne peut le designer : changer
+        son etat de survol ou de foyer ne changera alors rien a son style, et
+        il n'y a pas lieu de le recalculer.
+
+        C'est la question qui permet d'ignorer `<html>` et `<body>`, presents
+        dans toute lignee survolee et depourvus de regle qui les concerne dans
+        l'immense majorite des feuilles.
+        """
+        if element is None or not isinstance(element, html.Element):
+            return True
+        index = self.regles
+        if not hasattr(index, "candidates"):
+            return False
+        try:
+            for regle in index.candidates(element):
+                if regle.selecteur.sensible:
+                    return False
+        except Exception:  # noqa: BLE001 — au moindre doute, on recalcule
+            return False
+        return True
+
     def _restyle_suffit(self):
         """Rejoue la cascade des elements marques, et dit si cela a suffi.
 
@@ -330,6 +359,10 @@ class Document:
         changees = set()
         nouveaux = []
         visitees = 0
+        # Faut-il redescendre meme quand un style n'a pas bouge ? Seulement si
+        # une regle fait dependre un descendant de l'etat d'un ancetre.
+        descend_toujours = bool(getattr(self.regles, "sensible_descendante",
+                                        False))
 
         # On redescend chaque sous-arbre marque. C'est necessaire des qu'une
         # propriete heritee bouge — `color` en est une, et c'est justement la
@@ -360,6 +393,17 @@ class Document:
                 except Exception:  # noqa: BLE001 — au moindre doute, mise en page
                     return False
                 ancien = courante.style
+                # Une transition ou une animation declaree sur cet element veut
+                # dire que le changement doit etre **joue**, pas applique d'un
+                # coup. C'est l'animateur qui s'en charge, et il ne tourne que
+                # pendant une vraie mise en page : prendre le raccourci ici
+                # ferait sauter la transition — le style final serait juste,
+                # mais le mouvement disparaitrait.
+                for source in (ancien, neuf):
+                    if source.get("transition") or source.get("animation") \
+                            or source.get("transition-property") \
+                            or source.get("animation-name"):
+                        return False
                 for propriete in set(neuf) | set(ancien):
                     if neuf.get(propriete) != ancien.get(propriete):
                         changees.add(propriete)
@@ -368,6 +412,17 @@ class Document:
                             # et c'est elle qui posera les bons styles.
                             return False
                 nouveaux.append((courante, neuf))
+                # Elagage. Si le style de cet element n'a pas bouge, ses
+                # descendants n'ont rien de nouveau a heriter — et, faute de
+                # regle qui fasse dependre un descendant de l'etat d'un
+                # ancetre, rien d'autre ne peut les avoir changes.
+                #
+                # C'est ce qui rend le survol praticable : la lignee d'un
+                # element survole contient `html` et `body`, dont le style ne
+                # bouge pas. Sans l'elagage, chaque pixel parcouru par la souris
+                # ferait redescendre tout le document.
+                if neuf == ancien and not descend_toujours:
+                    continue
                 for enfant in getattr(courante, "enfants", ()) or ():
                     a_faire.append((enfant, neuf))
 
@@ -1050,8 +1105,57 @@ class Document:
                 css.lignee(self._foyer) if self._foyer is not None else [])
         avant = css.interaction()
         css.pose_interaction(survoles=etat[0], actifs=etat[1], foyer=etat[2])
-        if css.interaction() == avant:
+        apres = css.interaction()
+        if apres == avant:
             return False
+
+        # Passer la souris sur un bouton remettait toute la page en page. Or
+        # `:hover` ne change presque jamais qu'une couleur ou un fond — et ce
+        # sont exactement les proprietes que le restyle cible sait traiter sans
+        # toucher a la disposition.
+        #
+        # Les elements concernes sont ceux qui **entrent ou sortent** d'un etat,
+        # c'est-a-dire la difference symetrique des deux lignees. Marquer les
+        # deux lignees entieres serait correct mais plus large : un menu profond
+        # ferait recalculer toute sa branche a chaque pixel parcouru.
+        # `css.interaction()` rend des ensembles d'**identifiants**, pas
+        # d'elements : la difference symetrique se prend donc directement, et
+        # les objets se retrouvent dans les lignees qu'on vient de calculer et
+        # dans celles du tour precedent.
+        par_id = {}
+        for lignee in list(etat) + list(self._lignees_interaction):
+            for element in lignee or []:
+                par_id[id(element)] = element
+        self._lignees_interaction = etat
+
+        touches = set()
+        for anciens, nouveaux in zip(avant, apres):
+            touches |= set(anciens) ^ set(nouveaux)
+
+        # Un element marque qui n'a pas de boite — `<html>` en est un, la boite
+        # racine etant celle du corps — ne peut pas etre compare a son ancien
+        # style. On ne renonce pas pour autant : s'il n'existe aucune regle
+        # sensible a l'interaction qui puisse le designer, son style ne depend
+        # pas de ce qui vient de changer, et l'ignorer est exact.
+        touches = {cle for cle in touches
+                   if not self._sans_effet_interaction(par_id.get(cle))}
+
+        if touches and self.boite is not None and not self.animateur.anime():
+            del self.invalide.raisons[:]
+            self.invalide.etendue = invalidation.STYLE
+            self.invalide.elements.clear()
+            self.invalide.elements.update(touches)
+            if self._restyle_suffit():
+                telemetrie.compte("invalidation.interaction_peinture_seule")
+                self.invalide.vide()
+                # Le curseur de saisie est pose par la mise en page, qu'on
+                # vient d'eviter : prendre le foyer doit quand meme le faire
+                # apparaitre.
+                self.pose_curseur_visuel()
+                return True
+
+        telemetrie.compte("invalidation.interaction_mise_en_page")
+        self.invalide.vide()
         self.remet_en_page(self.largeur)
         return True
 

@@ -6299,6 +6299,197 @@ def _wss_scenario(base, chemin_ca, _os, _time, _reseau):
     jalon("WEBSOCKET_SUBPROTOCOL", connexion.protocole == "bo-chat")
 
 
+def verifie_grille_intrinseque():
+    """Les pistes de grille prennent la taille de leur contenu.
+
+    Elles se partageaient la place a parts egales, faute de savoir ce qu'elles
+    portaient — le commentaire du module le disait franchement. Une colonne de
+    mots courts recevait donc autant qu'une colonne de phrases, et une grille
+    `auto auto` coupait toujours la page en deux quel que soit son contenu.
+
+    Ce que ces epreuves verifient est le comportement observable, pas les
+    nombres internes : une colonne qui porte plus large **doit** etre plus
+    large. C'est la seule formulation qui reste vraie si la fonte change.
+    """
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #g { display: grid; grid-template-columns: auto auto; width: 900px; }
+        </style>
+        <body><div id="g">
+          <div id="court">a</div>
+          <div id="long">une phrase nettement plus longue que la precedente</div>
+        </div></body>""")
+    doc.remet_en_page(1000, 800)
+    court = boite_de(doc, "court")
+    longue = boite_de(doc, "long")
+    verifie("grille: une colonne auto suit son contenu",
+            longue.largeur > court.largeur * 1.5,
+            (court.largeur, longue.largeur))
+
+    # `min-content` et `max-content` ne sont pas la meme chose. Les confondre —
+    # ce qui etait le cas — revenait a ignorer les deux.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #g { display: grid; grid-template-columns: min-content max-content;
+               width: 900px; }
+        </style>
+        <body><div id="g">
+          <div id="mini">alpha bravo charlie delta</div>
+          <div id="maxi">alpha bravo charlie delta</div>
+        </div></body>""")
+    doc.remet_en_page(1000, 800)
+    mini = boite_de(doc, "mini")
+    maxi = boite_de(doc, "maxi")
+    verifie("grille: min-content est plus etroit que max-content",
+            mini.largeur < maxi.largeur, (mini.largeur, maxi.largeur))
+    verifie("grille: et min-content n'est pas nul", mini.largeur > 0, mini.largeur)
+
+    # `minmax(200px, 1fr)` : un plancher et un plafond, la forme la plus
+    # courante d'une grille reelle.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #g { display: grid; grid-template-columns: minmax(200px, 1fr) 100px;
+               width: 900px; }
+        </style>
+        <body><div id="g"><div id="souple">x</div><div id="fixe">y</div></div></body>""")
+    doc.remet_en_page(1000, 800)
+    souple = boite_de(doc, "souple")
+    fixe = boite_de(doc, "fixe")
+    verifie("grille: minmax respecte son plancher",
+            souple.largeur >= 199.0, souple.largeur)
+    verifie("grille: et la piste fixe garde sa largeur",
+            proche(fixe.largeur, 100.0, 2.0), fixe.largeur)
+    verifie("grille: la piste souple prend le reste",
+            souple.largeur > 700.0, souple.largeur)
+
+    # `fr` partage ce qui reste apres les pistes rigides.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #g { display: grid; grid-template-columns: 100px 1fr 2fr; width: 700px; }
+        </style>
+        <body><div id="g"><div id="a">a</div><div id="b">b</div>
+        <div id="c">c</div></div></body>""")
+    doc.remet_en_page(1000, 800)
+    a, b, c = (boite_de(doc, n) for n in ("a", "b", "c"))
+    verifie("grille: la piste fixe garde ses 100px", proche(a.largeur, 100.0, 2.0),
+            a.largeur)
+    verifie("grille: 2fr vaut deux fois 1fr",
+            proche(c.largeur, b.largeur * 2.0, 6.0), (b.largeur, c.largeur))
+    verifie("grille: et les trois remplissent la grille",
+            proche(a.largeur + b.largeur + c.largeur, 700.0, 6.0),
+            a.largeur + b.largeur + c.largeur)
+
+    # Le depassement : une colonne ne descend pas sous son mot le plus long,
+    # parce que deborder est pire que serrer.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #g { display: grid; grid-template-columns: auto auto; width: 60px; }
+        </style>
+        <body><div id="g">
+          <div id="p">incompressiblement</div><div id="q">x</div>
+        </div></body>""")
+    doc.remet_en_page(1000, 800)
+    verifie("grille: une colonne ne passe pas sous son min-content",
+            boite_de(doc, "p").largeur > 20.0, boite_de(doc, "p").largeur)
+
+
+def verifie_pseudo_classes_dynamiques():
+    """Passer la souris sur un bouton ne doit pas remettre la page en page.
+
+    C'est le cas le plus frequent de toute l'interactivite : `:hover` change
+    presque toujours une couleur ou un fond, jamais une geometrie. Le moteur
+    remettait pourtant toute la page en page a chaque pixel parcouru.
+
+    Comme pour les classes, les deux sens sont verifies. Un `:hover` qui change
+    une **largeur** doit, lui, bel et bien remettre en page — une invalidation
+    trop etroite se voit comme un bogue d'affichage, et une epreuve qui ne
+    verifierait que les economies recompenserait un moteur qui ne redessine
+    plus rien.
+    """
+    from moteur import telemetrie
+
+    cartes = "".join('<div class="carte" id="c%d">Carte %d</div>' % (i, i)
+                     for i in range(400))
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          .carte { padding: 6px; color: #202020; background: #ffffff; }
+          .carte:hover { color: #cc0000; background: #fff0f0; }
+          .large:hover { width: 500px; }
+          input { padding: 4px; }
+          input:focus { background: #ffffcc; }
+          input:disabled { color: #999999; }
+          .coche:checked { background: #ccffcc; }
+        </style>
+        <body>%s
+          <div class="carte large" id="grande">grandit</div>
+          <input id="champ"><input id="mort" disabled>
+          <input id="case" type="checkbox" class="coche">
+        </body>""" % cartes)
+    doc.remet_en_page(1000, 800)
+
+    def mesure(action):
+        telemetrie.reinitialise()
+        telemetrie.active(True)
+        change = action()
+        return change, telemetrie.compteurs()
+
+    cible = boite_de(doc, "c200")
+    point = (cible.x + 3, cible.y + 3)
+
+    # 1. Survol d'une carte qui ne change que sa couleur.
+    change, m = mesure(lambda: doc.survole(*point))
+    verifie("pseudo: le survol change l'affichage", change)
+    egal("pseudo: et ne remet rien en page",
+         m.get("invalidation.interaction_mise_en_page"), None)
+    egal("pseudo: il ne demande que des pixels",
+         m.get("invalidation.interaction_peinture_seule"), 1)
+    egal("pseudo: aucune boite n'est reposee", m.get("layout.dispose_bloc"), None)
+    egal("pseudo: et la couleur a bien change",
+         boite_de(doc, "c200").style.get("color"), "#cc0000")
+
+    # 2. Sortie du survol : meme economie.
+    autre = boite_de(doc, "c100")
+    change, m = mesure(lambda: doc.survole(autre.x + 3, autre.y + 3))
+    egal("pseudo: quitter un element ne remet rien en page non plus",
+         m.get("invalidation.interaction_mise_en_page"), None)
+    egal("pseudo: la carte quittee a repris sa couleur",
+         boite_de(doc, "c200").style.get("color"), "#202020")
+
+    # 3. Un `:hover` qui change une largeur **doit** remettre en page.
+    grande = boite_de(doc, "grande")
+    change, m = mesure(lambda: doc.survole(grande.x + 3, grande.y + 3))
+    egal("pseudo: un hover qui change une largeur remet en page",
+         m.get("invalidation.interaction_mise_en_page"), 1)
+    verifie("pseudo: et la largeur est appliquee",
+            boite_de(doc, "grande").largeur > 400.0,
+            boite_de(doc, "grande").largeur)
+
+    # 4. `:focus` : meme regle.
+    champ = next(n for n in doc.racine.parcours()
+                 if isinstance(n, html.Element)
+                 and n.attributs.get("id") == "champ")
+    doc.survole(0, 0)
+    change, m = mesure(lambda: doc.pose_foyer(champ))
+    verifie("pseudo: poser le foyer change l'affichage", change)
+    egal("pseudo: le foyer ne remet rien en page",
+         m.get("invalidation.interaction_mise_en_page"), None)
+    # `background` est developpe en ses composantes par la cascade : c'est
+    # `background-color` qui porte la teinte.
+    egal("pseudo: le fond du champ au foyer a change",
+         boite_de(doc, "champ").style.get("background-color"), "#ffffcc")
+
+    # 5. `:disabled` et `:checked` : statiques, mais ils doivent correspondre.
+    egal("pseudo: :disabled s'applique",
+         boite_de(doc, "mort").style.get("color"), "#999999")
+    telemetrie.active(False)
+
+
 def verifie_invalidation_ciblee():
     """Changer une couleur ne doit pas remettre mille cartes en page.
 
@@ -7403,6 +7594,8 @@ def principal():
         verifie_cors,
         verifie_toile_origine,
         verifie_wss,
+        verifie_grille_intrinseque,
+        verifie_pseudo_classes_dynamiques,
         verifie_invalidation_ciblee,
         verifie_tailles_intrinseques,
         verifie_flex,

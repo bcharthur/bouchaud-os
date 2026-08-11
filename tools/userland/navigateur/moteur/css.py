@@ -948,6 +948,26 @@ def correspond_un(liste, element):
     return any(s.correspond_element(element) for s in liste)
 
 
+def _sensible_hors_sujet(selecteur):
+    """Ce selecteur depend-il d'un etat porte par autre chose que son sujet ?"""
+    maillons = selecteur.maillons
+    for index, maillon in enumerate(maillons):
+        if index == len(maillons) - 1:
+            continue
+        if maillon.etats:
+            return True
+        for _genre, sous in maillon.groupes:
+            if any(s.sensible for s in sous):
+                return True
+    # Un `:has(... :hover)` sur le sujet depend aussi d'autre chose que de lui.
+    dernier = maillons[-1] if maillons else None
+    if dernier is not None:
+        for genre, sous in dernier.groupes:
+            if genre == "has" and any(s.sensible for s in sous):
+                return True
+    return False
+
+
 class _Tables:
     """Les regles d'un meme pseudo-element, rangees par cle.
 
@@ -1040,12 +1060,28 @@ class Index:
     par pseudo rend ces 53 % presque gratuits.
     """
 
-    __slots__ = ("par_pseudo", "sensible", "pseudos", "total")
+    __slots__ = ("par_pseudo", "sensible", "pseudos", "total",
+                 "sensible_descendante")
 
     def __init__(self, regles):
         self.total = len(regles)
         # Vrai des qu'une regle depend du survol, du foyer ou de l'enfoncement.
         self.sensible = any(r.selecteur.sensible for r in regles)
+        # Vrai si une regle sensible porte son etat **ailleurs que sur son
+        # dernier maillon** : `.menu:hover .item` en est une, `.carte:hover`
+        # non.
+        #
+        # La distinction decide de ce qu'un survol oblige a recalculer. Sans
+        # regle de ce genre, passer la souris sur un element ne peut changer le
+        # style que des elements de sa lignee — et pas de leurs descendants. Le
+        # moteur peut alors s'arreter des qu'un style ne bouge pas, au lieu de
+        # redescendre depuis `html` a chaque pixel parcouru.
+        #
+        # Avec une telle regle, il faut redescendre : c'est l'ancetre survole
+        # qui decide du style d'un descendant, et son propre style, lui, n'a
+        # pas bouge.
+        self.sensible_descendante = any(
+            _sensible_hors_sujet(r.selecteur) for r in regles)
         # Les pseudo-elements pour lesquels une regle existe. Sans cette liste,
         # la mise en page calculait deux cascades supplementaires — `::before`
         # et `::after` — pour **chaque** element de la page, y compris sur une
