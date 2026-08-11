@@ -5573,6 +5573,121 @@ def ecris_jalons():
         pass
 
 
+def verifie_invalidation_ciblee():
+    """Changer une couleur ne doit pas remettre mille cartes en page.
+
+    C'est la promesse entiere du pipeline d'invalidation, et elle se verifie de
+    la seule facon qui ne se trompe pas : en comptant les mises en page reelles.
+    Un test qui regarderait les pixels dirait « c'est bien peint » sans rien
+    savoir de ce que cela a coute.
+
+    Trois mutations, trois etendues attendues :
+
+      * une couleur       → peinture seule, aucune mise en page ;
+      * un `transform`    → composition seule ;
+      * une largeur       → mise en page, et il **faut** qu'elle ait lieu.
+
+    Le troisieme cas compte autant que les deux premiers : une invalidation
+    trop etroite se voit comme un bogue d'affichage, la pire espece a
+    diagnostiquer. Une epreuve qui ne verifierait que les economies finirait par
+    recompenser un moteur qui ne redessine plus rien.
+    """
+    from moteur import telemetrie
+
+    cartes = "".join(
+        '<div class="carte" id="c%d"><h3>Carte %d</h3>'
+        '<p>Un texte de carte assez long pour occuper une ligne.</p></div>'
+        % (i, i) for i in range(1000))
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          .carte { padding: 8px; border: 1px solid #dddddd; color: #202020; }
+          .carte.vedette { color: #cc0000; background: #fff8f0; }
+          .carte.large { width: 640px; }
+        </style>
+        <body>%s<script>1</script></body>""" % cartes)
+    doc.remet_en_page(1000, 800)
+    contexte = doc.contexte_js
+    verifie("invalidation: la page a un contexte", contexte is not None)
+    if contexte is None:
+        return
+
+    def compte_apres(code):
+        """Execute, rafraichit une fois, et rend les compteurs de ce tour."""
+        telemetrie.reinitialise()
+        telemetrie.active(True)
+        contexte.execute(code)
+        doc.rafraichis()
+        return telemetrie.compteurs()
+
+    # 1. Une couleur, posee directement : le chemin ou la propriete est connue.
+    mesures = compte_apres("document.getElementById('c500')"
+                           ".style.color = '#cc0000'")
+    egal("invalidation: une couleur ne remet rien en page",
+         mesures.get("invalidation.mise_en_page"), None)
+    egal("invalidation: elle ne demande que des pixels",
+         mesures.get("invalidation.peinture_seule"), 1)
+    egal("invalidation: et aucune boite n'est reposee",
+         mesures.get("layout.dispose_bloc"), None)
+
+    # 2. Un `transform` : plus haut encore dans le pipeline — les pixels
+    #    existants suffisent, il ne reste qu'a les deplacer.
+    mesures = compte_apres("document.getElementById('c501')"
+                           ".style.transform = 'translateX(4px)'")
+    egal("invalidation: un transform ne demande que la composition",
+         mesures.get("invalidation.composition_seule"), 1)
+    egal("invalidation: et ne repose aucune boite",
+         mesures.get("layout.dispose_bloc"), None)
+
+    # 3. Une classe : la propriete n'est pas nommee, il faut rejouer la cascade
+    #    pour savoir. Si elle ne change qu'une couleur, la mise en page doit
+    #    quand meme etre evitee — c'est le cas que le moteur ne savait pas
+    #    traiter, et le plus frequent dans une application reelle.
+    mesures = compte_apres("document.getElementById('c502')"
+                           ".classList.add('vedette')")
+    egal("invalidation: une classe qui ne change qu'une couleur evite la mise en page",
+         mesures.get("invalidation.mise_en_page_evitee"), 1)
+    egal("invalidation: le restyle cible a bien eu lieu",
+         mesures.get("invalidation.restyle_reussi"), 1)
+    verifie("invalidation: et il n'a coute que le sous-arbre de la carte",
+            (mesures.get("invalidation.restyle_boites") or 0) <= 8,
+            mesures.get("invalidation.restyle_boites"))
+    # La couleur doit reellement avoir change dans la boite peinte : economiser
+    # une mise en page ne vaut rien si l'ecran ne suit pas.
+    boite = boite_de(doc, "c502")
+    egal("invalidation: la nouvelle couleur est dans la boite",
+         boite.style.get("color"), "#cc0000")
+
+    # 4. Une classe qui change une largeur : la mise en page doit avoir lieu.
+    mesures = compte_apres("document.getElementById('c503')"
+                           ".classList.add('large')")
+    egal("invalidation: une classe qui change une largeur remet en page",
+         mesures.get("invalidation.mise_en_page"), 1)
+    # 640 px de contenu, plus le remplissage et les bordures des deux cotes :
+    # `width` est du contenu tant que `box-sizing` ne dit pas le contraire.
+    verifie("invalidation: et la largeur est effectivement appliquee",
+            proche(boite_de(doc, "c503").largeur, 640.0 + 18.0, 3.0),
+            boite_de(doc, "c503").largeur)
+
+    # 5. Une classe qu'aucune regle ne designe : rien ne change, meme pas les
+    #    pixels.
+    mesures = compte_apres("document.getElementById('c504')"
+                           ".classList.add('inconnue-nulle-part')")
+    egal("invalidation: une classe sans regle ne change rien",
+         mesures.get("invalidation.restyle_sans_effet"), 1)
+    egal("invalidation: et ne remet pas en page",
+         mesures.get("invalidation.mise_en_page"), None)
+
+    # 6. Une insertion de contenu : structure changee, mise en page obligatoire.
+    mesures = compte_apres(
+        "const d = document.createElement('div');"
+        "d.textContent = 'ajoute';"
+        "document.body.appendChild(d);")
+    egal("invalidation: une insertion remet en page",
+         mesures.get("invalidation.mise_en_page"), 1)
+    telemetrie.active(False)
+
+
 def verifie_foyer():
     """Le foyer : `activeElement`, `focus`, `blur`, `Tab`.
 
@@ -6555,6 +6670,7 @@ def principal():
         verifie_stockage_local,
         verifie_indexeddb,
         verifie_webapp_combinee,
+        verifie_invalidation_ciblee,
         verifie_tailles_intrinseques,
         verifie_flex,
         verifie_grille,

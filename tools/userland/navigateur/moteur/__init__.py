@@ -166,15 +166,147 @@ class Document:
         # demande que des pixels : refaire la mise en page de deux mille
         # elements pour cela etait le comportement d'avant, et c'est ce qui
         # rendait toute application Web lente des qu'elle bougeait.
-        if not self.animateur.anime() and not self.invalide.demande_mise_en_page \
-                and self.boite is not None:
-            telemetrie.compte("invalidation.peinture_seule")
-            self.invalide.vide()
-            return True
+        anime = self.animateur.anime()
+        if not anime and self.boite is not None:
+            etendue = self.invalide.etendue
+            if etendue < invalidation.MISE_EN_PAGE:
+                telemetrie.compte(
+                    "invalidation.composition_seule"
+                    if etendue <= invalidation.COMPOSITION
+                    else "invalidation.peinture_seule")
+                self.invalide.vide()
+                return True
+            # Une mutation qui ne nomme pas de propriete — un changement de
+            # `class`, un attribut cible par un selecteur — demande de rejouer
+            # la cascade. Mais rejouer la cascade n'est pas remettre en page :
+            # tant qu'on n'a pas regarde **ce qui a change**, on ne sait pas
+            # laquelle des deux il faut.
+            if etendue == invalidation.STYLE and self._restyle_suffit():
+                telemetrie.compte("invalidation.peinture_seule")
+                telemetrie.compte("invalidation.mise_en_page_evitee")
+                self.invalide.vide()
+                return True
 
         telemetrie.compte("invalidation.mise_en_page")
         self.invalide.vide()
         self.remet_en_page(self.largeur)
+        return True
+
+    # Au-dela, la comparaison coute plus cher que la mise en page qu'elle
+    # cherche a eviter. Une mutation qui touche des centaines d'elements est de
+    # toute facon un changement de structure, pas de couleur.
+    #
+    # Le budget compte les boites **visitees**, pas les elements marques : une
+    # propriete heritee oblige a redescendre le sous-arbre, et c'est cette
+    # descente qu'il faut borner.
+    ELEMENTS_RESTYLE_MAX = 256
+
+    def _restyle_suffit(self):
+        """Rejoue la cascade des elements marques, et dit si cela a suffi.
+
+        ## Le probleme
+
+        `element.className = "carte active"` ne nomme aucune propriete : le
+        moteur ne peut pas savoir, au moment de la mutation, si la nouvelle
+        classe change une couleur ou une largeur. Il prenait donc le parti
+        prudent — tout remettre en page. Sur mille cartes dont une change de
+        couleur, cela coute mille dispositions pour zero deplacement.
+
+        ## Ce que fait cette methode
+
+        Elle recalcule le style des seuls elements marques, le compare a celui
+        que porte deja leur boite, et **deduit l'etendue reelle** des proprietes
+        qui ont bouge. Si aucune ne touche la mise en page, les styles sont
+        remplaces en place et la disposition est conservee telle quelle.
+
+        ## Pourquoi elle refuse souvent
+
+        Elle rend `False` — donc « remets tout en page » — des que quelque chose
+        sort du cas simple : trop d'elements, un element sans boite (donc
+        peut-etre neuf), une propriete heritee qui obligerait a redescendre tout
+        le sous-arbre, une exception. Se tromper vers la mise en page coute du
+        temps ; se tromper vers l'economie laisse un affichage faux, et un
+        affichage faux ne se voit pas dans un profil.
+        """
+        marques = self.invalide.elements
+        if not marques or self.boite is None:
+            return False
+
+        # Les racines a recalculer, avec le style de leur parent — celui-ci ne
+        # change pas, c'est ce qui permet de repartir d'elles plutot que du
+        # document.
+        voulus = set(marques)
+        racines = []
+        pile = [(self.boite, None)]
+        while pile:
+            boite, parent = pile.pop()
+            if id(boite.element) in voulus:
+                racines.append((boite, parent.style if parent is not None else {}))
+            for enfant in getattr(boite, "enfants", ()) or ():
+                pile.append((enfant, boite))
+        if len(racines) != len(voulus):
+            # Un element marque sans boite : il vient d'apparaitre, ou il etait
+            # `display: none`. Dans les deux cas il faut une vraie mise en page.
+            return False
+
+        css.nouvelle_generation()
+        changees = set()
+        nouveaux = []
+        visitees = 0
+
+        # On redescend chaque sous-arbre marque. C'est necessaire des qu'une
+        # propriete heritee bouge — `color` en est une, et c'est justement la
+        # plus frequente : sans la descente, un changement de couleur sur un
+        # parent laisserait ses enfants dans l'ancienne. Le sous-arbre d'une
+        # carte fait quelques nœuds ; celui du document en fait des milliers, et
+        # c'est toute la difference entre ce chemin et une mise en page.
+        for boite, style_parent in racines:
+            a_faire = [(boite, style_parent)]
+            while a_faire:
+                courante, parent_style = a_faire.pop()
+                visitees += 1
+                if visitees > self.ELEMENTS_RESTYLE_MAX:
+                    return False
+                element = courante.element
+                # Une boite engendree (`::before`) porte un style fixe que la
+                # cascade ne sait pas retrouver depuis l'arbre : on ne sait pas
+                # la recalculer ici, donc on renonce.
+                if getattr(element, "style_engendre", None) is not None:
+                    return False
+                if not isinstance(element, html.Element):
+                    # Un fragment de texte n'a pas de style propre ; il herite
+                    # de sa boite, qui est deja traitee.
+                    continue
+                try:
+                    neuf = css.applique(self.regles, element, [element],
+                                        parent_style)
+                except Exception:  # noqa: BLE001 — au moindre doute, mise en page
+                    return False
+                ancien = courante.style
+                for propriete in set(neuf) | set(ancien):
+                    if neuf.get(propriete) != ancien.get(propriete):
+                        changees.add(propriete)
+                        if invalidation.etendue_de(propriete) >= invalidation.MISE_EN_PAGE:
+                            # Inutile de continuer : la mise en page aura lieu,
+                            # et c'est elle qui posera les bons styles.
+                            return False
+                nouveaux.append((courante, neuf))
+                for enfant in getattr(courante, "enfants", ()) or ():
+                    a_faire.append((enfant, neuf))
+
+        if not changees:
+            # La cascade a rendu exactement la meme chose : il n'y a meme pas de
+            # pixels a refaire. C'est le cas d'une classe ajoutee puis retiree,
+            # ou d'une classe qu'aucune regle ne designe.
+            telemetrie.compte("invalidation.restyle_sans_effet")
+            return True
+
+        # Les styles remplacent les anciens dans les boites deja posees : la
+        # peinture lira les nouvelles couleurs sur la disposition inchangee.
+        for courante, neuf in nouveaux:
+            courante.style = neuf
+        telemetrie.compte("invalidation.restyle_reussi")
+        telemetrie.compte("invalidation.restyle_boites", visitees)
         return True
 
     def evenement_js(self, nœud, type_, details=None):
