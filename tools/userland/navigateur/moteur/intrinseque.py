@@ -100,11 +100,15 @@ class Mesureur:
     avec l'objet.
     """
 
-    __slots__ = ("bo", "contexte", "_cache", "_generation")
+    __slots__ = ("bo", "contexte", "style_de", "_cache", "_generation")
 
-    def __init__(self, bo, contexte):
+    def __init__(self, bo, contexte, style_de):
         self.bo = bo
         self.contexte = contexte
+        # `style_de(element, style_parent)` : la cascade, passee par le cache de
+        # la passe. Un rappel plutot qu'un import direct, pour ne pas nouer
+        # `intrinseque` et `mise_en_page` l'un a l'autre.
+        self.style_de = style_de
         self._cache = {}
         self._generation = css.generation()
 
@@ -219,17 +223,26 @@ class Mesureur:
                 yield enfant, sous
 
     def _style_enfant(self, enfant, style_parent):
-        """Le style calcule de l'enfant, repris du cache de la passe.
+        """Le style calcule de l'enfant.
 
-        On ne recalcule pas la cascade ici : si la mise en page l'a deja faite,
-        elle est dans `contexte._styles`. Sinon on renonce a mesurer cet enfant
-        plutot que de payer une cascade — mesurer ne doit jamais couter plus
-        cher que poser, sans quoi le remede est pire que le mal.
+        Il vient du cache de la passe s'il y est deja, sinon la cascade le
+        calcule — et l'y depose. C'est ce qui rend la mesure prealable moins
+        chere que la pose qu'elle remplace : le travail se deplace en amont, la
+        pose n'aura plus a le refaire.
         """
         fixe = getattr(enfant, "style_engendre", None)
         if fixe is not None:
             return fixe
-        return self.contexte._styles.get(id(enfant))
+        connu = self.contexte._styles.get(id(enfant))
+        if connu is not None:
+            return connu
+        try:
+            return self.style_de(enfant, style_parent)
+        except Exception:
+            # Mesurer ne doit jamais empecher d'afficher : un style qu'on ne
+            # sait pas calculer rend simplement cet enfant non mesurable, et la
+            # pose reprendra son cours.
+            return None
 
     def _flux(self, element, style, affichage):
         """Bloc ou element en ligne.

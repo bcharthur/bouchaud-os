@@ -96,7 +96,8 @@ def dispose(boite, x, y, largeur_disponible, contexte, pose_enfant):
         principal = css.longueur(style.get("height", "auto"), 0.0, taille_police)
 
     articles = _prepare(boite, largeur_disponible, taille_police,
-                        horizontal, pose_enfant)
+                        horizontal, pose_enfant,
+                        getattr(contexte, "mesureur", None))
     if not articles:
         return 0.0
 
@@ -124,7 +125,8 @@ def dispose(boite, x, y, largeur_disponible, contexte, pose_enfant):
 
 # --- Preparation --------------------------------------------------------------
 
-def _prepare(boite, largeur_disponible, taille_police, horizontal, pose_enfant):
+def _prepare(boite, largeur_disponible, taille_police, horizontal, pose_enfant,
+             mesureur=None):
     articles = []
     for sous_boite in boite.enfants:
         style = sous_boite.style
@@ -150,7 +152,7 @@ def _prepare(boite, largeur_disponible, taille_police, horizontal, pose_enfant):
             largeur_disponible, taille_enfant)
 
         article.base = _base(article, largeur_disponible, taille_enfant,
-                             horizontal, pose_enfant)
+                             horizontal, pose_enfant, mesureur)
         article.rang = _entier(style.get("order"), 0)
         articles.append(article)
 
@@ -168,8 +170,21 @@ def _entier(valeur, defaut):
         return defaut
 
 
-def _base(article, largeur_disponible, taille_police, horizontal, pose_enfant):
-    """Taille souhaitee sur l'axe principal, avant repartition."""
+def _base(article, largeur_disponible, taille_police, horizontal, pose_enfant,
+          mesureur=None):
+    """Taille souhaitee sur l'axe principal, avant repartition.
+
+    ## Ce que cette fonction faisait, et ce qu'elle fait
+
+    Elle **posait l'enfant a l'origine** pour lire ce qu'il occupait, puis le
+    laissait etre repose ailleurs a sa place definitive. Deux dispositions
+    completes de tout un sous-arbre pour obtenir un nombre.
+
+    Elle demande maintenant ce nombre au calcul intrinseque, qui ne pose rien :
+    il descend l'arbre des elements en composant des largeurs de texte. Le
+    chemin par la pose reste en secours pour ce que le calcul ne couvre pas
+    encore — sa reponse est correcte, seulement plus chere.
+    """
     style = article.boite.style
     declaree = style.get("flex-basis", "auto")
     if declaree not in ("auto", "content", ""):
@@ -184,11 +199,22 @@ def _base(article, largeur_disponible, taille_police, horizontal, pose_enfant):
 
     # Ni base ni taille declaree : on demande au contenu ce qu'il occupe.
     #
-    # Sur l'axe horizontal, ce que rend la pose est la largeur de la **boite**,
-    # et une boite de bloc prend tout ce qu'on lui donne : trois articles
-    # reclamaient donc chacun la largeur entiere, et se la partageaient en
-    # trois parts egales. C'est l'etendue du contenu qu'il faut, pas celle du
-    # contenant.
+    # `max-content` est exactement la taille de base que la norme demande pour
+    # `flex-basis: content` : ce qu'il faudrait pour que rien ne revienne a la
+    # ligne. La repartition la reduira ensuite si la place manque, ce qui est
+    # son role.
+    if horizontal and mesureur is not None:
+        element = article.boite.element
+        if element is not None:
+            tailles = mesureur.tailles(element, style)
+            return max(0.0, min(largeur_disponible, tailles.max_contenu))
+
+    # Secours : sur l'axe vertical, et pour ce que la mesure ne sait pas encore
+    # faire, on retombe sur la pose. Sur l'axe horizontal, ce que rend la pose
+    # est la largeur de la **boite**, et une boite de bloc prend tout ce qu'on
+    # lui donne : trois articles reclamaient donc chacun la largeur entiere, et
+    # se la partageaient en trois parts egales. C'est l'etendue du contenu qu'il
+    # faut, pas celle du contenant.
     largeur, hauteur = pose_enfant(article.boite, largeur_disponible, 0.0, 0.0, None)
     if not horizontal:
         return hauteur

@@ -2195,6 +2195,120 @@ def proche(a, b, marge=1.5):
     return abs(a - b) <= marge
 
 
+def verifie_tailles_intrinseques():
+    """`min-content`, `max-content`, `fit-content` — et le meme calcul partout.
+
+    Ces trois mots-cles et la taille de base d'un article flexible sont la meme
+    notion. Le moteur les fait passer par la meme fonction, et ces epreuves
+    verifient les deux bouts : ce que la feuille demande explicitement, et ce
+    que la disposition en deduit toute seule.
+
+    L'ordre des inegalites est ce qui compte. `min-content` est la largeur du
+    mot le plus long, `max-content` celle de la phrase entiere : entre les deux
+    il doit y avoir un rapport net sur un texte de plusieurs mots. Un moteur qui
+    rendrait la meme valeur pour les deux aurait l'air de marcher sur une page
+    d'essai et s'effondrerait sur une vraie.
+    """
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #min  { width: min-content; }
+          #max  { width: max-content; }
+          #ajus { width: fit-content; }
+          #plein { }
+        </style>
+        <body>
+          <div id="min">alpha bravo charlie delta</div>
+          <div id="max">alpha bravo charlie delta</div>
+          <div id="ajus">alpha bravo charlie delta</div>
+          <div id="plein">alpha bravo charlie delta</div>
+        </body>""")
+    petite = boite_de(doc, "min")
+    grande = boite_de(doc, "max")
+    ajustee = boite_de(doc, "ajus")
+    pleine = boite_de(doc, "plein")
+
+    verifie("intrinseque: min-content est plus etroit que max-content",
+            petite.largeur < grande.largeur,
+            (petite.largeur, grande.largeur))
+    verifie("intrinseque: min-content n'est pas nul",
+            petite.largeur > 0, petite.largeur)
+    # Un bloc ordinaire prend toute la largeur ; `max-content` ne prend que ce
+    # que le texte demande. C'est la difference que le mot-cle doit produire.
+    verifie("intrinseque: max-content est plus etroit qu'un bloc ordinaire",
+            grande.largeur < pleine.largeur,
+            (grande.largeur, pleine.largeur))
+    # `fit-content` sans argument vaut `max-content` tant que la place suffit.
+    verifie("intrinseque: fit-content suit max-content quand la place suffit",
+            proche(ajustee.largeur, grande.largeur, 2.0),
+            (ajustee.largeur, grande.largeur))
+
+    # `fit-content(N)` borne : au-dessous de `max-content`, c'est N qui gagne ;
+    # jamais au-dessous de `min-content`.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #serre { width: fit-content(60px); }
+        </style>
+        <body><div id="serre">alpha bravo charlie delta</div></body>""")
+    serre = boite_de(doc, "serre")
+    verifie("intrinseque: fit-content(60px) ne depasse pas sa borne",
+            serre.largeur <= max(60.0, petite.largeur) + 1.0, serre.largeur)
+
+    # Un seul mot : les deux tailles se rejoignent, il n'y a nulle part ou
+    # couper.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #un { width: min-content; }
+          #deux { width: max-content; }
+        </style>
+        <body><div id="un">indivisible</div><div id="deux">indivisible</div></body>""")
+    verifie("intrinseque: un mot seul donne les memes deux tailles",
+            proche(boite_de(doc, "un").largeur,
+                   boite_de(doc, "deux").largeur, 2.0),
+            (boite_de(doc, "un").largeur,
+             boite_de(doc, "deux").largeur))
+
+    # `white-space: nowrap` interdit la coupure : `min-content` rejoint
+    # `max-content`.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #insecable { width: min-content; white-space: nowrap; }
+          #libre { width: max-content; }
+        </style>
+        <body>
+          <div id="insecable">alpha bravo charlie</div>
+          <div id="libre">alpha bravo charlie</div>
+        </body>""")
+    verifie("intrinseque: nowrap fait remonter min-content a max-content",
+            proche(boite_de(doc, "insecable").largeur,
+                   boite_de(doc, "libre").largeur, 3.0),
+            (boite_de(doc, "insecable").largeur,
+             boite_de(doc, "libre").largeur))
+
+    # Le meme calcul dans l'autre sens : une boite `inline-block` se retrecit a
+    # son contenu sans qu'on le lui demande. C'est le raccord qui compte —
+    # si `inline-block` et `max-content` divergeaient, il y aurait deux
+    # implementations de la meme notion.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #bloc { display: inline-block; }
+          #mot  { width: max-content; }
+        </style>
+        <body>
+          <div><span id="bloc">alpha bravo</span></div>
+          <div id="mot">alpha bravo</div>
+        </body>""")
+    enligne = boite_de(doc, "bloc")
+    motcle = boite_de(doc, "mot")
+    verifie("intrinseque: inline-block et max-content s'accordent",
+            proche(enligne.largeur, motcle.largeur, 3.0),
+            (enligne.largeur, motcle.largeur))
+
+
 def verifie_flex():
     """La disposition flexible : repartition, justification, retour a la ligne."""
     doc = document("""
@@ -5911,6 +6025,7 @@ def principal():
         verifie_temoins,
         verifie_cache_http,
         verifie_stockage_local,
+        verifie_tailles_intrinseques,
         verifie_flex,
         verifie_grille,
         verifie_position,

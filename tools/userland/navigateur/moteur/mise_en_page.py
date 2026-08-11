@@ -15,7 +15,7 @@ fait ici.
 
 import bo as _bo
 
-from . import css, edition, flex, grille, images, police, tableau
+from . import css, edition, flex, grille, images, intrinseque, police, tableau
 from .html import Element, Texte
 from . import telemetrie
 
@@ -195,6 +195,21 @@ class Contexte:
         self.image_video = image_video
         # Rappel qui rend ce qu'un `<canvas>` a dessine, ou `None`.
         self.toile = toile
+        # De quoi mesurer une boite **sans la poser**. Voir `intrinseque`.
+        self.mesureur = intrinseque.Mesureur(bo, self, self.style_pour_mesure)
+
+    def style_pour_mesure(self, element, style_parent):
+        """Le style d'un element, pour le seul besoin de la mesure.
+
+        Passe par `_style_de`, donc par le cache de la passe : ce que la mesure
+        calcule ici, la pose n'aura pas a le recalculer. Le cout se deplace, il
+        ne se duplique pas — ce qui est la seule facon de rendre une mesure
+        prealable moins chere que la pose qu'elle remplace.
+
+        Le chemin se reduit a l'element lui-meme : `Selecteur.correspond` n'en
+        lit que le dernier maillon et remonte ensuite par les parents reels.
+        """
+        return _style_de(element, style_parent, [element], self)
 
 
 def construit(racine, regles, largeur_page, url="", image_video=None, toile=None):
@@ -487,6 +502,47 @@ def _boites_enfants(boite, contexte):
         boite.enfants.append(sous_boite)
 
 
+def _mesure_retrecie(boite, style, disponible, contexte):
+    """La largeur qu'une boite « retrecie au contenu » demande.
+
+    C'est le cas des `inline-block`, des flottants et des cellules : leur
+    largeur ne vient ni de leur parent ni de la feuille, mais de ce qu'elles
+    portent. La formule de la norme est `min(max-content, max(min-content,
+    disponible))` — assez large pour eviter les retours a la ligne inutiles,
+    jamais plus large que la place offerte.
+
+    Rend `None` quand la mesure n'est pas possible : l'appelant retombe alors
+    sur la pose d'essai, plus chere mais toujours correcte.
+    """
+    mesureur = getattr(contexte, "mesureur", None)
+    element = boite.element
+    if mesureur is None or element is None or not isinstance(element, Element):
+        return None
+    tailles = mesureur.tailles(element, style)
+    if tailles.max_contenu <= 0.0:
+        # Rien de mesurable — une boite vide, ou un contenu que le calcul ne
+        # couvre pas. On ne devine pas : la pose d'essai tranchera.
+        return None
+    return max(0.0, min(tailles.max_contenu, max(tailles.min_contenu, disponible)))
+
+
+def _largeur_intrinseque(boite, style, disponible, contexte):
+    """Resout `width` quand elle est exprimee en mots-cles de dimensionnement.
+
+    Rend `None` si `width` n'en est pas un — l'appelant garde alors son chemin
+    ordinaire.
+    """
+    brut = style.get("width", "auto")
+    if not brut or brut == "auto" or "content" not in brut:
+        return None
+    mesureur = getattr(contexte, "mesureur", None)
+    element = boite.element
+    if mesureur is None or element is None:
+        return None
+    tailles = mesureur.tailles(element, style)
+    return intrinseque.largeur_mot_cle(brut, tailles, disponible)
+
+
 def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None):
     """Positionne une boite de type bloc et tout ce qu'elle contient.
 
@@ -523,6 +579,14 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None
     boite.y = y + marge_h
     largeur = largeur_disponible - marge_g - marge_d
     imposee = css.longueur(style.get("width", "auto"), largeur_disponible, taille)
+    if imposee is None:
+        # `width: min-content | max-content | fit-content(...)` passe par le
+        # **meme** calcul que la taille de base d'un article flexible. C'etait
+        # l'exigence : une seule implementation de la notion, deux facons de la
+        # demander. Deux implementations d'une meme notion divergent toujours,
+        # et la divergence se manifeste par un affichage faux que rien ne
+        # signale.
+        imposee = _largeur_intrinseque(boite, style, largeur, contexte)
     if largeur_forcee is not None:
         largeur = largeur_forcee
     elif imposee is not None and imposee > 0:
@@ -850,8 +914,17 @@ def _pose_flottant(boite, element, style, chemin, flottants, gauche, y,
     # Une boite flottante prend la largeur de son contenu, pas celle de son
     # parent : sans cela, la premiere occuperait toute la ligne et les
     # suivantes descendraient sous elle.
-    _dispose_bloc(sous_boite, gauche, y, max(1.0, largeur), contexte)
-    voulue = declaree if declaree is not None else etendue_contenu(sous_boite)
+    #
+    # Cette largeur se mesurait par une pose d'essai — soit trois dispositions
+    # completes du sous-arbre pour un seul flottant, la premiere n'existant que
+    # pour lire un nombre. Le calcul intrinseque rend le meme nombre sans rien
+    # poser.
+    voulue = declaree
+    if voulue is None:
+        voulue = _mesure_retrecie(sous_boite, style, largeur, contexte)
+    if voulue is None:
+        _dispose_bloc(sous_boite, gauche, y, max(1.0, largeur), contexte)
+        voulue = etendue_contenu(sous_boite)
     voulue = max(0.0, min(voulue, largeur))
     occupee = voulue + marge_g + marge_d
 
@@ -1133,8 +1206,17 @@ def _pose_en_ligne_bloc(boite, nœud, style, chemin, gauche, largeur,
     reste = max(0.0, gauche + largeur - curseur_x)
     declaree = css.longueur(style.get("width", "auto"), largeur, taille)
 
-    _dispose_bloc(sous_boite, curseur_x, curseur_y, max(1.0, largeur), contexte)
-    voulue = declaree if declaree is not None else etendue_contenu(sous_boite)
+    # La largeur voulue se demande au calcul intrinseque plutot qu'a une pose
+    # d'essai : `max-content` est exactement la definition de « ce que cette
+    # boite occuperait si rien ne revenait a la ligne », c'est-a-dire la largeur
+    # retrecie d'un `inline-block`. La pose d'essai reste en secours pour ce que
+    # la mesure ne sait pas encore faire.
+    voulue = declaree
+    if voulue is None:
+        voulue = _mesure_retrecie(sous_boite, style, largeur, contexte)
+    if voulue is None:
+        _dispose_bloc(sous_boite, curseur_x, curseur_y, max(1.0, largeur), contexte)
+        voulue = etendue_contenu(sous_boite)
     marge_g = _longueur(style, "margin-left", largeur, taille)
     marge_d = _longueur(style, "margin-right", largeur, taille)
     voulue = max(0.0, min(voulue, largeur))
