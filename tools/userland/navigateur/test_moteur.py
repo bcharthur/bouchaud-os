@@ -466,12 +466,17 @@ def verifie_diagnostics_compatibilite():
     doc = document("<body></body>")
     contexte = js.Contexte(doc)
     try:
-        # `WebSocket` n'existe pas : l'accesseur du prelude le note et rend
-        # `undefined`, donc la detection de fonctionnalite de la page continue
-        # de retomber sur son plan de secours.
-        contexte.execute("void indexedDB;", "page.js")
+        # `RTCPeerConnection` n'existe pas : l'accesseur du prelude le note et
+        # rend `undefined`, donc la detection de fonctionnalite de la page
+        # continue de retomber sur son plan de secours.
+        #
+        # L'exemple etait `indexedDB` jusqu'a ce qu'il soit implemente. Le
+        # remplacer plutot que d'affaiblir l'epreuve : ce qu'elle verifie, c'est
+        # que le moteur sait nommer ce qui lui manque — pas qu'il manque
+        # quelque chose en particulier.
+        contexte.execute("void RTCPeerConnection;", "page.js")
         egal("diagnostic: API absente observee",
-             contexte.rapport_compatibilite().get("api_absente:indexedDB"), 1)
+             contexte.rapport_compatibilite().get("api_absente:RTCPeerConnection"), 1)
 
         # A — un identifiant applicatif n'est pas une API navigateur.
         contexte.execute("console.log(currentUsr);", "app.js")
@@ -3659,6 +3664,278 @@ def _cache_http(stockage):
     egal("cache: le vidage vide", boite.lit("http://exemple.test/logo.png"), None)
 
 
+def verifie_indexeddb():
+    """IndexedDB : asynchrone, transactionnel, persistant, cloisonne.
+
+    Quatre proprietes, et chacune se casse d'une facon differente :
+
+    * **asynchrone** — si une ecriture bloquait le fil, les minuteries
+      s'arreteraient pendant. On en pose une et on verifie qu'elle a battu
+      pendant que mille enregistrements partaient ;
+    * **transactionnel** — une transaction abandonnee ne doit rien laisser
+      derriere elle. Pas « presque rien » : rien ;
+    * **persistant** — ce qui est ecrit doit se relire apres que tout ce qui
+      etait en memoire a ete jete ;
+    * **cloisonne** — deux origines qui ouvrent `mabase` ouvrent deux bases.
+      Sans cela, un site lirait l'etat d'un autre.
+    """
+    import time as _time
+    from moteur import indexeddb
+
+    restaure = isole_le_stockage()
+    try:
+        indexeddb.reinitialise()
+        _indexeddb_api(_time)
+        _indexeddb_transactions()
+        _indexeddb_persistance(indexeddb)
+        _indexeddb_origines(indexeddb)
+    finally:
+        indexeddb.reinitialise()
+        restaure()
+
+
+def _bat(contexte, jusqua, secondes=10.0):
+    """Bat la boucle d'evenements jusqu'a ce que la condition tienne.
+
+    Comme pour le reseau : attendre un nombre fixe de tours rendrait ces
+    epreuves instables sous charge, et un test instable est pire qu'absent.
+    """
+    import time as _time
+    limite = _time.perf_counter() + secondes
+    while _time.perf_counter() < limite:
+        contexte.tic()
+        if contexte.execute(jusqua):
+            return True
+        _time.sleep(0.01)
+    return False
+
+
+def _indexeddb_api(_time):
+    """Le cycle complet : open → onupgradeneeded → transaction → put → get."""
+    doc = document("<body><p>base</p></body>", url="https://un.test/page")
+    contexte = js.Contexte(doc)
+
+    verifie("idb: indexedDB est un objet, pas un moignon",
+            contexte.execute("typeof indexedDB === 'object' && "
+                             "typeof indexedDB.open === 'function'"), True)
+
+    contexte.execute("""
+        globalThis.__t = { etapes: [] };
+        const d = indexedDB.open("carnet", 1);
+        d.onupgradeneeded = function (e) {
+            __t.etapes.push("montee");
+            __t.ancienne = e.oldVersion;
+            __t.nouvelle = e.newVersion;
+            e.target.result.createObjectStore("notes");
+        };
+        d.onsuccess = function (e) {
+            __t.etapes.push("ouverte");
+            __t.version = e.target.result.version;
+            __t.magasins = Array.from(e.target.result.objectStoreNames);
+            globalThis.__base = e.target.result;
+            const t = __base.transaction("notes", "readwrite");
+            t.objectStore("notes").put({ titre: "un" }, "a");
+            t.objectStore("notes").put({ titre: "deux" }, "b");
+            t.oncomplete = function () {
+                __t.etapes.push("ecrit");
+                const l = __base.transaction("notes", "readonly");
+                const r = l.objectStore("notes").get("a");
+                r.onsuccess = function () { __t.lu = r.result; };
+                const c = l.objectStore("notes").count();
+                c.onsuccess = function () { __t.combien = c.result; };
+            };
+        };
+        d.onerror = function (e) { __t.erreur = String(e.target.error); };
+    """)
+    _bat(contexte, "__t.lu !== undefined && __t.combien !== undefined")
+
+    lu = json.loads(contexte.execute("JSON.stringify(__t)"))
+    egal("idb: onupgradeneeded avant onsuccess",
+         lu.get("etapes", [])[:2], ["montee", "ouverte"])
+    egal("idb: l'ancienne version est 0 sur une base neuve", lu.get("ancienne"), 0)
+    egal("idb: la nouvelle version est celle demandee", lu.get("nouvelle"), 1)
+    egal("idb: le magasin cree est declare", lu.get("magasins"), ["notes"])
+    egal("idb: la transaction s'est validee seule",
+         "ecrit" in lu.get("etapes", []), True)
+    egal("idb: get rend l'objet range", (lu.get("lu") or {}).get("titre"), "un")
+    egal("idb: count compte ce qui est range", lu.get("combien"), 2)
+
+    # `add` refuse une cle deja prise — c'est ce qui protege d'un doublon.
+    contexte.execute("""
+        (function () {
+            __t.doublon = null;
+            const t = __base.transaction("notes", "readwrite");
+            const r = t.objectStore("notes").add({ titre: "encore" }, "a");
+            r.onerror = function () { __t.doublon = r.error.name; };
+            r.onsuccess = function () { __t.doublon = "passe"; };
+        })();
+    """)
+    _bat(contexte, "__t.doublon !== null")
+    egal("idb: add refuse une cle deja prise",
+         json.loads(contexte.execute("JSON.stringify(__t.doublon)")),
+         "ConstraintError")
+
+    # Une ecriture en lecture seule doit echouer, pas passer en silence.
+    contexte.execute("""
+        (function () {
+            __t.lectureSeule = null;
+            const t = __base.transaction("notes", "readonly");
+            const r = t.objectStore("notes").put({ x: 1 }, "z");
+            r.onerror = function () { __t.lectureSeule = r.error.name; };
+            r.onsuccess = function () { __t.lectureSeule = "passe"; };
+        })();
+    """)
+    _bat(contexte, "__t.lectureSeule !== null")
+    egal("idb: une transaction en lecture seule refuse d'ecrire",
+         json.loads(contexte.execute("JSON.stringify(__t.lectureSeule)")),
+         "ReadOnlyError")
+
+    # L'asynchronisme, verifie plutot que suppose : une minuterie doit battre
+    # pendant que les ecritures partent. Si `put` ecrivait sur le fil de
+    # l'interface, ce compteur resterait a zero.
+    contexte.execute("""
+        (function () {
+            __t.tics = 0;
+            __t.finies = 0;
+            setInterval(function () { __t.tics += 1; }, 1);
+            const t = __base.transaction("notes", "readwrite");
+            const m = t.objectStore("notes");
+            for (let i = 0; i < 200; i++) {
+                const r = m.put({ n: i, texte: "enregistrement numero " + i }, "k" + i);
+                r.onsuccess = function () { __t.finies += 1; };
+            }
+        })();
+    """)
+    _bat(contexte, "__t.finies >= 200")
+    tics = contexte.execute("__t.tics")
+    verifie("idb: la boucle d'evenements bat pendant les ecritures",
+            tics and tics > 0, tics)
+
+
+def _indexeddb_transactions():
+    """Une transaction abandonnee ne laisse rien : ni moitie, ni trace."""
+    doc = document("<body><p>t</p></body>", url="https://un.test/page")
+    contexte = js.Contexte(doc)
+    contexte.execute("""
+        globalThis.__x = {};
+        const d = indexedDB.open("journal", 1);
+        d.onupgradeneeded = function (e) {
+            e.target.result.createObjectStore("lignes");
+        };
+        d.onsuccess = function (e) {
+            globalThis.__j = e.target.result;
+            const t = __j.transaction("lignes", "readwrite");
+            t.objectStore("lignes").put("gardee", "ok");
+            t.oncomplete = function () { __x.pose = true; };
+        };
+    """)
+    _bat(contexte, "__x.pose === true")
+
+    contexte.execute("""
+        (function () {
+            __x.abandon = null;
+            const t = __j.transaction("lignes", "readwrite");
+            t.objectStore("lignes").put("perdue", "jetee");
+            t.onabort = function () { __x.abandon = "abandonnee"; };
+            t.abort();
+        })();
+    """)
+    _bat(contexte, "__x.abandon !== null")
+
+    contexte.execute("""
+        (function () {
+            __x.relu = null;
+            __x.gardee = null;
+            const l = __j.transaction("lignes", "readonly");
+            const a = l.objectStore("lignes").get("jetee");
+            a.onsuccess = function () { __x.relu = a.result === undefined ? "vide" : a.result; };
+            const b = l.objectStore("lignes").get("ok");
+            b.onsuccess = function () { __x.gardee = b.result; };
+        })();
+    """)
+    _bat(contexte, "__x.relu !== null && __x.gardee !== null")
+    lu = json.loads(contexte.execute("JSON.stringify(__x)"))
+    egal("idb: une transaction abandonnee n'ecrit rien", lu.get("relu"), "vide")
+    egal("idb: et ne touche pas a ce qui etait deja la", lu.get("gardee"), "gardee")
+
+
+def _indexeddb_persistance(indexeddb):
+    """Ce qui est ecrit se relit apres que la memoire a ete jetee."""
+    doc = document("<body><p>p</p></body>", url="https://un.test/page")
+    contexte = js.Contexte(doc)
+    contexte.execute("""
+        globalThis.__p = {};
+        const d = indexedDB.open("profil", 1);
+        d.onupgradeneeded = function (e) {
+            e.target.result.createObjectStore("champs");
+        };
+        d.onsuccess = function (e) {
+            const t = e.target.result.transaction("champs", "readwrite");
+            t.objectStore("champs").put("arthur", "nom");
+            t.oncomplete = function () { __p.ecrit = true; };
+        };
+    """)
+    _bat(contexte, "__p.ecrit === true")
+
+    # Tout ce qui etait en memoire est jete : ce qu'on relit vient du disque.
+    indexeddb.reinitialise()
+    doc2 = document("<body><p>p</p></body>", url="https://un.test/page")
+    contexte2 = js.Contexte(doc2)
+    contexte2.execute("""
+        globalThis.__q = {};
+        const d = indexedDB.open("profil");
+        d.onsuccess = function (e) {
+            __q.version = e.target.result.version;
+            __q.magasins = Array.from(e.target.result.objectStoreNames);
+            const t = e.target.result.transaction("champs", "readonly");
+            const r = t.objectStore("champs").get("nom");
+            r.onsuccess = function () { __q.nom = r.result; };
+        };
+        d.onerror = function (e) { __q.erreur = String(e.target.error); };
+    """)
+    _bat(contexte2, "__q.nom !== undefined || __q.erreur !== undefined")
+    lu = json.loads(contexte2.execute("JSON.stringify(__q)"))
+    egal("idb: la valeur survit a un rechargement", lu.get("nom"), "arthur")
+    egal("idb: la version aussi", lu.get("version"), 1)
+    egal("idb: et le schema", lu.get("magasins"), ["champs"])
+
+
+def _indexeddb_origines(indexeddb):
+    """Deux origines, le meme nom de base, deux bases distinctes."""
+    a = indexeddb.service("https://a.test/page")
+    b = indexeddb.service("https://b.test/page")
+    a.applique_montee("commune", 1, [("m", {})], [])
+    b.applique_montee("commune", 1, [("m", {})], [])
+
+    ta = a.transaction("commune", "readwrite")
+    indexeddb.execute(ta, "put", "m", "cle", "valeur de A")
+    ta.commit()
+
+    tb = b.transaction("commune", "readonly")
+    egal("idb: une origine ne voit pas la base d'une autre",
+         indexeddb.execute(tb, "get", "m", "cle", None), indexeddb.ABSENT)
+
+    ta2 = a.transaction("commune", "readonly")
+    egal("idb: et voit bien la sienne",
+         indexeddb.execute(ta2, "get", "m", "cle", None), "valeur de A")
+
+    # Un nom de base est choisi par la page : `../../temoins.json` en est un
+    # nom valide. Sans echappement, une page ecrirait par-dessus le bocal a
+    # temoins.
+    #
+    # Ce qu'il faut verifier n'est pas l'absence des deux points — ils peuvent
+    # rester dans un nom de fichier sans danger — mais que le chemin **resolu**
+    # ne sorte pas du dossier. C'est la seule formulation qui teste la propriete
+    # plutot que son apparence.
+    from moteur import stockage as _stockage
+    dossier = os.path.abspath(os.path.join(_stockage.RACINE, indexeddb.DOSSIER))
+    for nom in ("../../temoins", "../../../etc/passwd", "a/b/c", "..", "/absolu"):
+        resolu = os.path.abspath(os.path.join(
+            _stockage.RACINE, indexeddb._nom_de_fichier("https://a.test", nom)))
+        verifie("idb: le nom de base %r reste dans son dossier" % nom,
+                os.path.dirname(resolu) == dossier, resolu)
+
+
 def verifie_stockage_local():
     """`localStorage` : cloisonne par origine, et rendu au JavaScript."""
     from moteur import stockage
@@ -6025,6 +6302,7 @@ def principal():
         verifie_temoins,
         verifie_cache_http,
         verifie_stockage_local,
+        verifie_indexeddb,
         verifie_tailles_intrinseques,
         verifie_flex,
         verifie_grille,

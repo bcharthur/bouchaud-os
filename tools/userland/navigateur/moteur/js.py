@@ -163,6 +163,13 @@ class Contexte:
         self._verrou_reponses = threading.Lock()
         self._annulees = set()
         self._fils = None
+        # IndexedDB : resultats en attente de livraison, et transactions
+        # ouvertes. Les transactions vivent cote Python — la page n'en voit
+        # qu'un entier, et ne peut donc pas en fabriquer une.
+        self._idb_resultats = []
+        self._idb_transactions = {}
+        self._prochaine_transaction = 1
+        self._idb_fils = None
         # Les connexions WebSocket ouvertes par cette page, par identifiant.
         self._sockets = {}
         self._lecteurs = {}        # identifiant de nœud -> Lecteur
@@ -223,8 +230,11 @@ class Contexte:
         # verrou pendant son execution serait un blocage certain.
         with self._verrou_reponses:
             arrivees, self._reponses = self._reponses, []
+            resultats, self._idb_resultats = self._idb_resultats, []
         for identifiant, reponse in arrivees:
             self._appelle("__bo_reponse", [identifiant, reponse])
+        for identifiant, resultat, erreur in resultats:
+            self._appelle("__bo_idb", [identifiant, resultat, erreur])
 
         maintenant = time.monotonic() * 1000.0
         for identifiant in sorted(self._minuteries):
@@ -1528,6 +1538,150 @@ class Contexte:
             self._fils = ThreadPoolExecutor(max_workers=4,
                                             thread_name_prefix="bo-reseau")
         return self._fils
+
+    # --- IndexedDB ------------------------------------------------------------
+    #
+    # Le contrat est le meme que pour le reseau, et pour la meme raison : une
+    # ecriture sur disque qui se ferait sur le fil de l'interface figerait la
+    # page, et la promesse rendue n'y changerait rien. Chaque appel part vers un
+    # fil et depose son resultat dans la file que `tic()` vidange deja — donc
+    # aucun rappel de page ne s'execute au milieu d'un script.
+
+    def _idb_service(self):
+        from . import indexeddb
+        return indexeddb.service(self.document.url)
+
+    def _idb_livre(self, identifiant, resultat=None, erreur=None):
+        """Depose un resultat dans la file de la boucle d'evenements."""
+        with self._verrou_reponses:
+            self._idb_resultats.append((int(identifiant), resultat, erreur))
+
+    def _idb_pool(self):
+        """Le fil de stockage. **Un seul**, et c'est le point important.
+
+        La page recoit son jeton de transaction immediatement, mais la
+        transaction elle-meme se construit sur le fil. Avec plusieurs fils,
+        rien ne garantit que la construction s'execute avant les operations
+        qu'on lui adresse : c'est exactement le defaut qu'une epreuve a trouve
+        ici — une lecture arrivait avant l'ouverture de sa propre transaction et
+        echouait en « transaction inconnue ».
+
+        Un fil unique rend l'ordre de soumission egal a l'ordre d'execution.
+        Ce n'est pas un pis-aller : IndexedDB **exige** que les operations d'une
+        transaction s'executent dans l'ordre ou la page les a emises, et une
+        file unique est la facon la plus simple de ne pas pouvoir se tromper.
+        Le stockage reste entierement hors du fil de l'interface, qui est ce
+        qu'on voulait.
+        """
+        if self._idb_fils is None:
+            from concurrent.futures import ThreadPoolExecutor
+            self._idb_fils = ThreadPoolExecutor(max_workers=1,
+                                                thread_name_prefix="bo-idb")
+        return self._idb_fils
+
+    def _idb_en_fond(self, identifiant, travail):
+        """Fait le travail sur le fil de stockage, et livre ce qu'il rend."""
+        from . import indexeddb
+
+        def enrobe():
+            try:
+                self._idb_livre(identifiant, travail())
+            except indexeddb.Erreur as e:
+                self._idb_livre(identifiant, None, {"nom": e.nom, "message": str(e)})
+            except Exception as e:  # noqa: BLE001 — une page ne tue pas le navigateur
+                self._idb_livre(identifiant, None,
+                                {"nom": "UnknownError", "message": str(e)})
+
+        self._idb_pool().submit(enrobe)
+
+    def _op_idbOuvre(self, identifiant, base, version):
+        """`indexedDB.open(nom, version)`.
+
+        Rend `(version_actuelle, magasins, montee_requise)`. Quand une montee
+        est requise, la page recoit `onupgradeneeded` **avant** `onsuccess` et
+        n'a le droit de creer des magasins que pendant celui-la : c'est ce qui
+        rend le schema d'une base previsible d'un lancement a l'autre.
+        """
+        version = None if version in (None, "", 0) else int(version)
+
+        def travail():
+            actuelle, magasins, montee = self._idb_service().ouvre(str(base), version)
+            return {"version": actuelle, "magasins": magasins,
+                    "montee": montee,
+                    "cible": version if version is not None else actuelle or 1}
+
+        self._idb_en_fond(identifiant, travail)
+        return True
+
+    def _op_idbMonte(self, identifiant, base, version, creations, suppressions):
+        """Applique ce que `onupgradeneeded` a demande, d'une seule ecriture."""
+        listes = [(str(nom), options or {}) for nom, options in (creations or [])]
+        retires = [str(nom) for nom in (suppressions or [])]
+
+        def travail():
+            magasins = self._idb_service().applique_montee(
+                str(base), int(version), listes, retires)
+            return {"version": int(version), "magasins": magasins}
+
+        self._idb_en_fond(identifiant, travail)
+        return True
+
+    def _op_idbSupprime(self, identifiant, base):
+        def travail():
+            return self._idb_service().supprime(str(base))
+
+        self._idb_en_fond(identifiant, travail)
+        return True
+
+    def _op_idbTransaction(self, identifiant, base, mode):
+        """Ouvre une transaction et retient son jeton.
+
+        Le jeton vit cote Python : la page n'en voit qu'un entier, et ne peut
+        donc pas fabriquer une transaction qu'elle n'a pas ouverte.
+        """
+        jeton = self._prochaine_transaction
+        self._prochaine_transaction += 1
+        mode = "readwrite" if mode == "readwrite" else "readonly"
+
+        def travail():
+            self._idb_transactions[jeton] = self._idb_service().transaction(
+                str(base), mode)
+            return jeton
+
+        self._idb_en_fond(identifiant, travail)
+        return jeton
+
+    def _op_idbOperation(self, identifiant, jeton, verbe, magasin, cle, valeur):
+        from . import indexeddb
+
+        def travail():
+            transaction = self._idb_transactions.get(int(jeton))
+            if transaction is None:
+                raise indexeddb.Erreur("TransactionInactiveError",
+                                       "transaction inconnue")
+            return indexeddb.execute(transaction, str(verbe), str(magasin),
+                                     cle, valeur)
+
+        self._idb_en_fond(identifiant, travail)
+        return True
+
+    def _op_idbTermine(self, identifiant, jeton, valide):
+        """Valide ou abandonne une transaction.
+
+        C'est ici que se joue l'atomicite : tant que ce n'est pas appele, rien
+        de ce que la transaction a prepare n'est visible d'une autre.
+        """
+        def travail():
+            transaction = self._idb_transactions.pop(int(jeton), None)
+            if transaction is None:
+                return False
+            if valide:
+                return transaction.commit()
+            transaction.abandonne()
+            return False
+
+        self._idb_en_fond(identifiant, travail)
+        return True
 
     def _op_annuleRequete(self, identifiant):
         """`xhr.abort()` et `AbortController.abort()`.
