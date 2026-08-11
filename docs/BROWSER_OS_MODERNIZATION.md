@@ -1,7 +1,9 @@
 # Ce que le noyau sait deja faire — et ce qui manque au renderer separe
 
-*Etat au 11 aout 2026. Aucun processus de rendu n'existe encore : ce document
-mesure le terrain avant d'y construire.*
+*Etat au 11 aout 2026, revise apres les correctifs qu'il avait lui-meme
+demandes. Aucun processus de rendu n'existe encore : ce document mesure le
+terrain avant d'y construire. Les sections 1 a 9 decrivent l'etat courant ;
+le verdict de fin dit ce qu'un renderer y trouverait.*
 
 ## Pourquoi ce document
 
@@ -12,10 +14,12 @@ entiere. C'est exactement le probleme que l'architecture multi-processus de
 Chromium et de WebKit resout — et la question posee ici est de savoir si ce
 noyau peut la porter.
 
-La reponse courte est **oui pour l'isolation des pannes, non pour l'isolation
-des ressources**, et la difference compte : separer le renderer sur cet OS
-empecherait un site de faire tomber le navigateur, mais **pas** de le rendre
-lent. Le reste du document dit pourquoi, avec les lignes de code a l'appui.
+La reponse courte est **oui pour l'isolation des pannes et de la memoire, non
+pour celle du temps de calcul**. Separer le renderer sur cet OS empecherait un
+site de faire tomber le navigateur, et — depuis que `RLIMIT_AS` est applique —
+d'epuiser la memoire de la machine. Cela ne l'empecherait toujours **pas** de le
+rendre lent : un seul cœur, un tourniquet, aucune priorite. Le reste du document
+dit pourquoi, avec les lignes de code a l'appui.
 
 La methode est celle des autres audits du depot : lire le dispatch d'appels
 systeme, lire les implementations, et ne rien affirmer qui ne soit verifiable.
@@ -127,13 +131,22 @@ chose a travers un `socketpair` et `SCM_RIGHTS`, entre deux processus qui ne
 sont pas parents par le mmap. C'est le scenario d'un tampon d'image passe du
 processus qui dessine a celui qui compose.
 
-**Un defaut, precis et trouvable.** Rien n'evince jamais le cache : aucun chemin
-du noyau ne retire d'entree de `PAGE_CACHE`. Les frames d'un `memfd` ferme
-restent allouees jusqu'a l'extinction de la machine. Un compositeur qui recree
-sa surface a chaque redimensionnement fait donc fuir de la memoire physique de
-maniere non bornee. Accessoirement, le cache est un `Vec` parcouru lineairement
-par page mappee (`abi/mem.rs:188`) : projeter une surface de 4 MiB, soit 1 024
-pages, coute jusqu'a ~500 000 comparaisons. Correct, mais quadratique.
+**Le cycle de vie, ajoute depuis.** Ce document signalait ici une fuite : rien
+n'evinçait jamais le cache, et les frames d'un `memfd` ferme restaient allouees
+jusqu'a l'extinction. C'est corrige — `kernel/partage.rs` compte trois choses
+la ou il n'y en avait aucune : **descripteurs ouverts**, **mappages vivants** et
+**possession des pages**. Les frames ne repartent que lorsque les deux premiers
+comptes sont a zero, si bien qu'un descripteur ferme dont le mappage vit encore
+ne libere rien — ce que POSIX promet. `Drop for Process` couvre la mort brutale :
+tuer un renderer ne fait plus fuir ses surfaces. `shm-probe.c` enchaine mille
+creations/destructions de surface et compare la memoire physique libre avant et
+apres ; il verifie aussi la contre-epreuve, qu'un mappage vivant survive a la
+fermeture de son descripteur.
+
+Reste, sans consequence aujourd'hui : le cache est un `Vec` parcouru
+lineairement par page mappee. Projeter une surface de 4 MiB, soit 1 024 pages,
+coute jusqu'a ~500 000 comparaisons. Correct, mais a revoir si les surfaces
+grossissent.
 
 ## 5. Synchronisation
 
@@ -173,18 +186,22 @@ et elle est deja la, pour une raison qui n'avait rien a voir.
 - **Tourniquet simple**, commutation aux points de blocage volontaires et sur
   IRQ0 uniquement si le timer a interrompu du code ring 3 (`task.rs:17-27`). Le
   noyau lui-meme n'est jamais preempte : il n'est pas reentrant.
-- **Aucun quota.** `setrlimit` rend 0 sans enregistrer (`abi/mod.rs:496`).
-  Aucune borne memoire ni CPU par processus.
+- **Un seul quota.** `RLIMIT_AS` se pose, se relit et s'applique dans `brk` et
+  `mmap` : un processus qui depasse recoit `ENOMEM` et survit a son propre
+  depassement. C'est delibere — c'est le seul quota qui change quelque chose au
+  projet de processus separes. Rien ne borne en revanche le temps CPU, le
+  nombre de descripteurs, ni la taille cumulee des tampons IPC.
 
 Consequence a enoncer clairement, parce qu'elle contredit l'argument habituel :
 sur cet OS, sortir le rendu dans un processus separe **n'empeche pas une page
 lourde de rendre l'interface lente**. Le renderer et l'interface se disputent le
-meme cœur en tourniquet, sans qu'aucun mecanisme ne favorise le second. Et une
-page qui fuit emporte toujours la machine, puisque rien ne plafonne sa memoire.
+meme cœur en tourniquet, sans qu'aucun mecanisme ne favorise le second.
 
-Ce que la separation apporte quand meme, et qui n'est pas rien : un renderer qui
-segfault ou qu'on tue laisse l'interface debout, avec un onglet mort au lieu
-d'une application morte.
+Ce que la separation apporte, en revanche : un renderer qui segfault ou qu'on
+tue laisse l'interface debout, avec un onglet mort au lieu d'une application
+morte — et, depuis `RLIMIT_AS`, un renderer qui fuit meurt seul au lieu
+d'emporter la machine. C'est deux benefices sur trois ; le troisieme demande des
+priorites d'ordonnancement, pas une architecture.
 
 ## 7. Attente d'evenements
 
@@ -208,10 +225,17 @@ a chaque quantum pour re-tester. Avec un processus, c'est invisible. Avec une
 interface et N renderers tous en `poll`, l'ordonnanceur depense ses quanta a
 re-tester — un cout en O(processus x descripteurs) par tick.
 
-Et `POLLOUT` est **toujours** rendu pret (`abi/file.rs:1604`, « les ecritures ne
-bloquent jamais ici »). Un renderer qui se sert de `poll` pour savoir quand il
-peut ecrire davantage dans un `socketpair` sature recevra un « pret » a chaque
-tour et tournera a vide. Tout protocole IPC avec contre-pression bute la-dessus.
+`POLLOUT` etait **toujours** rendu pret ; ce document le signalait comme le
+second defaut a corriger avant tout protocole IPC. C'est fait. Tubes et paires
+de sockets ont desormais une capacite (`CAPACITE_CANAL`, 64 KiB) : plein, plus
+de `POLLOUT` et `EAGAIN` a l'ecriture non bloquante ; presque plein, une
+ecriture courte qui dit combien d'octets sont reellement partis ; lecteur ferme,
+`POLLHUP`/`POLLERR` rendus sans qu'on les demande et `EPIPE` a l'ecriture.
+
+`ipc-probe.c` etablit les quatre etats. Il a d'abord ete passe au noyau Linux de
+l'hote, qui y a trouve deux erreurs — un `SIGPIPE` non ignore, et l'attente d'un
+`POLLOUT` apres une lecture partielle alors que Linux applique un seuil de place
+libre. Un test qui n'est vrai que contre son propre noyau ne prouve rien.
 
 `epoll` n'a pas de declenchement sur front (`EPOLLET`) : la liste est relue
 entierement a chaque tour.
@@ -244,59 +268,83 @@ est prete.
 
 ---
 
-## La distance jusqu'au prototype multi-processus
+## Renderer isolation readiness — le verdict, apres les correctifs
+
+*Mis a jour le 11 aout 2026, apres l'eviction du cache de pages, `POLLOUT`
+honnete et `RLIMIT_AS`. Le renderer n'existe toujours pas — ce qui suit dit
+seulement ce qu'il trouverait s'il etait ecrit.*
 
 Le prototype minimal honnete : **un processus d'interface, un processus de
 rendu**. Le renderer construit une liste d'affichage et peint dans une surface
-partagee ; l'interface compose et gere les entrees. Voici, brique par brique, ce
-qu'il demande et ce qu'il trouve.
+partagee ; l'interface compose et gere les entrees.
 
-| Ce qu'il faut | Etat | Reste a faire |
+### Les cinq axes
+
+| Axe | Etat | Ce qui le porte |
 |---|---|---|
-| Lancer le renderer | **pret** — `fork` + `execve` | forker tot (zygote), avant que le tas ne grossisse |
-| Canal de controle | **pret** — `socketpair` duplex | protocole a definir cote moteur |
-| Passer la surface | **pret** — `memfd` + `SCM_RIGHTS` + `MAP_SHARED` | rien au noyau |
-| Reveiller le consommateur | **pret** — `futex` cle par adresse physique | rien au noyau |
-| Detecter la mort du renderer | **pret** — `SIGCHLD` + `wait4` | recolter depuis un thread dedie (`wait4` bloque la tache) |
-| Tuer un renderer fige | **pret** — `kill(pid, SIGKILL)` | detection du figeage cote interface |
-| Contre-pression sur le canal | **partiel** — `POLLOUT` toujours vrai | rendre `poll` honnete en ecriture |
-| Ne pas fuir a chaque surface | **manquant** — le cache de pages n'evince jamais | liberer les frames a la fermeture du dernier descripteur |
-| Garder l'interface reactive | **manquant** — un CPU, pas de priorites | SMP, ou au minimum des priorites d'ordonnancement |
-| Borner un renderer qui fuit | **manquant** — `setrlimit` sans effet | `RLIMIT_AS` reellement applique a `mmap`/`brk` |
-| `posix_spawn` | **manquant** — `CLONE_VFORK` en `ENOSYS` | contournable par `fork` + `execve` |
+| **Memory safety** | **pret** | Le cache de pages compte descripteurs ouverts, mappages vivants et possession des pages ; les frames ne partent que lorsque les deux premiers comptes sont a zero. `Drop for Process` couvre la mort brutale — tuer un renderer ne fait plus fuir ses surfaces. Un mappage vivant survit a la fermeture de son descripteur, ce qui est ce que POSIX promet. |
+| **IPC backpressure** | **pret** | Tubes et paires de sockets ont une capacite (64 KiB). Plein : pas de `POLLOUT`, `EAGAIN` a l'ecriture non bloquante, ecriture courte quand il reste un peu de place. Lecteur ferme : `POLLHUP`/`POLLERR` sans qu'on les demande, et `EPIPE`. Un protocole de controle peut enfin ralentir au lieu de gonfler. |
+| **Process lifecycle** | **pret** | `fork` + `execve` + `wait4` + `SIGCHLD` de bout en bout ; `kill(pid, SIGKILL)` tue et se recolte. Reserve inchangee : `fork` copie l'espace d'adressage **immediatement**, sans copie a l'ecriture. Il faut donc forker tot — le *zygote* de Chromium — avant que le tas ne grossisse. |
+| **Shared surfaces** | **pret** | `memfd_create` + `ftruncate` + `mmap(MAP_SHARED)` sur des frames reellement partagees, transmises par `SCM_RIGHTS`, synchronisees par un `futex` dont la cle est l'**adresse physique** — donc valable entre deux processus qui voient la surface a deux adresses virtuelles differentes. `shm-probe` etablit la chaine entiere, cycle de vie compris. |
+| **Resource quota** | **partiel** | `RLIMIT_AS` se pose, se relit et s'applique dans `brk` et `mmap` : un renderer qui fuit meurt seul au lieu d'emporter la machine. Mais c'est le **seul** quota. Rien ne borne le temps CPU, le nombre de descripteurs ni la taille des tampons IPC cumules. |
 
-**Verdict.** Le prototype est constructible aujourd'hui : chacune des six
-primitives dont il a strictement besoin existe, et cinq d'entre elles sont deja
-exercees a l'execution par `shm-probe`. Aucune modification du noyau n'est un
-prealable.
+### Ce qui reste manquant, et ce que cela coute
 
-Mais il faut savoir ce qu'on achete. La separation donne **l'isolation des
-pannes** — un onglet qui meurt ne tue plus le navigateur — et rien d'autre. Elle
-ne donne ni la reactivite (un cœur, un tourniquet, pas de priorites) ni la
-protection contre l'epuisement memoire (pas de quota). Les vendre ensemble
-serait malhonnete, et surtout ce serait construire une architecture pour des
-benefices qu'elle n'apportera pas.
+* **Un seul CPU, pas de priorites.** `sched_getaffinity` rend toujours un
+  masque a 1 ; `sched_setscheduler` rend toujours 0 sans rien faire. C'est le
+  manque qui decide de la valeur du renderer separe : **la separation
+  n'achetera pas la reactivite**. Un renderer qui calcule prend le cœur au
+  meme titre que l'interface, et rien ne permet de le reculer.
+* **`poll` et `epoll_wait` attendent activement.** Une tache bloquee reste
+  `Ready` et se fait reordonnancer pour re-tester. Invisible avec un
+  processus ; a surveiller des qu'il y en aura plusieurs qui attendent chacun
+  sur son canal. Le cout n'est pas mesure aujourd'hui parce qu'il n'y a rien a
+  mesurer — c'est le premier chiffre a prendre le jour ou le renderer existe.
+* **`clone(CLONE_VFORK)` en `ENOSYS`**, donc pas de `posix_spawn`. Contournable
+  par `fork` + `execve`, qui est le chemin qu'emploie deja `subprocess`.
+* **Le cache de pages reste un `Vec` parcouru lineairement.** Correct, mais en
+  O(pages) par mappage. A revoir si une surface depasse quelques mebioctets.
+
+### Verdict
+
+**Le prototype est constructible, et il achete maintenant deux choses au lieu
+d'une.** Avant les correctifs, separer le rendu donnait l'isolation des pannes
+et rien de plus — avec, en prime, une fuite de memoire physique a chaque
+surface recreee et un canal IPC incapable de ralentir. Ces deux defauts sont
+corriges et eprouves.
+
+Ce qu'on obtiendrait aujourd'hui :
+
+* un onglet qui plante ou qu'on tue laisse l'interface debout ; **oui** ;
+* un onglet qui fuit meurt seul, sans emporter la machine ; **oui**, sous
+  `RLIMIT_AS` ;
+* un onglet qui calcule laisse l'interface fluide ; **non**, et cela ne
+  changera pas sans priorites d'ordonnancement.
+
+La troisieme ligne est celle qui doit decider du calendrier. Tant qu'elle est
+fausse, le renderer separe est un chantier lourd pour un benefice reel mais
+partiel — et le moteur, lui, a encore des gains a prendre sans changer
+d'architecture.
 
 ## Ordre de travail suggere
 
-Deux chantiers noyau valent d'etre faits **avant** le renderer, parce qu'ils
-sont petits et que les decouvrir apres coute cher :
+Les deux correctifs qui devaient preceder le renderer sont faits :
+l'eviction du cache de pages et `POLLOUT` honnete. `RLIMIT_AS` s'y est ajoute
+parce qu'il s'est revele reellement local — quelques lignes dans `sys_mmap` et
+`sys_brk`, et « le renderer a fui » cesse d'etre « la machine est morte ».
 
-1. **Evincer le cache de pages** a la fermeture du dernier descripteur d'un
-   `memfd`. Sans cela, la premiere demonstration qui redimensionne la fenetre
-   epuise la memoire physique — et le symptome ne designera pas sa cause.
-2. **`POLLOUT` honnete** sur `socketpair` et tubes : rendre pret seulement si le
-   tampon a de la place. Un protocole IPC sans contre-pression n'est pas un
-   protocole.
+Ce qui vient ensuite, dans l'ordre du rapport qualite/prix :
 
-Deux autres relevent d'une decision d'architecture, pas d'un correctif :
+1. **Des priorites d'ordonnancement minimales** — deux classes suffiraient :
+   interface et arriere-plan. C'est **la** prochaine amelioration rentable de
+   l'ordonnanceur, et elle l'est bien avant le SMP : sur un cœur unique, c'est
+   le seul moyen de rendre la separation utile a la reactivite, et cela se
+   greffe sur le tourniquet existant sans le remplacer. Un `nice` honnete
+   plutot qu'un ordonnanceur entierement different.
+2. **Instrumenter l'attente active** de `poll`/`epoll_wait` le jour ou
+   plusieurs processus attendent. Si le cout reste negligeable, ne rien faire ;
+   s'il grimpe, remplacer la boucle par de vraies files d'attente devient le
+   chantier OS prioritaire.
+3. **Le SMP**, qui rend la separation *rentable* sans la rendre *possible*.
+   C'est un chantier d'un autre ordre, et il n'est un prealable a rien.
 
-3. **Des priorites d'ordonnancement** (meme grossieres : deux classes,
-   interface et arriere-plan). C'est le seul moyen, sur un cœur unique, de
-   rendre la separation utile a la reactivite.
-4. **`RLIMIT_AS` applique** dans `sys_mmap` et `sys_brk`. Quelques lignes, et
-   c'est ce qui transforme « le renderer a fui » en « le renderer est mort »
-   plutot qu'en « la machine est morte ».
-
-Le SMP est un chantier d'un autre ordre, et il n'est pas un prealable : il rend
-la separation *rentable*, il ne la rend pas *possible*.
