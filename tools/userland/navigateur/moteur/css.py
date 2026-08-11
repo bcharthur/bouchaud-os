@@ -1040,9 +1040,10 @@ class Index:
     par pseudo rend ces 53 % presque gratuits.
     """
 
-    __slots__ = ("par_pseudo", "sensible", "pseudos")
+    __slots__ = ("par_pseudo", "sensible", "pseudos", "total")
 
     def __init__(self, regles):
+        self.total = len(regles)
         # Vrai des qu'une regle depend du survol, du foyer ou de l'enfoncement.
         self.sensible = any(r.selecteur.sensible for r in regles)
         # Les pseudo-elements pour lesquels une regle existe. Sans cette liste,
@@ -1062,7 +1063,16 @@ class Index:
     def candidates(self, element, pseudo=None):
         """Les regles susceptibles de styler cet element (ou son pseudo)."""
         tables = self.par_pseudo.get(pseudo)
-        return tables.candidates(element) if tables is not None else []
+        liste = tables.candidates(element) if tables is not None else []
+        if telemetrie.ACTIVE:
+            # Les deux chiffres qui disent si l'index sert : combien de regles
+            # la feuille contient, et combien il en laisse passer. Un compteur
+            # ne derive pas avec la machine, contrairement a un temps — c'est
+            # lui qui permet d'affirmer qu'un changement d'index a porte.
+            telemetrie.compte("css.selecteurs_essayes", len(liste))
+            telemetrie.compte("css.selecteurs_ecartes", self.total - len(liste))
+            telemetrie.compte("css.consultations")
+        return liste
 
 
 def indexe(regles):
