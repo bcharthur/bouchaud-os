@@ -51,5 +51,11 @@ cp navigateur/serveur_test.py navigateur/apercu.py "$WORK/"
 rm -rf "$WORK/tests"
 cp -r navigateur/tests "$WORK/"
 
+# Les jalons fonctionnels s'ecrivent dans l'arbre **source**, pas dans la copie
+# de travail : celle-ci est effacee a chaque execution, et le tableau de bord
+# n'y trouverait rien. Comme `suivi.jsonl`, ils sont versionnes — `git log` sur
+# ce fichier raconte quelles capacites sont apparues, et quand.
+export BO_JALONS="$PWD/navigateur/tests/jalons.json"
+
 cd "$WORK"
 exec python3 test_moteur.py "$@"

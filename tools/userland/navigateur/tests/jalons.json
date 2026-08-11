@@ -1,0 +1,9 @@
+{
+ "ASYNC_FETCH": true,
+ "INDEXEDDB_PERSISTENCE": true,
+ "LOGIN_FORM": true,
+ "SPA_NAVIGATION": true,
+ "STATIC_PAGE": true,
+ "WEBAPP_COMBINED": true,
+ "WEBSOCKET_CHAT": true
+}

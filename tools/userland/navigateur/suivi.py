@@ -116,6 +116,47 @@ SURVEILLEES = (
 )
 
 
+# --- Jalons fonctionnels ------------------------------------------------------
+#
+# Les mesures ci-dessus disent si le moteur travaille moins et se trompe moins.
+# Elles ne disent pas s'il sait faire tourner une application — et c'est
+# pourtant la seule question qui interesse quelqu'un qui veut s'en servir.
+#
+# Un jalon est binaire et nomme une capacite entiere. « 1 141 assertions »
+# n'apprend rien a personne ; « INDEXEDDB_PERSISTENCE : PASS » dit qu'une page
+# peut fermer et rouvrir sans perdre ses donnees.
+#
+# L'ordre est celui du parcours d'une application : afficher, saisir, naviguer,
+# demander, dialoguer, retenir, et tout cela ensemble.
+JALONS = [
+    ("STATIC_PAGE", "une page s'affiche"),
+    ("LOGIN_FORM", "un formulaire se remplit au clavier"),
+    ("SPA_NAVIGATION", "la navigation sans rechargement"),
+    ("ASYNC_FETCH", "une requete asynchrone met le DOM a jour"),
+    ("WEBSOCKET_CHAT", "un WebSocket recoit ce que le serveur pousse"),
+    ("INDEXEDDB_PERSISTENCE", "les donnees survivent au rechargement"),
+    ("WEBAPP_COMBINED", "le parcours complet, d'un bout a l'autre"),
+]
+
+CHEMIN_JALONS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "tests", "jalons.json")
+
+
+def lit_jalons():
+    """Ce que la derniere execution des verifications a etabli.
+
+    Rend un dictionnaire vide si le fichier n'existe pas : les jalons
+    apparaissent alors comme non mesures, ce qui est la verite — et non comme
+    des echecs, ce qui serait un mensonge.
+    """
+    try:
+        with open(CHEMIN_JALONS, "r", encoding="utf-8") as fichier:
+            donnees = json.load(fichier)
+        return donnees if isinstance(donnees, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 # --- Couleurs -----------------------------------------------------------------
 
 class Style:
@@ -374,6 +415,8 @@ def imprime(valeurs, ancien, contexte, style, reculs):
     else:
         print(style.gris("  premiere execution de cette portee : rien a comparer"))
 
+    imprime_jalons(style)
+
     for cle, libelle, _ in MESURES:
         if cle == "__section__":
             print()
@@ -396,6 +439,35 @@ def imprime(valeurs, ancien, contexte, style, reculs):
         print("  " + style.rouge("Reculs sur des mesures surveillees :"))
         for cle, avant, apres in reculs:
             print("    %-40s %s -> %s" % (cle, _nombre(avant), _nombre(apres)))
+
+
+def imprime_jalons(style):
+    """Les capacites, PASS ou FAIL, avant les compteurs.
+
+    En tete du tableau parce que c'est ce qu'on lit en premier quand on veut
+    savoir ou en est le navigateur. Un compteur qui s'ameliore pendant qu'un
+    jalon tombe est une regression, quoi qu'en dise le compteur.
+    """
+    jalons = lit_jalons()
+    print()
+    print("  " + style.gras("Jalons fonctionnels"))
+    if not jalons:
+        print("    " + style.gris("non mesures — lancer ./tools/userland/test-moteur.sh"))
+        return
+    for cle, libelle in JALONS:
+        if cle not in jalons:
+            etat = style.gris("  ??  ")
+        elif jalons[cle]:
+            etat = style.vert(" PASS ")
+        else:
+            etat = style.rouge(" FAIL ")
+        print("    %-26s %s  %s" % (cle, etat, style.gris(libelle)))
+    # Un jalon inconnu du catalogue vaut mieux affiche qu'ignore : c'est
+    # probablement un jalon neuf qu'on a oublie d'inscrire ici.
+    connus = {cle for cle, _ in JALONS}
+    for cle in sorted(set(jalons) - connus):
+        etat = style.vert(" PASS ") if jalons[cle] else style.rouge(" FAIL ")
+        print("    %-26s %s  %s" % (cle, etat, style.gris("(hors catalogue)")))
 
 
 def imprime_indisponibles(moteur, hote, compat, style):

@@ -5322,6 +5322,257 @@ def _sur_serveur(chemin, largeur=1000, hauteur=800, battements=8, attente=0.02):
     return doc, arrete
 
 
+# --- Jalons fonctionnels ------------------------------------------------------
+#
+# Les compteurs internes disent si le moteur travaille moins ; ils ne disent pas
+# s'il sait faire tourner une application. Ces jalons repondent a la seconde
+# question, et c'est la seule qui interesse quelqu'un qui veut s'en servir.
+#
+# Chacun est binaire — PASS ou FAIL — et nomme une capacite entiere plutot
+# qu'un detail. Ils sont ranges dans `JALONS` pour que le tableau de bord les
+# affiche sans les redecouvrir.
+
+JALONS = {}
+
+
+def jalon(nom, reussi, detail=None):
+    """Enregistre un jalon fonctionnel et l'affirme comme une verification."""
+    JALONS[nom] = bool(reussi)
+    verifie("jalon %s" % nom, reussi, detail)
+
+
+def verifie_webapp_combinee():
+    """Le temoin combine : toutes les briques modernes ensemble.
+
+    Les autres epreuves isolent une brique. Celle-ci les fait travailler
+    ensemble, parce que c'est la que les applications reelles tombent — un
+    `pushState` pendant qu'un `fetch` est en vol et qu'une transaction attend
+    son commit.
+
+    Le parcours est celui de `tests/pages/webapp.html` : amorce, formulaire,
+    navigation, requete, mise a jour du DOM, WebSocket, enregistrement,
+    rechargement, restauration. Et pendant tout cela, une minuterie de fond
+    doit continuer de battre : c'est la mesure la plus simple de « l'interface
+    repond », et elle ne ment pas.
+    """
+    import time as _time
+    from moteur import indexeddb
+
+    restaure = isole_le_stockage()
+    try:
+        indexeddb.reinitialise()
+        _webapp_combinee(_time, indexeddb)
+    finally:
+        indexeddb.reinitialise()
+        restaure()
+
+
+def _attends(doc, condition, secondes=20.0):
+    """Bat le document jusqu'a ce que la condition JavaScript tienne."""
+    import time as _time
+    limite = _time.perf_counter() + secondes
+    contexte = doc.contexte_js
+    while _time.perf_counter() < limite:
+        doc.rafraichis()
+        if contexte is not None and contexte.execute(condition):
+            return True
+        _time.sleep(0.02)
+    return False
+
+
+def _etat_webapp(doc):
+    contexte = doc.contexte_js
+    if contexte is None:
+        return {}
+    brut = contexte.execute("JSON.stringify(globalThis.__webapp || {})")
+    try:
+        return json.loads(brut) if brut else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _charge_sur(base, chemin, battements=4, largeur=1000, hauteur=800):
+    """Charge une page d'un serveur **deja demarre**.
+
+    L'origine doit rester la meme entre les deux chargements : IndexedDB
+    cloisonne par origine, et `_sur_serveur` prend un port libre a chaque appel.
+    Deux appels donnaient donc deux origines, donc deux bases — et la
+    restauration ne trouvait rien. Le cloisonnement faisait exactement son
+    travail ; c'est l'epreuve qui demandait la mauvaise chose.
+    """
+    import time as _time
+    doc = moteur.charge(base + chemin, largeur, journal=lambda n, t: None)
+    doc.remet_en_page(largeur, hauteur)
+    for _ in range(battements):
+        doc.rafraichis()
+        _time.sleep(0.02)
+    doc.base = base
+    return doc
+
+
+def _webapp_combinee(_time, indexeddb):
+    from moteur import reseau as _reseau
+    import serveur_test
+
+    serveur, base = serveur_test.demarre(0)
+    ancien = _reseau._charge_http
+    try:
+        import apercu
+        apercu.installe_reseau(_reseau)
+    except Exception:  # noqa: BLE001
+        pass
+
+    def arrete():
+        _reseau._charge_http = ancien
+        serveur_test.arrete(serveur)
+
+    doc = _charge_sur(base, "/page/webapp.html")
+    try:
+        contexte = doc.contexte_js
+        verifie("webapp: la page a un contexte JavaScript", contexte is not None)
+        if contexte is None:
+            for nom in ("STATIC_PAGE", "LOGIN_FORM", "SPA_NAVIGATION",
+                        "ASYNC_FETCH", "WEBSOCKET_CHAT", "INDEXEDDB_PERSISTENCE",
+                        "WEBAPP_COMBINED"):
+                jalon(nom, False, "pas de contexte JavaScript")
+            return
+
+        # STATIC_PAGE — la page s'affiche : des boites, du texte, une mise en
+        # page qui n'est pas vide.
+        boites = 0
+        textes = 0
+        pile = [doc.boite]
+        while pile:
+            boite = pile.pop()
+            boites += 1
+            textes += len(boite.lignes)
+            pile.extend(boite.enfants)
+        # Ce qui fait qu'une page « s'affiche » : des boites, du texte pose, et
+        # une hauteur reelle. Les seuils sont bas et delibereement grossiers —
+        # ce jalon repond a « la page est-elle rendue ? », pas a « est-elle
+        # rendue exactement ainsi ? », question dont s'occupent les controles de
+        # pixels.
+        jalon("STATIC_PAGE",
+              boites >= 10 and textes >= 5 and doc.boite.hauteur > 150,
+              (boites, textes, doc.boite.hauteur))
+
+        pret = _attends(doc, "globalThis.__webapp && __webapp.amorce === true")
+        etat = _etat_webapp(doc)
+        verifie("webapp: l'amorce a eu lieu", pret, etat.get("erreurs"))
+
+        # ASYNC_FETCH — la requete est partie, revenue, et le DOM porte ce
+        # qu'elle a rapporte.
+        _attends(doc, "__webapp.domMisAJour === true")
+        etat = _etat_webapp(doc)
+        jalon("ASYNC_FETCH",
+              bool(etat.get("fetch")) and etat["fetch"].get("ok") is True
+              and etat.get("domMisAJour") is True,
+              etat.get("fetch"))
+
+        # LOGIN_FORM — on remplit au clavier, comme un utilisateur. Pas de
+        # `input.value = ...` : c'est le modele d'edition qu'on eprouve, pas
+        # l'affectation d'une propriete.
+        champ = doc.racine.trouve_id("nom") if hasattr(doc.racine, "trouve_id") else None
+        if champ is None:
+            champ = next((n for n in doc.racine.parcours()
+                          if isinstance(n, html.Element)
+                          and n.attributs.get("id") == "nom"), None)
+        saisi = False
+        if champ is not None:
+            doc.pose_foyer(champ)
+            for lettre in "arthur":
+                doc.frappe(lettre, lettre)
+            saisi = doc.edition_de(champ).valeur == "arthur"
+        courriel = next((n for n in doc.racine.parcours()
+                         if isinstance(n, html.Element)
+                         and n.attributs.get("id") == "courriel"), None)
+        if courriel is not None:
+            doc.pose_foyer(courriel)
+            for lettre in "a@b.test":
+                doc.frappe(lettre, lettre)
+
+        contexte.execute("document.getElementById('profil')"
+                         ".dispatchEvent(new Event('submit'))")
+        _attends(doc, "__webapp.enregistre === true")
+        etat = _etat_webapp(doc)
+        jalon("LOGIN_FORM",
+              saisi and (etat.get("profil") or {}).get("nom") == "arthur",
+              (saisi, etat.get("profil")))
+
+        # SPA_NAVIGATION — deux vues, `pushState`, puis retour arriere.
+        contexte.execute("document.getElementById('vers-flux').click()")
+        _attends(doc, "__webapp.navigation.indexOf('flux') >= 0")
+        contexte.execute("history.back()")
+        _attends(doc, "__webapp.navigation.length >= 2")
+        etat = _etat_webapp(doc)
+        jalon("SPA_NAVIGATION", "flux" in etat.get("navigation", []),
+              etat.get("navigation"))
+
+        # WEBSOCKET_CHAT — le serveur parle quand il veut, et la page l'entend.
+        _attends(doc, "__webapp.messages.length >= 3")
+        etat = _etat_webapp(doc)
+        jalon("WEBSOCKET_CHAT",
+              etat.get("socket") in ("ouvert", "ferme")
+              and len(etat.get("messages", [])) >= 3,
+              (etat.get("socket"), etat.get("messages")))
+
+        # L'interface a-t-elle repondu pendant tout cela ? Si la minuterie de
+        # fond n'a pas battu, quelque chose a tenu le fil.
+        etat = _etat_webapp(doc)
+        tics = etat.get("tics", 0)
+        verifie("webapp: la boucle d'evenements n'a jamais cale", tics > 5, tics)
+
+    finally:
+        pass
+
+    # INDEXEDDB_PERSISTENCE — on recharge la page **dans un document neuf**,
+    # apres avoir jete tout ce qui etait en memoire, et **depuis le meme
+    # serveur** : meme origine, donc meme base. Ce qui revient vient du disque,
+    # ou ne revient pas.
+    indexeddb.reinitialise()
+    doc2 = _charge_sur(base, "/page/webapp.html")
+    try:
+        _attends(doc2, "globalThis.__webapp && __webapp.restaure !== null")
+        second = _etat_webapp(doc2)
+        restaure_profil = second.get("restaure")
+        jalon("INDEXEDDB_PERSISTENCE",
+              isinstance(restaure_profil, dict)
+              and restaure_profil.get("nom") == "arthur",
+              restaure_profil)
+
+        # WEBAPP_COMBINED — le parcours entier, sans une seule erreur en route.
+        _attends(doc2, "__webapp.pret === true")
+        second = _etat_webapp(doc2)
+        complet = (
+            JALONS.get("STATIC_PAGE") and JALONS.get("LOGIN_FORM")
+            and JALONS.get("SPA_NAVIGATION") and JALONS.get("ASYNC_FETCH")
+            and JALONS.get("WEBSOCKET_CHAT")
+            and JALONS.get("INDEXEDDB_PERSISTENCE")
+            and not second.get("erreurs"))
+        jalon("WEBAPP_COMBINED", complet,
+              (dict(JALONS), second.get("erreurs")))
+    finally:
+        arrete()
+        ecris_jalons()
+
+
+def ecris_jalons():
+    """Depose les jalons la ou le tableau de bord ira les lire.
+
+    `BO_JALONS` pointe sur l'arbre source : la copie de travail des
+    verifications est effacee a chaque execution, et un jalon ecrit dedans
+    disparaitrait avant que quiconque le lise.
+    """
+    chemin = os.environ.get("BO_JALONS") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "tests", "jalons.json")
+    try:
+        os.makedirs(os.path.dirname(chemin), exist_ok=True)
+        with open(chemin, "w", encoding="utf-8") as fichier:
+            json.dump(JALONS, fichier, indent=1, sort_keys=True)
+    except OSError:
+        pass
+
+
 def verifie_foyer():
     """Le foyer : `activeElement`, `focus`, `blur`, `Tab`.
 
@@ -6303,6 +6554,7 @@ def principal():
         verifie_cache_http,
         verifie_stockage_local,
         verifie_indexeddb,
+        verifie_webapp_combinee,
         verifie_tailles_intrinseques,
         verifie_flex,
         verifie_grille,

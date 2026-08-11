@@ -293,7 +293,8 @@ class Fixtures(http.server.BaseHTTPRequestHandler):
                  "/status/500", "/form/get", "/form/post", "/delay/1",
                  "/module/main.js", "/cookie/pose", "/cookie/lit",
                  "/page/login-form.html", "/page/spa-navigation.html",
-                 "/page/event-loop.html", "/page/reseau-lent.html"]
+                 "/page/event-loop.html", "/page/reseau-lent.html",
+                 "/page/webapp.html"]
         return ("<!doctype html><html lang=fr><head><meta charset=utf-8>"
                 "<title>Fixtures Bouchaud</title></head><body>"
                 "<h1>Fixtures Bouchaud</h1><ul>"
