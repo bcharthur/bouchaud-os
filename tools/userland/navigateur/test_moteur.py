@@ -5573,6 +5573,378 @@ def ecris_jalons():
         pass
 
 
+def verifie_origine():
+    """L'origine comme type, pas comme chaine.
+
+    Une comparaison approximative ici n'est pas un defaut de style : c'est ce
+    qui laisse un site en lire un autre. Les cinq pieges verifies sont ceux
+    qu'une comparaison de chaines rate.
+    """
+    from moteur.origine import Origine
+
+    def o(url):
+        return Origine.de_url(url)
+
+    verifie("origine: le port par defaut ne compte pas",
+            o("https://a.test") == o("https://a.test:443"))
+    verifie("origine: idem en clair",
+            o("http://a.test") == o("http://a.test:80"))
+    verifie("origine: le chemin ne compte pas",
+            o("https://a.test/un") == o("https://a.test/deux?x=1#y"))
+    verifie("origine: la casse de l'hote ne compte pas",
+            o("https://A.TEST") == o("https://a.test"))
+
+    verifie("origine: le schema fait partie de l'origine",
+            o("http://a.test") != o("https://a.test"))
+    verifie("origine: un sous-domaine est une autre origine",
+            o("https://sub.a.test") != o("https://a.test"))
+    verifie("origine: un port different est une autre origine",
+            o("https://a.test:8443") != o("https://a.test"))
+    verifie("origine: un hote different est une autre origine",
+            o("https://b.test") != o("https://a.test"))
+
+    # `ws://` parle au meme serveur que `http://` : une page doit pouvoir
+    # ouvrir un WebSocket vers sa propre origine.
+    verifie("origine: ws:// et http:// du meme hote se rejoignent",
+            o("ws://a.test") == o("http://a.test"))
+    verifie("origine: wss:// et https:// aussi",
+            o("wss://a.test") == o("https://a.test"))
+
+    # Les origines opaques : le piege qu'un tuple ne pouvait pas porter.
+    verifie("origine: une data: est opaque", o("data:text/html,x").est_opaque)
+    verifie("origine: un fichier est opaque", o("file:///tmp/x.html").est_opaque)
+    verifie("origine: about:blank est opaque", o("about:blank").est_opaque)
+    verifie("origine: deux opaques ne correspondent jamais",
+            o("data:text/html,x") != o("data:text/html,x"))
+    memes = o("data:text/html,x")
+    verifie("origine: une opaque est egale a elle-meme", memes == memes)
+
+    # Un port illisible ne doit pas retomber sur le port par defaut : ce serait
+    # accepter une adresse forgee comme si elle etait la bonne.
+    verifie("origine: un port illisible donne une origine opaque",
+            o("http://a.test:abc/").est_opaque)
+
+    egal("origine: serialisation sans port par defaut",
+         o("https://a.test:443/x").serialise(), "https://a.test")
+    egal("origine: serialisation avec port explicite",
+         o("https://a.test:8443/x").serialise(), "https://a.test:8443")
+    egal("origine: une opaque se serialise en null",
+         o("data:text/html,x").serialise(), "null")
+    # Mais sa cle de stockage reste unique : deux pages `data:` sans rapport ne
+    # doivent pas se relire l'une l'autre.
+    verifie("origine: deux opaques ont deux cles de stockage",
+            o("data:,a").cle_stockage() != o("data:,b").cle_stockage())
+
+
+def verifie_contexte_navigation():
+    """L'arbre des contextes : relations, historiques separes, fermeture."""
+    from moteur.contexte import BrowsingContext, TopLevelBrowsingContext
+
+    sommet = TopLevelBrowsingContext(url="https://a.test/page")
+    verifie("contexte: le premier niveau n'a pas de parent", sommet.est_sommet)
+    verifie("contexte: il est son propre sommet", sommet.sommet is sommet)
+
+    un = BrowsingContext(parent=sommet, url="https://a.test/cadre", nom="un")
+    deux = BrowsingContext(parent=sommet, url="https://b.test/cadre", nom="deux")
+    petit = BrowsingContext(parent=un, url="https://a.test/profond")
+
+    egal("contexte: les enfants sont declares", len(sommet.enfants), 2)
+    verifie("contexte: top remonte jusqu'au sommet", petit.sommet is sommet)
+    verifie("contexte: parent est le parent direct", petit.parent is un)
+    egal("contexte: la profondeur se compte", petit.profondeur, 2)
+    egal("contexte: les descendants sont tous la",
+         len(sommet.descendants()), 3)
+    verifie("contexte: on retrouve par nom", sommet.par_nom("deux") is deux)
+    verifie("contexte: et par identifiant", sommet.par_id(petit.id) is petit)
+
+    # L'origine decide de la frontiere.
+    verifie("contexte: meme origine reconnue", sommet.meme_origine(un))
+    verifie("contexte: origine differente reconnue",
+            not sommet.meme_origine(deux))
+
+    # Deux historiques, pas un seul tableau confondu. C'est ce qui fait qu'un
+    # « precedent » dans un iframe ne recule pas la page entiere.
+    sommet.navigue("https://a.test/page2")
+    un.navigue("https://a.test/cadre2")
+    un.navigue("https://a.test/cadre3")
+    egal("contexte: l'historique du sommet est le sien",
+         len(sommet.historique), 2)
+    egal("contexte: celui de l'iframe aussi", len(un.historique), 3)
+    un.recule()
+    egal("contexte: reculer dans l'iframe", un.url, "https://a.test/cadre2")
+    egal("contexte: ne bouge pas le sommet", sommet.url, "https://a.test/page2")
+    un.avance()
+    egal("contexte: et avancer y revient", un.url, "https://a.test/cadre3")
+
+    # Naviguer depuis le milieu coupe la branche abandonnee.
+    un.recule()
+    un.navigue("https://a.test/autre")
+    egal("contexte: naviguer depuis le milieu coupe la suite",
+         un.historique, ["https://a.test/cadre", "https://a.test/cadre2",
+                         "https://a.test/autre"])
+
+    # La fermeture descend jusqu'aux petits-enfants.
+    ferme = []
+
+    class FauxDocument:
+        def __init__(self, nom):
+            self.nom = nom
+
+        def ferme_document(self):
+            ferme.append(self.nom)
+
+    petit.document = FauxDocument("petit")
+    un.document = FauxDocument("un")
+    un.ferme_contexte()
+    egal("contexte: la fermeture descend d'abord aux enfants",
+         ferme, ["petit", "un"])
+    verifie("contexte: l'enfant ferme quitte son parent",
+            un not in sommet.enfants)
+    verifie("contexte: fermer deux fois ne fait rien",
+            un.ferme_contexte() is False)
+    verifie("contexte: le petit-fils est ferme aussi", petit.ferme)
+
+
+def verifie_cadres():
+    """iframe : deux mondes, une page, et une frontiere entre eux.
+
+    Le serveur repond sur `127.0.0.1` et sur `localhost` — deux hotes distincts
+    au sens de la norme, donc deux origines reelles, sans Internet ni DNS.
+
+    Ce qui est verifie, dans l'ordre ou cela se casse :
+
+      1. le cadre existe, a son contexte, son document et son viewport ;
+      2. il se met en page tout seul, a **sa** largeur et non a celle du parent ;
+      3. sa liste d'affichage entre dans celle du parent, rognee a ses bornes ;
+      4. `contentDocument` s'ouvre en meme origine et se ferme sinon ;
+      5. `postMessage` traverse dans les deux sens, et `targetOrigin` filtre ;
+      6. `iframe.src = ...` navigue l'enfant et pas le parent ;
+      7. retirer l'iframe detruit tout ce qu'il tenait.
+    """
+    import time as _time
+    from moteur import reseau as _reseau
+    import serveur_test
+
+    serveur, base = serveur_test.demarre(0)
+    port = base.rsplit(":", 1)[1]
+    # Meme serveur, hote different : c'est un cross-origin authentique.
+    autre = "http://localhost:%s" % port
+    ancien_charge = _reseau._charge_http
+    try:
+        import apercu
+        apercu.installe_reseau(_reseau)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        _cadres_scenario(base, autre, _time)
+    finally:
+        _reseau._charge_http = ancien_charge
+        serveur_test.arrete(serveur)
+
+
+def _cadres_scenario(base, autre, _time):
+    from moteur import origine as mod_origine
+
+    # Les deux bases doivent bien etre deux origines : si ce n'etait pas le cas,
+    # tout le reste du scenario ne prouverait rien.
+    verifie("cadres: les deux bases sont deux origines",
+            not mod_origine.meme_origine(base, autre), (base, autre))
+
+    doc = moteur.charge(base + "/page/iframe-parent.html", 1000,
+                        journal=lambda n, t: None)
+    doc.remet_en_page(1000, 800)
+    contexte = doc.contexte_js
+    verifie("cadres: la page a un contexte JavaScript", contexte is not None)
+    if contexte is None:
+        return
+
+    # La page ne peut pas deviner le port : on le lui donne avant qu'elle pose
+    # ses cadres.
+    contexte.execute(
+        "globalThis.__config = {meme: %r, autre: %r, origineAutre: %r};"
+        % (base + "/page/iframe-enfant.html",
+           autre + "/page/iframe-enfant.html",
+           autre))
+    # La page a deja tourne : on lui refait poser ses `src` maintenant que la
+    # configuration est la.
+    contexte.execute(
+        "document.getElementById('ami').src = __config.meme;"
+        "document.getElementById('etranger').src = __config.autre;")
+
+    def bat(condition, secondes=15.0):
+        limite = _time.perf_counter() + secondes
+        while _time.perf_counter() < limite:
+            doc.rafraichis()
+            if contexte.execute(condition):
+                return True
+            _time.sleep(0.02)
+        return False
+
+    charges = bat("__parent.cadres >= 2")
+    lu = json.loads(contexte.execute("JSON.stringify(__parent)"))
+    verifie("cadres: les deux cadres se sont annonces", charges, lu)
+
+    # 1 et 2. Les contextes existent, avec leur propre viewport.
+    enfants = doc.contexte_navigation.enfants
+    egal("cadres: deux contextes enfants", len(enfants), 2)
+    for enfant in enfants:
+        verifie("cadres: le contexte porte un document", enfant.document is not None)
+        verifie("cadres: il a son propre viewport",
+                enfant.largeur == 280.0 and enfant.hauteur == 180.0,
+                (enfant.largeur, enfant.hauteur))
+        verifie("cadres: son document est mis en page a sa largeur",
+                enfant.document.boite is not None
+                and enfant.document.largeur == 280.0,
+                enfant.document.largeur)
+        verifie("cadres: le parent est bien le parent", enfant.parent is
+                doc.contexte_navigation)
+        verifie("cadres: et le sommet est la page",
+                enfant.sommet is doc.contexte_navigation)
+
+    # 3. La liste d'affichage de l'enfant entre dans celle du parent, entre un
+    #    `clip` et un `declip`. Sans le rognage, un document enfant plus haut
+    #    que son cadre recouvrirait la page hote.
+    affichage = doc.liste_affichage(0.0, 1000, 800)
+    clips = [op for op in affichage if op and op[0] == "clip"]
+    verifie("cadres: la liste du parent contient un rognage de cadre",
+            any(abs(op[3] - 280.0) < 2 and abs(op[4] - 180.0) < 2 for op in clips),
+            [op[1:] for op in clips][:6])
+    textes = [op[3] for op in affichage if op and op[0] == "texte"]
+    verifie("cadres: le texte de l'enfant est peint dans le parent",
+            any("Document enfant" in t for t in textes), textes[:8])
+
+    # 4. La frontiere.
+    contexte.execute("__sonde()")
+    lu = json.loads(contexte.execute("JSON.stringify(__parent)"))
+    egal("cadres: contentDocument lisible en meme origine",
+         lu["memeOrigine"]["document"], "lisible")
+    egal("cadres: contentDocument refuse en origine differente",
+         lu["autreOrigine"]["document"], "refuse")
+
+    # Et la reciproque, vue depuis l'enfant : celui de meme origine a pu lire
+    # son parent, l'autre non.
+    par_origine = {}
+    for enfant in enfants:
+        sous = enfant.document.contexte_js
+        if sous is None:
+            continue
+        etat = json.loads(sous.execute("JSON.stringify(globalThis.__enfant || {})"))
+        par_origine[etat.get("origine")] = etat
+    ami = par_origine.get(mod_origine.Origine.de_url(base).serialise())
+    etranger = par_origine.get(mod_origine.Origine.de_url(autre).serialise())
+    if ami:
+        egal("cadres: l'enfant de meme origine lit son parent",
+             ami.get("lectureParent"), "autorisee")
+    if etranger:
+        verifie("cadres: l'enfant d'une autre origine ne lit pas son parent",
+                etranger.get("lectureParent") in ("refusee", "exception"),
+                etranger.get("lectureParent"))
+
+    # 5. postMessage, dans les deux sens et a travers la frontiere.
+    contexte.execute("__envoie()")
+    bat("__parent.memeOrigine.echo !== null && __parent.autreOrigine.echo !== null")
+    lu = json.loads(contexte.execute("JSON.stringify(__parent)"))
+    egal("cadres: postMessage aller-retour en meme origine",
+         (lu["memeOrigine"]["echo"] or {}).get("salut"), "meme")
+    egal("cadres: postMessage aller-retour cross-origine",
+         (lu["autreOrigine"]["echo"] or {}).get("salut"), "autre")
+
+    # Le message au mauvais `targetOrigin` ne doit jamais etre arrive. C'est ce
+    # qui empeche d'envoyer un jeton a un cadre parti ailleurs.
+    for enfant in enfants:
+        sous = enfant.document.contexte_js
+        if sous is None:
+            continue
+        recus = json.loads(sous.execute(
+            "JSON.stringify((globalThis.__enfant || {}).recus || [])"))
+        verifie("cadres: un targetOrigin qui ne correspond pas fait taire le message",
+                not any("secret" in json.dumps(r.get("data") or {}) for r in recus),
+                recus)
+
+    # 6. `iframe.src = ...` navigue l'enfant, jamais le parent.
+    url_parent = doc.url
+    contexte.execute("document.getElementById('ami').src = %r"
+                     % (base + "/page/login-form.html"))
+    bat("false", secondes=1.0)
+    egal("cadres: le document principal n'a pas navigue", doc.url, url_parent)
+    ami_contexte = next((e for e in doc.contexte_navigation.enfants
+                         if e.element is not None
+                         and e.element.attributs.get("id") == "ami"), None)
+    verifie("cadres: l'enfant a navigue",
+            ami_contexte is not None and ami_contexte.url.endswith("login-form.html"),
+            ami_contexte.url if ami_contexte else None)
+    verifie("cadres: et son historique lui appartient",
+            ami_contexte is not None and len(ami_contexte.historique) == 2,
+            ami_contexte.historique if ami_contexte else None)
+    egal("cadres: celui du parent n'a pas bouge",
+         len(doc.contexte_navigation.historique), 1)
+
+    # 7. Retirer l'iframe detruit son monde.
+    contextes_avant = list(doc.contexte_navigation.enfants)
+    contexte.execute("document.getElementById('etranger').remove()")
+    bat("false", secondes=1.0)
+    egal("cadres: le contexte retire disparait",
+         len(doc.contexte_navigation.enfants), 1)
+    mort = next(c for c in contextes_avant
+                if c not in doc.contexte_navigation.enfants)
+    verifie("cadres: son contexte est ferme", mort.ferme)
+    verifie("cadres: et son document est libere", mort.document is None)
+
+
+def verifie_fuite_cadres():
+    """Mille cadres crees et retires ne doivent rien laisser derriere eux.
+
+    C'est le test que le cycle de vie appelle. Un `<iframe>` tient un contexte
+    QuickJS, un pool de fils, des connexions et des transactions : oublier de
+    les rendre ne se voit pas sur une page d'essai et tue une application au
+    bout d'une heure.
+
+    On ne compte pas les octets — ils dependent du ramasse-miettes, et un test
+    qui en depend est instable. On compte ce qui est deterministe : les
+    contextes crees contre les contextes fermes, et les documents fermes.
+    """
+    from moteur import telemetrie
+
+    doc = document(
+        "<body><div id='zone'></div><script>1</script></body>",
+        url="http://a.test/page")
+    doc.remet_en_page(800, 600)
+    contexte = doc.contexte_js
+    verifie("fuite: la page a un contexte", contexte is not None)
+    if contexte is None:
+        return
+
+    telemetrie.reinitialise()
+    telemetrie.active(True)
+    tours = 500
+    for _ in range(tours):
+        # `about:blank` : aucun reseau, donc on mesure le cycle de vie et rien
+        # d'autre. Un cadre avec `src` melangerait le cout du chargement.
+        # Pas de `const` : chaque `execute` partage la portee globale du
+        # contexte, et une seconde declaration du meme nom la ferait echouer —
+        # silencieusement, puisque l'erreur est journalisee et non levee. Le
+        # test aurait alors mesure une seule iteration en croyant en mesurer
+        # mille.
+        contexte.execute(
+            "document.getElementById('zone').innerHTML = '<iframe></iframe>';")
+        doc.rafraichis()
+        contexte.execute("document.getElementById('zone').innerHTML = '';")
+        doc.rafraichis()
+
+    mesures = telemetrie.compteurs()
+    crees = mesures.get("cadre.crees", 0)
+    retires = mesures.get("cadre.retires", 0)
+    verifie("fuite: les cadres ont bien ete crees", crees >= tours - 2, crees)
+    egal("fuite: autant de cadres retires que crees", retires, crees)
+    egal("fuite: autant de contextes fermes que crees",
+         mesures.get("contexte.fermes", 0), crees)
+    egal("fuite: aucun contexte enfant ne survit",
+         len(doc.contexte_navigation.enfants), 0)
+    egal("fuite: aucun descendant ne survit",
+         len(doc.contexte_navigation.descendants()), 0)
+    telemetrie.active(False)
+
+
 def verifie_invalidation_ciblee():
     """Changer une couleur ne doit pas remettre mille cartes en page.
 
@@ -6670,6 +7042,10 @@ def principal():
         verifie_stockage_local,
         verifie_indexeddb,
         verifie_webapp_combinee,
+        verifie_origine,
+        verifie_contexte_navigation,
+        verifie_cadres,
+        verifie_fuite_cadres,
         verifie_invalidation_ciblee,
         verifie_tailles_intrinseques,
         verifie_flex,

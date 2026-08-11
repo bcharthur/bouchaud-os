@@ -85,7 +85,7 @@ class Boite:
 
     __slots__ = ("element", "style", "x", "y", "largeur", "hauteur",
                  "enfants", "lignes", "lien", "puce", "images",
-                 "hors_flux", "rogne", "toile", "curseur")
+                 "hors_flux", "rogne", "toile", "curseur", "cadre")
 
     def __init__(self, element, style):
         self.element = element
@@ -111,6 +111,10 @@ class Boite:
         # `(x, y, hauteur, selection)` quand ce champ est au foyer et doit
         # montrer un curseur. `selection` vaut `(x, largeur)` ou `None`.
         self.curseur = None
+        # Le contexte de navigation d'un `<iframe>`. La boite n'affiche alors
+        # pas son contenu propre mais la liste d'affichage du document enfant,
+        # rognee a ses bornes.
+        self.cadre = None
 
 
 class Fragment:
@@ -212,13 +216,20 @@ class Contexte:
         return _style_de(element, style_parent, [element], self)
 
 
-def construit(racine, regles, largeur_page, url="", image_video=None, toile=None):
-    """Construit l'arbre de boites et rend (racine, hauteur totale)."""
+def construit(racine, regles, largeur_page, url="", image_video=None, toile=None,
+              cadres=None):
+    """Construit l'arbre de boites et rend (racine, hauteur totale).
+
+    `cadres` est le gestionnaire de contextes enfants du document : la mise en
+    page y retrouve le contexte d'un `<iframe>` pour le rattacher a sa boite.
+    Elle ne le cree jamais — un chargement reseau n'a pas sa place dans une
+    mise en page, qui peut etre rejouee dix fois par seconde."""
     telemetrie.compte("layout.passes")
     # Une generation par passe : tout ce qui est memorise pendant celle-ci est
     # vrai pour toute sa duree, et jete a la suivante.
     css.nouvelle_generation()
     contexte = Contexte(regles, largeur_page, url, image_video, toile)
+    contexte.cadres = cadres
     style_initial = {
         "color": "#202124", "font-size": "16px", "line-height": "1.5",
         "display": "block",
@@ -610,6 +621,15 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None
     boite.rogne = style.get("overflow", "visible") in ("hidden", "auto", "scroll") \
         or style.get("overflow-y", "visible") in ("hidden", "auto", "scroll")
 
+    # Un `<iframe>` est une boite de taille declaree qui porte **un autre
+    # document**. Ses enfants dans l'arbre sont le repli qu'on montre a qui ne
+    # sait pas l'afficher ; ce qu'on affiche, nous, est la liste d'affichage du
+    # document enfant, rognee a ces bornes-la.
+    if isinstance(boite.element, Element) and boite.element.balise == "iframe":
+        _dispose_cadre(boite, style, taille, interieur_l, contexte,
+                       pad_b, b_b)
+        return
+
     # Une toile est une boite de taille declaree qui porte un dessin, pas du
     # contenu : ses enfants sont le repli qu'on montre a qui ne sait pas la
     # dessiner, et nous savons.
@@ -750,6 +770,63 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None
         curseur = bas_flottants
     _termine_bloc(boite, style, curseur, pad_b, b_b, taille, interieur_l)
     _pose_hors_flux(boite, contexte)
+
+
+def _dispose_cadre(boite, style, taille, interieur_l, contexte, pad_b, b_b):
+    """Pose la boite d'un `<iframe>` et rattache son contexte de navigation.
+
+    La boite ne descend pas dans ses enfants : le document enfant vit dans son
+    propre arbre de boites, mis en page a **son** viewport. C'est ce qui fait
+    qu'une `@media` ou un `vw` a l'interieur de l'iframe se rapportent au cadre
+    et non a la fenetre — et c'est aussi ce qui permettra, plus tard, de mettre
+    en page ce document dans un autre processus sans rien changer ici.
+
+    Les dimensions viennent de la feuille, puis de l'attribut HTML, puis des
+    valeurs par defaut de la norme (300x150). Cet ordre est celui de la norme :
+    une regle CSS l'emporte sur `width="…"`.
+    """
+    element = boite.element
+    largeur = interieur_l
+    declaree = css.longueur(style.get("width", "auto"), interieur_l, taille)
+    if declaree is None:
+        brut = (element.attributs.get("width") or "").strip()
+        try:
+            declaree = float(brut.rstrip("px").strip()) if brut else None
+        except ValueError:
+            declaree = None
+    if declaree is None:
+        declaree = 300.0
+    largeur = max(0.0, min(declaree, interieur_l)) if interieur_l > 0 else declaree
+
+    hauteur = css.longueur(style.get("height", "auto"), 0.0, taille)
+    if hauteur is None:
+        brut = (element.attributs.get("height") or "").strip()
+        try:
+            hauteur = float(brut.rstrip("px").strip()) if brut else None
+        except ValueError:
+            hauteur = None
+    if hauteur is None:
+        hauteur = 150.0
+
+    boite.largeur = largeur
+    boite.hauteur = max(0.0, hauteur) + pad_b + b_b
+    # Le contexte enfant, s'il existe deja. Il est cree par le gestionnaire de
+    # cadres au battement, pas ici : la mise en page ne doit pas declencher de
+    # chargement reseau.
+    cadres_du_document = getattr(contexte, "cadres", None)
+    boite.cadre = (cadres_du_document.contexte_de(element)
+                   if cadres_du_document is not None else None)
+    if boite.cadre is not None:
+        # Le viewport de l'enfant suit la boite : redimensionner l'iframe
+        # redimensionne le document qu'il porte.
+        interieur_h = max(0.0, hauteur)
+        if (boite.cadre.largeur, boite.cadre.hauteur) != (largeur, interieur_h):
+            boite.cadre.largeur = largeur
+            boite.cadre.hauteur = interieur_h
+            if boite.cadre.document is not None:
+                boite.cadre.document.hauteur_fenetre = interieur_h or 1.0
+                boite.cadre.document.remet_en_page(largeur)
+    telemetrie.compte("layout.cadres")
 
 
 def _dispose_toile(boite, style, taille, curseur, pad_b, bordure, reference,

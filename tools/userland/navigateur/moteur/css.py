@@ -2342,6 +2342,11 @@ h1, h2, h3, h4, h5, h6, hr, address, details, summary { display: block; }
    transparente qu'ils representent. Sans cette regle, ils seraient en ligne et
    le contenu d'un composant s'afficherait a la suite du texte voisin. */
 bo-ombre, bo-fragment, canvas { display: block; }
+/* Un `<iframe>` est un element remplace : il occupe une boite de taille
+   declaree dans le fil du texte, comme une image. `inline-block` est ce qui
+   s'en approche le plus dans ce moteur — la boite est disposee comme un bloc,
+   ce qui lui donne son fond et ses bords, mais elle reste sur la ligne. */
+iframe { display: inline-block; }
 head, script, style, title, meta, link, noscript, template { display: none; }
 span, a, b, i, em, strong, small, code, label, abbr, cite, q, sub, sup,
 time, mark, u, s, br, img, input, button, select, textarea { display: inline; }

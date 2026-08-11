@@ -31,7 +31,8 @@ import urllib.parse
 
 import bo
 
-from . import (animation, css, edition, html, images, invalidation,
+from . import (animation, cadres, contexte as mod_contexte, css, edition,
+               html, images, invalidation,
                mise_en_page, peinture, police, prechargement, reseau,
                stockage, telemetrie)
 
@@ -44,7 +45,7 @@ class Document:
     """Une page chargee : son arbre, ses regles, ses scripts, sa mise en page."""
 
     def __init__(self, reponse, largeur, scripts=True, journal=None,
-                 hauteur_fenetre=720.0, precharge=True):
+                 hauteur_fenetre=720.0, precharge=True, contexte_navigation=None):
         self.url = reponse.url
         self.code = reponse.code
         self.erreur = reponse.erreur
@@ -97,6 +98,26 @@ class Document:
         # Ce qui reste a refaire, et a quel etage du pipeline.
         self.invalide = invalidation.Invalidation()
 
+        # Le monde auquel ce document appartient. Un document principal n'est
+        # plus un cas particulier implicite : il possede son contexte comme un
+        # iframe possede le sien, et c'est ce qui rend `window.top` et
+        # `window.parent` calculables sans code special.
+        #
+        # Le contexte est fourni quand ce document est celui d'un `<iframe>` :
+        # il existe alors **avant** le document, et il doit etre en place avant
+        # que les scripts tournent. Le poser apres coup laissait le document
+        # enfant se croire de premier niveau pendant toute son amorce — et donc
+        # voir son propre `parent` comme lui-meme, ce qui ouvrait le DOM du
+        # parent a une page d'une autre origine.
+        if contexte_navigation is None:
+            contexte_navigation = mod_contexte.TopLevelBrowsingContext(
+                url=self.url, largeur=largeur, hauteur=self.hauteur_fenetre,
+                journal=self.journal)
+        self.contexte_navigation = contexte_navigation
+        self.contexte_navigation.document = self
+        # Les contextes enfants, un par `<iframe>` vivant.
+        self.cadres = cadres.Gestionnaire(self)
+
         if scripts:
             self._demarre_scripts()
         self.remet_en_page(largeur)
@@ -136,6 +157,45 @@ class Document:
         # repeindre, pas remettre en page.
         self.sale_curseur = False
 
+    def ferme_document(self):
+        """Libere tout ce que ce document tenait. Appele quand son contexte meurt.
+
+        L'ordre est celui des dependances, de la feuille vers la racine : les
+        contextes enfants d'abord (ils tiennent leurs propres ressources), puis
+        le contexte JavaScript — qui abandonne au passage ses requetes en vol,
+        ses connexions WebSocket, ses transactions de stockage et son pool de
+        fils —, puis l'arbre et les boites.
+
+        Sans cette methode, mille iframes crees et retires laissent mille
+        contextes QuickJS, mille pools de fils et mille connexions vivantes.
+        C'est le genre de fuite qui ne se voit pas sur une page d'essai et qui
+        tue une application au bout d'une heure.
+
+        Idempotente : fermer deux fois ne fait rien la seconde.
+        """
+        if getattr(self, "_ferme", False):
+            return False
+        self._ferme = True
+        gestionnaire = getattr(self, "cadres", None)
+        if gestionnaire is not None:
+            gestionnaire.ferme_tout()
+        contexte = self.contexte_js
+        self.contexte_js = None
+        if contexte is not None:
+            fermeture = getattr(contexte, "ferme", None)
+            if fermeture is not None:
+                try:
+                    fermeture()
+                except Exception as e:  # noqa: BLE001 — la fermeture n'echoue pas
+                    self.journal("warn", "fermeture du contexte JS : %s" % e)
+        self.boite = None
+        self.regles = None
+        del self.zones_liens[:]
+        self._editions.clear()
+        self._foyer = None
+        telemetrie.compte("document.fermes")
+        return True
+
     def rafraichis(self):
         """Remet en page si le JavaScript a touche a l'arbre. Rend `True` alors.
 
@@ -156,11 +216,28 @@ class Document:
                 self.titre = self.titre or self._titre()
                 sale = True
 
+        # Les contextes enfants battent au meme rythme : leurs minuteries, leurs
+        # reponses reseau et leurs transactions avancent avec celles du parent.
+        # Un iframe qui ne bat pas est un iframe fige, et le parent n'aurait
+        # aucun moyen de s'en apercevoir.
+        enfants_sales = False
+        gestionnaire = getattr(self, "cadres", None)
+        if gestionnaire is not None:
+            if gestionnaire.bat():
+                enfants_sales = True
+            # Un `<iframe>` peut etre apparu, avoir change de `src` ou avoir ete
+            # retire depuis le dernier tour.
+            if gestionnaire.synchronise(self.largeur, self.hauteur_fenetre):
+                sale = True
+
         # Une animation en cours redemande une mise en page a chaque battement :
         # c'est elle qui fait avancer le mouvement. Quand plus rien ne bouge,
         # l'animateur baisse son drapeau et le navigateur cesse de redessiner.
         if not sale and not self.animateur.anime():
-            return False
+            # Un enfant qui a bouge suffit a redessiner la page, sans que le
+            # parent ait a se remettre en page : la boite de l'iframe n'a pas
+            # change, seul son contenu.
+            return enfants_sales
 
         # L'invalidation dit jusqu'ou remonter. Une couleur qui change ne
         # demande que des pixels : refaire la mise en page de deux mille
@@ -549,7 +626,8 @@ class Document:
             with telemetrie.chrono("mise_en_page"):
                 self.boite, self.hauteur = mise_en_page.construit(
                     self.racine, self.regles, largeur, self.url,
-                    self._image_video, self._toile)
+                    self._image_video, self._toile,
+                    cadres=getattr(self, "cadres", None))
             self.pose_curseur_visuel()
         finally:
             css.pose_animateur(None)

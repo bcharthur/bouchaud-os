@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Cadres : meme origine et origine differente</title>
+<!--
+  Le temoin des contextes multiples.
+
+  Deux cadres, deux mondes : l'un de la meme origine que cette page, l'autre
+  d'une origine differente. Le serveur de fixtures repond sur `127.0.0.1` et
+  sur `localhost` — deux hotes distincts au sens de la norme, donc deux
+  origines — ce qui donne un cross-origin reel sans Internet ni DNS.
+
+  Ce que la page etablit, dans `window.__parent` :
+
+    * le cadre de meme origine laisse lire son `contentDocument` ;
+    * le cadre d'origine differente ne le laisse pas ;
+    * les deux recoivent et renvoient des `postMessage` ;
+    * un `targetOrigin` qui ne correspond pas fait taire le message.
+
+  Le dernier point est le plus important : c'est lui qui empeche une page
+  d'envoyer un jeton a un cadre qui a change de site entre-temps.
+-->
+<style>
+  body { margin: 0; font: 15px system-ui, sans-serif; color: #1c1c1e; }
+  header { padding: 12px 16px; border-bottom: 1px solid #dcdfe4; }
+  h1 { font-size: 17px; margin: 0; }
+  .cadres { display: flex; gap: 16px; padding: 16px; flex-wrap: wrap; }
+  figure { margin: 0; }
+  figcaption { font-size: 12px; color: #6b6f76; padding-bottom: 4px; }
+  iframe { border: 1px solid #c9ced6; background: #ffffff; }
+  #etat { font-size: 12px; color: #6b6f76; padding: 0 16px 16px; }
+</style>
+</head>
+<body>
+
+<header><h1>Deux mondes dans une page</h1></header>
+
+<div class="cadres">
+  <figure>
+    <figcaption>meme origine</figcaption>
+    <iframe id="ami" name="ami" width="280" height="180"></iframe>
+  </figure>
+  <figure>
+    <figcaption>origine differente</figcaption>
+    <iframe id="etranger" name="etranger" width="280" height="180"></iframe>
+  </figure>
+</div>
+
+<p id="etat">demarrage…</p>
+
+<script>
+(function () {
+  "use strict";
+
+  const etat = globalThis.__parent = {
+    origine: window.origin,
+    cadres: 0,
+    memeOrigine: { document: null, message: null, echo: null },
+    autreOrigine: { document: null, message: null, echo: null },
+    refuse: { message: null },
+    recus: [],
+  };
+
+  const $ = (id) => document.getElementById(id);
+
+  // Les adresses des deux cadres sont posees par l'epreuve avant le
+  // chargement : la page ne peut pas les deviner, puisque le port est tire au
+  // hasard a chaque execution.
+  const config = globalThis.__config || {};
+  if (config.meme) $("ami").src = config.meme;
+  if (config.autre) $("etranger").src = config.autre;
+
+  addEventListener("message", function (e) {
+    etat.recus.push({ data: e.data, origin: e.origin });
+    if (e.data && e.data.pret) {
+      // Qui vient de se charger ? On compare l'origine annoncee a la notre.
+      if (e.origin === window.origin) etat.memeOrigine.message = e.origin;
+      else etat.autreOrigine.message = e.origin;
+      etat.cadres += 1;
+    }
+    if (e.data && e.data.echo !== undefined) {
+      if (e.origin === window.origin) etat.memeOrigine.echo = e.data.echo;
+      else etat.autreOrigine.echo = e.data.echo;
+    }
+  });
+
+  // La lecture du DOM d'en face. On note ce qui arrive plutot que de supposer :
+  // c'est la meme sonde des deux cotes, et c'est ce qui rend la comparaison
+  // significative.
+  globalThis.__sonde = function () {
+    for (const [nom, cle] of [["ami", "memeOrigine"], ["etranger", "autreOrigine"]]) {
+      const cadre = $(nom);
+      try {
+        const doc = cadre.contentDocument;
+        etat[cle].document = doc && doc.body ? "lisible" : "refuse";
+      } catch (e) {
+        etat[cle].document = "exception";
+      }
+    }
+  };
+
+  // Les envois. Le troisieme est celui qui doit echouer : un `targetOrigin`
+  // qui ne correspond pas au destinataire.
+  globalThis.__envoie = function () {
+    const ami = $("ami").contentWindow;
+    const etranger = $("etranger").contentWindow;
+    if (ami) ami.postMessage({ salut: "meme" }, window.origin);
+    if (etranger) etranger.postMessage({ salut: "autre" }, config.origineAutre || "*");
+    // Celui-ci ne doit jamais arriver : on affirme parler a une origine que le
+    // destinataire n'a pas.
+    if (etranger) etranger.postMessage({ secret: "jeton" }, "https://nulle-part.invalid");
+  };
+
+  $("etat").textContent = "cadres poses";
+})();
+</script>
+</body>
+</html>

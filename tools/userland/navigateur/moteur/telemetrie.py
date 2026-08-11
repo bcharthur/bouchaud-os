@@ -186,6 +186,11 @@ METHODE_ABSENTE = "methode_absente"
 MOIGNON = "moignon_appele"
 ERREUR_JS = "erreur_js"
 RESSOURCE_ECHOUEE = "ressource"
+# Un acces refuse par la Same-Origin Policy. Ce n'est pas un manque du moteur —
+# c'est le moteur qui fait son travail — mais il faut pouvoir le compter : une
+# page qui en declenche beaucoup essaie quelque chose, et une page qui devrait
+# en declencher et n'en declenche aucun signale un trou dans la politique.
+SOP_REFUS = "sop_refus"
 
 # Les surfaces de la plate-forme Web, par famille. Un nom present ici et absent
 # du moteur est un manque a implementer ; un nom absent d'ici est le probleme de

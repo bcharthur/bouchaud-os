@@ -2107,10 +2107,167 @@
     globalThis.console = console;
     globalThis.window = globalThis;
     globalThis.self = globalThis;
-    globalThis.top = globalThis;
-    globalThis.parent = globalThis;
-    globalThis.frames = globalThis;
     globalThis.closed = false;
+
+    // --- WindowProxy --------------------------------------------------------
+    //
+    // `window.parent`, `window.top`, `iframe.contentWindow` ne rendent pas
+    // l'objet global d'un autre contexte : ils rendent un **proxy**. La
+    // distinction est le fondement de la Same-Origin Policy.
+    //
+    // Un objet global expose tout — le DOM, les fonctions de la page, ses
+    // variables. Le donner a un autre contexte, c'est lui donner la page
+    // entiere. Un `WindowProxy` n'expose que ce que la norme autorise a
+    // traverser une frontiere d'origine : quelques proprietes, `postMessage`,
+    // `location` en ecriture seule. Ce qui demande le meme origine — `document`
+    // au premier chef — passe par une verification a chaque acces.
+    //
+    // La verification a chaque acces, et non a la construction, n'est pas un
+    // exces de prudence : un contexte peut **changer d'origine** en naviguant,
+    // et un proxy obtenu quand l'iframe etait de meme origine ne doit pas
+    // continuer d'ouvrir le DOM apres qu'il est parti ailleurs.
+
+    class WindowProxy {
+        constructor(identifiant) {
+            // L'identifiant du BrowsingContext cote Python. La page ne recoit
+            // jamais autre chose : elle ne peut donc pas fabriquer un proxy
+            // vers un contexte qu'on ne lui a pas donne.
+            Object.defineProperty(this, "__ctx", { value: identifiant });
+        }
+
+        get closed() { return !!appel("ctxFerme", this.__ctx); }
+        get name() { return appel("ctxNom", this.__ctx) || ""; }
+        get length() { return appel("ctxNombreEnfants", this.__ctx) || 0; }
+        get origin() { return appel("ctxOrigine", this.__ctx) || "null"; }
+
+        get self() { return this; }
+        get window() { return this; }
+        get parent() { return proxyDe(appel("ctxParent", this.__ctx)) || this; }
+        get top() { return proxyDe(appel("ctxSommet", this.__ctx)) || this; }
+        get frames() { return this; }
+
+        // `document` traverse la frontiere seulement en meme origine. C'est la
+        // regle qui empeche une page d'aller lire le contenu d'une autre.
+        //
+        // Ce qui revient est une **vue** sur le document d'en face, pas l'objet
+        // `document` de l'autre contexte : elle expose ce qu'on lit d'un
+        // document tiers legitime — sa racine, son corps, son titre, ses
+        // recherches — sans donner acces aux variables globales de sa page.
+        get document() {
+            const info = appel("ctxDocument", this.__ctx);
+            if (!info) return null;
+            return new DocumentDistant(info);
+        }
+
+        get location() {
+            const proxy = this;
+            return {
+                get href() { return appel("ctxUrl", proxy.__ctx) || "about:blank"; },
+                set href(valeur) { appel("ctxNavigue", proxy.__ctx, String(valeur)); },
+                assign(valeur) { appel("ctxNavigue", proxy.__ctx, String(valeur)); },
+                replace(valeur) { appel("ctxNavigue", proxy.__ctx, String(valeur), true); },
+                toString() { return appel("ctxUrl", proxy.__ctx) || "about:blank"; },
+            };
+        }
+
+        postMessage(donnees, cibleOrigine, transfert) {
+            appel("ctxMessage", this.__ctx,
+                  donnees === undefined ? null : donnees,
+                  cibleOrigine === undefined ? "/" : String(cibleOrigine));
+            void transfert;
+        }
+
+        focus() { appel("ctxFocus", this.__ctx); }
+        blur() {}
+    }
+
+    // La vue sur le document d'un autre contexte de meme origine.
+    //
+    // Les recherches sont **portees a la racine de ce document-la** : sans
+    // cela, `iframe.contentDocument.getElementById("x")` chercherait dans la
+    // page hote et rendrait le mauvais element — un bogue silencieux et
+    // particulierement penible, parce que le resultat aurait l'air valide.
+    class DocumentDistant {
+        constructor(info) {
+            Object.defineProperty(this, "__info", { value: info });
+        }
+        get documentElement() { return noeuds([this.__info.racine])[0] || null; }
+        get body() {
+            return this.__info.corps === null || this.__info.corps === undefined
+                ? null : (noeuds([this.__info.corps])[0] || null);
+        }
+        get title() { return this.__info.titre; }
+        get URL() { return this.__info.url; }
+        get location() { return { href: this.__info.url, toString: () => this.__info.url }; }
+        querySelector(s) {
+            return noeuds([appel("select", this.__info.racine, String(s), false)])[0] || null;
+        }
+        querySelectorAll(s) {
+            return noeuds(appel("select", this.__info.racine, String(s), true) || []);
+        }
+        getElementById(id) {
+            return this.querySelector("#" + String(id));
+        }
+        getElementsByTagName(nom) {
+            return noeuds(appel("parBalise", this.__info.racine, String(nom)) || []);
+        }
+        getElementsByClassName(nom) {
+            return noeuds(appel("parClasse", this.__info.racine, String(nom)) || []);
+        }
+    }
+
+    globalThis.WindowProxy = WindowProxy;
+
+    const proxies = new Map();
+
+    // Un proxy par contexte, et toujours le meme : du code reel compare
+    // `event.source === iframe.contentWindow`, et deux objets differents pour
+    // le meme contexte feraient echouer la comparaison.
+    function proxyDe(identifiant) {
+        if (identifiant === null || identifiant === undefined) return null;
+        let proxy = proxies.get(identifiant);
+        if (!proxy) {
+            proxy = new WindowProxy(identifiant);
+            proxies.set(identifiant, proxy);
+        }
+        return proxy;
+    }
+    globalThis.__bo_proxy = proxyDe;
+
+    // Le contexte courant se voit lui-meme comme `globalThis`, pas comme un
+    // proxy : une page accede a son propre DOM directement, sans traverser
+    // quoi que ce soit.
+    Object.defineProperty(globalThis, "parent", {
+        configurable: true,
+        get() {
+            const parent = appel("ctxParent", null);
+            return parent === null || parent === undefined
+                ? globalThis : proxyDe(parent);
+        },
+    });
+    Object.defineProperty(globalThis, "top", {
+        configurable: true,
+        get() {
+            const sommet = appel("ctxSommet", null);
+            return sommet === null || sommet === undefined
+                ? globalThis : proxyDe(sommet);
+        },
+    });
+    Object.defineProperty(globalThis, "frames", {
+        configurable: true,
+        get() {
+            // `window.frames` est indexable et porte `length` : c'est la forme
+            // qu'attend `for (let i = 0; i < frames.length; i++)`.
+            const enfants = appel("ctxEnfants", null) || [];
+            const liste = enfants.map(proxyDe);
+            liste.length = enfants.length;
+            return liste;
+        },
+    });
+    Object.defineProperty(globalThis, "origin", {
+        configurable: true,
+        get() { return appel("ctxOrigine", null) || "null"; },
+    });
 
     Object.defineProperty(globalThis, "innerWidth",
         { get: () => (appel("tailleVue") || taille).width, enumerable: true });
@@ -2587,6 +2744,49 @@
     WebSocket.prototype.CLOSED = 3;
 
     globalThis.WebSocket = WebSocket;
+
+    // --- iframe : contentWindow et contentDocument --------------------------
+    //
+    // `contentWindow` rend un `WindowProxy`, jamais l'objet global de l'enfant.
+    // `contentDocument` passe par une verification d'origine cote Python et
+    // rend `null` quand elle echoue — ce que dit la norme, et ce qui evite de
+    // faire tomber une page qui teste simplement si elle a le droit.
+    Object.defineProperty(Element.prototype, "contentWindow", {
+        configurable: true,
+        get() {
+            if (this.tagName !== "IFRAME") return null;
+            return __bo_proxy(appel("ctxCadre", this.__id));
+        },
+    });
+    Object.defineProperty(Element.prototype, "contentDocument", {
+        configurable: true,
+        get() {
+            if (this.tagName !== "IFRAME") return null;
+            const contexte = appel("ctxCadre", this.__id);
+            if (contexte === null || contexte === undefined) return null;
+            return __bo_proxy(contexte).document;
+        },
+    });
+
+    // --- Reception des messages ---------------------------------------------
+    //
+    // Livre par `tic()`, donc jamais au milieu d'un script : un `postMessage`
+    // ne peut pas s'inserer entre deux lignes de la page qui le recoit.
+    globalThis.__bo_message = function (donnees, origine, source) {
+        const evenement = new Event("message");
+        evenement.data = donnees;
+        evenement.origin = origine || "null";
+        evenement.source = source === null || source === undefined
+            ? null : __bo_proxy(source);
+        evenement.lastEventId = "";
+        evenement.ports = [];
+        for (const f of ecouteursDe(globalThis, "message", false))
+            invoque(f, globalThis, evenement);
+        if (typeof globalThis.onmessage === "function") {
+            try { globalThis.onmessage(evenement); }
+            catch (e) { console.error(e); }
+        }
+    };
 
     globalThis.__bo_socket = function (identifiant, type, charge) {
         const connexion = sockets.get(identifiant);

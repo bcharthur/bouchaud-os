@@ -35,7 +35,8 @@ import urllib.parse
 import bo
 import bojs
 
-from . import (css, html, invalidation, reseau, securite, stockage,
+from . import (css, html, invalidation, origine as mod_origine, reseau,
+               securite, stockage,
                telemetrie, websocket)
 
 # Types de nœuds, comme dans la norme DOM.
@@ -170,6 +171,8 @@ class Contexte:
         self._idb_transactions = {}
         self._prochaine_transaction = 1
         self._idb_fils = None
+        # Les `postMessage` recus, en attente du prochain battement.
+        self._messages = []
         # Les connexions WebSocket ouvertes par cette page, par identifiant.
         self._sockets = {}
         self._lecteurs = {}        # identifiant de nœud -> Lecteur
@@ -231,6 +234,9 @@ class Contexte:
         with self._verrou_reponses:
             arrivees, self._reponses = self._reponses, []
             resultats, self._idb_resultats = self._idb_resultats, []
+            messages, self._messages = self._messages, []
+        for donnees, origine_emetteur, source in messages:
+            self._appelle("__bo_message", [donnees, origine_emetteur, source])
         for identifiant, reponse in arrivees:
             self._appelle("__bo_reponse", [identifiant, reponse])
         for identifiant, resultat, erreur in resultats:
@@ -296,7 +302,29 @@ class Contexte:
         for lecteur in self._lecteurs.values():
             lecteur.ferme()
         self._lecteurs.clear()
+        # Le stockage a son propre fil, et ses transactions ouvertes tiennent
+        # chacune une copie de leur base. Les oublier ici, c'etait garder en
+        # memoire tout ce qu'un iframe avait lu — et un fil de plus par
+        # iframe cree.
+        if self._idb_fils is not None:
+            self._idb_fils.shutdown(wait=False)
+            self._idb_fils = None
+        # Les `postMessage` recus, en attente du prochain battement.
+        self._messages = []
+        for transaction in list(self._idb_transactions.values()):
+            try:
+                transaction.abandonne()
+            except Exception:  # noqa: BLE001
+                pass
+        self._idb_transactions.clear()
+        del self._idb_resultats[:]
+        del self._reponses[:]
+        self._noeuds.clear()
+        self._identifiants.clear()
+        self._minuteries.clear()
+        self._toiles.clear()
         bojs.detruit(self._contexte)
+        telemetrie.compte("js.contextes_fermes")
 
     def _appelle(self, nom, arguments):
         try:
@@ -1538,6 +1566,218 @@ class Contexte:
             self._fils = ThreadPoolExecutor(max_workers=4,
                                             thread_name_prefix="bo-reseau")
         return self._fils
+
+    # --- Contextes de navigation ----------------------------------------------
+    #
+    # Toutes les operations `ctx*` prennent un identifiant de BrowsingContext,
+    # jamais un objet. La page ne peut donc designer qu'un contexte qu'on lui a
+    # donne, et c'est ici — cote Python — que la frontiere d'origine est
+    # verifiee. La verifier dans le prelude reviendrait a demander a la page de
+    # se surveiller elle-meme.
+
+    def _mon_contexte(self):
+        return getattr(self.document, "contexte_navigation", None)
+
+    def _contexte_par_id(self, identifiant):
+        """Retrouve un contexte de **cet arbre** par son identifiant.
+
+        La recherche part du sommet de l'arbre courant, pas d'un registre
+        global : un onglet ne doit pas pouvoir designer le contexte d'un autre
+        onglet en devinant un numero.
+        """
+        mien = self._mon_contexte()
+        if mien is None:
+            return None
+        if identifiant is None:
+            return mien
+        try:
+            return mien.sommet.par_id(int(identifiant))
+        except (TypeError, ValueError):
+            return None
+
+    def _op_ctxParent(self, identifiant=None):
+        contexte = self._contexte_par_id(identifiant)
+        if contexte is None or contexte.parent is None:
+            return None
+        return contexte.parent.id
+
+    def _op_ctxSommet(self, identifiant=None):
+        contexte = self._contexte_par_id(identifiant)
+        if contexte is None or contexte.est_sommet:
+            return None
+        return contexte.sommet.id
+
+    def _op_ctxEnfants(self, identifiant=None):
+        contexte = self._contexte_par_id(identifiant)
+        return [] if contexte is None else [e.id for e in contexte.enfants]
+
+    def _op_ctxNombreEnfants(self, identifiant=None):
+        contexte = self._contexte_par_id(identifiant)
+        return 0 if contexte is None else len(contexte.enfants)
+
+    def _op_ctxNom(self, identifiant=None):
+        contexte = self._contexte_par_id(identifiant)
+        return "" if contexte is None else contexte.nom
+
+    def _op_ctxFerme(self, identifiant=None):
+        contexte = self._contexte_par_id(identifiant)
+        return True if contexte is None else bool(contexte.ferme)
+
+    def _op_ctxOrigine(self, identifiant=None):
+        """`window.origin` : lisible a travers la frontiere, par construction.
+
+        Une origine ne revele rien du contenu — c'est justement ce qui permet a
+        deux pages de savoir si elles ont le droit de se parler.
+        """
+        contexte = self._contexte_par_id(identifiant)
+        return "null" if contexte is None else contexte.origine.serialise()
+
+    def _op_ctxUrl(self, identifiant=None):
+        """L'adresse d'un contexte, mais seulement en meme origine.
+
+        L'adresse complete d'un document tiers en dit trop : un identifiant de
+        session dans le chemin, un jeton dans la requete. La norme la reserve
+        au meme origine, et rend l'adresse initiale sinon.
+        """
+        contexte = self._contexte_par_id(identifiant)
+        if contexte is None:
+            return "about:blank"
+        mien = self._mon_contexte()
+        if mien is not None and not mien.meme_origine(contexte):
+            telemetrie.compte("sop.url_refusee")
+            return "about:blank"
+        return contexte.url
+
+    def _op_ctxDocument(self, identifiant=None):
+        """`contentDocument` — le point ou la Same-Origin Policy se joue.
+
+        Rendre le document d'une origine differente donnerait a la page hote
+        l'acces complet au contenu de la page invitee : son DOM, ses formulaires,
+        ses jetons. C'est exactement ce que la SOP existe pour empecher, et c'est
+        pourquoi la verification est ici et pas dans le prelude.
+        """
+        contexte = self._contexte_par_id(identifiant)
+        if contexte is None or contexte.ferme:
+            return None
+        mien = self._mon_contexte()
+        if mien is None or not mien.meme_origine(contexte):
+            telemetrie.compte("sop.document_refuse")
+            self.note(telemetrie.SOP_REFUS, "contentDocument",
+                      "%s -> %s" % (mien.origine.serialise() if mien else "?",
+                                    contexte.origine.serialise()))
+            return None
+        document = contexte.document
+        if document is None:
+            return None
+        telemetrie.compte("sop.document_accorde")
+        # Pas seulement la racine : `contentDocument` est un **document**, et du
+        # code reel lit `.body`, `.title`, `.getElementById(...)`. Rendre le
+        # seul nœud racine faisait echouer `doc.body` sur `undefined`, ce qui se
+        # lit exactement comme un refus de securite alors que l'acces etait
+        # accorde — la pire confusion possible a cet endroit.
+        corps = document.racine.trouve("body")
+        return {
+            "racine": self._identifiant(document.racine),
+            "corps": None if corps is None else self._identifiant(corps),
+            "titre": document.titre or "",
+            "url": document.url,
+        }
+
+    def _op_ctxNavigue(self, identifiant, url, remplace=False):
+        """Naviguer un autre contexte : permis meme cross-origine.
+
+        C'est voulu, et c'est ce que dit la norme : un parent a le droit de
+        changer l'adresse de son iframe sans avoir le droit d'en lire le
+        contenu. Naviguer ne revele rien.
+        """
+        contexte = self._contexte_par_id(identifiant)
+        if contexte is None or contexte.ferme:
+            return False
+        absolue = urllib.parse.urljoin(self.document.url, str(url))
+        # Un contexte ne se navigue que depuis son arbre, et un iframe ne peut
+        # pas naviguer le sommet d'un autre onglet : `_contexte_par_id` s'en est
+        # deja assure.
+        if contexte.element is not None:
+            contexte.element.pose_attribut("src", absolue)
+        return contexte.navigue(absolue, remplace=bool(remplace))
+
+    def _op_ctxFocus(self, identifiant=None):
+        contexte = self._contexte_par_id(identifiant)
+        if contexte is None:
+            return False
+        for autre in [contexte.sommet] + contexte.sommet.descendants():
+            autre.focalise = autre is contexte
+        return True
+
+    def _op_ctxCadre(self, identifiant_element):
+        """L'identifiant du contexte porte par un element `<iframe>`."""
+        element = self._element(identifiant_element)
+        gestionnaire = getattr(self.document, "cadres", None)
+        if element is None or gestionnaire is None:
+            return None
+        contexte = gestionnaire.contexte_de(element)
+        return None if contexte is None else contexte.id
+
+    # --- postMessage ----------------------------------------------------------
+
+    def _op_ctxMessage(self, identifiant, donnees, cible_origine):
+        """`otherWindow.postMessage(data, targetOrigin)`.
+
+        Le canal legitime entre deux origines : il transporte des donnees, pas
+        des references. Une page peut donc dialoguer avec une autre sans jamais
+        obtenir son DOM — c'est exactement ce qu'il fallait, et c'est pourquoi
+        `postMessage` existe alors que la SOP interdit le reste.
+
+        `targetOrigin` est une **assertion de l'emetteur** : « je n'accepte de
+        parler qu'a cette origine-la ». Si le destinataire n'est pas celle-la,
+        le message est jete en silence. Ce n'est pas une politesse : sans cette
+        verification, une page qui envoie un jeton a son iframe continuerait de
+        l'envoyer apres que l'iframe a navigue vers un site tiers.
+        """
+        destination = self._contexte_par_id(identifiant)
+        if destination is None or destination.ferme:
+            return False
+        emetteur = self._mon_contexte()
+        cible = str(cible_origine or "/")
+
+        if cible == "/":
+            # `"/"` veut dire « seulement ma propre origine ».
+            accorde = emetteur is not None and emetteur.meme_origine(destination)
+        elif cible == "*":
+            # `"*"` accepte n'importe qui. La norme l'autorise et le deconseille :
+            # le message part meme si le destinataire a change d'origine.
+            accorde = True
+        else:
+            attendue = mod_origine.Origine.de_url(cible)
+            accorde = (not attendue.est_opaque
+                       and attendue.meme_origine(destination.origine))
+
+        if not accorde:
+            telemetrie.compte("postmessage.refuses")
+            return False
+
+        document = destination.document
+        contexte_cible = getattr(document, "contexte_js", None)
+        if contexte_cible is None:
+            # Le destinataire n'a pas de script : il ne peut rien recevoir. Ce
+            # n'est pas une erreur, c'est un message sans auditeur.
+            telemetrie.compte("postmessage.sans_auditeur")
+            return False
+
+        source = None if emetteur is None else emetteur.id
+        origine_emetteur = ("null" if emetteur is None
+                            else emetteur.origine.serialise())
+        # La livraison passe par la file de la boucle d'evenements du
+        # destinataire, jamais par un appel direct : un `postMessage` ne doit
+        # pas s'executer au milieu du script de l'emetteur.
+        contexte_cible.livre_message(donnees, origine_emetteur, source)
+        telemetrie.compte("postmessage.livres")
+        return True
+
+    def livre_message(self, donnees, origine_emetteur, source):
+        """Range un `message` pour le prochain battement de **ce** contexte."""
+        with self._verrou_reponses:
+            self._messages.append((donnees, origine_emetteur, source))
 
     # --- IndexedDB ------------------------------------------------------------
     #
