@@ -31,9 +31,9 @@ import urllib.parse
 
 import bo
 
-from . import (animation, css, edition, html, images, mise_en_page,
-               peinture, police, prechargement, reseau, stockage,
-               telemetrie)
+from . import (animation, css, edition, html, images, invalidation,
+               mise_en_page, peinture, police, prechargement, reseau,
+               stockage, telemetrie)
 
 __all__ = ["animation", "css", "html", "images", "js", "mise_en_page",
            "peinture", "police", "prechargement", "reseau", "stockage",
@@ -94,6 +94,8 @@ class Document:
         # Vrai quand le curseur a bouge sans que la valeur change : il faut
         # repeindre, pas remettre en page.
         self.sale_curseur = False
+        # Ce qui reste a refaire, et a quel etage du pipeline.
+        self.invalide = invalidation.Invalidation()
 
         if scripts:
             self._demarre_scripts()
@@ -159,6 +161,19 @@ class Document:
         # l'animateur baisse son drapeau et le navigateur cesse de redessiner.
         if not sale and not self.animateur.anime():
             return False
+
+        # L'invalidation dit jusqu'ou remonter. Une couleur qui change ne
+        # demande que des pixels : refaire la mise en page de deux mille
+        # elements pour cela etait le comportement d'avant, et c'est ce qui
+        # rendait toute application Web lente des qu'elle bougeait.
+        if not self.animateur.anime() and not self.invalide.demande_mise_en_page \
+                and self.boite is not None:
+            telemetrie.compte("invalidation.peinture_seule")
+            self.invalide.vide()
+            return True
+
+        telemetrie.compte("invalidation.mise_en_page")
+        self.invalide.vide()
         self.remet_en_page(self.largeur)
         return True
 

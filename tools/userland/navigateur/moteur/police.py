@@ -590,6 +590,13 @@ def oublie():
 
 
 def retiens(famille):
+    # Une police qui arrive change la largeur de tout ce qui l'emploie : les
+    # mesures deja prises ne valent plus.
+    try:
+        from . import mise_en_page
+        mise_en_page.bo.oublie()
+    except Exception:  # noqa: BLE001 — l'import circulaire ne doit rien casser
+        pass
     if famille:
         ENREGISTREES.add(famille.strip().lower())
 

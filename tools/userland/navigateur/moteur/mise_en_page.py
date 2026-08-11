@@ -21,24 +21,60 @@ from . import telemetrie
 
 
 class _BoMesure:
-    """Enrobe l'hote pour compter les mesures de texte.
+    """Enrobe l'hote : compte les mesures de texte, et ne les refait pas.
 
     Chaque appel traverse le pont vers Qt (ou vers Pillow hors OS) : c'est
-    l'operation la plus chere que la mise en page fasse a l'unite, et la
-    seule qu'on ne puisse pas rendre moins chere — seulement moins frequente.
-    Il faut donc savoir combien il y en a.
+    l'operation la plus chere que la mise en page fasse a l'unite.
+
+    Ces deux fonctions sont **pures** — meme texte, meme taille, meme fonte,
+    meme resultat — et la mesure montre a quel point elles se repetent. Sur
+    pypi.org/project/requests, une seule passe demande 11 954 largeurs pour
+    668 chaines distinctes : l'espace simple en 16 px est mesure **2 886
+    fois**. Les hauteurs de ligne sont pires encore : 5 910 appels pour
+    quatorze couples `(taille, fixe)`.
+
+    La memoire est videe quand une police arrive (`oublie()`), parce que la
+    meme chaine dans la meme famille ne mesure alors plus pareil. C'est le seul
+    evenement qui invalide ces valeurs : ni le DOM, ni la fenetre, ni le
+    defilement ne les touchent.
     """
+
+    def __init__(self):
+        self._largeurs = {}
+        self._hauteurs = {}
 
     def __getattr__(self, nom):
         return getattr(_bo, nom)
 
-    def largeur_texte(self, *args, **kwargs):
-        telemetrie.compte("layout.mesures_texte")
-        return _bo.largeur_texte(*args, **kwargs)
+    def oublie(self):
+        """A appeler quand la fonte disponible change."""
+        self._largeurs.clear()
+        self._hauteurs.clear()
 
-    def hauteur_ligne(self, *args, **kwargs):
+    def largeur_texte(self, texte, taille, gras=False, fixe=False, famille=""):
+        telemetrie.compte("layout.mesures_texte")
+        cle = (texte, taille, gras, fixe, famille)
+        connue = self._largeurs.get(cle)
+        if connue is not None:
+            telemetrie.compte("layout.mesures_evitees")
+            return connue
+        mesure = _bo.largeur_texte(texte, taille, gras, fixe, famille)
+        # Borne : une page qui fabrique des milliers de chaines uniques ne doit
+        # pas transformer ce cache en fuite de memoire.
+        if len(self._largeurs) < 20000:
+            self._largeurs[cle] = mesure
+        return mesure
+
+    def hauteur_ligne(self, taille, fixe=False):
         telemetrie.compte("layout.hauteurs_ligne")
-        return _bo.hauteur_ligne(*args, **kwargs)
+        cle = (taille, fixe)
+        connue = self._hauteurs.get(cle)
+        if connue is not None:
+            telemetrie.compte("layout.hauteurs_evitees")
+            return connue
+        mesure = _bo.hauteur_ligne(taille, fixe)
+        self._hauteurs[cle] = mesure
+        return mesure
 
 
 bo = _BoMesure()
@@ -164,6 +200,9 @@ class Contexte:
 def construit(racine, regles, largeur_page, url="", image_video=None, toile=None):
     """Construit l'arbre de boites et rend (racine, hauteur totale)."""
     telemetrie.compte("layout.passes")
+    # Une generation par passe : tout ce qui est memorise pendant celle-ci est
+    # vrai pour toute sa duree, et jete a la suivante.
+    css.nouvelle_generation()
     contexte = Contexte(regles, largeur_page, url, image_video, toile)
     style_initial = {
         "color": "#202124", "font-size": "16px", "line-height": "1.5",
@@ -454,6 +493,7 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None
     `largeur_forcee` court-circuite le calcul de largeur : flex et grille
     attribuent aux articles une taille que la boite ne peut pas deduire seule.
     """
+    telemetrie.compte("layout.dispose_bloc")
     style = boite.style
     taille = _taille_police(style)
 
@@ -904,6 +944,13 @@ def _lignes_tableau(boite, contexte):
 
 def etendue_contenu(boite):
     telemetrie.compte("layout.etendue_contenu")
+    if telemetrie.ACTIVE:
+        with telemetrie.chrono("layout_intrinseque"):
+            return _etendue_contenu(boite)
+    return _etendue_contenu(boite)
+
+
+def _etendue_contenu(boite):
     """Ce que le contenu d'une boite occupe reellement en largeur.
 
     Une boite de bloc prend toute la largeur qu'on lui donne : la mesurer rend
@@ -924,7 +971,8 @@ def etendue_contenu(boite):
     for enfant in boite.enfants:
         marge = _longueur(enfant.style, "margin-right", boite.largeur,
                           _taille_police(enfant.style))
-        droite = max(droite, etendue_contenu(enfant), enfant.x + enfant.largeur + marge)
+        droite = max(droite, _etendue_contenu(enfant),
+                     enfant.x + enfant.largeur + marge)
     if boite.toile:
         droite = max(droite, boite.x + boite.largeur)
 

@@ -4145,6 +4145,163 @@ def verifie_tableau_de_bord():
          suivi.precedente(histoire, "inconnue"), None)
 
 
+def verifie_invalidation():
+    """Ce qui change decide de ce qu'on refait — et de ce qu'on ne refait pas.
+
+    Le moteur n'avait qu'un booleen : n'importe quelle mutation refaisait tout,
+    pour la page entiere. Changer la couleur d'un bouton coutait exactement le
+    prix d'un rechargement. Ce n'etait pas absurde tant que le DOM bougeait
+    peu ; ce n'est plus tenable maintenant que le navigateur recoit des frappes.
+    """
+    from moteur import invalidation
+
+    # Le classement des proprietes. Se tromper vers le haut coute du temps ;
+    # se tromper vers le bas laisse un affichage faux, et un affichage faux ne
+    # se voit pas dans un profil.
+    for propriete, attendu, quoi in (
+            ("color", invalidation.PEINTURE, "une couleur ne demande que des pixels"),
+            ("background-color", invalidation.PEINTURE, "un fond non plus"),
+            ("box-shadow", invalidation.PEINTURE, "ni une ombre"),
+            ("width", invalidation.MISE_EN_PAGE, "une largeur replace les boites"),
+            ("display", invalidation.MISE_EN_PAGE, "un display aussi"),
+            ("margin-top", invalidation.MISE_EN_PAGE, "une marge aussi"),
+            ("font-size", invalidation.MISE_EN_PAGE, "une taille de police aussi"),
+            ("transform", invalidation.COMPOSITION, "un transform ne fait que deplacer"),
+            ("opacity", invalidation.COMPOSITION, "une opacite non plus"),
+            ("truc-inconnu", invalidation.MISE_EN_PAGE,
+             "une propriete inconnue est traitee prudemment")):
+        egal("invalidation: %s" % quoi,
+             invalidation.etendue_de(propriete), attendu)
+
+    # Un lot prend l'etendue la plus haute : une couleur et une largeur
+    # ensemble demandent une mise en page.
+    egal("invalidation: un lot prend le plus cher",
+         invalidation.etendue_des(["color", "width"]), invalidation.MISE_EN_PAGE)
+    egal("invalidation: un lot de couleurs reste en peinture",
+         invalidation.etendue_des(["color", "background-color"]),
+         invalidation.PEINTURE)
+
+    etat = invalidation.Invalidation()
+    verifie("invalidation: au depart il n'y a rien a faire", etat.rien_a_faire)
+    etat.marque_propriete("color")
+    verifie("invalidation: une couleur ne demande pas de mise en page",
+            not etat.demande_mise_en_page and etat.demande_peinture)
+    etat.marque_propriete("width")
+    verifie("invalidation: une largeur, si", etat.demande_mise_en_page)
+    etat.marque_propriete("color")
+    verifie("invalidation: et une couleur ensuite ne redescend pas",
+            etat.demande_mise_en_page)
+    egal("invalidation: vider rend ce qui etait prevu", etat.vide(),
+         invalidation.MISE_EN_PAGE)
+    verifie("invalidation: apres quoi il n'y a plus rien", etat.rien_a_faire)
+
+
+def verifie_invalidation_reelle():
+    """Le chemin complet : `style.color` ne doit plus tout remettre en page."""
+    from moteur import invalidation
+
+    lignes = "".join("<p class=l id=p%d>ligne %d</p>" % (i, i) for i in range(60))
+    doc = document("<style>.l { color: #000000 }</style>"
+                   "<body><div id=zone>%s</div><script>1</script></body>" % lignes)
+    doc.remet_en_page(1000, 800)
+    contexte = doc.contexte_js
+
+    poses = [0]
+    from moteur import mise_en_page as _mep
+    vrai = _mep.construit
+
+    def compte(*a, **k):
+        poses[0] += 1
+        return vrai(*a, **k)
+
+    _mep.construit = compte
+    try:
+        # Une couleur : peinture seulement, aucune mise en page.
+        contexte.execute("document.getElementById('p3').style.color = '#ff0000'")
+        egal("invalidation reelle: une couleur reste en peinture",
+             doc.invalide.etendue, invalidation.PEINTURE)
+        doc.rafraichis()
+        egal("invalidation reelle: aucune mise en page n'a eu lieu", poses[0], 0)
+        verifie("invalidation reelle: et plus rien n'est en retard",
+                doc.invalide.rien_a_faire)
+
+        # Une largeur : la mise en page redevient necessaire.
+        contexte.execute("document.getElementById('p4').style.width = '120px'")
+        egal("invalidation reelle: une largeur demande la mise en page",
+             doc.invalide.etendue, invalidation.MISE_EN_PAGE)
+        doc.rafraichis()
+        egal("invalidation reelle: elle a bien eu lieu", poses[0], 1)
+        poses[0] = 0
+
+        # Une classe : la cascade doit etre rejouee.
+        contexte.execute("document.getElementById('p5').className = 'l autre'")
+        egal("invalidation reelle: une classe demande le style",
+             doc.invalide.etendue, invalidation.STYLE)
+
+        # Le resultat visible reste juste : la couleur demandee est appliquee.
+        # Verifie ici, avant que la mutation suivante ne remplace le sous-arbre.
+        _mep.construit = vrai
+        doc.remet_en_page(1000, 800)
+        _mep.construit = compte
+        boite = boite_de(doc, "p3")
+        egal("invalidation reelle: la couleur demandee est appliquee",
+             css_couleur(boite.style.get("color")) if boite else None,
+             css_couleur("#ff0000"))
+
+        # Une mutation dont on ne connait pas la portee reste prudente.
+        doc.invalide.vide()
+        contexte.execute("document.getElementById('zone').innerHTML = '<p>neuf</p>'")
+        egal("invalidation reelle: une mutation inconnue vaut mise en page",
+             doc.invalide.etendue, invalidation.MISE_EN_PAGE)
+    finally:
+        _mep.construit = vrai
+
+
+def verifie_memoires_de_passe():
+    """Les memoires de generation : justes, et videes quand il le faut."""
+    from moteur import css as _css
+
+    doc = document(
+        "<style>li:nth-child(2) { color: #ff0000 }</style>"
+        "<body><ul id=u><li id=a>a</li><li id=b>b</li><li id=c>c</li></ul>"
+        "<script>1</script></body>")
+    doc.remet_en_page(1000, 800)
+    egal("memoire: la fratrie memorisee ne fausse pas nth-child",
+         css_couleur(boite_de(doc, "b").style.get("color")), css_couleur("#ff0000"))
+    egal("memoire: et les autres ne sont pas atteints",
+         css_couleur(boite_de(doc, "a").style.get("color")),
+         css_couleur("#202124"))
+
+    # Un enfant insere change la fratrie : la memoire doit avoir ete jetee.
+    doc.contexte_js.execute(
+        "var u = document.getElementById('u');"
+        "var neuf = document.createElement('li'); neuf.id = 'zero';"
+        "neuf.textContent = 'z'; u.insertBefore(neuf, u.firstChild);")
+    doc.rafraichis()
+    doc.remet_en_page(1000, 800)
+    egal("memoire: apres insertion, nth-child(2) designe le nouveau second",
+         css_couleur(boite_de(doc, "a").style.get("color")), css_couleur("#ff0000"))
+    egal("memoire: et l'ancien second redevient normal",
+         css_couleur(boite_de(doc, "b").style.get("color")),
+         css_couleur("#202124"))
+
+    # La generation avance a chaque passe.
+    avant = _css.generation()
+    doc.remet_en_page(1000, 800)
+    verifie("memoire: chaque passe ouvre une generation",
+            _css.generation() > avant, (avant, _css.generation()))
+
+    # Le decoupage de `class` est memorise, mais suit la valeur.
+    element = _par_id(doc, "a")
+    egal("memoire: les classes se lisent", element.classes, [])
+    element.attributs["class"] = "un deux"
+    egal("memoire: et suivent un changement direct", element.classes,
+         ["un", "deux"])
+    element.pose_attribut("class", "trois")
+    egal("memoire: comme un changement par pose_attribut", element.classes,
+         ["trois"])
+
+
 # --- Interaction utilisateur reelle -------------------------------------------
 
 def verifie_modele_edition():
@@ -5476,6 +5633,9 @@ def principal():
         verifie_ressources_echouees,
         verifie_moignons,
         verifie_serveur_fixtures,
+        verifie_invalidation,
+        verifie_invalidation_reelle,
+        verifie_memoires_de_passe,
         verifie_modele_edition,
         verifie_saisie_reelle,
         verifie_ordre_des_evenements_de_frappe,

@@ -35,7 +35,8 @@ import urllib.parse
 import bo
 import bojs
 
-from . import css, html, reseau, securite, stockage, telemetrie
+from . import (css, html, invalidation, reseau, securite, stockage,
+               telemetrie)
 
 # Types de nœuds, comme dans la norme DOM.
 ELEMENT = 1
@@ -135,7 +136,7 @@ class Contexte:
     def __init__(self, document, journal=None, budget_ms=5000):
         self.document = document
         self.journal = journal or (lambda niveau, texte: None)
-        self.sale = False
+        self._sale = False
         self.navigation = None
         # Vrai quand un `pushState`/`popstate` a change l'adresse sans
         # recharger : le navigateur doit rafraichir sa barre d'adresse sans
@@ -406,6 +407,28 @@ class Contexte:
 
     # --- Le passage unique ----------------------------------------------------
 
+    # `sale` veut dire « le JavaScript a touche a l'arbre ». Toute mutation le
+    # leve, et la plupart ne disent pas *ce* qui a change — un `innerHTML`, un
+    # nœud insere, un texte remplace. Faute de mieux, elles valent une remise en
+    # page complete, et c'est ce que la propriete inscrit.
+    #
+    # Les rares mutations dont on connait exactement la portee — une propriete
+    # de `style`, un attribut — marquent l'invalidation *avant* de lever ce
+    # drapeau, et leur marque plus fine est alors ecrasee par celle-ci. C'est
+    # voulu pour l'instant : se tromper vers le haut coute du temps, se tromper
+    # vers le bas laisse un affichage faux. Les ops precises posent
+    # `_sale` directement pour garder leur etendue.
+    @property
+    def sale(self):
+        return self._sale
+
+    @sale.setter
+    def sale(self, valeur):
+        self._sale = bool(valeur)
+        if valeur:
+            self.document.invalide.marque(invalidation.MISE_EN_PAGE,
+                                          raison="mutation")
+
     def appel(self, operation, *arguments):
         """Point d'entree de `__bo_appel`, cote Python."""
         if telemetrie.ACTIVE and operation != "manque":
@@ -543,6 +566,13 @@ class Contexte:
         element = self._element(identifiant)
         if not element:
             return
+        # Un attribut peut changer ce que la cascade designe — `class`, `id`,
+        # un attribut cible par un selecteur : il faut rejouer le style. Les
+        # autres ne touchent que le contenu de l'element.
+        self.document.invalide.marque(
+            invalidation.STYLE if nom in ("class", "id", "style")
+            else invalidation.MISE_EN_PAGE, element, "attribut:%s" % nom)
+        self._sale = True
         if valeur is None:
             element.attributs.pop(nom.lower(), None)
         else:
@@ -564,7 +594,11 @@ class Contexte:
             declarations.append((propriete, valeur))
         element.attributs["style"] = "; ".join(
             "%s: %s" % (n, v) for n, v in declarations)
-        self.sale = True
+        # On sait exactement quelle propriete a change : c'est le seul chemin de
+        # mutation ou l'etendue se deduit sans deviner. `style.color = "red"`
+        # ne demande donc plus une remise en page de tout le document.
+        self.document.invalide.marque_propriete(propriete.strip().lower(), element)
+        self._sale = True
 
     def _op_poseHtml(self, identifiant, source):
         element = self._element(identifiant)
