@@ -2743,6 +2743,10 @@
                 this.readyState = 1;
             } else if (type === "open") {
                 this.readyState = 1;
+                // Le sous-protocole retenu par le serveur. La page le lit dans
+                // `onopen` pour savoir quelle langue parler — le lire plus tard
+                // serait trop tard.
+                this.protocol = (charge && charge.protocole) || "";
                 evenement = new Event("open");
             } else if (type === "close") {
                 this.readyState = 3;          // CLOSED

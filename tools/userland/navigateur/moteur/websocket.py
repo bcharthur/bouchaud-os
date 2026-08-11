@@ -39,7 +39,7 @@ import struct
 import threading
 import urllib.parse
 
-from . import reseau, securite, telemetrie
+from . import origine as mod_origine, reseau, securite, telemetrie
 
 # La constante de la RFC 6455. Le serveur concatene la cle du client avec elle,
 # hache le tout en SHA-1 et rend le resultat en base64 : c'est ce qui prouve
@@ -144,11 +144,9 @@ class Connexion:
         # pour refuser les pages tierces ; l'omettre reviendrait a lui retirer
         # ce moyen de defense.
         if self._document:
-            origine = securite.origine(self._document)
-            if origine is not None:
-                entetes.append("Origin: %s://%s%s" % (
-                    origine[0], origine[1],
-                    "" if origine[2] in (80, 443) else ":%d" % origine[2]))
+            origine = mod_origine.Origine.de_url(self._document)
+            if not origine.est_opaque:
+                entetes.append("Origin: %s" % origine.serialise())
         if self.protocoles:
             entetes.append("Sec-WebSocket-Protocol: %s" % ", ".join(self.protocoles))
 
@@ -172,10 +170,20 @@ class Connexion:
             raise Erreur("la reponse du serveur ne prouve pas la poignee de main")
 
         self.protocole = champs.get("sec-websocket-protocol", "").strip()
+        if self.protocoles and self.protocole \
+                and self.protocole not in self.protocoles:
+            # Un serveur qui choisit un sous-protocole que le client n'a pas
+            # propose ne respecte pas la norme, et poursuivre reviendrait a
+            # parler une langue qu'on n'a pas apprise. La connexion echoue.
+            prise.close()
+            raise Erreur("sous-protocole non demande : %s" % self.protocole)
         prise.settimeout(None)
         self._prise = prise
         self.etat = OUVERT
-        self._pose("open", None)
+        # Le sous-protocole voyage avec l'ouverture : la page le lit dans
+        # `socket.protocol` des `onopen`, ce qui est le seul moment ou elle
+        # peut choisir quoi envoyer.
+        self._pose("open", {"protocole": self.protocole})
         telemetrie.compte("websocket.ouvertures")
 
         self._fil = threading.Thread(target=self._ecoute, daemon=True,

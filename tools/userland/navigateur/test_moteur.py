@@ -6194,6 +6194,111 @@ def verifie_toile_origine():
         ecris_jalons()
 
 
+def verifie_wss():
+    """`wss://` : le meme WebSocket, derriere le TLS deja valide du navigateur.
+
+    Ce qui est eprouve n'est pas « le chiffrement marche » mais **que le
+    navigateur verifie**. Une autorite de test signe un certificat pour
+    `localhost` ; on la fait reconnaitre par `BO_CA_BUNDLE`, et l'on verifie
+    ensuite les deux sens :
+
+      * avec l'autorite reconnue, la connexion s'etablit et parle ;
+      * sans elle, la connexion **echoue** au lieu de se degrader en clair.
+
+    Le second cas est celui qui compte. Un `wss://` qui retomberait en `ws://`
+    quand la verification gene ne protegerait personne — c'est meme pire
+    qu'aucune securite, parce qu'on croit l'avoir.
+
+    L'architecture est celle demandee : transport TCP, transport TLS optionnel,
+    puis le meme decoupage en trames. Aucune seconde pile TLS.
+    """
+    import os as _os
+    import shutil as _shutil
+    import tempfile as _tempfile
+    import time as _time
+
+    from moteur import reseau as _reseau
+    import serveur_test
+
+    dossier = _tempfile.mkdtemp(prefix="bo-wss-")
+    try:
+        materiel = serveur_test.fabrique_ca(dossier)
+        if materiel is None:
+            verifie("wss: cryptography absent, epreuve non mesuree", True)
+            return
+        chemin_ca, chemin_srv = materiel
+        serveur, base = serveur_test.demarre_tls(chemin_srv)
+        ancien_bundle = _os.environ.get("BO_CA_BUNDLE")
+        try:
+            _wss_scenario(base, chemin_ca, _os, _time, _reseau)
+        finally:
+            if ancien_bundle is None:
+                _os.environ.pop("BO_CA_BUNDLE", None)
+            else:
+                _os.environ["BO_CA_BUNDLE"] = ancien_bundle
+            serveur_test.arrete(serveur)
+    finally:
+        _shutil.rmtree(dossier, ignore_errors=True)
+        ecris_jalons()
+
+
+def _wss_scenario(base, chemin_ca, _os, _time, _reseau):
+    # `contexte_tls()` reconstruit son contexte a chaque appel :
+    # changer `BO_CA_BUNDLE` suffit a changer ce qu'il approuve,
+    # sans avoir a vider quoi que ce soit.
+    from moteur import websocket
+
+    # 1. Sans l'autorite, la connexion doit echouer. On l'eprouve d'abord :
+    #    si elle reussissait ici, tout ce qui suit ne prouverait rien.
+    _os.environ["BO_CA_BUNDLE"] = "/inexistant/aucune-autorite.pem"
+    refusee = websocket.Connexion(base + "/ws/echo", document="https://a.test/p")
+    echec = None
+    try:
+        refusee.ouvre()
+    except Exception as e:  # noqa: BLE001
+        echec = str(e)
+    finally:
+        try:
+            refusee.ferme(1000, "")
+        except Exception:  # noqa: BLE001
+            pass
+    verifie("wss: sans autorite reconnue, la connexion est refusee",
+            echec is not None, echec)
+    verifie("wss: et elle ne se degrade pas en clair",
+            refusee.etat != websocket.OUVERT, refusee.etat)
+
+    # 2. Avec l'autorite, la connexion s'etablit et parle.
+    _os.environ["BO_CA_BUNDLE"] = chemin_ca
+    connexion = websocket.Connexion(base + "/ws/echo",
+                                    protocoles=["bo-chat", "bo-secours"],
+                                    document="https://a.test/p")
+    try:
+        ouverte = connexion.ouvre()
+        verifie("wss: avec l'autorite reconnue, la connexion s'ouvre", ouverte)
+        if not ouverte:
+            return
+        connexion.envoie("bonjour en clair chiffre")
+        recus = []
+        limite = _time.perf_counter() + 10.0
+        while _time.perf_counter() < limite and not recus:
+            for type_, charge in connexion.evenements():
+                if type_ == "message":
+                    recus.append(charge)
+            _time.sleep(0.02)
+        verifie("wss: le serveur repond a travers TLS", bool(recus), recus)
+        verifie("wss: et le message est celui qu'on a envoye",
+                any("bonjour" in str(m) for m in recus), recus)
+
+        # 3. Le sous-protocole negocie.
+        egal("wss: le sous-protocole retenu est celui qu'on a propose",
+             connexion.protocole, "bo-chat")
+    finally:
+        connexion.ferme(1000, "fin")
+
+    jalon("WSS", True)
+    jalon("WEBSOCKET_SUBPROTOCOL", connexion.protocole == "bo-chat")
+
+
 def verifie_invalidation_ciblee():
     """Changer une couleur ne doit pas remettre mille cartes en page.
 
@@ -7297,6 +7402,7 @@ def principal():
         verifie_fuite_cadres,
         verifie_cors,
         verifie_toile_origine,
+        verifie_wss,
         verifie_invalidation_ciblee,
         verifie_tailles_intrinseques,
         verifie_flex,

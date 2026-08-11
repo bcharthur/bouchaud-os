@@ -141,6 +141,8 @@ JALONS = [
     ("POSTMESSAGE", "les contextes se parlent sans se lire"),
     ("CORS", "une reponse tierce n'est lue qu'avec l'accord du serveur"),
     ("CANVAS_ORIGIN_CLEAN", "une toile contaminee ne se relit pas"),
+    ("WSS", "un WebSocket chiffre, avec verification du certificat"),
+    ("WEBSOCKET_SUBPROTOCOL", "le sous-protocole se negocie"),
 ]
 
 CHEMIN_JALONS = os.path.join(os.path.dirname(os.path.abspath(__file__)),

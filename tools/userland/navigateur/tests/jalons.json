@@ -10,5 +10,7 @@
  "SPA_NAVIGATION": true,
  "STATIC_PAGE": true,
  "WEBAPP_COMBINED": true,
- "WEBSOCKET_CHAT": true
+ "WEBSOCKET_CHAT": true,
+ "WEBSOCKET_SUBPROTOCOL": true,
+ "WSS": true
 }

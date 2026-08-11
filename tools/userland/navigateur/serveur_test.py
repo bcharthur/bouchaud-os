@@ -248,6 +248,9 @@ class Fixtures(http.server.BaseHTTPRequestHandler):
 
     MAGIE = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
+    # Les sous-protocoles que ce serveur sait parler.
+    PROTOCOLES_CONNUS = ("bo-chat", "bo-secours", "echo")
+
     def websocket(self, chemin):
         cle = self.headers.get("Sec-WebSocket-Key")
         if not cle or (self.headers.get("Upgrade") or "").lower() != "websocket":
@@ -259,6 +262,17 @@ class Fixtures(http.server.BaseHTTPRequestHandler):
         self.send_header("Upgrade", "websocket")
         self.send_header("Connection", "Upgrade")
         self.send_header("Sec-WebSocket-Accept", accepte)
+        # Le sous-protocole : on retient **le premier propose** que l'on
+        # connait, et on le renvoie. Un serveur qui renverrait autre chose que
+        # ce que le client a propose parlerait une langue que le client n'a pas
+        # apprise, et le client doit refuser — c'est ce que verifie l'epreuve.
+        proposes = [p.strip() for p in
+                    (self.headers.get("Sec-WebSocket-Protocol") or "").split(",")
+                    if p.strip()]
+        for candidat in proposes:
+            if candidat in self.PROTOCOLES_CONNUS:
+                self.send_header("Sec-WebSocket-Protocol", candidat)
+                break
         self.end_headers()
         self.wfile.flush()
 
@@ -498,6 +512,94 @@ class Serveur(socketserver.ThreadingTCPServer):
     def __init__(self, adresse, bavard=False):
         self.bavard = bavard
         super().__init__(adresse, Fixtures)
+
+
+# --- TLS d'epreuve ------------------------------------------------------------
+#
+# Une autorite de test, un certificat pour `localhost`/`127.0.0.1`, et de quoi
+# faire confiance a l'une sans toucher au magasin du systeme.
+#
+# Pourquoi une vraie chaine plutot qu'un certificat auto-signe accepte sans
+# verification : parce que ce qu'on veut eprouver est justement que le
+# navigateur **verifie**. Un test qui desactiverait la verification pour que
+# `wss://` passe prouverait exactement le contraire de ce qu'il pretend.
+
+def fabrique_ca(dossier):
+    """Cree `(ca.pem, serveur.pem)` dans `dossier`. Rend leurs chemins.
+
+    Rend `None` si `cryptography` n'est pas disponible : le reste des epreuves
+    continue, et celle-ci se declare non mesuree plutot que d'echouer pour une
+    dependance absente.
+    """
+    try:
+        import datetime
+        import ipaddress
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+    except ImportError:
+        return None
+
+    maintenant = datetime.datetime.now(datetime.timezone.utc)
+    cle_ca = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    nom_ca = x509.Name([
+        x509.NameAttribute(NameOID.COMMON_NAME, "Autorite d'epreuve Bouchaud")])
+    certificat_ca = (
+        x509.CertificateBuilder()
+        .subject_name(nom_ca).issuer_name(nom_ca)
+        .public_key(cle_ca.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(maintenant - datetime.timedelta(days=1))
+        .not_valid_after(maintenant + datetime.timedelta(days=2))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None),
+                       critical=True)
+        .sign(cle_ca, hashes.SHA256()))
+
+    cle_srv = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    certificat_srv = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([
+            x509.NameAttribute(NameOID.COMMON_NAME, "localhost")]))
+        .issuer_name(nom_ca)
+        .public_key(cle_srv.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(maintenant - datetime.timedelta(days=1))
+        .not_valid_after(maintenant + datetime.timedelta(days=2))
+        .add_extension(x509.SubjectAlternativeName([
+            x509.DNSName("localhost"),
+            x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), critical=False)
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None),
+                       critical=True)
+        .sign(cle_ca, hashes.SHA256()))
+
+    chemin_ca = os.path.join(dossier, "ca.pem")
+    chemin_srv = os.path.join(dossier, "serveur.pem")
+    with open(chemin_ca, "wb") as f:
+        f.write(certificat_ca.public_bytes(serialization.Encoding.PEM))
+    with open(chemin_srv, "wb") as f:
+        f.write(certificat_srv.public_bytes(serialization.Encoding.PEM))
+        f.write(cle_srv.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption()))
+    return chemin_ca, chemin_srv
+
+
+def demarre_tls(certificat, port=0, bavard=False):
+    """Lance le meme serveur derriere TLS. Rend `(serveur, base wss://)`."""
+    import ssl as _ssl
+
+    serveur = Serveur(("127.0.0.1", port), bavard)
+    contexte = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+    contexte.load_cert_chain(certificat)
+    serveur.socket = contexte.wrap_socket(serveur.socket, server_side=True)
+    fil = threading.Thread(target=serveur.serve_forever, daemon=True)
+    fil.start()
+    reel = serveur.server_address[1]
+    # `localhost` et non `127.0.0.1` : c'est le nom que porte le certificat, et
+    # la verification du nom d'hote fait partie de ce qu'on eprouve.
+    return serveur, "wss://localhost:%d" % reel
 
 
 def demarre(port=PORT_DEFAUT, bavard=False):
