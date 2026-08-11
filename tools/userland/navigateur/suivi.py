@@ -136,6 +136,11 @@ JALONS = [
     ("WEBSOCKET_CHAT", "un WebSocket recoit ce que le serveur pousse"),
     ("INDEXEDDB_PERSISTENCE", "les donnees survivent au rechargement"),
     ("WEBAPP_COMBINED", "le parcours complet, d'un bout a l'autre"),
+    ("IFRAME_SAME_ORIGIN", "un cadre de meme origine s'ouvre au parent"),
+    ("IFRAME_CROSS_ORIGIN", "un cadre d'une autre origine reste ferme"),
+    ("POSTMESSAGE", "les contextes se parlent sans se lire"),
+    ("CORS", "une reponse tierce n'est lue qu'avec l'accord du serveur"),
+    ("CANVAS_ORIGIN_CLEAN", "une toile contaminee ne se relit pas"),
 ]
 
 CHEMIN_JALONS = os.path.join(os.path.dirname(os.path.abspath(__file__)),

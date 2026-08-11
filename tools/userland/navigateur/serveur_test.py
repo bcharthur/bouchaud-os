@@ -91,7 +91,13 @@ class Fixtures(http.server.BaseHTTPRequestHandler):
         # Sans cela, une mesure repetee lirait le cache du moteur et non le
         # serveur : deux executions ne mesureraient plus la meme chose.
         self.send_header("Cache-Control", "no-store")
-        for nom, valeur in (entetes or []):
+        # Un dictionnaire ou une liste de couples : les deux formes se
+        # rencontrent dans les appelants, et se tromper ici produit une erreur
+        # de deballage a mille lieues de sa cause.
+        supplement = entetes or []
+        if isinstance(supplement, dict):
+            supplement = supplement.items()
+        for nom, valeur in supplement:
             self.send_header(nom, valeur)
         self.end_headers()
         if self.command != "HEAD":
@@ -116,6 +122,16 @@ class Fixtures(http.server.BaseHTTPRequestHandler):
 
     def do_HEAD(self):  # noqa: N802
         self.sert("GET")
+
+    def do_OPTIONS(self):  # noqa: N802
+        """Le preflight CORS. Sans lui, aucune requete non simple ne passe."""
+        self.sert("OPTIONS")
+
+    def do_PUT(self):  # noqa: N802
+        self.sert("PUT")
+
+    def do_DELETE(self):  # noqa: N802
+        self.sert("DELETE")
 
     def do_POST(self):  # noqa: N802
         self.sert("POST")
@@ -168,7 +184,59 @@ class Fixtures(http.server.BaseHTTPRequestHandler):
             return self.repond(404, "not found", "text/plain")
         if chemin.startswith("/page/"):
             return self.page(chemin)
+        if chemin.startswith("/cors/"):
+            return self.cors(chemin)
         return self.repond(404, "<h1>404</h1><p>%s</p>" % chemin)
+
+    # -- CORS ------------------------------------------------------------------
+    #
+    # Un jeu de reponses qui couvre les cas que le navigateur doit distinguer.
+    # Le point commun de toutes : **la requete arrive toujours**. Ce qui change
+    # est ce que le serveur autorise le script a en lire. Un serveur d'epreuve
+    # qui refuserait la requete elle-meme ne testerait pas CORS, il testerait
+    # un pare-feu.
+
+    def cors(self, chemin):
+        genre = chemin[len("/cors/"):].split("?")[0]
+        origine = self.headers.get("Origin") or ""
+        entetes = {}
+
+        if genre == "ouvert":
+            entetes["Access-Control-Allow-Origin"] = "*"
+        elif genre == "exact":
+            # N'autorise que l'origine qui demande, en la renvoyant telle
+            # quelle. C'est la forme correcte : renvoyer `*` la ou l'on veut
+            # une seule origine ouvrirait a tout le monde.
+            entetes["Access-Control-Allow-Origin"] = origine or "null"
+        elif genre == "autre":
+            entetes["Access-Control-Allow-Origin"] = "https://quelquun-dautre.invalid"
+        elif genre == "temoins":
+            entetes["Access-Control-Allow-Origin"] = origine or "null"
+            entetes["Access-Control-Allow-Credentials"] = "true"
+        elif genre == "temoins-etoile":
+            # Le piege : `*` avec des temoins ne doit pas suffire.
+            entetes["Access-Control-Allow-Origin"] = "*"
+            entetes["Access-Control-Allow-Credentials"] = "true"
+        elif genre == "prive":
+            # Aucun en-tete CORS : la reponse existe mais reste opaque.
+            pass
+        elif genre == "secret-entete":
+            entetes["Access-Control-Allow-Origin"] = "*"
+            entetes["X-Secret-Applicatif"] = "ne-doit-pas-traverser"
+        else:
+            return self.repond(404, "genre inconnu : %s" % genre)
+
+        if self.command == "OPTIONS":
+            # Le preflight. On repond ce que le genre autorise, plus la liste
+            # des methodes et en-tetes acceptes.
+            if genre != "prive":
+                entetes["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE"
+                entetes["Access-Control-Allow-Headers"] = "x-jeton, content-type"
+            return self.repond(204, "", "text/plain", entetes=entetes)
+
+        charge = json.dumps({"genre": genre, "vu": origine,
+                             "methode": self.command})
+        return self.repond(200, charge, "application/json", entetes=entetes)
 
     # -- WebSocket -------------------------------------------------------------
     #

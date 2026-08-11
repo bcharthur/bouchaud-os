@@ -984,7 +984,27 @@
         }
 
         // --- Pixels ---
+        //
+        // Lire les pixels d'une toile ou l'on a dessine une image d'une autre
+        // origine reviendrait a lire cette image — donc a lire une page ou
+        // l'utilisateur est peut-etre connecte. La norme appelle cela
+        // « contaminer » la toile, et la lecture leve alors `SecurityError`.
+        //
+        // La verification est faite par le moteur a partir des operations
+        // reellement enregistrees, pas d'un drapeau tenu ici : un drapeau
+        // JavaScript se remet a `false` en une ligne.
+        __verifieLisible(quoi) {
+            if (appel("toileSouillee", this.__operations)) {
+                const erreur = new Error(
+                    quoi + " : la toile a ete contaminee par une image d'une "
+                    + "autre origine");
+                erreur.name = "SecurityError";
+                throw erreur;
+            }
+        }
+
         getImageData(x, y, l, h) {
+            this.__verifieLisible("getImageData");
             const largeur = Math.max(1, Math.round(nombre(this.canvas.width)));
             const hauteur = Math.max(1, Math.round(nombre(this.canvas.height)));
             const tout = appel("rasterise", this.__operations, largeur, hauteur);
@@ -1114,7 +1134,11 @@
             if (!this.__contexte) this.__contexte = new ContexteToile(this);
             return this.__contexte;
         }
-        toDataURL() { return "data:,"; }
+        toDataURL() {
+            const contexte = this.__contexte;
+            if (contexte) contexte.__verifieLisible("toDataURL");
+            return "data:,";
+        }
     }
 
     globalThis.HTMLCanvasElement = ElementToile;
@@ -1715,9 +1739,16 @@
             let corps = options.body;
             if (corps === undefined || corps === null) corps = null;
             else if (typeof corps !== "string") corps = String(corps);
+            // `credentials` doit traverser : avec des temoins, CORS exige que
+            // le serveur nomme l'origine et l'avoue explicitement. Sans cette
+            // information, le moteur laisserait passer un
+            // `Access-Control-Allow-Origin: *` la ou la norme le refuse — et
+            // c'est precisement le cas ou un site pourrait lire les donnees
+            // privees d'un autre.
             appel("requete", identifiant,
                   String(options.method || "GET").toUpperCase(), String(url),
-                  corps, options.headers || {}, false);
+                  corps, options.headers || {}, false,
+                  String(options.credentials || "same-origin"));
         });
     };
 

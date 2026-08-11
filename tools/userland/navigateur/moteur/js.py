@@ -35,7 +35,8 @@ import urllib.parse
 import bo
 import bojs
 
-from . import (css, html, invalidation, origine as mod_origine, reseau,
+from . import (cors, css, html, images, invalidation,
+               origine as mod_origine, reseau,
                securite, stockage,
                telemetrie, websocket)
 
@@ -931,6 +932,31 @@ class Contexte:
         """Les operations dessinees sur cette toile, ou `None`."""
         return self._toiles.get(element)
 
+    def _op_toileSouillee(self, operations):
+        """Cette suite d'operations rend-elle la toile illisible ?
+
+        La question est tranchee **ici**, cote Python, en relisant les
+        operations elles-memes plutot qu'en faisant confiance a un drapeau tenu
+        par la page. Un drapeau JavaScript se remet a `false` en une ligne ; ce
+        que la toile a reellement dessine, non.
+
+        C'est le vieux manque que l'audit signalait, et il est devenu local le
+        jour ou `Origine` a existe : une image d'une autre origine dessinee dans
+        une toile doit la contaminer, faute de quoi une page peut relire les
+        pixels d'un site tiers ou l'utilisateur est connecte — c'est-a-dire lire
+        une page qu'elle n'a pas le droit d'ouvrir.
+        """
+        mienne = mod_origine.Origine.de_url(self.document.url)
+        for operation in operations or []:
+            if not operation or operation[0] != "image" or len(operation) < 6:
+                continue
+            if images.souille(operation[5], mienne):
+                telemetrie.compte("toile.souillees")
+                self.note(telemetrie.SOP_REFUS, "canvas_tainted",
+                          images.origine_de(operation[5]) or "?")
+                return True
+        return False
+
     def _op_rasterise(self, operations, largeur, hauteur):
         """Peint des operations de toile hors ecran et rend ses pixels RGBA.
 
@@ -1512,7 +1538,8 @@ class Contexte:
     def _op_annuleMinuterie(self, identifiant):
         self._minuteries.pop(int(identifiant), None)
 
-    def _op_requete(self, identifiant, methode, url, corps, entetes, synchrone):
+    def _op_requete(self, identifiant, methode, url, corps, entetes, synchrone,
+                    temoins="same-origin"):
         """`fetch` et `XMLHttpRequest`.
 
         Le defaut que cette methode corrigeait : la requete rendait bien une
@@ -1534,13 +1561,20 @@ class Contexte:
         absolue = urllib.parse.urljoin(self.document.url, url)
         identifiant = int(identifiant)
 
+        # `include` envoie les temoins a toutes les origines ; `same-origin`,
+        # la valeur par defaut, ne les envoie qu'a la sienne — auquel cas CORS
+        # n'a pas de regle supplementaire a appliquer.
+        avec_temoins = str(temoins or "same-origin") == "include"
+
         if synchrone:
-            reponse = self._recupere(methode, absolue, corps, entetes)
+            reponse = self._recupere(methode, absolue, corps, entetes,
+                                     avec_temoins)
             self._appelle("__bo_reponse", [identifiant, reponse])
             return
 
         def travaille():
-            reponse = self._recupere(methode, absolue, corps, entetes)
+            reponse = self._recupere(methode, absolue, corps, entetes,
+                                     avec_temoins)
             with self._verrou_reponses:
                 if identifiant in self._annulees:
                     # Annulee pendant le vol : la reponse est jetee, et le
@@ -1938,7 +1972,58 @@ class Contexte:
                                  if i != identifiant]
         return True
 
-    def _recupere(self, methode, url, corps, entetes):
+    def _recupere(self, methode, url, corps, entetes, avec_temoins=False):
+        """Emet une requete et rend ce que le script a le droit d'en voir.
+
+        Deux decisions distinctes, et les confondre casse tout :
+
+        * **la requete part-elle ?** Presque toujours oui. Une page a toujours
+          eu le droit d'envoyer vers une autre origine — c'est ainsi que se
+          chargent les images d'un CDN et que poste un formulaire. Le seul cas
+          ou l'envoi est retenu est la requete non simple dont le preflight a
+          ete refuse, parce qu'elle peut modifier l'etat du serveur ;
+        * **la reponse est-elle lisible ?** C'est la que CORS decide, au retour,
+          sur `Access-Control-Allow-Origin`.
+        """
+        mienne = mod_origine.Origine.de_url(self.document.url)
+
+        # Le preflight : le seul endroit ou CORS retient l'envoi.
+        if cors.preflight_requis(mienne, url, methode, entetes):
+            telemetrie.compte("cors.preflights")
+            try:
+                sonde = reseau.charge(
+                    url, methode="OPTIONS", corps=None,
+                    entetes=cors.entetes_preflight(mienne, methode, entetes),
+                    brut=True, document=self.document.url, destination="fetch")
+            except Exception as e:  # noqa: BLE001
+                self.journal("warn", "preflight %s : %s" % (url, e))
+                telemetrie.compte("cors.preflights_refuses")
+                return cors.reponse_opaque(url)
+            if not cors.preflight_accorde(mienne, methode, entetes,
+                                          getattr(sonde, "entetes", {}) or {},
+                                          sonde.code):
+                self.journal("warn",
+                             "CORS : le preflight de %s a ete refuse" % url)
+                telemetrie.compte("cors.preflights_refuses")
+                self.note(telemetrie.SOP_REFUS, "cors_preflight", url)
+                return cors.reponse_opaque(url)
+            telemetrie.compte("cors.preflights_accordes")
+
+        return self._recupere_brut(methode, url, corps, entetes, mienne,
+                                   avec_temoins)
+
+    def _recupere_brut(self, methode, url, corps, entetes, mienne, avec_temoins):
+        # `Origin` accompagne toute requete cross-origine. Sans lui, un serveur
+        # ne peut pas repondre `Access-Control-Allow-Origin: <celle-la>` — il ne
+        # sait pas a qui il parle —, et tout le mode « origine exacte » de CORS
+        # devient inutilisable. C'est le navigateur qui le pose, jamais la page :
+        # une page qui pourrait choisir son `Origin` contournerait la politique
+        # entiere.
+        entetes = dict(entetes or {})
+        entetes.pop("origin", None)
+        entetes.pop("Origin", None)
+        if not mod_origine.Origine.de_url(url).meme_origine(mienne):
+            entetes["Origin"] = mienne.serialise()
         try:
             # `brut=True` : une requete du script veut le corps tel quel, pas
             # la page d'habillage que le navigateur fabrique pour l'affichage.
@@ -1955,12 +2040,29 @@ class Contexte:
         if not reponse.code or reponse.code >= 400:
             self.echec_ressource("fetch", reponse.url or url, reponse.code,
                                  reponse.erreur or "http")
+
+        # La reponse est arrivee. Reste a savoir si le script a le droit de la
+        # lire — c'est une question distincte de celle de l'envoi, et c'est ici
+        # qu'elle se tranche.
+        entetes_reponse = getattr(reponse, "entetes", {}) or {}
+        lisible, raison = cors.reponse_lisible(mienne, reponse.url or url,
+                                               entetes_reponse, avec_temoins)
+        if not lisible:
+            telemetrie.compte("cors.reponses_opaques")
+            self.note(telemetrie.SOP_REFUS, "cors", raison)
+            self.journal("warn", "CORS : %s" % raison)
+            return cors.reponse_opaque(reponse.url or url)
+        telemetrie.compte("cors.reponses_lisibles")
         return {
             "status": reponse.code,
             "statusText": reponse.erreur or "",
             "text": reponse.contenu,
             "url": reponse.url,
-            "headers": getattr(reponse, "entetes", {}) or {},
+            # Meme lisible, une reponse cross-origine n'expose pas tous ses
+            # en-tetes : un `Set-Cookie` ou un en-tete applicatif d'un autre
+            # site n'ont pas a traverser.
+            "headers": cors.filtre_entetes(entetes_reponse, mienne,
+                                           reponse.url or url),
         }
 
     def _telecharge_script(self, source):

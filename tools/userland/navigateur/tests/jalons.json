@@ -1,7 +1,12 @@
 {
  "ASYNC_FETCH": true,
+ "CANVAS_ORIGIN_CLEAN": true,
+ "CORS": true,
+ "IFRAME_CROSS_ORIGIN": true,
+ "IFRAME_SAME_ORIGIN": true,
  "INDEXEDDB_PERSISTENCE": true,
  "LOGIN_FORM": true,
+ "POSTMESSAGE": true,
  "SPA_NAVIGATION": true,
  "STATIC_PAGE": true,
  "WEBAPP_COMBINED": true,

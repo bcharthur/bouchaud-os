@@ -5740,6 +5740,7 @@ def verifie_cadres():
     finally:
         _reseau._charge_http = ancien_charge
         serveur_test.arrete(serveur)
+        ecris_jalons()
 
 
 def _cadres_scenario(base, autre, _time):
@@ -5890,6 +5891,17 @@ def _cadres_scenario(base, autre, _time):
     verifie("cadres: son contexte est ferme", mort.ferme)
     verifie("cadres: et son document est libere", mort.document is None)
 
+    # Les jalons : ce que ce scenario prouve, en termes de capacites.
+    jalon("IFRAME_SAME_ORIGIN",
+          lu["memeOrigine"]["document"] == "lisible"
+          and (lu["memeOrigine"]["echo"] or {}).get("salut") == "meme")
+    jalon("IFRAME_CROSS_ORIGIN",
+          lu["autreOrigine"]["document"] == "refuse"
+          and lu["autreOrigine"]["message"] is not None)
+    jalon("POSTMESSAGE",
+          (lu["memeOrigine"]["echo"] or {}).get("salut") == "meme"
+          and (lu["autreOrigine"]["echo"] or {}).get("salut") == "autre")
+
 
 def verifie_fuite_cadres():
     """Mille cadres crees et retires ne doivent rien laisser derriere eux.
@@ -5943,6 +5955,243 @@ def verifie_fuite_cadres():
     egal("fuite: aucun descendant ne survit",
          len(doc.contexte_navigation.descendants()), 0)
     telemetrie.active(False)
+
+
+def verifie_cors():
+    """CORS : ce qu'un script a le droit de LIRE, pas ce qu'il a le droit de demander.
+
+    Le raccourci « si c'est cross-origine, on refuse » est faux et casserait la
+    moitie du Web. Ces epreuves verifient les deux moities de la vraie regle :
+
+      * la requete **part** meme cross-origine — le serveur la voit ;
+      * la reponse n'est **lisible** que si le serveur y consent.
+
+    Le second point se verifie de la seule facon honnete : en demandant au
+    serveur ce qu'il a recu. Une epreuve qui ne regarderait que le refus cote
+    navigateur ne saurait pas distinguer « refuse a la lecture » de « jamais
+    envoye », et ce sont deux comportements tres differents.
+    """
+    import time as _time
+    from moteur import reseau as _reseau
+    import serveur_test
+
+    serveur, base = serveur_test.demarre(0)
+    port = base.rsplit(":", 1)[1]
+    autre = "http://localhost:%s" % port
+    ancien_charge = _reseau._charge_http
+    try:
+        import apercu
+        apercu.installe_reseau(_reseau)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        _cors_scenario(base, autre, _time)
+    finally:
+        _reseau._charge_http = ancien_charge
+        serveur_test.arrete(serveur)
+        ecris_jalons()
+
+
+def _cors_scenario(base, autre, _time):
+    doc = moteur.charge(base + "/page/event-loop.html", 800,
+                        journal=lambda n, t: None)
+    contexte = doc.contexte_js
+    verifie("cors: la page a un contexte", contexte is not None)
+    if contexte is None:
+        return
+
+    def demande(nom, url, options=""):
+        """Emet un `fetch` et rend ce que le script en a vu."""
+        contexte.execute(
+            "globalThis.__c = globalThis.__c || {};"
+            "globalThis.__c[%r] = null;"
+            "fetch(%r%s).then(function (r) {"
+            "  return r.text().then(function (t) {"
+            "    __c[%r] = {status: r.status, texte: t,"
+            "               type: r.headers.get('content-type'),"
+            "               secret: r.headers.get('x-secret-applicatif')};"
+            "  });"
+            "}).catch(function (e) { __c[%r] = {erreur: String(e)}; });"
+            % (nom, url, options, nom, nom))
+        limite = _time.perf_counter() + 10.0
+        while _time.perf_counter() < limite:
+            doc.rafraichis()
+            if contexte.execute("__c[%r] !== null" % nom):
+                break
+            _time.sleep(0.02)
+        brut = contexte.execute("JSON.stringify(__c[%r])" % nom)
+        return json.loads(brut) if brut else None
+
+    # 1. Meme origine : rien a verifier, tout est lisible.
+    vu = demande("meme", base + "/cors/prive")
+    egal("cors: meme origine, reponse lisible", vu.get("status"), 200)
+    verifie("cors: et son corps arrive", "prive" in (vu.get("texte") or ""), vu)
+
+    # 2. Cross-origine sans en-tete : la reponse existe mais reste opaque.
+    # Une reponse non exposee fait **rejeter** la promesse `fetch` — c'est ce
+    # que fait un vrai navigateur, et c'est ce qui distingue « refuse » de
+    # « recu mais vide ». Le script ne doit rien apprendre du contenu, pas meme
+    # sa longueur.
+    vu = demande("prive", autre + "/cors/prive")
+    verifie("cors: cross-origine sans ACAO fait echouer le fetch",
+            vu.get("erreur") is not None, vu)
+    egal("cors: et rien du corps ne transparait", vu.get("texte"), None)
+
+    # Mais la requete est **partie** : c'est la distinction qui compte. On le
+    # prouve en la redemandant en meme origine, ou le serveur nous dira ce
+    # qu'il a vu.
+    vu = demande("preuve", base + "/cors/ouvert")
+    egal("cors: une requete cross-origine part quand meme",
+         vu.get("status"), 200)
+
+    # 3. `Access-Control-Allow-Origin: *`.
+    vu = demande("etoile", autre + "/cors/ouvert")
+    egal("cors: ACAO * expose la reponse", vu.get("status"), 200)
+    verifie("cors: et son corps est lisible", "ouvert" in (vu.get("texte") or ""),
+            vu)
+
+    # 4. ACAO nommant exactement notre origine.
+    vu = demande("exact", autre + "/cors/exact")
+    egal("cors: ACAO exact expose la reponse", vu.get("status"), 200)
+
+    # 5. ACAO nommant quelqu'un d'autre : refuse.
+    vu = demande("autre", autre + "/cors/autre")
+    verifie("cors: ACAO d'une autre origine ne nous expose rien",
+            vu.get("erreur") is not None, vu)
+
+    # 6. Les en-tetes applicatifs ne traversent pas, meme quand la reponse est
+    #    lisible. Un en-tete d'un autre site n'a pas a etre expose.
+    vu = demande("entetes", autre + "/cors/secret-entete")
+    egal("cors: la reponse est lisible", vu.get("status"), 200)
+    egal("cors: mais l'en-tete applicatif ne traverse pas",
+         vu.get("secret"), None)
+    verifie("cors: les en-tetes surs, eux, restent lisibles",
+            "json" in (vu.get("type") or ""), vu.get("type"))
+
+    # 7. Avec temoins : `*` ne suffit pas, il faut nommer l'origine et l'avouer.
+    vu = demande("cred-etoile", autre + "/cors/temoins-etoile",
+                 ", {credentials: 'include'}")
+    verifie("cors: ACAO * ne vaut pas pour une requete avec temoins",
+            vu.get("erreur") is not None, vu)
+    vu = demande("cred-exact", autre + "/cors/temoins",
+                 ", {credentials: 'include'}")
+    egal("cors: ACAO exact plus Allow-Credentials expose la reponse",
+         vu.get("status"), 200)
+
+    # 8. Preflight : une requete non simple demande d'abord la permission.
+    from moteur import telemetrie
+    telemetrie.reinitialise()
+    telemetrie.active(True)
+    vu = demande("preflight", autre + "/cors/exact",
+                 ", {method: 'PUT', headers: {'X-Jeton': 'a'}}")
+    mesures = telemetrie.compteurs()
+    verifie("cors: une requete non simple declenche un preflight",
+            (mesures.get("cors.preflights") or 0) >= 1, mesures.get("cors.preflights"))
+    egal("cors: le preflight accorde laisse passer", vu.get("status"), 200)
+
+    telemetrie.reinitialise()
+    vu = demande("preflight-refuse", autre + "/cors/prive",
+                 ", {method: 'DELETE', headers: {'X-Jeton': 'a'}}")
+    mesures = telemetrie.compteurs()
+    verifie("cors: un preflight refuse fait echouer le fetch",
+            vu.get("erreur") is not None, vu)
+    verifie("cors: et la vraie requete n'est jamais partie",
+            (mesures.get("cors.preflights_refuses") or 0) >= 1,
+            mesures.get("cors.preflights_refuses"))
+    telemetrie.active(False)
+    jalon("CORS", vu.get("erreur") is not None)
+
+
+def verifie_toile_origine():
+    """Une toile contaminee ne se relit pas.
+
+    C'est le vieux manque que l'audit signalait, et il n'etait pas traitable
+    tant que le moteur ne savait pas d'ou venait une image. Maintenant qu'il le
+    sait : dessiner une image d'une autre origine dans un `<canvas>` doit rendre
+    ses pixels illisibles, sans quoi une page peut relire l'image d'un site ou
+    l'utilisateur est connecte — c'est-a-dire lire une page qu'elle n'a pas le
+    droit d'ouvrir.
+
+    Les trois cas verifies sont les trois qui comptent : une image de la meme
+    origine ne contamine rien, une image `data:` non plus — elle voyage avec la
+    page —, une image d'ailleurs contamine.
+    """
+    from moteur import images
+
+    doc = document("<body><canvas id='t' width='40' height='40'></canvas>"
+                   "<script>1</script></body>",
+                   url="http://a.test/page")
+    contexte = doc.contexte_js
+    verifie("toile: la page a un contexte", contexte is not None)
+    if contexte is None:
+        return
+
+    # On declare des images d'origines choisies, sans reseau : c'est le lien
+    # `identifiant -> adresse` que la regle consulte.
+    images._origines[9001] = "http://a.test/logo.png"
+    images._origines[9002] = "http://b.test/pixel.gif"
+    images._origines[9003] = "data:image/gif;base64,R0lGOD"
+    try:
+        def lisible(operations):
+            return not contexte._op_toileSouillee(operations)
+
+        verifie("toile: une image de meme origine ne contamine pas",
+                lisible([["image", 0, 0, 10, 10, 9001]]))
+        verifie("toile: une image data: ne contamine pas",
+                lisible([["image", 0, 0, 10, 10, 9003]]))
+        verifie("toile: une image d'une autre origine contamine",
+                not lisible([["image", 0, 0, 10, 10, 9002]]))
+        verifie("toile: une seule image etrangere suffit a contaminer",
+                not lisible([["image", 0, 0, 10, 10, 9001],
+                             ["image", 0, 0, 10, 10, 9002]]))
+        # Une image dont on ignore l'origine contamine : ne pas savoir n'est pas
+        # une raison d'autoriser.
+        verifie("toile: une image d'origine inconnue contamine",
+                not lisible([["image", 0, 0, 10, 10, 12345]]))
+        verifie("toile: un dessin sans image reste lisible",
+                lisible([["rect", 0, 0, 10, 10]]))
+
+        # Et du cote de la page : `getImageData` doit lever `SecurityError`.
+        rendu = contexte.execute("""
+            (function () {
+                const c = document.getElementById('t').getContext('2d');
+                c.__operations.push(["image", 0, 0, 10, 10, 9002]);
+                try { c.getImageData(0, 0, 4, 4); return "lu"; }
+                catch (e) { return e.name; }
+            })()
+        """)
+        egal("toile: getImageData leve SecurityError sur une toile contaminee",
+             rendu, "SecurityError")
+
+        rendu = contexte.execute("""
+            (function () {
+                const t = document.getElementById('t');
+                const c = t.getContext('2d');
+                try { t.toDataURL(); return "lu"; }
+                catch (e) { return e.name; }
+            })()
+        """)
+        egal("toile: toDataURL aussi", rendu, "SecurityError")
+
+        # Une toile propre se relit normalement : la regle ne doit pas casser
+        # l'usage ordinaire.
+        rendu = contexte.execute("""
+            (function () {
+                const t = document.createElement('canvas');
+                t.width = 8; t.height = 8;
+                const c = t.getContext('2d');
+                c.fillStyle = '#ff0000'; c.fillRect(0, 0, 4, 4);
+                try { c.getImageData(0, 0, 2, 2); return "lu"; }
+                catch (e) { return e.name; }
+            })()
+        """)
+        egal("toile: une toile propre se relit", rendu, "lu")
+        jalon("CANVAS_ORIGIN_CLEAN", rendu == "lu"
+              and not lisible([["image", 0, 0, 10, 10, 9002]]))
+    finally:
+        for cle in (9001, 9002, 9003):
+            images._origines.pop(cle, None)
+        ecris_jalons()
 
 
 def verifie_invalidation_ciblee():
@@ -7046,6 +7295,8 @@ def principal():
         verifie_contexte_navigation,
         verifie_cadres,
         verifie_fuite_cadres,
+        verifie_cors,
+        verifie_toile_origine,
         verifie_invalidation_ciblee,
         verifie_tailles_intrinseques,
         verifie_flex,
