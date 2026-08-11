@@ -2494,6 +2494,105 @@
         }
     };
 
+    // --- WebSocket ----------------------------------------------------------
+    //
+    // La premiere connexion que la page garde ouverte. Tout le reste du reseau
+    // est un aller-retour ; ici le serveur parle quand il veut, et ce qu'il dit
+    // arrive au battement de la boucle d'evenements — jamais au milieu d'un
+    // script.
+
+    const sockets = new Map();
+    let prochainSocket = 1;
+
+    class WebSocket {
+        constructor(url, protocoles) {
+            this.url = String(url);
+            this.readyState = 0;              // CONNECTING
+            this.bufferedAmount = 0;
+            this.extensions = "";
+            this.protocol = "";
+            this.binaryType = "blob";
+            this.onopen = null;
+            this.onmessage = null;
+            this.onerror = null;
+            this.onclose = null;
+            this.__ecouteurs = new Map();
+            this.__id = prochainSocket++;
+            sockets.set(this.__id, this);
+            const liste = protocoles === undefined ? []
+                : (Array.isArray(protocoles) ? protocoles.map(String)
+                                             : [String(protocoles)]);
+            appel("ouvreSocket", this.__id, this.url, liste);
+        }
+
+        addEventListener(type, f, o) {
+            Nœud.prototype.addEventListener.call(this, type, f, o);
+        }
+        removeEventListener(type, f, o) {
+            Nœud.prototype.removeEventListener.call(this, type, f, o);
+        }
+
+        send(donnees) {
+            if (this.readyState !== 1)
+                throw new Error("WebSocket: la connexion n'est pas ouverte");
+            appel("envoieSocket", this.__id,
+                  typeof donnees === "string" ? donnees : Array.from(donnees));
+        }
+
+        close(code, raison) {
+            if (this.readyState === 2 || this.readyState === 3) return;
+            this.readyState = 2;              // CLOSING
+            appel("fermeSocket", this.__id, code === undefined ? 1000 : code,
+                  raison === undefined ? "" : String(raison));
+        }
+
+        __recoit(type, charge) {
+            let evenement;
+            if (type === "message") {
+                evenement = new Event("message");
+                evenement.data = charge;
+                evenement.origin = this.url;
+                this.readyState = 1;
+            } else if (type === "open") {
+                this.readyState = 1;
+                evenement = new Event("open");
+            } else if (type === "close") {
+                this.readyState = 3;          // CLOSED
+                evenement = new Event("close");
+                evenement.code = (charge && charge.code) || 1006;
+                evenement.reason = (charge && charge.raison) || "";
+                evenement.wasClean = !!(charge && charge.propre);
+                sockets.delete(this.__id);
+            } else {
+                evenement = new Event("error");
+                evenement.message = String(charge || "");
+            }
+            for (const f of ecouteursDe(this, evenement.type, false))
+                invoque(f, this, evenement);
+            const propre = "on" + evenement.type;
+            if (typeof this[propre] === "function") {
+                try { this[propre](evenement); }
+                catch (e) { console.error(e); }
+            }
+        }
+    }
+
+    WebSocket.CONNECTING = 0;
+    WebSocket.OPEN = 1;
+    WebSocket.CLOSING = 2;
+    WebSocket.CLOSED = 3;
+    WebSocket.prototype.CONNECTING = 0;
+    WebSocket.prototype.OPEN = 1;
+    WebSocket.prototype.CLOSING = 2;
+    WebSocket.prototype.CLOSED = 3;
+
+    globalThis.WebSocket = WebSocket;
+
+    globalThis.__bo_socket = function (identifiant, type, charge) {
+        const connexion = sockets.get(identifiant);
+        if (connexion) connexion.__recoit(type, charge);
+    };
+
     // --- Mesure de compatibilite --------------------------------------------
     //
     // Le moteur ne sait pas tout faire, et jusqu'ici il ne savait pas dire ce

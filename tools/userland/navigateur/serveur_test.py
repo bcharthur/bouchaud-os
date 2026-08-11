@@ -50,10 +50,14 @@ commit a l'autre.
 """
 
 import argparse
+import base64
+import hashlib
 import http.server
 import json
 import os
+import socket
 import socketserver
+import struct
 import sys
 import threading
 import time
@@ -152,6 +156,8 @@ class Fixtures(http.server.BaseHTTPRequestHandler):
             return self.module(chemin)
         if chemin.startswith("/cookie/"):
             return self.temoin(chemin)
+        if chemin == "/ws" or chemin.startswith("/ws/"):
+            return self.websocket(chemin)
         if chemin == "/slow-script.js":
             time.sleep(0.4)
             return self.repond(200, "globalThis.__lent = true;\n",
@@ -164,10 +170,126 @@ class Fixtures(http.server.BaseHTTPRequestHandler):
             return self.page(chemin)
         return self.repond(404, "<h1>404</h1><p>%s</p>" % chemin)
 
+    # -- WebSocket -------------------------------------------------------------
+    #
+    # Un serveur d'echo minimal mais conforme : poignee de main RFC 6455,
+    # trames texte, ping/pong, fermeture propre. Il n'y a pas de raison de
+    # dependre d'un service exterieur pour eprouver un protocole dont tout
+    # l'interet est le temps reel — et un service exterieur rendrait le test
+    # non deterministe.
+
+    MAGIE = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+    def websocket(self, chemin):
+        cle = self.headers.get("Sec-WebSocket-Key")
+        if not cle or (self.headers.get("Upgrade") or "").lower() != "websocket":
+            return self.repond(400, "attendu : une poignee de main WebSocket")
+
+        accepte = base64.b64encode(
+            hashlib.sha1((cle + self.MAGIE).encode("ascii")).digest()).decode("ascii")
+        self.send_response(101)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accepte)
+        self.end_headers()
+        self.wfile.flush()
+
+        # `/ws/ferme` ferme des l'ouverture : c'est le cas qu'un client doit
+        # savoir distinguer d'une panne.
+        if chemin == "/ws/ferme":
+            self._envoie_trame(0x8, struct.pack(">H", 1000) + b"au revoir")
+            return
+        self._boucle_echo(chemin)
+
+    def _boucle_echo(self, chemin):
+        salue = chemin == "/ws/salut"
+        if salue:
+            self._envoie_trame(0x1, b"bonjour")
+        while True:
+            trame = self._lis_trame()
+            if trame is None:
+                return
+            code, charge = trame
+            if code == 0x8:  # fermeture demandee par le client
+                self._envoie_trame(0x8, charge[:2] or struct.pack(">H", 1000))
+                return
+            if code == 0x9:  # ping
+                self._envoie_trame(0xA, charge)
+                continue
+            if code == 0xA:
+                continue
+            texte = charge.decode("utf-8", "replace")
+            if texte == "__ferme__":
+                self._envoie_trame(0x8, struct.pack(">H", 1000) + b"demande")
+                return
+            if texte == "__trois__":
+                # Trois messages d'affilee : de quoi verifier que l'ordre est
+                # conserve et qu'aucun n'est perdu.
+                for i in (1, 2, 3):
+                    self._envoie_trame(0x1, ("message %d" % i).encode("utf-8"))
+                continue
+            self._envoie_trame(code, charge)
+
+    def _lis_trame(self):
+        """Rend `(code, charge)`, ou `None` si la connexion se ferme."""
+        entete = self._lis_exactement(2)
+        if entete is None:
+            return None
+        premier, second = entete[0], entete[1]
+        code = premier & 0x0F
+        masque = bool(second & 0x80)
+        longueur = second & 0x7F
+        if longueur == 126:
+            suite = self._lis_exactement(2)
+            if suite is None:
+                return None
+            longueur = struct.unpack(">H", suite)[0]
+        elif longueur == 127:
+            suite = self._lis_exactement(8)
+            if suite is None:
+                return None
+            longueur = struct.unpack(">Q", suite)[0]
+        cles = self._lis_exactement(4) if masque else b"\0\0\0\0"
+        if cles is None:
+            return None
+        charge = self._lis_exactement(longueur) if longueur else b""
+        if charge is None:
+            return None
+        if masque:
+            charge = bytes(o ^ cles[i % 4] for i, o in enumerate(charge))
+        return code, charge
+
+    def _lis_exactement(self, combien):
+        morceaux = b""
+        while len(morceaux) < combien:
+            try:
+                bloc = self.rfile.read(combien - len(morceaux))
+            except (OSError, ValueError):
+                return None
+            if not bloc:
+                return None
+            morceaux += bloc
+        return morceaux
+
+    def _envoie_trame(self, code, charge=b""):
+        entete = bytes([0x80 | code])
+        taille = len(charge)
+        if taille < 126:
+            entete += bytes([taille])
+        elif taille < 65536:
+            entete += bytes([126]) + struct.pack(">H", taille)
+        else:
+            entete += bytes([127]) + struct.pack(">Q", taille)
+        try:
+            self.wfile.write(entete + charge)
+            self.wfile.flush()
+        except (OSError, ValueError):
+            pass
+
     # -- Routes ----------------------------------------------------------------
 
     def accueil(self):
-        liens = ["/json", "/echo", "/redirect?to=/json&n=2", "/status/404",
+        liens = ["/json", "/echo", "/ws", "/redirect?to=/json&n=2", "/status/404",
                  "/status/500", "/form/get", "/form/post", "/delay/1",
                  "/module/main.js", "/cookie/pose", "/cookie/lit",
                  "/page/login-form.html", "/page/spa-navigation.html",

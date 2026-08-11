@@ -36,7 +36,7 @@ import bo
 import bojs
 
 from . import (css, html, invalidation, reseau, securite, stockage,
-               telemetrie)
+               telemetrie, websocket)
 
 # Types de nœuds, comme dans la norme DOM.
 ELEMENT = 1
@@ -163,6 +163,8 @@ class Contexte:
         self._verrou_reponses = threading.Lock()
         self._annulees = set()
         self._fils = None
+        # Les connexions WebSocket ouvertes par cette page, par identifiant.
+        self._sockets = {}
         self._lecteurs = {}        # identifiant de nœud -> Lecteur
         self._toiles = {}          # element <canvas> -> operations dessinees
         self._modules = {}         # adresse de module -> source (ou None)
@@ -238,6 +240,8 @@ class Contexte:
             if not encore and repete:
                 self._minuteries.pop(identifiant, None)
 
+        self._sockets_battent()
+
         # Les lecteurs media avancent au meme rythme : decodage, son pousse
         # vers la carte, image retenue pour la peinture.
         for identifiant, lecteur in list(self._lecteurs.items()):
@@ -268,6 +272,12 @@ class Contexte:
         return self._appelle("__bo_evenement", [identifiant, type_, details or {}])
 
     def ferme(self):
+        for connexion in list(self._sockets.values()):
+            try:
+                connexion.ferme(1001, "page quittee")
+            except Exception:  # noqa: BLE001
+                pass
+        self._sockets.clear()
         if self._fils is not None:
             # Sans attendre : une page qu'on quitte ne doit pas retenir le
             # navigateur le temps qu'une requete lente veuille bien finir.
@@ -1089,6 +1099,61 @@ class Contexte:
         etat.pose_selection(debut, fin)
         self.document.sale_curseur = True
         return True
+
+    # --- WebSocket -------------------------------------------------------------
+
+    def _op_ouvreSocket(self, identifiant, url, protocoles):
+        """`new WebSocket(url)`.
+
+        L'ouverture part sur le groupe de fils reseau : la poignee de main est
+        un aller-retour, et la faire ici gelerait l'interface le temps qu'elle
+        aboutisse — exactement le defaut qu'on a corrige pour `fetch`.
+        """
+        absolue = urllib.parse.urljoin(self.document.url, str(url))
+        absolue = re.sub(r"^http", "ws", absolue, count=1) \
+            if absolue.startswith("http") else absolue
+        identifiant = int(identifiant)
+
+        def travaille():
+            connexion = websocket.Connexion(absolue, protocoles or (),
+                                            document=self.document.url)
+            self._sockets[identifiant] = connexion
+            try:
+                connexion.ouvre()
+            except websocket.Erreur as e:
+                # Un echec d'ouverture se voit comme `error` puis `close`,
+                # jamais comme une exception : c'est ce que la page attend.
+                connexion._pose("error", str(e))
+                connexion._pose("close", {"code": 1006, "raison": str(e),
+                                          "propre": False})
+                self.echec_ressource("websocket", absolue, 0, str(e))
+
+        self._pool().submit(travaille)
+        return True
+
+    def _op_envoieSocket(self, identifiant, donnees):
+        connexion = self._sockets.get(int(identifiant))
+        return bool(connexion and connexion.envoie(donnees))
+
+    def _op_fermeSocket(self, identifiant, code, raison):
+        connexion = self._sockets.get(int(identifiant))
+        return bool(connexion and connexion.ferme(int(code or 1000), raison or ""))
+
+    def _op_etatSocket(self, identifiant):
+        connexion = self._sockets.get(int(identifiant))
+        return websocket.FERME if connexion is None else connexion.etat
+
+    def _sockets_battent(self):
+        """Livre au JavaScript ce que les connexions ont recu.
+
+        Appele depuis `tic()`, donc depuis le fil de l'interface : un serveur
+        bavard ne peut pas interrompre un script au milieu de son execution.
+        """
+        for identifiant, connexion in list(self._sockets.items()):
+            for type_, charge in connexion.evenements():
+                self._appelle("__bo_socket", [identifiant, type_, charge])
+                if type_ == "close":
+                    self._sockets.pop(identifiant, None)
 
     def _op_resout(self, adresse):
         """Une adresse relative resolue contre celle du document."""

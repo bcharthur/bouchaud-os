@@ -469,9 +469,9 @@ def verifie_diagnostics_compatibilite():
         # `WebSocket` n'existe pas : l'accesseur du prelude le note et rend
         # `undefined`, donc la detection de fonctionnalite de la page continue
         # de retomber sur son plan de secours.
-        contexte.execute("void WebSocket;", "page.js")
+        contexte.execute("void indexedDB;", "page.js")
         egal("diagnostic: API absente observee",
-             contexte.rapport_compatibilite().get("api_absente:WebSocket"), 1)
+             contexte.rapport_compatibilite().get("api_absente:indexedDB"), 1)
 
         # A — un identifiant applicatif n'est pas une API navigateur.
         contexte.execute("console.log(currentUsr);", "app.js")
@@ -4302,6 +4302,125 @@ def verifie_memoires_de_passe():
          ["trois"])
 
 
+def verifie_websocket():
+    """Une connexion que la page garde ouverte, et le serveur qui parle seul.
+
+    Tout le reste du reseau est un aller-retour. Ici la connexion reste
+    ouverte et le serveur emet quand il veut : ce qui se verifie n'est donc
+    plus « la reponse est-elle correcte » mais « ce qui arrive parvient-il a la
+    page, dans l'ordre, sans interrompre son script ».
+    """
+    import time as _time
+
+    doc, arrete = _sur_serveur("/page/event-loop.html")
+    try:
+        contexte = doc.contexte_js
+        base = doc.base.replace("http://", "ws://")
+
+        def bat(jusqua, secondes=8.0):
+            limite = _time.perf_counter() + secondes
+            while _time.perf_counter() < limite:
+                contexte.tic()
+                if contexte.execute(jusqua):
+                    return True
+                _time.sleep(0.02)
+            return False
+
+        # 1. Ouverture, echo simple.
+        contexte.execute(
+            "globalThis.__ws = { etats: [], recus: [], fermeture: null };"
+            "var s = new WebSocket('%s/ws');"
+            "globalThis.__s = s;"
+            "__ws.etats.push(s.readyState);"
+            "s.onopen = function () { __ws.etats.push('open:' + s.readyState);"
+            "                         s.send('bonjour'); };"
+            "s.onmessage = function (e) { __ws.recus.push(e.data); };"
+            "s.onclose = function (e) { __ws.fermeture ="
+            "   { code: e.code, propre: e.wasClean }; };" % base)
+        egal("websocket: l'etat initial est CONNECTING",
+             contexte.execute("__ws.etats[0]"), 0)
+        egal("websocket: les constantes sont exposees",
+             contexte.execute("[WebSocket.CONNECTING, WebSocket.OPEN,"
+                              " WebSocket.CLOSING, WebSocket.CLOSED].join(',')"),
+             "0,1,2,3")
+
+        verifie("websocket: la connexion s'ouvre",
+                bat("__ws.etats.length > 1"), contexte.execute("JSON.stringify(__ws)"))
+        egal("websocket: l'etat devient OPEN",
+             contexte.execute("__ws.etats[1]"), "open:1")
+
+        verifie("websocket: l'echo revient", bat("__ws.recus.length >= 1"),
+                contexte.execute("JSON.stringify(__ws.recus)"))
+        egal("websocket: et c'est bien ce qu'on a envoye",
+             contexte.execute("__ws.recus[0]"), "bonjour")
+
+        # 2. Plusieurs messages, dans l'ordre, emis par le serveur seul.
+        contexte.execute("__ws.recus = []; __s.send('__trois__')")
+        verifie("websocket: trois messages arrivent", bat("__ws.recus.length >= 3"),
+                contexte.execute("JSON.stringify(__ws.recus)"))
+        egal("websocket: dans l'ordre d'emission",
+             contexte.execute("__ws.recus.slice(0, 3).join('|')"),
+             "message 1|message 2|message 3")
+
+        # 3. Fermeture demandee par le client.
+        contexte.execute("__s.close(1000, 'fini')")
+        verifie("websocket: la fermeture aboutit", bat("__ws.fermeture !== null"),
+                contexte.execute("JSON.stringify(__ws.fermeture)"))
+        egal("websocket: avec le code demande",
+             contexte.execute("__ws.fermeture.code"), 1000)
+        egal("websocket: et elle est propre",
+             contexte.execute("__ws.fermeture.propre"), True)
+        egal("websocket: l'etat final est CLOSED",
+             contexte.execute("__s.readyState"), 3)
+
+        # 4. Fermeture decidee par le serveur.
+        contexte.execute(
+            "globalThis.__f = null;"
+            "var t = new WebSocket('%s/ws/ferme');"
+            "t.onclose = function (e) { __f = { code: e.code, propre: e.wasClean }; };"
+            % base)
+        verifie("websocket: une fermeture du serveur est vue",
+                bat("__f !== null"), contexte.execute("JSON.stringify(__f)"))
+        egal("websocket: avec son code", contexte.execute("__f.code"), 1000)
+
+        # 5. Connexion refusee : `error` puis `close`, jamais une exception.
+        contexte.execute(
+            "globalThis.__e = { erreurs: 0, ferme: null };"
+            "var u = new WebSocket('ws://127.0.0.1:1/ws');"
+            "u.onerror = function () { __e.erreurs++; };"
+            "u.onclose = function (ev) { __e.ferme = ev.code; };")
+        verifie("websocket: une connexion refusee se signale",
+                bat("__e.ferme !== null", 10.0),
+                contexte.execute("JSON.stringify(__e)"))
+        verifie("websocket: par une erreur puis une fermeture",
+                contexte.execute("__e.erreurs") >= 1,
+                contexte.execute("JSON.stringify(__e)"))
+        egal("websocket: avec le code d'echec anormal",
+             contexte.execute("__e.ferme"), 1006)
+
+        # 6. `send()` apres fermeture doit lever, pas partir en silence.
+        leve = contexte.execute(
+            "(function () { try { __s.send('x'); return 'PAS-DE-LEVEE'; }"
+            " catch (e) { return 'leve'; } })()")
+        egal("websocket: envoyer sur une connexion fermee leve", leve, "leve")
+
+        # 7. L'interface est restee vivante pendant tout cela.
+        contexte.execute(
+            "globalThis.__bat = 0;"
+            "var minuterie = setInterval(function () { __bat++; }, 10);"
+            "var v = new WebSocket('%s/ws');"
+            "v.onopen = function () { v.send('__trois__'); };"
+            "globalThis.__recus2 = 0;"
+            "v.onmessage = function () { __recus2++; };" % base)
+        verifie("websocket: les messages arrivent", bat("__recus2 >= 3"),
+                contexte.execute("__recus2"))
+        verifie("websocket: et la minuterie a continue de battre pendant",
+                contexte.execute("__bat") > 0, contexte.execute("__bat"))
+        contexte.execute("clearInterval(minuterie); v.close()")
+    finally:
+        arrete()
+
+
 # --- Interaction utilisateur reelle -------------------------------------------
 
 def verifie_modele_edition():
@@ -5633,6 +5752,7 @@ def principal():
         verifie_ressources_echouees,
         verifie_moignons,
         verifie_serveur_fixtures,
+        verifie_websocket,
         verifie_invalidation,
         verifie_invalidation_reelle,
         verifie_memoires_de_passe,
