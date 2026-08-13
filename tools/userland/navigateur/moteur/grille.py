@@ -29,14 +29,23 @@ from . import css
 class Piste:
     """Une colonne ou une ligne de la grille."""
 
-    __slots__ = ("type", "valeur", "taille", "minimum")
+    __slots__ = ("type", "valeur", "taille", "minimum", "plafond",
+                 "min_contenu", "max_contenu")
 
-    def __init__(self, type_, valeur, minimum=0.0):
-        # `fixe` (pixels), `fraction` (fr), `auto`, `pourcent`
+    def __init__(self, type_, valeur, minimum=0.0, plafond=None):
+        # `fixe` (pixels), `fraction` (fr), `auto`, `min-content`,
+        # `max-content`, `pourcent`
         self.type = type_
         self.valeur = valeur
         self.taille = 0.0
         self.minimum = minimum
+        # Borne haute d'un `minmax(a, b)` : `None` quand il n'y en a pas.
+        self.plafond = plafond
+        # Ce que le contenu de cette piste demande. Rempli avant la mesure, a
+        # partir des articles qui y tombent — c'est precisement ce que la
+        # mesure n'avait pas et qui l'obligeait a partager la place au hasard.
+        self.min_contenu = 0.0
+        self.max_contenu = 0.0
 
 
 def est_grille(style):
@@ -76,10 +85,16 @@ def dispose(boite, x, y, largeur_disponible, contexte, pose_enfant):
     if not enfants:
         return 0.0
 
-    _mesure_colonnes(colonnes, largeur_disponible, espace_colonne)
-
+    # Le placement vient **avant** la mesure : on ne peut pas savoir ce qu'une
+    # colonne demande tant qu'on ignore ce qui y tombe. C'est l'inversion qui
+    # rend le dimensionnement par le contenu possible.
     placements = _place(enfants, len(colonnes), zones_nommees)
     nombre_lignes = max((p[1] + p[3] for p in placements), default=1)
+
+    contributions(colonnes, enfants, placements,
+                  getattr(contexte, "mesureur", None),
+                  getattr(contexte, "_styles", None))
+    _mesure_colonnes(colonnes, largeur_disponible, espace_colonne)
 
     lignes = _pistes(style.get("grid-template-rows", "none"),
                      largeur_disponible, taille_police)
@@ -156,12 +171,42 @@ def _pistes(declaration, disponible, taille_police):
 
 def _piste(morceau, disponible, taille_police):
     morceau = morceau.strip().lower()
+
+    # `minmax(a, b)` : un plancher et un plafond. C'est la forme la plus
+    # courante d'une grille reelle — `minmax(200px, 1fr)` dit « au moins deux
+    # cents pixels, sinon partage-toi le reste » — et la traiter comme une
+    # piste `auto` faisait perdre les deux bornes a la fois.
+    correspondance = _MINMAX.fullmatch(morceau)
+    if correspondance is not None:
+        bas = _piste(correspondance.group(1), disponible, taille_police)
+        haut = _piste(correspondance.group(2), disponible, taille_police)
+        piste = Piste(haut.type, haut.valeur,
+                      minimum=bas.valeur if bas.type == "fixe" else 0.0)
+        if bas.type in ("min-contenu", "max-contenu", "auto"):
+            piste.type = haut.type
+            piste.minimum = 0.0
+            # Le plancher vient du contenu : on le retient pour que la mesure
+            # sache lequel appliquer.
+            piste.plafond = None
+            piste.valeur = haut.valeur
+        if haut.type == "fixe":
+            piste.plafond = haut.valeur
+        return piste
+
     if morceau.endswith("fr"):
         try:
             return Piste("fraction", float(morceau[:-2] or 1))
         except ValueError:
             return Piste("fraction", 1.0)
-    if morceau in ("auto", "min-content", "max-content"):
+    # `min-content` et `max-content` ne sont pas `auto` : l'une prend la plus
+    # petite largeur ou le contenu tient, l'autre celle qu'il faudrait pour que
+    # rien ne revienne a la ligne. Les confondre — ce qui etait le cas —
+    # revenait a ignorer les deux.
+    if morceau == "min-content":
+        return Piste("min-contenu", 0.0)
+    if morceau == "max-content":
+        return Piste("max-contenu", 0.0)
+    if morceau == "auto":
         return Piste("auto", 0.0)
     mesure = css.longueur(morceau, disponible, taille_police)
     if mesure is None:
@@ -176,35 +221,110 @@ def _mesure_unique(motif, disponible, taille_police):
 
 
 def _mesure_colonnes(colonnes, disponible, espace):
-    """Attribue sa largeur a chaque colonne."""
+    """Attribue sa largeur a chaque colonne.
+
+    ## Ce qui a change
+
+    Les pistes `auto` se partageaient la place restante **a parts egales**,
+    faute de savoir ce qu'elles portaient. Le commentaire d'alors le disait
+    franchement : « la norme leur donne la taille de leur contenu, que la mise
+    en page n'a pas encore ». Elle l'a maintenant — `intrinseque` la calcule
+    sans rien poser — et les pistes la recoivent dans `min_contenu` et
+    `max_contenu` avant d'arriver ici.
+
+    L'ordre est celui de la norme, simplifie :
+
+      1. les pistes fixes prennent leur valeur ;
+      2. `min-content` et `max-content` prennent exactement ce que leur nom
+         dit ;
+      3. les pistes `auto` prennent leur `max-content`, bornees a la place
+         disponible — c'est le comportement d'une grille reelle : une colonne
+         `auto` s'ajuste a sa colonne la plus large, elle ne prend pas le tiers
+         de la page parce qu'elles sont trois ;
+      4. ce qui reste va aux `fr`, au prorata ;
+      5. si les demandes depassent la place, tout ce qui n'est pas fixe est
+         reduit proportionnellement, sans jamais descendre sous `min-content` —
+         une colonne plus etroite que son mot le plus long deborde.
+    """
     total_espace = espace * max(0, len(colonnes) - 1)
     reste = max(0.0, disponible - total_espace)
 
-    fixes = sum(p.valeur for p in colonnes if p.type == "fixe")
-    reste_apres_fixes = max(0.0, reste - fixes)
-
-    fractions = sum(p.valeur for p in colonnes if p.type == "fraction")
-    automatiques = [p for p in colonnes if p.type == "auto"]
-
-    # Les pistes automatiques se partagent ce qui reste apres les fixes, mais
-    # avant les fractions : c'est une simplification assumee — la norme leur
-    # donne la taille de leur contenu, que la mise en page n'a pas encore.
-    part_auto = 0.0
-    if automatiques and fractions <= 0:
-        part_auto = reste_apres_fixes / len(automatiques)
-    elif automatiques:
-        part_auto = min(reste_apres_fixes / (len(automatiques) + 1),
-                        reste_apres_fixes / max(1, len(automatiques)))
-        reste_apres_fixes -= part_auto * len(automatiques)
-
+    # 1 et 2 : ce que chaque piste demande, avant partage.
     for piste in colonnes:
         if piste.type == "fixe":
             piste.taille = piste.valeur
+        elif piste.type == "min-contenu":
+            piste.taille = piste.min_contenu
+        elif piste.type == "max-contenu":
+            piste.taille = piste.max_contenu
         elif piste.type == "auto":
-            piste.taille = part_auto
+            piste.taille = max(piste.min_contenu, piste.max_contenu)
         else:
-            piste.taille = (reste_apres_fixes * piste.valeur / fractions
-                            if fractions > 0 else 0.0)
+            piste.taille = 0.0
+        if piste.minimum:
+            piste.taille = max(piste.taille, piste.minimum)
+        if piste.plafond is not None:
+            piste.taille = min(piste.taille, piste.plafond)
+
+    rigides = sum(p.taille for p in colonnes if p.type != "fraction")
+    fractions = sum(p.valeur for p in colonnes if p.type == "fraction")
+
+    # 4 : les `fr` se partagent ce qui reste. Chacune a droit au moins a son
+    # contenu minimal — une piste `1fr` dans une grille pleine ne disparait pas.
+    if fractions > 0:
+        libre = max(0.0, reste - rigides)
+        for piste in colonnes:
+            if piste.type != "fraction":
+                continue
+            part = libre * piste.valeur / fractions
+            piste.taille = max(part, piste.min_contenu, piste.minimum or 0.0)
+            if piste.plafond is not None:
+                piste.taille = min(piste.taille, piste.plafond)
+
+    # 5 : le depassement. On reduit ce qui peut l'etre, jamais sous le
+    # `min-content` : une colonne plus etroite que son mot le plus long
+    # deborde, et deborder est pire que serrer.
+    demande = sum(p.taille for p in colonnes)
+    if demande > reste and demande > 0:
+        reductible = sum(max(0.0, p.taille - p.min_contenu)
+                         for p in colonnes if p.type != "fixe")
+        exces = demande - reste
+        if reductible > 0:
+            facteur = min(1.0, exces / reductible)
+            for piste in colonnes:
+                if piste.type == "fixe":
+                    continue
+                marge = max(0.0, piste.taille - piste.min_contenu)
+                piste.taille -= marge * facteur
+
+
+def contributions(colonnes, enfants, placements, mesureur, styles):
+    """Reporte sur chaque colonne ce que ses articles demandent.
+
+    Un article qui s'etend sur plusieurs colonnes ne dicte la taille d'aucune :
+    la norme repartit sa demande, et le faire naivement — l'imputer entiere a
+    la premiere — donnerait une colonne enorme a cote de colonnes vides. On
+    l'ignore donc pour le dimensionnement, ce qui est la simplification la moins
+    fausse tant que le cas reste rare.
+    """
+    if mesureur is None:
+        return
+    for enfant, (colonne, _ligne, etendue, _el) in zip(enfants, placements):
+        if etendue != 1 or colonne >= len(colonnes):
+            continue
+        element = getattr(enfant, "element", None)
+        if element is None:
+            continue
+        style = getattr(enfant, "style", None) or (styles or {}).get(id(element))
+        if style is None:
+            continue
+        try:
+            tailles = mesureur.tailles(element, style)
+        except Exception:  # noqa: BLE001 — mesurer ne doit pas empecher de poser
+            continue
+        piste = colonnes[colonne]
+        piste.min_contenu = max(piste.min_contenu, tailles.min_contenu)
+        piste.max_contenu = max(piste.max_contenu, tailles.max_contenu)
 
 
 # --- Placement ----------------------------------------------------------------

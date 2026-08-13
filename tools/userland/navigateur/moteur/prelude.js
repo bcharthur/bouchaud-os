@@ -293,6 +293,51 @@
     }
 
     /// `element.classList`.
+    /// Le formulaire : ce qu'il contient, ou il envoie, et comment.
+    ///
+    /// `form.elements`, `action`, `method` et `submit()` n'existaient pas. Une
+    /// page pouvait afficher un formulaire, pas l'envoyer : tout le chemin
+    /// entre « l'utilisateur a rempli » et « le serveur a recu » manquait.
+    function installeFormulaire(classe) {
+        Object.defineProperty(classe.prototype, "elements", {
+            configurable: true,
+            get() {
+                const liste = noeuds(appel("champsFormulaire", this.__id));
+                // Les controles nommes sont aussi accessibles par leur nom,
+                // comme `f.elements.utilisateur` — la forme que prend la
+                // moitie du code de formulaire du Web.
+                for (const controle of liste) {
+                    const nom = controle.getAttribute("name");
+                    if (nom && !(nom in liste)) liste[nom] = controle;
+                }
+                return liste;
+            },
+        });
+        Object.defineProperty(classe.prototype, "length", {
+            configurable: true,
+            get() { return this.elements.length; },
+        });
+        classe.prototype.submit = function () {
+            appel("soumets", this.__id, false);
+        };
+        classe.prototype.requestSubmit = function () {
+            // La difference avec `submit()` : `requestSubmit()` declenche
+            // l'evenement `submit`, donc laisse la page annuler. C'est ce que
+            // fait un vrai bouton, et `submit()` est justement celui qui ne le
+            // fait pas.
+            appel("soumets", this.__id, true);
+        };
+        classe.prototype.reset = function () {
+            for (const controle of this.elements) {
+                const type = (controle.type || "").toLowerCase();
+                if (type === "checkbox" || type === "radio")
+                    controle.checked = controle.hasAttribute("checked");
+                else if (controle.tagName.toLowerCase() !== "button")
+                    controle.value = controle.getAttribute("value") || "";
+            }
+        };
+    }
+
     /// `element.dataset` : la vue objet des attributs `data-*`.
     ///
     /// Absent, il ne degradait pas — il arretait. `t.dataset.dropdownBound`
@@ -488,6 +533,13 @@
         // que la page avait bien preselectionne « equipe ».
         get value() {
             const balise = this.tagName.toLowerCase();
+            // Un champ editable tient sa valeur dans le modele d'edition, la ou
+            // la frappe l'ecrit. La lire dans l'attribut rendrait la valeur par
+            // defaut et perdrait tout ce que l'utilisateur a tape.
+            if (balise === "input" || balise === "textarea") {
+                const courante = appel("valeurChamp", this.__id);
+                if (courante !== null && courante !== undefined) return courante;
+            }
             if (balise === "select") {
                 const choisie = this.__optionChoisie();
                 return choisie ? choisie.value : "";
@@ -503,7 +555,12 @@
             return this.getAttribute("value") || "";
         }
         set value(v) {
-            if (this.tagName.toLowerCase() === "select") {
+            const balise = this.tagName.toLowerCase();
+            if ((balise === "input" || balise === "textarea")
+                    && appel("poseValeurChamp", this.__id, String(v)) !== false) {
+                return;
+            }
+            if (balise === "select") {
                 // Choisir par valeur, comme le fait `select.value = "x"` :
                 // l'option correspondante devient la selectionnee, et aucune
                 // autre ne l'est.
@@ -573,9 +630,110 @@
                 this.insertBefore(typeof element === "string"
                     ? document.createTextNode(element) : element, premier);
         }
-        focus() {}
-        blur() {}
-        scrollIntoView() {}
+        /// Le foyer, pour de vrai.
+        ///
+        /// C'etait un moignon : la page appelait `focus()`, rien ne se passait,
+        /// `document.activeElement` restait `null`, et `:focus` ne peignait
+        /// jamais rien. Un formulaire ou l'on ne peut pas designer le champ
+        /// courant n'est pas remplissable — c'est la premiere marche de tout
+        /// le reste : clavier, `Tab`, accessibilite.
+        focus() { appel("poseFoyer", this.__id); }
+        blur() {
+            // `blur()` ne deplace le foyer que si c'est bien nous qui l'avons :
+            // un `blur` appele sur un element quelconque ne doit pas voler le
+            // foyer a un autre.
+            if (appel("foyer") === this.__id) appel("poseFoyer", null);
+        }
+        scrollIntoView() { appel("creux", "element.scrollIntoView"); }
+
+        /// Le formulaire qui contient ce controle. `null` hors formulaire.
+        get form() { return noeud(appel("formulaireDe", this.__id)); }
+
+        get tabIndex() {
+            const brut = this.getAttribute("tabindex");
+            if (brut !== null && brut !== "") return parseInt(brut, 10) || 0;
+            return ["input", "select", "textarea", "button", "a", "area"]
+                .indexOf(this.tagName.toLowerCase()) >= 0 ? 0 : -1;
+        }
+        set tabIndex(valeur) { this.setAttribute("tabindex", String(valeur)); }
+
+        get required() { return this.hasAttribute("required"); }
+        set required(v) {
+            if (v) this.setAttribute("required", "");
+            else this.removeAttribute("required");
+        }
+        get readOnly() { return this.hasAttribute("readonly"); }
+        set readOnly(v) {
+            if (v) this.setAttribute("readonly", "");
+            else this.removeAttribute("readonly");
+        }
+        get placeholder() { return this.getAttribute("placeholder") || ""; }
+        set placeholder(v) { this.setAttribute("placeholder", String(v)); }
+        get name() { return this.getAttribute("name") || ""; }
+        set name(v) { this.setAttribute("name", String(v)); }
+        get type() {
+            const balise = this.tagName.toLowerCase();
+            if (balise === "input") return (this.getAttribute("type") || "text").toLowerCase();
+            if (balise === "button") return (this.getAttribute("type") || "submit").toLowerCase();
+            return balise;
+        }
+        set type(v) { this.setAttribute("type", String(v)); }
+
+        /// `required` non rempli : la seule regle de validation qui compte
+        /// aujourd'hui. Le reste de la validation HTML5 — motifs, bornes,
+        /// types — attendra que celle-ci serve reellement.
+        ///
+        /// Un `<form>` valide tous ses controles ; tout le reste se valide
+        /// lui-meme. Poser deux `checkValidity` distincts, l'un sur le
+        /// formulaire et l'autre sur les champs, faisait que le premier
+        /// installe ecrasait le second — et chaque champ repondait alors comme
+        /// un formulaire vide, c'est-a-dire toujours valide.
+        checkValidity() {
+            if (this.tagName.toLowerCase() === "form") {
+                return this.elements.every(
+                    (c) => typeof c.checkValidity !== "function" || c.checkValidity());
+            }
+            if (!this.required) return true;
+            if (this.type === "checkbox" || this.type === "radio")
+                return !!this.checked;
+            return String(this.value || "").length > 0;
+        }
+        reportValidity() { return this.checkValidity(); }
+        get validity() {
+            const rempli = this.checkValidity();
+            return { valid: rempli, valueMissing: !rempli, customError: false,
+                     typeMismatch: false, patternMismatch: false };
+        }
+        setCustomValidity() {}
+
+        /// Selection minimale dans un champ. Le curseur n'a pas de rendu, mais
+        /// `selectionStart` est lu par toute bibliotheque de masque de saisie,
+        /// et rendre `undefined` la faisait lever.
+        get selectionStart() {
+            const s = appel("selectionChamp", this.__id);
+            return s ? s.debut : null;
+        }
+        set selectionStart(v) {
+            const s = appel("selectionChamp", this.__id) || { fin: 0 };
+            appel("poseSelectionChamp", this.__id, Number(v) || 0, s.fin);
+        }
+        get selectionEnd() {
+            const s = appel("selectionChamp", this.__id);
+            return s ? s.fin : null;
+        }
+        set selectionEnd(v) {
+            const s = appel("selectionChamp", this.__id) || { debut: 0 };
+            appel("poseSelectionChamp", this.__id, s.debut, Number(v) || 0);
+        }
+        setSelectionRange(debut, fin) {
+            appel("poseSelectionChamp", this.__id, Number(debut) || 0,
+                  Number(fin) || 0);
+        }
+        select() {
+            appel("poseSelectionChamp", this.__id, 0,
+                  String(this.value || "").length);
+            this.focus();
+        }
         click() { distribue(this, new Event("click", { bubbles: true, cancelable: true })); }
     }
 
@@ -826,7 +984,27 @@
         }
 
         // --- Pixels ---
+        //
+        // Lire les pixels d'une toile ou l'on a dessine une image d'une autre
+        // origine reviendrait a lire cette image — donc a lire une page ou
+        // l'utilisateur est peut-etre connecte. La norme appelle cela
+        // « contaminer » la toile, et la lecture leve alors `SecurityError`.
+        //
+        // La verification est faite par le moteur a partir des operations
+        // reellement enregistrees, pas d'un drapeau tenu ici : un drapeau
+        // JavaScript se remet a `false` en une ligne.
+        __verifieLisible(quoi) {
+            if (appel("toileSouillee", this.__operations)) {
+                const erreur = new Error(
+                    quoi + " : la toile a ete contaminee par une image d'une "
+                    + "autre origine");
+                erreur.name = "SecurityError";
+                throw erreur;
+            }
+        }
+
         getImageData(x, y, l, h) {
+            this.__verifieLisible("getImageData");
             const largeur = Math.max(1, Math.round(nombre(this.canvas.width)));
             const hauteur = Math.max(1, Math.round(nombre(this.canvas.height)));
             const tout = appel("rasterise", this.__operations, largeur, hauteur);
@@ -956,7 +1134,11 @@
             if (!this.__contexte) this.__contexte = new ContexteToile(this);
             return this.__contexte;
         }
-        toDataURL() { return "data:,"; }
+        toDataURL() {
+            const contexte = this.__contexte;
+            if (contexte) contexte.__verifieLisible("toDataURL");
+            return "data:,";
+        }
     }
 
     globalThis.HTMLCanvasElement = ElementToile;
@@ -1176,6 +1358,46 @@
     };
     globalThis.URL.revokeObjectURL = function () {};
 
+    // `action` et `method` doivent etre resolus, pas rendus bruts : une page
+    // qui lit `form.action` attend une adresse absolue, et un `method` en
+    // minuscules — c'est ce que la norme garantit et ce dont depend tout code
+    // qui reconstruit la requete lui-meme.
+    Object.defineProperty(Element.prototype, "action", {
+        configurable: true,
+        get() {
+            if (this.tagName.toLowerCase() !== "form") return this.getAttribute("action");
+            const brut = this.getAttribute("action");
+            return brut ? appel("resout", brut) : appel("url");
+        },
+        set(v) { this.setAttribute("action", String(v)); },
+    });
+    Object.defineProperty(Element.prototype, "method", {
+        configurable: true,
+        get() {
+            if (this.tagName.toLowerCase() !== "form") return this.getAttribute("method");
+            return (this.getAttribute("method") || "get").toLowerCase();
+        },
+        set(v) { this.setAttribute("method", String(v)); },
+    });
+    Object.defineProperty(Element.prototype, "htmlFor", {
+        configurable: true,
+        get() { return this.getAttribute("for") || ""; },
+        set(v) { this.setAttribute("for", String(v)); },
+    });
+    Object.defineProperty(Element.prototype, "control", {
+        configurable: true,
+        get() {
+            // `label.control` : le controle que cette etiquette designe, soit
+            // par `for`, soit parce qu'il est a l'interieur. C'est ce lien qui
+            // fait qu'un clic sur le libelle donne le foyer au champ.
+            if (this.tagName.toLowerCase() !== "label") return null;
+            const cible = this.getAttribute("for");
+            if (cible) return document.getElementById(cible);
+            return this.querySelector("input, select, textarea, button");
+        },
+    });
+    installeFormulaire(Element);
+
     globalThis.Node = Nœud;
     globalThis.Element = Element;
     globalThis.HTMLElement = Element;
@@ -1390,7 +1612,7 @@
         getResponseHeader(nom) {
             return this.__reponseEntetes[String(nom).toLowerCase()] || null;
         }
-        abort() {}
+        abort() { appel("creux", "XMLHttpRequest.abort"); }
         send(corps) {
             const identifiant = prochaineRequete++;
             requetes.set(identifiant, this);
@@ -1439,19 +1661,94 @@
         json() { return Promise.resolve(JSON.parse(this.__texte)); }
     }
 
+    /// `AbortSignal` / `AbortController` — annuler une requete en vol.
+    ///
+    /// Poser `window.AbortController = function () {}` aurait fait reussir la
+    /// detection de fonctionnalite et laisse la page croire qu'elle sait
+    /// annuler. Ici le signal porte reellement l'annulation jusqu'au fil
+    /// reseau : la requete n'est pas interrompue au milieu — on ne va pas
+    /// fermer une prise depuis un autre fil — mais sa reponse ne sera jamais
+    /// livree, et la promesse est rejetee avec un `AbortError`. Du point de vue
+    /// de la page, c'est exactement une annulation.
+    class AbortSignal {
+        constructor() {
+            this.aborted = false;
+            this.reason = undefined;
+            this.__ecouteurs = new Map();
+            this.onabort = null;
+        }
+        addEventListener(type, f, o) {
+            Nœud.prototype.addEventListener.call(this, type, f, o);
+        }
+        removeEventListener(type, f, o) {
+            Nœud.prototype.removeEventListener.call(this, type, f, o);
+        }
+        throwIfAborted() { if (this.aborted) throw this.reason; }
+        __declenche(raison) {
+            if (this.aborted) return;
+            this.aborted = true;
+            this.reason = raison;
+            const evenement = new Event("abort");
+            for (const f of ecouteursDe(this, "abort", false))
+                invoque(f, this, evenement);
+            if (typeof this.onabort === "function") this.onabort(evenement);
+        }
+    }
+
+    function erreurAnnulation(raison) {
+        if (raison !== undefined) return raison;
+        const e = new Error("The operation was aborted.");
+        e.name = "AbortError";
+        return e;
+    }
+
+    class AbortController {
+        constructor() { this.signal = new AbortSignal(); }
+        abort(raison) { this.signal.__declenche(erreurAnnulation(raison)); }
+    }
+
+    globalThis.AbortSignal = AbortSignal;
+    globalThis.AbortController = AbortController;
+
     globalThis.fetch = function (url, options) {
         options = options || {};
+        const signal = options.signal;
         return new Promise(function (resoud, rejette) {
+            if (signal && signal.aborted) {
+                // Deja annule avant de partir : aucune requete n'est emise.
+                rejette(erreurAnnulation(signal.reason));
+                return;
+            }
             const identifiant = prochaineRequete++;
+            let fini = false;
             requetes.set(identifiant, function (reponse) {
+                if (fini) return;
+                fini = true;
                 if (reponse.status > 0) resoud(new Reponse(reponse));
                 else rejette(new TypeError("echec du chargement : " + url));
             });
+            if (signal && typeof signal.addEventListener === "function") {
+                signal.addEventListener("abort", function () {
+                    if (fini) return;
+                    fini = true;
+                    requetes.delete(identifiant);
+                    appel("annuleRequete", identifiant);
+                    rejette(erreurAnnulation(signal.reason));
+                });
+            }
+            let corps = options.body;
+            if (corps === undefined || corps === null) corps = null;
+            else if (typeof corps !== "string") corps = String(corps);
+            // `credentials` doit traverser : avec des temoins, CORS exige que
+            // le serveur nomme l'origine et l'avoue explicitement. Sans cette
+            // information, le moteur laisserait passer un
+            // `Access-Control-Allow-Origin: *` la ou la norme le refuse — et
+            // c'est precisement le cas ou un site pourrait lire les donnees
+            // privees d'un autre.
             appel("requete", identifiant,
                   String(options.method || "GET").toUpperCase(), String(url),
-                  options.body === undefined || options.body === null
-                      ? null : String(options.body),
-                  options.headers || {}, false);
+                  corps, options.headers || {}, false,
+                  String(options.credentials || "same-origin"));
         });
     };
 
@@ -1459,6 +1756,18 @@
 
     class Document extends Nœud {
         constructor() { super(appel("racine")); this.readyState = "loading"; }
+
+        /// `document.activeElement` — l'element qui recevra la prochaine
+        /// frappe. Il rendait `null` en toutes circonstances, ce qui rend
+        /// impossible tout pilotage au clavier et toute gestion de foyer.
+        ///
+        /// La norme veut `body` quand rien n'a le foyer, jamais `null` sur un
+        /// document charge : du code ecrit `document.activeElement.tagName`
+        /// sans garde, et `null` le tue.
+        get activeElement() {
+            return noeud(appel("foyer")) || this.body || null;
+        }
+        hasFocus() { return true; }
         get documentElement() { return noeud(appel("racine")); }
         get body() { return noeud(appel("corps")); }
         get head() { return noeud(appel("tete")); }
@@ -1643,7 +1952,15 @@
         get children() { return this.__support.children; }
         get firstChild() { return this.__support.firstChild; }
         get lastChild() { return this.__support.lastChild; }
-        get activeElement() { return null; }
+        get activeElement() {
+            // Dans une racine d'ombre, `activeElement` ne designe le foyer que
+            // s'il se trouve a l'interieur : c'est tout l'interet de
+            // l'encapsulation, et rendre le foyer du document ferait fuir une
+            // information que l'ombre est censee cacher.
+            const actuel = noeud(appel("foyer"));
+            if (!actuel) return null;
+            return this.__support && this.__support.contains(actuel) ? actuel : null;
+        }
         appendChild(enfant) { return this.__support.appendChild(enfant); }
         insertBefore(enfant, avant) { return this.__support.insertBefore(enfant, avant); }
         removeChild(enfant) { return this.__support.removeChild(enfant); }
@@ -1668,6 +1985,27 @@
         reload() { appel("navigue", appel("url")); },
         toString() { return appel("url"); },
     };
+    Object.defineProperty(location, "hash", {
+        get() { return appel("urlPartie", "hash"); },
+        set(valeur) {
+            // Changer le fragment ne recharge pas le document : cela ajoute une
+            // entree d'historique et emet `hashchange`. Le confondre avec une
+            // navigation rechargeait la page a chaque ancre cliquee.
+            let fragment = String(valeur);
+            if (fragment && fragment[0] !== "#") fragment = "#" + fragment;
+            const avant = appel("url");
+            appel("poseEtat", null, "", fragment || "#", false);
+            const apres = appel("url");
+            if (avant !== apres) {
+                const evenement = new Event("hashchange");
+                evenement.oldURL = avant;
+                evenement.newURL = apres;
+                globalThis.dispatchEvent(evenement);
+            }
+        },
+        enumerable: true,
+        configurable: true,
+    });
     for (const partie of ["protocol", "host", "hostname", "port", "pathname",
                           "search", "hash", "origin"]) {
         Object.defineProperty(location, partie, {
@@ -1756,21 +2094,228 @@
         colorDepth: 32, pixelDepth: 32,
     };
 
+    /// `window.history` — l'historique de session du document.
+    ///
+    /// `pushState` et `replaceState` etaient vides. Une application a page
+    /// unique appelait, rien ne bougeait, et `location.pathname` rendait
+    /// eternellement l'adresse de depart : barre d'adresse figee, bouton
+    /// « precedent » sans effet, aucun `popstate`. C'est-a-dire, en pratique,
+    /// une forme entiere du Web applicatif inutilisable.
+    ///
+    /// Le troisieme argument est facultatif et peut valoir `null` ou `""`, ce
+    /// qui veut dire « garde l'adresse actuelle » — a ne pas confondre avec
+    /// « va a la racine ».
     globalThis.history = {
-        length: 1,
-        pushState() {}, replaceState() {},
+        get length() { return appel("longueurHistorique"); },
+        get state() { return appel("etatHistorique"); },
+        scrollRestoration: "auto",
+        pushState(etat, titre, url) {
+            appel("poseEtat", etat === undefined ? null : etat,
+                  titre === undefined ? "" : titre,
+                  url === undefined || url === null ? null : String(url), false);
+        },
+        replaceState(etat, titre, url) {
+            appel("poseEtat", etat === undefined ? null : etat,
+                  titre === undefined ? "" : titre,
+                  url === undefined || url === null ? null : String(url), true);
+        },
         back() { appel("historique", -1); },
         forward() { appel("historique", 1); },
         go(n) { appel("historique", Number(n) || 0); },
     };
 
+    /// Appele par Python quand un deplacement a change l'entree courante.
+    /// L'evenement porte l'etat memorise, comme le veut la norme — c'est lui
+    /// qui permet a l'application de retrouver la vue qu'elle affichait.
+    globalThis.__bo_popstate = function (etat) {
+        const evenement = new Event("popstate");
+        evenement.state = etat === undefined ? null : etat;
+        globalThis.dispatchEvent(evenement);
+        if (typeof globalThis.onpopstate === "function")
+            globalThis.onpopstate(evenement);
+    };
+
     globalThis.console = console;
     globalThis.window = globalThis;
     globalThis.self = globalThis;
-    globalThis.top = globalThis;
-    globalThis.parent = globalThis;
-    globalThis.frames = globalThis;
     globalThis.closed = false;
+
+    // --- WindowProxy --------------------------------------------------------
+    //
+    // `window.parent`, `window.top`, `iframe.contentWindow` ne rendent pas
+    // l'objet global d'un autre contexte : ils rendent un **proxy**. La
+    // distinction est le fondement de la Same-Origin Policy.
+    //
+    // Un objet global expose tout — le DOM, les fonctions de la page, ses
+    // variables. Le donner a un autre contexte, c'est lui donner la page
+    // entiere. Un `WindowProxy` n'expose que ce que la norme autorise a
+    // traverser une frontiere d'origine : quelques proprietes, `postMessage`,
+    // `location` en ecriture seule. Ce qui demande le meme origine — `document`
+    // au premier chef — passe par une verification a chaque acces.
+    //
+    // La verification a chaque acces, et non a la construction, n'est pas un
+    // exces de prudence : un contexte peut **changer d'origine** en naviguant,
+    // et un proxy obtenu quand l'iframe etait de meme origine ne doit pas
+    // continuer d'ouvrir le DOM apres qu'il est parti ailleurs.
+
+    class WindowProxy {
+        constructor(identifiant) {
+            // L'identifiant du BrowsingContext cote Python. La page ne recoit
+            // jamais autre chose : elle ne peut donc pas fabriquer un proxy
+            // vers un contexte qu'on ne lui a pas donne.
+            Object.defineProperty(this, "__ctx", { value: identifiant });
+        }
+
+        get closed() { return !!appel("ctxFerme", this.__ctx); }
+        get name() { return appel("ctxNom", this.__ctx) || ""; }
+        get length() { return appel("ctxNombreEnfants", this.__ctx) || 0; }
+        get origin() { return appel("ctxOrigine", this.__ctx) || "null"; }
+
+        get self() { return this; }
+        get window() { return this; }
+        get parent() { return proxyDe(appel("ctxParent", this.__ctx)) || this; }
+        get top() { return proxyDe(appel("ctxSommet", this.__ctx)) || this; }
+        get frames() { return this; }
+
+        // `document` traverse la frontiere seulement en meme origine. C'est la
+        // regle qui empeche une page d'aller lire le contenu d'une autre.
+        //
+        // Ce qui revient est une **vue** sur le document d'en face, pas l'objet
+        // `document` de l'autre contexte : elle expose ce qu'on lit d'un
+        // document tiers legitime — sa racine, son corps, son titre, ses
+        // recherches — sans donner acces aux variables globales de sa page.
+        get document() {
+            const info = appel("ctxDocument", this.__ctx);
+            if (!info) return null;
+            return new DocumentDistant(info);
+        }
+
+        get location() {
+            const proxy = this;
+            return {
+                get href() { return appel("ctxUrl", proxy.__ctx) || "about:blank"; },
+                set href(valeur) { appel("ctxNavigue", proxy.__ctx, String(valeur)); },
+                assign(valeur) { appel("ctxNavigue", proxy.__ctx, String(valeur)); },
+                replace(valeur) { appel("ctxNavigue", proxy.__ctx, String(valeur), true); },
+                toString() { return appel("ctxUrl", proxy.__ctx) || "about:blank"; },
+            };
+        }
+
+        postMessage(donnees, cibleOrigine, transfert) {
+            // Clone avant de traverser. Le pont Python aurait transporte les
+            // objets simples, et rien d'autre : `undefined` serait devenu
+            // `null`, une `Date` un objet vide, un cycle une troncature. Le
+            // paquet, lui, dit exactement ce qu'il porte.
+            appel("ctxMessage", this.__ctx,
+                  __bo_clone.serialise(donnees),
+                  cibleOrigine === undefined ? "/" : String(cibleOrigine));
+            void transfert;
+        }
+
+        focus() { appel("ctxFocus", this.__ctx); }
+        blur() {}
+    }
+
+    // La vue sur le document d'un autre contexte de meme origine.
+    //
+    // Les recherches sont **portees a la racine de ce document-la** : sans
+    // cela, `iframe.contentDocument.getElementById("x")` chercherait dans la
+    // page hote et rendrait le mauvais element — un bogue silencieux et
+    // particulierement penible, parce que le resultat aurait l'air valide.
+    class DocumentDistant {
+        constructor(info) {
+            Object.defineProperty(this, "__info", { value: info });
+        }
+        get documentElement() { return noeuds([this.__info.racine])[0] || null; }
+        get body() {
+            return this.__info.corps === null || this.__info.corps === undefined
+                ? null : (noeuds([this.__info.corps])[0] || null);
+        }
+        get title() { return this.__info.titre; }
+        get URL() { return this.__info.url; }
+        get location() { return { href: this.__info.url, toString: () => this.__info.url }; }
+        querySelector(s) {
+            return noeuds([appel("select", this.__info.racine, String(s), false)])[0] || null;
+        }
+        querySelectorAll(s) {
+            return noeuds(appel("select", this.__info.racine, String(s), true) || []);
+        }
+        getElementById(id) {
+            return this.querySelector("#" + String(id));
+        }
+        getElementsByTagName(nom) {
+            return noeuds(appel("parBalise", this.__info.racine, String(nom)) || []);
+        }
+        getElementsByClassName(nom) {
+            return noeuds(appel("parClasse", this.__info.racine, String(nom)) || []);
+        }
+    }
+
+    globalThis.WindowProxy = WindowProxy;
+
+    const proxies = new Map();
+
+    // Un proxy par contexte, et toujours le meme : du code reel compare
+    // `event.source === iframe.contentWindow`, et deux objets differents pour
+    // le meme contexte feraient echouer la comparaison.
+    function proxyDe(identifiant) {
+        if (identifiant === null || identifiant === undefined) return null;
+        let proxy = proxies.get(identifiant);
+        if (!proxy) {
+            proxy = new WindowProxy(identifiant);
+            proxies.set(identifiant, proxy);
+        }
+        return proxy;
+    }
+    globalThis.__bo_proxy = proxyDe;
+
+    // Le contexte courant se voit lui-meme comme `globalThis`, pas comme un
+    // proxy : une page accede a son propre DOM directement, sans traverser
+    // quoi que ce soit.
+    Object.defineProperty(globalThis, "parent", {
+        configurable: true,
+        get() {
+            const parent = appel("ctxParent", null);
+            return parent === null || parent === undefined
+                ? globalThis : proxyDe(parent);
+        },
+    });
+    Object.defineProperty(globalThis, "top", {
+        configurable: true,
+        get() {
+            const sommet = appel("ctxSommet", null);
+            return sommet === null || sommet === undefined
+                ? globalThis : proxyDe(sommet);
+        },
+    });
+    Object.defineProperty(globalThis, "frames", {
+        configurable: true,
+        get() {
+            // `window.frames` est indexable et porte `length` : c'est la forme
+            // qu'attend `for (let i = 0; i < frames.length; i++)`.
+            const enfants = appel("ctxEnfants", null) || [];
+            const liste = enfants.map(proxyDe);
+            liste.length = enfants.length;
+            return liste;
+        },
+    });
+    Object.defineProperty(globalThis, "origin", {
+        configurable: true,
+        get() { return appel("ctxOrigine", null) || "null"; },
+    });
+
+    // `window.postMessage(...)` adresse a soi-meme. C'est le seul cas ou
+    // l'emetteur et le destinataire sont le meme contexte, et il est plus
+    // repandu qu'il n'y parait : c'est ainsi qu'une page se donne une tache a
+    // faire au tour suivant sans passer par une minuterie. Le message n'en
+    // suit pas moins le chemin complet — file de la boucle d'evenements,
+    // verification de `targetOrigin`, clonage — pour que le comportement soit
+    // le meme qu'entre deux contextes.
+    globalThis.postMessage = function (donnees, cibleOrigine, transfert) {
+        void transfert;
+        appel("ctxMessage", null, __bo_clone.serialise(donnees),
+              cibleOrigine === undefined ? "/" : String(cibleOrigine));
+    };
 
     Object.defineProperty(globalThis, "innerWidth",
         { get: () => (appel("tailleVue") || taille).width, enumerable: true });
@@ -1790,12 +2335,12 @@
     globalThis.alert = function (message) { appel("console", "alerte", formate(message)); };
     globalThis.confirm = function () { return false; };
     globalThis.prompt = function () { return null; };
-    globalThis.scrollTo = function () {};
-    globalThis.scrollBy = function () {};
-    globalThis.open = function () { return null; };
-    globalThis.close = function () {};
-    globalThis.focus = function () {};
-    globalThis.blur = function () {};
+    globalThis.scrollTo = creux("window.scrollTo");
+    globalThis.scrollBy = creux("window.scrollBy");
+    globalThis.open = creux("window.open", null);
+    globalThis.close = creux("window.close");
+    globalThis.focus = creux("window.focus");
+    globalThis.blur = creux("window.blur");
     globalThis.matchMedia = function (requete) {
         return { matches: false, media: String(requete),
                  addListener() {}, removeListener() {},
@@ -2154,6 +2699,195 @@
         }
     };
 
+    // --- WebSocket et IndexedDB ---------------------------------------------
+    //
+    // Les deux surfaces que la fenetre partage mot pour mot avec un Worker.
+    // Elles vivent dans `prelude_partage.js`, evalue juste avant celui-ci, et
+    // s'installent ici avec les primitives d'evenement du document. Le Worker
+    // les installe avec les siennes ; le code, lui, est le meme des deux cotes.
+    __bo_installe_partage({
+        appel: appel,
+        Event: Event,
+        attache: function (cible, type, f, o) {
+            Nœud.prototype.addEventListener.call(cible, type, f, o);
+        },
+        detache: function (cible, type, f, o) {
+            Nœud.prototype.removeEventListener.call(cible, type, f, o);
+        },
+        emet: function (cible, evenement) {
+            for (const f of ecouteursDe(cible, evenement.type, false))
+                invoque(f, cible, evenement);
+            const propre = "on" + evenement.type;
+            if (typeof cible[propre] === "function") {
+                try { cible[propre].call(cible, evenement); }
+                catch (e) { console.error(e); }
+            }
+        },
+    });
+
+    // --- Worker -------------------------------------------------------------
+    //
+    // La page ne voit qu'un entier : son worker vit cote Python, sur un autre
+    // fil, avec son propre runtime QuickJS. C'est volontaire — un objet
+    // JavaScript qui designerait le monde d'en face serait exactement le
+    // partage qu'un Worker existe pour eviter.
+    //
+    // Les donnees qui traversent sont **copiees**, jamais partagees : elles
+    // passent par Python, ce qui les reduit a des valeurs — nombres, chaines,
+    // tableaux, objets simples. Aucune reference ne survit au passage.
+
+    const travailleurs = new Map();
+    let prochainTravailleur = 1;
+
+    class Worker {
+        constructor(url) {
+            this.__id = prochainTravailleur++;
+            this.__ecouteurs = new Map();
+            this.onmessage = null;
+            this.onerror = null;
+            this.onmessageerror = null;
+            travailleurs.set(this.__id, this);
+            if (!appel("wkCree", this.__id, String(url))) {
+                // Origine refusee, ou script introuvable : la page l'apprend
+                // par un `error`, au battement suivant. Jeter ici ferait
+                // tomber le constructeur, ce que la norme ne prevoit pas.
+                travailleurs.delete(this.__id);
+                const objet = this;
+                setTimeout(function () {
+                    objet.__recoit("erreur", "Worker refuse : " + url, "");
+                }, 0);
+            }
+        }
+
+        addEventListener(type, f, o) {
+            Nœud.prototype.addEventListener.call(this, type, f, o);
+        }
+        removeEventListener(type, f, o) {
+            Nœud.prototype.removeEventListener.call(this, type, f, o);
+        }
+
+        postMessage(donnees, transfert) {
+            void transfert;
+            appel("wkPoste", this.__id, __bo_clone.serialise(donnees));
+        }
+
+        terminate() {
+            travailleurs.delete(this.__id);
+            appel("wkTermine", this.__id);
+        }
+
+        __recoit(genre, a, b) {
+            let evenement;
+            if (genre === "message") {
+                evenement = new Event("message");
+                try { evenement.data = __bo_clone.materialise(a); }
+                catch (e) { evenement = new Event("messageerror"); evenement.data = null; }
+                evenement.origin = location.origin;
+                evenement.source = null;
+                evenement.ports = [];
+            } else if (genre === "erreur") {
+                evenement = new Event("error");
+                evenement.message = String(a || "");
+                evenement.filename = "";
+                evenement.lineno = 0;
+                evenement.error = null;
+                evenement.__pile = String(b || "");
+            } else {
+                // `console.log` depuis le worker : il remonte au journal du
+                // navigateur, pas a la page. Une page qui verrait les traces de
+                // son worker sous forme d'evenements ne saurait qu'en faire.
+                console[a === "error" ? "error" : (a === "warn" ? "warn" : "log")](
+                    "[worker] " + String(b));
+                return;
+            }
+            for (const f of ecouteursDe(this, evenement.type, false))
+                invoque(f, this, evenement);
+            const propre = "on" + evenement.type;
+            if (typeof this[propre] === "function") {
+                try { this[propre](evenement); }
+                catch (e) { console.error(e); }
+            }
+        }
+    }
+
+    globalThis.Worker = Worker;
+
+    // Ce qui ne traverse pas un `postMessage`, et qui doit lever plutot que
+    // d'arriver de l'autre cote sous forme d'objet vide. Un nœud du DOM en tete
+    // : il designe une place dans un arbre qui n'existe que dans ce contexte,
+    // et une copie sans arbre ne serait rien.
+    __bo_clone.refuse(Nœud, "Node");
+    __bo_clone.refuse(Worker, "Worker");
+    __bo_clone.refuse(WebSocket, "WebSocket");
+    __bo_clone.refuse(IDBRequest, "IDBRequest");
+    __bo_clone.refuse(IDBDatabase, "IDBDatabase");
+    __bo_clone.refuse(IDBTransaction, "IDBTransaction");
+    __bo_clone.refuse(WindowProxy, "Window");
+
+    globalThis.__bo_worker_hote = function (identifiant, genre, a, b) {
+        const travailleur = travailleurs.get(identifiant);
+        if (travailleur) travailleur.__recoit(genre, a, b);
+    };
+
+    // --- iframe : contentWindow et contentDocument --------------------------
+    //
+    // `contentWindow` rend un `WindowProxy`, jamais l'objet global de l'enfant.
+    // `contentDocument` passe par une verification d'origine cote Python et
+    // rend `null` quand elle echoue — ce que dit la norme, et ce qui evite de
+    // faire tomber une page qui teste simplement si elle a le droit.
+    Object.defineProperty(Element.prototype, "contentWindow", {
+        configurable: true,
+        get() {
+            if (this.tagName !== "IFRAME") return null;
+            return __bo_proxy(appel("ctxCadre", this.__id));
+        },
+    });
+    Object.defineProperty(Element.prototype, "contentDocument", {
+        configurable: true,
+        get() {
+            if (this.tagName !== "IFRAME") return null;
+            const contexte = appel("ctxCadre", this.__id);
+            if (contexte === null || contexte === undefined) return null;
+            return __bo_proxy(contexte).document;
+        },
+    });
+
+    // --- Reception des messages ---------------------------------------------
+    //
+    // Livre par `tic()`, donc jamais au milieu d'un script : un `postMessage`
+    // ne peut pas s'inserer entre deux lignes de la page qui le recoit.
+    globalThis.__bo_message = function (paquet, origine, source) {
+        const evenement = new Event("message");
+        try {
+            evenement.data = __bo_clone.materialise(paquet);
+        } catch (e) {
+            // Un paquet illisible devient `messageerror`, pas un `message` avec
+            // des donnees inventees : la page doit pouvoir distinguer « rien
+            // recu » de « recu vide ».
+            const rate = new Event("messageerror");
+            rate.origin = origine || "null";
+            rate.data = null;
+            for (const f of ecouteursDe(globalThis, "messageerror", false))
+                invoque(f, globalThis, rate);
+            if (typeof globalThis.onmessageerror === "function") {
+                try { globalThis.onmessageerror(rate); }
+                catch (e2) { console.error(e2); }
+            }
+            return;
+        }
+        evenement.origin = origine || "null";
+        evenement.source = source === null || source === undefined
+            ? null : __bo_proxy(source);
+        evenement.lastEventId = "";
+        evenement.ports = [];
+        for (const f of ecouteursDe(globalThis, "message", false))
+            invoque(f, globalThis, evenement);
+        if (typeof globalThis.onmessage === "function") {
+            try { globalThis.onmessage(evenement); }
+            catch (e) { console.error(e); }
+        }
+    };
+
     // --- Mesure de compatibilite --------------------------------------------
     //
     // Le moteur ne sait pas tout faire, et jusqu'ici il ne savait pas dire ce
@@ -2171,10 +2905,25 @@
     // La liste ne se veut pas exhaustive : ce qu'elle rate finit dans les
     // erreurs JavaScript, qui sont notees aussi.
 
+    // Un moignon signale son propre vide. Le nom part au rapport, la valeur
+    // rendue ne change pas — la page continue exactement comme avant.
+    //
+    // Pourquoi les compter separement des APIs absentes : une page qui teste
+    // `if (history.pushState)` obtient `true`, prend le chemin moderne, et
+    // poursuit avec un navigateur dont l'etat ne correspond plus a ce qu'elle
+    // croit. Une absence l'aurait fait retomber sur son plan de secours. Le
+    // moignon est donc souvent le plus couteux des deux, et le plus invisible.
+    function creux(nom, rendu) {
+        return function () {
+            appel("creux", nom);
+            return rendu;
+        };
+    }
+
     const NOMS_FENETRE = [
-        "WebSocket", "EventSource", "Worker", "SharedWorker", "ServiceWorker",
+        "EventSource", "SharedWorker", "ServiceWorker",
         "indexedDB", "IDBFactory", "IDBKeyRange", "caches", "CacheStorage",
-        "BroadcastChannel", "MessageChannel", "MessagePort", "SharedArrayBuffer",
+        "BroadcastChannel", "SharedArrayBuffer",
         "Notification", "PushManager", "RTCPeerConnection", "WebGLRenderingContext",
         "WebGL2RenderingContext", "OffscreenCanvas", "createImageBitmap",
         "ImageBitmap", "ImageData", "Path2D",
@@ -2182,7 +2931,7 @@
         "URLSearchParams", "AbortController", "AbortSignal",
         "Headers", "Request", "Response",
         "ReadableStream", "WritableStream", "TransformStream", "TextEncoderStream",
-        "structuredClone", "requestIdleCallback", "cancelIdleCallback",
+        "requestIdleCallback", "cancelIdleCallback",
         "reportError", "queueMicrotask",
         "IntersectionObserver", "PerformanceObserver", "ReportingObserver",
         "crypto", "TextEncoder", "TextDecoder", "Intl",
@@ -2191,7 +2940,7 @@
         "NodeFilter", "TreeWalker", "NodeIterator",
         "performance", "screen", "visualViewport", "scrollTo", "scrollBy",
         "open", "close", "print", "alert", "confirm", "prompt",
-        "postMessage", "focus", "blur", "getScreenDetails",
+        "focus", "blur", "getScreenDetails",
         "CSS", "CSSStyleSheet", "FontFace", "speechSynthesis",
         "customElements", "HTMLTemplateElement", "DocumentFragment",
         "trustedTypes", "navigation", "scheduler",
@@ -2252,6 +3001,24 @@
                 : ["replace", "assign", "reload", "ancestorOrigins"];
         for (const nom of noms) surveille(objet, nom, prefixe + "." + nom);
     }
+
+    // Appele par Python avant d'envoyer un formulaire : la page a le droit
+    // d'annuler. Rend `false` si elle l'a fait.
+    globalThis.__bo_soumission = function (identifiant) {
+        const formulaire = noeud(identifiant);
+        if (!formulaire) return false;
+        const evenement = new Event("submit", { cancelable: true });
+        evenement.submitter = null;
+        return formulaire.dispatchEvent(evenement);
+    };
+
+    // Les paires `nom=valeur` qu'un formulaire enverrait. Memes regles
+    // d'inclusion que `FormData` — un seul endroit ou elles sont ecrites,
+    // sinon la soumission et `FormData` finiraient par diverger.
+    globalThis.__bo_champsSoumis = function (identifiant) {
+        const formulaire = noeud(identifiant);
+        return formulaire ? champsDuFormulaire(formulaire) : [];
+    };
 
     // Etat du document, mis a jour par Python quand l'analyse est finie.
     globalThis.__bo_pret = function () {

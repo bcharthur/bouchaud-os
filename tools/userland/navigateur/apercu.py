@@ -32,6 +32,7 @@ import argparse
 import math
 import os
 import subprocess
+import tempfile
 import sys
 import types
 
@@ -580,8 +581,16 @@ def installe_reseau(reseau, agent=None):
                              "BouchaudOS/1.0 Nautile/2.0")
 
     def _charge_http(url, methode="GET", corps=None, entetes=None, brut=False):
+        # Les en-tetes de reponse partent dans un fichier a part plutot que
+        # dans la sortie : les melanger au corps obligerait a redecouper un
+        # flux binaire sur `\r\n\r\n`, ce qui casse des qu'une image contient
+        # cette suite d'octets. Sans eux, `Access-Control-Allow-Origin`
+        # n'arrive jamais au moteur et CORS ne peut pas etre eprouve du tout.
+        journal_entetes = tempfile.NamedTemporaryFile(
+            prefix="bo-entetes-", suffix=".txt", delete=False)
+        journal_entetes.close()
         commande = ["curl", "-sS", "-L", "--max-time", "40",
-                    "-A", entete_agent,
+                    "-A", entete_agent, "-D", journal_entetes.name,
                     "-w", "\\n__BO_CODE__%{http_code}\\n__BO_TYPE__%{content_type}",
                     "-X", str(methode), url]
         for nom, valeur in (entetes or {}).items():
@@ -592,7 +601,10 @@ def installe_reseau(reseau, agent=None):
         try:
             fini = subprocess.run(commande, capture_output=True, timeout=60)
         except Exception as e:  # noqa: BLE001
+            _oublie(journal_entetes.name)
             return reseau.Reponse(url, "", "text/plain", 0, str(e))
+        recus = _lit_entetes(journal_entetes.name)
+        _oublie(journal_entetes.name)
 
         octets = fini.stdout
         code, type_mime = 0, "application/octet-stream"
@@ -613,6 +625,7 @@ def installe_reseau(reseau, agent=None):
             return reseau.Reponse(url, "", "text/plain", 0,
                                   fini.stderr.decode("utf-8", "replace").strip()
                                   or "curl a echoue")
+        recus.setdefault("content-type", type_mime)
         # Le texte est decode dans tous les cas : `brut` ne veut pas dire « sans
         # texte » mais « sans enrobage HTML ». Une feuille de style est demandee
         # en brut et lue par `.contenu` — la vider ici affichait la page nue.
@@ -626,9 +639,42 @@ def installe_reseau(reseau, agent=None):
                          % (type_mime, len(octets)))
             type_mime = "text/html"
         return reseau.Reponse(url, texte, type_mime, code,
-                              entetes={"content-type": type_mime}, octets=octets)
+                              entetes=recus, octets=octets)
 
     reseau._charge_http = _charge_http
+
+
+def _lit_entetes(chemin):
+    """Les en-tetes du **dernier** bloc ecrit par curl.
+
+    Avec `-L`, curl empile un bloc par etape de redirection. Seul le dernier
+    decrit la reponse qu'on a vraiment recue — garder les precedents ferait lire
+    a un script les en-tetes d'une page qu'il n'a jamais obtenue.
+    """
+    try:
+        with open(chemin, "r", encoding="utf-8", errors="replace") as fichier:
+            brut = fichier.read()
+    except OSError:
+        return {}
+    blocs = [b for b in brut.split("\r\n\r\n") if b.strip()]
+    if not blocs:
+        blocs = [b for b in brut.split("\n\n") if b.strip()]
+    if not blocs:
+        return {}
+    entetes = {}
+    for ligne in blocs[-1].replace("\r\n", "\n").split("\n"):
+        if ":" not in ligne or ligne.lower().startswith("http/"):
+            continue
+        nom, valeur = ligne.split(":", 1)
+        entetes[nom.strip().lower()] = valeur.strip()
+    return entetes
+
+
+def _oublie(chemin):
+    try:
+        os.unlink(chemin)
+    except OSError:
+        pass
 
 
 # --- Programme ----------------------------------------------------------------
@@ -649,7 +695,8 @@ def principal(argv=None):
     installe_hote(arguments.largeur, arguments.hauteur)
 
     import moteur
-    from moteur import reseau
+    from moteur import reseau, telemetrie
+    telemetrie.active_par_environnement()
     installe_reseau(reseau)
 
     cible = arguments.cible
@@ -681,6 +728,17 @@ def principal(argv=None):
                                      hauteur))))
     for niveau, texte in journal[:8]:
         print("  [%s] %s" % (niveau, texte))
+    if document.contexte_js is not None:
+        diagnostic = document.contexte_js.rapport_compatibilite()
+        if diagnostic:
+            print("  [compatibilite]")
+            for nom, nombre in diagnostic.items():
+                print("    %s: %d" % (nom, nombre))
+    if telemetrie.ACTIVE:
+        # Le rapport complet — celui qui range les manques par nature plutot
+        # que par ordre alphabetique — quand la collecte a ete demandee.
+        print()
+        print(telemetrie.rapport_plateforme())
     return 0
 
 

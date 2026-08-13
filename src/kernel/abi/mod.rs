@@ -412,6 +412,31 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
             8
         }
         SCHED_SETAFFINITY | SCHED_SETSCHEDULER | SCHED_SETPARAM => 0,
+        // `setpriority(which, who, nice)` : le seul moyen pour un programme de
+        // se declarer interactif. Le noyau n'a que deux classes, mais le signe
+        // de `nice` suffit a les distinguer — et un programme portable n'a rien
+        // de special a faire, `nice(-5)` marche ici comme ailleurs.
+        //
+        // Seule la valeur compte, pas la cible : `which`/`who` designent
+        // toujours le processus courant faute de groupes de processus reels.
+        SETPRIORITY => {
+            let gentillesse = args[2] as i32;
+            let voulue = if gentillesse < 0 {
+                task::Priorite::Interactive
+            } else {
+                task::Priorite::Normale
+            };
+            task::pose_priorite(voulue);
+            0
+        }
+        GETPRIORITY => {
+            // Linux decale la valeur rendue de 20 pour distinguer une erreur ;
+            // musl la remet en place. On rend donc `20 - nice`.
+            match task::priorite() {
+                task::Priorite::Interactive => 25, // nice = -5
+                task::Priorite::Normale => 20,     // nice = 0
+            }
+        }
         SCHED_GETSCHEDULER => 0,
         SCHED_GET_PRIORITY_MAX | SCHED_GET_PRIORITY_MIN => 0,
         PRCTL => 0,
@@ -493,7 +518,9 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         UNAME => sys_uname(args[0]),
         SYSINFO => sys_sysinfo(args[0]),
         GETRLIMIT | PRLIMIT64 => sys_prlimit(args),
-        SETRLIMIT => 0,
+        // `setrlimit(resource, new)` : meme traitement que `prlimit64`, avec les
+        // arguments decales d'un cran et pas d'ancienne valeur a rendre.
+        SETRLIMIT => sys_prlimit([0, args[0], args[1], 0, 0, 0]),
         GETRANDOM => sys_getrandom(args[0], args[1] as usize),
         SYSLOG => 0,
         MEMBARRIER => 0,
@@ -842,26 +869,54 @@ fn sys_sysinfo(addr: u64) -> i64 {
 }
 
 /// `getrlimit` / `prlimit64`.
+/// `getrlimit` / `setrlimit` / `prlimit64`.
+///
+/// Un seul quota est reellement applique : `RLIMIT_AS`. Ce n'est pas de la
+/// paresse mais un choix — c'est le seul qui change quelque chose au projet de
+/// processus separes. Un renderer qui fuit sans plafond emporte la machine, et
+/// l'isolation des pannes ne vaut plus rien ; avec un plafond, sa `mmap` echoue
+/// proprement et le processus meurt seul. Les autres ressources continuent de
+/// se declarer illimitees, ce qui est la verite.
 fn sys_prlimit(args: [u64; 6]) -> i64 {
     const RLIMIT_STACK: u64 = 3;
     const RLIMIT_NOFILE: u64 = 7;
+    const RLIMIT_AS: u64 = 9;
     const RLIM_INFINITY: u64 = u64::MAX;
     // prlimit64(pid, resource, new, old) et getrlimit(resource, old).
-    let (resource, old) = if args[3] != 0 || args[2] != 0 {
-        (args[1], args[3])
+    let (resource, new, old) = if args[3] != 0 || args[2] != 0 {
+        (args[1], args[2], args[3])
     } else {
-        (args[0], args[1])
+        (args[0], 0, args[1])
     };
-    if old == 0 {
-        return 0;
+
+    // L'ancienne valeur se lit **avant** d'installer la nouvelle : c'est ce que
+    // `prlimit` promet, et ce dont depend tout code qui abaisse un quota le
+    // temps d'une operation puis le restaure.
+    if old != 0 {
+        let (soft, hard) = match resource {
+            RLIMIT_STACK => (crate::kernel::vmm::USER_STACK_SIZE, crate::kernel::vmm::USER_STACK_SIZE),
+            RLIMIT_NOFILE => (1024, 1024),
+            RLIMIT_AS => {
+                let limite = task::current_process().borrow().limite_as;
+                let valeur = if limite == 0 { RLIM_INFINITY } else { limite };
+                (valeur, RLIM_INFINITY)
+            }
+            _ => (RLIM_INFINITY, RLIM_INFINITY),
+        };
+        user_write(old, &soft.to_le_bytes());
+        user_write(old + 8, &hard.to_le_bytes());
     }
-    let (soft, hard) = match resource {
-        RLIMIT_STACK => (crate::kernel::vmm::USER_STACK_SIZE, crate::kernel::vmm::USER_STACK_SIZE),
-        RLIMIT_NOFILE => (1024, 1024),
-        _ => (RLIM_INFINITY, RLIM_INFINITY),
-    };
-    user_write(old, &soft.to_le_bytes());
-    user_write(old + 8, &hard.to_le_bytes());
+
+    if new != 0 && resource == RLIMIT_AS {
+        let soft = match user_read_u64(new) {
+            Some(valeur) => valeur,
+            None => return -errno::EFAULT,
+        };
+        // 0 en interne veut dire « pas de plafond » ; c'est ce que represente
+        // `RLIM_INFINITY` cote utilisateur.
+        task::current_process().borrow_mut().limite_as =
+            if soft == RLIM_INFINITY { 0 } else { soft };
+    }
     0
 }
 

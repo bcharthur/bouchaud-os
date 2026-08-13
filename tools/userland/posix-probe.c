@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -319,6 +320,90 @@ static void teste_socketpair(void)
     close(paire[1]);
 }
 
+/*
+ * RLIMIT_AS : le plafond memoire d'un processus.
+ *
+ * C'est ce qui separe « le renderer a fui » de « la machine est morte ». Sans
+ * quota, un processus separe qui perd le controle emporte tout le systeme, et
+ * l'isolation qu'on croyait acheter en le separant ne vaut plus rien.
+ *
+ * Le test verifie trois choses, dans cet ordre :
+ *
+ *   1. le plafond se pose et se relit ;
+ *   2. on peut allouer jusqu'a l'approcher ;
+ *   3. l'allocation qui le franchirait echoue **proprement** — `mmap` rend
+ *      MAP_FAILED avec ENOMEM, et le processus continue de tourner.
+ *
+ * Le troisieme point est le seul qui compte vraiment. Un depassement qui tuerait
+ * le processus, ou pire qui reussirait a moitie, ne serait pas un quota.
+ */
+static void teste_rlimit_as(void)
+{
+    struct rlimit lu;
+    if (getrlimit(RLIMIT_AS, &lu) != 0) {
+        verifie("getrlimit(RLIMIT_AS)", 0);
+        return;
+    }
+    verifie("getrlimit(RLIMIT_AS) repond", 1);
+
+    /*
+     * Le plafond doit laisser de la place a ce que le processus a deja mappe —
+     * son image, sa pile, son tas. On le pose donc au-dessus de l'existant, et
+     * on mesure la marge qu'il reste.
+     */
+    const size_t bloc = 4u * 1024 * 1024;
+    struct rlimit pose;
+    pose.rlim_cur = 64u * 1024 * 1024;
+    pose.rlim_max = RLIM_INFINITY;
+    if (setrlimit(RLIMIT_AS, &pose) != 0) {
+        verifie("setrlimit(RLIMIT_AS) accepte un plafond", 0);
+        return;
+    }
+    verifie("setrlimit(RLIMIT_AS) accepte un plafond", 1);
+
+    struct rlimit relu;
+    verifie("le plafond pose se relit",
+            getrlimit(RLIMIT_AS, &relu) == 0 && relu.rlim_cur == pose.rlim_cur);
+
+    /* On alloue par blocs jusqu'au refus. */
+    void *blocs[64];
+    int pris = 0;
+    int refus_propre = 0;
+    for (int i = 0; i < 64; i++) {
+        void *p = mmap(NULL, bloc, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) {
+            refus_propre = (errno == ENOMEM);
+            break;
+        }
+        /* Toucher la premiere page : une reservation qu'on n'utilise pas ne
+           prouverait rien. */
+        *(volatile char *)p = 1;
+        blocs[pris++] = p;
+    }
+
+    verifie("on alloue jusqu'au plafond, pas au-dela", pris > 0 && pris < 64);
+    verifie("l'allocation de trop echoue proprement (ENOMEM)", refus_propre);
+    /* Le processus doit etre encore la pour l'affirmer. */
+    verifie("le processus survit a son propre depassement", 1);
+
+    for (int i = 0; i < pris; i++)
+        munmap(blocs[i], bloc);
+
+    /* Une fois la place rendue, on doit pouvoir reallouer sous le meme
+       plafond : un quota qui ne se relache pas serait un compteur, pas une
+       limite. */
+    void *apres = mmap(NULL, bloc, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    verifie("liberer rend de la place sous le meme plafond", apres != MAP_FAILED);
+    if (apres != MAP_FAILED)
+        munmap(apres, bloc);
+
+    /* On rend le plafond, pour ne pas gener ce qui suit. */
+    pose.rlim_cur = RLIM_INFINITY;
+    setrlimit(RLIMIT_AS, &pose);
+}
+
 /* ----------------------------------------------------------------- main */
 
 int main(void)
@@ -342,6 +427,9 @@ int main(void)
 
     printf("\n[socketpair]\n");
     teste_socketpair();
+
+    printf("\n[quota memoire]\n");
+    teste_rlimit_as();
 
     printf("\n[reseau]\n");
     teste_reseau();

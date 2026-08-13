@@ -13,11 +13,71 @@ reelle. C'est la seule chose que le moteur demande a l'hote Qt, par
 fait ici.
 """
 
-import bo
+import bo as _bo
 
-from . import css, flex, grille, images, police, tableau
+from . import css, edition, flex, grille, images, intrinseque, police, tableau
 from .html import Element, Texte
 from . import telemetrie
+
+
+class _BoMesure:
+    """Enrobe l'hote : compte les mesures de texte, et ne les refait pas.
+
+    Chaque appel traverse le pont vers Qt (ou vers Pillow hors OS) : c'est
+    l'operation la plus chere que la mise en page fasse a l'unite.
+
+    Ces deux fonctions sont **pures** — meme texte, meme taille, meme fonte,
+    meme resultat — et la mesure montre a quel point elles se repetent. Sur
+    pypi.org/project/requests, une seule passe demande 11 954 largeurs pour
+    668 chaines distinctes : l'espace simple en 16 px est mesure **2 886
+    fois**. Les hauteurs de ligne sont pires encore : 5 910 appels pour
+    quatorze couples `(taille, fixe)`.
+
+    La memoire est videe quand une police arrive (`oublie()`), parce que la
+    meme chaine dans la meme famille ne mesure alors plus pareil. C'est le seul
+    evenement qui invalide ces valeurs : ni le DOM, ni la fenetre, ni le
+    defilement ne les touchent.
+    """
+
+    def __init__(self):
+        self._largeurs = {}
+        self._hauteurs = {}
+
+    def __getattr__(self, nom):
+        return getattr(_bo, nom)
+
+    def oublie(self):
+        """A appeler quand la fonte disponible change."""
+        self._largeurs.clear()
+        self._hauteurs.clear()
+
+    def largeur_texte(self, texte, taille, gras=False, fixe=False, famille=""):
+        telemetrie.compte("layout.mesures_texte")
+        cle = (texte, taille, gras, fixe, famille)
+        connue = self._largeurs.get(cle)
+        if connue is not None:
+            telemetrie.compte("layout.mesures_evitees")
+            return connue
+        mesure = _bo.largeur_texte(texte, taille, gras, fixe, famille)
+        # Borne : une page qui fabrique des milliers de chaines uniques ne doit
+        # pas transformer ce cache en fuite de memoire.
+        if len(self._largeurs) < 20000:
+            self._largeurs[cle] = mesure
+        return mesure
+
+    def hauteur_ligne(self, taille, fixe=False):
+        telemetrie.compte("layout.hauteurs_ligne")
+        cle = (taille, fixe)
+        connue = self._hauteurs.get(cle)
+        if connue is not None:
+            telemetrie.compte("layout.hauteurs_evitees")
+            return connue
+        mesure = _bo.hauteur_ligne(taille, fixe)
+        self._hauteurs[cle] = mesure
+        return mesure
+
+
+bo = _BoMesure()
 
 
 class Boite:
@@ -25,7 +85,7 @@ class Boite:
 
     __slots__ = ("element", "style", "x", "y", "largeur", "hauteur",
                  "enfants", "lignes", "lien", "puce", "images",
-                 "hors_flux", "rogne", "toile")
+                 "hors_flux", "rogne", "toile", "curseur", "cadre")
 
     def __init__(self, element, style):
         self.element = element
@@ -48,6 +108,13 @@ class Boite:
         self.rogne = False
         # Operations dessinees par un contexte 2D, si c'est un `<canvas>`.
         self.toile = None
+        # `(x, y, hauteur, selection)` quand ce champ est au foyer et doit
+        # montrer un curseur. `selection` vaut `(x, largeur)` ou `None`.
+        self.curseur = None
+        # Le contexte de navigation d'un `<iframe>`. La boite n'affiche alors
+        # pas son contenu propre mais la liste d'affichage du document enfant,
+        # rognee a ses bornes.
+        self.cadre = None
 
 
 class Fragment:
@@ -109,6 +176,22 @@ class Contexte:
     def __init__(self, regles, largeur_page, url="", image_video=None,
                  toile=None):
         self.regles = regles
+        # Le style deja calcule pendant **cette** passe, par element.
+        #
+        # Ce n'est pas un cache d'invalidation : il nait et meurt avec la passe,
+        # donc il ne peut pas rendre une valeur perimee — les regles, la
+        # fenetre et l'etat d'interaction sont fixes pendant toute sa duree.
+        #
+        # Il existe parce que la mesure l'a montre : `_style_de` est appele une
+        # premiere fois par `_dispose_ligne`, qui doit savoir si l'element est en
+        # ligne ou en bloc, puis une seconde par `_boite_pour`, qui fabrique la
+        # boite. Sur pypi.org, 2,66 appels de cascade par cle distincte, et
+        # 9 189 cles demandees plus d'une fois.
+        self._styles = {}
+        # Meme chose pour les boites engendrees, par `(element, pseudo)` : elles
+        # sont demandees une fois pour decider si elles existent, une autre pour
+        # les poser.
+        self._engendres = {}
         self.largeur_page = largeur_page
         # Adresse de la page : les `src` relatifs des images s'y resolvent.
         self.url = url
@@ -116,11 +199,37 @@ class Contexte:
         self.image_video = image_video
         # Rappel qui rend ce qu'un `<canvas>` a dessine, ou `None`.
         self.toile = toile
+        # De quoi mesurer une boite **sans la poser**. Voir `intrinseque`.
+        self.mesureur = intrinseque.Mesureur(bo, self, self.style_pour_mesure)
+
+    def style_pour_mesure(self, element, style_parent):
+        """Le style d'un element, pour le seul besoin de la mesure.
+
+        Passe par `_style_de`, donc par le cache de la passe : ce que la mesure
+        calcule ici, la pose n'aura pas a le recalculer. Le cout se deplace, il
+        ne se duplique pas — ce qui est la seule facon de rendre une mesure
+        prealable moins chere que la pose qu'elle remplace.
+
+        Le chemin se reduit a l'element lui-meme : `Selecteur.correspond` n'en
+        lit que le dernier maillon et remonte ensuite par les parents reels.
+        """
+        return _style_de(element, style_parent, [element], self)
 
 
-def construit(racine, regles, largeur_page, url="", image_video=None, toile=None):
-    """Construit l'arbre de boites et rend (racine, hauteur totale)."""
+def construit(racine, regles, largeur_page, url="", image_video=None, toile=None,
+              cadres=None):
+    """Construit l'arbre de boites et rend (racine, hauteur totale).
+
+    `cadres` est le gestionnaire de contextes enfants du document : la mise en
+    page y retrouve le contexte d'un `<iframe>` pour le rattacher a sa boite.
+    Elle ne le cree jamais — un chargement reseau n'a pas sa place dans une
+    mise en page, qui peut etre rejouee dix fois par seconde."""
+    telemetrie.compte("layout.passes")
+    # Une generation par passe : tout ce qui est memorise pendant celle-ci est
+    # vrai pour toute sa duree, et jete a la suivante.
+    css.nouvelle_generation()
     contexte = Contexte(regles, largeur_page, url, image_video, toile)
+    contexte.cadres = cadres
     style_initial = {
         "color": "#202124", "font-size": "16px", "line-height": "1.5",
         "display": "block",
@@ -162,6 +271,14 @@ def _style_de(element, style_parent, chemin, contexte):
     fixe = getattr(element, "style_engendre", None)
     if fixe is not None:
         return fixe
+
+    cle = id(element)
+    deja = contexte._styles.get(cle)
+    if deja is not None:
+        telemetrie.compte("layout.cascade_evitee")
+        return deja
+
+    telemetrie.compte("layout.cascade_element")
     style = css.applique(contexte.regles, element, chemin, style_parent)
 
     # Un element en ligne qui porte un bloc devient un bloc. La norme, elle,
@@ -174,6 +291,7 @@ def _style_de(element, style_parent, chemin, contexte):
             and _porte_un_bloc(element):
         style = dict(style)
         style["display"] = "block"
+    contexte._styles[cle] = style
     return style
 
 
@@ -227,8 +345,21 @@ def _engendre(boite, contexte, pseudo):
     element = boite.element
     if not isinstance(element, Element):
         return None
-    style = css.contenu_engendre(contexte.regles, element, _chemin(element),
-                                 boite.style, pseudo)
+    # Aucune regle de la page ne parle de ce pseudo-element : il ne peut
+    # designer personne, et la cascade rendrait toujours « pas de contenu ».
+    pseudos = getattr(contexte.regles, "pseudos", None)
+    if pseudos is not None and pseudo not in pseudos:
+        telemetrie.compte("layout.pseudo_evite")
+        return None
+
+    cle = (id(element), pseudo)
+    if cle in contexte._engendres:
+        telemetrie.compte("layout.pseudo_evite")
+        style = contexte._engendres[cle]
+    else:
+        style = css.contenu_engendre(contexte.regles, element, _chemin(element),
+                                     boite.style, pseudo)
+        contexte._engendres[cle] = style
     if style is None:
         return None
 
@@ -282,15 +413,30 @@ def _enfants(boite, contexte):
 
 
 def _texte_du_champ(element):
-    """Ce qu'un champ affiche : sa valeur, a defaut son invite."""
+    """Ce qu'un champ affiche : sa valeur courante, a defaut son invite.
+
+    `valeur_courante` est ce que l'utilisateur a tape ; l'attribut `value` reste
+    la valeur par defaut, celle que `form.reset()` restaure. Un champ de mot de
+    passe rend des puces : la vraie valeur ne sort jamais du modele d'edition,
+    et n'a donc aucune occasion d'etre peinte par megarde.
+    """
+    courante = getattr(element, "valeur_courante", None)
     if element.balise == "textarea":
+        if courante is not None:
+            return courante or element.attributs.get("placeholder", "")
         return element.texte() or element.attributs.get("placeholder", "")
     type_ = element.attributs.get("type", "text").lower()
     if type_ in ("checkbox", "radio", "hidden", "file", "color", "range"):
         return ""
+    if courante is not None:
+        if courante and type_ == "password":
+            return edition.PUCE * len(courante)
+        if courante:
+            return courante
+        return element.attributs.get("placeholder", "")
     valeur = element.attributs.get("value")
     if valeur:
-        return valeur
+        return edition.PUCE * len(valeur) if type_ == "password" else valeur
     if type_ in ("submit", "button", "reset"):
         return {"submit": "Envoyer", "reset": "Reinitialiser"}.get(type_, "")
     return element.attributs.get("placeholder", "")
@@ -367,12 +513,54 @@ def _boites_enfants(boite, contexte):
         boite.enfants.append(sous_boite)
 
 
+def _mesure_retrecie(boite, style, disponible, contexte):
+    """La largeur qu'une boite « retrecie au contenu » demande.
+
+    C'est le cas des `inline-block`, des flottants et des cellules : leur
+    largeur ne vient ni de leur parent ni de la feuille, mais de ce qu'elles
+    portent. La formule de la norme est `min(max-content, max(min-content,
+    disponible))` — assez large pour eviter les retours a la ligne inutiles,
+    jamais plus large que la place offerte.
+
+    Rend `None` quand la mesure n'est pas possible : l'appelant retombe alors
+    sur la pose d'essai, plus chere mais toujours correcte.
+    """
+    mesureur = getattr(contexte, "mesureur", None)
+    element = boite.element
+    if mesureur is None or element is None or not isinstance(element, Element):
+        return None
+    tailles = mesureur.tailles(element, style)
+    if tailles.max_contenu <= 0.0:
+        # Rien de mesurable — une boite vide, ou un contenu que le calcul ne
+        # couvre pas. On ne devine pas : la pose d'essai tranchera.
+        return None
+    return max(0.0, min(tailles.max_contenu, max(tailles.min_contenu, disponible)))
+
+
+def _largeur_intrinseque(boite, style, disponible, contexte):
+    """Resout `width` quand elle est exprimee en mots-cles de dimensionnement.
+
+    Rend `None` si `width` n'en est pas un — l'appelant garde alors son chemin
+    ordinaire.
+    """
+    brut = style.get("width", "auto")
+    if not brut or brut == "auto" or "content" not in brut:
+        return None
+    mesureur = getattr(contexte, "mesureur", None)
+    element = boite.element
+    if mesureur is None or element is None:
+        return None
+    tailles = mesureur.tailles(element, style)
+    return intrinseque.largeur_mot_cle(brut, tailles, disponible)
+
+
 def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None):
     """Positionne une boite de type bloc et tout ce qu'elle contient.
 
     `largeur_forcee` court-circuite le calcul de largeur : flex et grille
     attribuent aux articles une taille que la boite ne peut pas deduire seule.
     """
+    telemetrie.compte("layout.dispose_bloc")
     style = boite.style
     taille = _taille_police(style)
 
@@ -402,6 +590,14 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None
     boite.y = y + marge_h
     largeur = largeur_disponible - marge_g - marge_d
     imposee = css.longueur(style.get("width", "auto"), largeur_disponible, taille)
+    if imposee is None:
+        # `width: min-content | max-content | fit-content(...)` passe par le
+        # **meme** calcul que la taille de base d'un article flexible. C'etait
+        # l'exigence : une seule implementation de la notion, deux facons de la
+        # demander. Deux implementations d'une meme notion divergent toujours,
+        # et la divergence se manifeste par un affichage faux que rien ne
+        # signale.
+        imposee = _largeur_intrinseque(boite, style, largeur, contexte)
     if largeur_forcee is not None:
         largeur = largeur_forcee
     elif imposee is not None and imposee > 0:
@@ -425,6 +621,15 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None
     boite.rogne = style.get("overflow", "visible") in ("hidden", "auto", "scroll") \
         or style.get("overflow-y", "visible") in ("hidden", "auto", "scroll")
 
+    # Un `<iframe>` est une boite de taille declaree qui porte **un autre
+    # document**. Ses enfants dans l'arbre sont le repli qu'on montre a qui ne
+    # sait pas l'afficher ; ce qu'on affiche, nous, est la liste d'affichage du
+    # document enfant, rognee a ces bornes-la.
+    if isinstance(boite.element, Element) and boite.element.balise == "iframe":
+        _dispose_cadre(boite, style, taille, interieur_l, contexte,
+                       pad_b, b_b)
+        return
+
     # Une toile est une boite de taille declaree qui porte un dessin, pas du
     # contenu : ses enfants sont le repli qu'on montre a qui ne sait pas la
     # dessiner, et nous savons.
@@ -433,6 +638,7 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None
                        interieur_l, contexte)
         return
 
+    telemetrie.compte("layout.boites")
     mode = style.get("display", "block")
     if telemetrie.ACTIVE and mode not in DISPLAY_CONNUS:
         # Une valeur de `display` non reconnue retombe en bloc. `flow-root`
@@ -564,6 +770,63 @@ def _dispose_bloc(boite, x, y, largeur_disponible, contexte, largeur_forcee=None
         curseur = bas_flottants
     _termine_bloc(boite, style, curseur, pad_b, b_b, taille, interieur_l)
     _pose_hors_flux(boite, contexte)
+
+
+def _dispose_cadre(boite, style, taille, interieur_l, contexte, pad_b, b_b):
+    """Pose la boite d'un `<iframe>` et rattache son contexte de navigation.
+
+    La boite ne descend pas dans ses enfants : le document enfant vit dans son
+    propre arbre de boites, mis en page a **son** viewport. C'est ce qui fait
+    qu'une `@media` ou un `vw` a l'interieur de l'iframe se rapportent au cadre
+    et non a la fenetre — et c'est aussi ce qui permettra, plus tard, de mettre
+    en page ce document dans un autre processus sans rien changer ici.
+
+    Les dimensions viennent de la feuille, puis de l'attribut HTML, puis des
+    valeurs par defaut de la norme (300x150). Cet ordre est celui de la norme :
+    une regle CSS l'emporte sur `width="…"`.
+    """
+    element = boite.element
+    largeur = interieur_l
+    declaree = css.longueur(style.get("width", "auto"), interieur_l, taille)
+    if declaree is None:
+        brut = (element.attributs.get("width") or "").strip()
+        try:
+            declaree = float(brut.rstrip("px").strip()) if brut else None
+        except ValueError:
+            declaree = None
+    if declaree is None:
+        declaree = 300.0
+    largeur = max(0.0, min(declaree, interieur_l)) if interieur_l > 0 else declaree
+
+    hauteur = css.longueur(style.get("height", "auto"), 0.0, taille)
+    if hauteur is None:
+        brut = (element.attributs.get("height") or "").strip()
+        try:
+            hauteur = float(brut.rstrip("px").strip()) if brut else None
+        except ValueError:
+            hauteur = None
+    if hauteur is None:
+        hauteur = 150.0
+
+    boite.largeur = largeur
+    boite.hauteur = max(0.0, hauteur) + pad_b + b_b
+    # Le contexte enfant, s'il existe deja. Il est cree par le gestionnaire de
+    # cadres au battement, pas ici : la mise en page ne doit pas declencher de
+    # chargement reseau.
+    cadres_du_document = getattr(contexte, "cadres", None)
+    boite.cadre = (cadres_du_document.contexte_de(element)
+                   if cadres_du_document is not None else None)
+    if boite.cadre is not None:
+        # Le viewport de l'enfant suit la boite : redimensionner l'iframe
+        # redimensionne le document qu'il porte.
+        interieur_h = max(0.0, hauteur)
+        if (boite.cadre.largeur, boite.cadre.hauteur) != (largeur, interieur_h):
+            boite.cadre.largeur = largeur
+            boite.cadre.hauteur = interieur_h
+            if boite.cadre.document is not None:
+                boite.cadre.document.hauteur_fenetre = interieur_h or 1.0
+                boite.cadre.document.remet_en_page(largeur)
+    telemetrie.compte("layout.cadres")
 
 
 def _dispose_toile(boite, style, taille, curseur, pad_b, bordure, reference,
@@ -728,8 +991,17 @@ def _pose_flottant(boite, element, style, chemin, flottants, gauche, y,
     # Une boite flottante prend la largeur de son contenu, pas celle de son
     # parent : sans cela, la premiere occuperait toute la ligne et les
     # suivantes descendraient sous elle.
-    _dispose_bloc(sous_boite, gauche, y, max(1.0, largeur), contexte)
-    voulue = declaree if declaree is not None else etendue_contenu(sous_boite)
+    #
+    # Cette largeur se mesurait par une pose d'essai — soit trois dispositions
+    # completes du sous-arbre pour un seul flottant, la premiere n'existant que
+    # pour lire un nombre. Le calcul intrinseque rend le meme nombre sans rien
+    # poser.
+    voulue = declaree
+    if voulue is None:
+        voulue = _mesure_retrecie(sous_boite, style, largeur, contexte)
+    if voulue is None:
+        _dispose_bloc(sous_boite, gauche, y, max(1.0, largeur), contexte)
+        voulue = etendue_contenu(sous_boite)
     voulue = max(0.0, min(voulue, largeur))
     occupee = voulue + marge_g + marge_d
 
@@ -821,6 +1093,14 @@ def _lignes_tableau(boite, contexte):
 
 
 def etendue_contenu(boite):
+    telemetrie.compte("layout.etendue_contenu")
+    if telemetrie.ACTIVE:
+        with telemetrie.chrono("layout_intrinseque"):
+            return _etendue_contenu(boite)
+    return _etendue_contenu(boite)
+
+
+def _etendue_contenu(boite):
     """Ce que le contenu d'une boite occupe reellement en largeur.
 
     Une boite de bloc prend toute la largeur qu'on lui donne : la mesurer rend
@@ -841,7 +1121,8 @@ def etendue_contenu(boite):
     for enfant in boite.enfants:
         marge = _longueur(enfant.style, "margin-right", boite.largeur,
                           _taille_police(enfant.style))
-        droite = max(droite, etendue_contenu(enfant), enfant.x + enfant.largeur + marge)
+        droite = max(droite, _etendue_contenu(enfant),
+                     enfant.x + enfant.largeur + marge)
     if boite.toile:
         droite = max(droite, boite.x + boite.largeur)
 
@@ -1002,8 +1283,17 @@ def _pose_en_ligne_bloc(boite, nœud, style, chemin, gauche, largeur,
     reste = max(0.0, gauche + largeur - curseur_x)
     declaree = css.longueur(style.get("width", "auto"), largeur, taille)
 
-    _dispose_bloc(sous_boite, curseur_x, curseur_y, max(1.0, largeur), contexte)
-    voulue = declaree if declaree is not None else etendue_contenu(sous_boite)
+    # La largeur voulue se demande au calcul intrinseque plutot qu'a une pose
+    # d'essai : `max-content` est exactement la definition de « ce que cette
+    # boite occuperait si rien ne revenait a la ligne », c'est-a-dire la largeur
+    # retrecie d'un `inline-block`. La pose d'essai reste en secours pour ce que
+    # la mesure ne sait pas encore faire.
+    voulue = declaree
+    if voulue is None:
+        voulue = _mesure_retrecie(sous_boite, style, largeur, contexte)
+    if voulue is None:
+        _dispose_bloc(sous_boite, curseur_x, curseur_y, max(1.0, largeur), contexte)
+        voulue = etendue_contenu(sous_boite)
     marge_g = _longueur(style, "margin-left", largeur, taille)
     marge_d = _longueur(style, "margin-right", largeur, taille)
     voulue = max(0.0, min(voulue, largeur))
@@ -1060,6 +1350,7 @@ def _pose_image(boite, nœud, style, lien, gauche, largeur,
 def _pose_texte(boite, texte, style, lien, gauche, largeur,
                 curseur_x, curseur_y, hauteur_ligne):
     """Coupe le texte en mots et les pose en revenant a la ligne au besoin."""
+    telemetrie.compte("layout.textes_poses")
     texte = css.transforme_texte(texte, style)
     taille = _taille_police(style)
     gras = _est_gras(style)

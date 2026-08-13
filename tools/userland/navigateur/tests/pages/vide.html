@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Page vide</title>
+<!--
+  Une page qui ne fait rien, sauf exister avec un contexte JavaScript.
+
+  Elle sert aux epreuves qui pilotent le moteur depuis leur propre code plutot
+  que depuis la page : celle du cycle de vie des Workers cree et detruit mille
+  contextes ici, et tout ce que la balance mesure appartient donc aux workers,
+  pas au decor.
+
+  Le `<script>` n'est pas decoratif : sans lui, le document n'ouvre pas de
+  contexte JavaScript, et l'epreuve n'aurait rien pour parler au moteur.
+-->
+</head><body>
+<p id="etat">vide</p>
+<script>globalThis.__vide = true;</script>
+</body></html>

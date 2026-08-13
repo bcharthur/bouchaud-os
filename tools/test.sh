@@ -90,6 +90,8 @@ exec /audio-probe
 exec /net-probe 91.189.91.83
 exec /persist-probe
 exec /shm-probe
+exec /ipc-probe
+exec /ordonnanceur-probe
 exec /qpa-probe
 SCENARIO
 

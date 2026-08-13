@@ -19,6 +19,7 @@ images et la mise en page. Ce qu'elles ne couvrent pas : le rendu a l'ecran et
 le reseau, qui demandent l'un un ecran, l'autre le monde exterieur.
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -107,7 +108,7 @@ except ImportError:
 sys.path.insert(0, ".")
 
 import moteur  # noqa: E402
-from moteur import css, grille, html, js, reseau  # noqa: E402
+from moteur import css, grille, html, js, reseau, telemetrie  # noqa: E402
 
 # --- Cadre de verification ----------------------------------------------------
 
@@ -446,6 +447,182 @@ def verifie_erreurs():
 
     egal("erreurs: le contexte reste utilisable", contexte.execute("1 + 1"), 2)
     contexte.ferme()
+
+
+def verifie_diagnostics_compatibilite():
+    """Le rapport mesure des appels executes, et nomme correctement ce qu'il voit.
+
+    Deux defauts de la premiere version sont verrouilles ici.
+
+    Le premier : tout `X is not defined` etait range en API navigateur absente.
+    `currentUsr` devenait donc une lacune du moteur, alors que c'est un defaut
+    de la page — ou la consequence d'un bundle qui n'a pas charge. Une feuille
+    de route batie la-dessus aurait ete pleine de noms qu'aucun navigateur ne
+    fournit.
+
+    Le second : seuls `fetch` et `XMLHttpRequest` alimentaient le compteur de
+    ressources. Un `<script src>` principal en 404 vidait la page de tout
+    comportement sans que le rapport n'en dise un mot.
+    """
+    doc = document("<body></body>")
+    contexte = js.Contexte(doc)
+    try:
+        # `RTCPeerConnection` n'existe pas : l'accesseur du prelude le note et
+        # rend `undefined`, donc la detection de fonctionnalite de la page
+        # continue de retomber sur son plan de secours.
+        #
+        # L'exemple etait `indexedDB` jusqu'a ce qu'il soit implemente. Le
+        # remplacer plutot que d'affaiblir l'epreuve : ce qu'elle verifie, c'est
+        # que le moteur sait nommer ce qui lui manque — pas qu'il manque
+        # quelque chose en particulier.
+        contexte.execute("void RTCPeerConnection;", "page.js")
+        egal("diagnostic: API absente observee",
+             contexte.rapport_compatibilite().get("api_absente:RTCPeerConnection"), 1)
+
+        # A — un identifiant applicatif n'est pas une API navigateur.
+        contexte.execute("console.log(currentUsr);", "app.js")
+        egal("diagnostic: un identifiant inconnu n'est pas une API",
+             contexte.rapport_compatibilite().get("identifiant_inconnu:currentUsr"), 1)
+        egal("diagnostic: et il n'apparait pas comme API absente",
+             contexte.rapport_compatibilite().get("api_absente:currentUsr"), None)
+
+        for nom in ("webpackChunk", "myApplication", "foo"):
+            contexte.execute("void %s;" % nom, "app.js")
+            egal("diagnostic: %s reste applicatif" % nom,
+                 contexte.rapport_compatibilite().get("api_absente:%s" % nom), None)
+
+        # A bis — les vrais noms de la plate-forme, eux, sont bien reconnus.
+        for nom in ("WebSocket", "indexedDB", "TextEncoder"):
+            verifie("diagnostic: %s est une surface Web" % nom,
+                    telemetrie.est_surface_web(nom))
+        for nom in ("currentUsr", "webpackChunk", "myApplication", "foo",
+                    "__webpack_require__", "MonComposant"):
+            verifie("diagnostic: %s n'est pas une surface Web" % nom,
+                    not telemetrie.est_surface_web(nom))
+
+    finally:
+        contexte.ferme()
+
+    # Un contexte neuf par forme d'erreur : sans cela les compteurs se melent
+    # et une verification qui compte « 1 » pourrait passer pour la mauvaise
+    # raison.
+    for code, cle, quoi in (
+            ("new Array(-1)", "erreur_js:RangeError",
+             "les erreurs sont classees par genre"),
+            ("JSON.parse('{')", "erreur_js:SyntaxError",
+             "une erreur de syntaxe garde son genre"),
+            # QuickJS ne nomme pas le membre d'un `x.y()` : le message est un
+            # « TypeError: not a function » nu. On compte le cas sans lui
+            # inventer de nom, ce serait plus trompeur que de l'admettre.
+            ("document.body.tourneEnRond()", "methode_absente:<anonyme>",
+             "une methode anonyme est comptee sans etre nommee"),
+            # L'autre forme nomme la propriete, et c'est la plus utile de
+            # toutes : c'est exactement celle qui tuait le JavaScript de
+            # pypi.org.
+            ("var vide; vide.includes('x')", "methode_absente:includes",
+             "la propriete lue sur undefined est nommee")):
+        neuf = js.Contexte(document("<body></body>"))
+        try:
+            neuf.execute(code, "cas.js")
+            egal("diagnostic: %s" % quoi, neuf.rapport_compatibilite().get(cle), 1)
+        finally:
+            neuf.ferme()
+
+
+def verifie_moignons():
+    """Une API presente mais vide doit se denoncer elle-meme.
+
+    C'est le pire des trois etats. Absente, la page retombe sur son plan de
+    secours ; presente et juste, tout va bien ; presente et vide, la page teste
+    `if (history.pushState)`, obtient `true`, prend le chemin moderne et
+    poursuit avec un navigateur dont l'etat ne correspond plus a ce qu'elle
+    croit. Sans cette categorie, ce cas-la n'apparaissait nulle part.
+    """
+    doc = document("<body><div id=a>x</div></body>")
+    contexte = js.Contexte(doc)
+    try:
+        # Le test de detection doit continuer de reussir : le moignon reste
+        # present, sinon on changerait le comportement en le mesurant.
+        egal("moignon: history.pushState se detecte encore",
+             contexte.execute("typeof history.pushState"), "function")
+
+        contexte.execute("window.scrollTo(0, 100)")
+        contexte.execute("window.open('/x')")
+        contexte.execute("var x = new XMLHttpRequest(); x.abort()")
+        rapport = contexte.rapport_compatibilite()
+        for cle in ("moignon_appele:window.scrollTo",
+                    "moignon_appele:window.open",
+                    "moignon_appele:XMLHttpRequest.abort"):
+            egal("moignon: %s est compte" % cle.split(":")[1], rapport.get(cle), 1)
+
+        # Un moignon n'est pas une API absente : les deux se corrigent
+        # differemment et ne doivent pas se melanger.
+        verifie("moignon: aucun moignon n'est classe API absente",
+                not any(c.startswith("api_absente:window") for c in rapport),
+                [c for c in rapport if c.startswith("api_absente")])
+
+        # Et la reciproque, qui est la vraie valeur de cette categorie : ce qui
+        # a ete implemente ne doit plus s'y trouver. Le jour ou `pushState`
+        # redeviendrait vide, cette ligne le dirait.
+        contexte.execute("history.pushState({}, '', '/x')")
+        contexte.execute("document.getElementById('a').focus()")
+        rapport = contexte.rapport_compatibilite()
+        for nom in ("history.pushState", "element.focus"):
+            egal("moignon: %s n'est plus un moignon" % nom,
+                 rapport.get("moignon_appele:%s" % nom), None)
+    finally:
+        contexte.ferme()
+
+
+def verifie_ressources_echouees():
+    """B — toutes les destinations comptent, pas seulement `fetch`."""
+    from moteur import reseau as _reseau
+
+    doc = document("<body></body>", url="http://exemple.test/page")
+    contexte = js.Contexte(doc)
+    ancien = _reseau.charge
+
+    def absente(url, methode="GET", corps=None, entetes=None, brut=False,
+                document=None, destination=None):
+        return _reseau.Reponse(url, "", "text/plain", 404)
+
+    _reseau.charge = absente
+    try:
+        # Le cas qui manquait : le bundle principal de la page.
+        contexte._telecharge_script("http://exemple.test/app.js")
+        egal("ressources: un script en 404 est compte",
+             contexte.rapport_compatibilite().get("ressource_echouee:script"), 1)
+
+        contexte._op_moduleSource("http://exemple.test/mod.js")
+        egal("ressources: un module en 404 est compte",
+             contexte.rapport_compatibilite().get("ressource_echouee:module"), 1)
+
+        contexte._recupere("GET", "http://exemple.test/api", None, {})
+        egal("ressources: un fetch en 404 est compte",
+             contexte.rapport_compatibilite().get("ressource_echouee:fetch"), 1)
+    finally:
+        _reseau.charge = ancien
+        contexte.ferme()
+
+    # Les chargeurs hors JavaScript passent par la telemetrie globale, avec la
+    # meme cle de destination.
+    telemetrie.reinitialise()
+    telemetrie.active(True)
+    try:
+        for destination in ("stylesheet", "image", "font", "media"):
+            telemetrie.ressource_echouee("http://exemple.test/x", 404, destination)
+        vues = {e["cle"]: e["n"]
+                for e in telemetrie.rapport().get(telemetrie.RESSOURCE_ECHOUEE, [])}
+        for destination in ("stylesheet", "image", "font", "media"):
+            egal("ressources: %s est une destination connue" % destination,
+                 vues.get(destination), 1)
+        verifie("ressources: la note porte le code et l'adresse",
+                any("404" in ex and "exemple.test" in ex
+                    for e in telemetrie.rapport()[telemetrie.RESSOURCE_ECHOUEE]
+                    for ex in e["exemples"]))
+    finally:
+        telemetrie.active(False)
+        telemetrie.reinitialise()
 
 
 def verifie_budget():
@@ -2024,6 +2201,120 @@ def proche(a, b, marge=1.5):
     return abs(a - b) <= marge
 
 
+def verifie_tailles_intrinseques():
+    """`min-content`, `max-content`, `fit-content` — et le meme calcul partout.
+
+    Ces trois mots-cles et la taille de base d'un article flexible sont la meme
+    notion. Le moteur les fait passer par la meme fonction, et ces epreuves
+    verifient les deux bouts : ce que la feuille demande explicitement, et ce
+    que la disposition en deduit toute seule.
+
+    L'ordre des inegalites est ce qui compte. `min-content` est la largeur du
+    mot le plus long, `max-content` celle de la phrase entiere : entre les deux
+    il doit y avoir un rapport net sur un texte de plusieurs mots. Un moteur qui
+    rendrait la meme valeur pour les deux aurait l'air de marcher sur une page
+    d'essai et s'effondrerait sur une vraie.
+    """
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #min  { width: min-content; }
+          #max  { width: max-content; }
+          #ajus { width: fit-content; }
+          #plein { }
+        </style>
+        <body>
+          <div id="min">alpha bravo charlie delta</div>
+          <div id="max">alpha bravo charlie delta</div>
+          <div id="ajus">alpha bravo charlie delta</div>
+          <div id="plein">alpha bravo charlie delta</div>
+        </body>""")
+    petite = boite_de(doc, "min")
+    grande = boite_de(doc, "max")
+    ajustee = boite_de(doc, "ajus")
+    pleine = boite_de(doc, "plein")
+
+    verifie("intrinseque: min-content est plus etroit que max-content",
+            petite.largeur < grande.largeur,
+            (petite.largeur, grande.largeur))
+    verifie("intrinseque: min-content n'est pas nul",
+            petite.largeur > 0, petite.largeur)
+    # Un bloc ordinaire prend toute la largeur ; `max-content` ne prend que ce
+    # que le texte demande. C'est la difference que le mot-cle doit produire.
+    verifie("intrinseque: max-content est plus etroit qu'un bloc ordinaire",
+            grande.largeur < pleine.largeur,
+            (grande.largeur, pleine.largeur))
+    # `fit-content` sans argument vaut `max-content` tant que la place suffit.
+    verifie("intrinseque: fit-content suit max-content quand la place suffit",
+            proche(ajustee.largeur, grande.largeur, 2.0),
+            (ajustee.largeur, grande.largeur))
+
+    # `fit-content(N)` borne : au-dessous de `max-content`, c'est N qui gagne ;
+    # jamais au-dessous de `min-content`.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #serre { width: fit-content(60px); }
+        </style>
+        <body><div id="serre">alpha bravo charlie delta</div></body>""")
+    serre = boite_de(doc, "serre")
+    verifie("intrinseque: fit-content(60px) ne depasse pas sa borne",
+            serre.largeur <= max(60.0, petite.largeur) + 1.0, serre.largeur)
+
+    # Un seul mot : les deux tailles se rejoignent, il n'y a nulle part ou
+    # couper.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #un { width: min-content; }
+          #deux { width: max-content; }
+        </style>
+        <body><div id="un">indivisible</div><div id="deux">indivisible</div></body>""")
+    verifie("intrinseque: un mot seul donne les memes deux tailles",
+            proche(boite_de(doc, "un").largeur,
+                   boite_de(doc, "deux").largeur, 2.0),
+            (boite_de(doc, "un").largeur,
+             boite_de(doc, "deux").largeur))
+
+    # `white-space: nowrap` interdit la coupure : `min-content` rejoint
+    # `max-content`.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #insecable { width: min-content; white-space: nowrap; }
+          #libre { width: max-content; }
+        </style>
+        <body>
+          <div id="insecable">alpha bravo charlie</div>
+          <div id="libre">alpha bravo charlie</div>
+        </body>""")
+    verifie("intrinseque: nowrap fait remonter min-content a max-content",
+            proche(boite_de(doc, "insecable").largeur,
+                   boite_de(doc, "libre").largeur, 3.0),
+            (boite_de(doc, "insecable").largeur,
+             boite_de(doc, "libre").largeur))
+
+    # Le meme calcul dans l'autre sens : une boite `inline-block` se retrecit a
+    # son contenu sans qu'on le lui demande. C'est le raccord qui compte —
+    # si `inline-block` et `max-content` divergeaient, il y aurait deux
+    # implementations de la meme notion.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #bloc { display: inline-block; }
+          #mot  { width: max-content; }
+        </style>
+        <body>
+          <div><span id="bloc">alpha bravo</span></div>
+          <div id="mot">alpha bravo</div>
+        </body>""")
+    enligne = boite_de(doc, "bloc")
+    motcle = boite_de(doc, "mot")
+    verifie("intrinseque: inline-block et max-content s'accordent",
+            proche(enligne.largeur, motcle.largeur, 3.0),
+            (enligne.largeur, motcle.largeur))
+
+
 def verifie_flex():
     """La disposition flexible : repartition, justification, retour a la ligne."""
     doc = document("""
@@ -2565,6 +2856,113 @@ def verifie_index_regles():
     index_large = css.indexe(css.analyse(large + "\n" + feuille))
     egal("index: une feuille de 500 classes n'en propose que l'utile",
          len(index_large.candidates(span)), 1)
+
+    verifie_index_cles()
+
+
+def verifie_index_cles():
+    """Les cles d'indexation : ce qui est range ou, et surtout ce qui ne l'est pas.
+
+    Un index de selecteurs a un mode de defaillance particulier : il ne casse
+    rien bruyamment, il **perd des styles**. Une regle rangee sous une cle que
+    l'element ne porte pas n'est jamais essayee, et la page s'affiche presque
+    bien — c'est le pire genre de bogue a diagnostiquer.
+
+    Chaque cas ci-dessous verifie donc la meme chose sous deux angles : que le
+    style calcule par l'index est identique a celui calcule sans lui, et que le
+    filtrage a bien eu lieu.
+    """
+    def chemin_de(source, balise):
+        page = html.analyse(source)
+        cible = next(n for n in page.parcours()
+                     if isinstance(n, html.Element) and n.balise == balise)
+        chemin, courant = [], cible
+        while courant is not None:
+            chemin.append(courant)
+            courant = courant.parent
+        chemin.reverse()
+        return cible, chemin
+
+    def meme_style(nom, feuille, source, balise, attendu_couleur):
+        regles = css.analyse(feuille)
+        index = css.indexe(regles)
+        cible, chemin = chemin_de(source, balise)
+        par_index = css.applique(index, cible, chemin, {})
+        par_liste = css.applique(regles, cible, chemin, {})
+        egal("index %s: meme resultat que sans index" % nom, par_index, par_liste)
+        egal("index %s: la regle s'applique" % nom,
+             par_index.get("color"), attendu_couleur)
+
+    # --- Attribut : la cle la plus rentable de la mesure ---------------------
+    # 34 des 116 regles non indexables de pypi.org tenaient a `[type]`.
+    meme_style("attribut", "[type=text] { color: #aa0000; }",
+               '<body><input type="text"></body>', "input", "#aa0000")
+    index = css.indexe(css.analyse("[type=text] { color: #aa0000; }"))
+    _, chemin = chemin_de('<body><p>x</p></body>', "p")
+    egal("index attribut: un element sans l'attribut ne voit pas la regle",
+         len(index.candidates(chemin[-1])), 0)
+
+    # --- `:is()` prete ses cles ---------------------------------------------
+    meme_style("is", ":is(input, select, textarea) { color: #00aa00; }",
+               '<body><select></select></body>', "select", "#00aa00")
+    index = css.indexe(css.analyse(":is(input, select) { color: #00aa00; }"))
+    _, chemin = chemin_de('<body><p>x</p></body>', "p")
+    egal("index is: une balise hors du groupe ne voit pas la regle",
+         len(index.candidates(chemin[-1])), 0)
+
+    # --- `:not()` ne prete PAS les siennes -----------------------------------
+    # C'est le cas ou une erreur d'indexation serait invisible en test naif :
+    # `:not(.modal)` designe TOUT SAUF `.modal`. Le ranger sous `.modal` le
+    # rendrait invisible pour tous les autres — c'est-a-dire presque tous.
+    meme_style("not", ":not(.modal) { color: #0000aa; }",
+               '<body><p>x</p></body>', "p", "#0000aa")
+    index = css.indexe(css.analyse(":not(.modal) { color: #0000aa; }"))
+    _, chemin = chemin_de('<body><p>x</p></body>', "p")
+    verifie("index not: la regle reste universelle",
+            len(index.candidates(chemin[-1])) == 1,
+            len(index.candidates(chemin[-1])))
+
+    # --- `:is()` dont une branche est libre reste universel ------------------
+    index = css.indexe(css.analyse(":is(p, [hidden]) { color: #111; }"))
+    _, chemin = chemin_de('<body><span hidden>x</span></body>', "span")
+    verifie("index is: une branche par attribut range sous cet attribut",
+            len(index.candidates(chemin[-1])) == 1,
+            len(index.candidates(chemin[-1])))
+
+    # --- Partition par pseudo-element ---------------------------------------
+    # 53 % des cascades de pypi.org visaient un pseudo-element et essayaient
+    # quand meme toutes les regles de l'element porteur.
+    feuille = """
+        p { color: #101010; }
+        p::before { content: "a"; color: #202020; }
+        p::after  { content: "b"; color: #303030; }
+    """
+    regles = css.analyse(feuille)
+    index = css.indexe(regles)
+    cible, chemin = chemin_de('<body><p>x</p></body>', "p")
+    egal("index pseudo: l'element ne voit que ses regles",
+         len(index.candidates(cible, None)), 1)
+    egal("index pseudo: ::before ne voit que les siennes",
+         len(index.candidates(cible, "before")), 1)
+    egal("index pseudo: le style de ::before est le bon",
+         css.applique(index, cible, chemin, {}, "before").get("color"), "#202020")
+    egal("index pseudo: celui de ::after aussi",
+         css.applique(index, cible, chemin, {}, "after").get("color"), "#303030")
+    egal("index pseudo: et celui de l'element n'a pas bouge",
+         css.applique(index, cible, chemin, {}).get("color"), "#101010")
+
+    # --- `:root` ne designe que la racine ------------------------------------
+    index = css.indexe(css.analyse(":root { color: #404040; }"))
+    _, chemin = chemin_de('<body><p>x</p></body>', "p")
+    egal("index root: un element ordinaire ne voit pas la regle",
+         len(index.candidates(chemin[-1])), 0)
+
+    # --- Aucune regle rendue deux fois ---------------------------------------
+    # Un `:is()` range sous plusieurs classes que l'element porte toutes.
+    index = css.indexe(css.analyse(":is(.fas, .far) { color: #505050; }"))
+    _, chemin = chemin_de('<body><i class="fas far">x</i></body>', "i")
+    egal("index is: une regle rangee sous deux cles n'est rendue qu'une fois",
+         len(index.candidates(chemin[-1])), 1)
 
 
 def verifie_variables_css():
@@ -3265,6 +3663,278 @@ def _cache_http(stockage):
     egal("cache: et ne resssert pas", boite.lit("http://exemple.test/prive"), None)
     boite.vide()
     egal("cache: le vidage vide", boite.lit("http://exemple.test/logo.png"), None)
+
+
+def verifie_indexeddb():
+    """IndexedDB : asynchrone, transactionnel, persistant, cloisonne.
+
+    Quatre proprietes, et chacune se casse d'une facon differente :
+
+    * **asynchrone** — si une ecriture bloquait le fil, les minuteries
+      s'arreteraient pendant. On en pose une et on verifie qu'elle a battu
+      pendant que mille enregistrements partaient ;
+    * **transactionnel** — une transaction abandonnee ne doit rien laisser
+      derriere elle. Pas « presque rien » : rien ;
+    * **persistant** — ce qui est ecrit doit se relire apres que tout ce qui
+      etait en memoire a ete jete ;
+    * **cloisonne** — deux origines qui ouvrent `mabase` ouvrent deux bases.
+      Sans cela, un site lirait l'etat d'un autre.
+    """
+    import time as _time
+    from moteur import indexeddb
+
+    restaure = isole_le_stockage()
+    try:
+        indexeddb.reinitialise()
+        _indexeddb_api(_time)
+        _indexeddb_transactions()
+        _indexeddb_persistance(indexeddb)
+        _indexeddb_origines(indexeddb)
+    finally:
+        indexeddb.reinitialise()
+        restaure()
+
+
+def _bat(contexte, jusqua, secondes=10.0):
+    """Bat la boucle d'evenements jusqu'a ce que la condition tienne.
+
+    Comme pour le reseau : attendre un nombre fixe de tours rendrait ces
+    epreuves instables sous charge, et un test instable est pire qu'absent.
+    """
+    import time as _time
+    limite = _time.perf_counter() + secondes
+    while _time.perf_counter() < limite:
+        contexte.tic()
+        if contexte.execute(jusqua):
+            return True
+        _time.sleep(0.01)
+    return False
+
+
+def _indexeddb_api(_time):
+    """Le cycle complet : open → onupgradeneeded → transaction → put → get."""
+    doc = document("<body><p>base</p></body>", url="https://un.test/page")
+    contexte = js.Contexte(doc)
+
+    verifie("idb: indexedDB est un objet, pas un moignon",
+            contexte.execute("typeof indexedDB === 'object' && "
+                             "typeof indexedDB.open === 'function'"), True)
+
+    contexte.execute("""
+        globalThis.__t = { etapes: [] };
+        const d = indexedDB.open("carnet", 1);
+        d.onupgradeneeded = function (e) {
+            __t.etapes.push("montee");
+            __t.ancienne = e.oldVersion;
+            __t.nouvelle = e.newVersion;
+            e.target.result.createObjectStore("notes");
+        };
+        d.onsuccess = function (e) {
+            __t.etapes.push("ouverte");
+            __t.version = e.target.result.version;
+            __t.magasins = Array.from(e.target.result.objectStoreNames);
+            globalThis.__base = e.target.result;
+            const t = __base.transaction("notes", "readwrite");
+            t.objectStore("notes").put({ titre: "un" }, "a");
+            t.objectStore("notes").put({ titre: "deux" }, "b");
+            t.oncomplete = function () {
+                __t.etapes.push("ecrit");
+                const l = __base.transaction("notes", "readonly");
+                const r = l.objectStore("notes").get("a");
+                r.onsuccess = function () { __t.lu = r.result; };
+                const c = l.objectStore("notes").count();
+                c.onsuccess = function () { __t.combien = c.result; };
+            };
+        };
+        d.onerror = function (e) { __t.erreur = String(e.target.error); };
+    """)
+    _bat(contexte, "__t.lu !== undefined && __t.combien !== undefined")
+
+    lu = json.loads(contexte.execute("JSON.stringify(__t)"))
+    egal("idb: onupgradeneeded avant onsuccess",
+         lu.get("etapes", [])[:2], ["montee", "ouverte"])
+    egal("idb: l'ancienne version est 0 sur une base neuve", lu.get("ancienne"), 0)
+    egal("idb: la nouvelle version est celle demandee", lu.get("nouvelle"), 1)
+    egal("idb: le magasin cree est declare", lu.get("magasins"), ["notes"])
+    egal("idb: la transaction s'est validee seule",
+         "ecrit" in lu.get("etapes", []), True)
+    egal("idb: get rend l'objet range", (lu.get("lu") or {}).get("titre"), "un")
+    egal("idb: count compte ce qui est range", lu.get("combien"), 2)
+
+    # `add` refuse une cle deja prise — c'est ce qui protege d'un doublon.
+    contexte.execute("""
+        (function () {
+            __t.doublon = null;
+            const t = __base.transaction("notes", "readwrite");
+            const r = t.objectStore("notes").add({ titre: "encore" }, "a");
+            r.onerror = function () { __t.doublon = r.error.name; };
+            r.onsuccess = function () { __t.doublon = "passe"; };
+        })();
+    """)
+    _bat(contexte, "__t.doublon !== null")
+    egal("idb: add refuse une cle deja prise",
+         json.loads(contexte.execute("JSON.stringify(__t.doublon)")),
+         "ConstraintError")
+
+    # Une ecriture en lecture seule doit echouer, pas passer en silence.
+    contexte.execute("""
+        (function () {
+            __t.lectureSeule = null;
+            const t = __base.transaction("notes", "readonly");
+            const r = t.objectStore("notes").put({ x: 1 }, "z");
+            r.onerror = function () { __t.lectureSeule = r.error.name; };
+            r.onsuccess = function () { __t.lectureSeule = "passe"; };
+        })();
+    """)
+    _bat(contexte, "__t.lectureSeule !== null")
+    egal("idb: une transaction en lecture seule refuse d'ecrire",
+         json.loads(contexte.execute("JSON.stringify(__t.lectureSeule)")),
+         "ReadOnlyError")
+
+    # L'asynchronisme, verifie plutot que suppose : une minuterie doit battre
+    # pendant que les ecritures partent. Si `put` ecrivait sur le fil de
+    # l'interface, ce compteur resterait a zero.
+    contexte.execute("""
+        (function () {
+            __t.tics = 0;
+            __t.finies = 0;
+            setInterval(function () { __t.tics += 1; }, 1);
+            const t = __base.transaction("notes", "readwrite");
+            const m = t.objectStore("notes");
+            for (let i = 0; i < 200; i++) {
+                const r = m.put({ n: i, texte: "enregistrement numero " + i }, "k" + i);
+                r.onsuccess = function () { __t.finies += 1; };
+            }
+        })();
+    """)
+    _bat(contexte, "__t.finies >= 200")
+    tics = contexte.execute("__t.tics")
+    verifie("idb: la boucle d'evenements bat pendant les ecritures",
+            tics and tics > 0, tics)
+
+
+def _indexeddb_transactions():
+    """Une transaction abandonnee ne laisse rien : ni moitie, ni trace."""
+    doc = document("<body><p>t</p></body>", url="https://un.test/page")
+    contexte = js.Contexte(doc)
+    contexte.execute("""
+        globalThis.__x = {};
+        const d = indexedDB.open("journal", 1);
+        d.onupgradeneeded = function (e) {
+            e.target.result.createObjectStore("lignes");
+        };
+        d.onsuccess = function (e) {
+            globalThis.__j = e.target.result;
+            const t = __j.transaction("lignes", "readwrite");
+            t.objectStore("lignes").put("gardee", "ok");
+            t.oncomplete = function () { __x.pose = true; };
+        };
+    """)
+    _bat(contexte, "__x.pose === true")
+
+    contexte.execute("""
+        (function () {
+            __x.abandon = null;
+            const t = __j.transaction("lignes", "readwrite");
+            t.objectStore("lignes").put("perdue", "jetee");
+            t.onabort = function () { __x.abandon = "abandonnee"; };
+            t.abort();
+        })();
+    """)
+    _bat(contexte, "__x.abandon !== null")
+
+    contexte.execute("""
+        (function () {
+            __x.relu = null;
+            __x.gardee = null;
+            const l = __j.transaction("lignes", "readonly");
+            const a = l.objectStore("lignes").get("jetee");
+            a.onsuccess = function () { __x.relu = a.result === undefined ? "vide" : a.result; };
+            const b = l.objectStore("lignes").get("ok");
+            b.onsuccess = function () { __x.gardee = b.result; };
+        })();
+    """)
+    _bat(contexte, "__x.relu !== null && __x.gardee !== null")
+    lu = json.loads(contexte.execute("JSON.stringify(__x)"))
+    egal("idb: une transaction abandonnee n'ecrit rien", lu.get("relu"), "vide")
+    egal("idb: et ne touche pas a ce qui etait deja la", lu.get("gardee"), "gardee")
+
+
+def _indexeddb_persistance(indexeddb):
+    """Ce qui est ecrit se relit apres que la memoire a ete jetee."""
+    doc = document("<body><p>p</p></body>", url="https://un.test/page")
+    contexte = js.Contexte(doc)
+    contexte.execute("""
+        globalThis.__p = {};
+        const d = indexedDB.open("profil", 1);
+        d.onupgradeneeded = function (e) {
+            e.target.result.createObjectStore("champs");
+        };
+        d.onsuccess = function (e) {
+            const t = e.target.result.transaction("champs", "readwrite");
+            t.objectStore("champs").put("arthur", "nom");
+            t.oncomplete = function () { __p.ecrit = true; };
+        };
+    """)
+    _bat(contexte, "__p.ecrit === true")
+
+    # Tout ce qui etait en memoire est jete : ce qu'on relit vient du disque.
+    indexeddb.reinitialise()
+    doc2 = document("<body><p>p</p></body>", url="https://un.test/page")
+    contexte2 = js.Contexte(doc2)
+    contexte2.execute("""
+        globalThis.__q = {};
+        const d = indexedDB.open("profil");
+        d.onsuccess = function (e) {
+            __q.version = e.target.result.version;
+            __q.magasins = Array.from(e.target.result.objectStoreNames);
+            const t = e.target.result.transaction("champs", "readonly");
+            const r = t.objectStore("champs").get("nom");
+            r.onsuccess = function () { __q.nom = r.result; };
+        };
+        d.onerror = function (e) { __q.erreur = String(e.target.error); };
+    """)
+    _bat(contexte2, "__q.nom !== undefined || __q.erreur !== undefined")
+    lu = json.loads(contexte2.execute("JSON.stringify(__q)"))
+    egal("idb: la valeur survit a un rechargement", lu.get("nom"), "arthur")
+    egal("idb: la version aussi", lu.get("version"), 1)
+    egal("idb: et le schema", lu.get("magasins"), ["champs"])
+
+
+def _indexeddb_origines(indexeddb):
+    """Deux origines, le meme nom de base, deux bases distinctes."""
+    a = indexeddb.service("https://a.test/page")
+    b = indexeddb.service("https://b.test/page")
+    a.applique_montee("commune", 1, [("m", {})], [])
+    b.applique_montee("commune", 1, [("m", {})], [])
+
+    ta = a.transaction("commune", "readwrite")
+    indexeddb.execute(ta, "put", "m", "cle", "valeur de A")
+    ta.commit()
+
+    tb = b.transaction("commune", "readonly")
+    egal("idb: une origine ne voit pas la base d'une autre",
+         indexeddb.execute(tb, "get", "m", "cle", None), indexeddb.ABSENT)
+
+    ta2 = a.transaction("commune", "readonly")
+    egal("idb: et voit bien la sienne",
+         indexeddb.execute(ta2, "get", "m", "cle", None), "valeur de A")
+
+    # Un nom de base est choisi par la page : `../../temoins.json` en est un
+    # nom valide. Sans echappement, une page ecrirait par-dessus le bocal a
+    # temoins.
+    #
+    # Ce qu'il faut verifier n'est pas l'absence des deux points — ils peuvent
+    # rester dans un nom de fichier sans danger — mais que le chemin **resolu**
+    # ne sorte pas du dossier. C'est la seule formulation qui teste la propriete
+    # plutot que son apparence.
+    from moteur import stockage as _stockage
+    dossier = os.path.abspath(os.path.join(_stockage.RACINE, indexeddb.DOSSIER))
+    for nom in ("../../temoins", "../../../etc/passwd", "a/b/c", "..", "/absolu"):
+        resolu = os.path.abspath(os.path.join(
+            _stockage.RACINE, indexeddb._nom_de_fichier("https://a.test", nom)))
+        verifie("idb: le nom de base %r reste dans son dossier" % nom,
+                os.path.dirname(resolu) == dossier, resolu)
 
 
 def verifie_stockage_local():
@@ -3974,6 +4644,2564 @@ def verifie_tableau_de_bord():
          suivi.precedente(histoire, "inconnue"), None)
 
 
+def verifie_invalidation():
+    """Ce qui change decide de ce qu'on refait — et de ce qu'on ne refait pas.
+
+    Le moteur n'avait qu'un booleen : n'importe quelle mutation refaisait tout,
+    pour la page entiere. Changer la couleur d'un bouton coutait exactement le
+    prix d'un rechargement. Ce n'etait pas absurde tant que le DOM bougeait
+    peu ; ce n'est plus tenable maintenant que le navigateur recoit des frappes.
+    """
+    from moteur import invalidation
+
+    # Le classement des proprietes. Se tromper vers le haut coute du temps ;
+    # se tromper vers le bas laisse un affichage faux, et un affichage faux ne
+    # se voit pas dans un profil.
+    for propriete, attendu, quoi in (
+            ("color", invalidation.PEINTURE, "une couleur ne demande que des pixels"),
+            ("background-color", invalidation.PEINTURE, "un fond non plus"),
+            ("box-shadow", invalidation.PEINTURE, "ni une ombre"),
+            ("width", invalidation.MISE_EN_PAGE, "une largeur replace les boites"),
+            ("display", invalidation.MISE_EN_PAGE, "un display aussi"),
+            ("margin-top", invalidation.MISE_EN_PAGE, "une marge aussi"),
+            ("font-size", invalidation.MISE_EN_PAGE, "une taille de police aussi"),
+            ("transform", invalidation.COMPOSITION, "un transform ne fait que deplacer"),
+            ("opacity", invalidation.COMPOSITION, "une opacite non plus"),
+            ("truc-inconnu", invalidation.MISE_EN_PAGE,
+             "une propriete inconnue est traitee prudemment")):
+        egal("invalidation: %s" % quoi,
+             invalidation.etendue_de(propriete), attendu)
+
+    # Un lot prend l'etendue la plus haute : une couleur et une largeur
+    # ensemble demandent une mise en page.
+    egal("invalidation: un lot prend le plus cher",
+         invalidation.etendue_des(["color", "width"]), invalidation.MISE_EN_PAGE)
+    egal("invalidation: un lot de couleurs reste en peinture",
+         invalidation.etendue_des(["color", "background-color"]),
+         invalidation.PEINTURE)
+
+    etat = invalidation.Invalidation()
+    verifie("invalidation: au depart il n'y a rien a faire", etat.rien_a_faire)
+    etat.marque_propriete("color")
+    verifie("invalidation: une couleur ne demande pas de mise en page",
+            not etat.demande_mise_en_page and etat.demande_peinture)
+    etat.marque_propriete("width")
+    verifie("invalidation: une largeur, si", etat.demande_mise_en_page)
+    etat.marque_propriete("color")
+    verifie("invalidation: et une couleur ensuite ne redescend pas",
+            etat.demande_mise_en_page)
+    egal("invalidation: vider rend ce qui etait prevu", etat.vide(),
+         invalidation.MISE_EN_PAGE)
+    verifie("invalidation: apres quoi il n'y a plus rien", etat.rien_a_faire)
+
+
+def verifie_invalidation_reelle():
+    """Le chemin complet : `style.color` ne doit plus tout remettre en page."""
+    from moteur import invalidation
+
+    lignes = "".join("<p class=l id=p%d>ligne %d</p>" % (i, i) for i in range(60))
+    doc = document("<style>.l { color: #000000 }</style>"
+                   "<body><div id=zone>%s</div><script>1</script></body>" % lignes)
+    doc.remet_en_page(1000, 800)
+    contexte = doc.contexte_js
+
+    poses = [0]
+    from moteur import mise_en_page as _mep
+    vrai = _mep.construit
+
+    def compte(*a, **k):
+        poses[0] += 1
+        return vrai(*a, **k)
+
+    _mep.construit = compte
+    try:
+        # Une couleur : peinture seulement, aucune mise en page.
+        contexte.execute("document.getElementById('p3').style.color = '#ff0000'")
+        egal("invalidation reelle: une couleur reste en peinture",
+             doc.invalide.etendue, invalidation.PEINTURE)
+        doc.rafraichis()
+        egal("invalidation reelle: aucune mise en page n'a eu lieu", poses[0], 0)
+        verifie("invalidation reelle: et plus rien n'est en retard",
+                doc.invalide.rien_a_faire)
+
+        # Une largeur : la mise en page redevient necessaire.
+        contexte.execute("document.getElementById('p4').style.width = '120px'")
+        egal("invalidation reelle: une largeur demande la mise en page",
+             doc.invalide.etendue, invalidation.MISE_EN_PAGE)
+        doc.rafraichis()
+        egal("invalidation reelle: elle a bien eu lieu", poses[0], 1)
+        poses[0] = 0
+
+        # Une classe : la cascade doit etre rejouee.
+        contexte.execute("document.getElementById('p5').className = 'l autre'")
+        egal("invalidation reelle: une classe demande le style",
+             doc.invalide.etendue, invalidation.STYLE)
+
+        # Le resultat visible reste juste : la couleur demandee est appliquee.
+        # Verifie ici, avant que la mutation suivante ne remplace le sous-arbre.
+        _mep.construit = vrai
+        doc.remet_en_page(1000, 800)
+        _mep.construit = compte
+        boite = boite_de(doc, "p3")
+        egal("invalidation reelle: la couleur demandee est appliquee",
+             css_couleur(boite.style.get("color")) if boite else None,
+             css_couleur("#ff0000"))
+
+        # Une mutation dont on ne connait pas la portee reste prudente.
+        doc.invalide.vide()
+        contexte.execute("document.getElementById('zone').innerHTML = '<p>neuf</p>'")
+        egal("invalidation reelle: une mutation inconnue vaut mise en page",
+             doc.invalide.etendue, invalidation.MISE_EN_PAGE)
+    finally:
+        _mep.construit = vrai
+
+
+def verifie_memoires_de_passe():
+    """Les memoires de generation : justes, et videes quand il le faut."""
+    from moteur import css as _css
+
+    doc = document(
+        "<style>li:nth-child(2) { color: #ff0000 }</style>"
+        "<body><ul id=u><li id=a>a</li><li id=b>b</li><li id=c>c</li></ul>"
+        "<script>1</script></body>")
+    doc.remet_en_page(1000, 800)
+    egal("memoire: la fratrie memorisee ne fausse pas nth-child",
+         css_couleur(boite_de(doc, "b").style.get("color")), css_couleur("#ff0000"))
+    egal("memoire: et les autres ne sont pas atteints",
+         css_couleur(boite_de(doc, "a").style.get("color")),
+         css_couleur("#202124"))
+
+    # Un enfant insere change la fratrie : la memoire doit avoir ete jetee.
+    doc.contexte_js.execute(
+        "var u = document.getElementById('u');"
+        "var neuf = document.createElement('li'); neuf.id = 'zero';"
+        "neuf.textContent = 'z'; u.insertBefore(neuf, u.firstChild);")
+    doc.rafraichis()
+    doc.remet_en_page(1000, 800)
+    egal("memoire: apres insertion, nth-child(2) designe le nouveau second",
+         css_couleur(boite_de(doc, "a").style.get("color")), css_couleur("#ff0000"))
+    egal("memoire: et l'ancien second redevient normal",
+         css_couleur(boite_de(doc, "b").style.get("color")),
+         css_couleur("#202124"))
+
+    # La generation avance a chaque passe.
+    avant = _css.generation()
+    doc.remet_en_page(1000, 800)
+    verifie("memoire: chaque passe ouvre une generation",
+            _css.generation() > avant, (avant, _css.generation()))
+
+    # Le decoupage de `class` est memorise, mais suit la valeur.
+    element = _par_id(doc, "a")
+    egal("memoire: les classes se lisent", element.classes, [])
+    element.attributs["class"] = "un deux"
+    egal("memoire: et suivent un changement direct", element.classes,
+         ["un", "deux"])
+    element.pose_attribut("class", "trois")
+    egal("memoire: comme un changement par pose_attribut", element.classes,
+         ["trois"])
+
+
+def verifie_websocket():
+    """Une connexion que la page garde ouverte, et le serveur qui parle seul.
+
+    Tout le reste du reseau est un aller-retour. Ici la connexion reste
+    ouverte et le serveur emet quand il veut : ce qui se verifie n'est donc
+    plus « la reponse est-elle correcte » mais « ce qui arrive parvient-il a la
+    page, dans l'ordre, sans interrompre son script ».
+    """
+    import time as _time
+
+    doc, arrete = _sur_serveur("/page/event-loop.html")
+    try:
+        contexte = doc.contexte_js
+        base = doc.base.replace("http://", "ws://")
+
+        def bat(jusqua, secondes=8.0):
+            limite = _time.perf_counter() + secondes
+            while _time.perf_counter() < limite:
+                contexte.tic()
+                if contexte.execute(jusqua):
+                    return True
+                _time.sleep(0.02)
+            return False
+
+        # 1. Ouverture, echo simple.
+        contexte.execute(
+            "globalThis.__ws = { etats: [], recus: [], fermeture: null };"
+            "var s = new WebSocket('%s/ws');"
+            "globalThis.__s = s;"
+            "__ws.etats.push(s.readyState);"
+            "s.onopen = function () { __ws.etats.push('open:' + s.readyState);"
+            "                         s.send('bonjour'); };"
+            "s.onmessage = function (e) { __ws.recus.push(e.data); };"
+            "s.onclose = function (e) { __ws.fermeture ="
+            "   { code: e.code, propre: e.wasClean }; };" % base)
+        egal("websocket: l'etat initial est CONNECTING",
+             contexte.execute("__ws.etats[0]"), 0)
+        egal("websocket: les constantes sont exposees",
+             contexte.execute("[WebSocket.CONNECTING, WebSocket.OPEN,"
+                              " WebSocket.CLOSING, WebSocket.CLOSED].join(',')"),
+             "0,1,2,3")
+
+        verifie("websocket: la connexion s'ouvre",
+                bat("__ws.etats.length > 1"), contexte.execute("JSON.stringify(__ws)"))
+        egal("websocket: l'etat devient OPEN",
+             contexte.execute("__ws.etats[1]"), "open:1")
+
+        verifie("websocket: l'echo revient", bat("__ws.recus.length >= 1"),
+                contexte.execute("JSON.stringify(__ws.recus)"))
+        egal("websocket: et c'est bien ce qu'on a envoye",
+             contexte.execute("__ws.recus[0]"), "bonjour")
+
+        # 2. Plusieurs messages, dans l'ordre, emis par le serveur seul.
+        contexte.execute("__ws.recus = []; __s.send('__trois__')")
+        verifie("websocket: trois messages arrivent", bat("__ws.recus.length >= 3"),
+                contexte.execute("JSON.stringify(__ws.recus)"))
+        egal("websocket: dans l'ordre d'emission",
+             contexte.execute("__ws.recus.slice(0, 3).join('|')"),
+             "message 1|message 2|message 3")
+
+        # 3. Fermeture demandee par le client.
+        contexte.execute("__s.close(1000, 'fini')")
+        verifie("websocket: la fermeture aboutit", bat("__ws.fermeture !== null"),
+                contexte.execute("JSON.stringify(__ws.fermeture)"))
+        egal("websocket: avec le code demande",
+             contexte.execute("__ws.fermeture.code"), 1000)
+        egal("websocket: et elle est propre",
+             contexte.execute("__ws.fermeture.propre"), True)
+        egal("websocket: l'etat final est CLOSED",
+             contexte.execute("__s.readyState"), 3)
+
+        # 4. Fermeture decidee par le serveur.
+        contexte.execute(
+            "globalThis.__f = null;"
+            "var t = new WebSocket('%s/ws/ferme');"
+            "t.onclose = function (e) { __f = { code: e.code, propre: e.wasClean }; };"
+            % base)
+        verifie("websocket: une fermeture du serveur est vue",
+                bat("__f !== null"), contexte.execute("JSON.stringify(__f)"))
+        egal("websocket: avec son code", contexte.execute("__f.code"), 1000)
+
+        # 5. Connexion refusee : `error` puis `close`, jamais une exception.
+        contexte.execute(
+            "globalThis.__e = { erreurs: 0, ferme: null };"
+            "var u = new WebSocket('ws://127.0.0.1:1/ws');"
+            "u.onerror = function () { __e.erreurs++; };"
+            "u.onclose = function (ev) { __e.ferme = ev.code; };")
+        verifie("websocket: une connexion refusee se signale",
+                bat("__e.ferme !== null", 10.0),
+                contexte.execute("JSON.stringify(__e)"))
+        verifie("websocket: par une erreur puis une fermeture",
+                contexte.execute("__e.erreurs") >= 1,
+                contexte.execute("JSON.stringify(__e)"))
+        egal("websocket: avec le code d'echec anormal",
+             contexte.execute("__e.ferme"), 1006)
+
+        # 6. `send()` apres fermeture doit lever, pas partir en silence.
+        leve = contexte.execute(
+            "(function () { try { __s.send('x'); return 'PAS-DE-LEVEE'; }"
+            " catch (e) { return 'leve'; } })()")
+        egal("websocket: envoyer sur une connexion fermee leve", leve, "leve")
+
+        # 7. L'interface est restee vivante pendant tout cela.
+        contexte.execute(
+            "globalThis.__bat = 0;"
+            "var minuterie = setInterval(function () { __bat++; }, 10);"
+            "var v = new WebSocket('%s/ws');"
+            "v.onopen = function () { v.send('__trois__'); };"
+            "globalThis.__recus2 = 0;"
+            "v.onmessage = function () { __recus2++; };" % base)
+        verifie("websocket: les messages arrivent", bat("__recus2 >= 3"),
+                contexte.execute("__recus2"))
+        verifie("websocket: et la minuterie a continue de battre pendant",
+                contexte.execute("__bat") > 0, contexte.execute("__bat"))
+        contexte.execute("clearInterval(minuterie); v.close()")
+    finally:
+        arrete()
+
+
+# --- Interaction utilisateur reelle -------------------------------------------
+
+def verifie_modele_edition():
+    """Le modele d'edition, seul : valeur, curseur, selection.
+
+    Il ne connait ni le DOM ni Qt, donc il s'eprouve directement — et c'est
+    tout l'interet de l'avoir isole.
+    """
+    from moteur import edition
+
+    e = edition.Edition("abc")
+    egal("edition: le curseur part a la fin", e.curseur, 3)
+    egal("edition: insertion a la fin", (e.insere("d"), e.valeur), (True, "abcd"))
+    e.pose_curseur(2)
+    egal("edition: insertion au milieu", (e.insere("X"), e.valeur), (True, "abXcd"))
+    egal("edition: le curseur suit l'insertion", e.curseur, 3)
+
+    egal("edition: retour arriere", (e.efface_avant(), e.valeur), (True, "abcd"))
+    e.pose_curseur(0)
+    egal("edition: retour arriere en tete ne fait rien",
+         (e.efface_avant(), e.valeur), (False, "abcd"))
+    egal("edition: suppr avance", (e.efface_apres(), e.valeur), (True, "bcd"))
+    e.pose_curseur(3)
+    egal("edition: suppr en fin ne fait rien",
+         (e.efface_apres(), e.valeur), (False, "bcd"))
+
+    # Les fleches, avec et sans Maj.
+    e = edition.Edition("bonjour")
+    e.pose_curseur(3)
+    e.deplace(-1)
+    egal("edition: fleche gauche", e.curseur, 2)
+    e.deplace(1, etend=True)
+    e.deplace(1, etend=True)
+    egal("edition: Maj etend la selection", e.selection(), (2, 4))
+    egal("edition: le texte selectionne est le bon", e.texte_selectionne(), "nj")
+    e.deplace(-1, etend=True)
+    egal("edition: Maj en sens inverse reduit", e.selection(), (2, 3))
+
+    # Une fleche sans Maj sur une selection l'effondre a son bord, elle ne
+    # deplace pas d'un caractere : c'est ce que fait tout editeur.
+    e.pose_selection(2, 5)
+    e.deplace(1)
+    egal("edition: la fleche effondre la selection au bord", e.curseur, 5)
+    e.pose_selection(2, 5)
+    e.deplace(-1)
+    egal("edition: et a l'autre bord dans l'autre sens", e.curseur, 2)
+
+    # Taper sur une selection la remplace.
+    e.pose_selection(0, 3)
+    egal("edition: taper remplace la selection",
+         (e.insere("X"), e.valeur), (True, "Xjour"))
+
+    e.tout_selectionner()
+    egal("edition: tout selectionner", e.selection(), (0, 5))
+    egal("edition: retour arriere efface la selection",
+         (e.efface_avant(), e.valeur), (True, ""))
+
+    # Home et End, sur plusieurs lignes.
+    m = edition.Edition("une\ndeux\ntrois", multiligne=True)
+    m.pose_curseur(6)
+    m.au_debut()
+    egal("edition: Home va au debut de la ligne", m.curseur, 4)
+    m.a_la_fin()
+    egal("edition: End va a la fin de la ligne", m.curseur, 8)
+
+    # Un `<input>` est monoligne : un collage multiligne s'aplatit.
+    mono = edition.Edition("", multiligne=False)
+    mono.insere("un\ndeux")
+    egal("edition: un input aplatit les retours", mono.valeur, "un deux")
+    egal("edition: un textarea les garde",
+         (edition.Edition("", multiligne=True).insere("un\ndeux"), True)[1], True)
+
+    # Entree : rien dans un input, un retour dans un textarea.
+    egal("edition: Entree n'insere rien dans un input",
+         edition.applique_touche(edition.Edition("a"), "Enter"), (False, False))
+    ligne = edition.Edition("a", multiligne=True)
+    egal("edition: Entree insere dans un textarea",
+         edition.applique_touche(ligne, "Enter")[0], True)
+    egal("edition: et la valeur porte le retour", ligne.valeur, "a\n")
+
+    # Le masque ne touche pas la valeur : elle doit partir au serveur.
+    secret = edition.Edition("hunter2", masque=True)
+    egal("edition: la valeur reste en clair dans le modele", secret.valeur, "hunter2")
+    egal("edition: mais l'affichage est masque",
+         secret.texte_affiche(), edition.PUCE * 7)
+    egal("edition: et la longueur correspond",
+         len(secret.texte_affiche()), len("hunter2"))
+
+    egal("edition: Ctrl+A selectionne tout",
+         edition.applique_touche(edition.Edition("abc"), "a", ctrl=True), (False, True))
+    egal("edition: Ctrl+lettre n'insere pas",
+         edition.applique_touche(edition.Edition(""), "z", "z", ctrl=True)[0], False)
+
+
+def _page_saisie(source=None, url="http://exemple.test/page"):
+    doc = document(source or (
+        "<style>label { display: block }</style>"
+        "<body><form id=f action='/session' method=post>"
+        "<label id=et for=courriel>Adresse</label>"
+        "<input id=courriel name=courriel type=text>"
+        "<input id=mdp name=mdp type=password>"
+        "<input id=coche name=coche type=checkbox>"
+        "<textarea id=note name=note></textarea>"
+        "<button id=envoi type=submit>Envoyer</button>"
+        "</form><script>1</script></body>"), url=url)
+    doc.remet_en_page(1000, 800)
+    return doc
+
+
+def tape(doc, texte):
+    """Tape un texte caractere par caractere, comme un utilisateur."""
+    for caractere in texte:
+        doc.frappe(caractere, caractere)
+
+
+def verifie_saisie_reelle():
+    """Taper dans un champ, pour de vrai : frappe par frappe."""
+    doc = _page_saisie()
+    contexte = doc.contexte_js
+    doc.pose_foyer(_par_id(doc, "courriel"))
+
+    tape(doc, "alice")
+    egal("saisie: la valeur se construit lettre par lettre",
+         contexte.execute("document.getElementById('courriel').value"), "alice")
+    egal("saisie: le curseur suit",
+         contexte.execute("document.getElementById('courriel').selectionStart"), 5)
+
+    doc.frappe("Backspace")
+    egal("saisie: retour arriere retire la derniere lettre",
+         contexte.execute("document.getElementById('courriel').value"), "alic")
+
+    doc.frappe("Home")
+    tape(doc, "M")
+    egal("saisie: Home puis frappe insere en tete",
+         contexte.execute("document.getElementById('courriel').value"), "Malic")
+
+    doc.frappe("End")
+    tape(doc, "e")
+    egal("saisie: End puis frappe insere en queue",
+         contexte.execute("document.getElementById('courriel').value"), "Malice")
+
+    # `Entree` n'insere rien dans un `<input>`.
+    avant = contexte.execute("document.getElementById('courriel').value")
+    doc.frappe("Enter")
+    egal("saisie: Entree n'ajoute pas de retour dans un input",
+         contexte.execute("document.getElementById('courriel').value"), avant)
+
+    # Mais bien dans un `<textarea>`.
+    doc.pose_foyer(_par_id(doc, "note"))
+    tape(doc, "un")
+    doc.frappe("Enter")
+    tape(doc, "deux")
+    egal("saisie: Entree insere un retour dans un textarea",
+         contexte.execute("document.getElementById('note').value"), "un\ndeux")
+
+    # Le mot de passe garde sa valeur et n'affiche que des puces.
+    doc.pose_foyer(_par_id(doc, "mdp"))
+    tape(doc, "hunter2")
+    egal("saisie: la valeur du mot de passe est en clair pour le script",
+         contexte.execute("document.getElementById('mdp').value"), "hunter2")
+    boite = boite_de(doc, "mdp")
+    peint = " ".join(f.texte for f in boite.lignes) if boite else ""
+    verifie("saisie: mais le mot de passe n'est jamais peint en clair",
+            "hunter2" not in peint, peint)
+    verifie("saisie: il est peint en puces de meme longueur",
+            peint.count("\u2022") == 7, peint)
+
+
+def verifie_ordre_des_evenements_de_frappe():
+    """`keydown` → valeur → `input` → `keyup`, et `preventDefault` obei."""
+    doc = _page_saisie()
+    contexte = doc.contexte_js
+    doc.pose_foyer(_par_id(doc, "courriel"))
+    contexte.execute(
+        "globalThis.__ordre = [];"
+        "var c = document.getElementById('courriel');"
+        "c.addEventListener('keydown', e => __ordre.push('keydown:' + e.key + ':' + c.value));"
+        "c.addEventListener('input', () => __ordre.push('input:' + c.value));"
+        "c.addEventListener('keyup', () => __ordre.push('keyup:' + c.value));")
+
+    doc.frappe("a", "a")
+    egal("frappe: l'ordre est keydown, input, keyup",
+         contexte.execute("__ordre.join('|')"),
+         "keydown:a:|input:a|keyup:a")
+
+    # `keydown` voit la valeur d'avant, `input` celle d'apres. Emettre `input`
+    # avant la mutation ferait lire a la page un etat qui n'existe pas.
+    contexte.execute("__ordre = []")
+    doc.frappe("b", "b")
+    egal("frappe: keydown voit l'ancienne valeur, input la nouvelle",
+         contexte.execute("__ordre.join('|')"),
+         "keydown:b:a|input:ab|keyup:ab")
+
+    # Une touche qui ne change rien n'emet pas `input` : sinon toute validation
+    # « au changement » se declencherait a chaque appui de fleche.
+    contexte.execute("__ordre = []")
+    doc.frappe("ArrowLeft")
+    verifie("frappe: une fleche n'emet pas input",
+            "input" not in contexte.execute("__ordre.join('|')"),
+            contexte.execute("__ordre.join('|')"))
+
+    # `preventDefault()` dans `keydown` empeche l'insertion.
+    contexte.execute(
+        "__ordre = [];"
+        "c.addEventListener('keydown', e => { if (e.key === 'x') e.preventDefault(); });")
+    avant = contexte.execute("c.value")
+    doc.frappe("x", "x")
+    egal("frappe: preventDefault empeche l'insertion",
+         contexte.execute("c.value"), avant)
+    verifie("frappe: et aucun input n'est emis",
+            "input" not in contexte.execute("__ordre.join('|')"),
+            contexte.execute("__ordre.join('|')"))
+    verifie("frappe: mais keyup part quand meme",
+            "keyup" in contexte.execute("__ordre.join('|')"),
+            contexte.execute("__ordre.join('|')"))
+
+
+def verifie_curseur_visible():
+    """Le caret est peint, et il n'est pas un caractere de la valeur."""
+    doc = _page_saisie()
+    champ = _par_id(doc, "courriel")
+
+    boite = boite_de(doc, "courriel")
+    egal("curseur: sans foyer, pas de curseur",
+         boite.curseur if boite else "pas de boite", None)
+
+    doc.pose_foyer(champ)
+    doc.remet_en_page(1000, 800)
+    boite = boite_de(doc, "courriel")
+    verifie("curseur: le foyer fait apparaitre un curseur",
+            boite is not None and boite.curseur is not None)
+    x_vide, _, hauteur, selection = boite.curseur
+    verifie("curseur: il a une hauteur", hauteur > 0, hauteur)
+    egal("curseur: sans selection, rien a surligner", selection, None)
+    verifie("curseur: il est dans la boite du champ",
+            boite.x <= x_vide <= boite.x + boite.largeur, (boite.x, x_vide))
+
+    tape(doc, "abc")
+    boite = boite_de(doc, "courriel")
+    x_apres = boite.curseur[0]
+    verifie("curseur: il avance quand on tape", x_apres > x_vide, (x_vide, x_apres))
+
+    # Le curseur n'entre jamais dans la valeur : c'est ce qui le distingue de
+    # la barre d'adresse du chrome, qui l'y insere.
+    egal("curseur: la valeur ne contient pas le caret",
+         doc.contexte_js.execute("document.getElementById('courriel').value"), "abc")
+    peint = " ".join(f.texte for f in boite.lignes)
+    egal("curseur: ni le texte peint", peint, "abc")
+
+    # La selection donne un rectangle a peindre.
+    doc.frappe("ArrowLeft", maj=True)
+    doc.frappe("ArrowLeft", maj=True)
+    doc.pose_curseur_visuel()
+    boite = boite_de(doc, "courriel")
+    verifie("curseur: une selection est surlignee",
+            boite.curseur[3] is not None, boite.curseur)
+    verifie("curseur: et le surlignage a une largeur",
+            boite.curseur[3][1] > 0, boite.curseur[3])
+
+    # Le curseur disparait avec le foyer.
+    doc.pose_foyer(None)
+    doc.remet_en_page(1000, 800)
+    boite = boite_de(doc, "courriel")
+    egal("curseur: il disparait avec le foyer", boite.curseur, None)
+
+
+def verifie_clic_donne_le_foyer():
+    """Le chemin reel : clic → test de pointage → focalisable → foyer → caret."""
+    doc = _page_saisie()
+    contexte = doc.contexte_js
+
+    def clique_sur(identifiant, decalage=4.0):
+        boite = boite_de(doc, identifiant)
+        verifie("clic: la boite de %s existe" % identifiant, boite is not None)
+        if boite is None:
+            return None
+        return doc.clique(boite.x + decalage, boite.y + boite.hauteur / 2.0)
+
+    clique_sur("courriel")
+    egal("clic: le champ prend le foyer",
+         contexte.execute("document.activeElement.id"), "courriel")
+    tape(doc, "bonjour")
+    egal("clic: on peut ecrire dedans juste apres",
+         contexte.execute("document.getElementById('courriel').value"), "bonjour")
+
+    clique_sur("mdp")
+    egal("clic: un autre champ reprend le foyer",
+         contexte.execute("document.activeElement.id"), "mdp")
+
+    clique_sur("envoi")
+    egal("clic: un bouton prend le foyer aussi",
+         contexte.execute("document.activeElement.id"), "envoi")
+
+    # Cliquer une etiquette donne le foyer au controle qu'elle designe.
+    clique_sur("et")
+    egal("clic: une etiquette passe le foyer a son controle",
+         contexte.execute("document.activeElement.id"), "courriel")
+
+    # Le clic pose le curseur la ou l'on a clique, pas systematiquement en fin.
+    boite = boite_de(doc, "courriel")
+    doc.clique(boite.x + 2.0, boite.y + boite.hauteur / 2.0)
+    egal("clic: cliquer a gauche met le curseur en tete",
+         contexte.execute("document.getElementById('courriel').selectionStart"), 0)
+
+    # Cliquer dans le vide retire le foyer.
+    doc.clique(5.0, doc.hauteur - 1.0)
+    egal("clic: cliquer hors de tout controle retire le foyer",
+         contexte.execute("document.activeElement.tagName"), "BODY")
+
+
+def verifie_cases_et_radios():
+    """Cocher, decocher, et un seul radio coche par groupe."""
+    doc = _page_saisie(
+        "<body><form id=f>"
+        "<input id=c1 type=checkbox name=c1>"
+        "<input id=c2 type=checkbox name=c2 disabled>"
+        "<input id=r1 type=radio name=choix value=a>"
+        "<input id=r2 type=radio name=choix value=b>"
+        "<input id=r3 type=radio name=autre value=c>"
+        "</form><script>1</script></body>")
+    contexte = doc.contexte_js
+    contexte.execute(
+        "globalThis.__vus = [];"
+        "for (const n of ['c1','r1','r2']) {"
+        "  const e = document.getElementById(n);"
+        "  e.addEventListener('input', () => __vus.push('input:' + n));"
+        "  e.addEventListener('change', () => __vus.push('change:' + n));"
+        "}")
+
+    doc.active(_par_id(doc, "c1"))
+    egal("case: un clic coche", contexte.execute("document.getElementById('c1').checked"),
+         True)
+    egal("case: input puis change sont emis",
+         contexte.execute("__vus.join('|')"), "input:c1|change:c1")
+    doc.active(_par_id(doc, "c1"))
+    egal("case: un second clic decoche",
+         contexte.execute("document.getElementById('c1').checked"), False)
+
+    doc.active(_par_id(doc, "c2"))
+    egal("case: une case desactivee ne bouge pas",
+         contexte.execute("document.getElementById('c2').checked"), False)
+
+    doc.active(_par_id(doc, "r1"))
+    doc.active(_par_id(doc, "r2"))
+    egal("radio: le second est coche",
+         contexte.execute("document.getElementById('r2').checked"), True)
+    egal("radio: et le premier ne l'est plus",
+         contexte.execute("document.getElementById('r1').checked"), False)
+    doc.active(_par_id(doc, "r3"))
+    egal("radio: un autre groupe n'est pas affecte",
+         contexte.execute("document.getElementById('r2').checked"), True)
+
+    # Au clavier : l'espace agit comme un clic.
+    doc.pose_foyer(_par_id(doc, "c1"))
+    doc.frappe(" ", " ")
+    egal("case: l'espace coche au clavier",
+         contexte.execute("document.getElementById('c1').checked"), True)
+
+
+def _par_id(doc, identifiant):
+    for nœud in doc.racine.parcours():
+        if isinstance(nœud, html.Element) \
+                and nœud.attributs.get("id") == identifiant:
+            return nœud
+    return None
+
+
+# --- Plate-forme comportementale ----------------------------------------------
+
+def _sur_serveur(chemin, largeur=1000, hauteur=800, battements=8, attente=0.02):
+    """Charge une page du serveur de fixtures et rend `(document, arret)`.
+
+    Le serveur local remplace Internet pour tout ce qui compte ici : une
+    redirection, un 404, un POST, une reponse lente. Aucun de ces cas n'a besoin
+    du reseau exterieur, et les faire dependre de lui rendait la moitie du
+    comportement du navigateur intestable.
+    """
+    import time as _time
+
+    from moteur import reseau as _reseau
+    import serveur_test
+
+    serveur, base = serveur_test.demarre(0)
+    ancien = _reseau._charge_http
+    try:
+        import apercu
+        apercu.installe_reseau(_reseau)
+    except Exception:  # noqa: BLE001 — sans `apercu`, le client maison suffit
+        pass
+    doc = moteur.charge(base + chemin, largeur, journal=lambda n, t: None)
+    doc.remet_en_page(largeur, hauteur)
+    for _ in range(battements):
+        doc.rafraichis()
+        _time.sleep(attente)
+
+    def arrete():
+        _reseau._charge_http = ancien
+        serveur_test.arrete(serveur)
+
+    doc.base = base
+    return doc, arrete
+
+
+# --- Jalons fonctionnels ------------------------------------------------------
+#
+# Les compteurs internes disent si le moteur travaille moins ; ils ne disent pas
+# s'il sait faire tourner une application. Ces jalons repondent a la seconde
+# question, et c'est la seule qui interesse quelqu'un qui veut s'en servir.
+#
+# Chacun est binaire — PASS ou FAIL — et nomme une capacite entiere plutot
+# qu'un detail. Ils sont ranges dans `JALONS` pour que le tableau de bord les
+# affiche sans les redecouvrir.
+
+JALONS = {}
+
+
+def jalon(nom, reussi, detail=None):
+    """Enregistre un jalon fonctionnel et l'affirme comme une verification."""
+    JALONS[nom] = bool(reussi)
+    verifie("jalon %s" % nom, reussi, detail)
+
+
+def verifie_webapp_combinee():
+    """Le temoin combine : toutes les briques modernes ensemble.
+
+    Les autres epreuves isolent une brique. Celle-ci les fait travailler
+    ensemble, parce que c'est la que les applications reelles tombent — un
+    `pushState` pendant qu'un `fetch` est en vol et qu'une transaction attend
+    son commit.
+
+    Le parcours est celui de `tests/pages/webapp.html` : amorce, formulaire,
+    navigation, requete, mise a jour du DOM, WebSocket, enregistrement,
+    rechargement, restauration. Et pendant tout cela, une minuterie de fond
+    doit continuer de battre : c'est la mesure la plus simple de « l'interface
+    repond », et elle ne ment pas.
+    """
+    import time as _time
+    from moteur import indexeddb
+
+    restaure = isole_le_stockage()
+    try:
+        indexeddb.reinitialise()
+        _webapp_combinee(_time, indexeddb)
+    finally:
+        indexeddb.reinitialise()
+        restaure()
+
+
+def _attends(doc, condition, secondes=20.0):
+    """Bat le document jusqu'a ce que la condition JavaScript tienne."""
+    import time as _time
+    limite = _time.perf_counter() + secondes
+    contexte = doc.contexte_js
+    while _time.perf_counter() < limite:
+        doc.rafraichis()
+        if contexte is not None and contexte.execute(condition):
+            return True
+        _time.sleep(0.02)
+    return False
+
+
+def _etat_webapp(doc):
+    contexte = doc.contexte_js
+    if contexte is None:
+        return {}
+    brut = contexte.execute("JSON.stringify(globalThis.__webapp || {})")
+    try:
+        return json.loads(brut) if brut else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _charge_sur(base, chemin, battements=4, largeur=1000, hauteur=800):
+    """Charge une page d'un serveur **deja demarre**.
+
+    L'origine doit rester la meme entre les deux chargements : IndexedDB
+    cloisonne par origine, et `_sur_serveur` prend un port libre a chaque appel.
+    Deux appels donnaient donc deux origines, donc deux bases — et la
+    restauration ne trouvait rien. Le cloisonnement faisait exactement son
+    travail ; c'est l'epreuve qui demandait la mauvaise chose.
+    """
+    import time as _time
+    doc = moteur.charge(base + chemin, largeur, journal=lambda n, t: None)
+    doc.remet_en_page(largeur, hauteur)
+    for _ in range(battements):
+        doc.rafraichis()
+        _time.sleep(0.02)
+    doc.base = base
+    return doc
+
+
+def _webapp_combinee(_time, indexeddb):
+    from moteur import reseau as _reseau
+    import serveur_test
+
+    serveur, base = serveur_test.demarre(0)
+    ancien = _reseau._charge_http
+    try:
+        import apercu
+        apercu.installe_reseau(_reseau)
+    except Exception:  # noqa: BLE001
+        pass
+
+    def arrete():
+        _reseau._charge_http = ancien
+        serveur_test.arrete(serveur)
+
+    doc = _charge_sur(base, "/page/webapp.html")
+    try:
+        contexte = doc.contexte_js
+        verifie("webapp: la page a un contexte JavaScript", contexte is not None)
+        if contexte is None:
+            for nom in ("STATIC_PAGE", "LOGIN_FORM", "SPA_NAVIGATION",
+                        "ASYNC_FETCH", "WEBSOCKET_CHAT", "INDEXEDDB_PERSISTENCE",
+                        "WEBAPP_COMBINED"):
+                jalon(nom, False, "pas de contexte JavaScript")
+            return
+
+        # STATIC_PAGE — la page s'affiche : des boites, du texte, une mise en
+        # page qui n'est pas vide.
+        boites = 0
+        textes = 0
+        pile = [doc.boite]
+        while pile:
+            boite = pile.pop()
+            boites += 1
+            textes += len(boite.lignes)
+            pile.extend(boite.enfants)
+        # Ce qui fait qu'une page « s'affiche » : des boites, du texte pose, et
+        # une hauteur reelle. Les seuils sont bas et delibereement grossiers —
+        # ce jalon repond a « la page est-elle rendue ? », pas a « est-elle
+        # rendue exactement ainsi ? », question dont s'occupent les controles de
+        # pixels.
+        jalon("STATIC_PAGE",
+              boites >= 10 and textes >= 5 and doc.boite.hauteur > 150,
+              (boites, textes, doc.boite.hauteur))
+
+        pret = _attends(doc, "globalThis.__webapp && __webapp.amorce === true")
+        etat = _etat_webapp(doc)
+        verifie("webapp: l'amorce a eu lieu", pret, etat.get("erreurs"))
+
+        # ASYNC_FETCH — la requete est partie, revenue, et le DOM porte ce
+        # qu'elle a rapporte.
+        _attends(doc, "__webapp.domMisAJour === true")
+        etat = _etat_webapp(doc)
+        jalon("ASYNC_FETCH",
+              bool(etat.get("fetch")) and etat["fetch"].get("ok") is True
+              and etat.get("domMisAJour") is True,
+              etat.get("fetch"))
+
+        # LOGIN_FORM — on remplit au clavier, comme un utilisateur. Pas de
+        # `input.value = ...` : c'est le modele d'edition qu'on eprouve, pas
+        # l'affectation d'une propriete.
+        champ = doc.racine.trouve_id("nom") if hasattr(doc.racine, "trouve_id") else None
+        if champ is None:
+            champ = next((n for n in doc.racine.parcours()
+                          if isinstance(n, html.Element)
+                          and n.attributs.get("id") == "nom"), None)
+        saisi = False
+        if champ is not None:
+            doc.pose_foyer(champ)
+            for lettre in "arthur":
+                doc.frappe(lettre, lettre)
+            saisi = doc.edition_de(champ).valeur == "arthur"
+        courriel = next((n for n in doc.racine.parcours()
+                         if isinstance(n, html.Element)
+                         and n.attributs.get("id") == "courriel"), None)
+        if courriel is not None:
+            doc.pose_foyer(courriel)
+            for lettre in "a@b.test":
+                doc.frappe(lettre, lettre)
+
+        contexte.execute("document.getElementById('profil')"
+                         ".dispatchEvent(new Event('submit'))")
+        _attends(doc, "__webapp.enregistre === true")
+        etat = _etat_webapp(doc)
+        jalon("LOGIN_FORM",
+              saisi and (etat.get("profil") or {}).get("nom") == "arthur",
+              (saisi, etat.get("profil")))
+
+        # SPA_NAVIGATION — deux vues, `pushState`, puis retour arriere.
+        contexte.execute("document.getElementById('vers-flux').click()")
+        _attends(doc, "__webapp.navigation.indexOf('flux') >= 0")
+        contexte.execute("history.back()")
+        _attends(doc, "__webapp.navigation.length >= 2")
+        etat = _etat_webapp(doc)
+        jalon("SPA_NAVIGATION", "flux" in etat.get("navigation", []),
+              etat.get("navigation"))
+
+        # WEBSOCKET_CHAT — le serveur parle quand il veut, et la page l'entend.
+        _attends(doc, "__webapp.messages.length >= 3")
+        etat = _etat_webapp(doc)
+        jalon("WEBSOCKET_CHAT",
+              etat.get("socket") in ("ouvert", "ferme")
+              and len(etat.get("messages", [])) >= 3,
+              (etat.get("socket"), etat.get("messages")))
+
+        # L'interface a-t-elle repondu pendant tout cela ? Si la minuterie de
+        # fond n'a pas battu, quelque chose a tenu le fil.
+        etat = _etat_webapp(doc)
+        tics = etat.get("tics", 0)
+        verifie("webapp: la boucle d'evenements n'a jamais cale", tics > 5, tics)
+
+    finally:
+        pass
+
+    # INDEXEDDB_PERSISTENCE — on recharge la page **dans un document neuf**,
+    # apres avoir jete tout ce qui etait en memoire, et **depuis le meme
+    # serveur** : meme origine, donc meme base. Ce qui revient vient du disque,
+    # ou ne revient pas.
+    indexeddb.reinitialise()
+    doc2 = _charge_sur(base, "/page/webapp.html")
+    try:
+        _attends(doc2, "globalThis.__webapp && __webapp.restaure !== null")
+        second = _etat_webapp(doc2)
+        restaure_profil = second.get("restaure")
+        jalon("INDEXEDDB_PERSISTENCE",
+              isinstance(restaure_profil, dict)
+              and restaure_profil.get("nom") == "arthur",
+              restaure_profil)
+
+        # WEBAPP_COMBINED — le parcours entier, sans une seule erreur en route.
+        _attends(doc2, "__webapp.pret === true")
+        second = _etat_webapp(doc2)
+        complet = (
+            JALONS.get("STATIC_PAGE") and JALONS.get("LOGIN_FORM")
+            and JALONS.get("SPA_NAVIGATION") and JALONS.get("ASYNC_FETCH")
+            and JALONS.get("WEBSOCKET_CHAT")
+            and JALONS.get("INDEXEDDB_PERSISTENCE")
+            and not second.get("erreurs"))
+        jalon("WEBAPP_COMBINED", complet,
+              (dict(JALONS), second.get("erreurs")))
+    finally:
+        arrete()
+        ecris_jalons()
+
+
+def ecris_jalons():
+    """Depose les jalons la ou le tableau de bord ira les lire.
+
+    `BO_JALONS` pointe sur l'arbre source : la copie de travail des
+    verifications est effacee a chaque execution, et un jalon ecrit dedans
+    disparaitrait avant que quiconque le lise.
+    """
+    chemin = os.environ.get("BO_JALONS") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "tests", "jalons.json")
+    try:
+        os.makedirs(os.path.dirname(chemin), exist_ok=True)
+        with open(chemin, "w", encoding="utf-8") as fichier:
+            json.dump(JALONS, fichier, indent=1, sort_keys=True)
+    except OSError:
+        pass
+
+
+def verifie_origine():
+    """L'origine comme type, pas comme chaine.
+
+    Une comparaison approximative ici n'est pas un defaut de style : c'est ce
+    qui laisse un site en lire un autre. Les cinq pieges verifies sont ceux
+    qu'une comparaison de chaines rate.
+    """
+    from moteur.origine import Origine
+
+    def o(url):
+        return Origine.de_url(url)
+
+    verifie("origine: le port par defaut ne compte pas",
+            o("https://a.test") == o("https://a.test:443"))
+    verifie("origine: idem en clair",
+            o("http://a.test") == o("http://a.test:80"))
+    verifie("origine: le chemin ne compte pas",
+            o("https://a.test/un") == o("https://a.test/deux?x=1#y"))
+    verifie("origine: la casse de l'hote ne compte pas",
+            o("https://A.TEST") == o("https://a.test"))
+
+    verifie("origine: le schema fait partie de l'origine",
+            o("http://a.test") != o("https://a.test"))
+    verifie("origine: un sous-domaine est une autre origine",
+            o("https://sub.a.test") != o("https://a.test"))
+    verifie("origine: un port different est une autre origine",
+            o("https://a.test:8443") != o("https://a.test"))
+    verifie("origine: un hote different est une autre origine",
+            o("https://b.test") != o("https://a.test"))
+
+    # `ws://` parle au meme serveur que `http://` : une page doit pouvoir
+    # ouvrir un WebSocket vers sa propre origine.
+    verifie("origine: ws:// et http:// du meme hote se rejoignent",
+            o("ws://a.test") == o("http://a.test"))
+    verifie("origine: wss:// et https:// aussi",
+            o("wss://a.test") == o("https://a.test"))
+
+    # Les origines opaques : le piege qu'un tuple ne pouvait pas porter.
+    verifie("origine: une data: est opaque", o("data:text/html,x").est_opaque)
+    verifie("origine: un fichier est opaque", o("file:///tmp/x.html").est_opaque)
+    verifie("origine: about:blank est opaque", o("about:blank").est_opaque)
+    verifie("origine: deux opaques ne correspondent jamais",
+            o("data:text/html,x") != o("data:text/html,x"))
+    memes = o("data:text/html,x")
+    verifie("origine: une opaque est egale a elle-meme", memes == memes)
+
+    # Un port illisible ne doit pas retomber sur le port par defaut : ce serait
+    # accepter une adresse forgee comme si elle etait la bonne.
+    verifie("origine: un port illisible donne une origine opaque",
+            o("http://a.test:abc/").est_opaque)
+
+    egal("origine: serialisation sans port par defaut",
+         o("https://a.test:443/x").serialise(), "https://a.test")
+    egal("origine: serialisation avec port explicite",
+         o("https://a.test:8443/x").serialise(), "https://a.test:8443")
+    egal("origine: une opaque se serialise en null",
+         o("data:text/html,x").serialise(), "null")
+    # Mais sa cle de stockage reste unique : deux pages `data:` sans rapport ne
+    # doivent pas se relire l'une l'autre.
+    verifie("origine: deux opaques ont deux cles de stockage",
+            o("data:,a").cle_stockage() != o("data:,b").cle_stockage())
+
+
+def verifie_contexte_navigation():
+    """L'arbre des contextes : relations, historiques separes, fermeture."""
+    from moteur.contexte import BrowsingContext, TopLevelBrowsingContext
+
+    sommet = TopLevelBrowsingContext(url="https://a.test/page")
+    verifie("contexte: le premier niveau n'a pas de parent", sommet.est_sommet)
+    verifie("contexte: il est son propre sommet", sommet.sommet is sommet)
+
+    un = BrowsingContext(parent=sommet, url="https://a.test/cadre", nom="un")
+    deux = BrowsingContext(parent=sommet, url="https://b.test/cadre", nom="deux")
+    petit = BrowsingContext(parent=un, url="https://a.test/profond")
+
+    egal("contexte: les enfants sont declares", len(sommet.enfants), 2)
+    verifie("contexte: top remonte jusqu'au sommet", petit.sommet is sommet)
+    verifie("contexte: parent est le parent direct", petit.parent is un)
+    egal("contexte: la profondeur se compte", petit.profondeur, 2)
+    egal("contexte: les descendants sont tous la",
+         len(sommet.descendants()), 3)
+    verifie("contexte: on retrouve par nom", sommet.par_nom("deux") is deux)
+    verifie("contexte: et par identifiant", sommet.par_id(petit.id) is petit)
+
+    # L'origine decide de la frontiere.
+    verifie("contexte: meme origine reconnue", sommet.meme_origine(un))
+    verifie("contexte: origine differente reconnue",
+            not sommet.meme_origine(deux))
+
+    # Deux historiques, pas un seul tableau confondu. C'est ce qui fait qu'un
+    # « precedent » dans un iframe ne recule pas la page entiere.
+    sommet.navigue("https://a.test/page2")
+    un.navigue("https://a.test/cadre2")
+    un.navigue("https://a.test/cadre3")
+    egal("contexte: l'historique du sommet est le sien",
+         len(sommet.historique), 2)
+    egal("contexte: celui de l'iframe aussi", len(un.historique), 3)
+    un.recule()
+    egal("contexte: reculer dans l'iframe", un.url, "https://a.test/cadre2")
+    egal("contexte: ne bouge pas le sommet", sommet.url, "https://a.test/page2")
+    un.avance()
+    egal("contexte: et avancer y revient", un.url, "https://a.test/cadre3")
+
+    # Naviguer depuis le milieu coupe la branche abandonnee.
+    un.recule()
+    un.navigue("https://a.test/autre")
+    egal("contexte: naviguer depuis le milieu coupe la suite",
+         un.historique, ["https://a.test/cadre", "https://a.test/cadre2",
+                         "https://a.test/autre"])
+
+    # La fermeture descend jusqu'aux petits-enfants.
+    ferme = []
+
+    class FauxDocument:
+        def __init__(self, nom):
+            self.nom = nom
+
+        def ferme_document(self):
+            ferme.append(self.nom)
+
+    petit.document = FauxDocument("petit")
+    un.document = FauxDocument("un")
+    un.ferme_contexte()
+    egal("contexte: la fermeture descend d'abord aux enfants",
+         ferme, ["petit", "un"])
+    verifie("contexte: l'enfant ferme quitte son parent",
+            un not in sommet.enfants)
+    verifie("contexte: fermer deux fois ne fait rien",
+            un.ferme_contexte() is False)
+    verifie("contexte: le petit-fils est ferme aussi", petit.ferme)
+
+
+def verifie_cadres():
+    """iframe : deux mondes, une page, et une frontiere entre eux.
+
+    Le serveur repond sur `127.0.0.1` et sur `localhost` — deux hotes distincts
+    au sens de la norme, donc deux origines reelles, sans Internet ni DNS.
+
+    Ce qui est verifie, dans l'ordre ou cela se casse :
+
+      1. le cadre existe, a son contexte, son document et son viewport ;
+      2. il se met en page tout seul, a **sa** largeur et non a celle du parent ;
+      3. sa liste d'affichage entre dans celle du parent, rognee a ses bornes ;
+      4. `contentDocument` s'ouvre en meme origine et se ferme sinon ;
+      5. `postMessage` traverse dans les deux sens, et `targetOrigin` filtre ;
+      6. `iframe.src = ...` navigue l'enfant et pas le parent ;
+      7. retirer l'iframe detruit tout ce qu'il tenait.
+    """
+    import time as _time
+    from moteur import reseau as _reseau
+    import serveur_test
+
+    serveur, base = serveur_test.demarre(0)
+    port = base.rsplit(":", 1)[1]
+    # Meme serveur, hote different : c'est un cross-origin authentique.
+    autre = "http://localhost:%s" % port
+    ancien_charge = _reseau._charge_http
+    try:
+        import apercu
+        apercu.installe_reseau(_reseau)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        _cadres_scenario(base, autre, _time)
+    finally:
+        _reseau._charge_http = ancien_charge
+        serveur_test.arrete(serveur)
+        ecris_jalons()
+
+
+def _cadres_scenario(base, autre, _time):
+    from moteur import origine as mod_origine
+
+    # Les deux bases doivent bien etre deux origines : si ce n'etait pas le cas,
+    # tout le reste du scenario ne prouverait rien.
+    verifie("cadres: les deux bases sont deux origines",
+            not mod_origine.meme_origine(base, autre), (base, autre))
+
+    doc = moteur.charge(base + "/page/iframe-parent.html", 1000,
+                        journal=lambda n, t: None)
+    doc.remet_en_page(1000, 800)
+    contexte = doc.contexte_js
+    verifie("cadres: la page a un contexte JavaScript", contexte is not None)
+    if contexte is None:
+        return
+
+    # La page ne peut pas deviner le port : on le lui donne avant qu'elle pose
+    # ses cadres.
+    contexte.execute(
+        "globalThis.__config = {meme: %r, autre: %r, origineAutre: %r};"
+        % (base + "/page/iframe-enfant.html",
+           autre + "/page/iframe-enfant.html",
+           autre))
+    # La page a deja tourne : on lui refait poser ses `src` maintenant que la
+    # configuration est la.
+    contexte.execute(
+        "document.getElementById('ami').src = __config.meme;"
+        "document.getElementById('etranger').src = __config.autre;")
+
+    def bat(condition, secondes=15.0):
+        limite = _time.perf_counter() + secondes
+        while _time.perf_counter() < limite:
+            doc.rafraichis()
+            if contexte.execute(condition):
+                return True
+            _time.sleep(0.02)
+        return False
+
+    charges = bat("__parent.cadres >= 2")
+    lu = json.loads(contexte.execute("JSON.stringify(__parent)"))
+    verifie("cadres: les deux cadres se sont annonces", charges, lu)
+
+    # 1 et 2. Les contextes existent, avec leur propre viewport.
+    enfants = doc.contexte_navigation.enfants
+    egal("cadres: deux contextes enfants", len(enfants), 2)
+    for enfant in enfants:
+        verifie("cadres: le contexte porte un document", enfant.document is not None)
+        verifie("cadres: il a son propre viewport",
+                enfant.largeur == 280.0 and enfant.hauteur == 180.0,
+                (enfant.largeur, enfant.hauteur))
+        verifie("cadres: son document est mis en page a sa largeur",
+                enfant.document.boite is not None
+                and enfant.document.largeur == 280.0,
+                enfant.document.largeur)
+        verifie("cadres: le parent est bien le parent", enfant.parent is
+                doc.contexte_navigation)
+        verifie("cadres: et le sommet est la page",
+                enfant.sommet is doc.contexte_navigation)
+
+    # 3. La liste d'affichage de l'enfant entre dans celle du parent, entre un
+    #    `clip` et un `declip`. Sans le rognage, un document enfant plus haut
+    #    que son cadre recouvrirait la page hote.
+    affichage = doc.liste_affichage(0.0, 1000, 800)
+    clips = [op for op in affichage if op and op[0] == "clip"]
+    verifie("cadres: la liste du parent contient un rognage de cadre",
+            any(abs(op[3] - 280.0) < 2 and abs(op[4] - 180.0) < 2 for op in clips),
+            [op[1:] for op in clips][:6])
+    textes = [op[3] for op in affichage if op and op[0] == "texte"]
+    verifie("cadres: le texte de l'enfant est peint dans le parent",
+            any("Document enfant" in t for t in textes), textes[:8])
+
+    # 4. La frontiere.
+    contexte.execute("__sonde()")
+    lu = json.loads(contexte.execute("JSON.stringify(__parent)"))
+    egal("cadres: contentDocument lisible en meme origine",
+         lu["memeOrigine"]["document"], "lisible")
+    egal("cadres: contentDocument refuse en origine differente",
+         lu["autreOrigine"]["document"], "refuse")
+
+    # Et la reciproque, vue depuis l'enfant : celui de meme origine a pu lire
+    # son parent, l'autre non.
+    par_origine = {}
+    for enfant in enfants:
+        sous = enfant.document.contexte_js
+        if sous is None:
+            continue
+        etat = json.loads(sous.execute("JSON.stringify(globalThis.__enfant || {})"))
+        par_origine[etat.get("origine")] = etat
+    ami = par_origine.get(mod_origine.Origine.de_url(base).serialise())
+    etranger = par_origine.get(mod_origine.Origine.de_url(autre).serialise())
+    if ami:
+        egal("cadres: l'enfant de meme origine lit son parent",
+             ami.get("lectureParent"), "autorisee")
+    if etranger:
+        verifie("cadres: l'enfant d'une autre origine ne lit pas son parent",
+                etranger.get("lectureParent") in ("refusee", "exception"),
+                etranger.get("lectureParent"))
+
+    # 5. postMessage, dans les deux sens et a travers la frontiere.
+    contexte.execute("__envoie()")
+    bat("__parent.memeOrigine.echo !== null && __parent.autreOrigine.echo !== null")
+    lu = json.loads(contexte.execute("JSON.stringify(__parent)"))
+    egal("cadres: postMessage aller-retour en meme origine",
+         (lu["memeOrigine"]["echo"] or {}).get("salut"), "meme")
+    egal("cadres: postMessage aller-retour cross-origine",
+         (lu["autreOrigine"]["echo"] or {}).get("salut"), "autre")
+
+    # Le message au mauvais `targetOrigin` ne doit jamais etre arrive. C'est ce
+    # qui empeche d'envoyer un jeton a un cadre parti ailleurs.
+    for enfant in enfants:
+        sous = enfant.document.contexte_js
+        if sous is None:
+            continue
+        recus = json.loads(sous.execute(
+            "JSON.stringify((globalThis.__enfant || {}).recus || [])"))
+        verifie("cadres: un targetOrigin qui ne correspond pas fait taire le message",
+                not any("secret" in json.dumps(r.get("data") or {}) for r in recus),
+                recus)
+
+    # 6. `iframe.src = ...` navigue l'enfant, jamais le parent.
+    url_parent = doc.url
+    contexte.execute("document.getElementById('ami').src = %r"
+                     % (base + "/page/login-form.html"))
+    bat("false", secondes=1.0)
+    egal("cadres: le document principal n'a pas navigue", doc.url, url_parent)
+    ami_contexte = next((e for e in doc.contexte_navigation.enfants
+                         if e.element is not None
+                         and e.element.attributs.get("id") == "ami"), None)
+    verifie("cadres: l'enfant a navigue",
+            ami_contexte is not None and ami_contexte.url.endswith("login-form.html"),
+            ami_contexte.url if ami_contexte else None)
+    verifie("cadres: et son historique lui appartient",
+            ami_contexte is not None and len(ami_contexte.historique) == 2,
+            ami_contexte.historique if ami_contexte else None)
+    egal("cadres: celui du parent n'a pas bouge",
+         len(doc.contexte_navigation.historique), 1)
+
+    # 7. Retirer l'iframe detruit son monde.
+    contextes_avant = list(doc.contexte_navigation.enfants)
+    contexte.execute("document.getElementById('etranger').remove()")
+    bat("false", secondes=1.0)
+    egal("cadres: le contexte retire disparait",
+         len(doc.contexte_navigation.enfants), 1)
+    mort = next(c for c in contextes_avant
+                if c not in doc.contexte_navigation.enfants)
+    verifie("cadres: son contexte est ferme", mort.ferme)
+    verifie("cadres: et son document est libere", mort.document is None)
+
+    # Les jalons : ce que ce scenario prouve, en termes de capacites.
+    jalon("IFRAME_SAME_ORIGIN",
+          lu["memeOrigine"]["document"] == "lisible"
+          and (lu["memeOrigine"]["echo"] or {}).get("salut") == "meme")
+    jalon("IFRAME_CROSS_ORIGIN",
+          lu["autreOrigine"]["document"] == "refuse"
+          and lu["autreOrigine"]["message"] is not None)
+    jalon("POSTMESSAGE",
+          (lu["memeOrigine"]["echo"] or {}).get("salut") == "meme"
+          and (lu["autreOrigine"]["echo"] or {}).get("salut") == "autre")
+
+
+def verifie_fuite_cadres():
+    """Mille cadres crees et retires ne doivent rien laisser derriere eux.
+
+    C'est le test que le cycle de vie appelle. Un `<iframe>` tient un contexte
+    QuickJS, un pool de fils, des connexions et des transactions : oublier de
+    les rendre ne se voit pas sur une page d'essai et tue une application au
+    bout d'une heure.
+
+    On ne compte pas les octets — ils dependent du ramasse-miettes, et un test
+    qui en depend est instable. On compte ce qui est deterministe : les
+    contextes crees contre les contextes fermes, et les documents fermes.
+    """
+    from moteur import telemetrie
+
+    doc = document(
+        "<body><div id='zone'></div><script>1</script></body>",
+        url="http://a.test/page")
+    doc.remet_en_page(800, 600)
+    contexte = doc.contexte_js
+    verifie("fuite: la page a un contexte", contexte is not None)
+    if contexte is None:
+        return
+
+    telemetrie.reinitialise()
+    telemetrie.active(True)
+    tours = 500
+    for _ in range(tours):
+        # `about:blank` : aucun reseau, donc on mesure le cycle de vie et rien
+        # d'autre. Un cadre avec `src` melangerait le cout du chargement.
+        # Pas de `const` : chaque `execute` partage la portee globale du
+        # contexte, et une seconde declaration du meme nom la ferait echouer —
+        # silencieusement, puisque l'erreur est journalisee et non levee. Le
+        # test aurait alors mesure une seule iteration en croyant en mesurer
+        # mille.
+        contexte.execute(
+            "document.getElementById('zone').innerHTML = '<iframe></iframe>';")
+        doc.rafraichis()
+        contexte.execute("document.getElementById('zone').innerHTML = '';")
+        doc.rafraichis()
+
+    mesures = telemetrie.compteurs()
+    crees = mesures.get("cadre.crees", 0)
+    retires = mesures.get("cadre.retires", 0)
+    verifie("fuite: les cadres ont bien ete crees", crees >= tours - 2, crees)
+    egal("fuite: autant de cadres retires que crees", retires, crees)
+    egal("fuite: autant de contextes fermes que crees",
+         mesures.get("contexte.fermes", 0), crees)
+    egal("fuite: aucun contexte enfant ne survit",
+         len(doc.contexte_navigation.enfants), 0)
+    egal("fuite: aucun descendant ne survit",
+         len(doc.contexte_navigation.descendants()), 0)
+    telemetrie.active(False)
+
+
+def verifie_cors():
+    """CORS : ce qu'un script a le droit de LIRE, pas ce qu'il a le droit de demander.
+
+    Le raccourci « si c'est cross-origine, on refuse » est faux et casserait la
+    moitie du Web. Ces epreuves verifient les deux moities de la vraie regle :
+
+      * la requete **part** meme cross-origine — le serveur la voit ;
+      * la reponse n'est **lisible** que si le serveur y consent.
+
+    Le second point se verifie de la seule facon honnete : en demandant au
+    serveur ce qu'il a recu. Une epreuve qui ne regarderait que le refus cote
+    navigateur ne saurait pas distinguer « refuse a la lecture » de « jamais
+    envoye », et ce sont deux comportements tres differents.
+    """
+    import time as _time
+    from moteur import reseau as _reseau
+    import serveur_test
+
+    serveur, base = serveur_test.demarre(0)
+    port = base.rsplit(":", 1)[1]
+    autre = "http://localhost:%s" % port
+    ancien_charge = _reseau._charge_http
+    try:
+        import apercu
+        apercu.installe_reseau(_reseau)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        _cors_scenario(base, autre, _time)
+    finally:
+        _reseau._charge_http = ancien_charge
+        serveur_test.arrete(serveur)
+        ecris_jalons()
+
+
+def _cors_scenario(base, autre, _time):
+    doc = moteur.charge(base + "/page/event-loop.html", 800,
+                        journal=lambda n, t: None)
+    contexte = doc.contexte_js
+    verifie("cors: la page a un contexte", contexte is not None)
+    if contexte is None:
+        return
+
+    def demande(nom, url, options=""):
+        """Emet un `fetch` et rend ce que le script en a vu."""
+        contexte.execute(
+            "globalThis.__c = globalThis.__c || {};"
+            "globalThis.__c[%r] = null;"
+            "fetch(%r%s).then(function (r) {"
+            "  return r.text().then(function (t) {"
+            "    __c[%r] = {status: r.status, texte: t,"
+            "               type: r.headers.get('content-type'),"
+            "               secret: r.headers.get('x-secret-applicatif')};"
+            "  });"
+            "}).catch(function (e) { __c[%r] = {erreur: String(e)}; });"
+            % (nom, url, options, nom, nom))
+        limite = _time.perf_counter() + 10.0
+        while _time.perf_counter() < limite:
+            doc.rafraichis()
+            if contexte.execute("__c[%r] !== null" % nom):
+                break
+            _time.sleep(0.02)
+        brut = contexte.execute("JSON.stringify(__c[%r])" % nom)
+        return json.loads(brut) if brut else None
+
+    # 1. Meme origine : rien a verifier, tout est lisible.
+    vu = demande("meme", base + "/cors/prive")
+    egal("cors: meme origine, reponse lisible", vu.get("status"), 200)
+    verifie("cors: et son corps arrive", "prive" in (vu.get("texte") or ""), vu)
+
+    # 2. Cross-origine sans en-tete : la reponse existe mais reste opaque.
+    # Une reponse non exposee fait **rejeter** la promesse `fetch` — c'est ce
+    # que fait un vrai navigateur, et c'est ce qui distingue « refuse » de
+    # « recu mais vide ». Le script ne doit rien apprendre du contenu, pas meme
+    # sa longueur.
+    vu = demande("prive", autre + "/cors/prive")
+    verifie("cors: cross-origine sans ACAO fait echouer le fetch",
+            vu.get("erreur") is not None, vu)
+    egal("cors: et rien du corps ne transparait", vu.get("texte"), None)
+
+    # Mais la requete est **partie** : c'est la distinction qui compte. On le
+    # prouve en la redemandant en meme origine, ou le serveur nous dira ce
+    # qu'il a vu.
+    vu = demande("preuve", base + "/cors/ouvert")
+    egal("cors: une requete cross-origine part quand meme",
+         vu.get("status"), 200)
+
+    # 3. `Access-Control-Allow-Origin: *`.
+    vu = demande("etoile", autre + "/cors/ouvert")
+    egal("cors: ACAO * expose la reponse", vu.get("status"), 200)
+    verifie("cors: et son corps est lisible", "ouvert" in (vu.get("texte") or ""),
+            vu)
+
+    # 4. ACAO nommant exactement notre origine.
+    vu = demande("exact", autre + "/cors/exact")
+    egal("cors: ACAO exact expose la reponse", vu.get("status"), 200)
+
+    # 5. ACAO nommant quelqu'un d'autre : refuse.
+    vu = demande("autre", autre + "/cors/autre")
+    verifie("cors: ACAO d'une autre origine ne nous expose rien",
+            vu.get("erreur") is not None, vu)
+
+    # 6. Les en-tetes applicatifs ne traversent pas, meme quand la reponse est
+    #    lisible. Un en-tete d'un autre site n'a pas a etre expose.
+    vu = demande("entetes", autre + "/cors/secret-entete")
+    egal("cors: la reponse est lisible", vu.get("status"), 200)
+    egal("cors: mais l'en-tete applicatif ne traverse pas",
+         vu.get("secret"), None)
+    verifie("cors: les en-tetes surs, eux, restent lisibles",
+            "json" in (vu.get("type") or ""), vu.get("type"))
+
+    # 7. Avec temoins : `*` ne suffit pas, il faut nommer l'origine et l'avouer.
+    vu = demande("cred-etoile", autre + "/cors/temoins-etoile",
+                 ", {credentials: 'include'}")
+    verifie("cors: ACAO * ne vaut pas pour une requete avec temoins",
+            vu.get("erreur") is not None, vu)
+    vu = demande("cred-exact", autre + "/cors/temoins",
+                 ", {credentials: 'include'}")
+    egal("cors: ACAO exact plus Allow-Credentials expose la reponse",
+         vu.get("status"), 200)
+
+    # 8. Preflight : une requete non simple demande d'abord la permission.
+    from moteur import telemetrie
+    telemetrie.reinitialise()
+    telemetrie.active(True)
+    vu = demande("preflight", autre + "/cors/exact",
+                 ", {method: 'PUT', headers: {'X-Jeton': 'a'}}")
+    mesures = telemetrie.compteurs()
+    verifie("cors: une requete non simple declenche un preflight",
+            (mesures.get("cors.preflights") or 0) >= 1, mesures.get("cors.preflights"))
+    egal("cors: le preflight accorde laisse passer", vu.get("status"), 200)
+
+    telemetrie.reinitialise()
+    vu = demande("preflight-refuse", autre + "/cors/prive",
+                 ", {method: 'DELETE', headers: {'X-Jeton': 'a'}}")
+    mesures = telemetrie.compteurs()
+    verifie("cors: un preflight refuse fait echouer le fetch",
+            vu.get("erreur") is not None, vu)
+    verifie("cors: et la vraie requete n'est jamais partie",
+            (mesures.get("cors.preflights_refuses") or 0) >= 1,
+            mesures.get("cors.preflights_refuses"))
+    telemetrie.active(False)
+    jalon("CORS", vu.get("erreur") is not None)
+
+
+def verifie_toile_origine():
+    """Une toile contaminee ne se relit pas.
+
+    C'est le vieux manque que l'audit signalait, et il n'etait pas traitable
+    tant que le moteur ne savait pas d'ou venait une image. Maintenant qu'il le
+    sait : dessiner une image d'une autre origine dans un `<canvas>` doit rendre
+    ses pixels illisibles, sans quoi une page peut relire l'image d'un site ou
+    l'utilisateur est connecte — c'est-a-dire lire une page qu'elle n'a pas le
+    droit d'ouvrir.
+
+    Les trois cas verifies sont les trois qui comptent : une image de la meme
+    origine ne contamine rien, une image `data:` non plus — elle voyage avec la
+    page —, une image d'ailleurs contamine.
+    """
+    from moteur import images
+
+    doc = document("<body><canvas id='t' width='40' height='40'></canvas>"
+                   "<script>1</script></body>",
+                   url="http://a.test/page")
+    contexte = doc.contexte_js
+    verifie("toile: la page a un contexte", contexte is not None)
+    if contexte is None:
+        return
+
+    # On declare des images d'origines choisies, sans reseau : c'est le lien
+    # `identifiant -> adresse` que la regle consulte.
+    images._origines[9001] = "http://a.test/logo.png"
+    images._origines[9002] = "http://b.test/pixel.gif"
+    images._origines[9003] = "data:image/gif;base64,R0lGOD"
+    try:
+        def lisible(operations):
+            return not contexte._op_toileSouillee(operations)
+
+        verifie("toile: une image de meme origine ne contamine pas",
+                lisible([["image", 0, 0, 10, 10, 9001]]))
+        verifie("toile: une image data: ne contamine pas",
+                lisible([["image", 0, 0, 10, 10, 9003]]))
+        verifie("toile: une image d'une autre origine contamine",
+                not lisible([["image", 0, 0, 10, 10, 9002]]))
+        verifie("toile: une seule image etrangere suffit a contaminer",
+                not lisible([["image", 0, 0, 10, 10, 9001],
+                             ["image", 0, 0, 10, 10, 9002]]))
+        # Une image dont on ignore l'origine contamine : ne pas savoir n'est pas
+        # une raison d'autoriser.
+        verifie("toile: une image d'origine inconnue contamine",
+                not lisible([["image", 0, 0, 10, 10, 12345]]))
+        verifie("toile: un dessin sans image reste lisible",
+                lisible([["rect", 0, 0, 10, 10]]))
+
+        # Et du cote de la page : `getImageData` doit lever `SecurityError`.
+        rendu = contexte.execute("""
+            (function () {
+                const c = document.getElementById('t').getContext('2d');
+                c.__operations.push(["image", 0, 0, 10, 10, 9002]);
+                try { c.getImageData(0, 0, 4, 4); return "lu"; }
+                catch (e) { return e.name; }
+            })()
+        """)
+        egal("toile: getImageData leve SecurityError sur une toile contaminee",
+             rendu, "SecurityError")
+
+        rendu = contexte.execute("""
+            (function () {
+                const t = document.getElementById('t');
+                const c = t.getContext('2d');
+                try { t.toDataURL(); return "lu"; }
+                catch (e) { return e.name; }
+            })()
+        """)
+        egal("toile: toDataURL aussi", rendu, "SecurityError")
+
+        # Une toile propre se relit normalement : la regle ne doit pas casser
+        # l'usage ordinaire.
+        rendu = contexte.execute("""
+            (function () {
+                const t = document.createElement('canvas');
+                t.width = 8; t.height = 8;
+                const c = t.getContext('2d');
+                c.fillStyle = '#ff0000'; c.fillRect(0, 0, 4, 4);
+                try { c.getImageData(0, 0, 2, 2); return "lu"; }
+                catch (e) { return e.name; }
+            })()
+        """)
+        egal("toile: une toile propre se relit", rendu, "lu")
+        jalon("CANVAS_ORIGIN_CLEAN", rendu == "lu"
+              and not lisible([["image", 0, 0, 10, 10, 9002]]))
+    finally:
+        for cle in (9001, 9002, 9003):
+            images._origines.pop(cle, None)
+        ecris_jalons()
+
+
+def verifie_wss():
+    """`wss://` : le meme WebSocket, derriere le TLS deja valide du navigateur.
+
+    Ce qui est eprouve n'est pas « le chiffrement marche » mais **que le
+    navigateur verifie**. Une autorite de test signe un certificat pour
+    `localhost` ; on la fait reconnaitre par `BO_CA_BUNDLE`, et l'on verifie
+    ensuite les deux sens :
+
+      * avec l'autorite reconnue, la connexion s'etablit et parle ;
+      * sans elle, la connexion **echoue** au lieu de se degrader en clair.
+
+    Le second cas est celui qui compte. Un `wss://` qui retomberait en `ws://`
+    quand la verification gene ne protegerait personne — c'est meme pire
+    qu'aucune securite, parce qu'on croit l'avoir.
+
+    L'architecture est celle demandee : transport TCP, transport TLS optionnel,
+    puis le meme decoupage en trames. Aucune seconde pile TLS.
+    """
+    import os as _os
+    import shutil as _shutil
+    import tempfile as _tempfile
+    import time as _time
+
+    from moteur import reseau as _reseau
+    import serveur_test
+
+    dossier = _tempfile.mkdtemp(prefix="bo-wss-")
+    try:
+        materiel = serveur_test.fabrique_ca(dossier)
+        if materiel is None:
+            verifie("wss: cryptography absent, epreuve non mesuree", True)
+            return
+        chemin_ca, chemin_srv = materiel
+        serveur, base = serveur_test.demarre_tls(chemin_srv)
+        ancien_bundle = _os.environ.get("BO_CA_BUNDLE")
+        try:
+            _wss_scenario(base, chemin_ca, _os, _time, _reseau)
+        finally:
+            if ancien_bundle is None:
+                _os.environ.pop("BO_CA_BUNDLE", None)
+            else:
+                _os.environ["BO_CA_BUNDLE"] = ancien_bundle
+            serveur_test.arrete(serveur)
+    finally:
+        _shutil.rmtree(dossier, ignore_errors=True)
+        ecris_jalons()
+
+
+def _wss_scenario(base, chemin_ca, _os, _time, _reseau):
+    # `contexte_tls()` reconstruit son contexte a chaque appel :
+    # changer `BO_CA_BUNDLE` suffit a changer ce qu'il approuve,
+    # sans avoir a vider quoi que ce soit.
+    from moteur import websocket
+
+    # 1. Sans l'autorite, la connexion doit echouer. On l'eprouve d'abord :
+    #    si elle reussissait ici, tout ce qui suit ne prouverait rien.
+    _os.environ["BO_CA_BUNDLE"] = "/inexistant/aucune-autorite.pem"
+    refusee = websocket.Connexion(base + "/ws/echo", document="https://a.test/p")
+    echec = None
+    try:
+        refusee.ouvre()
+    except Exception as e:  # noqa: BLE001
+        echec = str(e)
+    finally:
+        try:
+            refusee.ferme(1000, "")
+        except Exception:  # noqa: BLE001
+            pass
+    verifie("wss: sans autorite reconnue, la connexion est refusee",
+            echec is not None, echec)
+    verifie("wss: et elle ne se degrade pas en clair",
+            refusee.etat != websocket.OUVERT, refusee.etat)
+
+    # 2. Avec l'autorite, la connexion s'etablit et parle.
+    _os.environ["BO_CA_BUNDLE"] = chemin_ca
+    connexion = websocket.Connexion(base + "/ws/echo",
+                                    protocoles=["bo-chat", "bo-secours"],
+                                    document="https://a.test/p")
+    try:
+        ouverte = connexion.ouvre()
+        verifie("wss: avec l'autorite reconnue, la connexion s'ouvre", ouverte)
+        if not ouverte:
+            return
+        connexion.envoie("bonjour en clair chiffre")
+        recus = []
+        limite = _time.perf_counter() + 10.0
+        while _time.perf_counter() < limite and not recus:
+            for type_, charge in connexion.evenements():
+                if type_ == "message":
+                    recus.append(charge)
+            _time.sleep(0.02)
+        verifie("wss: le serveur repond a travers TLS", bool(recus), recus)
+        verifie("wss: et le message est celui qu'on a envoye",
+                any("bonjour" in str(m) for m in recus), recus)
+
+        # 3. Le sous-protocole negocie.
+        egal("wss: le sous-protocole retenu est celui qu'on a propose",
+             connexion.protocole, "bo-chat")
+    finally:
+        connexion.ferme(1000, "fin")
+
+    jalon("WSS", True)
+    jalon("WEBSOCKET_SUBPROTOCOL", connexion.protocole == "bo-chat")
+
+
+def verifie_grille_intrinseque():
+    """Les pistes de grille prennent la taille de leur contenu.
+
+    Elles se partageaient la place a parts egales, faute de savoir ce qu'elles
+    portaient — le commentaire du module le disait franchement. Une colonne de
+    mots courts recevait donc autant qu'une colonne de phrases, et une grille
+    `auto auto` coupait toujours la page en deux quel que soit son contenu.
+
+    Ce que ces epreuves verifient est le comportement observable, pas les
+    nombres internes : une colonne qui porte plus large **doit** etre plus
+    large. C'est la seule formulation qui reste vraie si la fonte change.
+    """
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #g { display: grid; grid-template-columns: auto auto; width: 900px; }
+        </style>
+        <body><div id="g">
+          <div id="court">a</div>
+          <div id="long">une phrase nettement plus longue que la precedente</div>
+        </div></body>""")
+    doc.remet_en_page(1000, 800)
+    court = boite_de(doc, "court")
+    longue = boite_de(doc, "long")
+    verifie("grille: une colonne auto suit son contenu",
+            longue.largeur > court.largeur * 1.5,
+            (court.largeur, longue.largeur))
+
+    # `min-content` et `max-content` ne sont pas la meme chose. Les confondre —
+    # ce qui etait le cas — revenait a ignorer les deux.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #g { display: grid; grid-template-columns: min-content max-content;
+               width: 900px; }
+        </style>
+        <body><div id="g">
+          <div id="mini">alpha bravo charlie delta</div>
+          <div id="maxi">alpha bravo charlie delta</div>
+        </div></body>""")
+    doc.remet_en_page(1000, 800)
+    mini = boite_de(doc, "mini")
+    maxi = boite_de(doc, "maxi")
+    verifie("grille: min-content est plus etroit que max-content",
+            mini.largeur < maxi.largeur, (mini.largeur, maxi.largeur))
+    verifie("grille: et min-content n'est pas nul", mini.largeur > 0, mini.largeur)
+
+    # `minmax(200px, 1fr)` : un plancher et un plafond, la forme la plus
+    # courante d'une grille reelle.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #g { display: grid; grid-template-columns: minmax(200px, 1fr) 100px;
+               width: 900px; }
+        </style>
+        <body><div id="g"><div id="souple">x</div><div id="fixe">y</div></div></body>""")
+    doc.remet_en_page(1000, 800)
+    souple = boite_de(doc, "souple")
+    fixe = boite_de(doc, "fixe")
+    verifie("grille: minmax respecte son plancher",
+            souple.largeur >= 199.0, souple.largeur)
+    verifie("grille: et la piste fixe garde sa largeur",
+            proche(fixe.largeur, 100.0, 2.0), fixe.largeur)
+    verifie("grille: la piste souple prend le reste",
+            souple.largeur > 700.0, souple.largeur)
+
+    # `fr` partage ce qui reste apres les pistes rigides.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #g { display: grid; grid-template-columns: 100px 1fr 2fr; width: 700px; }
+        </style>
+        <body><div id="g"><div id="a">a</div><div id="b">b</div>
+        <div id="c">c</div></div></body>""")
+    doc.remet_en_page(1000, 800)
+    a, b, c = (boite_de(doc, n) for n in ("a", "b", "c"))
+    verifie("grille: la piste fixe garde ses 100px", proche(a.largeur, 100.0, 2.0),
+            a.largeur)
+    verifie("grille: 2fr vaut deux fois 1fr",
+            proche(c.largeur, b.largeur * 2.0, 6.0), (b.largeur, c.largeur))
+    verifie("grille: et les trois remplissent la grille",
+            proche(a.largeur + b.largeur + c.largeur, 700.0, 6.0),
+            a.largeur + b.largeur + c.largeur)
+
+    # Le depassement : une colonne ne descend pas sous son mot le plus long,
+    # parce que deborder est pire que serrer.
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          #g { display: grid; grid-template-columns: auto auto; width: 60px; }
+        </style>
+        <body><div id="g">
+          <div id="p">incompressiblement</div><div id="q">x</div>
+        </div></body>""")
+    doc.remet_en_page(1000, 800)
+    verifie("grille: une colonne ne passe pas sous son min-content",
+            boite_de(doc, "p").largeur > 20.0, boite_de(doc, "p").largeur)
+
+
+def verifie_pseudo_classes_dynamiques():
+    """Passer la souris sur un bouton ne doit pas remettre la page en page.
+
+    C'est le cas le plus frequent de toute l'interactivite : `:hover` change
+    presque toujours une couleur ou un fond, jamais une geometrie. Le moteur
+    remettait pourtant toute la page en page a chaque pixel parcouru.
+
+    Comme pour les classes, les deux sens sont verifies. Un `:hover` qui change
+    une **largeur** doit, lui, bel et bien remettre en page — une invalidation
+    trop etroite se voit comme un bogue d'affichage, et une epreuve qui ne
+    verifierait que les economies recompenserait un moteur qui ne redessine
+    plus rien.
+    """
+    from moteur import telemetrie
+
+    cartes = "".join('<div class="carte" id="c%d">Carte %d</div>' % (i, i)
+                     for i in range(400))
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          .carte { padding: 6px; color: #202020; background: #ffffff; }
+          .carte:hover { color: #cc0000; background: #fff0f0; }
+          .large:hover { width: 500px; }
+          input { padding: 4px; }
+          input:focus { background: #ffffcc; }
+          input:disabled { color: #999999; }
+          .coche:checked { background: #ccffcc; }
+        </style>
+        <body>%s
+          <div class="carte large" id="grande">grandit</div>
+          <input id="champ"><input id="mort" disabled>
+          <input id="case" type="checkbox" class="coche">
+        </body>""" % cartes)
+    doc.remet_en_page(1000, 800)
+
+    def mesure(action):
+        telemetrie.reinitialise()
+        telemetrie.active(True)
+        change = action()
+        return change, telemetrie.compteurs()
+
+    cible = boite_de(doc, "c200")
+    point = (cible.x + 3, cible.y + 3)
+
+    # 1. Survol d'une carte qui ne change que sa couleur.
+    change, m = mesure(lambda: doc.survole(*point))
+    verifie("pseudo: le survol change l'affichage", change)
+    egal("pseudo: et ne remet rien en page",
+         m.get("invalidation.interaction_mise_en_page"), None)
+    egal("pseudo: il ne demande que des pixels",
+         m.get("invalidation.interaction_peinture_seule"), 1)
+    egal("pseudo: aucune boite n'est reposee", m.get("layout.dispose_bloc"), None)
+    egal("pseudo: et la couleur a bien change",
+         boite_de(doc, "c200").style.get("color"), "#cc0000")
+
+    # 2. Sortie du survol : meme economie.
+    autre = boite_de(doc, "c100")
+    change, m = mesure(lambda: doc.survole(autre.x + 3, autre.y + 3))
+    egal("pseudo: quitter un element ne remet rien en page non plus",
+         m.get("invalidation.interaction_mise_en_page"), None)
+    egal("pseudo: la carte quittee a repris sa couleur",
+         boite_de(doc, "c200").style.get("color"), "#202020")
+
+    # 3. Un `:hover` qui change une largeur **doit** remettre en page.
+    grande = boite_de(doc, "grande")
+    change, m = mesure(lambda: doc.survole(grande.x + 3, grande.y + 3))
+    egal("pseudo: un hover qui change une largeur remet en page",
+         m.get("invalidation.interaction_mise_en_page"), 1)
+    verifie("pseudo: et la largeur est appliquee",
+            boite_de(doc, "grande").largeur > 400.0,
+            boite_de(doc, "grande").largeur)
+
+    # 4. `:focus` : meme regle.
+    champ = next(n for n in doc.racine.parcours()
+                 if isinstance(n, html.Element)
+                 and n.attributs.get("id") == "champ")
+    doc.survole(0, 0)
+    change, m = mesure(lambda: doc.pose_foyer(champ))
+    verifie("pseudo: poser le foyer change l'affichage", change)
+    egal("pseudo: le foyer ne remet rien en page",
+         m.get("invalidation.interaction_mise_en_page"), None)
+    # `background` est developpe en ses composantes par la cascade : c'est
+    # `background-color` qui porte la teinte.
+    egal("pseudo: le fond du champ au foyer a change",
+         boite_de(doc, "champ").style.get("background-color"), "#ffffcc")
+
+    # 5. `:disabled` et `:checked` : statiques, mais ils doivent correspondre.
+    egal("pseudo: :disabled s'applique",
+         boite_de(doc, "mort").style.get("color"), "#999999")
+    telemetrie.active(False)
+
+
+def verifie_invalidation_ciblee():
+    """Changer une couleur ne doit pas remettre mille cartes en page.
+
+    C'est la promesse entiere du pipeline d'invalidation, et elle se verifie de
+    la seule facon qui ne se trompe pas : en comptant les mises en page reelles.
+    Un test qui regarderait les pixels dirait « c'est bien peint » sans rien
+    savoir de ce que cela a coute.
+
+    Trois mutations, trois etendues attendues :
+
+      * une couleur       → peinture seule, aucune mise en page ;
+      * un `transform`    → composition seule ;
+      * une largeur       → mise en page, et il **faut** qu'elle ait lieu.
+
+    Le troisieme cas compte autant que les deux premiers : une invalidation
+    trop etroite se voit comme un bogue d'affichage, la pire espece a
+    diagnostiquer. Une epreuve qui ne verifierait que les economies finirait par
+    recompenser un moteur qui ne redessine plus rien.
+    """
+    from moteur import telemetrie
+
+    cartes = "".join(
+        '<div class="carte" id="c%d"><h3>Carte %d</h3>'
+        '<p>Un texte de carte assez long pour occuper une ligne.</p></div>'
+        % (i, i) for i in range(1000))
+    doc = document("""
+        <style>
+          body { margin: 0; }
+          .carte { padding: 8px; border: 1px solid #dddddd; color: #202020; }
+          .carte.vedette { color: #cc0000; background: #fff8f0; }
+          .carte.large { width: 640px; }
+        </style>
+        <body>%s<script>1</script></body>""" % cartes)
+    doc.remet_en_page(1000, 800)
+    contexte = doc.contexte_js
+    verifie("invalidation: la page a un contexte", contexte is not None)
+    if contexte is None:
+        return
+
+    def compte_apres(code):
+        """Execute, rafraichit une fois, et rend les compteurs de ce tour."""
+        telemetrie.reinitialise()
+        telemetrie.active(True)
+        contexte.execute(code)
+        doc.rafraichis()
+        return telemetrie.compteurs()
+
+    # 1. Une couleur, posee directement : le chemin ou la propriete est connue.
+    mesures = compte_apres("document.getElementById('c500')"
+                           ".style.color = '#cc0000'")
+    egal("invalidation: une couleur ne remet rien en page",
+         mesures.get("invalidation.mise_en_page"), None)
+    egal("invalidation: elle ne demande que des pixels",
+         mesures.get("invalidation.peinture_seule"), 1)
+    egal("invalidation: et aucune boite n'est reposee",
+         mesures.get("layout.dispose_bloc"), None)
+
+    # 2. Un `transform` : plus haut encore dans le pipeline — les pixels
+    #    existants suffisent, il ne reste qu'a les deplacer.
+    mesures = compte_apres("document.getElementById('c501')"
+                           ".style.transform = 'translateX(4px)'")
+    egal("invalidation: un transform ne demande que la composition",
+         mesures.get("invalidation.composition_seule"), 1)
+    egal("invalidation: et ne repose aucune boite",
+         mesures.get("layout.dispose_bloc"), None)
+
+    # 3. Une classe : la propriete n'est pas nommee, il faut rejouer la cascade
+    #    pour savoir. Si elle ne change qu'une couleur, la mise en page doit
+    #    quand meme etre evitee — c'est le cas que le moteur ne savait pas
+    #    traiter, et le plus frequent dans une application reelle.
+    mesures = compte_apres("document.getElementById('c502')"
+                           ".classList.add('vedette')")
+    egal("invalidation: une classe qui ne change qu'une couleur evite la mise en page",
+         mesures.get("invalidation.mise_en_page_evitee"), 1)
+    egal("invalidation: le restyle cible a bien eu lieu",
+         mesures.get("invalidation.restyle_reussi"), 1)
+    verifie("invalidation: et il n'a coute que le sous-arbre de la carte",
+            (mesures.get("invalidation.restyle_boites") or 0) <= 8,
+            mesures.get("invalidation.restyle_boites"))
+    # La couleur doit reellement avoir change dans la boite peinte : economiser
+    # une mise en page ne vaut rien si l'ecran ne suit pas.
+    boite = boite_de(doc, "c502")
+    egal("invalidation: la nouvelle couleur est dans la boite",
+         boite.style.get("color"), "#cc0000")
+
+    # 4. Une classe qui change une largeur : la mise en page doit avoir lieu.
+    mesures = compte_apres("document.getElementById('c503')"
+                           ".classList.add('large')")
+    egal("invalidation: une classe qui change une largeur remet en page",
+         mesures.get("invalidation.mise_en_page"), 1)
+    # 640 px de contenu, plus le remplissage et les bordures des deux cotes :
+    # `width` est du contenu tant que `box-sizing` ne dit pas le contraire.
+    verifie("invalidation: et la largeur est effectivement appliquee",
+            proche(boite_de(doc, "c503").largeur, 640.0 + 18.0, 3.0),
+            boite_de(doc, "c503").largeur)
+
+    # 5. Une classe qu'aucune regle ne designe : rien ne change, meme pas les
+    #    pixels.
+    mesures = compte_apres("document.getElementById('c504')"
+                           ".classList.add('inconnue-nulle-part')")
+    egal("invalidation: une classe sans regle ne change rien",
+         mesures.get("invalidation.restyle_sans_effet"), 1)
+    egal("invalidation: et ne remet pas en page",
+         mesures.get("invalidation.mise_en_page"), None)
+
+    # 6. Une insertion de contenu : structure changee, mise en page obligatoire.
+    mesures = compte_apres(
+        "const d = document.createElement('div');"
+        "d.textContent = 'ajoute';"
+        "document.body.appendChild(d);")
+    egal("invalidation: une insertion remet en page",
+         mesures.get("invalidation.mise_en_page"), 1)
+    telemetrie.active(False)
+
+
+def verifie_foyer():
+    """Le foyer : `activeElement`, `focus`, `blur`, `Tab`.
+
+    Rien de tout cela n'existait. `focus()` etait vide et `activeElement`
+    rendait `null` en toutes circonstances — donc aucun formulaire n'etait
+    remplissable au clavier, et `:focus` ne peignait jamais rien.
+    """
+    doc = document(
+        "<style>input:focus { background: #ffff00 }</style>"
+        "<body><input id=un><input id=deux><input id=trois disabled>"
+        "<a id=lien href='/x'>lien</a><div id=inerte>texte</div>"
+        "<script>1</script></body>")
+    doc.remet_en_page(1000, 800)
+    contexte = doc.contexte_js
+    verifie("foyer: la page a un contexte", contexte is not None)
+    if contexte is None:
+        return
+
+    egal("foyer: sans foyer, activeElement vaut body",
+         contexte.execute("document.activeElement.tagName"), "BODY")
+
+    contexte.execute("document.getElementById('un').focus()")
+    egal("foyer: focus() designe l'element",
+         contexte.execute("document.activeElement.id"), "un")
+    egal("foyer: le document est d'accord",
+         doc.foyer_actuel().attributs.get("id"), "un")
+
+    # Les evenements partent, et dans le bon ordre : `blur` sur l'ancien avant
+    # `focus` sur le nouveau. Une page qui valide un champ au `blur` avant
+    # d'afficher le suivant en depend.
+    contexte.execute(
+        "globalThis.__ordre = [];"
+        "for (const nom of ['un','deux']) {"
+        "  const e = document.getElementById(nom);"
+        "  e.addEventListener('focus', () => __ordre.push('focus:'+nom));"
+        "  e.addEventListener('blur', () => __ordre.push('blur:'+nom));"
+        "}")
+    contexte.execute("document.getElementById('deux').focus()")
+    egal("foyer: blur de l'ancien precede focus du nouveau",
+         contexte.execute("__ordre.join(',')"), "blur:un,focus:deux")
+
+    contexte.execute("document.getElementById('deux').blur()")
+    egal("foyer: blur() rend le foyer au document",
+         contexte.execute("document.activeElement.tagName"), "BODY")
+
+    # `Tab` suit l'ordre du document, saute ce qui est desactive, et fait le
+    # tour en fin de page.
+    doc.pose_foyer(None)
+    atteints = []
+    for _ in range(4):
+        atteint = doc.deplace_foyer(1)
+        atteints.append(None if atteint is None else atteint.attributs.get("id"))
+    egal("foyer: Tab suit l'ordre du document et saute le desactive",
+         ",".join(str(a) for a in atteints), "un,deux,lien,un")
+
+    arriere = doc.deplace_foyer(-1)
+    egal("foyer: Maj+Tab revient en arriere",
+         arriere.attributs.get("id") if arriere else None, "lien")
+
+    # Un element desactive ne prend pas le foyer, meme si on le lui demande.
+    contexte.execute("document.getElementById('trois').focus()")
+    verifie("foyer: un champ desactive ne prend pas le foyer",
+            contexte.execute("document.activeElement.id") != "trois",
+            contexte.execute("document.activeElement.id"))
+
+    # Et le style suit : `:focus` doit peindre.
+    doc.pose_foyer(None)
+    contexte.execute("document.getElementById('un').focus()")
+    doc.remet_en_page(1000, 800)
+    boite = boite_de(doc, "un")
+    egal("foyer: :focus est applique",
+         css_couleur(boite.style.get("background-color")) if boite else None,
+         css_couleur("#ffff00"))
+
+
+def verifie_formulaire_plateforme():
+    """`form.elements`, `action`, `method`, `submit`, `label.control`."""
+    doc = document(
+        "<body><form id=f action='/session' method=POST>"
+        "<label id=et for=nom>Nom</label>"
+        "<input id=nom name=nom value=alice>"
+        "<input id=mdp name=mdp type=password value=secret>"
+        "<input id=coche name=coche type=checkbox checked>"
+        "<button id=envoi type=submit>Envoyer</button></form>"
+        "<script>1</script></body>",
+        url="http://exemple.test/page/")
+    doc.remet_en_page(1000, 800)
+    contexte = doc.contexte_js
+
+    egal("formulaire: action est resolue en absolu",
+         contexte.execute("document.getElementById('f').action"),
+         "http://exemple.test/session")
+    egal("formulaire: method est en minuscules",
+         contexte.execute("document.getElementById('f').method"), "post")
+    egal("formulaire: elements compte les controles",
+         contexte.execute("document.getElementById('f').elements.length"), 4)
+    egal("formulaire: elements est indexable par nom",
+         contexte.execute("document.getElementById('f').elements.nom.value"),
+         "alice")
+    egal("formulaire: input.form remonte au formulaire",
+         contexte.execute("document.getElementById('nom').form.id"), "f")
+    egal("formulaire: label.htmlFor",
+         contexte.execute("document.getElementById('et').htmlFor"), "nom")
+    egal("formulaire: label.control designe le champ",
+         contexte.execute("document.getElementById('et').control.id"), "nom")
+
+    # `required` : la seule regle de validation implementee, et la seule qui
+    # serve aujourd'hui.
+    contexte.execute("document.getElementById('nom').required = true")
+    egal("formulaire: un champ requis rempli est valide",
+         contexte.execute("document.getElementById('nom').checkValidity()"), True)
+    contexte.execute("document.getElementById('nom').value = ''")
+    egal("formulaire: un champ requis vide ne l'est pas",
+         contexte.execute("document.getElementById('nom').checkValidity()"), False)
+    contexte.execute("document.getElementById('nom').value = 'alice'")
+
+    # `requestSubmit()` passe par l'evenement, `submit()` ne le declenche pas :
+    # c'est la difference que la norme etablit, et du code s'en sert pour
+    # contourner sa propre validation.
+    contexte.execute("globalThis.__vus = 0;"
+                     "document.getElementById('f').addEventListener('submit',"
+                     " e => { __vus++; e.preventDefault(); })")
+    contexte.execute("document.getElementById('f').requestSubmit()")
+    egal("formulaire: requestSubmit declenche l'evenement",
+         contexte.execute("__vus"), 1)
+    egal("formulaire: et preventDefault empeche la navigation",
+         contexte.navigation, None)
+
+    contexte.execute("document.getElementById('f').submit()")
+    egal("formulaire: submit() ne declenche pas l'evenement",
+         contexte.execute("__vus"), 1)
+    navigation = contexte.navigation
+    verifie("formulaire: submit() prepare bien un POST",
+            isinstance(navigation, tuple) and navigation[0] == "soumission"
+            and navigation[2] == "POST", navigation)
+    verifie("formulaire: le corps porte les champs remplis",
+            "nom=alice" in navigation[3] and "mdp=secret" in navigation[3]
+            and "coche=on" in navigation[3], navigation[3])
+    egal("formulaire: la cible est l'action resolue",
+         navigation[1], "http://exemple.test/session")
+
+    # En GET, les champs partent dans la chaine de requete, et **remplacent**
+    # celle qui s'y trouvait : deux envois ne doivent pas l'accumuler.
+    contexte.navigation = None
+    contexte.execute("var f = document.getElementById('f');"
+                     "f.setAttribute('method', 'get');"
+                     "f.setAttribute('action', '/chercher?ancien=1');"
+                     "f.submit()")
+    verifie("formulaire: GET met les champs dans la requete",
+            "nom=alice" in contexte.navigation, contexte.navigation)
+    verifie("formulaire: et remplace l'ancienne chaine",
+            "ancien=1" not in contexte.navigation, contexte.navigation)
+
+
+def verifie_historique_session():
+    """`pushState`, `replaceState`, `popstate`, et l'adresse qui suit."""
+    doc = document("<body><script>1</script></body>",
+                   url="http://exemple.test/depart")
+    doc.remet_en_page(1000, 800)
+    contexte = doc.contexte_js
+    contexte.execute("globalThis.__pops = [];"
+                     "addEventListener('popstate', e =>"
+                     " __pops.push(JSON.stringify(e.state)))")
+
+    egal("historique: longueur initiale",
+         contexte.execute("history.length"), 1)
+
+    contexte.execute("history.pushState({vue:'a'}, '', '/a')")
+    egal("historique: l'adresse du document a change", doc.url,
+         "http://exemple.test/a")
+    egal("historique: location.pathname suit",
+         contexte.execute("location.pathname"), "/a")
+    egal("historique: history.state porte l'etat",
+         contexte.execute("JSON.stringify(history.state)"), '{"vue":"a"}')
+    egal("historique: la longueur augmente",
+         contexte.execute("history.length"), 2)
+    verifie("historique: aucune navigation reelle n'est demandee",
+            contexte.navigation is None, contexte.navigation)
+
+    contexte.execute("history.pushState({vue:'b'}, '', '/b?x=1')")
+    egal("historique: la requete suit aussi",
+         contexte.execute("location.search"), "?x=1")
+
+    # `replaceState` ecrase, il n'empile pas.
+    contexte.execute("history.replaceState({vue:'b2'}, '', '/b2')")
+    egal("historique: replaceState n'allonge pas la pile",
+         contexte.execute("history.length"), 3)
+    egal("historique: mais change l'adresse",
+         contexte.execute("location.pathname"), "/b2")
+
+    # Retour : `popstate` part avec l'etat memorise.
+    contexte.execute("history.back()")
+    egal("historique: back revient a l'entree precedente",
+         contexte.execute("location.pathname"), "/a")
+    egal("historique: popstate a recu l'etat",
+         contexte.execute("__pops.join('|')"), '{"vue":"a"}')
+
+    contexte.execute("history.forward()")
+    egal("historique: forward avance",
+         contexte.execute("location.pathname"), "/b2")
+
+    # Un `pushState` apres un retour tronque ce qui suivait : on ne peut plus
+    # avancer, exactement comme dans un navigateur.
+    contexte.execute("history.back(); history.pushState({vue:'c'}, '', '/c')")
+    egal("historique: pushState apres retour tronque la suite",
+         contexte.execute("history.length"), 3)
+    contexte.execute("history.forward()")
+    egal("historique: et il n'y a plus rien devant",
+         contexte.execute("location.pathname"), "/c")
+
+    # Sortir de la plage reste une vraie navigation, deleguee au navigateur.
+    contexte.navigation = None
+    for _ in range(5):
+        contexte.execute("history.back()")
+    verifie("historique: au-dela, c'est une navigation du navigateur",
+            contexte.navigation is not None, contexte.navigation)
+
+
+def verifie_reseau_asynchrone():
+    """Le fil de l'interface doit vivre pendant qu'une requete est en vol.
+
+    `fetch` rendait bien une promesse, mais partait sur le fil de l'interface :
+    zero battement de minuterie, zero evenement, zero repeinture pendant tout
+    le vol. La promesse ne faisait que masquer un gel.
+    """
+    doc, arrete = _sur_serveur("/page/reseau-lent.html", battements=0)
+    try:
+        import time as _time
+        for _ in range(120):
+            doc.rafraichis()
+            _time.sleep(0.02)
+        etat = doc.contexte_js.execute("JSON.stringify(globalThis.__lent)")
+        import json as _json
+        lu = _json.loads(etat)
+        verifie("reseau: l'interface a continue de battre pendant le vol",
+                lu["battements"] > 10, lu)
+        verifie("reseau: la reponse est bien arrivee",
+                lu["recu"] is not None, lu)
+        verifie("reseau: et elle a pris le temps annonce",
+                lu["ms"] >= 900, lu)
+    finally:
+        arrete()
+
+
+def verifie_fetch_reel():
+    """La surface de `Response`, contre un vrai serveur."""
+    import json as _json
+    import time as _time
+
+    doc, arrete = _sur_serveur("/page/event-loop.html")
+    try:
+        contexte = doc.contexte_js
+        base = doc.base
+
+        def joue(code, jusqua=None, secondes=10.0):
+            """Execute, puis bat jusqu'a ce que la condition tienne.
+
+            Attendre un nombre fixe de battements rendait ces verifications
+            instables : sous charge, une reponse arrivait apres le dernier tour
+            et le test echouait sans que rien ne soit casse. Un test instable
+            est pire qu'absent — il apprend a ignorer les echecs.
+            """
+            contexte.execute(code)
+            limite = _time.perf_counter() + secondes
+            while _time.perf_counter() < limite:
+                contexte.tic()
+                if jusqua is not None and contexte.execute(jusqua):
+                    return True
+                _time.sleep(0.02)
+            return jusqua is None
+
+        joue("globalThis.__r = {};"
+             "fetch('%s/json').then(r => {"
+             "  __r.ok = r.ok; __r.status = r.status; __r.url = r.url;"
+             "  __r.type = r.headers.get('content-type');"
+             "  return r.json();"
+             "}).then(j => { __r.json = j.nom; })" % base,
+             jusqua="__r.json !== undefined")
+        lu = _json.loads(contexte.execute("JSON.stringify(__r)"))
+        egal("fetch: ok", lu.get("ok"), True)
+        egal("fetch: status", lu.get("status"), 200)
+        egal("fetch: le type de contenu se lit",
+             (lu.get("type") or "").split(";")[0], "application/json")
+        egal("fetch: json() rend l'objet", lu.get("json"), "bouchaud")
+
+        joue("globalThis.__c = [];"
+             "fetch('%s/status/404').then(r => __c.push(r.status + ':' + r.ok));"
+             "fetch('%s/status/500').then(r => __c.push(String(r.status)));"
+             "fetch('%s/redirect?to=/json&n=3').then(r => __c.push('r' + r.status));"
+             % (base, base, base), jusqua="__c.length >= 3")
+        codes = contexte.execute("__c.slice().sort().join(',')")
+        verifie("fetch: un 404 arrive comme reponse, pas comme rejet",
+                "404:false" in codes, codes)
+        verifie("fetch: un 500 aussi", "500" in codes, codes)
+        verifie("fetch: une chaine de redirections aboutit", "r200" in codes, codes)
+
+        joue("globalThis.__p = '';"
+             "fetch('%s/echo', {method:'POST',"
+             " headers:{'Content-Type':'application/json'},"
+             " body: JSON.stringify({a:1})}).then(r => r.json())"
+             ".then(j => { __p = j.corps; })" % base, jusqua="__p !== ''")
+        egal("fetch: un POST envoie bien son corps",
+             contexte.execute("__p"), '{"a":1}')
+
+        # L'annulation doit etre reelle : un moignon d'`AbortController` aurait
+        # laisse la page croire qu'elle sait annuler.
+        joue("globalThis.__a = '';"
+             "var ac = new AbortController();"
+             "fetch('%s/delay/2', {signal: ac.signal})"
+             " .then(() => { __a = 'PAS-ANNULE'; })"
+             " .catch(e => { __a = e.name; });"
+             "ac.abort();" % base, jusqua="__a !== ''")
+        egal("fetch: abort() rejette avec AbortError",
+             contexte.execute("__a"), "AbortError")
+    finally:
+        arrete()
+
+
+def verifie_serveur_fixtures():
+    """Le serveur local lui-meme : sans lui, rien de ce qui precede n'est testable."""
+    import urllib.request
+
+    import serveur_test
+
+    serveur, base = serveur_test.demarre(0)
+    try:
+        def code_de(chemin):
+            try:
+                return urllib.request.urlopen(base + chemin, timeout=5).status
+            except Exception as e:  # noqa: BLE001
+                return getattr(e, "code", 0)
+
+        egal("serveur: l'accueil repond", code_de("/"), 200)
+        egal("serveur: /json repond", code_de("/json"), 200)
+        egal("serveur: /status/404 rend 404", code_de("/status/404"), 404)
+        egal("serveur: /status/500 rend 500", code_de("/status/500"), 500)
+        egal("serveur: une chaine de redirections aboutit",
+             code_de("/redirect?to=/json&n=3"), 200)
+        egal("serveur: les modules sont servis", code_de("/module/main.js"), 200)
+        egal("serveur: y compris ceux d'un sous-dossier",
+             code_de("/module/lib/util.js"), 200)
+        egal("serveur: une page temoin du depot est servie",
+             code_de("/page/login-form.html"), 200)
+        egal("serveur: un bundle absent rend 404", code_de("/404.js"), 404)
+
+        # Deterministe : deux lectures rendent exactement les memes octets.
+        premier = urllib.request.urlopen(base + "/json", timeout=5).read()
+        second = urllib.request.urlopen(base + "/json", timeout=5).read()
+        egal("serveur: deux lectures rendent la meme chose", premier, second)
+    finally:
+        serveur_test.arrete(serveur)
+
+
+def verifie_parcours_complet():
+    """Le parcours entier : de l'ouverture a `popstate`, sans rien sauter.
+
+    C'est la verification qui compte le plus de tout le fichier, parce que
+    c'est la seule qui ressemble a ce qu'un utilisateur fait. Quinze etapes
+    liees : chacune depend de la precedente, et une seule qui casse rend la
+    suite sans objet.
+
+    Elle ne remplace pas les verifications unitaires — elle dit si elles
+    suffisent.
+    """
+    import json as _json
+    import time as _time
+
+    doc, arrete = _sur_serveur("/page/parcours-complet.html", battements=4)
+    try:
+        contexte = doc.contexte_js
+        verifie("parcours: la page a un contexte JavaScript", contexte is not None)
+        if contexte is None:
+            return
+
+        def bat(tours=6, pause=0.02):
+            for _ in range(tours):
+                doc.rafraichis()
+                _time.sleep(pause)
+
+        # 3. L'utilisateur clique dans le champ : le foyer suit vraiment.
+        courriel = doc.racine.trouve_par_id("email") \
+            if hasattr(doc.racine, "trouve_par_id") else None
+        contexte.execute("document.getElementById('email').focus()")
+        egal("parcours: le foyer est dans le champ",
+             contexte.execute("document.activeElement.id"), "email")
+
+        # 4. Il ecrit.
+        contexte.execute("var e = document.getElementById('email');"
+                         "e.value = 'alice@exemple.fr';"
+                         "e.dispatchEvent(new Event('input'))")
+
+        # 5. Tab vers le champ suivant — par le modele de foyer du document,
+        #    comme le ferait une vraie frappe.
+        atteint = doc.deplace_foyer(1)
+        egal("parcours: Tab atteint le mot de passe",
+             atteint.attributs.get("id") if atteint else None, "motdepasse")
+
+        # 6. Il ecrit son mot de passe.
+        contexte.execute("var m = document.getElementById('motdepasse');"
+                         "m.value = 'secret42';"
+                         "m.dispatchEvent(new Event('input'))")
+
+        # 7. Il coche la case.
+        contexte.execute("var c = document.getElementById('memoire');"
+                         "c.checked = true;"
+                         "c.dispatchEvent(new Event('change'))")
+
+        # 8. Il soumet.
+        contexte.execute("document.getElementById('connexion')"
+                         ".dispatchEvent(new Event('submit', {cancelable: true}))")
+        bat(60, 0.03)
+
+        parcours = _json.loads(
+            contexte.execute("JSON.stringify(globalThis.__parcours)"))
+        etapes = parcours["etapes"]
+        vues = {e.split("=")[0]: e.partition("=")[2] for e in etapes}
+
+        attendues = [
+            ("js-execute", "le script de la page s'execute"),
+            ("focus", "le foyer arrive dans le champ"),
+            ("saisie-email", "la saisie declenche input"),
+            ("saisie-mdp", "le mot de passe aussi"),
+            ("case", "la case declenche change"),
+            ("formdata", "FormData rassemble les champs"),
+            ("post-status", "le POST recoit une reponse"),
+            ("serveur-a-recu", "le serveur a bien recu le corps"),
+            ("api-json", "une seconde requete rend du JSON"),
+            ("dom-maj", "le DOM est mis a jour depuis la reponse"),
+            ("pushstate", "l'adresse change sans rechargement"),
+        ]
+        for cle, quoi in attendues:
+            verifie("parcours: %s" % quoi, cle in vues,
+                    " | ".join(etapes))
+
+        egal("parcours: le champ saisi arrive au serveur",
+             "alice%40exemple.fr" in vues.get("serveur-a-recu", "")
+             or "alice@exemple.fr" in vues.get("serveur-a-recu", ""), True)
+        verifie("parcours: la case cochee part avec le formulaire",
+                "memoire=oui" in vues.get("formdata", ""), vues.get("formdata"))
+        egal("parcours: le POST a reussi", vues.get("post-status"), "200")
+        egal("parcours: le DOM porte le bloc ajoute", vues.get("dom-maj"), "1")
+        egal("parcours: l'adresse est la nouvelle", vues.get("pushstate"), "/tableau")
+        egal("parcours: et le document est d'accord",
+             contexte.execute("location.pathname"), "/tableau")
+
+        # 14. Retour : `popstate` part avec l'etat.
+        contexte.execute("history.back()")
+        bat(4)
+        parcours = _json.loads(
+            contexte.execute("JSON.stringify(globalThis.__parcours)"))
+        verifie("parcours: back declenche popstate",
+                len(parcours["popstates"]) >= 1, parcours["popstates"])
+        verifie("parcours: et l'adresse revient",
+                contexte.execute("location.pathname").endswith("parcours-complet.html"),
+                contexte.execute("location.pathname"))
+
+        # 15. L'interface a battu pendant tout le reseau.
+        verifie("parcours: l'interface est restee vivante pendant le reseau",
+                parcours["battements"] > 10, parcours["battements"])
+    finally:
+        arrete()
+
+
+def verifie_parcours_utilisateur():
+    """Le parcours de connexion, joue comme un utilisateur le jouerait.
+
+    C'est la difference avec `verifie_parcours_complet`, qui posait les valeurs
+    par script. Ici rien n'est ecrit dans `input.value` : on clique, on tape
+    caractere par caractere, on tabule, on coche, on valide. Ce que le test
+    prouve alors n'est plus « les methodes existent » mais « on peut s'en
+    servir ».
+
+    C'est la verification de reference du navigateur. Si elle passe, une page de
+    connexion ordinaire est utilisable ; si elle casse, plus rien ne l'est.
+    """
+    import json as _json
+    import time as _time
+
+    doc, arrete = _sur_serveur("/page/parcours-complet.html", battements=4)
+    try:
+        contexte = doc.contexte_js
+        verifie("utilisateur: la page a un contexte", contexte is not None)
+        if contexte is None:
+            return
+
+        def clique(identifiant):
+            boite = boite_de(doc, identifiant)
+            if boite is None:
+                verifie("utilisateur: la boite de %s existe" % identifiant, False)
+                return
+            doc.clique(boite.x + 5.0, boite.y + boite.hauteur / 2.0)
+
+        def bat(secondes=6.0, jusqua=None):
+            limite = _time.perf_counter() + secondes
+            while _time.perf_counter() < limite:
+                doc.rafraichis()
+                if jusqua is not None and contexte.execute(jusqua):
+                    return True
+                _time.sleep(0.02)
+            return jusqua is None
+
+        # 2. Clic dans le champ d'adresse.
+        clique("email")
+        egal("utilisateur: le clic donne le foyer au champ",
+             contexte.execute("document.activeElement.id"), "email")
+
+        # 3. Le caret est visible.
+        boite = boite_de(doc, "email")
+        verifie("utilisateur: un caret est pose", boite.curseur is not None)
+
+        # 4. Frappe reelle, caractere par caractere.
+        tape(doc, "alice@exemple.fr")
+        egal("utilisateur: la valeur vient de la frappe",
+             contexte.execute("document.getElementById('email').value"),
+             "alice@exemple.fr")
+
+        # 5. Retour arriere, puis correction.
+        doc.frappe("Backspace")
+        doc.frappe("Backspace")
+        tape(doc, "com")
+        egal("utilisateur: retour arriere puis correction",
+             contexte.execute("document.getElementById('email').value"),
+             "alice@exemple.com")
+
+        # 6. Tab vers le mot de passe.
+        doc.frappe("Tab")
+        egal("utilisateur: Tab passe au champ suivant",
+             contexte.execute("document.activeElement.id"), "motdepasse")
+
+        # 7. Mot de passe tape reellement.
+        tape(doc, "secret42")
+        egal("utilisateur: le mot de passe est saisi",
+             contexte.execute("document.getElementById('motdepasse').value"),
+             "secret42")
+        boite = boite_de(doc, "motdepasse")
+        peint = " ".join(f.texte for f in boite.lignes) if boite else ""
+        verifie("utilisateur: il n'est pas peint en clair",
+                "secret42" not in peint, peint)
+
+        # 8. La case, au clavier.
+        doc.frappe("Tab")
+        egal("utilisateur: Tab atteint la case",
+             contexte.execute("document.activeElement.id"), "memoire")
+        doc.frappe(" ", " ")
+        egal("utilisateur: l'espace coche la case",
+             contexte.execute("document.getElementById('memoire').checked"), True)
+
+        # 9. Soumission par le bouton.
+        doc.frappe("Tab")
+        egal("utilisateur: Tab atteint le bouton",
+             contexte.execute("document.activeElement.id"), "valider")
+        doc.active(doc.foyer_actuel())
+        bat(8.0, jusqua="globalThis.__parcours.etapes."
+                        "some(e => e.indexOf('pushstate') === 0)")
+
+        parcours = _json.loads(
+            contexte.execute("JSON.stringify(globalThis.__parcours)"))
+        vues = {e.split("=")[0]: e.partition("=")[2] for e in parcours["etapes"]}
+
+        # 10-14. Ce que la soumission a reellement produit.
+        verifie("utilisateur: FormData porte l'adresse tapee",
+                "email=alice%40exemple.com" in vues.get("formdata", "")
+                or "email=alice@exemple.com" in vues.get("formdata", ""),
+                vues.get("formdata"))
+        verifie("utilisateur: et le mot de passe tape",
+                "secret42" in vues.get("formdata", ""), vues.get("formdata"))
+        verifie("utilisateur: et la case cochee",
+                "memoire=oui" in vues.get("formdata", ""), vues.get("formdata"))
+        egal("utilisateur: le POST a abouti", vues.get("post-status"), "200")
+        verifie("utilisateur: le serveur a recu ce qui a ete tape",
+                "secret42" in vues.get("serveur-a-recu", ""),
+                vues.get("serveur-a-recu"))
+        egal("utilisateur: une API JSON a repondu", vues.get("api-json"), "bouchaud")
+        egal("utilisateur: le DOM a ete mis a jour", vues.get("dom-maj"), "1")
+        egal("utilisateur: l'adresse a change sans rechargement",
+             vues.get("pushstate"), "/tableau")
+        # Le serveur local repond en quelques millisecondes : le vol est trop
+        # court pour compter beaucoup de battements, et exiger un grand nombre
+        # ici rendrait la verification dependante de la vitesse de la machine.
+        # La preuve que le reseau ne bloque pas est ailleurs, sur une reponse
+        # d'une seconde — `verifie_reseau_asynchrone`. Ici on verifie seulement
+        # que la minuterie a continue d'echoir pendant la sequence.
+        verifie("utilisateur: la minuterie a continue de battre",
+                parcours["battements"] > 0, parcours["battements"])
+
+        # 15. Retour arriere du navigateur.
+        contexte.execute("history.back()")
+        bat(1.5)
+        parcours = _json.loads(
+            contexte.execute("JSON.stringify(globalThis.__parcours)"))
+        verifie("utilisateur: back declenche popstate",
+                len(parcours["popstates"]) >= 1, parcours["popstates"])
+    finally:
+        arrete()
+
+
 # --- Securite web -------------------------------------------------------------
 
 def verifie_politique_ressources():
@@ -4287,6 +7515,1333 @@ def verifie_hote_reel():
     verifie("hote: la mesure de texte est reelle", largeur > 0, largeur)
 
 
+# --- Workers ------------------------------------------------------------------
+#
+# Ce qui est verifie ici, dans l'ordre ou ca compte :
+#
+#   1. la surface du monde d'un Worker est celle d'un Worker, pas celle d'une
+#      fenetre amputee ;
+#   2. le calcul s'y fait **ailleurs** — mesure, pas lecture de propriete ;
+#   3. `fetch` et IndexedDB y passent par l'infrastructure du document, pas par
+#      une seconde implementation ;
+#   4. `terminate()` rend tout, y compris sur un worker qui ne rend jamais la
+#      main ;
+#   5. mille creations et destructions ne laissent rien derriere elles.
+#
+# Le point 2 est le seul qui distingue un vrai Worker d'une API qui en porte le
+# nom, et c'est pour cela qu'il a sa propre page temoin.
+
+
+def _bat_jusqua(doc, contexte, condition, secondes=20.0):
+    """Fait battre le document jusqu'a ce que la page dise oui."""
+    import time as _time
+    limite = _time.perf_counter() + secondes
+    while _time.perf_counter() < limite:
+        doc.rafraichis()
+        try:
+            if contexte.execute(condition):
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        _time.sleep(0.01)
+    return False
+
+
+def verifie_workers_surface():
+    """Le monde d'un Worker : ce qu'il a, et ce qu'il n'a pas."""
+    doc, arrete = _sur_serveur("/page/worker-base.html", battements=2)
+    try:
+        contexte = doc.contexte_js
+        verifie("worker: la page a un contexte", contexte is not None)
+        if contexte is None:
+            jalon("WEB_WORKER_BASIC", False, "pas de contexte JavaScript")
+            return
+
+        fini = _bat_jusqua(doc, contexte, "!!(globalThis.__worker||{}).pret")
+        etat = json.loads(contexte.execute("JSON.stringify(globalThis.__worker)"))
+        verifie("worker: le scenario est alle jusqu'au bout", fini,
+                etat.get("etapes"))
+        egal("worker: aucune erreur", etat.get("erreurs"), [])
+
+        surface = (etat.get("surface") or {}).get("surface") or {}
+
+        # Ce qui ne doit pas exister. Un Worker qui verrait le DOM partagerait
+        # l'arbre entre deux fils : ce n'est pas une privation, c'est ce qui
+        # rend legitime de le faire tourner ailleurs.
+        for nom in ("aDocument", "aWindow", "aHtmlElement", "aLocalStorage",
+                    "aAlert"):
+            verifie("worker: pas de %s dans le worker" % nom,
+                    surface.get(nom) is False, surface.get(nom))
+
+        # Ce qui doit exister, et que la norme exige d'un
+        # `DedicatedWorkerGlobalScope`.
+        for nom in ("selfEstGlobal", "aPostMessage", "aFetch", "aSetTimeout",
+                    "aSetInterval", "aQueueMicrotask", "aUrl",
+                    "aUrlSearchParams", "aTextEncoder", "aTextDecoder",
+                    "aIndexedDb", "aWebSocket", "portee"):
+            verifie("worker: %s" % nom, surface.get(nom) is True,
+                    surface.get(nom))
+
+        # La page, elle, a bien tout ce que le worker n'a pas : la difference
+        # est un monde different, pas un moteur diminue.
+        page = json.loads(contexte.execute("JSON.stringify(globalThis.__page)"))
+        verifie("worker: la page, elle, a un document",
+                page.get("aDocument") is True and page.get("aWindow") is True)
+        verifie("worker: et la page a le constructeur Worker",
+                page.get("aWorker") is True)
+
+        # Les messages traversent, dans les deux sens, avec leur structure.
+        echo = etat.get("echo") or {}
+        egal("worker: l'objet poste revient identique", echo.get("recu"),
+             {"a": 1, "b": ["x", None, True], "c": {"d": -2.5}})
+
+        # Les minuteries battent sur le fil du worker.
+        egal("worker: setInterval bat dans le worker",
+             (etat.get("minuterie") or {}).get("tours"), 3)
+
+        # `TextEncoder`/`TextDecoder`, en UTF-8 et sur des caracteres qui
+        # sortent de l'ASCII — c'est la seule facon de voir un encodage faux.
+        texte = etat.get("texte") or {}
+        egal("worker: TextDecoder rend ce que TextEncoder a produit",
+             texte.get("relu"), "eleve — caractères accentués")
+        verifie("worker: l'encodage est bien de l'UTF-8 multi-octets",
+                len(texte.get("octets") or []) > len("eleve — caracteres"),
+                len(texte.get("octets") or []))
+
+        # `URL` resout contre l'adresse du script du worker.
+        adresse = etat.get("url") or {}
+        egal("worker: URL resout une adresse relative",
+             adresse.get("chemin"), "/autre/chemin")
+        egal("worker: et connait son origine", adresse.get("origine"),
+             doc.base)
+
+        # Les micro-taches sont de vraies micro-taches : apres tout le code
+        # synchrone, jamais entrelacees avec lui.
+        egal("worker: queueMicrotask s'execute apres le code synchrone",
+             (etat.get("microtache") or {}).get("ordre"),
+             ["sync", "sync-fin", "microtache"])
+
+        jalon("WEB_WORKER_BASIC",
+              fini and not etat.get("erreurs")
+              and surface.get("aDocument") is False
+              and surface.get("aPostMessage") is True,
+              etat.get("etapes"))
+    finally:
+        doc.ferme_document()
+        arrete()
+
+
+def verifie_workers_calcul_ailleurs():
+    """Le calcul d'un worker bloque-t-il la page ? La seule question qui compte.
+
+    Une API `Worker` presente mais servie sur le fil de l'interface serait une
+    facon compliquee de ne rien changer — et elle passerait toutes les
+    verifications de surface. Seule une mesure la demasque : la page compte ses
+    battements pendant que le worker calcule sans interruption.
+    """
+    doc, arrete = _sur_serveur("/page/worker-cpu.html", battements=2)
+    try:
+        contexte = doc.contexte_js
+        if contexte is None:
+            jalon("WEB_WORKER_LIFECYCLE", False, "pas de contexte JavaScript")
+            return
+        fini = _bat_jusqua(doc, contexte, "!!globalThis.__wc.rapport", 30.0)
+        etat = json.loads(contexte.execute("JSON.stringify(globalThis.__wc)"))
+        verifie("worker: le calcul a rendu son resultat", fini, etat)
+        egal("worker: aucune erreur pendant le calcul", etat.get("erreurs"), [])
+
+        rapport = etat.get("rapport") or {}
+        verifie("worker: le calcul a bien dure ce qu'on lui a demande",
+                (rapport.get("duree") or 0) >= 190, rapport.get("duree"))
+        verifie("worker: et il a reellement tourne",
+                (rapport.get("tours") or 0) > 0, rapport.get("tours"))
+
+        # Le point de l'epreuve. Si le calcul s'etait fait sur le fil de
+        # l'interface, la page n'aurait pas pu battre pendant ces 200 ms : le
+        # compteur serait fige, ou aurait avance d'un cran.
+        avance = (etat.get("toursALArrivee") or 0) - (etat.get("toursAuDepart") or 0)
+        verifie("worker: la page a continue de battre pendant le calcul",
+                avance >= 4, (etat.get("toursAuDepart"),
+                              etat.get("toursALArrivee")))
+    finally:
+        doc.ferme_document()
+        arrete()
+
+
+def verifie_workers_reseau():
+    """`fetch` dans un worker : la meme infrastructure, pas une seconde."""
+    doc, arrete = _sur_serveur("/page/worker-fetch.html", battements=2)
+    try:
+        contexte = doc.contexte_js
+        if contexte is None:
+            jalon("WEB_WORKER_FETCH", False, "pas de contexte JavaScript")
+            return
+        fini = _bat_jusqua(doc, contexte, "!!globalThis.__wf.rapport", 30.0)
+        etat = json.loads(contexte.execute("JSON.stringify(globalThis.__wf)"))
+        rapport = etat.get("rapport") or {}
+        verifie("worker: le rapport reseau est arrive", fini, etat)
+        egal("worker: aucune erreur de worker", etat.get("erreurs"), [])
+        verifie("worker: aucune erreur de requete", not rapport.get("erreur"),
+                rapport.get("erreur"))
+
+        # 1. L'adresse relative se resout contre le script du worker.
+        egal("worker: la requete relative aboutit",
+             rapport.get("relatifStatut"), 200)
+        egal("worker: et son corps est celui du serveur",
+             rapport.get("relatifNom"), "bouchaud")
+        egal("worker: le JSON imbrique traverse",
+             rapport.get("relatifImbrique"), "b")
+        verifie("worker: l'adresse relative s'est resolue contre le worker",
+                str(rapport.get("relatifUrl", "")).endswith("/json"),
+                rapport.get("relatifUrl"))
+
+        # 2. Une redirection est suivie par la meme pile que celle de la page.
+        egal("worker: la redirection est suivie",
+             rapport.get("redirigeStatut"), 200)
+
+        # 3. Methode et corps traversent.
+        egal("worker: le POST arrive comme un POST",
+             rapport.get("echoMethode"), "POST")
+        egal("worker: avec son corps", rapport.get("echoCorps"),
+             "depuis-le-worker")
+
+        # Le worker partage l'origine de son document : la requete n'est donc
+        # pas cross-origine, et ne doit pas porter d'en-tete `Origin`. C'est ce
+        # qui prouve que le chemin traverse `_recupere` et non un raccourci.
+        egal("worker: une requete de meme origine ne porte pas d'Origin",
+             rapport.get("echoOrigin"), "")
+
+        # Et la page n'a pas ete bloquee pendant ce temps.
+        verifie("worker: la page a battu pendant les requetes",
+                (etat.get("toursALArrivee") or 0) >= 1,
+                etat.get("toursALArrivee"))
+
+        jalon("WEB_WORKER_FETCH",
+              fini and not rapport.get("erreur")
+              and rapport.get("relatifStatut") == 200
+              and rapport.get("echoMethode") == "POST",
+              rapport)
+    finally:
+        doc.ferme_document()
+        arrete()
+
+
+def verifie_workers_stockage():
+    """IndexedDB dans un worker : la meme base que celle du document."""
+    doc, arrete = _sur_serveur("/page/worker-indexeddb.html", battements=2)
+    try:
+        contexte = doc.contexte_js
+        if contexte is None:
+            jalon("WEB_WORKER_INDEXEDDB", False, "pas de contexte JavaScript")
+            return
+        fini = _bat_jusqua(doc, contexte, "!!globalThis.__wi.relu", 30.0)
+        etat = json.loads(contexte.execute("JSON.stringify(globalThis.__wi)"))
+        rapport = etat.get("rapport") or {}
+        verifie("worker: le worker a fini son travail de base", fini, etat)
+        egal("worker: aucune erreur", etat.get("erreurs"), [])
+        verifie("worker: aucune erreur IndexedDB", not rapport.get("erreur"),
+                rapport.get("erreur"))
+
+        egal("worker: le magasin a ete cree par le worker",
+             rapport.get("magasins"), ["notes"])
+        egal("worker: il relit ce qu'il vient d'ecrire", rapport.get("lu"),
+             {"texte": "ecrit par le worker", "n": 1})
+        egal("worker: et il compte ses deux enregistrements",
+             rapport.get("combien"), 2)
+        egal("worker: les cles sont celles qu'il a posees",
+             rapport.get("cles"), ["a", "b"])
+        verifie("worker: une cle absente rend undefined, pas null",
+                rapport.get("absenteEstIndefinie") is True)
+
+        # Le point de l'epreuve : la page retrouve ce que le worker a ecrit.
+        # Deux bases separees se comporteraient parfaitement chacune de son
+        # cote, et le defaut serait invisible autrement.
+        egal("worker: la page relit ce que le worker a ecrit",
+             etat.get("relu"), {"texte": "et un second", "n": 2})
+        verifie("worker: la page n'a pas eu a recreer le schema",
+                not etat.get("monteeInattendue"))
+
+        jalon("WEB_WORKER_INDEXEDDB",
+              fini and not rapport.get("erreur")
+              and etat.get("relu") == {"texte": "et un second", "n": 2},
+              rapport)
+    finally:
+        doc.ferme_document()
+        arrete()
+
+
+def verifie_workers_temps_reel():
+    """`WebSocket` dans un worker, par le meme code que dans la fenetre."""
+    doc, arrete = _sur_serveur("/page/worker-websocket.html", battements=2)
+    try:
+        contexte = doc.contexte_js
+        if contexte is None:
+            jalon("WEB_WORKER_WEBSOCKET", False, "pas de contexte JavaScript")
+            return
+        fini = _bat_jusqua(doc, contexte, "!!globalThis.__ws.rapport", 30.0)
+        etat = json.loads(contexte.execute("JSON.stringify(globalThis.__ws)"))
+        rapport = etat.get("rapport") or {}
+        verifie("worker: le rapport WebSocket est arrive", fini, etat)
+        verifie("worker: la connexion s'est ouverte",
+                rapport.get("ouvert") is True, rapport)
+        egal("worker: le serveur a renvoye ce qu'on lui a dit",
+             rapport.get("recus"), ["bonjour depuis le worker"])
+        egal("worker: la fermeture est propre", rapport.get("code"), 1000)
+        verifie("worker: et elle est signalee comme telle",
+                rapport.get("propre") is True)
+
+        jalon("WEB_WORKER_WEBSOCKET",
+              fini and rapport.get("ouvert") is True
+              and rapport.get("code") == 1000, rapport)
+    finally:
+        doc.ferme_document()
+        arrete()
+
+
+def verifie_workers_messagerie():
+    """Le trafic de messages : structure, ordre, et refus d'origine.
+
+    Ce que cette verification ajoute a `worker-base.html` : elle pilote le
+    worker depuis le Python de l'epreuve, ce qui permet de compter les messages
+    et de verifier leur ordre — une page ne peut affirmer que ce qu'elle a vu.
+    """
+    import time as _time
+
+    doc, arrete = _sur_serveur("/page/vide.html", battements=2)
+    try:
+        contexte = doc.contexte_js
+        if contexte is None:
+            jalon("WEB_WORKER_MESSAGING", False, "pas de contexte JavaScript")
+            return
+
+        contexte.execute("""
+        globalThis.__m = { recus: [], erreurs: [] };
+        globalThis.__w = new Worker('/page/worker-base.js');
+        globalThis.__w.onmessage = function (e) {
+            globalThis.__m.recus.push(e.data && e.data.recu);
+        };
+        globalThis.__w.onerror = function (e) {
+            globalThis.__m.erreurs.push(String(e.message || 'erreur'));
+        };
+        for (let i = 0; i < 20; i++)
+            globalThis.__w.postMessage({ genre: 'echo', charge: i });
+        """)
+        arrive = _bat_jusqua(doc, contexte, "globalThis.__m.recus.length >= 20")
+        recus = json.loads(contexte.execute("JSON.stringify(globalThis.__m.recus)"))
+        verifie("worker: les vingt messages sont revenus", arrive, len(recus))
+        egal("worker: dans l'ordre ou ils ont ete postes",
+             recus[:20], list(range(20)))
+
+        # Un message poste avant que le worker ait fini de demarrer n'est pas
+        # perdu : il attend dans la file. C'est ce qui rend `new Worker(...)`
+        # suivi immediatement de `postMessage(...)` utilisable, et c'est
+        # l'usage le plus repandu.
+        contexte.execute("""
+        globalThis.__m2 = [];
+        globalThis.__w2 = new Worker('/page/worker-base.js');
+        globalThis.__w2.postMessage({ genre: 'echo', charge: 'tot' });
+        globalThis.__w2.onmessage = function (e) {
+            globalThis.__m2.push(e.data && e.data.recu);
+        };
+        """)
+        tot = _bat_jusqua(doc, contexte, "globalThis.__m2.length >= 1")
+        verifie("worker: un message poste avant l'amorce n'est pas perdu", tot)
+        egal("worker: et c'est bien celui-la",
+             json.loads(contexte.execute("JSON.stringify(globalThis.__m2)")),
+             ["tot"])
+
+        # Les structures imbriquees traversent par valeur, jamais par
+        # reference : le worker qui modifierait l'objet ne toucherait rien chez
+        # la page. On le verifie en postant un objet, en le mutant aussitot, et
+        # en comparant ce que le worker a vu.
+        contexte.execute("""
+        globalThis.__m3 = [];
+        globalThis.__objet = { n: 1, dedans: { liste: [1, 2, 3] } };
+        globalThis.__w.onmessage = function (e) {
+            globalThis.__m3.push(e.data && e.data.recu);
+        };
+        globalThis.__w.postMessage({ genre: 'echo', charge: globalThis.__objet });
+        globalThis.__objet.n = 99;
+        globalThis.__objet.dedans.liste.push(4);
+        """)
+        copie = _bat_jusqua(doc, contexte, "globalThis.__m3.length >= 1")
+        vu = json.loads(contexte.execute("JSON.stringify(globalThis.__m3)"))
+        verifie("worker: l'objet imbrique est revenu", copie, vu)
+        egal("worker: les donnees sont copiees, pas partagees",
+             vu[0] if vu else None, {"n": 1, "dedans": {"liste": [1, 2, 3]}})
+
+        # Un script de worker d'une autre origine est refuse. Un worker partage
+        # l'origine de son createur — donc ses temoins, son stockage, ses bases.
+        # Le charger d'ailleurs reviendrait a executer du code etranger avec les
+        # droits de la page.
+        import serveur_test
+        serveur_autre, autre = serveur_test.demarre(0)
+        try:
+            contexte.execute(
+                "globalThis.__refus = { erreurs: [] };"
+                "globalThis.__w3 = new Worker(%r);"
+                "globalThis.__w3.onerror = function (e) {"
+                "  globalThis.__refus.erreurs.push(String(e.message||'e')); };"
+                % (autre + "/page/worker-base.js"))
+            _bat_jusqua(doc, contexte, "globalThis.__refus.erreurs.length >= 1",
+                        5.0)
+            refus = json.loads(
+                contexte.execute("JSON.stringify(globalThis.__refus.erreurs)"))
+            verifie("worker: un script d'une autre origine est refuse",
+                    len(refus) >= 1, refus)
+        finally:
+            serveur_test.arrete(serveur_autre)
+
+        jalon("WEB_WORKER_MESSAGING",
+              arrive and recus[:20] == list(range(20)) and tot and copie,
+              len(recus))
+    finally:
+        doc.ferme_document()
+        arrete()
+        _time.sleep(0.05)
+
+
+def verifie_workers_cycle_de_vie():
+    """`terminate()` rend tout — y compris sur un worker qui boucle.
+
+    Deux epreuves, et la seconde est la seule qui compte vraiment :
+
+      * un worker en boucle infinie s'arrete quand on le lui demande. Un arret
+        qui attendrait que le script veuille bien finir n'arreterait jamais
+        celui-la, et une page hostile figerait le navigateur pour de bon ;
+      * mille creations suivies d'autant de destructions ne laissent rien :
+        ni contexte QuickJS, ni fil, ni descripteur.
+
+    La memoire est mesuree aussi, mais lue avec precaution : voir le
+    commentaire de la balance plus bas.
+    """
+    import os as _os
+    import threading as _threading
+    import time as _time
+
+    import bojs as _bojs
+
+    def contextes():
+        return _bojs.contextes()
+
+    def descripteurs():
+        try:
+            return len(_os.listdir("/proc/self/fd"))
+        except OSError:
+            return -1
+
+    def resident_ko():
+        try:
+            with open("/proc/self/statm") as fichier:
+                pages = int(fichier.read().split()[1])
+            return pages * (_os.sysconf("SC_PAGE_SIZE") // 1024)
+        except (OSError, ValueError, IndexError):
+            return -1
+
+    doc, arrete = _sur_serveur("/page/vide.html", battements=2)
+    try:
+        contexte = doc.contexte_js
+        if contexte is None:
+            jalon("WEB_WORKER_LIFECYCLE", False, "pas de contexte JavaScript")
+            return
+
+        # 1. Un worker qui ne rend jamais la main.
+        contexte.execute("""
+        globalThis.__b = { commence: false };
+        globalThis.__wb = new Worker('/page/worker-boucle.js');
+        globalThis.__wb.onmessage = function () { globalThis.__b.commence = true; };
+        """)
+        parti = _bat_jusqua(doc, contexte, "globalThis.__b.commence", 20.0)
+        verifie("worker: le worker en boucle a bien demarre", parti)
+        avant_arret = contextes()
+        depart = _time.perf_counter()
+        contexte.execute("globalThis.__wb.terminate()")
+        duree = _time.perf_counter() - depart
+        verifie("worker: terminate() rend la main tout de suite",
+                duree < 1.0, duree)
+        egal("worker: et le contexte QuickJS a disparu",
+             contextes(), avant_arret - 1)
+        egal("worker: la page, elle, repond encore",
+             contexte.execute("1 + 1"), 2)
+
+        # 2. La balance. Mille creations, mille destructions.
+        contexte.execute("""
+        globalThis.__lot = { vivants: [], repondus: 0, erreurs: 0 };
+        globalThis.__ouvre = function (combien) {
+            globalThis.__lot = { vivants: [], repondus: 0, erreurs: 0 };
+            for (let i = 0; i < combien; i++) {
+                const w = new Worker('/page/worker-base.js');
+                w.onmessage = function () { globalThis.__lot.repondus += 1; };
+                w.onerror = function () { globalThis.__lot.erreurs += 1; };
+                w.postMessage({ genre: 'echo', charge: i });
+                globalThis.__lot.vivants.push(w);
+            }
+        };
+        globalThis.__ferme = function () {
+            for (const w of globalThis.__lot.vivants) w.terminate();
+            globalThis.__lot.vivants = [];
+        };
+        """)
+        for _ in range(5):
+            doc.rafraichis()
+            _time.sleep(0.01)
+
+        avant = (contextes(), _threading.active_count(), descripteurs(),
+                 resident_ko())
+
+        LOT = 25
+        LOTS = 40                      # 40 x 25 = 1000
+        repondus = 0
+        for _ in range(LOTS):
+            contexte.execute("globalThis.__ouvre(%d)" % LOT)
+            _bat_jusqua(doc, contexte,
+                        "globalThis.__lot.repondus >= %d" % LOT, 10.0)
+            repondus += int(contexte.execute("globalThis.__lot.repondus") or 0)
+            contexte.execute("globalThis.__ferme()")
+        for _ in range(10):
+            doc.rafraichis()
+            _time.sleep(0.02)
+
+        apres = (contextes(), _threading.active_count(), descripteurs(),
+                 resident_ko())
+
+        total = LOT * LOTS
+        verifie("worker: les mille workers ont repondu",
+                repondus >= total * 0.9, (repondus, total))
+        egal("worker: pas un contexte QuickJS de plus qu'avant",
+             apres[0], avant[0])
+        egal("worker: pas un fil de plus qu'avant", apres[1], avant[1])
+        egal("worker: pas un descripteur de plus qu'avant",
+             apres[2], avant[2])
+
+        # La memoire, elle, ne revient pas exactement a son point de depart, et
+        # ce n'est pas une fuite : la mesure l'etablit. Le supplement suit le
+        # nombre de workers **simultanes** (25 ici), pas le nombre total —
+        # mille workers dix par dix coutent 8 Mo, cent par cent en coutent 32.
+        # C'est la marque haute de l'allocateur, que la libc ne rend pas au
+        # systeme. La borne ci-dessous est donc large a dessein : elle attrape
+        # une vraie fuite — qui, elle, croitrait avec le total — sans accuser
+        # l'allocateur.
+        croissance = apres[3] - avant[3]
+        verifie("worker: la memoire ne croit pas avec le nombre de workers",
+                croissance < 60000, (avant[3], apres[3], croissance))
+
+        jalon("WEB_WORKER_LIFECYCLE",
+              parti and duree < 1.0 and apres[0] == avant[0]
+              and apres[1] == avant[1] and apres[2] == avant[2],
+              {"contextes": (avant[0], apres[0]),
+               "fils": (avant[1], apres[1]),
+               "descripteurs": (avant[2], apres[2]),
+               "resident_ko": (avant[3], apres[3]),
+               "workers": total, "repondus": repondus})
+    finally:
+        doc.ferme_document()
+        arrete()
+
+
+# --- Clonage structure --------------------------------------------------------
+#
+# Une seule abstraction sert quatre chemins : `Worker.postMessage`,
+# `Window.postMessage`, `MessagePort.postMessage` et IndexedDB. Ce qui suit la
+# verifie d'abord seule — un aller-retour dans le meme contexte, par
+# `structuredClone` —, puis sur chacun des quatre.
+#
+# Le point le plus important n'est pas ce qui traverse : c'est ce qui **leve**.
+# Avant, une fonction, un `Symbol` ou un nœud du DOM devenaient `null` ou `{}`
+# en silence, et la page decouvrait le trou beaucoup plus loin.
+
+
+def verifie_clonage_structure():
+    """Ce qui traverse, ce qui est preserve, et ce qui leve."""
+    doc, arrete = _sur_serveur("/page/vide.html", battements=2)
+    try:
+        contexte = doc.contexte_js
+        verifie("clone: la page a un contexte", contexte is not None)
+        if contexte is None:
+            jalon("STRUCTURED_CLONE", False, "pas de contexte JavaScript")
+            return
+
+        # 1. Les valeurs simples font l'aller-retour sans changer de nature.
+        #    `undefined` en tete : c'est celle que la conversion du pont
+        #    transformait en `null`, et la seule dont la perte se lit comme un
+        #    champ manquant plutot que comme une erreur.
+        rendu = json.loads(contexte.execute("""
+        (function () {
+          const r = {};
+          const c = structuredClone;
+          r.indefini = c(undefined) === undefined;
+          r.nul = c(null) === null;
+          r.vrai = c(true) === true;
+          r.zero = c(0) === 0;
+          r.negatif = c(-3.5) === -3.5;
+          r.grand = c(9007199254740991) === 9007199254740991;
+          r.chaine = c("éléphant") === "éléphant";
+          r.vide = c("") === "";
+          // NaN ne s'egale pas lui-meme : c'est `Number.isNaN` qui repond.
+          r.nan = Number.isNaN(c(NaN));
+          r.infini = c(Infinity) === Infinity;
+          r.infiniNegatif = c(-Infinity) === -Infinity;
+          return JSON.stringify(r);
+        })()
+        """))
+        for nom, valeur in sorted(rendu.items()):
+            verifie("clone: %s traverse" % nom, valeur is True, valeur)
+
+        # 2. Les structures imbriquees, et la copie qui est bien une copie.
+        rendu = json.loads(contexte.execute("""
+        (function () {
+          const r = {};
+          const source = { a: 1, b: [1, [2, [3, { c: "profond" }]]],
+                           d: { e: { f: null } } };
+          const copie = structuredClone(source);
+          r.egal = JSON.stringify(copie) === JSON.stringify(source);
+          r.autreObjet = copie !== source;
+          r.autreTableau = copie.b !== source.b;
+          copie.b[1][1][1].c = "change";
+          r.independant = source.b[1][1][1].c === "profond";
+          // Les trous d'un tableau et les valeurs `undefined` dedans.
+          const troue = structuredClone([1, undefined, 3]);
+          r.trou = troue.length === 3 && troue[1] === undefined;
+          return JSON.stringify(r);
+        })()
+        """))
+        for nom, valeur in sorted(rendu.items()):
+            verifie("clone: imbrique — %s" % nom, valeur is True, valeur)
+
+        # 3. Les cycles et le partage. Un format qui recopierait naivement
+        #    boucherait sur le premier, et perdrait le second sans le dire :
+        #    deux champs qui pointaient le meme objet en recevraient deux.
+        rendu = json.loads(contexte.execute("""
+        (function () {
+          const r = {};
+          const boucle = { nom: "moi" };
+          boucle.moi = boucle;
+          const c1 = structuredClone(boucle);
+          r.cycleTient = c1.moi === c1;
+          r.cycleCopie = c1 !== boucle;
+          r.cycleContenu = c1.nom === "moi";
+
+          const mutuel = { a: {}, b: {} };
+          mutuel.a.vers = mutuel.b;
+          mutuel.b.vers = mutuel.a;
+          const c2 = structuredClone(mutuel);
+          r.mutuel = c2.a.vers === c2.b && c2.b.vers === c2.a;
+
+          const partage = {};
+          const c3 = structuredClone({ x: partage, y: partage });
+          r.partagePreserve = c3.x === c3.y;
+
+          const tableau = [];
+          tableau.push(tableau);
+          const c4 = structuredClone(tableau);
+          r.tableauCyclique = c4[0] === c4;
+          return JSON.stringify(r);
+        })()
+        """))
+        for nom, valeur in sorted(rendu.items()):
+            verifie("clone: cycle — %s" % nom, valeur is True, valeur)
+
+        # 4. Les types de la plate-forme que la norme cite nommement.
+        rendu = json.loads(contexte.execute("""
+        (function () {
+          const r = {};
+          const d = new Date(1700000000123);
+          const cd = structuredClone(d);
+          r.date = cd instanceof Date && cd.getTime() === 1700000000123
+                   && cd !== d;
+
+          const x = /a.c/gi;
+          const cx = structuredClone(x);
+          r.regexp = cx instanceof RegExp && cx.source === "a.c"
+                     && cx.flags === x.flags;
+
+          const m = new Map([["a", 1], ["b", { profond: true }]]);
+          const cm = structuredClone(m);
+          r.map = cm instanceof Map && cm.size === 2 && cm.get("a") === 1
+                  && cm.get("b").profond === true && cm.get("b") !== m.get("b");
+
+          const s = new Set([1, "deux", 3]);
+          const cs = structuredClone(s);
+          r.set = cs instanceof Set && cs.size === 3 && cs.has("deux");
+
+          const tampon = new ArrayBuffer(4);
+          new Uint8Array(tampon).set([1, 2, 3, 250]);
+          const ct = structuredClone(tampon);
+          r.tampon = ct instanceof ArrayBuffer && ct.byteLength === 4
+                     && new Uint8Array(ct)[3] === 250 && ct !== tampon;
+
+          const vue = new Uint16Array([300, 400, 500]);
+          const cv = structuredClone(vue);
+          r.vue = cv instanceof Uint16Array && cv.length === 3
+                  && cv[1] === 400 && cv !== vue;
+
+          const err = new TypeError("mauvais type");
+          const ce = structuredClone(err);
+          r.erreur = ce instanceof Error && ce.name === "TypeError"
+                     && ce.message === "mauvais type";
+
+          // Une instance de classe se clone en objet simple : ses champs
+          // traversent, son prototype non. C'est ce que fait la norme.
+          class Point { constructor() { this.x = 1; this.y = 2; } bouge() {} }
+          const cp = structuredClone(new Point());
+          r.classe = cp.x === 1 && cp.y === 2 && !(cp instanceof Point);
+          return JSON.stringify(r);
+        })()
+        """))
+        for nom, valeur in sorted(rendu.items()):
+            verifie("clone: type — %s" % nom, valeur is True, valeur)
+
+        # 5. Ce qui leve. C'est la moitie qui manquait : une conversion muette
+        #    fait disparaitre le probleme, pas le defaut.
+        rendu = json.loads(contexte.execute("""
+        (function () {
+          function leve(f) {
+            try { f(); return "rien"; }
+            catch (e) { return e.name; }
+          }
+          const r = {};
+          r.fonction = leve(() => structuredClone(function () {}));
+          r.flechee = leve(() => structuredClone(() => 1));
+          r.symbole = leve(() => structuredClone(Symbol("s")));
+          r.dansUnObjet = leve(() => structuredClone({ a: 1, f: function () {} }));
+          r.dansUnTableau = leve(() => structuredClone([1, Symbol("s")]));
+          r.noeud = leve(() => structuredClone(document.body));
+          r.fenetre = leve(() => structuredClone(window));
+          const canal = new MessageChannel();
+          r.port = leve(() => structuredClone(canal.port1));
+          canal.port1.close(); canal.port2.close();
+          return JSON.stringify(r);
+        })()
+        """))
+        for nom, valeur in sorted(rendu.items()):
+            egal("clone: %s leve DataCloneError" % nom, valeur, "DataCloneError")
+
+        jalon("STRUCTURED_CLONE",
+              all(v == "DataCloneError" for v in rendu.values()), rendu)
+    finally:
+        doc.ferme_document()
+        arrete()
+
+
+def verifie_clonage_par_les_quatre_chemins():
+    """La meme abstraction sur les quatre chemins qui s'en servent."""
+    doc, arrete = _sur_serveur("/page/vide.html", battements=2)
+    try:
+        contexte = doc.contexte_js
+        if contexte is None:
+            jalon("WEB_WORKER_MESSAGING", False, "pas de contexte JavaScript")
+            return
+
+        # Un echantillon qui contient tout ce qui se perdait avant : un
+        # `undefined`, un `NaN`, une `Date`, un `Map`, un cycle.
+        prepare = """
+        globalThis.__temoin = function () {
+          const o = { indefini: undefined, nombre: NaN, infini: -Infinity,
+                      date: new Date(1700000000123),
+                      table: new Map([["cle", [1, 2, 3]]]),
+                      texte: "élan" };
+          o.moi = o;
+          return o;
+        };
+        globalThis.__verifie = function (v) {
+          return {
+            indefini: "indefini" in v && v.indefini === undefined,
+            nan: Number.isNaN(v.nombre),
+            infini: v.infini === -Infinity,
+            date: v.date instanceof Date && v.date.getTime() === 1700000000123,
+            map: v.table instanceof Map
+                 && JSON.stringify(v.table.get("cle")) === "[1,2,3]",
+            texte: v.texte === "élan",
+            cycle: v.moi === v,
+          };
+        };
+        """
+        contexte.execute(prepare)
+
+        # 1. Un Worker.
+        contexte.execute("""
+        globalThis.__q1 = null;
+        globalThis.__w = new Worker('/page/worker-base.js');
+        globalThis.__w.onmessage = function (e) {
+          globalThis.__q1 = globalThis.__verifie(e.data.recu);
+        };
+        globalThis.__w.postMessage({ genre: 'echo', charge: globalThis.__temoin() });
+        """)
+        vu = _bat_jusqua(doc, contexte, "!!globalThis.__q1")
+        verifie("clone: le worker a renvoye l'echantillon", vu)
+        rendu = json.loads(contexte.execute("JSON.stringify(globalThis.__q1)"))
+        for nom, valeur in sorted((rendu or {}).items()):
+            verifie("clone: worker — %s" % nom, valeur is True, valeur)
+
+        # 2. Un MessageChannel. La livraison est differee : le message ne doit
+        #    pas arriver pendant l'appel a `postMessage`.
+        contexte.execute("""
+        globalThis.__q2 = null;
+        globalThis.__synchrone = false;
+        globalThis.__canal = new MessageChannel();
+        globalThis.__canal.port2.onmessage = function (e) {
+          globalThis.__q2 = globalThis.__verifie(e.data);
+        };
+        globalThis.__canal.port1.postMessage(globalThis.__temoin());
+        globalThis.__synchrone = globalThis.__q2 !== null;
+        """)
+        verifie("clone: MessagePort ne livre pas dans l'appel",
+                contexte.execute("globalThis.__synchrone") is False)
+        vu = _bat_jusqua(doc, contexte, "!!globalThis.__q2")
+        verifie("clone: le port jumeau a recu", vu)
+        rendu = json.loads(contexte.execute("JSON.stringify(globalThis.__q2)"))
+        for nom, valeur in sorted((rendu or {}).items()):
+            verifie("clone: canal — %s" % nom, valeur is True, valeur)
+
+        # 3. `window.postMessage` sur soi-meme : la boucle la plus courte qui
+        #    passe quand meme par la file de la boucle d'evenements.
+        contexte.execute("""
+        globalThis.__q3 = null;
+        globalThis.addEventListener('message', function (e) {
+          if (e.data && e.data.__marque === 'clone')
+            globalThis.__q3 = globalThis.__verifie(e.data.charge);
+        });
+        (function () {
+          const charge = globalThis.__temoin();
+          window.postMessage({ __marque: 'clone', charge: charge }, '*');
+        })();
+        """)
+        vu = _bat_jusqua(doc, contexte, "!!globalThis.__q3")
+        verifie("clone: window.postMessage a livre", vu)
+        rendu = json.loads(contexte.execute("JSON.stringify(globalThis.__q3)"))
+        for nom, valeur in sorted((rendu or {}).items()):
+            verifie("clone: fenetre — %s" % nom, valeur is True, valeur)
+
+        # 4. IndexedDB. L'aller-retour passe par le disque : ce qui survit ici
+        #    survit aussi a une fermeture du navigateur.
+        contexte.execute("""
+        globalThis.__q4 = null;
+        (function () {
+          const demande = indexedDB.open('bo-clone', 1);
+          demande.onupgradeneeded = function () {
+            demande.result.createObjectStore('valeurs');
+          };
+          demande.onsuccess = function () {
+            const base = demande.result;
+            const ecriture = base.transaction('valeurs', 'readwrite');
+            ecriture.objectStore('valeurs').put(globalThis.__temoin(), 'temoin');
+            ecriture.oncomplete = function () {
+              const lecture = base.transaction('valeurs', 'readonly');
+              const r = lecture.objectStore('valeurs').get('temoin');
+              r.onsuccess = function () {
+                globalThis.__q4 = globalThis.__verifie(r.result);
+              };
+              r.onerror = function () { globalThis.__q4 = { erreur: true }; };
+            };
+          };
+          demande.onerror = function () { globalThis.__q4 = { erreur: true }; };
+        })();
+        """)
+        vu = _bat_jusqua(doc, contexte, "!!globalThis.__q4", 30.0)
+        verifie("clone: IndexedDB a rendu la valeur", vu)
+        rendu = json.loads(contexte.execute("JSON.stringify(globalThis.__q4)"))
+        for nom, valeur in sorted((rendu or {}).items()):
+            verifie("clone: base — %s" % nom, valeur is True, valeur)
+    finally:
+        doc.ferme_document()
+        arrete()
+
+
+def verifie_canal_de_messages():
+    """`MessageChannel` : deux bouts, une file, et rien de synchrone."""
+    doc, arrete = _sur_serveur("/page/vide.html", battements=2)
+    try:
+        contexte = doc.contexte_js
+        if contexte is None:
+            jalon("MESSAGE_CHANNEL", False, "pas de contexte JavaScript")
+            return
+
+        # Les deux sens, et l'ordre.
+        contexte.execute("""
+        globalThis.__c = { versDeux: [], versUn: [] };
+        globalThis.__canal = new MessageChannel();
+        globalThis.__canal.port2.onmessage = function (e) {
+          globalThis.__c.versDeux.push(e.data);
+          globalThis.__canal.port2.postMessage("recu:" + e.data);
+        };
+        globalThis.__canal.port1.onmessage = function (e) {
+          globalThis.__c.versUn.push(e.data);
+        };
+        for (let i = 0; i < 5; i++) globalThis.__canal.port1.postMessage(i);
+        """)
+        arrive = _bat_jusqua(doc, contexte, "globalThis.__c.versUn.length >= 5")
+        etat = json.loads(contexte.execute("JSON.stringify(globalThis.__c)"))
+        verifie("canal: les cinq messages ont fait l'aller-retour", arrive, etat)
+        egal("canal: dans l'ordre, a l'aller", etat.get("versDeux"),
+             [0, 1, 2, 3, 4])
+        egal("canal: et au retour", etat.get("versUn"),
+             ["recu:0", "recu:1", "recu:2", "recu:3", "recu:4"])
+
+        # Un port qui n'a pas demarre garde ses messages. C'est la difference
+        # entre `onmessage` — qui demarre le port — et `addEventListener` sans
+        # `start()`, qui, selon la norme, ne le demarre pas.
+        contexte.execute("""
+        globalThis.__d = { recus: [], avantStart: null };
+        globalThis.__canal2 = new MessageChannel();
+        globalThis.__canal2.port1.postMessage("garde-moi");
+        """)
+        for _ in range(10):
+            doc.rafraichis()
+        contexte.execute(
+            "globalThis.__d.avantStart = globalThis.__d.recus.length;"
+            "globalThis.__canal2.port2.addEventListener('message',"
+            "  function (e) { globalThis.__d.recus.push(e.data); });")
+        garde = _bat_jusqua(doc, contexte, "globalThis.__d.recus.length >= 1")
+        etat = json.loads(contexte.execute("JSON.stringify(globalThis.__d)"))
+        egal("canal: rien n'arrive avant l'ecoute", etat.get("avantStart"), 0)
+        verifie("canal: le message garde arrive au demarrage", garde, etat)
+        egal("canal: et c'est bien celui-la", etat.get("recus"), ["garde-moi"])
+
+        # Un port ferme ne transmet plus.
+        contexte.execute("""
+        globalThis.__e = [];
+        globalThis.__canal3 = new MessageChannel();
+        globalThis.__canal3.port2.onmessage = function (e) {
+          globalThis.__e.push(e.data);
+        };
+        globalThis.__canal3.port1.postMessage("avant");
+        """)
+        _bat_jusqua(doc, contexte, "globalThis.__e.length >= 1")
+        contexte.execute("globalThis.__canal3.port1.close();"
+                         "globalThis.__canal3.port1.postMessage('apres');")
+        for _ in range(20):
+            doc.rafraichis()
+        egal("canal: un port ferme ne transmet plus",
+             json.loads(contexte.execute("JSON.stringify(globalThis.__e)")),
+             ["avant"])
+
+        jalon("MESSAGE_CHANNEL", arrive and garde, etat)
+    finally:
+        doc.ferme_document()
+        arrete()
+
+
+# --- Renderer separe ----------------------------------------------------------
+#
+# Le moteur web dans un autre processus, le chrome dans celui-ci, une prise et
+# une surface partagee entre les deux.
+#
+# Trois questions, et une seule compte vraiment :
+#
+#   1. **le protocole tient-il ?** Une trame tronquee, une longueur absurde, une
+#      version inconnue doivent etre refusees, pas devinees ;
+#   2. **la page marche-t-elle a travers ?** La fixture de connexion est
+#      l'epreuve : cliquer, taper, envoyer — le tout par des messages, sans
+#      qu'aucun code de l'epreuve ne touche le DOM d'en face ;
+#   3. **la separation achete-t-elle quelque chose ?** Un renderer qui meurt ne
+#      doit rien emporter, et sa memoire doit etre bornee sans que celle du
+#      navigateur le soit.
+
+
+def verifie_renderer_protocole():
+    """Le cadrage des trames, et tout ce qui doit etre refuse."""
+    import socket as _socket
+
+    from moteur import protocole
+
+    # L'aller-retour nominal, y compris la charge vide et les accents.
+    for genre, charge in ((protocole.TICK, None),
+                          (protocole.NAVIGATE, {"url": "http://a.test/é?x=1"}),
+                          (protocole.FRAME_READY, {"generation": 7,
+                                                   "tampon": 1})):
+        a, b = _socket.socketpair()
+        try:
+            protocole.Canal(a).envoie(genre, charge)
+            relu_genre, relu_charge = protocole.Canal(b).lis()
+            egal("protocole: %s revient identique" % protocole.NOMS[genre],
+                 (relu_genre, relu_charge), (genre, charge))
+        finally:
+            a.close()
+            b.close()
+
+    def refuse(nom, octets, attendus=None):
+        """Ecrit des octets bruts et verifie que la lecture leve."""
+        a, b = _socket.socketpair()
+        try:
+            a.sendall(octets)
+            a.close()
+            try:
+                protocole.Canal(b).lis(attendus)
+            except protocole.Erreur:
+                reussi = True
+            except protocole.Fin:
+                reussi = False
+            else:
+                reussi = False
+            verifie("protocole: %s est refuse" % nom, reussi)
+        finally:
+            b.close()
+
+    entete = protocole.EN_TETE
+    refuse("une version inconnue", entete.pack(99, protocole.TICK, 0))
+    refuse("un genre inconnu", entete.pack(protocole.VERSION, 4242, 0))
+    refuse("une longueur absurde",
+           entete.pack(protocole.VERSION, protocole.NAVIGATE,
+                       protocole.CHARGE_MAX + 1))
+    refuse("un en-tete tronque", b"\x00\x01\x00")
+    refuse("une charge tronquee",
+           entete.pack(protocole.VERSION, protocole.NAVIGATE, 64) + b"{}")
+    refuse("une charge qui n'est pas du JSON",
+           entete.pack(protocole.VERSION, protocole.NAVIGATE, 3) + b"{[}")
+    # Le sens compte : un renderer n'a aucune raison d'envoyer un `CLOSE`.
+    refuse("un message a contresens",
+           entete.pack(protocole.VERSION, protocole.CLOSE, 0),
+           protocole.VERS_NAVIGATEUR)
+
+    # Le decoupage : deux messages dans un envoi, un message en deux envois.
+    a, b = _socket.socketpair()
+    try:
+        canal = protocole.Canal(b)
+        a.sendall(protocole.encode(protocole.TICK, {"n": 1})
+                  + protocole.encode(protocole.TICK, {"n": 2}))
+        egal("protocole: deux trames dans un envoi (1)",
+             canal.lis()[1], {"n": 1})
+        egal("protocole: deux trames dans un envoi (2)",
+             canal.lis()[1], {"n": 2})
+
+        trame = protocole.encode(protocole.NAVIGATE, {"url": "http://a.test/"})
+        a.sendall(trame[:5])
+        a.sendall(trame[5:])
+        egal("protocole: une trame en deux envois",
+             canal.lis()[1], {"url": "http://a.test/"})
+    finally:
+        a.close()
+        b.close()
+
+    # Une charge trop grosse est refusee a l'ecriture aussi : mieux vaut echouer
+    # chez celui qui fabrique le message que chez celui qui le recoit.
+    try:
+        protocole.encode(protocole.NAVIGATE,
+                         {"url": "x" * (protocole.CHARGE_MAX + 10)})
+    except protocole.Erreur:
+        verifie("protocole: une charge trop grosse est refusee a l'emission",
+                True)
+    else:
+        verifie("protocole: une charge trop grosse est refusee a l'emission",
+                False)
+
+
+def verifie_renderer_surface():
+    """La surface partagee : en-tete, deux tampons, publication."""
+    from moteur import surface as mod_surface
+
+    s = mod_surface.Surface.alloue(64, 32)
+    try:
+        entete = s.entete()
+        egal("surface: les dimensions se relisent",
+             (entete["largeur"], entete["hauteur"]), (64, 32))
+        egal("surface: le pas est coherent", entete["pas"], 64 * 4)
+        egal("surface: rien n'est publie au depart", entete["generation"], 0)
+
+        # Deux tampons independants : ecrire dans l'un ne touche pas l'autre.
+        s.ecris(0, b"\x11" * s.octets_tampon)
+        s.ecris(1, b"\x22" * s.octets_tampon)
+        egal("surface: le tampon 0 garde ce qu'on y met", s.lis(0)[:4],
+             b"\x11\x11\x11\x11")
+        egal("surface: le tampon 1 aussi", s.lis(1)[:4], b"\x22\x22\x22\x22")
+
+        s.publie(1, 5)
+        egal("surface: la publication nomme le tampon", s.entete()["avant"], 1)
+        egal("surface: et sa generation", s.entete()["generation"], 5)
+        egal("surface: la lecture par defaut suit la publication",
+             s.lis()[:4], b"\x22\x22\x22\x22")
+
+        # Une seconde vue sur le **meme** descripteur voit les memes octets :
+        # c'est la definition de « partage », et la seule chose qui distingue
+        # cette surface d'une copie.
+        import os as _os
+        jumelle = mod_surface.Surface(_os.dup(s.descripteur), 64, 32)
+        try:
+            egal("surface: une seconde vue lit les memes pixels",
+                 jumelle.lis()[:4], b"\x22\x22\x22\x22")
+            jumelle.ecris(0, b"\x33" * s.octets_tampon)
+            egal("surface: et ce qu'elle ecrit se voit de l'autre cote",
+                 s.lis(0)[:4], b"\x33\x33\x33\x33")
+        finally:
+            jumelle.ferme()
+
+        # Les dimensions impossibles sont refusees des l'allocation.
+        for largeur, hauteur in ((0, 10), (10, -1), (100000, 100000)):
+            try:
+                mod_surface.Surface.alloue(largeur, hauteur)
+            except ValueError:
+                refuse = True
+            else:
+                refuse = False
+            verifie("surface: %sx%s est refuse" % (largeur, hauteur), refuse)
+    finally:
+        s.ferme()
+
+
+def verifie_renderer_separe():
+    """La fixture de connexion, jouee de bout en bout dans un autre processus.
+
+    Rien de ce qui suit ne touche le DOM d'en face : l'epreuve n'a que des
+    messages et une surface. C'est exactement la contrainte d'un vrai chrome, et
+    c'est ce qui rend le resultat interessant — un clic qui arrive, un
+    formulaire qui part, une trame qui change.
+    """
+    import os as _os
+
+    from moteur import superviseur
+
+    doc_bidon, arrete = _sur_serveur("/page/vide.html", battements=1)
+    base = doc_bidon.base
+    doc_bidon.ferme_document()
+    traces = []
+    renderer = superviseur.Renderer(900, 700,
+                                    journal=lambda n, t: traces.append((n, t)))
+    try:
+        egal("renderer: c'est bien un autre processus",
+             renderer.pid != _os.getpid(), True)
+        vu, evenements = renderer.attends("READY", 15.0)
+        verifie("renderer: il se presente", vu, [e[0] for e in evenements])
+        pret = next((c for n, c in evenements if n == "READY"), {}) or {}
+        egal("renderer: a la version du protocole", pret.get("version"), 1)
+        egal("renderer: et c'est bien son pid", pret.get("pid"), renderer.pid)
+
+        # La limite d'adressage annoncee par le renderer est celle que le
+        # navigateur a posee — et le navigateur, lui, ne l'a pas.
+        egal("renderer: la limite memoire posee est celle qui s'applique",
+             pret.get("limite_as"), renderer.limite_as)
+        import resource as _resource
+        mienne, _ = _resource.getrlimit(_resource.RLIMIT_AS)
+        verifie("renderer: le navigateur, lui, n'est pas borne",
+                mienne != renderer.limite_as, mienne)
+        # Et cette limite est un **budget** au-dessus de ce dont l'enfant
+        # herite, pas un plafond absolu : un `fork` transmet l'espace
+        # d'adressage du parent, et un plafond absolu ferait naitre un renderer
+        # deja au ras du sien des que le navigateur a un peu travaille.
+        verifie("renderer: la limite depasse ce dont il a herite",
+                renderer.limite_as > superviseur.taille_adressage(),
+                (renderer.limite_as, superviseur.taille_adressage()))
+
+        # 1. La navigation. L'adresse et le titre remontent par le canal.
+        renderer.navigue(base + "/page/login-form.html")
+        vu, evenements = renderer.attends("FRAME_READY", 30.0)
+        noms = [e[0] for e in evenements]
+        verifie("renderer: une premiere trame arrive", vu, noms)
+        verifie("renderer: l'adresse a ete annoncee", "URL_CHANGED" in noms, noms)
+        verifie("renderer: le titre aussi", "TITLE_CHANGED" in noms, noms)
+        egal("renderer: et c'est le bon titre", renderer.titre,
+             "Connexion — page temoin")
+        verifie("renderer: l'adresse est celle demandee",
+                str(renderer.url or "").endswith("/page/login-form.html"),
+                renderer.url)
+
+        # 2. Les pixels sont dans la surface partagee, pas dans le canal.
+        trame = renderer.derniere_trame or {}
+        egal("renderer: la trame annonce ses dimensions",
+             (trame.get("largeur"), trame.get("hauteur")), (900, 700))
+        egal("renderer: la generation demarre a un", trame.get("generation"), 1)
+        peints = renderer.pixels_non_vides()
+        verifie("renderer: la surface porte une vraie page", peints > 10000,
+                peints)
+        egal("renderer: l'en-tete de la surface designe le meme tampon",
+             renderer.surface.entete()["avant"], trame.get("tampon"))
+
+        def empreinte():
+            octets = renderer.trame()
+            return None if octets is None else hashlib.sha256(octets).hexdigest()
+
+        au_chargement = empreinte()
+
+        # 3. Le clic. Le champ « utilisateur » est a x=49..371, y=166..204 dans
+        #    cette mise en page ; on vise son milieu.
+        renderer.clic(200, 185)
+        renderer.attends("FRAME_READY", 10.0)
+        apres_clic = empreinte()
+        verifie("renderer: un clic change ce qui est peint",
+                apres_clic != au_chargement)
+
+        # 4. La frappe. Pas de `input.value = …` : c'est le modele d'edition
+        #    qu'on eprouve, a travers une frontiere de processus.
+        for lettre in "arthur":
+            renderer.touche(lettre, lettre)
+        renderer.attends("FRAME_READY", 10.0)
+        apres_frappe = empreinte()
+        verifie("renderer: la frappe change ce qui est peint",
+                apres_frappe != apres_clic)
+        egal("renderer: la mise en page, elle, n'a pas bouge",
+             renderer.pixels_non_vides(), peints)
+
+        # 5. L'envoi. Le bouton est a y=439..479. La page ecrit son resultat
+        #    dans un bloc qui **grandit** : c'est ce qui rend l'envoi visible
+        #    depuis l'exterieur, sans lire une seule ligne de son DOM.
+        renderer.clic(200, 459)
+        renderer.attends("FRAME_READY", 10.0)
+        apres_envoi = renderer.pixels_non_vides()
+        verifie("renderer: l'envoi du formulaire a traverse",
+                apres_envoi > peints, (peints, apres_envoi))
+        verifie("renderer: et la trame a change", empreinte() != apres_frappe)
+
+        # 6. Le redimensionnement : la surface est reallouee **par le
+        #    navigateur**, et le renderer repeint dedans.
+        renderer.redimensionne(640, 480)
+        vu, _ = renderer.attends("FRAME_READY", 15.0)
+        verifie("renderer: il repeint apres un redimensionnement", vu)
+        egal("renderer: dans la nouvelle surface",
+             (renderer.derniere_trame or {}).get("largeur"), 640)
+
+        # 7. Aucune erreur en chemin.
+        restes = renderer.recolte(0.2)
+        erreurs = [c for n, c in restes if n == "ERROR"]
+        egal("renderer: aucune erreur signalee", erreurs, [])
+
+        code = renderer.ferme()
+        egal("renderer: il s'arrete proprement sur CLOSE", code, 0)
+
+        jalon("RENDERER_BASIC",
+              vu and apres_envoi > peints and renderer.titre
+              == "Connexion — page temoin",
+              {"pixels": (peints, apres_envoi), "titre": renderer.titre})
+    finally:
+        renderer.ferme()
+        arrete()
+
+
+def verifie_renderer_isolation():
+    """Ce que la separation achete : un crash contenu, une memoire bornee."""
+    import os as _os
+    import signal as _signal
+
+    from moteur import protocole, superviseur
+
+    doc_bidon, arrete = _sur_serveur("/page/vide.html", battements=1)
+    base = doc_bidon.base
+    doc_bidon.ferme_document()
+    try:
+        # --- Crash -----------------------------------------------------------
+        #
+        # Un renderer tue net. Le navigateur doit l'apprendre, le nommer, et
+        # continuer — puis pouvoir en refaire un.
+        renderer = superviseur.Renderer(400, 300)
+        renderer.attends("READY", 15.0)
+        renderer.navigue(base + "/page/login-form.html")
+        renderer.attends("FRAME_READY", 30.0)
+        avant = renderer.pixels_non_vides()
+        verifie("isolation: le premier renderer avait peint", avant > 0, avant)
+
+        pid = renderer.pid
+        _os.kill(pid, _signal.SIGKILL)
+        vu, evenements = renderer.attends("CRASH", 10.0)
+        verifie("isolation: la mort est signalee", vu,
+                [e[0] for e in evenements])
+        mort = next((c for n, c in evenements if n == "CRASH"), {}) or {}
+        egal("isolation: par le bon signal", mort.get("signal"),
+             int(_signal.SIGKILL))
+        verifie("isolation: avec une raison lisible",
+                "SIGKILL" in str(mort.get("raison", "")), mort.get("raison"))
+        verifie("isolation: le navigateur, lui, est toujours la",
+                _os.getpid() > 0)
+        verifie("isolation: et la surface reste lisible apres la mort",
+                renderer.pixels_non_vides() == avant)
+
+        # Parler a un mort ne bloque pas : ca leve, et ca se rattrape.
+        try:
+            renderer.navigue(base + "/page/vide.html")
+        except protocole.Fin:
+            leve = True
+        except OSError:
+            leve = True
+        else:
+            leve = False
+        verifie("isolation: parler a un renderer mort echoue franchement", leve)
+        renderer.ferme()
+
+        # Un second renderer prend la place du premier. C'est ce qui separe une
+        # isolation d'une panne : l'onglet peut redemarrer.
+        remplacant = superviseur.Renderer(400, 300)
+        try:
+            vu, _ = remplacant.attends("READY", 15.0)
+            verifie("isolation: un remplacant demarre", vu)
+            verifie("isolation: et c'est un nouveau processus",
+                    remplacant.pid != pid, (pid, remplacant.pid))
+            remplacant.navigue(base + "/page/login-form.html")
+            vu, _ = remplacant.attends("FRAME_READY", 30.0)
+            verifie("isolation: le remplacant peint", vu)
+        finally:
+            remplacant.ferme()
+
+        jalon("RENDERER_CRASH_ISOLATION",
+              mort.get("signal") == int(_signal.SIGKILL), mort)
+
+        # --- Memoire ---------------------------------------------------------
+        #
+        # La limite est **dans** le renderer et nulle part ailleurs. On le
+        # verifie en lui demandant une surface que le navigateur, lui, alloue et
+        # mappe sans difficulte : le renderer echoue, le dit, et survit. Un
+        # plafond qui ne s'appliquerait pas se lirait exactement comme un
+        # plafond qui s'applique, jusqu'au jour ou un onglet emporte la machine.
+        etroit = superviseur.Renderer(
+            200, 150, budget_as=48 << 20)
+        try:
+            vu, evenements = etroit.attends("READY", 15.0)
+            verifie("isolation: le renderer borne demarre", vu)
+            pret = next((c for n, c in evenements if n == "READY"), {}) or {}
+            serre = (pret.get("limite_as") or 0)
+            verifie("isolation: il annonce la limite etroite qu'on lui a posee",
+                    serre == etroit.limite_as, (serre, etroit.limite_as))
+            verifie("isolation: et elle est bien plus basse que celle par defaut",
+                    0 < serre < superviseur.taille_adressage() + superviseur.BUDGET_AS,
+                    serre)
+
+            # 4096x4096x4 octets x 2 tampons = 128 Mio : au-dela de ce que sa
+            # limite lui laisse, en deca de ce que le navigateur peut mapper.
+            etroit.redimensionne(4096, 4096)
+            vu, evenements = etroit.attends("ERROR", 15.0)
+            verifie("isolation: le renderer refuse ce qu'il ne peut pas mapper",
+                    vu, [e[0] for e in evenements])
+            verifie("isolation: le navigateur, lui, a mappe la meme surface",
+                    etroit.surface is not None
+                    and etroit.surface.largeur == 4096)
+            verifie("isolation: et le renderer est toujours vivant",
+                    etroit.vivant())
+
+            jalon("RENDERER_MEMORY_ISOLATION",
+                  vu and etroit.vivant() and serre == etroit.limite_as,
+                  serre)
+        finally:
+            etroit.ferme()
+
+        # --- Processeur ------------------------------------------------------
+        #
+        # Le mecanisme, pas la mesure : celle-ci est faite par
+        # `ordonnanceur-probe` sous Bouchaud OS, et elle est consignee dans
+        # `docs/BROWSER_OS_MODERNIZATION.md`. Ce qui se verifie ici est ce qui
+        # rend cette mesure applicable au renderer — qu'il ne partage pas la
+        # classe de son parent.
+        interactif = superviseur.Renderer(200, 150)
+        try:
+            interactif.attends("READY", 15.0)
+            classe_enfant = _os.getpriority(_os.PRIO_PROCESS, interactif.pid)
+            egal("isolation: le renderer est en classe normale",
+                 classe_enfant, 0)
+            try:
+                _os.setpriority(_os.PRIO_PROCESS, 0, -5)
+                pose = True
+            except (OSError, PermissionError):
+                pose = False
+            if pose:
+                egal("isolation: et il y reste quand le navigateur passe devant",
+                     _os.getpriority(_os.PRIO_PROCESS, interactif.pid), 0)
+                _os.setpriority(_os.PRIO_PROCESS, 0, 0)
+            else:
+                verifie("isolation: le navigateur ne peut pas se prioriser ici "
+                        "(droits) — le renderer reste neanmoins en classe "
+                        "normale", classe_enfant == 0)
+        finally:
+            interactif.ferme()
+    finally:
+        arrete()
+
+
+
 def principal():
     import bojs
     print("QuickJS %s, CPython %s" % (bojs.version(), sys.version.split()[0]))
@@ -4302,6 +8857,27 @@ def principal():
         verifie_minuteries,
         verifie_promesses,
         verifie_erreurs,
+        verifie_diagnostics_compatibilite,
+        verifie_ressources_echouees,
+        verifie_moignons,
+        verifie_serveur_fixtures,
+        verifie_websocket,
+        verifie_invalidation,
+        verifie_invalidation_reelle,
+        verifie_memoires_de_passe,
+        verifie_modele_edition,
+        verifie_saisie_reelle,
+        verifie_ordre_des_evenements_de_frappe,
+        verifie_curseur_visible,
+        verifie_clic_donne_le_foyer,
+        verifie_cases_et_radios,
+        verifie_foyer,
+        verifie_formulaire_plateforme,
+        verifie_historique_session,
+        verifie_fetch_reel,
+        verifie_reseau_asynchrone,
+        verifie_parcours_complet,
+        verifie_parcours_utilisateur,
         verifie_budget,
         verifie_page_complete,
         verifie_evenement_apres_chargement,
@@ -4337,6 +8913,19 @@ def principal():
         verifie_temoins,
         verifie_cache_http,
         verifie_stockage_local,
+        verifie_indexeddb,
+        verifie_webapp_combinee,
+        verifie_origine,
+        verifie_contexte_navigation,
+        verifie_cadres,
+        verifie_fuite_cadres,
+        verifie_cors,
+        verifie_toile_origine,
+        verifie_wss,
+        verifie_grille_intrinseque,
+        verifie_pseudo_classes_dynamiques,
+        verifie_invalidation_ciblee,
+        verifie_tailles_intrinseques,
         verifie_flex,
         verifie_grille,
         verifie_position,
@@ -4376,6 +8965,20 @@ def principal():
         verifie_temoins_httponly,
         verifie_temoins_document,
         verifie_redirection_entetes,
+        verifie_workers_surface,
+        verifie_workers_calcul_ailleurs,
+        verifie_workers_reseau,
+        verifie_workers_stockage,
+        verifie_workers_temps_reel,
+        verifie_workers_messagerie,
+        verifie_workers_cycle_de_vie,
+        verifie_clonage_structure,
+        verifie_clonage_par_les_quatre_chemins,
+        verifie_canal_de_messages,
+        verifie_renderer_protocole,
+        verifie_renderer_surface,
+        verifie_renderer_separe,
+        verifie_renderer_isolation,
         verifie_tableau_de_bord,
         verifie_hote_reel,
     ):
@@ -4389,6 +8992,12 @@ def principal():
             traceback.print_exc()
         etat = "ok " if len(_echecs) == avant else "ECHEC"
         print("  %s  %s" % (etat, nom))
+
+    # Les jalons sont deposes une derniere fois, apres tout le monde : chaque
+    # scenario ecrivait les siens en partant, si bien qu'un jalon pose par le
+    # dernier a parler n'atteignait jamais le fichier — et le tableau de bord
+    # affichait « absent » pour une capacite qui venait de passer.
+    ecris_jalons()
 
     print()
     # La forme de cette ligne est celle qu'attend `tools/test.sh`, qui compte

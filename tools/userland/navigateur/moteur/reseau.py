@@ -332,10 +332,25 @@ def _est_adresse(nom):
     return len(parties) == 4 and all(p.isdigit() and int(p) < 256 for p in parties)
 
 
+# Les noms qui designent la machine elle-meme. Ils ne se demandent a personne :
+# aucun serveur de noms exterieur n'a a savoir qu'on parle a sa propre boucle
+# locale, et beaucoup refusent de repondre pour ces noms-la. Les faire passer
+# par le reseau, c'est rendre `localhost` injoignable — donc rendre intestable
+# tout ce qui se sert d'un serveur local, `wss://` en tete.
+NOMS_LOCAUX = {
+    "localhost": "127.0.0.1",
+    "localhost.localdomain": "127.0.0.1",
+    "ip6-localhost": "127.0.0.1",
+}
+
+
 def resout(nom):
     """Rend l'adresse IPv4 d'un nom. Leve `OSError` si elle est introuvable."""
     if _est_adresse(nom):
         return nom
+    locale = NOMS_LOCAUX.get((nom or "").lower().rstrip("."))
+    if locale is not None:
+        return locale
     if nom in _CACHE_DNS:
         return _CACHE_DNS[nom]
 
@@ -631,6 +646,24 @@ def contexte_tls():
     contexte = ssl.create_default_context()
     contexte.check_hostname = True
     contexte.verify_mode = ssl.CERT_REQUIRED
+
+    # Un magasin nomme explicitement s'**ajoute** au magasin du systeme, il ne
+    # le remplace pas et n'est pas un simple repli.
+    #
+    # C'etait le cas avant, et c'etait surprenant : `BO_CA_BUNDLE` n'avait
+    # d'effet que sur une machine depourvue de racines. Poser la variable et
+    # constater qu'elle ne change rien est le genre de comportement qui fait
+    # perdre une heure — et c'est exactement ce qui est arrive en branchant une
+    # autorite d'epreuve pour eprouver `wss://`.
+    nomme = os.environ.get("BO_CA_BUNDLE")
+    if nomme and os.path.exists(nomme):
+        try:
+            if os.path.isdir(nomme):
+                contexte.load_verify_locations(capath=nomme)
+            else:
+                contexte.load_verify_locations(cafile=nomme)
+        except Exception:  # noqa: BLE001 — magasin illisible : on continue
+            pass
 
     if _magasin_charge(contexte):
         return contexte

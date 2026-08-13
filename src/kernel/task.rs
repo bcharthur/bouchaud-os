@@ -52,6 +52,40 @@ use crate::kernel::vmm::AddressSpace;
 /// Taille de la pile noyau d'une tache (64 KiB).
 const KSTACK_SIZE: usize = 64 * 1024;
 
+/// Classe d'ordonnancement d'une tache.
+///
+/// Deux, pas davantage. L'audit OS avait identifie l'absence de priorites comme
+/// le dernier manque avant un processus de rendu separe : sur un cœur unique et
+/// un tourniquet strict, sortir le rendu d'un processus n'empeche pas une page
+/// lourde de rendre l'interface lente, parce que rien ne favorise l'interface.
+///
+/// Ce qu'il fallait n'etait pas un ordonnanceur different — le tourniquet
+/// convient — mais un moyen de dire lequel des deux compte quand les deux sont
+/// prets. Deux classes suffisent a le dire, et une troisieme n'ajouterait que
+/// des questions sans reponse.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Priorite {
+    /// Ce qui repond a l'utilisateur : l'interface du navigateur, le serveur
+    /// graphique. Servi en premier quand plusieurs taches sont pretes.
+    Interactive,
+    /// Tout le reste : calcul, rendu, travail de fond. Jamais affame.
+    Normale,
+}
+
+/// Nombre maximal de tours consecutifs accordes aux taches interactives.
+///
+/// Sans cette borne, une tache interactive qui calcule sans jamais se bloquer
+/// affamerait tout le reste — et « l'interface reste fluide » deviendrait
+/// « rien d'autre ne tourne ». Au-dela du compte, le tourniquet reprend ses
+/// droits pour un tour, ce qui garantit une progression a toute tache prete.
+///
+/// Huit : assez pour que l'interface enchaine plusieurs reveils courts sans
+/// interruption, assez peu pour qu'une tache de fond conserve au moins un
+/// neuvieme du temps dans le pire des cas.
+const TOURS_INTERACTIFS_MAX: u32 = 8;
+
+static mut TOURS_INTERACTIFS: u32 = 0;
+
 /// Etat d'ordonnancement d'une tache.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum TaskState {
@@ -97,6 +131,91 @@ pub struct Process {
     pub gid: u32,
     /// Gestionnaires et masques de signaux.
     pub signals: crate::kernel::signal::SignalState,
+    /// Plages `MAP_SHARED` vivantes, chacune tenant une reference sur le cache
+    /// de pages partage.
+    pub partages: Vec<Partage>,
+    /// Taille maximale de l'espace d'adressage (`RLIMIT_AS`), 0 = illimite.
+    pub limite_as: u64,
+}
+
+/// Une plage `MAP_SHARED` projetee dans un processus.
+///
+/// Elle existe pour une seule raison : savoir quelle reference rendre au cache
+/// de pages quand la plage disparait — par `munmap`, par `execve` ou avec le
+/// processus. Sans cette trace, `munmap` ne saurait pas quel nœud il vient de
+/// lacher, et les frames resteraient allouees pour toujours.
+#[derive(Clone, Copy)]
+pub struct Partage {
+    pub base: u64,
+    pub length: u64,
+    pub node: usize,
+}
+
+impl Process {
+    /// Le nœud partage qui couvre cette adresse, s'il y en a un.
+    pub fn partage_a(&self, addr: u64) -> Option<usize> {
+        self.partages
+            .iter()
+            .find(|p| addr >= p.base && addr < p.base + p.length)
+            .map(|p| p.node)
+    }
+
+    /// Retire les plages entierement couvertes par `[addr, addr+len)` et rend
+    /// les nœuds dont la reference est a relacher.
+    ///
+    /// Un recouvrement **partiel** ne relache rien : la plage reste inscrite
+    /// telle quelle. C'est deliberement conservateur. Un `munmap` de la moitie
+    /// d'une surface partagee est assez rare pour qu'une fuite bornee soit
+    /// preferable a la seule autre erreur possible ici — liberer une frame
+    /// qu'un mappage vivant designe encore.
+    pub fn retire_partages(&mut self, addr: u64, len: u64) -> Vec<usize> {
+        let fin = addr + len;
+        let mut rendus = Vec::new();
+        self.partages.retain(|p| {
+            if addr <= p.base && p.base + p.length <= fin {
+                rendus.push(p.node);
+                false
+            } else {
+                true
+            }
+        });
+        rendus
+    }
+
+    /// Relache toutes les plages partagees (`execve`, fin du processus).
+    pub fn relache_partages(&mut self) {
+        let nœuds: Vec<usize> = self.partages.iter().map(|p| p.node).collect();
+        self.partages.clear();
+        for node in nœuds {
+            crate::kernel::partage::demappe(node);
+        }
+    }
+
+    /// Taille actuelle de l'espace d'adressage, en octets.
+    ///
+    /// Ce noyau n'a pas d'allocation paresseuse : `mmap` et `brk` mappent
+    /// immediatement ce qu'ils promettent. Taille virtuelle et taille residente
+    /// coincident donc, et compter les pages possedees est une mesure exacte de
+    /// ce que `RLIMIT_AS` borne.
+    pub fn taille_as(&self) -> u64 {
+        self.space.mapped_pages() as u64 * crate::kernel::vmm::PAGE_SIZE
+    }
+
+    /// Cette croissance tiendrait-elle sous `RLIMIT_AS` ?
+    pub fn tient_sous_limite(&self, croissance: u64) -> bool {
+        self.limite_as == 0 || self.taille_as() + croissance <= self.limite_as
+    }
+}
+
+impl Drop for Process {
+    /// Un processus qui disparait rend ses references sur le cache partage.
+    ///
+    /// C'est le filet : `munmap` couvre le cas ordinaire, celui-ci couvre la
+    /// mort brutale — un `SIGKILL`, une faute de page fatale, un `exit` sans
+    /// menage. Sans lui, tuer un renderer suffirait a faire fuir ses surfaces.
+    fn drop(&mut self) {
+        self.relache_partages();
+    }
 }
 
 /// Un fil d'execution utilisateur.
@@ -104,6 +223,8 @@ pub struct Task {
     pub tid: u32,
     pub process: Rc<RefCell<Process>>,
     pub state: TaskState,
+    /// Classe d'ordonnancement. Voir [`Priorite`].
+    pub priorite: Priorite,
     /// Etat ring 3 quand la tache n'est pas en cours d'execution.
     pub frame: TrapFrame,
     /// Contexte noyau (pile) pour le changement de tache.
@@ -228,6 +349,10 @@ impl Task {
             tid: alloc_tid(),
             process,
             state: TaskState::Ready,
+            // Toute tache nait normale. C'est a elle de se declarer
+            // interactive — un programme qui ne demande rien ne doit pas
+            // pouvoir prendre le pas sur l'interface par accident.
+            priorite: Priorite::Normale,
             frame,
             ctx: Context::default(),
             kstack,
@@ -375,20 +500,74 @@ fn install(task: &mut Task) {
     }
 }
 
-/// Choisit la prochaine tache prete apres `after` (tourniquet).
+/// Choisit la prochaine tache prete apres `after`.
+///
+/// Un tourniquet a deux etages. On cherche d'abord une tache **interactive**
+/// prete, en repartant de `after` pour que plusieurs taches interactives se
+/// relaient equitablement entre elles. A defaut, on prend la premiere prete,
+/// quelle qu'elle soit.
+///
+/// La borne `TOURS_INTERACTIFS_MAX` est ce qui separe une priorite d'une
+/// famine : passe ce nombre de tours consecutifs, l'etage interactif est
+/// ignore pour un tour et le tourniquet ordinaire reprend. Une tache normale
+/// avance donc toujours, meme face a une tache interactive qui ne se bloque
+/// jamais.
 fn pick_next(after: usize) -> Option<usize> {
-    let list = tasks();
-    let len = list.len();
+    let len = tasks().len();
     if len == 0 {
         return None;
     }
+
+    let force_partage = unsafe { TOURS_INTERACTIFS >= TOURS_INTERACTIFS_MAX };
+    if !force_partage {
+        for offset in 1..=len {
+            let index = (after.wrapping_add(offset)) % len;
+            let candidate = &tasks()[index];
+            if candidate.state == TaskState::Ready
+                && candidate.priorite == Priorite::Interactive
+            {
+                unsafe { TOURS_INTERACTIFS += 1 };
+                return Some(index);
+            }
+        }
+    }
+
     for offset in 1..=len {
         let index = (after.wrapping_add(offset)) % len;
-        if list[index].state == TaskState::Ready {
+        if tasks()[index].state == TaskState::Ready {
+            // Une tache normale a eu la main : le compte repart. C'est ce qui
+            // rend la borne glissante plutot que definitive.
+            if tasks()[index].priorite == Priorite::Normale {
+                unsafe { TOURS_INTERACTIFS = 0 };
+            } else {
+                unsafe { TOURS_INTERACTIFS += 1 };
+            }
             return Some(index);
         }
     }
     None
+}
+
+/// Change la classe d'ordonnancement du processus courant.
+///
+/// Rend l'ancienne. Toutes les taches du processus suivent : une priorite
+/// s'applique a un programme, pas a l'un de ses fils — un navigateur dont
+/// seule la moitie des fils serait prioritaire aurait une interface qui saccade
+/// une fois sur deux.
+pub fn pose_priorite(priorite: Priorite) -> Priorite {
+    let pid = current().process.borrow().pid;
+    let ancienne = current().priorite;
+    for task in tasks().iter_mut() {
+        if task.process.borrow().pid == pid {
+            task.priorite = priorite;
+        }
+    }
+    ancienne
+}
+
+/// La classe d'ordonnancement du processus courant.
+pub fn priorite() -> Priorite {
+    current().priorite
 }
 
 /// Verifie l'invariant de non-reentrance avant de commuter.
@@ -999,6 +1178,8 @@ pub fn new_process(name: &str, cwd: usize) -> Option<Rc<RefCell<Process>>> {
         uid: crate::users::session().uid() as u32,
         gid: crate::users::session().uid() as u32,
         signals: crate::kernel::signal::SignalState::default(),
+        partages: Vec::new(),
+        limite_as: 0,
     }));
     processes().push(process.clone());
     Some(process)

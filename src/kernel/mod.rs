@@ -19,6 +19,7 @@ pub mod heap;
 pub mod input;
 pub mod memory;
 pub mod handle;
+pub mod partage;
 pub mod power;
 pub mod process;
 pub mod scheduler;

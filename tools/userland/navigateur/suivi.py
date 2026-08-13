@@ -81,6 +81,9 @@ MESURES = [
     ("__section__", "JavaScript et interactivite", None),
     ("js.erreurs", "erreurs JavaScript", BAS),
     ("js.apis_manquantes", "APIs Web absentes demandees", BAS),
+    ("js.identifiants_inconnus", "identifiants applicatifs non definis", BAS),
+    ("js.methodes_absentes", "methodes absentes ou non appelables", BAS),
+    ("js.moignons", "moignons appeles (API presente mais vide)", BAS),
     ("js.appels_moteur", "appels du pont Python/JS", BAS),
     ("interactions.ecouteurs", "ecouteurs poses par les pages", HAUT),
 
@@ -109,7 +112,67 @@ SURVEILLEES = (
     "css.declarations_ignorees", "css.proprietes_bloquantes",
     "css.selecteurs_ignores", "css.valeurs_rejetees",
     "js.erreurs", "page.boites_effondrees", "polices.refusees",
+    "js.moignons",
 )
+
+
+# --- Jalons fonctionnels ------------------------------------------------------
+#
+# Les mesures ci-dessus disent si le moteur travaille moins et se trompe moins.
+# Elles ne disent pas s'il sait faire tourner une application — et c'est
+# pourtant la seule question qui interesse quelqu'un qui veut s'en servir.
+#
+# Un jalon est binaire et nomme une capacite entiere. « 1 141 assertions »
+# n'apprend rien a personne ; « INDEXEDDB_PERSISTENCE : PASS » dit qu'une page
+# peut fermer et rouvrir sans perdre ses donnees.
+#
+# L'ordre est celui du parcours d'une application : afficher, saisir, naviguer,
+# demander, dialoguer, retenir, et tout cela ensemble.
+JALONS = [
+    ("STATIC_PAGE", "une page s'affiche"),
+    ("LOGIN_FORM", "un formulaire se remplit au clavier"),
+    ("SPA_NAVIGATION", "la navigation sans rechargement"),
+    ("ASYNC_FETCH", "une requete asynchrone met le DOM a jour"),
+    ("WEBSOCKET_CHAT", "un WebSocket recoit ce que le serveur pousse"),
+    ("INDEXEDDB_PERSISTENCE", "les donnees survivent au rechargement"),
+    ("WEBAPP_COMBINED", "le parcours complet, d'un bout a l'autre"),
+    ("IFRAME_SAME_ORIGIN", "un cadre de meme origine s'ouvre au parent"),
+    ("IFRAME_CROSS_ORIGIN", "un cadre d'une autre origine reste ferme"),
+    ("POSTMESSAGE", "les contextes se parlent sans se lire"),
+    ("CORS", "une reponse tierce n'est lue qu'avec l'accord du serveur"),
+    ("CANVAS_ORIGIN_CLEAN", "une toile contaminee ne se relit pas"),
+    ("WSS", "un WebSocket chiffre, avec verification du certificat"),
+    ("WEBSOCKET_SUBPROTOCOL", "le sous-protocole se negocie"),
+    ("WEB_WORKER_BASIC", "un Worker vit dans son propre monde"),
+    ("WEB_WORKER_FETCH", "il fait du reseau par la pile du document"),
+    ("WEB_WORKER_INDEXEDDB", "il partage la base de son origine"),
+    ("WEB_WORKER_WEBSOCKET", "il ouvre une connexion permanente"),
+    ("WEB_WORKER_MESSAGING", "les messages traversent, copies et dans l'ordre"),
+    ("WEB_WORKER_LIFECYCLE", "terminate() rend tout, meme sur une boucle"),
+    ("STRUCTURED_CLONE", "ce qui ne se clone pas leve, au lieu de disparaitre"),
+    ("MESSAGE_CHANNEL", "deux ports se parlent par la file de taches"),
+    ("RENDERER_BASIC", "une page vit dans un autre processus"),
+    ("RENDERER_CRASH_ISOLATION", "un renderer tue ne fait pas tomber la fenetre"),
+    ("RENDERER_MEMORY_ISOLATION", "sa memoire est bornee, celle du chrome non"),
+]
+
+CHEMIN_JALONS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "tests", "jalons.json")
+
+
+def lit_jalons():
+    """Ce que la derniere execution des verifications a etabli.
+
+    Rend un dictionnaire vide si le fichier n'existe pas : les jalons
+    apparaissent alors comme non mesures, ce qui est la verite — et non comme
+    des echecs, ce qui serait un mensonge.
+    """
+    try:
+        with open(CHEMIN_JALONS, "r", encoding="utf-8") as fichier:
+            donnees = json.load(fichier)
+        return donnees if isinstance(donnees, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
 
 # --- Couleurs -----------------------------------------------------------------
@@ -267,6 +330,10 @@ def assemble(moteur, hote, compat):
             "css.valeurs_rejetees": _somme(pages, "CSS", "valeurs_rejetees"),
             "css.arobases_ignorees": _somme(pages, "CSS", "arobases_ignorees"),
             "js.erreurs": _somme(pages, "JAVASCRIPT", "erreurs"),
+            "js.identifiants_inconnus": _somme(pages, "JAVASCRIPT",
+                                               "identifiants_inconnus"),
+            "js.methodes_absentes": _somme(pages, "JAVASCRIPT", "methodes_absentes"),
+            "js.moignons": _somme(pages, "JAVASCRIPT", "moignons_appeles"),
             "js.apis_manquantes": _somme(pages, "JAVASCRIPT", "apis_manquantes"),
             "js.appels_moteur": _somme(pages, "JAVASCRIPT", "appels_moteur"),
             "interactions.ecouteurs": _somme(pages, "INTERACTIONS", "ecouteurs_poses"),
@@ -366,6 +433,8 @@ def imprime(valeurs, ancien, contexte, style, reculs):
     else:
         print(style.gris("  premiere execution de cette portee : rien a comparer"))
 
+    imprime_jalons(style)
+
     for cle, libelle, _ in MESURES:
         if cle == "__section__":
             print()
@@ -388,6 +457,35 @@ def imprime(valeurs, ancien, contexte, style, reculs):
         print("  " + style.rouge("Reculs sur des mesures surveillees :"))
         for cle, avant, apres in reculs:
             print("    %-40s %s -> %s" % (cle, _nombre(avant), _nombre(apres)))
+
+
+def imprime_jalons(style):
+    """Les capacites, PASS ou FAIL, avant les compteurs.
+
+    En tete du tableau parce que c'est ce qu'on lit en premier quand on veut
+    savoir ou en est le navigateur. Un compteur qui s'ameliore pendant qu'un
+    jalon tombe est une regression, quoi qu'en dise le compteur.
+    """
+    jalons = lit_jalons()
+    print()
+    print("  " + style.gras("Jalons fonctionnels"))
+    if not jalons:
+        print("    " + style.gris("non mesures — lancer ./tools/userland/test-moteur.sh"))
+        return
+    for cle, libelle in JALONS:
+        if cle not in jalons:
+            etat = style.gris("  ??  ")
+        elif jalons[cle]:
+            etat = style.vert(" PASS ")
+        else:
+            etat = style.rouge(" FAIL ")
+        print("    %-26s %s  %s" % (cle, etat, style.gris(libelle)))
+    # Un jalon inconnu du catalogue vaut mieux affiche qu'ignore : c'est
+    # probablement un jalon neuf qu'on a oublie d'inscrire ici.
+    connus = {cle for cle, _ in JALONS}
+    for cle in sorted(set(jalons) - connus):
+        etat = style.vert(" PASS ") if jalons[cle] else style.rouge(" FAIL ")
+        print("    %-26s %s  %s" % (cle, etat, style.gris("(hors catalogue)")))
 
 
 def imprime_indisponibles(moteur, hote, compat, style):

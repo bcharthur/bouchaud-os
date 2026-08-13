@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Bouchaud WebApp — temoin combine</title>
+<!--
+  Le temoin qui compte.
+
+  Les autres temoins isolent une brique : un formulaire, une navigation, une
+  requete. Celui-ci les fait travailler ensemble, parce que c'est la que les
+  vraies applications tombent. Un moteur peut tres bien reussir chaque epreuve
+  separement et s'effondrer des qu'un `pushState` survient pendant qu'un
+  `fetch` est en vol et qu'une transaction IndexedDB attend son commit.
+
+  Le parcours, dans l'ordre :
+
+    1. la page charge, le script s'amorce ;
+    2. l'utilisateur saisit un profil dans un vrai formulaire ;
+    3. `history.pushState` change de vue sans recharger ;
+    4. un `fetch` asynchrone rapporte du JSON ;
+    5. le DOM se met a jour avec ce qui est arrive ;
+    6. un WebSocket s'ouvre ;
+    7. ses messages arrivent et s'affichent ;
+    8. tout est enregistre dans IndexedDB ;
+    9. au rechargement, l'etat est restaure depuis IndexedDB ;
+   10. et l'interface repond pendant tout cela.
+
+  Chaque etape pose son drapeau dans `window.__webapp`. Les epreuves lisent
+  cet objet : c'est le contrat entre la page et ce qui la mesure, et il est
+  volontairement plat — un test qui doit fouiller le DOM pour savoir si une
+  etape a reussi teste l'affichage, pas le comportement.
+-->
+<style>
+  :root { --fond: #ffffff; --texte: #1c1c1e; --accent: #2b5fd9; --bord: #d8dade; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; color: var(--texte);
+         background: var(--fond); }
+  header { display: flex; align-items: center; gap: 12px; padding: 12px 20px;
+           border-bottom: 1px solid var(--bord); }
+  header h1 { font-size: 18px; margin: 0; }
+  nav { display: flex; gap: 8px; margin-left: auto; }
+  nav button { padding: 6px 12px; border: 1px solid var(--bord);
+               background: #ffffff; border-radius: 6px; }
+  nav button.actif { background: var(--accent); color: #ffffff; }
+  main { padding: 20px; }
+  .vue { display: none; }
+  .vue.visible { display: block; }
+  form { display: flex; flex-direction: column; gap: 10px; max-width: 320px; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+  input { padding: 8px; border: 1px solid var(--bord); border-radius: 6px; }
+  button[type=submit] { padding: 9px; border: 0; border-radius: 6px;
+                        background: var(--accent); color: #ffffff; }
+  .cartes { display: flex; flex-wrap: wrap; gap: 12px; }
+  .carte { border: 1px solid var(--bord); border-radius: 8px; padding: 12px;
+           width: max-content; min-width: 140px; }
+  .carte h3 { margin: 0 0 6px; font-size: 14px; }
+  #journal { font-size: 13px; line-height: 1.6; }
+  #journal li::before { content: "▸ "; color: var(--accent); }
+  .etat { font-size: 12px; color: #6b6f76; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Carnet</h1>
+  <span class="etat" id="etat">demarrage…</span>
+  <nav>
+    <button id="vers-profil" class="actif">Profil</button>
+    <button id="vers-flux">Flux</button>
+  </nav>
+</header>
+
+<main>
+  <section class="vue visible" id="vue-profil">
+    <form id="profil">
+      <label>Nom
+        <input type="text" name="nom" id="nom" value="">
+      </label>
+      <label>Courriel
+        <input type="email" name="courriel" id="courriel" value="">
+      </label>
+      <button type="submit">Enregistrer</button>
+    </form>
+    <p class="etat" id="profil-etat">aucun profil</p>
+  </section>
+
+  <section class="vue" id="vue-flux">
+    <div class="cartes" id="cartes"></div>
+    <ul id="journal"></ul>
+  </section>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  // Le tableau de bord que les epreuves lisent. Un drapeau par etape : une
+  // etape absente est une etape qui n'a pas eu lieu, et non une etape dont on
+  // ne sait rien.
+  const etat = globalThis.__webapp = {
+    amorce: false,
+    profil: null,
+    navigation: [],
+    fetch: null,
+    domMisAJour: false,
+    socket: null,
+    messages: [],
+    enregistre: false,
+    restaure: null,
+    tics: 0,
+    erreurs: [],
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const dit = (texte) => { $("etat").textContent = texte; };
+
+  // Un battement de fond : s'il s'arrete, c'est que quelque chose a bloque le
+  // fil de l'interface. C'est la mesure la plus simple de « l'application reste
+  // reactive », et elle ne ment pas.
+  setInterval(function () { etat.tics += 1; }, 16);
+
+  // --- 1. Amorce ----------------------------------------------------------
+  const BASE = "carnet-webapp";
+  let base = null;
+
+  function ouvreBase() {
+    return new Promise(function (resoudre, rejeter) {
+      const demande = indexedDB.open(BASE, 1);
+      demande.onupgradeneeded = function (e) {
+        const db = e.target.result;
+        db.createObjectStore("profil");
+        db.createObjectStore("messages");
+      };
+      demande.onsuccess = function (e) { resoudre(e.target.result); };
+      demande.onerror = function (e) { rejeter(e.target.error); };
+    });
+  }
+
+  function ecrit(magasin, cle, valeur) {
+    return new Promise(function (resoudre, rejeter) {
+      const t = base.transaction(magasin, "readwrite");
+      t.objectStore(magasin).put(valeur, cle);
+      t.oncomplete = function () { resoudre(true); };
+      t.onabort = function () { rejeter(new Error("transaction abandonnee")); };
+    });
+  }
+
+  function lit(magasin, cle) {
+    return new Promise(function (resoudre, rejeter) {
+      const t = base.transaction(magasin, "readonly");
+      const r = t.objectStore(magasin).get(cle);
+      r.onsuccess = function () { resoudre(r.result); };
+      r.onerror = function () { rejeter(r.error); };
+    });
+  }
+
+  // --- 3. Navigation sans rechargement ------------------------------------
+  function montre(vue, pousse) {
+    for (const section of document.querySelectorAll(".vue"))
+      section.className = "vue" + (section.id === "vue-" + vue ? " visible" : "");
+    $("vers-profil").className = vue === "profil" ? "actif" : "";
+    $("vers-flux").className = vue === "flux" ? "actif" : "";
+    if (pousse) {
+      history.pushState({ vue: vue }, "", "?vue=" + vue);
+      etat.navigation.push(vue);
+    }
+  }
+
+  $("vers-profil").addEventListener("click", function () { montre("profil", true); });
+  $("vers-flux").addEventListener("click", function () { montre("flux", true); });
+  addEventListener("popstate", function (e) {
+    const vue = (e.state && e.state.vue) || "profil";
+    montre(vue, false);
+    etat.navigation.push("retour:" + vue);
+  });
+
+  // --- 2. Le formulaire ----------------------------------------------------
+  $("profil").addEventListener("submit", function (e) {
+    e.preventDefault();
+    const profil = { nom: $("nom").value, courriel: $("courriel").value };
+    if (!profil.nom) { $("profil-etat").textContent = "le nom est requis"; return; }
+    etat.profil = profil;
+    $("profil-etat").textContent = "profil de " + profil.nom;
+    ecrit("profil", "courant", profil).then(function () {
+      etat.enregistre = true;
+      dit("profil enregistre");
+    }).catch(function (erreur) { etat.erreurs.push(String(erreur)); });
+  });
+
+  // --- 4 et 5. Fetch asynchrone, puis mise a jour du DOM -------------------
+  function chargeFlux() {
+    return fetch("/json").then(function (r) {
+      etat.fetch = { ok: r.ok, status: r.status };
+      return r.json();
+    }).then(function (donnees) {
+      const cartes = $("cartes");
+      cartes.innerHTML = "";
+      const entrees = Object.keys(donnees);
+      for (const cle of entrees) {
+        const carte = document.createElement("div");
+        carte.className = "carte";
+        const titre = document.createElement("h3");
+        titre.textContent = cle;
+        const corps = document.createElement("p");
+        corps.textContent = String(donnees[cle]);
+        carte.appendChild(titre);
+        carte.appendChild(corps);
+        cartes.appendChild(carte);
+      }
+      etat.domMisAJour = cartes.children.length > 0;
+      dit("flux charge");
+    }).catch(function (erreur) { etat.erreurs.push("fetch: " + String(erreur)); });
+  }
+
+  // --- 6 et 7. WebSocket ---------------------------------------------------
+  function ouvreSocket() {
+    return new Promise(function (resoudre) {
+      let socket;
+      try {
+        socket = new WebSocket(location.origin.replace(/^http/, "ws") + "/ws/echo");
+      } catch (erreur) {
+        etat.erreurs.push("ws: " + String(erreur));
+        resoudre(false);
+        return;
+      }
+      socket.onopen = function () {
+        etat.socket = "ouvert";
+        socket.send("__trois__");
+      };
+      socket.onmessage = function (e) {
+        etat.messages.push(String(e.data));
+        const ligne = document.createElement("li");
+        ligne.textContent = String(e.data);
+        $("journal").appendChild(ligne);
+        if (etat.messages.length >= 3) {
+          ecrit("messages", "recus", etat.messages).catch(function (erreur) {
+            etat.erreurs.push(String(erreur));
+          });
+          resoudre(true);
+        }
+      };
+      socket.onerror = function () {
+        etat.socket = "erreur";
+        resoudre(false);
+      };
+      socket.onclose = function () {
+        if (etat.socket !== "erreur") etat.socket = "ferme";
+      };
+    });
+  }
+
+  // --- 9. Restauration -----------------------------------------------------
+  function restaure() {
+    return lit("profil", "courant").then(function (profil) {
+      if (profil) {
+        // `undefined` et « range a null » ne sont pas la meme chose : c'est
+        // cette distinction qui decide s'il faut restaurer ou repartir de zero.
+        etat.restaure = profil;
+        $("nom").value = profil.nom;
+        $("courriel").value = profil.courriel;
+        $("profil-etat").textContent = "profil restaure : " + profil.nom;
+      } else {
+        etat.restaure = false;
+      }
+      return lit("messages", "recus");
+    }).then(function (messages) {
+      if (messages && messages.length) {
+        for (const texte of messages) {
+          const ligne = document.createElement("li");
+          ligne.textContent = texte;
+          $("journal").appendChild(ligne);
+        }
+      }
+    });
+  }
+
+  ouvreBase().then(function (db) {
+    base = db;
+    etat.amorce = true;
+    dit("base ouverte");
+    return restaure();
+  }).then(function () {
+    return chargeFlux();
+  }).then(function () {
+    return ouvreSocket();
+  }).then(function () {
+    etat.pret = true;
+    dit("pret");
+  }).catch(function (erreur) {
+    etat.erreurs.push("amorce: " + String(erreur));
+    dit("erreur : " + erreur);
+  });
+})();
+</script>
+</body>
+</html>

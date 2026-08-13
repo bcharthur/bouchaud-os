@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Worker : IndexedDB</title>
+<!--
+  Le worker ecrit, la page relit.
+
+  C'est la verification qui compte : si la page retrouve ce que le worker a
+  ecrit, alors les deux mondes partagent bien la meme base — donc le service est
+  cloisonne par origine et non par contexte JavaScript, ce qui est ce que la
+  norme demande.
+
+  L'inverse serait invisible autrement : deux bases separees se comporteraient
+  parfaitement, chacune de son cote, et le worker de synchronisation ne
+  synchroniserait rien.
+-->
+</head><body>
+<h1>IndexedDB depuis un worker</h1>
+<pre id="journal">…</pre>
+<script>
+globalThis.__wi = { rapport: null, relu: null, erreurs: [] };
+
+var travailleur = new Worker("/page/worker-indexeddb.js");
+travailleur.onerror = function (e) {
+  globalThis.__wi.erreurs.push(String(e.message || "erreur"));
+};
+
+travailleur.onmessage = function (evenement) {
+  globalThis.__wi.rapport = evenement.data;
+  var zone = document.getElementById("journal");
+  if (zone) zone.textContent = JSON.stringify(evenement.data);
+
+  // La page ouvre la meme base, apres le worker, et lit ce qu'il a ecrit.
+  var demande = indexedDB.open("bo-worker", 1);
+  demande.onupgradeneeded = function () {
+    // Ne devrait pas arriver : le worker a deja cree le magasin. S'il arrive,
+    // c'est que la page et le worker ne voient pas la meme base.
+    globalThis.__wi.monteeInattendue = true;
+    demande.result.createObjectStore("notes");
+  };
+  demande.onsuccess = function () {
+    var base = demande.result;
+    var t = base.transaction("notes", "readonly");
+    var lecture = t.objectStore("notes").get("b");
+    lecture.onsuccess = function () { globalThis.__wi.relu = lecture.result; };
+    lecture.onerror = function () {
+      globalThis.__wi.erreurs.push("lecture: " + lecture.error.name);
+    };
+  };
+  demande.onerror = function () {
+    globalThis.__wi.erreurs.push("ouverture: " + demande.error.name);
+  };
+};
+
+travailleur.postMessage({ genre: "va" });
+</script>
+</body></html>

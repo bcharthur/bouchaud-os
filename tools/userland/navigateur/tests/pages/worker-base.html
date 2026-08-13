@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Worker : la surface et les messages</title>
+<!--
+  Ce que cette page eprouve.
+
+  Un `Worker` n'est utile que s'il est vraiment ailleurs. « Ailleurs » se
+  verifie de deux facons, et cette page fait la premiere :
+
+    * le monde du worker n'est pas celui d'un document. Pas de `document`, pas
+      de `window`, pas de `HTMLElement`, pas de `localStorage`. Ce n'est pas
+      une privation : c'est ce qui rend legitime de le faire tourner sur un
+      autre fil, puisqu'il n'y a plus d'arbre partage a proteger ;
+    * ce qu'il **a** est complet et fonctionne : `postMessage`, les minuteries,
+      les micro-taches, `URL`, `TextEncoder`/`TextDecoder`.
+
+  La seconde facon — prouver que le calcul ne bloque pas la page — est dans
+  `worker-cpu.html`, qui demande une mesure et non une lecture de propriete.
+
+  La page n'affirme rien. Elle enregistre ce que le worker lui repond dans
+  `globalThis.__worker`, et la verification compare.
+-->
+</head><body>
+<h1>Worker</h1>
+<pre id="journal">…</pre>
+<script>
+globalThis.__worker = { pret: false, etapes: [], erreurs: [] };
+
+var travailleur = new Worker("/page/worker-base.js");
+
+travailleur.onerror = function (evenement) {
+  globalThis.__worker.erreurs.push(String(evenement.message || "erreur"));
+};
+
+travailleur.onmessage = function (evenement) {
+  var message = evenement.data || {};
+  globalThis.__worker.etapes.push(message.genre);
+  globalThis.__worker[message.genre] = message;
+
+  var zone = document.getElementById("journal");
+  if (zone) zone.textContent = globalThis.__worker.etapes.join("\n");
+
+  if (message.genre === "surface") travailleur.postMessage({ genre: "echo", charge: { a: 1, b: ["x", null, true], c: { d: -2.5 } } });
+  else if (message.genre === "echo") travailleur.postMessage({ genre: "minuterie" });
+  else if (message.genre === "minuterie") travailleur.postMessage({ genre: "texte", charge: "eleve — caractères accentués" });
+  else if (message.genre === "texte") travailleur.postMessage({ genre: "url", charge: "../autre/chemin?q=1#f" });
+  else if (message.genre === "url") travailleur.postMessage({ genre: "microtache" });
+  else if (message.genre === "microtache") globalThis.__worker.pret = true;
+};
+
+travailleur.postMessage({ genre: "surface" });
+
+// Ce que la page voit d'elle-meme, pour comparer : le worker doit voir un
+// monde different, pas le meme moins quelques proprietes.
+globalThis.__page = {
+  aDocument: typeof document !== "undefined",
+  aWindow: typeof window !== "undefined",
+  aWorker: typeof Worker === "function",
+};
+</script>
+</body></html>

@@ -78,6 +78,25 @@ def _colle(boite, style, haut, defilement, hauteur_vue, contenant):
     return colle - haut
 
 
+def _peint_curseur(boite, liste, defilement, hauteur_vue):
+    """La selection derriere le texte, puis le trait du curseur devant.
+
+    L'ordre compte : peindre la selection apres le texte le recouvrirait. Elle
+    est donc dessinee avant — mais les fragments l'ont deja ete, alors on la
+    pose en dessous en la dessinant en premier dans cette passe, ce que la
+    liste d'affichage permet parce que la selection est translucide.
+    """
+    x, y, hauteur, selection = boite.curseur
+    haut = y - defilement
+    if haut + hauteur < 0 or haut > hauteur_vue:
+        return
+    if selection is not None:
+        debut_x, largeur = selection
+        if largeur > 0:
+            liste.append(("rect", debut_x, haut, largeur, hauteur, 0x553B82F6))
+    liste.append(("rect", x, haut, 1.0, hauteur, 0xFF1F2937))
+
+
 def _peint_boite(boite, liste, defilement, largeur_vue, hauteur_vue, zones_liens,
                  matrice=None, contenant=None):
     style = boite.style
@@ -193,9 +212,26 @@ def _peint_contenu(boite, liste, defilement, largeur_vue, hauteur_vue, zones_lie
             _peint_fragment(fragment, liste, defilement, hauteur_vue, zones_liens,
                             matrice)
 
+        # Le curseur et la selection d'un champ au foyer. Ils sont poses par la
+        # mise en page, pas inseres dans le texte : un caret ecrit dans la
+        # valeur partirait avec le formulaire, et changerait la largeur mesuree
+        # a chaque battement de clignotement.
+        if boite.curseur is not None:
+            _peint_curseur(boite, liste, defilement, hauteur_vue)
+
         # Le dessin d'une toile est une liste d'affichage a part entiere,
         # exprimee dans les coordonnees de la toile : la poser revient a la
         # decaler et a la rogner a ses bords.
+        # Un `<iframe>` : la liste d'affichage du document enfant, decalee a la
+        # place de la boite et rognee a ses bornes.
+        #
+        # Le rognage n'est pas cosmetique : sans lui, un document enfant plus
+        # haut que son cadre deborderait sur la page parente, et une page
+        # hostile pourrait recouvrir l'interface de son hote. C'est la premiere
+        # chose qu'un `<iframe>` doit garantir.
+        if boite.cadre is not None:
+            _peint_cadre(boite, liste, haut)
+
         if boite.toile:
             liste.append(("clip", boite.x, haut, boite.largeur, boite.hauteur))
             for operation in boite.toile:
@@ -233,6 +269,40 @@ def _peint_contenu(boite, liste, defilement, largeur_vue, hauteur_vue, zones_lie
 
     if rogne_ici:
         liste.append(("declip",))
+
+
+def _peint_cadre(boite, liste, haut):
+    """Insere la liste d'affichage d'un document enfant dans celle du parent.
+
+    Le document enfant est peint dans **son** repere, a partir de (0, 0) et
+    avec son propre defilement. On le translate ensuite a la place de la boite.
+    Cette separation compte : l'enfant ne sait rien de l'endroit ou il est
+    affiche, ce qui est exactement ce qu'il faudra quand il sera peint dans un
+    autre processus et transmis par un tampon partage.
+
+    Les zones de liens de l'enfant ne remontent **pas** au parent : un clic dans
+    un iframe se resout dans le contexte de l'iframe, pas dans celui de la page
+    hote. Les melanger ferait qu'un lien d'une page tierce serait suivi comme
+    s'il venait de la notre.
+    """
+    contexte = boite.cadre
+    document = getattr(contexte, "document", None)
+    if document is None or getattr(document, "boite", None) is None:
+        return
+    if boite.largeur <= 0 or boite.hauteur <= 0:
+        return
+
+    try:
+        interieure = peint(document.boite, contexte.defilement_y,
+                           boite.largeur, boite.hauteur, [])
+    except Exception:  # noqa: BLE001 — un iframe casse ne casse pas la page
+        return
+
+    liste.append(("clip", boite.x, haut, boite.largeur, boite.hauteur))
+    dx = boite.x - contexte.defilement_x
+    for operation in interieure:
+        liste.append(_decale(operation, dx, haut))
+    liste.append(("declip",))
 
 
 def _peint_fragment(fragment, liste, defilement, hauteur_vue, zones_liens,

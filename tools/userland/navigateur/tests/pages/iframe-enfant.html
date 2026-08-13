@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Cadre enfant</title>
+<!--
+  Le document invite. Il vit dans son propre contexte de navigation : son
+  `window`, son historique, son origine, son viewport.
+
+  Il fait trois choses, et chacune eprouve une frontiere differente :
+
+    * il annonce sa presence a son parent par `postMessage` — le canal
+      legitime, celui qui traverse les origines ;
+    * il repond a ce qu'on lui envoie, en renvoyant a `event.origin` plutot
+      qu'a `"*"` — la facon correcte de repondre, qui ne parle qu'a celui qui
+      a parle ;
+    * il **essaie** de lire le DOM de son parent, et note ce qui arrive. En
+      meme origine cela doit reussir, en origine differente cela doit echouer.
+      Un test qui ne verifierait que le premier cas ne prouverait rien.
+-->
+<style>
+  body { margin: 0; font: 14px system-ui, sans-serif; background: #eef3ff;
+         color: #16324f; }
+  main { padding: 12px; }
+  h1 { font-size: 15px; margin: 0 0 6px; }
+  #recu { font-size: 12px; color: #4a5a6a; }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="titre">Document enfant</h1>
+  <p id="adresse"></p>
+  <p id="recu">rien recu</p>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  const etat = globalThis.__enfant = {
+    origine: null,
+    lectureParent: null,
+    recus: [],
+  };
+
+  etat.origine = window.origin;
+  document.getElementById("adresse").textContent = location.href;
+
+  // La tentative d'acces au DOM du parent. On ne suppose pas le resultat : on
+  // le note. C'est ce qui permet a l'epreuve de verifier les deux sens.
+  try {
+    const corps = parent.document && parent.document.body;
+    etat.lectureParent = corps ? "autorisee" : "refusee";
+  } catch (e) {
+    etat.lectureParent = "exception";
+  }
+
+  addEventListener("message", function (e) {
+    etat.recus.push({ data: e.data, origin: e.origin });
+    document.getElementById("recu").textContent =
+      "recu de " + e.origin + " : " + JSON.stringify(e.data);
+    // On repond a l'origine qui a parle, pas a `"*"` : repondre a tout le
+    // monde enverrait la reponse au site suivant si le cadre change de page.
+    if (e.source) e.source.postMessage({ echo: e.data }, e.origin);
+  });
+
+  // On previent le parent qu'on est la. `"*"` est acceptable ici parce que le
+  // message ne contient rien de sensible — seulement « je suis charge ».
+  if (parent !== window) {
+    parent.postMessage({ pret: true, origine: window.origin }, "*");
+  }
+})();
+</script>
+</body>
+</html>

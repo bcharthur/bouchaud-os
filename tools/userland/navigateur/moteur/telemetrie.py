@@ -76,6 +76,7 @@ def reinitialise():
     """Vide ce qui a ete note. Une page par mesure, sinon rien n'est comparable."""
     _notes.clear()
     _chronos.clear()
+    _compteurs.clear()
 
 
 def note(categorie, cle, exemple=None):
@@ -133,11 +134,143 @@ class chrono:
         return False
 
 
+# --- Compteurs bruts ----------------------------------------------------------
+
+_compteurs = {}
+
+
+def compte(nom, combien=1):
+    """Incremente un compteur. Le prix d'un test de booleen quand c'est eteint.
+
+    Distinct de `note()` : ici il n'y a ni cle secondaire ni exemple, seulement
+    un nombre. C'est ce qu'il faut pour compter des dizaines de milliers
+    d'evenements par mise en page sans que la mesure coute plus que ce qu'elle
+    mesure.
+    """
+    if not ACTIVE:
+        return
+    _compteurs[nom] = _compteurs.get(nom, 0) + combien
+
+
+def compteurs():
+    return dict(sorted(_compteurs.items(), key=lambda p: -p[1]))
+
+
 def temps():
     """`phase -> (appels, millisecondes cumulees)`, du plus couteux au moins."""
     ordonne = sorted(_chronos.items(), key=lambda t: -t[1][1])
     return [{"phase": nom, "appels": n, "ms": round(total * 1000.0, 2)}
             for nom, (n, total) in ordonne]
+
+
+# --- Categories du diagnostic JavaScript --------------------------------------
+#
+# Quatre categories, et la frontiere entre les deux premieres est tout l'enjeu.
+#
+# Un `ReferenceError: X is not defined` ne dit pas si `X` est une API que le
+# navigateur devrait fournir ou une variable que la page a oublie de definir.
+# Les confondre remplit la feuille de route de noms comme `currentUsr` ou
+# `webpackChunk`, qui n'ont d'equivalent dans aucun navigateur et qu'aucune
+# implementation ne ferait disparaitre — pendant que les vrais manques se
+# perdent dans le bruit.
+#
+# La regle appliquee : un nom n'est une API navigateur absente que s'il figure
+# au registre ci-dessous. Tout le reste est un identifiant applicatif inconnu.
+# Se tromper dans ce sens est sans danger : au pire on sous-estime un manque,
+# et un manque reel finira par revenir par un autre chemin — un accesseur du
+# prelude, une methode absente, une ressource echouee.
+
+API_ABSENTE = "api_absente"
+IDENTIFIANT_INCONNU = "identifiant_inconnu"
+METHODE_ABSENTE = "methode_absente"
+MOIGNON = "moignon_appele"
+ERREUR_JS = "erreur_js"
+RESSOURCE_ECHOUEE = "ressource"
+# Un acces refuse par la Same-Origin Policy. Ce n'est pas un manque du moteur —
+# c'est le moteur qui fait son travail — mais il faut pouvoir le compter : une
+# page qui en declenche beaucoup essaie quelque chose, et une page qui devrait
+# en declencher et n'en declenche aucun signale un trou dans la politique.
+SOP_REFUS = "sop_refus"
+
+# Les surfaces de la plate-forme Web, par famille. Un nom present ici et absent
+# du moteur est un manque a implementer ; un nom absent d'ici est le probleme de
+# la page.
+SURFACES_WEB = frozenset("""
+window self globalThis document navigator location history screen frames parent top
+alert confirm prompt open close print focus blur stop
+setTimeout setInterval clearTimeout clearInterval queueMicrotask
+requestAnimationFrame cancelAnimationFrame requestIdleCallback cancelIdleCallback
+setImmediate reportError structuredClone
+fetch Request Response Headers AbortController AbortSignal
+XMLHttpRequest XMLHttpRequestUpload FormData URLSearchParams URL
+WebSocket EventSource BroadcastChannel MessageChannel MessagePort
+Worker SharedWorker ServiceWorker ServiceWorkerContainer
+Blob File FileList FileReader FileReaderSync
+ReadableStream WritableStream TransformStream ByteLengthQueuingStrategy
+TextEncoder TextDecoder TextEncoderStream TextDecoderStream
+btoa atob crypto SubtleCrypto Intl
+localStorage sessionStorage indexedDB IDBFactory IDBKeyRange IDBDatabase
+IDBTransaction IDBObjectStore IDBRequest IDBCursor IDBIndex
+caches CacheStorage Cache
+Notification PushManager Permissions PermissionStatus
+Node Element HTMLElement Document DocumentFragment ShadowRoot Text Comment
+Attr NamedNodeMap NodeList HTMLCollection DOMTokenList DOMParser XMLSerializer
+Range Selection NodeFilter NodeIterator TreeWalker XPathEvaluator XPathResult
+MutationObserver IntersectionObserver ResizeObserver PerformanceObserver
+ReportingObserver
+Event CustomEvent EventTarget MouseEvent KeyboardEvent PointerEvent TouchEvent
+InputEvent FocusEvent WheelEvent DragEvent ClipboardEvent CompositionEvent
+SubmitEvent PopStateEvent HashChangeEvent MessageEvent ProgressEvent
+StorageEvent ErrorEvent PromiseRejectionEvent CloseEvent BeforeUnloadEvent
+AnimationEvent TransitionEvent UIEvent PageTransitionEvent
+HTMLFormElement HTMLInputElement HTMLSelectElement HTMLTextAreaElement
+HTMLButtonElement HTMLAnchorElement HTMLImageElement HTMLCanvasElement
+HTMLScriptElement HTMLLinkElement HTMLStyleElement HTMLTemplateElement
+HTMLIFrameElement HTMLMediaElement HTMLVideoElement HTMLAudioElement
+HTMLOptionElement HTMLLabelElement HTMLTableElement HTMLDialogElement
+HTMLSlotElement HTMLPictureElement HTMLSourceElement HTMLTrackElement
+Image Audio Option OffscreenCanvas ImageData ImageBitmap Path2D
+CanvasRenderingContext2D CanvasGradient CanvasPattern
+WebGLRenderingContext WebGL2RenderingContext
+CSS CSSStyleSheet CSSStyleDeclaration CSSRule StyleSheet FontFace FontFaceSet
+getComputedStyle matchMedia MediaQueryList getSelection
+customElements CustomElementRegistry HTMLUnknownElement
+performance Performance PerformanceEntry
+MediaSource SourceBuffer MediaRecorder MediaStream RTCPeerConnection
+SpeechSynthesis speechSynthesis
+AbortError DOMException DOMRect DOMRectReadOnly DOMMatrix DOMPoint
+visualViewport scrollX scrollY scrollTo scrollBy scroll pageXOffset pageYOffset
+innerWidth innerHeight outerWidth outerHeight devicePixelRatio
+addEventListener removeEventListener dispatchEvent postMessage
+console isSecureContext origin name closed opener length
+trustedTypes navigation scheduler
+""".split())
+
+# Prefixes qui trahissent un identifiant d'application ou d'outillage. Ils ne
+# peuvent jamais devenir des APIs, meme si un jour l'un d'eux entrait par
+# accident dans le registre.
+_PREFIXES_APPLICATIFS = ("webpack", "__webpack", "parcel", "vite", "_", "$",
+                         "jQuery", "angular", "ng", "React", "Vue", "gtag",
+                         "dataLayer", "ga", "fbq", "_paq", "Shopify")
+
+
+def est_surface_web(nom):
+    """Ce nom designe-t-il une API navigateur, ou une variable de la page ?"""
+    nom = str(nom or "")
+    if not nom:
+        return False
+    if nom in SURFACES_WEB:
+        return True
+    for prefixe in _PREFIXES_APPLICATIFS:
+        if nom.startswith(prefixe):
+            return False
+    # Les constructeurs de la plate-forme suivent tous la meme forme : une
+    # majuscule, puis un suffixe connu. `HTMLFooElement`, `SVGBarElement`,
+    # `FooEvent` sont des surfaces ; `MonComposant` n'en est pas une.
+    if nom[:1].isupper() and nom.endswith(("Element", "Event", "Observer",
+                                           "Exception", "Error")):
+        return nom.endswith(("Element", "Event", "Observer")) or nom in SURFACES_WEB
+    return False
 
 
 # --- Classement des manques CSS -----------------------------------------------
@@ -316,15 +449,21 @@ def arobase_ignoree(nom, prelude=""):
 
 def api_manquante(nom, detail=None):
     """Une API Web qu'un script est alle chercher et qui n'existe pas."""
-    note("api", nom, detail)
+    note(API_ABSENTE, nom, detail)
 
 
 def erreur_js(message, source=None):
-    note("js_erreur", str(message)[:160], source)
+    note(ERREUR_JS, str(message)[:160], source)
 
 
 def ressource_echouee(url, code, destination=""):
-    note("ressource", "%s %s" % (code, destination or "?"), url)
+    """Une sous-ressource perdue, nommee par sa destination.
+
+    La cle est la destination — `script`, `stylesheet`, `image`… — et non
+    l'adresse : c'est ainsi qu'un bundle principal en 404 se voit du premier
+    coup d'oeil, la ou une cle par URL le noierait parmi les vignettes.
+    """
+    note(RESSOURCE_ECHOUEE, destination or "?", "%s %s" % (code or 0, url))
 
 
 def balise_inconnue(nom):
@@ -362,15 +501,79 @@ def json_ligne(contexte=None):
 
 
 _TITRES = {
-    "api": "APIs Web absentes",
+    API_ABSENTE: "APIs Web absentes",
+    IDENTIFIANT_INCONNU: "Identifiants applicatifs non definis",
+    METHODE_ABSENTE: "Methodes absentes ou non appelables",
+    MOIGNON: "Moignons appeles (API presente mais vide)",
     "css_propriete": "Proprietes CSS non honorees",
     "css_valeur": "Valeurs CSS non comprises",
     "css_selecteur": "Selecteurs non compiles",
     "css_arobase": "Regles @ ignorees",
     "html_balise": "Balises HTML inconnues",
-    "js_erreur": "Erreurs JavaScript",
-    "ressource": "Ressources non chargees",
+    ERREUR_JS: "Erreurs JavaScript",
+    RESSOURCE_ECHOUEE: "Ressources non chargees",
 }
+
+
+_SECTIONS_JS = (
+    (API_ABSENTE, "MISSING WEB APIs"),
+    (IDENTIFIANT_INCONNU, "UNDEFINED APP IDENTIFIERS"),
+    (METHODE_ABSENTE, "UNSUPPORTED / MISSING METHODS"),
+    (MOIGNON, "STUBBED APIs USED"),
+    (RESSOURCE_ECHOUEE, "RESOURCE FAILURES"),
+    (ERREUR_JS, "JAVASCRIPT ERRORS"),
+)
+
+
+def rapport_plateforme(titre="Bouchaud Browser Compatibility Report", lignes_max=15):
+    """Le rapport de la plate-forme Web, dans l'ordre ou il se decide.
+
+    Les APIs absentes d'abord parce qu'elles se corrigent en les ecrivant. Les
+    identifiants applicatifs ensuite, non pour les implementer — ils n'ont
+    d'equivalent dans aucun navigateur — mais parce qu'ils signalent presque
+    toujours un bundle qui n'a pas charge, donc une ressource a aller chercher
+    plus bas dans le meme rapport.
+
+    Les moignons ont leur propre section, et c'est voulu. Une API presente mais
+    vide est souvent pire qu'une absente : la page teste `if (history.pushState)`,
+    obtient `true`, prend le chemin moderne, et poursuit avec un navigateur dont
+    l'etat ne correspond plus a ce qu'elle croit. Une absence, elle, l'aurait
+    fait retomber sur son plan de secours.
+    """
+    donnees = rapport()
+    lignes = ["=== %s ===" % titre]
+    vide = True
+    for categorie, entete in _SECTIONS_JS:
+        entrees = donnees.get(categorie)
+        if not entrees:
+            continue
+        vide = False
+        lignes.append("")
+        lignes.append(entete)
+        for entree in entrees[:lignes_max]:
+            lignes.append("  %-40s %6d" % (entree["cle"][:40], entree["n"]))
+            for exemple in entree["exemples"][:1]:
+                lignes.append("      %s" % exemple[:90])
+        if len(entrees) > lignes_max:
+            lignes.append("  %-40s %6d" % ("… autres", len(entrees) - lignes_max))
+
+    par_impact = resume_css()
+    if any(par_impact.values()):
+        vide = False
+        lignes.append("")
+        lignes.append("CSS UNSUPPORTED")
+        for impact in ORDRE_IMPACT:
+            liste = par_impact.get(impact) or []
+            if not liste:
+                continue
+            lignes.append("  %-12s %4d declarations, %d proprietes"
+                          % (impact, sum(n for _, n in liste), len(liste)))
+            for nom, n in liste[:6]:
+                lignes.append("      %-34s %6d" % (nom, n))
+    if vide:
+        lignes.append("")
+        lignes.append("  Rien a signaler : tout ce que la page a demande a ete traite.")
+    return "\n".join(lignes) + "\n"
 
 
 def texte(titre=None, largeur=None):
@@ -399,8 +602,10 @@ def texte(titre=None, largeur=None):
         lignes.append("")
 
     donnees = rapport()
-    for categorie in ("api", "css_valeur", "css_selecteur", "css_arobase",
-                      "js_erreur", "ressource", "html_balise"):
+    for categorie in (API_ABSENTE, IDENTIFIANT_INCONNU, METHODE_ABSENTE,
+                      MOIGNON, RESSOURCE_ECHOUEE, ERREUR_JS,
+                      "css_valeur", "css_selecteur", "css_arobase",
+                      "html_balise"):
         entrees = donnees.get(categorie)
         if not entrees:
             continue

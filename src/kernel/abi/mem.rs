@@ -13,13 +13,16 @@
 //!   (fichier, numero de page). Deux processus qui mappent le meme fichier
 //!   pointent alors sur les memes frames physiques, et `msync` repercute les
 //!   ecritures dans le contenu du fichier. Sans ce cache, `MAP_SHARED` serait
-//!   un mensonge : chacun travaillerait sur sa copie.
+//!   un mensonge : chacun travaillerait sur sa copie. Le cache et son cycle de
+//!   vie vivent dans [`crate::kernel::partage`] ; ce module ne fait qu'y
+//!   puiser et lui declarer les mappages qu'il cree.
 //!
 //! `/dev/fb0` suit une troisieme voie : ses pages sont celles de la memoire
 //! video, empruntees telles quelles.
 
 use crate::kernel::abi::errno;
 use crate::kernel::fd::FdKind;
+use crate::kernel::partage;
 use crate::kernel::task;
 use crate::kernel::vmm::{self, PAGE_SIZE};
 
@@ -63,6 +66,12 @@ pub fn sys_brk(addr: u64) -> i64 {
         let start = (current + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         let end = (addr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         if end > start {
+            // `brk` ne rend pas d'erreur : la libc compare le retour a sa
+            // demande. Rendre le sommet inchange est donc la facon correcte de
+            // dire non, et c'est ce que fait un depassement de `RLIMIT_AS`.
+            if !process.tient_sous_limite(end - start) {
+                return current as i64;
+            }
             let flags = vmm::PTE_PRESENT | vmm::PTE_USER | vmm::PTE_WRITE | vmm::PTE_NO_EXEC;
             if !process.space.map_alloc(start, end - start, flags) {
                 return current as i64;
@@ -124,6 +133,13 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, fd: i32, offset: 
         return -errno::ENOMEM;
     }
 
+    // Le plafond se verifie avant d'allouer quoi que ce soit : echouer a
+    // mi-chemin laisserait des pages mappees pour une `mmap` qui rend une
+    // erreur, et l'appelant n'aurait aucun moyen de les rendre.
+    if !process.tient_sous_limite(length) {
+        return -errno::ENOMEM;
+    }
+
     // On mappe en ecriture le temps d'initialiser, puis on applique `prot`.
     let temporary = vmm::PTE_PRESENT | vmm::PTE_USER | vmm::PTE_WRITE;
     if !process.space.map_alloc(base, length, temporary) {
@@ -166,48 +182,13 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, fd: i32, offset: 
     base as i64
 }
 
-/// Cache de pages : (nœud RAMFS, index de page) -> frame physique partagee.
-///
-/// Sans lui, `MAP_SHARED` sur fichier serait un mensonge : chaque processus
-/// travaillerait sur sa copie, et les ecritures ne seraient vues de personne.
-/// Avec lui, deux processus qui mappent le meme fichier pointent sur les memes
-/// frames — c'est le partage que POSIX promet.
-static mut PAGE_CACHE: Option<alloc::vec::Vec<(usize, u64, u64)>> = None;
-
-fn page_cache() -> &'static mut alloc::vec::Vec<(usize, u64, u64)> {
-    unsafe {
-        if PAGE_CACHE.is_none() {
-            PAGE_CACHE = Some(alloc::vec::Vec::new());
-        }
-        PAGE_CACHE.as_mut().unwrap()
-    }
-}
-
-/// Frame partagee d'une page de fichier, creee et remplie au premier acces.
-fn cached_page(node: usize, page_index: u64) -> Option<u64> {
-    if let Some((_, _, frame)) = page_cache().iter().find(|(n, p, _)| *n == node && *p == page_index) {
-        return Some(*frame);
-    }
-    let frame = vmm::alloc_frame()?;
-    // Remplissage depuis le contenu du fichier.
-    let fs = crate::fs::ramfs::fs();
-    let content = &fs.nodes[node].content;
-    let start = (page_index * PAGE_SIZE) as usize;
-    if start < content.len() {
-        let end = core::cmp::min(content.len(), start + PAGE_SIZE as usize);
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                content[start..end].as_ptr(),
-                crate::kernel::memory::phys_to_virt(frame),
-                end - start,
-            );
-        }
-    }
-    page_cache().push((node, page_index, frame));
-    Some(frame)
-}
-
 /// Mappe un fichier en partage sur les frames du cache.
+///
+/// Le mappage est **declare** au cache (`partage::mappe`) et enregistre dans le
+/// processus : c'est ce qui permettra a `munmap`, a `execve` et a la mort du
+/// processus de rendre la reference. Sans cette declaration, les frames
+/// resteraient allouees pour toujours — c'est precisement le defaut que le
+/// module `partage` corrige.
 fn map_shared_file(
     process: &mut task::Process,
     node: usize,
@@ -219,7 +200,7 @@ fn map_shared_file(
     let mut done = 0u64;
     while done < length {
         let page_index = (offset + done) / PAGE_SIZE;
-        let frame = match cached_page(node, page_index) {
+        let frame = match partage::page(node, page_index) {
             Some(frame) => frame,
             None => return false,
         };
@@ -230,37 +211,9 @@ fn map_shared_file(
         }
         done += PAGE_SIZE;
     }
+    partage::mappe(node);
+    process.partages.push(task::Partage { base, length, node });
     true
-}
-
-/// Recopie les pages partagees d'un fichier vers son contenu RAMFS.
-///
-/// Appele par `msync` et a la fermeture : c'est ce qui rend les ecritures d'un
-/// `MAP_SHARED` visibles par un `read` ordinaire.
-pub fn writeback(node: usize) {
-    let pages: alloc::vec::Vec<(u64, u64)> = page_cache()
-        .iter()
-        .filter(|(n, _, _)| *n == node)
-        .map(|(_, page, frame)| (*page, *frame))
-        .collect();
-    if pages.is_empty() {
-        return;
-    }
-    let fs = crate::fs::ramfs::fs();
-    for (page_index, frame) in pages {
-        let start = (page_index * PAGE_SIZE) as usize;
-        if start >= fs.nodes[node].content.len() {
-            continue;
-        }
-        let end = core::cmp::min(fs.nodes[node].content.len(), start + PAGE_SIZE as usize);
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                crate::kernel::memory::phys_to_virt(frame),
-                fs.nodes[node].content[start..end].as_mut_ptr(),
-                end - start,
-            );
-        }
-    }
 }
 
 /// Mappe le framebuffer materiel dans l'espace utilisateur.
@@ -278,13 +231,24 @@ fn map_framebuffer(process: &mut task::Process, base: u64, length: u64, offset: 
 }
 
 /// `munmap`.
+///
+/// Deux choses a defaire, pas une : les entrees de table de pages, et la
+/// reference que la plage detenait sur le cache partage. Oublier la seconde
+/// etait exactement la fuite corrigee ici.
 pub fn sys_munmap(addr: u64, length: u64) -> i64 {
     if length == 0 || addr & (PAGE_SIZE - 1) != 0 {
         return -errno::EINVAL;
     }
     let process = task::current_process();
     let mut process = process.borrow_mut();
+    let liberes = process.retire_partages(addr, length);
     process.space.unmap(addr, length);
+    // Les references sont rendues **apres** avoir demappe : tant qu'une entree
+    // de table pointe encore sur la frame, la liberer serait un usage apres
+    // liberation en attente d'un ordonnancement malheureux.
+    for node in liberes {
+        partage::demappe(node);
+    }
     0
 }
 
@@ -333,19 +297,19 @@ pub fn sys_mremap(old_addr: u64, old_size: u64, new_size: u64, _flags: u32) -> i
 }
 
 /// `msync` : repercute les ecritures d'un `MAP_SHARED` vers le fichier.
+///
+/// Si l'adresse designe une plage partagee connue du processus, on ne recopie
+/// que le nœud concerne ; sinon on recopie tout, ce qui reste correct — les
+/// frames sont la source de verite, le contenu RAMFS n'en est que le reflet.
 pub fn sys_msync(addr: u64, _length: u64) -> i64 {
-    // On ne sait pas a quel fichier appartient l'adresse ; recopier tout le
-    // cache est correct et sans risque : les frames sont la source de verite,
-    // le contenu RAMFS n'en est que le reflet.
-    let nodes: alloc::vec::Vec<usize> = {
-        let mut list: alloc::vec::Vec<usize> = page_cache().iter().map(|(node, _, _)| *node).collect();
-        list.sort_unstable();
-        list.dedup();
-        list
+    let node = {
+        let process = task::current_process();
+        let process = process.borrow();
+        process.partage_a(addr)
     };
-    let _ = addr;
-    for node in nodes {
-        writeback(node);
+    match node {
+        Some(node) => partage::writeback(node),
+        None => partage::writeback_tout(),
     }
     0
 }

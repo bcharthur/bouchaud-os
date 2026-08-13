@@ -65,6 +65,10 @@ struct Contexte {
     long echeance = 0;
     long budget = BUDGET_MS_DEFAUT;
     bool interrompu = false;
+    /// Arret demande depuis un autre fil. Lu par le gardien, ecrit par
+    /// `bojs.interromps` : c'est ce qui rend `Worker.terminate()` capable de
+    /// reprendre la main sur un `while (true) {}`.
+    bool tue = false;
 };
 
 std::vector<Contexte *> g_contextes;
@@ -269,12 +273,31 @@ JSValue versJs(JSContext *ctx, PyObject *valeur, int profondeur)
 
 // --- Le passage unique ------------------------------------------------------
 
+JSValue passageAvecGil(JSContext *ctx, Contexte *etat, int nombre,
+                       JSValueConst *arguments);
+
 JSValue passage(JSContext *ctx, JSValueConst, int nombre, JSValueConst *arguments)
 {
     Contexte *etat = static_cast<Contexte *>(JS_GetContextOpaque(ctx));
     if (!etat || !etat->pont)
         return JS_ThrowInternalError(ctx, "bojs: aucun pont installe");
 
+    // Le GIL est relache pendant l'execution JavaScript (voir `bojs_evalue`) :
+    // il faut le reprendre pour toucher au moindre objet Python. Sans cela, un
+    // Worker qui appelle `fetch` depuis son fil corromprait l'interpreteur —
+    // et pas tout de suite, ce qui est le pire.
+    //
+    // `PyGILState_Ensure` est reentrant : sur le fil principal, ou le GIL est
+    // deja detenu, il ne fait que compter.
+    PyGILState_STATE gil = PyGILState_Ensure();
+    JSValue rendu = passageAvecGil(ctx, etat, nombre, arguments);
+    PyGILState_Release(gil);
+    return rendu;
+}
+
+JSValue passageAvecGil(JSContext *ctx, Contexte *etat, int nombre,
+                       JSValueConst *arguments)
+{
     PyObject *liste = PyTuple_New(nombre);
     if (!liste)
         return JS_ThrowOutOfMemory(ctx);
@@ -329,6 +352,9 @@ JSValue passage(JSContext *ctx, JSValueConst, int nombre, JSValueConst *argument
 ///
 /// L'erreur Python, s'il y en a une, est effacee : l'appelant traduit l'absence
 /// de resultat en exception JavaScript, ce qui donne un message plus utile.
+char *demandeTexteAvecGil(JSContext *ctx, Contexte *etat, const char *operation,
+                          const char *a, const char *b);
+
 char *demandeTexte(JSContext *ctx, const char *operation, const char *a,
                    const char *b)
 {
@@ -336,6 +362,18 @@ char *demandeTexte(JSContext *ctx, const char *operation, const char *a,
     if (!etat || !etat->pont)
         return nullptr;
 
+    // Appele depuis le chargeur de modules, donc depuis `JS_Eval`, donc sans le
+    // GIL. Meme raison que dans `passage` : toucher a un objet Python sans lui
+    // corrompt l'interpreteur, et pas immediatement.
+    PyGILState_STATE gil = PyGILState_Ensure();
+    char *rendu = demandeTexteAvecGil(ctx, etat, operation, a, b);
+    PyGILState_Release(gil);
+    return rendu;
+}
+
+char *demandeTexteAvecGil(JSContext *ctx, Contexte *etat, const char *operation,
+                          const char *a, const char *b)
+{
     PyObject *arguments = b
         ? Py_BuildValue("(sss)", operation, a, b)
         : Py_BuildValue("(ss)", operation, a);
@@ -397,7 +435,16 @@ JSModuleDef *chargeModule(JSContext *ctx, const char *nom, void *)
 int gardien(JSRuntime *, void *opaque)
 {
     Contexte *etat = static_cast<Contexte *>(opaque);
-    if (!etat || etat->echeance == 0)
+    if (!etat)
+        return 0;
+    // L'arret demande de l'exterieur passe avant le budget : il ne depend pas
+    // du temps ecoule, et il doit valoir aussi pour une execution qui vient de
+    // commencer.
+    if (etat->tue) {
+        etat->interrompu = true;
+        return 1;
+    }
+    if (etat->echeance == 0)
         return 0;
     if (maintenant_ms() > etat->echeance) {
         etat->interrompu = true;
@@ -418,7 +465,14 @@ void remonteException(Contexte *etat)
     JSValue pile = JS_GetPropertyStr(ctx, exception, "stack");
     const char *trace = JS_IsUndefined(pile) ? nullptr : JS_ToCString(ctx, pile);
 
-    if (etat->interrompu) {
+    if (etat->tue) {
+        // Distinguer les deux interruptions compte : l'une est un defaut de la
+        // page, l'autre une decision du navigateur. Les confondre faisait
+        // apparaitre « script interrompu apres 5000 ms » dans le journal a
+        // chaque `terminate()`, ce qui accusait la page d'une lenteur qu'elle
+        // n'avait pas.
+        texte = PyUnicode_FromString("execution arretee de l'exterieur");
+    } else if (etat->interrompu) {
         texte = PyUnicode_FromFormat("script interrompu apres %ld ms", etat->budget);
     } else if (message && trace) {
         texte = PyUnicode_FromFormat("%s\n%s", message, trace);
@@ -497,6 +551,15 @@ PyObject *bojs_cree(PyObject *, PyObject *args)
     // adresses et rapporter les sources.
     JS_SetModuleLoaderFunc(etat->execution, normaliseModule, chargeModule, nullptr);
 
+    // Un emplacement libere est repris. Sans cela, mille `new Worker()` suivis
+    // d'autant de `terminate()` laissaient mille cases derriere eux : peu de
+    // memoire, mais une croissance sans borne — donc une fuite.
+    for (size_t rang = 0; rang < g_contextes.size(); rang++) {
+        if (!g_contextes[rang]) {
+            g_contextes[rang] = etat;
+            return PyLong_FromLong(long(rang));
+        }
+    }
     g_contextes.push_back(etat);
     return PyLong_FromLong(long(g_contextes.size() - 1));
 }
@@ -535,15 +598,31 @@ PyObject *bojs_evalue(PyObject *, PyObject *args)
 
     etat->interrompu = false;
     etat->echeance = maintenant_ms() + etat->budget;
-    JSValue resultat = JS_Eval(etat->contexte, source, size_t(taille), nom,
-                               module ? JS_EVAL_TYPE_MODULE : JS_EVAL_TYPE_GLOBAL);
+
+    // Le GIL est relache pendant l'execution : c'est ce qui permet a un Worker
+    // de calculer sur son fil pendant que le document principal continue de
+    // battre. Sans cela, un `Worker` serait une API presente et un mensonge —
+    // le calcul se ferait sur le fil de l'interface, et la page figerait
+    // exactement comme si le worker n'existait pas.
+    //
+    // Chaque contexte a son propre `JSRuntime` (voir `bojs_cree`), donc deux
+    // fils n'entrent jamais dans le meme tas QuickJS. Le pont, lui, reprend le
+    // GIL avant de toucher a Python (voir `passage`).
+    JSValue resultat;
+    Py_BEGIN_ALLOW_THREADS
+    resultat = JS_Eval(etat->contexte, source, size_t(taille), nom,
+                       module ? JS_EVAL_TYPE_MODULE : JS_EVAL_TYPE_GLOBAL);
+    Py_END_ALLOW_THREADS
+
     if (JS_IsException(resultat)) {
         JS_FreeValue(etat->contexte, resultat);
         etat->echeance = 0;
         remonteException(etat);
         return nullptr;
     }
+    Py_BEGIN_ALLOW_THREADS
     pompeTaches(etat);
+    Py_END_ALLOW_THREADS
     etat->echeance = 0;
 
     PyObject *converti = versPython(etat->contexte, resultat, 0);
@@ -590,7 +669,11 @@ PyObject *bojs_appelle(PyObject *, PyObject *args)
 
     etat->interrompu = false;
     etat->echeance = maintenant_ms() + etat->budget;
-    JSValue resultat = JS_Call(ctx, fonction, global, nombre, convertis);
+    // Meme raison que dans `bojs_evalue` : le JavaScript tourne sans le GIL.
+    JSValue resultat;
+    Py_BEGIN_ALLOW_THREADS
+    resultat = JS_Call(ctx, fonction, global, nombre, convertis);
+    Py_END_ALLOW_THREADS
     for (int i = 0; i < nombre; ++i)
         JS_FreeValue(ctx, convertis[i]);
     delete[] convertis;
@@ -603,7 +686,9 @@ PyObject *bojs_appelle(PyObject *, PyObject *args)
         remonteException(etat);
         return nullptr;
     }
+    Py_BEGIN_ALLOW_THREADS
     pompeTaches(etat);
+    Py_END_ALLOW_THREADS
     etat->echeance = 0;
 
     PyObject *converti = versPython(ctx, resultat, 0);
@@ -620,8 +705,26 @@ PyObject *bojs_pompe(PyObject *, PyObject *args)
     if (!etat)
         return nullptr;
     etat->echeance = maintenant_ms() + etat->budget;
+    Py_BEGIN_ALLOW_THREADS
     pompeTaches(etat);
+    Py_END_ALLOW_THREADS
     etat->echeance = 0;
+    Py_RETURN_NONE;
+}
+
+PyObject *bojs_interromps(PyObject *, PyObject *args)
+{
+    int indice;
+    if (!PyArg_ParseTuple(args, "i", &indice))
+        return nullptr;
+    Contexte *etat = contexte_par_indice(indice);
+    if (!etat)
+        return nullptr;
+    // Appele depuis un *autre* fil que celui qui execute. On ne touche a rien
+    // de QuickJS : seul un drapeau que le gardien relit a chaque poignee
+    // d'instructions. C'est le seul point de rendez-vous sur, et c'est ce qui
+    // permet a `terminate()` d'aboutir sur un worker en boucle infinie.
+    etat->tue = true;
     Py_RETURN_NONE;
 }
 
@@ -641,6 +744,19 @@ PyObject *bojs_detruit(PyObject *, PyObject *args)
     Py_RETURN_NONE;
 }
 
+PyObject *bojs_contextes(PyObject *, PyObject *)
+{
+    // Le nombre de contextes **vivants**, pas la taille du tableau : c'est ce
+    // qu'une epreuve de fuite doit comparer avant et apres. Mille `new Worker`
+    // suivis d'autant de `terminate()` doivent rendre ici le nombre de depart,
+    // a l'unite pres — sans quoi un runtime QuickJS est reste debout.
+    long vivants = 0;
+    for (size_t rang = 0; rang < g_contextes.size(); rang++)
+        if (g_contextes[rang])
+            vivants++;
+    return PyLong_FromLong(vivants);
+}
+
 PyObject *bojs_version(PyObject *, PyObject *)
 {
     return PyUnicode_FromString(BOJS_VERSION_QUICKJS);
@@ -657,7 +773,11 @@ PyMethodDef bojs_methodes[] = {
      "appelle(ctx, nom_global, arguments=None) -> valeur rendue"},
     {"pompe", bojs_pompe, METH_VARARGS,
      "pompe(ctx) : execute les taches differees (promesses)"},
+    {"interromps", bojs_interromps, METH_VARARGS,
+     "interromps(ctx) : arrete l'execution en cours, depuis un autre fil"},
     {"detruit", bojs_detruit, METH_VARARGS, "detruit(ctx)"},
+    {"contextes", bojs_contextes, METH_NOARGS,
+     "contextes() -> nombre de contextes JavaScript vivants"},
     {"version", bojs_version, METH_NOARGS, "version() -> version de QuickJS"},
     {nullptr, nullptr, 0, nullptr},
 };

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Worker : le reseau</title>
+<!--
+  Un worker qui fait du reseau, et la page qui n'en fait pas.
+
+  Ce que la verification lit :
+
+    * le worker obtient bien ses trois reponses — adresse relative resolue
+      contre le script du worker, redirection suivie, POST avec corps ;
+    * la page, pendant ce temps, a continue de battre. Le compteur `tours` est
+      incremente par une minuterie de la page : s'il n'a pas bouge quand le
+      rapport arrive, c'est que le fil de l'interface etait bloque, et
+      l'ensemble ne vaut rien.
+
+  Le second point est le vrai sujet. Une API `fetch` presente dans un worker
+  mais servie depuis le fil de la page serait un mensonge que seule une mesure
+  peut demasquer.
+-->
+</head><body>
+<h1>Reseau depuis un worker</h1>
+<pre id="journal">…</pre>
+<script>
+globalThis.__wf = { tours: 0, rapport: null, toursALArrivee: -1, erreurs: [] };
+
+setInterval(function () { globalThis.__wf.tours += 1; }, 1);
+
+var travailleur = new Worker("/page/worker-fetch.js");
+travailleur.onerror = function (e) {
+  globalThis.__wf.erreurs.push(String(e.message || "erreur"));
+};
+travailleur.onmessage = function (evenement) {
+  globalThis.__wf.rapport = evenement.data;
+  globalThis.__wf.toursALArrivee = globalThis.__wf.tours;
+  var zone = document.getElementById("journal");
+  if (zone) zone.textContent = JSON.stringify(evenement.data);
+};
+travailleur.postMessage({ genre: "va" });
+</script>
+</body></html>

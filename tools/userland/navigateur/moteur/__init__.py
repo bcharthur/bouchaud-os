@@ -31,8 +31,10 @@ import urllib.parse
 
 import bo
 
-from . import (animation, css, html, images, mise_en_page, peinture,
-               police, prechargement, reseau, stockage, telemetrie)
+from . import (animation, cadres, contexte as mod_contexte, css, edition,
+               html, images, invalidation,
+               mise_en_page, peinture, police, prechargement, reseau,
+               stockage, telemetrie)
 
 __all__ = ["animation", "css", "html", "images", "js", "mise_en_page",
            "peinture", "police", "prechargement", "reseau", "stockage",
@@ -43,7 +45,7 @@ class Document:
     """Une page chargee : son arbre, ses regles, ses scripts, sa mise en page."""
 
     def __init__(self, reponse, largeur, scripts=True, journal=None,
-                 hauteur_fenetre=720.0, precharge=True):
+                 hauteur_fenetre=720.0, precharge=True, contexte_navigation=None):
         self.url = reponse.url
         self.code = reponse.code
         self.erreur = reponse.erreur
@@ -60,6 +62,11 @@ class Document:
         # Dernier element survole, retenu pour que `:active` et `:hover` se
         # composent au lieu de s'effacer l'un l'autre.
         self._survole = None
+        # Les lignees d'interaction du tour precedent. Elles servent a
+        # retrouver les objets d'un element qui **quitte** un etat : son
+        # identifiant figure dans la difference, mais plus dans les lignees
+        # courantes.
+        self._lignees_interaction = ([], [], [])
         # Ce qui bouge : gabarits `@keyframes`, animations en cours,
         # transitions engagees. Neuf a chaque page, donc rien ne survit a une
         # navigation.
@@ -86,6 +93,35 @@ class Document:
         self.hauteur = 0.0
         self.zones_liens = []
         self.contexte_js = None
+        # L'element au foyer. Un seul par document, comme le veut la norme.
+        self._foyer = None
+        # L'etat d'edition de chaque champ touche, par identite d'element.
+        self._editions = {}
+        # Vrai quand le curseur a bouge sans que la valeur change : il faut
+        # repeindre, pas remettre en page.
+        self.sale_curseur = False
+        # Ce qui reste a refaire, et a quel etage du pipeline.
+        self.invalide = invalidation.Invalidation()
+
+        # Le monde auquel ce document appartient. Un document principal n'est
+        # plus un cas particulier implicite : il possede son contexte comme un
+        # iframe possede le sien, et c'est ce qui rend `window.top` et
+        # `window.parent` calculables sans code special.
+        #
+        # Le contexte est fourni quand ce document est celui d'un `<iframe>` :
+        # il existe alors **avant** le document, et il doit etre en place avant
+        # que les scripts tournent. Le poser apres coup laissait le document
+        # enfant se croire de premier niveau pendant toute son amorce — et donc
+        # voir son propre `parent` comme lui-meme, ce qui ouvrait le DOM du
+        # parent a une page d'une autre origine.
+        if contexte_navigation is None:
+            contexte_navigation = mod_contexte.TopLevelBrowsingContext(
+                url=self.url, largeur=largeur, hauteur=self.hauteur_fenetre,
+                journal=self.journal)
+        self.contexte_navigation = contexte_navigation
+        self.contexte_navigation.document = self
+        # Les contextes enfants, un par `<iframe>` vivant.
+        self.cadres = cadres.Gestionnaire(self)
 
         if scripts:
             self._demarre_scripts()
@@ -118,6 +154,52 @@ class Document:
         except Exception as e:  # noqa: BLE001 — un script ne tue pas la page
             self.journal("error", "JavaScript : %s" % e)
             self.contexte_js = None
+        # L'element au foyer. Un seul par document, comme le veut la norme.
+        self._foyer = None
+        # L'etat d'edition de chaque champ touche, par identite d'element.
+        self._editions = {}
+        # Vrai quand le curseur a bouge sans que la valeur change : il faut
+        # repeindre, pas remettre en page.
+        self.sale_curseur = False
+
+    def ferme_document(self):
+        """Libere tout ce que ce document tenait. Appele quand son contexte meurt.
+
+        L'ordre est celui des dependances, de la feuille vers la racine : les
+        contextes enfants d'abord (ils tiennent leurs propres ressources), puis
+        le contexte JavaScript — qui abandonne au passage ses requetes en vol,
+        ses connexions WebSocket, ses transactions de stockage et son pool de
+        fils —, puis l'arbre et les boites.
+
+        Sans cette methode, mille iframes crees et retires laissent mille
+        contextes QuickJS, mille pools de fils et mille connexions vivantes.
+        C'est le genre de fuite qui ne se voit pas sur une page d'essai et qui
+        tue une application au bout d'une heure.
+
+        Idempotente : fermer deux fois ne fait rien la seconde.
+        """
+        if getattr(self, "_ferme", False):
+            return False
+        self._ferme = True
+        gestionnaire = getattr(self, "cadres", None)
+        if gestionnaire is not None:
+            gestionnaire.ferme_tout()
+        contexte = self.contexte_js
+        self.contexte_js = None
+        if contexte is not None:
+            fermeture = getattr(contexte, "ferme", None)
+            if fermeture is not None:
+                try:
+                    fermeture()
+                except Exception as e:  # noqa: BLE001 — la fermeture n'echoue pas
+                    self.journal("warn", "fermeture du contexte JS : %s" % e)
+        self.boite = None
+        self.regles = None
+        del self.zones_liens[:]
+        self._editions.clear()
+        self._foyer = None
+        telemetrie.compte("document.fermes")
+        return True
 
     def rafraichis(self):
         """Remet en page si le JavaScript a touche a l'arbre. Rend `True` alors.
@@ -139,12 +221,224 @@ class Document:
                 self.titre = self.titre or self._titre()
                 sale = True
 
+        # Les contextes enfants battent au meme rythme : leurs minuteries, leurs
+        # reponses reseau et leurs transactions avancent avec celles du parent.
+        # Un iframe qui ne bat pas est un iframe fige, et le parent n'aurait
+        # aucun moyen de s'en apercevoir.
+        enfants_sales = False
+        gestionnaire = getattr(self, "cadres", None)
+        if gestionnaire is not None:
+            if gestionnaire.bat():
+                enfants_sales = True
+            # Un `<iframe>` peut etre apparu, avoir change de `src` ou avoir ete
+            # retire depuis le dernier tour.
+            if gestionnaire.synchronise(self.largeur, self.hauteur_fenetre):
+                sale = True
+
         # Une animation en cours redemande une mise en page a chaque battement :
         # c'est elle qui fait avancer le mouvement. Quand plus rien ne bouge,
         # l'animateur baisse son drapeau et le navigateur cesse de redessiner.
         if not sale and not self.animateur.anime():
-            return False
+            # Un enfant qui a bouge suffit a redessiner la page, sans que le
+            # parent ait a se remettre en page : la boite de l'iframe n'a pas
+            # change, seul son contenu.
+            return enfants_sales
+
+        # L'invalidation dit jusqu'ou remonter. Une couleur qui change ne
+        # demande que des pixels : refaire la mise en page de deux mille
+        # elements pour cela etait le comportement d'avant, et c'est ce qui
+        # rendait toute application Web lente des qu'elle bougeait.
+        anime = self.animateur.anime()
+        if not anime and self.boite is not None:
+            etendue = self.invalide.etendue
+            if etendue < invalidation.MISE_EN_PAGE:
+                telemetrie.compte(
+                    "invalidation.composition_seule"
+                    if etendue <= invalidation.COMPOSITION
+                    else "invalidation.peinture_seule")
+                self.invalide.vide()
+                return True
+            # Une mutation qui ne nomme pas de propriete — un changement de
+            # `class`, un attribut cible par un selecteur — demande de rejouer
+            # la cascade. Mais rejouer la cascade n'est pas remettre en page :
+            # tant qu'on n'a pas regarde **ce qui a change**, on ne sait pas
+            # laquelle des deux il faut.
+            if etendue == invalidation.STYLE and self._restyle_suffit():
+                telemetrie.compte("invalidation.peinture_seule")
+                telemetrie.compte("invalidation.mise_en_page_evitee")
+                self.invalide.vide()
+                return True
+
+        telemetrie.compte("invalidation.mise_en_page")
+        self.invalide.vide()
         self.remet_en_page(self.largeur)
+        return True
+
+    # Au-dela, la comparaison coute plus cher que la mise en page qu'elle
+    # cherche a eviter. Une mutation qui touche des centaines d'elements est de
+    # toute facon un changement de structure, pas de couleur.
+    #
+    # Le budget compte les boites **visitees**, pas les elements marques : une
+    # propriete heritee oblige a redescendre le sous-arbre, et c'est cette
+    # descente qu'il faut borner.
+    ELEMENTS_RESTYLE_MAX = 256
+
+    def _sans_effet_interaction(self, element):
+        """Le style de cet element peut-il dependre de l'etat d'interaction ?
+
+        Rend `True` quand aucune regle sensible ne peut le designer : changer
+        son etat de survol ou de foyer ne changera alors rien a son style, et
+        il n'y a pas lieu de le recalculer.
+
+        C'est la question qui permet d'ignorer `<html>` et `<body>`, presents
+        dans toute lignee survolee et depourvus de regle qui les concerne dans
+        l'immense majorite des feuilles.
+        """
+        if element is None or not isinstance(element, html.Element):
+            return True
+        index = self.regles
+        if not hasattr(index, "candidates"):
+            return False
+        try:
+            for regle in index.candidates(element):
+                if regle.selecteur.sensible:
+                    return False
+        except Exception:  # noqa: BLE001 — au moindre doute, on recalcule
+            return False
+        return True
+
+    def _restyle_suffit(self):
+        """Rejoue la cascade des elements marques, et dit si cela a suffi.
+
+        ## Le probleme
+
+        `element.className = "carte active"` ne nomme aucune propriete : le
+        moteur ne peut pas savoir, au moment de la mutation, si la nouvelle
+        classe change une couleur ou une largeur. Il prenait donc le parti
+        prudent — tout remettre en page. Sur mille cartes dont une change de
+        couleur, cela coute mille dispositions pour zero deplacement.
+
+        ## Ce que fait cette methode
+
+        Elle recalcule le style des seuls elements marques, le compare a celui
+        que porte deja leur boite, et **deduit l'etendue reelle** des proprietes
+        qui ont bouge. Si aucune ne touche la mise en page, les styles sont
+        remplaces en place et la disposition est conservee telle quelle.
+
+        ## Pourquoi elle refuse souvent
+
+        Elle rend `False` — donc « remets tout en page » — des que quelque chose
+        sort du cas simple : trop d'elements, un element sans boite (donc
+        peut-etre neuf), une propriete heritee qui obligerait a redescendre tout
+        le sous-arbre, une exception. Se tromper vers la mise en page coute du
+        temps ; se tromper vers l'economie laisse un affichage faux, et un
+        affichage faux ne se voit pas dans un profil.
+        """
+        marques = self.invalide.elements
+        if not marques or self.boite is None:
+            return False
+
+        # Les racines a recalculer, avec le style de leur parent — celui-ci ne
+        # change pas, c'est ce qui permet de repartir d'elles plutot que du
+        # document.
+        voulus = set(marques)
+        racines = []
+        pile = [(self.boite, None)]
+        while pile:
+            boite, parent = pile.pop()
+            if id(boite.element) in voulus:
+                racines.append((boite, parent.style if parent is not None else {}))
+            for enfant in getattr(boite, "enfants", ()) or ():
+                pile.append((enfant, boite))
+        if len(racines) != len(voulus):
+            # Un element marque sans boite : il vient d'apparaitre, ou il etait
+            # `display: none`. Dans les deux cas il faut une vraie mise en page.
+            return False
+
+        css.nouvelle_generation()
+        changees = set()
+        nouveaux = []
+        visitees = 0
+        # Faut-il redescendre meme quand un style n'a pas bouge ? Seulement si
+        # une regle fait dependre un descendant de l'etat d'un ancetre.
+        descend_toujours = bool(getattr(self.regles, "sensible_descendante",
+                                        False))
+
+        # On redescend chaque sous-arbre marque. C'est necessaire des qu'une
+        # propriete heritee bouge — `color` en est une, et c'est justement la
+        # plus frequente : sans la descente, un changement de couleur sur un
+        # parent laisserait ses enfants dans l'ancienne. Le sous-arbre d'une
+        # carte fait quelques nœuds ; celui du document en fait des milliers, et
+        # c'est toute la difference entre ce chemin et une mise en page.
+        for boite, style_parent in racines:
+            a_faire = [(boite, style_parent)]
+            while a_faire:
+                courante, parent_style = a_faire.pop()
+                visitees += 1
+                if visitees > self.ELEMENTS_RESTYLE_MAX:
+                    return False
+                element = courante.element
+                # Une boite engendree (`::before`) porte un style fixe que la
+                # cascade ne sait pas retrouver depuis l'arbre : on ne sait pas
+                # la recalculer ici, donc on renonce.
+                if getattr(element, "style_engendre", None) is not None:
+                    return False
+                if not isinstance(element, html.Element):
+                    # Un fragment de texte n'a pas de style propre ; il herite
+                    # de sa boite, qui est deja traitee.
+                    continue
+                try:
+                    neuf = css.applique(self.regles, element, [element],
+                                        parent_style)
+                except Exception:  # noqa: BLE001 — au moindre doute, mise en page
+                    return False
+                ancien = courante.style
+                # Une transition ou une animation declaree sur cet element veut
+                # dire que le changement doit etre **joue**, pas applique d'un
+                # coup. C'est l'animateur qui s'en charge, et il ne tourne que
+                # pendant une vraie mise en page : prendre le raccourci ici
+                # ferait sauter la transition — le style final serait juste,
+                # mais le mouvement disparaitrait.
+                for source in (ancien, neuf):
+                    if source.get("transition") or source.get("animation") \
+                            or source.get("transition-property") \
+                            or source.get("animation-name"):
+                        return False
+                for propriete in set(neuf) | set(ancien):
+                    if neuf.get(propriete) != ancien.get(propriete):
+                        changees.add(propriete)
+                        if invalidation.etendue_de(propriete) >= invalidation.MISE_EN_PAGE:
+                            # Inutile de continuer : la mise en page aura lieu,
+                            # et c'est elle qui posera les bons styles.
+                            return False
+                nouveaux.append((courante, neuf))
+                # Elagage. Si le style de cet element n'a pas bouge, ses
+                # descendants n'ont rien de nouveau a heriter — et, faute de
+                # regle qui fasse dependre un descendant de l'etat d'un
+                # ancetre, rien d'autre ne peut les avoir changes.
+                #
+                # C'est ce qui rend le survol praticable : la lignee d'un
+                # element survole contient `html` et `body`, dont le style ne
+                # bouge pas. Sans l'elagage, chaque pixel parcouru par la souris
+                # ferait redescendre tout le document.
+                if neuf == ancien and not descend_toujours:
+                    continue
+                for enfant in getattr(courante, "enfants", ()) or ():
+                    a_faire.append((enfant, neuf))
+
+        if not changees:
+            # La cascade a rendu exactement la meme chose : il n'y a meme pas de
+            # pixels a refaire. C'est le cas d'une classe ajoutee puis retiree,
+            # ou d'une classe qu'aucune regle ne designe.
+            telemetrie.compte("invalidation.restyle_sans_effet")
+            return True
+
+        # Les styles remplacent les anciens dans les boites deja posees : la
+        # peinture lira les nouvelles couleurs sur la disposition inchangee.
+        for courante, neuf in nouveaux:
+            courante.style = neuf
+        telemetrie.compte("invalidation.restyle_reussi")
+        telemetrie.compte("invalidation.restyle_boites", visitees)
         return True
 
     def evenement_js(self, nœud, type_, details=None):
@@ -169,6 +463,13 @@ class Document:
         if self.contexte_js is not None:
             self.contexte_js.ferme()
             self.contexte_js = None
+        # L'element au foyer. Un seul par document, comme le veut la norme.
+        self._foyer = None
+        # L'etat d'edition de chaque champ touche, par identite d'element.
+        self._editions = {}
+        # Vrai quand le curseur a bouge sans que la valeur change : il faut
+        # repeindre, pas remettre en page.
+        self.sale_curseur = False
 
     # --- Arbre et mise en page ------------------------------------------------
 
@@ -298,6 +599,8 @@ class Document:
                                     destination="font")
             ouverte = police.ouvre(reponse.octets or b"") if reponse.code == 200 else None
             if not ouverte:
+                if not reponse.code or reponse.code >= 400:
+                    telemetrie.ressource_echouee(url, reponse.code, "font")
                 self._polices[cle] = False
                 self.journal("warn", "police %s : %s illisible" % (famille, choix[1]))
                 continue
@@ -343,9 +646,14 @@ class Document:
             reponse = reseau.charge(url, brut=True, document=self.url,
                                     destination="style")
         except Exception as e:  # noqa: BLE001
+            telemetrie.ressource_echouee(url, 0, "stylesheet")
             self.journal("warn", "feuille %s : %s" % (adresse, e))
             self._feuilles[cle] = ""
             return ""
+        if not reponse.code or reponse.code >= 400:
+            # Une feuille perdue, c'est une page qui s'affiche nue. Le rapport
+            # doit le dire aussi fort qu'un script perdu.
+            telemetrie.ressource_echouee(url, reponse.code, "stylesheet")
         texte = "" if (reponse.code and reponse.code >= 400) else reponse.contenu
         self._feuilles[cle] = texte
         return texte
@@ -373,7 +681,9 @@ class Document:
             with telemetrie.chrono("mise_en_page"):
                 self.boite, self.hauteur = mise_en_page.construit(
                     self.racine, self.regles, largeur, self.url,
-                    self._image_video, self._toile)
+                    self._image_video, self._toile,
+                    cadres=getattr(self, "cadres", None))
+            self.pose_curseur_visuel()
         finally:
             css.pose_animateur(None)
 
@@ -425,6 +735,402 @@ class Document:
         """Le bouton n'est plus enfonce."""
         return self._interaction(survoles=self._survole, actifs=None)
 
+    # --- Foyer ----------------------------------------------------------------
+    #
+    # Le foyer appartient au **document**, pas au JavaScript ni au chrome. Les
+    # deux le deplacent — un clic reel d'un cote, un `element.focus()` de
+    # l'autre — et les deux doivent lire le meme. Le mettre ailleurs qu'ici
+    # aurait donne deux verites, donc un `document.activeElement` qui contredit
+    # ce que l'utilisateur voit surligne.
+
+    def foyer_actuel(self):
+        """L'element au foyer, ou `None`."""
+        return self._foyer
+
+    # --- Edition de texte -----------------------------------------------------
+
+    def edition_de(self, element, cree=True):
+        """L'etat d'edition d'un champ : valeur courante, curseur, selection.
+
+        Cree a la premiere demande, a partir de l'attribut `value` — qui reste
+        la valeur **par defaut**, celle que `form.reset()` restaure. La valeur
+        courante vit ici. Les confondre, comme avant, rendait `reset()`
+        incapable de restaurer quoi que ce soit puisqu'il avait lui-meme ecrase
+        ce qu'il devait remettre.
+        """
+        if element is None or not edition.est_editable(element):
+            return None
+        etat = self._editions.get(id(element))
+        if etat is None and cree:
+            depart = (element.texte() if element.balise == "textarea"
+                      else element.attributs.get("value", ""))
+            etat = edition.Edition(depart,
+                                   multiligne=edition.multiligne(element),
+                                   masque=edition.est_masque(element))
+            self._editions[id(element)] = etat
+        return etat
+
+    def frappe(self, touche, texte="", maj=False, ctrl=False):
+        """Une touche reelle, adressee a l'element au foyer.
+
+        L'ordre des evenements est celui du Web, et il compte : `keydown`
+        d'abord — la page peut annuler et rien ne sera insere —, la valeur
+        ensuite, `input` apres la valeur, `keyup` en dernier. Emettre `input`
+        avant la mutation, ou `keydown` apres, ferait lire a la page un etat qui
+        n'existe pas encore.
+
+        Rend `True` si la valeur a change.
+        """
+        cible = self._foyer
+        contexte = self.contexte_js
+        details = {"key": touche, "shiftKey": bool(maj), "ctrlKey": bool(ctrl)}
+
+        if contexte is not None and cible is not None:
+            # `keydown` est annulable : `e.preventDefault()` dans un `keydown`
+            # doit empecher l'insertion, et c'est la forme la plus repandue de
+            # filtrage de saisie du Web.
+            if contexte.evenement(cible, "keydown", details) is False:
+                contexte.evenement(cible, "keyup", details)
+                return False
+
+        etat = self.edition_de(cible)
+        change = bouge = False
+        if etat is not None:
+            change, bouge = edition.applique_touche(etat, touche, texte,
+                                                    maj=maj, ctrl=ctrl)
+            if change:
+                self._synchronise_champ(cible, etat)
+
+        if touche == "Tab":
+            self.deplace_foyer(-1 if maj else 1)
+            bouge = True
+        elif touche == "Enter" and etat is not None and not etat.multiligne:
+            self._entree_soumet(cible)
+        elif touche in (" ", "Spacebar") and etat is None:
+            # Sur une case ou un bouton, l'espace agit comme un clic. C'est le
+            # seul moyen de cocher au clavier.
+            self.active(cible)
+
+        if contexte is not None and cible is not None:
+            if change:
+                contexte.evenement(cible, "input", details)
+            contexte.evenement(cible, "keyup", details)
+
+        if change or bouge:
+            self.sale_curseur = True
+        if change:
+            self.remet_en_page(self.largeur)
+        return change
+
+    def _synchronise_champ(self, element, etat):
+        """Reporte la valeur courante la ou la mise en page la lira."""
+        element.valeur_courante = etat.valeur
+
+    def _entree_soumet(self, champ):
+        """`Entree` dans un champ envoie le formulaire qui le contient."""
+        contexte = self.contexte_js
+        if contexte is None:
+            return
+        formulaire = champ
+        while formulaire is not None and getattr(formulaire, "balise", None) != "form":
+            formulaire = getattr(formulaire, "parent", None)
+        if formulaire is None:
+            return
+        contexte.appel("soumets", contexte._identifiant(formulaire), True)
+
+    def active(self, element):
+        """L'action par defaut d'un clic ou d'un espace : cocher, choisir, envoyer.
+
+        Ces trois-la n'ont rien d'accessoire : sans elles, une case ne se coche
+        pas, un bouton n'envoie rien, et un formulaire n'est qu'un dessin.
+        """
+        if element is None or "disabled" in getattr(element, "attributs", {}):
+            return False
+        contexte = self.contexte_js
+        balise = getattr(element, "balise", None)
+        type_ = (element.attributs.get("type") or "").lower() if balise == "input" else ""
+
+        if balise == "input" and type_ in ("checkbox", "radio"):
+            if type_ == "radio":
+                # Un seul bouton coche par nom : c'est la definition meme d'un
+                # groupe radio, et sans cela on peut tout cocher a la fois.
+                nom = element.attributs.get("name")
+                if nom:
+                    for autre in self.racine.parcours():
+                        if (isinstance(autre, html.Element)
+                                and autre is not element
+                                and autre.balise == "input"
+                                and (autre.attributs.get("type") or "").lower() == "radio"
+                                and autre.attributs.get("name") == nom):
+                            autre.attributs.pop("checked", None)
+                element.attributs["checked"] = ""
+            elif "checked" in element.attributs:
+                element.attributs.pop("checked")
+            else:
+                element.attributs["checked"] = ""
+            if contexte is not None:
+                contexte.evenement(element, "input", {})
+                contexte.evenement(element, "change", {})
+            self.remet_en_page(self.largeur)
+            return True
+
+        if (balise == "button" and (element.attributs.get("type") or "submit").lower()
+                == "submit") or (balise == "input" and type_ == "submit"):
+            formulaire = element
+            while formulaire is not None \
+                    and getattr(formulaire, "balise", None) != "form":
+                formulaire = getattr(formulaire, "parent", None)
+            if formulaire is not None and contexte is not None:
+                contexte.appel("soumets", contexte._identifiant(formulaire), True)
+                return True
+        return False
+
+    def clic_complet(self, x, y, details=None):
+        """Un clic du debut a la fin : foyer, evenement, action, lien.
+
+        ## Pourquoi cette methode existe
+
+        Cette sequence vivait dans le chrome Qt (`navigateur.py`). Tant qu'il
+        n'y avait qu'un seul appelant, c'etait defendable. Le processus de rendu
+        en a fait un second — et un second qui n'a pas de chrome : il recoit un
+        `INPUT_EVENT` et doit produire exactement le meme comportement. La
+        recopier aurait donne deux ordres a maintenir, dont l'un aurait fini par
+        deriver ; un formulaire se serait alors envoye dans la fenetre et pas
+        dans l'onglet, ou l'inverse, pour une raison introuvable.
+
+        ## L'ordre, qui est tout
+
+        1. **le foyer d'abord.** `document.activeElement` lu dans un
+           gestionnaire de clic doit deja designer le nouvel element : c'est ce
+           que fait le Web, et du code reel en depend ;
+        2. **le script ensuite.** Il peut annuler — un `preventDefault()` sur un
+           lien est la facon dont la moitie des sites detournent la navigation ;
+        3. **l'action par defaut, seulement s'il n'a pas annule.** Cocher une
+           case, choisir un bouton radio, envoyer un formulaire ;
+        4. **le lien en dernier**, et rendu a l'appelant plutot que suivi : la
+           decision de naviguer appartient au navigateur, jamais au moteur —
+           c'est ce qui permet au renderer de la *demander* sans l'appliquer.
+
+        Rend `(suite, lien)` : `suite` vaut `"annule"` si le script a arrete le
+        clic, `"fait"` sinon ; `lien` est l'adresse a suivre, ou `None`.
+        """
+        cible = self.element_a(x, y)
+        self.clique(x, y)
+        if cible is not None and not self.evenement_js(
+                cible, "click", details or {"clientX": x, "clientY": y,
+                                            "pageX": x, "pageY": y}):
+            return "annule", None
+        self.active(self.foyer_actuel())
+        return "fait", self.lien_a(x, y)
+
+    def clique(self, x, y):
+        """Un clic reel : trouve la cible, deplace le foyer, pose le curseur.
+
+        C'est le chemin qui manquait entierement. Le foyer ne se deplacait que
+        par `element.focus()` — donc jamais dans l'usage normal, ou l'on clique.
+        """
+        cible = self.element_a(x, y)
+        focalisable = cible
+        while focalisable is not None:
+            if isinstance(focalisable, html.Element):
+                balise = focalisable.balise
+                if (balise in ("input", "select", "textarea", "button")
+                        or (balise in ("a", "area") and "href" in focalisable.attributs)
+                        or "tabindex" in focalisable.attributs):
+                    break
+                if balise == "label":
+                    # Cliquer une etiquette donne le foyer au controle qu'elle
+                    # designe : c'est ce que tout formulaire suppose, et sans
+                    # cela la moitie des cases a cocher sont inatteignables.
+                    designe = self._controle_de_label(focalisable)
+                    if designe is not None:
+                        focalisable = designe
+                        break
+            focalisable = getattr(focalisable, "parent", None)
+
+        if focalisable is None or "disabled" in getattr(focalisable, "attributs", {}):
+            # Cliquer dans le vide retire le foyer, comme dans un navigateur.
+            self.pose_foyer(None)
+            return None
+
+        self.pose_foyer(focalisable)
+        etat = self.edition_de(focalisable)
+        if etat is not None:
+            etat.pose_curseur(self._curseur_a(focalisable, etat, x))
+            self.sale_curseur = True
+        return focalisable
+
+    def _controle_de_label(self, etiquette):
+        cible = etiquette.attributs.get("for")
+        if cible:
+            for nœud in self.racine.parcours():
+                if isinstance(nœud, html.Element) \
+                        and nœud.attributs.get("id") == cible:
+                    return nœud
+            return None
+        for nœud in etiquette.parcours():
+            if isinstance(nœud, html.Element) \
+                    and nœud.balise in ("input", "select", "textarea", "button"):
+                return nœud
+        return None
+
+    def _curseur_a(self, element, etat, x):
+        """L'indice de caractere le plus proche du point clique.
+
+        On mesure les prefixes successifs et on prend celui dont le bord est le
+        plus proche : c'est exact au caractere pres, et la mesure passe par
+        l'hote, donc par la vraie fonte — la seule facon d'etre juste avec une
+        police proportionnelle.
+        """
+        boite = self._boite_de(element)
+        if boite is None:
+            return len(etat.valeur)
+        style = boite.style
+        taille = mise_en_page._taille_police(style)
+        gras = mise_en_page._est_gras(style)
+        fixe = mise_en_page._est_fixe(style)
+        famille = mise_en_page.famille(style)
+        # Le texte commence apres la bordure et le remplissage gauche : mesurer
+        # depuis le bord de la boite decalerait le curseur d'autant.
+        depart = boite.x + (css.longueur(style.get("padding-left"), 0.0, taille) or 0.0) \
+            + (css.longueur(style.get("border-left-width"), 0.0, taille) or 0.0)
+        affiche = etat.texte_affiche()
+
+        meilleur, ecart_min = 0, abs(x - depart)
+        for index in range(1, len(affiche) + 1):
+            largeur = bo.largeur_texte(affiche[:index], taille, gras, fixe, famille)
+            ecart = abs(x - (depart + largeur))
+            if ecart < ecart_min:
+                meilleur, ecart_min = index, ecart
+        return meilleur
+
+    def pose_curseur_visuel(self):
+        """Place le trait du curseur dans la boite du champ au foyer.
+
+        Apres la mise en page, pas pendant : la position du curseur depend de
+        la largeur du texte qui le precede, donc de la boite finale. La calculer
+        en cours de disposition obligerait a la refaire des que la boite bouge.
+
+        Le curseur n'est pas un caractere. Il est pose a cote du texte, dans un
+        champ de la boite que la peinture lit. L'inserer dans la valeur — ce que
+        fait la barre d'adresse du chrome — partirait avec le formulaire et
+        changerait la largeur mesuree a chaque clignotement.
+        """
+        cible = self._foyer
+        etat = self.edition_de(cible, cree=False) if cible is not None else None
+        if etat is None:
+            return False
+        boite = self._boite_de(cible)
+        if boite is None:
+            return False
+        style = boite.style
+        taille = mise_en_page._taille_police(style)
+        gras = mise_en_page._est_gras(style)
+        fixe = mise_en_page._est_fixe(style)
+        famille = mise_en_page.famille(style)
+        gauche = boite.x \
+            + (css.longueur(style.get("padding-left"), 0.0, taille) or 0.0) \
+            + (css.longueur(style.get("border-left-width"), 0.0, taille) or 0.0)
+        haut = boite.y \
+            + (css.longueur(style.get("padding-top"), 0.0, taille) or 0.0) \
+            + (css.longueur(style.get("border-top-width"), 0.0, taille) or 0.0)
+        hauteur = bo.hauteur_ligne(taille, fixe)
+        affiche = etat.texte_affiche()
+
+        def largeur(jusqua):
+            if jusqua <= 0:
+                return 0.0
+            return bo.largeur_texte(affiche[:jusqua], taille, gras, fixe, famille)
+
+        debut, fin = etat.selection()
+        selection = None
+        if debut != fin:
+            x_debut = largeur(debut)
+            selection = (gauche + x_debut, largeur(fin) - x_debut)
+        boite.curseur = (gauche + largeur(etat.curseur), haut, hauteur, selection)
+        return True
+
+    def _boite_de(self, element):
+        pile = [self.boite] if self.boite is not None else []
+        while pile:
+            boite = pile.pop()
+            if boite.element is element:
+                return boite
+            pile.extend(getattr(boite, "enfants", ()) or ())
+        return None
+
+    def pose_foyer(self, element, notifie=True):
+        """Deplace le foyer. Rend `True` si quelque chose a change.
+
+        Emet `blur` sur l'ancien puis `focus` sur le nouveau, dans cet ordre —
+        c'est celui de la norme, et une page qui valide un champ au `blur`
+        avant d'afficher le suivant en depend.
+        """
+        if element is self._foyer:
+            return False
+        ancien, self._foyer = self._foyer, element
+        # Un champ editable qui prend le foyer doit avoir un curseur : c'est la
+        # que son etat d'edition nait, s'il n'existait pas encore.
+        if element is not None:
+            self.edition_de(element)
+        contexte = self.contexte_js
+        if notifie and contexte is not None:
+            if ancien is not None:
+                contexte.evenement(ancien, "blur", {})
+                contexte.evenement(ancien, "focusout", {})
+            if element is not None:
+                contexte.evenement(element, "focus", {})
+                contexte.evenement(element, "focusin", {})
+        self._interaction(survoles=self._survole, actifs=None)
+        return True
+
+    def elements_focalisables(self):
+        """Les elements que `Tab` peut atteindre, dans l'ordre du document.
+
+        L'ordre par `tabindex` positif n'est pas gere : il est rare, souvent
+        deconseille, et le simuler a moitie serait pire que de suivre l'ordre du
+        document — qui est ce que font les pages bien construites, et donc la
+        quasi-totalite des formulaires.
+        """
+        focalisables = []
+        for nœud in self.racine.parcours():
+            if not isinstance(nœud, html.Element):
+                continue
+            if "disabled" in nœud.attributs or "hidden" in nœud.attributs:
+                continue
+            tabindex = nœud.attributs.get("tabindex")
+            if tabindex is not None:
+                try:
+                    if int(tabindex) < 0:
+                        continue
+                except ValueError:
+                    pass
+                focalisables.append(nœud)
+                continue
+            if nœud.balise in ("input", "select", "textarea", "button"):
+                if (nœud.attributs.get("type") or "").lower() == "hidden":
+                    continue
+                focalisables.append(nœud)
+            elif nœud.balise in ("a", "area") and "href" in nœud.attributs:
+                focalisables.append(nœud)
+        return focalisables
+
+    def deplace_foyer(self, sens=1):
+        """`Tab` et `Maj+Tab`. Rend l'element atteint, ou `None`."""
+        liste = self.elements_focalisables()
+        if not liste:
+            return None
+        if self._foyer in liste:
+            depart = liste.index(self._foyer) + sens
+        else:
+            depart = 0 if sens > 0 else len(liste) - 1
+        # Le foyer fait le tour : c'est ce que fait un navigateur en fin de
+        # document, et une page de connexion a trois champs en depend pour
+        # revenir au premier.
+        cible = liste[depart % len(liste)]
+        self.pose_foyer(cible)
+        return cible
+
     def _interaction(self, survoles=None, actifs=None):
         self._survole = survoles
         if not getattr(self.regles, "sensible", False):
@@ -433,11 +1139,61 @@ class Document:
             # `<style>` qui, lui, en parle.
             return False
         etat = (css.lignee(survoles) if survoles is not None else [],
-                css.lignee(actifs) if actifs is not None else [])
+                css.lignee(actifs) if actifs is not None else [],
+                css.lignee(self._foyer) if self._foyer is not None else [])
         avant = css.interaction()
-        css.pose_interaction(survoles=etat[0], actifs=etat[1])
-        if css.interaction() == avant:
+        css.pose_interaction(survoles=etat[0], actifs=etat[1], foyer=etat[2])
+        apres = css.interaction()
+        if apres == avant:
             return False
+
+        # Passer la souris sur un bouton remettait toute la page en page. Or
+        # `:hover` ne change presque jamais qu'une couleur ou un fond — et ce
+        # sont exactement les proprietes que le restyle cible sait traiter sans
+        # toucher a la disposition.
+        #
+        # Les elements concernes sont ceux qui **entrent ou sortent** d'un etat,
+        # c'est-a-dire la difference symetrique des deux lignees. Marquer les
+        # deux lignees entieres serait correct mais plus large : un menu profond
+        # ferait recalculer toute sa branche a chaque pixel parcouru.
+        # `css.interaction()` rend des ensembles d'**identifiants**, pas
+        # d'elements : la difference symetrique se prend donc directement, et
+        # les objets se retrouvent dans les lignees qu'on vient de calculer et
+        # dans celles du tour precedent.
+        par_id = {}
+        for lignee in list(etat) + list(self._lignees_interaction):
+            for element in lignee or []:
+                par_id[id(element)] = element
+        self._lignees_interaction = etat
+
+        touches = set()
+        for anciens, nouveaux in zip(avant, apres):
+            touches |= set(anciens) ^ set(nouveaux)
+
+        # Un element marque qui n'a pas de boite — `<html>` en est un, la boite
+        # racine etant celle du corps — ne peut pas etre compare a son ancien
+        # style. On ne renonce pas pour autant : s'il n'existe aucune regle
+        # sensible a l'interaction qui puisse le designer, son style ne depend
+        # pas de ce qui vient de changer, et l'ignorer est exact.
+        touches = {cle for cle in touches
+                   if not self._sans_effet_interaction(par_id.get(cle))}
+
+        if touches and self.boite is not None and not self.animateur.anime():
+            del self.invalide.raisons[:]
+            self.invalide.etendue = invalidation.STYLE
+            self.invalide.elements.clear()
+            self.invalide.elements.update(touches)
+            if self._restyle_suffit():
+                telemetrie.compte("invalidation.interaction_peinture_seule")
+                self.invalide.vide()
+                # Le curseur de saisie est pose par la mise en page, qu'on
+                # vient d'eviter : prendre le foyer doit quand meme le faire
+                # apparaitre.
+                self.pose_curseur_visuel()
+                return True
+
+        telemetrie.compte("invalidation.interaction_mise_en_page")
+        self.invalide.vide()
         self.remet_en_page(self.largeur)
         return True
 

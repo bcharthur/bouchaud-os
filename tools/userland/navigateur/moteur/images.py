@@ -39,6 +39,41 @@ _cache = {}
 def vide():
     """Oublie tout : appele quand la memoire compte plus que la vitesse."""
     _cache.clear()
+    _origines.clear()
+
+
+# `identifiant d'image -> adresse d'ou elle vient`. Une image `data:` y figure
+# aussi : son origine est opaque, mais elle ne vient d'aucun serveur tiers, donc
+# elle ne souille rien.
+_origines = {}
+
+
+def origine_de(identifiant):
+    """L'adresse d'ou vient cette image, ou `None` si on ne la connait pas."""
+    return _origines.get(identifiant)
+
+
+def souille(identifiant, origine_document):
+    """Cette image rend-elle une toile illisible ?
+
+    Une image de la meme origine que le document ne souille rien. Une image
+    `data:` non plus — elle voyage avec la page. Toute autre le fait, faute
+    d'un `crossorigin` accompagne d'un `Access-Control-Allow-Origin` : sans
+    cette regle, une page pourrait dessiner l'image d'un site tiers dans une
+    toile et en relire les pixels, ce qui reviendrait a lire une page ou
+    l'utilisateur est connecte.
+
+    Une image dont on ne connait pas l'origine souille : ne pas savoir n'est
+    pas une raison d'autoriser.
+    """
+    from . import origine as mod_origine
+
+    url = _origines.get(identifiant)
+    if url is None:
+        return True
+    if url.startswith("data:"):
+        return False
+    return not mod_origine.Origine.de_url(url).meme_origine(origine_document)
 
 
 def charge(base, source):
@@ -64,6 +99,12 @@ def charge(base, source):
         _cache.clear()
 
     resultat = _decode(_octets(url, base))
+    if resultat is not None:
+        # L'origine de chaque image est retenue : c'est ce qui permettra a un
+        # `<canvas>` de savoir s'il reste lisible apres qu'on y a dessine.
+        # Sans cette trace, la seule facon de le decider serait de refaire la
+        # requete — ou de ne rien decider du tout, ce qui etait le cas.
+        _origines[resultat[0]] = url
     if telemetrie.ACTIVE:
         # Compter ici, et pas les operations peintes : la liste d'affichage est
         # elaguee au viewport, donc une page de 11 000 pixels de haut n'y montre
