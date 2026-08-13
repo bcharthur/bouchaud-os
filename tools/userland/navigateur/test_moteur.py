@@ -19,6 +19,7 @@ images et la mise en page. Ce qu'elles ne couvrent pas : le rendu a l'ecran et
 le reseau, qui demandent l'un un ecran, l'autre le monde exterieur.
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -8420,6 +8421,427 @@ def verifie_canal_de_messages():
         arrete()
 
 
+# --- Renderer separe ----------------------------------------------------------
+#
+# Le moteur web dans un autre processus, le chrome dans celui-ci, une prise et
+# une surface partagee entre les deux.
+#
+# Trois questions, et une seule compte vraiment :
+#
+#   1. **le protocole tient-il ?** Une trame tronquee, une longueur absurde, une
+#      version inconnue doivent etre refusees, pas devinees ;
+#   2. **la page marche-t-elle a travers ?** La fixture de connexion est
+#      l'epreuve : cliquer, taper, envoyer — le tout par des messages, sans
+#      qu'aucun code de l'epreuve ne touche le DOM d'en face ;
+#   3. **la separation achete-t-elle quelque chose ?** Un renderer qui meurt ne
+#      doit rien emporter, et sa memoire doit etre bornee sans que celle du
+#      navigateur le soit.
+
+
+def verifie_renderer_protocole():
+    """Le cadrage des trames, et tout ce qui doit etre refuse."""
+    import socket as _socket
+
+    from moteur import protocole
+
+    # L'aller-retour nominal, y compris la charge vide et les accents.
+    for genre, charge in ((protocole.TICK, None),
+                          (protocole.NAVIGATE, {"url": "http://a.test/é?x=1"}),
+                          (protocole.FRAME_READY, {"generation": 7,
+                                                   "tampon": 1})):
+        a, b = _socket.socketpair()
+        try:
+            protocole.Canal(a).envoie(genre, charge)
+            relu_genre, relu_charge = protocole.Canal(b).lis()
+            egal("protocole: %s revient identique" % protocole.NOMS[genre],
+                 (relu_genre, relu_charge), (genre, charge))
+        finally:
+            a.close()
+            b.close()
+
+    def refuse(nom, octets, attendus=None):
+        """Ecrit des octets bruts et verifie que la lecture leve."""
+        a, b = _socket.socketpair()
+        try:
+            a.sendall(octets)
+            a.close()
+            try:
+                protocole.Canal(b).lis(attendus)
+            except protocole.Erreur:
+                reussi = True
+            except protocole.Fin:
+                reussi = False
+            else:
+                reussi = False
+            verifie("protocole: %s est refuse" % nom, reussi)
+        finally:
+            b.close()
+
+    entete = protocole.EN_TETE
+    refuse("une version inconnue", entete.pack(99, protocole.TICK, 0))
+    refuse("un genre inconnu", entete.pack(protocole.VERSION, 4242, 0))
+    refuse("une longueur absurde",
+           entete.pack(protocole.VERSION, protocole.NAVIGATE,
+                       protocole.CHARGE_MAX + 1))
+    refuse("un en-tete tronque", b"\x00\x01\x00")
+    refuse("une charge tronquee",
+           entete.pack(protocole.VERSION, protocole.NAVIGATE, 64) + b"{}")
+    refuse("une charge qui n'est pas du JSON",
+           entete.pack(protocole.VERSION, protocole.NAVIGATE, 3) + b"{[}")
+    # Le sens compte : un renderer n'a aucune raison d'envoyer un `CLOSE`.
+    refuse("un message a contresens",
+           entete.pack(protocole.VERSION, protocole.CLOSE, 0),
+           protocole.VERS_NAVIGATEUR)
+
+    # Le decoupage : deux messages dans un envoi, un message en deux envois.
+    a, b = _socket.socketpair()
+    try:
+        canal = protocole.Canal(b)
+        a.sendall(protocole.encode(protocole.TICK, {"n": 1})
+                  + protocole.encode(protocole.TICK, {"n": 2}))
+        egal("protocole: deux trames dans un envoi (1)",
+             canal.lis()[1], {"n": 1})
+        egal("protocole: deux trames dans un envoi (2)",
+             canal.lis()[1], {"n": 2})
+
+        trame = protocole.encode(protocole.NAVIGATE, {"url": "http://a.test/"})
+        a.sendall(trame[:5])
+        a.sendall(trame[5:])
+        egal("protocole: une trame en deux envois",
+             canal.lis()[1], {"url": "http://a.test/"})
+    finally:
+        a.close()
+        b.close()
+
+    # Une charge trop grosse est refusee a l'ecriture aussi : mieux vaut echouer
+    # chez celui qui fabrique le message que chez celui qui le recoit.
+    try:
+        protocole.encode(protocole.NAVIGATE,
+                         {"url": "x" * (protocole.CHARGE_MAX + 10)})
+    except protocole.Erreur:
+        verifie("protocole: une charge trop grosse est refusee a l'emission",
+                True)
+    else:
+        verifie("protocole: une charge trop grosse est refusee a l'emission",
+                False)
+
+
+def verifie_renderer_surface():
+    """La surface partagee : en-tete, deux tampons, publication."""
+    from moteur import surface as mod_surface
+
+    s = mod_surface.Surface.alloue(64, 32)
+    try:
+        entete = s.entete()
+        egal("surface: les dimensions se relisent",
+             (entete["largeur"], entete["hauteur"]), (64, 32))
+        egal("surface: le pas est coherent", entete["pas"], 64 * 4)
+        egal("surface: rien n'est publie au depart", entete["generation"], 0)
+
+        # Deux tampons independants : ecrire dans l'un ne touche pas l'autre.
+        s.ecris(0, b"\x11" * s.octets_tampon)
+        s.ecris(1, b"\x22" * s.octets_tampon)
+        egal("surface: le tampon 0 garde ce qu'on y met", s.lis(0)[:4],
+             b"\x11\x11\x11\x11")
+        egal("surface: le tampon 1 aussi", s.lis(1)[:4], b"\x22\x22\x22\x22")
+
+        s.publie(1, 5)
+        egal("surface: la publication nomme le tampon", s.entete()["avant"], 1)
+        egal("surface: et sa generation", s.entete()["generation"], 5)
+        egal("surface: la lecture par defaut suit la publication",
+             s.lis()[:4], b"\x22\x22\x22\x22")
+
+        # Une seconde vue sur le **meme** descripteur voit les memes octets :
+        # c'est la definition de « partage », et la seule chose qui distingue
+        # cette surface d'une copie.
+        import os as _os
+        jumelle = mod_surface.Surface(_os.dup(s.descripteur), 64, 32)
+        try:
+            egal("surface: une seconde vue lit les memes pixels",
+                 jumelle.lis()[:4], b"\x22\x22\x22\x22")
+            jumelle.ecris(0, b"\x33" * s.octets_tampon)
+            egal("surface: et ce qu'elle ecrit se voit de l'autre cote",
+                 s.lis(0)[:4], b"\x33\x33\x33\x33")
+        finally:
+            jumelle.ferme()
+
+        # Les dimensions impossibles sont refusees des l'allocation.
+        for largeur, hauteur in ((0, 10), (10, -1), (100000, 100000)):
+            try:
+                mod_surface.Surface.alloue(largeur, hauteur)
+            except ValueError:
+                refuse = True
+            else:
+                refuse = False
+            verifie("surface: %sx%s est refuse" % (largeur, hauteur), refuse)
+    finally:
+        s.ferme()
+
+
+def verifie_renderer_separe():
+    """La fixture de connexion, jouee de bout en bout dans un autre processus.
+
+    Rien de ce qui suit ne touche le DOM d'en face : l'epreuve n'a que des
+    messages et une surface. C'est exactement la contrainte d'un vrai chrome, et
+    c'est ce qui rend le resultat interessant — un clic qui arrive, un
+    formulaire qui part, une trame qui change.
+    """
+    import os as _os
+
+    from moteur import superviseur
+
+    doc_bidon, arrete = _sur_serveur("/page/vide.html", battements=1)
+    base = doc_bidon.base
+    doc_bidon.ferme_document()
+    traces = []
+    renderer = superviseur.Renderer(900, 700,
+                                    journal=lambda n, t: traces.append((n, t)))
+    try:
+        egal("renderer: c'est bien un autre processus",
+             renderer.pid != _os.getpid(), True)
+        vu, evenements = renderer.attends("READY", 15.0)
+        verifie("renderer: il se presente", vu, [e[0] for e in evenements])
+        pret = next((c for n, c in evenements if n == "READY"), {}) or {}
+        egal("renderer: a la version du protocole", pret.get("version"), 1)
+        egal("renderer: et c'est bien son pid", pret.get("pid"), renderer.pid)
+
+        # La limite d'adressage annoncee par le renderer est celle que le
+        # navigateur a posee — et le navigateur, lui, ne l'a pas.
+        egal("renderer: la limite memoire posee est celle qui s'applique",
+             pret.get("limite_as"), renderer.limite_as)
+        import resource as _resource
+        mienne, _ = _resource.getrlimit(_resource.RLIMIT_AS)
+        verifie("renderer: le navigateur, lui, n'est pas borne",
+                mienne != renderer.limite_as, mienne)
+        # Et cette limite est un **budget** au-dessus de ce dont l'enfant
+        # herite, pas un plafond absolu : un `fork` transmet l'espace
+        # d'adressage du parent, et un plafond absolu ferait naitre un renderer
+        # deja au ras du sien des que le navigateur a un peu travaille.
+        verifie("renderer: la limite depasse ce dont il a herite",
+                renderer.limite_as > superviseur.taille_adressage(),
+                (renderer.limite_as, superviseur.taille_adressage()))
+
+        # 1. La navigation. L'adresse et le titre remontent par le canal.
+        renderer.navigue(base + "/page/login-form.html")
+        vu, evenements = renderer.attends("FRAME_READY", 30.0)
+        noms = [e[0] for e in evenements]
+        verifie("renderer: une premiere trame arrive", vu, noms)
+        verifie("renderer: l'adresse a ete annoncee", "URL_CHANGED" in noms, noms)
+        verifie("renderer: le titre aussi", "TITLE_CHANGED" in noms, noms)
+        egal("renderer: et c'est le bon titre", renderer.titre,
+             "Connexion — page temoin")
+        verifie("renderer: l'adresse est celle demandee",
+                str(renderer.url or "").endswith("/page/login-form.html"),
+                renderer.url)
+
+        # 2. Les pixels sont dans la surface partagee, pas dans le canal.
+        trame = renderer.derniere_trame or {}
+        egal("renderer: la trame annonce ses dimensions",
+             (trame.get("largeur"), trame.get("hauteur")), (900, 700))
+        egal("renderer: la generation demarre a un", trame.get("generation"), 1)
+        peints = renderer.pixels_non_vides()
+        verifie("renderer: la surface porte une vraie page", peints > 10000,
+                peints)
+        egal("renderer: l'en-tete de la surface designe le meme tampon",
+             renderer.surface.entete()["avant"], trame.get("tampon"))
+
+        def empreinte():
+            octets = renderer.trame()
+            return None if octets is None else hashlib.sha256(octets).hexdigest()
+
+        au_chargement = empreinte()
+
+        # 3. Le clic. Le champ « utilisateur » est a x=49..371, y=166..204 dans
+        #    cette mise en page ; on vise son milieu.
+        renderer.clic(200, 185)
+        renderer.attends("FRAME_READY", 10.0)
+        apres_clic = empreinte()
+        verifie("renderer: un clic change ce qui est peint",
+                apres_clic != au_chargement)
+
+        # 4. La frappe. Pas de `input.value = …` : c'est le modele d'edition
+        #    qu'on eprouve, a travers une frontiere de processus.
+        for lettre in "arthur":
+            renderer.touche(lettre, lettre)
+        renderer.attends("FRAME_READY", 10.0)
+        apres_frappe = empreinte()
+        verifie("renderer: la frappe change ce qui est peint",
+                apres_frappe != apres_clic)
+        egal("renderer: la mise en page, elle, n'a pas bouge",
+             renderer.pixels_non_vides(), peints)
+
+        # 5. L'envoi. Le bouton est a y=439..479. La page ecrit son resultat
+        #    dans un bloc qui **grandit** : c'est ce qui rend l'envoi visible
+        #    depuis l'exterieur, sans lire une seule ligne de son DOM.
+        renderer.clic(200, 459)
+        renderer.attends("FRAME_READY", 10.0)
+        apres_envoi = renderer.pixels_non_vides()
+        verifie("renderer: l'envoi du formulaire a traverse",
+                apres_envoi > peints, (peints, apres_envoi))
+        verifie("renderer: et la trame a change", empreinte() != apres_frappe)
+
+        # 6. Le redimensionnement : la surface est reallouee **par le
+        #    navigateur**, et le renderer repeint dedans.
+        renderer.redimensionne(640, 480)
+        vu, _ = renderer.attends("FRAME_READY", 15.0)
+        verifie("renderer: il repeint apres un redimensionnement", vu)
+        egal("renderer: dans la nouvelle surface",
+             (renderer.derniere_trame or {}).get("largeur"), 640)
+
+        # 7. Aucune erreur en chemin.
+        restes = renderer.recolte(0.2)
+        erreurs = [c for n, c in restes if n == "ERROR"]
+        egal("renderer: aucune erreur signalee", erreurs, [])
+
+        code = renderer.ferme()
+        egal("renderer: il s'arrete proprement sur CLOSE", code, 0)
+
+        jalon("RENDERER_BASIC",
+              vu and apres_envoi > peints and renderer.titre
+              == "Connexion — page temoin",
+              {"pixels": (peints, apres_envoi), "titre": renderer.titre})
+    finally:
+        renderer.ferme()
+        arrete()
+
+
+def verifie_renderer_isolation():
+    """Ce que la separation achete : un crash contenu, une memoire bornee."""
+    import os as _os
+    import signal as _signal
+
+    from moteur import protocole, superviseur
+
+    doc_bidon, arrete = _sur_serveur("/page/vide.html", battements=1)
+    base = doc_bidon.base
+    doc_bidon.ferme_document()
+    try:
+        # --- Crash -----------------------------------------------------------
+        #
+        # Un renderer tue net. Le navigateur doit l'apprendre, le nommer, et
+        # continuer — puis pouvoir en refaire un.
+        renderer = superviseur.Renderer(400, 300)
+        renderer.attends("READY", 15.0)
+        renderer.navigue(base + "/page/login-form.html")
+        renderer.attends("FRAME_READY", 30.0)
+        avant = renderer.pixels_non_vides()
+        verifie("isolation: le premier renderer avait peint", avant > 0, avant)
+
+        pid = renderer.pid
+        _os.kill(pid, _signal.SIGKILL)
+        vu, evenements = renderer.attends("CRASH", 10.0)
+        verifie("isolation: la mort est signalee", vu,
+                [e[0] for e in evenements])
+        mort = next((c for n, c in evenements if n == "CRASH"), {}) or {}
+        egal("isolation: par le bon signal", mort.get("signal"),
+             int(_signal.SIGKILL))
+        verifie("isolation: avec une raison lisible",
+                "SIGKILL" in str(mort.get("raison", "")), mort.get("raison"))
+        verifie("isolation: le navigateur, lui, est toujours la",
+                _os.getpid() > 0)
+        verifie("isolation: et la surface reste lisible apres la mort",
+                renderer.pixels_non_vides() == avant)
+
+        # Parler a un mort ne bloque pas : ca leve, et ca se rattrape.
+        try:
+            renderer.navigue(base + "/page/vide.html")
+        except protocole.Fin:
+            leve = True
+        except OSError:
+            leve = True
+        else:
+            leve = False
+        verifie("isolation: parler a un renderer mort echoue franchement", leve)
+        renderer.ferme()
+
+        # Un second renderer prend la place du premier. C'est ce qui separe une
+        # isolation d'une panne : l'onglet peut redemarrer.
+        remplacant = superviseur.Renderer(400, 300)
+        try:
+            vu, _ = remplacant.attends("READY", 15.0)
+            verifie("isolation: un remplacant demarre", vu)
+            verifie("isolation: et c'est un nouveau processus",
+                    remplacant.pid != pid, (pid, remplacant.pid))
+            remplacant.navigue(base + "/page/login-form.html")
+            vu, _ = remplacant.attends("FRAME_READY", 30.0)
+            verifie("isolation: le remplacant peint", vu)
+        finally:
+            remplacant.ferme()
+
+        jalon("RENDERER_CRASH_ISOLATION",
+              mort.get("signal") == int(_signal.SIGKILL), mort)
+
+        # --- Memoire ---------------------------------------------------------
+        #
+        # La limite est **dans** le renderer et nulle part ailleurs. On le
+        # verifie en lui demandant une surface que le navigateur, lui, alloue et
+        # mappe sans difficulte : le renderer echoue, le dit, et survit. Un
+        # plafond qui ne s'appliquerait pas se lirait exactement comme un
+        # plafond qui s'applique, jusqu'au jour ou un onglet emporte la machine.
+        etroit = superviseur.Renderer(
+            200, 150, budget_as=48 << 20)
+        try:
+            vu, evenements = etroit.attends("READY", 15.0)
+            verifie("isolation: le renderer borne demarre", vu)
+            pret = next((c for n, c in evenements if n == "READY"), {}) or {}
+            serre = (pret.get("limite_as") or 0)
+            verifie("isolation: il annonce la limite etroite qu'on lui a posee",
+                    serre == etroit.limite_as, (serre, etroit.limite_as))
+            verifie("isolation: et elle est bien plus basse que celle par defaut",
+                    0 < serre < superviseur.taille_adressage() + superviseur.BUDGET_AS,
+                    serre)
+
+            # 4096x4096x4 octets x 2 tampons = 128 Mio : au-dela de ce que sa
+            # limite lui laisse, en deca de ce que le navigateur peut mapper.
+            etroit.redimensionne(4096, 4096)
+            vu, evenements = etroit.attends("ERROR", 15.0)
+            verifie("isolation: le renderer refuse ce qu'il ne peut pas mapper",
+                    vu, [e[0] for e in evenements])
+            verifie("isolation: le navigateur, lui, a mappe la meme surface",
+                    etroit.surface is not None
+                    and etroit.surface.largeur == 4096)
+            verifie("isolation: et le renderer est toujours vivant",
+                    etroit.vivant())
+
+            jalon("RENDERER_MEMORY_ISOLATION",
+                  vu and etroit.vivant() and serre == etroit.limite_as,
+                  serre)
+        finally:
+            etroit.ferme()
+
+        # --- Processeur ------------------------------------------------------
+        #
+        # Le mecanisme, pas la mesure : celle-ci est faite par
+        # `ordonnanceur-probe` sous Bouchaud OS, et elle est consignee dans
+        # `docs/BROWSER_OS_MODERNIZATION.md`. Ce qui se verifie ici est ce qui
+        # rend cette mesure applicable au renderer — qu'il ne partage pas la
+        # classe de son parent.
+        interactif = superviseur.Renderer(200, 150)
+        try:
+            interactif.attends("READY", 15.0)
+            classe_enfant = _os.getpriority(_os.PRIO_PROCESS, interactif.pid)
+            egal("isolation: le renderer est en classe normale",
+                 classe_enfant, 0)
+            try:
+                _os.setpriority(_os.PRIO_PROCESS, 0, -5)
+                pose = True
+            except (OSError, PermissionError):
+                pose = False
+            if pose:
+                egal("isolation: et il y reste quand le navigateur passe devant",
+                     _os.getpriority(_os.PRIO_PROCESS, interactif.pid), 0)
+                _os.setpriority(_os.PRIO_PROCESS, 0, 0)
+            else:
+                verifie("isolation: le navigateur ne peut pas se prioriser ici "
+                        "(droits) — le renderer reste neanmoins en classe "
+                        "normale", classe_enfant == 0)
+        finally:
+            interactif.ferme()
+    finally:
+        arrete()
+
+
+
 def principal():
     import bojs
     print("QuickJS %s, CPython %s" % (bojs.version(), sys.version.split()[0]))
@@ -8553,6 +8975,10 @@ def principal():
         verifie_clonage_structure,
         verifie_clonage_par_les_quatre_chemins,
         verifie_canal_de_messages,
+        verifie_renderer_protocole,
+        verifie_renderer_surface,
+        verifie_renderer_separe,
+        verifie_renderer_isolation,
         verifie_tableau_de_bord,
         verifie_hote_reel,
     ):

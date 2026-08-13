@@ -1,7 +1,26 @@
 # Le protocole navigateur ↔ renderer
 
-*Esquisse, pas implementation. Aucun processus de rendu n'existe : ce document
-fixe le contrat pendant qu'il est encore gratuit de le changer.*
+*Ce document etait une esquisse. Il decrit maintenant un mecanisme qui tourne :
+`moteur/protocole.py` porte le cadrage, `moteur/superviseur.py` le cote
+navigateur, `moteur/renderer.py` le cote rendu, `moteur/surface.py` la memoire
+partagee. Ce qui suit distingue partout ce qui **est** de ce qui **reste**.*
+
+## Ce qui est implemente
+
+| | Etat |
+|---|---|
+| Cadrage `version / genre / longueur / charge`, gros-boutiste, huit octets | fait |
+| Verification de la version, du genre, du **sens**, de la longueur, de la completude | fait |
+| `CREATE_DOCUMENT`, `NAVIGATE`, `RESIZE`, `INPUT_EVENT`, `TICK`, `SURFACE`, `CLOSE` | fait |
+| `READY`, `TITLE_CHANGED`, `URL_CHANGED`, `CURSOR_CHANGED`, `FRAME_READY`, `CONSOLE_MESSAGE`, `ERROR`, `REQUEST_NAVIGATION` | fait |
+| Surface `memfd` + `MAP_SHARED` + `SCM_RIGHTS`, deux tampons, generation | fait |
+| `CRASH` synthetise par le navigateur depuis `wait4` | fait |
+| `RLIMIT_AS` dans le renderer, annonce en retour dans `READY` | fait |
+| Un renderer par origine | **pas fait** — le superviseur ne tient qu'un enfant |
+| Encodage binaire de la liste d'affichage | **sans objet** — voir plus bas |
+
+Le protocole porte deja un identifiant de contexte dans chaque message : passer
+a plusieurs renderers ne demande pas de le changer.
 
 ## Pourquoi l'ecrire avant
 
@@ -87,13 +106,51 @@ adresse physique — donc utilisable dans la surface —, `fork`/`execve`/`wait4
 `kill`, `RLIMIT_AS`, et deux classes d'ordonnancement. Voir
 `BROWSER_OS_MODERNIZATION.md` pour l'etat detaille.
 
-## Ce qui n'est pas tranche
+## Ce que l'implementation a tranche, et comment
 
-* **Le format de la liste d'affichage sur le fil.** Aujourd'hui ce sont des
-  tuples Python. Entre deux processus il faudra un encodage binaire stable, et
-  c'est la seule piece qui demande vraiment du travail.
+**Le format de la liste d'affichage : la question ne se pose plus.** Elle ne
+traverse pas. Le renderer joue sa liste d'affichage chez lui et ne publie que
+des pixels. C'est l'inverse de Chromium, qui envoie une liste que le processus
+GPU rasterise — meilleur quand il y a un GPU et un compositeur, ce qui n'est pas
+le cas ici. En echange, on evite d'inventer un encodage binaire stable pour des
+tuples Python, qui etait la seule piece de ce protocole a demander vraiment du
+travail.
+
+**La charge des messages de controle est du JSON.** Ils sont petits et rares :
+une navigation, un redimensionnement, une frappe. Un encodage binaire aurait
+coute un analyseur de plus a ecrire et a verifier, sans rien gagner de mesurable.
+Le jour ou un message de controle deviendra chaud, c'est ce paragraphe qu'il
+faudra contredire — pas la structure.
+
+**Le partage de la pile reseau : le renderer emet lui-meme.** C'est le choix le
+moins sur des deux, et il est assume pour cette version : le renderer est encore
+un `fork` du navigateur, donc il a de toute facon acces a tout ce que le
+navigateur avait. La question redeviendra reelle le jour ou il sera lance par
+`execve` avec ses propres droits — et c'est a ce moment-la qu'il faudra faire
+passer les requetes par le navigateur.
+
+**Un descripteur ne se lit pas avec `recv`.** Ce n'est pas un choix, c'est un
+piege, et il a coute une soiree : un descripteur envoye par `SCM_RIGHTS` voyage
+dans les donnees auxiliaires du meme envoi que les octets, et un `recv`
+ordinaire lit les octets en **jetant le descripteur en silence** — le noyau le
+ferme, personne n'est averti. Les deux cotes lisent donc par `recvmsg`
+**partout**, y compris pour les messages qui ne portent rien : on ne sait pas a
+l'avance lequel en portera.
+
+**`RLIMIT_AS` est un budget, pas un plafond.** `fork` transmet l'espace
+d'adressage du parent : une limite absolue se mesure contre ce que le navigateur
+occupait deja. Un navigateur qui a beaucoup travaille avant de creer son
+renderer lui donne un enfant qui nait au ras de son plafond, et dont le premier
+`mmap` echoue sans que son code y soit pour rien. La limite s'exprime donc en
+« tant de plus que ce dont il herite », et la vraie regle reste celle de
+Chromium : **un zygote se forke tot**.
+
+## Ce qui n'est toujours pas tranche
+
 * **La reprise apres crash.** Recharger la page, ou afficher un cadre mort ?
-  Chromium fait le second et laisse l'utilisateur decider.
-* **Le partage de la pile reseau.** Le renderer emet-il ses requetes lui-meme,
-  ou les demande-t-il ? Le second est plus sur — les temoins et le cache restent
-  hors de sa portee — et plus lent d'un aller-retour.
+  Chromium fait le second et laisse l'utilisateur decider. Le mecanisme rend les
+  deux possibles : la derniere trame reste lisible dans la surface apres la mort
+  du renderer, et un remplacant demarre en quelques millisecondes.
+* **Le nombre de renderers.** Un par onglet, ou un par origine ? Le second est ce
+  vers quoi il faut aller — il transforme la Same-Origin Policy en frontiere
+  materielle — et rien dans le protocole ne s'y oppose.

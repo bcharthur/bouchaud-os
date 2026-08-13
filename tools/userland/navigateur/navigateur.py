@@ -580,23 +580,16 @@ class Navigateur:
         # Le script de la page voit le clic en premier, et peut l'annuler : un
         # `preventDefault()` sur un lien est la facon dont la moitie des sites
         # detournent la navigation.
-        cible = document.element_a(x, page_y)
-        # Le foyer suit le clic avant que le script ne le voie : c'est l'ordre
-        # du Web, et `document.activeElement` lu dans un gestionnaire de clic
-        # doit deja designer le nouvel element. Sans ce chemin, le foyer ne se
-        # deplacait que par `element.focus()` — donc jamais dans l'usage normal.
-        document.clique(x, page_y)
-        if cible is not None and not document.evenement_js(
-                cible, "click", {"clientX": x, "clientY": y - HAUTEUR_CHROME,
-                                 "pageX": x, "pageY": page_y}):
+        # La sequence complete — foyer, evenement, action par defaut, lien —
+        # vit dans le moteur : le processus de rendu la joue mot pour mot, et
+        # deux copies auraient fini par diverger.
+        suite, lien = document.clic_complet(
+            x, page_y, {"clientX": x, "clientY": y - HAUTEUR_CHROME,
+                        "pageX": x, "pageY": page_y})
+        if suite == "annule":
             bo.redessiner()
             return
-        # L'action par defaut : cocher une case, choisir un bouton radio,
-        # envoyer un formulaire. Elle n'a lieu que si le script n'a pas annule.
-        document.active(document.foyer_actuel())
         self.bat()
-
-        lien = document.lien_a(x, page_y)
         if lien:
             self.ouvre(lien)
 

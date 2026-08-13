@@ -885,6 +885,44 @@ class Document:
                 return True
         return False
 
+    def clic_complet(self, x, y, details=None):
+        """Un clic du debut a la fin : foyer, evenement, action, lien.
+
+        ## Pourquoi cette methode existe
+
+        Cette sequence vivait dans le chrome Qt (`navigateur.py`). Tant qu'il
+        n'y avait qu'un seul appelant, c'etait defendable. Le processus de rendu
+        en a fait un second — et un second qui n'a pas de chrome : il recoit un
+        `INPUT_EVENT` et doit produire exactement le meme comportement. La
+        recopier aurait donne deux ordres a maintenir, dont l'un aurait fini par
+        deriver ; un formulaire se serait alors envoye dans la fenetre et pas
+        dans l'onglet, ou l'inverse, pour une raison introuvable.
+
+        ## L'ordre, qui est tout
+
+        1. **le foyer d'abord.** `document.activeElement` lu dans un
+           gestionnaire de clic doit deja designer le nouvel element : c'est ce
+           que fait le Web, et du code reel en depend ;
+        2. **le script ensuite.** Il peut annuler — un `preventDefault()` sur un
+           lien est la facon dont la moitie des sites detournent la navigation ;
+        3. **l'action par defaut, seulement s'il n'a pas annule.** Cocher une
+           case, choisir un bouton radio, envoyer un formulaire ;
+        4. **le lien en dernier**, et rendu a l'appelant plutot que suivi : la
+           decision de naviguer appartient au navigateur, jamais au moteur —
+           c'est ce qui permet au renderer de la *demander* sans l'appliquer.
+
+        Rend `(suite, lien)` : `suite` vaut `"annule"` si le script a arrete le
+        clic, `"fait"` sinon ; `lien` est l'adresse a suivre, ou `None`.
+        """
+        cible = self.element_a(x, y)
+        self.clique(x, y)
+        if cible is not None and not self.evenement_js(
+                cible, "click", details or {"clientX": x, "clientY": y,
+                                            "pageX": x, "pageY": y}):
+            return "annule", None
+        self.active(self.foyer_actuel())
+        return "fait", self.lien_a(x, y)
+
     def clique(self, x, y):
         """Un clic reel : trouve la cible, deplace le foyer, pose le curseur.
 

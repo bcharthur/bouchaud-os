@@ -151,6 +151,9 @@ JALONS = [
     ("WEB_WORKER_LIFECYCLE", "terminate() rend tout, meme sur une boucle"),
     ("STRUCTURED_CLONE", "ce qui ne se clone pas leve, au lieu de disparaitre"),
     ("MESSAGE_CHANNEL", "deux ports se parlent par la file de taches"),
+    ("RENDERER_BASIC", "une page vit dans un autre processus"),
+    ("RENDERER_CRASH_ISOLATION", "un renderer tue ne fait pas tomber la fenetre"),
+    ("RENDERER_MEMORY_ISOLATION", "sa memoire est bornee, celle du chrome non"),
 ]
 
 CHEMIN_JALONS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
