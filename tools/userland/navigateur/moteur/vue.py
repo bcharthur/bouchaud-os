@@ -377,8 +377,17 @@ class VueRenderer(_Vue):
             self.erreur = str(e)
             return False
         self.defilement = 0.0
-        # L'URL d'abord — elle vient avant les pixels, et c'est elle qui remplit
-        # la barre d'adresse pendant que la page se peint.
+        # L'adresse demandee devient l'adresse courante **tout de suite**, et
+        # c'est le renderer qui la corrigera s'il aboutit ailleurs — redirection,
+        # `pushState`. Attendre `URL_CHANGED` pour la poser paraissait plus
+        # rigoureux et ne l'etait pas : la premiere attente ci-dessous rend la
+        # main sur la premiere trame venue, et une trame tardive de la page
+        # **precedente** suffisait a la satisfaire. Le chrome empilait alors
+        # l'ancienne adresse dans son historique, ce qui donnait une barre
+        # d'adresse qui retarde d'une page et un bouton « reculer » qui ramene
+        # la ou l'on est deja.
+        self.url = str(url)
+        self.titre = ""
         vus = self._attends_parmi(("URL", "TRAME", "CRASH"), DELAI_CHARGEMENT_S)
         vus += self._attends_parmi(("TRAME", "CRASH"), DELAI_CHARGEMENT_S)
         self.derniers_evenements = vus

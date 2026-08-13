@@ -61,6 +61,11 @@ cp navigateur/serveur_test.py navigateur/apercu.py "$WORK/"
 # pendant qu'un **vrai** renderer travaille, et elle a besoin du meme
 # echafaudage — module `bojs` compile, moteur, serveur de fixtures.
 cp navigateur/ordonnanceur-navigateur.py "$WORK/"
+# Le chrome lui-meme voyage avec : c'est le programme que l'hote lance, et
+# l'eprouver sur le bouchon `bo` est la seule facon de verifier que le
+# navigateur **reel** — pas seulement la vue qu'il utilise — passe bien par le
+# renderer separe.
+cp navigateur/navigateur.py "$WORK/"
 # Les pages temoins voyagent avec les verifications : sans elles, le scenario
 # de formulaire se croyait absent et se sautait en silence — une verification
 # qui ne s'execute pas est pire qu'une verification qui echoue.

@@ -9177,6 +9177,192 @@ def verifie_produit_crash():
         arrete()
 
 
+def verifie_chrome_produit():
+    """Le programme que l'hote lance, pilote comme l'hote le pilote.
+
+    Les epreuves precedentes passent par `moteur/vue.py`. Celle-ci passe par
+    `navigateur.py` — le fichier que `hote.cpp` execute — et n'appelle que les
+    sept rappels que Qt appelle : `peindre`, `clic`, `touche`, `survol`,
+    `molette`, `tic`, `fermeture`.
+
+    C'est la difference entre « la vue separee marche » et « le navigateur
+    utilise la vue separee ». La premiere etait vraie depuis longtemps sans que
+    la seconde le soit, et c'est exactement le decalage que cette phase existe
+    pour supprimer.
+    """
+    import time as _time
+
+    doc_bidon, arrete = _sur_serveur("/page/vide.html", battements=1)
+    base = doc_bidon.base
+    doc_bidon.ferme_document()
+
+    # Le chrome se fabrique **a l'import** — c'est la ou il forke son renderer,
+    # avant d'avoir rien accumule. On le recharge donc proprement plutot que de
+    # dependre de l'ordre des epreuves.
+    for module in ("navigateur",):
+        sys.modules.pop(module, None)
+    import navigateur as chrome
+
+    titres = []
+    redessins = [0]
+    bo.titre = lambda texte: titres.append(texte)
+    bo.redessiner = lambda: redessins.__setitem__(0, redessins[0] + 1)
+    bo.traiter_evenements = getattr(bo, "traiter_evenements", lambda: None)
+
+    n = chrome._navigateur
+    try:
+        egal("chrome: la page vit dans un autre processus",
+             n.onglet.vue.genre, "renderer")
+        verifie("chrome: et c'est bien un autre pid",
+                n.onglet.vue.renderer.pid != os.getpid())
+
+        # --- Ouvrir ----------------------------------------------------------
+        n.ouvre(base + "/page/login-form.html")
+        egal("chrome: l'adresse est dans la barre", n.saisie,
+             base + "/page/login-form.html")
+        egal("chrome: et dans l'historique", n.onglet.url,
+             base + "/page/login-form.html")
+        verifie("chrome: le titre de la fenetre a ete pose",
+                titres and "Connexion" in titres[-1], titres[-1:])
+
+        # --- Peindre ---------------------------------------------------------
+        #
+        # Le chrome ne pose plus une liste d'affichage de la page : il pose une
+        # image. C'est verifiable en comptant les operations.
+        liste = chrome._peindre(1280, 720)
+        images = [op for op in liste if op[0] == "image"]
+        egal("chrome: la page est peinte en une image", len(images), 1)
+        verifie("chrome: posee sous la barre d'outils",
+                images and images[0][2] == chrome.HAUTEUR_CHROME, images[:1])
+        verifie("chrome: et le chrome est peint par-dessus",
+                any(op[0] == "texte" for op in liste))
+
+        # --- Souris ----------------------------------------------------------
+        chrome._survol(200, 185 + chrome.HAUTEUR_CHROME)
+        for _ in range(40):
+            chrome._tic()
+            _time.sleep(0.01)
+
+        # --- Clic et clavier -------------------------------------------------
+        avant = n.onglet.vue.trames
+        chrome._clic(200, 185 + chrome.HAUTEUR_CHROME)
+        pris = False
+        limite = _time.monotonic() + 5.0
+        while _time.monotonic() < limite and not pris:
+            chrome._tic()
+            pris = n.onglet.vue.foyer
+            _time.sleep(0.01)
+        verifie("chrome: un clic dans un champ donne le foyer a la page", pris)
+
+        if pris:
+            # La bifurcation du clavier : le champ de la page a le foyer, donc
+            # `Bas` ne doit pas faire defiler. Le chrome le sait par message, il
+            # ne lit plus le DOM.
+            for code, texte in ((0x41, "a"), (0x6C, "l")):
+                chrome._touche(code, texte)
+            defilement = n.onglet.vue.defilement
+            chrome._touche(chrome.K_BAS, "")
+            egal("chrome: la frappe va a la page, pas a l'ascenseur",
+                 n.onglet.vue.defilement, defilement)
+            for _ in range(40):
+                chrome._tic()
+                _time.sleep(0.01)
+            verifie("chrome: et la page a repeint", n.onglet.vue.trames > avant,
+                    (avant, n.onglet.vue.trames))
+
+        # --- Defilement ------------------------------------------------------
+        chrome._molette(-120)
+        verifie("chrome: la molette fait defiler la page distante",
+                n.onglet.vue.defilement > 0, n.onglet.vue.defilement)
+
+        # --- Redimensionnement ------------------------------------------------
+        avant = n.onglet.vue.trames
+        chrome._peindre(800, 600)
+        egal("chrome: la vue suit la fenetre", n.onglet.vue.largeur, 800)
+        limite = _time.monotonic() + 10.0
+        while _time.monotonic() < limite and n.onglet.vue.trames == avant:
+            chrome._tic()
+            _time.sleep(0.01)
+        verifie("chrome: et le renderer repeint a la nouvelle taille",
+                n.onglet.vue.trames > avant, (avant, n.onglet.vue.trames))
+
+        # --- Lien : le renderer demande, le chrome ouvre -----------------------
+        n.ouvre(base + "/page/lien-sortant.html")
+        depart = n.onglet.url
+        profondeur = len(n.onglet.historique)
+        for y in range(22, 70, 6):
+            chrome._clic(100, y + chrome.HAUTEUR_CHROME)
+            for _ in range(20):
+                chrome._tic()
+                _time.sleep(0.01)
+            if n.onglet.url != depart:
+                break
+        egal("chrome: le lien a mene a la page suivante", n.onglet.url,
+             base + "/page/vide.html")
+        egal("chrome: et l'historique s'est empile",
+             len(n.onglet.historique), profondeur + 1)
+        verifie("chrome: donc le bouton reculer est actif",
+                n.onglet.peut_reculer())
+        n.recule()
+        egal("chrome: qui ramene bien en arriere", n.onglet.url, depart)
+
+        # --- Crash depuis l'interface -----------------------------------------
+        import signal as _signal
+        pid = n.onglet.vue.renderer.pid
+        image_avant = n.onglet.vue.image
+        os.kill(pid, _signal.SIGKILL)
+        limite = _time.monotonic() + 10.0
+        while _time.monotonic() < limite and not n.onglet.vue.crashee:
+            chrome._tic()
+            _time.sleep(0.01)
+        verifie("chrome: la mort de la page remonte a l'interface",
+                n.onglet.vue.crashee)
+        verifie("chrome: la barre d'etat le dit",
+                "crashee" in n.etat, n.etat)
+
+        # La fenetre reste peignable, avec sa derniere image.
+        liste = chrome._peindre(1280, 720)
+        egal("chrome: la derniere image est toujours la",
+             n.onglet.vue.image, image_avant)
+        verifie("chrome: et la fenetre se peint encore",
+                any(op[0] == "image" for op in liste)
+                and any(op[0] == "texte" for op in liste))
+
+        # Le chrome reste interactif : aucune de ces entrees ne doit lever.
+        chrome._survol(300, 300)
+        chrome._clic(300, 300)
+        chrome._touche(0x41, "a")
+        chrome._molette(-120)
+        chrome._tic()
+        verifie("chrome: et il reste interactif", True)
+
+        # La barre d'adresse marche toujours : Ctrl+L, une adresse, Entree.
+        chrome._touche(chrome.K_L, "l", 0x04000000)
+        verifie("chrome: Ctrl+L donne le foyer a la barre d'adresse",
+                n.champ_actif)
+
+        # F5 refait un renderer et recharge.
+        chrome._touche(chrome.K_ECHAP, "")
+        chrome._touche(chrome.K_F5, "")
+        verifie("chrome: F5 remet une page vivante",
+                not n.onglet.vue.crashee, n.etat)
+        verifie("chrome: dans un processus neuf",
+                n.onglet.vue.renderer is not None
+                and n.onglet.vue.renderer.pid != pid)
+        verifie("chrome: qui peint", n.onglet.vue.trames > 0)
+
+        jalon("PRODUCT_RENDERER_CHROME",
+              n.onglet.vue.genre == "renderer" and pris
+              and not n.onglet.vue.crashee,
+              {"pid_mort": pid, "pid_neuf": n.onglet.vue.renderer.pid})
+    finally:
+        try:
+            chrome._fermeture()
+        except Exception:  # noqa: BLE001
+            pass
+        arrete()
+
+
 def verifie_renderer_courtage():
     """Ce que le renderer ne va plus chercher lui-meme.
 
@@ -9586,6 +9772,7 @@ def principal():
         verifie_renderer_isolation,
         verifie_produit_renderer,
         verifie_produit_crash,
+        verifie_chrome_produit,
         verifie_renderer_courtage,
         verifie_renderer_privileges,
         verifie_tableau_de_bord,
