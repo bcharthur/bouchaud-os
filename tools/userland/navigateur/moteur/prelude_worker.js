@@ -153,13 +153,24 @@
     // --- Messages ------------------------------------------------------------
 
     globalThis.postMessage = function (donnees, transfert) {
-        appel("wkVersHote", donnees === undefined ? null : donnees);
+        // Le meme clonage que partout ailleurs, et pour la meme raison : ce qui
+        // traverse est une copie, jamais une reference. Deux fils qui
+        // partageraient un objet partageraient un tas QuickJS, c'est-a-dire
+        // exactement ce qu'un Worker existe pour eviter.
+        appel("wkVersHote", globalThis.__bo_clone.serialise(donnees));
         void transfert;
     };
 
     // Appele par l'hote au battement du worker. Jamais au milieu d'un script :
     // c'est la meme discipline que la boucle d'evenements du document.
-    globalThis.__bo_worker_message = function (donnees) {
+    globalThis.__bo_worker_message = function (paquet) {
+        let donnees;
+        try {
+            donnees = globalThis.__bo_clone.materialise(paquet);
+        } catch (e) {
+            emet(new MessageEvent("messageerror", { data: null }));
+            return;
+        }
         emet(new MessageEvent("message", { data: donnees }));
     };
 
@@ -459,6 +470,14 @@
     // ce fichier evalue : `WebSocket` et `indexedDB` s'installent alors ici
     // avec les primitives d'evenement ci-dessus, et le code qui les definit est
     // celui-la meme qui sert a la fenetre.
+    // Ce qui ne traverse pas, cote Worker. La liste est courte parce qu'un
+    // Worker n'a pas de DOM : c'est la meme regle appliquee a un monde plus
+    // petit, pas une regle differente.
+    globalThis.__bo_clone.refuse(globalThis.WebSocket, "WebSocket");
+    globalThis.__bo_clone.refuse(globalThis.IDBRequest, "IDBRequest");
+    globalThis.__bo_clone.refuse(globalThis.IDBDatabase, "IDBDatabase");
+    globalThis.__bo_clone.refuse(globalThis.IDBTransaction, "IDBTransaction");
+
     globalThis.__bo_worker_env = {
         appel: appel,
         Event: Event,

@@ -32,6 +32,123 @@
 // l'hote appelle au battement.
 
 globalThis.__bo_installe_partage = function (env) {
+    // --- MessageChannel -----------------------------------------------------
+    //
+    // Deux bouts d'un meme fil, dans le meme contexte JavaScript. Contrairement
+    // aux deux autres messageries — celle d'un Worker, celle d'un contexte de
+    // navigation —, celle-ci ne traverse aucune frontiere : les deux ports
+    // vivent cote a cote.
+    //
+    // Ce qui la rend malgre tout non triviale est la **livraison differee**. Un
+    // `port1.postMessage(x)` ne doit pas appeler `port2.onmessage` tout de
+    // suite : ce serait un appel de fonction deguise, et du code qui compte sur
+    // l'ordre de la boucle d'evenements se tromperait. La livraison passe donc
+    // par `setTimeout(…, 0)`, c'est-a-dire par la file de taches que l'hote
+    // vidange deja. Aucune troisieme messagerie n'est fabriquee ici : celle-ci
+    // emprunte celle des minuteries.
+    //
+    // Et les donnees sont clonees, comme partout ailleurs — meme entre deux
+    // ports du meme contexte. Deux pages qui se partageraient un objet par
+    // `postMessage` decouvriraient la difference le jour ou l'une d'elles
+    // deviendrait un Worker.
+
+    class MessagePort {
+        constructor() {
+            this.__ecouteurs = new Map();
+            this.__jumeau = null;
+            this.__demarre = false;
+            this.__attente = [];
+            this.__ferme = false;
+            this.__onmessage = null;
+            this.onmessageerror = null;
+        }
+
+        // Poser `onmessage` demarre le port. Ce n'est pas une commodite : la
+        // norme l'exige, et sans cela le cas le plus courant — `port.onmessage
+        // = f` et rien d'autre — ne recevrait jamais rien. Le port resterait
+        // parfaitement silencieux, ce qui est le pire des symptomes.
+        get onmessage() { return this.__onmessage; }
+        set onmessage(f) {
+            this.__onmessage = f;
+            if (typeof f === "function") this.start();
+        }
+
+        addEventListener(type, f, o) {
+            env.attache(this, type, f, o);
+            // Poser un `onmessage` ou un ecouteur `message` demarre le port :
+            // c'est ce que dit la norme, et c'est ce qui evite d'avoir a
+            // appeler `start()` dans le cas courant.
+            if (String(type) === "message") this.start();
+        }
+        removeEventListener(type, f, o) { env.detache(this, type, f, o); }
+
+        start() {
+            if (this.__demarre || this.__ferme) return;
+            this.__demarre = true;
+            const attente = this.__attente;
+            this.__attente = [];
+            for (const paquet of attente) this.__livre(paquet);
+        }
+
+        close() {
+            this.__ferme = true;
+            this.__attente = [];
+        }
+
+        postMessage(donnees, transfert) {
+            void transfert;
+            if (this.__ferme) return;
+            const paquet = globalThis.__bo_clone.serialise(donnees);
+            const jumeau = this.__jumeau;
+            if (!jumeau || jumeau.__ferme) return;
+            // Differe, toujours : livrer ici ferait de `postMessage` un appel
+            // synchrone, ce qu'il n'est pas.
+            setTimeout(function () { jumeau.__recoit(paquet); }, 0);
+        }
+
+        __recoit(paquet) {
+            if (this.__ferme) return;
+            if (!this.__demarre) { this.__attente.push(paquet); return; }
+            this.__livre(paquet);
+        }
+
+        __livre(paquet) {
+            let donnees;
+            try {
+                donnees = globalThis.__bo_clone.materialise(paquet);
+            } catch (e) {
+                const rate = new env.Event("messageerror");
+                rate.data = null;
+                env.emet(this, rate);
+                return;
+            }
+            const evenement = new env.Event("message");
+            evenement.data = donnees;
+            evenement.origin = "";
+            evenement.source = null;
+            evenement.ports = [];
+            env.emet(this, evenement);
+        }
+    }
+
+    class MessageChannel {
+        constructor() {
+            this.port1 = new MessagePort();
+            this.port2 = new MessagePort();
+            this.port1.__jumeau = this.port2;
+            this.port2.__jumeau = this.port1;
+        }
+    }
+
+    globalThis.MessagePort = MessagePort;
+    globalThis.MessageChannel = MessageChannel;
+
+    // Un port n'est pas clonable : il se **transfere**, et le transfert n'est
+    // pas implemente. Le refuser nommement vaut mieux que de le laisser passer
+    // pour un objet simple, ce qui donnerait a l'autre bout un port sans
+    // jumeau — inerte, et sans rien pour l'expliquer.
+    globalThis.__bo_clone.refuse(MessagePort, "MessagePort");
+
     // --- WebSocket ----------------------------------------------------------
     //
     // La premiere connexion que la page garde ouverte. Tout le reste du reseau
@@ -145,6 +262,25 @@ globalThis.__bo_installe_partage = function (env) {
     const requetesIdb = new Map();
     let prochaineRequeteIdb = 1;
 
+    // Une valeur rangee voyage sous forme de paquet de clonage, marque pour
+    // qu'on le reconnaisse a la relecture. Le marqueur est necessaire : une
+    // base ecrite avant ce changement contient des valeurs nues, et les lire
+    // comme des paquets echouerait au lieu de simplement les rendre.
+    const MARQUE = "__bo_clone";
+
+    function emballe(valeur) {
+        const paquet = globalThis.__bo_clone.serialise(valeur);
+        paquet[MARQUE] = 1;
+        return paquet;
+    }
+
+    function deballe(valeur) {
+        if (!valeur || typeof valeur !== "object" || !valeur[MARQUE])
+            return valeur;
+        try { return globalThis.__bo_clone.materialise(valeur); }
+        catch (e) { return valeur; }
+    }
+
     function evenementIdb(type, cible) {
         const evenement = new env.Event(type);
         // La norme veut `target` **et** `currentTarget` : du code reel lit
@@ -194,6 +330,15 @@ globalThis.__bo_installe_partage = function (env) {
             // creer l'enregistrement doit voir la difference.
             if (valeur && typeof valeur === "object" && valeur.__bo_absent)
                 valeur = undefined;
+            // Une valeur rangee l'a ete sous forme de paquet de clonage : c'est
+            // ce qui permet a une `Date`, a un `Map` ou a un objet cyclique de
+            // survivre a un aller-retour dans la base. Les autres resultats —
+            // un compte, une liste de cles — n'en sont pas et passent tels
+            // quels.
+            // `getAll` rend une liste de valeurs rangees : chacune porte son
+            // propre paquet. Les listes de cles, elles, n'en portent aucun et
+            // traversent sans etre touchees.
+            valeur = Array.isArray(valeur) ? valeur.map(deballe) : deballe(valeur);
             this.result = valeur;
             this.readyState = "done";
             this.__emet("success");
@@ -227,10 +372,16 @@ globalThis.__bo_installe_partage = function (env) {
             requete.source = this;
             requete.transaction = this.__transaction;
             this.__transaction.__enregistre(requete);
+            // La **valeur** est clonee, la **cle** non : une cle doit rester
+            // comparable et ordonnable cote Python, ou la base ne saurait plus
+            // ni retrouver ni trier. C'est aussi ce que dit la norme, qui
+            // n'accepte comme cle que des nombres, des chaines, des dates et
+            // des tableaux de ceux-la.
+            const emballee = ["put", "add"].indexOf(verbe) >= 0
+                ? emballe(valeur) : (valeur === undefined ? null : valeur);
             env.appel("idbOperation", requete.__id, this.__transaction.__jeton,
                   verbe, this.name,
-                  cle === undefined ? null : cle,
-                  valeur === undefined ? null : valeur);
+                  cle === undefined ? null : cle, emballee);
             return requete;
         }
 

@@ -2202,8 +2202,12 @@
         }
 
         postMessage(donnees, cibleOrigine, transfert) {
+            // Clone avant de traverser. Le pont Python aurait transporte les
+            // objets simples, et rien d'autre : `undefined` serait devenu
+            // `null`, une `Date` un objet vide, un cycle une troncature. Le
+            // paquet, lui, dit exactement ce qu'il porte.
             appel("ctxMessage", this.__ctx,
-                  donnees === undefined ? null : donnees,
+                  __bo_clone.serialise(donnees),
                   cibleOrigine === undefined ? "/" : String(cibleOrigine));
             void transfert;
         }
@@ -2299,6 +2303,19 @@
         configurable: true,
         get() { return appel("ctxOrigine", null) || "null"; },
     });
+
+    // `window.postMessage(...)` adresse a soi-meme. C'est le seul cas ou
+    // l'emetteur et le destinataire sont le meme contexte, et il est plus
+    // repandu qu'il n'y parait : c'est ainsi qu'une page se donne une tache a
+    // faire au tour suivant sans passer par une minuterie. Le message n'en
+    // suit pas moins le chemin complet — file de la boucle d'evenements,
+    // verification de `targetOrigin`, clonage — pour que le comportement soit
+    // le meme qu'entre deux contextes.
+    globalThis.postMessage = function (donnees, cibleOrigine, transfert) {
+        void transfert;
+        appel("ctxMessage", null, __bo_clone.serialise(donnees),
+              cibleOrigine === undefined ? "/" : String(cibleOrigine));
+    };
 
     Object.defineProperty(globalThis, "innerWidth",
         { get: () => (appel("tailleVue") || taille).width, enumerable: true });
@@ -2751,7 +2768,7 @@
 
         postMessage(donnees, transfert) {
             void transfert;
-            appel("wkPoste", this.__id, donnees === undefined ? null : donnees);
+            appel("wkPoste", this.__id, __bo_clone.serialise(donnees));
         }
 
         terminate() {
@@ -2763,7 +2780,8 @@
             let evenement;
             if (genre === "message") {
                 evenement = new Event("message");
-                evenement.data = a;
+                try { evenement.data = __bo_clone.materialise(a); }
+                catch (e) { evenement = new Event("messageerror"); evenement.data = null; }
                 evenement.origin = location.origin;
                 evenement.source = null;
                 evenement.ports = [];
@@ -2793,6 +2811,18 @@
     }
 
     globalThis.Worker = Worker;
+
+    // Ce qui ne traverse pas un `postMessage`, et qui doit lever plutot que
+    // d'arriver de l'autre cote sous forme d'objet vide. Un nœud du DOM en tete
+    // : il designe une place dans un arbre qui n'existe que dans ce contexte,
+    // et une copie sans arbre ne serait rien.
+    __bo_clone.refuse(Nœud, "Node");
+    __bo_clone.refuse(Worker, "Worker");
+    __bo_clone.refuse(WebSocket, "WebSocket");
+    __bo_clone.refuse(IDBRequest, "IDBRequest");
+    __bo_clone.refuse(IDBDatabase, "IDBDatabase");
+    __bo_clone.refuse(IDBTransaction, "IDBTransaction");
+    __bo_clone.refuse(WindowProxy, "Window");
 
     globalThis.__bo_worker_hote = function (identifiant, genre, a, b) {
         const travailleur = travailleurs.get(identifiant);
@@ -2826,9 +2856,25 @@
     //
     // Livre par `tic()`, donc jamais au milieu d'un script : un `postMessage`
     // ne peut pas s'inserer entre deux lignes de la page qui le recoit.
-    globalThis.__bo_message = function (donnees, origine, source) {
+    globalThis.__bo_message = function (paquet, origine, source) {
         const evenement = new Event("message");
-        evenement.data = donnees;
+        try {
+            evenement.data = __bo_clone.materialise(paquet);
+        } catch (e) {
+            // Un paquet illisible devient `messageerror`, pas un `message` avec
+            // des donnees inventees : la page doit pouvoir distinguer « rien
+            // recu » de « recu vide ».
+            const rate = new Event("messageerror");
+            rate.origin = origine || "null";
+            rate.data = null;
+            for (const f of ecouteursDe(globalThis, "messageerror", false))
+                invoque(f, globalThis, rate);
+            if (typeof globalThis.onmessageerror === "function") {
+                try { globalThis.onmessageerror(rate); }
+                catch (e2) { console.error(e2); }
+            }
+            return;
+        }
         evenement.origin = origine || "null";
         evenement.source = source === null || source === undefined
             ? null : __bo_proxy(source);
@@ -2877,7 +2923,7 @@
     const NOMS_FENETRE = [
         "EventSource", "SharedWorker", "ServiceWorker",
         "indexedDB", "IDBFactory", "IDBKeyRange", "caches", "CacheStorage",
-        "BroadcastChannel", "MessageChannel", "MessagePort", "SharedArrayBuffer",
+        "BroadcastChannel", "SharedArrayBuffer",
         "Notification", "PushManager", "RTCPeerConnection", "WebGLRenderingContext",
         "WebGL2RenderingContext", "OffscreenCanvas", "createImageBitmap",
         "ImageBitmap", "ImageData", "Path2D",
@@ -2885,7 +2931,7 @@
         "URLSearchParams", "AbortController", "AbortSignal",
         "Headers", "Request", "Response",
         "ReadableStream", "WritableStream", "TransformStream", "TextEncoderStream",
-        "structuredClone", "requestIdleCallback", "cancelIdleCallback",
+        "requestIdleCallback", "cancelIdleCallback",
         "reportError", "queueMicrotask",
         "IntersectionObserver", "PerformanceObserver", "ReportingObserver",
         "crypto", "TextEncoder", "TextDecoder", "Intl",
@@ -2894,7 +2940,7 @@
         "NodeFilter", "TreeWalker", "NodeIterator",
         "performance", "screen", "visualViewport", "scrollTo", "scrollBy",
         "open", "close", "print", "alert", "confirm", "prompt",
-        "postMessage", "focus", "blur", "getScreenDetails",
+        "focus", "blur", "getScreenDetails",
         "CSS", "CSSStyleSheet", "FontFace", "speechSynthesis",
         "customElements", "HTMLTemplateElement", "DocumentFragment",
         "trustedTypes", "navigation", "scheduler",

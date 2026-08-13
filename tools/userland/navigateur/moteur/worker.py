@@ -216,7 +216,7 @@ class Worker:
         if self._arret.is_set():
             bojs.interromps(self._contexte)
 
-        for nom in ("prelude_partage.js", "prelude_worker.js"):
+        for nom in ("prelude_clone.js", "prelude_partage.js", "prelude_worker.js"):
             with open(_chemin(nom), "r", encoding="utf-8") as fichier:
                 bojs.evalue(self._contexte, fichier.read(), nom)
 

@@ -187,11 +187,12 @@ class Contexte:
         self._types_mse = {}       # identifiant MediaSource -> type MIME
         self._segments_mse = {}    # segments recus avant rattachement
 
-        # `prelude_partage.js` d'abord : il n'installe rien de lui-meme, il pose
-        # `__bo_installe_partage`, que `prelude.js` appelle avec les primitives
-        # d'evenement du document. Le meme fichier sert au Worker, avec les
-        # siennes.
-        for nom in ("prelude_partage.js", "prelude.js"):
+        # L'ordre compte. `prelude_clone.js` pose `__bo_clone`, dont les deux
+        # suivants se servent ; `prelude_partage.js` n'installe rien de
+        # lui-meme, il pose `__bo_installe_partage`, que `prelude.js` appelle
+        # avec les primitives d'evenement du document. Les deux premiers servent
+        # aussi au Worker, avec les siennes.
+        for nom in ("prelude_clone.js", "prelude_partage.js", "prelude.js"):
             with open(_chemin_prelude(nom), "r", encoding="utf-8") as f:
                 bojs.evalue(self._contexte, f.read(), nom)
 

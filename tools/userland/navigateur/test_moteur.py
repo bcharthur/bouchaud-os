@@ -8038,6 +8038,388 @@ def verifie_workers_cycle_de_vie():
         arrete()
 
 
+# --- Clonage structure --------------------------------------------------------
+#
+# Une seule abstraction sert quatre chemins : `Worker.postMessage`,
+# `Window.postMessage`, `MessagePort.postMessage` et IndexedDB. Ce qui suit la
+# verifie d'abord seule — un aller-retour dans le meme contexte, par
+# `structuredClone` —, puis sur chacun des quatre.
+#
+# Le point le plus important n'est pas ce qui traverse : c'est ce qui **leve**.
+# Avant, une fonction, un `Symbol` ou un nœud du DOM devenaient `null` ou `{}`
+# en silence, et la page decouvrait le trou beaucoup plus loin.
+
+
+def verifie_clonage_structure():
+    """Ce qui traverse, ce qui est preserve, et ce qui leve."""
+    doc, arrete = _sur_serveur("/page/vide.html", battements=2)
+    try:
+        contexte = doc.contexte_js
+        verifie("clone: la page a un contexte", contexte is not None)
+        if contexte is None:
+            jalon("STRUCTURED_CLONE", False, "pas de contexte JavaScript")
+            return
+
+        # 1. Les valeurs simples font l'aller-retour sans changer de nature.
+        #    `undefined` en tete : c'est celle que la conversion du pont
+        #    transformait en `null`, et la seule dont la perte se lit comme un
+        #    champ manquant plutot que comme une erreur.
+        rendu = json.loads(contexte.execute("""
+        (function () {
+          const r = {};
+          const c = structuredClone;
+          r.indefini = c(undefined) === undefined;
+          r.nul = c(null) === null;
+          r.vrai = c(true) === true;
+          r.zero = c(0) === 0;
+          r.negatif = c(-3.5) === -3.5;
+          r.grand = c(9007199254740991) === 9007199254740991;
+          r.chaine = c("éléphant") === "éléphant";
+          r.vide = c("") === "";
+          // NaN ne s'egale pas lui-meme : c'est `Number.isNaN` qui repond.
+          r.nan = Number.isNaN(c(NaN));
+          r.infini = c(Infinity) === Infinity;
+          r.infiniNegatif = c(-Infinity) === -Infinity;
+          return JSON.stringify(r);
+        })()
+        """))
+        for nom, valeur in sorted(rendu.items()):
+            verifie("clone: %s traverse" % nom, valeur is True, valeur)
+
+        # 2. Les structures imbriquees, et la copie qui est bien une copie.
+        rendu = json.loads(contexte.execute("""
+        (function () {
+          const r = {};
+          const source = { a: 1, b: [1, [2, [3, { c: "profond" }]]],
+                           d: { e: { f: null } } };
+          const copie = structuredClone(source);
+          r.egal = JSON.stringify(copie) === JSON.stringify(source);
+          r.autreObjet = copie !== source;
+          r.autreTableau = copie.b !== source.b;
+          copie.b[1][1][1].c = "change";
+          r.independant = source.b[1][1][1].c === "profond";
+          // Les trous d'un tableau et les valeurs `undefined` dedans.
+          const troue = structuredClone([1, undefined, 3]);
+          r.trou = troue.length === 3 && troue[1] === undefined;
+          return JSON.stringify(r);
+        })()
+        """))
+        for nom, valeur in sorted(rendu.items()):
+            verifie("clone: imbrique — %s" % nom, valeur is True, valeur)
+
+        # 3. Les cycles et le partage. Un format qui recopierait naivement
+        #    boucherait sur le premier, et perdrait le second sans le dire :
+        #    deux champs qui pointaient le meme objet en recevraient deux.
+        rendu = json.loads(contexte.execute("""
+        (function () {
+          const r = {};
+          const boucle = { nom: "moi" };
+          boucle.moi = boucle;
+          const c1 = structuredClone(boucle);
+          r.cycleTient = c1.moi === c1;
+          r.cycleCopie = c1 !== boucle;
+          r.cycleContenu = c1.nom === "moi";
+
+          const mutuel = { a: {}, b: {} };
+          mutuel.a.vers = mutuel.b;
+          mutuel.b.vers = mutuel.a;
+          const c2 = structuredClone(mutuel);
+          r.mutuel = c2.a.vers === c2.b && c2.b.vers === c2.a;
+
+          const partage = {};
+          const c3 = structuredClone({ x: partage, y: partage });
+          r.partagePreserve = c3.x === c3.y;
+
+          const tableau = [];
+          tableau.push(tableau);
+          const c4 = structuredClone(tableau);
+          r.tableauCyclique = c4[0] === c4;
+          return JSON.stringify(r);
+        })()
+        """))
+        for nom, valeur in sorted(rendu.items()):
+            verifie("clone: cycle — %s" % nom, valeur is True, valeur)
+
+        # 4. Les types de la plate-forme que la norme cite nommement.
+        rendu = json.loads(contexte.execute("""
+        (function () {
+          const r = {};
+          const d = new Date(1700000000123);
+          const cd = structuredClone(d);
+          r.date = cd instanceof Date && cd.getTime() === 1700000000123
+                   && cd !== d;
+
+          const x = /a.c/gi;
+          const cx = structuredClone(x);
+          r.regexp = cx instanceof RegExp && cx.source === "a.c"
+                     && cx.flags === x.flags;
+
+          const m = new Map([["a", 1], ["b", { profond: true }]]);
+          const cm = structuredClone(m);
+          r.map = cm instanceof Map && cm.size === 2 && cm.get("a") === 1
+                  && cm.get("b").profond === true && cm.get("b") !== m.get("b");
+
+          const s = new Set([1, "deux", 3]);
+          const cs = structuredClone(s);
+          r.set = cs instanceof Set && cs.size === 3 && cs.has("deux");
+
+          const tampon = new ArrayBuffer(4);
+          new Uint8Array(tampon).set([1, 2, 3, 250]);
+          const ct = structuredClone(tampon);
+          r.tampon = ct instanceof ArrayBuffer && ct.byteLength === 4
+                     && new Uint8Array(ct)[3] === 250 && ct !== tampon;
+
+          const vue = new Uint16Array([300, 400, 500]);
+          const cv = structuredClone(vue);
+          r.vue = cv instanceof Uint16Array && cv.length === 3
+                  && cv[1] === 400 && cv !== vue;
+
+          const err = new TypeError("mauvais type");
+          const ce = structuredClone(err);
+          r.erreur = ce instanceof Error && ce.name === "TypeError"
+                     && ce.message === "mauvais type";
+
+          // Une instance de classe se clone en objet simple : ses champs
+          // traversent, son prototype non. C'est ce que fait la norme.
+          class Point { constructor() { this.x = 1; this.y = 2; } bouge() {} }
+          const cp = structuredClone(new Point());
+          r.classe = cp.x === 1 && cp.y === 2 && !(cp instanceof Point);
+          return JSON.stringify(r);
+        })()
+        """))
+        for nom, valeur in sorted(rendu.items()):
+            verifie("clone: type — %s" % nom, valeur is True, valeur)
+
+        # 5. Ce qui leve. C'est la moitie qui manquait : une conversion muette
+        #    fait disparaitre le probleme, pas le defaut.
+        rendu = json.loads(contexte.execute("""
+        (function () {
+          function leve(f) {
+            try { f(); return "rien"; }
+            catch (e) { return e.name; }
+          }
+          const r = {};
+          r.fonction = leve(() => structuredClone(function () {}));
+          r.flechee = leve(() => structuredClone(() => 1));
+          r.symbole = leve(() => structuredClone(Symbol("s")));
+          r.dansUnObjet = leve(() => structuredClone({ a: 1, f: function () {} }));
+          r.dansUnTableau = leve(() => structuredClone([1, Symbol("s")]));
+          r.noeud = leve(() => structuredClone(document.body));
+          r.fenetre = leve(() => structuredClone(window));
+          const canal = new MessageChannel();
+          r.port = leve(() => structuredClone(canal.port1));
+          canal.port1.close(); canal.port2.close();
+          return JSON.stringify(r);
+        })()
+        """))
+        for nom, valeur in sorted(rendu.items()):
+            egal("clone: %s leve DataCloneError" % nom, valeur, "DataCloneError")
+
+        jalon("STRUCTURED_CLONE",
+              all(v == "DataCloneError" for v in rendu.values()), rendu)
+    finally:
+        doc.ferme_document()
+        arrete()
+
+
+def verifie_clonage_par_les_quatre_chemins():
+    """La meme abstraction sur les quatre chemins qui s'en servent."""
+    doc, arrete = _sur_serveur("/page/vide.html", battements=2)
+    try:
+        contexte = doc.contexte_js
+        if contexte is None:
+            jalon("WEB_WORKER_MESSAGING", False, "pas de contexte JavaScript")
+            return
+
+        # Un echantillon qui contient tout ce qui se perdait avant : un
+        # `undefined`, un `NaN`, une `Date`, un `Map`, un cycle.
+        prepare = """
+        globalThis.__temoin = function () {
+          const o = { indefini: undefined, nombre: NaN, infini: -Infinity,
+                      date: new Date(1700000000123),
+                      table: new Map([["cle", [1, 2, 3]]]),
+                      texte: "élan" };
+          o.moi = o;
+          return o;
+        };
+        globalThis.__verifie = function (v) {
+          return {
+            indefini: "indefini" in v && v.indefini === undefined,
+            nan: Number.isNaN(v.nombre),
+            infini: v.infini === -Infinity,
+            date: v.date instanceof Date && v.date.getTime() === 1700000000123,
+            map: v.table instanceof Map
+                 && JSON.stringify(v.table.get("cle")) === "[1,2,3]",
+            texte: v.texte === "élan",
+            cycle: v.moi === v,
+          };
+        };
+        """
+        contexte.execute(prepare)
+
+        # 1. Un Worker.
+        contexte.execute("""
+        globalThis.__q1 = null;
+        globalThis.__w = new Worker('/page/worker-base.js');
+        globalThis.__w.onmessage = function (e) {
+          globalThis.__q1 = globalThis.__verifie(e.data.recu);
+        };
+        globalThis.__w.postMessage({ genre: 'echo', charge: globalThis.__temoin() });
+        """)
+        vu = _bat_jusqua(doc, contexte, "!!globalThis.__q1")
+        verifie("clone: le worker a renvoye l'echantillon", vu)
+        rendu = json.loads(contexte.execute("JSON.stringify(globalThis.__q1)"))
+        for nom, valeur in sorted((rendu or {}).items()):
+            verifie("clone: worker — %s" % nom, valeur is True, valeur)
+
+        # 2. Un MessageChannel. La livraison est differee : le message ne doit
+        #    pas arriver pendant l'appel a `postMessage`.
+        contexte.execute("""
+        globalThis.__q2 = null;
+        globalThis.__synchrone = false;
+        globalThis.__canal = new MessageChannel();
+        globalThis.__canal.port2.onmessage = function (e) {
+          globalThis.__q2 = globalThis.__verifie(e.data);
+        };
+        globalThis.__canal.port1.postMessage(globalThis.__temoin());
+        globalThis.__synchrone = globalThis.__q2 !== null;
+        """)
+        verifie("clone: MessagePort ne livre pas dans l'appel",
+                contexte.execute("globalThis.__synchrone") is False)
+        vu = _bat_jusqua(doc, contexte, "!!globalThis.__q2")
+        verifie("clone: le port jumeau a recu", vu)
+        rendu = json.loads(contexte.execute("JSON.stringify(globalThis.__q2)"))
+        for nom, valeur in sorted((rendu or {}).items()):
+            verifie("clone: canal — %s" % nom, valeur is True, valeur)
+
+        # 3. `window.postMessage` sur soi-meme : la boucle la plus courte qui
+        #    passe quand meme par la file de la boucle d'evenements.
+        contexte.execute("""
+        globalThis.__q3 = null;
+        globalThis.addEventListener('message', function (e) {
+          if (e.data && e.data.__marque === 'clone')
+            globalThis.__q3 = globalThis.__verifie(e.data.charge);
+        });
+        (function () {
+          const charge = globalThis.__temoin();
+          window.postMessage({ __marque: 'clone', charge: charge }, '*');
+        })();
+        """)
+        vu = _bat_jusqua(doc, contexte, "!!globalThis.__q3")
+        verifie("clone: window.postMessage a livre", vu)
+        rendu = json.loads(contexte.execute("JSON.stringify(globalThis.__q3)"))
+        for nom, valeur in sorted((rendu or {}).items()):
+            verifie("clone: fenetre — %s" % nom, valeur is True, valeur)
+
+        # 4. IndexedDB. L'aller-retour passe par le disque : ce qui survit ici
+        #    survit aussi a une fermeture du navigateur.
+        contexte.execute("""
+        globalThis.__q4 = null;
+        (function () {
+          const demande = indexedDB.open('bo-clone', 1);
+          demande.onupgradeneeded = function () {
+            demande.result.createObjectStore('valeurs');
+          };
+          demande.onsuccess = function () {
+            const base = demande.result;
+            const ecriture = base.transaction('valeurs', 'readwrite');
+            ecriture.objectStore('valeurs').put(globalThis.__temoin(), 'temoin');
+            ecriture.oncomplete = function () {
+              const lecture = base.transaction('valeurs', 'readonly');
+              const r = lecture.objectStore('valeurs').get('temoin');
+              r.onsuccess = function () {
+                globalThis.__q4 = globalThis.__verifie(r.result);
+              };
+              r.onerror = function () { globalThis.__q4 = { erreur: true }; };
+            };
+          };
+          demande.onerror = function () { globalThis.__q4 = { erreur: true }; };
+        })();
+        """)
+        vu = _bat_jusqua(doc, contexte, "!!globalThis.__q4", 30.0)
+        verifie("clone: IndexedDB a rendu la valeur", vu)
+        rendu = json.loads(contexte.execute("JSON.stringify(globalThis.__q4)"))
+        for nom, valeur in sorted((rendu or {}).items()):
+            verifie("clone: base — %s" % nom, valeur is True, valeur)
+    finally:
+        doc.ferme_document()
+        arrete()
+
+
+def verifie_canal_de_messages():
+    """`MessageChannel` : deux bouts, une file, et rien de synchrone."""
+    doc, arrete = _sur_serveur("/page/vide.html", battements=2)
+    try:
+        contexte = doc.contexte_js
+        if contexte is None:
+            jalon("MESSAGE_CHANNEL", False, "pas de contexte JavaScript")
+            return
+
+        # Les deux sens, et l'ordre.
+        contexte.execute("""
+        globalThis.__c = { versDeux: [], versUn: [] };
+        globalThis.__canal = new MessageChannel();
+        globalThis.__canal.port2.onmessage = function (e) {
+          globalThis.__c.versDeux.push(e.data);
+          globalThis.__canal.port2.postMessage("recu:" + e.data);
+        };
+        globalThis.__canal.port1.onmessage = function (e) {
+          globalThis.__c.versUn.push(e.data);
+        };
+        for (let i = 0; i < 5; i++) globalThis.__canal.port1.postMessage(i);
+        """)
+        arrive = _bat_jusqua(doc, contexte, "globalThis.__c.versUn.length >= 5")
+        etat = json.loads(contexte.execute("JSON.stringify(globalThis.__c)"))
+        verifie("canal: les cinq messages ont fait l'aller-retour", arrive, etat)
+        egal("canal: dans l'ordre, a l'aller", etat.get("versDeux"),
+             [0, 1, 2, 3, 4])
+        egal("canal: et au retour", etat.get("versUn"),
+             ["recu:0", "recu:1", "recu:2", "recu:3", "recu:4"])
+
+        # Un port qui n'a pas demarre garde ses messages. C'est la difference
+        # entre `onmessage` — qui demarre le port — et `addEventListener` sans
+        # `start()`, qui, selon la norme, ne le demarre pas.
+        contexte.execute("""
+        globalThis.__d = { recus: [], avantStart: null };
+        globalThis.__canal2 = new MessageChannel();
+        globalThis.__canal2.port1.postMessage("garde-moi");
+        """)
+        for _ in range(10):
+            doc.rafraichis()
+        contexte.execute(
+            "globalThis.__d.avantStart = globalThis.__d.recus.length;"
+            "globalThis.__canal2.port2.addEventListener('message',"
+            "  function (e) { globalThis.__d.recus.push(e.data); });")
+        garde = _bat_jusqua(doc, contexte, "globalThis.__d.recus.length >= 1")
+        etat = json.loads(contexte.execute("JSON.stringify(globalThis.__d)"))
+        egal("canal: rien n'arrive avant l'ecoute", etat.get("avantStart"), 0)
+        verifie("canal: le message garde arrive au demarrage", garde, etat)
+        egal("canal: et c'est bien celui-la", etat.get("recus"), ["garde-moi"])
+
+        # Un port ferme ne transmet plus.
+        contexte.execute("""
+        globalThis.__e = [];
+        globalThis.__canal3 = new MessageChannel();
+        globalThis.__canal3.port2.onmessage = function (e) {
+          globalThis.__e.push(e.data);
+        };
+        globalThis.__canal3.port1.postMessage("avant");
+        """)
+        _bat_jusqua(doc, contexte, "globalThis.__e.length >= 1")
+        contexte.execute("globalThis.__canal3.port1.close();"
+                         "globalThis.__canal3.port1.postMessage('apres');")
+        for _ in range(20):
+            doc.rafraichis()
+        egal("canal: un port ferme ne transmet plus",
+             json.loads(contexte.execute("JSON.stringify(globalThis.__e)")),
+             ["avant"])
+
+        jalon("MESSAGE_CHANNEL", arrive and garde, etat)
+    finally:
+        doc.ferme_document()
+        arrete()
+
+
 def principal():
     import bojs
     print("QuickJS %s, CPython %s" % (bojs.version(), sys.version.split()[0]))
@@ -8168,6 +8550,9 @@ def principal():
         verifie_workers_temps_reel,
         verifie_workers_messagerie,
         verifie_workers_cycle_de_vie,
+        verifie_clonage_structure,
+        verifie_clonage_par_les_quatre_chemins,
+        verifie_canal_de_messages,
         verifie_tableau_de_bord,
         verifie_hote_reel,
     ):

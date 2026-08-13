@@ -149,6 +149,8 @@ JALONS = [
     ("WEB_WORKER_WEBSOCKET", "il ouvre une connexion permanente"),
     ("WEB_WORKER_MESSAGING", "les messages traversent, copies et dans l'ordre"),
     ("WEB_WORKER_LIFECYCLE", "terminate() rend tout, meme sur une boucle"),
+    ("STRUCTURED_CLONE", "ce qui ne se clone pas leve, au lieu de disparaitre"),
+    ("MESSAGE_CHANNEL", "deux ports se parlent par la file de taches"),
 ]
 
 CHEMIN_JALONS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
