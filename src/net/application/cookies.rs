@@ -1,5 +1,5 @@
 //! Pot de cookies en mémoire (session uniquement — pas de persistance disque,
-//! l'OS n'a pas encore de stockage persistant, voir docs/AUDIT.md).
+//! l'OS n'a pas encore de stockage persistant, voir docs/history/AUDIT.md).
 //!
 //! Suffisant pour les usages réels immédiats : consentements, préférences de
 //! langue/région (Google `NID`/`CONSENT`), sessions de connexion le temps du

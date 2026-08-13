@@ -1,52 +1,81 @@
-# Architecture cible du moteur Web Nautile
+# Les modules du moteur Web
 
-Cette découpe s'inspire des responsabilités visibles dans WebKit : une couche API
-WebView/navigation, puis un moteur interne séparant chargement réseau, parsing,
-DOM, style, layout, display list, painting, JavaScript et bindings DOM. La page
-Apple WebKit consultée demande JavaScript côté documentation, mais elle confirme
-le périmètre WebKit public : navigation, vues Web, configuration, scripts et
-interaction page/app.
+*Carte de `tools/userland/navigateur/moteur/`. La version precedente de ce
+document decrivait une decoupe visee pour un moteur ecrit en Rust **dans** le
+noyau (`web.rs`, `style.rs`, `paint.rs`) : ces fichiers n'existent plus, le
+moteur est du Python au-dessus de Qt et de QuickJS. L'ancienne carte est dans
+`docs/history/WEB_ENGINE_MODULES.md`.*
 
-## Modules nécessaires
+Chaque module porte une explication en tete de fichier qui dit ce qu'il fait et
+**pourquoi il est fait ainsi**. Ce tableau ne les remplace pas : il sert a
+trouver le bon fichier.
 
-- **loader / navigation** : résolution URL, historique, redirections, documents
-  internes (`about:*`), état de chargement.
-- **network / resource loader** : HTTP(S), cache, sous-ressources CSS/JS/images,
-  priorités et annulation.
-- **html tokenizer + tree builder** : tokenisation tolérante, correction de
-  balises mal fermées, modes d'insertion HTML.
-- **DOM** : nœuds, attributs, recherche, mutations, sérialisation, événements.
-- **CSS tokenizer/parser** : règles, at-rules, media/supports, déclarations,
-  valeurs (`calc`, couleurs, gradients, longueurs).
-- **style resolver** : cascade, spécificité, héritage, variables CSS, index de
-  sélecteurs et matching descendant.
-- **layout** : block/inline/flex/grid, fragmentation de lignes, box model,
-  positionnement, overflow/scroll containers.
-- **display list / stacking** : items peignables, z-index, stacking contexts,
-  clipping, transforms.
-- **paint/compositor** : clipping viewport, images, texte, fonds, bordures,
-  ombres, gradients, futurs layers composités.
-- **JavaScript engine** : lexer/parser/interpréteur, objets natifs, timers,
-  microtasks, erreurs récupérables.
-- **DOM bindings JS** : `document`, `window`, `Element`, événements,
-  mutations DOM, reflow/repaint après mutation.
-- **media/images/fonts** : PNG/JPEG/WebP/SVG, polices système et `@font-face`.
-- **diagnostic/devtools** : `about:log`, timings, compteurs DOM/CSS/layout/paint.
+## Le pipeline
 
-## Découpe engagée dans le code
+```text
+  URL ──► reseau ──► html ──► css ──► mise_en_page ──► peinture ──► pixels
+            │          │        │          │              │
+       securite    invalidation │      flex/grille    police/images
+       transport                │      tableau
+       stockage             intrinseque
+```
 
-- `web.rs` reste l'orchestrateur historique : pipeline HTML → CSS → layout → paint.
-- `style.rs` contient maintenant les structures de règles CSS et l'index de
-  matching (`Sel`, `Rule`, `CssIndex`).
-- `css_parser.rs` contient le parsing des feuilles CSS : declarations, selecteurs,
-  at-rules simples et production de `Rule`.
-- `css_values.rs` contient le parsing des valeurs CSS isolables du layout
-  (`transform` aujourd'hui, `calc`/couleurs/gradients demain).
-- `display_list.rs` contient maintenant les items peignables, les liens, les
-  layers et les transformations simples de fragments.
-- `paint.rs` contient la traversée de display list vers framebuffer : couches,
-  clipping viewport, texte/images/rectangles/coins arrondis.
+| Module | Role |
+|---|---|
+| `reseau.py` | HTTP, HTTPS, `file://`, pages internes, cache, redirections |
+| `transport.py` | par ou une ressource arrive : `Direct` ou `Courtier` |
+| `securite.py` | qui a le droit de demander quoi |
+| `prechargement.py` | les sous-ressources partent ensemble |
+| `html.py` | du texte a un arbre de nœuds |
+| `css.py` | analyse, specificite, cascade, heritage |
+| `invalidation.py` | ce qu'il faut refaire quand quelque chose change, et rien de plus |
+| `intrinseque.py` | ce qu'une boite demande avant qu'on lui donne quoi que ce soit |
+| `mise_en_page.py` | de l'arbre style aux boites positionnees |
+| `flex.py`, `grille.py`, `tableau.py` | les dispositions qui ont leur propre algorithme |
+| `peinture.py` | de l'arbre de boites a une liste d'affichage |
+| `police.py`, `images.py` | `@font-face` et `src` vers quelque chose que l'hote sait dessiner |
+| `animation.py` | ce qui fait qu'une page bouge |
 
-La suite naturelle est d'extraire progressivement `layout_block.rs`,
-`layout_inline.rs`, `html_parser.rs` et `dom_bindings.rs`, en gardant une
-compilation verte à chaque étape.
+## Le monde JavaScript
+
+| Module | Role |
+|---|---|
+| `js.py` | le JavaScript d'une page, branche sur l'arbre du moteur |
+| `worker.py` | un second monde JavaScript, sur son propre fil |
+| `prelude.js` | la surface globale d'une fenetre |
+| `prelude_worker.js` | celle d'un Worker, ecrite positivement et non par retrait |
+| `prelude_partage.js` | ce que les deux mondes ont en commun |
+| `prelude_clone.js` | le clonage structure, ecrit une fois pour les quatre chemins |
+
+## Les frontieres
+
+| Module | Role |
+|---|---|
+| `origine.py` | l'unite de confiance du Web |
+| `cors.py` | ce qu'un script a le droit de **lire** |
+| `contexte.py` | plusieurs mondes Web a la fois |
+| `cadres.py` | les `<iframe>` |
+
+## Le multiprocessus
+
+| Module | Role |
+|---|---|
+| `vue.py` | ce que le chrome voit d'une page, ou qu'elle vive |
+| `superviseur.py` | le cote navigateur : forke, applique la politique, courte les ressources |
+| `renderer.py` | le cote rendu : un moteur Web au bout d'une prise |
+| `protocole.py` | les trames echangees entre les deux |
+| `surface.py` | `memfd` + `MAP_SHARED`, deux tampons, une generation |
+| `privileges.py` | ce dont l'enfant n'herite pas, et ce qu'il peut encore |
+
+## La persistance et le reste
+
+| Module | Role |
+|---|---|
+| `stockage.py` | temoins, `localStorage`, cache HTTP |
+| `indexeddb.py` | la memoire d'une application Web |
+| `websocket.py` | la premiere connexion que la page garde ouverte |
+| `edition.py` | l'etat d'un champ editable |
+| `media.py` | audio et video, de la trame decodee a l'ecran |
+| `youtube.py`, `signature.py`, `lecteur_youtube.py` | extraire le flux plutot qu'executer l'application |
+| `distant.py` | afficher ce qu'un vrai Chromium a rendu ailleurs |
+| `telemetrie.py` | ce que la page a demande et que le moteur n'a pas su faire |

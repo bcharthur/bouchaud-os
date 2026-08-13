@@ -1,5 +1,14 @@
 # Feuille de route — compatibilité du navigateur Bouchaud
 
+> **État de ce document.** Sa partie *mesure* et sa partie *plan* restent
+> courantes : le WPT n'existe toujours pas, et les outils de suivi décrits ici
+> sont ceux qu'on lance aujourd'hui. Ses **inventaires de manques** ont en
+> revanche été rattrapés par le travail : `iframe`, WebSocket, Workers,
+> IndexedDB, Same-Origin Policy et le renderer séparé existent désormais et sont
+> éprouvés. Les passages concernés portent une note ; en cas de doute, la source
+> de vérité est `tools/userland/navigateur/tests/jalons.json`, écrit par les
+> épreuves, et le `README.md` de la racine.
+
 Ce document remplace l'intuition par la mesure. Chaque affirmation qu'il
 contient est reproductible avec les outils du dépôt :
 
@@ -60,13 +69,17 @@ des modules noyau sans rapport (`src/net`, `src/gui`).
 | CSS — priorité | `!important`, seconde passe de cascade |
 | Média | ffmpeg, H.264, MSE partiel, lecteur YouTube de substitution |
 
-### Ce qui n'existe pas
+### Ce qui n'existait pas au moment de cet inventaire
 
-`iframe` comme contexte de navigation (zéro occurrence dans `moteur/`),
-WebSocket, Workers, Service Workers, IndexedDB, CSP, SRI, Referrer-Policy,
-permissions, arbre d'accessibilité, impression, HTTP/2 côté navigateur,
-`ReadableStream`, `Blob`/`File`, annulation réelle de `fetch`/XHR, pointage du
-contenu positionné hors de son parent.
+> **Rattrapé depuis.** `iframe` comme contexte de navigation, WebSocket et WSS,
+> Web Workers, IndexedDB, ainsi que les origines et la Same-Origin Policy
+> existent et sont éprouvés — voir `jalons.json`. Le reste de la liste tient
+> toujours.
+
+Service Workers, CSP, SRI, Referrer-Policy, permissions, arbre
+d'accessibilité, impression, HTTP/2 côté navigateur, `ReadableStream`,
+`Blob`/`File`, annulation réelle de `fetch`/XHR, pointage du contenu positionné
+hors de son parent.
 
 ### Ce qui ne peut pas être vérifié ici
 
@@ -80,7 +93,7 @@ faut garder en tête à chaque chiffre de ce document.
 
 ## 2. Revue de l'audit Codex
 
-Lu intégralement (`docs/CODEX_BROWSER_AUDIT.md`, 499 lignes). Chaque constat
+Lu intégralement (`docs/history/CODEX_BROWSER_AUDIT.md`, 499 lignes). Chaque constat
 ci-dessous a été **revérifié dans le code** avant d'être classé. L'audit est
 sérieux : il ne s'est trompé sur aucun fait matériel que j'aie pu tester. Là où
 je diverge, c'est sur des priorités, pas sur des faits.
@@ -212,7 +225,9 @@ pré-vol + credentials à fetch/XHR/scripts/modules/images/styles » ne peut pas
 
 Trois raisons, dans l'ordre de force :
 
-1. *SOP protège une frontière qui n'existe pas encore.* La Same-Origin Policy
+1. *SOP protège une frontière qui n'existe pas encore.* **(Plus vrai : la SOP,
+   les origines et les contextes de navigation existent et sont éprouvés.)**
+   La Same-Origin Policy
    règle ce qu'un contexte de navigation peut lire d'un autre. Or le navigateur
    n'a ni `iframe`, ni fenêtre ouverte par script, ni Worker : il n'y a jamais
    deux origines vivantes en même temps dans un même processus. Le seul vecteur
@@ -245,6 +260,10 @@ attaquerait la troisième cause de lenteur en partant de la plus grosse
 complexité. Rangé P3, après que la mise en page soit descendue sous la seconde.
 
 **Désaccord 3 — le prototype de moteur de rendu séparé ne peut pas être en P1.**
+*(Tranché depuis : le travail noyau a bien été fait d'abord — mémoire partagée,
+IPC avec contre-pression, `RLIMIT_AS`, classes d'ordonnancement — et le renderer
+séparé est venu ensuite. Il n'est plus un prototype : c'est le chemin par défaut
+du navigateur. Voir `BROWSER_ISOLATION.md`.)*
 L'audit le propose « fondé sur l'IPC existant, derrière un drapeau ». Mais les
 primitives dont il dépend ne sont pas listées comme acquises : mémoire partagée
 entre processus, cycle de vie et terminaison forcée d'un processus fils, quotas,

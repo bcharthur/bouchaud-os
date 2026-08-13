@@ -44,3 +44,10 @@ tools/userland/build-verifie-hote/
 
 # Fichier de travail du tableau de bord, efface a la fin de chaque execution.
 tools/userland/navigateur/.suivi-observations.jsonl
+
+# Rapport de la sonde d'ordonnancement : ses chiffres sont ceux de la machine
+# qui l'a lancee, pas ceux du projet. Le versionner ferait passer la latence
+# d'un poste de developpement a plusieurs cœurs pour une propriete de l'OS.
+# `audit-privileges.json`, lui, est versionne : il porte des capacites, pas des
+# millisecondes.
+tools/userland/navigateur/tests/ordonnanceur-navigateur.json

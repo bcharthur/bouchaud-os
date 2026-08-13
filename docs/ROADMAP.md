@@ -3,6 +3,51 @@
 OS souverain francais experimental, from scratch, en Rust `no_std`.
 Etat des versions : `[x]` fait, `[~]` prepare/stub, `[ ]` planifie.
 
+Ce document est un **journal** : les sections anciennes disent ce qui a ete fait
+et quand, elles ne decrivent pas l'etat courant. Pour l'etat courant, voir le
+`README.md` de la racine ; pour les capacites du navigateur, une par une,
+`tools/userland/navigateur/tests/jalons.json`, ecrit par les epreuves.
+
+## V0.37 - Le navigateur reel tourne dans le renderer separe
+- [x] **La page que l'utilisateur ouvre vit dans un autre processus.**
+      `Navigateur.ouvre()` construisait son `Document` en-processus et lisait le
+      DOM a portee d'attribut ; le superviseur n'etait le backend de personne.
+      `moteur/vue.py` recolle les deux : `VueRenderer` par defaut, `VueLocale`
+      sous `BO_BROWSER_INPROCESS=1` comme outil de comparaison.
+- [x] **Le chrome ne lit plus le DOM.** Foyer (`FOCUS_CHANGED`), lien survole
+      (dans `CURSOR_CHANGED`), hauteur du document (dans `FRAME_READY`), clic,
+      navigation : tout passe par des messages. Entrees, defilement,
+      redimensionnement, titre, adresse et crash traversent la frontiere.
+- [x] **Crash depuis l'interface** : la fenetre vit, la derniere image reste,
+      l'etat dit « page crashee », le processus est recolte, la surface et la
+      prise sont rendues, F5 fabrique un renderer neuf. Jalon
+      `PRODUCT_RENDERER_CRASH_RECOVERY`.
+- [x] **Les ressources sont courtees.** `moteur/transport.py` pose un seuil
+      unique dans `reseau.charge` : sous courtage le renderer emet un
+      `FETCH_REQUEST`, et le navigateur applique la politique, lit les temoins,
+      ouvre la prise. `Direct` reste disponible pour comparer.
+- [x] **L'enfant n'herite plus de la table du parent.** `fork` sans `exec` la
+      copie entiere ; `FD_CLOEXEC` n'y peut rien. `moteur/privileges.py` enumere
+      et ferme. Batterie adversariale et tableau PASS/FAIL dans
+      `docs/RENDERER_PRIVILEGE_AUDIT.md`.
+- [x] **Une sonde d'ordonnancement dont la charge est un vrai renderer**
+      (`navigateur/ordonnanceur-navigateur.py`). Elle refuse de conclure quand
+      elle ne mesure rien, ce qui est le cas sur une machine a plusieurs cœurs.
+- [ ] **La jouer sous Bouchaud OS, sur un cœur.** C'est la mesure qui remplacera
+      la derniere inference de `BROWSER_ISOLATION.md`.
+- [ ] **Rendre le courtage asynchrone.** Le navigateur sert un `FETCH_REQUEST`
+      dans son pompage d'evenements : il gele son chrome le temps de
+      l'aller-retour. Goulot suivant.
+- [ ] **Un `execve` optionnel vers un binaire de renderer**, pour fermer les deux
+      capacites « par le nom » qui restent ouvertes (`open`, `socket`).
+- [ ] **Un runner WPT** sur une revision epinglee : `url/`, `dom/`, `events/`,
+      `html/semantics/forms/`, `fetch/`, `webstorage/`, `workers/`,
+      `html/browsers/`. Sortie PASS / FAIL / UNSUPPORTED, avec une definition
+      objective d'UNSUPPORTED.
+- [ ] **Deux frameworks reels vendorises**, version epinglee, licences
+      documentees. Le journal de compatibilite mesure ce qui manque.
+- [ ] **Un processus par origine.** Volontairement apres tout ce qui precede.
+
 ## V0.35 - Navigateur AUTONOME par defaut (Nautile), zero proxy
 - [x] Le bureau ouvre par defaut **Nautile**, le moteur web from-scratch de
       l'OS -> navigation **100% autonome**, aucun service externe requis.

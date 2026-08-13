@@ -9396,30 +9396,45 @@ def verifie_renderer_privileges():
             # Le rapport, ecrit a cote des jalons : le document ne doit pas
             # avoir a etre tenu a la main, et un audit recopie a la main est un
             # audit perime.
-            ecris_audit_privileges(resume_sale, resume_propre, garde,
-                                   tentatives, isinstance(refus, dict))
+            ecris_audit_privileges(resume_propre, tentatives,
+                                   isinstance(refus, dict), len(unix))
         finally:
             propre.ferme()
     finally:
         arrete()
 
 
-def ecris_audit_privileges(sans_balayage, avec_balayage, gardes, tentatives,
-                           navigation_refusee):
+def ecris_audit_privileges(apres_balayage, tentatives, navigation_refusee,
+                           prises_de_controle):
     """Depose le resultat de l'audit a cote des jalons, en JSON.
 
     Comme `jalons.json` : versionne, relu par la documentation, et jamais
     recopie a la main. Un tableau PASS/FAIL tenu a la main devient faux au
     premier changement que personne ne pense a y reporter.
+
+    **Des verdicts, pas des mesures.** Le premier jet deposait aussi
+    l'inventaire brut des deux cotes du `fork` — cinq prises reseau avant, zero
+    apres. C'etait interessant a lire et impossible a comparer : le nombre de
+    prises que le navigateur tient au moment du `fork` depend de ce qu'il vient
+    de faire, et le genre des descripteurs 0, 1 et 2 depend de la facon dont on
+    a lance le processus. Un fichier versionne dont le contenu bouge selon la
+    machine ne peut pas servir de reference, et la verification d'integration
+    qui le compare echouerait pour des raisons qui n'apprennent rien.
+
+    Ce qui est depose est donc ce qui doit **rester vrai partout** : aucune
+    prise reseau heritee, aucun fichier herite, une seule prise de controle, et
+    le verdict de chaque tentative.
     """
     chemin = os.environ.get("BO_AUDIT_PRIVILEGES")
     if not chemin:
         return
     rapport = {
-        "descripteurs_sans_balayage": sans_balayage,
-        "descripteurs_avec_balayage": avec_balayage,
-        "gardes": [{"genre": e["genre"], "cible": e["cible"]} for e in gardes],
-        "tentatives": tentatives,
+        "prises_reseau_heritees": apres_balayage.get("prise_reseau", 0),
+        "fichiers_herites": (apres_balayage.get("fichier", 0)
+                             + apres_balayage.get("repertoire", 0)),
+        "prises_de_controle": prises_de_controle,
+        "surfaces_accordees": apres_balayage.get("memfd", 0),
+        "tentatives": {t["capacite"]: bool(t["obtenu"]) for t in tentatives},
         "navigation_file_refusee": bool(navigation_refusee),
     }
     try:
