@@ -490,10 +490,22 @@ class Fixtures(http.server.BaseHTTPRequestHandler):
         return self.repond(200, "<pre id=recu>%s</pre>" % recu)
 
     def page(self, chemin):
-        """Sert une page temoin du depot, telle quelle."""
+        """Sert une page temoin du depot, telle quelle.
+
+        Les `.js` passent par ici aussi : un script de Worker doit venir d'une
+        adresse reelle et de la meme origine que la page. Le servir en ligne
+        aurait esquive precisement ce que l'epreuve doit verifier — que le
+        moteur va le chercher, et qu'il refuse d'aller le chercher ailleurs.
+        """
         nom = os.path.basename(chemin)
         fichier = os.path.join(PAGES, nom)
-        if not nom.endswith(".html") or not os.path.exists(fichier):
+        if not os.path.exists(fichier):
+            return self.repond(404, "<h1>404</h1><p>%s</p>" % nom)
+        if nom.endswith(".js"):
+            with open(fichier, "rb") as f:
+                return self.repond(200, f.read(),
+                                   "application/javascript; charset=utf-8")
+        if not nom.endswith(".html"):
             return self.repond(404, "<h1>404</h1><p>%s</p>" % nom)
         with open(fichier, "rb") as f:
             return self.repond(200, f.read())

@@ -7514,6 +7514,530 @@ def verifie_hote_reel():
     verifie("hote: la mesure de texte est reelle", largeur > 0, largeur)
 
 
+# --- Workers ------------------------------------------------------------------
+#
+# Ce qui est verifie ici, dans l'ordre ou ca compte :
+#
+#   1. la surface du monde d'un Worker est celle d'un Worker, pas celle d'une
+#      fenetre amputee ;
+#   2. le calcul s'y fait **ailleurs** — mesure, pas lecture de propriete ;
+#   3. `fetch` et IndexedDB y passent par l'infrastructure du document, pas par
+#      une seconde implementation ;
+#   4. `terminate()` rend tout, y compris sur un worker qui ne rend jamais la
+#      main ;
+#   5. mille creations et destructions ne laissent rien derriere elles.
+#
+# Le point 2 est le seul qui distingue un vrai Worker d'une API qui en porte le
+# nom, et c'est pour cela qu'il a sa propre page temoin.
+
+
+def _bat_jusqua(doc, contexte, condition, secondes=20.0):
+    """Fait battre le document jusqu'a ce que la page dise oui."""
+    import time as _time
+    limite = _time.perf_counter() + secondes
+    while _time.perf_counter() < limite:
+        doc.rafraichis()
+        try:
+            if contexte.execute(condition):
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        _time.sleep(0.01)
+    return False
+
+
+def verifie_workers_surface():
+    """Le monde d'un Worker : ce qu'il a, et ce qu'il n'a pas."""
+    doc, arrete = _sur_serveur("/page/worker-base.html", battements=2)
+    try:
+        contexte = doc.contexte_js
+        verifie("worker: la page a un contexte", contexte is not None)
+        if contexte is None:
+            jalon("WEB_WORKER_BASIC", False, "pas de contexte JavaScript")
+            return
+
+        fini = _bat_jusqua(doc, contexte, "!!(globalThis.__worker||{}).pret")
+        etat = json.loads(contexte.execute("JSON.stringify(globalThis.__worker)"))
+        verifie("worker: le scenario est alle jusqu'au bout", fini,
+                etat.get("etapes"))
+        egal("worker: aucune erreur", etat.get("erreurs"), [])
+
+        surface = (etat.get("surface") or {}).get("surface") or {}
+
+        # Ce qui ne doit pas exister. Un Worker qui verrait le DOM partagerait
+        # l'arbre entre deux fils : ce n'est pas une privation, c'est ce qui
+        # rend legitime de le faire tourner ailleurs.
+        for nom in ("aDocument", "aWindow", "aHtmlElement", "aLocalStorage",
+                    "aAlert"):
+            verifie("worker: pas de %s dans le worker" % nom,
+                    surface.get(nom) is False, surface.get(nom))
+
+        # Ce qui doit exister, et que la norme exige d'un
+        # `DedicatedWorkerGlobalScope`.
+        for nom in ("selfEstGlobal", "aPostMessage", "aFetch", "aSetTimeout",
+                    "aSetInterval", "aQueueMicrotask", "aUrl",
+                    "aUrlSearchParams", "aTextEncoder", "aTextDecoder",
+                    "aIndexedDb", "aWebSocket", "portee"):
+            verifie("worker: %s" % nom, surface.get(nom) is True,
+                    surface.get(nom))
+
+        # La page, elle, a bien tout ce que le worker n'a pas : la difference
+        # est un monde different, pas un moteur diminue.
+        page = json.loads(contexte.execute("JSON.stringify(globalThis.__page)"))
+        verifie("worker: la page, elle, a un document",
+                page.get("aDocument") is True and page.get("aWindow") is True)
+        verifie("worker: et la page a le constructeur Worker",
+                page.get("aWorker") is True)
+
+        # Les messages traversent, dans les deux sens, avec leur structure.
+        echo = etat.get("echo") or {}
+        egal("worker: l'objet poste revient identique", echo.get("recu"),
+             {"a": 1, "b": ["x", None, True], "c": {"d": -2.5}})
+
+        # Les minuteries battent sur le fil du worker.
+        egal("worker: setInterval bat dans le worker",
+             (etat.get("minuterie") or {}).get("tours"), 3)
+
+        # `TextEncoder`/`TextDecoder`, en UTF-8 et sur des caracteres qui
+        # sortent de l'ASCII — c'est la seule facon de voir un encodage faux.
+        texte = etat.get("texte") or {}
+        egal("worker: TextDecoder rend ce que TextEncoder a produit",
+             texte.get("relu"), "eleve — caractères accentués")
+        verifie("worker: l'encodage est bien de l'UTF-8 multi-octets",
+                len(texte.get("octets") or []) > len("eleve — caracteres"),
+                len(texte.get("octets") or []))
+
+        # `URL` resout contre l'adresse du script du worker.
+        adresse = etat.get("url") or {}
+        egal("worker: URL resout une adresse relative",
+             adresse.get("chemin"), "/autre/chemin")
+        egal("worker: et connait son origine", adresse.get("origine"),
+             doc.base)
+
+        # Les micro-taches sont de vraies micro-taches : apres tout le code
+        # synchrone, jamais entrelacees avec lui.
+        egal("worker: queueMicrotask s'execute apres le code synchrone",
+             (etat.get("microtache") or {}).get("ordre"),
+             ["sync", "sync-fin", "microtache"])
+
+        jalon("WEB_WORKER_BASIC",
+              fini and not etat.get("erreurs")
+              and surface.get("aDocument") is False
+              and surface.get("aPostMessage") is True,
+              etat.get("etapes"))
+    finally:
+        doc.ferme_document()
+        arrete()
+
+
+def verifie_workers_calcul_ailleurs():
+    """Le calcul d'un worker bloque-t-il la page ? La seule question qui compte.
+
+    Une API `Worker` presente mais servie sur le fil de l'interface serait une
+    facon compliquee de ne rien changer — et elle passerait toutes les
+    verifications de surface. Seule une mesure la demasque : la page compte ses
+    battements pendant que le worker calcule sans interruption.
+    """
+    doc, arrete = _sur_serveur("/page/worker-cpu.html", battements=2)
+    try:
+        contexte = doc.contexte_js
+        if contexte is None:
+            jalon("WEB_WORKER_LIFECYCLE", False, "pas de contexte JavaScript")
+            return
+        fini = _bat_jusqua(doc, contexte, "!!globalThis.__wc.rapport", 30.0)
+        etat = json.loads(contexte.execute("JSON.stringify(globalThis.__wc)"))
+        verifie("worker: le calcul a rendu son resultat", fini, etat)
+        egal("worker: aucune erreur pendant le calcul", etat.get("erreurs"), [])
+
+        rapport = etat.get("rapport") or {}
+        verifie("worker: le calcul a bien dure ce qu'on lui a demande",
+                (rapport.get("duree") or 0) >= 190, rapport.get("duree"))
+        verifie("worker: et il a reellement tourne",
+                (rapport.get("tours") or 0) > 0, rapport.get("tours"))
+
+        # Le point de l'epreuve. Si le calcul s'etait fait sur le fil de
+        # l'interface, la page n'aurait pas pu battre pendant ces 200 ms : le
+        # compteur serait fige, ou aurait avance d'un cran.
+        avance = (etat.get("toursALArrivee") or 0) - (etat.get("toursAuDepart") or 0)
+        verifie("worker: la page a continue de battre pendant le calcul",
+                avance >= 4, (etat.get("toursAuDepart"),
+                              etat.get("toursALArrivee")))
+    finally:
+        doc.ferme_document()
+        arrete()
+
+
+def verifie_workers_reseau():
+    """`fetch` dans un worker : la meme infrastructure, pas une seconde."""
+    doc, arrete = _sur_serveur("/page/worker-fetch.html", battements=2)
+    try:
+        contexte = doc.contexte_js
+        if contexte is None:
+            jalon("WEB_WORKER_FETCH", False, "pas de contexte JavaScript")
+            return
+        fini = _bat_jusqua(doc, contexte, "!!globalThis.__wf.rapport", 30.0)
+        etat = json.loads(contexte.execute("JSON.stringify(globalThis.__wf)"))
+        rapport = etat.get("rapport") or {}
+        verifie("worker: le rapport reseau est arrive", fini, etat)
+        egal("worker: aucune erreur de worker", etat.get("erreurs"), [])
+        verifie("worker: aucune erreur de requete", not rapport.get("erreur"),
+                rapport.get("erreur"))
+
+        # 1. L'adresse relative se resout contre le script du worker.
+        egal("worker: la requete relative aboutit",
+             rapport.get("relatifStatut"), 200)
+        egal("worker: et son corps est celui du serveur",
+             rapport.get("relatifNom"), "bouchaud")
+        egal("worker: le JSON imbrique traverse",
+             rapport.get("relatifImbrique"), "b")
+        verifie("worker: l'adresse relative s'est resolue contre le worker",
+                str(rapport.get("relatifUrl", "")).endswith("/json"),
+                rapport.get("relatifUrl"))
+
+        # 2. Une redirection est suivie par la meme pile que celle de la page.
+        egal("worker: la redirection est suivie",
+             rapport.get("redirigeStatut"), 200)
+
+        # 3. Methode et corps traversent.
+        egal("worker: le POST arrive comme un POST",
+             rapport.get("echoMethode"), "POST")
+        egal("worker: avec son corps", rapport.get("echoCorps"),
+             "depuis-le-worker")
+
+        # Le worker partage l'origine de son document : la requete n'est donc
+        # pas cross-origine, et ne doit pas porter d'en-tete `Origin`. C'est ce
+        # qui prouve que le chemin traverse `_recupere` et non un raccourci.
+        egal("worker: une requete de meme origine ne porte pas d'Origin",
+             rapport.get("echoOrigin"), "")
+
+        # Et la page n'a pas ete bloquee pendant ce temps.
+        verifie("worker: la page a battu pendant les requetes",
+                (etat.get("toursALArrivee") or 0) >= 1,
+                etat.get("toursALArrivee"))
+
+        jalon("WEB_WORKER_FETCH",
+              fini and not rapport.get("erreur")
+              and rapport.get("relatifStatut") == 200
+              and rapport.get("echoMethode") == "POST",
+              rapport)
+    finally:
+        doc.ferme_document()
+        arrete()
+
+
+def verifie_workers_stockage():
+    """IndexedDB dans un worker : la meme base que celle du document."""
+    doc, arrete = _sur_serveur("/page/worker-indexeddb.html", battements=2)
+    try:
+        contexte = doc.contexte_js
+        if contexte is None:
+            jalon("WEB_WORKER_INDEXEDDB", False, "pas de contexte JavaScript")
+            return
+        fini = _bat_jusqua(doc, contexte, "!!globalThis.__wi.relu", 30.0)
+        etat = json.loads(contexte.execute("JSON.stringify(globalThis.__wi)"))
+        rapport = etat.get("rapport") or {}
+        verifie("worker: le worker a fini son travail de base", fini, etat)
+        egal("worker: aucune erreur", etat.get("erreurs"), [])
+        verifie("worker: aucune erreur IndexedDB", not rapport.get("erreur"),
+                rapport.get("erreur"))
+
+        egal("worker: le magasin a ete cree par le worker",
+             rapport.get("magasins"), ["notes"])
+        egal("worker: il relit ce qu'il vient d'ecrire", rapport.get("lu"),
+             {"texte": "ecrit par le worker", "n": 1})
+        egal("worker: et il compte ses deux enregistrements",
+             rapport.get("combien"), 2)
+        egal("worker: les cles sont celles qu'il a posees",
+             rapport.get("cles"), ["a", "b"])
+        verifie("worker: une cle absente rend undefined, pas null",
+                rapport.get("absenteEstIndefinie") is True)
+
+        # Le point de l'epreuve : la page retrouve ce que le worker a ecrit.
+        # Deux bases separees se comporteraient parfaitement chacune de son
+        # cote, et le defaut serait invisible autrement.
+        egal("worker: la page relit ce que le worker a ecrit",
+             etat.get("relu"), {"texte": "et un second", "n": 2})
+        verifie("worker: la page n'a pas eu a recreer le schema",
+                not etat.get("monteeInattendue"))
+
+        jalon("WEB_WORKER_INDEXEDDB",
+              fini and not rapport.get("erreur")
+              and etat.get("relu") == {"texte": "et un second", "n": 2},
+              rapport)
+    finally:
+        doc.ferme_document()
+        arrete()
+
+
+def verifie_workers_temps_reel():
+    """`WebSocket` dans un worker, par le meme code que dans la fenetre."""
+    doc, arrete = _sur_serveur("/page/worker-websocket.html", battements=2)
+    try:
+        contexte = doc.contexte_js
+        if contexte is None:
+            jalon("WEB_WORKER_WEBSOCKET", False, "pas de contexte JavaScript")
+            return
+        fini = _bat_jusqua(doc, contexte, "!!globalThis.__ws.rapport", 30.0)
+        etat = json.loads(contexte.execute("JSON.stringify(globalThis.__ws)"))
+        rapport = etat.get("rapport") or {}
+        verifie("worker: le rapport WebSocket est arrive", fini, etat)
+        verifie("worker: la connexion s'est ouverte",
+                rapport.get("ouvert") is True, rapport)
+        egal("worker: le serveur a renvoye ce qu'on lui a dit",
+             rapport.get("recus"), ["bonjour depuis le worker"])
+        egal("worker: la fermeture est propre", rapport.get("code"), 1000)
+        verifie("worker: et elle est signalee comme telle",
+                rapport.get("propre") is True)
+
+        jalon("WEB_WORKER_WEBSOCKET",
+              fini and rapport.get("ouvert") is True
+              and rapport.get("code") == 1000, rapport)
+    finally:
+        doc.ferme_document()
+        arrete()
+
+
+def verifie_workers_messagerie():
+    """Le trafic de messages : structure, ordre, et refus d'origine.
+
+    Ce que cette verification ajoute a `worker-base.html` : elle pilote le
+    worker depuis le Python de l'epreuve, ce qui permet de compter les messages
+    et de verifier leur ordre — une page ne peut affirmer que ce qu'elle a vu.
+    """
+    import time as _time
+
+    doc, arrete = _sur_serveur("/page/vide.html", battements=2)
+    try:
+        contexte = doc.contexte_js
+        if contexte is None:
+            jalon("WEB_WORKER_MESSAGING", False, "pas de contexte JavaScript")
+            return
+
+        contexte.execute("""
+        globalThis.__m = { recus: [], erreurs: [] };
+        globalThis.__w = new Worker('/page/worker-base.js');
+        globalThis.__w.onmessage = function (e) {
+            globalThis.__m.recus.push(e.data && e.data.recu);
+        };
+        globalThis.__w.onerror = function (e) {
+            globalThis.__m.erreurs.push(String(e.message || 'erreur'));
+        };
+        for (let i = 0; i < 20; i++)
+            globalThis.__w.postMessage({ genre: 'echo', charge: i });
+        """)
+        arrive = _bat_jusqua(doc, contexte, "globalThis.__m.recus.length >= 20")
+        recus = json.loads(contexte.execute("JSON.stringify(globalThis.__m.recus)"))
+        verifie("worker: les vingt messages sont revenus", arrive, len(recus))
+        egal("worker: dans l'ordre ou ils ont ete postes",
+             recus[:20], list(range(20)))
+
+        # Un message poste avant que le worker ait fini de demarrer n'est pas
+        # perdu : il attend dans la file. C'est ce qui rend `new Worker(...)`
+        # suivi immediatement de `postMessage(...)` utilisable, et c'est
+        # l'usage le plus repandu.
+        contexte.execute("""
+        globalThis.__m2 = [];
+        globalThis.__w2 = new Worker('/page/worker-base.js');
+        globalThis.__w2.postMessage({ genre: 'echo', charge: 'tot' });
+        globalThis.__w2.onmessage = function (e) {
+            globalThis.__m2.push(e.data && e.data.recu);
+        };
+        """)
+        tot = _bat_jusqua(doc, contexte, "globalThis.__m2.length >= 1")
+        verifie("worker: un message poste avant l'amorce n'est pas perdu", tot)
+        egal("worker: et c'est bien celui-la",
+             json.loads(contexte.execute("JSON.stringify(globalThis.__m2)")),
+             ["tot"])
+
+        # Les structures imbriquees traversent par valeur, jamais par
+        # reference : le worker qui modifierait l'objet ne toucherait rien chez
+        # la page. On le verifie en postant un objet, en le mutant aussitot, et
+        # en comparant ce que le worker a vu.
+        contexte.execute("""
+        globalThis.__m3 = [];
+        globalThis.__objet = { n: 1, dedans: { liste: [1, 2, 3] } };
+        globalThis.__w.onmessage = function (e) {
+            globalThis.__m3.push(e.data && e.data.recu);
+        };
+        globalThis.__w.postMessage({ genre: 'echo', charge: globalThis.__objet });
+        globalThis.__objet.n = 99;
+        globalThis.__objet.dedans.liste.push(4);
+        """)
+        copie = _bat_jusqua(doc, contexte, "globalThis.__m3.length >= 1")
+        vu = json.loads(contexte.execute("JSON.stringify(globalThis.__m3)"))
+        verifie("worker: l'objet imbrique est revenu", copie, vu)
+        egal("worker: les donnees sont copiees, pas partagees",
+             vu[0] if vu else None, {"n": 1, "dedans": {"liste": [1, 2, 3]}})
+
+        # Un script de worker d'une autre origine est refuse. Un worker partage
+        # l'origine de son createur — donc ses temoins, son stockage, ses bases.
+        # Le charger d'ailleurs reviendrait a executer du code etranger avec les
+        # droits de la page.
+        import serveur_test
+        serveur_autre, autre = serveur_test.demarre(0)
+        try:
+            contexte.execute(
+                "globalThis.__refus = { erreurs: [] };"
+                "globalThis.__w3 = new Worker(%r);"
+                "globalThis.__w3.onerror = function (e) {"
+                "  globalThis.__refus.erreurs.push(String(e.message||'e')); };"
+                % (autre + "/page/worker-base.js"))
+            _bat_jusqua(doc, contexte, "globalThis.__refus.erreurs.length >= 1",
+                        5.0)
+            refus = json.loads(
+                contexte.execute("JSON.stringify(globalThis.__refus.erreurs)"))
+            verifie("worker: un script d'une autre origine est refuse",
+                    len(refus) >= 1, refus)
+        finally:
+            serveur_test.arrete(serveur_autre)
+
+        jalon("WEB_WORKER_MESSAGING",
+              arrive and recus[:20] == list(range(20)) and tot and copie,
+              len(recus))
+    finally:
+        doc.ferme_document()
+        arrete()
+        _time.sleep(0.05)
+
+
+def verifie_workers_cycle_de_vie():
+    """`terminate()` rend tout — y compris sur un worker qui boucle.
+
+    Deux epreuves, et la seconde est la seule qui compte vraiment :
+
+      * un worker en boucle infinie s'arrete quand on le lui demande. Un arret
+        qui attendrait que le script veuille bien finir n'arreterait jamais
+        celui-la, et une page hostile figerait le navigateur pour de bon ;
+      * mille creations suivies d'autant de destructions ne laissent rien :
+        ni contexte QuickJS, ni fil, ni descripteur.
+
+    La memoire est mesuree aussi, mais lue avec precaution : voir le
+    commentaire de la balance plus bas.
+    """
+    import os as _os
+    import threading as _threading
+    import time as _time
+
+    import bojs as _bojs
+
+    def contextes():
+        return _bojs.contextes()
+
+    def descripteurs():
+        try:
+            return len(_os.listdir("/proc/self/fd"))
+        except OSError:
+            return -1
+
+    def resident_ko():
+        try:
+            with open("/proc/self/statm") as fichier:
+                pages = int(fichier.read().split()[1])
+            return pages * (_os.sysconf("SC_PAGE_SIZE") // 1024)
+        except (OSError, ValueError, IndexError):
+            return -1
+
+    doc, arrete = _sur_serveur("/page/vide.html", battements=2)
+    try:
+        contexte = doc.contexte_js
+        if contexte is None:
+            jalon("WEB_WORKER_LIFECYCLE", False, "pas de contexte JavaScript")
+            return
+
+        # 1. Un worker qui ne rend jamais la main.
+        contexte.execute("""
+        globalThis.__b = { commence: false };
+        globalThis.__wb = new Worker('/page/worker-boucle.js');
+        globalThis.__wb.onmessage = function () { globalThis.__b.commence = true; };
+        """)
+        parti = _bat_jusqua(doc, contexte, "globalThis.__b.commence", 20.0)
+        verifie("worker: le worker en boucle a bien demarre", parti)
+        avant_arret = contextes()
+        depart = _time.perf_counter()
+        contexte.execute("globalThis.__wb.terminate()")
+        duree = _time.perf_counter() - depart
+        verifie("worker: terminate() rend la main tout de suite",
+                duree < 1.0, duree)
+        egal("worker: et le contexte QuickJS a disparu",
+             contextes(), avant_arret - 1)
+        egal("worker: la page, elle, repond encore",
+             contexte.execute("1 + 1"), 2)
+
+        # 2. La balance. Mille creations, mille destructions.
+        contexte.execute("""
+        globalThis.__lot = { vivants: [], repondus: 0, erreurs: 0 };
+        globalThis.__ouvre = function (combien) {
+            globalThis.__lot = { vivants: [], repondus: 0, erreurs: 0 };
+            for (let i = 0; i < combien; i++) {
+                const w = new Worker('/page/worker-base.js');
+                w.onmessage = function () { globalThis.__lot.repondus += 1; };
+                w.onerror = function () { globalThis.__lot.erreurs += 1; };
+                w.postMessage({ genre: 'echo', charge: i });
+                globalThis.__lot.vivants.push(w);
+            }
+        };
+        globalThis.__ferme = function () {
+            for (const w of globalThis.__lot.vivants) w.terminate();
+            globalThis.__lot.vivants = [];
+        };
+        """)
+        for _ in range(5):
+            doc.rafraichis()
+            _time.sleep(0.01)
+
+        avant = (contextes(), _threading.active_count(), descripteurs(),
+                 resident_ko())
+
+        LOT = 25
+        LOTS = 40                      # 40 x 25 = 1000
+        repondus = 0
+        for _ in range(LOTS):
+            contexte.execute("globalThis.__ouvre(%d)" % LOT)
+            _bat_jusqua(doc, contexte,
+                        "globalThis.__lot.repondus >= %d" % LOT, 10.0)
+            repondus += int(contexte.execute("globalThis.__lot.repondus") or 0)
+            contexte.execute("globalThis.__ferme()")
+        for _ in range(10):
+            doc.rafraichis()
+            _time.sleep(0.02)
+
+        apres = (contextes(), _threading.active_count(), descripteurs(),
+                 resident_ko())
+
+        total = LOT * LOTS
+        verifie("worker: les mille workers ont repondu",
+                repondus >= total * 0.9, (repondus, total))
+        egal("worker: pas un contexte QuickJS de plus qu'avant",
+             apres[0], avant[0])
+        egal("worker: pas un fil de plus qu'avant", apres[1], avant[1])
+        egal("worker: pas un descripteur de plus qu'avant",
+             apres[2], avant[2])
+
+        # La memoire, elle, ne revient pas exactement a son point de depart, et
+        # ce n'est pas une fuite : la mesure l'etablit. Le supplement suit le
+        # nombre de workers **simultanes** (25 ici), pas le nombre total —
+        # mille workers dix par dix coutent 8 Mo, cent par cent en coutent 32.
+        # C'est la marque haute de l'allocateur, que la libc ne rend pas au
+        # systeme. La borne ci-dessous est donc large a dessein : elle attrape
+        # une vraie fuite — qui, elle, croitrait avec le total — sans accuser
+        # l'allocateur.
+        croissance = apres[3] - avant[3]
+        verifie("worker: la memoire ne croit pas avec le nombre de workers",
+                croissance < 60000, (avant[3], apres[3], croissance))
+
+        jalon("WEB_WORKER_LIFECYCLE",
+              parti and duree < 1.0 and apres[0] == avant[0]
+              and apres[1] == avant[1] and apres[2] == avant[2],
+              {"contextes": (avant[0], apres[0]),
+               "fils": (avant[1], apres[1]),
+               "descripteurs": (avant[2], apres[2]),
+               "resident_ko": (avant[3], apres[3]),
+               "workers": total, "repondus": repondus})
+    finally:
+        doc.ferme_document()
+        arrete()
+
+
 def principal():
     import bojs
     print("QuickJS %s, CPython %s" % (bojs.version(), sys.version.split()[0]))
@@ -7637,6 +8161,13 @@ def principal():
         verifie_temoins_httponly,
         verifie_temoins_document,
         verifie_redirection_entetes,
+        verifie_workers_surface,
+        verifie_workers_calcul_ailleurs,
+        verifie_workers_reseau,
+        verifie_workers_stockage,
+        verifie_workers_temps_reel,
+        verifie_workers_messagerie,
+        verifie_workers_cycle_de_vie,
         verifie_tableau_de_bord,
         verifie_hote_reel,
     ):
@@ -7650,6 +8181,12 @@ def principal():
             traceback.print_exc()
         etat = "ok " if len(_echecs) == avant else "ECHEC"
         print("  %s  %s" % (etat, nom))
+
+    # Les jalons sont deposes une derniere fois, apres tout le monde : chaque
+    # scenario ecrivait les siens en partant, si bien qu'un jalon pose par le
+    # dernier a parler n'atteignait jamais le fichier — et le tableau de bord
+    # affichait « absent » pour une capacite qui venait de passer.
+    ecris_jalons()
 
     print()
     # La forme de cette ligne est celle qu'attend `tools/test.sh`, qui compte

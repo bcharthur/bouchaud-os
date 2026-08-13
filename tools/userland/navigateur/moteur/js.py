@@ -174,6 +174,10 @@ class Contexte:
         self._idb_fils = None
         # Les `postMessage` recus, en attente du prochain battement.
         self._messages = []
+        # Les Workers vivants de ce document, par identifiant. Chacun tient son
+        # propre fil et son propre runtime QuickJS ; ce dictionnaire n'est que
+        # la laisse qui permet de tous les rendre a la fermeture du document.
+        self._workers = {}
         # Les connexions WebSocket ouvertes par cette page, par identifiant.
         self._sockets = {}
         self._lecteurs = {}        # identifiant de nœud -> Lecteur
@@ -183,8 +187,13 @@ class Contexte:
         self._types_mse = {}       # identifiant MediaSource -> type MIME
         self._segments_mse = {}    # segments recus avant rattachement
 
-        with open(_chemin_prelude(), "r", encoding="utf-8") as f:
-            bojs.evalue(self._contexte, f.read(), "prelude.js")
+        # `prelude_partage.js` d'abord : il n'installe rien de lui-meme, il pose
+        # `__bo_installe_partage`, que `prelude.js` appelle avec les primitives
+        # d'evenement du document. Le meme fichier sert au Worker, avec les
+        # siennes.
+        for nom in ("prelude_partage.js", "prelude.js"):
+            with open(_chemin_prelude(nom), "r", encoding="utf-8") as f:
+                bojs.evalue(self._contexte, f.read(), nom)
 
     # --- Cycle de vie ---------------------------------------------------------
 
@@ -258,6 +267,7 @@ class Contexte:
                 self._minuteries.pop(identifiant, None)
 
         self._sockets_battent()
+        self._workers_battent()
 
         # Les lecteurs media avancent au meme rythme : decodage, son pousse
         # vers la carte, image retenue pour la peinture.
@@ -289,6 +299,16 @@ class Contexte:
         return self._appelle("__bo_evenement", [identifiant, type_, details or {}])
 
     def ferme(self):
+        # Les workers d'abord : chacun tient un fil, et un fil qui survit a son
+        # document est exactement la fuite qu'on veut ne jamais avoir. Un
+        # `terminate()` attend son fil, donc quand cette boucle finit, plus
+        # aucun runtime QuickJS de ce document n'existe.
+        for travailleur in list(self._workers.values()):
+            try:
+                travailleur.termine()
+            except Exception:  # noqa: BLE001
+                pass
+        self._workers.clear()
         for connexion in list(self._sockets.values()):
             try:
                 connexion.ferme(1001, "page quittee")
@@ -1223,6 +1243,95 @@ class Contexte:
         """Une adresse relative resolue contre celle du document."""
         return urllib.parse.urljoin(self.document.url, str(adresse or ""))
 
+    # --- Workers --------------------------------------------------------------
+    #
+    # Un Worker vit sur son propre fil, avec son propre runtime QuickJS. Ce que
+    # ce contexte-ci en garde tient en trois choses : la laisse qui permet de le
+    # tuer, les services qu'il emprunte, et la file par ou remontent ses
+    # messages. Tout le reste est dans [`worker`].
+
+    def _op_wkCree(self, identifiant, url):
+        """`new Worker(url)`.
+
+        Le script d'un worker doit etre de **la meme origine** que le document.
+        Ce n'est pas une precaution de plus : un worker partage l'origine de son
+        createur — donc ses temoins, son stockage, ses bases —, et le charger
+        depuis ailleurs reviendrait a executer du code etranger avec les droits
+        de la page. La verification est ici, cote Python, et pas dans le
+        prelude : une page ne se surveille pas elle-meme.
+        """
+        from . import worker as mod_worker
+
+        absolue = urllib.parse.urljoin(self.document.url, str(url))
+        mienne = mod_origine.Origine.de_url(self.document.url)
+        if not mod_origine.Origine.de_url(absolue).meme_origine(mienne):
+            self.note(telemetrie.SOP_REFUS, "worker", absolue)
+            self.journal("warn",
+                         "Worker : %s n'est pas de la meme origine" % absolue)
+            return False
+
+        identifiant = int(identifiant)
+        self._workers[identifiant] = mod_worker.Worker(
+            self, identifiant, absolue, journal=self.journal)
+        return True
+
+    def _op_wkPoste(self, identifiant, donnees):
+        travailleur = self._workers.get(int(identifiant))
+        return bool(travailleur and travailleur.poste(donnees))
+
+    def _op_wkTermine(self, identifiant):
+        travailleur = self._workers.pop(int(identifiant), None)
+        if travailleur is None:
+            return False
+        travailleur.termine()
+        return True
+
+    def _workers_battent(self):
+        """Livre a la page ce que ses workers ont dit.
+
+        Depuis `tic()`, donc depuis le fil de l'interface : un worker bavard ne
+        peut pas s'inserer entre deux lignes de la page qui l'ecoute.
+        """
+        for identifiant, travailleur in list(self._workers.items()):
+            for entree in travailleur.recolte():
+                self._appelle("__bo_worker_hote",
+                              [identifiant, entree[0]] + list(entree[1:]))
+            if not travailleur.vivant:
+                # `self.close()` depuis le worker : il s'est termine tout seul.
+                self._workers.pop(identifiant, None)
+
+    # -- Ce qu'un Worker emprunte a son document --
+    #
+    # Ces quatre methodes sont la frontiere. Un worker ne parle jamais
+    # directement a `reseau` ni a `indexeddb` : il passe par ici, donc par la
+    # meme politique et les memes fils que la page. C'est ce qui garantit qu'il
+    # n'existe qu'une implementation de Fetch et une seule de CORS.
+
+    def soumets_reseau(self, travail):
+        """Fait faire un travail reseau par le groupe de fils du document."""
+        self._pool().submit(travail)
+
+    def soumets_stockage(self, travail):
+        """Fait faire un travail de stockage par le fil unique du document.
+
+        Le meme fil que la page, et c'est voulu : IndexedDB exige que les
+        operations s'executent dans l'ordre ou elles ont ete emises, et un
+        second fil rendrait cet ordre indetermine entre un worker et son
+        document — qui, eux, partagent la base.
+        """
+        self._idb_pool().submit(travail)
+
+    def service_idb(self):
+        return self._idb_service()
+
+    def recupere_pour(self, methode, url, corps, entetes, avec_temoins):
+        """Le `fetch` d'un worker : exactement celui de la page."""
+        return self._recupere(methode, url, corps, entetes, avec_temoins)
+
+    def telecharge_worker(self, url):
+        """Le source d'un script de worker, ou `None`."""
+        return self._telecharge_script(url) or None
+
     # --- Soumission -----------------------------------------------------------
 
     def _op_soumets(self, identifiant, avec_evenement):
@@ -2113,9 +2222,9 @@ def _boite_de(boite, element):
     return None
 
 
-def _chemin_prelude():
+def _chemin_prelude(nom="prelude.js"):
     import os
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "prelude.js")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), nom)
 
 
 def _operation_toile(operation):

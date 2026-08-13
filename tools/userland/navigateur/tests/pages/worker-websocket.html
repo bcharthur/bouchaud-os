@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Worker : WebSocket</title>
+<!--
+  Le worker ouvre la connexion, envoie, recoit l'echo, ferme.
+
+  L'adresse du serveur d'epreuve change a chaque execution : la page la lit dans
+  son propre `location` et la transmet au worker. C'est aussi ce qui prouve que
+  le worker ne devine rien de son environnement — tout ce qu'il sait du monde
+  lui a ete donne.
+-->
+</head><body>
+<h1>WebSocket depuis un worker</h1>
+<pre id="journal">…</pre>
+<script>
+globalThis.__ws = { rapport: null, erreurs: [] };
+var travailleur = new Worker("/page/worker-websocket.js");
+travailleur.onerror = function (e) {
+  globalThis.__ws.erreurs.push(String(e.message || "erreur"));
+};
+travailleur.onmessage = function (evenement) {
+  globalThis.__ws.rapport = evenement.data;
+  var zone = document.getElementById("journal");
+  if (zone) zone.textContent = JSON.stringify(evenement.data);
+};
+travailleur.postMessage({ genre: "va",
+                          url: "ws://" + location.host + "/ws" });
+</script>
+</body></html>

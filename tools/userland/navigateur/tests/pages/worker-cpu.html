@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Worker : le calcul est ailleurs</title>
+<!--
+  La seule question a laquelle cette page repond : le calcul du worker
+  bloque-t-il la page ?
+
+  Le protocole est volontairement grossier, parce qu'un protocole subtil se
+  tromperait. La page pose une minuterie de 1 ms qui incremente un compteur, et
+  demande au worker de calculer sans interruption pendant 200 ms. Ensuite :
+
+    * si le compteur a beaucoup avance pendant le calcul, la page a continue
+      de battre — le worker est ailleurs ;
+    * s'il n'a pas bouge, le calcul s'est fait sur le fil de l'interface, et
+      l'API `Worker` est un mensonge.
+
+  Il n'y a pas de troisieme lecture. C'est pour cela que cette page existe
+  separement de `worker-base.html` : celle-la lit des proprietes, celle-ci
+  mesure.
+-->
+</head><body>
+<h1>Le calcul est-il ailleurs ?</h1>
+<pre id="journal">…</pre>
+<script>
+globalThis.__wc = {
+  tours: 0,           // battements de la page pendant tout le scenario
+  toursAuDepart: -1,  // au moment ou le calcul est lance
+  toursALArrivee: -1, // au moment ou le worker rend son resultat
+  rapport: null,
+  erreurs: [],
+};
+
+setInterval(function () { globalThis.__wc.tours += 1; }, 1);
+
+var travailleur = new Worker("/page/worker-cpu.js");
+travailleur.onerror = function (e) {
+  globalThis.__wc.erreurs.push(String(e.message || "erreur"));
+};
+travailleur.onmessage = function (evenement) {
+  globalThis.__wc.rapport = evenement.data;
+  globalThis.__wc.toursALArrivee = globalThis.__wc.tours;
+  var zone = document.getElementById("journal");
+  if (zone) zone.textContent = JSON.stringify(evenement.data);
+};
+
+// Le calcul demarre au premier battement de la page, pas a l'analyse : on veut
+// que le compteur soit deja en marche quand il commence.
+setTimeout(function () {
+  globalThis.__wc.toursAuDepart = globalThis.__wc.tours;
+  travailleur.postMessage({ genre: "calcule", ms: 200 });
+}, 5);
+</script>
+</body></html>

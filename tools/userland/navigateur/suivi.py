@@ -143,6 +143,12 @@ JALONS = [
     ("CANVAS_ORIGIN_CLEAN", "une toile contaminee ne se relit pas"),
     ("WSS", "un WebSocket chiffre, avec verification du certificat"),
     ("WEBSOCKET_SUBPROTOCOL", "le sous-protocole se negocie"),
+    ("WEB_WORKER_BASIC", "un Worker vit dans son propre monde"),
+    ("WEB_WORKER_FETCH", "il fait du reseau par la pile du document"),
+    ("WEB_WORKER_INDEXEDDB", "il partage la base de son origine"),
+    ("WEB_WORKER_WEBSOCKET", "il ouvre une connexion permanente"),
+    ("WEB_WORKER_MESSAGING", "les messages traversent, copies et dans l'ordre"),
+    ("WEB_WORKER_LIFECYCLE", "terminate() rend tout, meme sur une boucle"),
 ]
 
 CHEMIN_JALONS = os.path.join(os.path.dirname(os.path.abspath(__file__)),

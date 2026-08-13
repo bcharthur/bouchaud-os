@@ -2682,35 +2682,64 @@
         }
     };
 
-    // --- WebSocket ----------------------------------------------------------
+    // --- WebSocket et IndexedDB ---------------------------------------------
     //
-    // La premiere connexion que la page garde ouverte. Tout le reste du reseau
-    // est un aller-retour ; ici le serveur parle quand il veut, et ce qu'il dit
-    // arrive au battement de la boucle d'evenements — jamais au milieu d'un
-    // script.
+    // Les deux surfaces que la fenetre partage mot pour mot avec un Worker.
+    // Elles vivent dans `prelude_partage.js`, evalue juste avant celui-ci, et
+    // s'installent ici avec les primitives d'evenement du document. Le Worker
+    // les installe avec les siennes ; le code, lui, est le meme des deux cotes.
+    __bo_installe_partage({
+        appel: appel,
+        Event: Event,
+        attache: function (cible, type, f, o) {
+            Nœud.prototype.addEventListener.call(cible, type, f, o);
+        },
+        detache: function (cible, type, f, o) {
+            Nœud.prototype.removeEventListener.call(cible, type, f, o);
+        },
+        emet: function (cible, evenement) {
+            for (const f of ecouteursDe(cible, evenement.type, false))
+                invoque(f, cible, evenement);
+            const propre = "on" + evenement.type;
+            if (typeof cible[propre] === "function") {
+                try { cible[propre].call(cible, evenement); }
+                catch (e) { console.error(e); }
+            }
+        },
+    });
 
-    const sockets = new Map();
-    let prochainSocket = 1;
+    // --- Worker -------------------------------------------------------------
+    //
+    // La page ne voit qu'un entier : son worker vit cote Python, sur un autre
+    // fil, avec son propre runtime QuickJS. C'est volontaire — un objet
+    // JavaScript qui designerait le monde d'en face serait exactement le
+    // partage qu'un Worker existe pour eviter.
+    //
+    // Les donnees qui traversent sont **copiees**, jamais partagees : elles
+    // passent par Python, ce qui les reduit a des valeurs — nombres, chaines,
+    // tableaux, objets simples. Aucune reference ne survit au passage.
 
-    class WebSocket {
-        constructor(url, protocoles) {
-            this.url = String(url);
-            this.readyState = 0;              // CONNECTING
-            this.bufferedAmount = 0;
-            this.extensions = "";
-            this.protocol = "";
-            this.binaryType = "blob";
-            this.onopen = null;
+    const travailleurs = new Map();
+    let prochainTravailleur = 1;
+
+    class Worker {
+        constructor(url) {
+            this.__id = prochainTravailleur++;
+            this.__ecouteurs = new Map();
             this.onmessage = null;
             this.onerror = null;
-            this.onclose = null;
-            this.__ecouteurs = new Map();
-            this.__id = prochainSocket++;
-            sockets.set(this.__id, this);
-            const liste = protocoles === undefined ? []
-                : (Array.isArray(protocoles) ? protocoles.map(String)
-                                             : [String(protocoles)]);
-            appel("ouvreSocket", this.__id, this.url, liste);
+            this.onmessageerror = null;
+            travailleurs.set(this.__id, this);
+            if (!appel("wkCree", this.__id, String(url))) {
+                // Origine refusee, ou script introuvable : la page l'apprend
+                // par un `error`, au battement suivant. Jeter ici ferait
+                // tomber le constructeur, ce que la norme ne prevoit pas.
+                travailleurs.delete(this.__id);
+                const objet = this;
+                setTimeout(function () {
+                    objet.__recoit("erreur", "Worker refuse : " + url, "");
+                }, 0);
+            }
         }
 
         addEventListener(type, f, o) {
@@ -2720,44 +2749,38 @@
             Nœud.prototype.removeEventListener.call(this, type, f, o);
         }
 
-        send(donnees) {
-            if (this.readyState !== 1)
-                throw new Error("WebSocket: la connexion n'est pas ouverte");
-            appel("envoieSocket", this.__id,
-                  typeof donnees === "string" ? donnees : Array.from(donnees));
+        postMessage(donnees, transfert) {
+            void transfert;
+            appel("wkPoste", this.__id, donnees === undefined ? null : donnees);
         }
 
-        close(code, raison) {
-            if (this.readyState === 2 || this.readyState === 3) return;
-            this.readyState = 2;              // CLOSING
-            appel("fermeSocket", this.__id, code === undefined ? 1000 : code,
-                  raison === undefined ? "" : String(raison));
+        terminate() {
+            travailleurs.delete(this.__id);
+            appel("wkTermine", this.__id);
         }
 
-        __recoit(type, charge) {
+        __recoit(genre, a, b) {
             let evenement;
-            if (type === "message") {
+            if (genre === "message") {
                 evenement = new Event("message");
-                evenement.data = charge;
-                evenement.origin = this.url;
-                this.readyState = 1;
-            } else if (type === "open") {
-                this.readyState = 1;
-                // Le sous-protocole retenu par le serveur. La page le lit dans
-                // `onopen` pour savoir quelle langue parler — le lire plus tard
-                // serait trop tard.
-                this.protocol = (charge && charge.protocole) || "";
-                evenement = new Event("open");
-            } else if (type === "close") {
-                this.readyState = 3;          // CLOSED
-                evenement = new Event("close");
-                evenement.code = (charge && charge.code) || 1006;
-                evenement.reason = (charge && charge.raison) || "";
-                evenement.wasClean = !!(charge && charge.propre);
-                sockets.delete(this.__id);
-            } else {
+                evenement.data = a;
+                evenement.origin = location.origin;
+                evenement.source = null;
+                evenement.ports = [];
+            } else if (genre === "erreur") {
                 evenement = new Event("error");
-                evenement.message = String(charge || "");
+                evenement.message = String(a || "");
+                evenement.filename = "";
+                evenement.lineno = 0;
+                evenement.error = null;
+                evenement.__pile = String(b || "");
+            } else {
+                // `console.log` depuis le worker : il remonte au journal du
+                // navigateur, pas a la page. Une page qui verrait les traces de
+                // son worker sous forme d'evenements ne saurait qu'en faire.
+                console[a === "error" ? "error" : (a === "warn" ? "warn" : "log")](
+                    "[worker] " + String(b));
+                return;
             }
             for (const f of ecouteursDe(this, evenement.type, false))
                 invoque(f, this, evenement);
@@ -2769,16 +2792,12 @@
         }
     }
 
-    WebSocket.CONNECTING = 0;
-    WebSocket.OPEN = 1;
-    WebSocket.CLOSING = 2;
-    WebSocket.CLOSED = 3;
-    WebSocket.prototype.CONNECTING = 0;
-    WebSocket.prototype.OPEN = 1;
-    WebSocket.prototype.CLOSING = 2;
-    WebSocket.prototype.CLOSED = 3;
+    globalThis.Worker = Worker;
 
-    globalThis.WebSocket = WebSocket;
+    globalThis.__bo_worker_hote = function (identifiant, genre, a, b) {
+        const travailleur = travailleurs.get(identifiant);
+        if (travailleur) travailleur.__recoit(genre, a, b);
+    };
 
     // --- iframe : contentWindow et contentDocument --------------------------
     //
@@ -2823,356 +2842,6 @@
         }
     };
 
-    globalThis.__bo_socket = function (identifiant, type, charge) {
-        const connexion = sockets.get(identifiant);
-        if (connexion) connexion.__recoit(type, charge);
-    };
-
-    // --- IndexedDB ----------------------------------------------------------
-    //
-    // La memoire d'une application Web. `localStorage` ne range que des
-    // chaines, n'a ni transaction ni requete asynchrone, et bloque le fil de
-    // l'interface a chaque ecriture ; une application qui garde son etat hors
-    // ligne a besoin de l'autre.
-    //
-    // Tout ici rend **immediatement** une `IDBRequest` vide et rend la main.
-    // Le travail se fait sur un fil, et son resultat arrive au battement
-    // suivant de la boucle d'evenements — donc jamais au milieu d'un script.
-    // C'est la meme discipline que le reseau, et c'est ce qui permet a une page
-    // d'ecrire mille enregistrements sans que ses minuteries s'arretent.
-
-    const requetesIdb = new Map();
-    let prochaineRequeteIdb = 1;
-
-    function evenementIdb(type, cible) {
-        const evenement = new Event(type);
-        // La norme veut `target` **et** `currentTarget` : du code reel lit
-        // indifferemment l'un ou l'autre, et n'en trouver qu'un le fait tomber
-        // sur `undefined.result`.
-        try {
-            Object.defineProperty(evenement, "target", { value: cible });
-            Object.defineProperty(evenement, "currentTarget", { value: cible });
-        } catch (e) { /* deja defini */ }
-        return evenement;
-    }
-
-    class IDBRequest {
-        constructor() {
-            this.result = undefined;
-            this.error = null;
-            this.readyState = "pending";
-            this.onsuccess = null;
-            this.onerror = null;
-            this.onupgradeneeded = null;
-            this.onblocked = null;
-            this.transaction = null;
-            this.source = null;
-            this.__ecouteurs = new Map();
-            this.__id = prochaineRequeteIdb++;
-            requetesIdb.set(this.__id, this);
-        }
-
-        addEventListener(type, f, o) {
-            Nœud.prototype.addEventListener.call(this, type, f, o);
-        }
-        removeEventListener(type, f, o) {
-            Nœud.prototype.removeEventListener.call(this, type, f, o);
-        }
-
-        __emet(type) {
-            const evenement = evenementIdb(type, this);
-            for (const f of ecouteursDe(this, type, false))
-                invoque(f, this, evenement);
-            const propre = "on" + type;
-            if (typeof this[propre] === "function") {
-                try { this[propre](evenement); }
-                catch (e) { console.error(e); }
-            }
-            return evenement;
-        }
-
-        __reussit(valeur) {
-            // Cote Python il n'y a qu'un `None`, qui traverse le pont en
-            // `null`. IndexedDB, lui, distingue « absent » (`undefined`) de
-            // « range a null ». Le marqueur retablit la distinction : une page
-            // qui teste `if (r.result === undefined)` pour decider s'il faut
-            // creer l'enregistrement doit voir la difference.
-            if (valeur && typeof valeur === "object" && valeur.__bo_absent)
-                valeur = undefined;
-            this.result = valeur;
-            this.readyState = "done";
-            this.__emet("success");
-        }
-
-        __echoue(erreur) {
-            // `error` est un objet, pas une chaine : du code reel lit
-            // `request.error.name` pour distinguer une contrainte violee d'un
-            // quota depasse.
-            const objet = new Error(erreur && erreur.message || "erreur IndexedDB");
-            objet.name = (erreur && erreur.nom) || "UnknownError";
-            this.error = objet;
-            this.readyState = "done";
-            this.__emet("error");
-        }
-    }
-
-    class IDBObjectStore {
-        constructor(transaction, nom) {
-            this.__transaction = transaction;
-            this.name = nom;
-            this.keyPath = null;
-            this.autoIncrement = false;
-            this.indexNames = [];
-        }
-
-        get transaction() { return this.__transaction; }
-
-        __operation(verbe, cle, valeur) {
-            const requete = new IDBRequest();
-            requete.source = this;
-            requete.transaction = this.__transaction;
-            this.__transaction.__enregistre(requete);
-            appel("idbOperation", requete.__id, this.__transaction.__jeton,
-                  verbe, this.name,
-                  cle === undefined ? null : cle,
-                  valeur === undefined ? null : valeur);
-            return requete;
-        }
-
-        // `put` remplace, `add` refuse une cle deja prise. La distinction n'est
-        // pas cosmetique : `add` est ce qui protege d'un doublon quand deux
-        // chemins de code enregistrent le meme objet.
-        put(valeur, cle) { return this.__operation("put", cle, valeur); }
-        add(valeur, cle) { return this.__operation("add", cle, valeur); }
-        get(cle) { return this.__operation("get", cle, null); }
-        delete(cle) { return this.__operation("delete", cle, null); }
-        clear() { return this.__operation("clear", null, null); }
-        count() { return this.__operation("count", null, null); }
-        getAll() { return this.__operation("getAll", null, null); }
-        getAllKeys() { return this.__operation("getAllKeys", null, null); }
-    }
-
-    class IDBTransaction {
-        constructor(base, magasins, mode) {
-            this.db = base;
-            this.mode = mode;
-            this.objectStoreNames = magasins;
-            this.error = null;
-            this.oncomplete = null;
-            this.onerror = null;
-            this.onabort = null;
-            this.__ecouteurs = new Map();
-            this.__jeton = null;
-            this.__enAttente = 0;
-            this.__terminee = false;
-            this.__echouee = false;
-        }
-
-        addEventListener(type, f, o) {
-            Nœud.prototype.addEventListener.call(this, type, f, o);
-        }
-        removeEventListener(type, f, o) {
-            Nœud.prototype.removeEventListener.call(this, type, f, o);
-        }
-
-        objectStore(nom) { return new IDBObjectStore(this, nom); }
-
-        __enregistre(requete) {
-            this.__enAttente += 1;
-            const transaction = this;
-            requete.addEventListener("success", function () {
-                transaction.__unDeMoins(false);
-            });
-            requete.addEventListener("error", function () {
-                transaction.__unDeMoins(true);
-            });
-        }
-
-        // La transaction se valide toute seule quand sa derniere requete est
-        // revenue. C'est ce que fait un vrai IndexedDB, et c'est ce qui evite a
-        // la page d'avoir a appeler un `commit()` que la norme ne demande pas.
-        __unDeMoins(echec) {
-            if (echec) this.__echouee = true;
-            this.__enAttente -= 1;
-            if (this.__enAttente <= 0 && !this.__terminee) this.__conclut();
-        }
-
-        __conclut() {
-            if (this.__terminee) return;
-            this.__terminee = true;
-            const valide = !this.__echouee;
-            const transaction = this;
-            const fin = new IDBRequest();
-            fin.addEventListener("success", function () {
-                transaction.__emet(valide ? "complete" : "abort");
-            });
-            fin.addEventListener("error", function () {
-                transaction.__emet("abort");
-            });
-            appel("idbTermine", fin.__id, this.__jeton, valide);
-        }
-
-        // Une transaction abandonnee ne laisse **rien** derriere elle : ni la
-        // moitie de ses ecritures, ni un magasin a moitie vide.
-        abort() {
-            if (this.__terminee) return;
-            this.__echouee = true;
-            this.__conclut();
-        }
-
-        __emet(type) {
-            const evenement = evenementIdb(type, this);
-            for (const f of ecouteursDe(this, type, false))
-                invoque(f, this, evenement);
-            const propre = "on" + type;
-            if (typeof this[propre] === "function") {
-                try { this[propre](evenement); }
-                catch (e) { console.error(e); }
-            }
-        }
-    }
-
-    class IDBDatabase {
-        constructor(nom, version, magasins) {
-            this.name = nom;
-            this.version = version;
-            this.objectStoreNames = magasins || [];
-            this.onversionchange = null;
-            this.onclose = null;
-            this.__ecouteurs = new Map();
-            // Ce que `onupgradeneeded` a demande, pas encore ecrit.
-            this.__creations = [];
-            this.__suppressions = [];
-            this.__enMontee = false;
-        }
-
-        addEventListener(type, f, o) {
-            Nœud.prototype.addEventListener.call(this, type, f, o);
-        }
-        removeEventListener(type, f, o) {
-            Nœud.prototype.removeEventListener.call(this, type, f, o);
-        }
-
-        createObjectStore(nom, options) {
-            if (!this.__enMontee)
-                throw new Error("createObjectStore hors de onupgradeneeded");
-            nom = String(nom);
-            this.__creations.push([nom, options || {}]);
-            if (this.objectStoreNames.indexOf(nom) < 0)
-                this.objectStoreNames.push(nom);
-            // Le magasin est utilisable tout de suite du point de vue de la
-            // page : c'est ce que fait un vrai IndexedDB pendant une montee.
-            return new IDBObjectStore(null, nom);
-        }
-
-        deleteObjectStore(nom) {
-            if (!this.__enMontee)
-                throw new Error("deleteObjectStore hors de onupgradeneeded");
-            nom = String(nom);
-            this.__suppressions.push(nom);
-            const rang = this.objectStoreNames.indexOf(nom);
-            if (rang >= 0) this.objectStoreNames.splice(rang, 1);
-        }
-
-        transaction(magasins, mode) {
-            const liste = Array.isArray(magasins) ? magasins.map(String)
-                                                  : [String(magasins)];
-            const t = new IDBTransaction(this, liste,
-                                         mode === "readwrite" ? "readwrite"
-                                                              : "readonly");
-            // Le jeton est attribue cote Python ; l'appel le rend directement,
-            // ce qui evite d'avoir a differer les operations qui suivent.
-            const ouverture = new IDBRequest();
-            t.__jeton = appel("idbTransaction", ouverture.__id, this.name, t.mode);
-            return t;
-        }
-
-        close() { /* rien a fermer : les bases ne tiennent pas de descripteur */ }
-    }
-
-    class IDBFactory {
-        open(nom, version) {
-            const requete = new IDBRequest();
-            requete.__base = String(nom);
-            requete.__versionDemandee = version === undefined ? null : Number(version);
-            requete.__etape = "ouverture";
-            appel("idbOuvre", requete.__id, requete.__base,
-                  requete.__versionDemandee);
-            return requete;
-        }
-
-        deleteDatabase(nom) {
-            const requete = new IDBRequest();
-            requete.__etape = "suppression";
-            appel("idbSupprime", requete.__id, String(nom));
-            return requete;
-        }
-
-        cmp(a, b) { return a < b ? -1 : (a > b ? 1 : 0); }
-    }
-
-    globalThis.IDBRequest = IDBRequest;
-    globalThis.IDBDatabase = IDBDatabase;
-    globalThis.IDBTransaction = IDBTransaction;
-    globalThis.IDBObjectStore = IDBObjectStore;
-    globalThis.IDBFactory = IDBFactory;
-    globalThis.indexedDB = new IDBFactory();
-
-    // Le retour des fils de travail. Une seule porte d'entree, appelee par
-    // `tic()` : rien de ce qui suit ne s'execute au milieu d'un script.
-    globalThis.__bo_idb = function (identifiant, resultat, erreur) {
-        const requete = requetesIdb.get(identifiant);
-        if (!requete) return;
-        requetesIdb.delete(identifiant);
-        if (erreur) { requete.__echoue(erreur); return; }
-
-        if (requete.__etape === "ouverture") {
-            const base = new IDBDatabase(requete.__base, resultat.cible,
-                                         resultat.magasins);
-            if (resultat.montee) {
-                // `onupgradeneeded` d'abord, `onsuccess` seulement une fois la
-                // montee ecrite. L'ordre n'est pas negociable : une page qui
-                // recevrait `onsuccess` avant que ses magasins existent
-                // ouvrirait une transaction sur du vide.
-                base.__enMontee = true;
-                requete.result = base;
-                requete.__ancienneVersion = resultat.version;
-                const evenement = evenementIdb("upgradeneeded", requete);
-                evenement.oldVersion = resultat.version;
-                evenement.newVersion = resultat.cible;
-                for (const f of ecouteursDe(requete, "upgradeneeded", false))
-                    invoque(f, requete, evenement);
-                if (typeof requete.onupgradeneeded === "function") {
-                    try { requete.onupgradeneeded(evenement); }
-                    catch (e) { console.error(e); }
-                }
-                base.__enMontee = false;
-
-                const suite = new IDBRequest();
-                suite.__etape = "montee";
-                suite.__baseObjet = base;
-                suite.__origine = requete;
-                suite.addEventListener("success", function () {
-                    base.version = suite.result.version;
-                    base.objectStoreNames = suite.result.magasins;
-                    requete.__reussit(base);
-                });
-                suite.addEventListener("error", function () {
-                    requete.__echoue({ nom: suite.error.name,
-                                       message: suite.error.message });
-                });
-                appel("idbMonte", suite.__id, base.name, resultat.cible,
-                      base.__creations, base.__suppressions);
-                base.__creations = [];
-                base.__suppressions = [];
-                return;
-            }
-            requete.__reussit(base);
-            return;
-        }
-        requete.__reussit(resultat);
-    };
-
     // --- Mesure de compatibilite --------------------------------------------
     //
     // Le moteur ne sait pas tout faire, et jusqu'ici il ne savait pas dire ce
@@ -3206,7 +2875,7 @@
     }
 
     const NOMS_FENETRE = [
-        "WebSocket", "EventSource", "Worker", "SharedWorker", "ServiceWorker",
+        "EventSource", "SharedWorker", "ServiceWorker",
         "indexedDB", "IDBFactory", "IDBKeyRange", "caches", "CacheStorage",
         "BroadcastChannel", "MessageChannel", "MessagePort", "SharedArrayBuffer",
         "Notification", "PushManager", "RTCPeerConnection", "WebGLRenderingContext",

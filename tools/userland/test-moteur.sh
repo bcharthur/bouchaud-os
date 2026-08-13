@@ -27,10 +27,22 @@ mkdir -p "$WORK"
 }
 
 # --- Le module `bojs`, pour le Python de cette machine -----------------------
+#
+# Les en-tetes viennent de l'interprete **qui va executer le module**, pas de
+# `python3-config`. Sur cette machine les deux divergeaient — en-tetes 3.12,
+# interprete 3.11 —, et la consequence n'etait pas une erreur de compilation
+# mais quelque chose de bien pire : depuis 3.12, `Py_INCREF(Py_None)` ne fait
+# rien parce que `None` y est immortel, tandis que le `Py_DECREF` du 3.11 qui
+# executait, lui, decrementait pour de bon. Chaque fonction rendant `None`
+# perdait donc une reference, et l'interprete mourait a la sortie sur
+# « deallocating None ». Un module compile contre les en-tetes du mauvais
+# interprete ne se signale jamais autrement que par ce genre de defaut — tardif,
+# non reproductible, et qui accuse le mauvais code.
+INCLUDE_PY=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["include"])')
 if [ ! -f "$WORK/bojs.so" ] || [ navigateur/bojs.cpp -nt "$WORK/bojs.so" ]; then
-    echo "== compilation de bojs pour le Python local =="
+    echo "== compilation de bojs pour le Python local ($INCLUDE_PY) =="
     g++ -O1 -shared -fPIC -DBOJS_MODULE_PARTAGE \
-        $(python3-config --includes) -I"$JS/include" -I navigateur \
+        -I"$INCLUDE_PY" -I"$JS/include" -I navigateur \
         navigateur/bojs.cpp "$JS/lib/libquickjs.a" \
         -o "$WORK/bojs.so"
 fi
