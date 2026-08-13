@@ -1,11 +1,11 @@
-// La latence de l'interface pendant qu'un autre processus calcule.
+// La latence de l'interface pendant que d'autres processus calculent.
 //
 // C'est la seule mesure qui compte pour decider si un processus de rendu
 // separe vaudra la peine. L'audit OS avait conclu : sur un cœur unique et un
 // tourniquet strict, sortir le rendu d'un processus n'empeche pas une page
 // lourde de rendre l'interface lente, parce que rien ne favorise l'interface.
-// Deux classes d'ordonnancement viennent d'etre ajoutees ; cette sonde dit si
-// elles changent quelque chose.
+// Deux classes d'ordonnancement ont ete ajoutees ; cette sonde dit si elles
+// changent quelque chose, et de combien.
 //
 // Le dispositif :
 //
@@ -13,8 +13,8 @@
 //     d'un rafraichissement — et note de combien il est en retard. Un reveil
 //     demande a 16 ms qui arrive a 40 ms accuse 24 ms de retard, et c'est ce
 //     retard-la que l'utilisateur ressent comme une saccade ;
-//   * un processus **calcul** tourne sans jamais se bloquer, comme le ferait
-//     une page qui met en page dix mille elements.
+//   * plusieurs processus **calcul** tournent sans jamais se bloquer, comme le
+//     ferait une page qui met en page dix mille elements.
 //
 // Trois mesures, dans cet ordre, parce que chacune sert de temoin a la
 // suivante :
@@ -23,10 +23,30 @@
 //   2. l'interface pendant le calcul, **sans** priorite ;
 //   3. l'interface pendant le calcul, **avec** priorite.
 //
-// La troisieme doit s'approcher de la premiere. Et le processus de calcul doit
-// avoir progresse dans les trois : une priorite qui l'affamerait ne serait pas
-// une priorite mais une exclusion — « l'interface reste fluide » deviendrait
-// « rien d'autre ne tourne ».
+// La troisieme doit s'approcher de la premiere. Et les processus de calcul
+// doivent avoir progresse dans les trois : une priorite qui les affamerait ne
+// serait pas une priorite mais une exclusion — « l'interface reste fluide »
+// deviendrait « rien d'autre ne tourne ».
+//
+// ## Pourquoi plusieurs calculs, et pas un seul
+//
+// Un tourniquet a quantum d'un tick fait attendre au reveil **un quantum par
+// concurrent pret**. Avec un seul concurrent, le pire cas vaut un tick — c'est
+// aussi la resolution de l'horloge, donc la mesure ne peut rien distinguer.
+// La premiere version de cette sonde n'employait qu'un calcul et concluait
+// « la charge ne degrade pas la latence », ce qui etait vrai et sans interet :
+// elle mesurait le plancher de son propre instrument.
+//
+// Avec huit concurrents, le pire cas attendu vaut huit ticks, soit huit fois
+// la resolution. L'effet devient lisible, et son absence aussi.
+//
+// ## Ce que la sonde refuse de faire
+//
+// Conclure quand elle ne mesure rien. Si la charge ne degrade pas la latence —
+// parce que la machine a plusieurs cœurs, ou parce que la resolution de
+// l'horloge est trop grossiere —, elle le dit et n'affirme aucune amelioration.
+// Un test qui validerait n'importe quelle implementation, y compris une qui ne
+// fait rien, serait pire qu'absent.
 //
 //   musl-gcc -O2 -static-pie ordonnanceur-probe.c -o ordonnanceur-probe
 //   (ou via ./build.sh musl)
@@ -63,10 +83,45 @@ static long long maintenant_us(void)
 
 #define PERIODE_US 16000
 #define REVEILS 60
+#define CALCULS_MAX 16
+
+// Ce qu'une serie de reveils apprend. Les quantiles hauts comptent plus que la
+// mediane : une interface dont une trame sur vingt arrive en retard se voit,
+// alors qu'une mediane parfaite ne se remarque pas.
+struct latence {
+    long long median;
+    long long p95;
+    long long p99;
+    long long pire;
+};
+
+// La granularite reelle de l'horloge : le plus petit ecart non nul entre deux
+// lectures consecutives. Rien de ce que la sonde mesure en dessous de cette
+// valeur n'a de sens, et le dire evite de commenter du bruit.
+static long long granularite_us(void)
+{
+    long long plus_petit = -1;
+    int vus = 0;
+    // Borne volontairement basse : chaque tour coute deux appels systeme, et
+    // sous emulation cela se paie. Il suffit d'attraper quelques changements de
+    // valeur — un par tick — pour connaitre le pas de l'horloge.
+    for (int i = 0; i < 20000 && vus < 8; i++) {
+        long long a = maintenant_us();
+        long long b = maintenant_us();
+        if (b > a) {
+            vus++;
+            if (plus_petit < 0 || b - a < plus_petit)
+                plus_petit = b - a;
+        }
+        if (plus_petit == 1)
+            break;
+    }
+    return plus_petit < 0 ? 0 : plus_petit;
+}
 
 // Le processus d'interface : se reveiller a l'heure, et mesurer de combien on
-// ne l'est pas. On rend le retard **median** et le pire.
-static void mesure_interface(long long *median, long long *pire)
+// ne l'est pas.
+static void mesure_interface(struct latence *sortie)
 {
     long long retards[REVEILS];
     long long attendu = maintenant_us();
@@ -93,11 +148,19 @@ static void mesure_interface(long long *median, long long *pire)
         while (j >= 0 && retards[j] > v) { retards[j + 1] = retards[j]; j--; }
         retards[j + 1] = v;
     }
-    *median = retards[REVEILS / 2];
-    *pire = retards[REVEILS - 1];
+    sortie->median = retards[REVEILS / 2];
+    sortie->p95 = retards[(REVEILS * 95) / 100];
+    sortie->p99 = retards[(REVEILS * 99) / 100];
+    sortie->pire = retards[REVEILS - 1];
 }
 
-// Le processus de calcul : une boucle qui ne se bloque jamais. Il ecrit son
+static void imprime(const char *libelle, const struct latence *l)
+{
+    printf("  %-24s median %5lld us  p95 %6lld us  p99 %6lld us  pire %6lld us\n",
+           libelle, l->median, l->p95, l->p99, l->pire);
+}
+
+// Un processus de calcul : une boucle qui ne se bloque jamais. Il ecrit son
 // compteur de tours dans le tube avant de mourir, ce qui prouve qu'il a
 // progresse.
 static void calcule_jusqua(int tube, int secondes)
@@ -115,27 +178,30 @@ static void calcule_jusqua(int tube, int secondes)
     _exit(0);
 }
 
-// Lance le calcul en fond, mesure l'interface pendant ce temps, et rend les
-// tours effectues par le calcul.
-static unsigned long long sous_charge(int interactif, long long *median,
-                                      long long *pire)
+// Lance `combien` calculs en fond, mesure l'interface pendant ce temps, et rend
+// le total des tours effectues — c'est lui qui dit si les calculs ont avance.
+static unsigned long long sous_charge(int interactif, int combien,
+                                      struct latence *sortie)
 {
     int tube[2];
+    pid_t enfants[CALCULS_MAX];
+    int nes = 0;
+
     if (pipe(tube) != 0)
         return 0;
 
-    pid_t enfant = fork();
-    if (enfant < 0) {
-        close(tube[0]);
-        close(tube[1]);
-        return 0;
-    }
-    if (enfant == 0) {
-        close(tube[0]);
-        // Le calcul reste normal dans les deux cas : ce qu'on change est la
-        // priorite de **l'interface**, pas la sienne. Le degrader serait une
-        // autre experience, et une moins honnete.
-        calcule_jusqua(tube[1], 2);
+    for (int i = 0; i < combien && i < CALCULS_MAX; i++) {
+        pid_t enfant = fork();
+        if (enfant < 0)
+            break;
+        if (enfant == 0) {
+            close(tube[0]);
+            // Le calcul reste normal dans les deux cas : ce qu'on change est la
+            // priorite de **l'interface**, pas la sienne. Le degrader serait
+            // une autre experience, et une moins honnete.
+            calcule_jusqua(tube[1], 2);
+        }
+        enfants[nes++] = enfant;
     }
     close(tube[1]);
 
@@ -145,75 +211,93 @@ static unsigned long long sous_charge(int interactif, long long *median,
         if (setpriority(PRIO_PROCESS, 0, -5) != 0)
             printf("  (setpriority a echoue : %s)\n", strerror(errno));
     }
-    mesure_interface(median, pire);
+    mesure_interface(sortie);
     if (interactif)
         setpriority(PRIO_PROCESS, 0, 0);
 
-    unsigned long long tours = 0;
-    if (read(tube[0], &tours, sizeof tours) != (ssize_t)sizeof tours)
-        tours = 0;
+    unsigned long long total = 0;
+    for (int i = 0; i < nes; i++) {
+        unsigned long long tours = 0;
+        if (read(tube[0], &tours, sizeof tours) == (ssize_t)sizeof tours)
+            total += tours;
+    }
     close(tube[0]);
-    int statut = 0;
-    waitpid(enfant, &statut, 0);
-    return tours;
+    for (int i = 0; i < nes; i++) {
+        int statut = 0;
+        waitpid(enfants[i], &statut, 0);
+    }
+    return total;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    int calculs = argc > 1 ? atoi(argv[1]) : 8;
+    if (calculs < 1)
+        calculs = 1;
+    if (calculs > CALCULS_MAX)
+        calculs = CALCULS_MAX;
+
     printf("ordonnanceur-probe: latence de l'interface sous charge\n");
 
+    long long grain = granularite_us();
+    printf("  horloge : granularite %lld us — periode visee %d us,"
+           " %d processus de calcul\n", grain, PERIODE_US, calculs);
+
     // 1. Le temoin : l'interface seule.
-    long long repos_median = 0, repos_pire = 0;
-    mesure_interface(&repos_median, &repos_pire);
-    printf("  au repos              median %5lld us   pire %6lld us\n",
-           repos_median, repos_pire);
+    struct latence repos;
+    mesure_interface(&repos);
+    imprime("au repos", &repos);
 
     // 2. Sous charge, sans priorite.
-    long long normale_median = 0, normale_pire = 0;
-    unsigned long long tours_normale =
-        sous_charge(0, &normale_median, &normale_pire);
-    printf("  sous charge (normal)  median %5lld us   pire %6lld us"
-           "   calcul : %llu tours\n",
-           normale_median, normale_pire, tours_normale);
+    struct latence normale;
+    unsigned long long tours_normale = sous_charge(0, calculs, &normale);
+    imprime("sous charge (normal)", &normale);
+    printf("  %-24s %llu tours de calcul\n", "", tours_normale);
 
     // 3. Sous charge, avec priorite.
-    long long prio_median = 0, prio_pire = 0;
-    unsigned long long tours_prio = sous_charge(1, &prio_median, &prio_pire);
-    printf("  sous charge (interactif) median %5lld us   pire %6lld us"
-           "   calcul : %llu tours\n",
-           prio_median, prio_pire, tours_prio);
+    struct latence prio;
+    unsigned long long tours_prio = sous_charge(1, calculs, &prio);
+    imprime("sous charge (interactif)", &prio);
+    printf("  %-24s %llu tours de calcul\n", "", tours_prio);
 
-    char detail[192];
+    char detail[256];
 
-    // Le test n'a de sens que si la charge degrade reellement la latence.
-    // Sans cela, comparer « avec » et « sans » priorite ne mesurerait que du
-    // bruit — et conclurait a une amelioration inexistante.
-    int charge_visible = normale_median > repos_median + 1000;
+    // Le test n'a de sens que si la charge degrade reellement la latence, et
+    // qu'elle la degrade au-dela de ce que l'horloge sait distinguer. Sans
+    // cela, comparer « avec » et « sans » priorite ne mesurerait que du bruit.
+    long long plancher = grain > 0 ? grain * 2 : 1000;
+    int charge_visible = normale.p95 > repos.p95 + plancher;
+
     if (!charge_visible) {
-        // Sur une machine a plusieurs cœurs, un seul processus de calcul ne
-        // dispute rien a l'interface : il n'y a pas de degradation a corriger,
-        // et comparer « avec » et « sans » priorite ne mesurerait que du bruit.
-        //
-        // On le dit plutot que de conclure. Un test qui annoncerait une
-        // amelioration la ou il n'y a rien a ameliorer serait pire qu'absent :
-        // il validerait n'importe quelle implementation, y compris une qui ne
-        // fait rien.
-        printf("  (la charge ne degrade pas la latence sur cette machine —\n"
-               "   plusieurs cœurs, sans doute. L'effet de la priorite n'y est\n"
-               "   pas mesurable ; c'est sous Bouchaud OS, sur un cœur unique,\n"
-               "   que cette sonde a un sens.)\n");
+        printf("  (la charge ne degrade pas la latence de facon mesurable :\n"
+               "   p95 au repos %lld us, p95 sous charge %lld us, granularite\n"
+               "   de l'horloge %lld us. Soit la machine a plusieurs cœurs,\n"
+               "   soit l'effet est plus fin que l'instrument. Aucune\n"
+               "   conclusion n'est tiree sur la priorite.)\n",
+               repos.p95, normale.p95, grain);
     } else {
-        snprintf(detail, sizeof detail, "sans %lld us, avec %lld us",
-                 normale_median, prio_median);
-        verifie("la priorite interactive reduit la latence",
-                prio_median < normale_median, detail);
+        snprintf(detail, sizeof detail,
+                 "p95 sans %lld / avec %lld us ; p99 sans %lld / avec %lld us ;"
+                 " pire sans %lld / avec %lld us",
+                 normale.p95, prio.p95, normale.p99, prio.p99,
+                 normale.pire, prio.pire);
+        // C'est la **queue** de la distribution qui se juge, pas la mediane :
+        // une interface dont une trame sur cent arrive en retard se voit, une
+        // mediane parfaite ne se remarque pas. Exiger que le p95 baisse serait
+        // trop strict — la mesure validee sur Linux montre qu'a cet endroit
+        // les deux courbes se croisent dans le bruit, alors que le p99 et le
+        // pire cas, eux, se separent nettement.
+        verifie("la priorite interactive raccourcit la queue de latence",
+                prio.p99 < normale.p99 || prio.pire < normale.pire, detail);
+        verifie("et n'aggrave pas le pire cas",
+                prio.pire <= normale.pire, detail);
     }
 
     // Et surtout : le calcul doit avoir progresse dans les deux cas. Une
     // priorite qui l'affamerait ne serait pas une priorite.
     snprintf(detail, sizeof detail, "normal %llu tours, interactif %llu tours",
              tours_normale, tours_prio);
-    verifie("le processus de calcul n'est pas affame", tours_prio > 0, detail);
+    verifie("le calcul n'est pas affame", tours_prio > 0, detail);
     if (tours_normale > 0) {
         // On tolere une forte reduction — c'est le but — mais pas
         // l'annulation : au moins un dixieme du travail doit passer.

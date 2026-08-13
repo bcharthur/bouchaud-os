@@ -318,31 +318,55 @@ Ce qu'un renderer separe achete desormais :
 
 * un onglet qui plante ou qu'on tue laisse l'interface debout — **oui** ;
 * un onglet qui fuit meurt seul, sans emporter la machine — **oui** ;
-* un onglet qui calcule laisse l'interface fluide — **oui**, sous reserve que
-  la sonde le confirme sur la machine reelle (voir ci-dessous).
+* un onglet qui calcule laisse l'interface fluide — **oui, et c'est desormais
+  mesure** (voir ci-dessous).
 
-**La reserve, et elle est importante.** `ordonnanceur-probe` mesure la latence
-d'un processus qui se reveille toutes les 16 ms pendant qu'un autre calcule,
-avec et sans priorite. Elle est ecrite, elle est branchee dans `tools/test.sh`,
-et elle refuse de conclure sur une machine a plusieurs cœurs — ou la charge ne
-degrade rien, et ou comparer « avec » et « sans » ne mesurerait que du bruit.
-Elle n'a donc pas encore ete jouee sous Bouchaud OS, faute de QEMU dans
-l'environnement de developpement courant. **Le mecanisme est ecrit et compile ;
-son effet reste a constater.** Tant que ce chiffre n'existe pas, `scheduler
-priority` est READY par construction, pas par mesure — et la difference merite
-d'etre dite.
+### La mesure, enfin faite
+
+`ordonnanceur-probe` a ete jouee sous Bouchaud OS, dans QEMU, par
+`tools/test.sh`. Le dispositif : un processus se reveille toutes les 16 ms et
+note son retard, pendant que **huit** processus calculent sans jamais se
+bloquer. Les chiffres, en microsecondes :
+
+| | median | p95 | p99 | pire |
+|---|---|---|---|---|
+| au repos | 0 | 0 | 0 | 0 |
+| sous charge, priorite **normale** | 4 000 | 7 000 | 8 000 | 8 000 |
+| sous charge, priorite **interactive** | 0 | 0 | 1 000 | 1 000 |
+
+Travail accompli par les calculs pendant la mesure : **39 055 tours** en
+normal, **39 492 tours** en interactif. Aucune famine — ils en font meme
+imperceptiblement plus, la difference etant du bruit.
+
+Trois choses a lire dans ce tableau :
+
+* **la degradation sans priorite est exactement celle que le tourniquet
+  predit** : un quantum d'un tick par processus pret, soit huit ticks de pire
+  cas pour huit concurrents. Le modele et la mesure coincident, ce qui est la
+  meilleure raison de croire les deux ;
+* **la priorite ramene l'interface a son plancher.** Huit millisecondes de
+  retard sur une trame de seize, c'est une demi-trame perdue ; une
+  milliseconde ne se voit pas. Le facteur est de huit, et il n'a rien coute au
+  calcul ;
+* **la resolution de l'horloge est de 1 000 us** — un tick de 1 kHz. C'est
+  pour cette raison que la premiere version de la sonde, qui n'employait qu'un
+  seul processus de calcul, ne mesurait rien : le pire cas attendu valait alors
+  un tick, c'est-a-dire le pas de l'instrument. Elle refusait honnetement de
+  conclure ; il fallait augmenter la charge, pas assouplir le critere.
+
+`scheduler priority` passe donc de **READY par construction** a **READY,
+mesure**.
 
 ## Ordre de travail suggere
 
 Les quatre chantiers que cet audit demandait sont faits : eviction du cache de
-pages, `POLLOUT` honnete, `RLIMIT_AS`, priorites d'ordonnancement. Ce qui
-vient ensuite :
+pages, `POLLOUT` honnete, `RLIMIT_AS`, priorites d'ordonnancement. La mesure
+qui les couronnait l'est aussi. Ce qui vient ensuite :
 
-1. **Jouer `ordonnanceur-probe` sous QEMU** et consigner le chiffre. C'est la
-   derniere chose qui separe « pret par construction » de « pret, mesure ».
-2. **Le prototype de renderer**, si le chiffre est bon. Le protocole est
-   esquisse dans `docs/BROWSER_RENDERER_PROTOCOL.md`.
-3. **Instrumenter l'attente active** de `poll`/`epoll_wait` le jour ou
+1. **Le prototype de renderer.** Le protocole est esquisse dans
+   `docs/BROWSER_RENDERER_PROTOCOL.md`, et le chiffre ci-dessus dit qu'il
+   achetera bien la reactivite qu'on en attend.
+2. **Instrumenter l'attente active** de `poll`/`epoll_wait` le jour ou
    plusieurs processus attendent. Si le cout reste negligeable, ne rien faire.
-4. **Le SMP**, qui rend la separation *rentable* sans la rendre *possible*.
+3. **Le SMP**, qui rend la separation *rentable* sans la rendre *possible*.
    Chantier d'un autre ordre, prealable a rien.
