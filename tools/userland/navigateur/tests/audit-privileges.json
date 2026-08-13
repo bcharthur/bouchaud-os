@@ -1,0 +1,64 @@
+{
+  "descripteurs_avec_balayage": {
+    "memfd": 2,
+    "peripherique": 1,
+    "prise_unix": 1,
+    "tube": 2
+  },
+  "descripteurs_sans_balayage": {
+    "memfd": 2,
+    "peripherique": 1,
+    "prise_reseau": 5,
+    "prise_unix": 1,
+    "tube": 2
+  },
+  "gardes": [
+    {
+      "cible": "/dev/null",
+      "genre": "peripherique"
+    },
+    {
+      "cible": "pipe:[52777]",
+      "genre": "tube"
+    },
+    {
+      "cible": "pipe:[52777]",
+      "genre": "tube"
+    },
+    {
+      "cible": "/memfd:bo-surface (deleted)",
+      "genre": "memfd"
+    },
+    {
+      "cible": "/memfd:bo-surface (deleted)",
+      "genre": "memfd"
+    },
+    {
+      "cible": "socket:[60380]",
+      "genre": "prise_unix"
+    }
+  ],
+  "navigation_file_refusee": true,
+  "tentatives": [
+    {
+      "capacite": "fichier_arbitraire",
+      "detail": "3 octets lus de /etc/hostname",
+      "obtenu": true
+    },
+    {
+      "capacite": "descripteur_herite",
+      "detail": "OSError: aucun descripteur herite exploitable",
+      "obtenu": false
+    },
+    {
+      "capacite": "stockage_direct",
+      "detail": "magasin de temoins ouvert (0 entree(s) pour exemple.test)",
+      "obtenu": true
+    },
+    {
+      "capacite": "prise_reseau_directe",
+      "detail": "connecte a 127.0.0.1:44589",
+      "obtenu": true
+    }
+  ]
+}

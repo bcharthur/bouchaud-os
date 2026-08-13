@@ -37,8 +37,23 @@ rien d'autre que lui.
 Naviguer. Le renderer **demande** (`REQUEST_NAVIGATION`) ; c'est ici qu'on
 decide. Un renderer compromis ne doit gagner que ce que sa page pouvait deja
 faire, et une page ne peut pas se rendre elle-meme sur `file:///etc/shadow`.
+
+Charger, non plus. Le renderer emet `FETCH_REQUEST` ; c'est ici que la politique
+s'applique, que les temoins sont lus, et que la prise s'ouvre. Voir
+`transport.py` pour ce que ce deplacement change, et pour ce qu'il ne change pas
+encore.
+
+## Ce dont l'enfant n'herite pas
+
+Un `fork` copie la table des descripteurs : sans precaution, le renderer
+naitrait avec les prises TCP de la reserve du navigateur, sa base de temoins,
+son affichage et les surfaces des autres onglets. `privileges.ferme_herites`
+les ferme un par un dans l'enfant, avant qu'il ne serve. `FD_CLOEXEC` ne peut
+rien ici : il n'y a pas d'`exec`.
 """
 
+import base64
+import contextlib
 import errno
 import os
 import resource
@@ -46,7 +61,8 @@ import signal
 import socket
 import time
 
-from . import protocole, securite, surface as mod_surface
+from . import (privileges, protocole, securite, surface as mod_surface,
+               transport as mod_transport)
 
 # Espace d'adressage qu'un renderer a le droit d'ajouter a celui dont il herite.
 #
@@ -88,6 +104,9 @@ def taille_adressage():
 # Au-dela, le renderer est considere mort meme s'il respire encore.
 ATTENTE_ARRET_S = 3.0
 
+# Borne d'un envoi bloquant vers le renderer. Voir `_envoi_bloquant`.
+ATTENTE_ENVOI_S = 30.0
+
 
 class Crash(Exception):
     """Le renderer est mort. Porte de quoi le dire a l'utilisateur."""
@@ -103,8 +122,21 @@ class Renderer:
     """Un processus de rendu, vu du navigateur."""
 
     def __init__(self, largeur=800, hauteur=600, budget_as=BUDGET_AS,
-                 limite_as=None, journal=None):
+                 limite_as=None, journal=None, courtage=True, audit=False,
+                 ferme_herites=True):
         self.journal = journal or (lambda niveau, texte: None)
+        # Les capacites du renderer, decidees **ici** et posees dans l'enfant.
+        # Un renderer ne se les accorde pas : il nait avec celles qu'on lui a
+        # donnees, et il ne peut pas en demander d'autres.
+        self.courtage = bool(courtage)
+        self.audit = bool(audit)
+        self.ferme_herites = bool(ferme_herites)
+        self.descripteurs_fermes = 0
+        self.requetes_servies = 0
+        # Quand un chrome tient l'historique, il applique lui-meme les
+        # navigations autorisees. Voir `_note`.
+        self.auto_navigation = True
+        self.foyer = False
         # La limite effective : ce dont l'enfant heritera, plus son budget. Un
         # appelant peut imposer la valeur absolue s'il sait ce qu'il fait —
         # c'est ce que font les epreuves d'isolation.
@@ -145,6 +177,15 @@ class Renderer:
                 parent.close()
                 self.surface.ferme()
                 self.surface = None
+                # Tout ce qui restait de la table du navigateur part ici : ses
+                # prises TCP deja connectees, sa base de temoins, son
+                # affichage, les surfaces des autres onglets. C'est la seule
+                # facon de le faire apres un `fork` sans `exec` — voir
+                # `privileges.py`. La prise de controle et la console serie
+                # survivent, et rien d'autre.
+                if self.ferme_herites and privileges.balayage_actif():
+                    privileges.ferme_herites(
+                        set(privileges.GARDES_PAR_DEFAUT) | {enfant.fileno()})
                 if limite_as:
                     resource.setrlimit(resource.RLIMIT_AS,
                                        (limite_as, limite_as))
@@ -159,7 +200,8 @@ class Renderer:
                 except (OSError, AttributeError):
                     pass
                 from . import renderer as mod_renderer
-                code = mod_renderer.sers(enfant)
+                code = mod_renderer.sers(enfant, courtage=self.courtage,
+                                         audit=self.audit)
             except BaseException:  # noqa: BLE001 — on ne remonte jamais d'ici
                 code = 4
             finally:
@@ -341,6 +383,91 @@ class Renderer:
     def bat(self):
         self.dis(protocole.TICK, {"horodatage": time.monotonic()})
 
+    def demande_audit(self, quoi="descripteurs", **details):
+        """Demande au renderer ce qu'il possede. Ne repond que s'il a la capacite."""
+        charge = {"quoi": quoi}
+        charge.update(details)
+        self.dis(protocole.AUDIT, charge)
+
+    # --- Courtage des ressources ----------------------------------------------
+
+    @contextlib.contextmanager
+    def _envoi_bloquant(self, delai=ATTENTE_ENVOI_S):
+        """Rend la prise bloquante le temps d'un gros envoi, puis la rend.
+
+        Le delai borne le cas ou le pair meurt en cours d'envoi : sans lui, le
+        navigateur attendrait pour toujours qu'un processus mort le lise, ce qui
+        est exactement le gel que la separation existe pour eviter.
+        """
+        if self.prise is None:
+            yield
+            return
+        self.prise.settimeout(delai)
+        try:
+            yield
+        finally:
+            try:
+                self.prise.settimeout(0.0)
+            except OSError:
+                pass
+
+    def _sert_requete(self, charge):
+        """Honore un `FETCH_REQUEST`. **C'est ici que la politique s'applique.**
+
+        Le renderer a dit ce qu'il voulait ; rien de ce qu'il a dit n'est pris
+        pour argent comptant. L'origine du document est celle qu'il annonce —
+        un renderer compromis peut mentir dessus — mais mentir ne lui donne rien
+        de plus qu'a sa propre page : `securite.verifie` compare le schema, et
+        c'est le navigateur qui detient les temoins de toute facon.
+        """
+        identifiant = charge.get("id")
+        url = str(charge.get("url", ""))
+        corps = charge.get("corps")
+        if corps is not None:
+            try:
+                corps = base64.b64decode(corps)
+            except (ValueError, TypeError):
+                corps = None
+        from . import reseau
+        try:
+            reponse = reseau.charge_localement(
+                url, methode=str(charge.get("methode") or "GET"), corps=corps,
+                entetes=charge.get("entetes") or None,
+                brut=bool(charge.get("brut")),
+                document=charge.get("document"),
+                destination=charge.get("destination"))
+        except Exception as e:  # noqa: BLE001 — un echec reseau n'est pas un crash
+            reponse = reseau.Reponse(url, "", "text/plain", 0, erreur=str(e))
+        self.requetes_servies += 1
+
+        meta = mod_transport.reponse_vers(reponse)
+        meta["id"] = identifiant
+        octets = bytes(reponse.octets or b"")
+        if meta.pop("texte_propre", False):
+            # Le texte ne derive pas des octets — page d'erreur fabriquee, corps
+            # reencode. Il voyage alors tel quel, sinon l'autre cote
+            # reconstruirait autre chose que ce qui a ete decide ici.
+            meta["texte_propre"] = True
+            meta["contenu"] = reponse.contenu
+        meta["fin"] = not octets
+        # **Bloquant, ici et seulement ici.** La prise du navigateur est en mode
+        # non bloquant pour que le chrome puisse la sonder sans jamais
+        # s'arreter ; mais une reponse de trois mebioctets ne tient pas dans le
+        # tampon d'un `socketpair`, et un `sendall` non bloquant y rendrait un
+        # `BlockingIOError` au milieu — c'est-a-dire une reponse tronquee, un
+        # renderer qui attend quarante-cinq secondes, et une image qui manque
+        # sans que rien ne le dise. Le pair est, lui, bloque en lecture sur
+        # cette reponse precise : il draine forcement.
+        with self._envoi_bloquant():
+            self.dis(protocole.FETCH_RESPONSE, meta)
+            pas = protocole.MORCEAU_FETCH
+            for debut in range(0, len(octets), pas):
+                morceau = octets[debut:debut + pas]
+                self.dis(protocole.FETCH_DATA,
+                         {"id": identifiant,
+                          "b64": base64.b64encode(morceau).decode("ascii"),
+                          "fin": debut + pas >= len(octets)})
+
     # --- Ecoute ---------------------------------------------------------------
 
     def recolte(self, secondes=0.0):
@@ -385,6 +512,12 @@ class Renderer:
 
     def _note(self, genre, charge):
         nom = protocole.NOMS.get(genre, str(genre))
+        if genre == protocole.FETCH_REQUEST:
+            # Servi ici et maintenant, et **pas** remonte au chrome : une page
+            # ordinaire en emet des dizaines, et les faire remonter noierait la
+            # file d'evenements de l'interface sous de la plomberie.
+            self._sert_requete(charge)
+            return
         if genre == protocole.TITLE_CHANGED:
             self.titre = charge.get("titre")
         elif genre == protocole.URL_CHANGED:
@@ -393,11 +526,19 @@ class Renderer:
             self.curseur = charge.get("forme", "fleche")
         elif genre == protocole.FRAME_READY:
             self.derniere_trame = charge
+        elif genre == protocole.FOCUS_CHANGED:
+            self.foyer = bool(charge.get("foyer"))
         elif genre == protocole.REQUEST_NAVIGATION:
             # **La politique est ici.** Le renderer demande ; le navigateur
             # verifie le schema avant d'appliquer. C'est ce qui empeche une page
             # compromise d'obtenir par la porte de derriere ce que la politique
             # lui refuse par la porte de devant.
+            if charge.get("pas") is not None:
+                # `history.go(-1)` : le renderer n'a pas l'historique, il ne
+                # peut donc que le demander. Seul le chrome sait ou cela mene.
+                nom = "NAVIGATION_HISTORIQUE"
+                self.evenements.append((nom, charge))
+                return
             url = str(charge.get("url", ""))
             try:
                 securite.verifie(securite.requete_document(
@@ -407,7 +548,15 @@ class Renderer:
                 self.journal("warn", "navigation refusee : %s" % refus.raison)
                 nom = "NAVIGATION_REFUSEE"
             else:
-                self.navigue(url)
+                nom = "NAVIGATION_AUTORISEE"
+                # Le chrome tient l'historique ; quand il en tient un, c'est lui
+                # qui applique, parce qu'une navigation appliquee ici serait une
+                # page de plus a l'ecran et une entree de moins dans son
+                # historique. Sans chrome — les epreuves du protocole — on
+                # applique soi-meme, sinon le mecanisme ne serait pas eprouvable
+                # tout seul.
+                if self.auto_navigation:
+                    self.navigue(url)
         self.evenements.append((nom, charge))
 
     def attends(self, nom, secondes=15.0):

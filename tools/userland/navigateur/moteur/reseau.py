@@ -34,6 +34,7 @@ import zlib
 from . import securite
 from . import stockage
 from . import telemetrie
+from . import transport as mod_transport
 
 DELAI = 20.0
 AGENT = "BouchaudOS/1.0 (navigateur natif; Qt/Python)"
@@ -161,6 +162,33 @@ def charge(url, methode="GET", corps=None, entetes=None, brut=False,
     l'utilisateur, et la politique de `securite.py` s'applique. L'omettre decrit
     une navigation voulue par l'utilisateur, qui reste libre d'ouvrir un
     fichier local.
+
+    ## Le seuil du courtier
+
+    Quand un transport est installe (`transport.installe`), la requete lui est
+    remise **au lieu** d'etre servie ici. C'est le seul endroit ou la bascule se
+    fait, et c'est voulu : une vingtaine d'appelants passent par cette fonction —
+    cascade, images, polices, prechargement, `fetch` — et un seul d'entre eux
+    qui aurait garde un chemin direct aurait suffi a rendre l'isolation
+    mensongere. Voir `transport.py`.
+    """
+    courtier = mod_transport.actuel()
+    if courtier is not None:
+        return courtier.charge(url, methode=methode, corps=corps,
+                               entetes=entetes, brut=brut, document=document,
+                               destination=destination)
+    return charge_localement(url, methode=methode, corps=corps,
+                             entetes=entetes, brut=brut, document=document,
+                             destination=destination)
+
+
+def charge_localement(url, methode="GET", corps=None, entetes=None, brut=False,
+                      document=None, destination=None):
+    """`charge` sans le seuil : va vraiment chercher la ressource.
+
+    Le navigateur s'en sert pour honorer une requete que le renderer lui a
+    courtee — c'est le bout de la chaine, celui qui a le droit d'ouvrir une
+    prise. Personne d'autre ne devrait l'appeler directement.
     """
     if document is not None:
         requete = securite.requete_document(url, document,

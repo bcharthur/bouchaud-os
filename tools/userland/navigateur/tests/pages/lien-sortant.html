@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Lien sortant — page temoin</title>
+<!--
+  La plus petite page qui eprouve « le renderer demande, le navigateur decide ».
+
+  Un seul lien, vers un autre document, sans JavaScript pour l'intercepter. Il
+  est en gros corps et seul sur sa ligne : les epreuves cliquent dedans par
+  coordonnees, et la zone cliquable d'un lien est celle de son **texte** — un
+  lien court dans une police etroite donnerait une cible que le premier
+  changement de metrique ferait manquer.
+
+  Le second lien pointe vers `file://`. Il n'est pas la pour marcher : il est la
+  pour ne pas marcher, et pour que ce refus soit constate depuis le meme chemin
+  qu'une navigation ordinaire plutot que depuis un appel interne.
+-->
+<style>
+  body { margin: 0; padding: 20px; font-family: system-ui, sans-serif; }
+  p { margin: 0 0 40px; }
+  a { font-size: 28px; color: #1d4ed8; }
+  #interdit { color: #b91c1c; }
+</style>
+</head>
+<body>
+<p><a id="suivant" href="/page/vide.html">Aller a la page suivante</a></p>
+<p><a id="interdit" href="file:///etc/shadow">Aller la ou c'est interdit</a></p>
+</body>
+</html>
