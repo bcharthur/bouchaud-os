@@ -57,6 +57,10 @@ cp navigateur/suivi.py "$WORK/"
 # navigateur — redirections, 404, POST, reponse lente — ne se teste
 # pas sans lui, et le faire dependre d'Internet le rendait intestable.
 cp navigateur/serveur_test.py navigateur/apercu.py "$WORK/"
+# La sonde d'ordonnancement voyage avec : elle mesure la latence du chrome
+# pendant qu'un **vrai** renderer travaille, et elle a besoin du meme
+# echafaudage — module `bojs` compile, moteur, serveur de fixtures.
+cp navigateur/ordonnanceur-navigateur.py "$WORK/"
 # Les pages temoins voyagent avec les verifications : sans elles, le scenario
 # de formulaire se croyait absent et se sautait en silence — une verification
 # qui ne s'execute pas est pire qu'une verification qui echoue.
@@ -70,4 +74,7 @@ cp -r navigateur/tests "$WORK/"
 export BO_JALONS="$PWD/navigateur/tests/jalons.json"
 
 cd "$WORK"
-exec python3 test_moteur.py "$@"
+# `BO_SCRIPT` permet de lancer autre chose que les verifications dans le
+# meme echafaudage — la sonde d'ordonnancement, par exemple. Dupliquer la
+# preparation dans un second script aurait garanti qu'ils divergent.
+exec python3 "${BO_SCRIPT:-test_moteur.py}" "$@"

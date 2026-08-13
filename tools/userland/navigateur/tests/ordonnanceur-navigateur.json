@@ -1,0 +1,29 @@
+{
+  "differencie": {
+    "libelle": "chrome interactif",
+    "median": 0.1440049991288106,
+    "p95": 0.19570899098653172,
+    "p99": 0.21253099134810327,
+    "pire": 0.2775069963263377,
+    "priorite_posee": true,
+    "trames": 0
+  },
+  "egalite": {
+    "libelle": "renderer a egalite",
+    "median": 0.1544259921502089,
+    "p95": 0.20165599676147394,
+    "p99": 0.24971199968604196,
+    "pire": 0.26493999757803977,
+    "priorite_posee": true,
+    "trames": 0
+  },
+  "hote": "bouchon",
+  "plancher": {
+    "libelle": "chrome seul (plancher)",
+    "median": 0.2005399953759479,
+    "p95": 0.26518399158703687,
+    "p99": 0.3245219970722246,
+    "pire": 0.3331589950903435
+  },
+  "verdict": "sans contention"
+}
