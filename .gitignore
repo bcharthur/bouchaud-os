@@ -14,6 +14,10 @@ tools/render-proxy/node_modules/
 # Binaires userland compiles (build.sh) et image du disque de donnees (mkdisk.sh)
 tools/userland/out/
 tools/userland/*.img
+# Le manifeste voyage avec l'image : construit par build-tout.sh, ou telecharge
+# par tools/userland.ps1. Ni l'un ni l'autre n'a sa place dans le depot — c'est
+# la release qui en est la reference.
+tools/userland/userland-manifest.json
 # Artefacts du lanceur de sondes (tools/test.sh)
 tools/userland/test-out/
 # Chantiers et resultats de build-python.sh / build-qt.sh (sources telechargees,

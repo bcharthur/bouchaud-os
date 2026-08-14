@@ -93,22 +93,42 @@ Prérequis : Rust (la chaîne est épinglée dans `rust-toolchain.toml`, rustup
 l'installe au premier `cargo`), QEMU, et `cargo install bootimage`.
 
 ```powershell
-cargo bootimage
-qemu-system-x86_64 -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+git clone https://github.com/bcharthur/bouchaud-os.git
+cd bouchaud-os
+.\run.ps1
 ```
 
-`run.ps1`, `run-fullscreen.ps1` et `boot.ps1` enveloppent ces commandes ;
-`check.ps1` enchaîne les vérifications. `run.ps1 -Sync` met à jour la branche
-courante avant de construire — ce n'est pas le défaut, et cela n'empêche jamais
-de démarrer : booter ne doit pas dépendre du réseau.
+C'est tout, et **sans WSL**. `run.ps1` construit le noyau, récupère le userland
+du commit courant s'il manque, vérifie qu'il porte bien ce commit et la bonne
+empreinte SHA-256, puis lance QEMU avec les deux disques.
 
 Le navigateur ne vit **pas** dans l'image bootable : il est dans le disque
-userland, construit à part par `tools/userland/mkdisk.sh`. Sans ce second
-disque, l'OS démarre mais sans Qt, sans Python et sans navigateur.
+userland, un ELF unique embarquant Qt, CPython, QuickJS et FFmpeg. Le construire
+demande une heure et une chaîne de compilation Linux ; l'intégration continue le
+fait une fois par commit de `main` et le publie en release. Rien de Linux
+n'intervient à l'exécution : ce sont des ELF statiques produits par compilation
+croisée, comme un firmware.
 
-Le userland se construit à part, **sous WSL ou Linux** — cette chaîne compile
-du C, du C++ et du Python pour une cible Linux-ABI, rien n'en tourne sous
-Windows :
+| Option de `run.ps1` | Effet |
+|---|---|
+| `-NoUserlandDownload` | démarre le noyau seul, sans chercher le userland |
+| `-RefreshUserland` | retélécharge même si l'image locale est valide |
+| `-AllowOlderUserland` | accepte le userland d'un ancêtre, en annonçant l'écart |
+| `-Sync` | met à jour la branche courante avant de construire |
+| `-Fullscreen` | QEMU en plein écran |
+
+**Jamais un userland d'un autre commit sans le dire.** Une image d'un autre jour
+ne se signale pas : elle démarre, et elle se comporte comme le système d'alors.
+La panne qui suit accuse le code source, qui n'y est pour rien.
+
+`run-fullscreen.ps1` et `boot.ps1` enveloppent les mêmes commandes ;
+`check.ps1` enchaîne les vérifications.
+
+### Construire le userland soi-même
+
+Inutile pour s'en servir — `run.ps1` le récupère. Nécessaire pour le modifier.
+**Sous WSL ou Linux** : cette chaîne compile du C, du C++ et du Python pour une
+cible Linux-ABI, rien n'en tourne sous Windows.
 
 ```bash
 cd tools/userland

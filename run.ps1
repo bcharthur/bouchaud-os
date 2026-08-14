@@ -12,7 +12,14 @@ param(
   # Met a jour la branche courante avant de construire. Voir
   # tools/etat-source.ps1 : ce n'est pas le defaut, et cela ne bloque jamais le
   # demarrage.
-  [switch]$Sync
+  [switch]$Sync,
+  # Demarre le noyau seul, sans chercher a recuperer le userland.
+  [switch]$NoUserlandDownload,
+  # Retelecharge le userland meme si celui qui est la est valide.
+  [switch]$RefreshUserland,
+  # Accepte le userland d'un ancetre du commit courant, faute d'exact. Voir
+  # tools/userland.ps1 : le decalage est alors annonce, jamais silencieux.
+  [switch]$AllowOlderUserland
 )
 
 & "$PSScriptRoot\tools\etat-source.ps1" -RepoRoot $PSScriptRoot -Sync:$Sync
@@ -39,7 +46,15 @@ $qemuArgs = @(
 
 # Second disque : l'archive userland. Le noyau la deplie dans le RAMFS au
 # demarrage, ce qui permet d'installer un programme sans recompiler l'OS.
-# Fabriquer l'image avec tools/userland/mkdisk.sh.
+#
+# Elle est recuperee ici si elle manque — l'integration continue en publie une
+# par commit de `main`, et la construire soi-meme demande une heure et une
+# chaine Linux. Voir tools/userland.ps1 : jamais un userland d'un autre commit
+# sans le dire, jamais une image dont l'empreinte ne correspond pas.
+& "$PSScriptRoot\tools\userland.ps1" -RepoRoot $PSScriptRoot `
+    -NoDownload:$NoUserlandDownload -Refresh:$RefreshUserland `
+    -AllowOlder:$AllowOlderUserland
+
 $userland = "tools\userland\userland.img"
 if (Test-Path $userland) {
   Write-Host "disque userland : $userland" -ForegroundColor Cyan
