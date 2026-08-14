@@ -13,6 +13,127 @@ static mut QUEUE: [u8; QUEUE_SIZE] = [0; QUEUE_SIZE];
 static mut Q_HEAD: usize = 0;
 static mut Q_TAIL: usize = 0;
 
+/// Compteurs de diagnostic. La machine est mono-coeur et ces champs ne sont
+/// modifies que depuis IRQ1 (interruptions coupees) ou pendant l'initialisation.
+static mut IRQ_COUNT: u64 = 0;
+static mut DROPPED_COUNT: u64 = 0;
+static mut LAST_SCANCODE: u8 = 0;
+static mut INIT_CONFIG: u8 = 0;
+static mut INIT_ACK_DEFAULTS: u8 = 0;
+static mut INIT_ACK_ENABLE: u8 = 0;
+
+const WAIT_8042: usize = 100_000;
+
+#[derive(Clone, Copy, Debug)]
+pub struct Stats {
+    pub irq: u64,
+    pub dropped: u64,
+    pub pending: usize,
+    pub last_scancode: u8,
+    pub controller_status: u8,
+    pub controller_config: u8,
+    pub pic_master_mask: u8,
+    pub ack_defaults: u8,
+    pub ack_enable: u8,
+}
+
+pub fn stats() -> Stats {
+    use crate::arch::x86_64::ports::inb;
+    let (head, tail, irq, dropped, last, config, ack_defaults, ack_enable) = unsafe {
+        (
+            Q_HEAD,
+            Q_TAIL,
+            IRQ_COUNT,
+            DROPPED_COUNT,
+            LAST_SCANCODE,
+            INIT_CONFIG,
+            INIT_ACK_DEFAULTS,
+            INIT_ACK_ENABLE,
+        )
+    };
+    let pending = if tail >= head {
+        tail - head
+    } else {
+        QUEUE_SIZE - head + tail
+    };
+    let (master, _) = crate::arch::x86_64::interrupts::mask_snapshot();
+    Stats {
+        irq,
+        dropped,
+        pending,
+        last_scancode: last,
+        controller_status: unsafe { inb(0x64) },
+        controller_config: config,
+        pic_master_mask: master,
+        ack_defaults,
+        ack_enable,
+    }
+}
+
+fn wait_input_empty() -> bool {
+    use crate::arch::x86_64::ports::inb;
+    for _ in 0..WAIT_8042 {
+        if unsafe { inb(0x64) } & 0x02 == 0 {
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    false
+}
+
+fn wait_output_full() -> bool {
+    use crate::arch::x86_64::ports::inb;
+    for _ in 0..WAIT_8042 {
+        if unsafe { inb(0x64) } & 0x01 != 0 {
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    false
+}
+
+fn controller_write(value: u8) -> bool {
+    use crate::arch::x86_64::ports::outb;
+    if !wait_input_empty() {
+        return false;
+    }
+    unsafe { outb(0x64, value) };
+    true
+}
+
+fn data_write(value: u8) -> bool {
+    use crate::arch::x86_64::ports::outb;
+    if !wait_input_empty() {
+        return false;
+    }
+    unsafe { outb(0x60, value) };
+    true
+}
+
+fn data_read() -> Option<u8> {
+    use crate::arch::x86_64::ports::inb;
+    if !wait_output_full() {
+        return None;
+    }
+    Some(unsafe { inb(0x60) })
+}
+
+/// Envoie une commande au clavier et attend son ACK. Un `RESEND` (0xFE) est
+/// rejoue une fois.
+fn keyboard_command(command: u8) -> Option<u8> {
+    for _ in 0..2 {
+        if !data_write(command) {
+            return None;
+        }
+        let reply = data_read()?;
+        if reply == 0xFE {
+            continue;
+        }
+        return Some(reply);
+    }
+    None
+}
+
 /// Prepare le controleur 8042 pour le clavier.
 ///
 /// Deux choses indispensables, et une seule est evidente.
@@ -27,60 +148,111 @@ static mut Q_TAIL: usize = 0;
 /// touche n'arrivera jamais, alors que tout le reste du systeme fonctionne.
 /// Que cet octet soit present ou non depend du chemin exact suivi par le BIOS,
 /// ce qui rend la panne intermittente d'un demarrage a l'autre.
+
+
 pub fn init() {
-    use crate::arch::x86_64::ports::{inb, outb};
-    unsafe {
-        // 1. Vide le tampon de sortie (borne : on ne boucle pas sur un
-        //    controleur absent ou defaillant).
+    // Les interruptions sont deja actives a ce stade du boot. Une reponse a
+    // F6/F4 ou au controleur arrive sur le meme port 0x60 que les scancodes :
+    // IRQ1 ne doit pas pouvoir la consommer avant data_read().
+    interrupts::without_interrupts(|| {
+        use crate::arch::x86_64::ports::inb;
+
+        let mut config = 0u8;
+
+        unsafe {
+            Q_HEAD = 0;
+            Q_TAIL = 0;
+            IRQ_COUNT = 0;
+            DROPPED_COUNT = 0;
+            LAST_SCANCODE = 0;
+            SHIFT = false;
+            ALTGR = false;
+            EXTENDED_PENDING = false;
+        }
+
         for _ in 0..64 {
-            if inb(0x64) & 0x01 == 0 {
+            if unsafe { inb(0x64) } & 0x01 == 0 {
                 break;
             }
-            let _ = inb(0x60);
+            let _ = data_read();
         }
 
-        // 2. Reactive l'interface clavier.
-        outb(0x64, 0xAE);
+        let _ = controller_write(0xAE);
 
-        // 3. Relit la configuration et s'assure que l'IRQ1 est active et que
-        //    l'horloge du clavier n'est pas coupee.
-        outb(0x64, 0x20);
-        let mut waited = 0;
-        while inb(0x64) & 0x01 == 0 && waited < 100_000 {
-            waited += 1;
-        }
-        if inb(0x64) & 0x01 != 0 {
-            let mut config = inb(0x60);
-            config |= 0x01; // IRQ1 active
-            config &= !0x10; // horloge clavier active
-            outb(0x64, 0x60);
-            let mut waited = 0;
-            while inb(0x64) & 0x02 != 0 && waited < 100_000 {
-                waited += 1;
+        if controller_write(0x20) {
+            if let Some(current) = data_read() {
+                config = current | 0x01 | 0x40;
+                config &= !0x10;
+                if controller_write(0x60) {
+                    let _ = data_write(config);
+                }
             }
-            outb(0x60, config);
         }
 
-        // 4. Un dernier octet a pu arriver pendant la reconfiguration.
-        for _ in 0..8 {
-            if inb(0x64) & 0x01 == 0 {
-                break;
-            }
-            let _ = inb(0x60);
+        let ack_defaults = keyboard_command(0xF6).unwrap_or(0);
+        let ack_enable = keyboard_command(0xF4).unwrap_or(0);
+
+        crate::arch::x86_64::interrupts::unmask_irq(1);
+        let (master_mask, _) = crate::arch::x86_64::interrupts::mask_snapshot();
+
+        unsafe {
+            INIT_CONFIG = config;
+            INIT_ACK_DEFAULTS = ack_defaults;
+            INIT_ACK_ENABLE = ack_enable;
         }
-    }
-    crate::kernel::dmesg::log("keyboard: 8042 purge, interface et IRQ1 actives");
+
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "keyboard: 8042 pret config={:#04x}, ACK F6={:#04x} F4={:#04x}, PIC1 mask={:#04x}",
+            config, ack_defaults, ack_enable, master_mask
+        ));
+    });
+}
+
+/// Rearme le clavier apres qu'un autre pilote a reconfigure le controleur 8042.
+pub fn rearm_after_8042_reconfigure() {
+    interrupts::without_interrupts(|| {
+        let _ = controller_write(0xAE);
+
+        let mut config = unsafe { INIT_CONFIG };
+        if controller_write(0x20) {
+            if let Some(current) = data_read() {
+                config = current | 0x01 | 0x40;
+                config &= !0x10;
+                if controller_write(0x60) {
+                    let _ = data_write(config);
+                }
+            }
+        }
+
+        let ack_enable = keyboard_command(0xF4).unwrap_or(0);
+        crate::arch::x86_64::interrupts::unmask_irq(1);
+
+        unsafe {
+            INIT_CONFIG = config;
+            INIT_ACK_ENABLE = ack_enable;
+        }
+
+        let (master_mask, _) = crate::arch::x86_64::interrupts::mask_snapshot();
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "keyboard: rearme apres souris config={:#04x}, ACK F4={:#04x}, PIC1 mask={:#04x}",
+            config, ack_enable, master_mask
+        ));
+    });
 }
 
 /// Empile un scancode. Appele depuis le gestionnaire d'interruption clavier.
+
 pub fn push_scancode(sc: u8) {
     unsafe {
+        IRQ_COUNT = IRQ_COUNT.wrapping_add(1);
+        LAST_SCANCODE = sc;
         let next = (Q_TAIL + 1) % QUEUE_SIZE;
         if next != Q_HEAD {
             QUEUE[Q_TAIL] = sc;
             Q_TAIL = next;
+        } else {
+            DROPPED_COUNT = DROPPED_COUNT.wrapping_add(1);
         }
-        // File pleine : on laisse tomber le scancode (garde-fou simple).
     }
 }
 
@@ -107,11 +279,10 @@ pub fn has_pending() -> bool {
 }
 
 /// Lecture non bloquante d'un scancode brut (None si rien). Utile pour le GUI.
+
 pub fn try_scancode() -> Option<u8> {
-    interrupts::disable();
-    let r = pop_scancode();
-    interrupts::enable();
-    r
+    // Preserve l'etat IF de l'appelant.
+    interrupts::without_interrupts(pop_scancode)
 }
 
 /// Attend le prochain scancode, en mettant le CPU en veille si la file est vide.
@@ -248,14 +419,17 @@ pub enum Key {
 static mut SHIFT: bool = false;
 /// Etat persistant de la touche AltGr (Alt droit, sequence E0 38 / E0 B8).
 static mut ALTGR: bool = false;
+/// Prefixe E0 recu sans son second octet : `try_key` reste non bloquant.
+static mut EXTENDED_PENDING: bool = false;
 
 /// Decode un scancode (et son eventuel 2e octet etendu) en touche logique.
 /// Renvoie None pour les codes qui ne font que modifier un etat (Shift/AltGr)
 /// ou les relachements.
+
 fn decode_from(sc: u8) -> Option<Key> {
-    if sc == 0xe0 {
-        let ext = read_scancode(); // le 2e octet arrive immediatement
-        return match ext {
+    if unsafe { EXTENDED_PENDING } {
+        unsafe { EXTENDED_PENDING = false; }
+        return match sc {
             0x38 => { unsafe { ALTGR = true; } None }
             0xb8 => { unsafe { ALTGR = false; } None }
             0x48 => Some(Key::Up),
@@ -265,6 +439,10 @@ fn decode_from(sc: u8) -> Option<Key> {
             0x53 => Some(Key::Backspace),
             _ => None,
         };
+    }
+    if sc == 0xe0 {
+        unsafe { EXTENDED_PENDING = true; }
+        return None;
     }
     match sc {
         0x2a | 0x36 => { unsafe { SHIFT = true; } None }

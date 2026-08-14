@@ -6,6 +6,7 @@
 //! jour la position, les boutons et le delta de roulette.
 
 use crate::arch::x86_64::ports::{inb, outb};
+use x86_64::instructions::interrupts;
 use crate::drivers::gfx::{WIDTH, HEIGHT};
 
 static mut MX: i32 = (WIDTH / 2) as i32;
@@ -39,38 +40,48 @@ unsafe fn set_sample_rate(rate: u8) {
 }
 
 /// Active la souris et l'IRQ12. A appeler en entrant dans le bureau.
+
 pub fn init() {
-    unsafe {
-        ctl(0xA8); // active le peripherique auxiliaire (souris)
-        // Active la generation d'IRQ12 dans la config du controleur.
+    // Le 8042 est partage avec le clavier. Les ACK et les reponses du
+    // controleur passent par 0x60 : transaction atomique vis-a-vis d'IRQ1/12.
+    interrupts::without_interrupts(|| unsafe {
+        ctl(0xAE); // clavier actif
+        ctl(0xA8); // souris active
+
         ctl(0x20);
         let mut status = rd();
-        status |= 0x02;  // IRQ12 active
-        status &= !0x20; // horloge souris active
+        status |= 0x03;   // IRQ1 + IRQ12
+        status |= 0x40;   // traduction Set-1 clavier
+        status &= !0x10;  // horloge clavier active
+        status &= !0x20;  // horloge souris active
         ctl(0x60);
         wr(status);
-        mouse_cmd(0xF6); // parametres par defaut
-        // Sequence d'activation IntelliMouse : les souris compatibles passent
-        // en mode paquet 4 octets et exposent la roulette avec l'ID 3 (ou 4).
+
+        mouse_cmd(0xF6);
         set_sample_rate(200);
         set_sample_rate(100);
         set_sample_rate(80);
-        mouse_cmd(0xF2); // Get Device ID (ACK deja consomme par mouse_cmd)
+        mouse_cmd(0xF2);
         let id = rd();
         HAS_WHEEL = id == 3 || id == 4;
-        mouse_cmd(0xF4); // active le reporting
+        mouse_cmd(0xF4);
 
-        // Demasque IRQ2 (cascade vers le PIC esclave) et IRQ12 (souris).
-        let m1 = inb(0x21);
-        outb(0x21, m1 & !(1 << 2));
-        let m2 = inb(0xA1);
-        outb(0xA1, m2 & !(1 << 4)); // IRQ12 = bit 4 du PIC esclave
+        crate::arch::x86_64::interrupts::unmask_irq(1);
+        crate::arch::x86_64::interrupts::unmask_irq(12);
 
         MX = (WIDTH / 2) as i32;
         MY = (HEIGHT / 2) as i32;
         CYCLE = 0;
         WHEEL_DELTA = 0;
-    }
+
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "mouse: 8042 config={:#04x}, id={}, wheel={}",
+            status, id, HAS_WHEEL
+        ));
+    });
+
+    // F4 cote clavier APRES toute la negociation IntelliMouse.
+    crate::drivers::keyboard::rearm_after_8042_reconfigure();
 }
 
 /// Traite un octet recu de la souris (appele depuis l'IRQ12).

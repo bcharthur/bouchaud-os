@@ -6,6 +6,7 @@
 //! clavier n'est plus interroge en polling.
 
 use pic8259::ChainedPics;
+use crate::arch::x86_64::ports::{inb, outb};
 use crate::kernel::dmesg;
 
 pub const PIC_1_OFFSET: u8 = 32;
@@ -55,6 +56,39 @@ pub fn state() -> &'static str {
     }
 }
 
+
+/// Demasque explicitement une IRQ sur les PIC 8259.
+///
+/// `ChainedPics::initialize()` restaure les masques qu'il a trouves avant le
+/// remappage. Cela convient a une machine deja configuree, mais pas comme
+/// contrat de pilote : l'IRQ1 peut donc rester masquee meme si le 8042 est
+/// parfaitement configure. Les pilotes appellent cette fonction quand leur
+/// peripherique est pret a produire des interruptions.
+pub fn unmask_irq(irq: u8) {
+    unsafe {
+        match irq {
+            0..=7 => {
+                let mask = inb(0x21);
+                outb(0x21, mask & !1u8.wrapping_shl(irq as u32));
+            }
+            8..=15 => {
+                // Une IRQ du PIC esclave a aussi besoin de la cascade IRQ2.
+                let master = inb(0x21);
+                outb(0x21, master & !1u8.wrapping_shl(2));
+                let slave_irq = irq - 8;
+                let slave = inb(0xA1);
+                outb(0xA1, slave & !1u8.wrapping_shl(slave_irq as u32));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Masques materiels courants (PIC maitre, PIC esclave), pour le diagnostic.
+pub fn mask_snapshot() -> (u8, u8) {
+    unsafe { (inb(0x21), inb(0xA1)) }
+}
+
 /// Signale la fin de traitement d'une IRQ au PIC.
 pub fn notify_end_of_interrupt(irq: u8) {
     unsafe { PICS.notify_end_of_interrupt(irq); }
@@ -64,6 +98,8 @@ pub fn notify_end_of_interrupt(irq: u8) {
 pub fn init() {
     unsafe {
         PICS.initialize();
+        // Le timer est une dependance du scheduler : ne pas dependre du masque BIOS.
+        unmask_irq(0);
         x86_64::instructions::interrupts::enable();
         ENABLED = true;
     }
