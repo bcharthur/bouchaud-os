@@ -224,7 +224,8 @@ class Transaction:
     interrompue en chemin ne laisse pas la moitie de ses ecritures visibles.
     """
 
-    __slots__ = ("service", "base", "mode", "donnees", "vivante", "modifiee")
+    __slots__ = ("service", "base", "mode", "donnees", "vivante", "modifiee",
+                 "touches")
 
     def __init__(self, service, base, mode):
         self.service = service
@@ -237,6 +238,9 @@ class Transaction:
             if mode == "readwrite" else service._donnees(base)
         self.vivante = True
         self.modifiee = False
+        # Les magasins que cette transaction a reellement ecrits. C'est ce qui
+        # sera publie, et **rien d'autre** : voir `commit`.
+        self.touches = set()
 
     def magasin(self, nom):
         magasins = self.donnees.setdefault("magasins", {})
@@ -250,12 +254,35 @@ class Transaction:
                          "transaction en lecture seule")
 
     def commit(self):
+        """Publie **les magasins touches**, fondus dans l'etat courant.
+
+        Pas l'instantane entier, et la difference est une perte de donnees.
+        Une transaction prend a sa naissance une copie de toute la base ; la
+        publier telle quelle au commit remet donc en place la valeur qu'avaient
+        **tous les autres magasins a cet instant-la**. Deux transactions qui se
+        chevauchent sur des magasins differents s'effacent alors l'une l'autre,
+        et c'est la derniere qui commite qui gagne.
+
+        Ce n'est pas theorique : la page temoin ecrit son profil a la
+        soumission du formulaire et ses messages depuis un gestionnaire
+        WebSocket. Quand un message arrivait entre l'ouverture de la
+        transaction du profil et son commit, la transaction des messages
+        publiait un instantane pris avant le profil — et le profil disparaissait
+        du disque. L'epreuve de persistance echouait alors une fois sur six,
+        avec un fichier bien present et un profil absent.
+
+        La norme n'autorise pas ce recouvrement : une transaction a une portee,
+        et deux portees qui se croisent sont serialisees. Ne republier que ce
+        qu'on a touche donne le meme resultat observable sans avoir a ordonner
+        les transactions entre elles.
+        """
         if not self.vivante:
             return False
         self.vivante = False
         if self.mode != "readwrite" or not self.modifiee:
             return True
-        return self.service._publie(self.base, self.donnees)
+        return self.service._publie_magasins(self.base, self.donnees,
+                                             self.touches)
 
     def abandonne(self):
         """Jette tout ce que la transaction avait prepare."""
@@ -284,6 +311,32 @@ class Service:
             if base not in self._bases:
                 self._bases[base] = _lit_base(_nom_de_fichier(self.origine, base))
             return self._bases[base]
+
+    def _publie_magasins(self, base, donnees, touches):
+        """Recopie les magasins nommes depuis `donnees` dans l'etat courant.
+
+        L'etat courant est relu **sous le verrou**, juste avant l'ecriture :
+        c'est ce qui fait que ce qu'une autre transaction a publie entre-temps
+        survit.
+        """
+        with self._verrou:
+            if not touches:
+                return True
+            courant = json.loads(json.dumps(self._donnees(base)))
+            magasins = courant.setdefault("magasins", {})
+            source = donnees.get("magasins", {})
+            for nom in touches:
+                if nom in source:
+                    magasins[nom] = source[nom]
+                else:
+                    magasins.pop(nom, None)
+            # Les compteurs de cles automatiques suivent leur magasin.
+            compteurs_source = donnees.get("compteurs", {})
+            compteurs = courant.setdefault("compteurs", {})
+            for nom in touches:
+                if nom in compteurs_source:
+                    compteurs[nom] = compteurs_source[nom]
+            return self._publie(base, courant)
 
     def _publie(self, base, donnees):
         with self._verrou:
@@ -424,18 +477,21 @@ def execute(transaction, verbe, magasin, cle, valeur):
                          "cle deja presente : %r" % (cle,))
         contenu[interne] = valeur
         transaction.modifiee = True
+        transaction.touches.add(magasin)
         return cle
 
     if verbe == "delete":
         transaction.ecriture_permise()
         transaction.magasin(magasin).pop(_cle_valide(cle), None)
         transaction.modifiee = True
+        transaction.touches.add(magasin)
         return None
 
     if verbe == "clear":
         transaction.ecriture_permise()
         transaction.donnees["magasins"][magasin] = {}
         transaction.modifiee = True
+        transaction.touches.add(magasin)
         return None
 
     raise Erreur("NotSupportedError", "operation inconnue : %s" % verbe)

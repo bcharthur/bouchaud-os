@@ -3665,6 +3665,96 @@ def _cache_http(stockage):
     egal("cache: le vidage vide", boite.lit("http://exemple.test/logo.png"), None)
 
 
+def verifie_indexeddb_transactions_croisees():
+    """Deux transactions qui se chevauchent sur des magasins differents.
+
+    ## Le defaut que cette epreuve fige
+
+    Une transaction prend a sa naissance une copie de **toute** la base, et la
+    premiere version la republiait entiere au commit. Deux transactions
+    ouvertes en meme temps sur des magasins differents s'ecrasaient donc l'une
+    l'autre : la derniere a commiter remettait en place ce que les autres
+    magasins contenaient a **sa** naissance a elle.
+
+    Ce n'est pas un cas de laboratoire. La page temoin `webapp.html` ecrit son
+    profil a la soumission du formulaire et ses messages depuis un gestionnaire
+    WebSocket. Quand un message arrivait entre l'ouverture de la transaction du
+    profil et son commit, le profil disparaissait du disque — et l'epreuve de
+    persistance echouait une fois sur six, avec un fichier bien present et un
+    profil absent. Une barriere d'integration qui echoue une fois sur six ne
+    protege rien : elle apprend a relancer.
+
+    L'epreuve ci-dessous ne depend d'aucun ordonnancement : elle ouvre les deux
+    transactions **a la main**, dans l'ordre qui perdait.
+    """
+    from moteur import indexeddb
+
+    restaure = isole_le_stockage()
+    try:
+        indexeddb.reinitialise()
+        service = indexeddb.service("https://croisees.test")
+        service.applique_montee("carnet", 1,
+                                [("profil", {}), ("messages", {})], [])
+
+        # A et B naissent toutes les deux **avant** que l'une ait commite :
+        # elles partagent donc le meme instantane de depart.
+        a = service.transaction("carnet", "readwrite")
+        b = service.transaction("carnet", "readwrite")
+
+        indexeddb.execute(a, "put", "profil", "courant", {"nom": "arthur"})
+        egal("idb croisees: A commite", a.commit(), True)
+
+        # B n'a pas touche `profil`. Publier son instantane entier remettrait
+        # le magasin `profil` tel qu'il etait a la naissance de B : vide.
+        indexeddb.execute(b, "put", "messages", "recus", ["salut"])
+        egal("idb croisees: B commite", b.commit(), True)
+
+        indexeddb.reinitialise()
+        relu = indexeddb.service("https://croisees.test")
+        lecture = relu.transaction("carnet", "readonly")
+        profil = indexeddb.execute(lecture, "get", "profil", "courant", None)
+        messages = indexeddb.execute(lecture, "get", "messages", "recus", None)
+        egal("idb croisees: le profil survit au commit de l'autre magasin",
+             profil, {"nom": "arthur"})
+        egal("idb croisees: et les messages sont la aussi", messages, ["salut"])
+
+        # Le sens inverse : A ecrit apres B, et c'est `messages` qui doit
+        # survivre. Un correctif qui ne marcherait que dans un sens se
+        # signalerait ici.
+        indexeddb.reinitialise()
+        service = indexeddb.service("https://croisees.test")
+        c = service.transaction("carnet", "readwrite")
+        d = service.transaction("carnet", "readwrite")
+        indexeddb.execute(c, "put", "messages", "recus", ["deux"])
+        c.commit()
+        indexeddb.execute(d, "put", "profil", "courant", {"nom": "berthe"})
+        d.commit()
+
+        indexeddb.reinitialise()
+        relu = indexeddb.service("https://croisees.test")
+        lecture = relu.transaction("carnet", "readonly")
+        egal("idb croisees: dans l'autre sens, les messages survivent",
+             indexeddb.execute(lecture, "get", "messages", "recus", None),
+             ["deux"])
+        egal("idb croisees: et le profil est celui qu'on vient d'ecrire",
+             indexeddb.execute(lecture, "get", "profil", "courant", None),
+             {"nom": "berthe"})
+
+        # Une suppression doit se propager, elle aussi : ne publier que les
+        # magasins touches ne doit pas vouloir dire ne publier que les ajouts.
+        vide = service.transaction("carnet", "readwrite")
+        indexeddb.execute(vide, "delete", "profil", "courant", None)
+        vide.commit()
+        indexeddb.reinitialise()
+        lecture = indexeddb.service("https://croisees.test").transaction(
+            "carnet", "readonly")
+        egal("idb croisees: une suppression traverse le commit",
+             indexeddb.execute(lecture, "get", "profil", "courant", None),
+             indexeddb.ABSENT)
+    finally:
+        restaure()
+
+
 def verifie_indexeddb():
     """IndexedDB : asynchrone, transactionnel, persistant, cloisonne.
 
@@ -9721,6 +9811,7 @@ def principal():
         verifie_cache_http,
         verifie_stockage_local,
         verifie_indexeddb,
+        verifie_indexeddb_transactions_croisees,
         verifie_webapp_combinee,
         verifie_origine,
         verifie_contexte_navigation,
