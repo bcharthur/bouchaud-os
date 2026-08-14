@@ -64,3 +64,9 @@ jalons-produit.json
 # third_party/UPSTREAM.md. 27 877 fichiers qui n' ont rien a faire dans
 # l' historique de Bouchaud.
 third_party/ladybird/
+
+# Constructions du portage Ladybird (regenerables par tools/ladybird/*.sh)
+third_party/deps-src/
+third_party/deps-hote/
+third_party/deps-bouchaud/
+third_party/build-ak-*/

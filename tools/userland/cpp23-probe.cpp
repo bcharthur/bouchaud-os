@@ -21,6 +21,17 @@
 //
 // Une sonde qui ne verifierait que la syntaxe passerait a cote des trois.
 //
+// ## La lecon apprise en construisant AK
+//
+// La premiere version de cette sonde donnait un feu vert avec GCC 13 : elle
+// testait `std::expected`, les concepts, `consteval`. Puis AK a refuse de
+// compiler — 37 fichiers, une seule cause : le **parametre `this` explicite**,
+// qu'aucune de ces verifications n'exercait.
+//
+// Une sonde de compatibilite ne vaut que par les constructions qu'elle exerce.
+// Celle-ci teste maintenant ce que le code reel emploie, pas ce qui figure en
+// tete des listes de nouveautes.
+//
 // ## Convention de sortie
 //
 // Comme les autres sondes du dossier : chaque verification imprime `ok` ou
@@ -35,7 +46,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <expected>
+#include <utility>
 #include <memory>
 #include <optional>
 #include <span>
@@ -95,22 +106,56 @@ struct Version {
     auto operator<=>(Version const&) const = default;
 };
 
-// --- std::expected (C++23) --------------------------------------------------
+// --- `if consteval` et `std::to_underlying` ---------------------------------
 //
-// AK a son propre `ErrorOr`, mais `std::expected` exerce exactement le meme
-// mecanisme de retour par valeur sans exception, et il est dans la
-// bibliotheque standard : s'il ne marche pas, `ErrorOr` ne marchera pas.
+// Mesures sur l'arbre upstream : `if consteval` 13 occurrences,
+// `std::to_underlying` 845. Ce sont donc de vraies dependances, au contraire de
+// `std::expected` que la premiere version de cette sonde testait — et que
+// Ladybird n'emploie **nulle part** (zero occurrence). Tester une fonctionnalite
+// que le code n'utilise pas, c'est se donner un verdict sur autre chose que ce
+// qu'on veut savoir.
+//
+// `std::expected` n'est d'ailleurs pas fourni par libstdc++ 13 quand c'est clang
+// qui compile : la sonde aurait donc refuse la seule chaine qui marche.
 
-std::expected<int, std::string> divise(int a, int b)
+enum class Genre : unsigned { Texte = 3, Binaire = 7 };
+
+constexpr int selon_contexte()
 {
-    if (b == 0)
-        return std::unexpected(std::string("division par zero"));
-    return a / b;
+    if consteval {
+        return 1; // evalue a la compilation
+    } else {
+        return 2; // evalue a l'execution
+    }
 }
 
 // --- Stockage par fil -------------------------------------------------------
 
 thread_local int tls_valeur = 0;
+
+// --- Parametre `this` explicite (« deducing this », P0847R7) ----------------
+//
+// C'est LA fonctionnalite C++23 qui bloque, et la sonde ne la testait pas dans
+// sa premiere version. `AK/Optional.h` l'emploie des la ligne 74 :
+//
+//     ALWAYS_INLINE constexpr Self& operator=(this Self& self, V)
+//
+// GCC 13 ne la connait pas — les 37 fichiers d'AK echouent tous la-dessus, et
+// aucun ne le dit clairement. Clang 17+ et GCC 14+ la connaissent.
+//
+// Une sonde qui teste `std::expected` et les concepts sans tester ceci donne un
+// feu vert qui ne vaut rien : c'est exactement ce qui s'est passe.
+
+struct AvecThisExplicite {
+    int valeur = 0;
+    template<typename Self>
+    constexpr auto&& lit(this Self&& self) { return self.valeur; }
+    AvecThisExplicite& operator=(this AvecThisExplicite& self, int v)
+    {
+        self.valeur = v;
+        return self;
+    }
+};
 
 // --- Deduction, agregats, lambdas generiques --------------------------------
 
@@ -147,28 +192,37 @@ int main()
     // qui a servi.
     verifie("mode C++23 actif (__cplusplus > C++20)", __cplusplus > 202002L);
 
-    // 3. Concepts.
+    // 3. Le parametre `this` explicite : sans lui, AK ne compile pas du tout.
+    {
+        AvecThisExplicite o;
+        o = 42;
+        verifie("parametre `this` explicite (AK/Optional.h en depend)", o.lit() == 42);
+    }
+
+    // 4. Concepts.
     verifie("concepts et requires-expressions", somme(20, 22) == 42);
     verifie("concept refuse un type non conforme",
             !Additionnable<void*> || true);
 
-    // 4. Evaluation a la compilation.
+    // 5. Evaluation a la compilation.
     static_assert(carre(9) == 81, "consteval doit s'evaluer a la compilation");
     verifie("consteval", carre(9) == 81);
     verifie("constinit", compteur_global == 7);
 
-    // 5. Comparaison a trois voies.
+    // 6. Comparaison a trois voies.
     verifie("operator<=> par defaut",
             (Version { 1, 2 } < Version { 1, 10 }) && (Version { 2, 0 } > Version { 1, 99 }));
 
-    // 6. std::expected — le retour d'erreur sans exception.
-    auto bon = divise(84, 2);
-    auto mauvais = divise(1, 0);
-    verifie("std::expected : valeur", bon.has_value() && *bon == 42);
-    verifie("std::expected : erreur", !mauvais.has_value()
-                                       && mauvais.error() == "division par zero");
+    // 7. `if consteval` et `std::to_underlying` : 13 et 845 emplois chez upstream.
+    {
+        constexpr int a_la_compilation = selon_contexte();
+        int a_l_execution = selon_contexte();
+        static_assert(a_la_compilation == 1);
+        verifie("if consteval", a_la_compilation == 1 && a_l_execution == 2);
+        verifie("std::to_underlying", std::to_underlying(Genre::Binaire) == 7u);
+    }
 
-    // 7. Conteneurs et vues.
+    // 8. Conteneurs et vues.
     std::vector<int> v { 1, 2, 3, 4, 5 };
     std::span<int> vue { v };
     int total = 0;
@@ -179,7 +233,7 @@ int main()
     std::string_view sv { "Bouchaud" };
     verifie("std::string_view", sv.size() == 8 && sv.starts_with("Bou"));
 
-    // 8. Allocation dynamique et RAII (donc l'allocateur de la libc statique).
+    // 9. Allocation dynamique et RAII (donc l'allocateur de la libc statique).
     {
         auto p = std::make_unique<std::vector<std::string>>();
         for (int i = 0; i < 256; ++i)
@@ -188,21 +242,26 @@ int main()
                                                           && p->at(255).size() > 40);
     }
 
-    // 9. Stockage par fil : arch_prctl + bloc TLS place par le chargeur.
+    // 10. Stockage par fil : arch_prctl + bloc TLS place par le chargeur.
     tls_valeur = 0x1234;
     verifie("thread_local (TLS)", tls_valeur == 0x1234);
 
-    // 10. Atomiques : LibGC et LibSync en dependent.
+    // 11. Atomiques : LibGC et LibSync en dependent.
     std::atomic<std::uint64_t> compteur { 0 };
     for (int i = 0; i < 1000; ++i)
         compteur.fetch_add(1, std::memory_order_relaxed);
-    verifie("std::atomic sans verrou", compteur.load() == 1000
-                                       && compteur.is_lock_free());
+    // `is_always_lock_free` (constexpr) plutot que `is_lock_free()` : la seconde
+    // emet un appel a `__atomic_is_lock_free` de libatomic, que clang ne lie pas
+    // par defaut. La propriete qui nous interesse — LibGC et LibSync veulent des
+    // atomiques sans verrou — se decide de toute facon a la compilation.
+    static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
+                  "LibGC et LibSync exigent des atomiques 64 bits sans verrou");
+    verifie("std::atomic 64 bits sans verrou", compteur.load() == 1000);
 
-    // 11. Paquets de parametres.
+    // 12. Paquets de parametres.
     verifie("paquets de parametres variadiques", compte(1, 2.0, "trois") == 3);
 
-    // 12. if constexpr / traits.
+    // 13. if constexpr / traits.
     if constexpr (std::is_integral_v<int>)
         verifie("if constexpr + type_traits", true);
     else

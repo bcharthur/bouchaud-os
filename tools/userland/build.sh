@@ -83,9 +83,25 @@ musl_static_fixed() {
 # prouver qu'elle sait produire du C++23 qui *s'execute* en ring 3. Voir
 # l'en-tete de `cpp23-probe.cpp` pour ce que la sonde verifie et pourquoi.
 cpp23() {
-    command -v g++ >/dev/null || { echo "g++ introuvable" >&2; exit 1; }
-    echo "  CXX  cpp23-probe (C++23, static-pie, -fno-exceptions)"
-    g++ -std=c++23 -O2 -static-pie -fPIE -fno-exceptions -fno-rtti \
+    # clang++ et non g++ : AK emploie le parametre `this` explicite (22 fois),
+    # que GCC 13 ne connait pas. GCC 14 le connait ; on prend donc le premier
+    # compilateur disponible qui sache compiler la sonde.
+    CXX_SONDE=""
+    for c in "${CXX:-}" clang++ g++-14 g++; do
+        [ -n "$c" ] || continue
+        command -v "$c" >/dev/null || continue
+        if echo 'struct S{int v;auto f(this S s){return s.v;}};int main(){return S{0}.f();}' \
+           | "$c" -std=c++23 -x c++ - -o /dev/null 2>/dev/null; then
+            CXX_SONDE=$c
+            break
+        fi
+    done
+    [ -n "$CXX_SONDE" ] && [ -n "$CXX_SONDE" ] || {
+        echo "aucun compilateur C++23 avec parametre 'this' explicite (clang++ >= 17 ou g++ >= 14)" >&2
+        exit 1
+    }
+    echo "  CXX  cpp23-probe ($CXX_SONDE, static-pie, -fno-exceptions)"
+    "$CXX_SONDE" -std=c++23 -O2 -static-pie -fPIE -fno-exceptions -fno-rtti \
         -Wall -Wextra cpp23-probe.cpp -o "$OUT/cpp23-probe"
 }
 
