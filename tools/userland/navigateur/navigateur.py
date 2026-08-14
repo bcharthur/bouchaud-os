@@ -30,6 +30,7 @@ il tranche la question « est-ce le moteur, ou la separation ? ».
 """
 
 import sys
+import time
 import traceback
 
 import bo
@@ -127,6 +128,9 @@ class Navigateur:
         self.etat = "Pret."
         self.survol = None
         self.chargement = None  # URL en cours de chargement
+        self.chargement_debut = None
+        self._chargement_seconde = -1
+        self._ouverture_differee = None
         # La vue est creee **tot**, avant que le chrome n'ait travaille. Ce
         # n'est pas un detail d'ordonnancement : `superviseur.BUDGET_AS` est un
         # budget au-dessus de ce dont l'enfant herite, et un renderer forke
@@ -171,6 +175,38 @@ class Navigateur:
         """
         print("[js:%s] %s" % (niveau, texte), flush=True)
 
+    def differe_ouverture(self, url, empiler=True):
+        """Joue la navigation au premier battement apres QApplication::exec()."""
+        self._ouverture_differee = (url, bool(empiler))
+        self.etat = "Initialisation du moteur de rendu..."
+        self.survol = None
+        bo.redessiner()
+
+    def _termine_chargement(self):
+        """La premiere trame exploitable devient la barriere de fin de chargement."""
+        if self.chargement is None:
+            return
+        vue = self.onglet.vue
+        arrivee = ((vue.url if vue is not None else "") or self.chargement)
+        self.chargement = None
+        self.chargement_debut = None
+        self._chargement_seconde = -1
+        if not self.champ_actif:
+            self.saisie = arrivee
+            self.curseur_saisie = len(self.saisie)
+        titre = (vue.titre if vue is not None else "") or arrivee
+        bo.titre("%s — Navigateur" % titre)
+        if vue is not None and vue.crashee:
+            self.etat = "Page crashee : %s — F5 pour recharger" % (
+                vue.erreur or "renderer mort")
+        elif vue is not None and vue.erreur:
+            self.etat = "Echec : %s" % vue.erreur
+        else:
+            hauteur = int(vue.hauteur_document) if vue is not None else 0
+            self.etat = "%s — %d px de haut%s" % (
+                titre, hauteur,
+                "" if arrivee.startswith("https://") else " — connexion en clair")
+
     # --- Evenements de la page ------------------------------------------------
 
     def applique(self, evenements):
@@ -185,6 +221,8 @@ class Navigateur:
         historique = None
         for nom, charge in evenements or ():
             if nom == "TRAME":
+                if self.chargement is not None:
+                    self._termine_chargement()
                 redessine = True
             elif nom == "TITRE":
                 bo.titre("%s — Navigateur" % (charge.get("titre") or ""))
@@ -208,6 +246,9 @@ class Navigateur:
             elif nom == "HISTORIQUE":
                 historique = charge.get("pas")
             elif nom == "CRASH":
+                self.chargement = None
+                self.chargement_debut = None
+                self._chargement_seconde = -1
                 self.etat = "Page crashee : %s — F5 pour recharger" % (
                     charge.get("raison") or "renderer mort")
                 self.survol = None
@@ -228,47 +269,54 @@ class Navigateur:
             self.ouvre(navigation)
 
     def bat(self):
-        """Battement : minuteries de la page, et remise en page si besoin.
-
-        C'est ce qui fait qu'un `setTimeout` qui modifie le DOM se voit
-        reellement a l'ecran, et que `location.href = …` navigue.
-        """
+        """Tour court de la boucle produit : aucune attente reseau ici."""
         if self.onglet.distant is not None:
             self.bat_distant()
-            return
-        if self.onglet.vue is None:
-            return
-        self.applique(self.onglet.vue.bat())
+        elif self.onglet.vue is not None:
+            self.applique(self.onglet.vue.bat())
+
+        if self._ouverture_differee is not None:
+            url, empiler = self._ouverture_differee
+            self._ouverture_differee = None
+            self.ouvre(url, empiler=empiler)
+
+        if self.chargement is not None and self.chargement_debut is not None:
+            secondes = int(max(0.0, time.monotonic() - self.chargement_debut))
+            if secondes != self._chargement_seconde:
+                self._chargement_seconde = secondes
+                self.etat = "Chargement de %s... %d s" % (self.chargement, secondes)
+                bo.redessiner()
 
     def ouvre(self, url, empiler=True):
-        # `distant:` demande explicitement le rendu deporte. C'est ce qui permet
-        # de le viser depuis la barre d'adresse, sans passer par la bascule.
+        """Envoie NAVIGATE et rend la main ; FRAME_READY terminera le chargement."""
         brut = (url or "").strip()
         if brut.startswith("distant:"):
             return self.ouvre_distant(
                 reseau.normalise(brut[len("distant:"):], self.onglet.url or None))
         url = reseau.normalise(url, self.onglet.url or None)
         if not url:
-            return
-        self.etat = "Chargement de %s…" % url
+            return False
+
+        self.etat = "Chargement de %s..." % url
         self.chargement = url
+        self.chargement_debut = time.monotonic()
+        self._chargement_seconde = 0
         self.survol = None
         bo.redessiner()
-        bo.traiter_evenements()
 
         vue = self.onglet.vue
         if vue is None:
             vue = self.onglet.vue = mod_vue.ouvre_vue(
                 self.largeur_vue, self.hauteur_vue, journal=self._journal_js)
-        vue.redimensionne(self.largeur_vue, self.hauteur_vue)
         try:
-            vue.ouvre(url)
+            vue.redimensionne(self.largeur_vue, self.hauteur_vue)
+            lancee = vue.ouvre(url)
         except Exception as e:
             traceback.print_exc(file=sys.stdout)
             self.etat = "Erreur interne : %s" % e
             self.chargement = None
-            return
-        self.chargement = None
+            self.chargement_debut = None
+            return False
 
         arrivee = vue.url or url
         if empiler:
@@ -280,14 +328,10 @@ class Navigateur:
         self.saisie = arrivee
         self.curseur_saisie = len(self.saisie)
         bo.titre("%s — Navigateur" % (vue.titre or arrivee))
-        if vue.crashee:
-            self.etat = "Page crashee : %s — F5 pour recharger" % (vue.erreur or "")
-        elif vue.erreur:
-            self.etat = "Echec : %s" % vue.erreur
-        else:
-            self.etat = "%s — %d px de haut%s" % (
-                vue.titre or arrivee, int(vue.hauteur_document),
-                "" if arrivee.startswith("https://") else " — connexion en clair")
+
+        if vue.genre == "local" or lancee is False or vue.crashee:
+            self._termine_chargement()
+        return bool(lancee is not False)
 
     # --- Rendu distant --------------------------------------------------------
 
@@ -823,14 +867,16 @@ def verifie(depart="bo:accueil", battements=60):
         traceback.print_exc(file=sys.stdout)
         note("chargement", False, e)
     else:
-        note("chargement", not (vue and vue.crashee), vue.erreur if vue else "")
+        limite_battements = max(int(battements), 180)
+        for _ in range(limite_battements):
+            _tic()
+            if vue and (vue.crashee or (vue.trames > 0 and vue.url)):
+                break
+            time.sleep(0.016)
+        note("chargement", bool(vue and not vue.crashee and vue.trames > 0),
+             vue.erreur if vue else "")
     note("adresse", bool(vue and vue.url), getattr(vue, "url", None))
     note("titre", bool(vue and vue.titre), getattr(vue, "titre", None))
-
-    # Le battement est celui de l'hote : seize millisecondes, et c'est par lui
-    # que la trame du renderer remonte jusqu'au chrome.
-    for _ in range(battements):
-        _tic()
     note("trame peinte", bool(vue and vue.trames > 0), getattr(vue, "trames", 0))
 
     liste = _peindre(1280, 720)
@@ -875,10 +921,9 @@ def main():
 
     bo.ouvrir("Navigateur — Bouchaud OS")
     depart = arguments[0] if arguments else "bo:accueil"
-    try:
-        _navigateur.ouvre(depart or "bo:accueil")
-    except Exception:
-        traceback.print_exc(file=sys.stdout)
+    _navigateur.differe_ouverture(depart or "bo:accueil")
+    print("[bo] navigation initiale differee jusqu'a l'event-loop : %s"
+          % (depart or "bo:accueil"), flush=True)
     return bo.boucle()
 
 

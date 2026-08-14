@@ -283,6 +283,7 @@ class VueRenderer(_Vue):
         self.image = None            # (identifiant, largeur, hauteur) cote Qt
         self.generation = 0
         self.trames = 0
+        self.pret = False
         self._demarre()
 
     def _demarre(self):
@@ -293,7 +294,8 @@ class VueRenderer(_Vue):
         # autorisee, pas le superviseur. Voir l'en-tete du module.
         self.renderer.auto_navigation = False
         self.crashee = False
-        self._pompe(5.0, attendu="READY")
+        self.pret = False
+        # READY sera collecte par le premier battement de l'event-loop.
 
     # --- Traduction -----------------------------------------------------------
 
@@ -302,7 +304,10 @@ class VueRenderer(_Vue):
         evenements = []
         for nom, charge in brut:
             charge = charge or {}
-            if nom == "TITLE_CHANGED":
+            if nom == "READY":
+                self.pret = True
+                continue
+            elif nom == "TITLE_CHANGED":
                 self.titre = charge.get("titre") or self.titre
                 evenements.append(("TITRE", {"titre": self.titre}))
             elif nom == "URL_CHANGED":
@@ -362,36 +367,20 @@ class VueRenderer(_Vue):
     # --- Cycle de vie ---------------------------------------------------------
 
     def ouvre(self, url):
-        """Demande la page, et attend d'en avoir quelque chose a montrer.
-
-        L'attente est bornee et le chrome reste peint pendant : un renderer qui
-        ne repond pas laisse une fenetre vivante avec une barre d'etat qui le
-        dit, ce qui est tout l'interet d'avoir mis la page ailleurs.
-        """
+        """Met NAVIGATE en file et rend immediatement la main au chrome."""
         if self.crashee or self.renderer is None or not self.renderer.vivant():
             self._redemarre()
         self.erreur = None
+        self.defilement = 0.0
+        self.url = str(url)
+        self.titre = ""
+        self.derniers_evenements = []
         try:
             self.renderer.navigue(url)
         except (protocole.Fin, OSError) as e:
             self.erreur = str(e)
             return False
-        self.defilement = 0.0
-        # L'adresse demandee devient l'adresse courante **tout de suite**, et
-        # c'est le renderer qui la corrigera s'il aboutit ailleurs — redirection,
-        # `pushState`. Attendre `URL_CHANGED` pour la poser paraissait plus
-        # rigoureux et ne l'etait pas : la premiere attente ci-dessous rend la
-        # main sur la premiere trame venue, et une trame tardive de la page
-        # **precedente** suffisait a la satisfaire. Le chrome empilait alors
-        # l'ancienne adresse dans son historique, ce qui donnait une barre
-        # d'adresse qui retarde d'une page et un bouton « reculer » qui ramene
-        # la ou l'on est deja.
-        self.url = str(url)
-        self.titre = ""
-        vus = self._attends_parmi(("URL", "TRAME", "CRASH"), DELAI_CHARGEMENT_S)
-        vus += self._attends_parmi(("TRAME", "CRASH"), DELAI_CHARGEMENT_S)
-        self.derniers_evenements = vus
-        return not self.crashee
+        return True
 
     def _attends_parmi(self, noms, secondes):
         vus = []
