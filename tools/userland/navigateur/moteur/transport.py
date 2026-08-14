@@ -116,6 +116,8 @@ class Courtier:
 
     def __init__(self, demande):
         self._demande = demande
+        # Le protocole v1 utilise un seul lecteur sur le flux de controle.
+        self._requete = threading.Lock()
 
     def charge(self, url, methode="GET", corps=None, entetes=None, brut=False,
                document=None, destination=None):
@@ -130,7 +132,11 @@ class Courtier:
             octets = corps if isinstance(corps, (bytes, bytearray)) \
                 else str(corps).encode("utf-8")
             requete["corps"] = base64.b64encode(bytes(octets)).decode("ascii")
-        reponse = self._demande(requete)
+        # Le prechargement peut appeler charge() depuis plusieurs fils.
+        # Une transaction complete a la fois evite qu'un fil lise la reponse
+        # d'un autre. Le reseau, lui, est sorti du fil Qt cote navigateur.
+        with self._requete:
+            reponse = self._demande(requete)
         return reponse_depuis(reponse, url)
 
 

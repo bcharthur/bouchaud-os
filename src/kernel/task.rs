@@ -303,6 +303,17 @@ static mut KERNEL_CTX: Context = Context { rsp: 0 };
 /// Une tache utilisateur a-t-elle demande une preemption ?
 static mut NEED_RESCHED: bool = false;
 
+/// Miroir IRQ-safe du type de tache courante : evite de parcourir TASKS quand
+/// IRQ0 interrompt un syscall en ring 0.
+static mut CURRENT_IS_KERNEL: bool = false;
+
+static mut CONTEXT_SWITCHES: u64 = 0;
+static mut IRQ_PREEMPTIONS: u64 = 0;
+static mut DEFERRED_PREEMPTIONS: u64 = 0;
+static mut WM_HEARTBEAT_TICK: u64 = 0;
+static mut WM_WATCHDOG_ARMED: bool = false;
+static mut WM_LAST_WARNING_TICK: u64 = 0;
+
 fn tasks() -> &'static mut Vec<Box<Task>> {
     unsafe {
         if TASKS.is_none() {
@@ -565,6 +576,7 @@ extern "C" fn kernel_task_trampoline() -> ! {
 /// base FS (TLS) et etat FPU.
 fn install(task: &mut Task) {
     unsafe {
+        CURRENT_IS_KERNEL = task.noyau;
         // Un fil noyau n'a pas d'espace utilisateur a activer, et surtout ne
         // doit pas activer celui d'un programme : il lirait alors, sous les
         // memes adresses, la memoire du dernier processus installe.
@@ -736,6 +748,7 @@ pub fn schedule() -> bool {
 /// Bascule de la tache `from` vers la tache `to`.
 fn switch_to(from: usize, to: usize) {
     unsafe {
+        CONTEXT_SWITCHES = CONTEXT_SWITCHES.wrapping_add(1);
         let list = tasks();
         let from_ptr = &mut **list.get_mut(from).unwrap() as *mut Task;
         let to_ptr = &mut **list.get_mut(to).unwrap() as *mut Task;
@@ -757,6 +770,7 @@ fn switch_to_kernel() -> ! {
         let list = tasks();
         let from_ptr = &mut **list.get_mut(cur).unwrap() as *mut Task;
         CURRENT = usize::MAX;
+        CURRENT_IS_KERNEL = false;
         usermode::per_cpu().current = 0;
         crate::kernel::vmm::activate_kernel();
         switch_context(&mut (*from_ptr).ctx.rsp, KERNEL_CTX.rsp);
@@ -973,7 +987,9 @@ pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
         Some(process) => process,
         None => return -1,
     };
-    let task = Task::new_kernel(process.clone(), entree);
+    let mut task = Task::new_kernel(process.clone(), entree);
+    // Le serveur graphique est de l'UI : meme classe interactive que le navigateur.
+    task.priorite = Priorite::Interactive;
     let index = register(task);
     unsafe {
         CURRENT = index;
@@ -1148,6 +1164,7 @@ pub fn kill_all(code: i32) {
 ///
 /// On ne commute que si une autre tache est prete : sinon on economise deux
 /// changements de contexte par tick.
+
 pub fn preempt_from_irq() {
     if unsafe { CURRENT } == usize::MAX {
         return;
@@ -1159,6 +1176,7 @@ pub fn preempt_from_irq() {
     let cur = unsafe { CURRENT };
     if let Some(next) = pick_next(cur) {
         if next != cur {
+            unsafe { IRQ_PREEMPTIONS = IRQ_PREEMPTIONS.wrapping_add(1); }
             switch_to(cur, next);
         }
     }
@@ -1259,9 +1277,88 @@ pub fn take_need_resched() -> bool {
     }
 }
 
+/// Le timer a interrompu du ring 0 appartenant a une tache utilisateur.
+/// On ne commute pas au milieu du noyau : `abi::handle` consommera la demande.
+pub fn request_deferred_preempt() {
+    unsafe {
+        DEFERRED_PREEMPTIONS = DEFERRED_PREEMPTIONS.wrapping_add(1);
+        NEED_RESCHED = true;
+    }
+}
+
+/// Lecture IRQ-safe, sans parcourir TASKS.
+pub fn current_is_kernel_task() -> bool {
+    unsafe { core::ptr::read_volatile(&raw const CURRENT_IS_KERNEL) }
+}
+
+/// Heartbeat du compositor.
+pub fn note_wm_heartbeat() {
+    unsafe {
+        WM_HEARTBEAT_TICK = crate::kernel::timer::ticks();
+        WM_WATCHDOG_ARMED = true;
+    }
+}
+
+/// Watchdog IRQ0 : si le timer vit mais pas le WM, le journal serie continue.
+pub fn watchdog_from_timer() {
+    let now = crate::kernel::timer::ticks();
+    let (armed, heartbeat, last_warning, switches, irq, deferred) = unsafe {
+        (
+            core::ptr::read_volatile(&raw const WM_WATCHDOG_ARMED),
+            core::ptr::read_volatile(&raw const WM_HEARTBEAT_TICK),
+            core::ptr::read_volatile(&raw const WM_LAST_WARNING_TICK),
+            core::ptr::read_volatile(&raw const CONTEXT_SWITCHES),
+            core::ptr::read_volatile(&raw const IRQ_PREEMPTIONS),
+            core::ptr::read_volatile(&raw const DEFERRED_PREEMPTIONS),
+        )
+    };
+    if !armed {
+        return;
+    }
+    let silence = now.wrapping_sub(heartbeat);
+    let seuil = 2 * crate::kernel::timer::TICKS_PER_SECOND;
+    if silence >= seuil && now.wrapping_sub(last_warning) >= seuil {
+        unsafe { WM_LAST_WARNING_TICK = now; }
+        crate::serial_println!(
+            "[sched-watchdog] desktop sans heartbeat depuis {} ms ; switches={} irq-preempt={} deferred={}",
+            silence.saturating_mul(1000) / crate::kernel::timer::TICKS_PER_SECOND,
+            switches, irq, deferred
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct OrdonnanceurStats {
+    pub switches: u64,
+    pub irq_preemptions: u64,
+    pub deferred_preemptions: u64,
+    pub wm_age_ms: u64,
+    pub ready: usize,
+    pub live: usize,
+}
+
+pub fn diagnostic_ordonnanceur() -> OrdonnanceurStats {
+    let now = crate::kernel::timer::ticks();
+    let (switches, irq, deferred, heartbeat) = unsafe {
+        (CONTEXT_SWITCHES, IRQ_PREEMPTIONS, DEFERRED_PREEMPTIONS, WM_HEARTBEAT_TICK)
+    };
+    OrdonnanceurStats {
+        switches,
+        irq_preemptions: irq,
+        deferred_preemptions: deferred,
+        wm_age_ms: now
+            .saturating_sub(heartbeat)
+            .saturating_mul(1000)
+            / crate::kernel::timer::TICKS_PER_SECOND,
+        ready: ready_count(),
+        live: live_count(),
+    }
+}
+
 // --- Sommeil -----------------------------------------------------------------
 
 /// Endort la tache courante pendant `ticks` ticks du timer.
+
 pub fn sleep_ticks(ticks: u64) {
     let deadline = crate::kernel::timer::ticks() + ticks.max(1);
     {
@@ -1270,11 +1367,10 @@ pub fn sleep_ticks(ticks: u64) {
         task.state = TaskState::Blocked;
     }
     while crate::kernel::timer::ticks() < deadline {
-        if !schedule() {
-            cpu::wait_for_interrupt();
-        }
+        // schedule() fait deja HLT si la tache est bloquee et seule.
+        schedule();
         if current().state == TaskState::Ready {
-            break; // reveille par un signal / un futex
+            break;
         }
     }
     let task = current();

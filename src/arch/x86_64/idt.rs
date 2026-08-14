@@ -168,25 +168,40 @@ extern "x86-interrupt" fn page_fault_handler(stack: InterruptStackFrame, code: P
 
 // --- IRQ materielles --------------------------------------------------------
 
+
 extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
     let _gs = GsGuard::enter(&stack);
     timer::tick();
     crate::kernel::task::echantillonne();
     notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
 
-    // Preemption : uniquement si le timer a interrompu du code ring 3. Le noyau
-    // n'est pas reentrant (verrous de l'allocateur et des pilotes) ; une tache
-    // utilisateur, elle, ne detient aucun verrou noyau.
-    if from_user(&stack) && crate::kernel::task::in_user_task() {
-        crate::kernel::task::preempt_from_irq();
+    crate::kernel::task::watchdog_from_timer();
+
+    if crate::kernel::task::in_user_task() {
+        if from_user(&stack) {
+            crate::kernel::task::preempt_from_irq();
+        } else if !crate::kernel::task::current_is_kernel_task() {
+            // IRQ0 a surpris un syscall : preemption differee a sa sortie.
+            crate::kernel::task::request_deferred_preempt();
+        }
     }
 }
 
+
 extern "x86-interrupt" fn keyboard_interrupt_handler(stack: InterruptStackFrame) {
     let _gs = GsGuard::enter(&stack);
-    let scancode = unsafe { ports::inb(0x60) };
-    keyboard::push_scancode(scancode);
+    let status = unsafe { ports::inb(0x64) };
+    let data = unsafe { ports::inb(0x60) };
+    if status & 0x20 == 0 {
+        keyboard::push_scancode(data);
+    } else {
+        mouse::handle_byte(data);
+    }
     notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
+
+    if from_user(&stack) && crate::kernel::task::in_user_task() {
+        crate::kernel::task::preempt_from_irq();
+    }
 }
 
 /// Acquitte une IRQ du controleur ATA.
@@ -208,7 +223,12 @@ extern "x86-interrupt" fn ata_secondary_handler(stack: InterruptStackFrame) {
 
 extern "x86-interrupt" fn mouse_interrupt_handler(stack: InterruptStackFrame) {
     let _gs = GsGuard::enter(&stack);
+    let status = unsafe { ports::inb(0x64) };
     let byte = unsafe { ports::inb(0x60) };
-    mouse::handle_byte(byte);
+    if status & 0x20 != 0 {
+        mouse::handle_byte(byte);
+    } else {
+        keyboard::push_scancode(byte);
+    }
     notify_end_of_interrupt(InterruptIndex::Mouse.as_u8());
 }

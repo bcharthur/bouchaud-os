@@ -125,6 +125,7 @@ fn boucle() {
     let mut dernier_releve = 0u64;
 
     while !quit {
+        task::note_wm_heartbeat();
         let maintenant = crate::kernel::timer::monotonic_ms();
 
         // ---- Clavier (non bloquant) ----
@@ -310,6 +311,31 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
             crate::serial_println!("[ps] {}", ligne);
         }
     }
+
+
+    let sched = task::diagnostic_ordonnanceur();
+    crate::serial_println!(
+        "[sched] switches={} irq-preempt={} deferred={} wm-age={} ms ready={}/{}",
+        sched.switches,
+        sched.irq_preemptions,
+        sched.deferred_preemptions,
+        sched.wm_age_ms,
+        sched.ready,
+        sched.live
+    );
+    let clavier = keyboard::stats();
+    crate::serial_println!(
+        "[kbd] irq={} attente={} perdus={} last={:#04x} status={:#04x} cfg={:#04x} PIC1={:#04x} ACK(F6/F4)={:#04x}/{:#04x}",
+        clavier.irq,
+        clavier.pending,
+        clavier.dropped,
+        clavier.last_scancode,
+        clavier.controller_status,
+        clavier.controller_config,
+        clavier.pic_master_mask,
+        clavier.ack_defaults,
+        clavier.ack_enable
+    );
 
     for w in wins.iter_mut() {
         if let App::Navigateur { client } = &mut w.app {
