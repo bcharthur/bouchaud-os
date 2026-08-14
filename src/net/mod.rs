@@ -68,6 +68,90 @@ pub fn external_enabled() -> bool {
 // eth0 / e1000 : activation et ARP reel
 // ---------------------------------------------------------------------------
 
+/// Etat de l'interface exterieure a l'issue du demarrage.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Demarrage {
+    /// Aucune carte reseau sur le bus PCI. Une machine sans reseau, ce qui est
+    /// une configuration valide et non une panne.
+    SansCarte,
+    /// Carte presente mais non geree, ou dont l'initialisation a echoue.
+    CarteRefusee,
+    /// Carte prete, mais le lien n'est pas monte : rien a configurer.
+    LienBas,
+    /// Carte prete, lien monte, pas de bail DHCP. La configuration statique de
+    /// repli s'applique — c'est ce qui fait marcher SLIRP sans serveur DHCP.
+    SansBail,
+    /// Interface configuree : adresse, passerelle, resolveur.
+    Pret,
+}
+
+static mut DEMARRAGE: Demarrage = Demarrage::SansCarte;
+
+/// Ce que l'initialisation du demarrage a obtenu.
+pub fn etat_demarrage() -> Demarrage { unsafe { DEMARRAGE } }
+
+/// Met le reseau en service au demarrage. **N'echoue jamais.**
+///
+/// ## Pourquoi cela ne peut pas rester une commande
+///
+/// Le driver e1000 existait et marchait, mais il fallait taper `ifup` puis
+/// `dhcp` avant de pouvoir ouvrir une page. Sur un poste de travail, cela veut
+/// dire que le navigateur ne trouve pas le reseau la premiere fois qu'on
+/// l'ouvre — et qu'il faut connaitre deux commandes pour reparer quelque chose
+/// qui n'est pas casse. Un systeme dont l'interface graphique demarre doit
+/// avoir son reseau en service, comme il a son clavier.
+///
+/// ## Pourquoi chaque echec est benin
+///
+/// Aucune des cinq issues n'arrete le demarrage. Une machine sans carte reseau
+/// doit demarrer ; une machine dont le lien est bas doit demarrer ; une machine
+/// sans serveur DHCP doit demarrer avec sa configuration de repli — c'est
+/// exactement le cas de SLIRP, ou l'adresse est connue d'avance. Rendre le
+/// reseau fatal au demarrage transformerait une machine utilisable en machine
+/// morte pour la seule raison qu'elle est hors ligne.
+///
+/// Le prix est un delai borne : la negociation DHCP attend deux fois quelques
+/// secondes avant de renoncer, et seulement si une carte a repondu. Une machine
+/// sans carte ne paie rien du tout.
+pub fn demarre() -> Demarrage {
+    let etat = demarre_interne();
+    unsafe { DEMARRAGE = etat; }
+    let ligne = match etat {
+        Demarrage::SansCarte => String::from("net: lo 127.0.0.1 actif ; aucune carte reseau"),
+        Demarrage::CarteRefusee => String::from("net: lo actif ; carte presente mais non geree"),
+        Demarrage::LienBas => String::from("net: lo actif ; eth0 initialisee, lien bas"),
+        Demarrage::SansBail => format!(
+            "net: eth0 {} (statique, pas de bail DHCP) gw {} dns {}",
+            ipv4::format_addr(&our_ip()), ipv4::format_addr(&gateway()),
+            ipv4::format_addr(&dns_server())),
+        Demarrage::Pret => format!(
+            "net: eth0 {} gw {} dns {} — pret",
+            ipv4::format_addr(&our_ip()), ipv4::format_addr(&gateway()),
+            ipv4::format_addr(&dns_server())),
+    };
+    crate::kernel::dmesg::log(&ligne);
+    etat
+}
+
+fn demarre_interne() -> Demarrage {
+    if pci::find_network().is_none() {
+        return Demarrage::SansCarte;
+    }
+    if !e1000::init() {
+        return Demarrage::CarteRefusee;
+    }
+    if !e1000::link_up() {
+        return Demarrage::LienBas;
+    }
+    match dhcp::negocie() {
+        Some(_) => Demarrage::Pret,
+        // Pas de bail, mais une carte et un lien : la configuration statique
+        // de repli reste posee, et elle suffit sous SLIRP. On declare donc
+        // l'interface utilisable plutot que de la declarer morte.
+        None => Demarrage::SansBail,
+    }
+}
+
 /// Active l'interface eth0 (initialise le driver e1000).
 pub fn ifup() {
     if e1000::init() {

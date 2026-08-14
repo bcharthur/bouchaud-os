@@ -9502,7 +9502,8 @@ def verifie_renderer_privileges():
         try:
             sale.attends("READY", 15.0)
             herite = audit(sale, "descripteurs").get("descripteurs") or []
-            resume_sale = privileges.resume(herite)
+            resume_sale = privileges.resume(
+                [e for e in herite if e["fd"] not in (0, 1, 2)])
         finally:
             sale.ferme()
         verifie("privileges: sans balayage, l'enfant herite de tout",
@@ -9514,7 +9515,6 @@ def verifie_renderer_privileges():
             propre.attends("READY", 15.0)
             reponse = audit(propre, "descripteurs")
             garde = reponse.get("descripteurs") or []
-            resume_propre = privileges.resume(garde)
             egal("privileges: le renderer courte ses ressources",
                  reponse.get("transport"), "courtier")
 
@@ -9522,11 +9522,27 @@ def verifie_renderer_privileges():
             numeros = sorted(entree["fd"] for entree in garde)
             verifie("privileges: stdio est garde (concession assumee)",
                     set((0, 1, 2)).issubset(set(numeros)), numeros)
-            unix = [e for e in garde if e["genre"] == "prise_unix"]
+
+            # **Tout ce qui suit ignore 0, 1 et 2**, et cela a coute une
+            # epreuve intermittente. Le *genre* des descripteurs standard
+            # n'appartient pas au navigateur : lance depuis un terminal, `0`
+            # est un peripherique ; depuis un tube, c'est un tube ; depuis un
+            # superviseur qui parle par prise, c'est une **prise UNIX** — et
+            # l'epreuve comptait alors deux prises UNIX la ou elle en attendait
+            # une, sans qu'aucun descripteur n'ait fuit. Une meme execution
+            # passait ou echouait selon la facon dont on l'avait lancee, ce qui
+            # est la pire forme d'echec : celle qui n'apprend rien.
+            #
+            # La question interessante n'a jamais ete « combien de prises » mais
+            # « combien de prises **au-dela de ce qu'on a accorde** ».
+            hors_stdio = [e for e in garde if e["fd"] not in (0, 1, 2)]
+            resume_propre = privileges.resume(hors_stdio)
+            unix = [e for e in hors_stdio if e["genre"] == "prise_unix"]
             egal("privileges: une seule prise, celle du controle", len(unix), 1)
-            reseaux = [e for e in garde if e["genre"] == "prise_reseau"]
+            reseaux = [e for e in hors_stdio if e["genre"] == "prise_reseau"]
             egal("privileges: aucune prise reseau heritee", reseaux, [])
-            fichiers = [e for e in garde if e["genre"] in ("fichier", "repertoire")]
+            fichiers = [e for e in hors_stdio
+                        if e["genre"] in ("fichier", "repertoire")]
             egal("privileges: aucun fichier du navigateur", fichiers, [])
             verifie("privileges: le balayage a bien retire quelque chose",
                     len(garde) < len(herite), (len(garde), len(herite)))

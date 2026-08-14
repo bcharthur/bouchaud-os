@@ -787,6 +787,72 @@ def _detour_youtube(url):
                                                  flush=True))
 
 
+def verifie(depart="bo:accueil", battements=60):
+    """Demarre le navigateur, ouvre une page, et rend compte. Sans fenetre.
+
+    ## A quoi cela sert
+
+    A prouver, depuis Bouchaud OS lui-meme, que le binaire livre dans
+    `userland.img` demarre vraiment : que Qt s'initialise, que CPython execute
+    le chrome, que le renderer se forke, qu'une page se charge et qu'une trame
+    est peinte. C'est le seul moyen d'obtenir ce verdict sans quelqu'un devant
+    l'ecran, et donc le seul moyen de l'obtenir a chaque commit.
+
+    ## Pourquoi sans fenetre
+
+    `bo.ouvrir` demande un peripherique d'affichage et `bo.boucle` ne rend la
+    main que lorsqu'on ferme la fenetre : ni l'un ni l'autre n'a de sens dans un
+    scenario qui doit se terminer seul. On appelle donc exactement les rappels
+    que Qt appellerait — `peindre`, `tic` — sur le meme objet `Navigateur`.
+    C'est le chemin du produit, pas une imitation : la vue est la vraie, le
+    renderer est un vrai processus, et la trame vient de la surface partagee.
+    """
+    lignes = []
+    def note(nom, ok, detail=""):
+        lignes.append((nom, bool(ok), str(detail)[:120]))
+
+    vue = _navigateur.onglet.vue
+    note("vue separee", vue is not None and vue.genre == "renderer",
+         getattr(vue, "genre", None))
+    pid_renderer = getattr(getattr(vue, "renderer", None), "pid", None)
+    note("processus renderer", bool(pid_renderer), pid_renderer)
+
+    try:
+        _navigateur.ouvre(depart or "bo:accueil")
+    except Exception as e:  # noqa: BLE001
+        traceback.print_exc(file=sys.stdout)
+        note("chargement", False, e)
+    else:
+        note("chargement", not (vue and vue.crashee), vue.erreur if vue else "")
+    note("adresse", bool(vue and vue.url), getattr(vue, "url", None))
+    note("titre", bool(vue and vue.titre), getattr(vue, "titre", None))
+
+    # Le battement est celui de l'hote : seize millisecondes, et c'est par lui
+    # que la trame du renderer remonte jusqu'au chrome.
+    for _ in range(battements):
+        _tic()
+    note("trame peinte", bool(vue and vue.trames > 0), getattr(vue, "trames", 0))
+
+    liste = _peindre(1280, 720)
+    images = [op for op in liste if op[0] == "image"]
+    note("page posee en image", len(images) == 1, len(images))
+    note("chrome peint", any(op[0] == "texte" for op in liste), len(liste))
+
+    print("")
+    for nom, ok, detail in lignes:
+        print("  %s  %s%s" % ("ok  " if ok else "ECHEC", nom,
+                              (" — " + detail) if detail else ""))
+    echecs = sum(1 for _n, ok, _d in lignes if not ok)
+    # La forme de cette ligne est celle que `tools/test.sh` et la CI comptent.
+    print("RESULTAT : %d verification(s) en echec (%d passees)"
+          % (echecs, len(lignes) - echecs))
+    try:
+        _fermeture()
+    except Exception:  # noqa: BLE001
+        pass
+    return 1 if echecs else 0
+
+
 def main():
     reseau.installe_detour_youtube(_detour_youtube)
     bo.enregistrer({
@@ -798,8 +864,17 @@ def main():
         "fermeture": _fermeture,
         "tic": _tic,
     })
+    arguments = [a for a in sys.argv[1:] if a]
+
+    # `--verifie` : demarrer, ouvrir, peindre, rendre compte, sortir. Voir
+    # `verifie`. Le mode existe pour la CI, mais rien n'y est reserve aux
+    # tests : c'est le navigateur, sans sa fenetre.
+    if "--verifie" in arguments:
+        arguments.remove("--verifie")
+        return verifie(arguments[0] if arguments else "bo:accueil")
+
     bo.ouvrir("Navigateur — Bouchaud OS")
-    depart = sys.argv[1] if len(sys.argv) > 1 else "bo:accueil"
+    depart = arguments[0] if arguments else "bo:accueil"
     try:
         _navigateur.ouvre(depart or "bo:accueil")
     except Exception:
