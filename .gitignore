@@ -70,3 +70,4 @@ third_party/deps-src/
 third_party/deps-hote/
 third_party/deps-bouchaud/
 third_party/build-ak-*/
+third_party/build-libcore-*/

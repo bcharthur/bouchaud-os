@@ -110,6 +110,11 @@ if [ -x "$AK_PROBE" ]; then
     info "== AK (portage Ladybird) =="
     cp "$AK_PROBE" "$WORK/files/ak-probe"
     echo "exec /ak-probe" >> "$WORK/files/autorun"
+    CORE_PROBE=third_party/build-libcore-bouchaud/libcore-probe
+    if [ -x "$CORE_PROBE" ]; then
+        cp "$CORE_PROBE" "$WORK/files/libcore-probe"
+        echo "exec /libcore-probe" >> "$WORK/files/autorun"
+    fi
 else
     info "AK absent — pour l'ajouter au scenario :"
     info "  ./tools/ladybird/fetch.sh && ./tools/ladybird/build-deps.sh --cible \\"
@@ -254,6 +259,10 @@ report $? "le temoin C++23 s'est execute en ring 3"
 if [ -x "$AK_PROBE" ]; then
     grep -q "temoin AK" "$LOG" 2>/dev/null
     report $? "AK s'est execute en ring 3"
+    if [ -x "third_party/build-libcore-bouchaud/libcore-probe" ]; then
+        grep -q "temoin LibSync" "$LOG" 2>/dev/null
+        report $? "LibSync + LibCore se sont executes en ring 3"
+    fi
 fi
 
 # Les deux autres sondes impriment leur propre bilan ; on les compte plutot que
