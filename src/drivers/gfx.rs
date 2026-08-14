@@ -62,6 +62,11 @@ fn rgb(index: u8) -> u32 {
 static mut BACK: Option<Vec<u32>> = None;
 static mut LFB: *mut u32 = core::ptr::null_mut();
 static mut HD_ACTIVE: bool = false;
+/// Vrai pendant qu'un processus ring 3 possede logiquement la sortie video.
+///
+/// Le mode BGA reste actif : seul `present()` du bureau est suspendu. Le
+/// client userland peut donc ecrire `/dev/fb0` sans transition par le VGA texte.
+static mut USERLAND_OWNS_DISPLAY: bool = false;
 /// Adresse *physique* du framebuffer lineaire, memorisee pour pouvoir le
 /// remapper dans un espace d'adressage utilisateur (`mmap` de `/dev/fb0`).
 static mut LFB_PHYS: u64 = 0;
@@ -163,6 +168,41 @@ pub fn is_active() -> bool {
     unsafe { HD_ACTIVE }
 }
 
+/// Le framebuffer physique est-il temporairement cede a un client ring 3 ?
+pub fn userland_owns_display() -> bool {
+    unsafe { USERLAND_OWNS_DISPLAY }
+}
+
+/// Cede logiquement l'ecran au userland sans repasser par le mode VGA texte.
+///
+/// Le gestionnaire de fenetres conserve son backbuffer en RAM. Tant que le
+/// handoff est actif, `present()` devient un no-op ; le client peut donc mapper
+/// `/dev/fb0` et peindre le LFB sans etre ecrase par une trame du bureau.
+pub fn handoff_to_userland() -> bool {
+    if !is_active() {
+        enter();
+    }
+    if !is_active() {
+        crate::serial_println!("[gfx] handoff userland impossible : BGA inactif");
+        return false;
+    }
+    unsafe { USERLAND_OWNS_DISPLAY = true; }
+    crate::serial_println!("[gfx] framebuffer cede au userland (BGA conserve)");
+    true
+}
+
+/// Reprend la presentation du bureau apres la fin du client userland.
+pub fn resume_from_userland() {
+    if !is_active() {
+        // Filet de securite : le plugin Qt ne devrait pas couper BGA car ses
+        // KDSETMODE sont des no-op dans l'ABI, mais on sait se reconstruire si
+        // un futur backend le fait.
+        enter();
+    }
+    unsafe { USERLAND_OWNS_DISPLAY = false; }
+    crate::serial_println!("[gfx] framebuffer repris par le bureau");
+}
+
 /// Passe en mode graphique HD (1280x720x32) et alloue le double-buffer.
 /// Si la carte BGA est absente, le double-buffer existe quand meme mais
 /// `present()` est sans effet (le shell texte reste accessible via Echap).
@@ -171,6 +211,7 @@ pub fn enter() {
     let lfb = locate_lfb();
     unsafe {
         BACK = Some(vec![0u32; WIDTH * HEIGHT]);
+        USERLAND_OWNS_DISPLAY = false;
         match (id >= 0xB0C0 && id <= 0xB0C5, lfb) {
             (true, Some(p)) => {
                 bga_set_mode(WIDTH as u16, HEIGHT as u16);
@@ -207,6 +248,7 @@ pub fn leave() {
         BACK = None;
         LFB = core::ptr::null_mut();
         HD_ACTIVE = false;
+        USERLAND_OWNS_DISPLAY = false;
     }
     crate::serial_println!("[gfx] retour mode texte");
 }
@@ -317,6 +359,7 @@ pub fn rect(x: usize, y: usize, w: usize, h: usize, color: u8) {
 
 /// Copie le double-buffer vers le framebuffer lineaire (sans effet si BGA off).
 pub fn present() {
+    if userland_owns_display() { return; }
     let buf = back();
     if buf.is_empty() { return; }
     let lfb = unsafe { LFB };

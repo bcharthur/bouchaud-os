@@ -14,6 +14,7 @@
 //! (`tools/userland/navigateur/`) et s'affiche par Qt sur `/dev/fb0`.
 
 pub mod apps;
+pub mod client;
 pub mod desktop;
 pub mod event;
 pub mod framebuffer;
