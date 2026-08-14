@@ -12,10 +12,24 @@ pub(crate) const MENU_ITEM_H: i32 = 22;    // hauteur d'un item du menu Démarre
 pub(crate) const MENU_HEADER_H: i32 = 8;   // zone vide en haut du menu
 pub(crate) const MENU_W: i32 = 178;        // largeur du menu Démarrer
 
-/// `kind` du navigateur. Il ne fabrique pas une fenetre : le navigateur vit en
-/// ring 3 (`tools/userland/navigateur/`) et prend l'ecran entier par Qt. Le
-/// gestionnaire de fenetres rend donc la main au binaire, puis la reprend.
+/// `kind` du navigateur.
+///
+/// Il fabrique desormais une fenetre comme les autres. Le programme vit toujours
+/// en ring 3 (`tools/userland/navigateur/`), mais il ne prend plus l'ecran : il
+/// peint dans une surface partagee que le gestionnaire de fenetres compose dans
+/// sa fenetre. Voir `gui::client`.
 pub(crate) const KIND_NAVIGATEUR: usize = 6;
+
+/// Taille de la zone utile du navigateur, en pixels.
+///
+/// Elle est **fixe** pour ce jalon, et c'est assume : la surface partagee est
+/// allouee une fois et Qt dimensionne son ecran dessus au demarrage. Redimensionner
+/// la fenetre demanderait de reallouer la surface, de la reprojeter dans le client
+/// et de faire admettre a `linuxfb` un changement de resolution a chaud — trois
+/// chantiers qui n'ont rien a voir entre eux, et aucun qui doive retarder le
+/// moment ou le navigateur devient une fenetre.
+pub(crate) const NAV_LARGEUR: i32 = 1100;
+pub(crate) const NAV_HAUTEUR: i32 = 604;
 
 /// Entrees du menu Demarrer : (libelle, `kind` passe a `make_app`).
 ///
@@ -45,6 +59,8 @@ pub(crate) enum App {
     Calc { expr: String },
     Monitor,
     Rustpad { state: crate::gui::apps::rustpad::RustpadState },
+    /// Fenetre d'un client ring 3 : le contenu vient de sa surface partagee.
+    Navigateur { client: alloc::boxed::Box<crate::gui::client::Client> },
 }
 
 pub(crate) struct Win {
@@ -107,8 +123,38 @@ pub(crate) fn icon_rect(i: usize) -> Rect {
     Rect { x, y, w: 56, h: 60 }
 }
 
+/// Zone utile d'une fenetre : l'interieur des bordures, sous la barre de titre.
+///
+/// C'est le repere dans lequel un client exprime ses degats et recoit ses
+/// evenements. Une seule definition, ici : deux calculs concurrents de cette
+/// zone donneraient un decalage entre l'endroit ou l'on peint et celui ou l'on
+/// clique — un pixel, invisible a la lecture, evident a l'usage.
+pub(crate) fn zone_utile(w: &Win) -> crate::gui::protocole::Rect {
+    let x = w.x + 1;
+    let y = w.y + TITLE_H + 1;
+    let largeur = (w.w - 2).max(0) as u32;
+    let hauteur = (w.h - TITLE_H - 2).max(0) as u32;
+    crate::gui::protocole::Rect::neuf(x, y, largeur, hauteur)
+}
+
+/// Geometrie d'une fenetre dont la zone utile doit faire `largeur` x `hauteur`.
+pub(crate) fn fenetre_pour_zone(largeur: i32, hauteur: i32) -> (i32, i32) {
+    (largeur + 2, hauteur + TITLE_H + 2)
+}
+
+/// La fenetre porte-t-elle un client ring 3 ?
+pub(crate) fn est_client(w: &Win) -> bool {
+    matches!(w.app, App::Navigateur { .. })
+}
+
 /// Bascule maximiser / restaurer une fenetre.
 pub(crate) fn toggle_max(w: &mut Win) {
+    // Un client ring 3 a une surface de taille fixe : l'agrandir n'agrandirait
+    // que le cadre, et le contenu flotterait dans un coin. Tant que la surface
+    // n'est pas reallouable, ne rien faire est la seule reponse honnete.
+    if est_client(w) {
+        return;
+    }
     match w.restore.take() {
         Some((x, y, ww, hh)) => { w.x = x; w.y = y; w.w = ww; w.h = hh; }
         None => {

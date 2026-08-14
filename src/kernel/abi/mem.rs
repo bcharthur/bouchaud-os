@@ -109,6 +109,18 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, fd: i32, offset: 
                     process.mmap_next += length + PAGE_SIZE;
                     base
                 };
+                // Ecran virtuel : `/dev/fb0` designe une surface partagee, et
+                // la projeter est exactement ce que fait un `MAP_SHARED` sur un
+                // `memfd`. Le client obtient les frames que le compositeur lit,
+                // sans avoir a savoir qu'il ne touche pas le materiel.
+                if let Some(ecran) = process.ecran {
+                    return if map_shared_file(&mut process, ecran.node, base, length, offset) {
+                        process.space.protect(base, length, prot_to_flags(prot));
+                        base as i64
+                    } else {
+                        -errno::ENOMEM
+                    };
+                }
                 return match map_framebuffer(&mut process, base, length, offset) {
                     Some(address) => address as i64,
                     None => -errno::ENODEV,

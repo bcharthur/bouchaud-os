@@ -26,7 +26,7 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
     let parent = task::current_process();
 
     let (space, files, brk_start, brk, mmap_next, cwd, uid, gid, name, parent_pid, signals,
-         partages, limite_as) = {
+         partages, limite_as, ecran) = {
         let borrowed = parent.borrow();
         let space = match borrowed.space.duplicate() {
             Some(space) => space,
@@ -46,6 +46,11 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
             borrowed.signals.clone(),
             borrowed.partages.clone(),
             borrowed.limite_as,
+            // L'ecran virtuel se transmet comme le reste de la vue du monde :
+            // le renderer, ne d'un `fork` du navigateur, doit voir le meme
+            // `/dev/fb0` que son parent — c'est-a-dire la surface du
+            // gestionnaire de fenetres, jamais le framebuffer physique.
+            borrowed.ecran,
         )
     };
 
@@ -80,6 +85,7 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
         signals: child_signals,
         partages,
         limite_as,
+        ecran,
     }));
     task::register_process(child.clone());
 

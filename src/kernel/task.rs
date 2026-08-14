@@ -136,6 +136,28 @@ pub struct Process {
     pub partages: Vec<Partage>,
     /// Taille maximale de l'espace d'adressage (`RLIMIT_AS`), 0 = illimite.
     pub limite_as: u64,
+    /// Ecran virtuel : `/dev/fb0` de ce processus designe cette surface
+    /// partagee, et non le framebuffer physique.
+    ///
+    /// C'est ce qui fait du navigateur une application parmi d'autres plutot
+    /// qu'un programme qui prend l'ecran. Il ouvre `/dev/fb0`, l'interroge, le
+    /// projette — tout son code reste celui d'un client framebuffer Linux
+    /// ordinaire — et ce qu'il obtient est la surface que le gestionnaire de
+    /// fenetres compose dans sa fenetre. La regle « le WM est seul proprietaire
+    /// du framebuffer physique » est donc tenue par le noyau, pas par la bonne
+    /// volonte du client.
+    pub ecran: Option<EcranVirtuel>,
+}
+
+/// Redirection de `/dev/fb0` vers une surface partagee.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EcranVirtuel {
+    /// Nœud RAMFS anonyme qui porte les pixels.
+    pub node: usize,
+    pub largeur: u32,
+    pub hauteur: u32,
+    /// Octets par ligne.
+    pub pas: u32,
 }
 
 /// Une plage `MAP_SHARED` projetee dans un processus.
@@ -247,6 +269,17 @@ pub struct Task {
     pub waiting_for_child: bool,
     /// La tache n'a pas encore rejoint le ring 3.
     pub fresh: bool,
+    /// Fil noyau : ne part jamais en ring 3, garde l'espace d'adressage du
+    /// noyau, et n'est jamais preempte (l'IRQ0 ne commute que depuis ring 3).
+    ///
+    /// Le gestionnaire de fenetres en est un. Il pouvait rester sur le fil du
+    /// shell tant qu'il lancait ses programmes de facon synchrone ; des lors
+    /// qu'il doit **composer pendant** que le navigateur tourne, il lui faut
+    /// une place dans l'ordonnanceur comme a tout le monde.
+    pub noyau: bool,
+    /// Fonction du fil noyau. Elle ne rend jamais la main : elle se termine par
+    /// [`exit_current`].
+    entree_noyau: Option<fn() -> !>,
 }
 
 static mut TASKS: Option<Vec<Box<Task>>> = None;
@@ -365,34 +398,59 @@ impl Task {
             wake_tick: 0,
             waiting_for_child: false,
             fresh: true,
+            noyau: false,
+            entree_noyau: None,
         });
 
-        // Amorce de pile noyau : le premier `switch_context` vers cette tache
-        // depile six registres callee-saved et un RFLAGS, puis fait `ret` sur
-        // le trampoline. La disposition doit etre le miroir exact des `push`
-        // de `switch_context`.
-        unsafe {
-            let mut sp = task.kstack_top as *mut u64;
-            sp = sp.sub(1);
-            *sp = task_trampoline as *const () as usize as u64; // adresse de retour
-            sp = sp.sub(1);
-            // RFLAGS de depart : bit 1 reserve a 1, `IF` a 0. Le trampoline n'a
-            // pas besoin des interruptions — `resume_usermode` commence par un
-            // `cli` — et l'`iretq` qui l'acheve rendra a la tache le RFLAGS de
-            // sa trame ring 3.
-            *sp = 0x0000_0002;
-            for _ in 0..6 {
-                sp = sp.sub(1);
-                *sp = 0; // rbp, rbx, r12, r13, r14, r15
-            }
-            task.ctx.rsp = sp as u64;
-        }
+        // RFLAGS de depart : bit 1 reserve a 1, `IF` a 0. Le trampoline n'a
+        // pas besoin des interruptions — `resume_usermode` commence par un
+        // `cli` — et l'`iretq` qui l'acheve rendra a la tache le RFLAGS de
+        // sa trame ring 3.
+        amorce_pile(&mut task, task_trampoline, 0x0000_0002);
+        task
+    }
+
+    /// Cree un fil noyau : meme ordonnancement, mais il execute `entree` en
+    /// ring 0 au lieu de partir en ring 3.
+    ///
+    /// `process` n'est la que pour les champs que tout le noyau consulte sans
+    /// se demander qui les porte (pid, table de descripteurs). Son espace
+    /// d'adressage n'est jamais active : [`install`] bascule sur celui du noyau
+    /// pour un fil noyau.
+    pub fn new_kernel(process: Rc<RefCell<Process>>, entree: fn() -> !) -> Box<Task> {
+        // La trame ring 3 n'a aucun sens ici ; elle reste a zero et n'est jamais
+        // restauree, puisque le trampoline noyau ne fait pas d'`iretq`.
+        let mut task = Task::new(process, TrapFrame::new_user(0, 0));
+        task.noyau = true;
+        task.entree_noyau = Some(entree);
+        // Un fil noyau demarre **interruptions actives** : rien ne les
+        // retablira pour lui plus tard. Sans `IF`, sa premiere attente
+        // s'arreterait sur un `hlt` que plus aucun tick ne pourrait lever.
+        amorce_pile(&mut task, kernel_task_trampoline, 0x0000_0202);
         task
     }
 
     /// Adresse de la zone `fxsave` (alignee 16, dans `self.fpu`).
     fn fpu_ptr(&self) -> u64 {
         self.fpu_area
+    }
+}
+
+/// Amorce de pile noyau : le premier `switch_context` vers cette tache depile
+/// six registres callee-saved et un RFLAGS, puis fait `ret` sur `trampoline`.
+/// La disposition doit etre le miroir exact des `push` de `switch_context`.
+fn amorce_pile(task: &mut Task, trampoline: extern "C" fn() -> !, rflags: u64) {
+    unsafe {
+        let mut sp = task.kstack_top as *mut u64;
+        sp = sp.sub(1);
+        *sp = trampoline as *const () as usize as u64; // adresse de retour
+        sp = sp.sub(1);
+        *sp = rflags;
+        for _ in 0..6 {
+            sp = sp.sub(1);
+            *sp = 0; // rbp, rbx, r12, r13, r14, r15
+        }
+        task.ctx.rsp = sp as u64;
     }
 }
 
@@ -485,11 +543,26 @@ extern "C" fn task_trampoline() -> ! {
     unsafe { usermode::resume_usermode(&frame) }
 }
 
+/// Point d'entree d'un fil noyau : appelle sa fonction, qui ne revient pas.
+extern "C" fn kernel_task_trampoline() -> ! {
+    let task = current();
+    task.fresh = false;
+    let entree = task.entree_noyau.expect("task: fil noyau sans point d'entree");
+    entree()
+}
+
 /// Installe le contexte materiel d'une tache : espace d'adressage, pile noyau,
 /// base FS (TLS) et etat FPU.
 fn install(task: &mut Task) {
     unsafe {
-        task.process.borrow().space.activate();
+        // Un fil noyau n'a pas d'espace utilisateur a activer, et surtout ne
+        // doit pas activer celui d'un programme : il lirait alors, sous les
+        // memes adresses, la memoire du dernier processus installe.
+        if task.noyau {
+            crate::kernel::vmm::activate_kernel();
+        } else {
+            task.process.borrow().space.activate();
+        }
         usermode::set_kernel_stack(task.kstack_top);
         usermode::set_fs_base(task.fs_base);
         usermode::per_cpu().current = task.tid as u64;
@@ -836,6 +909,13 @@ pub fn exit_group(code: i32) -> ! {
 /// Lance une tache depuis le fil noyau et attend la fin du programme.
 ///
 /// Renvoie le code de sortie du processus.
+///
+/// # Securite
+/// A n'appeler que depuis le fil noyau appelant, `CURRENT` valant `usize::MAX`.
+/// `KERNEL_CTX` est unique : un appel imbrique depuis une tache y ecraserait le
+/// contexte du fil qui attend deja, et `CURRENT = usize::MAX` a la sortie
+/// effacerait l'identite de la tache appelante. Les appelants verifient
+/// [`in_user_task`] avant d'arriver ici — voir `exec::exec_image`.
 pub fn run(first: Box<Task>) -> i32 {
     let process = first.process.clone();
     let index = register(first);
@@ -864,9 +944,143 @@ pub fn run(first: Box<Task>) -> i32 {
     code
 }
 
+/// Lance un fil noyau depuis le fil appelant et attend qu'il ait fini.
+///
+/// C'est `run` pour du code ring 0. Le gestionnaire de fenetres passe par la :
+/// il devient une tache comme les autres, l'ordonnanceur peut donc lui rendre la
+/// main pendant qu'un programme ring 3 tourne, ce qu'un simple appel de fonction
+/// depuis le shell ne permettait pas.
+pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
+    // Meme invariant que `run` : un seul `KERNEL_CTX`, donc un seul fil noyau
+    // appelant a la fois.
+    if in_user_task() {
+        crate::kernel::dmesg::log("task: run_noyau imbrique refuse");
+        return -1;
+    }
+    // Racine comme repertoire courant : un fil noyau n'ouvre pas de chemin
+    // relatif, et la valeur n'existe que parce que `Process` la porte.
+    let process = match new_process(nom, 0) {
+        Some(process) => process,
+        None => return -1,
+    };
+    let task = Task::new_kernel(process.clone(), entree);
+    let index = register(task);
+    unsafe {
+        CURRENT = index;
+        let list = tasks();
+        let to_ptr = &mut **list.get_mut(index).unwrap() as *mut Task;
+        install(&mut *to_ptr);
+        switch_context(&mut KERNEL_CTX.rsp, (*to_ptr).ctx.rsp);
+    }
+    crate::kernel::vmm::activate_kernel();
+    unsafe { CURRENT = usize::MAX };
+    let (code, pid) = {
+        let borrowed = process.borrow();
+        (borrowed.exit_code, borrowed.pid)
+    };
+    reap();
+    for stale in processes().iter() {
+        crate::kernel::process::kill(stale.borrow().pid);
+    }
+    processes().clear();
+    crate::kernel::process::kill(pid);
+    code
+}
+
 /// Detruit les taches zombies (piles noyau, espaces d'adressage).
+///
+/// # Securite
+/// A n'appeler que depuis le fil noyau appelant, `CURRENT` valant `usize::MAX` :
+/// la table est un `Vec` et `CURRENT` en est un indice. Depuis une tache,
+/// utiliser [`nettoie_zombies`].
 pub fn reap() {
     tasks().retain(|t| t.state != TaskState::Zombie);
+}
+
+/// Meme chose, appelable depuis une tache vivante.
+///
+/// Retirer une tache decale toutes les suivantes dans le `Vec` ; `CURRENT`,
+/// qui est un indice, designerait alors quelqu'un d'autre — c'est-a-dire que la
+/// prochaine commutation sauverait le contexte de la tache courante par-dessus
+/// celui d'une autre. On retrouve donc l'indice par le tid, seule identite
+/// stable.
+pub fn nettoie_zombies() {
+    let cur = unsafe { CURRENT };
+    if cur == usize::MAX {
+        reap();
+        return;
+    }
+    let tid = tasks()[cur].tid;
+    tasks().retain(|t| t.state != TaskState::Zombie);
+    if let Some(index) = index_of(tid) {
+        unsafe { CURRENT = index };
+    }
+}
+
+/// Change la classe d'ordonnancement de toutes les taches d'un processus.
+///
+/// Variante de [`pose_priorite`] pour un processus **autre** que le courant :
+/// le gestionnaire de fenetres declare interactif le navigateur qu'il vient de
+/// lancer, sans que celui-ci ait a le demander.
+pub fn pose_priorite_de(pid: u32, priorite: Priorite) {
+    for task in tasks().iter_mut() {
+        if task.process.borrow().pid == pid {
+            task.priorite = priorite;
+        }
+    }
+}
+
+/// Le processus est-il termine, et avec quel code ?
+pub fn code_de_sortie(pid: u32) -> Option<i32> {
+    processes().iter().find_map(|p| {
+        let borrowed = p.borrow();
+        if borrowed.pid == pid && borrowed.zombie { Some(borrowed.exit_code) } else { None }
+    })
+}
+
+/// Un processus et tous ses descendants, du plus proche au plus lointain.
+///
+/// Un navigateur n'est pas un processus, c'est un arbre : l'interface forke un
+/// renderer par onglet, qui peut lui-meme forker. Fermer la fenetre en ne tuant
+/// que la racine laisserait les renderers tourner sans personne pour lire ce
+/// qu'ils produisent — du calcul pur, indefiniment, sur un cœur unique.
+pub fn arbre_de(racine: u32) -> Vec<u32> {
+    let mut cibles = vec![racine];
+    let mut index = 0;
+    while index < cibles.len() {
+        let parent = cibles[index];
+        for process in processes().iter() {
+            let enfant = process.borrow();
+            if enfant.parent == parent && !cibles.contains(&enfant.pid) {
+                cibles.push(enfant.pid);
+            }
+        }
+        index += 1;
+    }
+    cibles
+}
+
+/// Termine de force toutes les taches d'un processus.
+///
+/// Employe quand le proprietaire d'une fenetre disparait : un client dont plus
+/// personne ne compose la surface n'a plus de raison de peindre, et le laisser
+/// vivre laisserait aussi vivante la surface qu'il projette.
+pub fn tue_processus(pid: u32, code: i32) {
+    let courant = try_current().map(|t| t.tid);
+    for task in tasks().iter_mut() {
+        if Some(task.tid) == courant {
+            continue;
+        }
+        if task.process.borrow().pid == pid {
+            task.state = TaskState::Zombie;
+        }
+    }
+    if let Some(process) = process_by_pid(pid) {
+        let mut borrowed = process.borrow_mut();
+        borrowed.threads = 0;
+        borrowed.exit_code = code;
+        borrowed.zombie = true;
+    }
 }
 
 /// Termine tous les autres threads du processus courant.
@@ -1180,6 +1394,7 @@ pub fn new_process(name: &str, cwd: usize) -> Option<Rc<RefCell<Process>>> {
         signals: crate::kernel::signal::SignalState::default(),
         partages: Vec::new(),
         limite_as: 0,
+        ecran: None,
     }));
     processes().push(process.clone());
     Some(process)

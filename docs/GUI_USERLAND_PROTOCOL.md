@@ -1,65 +1,195 @@
-# GUI userland bridge - jalon 1
+# Protocole GUI userland - jalon 2
 
-Ce jalon avance deux chantiers sans essayer de livrer tout le compositor en une fois.
+Le navigateur n'est plus un programme qui prend l'ecran : c'est une fenetre du bureau.
 
-## 1. Transition bureau -> navigateur
+    ecran physique
+         ^
+         | (seul ecrivain)
+    Bouchaud WM (fil noyau, compositeur)
+         |
+         +-- Terminal, Fichiers, ...  (fenetres natives)
+         |
+         +-- Bouchaud Browser         (client ring 3)
+                  |
+             surface partagee (memfd, MAP_SHARED)
+                  |
+             Qt / Python / renderer
 
-Avant ce patch, `lance_navigateur()` faisait:
+## 1. La regle
 
-    fb::leave() -> exec(/bo-navigateur) -> fb::enter()
+**Le gestionnaire de fenetres est seul proprietaire du framebuffer physique.**
 
-`leave()` repassait la carte en VGA texte 80x25. Le flash etait donc structurel.
+Elle n'est pas tenue par la bonne volonte du client mais par le noyau :
 
-Apres ce patch:
+| Ce que le client demande | Ce qu'il obtient |
+|---|---|
+| `open("/dev/fb0")` + `mmap` | la surface de sa fenetre (`Process::ecran`) |
+| `FBIOGET_VSCREENINFO` | la geometrie de sa fenetre, pas celle de la dalle |
+| `smem_start` de `FBIOGET_FSCREENINFO` | `0` - l'adresse physique ne lui est pas donnee |
+| `open("/dev/input/event0")` | `EACCES` |
 
-    dessine carte de lancement
-    -> handoff_to_userland()
-    -> exec(/bo-navigateur)
-    -> resume_from_userland()
+Un client qui ignore completement le protocole ne peut donc ni ecrire un pixel a
+l'ecran, ni voler une touche. C'est ce qui rend le compositeur sûr sans avoir a
+faire confiance a Qt.
 
-BGA reste actif. Le backbuffer du bureau reste en RAM et `present()` devient un no-op
-pendant que le navigateur possede logiquement la sortie.
+## 2. Ce qui a change dans le noyau
 
-## 2. Qt -> pixels
+- `task::Task` sait porter un **fil noyau** (`Task::new_kernel`, `task::run_noyau`).
+  Le bureau en est un : il est ordonnance comme les autres taches, donc il
+  continue a vivre pendant qu'un client ring 3 tourne. Auparavant `exec` etait
+  synchrone et le bureau disparaissait pour toute la duree du navigateur.
+- `exec::lance_detache` charge un ELF et rend son pid **sans attendre sa fin**.
+- `Process::ecran` (`EcranVirtuel`) redirige `/dev/fb0` vers un nœud partage.
+- `gui::surface::Surface` alloue les pages d'un `memfd` et en garde les frames,
+  ce qui donne au compositeur une lecture directe sans copie intermediaire.
 
-L'hote Qt garde linuxfb pour la creation de QApplication et les entrees, mais il ouvre
-aussi `/dev/fb0` lui-meme. Le paintEvent produit sa frame dans une QImage qui enveloppe
-un mmap anonyme, puis copie les pixels vers la sortie.
+Un fil noyau **n'est jamais preempte** : l'IRQ0 ne commute que depuis le ring 3.
+Une composition ne peut donc pas etre coupee en son milieu, et c'est ce qui rend
+un tampon simple suffisant pour ce jalon. Le champ `tampon` du protocole existe
+pour le jour ou ce ne sera plus vrai (preemption noyau, plusieurs cœurs).
 
-Au prochain boot, le journal doit contenir une ligne de ce type:
+## 3. Transport
 
-    [bo] raster Qt : QImage=ok paintEngine=ok QPainter=actif
-    [bo] sortie graphique : /dev/fb0 1280x720 stride=5120
+Une paire de canaux, exactement ce qu'un `socketpair` donne a deux processus. Le
+gestionnaire de fenetres etant dans le noyau, il tient ses deux extremites
+directement ; le client recoit un descripteur ordinaire, dont le numero est dans
+`BO_GUI_FD`.
 
-Si QPainter est inactif, on saura que le probleme est le moteur raster Qt et non le WM.
+Variables d'environnement posees par le gestionnaire de fenetres :
 
-## 3. Surface partagee deja preparee cote hote
+| Variable | Sens |
+|---|---|
+| `BO_GUI_FD` | descripteur du canal de protocole |
+| `BO_SURFACE_FD` | descripteur de la surface (`mmap(MAP_SHARED)`) |
+| `BO_SURFACE_WIDTH` / `HEIGHT` / `STRIDE` | geometrie de la surface |
+| `QT_QPA_PLATFORM_PLUGIN_ARGS` | taille d'ecran = taille de la fenetre |
+| `QT_QPA_FB_DISABLE_INPUT` | `1` - ceinture, le noyau refuse deja evdev |
 
-L'hote reconnait maintenant:
+## 4. Format de fil
 
-- `BO_SURFACE_FD`
-- `BO_SURFACE_WIDTH`
-- `BO_SURFACE_HEIGHT`
-- `BO_SURFACE_STRIDE`
+Tout est en petit-boutiste explicite. En-tete de 16 octets devant chaque charge :
 
-Si ces variables existent, il mappe ce fd au lieu de `/dev/fb0`. Le noyau ne les fournit
-pas encore: ce sera le prochain jalon, avec `memfd + SCM_RIGHTS + socketpair` et un vrai
-client de fenetre asynchrone.
+| Decalage | Taille | Champ |
+|---|---|---|
+| 0 | 4 | `magic` = `0x55474F42` ("BOGU") |
+| 4 | 2 | `version` = 1 |
+| 6 | 2 | `genre` |
+| 8 | 4 | `taille_charge` (<= 4096) |
+| 12 | 4 | `serie` |
 
-## 4. Protocole v1
+### Client -> gestionnaire de fenetres
 
-`src/gui/client.rs` fige deja les noms de messages:
+| Genre | Valeur | Charge |
+|---|---|---|
+| `Hello` | 1 | `version:u32`, `pid:u32` |
+| `CreateWindow` | 2 | `fenetre:u32`, `largeur:u32`, `hauteur:u32`, `drapeaux:u32` |
+| `SetTitle` | 3 | UTF-8 (96 caracteres au plus retenus) |
+| `Damage` | 4 | `fenetre:u32`, `Rect` |
+| `Close` | 5 | `fenetre:u32` |
+| `FrameReady` | 6 | `fenetre:u32`, `tampon:u32`, `Rect` |
 
-- client -> WM: Hello, CreateWindow, SetTitle, Damage, Close
-- WM -> client: Configure, Focus, Key, Pointer, Wheel, CloseRequest
+### Gestionnaire de fenetres -> client
 
-Le protocole n'est pas encore branche dans la boucle du WM. Il est volontairement ajoute
-maintenant pour que la prochaine etape ne melange pas conception du format et transport.
+| Genre | Valeur | Charge |
+|---|---|---|
+| `Surface` | 0x100 | `fenetre`, `tampon`, `largeur`, `hauteur`, `pas`, `format` |
+| `Configure` | 0x101 | `fenetre`, `largeur`, `hauteur`, `focus` |
+| `Focus` | 0x102 | reserve |
+| `Key` | 0x103 | `fenetre`, `code`, `modificateurs`, `unicode`, `appui` |
+| `Pointer` | 0x104 | `fenetre`, `x:i32`, `y:i32`, `boutons` |
+| `Wheel` | 0x105 | `fenetre`, `delta:i32` |
+| `CloseRequest` | 0x106 | `fenetre:u32` |
 
-## Prochain test
+`Rect` fait 16 octets : `x:i32`, `y:i32`, `largeur:u32`, `hauteur:u32`, exprime
+dans le repere de la **surface** (origine en haut a gauche de la zone utile).
 
-1. push du commit afin que le workflow userland reconstruise `/bo-navigateur` pour ce SHA;
-2. `run.ps1` sous Windows;
-3. ouvrir Bouchaud Browser depuis le bureau;
-4. relever les lignes `[gfx] framebuffer ...`, `[bo] raster Qt ...`, `[bo] sortie graphique ...`;
-5. verifier visuellement qu'il n'y a plus de retour VGA texte entre le bureau et Qt.
+### Codes de touche
+
+Ce ne sont pas des codes evdev. Le pilote clavier du bureau ne produit pas de
+scancode brut mais une touche deja interpretee selon la disposition ; envoyer un
+faux code Linux serait pire qu'un code a nous, parce que le client le croirait.
+
+| Code | Sens |
+|---|---|
+| 0 | caractere - le point de code est dans `unicode` |
+| 1 | Entree |
+| 2 | Retour arriere |
+| 3 | Tabulation |
+| 4-7 | Haut, Bas, Gauche, Droite |
+| 8 | Echap |
+
+Echap va au client quand celui-ci a le focus : un navigateur en a besoin, et le
+lui confisquer pour fermer sa fenetre detruirait le travail en cours. Sans client
+au premier plan, Echap garde son role d'avant (fermer le menu, puis la fenetre du
+dessus, puis le bureau).
+
+## 5. Contre-pression
+
+Le canal a une capacite de 64 KiB, comme un `socketpair` du noyau.
+
+- Cote gestionnaire de fenetres : ce qui ne tient pas est **abandonne**, jamais
+  attendu. Les mouvements de souris sont en plus fusionnes - si le dernier
+  message du canal est deja un `Pointer` non lu, sa charge est remplacee sur
+  place au lieu d'en empiler un second. Un deplacement rapide ne remplit donc pas
+  64 KiB de positions perimees.
+- Cote client : un message est ecrit d'un bloc, en-tete et charge ensemble. Deux
+  ecritures pourraient etre separees par un `EAGAIN` et laisser le lecteur devant
+  un en-tete sans corps - c'est exactement le defaut de cadrage corrige sur le
+  canal du renderer.
+- Des deux cotes, les receptions partielles sont conservees telles quelles : on
+  n'analyse jamais un message avant de l'avoir en entier.
+
+## 6. Degats
+
+`FrameReady` porte un rectangle, et il est rogne a la surface avant tout usage :
+un `Damage { x: -1 }` ou un `largeur: u32::MAX` ferait autrement lire le
+compositeur hors du tampon, depuis le noyau.
+
+Ce que le jalon 2 en fait est volontairement modeste : le rectangle decide **s'il
+faut recomposer**, pas quelle portion recopier. Le bureau redessine encore tout a
+chaque trame, la zone utile est donc recopiee en entier. Recomposer partiellement
+demande de savoir quels pixels du bureau sont encore valides - c'est le chantier
+des regions sales du compositeur lui-meme, et il n'a pas a retarder celui-ci.
+
+Le format, lui, est deja le bon : le jour ou le moteur saura dire quelles regions
+il a refaites, seuls `hote.cpp` et le compositeur changent.
+
+## 7. Cadence
+
+Le bureau ne redessine que sur evenement, et au plus une fois par 16 ms.
+
+Il redessinait autrefois a chaque tour de boucle - c'est-a-dire aussi vite que le
+processeur le permettait, le PIT battant a 1 kHz. Tant que rien d'autre ne
+tournait, cela ne se voyait pas. Face a un client qui a besoin du meme processeur,
+c'est une famine.
+
+Sont considerees comme des evenements : les entrees, les changements de fenetre,
+les trames des clients, et l'ecoulement d'une seconde (l'horloge et les
+indicateurs systeme changent seuls). Sans rien de tout cela, la boucle dort et
+s'arrete sur un `hlt` comme avant.
+
+## 8. Verifications
+
+    tools/gui/test-protocole.sh
+
+- tests d'unite de `src/gui/protocole.rs` compiles pour l'hote (`rustc --test`) :
+  rognage des degats, union, coordonnees ecran -> fenetre, cadrage du flux,
+  rejet d'un flux etranger ou d'une charge demesuree ;
+- `tools/verifie-protocole-gui.py` : les valeurs numeriques du protocole sont
+  les memes dans `src/gui/protocole.rs` et dans `hote.cpp`.
+
+Les deux sont bloquantes en CI (`kernel-build`) et ne demandent ni QEMU, ni Qt,
+ni le reseau.
+
+## 9. Ce que ce jalon ne fait pas
+
+- **Pas de redimensionnement.** La surface est allouee une fois et Qt dimensionne
+  son ecran dessus au demarrage. Le bouton maximiser est donc inerte sur la
+  fenetre du navigateur, et la poignee de redimensionnement absente.
+- **Pas de double tampon.** Voir la section 2 : inutile tant que le compositeur
+  ne peut pas etre preempte.
+- **Pas de modificateurs clavier.** Le pilote du bureau n'expose pas encore
+  Ctrl/Alt separement ; le champ existe dans le message.
+- **Pas de recomposition partielle de l'ecran.** Voir la section 6.
+- **Une seule instance.** Deux navigateurs, ce sont deux Qt qui demarrent en
+  meme temps sur un cœur unique.

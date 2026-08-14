@@ -453,6 +453,27 @@ pub fn pixel_rgb(x: usize, y: usize, rgb: u32) {
     }
 }
 
+/// Tranche mutable d'une ligne du backbuffer, bornee a l'ecran.
+///
+/// C'est le chemin par lequel le compositeur ecrit la surface d'un client :
+/// les pixels vont des frames partagees au double-tampon du bureau par un
+/// `copy_from_slice`, sans passer par un tampon intermediaire ni par un test de
+/// bornes par pixel. Rend une tranche vide si la ligne tombe hors de l'ecran,
+/// ce qui laisse l'appelant ecrire `if dst.is_empty() { continue }` plutot que
+/// de refaire le rognage de son cote.
+pub fn ligne_mut(x: usize, y: usize, n: usize) -> &'static mut [u32] {
+    if y >= HEIGHT || x >= WIDTH {
+        return &mut [];
+    }
+    let n = n.min(WIDTH - x);
+    let buf = back();
+    if buf.is_empty() {
+        return &mut [];
+    }
+    let debut = y * WIDTH + x;
+    &mut buf[debut..debut + n]
+}
+
 /// Lit la couleur RGB du pixel (x,y) dans le backbuffer.
 pub fn get_pixel_rgb(x: usize, y: usize) -> u32 {
     if x < WIDTH && y < HEIGHT {

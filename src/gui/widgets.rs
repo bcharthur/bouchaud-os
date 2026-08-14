@@ -402,6 +402,81 @@ fn draw_window(w: &Win, focused: bool) {
     }
 }
 
+// ─── Clients ring 3 ────────────────────────────────────────────────────────
+
+/// Compose la surface d'un client dans sa fenetre, ou son ecran de demarrage.
+///
+/// Le gestionnaire de fenetres redessine tout le bureau a chaque trame : la
+/// zone utile est donc recopiee en entier, et le rectangle de degat ne sert
+/// qu'a decider s'il faut recomposer. C'est le repli assume du jalon : la
+/// recomposition partielle de l'ecran demande de savoir quels pixels du bureau
+/// sont encore valides, ce qui est un autre chantier — celui des regions sales
+/// du compositeur lui-meme.
+pub(crate) fn compose_client(w: &Win, client: &crate::gui::client::Client) {
+    use crate::gui::client::Etat;
+    let zone = crate::gui::window::zone_utile(w);
+    if zone.largeur == 0 || zone.hauteur == 0 {
+        return;
+    }
+    if client.etat == Etat::Demarrage {
+        dessine_demarrage(&zone, &client.titre);
+        return;
+    }
+
+    let surface = &client.surface;
+    let hauteur = (zone.hauteur as usize).min(surface.hauteur);
+    let largeur = (zone.largeur as usize).min(surface.largeur);
+    let (zx, zy) = (zone.x.max(0) as usize, zone.y.max(0) as usize);
+    for ligne in 0..hauteur {
+        let destination = fb::ligne_mut(zx, zy + ligne, largeur);
+        if destination.is_empty() {
+            continue;
+        }
+        let compte = destination.len();
+        surface.copie_ligne(ligne, 0, compte, destination);
+    }
+}
+
+/// Ecran d'attente dessine **dans la fenetre** du client.
+///
+/// C'est le meme visuel que la carte de lancement d'avant, a un detail pres qui
+/// change tout : il ne recouvre plus le bureau. La fenetre existe des le double
+/// clic, la barre des taches et l'horloge continuent, et le contenu Web viendra
+/// remplacer ce dessin sans qu'aucune transition ne soit visible ailleurs.
+fn dessine_demarrage(zone: &crate::gui::protocole::Rect, titre: &str) {
+    let zx = zone.x.max(0) as usize;
+    let zy = zone.y.max(0) as usize;
+    let zl = zone.largeur as usize;
+    let zh = zone.hauteur as usize;
+
+    fb::fill_rect_rgb(zx, zy, zl, zh, 0x000B_1220);
+
+    let largeur = 540usize.min(zl);
+    let hauteur = 170usize.min(zh);
+    let x = zx + (zl - largeur) / 2;
+    let y = zy + (zh - hauteur) / 2;
+
+    fb::fill_rect_rgb(x, y, largeur, hauteur, 0x0011_1B2E);
+    fb::fill_rect_rgb(x, y, largeur, 4, 0x003D_8BFF);
+    fb::draw_text_prop(x + 34, y + 34, titre, 0x00F3_F6FC, 30.0, true);
+    fb::draw_text_prop(
+        x + 34,
+        y + 86,
+        "Demarrage de Qt, Python et du renderer...",
+        0x00B8_C4D9,
+        16.0,
+        false,
+    );
+    fb::draw_text_prop(
+        x + 34,
+        y + 121,
+        "Le bureau reste actif pendant le chargement.",
+        0x007F_93B8,
+        14.0,
+        false,
+    );
+}
+
 // ─── Barre des tâches ──────────────────────────────────────────────────────
 
 /// Dessine la barre des taches.
