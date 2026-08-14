@@ -92,18 +92,80 @@ function Test-Manifeste($chemin, $commitAttendu) {
   return $m
 }
 
+# Ce qu'une tentative de telechargement a donne. Trois issues, et il faut
+# vraiment les trois : "absent" est un fait ordinaire, "erreur" est un incident
+# qu'il faut montrer, et les confondre a coute une soiree a l'utilisateur.
+#
+# La premiere version rendait $false pour n'importe quel echec. Le message
+# disait alors "aucun userland publie pour ce commit" alors que la release
+# existait, avec ses deux fichiers, aux adresses exactes que le script
+# construit. Le script affirmait quelque chose qu'il n'avait aucun moyen de
+# savoir, et envoyait chercher du cote de l'integration continue un defaut qui
+# etait du cote du reseau.
+$ABSENT = "absent"
+$OBTENU = "obtenu"
+$ERREUR = "erreur"
+
+function Get-Statut($erreur) {
+  # Le code HTTP d'une exception d'Invoke-WebRequest, ou 0 s'il n'y en a pas.
+  # Pas de code veut dire que la requete n'a jamais abouti : nom non resolu,
+  # poignee de main TLS refusee, mandataire qui coupe. C'est precisement la
+  # distinction qui manquait.
+  try {
+    $reponse = $erreur.Exception.Response
+    if ($reponse -and $reponse.StatusCode) { return [int]$reponse.StatusCode }
+  } catch {}
+  return 0
+}
+
+function Telecharge($url, $sortie) {
+  # Rend "obtenu", "absent" (404), ou "erreur" en ayant dit pourquoi.
+  #
+  # Deux transports, et le second n'est pas un luxe : "Invoke-WebRequest" passe
+  # par la pile TLS de .NET Framework, dont la configuration par defaut varie
+  # d'un poste Windows a l'autre : versions de TLS activees, mandataire du
+  # systeme, inspection par un antivirus. "curl.exe" est livre avec Windows 10
+  # depuis 1803 et a sa propre pile ; quand l'un echoue sans raison lisible,
+  # l'autre passe souvent.
+  $premier = ""
+  try {
+    Invoke-WebRequest -Uri $url -OutFile $sortie -UseBasicParsing -ErrorAction Stop
+    return $OBTENU
+  } catch {
+    $statut = Get-Statut $_
+    if ($statut -eq 404) { return $ABSENT }
+    $premier = $_.Exception.Message
+  }
+
+  $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+  if ($curl) {
+    # -f : rend un code d'erreur sur un statut HTTP superieur ou egal a 400 au
+    # lieu d'ecrire la page d'erreur dans le fichier. -L : suit la redirection
+    # vers le stockage des artefacts, ou GitHub renvoie toujours.
+    $code = & $curl.Source -sS -L -f -o $sortie -w "%{http_code}" $url 2>&1
+    if ($LASTEXITCODE -eq 0) { return $OBTENU }
+    if ("$code" -match "404") { return $ABSENT }
+    Rouge "userland: le telechargement a echoue."
+    Rouge "  adresse    : $url"
+    Rouge "  PowerShell : $premier"
+    Rouge "  curl       : $code"
+    return $ERREUR
+  }
+
+  Rouge "userland: le telechargement a echoue."
+  Rouge "  adresse    : $url"
+  Rouge "  PowerShell : $premier"
+  return $ERREUR
+}
+
 function Recupere($slug, $commit) {
-  # Rend $true si le userland de ce commit a ete recupere et verifie.
+  # Rend "obtenu", "absent" ou "erreur" pour le userland de ce commit.
   $base = "https://github.com/$slug/releases/download/userland-$commit"
   $tmpM = [System.IO.Path]::GetTempFileName()
   $tmpI = [System.IO.Path]::GetTempFileName()
   try {
-    try {
-      Invoke-WebRequest -Uri "$base/userland-manifest.json" -OutFile $tmpM `
-        -UseBasicParsing -ErrorAction Stop
-    } catch {
-      return $false      # pas de release pour ce commit : cas normal, silencieux
-    }
+    $etat = Telecharge "$base/userland-manifest.json" $tmpM
+    if ($etat -ne $OBTENU) { return $etat }
     $m = Get-Content $tmpM -Raw | ConvertFrom-Json
 
     # Le manifeste est verifie **avant** de tirer les dizaines de mebioctets de
@@ -111,31 +173,39 @@ function Recupere($slug, $commit) {
     # inutile, et le faire quand meme donnerait envie de s'en contenter.
     if ($m.git_commit -ne $commit) {
       Rouge "userland: la release $commit contient un manifeste pour $($m.git_commit) - refuse."
-      return $false
+      return $ERREUR
     }
 
     $mo = [math]::Round($m.image_size / 1MB, 1)
     Info "userland: telechargement de $mo Mo (Qt $($m.qt_version), Python $($m.python_version), FFmpeg $($m.ffmpeg_version))"
-    Invoke-WebRequest -Uri "$base/userland.img" -OutFile $tmpI `
-      -UseBasicParsing -ErrorAction Stop
+    $etat = Telecharge "$base/userland.img" $tmpI
+    if ($etat -ne $OBTENU) {
+      # Le manifeste etait la et l'image ne l'est pas : ce n'est pas une release
+      # absente, c'est une release incomplete ou un telechargement coupe.
+      if ($etat -eq $ABSENT) {
+        Rouge "userland: la release existe mais son image manque."
+        Rouge "  $base/userland.img"
+      }
+      return $ERREUR
+    }
 
     $somme = (Get-FileHash $tmpI -Algorithm SHA256).Hash.ToLower()
     if ($somme -ne ("" + $m.sha256).ToLower()) {
       Rouge "userland: empreinte SHA-256 incorrecte - image jetee."
       Rouge "  attendu $($m.sha256)"
       Rouge "  obtenu  $somme"
-      return $false
+      return $ERREUR
     }
     $taille = (Get-Item $tmpI).Length
     if ($taille -ne $m.image_size) {
       Rouge "userland: taille inattendue ($taille au lieu de $($m.image_size)) - image jetee."
-      return $false
+      return $ERREUR
     }
 
     New-Item -ItemType Directory -Force -Path $Dossier | Out-Null
     Move-Item -Force $tmpI $Image
     Move-Item -Force $tmpM $Manifest
-    return $true
+    return $OBTENU
   } finally {
     foreach ($f in @($tmpM, $tmpI)) {
       if (Test-Path $f) { Remove-Item -Force $f -ErrorAction SilentlyContinue }
@@ -177,8 +247,28 @@ if (-not $slug) {
 }
 
 Info "userland: recherche pour $($commit.Substring(0,12)) dans $slug"
-if (Recupere $slug $commit) {
+$etat = Recupere $slug $commit
+if ($etat -eq $OBTENU) {
   Bon "userland: recupere et verifie pour ce commit."
+  exit 0
+}
+
+# Un echec de transport n'est pas une absence, et les deux ne se reparent pas
+# de la meme facon. Le dire separement est tout l'objet de cette distinction :
+# renvoyer quelqu'un vers l'integration continue quand c'est son reseau qui
+# coupe lui fait chercher des heures du mauvais cote.
+if ($etat -eq $ERREUR) {
+  Write-Host ""
+  Write-Host "La release existe peut-etre : c'est la requete qui a echoue." -ForegroundColor Yellow
+  Write-Host "  Verifier a la main dans un navigateur :"
+  Write-Host "  https://github.com/$slug/releases/tag/userland-$commit"
+  Write-Host ""
+  Write-Host "  Si la page existe, telecharger ses deux fichiers dans"
+  Write-Host "  tools\userland\ : le script les reconnaitra au prochain demarrage."
+  Write-Host "  Causes habituelles : mandataire d'entreprise, antivirus qui"
+  Write-Host "  inspecte le TLS, ou TLS 1.2 desactive dans .NET Framework."
+  Write-Host ""
+  Write-Host "  Pour demarrer sans userland :  .\run.ps1 -NoUserlandDownload"
   exit 0
 }
 
@@ -191,7 +281,7 @@ if ($AllowOlder) {
   foreach ($a in $ancetres) {
     $rang++
     if ($a -eq $commit) { continue }
-    if (Recupere $slug $a) {
+    if ((Recupere $slug $a) -eq $OBTENU) {
       Avertis ""
       Avertis "userland: image d'un AUTRE commit, acceptee parce que -AllowOlder."
       Avertis "  commit du userland : $a"
@@ -206,6 +296,7 @@ if ($AllowOlder) {
   Rouge "userland: aucun userland publie parmi les $MaxAncetres derniers commits."
 } else {
   Rouge "userland: aucun userland publie pour le commit $($commit.Substring(0,12))."
+  Rouge "  (verifie : la page de release repond 404)"
 }
 
 Write-Host ""
@@ -216,7 +307,8 @@ Write-Host "  3. demarrer le noyau seul :           .\run.ps1 -NoUserlandDownloa
 Write-Host ""
 Write-Host "L'integration continue publie un userland par commit de main"
 Write-Host "(workflow 'userland'). Une branche de travail n'en a pas tant que"
-Write-Host "son build n'a pas tourne." -ForegroundColor DarkGray
+Write-Host "son build n'a pas tourne, et un merge tout frais attend le sien."
+Write-Host "  suivi : https://github.com/$slug/actions/workflows/userland.yml" -ForegroundColor DarkGray
 # Non bloquant : le noyau demarre tres bien sans userland, et refuser de lancer
 # QEMU pour cela reviendrait a cacher le systeme parce qu'il lui manque une
 # application.
