@@ -86,8 +86,35 @@ fn send(mac: [u8; 6], msg: &[u8]) -> bool {
 
 /// Attend une reponse DHCP du bon xid (et type voulu si != 0).
 fn recv(xid: u32, want_type: u8) -> Option<Lease> {
+    recv_avant(xid, want_type, ATTENTE_COMMANDE_MS)
+}
+
+/// Delai laisse a un serveur DHCP par la commande `dhcp`, tapee par quelqu'un
+/// qui attend une reponse et preferera patienter plutot que d'echouer trop tot.
+pub const ATTENTE_COMMANDE_MS: u64 = 4_000;
+
+/// Delai laisse par l'initialisation du demarrage.
+///
+/// Court, et volontairement. Un serveur DHCP repond en quelques millisecondes ;
+/// un serveur qui met plusieurs secondes est un serveur qui n'est pas la. La
+/// premiere version attendait deux fois huit millions de tours de boucle sans
+/// horloge — environ quinze secondes — et les payait **a chaque demarrage** sur
+/// un reseau qui n'a pas de serveur DHCP. Sous QEMU/SLIRP, ou l'adressage est
+/// fixe et connu d'avance, cela retardait la banniere de quinze secondes pour
+/// ne rien apprendre.
+pub const ATTENTE_DEMARRAGE_MS: u64 = 700;
+
+/// Attend une reponse, au plus `budget_ms` millisecondes.
+///
+/// Le temps se lit sur l'horloge du noyau et non sur un compteur de tours : un
+/// nombre de tours ne mesure rien, puisqu'il vaut quinze secondes sous
+/// emulation et une fraction de seconde sur une vraie machine. C'est la meme
+/// boucle qui rendait le demarrage lent ici et rapide ailleurs, sans que le
+/// code ne dise laquelle des deux etait voulue.
+fn recv_avant(xid: u32, want_type: u8, budget_ms: u64) -> Option<Lease> {
     let mut buf = [0u8; 2048];
-    for _ in 0..8_000_000u32 {
+    let limite = crate::kernel::timer::monotonic_ms() + budget_ms;
+    while crate::kernel::timer::monotonic_ms() < limite {
         let n = match e1000::receive(&mut buf) { Some(n) => n, None => continue };
         let h = match ethernet::parse_header(&buf[..n]) { Some(h) => h, None => continue };
         if h.ethertype != ethernet::ETHERTYPE_IPV4 { continue; }
@@ -128,6 +155,11 @@ pub struct Bail {
 /// Tant qu'il n'y avait qu'un appelant, la question ne se posait pas ; le
 /// demarrage automatique en a fait un second.
 pub fn negocie() -> Option<Bail> {
+    negocie_avant(ATTENTE_DEMARRAGE_MS)
+}
+
+/// `negocie`, avec un budget d'attente explicite par etape.
+pub fn negocie_avant(budget_ms: u64) -> Option<Bail> {
     if !e1000::is_ready() && !e1000::init() {
         return None;
     }
@@ -137,11 +169,11 @@ pub fn negocie() -> Option<Bail> {
 
     let l = build_msg(&mut msg, xid, mac, 1, None, None);
     send(mac, &msg[..l]);
-    let offer = recv(xid, 2)?;
+    let offer = recv_avant(xid, 2, budget_ms)?;
 
     let l = build_msg(&mut msg, xid, mac, 3, Some(offer.your_ip), Some(offer.server_id));
     send(mac, &msg[..l]);
-    let ack = recv(xid, 5)?;
+    let ack = recv_avant(xid, 5, budget_ms)?;
 
     // Valeurs de repli : un serveur qui n'annonce ni routeur ni resolveur
     // laisse la configuration compilee en place plutot que de poser 0.0.0.0,

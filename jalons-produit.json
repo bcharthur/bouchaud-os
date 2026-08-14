@@ -1,4 +1,4 @@
 {
-  "PRODUCT_BROWSER_QEMU_BOOT": false,
+  "PRODUCT_BROWSER_QEMU_BOOT": true,
   "USERLAND_QEMU_BOOT": true
 }

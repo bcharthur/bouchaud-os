@@ -771,8 +771,41 @@ fn proc_clone(args: [u64; 6], frame: &TrapFrame) -> i64 {
     let tls = args[4];
 
     if flags & (CLONE_VM | CLONE_THREAD) != (CLONE_VM | CLONE_THREAD) {
-        // fork() reel : non supporte (voir la note du module).
-        return -errno::ENOSYS;
+        // Sans `CLONE_VM` ni `CLONE_THREAD`, ce n'est pas un fil : c'est un
+        // **fork**, et `proc::sys_fork` sait le faire depuis longtemps.
+        //
+        // Cette branche rendait `ENOSYS`, et c'est ce qui a empeche le
+        // navigateur de creer son processus de rendu sous Bouchaud OS.
+        // `fork()` de la glibc n'emet pas l'appel systeme `fork` (57) : depuis
+        // longtemps, elle passe par `clone` avec
+        // `CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID | SIGCHLD`. L'appel
+        // systeme 57 etait donc implemente, teste, et **jamais atteint** par
+        // un programme reel — tandis que celui que les programmes emettent
+        // vraiment repondait « non implemente ».
+        //
+        // C'est le genre de trou qu'aucune epreuve sur Linux ne peut voir : la
+        // separation navigateur/renderer passe ses 1630 verifications sur une
+        // machine ou `fork` existe, et n'avait jamais tourne ici.
+        let resultat = proc::sys_fork(frame);
+        if resultat > 0 {
+            // `CLONE_PARENT_SETTID` : le pere veut connaitre l'identifiant de
+            // son fils a cet emplacement, en plus de la valeur de retour.
+            if flags & CLONE_PARENT_SETTID != 0 && parent_tid != 0 {
+                user_write_u32(parent_tid, resultat as u32);
+            }
+            // `CLONE_CHILD_SETTID` n'est pas honore : il demande d'ecrire dans
+            // l'espace d'adressage **du fils**, auquel le pere n'a pas acces
+            // depuis ici. La consequence est bornee et connue : le fils garde
+            // dans son bloc de fil l'identifiant copie du pere, si bien qu'une
+            // libc qui le lit sans repasser par un appel systeme se croit son
+            // pere. `getpid`, `gettid` et l'envoi de signaux par le noyau ne
+            // s'en servent pas — ils passent par le noyau, qui a la bonne
+            // valeur. Ce qui s'en sert est `raise()` de la glibc, qui viserait
+            // alors le pere. A corriger le jour ou l'on saura ecrire dans
+            // l'espace d'un processus qu'on vient de creer.
+            let _ = child_tid;
+        }
+        return resultat;
     }
     if child_stack == 0 {
         return -errno::EINVAL;
