@@ -106,19 +106,36 @@ Le navigateur ne vit **pas** dans l'image bootable : il est dans le disque
 userland, construit à part par `tools/userland/mkdisk.sh`. Sans ce second
 disque, l'OS démarre mais sans Qt, sans Python et sans navigateur.
 
-Le userland se construit à part :
+Le userland se construit à part, **sous WSL ou Linux** — cette chaîne compile
+du C, du C++ et du Python pour une cible Linux-ABI, rien n'en tourne sous
+Windows :
 
 ```bash
 cd tools/userland
-./build-quickjs.sh     # moteur JavaScript
-./build-python.sh      # interpréteur embarqué
-./build-qt.sh          # Qt pour la cible
-./build-navigateur.sh  # le navigateur, ELF unique
-./mkdisk.sh            # image de disque
+./build-tout.sh        # QuickJS, FFmpeg, CPython, Qt, navigateur, disque
+```
+
+Compter une heure environ la première fois sur quatre cœurs, Qt en représentant
+les deux tiers. Chaque étape est sautée si son résultat est déjà là. Les étapes
+restent lançables une par une, mais dans cet ordre et avec ces variables — Qt
+est du C++, donc CPython doit être en glibc, et `build-navigateur.sh` lie
+`libavcodec.a` :
+
+```bash
+./build-quickjs.sh                                   # moteur JavaScript
+./build-ffmpeg.sh                                    # décodeurs audio/vidéo
+LIBC=glibc OUT=out-python-embed ./build-python.sh    # interpréteur embarqué
+./build-qt.sh                                        # Qt 5.15 statique + linuxfb
+./build-navigateur.sh                                # le navigateur, ELF unique
+./mkdisk.sh out-navigateur                           # -> userland.img
 ```
 
 Ces scripts téléchargent leurs sources et reconstruisent tout : rien de ce
 qu'ils produisent n'est versionné.
+
+Sans `userland.img`, l'OS démarre normalement et le bureau annonce
+`/bo-navigateur absent` : le noyau est complet, c'est le second disque qui
+manque.
 
 ## Éprouver
 
