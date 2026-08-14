@@ -92,6 +92,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // un fichier persistant doit pouvoir remplacer celui que l'archive depose,
     // pas l'inverse.
     fs::persistance::monte();
+    // A partir d'ici le tas, le RAMFS et le timer sont prets : le journal peut
+    // mesurer la charge de la machine sans risquer d'echouer dans la ligne meme
+    // qui devait l'expliquer.
+    kernel::journal::demarre();
     kernel::process::init();
     kernel::dmesg::log("process: table initialisee (init, desktop, shell)");
     kernel::dmesg::log("abi: appels systeme POSIX/Linux x86-64 disponibles (ring 3)");

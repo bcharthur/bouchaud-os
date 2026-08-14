@@ -168,7 +168,48 @@ les trames des clients, et l'ecoulement d'une seconde (l'horloge et les
 indicateurs systeme changent seuls). Sans rien de tout cela, la boucle dort et
 s'arrete sur un `hlt` comme avant.
 
-## 8. Verifications
+## 8. Suivre ce qui se passe
+
+Chaque ligne du journal serie porte l'heure et la charge de la machine :
+
+    [18:51:48][ 12%:  5%:  6%] gui: client /bo-navigateur pid=5 ...
+     \______/  \_/  \_/  \_/
+      heure    cpu  ram  RAMFS
+
+La memoire est celle des **frames physiques**, pas du tas : un navigateur projette
+des centaines de mebioctets de Qt et de Python par `mmap`, qui ne passent jamais
+par le tas. `journal off` coupe les couleurs ANSI.
+
+Toutes les cinq secondes, deux lignes de plus disent qui consomme :
+
+    [ps] bo-navigateur pid=5 cpu 18% rss 74 Mio (6 fils) | desktop pid=4 cpu 3% rss 0 Mio
+    [gui] client pid=5 actif 61 trames (12/s, silence 40 ms) recu 1464 o, envoye 210 ev (0 perdus)
+
+Le pourcentage processeur vient d'un profileur par echantillonnage : a chaque
+IRQ0 — mille fois par seconde — la tache courante gagne un tick. Le denominateur
+est le nombre de ticks reellement distribues sur la periode, pas la duree
+ecoulee ; une machine qui dort ne fabrique donc pas des parts qui depassent cent.
+
+Cote client, l'hote Qt tient les memes comptes et les journalise toutes les cinq
+secondes :
+
+    [bo] battement : 312 tics, 61 trames, 210 evenements recus
+
+Les deux relevés se lisent ensemble : si le noyau compte des trames que l'hote
+n'a pas envoyees, ou l'inverse, on sait de quel cote du fil regarder.
+
+## 9. Ce qui arrive quand le client ne parle pas le protocole
+
+L'image userland est construite par la CI et peut preceder le noyau qu'on
+demarre. Un binaire d'avant le protocole ouvre `/dev/fb0` — c'est-a-dire la
+surface — et y peint sans rien annoncer.
+
+Au bout de six secondes sans `Hello`, le compositeur cesse de l'attendre : il
+compose la surface au rythme fixe du bureau et le journalise. C'est moins
+efficace, et c'est la difference entre un navigateur qui s'affiche et une fenetre
+qui reste sur son ecran de demarrage.
+
+## 10. Verifications
 
     tools/gui/test-protocole.sh
 
@@ -181,7 +222,7 @@ s'arrete sur un `hlt` comme avant.
 Les deux sont bloquantes en CI (`kernel-build`) et ne demandent ni QEMU, ni Qt,
 ni le reseau.
 
-## 9. Ce que ce jalon ne fait pas
+## 11. Ce que ce jalon ne fait pas
 
 - **Pas de redimensionnement.** La surface est allouee une fois et Qt dimensionne
   son ecran dessus au demarrage. Le bouton maximiser est donc inerte sur la

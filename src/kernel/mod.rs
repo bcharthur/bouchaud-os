@@ -16,6 +16,7 @@ pub mod elf;
 pub mod exec;
 pub mod fd;
 pub mod heap;
+pub mod journal;
 pub mod input;
 pub mod memory;
 pub mod handle;

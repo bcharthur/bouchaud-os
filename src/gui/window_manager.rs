@@ -62,6 +62,13 @@ const PERIODE_HORLOGE_MS: u64 = 1000;
 /// tranches de temps utilisables.
 const REPOS_TICKS: u64 = 4;
 
+/// Periode du releve de charge par processus, en millisecondes.
+///
+/// Cinq secondes : assez rare pour ne pas noyer le journal, assez frequent pour
+/// qu'une lenteur de quelques secondes laisse au moins une trace. C'est la ligne
+/// qu'on lit quand on se demande « qui prend le processeur ».
+const PERIODE_RELEVE_MS: u64 = 5000;
+
 /// Lance le bureau (bloquant jusqu'a Quitter).
 pub fn run() {
     task::run_noyau(fil_bureau, "desktop");
@@ -114,6 +121,8 @@ fn boucle() {
     let mut derniere_trame = 0u64;
     let mut derniere_horloge = 0u64;
     let mut derniere_souris = (usize::MAX, usize::MAX);
+    let mut derniers_boutons = 0u32;
+    let mut dernier_releve = 0u64;
 
     while !quit {
         let maintenant = crate::kernel::timer::monotonic_ms();
@@ -155,10 +164,18 @@ fn boucle() {
         let click = left && !prev_left;
         let release = !left && prev_left;
         prev_left = left;
-        if (mxu, myu) != derniere_souris {
+        // La position part au client quand le curseur bouge **ou** quand un
+        // bouton change d'etat. Ne suivre que le mouvement laissait le client
+        // croire que le bouton etait reste enfonce : sans deplacement entre
+        // l'appui et le relachement, aucun message ne portait le relachement, et
+        // le clic suivant n'avait plus de front montant a montrer. Un seul clic
+        // fonctionnait, puis plus aucun.
+        let boutons = crate::drivers::mouse::buttons() as u32;
+        if (mxu, myu) != derniere_souris || boutons != derniers_boutons {
             derniere_souris = (mxu, myu);
+            derniers_boutons = boutons;
             sale = true;
-            transmet_position(&mut wins, mx, my);
+            transmet_position(&mut wins, mx, my, boutons);
         }
         if click || release || wheel != 0 {
             sale = true;
@@ -240,6 +257,16 @@ fn boucle() {
             sale = false;
         }
 
+        if maintenant.wrapping_sub(dernier_releve) >= PERIODE_RELEVE_MS {
+            let periode = if dernier_releve == 0 {
+                PERIODE_RELEVE_MS
+            } else {
+                maintenant.wrapping_sub(dernier_releve)
+            };
+            dernier_releve = maintenant;
+            releve_charge(&mut wins, periode);
+        }
+
         // Rend la main : c'est ici que les clients ring 3 avancent. Sans autre
         // tache prete, `sleep_ticks` s'arrete sur un `hlt` — le bureau au repos
         // ne consomme donc pas plus qu'avant.
@@ -250,6 +277,46 @@ fn boucle() {
     ferme_tous_les_clients(&mut wins);
     fb::leave();
     crate::serial_println!("[gui] window manager ferme");
+}
+
+/// Ecrit dans le journal qui consomme le processeur et la memoire.
+///
+/// Un gestionnaire des taches tient dans une ligne : le nom, le pid, la part de
+/// processeur sur la periode et la taille de l'espace d'adressage. Le
+/// denominateur du pourcentage est le nombre de ticks reellement distribues, pas
+/// la duree ecoulee — sinon une machine qui a dormi la moitie du temps afficherait
+/// des parts qui ne font pas cent.
+fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
+    let (mesures, total) = task::mesure_processus();
+    if total > 0 {
+        let mut ligne = String::new();
+        for mesure in mesures.iter() {
+            if mesure.ticks == 0 && mesure.octets < 1024 * 1024 {
+                continue; // rien a dire d'un processus qui n'a rien fait
+            }
+            if !ligne.is_empty() {
+                ligne.push_str(" | ");
+            }
+            ligne.push_str(&alloc::format!(
+                "{} pid={} cpu {}% rss {} Mio{}",
+                mesure.nom,
+                mesure.pid,
+                mesure.ticks * 100 / total,
+                mesure.octets / (1024 * 1024),
+                if mesure.taches > 1 { alloc::format!(" ({} fils)", mesure.taches) } else { String::new() },
+            ));
+        }
+        if !ligne.is_empty() {
+            crate::serial_println!("[ps] {}", ligne);
+        }
+    }
+
+    for w in wins.iter_mut() {
+        if let App::Navigateur { client } = &mut w.app {
+            crate::serial_println!("[gui] client {}", client.etat_journal(periode_ms));
+            client.remet_compteurs();
+        }
+    }
 }
 
 // --- Clients -----------------------------------------------------------------
@@ -267,6 +334,15 @@ fn pompe_clients(wins: &mut Vec<Win>) -> bool {
     let mut morts: Vec<usize> = Vec::new();
     for (index, w) in wins.iter_mut().enumerate() {
         if let App::Navigateur { client } = &mut w.app {
+            if client.verifie_silence() {
+                recompose = true;
+            }
+            // Un client qui n'annonce pas ses trames est recompose au rythme du
+            // compositeur : on ne sait pas quand il peint, seulement qu'il peint.
+            if client.sans_protocole && !w.min {
+                client.abime_tout();
+                recompose = true;
+            }
             if client.pompe() {
                 // Le degat est consomme meme si la fenetre est minimisee :
                 // l'accumuler pour rien ferait grossir un rectangle que
@@ -375,13 +451,12 @@ fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize) {
 ///
 /// Seule la fenetre active recoit les mouvements : un client qui suivrait la
 /// souris par-dessous une autre fenetre afficherait des survols fantomes.
-fn transmet_position(wins: &mut Vec<Win>, mx: i32, my: i32) {
+fn transmet_position(wins: &mut Vec<Win>, mx: i32, my: i32, boutons: u32) {
     let index = match fenetre_active(wins) {
         Some(index) => index,
         None => return,
     };
     let zone = zone_utile(&wins[index]);
-    let boutons = crate::drivers::mouse::buttons() as u32;
     if let App::Navigateur { client } = &mut wins[index].app {
         if let Some((x, y)) = crate::gui::protocole::vers_local(&zone, mx, my) {
             client.envoie_pointeur(x, y, boutons);

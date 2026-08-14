@@ -269,6 +269,15 @@ pub struct Task {
     pub waiting_for_child: bool,
     /// La tache n'a pas encore rejoint le ring 3.
     pub fresh: bool,
+    /// Ticks du timer pendant lesquels cette tache avait la main.
+    ///
+    /// C'est un profileur par echantillonnage, et le plus simple qui soit : a
+    /// chaque IRQ0 — mille fois par seconde — on incremente le compteur de la
+    /// tache courante. Sur mille echantillons, la proportion est le temps
+    /// processeur, a la precision du tick pres. Cela ne coute qu'une addition
+    /// dans un gestionnaire d'interruption qui existe deja, et cela repond a la
+    /// seule question qu'on se pose devant une machine lente : qui consomme.
+    pub ticks_cpu: u64,
     /// Fil noyau : ne part jamais en ring 3, garde l'espace d'adressage du
     /// noyau, et n'est jamais preempte (l'IRQ0 ne commute que depuis ring 3).
     ///
@@ -398,6 +407,7 @@ impl Task {
             wake_tick: 0,
             waiting_for_child: false,
             fresh: true,
+            ticks_cpu: 0,
             noyau: false,
             entree_noyau: None,
         });
@@ -1152,6 +1162,87 @@ pub fn preempt_from_irq() {
             switch_to(cur, next);
         }
     }
+}
+
+/// Compte un tick du timer pour la tache courante.
+///
+/// Appele par IRQ0, y compris quand le timer interrompt du code noyau : le
+/// bureau est une tache comme les autres, et le temps qu'il passe a composer
+/// doit se voir au meme titre que celui du navigateur.
+pub fn echantillonne() {
+    let index = unsafe { CURRENT };
+    if index == usize::MAX {
+        return;
+    }
+    if let Some(task) = tasks().get_mut(index) {
+        task.ticks_cpu = task.ticks_cpu.wrapping_add(1);
+    }
+}
+
+/// Instantane d'un processus pour le journal : (pid, nom, ticks, octets).
+pub struct Mesure {
+    pub pid: u32,
+    pub nom: String,
+    /// Ticks consommes depuis le dernier appel a [`mesure_processus`].
+    pub ticks: u64,
+    /// Taille de l'espace d'adressage, en octets.
+    pub octets: u64,
+    pub taches: usize,
+}
+
+/// Compteurs de la derniere mesure, pour rendre un delta plutot qu'un cumul.
+///
+/// Un cumul depuis le demarrage ne dit rien d'utile : au bout d'une minute,
+/// tout le monde a « beaucoup » de ticks. Ce qu'on veut lire, c'est ce qui s'est
+/// passe depuis la ligne precedente du journal.
+static mut MESURE_PRECEDENTE: Option<Vec<(u32, u64)>> = None;
+
+/// Mesure tous les processus vivants et remet les compteurs a la reference.
+///
+/// Rend aussi le nombre total de ticks ecoules sur la periode, seul denominateur
+/// honnete d'un pourcentage : compter sur l'horloge murale donnerait des totaux
+/// qui depassent 100 % des que la machine dort.
+pub fn mesure_processus() -> (Vec<Mesure>, u64) {
+    let mut cumuls: Vec<(u32, u64)> = Vec::new();
+    let mut mesures: Vec<Mesure> = Vec::new();
+
+    for task in tasks().iter() {
+        if task.state == TaskState::Zombie {
+            continue;
+        }
+        let (pid, nom, octets) = {
+            let process = task.process.borrow();
+            (process.pid, process.name.clone(), process.taille_as())
+        };
+        match cumuls.iter_mut().find(|(autre, _)| *autre == pid) {
+            Some((_, ticks)) => *ticks += task.ticks_cpu,
+            None => {
+                cumuls.push((pid, task.ticks_cpu));
+                mesures.push(Mesure { pid, nom, ticks: 0, octets, taches: 0 });
+            }
+        }
+        if let Some(mesure) = mesures.iter_mut().find(|m| m.pid == pid) {
+            mesure.taches += 1;
+        }
+    }
+
+    let precedents = unsafe {
+        let pointeur = &raw mut MESURE_PRECEDENTE;
+        if (*pointeur).is_none() {
+            *pointeur = Some(Vec::new());
+        }
+        (*pointeur).as_ref().unwrap().clone()
+    };
+
+    let mut total = 0u64;
+    for mesure in mesures.iter_mut() {
+        let cumul = cumuls.iter().find(|(pid, _)| *pid == mesure.pid).map_or(0, |(_, t)| *t);
+        let avant = precedents.iter().find(|(pid, _)| *pid == mesure.pid).map_or(0, |(_, t)| *t);
+        mesure.ticks = cumul.saturating_sub(avant);
+        total += mesure.ticks;
+    }
+    unsafe { MESURE_PRECEDENTE = Some(cumuls) };
+    (mesures, total)
 }
 
 /// Signale qu'une commutation est souhaitable au prochain point sur.
