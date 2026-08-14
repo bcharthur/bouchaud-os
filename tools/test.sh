@@ -102,6 +102,20 @@ exec /qpa-probe
 exec /cpp23-probe
 SCENARIO
 
+# AK, la base de Ladybird. Comme Python et Qt : si le portage a ete construit,
+# on le joue ; sinon on s'en passe. C'est ce qui garde `test.sh` utilisable sans
+# avoir recupere les 27 877 fichiers de l'upstream.
+AK_PROBE=third_party/build-ak-bouchaud/ak-probe
+if [ -x "$AK_PROBE" ]; then
+    info "== AK (portage Ladybird) =="
+    cp "$AK_PROBE" "$WORK/files/ak-probe"
+    echo "exec /ak-probe" >> "$WORK/files/autorun"
+else
+    info "AK absent — pour l'ajouter au scenario :"
+    info "  ./tools/ladybird/fetch.sh && ./tools/ladybird/build-deps.sh --cible \\"
+    info "  && ./tools/ladybird/build-ak.sh --cible"
+fi
+
 # Python et Qt ne sont pas construits par ce script : ils demandent une
 # vingtaine de minutes chacun et des sources telechargees. S'ils sont la, on les
 # joue ; sinon on s'en passe. C'est ce qui permet de garder un `test.sh` rapide
@@ -235,6 +249,12 @@ report $? "ring3-selftest est alle jusqu'a sa derniere etape"
 # Le temoin C++23 : sans lui, aucune brique Ladybird ne peut etre construite.
 grep -q "temoin C++23" "$LOG" 2>/dev/null
 report $? "le temoin C++23 s'est execute en ring 3"
+
+# AK n'est verifie que s'il a ete construit : son absence n'est pas un echec.
+if [ -x "$AK_PROBE" ]; then
+    grep -q "temoin AK" "$LOG" 2>/dev/null
+    report $? "AK s'est execute en ring 3"
+fi
 
 # Les deux autres sondes impriment leur propre bilan ; on les compte plutot que
 # de faire confiance au seul code de sortie, qui ne dit pas laquelle a lache.
