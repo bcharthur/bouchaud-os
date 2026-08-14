@@ -136,17 +136,27 @@ de l'upstream sans figer un copier-coller**.
 
 | Option | Suivi upstream | Poids du depot | Verdict |
 |---|---|---|---|
-| `git submodule` | excellent | nul | **retenu** |
 | `git subtree` | correct | +27 877 fichiers | rejete : gonfle chaque clone Bouchaud |
 | Miroir de branche | bon | eleve | rejete : duplique la maintenance |
-| Script de fetch seul | mauvais | nul | rejete : rien ne fige le SHA dans l'historique |
+| `git submodule` | excellent | nul | **ecarte a l'implementation, voir ci-dessous** |
+| SHA epingle + script | excellent | nul | **retenu** |
 
-**Decision : `git submodule` sur `third_party/ladybird`, SHA epingle**, double par
-un fichier texte lisible sans git :
+**Decision revisee.** La premiere redaction de ce document retenait le submodule.
+En l'implementant, un defaut est apparu : le SHA aurait ete inscrit a **deux**
+endroits — l'index git et `third_party/UPSTREAM.md` — et il aurait fallu une
+regle pour departager en cas de desaccord. Deux sources de verite pour une meme
+valeur : c'est exactement le defaut qu'on refuse ailleurs dans ce depot.
 
-    third_party/ladybird/          submodule, SHA epingle
-    third_party/UPSTREAM.md        SHA + date + raison de la derniere montee
-    tools/ladybird/fetch.sh        clone/checkout hors submodule (CI, machines sans git)
+Le submodule n'apporte par ailleurs rien que le couple manifeste + script n'ait
+deja : la reproductibilite vient du SHA, pas du mecanisme qui le porte. Il coute
+en revanche un `.gitmodules`, un `--recursive` que personne ne tape, et une
+configuration de CI supplementaire.
+
+**Retenu : un SHA unique, epingle dans un fichier texte, consomme par un script.**
+
+    third_party/UPSTREAM.md        LE SHA, sa date, la raison de la derniere montee
+    third_party/ladybird/          arbre recupere (ignore par git)
+    tools/ladybird/fetch.sh        recuperation + verification (`--verifie`)
     tools/ladybird/patches/        nos divergences, une par fichier, numerotees
 
 Les divergences vivent en patches **separes** et non en modifications directes du
