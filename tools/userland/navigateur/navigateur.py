@@ -266,7 +266,7 @@ class Navigateur:
             elif historique > 0:
                 self.avance()
         elif navigation:
-            self.ouvre(navigation)
+            self.commence_ouverture(navigation)
 
     def bat(self):
         """Tour court de la boucle produit : aucune attente reseau ici."""
@@ -276,9 +276,13 @@ class Navigateur:
             self.applique(self.onglet.vue.bat())
 
         if self._ouverture_differee is not None:
-            url, empiler = self._ouverture_differee
-            self._ouverture_differee = None
-            self.ouvre(url, empiler=empiler)
+            vue = self.onglet.vue
+            pret = (vue is None or vue.genre != "renderer"
+                    or getattr(vue, "pret", False) or vue.crashee)
+            if pret:
+                url, empiler = self._ouverture_differee
+                self._ouverture_differee = None
+                self.commence_ouverture(url, empiler=empiler)
 
         if self.chargement is not None and self.chargement_debut is not None:
             secondes = int(max(0.0, time.monotonic() - self.chargement_debut))
@@ -287,8 +291,8 @@ class Navigateur:
                 self.etat = "Chargement de %s... %d s" % (self.chargement, secondes)
                 bo.redessiner()
 
-    def ouvre(self, url, empiler=True):
-        """Envoie NAVIGATE et rend la main ; FRAME_READY terminera le chargement."""
+    def _ouvre_impl(self, url, empiler=True, attendre=False):
+        """Implementation commune aux contrats synchrone et asynchrone."""
         brut = (url or "").strip()
         if brut.startswith("distant:"):
             return self.ouvre_distant(
@@ -310,7 +314,11 @@ class Navigateur:
                 self.largeur_vue, self.hauteur_vue, journal=self._journal_js)
         try:
             vue.redimensionne(self.largeur_vue, self.hauteur_vue)
-            lancee = vue.ouvre(url)
+            if (not attendre and vue.genre == "renderer"
+                    and hasattr(vue, "commence_ouverture")):
+                lancee = vue.commence_ouverture(url)
+            else:
+                lancee = vue.ouvre(url)
         except Exception as e:
             traceback.print_exc(file=sys.stdout)
             self.etat = "Erreur interne : %s" % e
@@ -329,9 +337,20 @@ class Navigateur:
         self.curseur_saisie = len(self.saisie)
         bo.titre("%s — Navigateur" % (vue.titre or arrivee))
 
-        if vue.genre == "local" or lancee is False or vue.crashee:
+        # Dans le chemin synchrone, VueRenderer.ouvre() a deja recu sa trame :
+        # le chrome doit donc exposer titre/etat final avant de rendre la main.
+        # Dans le chemin Qt, seule la premiere TRAME appelle cette fonction.
+        if attendre or vue.genre == "local" or lancee is False or vue.crashee:
             self._termine_chargement()
         return bool(lancee is not False)
+
+    def commence_ouverture(self, url, empiler=True):
+        """Navigation de l'UI : aucune attente de page dans le fil Qt."""
+        return self._ouvre_impl(url, empiler=empiler, attendre=False)
+
+    def ouvre(self, url, empiler=True):
+        """Contrat historique synchrone, conserve pour tests et outils."""
+        return self._ouvre_impl(url, empiler=empiler, attendre=True)
 
     # --- Rendu distant --------------------------------------------------------
 
@@ -384,7 +403,7 @@ class Navigateur:
             self.onglet.distant = None
             self.onglet.image_distante = None
             if url:
-                self.ouvre(url, empiler=False)
+                self.commence_ouverture(url, empiler=False)
             else:
                 self.etat = "Retour au moteur natif."
             return
@@ -443,18 +462,9 @@ class Navigateur:
             self._recharge_position()
 
     def _recharge_position(self):
-        """Rejoue l'entree d'historique courante, **sans toucher a la pile.**"""
+        """Rejoue l'entree courante sans bloquer l'event-loop."""
         url = self.onglet.historique[self.onglet.position]
-        vue = self.onglet.vue
-        if vue is None:
-            vue = self.onglet.vue = mod_vue.ouvre_vue(
-                self.largeur_vue, self.hauteur_vue, journal=self._journal_js)
-        vue.redimensionne(self.largeur_vue, self.hauteur_vue)
-        vue.ouvre(url)
-        self.saisie = vue.url or url
-        self.curseur_saisie = len(self.saisie)
-        bo.titre("%s — Navigateur" % (vue.titre or url))
-        self.etat = vue.titre or url
+        self.commence_ouverture(url, empiler=False)
 
     # --- Defilement ---------------------------------------------------------
 
@@ -575,7 +585,7 @@ class Navigateur:
         if self.champ_actif:
             if code in (K_RETOUR, K_ENTREE):
                 self.champ_actif = False
-                self.ouvre(self.saisie)
+                self.commence_ouverture(self.saisie)
                 return
             if code == K_ECHAP:
                 self.champ_actif = False
@@ -632,7 +642,7 @@ class Navigateur:
                 return
         if code == K_F5:
             if self.onglet.url:
-                self.ouvre(self.onglet.url, empiler=False)
+                self.commence_ouverture(self.onglet.url, empiler=False)
             return
         if ctrl and code == K_Q:
             bo.quitter()
@@ -689,9 +699,9 @@ class Navigateur:
                         if self.onglet.distant is not None:
                             self._agit_distant(self.onglet.distant.recharge)
                         else:
-                            self.ouvre(self.onglet.url, empiler=False)
+                            self.commence_ouverture(self.onglet.url, empiler=False)
                     elif nom == "accueil":
-                        self.ouvre("bo:accueil")
+                        self.commence_ouverture("bo:accueil")
                     return
             cx, cy, cl, ch = self._champ()
             if cx <= x <= cx + cl and cy <= y <= cy + ch:

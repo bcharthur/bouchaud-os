@@ -36,3 +36,11 @@ renderer. Les requetes courtees y sont donc serialisees pour la correction. Le
 prochain jalon de performance pourra ajouter un dispatcher de reponses par `id`
 pour retrouver un vrai parallelisme des sous-ressources sans lecteurs
 concurrents sur le meme flux.
+
+
+## Contrats d'ouverture
+
+- `commence_ouverture()` est non bloquant et reserve aux actions de l'UI Qt ;
+- `ouvre()` conserve le contrat synchrone historique des epreuves et outils.
+
+Le premier lancement attend egalement `READY` par battements successifs, sans bloquer l'event-loop.
