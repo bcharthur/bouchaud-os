@@ -366,8 +366,12 @@ class VueRenderer(_Vue):
 
     # --- Cycle de vie ---------------------------------------------------------
 
-    def ouvre(self, url):
-        """Met NAVIGATE en file et rend immediatement la main au chrome."""
+    def commence_ouverture(self, url):
+        """Envoie NAVIGATE et rend immediatement la main.
+
+        C'est le chemin du produit graphique. READY, URL_CHANGED,
+        TITLE_CHANGED et FRAME_READY sont recoltes par ``bat()``.
+        """
         if self.crashee or self.renderer is None or not self.renderer.vivant():
             self._redemarre()
         self.erreur = None
@@ -381,6 +385,22 @@ class VueRenderer(_Vue):
             self.erreur = str(e)
             return False
         return True
+
+    def ouvre(self, url):
+        """Contrat historique synchrone pour les epreuves et outils.
+
+        La vraie UI Qt n'appelle plus cette methode. Elle utilise
+        ``commence_ouverture()`` et ne bloque donc pas son event-loop.
+        """
+        if not self.commence_ouverture(url):
+            return False
+
+        vus = self._attends_parmi(
+            ("URL", "TRAME", "CRASH"), DELAI_CHARGEMENT_S)
+        vus += self._attends_parmi(
+            ("TRAME", "CRASH"), DELAI_CHARGEMENT_S)
+        self.derniers_evenements = vus
+        return not self.crashee
 
     def _attends_parmi(self, noms, secondes):
         vus = []
