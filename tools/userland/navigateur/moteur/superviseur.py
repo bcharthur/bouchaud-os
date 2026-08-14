@@ -291,55 +291,81 @@ class Renderer:
 
     def ferme(self, delai=ATTENTE_ARRET_S):
         """Demande l'arret, puis insiste. Rend le code de sortie."""
+
         if self.pid is None:
             return None
+
         if self.mort is None:
             try:
-                self.dis(protocole.CLOSE, {"contexte": self.contexte})
+                self.dis(
+                    protocole.CLOSE,
+                    {"contexte": self.contexte},
+                )
             except (OSError, protocole.Fin):
                 pass
-                        limite = time.monotonic() + delai
 
-                        while time.monotonic() < limite:
-                            if not self.vivant():
-                                break
+            limite = time.monotonic() + delai
 
-                            # CLOSE a pu etre mis en file pendant une saturation.
-                            # On continue donc a le pousser pendant l'attente.
-                            if self.canal is not None:
-                                try:
-                                    self.canal.vidange()
-                                except (
-                                    OSError,
-                                    protocole.Fin,
-                                ):
-                                    pass
+            while time.monotonic() < limite:
+                if not self.vivant():
+                    break
 
-                            time.sleep(0.01)
+                # CLOSE a pu etre mis en file pendant une saturation.
+                # On continue donc a le pousser pendant l'attente.
+                if self.canal is not None:
+                    try:
+                        self.canal.vidange()
+                    except (
+                        OSError,
+                        protocole.Fin,
+                    ):
+                        pass
+
+                time.sleep(0.01)
+
             if self.vivant():
-                # Un renderer qui n'obeit pas au `CLOSE` est exactement le cas
+                # Un renderer qui n'obeit pas au CLOSE est exactement le cas
                 # que la separation existe pour traiter : on le tue, et la
                 # fenetre ne s'en apercoit pas.
-                self.journal("warn", "renderer %d : arret force" % self.pid)
+                self.journal(
+                    "warn",
+                    "renderer %d : arret force" % self.pid,
+                )
+
                 try:
-                    os.kill(self.pid, signal.SIGKILL)
+                    os.kill(
+                        self.pid,
+                        signal.SIGKILL,
+                    )
                 except OSError:
                     pass
+
                 try:
-                    os.waitpid(self.pid, 0)
+                    os.waitpid(
+                        self.pid,
+                        0,
+                    )
                 except ChildProcessError:
                     pass
-                self._note_mort(-1, int(signal.SIGKILL))
+
+                self._note_mort(
+                    -1,
+                    int(signal.SIGKILL),
+                )
+
         if self.prise is not None:
             try:
                 self.prise.close()
             except OSError:
                 pass
+
             self.prise = None
             self.canal = None
+
         if self.surface is not None:
             self.surface.ferme()
             self.surface = None
+
         return None if self.mort is None else self.mort.code
 
     def tue(self, signal_envoye=signal.SIGKILL):
