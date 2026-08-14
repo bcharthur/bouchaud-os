@@ -135,13 +135,43 @@ pub fn run() {
 /// Rend l'ecran au navigateur, puis le reprend.
 ///
 /// Le navigateur ne vit pas dans le noyau : c'est un binaire ring 3 qui ouvre
-/// `/dev/fb0` et le peint entierement par Qt. Deux surfaces ne peuvent pas se
-/// partager le framebuffer, donc le bureau sort du mode graphique, execute le
-/// binaire, et y rentre quand celui-ci se termine.
+/// `/dev/fb0` et le peint entierement par Qt. Pendant ce handoff synchrone, le
+/// gestionnaire de fenetres garde BGA actif mais suspend ses `present()`: le
+/// navigateur prend le LFB sans provoquer un flash vers le mode VGA texte.
 ///
 /// L'existence du fichier est verifiee **avant** de quitter le mode graphique :
 /// sinon un disque sans navigateur ferait clignoter l'ecran pour finir sur un
 /// message que personne ne lit.
+fn dessine_lancement_navigateur() {
+    let largeur = 540usize;
+    let hauteur = 170usize;
+    let x = (fb::WIDTH.saturating_sub(largeur)) / 2;
+    let y = (fb::HEIGHT.saturating_sub(hauteur)) / 2;
+
+    // Le dernier frame du bureau reste visible autour de la carte. Cela donne
+    // une transition continue jusqu'a la premiere trame produite par Qt.
+    fb::fill_rect_rgb(x, y, largeur, hauteur, 0x0011_1B2E);
+    fb::fill_rect_rgb(x, y, largeur, 4, 0x003D_8BFF);
+    fb::draw_text_prop(x + 34, y + 34, "Bouchaud Browser", 0x00F3_F6FC, 30.0, true);
+    fb::draw_text_prop(
+        x + 34,
+        y + 86,
+        "Demarrage de Qt, Python et du renderer...",
+        0x00B8_C4D9,
+        16.0,
+        false,
+    );
+    fb::draw_text_prop(
+        x + 34,
+        y + 121,
+        "Le bureau reste en mode graphique.",
+        0x007F_93B8,
+        14.0,
+        false,
+    );
+    fb::present();
+}
+
 fn lance_navigateur(cwd: usize) {
     const CHEMIN: &str = "/bo-navigateur";
 
@@ -151,20 +181,29 @@ fn lance_navigateur(cwd: usize) {
         return;
     }
 
-    fb::leave();
+    dessine_lancement_navigateur();
+    if !fb::handoff_to_userland() {
+        crate::kernel::dmesg::log("gui: handoff graphique vers le navigateur impossible");
+        return;
+    }
+
     let args = { let mut v = Vec::new(); v.push(String::from(CHEMIN)); v };
     let env = crate::kernel::exec::shell_environment();
-    match crate::kernel::exec::exec(CHEMIN, &args, &env, cwd) {
+    let resultat = crate::kernel::exec::exec(CHEMIN, &args, &env, cwd);
+
+    // `exec` est synchrone aujourd'hui. A son retour le navigateur a termine :
+    // on reprend seulement le droit de presenter, sans reprogrammer BGA.
+    fb::resume_from_userland();
+    mouse::init();
+
+    match resultat {
         Ok(code) if code != 0 => {
             crate::println!("navigateur: termine avec le code {}", code);
         }
         Ok(_) => {}
         Err(message) => crate::println!("navigateur: {}", message),
     }
-    fb::enter();
-    mouse::init();
 }
-
 fn handle_wheel(mx: i32, my: i32, delta: i32, wins: &mut Vec<Win>) {
     for i in (0..wins.len()).rev() {
         let w = &wins[i];

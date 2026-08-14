@@ -70,9 +70,16 @@
 
 #include <brotli/decode.h>
 
+#include <linux/fb.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -96,6 +103,219 @@ class Toile;
 Toile *g_toile = nullptr;
 /// Rappels enregistres par le script Python, par nom.
 PyObject *g_rappels = nullptr;
+
+/// Destination de pixels de l'hote.
+///
+/// Etape actuelle : `/dev/fb0`, mappe une seconde fois a cote de linuxfb. Le
+/// widget Qt ne depend alors plus du backing-store pour rendre les pixels.
+/// Etape suivante : le WM passera un memfd herite dans `BO_SURFACE_FD`; le meme
+/// code peindra cette surface partagee sans toucher au framebuffer physique.
+class SortieBouchaud
+{
+public:
+    ~SortieBouchaud() { ferme(); }
+
+    bool ouvre()
+    {
+        if (pixels_)
+            return true;
+        if (ouvreSurfacePartagee())
+            return true;
+        return ouvreFramebuffer();
+    }
+
+    bool active() const { return pixels_ != nullptr; }
+    bool framebuffer() const { return mode_ == Mode::Framebuffer; }
+    const char *nom() const
+    {
+        if (mode_ == Mode::SurfacePartagee) return "surface-partagee";
+        if (mode_ == Mode::Framebuffer) return "/dev/fb0";
+        return "QPA";
+    }
+
+    void presente(const QImage &source)
+    {
+        if (!pixels_ || source.isNull())
+            return;
+        const int lignes = std::min(hauteur_, source.height());
+        const int octets = std::min(pas_, source.width() * 4);
+        for (int y = 0; y < lignes; ++y)
+            std::memcpy(pixels_ + size_t(y) * size_t(pas_), source.constScanLine(y), size_t(octets));
+    }
+
+    void remplit(uint32_t rgb)
+    {
+        if (!pixels_)
+            return;
+        for (int y = 0; y < hauteur_; ++y) {
+            uint32_t *ligne = reinterpret_cast<uint32_t *>(pixels_ + size_t(y) * size_t(pas_));
+            for (int x = 0; x < largeur_; ++x)
+                ligne[x] = rgb;
+        }
+    }
+
+private:
+    enum class Mode { Aucun, SurfacePartagee, Framebuffer };
+
+    static int entierEnv(const char *nom, int defaut = -1)
+    {
+        const char *texte = std::getenv(nom);
+        if (!texte || !*texte)
+            return defaut;
+        char *fin = nullptr;
+        const long valeur = std::strtol(texte, &fin, 10);
+        return fin && *fin == '\0' && valeur >= 0 && valeur <= 0x7fffffff
+            ? int(valeur) : defaut;
+    }
+
+    bool mappe(int fd, int largeur, int hauteur, int pas, Mode mode)
+    {
+        if (fd < 0 || largeur <= 0 || hauteur <= 0 || pas < largeur * 4)
+            return false;
+        const size_t taille = size_t(pas) * size_t(hauteur);
+        void *carte = mmap(nullptr, taille, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (carte == MAP_FAILED)
+            return false;
+        fd_ = fd;
+        pixels_ = static_cast<unsigned char *>(carte);
+        taille_ = taille;
+        largeur_ = largeur;
+        hauteur_ = hauteur;
+        pas_ = pas;
+        mode_ = mode;
+        return true;
+    }
+
+    bool ouvreSurfacePartagee()
+    {
+        const int fd = entierEnv("BO_SURFACE_FD");
+        if (fd < 0)
+            return false;
+        const int largeur = entierEnv("BO_SURFACE_WIDTH");
+        const int hauteur = entierEnv("BO_SURFACE_HEIGHT");
+        const int pas = entierEnv("BO_SURFACE_STRIDE", largeur > 0 ? largeur * 4 : -1);
+        if (!mappe(fd, largeur, hauteur, pas, Mode::SurfacePartagee)) {
+            std::fprintf(stderr, "[bo] BO_SURFACE_FD present mais surface invalide\n");
+            return false;
+        }
+        std::printf("[bo] sortie graphique : surface partagee fd=%d %dx%d stride=%d\n",
+                    fd_, largeur_, hauteur_, pas_);
+        return true;
+    }
+
+    bool ouvreFramebuffer()
+    {
+        const int fd = open("/dev/fb0", O_RDWR);
+        if (fd < 0)
+            return false;
+        fb_var_screeninfo var{};
+        fb_fix_screeninfo fix{};
+        if (ioctl(fd, FBIOGET_VSCREENINFO, &var) != 0
+            || ioctl(fd, FBIOGET_FSCREENINFO, &fix) != 0
+            || var.bits_per_pixel != 32
+            || var.red.offset != 16 || var.green.offset != 8 || var.blue.offset != 0
+            || !mappe(fd, int(var.xres), int(var.yres), int(fix.line_length), Mode::Framebuffer)) {
+            close(fd);
+            return false;
+        }
+        std::printf("[bo] sortie graphique : /dev/fb0 %dx%d stride=%d\n",
+                    largeur_, hauteur_, pas_);
+        return true;
+    }
+
+    void ferme()
+    {
+        if (pixels_)
+            munmap(pixels_, taille_);
+        if (fd_ >= 0)
+            close(fd_);
+        fd_ = -1;
+        pixels_ = nullptr;
+        taille_ = 0;
+        largeur_ = hauteur_ = pas_ = 0;
+        mode_ = Mode::Aucun;
+    }
+
+    int fd_ = -1;
+    unsigned char *pixels_ = nullptr;
+    size_t taille_ = 0;
+    int largeur_ = 0;
+    int hauteur_ = 0;
+    int pas_ = 0;
+    Mode mode_ = Mode::Aucun;
+};
+
+/// Backbuffer raster alloue par `mmap` anonyme plutot que par QImage.
+///
+/// Si l'ancien avertissement venait d'une allocation du backing-store Qt, ce
+/// chemin l'evite. QImage ne fait qu'envelopper des pages deja allouees.
+class TrameRaster
+{
+public:
+    ~TrameRaster() { reset(); }
+
+    bool assure(int largeur, int hauteur)
+    {
+        if (largeur <= 0 || hauteur <= 0)
+            return false;
+        if (pixels_ && largeur == largeur_ && hauteur == hauteur_)
+            return true;
+        reset();
+        largeur_ = largeur;
+        hauteur_ = hauteur;
+        pas_ = largeur * 4;
+        taille_ = size_t(pas_) * size_t(hauteur_);
+        void *carte = mmap(nullptr, taille_, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (carte == MAP_FAILED) {
+            pixels_ = nullptr;
+            taille_ = 0;
+            return false;
+        }
+        pixels_ = static_cast<unsigned char *>(carte);
+        image_ = QImage(pixels_, largeur_, hauteur_, pas_, QImage::Format_RGB32);
+        if (image_.isNull()) {
+            reset();
+            return false;
+        }
+        return true;
+    }
+
+    QImage &image() { return image_; }
+
+private:
+    void reset()
+    {
+        image_ = QImage();
+        if (pixels_)
+            munmap(pixels_, taille_);
+        pixels_ = nullptr;
+        taille_ = 0;
+        largeur_ = hauteur_ = pas_ = 0;
+    }
+
+    unsigned char *pixels_ = nullptr;
+    size_t taille_ = 0;
+    int largeur_ = 0;
+    int hauteur_ = 0;
+    int pas_ = 0;
+    QImage image_;
+};
+
+void diagnostiqueRasterQt()
+{
+    QImage interne(64, 64, QImage::Format_RGB32);
+    QPainter peintre;
+    const bool active = !interne.isNull() && peintre.begin(&interne);
+    if (active) {
+        peintre.fillRect(interne.rect(), QColor(30, 90, 180));
+        peintre.end();
+    }
+    std::printf("[bo] raster Qt : QImage=%s paintEngine=%s QPainter=%s\n",
+                interne.isNull() ? "nulle" : "ok",
+                (!interne.isNull() && interne.paintEngine()) ? "ok" : "absent",
+                active ? "actif" : "inactif");
+}
 
 // --- Outils de conversion ---------------------------------------------------
 
@@ -189,6 +409,7 @@ public:
     {
         setFocusPolicy(Qt::StrongFocus);
         setMouseTracking(true);
+        sortie.ouvre();
     }
 
     /// Mesure un texte avec la fonte demandee. Le rendu en a besoin pour la
@@ -211,32 +432,61 @@ public:
 protected:
     void paintEvent(QPaintEvent *) override
     {
+        // Sur Bouchaud OS on ne depend plus du backing-store du QWidget pour
+        // produire les pixels. On peint dans une QImage enveloppant des pages
+        // mmappees puis on copie vers /dev/fb0 (ou la future surface du WM).
+        if (sortie.active()) {
+            if (!trame.assure(width(), height())) {
+                if (!avertiTrame_) {
+                    std::fprintf(stderr, "[bo] trame raster : mmap/QImage impossible\n");
+                    avertiTrame_ = true;
+                }
+                sortie.remplit(0x00301020);
+                return;
+            }
+
+            QImage &image = trame.image();
+            image.fill(QColor(255, 255, 255));
+            QPainter p(&image);
+            if (!p.isActive()) {
+                if (!avertiRaster_) {
+                    std::fprintf(stderr,
+                                 "[bo] QPainter(QImage) inactif : moteur raster Qt indisponible\n");
+                    avertiRaster_ = true;
+                }
+                sortie.remplit(0x00301020);
+                return;
+            }
+            p.setRenderHint(QPainter::Antialiasing, true);
+            p.setRenderHint(QPainter::TextAntialiasing, true);
+            peintPage(p);
+            p.end();
+            sortie.presente(image);
+
+            // linuxfb peut flusher son propre backing-store juste apres le
+            // paintEvent. Une seconde copie au tour d'evenements suivant fait
+            // gagner notre frame sans bloquer la boucle Qt.
+            QTimer::singleShot(0, this, [this] {
+                if (sortie.active())
+                    sortie.presente(trame.image());
+            });
+            return;
+        }
+
+        // CI/offscreen et hote Linux classique : conserver le chemin QWidget.
         QPainter p(this);
+        if (!p.isActive()) {
+            if (!avertiWidget_) {
+                std::fprintf(stderr, "[bo] QPainter(QWidget) inactif\n");
+                avertiWidget_ = true;
+            }
+            return;
+        }
         p.setRenderHint(QPainter::Antialiasing, true);
         p.setRenderHint(QPainter::TextAntialiasing, true);
         p.fillRect(rect(), QColor(255, 255, 255));
-
-        // Tout se fait sous le verrou, d'un bloc : construire les arguments,
-        // obtenir la liste d'affichage, la parcourir, la relacher.
-        PyGILState_STATE etat = PyGILState_Ensure();
-        if (g_rappels) {
-            PyObject *fonction = PyDict_GetItemString(g_rappels, "peindre");
-            if (fonction && PyCallable_Check(fonction)) {
-                PyObject *arguments = Py_BuildValue("(ii)", width(), height());
-                PyObject *liste = arguments ? PyObject_CallObject(fonction, arguments)
-                                            : nullptr;
-                Py_XDECREF(arguments);
-                if (liste) {
-                    peintListe(p, liste);
-                    Py_DECREF(liste);
-                } else {
-                    PyErr_Print();
-                }
-            }
-        }
-        PyGILState_Release(etat);
+        peintPage(p);
     }
-
     void keyPressEvent(QKeyEvent *e) override
     {
         appelle("touche", "(isi)", e->key(), e->text().toUtf8().constData(),
@@ -273,6 +523,27 @@ private:
     /// Chaque element est un tuple dont le premier champ nomme l'operation. Le
     /// format est volontairement plat et sans objets : c'est ce qui permet au
     /// code Python de la construire sans jamais dialoguer avec Qt.
+    void peintPage(QPainter &p)
+    {
+        PyGILState_STATE etat = PyGILState_Ensure();
+        if (g_rappels) {
+            PyObject *fonction = PyDict_GetItemString(g_rappels, "peindre");
+            if (fonction && PyCallable_Check(fonction)) {
+                PyObject *arguments = Py_BuildValue("(ii)", width(), height());
+                PyObject *liste = arguments ? PyObject_CallObject(fonction, arguments)
+                                            : nullptr;
+                Py_XDECREF(arguments);
+                if (liste) {
+                    peintListe(p, liste);
+                    Py_DECREF(liste);
+                } else {
+                    PyErr_Print();
+                }
+            }
+        }
+        PyGILState_Release(etat);
+    }
+
     void peintListe(QPainter &p, PyObject *liste)
     {
         const Py_ssize_t n = PySequence_Size(liste);
@@ -641,6 +912,12 @@ private:
     }
 
     /// Zones de rognage en cours, de la plus exterieure a la plus interieure.
+    SortieBouchaud sortie;
+    TrameRaster trame;
+    bool avertiTrame_ = false;
+    bool avertiRaster_ = false;
+    bool avertiWidget_ = false;
+
     QVector<QRectF> pileRognage;
     /// Etats de peintre empiles par « transforme » et « opacite ».
     int enveloppes = 0;
@@ -970,6 +1247,7 @@ void ajoute_chemin(PyConfig *config, const char *format, const char *prefixe)
 int main(int argc, char **argv)
 {
     QApplication app(argc, argv);
+    diagnostiqueRasterQt();
 
     // Les modules doivent exister avant l'initialisation de l'interprete : un
     // executable statique ne peut pas charger d'extension apres coup.
