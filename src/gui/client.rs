@@ -75,6 +75,22 @@ pub struct Client {
     pub protocole_actif: bool,
     /// Le client a demande sa fermeture (`Close`).
     pub fermeture_demandee: bool,
+    /// Compteurs, pour que le journal puisse dire ce que fait ce client.
+    ///
+    /// Sans eux, un client qui ne repond plus et un client qui repond
+    /// parfaitement mais peint du blanc se ressemblent beaucoup — dans les deux
+    /// cas l'ecran ne bouge pas. Le nombre de trames par seconde tranche la
+    /// question en une ligne de journal.
+    pub trames: u64,
+    pub octets_recus: u64,
+    pub evenements_envoyes: u64,
+    pub evenements_perdus: u64,
+    /// Tick de la derniere trame recue.
+    pub derniere_trame: u64,
+    /// Tick du lancement.
+    debut: u64,
+    /// Le client peint sans annoncer ses trames : on compose au rythme fixe.
+    pub sans_protocole: bool,
 }
 
 impl Client {
@@ -166,6 +182,13 @@ impl Client {
             serie: 0,
             protocole_actif: false,
             fermeture_demandee: false,
+            trames: 0,
+            octets_recus: 0,
+            evenements_envoyes: 0,
+            evenements_perdus: 0,
+            derniere_trame: 0,
+            debut: crate::kernel::timer::ticks(),
+            sans_protocole: false,
         };
         client.annonce_surface();
         Ok(client)
@@ -184,9 +207,13 @@ impl Client {
         let message = proto::message(genre, self.serie, charge);
         let mut canal = self.vers_client.borrow_mut();
         if canal.lecteurs == 0 || canal.place() < message.len() {
+            drop(canal);
+            self.evenements_perdus += 1;
             return false;
         }
         canal.octets.extend_from_slice(&message);
+        drop(canal);
+        self.evenements_envoyes += 1;
         true
     }
 
@@ -290,6 +317,7 @@ impl Client {
         {
             let mut canal = self.vers_wm.borrow_mut();
             if !canal.octets.is_empty() {
+                self.octets_recus += canal.octets.len() as u64;
                 self.tampon.append(&mut canal.octets);
             }
             // Un tampon qui grossit sans jamais former de message est un flux
@@ -369,7 +397,15 @@ impl Client {
                 }
                 self.degat = self.degat.union(&degat);
                 self.protocole_actif = true;
+                if self.etat == Etat::Demarrage {
+                    crate::kernel::dmesg::log_fmt(format_args!(
+                        "gui: premiere trame du client pid={} ({}x{})",
+                        self.pid, degat.largeur, degat.hauteur
+                    ));
+                }
                 self.etat = Etat::Actif;
+                self.trames += 1;
+                self.derniere_trame = crate::kernel::timer::ticks();
                 true
             }
             Genre::Close => {
@@ -379,6 +415,74 @@ impl Client {
             // Les messages descendants n'ont rien a faire dans ce sens.
             _ => false,
         }
+    }
+
+    /// Delai au-dela duquel un client muet est repute ne pas parler le protocole.
+    ///
+    /// Qt, CPython et le moteur mettent plusieurs secondes a demarrer sous
+    /// emulation ; en dessous, on conclurait trop tot.
+    const PATIENCE_MS: u64 = 6000;
+
+    /// Un client qui n'a jamais dit bonjour peint-il quand meme ?
+    ///
+    /// Le cas existe pour de bon : l'image userland est construite par la CI et
+    /// peut preceder la version du noyau qu'on demarre. Un binaire d'avant le
+    /// protocole ouvre `/dev/fb0` — c'est-a-dire la surface — et peint dedans
+    /// sans rien annoncer. Sa fenetre resterait indefiniment sur l'ecran de
+    /// demarrage alors que l'image est la, a portee de `memcpy`.
+    ///
+    /// Passe le delai, on compose donc au rythme fixe du compositeur. C'est
+    /// moins efficace — on recopie parfois pour rien — mais c'est la difference
+    /// entre un navigateur qui s'affiche et une fenetre vide.
+    pub fn verifie_silence(&mut self) -> bool {
+        if self.protocole_actif || self.sans_protocole || self.etat == Etat::Termine {
+            return false;
+        }
+        let age = crate::kernel::timer::ticks().saturating_sub(self.debut);
+        if age < crate::kernel::timer::ms_to_ticks(Self::PATIENCE_MS) {
+            return false;
+        }
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "gui: client pid={} muet apres {} s — composition au rythme fixe",
+            self.pid,
+            Self::PATIENCE_MS / 1000
+        ));
+        self.sans_protocole = true;
+        self.etat = Etat::Actif;
+        self.abime_tout();
+        true
+    }
+
+    /// Une ligne d'etat pour le journal.
+    ///
+    /// Format volontairement dense : elle est destinee a etre lue au fil de
+    /// l'eau, une fois toutes les quelques secondes, a cote des autres lignes.
+    pub fn etat_journal(&self, periode_ms: u64) -> String {
+        let par_seconde = if periode_ms > 0 { self.trames * 1000 / periode_ms.max(1) } else { 0 };
+        let silence = crate::kernel::timer::ticks().saturating_sub(self.derniere_trame);
+        alloc::format!(
+            "pid={} {} {} trames ({}/s, silence {} ms) recu {} o, envoye {} ev ({} perdus)",
+            self.pid,
+            match self.etat {
+                Etat::Demarrage => "demarrage",
+                Etat::Actif => "actif",
+                Etat::Termine => "termine",
+            },
+            self.trames,
+            par_seconde,
+            if self.derniere_trame == 0 { 0 } else { silence },
+            self.octets_recus,
+            self.evenements_envoyes,
+            self.evenements_perdus,
+        )
+    }
+
+    /// Remet a zero les compteurs de periode.
+    pub fn remet_compteurs(&mut self) {
+        self.trames = 0;
+        self.octets_recus = 0;
+        self.evenements_envoyes = 0;
+        self.evenements_perdus = 0;
     }
 
     /// Le degat accumule, et le remet a zero.

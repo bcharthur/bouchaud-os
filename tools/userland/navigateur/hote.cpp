@@ -66,12 +66,16 @@
 #include <QtGui/QFontDatabase>
 #include <QtGui/QTransform>
 #include <QtCore/QTimer>
+#include <QtCore/QFile>
 #include <QtCore/QtPlugin>
 
 #include <brotli/decode.h>
 
 #include <linux/fb.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <sys/time.h>
+#include <dirent.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -335,12 +339,21 @@ public:
         if (!fin || *fin != '\0' || valeur < 0)
             return false;
         fd_ = int(valeur);
-        // Non bloquant : le battement passe ici toutes les 16 ms et ne doit
-        // jamais s'arreter parce que le bureau n'a rien a dire.
+        // Non bloquant, par les deux chemins que le noyau connait. Ce n'est pas
+        // de la superstition : une lecture bloquante sur ce descripteur attend
+        // jusqu'a deux secondes, et le battement de service passe ici toutes les
+        // 16 ms. Un seul de ces appels qui ne prend pas, et la boucle
+        // d'evenements de Qt avance cent fois moins vite — page qui ne charge
+        // pas, minuteries qui n'echoient pas, clics qui n'arrivent jamais. Le
+        // `poll` de `pompe` est la troisieme ceinture.
         const int drapeaux = fcntl(fd_, F_GETFL, 0);
-        if (drapeaux >= 0)
-            fcntl(fd_, F_SETFL, drapeaux | O_NONBLOCK);
-        std::printf("[bo] pont gestionnaire de fenetres : fd=%d\n", fd_);
+        if (drapeaux >= 0 && fcntl(fd_, F_SETFL, drapeaux | O_NONBLOCK) == 0)
+            nonBloquant_ = true;
+        int un = 1;
+        if (ioctl(fd_, FIONBIO, &un) == 0)
+            nonBloquant_ = true;
+        std::printf("[bo] pont gestionnaire de fenetres : fd=%d (non bloquant : %s)\n",
+                    fd_, nonBloquant_ ? "oui" : "NON");
         return true;
     }
 
@@ -381,6 +394,7 @@ public:
         protocole::poseU32(charge, 16, uint32_t(largeur));
         protocole::poseU32(charge, 20, uint32_t(hauteur));
         envoie(protocole::FrameReady, charge, sizeof(charge));
+        ++trames_;
     }
 
     void titre(const QByteArray &texte)
@@ -431,6 +445,13 @@ private:
     QByteArray tampon_;
     /// Etat precedent des boutons, pour distinguer un survol d'un clic.
     uint32_t boutons_ = 0;
+    bool nonBloquant_ = false;
+
+public:
+    /// Compteurs du battement, pour le journal.
+    unsigned long tics_ = 0;
+    unsigned long trames_ = 0;
+    unsigned long evenements_ = 0;
 };
 
 PontFenetre g_pont;
@@ -492,6 +513,59 @@ private:
     QImage image_;
 };
 
+/// S'assure que Qt a des polices, et les charge lui-meme sinon.
+///
+/// Ce Qt est construit sans fontconfig : c'est `QBasicFontDatabase` qui cherche
+/// les fichiers, en balayant `QT_QPA_FONTDIR`. Quand ce balayage ne donne rien —
+/// repertoire absent, format refuse, variable perdue en route — il n'y a **aucun
+/// message** : `QPainter::drawText` continue de reussir et ne dessine rien. Une
+/// page entiere s'affiche alors avec ses cadres, ses fonds et ses bordures, mais
+/// pas un caractere, et rien dans le journal ne le dit.
+///
+/// On ne se contente donc pas d'esperer : on demande a Qt ce qu'il a trouve, on
+/// le journalise, et s'il n'a rien on lui donne les fichiers a la main —
+/// `addApplicationFontFromData` ne depend d'aucun balayage. Les polices sont
+/// deposees par le noyau (`src/kernel/sysroot.rs`), elles sont donc toujours la.
+void assurePolices()
+{
+    QFontDatabase base;
+    int familles = base.families().size();
+    if (familles > 0) {
+        std::printf("[bo] polices : %d familles trouvees par Qt\n", familles);
+        return;
+    }
+
+    const char *dossier = std::getenv("QT_QPA_FONTDIR");
+    if (!dossier || !*dossier)
+        dossier = "/usr/share/fonts/truetype/dejavu";
+
+    int charges = 0;
+    if (DIR *repertoire = opendir(dossier)) {
+        while (struct dirent *entree = readdir(repertoire)) {
+            const size_t longueur = std::strlen(entree->d_name);
+            if (longueur < 5)
+                continue;
+            const char *extension = entree->d_name + longueur - 4;
+            if (std::strcmp(extension, ".ttf") && std::strcmp(extension, ".otf"))
+                continue;
+            char chemin[512];
+            std::snprintf(chemin, sizeof chemin, "%s/%s", dossier, entree->d_name);
+            QFile fichier(QString::fromUtf8(chemin));
+            if (!fichier.open(QIODevice::ReadOnly))
+                continue;
+            if (QFontDatabase::addApplicationFontFromData(fichier.readAll()) >= 0)
+                ++charges;
+        }
+        closedir(repertoire);
+    }
+
+    familles = QFontDatabase().families().size();
+    std::printf("[bo] polices : Qt n'a rien trouve dans %s, %d fichiers charges a la main, %d familles\n",
+                dossier, charges, familles);
+    if (familles == 0)
+        std::fprintf(stderr, "[bo] AUCUNE POLICE : la page s'affichera sans texte\n");
+}
+
 void diagnostiqueRasterQt()
 {
     QImage interne(64, 64, QImage::Format_RGB32);
@@ -505,6 +579,13 @@ void diagnostiqueRasterQt()
                 interne.isNull() ? "nulle" : "ok",
                 (!interne.isNull() && interne.paintEngine()) ? "ok" : "absent",
                 active ? "actif" : "inactif");
+
+    // Une mesure de controle : une largeur nulle pour un mot non vide veut dire
+    // qu'aucune police n'est utilisable, et donc qu'aucun texte ne sera peint.
+    const double largeur = QFontMetricsF(QFont()).horizontalAdvance(
+        QStringLiteral("Bouchaud"));
+    std::printf("[bo] mesure texte : \"Bouchaud\" = %.1f px (%s)\n", largeur,
+                largeur > 1.0 ? "police utilisable" : "AUCUNE POLICE UTILISABLE");
 }
 
 // --- Outils de conversion ---------------------------------------------------
@@ -1132,6 +1213,16 @@ void PontFenetre::pompe()
         return;
     unsigned char bloc[4096];
     for (;;) {
+        // On ne lit que ce que `poll` declare lisible. Une lecture speculative
+        // sur un descripteur qui n'aurait pas pris le mode non bloquant
+        // arreterait la boucle d'evenements de Qt — c'est-a-dire tout le
+        // navigateur — pour un message qui n'existe pas.
+        struct pollfd surveille;
+        surveille.fd = fd_;
+        surveille.events = POLLIN;
+        surveille.revents = 0;
+        if (::poll(&surveille, 1, 0) <= 0 || !(surveille.revents & POLLIN))
+            break;
         const ssize_t lu = ::read(fd_, bloc, sizeof(bloc));
         if (lu > 0) {
             tampon_.append(reinterpret_cast<const char *>(bloc), int(lu));
@@ -1170,6 +1261,7 @@ void PontFenetre::pompe()
 
 void PontFenetre::traite(uint16_t genre, const unsigned char *charge, size_t taille)
 {
+    ++evenements_;
     switch (genre) {
     case protocole::Pointer: {
         if (taille < 16)
@@ -1295,10 +1387,23 @@ PyObject *bo_ouvrir(PyObject *, PyObject *args)
     if (!battement) {
         battement = new QTimer();
         QObject::connect(battement, &QTimer::timeout, [] {
-            // Les entrees d'abord : une touche traitee avant le battement du
-            // moteur est une trame d'avance sur ce que l'utilisateur voit.
-            g_pont.pompe();
+            // Le battement du moteur d'abord, le pont ensuite. L'ordre inverse
+            // paraissait meilleur — traiter une touche avant de redessiner fait
+            // gagner une trame — mais il fait dependre le cœur du navigateur du
+            // bon fonctionnement du pont : si celui-ci se bloque, les minuteries
+            // de la page ne battent plus et rien ne charge. Le moteur doit
+            // pouvoir vivre meme sans gestionnaire de fenetres.
+            ++g_pont.tics_;
             appelle("tic");
+            g_pont.pompe();
+
+            // Un releve toutes les cinq secondes, en face de celui du noyau : si
+            // les deux comptes divergent, on saura de quel cote regarder.
+            if (g_pont.tics_ % 312 == 0) {
+                std::printf("[bo] battement : %lu tics, %lu trames, %lu evenements recus\n",
+                            g_pont.tics_, g_pont.trames_, g_pont.evenements_);
+                std::fflush(stdout);
+            }
         });
         battement->start(16);
     }
@@ -1597,6 +1702,7 @@ int main(int argc, char **argv)
     g_pont.ouvre();
 
     QApplication app(argc, argv);
+    assurePolices();
     diagnostiqueRasterQt();
 
     // Les modules doivent exister avant l'initialisation de l'interprete : un

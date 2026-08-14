@@ -95,7 +95,7 @@ fn env_export(line: &str) {
 /// Liste des commandes connues, pour la tab-completion.
 pub const COMMANDS: &[&str] = &[
     "help", "clear", "version", "uname", "sysinfo", "cpuinfo", "meminfo", "alloctest",
-    "devices", "dmesg", "history", "uptime", "ticks", "interrupts", "breakpoint",
+    "devices", "dmesg", "journal", "history", "uptime", "ticks", "interrupts", "breakpoint",
     "serial-test", "panic-test", "roadmap", "whoami", "id", "users", "useradd",
     "userdel", "passwd", "su", "pwd", "ls", "tree", "cd", "mkdir", "touch", "cat",
     "write", "append", "nano", "edit", "rm", "rmdir", "cp", "mv", "stat", "chmod", "chown",
@@ -565,6 +565,26 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "alloctest" => { c::alloctest(); 0 }
         "devices" => { c::devices(); 0 }
         "dmesg" => { dmesg::print(); 0 }
+        // Les couleurs du journal supposent un terminal qui lit l'ANSI. C'est le
+        // cas de la console de Windows depuis Windows 10, mais pas d'un journal
+        // redirige vers un fichier : `journal off` rend le texte pur.
+        "journal" => {
+            match argv.get(1).copied() {
+                Some("on") | Some("couleurs") => {
+                    crate::kernel::journal::pose_couleurs(true);
+                    crate::println!("journal: couleurs actives");
+                }
+                Some("off") | Some("brut") => {
+                    crate::kernel::journal::pose_couleurs(false);
+                    crate::println!("journal: couleurs coupees");
+                }
+                _ => crate::println!(
+                    "usage: journal on|off   (couleurs ANSI : {})",
+                    if crate::kernel::journal::couleurs() { "actives" } else { "coupees" }
+                ),
+            }
+            0
+        }
         "history" => { c::history(argc, &argv); 0 }
         "uptime" => { c::uptime(); 0 }
         "ticks" => { c::ticks(); 0 }

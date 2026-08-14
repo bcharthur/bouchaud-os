@@ -56,9 +56,25 @@ fn write_raw(byte: u8) {
     unsafe { outb(COM1, byte); }
 }
 
+/// Le prochain octet ecrit commence-t-il une ligne ?
+static mut DEBUT_LIGNE: bool = true;
+/// Vrai pendant l'ecriture du prefixe lui-meme (garde de reentrance).
+static mut DANS_PREFIXE: bool = false;
+
 impl fmt::Write for SerialPort {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for byte in s.bytes() {
+            // Le prefixe est pose au premier octet non vide d'une ligne, et non
+            // a chaque appel : une ligne construite par plusieurs `serial_print!`
+            // n'en recoit donc qu'un, et une ligne vide n'en recoit aucun.
+            unsafe {
+                if DEBUT_LIGNE && byte != b'\n' && !DANS_PREFIXE {
+                    DANS_PREFIXE = true;
+                    crate::kernel::journal::ecris_prefixe();
+                    DANS_PREFIXE = false;
+                }
+                DEBUT_LIGNE = byte == b'\n';
+            }
             write_byte(byte);
         }
         Ok(())
