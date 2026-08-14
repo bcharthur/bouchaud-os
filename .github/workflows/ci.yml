@@ -59,6 +59,14 @@ jobs:
       - name: Construire le noyau
         run: cargo build
 
+      # Le protocole GUI userland existe deux fois : en Rust dans le noyau, en
+      # C++ dans l'hote Qt. Rien dans la construction ne relie les deux, et un
+      # desaccord ne se voit que dans QEMU, sous la forme d'une fenetre qui ne
+      # s'ouvre pas. Ces verifications-la sont donc bloquantes, et elles ne
+      # demandent ni QEMU, ni Qt, ni le reseau.
+      - name: Protocole GUI (tests hote + coherence Rust/C++)
+        run: tools/gui/test-protocole.sh
+
       # L'image bootable est une etape de plus que `cargo build` : elle passe par
       # `bootimage`, qui assemble le bootloader et le noyau. La construire ici
       # attrape les ruptures de ce chemin-la, que la compilation seule ne voit

@@ -29,6 +29,14 @@ La frontiere qui compte le plus n'est pas celle du bas. C'est celle du haut :
 entre le navigateur et son renderer, deux processus ring 3 qui ne partagent
 qu'un canal de controle et une surface. Voir `BROWSER_ISOLATION.md`.
 
+La meme frontiere se retrouve un etage plus bas, entre le navigateur et le
+bureau. Le gestionnaire de fenetres est un **fil noyau** : il est ordonnance
+comme les autres taches, il compose pendant que le navigateur tourne, et il est
+seul a ecrire dans le framebuffer physique. Le navigateur, lui, a un `/dev/fb0`
+redirige vers la surface de sa fenetre et se voit refuser `/dev/input/*` — ce
+n'est pas une convention, c'est le noyau qui le tient. Voir
+`GUI_USERLAND_PROTOCOL.md`.
+
 ## L'arbre
 
 ```text

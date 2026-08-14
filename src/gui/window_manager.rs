@@ -1,7 +1,30 @@
 //! Boucle d'evenements du gestionnaire de fenetres : entree souris/clavier,
-//! focus / z-order, deplacement / redimensionnement, et rendu.
+//! focus / z-order, deplacement / redimensionnement, composition et rendu.
+//!
+//! ## Le bureau est une tache
+//!
+//! Il l'est depuis que le navigateur doit tourner **pendant** que le bureau
+//! vit. Auparavant, ouvrir le navigateur appelait `exec`, qui ne rendait la main
+//! qu'a la mort du programme : le bureau etait gele, sa barre des taches et son
+//! horloge disparaissaient de l'ecran avec lui. Le bureau passe donc par
+//! [`task::run_noyau`] et devient un fil noyau ordonnance comme les autres, ce
+//! qui permet a l'ordonnanceur d'alterner entre lui et les clients.
+//!
+//! Un fil noyau n'est jamais preempte — l'IRQ0 ne commute que depuis le ring 3.
+//! Une composition n'est donc jamais coupee en son milieu, et c'est ce qui rend
+//! une surface simple (sans double tampon) suffisante pour ce jalon : le client
+//! ne peut pas ecrire pendant qu'on le lit, faute de pouvoir s'executer.
+//!
+//! ## Le bureau ne redessine que s'il se passe quelque chose
+//!
+//! La boucle dessinait autrefois a chaque tour, c'est-a-dire aussi vite que le
+//! processeur le permettait — le PIT bat a 1 kHz. Tant que rien d'autre ne
+//! tournait, cela ne se voyait pas. Face a un navigateur qui a besoin du meme
+//! processeur, c'est une famine. On ne redessine donc que sur evenement, et au
+//! plus [`PERIODE_TRAME_MS`] fois par seconde.
 
 use crate::gui::apps;
+use crate::gui::client::{self, Client};
 use crate::gui::event::Key;
 use crate::gui::framebuffer as fb;
 use crate::gui::mouse;
@@ -9,19 +32,69 @@ use crate::gui::widgets;
 use crate::gui::window::{
     self as window,
     clamp_win, icon_rect, make_app, menu_rect, start_btn, taskbar_btn, toggle_max,
-    Drag, Win, BAR_H, ICONS, MENU, MENU_HEADER_H, MENU_ITEM_H, MIN_H, MIN_W, TITLE_H,
+    zone_utile, App, Drag, Win, BAR_H, ICONS, MENU, MENU_HEADER_H, MENU_ITEM_H, MIN_H, MIN_W,
+    NAV_HAUTEUR, NAV_LARGEUR, TITLE_H,
 };
 use crate::drivers::keyboard;
 use crate::fs::ramfs;
+use crate::kernel::task;
 use crate::users;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+/// Periode minimale entre deux trames composees, en millisecondes.
+///
+/// 16 ms, soit environ 60 par seconde. Ce n'est pas une cadence a tenir, c'est
+/// un plafond : sans changement a l'ecran, aucune trame n'est produite.
+const PERIODE_TRAME_MS: u64 = 16;
+
+/// Periode de rafraichissement des indicateurs systeme (heure, CPU, memoire).
+///
+/// Ils changent tout seuls, sans evenement pour l'annoncer. Une seconde est la
+/// granularite de l'horloge : rafraichir plus vite ne montrerait rien de plus.
+const PERIODE_HORLOGE_MS: u64 = 1000;
+
+/// Duree de sommeil quand il n'y a rien a faire, en ticks (1 tick = 1 ms).
+///
+/// C'est la latence maximale d'un clic ou d'une touche : les interruptions
+/// d'entree ne reveillent pas un dormeur, seul l'echeance le fait. Quatre
+/// millisecondes sont imperceptibles a la main et laissent au navigateur des
+/// tranches de temps utilisables.
+const REPOS_TICKS: u64 = 4;
+
 /// Lance le bureau (bloquant jusqu'a Quitter).
 pub fn run() {
+    task::run_noyau(fil_bureau, "desktop");
+}
+
+/// Corps du fil noyau du bureau.
+fn fil_bureau() -> ! {
+    boucle();
+    task::exit_current(0)
+}
+
+/// Codes de touche du protocole GUI.
+///
+/// Ce ne sont pas des codes evdev : le pilote clavier du bureau ne produit pas
+/// de code brut mais une touche deja interpretee selon la disposition. Envoyer
+/// un faux code Linux serait pire qu'un code a nous — le client le croirait.
+mod touche {
+    /// La touche porte un caractere ; le point de code est dans `unicode`.
+    pub const CARACTERE: u32 = 0;
+    pub const ENTREE: u32 = 1;
+    pub const RETOUR: u32 = 2;
+    pub const TABULATION: u32 = 3;
+    pub const HAUT: u32 = 4;
+    pub const BAS: u32 = 5;
+    pub const GAUCHE: u32 = 6;
+    pub const DROITE: u32 = 7;
+    pub const ECHAP: u32 = 8;
+}
+
+fn boucle() {
     fb::enter();
     mouse::init();
-    crate::serial_println!("[gui] window manager demarre");
+    crate::serial_println!("[gui] window manager demarre (fil noyau)");
 
     let home = ramfs::fs().resolve(users::session().home(), 0).unwrap_or(0);
     let mut wins: Vec<Win> = Vec::new();
@@ -36,20 +109,39 @@ pub fn run() {
     wins.push(make_app(0, home, &mut spawn_n)); // un terminal pour commencer
 
     let mut quit = false;
+    // Tout est sale au premier tour : il n'y a encore rien a l'ecran.
+    let mut sale = true;
+    let mut derniere_trame = 0u64;
+    let mut derniere_horloge = 0u64;
+    let mut derniere_souris = (usize::MAX, usize::MAX);
+
     while !quit {
-        crate::kernel::timer::frame_start();
+        let maintenant = crate::kernel::timer::monotonic_ms();
 
         // ---- Clavier (non bloquant) ----
         while let Some(k) = keyboard::try_key() {
-            match k {
-                Key::Other => {
-                    if menu_open { menu_open = false; }
-                    else if wins.pop().is_none() { quit = true; }
+            sale = true;
+            // Echap ferme le menu, puis la fenetre du dessus, puis le bureau —
+            // sauf quand un client a le focus. Un navigateur a besoin d'Echap
+            // (arreter un chargement, fermer une boite de dialogue) et le lui
+            // confisquer pour fermer sa fenetre serait le pire des deux mondes :
+            // la touche ne ferait pas ce que la page attend, et detruirait le
+            // travail en cours. La croix de la barre de titre reste la.
+            let actif = fenetre_active(&wins);
+            let client_actif = actif
+                .map_or(false, |index| window::est_client(&wins[index]));
+            if k == Key::Other && (menu_open || !client_actif) {
+                if menu_open { menu_open = false; }
+                else if !ferme_fenetre_du_dessus(&mut wins) { quit = true; }
+                continue;
+            }
+            if let Some(index) = actif {
+                if let App::Navigateur { client } = &mut wins[index].app {
+                    envoie_touche(client, k);
+                    continue;
                 }
-                other => {
-                    if let Some(w) = wins.last_mut() {
-                        if apps::key_to_app(w, other, home) { wins.pop(); }
-                    }
+                if apps::key_to_app(&mut wins[index], k, home) {
+                    ferme_fenetre(&mut wins, index);
                 }
             }
         }
@@ -63,6 +155,14 @@ pub fn run() {
         let click = left && !prev_left;
         let release = !left && prev_left;
         prev_left = left;
+        if (mxu, myu) != derniere_souris {
+            derniere_souris = (mxu, myu);
+            sale = true;
+            transmet_position(&mut wins, mx, my);
+        }
+        if click || release || wheel != 0 {
+            sale = true;
+        }
 
         if left {
             if let Some(d) = drag {
@@ -92,13 +192,13 @@ pub fn run() {
                         // Clic — verifier double-clic
                         let tick = crate::kernel::timer::ticks();
                         // Fenetre de double-clic : une demi-seconde.
-                        let window = crate::kernel::timer::TICKS_PER_SECOND / 2;
+                        let fenetre = crate::kernel::timer::TICKS_PER_SECOND / 2;
                         let double = last_icon_tap
-                            .map_or(false, |(li, lt)| li == idx && tick.wrapping_sub(lt) < window);
+                            .map_or(false, |(li, lt)| li == idx && tick.wrapping_sub(lt) < fenetre);
                         if double {
                             let kind = ICONS[idx].1;
                             if kind == window::KIND_NAVIGATEUR {
-                                lance_navigateur(home);
+                                lance_navigateur(&mut wins, home);
                             } else {
                                 wins.push(make_app(kind, home, &mut spawn_n));
                             }
@@ -118,96 +218,203 @@ pub fn run() {
             handle_wheel(mx, my, wheel, &mut wins);
         }
 
-        widgets::draw_desktop(&wins);
-        if menu_open { widgets::draw_menu(mx, my); }
-        widgets::draw_taskbar(&wins, menu_open);
-        widgets::draw_cursor(mxu, myu);
-        crate::kernel::timer::mark_frame();
-        fb::present();
-        // Yield CPU until next interrupt (PIT ~18 Hz, keyboard, mouse).
-        crate::arch::x86_64::cpu::wait_for_interrupt();
+        // ---- Clients ring 3 ----
+        if pompe_clients(&mut wins) {
+            sale = true;
+        }
+
+        // ---- Rendu ----
+        if maintenant.wrapping_sub(derniere_horloge) >= PERIODE_HORLOGE_MS {
+            derniere_horloge = maintenant;
+            sale = true; // horloge, charge CPU, memoire : ils bougent seuls
+        }
+        if sale && maintenant.wrapping_sub(derniere_trame) >= PERIODE_TRAME_MS {
+            crate::kernel::timer::frame_start();
+            widgets::draw_desktop(&wins);
+            if menu_open { widgets::draw_menu(mx, my); }
+            widgets::draw_taskbar(&wins, menu_open);
+            widgets::draw_cursor(mxu, myu);
+            crate::kernel::timer::mark_frame();
+            fb::present();
+            derniere_trame = maintenant;
+            sale = false;
+        }
+
+        // Rend la main : c'est ici que les clients ring 3 avancent. Sans autre
+        // tache prete, `sleep_ticks` s'arrete sur un `hlt` — le bureau au repos
+        // ne consomme donc pas plus qu'avant.
+        task::sleep_ticks(REPOS_TICKS);
+        task::nettoie_zombies();
     }
 
+    ferme_tous_les_clients(&mut wins);
     fb::leave();
     crate::serial_println!("[gui] window manager ferme");
 }
 
-/// Rend l'ecran au navigateur, puis le reprend.
-///
-/// Le navigateur ne vit pas dans le noyau : c'est un binaire ring 3 qui ouvre
-/// `/dev/fb0` et le peint entierement par Qt. Pendant ce handoff synchrone, le
-/// gestionnaire de fenetres garde BGA actif mais suspend ses `present()`: le
-/// navigateur prend le LFB sans provoquer un flash vers le mode VGA texte.
-///
-/// L'existence du fichier est verifiee **avant** de quitter le mode graphique :
-/// sinon un disque sans navigateur ferait clignoter l'ecran pour finir sur un
-/// message que personne ne lit.
-fn dessine_lancement_navigateur() {
-    let largeur = 540usize;
-    let hauteur = 170usize;
-    let x = (fb::WIDTH.saturating_sub(largeur)) / 2;
-    let y = (fb::HEIGHT.saturating_sub(hauteur)) / 2;
+// --- Clients -----------------------------------------------------------------
 
-    // Le dernier frame du bureau reste visible autour de la carte. Cela donne
-    // une transition continue jusqu'a la premiere trame produite par Qt.
-    fb::fill_rect_rgb(x, y, largeur, hauteur, 0x0011_1B2E);
-    fb::fill_rect_rgb(x, y, largeur, 4, 0x003D_8BFF);
-    fb::draw_text_prop(x + 34, y + 34, "Bouchaud Browser", 0x00F3_F6FC, 30.0, true);
-    fb::draw_text_prop(
-        x + 34,
-        y + 86,
-        "Demarrage de Qt, Python et du renderer...",
-        0x00B8_C4D9,
-        16.0,
-        false,
-    );
-    fb::draw_text_prop(
-        x + 34,
-        y + 121,
-        "Le bureau reste en mode graphique.",
-        0x007F_93B8,
-        14.0,
-        false,
-    );
-    fb::present();
+/// Indice de la fenetre active (celle du dessus, non minimisee).
+fn fenetre_active(wins: &[Win]) -> Option<usize> {
+    wins.iter().rposition(|w| !w.min)
 }
 
-fn lance_navigateur(cwd: usize) {
-    const CHEMIN: &str = "/bo-navigateur";
-
-    if ramfs::fs().resolve_checked(CHEMIN, cwd).is_err() {
-        crate::kernel::dmesg::log(
-            "gui: /bo-navigateur absent — voir tools/userland/build-navigateur.sh");
-        return;
-    }
-
-    dessine_lancement_navigateur();
-    if !fb::handoff_to_userland() {
-        crate::kernel::dmesg::log("gui: handoff graphique vers le navigateur impossible");
-        return;
-    }
-
-    let args = { let mut v = Vec::new(); v.push(String::from(CHEMIN)); v };
-    let env = crate::kernel::exec::shell_environment();
-    let resultat = crate::kernel::exec::exec(CHEMIN, &args, &env, cwd);
-
-    // `exec` est synchrone aujourd'hui. A son retour le navigateur a termine :
-    // on reprend seulement le droit de presenter, sans reprogrammer BGA.
-    fb::resume_from_userland();
-    mouse::init();
-
-    match resultat {
-        Ok(code) if code != 0 => {
-            crate::println!("navigateur: termine avec le code {}", code);
+/// Consulte tous les clients : trames recues, processus morts.
+///
+/// Rend `true` si l'ecran doit etre recompose.
+fn pompe_clients(wins: &mut Vec<Win>) -> bool {
+    let mut recompose = false;
+    let mut morts: Vec<usize> = Vec::new();
+    for (index, w) in wins.iter_mut().enumerate() {
+        if let App::Navigateur { client } = &mut w.app {
+            if client.pompe() {
+                // Le degat est consomme meme si la fenetre est minimisee :
+                // l'accumuler pour rien ferait grossir un rectangle que
+                // personne ne lit, et la restauration recompose de toute facon.
+                let degat = client.prend_degat();
+                if !w.min && !degat.vide() {
+                    recompose = true;
+                }
+            }
+            if client.fermeture_demandee || !client.vivant() {
+                morts.push(index);
+            }
         }
-        Ok(_) => {}
-        Err(message) => crate::println!("navigateur: {}", message),
+    }
+    // A l'envers : retirer une fenetre decale celles qui suivent.
+    for index in morts.into_iter().rev() {
+        ferme_fenetre(wins, index);
+        recompose = true;
+    }
+    recompose
+}
+
+/// Ferme une fenetre, en terminant son client s'il y en a un.
+fn ferme_fenetre(wins: &mut Vec<Win>, index: usize) {
+    if index >= wins.len() {
+        return;
+    }
+    let mut w = wins.remove(index);
+    if let App::Navigateur { client } = &mut w.app {
+        client.termine();
     }
 }
+
+/// Ferme la fenetre du dessus. Rend `false` s'il n'y en avait aucune.
+fn ferme_fenetre_du_dessus(wins: &mut Vec<Win>) -> bool {
+    match wins.len() {
+        0 => false,
+        n => {
+            ferme_fenetre(wins, n - 1);
+            true
+        }
+    }
+}
+
+fn ferme_tous_les_clients(wins: &mut Vec<Win>) {
+    // Le bureau s'en va : plus personne ne composera ces surfaces. Laisser les
+    // clients vivre les laisserait peindre dans le vide — et surtout empecherait
+    // le fil noyau du bureau de se terminer, puisqu'il attend que plus aucune
+    // tache ne soit executable.
+    for w in wins.iter_mut() {
+        if let App::Navigateur { client } = &mut w.app {
+            client.termine();
+        }
+    }
+    wins.clear();
+}
+
+/// Ouvre le navigateur dans une vraie fenetre du bureau.
+///
+/// Le processus est lance sans attendre : la fenetre existe immediatement, avec
+/// son ecran de demarrage, et se remplira a la premiere trame du client.
+fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize) {
+    // Une seule instance : deux navigateurs, ce sont deux surfaces de 2,6 Mio et
+    // deux Qt qui demarrent en meme temps sur un cœur unique.
+    if let Some(index) = wins.iter().position(|w| window::est_client(w)) {
+        let w = wins.remove(index);
+        wins.push(w);
+        if let Some(w) = wins.last_mut() {
+            w.min = false;
+        }
+        return;
+    }
+
+    let (largeur_fenetre, hauteur_fenetre) = window::fenetre_pour_zone(NAV_LARGEUR, NAV_HAUTEUR);
+    let client = match Client::lance(
+        client::CHEMIN_NAVIGATEUR,
+        cwd,
+        NAV_LARGEUR as usize,
+        NAV_HAUTEUR as usize,
+    ) {
+        Ok(client) => client,
+        Err(message) => {
+            crate::kernel::dmesg::log_fmt(format_args!("gui: navigateur : {}", message));
+            return;
+        }
+    };
+
+    let mut w = Win {
+        title: String::from("Bouchaud Browser"),
+        x: (fb::WIDTH as i32 - largeur_fenetre) / 2,
+        y: BAR_H as i32 + 8,
+        w: largeur_fenetre,
+        h: hauteur_fenetre,
+        min: false,
+        restore: None,
+        app: App::Navigateur { client: alloc::boxed::Box::new(client) },
+    };
+    clamp_win(&mut w);
+    wins.push(w);
+    if let Some(App::Navigateur { client }) = wins.last_mut().map(|w| &mut w.app) {
+        client.envoie_configuration(true);
+    }
+}
+
+/// Transmet la position du curseur au client survole, s'il a le focus.
+///
+/// Seule la fenetre active recoit les mouvements : un client qui suivrait la
+/// souris par-dessous une autre fenetre afficherait des survols fantomes.
+fn transmet_position(wins: &mut Vec<Win>, mx: i32, my: i32) {
+    let index = match fenetre_active(wins) {
+        Some(index) => index,
+        None => return,
+    };
+    let zone = zone_utile(&wins[index]);
+    let boutons = crate::drivers::mouse::buttons() as u32;
+    if let App::Navigateur { client } = &mut wins[index].app {
+        if let Some((x, y)) = crate::gui::protocole::vers_local(&zone, mx, my) {
+            client.envoie_pointeur(x, y, boutons);
+        }
+    }
+}
+
+fn envoie_touche(client: &mut Client, k: Key) {
+    let (code, unicode) = match k {
+        Key::Char(octet) => (touche::CARACTERE, octet as u32),
+        Key::Enter => (touche::ENTREE, 0),
+        Key::Backspace => (touche::RETOUR, 0),
+        Key::Tab => (touche::TABULATION, 0),
+        Key::Up => (touche::HAUT, 0),
+        Key::Down => (touche::BAS, 0),
+        Key::Left => (touche::GAUCHE, 0),
+        Key::Right => (touche::DROITE, 0),
+        Key::Other => (touche::ECHAP, 0),
+    };
+    client.envoie_touche(code, unicode, 0);
+}
+
 fn handle_wheel(mx: i32, my: i32, delta: i32, wins: &mut Vec<Win>) {
     for i in (0..wins.len()).rev() {
         let w = &wins[i];
         if !w.min && mx >= w.x && mx < w.x + w.w && my >= w.y && my < w.y + w.h {
+            let zone = zone_utile(w);
+            if let App::Navigateur { client } = &mut wins[i].app {
+                if crate::gui::protocole::vers_local(&zone, mx, my).is_some() {
+                    client.envoie_molette(delta);
+                }
+                return;
+            }
             apps::wheel_to_app(&mut wins[i], mx, my, delta);
             break;
         }
@@ -230,7 +437,7 @@ fn handle_click(
             let row = ((my - mr.y - MENU_HEADER_H) / MENU_ITEM_H).max(0) as usize;
             if let Some(&(_, kind)) = MENU.get(row) {
                 if kind == usize::MAX { *quit = true; }
-                else if kind == window::KIND_NAVIGATEUR { lance_navigateur(home); }
+                else if kind == window::KIND_NAVIGATEUR { lance_navigateur(wins, home); }
                 else { wins.push(make_app(kind, home, spawn_n)); }
             }
         }
@@ -244,6 +451,14 @@ fn handle_click(
         if taskbar_btn(i).hit(mx, my) {
             let mut w = wins.remove(i);
             w.min = false;
+            // Le contenu d'un client n'est pas redessine par le bureau : il est
+            // recopie depuis sa surface. Apres une restauration, il faut donc
+            // redemander cette recopie, sinon la fenetre reapparait vide
+            // jusqu'a la prochaine trame du client — qui peut ne jamais venir
+            // si la page est statique.
+            if let App::Navigateur { client } = &mut w.app {
+                client.abime_tout();
+            }
             wins.push(w);
             return;
         }
@@ -271,23 +486,39 @@ fn handle_click(
     if let Some(i) = hit {
         let w = wins.remove(i);
         wins.push(w);
+        let index = wins.len() - 1;
         let top = wins.last_mut().unwrap();
         let r = top.x + top.w;
         let on_title = my >= top.y + 1 && my < top.y + TITLE_H;
         if on_title && mx >= r - 10 && mx < r - 1 {
-            wins.pop();
+            // Fermeture : un client a le droit d'etre prevenu et de refuser
+            // (une page qui demande confirmation). Il est termine de force si
+            // sa fenetre disparait de toute facon a l'iteration suivante.
+            if let App::Navigateur { client } = &mut wins[index].app {
+                client.demande_fermeture();
+            } else {
+                ferme_fenetre(wins, index);
+            }
         } else if on_title && mx >= r - 19 && mx < r - 10 {
             toggle_max(top);
         } else if on_title && mx >= r - 28 && mx < r - 19 {
             top.min = true;
             let m = wins.pop().unwrap();
             wins.insert(0, m);
-        } else if my >= top.y + top.h - 8 && mx >= r - 8 {
+        } else if !window::est_client(top) && my >= top.y + top.h - 8 && mx >= r - 8 {
             *drag = Some(Drag::Resize);
         } else if my < top.y + TITLE_H {
             *drag = Some(Drag::Move(mx - top.x, my - top.y));
         } else {
-            apps::app_click(top, mx, my, home);
+            let zone = zone_utile(top);
+            match &mut wins[index].app {
+                App::Navigateur { client } => {
+                    if let Some((x, y)) = crate::gui::protocole::vers_local(&zone, mx, my) {
+                        client.envoie_pointeur(x, y, 1);
+                    }
+                }
+                _ => apps::app_click(&mut wins[index], mx, my, home),
+            }
         }
     }
 }

@@ -245,6 +245,196 @@ private:
     Mode mode_ = Mode::Aucun;
 };
 
+// --- Pont avec le gestionnaire de fenetres ----------------------------------
+//
+// Le navigateur n'est plus un programme qui prend l'ecran : c'est une fenetre du
+// bureau de Bouchaud OS. Deux consequences, et ce sont les deux seules choses
+// que ce pont doit gerer.
+//
+// 1. **Les entrees ne viennent plus d'evdev.** Le noyau refuse `/dev/input/*` a
+//    un processus qui a un ecran virtuel — sinon le bureau et Qt se
+//    partageraient la meme file de scancodes, chacun en volant la moitie a
+//    l'autre. Les touches, les clics et la molette arrivent donc par ce canal,
+//    deja convertis dans le repere de la fenetre.
+//
+// 2. **Le compositeur doit savoir quand une trame est prete.** Sans ce signal il
+//    ne peut que recomposer a intervalle fixe, c'est-a-dire recopier 2,6 Mio
+//    pour rien la plupart du temps.
+//
+// Le canal est lu depuis le battement de service, pas depuis un
+// `QSocketNotifier` : le battement existe deja, il tourne toutes les 16 ms, et
+// il ne depend pas de la facon dont le distributeur d'evenements de Qt surveille
+// les descripteurs. Une dependance de moins sur un chemin que l'on ne peut
+// tester que sur la machine cible.
+
+namespace protocole {
+
+constexpr uint32_t MAGIC = 0x55474F42; // "BOGU" en petit-boutiste
+constexpr uint16_t VERSION = 1;
+constexpr size_t TAILLE_ENTETE = 16;
+constexpr uint32_t FENETRE = 1;
+constexpr uint32_t CHARGE_MAX = 4096;
+
+enum Genre : uint16_t {
+    Hello = 1,
+    CreateWindow = 2,
+    SetTitle = 3,
+    Damage = 4,
+    Close = 5,
+    FrameReady = 6,
+    Surface = 0x100,
+    Configure = 0x101,
+    Focus = 0x102,
+    Key = 0x103,
+    Pointer = 0x104,
+    Wheel = 0x105,
+    CloseRequest = 0x106,
+};
+
+/// Codes de touche du protocole. Ce ne sont pas des codes evdev : le bureau
+/// envoie une touche deja interpretee selon sa disposition clavier.
+enum CodeTouche : uint32_t {
+    ToucheCaractere = 0,
+    ToucheEntree = 1,
+    ToucheRetour = 2,
+    ToucheTabulation = 3,
+    ToucheHaut = 4,
+    ToucheBas = 5,
+    ToucheGauche = 6,
+    ToucheDroite = 7,
+    ToucheEchap = 8,
+};
+
+inline uint32_t litU32(const unsigned char *o, size_t d)
+{
+    return uint32_t(o[d]) | (uint32_t(o[d + 1]) << 8) | (uint32_t(o[d + 2]) << 16)
+        | (uint32_t(o[d + 3]) << 24);
+}
+inline int32_t litI32(const unsigned char *o, size_t d) { return int32_t(litU32(o, d)); }
+
+inline void poseU32(unsigned char *o, size_t d, uint32_t v)
+{
+    o[d] = v & 0xFF;
+    o[d + 1] = (v >> 8) & 0xFF;
+    o[d + 2] = (v >> 16) & 0xFF;
+    o[d + 3] = (v >> 24) & 0xFF;
+}
+
+} // namespace protocole
+
+class PontFenetre
+{
+public:
+    bool ouvre()
+    {
+        const char *texte = std::getenv("BO_GUI_FD");
+        if (!texte || !*texte)
+            return false;
+        char *fin = nullptr;
+        const long valeur = std::strtol(texte, &fin, 10);
+        if (!fin || *fin != '\0' || valeur < 0)
+            return false;
+        fd_ = int(valeur);
+        // Non bloquant : le battement passe ici toutes les 16 ms et ne doit
+        // jamais s'arreter parce que le bureau n'a rien a dire.
+        const int drapeaux = fcntl(fd_, F_GETFL, 0);
+        if (drapeaux >= 0)
+            fcntl(fd_, F_SETFL, drapeaux | O_NONBLOCK);
+        std::printf("[bo] pont gestionnaire de fenetres : fd=%d\n", fd_);
+        return true;
+    }
+
+    bool actif() const { return fd_ >= 0; }
+
+    /// Dit bonjour et annonce la fenetre. Le bureau connait deja la geometrie —
+    /// c'est lui qui l'a choisie — mais un client qui se presente est un client
+    /// dont on sait qu'il parle le protocole, et non un programme qui peint dans
+    /// la surface en ignorant tout le reste.
+    void salue(int largeur, int hauteur)
+    {
+        if (!actif())
+            return;
+        unsigned char bonjour[8];
+        protocole::poseU32(bonjour, 0, protocole::VERSION);
+        protocole::poseU32(bonjour, 4, uint32_t(getpid()));
+        envoie(protocole::Hello, bonjour, sizeof(bonjour));
+
+        unsigned char fenetre[16];
+        protocole::poseU32(fenetre, 0, protocole::FENETRE);
+        protocole::poseU32(fenetre, 4, uint32_t(largeur));
+        protocole::poseU32(fenetre, 8, uint32_t(hauteur));
+        protocole::poseU32(fenetre, 12, 0);
+        envoie(protocole::CreateWindow, fenetre, sizeof(fenetre));
+    }
+
+    /// Annonce une trame prete. C'est le seul message qui autorise le
+    /// compositeur a lire la surface.
+    void trameLivree(int x, int y, int largeur, int hauteur)
+    {
+        if (!actif() || largeur <= 0 || hauteur <= 0)
+            return;
+        unsigned char charge[24];
+        protocole::poseU32(charge, 0, protocole::FENETRE);
+        protocole::poseU32(charge, 4, 0); // tampon 0 : simple tampon pour l'instant
+        protocole::poseU32(charge, 8, uint32_t(x));
+        protocole::poseU32(charge, 12, uint32_t(y));
+        protocole::poseU32(charge, 16, uint32_t(largeur));
+        protocole::poseU32(charge, 20, uint32_t(hauteur));
+        envoie(protocole::FrameReady, charge, sizeof(charge));
+    }
+
+    void titre(const QByteArray &texte)
+    {
+        if (!actif())
+            return;
+        const QByteArray borne = texte.left(96);
+        envoie(protocole::SetTitle,
+               reinterpret_cast<const unsigned char *>(borne.constData()),
+               size_t(borne.size()));
+    }
+
+    /// Lit tout ce que le bureau a envoye et le distribue. Appelee par le
+    /// battement de service.
+    void pompe();
+
+private:
+    void envoie(uint16_t genre, const unsigned char *charge, size_t taille)
+    {
+        unsigned char entete[protocole::TAILLE_ENTETE];
+        protocole::poseU32(entete, 0, protocole::MAGIC);
+        entete[4] = protocole::VERSION & 0xFF;
+        entete[5] = (protocole::VERSION >> 8) & 0xFF;
+        entete[6] = genre & 0xFF;
+        entete[7] = (genre >> 8) & 0xFF;
+        protocole::poseU32(entete, 8, uint32_t(taille));
+        protocole::poseU32(entete, 12, ++serie_);
+
+        // Un message est ecrit d'un bloc, en-tete et charge ensemble : deux
+        // ecritures pourraient etre separees par un `EAGAIN` et laisser le
+        // bureau devant un en-tete sans corps. Si le canal est plein, on
+        // abandonne le message entier — jamais sa moitie.
+        unsigned char tampon[protocole::TAILLE_ENTETE + protocole::CHARGE_MAX];
+        if (taille > protocole::CHARGE_MAX)
+            return;
+        std::memcpy(tampon, entete, sizeof(entete));
+        if (taille)
+            std::memcpy(tampon + sizeof(entete), charge, taille);
+        const ssize_t ecrit = ::write(fd_, tampon, sizeof(entete) + taille);
+        (void)ecrit;
+    }
+
+    void traite(uint16_t genre, const unsigned char *charge, size_t taille);
+
+    int fd_ = -1;
+    uint32_t serie_ = 0;
+    /// Reception partielle : un message peut arriver en deux morceaux.
+    QByteArray tampon_;
+    /// Etat precedent des boutons, pour distinguer un survol d'un clic.
+    uint32_t boutons_ = 0;
+};
+
+PontFenetre g_pont;
+
 /// Backbuffer raster alloue par `mmap` anonyme plutot que par QImage.
 ///
 /// Si l'ancien avertissement venait d'une allocation du backing-store Qt, ce
@@ -462,13 +652,20 @@ protected:
             peintPage(p);
             p.end();
             sortie.presente(image);
+            // Le degat est la trame entiere : le moteur ne dit pas encore
+            // quelles regions il a refaites. Le message porte deja le
+            // rectangle, c'est donc le seul endroit a changer le jour ou il le
+            // dira — le protocole, lui, n'aura pas a bouger.
+            g_pont.trameLivree(0, 0, image.width(), image.height());
 
             // linuxfb peut flusher son propre backing-store juste apres le
             // paintEvent. Une seconde copie au tour d'evenements suivant fait
             // gagner notre frame sans bloquer la boucle Qt.
             QTimer::singleShot(0, this, [this] {
-                if (sortie.active())
+                if (sortie.active()) {
                     sortie.presente(trame.image());
+                    g_pont.trameLivree(0, 0, trame.image().width(), trame.image().height());
+                }
             });
             return;
         }
@@ -923,6 +1120,143 @@ private:
     int enveloppes = 0;
 };
 
+// --- Pont : reception -------------------------------------------------------
+//
+// Definie ici, apres `Toile` et `appelle` : la distribution des evenements passe
+// par les memes rappels Python que les gestionnaires de Qt, et il n'y a donc
+// qu'un seul chemin d'entree dans le moteur, quel que soit le systeme hote.
+
+void PontFenetre::pompe()
+{
+    if (!actif())
+        return;
+    unsigned char bloc[4096];
+    for (;;) {
+        const ssize_t lu = ::read(fd_, bloc, sizeof(bloc));
+        if (lu > 0) {
+            tampon_.append(reinterpret_cast<const char *>(bloc), int(lu));
+            continue;
+        }
+        break; // EAGAIN, fin de fichier, ou erreur : on traite ce qu'on a.
+    }
+
+    for (;;) {
+        if (size_t(tampon_.size()) < protocole::TAILLE_ENTETE)
+            return;
+        const unsigned char *octets =
+            reinterpret_cast<const unsigned char *>(tampon_.constData());
+        if (protocole::litU32(octets, 0) != protocole::MAGIC) {
+            // Flux desynchronise : rien de bon ne peut en sortir, et repartir
+            // d'un octet plus loin ne ferait qu'inventer des messages.
+            std::fprintf(stderr, "[bo] pont : flux invalide, canal abandonne\n");
+            tampon_.clear();
+            fd_ = -1;
+            return;
+        }
+        const uint16_t genre = uint16_t(octets[6]) | (uint16_t(octets[7]) << 8);
+        const uint32_t taille = protocole::litU32(octets, 8);
+        if (taille > protocole::CHARGE_MAX) {
+            tampon_.clear();
+            fd_ = -1;
+            return;
+        }
+        const size_t total = protocole::TAILLE_ENTETE + taille;
+        if (size_t(tampon_.size()) < total)
+            return;
+        traite(genre, octets + protocole::TAILLE_ENTETE, taille);
+        tampon_.remove(0, int(total));
+    }
+}
+
+void PontFenetre::traite(uint16_t genre, const unsigned char *charge, size_t taille)
+{
+    switch (genre) {
+    case protocole::Pointer: {
+        if (taille < 16)
+            return;
+        const int x = protocole::litI32(charge, 4);
+        const int y = protocole::litI32(charge, 8);
+        const uint32_t boutons = protocole::litU32(charge, 12);
+        const bool appuyait = boutons_ & 1;
+        const bool appuie = boutons & 1;
+        boutons_ = boutons;
+        // Le front montant fait le clic ; le reste est du survol. Le bureau
+        // envoie une position absolue a chaque mouvement, ce qui rend la perte
+        // d'un message sans consequence — mais pas celle d'un front.
+        if (appuie && !appuyait) {
+            appelle("clic", "(ii)", x, y);
+            if (g_toile)
+                g_toile->update();
+        } else {
+            appelle("survol", "(ii)", x, y);
+        }
+        return;
+    }
+    case protocole::Wheel: {
+        if (taille < 8)
+            return;
+        appelle("molette", "(i)", protocole::litI32(charge, 4));
+        if (g_toile)
+            g_toile->update();
+        return;
+    }
+    case protocole::Key: {
+        if (taille < 20)
+            return;
+        const uint32_t code = protocole::litU32(charge, 4);
+        const uint32_t modificateurs = protocole::litU32(charge, 8);
+        const uint32_t unicode = protocole::litU32(charge, 12);
+        const uint32_t appui = protocole::litU32(charge, 16);
+        if (!appui)
+            return;
+
+        int qtKey = 0;
+        QString texte;
+        switch (code) {
+        case protocole::ToucheEntree: qtKey = Qt::Key_Return; break;
+        case protocole::ToucheRetour: qtKey = Qt::Key_Backspace; break;
+        case protocole::ToucheTabulation: qtKey = Qt::Key_Tab; break;
+        case protocole::ToucheHaut: qtKey = Qt::Key_Up; break;
+        case protocole::ToucheBas: qtKey = Qt::Key_Down; break;
+        case protocole::ToucheGauche: qtKey = Qt::Key_Left; break;
+        case protocole::ToucheDroite: qtKey = Qt::Key_Right; break;
+        case protocole::ToucheEchap: qtKey = Qt::Key_Escape; break;
+        default:
+            if (!unicode)
+                return;
+            texte = QString(QChar(ushort(unicode)));
+            // Qt designe les lettres par leur majuscule : le moteur compare
+            // `code == K_L` pour Ctrl+L, et minuscule ne correspondrait a rien.
+            qtKey = texte.at(0).toUpper().unicode();
+            break;
+        }
+        // Le bureau ne rapporte pas encore l'etat des modificateurs ; le champ
+        // existe pour que le jour ou il le fera, seul ce fichier-ci change.
+        int qtMods = 0;
+        if (modificateurs & 0x2)
+            qtMods |= Qt::ControlModifier;
+        if (modificateurs & 0x4)
+            qtMods |= Qt::AltModifier;
+        appelle("touche", "(isi)", qtKey, texte.toUtf8().constData(), qtMods);
+        if (g_toile)
+            g_toile->update();
+        return;
+    }
+    case protocole::CloseRequest:
+        appelle("fermeture");
+        QCoreApplication::quit();
+        return;
+    case protocole::Configure:
+    case protocole::Surface:
+    case protocole::Focus:
+        // La geometrie est imposee par le bureau et connue par la surface : ces
+        // messages ne servent aujourd'hui qu'a confirmer ce que l'on a deja.
+        return;
+    default:
+        return;
+    }
+}
+
 // --- Module Python `bo` -----------------------------------------------------
 
 PyObject *bo_enregistrer(PyObject *, PyObject *args)
@@ -943,8 +1277,15 @@ PyObject *bo_ouvrir(PyObject *, PyObject *args)
         return nullptr;
     if (g_toile) {
         g_toile->setWindowTitle(QString::fromUtf8(titre));
+        // Plein ecran : sous le gestionnaire de fenetres de Bouchaud OS,
+        // « l'ecran » est la surface de la fenetre, pas la dalle. Qt dimensionne
+        // donc la toile exactement sur la zone utile que le bureau a allouee.
         g_toile->showFullScreen();
         g_toile->setFocus();
+        if (g_pont.actif()) {
+            g_pont.salue(g_toile->width(), g_toile->height());
+            g_pont.titre(QByteArray(titre));
+        }
     }
     // Battement de service : c'est par lui qu'un fil Python fait executer du
     // travail sur le fil principal. Qt n'accepte d'etre touche que depuis
@@ -954,6 +1295,9 @@ PyObject *bo_ouvrir(PyObject *, PyObject *args)
     if (!battement) {
         battement = new QTimer();
         QObject::connect(battement, &QTimer::timeout, [] {
+            // Les entrees d'abord : une touche traitee avant le battement du
+            // moteur est une trame d'avance sur ce que l'utilisateur voit.
+            g_pont.pompe();
             appelle("tic");
         });
         battement->start(16);
@@ -1246,6 +1590,12 @@ void ajoute_chemin(PyConfig *config, const char *format, const char *prefixe)
 
 int main(int argc, char **argv)
 {
+    // Le pont s'ouvre **avant** QApplication : le descripteur vient du
+    // gestionnaire de fenetres via l'environnement, et le savoir des la premiere
+    // ligne permet de journaliser sous quel regime on tourne — fenetre du
+    // bureau, ou programme seul devant un framebuffer.
+    g_pont.ouvre();
+
     QApplication app(argc, argv);
     diagnostiqueRasterQt();
 

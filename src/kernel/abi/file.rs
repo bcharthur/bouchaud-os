@@ -588,8 +588,31 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
         // en mode graphique lineaire si ce n'est pas deja fait. Sans cela,
         // `mmap` renverrait des pages valides mais invisibles (la carte serait
         // restee en mode texte).
-        if matches!(kind, FdKind::Framebuffer) && !crate::drivers::gfx::is_active() {
+        // Un ecran virtuel ne demande rien au materiel : la carte est deja
+        // programmee par le gestionnaire de fenetres, qui la garde. Appeler
+        // `enter()` ici reinitialiserait BGA et le double-tampon du bureau au
+        // beau milieu d'une session — c'est-a-dire ferait clignoter l'ecran
+        // chaque fois qu'une application s'ouvre.
+        if matches!(kind, FdKind::Framebuffer)
+            && ecran_virtuel().is_none()
+            && !crate::drivers::gfx::is_active()
+        {
             crate::drivers::gfx::enter();
+        }
+        // Un client du gestionnaire de fenetres ne lit pas les entrees : c'est
+        // le bureau qui possede le clavier et la souris, et qui lui transmet ce
+        // qui le concerne, converti dans le repere de sa fenetre.
+        //
+        // Le refus est ici, dans le noyau, et non dans la configuration du
+        // client. Les deux consommateurs puisent dans la *meme* file de
+        // scancodes : les laisser coexister ne partagerait pas les touches, il
+        // en perdrait une sur deux de chaque cote. C'est le genre de defaut qui
+        // se diagnostique en une heure et se reproduit a chaque nouveau client
+        // — a moins que le systeme ne le rende impossible.
+        if matches!(kind, FdKind::InputKeyboard | FdKind::InputMouse)
+            && ecran_virtuel().is_some()
+        {
+            return -errno::EACCES;
         }
         // De meme pour la souris : son IRQ n'est armee qu'a l'entree du bureau.
         // Sans cela, /dev/input/event1 resterait muet. On prend ensuite un
@@ -856,8 +879,8 @@ pub fn sys_fstat(fd: i32, out: u64) -> i64 {
         FdKind::Console => stat_bytes(0, S_IFCHR | 0o620, 0, 0, 0),
         FdKind::Pipe(_, _) => stat_bytes(0, S_IFIFO | 0o600, 0, 0, 0),
         FdKind::Framebuffer => {
-            let (width, height) = crate::drivers::gfx::resolution();
-            stat_bytes(1, S_IFCHR | 0o660, 0, 0, (width * height * 4) as u64)
+            let (_, hauteur, pas) = geometrie_ecran();
+            stat_bytes(1, S_IFCHR | 0o660, 0, 0, (pas * hauteur) as u64)
         }
         _ => stat_bytes(0, S_IFCHR | 0o666, 0, 0, 0),
     };
@@ -1448,7 +1471,7 @@ fn vt_ioctl(request: u64, arg: u64) -> i64 {
 
 /// `struct fb_var_screeninfo` (160 octets) decrivant le mode courant.
 fn fb_var_screeninfo() -> [u8; 160] {
-    let (width, height) = crate::drivers::gfx::resolution();
+    let (width, height, _) = geometrie_ecran();
     let mut buffer = [0u8; 160];
     let mut put = |offset: usize, value: u32| {
         buffer[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
@@ -1469,17 +1492,44 @@ fn fb_var_screeninfo() -> [u8; 160] {
 
 /// `struct fb_fix_screeninfo` (80 octets) : adresse et pas de ligne.
 fn fb_fix_screeninfo() -> [u8; 80] {
-    let (width, height) = crate::drivers::gfx::resolution();
+    let (_width, height, pas) = geometrie_ecran();
     let mut buffer = [0u8; 80];
     let id = b"bouchaudfb";
     buffer[..id.len()].copy_from_slice(id);
-    let phys = crate::drivers::gfx::lfb_phys().unwrap_or(0);
+    // `smem_start` est l'adresse *physique* du framebuffer. Un client qui a un
+    // ecran virtuel n'a rien a faire de celle du materiel : la lui donner
+    // reviendrait a lui indiquer ou taper pour contourner le compositeur.
+    let phys = match ecran_virtuel() {
+        Some(_) => 0,
+        None => crate::drivers::gfx::lfb_phys().unwrap_or(0),
+    };
     buffer[16..24].copy_from_slice(&phys.to_le_bytes()); // smem_start
-    buffer[24..28].copy_from_slice(&((width * height * 4) as u32).to_le_bytes()); // smem_len
+    buffer[24..28].copy_from_slice(&((pas * height) as u32).to_le_bytes()); // smem_len
     buffer[28..32].copy_from_slice(&0u32.to_le_bytes()); // FB_TYPE_PACKED_PIXELS
     buffer[36..40].copy_from_slice(&2u32.to_le_bytes()); // FB_VISUAL_TRUECOLOR
-    buffer[48..52].copy_from_slice(&((width * 4) as u32).to_le_bytes()); // line_length
+    buffer[48..52].copy_from_slice(&(pas as u32).to_le_bytes()); // line_length
     buffer
+}
+
+/// L'ecran virtuel du processus courant, s'il en a un.
+///
+/// Voir `task::Process::ecran` : c'est la redirection qui fait de `/dev/fb0` la
+/// surface d'une fenetre plutot que la memoire video.
+pub fn ecran_virtuel() -> Option<crate::kernel::task::EcranVirtuel> {
+    let process = task::current_process();
+    let ecran = process.borrow().ecran;
+    ecran
+}
+
+/// Geometrie que voit le processus courant : (largeur, hauteur, pas en octets).
+fn geometrie_ecran() -> (usize, usize, usize) {
+    match ecran_virtuel() {
+        Some(ecran) => (ecran.largeur as usize, ecran.hauteur as usize, ecran.pas as usize),
+        None => {
+            let (largeur, hauteur) = crate::drivers::gfx::resolution();
+            (largeur, hauteur, largeur * 4)
+        }
+    }
 }
 
 /// ioctls evdev.

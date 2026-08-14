@@ -11,10 +11,18 @@
 //!     calculatrice, editeur).
 //!
 //! Le navigateur ne fait plus partie du noyau : il vit en ring 3
-//! (`tools/userland/navigateur/`) et s'affiche par Qt sur `/dev/fb0`.
+//! (`tools/userland/navigateur/`). Il n'ecrit plus pour autant a l'ecran : son
+//! `/dev/fb0` est redirige vers une surface partagee que le gestionnaire de
+//! fenetres compose dans une fenetre ordinaire.
+//!
+//!   - `protocole` : format de fil du protocole GUI userland ;
+//!   - `surface` : memoire de pixels partagee avec un client ring 3 ;
+//!   - `client` : session (processus, surface, canal) d'un client.
 
 pub mod apps;
 pub mod client;
+pub mod protocole;
+pub mod surface;
 pub mod desktop;
 pub mod event;
 pub mod framebuffer;

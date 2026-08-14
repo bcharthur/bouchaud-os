@@ -105,6 +105,34 @@ pub fn exec(path: &str, argv: &[String], envp: &[String], cwd: usize) -> Result<
     exec_image(path, &data, argv, envp, cwd)
 }
 
+/// Charge un programme et lance sa premiere tache **sans attendre sa fin**.
+///
+/// Rend le pid. C'est ce que `lance_navigateur` emploie : le gestionnaire de
+/// fenetres etant lui-meme une tache ([`task::run_noyau`]), il n'a plus besoin
+/// de bloquer sur `exec` — et il ne le peut plus, puisqu'il doit continuer a
+/// composer pendant que le programme tourne.
+///
+/// `prepare` recoit le processus neuf avant que sa pile ne soit construite : il
+/// y installe les descripteurs herites (surface, canal du protocole GUI) et rend
+/// les variables d'environnement qui les designent. L'ordre compte — les numeros
+/// de descripteur doivent etre connus avant d'ecrire `envp` dans la pile.
+pub fn lance_detache(
+    path: &str,
+    argv: &[String],
+    envp: &[String],
+    cwd: usize,
+    prepare: &mut dyn FnMut(&mut task::Process) -> Vec<String>,
+) -> Result<u32, String> {
+    if !crate::arch::x86_64::usermode::ready() {
+        return Err("user-mode non initialise (ring 3 indisponible)".to_string());
+    }
+    let data = read_file(path, cwd)?;
+    let (process, task) = construit_tache(path, &data, argv, envp, cwd, Some(prepare))?;
+    let pid = process.borrow().pid;
+    task::register(task);
+    Ok(pid)
+}
+
 /// Meme chose a partir d'une image ELF deja en memoire (autotest embarque).
 pub fn exec_image(
     name: &str,
@@ -113,10 +141,77 @@ pub fn exec_image(
     envp: &[String],
     cwd: usize,
 ) -> Result<i32, String> {
+    // Un `exec` synchrone bloque le fil qui l'appelle jusqu'a la fin du
+    // programme. Depuis une tache — le bureau, par exemple, qui est un fil
+    // noyau —, cela ecraserait le contexte du fil noyau appelant, qui est
+    // unique. Refuser est la seule reponse : le message arrive dans le terminal
+    // du bureau, la ou l'utilisateur a tape la commande, au lieu que la machine
+    // parte en silence.
+    if task::in_user_task() {
+        return Err(alloc::format!(
+            "{} : exec synchrone impossible depuis le bureau (lancer depuis le shell texte)",
+            name
+        ));
+    }
+    let (process, first) = construit_tache(name, data, argv, envp, cwd, None)?;
+    let _ = &process;
+
+    // Un programme qui ouvre /dev/fb0 fait basculer la carte en mode graphique ;
+    // il faut rendre le mode texte au shell quand il se termine, sinon la
+    // console redevient invisible.
+    let graphics_before = crate::drivers::gfx::is_active();
+
+    let code = task::run(first);
+
+    if !graphics_before && crate::drivers::gfx::is_active() {
+        crate::drivers::gfx::leave();
+    }
+    Ok(code)
+}
+
+/// Fabrique un processus, y charge l'image ELF, et rend sa premiere tache.
+///
+/// Ce qui suit etait le corps d'`exec_image`. Il en est sorti pour qu'un
+/// lancement synchrone et un lancement detache partagent exactement le meme
+/// chargeur : deux copies auraient diverge des le premier correctif d'`auxv`.
+fn construit_tache(
+    name: &str,
+    data: &[u8],
+    argv: &[String],
+    envp: &[String],
+    cwd: usize,
+    prepare: Option<&mut dyn FnMut(&mut task::Process) -> Vec<String>>,
+) -> Result<(alloc::rc::Rc<core::cell::RefCell<task::Process>>, alloc::boxed::Box<task::Task>), String> {
     let process = match task::new_process(name, cwd) {
         Some(process) => process,
         None => return Err("memoire physique insuffisante (espace d'adressage)".to_string()),
     };
+
+    // Les descripteurs herites sont poses avant la construction de la pile :
+    // l'environnement doit pouvoir citer leurs numeros.
+    //
+    // Les variables rendues par `prepare` **recouvrent** celles de base, elles
+    // ne s'y ajoutent pas. La distinction n'est pas cosmetique : la libc rend la
+    // premiere occurrence trouvee, donc une seconde definition de
+    // `QT_QPA_PLATFORM_PLUGIN_ARGS` placee a la fin n'aurait aucun effet — Qt
+    // aurait garde la taille de la dalle alors que sa surface fait celle d'une
+    // fenetre, et aurait peint au-dela de ce qui lui est projete.
+    let envp = match prepare {
+        Some(prepare) => {
+            let mut complet = envp.to_vec();
+            for entree in prepare(&mut process.borrow_mut()) {
+                let nom = match entree.find('=') {
+                    Some(position) => entree[..position + 1].to_string(),
+                    None => continue,
+                };
+                complet.retain(|existante| !existante.starts_with(&nom));
+                complet.push(entree);
+            }
+            complet
+        }
+        None => envp.to_vec(),
+    };
+    let envp = &envp[..];
 
     let (entry, stack) = {
         let mut borrowed = process.borrow_mut();
@@ -165,19 +260,9 @@ pub fn exec_image(
         name, entry, stack
     ));
 
-    // Un programme qui ouvre /dev/fb0 fait basculer la carte en mode graphique ;
-    // il faut rendre le mode texte au shell quand il se termine, sinon la
-    // console redevient invisible.
-    let graphics_before = crate::drivers::gfx::is_active();
-
     let frame = TrapFrame::new_user(entry, stack);
-    let first = task::Task::new(process, frame);
-    let code = task::run(first);
-
-    if !graphics_before && crate::drivers::gfx::is_active() {
-        crate::drivers::gfx::leave();
-    }
-    Ok(code)
+    let first = task::Task::new(process.clone(), frame);
+    Ok((process, first))
 }
 
 /// Petit programme ELF64 statique genere a la volee, entierement en langage
