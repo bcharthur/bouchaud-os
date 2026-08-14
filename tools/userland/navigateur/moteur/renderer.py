@@ -30,26 +30,42 @@ protocole que `BROWSER_RENDERER_PROTOCOL.md` designait comme du vrai travail.
 Le renderer ne bat pas tout seul. `TICK` vient du navigateur, et c'est ce qui
 permet de geler un onglet en arriere-plan sans le tuer — et ce qui rend une
 epreuve reproductible, puisque rien n'avance entre deux battements demandes.
+
+## Les ressources : demandees, pas prises
+
+Par defaut, ce processus ne va **pas** chercher ses ressources lui-meme. Il
+installe un `transport.Courtier` : chaque `reseau.charge` devient un
+`FETCH_REQUEST` sur le canal de controle, et c'est le navigateur qui applique la
+politique, lit les temoins et ouvre la prise. Voir `transport.py` pour ce que
+cela deplace exactement, et `BO_RENDERER_DIRECT=1` pour l'outil de comparaison
+qui remet l'ancien chemin.
 """
 
 import os
 import resource
 import socket
 import time
+import urllib.parse
 
 import bo
 
-from . import protocole, surface as mod_surface
+from . import privileges, protocole, surface as mod_surface, transport
 
 # Le renderer se coupe si le navigateur ne lui parle plus. Sans cela, un
 # navigateur tue laisserait derriere lui un processus qui peint pour personne.
 SILENCE_MAX_S = 120.0
 
+# Au-dela, une ressource courtee est declaree perdue. Plus long que le delai
+# reseau du navigateur (`reseau.DELAI`, 20 s) : c'est lui qui doit rendre le
+# verdict d'echec, pas nous — sinon deux horloges decident de la meme chose et
+# la plus courte gagne, en donnant une erreur moins precise.
+DELAI_FETCH_S = 45.0
+
 
 class Renderer:
     """L'etat d'un renderer : un document, une surface, une prise."""
 
-    def __init__(self, prise):
+    def __init__(self, prise, courtage=True, audit=False):
         self.prise = prise
         self.canal = protocole.Canal(prise)
         self.surface = None
@@ -63,6 +79,20 @@ class Renderer:
         self.titre = None
         self.url = None
         self.a_repeindre = False
+        self.foyer = False
+        self.curseur = "fleche"
+        self.lien_survole = None
+        # `AUDIT` n'est pas une capacite qu'un renderer de production possede :
+        # elle est accordee au `fork`, par le navigateur, et seulement aux
+        # renderers d'audit. Un renderer ordinaire ne sait litteralement pas
+        # repondre a la question « que possedes-tu ? ».
+        self.audit = bool(audit)
+        # Ce qui est arrive pendant qu'on attendait une reponse a une requete.
+        # Rejoue ensuite, dans l'ordre : voir `attends_fetch`.
+        self.differes = []
+        self._suivant_fetch = 1
+        if courtage:
+            transport.installe(transport.Courtier(self.demande_ressource))
 
     # --- Sortie ---------------------------------------------------------------
 
@@ -101,7 +131,13 @@ class Renderer:
                                    "limite_as": douce})
         while True:
             try:
-                genre, charge = self.canal.lis(protocole.VERS_RENDERER)
+                # Ce qui a ete mis de cote pendant une requete passe d'abord :
+                # un `TICK` arrive au milieu d'un chargement doit etre joue,
+                # pas perdu, et il doit l'etre **dans l'ordre**.
+                if self.differes:
+                    genre, charge = self.differes.pop(0)
+                else:
+                    genre, charge = self.canal.lis(protocole.VERS_RENDERER)
             except protocole.Fin:
                 return 0
             except socket.timeout:
@@ -140,6 +176,116 @@ class Renderer:
             self.entree(charge)
         elif genre == protocole.TICK:
             self.bat()
+        elif genre == protocole.AUDIT:
+            self.repond_audit(charge)
+        elif genre in (protocole.FETCH_RESPONSE, protocole.FETCH_DATA):
+            # Une reponse sans demande en cours. Rien a en faire, et surtout pas
+            # a la croire : elle est jetee.
+            pass
+
+    # --- Ressources courtees --------------------------------------------------
+
+    def demande_ressource(self, requete):
+        """Envoie un `FETCH_REQUEST` et rend la charge de la reponse.
+
+        C'est le seul chemin par lequel une ressource entre dans ce processus
+        quand le courtage est actif. Rendre une erreur plutot que lever est
+        deliberé : `reseau.charge` promet de ne jamais echouer par exception, et
+        toute la cascade compte dessus.
+        """
+        identifiant = self._suivant_fetch
+        self._suivant_fetch += 1
+        requete = dict(requete, id=identifiant)
+        try:
+            self.dis(protocole.FETCH_REQUEST, requete)
+            return self.attends_fetch(identifiant)
+        except protocole.Fin:
+            raise
+        except protocole.Erreur as e:
+            return {"url": requete["url"], "code": 0,
+                    "erreur": "courtier : %s" % e, "type_mime": "text/plain"}
+
+    def attends_fetch(self, identifiant):
+        """Lit jusqu'a la reponse `identifiant`, en gardant le reste pour plus tard.
+
+        Tout ce qui n'est pas cette reponse est **mis de cote**, pas traite :
+        traiter un `INPUT_EVENT` ici rentrerait dans le moteur alors qu'on est
+        deja au milieu d'un chargement, et une cascade reentrante est une des
+        rares facons qu'a ce code de se corrompre silencieusement.
+        """
+        morceaux = []
+        meta = None
+        limite = time.monotonic() + DELAI_FETCH_S
+        while True:
+            if time.monotonic() > limite:
+                raise protocole.Erreur("reponse %d jamais venue" % identifiant)
+            try:
+                genre, charge = self.canal.lis(protocole.VERS_RENDERER)
+            except socket.timeout:
+                raise protocole.Erreur("reponse %d : silence" % identifiant)
+            charge = charge or {}
+            if genre == protocole.FETCH_RESPONSE and charge.get("id") == identifiant:
+                meta = charge
+                if charge.get("fin"):
+                    break
+            elif genre == protocole.FETCH_DATA and charge.get("id") == identifiant:
+                donnees = charge.get("b64")
+                if donnees:
+                    morceaux.append(donnees)
+                if charge.get("fin"):
+                    break
+            elif genre == protocole.CLOSE:
+                raise protocole.Fin()
+            else:
+                self.differes.append((genre, charge))
+        if meta is None:
+            raise protocole.Erreur("reponse %d sans en-tete" % identifiant)
+        import base64
+        octets = base64.b64decode("".join(morceaux)) if morceaux else b""
+        reponse = dict(meta)
+        reponse["octets"] = octets
+        if not meta.get("texte_propre"):
+            reponse.pop("contenu", None)
+        return reponse
+
+    # --- Audit -----------------------------------------------------------------
+
+    def repond_audit(self, charge):
+        """Dit ce que ce processus possede. **Seulement si on lui a accorde.**
+
+        Un renderer de production ignore la demande, et c'est le comportement
+        correct : la reponse est un plan detaille de ce qu'un attaquant pourrait
+        atteindre depuis ici. Elle n'existe que pour les epreuves, qui creent
+        leur renderer avec la capacite.
+        """
+        if not self.audit:
+            self.dis(protocole.ERROR,
+                     {"raison": "AUDIT", "detail": "capacite non accordee"})
+            return
+        quoi = str(charge.get("quoi", "descripteurs"))
+        reponse = {"quoi": quoi, "pid": os.getpid(),
+                   "transport": getattr(transport.actuel(), "nom", "direct")}
+        if quoi == "descripteurs":
+            reponse["descripteurs"] = privileges.inventaire()
+        elif quoi == "tentatives":
+            cible = charge.get("cible_reseau")
+            accordes = [self.prise.fileno()]
+            if self.surface is not None and self.surface.descripteur is not None:
+                accordes.append(self.surface.descripteur)
+            reponse["tentatives"] = privileges.tentatives(
+                cible_reseau=tuple(cible) if cible else None,
+                fichier=charge.get("fichier"), accordes=accordes)
+            reponse["accordes"] = accordes
+        elif quoi == "navigation_interdite":
+            # Le renderer demande une navigation que la politique doit refuser.
+            # C'est la seule tentative qui ne se joue pas ici : elle se joue
+            # **de l'autre cote**, et c'est precisement ce qu'on veut prouver.
+            self.dis(protocole.REQUEST_NAVIGATION,
+                     {"contexte": self.contexte,
+                      "url": str(charge.get("url") or "file:///etc/shadow"),
+                      "provenance": self.url or "https://exemple.test/"})
+            reponse["demande"] = True
+        self.dis(protocole.AUDIT_RESULT, reponse)
 
     # --- Surface --------------------------------------------------------------
 
@@ -207,14 +353,21 @@ class Renderer:
             return
         genre = str(charge.get("genre", ""))
         if genre == "souris":
-            if self.document.survole(float(charge.get("x", 0)),
-                                     float(charge.get("y", 0))):
+            x = float(charge.get("x", 0))
+            y = float(charge.get("y", 0)) + self.defilement
+            if self.document.survole(x, y):
                 self.a_repeindre = True
-            forme = "pointeur" if self.document.lien_a(
-                float(charge.get("x", 0)),
-                float(charge.get("y", 0)) + self.defilement) else "fleche"
-            self.dis(protocole.CURSOR_CHANGED,
-                     {"contexte": self.contexte, "forme": forme})
+            lien = self.document.lien_a(x, y)
+            forme = "pointeur" if lien else "fleche"
+            # La forme **et** le lien dans le meme message. Le chrome affiche
+            # l'adresse survolee dans sa barre d'etat ; la lui faire chercher
+            # dans le DOM d'en face aurait ete exactement la lecture directe que
+            # cette architecture existe pour supprimer.
+            if forme != self.curseur or lien != self.lien_survole:
+                self.curseur, self.lien_survole = forme, lien
+                self.dis(protocole.CURSOR_CHANGED,
+                         {"contexte": self.contexte, "forme": forme,
+                          "lien": lien})
         elif genre == "clic":
             x = float(charge.get("x", 0))
             y = float(charge.get("y", 0)) + self.defilement
@@ -230,18 +383,48 @@ class Renderer:
                 # qui applique la politique — schema autorise, origine,
                 # historique —, et un renderer compromis ne doit pas pouvoir
                 # s'en passer.
-                self.dis(protocole.REQUEST_NAVIGATION,
-                         {"contexte": self.contexte, "url": url,
-                          "provenance": self.url})
+                self.demande_navigation(url)
+            self.annonce_foyer()
         elif genre == "touche":
             self.document.frappe(str(charge.get("touche", "")),
                                  str(charge.get("texte", "")),
                                  bool(charge.get("maj")),
                                  bool(charge.get("ctrl")))
             self.a_repeindre = True
+            self.annonce_foyer()
         elif genre == "defilement":
             self.defilement = max(0.0, float(charge.get("position", 0)))
             self.a_repeindre = True
+
+    def demande_navigation(self, url):
+        """Demande au navigateur d'aller quelque part. **Adresse absolue.**
+
+        La resolution se fait ici, contre l'adresse du document. Ce n'est pas
+        une commodite pour l'appelant : la politique du navigateur compare un
+        **schema**, et un schema ne se lit pas dans `../ailleurs`. Envoyer
+        l'adresse brute reviendrait a demander a la politique de deviner contre
+        quoi resoudre, c'est-a-dire a la faire dependre d'un etat que le
+        renderer lui annonce — exactement ce qu'on cherche a ne pas faire.
+        """
+        absolue = urllib.parse.urljoin(self.url or "", str(url)) \
+            if self.url else str(url)
+        self.dis(protocole.REQUEST_NAVIGATION,
+                 {"contexte": self.contexte, "url": absolue,
+                  "provenance": self.url})
+
+    def annonce_foyer(self):
+        """Dit au chrome si un champ de la page tient le clavier.
+
+        Sans cela, le chrome ne saurait pas a qui donner la prochaine frappe :
+        en-processus il lisait `document.foyer_actuel()`, ce qu'un chrome
+        separe du DOM ne peut plus faire. C'est le seul bit du DOM dont le
+        chrome ait besoin, et il vient donc par message.
+        """
+        foyer = self.document is not None and self.document.foyer_actuel() is not None
+        if foyer != self.foyer:
+            self.foyer = foyer
+            self.dis(protocole.FOCUS_CHANGED,
+                     {"contexte": self.contexte, "foyer": foyer})
 
     def bat(self):
         if self.document is None:
@@ -249,6 +432,18 @@ class Renderer:
         if self.document.rafraichis():
             self.a_repeindre = True
         self.annonce_titre()
+        self.annonce_foyer()
+        # `location.href = …` : le script demande, le navigateur decide. Le
+        # renderer ne suit pas la demande lui-meme — c'est la meme regle que
+        # pour un lien clique, et l'oublier ici aurait laisse une porte ouverte
+        # que la porte de devant refuse.
+        demande = self.document.navigation_demandee
+        if isinstance(demande, tuple):
+            self.dis(protocole.REQUEST_NAVIGATION,
+                     {"contexte": self.contexte, "pas": int(demande[1]),
+                      "provenance": self.url})
+        elif demande:
+            self.demande_navigation(demande)
         if self.document.url != self.url:
             self.url = self.document.url
             self.dis(protocole.URL_CHANGED,
@@ -296,12 +491,18 @@ class Renderer:
                  {"contexte": self.contexte, "generation": self.generation,
                   "tampon": suivant, "largeur": self.surface.largeur,
                   "hauteur": self.surface.hauteur,
+                  # La hauteur du document et la position du defilement
+                  # voyagent avec la trame : c'est ce dont le chrome a besoin
+                  # pour dessiner son ascenseur, et c'est la seule autre chose
+                  # qu'il lisait dans le DOM.
+                  "hauteur_document": float(getattr(self.document, "hauteur", 0.0)),
+                  "defilement": float(self.defilement),
                   "horodatage": time.monotonic()})
 
 
-def sers(prise):
+def sers(prise, courtage=True, audit=False):
     """Point d'entree du processus enfant. Rend le code de sortie."""
-    renderer = Renderer(prise)
+    renderer = Renderer(prise, courtage=courtage, audit=audit)
     try:
         return renderer.sers()
     finally:

@@ -13,6 +13,8 @@ partagee. Ce qui suit distingue partout ce qui **est** de ce qui **reste**.*
 | Verification de la version, du genre, du **sens**, de la longueur, de la completude | fait |
 | `CREATE_DOCUMENT`, `NAVIGATE`, `RESIZE`, `INPUT_EVENT`, `TICK`, `SURFACE`, `CLOSE` | fait |
 | `READY`, `TITLE_CHANGED`, `URL_CHANGED`, `CURSOR_CHANGED`, `FRAME_READY`, `CONSOLE_MESSAGE`, `ERROR`, `REQUEST_NAVIGATION` | fait |
+| `FOCUS_CHANGED`, `FETCH_REQUEST` / `FETCH_RESPONSE` / `FETCH_DATA`, `AUDIT` / `AUDIT_RESULT` | fait |
+| Utilise par le **vrai** navigateur, par defaut | fait — voir `BROWSER_ISOLATION.md` |
 | Surface `memfd` + `MAP_SHARED` + `SCM_RIGHTS`, deux tampons, generation | fait |
 | `CRASH` synthetise par le navigateur depuis `wait4` | fait |
 | `RLIMIT_AS` dans le renderer, annonce en retour dans `READY` | fait |
@@ -58,6 +60,9 @@ trame a l'autre.
 | `TICK` | horodatage | Fait avancer minuteries, animations, reponses reseau. Le renderer ne bat pas tout seul : c'est le navigateur qui cadence, et c'est ce qui permet de le geler sans le tuer. |
 | `SURFACE` | id, descripteur memfd, largeur, hauteur, pas | Le tampon ou peindre. Passe par `SCM_RIGHTS`. |
 | `CLOSE` | id | Detruit le contexte et tout ce qu'il tient. |
+| `FETCH_RESPONSE` | id de requete, metadonnees, `fin` | La reponse a un `FETCH_REQUEST`. Le corps suit en `FETCH_DATA` : une image de trois mebioctets ne tient pas dans une trame de controle, dont `CHARGE_MAX` est petite a dessein. |
+| `FETCH_DATA` | id de requete, morceau base64, `fin` | Un morceau de corps. La taille est choisie pour que le morceau **encode** reste sous `CHARGE_MAX` — base64 gonfle d'un tiers. |
+| `AUDIT` | quoi | Demande au renderer ce qu'il possede. Un renderer de production ne sait pas repondre : la capacite est accordee au `fork`. |
 
 ## Renderer → Navigateur
 
@@ -65,10 +70,13 @@ trame a l'autre.
 |---|---|---|
 | `TITLE_CHANGED` | id, titre | |
 | `URL_CHANGED` | id, url | Apres une redirection ou un `pushState`. |
-| `CURSOR_CHANGED` | id, forme | |
-| `DISPLAY_LIST_READY` | id, numero de trame, rectangle sale | Les pixels sont dans la surface partagee ; le message ne porte que de quoi savoir quoi recomposer. |
+| `CURSOR_CHANGED` | id, forme, lien | Le lien voyage avec la forme : le chrome affiche l'adresse survolee en barre d'etat, et la lui faire chercher dans le DOM d'en face serait exactement la lecture directe que cette architecture supprime. |
+| `FOCUS_CHANGED` | id, foyer | Un champ de la page tient-il le clavier ? Le seul bit du DOM dont le chrome ait besoin, et le seul qu'il ne puisse pas aller chercher. |
+| `FETCH_REQUEST` | id, url, methode, corps, en-tetes, document, destination | Le renderer demande une ressource. Le navigateur applique la politique, lit les temoins, ouvre la prise. Voir `moteur/transport.py`. |
+| `AUDIT_RESULT` | quoi, descripteurs ou tentatives | Reponse a `AUDIT`. Voir `RENDERER_PRIVILEGE_AUDIT.md`. |
+| `FRAME_READY` | id, generation, tampon, dimensions, hauteur du document, defilement | Les pixels sont dans la surface partagee ; le message ne porte que de quoi savoir quoi recomposer. La hauteur du document et la position du defilement voyagent avec : c'est ce dont le chrome a besoin pour son ascenseur, et c'est l'autre chose qu'il lisait dans le DOM. |
 | `CONSOLE_MESSAGE` | id, niveau, texte | |
-| `REQUEST_NAVIGATION` | id, url, provenance | Un clic sur un lien. Le renderer **demande**, il ne navigue pas : c'est le navigateur qui applique la politique. |
+| `REQUEST_NAVIGATION` | id, url **absolue** ou pas d'historique, provenance | Un clic sur un lien, ou `location.href = …`, ou `history.go(n)`. Le renderer **demande**, il ne navigue pas. L'adresse est resolue contre celle du document avant l'envoi : la politique compare un schema, et un schema ne se lit pas dans `../ailleurs`. |
 | `CRASH` | id, raison | Emis par le navigateur lui-meme quand `wait4` recolte une mort anormale — un renderer qui plante n'a plus rien pour parler. |
 
 ## Les regles qui comptent plus que la liste
@@ -147,10 +155,18 @@ Chromium : **un zygote se forke tot**.
 
 ## Ce qui n'est toujours pas tranche
 
-* **La reprise apres crash.** Recharger la page, ou afficher un cadre mort ?
-  Chromium fait le second et laisse l'utilisateur decider. Le mecanisme rend les
-  deux possibles : la derniere trame reste lisible dans la surface apres la mort
-  du renderer, et un remplacant demarre en quelques millisecondes.
+* **~~La reprise apres crash.~~** Tranche : la derniere image reste a l'ecran,
+  l'etat dit « page crashee », les ressources sont rendues, et F5 fabrique un
+  renderer neuf. L'image survit parce qu'elle a deja ete copiee chez Qt — la
+  surface partagee peut donc etre liberee sans que l'ecran se vide.
+* **Le courtage synchrone.** Le navigateur sert un `FETCH_REQUEST` dans son
+  pompage d'evenements, donc il gele son chrome le temps de l'aller-retour. Ce
+  n'est pas une regression — le chargement en-processus faisait pire — mais
+  c'est le goulot suivant.
+* **Le media.** `reseau.tranche` et `reseau.taille_distante` restent directs :
+  ils lisent par tranches de plusieurs mebioctets, en boucle, et les passer par
+  des trames de controle sans les avoir d'abord rendus asynchrones
+  transformerait une lecture video en gel de l'interface.
 * **Le nombre de renderers.** Un par onglet, ou un par origine ? Le second est ce
   vers quoi il faut aller — il transforme la Same-Origin Policy en frontiere
   materielle — et rien dans le protocole ne s'y oppose.

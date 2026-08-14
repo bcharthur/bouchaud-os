@@ -1,78 +1,124 @@
 # Architecture de Bouchaud OS
 
-Ce document decrit le decoupage en modules introduit en V0.6. L'objectif est de
-garder un code lisible, isoler le materiel, et preparer l'evolution vers un vrai
-noyau (interruptions, memoire, processus, reseau).
+*Ce document decrit ce qui existe. Les versions precedentes — qui decrivaient
+une GDT en stub, un noyau sans allocateur et un reseau a l'etat de feuille de
+route — sont dans `docs/history/`.*
 
-## Vue d'ensemble
+## Les quatre etages
 
+```text
+        ┌──────────────────────────────────────────────────────────┐
+  ring 3│  navigateur (chrome Qt)          renderer (moteur Web)   │
+        │  historique, politique      ⇄    DOM, CSS, mise en page  │
+        │  reseau, temoins, stockage       JavaScript, Workers     │
+        ├──────────────────────────────────────────────────────────┤
+        │  Qt · Python · QuickJS · FFmpeg   (tools/userland/)       │
+        ╞══════════════════════════════════════════════════════════╡
+        │  ABI compatible Linux : syscall/sysret                    │
+  ring 0│  src/kernel/abi/ · src/kernel/syscall.rs                  │
+        ├──────────────────────────────────────────────────────────┤
+        │  noyau : processus, fils, ordonnanceur, memoire, VFS,     │
+        │  reseau, signaux, descripteurs, ELF        (src/kernel/)  │
+        ├──────────────────────────────────────────────────────────┤
+        │  x86_64 : GDT+TSS, IDT, PIC/PIT, pagination, ring 3       │
+        │                                        (src/arch/x86_64/) │
+        └──────────────────────────────────────────────────────────┘
 ```
+
+La frontiere qui compte le plus n'est pas celle du bas. C'est celle du haut :
+entre le navigateur et son renderer, deux processus ring 3 qui ne partagent
+qu'un canal de controle et une surface. Voir `BROWSER_ISOLATION.md`.
+
+## L'arbre
+
+```text
 src/
-├── main.rs            Point d'entree (kernel_main), banniere, sequence de boot
-├── macros.rs          Macros print! / println! (VGA)
-├── arch/
-│   ├── mod.rs         Selection d'architecture
-│   └── x86_64/
-│       ├── mod.rs     init() des briques bas niveau
-│       ├── ports.rs   inb / outb (E/S sur ports)
-│       ├── cpu.rs     CPUID, rdtsc, halt_loop, cpuinfo
-│       ├── gdt.rs     STUB : Global Descriptor Table
-│       ├── idt.rs     STUB : Interrupt Descriptor Table
-│       └── interrupts.rs  STUB : etat des IRQ
-├── drivers/
-│   ├── mod.rs
-│   ├── vga.rs         Sortie texte VGA 0xb8000 + couleurs + _print
-│   ├── serial.rs      UART 16550 COM1 + serial_print! / serial_println!
-│   └── keyboard.rs    Clavier PS/2 polling, mapping AZERTY-FR, read_line
-├── fs/
-│   ├── mod.rs
-│   └── ramfs.rs       FS en memoire a inodes fixes (Node, FileSystem)
+├── main.rs              kernel_main : sequence de boot
+├── arch/x86_64/
+│   ├── gdt.rs           GDT + TSS, ordre impose par syscall/sysret
+│   ├── idt.rs           exceptions et IRQ
+│   ├── interrupts.rs    PIC 8259, PIT, clavier, souris
+│   ├── usermode.rs      bascule ring 0 → ring 3
+│   ├── pci.rs           enumeration du bus
+│   ├── cpu.rs           CPUID, rdtsc
+│   └── rtc.rs           horloge temps reel
 ├── kernel/
-│   ├── mod.rs
-│   ├── dmesg.rs       Journal noyau (tampon circulaire) + mirroring serie
-│   ├── timer.rs       Ticks + mesure TSC
-│   └── panic.rs       Panic handler (#[panic_handler])
-├── users/
-│   └── mod.rs         User, Session (root / arthur / guest)
-├── shell/
-│   ├── mod.rs         Boucle shell, parsing, dispatcher
-│   └── commands.rs    Implementation de chaque commande
-└── net/
-    └── mod.rs         ROADMAP reseau OSI + placeholders
+│   ├── memory.rs        frames physiques
+│   ├── vmm.rs           espaces d'adressage, pagination
+│   ├── heap.rs          tas noyau
+│   ├── process.rs       processus, espaces separes
+│   ├── task.rs          fils
+│   ├── scheduler.rs     ordonnanceur a classes : Interactive / Normale
+│   ├── signal.rs        signaux POSIX
+│   ├── fd.rs            table de descripteurs
+│   ├── handle.rs        objets noyau references par descripteur
+│   ├── partage.rs       memoire partagee : memfd, MAP_SHARED, SCM_RIGHTS
+│   ├── syscall.rs       point d'entree syscall
+│   ├── abi/             traduction de l'ABI Linux
+│   ├── elf.rs           chargeur ELF
+│   ├── exec.rs          lancement d'un programme
+│   ├── sysroot.rs       arborescence systeme
+│   ├── timer.rs         ticks
+│   ├── input.rs         file d'entrees
+│   ├── dmesg.rs         journal noyau
+│   ├── power.rs         arret, redemarrage
+│   └── autorun.rs       demarrage automatique
+├── fs/                  VFS et persistance
+├── net/
+│   ├── link/            Ethernet, e1000
+│   ├── internet/        IPv4, ARP, ICMP
+│   ├── transport/       TCP, UDP
+│   ├── application/     DNS, HTTP
+│   ├── security/        TLS
+│   ├── encoding/        base64, URL
+│   └── stack.rs         assemblage
+├── drivers/             VGA, serie, clavier, souris, framebuffer
+├── gui/                 gestionnaire de fenetres, widgets, polices
+├── wasm/                interpreteur WebAssembly (wasmi)
+├── lang/                interpreteurs embarques
+├── shell/               shell interactif
+├── git/                 client git minimal
+└── users/               sessions
+
+tools/userland/
+├── build-*.sh           construction de Qt, Python, QuickJS, FFmpeg
+├── mkdisk.sh            image de disque
+├── *-probe.c            sondes : ABI, reseau, ordonnanceur, IPC, memoire
+└── navigateur/
+    ├── hote.cpp         pont Qt ↔ Python : le module `bo`
+    ├── bojs.cpp         pont QuickJS ↔ Python
+    ├── navigateur.py    le chrome : fenetre, historique, barre d'adresse
+    └── moteur/          le moteur Web
 ```
 
-## Principes de conception
+## Le moteur Web
 
-- **`no_std`, pas d'`alloc`** : aucune allocation dynamique tant qu'un heap
-  allocator propre n'existe pas (cible V0.8). Tout repose sur des tableaux et
-  structures de taille fixe (`static`).
-- **Isolation du materiel** : tout ce qui touche au CPU ou aux ports d'E/S vit
-  dans `arch/x86_64`. Le reste du noyau l'utilise via des fonctions stables.
-- **Etat global controle** : les ressources uniques (VGA, serie, dmesg, session,
-  RAMFS) sont des `static mut` encapsules derriere des fonctions d'acces
-  (`vga::set_color`, `dmesg::log`, `ramfs::fs()`, `users::session()`...).
-- **Sorties** : les macros `print!`/`println!` ecrivent sur l'ecran VGA ; les
-  evenements noyau passent par `dmesg::log`, qui copie aussi sur la serie COM1.
+`tools/userland/navigateur/moteur/` — carte detaillee dans
+`WEB_ENGINE_MODULES.md`. Les modules qui portent l'architecture multiprocessus :
 
-## Sequence de boot (`kernel_main`)
+| Module | Role |
+|---|---|
+| `vue.py` | l'interface que le chrome voit d'une page : `VueLocale` ou `VueRenderer` |
+| `superviseur.py` | le cote navigateur : forke le renderer, applique la politique, courte les ressources |
+| `renderer.py` | le cote renderer : un moteur Web au bout d'une prise |
+| `protocole.py` | les trames echangees entre les deux |
+| `surface.py` | la surface partagee : `memfd` + `MAP_SHARED`, deux tampons |
+| `transport.py` | `Direct` ou `Courtier` : par ou une ressource arrive |
+| `privileges.py` | ce dont l'enfant n'herite pas, et ce qu'il peut encore |
 
-1. `drivers::serial::init()` puis `drivers::vga::clear()` — sorties pretes.
-2. `kernel::timer::init()` (capture du TSC) et `kernel::dmesg::init()`.
-3. `arch::x86_64::init()` — stubs GDT / IDT / interruptions (journalises).
-4. Montage du RAMFS, session par defaut (`arthur`), logs des sous-systemes.
-5. Banniere d'accueil.
-6. `shell::run()` — boucle interactive infinie.
+## Principes
 
-## Points d'extension prevus
+**L'isolation avant la commodite.** Le renderer nait sans les descripteurs de
+son parent, avec un `RLIMIT_AS` a lui, en classe `Normale` pendant que le
+navigateur est `Interactive`, et sans le droit de decider d'une navigation. Ce
+qu'il ne peut pas encore, `RENDERER_PRIVILEGE_AUDIT.md` le dit sans arrondir.
 
-| Sous-systeme | Fichier cible           | Etat V0.6 | Prochaine etape |
-|--------------|-------------------------|-----------|-----------------|
-| GDT          | `arch/x86_64/gdt.rs`    | stub      | charger GDT + TSS |
-| IDT          | `arch/x86_64/idt.rs`    | stub      | handlers d'exceptions |
-| Interruptions| `arch/x86_64/interrupts.rs` | stub  | PIC 8259, IRQ timer/clavier |
-| Timer        | `kernel/timer.rs`       | TSC only  | tick sur IRQ0 (PIT) |
-| Memoire      | (a creer) `kernel/mem`  | absent    | frames + paging + heap |
-| PCI          | (a creer) `drivers/pci` | absent    | scan du bus |
-| Reseau       | `net/mod.rs`            | roadmap   | driver + Ethernet + IPv4 |
-| Disque       | (a creer) `drivers/blk` | roadmap   | virtio-blk + BFS |
-| Securite     | `users/mod.rs`          | sessions  | syscalls + split user/kernel |
+**Une seule verite par question.** Le foyer appartient au document, pas au
+chrome ni au JavaScript. L'historique appartient au chrome, pas au renderer. La
+politique appartient au navigateur, pas au moteur. Chaque fois que deux
+endroits ont su repondre a la meme question, ils ont fini par se contredire.
+
+**Ce qui n'est pas mesure n'est pas affirme.** Les jalons fonctionnels sont
+ecrits par les epreuves (`tests/jalons.json`), l'audit de privileges par
+l'epreuve qui l'execute (`tests/audit-privileges.json`), et les sondes refusent
+de conclure quand elles ne mesurent rien.

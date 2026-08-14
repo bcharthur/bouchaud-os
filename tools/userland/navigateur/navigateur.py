@@ -7,6 +7,26 @@ ou dans `moteur/`.
 
     exec /bo-navigateur                    page d'accueil
     exec /bo-navigateur https://…          une adresse
+
+## Ou vit la page
+
+**Dans un autre processus.** Ce fichier tient la fenetre, le chrome et
+l'historique ; le document, la cascade, le JavaScript et la peinture vivent dans
+un renderer que `moteur/superviseur.py` a forke, et qui communique par un canal
+de controle et une surface partagee.
+
+Ce n'a pas toujours ete le cas : le chrome construisait son `Document` lui-meme
+et lisait le DOM a portee d'attribut. Le processus separe existait mais n'etait
+exerce que par les epreuves — l'architecture affichee n'etait pas
+l'architecture executee. `moteur/vue.py` est ce qui a recolle les deux, et
+explique ce qu'il a fallu deplacer pour cela.
+
+L'ancien chemin reste atteignable :
+
+    BO_BROWSER_INPROCESS=1 /bo-navigateur …
+
+C'est un outil de comparaison, pas une option. Quand une page se comporte mal,
+il tranche la question « est-ce le moteur, ou la separation ? ».
 """
 
 import sys
@@ -14,7 +34,7 @@ import traceback
 
 import bo
 
-from moteur import Document, distant, lecteur_youtube, reseau
+from moteur import distant, lecteur_youtube, reseau, vue as mod_vue
 
 # --- Constantes visuelles ----------------------------------------------------
 
@@ -72,8 +92,9 @@ class Onglet:
     def __init__(self):
         self.historique = []
         self.position = -1
-        self.document = None
-        self.defilement = 0.0
+        # La page. Locale ou distante selon `moteur/vue.py` — le chrome ne sait
+        # pas laquelle, et c'est le point.
+        self.vue = None
         # Rendu distant : la page n'est plus un arbre mais une image, rendue
         # par un vrai navigateur sur l'hote. Voir `moteur/distant.py`.
         self.distant = None
@@ -106,6 +127,15 @@ class Navigateur:
         self.etat = "Pret."
         self.survol = None
         self.chargement = None  # URL en cours de chargement
+        # La vue est creee **tot**, avant que le chrome n'ait travaille. Ce
+        # n'est pas un detail d'ordonnancement : `superviseur.BUDGET_AS` est un
+        # budget au-dessus de ce dont l'enfant herite, et un renderer forke
+        # apres une longue session naitrait au ras de son plafond. Un zygote se
+        # forke tot.
+        self.onglet.vue = mod_vue.ouvre_vue(
+            self.largeur_vue, self.hauteur_vue, journal=self._journal_js)
+        self.etat = ("Pret. (moteur en-processus)" if self.onglet.vue.genre == "local"
+                     else "Pret.")
 
     # --- Geometrie ----------------------------------------------------------
 
@@ -141,6 +171,62 @@ class Navigateur:
         """
         print("[js:%s] %s" % (niveau, texte), flush=True)
 
+    # --- Evenements de la page ------------------------------------------------
+
+    def applique(self, evenements):
+        """Reagit a ce que la vue a dit. Le seul endroit qui le fasse.
+
+        Les navigations ne sont **pas** appliquees par la vue : elles remontent
+        ici, ou l'historique existe. Une page qui se rendrait elle-meme ailleurs
+        laisserait un bouton « reculer » qui ment.
+        """
+        redessine = False
+        navigation = None
+        historique = None
+        for nom, charge in evenements or ():
+            if nom == "TRAME":
+                redessine = True
+            elif nom == "TITRE":
+                bo.titre("%s — Navigateur" % (charge.get("titre") or ""))
+                redessine = True
+            elif nom == "URL":
+                adresse = charge.get("url") or ""
+                if adresse and adresse != self.onglet.url:
+                    self.onglet.historique[self.onglet.position] = adresse
+                if not self.champ_actif:
+                    self.saisie = adresse
+                    self.curseur_saisie = len(self.saisie)
+                redessine = True
+            elif nom == "CURSEUR":
+                lien = charge.get("lien")
+                nouveau = ("→ " + lien) if lien else None
+                if nouveau != self.survol:
+                    self.survol = nouveau
+                    redessine = True
+            elif nom == "NAVIGUE":
+                navigation = charge.get("url")
+            elif nom == "HISTORIQUE":
+                historique = charge.get("pas")
+            elif nom == "CRASH":
+                self.etat = "Page crashee : %s — F5 pour recharger" % (
+                    charge.get("raison") or "renderer mort")
+                self.survol = None
+                redessine = True
+            elif nom == "JOURNAL":
+                self._journal_js(charge.get("niveau", "log"),
+                                 charge.get("texte", ""))
+        if redessine:
+            bo.redessiner()
+        # La navigation en dernier : elle remplace la vue, et jouer les autres
+        # evenements apres l'aurait fait sur une page qui n'existe plus.
+        if historique:
+            if historique < 0:
+                self.recule()
+            elif historique > 0:
+                self.avance()
+        elif navigation:
+            self.ouvre(navigation)
+
     def bat(self):
         """Battement : minuteries de la page, et remise en page si besoin.
 
@@ -150,20 +236,9 @@ class Navigateur:
         if self.onglet.distant is not None:
             self.bat_distant()
             return
-        document = self.onglet.document
-        if document is None:
+        if self.onglet.vue is None:
             return
-        if document.rafraichis():
-            bo.redessiner()
-        demande = document.navigation_demandee
-        if isinstance(demande, tuple):
-            pas = demande[1]
-            if pas < 0:
-                self.recule()
-            elif pas > 0:
-                self.avance()
-        elif demande:
-            self.ouvre(demande)
+        self.applique(self.onglet.vue.bat())
 
     def ouvre(self, url, empiler=True):
         # `distant:` demande explicitement le rendu deporte. C'est ce qui permet
@@ -177,37 +252,42 @@ class Navigateur:
             return
         self.etat = "Chargement de %s…" % url
         self.chargement = url
+        self.survol = None
         bo.redessiner()
         bo.traiter_evenements()
+
+        vue = self.onglet.vue
+        if vue is None:
+            vue = self.onglet.vue = mod_vue.ouvre_vue(
+                self.largeur_vue, self.hauteur_vue, journal=self._journal_js)
+        vue.redimensionne(self.largeur_vue, self.hauteur_vue)
         try:
-            document = Document(reseau.charge(url), self.largeur_vue,
-                                journal=self._journal_js,
-                                hauteur_fenetre=self.hauteur_vue)
+            vue.ouvre(url)
         except Exception as e:
             traceback.print_exc(file=sys.stdout)
             self.etat = "Erreur interne : %s" % e
             self.chargement = None
             return
         self.chargement = None
-        # La page precedente rend son interprete : sans cela, ses minuteries
-        # continueraient de tourner derriere celle qu'on vient d'ouvrir.
-        if self.onglet.document is not None and self.onglet.document is not document:
-            self.onglet.document.ferme()
-        self.onglet.document = document
-        self.onglet.defilement = 0.0
+
+        arrivee = vue.url or url
         if empiler:
-            self.onglet.empile(document.url)
+            self.onglet.empile(arrivee)
+        elif self.onglet.position >= 0:
+            self.onglet.historique[self.onglet.position] = arrivee
         else:
-            self.onglet.historique[self.onglet.position] = document.url
-        self.saisie = document.url
+            self.onglet.empile(arrivee)
+        self.saisie = arrivee
         self.curseur_saisie = len(self.saisie)
-        bo.titre("%s — Navigateur" % document.titre)
-        if document.erreur:
-            self.etat = "Echec : %s" % document.erreur
+        bo.titre("%s — Navigateur" % (vue.titre or arrivee))
+        if vue.crashee:
+            self.etat = "Page crashee : %s — F5 pour recharger" % (vue.erreur or "")
+        elif vue.erreur:
+            self.etat = "Echec : %s" % vue.erreur
         else:
             self.etat = "%s — %d px de haut%s" % (
-                document.titre, int(document.hauteur),
-                "" if document.url.startswith("https://") else " — connexion en clair")
+                vue.titre or arrivee, int(vue.hauteur_document),
+                "" if arrivee.startswith("https://") else " — connexion en clair")
 
     # --- Rendu distant --------------------------------------------------------
 
@@ -237,10 +317,9 @@ class Navigateur:
 
         self._prend_image()
         session.etat()
-        self.onglet.defilement = 0.0
-        if self.onglet.document is not None:
-            self.onglet.document.ferme()
-            self.onglet.document = None
+        if self.onglet.vue is not None:
+            self.onglet.vue.ferme()
+            self.onglet.vue = None
         self.onglet.empile(session.url or url)
         self.saisie = session.url or url
         self.curseur_saisie = len(self.saisie)
@@ -320,15 +399,18 @@ class Navigateur:
             self._recharge_position()
 
     def _recharge_position(self):
+        """Rejoue l'entree d'historique courante, **sans toucher a la pile.**"""
         url = self.onglet.historique[self.onglet.position]
-        document = Document(reseau.charge(url), self.largeur_vue,
-                            hauteur_fenetre=self.hauteur_vue)
-        self.onglet.document = document
-        self.onglet.defilement = 0.0
-        self.saisie = url
+        vue = self.onglet.vue
+        if vue is None:
+            vue = self.onglet.vue = mod_vue.ouvre_vue(
+                self.largeur_vue, self.hauteur_vue, journal=self._journal_js)
+        vue.redimensionne(self.largeur_vue, self.hauteur_vue)
+        vue.ouvre(url)
+        self.saisie = vue.url or url
         self.curseur_saisie = len(self.saisie)
-        bo.titre("%s — Navigateur" % document.titre)
-        self.etat = document.titre
+        bo.titre("%s — Navigateur" % (vue.titre or url))
+        self.etat = vue.titre or url
 
     # --- Defilement ---------------------------------------------------------
 
@@ -336,27 +418,24 @@ class Navigateur:
         if self.onglet.distant is not None:
             self._agit_distant(lambda: self.onglet.distant.defile(int(pixels)))
             return
-        document = self.onglet.document
-        if not document:
+        vue = self.onglet.vue
+        if vue is None:
             return
-        maximum = max(0.0, document.hauteur - self.hauteur_vue + 40)
-        self.onglet.defilement = min(maximum, max(0.0, self.onglet.defilement + pixels))
-        # Le document connait sa position : c'est ce que lisent
-        # `IntersectionObserver` et `window.scrollY`, et c'est ce qui fait
-        # qu'une image se charge quand elle arrive a l'ecran.
-        document.defilement = self.onglet.defilement
+        vue.defile(pixels)
+        bo.redessiner()
 
     # --- Peinture -----------------------------------------------------------
 
     def peint(self, largeur, hauteur):
         # La hauteur compte autant que la largeur : les `@media` et les
         # unites `vh` s'y rapportent, une fenetre seulement raccourcie peut
-        # donc changer la page.
+        # donc changer la page. Le redimensionnement part a la vue, qui le
+        # transmet au renderer — le chrome ne remet plus rien en page lui-meme.
         remise_en_page = largeur != self.largeur or hauteur != self.hauteur
         self.largeur, self.hauteur = largeur, hauteur
-        document = self.onglet.document
-        if document and remise_en_page:
-            document.remet_en_page(self.largeur_vue, self.hauteur_vue)
+        vue = self.onglet.vue
+        if vue is not None and remise_en_page:
+            vue.redimensionne(self.largeur_vue, self.hauteur_vue)
 
         liste = [("rect", 0, 0, largeur, hauteur, FOND_PAGE)]
 
@@ -375,13 +454,14 @@ class Navigateur:
             self._barre_etat(liste)
             return liste
 
-        if document:
+        if vue is not None:
             liste.append(("clip", 0, HAUTEUR_CHROME, largeur, self.hauteur_vue))
-            decalage = self.onglet.defilement - HAUTEUR_CHROME
-            liste.extend(document.liste_affichage(decalage, self.largeur_vue,
-                                                  self.hauteur_vue + HAUTEUR_CHROME))
+            # `VueLocale` pose une liste d'affichage, `VueRenderer` pose une
+            # image : les deux savent se peindre dans la zone de contenu, et le
+            # chrome n'a pas a savoir laquelle il tient.
+            vue.peint(liste, HAUTEUR_CHROME)
             liste.append(("declip",))
-            self._barre_defilement(liste, document)
+            self._barre_defilement(liste, vue)
 
         self._chrome(liste)
         self._barre_etat(liste)
@@ -429,14 +509,15 @@ class Navigateur:
         liste.append(("texte", MARGE, y + 4, message[:200], TEXTE_ESTOMPE, 12,
                       False, False, False, False))
 
-    def _barre_defilement(self, liste, document):
+    def _barre_defilement(self, liste, vue):
         hauteur_vue = self.hauteur_vue
-        if document.hauteur <= hauteur_vue:
+        hauteur_document = vue.hauteur_document
+        if hauteur_document <= hauteur_vue:
             return
         piste_h = hauteur_vue
-        pouce_h = max(30.0, piste_h * hauteur_vue / document.hauteur)
-        maximum = max(1.0, document.hauteur - hauteur_vue + 40)
-        position = (piste_h - pouce_h) * min(1.0, self.onglet.defilement / maximum)
+        pouce_h = max(30.0, piste_h * hauteur_vue / hauteur_document)
+        maximum = max(1.0, hauteur_document - hauteur_vue + 40)
+        position = (piste_h - pouce_h) * min(1.0, vue.defilement / maximum)
         x = self.largeur - 8
         liste.append(("rect", x, HAUTEUR_CHROME, 6, piste_h, 0xFFEFF1F5))
         liste.append(("rond", x, HAUTEUR_CHROME + position, 6, pouce_h, 3, 0xFFB9C2D0))
@@ -493,13 +574,16 @@ class Navigateur:
         # Un champ de la **page** a le foyer : la frappe lui appartient, pas au
         # chrome. Sans cette bifurcation, `Bas` faisait defiler la page pendant
         # qu'on essayait d'ecrire, et aucune lettre n'atteignait le formulaire.
-        document = self.onglet.document
-        if document is not None and self.onglet.distant is None \
-                and document.foyer_actuel() is not None:
+        #
+        # Le chrome ne lit plus le DOM pour le savoir : la vue tient le bit, et
+        # le renderer le lui envoie (`FOCUS_CHANGED`) chaque fois qu'il change.
+        # C'est le seul etat du document dont le chrome ait besoin.
+        vue = self.onglet.vue
+        if vue is not None and self.onglet.distant is None and vue.foyer:
             nom = _touche_web(code, texte)
             if nom is not None:
-                document.frappe(nom, texte or "",
-                                maj=bool(modificateurs & MAJ), ctrl=ctrl)
+                self.applique(vue.touche(nom, texte or "",
+                                         maj=bool(modificateurs & MAJ), ctrl=ctrl))
                 bo.redessiner()
                 return
         if code == K_F5:
@@ -518,7 +602,9 @@ class Navigateur:
         elif code == K_PAGE_HAUT:
             self.defile(-self.hauteur_vue * 0.9)
         elif code == K_DEBUT:
-            self.onglet.defilement = 0.0
+            if self.onglet.vue is not None:
+                self.onglet.vue.va_en_haut()
+                bo.redessiner()
         elif code == K_FIN:
             self.defile(1e9)
         elif code == K_GAUCHE:
@@ -572,51 +658,35 @@ class Navigateur:
             return
 
         self.champ_actif = False
-        document = self.onglet.document
-        if not document:
+        vue = self.onglet.vue
+        if vue is None:
             return
 
-        page_y = y - HAUTEUR_CHROME + self.onglet.defilement
         # Le script de la page voit le clic en premier, et peut l'annuler : un
         # `preventDefault()` sur un lien est la facon dont la moitie des sites
         # detournent la navigation.
         # La sequence complete — foyer, evenement, action par defaut, lien —
-        # vit dans le moteur : le processus de rendu la joue mot pour mot, et
-        # deux copies auraient fini par diverger.
-        suite, lien = document.clic_complet(
-            x, page_y, {"clientX": x, "clientY": y - HAUTEUR_CHROME,
-                        "pageX": x, "pageY": page_y})
-        if suite == "annule":
-            bo.redessiner()
-            return
-        self.bat()
-        if lien:
-            self.ouvre(lien)
+        # vit dans le moteur, du cote ou vit la page. Le chrome n'en voit que
+        # le resultat : eventuellement une demande de navigation, qu'il
+        # applique ou non.
+        self.applique(vue.clic(x, y - HAUTEUR_CHROME))
 
     def survole(self, x, y):
-        document = self.onglet.document
-        if not document or y < HAUTEUR_CHROME:
-            change = document.survole(-1, -1) if document else False
+        vue = self.onglet.vue
+        if vue is None:
+            return
+        if y < HAUTEUR_CHROME:
+            # Le pointeur a quitte la page : elle doit le savoir, sinon un
+            # `:hover` reste allume sous une barre d'outils.
+            self.applique(vue.souris(-1, -1))
             if self.survol:
                 self.survol = None
-                change = True
-            if change:
                 bo.redessiner()
             return
-        page_y = y - HAUTEUR_CHROME + self.onglet.defilement
-
         # `:hover` : la page se restyle sous le pointeur. Le document ne
         # recalcule que si sa feuille parle d'interaction, donc un mouvement
         # ordinaire ne coute qu'un test de position.
-        change = document.survole(x, page_y)
-
-        lien = document.lien_a(x, page_y)
-        nouveau = ("→ " + lien) if lien else None
-        if nouveau != self.survol:
-            self.survol = nouveau
-            change = True
-        if change:
-            bo.redessiner()
+        self.applique(vue.souris(x, y - HAUTEUR_CHROME))
 
     def molette(self, cran):
         # Qt compte en huitiemes de degre ; un cran vaut 120.
@@ -682,6 +752,14 @@ def _molette(cran):
 
 
 def _fermeture():
+    # La vue ferme son renderer : sans cela, la fenetre disparaitrait en
+    # laissant derriere elle un processus qui peint pour personne — jusqu'a ce
+    # que `SILENCE_MAX_S` le reveille, deux minutes plus tard.
+    try:
+        if _navigateur.onglet.vue is not None:
+            _navigateur.onglet.vue.ferme()
+    except Exception:
+        traceback.print_exc(file=sys.stdout)
     return True
 
 

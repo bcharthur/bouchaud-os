@@ -8841,6 +8841,797 @@ def verifie_renderer_isolation():
         arrete()
 
 
+def _bat_vue_jusqua(v, condition, secondes=5.0):
+    """Bat la vue jusqu'a ce que la condition tienne. Rend son etat final.
+
+    Le chrome reel fait exactement cela : l'hote Qt appelle `tic` toutes les
+    seize millisecondes, et ce qui vient du renderer arrive au battement
+    suivant, pas dans l'appel qui l'a provoque. Une epreuve qui lirait l'etat
+    juste apres avoir pousse un evenement mesurerait la latence du canal, pas
+    le comportement.
+    """
+    import time as _t
+    limite = _t.monotonic() + secondes
+    while _t.monotonic() < limite:
+        if condition():
+            return True
+        v.bat()
+        _t.sleep(0.01)
+    return bool(condition())
+
+
+def _clique_jusqua_navigation(v, x, bande):
+    """Clique le long d'une bande verticale jusqu'a obtenir une demande.
+
+    Rend les URL demandees. Cliquer a cote d'un lien ne declenche rien : le
+    balayage est donc sans effet de bord tant qu'il n'a pas touche.
+    """
+    demandes = []
+    for y in bande:
+        for nom, charge in v.clic(x, y):
+            if nom == "NAVIGUE":
+                demandes.append(charge.get("url"))
+        _bat_vue_jusqua(v, lambda: bool(demandes), 0.3)
+        for nom, charge in v.bat():
+            if nom == "NAVIGUE":
+                demandes.append(charge.get("url"))
+        if demandes:
+            break
+    return demandes
+
+
+def verifie_produit_renderer():
+    """Le navigateur reel, branche sur le renderer separe.
+
+    Ce n'est pas une redite de `verifie_renderer_separe` : celle-la eprouvait le
+    mecanisme, celle-ci eprouve **le produit**. Elle passe par `moteur/vue.py`,
+    c'est-a-dire par exactement le meme objet que `navigateur.py` utilise quand
+    un utilisateur ouvre une fenetre, et elle joue le parcours que le chrome
+    joue — ouvrir, survoler, cliquer, taper, defiler, redimensionner.
+
+    La question a laquelle elle repond est la seule qui restait : est-ce que le
+    navigateur que l'utilisateur lance est bien celui que l'architecture pretend
+    avoir construit ?
+    """
+    import time as _time
+
+    from moteur import vue as mod_vue
+
+    doc_bidon, arrete = _sur_serveur("/page/vide.html", battements=1)
+    base = doc_bidon.base
+    doc_bidon.ferme_document()
+    try:
+        # --- Le chemin par defaut --------------------------------------------
+        #
+        # Sans variable d'environnement, `ouvre_vue` doit rendre une vue qui
+        # vit ailleurs. C'est le coeur de cette phase, et c'est une ligne.
+        ancien = os.environ.pop("BO_BROWSER_INPROCESS", None)
+        try:
+            defaut = mod_vue.ouvre_vue(400, 300)
+            genre_defaut = defaut.genre
+            pid_defaut = getattr(defaut.renderer, "pid", None)
+            defaut.ferme()
+        finally:
+            if ancien is not None:
+                os.environ["BO_BROWSER_INPROCESS"] = ancien
+        egal("produit: la vue par defaut est un autre processus",
+             genre_defaut, "renderer")
+        verifie("produit: et c'est bien un autre pid",
+                pid_defaut is not None and pid_defaut != os.getpid(),
+                pid_defaut)
+
+        # L'ancien chemin reste atteignable, et seulement par la variable.
+        os.environ["BO_BROWSER_INPROCESS"] = "1"
+        try:
+            secours = mod_vue.ouvre_vue(400, 300)
+            genre_secours = secours.genre
+            secours.ferme()
+        finally:
+            os.environ.pop("BO_BROWSER_INPROCESS", None)
+        egal("produit: BO_BROWSER_INPROCESS=1 rend l'ancien chemin",
+             genre_secours, "local")
+
+        # --- Le parcours complet ---------------------------------------------
+        journal = []
+        v = mod_vue.VueRenderer(900, 700,
+                                journal=lambda n, t: journal.append((n, t)))
+        try:
+            ouverte = v.ouvre(base + "/page/login-form.html")
+            verifie("produit: la page s'ouvre", ouverte, v.erreur)
+            egal("produit: l'adresse remonte au chrome", v.url,
+                 base + "/page/login-form.html")
+            egal("produit: le titre remonte au chrome", v.titre,
+                 "Connexion — page temoin")
+            verifie("produit: une trame est arrivee", v.trames > 0, v.trames)
+            verifie("produit: et le chrome en a une image", v.image is not None)
+            verifie("produit: la hauteur du document remonte aussi",
+                    v.hauteur_document > 100, v.hauteur_document)
+
+            # Le chrome peut peindre sans rien savoir de la page : il pose ce
+            # que la vue lui donne, et rien d'autre.
+            liste = []
+            v.peint(liste, 44)
+            verifie("produit: le chrome peint la page en une operation",
+                    len(liste) == 1 and liste[0][0] == "image", liste)
+
+            # --- Souris ------------------------------------------------------
+            #
+            # Le survol ne lit plus le DOM : la forme du curseur et l'adresse
+            # survolee arrivent par message. Le chrome n'apprend donc rien
+            # instantanement — il apprend au battement suivant, ce qui est la
+            # vraie contrainte d'une interface separee de sa page.
+            evenements = v.souris(200, 185)
+            verifie("produit: la souris produit des evenements de chrome",
+                    isinstance(evenements, list))
+
+            # --- Clic et foyer -----------------------------------------------
+            #
+            # Le chrome doit apprendre qu'un champ de la page tient le clavier :
+            # c'est le seul bit du DOM dont il a besoin, et il ne peut plus
+            # aller le chercher. Les coordonnees sont celles de
+            # `verifie_renderer_separe` — meme page, meme largeur, meme champ.
+            v.clic(200, 185)
+            foyer_pris = _bat_vue_jusqua(v, lambda: v.foyer)
+            verifie("produit: un clic dans un champ donne le foyer au chrome",
+                    foyer_pris)
+
+            # --- Clavier -----------------------------------------------------
+            if foyer_pris:
+                avant_frappe = v.trames
+                for lettre in "alice":
+                    v.touche(lettre, lettre)
+                verifie("produit: la frappe atteint la page sans passer par le DOM",
+                        _bat_vue_jusqua(v, lambda: v.trames > avant_frappe) and v.foyer,
+                        (avant_frappe, v.trames, v.foyer))
+
+            # --- Defilement --------------------------------------------------
+            avant = v.trames
+            v.defile(200)
+            egal("produit: le chrome connait la position de defilement",
+                 v.defilement, min(v.defilement_maximum(), 200.0))
+            limite = _time.monotonic() + 5.0
+            while _time.monotonic() < limite and v.trames == avant:
+                v.bat()
+                _time.sleep(0.01)
+            verifie("produit: et le renderer repeint apres un defilement",
+                    v.trames > avant, (avant, v.trames))
+
+            # --- Redimensionnement -------------------------------------------
+            avant = v.trames
+            v.redimensionne(640, 480)
+            limite = _time.monotonic() + 10.0
+            while _time.monotonic() < limite and v.trames == avant:
+                v.bat()
+                _time.sleep(0.01)
+            verifie("produit: le redimensionnement traverse et repeint",
+                    v.trames > avant, (avant, v.trames))
+            verifie("produit: et la nouvelle trame a la nouvelle taille",
+                    v.image is not None and v.image[1] == 640, v.image)
+
+            jalon("PRODUCT_RENDERER_DEFAULT",
+                  genre_defaut == "renderer" and ouverte and v.trames > 0
+                  and foyer_pris,
+                  {"genre": genre_defaut, "trames": v.trames,
+                   "foyer": foyer_pris})
+        finally:
+            v.ferme()
+
+        # --- Navigation : le renderer demande, le chrome decide --------------
+        #
+        # Le parcours complet, dans l'ordre du protocole :
+        #
+        #     clic -> REQUEST_NAVIGATION -> politique -> le chrome ouvre
+        #
+        # Ce qui compte est le maillon du milieu. Une vue qui naviguerait toute
+        # seule donnerait la meme page a l'ecran et un bouton « reculer » qui
+        # ment, et rien dans le rendu ne le montrerait.
+        v = mod_vue.VueRenderer(800, 600)
+        try:
+            depart = base + "/page/lien-sortant.html"
+            v.ouvre(depart)
+            egal("produit: la page de depart est chargee", v.url, depart)
+
+            # La zone cliquable d'un lien est celle de son texte, dont la
+            # hauteur depend des metriques de la police — Qt reel et bouchon
+            # local ne donnent pas le meme chiffre. On balaie donc la bande
+            # plutot que de viser un pixel : cliquer a cote d'un lien ne
+            # declenche rien, et l'epreuve reste la meme des deux cotes.
+            demandes = _clique_jusqua_navigation(v, 100, range(22, 70, 6))
+            verifie("produit: un lien clique remonte au chrome", demandes,
+                    demandes)
+            egal("produit: et la vue n'a pas navigue toute seule", v.url,
+                 depart)
+
+            # C'est le chrome qui applique — ici, l'epreuve qui joue son role.
+            suite = False
+            if demandes:
+                suite = v.ouvre(demandes[0])
+                egal("produit: la page demandee est arrivee", v.url,
+                     base + "/page/vide.html")
+
+            # Le lien interdit : demande de la meme facon, refuse par la
+            # politique du navigateur, et jamais applique.
+            v.ouvre(depart)
+            refus = []
+            interdites = []
+            for y in range(118, 170, 6):
+                for nom, charge in v.clic(100, y):
+                    if nom == "JOURNAL" and "refusee" in str(charge.get("texte")):
+                        refus.append(charge)
+                    elif nom == "NAVIGUE":
+                        interdites.append(charge.get("url"))
+                _bat_vue_jusqua(v, lambda: bool(refus or interdites), 0.3)
+                for nom, charge in v.bat():
+                    if nom == "JOURNAL" and "refusee" in str(charge.get("texte")):
+                        refus.append(charge)
+                    elif nom == "NAVIGUE":
+                        interdites.append(charge.get("url"))
+                if refus or interdites:
+                    break
+            egal("produit: un lien file:// ne remonte jamais comme autorise",
+                 interdites, [])
+            verifie("produit: il est refuse par la politique du navigateur",
+                    refus, refus)
+
+            jalon("PRODUCT_RENDERER_NAVIGATION",
+                  bool(demandes) and suite and not interdites and bool(refus),
+                  {"demandes": demandes, "refus": len(refus)})
+        finally:
+            v.ferme()
+    finally:
+        arrete()
+
+
+def verifie_produit_crash():
+    """Une page qui meurt sous le vrai chemin. La fenetre, elle, ne meurt pas.
+
+    `RENDERER_CRASH_ISOLATION` prouvait le mecanisme depuis une epreuve. Il ne
+    prouvait pas ce que l'utilisateur voit, parce que l'utilisateur ne passait
+    pas par la. Cette epreuve-ci passe par `moteur/vue.py` — le meme objet que
+    le chrome — et verifie les six choses qu'un utilisateur constate :
+
+    la fenetre vit, le chrome repond, la derniere image reste a l'ecran, l'etat
+    dit « crashee », le processus est recolte, ses ressources sont rendues, et
+    F5 remet une page vivante.
+    """
+    import signal as _signal
+    import time as _time
+
+    from moteur import vue as mod_vue
+
+    doc_bidon, arrete = _sur_serveur("/page/vide.html", battements=1)
+    base = doc_bidon.base
+    doc_bidon.ferme_document()
+    try:
+        v = mod_vue.VueRenderer(500, 400)
+        try:
+            v.ouvre(base + "/page/login-form.html")
+            verifie("crash produit: la page vivait", v.trames > 0, v.trames)
+            image_avant = v.image
+            pid = v.renderer.pid
+            surface_avant = v.renderer.surface
+
+            os.kill(pid, _signal.SIGKILL)
+
+            vu = False
+            limite = _time.monotonic() + 10.0
+            while _time.monotonic() < limite and not vu:
+                for nom, _charge in v.bat():
+                    if nom == "CRASH":
+                        vu = True
+                _time.sleep(0.01)
+            verifie("crash produit: le chrome apprend la mort", vu or v.crashee)
+            verifie("crash produit: la vue se declare crashee", v.crashee)
+            verifie("crash produit: avec une raison lisible",
+                    "SIGKILL" in str(v.erreur), v.erreur)
+
+            # Le chrome reste peignable, et il peint encore la derniere image :
+            # la copie vit chez Qt, pas dans la surface qu'on vient de rendre.
+            liste = []
+            v.peint(liste, 44)
+            egal("crash produit: la derniere image est conservee", v.image,
+                 image_avant)
+            verifie("crash produit: et le chrome sait encore la peindre",
+                    len(liste) == 1 and liste[0][0] == "image", liste)
+
+            # Ressources rendues : le processus recolte, la surface fermee, la
+            # prise fermee. Un onglet mort qui garde trois mebioctets de surface
+            # par onglet est une fuite qu'on ne voit qu'au centieme.
+            recolte = True
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                recolte = True
+            except OSError:
+                recolte = False
+            verifie("crash produit: le processus est recolte", recolte)
+            verifie("crash produit: la surface est rendue",
+                    surface_avant is not None and surface_avant.descripteur is None)
+            verifie("crash produit: la prise aussi",
+                    v.renderer is None or v.renderer.prise is None)
+
+            # Les entrees ne lancent plus rien, et surtout ne lèvent pas : un
+            # chrome qui plante en survolant une page morte serait pire que le
+            # crash qu'il est cense contenir.
+            for action in (lambda: v.souris(10, 10), lambda: v.clic(10, 10),
+                           lambda: v.touche("a", "a"), lambda: v.defile(50),
+                           lambda: v.redimensionne(600, 500), v.bat):
+                action()
+            verifie("crash produit: le chrome survit a toutes les entrees", True)
+
+            # Rechargement : une page vivante, dans un processus neuf.
+            recharge = v.ouvre(base + "/page/login-form.html")
+            verifie("crash produit: F5 remet une page vivante", recharge,
+                    v.erreur)
+            verifie("crash produit: dans un processus neuf",
+                    v.renderer is not None and v.renderer.pid != pid,
+                    (pid, getattr(v.renderer, "pid", None)))
+            verifie("crash produit: qui peint", v.trames > 0, v.trames)
+
+            jalon("PRODUCT_RENDERER_CRASH_RECOVERY",
+                  v.crashee is False and recharge and v.trames > 0,
+                  {"pid_mort": pid, "pid_neuf": getattr(v.renderer, "pid", None)})
+        finally:
+            v.ferme()
+    finally:
+        arrete()
+
+
+def verifie_chrome_produit():
+    """Le programme que l'hote lance, pilote comme l'hote le pilote.
+
+    Les epreuves precedentes passent par `moteur/vue.py`. Celle-ci passe par
+    `navigateur.py` — le fichier que `hote.cpp` execute — et n'appelle que les
+    sept rappels que Qt appelle : `peindre`, `clic`, `touche`, `survol`,
+    `molette`, `tic`, `fermeture`.
+
+    C'est la difference entre « la vue separee marche » et « le navigateur
+    utilise la vue separee ». La premiere etait vraie depuis longtemps sans que
+    la seconde le soit, et c'est exactement le decalage que cette phase existe
+    pour supprimer.
+    """
+    import time as _time
+
+    doc_bidon, arrete = _sur_serveur("/page/vide.html", battements=1)
+    base = doc_bidon.base
+    doc_bidon.ferme_document()
+
+    # Le chrome se fabrique **a l'import** — c'est la ou il forke son renderer,
+    # avant d'avoir rien accumule. On le recharge donc proprement plutot que de
+    # dependre de l'ordre des epreuves.
+    for module in ("navigateur",):
+        sys.modules.pop(module, None)
+    import navigateur as chrome
+
+    titres = []
+    redessins = [0]
+    bo.titre = lambda texte: titres.append(texte)
+    bo.redessiner = lambda: redessins.__setitem__(0, redessins[0] + 1)
+    bo.traiter_evenements = getattr(bo, "traiter_evenements", lambda: None)
+
+    n = chrome._navigateur
+    try:
+        egal("chrome: la page vit dans un autre processus",
+             n.onglet.vue.genre, "renderer")
+        verifie("chrome: et c'est bien un autre pid",
+                n.onglet.vue.renderer.pid != os.getpid())
+
+        # --- Ouvrir ----------------------------------------------------------
+        n.ouvre(base + "/page/login-form.html")
+        egal("chrome: l'adresse est dans la barre", n.saisie,
+             base + "/page/login-form.html")
+        egal("chrome: et dans l'historique", n.onglet.url,
+             base + "/page/login-form.html")
+        verifie("chrome: le titre de la fenetre a ete pose",
+                titres and "Connexion" in titres[-1], titres[-1:])
+
+        # --- Peindre ---------------------------------------------------------
+        #
+        # Le chrome ne pose plus une liste d'affichage de la page : il pose une
+        # image. C'est verifiable en comptant les operations.
+        liste = chrome._peindre(1280, 720)
+        images = [op for op in liste if op[0] == "image"]
+        egal("chrome: la page est peinte en une image", len(images), 1)
+        verifie("chrome: posee sous la barre d'outils",
+                images and images[0][2] == chrome.HAUTEUR_CHROME, images[:1])
+        verifie("chrome: et le chrome est peint par-dessus",
+                any(op[0] == "texte" for op in liste))
+
+        # --- Souris ----------------------------------------------------------
+        chrome._survol(200, 185 + chrome.HAUTEUR_CHROME)
+        for _ in range(40):
+            chrome._tic()
+            _time.sleep(0.01)
+
+        # --- Clic et clavier -------------------------------------------------
+        avant = n.onglet.vue.trames
+        chrome._clic(200, 185 + chrome.HAUTEUR_CHROME)
+        pris = False
+        limite = _time.monotonic() + 5.0
+        while _time.monotonic() < limite and not pris:
+            chrome._tic()
+            pris = n.onglet.vue.foyer
+            _time.sleep(0.01)
+        verifie("chrome: un clic dans un champ donne le foyer a la page", pris)
+
+        if pris:
+            # La bifurcation du clavier : le champ de la page a le foyer, donc
+            # `Bas` ne doit pas faire defiler. Le chrome le sait par message, il
+            # ne lit plus le DOM.
+            for code, texte in ((0x41, "a"), (0x6C, "l")):
+                chrome._touche(code, texte)
+            defilement = n.onglet.vue.defilement
+            chrome._touche(chrome.K_BAS, "")
+            egal("chrome: la frappe va a la page, pas a l'ascenseur",
+                 n.onglet.vue.defilement, defilement)
+            for _ in range(40):
+                chrome._tic()
+                _time.sleep(0.01)
+            verifie("chrome: et la page a repeint", n.onglet.vue.trames > avant,
+                    (avant, n.onglet.vue.trames))
+
+        # --- Defilement ------------------------------------------------------
+        chrome._molette(-120)
+        verifie("chrome: la molette fait defiler la page distante",
+                n.onglet.vue.defilement > 0, n.onglet.vue.defilement)
+
+        # --- Redimensionnement ------------------------------------------------
+        avant = n.onglet.vue.trames
+        chrome._peindre(800, 600)
+        egal("chrome: la vue suit la fenetre", n.onglet.vue.largeur, 800)
+        limite = _time.monotonic() + 10.0
+        while _time.monotonic() < limite and n.onglet.vue.trames == avant:
+            chrome._tic()
+            _time.sleep(0.01)
+        verifie("chrome: et le renderer repeint a la nouvelle taille",
+                n.onglet.vue.trames > avant, (avant, n.onglet.vue.trames))
+
+        # --- Lien : le renderer demande, le chrome ouvre -----------------------
+        n.ouvre(base + "/page/lien-sortant.html")
+        depart = n.onglet.url
+        profondeur = len(n.onglet.historique)
+        for y in range(22, 70, 6):
+            chrome._clic(100, y + chrome.HAUTEUR_CHROME)
+            for _ in range(20):
+                chrome._tic()
+                _time.sleep(0.01)
+            if n.onglet.url != depart:
+                break
+        egal("chrome: le lien a mene a la page suivante", n.onglet.url,
+             base + "/page/vide.html")
+        egal("chrome: et l'historique s'est empile",
+             len(n.onglet.historique), profondeur + 1)
+        verifie("chrome: donc le bouton reculer est actif",
+                n.onglet.peut_reculer())
+        n.recule()
+        egal("chrome: qui ramene bien en arriere", n.onglet.url, depart)
+
+        # --- Crash depuis l'interface -----------------------------------------
+        import signal as _signal
+        pid = n.onglet.vue.renderer.pid
+        image_avant = n.onglet.vue.image
+        os.kill(pid, _signal.SIGKILL)
+        limite = _time.monotonic() + 10.0
+        while _time.monotonic() < limite and not n.onglet.vue.crashee:
+            chrome._tic()
+            _time.sleep(0.01)
+        verifie("chrome: la mort de la page remonte a l'interface",
+                n.onglet.vue.crashee)
+        verifie("chrome: la barre d'etat le dit",
+                "crashee" in n.etat, n.etat)
+
+        # La fenetre reste peignable, avec sa derniere image.
+        liste = chrome._peindre(1280, 720)
+        egal("chrome: la derniere image est toujours la",
+             n.onglet.vue.image, image_avant)
+        verifie("chrome: et la fenetre se peint encore",
+                any(op[0] == "image" for op in liste)
+                and any(op[0] == "texte" for op in liste))
+
+        # Le chrome reste interactif : aucune de ces entrees ne doit lever.
+        chrome._survol(300, 300)
+        chrome._clic(300, 300)
+        chrome._touche(0x41, "a")
+        chrome._molette(-120)
+        chrome._tic()
+        verifie("chrome: et il reste interactif", True)
+
+        # La barre d'adresse marche toujours : Ctrl+L, une adresse, Entree.
+        chrome._touche(chrome.K_L, "l", 0x04000000)
+        verifie("chrome: Ctrl+L donne le foyer a la barre d'adresse",
+                n.champ_actif)
+
+        # F5 refait un renderer et recharge.
+        chrome._touche(chrome.K_ECHAP, "")
+        chrome._touche(chrome.K_F5, "")
+        verifie("chrome: F5 remet une page vivante",
+                not n.onglet.vue.crashee, n.etat)
+        verifie("chrome: dans un processus neuf",
+                n.onglet.vue.renderer is not None
+                and n.onglet.vue.renderer.pid != pid)
+        verifie("chrome: qui peint", n.onglet.vue.trames > 0)
+
+        jalon("PRODUCT_RENDERER_CHROME",
+              n.onglet.vue.genre == "renderer" and pris
+              and not n.onglet.vue.crashee,
+              {"pid_mort": pid, "pid_neuf": n.onglet.vue.renderer.pid})
+    finally:
+        try:
+            chrome._fermeture()
+        except Exception:  # noqa: BLE001
+            pass
+        arrete()
+
+
+def verifie_renderer_courtage():
+    """Ce que le renderer ne va plus chercher lui-meme.
+
+    Le renderer chargeait ses ressources par `reseau.charge` : il resolvait un
+    nom, ouvrait une prise, lisait le magasin de temoins, ecrivait dans le cache
+    du disque. Le processus qu'on isolait avait donc le reseau et le stockage,
+    non pas parce qu'on les lui avait accordes mais parce que le code savait
+    appeler les modules.
+
+    Ce qui se verifie ici : la meme page, rendue pareil, avec toutes ses
+    ressources passees par le navigateur.
+    """
+    import time as _time
+
+    from moteur import transport, vue as mod_vue
+
+    doc_bidon, arrete = _sur_serveur("/page/vide.html", battements=1)
+    base = doc_bidon.base
+    doc_bidon.ferme_document()
+    try:
+        # --- L'abstraction, sans processus -----------------------------------
+        #
+        # Un faux courtier suffit a prouver que le seuil est unique : si un seul
+        # appelant du moteur gardait un chemin direct, la page verrait autre
+        # chose que ce que le courtier a rendu.
+        vues = []
+
+        def faux_courtier(requete):
+            vues.append(requete["url"])
+            return {"url": requete["url"], "code": 200,
+                    "type_mime": "text/html",
+                    "octets": b"<html><head><title>Courte</title></head>"
+                              b"<body>ok</body></html>"}
+
+        ancien = transport.installe(transport.Courtier(faux_courtier))
+        try:
+            reponse = reseau.charge("https://exemple.invalid/quelque-part")
+        finally:
+            transport.installe(ancien)
+        egal("courtage: la reponse traverse l'abstraction", reponse.code, 200)
+        verifie("courtage: le corps arrive entier",
+                "Courte" in reponse.contenu, reponse.contenu[:80])
+        egal("courtage: et le seuil a bien ete franchi", vues,
+             ["https://exemple.invalid/quelque-part"])
+
+        # `charge_localement` reste le bout de chaine, et il ignore le seuil :
+        # c'est ce que le navigateur appelle pour honorer une requete courtee.
+        # Sans cette propriete, le courtier s'appellerait lui-meme.
+        ancien = transport.installe(transport.Courtier(faux_courtier))
+        try:
+            directe = reseau.charge_localement(base + "/page/vide.html")
+        finally:
+            transport.installe(ancien)
+        egal("courtage: le navigateur, lui, va vraiment chercher",
+             directe.code, 200)
+
+        # --- De bout en bout, avec un vrai renderer --------------------------
+        v = mod_vue.VueRenderer(700, 500)
+        try:
+            ouverte = v.ouvre(base + "/page/login-form.html")
+            verifie("courtage: la page courtee s'ouvre", ouverte, v.erreur)
+            egal("courtage: avec son titre", v.titre, "Connexion — page temoin")
+            verifie("courtage: et le navigateur a servi les requetes",
+                    v.renderer.requetes_servies > 0,
+                    v.renderer.requetes_servies)
+            servies = v.renderer.requetes_servies
+            verifie("courtage: la page est peinte", v.trames > 0, v.trames)
+            jalon("RENDERER_BROKERED_FETCH", ouverte and servies > 0, servies)
+        finally:
+            v.ferme()
+
+        # Le mode direct reste disponible pour comparer : la meme page, le meme
+        # resultat, aucune requete servie par le navigateur.
+        direct = mod_vue.VueRenderer(700, 500, courtage=False)
+        try:
+            ouverte = direct.ouvre(base + "/page/login-form.html")
+            verifie("courtage: le mode direct rend la meme page", ouverte,
+                    direct.erreur)
+            egal("courtage: avec le meme titre", direct.titre,
+                 "Connexion — page temoin")
+            egal("courtage: et sans rien demander au navigateur",
+                 direct.renderer.requetes_servies, 0)
+        finally:
+            direct.ferme()
+    finally:
+        arrete()
+
+
+def verifie_renderer_privileges():
+    """Ce que le renderer possede vraiment. Mesure, pas intention.
+
+    Le renderer nait par `fork()` sans `exec()` : il herite de la table des
+    descripteurs du navigateur — prises TCP deja connectees, base de temoins,
+    affichage, surfaces des autres onglets. `FD_CLOEXEC` n'y peut rien puisqu'il
+    n'y a pas d'`exec`. La seule facon est d'enumerer et de fermer.
+
+    Cette epreuve compare l'inventaire des deux cotes du `fork`, puis fait jouer
+    au renderer une batterie de tentatives — ouvrir un fichier, ouvrir une
+    prise, lire le stockage, se servir d'un descripteur herite, naviguer vers
+    `file://`. Elle n'exige pas que tout echoue : elle exige que le resultat
+    soit **connu**. Voir `docs/RENDERER_PRIVILEGE_AUDIT.md`.
+    """
+    import time as _time
+
+    from moteur import privileges, superviseur
+
+    doc_bidon, arrete = _sur_serveur("/page/vide.html", battements=1)
+    base = doc_bidon.base
+    doc_bidon.ferme_document()
+    hote_port = base.split("//", 1)[1].split("/", 1)[0]
+    hote, _, port = hote_port.partition(":")
+
+    def audit(renderer, quoi, **details):
+        renderer.demande_audit(quoi, **details)
+        limite = _time.monotonic() + 15.0
+        while _time.monotonic() < limite:
+            for nom, charge in renderer.recolte(0.05):
+                if nom == "AUDIT_RESULT":
+                    return charge
+                if nom == "ERROR" and charge.get("raison") == "AUDIT":
+                    return {"refus": charge.get("detail")}
+        return {}
+
+    try:
+        # L'inventaire du navigateur avant le `fork` : ce dont l'enfant
+        # heriterait si on ne faisait rien.
+        avant = privileges.inventaire()
+        verifie("privileges: le navigateur tient plus que stdio",
+                len(avant) > 3, privileges.resume(avant))
+
+        # --- Sans balayage : la mesure du probleme ---------------------------
+        #
+        # Un renderer qui n'a pas ete nettoye sert de temoin. Sans lui, on ne
+        # saurait pas si le balayage ferme quelque chose ou si le navigateur
+        # n'avait rien d'ouvert.
+        sale = superviseur.Renderer(200, 150, audit=True, ferme_herites=False)
+        try:
+            sale.attends("READY", 15.0)
+            herite = audit(sale, "descripteurs").get("descripteurs") or []
+            resume_sale = privileges.resume(herite)
+        finally:
+            sale.ferme()
+        verifie("privileges: sans balayage, l'enfant herite de tout",
+                len(herite) > 4, resume_sale)
+
+        # --- Avec balayage : ce qui reste ------------------------------------
+        propre = superviseur.Renderer(200, 150, audit=True)
+        try:
+            propre.attends("READY", 15.0)
+            reponse = audit(propre, "descripteurs")
+            garde = reponse.get("descripteurs") or []
+            resume_propre = privileges.resume(garde)
+            egal("privileges: le renderer courte ses ressources",
+                 reponse.get("transport"), "courtier")
+
+            # Ce qui doit rester : stdio, la prise de controle, la surface.
+            numeros = sorted(entree["fd"] for entree in garde)
+            verifie("privileges: stdio est garde (concession assumee)",
+                    set((0, 1, 2)).issubset(set(numeros)), numeros)
+            unix = [e for e in garde if e["genre"] == "prise_unix"]
+            egal("privileges: une seule prise, celle du controle", len(unix), 1)
+            reseaux = [e for e in garde if e["genre"] == "prise_reseau"]
+            egal("privileges: aucune prise reseau heritee", reseaux, [])
+            fichiers = [e for e in garde if e["genre"] in ("fichier", "repertoire")]
+            egal("privileges: aucun fichier du navigateur", fichiers, [])
+            verifie("privileges: le balayage a bien retire quelque chose",
+                    len(garde) < len(herite), (len(garde), len(herite)))
+
+            # --- La batterie adversariale ---------------------------------
+            tentatives = audit(
+                propre, "tentatives", cible_reseau=[hote, int(port or 80)],
+                fichier="/etc/hostname").get("tentatives") or []
+            par_nom = {t["capacite"]: t for t in tentatives}
+            verifie("privileges: la batterie a bien tourne",
+                    len(tentatives) >= 3, tentatives)
+
+            # Ce qui doit avoir echoue : se servir d'un descripteur herite.
+            herite_utilisable = par_nom.get("descripteur_herite", {})
+            egal("privileges: aucun descripteur herite exploitable",
+                 herite_utilisable.get("obtenu"), False)
+
+            # Ce qui reussit encore, et qui est donc ecrit noir sur blanc :
+            # fermer des descripteurs ne ferme pas le systeme de fichiers, et
+            # aucun mecanisme du noyau ne le fait a notre place aujourd'hui.
+            fichier = par_nom.get("fichier_arbitraire", {})
+            verifie("privileges: l'ouverture par le nom reste possible "
+                    "(documente, pas resolu)",
+                    fichier.get("obtenu") is not None, fichier)
+            prise = par_nom.get("prise_reseau_directe", {})
+            verifie("privileges: l'ouverture d'une prise reste possible "
+                    "(documente, pas resolu)",
+                    prise.get("obtenu") is not None, prise)
+
+            # --- La navigation, elle, est refusee de l'autre cote ----------
+            #
+            # C'est la difference entre une capacite qu'on n'a pas su retirer
+            # et une capacite qui n'a jamais ete accordee : le renderer peut
+            # demander, il ne peut pas obtenir.
+            propre.demande_audit("navigation_interdite", url="file:///etc/shadow")
+            refus = None
+            limite = _time.monotonic() + 10.0
+            while _time.monotonic() < limite and refus is None:
+                for nom, charge in propre.recolte(0.05):
+                    if nom == "NAVIGATION_REFUSEE":
+                        refus = charge
+                    elif nom == "NAVIGATION_AUTORISEE":
+                        refus = False
+            verifie("privileges: une navigation file:// demandee est refusee",
+                    isinstance(refus, dict), refus)
+
+            jalon("RENDERER_FD_HYGIENE",
+                  not reseaux and not fichiers and len(unix) == 1
+                  and herite_utilisable.get("obtenu") is False
+                  and isinstance(refus, dict),
+                  {"garde": resume_propre, "sans_balayage": resume_sale})
+
+            # Le rapport, ecrit a cote des jalons : le document ne doit pas
+            # avoir a etre tenu a la main, et un audit recopie a la main est un
+            # audit perime.
+            ecris_audit_privileges(resume_propre, tentatives,
+                                   isinstance(refus, dict), len(unix))
+        finally:
+            propre.ferme()
+    finally:
+        arrete()
+
+
+def ecris_audit_privileges(apres_balayage, tentatives, navigation_refusee,
+                           prises_de_controle):
+    """Depose le resultat de l'audit a cote des jalons, en JSON.
+
+    Comme `jalons.json` : versionne, relu par la documentation, et jamais
+    recopie a la main. Un tableau PASS/FAIL tenu a la main devient faux au
+    premier changement que personne ne pense a y reporter.
+
+    **Des verdicts, pas des mesures.** Le premier jet deposait aussi
+    l'inventaire brut des deux cotes du `fork` — cinq prises reseau avant, zero
+    apres. C'etait interessant a lire et impossible a comparer : le nombre de
+    prises que le navigateur tient au moment du `fork` depend de ce qu'il vient
+    de faire, et le genre des descripteurs 0, 1 et 2 depend de la facon dont on
+    a lance le processus. Un fichier versionne dont le contenu bouge selon la
+    machine ne peut pas servir de reference, et la verification d'integration
+    qui le compare echouerait pour des raisons qui n'apprennent rien.
+
+    Ce qui est depose est donc ce qui doit **rester vrai partout** : aucune
+    prise reseau heritee, aucun fichier herite, une seule prise de controle, et
+    le verdict de chaque tentative.
+    """
+    chemin = os.environ.get("BO_AUDIT_PRIVILEGES")
+    if not chemin:
+        return
+    rapport = {
+        "prises_reseau_heritees": apres_balayage.get("prise_reseau", 0),
+        "fichiers_herites": (apres_balayage.get("fichier", 0)
+                             + apres_balayage.get("repertoire", 0)),
+        "prises_de_controle": prises_de_controle,
+        "surfaces_accordees": apres_balayage.get("memfd", 0),
+        "tentatives": {t["capacite"]: bool(t["obtenu"]) for t in tentatives},
+        "navigation_file_refusee": bool(navigation_refusee),
+    }
+    try:
+        with open(chemin, "w", encoding="utf-8") as fichier:
+            json.dump(rapport, fichier, ensure_ascii=False, indent=2,
+                      sort_keys=True)
+            fichier.write("\n")
+    except OSError:
+        pass
+
+
 
 def principal():
     import bojs
@@ -8979,6 +9770,11 @@ def principal():
         verifie_renderer_surface,
         verifie_renderer_separe,
         verifie_renderer_isolation,
+        verifie_produit_renderer,
+        verifie_produit_crash,
+        verifie_chrome_produit,
+        verifie_renderer_courtage,
+        verifie_renderer_privileges,
         verifie_tableau_de_bord,
         verifie_hote_reel,
     ):

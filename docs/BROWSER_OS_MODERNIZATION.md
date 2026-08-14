@@ -363,9 +363,13 @@ Les quatre chantiers que cet audit demandait sont faits : eviction du cache de
 pages, `POLLOUT` honnete, `RLIMIT_AS`, priorites d'ordonnancement. La mesure
 qui les couronnait l'est aussi. Ce qui vient ensuite :
 
-1. **Le prototype de renderer.** Le protocole est esquisse dans
-   `docs/BROWSER_RENDERER_PROTOCOL.md`, et le chiffre ci-dessus dit qu'il
-   achetera bien la reactivite qu'on en attend.
+1. ~~**Le prototype de renderer.**~~ Fait, et depasse : le renderer separe n'est
+   plus un prototype mais le chemin par defaut du navigateur, avec ses
+   ressources courtees par le processus qui tient la fenetre et sa table de
+   descripteurs nettoyee au `fork`. Voir `BROWSER_ISOLATION.md` et
+   `RENDERER_PRIVILEGE_AUDIT.md`. La mesure de reactivite ci-dessus a
+   maintenant sa version avec un renderer reel comme charge
+   (`navigateur/ordonnanceur-navigateur.py`), qui reste a jouer sous QEMU.
 2. **Instrumenter l'attente active** de `poll`/`epoll_wait` le jour ou
    plusieurs processus attendent. Si le cout reste negligeable, ne rien faire.
 3. **Le SMP**, qui rend la separation *rentable* sans la rendre *possible*.

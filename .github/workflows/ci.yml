@@ -1,0 +1,211 @@
+# Integration continue.
+#
+# ## La regle qui gouverne ce fichier
+#
+# **Aucun travail bloquant ne depend d'Internet.** Le moteur Web sait servir ses
+# propres fixtures (`navigateur/serveur_test.py`) : redirections, 404, POST,
+# reponse lente, TLS avec une autorite fabriquee pour l'occasion. Faire dependre
+# la barriere d'un site exterieur rendrait l'echec ambigu — « le moteur a-t-il
+# regresse, ou le site est-il tombe ? » — et une barriere ambigue finit par etre
+# ignoree.
+#
+# Les seuls telechargements des jobs bloquants sont ceux des **sources epinglees**
+# des dependances (QuickJS depuis PyPI, la chaine Rust depuis rustup), sans
+# lesquels il n'y a rien a construire. Ils sont mis en cache.
+#
+# Ce qui touche vraiment au monde exterieur — les sondes vers de vrais sites —
+# vit dans un job informatif, qui ne fait jamais echouer la barriere.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # --- Le noyau ---------------------------------------------------------------
+  #
+  # `rust-toolchain.toml` epingle un nightly precis : le canal flottant casse
+  # regulierement la cible custom. rustup l'installe tout seul au premier
+  # `cargo`, il n'y a donc rien a declarer ici — et surtout rien a epingler une
+  # seconde fois, ce qui aurait donne deux verites sur la version.
+  kernel-build:
+    name: kernel-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Chaine Rust
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+
+      - name: Construire le noyau
+        run: cargo build
+
+      # L'image bootable est une etape de plus que `cargo build` : elle passe par
+      # `bootimage`, qui assemble le bootloader et le noyau. La construire ici
+      # attrape les ruptures de ce chemin-la, que la compilation seule ne voit
+      # pas.
+      - name: Image bootable
+        run: |
+          cargo install bootimage --locked
+          cargo bootimage
+
+      - name: Publier l'image
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootimage
+          path: target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          if-no-files-found: error
+
+  # --- Le moteur Web ----------------------------------------------------------
+  #
+  # Le moteur est du Python : analyse HTML, cascade, mise en page, peinture,
+  # JavaScript, Workers, renderer separe. Rien de tout cela n'a besoin de
+  # Bouchaud OS — seulement du module `bo`, que `test_moteur.py` remplace par un
+  # bouchon quand l'hote Qt n'est pas la.
+  browser-engine-tests:
+    name: browser-engine-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Dependances de verification
+        # `pillow` sert a l'hote de substitution qui rend les pages en image ;
+        # `cryptography` fabrique l'autorite et les certificats du serveur de
+        # fixtures, sans quoi le scenario WSS ne peut pas tourner. Aucune des
+        # deux n'est une dependance du moteur.
+        run: python -m pip install --upgrade pillow cryptography cffi
+
+      - name: Cache QuickJS
+        uses: actions/cache@v4
+        with:
+          path: |
+            tools/userland/build-quickjs
+            tools/userland/out-quickjs
+          key: quickjs-${{ runner.os }}-${{ hashFiles('tools/userland/build-quickjs.sh') }}
+
+      - name: Construire QuickJS
+        run: tools/userland/build-quickjs.sh
+
+      - name: Verifications du moteur
+        env:
+          # L'audit de privileges s'ecrit a cote des jalons. Un ecart avec la
+          # version versionnee se lit alors dans le diff plutot que dans un
+          # journal de 1600 lignes.
+          BO_AUDIT_PRIVILEGES: tools/userland/navigateur/tests/audit-privileges.json
+        run: tools/userland/test-moteur.sh
+
+      - name: L'audit de privileges n'a pas bouge
+        # Un changement de capacite du renderer doit etre **decide**, pas subi.
+        # S'il est voulu, le fichier est commite avec le changement qui le
+        # cause ; sinon, cette etape le signale au moment ou il apparait.
+        run: git diff --exit-code -- tools/userland/navigateur/tests/audit-privileges.json
+
+      - name: Les jalons fonctionnels n'ont pas recule
+        run: |
+          python - <<'PY'
+          import json, subprocess, sys
+          courant = json.load(open("tools/userland/navigateur/tests/jalons.json"))
+          reference = json.loads(subprocess.run(
+              ["git", "show", "HEAD:tools/userland/navigateur/tests/jalons.json"],
+              capture_output=True, text=True, check=True).stdout)
+          recules = sorted(nom for nom, ok in reference.items()
+                           if ok and not courant.get(nom))
+          if recules:
+              print("jalons perdus : %s" % ", ".join(recules))
+              sys.exit(1)
+          nouveaux = sorted(set(courant) - set(reference))
+          print("%d jalons, %d nouveaux%s"
+                % (len(courant), len(nouveaux),
+                   (" : " + ", ".join(nouveaux)) if nouveaux else ""))
+          PY
+
+  # --- L'hote Qt --------------------------------------------------------------
+  #
+  # Le bouchon du job precedent mesure le texte a la regle de trois. Ce job-ci
+  # compile le vrai pont `hote.cpp` contre le Qt du systeme et rejoue les memes
+  # verifications avec les vraies metriques de fonte et le vrai decodage
+  # d'image. C'est ce qui attrape les ecarts que le bouchon ne peut pas voir.
+  #
+  # Il n'est pas bloquant : le Qt d'un runner n'est pas celui qu'on construit
+  # pour la cible, et une divergence de version ne doit pas fermer la barriere.
+  qt-pixel-tests:
+    name: qt-pixel-tests
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Qt et dependances
+        # `verifie-hote.sh` ne demande ni QuickJS ni ffmpeg : il compile le pont
+        # contre le Qt du systeme, avec les greffons statiques neutralises.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qtbase5-dev qtbase5-dev-tools libbrotli-dev python3-dev
+
+      - name: Le pont Qt peint, et l'on relit les pixels
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: tools/userland/verifie-hote.sh
+
+  # --- Les sondes sous QEMU ---------------------------------------------------
+  #
+  # Ce que rien d'autre ne peut prouver : que le noyau demarre pour de vrai, et
+  # que ses sondes passent sur la machine cible plutot que sur Linux. Informatif
+  # tant que le demarrage automatique et la collecte du verdict ne sont pas
+  # assez sûrs pour qu'un echec ici veuille dire « le noyau est casse » plutot
+  # que « l'emulation a expire ».
+  qemu-probes:
+    name: qemu-probes
+    runs-on: ubuntu-latest
+    needs: kernel-build
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: bootimage
+          path: image
+
+      - name: Demarrer et lire la sortie serie
+        run: |
+          timeout 180 qemu-system-x86_64 \
+            -drive format=raw,file=image/bootimage-bouchaud-os.bin \
+            -display none -serial stdio -no-reboot | tee serie.log || true
+          echo "--- verdict ---"
+          grep -qi "panic" serie.log && { echo "panic au demarrage"; exit 1; }
+          test -s serie.log || { echo "aucune sortie serie"; exit 1; }
+          echo "le noyau a parle sur la serie"

@@ -1,0 +1,13 @@
+{
+  "fichiers_herites": 0,
+  "navigation_file_refusee": true,
+  "prises_de_controle": 1,
+  "prises_reseau_heritees": 0,
+  "surfaces_accordees": 2,
+  "tentatives": {
+    "descripteur_herite": false,
+    "fichier_arbitraire": true,
+    "prise_reseau_directe": true,
+    "stockage_direct": true
+  }
+}

@@ -73,6 +73,9 @@ INPUT_EVENT = 4
 TICK = 5
 SURFACE = 6
 CLOSE = 7
+FETCH_RESPONSE = 8
+FETCH_DATA = 9
+AUDIT = 10
 
 # --- Renderer -> Navigateur ---------------------------------------------------
 
@@ -84,22 +87,36 @@ FRAME_READY = 132
 CONSOLE_MESSAGE = 133
 ERROR = 134
 REQUEST_NAVIGATION = 135
+FOCUS_CHANGED = 136
+FETCH_REQUEST = 137
+AUDIT_RESULT = 138
 
 NOMS = {
     CREATE_DOCUMENT: "CREATE_DOCUMENT", NAVIGATE: "NAVIGATE", RESIZE: "RESIZE",
     INPUT_EVENT: "INPUT_EVENT", TICK: "TICK", SURFACE: "SURFACE",
-    CLOSE: "CLOSE",
+    CLOSE: "CLOSE", FETCH_RESPONSE: "FETCH_RESPONSE", FETCH_DATA: "FETCH_DATA",
+    AUDIT: "AUDIT",
     READY: "READY", TITLE_CHANGED: "TITLE_CHANGED", URL_CHANGED: "URL_CHANGED",
     CURSOR_CHANGED: "CURSOR_CHANGED", FRAME_READY: "FRAME_READY",
     CONSOLE_MESSAGE: "CONSOLE_MESSAGE", ERROR: "ERROR",
-    REQUEST_NAVIGATION: "REQUEST_NAVIGATION",
+    REQUEST_NAVIGATION: "REQUEST_NAVIGATION", FOCUS_CHANGED: "FOCUS_CHANGED",
+    FETCH_REQUEST: "FETCH_REQUEST", AUDIT_RESULT: "AUDIT_RESULT",
 }
 
 VERS_RENDERER = frozenset((CREATE_DOCUMENT, NAVIGATE, RESIZE, INPUT_EVENT,
-                           TICK, SURFACE, CLOSE))
+                           TICK, SURFACE, CLOSE, FETCH_RESPONSE, FETCH_DATA,
+                           AUDIT))
 VERS_NAVIGATEUR = frozenset((READY, TITLE_CHANGED, URL_CHANGED, CURSOR_CHANGED,
                              FRAME_READY, CONSOLE_MESSAGE, ERROR,
-                             REQUEST_NAVIGATION))
+                             REQUEST_NAVIGATION, FOCUS_CHANGED, FETCH_REQUEST,
+                             AUDIT_RESULT))
+
+# Un corps de ressource ne tient pas dans une trame de controle : `CHARGE_MAX`
+# est petite a dessein, et une image de trois mebioctets la depasse de loin. Le
+# corps voyage donc en morceaux, chacun encode en base64 dans une trame
+# `FETCH_DATA`. La taille est choisie pour que le morceau **encode** reste
+# nettement sous `CHARGE_MAX` : base64 gonfle d'un tiers.
+MORCEAU_FETCH = 192 * 1024
 
 
 class Erreur(Exception):

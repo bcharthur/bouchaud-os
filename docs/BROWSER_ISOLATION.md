@@ -105,11 +105,19 @@ Deux choses distinctes, et les confondre serait une facon polie de mentir :
   que ce soit (39 055 tours contre 39 492). Le detail est dans
   `BROWSER_OS_MODERNIZATION.md`.
 
-Ce qui n'a **pas** ete fait : rejouer cette mesure avec le renderer lui-meme
-comme charge, sous Bouchaud OS. Rien ne laisse penser que le resultat differerait
-— un renderer qui met en page est exactement le processus de calcul de la sonde
-—, mais ce serait une inference, pas une mesure, et le tableau ci-dessus le dit
-comme tel.
+L'inference qui restait — « un renderer qui met en page est exactement le
+processus de calcul de la sonde » — a maintenant son instrument :
+`navigateur/ordonnanceur-navigateur.py` charge la machine avec un **vrai**
+renderer forke par `superviseur.py`, sur une vraie feuille lourde, dans le vrai
+protocole, et mesure le retard du battement du chrome.
+
+Ce que la sonde donne sur l'hote de developpement : rien de concluant, et elle
+le dit. La machine a plusieurs cœurs libres, le renderer et le chrome ne se
+disputent jamais le meme, et le pire retard reste sous le quart de trame en
+dessous duquel il n'y a rien a corriger. La mesure qui compte demande la cible :
+un cœur, sous QEMU. **Le tableau de ce document n'affirme donc toujours rien sur
+l'effet mesure avec un renderer reel** — il affirme seulement que l'outil qui le
+mesurera existe et refuse de conclure a la place.
 
 ## Ce que la separation a corrige en chemin
 
@@ -148,14 +156,78 @@ bord du chantier : c'est ce que le chantier a rendu visible.
   detacherait. C'est une difference observable, et elle est dite plutot que
   decouverte.
 
+## La productisation : quand le mecanisme est devenu le navigateur
+
+Tout ce qui precede decrivait un mecanisme que seules les epreuves exercaient.
+`Navigateur.ouvre()` construisait son `Document` en-processus, et le superviseur
+n'etait le backend de personne. L'architecture affichee n'etait pas
+l'architecture executee — et un mecanisme qu'aucun utilisateur n'emprunte n'est
+pas une isolation, c'est une demonstration.
+
+### Ce qu'il a fallu deplacer
+
+Le chrome ne se contentait pas d'afficher un document : il le **lisait**. Chaque
+lecture est impossible a travers une frontiere de processus, et chacune a donc
+du devenir un message.
+
+| Ce que le chrome lisait | Ce qui l'a remplace |
+|---|---|
+| `document.foyer_actuel()` — a qui donner la frappe | `FOCUS_CHANGED` |
+| `document.lien_a(x, y)` — l'adresse en barre d'etat | le champ `lien` de `CURSOR_CHANGED` |
+| `document.hauteur` — l'ascenseur | le champ `hauteur_document` de `FRAME_READY` |
+| `document.clic_complet(...)` — la sequence du clic | `INPUT_EVENT` puis `REQUEST_NAVIGATION` |
+| `document.navigation_demandee` — `location.href = …` | `REQUEST_NAVIGATION` |
+| `document.liste_affichage(...)` — les pixels | la surface partagee, posee en une operation |
+
+`moteur/vue.py` porte l'interface commune. Deux implantations : `VueRenderer`
+par defaut, `VueLocale` sous `BO_BROWSER_INPROCESS=1`. Le chrome ne sait pas
+laquelle il tient, ce qui est la seule facon de pouvoir comparer les deux sur le
+meme scenario.
+
+### La regle qui a survecu au deplacement
+
+**Le renderer demande, le navigateur decide** — et elle s'est etendue plutot que
+de s'affaiblir. Une navigation autorisee n'est plus appliquee par le superviseur
+quand un chrome tient l'historique : elle remonte, et c'est le chrome qui ouvre.
+Sans cela la page serait a l'ecran sans entree dans l'historique, c'est-a-dire
+un bouton « reculer » qui ment. La regle n'est pas seulement une regle de
+securite : c'est aussi celle qui garde **une seule verite sur ou l'on se
+trouve**.
+
+Le renderer resout desormais l'adresse contre celle de son document avant de la
+demander. La politique du navigateur compare un schema, et un schema ne se lit
+pas dans `../ailleurs` : envoyer l'adresse brute revenait a faire dependre la
+politique d'un etat que le renderer lui annonce.
+
+### Les ressources : le second deplacement
+
+Le renderer allait chercher ses ressources lui-meme. `transport.py` pose un
+seuil unique dans `reseau.charge` : sous courtage, chaque requete devient un
+`FETCH_REQUEST`, et c'est le navigateur qui applique la politique, lit les
+temoins, ouvre la prise et ecrit le cache. Une vingtaine d'appelants passent par
+cette fonction — cascade, images, polices, prechargement, `fetch` — et un seul
+qui aurait garde un chemin direct aurait suffi a rendre l'isolation mensongere.
+
+Ce que cela ne resout pas encore : le navigateur sert la requete
+**synchroniquement**, dans son pompage d'evenements. Une ressource lente gele
+donc le chrome le temps de son aller-retour — comme le faisait le chargement
+en-processus, donc pas une regression, mais pas encore le benefice complet.
+
+### Ce dont l'enfant n'herite plus
+
+`fork` sans `exec` copie la table des descripteurs entiere. Le detail, les
+mesures et les capacites qui restent ouvertes sont dans
+`RENDERER_PRIVILEGE_AUDIT.md`.
+
 ## L'ordre de travail suivant
 
-1. **Brancher le chrome Qt sur le superviseur.** Le prototype est pilote par les
-   epreuves ; il ne l'est pas encore par la fenetre. C'est le pas qui transforme
-   un mecanisme en navigateur.
-2. **Un renderer par origine.** Le protocole est pret, le superviseur ne tient
-   qu'un enfant. C'est la seule piece qui manque pour que la SOP devienne une
-   frontiere de processus.
-3. **Rejouer `ordonnanceur-probe` avec un renderer comme charge**, sous
-   Bouchaud OS, pour remplacer la derniere inference de ce document par une
-   mesure.
+1. **Rendre le courtage asynchrone.** C'est le goulot mesurable : le navigateur
+   bloque son chrome pendant qu'il sert une requete du renderer. Une file cote
+   navigateur et une continuation cote renderer.
+2. **Un `execve` optionnel vers un binaire de renderer.** Il transformerait les
+   deux capacites « par le nom » qui restent ouvertes — `open`, `socket` — en
+   refus du systeme. Le chemin `SCM_RIGHTS` a ete eprouve pour cela.
+3. **Rejouer `ordonnanceur-navigateur.py` sous Bouchaud OS**, sur un cœur, pour
+   remplacer la derniere inference de ce document par une mesure.
+4. **Un renderer par origine.** Volontairement apres les trois autres : un
+   navigateur, un renderer, robuste en navigation reelle d'abord.
