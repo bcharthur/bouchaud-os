@@ -83,6 +83,7 @@ EXPORT
 
 genere_export LibSync SYNC_API
 genere_export LibCore CORE_API
+genere_export LibThreading THREADING_API
 
 # --- LibSync : trois fichiers, aucune dependance hors AK --------------------
 #
@@ -93,7 +94,17 @@ SRC_SYNC="MutexPOSIX.cpp ConditionVariablePOSIX.cpp RWLockPOSIX.cpp"
 # --- LibCore : le sous-ensemble ---------------------------------------------
 #
 # Les neuf en-tetes reclames par LibGC/LibJS et leur cloture de symboles.
-SRC_CORE="ElapsedTimer.cpp Environment.cpp ImmutableBytes.cpp"
+# LibGC reclame en plus : File, StandardPaths, System, Timer. Ils entrainent
+# EventLoop et ses satellites — c'est l'editeur de liens qui l'a dit, pas une
+# supposition.
+SRC_CORE="ElapsedTimer.cpp Environment.cpp ImmutableBytes.cpp \
+    File.cpp StandardPaths.cpp System.cpp Timer.cpp \
+    EventLoop.cpp EventLoopImplementation.cpp EventLoopImplementationUnix.cpp \
+    EventReceiver.cpp Notifier.cpp ThreadEventQueue.cpp SocketAddress.cpp \
+    DirIterator.cpp DirectoryEntry.cpp Directory.cpp AddressInfoVector.cpp"
+
+# LibThreading : LibGC s'en sert pour son fil de collecte.
+SRC_THREADING="Thread.cpp"
 
 compile() {
     local dossier=$1 src=$2
@@ -118,6 +129,9 @@ for src in $SRC_SYNC; do compile LibSync "$src"; done
 
 info "== LibCore, sous-ensemble ($CIBLE) =="
 for src in $SRC_CORE; do compile LibCore "$src"; done
+
+info "== LibThreading ($CIBLE) =="
+for src in $SRC_THREADING; do compile LibThreading "$src"; done
 
 if [ "$ECHECS" -gt 0 ]; then
     rouge "$ECHECS fichier(s) n'ont pas compile"

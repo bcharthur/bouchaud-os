@@ -110,11 +110,13 @@ if [ -x "$AK_PROBE" ]; then
     info "== AK (portage Ladybird) =="
     cp "$AK_PROBE" "$WORK/files/ak-probe"
     echo "exec /ak-probe" >> "$WORK/files/autorun"
-    CORE_PROBE=third_party/build-libcore-bouchaud/libcore-probe
-    if [ -x "$CORE_PROBE" ]; then
-        cp "$CORE_PROBE" "$WORK/files/libcore-probe"
-        echo "exec /libcore-probe" >> "$WORK/files/autorun"
-    fi
+    for etage in libcore libgc; do
+        SONDE="third_party/build-$etage-bouchaud/$etage-probe"
+        if [ -x "$SONDE" ]; then
+            cp "$SONDE" "$WORK/files/$etage-probe"
+            echo "exec /$etage-probe" >> "$WORK/files/autorun"
+        fi
+    done
 else
     info "AK absent — pour l'ajouter au scenario :"
     info "  ./tools/ladybird/fetch.sh && ./tools/ladybird/build-deps.sh --cible \\"
@@ -262,6 +264,10 @@ if [ -x "$AK_PROBE" ]; then
     if [ -x "third_party/build-libcore-bouchaud/libcore-probe" ]; then
         grep -q "temoin LibSync" "$LOG" 2>/dev/null
         report $? "LibSync + LibCore se sont executes en ring 3"
+    fi
+    if [ -x "third_party/build-libgc-bouchaud/libgc-probe" ]; then
+        grep -q "temoin LibGC" "$LOG" 2>/dev/null
+        report $? "LibGC a alloue et recolte en ring 3"
     fi
 fi
 

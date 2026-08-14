@@ -39,6 +39,7 @@ mais que sa conformite n'a pas ete confrontee a ce qu'attend le consommateur.
 | `clock_gettime` | oui | oui | oui | dispatch |
 | `nanosleep` | oui | oui | oui | dispatch |
 | `getrandom` | oui | oui | oui | dispatch |
+| `getaddrinfo` en statique | **non (NSS)** | oui | oui | mesure PR 8 |
 | `prlimit64` (`RLIMIT_AS`) | oui | oui | oui | dispatch |
 | `renameat` | **absent** | oui | oui | `nr.rs` |
 | `statx` | oui | oui | oui | `abi/file.rs` |

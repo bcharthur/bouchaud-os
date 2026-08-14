@@ -71,3 +71,4 @@ third_party/deps-hote/
 third_party/deps-bouchaud/
 third_party/build-ak-*/
 third_party/build-libcore-*/
+third_party/build-libgc-*/

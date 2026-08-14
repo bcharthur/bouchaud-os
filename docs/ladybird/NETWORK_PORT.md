@@ -51,6 +51,32 @@ porter OpenSSL ?** Elle est deja sur le chemin critique de LibJS.
 3. HTTPS sur fixture locale avec autorite fabriquee (le mecanisme existe deja).
 4. `https://example.com` en sonde **informative**, jamais bloquante.
 
+## Un obstacle decouvert en construisant LibGC (PR 8)
+
+L'edition de liens de `LibCore/System.cpp` en statique produit :
+
+    warning: Using 'getaddrinfo' in statically linked applications requires at
+    runtime the shared libraries from the glibc version used for linking
+
+Ce n'est pas cosmetique. `getaddrinfo` de la glibc delegue a **NSS**, qui charge
+des greffons (`libnss_dns.so`, `libnss_files.so`) par `dlopen` a l'execution.
+Dans un binaire statique-PIE deploye sur Bouchaud, ces greffons n'existent pas :
+la resolution de noms echouera, silencieusement ou par une erreur sans rapport.
+
+Trois issues, a trancher avant M11 :
+
+1. **Ne pas utiliser `getaddrinfo`.** RequestServer passe par curl, qui peut
+   etre construit avec son propre resolveur (`--enable-ares`) ou pointe sur le
+   notre.
+2. **Fournir la resolution nous-memes**, en interceptant l'appel : Bouchaud a
+   deja un resolveur DNS noyau.
+3. **Passer a musl**, dont le `getaddrinfo` est autonome et fonctionne en
+   statique. C'est la raison technique la plus solide de reconsiderer musl pour
+   le userland — et elle n'etait pas visible avant de lier reellement.
+
+Le point est sans effet sur LibGC et LibJS, qui n'appellent jamais `getaddrinfo`.
+Il est note ici parce que c'est la que la decision se prendra.
+
 ## Regle heritee de la CI actuelle
 
 Aucun travail bloquant ne depend d'Internet. Elle s'applique integralement a
