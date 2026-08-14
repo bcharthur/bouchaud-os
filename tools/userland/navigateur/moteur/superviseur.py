@@ -160,98 +160,99 @@ class Renderer:
     # --- Naissance et mort ----------------------------------------------------
 
     def _demarre(self, limite_as):
-        parent, enfant = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.surface = mod_surface.Surface.alloue(self.largeur, self.hauteur)
+            parent, enfant = socket.socketpair(
+                socket.AF_UNIX,
+                socket.SOCK_STREAM
+            )
 
-        pid = os.fork()
-        if pid == 0:
-            # --- Cote enfant ------------------------------------------------
-            #
-            # Rien de ce qui appartient au parent ne doit survivre ici : ni sa
-            # prise, ni son descripteur de surface. L'enfant recevra le sien par
-            # `SCM_RIGHTS`, ce qui parait redondant apres un `fork` — mais ne
-            # l'est pas : c'est le chemin qui servira le jour ou le renderer
-            # sera lance par `execve`, et l'eprouver maintenant coute zero.
-            code = 3
-            try:
-                parent.close()
-                self.surface.ferme()
-                self.surface = None
-                # Tout ce qui restait de la table du navigateur part ici : ses
-                # prises TCP deja connectees, sa base de temoins, son
-                # affichage, les surfaces des autres onglets. C'est la seule
-                # facon de le faire apres un `fork` sans `exec` — voir
-                # `privileges.py`. La prise de controle et la console serie
-                # survivent, et rien d'autre.
-                if self.ferme_herites and privileges.balayage_actif():
-                    privileges.ferme_herites(
-                        set(privileges.GARDES_PAR_DEFAUT) | {enfant.fileno()})
-                if limite_as:
-                    resource.setrlimit(resource.RLIMIT_AS,
-                                       (limite_as, limite_as))
-                # Le renderer reste `Normale` : c'est l'interface qui passe
-                # devant, et un renderer qui se declarerait interactif
-                # annulerait tout le benefice mesure. On le pose explicitement
-                # plutot que de compter sur l'heritage — un navigateur qui se
-                # serait deja declare interactif transmettrait sa classe a son
-                # enfant, et les deux se retrouveraient a egalite.
+            self.surface = mod_surface.Surface.alloue(
+                self.largeur,
+                self.hauteur
+            )
+
+            pid = os.fork()
+
+            if pid == 0:
+                # --- Cote enfant ---------------------------------------------
+                code = 3
+
                 try:
-                    os.setpriority(os.PRIO_PROCESS, 0, 0)
-                except (OSError, AttributeError):
-                    pass
-                from . import renderer as mod_renderer
-                code = mod_renderer.sers(enfant, courtage=self.courtage,
-                                         audit=self.audit)
-            except BaseException:  # noqa: BLE001 — on ne remonte jamais d'ici
-                code = 4
-            finally:
-                try:
-                    enfant.close()
-                except OSError:
-                    pass
-                # `_exit` et non `exit` : l'enfant ne doit rejouer ni les
-                # `atexit` du parent, ni vidanger ses tampons — il ecrirait
-                # deux fois ce que le parent a deja ecrit une.
-                os._exit(code)
+                    parent.close()
 
-                # --- Cote parent ---------------------------------------------------
-                enfant.close()
+                    self.surface.ferme()
+                    self.surface = None
 
-                self.pid = pid
-                self.prise = parent
-                self.canal = protocole.Canal(parent)
+                    if self.ferme_herites and privileges.balayage_actif():
+                        privileges.ferme_herites(
+                            set(privileges.GARDES_PAR_DEFAUT)
+                            | {enfant.fileno()}
+                        )
 
-                # Le tout premier dialogue est volontairement bloquant.
-                #
-                # La prise est vide, le renderer vient de naitre, et surtout SURFACE
-                # transporte un descripteur SCM_RIGHTS : il ne faut pas mettre une
-                # demi-trame + un fd dans une file asynchrone dont l'association serait
-                # ensuite ambigue.
-                #
-                # Une fois le bootstrap envoye, le canal devient non bloquant pour tout
-                # le fonctionnement normal du navigateur.
-                self.prise.settimeout(ATTENTE_ENVOI_S)
+                    if limite_as:
+                        resource.setrlimit(
+                            resource.RLIMIT_AS,
+                            (limite_as, limite_as)
+                        )
 
-                self.canal.envoie_avec_descripteur(
-                    protocole.SURFACE,
-                    {
-                        "largeur": self.largeur,
-                        "hauteur": self.hauteur,
-                    },
-                    self.surface.descripteur,
-                )
+                    try:
+                        os.setpriority(
+                            os.PRIO_PROCESS,
+                            0,
+                            0
+                        )
+                    except (OSError, AttributeError):
+                        pass
 
-                self.canal.envoie(
-                    protocole.CREATE_DOCUMENT,
-                    {
-                        "contexte": self.contexte,
-                        "largeur": self.largeur,
-                        "hauteur": self.hauteur,
-                    },
-                )
+                    from . import renderer as mod_renderer
 
-                # A partir d'ici le chrome ne doit plus jamais attendre le renderer.
-                self.prise.settimeout(0.0)
+                    code = mod_renderer.sers(
+                        enfant,
+                        courtage=self.courtage,
+                        audit=self.audit
+                    )
+
+                except BaseException:
+                    code = 4
+
+                finally:
+                    try:
+                        enfant.close()
+                    except OSError:
+                        pass
+
+                    os._exit(code)
+
+            # --- Cote parent -------------------------------------------------
+            enfant.close()
+
+            self.pid = pid
+            self.prise = parent
+            self.canal = protocole.Canal(parent)
+
+            # Bootstrap volontairement bloquant :
+            # SURFACE transporte un fd SCM_RIGHTS.
+            self.prise.settimeout(ATTENTE_ENVOI_S)
+
+            self.canal.envoie_avec_descripteur(
+                protocole.SURFACE,
+                {
+                    "largeur": self.largeur,
+                    "hauteur": self.hauteur,
+                },
+                self.surface.descripteur,
+            )
+
+            self.canal.envoie(
+                protocole.CREATE_DOCUMENT,
+                {
+                    "contexte": self.contexte,
+                    "largeur": self.largeur,
+                    "hauteur": self.hauteur,
+                },
+            )
+
+            # Fonctionnement normal non bloquant.
+            self.prise.settimeout(0.0)
 
     def vivant(self):
         """Le renderer respire-t-il ? Recolte au passage s'il vient de mourir."""
