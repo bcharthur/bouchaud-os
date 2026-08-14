@@ -112,6 +112,46 @@ fn recv(xid: u32, want_type: u8) -> Option<Lease> {
     None
 }
 
+/// Ce qu'une negociation reussie a rapporte.
+#[derive(Clone, Copy)]
+pub struct Bail {
+    pub ip: Ipv4Addr,
+    pub gateway: Ipv4Addr,
+    pub dns: Ipv4Addr,
+}
+
+/// Negocie un bail et applique la configuration. **Sans rien afficher.**
+///
+/// Separe de `run` parce que les deux appelants n'ont pas le meme besoin : la
+/// commande `dhcp` raconte chaque etape a l'utilisateur qui l'a tapee, tandis
+/// que l'initialisation du demarrage ne doit produire qu'une ligne de journal.
+/// Tant qu'il n'y avait qu'un appelant, la question ne se posait pas ; le
+/// demarrage automatique en a fait un second.
+pub fn negocie() -> Option<Bail> {
+    if !e1000::is_ready() && !e1000::init() {
+        return None;
+    }
+    let mac = e1000::mac();
+    let xid = cpu::rdtsc() as u32;
+    let mut msg = [0u8; 400];
+
+    let l = build_msg(&mut msg, xid, mac, 1, None, None);
+    send(mac, &msg[..l]);
+    let offer = recv(xid, 2)?;
+
+    let l = build_msg(&mut msg, xid, mac, 3, Some(offer.your_ip), Some(offer.server_id));
+    send(mac, &msg[..l]);
+    let ack = recv(xid, 5)?;
+
+    // Valeurs de repli : un serveur qui n'annonce ni routeur ni resolveur
+    // laisse la configuration compilee en place plutot que de poser 0.0.0.0,
+    // qui donnerait une interface configuree et injoignable.
+    let gateway = if ack.router == [0, 0, 0, 0] { net::gateway() } else { ack.router };
+    let dns = if ack.dns == [0, 0, 0, 0] { net::dns_server() } else { ack.dns };
+    net::set_config(ack.your_ip, gateway, dns);
+    Some(Bail { ip: ack.your_ip, gateway, dns })
+}
+
 /// Commande `dhcp` : configuration automatique de l'interface.
 pub fn run() {
     if !e1000::is_ready() && !e1000::init() {

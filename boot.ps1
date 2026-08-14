@@ -3,11 +3,17 @@
 param(
     # Met a jour la branche courante avant de construire. Voir
     # tools/etat-source.ps1.
-    [switch]$Sync
+    [switch]$Sync,
+    [switch]$NoUserlandDownload,
+    [switch]$RefreshUserland,
+    [switch]$AllowOlderUserland
 )
 
 Set-Location $PSScriptRoot
 & "$PSScriptRoot\tools\etat-source.ps1" -RepoRoot $PSScriptRoot -Sync:$Sync
+& "$PSScriptRoot\tools\userland.ps1" -RepoRoot $PSScriptRoot `
+    -NoDownload:$NoUserlandDownload -Refresh:$RefreshUserland `
+    -AllowOlder:$AllowOlderUserland
 
 Write-Host "=== cargo bootimage (toolchain epinglee par rust-toolchain.toml) ===" -ForegroundColor Cyan
 cargo bootimage 2>&1 | Tee-Object -FilePath boot.log

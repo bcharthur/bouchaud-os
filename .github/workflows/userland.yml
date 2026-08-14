@@ -1,0 +1,274 @@
+# Construit le userland de Bouchaud OS, et prouve qu'il demarre.
+#
+# ## Pourquoi ce workflow existe
+#
+# `/bo-navigateur` est un ELF unique qui embarque Qt 5.15 statique, CPython
+# 3.12, QuickJS et FFmpeg. Le construire demande une heure de machine et une
+# chaine de compilation Linux. Tant que cette construction n'existait que sur la
+# machine du developpeur, un utilisateur de Windows n'avait aucun moyen
+# d'obtenir un Bouchaud OS complet : son OS demarrait, et le bureau annoncait
+# `/bo-navigateur absent`.
+#
+# Le userland n'a pourtant aucune raison d'etre construit par chacun. Il ne
+# depend que du commit source, il est reproductible, et il pese quelques
+# dizaines de mebioctets. Il est donc construit **une fois par commit**, ici, et
+# publie en release pour que `run.ps1` puisse le recuperer.
+#
+# ## Ce que cela ne change pas
+#
+# Bouchaud OS reste un systeme bare-metal. Rien de Linux n'intervient a
+# l'execution : ce workflow est une chaine de **compilation croisee** qui produit
+# des ELF statiques, exactement comme un compilateur croise produit un firmware.
+# La machine qui compile n'est pas la machine qui execute.
+
+name: userland
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "tools/userland/**"
+      - ".github/workflows/userland.yml"
+  workflow_dispatch:
+
+# Pas de `cancel-in-progress` : annuler une construction de Qt a mi-parcours
+# jette quarante minutes de machine **et** le cache qu'elle allait deposer. Deux
+# constructions qui se suivent coutent moins cher qu'une qu'on recommence.
+concurrency:
+  group: userland-${{ github.ref }}
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Construction. Les versions sont epinglees dans les scripts eux-memes
+  # (`QTVER`, `PYVER`, `VERSION`, `PYPI_VER`) et `manifeste.sh` les y relit —
+  # une liste tenue a cote aurait derive au premier changement que personne
+  # n'aurait pense a y reporter.
+  # ---------------------------------------------------------------------------
+  userland:
+    name: userland-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    outputs:
+      sha256: ${{ steps.manifeste.outputs.sha256 }}
+      taille: ${{ steps.manifeste.outputs.taille }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependances de construction
+        # Les sources Ubuntu de Qt sont expurgees de leurs bibliotheques tierces
+        # embarquees (suffixe `+dfsg`) : freetype, libpng, pcre2 et zlib doivent
+        # venir du systeme, en version **statique**.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential python3-dev pkg-config perl \
+            libfreetype-dev libpng-dev libjpeg-dev libpcre2-dev \
+            zlib1g-dev libbrotli-dev libbz2-dev libfontconfig1-dev \
+            nasm curl tar xz-utils file
+
+      # Chaque dependance a son cache, clef sur son script de construction : un
+      # changement de version ou de drapeau invalide le cache concerne et lui
+      # seul. Un cache unique aurait fait recompiler Qt pour un changement de
+      # QuickJS.
+      - name: Cache QuickJS
+        uses: actions/cache@v4
+        with:
+          path: tools/userland/out-quickjs
+          key: qjs-${{ runner.os }}-${{ hashFiles('tools/userland/build-quickjs.sh') }}
+
+      - name: Cache FFmpeg
+        uses: actions/cache@v4
+        with:
+          path: tools/userland/out-ffmpeg
+          key: ffmpeg-${{ runner.os }}-${{ hashFiles('tools/userland/build-ffmpeg.sh') }}
+
+      - name: Cache CPython
+        uses: actions/cache@v4
+        with:
+          path: tools/userland/out-python-embed
+          key: cpython-${{ runner.os }}-${{ hashFiles('tools/userland/build-python.sh') }}
+
+      # Le plus gros, et de loin. Seul `install/` est mis en cache : c'est ce
+      # que `build-tout.sh` regarde pour sauter l'etape, et l'arbre de
+      # compilation complet pese plusieurs gibioctets pour rien.
+      - name: Cache Qt
+        uses: actions/cache@v4
+        with:
+          path: tools/userland/build-qt/install
+          key: qt-${{ runner.os }}-${{ hashFiles('tools/userland/build-qt.sh') }}
+
+      - name: Construire le userland
+        run: tools/userland/build-tout.sh
+
+      - name: Manifeste
+        id: manifeste
+        run: |
+          cd tools/userland
+          ./manifeste.sh userland.img > userland-manifest.json
+          cat userland-manifest.json
+          echo "sha256=$(sha256sum userland.img | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "taille=$(wc -c < userland.img)" >> "$GITHUB_OUTPUT"
+
+      - name: Le manifeste designe bien ce commit
+        # Un userland qui annoncerait un autre commit que celui qui l'a produit
+        # serait pire qu'absent : `run.ps1` l'accepterait, et la panne qui
+        # suivrait accuserait le code source.
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          m = json.load(open("tools/userland/userland-manifest.json"))
+          attendu = os.environ["GITHUB_SHA"]
+          if m["git_commit"] != attendu:
+              sys.exit("manifeste: %s, attendu %s" % (m["git_commit"], attendu))
+          for champ in ("qt_version", "python_version", "quickjs_version",
+                        "ffmpeg_version", "sha256", "image_size"):
+              if not m.get(champ):
+                  sys.exit("manifeste: champ '%s' vide" % champ)
+          print("manifeste coherent : %s" % m["git_commit"])
+          PY
+
+      - name: Publier l'artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: userland
+          path: |
+            tools/userland/userland.img
+            tools/userland/userland-manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
+      # La release est ce que `run.ps1` telecharge. Un artefact d'Actions
+      # demande un jeton pour etre lu ; une release publique n'en demande pas,
+      # et le but est justement qu'une machine Windows fraichement clonee y
+      # arrive sans rien configurer.
+      #
+      # Le tag porte le commit : c'est ce qui rend le userland rattachable sans
+      # ambiguite, et ce qui permet a `run.ps1` de demander exactement le sien.
+      - name: Publier la release du commit
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="userland-${GITHUB_SHA}"
+          cd tools/userland
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG deja publiee — mise a jour des fichiers"
+            gh release upload "$TAG" userland.img userland-manifest.json --clobber
+          else
+            gh release create "$TAG" userland.img userland-manifest.json \
+              --title "userland ${GITHUB_SHA:0:12}" \
+              --notes "Userland de Bouchaud OS construit pour le commit ${GITHUB_SHA}.
+
+          Recupere automatiquement par \`run.ps1\`. Le manifeste porte le commit,
+          les versions de Qt, CPython, QuickJS et FFmpeg, la taille et l'empreinte
+          SHA-256 de l'image." \
+              --latest=false
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Le produit, demarre pour de vrai.
+  #
+  # C'est la seule epreuve qui reponde a la question que personne d'autre ne
+  # pose : le binaire qu'on publie s'execute-t-il sous Bouchaud OS ? Les 1630
+  # verifications du moteur tournent sur Linux avec un bouchon a la place de Qt ;
+  # elles ne disent rien de l'ABI, du chargeur ELF, du framebuffer ni du
+  # `fork` reel.
+  # ---------------------------------------------------------------------------
+  produit:
+    name: product-qemu-boot
+    runs-on: ubuntu-latest
+    needs: userland
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Noyau
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          cargo install bootimage --locked
+          cargo bootimage
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: userland
+          path: livre
+
+      - name: Preparer le disque de scenario
+        # ## Ce qui est teste, exactement
+        #
+        # Le noyau ne lit son archive que sur `hdb`, et l'archive publiee ne
+        # porte pas de `/autorun` — il n'y a aucune raison qu'un utilisateur
+        # voie sa machine jouer un script et s'eteindre. On derive donc un
+        # disque de scenario a partir de l'image **publiee**, en y ajoutant le
+        # seul `/autorun`.
+        #
+        # L'empreinte de `/bo-navigateur` est relevee des deux cotes et
+        # comparee : c'est ce qui permet d'affirmer que le binaire execute par
+        # Bouchaud OS est bit pour bit celui qui est publie, et pas une
+        # recompilation faite pour l'occasion.
+        run: |
+          set -e
+          mkdir -p scenario
+          tar -xf livre/userland.img -C scenario
+          sha256sum scenario/bo-navigateur | cut -d' ' -f1 > livre.sha256
+          echo "bo-navigateur publie : $(cat livre.sha256)"
+
+          cat > scenario/autorun <<'SCENARIO'
+          # Scenario joue au demarrage (voir src/kernel/autorun.rs).
+          uname
+          df
+          ifconfig
+          export BO_PREFIXE=/usr
+          exec /bo-navigateur --verifie
+          SCENARIO
+
+          (cd tools/userland && IMAGE="$GITHUB_WORKSPACE/scenario.img" \
+             ./mkdisk.sh "$GITHUB_WORKSPACE/scenario")
+          ls -la scenario.img
+
+      - name: Demarrer Bouchaud OS
+        run: |
+          set +e
+          timeout 600 qemu-system-x86_64 \
+            -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            -drive format=raw,file=scenario.img \
+            -m 2048 -display none -no-reboot \
+            -netdev user,id=net0 -device e1000,netdev=net0 \
+            -audiodev none,id=muet -device AC97,audiodev=muet \
+            -serial file:serie.log
+          echo "qemu: code $?"
+          echo "--- journal serie ---"
+          cat serie.log || true
+
+      - name: Verdict
+        id: verdict
+        run: python3 tools/verdict-produit.py serie.log "$(cat livre.sha256)"
+
+      - name: Publier le journal
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serie-produit
+          path: |
+            serie.log
+            jalons-produit.json
+          if-no-files-found: warn

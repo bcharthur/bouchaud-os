@@ -63,6 +63,15 @@ pub fn print_addr(addr: &Ipv4Addr) {
     crate::print!("{}.{}.{}.{}", addr[0], addr[1], addr[2], addr[3]);
 }
 
+/// La meme chose, mais rendue plutot qu'affichee.
+///
+/// `print_addr` ecrit directement sur la console, ce qui ne sert a rien quand
+/// l'adresse doit finir dans une ligne de journal composee ailleurs — le
+/// journal du demarrage, par exemple, qui prend une chaine entiere.
+pub fn format_addr(addr: &Ipv4Addr) -> alloc::string::String {
+    alloc::format!("{}.{}.{}.{}", addr[0], addr[1], addr[2], addr[3])
+}
+
 /// Indique si l'adresse appartient au reseau loopback 127.0.0.0/8.
 pub fn is_loopback(addr: &Ipv4Addr) -> bool {
     addr[0] == 127

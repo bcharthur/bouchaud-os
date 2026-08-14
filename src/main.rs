@@ -95,7 +95,12 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     kernel::process::init();
     kernel::dmesg::log("process: table initialisee (init, desktop, shell)");
     kernel::dmesg::log("abi: appels systeme POSIX/Linux x86-64 disponibles (ring 3)");
-    kernel::dmesg::log("net: loopback lo 127.0.0.1 actif (ping ok); eth0 sans driver");
+    // Le reseau est mis en service ici, pas laisse a une commande. Le driver
+    // e1000 existait et marchait, mais il fallait taper `ifup` puis `dhcp`
+    // avant de pouvoir ouvrir une page : un systeme dont l'interface graphique
+    // demarre doit avoir son reseau en service, comme il a son clavier.
+    // `net::demarre` n'echoue jamais — voir sa documentation.
+    net::demarre();
     kernel::dmesg::log("shell: initialise");
 
     // 5. Banniere d'accueil.

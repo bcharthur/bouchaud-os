@@ -72,9 +72,17 @@ echo ""
 echo "== disque userland =="
 ./mkdisk.sh out-navigateur
 
+# Le manifeste voyage avec l'image, meme construite ici. Sans lui, `run.ps1` ne
+# peut pas distinguer un userland construit pour ce commit d'un vestige d'il y a
+# trois semaines — et il retelechargerait a chaque demarrage, ou pire, garderait
+# le vestige.
+./manifeste.sh userland.img > userland-manifest.json
+
 echo ""
 echo "pret :"
 ls -la "$ROOT/userland.img" | sed 's/^/  /'
+sed -n 's/^  "\(git_commit\|qt_version\|python_version\|ffmpeg_version\|sha256\)": /  \1 /p' \
+    userland-manifest.json
 echo ""
 echo "Relancer .\\run.ps1 (ou run.ps1) : le second disque sera attache"
 echo "automatiquement, et le bureau trouvera /bo-navigateur."
