@@ -7,8 +7,8 @@
 # `/bo-navigateur` est un ELF unique qui embarque Qt statique, CPython, QuickJS
 # et FFmpeg. Le construire demande une heure et une chaine de compilation Linux.
 # Sur Windows, cela voulait dire : installer WSL, apprendre six scripts, et
-# attendre — avant meme d'avoir vu le systeme. Un OS dont la premiere impression
-# est « installe un autre OS d'abord » n'est pas un produit.
+# attendre - avant meme d'avoir vu le systeme. Un OS dont la premiere impression
+# est "installe un autre OS d'abord" n'est pas un produit.
 #
 # Le userland n'a pourtant aucune raison d'etre construit par chacun : il ne
 # depend que du commit source. L'integration continue le construit une fois, le
@@ -18,7 +18,7 @@
 #
 # **Jamais un userland d'un autre commit sans le dire.** Une image d'un autre
 # jour ne se signale pas : elle demarre, et elle se comporte comme le systeme
-# d'alors — un binaire qui ignore le dernier appel systeme, un moteur qui ignore
+# d'alors - un binaire qui ignore le dernier appel systeme, un moteur qui ignore
 # le dernier protocole. La panne qui suit accuse le code source, qui n'y est pour
 # rien, et l'on cherche des heures du mauvais cote.
 #
@@ -110,7 +110,7 @@ function Recupere($slug, $commit) {
     # l'image : un manifeste qui annonce un autre commit rend le telechargement
     # inutile, et le faire quand meme donnerait envie de s'en contenter.
     if ($m.git_commit -ne $commit) {
-      Rouge "userland: la release $commit contient un manifeste pour $($m.git_commit) — refuse."
+      Rouge "userland: la release $commit contient un manifeste pour $($m.git_commit) - refuse."
       return $false
     }
 
@@ -121,14 +121,14 @@ function Recupere($slug, $commit) {
 
     $somme = (Get-FileHash $tmpI -Algorithm SHA256).Hash.ToLower()
     if ($somme -ne ("" + $m.sha256).ToLower()) {
-      Rouge "userland: empreinte SHA-256 incorrecte — image jetee."
+      Rouge "userland: empreinte SHA-256 incorrecte - image jetee."
       Rouge "  attendu $($m.sha256)"
       Rouge "  obtenu  $somme"
       return $false
     }
     $taille = (Get-Item $tmpI).Length
     if ($taille -ne $m.image_size) {
-      Rouge "userland: taille inattendue ($taille au lieu de $($m.image_size)) — image jetee."
+      Rouge "userland: taille inattendue ($taille au lieu de $($m.image_size)) - image jetee."
       return $false
     }
 
@@ -164,14 +164,14 @@ if (-not $Refresh) {
 }
 
 if ($NoDownload) {
-  Avertis "userland: -NoUserlandDownload — la machine demarrera sans userland."
+  Avertis "userland: -NoUserlandDownload - la machine demarrera sans userland."
   Avertis "  ni Qt, ni Python, ni navigateur : le bureau annoncera /bo-navigateur absent."
   exit 0
 }
 
 $slug = Get-DepotSlug
 if (-not $slug) {
-  Avertis "userland: depot GitHub d'origine inconnu — rien a telecharger."
+  Avertis "userland: depot GitHub d'origine inconnu - rien a telecharger."
   Avertis "  forcer avec :  `$env:BO_USERLAND_REPO = 'proprietaire/depot'"
   exit 0
 }
@@ -185,7 +185,7 @@ if (Recupere $slug $commit) {
 # Rien pour ce commit exactement. C'est le cas normal sur une branche de
 # travail : l'integration continue ne publie que pour `main`.
 if ($AllowOlder) {
-  Info "userland: aucun pour ce commit — recherche chez ses ancetres"
+  Info "userland: aucun pour ce commit - recherche chez ses ancetres"
   $ancetres = & git -C $RepoRoot rev-list --max-count=$MaxAncetres HEAD
   $rang = 0
   foreach ($a in $ancetres) {

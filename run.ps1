@@ -2,7 +2,7 @@ param(
   [switch]$Fullscreen,
   # Sortie audio de l'hote. "dsound" sur Windows, "sdl" ou "pa" sur Linux ;
   # "none" pour une machine muette. Sans carte AC97 branchee sur un vrai
-  # backend, l'OS ne trouve aucun peripherique et toute video est silencieuse —
+  # backend, l'OS ne trouve aucun peripherique et toute video est silencieuse -
   # ce qui se prend facilement pour un defaut du pilote.
   [string]$Audio = "dsound",
   # Acceleration materielle. Sans elle, QEMU emule chaque instruction et le
@@ -47,7 +47,7 @@ $qemuArgs = @(
 # Second disque : l'archive userland. Le noyau la deplie dans le RAMFS au
 # demarrage, ce qui permet d'installer un programme sans recompiler l'OS.
 #
-# Elle est recuperee ici si elle manque — l'integration continue en publie une
+# Elle est recuperee ici si elle manque - l'integration continue en publie une
 # par commit de `main`, et la construire soi-meme demande une heure et une
 # chaine Linux. Voir tools/userland.ps1 : jamais un userland d'un autre commit
 # sans le dire, jamais une image dont l'empreinte ne correspond pas.
@@ -77,7 +77,7 @@ if ($Audio -eq "none") {
   $qemuArgs += @("-audiodev", "$Audio,id=snd0", "-device", "AC97,audiodev=snd0")
 }
 
-# Acceleration : WHPX sous Windows (activer « Plateforme d'hyperviseur Windows »
+# Acceleration : WHPX sous Windows (activer "Plateforme d'hyperviseur Windows"
 # dans les fonctionnalites facultatives), KVM sous Linux. "auto" laisse QEMU
 # choisir et retomber sur l'emulation pure si rien n'est disponible.
 if ($Accel -ne "none") {

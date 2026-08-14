@@ -205,7 +205,14 @@ pub fn init() {
                 "[kernel] pci: {} peripheriques, carte reseau {:04x}:{:04x} ({})",
                 n, d.vendor, d.device, vendor_name(d.vendor)
             );
-            dmesg::log("pci: carte reseau detectee (driver non charge)");
+            // Ce que le scan sait, et rien de plus. La ligne disait
+            // « driver non charge » : c'etait vrai du temps ou il fallait
+            // taper `ifup`, et c'est devenu faux le jour ou `net::demarre()`
+            // a charge le pilote quelques lignes plus bas dans le meme
+            // demarrage. Le journal affichait donc « driver non charge »
+            // juste avant « e1000: initialise », ce qui fait douter de la
+            // seconde ligne plutot que de la premiere.
+            dmesg::log("pci: carte reseau detectee");
         }
         None => {
             crate::serial_println!("[kernel] pci: {} peripheriques, aucune carte reseau", n);

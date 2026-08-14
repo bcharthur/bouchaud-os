@@ -14,14 +14,14 @@
 # le 2026-08-04 (commit b2d2615) et reecrit en ring 3 : le repertoire n'existe
 # plus, et le `build.rs` dans lequel le script disait injecter ses references
 # n'a jamais existe non plus. Le script interrogeait donc un sous-systeme
-# disparu — et comme `run.ps1` s'arretait sur son code de sortie, il empechait
+# disparu - et comme `run.ps1` s'arretait sur son code de sortie, il empechait
 # purement et simplement de demarrer l'OS.
 #
 # Il tombait sur un second piege, qui vaut d'etre garde en memoire : il passait
 # un chemin a git sous la forme `git log ... -- src/browser`, depuis une
 # fonction PowerShell a `ValueFromRemainingArguments`. **Le lieur de parametres
-# de PowerShell consomme le `--`** — c'est son marqueur de fin d'options — et
-# git recevait `src/browser` comme une revision, d'ou le « ambiguous argument »
+# de PowerShell consomme le `--`** - c'est son marqueur de fin d'options - et
+# git recevait `src/browser` comme une revision, d'ou le "ambiguous argument"
 # et le code 128. Un pathspec passe a git depuis une fonction PowerShell doit
 # donc l'etre autrement : `--` seul ne survit pas au trajet. Rien ici n'en
 # utilise, ce qui est la facon la plus sure de ne pas s'y reprendre.
@@ -30,8 +30,8 @@ param(
   [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")),
   # Met a jour la branche courante avant de construire. **Volontairement pas le
   # defaut** : tirer automatiquement a chaque demarrage change le code qu'on
-  # s'apprete a booter sans le dire, ce qui transforme « je relance pour
-  # reproduire » en « je relance sur autre chose ».
+  # s'apprete a booter sans le dire, ce qui transforme "je relance pour
+  # reproduire" en "je relance sur autre chose".
   [switch]$Sync
 )
 
@@ -84,7 +84,7 @@ if (-not [string]::IsNullOrWhiteSpace($sale)) {
 
 # Le navigateur ne vit plus dans le noyau : il est dans le disque userland, que
 # `tools/userland/mkdisk.sh` fabrique. Une image absente n'empeche pas de
-# booter, elle donne un OS sans userland — et c'est la confusion la plus
+# booter, elle donne un OS sans userland - et c'est la confusion la plus
 # frequente, donc elle est dite ici.
 $userland = Join-Path $RepoRoot "tools\userland\userland.img"
 if (Test-Path $userland) {
