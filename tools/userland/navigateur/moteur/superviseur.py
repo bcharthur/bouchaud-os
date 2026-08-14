@@ -59,7 +59,9 @@ import os
 import resource
 import signal
 import socket
+import threading
 import time
+from collections import deque
 
 from . import (privileges, protocole, securite, surface as mod_surface,
                transport as mod_transport)
@@ -106,6 +108,9 @@ ATTENTE_ARRET_S = 3.0
 
 # Borne d'un envoi bloquant vers le renderer. Voir `_envoi_bloquant`.
 ATTENTE_ENVOI_S = 30.0
+
+# DNS/TCP/TLS hors du fil Qt. Quatre suffit sous QEMU.
+FETCH_WORKERS = 4
 
 
 class Crash(Exception):
@@ -155,6 +160,11 @@ class Renderer:
         self.url = None
         self.curseur = "fleche"
         self.derniere_trame = None
+        self._fetch_lock = threading.Lock()
+        self._fetch_attente = deque()
+        self._fetch_terminees = deque()
+        self._fetch_actifs = 0
+        self._fetch_ferme = False
         self._demarre(self.limite_as)
 
     # --- Naissance et mort ----------------------------------------------------
@@ -292,6 +302,10 @@ class Renderer:
 
     def ferme(self, delai=ATTENTE_ARRET_S):
         """Demande l'arret, puis insiste. Rend le code de sortie."""
+
+        with self._fetch_lock:
+            self._fetch_ferme = True
+            self._fetch_attente.clear()
 
         if self.pid is None:
             return None
@@ -594,15 +608,8 @@ class Renderer:
             except OSError:
                 pass
 
-    def _sert_requete(self, charge):
-        """Honore un `FETCH_REQUEST`. **C'est ici que la politique s'applique.**
-
-        Le renderer a dit ce qu'il voulait ; rien de ce qu'il a dit n'est pris
-        pour argent comptant. L'origine du document est celle qu'il annonce —
-        un renderer compromis peut mentir dessus — mais mentir ne lui donne rien
-        de plus qu'a sa propre page : `securite.verifie` compare le schema, et
-        c'est le navigateur qui detient les temoins de toute facon.
-        """
+    def _charge_requete(self, charge):
+        """Execute la partie potentiellement lente d'un FETCH, sans toucher Canal."""
         identifiant = charge.get("id")
         url = str(charge.get("url", ""))
         corps = charge.get("corps")
@@ -612,6 +619,7 @@ class Renderer:
             except (ValueError, TypeError):
                 corps = None
         from . import reseau
+        debut = time.monotonic()
         try:
             reponse = reseau.charge_localement(
                 url, methode=str(charge.get("methode") or "GET"), corps=corps,
@@ -619,28 +627,20 @@ class Renderer:
                 brut=bool(charge.get("brut")),
                 document=charge.get("document"),
                 destination=charge.get("destination"))
-        except Exception as e:  # noqa: BLE001 — un echec reseau n'est pas un crash
+        except Exception as e:  # noqa: BLE001
             reponse = reseau.Reponse(url, "", "text/plain", 0, erreur=str(e))
-        self.requetes_servies += 1
+        duree_ms = int((time.monotonic() - debut) * 1000)
+        return identifiant, url, reponse, duree_ms
 
+    def _envoie_reponse_fetch(self, identifiant, reponse):
+        """Reinjecte un resultat deja charge ; seul le fil UI touche au canal."""
         meta = mod_transport.reponse_vers(reponse)
         meta["id"] = identifiant
         octets = bytes(reponse.octets or b"")
         if meta.pop("texte_propre", False):
-            # Le texte ne derive pas des octets — page d'erreur fabriquee, corps
-            # reencode. Il voyage alors tel quel, sinon l'autre cote
-            # reconstruirait autre chose que ce qui a ete decide ici.
             meta["texte_propre"] = True
             meta["contenu"] = reponse.contenu
         meta["fin"] = not octets
-        # **Bloquant, ici et seulement ici.** La prise du navigateur est en mode
-        # non bloquant pour que le chrome puisse la sonder sans jamais
-        # s'arreter ; mais une reponse de trois mebioctets ne tient pas dans le
-        # tampon d'un `socketpair`, et un `sendall` non bloquant y rendrait un
-        # `BlockingIOError` au milieu — c'est-a-dire une reponse tronquee, un
-        # renderer qui attend quarante-cinq secondes, et une image qui manque
-        # sans que rien ne le dise. Le pair est, lui, bloque en lecture sur
-        # cette reponse precise : il draine forcement.
         with self._envoi_bloquant():
             self.dis(protocole.FETCH_RESPONSE, meta)
             pas = protocole.MORCEAU_FETCH
@@ -650,6 +650,69 @@ class Renderer:
                          {"id": identifiant,
                           "b64": base64.b64encode(morceau).decode("ascii"),
                           "fin": debut + pas >= len(octets)})
+        self.requetes_servies += 1
+
+    def _sert_requete(self, charge):
+        identifiant, url, reponse, duree_ms = self._charge_requete(charge)
+        self._envoie_reponse_fetch(identifiant, reponse)
+        self.journal("debug", "fetch #%s local %s (%d ms)" %
+                     (identifiant, url, duree_ms))
+
+    def _travaille_requete(self, charge):
+        resultat = self._charge_requete(charge)
+        with self._fetch_lock:
+            if not self._fetch_ferme:
+                self._fetch_terminees.append(resultat)
+            self._fetch_actifs = max(0, self._fetch_actifs - 1)
+        self._lance_requetes()
+
+    def _lance_requetes(self):
+        while True:
+            with self._fetch_lock:
+                if (self._fetch_ferme or self._fetch_actifs >= FETCH_WORKERS
+                        or not self._fetch_attente):
+                    return
+                charge = self._fetch_attente.popleft()
+                self._fetch_actifs += 1
+            identifiant = charge.get("id")
+            try:
+                fil = threading.Thread(
+                    target=self._travaille_requete,
+                    args=(charge,), name="bo-fetch-%s" % identifiant,
+                    daemon=True)
+                fil.start()
+            except Exception as e:  # noqa: BLE001
+                with self._fetch_lock:
+                    self._fetch_actifs = max(0, self._fetch_actifs - 1)
+                self.journal("warn", "worker fetch indisponible : %s" % e)
+                resultat = self._charge_requete(charge)
+                with self._fetch_lock:
+                    if not self._fetch_ferme:
+                        self._fetch_terminees.append(resultat)
+
+    def _programme_requete(self, charge):
+        url = str(charge.get("url", ""))
+        if url.startswith(("bo:", "file://")):
+            self._sert_requete(charge)
+            return
+        with self._fetch_lock:
+            if self._fetch_ferme:
+                return
+            self._fetch_attente.append(dict(charge))
+        self._lance_requetes()
+
+    def _vidange_requetes_terminees(self, maximum=1):
+        for _ in range(max(0, int(maximum))):
+            with self._fetch_lock:
+                if self._fetch_ferme or not self._fetch_terminees:
+                    return
+                identifiant, url, reponse, duree_ms = self._fetch_terminees.popleft()
+            try:
+                self._envoie_reponse_fetch(identifiant, reponse)
+            except (OSError, protocole.Fin):
+                return
+            self.journal("debug", "fetch #%s termine %s (%d ms)" %
+                         (identifiant, url, duree_ms))
 
     # --- Ecoute ---------------------------------------------------------------
 
@@ -667,6 +730,8 @@ class Renderer:
             0.0,
             secondes,
         )
+
+        self._vidange_requetes_terminees(maximum=1)
 
         while True:
             if self.prise is None or self.canal is None:
@@ -743,6 +808,7 @@ class Renderer:
                 charge or {},
             )
 
+        self._vidange_requetes_terminees(maximum=1)
         self.vivant()
 
         sortie = self.evenements
@@ -753,10 +819,9 @@ class Renderer:
     def _note(self, genre, charge):
         nom = protocole.NOMS.get(genre, str(genre))
         if genre == protocole.FETCH_REQUEST:
-            # Servi ici et maintenant, et **pas** remonte au chrome : une page
-            # ordinaire en emet des dizaines, et les faire remonter noierait la
-            # file d'evenements de l'interface sous de la plomberie.
-            self._sert_requete(charge)
+            # La politique reste dans le navigateur, mais le reseau ne bloque
+            # plus le fil Qt.
+            self._programme_requete(charge)
             return
         if genre == protocole.TITLE_CHANGED:
             self.titre = charge.get("titre")
