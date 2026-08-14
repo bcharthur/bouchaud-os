@@ -4,6 +4,7 @@
 # Trois chaines, de la plus simple a la plus complete :
 #
 #   ./build.sh freestanding   programmes de test sans libc (gcc + ld)
+#   ./build.sh cpp23          temoin C++23 static-pie (prerequis portage Ladybird)
 #   ./build.sh musl           binaires statiques musl (musl-gcc)
 #   ./build.sh musl-dynamic   binaires dynamiques + ld-musl (ld.so)
 #
@@ -75,6 +76,19 @@ musl_static_fixed() {
     done
 }
 
+# C++23 statique-PIE : la chaine que reclame Ladybird.
+#
+# C'est deja celle qui produit le navigateur (`build-navigateur.sh` : g++ +
+# `-static-pie`), donc il n'y a pas de nouvelle chaine a installer — seulement a
+# prouver qu'elle sait produire du C++23 qui *s'execute* en ring 3. Voir
+# l'en-tete de `cpp23-probe.cpp` pour ce que la sonde verifie et pourquoi.
+cpp23() {
+    command -v g++ >/dev/null || { echo "g++ introuvable" >&2; exit 1; }
+    echo "  CXX  cpp23-probe (C++23, static-pie, -fno-exceptions)"
+    g++ -std=c++23 -O2 -static-pie -fPIE -fno-exceptions -fno-rtti \
+        -Wall -Wextra cpp23-probe.cpp -o "$OUT/cpp23-probe"
+}
+
 musl_dynamic() {
     command -v musl-gcc >/dev/null || { echo "musl-gcc introuvable" >&2; exit 1; }
     for src in hello.c "$@"; do
@@ -96,10 +110,11 @@ musl_dynamic() {
 
 case "${1:-freestanding}" in
     freestanding) freestanding ;;
+    cpp23) cpp23 ;;
     musl) musl_static || musl_static_fixed ;;
     musl-fixed) musl_static_fixed ;;
     musl-dynamic) musl_dynamic ;;
-    *) echo "usage: $0 [freestanding|musl|musl-fixed|musl-dynamic]" >&2; exit 2 ;;
+    *) echo "usage: $0 [freestanding|cpp23|musl|musl-fixed|musl-dynamic]" >&2; exit 2 ;;
 esac
 
 echo "binaires dans $OUT/ — a copier dans le RAMFS puis lancer avec 'exec'"

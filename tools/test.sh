@@ -74,6 +74,12 @@ if ! (cd tools/userland && OUT=../../$WORK/files ./build.sh freestanding >/dev/n
     red "la construction freestanding a echoue"
     exit 1
 fi
+# Le temoin C++23 conditionne tout le portage Ladybird : il doit tourner a
+# chaque scenario, pas seulement le jour ou l'on y pense.
+if ! (cd tools/userland && OUT=../../$WORK/files ./build.sh cpp23 >/dev/null); then
+    red "la construction C++23 a echoue (g++ >= 13 requis)"
+    exit 1
+fi
 
 # --- 2. Scenario ------------------------------------------------------------
 
@@ -93,6 +99,7 @@ exec /shm-probe
 exec /ipc-probe
 exec /ordonnanceur-probe
 exec /qpa-probe
+exec /cpp23-probe
 SCENARIO
 
 # Python et Qt ne sont pas construits par ce script : ils demandent une
@@ -224,6 +231,10 @@ report $? "le scenario est alle jusqu'au bout"
 # contente d'aller au bout. Sa derniere ligne fait donc office de bilan.
 grep -q "\[main\] termine" "$LOG" 2>/dev/null
 report $? "ring3-selftest est alle jusqu'a sa derniere etape"
+
+# Le temoin C++23 : sans lui, aucune brique Ladybird ne peut etre construite.
+grep -q "temoin C++23" "$LOG" 2>/dev/null
+report $? "le temoin C++23 s'est execute en ring 3"
 
 # Les deux autres sondes impriment leur propre bilan ; on les compte plutot que
 # de faire confiance au seul code de sortie, qui ne dit pas laquelle a lache.
