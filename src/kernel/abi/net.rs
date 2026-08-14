@@ -127,6 +127,31 @@ fn write_sockaddr(addr: u64, len_addr: u64, ip: Ipv4Addr, port: u16) -> bool {
     }
 }
 
+/// Le descripteur est-il une extremite de `socketpair` ?
+///
+/// Une paire n'a pas de `SocketState` : ce sont deux tubes croises, sans
+/// adresse ni connexion. Elle reste pourtant un **socket** du point de vue de
+/// l'espace utilisateur, et les appels qui l'interrogent doivent repondre
+/// plutot que de la renier.
+///
+/// Ce que cela a coute : `socket.socketpair()` de CPython enveloppe chacun des
+/// deux descripteurs rendus par le noyau dans un objet `socket`, et le
+/// constructeur de CPython **valide** le descripteur en lui demandant son type
+/// (`getsockopt(SO_TYPE)`). Ce chemin passait par `socket_of`, qui ne
+/// connaissait que `FdKind::Socket` et rendait `ENOTSOCK` — si bien que
+/// `socketpair` reussissait au niveau de l'appel systeme et echouait au niveau
+/// de Python, avec « Socket operation on non-socket » pour tout indice.
+///
+/// Le navigateur ne pouvait donc pas creer son processus de rendu : la
+/// separation eprouvee sur Linux, ou `socketpair` est complet, n'avait jamais
+/// tourne sous Bouchaud OS.
+fn est_paire(fd: i32) -> bool {
+    let process = task::current_process();
+    let borrowed = process.borrow();
+    matches!(borrowed.files.get(fd).map(|desc| &desc.kind),
+             Some(FdKind::SocketPair(_, _)))
+}
+
 /// Recupere l'etat d'un socket depuis son descripteur.
 fn socket_of(fd: i32) -> Result<Rc<RefCell<SocketState>>, i64> {
     let process = task::current_process();
@@ -226,6 +251,13 @@ pub fn sys_bind(fd: i32, addr: u64, len: usize) -> i64 {
 pub fn sys_sendto(fd: i32, buffer: u64, len: usize, _flags: u32, addr: u64, addr_len: usize) -> i64 {
     if len == 0 {
         return 0;
+    }
+    // Une extremite de `socketpair` est un tube croise : elle n'a ni pair ni
+    // adresse, et `send`/`sendall` sur elle n'est rien d'autre qu'un `write`.
+    // Sans cette bifurcation, `socket_of` rendait `ENOTSOCK` — c'est-a-dire
+    // qu'une paire creee avec succes refusait ensuite le moindre octet.
+    if est_paire(fd) {
+        return crate::kernel::abi::file::sys_write(fd, buffer, len);
     }
     let state = match socket_of(fd) {
         Ok(state) => state,
@@ -331,6 +363,17 @@ pub fn sys_recvfrom(
 ) -> i64 {
     if len == 0 {
         return 0;
+    }
+    // Symetrique de `sys_sendto` : lire sur une paire, c'est `read`. Aucune
+    // adresse d'expediteur n'est ecrite — une paire est anonyme des deux
+    // cotes, et Linux ne remplit rien non plus.
+    if est_paire(fd) {
+        let lu = crate::kernel::abi::file::sys_read(fd, buffer, len);
+        if lu >= 0 && addr_len != 0 {
+            user_write(addr_len, &0u32.to_le_bytes());
+        }
+        let _ = addr;
+        return lu;
     }
     let state = match socket_of(fd) {
         Ok(state) => state,
@@ -725,6 +768,19 @@ pub fn sys_shutdown(fd: i32, _how: u32) -> i64 {
 
 /// `getsockname` / `getpeername`.
 pub fn sys_getsockname(fd: i32, addr: u64, len_addr: u64, peer: bool) -> i64 {
+    // Une paire est anonyme : Linux rend une `sockaddr_un` reduite a sa
+    // famille, longueur deux. Rendre `ENOTSOCK` ferait croire a l'appelant
+    // qu'il ne tient pas un socket, ce qui est faux et le fait renoncer.
+    if est_paire(fd) {
+        let _ = peer;
+        if addr != 0 && !user_write(addr, &(AF_UNIX as u16).to_le_bytes()) {
+            return -errno::EFAULT;
+        }
+        if len_addr != 0 && !user_write(len_addr, &2u32.to_le_bytes()) {
+            return -errno::EFAULT;
+        }
+        return 0;
+    }
     let state = match socket_of(fd) {
         Ok(state) => state,
         Err(code) => return code,
@@ -754,18 +810,28 @@ pub fn sys_setsockopt(fd: i32, _level: u32, _option: u32, _value: u64, _len: usi
 pub fn sys_getsockopt(fd: i32, _level: u32, option: u32, value: u64, len_addr: u64) -> i64 {
     const SO_ERROR: u32 = 4;
     const SO_TYPE: u32 = 3;
-    let state = match socket_of(fd) {
-        Ok(state) => state,
-        Err(code) => return code,
-    };
-    let result: u32 = match option {
-        // `connect` etant synchrone ici, il n'y a jamais d'erreur differee.
-        SO_ERROR => 0,
-        SO_TYPE => match state.borrow().kind {
-            SocketKind::Tcp => SOCK_STREAM,
-            SocketKind::Udp => SOCK_DGRAM,
-        },
-        _ => 0,
+    // `SO_TYPE` sur une paire : c'est **cette** question que pose CPython pour
+    // valider un descripteur qu'on lui donne, et y repondre `ENOTSOCK` suffit
+    // a rendre `socketpair` inutilisable depuis Python. Voir `est_paire`.
+    let result: u32 = if est_paire(fd) {
+        match option {
+            SO_TYPE => SOCK_STREAM,   // `sys_socketpair` n'en cree pas d'autre
+            _ => 0,
+        }
+    } else {
+        let state = match socket_of(fd) {
+            Ok(state) => state,
+            Err(code) => return code,
+        };
+        match option {
+            // `connect` etant synchrone ici, il n'y a jamais d'erreur differee.
+            SO_ERROR => 0,
+            SO_TYPE => match state.borrow().kind {
+                SocketKind::Tcp => SOCK_STREAM,
+                SocketKind::Udp => SOCK_DGRAM,
+            },
+            _ => 0,
+        }
     };
     if value != 0 && !user_write(value, &result.to_le_bytes()) {
         return -errno::EFAULT;

@@ -55,3 +55,7 @@ tools/userland/navigateur/.suivi-observations.jsonl
 # `audit-privileges.json`, lui, est versionne : il porte des capacites, pas des
 # millisecondes.
 tools/userland/navigateur/tests/ordonnanceur-navigateur.json
+
+# Verdict du demarrage produit, ecrit par tools/verdict-produit.py a chaque
+# execution. Un resultat de mesure, pas une source.
+jalons-produit.json
