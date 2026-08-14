@@ -8,14 +8,14 @@ param(
   # Acceleration materielle. Sans elle, QEMU emule chaque instruction et le
   # decodage H.264 ne suit pas le temps reel : l'image saccade, et c'est le
   # processeur emule qui est en cause, pas le decodeur.
-  [string]$Accel = "auto"
+  [string]$Accel = "auto",
+  # Met a jour la branche courante avant de construire. Voir
+  # tools/etat-source.ps1 : ce n'est pas le defaut, et cela ne bloque jamais le
+  # demarrage.
+  [switch]$Sync
 )
 
-& "$PSScriptRoot\tools\update-nautile.ps1" -RepoRoot $PSScriptRoot
-if ($LASTEXITCODE -ne 0) {
-  Write-Host "mise a jour Nautile echouee - bootimage non lance." -ForegroundColor Red
-  exit $LASTEXITCODE
-}
+& "$PSScriptRoot\tools\etat-source.ps1" -RepoRoot $PSScriptRoot -Sync:$Sync
 
 cargo bootimage
 # Si la generation de l'image echoue (erreur de compilation, llvm-objcopy

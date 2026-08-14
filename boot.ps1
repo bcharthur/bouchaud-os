@@ -1,12 +1,13 @@
 # Regenere l'image bootable AVEC verification (contrairement a run.ps1 qui lance
 # QEMU meme si bootimage echoue) puis lance QEMU sur l'image fraiche.
+param(
+    # Met a jour la branche courante avant de construire. Voir
+    # tools/etat-source.ps1.
+    [switch]$Sync
+)
+
 Set-Location $PSScriptRoot
-& "$PSScriptRoot\tools\update-nautile.ps1" -RepoRoot $PSScriptRoot
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "mise a jour Nautile echouee - bootimage non lance." -ForegroundColor Red
-    Read-Host "Entree pour fermer"
-    exit $LASTEXITCODE
-}
+& "$PSScriptRoot\tools\etat-source.ps1" -RepoRoot $PSScriptRoot -Sync:$Sync
 
 Write-Host "=== cargo bootimage (toolchain epinglee par rust-toolchain.toml) ===" -ForegroundColor Cyan
 cargo bootimage 2>&1 | Tee-Object -FilePath boot.log
