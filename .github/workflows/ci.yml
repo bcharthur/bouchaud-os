@@ -142,6 +142,47 @@ jobs:
                    (" : " + ", ".join(nouveaux)) if nouveaux else ""))
           PY
 
+  # --- Les scripts que Windows execute ----------------------------------------
+  #
+  # Bloquant, et il le faut : ces scripts sont la premiere chose qu'un
+  # utilisateur de Windows lance, et rien d'autre dans cette CI ne les regarde.
+  # Un `.ps1` casse ne se voit sur aucune machine Linux — c'est arrive, et le
+  # defaut ne dependait meme pas du code mais de la page de codes du lecteur.
+  windows-scripts:
+    name: windows-scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ASCII strict
+        # Voir l'en-tete de ce script pour le mecanisme : un tiret cadratin lu
+        # en Windows-1252 se termine par un guillemet typographique, que
+        # l'analyseur de PowerShell accepte comme delimiteur de chaine.
+        run: python3 tools/verifie-scripts-windows.py
+
+      - name: Analyse syntaxique
+        # `pwsh` est preinstalle sur les runners Ubuntu. L'analyseur employe est
+        # celui de PowerShell lui-meme : c'est la seule facon de savoir qu'un
+        # script est lisible sans l'executer.
+        shell: pwsh
+        run: |
+          $echecs = 0
+          foreach ($chemin in (git ls-files '*.ps1')) {
+            $erreurs = $null; $jetons = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $chemin), [ref]$jetons, [ref]$erreurs) | Out-Null
+            if ($erreurs -and $erreurs.Count) {
+              $echecs++
+              Write-Host "  ECHEC  $chemin"
+              $erreurs | Select-Object -First 5 | ForEach-Object {
+                Write-Host ("           ligne " + $_.Extent.StartLineNumber + " : " + $_.Message)
+              }
+            } else {
+              Write-Host "  ok     $chemin"
+            }
+          }
+          if ($echecs) { exit 1 }
+
   # --- L'hote Qt --------------------------------------------------------------
   #
   # Le bouchon du job precedent mesure le texte a la regle de trois. Ce job-ci
