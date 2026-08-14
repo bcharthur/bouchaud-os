@@ -98,7 +98,13 @@ qemu-system-x86_64 -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootim
 ```
 
 `run.ps1`, `run-fullscreen.ps1` et `boot.ps1` enveloppent ces commandes ;
-`check.ps1` enchaîne les vérifications.
+`check.ps1` enchaîne les vérifications. `run.ps1 -Sync` met à jour la branche
+courante avant de construire — ce n'est pas le défaut, et cela n'empêche jamais
+de démarrer : booter ne doit pas dépendre du réseau.
+
+Le navigateur ne vit **pas** dans l'image bootable : il est dans le disque
+userland, construit à part par `tools/userland/mkdisk.sh`. Sans ce second
+disque, l'OS démarre mais sans Qt, sans Python et sans navigateur.
 
 Le userland se construit à part :
 
