@@ -383,115 +383,115 @@ class Renderer:
 
     # --- Parole ---------------------------------------------------------------
 
-        def dis(self, genre, charge=None):
-            """Place un message dans le canal vers le renderer.
+    def dis(self, genre, charge=None):
+        """Place un message dans le canal vers le renderer.
 
-            Sur la prise non bloquante, EAGAIN n'est plus une exception :
-            `Canal.envoie()` conserve les octets restants et rend False.
+        Sur la prise non bloquante, EAGAIN n'est plus une exception :
+        `Canal.envoie()` conserve les octets restants et rend False.
 
-            Retour :
-                True  -> la file a ete entierement videe
-                False -> le message est correctement mis en file mais attend
-            """
+        Retour :
+            True  -> la file a ete entierement videe
+            False -> le message est correctement mis en file mais attend
+        """
 
-            if self.prise is None or self.canal is None:
-                raise protocole.Fin()
+        if self.prise is None or self.canal is None:
+            raise protocole.Fin()
 
-            try:
-                return self.canal.envoie(
-                    genre,
-                    charge,
-                )
+        try:
+            return self.canal.envoie(
+                genre,
+                charge,
+            )
 
-            except BrokenPipeError:
+        except BrokenPipeError:
+            self.vivant()
+            raise protocole.Fin()
+
+        except OSError as e:
+            if e.errno in (
+                errno.EPIPE,
+                errno.ECONNRESET,
+            ):
                 self.vivant()
                 raise protocole.Fin()
 
-            except OSError as e:
-                if e.errno in (
-                    errno.EPIPE,
-                    errno.ECONNRESET,
-                ):
-                    self.vivant()
-                    raise protocole.Fin()
+            # EAGAIN ne devrait normalement plus sortir de Canal.envoie(),
+            # puisqu'il est absorbe par la file de sortie.
+            #
+            # On garde toutefois cette ceinture de securite pour une libc
+            # ou une implementation de socket qui le remonterait autrement.
+            if e.errno in (
+                errno.EAGAIN,
+                errno.EWOULDBLOCK,
+            ):
+                return False
 
-                # EAGAIN ne devrait normalement plus sortir de Canal.envoie(),
-                # puisqu'il est absorbe par la file de sortie.
-                #
-                # On garde toutefois cette ceinture de securite pour une libc
-                # ou une implementation de socket qui le remonterait autrement.
-                if e.errno in (
-                    errno.EAGAIN,
-                    errno.EWOULDBLOCK,
-                ):
-                    return False
-
-                raise
+            raise
 
     def navigue(self, url):
         self.dis(protocole.NAVIGATE, {"contexte": self.contexte,
                                       "url": str(url)})
 
-        def redimensionne(self, largeur, hauteur):
-            """Redimensionne la vue et transmet la nouvelle surface.
+    def redimensionne(self, largeur, hauteur):
+        """Redimensionne la vue et transmet la nouvelle surface.
 
-            SURFACE transporte un fd SCM_RIGHTS.
+        SURFACE transporte un fd SCM_RIGHTS.
 
-            Contrairement aux messages ordinaires, cette operation est envoyee
-            dans une courte section bloquante bornee, afin que le descripteur et
-            sa trame restent atomiquement associes.
-            """
+        Contrairement aux messages ordinaires, cette operation est envoyee
+        dans une courte section bloquante bornee, afin que le descripteur et
+        sa trame restent atomiquement associes.
+        """
 
-            self.largeur = int(largeur)
-            self.hauteur = int(hauteur)
+        self.largeur = int(largeur)
+        self.hauteur = int(hauteur)
 
-            ancienne = self.surface
+        ancienne = self.surface
 
-            nouvelle = mod_surface.Surface.alloue(
-                self.largeur,
-                self.hauteur,
-            )
+        nouvelle = mod_surface.Surface.alloue(
+            self.largeur,
+            self.hauteur,
+        )
 
-            self.surface = nouvelle
+        self.surface = nouvelle
 
-            try:
-                with self._envoi_bloquant():
-                    # Conserver l'ordre :
-                    # tout ce qui precedait SURFACE doit partir avant le fd.
-                    if self.canal is not None:
-                        self.canal.vidange()
+        try:
+            with self._envoi_bloquant():
+                # Conserver l'ordre :
+                # tout ce qui precedait SURFACE doit partir avant le fd.
+                if self.canal is not None:
+                    self.canal.vidange()
 
-                        self.canal.envoie_avec_descripteur(
-                            protocole.SURFACE,
-                            {
-                                "largeur": self.largeur,
-                                "hauteur": self.hauteur,
-                            },
-                            nouvelle.descripteur,
-                        )
+                    self.canal.envoie_avec_descripteur(
+                        protocole.SURFACE,
+                        {
+                            "largeur": self.largeur,
+                            "hauteur": self.hauteur,
+                        },
+                        nouvelle.descripteur,
+                    )
 
-                        self.canal.envoie(
-                            protocole.RESIZE,
-                            {
-                                "contexte": self.contexte,
-                                "largeur": self.largeur,
-                                "hauteur": self.hauteur,
-                            },
-                        )
+                    self.canal.envoie(
+                        protocole.RESIZE,
+                        {
+                            "contexte": self.contexte,
+                            "largeur": self.largeur,
+                            "hauteur": self.hauteur,
+                        },
+                    )
 
-                        # Socket bloquante dans ce contexte :
-                        # on exige que RESIZE soit parti avant de rendre la main.
-                        self.canal.vidange()
+                    # Socket bloquante dans ce contexte :
+                    # on exige que RESIZE soit parti avant de rendre la main.
+                    self.canal.vidange()
 
-            except Exception:
-                # Si la transmission echoue, ne garder aucune nouvelle surface
-                # que le renderer ne connait pas.
-                nouvelle.ferme()
-                self.surface = ancienne
-                raise
+        except Exception:
+            # Si la transmission echoue, ne garder aucune nouvelle surface
+            # que le renderer ne connait pas.
+            nouvelle.ferme()
+            self.surface = ancienne
+            raise
 
-            if ancienne is not None:
-                ancienne.ferme()
+        if ancienne is not None:
+            ancienne.ferme()
 
     def souris(self, x, y):
         self.dis(protocole.INPUT_EVENT, {"genre": "souris", "x": x, "y": y})
@@ -512,58 +512,58 @@ class Renderer:
         self.dis(protocole.INPUT_EVENT,
                  {"genre": "defilement", "position": position})
 
-        def bat(self):
-            """Fait avancer le renderer sans accumuler les battements.
+    def bat(self):
+        """Fait avancer le renderer sans accumuler les battements.
 
-            Un TICK est un signal de cadence, pas une commande qui doit etre
-            rejouee cent fois.
+        Un TICK est un signal de cadence, pas une commande qui doit etre
+        rejouee cent fois.
 
-            Si le renderer est tellement en retard que des octets attendent deja
-            dans le canal, le prochain TICK apportera l'heure actuelle.
+        Si le renderer est tellement en retard que des octets attendent deja
+        dans le canal, le prochain TICK apportera l'heure actuelle.
 
-            On peut donc fusionner les battements sans perdre d'etat observable.
-            """
+        On peut donc fusionner les battements sans perdre d'etat observable.
+        """
 
-            if self.prise is None or self.canal is None:
-                raise protocole.Fin()
+        if self.prise is None or self.canal is None:
+            raise protocole.Fin()
 
-            try:
-                # Le renderer a peut-etre libere de la place depuis le passage
-                # precedent.
-                self.canal.vidange()
+        try:
+            # Le renderer a peut-etre libere de la place depuis le passage
+            # precedent.
+            self.canal.vidange()
 
-            except BrokenPipeError:
+        except BrokenPipeError:
+            self.vivant()
+            raise protocole.Fin()
+
+        except OSError as e:
+            if e.errno in (
+                errno.EPIPE,
+                errno.ECONNRESET,
+            ):
                 self.vivant()
                 raise protocole.Fin()
 
-            except OSError as e:
-                if e.errno in (
-                    errno.EPIPE,
-                    errno.ECONNRESET,
-                ):
-                    self.vivant()
-                    raise protocole.Fin()
+            if e.errno not in (
+                errno.EAGAIN,
+                errno.EWOULDBLOCK,
+            ):
+                raise
 
-                if e.errno not in (
-                    errno.EAGAIN,
-                    errno.EWOULDBLOCK,
-                ):
-                    raise
+        # Quelque chose d'important attend deja :
+        #
+        # NAVIGATE / INPUT / RESIZE / ancien TICK / etc.
+        #
+        # Ajouter encore TICK ne ferait qu'accroitre le retard.
+        if self.canal.a_envoyer():
+            return False
 
-            # Quelque chose d'important attend deja :
-            #
-            # NAVIGATE / INPUT / RESIZE / ancien TICK / etc.
-            #
-            # Ajouter encore TICK ne ferait qu'accroitre le retard.
-            if self.canal.a_envoyer():
-                return False
-
-            return self.dis(
-                protocole.TICK,
-                {
-                    "horodatage": time.monotonic(),
-                },
-            )
+        return self.dis(
+            protocole.TICK,
+            {
+                "horodatage": time.monotonic(),
+            },
+        )
 
     def demande_audit(self, quoi="descripteurs", **details):
         """Demande au renderer ce qu'il possede. Ne repond que s'il a la capacite."""
@@ -652,102 +652,102 @@ class Renderer:
 
     # --- Ecoute ---------------------------------------------------------------
 
-        def recolte(self, secondes=0.0):
-            """Lit les messages du renderer sans bloquer indefiniment.
+    def recolte(self, secondes=0.0):
+        """Lit les messages du renderer sans bloquer indefiniment.
 
-            Avant chaque lecture, on profite du fait que le renderer ait peut-etre
-            avance pour tenter de vider la file navigateur -> renderer.
+        Avant chaque lecture, on profite du fait que le renderer ait peut-etre
+        avance pour tenter de vider la file navigateur -> renderer.
 
-            Ainsi les deux directions progressent ensemble et aucune ne peut etre
-            abandonnee simplement parce que l'autre applique de la contre-pression.
-            """
+        Ainsi les deux directions progressent ensemble et aucune ne peut etre
+        abandonnee simplement parce que l'autre applique de la contre-pression.
+        """
 
-            limite = time.monotonic() + max(
-                0.0,
-                secondes,
-            )
+        limite = time.monotonic() + max(
+            0.0,
+            secondes,
+        )
 
-            while True:
-                if self.prise is None or self.canal is None:
-                    break
+        while True:
+            if self.prise is None or self.canal is None:
+                break
 
-                # Essayer d'abord de faire progresser ce qui attend vers le
-                # renderer.
-                try:
-                    self.canal.vidange()
+            # Essayer d'abord de faire progresser ce qui attend vers le
+            # renderer.
+            try:
+                self.canal.vidange()
 
-                except BrokenPipeError:
+            except BrokenPipeError:
+                self.vivant()
+                break
+
+            except protocole.Fin:
+                self.vivant()
+                break
+
+            except OSError as e:
+                if e.errno not in (
+                    errno.EAGAIN,
+                    errno.EWOULDBLOCK,
+                ):
                     self.vivant()
                     break
 
-                except protocole.Fin:
-                    self.vivant()
-                    break
+            # Puis lire ce qui vient du renderer.
+            try:
+                self.prise.settimeout(0.0)
 
-                except OSError as e:
-                    if e.errno not in (
-                        errno.EAGAIN,
-                        errno.EWOULDBLOCK,
-                    ):
-                        self.vivant()
-                        break
-
-                # Puis lire ce qui vient du renderer.
-                try:
-                    self.prise.settimeout(0.0)
-
-                    genre, charge = self.canal.lis(
-                        protocole.VERS_NAVIGATEUR
-                    )
-
-                except (BlockingIOError, socket.timeout):
-                    if time.monotonic() >= limite:
-                        break
-
-                    if not self.vivant():
-                        break
-
-                    time.sleep(0.002)
-                    continue
-
-                except protocole.Fin:
-                    self.vivant()
-                    break
-
-                except protocole.Erreur as e:
-                    # Un flux devenu invalide n'est plus fiable.
-                    self.journal(
-                        "error",
-                        "renderer : %s" % e,
-                    )
-
-                    self.evenements.append(
-                        (
-                            "PROTOCOLE",
-                            {
-                                "detail": str(e),
-                            },
-                        )
-                    )
-
-                    self.tue()
-                    break
-
-                except OSError:
-                    self.vivant()
-                    break
-
-                self._note(
-                    genre,
-                    charge or {},
+                genre, charge = self.canal.lis(
+                    protocole.VERS_NAVIGATEUR
                 )
 
-            self.vivant()
+            except (BlockingIOError, socket.timeout):
+                if time.monotonic() >= limite:
+                    break
 
-            sortie = self.evenements
-            self.evenements = []
+                if not self.vivant():
+                    break
 
-            return sortie
+                time.sleep(0.002)
+                continue
+
+            except protocole.Fin:
+                self.vivant()
+                break
+
+            except protocole.Erreur as e:
+                # Un flux devenu invalide n'est plus fiable.
+                self.journal(
+                    "error",
+                    "renderer : %s" % e,
+                )
+
+                self.evenements.append(
+                    (
+                        "PROTOCOLE",
+                        {
+                            "detail": str(e),
+                        },
+                    )
+                )
+
+                self.tue()
+                break
+
+            except OSError:
+                self.vivant()
+                break
+
+            self._note(
+                genre,
+                charge or {},
+            )
+
+        self.vivant()
+
+        sortie = self.evenements
+        self.evenements = []
+
+        return sortie
 
     def _note(self, genre, charge):
         nom = protocole.NOMS.get(genre, str(genre))
