@@ -89,3 +89,4 @@ third_party/gen-bouchaud/
 third_party/gen-bouchaud
 third_party/build-js-*/
 third_party/build-libipc-*/
+third_party/build-libtest-*/

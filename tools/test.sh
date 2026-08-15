@@ -65,6 +65,12 @@ elif [ ! -f "$BOOTIMG" ]; then
 fi
 
 info "== construction des sondes userland =="
+# Le repertoire de preparation est vide **avant** d'etre rempli, et pas
+# seulement a la fin. Une execution interrompue — par le garde-fou de taille,
+# par exemple — laisse ses fichiers derriere elle ; l'execution suivante les
+# ajoutait aux siens et mesurait une image qu'elle n'avait pas construite,
+# refusant alors de demarrer pour une raison qui n'existait plus.
+rm -rf "$WORK/files"
 if ! (cd tools/userland && OUT=../../$WORK/files ./build.sh musl >/dev/null); then
     red "la construction musl a echoue (paquet musl-tools installe ?)"
     exit 1
@@ -143,16 +149,46 @@ if [ -x "$AK_PROBE" ]; then
     fi
 
     # L'ordre est celui de la pile : chaque sonde suppose la precedente.
+    # ## Ce qui embarque, quand tout ne tient pas
+    #
+    # Chaque binaire Ladybird lie les donnees ICU en statique : ~40 Mio piece
+    # une fois depouille. L'archive plafonne a 192 Mio (`src/fs/tar.rs`), et
+    # tout embarquer en demandait 215.
+    #
+    # L'arbitrage se fait par le recouvrement, pas par la taille. `temoin.js`,
+    # joue par le `js` d'upstream, exerce deja `normalize('NFC')`, deux `Intl`
+    # et `BigInt` de bout en bout : `libunicode-probe` et `libcrypto-probe` ne
+    # prouveraient rien de plus en ring 3. Ils restent construits et joues sur
+    # l'hote, ou la place ne manque pas.
     for etage in libcore libgc libunicode libcrypto libjs; do
         # `libjs-probe` cede la place a `js` quand celui-ci existe. Sur un arbre
         # ou `js` n'a pas ete construit, la sonde reste.
         if [ "$etage" = libjs ] && [ -x "$JS_UPSTREAM" ]; then
             continue
         fi
+        # Idem pour ICU et BigInt : couverts par temoin.js a travers `js`.
+        if [ "$etage" = libunicode ] || [ "$etage" = libcrypto ]; then
+            [ -x "$JS_UPSTREAM" ] && continue
+        fi
         SONDE="third_party/build-$etage-bouchaud/$etage-probe"
         if [ -x "$SONDE" ]; then
             copie_depouillee "$SONDE" "$WORK/files/$etage-probe"
             echo "exec /$etage-probe" >> "$WORK/files/autorun"
+        fi
+    done
+
+    # Les tests LibIPC **d'upstream**. Ce ne sont pas des sondes a nous : ce
+    # sont les huit cas que Ladybird ecrit pour sa propre couche IPC, et ils
+    # visent exactement ce qu'un portage doit prouver — raccrochage du pair,
+    # sortie du fil d'entree/sortie, message arrive juste avant la fin de
+    # fichier, file d'envoi avec descripteurs.
+    #
+    # `Tests/LibIPC/CMakeLists.txt` reserve `TestTransportSocket` a
+    # `UNIX AND NOT APPLE` : c'est la branche que Bouchaud presente.
+    for t in TestTransportSocket TestConnection; do
+        if [ -x "third_party/build-libtest-bouchaud/$t" ]; then
+            copie_depouillee "third_party/build-libtest-bouchaud/$t" "$WORK/files/$t"
+            echo "exec /$t" >> "$WORK/files/autorun"
         fi
     done
 
@@ -355,11 +391,11 @@ if [ -x "$AK_PROBE" ]; then
         temoin_abouti "LibGC"
         report $? "LibGC a alloue et recolte en ring 3"
     fi
-    if [ -x "third_party/build-libunicode-bouchaud/libunicode-probe" ]; then
+    if [ -x "third_party/build-libunicode-bouchaud/libunicode-probe" ] && [ ! -x "$JS_UPSTREAM" ]; then
         temoin_abouti "LibUnicode"
         report $? "LibUnicode et les donnees ICU en ring 3"
     fi
-    if [ -x "third_party/build-libcrypto-bouchaud/libcrypto-probe" ]; then
+    if [ -x "third_party/build-libcrypto-bouchaud/libcrypto-probe" ] && [ ! -x "$JS_UPSTREAM" ]; then
         temoin_abouti "LibCrypto (BigInt / BigFraction)"
         report $? "LibCrypto : BigInt et BigFraction en ring 3"
     fi
@@ -374,6 +410,23 @@ if [ -x "$AK_PROBE" ]; then
         grep -q "RESULTAT : 0 verification(s) en echec" "$LOG" 2>/dev/null
         report $? "js d'upstream a execute temoin.js en ring 3"
     fi
+    # Les tests d'upstream impriment leur propre verdict terminal — « All N
+    # tests passed. » — et non notre `RESULTAT`. On exige cette ligne-la, qui
+    # est bien un bilan de fin et non une banniere : un binaire qui demarre
+    # puis meurt affiche ses premiers « Running test » sans jamais l'atteindre.
+    for t in TestTransportSocket TestConnection; do
+        if [ -x "third_party/build-libtest-bouchaud/$t" ]; then
+            # Pas d'ancre `^` : le journal serie prefixe chaque ligne de
+            # `[hh:mm:ss][cpu%:ram%:disk%]`. L'ancre faisait echouer la
+            # verification alors que les tests passaient — exactement le genre
+            # de verdict trompeur que ce harnais cherche a eviter, ici dans
+            # l'autre sens.
+            grep -qE "All [0-9]+ tests passed\." "$LOG" 2>/dev/null \
+                && grep -q "Running test" "$LOG" 2>/dev/null
+            report $? "$t (test d'upstream) en ring 3"
+        fi
+    done
+
     # Le jalon M4 : la ligne doit reellement sortir, quelle que soit celle des
     # deux voies qui la produit.
     grep -q "Hello Bouchaud" "$LOG" 2>/dev/null
