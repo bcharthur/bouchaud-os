@@ -6,7 +6,10 @@ Le moteur JavaScript du navigateur Bouchaud est **QuickJS**, appele depuis
 `tools/userland/navigateur/bojs.cpp` (28 Ko) et pilote par le moteur Python
 (`moteur/js.py`, 100 Ko). Il fonctionne et reste le chemin par defaut.
 
-LibJS n'est pas encore construit, ni sur l'hote, ni pour la cible.
+LibJS **est construit et s'execute**, sur l'hote et en ring 3 sous QEMU — voir
+« Le jalon M4 est atteint » plus bas. Il n'est pas encore branche au navigateur :
+`BO_WEB_ENGINE=ladybird` reste a cabler, et QuickJS demeure le chemin par
+defaut.
 
 ## Objectif
 
@@ -168,7 +171,7 @@ Ce qui est construit et verifie, sur l'hote **et** pour la cible `-static-pie` :
 | Caisses Rust (5) | — | **fait** | archives + en-tetes FFI |
 | LibUnicode | 23 | **fait** | 8 verifications (donnees ICU) |
 | LibCrypto, sous-ensemble | 3 | **fait** | 9 verifications (BigInt/BigFraction) |
-| LibJS | 556 | en cours | — |
+| LibJS + satellites | 275 | **fait** | 12 verifications, hote **et** ring 3 |
 
 ### La lecon de ce lot : c'est la version, pas le code
 
@@ -232,15 +235,111 @@ Deux pieges y sont documentes parce qu'ils coutent tous les deux une heure :
   fait un `import_rust_crate` a la fois : c'etait une condition de correction,
   pas une preference de style.
 
-### Ce qui reste
+## Le jalon M4 est atteint
 
-1. LibJS : 556 fichiers, plus ses dependances privees restantes (LibTextCodec,
-   LibRegex, LibSyntax, LibFileSystem, LibURL, simdjson) que l'editeur de liens
-   reclamera.
-2. Le temoin `1 + 2`, puis `console.log`.
+Sous QEMU, en ring 3, sur Bouchaud OS :
 
-Rien dans ce qui precede n'est un obstacle de conception : ce sont des
-constructions a enchainer.
+    == temoin LibJS ==
+      ok     un royaume JS est construit
+             1 + 2 = 3
+             10! = 3628800
+             2n ** 64n = 18446744073709551616
+             'e+U+0301'.normalize('NFC') = U+e9
+             Intl.NumberFormat('fr-FR') = fr-FR
+             JSON aller-retour = {"b":[1,2],"a":true}
+             regex = 15/08/2026
+             try/catch = TypeError
+             200 000 objets abandonnes, garde = intact
+             --- console.log ---
+             "Hello Bouchaud"
+    RESULTAT : 0 verification(s) en echec (12 passees)
+
+## Ce que le ring 3 a exige du noyau, et que l'hote ne montrait pas
+
+La construction ne prouvait rien sur Bouchaud. Les douze memes verifications
+passaient sur l'hote depuis le premier essai ; sous QEMU, la sonde mourait —
+quatre fois de suite, pour quatre raisons distinctes, aucune visible a la
+compilation.
+
+### 1. `/proc/self/maps` — sans quoi rien de Ladybird ne demarre
+
+`AK::StackInfo` appelle `pthread_getattr_np()`, qui pour le **thread principal**
+lit `/proc/self/maps` : c'est le noyau qui a pose cette pile, et rien dans l'ABI
+ne la lui communique autrement. Le fichier n'existait pas ; la glibc rendait
+`ENOENT` et AK faisait `VERIFY_NOT_REACHED()`.
+
+Cela arretait **toute** brique de Ladybird — AK, LibGC, LibJS. Et pour LibGC ce
+n'est pas qu'une question de demarrage : son ramasse-miettes est
+**conservateur** et balaie la pile a la recherche de racines. Des bornes fausses
+ne le feraient pas planter, elles lui feraient recolter des objets vivants.
+
+Le fichier est desormais produit par processus (`FdKind::Instantane`), et non
+ecrit dans le RAMFS — `/proc/self` y serait partage par tout le systeme, donc
+faux pour tout le monde sauf un.
+
+### 2. Un espace d'adressage de 512 Gio ne suffit plus
+
+`GC::PrimitiveStorage` reserve **4 Tio** des la construction de la `JS::VM`,
+pour que ses pointeurs compresses partagent leurs bits de poids fort.
+`GC::BlockAllocator` en reserve **4 Tio** de plus, pour la meme raison appliquee
+aux blocs du tas. Un processus LibJS reserve donc 8 Tio d'espace d'adressage
+avant d'avoir alloue le moindre octet utile.
+
+Le creneau utilisateur de Bouchaud etait **une** entree PML4 : 512 Gio, huit
+fois moins que la premiere de ces deux reservations. Il en compte desormais 64,
+soit 32 Tio, et la pile est remontee au sommet — laissee au milieu, elle aurait
+coupe les reservations en deux.
+
+Ce n'est pas propre a Ladybird : la compression de pointeurs par cage est la
+technique courante des moteurs JavaScript modernes.
+
+### 3. Reserver n'est pas allouer
+
+`mmap(PROT_NONE)` demande une **plage d'adresses**, pas de la memoire. Bouchaud
+allouait avidement : la reservation de 4 Tio demandait 4 Tio de RAM et rendait
+`ENOMEM`. Symetriquement, `decommit_memory()` de LibCore **rend** la memoire par
+un `mmap(PROT_NONE, MAP_FIXED)` — s'en tenir a rendre l'adresse faisait de la
+liberation une operation sans effet.
+
+### 4. La pagination a la demande
+
+Le dernier obstacle, et le plus instructif. mimalloc — l'allocateur d'AK, donc
+de tout Ladybird — prend ses arenes **par gibioctet**, en lecture-ecriture, avec
+`MAP_NORESERVE`, et n'en touche qu'une fraction. Les peupler a l'appel epuisait
+les 2 Gio de la machine en deux arenes ; les refuser aurait fait echouer
+l'allocateur.
+
+La seule reponse juste est celle de Linux : noter la promesse, et n'allouer
+chaque page qu'a son premier acces. Le gestionnaire de faute de page consulte
+desormais les plages promises du processus et peuple la page fautive avec les
+droits enregistres a la reservation. Une faute **hors** de toute promesse reste
+une faute : sans cette rigueur, le noyau transformerait chaque dereference de
+pointeur nul en allocation silencieuse.
+
+### 5. `clone3`
+
+La glibc l'emet avant `clone`. C'est le meme piege que celui deja rencontre avec
+`fork` : l'appel systeme historique etait implemente et teste, mais les
+programmes reels emettent l'autre. Une difference compte — `struct clone_args`
+donne la pile par sa **base et sa taille**, la ou `clone` recevait son
+**sommet**.
+
+## Une lecon de methode : le verdict qui mentait
+
+`tools/test.sh` comptait `ak-probe` et `libgc-probe` au vert alors qu'ils
+**mouraient** en ring 3 sur `StackInfo.cpp`. La banniere `== temoin AK ==`
+s'imprime avant le premier appel fautif ; le verdict cherchait cette banniere,
+la trouvait, et concluait au succes. Les lignes « RESULTAT » qui suivaient dans
+le journal appartenaient a d'autres sondes.
+
+Le verdict exige desormais que le bilan d'une sonde **suive sa banniere**, sans
+qu'une autre banniere ne s'intercale, et annonce zero echec. C'est la seule
+lecture qu'un plantage ne peut pas satisfaire.
+
+## Ce qui reste
+
+Le moteur JavaScript tourne ; le moteur **web** n'existe pas encore. La suite est
+LibIPC, LibGfx, puis LibWeb — et `BO_WEB_ENGINE=ladybird` cote navigateur.
 
 ### La facture d'ICU, connue d'avance
 

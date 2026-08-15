@@ -49,8 +49,33 @@ pub const PAGE_SIZE: u64 = 4096;
 /// [`init`] en choisit un autre et [`user_slot_base`] fait foi.
 pub const USER_SPACE_BASE: u64 = 0x0000_4000_0000_0000;
 
-/// Taille du creneau utilisateur (512 GiB : une entree PML4).
-pub const USER_SPACE_SIZE: u64 = 512 * 1024 * 1024 * 1024;
+/// Nombre d'entrees PML4 consecutives reservees a l'espace utilisateur.
+///
+/// Une seule entree — 512 GiB — a longtemps suffi. Ce n'est plus vrai depuis
+/// que Bouchaud execute LibJS : `GC::PrimitiveStorage` **reserve** une « cage »
+/// de **4 TiB** d'espace d'adressage des la construction de la `JS::VM`, pour
+/// que tous ses pointeurs compresses partagent les memes bits de poids fort.
+/// Cette reservation est en `PROT_NONE` et ne consomme aucune page physique,
+/// mais elle exige que l'adressage la contienne — et 4 TiB, c'est huit fois
+/// l'ancien creneau.
+///
+/// Ce n'est pas propre a Ladybird : la compression de pointeurs par cage est la
+/// technique courante des moteurs JavaScript modernes. Un noyau 64 bits qui
+/// borne son userland a 512 GiB rencontrera la meme limite a chaque fois.
+///
+/// Et ce n'est pas une reservation mais **deux** : `GC::BlockAllocator` reserve
+/// a son tour une `HeapRegion` de 4 TiB, pour que tout bloc du tas gere se
+/// reconnaisse a ses bits de poids fort. Un processus LibJS reserve donc 8 TiB
+/// d'espace d'adressage avant d'avoir alloue le moindre octet utile.
+///
+/// Soixante-quatre entrees donnent 32 TiB : les deux reservations, la pile en
+/// haut, et de la marge pour celles que LibWeb ajoutera. Le cout est nul tant
+/// qu'une entree n'est pas utilisee — une entree PML4 absente ne coute pas de
+/// table intermediaire, et une plage reservee n'en cree aucune.
+pub const USER_SLOTS: usize = 64;
+
+/// Taille du creneau utilisateur (64 entrees PML4 = 32 TiB).
+pub const USER_SPACE_SIZE: u64 = USER_SLOTS as u64 * 512 * 1024 * 1024 * 1024;
 
 /// Decalage, dans le creneau, de l'adresse de chargement d'un binaire PIE.
 pub const LOAD_OFFSET: u64 = 0x40_0000;
@@ -59,7 +84,14 @@ pub const INTERP_OFFSET: u64 = 0x4000_0000;
 /// Decalage de la base des allocations `mmap`.
 pub const MMAP_OFFSET: u64 = 0x40_0000_0000;
 /// Decalage du sommet de la pile utilisateur principale.
-pub const STACK_TOP_OFFSET: u64 = 0x7F_0000_0000;
+///
+/// En haut du creneau, et non plus a 508 GiB : entre la base des `mmap`
+/// (256 GiB) et la pile s'etend desormais la zone ou doit tenir la cage de
+/// 4 TiB de LibJS. Laisser la pile au milieu la couperait en deux.
+///
+/// 16 GiB de marge sous le sommet, pour que la pile et ses gardes ne touchent
+/// jamais la derniere page du creneau.
+pub const STACK_TOP_OFFSET: u64 = USER_SPACE_SIZE - 16 * 1024 * 1024 * 1024;
 
 /// Taille par defaut de la pile utilisateur principale (8 MiB, comme Linux).
 pub const USER_STACK_SIZE: u64 = 8 * 1024 * 1024;
@@ -212,15 +244,22 @@ pub fn init() {
         }
 
         let kernel = table_at(KERNEL_PML4);
+        // Il faut desormais `USER_SLOTS` entrees **consecutives** et libres :
+        // l'espace utilisateur est un intervalle continu, pas une collection de
+        // creneaux. Une entree isolee ne suffirait plus (voir `USER_SLOTS`).
+        let libres = |depart: usize| -> bool {
+            depart + USER_SLOTS <= 256
+                && (depart..depart + USER_SLOTS).all(|i| kernel[i] & PTE_PRESENT == 0)
+        };
         let wanted = pml4_index(USER_SPACE_BASE);
-        NEXT_USER_SLOT = if kernel[wanted] & PTE_PRESENT == 0 {
+        NEXT_USER_SLOT = if libres(wanted) {
             wanted
         } else {
-            // Creneau occupe (cartographie inattendue) : on prend le premier
-            // creneau libre de la moitie basse.
+            // Creneau occupe (cartographie inattendue) : on cherche la premiere
+            // suite libre assez longue dans la moitie basse.
             let mut slot = 0;
             for i in 1..256 {
-                if kernel[i] & PTE_PRESENT == 0 {
+                if libres(i) {
                     slot = i;
                     break;
                 }
@@ -231,10 +270,12 @@ pub fn init() {
 
     let (_, _, total) = frame_stats();
     crate::kernel::dmesg::log_fmt(format_args!(
-        "vmm: {} frames libres ({} MiB), creneau user PML4 #{}",
+        "vmm: {} frames libres ({} MiB), creneau user PML4 #{}..{} ({} TiB)",
         total,
         total * PAGE_SIZE / (1024 * 1024),
-        unsafe { NEXT_USER_SLOT }
+        unsafe { NEXT_USER_SLOT },
+        unsafe { NEXT_USER_SLOT } + USER_SLOTS - 1,
+        USER_SPACE_SIZE / (1024 * 1024 * 1024 * 1024)
     ));
 }
 
@@ -275,8 +316,12 @@ impl AddressSpace {
         // Le noyau doit rester mappe apres le `mov cr3` : on recopie toutes
         // ses entrees (image noyau, tas, cartographie physique).
         dst.copy_from_slice(src);
-        // Le creneau utilisateur nous appartient : on repart de zero.
-        dst[user_slot()] = 0;
+        // Le creneau utilisateur nous appartient : on repart de zero. Toutes
+        // ses entrees, et pas seulement la premiere — l'espace utilisateur
+        // s'etend sur `USER_SLOTS` entrees PML4 consecutives.
+        for i in 0..USER_SLOTS {
+            dst[user_slot() + i] = 0;
+        }
         Some(AddressSpace { pml4, tables: Vec::new(), pages: Vec::new() })
     }
 
@@ -420,34 +465,42 @@ impl AddressSpace {
     ///
     /// Parcourt les quatre niveaux du creneau utilisateur. Sert a `fork`, qui
     /// doit recopier tout ce que le parent a mappe, et au diagnostic.
+    ///
+    /// Les `USER_SLOTS` entrees PML4 sont parcourues, pas seulement la
+    /// premiere. C'est le genre de detail qu'un elargissement du creneau rend
+    /// soudain determinant : avec la pile deplacee en haut de l'espace, elle
+    /// tombe dans la derniere entree, et n'en parcourir qu'une faisait rendre
+    /// a `fork` un enfant sans pile — qui fautait a son premier appel.
     pub fn iter_user_pages(&self) -> Vec<(u64, u64)> {
         let mut out = Vec::new();
-        let slot = user_slot();
         let pml4 = table_at(self.pml4);
-        let entry4 = pml4[slot];
-        if entry4 & PTE_PRESENT == 0 {
-            return out;
-        }
-        let pdpt = table_at(entry4 & ADDR_MASK);
-        for (i3, &entry3) in pdpt.iter().enumerate() {
-            if entry3 & PTE_PRESENT == 0 {
+        for creneau in 0..USER_SLOTS {
+            let slot = user_slot() + creneau;
+            let entry4 = pml4[slot];
+            if entry4 & PTE_PRESENT == 0 {
                 continue;
             }
-            let pd = table_at(entry3 & ADDR_MASK);
-            for (i2, &entry2) in pd.iter().enumerate() {
-                if entry2 & PTE_PRESENT == 0 || entry2 & PTE_HUGE != 0 {
+            let pdpt = table_at(entry4 & ADDR_MASK);
+            for (i3, &entry3) in pdpt.iter().enumerate() {
+                if entry3 & PTE_PRESENT == 0 {
                     continue;
                 }
-                let pt = table_at(entry2 & ADDR_MASK);
-                for (i1, &entry1) in pt.iter().enumerate() {
-                    if entry1 & PTE_PRESENT == 0 {
+                let pd = table_at(entry3 & ADDR_MASK);
+                for (i2, &entry2) in pd.iter().enumerate() {
+                    if entry2 & PTE_PRESENT == 0 || entry2 & PTE_HUGE != 0 {
                         continue;
                     }
-                    let virt = ((slot as u64) << 39)
-                        | ((i3 as u64) << 30)
-                        | ((i2 as u64) << 21)
-                        | ((i1 as u64) << 12);
-                    out.push((virt, entry1));
+                    let pt = table_at(entry2 & ADDR_MASK);
+                    for (i1, &entry1) in pt.iter().enumerate() {
+                        if entry1 & PTE_PRESENT == 0 {
+                            continue;
+                        }
+                        let virt = ((slot as u64) << 39)
+                            | ((i3 as u64) << 30)
+                            | ((i2 as u64) << 21)
+                            | ((i1 as u64) << 12);
+                        out.push((virt, entry1));
+                    }
                 }
             }
         }

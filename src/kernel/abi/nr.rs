@@ -38,6 +38,8 @@ pub const NANOSLEEP: u64 = 35;
 pub const GETPID: u64 = 39;
 pub const SENDFILE: u64 = 40;
 pub const CLONE: u64 = 56;
+/// `clone3` : la forme moderne de `clone`, avec ses arguments dans une structure.
+pub const CLONE3: u64 = 435;
 pub const FORK: u64 = 57;
 pub const VFORK: u64 = 58;
 pub const EXECVE: u64 = 59;
@@ -216,6 +218,7 @@ pub fn name(number: u64) -> &'static str {
         NANOSLEEP => "nanosleep",
         GETPID => "getpid",
         CLONE => "clone",
+        CLONE3 => "clone3",
         FORK => "fork",
         EXECVE => "execve",
         EXIT => "exit",
@@ -322,7 +325,7 @@ pub fn print_implemented() {
         ("fichiers", &[STAT, LSTAT, FSTAT, NEWFSTATAT, STATX, ACCESS, FACCESSAT, READLINK, READLINKAT, GETDENTS64, GETCWD, CHDIR, MKDIR, UNLINK, RENAME]),
         ("attente", &[POLL, PPOLL, SELECT, EPOLL_CREATE1, EPOLL_CTL, EPOLL_WAIT, EVENTFD2, TIMERFD_CREATE, TIMERFD_SETTIME, TIMERFD_GETTIME]),
         ("memoire", &[BRK, MMAP, MUNMAP, MPROTECT, MREMAP, MADVISE, MSYNC]),
-        ("taches", &[CLONE, FORK, VFORK, EXECVE, WAIT4, EXIT, EXIT_GROUP, GETPID, GETPPID, GETTID, SET_TID_ADDRESS, SCHED_YIELD, FUTEX, NANOSLEEP, CLOCK_NANOSLEEP, ARCH_PRCTL, PRCTL]),
+        ("taches", &[CLONE, CLONE3, FORK, VFORK, EXECVE, WAIT4, EXIT, EXIT_GROUP, GETPID, GETPPID, GETTID, SET_TID_ADDRESS, SCHED_YIELD, FUTEX, NANOSLEEP, CLOCK_NANOSLEEP, ARCH_PRCTL, PRCTL]),
         ("signaux", &[RT_SIGACTION, RT_SIGPROCMASK, RT_SIGRETURN, RT_SIGSUSPEND, RT_SIGPENDING, SIGALTSTACK, KILL, TKILL, TGKILL, PAUSE, ALARM, SETITIMER, GETITIMER]),
         ("reseau", &[SOCKET, CONNECT, BIND, SENDTO, RECVFROM, SENDMSG, RECVMSG, SENDMMSG, RECVMMSG, SHUTDOWN, GETSOCKNAME, GETPEERNAME, SOCKETPAIR, SETSOCKOPT, GETSOCKOPT]),
         ("temps", &[CLOCK_GETTIME, CLOCK_GETRES, GETTIMEOFDAY, TIME]),

@@ -77,5 +77,10 @@ third_party/build-rust-*/
 third_party/icu-src/
 third_party/icu-hote/
 third_party/icu-bouchaud/
+# Les variantes « cible » sont des liens symboliques vers la construction hote
+# (meme chaine d'outils, voir build-icu.sh) : les motifs a barre oblique
+# ci-dessus ne les attrapent pas.
+third_party/icu-bouchaud
+third_party/build-rust-bouchaud
 third_party/build-libcrypto-*/
 third_party/build-libjs-*/

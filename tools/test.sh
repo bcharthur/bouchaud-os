@@ -110,7 +110,10 @@ if [ -x "$AK_PROBE" ]; then
     info "== AK (portage Ladybird) =="
     cp "$AK_PROBE" "$WORK/files/ak-probe"
     echo "exec /ak-probe" >> "$WORK/files/autorun"
-    for etage in libcore libgc; do
+    # L'ordre est celui de la pile : chaque sonde suppose la precedente.
+    # `libjs-probe` fait 56 Mio a lui seul — les donnees d'ICU y sont liees en
+    # statique — d'ou le fait qu'il ne soit joue que s'il a ete construit.
+    for etage in libcore libgc libunicode libcrypto libjs; do
         SONDE="third_party/build-$etage-bouchaud/$etage-probe"
         if [ -x "$SONDE" ]; then
             cp "$SONDE" "$WORK/files/$etage-probe"
@@ -257,17 +260,57 @@ report $? "ring3-selftest est alle jusqu'a sa derniere etape"
 grep -q "temoin C++23" "$LOG" 2>/dev/null
 report $? "le temoin C++23 s'est execute en ring 3"
 
+# Une sonde a-t-elle vraiment abouti ?
+#
+# Chercher sa banniere ne suffit pas, et c'est une lecon payee : `ak-probe` et
+# `libgc-probe` ont longtemps ete comptes au vert alors qu'ils **mouraient** en
+# ring 3 sur `AK/StackInfo.cpp`. La banniere s'imprime avant le premier appel a
+# `pthread_getattr_np` ; le grep la trouvait, et le verdict annoncait un succes
+# que rien n'etayait. Les lignes « RESULTAT » qui suivaient dans le journal
+# appartenaient a d'autres sondes.
+#
+# On exige donc que le bilan de la sonde suive sa banniere, sans qu'une autre
+# banniere ne s'intercale, et qu'il annonce zero echec. C'est la seule lecture
+# qu'un plantage ne peut pas satisfaire.
+temoin_abouti() {
+    awk -v banniere="== temoin $1 ==" '
+        index($0, banniere) { dedans = 1; next }
+        dedans && /== temoin / { dedans = 0 }
+        dedans && /RESULTAT/ {
+            if (index($0, "0 verification(s) en echec")) { trouve = 1 }
+            dedans = 0
+        }
+        END { exit trouve ? 0 : 1 }
+    ' "$LOG" 2>/dev/null
+}
+
 # AK n'est verifie que s'il a ete construit : son absence n'est pas un echec.
 if [ -x "$AK_PROBE" ]; then
-    grep -q "temoin AK" "$LOG" 2>/dev/null
+    temoin_abouti "AK"
     report $? "AK s'est execute en ring 3"
     if [ -x "third_party/build-libcore-bouchaud/libcore-probe" ]; then
-        grep -q "temoin LibSync" "$LOG" 2>/dev/null
+        temoin_abouti "LibSync + LibCore"
         report $? "LibSync + LibCore se sont executes en ring 3"
     fi
     if [ -x "third_party/build-libgc-bouchaud/libgc-probe" ]; then
-        grep -q "temoin LibGC" "$LOG" 2>/dev/null
+        temoin_abouti "LibGC"
         report $? "LibGC a alloue et recolte en ring 3"
+    fi
+    if [ -x "third_party/build-libunicode-bouchaud/libunicode-probe" ]; then
+        temoin_abouti "LibUnicode"
+        report $? "LibUnicode et les donnees ICU en ring 3"
+    fi
+    if [ -x "third_party/build-libcrypto-bouchaud/libcrypto-probe" ]; then
+        temoin_abouti "LibCrypto (BigInt / BigFraction)"
+        report $? "LibCrypto : BigInt et BigFraction en ring 3"
+    fi
+    if [ -x "third_party/build-libjs-bouchaud/libjs-probe" ]; then
+        temoin_abouti "LibJS"
+        report $? "LibJS a evalue du JavaScript en ring 3"
+        # Le jalon M4 : la ligne doit reellement sortir. Un `console.log` sans
+        # client de console s'execute sans rien imprimer — voir libjs-probe.cpp.
+        grep -q "Hello Bouchaud" "$LOG" 2>/dev/null
+        report $? "jalon M4 : console.log a imprime depuis Bouchaud"
     fi
 fi
 

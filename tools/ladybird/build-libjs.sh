@@ -214,19 +214,27 @@ fi
 
 # --- Les en-tetes FFI des caisses Rust --------------------------------------
 #
-# Chaque bibliotheque inclut le sien par `#include <RustFFI.h>`, **sans**
-# prefixe de repertoire. Cinq fichiers portent donc le meme nom, et un unique
-# `-I` commun donnerait a chaque bibliotheque l'interface d'une autre — sans
-# erreur d'inclusion, juste des declarations qui ne correspondent a rien de ce
-# qui sera lie.
+# Les bibliotheques n'emploient pas toutes la meme convention d'inclusion —
+# fait mesure, pas suppose :
 #
-# Chacun est donc range dans son propre repertoire, et `compile_biblio` ajoute
-# le `-I` correspondant a la bibliotheque en cours. C'est ce que fait le CMake
-# d'upstream avec `FFI_OUTPUT_DIR`, cible par cible.
+#     <RustFFI.h>            LibRegex, LibTextCodec
+#     <LibJS/RustFFI.h>      LibJS
+#     <LibURL/RustFFI.h>     LibURL
+#     <LibUnicode/RustFFI.h> LibUnicode
+#
+# La forme prefixee se resout par le `-I$SORTIE/gen` commun. La forme nue, non :
+# cinq fichiers y portent le meme nom, et un `-I` commun donnerait a chaque
+# bibliotheque l'interface d'une autre — sans erreur d'inclusion, juste des
+# declarations qui ne correspondent a rien de ce qui sera lie.
+#
+# On installe donc les deux dispositions : une copie prefixee, et une copie
+# isolee par bibliotheque que `compile_biblio` ajoute au coup par coup. C'est ce
+# que fait le CMake d'upstream avec `FFI_OUTPUT_DIR`, cible par cible.
 for biblio in LibJS LibRegex LibTextCodec LibURL LibUnicode; do
     [ -f "$RUST/gen/$biblio/RustFFI.h" ] || continue
-    mkdir -p "$SORTIE/gen/ffi/$biblio"
+    mkdir -p "$SORTIE/gen/ffi/$biblio" "$SORTIE/gen/$biblio"
     cp "$RUST/gen/$biblio/RustFFI.h" "$SORTIE/gen/ffi/$biblio/RustFFI.h"
+    cp "$RUST/gen/$biblio/RustFFI.h" "$SORTIE/gen/$biblio/RustFFI.h"
 done
 
 CXX=${CXX:-clang++}

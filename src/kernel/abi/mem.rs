@@ -145,6 +145,73 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, fd: i32, offset: 
         return -errno::ENOMEM;
     }
 
+    // --- Reservation d'espace d'adressage -----------------------------------
+    //
+    // Un `mmap` en `PROT_NONE` ne demande pas de la memoire : il demande une
+    // **plage d'adresses** que personne d'autre n'utilisera. Aucune page n'y
+    // sera jamais lue ni ecrite tant qu'elle n'aura pas ete confirmee par un
+    // second `mmap` en `MAP_FIXED` avec de vrais droits. Allouer des frames ici
+    // reviendrait a prendre au serieux une intention que l'appelant n'a pas.
+    //
+    // Ce n'est pas un cas theorique. `GC::PrimitiveStorage` reserve **4 TiB**
+    // ainsi des la construction de la `JS::VM`, pour que tous les pointeurs
+    // compresses de LibJS partagent les memes bits de poids fort. Avec une
+    // allocation avide, cet appel demandait 4 TiB de memoire physique et
+    // rendait `ENOMEM` — et LibJS s'arretait la, sur son tout premier appel
+    // systeme d'importance.
+    //
+    // Le noyau n'a donc rien a faire que reserver l'intervalle : ne pas mapper
+    // ces pages *est* le comportement correct. Un acces avant confirmation fait
+    // une faute de page, comme sous Linux.
+    //
+    // `MAP_NORESERVE` exprime la meme intention pour une plage accessible : ne
+    // pas engager la memoire d'avance. Bouchaud n'a pas de sur-engagement, donc
+    // on ne peut l'honorer que lorsqu'il accompagne `PROT_NONE` — sinon on
+    // alloue, ce qui est plus strict que demande, jamais moins.
+    if prot == PROT_NONE {
+        // Avec `MAP_FIXED`, la plage remplace ce qui s'y trouvait : c'est ainsi
+        // que Linux definit l'appel, et c'est ainsi que `decommit_memory()` de
+        // LibCore **rend** la memoire — un `mmap(PROT_NONE, MAP_FIXED)` sur une
+        // plage vivante. Se contenter de rendre l'adresse ferait de la
+        // liberation une operation sans effet : la memoire ne redescendrait
+        // jamais, et le premier programme a exercer son ramasse-miettes
+        // epuiserait la machine.
+        //
+        // C'est ce qui est arrive : le temoin LibJS tenait jusqu'a sa dixieme
+        // verification, celle qui abandonne 200 000 objets, puis la machine
+        // manquait de memoire.
+        if flags & MAP_FIXED != 0 {
+            process.space.unmap(base, length);
+        }
+        process.promesses.retain(|p| p.fin <= base || p.debut >= base + length);
+        return base as i64;
+    }
+
+    // --- `MAP_NORESERVE` : promettre sans engager --------------------------
+    //
+    // La plage sera accessible, mais l'appelant annonce qu'il n'en touchera
+    // qu'une part. Sous Linux la memoire n'est engagee qu'a l'acces ; c'est ce
+    // que fait mimalloc — l'allocateur d'AK, donc de tout Ladybird — qui prend
+    // ses arenes **par gibioctet**, en lecture-ecriture, et n'en emploie qu'une
+    // fraction.
+    //
+    // Les peupler ici epuisait les 2 Gio de la machine en deux arenes, et le
+    // temoin LibJS mourait d'une dereference nulle a sa dixieme verification —
+    // l'allocateur ayant rendu ce qu'il rend quand il n'a plus rien. Les
+    // refuser aurait ete tout aussi faux.
+    //
+    // On note donc la promesse, et le gestionnaire de faute de page peuple
+    // chaque page a son premier acces, avec les droits enregistres ici.
+    if flags & MAP_NORESERVE != 0 && flags & MAP_ANONYMOUS != 0 {
+        let drapeaux = prot_to_flags(prot);
+        process.promesses.push(task::Promesse {
+            debut: base,
+            fin: base + length,
+            drapeaux,
+        });
+        return base as i64;
+    }
+
     // Le plafond se verifie avant d'allouer quoi que ce soit : echouer a
     // mi-chemin laisserait des pages mappees pour une `mmap` qui rend une
     // erreur, et l'appelant n'aurait aucun moyen de les rendre.
@@ -274,6 +341,34 @@ pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> i64 {
     if !vmm::is_user_addr(addr) {
         return -errno::ENOMEM;
     }
+
+    // Donner des droits a une plage **reservee**, c'est la confirmer.
+    //
+    // C'est l'autre moitie de la reservation d'espace d'adressage (voir
+    // `sys_mmap`), et l'oublier ne se voit pas tout de suite : les droits sont
+    // bien poses, l'appel rend 0, et le programme faute a la premiere ecriture
+    // sur une adresse qu'il croit legitimement posseder.
+    //
+    // C'est exactement ce qui arrivait avec mimalloc, l'allocateur d'AK : il
+    // reserve ses arenes en `PROT_NONE`, puis les confirme par `mprotect` — pas
+    // par un second `mmap`. Sans allocation ici, LibJS mourait d'une faute de
+    // page a la dixieme verification du temoin, loin de sa cause.
+    //
+    // On n'alloue que pour les pages absentes : `map_alloc` laisse intactes
+    // celles qui existent deja, donc un `mprotect` ordinaire sur une plage
+    // vivante ne coute rien de plus.
+    if prot != PROT_NONE {
+        let debut = addr & !(PAGE_SIZE - 1);
+        let fin = (addr + length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let drapeaux = prot_to_flags(prot);
+        // La promesse plutot que l'allocation : `mprotect` peut porter sur une
+        // plage enorme (mimalloc confirme ses arenes ainsi), et tout peupler
+        // ici reviendrait a engager la memoire que `MAP_NORESERVE` disait
+        // justement ne pas vouloir engager. Les pages deja presentes gardent
+        // leur frame et ne font que changer de droits, juste apres.
+        process.promesses.push(task::Promesse { debut, fin, drapeaux });
+    }
+
     process.space.protect(addr, length, prot_to_flags(prot));
     0
 }

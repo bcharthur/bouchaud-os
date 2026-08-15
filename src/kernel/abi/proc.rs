@@ -26,7 +26,7 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
     let parent = task::current_process();
 
     let (space, files, brk_start, brk, mmap_next, cwd, uid, gid, name, parent_pid, signals,
-         partages, limite_as, ecran) = {
+         partages, limite_as, promesses, ecran) = {
         let borrowed = parent.borrow();
         let space = match borrowed.space.duplicate() {
             Some(space) => space,
@@ -46,6 +46,7 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
             borrowed.signals.clone(),
             borrowed.partages.clone(),
             borrowed.limite_as,
+            borrowed.promesses.clone(),
             // L'ecran virtuel se transmet comme le reste de la vue du monde :
             // le renderer, ne d'un `fork` du navigateur, doit voir le meme
             // `/dev/fb0` que son parent — c'est-a-dire la surface du
@@ -85,6 +86,11 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
         signals: child_signals,
         partages,
         limite_as,
+        // Les promesses de pagination a la demande suivent le `fork` : les
+        // pages deja peuplees ont ete dupliquees par `duplicate`, celles qui
+        // ne le sont pas encore doivent le rester dans le fils aussi. Sans cela
+        // l'enfant fauterait sur une plage que son pere considere sienne.
+        promesses,
         ecran,
     }));
     task::register_process(child.clone());
