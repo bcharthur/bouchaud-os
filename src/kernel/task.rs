@@ -106,6 +106,55 @@ pub struct Context {
 }
 
 /// Ressources partagees par tous les threads d'un meme programme.
+/// Peuple a la demande la page fautive, si elle a ete promise.
+///
+/// Rend `true` si la faute est reparee et que l'instruction peut etre reprise.
+///
+/// C'est la contrepartie de `MAP_NORESERVE` (voir `abi::mem::sys_mmap`) : la
+/// plage a ete promise sans etre peuplee, et c'est ici qu'elle le devient, une
+/// page a la fois, avec les droits enregistres a la reservation.
+///
+/// La fonction est volontairement stricte : elle ne peuple **que** ce qui a ete
+/// promis. Une faute hors de toute promesse reste une faute, et le processus
+/// meurt comme avant — sans quoi le noyau transformerait chaque dereference de
+/// pointeur nul en allocation silencieuse, et l'on perdrait le seul mecanisme
+/// qui signale ces defauts.
+pub fn peuple_a_la_demande(adresse: u64) -> bool {
+    if !crate::kernel::vmm::is_user_addr(adresse) || !in_user_task() {
+        return false;
+    }
+    let processus = current_process();
+    let mut p = processus.borrow_mut();
+
+    let page = adresse & !(crate::kernel::vmm::PAGE_SIZE - 1);
+    let drapeaux = match p.promesses.iter().rev().find(|q| page >= q.debut && page < q.fin) {
+        // La derniere promesse couvrant l'adresse fait foi : un `mprotect` sur
+        // une plage deja promise en redefinit les droits, et c'est le plus
+        // recent qui vaut.
+        Some(promesse) => promesse.drapeaux,
+        None => return false,
+    };
+
+    if p.space.translate(page).is_some() {
+        // Deja presente : la faute vient des droits, pas de l'absence. Ce n'est
+        // pas a nous de la reparer.
+        return false;
+    }
+
+    p.space.map_alloc(page, crate::kernel::vmm::PAGE_SIZE, drapeaux)
+}
+
+/// Une plage d'adresses promise a un processus, peuplee page par page.
+///
+/// `drapeaux` porte les droits demandes a la reservation : c'est avec eux que la
+/// page sera mappee au premier acces, et non avec des droits devines.
+#[derive(Clone, Copy)]
+pub struct Promesse {
+    pub debut: u64,
+    pub fin: u64,
+    pub drapeaux: u64,
+}
+
 pub struct Process {
     pub pid: u32,
     /// PID du parent (0 pour le processus lance depuis le shell).
@@ -136,6 +185,19 @@ pub struct Process {
     pub partages: Vec<Partage>,
     /// Taille maximale de l'espace d'adressage (`RLIMIT_AS`), 0 = illimite.
     pub limite_as: u64,
+    /// Plages promises mais pas encore peuplees : la pagination a la demande.
+    ///
+    /// Un `mmap` en `MAP_NORESERVE` demande une plage utilisable **sans**
+    /// engager la memoire d'avance. C'est ainsi que mimalloc — l'allocateur
+    /// d'AK, donc de tout Ladybird — prend ses arenes : **un gibioctet a la
+    /// fois**, en lecture-ecriture, dont il ne touchera qu'une fraction.
+    ///
+    /// Les peupler a l'appel epuisait la machine en deux arenes. Les refuser
+    /// aurait fait echouer l'allocateur. La seule reponse juste est celle de
+    /// Linux : noter la promesse, et n'allouer chaque page qu'a son premier
+    /// acces — c'est ce que fait `crate::kernel::vmm::peuple_a_la_demande`,
+    /// appele depuis le gestionnaire de faute de page.
+    pub promesses: Vec<Promesse>,
     /// Ecran virtuel : `/dev/fb0` de ce processus designe cette surface
     /// partagee, et non le framebuffer physique.
     ///
@@ -1581,6 +1643,7 @@ pub fn new_process(name: &str, cwd: usize) -> Option<Rc<RefCell<Process>>> {
         signals: crate::kernel::signal::SignalState::default(),
         partages: Vec::new(),
         limite_as: 0,
+        promesses: Vec::new(),
         ecran: None,
     }));
     processes().push(process.clone());

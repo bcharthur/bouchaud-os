@@ -159,6 +159,13 @@ extern "x86-interrupt" fn page_fault_handler(stack: InterruptStackFrame, code: P
     let _gs = GsGuard::enter(&stack);
     let addr = x86_64::registers::control::Cr2::read();
     if from_user(&stack) && crate::kernel::task::in_user_task() {
+        // Pagination a la demande : la page a-t-elle ete promise ? Si oui, on
+        // l'alloue et l'instruction reprend comme si de rien n'etait. C'est ce
+        // qui rend `MAP_NORESERVE` utilisable — voir
+        // `kernel::task::peuple_a_la_demande`.
+        if crate::kernel::task::peuple_a_la_demande(addr.as_u64()) {
+            return;
+        }
         crate::println!("faute de page utilisateur @ {:#x} ({:?})", addr.as_u64(), code);
         kill_faulting_task("faute de page", &stack);
     }

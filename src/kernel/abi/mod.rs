@@ -386,6 +386,7 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         // `ENOSYS` la fait retomber proprement sur son chemin sans rseq.
         RSEQ => -errno::ENOSYS,
         CLONE => proc_clone(args, frame),
+        CLONE3 => proc_clone3(args, frame),
         // `vfork` partage l'espace d'adressage du parent jusqu'a l'`execve` ;
         // le dupliquer est plus couteux mais toujours correct.
         FORK | VFORK => proc::sys_fork(frame),
@@ -752,6 +753,54 @@ fn sys_arch_prctl(code: i32, addr: u64) -> i64 {
         }
         _ => -errno::EINVAL,
     }
+}
+
+/// `clone3` : la forme moderne de `clone`, avec ses arguments en memoire.
+///
+/// ## Pourquoi il a fallu l'implementer
+///
+/// Parce que la glibc l'emet **avant** `clone`, et que rendre `ENOSYS` ne
+/// suffit pas toujours a la faire reculer. C'est exactement le meme piege que
+/// celui deja documente dans `proc_clone` a propos de `fork` : l'appel systeme
+/// historique etait implemente et teste, mais les programmes reels emettent
+/// l'autre.
+///
+/// Le symptome, lui, ne parlait pas de `clone3` : le temoin LibJS s'arretait a
+/// sa dixieme verification — celle qui met le ramasse-miettes sous pression et
+/// fait donc demarrer le fil de collecte de LibGC — par une dereference de
+/// pointeur nul a l'adresse 0x120, apres que la memoire de la machine soit
+/// montee a 100 %.
+///
+/// ## La difference qui compte
+///
+/// `struct clone_args` (`include/uapi/linux/sched.h`) donne la pile par sa
+/// **base et sa taille**, la ou `clone` recevait son **sommet**. Sur x86-64 la
+/// pile descend : le sommet vaut donc `stack + stack_size`. Confondre les deux
+/// donnerait au fil une pile qui croit vers le bas depuis son propre debut,
+/// c'est-a-dire hors de sa zone — un defaut qui ne se manifeste qu'au premier
+/// appel un peu profond.
+fn proc_clone3(args: [u64; 6], frame: &TrapFrame) -> i64 {
+    let adresse = args[0];
+    let taille = args[1] as usize;
+    // La structure a grandi au fil des versions du noyau ; les 64 premiers
+    // octets sont figes et portent tout ce dont nous avons besoin.
+    if adresse == 0 || taille < 64 {
+        return -errno::EINVAL;
+    }
+
+    let lire = |decalage: u64| -> Option<u64> { user_read_u64(adresse + decalage) };
+
+    let (flags, child_tid, parent_tid, pile, taille_pile, tls) = match (
+        lire(0), lire(16), lire(24), lire(40), lire(48), lire(56),
+    ) {
+        (Some(f), Some(c), Some(p), Some(s), Some(ts), Some(t)) => (f, c, p, s, ts, t),
+        _ => return -errno::EFAULT,
+    };
+
+    // `clone` attend le sommet de pile ; `clone3` donne la base et la taille.
+    let sommet = if pile != 0 { pile + taille_pile } else { 0 };
+
+    proc_clone([flags, sommet, parent_tid, child_tid, tls, 0], frame)
 }
 
 /// `clone` : creation de thread. Seul `CLONE_THREAD` (pthread) est supporte ;

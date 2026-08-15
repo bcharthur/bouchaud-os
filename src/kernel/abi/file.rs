@@ -168,6 +168,24 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
             }
             (end - offset) as i64
         }
+        // Instantane : un fichier ordinaire, mais dont le contenu vit dans le
+        // descripteur et non dans le RAMFS. La glibc lit `/proc/self/maps` par
+        // `getdelim`, donc en plusieurs `read` successifs : le decalage doit
+        // avancer comme pour un vrai fichier.
+        FdKind::Instantane(ref contenu) => {
+            let offset = process.borrow().files.get(fd).map(|d| d.offset).unwrap_or(0);
+            if offset >= contenu.len() {
+                return 0;
+            }
+            let fin = core::cmp::min(contenu.len(), offset + count);
+            if !user_write(buffer, &contenu[offset..fin]) {
+                return -errno::EFAULT;
+            }
+            if let Some(desc) = process.borrow_mut().files.get_mut(fd) {
+                desc.offset = fin;
+            }
+            (fin - offset) as i64
+        }
         FdKind::Dir(_) => -errno::EISDIR,
         FdKind::Framebuffer | FdKind::VirtualTerminal => -errno::EINVAL,
         FdKind::InputKeyboard => read_input(buffer, count, input::Device::Keyboard),
@@ -310,6 +328,8 @@ pub fn sys_write(fd: i32, buffer: u64, count: usize) -> i64 {
         FdKind::Null => count as i64,
         FdKind::Zero => count as i64,
         FdKind::Random => count as i64,
+        // `/proc/self/maps` decrit un etat, il ne le recoit pas.
+        FdKind::Instantane(_) => -errno::EBADF,
         FdKind::Audio => {
             if !crate::drivers::ac97::pret() && !crate::drivers::ac97::init() {
                 return -errno::ENODEV;
@@ -699,6 +719,7 @@ pub fn sys_lseek(fd: i32, offset: i64, whence: u32) -> i64 {
     };
     let size = match desc.kind {
         FdKind::File(node) | FdKind::Dir(node) => ramfs::fs().nodes[node].content.len() as i64,
+        FdKind::Instantane(ref contenu) => contenu.len() as i64,
         FdKind::Console | FdKind::Pipe(_, _) => return -errno::ESPIPE,
         _ => 0,
     };
@@ -851,11 +872,16 @@ pub fn sys_stat_path(path_addr: u64, out: u64, _no_follow: bool) -> i64 {
         None => return -errno::EFAULT,
     };
     if let Some(kind) = device_for_path(&path) {
-        let mode = match kind {
-            FdKind::Framebuffer | FdKind::InputKeyboard | FdKind::InputMouse => S_IFCHR | 0o660,
-            _ => S_IFCHR | 0o666,
+        // Un instantane est un fichier ordinaire, pas un peripherique : c'est
+        // ce que `stat` doit dire, et avec sa taille. La glibc dimensionne le
+        // tampon de `fopen` dessus ; annoncer 0 octet la ferait lire
+        // caractere par caractere, et un `S_IFCHR` lui interdirait de chercher.
+        let (mode, taille) = match kind {
+            FdKind::Instantane(ref contenu) => (S_IFREG | 0o444, contenu.len() as u64),
+            FdKind::Framebuffer | FdKind::InputKeyboard | FdKind::InputMouse => (S_IFCHR | 0o660, 0),
+            _ => (S_IFCHR | 0o666, 0),
         };
-        let buffer = stat_bytes(1, mode, 0, 0, 0);
+        let buffer = stat_bytes(1, mode, 0, 0, taille);
         return if user_write(out, &buffer) { 0 } else { -errno::EFAULT };
     }
     match resolve(&path) {
@@ -878,6 +904,11 @@ pub fn sys_fstat(fd: i32, out: u64) -> i64 {
         FdKind::File(node) | FdKind::Dir(node) => fill_stat(node),
         FdKind::Console => stat_bytes(0, S_IFCHR | 0o620, 0, 0, 0),
         FdKind::Pipe(_, _) => stat_bytes(0, S_IFIFO | 0o600, 0, 0, 0),
+        // Un fichier ordinaire, avec sa taille : la glibc dimensionne le tampon
+        // de `fopen` dessus. Le declarer caractere ferait lire octet par octet.
+        FdKind::Instantane(ref contenu) => {
+            stat_bytes(0, S_IFREG | 0o444, 0, 0, contenu.len() as u64)
+        }
         FdKind::Framebuffer => {
             let (_, hauteur, pas) = geometrie_ecran();
             stat_bytes(1, S_IFCHR | 0o660, 0, 0, (pas * hauteur) as u64)
@@ -929,7 +960,12 @@ pub fn sys_statx(dirfd: i32, path_addr: u64, _flags: u32, _mask: u32, out: u64) 
             (mode, entry.content.len() as u64, entry.uid as u32, entry.gid as u32, node as u64)
         }
         None if !path.is_empty() && device_for_path(&absolute(&path)).is_some() => {
-            (S_IFCHR | 0o666, 0, 0, 0, 1)
+            match device_for_path(&absolute(&path)) {
+                Some(FdKind::Instantane(contenu)) => {
+                    (S_IFREG | 0o444, contenu.len() as u64, 0, 0, 1)
+                }
+                _ => (S_IFCHR | 0o666, 0, 0, 0, 1),
+            }
         }
         None => return -errno::ENOENT,
     };
@@ -1729,7 +1765,8 @@ fn readable(fd: i32) -> bool {
     };
     match kind {
         FdKind::Console => keyboard::has_pending(),
-        FdKind::File(_) | FdKind::Dir(_) | FdKind::Zero | FdKind::Random | FdKind::Null => true,
+        FdKind::File(_) | FdKind::Dir(_) | FdKind::Zero | FdKind::Random | FdKind::Null
+        | FdKind::Instantane(_) => true,
         // Un tube dont l'ecrivain a disparu est « pret » : la lecture rendra 0.
         // Le declarer bloque ferait tourner indefiniment une boucle `poll` qui
         // attend la fin de fichier.

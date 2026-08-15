@@ -1,0 +1,131 @@
+# Suivi de l'upstream Ladybird.
+#
+# ## La regle qui gouverne ce fichier
+#
+# **Un SHA non teste n'entre jamais dans une release.** Ce job ne fait donc
+# jamais avancer le SHA tout seul : il essaie, il rend compte, et il laisse un
+# humain decider. Un robot qui pousserait un upstream rouge dans `main` couterait
+# plus cher que le suivi manuel qu'il pretend remplacer.
+#
+# Deux travaux distincts, et ils n'ont pas le meme statut :
+#
+#   - `epingle` verifie que le SHA du manifeste est bien celui qu'on recupere.
+#     **Bloquant** : c'est la reproductibilite du port.
+#   - `amont` regarde ce qu'il y a de neuf chez Ladybird et tente la
+#     construction. **Informatif** : Ladybird bouge plusieurs fois par jour, et
+#     son etat du moment n'est pas un defaut de Bouchaud.
+
+name: ladybird-sync
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "third_party/UPSTREAM.md"
+      - "tools/ladybird/**"
+      - ".github/workflows/ladybird-sync.yml"
+  pull_request:
+    paths:
+      - "third_party/UPSTREAM.md"
+      - "tools/ladybird/**"
+  schedule:
+    # Une fois par jour. Suffisant pour voir venir une rupture, assez rare pour
+    # ne pas transformer la page Actions en flux continu.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # --- Le SHA epingle est-il celui qu'on croit ? ------------------------------
+  epingle:
+    name: epingle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Recuperer Ladybird au SHA epingle
+        run: ./tools/ladybird/fetch.sh
+
+      - name: Le SHA obtenu est bien celui du manifeste
+        run: ./tools/ladybird/fetch.sh --verifie
+
+      # Un SHA epingle qui a disparu de l'upstream (force-push, branche
+      # supprimee) rendrait le port irreproductible sans que personne ne le
+      # remarque avant d'en avoir besoin.
+      - name: Le SHA existe toujours chez upstream
+        run: |
+          SHA=$(grep -m1 -E '^\s+sha\s+[0-9a-f]{40}' third_party/UPSTREAM.md | awk '{print $2}')
+          git ls-remote https://github.com/LadybirdBrowser/ladybird | grep -q "$SHA" \
+            && echo "  ok     $SHA est encore reference par une branche upstream" \
+            || echo "  note   $SHA n'est plus en tete d'une branche (normal si ancien)"
+
+  # --- Que se passe-t-il si l'on monte a l'upstream du jour ? -----------------
+  #
+  # Informatif : ce job a le droit d'echouer sans fermer la barriere.
+  amont:
+    name: amont (informatif)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ecart entre le SHA epingle et l'upstream du jour
+        id: ecart
+        run: |
+          EPINGLE=$(grep -m1 -E '^\s+sha\s+[0-9a-f]{40}' third_party/UPSTREAM.md | awk '{print $2}')
+          AMONT=$(git ls-remote https://github.com/LadybirdBrowser/ladybird HEAD | cut -f1)
+          echo "epingle=$EPINGLE" >> "$GITHUB_OUTPUT"
+          echo "amont=$AMONT" >> "$GITHUB_OUTPUT"
+          if [ "$EPINGLE" = "$AMONT" ]; then
+            echo "a_jour=1" >> "$GITHUB_OUTPUT"
+            echo "Le port est a l'upstream du jour."
+          else
+            echo "a_jour=0" >> "$GITHUB_OUTPUT"
+            echo "epingle : $EPINGLE"
+            echo "amont   : $AMONT"
+          fi
+
+      - name: Recuperer l'upstream du jour
+        if: steps.ecart.outputs.a_jour == '0'
+        run: ./tools/ladybird/fetch.sh "${{ steps.ecart.outputs.amont }}"
+
+      # Ce que l'on verifie a ce stade du portage : que l'arbre a la forme qu'on
+      # attend. Les cibles de construction viendront s'ajouter ici au fur et a
+      # mesure des PR (AK, LibCore, LibGC, LibJS).
+      - name: L'arbre a toujours la forme attendue
+        if: steps.ecart.outputs.a_jour == '0'
+        run: |
+          echecs=0
+          for chemin in AK Libraries/LibCore Libraries/LibGC Libraries/LibJS \
+                        Libraries/LibIPC Services/WebContent vcpkg.json LICENSE; do
+            if [ -e "third_party/ladybird/$chemin" ]; then
+              echo "  ok     $chemin"
+            else
+              echo "  ECHEC  $chemin a disparu"
+              echecs=$((echecs+1))
+            fi
+          done
+          # La licence ne doit pas changer sans qu'on le sache : c'est ce qui
+          # autorise la redistribution.
+          if ! diff -q third_party/ladybird/LICENSE \
+                      THIRD_PARTY_LICENSES/ladybird-BSD-2-Clause.txt >/dev/null; then
+            echo "  ECHEC  la licence upstream a change — a examiner avant toute montee"
+            echecs=$((echecs+1))
+          else
+            echo "  ok     licence inchangee"
+          fi
+          exit $echecs
+
+      - name: Verdict
+        if: always()
+        run: |
+          if [ "${{ steps.ecart.outputs.a_jour }}" = "1" ]; then
+            echo "Rien a faire : le port suit l'upstream."
+          else
+            echo "Un SHA plus recent existe : ${{ steps.ecart.outputs.amont }}"
+            echo "Pour le retenir, editer third_party/UPSTREAM.md en indiquant la raison."
+            echo "Ce job ne le fait pas tout seul, et c'est voulu."
+          fi

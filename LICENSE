@@ -1,0 +1,24 @@
+Bouchaud OS est publie sous double licence, au choix de l'utilisateur :
+
+  * MIT        -- voir LICENSE-MIT
+  * Apache-2.0 -- voir LICENSE-APACHE
+
+C'est la double licence declaree par `Cargo.toml` (`license = "MIT OR
+Apache-2.0"`) et la pratique usuelle de l'ecosysteme Rust.
+
+Sauf mention contraire explicite, toute contribution soumise a ce depot est
+proposee sous ces deux licences, sans condition supplementaire.
+
+---
+
+Composants tiers
+
+Bouchaud OS incorpore des composants tiers publies sous d'autres licences (Qt,
+CPython, QuickJS, FFmpeg, musl, DejaVu, et -- a mesure du portage -- Ladybird et
+ses dependances).
+
+Ces licences ne sont pas remplacees par celle-ci : chaque composant reste soumis
+a la sienne, et ses notices de copyright sont conservees.
+
+  * inventaire et regles : THIRD_PARTY_NOTICES.md
+  * textes integraux     : THIRD_PARTY_LICENSES/

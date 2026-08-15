@@ -59,6 +59,19 @@ pub enum FdKind {
     /// Console virtuelle `/dev/tty0` : ne sert qu'a ses ioctls de mode
     /// graphique, les entrees/sorties passent par la console.
     VirtualTerminal,
+    /// Instantane en memoire, produit a l'ouverture et lu comme un fichier.
+    ///
+    /// C'est ce qui permet a `/proc/self/…` de decrire le processus **courant**
+    /// sans que le RAMFS n'ait a porter une copie par processus. Un fichier
+    /// ecrit dans `/proc/self/` serait partage par tout le systeme : le
+    /// gestionnaire de fenetres et le navigateur y liraient la meme chose,
+    /// c'est-a-dire la mauvaise pour l'un des deux.
+    ///
+    /// Le contenu est fige a l'ouverture. C'est la meme convention que les
+    /// autres fichiers de `/proc` sur Bouchaud (voir `sysroot.rs` : « ce sont
+    /// des instantanes, pas des vues vivantes »), et elle suffit aux
+    /// consommateurs reels, qui ouvrent, lisent d'un trait et referment.
+    Instantane(Rc<Vec<u8>>),
 }
 
 /// Etat partage d'un tube.
@@ -364,6 +377,97 @@ pub fn device_for_path(path: &str) -> Option<FdKind> {
         // Sortie audio. `/dev/dsp` est le nom OSS, `/dev/audio` son alias
         // historique : les deux menent au meme pilote AC'97.
         "/dev/dsp" | "/dev/dsp0" | "/dev/audio" | "/dev/sound/dsp" => Some(FdKind::Audio),
+        "/proc/self/maps" | "/proc/self/smaps" => {
+            Some(FdKind::Instantane(Rc::new(carte_memoire())))
+        }
         _ => None,
     }
+}
+
+/// Contenu de `/proc/self/maps` pour le processus courant.
+///
+/// ## Pourquoi ce fichier existe
+///
+/// Parce que la glibc en a besoin pour repondre a une question qu'elle ne sait
+/// pas resoudre autrement : **ou commence et ou finit la pile du thread
+/// principal ?**
+///
+/// Pour un thread cree par `pthread_create`, la reponse est connue — c'est la
+/// libc qui a alloue la pile. Pour le thread principal, c'est le noyau qui l'a
+/// posee, et rien dans l'ABI ne la lui communique. `pthread_getattr_np()` ouvre
+/// donc `/proc/self/maps`, y cherche la ligne dont la plage contient
+/// `__libc_stack_end`, et en deduit les bornes. Sans le fichier, elle rend
+/// `ENOENT`.
+///
+/// Ce n'est pas un detail de confort. `AK::StackInfo` appelle
+/// `pthread_getattr_np` et fait un `VERIFY_NOT_REACHED()` sur echec : **toute**
+/// brique de Ladybird s'arrete la — AK, LibGC, LibJS. Et LibGC en a besoin pour
+/// une raison de fond, pas seulement de demarrage : c'est un ramasse-miettes
+/// **conservateur**, qui balaie la pile a la recherche de racines. Des bornes
+/// fausses ne le feraient pas planter, elles lui feraient recolter des objets
+/// vivants — un defaut qui se manifeste ailleurs, plus tard, sans lien apparent
+/// avec sa cause.
+///
+/// ## Ce qu'on decrit
+///
+/// Les quatre regions que le noyau connait exactement : l'image, le tas `brk`,
+/// la zone `mmap` et la pile. Le format est celui de Linux, que la glibc analyse
+/// par `sscanf("%lx-%lx")` :
+///
+/// ```text
+///   400000000000-400000001000 r-xp 00000000 00:00 0    /chemin/du/binaire
+///   407efe000000-407effffffff rw-p 00000000 00:00 0    [stack]
+/// ```
+///
+/// Seule la ligne `[stack]` compte pour `pthread_getattr_np`, mais les autres
+/// coutent quelques lignes et rendent le fichier utile a `pmap`, aux
+/// bibliotheques qui comptent leurs pages, et au diagnostic.
+fn carte_memoire() -> Vec<u8> {
+    use alloc::format;
+    use alloc::string::String;
+
+    let processus = crate::kernel::task::current_process();
+    let p = processus.borrow();
+
+    let sommet = crate::kernel::vmm::user_stack_top();
+    let base_pile = sommet - crate::kernel::vmm::USER_STACK_SIZE;
+
+    let mut texte = String::new();
+
+    // L'image chargee. On n'en connait pas le decoupage en segments ici : une
+    // seule ligne couvrant du debut de l'image au debut du tas suffit aux
+    // consommateurs, et vaut mieux qu'une ligne inventee par segment.
+    let base_image = crate::kernel::vmm::user_load_base();
+    if p.brk_start > base_image {
+        texte.push_str(&format!(
+            "{:012x}-{:012x} r-xp 00000000 00:00 0                          /{}\n",
+            base_image, p.brk_start, p.name
+        ));
+    }
+
+    // Le tas `brk`. Vide tant que rien n'a ete demande — on ne l'ecrit alors
+    // pas, plutot que d'annoncer une region de taille nulle.
+    if p.brk > p.brk_start {
+        texte.push_str(&format!(
+            "{:012x}-{:012x} rw-p 00000000 00:00 0                          [heap]\n",
+            p.brk_start, p.brk
+        ));
+    }
+
+    // La zone `mmap`, de sa base au premier emplacement libre.
+    let base_mmap = crate::kernel::vmm::user_mmap_base();
+    if p.mmap_next > base_mmap {
+        texte.push_str(&format!(
+            "{:012x}-{:012x} rw-p 00000000 00:00 0\n",
+            base_mmap, p.mmap_next
+        ));
+    }
+
+    // La pile — la seule ligne dont `pthread_getattr_np` a reellement besoin.
+    texte.push_str(&format!(
+        "{:012x}-{:012x} rw-p 00000000 00:00 0                          [stack]\n",
+        base_pile, sommet
+    ));
+
+    texte.into_bytes()
 }

@@ -74,6 +74,12 @@ if ! (cd tools/userland && OUT=../../$WORK/files ./build.sh freestanding >/dev/n
     red "la construction freestanding a echoue"
     exit 1
 fi
+# Le temoin C++23 conditionne tout le portage Ladybird : il doit tourner a
+# chaque scenario, pas seulement le jour ou l'on y pense.
+if ! (cd tools/userland && OUT=../../$WORK/files ./build.sh cpp23 >/dev/null); then
+    red "la construction C++23 a echoue (g++ >= 13 requis)"
+    exit 1
+fi
 
 # --- 2. Scenario ------------------------------------------------------------
 
@@ -93,7 +99,73 @@ exec /shm-probe
 exec /ipc-probe
 exec /ordonnanceur-probe
 exec /qpa-probe
+exec /cpp23-probe
 SCENARIO
+
+# AK, la base de Ladybird. Comme Python et Qt : si le portage a ete construit,
+# on le joue ; sinon on s'en passe. C'est ce qui garde `test.sh` utilisable sans
+# avoir recupere les 27 877 fichiers de l'upstream.
+AK_PROBE=third_party/build-ak-bouchaud/ak-probe
+if [ -x "$AK_PROBE" ]; then
+    info "== AK (portage Ladybird) =="
+    # ## Ce qui entre dans l'image, et pourquoi pas tout
+    #
+    # `src/fs/tar.rs` refuse de lire plus de 192 Mio d'archive — un garde-fou
+    # contre l'epuisement du tas, puisque le RAMFS tient l'archive **et** les
+    # fichiers deplies. Or les binaires du portage Ladybird lient les donnees
+    # ICU en statique : ils pesent une cinquantaine de mega-octets **chacun**.
+    # Deux d'entre eux suffisent a faire deborder l'image.
+    #
+    # Le symptome ne ressemble a rien de ce qui precede : `mkdisk` reussit, la
+    # copie reussit, et c'est le **noyau** qui rejette ensuite un ELF tronque
+    # par « segment PT_LOAD hors du fichier ». Rien cote hote ne l'annonce.
+    #
+    # Deux mesures, donc.
+    #
+    # 1. On **depouille** les binaires copies. Ils portent leurs informations
+    #    de debogage, inutiles en ring 3 — le diagnostic se fait sur l'hote, ou
+    #    les binaires complets restent intacts.
+    # 2. Quand `js` d'upstream existe, il **remplace** `libjs-probe` au lieu de
+    #    s'y ajouter. Les deux exercent la meme chaine ; celui d'upstream le
+    #    fait mieux, puisque c'est son code et non le notre.
+    copie_depouillee() {
+        cp "$1" "$2"
+        strip "$2" 2>/dev/null || true
+    }
+
+    copie_depouillee "$AK_PROBE" "$WORK/files/ak-probe"
+    echo "exec /ak-probe" >> "$WORK/files/autorun"
+
+    JS_UPSTREAM=third_party/build-js-bouchaud/js
+    if [ -x "$JS_UPSTREAM" ]; then
+        copie_depouillee "$JS_UPSTREAM" "$WORK/files/js"
+        cp tools/ladybird/temoin.js "$WORK/files/temoin.js"
+    fi
+
+    # L'ordre est celui de la pile : chaque sonde suppose la precedente.
+    for etage in libcore libgc libunicode libcrypto libjs; do
+        # `libjs-probe` cede la place a `js` quand celui-ci existe. Sur un arbre
+        # ou `js` n'a pas ete construit, la sonde reste.
+        if [ "$etage" = libjs ] && [ -x "$JS_UPSTREAM" ]; then
+            continue
+        fi
+        SONDE="third_party/build-$etage-bouchaud/$etage-probe"
+        if [ -x "$SONDE" ]; then
+            copie_depouillee "$SONDE" "$WORK/files/$etage-probe"
+            echo "exec /$etage-probe" >> "$WORK/files/autorun"
+        fi
+    done
+
+    # `js` en dernier : c'est le plus lourd, et le seul dont l'echec ne dirait
+    # rien de neuf si une brique en amont avait deja lache.
+    if [ -x "$JS_UPSTREAM" ]; then
+        echo "exec /js /temoin.js" >> "$WORK/files/autorun"
+    fi
+else
+    info "AK absent — pour l'ajouter au scenario :"
+    info "  ./tools/ladybird/fetch.sh && ./tools/ladybird/build-deps.sh --cible \\"
+    info "  && ./tools/ladybird/build-ak.sh --cible"
+fi
 
 # Python et Qt ne sont pas construits par ce script : ils demandent une
 # vingtaine de minutes chacun et des sources telechargees. S'ils sont la, on les
@@ -160,6 +232,24 @@ if [ -x "$NAVIGATEUR_DIR/bo-navigateur" ]; then
 fi
 
 info "== fabrication du disque de test =="
+# ## Le garde-fou de taille, et pourquoi il vaut mieux ici qu'a l'execution
+#
+# `src/fs/tar.rs` ne lit que les 192 premiers Mio de l'archive. Au-dela, le
+# noyau deplie une archive tronquee : les derniers fichiers sont incomplets, et
+# le seul signe est un « segment PT_LOAD hors du fichier » au moment de les
+# executer — un message qui accuse l'ELF, pas l'image.
+#
+# On mesure donc avant de demarrer. Une image trop grosse est une erreur de
+# construction, pas une surprise a diagnostiquer trente minutes plus tard.
+TAILLE_FICHIERS=$(du -sb "$WORK/files" | cut -f1)
+LIMITE=$((192 * 1024 * 1024))
+if [ "$TAILLE_FICHIERS" -ge "$LIMITE" ]; then
+    red "les fichiers du scenario font $((TAILLE_FICHIERS / 1024 / 1024)) Mio"
+    red "  or src/fs/tar.rs n'en lit que $((LIMITE / 1024 / 1024)) : l'archive serait tronquee"
+    red "  (les binaires Ladybird lient les donnees ICU en statique, ~50 Mio piece)"
+    exit 1
+fi
+
 if ! (cd tools/userland && IMAGE=../../$DISK ./mkdisk.sh ../../$WORK/files >/dev/null); then
     red "mkdisk a echoue"
     exit 1
@@ -224,6 +314,71 @@ report $? "le scenario est alle jusqu'au bout"
 # contente d'aller au bout. Sa derniere ligne fait donc office de bilan.
 grep -q "\[main\] termine" "$LOG" 2>/dev/null
 report $? "ring3-selftest est alle jusqu'a sa derniere etape"
+
+# Le temoin C++23 : sans lui, aucune brique Ladybird ne peut etre construite.
+grep -q "temoin C++23" "$LOG" 2>/dev/null
+report $? "le temoin C++23 s'est execute en ring 3"
+
+# Une sonde a-t-elle vraiment abouti ?
+#
+# Chercher sa banniere ne suffit pas, et c'est une lecon payee : `ak-probe` et
+# `libgc-probe` ont longtemps ete comptes au vert alors qu'ils **mouraient** en
+# ring 3 sur `AK/StackInfo.cpp`. La banniere s'imprime avant le premier appel a
+# `pthread_getattr_np` ; le grep la trouvait, et le verdict annoncait un succes
+# que rien n'etayait. Les lignes « RESULTAT » qui suivaient dans le journal
+# appartenaient a d'autres sondes.
+#
+# On exige donc que le bilan de la sonde suive sa banniere, sans qu'une autre
+# banniere ne s'intercale, et qu'il annonce zero echec. C'est la seule lecture
+# qu'un plantage ne peut pas satisfaire.
+temoin_abouti() {
+    awk -v banniere="== temoin $1 ==" '
+        index($0, banniere) { dedans = 1; next }
+        dedans && /== temoin / { dedans = 0 }
+        dedans && /RESULTAT/ {
+            if (index($0, "0 verification(s) en echec")) { trouve = 1 }
+            dedans = 0
+        }
+        END { exit trouve ? 0 : 1 }
+    ' "$LOG" 2>/dev/null
+}
+
+# AK n'est verifie que s'il a ete construit : son absence n'est pas un echec.
+if [ -x "$AK_PROBE" ]; then
+    temoin_abouti "AK"
+    report $? "AK s'est execute en ring 3"
+    if [ -x "third_party/build-libcore-bouchaud/libcore-probe" ]; then
+        temoin_abouti "LibSync + LibCore"
+        report $? "LibSync + LibCore se sont executes en ring 3"
+    fi
+    if [ -x "third_party/build-libgc-bouchaud/libgc-probe" ]; then
+        temoin_abouti "LibGC"
+        report $? "LibGC a alloue et recolte en ring 3"
+    fi
+    if [ -x "third_party/build-libunicode-bouchaud/libunicode-probe" ]; then
+        temoin_abouti "LibUnicode"
+        report $? "LibUnicode et les donnees ICU en ring 3"
+    fi
+    if [ -x "third_party/build-libcrypto-bouchaud/libcrypto-probe" ]; then
+        temoin_abouti "LibCrypto (BigInt / BigFraction)"
+        report $? "LibCrypto : BigInt et BigFraction en ring 3"
+    fi
+    if [ -x "third_party/build-libjs-bouchaud/libjs-probe" ] && [ ! -x "$JS_UPSTREAM" ]; then
+        temoin_abouti "LibJS"
+        report $? "LibJS a evalue du JavaScript en ring 3"
+    fi
+    if [ -x "$JS_UPSTREAM" ]; then
+        # Le bilan est imprime par `temoin.js` lui-meme, a travers `js`. On
+        # exige la ligne exacte : un `js` qui demarre puis echoue afficherait
+        # ses premieres verifications sans jamais l'atteindre.
+        grep -q "RESULTAT : 0 verification(s) en echec" "$LOG" 2>/dev/null
+        report $? "js d'upstream a execute temoin.js en ring 3"
+    fi
+    # Le jalon M4 : la ligne doit reellement sortir, quelle que soit celle des
+    # deux voies qui la produit.
+    grep -q "Hello Bouchaud" "$LOG" 2>/dev/null
+    report $? "jalon M4 : console.log a imprime depuis Bouchaud"
+fi
 
 # Les deux autres sondes impriment leur propre bilan ; on les compte plutot que
 # de faire confiance au seul code de sortie, qui ne dit pas laquelle a lache.

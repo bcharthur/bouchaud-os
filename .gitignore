@@ -59,3 +59,32 @@ tools/userland/navigateur/tests/ordonnanceur-navigateur.json
 # Verdict du demarrage produit, ecrit par tools/verdict-produit.py a chaque
 # execution. Un resultat de mesure, pas une source.
 jalons-produit.json
+
+# Arbre Ladybird : recupere par tools/ladybird/fetch.sh au SHA de
+# third_party/UPSTREAM.md. 27 877 fichiers qui n' ont rien a faire dans
+# l' historique de Bouchaud.
+third_party/ladybird/
+
+# Constructions du portage Ladybird (regenerables par tools/ladybird/*.sh)
+third_party/deps-src/
+third_party/deps-hote/
+third_party/deps-bouchaud/
+third_party/build-ak-*/
+third_party/build-libcore-*/
+third_party/build-libgc-*/
+third_party/build-libunicode-*/
+third_party/build-rust-*/
+third_party/icu-src/
+third_party/icu-hote/
+third_party/icu-bouchaud/
+# Les variantes « cible » sont des liens symboliques vers la construction hote
+# (meme chaine d'outils, voir build-icu.sh) : les motifs a barre oblique
+# ci-dessus ne les attrapent pas.
+third_party/icu-bouchaud
+third_party/build-rust-bouchaud
+third_party/build-libcrypto-*/
+third_party/build-libjs-*/
+third_party/gen-hote/
+third_party/gen-bouchaud/
+third_party/gen-bouchaud
+third_party/build-js-*/
