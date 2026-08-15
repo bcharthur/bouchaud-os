@@ -1,93 +1,90 @@
-# M5b en ring 3 : un message court passe, un message long non
+# M5b en ring 3 : le message reste dans la file d'envoi
 
-## L'observation
+**M5 n'est pas termine.** Ce document dit ou en est le diagnostic.
 
-Le temoin `tools/ladybird/libipc-codec-probe.cpp` echange deux messages a
-travers des endpoints **generes** par `Meta/Generators/generate_ipc_definitions.py`,
-entre deux vrais processus relies par un `socketpair`.
+## L'observation, apres instrumentation
 
-Sur l'hote, les cinq verifications passent.
+Le temoin `tools/ladybird/libipc-codec-probe.cpp` envoie desormais **un type a
+la fois**, en chaine, chaque reponse declenchant l'envoi suivant. Chaque etape
+trace son passage, des deux cotes.
 
-En ring 3 sous QEMU :
+Sur l'hote, les six verifications passent — `u32`, `String`, `Vector<u32>`,
+`Optional<String>`, `URL::URL`, puis les quatre reunis.
+
+En ring 3 :
 
     == temoin LibIPC : endpoints generes ==
-      ok     pong : la valeur a fait l'aller-retour
-             ping 42 -> pong 43
+             [client] envoi ping
+             [serveur] ping recu
+      ok     u32 : ping 42 -> pong 43
+             [client] envoi echo_string
       ECHEC  aucune reponse en 10 s
+             [serveur] echo_string recu        <-- APRES le delai
 
-    RESULTAT : 1 verification(s) en echec (1 passees)
+## Ce que la trace etablit
 
-Le premier message aboutit. Le second reste sans reponse.
+La derniere ligne est la plus importante : **le serveur recoit bien
+`echo_string`, mais seulement une fois le delai ecoule** — c'est-a-dire au
+moment ou le client appelle `shutdown()`.
 
-## Ce que cela elimine deja
+Cela elimine plusieurs pistes d'un coup :
 
-Le `ping`/`pong` qui passe **prouve** que la chaine complete fonctionne :
+- **ce n'est pas le codec.** Le message est decode correctement quand il
+  arrive ; `String` n'est pas en cause, et les types suivants n'ont meme pas ete
+  atteints ;
+- **ce n'est pas la fragmentation.** Le message arrive entier, plus tard ;
+- **ce n'est pas `URL::URL`.** L'echec survient des le premier message apres le
+  `ping`, qui ne porte qu'un `String`.
 
-- le fichier `.ipc` est lu par le generateur d'upstream ;
-- le `Proxy` genere encode et ecrit ;
-- `IPC::Transport` traverse le `socketpair` de Bouchaud ;
-- le fil d'entree/sortie de `TransportSocket` lit et reveille la boucle ;
-- le `Stub` genere decode et appelle la methode virtuelle ;
-- la reponse fait le chemin inverse.
+La matrice des types est donc, en ring 3 : `u32` OK, le reste **non atteint** —
+et non « en echec ».
 
-Ce n'est donc ni le generateur, ni les endpoints, ni le transport, ni `fork`,
-ni le `socketpair`, ni le fil d'entree/sortie qui manquent. **M5a est atteint en
-ring 3.**
+## La cause probable, et pourquoi
 
-## La difference entre les deux messages
+Le comportement observe est exactement celui que decrit le test d'upstream
+`buffered_message_is_drained_when_io_thread_stops_without_reading_it` : des
+octets restes en attente sont drainés a l'arret.
 
-| | `ping` | `echo` |
-|---|---|---|
-| champs | `u32` | `String`, `Vector<u32>`, `Optional<String>`, `URL::URL` |
-| taille | quelques octets | quelques centaines |
-| codecs | arithmetique | chaines, conteneurs, URL |
+`TransportSocket` n'ecrit pas directement. Il empile dans `m_send_queue`, puis
+appelle `wake_io_thread()`, qui **ecrit un octet dans un tube** cree par
+`pipe2(O_CLOEXEC | O_NONBLOCK)` (`TransportSocket.cpp:165`). Le fil
+d'entree/sortie attend sur `poll` **deux** descripteurs : la socket et le bout
+lecteur de ce tube (`TransportSocket.cpp:200`).
 
-Deux hypotheses, dans cet ordre de vraisemblance :
+Le premier message du temoin (`ping`) part de `main()`, avant
+`Core::EventLoop::exec()`. Les suivants partent depuis un gestionnaire, donc par
+la file et son reveil.
 
-1. **Un codec ou un chemin de decodage qui s'arrete.** `URL::URL` passe par la
-   caisse Rust `liburl_rust` ; `Optional<String>` et `Vector<u32>` par les
-   gabarits de `Decoder.h`. Un echec cote serveur ferait taire la reponse sans
-   rien imprimer, et c'est bien ce qu'on observe : pas de fin de fichier, pas de
-   `die()`, juste un silence — donc un processus **vivant mais qui ne repond
-   pas**, non un processus mort.
+L'hypothese est donc : **le reveil par le tube ne parvient pas au fil
+d'entree/sortie sous Bouchaud.** Le message reste dans la file jusqu'a ce que
+`shutdown()` la vide.
 
-2. **La lecture fragmentee.** `TransportSocket` lit par
-   `receive_message(..., MSG_DONTWAIT, ...)` dans un fil dedie et attend sur
-   `Core::System::poll`. Un message livre en plusieurs morceaux exige que la
-   lecture partielle soit conservee et que `poll` se rearme.
+## Ce qu'il faut mesurer ensuite
 
-   Cette piste, que j'avais d'abord placee en tete, est **affaiblie par la
-   mesure** : le tampon de lecture fait 4096 octets (`TransportSocket.cpp:423`)
-   et le message `echo` en fait quelques centaines. Il n'a aucune raison d'etre
-   fragmente. Elle ne redevient plausible que si le `socketpair` de Bouchaud
-   livre par morceaux plus petits que ce que la taille du message justifie —
-   ce qui serait en soi le defaut a corriger.
-
-## Comment trancher
-
-Par ordre de cout croissant :
-
-1. **Instrumenter le serveur** : imprimer a l'entree de `echo()`. Si la ligne
-   sort, le probleme est au retour ; si elle ne sort pas, il est a l'aller.
-   C'est la mesure la plus discriminante, et la moins chere.
-2. Retirer les champs un a un — d'abord `URL::URL`, puis `Optional`, puis
-   `Vector` — jusqu'a ce que l'aller-retour revienne. Le champ qui debloque
-   nomme le codec en cause (hypothese 1).
-3. Rallonger un simple `String` par paliers. Si la rupture suit la taille et
-   non le type, c'est l'hypothese 2.
-4. `strace` autour du temoin (le harnais sait le faire) pour lire les
-   `recvmsg`/`poll` reels et leurs tailles de retour.
+1. Un test **independant de Ladybird** : deux fils d'un meme processus, un
+   `pipe2(O_NONBLOCK)`, l'un bloque dans `poll(-1)`, l'autre ecrit un octet.
+   Le premier doit se reveiller. C'est trois dizaines de lignes, et cela
+   tranche entre « defaut Bouchaud » et « defaut d'integration ».
+2. Si le reveil manque : regarder `sys_poll` (`src/kernel/abi/file.rs:1800`).
+   Sa boucle fait `task::yield_now()` puis
+   `crate::arch::x86_64::cpu::wait_for_interrupt()` — un `hlt`. Verifier qu'un
+   `write` fait par **un autre fil du meme processus** rend bien la main a ce
+   `poll`, et que `hlt` ne suspend pas le processeur alors qu'une autre tache
+   est prete.
+3. Verifier que `pipe2` honore `O_NONBLOCK` et `O_CLOEXEC`.
 
 ## Pourquoi le temoin n'est pas dans le scenario QEMU
 
-Parce qu'une verification rouge en permanence n'apprend rien de plus que ce
-document, et masque les regressions reelles. Le temoin reste construit et joue
-sur l'hote, ou il est vert ; `tools/test.sh` le reprendra des que le defaut sera
-compris.
+Parce que le laisser rouge en permanence masquerait les regressions reelles,
+et n'apprendrait rien de plus que ce document.
+
+Ce n'est **pas** une facon de declarer M5 termine : il ne l'est pas. Le temoin
+est construit pour la cible, joue sur l'hote ou il est vert, et `tools/test.sh`
+le reprendra des que le reveil sera repare.
 
 ## Ce que cela ne remet pas en cause
 
-`TestTransportSocket` d'upstream — cinq cas, dont le passage de descripteurs,
-le raccrochage du pair et le message arrive juste avant la fin de fichier —
-passe en ring 3. Le transport tient. Ce qui manque est un cas particulier de
-lecture, pas la couche.
+`TestTransportSocket` d'upstream — cinq cas, dont le passage de descripteurs et
+le raccrochage du pair — passe en ring 3. Le transport tient. Ce qui manque est
+le reveil d'un fil par un tube, une primitive de Bouchaud, pas une brique de
+Ladybird.

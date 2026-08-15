@@ -5,5 +5,9 @@
 endpoint BouchaudPortageServer
 {
     ping(u32 valeur) =|
+    echo_string(String texte) =|
+    echo_vector(Vector<u32> nombres) =|
+    echo_optional(Optional<String> option) =|
+    echo_url(URL::URL url) =|
     echo(String texte, Vector<u32> nombres, Optional<String> option, URL::URL url) =|
 }

@@ -24,19 +24,23 @@
 // proxy genere, et on attend que la methode virtuelle du stub genere soit
 // appelee a l'autre bout avec 42.
 //
+// ## Un type a la fois, puis tous ensemble
+//
+// Les messages sont envoyes **en chaine** : chaque reponse declenche l'envoi
+// suivant. `String`, puis `Vector<u32>`, puis `Optional<String>`, puis
+// `URL::URL`, et enfin les quatre reunis.
+//
+// Ce n'est pas de la prudence : c'est ce qui rend un echec diagnostiquable. Un
+// message unique portant quatre types dit seulement « quelque chose n'est pas
+// revenu ». La chaine dit **lequel**, et la trace en dit le sens — l'aller ou
+// le retour.
+//
 // ## Pourquoi deux processus et non deux fils
 //
 // Parce que c'est la question du portage. Deux fils partagent un espace
 // d'adressage : le socketpair y fonctionnerait meme si `fork` etait defaillant.
 // Deux processus exercent ce que WebContent exigera — un `fork`, deux tables de
 // descripteurs, et des messages qui traversent reellement le noyau.
-//
-// ## Les types
-//
-// `String`, `Vector<u32>`, `Optional<String>` et `URL::URL` sont les quatre
-// codecs que LibIPC declare (`Encoder.h`, `Decoder.h`) et que LibWeb emploiera.
-// Le fichier `.ipc` les nomme ; le generateur produit l'encodage ; nous n'avons
-// ecrit aucun codec.
 
 #include <BouchaudPortageClientEndpoint.h>
 #include <BouchaudPortageServerEndpoint.h>
@@ -68,15 +72,23 @@ void verifie(char const* quoi, bool ok)
         ++echecs;
         std::printf("  ECHEC  %s\n", quoi);
     }
+    std::fflush(stdout);
 }
 
-// Les valeurs de reference, partagees par les deux cotes. Ce sont elles que le
-// serveur verifie a l'arrivee, et que le client verifie au retour : un codec
-// qui perdrait un champ en chemin se verrait des deux cotes.
+// Trace de progression. Elle nomme le **dernier point atteint** : quand un
+// message ne revient pas, c'est la derniere ligne imprimee qui designe l'etape
+// fautive, et de quel cote elle se trouve.
+void trace(char const* cote, char const* etape)
+{
+    std::printf("         [%s] %s\n", cote, etape);
+    std::fflush(stdout);
+}
+
 constexpr u32 VALEUR_PING = 42;
 constexpr u32 VALEUR_PONG = 43;
 StringView const TEXTE = "Bouchaud"sv;
-StringView const URL_TEXTE = "https://bouchaud.example/portage?x=1#frag"sv;
+StringView const OPTION = "presente"sv;
+StringView const URL_TEXTE = "https://example.com/path?q=42#fragment"sv;
 
 Vector<u32> nombres_attendus()
 {
@@ -87,10 +99,11 @@ Vector<u32> nombres_attendus()
     return v;
 }
 
+String texte() { return String::from_utf8(TEXTE).release_value(); }
+String option() { return String::from_utf8(OPTION).release_value(); }
+URL::URL adresse() { return URL::Parser::basic_parse(URL_TEXTE).release_value(); }
+
 // --- Le serveur -------------------------------------------------------------
-//
-// `ConnectionFromClient` fournit le proxy vers le client ; on herite du stub
-// **genere** et on implemente ses methodes virtuelles.
 class Serveur final : public IPC::ConnectionFromClient<BouchaudPortageClientEndpoint, BouchaudPortageServerEndpoint> {
 public:
     explicit Serveur(NonnullOwnPtr<IPC::Transport> transport)
@@ -103,16 +116,38 @@ public:
 private:
     virtual void ping(u32 valeur) override
     {
-        // On repond avec la valeur recue augmentee de un : si le codec perdait
-        // la valeur, le client recevrait 1 et non 43.
+        trace("serveur", "ping recu");
         async_pong(valeur + 1);
     }
 
-    virtual void echo(String texte, Vector<u32> nombres, Optional<String> option, URL::URL url) override
+    virtual void echo_string(String recu) override
     {
-        // Renvoi a l'identique : c'est l'aller-retour complet qui est mesure,
-        // pas seulement l'aller.
-        async_echo_result(texte, nombres, option, url);
+        trace("serveur", "echo_string recu");
+        async_echo_string_result(recu);
+    }
+
+    virtual void echo_vector(Vector<u32> nombres) override
+    {
+        trace("serveur", "echo_vector recu");
+        async_echo_vector_result(nombres);
+    }
+
+    virtual void echo_optional(Optional<String> opt) override
+    {
+        trace("serveur", "echo_optional recu");
+        async_echo_optional_result(opt);
+    }
+
+    virtual void echo_url(URL::URL url) override
+    {
+        trace("serveur", "echo_url recu");
+        async_echo_url_result(url);
+    }
+
+    virtual void echo(String recu, Vector<u32> nombres, Optional<String> opt, URL::URL url) override
+    {
+        trace("serveur", "echo (4 champs) recu");
+        async_echo_result(recu, nombres, opt, url);
     }
 };
 
@@ -129,37 +164,55 @@ public:
 private:
     virtual void pong(u32 valeur) override
     {
-        verifie("pong : la valeur a fait l'aller-retour", valeur == VALEUR_PONG);
-        std::printf("         ping %u -> pong %u\n", VALEUR_PING, valeur);
-
-        // Le second message part une fois le premier revenu : l'ordre rend le
-        // diagnostic lisible si l'un des deux echoue.
-        Vector<u32> nombres = nombres_attendus();
-        async_echo(String::from_utf8(TEXTE).release_value(), nombres,
-                   Optional<String> { String::from_utf8("presente"sv).release_value() },
-                   URL::Parser::basic_parse(URL_TEXTE).release_value());
+        verifie("u32 : ping 42 -> pong 43", valeur == VALEUR_PONG);
+        trace("client", "envoi echo_string");
+        async_echo_string(texte());
     }
 
-    virtual void echo_result(String texte, Vector<u32> nombres, Optional<String> option, URL::URL url) override
+    virtual void echo_string_result(String recu) override
     {
-        verifie("String traverse intact", texte == TEXTE);
+        verifie("String traverse intact", recu == TEXTE);
+        trace("client", "envoi echo_vector");
+        async_echo_vector(nombres_attendus());
+    }
 
+    virtual void echo_vector_result(Vector<u32> nombres) override
+    {
         auto attendus = nombres_attendus();
-        bool vecteur_ok = nombres.size() == attendus.size();
-        if (vecteur_ok) {
-            for (size_t i = 0; i < nombres.size(); ++i)
-                vecteur_ok = vecteur_ok && nombres[i] == attendus[i];
-        }
+        bool ok = nombres.size() == attendus.size();
+        for (size_t i = 0; ok && i < nombres.size(); ++i)
+            ok = nombres[i] == attendus[i];
         std::printf("         Vector<u32> : %zu elements, dernier = %u\n",
                     nombres.size(), nombres.is_empty() ? 0u : nombres.last());
-        verifie("Vector<u32> traverse intact", vecteur_ok);
+        verifie("Vector<u32> traverse intact", ok);
+        trace("client", "envoi echo_optional");
+        async_echo_optional(Optional<String> { option() });
+    }
 
+    virtual void echo_optional_result(Optional<String> recu) override
+    {
         verifie("Optional<String> renseigne traverse intact",
-                option.has_value() && *option == "presente"sv);
+                recu.has_value() && *recu == OPTION);
+        trace("client", "envoi echo_url");
+        async_echo_url(adresse());
+    }
 
-        std::printf("         URL : %s\n", url.serialize().to_byte_string().characters());
-        verifie("URL::URL traverse intacte", url.serialize() == URL_TEXTE);
+    virtual void echo_url_result(URL::URL recue) override
+    {
+        std::printf("         URL : %s\n", recue.serialize().to_byte_string().characters());
+        verifie("URL::URL traverse intacte", recue.serialize() == URL_TEXTE);
+        trace("client", "envoi echo (4 champs)");
+        async_echo(texte(), nombres_attendus(), Optional<String> { option() }, adresse());
+    }
 
+    virtual void echo_result(String recu, Vector<u32> nombres, Optional<String> opt, URL::URL url) override
+    {
+        auto attendus = nombres_attendus();
+        bool ok = recu == TEXTE
+            && nombres.size() == attendus.size()
+            && opt.has_value() && *opt == OPTION
+            && url.serialize() == URL_TEXTE;
+        verifie("les quatre types dans un seul message", ok);
         Core::EventLoop::current().quit(0);
     }
 };
@@ -170,8 +223,6 @@ int main()
 {
     std::printf("== temoin LibIPC : endpoints generes ==\n");
 
-    // `socketpair` : la meme primitive que `IPC::Transport::create_pair()`
-    // d'upstream emploie, et celle que Bouchaud fournit deja.
     int fds[2] {};
     if (socketpair(AF_LOCAL, SOCK_STREAM, 0, fds) < 0) {
         std::printf("  ECHEC  socketpair : %s\n", strerror(errno));
@@ -190,12 +241,10 @@ int main()
         // --- Processus B : le serveur ---------------------------------------
         close(fds[0]);
         Core::EventLoop boucle;
-        auto transport = make<IPC::Transport>(MUST(Core::LocalSocket::adopt_fd(fds[1])));
         // `IPC::Connection` derive d'`EventReceiver`, donc de `RefCounted` :
         // une instance sur la pile part avec un compteur non nul et fait
-        // echouer `!m_ref_count` a la destruction. Upstream passe par
-        // `new_client_connection<T>` ; ici `make_ref_counted` suffit.
-        auto serveur = make_ref_counted<Serveur>(move(transport));
+        // echouer `!m_ref_count` a la destruction.
+        auto serveur = make_ref_counted<Serveur>(make<IPC::Transport>(MUST(Core::LocalSocket::adopt_fd(fds[1]))));
         boucle.exec();
         _exit(0);
     }
@@ -203,16 +252,14 @@ int main()
     // --- Processus A : le client --------------------------------------------
     close(fds[1]);
     Core::EventLoop boucle;
-    auto transport = make<IPC::Transport>(MUST(Core::LocalSocket::adopt_fd(fds[0])));
-    auto client = make_ref_counted<Client>(move(transport));
+    auto client = make_ref_counted<Client>(make<IPC::Transport>(MUST(Core::LocalSocket::adopt_fd(fds[0]))));
 
-    // Le premier message part du fil principal, avant la boucle : le proxy
-    // genere se charge de l'encoder et de l'ecrire.
+    trace("client", "envoi ping");
     client->async_ping(VALEUR_PING);
 
-    // Un garde-fou : sans lui, un codec qui ne repondrait jamais laisserait le
+    // Un garde-fou : sans lui, un message qui ne revient pas laisserait le
     // temoin suspendu, et le harnais ne verrait qu'un delai depasse — ce qui ne
-    // designe aucune cause.
+    // designe aucune cause. La trace, elle, nomme le dernier point atteint.
     auto minuteur = Core::Timer::create_single_shot(10000, [&] {
         std::printf("  ECHEC  aucune reponse en 10 s\n");
         ++echecs;
