@@ -9397,6 +9397,21 @@ def verifie_chrome_produit():
         egal("chrome: qui ramene bien en arriere", n.onglet.url, depart)
 
         # --- Crash depuis l'interface -----------------------------------------
+        #
+        # On laisse d'abord le retour arriere se poser. `recule()` declenche une
+        # vraie navigation : le renderer va produire une trame de plus. Prendre
+        # l'image *avant* qu'elle n'arrive, puis exiger plus bas qu'elle n'ait
+        # pas bouge, revient a courir contre le repeint — et a echouer une fois
+        # sur quelques executions, sans qu'aucun defaut ne soit en cause.
+        #
+        # Ce que la suite veut verifier est que la mort du renderer **preserve**
+        # la derniere image. Encore faut-il que « la derniere » soit stable au
+        # moment ou on la note.
+        limite = _time.monotonic() + 10.0
+        while _time.monotonic() < limite and n.chargement is not None:
+            chrome._tic()
+            _time.sleep(0.01)
+
         import signal as _signal
         pid = n.onglet.vue.renderer.pid
         image_avant = n.onglet.vue.image

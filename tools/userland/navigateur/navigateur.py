@@ -301,6 +301,33 @@ class Navigateur:
         if not url:
             return False
 
+        # Naviguer vers la page ou l'on est deja **remplace** l'entree
+        # d'historique ; cela n'en cree pas une seconde.
+        #
+        # C'est la regle des navigateurs reels, et ce n'est pas un detail de
+        # confort. Le renderer *demande* les navigations
+        # (`REQUEST_NAVIGATION`) ; le chrome les applique et tient
+        # l'historique. Rien ne garantit qu'une seule demande arrive : un lien
+        # clique deux fois, un clic reemis parce que la page n'avait pas encore
+        # bascule, et deux demandes identiques se suivent.
+        #
+        # Le chrome empilait alors la meme page deux fois. L'historique gagnait
+        # une entree fantome, et « reculer » ramenait a la page qu'on venait de
+        # quitter — c'est-a-dire a elle-meme.
+        #
+        # La premiere version de ce garde-fou comparait la demande a celle qui
+        # etait **encore en vol**, en supposant que le doublon arrivait avant la
+        # premiere trame. La mesure a montre le contraire : au moment de la
+        # seconde demande, `self.chargement` valait deja `None` — le premier
+        # chargement etait termine. Le doublon ne se distingue donc pas par le
+        # temps, mais par sa destination : elle est deja sous nos pieds.
+        #
+        # On ne refuse pas la navigation — la page se recharge, ce qu'un clic
+        # sur un lien vers soi-meme doit faire. On refuse seulement d'en faire
+        # une entree d'historique de plus.
+        if empiler and self.onglet.url == url:
+            empiler = False
+
         self.etat = "Chargement de %s..." % url
         self.chargement = url
         self.chargement_debut = time.monotonic()
