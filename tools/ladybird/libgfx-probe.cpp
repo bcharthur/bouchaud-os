@@ -60,12 +60,29 @@ int main()
     verifie(bitmap->width() == 320 && bitmap->height() == 200,
         "Bitmap BGRA8888 320x200 cree par LibGfx");
 
+    // Le fond avant toute peinture. `Bitmap::create` remet la memoire a zero
+    // (`allocate_backing_store(..., InitializeBackingStore::Yes)`), donc noir
+    // transparent. Sans cette mesure, « clear_rect a produit du blanc » ne
+    // prouverait rien : un painter qui n'ecrirait nulle part passerait aussi
+    // bien, pourvu que le tampon soit deja blanc.
+    verifie(bitmap->get_pixel(5, 5) != Gfx::Color::White,
+        "bitmap neuf : le fond n'est pas encore blanc");
+
+    // `Painter::create` rend un `NonnullOwnPtr<Gfx::Painter>`. AK **supprime**
+    // `operator bool` et `operator!` sur ce type (`AK/NonnullOwnPtr.h:103`)
+    // precisement pour interdire ce qu'une premiere version de ce temoin
+    // ecrivait — `verifie(!!painter, ...)`, une verification qui ne pouvait
+    // pas echouer et que le compilateur a eu raison de refuser.
+    //
+    // Ce qu'il y a a prouver n'est donc pas que le pointeur existe : le type
+    // s'en porte garant. C'est que le painter rendu est bien le backend Skia
+    // et qu'il ecrit dans *notre* bitmap. Les verifications qui suivent le
+    // font, en lisant les pixels.
     auto painter = Gfx::Painter::create(bitmap);
-    verifie(!!painter, "PainterSkia CPU cree");
 
     painter->clear_rect(Gfx::FloatRect { 0, 0, 320, 200 }, Gfx::Color::White);
     verifie(bitmap->get_pixel(5, 5) == Gfx::Color::White,
-        "clear_rect a produit des pixels blancs");
+        "clear_rect Skia a peint dans notre bitmap");
 
     painter->fill_rect(Gfx::FloatRect { 32, 24, 128, 80 }, Gfx::Color::Red);
     painter->fill_rect(Gfx::FloatRect { 176, 96, 96, 72 }, Gfx::Color::Blue);

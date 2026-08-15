@@ -55,6 +55,31 @@ jobs:
             third_party/gen-bouchaud
           key: ladybird-m5-${{ runner.os }}-${{ hashFiles('tools/ladybird/build-*.sh', 'tools/ladybird/fetch.sh', 'tools/ladybird/ipc/**') }}
 
+      # Les archives telechargees par vcpkg, mises en cache **a part** et
+      # enregistrees meme si la construction echoue.
+      #
+      # C'est le correctif du defaut observe : vcpkg va chercher chaque paquet
+      # chez son editeur — sourceware, gitlab.freedesktop.org, une quinzaine
+      # d'hotes — et il a suffi que freetype reponde 504 pour arreter la
+      # construction entiere. Avec `actions/cache`, rien n'etait alors
+      # enregistre : le cache ne se sauve qu'a la fin d'un travail **reussi**.
+      # Les vingt-six paquets deja telecharges etaient donc perdus, et
+      # l'execution suivante recommencait a zero — en repassant par le meme
+      # hote fragile.
+      #
+      # `restore` puis `save: if: always()` cassent ce cercle : chaque
+      # execution banque ce qu'elle a obtenu, et la suivante repart de la.
+      # Chaque archive porte son empreinte SHA512, que vcpkg verifie avant
+      # usage — un cache partiel ne peut donc rien corrompre.
+      - name: Restaurer les archives vcpkg
+        id: cache-telechargements
+        uses: actions/cache/restore@v4
+        with:
+          path: third_party/vcpkg-downloads
+          key: ladybird-gfx-downloads-${{ runner.os }}-${{ hashFiles('tools/ladybird/build-vcpkg-gfx.sh') }}
+          restore-keys: |
+            ladybird-gfx-downloads-${{ runner.os }}-
+
       - name: Cache dependances graphiques
         uses: actions/cache@v4
         with:
@@ -76,6 +101,26 @@ jobs:
 
       - name: Construire le port natif jusqu'a LibGfx
         run: tools/ladybird/native-m6.sh --cible
+
+      # `always()` : c'est tout l'interet. Une construction interrompue a
+      # quand meme rapporte des archives, et les garder evite de repasser par
+      # les memes hotes au tour suivant.
+      #
+      # La cle porte `run_id` **et** `run_attempt`. Le second n'est pas une
+      # precaution decorative : une relance depuis l'interface Actions garde le
+      # meme `run_id` et n'incremente que `run_attempt`. Comme les cles de cache
+      # sont immuables, la premiere tentative aurait pris la cle pour elle, et
+      # chaque relance aurait pu *lire* son instantane sans jamais pouvoir en
+      # *ecrire* un plus complet — les relances successives repartant toujours
+      # du meme point. C'est exactement l'accumulation que cette etape cherche a
+      # obtenir qui aurait ete perdue, et dans le cas d'usage le plus courant :
+      # celui ou l'on relance apres une panne d'hote.
+      - name: Enregistrer les archives vcpkg
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: third_party/vcpkg-downloads
+          key: ladybird-gfx-downloads-${{ runner.os }}-${{ hashFiles('tools/ladybird/build-vcpkg-gfx.sh') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Verifier l'ELF produit
         run: |
