@@ -36,6 +36,7 @@ fi
 
 DEPS="$RACINE/third_party/deps-$CIBLE"
 AK="$RACINE/third_party/build-ak-$CIBLE"
+GEN="$RACINE/third_party/gen-$CIBLE"
 CORE="$RACINE/third_party/build-libcore-$CIBLE"
 SORTIE="$RACINE/third_party/build-libunicode-$CIBLE"
 RUST_OUT="$RACINE/third_party/build-rust-$CIBLE"
@@ -44,7 +45,8 @@ rouge() { printf '\033[31m%s\033[0m\n' "$*"; }
 vert()  { printf '\033[32m%s\033[0m\n' "$*"; }
 info()  { printf '\033[36m%s\033[0m\n' "$*"; }
 
-[ -f "$CORE/libCoreMin.a" ] || { rouge "LibCore absent — lancer build-libcore.sh"; exit 1; }
+[ -f "$CORE/libCore.a" ] || { rouge "LibCore absent — lancer build-libcore.sh"; exit 1; }
+[ -d "$GEN/LibUnicode" ] || { rouge "en-tetes absents — lancer build-entetes.sh ${1:-}"; exit 1; }
 
 # --- ICU : le notre, pas celui de la distribution ---------------------------
 #
@@ -82,17 +84,7 @@ RUST_LIB="$RUST_OUT/x86_64-unknown-linux-gnu/release/liblibunicode_rust.a"
 [ -f "$RUST_OUT/gen/LibUnicode/RustFFI.h" ] || { rouge "RustFFI.h absent — relancer build-rust.sh"; exit 1; }
 vert "  ok    libunicode_rust + RustFFI.h"
 
-mkdir -p "$SORTIE/obj" "$SORTIE/gen/LibUnicode"
-cp "$RUST_OUT/gen/LibUnicode/RustFFI.h" "$SORTIE/gen/LibUnicode/RustFFI.h"
-
-if [ ! -f "$SORTIE/gen/LibUnicode/Export.h" ]; then
-    cat > "$SORTIE/gen/LibUnicode/Export.h" <<'EXPORT'
-/* Genere par build-libunicode.sh : archive statique, macros vides. */
-#pragma once
-#define UNICODE_API
-#define UNICODE_NO_EXPORT
-EXPORT
-fi
+mkdir -p "$SORTIE/obj"
 
 CXX=${CXX:-clang++}
 # `-fno-rtti` n'est **pas** pose : upstream ne desactive que les exceptions
@@ -100,7 +92,7 @@ CXX=${CXX:-clang++}
 # `dynamic_cast`, et melanger des unites compilees avec et sans RTTI produit des
 # transtypages qui echouent a l'execution sans rien dire.
 CXXFLAGS="-std=c++23 -O2 -fno-exceptions -fPIC $FLAGS_CIBLE \
-    -I$LB -I$LB/Libraries -I$AK/gen -I$CORE/gen -I$SORTIE/gen -I$DEPS/include \
+    -I$LB -I$LB/Libraries -I$AK/gen -I$GEN -I$DEPS/include \
     $(pkg-config --cflags icu-i18n icu-uc) \
     -Wno-unused-parameter -Wno-unknown-pragmas -Wno-invalid-constexpr \
     -Wno-unqualified-std-cast-call -Wno-user-defined-literals \
@@ -148,7 +140,7 @@ echo "$RUST_LIB" > "$SORTIE/rust-lib.txt"
 info "  CXX   temoin LibUnicode"
 $CXX $CXXFLAGS "$RACINE/tools/ladybird/libunicode-probe.cpp" \
     -o "$SORTIE/libunicode-probe" \
-    "$SORTIE/libUnicode.a" "$CORE/libCoreMin.a" "$AK/libAK.a" "$RUST_LIB" \
+    "$SORTIE/libUnicode.a" "$CORE/libCore.a" "$AK/libAK.a" "$RUST_LIB" \
     $(pkg-config --libs icu-i18n icu-uc) \
     -L"$DEPS/lib" -lfmt -lsimdutf -lmimalloc -lpthread
 

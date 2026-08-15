@@ -35,6 +35,7 @@ fi
 
 DEPS="$RACINE/third_party/deps-$CIBLE"
 AK="$RACINE/third_party/build-ak-$CIBLE"
+GEN="$RACINE/third_party/gen-$CIBLE"
 CORE="$RACINE/third_party/build-libcore-$CIBLE"
 SORTIE="$RACINE/third_party/build-libgc-$CIBLE"
 
@@ -42,7 +43,8 @@ rouge() { printf '\033[31m%s\033[0m\n' "$*"; }
 vert()  { printf '\033[32m%s\033[0m\n' "$*"; }
 info()  { printf '\033[36m%s\033[0m\n' "$*"; }
 
-[ -f "$CORE/libCoreMin.a" ] || { rouge "LibCore absent — lancer build-libcore.sh ${1:-}"; exit 1; }
+[ -f "$CORE/libCore.a" ] || { rouge "LibCore absent — lancer build-libcore.sh ${1:-}"; exit 1; }
+[ -d "$GEN/LibGC" ] || { rouge "en-tetes absents — lancer build-entetes.sh ${1:-}"; exit 1; }
 
 CXX=${CXX:-clang++}
 # `-fno-rtti` n'est **pas** pose : upstream ne desactive que les exceptions
@@ -50,23 +52,12 @@ CXX=${CXX:-clang++}
 # `dynamic_cast`, et melanger des unites compilees avec et sans RTTI produit des
 # transtypages qui echouent a l'execution sans rien dire.
 CXXFLAGS="-std=c++23 -O2 -fno-exceptions -fPIC $FLAGS_CIBLE \
-    -I$LB -I$LB/Libraries -I$AK/gen -I$CORE/gen -I$SORTIE/gen -I$DEPS/include \
+    -I$LB -I$LB/Libraries -I$AK/gen -I$GEN -I$DEPS/include \
     -Wno-unused-parameter -Wno-unknown-pragmas -Wno-invalid-constexpr \
     -Wno-unqualified-std-cast-call -Wno-user-defined-literals \
     -Wno-unknown-warning-option"
 
-mkdir -p "$SORTIE/obj" "$SORTIE/gen/LibGC"
-
-if [ ! -f "$SORTIE/gen/LibGC/Export.h" ]; then
-    info "  GEN   LibGC/Export.h"
-    cat > "$SORTIE/gen/LibGC/Export.h" <<'EXPORT'
-/* Genere par tools/ladybird/build-libgc.sh : archive statique, donc macros
- * de visibilite vides. Voir build-libcore.sh pour l'explication complete. */
-#pragma once
-#define GC_API
-#define GC_NO_EXPORT
-EXPORT
-fi
+mkdir -p "$SORTIE/obj"
 
 SOURCES=$(sed -n '/^set(SOURCES/,/^)/p' "$LB/Libraries/LibGC/CMakeLists.txt" \
           | grep -oE '[A-Za-z0-9_]+\.cpp')
@@ -98,7 +89,7 @@ vert "  ok    libGC.a ($(du -h "$SORTIE/libGC.a" | cut -f1))"
 
 info "  CXX   temoin LibGC"
 $CXX $CXXFLAGS "$RACINE/tools/ladybird/libgc-probe.cpp" -o "$SORTIE/libgc-probe" \
-    "$SORTIE/libGC.a" "$CORE/libCoreMin.a" "$AK/libAK.a" \
+    "$SORTIE/libGC.a" "$CORE/libCore.a" "$AK/libAK.a" \
     -L"$DEPS/lib" -lfmt -lsimdutf -lmimalloc -lpthread
 
 vert "temoin construit : $SORTIE/libgc-probe"

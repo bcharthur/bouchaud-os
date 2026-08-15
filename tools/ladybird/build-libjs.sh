@@ -41,6 +41,7 @@ fi
 
 DEPS="$RACINE/third_party/deps-$CIBLE"
 AK="$RACINE/third_party/build-ak-$CIBLE"
+GEN="$RACINE/third_party/gen-$CIBLE"
 CORE="$RACINE/third_party/build-libcore-$CIBLE"
 GC="$RACINE/third_party/build-libgc-$CIBLE"
 UNI="$RACINE/third_party/build-libunicode-$CIBLE"
@@ -53,7 +54,8 @@ rouge() { printf '\033[31m%s\033[0m\n' "$*"; }
 vert()  { printf '\033[32m%s\033[0m\n' "$*"; }
 info()  { printf '\033[36m%s\033[0m\n' "$*"; }
 
-for brique in "$GC/libGC.a" "$UNI/libUnicode.a" "$CRYPTO/libCryptoMin.a"; do
+[ -d "$GEN/LibJS" ] || { rouge "en-tetes absents — lancer build-entetes.sh ${1:-}"; exit 1; }
+for brique in "$GC/libGC.a" "$UNI/libUnicode.a" "$CRYPTO/libCryptoMin.a" "$CORE/libCore.a"; do
     [ -f "$brique" ] || { rouge "$(basename "$brique") absent — voir docs/ladybird/LIBJS_PORT.md"; exit 1; }
 done
 TRIPLET=x86_64-unknown-linux-gnu
@@ -64,27 +66,6 @@ RUSTLIB="$RUST/$TRIPLET/release"
 info "== LibJS ($CIBLE) =="
 
 mkdir -p "$SORTIE/obj" "$SORTIE/gen/LibJS/Bytecode"
-
-# --- Les en-tetes d'export --------------------------------------------------
-genere_export() {
-    local biblio=$1 macro=$2
-    local fichier="$SORTIE/gen/$biblio/Export.h"
-    mkdir -p "$SORTIE/gen/$biblio"
-    [ -f "$fichier" ] && return 0
-    cat > "$fichier" <<EXPORT
-/* Genere par tools/ladybird/build-libjs.sh : archive statique, macros vides.
- * Voir build-libcore.sh pour l'explication complete. */
-#pragma once
-#define ${macro}
-#define ${macro%_API}_NO_EXPORT
-EXPORT
-}
-genere_export LibJS JS_API
-genere_export LibRegex REGEX_API
-genere_export LibURL URL_API
-genere_export LibTextCodec TEXTCODEC_API
-genere_export LibSyntax SYNTAX_API
-genere_export LibFileSystem FILESYSTEM_API
 
 # --- Le compilateur de code-octet -------------------------------------------
 #
@@ -164,8 +145,8 @@ if [ ! -x "$GENLAYOUT" ]; then
     info "  CXX   generate_interpreter_layout"
     ${CXX:-clang++} -std=c++23 -O2 -fno-exceptions $FLAGS_CIBLE \
         -Dprivate=public -Dprotected=public \
-        -I"$LB" -I"$LB/Libraries" -I"$AK/gen" -I"$CORE/gen" -I"$GC/gen" \
-        -I"$UNI/gen" -I"$CRYPTO/gen" -I"$SORTIE/gen" -I"$DEPS/include" -I"$ICU/include" \
+        -I"$LB" -I"$LB/Libraries" -I"$AK/gen" -I"$GEN" -I"$SORTIE/gen" \
+        -I"$DEPS/include" -I"$ICU/include" \
         -Wno-unused-parameter -Wno-unknown-pragmas -Wno-invalid-constexpr \
         -Wno-unqualified-std-cast-call -Wno-user-defined-literals \
         -Wno-unknown-warning-option -Wno-keyword-macro \
@@ -212,35 +193,10 @@ if [ ! -f "$INTERP_O" ] || [ "$INTERP_S" -nt "$INTERP_O" ]; then
         -c "$INTERP_S" -o "$INTERP_O"
 fi
 
-# --- Les en-tetes FFI des caisses Rust --------------------------------------
-#
-# Les bibliotheques n'emploient pas toutes la meme convention d'inclusion —
-# fait mesure, pas suppose :
-#
-#     <RustFFI.h>            LibRegex, LibTextCodec
-#     <LibJS/RustFFI.h>      LibJS
-#     <LibURL/RustFFI.h>     LibURL
-#     <LibUnicode/RustFFI.h> LibUnicode
-#
-# La forme prefixee se resout par le `-I$SORTIE/gen` commun. La forme nue, non :
-# cinq fichiers y portent le meme nom, et un `-I` commun donnerait a chaque
-# bibliotheque l'interface d'une autre — sans erreur d'inclusion, juste des
-# declarations qui ne correspondent a rien de ce qui sera lie.
-#
-# On installe donc les deux dispositions : une copie prefixee, et une copie
-# isolee par bibliotheque que `compile_biblio` ajoute au coup par coup. C'est ce
-# que fait le CMake d'upstream avec `FFI_OUTPUT_DIR`, cible par cible.
-for biblio in LibJS LibRegex LibTextCodec LibURL LibUnicode; do
-    [ -f "$RUST/gen/$biblio/RustFFI.h" ] || continue
-    mkdir -p "$SORTIE/gen/ffi/$biblio" "$SORTIE/gen/$biblio"
-    cp "$RUST/gen/$biblio/RustFFI.h" "$SORTIE/gen/ffi/$biblio/RustFFI.h"
-    cp "$RUST/gen/$biblio/RustFFI.h" "$SORTIE/gen/$biblio/RustFFI.h"
-done
-
 CXX=${CXX:-clang++}
 CXXFLAGS="-std=c++23 -O2 -fno-exceptions -fPIC $FLAGS_CIBLE \
     -I$LB -I$LB/Libraries \
-    -I$AK/gen -I$CORE/gen -I$GC/gen -I$UNI/gen -I$CRYPTO/gen -I$SORTIE/gen \
+    -I$AK/gen -I$GEN -I$SORTIE/gen \
     -I$DEPS/include -I$ICU/include \
     -Wno-unused-parameter -Wno-unknown-pragmas -Wno-invalid-constexpr \
     -Wno-unqualified-std-cast-call -Wno-user-defined-literals \
@@ -272,9 +228,11 @@ compile_biblio() {
     nb=$(echo "$liste" | wc -w)
     info "  $biblio : $nb fichier(s)"
 
-    # L'en-tete FFI de *cette* bibliotheque, et d'aucune autre (voir plus haut).
+    # L'en-tete FFI de *cette* bibliotheque, et d'aucune autre : cinq fichiers
+    # portent le meme nom, et un `-I` commun donnerait a chacune l'interface
+    # d'une autre. Voir build-entetes.sh.
     local ffi=""
-    [ -d "$SORTIE/gen/ffi/$biblio" ] && ffi="-I$SORTIE/gen/ffi/$biblio"
+    [ -d "$GEN/ffi/$biblio" ] && ffi="-I$GEN/ffi/$biblio"
 
     local en_vol=0
     for src in $liste; do
@@ -353,7 +311,7 @@ info "  CXX   temoin LibJS"
 $CXX $CXXFLAGS "$RACINE/tools/ladybird/libjs-probe.cpp" -o "$SORTIE/libjs-probe" \
     "$SORTIE/libJS.a" \
     "$GC/libGC.a" "$UNI/libUnicode.a" "$CRYPTO/libCryptoMin.a" \
-    "$CORE/libCoreMin.a" "$AK/libAK.a" \
+    "$CORE/libCore.a" "$AK/libAK.a" \
     "$RUSTLIB/liblibunicode_rust.a" "$RUSTLIB/liblibregex_rust.a" \
     "$RUSTLIB/libliburl_rust.a" \
     "$RUSTLIB/liblibjs_rust.a" "$RUSTLIB/liblibtextcodec_rust.a" \

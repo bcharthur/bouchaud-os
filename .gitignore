@@ -84,3 +84,6 @@ third_party/icu-bouchaud
 third_party/build-rust-bouchaud
 third_party/build-libcrypto-*/
 third_party/build-libjs-*/
+third_party/gen-hote/
+third_party/gen-bouchaud/
+third_party/gen-bouchaud

@@ -163,7 +163,7 @@ Ce qui est construit et verifie, sur l'hote **et** pour la cible `-static-pie` :
 | fast_float, fmt, simdutf, mimalloc | — | **fait** | versions de `vcpkg.json` |
 | AK | 39 | **fait** | 13 verifications |
 | LibSync | 3 | **fait** | 6 verifications (dont 4 fils en contention) |
-| LibCore, sous-ensemble | 17 | **fait** | idem |
+| LibCore, **complet** | 42 | **fait** | 13 verifications, hote **et** ring 3 |
 | LibThreading | 1 | **fait** | idem |
 | LibGC | 20 | **fait** | 5 verifications (513 cellules recoltees) |
 | ICU | — | **fait** | 77.1 statique, sans `dlopen` |
@@ -336,10 +336,66 @@ Le verdict exige desormais que le bilan d'une sonde **suive sa banniere**, sans
 qu'une autre banniere ne s'intercale, et annonce zero echec. C'est la seule
 lecture qu'un plantage ne peut pas satisfaire.
 
+## Du sous-ensemble au vrai graphe
+
+`libCoreMin.a` — dix-sept sources sur vingt-huit — etait la bonne facon de
+**demarrer** : construire LibCore en entier exigeait LibUnicode, LibURL et
+LibTextCodec, donc ICU, donc tout le tiers-parti, avant meme de savoir si dix-sept
+fichiers compilaient. Ce n'etait pas une facon de **rester** : un sous-ensemble
+fige est un fork simplifie qui ne dit pas son nom, et qui diverge un peu plus a
+chaque montee de SHA.
+
+Ces trois bibliotheques existent maintenant, donc le graphe reel est atteignable.
+`libCore.a` porte desormais les **quarante-deux** sources que le CMake d'upstream
+retient pour une cible POSIX/Linux. **Aucune n'a demande la moindre modification
+de source Ladybird** — la selection de plateforme se fait dans notre script, `if()`
+par `if()`, en nommant la capacite Bouchaud qui la motive :
+
+| Choix d'upstream | Ce que Bouchaud offre | Source retenue |
+|---|---|---|
+| Geolocalisation | rien | `GeolocationProviderUnimplemented.cpp` (d'upstream) |
+| POSIX / Windows | ABI Linux | la branche POSIX, 10 sources |
+| `sys/inotify.h` | pas d'inotify dans `abi/` | `FileWatcherUnimplemented.cpp` |
+| Statistiques de processus | `/proc` present | `Platform/ProcessStatisticsLinux.cpp` |
+| Fuseau horaire | POSIX | `TimeZoneWatcherUnix.cpp` |
+
+Le temoin a grandi avec : il exerce maintenant `AnonymousBuffer` (memoire
+partagee par descripteur — le fondement de LibIPC), `MimeData`, `StandardPaths`,
+`Directory`, `FilePosix`, `Core::Process::spawn` et `Version`. Compiler
+quarante-deux fichiers n'aurait rien prouve ; les treize verifications passent en
+ring 3.
+
+### Deux consequences de structure
+
+**Les en-tetes generes sont mutualises.** `build-entetes.sh` produit
+`third_party/gen-<cible>/` : les `Export.h`, dont la liste est **lue** dans les
+`ladybird_lib(... EXPLICIT_SYMBOL_EXPORT)` d'upstream, et les `RustFFI.h` dans
+leurs deux dispositions. Au passage, cinq `Export.h` que nos scripts
+fabriquaient — `LibURL`, `LibUnicode`, `LibThreading`, `LibFileSystem`,
+`LibSyntax` — se sont reveles **inventes** : ces bibliotheques ne declarent pas
+d'export explicite, aucune de leurs sources n'inclut d'`Export.h`, et les macros
+correspondantes n'apparaissent nulle part dans Ladybird.
+
+**Le graphe est circulaire, et l'ordre de construction le reconnait.** LibCore
+reference LibUnicode/LibURL/LibTextCodec, construites avec LibJS, qui a besoin de
+LibCore. La circularite est au niveau des **archives**, pas des objets : seule
+l'edition de liens d'un executable a besoin de tout le monde. `build-tout.sh`
+produit donc les archives dans l'ordre puis revient relier les temoins, et
+l'edition de liens emploie `--start-group` — les caisses Rust rappellent le C++
+(`libunicode_rust` appelle `unicode_property_matches`) et le C++ rappelle le
+Rust.
+
 ## Ce qui reste
 
 Le moteur JavaScript tourne ; le moteur **web** n'existe pas encore. La suite est
 LibIPC, LibGfx, puis LibWeb — et `BO_WEB_ENGINE=ladybird` cote navigateur.
+
+Une dette reste notee et non payee : **OpenSSL**. LibCrypto est encore construit
+en sous-ensemble (3 sources sur 29) parce que LibJS n'en veut que `BigInt` et
+`BigFraction`. Contrairement a LibCore, ce sous-ensemble ne peut pas etre leve
+aujourd'hui : la distribution fournit OpenSSL 3.0 quand `PK/MLKEM.cpp` et
+`PK/MLDSA.cpp` exigent 3.5. Il le sera avec LibTLS et RequestServer, en
+construisant OpenSSL depuis la version epinglee — exactement comme pour ICU.
 
 ### La facture d'ICU, connue d'avance
 

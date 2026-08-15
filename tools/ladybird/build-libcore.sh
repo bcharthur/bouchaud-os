@@ -1,27 +1,34 @@
 #!/bin/bash
-# Construit LibSync et le sous-ensemble de LibCore dont LibGC et LibJS ont besoin.
+# Construit LibSync, LibCore **complet** et LibThreading, et joue un temoin.
 #
 #   ./tools/ladybird/build-libcore.sh          hote
 #   ./tools/ladybird/build-libcore.sh --cible  Bouchaud (static-pie)
 #
-# ## Pourquoi un sous-ensemble
+# ## Ce script construisait un sous-ensemble ; il ne le fait plus
 #
-# `LibCore` complet se lie a `LibUnicode` (donc ICU), `LibURL` et `LibTextCodec`.
-# Or la mesure d'inclusions (docs/ladybird/DEPENDENCIES.md) dit que LibGC et
-# LibJS n'utilisent que **neuf** en-tetes de LibCore. Construire les 28 sources
-# et leurs dependances avant de savoir si les neuf compilent serait payer ICU
-# pour rien.
+# Jusqu'au jalon M4, il produisait `libCoreMin.a` : dix-sept sources sur
+# vingt-huit, choisies par la mesure des inclusions de LibGC et LibJS, puis
+# etendues au fur et a mesure que l'editeur de liens reclamait.
 #
-# On construit donc ce que ces neuf en-tetes reclament, et **l'editeur de liens
-# dit le reste** : chaque symbole manquant nomme le fichier a ajouter. C'est plus
-# sur qu'une liste devinee, et la liste ci-dessous est exactement ce que cette
-# methode a produit — pas ce qu'on esperait.
+# C'etait la bonne facon de **demarrer** — construire LibCore en entier exigeait
+# LibUnicode, LibURL et LibTextCodec, donc ICU, donc tout le tiers-parti, avant
+# meme de savoir si dix-sept fichiers compilaient. Ce n'etait pas une facon de
+# **rester** : un sous-ensemble fige est un fork simplifie qui ne dit pas son
+# nom, et qui diverge un peu plus a chaque montee de SHA.
 #
-# ## Ce qui est volontairement absent
+# Ces trois bibliotheques existent maintenant. Le graphe reel est donc
+# atteignable, et c'est lui qu'on construit : les **quarante-deux** sources que
+# le CMake d'upstream retient pour une cible POSIX/Linux. Aucune n'a demande la
+# moindre modification de source Ladybird.
 #
-# Rien de ce qui touche au reseau, aux processus, aux fichiers surveilles ou aux
-# fuseaux horaires. Ces morceaux viendront quand LibIPC et RequestServer les
-# reclameront, avec leurs dependances.
+# ## La selection de plateforme, telle qu'upstream la fait
+#
+# `Libraries/LibCore/CMakeLists.txt` choisit ses sources par des `if()` :
+# Windows contre POSIX, `sys/inotify.h` present ou non, Linux contre Apple pour
+# les statistiques de processus et la surveillance du fuseau horaire. Ce script
+# fait les memes choix, explicitement, en nommant la capacite Bouchaud qui les
+# motive — c'est la « couche plateforme » du portage, et elle vit ici plutot que
+# dans une copie modifiee de l'arbre amont.
 
 set -eu
 cd "$(dirname "$0")/../.."
@@ -37,6 +44,8 @@ fi
 
 DEPS="$RACINE/third_party/deps-$CIBLE"
 AK="$RACINE/third_party/build-ak-$CIBLE"
+GEN="$RACINE/third_party/gen-$CIBLE"
+ICU="$RACINE/third_party/icu-$CIBLE"
 SORTIE="$RACINE/third_party/build-libcore-$CIBLE"
 
 rouge() { printf '\033[31m%s\033[0m\n' "$*"; }
@@ -44,6 +53,8 @@ vert()  { printf '\033[32m%s\033[0m\n' "$*"; }
 info()  { printf '\033[36m%s\033[0m\n' "$*"; }
 
 [ -f "$AK/libAK.a" ] || { rouge "AK absent — lancer build-ak.sh ${1:-}"; exit 1; }
+[ -d "$GEN/LibCore" ] || { rouge "en-tetes absents — lancer build-entetes.sh ${1:-}"; exit 1; }
+[ -d "$ICU/include" ] || { rouge "ICU absent — lancer build-icu.sh ${1:-}"; exit 1; }
 
 CXX=${CXX:-clang++}
 # `-fno-rtti` n'est **pas** pose : upstream ne desactive que les exceptions
@@ -51,74 +62,62 @@ CXX=${CXX:-clang++}
 # `dynamic_cast`, et melanger des unites compilees avec et sans RTTI produit des
 # transtypages qui echouent a l'execution sans rien dire.
 CXXFLAGS="-std=c++23 -O2 -fno-exceptions -fPIC $FLAGS_CIBLE \
-    -I$LB -I$LB/Libraries -I$AK/gen -I$SORTIE/gen -I$DEPS/include \
+    -I$LB -I$LB/Libraries -I$AK/gen -I$GEN -I$DEPS/include -I$ICU/include \
     -Wno-unused-parameter -Wno-unknown-pragmas -Wno-invalid-constexpr \
     -Wno-unqualified-std-cast-call -Wno-user-defined-literals \
     -Wno-unknown-warning-option"
 
-mkdir -p "$SORTIE/obj" "$SORTIE/gen"
+mkdir -p "$SORTIE/obj"
 
-# --- En-tetes d'export generes ----------------------------------------------
+# --- LibSync : les primitives de synchronisation ----------------------------
 #
-# `ladybird_lib(... EXPLICIT_SYMBOL_EXPORT)` appelle `generate_export_header`,
-# qui produit un `Export.h` par bibliotheque definissant `SYNC_API`, `CORE_API`…
-# Ces macros pilotent la visibilite des symboles d'une bibliotheque **partagee**.
-#
-# Nous produisons des archives statiques : la visibilite ne se pose pas, et les
-# macros doivent donc etre vides. C'est exactement ce que CMake genere quand
-# `<NOM>_STATIC_DEFINE` est defini — on ecrit le meme resultat directement.
-genere_export() {
-    local biblio=$1 macro=$2
-    local fichier="$SORTIE/gen/$biblio/Export.h"
-    mkdir -p "$SORTIE/gen/$biblio"
-    [ -f "$fichier" ] && return 0
-    info "  GEN   $biblio/Export.h"
-    cat > "$fichier" <<EXPORT
-/* Genere par tools/ladybird/build-libcore.sh.
- *
- * Equivalent de ce que \`generate_export_header\` produit pour une
- * bibliotheque statique : les macros de visibilite sont vides, parce qu'une
- * archive n'exporte rien — tout est resolu a l'edition de liens finale. */
-#pragma once
-#define ${macro}
-#define ${macro%_API}_NO_EXPORT
-EXPORT
-}
-
-genere_export LibSync SYNC_API
-genere_export LibCore CORE_API
-genere_export LibThreading THREADING_API
-
-# --- LibSync : trois fichiers, aucune dependance hors AK --------------------
-#
-# Les primitives de synchronisation, au-dessus de pthread. C'est la brique la
-# plus simple de tout Ladybird, et LibGC en depend publiquement.
+# Trois fichiers, aucune dependance hors AK. LibGC en depend publiquement.
 SRC_SYNC="MutexPOSIX.cpp ConditionVariablePOSIX.cpp RWLockPOSIX.cpp"
 
-# --- LibCore : le sous-ensemble ---------------------------------------------
+# --- LibCore : la liste d'upstream, sans retrait ----------------------------
 #
-# Les neuf en-tetes reclames par LibGC/LibJS et leur cloture de symboles.
-# LibGC reclame en plus : File, StandardPaths, System, Timer. Ils entrainent
-# EventLoop et ses satellites — c'est l'editeur de liens qui l'a dit, pas une
-# supposition.
-# `FilePosix.cpp` et `MappedFile.cpp` : ajoutes quand l'edition de liens de
-# LibJS les a reclames. `File.cpp` ne porte que la partie portable — les
-# virtuelles (`stat`, `fstat`, `truncate`, `open_path`) et donc la **table
-# virtuelle** de `Core::File` vivent dans la variante POSIX. Sans elle, le
-# defaut ne se manifeste pas a la compilation mais par « undefined reference to
-# vtable for Core::File », un message qui ne nomme aucun fichier.
-SRC_CORE="ElapsedTimer.cpp Environment.cpp ImmutableBytes.cpp \
-    File.cpp FilePosix.cpp MappedFile.cpp StandardPaths.cpp System.cpp Timer.cpp \
-    EventLoop.cpp EventLoopImplementation.cpp EventLoopImplementationUnix.cpp \
-    EventReceiver.cpp Notifier.cpp ThreadEventQueue.cpp SocketAddress.cpp \
-    DirIterator.cpp DirectoryEntry.cpp Directory.cpp AddressInfoVector.cpp"
+# Lue dans le `set(SOURCES ...)` du CMakeLists, pour que l'ajout d'un fichier en
+# amont soit pris sans que rien ne soit a modifier ici.
+SRC_CORE=$(sed -n '/^set(SOURCES/,/^)/p' "$LB/Libraries/LibCore/CMakeLists.txt" \
+           | grep -oE '[A-Za-z0-9_]+\.cpp')
 
-# LibThreading : LibGC s'en sert pour son fil de collecte.
+# --- Les choix de plateforme ------------------------------------------------
+#
+# Un par `if()` du CMakeLists amont, dans le meme ordre, avec la raison.
+
+# Geolocalisation : `GeolocationProviderCoreLocation.mm` est le chemin Apple.
+# Bouchaud n'a pas de service de localisation — upstream fournit lui-meme la
+# variante « non implementee », et c'est elle qu'il faut prendre plutot que d'en
+# ecrire une.
+SRC_CORE="$SRC_CORE GeolocationProviderUnimplemented.cpp"
+
+# POSIX contre Windows. Bouchaud expose une ABI Linux : la branche `else()`.
+SRC_CORE="$SRC_CORE AnonymousBuffer.cpp EventLoopImplementationUnix.cpp \
+    FilePosix.cpp LocalServer.cpp MappedFile.cpp Process.cpp Socket.cpp \
+    System.cpp TCPServer.cpp UDPServer.cpp"
+
+# Surveillance de fichiers : `check_include_file(sys/inotify.h)` chez upstream.
+# Bouchaud n'implemente pas inotify — aucun `inotify_init`, `inotify_add_watch`
+# ni `inotify_rm_watch` dans `src/kernel/abi/`. La variante « non implementee »
+# rend `ENOTSUP` proprement ; la variante inotify se lierait a des appels
+# systeme absents et echouerait a l'execution, pas a la liaison.
+SRC_CORE="$SRC_CORE FileWatcherUnimplemented.cpp"
+
+# Statistiques de processus. `ProcessStatisticsLinux.cpp` lit `/proc` — ce que
+# Bouchaud fournit (voir `src/kernel/sysroot.rs`). On prend donc bien la
+# variante Linux, et non celle « non implementee » : c'est le sens de la
+# compatibilite d'ABI qu'on construit.
+SRC_CORE="$SRC_CORE Platform/ProcessStatisticsLinux.cpp"
+
+# Fuseau horaire : la branche `LINUX OR BSD`.
+SRC_CORE="$SRC_CORE TimeZoneWatcherUnix.cpp"
+
+# --- LibThreading -----------------------------------------------------------
 SRC_THREADING="Thread.cpp"
 
 compile() {
     local dossier=$1 src=$2
-    local obj="$SORTIE/obj/$(basename "$dossier")-${src%.cpp}.o"
+    local obj="$SORTIE/obj/$(basename "$dossier")-$(echo "${src%.cpp}" | tr / -).o"
     OBJETS="$OBJETS $obj"
     if [ -f "$obj" ] && [ "$obj" -nt "$LB/Libraries/$dossier/$src" ]; then
         return 0
@@ -134,13 +133,13 @@ compile() {
 ECHECS=0
 OBJETS=""
 
-info "== LibSync ($CIBLE) =="
+info "== LibSync ($CIBLE) : $(echo "$SRC_SYNC" | wc -w) fichiers =="
 for src in $SRC_SYNC; do compile LibSync "$src"; done
 
-info "== LibCore, sous-ensemble ($CIBLE) =="
+info "== LibCore ($CIBLE) : $(echo "$SRC_CORE" | wc -w) fichiers =="
 for src in $SRC_CORE; do compile LibCore "$src"; done
 
-info "== LibThreading ($CIBLE) =="
+info "== LibThreading ($CIBLE) : $(echo "$SRC_THREADING" | wc -w) fichiers =="
 for src in $SRC_THREADING; do compile LibThreading "$src"; done
 
 if [ "$ECHECS" -gt 0 ]; then
@@ -148,13 +147,54 @@ if [ "$ECHECS" -gt 0 ]; then
     exit 1
 fi
 
-ar rcs "$SORTIE/libCoreMin.a" $OBJETS
-vert "  ok    libCoreMin.a ($(du -h "$SORTIE/libCoreMin.a" | cut -f1))"
+ar rcs "$SORTIE/libCore.a" $OBJETS
+vert "  ok    libCore.a ($(du -h "$SORTIE/libCore.a" | cut -f1))"
 
 info "  CXX   temoin LibCore"
+# LibCore complet se lie a LibUnicode, LibURL et LibTextCodec — c'est ce que dit
+# `target_link_libraries` en amont, et c'est desormais vrai chez nous aussi.
+UNI="$RACINE/third_party/build-libunicode-$CIBLE"
+JS="$RACINE/third_party/build-libjs-$CIBLE"
+RUSTLIB="$RACINE/third_party/build-rust-$CIBLE/x86_64-unknown-linux-gnu/release"
+# ## L'amorcage, et pourquoi le temoin peut attendre
+#
+# LibCore complet **reference** LibUnicode, LibURL et LibTextCodec. Or LibURL et
+# LibTextCodec sont construits avec LibJS, qui a besoin de LibCore. Au niveau des
+# archives, la dependance est donc circulaire.
+#
+# Elle ne l'est pas au niveau des objets : compiler LibCore n'exige que des
+# en-tetes, et compiler LibUnicode n'exige pas `libCore.a`. Seule **l'edition de
+# liens** d'un executable a besoin de tout le monde.
+#
+# D'ou la marche a suivre, que `build-tout.sh` applique : produire les archives
+# dans l'ordre, puis relier les temoins a la fin. Sur un arbre neuf, ce script
+# s'arrete donc apres `libCore.a` en le disant, plutot que d'echouer sur une
+# edition de liens qui ne peut pas encore aboutir.
+if [ ! -f "$UNI/libUnicode.a" ] || [ ! -f "$JS/libJS.a" ]; then
+    info "  note  LibUnicode/LibJS pas encore construits : temoin remis a plus tard"
+    info "        (relancer ce script apres build-libjs.sh, ou passer par build-tout.sh)"
+    exit 0
+fi
+SUP="$JS/libJS.a $UNI/libUnicode.a \
+     $RUSTLIB/liblibunicode_rust.a $RUSTLIB/liblibregex_rust.a \
+     $RUSTLIB/libliburl_rust.a $RUSTLIB/liblibjs_rust.a \
+     $RUSTLIB/liblibtextcodec_rust.a"
+
+# `--start-group` / `--end-group` : les archives sont **mutuellement
+# recursives**. Les caisses Rust rappellent le C++ (`libunicode_rust` appelle
+# `unicode_property_matches`, fourni par LibUnicode), et LibUnicode appelle le
+# Rust en retour. Un editeur de liens ne revient pas en arriere : quel que soit
+# l'ordre choisi, l'une des deux directions reste non resolue. Le groupe le fait
+# reparcourir jusqu'a stabilite — c'est la reponse prevue pour ce cas, et non un
+# contournement.
 $CXX $CXXFLAGS "$RACINE/tools/ladybird/libcore-probe.cpp" -o "$SORTIE/libcore-probe" \
-    "$SORTIE/libCoreMin.a" "$AK/libAK.a" \
-    -L"$DEPS/lib" -lfmt -lsimdutf -lmimalloc -lpthread
+    -Wl,--start-group \
+    "$SORTIE/libCore.a" $SUP "$AK/libAK.a" \
+    -Wl,--end-group \
+    -Wl,--allow-multiple-definition \
+    -L"$DEPS/lib" -lsimdjson -ltommath -lpsl -lfmt -lsimdutf -lmimalloc \
+    -L"$ICU/lib" -licui18n -licuuc -licudata \
+    -lpthread -lm -ldl
 
 vert "temoin construit : $SORTIE/libcore-probe"
 if [ "$CIBLE" = "hote" ]; then
