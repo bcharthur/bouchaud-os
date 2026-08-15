@@ -59,7 +59,8 @@ CXX=${CXX:-clang++}
 CXXFLAGS="-std=c++23 -O2 -fno-exceptions -fPIC \
     -DAK_SYSTEM_CACHE_ALIGNMENT_SIZE=64 $FLAGS_CIBLE \
     -I$LB -I$LB/Libraries \
-    -I$AK/gen -I$GEN -I$JS/gen -I$IPC/gen -I$RUSTGFXROOT/gen \
+    -I$AK/gen -I$GEN -I$JS/gen -I$IPC/gen \
+    -I$RUSTGFXROOT/gen -I$RUSTGFXROOT/gen/LibGfx \
     -I$DEPS/include -I$ICU/include \
     -I$VCPKG/include -I$VCPKG/include/skia \
     -Wno-unused-parameter -Wno-unknown-pragmas -Wno-invalid-constexpr \
