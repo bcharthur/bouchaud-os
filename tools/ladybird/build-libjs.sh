@@ -194,7 +194,8 @@ if [ ! -f "$INTERP_O" ] || [ "$INTERP_S" -nt "$INTERP_O" ]; then
 fi
 
 CXX=${CXX:-clang++}
-CXXFLAGS="-std=c++23 -O2 -fno-exceptions -fPIC $FLAGS_CIBLE \
+# `-DAK_SYSTEM_CACHE_ALIGNMENT_SIZE=64` : voir build-ak.sh.
+CXXFLAGS="-std=c++23 -O2 -fno-exceptions -fPIC -DAK_SYSTEM_CACHE_ALIGNMENT_SIZE=64 $FLAGS_CIBLE \
     -I$LB -I$LB/Libraries \
     -I$AK/gen -I$GEN -I$SORTIE/gen \
     -I$DEPS/include -I$ICU/include \

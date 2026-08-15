@@ -72,7 +72,8 @@ info "== js ($CIBLE) — l'interpreteur d'upstream =="
 mkdir -p "$SORTIE/obj"
 
 CXX=${CXX:-clang++}
-CXXFLAGS="-std=c++23 -O2 -fno-exceptions -fPIC $FLAGS_CIBLE \
+# `-DAK_SYSTEM_CACHE_ALIGNMENT_SIZE=64` : voir build-ak.sh.
+CXXFLAGS="-std=c++23 -O2 -fno-exceptions -fPIC -DAK_SYSTEM_CACHE_ALIGNMENT_SIZE=64 $FLAGS_CIBLE \
     -I$LB -I$LB/Libraries -I$AK/gen -I$GEN -I$JS/gen \
     -I$DEPS/include -I$ICU/include $(pkg-config --cflags libedit) \
     -Wno-unused-parameter -Wno-unknown-pragmas -Wno-invalid-constexpr \
