@@ -63,7 +63,19 @@ CXX=${CXX:-clang++}
 # (Meta/CMake/compile_options.cmake). `AK/TypeCasts.h` s'appuie sur
 # `dynamic_cast`, et melanger des unites compilees avec et sans RTTI produit des
 # transtypages qui echouent a l'execution sans rien dire.
-CXXFLAGS="-std=c++23 -O2 -fno-exceptions -fPIC $FLAGS_CIBLE \
+# `-DAK_SYSTEM_CACHE_ALIGNMENT_SIZE=64` : `AK/Platform.h` derive l'alignement de
+# ligne de cache de `__GCC_DESTRUCTIVE_SIZE`, un macro que GCC definit et que
+# Clang 18 ne connait pas. Le fichier prevoit lui-meme l'echappatoire
+# (`#ifndef AK_SYSTEM_CACHE_ALIGNMENT_SIZE`) : on renseigne donc la valeur
+# plutot que de modifier Ladybird. 64 octets, la taille de ligne de cache
+# x86-64 — c'est ce que GCC y met.
+#
+# Pose dans **tous** les scripts, et pas seulement la ou l'erreur apparait :
+# la valeur pilote des `alignas`, donc la disposition memoire de
+# `SingleProducerCircularQueue`. Deux unites compilees avec des valeurs
+# differentes s'accorderaient a l'edition de liens et se contrediraient a
+# l'execution.
+CXXFLAGS="-std=c++23 -O2 -fno-exceptions -fPIC -DAK_SYSTEM_CACHE_ALIGNMENT_SIZE=64 $FLAGS_CIBLE \
     -I$LB -I$SORTIE/gen -I$DEPS/include \
     -Wno-unused-parameter -Wno-unknown-pragmas \
     -Wno-invalid-constexpr -Wno-unqualified-std-cast-call \
