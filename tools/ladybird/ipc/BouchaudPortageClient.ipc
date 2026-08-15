@@ -1,0 +1,9 @@
+#include <AK/String.h>
+#include <AK/Vector.h>
+#include <LibURL/URL.h>
+
+endpoint BouchaudPortageClient
+{
+    pong(u32 valeur) =|
+    echo_result(String texte, Vector<u32> nombres, Optional<String> option, URL::URL url) =|
+}

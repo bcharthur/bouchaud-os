@@ -185,12 +185,37 @@ if [ -x "$AK_PROBE" ]; then
     #
     # `Tests/LibIPC/CMakeLists.txt` reserve `TestTransportSocket` a
     # `UNIX AND NOT APPLE` : c'est la branche que Bouchaud presente.
-    for t in TestTransportSocket TestConnection; do
+    # `TestConnection` reste sur l'hote : voir docs/ladybird/ICU_RUNTIME_SIZE.md.
+    # Chaque binaire Ladybird pese ~40 Mio de donnees ICU, l'archive plafonne a
+    # 192, et il faut choisir. `TestTransportSocket` couvre le transport
+    # (descripteurs, EOF, raccrochage) ; `TestConnection` couvre la concurrence,
+    # qui ne depend pas du portage — c'est du code C++ portable au-dessus du
+    # meme transport.
+    for t in TestTransportSocket; do
         if [ -x "third_party/build-libtest-bouchaud/$t" ]; then
             copie_depouillee "third_party/build-libtest-bouchaud/$t" "$WORK/files/$t"
             echo "exec /$t" >> "$WORK/files/autorun"
         fi
     done
+
+    # Le temoin des endpoints **generes** : deux vrais processus, un
+    # `socketpair`, et un aller-retour a travers le code produit par
+    # `generate_ipc_definitions.py`. Les tests d'upstream ci-dessus prouvent le
+    # transport ; celui-ci prouve le codec, que le transport ne peut pas voir.
+    #
+    # **Pas encore dans le scenario QEMU.** Le temoin passe sur l'hote (5/5) et
+    # son premier message passe en ring 3 — `ping 42 -> pong 43`, donc le proxy
+    # et le stub generes fonctionnent. Mais le second, qui porte
+    # String/Vector/Optional/URL, n'obtient pas de reponse.
+    #
+    # La difference entre les deux est la taille : le premier tient dans une
+    # poignee d'octets, le second en fait quelques centaines. La piste est donc
+    # la lecture fragmentee cote Bouchaud — `recvmsg` en `MSG_DONTWAIT` et le
+    # rearmement de `poll` dans le fil d'entree/sortie de `TransportSocket`.
+    #
+    # Voir docs/ladybird/M5_CODEC_RING3.md. Tant que ce n'est pas compris, le
+    # temoin reste hote seulement : mettre une verification rouge dans la suite
+    # ne la rendrait pas plus verte, et masquerait les regressions reelles.
 
     # `js` en dernier : c'est le plus lourd, et le seul dont l'echec ne dirait
     # rien de neuf si une brique en amont avait deja lache.
