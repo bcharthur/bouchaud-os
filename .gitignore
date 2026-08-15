@@ -78,3 +78,4 @@ third_party/icu-src/
 third_party/icu-hote/
 third_party/icu-bouchaud/
 third_party/build-libcrypto-*/
+third_party/build-libjs-*/

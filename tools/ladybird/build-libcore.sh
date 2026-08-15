@@ -101,8 +101,14 @@ SRC_SYNC="MutexPOSIX.cpp ConditionVariablePOSIX.cpp RWLockPOSIX.cpp"
 # LibGC reclame en plus : File, StandardPaths, System, Timer. Ils entrainent
 # EventLoop et ses satellites — c'est l'editeur de liens qui l'a dit, pas une
 # supposition.
+# `FilePosix.cpp` et `MappedFile.cpp` : ajoutes quand l'edition de liens de
+# LibJS les a reclames. `File.cpp` ne porte que la partie portable — les
+# virtuelles (`stat`, `fstat`, `truncate`, `open_path`) et donc la **table
+# virtuelle** de `Core::File` vivent dans la variante POSIX. Sans elle, le
+# defaut ne se manifeste pas a la compilation mais par « undefined reference to
+# vtable for Core::File », un message qui ne nomme aucun fichier.
 SRC_CORE="ElapsedTimer.cpp Environment.cpp ImmutableBytes.cpp \
-    File.cpp StandardPaths.cpp System.cpp Timer.cpp \
+    File.cpp FilePosix.cpp MappedFile.cpp StandardPaths.cpp System.cpp Timer.cpp \
     EventLoop.cpp EventLoopImplementation.cpp EventLoopImplementationUnix.cpp \
     EventReceiver.cpp Notifier.cpp ThreadEventQueue.cpp SocketAddress.cpp \
     DirIterator.cpp DirectoryEntry.cpp Directory.cpp AddressInfoVector.cpp"

@@ -1,0 +1,73 @@
+Sujet: Intrinsics.cpp — ne supposer #embed disponible que si le preprocesseur le dit
+
+Upstream choisit entre `#embed` et une inclusion par directive d'assemblage
+(`.incbin`) sur ce test :
+
+    #if defined(AK_COMPILER_CLANG) || (defined(AK_COMPILER_GCC) && (__GNUC__ > 14))
+
+La branche GCC interroge une version ; la branche Clang suppose que **tout**
+Clang sait faire `#embed`. Ce n'est vrai qu'a partir de Clang 19. Clang 18 —
+la version de la chaine Bouchaud — rejette la directive :
+
+    Intrinsics.cpp:149:6: error: invalid preprocessing directive
+
+Le correctif interroge le preprocesseur au lieu de deduire d'un nom de
+compilateur : `__has_embed` est defini exactement par les preprocesseurs qui
+implementent la directive (Clang >= 19, GCC >= 15). La branche GCC est laissee
+telle quelle pour ne pas changer le comportement des versions deja couvertes.
+
+Ce patch n'a rien de specifique a Bouchaud : c'est une correction de
+portabilite valable pour toute chaine Clang 18, et elle a vocation a etre
+proposee en amont. Il est garde ici en attendant, conformement a la regle 1 du
+README de ce repertoire — et il disparaitra soit avec la montee de Clang, soit
+avec son acceptation en amont.
+
+diff --git a/Libraries/LibJS/Runtime/Intrinsics.cpp b/Libraries/LibJS/Runtime/Intrinsics.cpp
+index e9deb826..9965b0e6 100644
+--- a/Libraries/LibJS/Runtime/Intrinsics.cpp
++++ b/Libraries/LibJS/Runtime/Intrinsics.cpp
+@@ -144,7 +144,7 @@
+     extern unsigned char const name[];              \
+     extern unsigned char const name##_END[];
+ 
+-#if defined(AK_COMPILER_CLANG) || (defined(AK_COMPILER_GCC) && (__GNUC__ > 14))
++#if (defined(AK_COMPILER_CLANG) && defined(__has_embed)) || (defined(AK_COMPILER_GCC) && (__GNUC__ > 14))
+ static constexpr char16_t ABSTRACT_OPERATIONS[] = {
+ #    embed "JavaScriptImplementations/AbstractOperations.js" suffix(, )
+     0 // null terminator
+@@ -153,7 +153,7 @@ static constexpr char16_t ABSTRACT_OPERATIONS[] = {
+ INCLUDE_FILE_WITH_ASSEMBLY(ABSTRACT_OPERATIONS, "LibJS/Runtime/JavaScriptImplementations/AbstractOperations.js")
+ #endif
+ 
+-#if defined(AK_COMPILER_CLANG) || (defined(AK_COMPILER_GCC) && (__GNUC__ > 14))
++#if (defined(AK_COMPILER_CLANG) && defined(__has_embed)) || (defined(AK_COMPILER_GCC) && (__GNUC__ > 14))
+ static constexpr char16_t ARRAY_CONSTRUCTOR[] = {
+ #    embed "JavaScriptImplementations/ArrayConstructor.js" suffix(, )
+     0 // null terminator
+@@ -166,7 +166,7 @@ namespace JS {
+ 
+ GC_DEFINE_ALLOCATOR(Intrinsics);
+ 
+-#if !defined(AK_COMPILER_CLANG) && !(defined(AK_COMPILER_GCC) && (__GNUC__ > 14))
++#if !(defined(AK_COMPILER_CLANG) && defined(__has_embed)) && !(defined(AK_COMPILER_GCC) && (__GNUC__ > 14))
+ static Utf16String utf16_source_from_ascii_bytes(ReadonlyBytes source)
+ {
+     Vector<char16_t> code_units;
+@@ -182,7 +182,7 @@ static Utf16String utf16_source_from_ascii_bytes(ReadonlyBytes source)
+ 
+ static Utf16View abstract_operations_source()
+ {
+-#if defined(AK_COMPILER_CLANG) || (defined(AK_COMPILER_GCC) && (__GNUC__ > 14))
++#if (defined(AK_COMPILER_CLANG) && defined(__has_embed)) || (defined(AK_COMPILER_GCC) && (__GNUC__ > 14))
+     return { ABSTRACT_OPERATIONS, AK::array_size(ABSTRACT_OPERATIONS) - 1 };
+ #else
+     static NeverDestroyed<Utf16String> source = utf16_source_from_ascii_bytes({ ABSTRACT_OPERATIONS, static_cast<size_t>(ABSTRACT_OPERATIONS_END - ABSTRACT_OPERATIONS) });
+@@ -192,7 +192,7 @@ static Utf16View abstract_operations_source()
+ 
+ static Utf16View array_constructor_source()
+ {
+-#if defined(AK_COMPILER_CLANG) || (defined(AK_COMPILER_GCC) && (__GNUC__ > 14))
++#if (defined(AK_COMPILER_CLANG) && defined(__has_embed)) || (defined(AK_COMPILER_GCC) && (__GNUC__ > 14))
+     return { ARRAY_CONSTRUCTOR, AK::array_size(ARRAY_CONSTRUCTOR) - 1 };
+ #else
+     static NeverDestroyed<Utf16String> source = utf16_source_from_ascii_bytes({ ARRAY_CONSTRUCTOR, static_cast<size_t>(ARRAY_CONSTRUCTOR_END - ARRAY_CONSTRUCTOR) });
