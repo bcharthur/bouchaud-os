@@ -91,3 +91,12 @@ third_party/build-js-*/
 third_party/build-libipc-*/
 third_party/build-libtest-*/
 third_party/build-libipc-*/
+
+# Chantiers vcpkg du portage graphique (regenerables par build-vcpkg-gfx.sh)
+third_party/vcpkg-gfx/
+third_party/vcpkg-gfx-installed/
+third_party/vcpkg-gfx-manifest/
+third_party/vcpkg-downloads/
+third_party/build-libgfx-*/
+third_party/build-libcompress-*/
+third_party/build-rust-gfx-*/

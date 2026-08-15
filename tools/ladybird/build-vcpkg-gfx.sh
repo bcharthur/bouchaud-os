@@ -25,6 +25,19 @@ VCPKG="$RACINE/third_party/vcpkg-gfx"
 MANIFESTE="$RACINE/third_party/vcpkg-gfx-manifest"
 INSTALLE="$RACINE/third_party/vcpkg-gfx-installed"
 
+# --- Ou vcpkg depose ses archives telechargees ------------------------------
+#
+# Par defaut, vcpkg les met dans `$VCPKG/downloads`, c'est-a-dire **dans** son
+# propre depot git. On l'en sort : ce repertoire est le seul dont le contenu
+# merite d'etre conserve entre deux executions, et le melanger a l'arbre vcpkg
+# oblige a tout mettre en cache ensemble ou rien.
+#
+# Chaque archive est validee par son empreinte SHA512 avant usage. Un cache
+# corrompu ou partiel ne peut donc pas empoisonner la construction : vcpkg
+# retelecharge ce qui ne correspond pas.
+export VCPKG_DOWNLOADS="${VCPKG_DOWNLOADS:-$RACINE/third_party/vcpkg-downloads}"
+mkdir -p "$VCPKG_DOWNLOADS"
+
 rouge() { printf '\033[31m%s\033[0m\n' "$*"; }
 vert()  { printf '\033[32m%s\033[0m\n' "$*"; }
 info()  { printf '\033[36m%s\033[0m\n' "$*"; }
@@ -80,13 +93,50 @@ if [ ! -x "$VCPKG/vcpkg" ]; then
     "$VCPKG/bootstrap-vcpkg.sh" -disableMetrics
 fi
 
+# --- L'installation, avec reprise ------------------------------------------
+#
+# vcpkg va chercher chaque paquet chez son editeur : sourceware pour bzip2,
+# gitlab.freedesktop.org pour freetype, et une quinzaine d'autres hotes. Aucun
+# n'est sous notre controle, et il suffit qu'un seul reponde 504 pour que la
+# construction entiere s'arrete — c'est exactement ce qui est arrive avec
+# freetype.
+#
+# On reessaie donc, avec une attente croissante. Ce n'est pas une precaution
+# vague : vcpkg est **reprenable**. Chaque paquet deja construit est reconnu et
+# saute, et chaque archive deja telechargee reste dans `$VCPKG_DOWNLOADS`. Un
+# second essai repart donc de la ou le premier s'est arrete, et ne repaie ni les
+# telechargements ni les compilations acquis.
+#
+# Les trois tentatives internes de vcpkg ne suffisent pas : elles s'enchainent
+# en quelques secondes, ce qui ne laisse pas le temps a une panne passagere de
+# se resorber.
 info "== dependances graphiques Ladybird / Skia CPU =="
-"$VCPKG/vcpkg" install \
-    --triplet x64-linux \
-    --x-manifest-root="$MANIFESTE" \
-    --x-install-root="$INSTALLE" \
-    --clean-after-build \
-    --disable-metrics
+ATTENTE=15
+TENTATIVE=1
+MAX=4
+while :; do
+    if "$VCPKG/vcpkg" install \
+        --triplet x64-linux \
+        --x-manifest-root="$MANIFESTE" \
+        --x-install-root="$INSTALLE" \
+        --clean-after-build \
+        --disable-metrics
+    then
+        break
+    fi
+    if [ "$TENTATIVE" -ge "$MAX" ]; then
+        rouge "vcpkg a echoue $MAX fois — ce n'est plus une panne passagere"
+        rouge "  les archives deja obtenues restent dans $VCPKG_DOWNLOADS"
+        exit 1
+    fi
+    # Les fragments d'un telechargement interrompu (`*.part`) ne servent a
+    # rien — vcpkg reprend du debut — et gonfleraient le cache sans profit.
+    find "$VCPKG_DOWNLOADS" -maxdepth 1 -name '*.part' -delete 2>/dev/null || true
+    info "  tentative $TENTATIVE/$MAX echouee ; reprise dans ${ATTENTE}s"
+    sleep "$ATTENTE"
+    ATTENTE=$((ATTENTE * 2))
+    TENTATIVE=$((TENTATIVE + 1))
+done
 
 [ -f "$INSTALLE/x64-linux/lib/libskia.a" ] || {
     rouge "Skia statique absent apres vcpkg"
