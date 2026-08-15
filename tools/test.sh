@@ -108,18 +108,59 @@ SCENARIO
 AK_PROBE=third_party/build-ak-bouchaud/ak-probe
 if [ -x "$AK_PROBE" ]; then
     info "== AK (portage Ladybird) =="
-    cp "$AK_PROBE" "$WORK/files/ak-probe"
+    # ## Ce qui entre dans l'image, et pourquoi pas tout
+    #
+    # `src/fs/tar.rs` refuse de lire plus de 192 Mio d'archive — un garde-fou
+    # contre l'epuisement du tas, puisque le RAMFS tient l'archive **et** les
+    # fichiers deplies. Or les binaires du portage Ladybird lient les donnees
+    # ICU en statique : ils pesent une cinquantaine de mega-octets **chacun**.
+    # Deux d'entre eux suffisent a faire deborder l'image.
+    #
+    # Le symptome ne ressemble a rien de ce qui precede : `mkdisk` reussit, la
+    # copie reussit, et c'est le **noyau** qui rejette ensuite un ELF tronque
+    # par « segment PT_LOAD hors du fichier ». Rien cote hote ne l'annonce.
+    #
+    # Deux mesures, donc.
+    #
+    # 1. On **depouille** les binaires copies. Ils portent leurs informations
+    #    de debogage, inutiles en ring 3 — le diagnostic se fait sur l'hote, ou
+    #    les binaires complets restent intacts.
+    # 2. Quand `js` d'upstream existe, il **remplace** `libjs-probe` au lieu de
+    #    s'y ajouter. Les deux exercent la meme chaine ; celui d'upstream le
+    #    fait mieux, puisque c'est son code et non le notre.
+    copie_depouillee() {
+        cp "$1" "$2"
+        strip "$2" 2>/dev/null || true
+    }
+
+    copie_depouillee "$AK_PROBE" "$WORK/files/ak-probe"
     echo "exec /ak-probe" >> "$WORK/files/autorun"
+
+    JS_UPSTREAM=third_party/build-js-bouchaud/js
+    if [ -x "$JS_UPSTREAM" ]; then
+        copie_depouillee "$JS_UPSTREAM" "$WORK/files/js"
+        cp tools/ladybird/temoin.js "$WORK/files/temoin.js"
+    fi
+
     # L'ordre est celui de la pile : chaque sonde suppose la precedente.
-    # `libjs-probe` fait 56 Mio a lui seul — les donnees d'ICU y sont liees en
-    # statique — d'ou le fait qu'il ne soit joue que s'il a ete construit.
     for etage in libcore libgc libunicode libcrypto libjs; do
+        # `libjs-probe` cede la place a `js` quand celui-ci existe. Sur un arbre
+        # ou `js` n'a pas ete construit, la sonde reste.
+        if [ "$etage" = libjs ] && [ -x "$JS_UPSTREAM" ]; then
+            continue
+        fi
         SONDE="third_party/build-$etage-bouchaud/$etage-probe"
         if [ -x "$SONDE" ]; then
-            cp "$SONDE" "$WORK/files/$etage-probe"
+            copie_depouillee "$SONDE" "$WORK/files/$etage-probe"
             echo "exec /$etage-probe" >> "$WORK/files/autorun"
         fi
     done
+
+    # `js` en dernier : c'est le plus lourd, et le seul dont l'echec ne dirait
+    # rien de neuf si une brique en amont avait deja lache.
+    if [ -x "$JS_UPSTREAM" ]; then
+        echo "exec /js /temoin.js" >> "$WORK/files/autorun"
+    fi
 else
     info "AK absent — pour l'ajouter au scenario :"
     info "  ./tools/ladybird/fetch.sh && ./tools/ladybird/build-deps.sh --cible \\"
@@ -191,6 +232,24 @@ if [ -x "$NAVIGATEUR_DIR/bo-navigateur" ]; then
 fi
 
 info "== fabrication du disque de test =="
+# ## Le garde-fou de taille, et pourquoi il vaut mieux ici qu'a l'execution
+#
+# `src/fs/tar.rs` ne lit que les 192 premiers Mio de l'archive. Au-dela, le
+# noyau deplie une archive tronquee : les derniers fichiers sont incomplets, et
+# le seul signe est un « segment PT_LOAD hors du fichier » au moment de les
+# executer — un message qui accuse l'ELF, pas l'image.
+#
+# On mesure donc avant de demarrer. Une image trop grosse est une erreur de
+# construction, pas une surprise a diagnostiquer trente minutes plus tard.
+TAILLE_FICHIERS=$(du -sb "$WORK/files" | cut -f1)
+LIMITE=$((192 * 1024 * 1024))
+if [ "$TAILLE_FICHIERS" -ge "$LIMITE" ]; then
+    red "les fichiers du scenario font $((TAILLE_FICHIERS / 1024 / 1024)) Mio"
+    red "  or src/fs/tar.rs n'en lit que $((LIMITE / 1024 / 1024)) : l'archive serait tronquee"
+    red "  (les binaires Ladybird lient les donnees ICU en statique, ~50 Mio piece)"
+    exit 1
+fi
+
 if ! (cd tools/userland && IMAGE=../../$DISK ./mkdisk.sh ../../$WORK/files >/dev/null); then
     red "mkdisk a echoue"
     exit 1
@@ -304,14 +363,21 @@ if [ -x "$AK_PROBE" ]; then
         temoin_abouti "LibCrypto (BigInt / BigFraction)"
         report $? "LibCrypto : BigInt et BigFraction en ring 3"
     fi
-    if [ -x "third_party/build-libjs-bouchaud/libjs-probe" ]; then
+    if [ -x "third_party/build-libjs-bouchaud/libjs-probe" ] && [ ! -x "$JS_UPSTREAM" ]; then
         temoin_abouti "LibJS"
         report $? "LibJS a evalue du JavaScript en ring 3"
-        # Le jalon M4 : la ligne doit reellement sortir. Un `console.log` sans
-        # client de console s'execute sans rien imprimer — voir libjs-probe.cpp.
-        grep -q "Hello Bouchaud" "$LOG" 2>/dev/null
-        report $? "jalon M4 : console.log a imprime depuis Bouchaud"
     fi
+    if [ -x "$JS_UPSTREAM" ]; then
+        # Le bilan est imprime par `temoin.js` lui-meme, a travers `js`. On
+        # exige la ligne exacte : un `js` qui demarre puis echoue afficherait
+        # ses premieres verifications sans jamais l'atteindre.
+        grep -q "RESULTAT : 0 verification(s) en echec" "$LOG" 2>/dev/null
+        report $? "js d'upstream a execute temoin.js en ring 3"
+    fi
+    # Le jalon M4 : la ligne doit reellement sortir, quelle que soit celle des
+    # deux voies qui la produit.
+    grep -q "Hello Bouchaud" "$LOG" 2>/dev/null
+    report $? "jalon M4 : console.log a imprime depuis Bouchaud"
 fi
 
 # Les deux autres sondes impriment leur propre bilan ; on les compte plutot que

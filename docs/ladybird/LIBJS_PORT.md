@@ -172,6 +172,7 @@ Ce qui est construit et verifie, sur l'hote **et** pour la cible `-static-pie` :
 | LibUnicode | 23 | **fait** | 8 verifications (donnees ICU) |
 | LibCrypto, sous-ensemble | 3 | **fait** | 9 verifications (BigInt/BigFraction) |
 | LibJS + satellites | 275 | **fait** | 12 verifications, hote **et** ring 3 |
+| `js` d'upstream | 2 | **fait** | 13 verifications, hote **et** ring 3 |
 
 ### La lecon de ce lot : c'est la version, pas le code
 
@@ -384,6 +385,54 @@ produit donc les archives dans l'ordre puis revient relier les temoins, et
 l'edition de liens emploie `--start-group` — les caisses Rust rappellent le C++
 (`libunicode_rust` appelle `unicode_property_matches`) et le C++ rappelle le
 Rust.
+
+## `js` : l'executable d'upstream, et non plus seulement notre sonde
+
+`libjs-probe` est **notre** code. Il a prouve que la chaine tenait, mais un
+programme ecrit pour passer ses propres verifications ne demontre pas grand-chose
+sur la bibliotheque : c'est nous qui avons choisi ce qu'il appelle.
+
+`Utilities/js.cpp` est le programme d'upstream — 1 151 lignes. Compile sans
+modification, avec `LibMain`, il execute `tools/ladybird/temoin.js` : classes et
+champs prives, destructuration, `BigInt` a 2^128, `normalize('NFC')`, deux
+`Intl`, `JSON`, groupes de capture nommes, `try/catch`, ordre des microtaches.
+Treize verifications, sur l'hote **et** en ring 3.
+
+C'est la condition qui etait posee avant d'aborder LibWeb : un executable LibJS
+reellement fonctionnel. Le jalon M4 est desormais porte par lui.
+
+Deux choses apprises en chemin :
+
+- **`queueMicrotask` n'existe pas**, et c'est correct. C'est une API du Web
+  (HTML), fournie par LibWeb, pas par LibJS. Le premier jet de `temoin.js`
+  l'appelait ; `js` a repondu « ReferenceError » — une bonne reponse a une
+  mauvaise attente, et un rappel net de la frontiere entre ce qui est construit
+  et ce qui ne l'est pas.
+- **`pkg-config --static`** et non `pkg-config` pour libedit : le premier ajoute
+  `Libs.private`, c'est-a-dire `-ltermcap` et `-lbsd`. En liaison dynamique ces
+  dependances se resolvent par le `DT_NEEDED` de `libedit.so` ; en `-static-pie`
+  personne ne les apporte, et l'edition de liens echoue sur `tputs` — un symbole
+  de terminfo dont rien ne dit qu'il vient de libedit.
+
+### La taille commence a compter
+
+Les binaires du portage lient les donnees ICU en statique : **une cinquantaine
+de mega-octets chacun**. Or `src/fs/tar.rs` ne lit que les 192 premiers Mio de
+l'archive de test — un garde-fou contre l'epuisement du tas, puisque le RAMFS
+tient l'archive **et** les fichiers deplies.
+
+Deux binaires suffisaient donc a faire deborder l'image, et le symptome ne
+ressemblait a rien : `mkdisk` reussissait, la copie reussissait, et c'est le
+noyau qui rejetait ensuite un ELF tronque par « segment PT_LOAD hors du
+fichier » — un message qui accuse l'ELF, pas l'image.
+
+Trois mesures : les binaires du scenario sont **depouilles**, `js` **remplace**
+`libjs-probe` au lieu de s'y ajouter (les deux exercent la meme chaine, celui
+d'upstream mieux que le notre), et `tools/test.sh` **mesure avant de
+construire** plutot que de laisser l'archive se tronquer en silence.
+
+C'est le premier signe concret que la facture d'ICU devra etre payee : le
+`ICU_DATA_FILTER_FILE` evoque plus haut n'est plus une precaution theorique.
 
 ## Ce qui reste
 

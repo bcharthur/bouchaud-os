@@ -54,5 +54,8 @@ etape "LibJS + satellites"      ./tools/ladybird/build-libjs.sh      $CIBLE
 # 3. Le temoin de LibCore, maintenant que LibUnicode et LibJS existent.
 etape "LibCore (temoin)"        ./tools/ladybird/build-libcore.sh  $CIBLE
 
+# 4. `js`, l'interpreteur d'upstream : l'executable reel du portage.
+etape "js (upstream)"           ./tools/ladybird/build-js.sh       $CIBLE
+
 echo
 vert "portage Ladybird complet pour la cible « $etiquette »"
