@@ -72,7 +72,8 @@ jobs:
             libfreetype-dev libpng-dev libjpeg-dev libpcre2-dev \
             zlib1g-dev libbrotli-dev libbz2-dev libfontconfig1-dev \
             nasm curl tar xz-utils file \
-            clang lld cmake ninja-build git autoconf automake libtool libssl-dev
+            clang lld cmake ninja-build git autoconf automake libtool libssl-dev \
+            libedit-dev
 
       # Chaque dependance a son cache, clef sur son script de construction : un
       # changement de version ou de drapeau invalide le cache concerne et lui
