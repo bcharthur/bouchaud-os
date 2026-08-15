@@ -30,6 +30,7 @@ VER_FMT=12.2.0
 VER_FASTFLOAT=8.2.10
 VER_SIMDUTF=9.0.0
 VER_MIMALLOC=2.2.7
+VER_TOMMATH=1.3.0
 
 CIBLE=hote
 CXXFLAGS_SUP=""
@@ -116,6 +117,36 @@ if [ ! -f "$PREFIXE/lib/libmimalloc.a" ]; then
 fi
 cp -r "$SRC/mimalloc-$VER_MIMALLOC/include/"*.h "$PREFIXE/include/"
 vert "  ok    mimalloc $VER_MIMALLOC"
+
+# --- libtommath -------------------------------------------------------------
+#
+# L'arithmetique a precision arbitraire derriere `Crypto::UnsignedBigInteger`,
+# donc derriere le type `BigInt` de JavaScript.
+#
+# La distribution en fournit **1.2.1**, et il a fallu le constater plutot que
+# l'esperer : `UnsignedBigInteger.cpp` appelle `mp_expt_n()`, qui n'existe qu'a
+# partir de **1.3.0** (c'est `mp_expt_d()` qui a ete renomme). Deux fichiers
+# sur trois refusaient de compiler. L'API de libtommath n'est donc pas stable
+# entre ces deux versions, contrairement a ce qu'on pouvait supposer — d'ou la
+# construction depuis la version epinglee par `vcpkg.json`.
+#
+# `makefile.include` de libtommath impose ses propres `CFLAGS` ; on compile
+# donc les sources directement, ce qui evite aussi d'avoir a lui expliquer
+# `-static-pie`.
+recupere "https://github.com/libtom/libtommath.git" \
+    "v$VER_TOMMATH" "libtommath-$VER_TOMMATH"
+if [ ! -f "$PREFIXE/lib/libtommath.a" ]; then
+    info "  CC    libtommath"
+    ( cd "$SRC/libtommath-$VER_TOMMATH"
+      rm -rf /tmp/tommath-obj && mkdir -p /tmp/tommath-obj
+      for c in *.c; do
+          ${CC:-gcc} -O2 -DNDEBUG -fPIC $CXXFLAGS_SUP \
+              -c "$c" -o "/tmp/tommath-obj/${c%.c}.o"
+      done
+      ar rcs "$PREFIXE/lib/libtommath.a" /tmp/tommath-obj/*.o )
+fi
+cp "$SRC/libtommath-$VER_TOMMATH/tommath.h" "$PREFIXE/include/"
+vert "  ok    libtommath $VER_TOMMATH"
 
 echo
 vert "dependances pretes dans third_party/deps-$CIBLE"

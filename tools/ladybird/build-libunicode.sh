@@ -45,33 +45,45 @@ vert()  { printf '\033[32m%s\033[0m\n' "$*"; }
 info()  { printf '\033[36m%s\033[0m\n' "$*"; }
 
 [ -f "$CORE/libCoreMin.a" ] || { rouge "LibCore absent — lancer build-libcore.sh"; exit 1; }
-pkg-config --exists icu-i18n icu-uc || { rouge "ICU absent — apt install libicu-dev"; exit 1; }
 
-ICU_VER=$(pkg-config --modversion icu-i18n)
+# --- ICU : le notre, pas celui de la distribution ---------------------------
+#
+# `libicu-dev` de Debian donne ICU 74, contre lequel 19 des 23 sources
+# compilent — et les 4 dernieres pas du tout. Voir `build-icu.sh` pour le
+# detail des API en cause. On exige donc l'ICU construit par ce script, et on
+# refuse de retomber silencieusement sur celui du systeme : un repli
+# silencieux ferait reapparaitre les memes 4 echecs, un mois plus tard, sans
+# que rien ne rappelle pourquoi.
+ICU="$RACINE/third_party/icu-$CIBLE"
+[ -f "$ICU/lib/libicuuc.a" ] || {
+    rouge "ICU absent — lancer tools/ladybird/build-icu.sh ${1:-}"
+    exit 1
+}
+export PKG_CONFIG_PATH="$ICU/lib/pkgconfig"
+ICU_VER=$(pkg-config --modversion icu-uc)
 info "== LibUnicode ($CIBLE) — ICU $ICU_VER =="
-# Upstream epingle ICU 78.3 dans vcpkg.json. Une version differente n'est pas
-# forcement un probleme — l'API C++ d'ICU est stable — mais c'est un ecart a
-# connaitre : si une fonction manque, c'est la premiere piste.
-if [ "$ICU_VER" != "78.3" ]; then
-    info "  note  upstream epingle ICU 78.3 ; ecart a garder en tete"
-fi
+# `vcpkg.json` d'upstream epingle 78.3, mais aucun tag `release-78-*` n'existe
+# publiquement : `release-77-1` est le plus recent. L'ecart est assume et
+# documente dans docs/ladybird/LIBJS_PORT.md.
+case "$ICU_VER" in
+    77.*) ;;
+    *) info "  note  attendu 77.x (upstream ecrit 78.3, tag inexistant en amont)" ;;
+esac
 
 # --- La caisse Rust ---------------------------------------------------------
-CRATE="$LB/Libraries/LibUnicode/Rust"
-if [ ! -f "$RUST_OUT/x86_64-unknown-linux-gnu/release/liblibunicode_rust.a" ]; then
-    info "  CARGO libunicode_rust"
-    ( cd "$CRATE"
-      CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu \
-      CARGO_TARGET_DIR="$RUST_OUT" \
-          cargo build --release --features allocator )
-fi
+#
+# Construite par `build-rust.sh`, avec les quatre autres caisses du chemin
+# LibJS. Elle l'etait ici auparavant ; le regroupement n'est pas cosmetique :
+# `libunicode_rust` est aussi un `rlib` consomme par `libregex_rust`, et la
+# fonctionnalite `allocator` doit etre posee sur l'une sans l'etre sur l'autre.
+# C'est une propriete du graphe entier, pas de cette bibliotheque seule.
 RUST_LIB="$RUST_OUT/x86_64-unknown-linux-gnu/release/liblibunicode_rust.a"
-RUST_FFI=$(find "$RUST_OUT" -name RustFFI.h -print -quit)
-[ -n "$RUST_FFI" ] || { rouge "RustFFI.h introuvable (cbindgen n'a pas tourne ?)"; exit 1; }
-vert "  ok    libunicode_rust + $(basename "$RUST_FFI")"
+[ -f "$RUST_LIB" ] || { rouge "caisses Rust absentes — lancer build-rust.sh ${1:-}"; exit 1; }
+[ -f "$RUST_OUT/gen/LibUnicode/RustFFI.h" ] || { rouge "RustFFI.h absent — relancer build-rust.sh"; exit 1; }
+vert "  ok    libunicode_rust + RustFFI.h"
 
 mkdir -p "$SORTIE/obj" "$SORTIE/gen/LibUnicode"
-cp "$RUST_FFI" "$SORTIE/gen/LibUnicode/RustFFI.h"
+cp "$RUST_OUT/gen/LibUnicode/RustFFI.h" "$SORTIE/gen/LibUnicode/RustFFI.h"
 
 if [ ! -f "$SORTIE/gen/LibUnicode/Export.h" ]; then
     cat > "$SORTIE/gen/LibUnicode/Export.h" <<'EXPORT'
@@ -126,3 +138,22 @@ fi
 ar rcs "$SORTIE/libUnicode.a" $OBJETS
 vert "  ok    libUnicode.a ($(du -h "$SORTIE/libUnicode.a" | cut -f1))"
 echo "$RUST_LIB" > "$SORTIE/rust-lib.txt"
+
+# --- Le temoin --------------------------------------------------------------
+#
+# `-licudata` **apres** `-licuuc` et `-licui18n` : l'archive de donnees ne
+# reference rien, elle est referencee. L'ordre inverse la ferait ecarter par
+# l'editeur de liens, et les donnees manqueraient a l'execution sans qu'aucune
+# erreur de liaison ne le signale.
+info "  CXX   temoin LibUnicode"
+$CXX $CXXFLAGS "$RACINE/tools/ladybird/libunicode-probe.cpp" \
+    -o "$SORTIE/libunicode-probe" \
+    "$SORTIE/libUnicode.a" "$CORE/libCoreMin.a" "$AK/libAK.a" "$RUST_LIB" \
+    $(pkg-config --libs icu-i18n icu-uc) \
+    -L"$DEPS/lib" -lfmt -lsimdutf -lmimalloc -lpthread
+
+vert "temoin construit : $SORTIE/libunicode-probe ($(du -h "$SORTIE/libunicode-probe" | cut -f1))"
+if [ "$CIBLE" = "hote" ]; then
+    echo
+    "$SORTIE/libunicode-probe"
+fi
