@@ -61,12 +61,26 @@ info "== en-tetes generes ($CIBLE) =="
 mkdir -p "$SORTIE"
 
 # --- Export.h ---------------------------------------------------------------
+# Deux formes, et il a fallu la seconde pour s'en apercevoir : `ladybird_lib(...
+# EXPLICIT_SYMBOL_EXPORT)` couvre la plupart des bibliotheques, mais `LibTest`
+# appelle `ladybird_generate_export_header(LibTest test)` **directement**, sans
+# passer par `ladybird_lib`. Ne lire que la premiere forme faisait manquer son
+# `Export.h`, et l'erreur ne parlait bien sur que du fichier absent.
 NB=0
 for cmake in "$LB"/Libraries/*/CMakeLists.txt; do
     ligne=$(grep -oE 'ladybird_lib\([A-Za-z]+ [a-z0-9]+ EXPLICIT_SYMBOL_EXPORT\)' "$cmake" || true)
-    [ -n "$ligne" ] || continue
-    biblio=$(echo "$ligne" | sed -E 's/ladybird_lib\(([A-Za-z]+) .*/\1/')
-    nom=$(echo "$ligne" | sed -E 's/ladybird_lib\([A-Za-z]+ ([a-z0-9]+) .*/\1/')
+    if [ -n "$ligne" ]; then
+        biblio=$(echo "$ligne" | sed -E 's/ladybird_lib\(([A-Za-z]+) .*/\1/')
+        nom=$(echo "$ligne" | sed -E 's/ladybird_lib\([A-Za-z]+ ([a-z0-9]+) .*/\1/')
+    else
+        # `^` : la definition de la fonction elle-meme, dans Meta/, n'est pas
+        # une invocation — mais on ne lit ici que Libraries/, ou seules les
+        # invocations apparaissent, en debut de ligne.
+        ligne=$(grep -oE '^ladybird_generate_export_header\([A-Za-z]+ [a-z0-9]+\)' "$cmake" || true)
+        [ -n "$ligne" ] || continue
+        biblio=$(echo "$ligne" | sed -E 's/ladybird_generate_export_header\(([A-Za-z]+) .*/\1/')
+        nom=$(echo "$ligne" | sed -E 's/ladybird_generate_export_header\([A-Za-z]+ ([a-z0-9]+)\)/\1/')
+    fi
     macro=$(echo "$nom" | tr '[:lower:]' '[:upper:]')_API
 
     mkdir -p "$SORTIE/$biblio"
@@ -77,7 +91,7 @@ for cmake in "$LB"/Libraries/*/CMakeLists.txt; do
  * **statique** : les macros de visibilite sont vides, parce qu'une archive
  * n'exporte rien — tout est resolu a l'edition de liens finale.
  *
- * Le nom de la macro vient de \`ladybird_lib($biblio $nom EXPLICIT_SYMBOL_EXPORT)\`. */
+ * Macro deduite du nom court declare en amont pour \`$biblio\` : \`$nom\`. */
 #pragma once
 #define ${macro}
 #define ${macro%_API}_NO_EXPORT

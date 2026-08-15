@@ -100,3 +100,44 @@ done
 
 ar rcs "$SORTIE/libIPC.a" $OBJETS
 vert "  ok    libIPC.a ($(du -h "$SORTIE/libIPC.a" | cut -f1))"
+
+# --- Les endpoints du temoin ------------------------------------------------
+#
+# Produits par `Meta/Generators/generate_ipc_definitions.py`, le generateur
+# d'upstream — le meme que celui qu'appelle `compile_ipc()` dans
+# `Meta/CMake/code_generators.cmake`. C'est un script Python : aucune chaine
+# supplementaire, et surtout aucune classe Endpoint/Proxy/Stub ecrite a la main.
+GENERATEUR="$LB/Meta/Generators/generate_ipc_definitions.py"
+for cote in Server Client; do
+    entree="$RACINE/tools/ladybird/ipc/BouchaudPortage$cote.ipc"
+    sortie="$SORTIE/gen/BouchaudPortage${cote}Endpoint.h"
+    if [ ! -f "$sortie" ] || [ "$entree" -nt "$sortie" ]; then
+        info "  GEN   BouchaudPortage${cote}Endpoint.h"
+        python3 "$GENERATEUR" --input "$entree" --output "$sortie"
+    fi
+done
+vert "  ok    endpoints generes"
+
+info "  CXX   temoin codec"
+RUSTLIB="$RACINE/third_party/build-rust-$CIBLE/x86_64-unknown-linux-gnu/release"
+GC="$RACINE/third_party/build-libgc-$CIBLE"
+UNI="$RACINE/third_party/build-libunicode-$CIBLE"
+CRYPTO="$RACINE/third_party/build-libcrypto-$CIBLE"
+$CXX $CXXFLAGS "$RACINE/tools/ladybird/libipc-codec-probe.cpp" \
+    -o "$SORTIE/libipc-codec-probe" \
+    -Wl,--start-group \
+    "$SORTIE/libIPC.a" "$JS/libJS.a" "$GC/libGC.a" "$UNI/libUnicode.a" \
+    "$CRYPTO/libCryptoMin.a" "$CORE/libCore.a" "$AK/libAK.a" \
+    "$RUSTLIB/liblibunicode_rust.a" "$RUSTLIB/liblibregex_rust.a" \
+    "$RUSTLIB/libliburl_rust.a" "$RUSTLIB/liblibjs_rust.a" \
+    "$RUSTLIB/liblibtextcodec_rust.a" \
+    -Wl,--end-group -Wl,--allow-multiple-definition \
+    -L"$DEPS/lib" -lsimdjson -ltommath -lpsl -lfmt -lsimdutf -lmimalloc \
+    -L"$ICU/lib" -licui18n -licuuc -licudata \
+    -lpthread -lm -ldl
+
+vert "  ok    libipc-codec-probe"
+if [ "$CIBLE" = "hote" ]; then
+    echo
+    "$SORTIE/libipc-codec-probe"
+fi
