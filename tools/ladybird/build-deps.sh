@@ -48,7 +48,7 @@ vert()  { printf '\033[32m%s\033[0m\n' "$*"; }
 info()  { printf '\033[36m%s\033[0m\n' "$*"; }
 
 CXX=${CXX:-clang++}
-CXXSTD="-std=c++23 -O2 -fno-exceptions -fno-rtti $CXXFLAGS_SUP"
+CXXSTD="-std=c++23 -O2 -fno-exceptions $CXXFLAGS_SUP"
 
 # Recupere une source a un tag precis, une seule fois.
 #

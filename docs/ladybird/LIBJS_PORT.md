@@ -150,6 +150,55 @@ actuel avant M5.
 | OpenSSL suppose `/dev/urandom`, `getrandom` | faible | les deux existent |
 | Divergence upstream par patches locaux | moyenne | patches numerotes, proposes en amont |
 
+## Etat mesure au 2026-08-15 (PR 1-8)
+
+Ce qui est construit et verifie, sur l'hote **et** pour la cible `-static-pie` :
+
+| Brique | Fichiers | Etat | Temoin |
+|---|---|---|---|
+| Chaine C++23 | — | **fait** | 17 verifications |
+| fast_float, fmt, simdutf, mimalloc | — | **fait** | versions de `vcpkg.json` |
+| AK | 39 | **fait** | 13 verifications |
+| LibSync | 3 | **fait** | 6 verifications (dont 4 fils en contention) |
+| LibCore, sous-ensemble | 17 | **fait** | idem |
+| LibThreading | 1 | **fait** | idem |
+| LibGC | 20 | **fait** | 5 verifications (513 cellules recoltees) |
+| LibUnicode | 23 | **bloque** | voir ci-dessous |
+| LibCrypto, LibJS | 556+ | non commence | — |
+
+### Le blocage : la version d'ICU
+
+Sur 23 fichiers de LibUnicode, **19 compilent** contre l'ICU 74 de la
+distribution. Les 4 restants echouent sur des differences d'API entre ICU 74 et
+la version qu'upstream emploie :
+
+- `CharacterTypes.cpp` : `icu::UnicodeSet::strings()` est **privee** en 74,
+  publique a partir de 77 ;
+- `Calendars/AdjustedEraCalendar.h` et `ChineseDangiCalendar.h` : les signatures
+  virtuelles d'`icu::Calendar` ont change ; les `override` ne recouvrent plus
+  rien.
+
+Aucun code a nous ne corrige cela : c'est upstream qui emploie des API recentes.
+
+`vcpkg.json` epingle **ICU 78.3**, mais aucun tag `release-78-*` n'existe sur le
+depot public d'ICU — le plus recent y est `release-77-1`. La version de vcpkg ne
+correspond donc pas a une etiquette amont accessible. `release-77-1` expose bien
+`strings()` en public et est la cible retenue.
+
+### Ce qui reste, dans l'ordre
+
+1. ICU 77 construit en statique (en cours).
+2. LibUnicode : reprendre les 4 fichiers avec ICU 77.
+3. LibCrypto : OpenSSL 3.0 de la distribution + libtommath.
+4. LibTextCodec, LibRegex, LibSyntax, LibFileSystem, LibURL — les dependances
+   privees de LibJS que l'editeur de liens reclamera.
+5. LibJS : 556 fichiers.
+6. Le temoin `1 + 2`, puis `console.log`.
+
+Rien dans ce qui precede n'est un obstacle de conception : ce sont des
+constructions a enchainer. Le seul inconnu restant est le temps de compilation de
+LibJS.
+
 ## Critere de succes du document
 
 Le portage est reussi quand, sous QEMU :

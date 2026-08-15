@@ -72,3 +72,5 @@ third_party/deps-bouchaud/
 third_party/build-ak-*/
 third_party/build-libcore-*/
 third_party/build-libgc-*/
+third_party/build-libunicode-*/
+third_party/build-rust-*/

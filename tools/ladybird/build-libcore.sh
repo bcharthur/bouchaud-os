@@ -46,7 +46,11 @@ info()  { printf '\033[36m%s\033[0m\n' "$*"; }
 [ -f "$AK/libAK.a" ] || { rouge "AK absent — lancer build-ak.sh ${1:-}"; exit 1; }
 
 CXX=${CXX:-clang++}
-CXXFLAGS="-std=c++23 -O2 -fno-exceptions -fno-rtti -fPIC $FLAGS_CIBLE \
+# `-fno-rtti` n'est **pas** pose : upstream ne desactive que les exceptions
+# (Meta/CMake/compile_options.cmake). `AK/TypeCasts.h` s'appuie sur
+# `dynamic_cast`, et melanger des unites compilees avec et sans RTTI produit des
+# transtypages qui echouent a l'execution sans rien dire.
+CXXFLAGS="-std=c++23 -O2 -fno-exceptions -fPIC $FLAGS_CIBLE \
     -I$LB -I$LB/Libraries -I$AK/gen -I$SORTIE/gen -I$DEPS/include \
     -Wno-unused-parameter -Wno-unknown-pragmas -Wno-invalid-constexpr \
     -Wno-unqualified-std-cast-call -Wno-user-defined-literals \
