@@ -25,6 +25,7 @@ pub fn help() {
     println!("            panic-test, roadmap");
     println!("  noyau   : ps, kill <pid>, free, syscalls, apps, launch <app>, df");
     println!("  ring 3  : exec <elf64> [args], elfinfo <f>, usermode (autotest), tasks");
+    println!("            poll-selftest (Ladybird M5 : pipe2 + clone + poll, 100% bare-metal)");
     println!("            vmstat (memoire virtuelle), strace on|off");
     println!("  session : whoami, id, users, su [user], logout/exit");
     println!("  comptes : useradd <nom>, userdel <nom>, passwd [user]   (root pour add/del)");

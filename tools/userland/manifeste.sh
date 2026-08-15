@@ -62,6 +62,11 @@ TAILLE=$(wc -c < "$IMAGE" | tr -d ' ')
 SOMME=$(sha256sum "$IMAGE" | cut -d' ' -f1)
 QUAND=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
+LADYBIRD_M5=false
+if tar -tf "$IMAGE" 2>/dev/null | grep -qE '(^|\./)usr/libexec/ladybird/libipc-codec-probe$'; then
+    LADYBIRD_M5=true
+fi
+
 cat <<JSON
 {
   "schema": 1,
@@ -76,6 +81,7 @@ cat <<JSON
   "python_version": "$PYVER",
   "quickjs_version": "$QJSVER",
   "quickjs_pypi_version": "$QJSPYPI",
-  "ffmpeg_version": "$AVVER"
+  "ffmpeg_version": "$AVVER",
+  "ladybird_m5_probe": $LADYBIRD_M5
 }
 JSON

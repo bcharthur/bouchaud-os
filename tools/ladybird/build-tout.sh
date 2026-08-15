@@ -57,5 +57,10 @@ etape "LibCore (temoin)"        ./tools/ladybird/build-libcore.sh  $CIBLE
 # 4. `js`, l'interpreteur d'upstream : l'executable reel du portage.
 etape "js (upstream)"           ./tools/ladybird/build-js.sh       $CIBLE
 
+# 5. M5 : transport et endpoints generes. Le temoin `libipc-codec-probe`
+# devient un artefact produit par la chaine cible, et non un executable reserve
+# au harnais de test.
+etape "LibIPC + endpoints generes" ./tools/ladybird/build-libipc.sh $CIBLE
+
 echo
 vert "portage Ladybird complet pour la cible « $etiquette »"
