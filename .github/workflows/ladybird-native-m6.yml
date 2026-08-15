@@ -105,12 +105,22 @@ jobs:
       # `always()` : c'est tout l'interet. Une construction interrompue a
       # quand meme rapporte des archives, et les garder evite de repasser par
       # les memes hotes au tour suivant.
+      #
+      # La cle porte `run_id` **et** `run_attempt`. Le second n'est pas une
+      # precaution decorative : une relance depuis l'interface Actions garde le
+      # meme `run_id` et n'incremente que `run_attempt`. Comme les cles de cache
+      # sont immuables, la premiere tentative aurait pris la cle pour elle, et
+      # chaque relance aurait pu *lire* son instantane sans jamais pouvoir en
+      # *ecrire* un plus complet — les relances successives repartant toujours
+      # du meme point. C'est exactement l'accumulation que cette etape cherche a
+      # obtenir qui aurait ete perdue, et dans le cas d'usage le plus courant :
+      # celui ou l'on relance apres une panne d'hote.
       - name: Enregistrer les archives vcpkg
         if: always()
         uses: actions/cache/save@v4
         with:
           path: third_party/vcpkg-downloads
-          key: ladybird-gfx-downloads-${{ runner.os }}-${{ hashFiles('tools/ladybird/build-vcpkg-gfx.sh') }}-${{ github.run_id }}
+          key: ladybird-gfx-downloads-${{ runner.os }}-${{ hashFiles('tools/ladybird/build-vcpkg-gfx.sh') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Verifier l'ELF produit
         run: |

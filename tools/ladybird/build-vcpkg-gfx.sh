@@ -124,14 +124,22 @@ while :; do
     then
         break
     fi
+    # Les fragments d'un telechargement interrompu (`*.part`) ne servent a
+    # rien — vcpkg reprend du debut — et gonfleraient le cache sans profit.
+    #
+    # Ce menage vient **avant** le test de la derniere tentative, et non apres.
+    # Place ensuite, il etait saute precisement dans le cas ou il compte : la
+    # sortie en erreur, suivie du `if: always()` du workflow qui enregistre le
+    # repertoire. Un gros telechargement coupe au dernier essai aurait donc ete
+    # mis en cache, restaure aux executions suivantes, et aurait consomme le
+    # quota pour un fragment inutilisable — l'inverse de ce que la boucle
+    # cherche a preserver.
+    find "$VCPKG_DOWNLOADS" -maxdepth 1 -name '*.part' -delete 2>/dev/null || true
     if [ "$TENTATIVE" -ge "$MAX" ]; then
         rouge "vcpkg a echoue $MAX fois — ce n'est plus une panne passagere"
         rouge "  les archives deja obtenues restent dans $VCPKG_DOWNLOADS"
         exit 1
     fi
-    # Les fragments d'un telechargement interrompu (`*.part`) ne servent a
-    # rien — vcpkg reprend du debut — et gonfleraient le cache sans profit.
-    find "$VCPKG_DOWNLOADS" -maxdepth 1 -name '*.part' -delete 2>/dev/null || true
     info "  tentative $TENTATIVE/$MAX echouee ; reprise dans ${ATTENTE}s"
     sleep "$ATTENTE"
     ATTENTE=$((ATTENTE * 2))
