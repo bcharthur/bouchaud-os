@@ -44,6 +44,13 @@ pub const SOCK_DGRAM: u32 = 2;
 pub const SOCK_NONBLOCK: u32 = 0o4000;
 pub const SOCK_CLOEXEC: u32 = 0o2000000;
 
+/// Drapeau persistant du descripteur, pose par `fcntl(F_SETFL)`/`FIONBIO`.
+const O_NONBLOCK: u32 = 0o4000;
+/// Drapeau Linux de `recv`/`recvmsg` : ne vaut que pour **cet appel**.
+/// Ladybird l'utilise pour drainer son transport jusqu'a `EAGAIN` sans rendre
+/// le socket lui-meme non bloquant.
+const MSG_DONTWAIT: u32 = 0x40;
+
 /// Nature d'un socket.
 #[derive(Clone, Copy, PartialEq)]
 pub enum SocketKind {
@@ -150,6 +157,19 @@ fn est_paire(fd: i32) -> bool {
     let borrowed = process.borrow();
     matches!(borrowed.files.get(fd).map(|desc| &desc.kind),
              Some(FdKind::SocketPair(_, _)))
+}
+
+/// Le descripteur a-t-il ete place durablement en mode non bloquant ?
+///
+/// `SocketState::nonblocking` couvre `SOCK_NONBLOCK` a la creation. Ce test
+/// couvre les bascules ulterieures par `fcntl(F_SETFL)` et `FIONBIO`, qui
+/// vivent dans `FileDesc::flags`.
+fn fd_non_bloquant(fd: i32) -> bool {
+    let process = task::current_process();
+    let borrowed = process.borrow();
+    borrowed.files.get(fd)
+        .map(|desc| desc.flags & O_NONBLOCK != 0)
+        .unwrap_or(false)
 }
 
 /// Recupere l'etat d'un socket depuis son descripteur.
@@ -357,7 +377,7 @@ pub fn sys_recvfrom(
     fd: i32,
     buffer: u64,
     len: usize,
-    _flags: u32,
+    flags: u32,
     addr: u64,
     addr_len: u64,
 ) -> i64 {
@@ -368,6 +388,28 @@ pub fn sys_recvfrom(
     // adresse d'expediteur n'est ecrite — une paire est anonyme des deux
     // cotes, et Linux ne remplit rien non plus.
     if est_paire(fd) {
+        // `MSG_DONTWAIT` est local a cet appel. Il ne faut surtout pas poser
+        // `O_NONBLOCK` temporairement sur le descripteur : les autres threads
+        // verraient alors un etat qui ne leur appartient pas.
+        //
+        // Le noyau Bouchaud n'est pas preempte au milieu d'un syscall. Tester
+        // le tampon puis entrer dans `sys_read` est donc atomique vis-a-vis des
+        // autres taches : si le canal est vide ici, une lecture non bloquante
+        // doit rendre `EAGAIN` immediatement au lieu d'entrer dans l'attente de
+        // deux secondes de `sys_read(SocketPair)`.
+        if fd_non_bloquant(fd) || flags & MSG_DONTWAIT != 0 {
+            let vide = {
+                let process = task::current_process();
+                let borrowed = process.borrow();
+                match borrowed.files.get(fd).map(|desc| &desc.kind) {
+                    Some(FdKind::SocketPair(inbox, _)) => inbox.borrow().octets.is_empty(),
+                    _ => return -errno::ENOTSOCK,
+                }
+            };
+            if vide {
+                return -errno::EAGAIN;
+            }
+        }
         let lu = crate::kernel::abi::file::sys_read(fd, buffer, len);
         if lu >= 0 && addr_len != 0 {
             user_write(addr_len, &0u32.to_le_bytes());
@@ -381,7 +423,10 @@ pub fn sys_recvfrom(
     };
     let (kind, nonblocking) = {
         let borrowed = state.borrow();
-        (borrowed.kind, borrowed.nonblocking)
+        (
+            borrowed.kind,
+            borrowed.nonblocking || fd_non_bloquant(fd) || flags & MSG_DONTWAIT != 0,
+        )
     };
 
     match kind {
@@ -710,9 +755,11 @@ pub fn sys_recvmsg(fd: i32, msghdr: u64, flags: u32) -> i64 {
     let mut installes: Vec<i32> = Vec::new();
     if let Some(canal) = &entrant {
         // Meme attente que pour les octets : le pair n'a peut-etre pas encore
-        // eu la main. Sans elle, le premier `recvmsg` d'un dialogue echoue.
-        let bloquant = process.borrow().files.get(fd)
-            .map(|d| d.flags & 0o4000 == 0).unwrap_or(true);
+        // eu la main. Sans elle, le premier `recvmsg` bloquant d'un dialogue
+        // echoue. `MSG_DONTWAIT`, lui, interdit explicitement cette attente et
+        // doit conduire a `EAGAIN` immediatement si le canal est vide.
+        let bloquant = !fd_non_bloquant(fd)
+            && flags & MSG_DONTWAIT == 0;
         if bloquant && canal.borrow().descripteurs.is_empty()
             && canal.borrow().octets.is_empty()
         {
