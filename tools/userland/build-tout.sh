@@ -68,6 +68,23 @@ etape "CPython"  "$ROOT/out-python-embed/usr/lib/libpython3.12.a" \
 etape "Qt"       "$ROOT/build-qt/install/bin/qmake"          ./build-qt.sh
 etape "Navigateur" "$ROOT/out-navigateur/bo-navigateur"      ./build-navigateur.sh
 
+# Artefact de transition M5 : le binaire est compile pour la cible par la chaine
+# Ladybird, puis livre dans le vrai userland interactif. Il ne tourne jamais sur
+# l'hote Linux : seule la compilation croisee y a lieu.
+if [ -n "${BO_LADYBIRD_M5_PROBE:-}" ]; then
+    [ -x "$BO_LADYBIRD_M5_PROBE" ] || {
+        echo "Ladybird M5: probe cible introuvable ou non executable: $BO_LADYBIRD_M5_PROBE" >&2
+        exit 1
+    }
+    DEST="$ROOT/out-navigateur/usr/libexec/ladybird"
+    mkdir -p "$DEST"
+    cp "$BO_LADYBIRD_M5_PROBE" "$DEST/libipc-codec-probe"
+    chmod 755 "$DEST/libipc-codec-probe"
+    strip --strip-unneeded "$DEST/libipc-codec-probe" 2>/dev/null || true
+    echo "== Ladybird M5 embarque : /usr/libexec/ladybird/libipc-codec-probe"
+    ls -lh "$DEST/libipc-codec-probe"
+fi
+
 echo ""
 echo "== disque userland =="
 ./mkdisk.sh out-navigateur

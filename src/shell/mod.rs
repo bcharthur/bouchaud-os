@@ -109,7 +109,7 @@ pub const COMMANDS: &[&str] = &[
     "git", "rustc", "cargo", "rust-selftest",
     "python", "python3", "pip", "pip3", "python-selftest",
     "pybrowser",
-    "exec", "elfinfo", "usermode", "tasks", "vmstat", "strace",
+    "exec", "elfinfo", "usermode", "poll-selftest", "tasks", "vmstat", "strace",
 ];
 
 /// Operateur reliant un segment de commande au precedent.
@@ -695,6 +695,7 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "exec" => c::exec_cmd(argc, &argv, *cwd),
         "elfinfo" => c::elfinfo(argc, &argv, *cwd),
         "usermode" => { crate::kernel::exec::selftest(*cwd); 0 }
+        "poll-selftest" => crate::kernel::exec::poll_selftest(*cwd),
         "tasks" => { crate::kernel::task::print_table(); 0 }
         "vmstat" => { crate::kernel::vmm::print_info(); 0 }
         "strace" => { c::strace(argc, &argv); 0 }

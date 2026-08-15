@@ -1832,7 +1832,13 @@ pub fn sys_poll(fds: u64, count: usize, timeout_ms: i32) -> i64 {
         if ready > 0 || crate::kernel::timer::ticks() >= deadline {
             return ready;
         }
-        task::yield_now();
+        // Si schedule() a reellement bascule vers une autre tache, celle-ci a
+        // pu rendre un fd pret (ex. le tube de reveil de LibIPC). Au retour,
+        // reevaluer les descripteurs avant de faire hlt, sinon le reveil logiciel
+        // est perdu jusqu'a la prochaine interruption materielle.
+        if task::schedule() {
+            continue;
+        }
         crate::arch::x86_64::cpu::wait_for_interrupt();
     }
 }
@@ -1871,7 +1877,11 @@ pub fn sys_select(nfds: i32, read_set: u64, _write_set: u64, _except_set: u64, t
         if ready > 0 || crate::kernel::timer::ticks() >= deadline {
             return ready;
         }
-        task::yield_now();
+        // Meme regle que poll(): apres une vraie commutation, une autre tache
+        // peut avoir rendu un descripteur lisible. Le reevaluer avant hlt.
+        if task::schedule() {
+            continue;
+        }
         crate::arch::x86_64::cpu::wait_for_interrupt();
     }
 }

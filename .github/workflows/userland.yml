@@ -24,8 +24,11 @@
 name: userland
 
 on:
+  # Chaque commit de branche peut ainsi publier son userland exact. C'est
+  # indispensable au developpement Windows : run.ps1 exige un manifeste portant
+  # le SHA courant.
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
     paths:
       - "tools/userland/**"
@@ -68,7 +71,8 @@ jobs:
             build-essential python3-dev pkg-config perl \
             libfreetype-dev libpng-dev libjpeg-dev libpcre2-dev \
             zlib1g-dev libbrotli-dev libbz2-dev libfontconfig1-dev \
-            nasm curl tar xz-utils file
+            nasm curl tar xz-utils file \
+            clang lld cmake ninja-build git autoconf automake libtool libssl-dev
 
       # Chaque dependance a son cache, clef sur son script de construction : un
       # changement de version ou de drapeau invalide le cache concerne et lui
@@ -101,7 +105,36 @@ jobs:
           path: tools/userland/build-qt/install
           key: qt-${{ runner.os }}-${{ hashFiles('tools/userland/build-qt.sh') }}
 
+      - name: Cache Ladybird M5 cible
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/ladybird
+            third_party/deps-src
+            third_party/deps-bouchaud
+            third_party/icu-src
+            third_party/icu-bouchaud
+            third_party/build-rust-bouchaud
+            third_party/build-ak-bouchaud
+            third_party/build-libcore-bouchaud
+            third_party/build-libunicode-bouchaud
+            third_party/build-libcrypto-bouchaud
+            third_party/build-libgc-bouchaud
+            third_party/build-libjs-bouchaud
+            third_party/build-libipc-bouchaud
+            third_party/gen-bouchaud
+          key: ladybird-m5-${{ runner.os }}-${{ hashFiles('tools/ladybird/**') }}
+
+      - name: Construire Ladybird M5 pour Bouchaud
+        run: |
+          tools/ladybird/fetch.sh
+          tools/ladybird/build-tout.sh --cible
+          test -x third_party/build-libipc-bouchaud/libipc-codec-probe
+          file third_party/build-libipc-bouchaud/libipc-codec-probe
+
       - name: Construire le userland
+        env:
+          BO_LADYBIRD_M5_PROBE: ${{ github.workspace }}/third_party/build-libipc-bouchaud/libipc-codec-probe
         run: tools/userland/build-tout.sh
 
       - name: Manifeste
@@ -128,6 +161,8 @@ jobs:
                         "ffmpeg_version", "sha256", "image_size"):
               if not m.get(champ):
                   sys.exit("manifeste: champ '%s' vide" % champ)
+          if m.get("ladybird_m5_probe") is not True:
+              sys.exit("manifeste: le probe Ladybird M5 n'est pas embarque")
           print("manifeste coherent : %s" % m["git_commit"])
           PY
 
@@ -238,6 +273,9 @@ jobs:
           df
           ifconfig
           export BO_PREFIXE=/usr
+          # M5b tourne ici dans Bouchaud OS, en ring 3. Le runner Linux n'est
+          # que le compilateur et l'hote de QEMU.
+          exec /usr/libexec/ladybird/libipc-codec-probe
           exec /bo-navigateur --verifie
           SCENARIO
 
@@ -258,6 +296,17 @@ jobs:
           echo "qemu: code $?"
           echo "--- journal serie ---"
           cat serie.log || true
+
+      - name: Verdict Ladybird M5b
+        run: |
+          grep -F "== temoin LibIPC : endpoints generes ==" serie.log
+          grep -F "ok     u32 : ping 42 -> pong 43" serie.log
+          grep -F "ok     String traverse intact" serie.log
+          grep -F "ok     Vector<u32> traverse intact" serie.log
+          grep -F "ok     Optional<String> renseigne traverse intact" serie.log
+          grep -F "ok     URL::URL traverse intacte" serie.log
+          grep -F "ok     les quatre types dans un seul message" serie.log
+          grep -F "RESULTAT : 0 verification(s) en echec (6 passees)" serie.log
 
       - name: Verdict
         id: verdict

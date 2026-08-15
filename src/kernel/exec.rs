@@ -364,6 +364,246 @@ pub fn selftest_image() -> Vec<u8> {
     image
 }
 
+
+/// Petit ELF64 autonome, genere en memoire, qui reproduit le reveil utilise par
+/// Ladybird LibIPC sans aucune libc ni outil Linux hote.
+///
+/// Deux threads du meme processus partagent un `pipe2`. Le parent entre dans
+/// `poll(..., -1)` ; le second thread dort 50 ms puis ecrit un octet. Le succes
+/// prouve le chemin exact qui bloquait `TransportSocket::wake_io_thread()` :
+///
+///     clone(CLONE_THREAD) -> pipe2 -> poll(-1) <- write depuis l'autre thread
+///
+/// L'image n'est jamais stockee dans le userland : elle est construite par le
+/// noyau a l'execution de `poll-selftest`.
+pub fn poll_selftest_image() -> Vec<u8> {
+    let base: u64 = vmm::user_load_base();
+    const EHDR: usize = 64;
+    const PHDR: usize = 56;
+    const CODE_OFF: usize = EHDR + PHDR;
+
+    let succes = b"[poll-selftest] OK : poll reveille par write(pipe) depuis un autre thread\n";
+    let echec = b"[poll-selftest] ECHEC : le reveil inter-thread n'a pas traverse poll\n";
+
+    let mut code: Vec<u8> = Vec::new();
+    let mut vers_echec: Vec<usize> = Vec::new();
+
+    // mmap(NULL, 4096, RW, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+    // La page porte pipefd[2], pollfd, timespec et les octets de test.
+    code.extend_from_slice(&[0xB8, 0x09, 0x00, 0x00, 0x00]); // mov eax, 9
+    code.extend_from_slice(&[0x31, 0xFF]);                   // xor edi, edi
+    code.extend_from_slice(&[0xBE, 0x00, 0x10, 0x00, 0x00]); // mov esi, 4096
+    code.extend_from_slice(&[0xBA, 0x03, 0x00, 0x00, 0x00]); // mov edx, PROT_READ|PROT_WRITE
+    code.extend_from_slice(&[0x41, 0xBA, 0x22, 0x00, 0x00, 0x00]); // mov r10d, MAP_PRIVATE|MAP_ANON
+    code.extend_from_slice(&[0x49, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF]); // mov r8, -1
+    code.extend_from_slice(&[0x45, 0x31, 0xC9]);             // xor r9d, r9d
+    code.extend_from_slice(&[0x0F, 0x05]);                   // syscall
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]);             // test rax, rax
+    code.extend_from_slice(&[0x0F, 0x88, 0, 0, 0, 0]);      // js fail
+    vers_echec.push(code.len() - 4);
+    code.extend_from_slice(&[0x49, 0x89, 0xC4]);             // mov r12, rax
+
+    // pipe2(state, O_NONBLOCK|O_CLOEXEC)
+    code.extend_from_slice(&[0xB8, 0x25, 0x01, 0x00, 0x00]); // mov eax, 293
+    code.extend_from_slice(&[0x4C, 0x89, 0xE7]);             // mov rdi, r12
+    code.extend_from_slice(&[0xBE, 0x00, 0x08, 0x08, 0x00]); // mov esi, 0x80800
+    code.extend_from_slice(&[0x0F, 0x05]);
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]);
+    code.extend_from_slice(&[0x0F, 0x88, 0, 0, 0, 0]);      // js fail
+    vers_echec.push(code.len() - 4);
+
+    // mmap(NULL, 64 KiB, RW, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) pour la pile enfant.
+    code.extend_from_slice(&[0xB8, 0x09, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0x31, 0xFF]);
+    code.extend_from_slice(&[0xBE, 0x00, 0x00, 0x01, 0x00]); // 65536
+    code.extend_from_slice(&[0xBA, 0x03, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0x41, 0xBA, 0x22, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0x49, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF]);
+    code.extend_from_slice(&[0x45, 0x31, 0xC9]);
+    code.extend_from_slice(&[0x0F, 0x05]);
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]);
+    code.extend_from_slice(&[0x0F, 0x88, 0, 0, 0, 0]);      // js fail
+    vers_echec.push(code.len() - 4);
+    code.extend_from_slice(&[0x49, 0x89, 0xC5]);             // mov r13, rax
+
+    // timespec { 0 s, 50 000 000 ns } a state+32.
+    code.extend_from_slice(&[0x49, 0xC7, 0x44, 0x24, 0x20, 0, 0, 0, 0]);
+    code.extend_from_slice(&[0x49, 0xC7, 0x44, 0x24, 0x28, 0x80, 0xF0, 0xFA, 0x02]);
+
+    // clone(CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD,
+    //       stack_top, 0, 0, 0)
+    code.extend_from_slice(&[0xB8, 0x38, 0x00, 0x00, 0x00]); // mov eax, 56
+    code.extend_from_slice(&[0xBF, 0x00, 0x0F, 0x01, 0x00]); // mov edi, 0x10f00
+    code.extend_from_slice(&[0x49, 0x8D, 0xB5, 0xF0, 0xFF, 0x00, 0x00]); // lea rsi,[r13+0xfff0]
+    code.extend_from_slice(&[0x31, 0xD2]);                   // xor edx, edx
+    code.extend_from_slice(&[0x45, 0x31, 0xD2]);             // xor r10d, r10d
+    code.extend_from_slice(&[0x45, 0x31, 0xC0]);             // xor r8d, r8d
+    code.extend_from_slice(&[0x0F, 0x05]);
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]);             // test rax,rax
+    code.extend_from_slice(&[0x0F, 0x88, 0, 0, 0, 0]);      // js fail
+    vers_echec.push(code.len() - 4);
+    code.extend_from_slice(&[0x0F, 0x84, 0, 0, 0, 0]);      // jz child
+    let vers_enfant = code.len() - 4;
+
+    // Parent : pollfd { fd=pipe[0], events=POLLIN, revents=0 } a state+16.
+    code.extend_from_slice(&[0x41, 0x8B, 0x3C, 0x24]);       // mov edi,[r12]
+    code.extend_from_slice(&[0x41, 0x89, 0x7C, 0x24, 0x10]); // mov [r12+16],edi
+    code.extend_from_slice(&[0x66, 0x41, 0xC7, 0x44, 0x24, 0x14, 0x01, 0x00]); // events=POLLIN
+    code.extend_from_slice(&[0x66, 0x41, 0xC7, 0x44, 0x24, 0x16, 0x00, 0x00]); // revents=0
+
+    // poll(&pollfd, 1, -1)
+    code.extend_from_slice(&[0xB8, 0x07, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0x49, 0x8D, 0x7C, 0x24, 0x10]);
+    code.extend_from_slice(&[0xBE, 0x01, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0xBA, 0xFF, 0xFF, 0xFF, 0xFF]);
+    code.extend_from_slice(&[0x0F, 0x05]);
+    code.extend_from_slice(&[0x48, 0x83, 0xF8, 0x01]);       // cmp rax,1
+    code.extend_from_slice(&[0x0F, 0x85, 0, 0, 0, 0]);      // jne fail
+    vers_echec.push(code.len() - 4);
+
+    // revents & POLLIN
+    code.extend_from_slice(&[0x41, 0x0F, 0xB7, 0x44, 0x24, 0x16]); // movzx eax,word [r12+22]
+    code.extend_from_slice(&[0xA9, 0x01, 0x00, 0x00, 0x00]);       // test eax,1
+    code.extend_from_slice(&[0x0F, 0x84, 0, 0, 0, 0]);            // jz fail
+    vers_echec.push(code.len() - 4);
+
+    // read(pipe[0], state+65, 1)
+    code.extend_from_slice(&[0x41, 0x8B, 0x3C, 0x24]);
+    code.extend_from_slice(&[0x49, 0x8D, 0x74, 0x24, 0x41]);
+    code.extend_from_slice(&[0xBA, 0x01, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0x31, 0xC0]);
+    code.extend_from_slice(&[0x0F, 0x05]);
+    code.extend_from_slice(&[0x48, 0x83, 0xF8, 0x01]);
+    code.extend_from_slice(&[0x0F, 0x85, 0, 0, 0, 0]);            // jne fail
+    vers_echec.push(code.len() - 4);
+    code.extend_from_slice(&[0x41, 0x80, 0x7C, 0x24, 0x41, 0xA5]); // cmp byte [r12+65],0xa5
+    code.extend_from_slice(&[0x0F, 0x85, 0, 0, 0, 0]);            // jne fail
+    vers_echec.push(code.len() - 4);
+
+    // write(stdout, success, len)
+    code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0x48, 0x8D, 0x35, 0, 0, 0, 0]);
+    let succes_lea = code.len() - 4;
+    code.extend_from_slice(&[0xBA]);
+    code.extend_from_slice(&(succes.len() as u32).to_le_bytes());
+    code.extend_from_slice(&[0x0F, 0x05]);
+    code.extend_from_slice(&[0xB8, 0xE7, 0x00, 0x00, 0x00]); // exit_group(0)
+    code.extend_from_slice(&[0x31, 0xFF]);
+    code.extend_from_slice(&[0x0F, 0x05]);
+
+    // Enfant : attendre assez pour que le parent soit deja dans poll(-1).
+    let enfant = code.len();
+    code.extend_from_slice(&[0xB8, 0x23, 0x00, 0x00, 0x00]); // nanosleep
+    code.extend_from_slice(&[0x49, 0x8D, 0x7C, 0x24, 0x20]);
+    code.extend_from_slice(&[0x31, 0xF6]);
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // state+64 = 0xa5 ; write(pipe[1], state+64, 1)
+    code.extend_from_slice(&[0x41, 0xC6, 0x44, 0x24, 0x40, 0xA5]);
+    code.extend_from_slice(&[0x41, 0x8B, 0x7C, 0x24, 0x04]);
+    code.extend_from_slice(&[0x49, 0x8D, 0x74, 0x24, 0x40]);
+    code.extend_from_slice(&[0xBA, 0x01, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // exit(0) : termine uniquement ce thread.
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0x31, 0xFF]);
+    code.extend_from_slice(&[0x0F, 0x05]);
+    code.extend_from_slice(&[0xEB, 0xFE]);
+
+    // Echec commun.
+    let fail = code.len();
+    code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0x48, 0x8D, 0x35, 0, 0, 0, 0]);
+    let echec_lea = code.len() - 4;
+    code.extend_from_slice(&[0xBA]);
+    code.extend_from_slice(&(echec.len() as u32).to_le_bytes());
+    code.extend_from_slice(&[0x0F, 0x05]);
+    code.extend_from_slice(&[0xB8, 0xE7, 0x00, 0x00, 0x00]); // exit_group(1)
+    code.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0x0F, 0x05]);
+    code.extend_from_slice(&[0xEB, 0xFE]);
+
+    let succes_offset = code.len();
+    code.extend_from_slice(succes);
+    let echec_offset = code.len();
+    code.extend_from_slice(echec);
+
+    // Patcher les branches rel32 et les LEA RIP-relatifs.
+    let patch_rel32 = |code: &mut Vec<u8>, at: usize, target: usize| {
+        let disp = target as i64 - (at + 4) as i64;
+        code[at..at + 4].copy_from_slice(&(disp as i32).to_le_bytes());
+    };
+    patch_rel32(&mut code, vers_enfant, enfant);
+    for at in vers_echec {
+        patch_rel32(&mut code, at, fail);
+    }
+    patch_rel32(&mut code, succes_lea, succes_offset);
+    patch_rel32(&mut code, echec_lea, echec_offset);
+
+    let filesz = (CODE_OFF + code.len()) as u64;
+    let mut image = Vec::with_capacity(filesz as usize);
+    image.extend_from_slice(&[0x7F, b'E', b'L', b'F', 2, 1, 1, 0]);
+    image.extend_from_slice(&[0; 8]);
+    image.extend_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+    image.extend_from_slice(&62u16.to_le_bytes()); // x86-64
+    image.extend_from_slice(&1u32.to_le_bytes());
+    image.extend_from_slice(&(base + CODE_OFF as u64).to_le_bytes());
+    image.extend_from_slice(&(EHDR as u64).to_le_bytes());
+    image.extend_from_slice(&0u64.to_le_bytes());
+    image.extend_from_slice(&0u32.to_le_bytes());
+    image.extend_from_slice(&(EHDR as u16).to_le_bytes());
+    image.extend_from_slice(&(PHDR as u16).to_le_bytes());
+    image.extend_from_slice(&1u16.to_le_bytes());
+    image.extend_from_slice(&0u16.to_le_bytes());
+    image.extend_from_slice(&0u16.to_le_bytes());
+    image.extend_from_slice(&0u16.to_le_bytes());
+
+    image.extend_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+    image.extend_from_slice(&5u32.to_le_bytes()); // R|X
+    image.extend_from_slice(&0u64.to_le_bytes());
+    image.extend_from_slice(&base.to_le_bytes());
+    image.extend_from_slice(&base.to_le_bytes());
+    image.extend_from_slice(&filesz.to_le_bytes());
+    image.extend_from_slice(&filesz.to_le_bytes());
+    image.extend_from_slice(&0x1000u64.to_le_bytes());
+    image.extend_from_slice(&code);
+    image
+}
+
+/// Commande bare-metal `poll-selftest`.
+///
+/// Aucun binaire userland preconstruit, aucune libc, aucun WSL : le noyau
+/// fabrique un ELF x86-64 minimal en RAM et l'execute en ring 3.
+pub fn poll_selftest(cwd: usize) -> i32 {
+    crate::println!("Autotest Ladybird M5 : poll/pipe/reveil inter-thread");
+    crate::println!("  mode     : ELF genere par Bouchaud OS, sans dependance hote");
+    crate::println!("  scenario : parent poll(-1), enfant clone dort 50 ms puis write(pipe)");
+
+    let image = poll_selftest_image();
+    let argv = alloc::vec!["poll-selftest".to_string()];
+    let before = crate::kernel::abi::syscall_count();
+    match exec_image("poll-selftest", &image, &argv, &default_environment(), cwd) {
+        Ok(code) => {
+            let used = crate::kernel::abi::syscall_count().saturating_sub(before);
+            crate::println!("  sortie   : code {} ({} appels systeme)", code, used);
+            if code == 0 {
+                crate::println!("  RESULTAT : M5 wakeup poll/pipe OK");
+                0
+            } else {
+                crate::println!("  RESULTAT : ECHEC M5 wakeup poll/pipe");
+                code
+            }
+        }
+        Err(message) => {
+            crate::println!("  ECHEC : {}", message);
+            crate::println!("  note  : depuis le bureau, relancer ce test dans le shell texte avant `desktop`");
+            1
+        }
+    }
+}
+
 /// Autotest complet du mode utilisateur (commande `usermode`).
 pub fn selftest(cwd: usize) {
     crate::println!("Autotest ring 3 / ELF / syscalls");
