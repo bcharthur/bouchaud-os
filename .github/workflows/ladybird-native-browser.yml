@@ -36,9 +36,6 @@ jobs:
             nasm bison flex \
             libssl-dev libedit-dev linux-libc-dev mesa-common-dev ca-certificates
 
-          # Prerequis systeme explicitement demandes par des ports du graphe
-          # Ladybird/vcpkg. On echoue ici, en quelques secondes, plutot qu'au
-          # milieu d'un build vcpkg d'une heure.
           test -f /usr/include/ltdl.h
           dpkg-query -W -f='${Status}\n' libltdl-dev | grep -q 'install ok installed'
           dpkg-query -W -f='${Status}\n' linux-libc-dev | grep -q 'install ok installed'
@@ -60,26 +57,30 @@ jobs:
           path: third_party/ladybird
           key: ladybird-source-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md', 'tools/ladybird/patches/**') }}
 
-      - name: Restaurer vcpkg navigateur
+      # Ne jamais restaurer `vcpkg-browser-installed`: ce repertoire contient
+      # l'etat de resolution d'un ancien manifeste, pas seulement des objets de
+      # compilation. Le run #15 a ainsi ressuscite dbus[systemd] alors que dbus
+      # etait deja retire du manifeste Bouchaud. On ne conserve que les caches
+      # qui sont independants du graphe courant : sources, depot vcpkg et binary
+      # cache. `browser-vcpkg.sh` reconstruit ensuite l'install root proprement.
+      - name: Restaurer caches vcpkg navigateur
         id: cache-browser-vcpkg
         uses: actions/cache/restore@v4
         with:
           path: |
             third_party/vcpkg-gfx
             third_party/vcpkg-downloads
-            third_party/vcpkg-browser-installed
             third_party/vcpkg-browser-manifest
             ~/.cache/vcpkg
-          key: ladybird-browser-vcpkg-${{ runner.os }}-${{ hashFiles('tools/ladybird/browser-vcpkg.sh', 'third_party/UPSTREAM.md') }}
+          key: ladybird-browser-vcpkg-v2-${{ runner.os }}-${{ hashFiles('tools/ladybird/browser-vcpkg.sh', 'third_party/UPSTREAM.md') }}
           restore-keys: |
+            ladybird-browser-vcpkg-v2-${{ runner.os }}-
             ladybird-browser-vcpkg-${{ runner.os }}-
             ladybird-gfx-vcpkg-${{ runner.os }}-
 
       - name: Construire les dependances navigateur
         run: tools/ladybird/browser-vcpkg.sh
 
-      # Si vcpkg casse tard, banque l'avancement sous une cle unique. Le run
-      # suivant le restaurera par prefixe et reprendra les paquets deja acquis.
       - name: Sauvegarder progression vcpkg apres echec
         if: failure()
         uses: actions/cache/save@v4
@@ -87,14 +88,10 @@ jobs:
           path: |
             third_party/vcpkg-gfx
             third_party/vcpkg-downloads
-            third_party/vcpkg-browser-installed
             third_party/vcpkg-browser-manifest
             ~/.cache/vcpkg
-          key: ladybird-browser-vcpkg-${{ runner.os }}-${{ hashFiles('tools/ladybird/browser-vcpkg.sh', 'third_party/UPSTREAM.md') }}-partial-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ladybird-browser-vcpkg-v2-${{ runner.os }}-${{ hashFiles('tools/ladybird/browser-vcpkg.sh', 'third_party/UPSTREAM.md') }}-partial-${{ github.run_id }}-${{ github.run_attempt }}
 
-      # Des que la fermeture vcpkg est complete, publie une seule cle stable.
-      # Les executions suivantes obtiennent alors un exact hit et ne dupliquent
-      # plus plusieurs Gio de caches complets a chaque run.
       - name: Publier cache vcpkg complet
         if: success() && steps.cache-browser-vcpkg.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -102,10 +99,9 @@ jobs:
           path: |
             third_party/vcpkg-gfx
             third_party/vcpkg-downloads
-            third_party/vcpkg-browser-installed
             third_party/vcpkg-browser-manifest
             ~/.cache/vcpkg
-          key: ladybird-browser-vcpkg-${{ runner.os }}-${{ hashFiles('tools/ladybird/browser-vcpkg.sh', 'third_party/UPSTREAM.md') }}
+          key: ladybird-browser-vcpkg-v2-${{ runner.os }}-${{ hashFiles('tools/ladybird/browser-vcpkg.sh', 'third_party/UPSTREAM.md') }}
 
       - name: Cache build WebContent
         uses: actions/cache@v4
