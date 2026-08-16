@@ -31,7 +31,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config python3 python3-dev python3-venv perl \
-            clang lld cmake ninja-build git curl wget gnupg lsb-release zip unzip tar xz-utils file \
+            clang lld ccache cmake ninja-build git curl wget gnupg lsb-release zip unzip tar xz-utils file \
             autoconf autoconf-archive automake libtool libltdl-dev gettext m4 \
             nasm bison flex \
             libssl-dev libedit-dev linux-libc-dev mesa-common-dev ca-certificates
@@ -40,6 +40,7 @@ jobs:
           dpkg-query -W -f='${Status}\n' libltdl-dev | grep -q 'install ok installed'
           dpkg-query -W -f='${Status}\n' linux-libc-dev | grep -q 'install ok installed'
           dpkg-query -W -f='${Status}\n' mesa-common-dev | grep -q 'install ok installed'
+          command -v ccache
 
           # Ladybird épinglé utilise LLVM 20 dans son environnement Ubuntu.
           # Ubuntu 24.04 fournit encore Clang 18 par défaut ; ce compilateur
@@ -62,6 +63,7 @@ jobs:
           ld.lld-20 --version
           llvm-ar-20 --version
           llvm-ranlib-20 --version
+          ccache --version
 
       - name: Cache cargo Ladybird
         uses: actions/cache@v4
@@ -81,10 +83,7 @@ jobs:
 
       # Ne jamais restaurer `vcpkg-browser-installed`: ce repertoire contient
       # l'etat de resolution d'un ancien manifeste, pas seulement des objets de
-      # compilation. Le run #15 a ainsi ressuscite dbus[systemd] alors que dbus
-      # etait deja retire du manifeste Bouchaud. On ne conserve que les caches
-      # qui sont independants du graphe courant : sources, depot vcpkg et binary
-      # cache. `browser-vcpkg.sh` reconstruit ensuite l'install root proprement.
+      # compilation. On conserve uniquement les caches independants du graphe.
       - name: Restaurer caches vcpkg navigateur
         id: cache-browser-vcpkg
         uses: actions/cache/restore@v4
@@ -125,16 +124,54 @@ jobs:
             ~/.cache/vcpkg
           key: ladybird-browser-vcpkg-v2-${{ runner.os }}-${{ hashFiles('tools/ladybird/browser-vcpkg.sh', 'third_party/UPSTREAM.md') }}
 
-      - name: Cache build WebContent
-        uses: actions/cache@v4
+      # Deux niveaux incrementaux :
+      # 1) le build Ninja/CMake, reutilisable tant que le SHA upstream reste le meme ;
+      # 2) ccache, robuste aux worktrees recrees et aux timestamps qui forcent Ninja
+      #    a relancer des commandes de compilation identiques.
+      - name: Restaurer build WebContent partiel
+        id: restore-browser-build
+        uses: actions/cache/restore@v4
         with:
           path: |
             third_party/build-ladybird-browser-bouchaud
             third_party/native-browser-bouchaud
-          key: ladybird-browser-build-${{ runner.os }}-${{ hashFiles('tools/ladybird/browser-upstream.sh', 'tools/ladybird/prepare-browser-source.py', 'tools/ladybird/webcontent-bootstrap.c', 'third_party/UPSTREAM.md') }}
+          key: ladybird-browser-build-v3-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md') }}-${{ github.sha }}
+          restore-keys: |
+            ladybird-browser-build-v3-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md') }}-
+
+      - name: Restaurer ccache Ladybird
+        id: restore-browser-ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/ccache
+          key: ladybird-browser-ccache-v1-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md') }}-${{ github.sha }}
+          restore-keys: |
+            ladybird-browser-ccache-v1-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md') }}-
+            ladybird-browser-ccache-v1-${{ runner.os }}-
 
       - name: Construire le navigateur Ladybird natif
         run: tools/ladybird/native-browser-final.sh --cible
+
+      # Ces sauvegardes s'executent aussi lorsque Ninja echoue. Ainsi un blocage
+      # a 2719/2720 ne jette plus 90 minutes d'objets compiles. Les cles de save
+      # sont uniques et les prochains runs les retrouvent via restore-keys.
+      - name: Sauvegarder build WebContent meme apres echec
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            third_party/build-ladybird-browser-bouchaud
+            third_party/native-browser-bouchaud
+          key: ladybird-browser-build-v3-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Sauvegarder ccache Ladybird meme apres echec
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ccache
+          key: ladybird-browser-ccache-v1-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Verifier les artefacts
         run: |
@@ -193,7 +230,7 @@ jobs:
           cp native-browser/WebContent scenario/usr/libexec/ladybird/WebContent
           cp native-browser/webcontent-bootstrap scenario/usr/libexec/ladybird/webcontent-bootstrap
           chmod 755 scenario/usr/libexec/ladybird/*
-          for svc in RequestServer ImageDecoder WebContentCompositor WebWorker; do
+          for svc in RequestServer ImageDecoder Compositor WebWorker; do
             if [ -x "native-browser/$svc" ]; then
               cp "native-browser/$svc" "scenario/usr/libexec/ladybird/$svc"
               chmod 755 "scenario/usr/libexec/ladybird/$svc"

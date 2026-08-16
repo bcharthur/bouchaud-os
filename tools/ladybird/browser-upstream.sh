@@ -29,7 +29,13 @@ git -C "$LB" worktree add --force --detach "$SRC" HEAD >/dev/null
 python3 tools/ladybird/prepare-browser-source.py "$SRC"
 python3 tools/ladybird/prepare-browser-runtime-link.py "$SRC"
 
-rm -rf "$BUILD"
+# Do not destroy a build directory restored by GitHub Actions. CMake/Ninja can
+# reconfigure it in place and ccache catches recompilations forced only by fresh
+# worktree mtimes. Set BO_CLEAN_LADYBIRD_BUILD=1 for deliberate clean rebuilds.
+if [ "${BO_CLEAN_LADYBIRD_BUILD:-0}" = "1" ]; then
+    say "nettoyage explicite du build Ladybird"
+    rm -rf "$BUILD"
+fi
 mkdir -p "$BUILD"
 
 export PKG_CONFIG_PATH="$VCPKG/lib/pkgconfig:$VCPKG/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
@@ -47,10 +53,11 @@ CLANGXX=$(command -v "clang++-${LLVM_VERSION}" || true)
 LLVM_AR=$(command -v "llvm-ar-${LLVM_VERSION}" || true)
 LLVM_RANLIB=$(command -v "llvm-ranlib-${LLVM_VERSION}" || true)
 LLD=$(command -v "ld.lld-${LLVM_VERSION}" || true)
+CCACHE=$(command -v ccache || true)
 
-for tool in "$CLANG" "$CLANGXX" "$LLVM_AR" "$LLVM_RANLIB" "$LLD"; do
+for tool in "$CLANG" "$CLANGXX" "$LLVM_AR" "$LLVM_RANLIB" "$LLD" "$CCACHE"; do
     [ -n "$tool" ] || {
-        echo "Toolchain LLVM ${LLVM_VERSION} incomplete ; le workflow doit installer clang/lld/llvm-${LLVM_VERSION}" >&2
+        echo "Toolchain LLVM ${LLVM_VERSION}/ccache incomplete ; le workflow doit installer clang/lld/llvm-${LLVM_VERSION} et ccache" >&2
         exit 1
     }
 done
@@ -66,8 +73,19 @@ if [ "$CLANG_MAJOR" -lt "$LLVM_VERSION" ]; then
     exit 1
 fi
 
+# ccache is the durable layer. Even if a fresh Ladybird worktree gives every
+# source a newer timestamp and Ninja decides to rebuild it, unchanged compile
+# commands are served from this cache instead of spending another 90 minutes.
+export CCACHE_DIR="${CCACHE_DIR:-$HOME/.cache/ccache}"
+export CCACHE_BASEDIR="$ROOT"
+export CCACHE_NOHASHDIR=true
+mkdir -p "$CCACHE_DIR"
+ccache --max-size="${BO_CCACHE_MAXSIZE:-4G}" >/dev/null
+ccache --zero-stats >/dev/null || true
+
 say "Compilateur Ladybird : $($CLANGXX --version | head -n1)"
 say "Linker Ladybird      : $($LLD --version | head -n1)"
+say "ccache Ladybird      : $CCACHE ($CCACHE_DIR)"
 # Preflight volontairement minuscule : il teste exactement la famille de syntaxe
 # qui a casse AK::Optional au run #27. Si l'image runner fournit un Clang trop
 # ancien, on echoue ici en quelques secondes plutot qu'apres la generation Ninja.
@@ -108,7 +126,10 @@ restore_bouchaud_cargo_config() {
         mv -f "$ROOT_CARGO_CONFIG_SAVED" "$ROOT_CARGO_CONFIG"
     fi
 }
-trap restore_bouchaud_cargo_config EXIT
+report_ccache() {
+    ccache --show-stats || true
+}
+trap 'report_ccache; restore_bouchaud_cargo_config' EXIT
 if [ -f "$ROOT_CARGO_CONFIG" ]; then
     mv "$ROOT_CARGO_CONFIG" "$ROOT_CARGO_CONFIG_SAVED"
 fi
@@ -164,6 +185,8 @@ cmake -S "$SRC" -B "$BUILD" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_COMPILER="$CLANG" \
     -DCMAKE_CXX_COMPILER="$CLANGXX" \
+    -DCMAKE_C_COMPILER_LAUNCHER="$CCACHE" \
+    -DCMAKE_CXX_COMPILER_LAUNCHER="$CCACHE" \
     -DCMAKE_AR="$LLVM_AR" \
     -DCMAKE_RANLIB="$LLVM_RANLIB" \
     -DCMAKE_LINKER="$LLD" \
@@ -263,6 +286,7 @@ done
 # Le masque Cargo n'est utile que pour le build Ladybird. Restaurer avant la
 # sortie normale rend aussi l'etat du checkout explicite pour les etapes CI
 # suivantes ; le trap reste la garantie en cas de sortie anticipee.
+report_ccache
 restore_bouchaud_cargo_config
 trap - EXIT
 
