@@ -141,6 +141,7 @@ cmake -S "$SRC" -B "$BUILD" -G Ninja \
     -D_VCPKG_INSTALLED_DIR="$VCPKG_INSTALLED_ROOT" \
     -DVCPKG_TARGET_TRIPLET="$VCPKG_TRIPLET" \
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+    -DCMAKE_CXX_FLAGS="-Wno-error=invalid-constexpr" \
     -DBUILD_SHARED_LIBS=OFF \
     -DBUILD_TESTING=OFF \
     -DENABLE_GUI_TARGETS=ON \
@@ -154,14 +155,21 @@ cmake -S "$SRC" -B "$BUILD" -G Ninja \
     -DCMAKE_EXE_LINKER_FLAGS="-static-pie -Wl,--allow-multiple-definition"
 
 say "== build WebContent + services =="
-# Building the named targets lets Ninja pull exactly their transitive library
-# closure instead of compiling the UI or unrelated test utilities.
-cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target WebContent
+# Pendant le portage on veut decouvrir en un seul run toutes les incompatibilites
+# independantes, au lieu de faire un cycle CI par fichier. Ninja -k 0 continue
+# donc tant qu'il reste une cible qui peut etre construite. Le build reste en
+# echec a la fin si des erreurs subsistent : on ne masque pas les vraies erreurs,
+# on les collecte simplement en lot.
+#
+# invalid-constexpr est temporairement demote de -Werror ci-dessus : le run #30
+# montre que ce diagnostic Clang touche AK::Optional<Utf16String> dans l'upstream
+# epingle. Il reste visible comme warning, sans couper la traversee Ninja.
+cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target WebContent -- -k 0
 
 # Services are optional here: build those present in this exact upstream SHA.
 for target in RequestServer ImageDecoder WebContentCompositor WebWorker; do
     if ninja -C "$BUILD" -t targets all 2>/dev/null | grep -q "^${target}:"; then
-        cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target "$target"
+        cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target "$target" -- -k 0
     fi
 done
 
