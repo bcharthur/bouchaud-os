@@ -1,0 +1,195 @@
+name: ladybird-native-browser
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["**"]
+    paths:
+      - "tools/ladybird/**"
+      - "docs/ladybird/**"
+      - ".github/workflows/ladybird-native-browser.yml"
+  pull_request:
+    paths:
+      - "tools/ladybird/**"
+      - "docs/ladybird/**"
+      - ".github/workflows/ladybird-native-browser.yml"
+
+concurrency:
+  group: ladybird-native-browser-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: WebContent-static-Bouchaud
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Outils de construction
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config python3 python3-dev perl \
+            clang lld cmake ninja-build git curl zip unzip tar xz-utils file \
+            autoconf autoconf-archive automake libtool nasm bison flex \
+            libssl-dev libedit-dev ca-certificates
+
+      - name: Cache cargo Ladybird
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ladybird-browser-cargo-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md', 'tools/ladybird/native-browser-final.sh') }}
+          restore-keys: |
+            ladybird-browser-cargo-${{ runner.os }}-
+
+      - name: Cache arbre Ladybird
+        uses: actions/cache@v4
+        with:
+          path: third_party/ladybird
+          key: ladybird-source-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md', 'tools/ladybird/patches/**') }}
+
+      - name: Restaurer vcpkg navigateur
+        id: cache-browser-vcpkg
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            third_party/vcpkg-gfx
+            third_party/vcpkg-downloads
+            third_party/vcpkg-browser-installed
+            third_party/vcpkg-browser-manifest
+            ~/.cache/vcpkg
+          key: ladybird-browser-vcpkg-${{ runner.os }}-${{ hashFiles('tools/ladybird/browser-vcpkg.sh', 'third_party/UPSTREAM.md') }}
+          restore-keys: |
+            ladybird-browser-vcpkg-${{ runner.os }}-
+            ladybird-gfx-vcpkg-${{ runner.os }}-
+
+      - name: Construire les dependances navigateur
+        run: tools/ladybird/browser-vcpkg.sh
+
+      - name: Sauvegarder vcpkg immediatement
+        if: steps.cache-browser-vcpkg.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            third_party/vcpkg-gfx
+            third_party/vcpkg-downloads
+            third_party/vcpkg-browser-installed
+            third_party/vcpkg-browser-manifest
+            ~/.cache/vcpkg
+          key: ${{ steps.cache-browser-vcpkg.outputs.cache-primary-key }}
+
+      - name: Cache build WebContent
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/build-ladybird-browser-bouchaud
+            third_party/native-browser-bouchaud
+          key: ladybird-browser-build-${{ runner.os }}-${{ hashFiles('tools/ladybird/browser-upstream.sh', 'tools/ladybird/prepare-browser-source.py', 'tools/ladybird/webcontent-bootstrap.c', 'third_party/UPSTREAM.md') }}
+
+      - name: Construire le navigateur Ladybird natif
+        run: tools/ladybird/native-browser-final.sh --cible
+
+      - name: Verifier les artefacts
+        run: |
+          test -x third_party/native-browser-bouchaud/WebContent
+          test -x third_party/native-browser-bouchaud/webcontent-bootstrap
+          file third_party/native-browser-bouchaud/WebContent
+          ! file third_party/native-browser-bouchaud/WebContent | grep -qi 'dynamically linked'
+          ls -lh third_party/native-browser-bouchaud/
+
+      - name: Publier Ladybird natif
+        uses: actions/upload-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: third_party/native-browser-bouchaud/
+          if-no-files-found: error
+          retention-days: 14
+
+  qemu:
+    name: WebContent-ring3-QEMU
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+
+      - name: Cache cargo noyau
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Construire le noyau
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          cargo install bootimage --locked
+          cargo bootimage
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+
+      - name: Fabriquer le disque Ladybird
+        run: |
+          set -e
+          mkdir -p scenario/usr/libexec/ladybird scenario/usr/share/ladybird
+          cp native-browser/WebContent scenario/usr/libexec/ladybird/WebContent
+          cp native-browser/webcontent-bootstrap scenario/usr/libexec/ladybird/webcontent-bootstrap
+          chmod 755 scenario/usr/libexec/ladybird/*
+          for svc in RequestServer ImageDecoder WebContentCompositor WebWorker; do
+            if [ -x "native-browser/$svc" ]; then
+              cp "native-browser/$svc" "scenario/usr/libexec/ladybird/$svc"
+              chmod 755 "scenario/usr/libexec/ladybird/$svc"
+            fi
+          done
+          if [ -d native-browser/resources ]; then
+            cp -a native-browser/resources/. scenario/usr/share/ladybird/
+          fi
+          cat > scenario/autorun <<'SCENARIO'
+          uname
+          df
+          echo "=== Ladybird WebContent natif ==="
+          exec /usr/libexec/ladybird/webcontent-bootstrap /usr/libexec/ladybird/WebContent
+          SCENARIO
+          (cd tools/userland && IMAGE="$GITHUB_WORKSPACE/ladybird-browser.img" ./mkdisk.sh "$GITHUB_WORKSPACE/scenario")
+
+      - name: Executer WebContent en ring3
+        run: |
+          set +e
+          timeout 240 qemu-system-x86_64 \
+            -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            -drive format=raw,file=ladybird-browser.img \
+            -m 4096 -display none -no-reboot \
+            -netdev user,id=net0 -device e1000,netdev=net0 \
+            -audiodev none,id=muet -device AC97,audiodev=muet \
+            -serial file:serie-ladybird-browser.log
+          echo "qemu: code $?"
+          cat serie-ladybird-browser.log
+
+      - name: Verdict WebContent natif
+        run: |
+          grep -F "[ladybird-bouchaud] WebContent lance pid=" serie-ladybird-browser.log
+          grep -F "[ladybird-bouchaud] WEBCONTENT_READY" serie-ladybird-browser.log
+          grep -F "[ladybird-bouchaud] WEBCONTENT_PROCESS_ALIVE" serie-ladybird-browser.log
+          grep -F "[ladybird-bouchaud] RESULTAT : WebContent natif ring3 OK" serie-ladybird-browser.log
+
+      - name: Journal Ladybird
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-native-browser-serie
+          path: serie-ladybird-browser.log
+          if-no-files-found: warn
