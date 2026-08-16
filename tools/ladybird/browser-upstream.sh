@@ -35,6 +35,34 @@ export PKG_CONFIG_PATH="$VCPKG/lib/pkgconfig:$VCPKG/share/pkgconfig${PKG_CONFIG_
 export CMAKE_PREFIX_PATH="$VCPKG${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
 export CARGO_NET_GIT_FETCH_WITH_CLI=true
 
+# Ladybird upstream utilise du C++ moderne que le GCC 13 de l'image Ubuntu ne
+# parse pas correctement (notamment les explicit object parameters / "deducing
+# this" utilises par AK::Optional). Le run #27 utilisait implicitement g++ : les
+# diagnostics venaient de cc1plus et les options -Wno-* propres a Clang etaient
+# rejetees. Le workflow installe deja Clang/LLD ; on les rend donc explicites au
+# lieu de laisser CMake choisir le compilateur par defaut.
+CLANG=$(command -v clang || true)
+CLANGXX=$(command -v clang++ || true)
+LLVM_AR=$(command -v llvm-ar || command -v ar)
+LLVM_RANLIB=$(command -v llvm-ranlib || command -v ranlib)
+[ -n "$CLANG" ] && [ -n "$CLANGXX" ] || {
+    echo "Clang/clang++ absents alors que Ladybird les requiert pour ce build" >&2
+    exit 1
+}
+
+say "Compilateur Ladybird : $($CLANGXX --version | head -n1)"
+# Preflight volontairement minuscule : il teste exactement la famille de syntaxe
+# qui a casse AK::Optional au run #27. Si l'image runner fournit un Clang trop
+# ancien, on echoue ici en quelques secondes plutot qu'apres la generation Ninja.
+cat > "$BUILD/clang-explicit-this.cpp" <<'EOF_CLANG_TEST'
+struct Probe {
+    template<class Self>
+    constexpr int value(this Self& self) { (void)self; return 0; }
+};
+int main() { Probe p; return p.value(); }
+EOF_CLANG_TEST
+"$CLANGXX" -std=c++23 -fsyntax-only "$BUILD/clang-explicit-this.cpp"
+
 # Le depot Bouchaud possede volontairement une configuration Cargo bare-metal
 # a sa racine : cible JSON x86_64-bouchaud_os + `build-std = core,alloc,...`.
 # Les commandes Cargo lancees par CMake depuis un build situe sous ce depot
@@ -100,8 +128,14 @@ say "== configure Ladybird services-only / Bouchaud =="
 printf '  vcpkg install root : %s\n' "$VCPKG_INSTALLED_ROOT"
 printf '  vcpkg triplet      : %s\n' "$VCPKG_TRIPLET"
 printf '  rust toolchain     : %s\n' "$LADYBIRD_RUST_TOOLCHAIN"
+printf '  C compiler         : %s\n' "$CLANG"
+printf '  C++ compiler       : %s\n' "$CLANGXX"
 cmake -S "$SRC" -B "$BUILD" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_COMPILER="$CLANG" \
+    -DCMAKE_CXX_COMPILER="$CLANGXX" \
+    -DCMAKE_AR="$LLVM_AR" \
+    -DCMAKE_RANLIB="$LLVM_RANLIB" \
     -DCMAKE_PREFIX_PATH="$VCPKG" \
     -DVCPKG_INSTALLED_DIR="$VCPKG_INSTALLED_ROOT" \
     -D_VCPKG_INSTALLED_DIR="$VCPKG_INSTALLED_ROOT" \
