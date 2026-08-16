@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build the real pinned Ladybird libraries and Services/WebContent in a disposable
-# worktree. The executable is linked static-pie so Bouchaud's Linux-ABI userland
-# can load it without a dynamic ELF interpreter.
+# worktree. Only the runtime services are linked static-pie for Bouchaud's
+# Linux-ABI userland; build-time generators remain normal Ubuntu executables.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -27,6 +27,7 @@ rm -rf "$SRC"
 git -C "$LB" worktree prune
 git -C "$LB" worktree add --force --detach "$SRC" HEAD >/dev/null
 python3 tools/ladybird/prepare-browser-source.py "$SRC"
+python3 tools/ladybird/prepare-browser-runtime-link.py "$SRC"
 
 rm -rf "$BUILD"
 mkdir -p "$BUILD"
@@ -37,9 +38,9 @@ export CARGO_NET_GIT_FETCH_WITH_CLI=true
 
 # Ladybird upstream utilise LLVM 20 dans son environnement Ubuntu. Clang 18
 # parse le C++ moderne d'AK mais segfault dans LibWasm/BytecodeInterpreter.cpp
-# pendant la génération LLVM IR (run #36, exit 139). Ne plus prendre le `clang`
-# non versionné du runner : forcer exactement la génération LLVM supportée par
-# le snapshot Ladybird épinglé.
+# pendant la generation LLVM IR (run #36, exit 139). Ne plus prendre le `clang`
+# non versionne du runner : forcer exactement la generation LLVM supportee par
+# le snapshot Ladybird epingle.
 LLVM_VERSION="${BO_LLVM_VERSION:-20}"
 CLANG=$(command -v "clang-${LLVM_VERSION}" || true)
 CLANGXX=$(command -v "clang++-${LLVM_VERSION}" || true)
@@ -54,8 +55,8 @@ for tool in "$CLANG" "$CLANGXX" "$LLVM_AR" "$LLVM_RANLIB" "$LLD"; do
     }
 done
 
-# `-fuse-ld=lld` cherche aussi son linker dans PATH. Mettre le bindir réel de
-# clang-20 devant /usr/bin évite qu'un ld.lld 18 non versionné soit repris.
+# `-fuse-ld=lld` cherche aussi son linker dans PATH. Mettre le bindir reel de
+# clang-20 devant /usr/bin evite qu'un ld.lld 18 non versionne soit repris.
 LLVM_BINDIR=$(dirname "$(readlink -f "$CLANGXX")")
 export PATH="$LLVM_BINDIR:$PATH"
 
@@ -140,11 +141,11 @@ fi
     exit 1
 }
 
-# Certains outils générateurs de Lagom/Ladybird lient mimalloc par son nom
+# Certains outils generateurs de Lagom/Ladybird lient mimalloc par son nom
 # (`-lmimalloc`) au lieu d'une archive absolue. CMAKE_PREFIX_PATH permet bien de
-# trouver le package, mais n'ajoute pas à lui seul le répertoire à la recherche
-# link-time de `ld.lld`. Le run #36 échouait ainsi sur
-# `generate_interpreter_layout` malgré mimalloc installé par vcpkg.
+# trouver le package, mais n'ajoute pas a lui seul le repertoire a la recherche
+# link-time de `ld.lld`. LIBRARY_PATH + CMAKE_LIBRARY_PATH donnent ce chemin aux
+# outils hote sans leur imposer le format static-pie de Bouchaud.
 MIMALLOC_ARCHIVE="$VCPKG/lib/libmimalloc.a"
 [ -f "$MIMALLOC_ARCHIVE" ] || {
     echo "archive mimalloc absente: $MIMALLOC_ARCHIVE" >&2
@@ -183,7 +184,36 @@ cmake -S "$SRC" -B "$BUILD" -G Ninja \
     -DENABLE_INSTALL_FREEDESKTOP_FILES=OFF \
     -DLADYBIRD_ENABLE_CPPTRACE=OFF \
     -DLAGOM_USE_LINKER=lld \
-    -DCMAKE_EXE_LINKER_FLAGS="-L$VCPKG/lib -static-pie -Wl,--allow-multiple-definition"
+    -DCMAKE_EXE_LINKER_FLAGS="-L$VCPKG/lib"
+
+# Ladybird construit plusieurs executables uniquement pour LA MACHINE HOTE.
+# Le run #39 a montre que generate_interpreter_layout se liait puis segfaultait
+# car notre ancien -static-pie global contaminait aussi ce generateur Ubuntu.
+# Valider explicitement la separation host/target avant de lancer les 2762 jobs.
+say "== preflight generate_interpreter_layout (host Ubuntu) =="
+cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target generate_interpreter_layout
+GEN_LAYOUT="$BUILD/bin/generate_interpreter_layout"
+[ -x "$GEN_LAYOUT" ] || { echo "generate_interpreter_layout non produit" >&2; exit 1; }
+file "$GEN_LAYOUT" | tee "$BUILD/generate-interpreter-layout.file.txt"
+if ! readelf -l "$GEN_LAYOUT" | grep -q 'INTERP'; then
+    echo "ERREUR: generate_interpreter_layout n'est pas un executable hote dynamique; un flag Bouchaud fuit encore" >&2
+    readelf -l "$GEN_LAYOUT" >&2 || true
+    exit 1
+fi
+HOST_LAYOUT="$BUILD/generate-interpreter-layout-preflight.conf"
+if ! (ulimit -c 0; "$GEN_LAYOUT" > "$HOST_LAYOUT"); then
+    status=$?
+    echo "ERREUR: generate_interpreter_layout plante sur le runner (status=$status)" >&2
+    ldd "$GEN_LAYOUT" >&2 || true
+    exit "$status"
+fi
+[ -s "$HOST_LAYOUT" ] || { echo "generate_interpreter_layout a produit un fichier vide" >&2; exit 1; }
+grep -q '^const OBJECT_SIZE = ' "$HOST_LAYOUT" || {
+    echo "sortie generate_interpreter_layout invalide (OBJECT_SIZE absent)" >&2
+    head -n 40 "$HOST_LAYOUT" >&2 || true
+    exit 1
+}
+ok "generateur LibJS hote valide"
 
 say "== build WebContent + services =="
 # Pendant le portage on veut decouvrir en un seul run toutes les incompatibilites
@@ -197,8 +227,10 @@ say "== build WebContent + services =="
 # epingle. Il reste visible comme warning, sans couper la traversee Ninja.
 cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target WebContent -- -k 0
 
-# Services are optional here: build those present in this exact upstream SHA.
-for target in RequestServer ImageDecoder WebContentCompositor WebWorker; do
+# Services de processus utiles au chemin CPU-only. Le target GPU upstream est
+# `Compositor`, pas `WebContentCompositor`; on ne le construit volontairement
+# pas ici car Bouchaud vise Skia CPU -> shared surface -> WM, sans ANGLE/OpenGL.
+for target in RequestServer ImageDecoder WebWorker; do
     if ninja -C "$BUILD" -t targets all 2>/dev/null | grep -q "^${target}:"; then
         cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target "$target" -- -k 0
     fi
@@ -207,7 +239,7 @@ done
 OUT="$ROOT/third_party/native-browser-bouchaud"
 rm -rf "$OUT"
 mkdir -p "$OUT"
-find "$BUILD" -type f \( -name WebContent -o -name RequestServer -o -name ImageDecoder -o -name WebContentCompositor -o -name WebWorker \) -perm -111 -exec cp -f {} "$OUT/" \;
+find "$BUILD" -type f \( -name WebContent -o -name RequestServer -o -name ImageDecoder -o -name WebWorker \) -perm -111 -exec cp -f {} "$OUT/" \;
 
 [ -x "$OUT/WebContent" ] || { echo "WebContent non produit" >&2; exit 1; }
 file "$OUT/WebContent" | tee "$OUT/file.txt"
@@ -215,10 +247,18 @@ if [ -d "$SRC/Base/res" ]; then
     mkdir -p "$OUT/resources"
     cp -a "$SRC/Base/res/." "$OUT/resources/"
 fi
-if file "$OUT/WebContent" | grep -qi 'dynamically linked'; then
-    echo "ERREUR: WebContent contient encore un interpreteur dynamique" >&2
-    exit 1
-fi
+
+# `file` peut varier selon la version du runner; readelf est l'invariant utile
+# pour Bouchaud : aucun PT_INTERP ne doit demander ld-linux au demarrage.
+for runtime in WebContent RequestServer ImageDecoder WebWorker; do
+    [ -x "$OUT/$runtime" ] || continue
+    file "$OUT/$runtime" | tee "$OUT/$runtime.file.txt"
+    if readelf -l "$OUT/$runtime" | grep -q 'INTERP'; then
+        echo "ERREUR: $runtime contient encore un interpreteur ELF dynamique" >&2
+        readelf -l "$OUT/$runtime" >&2 || true
+        exit 1
+    fi
+done
 
 # Le masque Cargo n'est utile que pour le build Ladybird. Restaurer avant la
 # sortie normale rend aussi l'etat du checkout explicite pour les etapes CI
