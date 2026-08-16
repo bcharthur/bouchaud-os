@@ -6,6 +6,7 @@ worktree passed as argv[1]. Changes are deliberately tiny and mechanical:
 - configure Services without adding the desktop UI;
 - select the unimplemented renderer sandbox for Bouchaud (M14 comes later);
 - provide a deterministic x86_64 cache-line alignment when building AK with Clang;
+- force a portable x86-64 ISA instead of the CI host's -march=native;
 - allow WebContent to inherit an already-created IPC fd from Bouchaud.
 """
 from pathlib import Path
@@ -40,6 +41,22 @@ if insert not in data:
         raise SystemExit("cannot place BOUCHAUD_PORT marker")
     cmake.write_text(data.replace(needle, insert + needle, 1))
 
+# Ladybird normally compiles a non-cross host build with -march=native. On a
+# GitHub runner this enabled AVX and the resulting WebContent immediately hit
+# #UD in Bouchaud/QEMU on `vxorps` before WEBCONTENT_READY. Bouchaud's x86-64
+# ABI deliberately targets the architectural baseline (SSE2, no AVX required),
+# so override upstream's host tuning only in the disposable BOUCHAUD_PORT tree.
+# This must be global: WebContent links hundreds of static Ladybird libraries,
+# and one AVX instruction in any of them is enough to crash at startup.
+compile_options = root / "Meta/CMake/compile_options.cmake"
+replace_once(
+    compile_options,
+    "if (ENABLE_CI_BASELINE_CPU)\n",
+    "if (BOUCHAUD_PORT AND CMAKE_SYSTEM_PROCESSOR MATCHES \"^(x86_64|amd64|AMD64)$\")\n"
+    "    add_cxx_compile_options(-march=x86-64 -mtune=generic)\n"
+    "elseif (ENABLE_CI_BASELINE_CPU)\n",
+)
+
 # AK cache alignment: upstream currently falls back unconditionally to
 # __GCC_DESTRUCTIVE_SIZE. GCC exposes that implementation macro, but the Clang
 # toolchain deliberately used for Ladybird does not, so every user of
@@ -66,9 +83,6 @@ replace_once(
 main = root / "Services/WebContent/main.cpp"
 data = main.read_text()
 if "BOUCHAUD_WEBCONTENT_FD" not in data:
-    # In this pinned Ladybird snapshot LocalSocket lives in LibCore/Socket.h;
-    # there is no standalone LibCore/LocalSocket.h. The run #43 reached
-    # 2719/2720 and failed only on that stale include name.
     data = data.replace(
         "#include <LibCore/LocalServer.h>\n",
         "#include <LibCore/LocalServer.h>\n#include <LibCore/Socket.h>\n",
