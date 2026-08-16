@@ -28,6 +28,19 @@ use crate::fs::ramfs;
 /// Taille d'un en-tete `tar` (et unite de bloc de l'archive).
 const BLOCK: usize = 512;
 
+/// Ladybird est lie statiquement : WebContent pese plusieurs centaines de Mio.
+/// Cette limite ne s'applique qu'aux fichiers de l'archive de boot, qui est une
+/// image de confiance fabriquee par notre CI. Les ecritures ordinaires du RAMFS
+/// restent protegees par `ramfs::MAX_FILE_SIZE` (64 Mio).
+const MAX_BOOT_FILE_SIZE: usize = 512 * 1024 * 1024;
+
+/// Garde-fou sur le second disque lu integralement au boot. Le run Ladybird
+/// #31966498412 produit une image d'environ 271 Mio ; l'ancienne limite de
+/// 192 Mio tronquait donc WebContent avant meme que le TAR atteigne le petit
+/// `webcontent-bootstrap` place juste apres. 768 Mio laisse une marge importante
+/// tout en bornant clairement l'allocation noyau.
+const MAX_ARCHIVE_DISK_SIZE: usize = 768 * 1024 * 1024;
+
 /// Champs d'un en-tete `ustar`, en octets depuis son debut.
 const NAME: usize = 0;
 const MODE: usize = 100;
@@ -92,8 +105,18 @@ fn mkdir_path(path: &str) -> usize {
     current
 }
 
-/// Depose un fichier dans le RAMFS, en creant l'arborescence au besoin.
+/// Depose un fichier de l'archive de boot dans le RAMFS, en creant
+/// l'arborescence au besoin.
+///
+/// On n'utilise volontairement pas `write_node_bytes`: sa limite de 64 Mio
+/// protege les ecritures ordinaires et ne doit pas etre relevee uniquement pour
+/// Ladybird. L'archive de boot a son propre plafond, plus haut mais toujours
+/// borne, et provient exclusivement de notre image ustar de confiance.
 fn write_file(path: &str, content: &[u8], mode: u16) -> bool {
+    if content.len() > MAX_BOOT_FILE_SIZE {
+        return false;
+    }
+
     let (parent_path, name) = match path.rfind('/') {
         Some(index) => (&path[..index], &path[index + 1..]),
         None => ("", path),
@@ -111,9 +134,7 @@ fn write_file(path: &str, content: &[u8], mode: u16) -> bool {
             Err(_) => return false,
         },
     };
-    if !fs.write_node_bytes(node, content) {
-        return false;
-    }
+    fs.nodes[node].content = content.to_vec();
     fs.nodes[node].mode = mode;
     true
 }
@@ -123,13 +144,22 @@ pub struct Unpacked {
     pub files: usize,
     pub directories: usize,
     pub bytes: usize,
-    /// Entrees refusees (trop grosses, ou table d'inodes pleine).
+    /// Entrees refusees (trop grosses, table d'inodes pleine ou type inconnu).
     pub skipped: usize,
+    /// Archive tronquee ou incoherente : on s'est arrete avant de lire des
+    /// donnees partielles comme si elles formaient un fichier valide.
+    pub truncated: bool,
 }
 
 /// Deplie une archive `tar` deja en memoire.
 pub fn unpack(archive: &[u8]) -> Unpacked {
-    let mut result = Unpacked { files: 0, directories: 0, bytes: 0, skipped: 0 };
+    let mut result = Unpacked {
+        files: 0,
+        directories: 0,
+        bytes: 0,
+        skipped: 0,
+        truncated: false,
+    };
     let mut offset = 0usize;
 
     while offset + BLOCK <= archive.len() {
@@ -158,6 +188,19 @@ pub fn unpack(archive: &[u8]) -> Unpacked {
         let kind = header[TYPEFLAG];
         offset += BLOCK;
 
+        // Ne jamais donner un fichier partiel au RAMFS. C'etait exactement ce
+        // que faisait l'ancien `min(offset + size, archive.len())` quand hdb
+        // etait coupe a 192 Mio : WebContent devenait un fragment puis le
+        // parseur sautait hors du tampon et n'atteignait plus le bootstrap.
+        let end = match offset.checked_add(size) {
+            Some(end) if end <= archive.len() => end,
+            _ => {
+                result.skipped += 1;
+                result.truncated = true;
+                break;
+            }
+        };
+
         match kind {
             TYPE_DIR => {
                 if !path.is_empty() && mkdir_path(path) != 0 {
@@ -165,18 +208,12 @@ pub fn unpack(archive: &[u8]) -> Unpacked {
                 }
             }
             TYPE_FILE | TYPE_FILE_ALT => {
-                let end = core::cmp::min(offset + size, archive.len());
-                if end > offset && !path.is_empty() {
+                if !path.is_empty() {
                     if write_file(path, &archive[offset..end], if mode == 0 { 0o644 } else { mode }) {
                         result.files += 1;
                         result.bytes += size;
                     } else {
                         result.skipped += 1;
-                    }
-                } else if !path.is_empty() {
-                    // Fichier vide : on le cree quand meme.
-                    if write_file(path, &[], if mode == 0 { 0o644 } else { mode }) {
-                        result.files += 1;
                     }
                 }
             }
@@ -186,7 +223,20 @@ pub fn unpack(archive: &[u8]) -> Unpacked {
         }
 
         // Le contenu est complete jusqu'au bloc suivant.
-        offset += (size + BLOCK - 1) / BLOCK * BLOCK;
+        let padded = match size.checked_add(BLOCK - 1) {
+            Some(value) => value / BLOCK * BLOCK,
+            None => {
+                result.truncated = true;
+                break;
+            }
+        };
+        offset = match offset.checked_add(padded) {
+            Some(next) => next,
+            None => {
+                result.truncated = true;
+                break;
+            }
+        };
     }
     result
 }
@@ -201,7 +251,7 @@ fn read_archive(drive: Drive) -> Option<Vec<u8>> {
     }
 
     // On lit d'abord un secteur pour verifier la signature avant d'engager la
-    // lecture complete : inutile d'aspirer des dizaines de mega-octets d'un
+    // lecture complete : inutile d'aspirer des centaines de mega-octets d'un
     // disque qui ne contient pas ce qu'on cherche.
     let mut probe = alloc::vec![0u8; SECTOR_SIZE];
     if ata::read(drive, 0, 1, &mut probe) != 1 {
@@ -216,8 +266,14 @@ fn read_archive(drive: Drive) -> Option<Vec<u8>> {
         Drive::Slave => slave_sectors,
         Drive::Master => return None,
     };
-    // Garde-fou : on ne lit pas plus que ce que le tas peut absorber.
-    let max_sectors = (192 * 1024 * 1024 / SECTOR_SIZE) as u64;
+    let max_sectors = (MAX_ARCHIVE_DISK_SIZE / SECTOR_SIZE) as u64;
+    if sectors > max_sectors {
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "tar: hdb trop grand ({} Mio), lecture bornee a {} Mio",
+            sectors * SECTOR_SIZE as u64 / (1024 * 1024),
+            MAX_ARCHIVE_DISK_SIZE / (1024 * 1024)
+        ));
+    }
     let to_read = core::cmp::min(sectors, max_sectors) as usize;
 
     let mut data = alloc::vec![0u8; to_read * SECTOR_SIZE];
@@ -253,7 +309,7 @@ pub fn mount_data_disk() {
     let result = unpack(&archive);
     unsafe { MOUNTED = Some((result.files, result.directories, result.bytes)) };
     crate::kernel::dmesg::log_fmt(format_args!(
-        "tar: hdb deplie -> {} fichiers, {} repertoires, {} Kio{}",
+        "tar: hdb deplie -> {} fichiers, {} repertoires, {} Kio{}{}",
         result.files,
         result.directories,
         result.bytes / 1024,
@@ -261,6 +317,7 @@ pub fn mount_data_disk() {
             alloc::format!(" ({} entrees ignorees)", result.skipped)
         } else {
             String::new()
-        }
+        },
+        if result.truncated { " [ARCHIVE TRONQUEE]" } else { "" }
     ));
 }
