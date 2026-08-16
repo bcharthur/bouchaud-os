@@ -69,8 +69,25 @@ jobs:
       - name: Construire les dependances navigateur
         run: tools/ladybird/browser-vcpkg.sh
 
+      # `always()`, et une cle unique par tentative. Les deux vont ensemble.
+      #
+      # Sans `always()`, un echec de `browser-vcpkg.sh` saute cette etape et
+      # jette les trente-trois minutes de vcpkg deja faites : la tentative
+      # suivante repart de zero, par les memes hotes, et l'on ne peut pas
+      # iterer. C'est le defaut deja corrige sur `ladybird-native-m6`.
+      #
+      # Mais `always()` seul serait pire que le mal avec une cle fixe : le
+      # premier echec deposerait un arbre **partiel** sous la cle primaire, les
+      # cles de cache etant immuables, et plus aucune execution ne pourrait
+      # jamais y ecrire un arbre complet. Le cache resterait fige sur cet etat
+      # partiel.
+      #
+      # D'ou `run_id`-`run_attempt` : chaque tentative banque son avancement
+      # sous une cle qui lui appartient, et la restauration prend la plus
+      # recente par prefixe (`restore-keys`). `run_attempt` compte : une
+      # relance depuis l'interface Actions garde le meme `run_id`.
       - name: Sauvegarder vcpkg immediatement
-        if: steps.cache-browser-vcpkg.outputs.cache-hit != 'true'
+        if: always()
         uses: actions/cache/save@v4
         with:
           path: |
@@ -79,7 +96,7 @@ jobs:
             third_party/vcpkg-browser-installed
             third_party/vcpkg-browser-manifest
             ~/.cache/vcpkg
-          key: ${{ steps.cache-browser-vcpkg.outputs.cache-primary-key }}
+          key: ladybird-browser-vcpkg-${{ runner.os }}-${{ hashFiles('tools/ladybird/browser-vcpkg.sh', 'third_party/UPSTREAM.md') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Cache build WebContent
         uses: actions/cache@v4
