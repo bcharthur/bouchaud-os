@@ -100,3 +100,6 @@ third_party/vcpkg-downloads/
 third_party/build-libgfx-*/
 third_party/build-libcompress-*/
 third_party/build-rust-gfx-*/
+third_party/gen-libweb/
+third_party/build-libweb-*/
+third_party/build-webcontent-*/
