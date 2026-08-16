@@ -1,17 +1,34 @@
-# M5b en ring 3 : le message reste dans la file d'envoi
+# M5b en ring 3 : le reveil perdu de `poll`
 
-**M5 n'est pas termine.** Ce document dit ou en est le diagnostic.
+**M5 est termine.** Les six verifications du temoin passent en ring 3, sous
+QEMU, dans le travail `product-qemu-boot` du workflow `userland`.
 
-## L'observation, apres instrumentation
+Ce document garde la trace du defaut, parce que la facon dont il a ete trouve
+vaut plus que le correctif lui-meme — cinq lignes.
 
-Le temoin `tools/ladybird/libipc-codec-probe.cpp` envoie desormais **un type a
-la fois**, en chaine, chaque reponse declenchant l'envoi suivant. Chaque etape
-trace son passage, des deux cotes.
+## La preuve
 
-Sur l'hote, les six verifications passent — `u32`, `String`, `Vector<u32>`,
-`Optional<String>`, `URL::URL`, puis les quatre reunis.
+Sortie serie de Bouchaud OS, le runner Linux n'etant que le compilateur et
+l'hote de QEMU :
 
-En ring 3 :
+    == temoin LibIPC : endpoints generes ==
+      ok     u32 : ping 42 -> pong 43
+      ok     String traverse intact
+      ok     Vector<u32> traverse intact
+      ok     Optional<String> renseigne traverse intact
+      ok     URL::URL traverse intacte
+      ok     les quatre types dans un seul message
+    RESULTAT : 0 verification(s) en echec (6 passees)
+
+Le verdict de CI ne se contente pas du bandeau : il exige chacune des six
+lignes **et** le `RESULTAT` (`.github/workflows/userland.yml`). Un temoin qui
+s'arreterait au milieu ne pourrait pas passer pour vert.
+
+## Ce que l'instrumentation avait etabli
+
+Le temoin envoie **un type a la fois**, en chaine, chaque reponse declenchant
+l'envoi suivant, et chaque etape trace son passage des deux cotes. C'est ce
+decoupage qui a rendu le defaut lisible. En ring 3, avant correctif :
 
     == temoin LibIPC : endpoints generes ==
              [client] envoi ping
@@ -21,70 +38,68 @@ En ring 3 :
       ECHEC  aucune reponse en 10 s
              [serveur] echo_string recu        <-- APRES le delai
 
-## Ce que la trace etablit
+La derniere ligne portait tout : le serveur recevait bien `echo_string`, mais
+seulement une fois le delai ecoule — c'est-a-dire au moment ou le client
+appelait `shutdown()`, qui vide la file d'envoi.
 
-La derniere ligne est la plus importante : **le serveur recoit bien
-`echo_string`, mais seulement une fois le delai ecoule** — c'est-a-dire au
-moment ou le client appelle `shutdown()`.
+Cela ecartait trois pistes d'un coup :
 
-Cela elimine plusieurs pistes d'un coup :
-
-- **ce n'est pas le codec.** Le message est decode correctement quand il
-  arrive ; `String` n'est pas en cause, et les types suivants n'ont meme pas ete
-  atteints ;
-- **ce n'est pas la fragmentation.** Le message arrive entier, plus tard ;
-- **ce n'est pas `URL::URL`.** L'echec survient des le premier message apres le
+- **pas le codec** : le message etait decode correctement quand il arrivait ;
+- **pas la fragmentation** : il arrivait entier, plus tard ;
+- **pas `URL::URL`** : l'echec survenait des le premier message apres le
   `ping`, qui ne porte qu'un `String`.
 
-La matrice des types est donc, en ring 3 : `u32` OK, le reste **non atteint** —
-et non « en echec ».
+La matrice des types n'etait donc pas « `u32` OK, le reste en echec » mais
+« `u32` OK, le reste **jamais atteint** ». Une nuance qui change la recherche
+du tout au tout : il ne fallait pas chercher dans la serialisation.
 
-## La cause probable, et pourquoi
+## La cause
 
-Le comportement observe est exactement celui que decrit le test d'upstream
-`buffered_message_is_drained_when_io_thread_stops_without_reading_it` : des
-octets restes en attente sont drainés a l'arret.
+`TransportSocket` n'ecrit pas directement : il empile dans `m_send_queue`, puis
+appelle `wake_io_thread()`, qui ecrit un octet dans un tube. Le fil
+d'entree/sortie attend sur `poll`, sur deux descripteurs — la socket et le bout
+lecteur de ce tube.
 
-`TransportSocket` n'ecrit pas directement. Il empile dans `m_send_queue`, puis
-appelle `wake_io_thread()`, qui **ecrit un octet dans un tube** cree par
-`pipe2(O_CLOEXEC | O_NONBLOCK)` (`TransportSocket.cpp:165`). Le fil
-d'entree/sortie attend sur `poll` **deux** descripteurs : la socket et le bout
-lecteur de ce tube (`TransportSocket.cpp:200`).
+Le defaut etait dans `sys_poll` (`src/kernel/abi/file.rs`) :
 
-Le premier message du temoin (`ping`) part de `main()`, avant
-`Core::EventLoop::exec()`. Les suivants partent depuis un gestionnaire, donc par
-la file et son reveil.
+```rust
+task::yield_now();
+crate::arch::x86_64::cpu::wait_for_interrupt();
+```
 
-L'hypothese est donc : **le reveil par le tube ne parvient pas au fil
-d'entree/sortie sous Bouchaud.** Le message reste dans la file jusqu'a ce que
-`shutdown()` la vide.
+`yield_now()` pouvait basculer vers un autre fil, celui-la meme qui ecrivait
+l'octet de reveil. Mais au retour, la boucle tombait **directement** dans
+`wait_for_interrupt()` — un `hlt` — sans jamais reevaluer les descripteurs. Le
+reveil logiciel etait donc perdu jusqu'a la prochaine interruption materielle.
 
-## Ce qu'il faut mesurer ensuite
+C'est bien pour cela que le message finissait par passer : il attendait le
+minuteur, pas le tube.
 
-1. Un test **independant de Ladybird** : deux fils d'un meme processus, un
-   `pipe2(O_NONBLOCK)`, l'un bloque dans `poll(-1)`, l'autre ecrit un octet.
-   Le premier doit se reveiller. C'est trois dizaines de lignes, et cela
-   tranche entre « defaut Bouchaud » et « defaut d'integration ».
-2. Si le reveil manque : regarder `sys_poll` (`src/kernel/abi/file.rs:1800`).
-   Sa boucle fait `task::yield_now()` puis
-   `crate::arch::x86_64::cpu::wait_for_interrupt()` — un `hlt`. Verifier qu'un
-   `write` fait par **un autre fil du meme processus** rend bien la main a ce
-   `poll`, et que `hlt` ne suspend pas le processeur alors qu'une autre tache
-   est prete.
-3. Verifier que `pipe2` honore `O_NONBLOCK` et `O_CLOEXEC`.
+## Le correctif
 
-## Pourquoi le temoin n'est pas dans le scenario QEMU
+```rust
+if task::schedule() {
+    continue;
+}
+crate::arch::x86_64::cpu::wait_for_interrupt();
+```
 
-Parce que le laisser rouge en permanence masquerait les regressions reelles,
-et n'apprendrait rien de plus que ce document.
+`task::schedule()` rend `true` quand une commutation a **reellement** eu lieu.
+Dans ce cas un autre fil s'est execute et a pu rendre un descripteur pret : on
+reprend la boucle et on relit les descripteurs avant de dormir. Sinon,
+personne d'autre n'etait pret et le `hlt` est legitime.
 
-Ce n'est **pas** une facon de declarer M5 termine : il ne l'est pas. Le temoin
-est construit pour la cible, joue sur l'hote ou il est vert, et `tools/test.sh`
-le reprendra des que le reveil sera repare.
+`sys_select` avait exactement le meme defaut et a recu le meme correctif.
 
-## Ce que cela ne remet pas en cause
+## Ce qu'il faut en retenir
 
-`TestTransportSocket` d'upstream — cinq cas, dont le passage de descripteurs et
-le raccrochage du pair — passe en ring 3. Le transport tient. Ce qui manque est
-le reveil d'un fil par un tube, une primitive de Bouchaud, pas une brique de
-Ladybird.
+Le correctif est **du cote de Bouchaud**, generique, et ne touche pas une ligne
+de Ladybird. C'etait la bonne lecture des le depart : ce qui manquait n'etait
+pas une brique de Ladybird mais une primitive de Bouchaud — le reveil d'un fil
+par un tube. Toute application POSIX qui reveille un `poll` depuis un autre fil
+en beneficie, pas seulement LibIPC.
+
+Le sous-jacent n'avait d'ailleurs jamais ete mis en doute : `TestTransportSocket`
+d'upstream — cinq cas, dont le passage de descripteurs et le raccrochage du
+pair — passait deja en ring 3. Le transport tenait ; c'est l'ordonnanceur qui
+dormait trop tot.

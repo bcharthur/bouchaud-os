@@ -203,14 +203,24 @@ jobs:
           echo "qemu: code $?"
           cat serie-m6.log
 
+      # Ces chaines sont un contrat entre le temoin et le harnais : renommer un
+      # message dans `libgfx-probe.cpp` sans toucher ici rend le travail rouge
+      # alors que le ring 3 est vert — c'est exactement ce qui est arrive quand
+      # `PainterSkia CPU cree` a ete retiree et `clear_rect ...` renommee.
+      #
+      # L'ordre des lignes n'est pas decoratif : le bandeau seul ne prouve rien,
+      # et c'est le `RESULTAT` qui fait foi. Le `! grep ECHEC` le double, parce
+      # qu'un decompte attendu peut coincider par accident alors qu'une
+      # verification a echoue.
       - name: Verdict M6
         run: |
           grep -F "== temoin LibGfx : Skia CPU ==" serie-m6.log
           grep -F "ok     Bitmap BGRA8888 320x200 cree par LibGfx" serie-m6.log
-          grep -F "ok     PainterSkia CPU cree" serie-m6.log
-          grep -F "ok     clear_rect a produit des pixels blancs" serie-m6.log
+          grep -F "ok     bitmap neuf : le fond n'est pas encore blanc" serie-m6.log
+          grep -F "ok     clear_rect Skia a peint dans notre bitmap" serie-m6.log
           grep -F "ok     fill_rect Skia a produit rouge, bleu et fond intact" serie-m6.log
           grep -F "RESULTAT : 0 verification(s) en echec (4 passees)" serie-m6.log
+          ! grep -F "  ECHEC  " serie-m6.log
 
       - name: Journal M6
         if: always()
