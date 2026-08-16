@@ -18,7 +18,7 @@
 # Le moteur lui-meme (`webview/platforms/bouchaud.py`) vient de
 # `webview_bouchaud.py`, a cote de ce script.
 
-set -e
+set -euo pipefail
 cd "$(dirname "$0")"
 SOURCE=$PWD
 
@@ -35,22 +35,77 @@ TYPINGEXT_VER=${TYPINGEXT_VER:-4.16.0}
 mkdir -p "$CHANTIER"
 cd "$CHANTIER"
 
-telecharge() { # telecharge <paquet>
+telecharge() { # telecharge <paquet> <version>
     local nom=$1
-    [ -f "$nom.tar.gz" ] && return 0
+    local version=$2
+    local archive="$nom.tar.gz"
+    local meta="$nom-$version.pypi.json"
+    local tmp="$archive.tmp"
+
+    # Ne jamais reutiliser silencieusement une archive corrompue issue d'un
+    # ancien run interrompu.
+    if [ -f "$archive" ] && tar -tzf "$archive" >/dev/null 2>&1; then
+        return 0
+    fi
+    rm -f "$archive" "$tmp" "$meta"
+
+    echo "  PyPI: $nom==$version"
+    # Le run #90 recevait parfois une reponse vide de PyPI : le pipe envoyait
+    # alors directement EOF a json.load() et produisait un JSONDecodeError peu
+    # parlant. Telecharger d'abord le metadata dans un fichier, avec retries,
+    # puis seulement le parser rend la panne reseau explicite et recuperable.
+    curl --fail --silent --show-error --location \
+         --retry 5 --retry-all-errors --retry-delay 2 \
+         --connect-timeout 10 --max-time 90 \
+         -o "$meta" "https://pypi.org/pypi/$nom/$version/json"
+    [ -s "$meta" ] || {
+        echo "PyPI: metadata vide pour $nom==$version" >&2
+        return 1
+    }
+
     local url
-    url=$(curl -sf --max-time 30 "https://pypi.org/pypi/$nom/json" | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-sdist = [f['url'] for f in d['urls'] if f['packagetype'] == 'sdist']
-wheel = [f['url'] for f in d['urls'] if f['packagetype'] == 'bdist_wheel']
-print((sdist or wheel)[0])")
-    curl -sfL --max-time 300 -o "$nom.tar.gz" "$url"
+    url=$(python3 - "$meta" "$nom" "$version" <<'PY'
+import json
+import sys
+
+path, name, version = sys.argv[1:]
+try:
+    with open(path, "rb") as stream:
+        data = json.load(stream)
+except (OSError, json.JSONDecodeError) as exc:
+    raise SystemExit(f"PyPI: metadata invalide pour {name}=={version}: {exc}")
+
+if data.get("info", {}).get("version") != version:
+    raise SystemExit(
+        f"PyPI: version inattendue pour {name}: "
+        f"{data.get('info', {}).get('version')!r}, attendu {version!r}"
+    )
+
+sdists = [entry.get("url") for entry in data.get("urls", [])
+          if entry.get("packagetype") == "sdist" and entry.get("url")]
+if not sdists:
+    raise SystemExit(f"PyPI: aucun sdist pour {name}=={version}")
+print(sdists[0])
+PY
+    )
+
+    curl --fail --silent --show-error --location \
+         --retry 5 --retry-all-errors --retry-delay 2 \
+         --connect-timeout 10 --max-time 300 \
+         -o "$tmp" "$url"
+    tar -tzf "$tmp" >/dev/null || {
+        echo "PyPI: archive invalide pour $nom==$version" >&2
+        rm -f "$tmp"
+        return 1
+    }
+    mv "$tmp" "$archive"
+    rm -f "$meta"
 }
 
-for paquet in pywebview bottle proxy_tools typing_extensions; do
-    telecharge "$paquet"
-done
+telecharge pywebview "$PYWEBVIEW_VER"
+telecharge bottle "$BOTTLE_VER"
+telecharge proxy_tools "$PROXYTOOLS_VER"
+telecharge typing_extensions "$TYPINGEXT_VER"
 
 rm -rf extrait && mkdir extrait
 for paquet in pywebview bottle proxy_tools typing_extensions; do
