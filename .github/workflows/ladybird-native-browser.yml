@@ -7,11 +7,13 @@ on:
     paths:
       - "tools/ladybird/**"
       - "docs/ladybird/**"
+      - "src/fs/tar.rs"
       - ".github/workflows/ladybird-native-browser.yml"
   pull_request:
     paths:
       - "tools/ladybird/**"
       - "docs/ladybird/**"
+      - "src/fs/tar.rs"
       - ".github/workflows/ladybird-native-browser.yml"
 
 concurrency:
@@ -42,10 +44,6 @@ jobs:
           dpkg-query -W -f='${Status}\n' mesa-common-dev | grep -q 'install ok installed'
           command -v ccache
 
-          # Ladybird épinglé utilise LLVM 20 dans son environnement Ubuntu.
-          # Ubuntu 24.04 fournit encore Clang 18 par défaut ; ce compilateur
-          # segfault dans LibWasm/BytecodeInterpreter.cpp pendant la génération
-          # LLVM IR. Installer la toolchain supportée par upstream via apt.llvm.org.
           LLVM_VERSION=20
           if ! command -v "clang-${LLVM_VERSION}" >/dev/null 2>&1; then
             CODENAME="$(lsb_release -sc)"
@@ -81,9 +79,6 @@ jobs:
           path: third_party/ladybird
           key: ladybird-source-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md', 'tools/ladybird/patches/**') }}
 
-      # Ne jamais restaurer `vcpkg-browser-installed`: ce repertoire contient
-      # l'etat de resolution d'un ancien manifeste, pas seulement des objets de
-      # compilation. On conserve uniquement les caches independants du graphe.
       - name: Restaurer caches vcpkg navigateur
         id: cache-browser-vcpkg
         uses: actions/cache/restore@v4
@@ -124,10 +119,6 @@ jobs:
             ~/.cache/vcpkg
           key: ladybird-browser-vcpkg-v2-${{ runner.os }}-${{ hashFiles('tools/ladybird/browser-vcpkg.sh', 'third_party/UPSTREAM.md') }}
 
-      # Deux niveaux incrementaux :
-      # 1) le build Ninja/CMake, reutilisable tant que le SHA upstream reste le meme ;
-      # 2) ccache, robuste aux worktrees recrees et aux timestamps qui forcent Ninja
-      #    a relancer des commandes de compilation identiques.
       - name: Restaurer build WebContent partiel
         id: restore-browser-build
         uses: actions/cache/restore@v4
@@ -152,9 +143,6 @@ jobs:
       - name: Construire le navigateur Ladybird natif
         run: tools/ladybird/native-browser-final.sh --cible
 
-      # Ces sauvegardes s'executent aussi lorsque Ninja echoue. Ainsi un blocage
-      # a 2719/2720 ne jette plus 90 minutes d'objets compiles. Les cles de save
-      # sont uniques et les prochains runs les retrouvent via restore-keys.
       - name: Sauvegarder build WebContent meme apres echec
         if: always()
         continue-on-error: true
@@ -226,6 +214,15 @@ jobs:
       - name: Fabriquer le disque Ladybird
         run: |
           set -e
+          # Gardes synchronisees avec src/fs/tar.rs. Une croissance future du
+          # runtime doit echouer ici avec sa taille reelle, pas devenir un
+          # mysterieux "fichier introuvable" apres une troncature noyau.
+          MAX_BOOT_FILE=$((512 * 1024 * 1024))
+          MAX_DATA_DISK=$((768 * 1024 * 1024))
+          WEB_SIZE=$(stat -c '%s' native-browser/WebContent)
+          echo "WebContent: $WEB_SIZE octets"
+          test "$WEB_SIZE" -le "$MAX_BOOT_FILE"
+
           mkdir -p scenario/usr/libexec/ladybird scenario/usr/share/ladybird
           cp native-browser/WebContent scenario/usr/libexec/ladybird/WebContent
           cp native-browser/webcontent-bootstrap scenario/usr/libexec/ladybird/webcontent-bootstrap
@@ -246,6 +243,9 @@ jobs:
           exec /usr/libexec/ladybird/webcontent-bootstrap /usr/libexec/ladybird/WebContent
           SCENARIO
           (cd tools/userland && IMAGE="$GITHUB_WORKSPACE/ladybird-browser.img" ./mkdisk.sh "$GITHUB_WORKSPACE/scenario")
+          DISK_SIZE=$(stat -c '%s' ladybird-browser.img)
+          echo "hdb Ladybird: $DISK_SIZE octets"
+          test "$DISK_SIZE" -le "$MAX_DATA_DISK"
 
       - name: Executer WebContent en ring3
         run: |
@@ -262,6 +262,11 @@ jobs:
 
       - name: Verdict WebContent natif
         run: |
+          grep -F "tar: hdb deplie ->" serie-ladybird-browser.log
+          if grep -Fq "[ARCHIVE TRONQUEE]" serie-ladybird-browser.log; then
+            echo "Le disque Ladybird a ete tronque pendant le depliage" >&2
+            exit 1
+          fi
           grep -F "[ladybird-bouchaud] WebContent lance pid=" serie-ladybird-browser.log
           grep -F "[ladybird-bouchaud] WEBCONTENT_READY" serie-ladybird-browser.log
           grep -F "[ladybird-bouchaud] WEBCONTENT_PROCESS_ALIVE" serie-ladybird-browser.log
