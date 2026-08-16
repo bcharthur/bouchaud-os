@@ -1,6 +1,6 @@
 #!/bin/bash
 # Dependances du navigateur Ladybird complet, sans backend GPU.
-# Reutilise le clone vcpkg M6 et son cache de telechargements.
+# Reutilise le clone vcpkg M6 et son cache de telechargements/binaire.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -22,12 +22,8 @@ fi
 # M6 amorce volontairement vcpkg avec un clone shallow (`--depth 1`) pour
 # construire seulement Skia. Le navigateur complet utilise en revanche le
 # mode manifeste/versioning de vcpkg : le registre builtin reference des arbres
-# Git historiques (dbus, libwebp, SDL3, ...). Un depot shallow peut connaitre
-# le commit baseline tout en ne possedant pas ces objets, ce qui produit :
-#   fatal: failed to unpack tree object ...
-# Avant le premier build navigateur, on transforme donc ce clone en depot
-# complet. Cette operation n'arrive qu'une fois : le cache GitHub conserve
-# ensuite le vcpkg non-shallow pour les runs suivants.
+# Git historiques. Un depot shallow peut connaitre le commit baseline tout en
+# ne possedant pas ces objets.
 if [ "$(git -C "$VCPKG" rev-parse --is-shallow-repository)" = "true" ]; then
     say "vcpkg : conversion du clone shallow en historique complet"
     git -C "$VCPKG" fetch -q --unshallow origin
@@ -37,12 +33,8 @@ fi
 
 git -C "$VCPKG" fetch -q origin "$BASELINE"
 git -C "$VCPKG" checkout -q --detach "$BASELINE"
-mkdir -p "$MANIFEST" "$INSTALLED" "$DOWNLOADS"
+mkdir -p "$MANIFEST" "$DOWNLOADS"
 
-# Start from Ladybird's own manifest, including its exact overrides, then remove
-# only the GPU backend that Bouchaud deliberately does not expose at M6-M8.
-# Platform expressions are left untouched: vcpkg will naturally skip Qt/Win/macOS
-# dependencies on this Linux builder.
 ./tools/ladybird/fetch.sh
 python3 - "$ROOT/third_party/ladybird/vcpkg.json" "$MANIFEST/vcpkg.json" <<'PYMANIFEST'
 import json, sys
@@ -50,34 +42,9 @@ src, dst = sys.argv[1:]
 with open(src, encoding="utf-8") as f:
     data = json.load(f)
 
-# Ce que Bouchaud retire du manifeste d'upstream, et pourquoi.
-#
-# `vulkan*` : Bouchaud n'expose aucun GPU. Skia tourne en CPU, la feature
-# `vulkan` de skia est retiree plus bas.
-#
-# `dbus` et `libproxy` : integration de bureau Linux — bus de session pour les
-# notifications et les portails, et decouverte du proxy systeme. Bouchaud n'a
-# ni l'un ni l'autre. Ce ne sont pas des suppositions : dans l'arbre epingle,
-# **aucun CMakeLists ni aucune source de Ladybird ne les reference**. Le seul
-# « dbus » du depot est une regle d'installation qui depose un fichier
-# `.service` dans `share/dbus-1/services`, un artefact d'empaquetage de
-# l'application de bureau, pas une dependance de construction. WebContent ne
-# les lie pas.
-#
-# Ils ne sont pas retires par confort : `dbus` est ce qui fait echouer la
-# construction. Son archive vient de `gitlab.freedesktop.org` — le meme hote
-# qui avait rendu 504 pour freetype en M6 — et cet hote rend desormais 403 aux
-# runners GitHub :
-#
-#     error: curl operation failed with response code 403.
-#     error: Not a transient network error, won't retry download from
-#            https://gitlab.freedesktop.org//dbus/dbus/-/archive/dbus-1.16.2/...
-#     error: building dbus:x64-linux failed with: BUILD_FAILED
-#
-# vcpkg classe 403 comme **non transitoire** et ne reessaie pas : aucune boucle
-# de reprise ne peut rattraper cela. La seule issue correcte est de ne pas
-# demander un paquet dont on n'a pas besoin. `libproxy` part avec, parce qu'il
-# est lui aussi inutilise et qu'il tire `dbus`.
+# Bouchaud n'expose aucun GPU et ne fournit ni bus de session D-Bus ni service
+# de decouverte de proxy du bureau Linux. Ces dependances d'integration desktop
+# ne font pas partie du WebContent natif Bouchaud.
 remove = {
     "vulkan", "vulkan-headers", "vulkan-memory-allocator",
     "dbus", "libproxy",
@@ -92,31 +59,46 @@ for dep in data.get("dependencies", []):
         dep["features"] = [x for x in dep.get("features", []) if x != "vulkan"]
     out.append(dep)
 data["dependencies"] = out
-# Keep builtin-baseline and *all* upstream overrides exactly as pinned.
+
 with open(dst, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
 PYMANIFEST
 
-# Ladybird carries project-specific vcpkg ports that are not present in the
-# builtin registry (notably pdfjs and wuffs, and pinned variants such as
-# simdutf/angle).  The manifest alone is therefore insufficient: use the exact
-# overlay directory from the same pinned Ladybird source tree.
 [ -d "$OVERLAY_PORTS/pdfjs" ] || { echo "overlay Ladybird pdfjs absent: $OVERLAY_PORTS" >&2; exit 1; }
 [ -d "$OVERLAY_PORTS/wuffs" ] || { echo "overlay Ladybird wuffs absent: $OVERLAY_PORTS" >&2; exit 1; }
+
+# IMPORTANT : l'install root n'est PAS un cache de compilation. Il contient
+# l'etat de resolution du manifeste. Le restaurer depuis une ancienne tentative
+# peut conserver des dependances qui ont depuis ete retirees du manifeste.
+# C'est exactement ce qui a maintenu `dbus[systemd]` vivant apres sa suppression
+# du manifeste Bouchaud.
+#
+# On reconstruit donc cet arbre a chaque run. Le travail couteux n'est pas perdu :
+# vcpkg restaure les paquets deja construits depuis son binary cache
+# (~/.cache/vcpkg/archives) et reutilise les sources dans $DOWNLOADS.
+say "vcpkg : reconstruction propre de l'install root navigateur"
+rm -rf "$INSTALLED"
+mkdir -p "$INSTALLED"
+
+# Garde-fou contre une regression du transformateur de manifeste lui-meme.
+python3 - "$MANIFEST/vcpkg.json" <<'PYCHECK'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+names = {d if isinstance(d, str) else d.get("name") for d in data.get("dependencies", [])}
+for forbidden in ("dbus", "libproxy", "vulkan", "vulkan-headers", "vulkan-memory-allocator"):
+    if forbidden in names:
+        raise SystemExit(f"dependance interdite encore presente dans le manifeste: {forbidden}")
+print("  manifeste Bouchaud propre : dbus/libproxy/vulkan absents")
+PYCHECK
 
 say "== vcpkg navigateur Ladybird =="
 printf '  overlay ports : %s\n' "$OVERLAY_PORTS"
 export VCPKG_DOWNLOADS="$DOWNLOADS"
 
-# Reprise, comme pour Skia en M6. vcpkg est reprenable : un paquet deja
-# construit est reconnu et saute, une archive deja obtenue reste dans
-# `$VCPKG_DOWNLOADS`. Un second essai repart donc d'ou le premier s'est arrete.
-#
-# A ne pas confondre avec le cas `dbus` : une erreur que vcpkg declare **non
-# transitoire** (403, empreinte invalide) se reproduira a l'identique, et la
-# boucle ne fait alors que la constater trois fois plus vite. Elle est la pour
-# les 504 et les coupures — on en a deja vu un sur ce meme hote.
+# Reprise pour les pannes reseau transitoires. Comme l'install root est propre,
+# une seconde tentative ne peut pas ressusciter le graphe d'un ancien manifeste.
 ATTENTE=15
 TENTATIVE=1
 MAX=3
@@ -133,7 +115,7 @@ while :; do
     find "$DOWNLOADS" -maxdepth 1 -name '*.part' -delete 2>/dev/null || true
     if [ "$TENTATIVE" -ge "$MAX" ]; then
         echo "vcpkg a echoue $MAX fois — ce n'est plus une panne passagere" >&2
-        echo "  les archives obtenues restent dans $DOWNLOADS" >&2
+        echo "  binary cache et archives restent disponibles pour le prochain run" >&2
         exit 1
     fi
     say "  tentative $TENTATIVE/$MAX echouee ; reprise dans ${ATTENTE}s"
