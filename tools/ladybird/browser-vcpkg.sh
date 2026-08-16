@@ -19,7 +19,23 @@ if [ ! -x "$VCPKG/vcpkg" ]; then
     ./tools/ladybird/build-vcpkg-gfx.sh
 fi
 
-git -C "$VCPKG" fetch -q origin "$BASELINE" || true
+# M6 amorce volontairement vcpkg avec un clone shallow (`--depth 1`) pour
+# construire seulement Skia. Le navigateur complet utilise en revanche le
+# mode manifeste/versioning de vcpkg : le registre builtin reference des arbres
+# Git historiques (dbus, libwebp, SDL3, ...). Un depot shallow peut connaitre
+# le commit baseline tout en ne possedant pas ces objets, ce qui produit :
+#   fatal: failed to unpack tree object ...
+# Avant le premier build navigateur, on transforme donc ce clone en depot
+# complet. Cette operation n'arrive qu'une fois : le cache GitHub conserve
+# ensuite le vcpkg non-shallow pour les runs suivants.
+if [ "$(git -C "$VCPKG" rev-parse --is-shallow-repository)" = "true" ]; then
+    say "vcpkg : conversion du clone shallow en historique complet"
+    git -C "$VCPKG" fetch -q --unshallow origin
+else
+    git -C "$VCPKG" fetch -q origin
+fi
+
+git -C "$VCPKG" fetch -q origin "$BASELINE"
 git -C "$VCPKG" checkout -q --detach "$BASELINE"
 mkdir -p "$MANIFEST" "$INSTALLED" "$DOWNLOADS"
 
