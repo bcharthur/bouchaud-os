@@ -35,22 +35,38 @@ export PKG_CONFIG_PATH="$VCPKG/lib/pkgconfig:$VCPKG/share/pkgconfig${PKG_CONFIG_
 export CMAKE_PREFIX_PATH="$VCPKG${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
 export CARGO_NET_GIT_FETCH_WITH_CLI=true
 
-# Ladybird upstream utilise du C++ moderne que le GCC 13 de l'image Ubuntu ne
-# parse pas correctement (notamment les explicit object parameters / "deducing
-# this" utilises par AK::Optional). Le run #27 utilisait implicitement g++ : les
-# diagnostics venaient de cc1plus et les options -Wno-* propres a Clang etaient
-# rejetees. Le workflow installe deja Clang/LLD ; on les rend donc explicites au
-# lieu de laisser CMake choisir le compilateur par defaut.
-CLANG=$(command -v clang || true)
-CLANGXX=$(command -v clang++ || true)
-LLVM_AR=$(command -v llvm-ar || command -v ar)
-LLVM_RANLIB=$(command -v llvm-ranlib || command -v ranlib)
-[ -n "$CLANG" ] && [ -n "$CLANGXX" ] || {
-    echo "Clang/clang++ absents alors que Ladybird les requiert pour ce build" >&2
+# Ladybird upstream utilise LLVM 20 dans son environnement Ubuntu. Clang 18
+# parse le C++ moderne d'AK mais segfault dans LibWasm/BytecodeInterpreter.cpp
+# pendant la génération LLVM IR (run #36, exit 139). Ne plus prendre le `clang`
+# non versionné du runner : forcer exactement la génération LLVM supportée par
+# le snapshot Ladybird épinglé.
+LLVM_VERSION="${BO_LLVM_VERSION:-20}"
+CLANG=$(command -v "clang-${LLVM_VERSION}" || true)
+CLANGXX=$(command -v "clang++-${LLVM_VERSION}" || true)
+LLVM_AR=$(command -v "llvm-ar-${LLVM_VERSION}" || true)
+LLVM_RANLIB=$(command -v "llvm-ranlib-${LLVM_VERSION}" || true)
+LLD=$(command -v "ld.lld-${LLVM_VERSION}" || true)
+
+for tool in "$CLANG" "$CLANGXX" "$LLVM_AR" "$LLVM_RANLIB" "$LLD"; do
+    [ -n "$tool" ] || {
+        echo "Toolchain LLVM ${LLVM_VERSION} incomplete ; le workflow doit installer clang/lld/llvm-${LLVM_VERSION}" >&2
+        exit 1
+    }
+done
+
+# `-fuse-ld=lld` cherche aussi son linker dans PATH. Mettre le bindir réel de
+# clang-20 devant /usr/bin évite qu'un ld.lld 18 non versionné soit repris.
+LLVM_BINDIR=$(dirname "$(readlink -f "$CLANGXX")")
+export PATH="$LLVM_BINDIR:$PATH"
+
+CLANG_MAJOR=$("$CLANGXX" -dumpversion | cut -d. -f1)
+if [ "$CLANG_MAJOR" -lt "$LLVM_VERSION" ]; then
+    echo "Clang trop ancien : $($CLANGXX --version | head -n1), LLVM ${LLVM_VERSION}+ requis" >&2
     exit 1
-}
+fi
 
 say "Compilateur Ladybird : $($CLANGXX --version | head -n1)"
+say "Linker Ladybird      : $($LLD --version | head -n1)"
 # Preflight volontairement minuscule : il teste exactement la famille de syntaxe
 # qui a casse AK::Optional au run #27. Si l'image runner fournit un Clang trop
 # ancien, on echoue ici en quelques secondes plutot qu'apres la generation Ninja.
@@ -124,6 +140,19 @@ fi
     exit 1
 }
 
+# Certains outils générateurs de Lagom/Ladybird lient mimalloc par son nom
+# (`-lmimalloc`) au lieu d'une archive absolue. CMAKE_PREFIX_PATH permet bien de
+# trouver le package, mais n'ajoute pas à lui seul le répertoire à la recherche
+# link-time de `ld.lld`. Le run #36 échouait ainsi sur
+# `generate_interpreter_layout` malgré mimalloc installé par vcpkg.
+MIMALLOC_ARCHIVE="$VCPKG/lib/libmimalloc.a"
+[ -f "$MIMALLOC_ARCHIVE" ] || {
+    echo "archive mimalloc absente: $MIMALLOC_ARCHIVE" >&2
+    find "$VCPKG/lib" -maxdepth 1 -iname '*mimalloc*' -print >&2 || true
+    exit 1
+}
+export LIBRARY_PATH="$VCPKG/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+
 say "== configure Ladybird services-only / Bouchaud =="
 printf '  vcpkg install root : %s\n' "$VCPKG_INSTALLED_ROOT"
 printf '  vcpkg triplet      : %s\n' "$VCPKG_TRIPLET"
@@ -136,7 +165,9 @@ cmake -S "$SRC" -B "$BUILD" -G Ninja \
     -DCMAKE_CXX_COMPILER="$CLANGXX" \
     -DCMAKE_AR="$LLVM_AR" \
     -DCMAKE_RANLIB="$LLVM_RANLIB" \
+    -DCMAKE_LINKER="$LLD" \
     -DCMAKE_PREFIX_PATH="$VCPKG" \
+    -DCMAKE_LIBRARY_PATH="$VCPKG/lib" \
     -DVCPKG_INSTALLED_DIR="$VCPKG_INSTALLED_ROOT" \
     -D_VCPKG_INSTALLED_DIR="$VCPKG_INSTALLED_ROOT" \
     -DVCPKG_TARGET_TRIPLET="$VCPKG_TRIPLET" \
@@ -152,7 +183,7 @@ cmake -S "$SRC" -B "$BUILD" -G Ninja \
     -DENABLE_INSTALL_FREEDESKTOP_FILES=OFF \
     -DLADYBIRD_ENABLE_CPPTRACE=OFF \
     -DLAGOM_USE_LINKER=lld \
-    -DCMAKE_EXE_LINKER_FLAGS="-static-pie -Wl,--allow-multiple-definition"
+    -DCMAKE_EXE_LINKER_FLAGS="-L$VCPKG/lib -static-pie -Wl,--allow-multiple-definition"
 
 say "== build WebContent + services =="
 # Pendant le portage on veut decouvrir en un seul run toutes les incompatibilites

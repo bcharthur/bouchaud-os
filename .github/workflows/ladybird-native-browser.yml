@@ -31,7 +31,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config python3 python3-dev python3-venv perl \
-            clang lld cmake ninja-build git curl zip unzip tar xz-utils file \
+            clang lld cmake ninja-build git curl wget gnupg lsb-release zip unzip tar xz-utils file \
             autoconf autoconf-archive automake libtool libltdl-dev gettext m4 \
             nasm bison flex \
             libssl-dev libedit-dev linux-libc-dev mesa-common-dev ca-certificates
@@ -40,6 +40,28 @@ jobs:
           dpkg-query -W -f='${Status}\n' libltdl-dev | grep -q 'install ok installed'
           dpkg-query -W -f='${Status}\n' linux-libc-dev | grep -q 'install ok installed'
           dpkg-query -W -f='${Status}\n' mesa-common-dev | grep -q 'install ok installed'
+
+          # Ladybird épinglé utilise LLVM 20 dans son environnement Ubuntu.
+          # Ubuntu 24.04 fournit encore Clang 18 par défaut ; ce compilateur
+          # segfault dans LibWasm/BytecodeInterpreter.cpp pendant la génération
+          # LLVM IR. Installer la toolchain supportée par upstream via apt.llvm.org.
+          LLVM_VERSION=20
+          if ! command -v "clang-${LLVM_VERSION}" >/dev/null 2>&1; then
+            CODENAME="$(lsb_release -sc)"
+            wget -qO /tmp/llvm-snapshot.gpg.key https://apt.llvm.org/llvm-snapshot.gpg.key
+            sudo gpg --dearmor --yes -o /usr/share/keyrings/llvm-snapshot.gpg.gpg /tmp/llvm-snapshot.gpg.key
+            echo "deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg.gpg] https://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-${LLVM_VERSION} main" \
+              | sudo tee /etc/apt/sources.list.d/llvm-${LLVM_VERSION}.list
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends \
+              "clang-${LLVM_VERSION}" "lld-${LLVM_VERSION}" "llvm-${LLVM_VERSION}"
+          fi
+
+          clang-20 --version
+          clang++-20 --version
+          ld.lld-20 --version
+          llvm-ar-20 --version
+          llvm-ranlib-20 --version
 
       - name: Cache cargo Ladybird
         uses: actions/cache@v4
