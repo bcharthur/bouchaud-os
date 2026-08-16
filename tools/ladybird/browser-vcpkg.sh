@@ -9,6 +9,7 @@ VCPKG="$ROOT/third_party/vcpkg-gfx"
 MANIFEST="$ROOT/third_party/vcpkg-browser-manifest"
 INSTALLED="$ROOT/third_party/vcpkg-browser-installed"
 DOWNLOADS="$ROOT/third_party/vcpkg-downloads"
+OVERLAY_PORTS="$ROOT/third_party/ladybird/Meta/CMake/vcpkg/overlay-ports"
 
 say(){ printf '\033[1;36m%s\033[0m\n' "$*"; }
 ok(){ printf '\033[32m%s\033[0m\n' "$*"; }
@@ -50,11 +51,20 @@ with open(dst, "w", encoding="utf-8") as f:
     f.write("\n")
 PYMANIFEST
 
+# Ladybird carries project-specific vcpkg ports that are not present in the
+# builtin registry (notably pdfjs and wuffs, and pinned variants such as
+# simdutf/angle).  The manifest alone is therefore insufficient: use the exact
+# overlay directory from the same pinned Ladybird source tree.
+[ -d "$OVERLAY_PORTS/pdfjs" ] || { echo "overlay Ladybird pdfjs absent: $OVERLAY_PORTS" >&2; exit 1; }
+[ -d "$OVERLAY_PORTS/wuffs" ] || { echo "overlay Ladybird wuffs absent: $OVERLAY_PORTS" >&2; exit 1; }
+
 say "== vcpkg navigateur Ladybird =="
+printf '  overlay ports : %s\n' "$OVERLAY_PORTS"
 export VCPKG_DOWNLOADS="$DOWNLOADS"
 "$VCPKG/vcpkg" install \
     --x-manifest-root="$MANIFEST" \
     --x-install-root="$INSTALLED" \
+    --overlay-ports="$OVERLAY_PORTS" \
     --triplet x64-linux \
     --clean-after-build
 
