@@ -83,9 +83,6 @@ replace_once(
 main = root / "Services/WebContent/main.cpp"
 data = main.read_text()
 if "BOUCHAUD_WEBCONTENT_FD" not in data:
-    # In this pinned Ladybird snapshot LocalSocket lives in LibCore/Socket.h;
-    # there is no standalone LibCore/LocalSocket.h. The run #43 reached
-    # 2719/2720 and failed only on that stale include name.
     data = data.replace(
         "#include <LibCore/LocalServer.h>\n",
         "#include <LibCore/LocalServer.h>\n#include <LibCore/Socket.h>\n",
