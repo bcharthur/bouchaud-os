@@ -10,6 +10,17 @@ MANIFEST="$ROOT/third_party/vcpkg-browser-manifest"
 INSTALLED="$ROOT/third_party/vcpkg-browser-installed"
 DOWNLOADS="$ROOT/third_party/vcpkg-downloads"
 OVERLAY_PORTS="$ROOT/third_party/ladybird/Meta/CMake/vcpkg/overlay-ports"
+LOCAL_OVERLAY_PORTS="$MANIFEST/overlay-ports"
+
+# Ladybird epingle fontconfig 2.17.1#1. Son port vcpkg telecharge normalement
+# une archive generee par gitlab.freedesktop.org. Cet endpoint a deja bloque
+# plusieurs executions GitHub Actions (504), alors que le depot Git lui-meme est
+# miroir sur GitHub. On conserve EXACTEMENT le port vcpkg #1 et ses patches,
+# mais on remplace seulement son transport de source par un commit immuable du
+# miroir. Le tag 2.17.1 du miroir pointe sur ce commit.
+FONTCONFIG_PORT_TREE=91f5aca0263a76ef0580e8250dcb01c0132f499e
+FONTCONFIG_GIT_COMMIT=6d0a98982ec351c165c9224c8b7dbdfca3010e47
+FONTCONFIG_FETCH_REF=2.17.1
 
 say(){ printf '\033[1;36m%s\033[0m\n' "$*"; }
 ok(){ printf '\033[32m%s\033[0m\n' "$*"; }
@@ -68,6 +79,39 @@ PYMANIFEST
 [ -d "$OVERLAY_PORTS/pdfjs" ] || { echo "overlay Ladybird pdfjs absent: $OVERLAY_PORTS" >&2; exit 1; }
 [ -d "$OVERLAY_PORTS/wuffs" ] || { echo "overlay Ladybird wuffs absent: $OVERLAY_PORTS" >&2; exit 1; }
 
+# --- fontconfig : meme port, source Git robuste ------------------------------
+#
+# Le run #19 a demontre que le port compile ; son unique panne est le 504 de
+# l'archive GitLab. Le baseline vcpkg possede encore l'arbre exact du port #1.
+# On l'extrait comme overlay local, puis on ne remplace que vcpkg_from_gitlab
+# par vcpkg_from_git vers le miroir GitHub epingle. Les patches, options Meson,
+# dependances et numero de port restent donc ceux demandes par Ladybird.
+FONTCONFIG_OVERLAY="$LOCAL_OVERLAY_PORTS/fontconfig"
+rm -rf "$FONTCONFIG_OVERLAY"
+mkdir -p "$FONTCONFIG_OVERLAY"
+git -C "$VCPKG" archive "$FONTCONFIG_PORT_TREE" | tar -x -C "$FONTCONFIG_OVERLAY"
+
+python3 - "$FONTCONFIG_OVERLAY/portfile.cmake" "$FONTCONFIG_GIT_COMMIT" "$FONTCONFIG_FETCH_REF" <<'PYFONTCONFIG'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+commit = sys.argv[2]
+fetch_ref = sys.argv[3]
+text = path.read_text(encoding="utf-8")
+start = text.find("vcpkg_from_gitlab(")
+patches = text.find("    PATCHES", start)
+if start < 0 or patches < 0:
+    raise SystemExit("port fontconfig inattendu : bloc vcpkg_from_gitlab introuvable")
+replacement = f'''vcpkg_from_git(\n    OUT_SOURCE_PATH SOURCE_PATH\n    URL https://github.com/arthenica/fontconfig.git\n    REF {commit}\n    FETCH_REF {fetch_ref}\n'''
+text = text[:start] + replacement + text[patches:]
+path.write_text(text, encoding="utf-8")
+PYFONTCONFIG
+
+grep -Fq "REF $FONTCONFIG_GIT_COMMIT" "$FONTCONFIG_OVERLAY/portfile.cmake"
+grep -Fq '"port-version": 1' "$FONTCONFIG_OVERLAY/vcpkg.json"
+say "fontconfig : port 2.17.1#1 conserve, source miroir GitHub epinglee"
+
 # IMPORTANT : l'install root n'est PAS un cache de compilation. Il contient
 # l'etat de resolution du manifeste. Le restaurer depuis une ancienne tentative
 # peut conserver des dependances qui ont depuis ete retirees du manifeste.
@@ -94,11 +138,18 @@ print("  manifeste Bouchaud propre : dbus/libproxy/vulkan absents")
 PYCHECK
 
 say "== vcpkg navigateur Ladybird =="
-printf '  overlay ports : %s\n' "$OVERLAY_PORTS"
+printf '  overlay ports Ladybird : %s\n' "$OVERLAY_PORTS"
+printf '  overlay ports Bouchaud  : %s\n' "$LOCAL_OVERLAY_PORTS"
 export VCPKG_DOWNLOADS="$DOWNLOADS"
 
 # Reprise pour les pannes reseau transitoires. Comme l'install root est propre,
 # une seconde tentative ne peut pas ressusciter le graphe d'un ancien manifeste.
+#
+# Ne PAS utiliser --clean-after-build ici : cette option supprime aussi les
+# archives de $VCPKG_DOWNLOADS apres chaque paquet. Cela annulait exactement le
+# cache de sources que ce script et le workflow cherchent a conserver. On garde
+# le nettoyage des buildtrees et packages temporaires pour contenir l'espace
+# disque, mais les telechargements verifies restent disponibles au run suivant.
 ATTENTE=15
 TENTATIVE=1
 MAX=3
@@ -106,9 +157,11 @@ while :; do
     if "$VCPKG/vcpkg" install \
         --x-manifest-root="$MANIFEST" \
         --x-install-root="$INSTALLED" \
+        --overlay-ports="$LOCAL_OVERLAY_PORTS" \
         --overlay-ports="$OVERLAY_PORTS" \
         --triplet x64-linux \
-        --clean-after-build
+        --clean-buildtrees-after-build \
+        --clean-packages-after-build
     then
         break
     fi
