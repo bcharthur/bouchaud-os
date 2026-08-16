@@ -8,7 +8,9 @@ ROOT=$(pwd)
 LB="$ROOT/third_party/ladybird"
 SRC="$ROOT/third_party/ladybird-browser-src"
 BUILD="$ROOT/third_party/build-ladybird-browser-bouchaud"
-VCPKG="$ROOT/third_party/vcpkg-browser-installed/x64-linux"
+VCPKG_INSTALLED_ROOT="$ROOT/third_party/vcpkg-browser-installed"
+VCPKG_TRIPLET="x64-linux"
+VCPKG="$VCPKG_INSTALLED_ROOT/$VCPKG_TRIPLET"
 
 say(){ printf '\033[1;36m%s\033[0m\n' "$*"; }
 ok(){ printf '\033[32m%s\033[0m\n' "$*"; }
@@ -33,10 +35,34 @@ export PKG_CONFIG_PATH="$VCPKG/lib/pkgconfig:$VCPKG/share/pkgconfig${PKG_CONFIG_
 export CMAKE_PREFIX_PATH="$VCPKG${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
 export CARGO_NET_GIT_FETCH_WITH_CLI=true
 
+# Plusieurs configs CMake produites par vcpkg (notamment harfbuzzConfig.cmake)
+# ne sont pas totalement relocatables : elles reconstruisent leurs chemins avec
+# VCPKG_INSTALLED_DIR/_VCPKG_INSTALLED_DIR + VCPKG_TARGET_TRIPLET. Comme nous
+# consommons les archives vcpkg depuis un CMake Ladybird externe au toolchain
+# vcpkg, ces variables seraient sinon vides et HarfBuzz annoncerait par exemple
+# `//include/harfbuzz`.
+#
+# On fournit donc explicitement le contexte de l'install root sans activer le
+# toolchain vcpkg ni son mode manifeste : la resolution/reconstruction des 78
+# dependances reste entierement sous le controle de browser-vcpkg.sh.
+[ -d "$VCPKG/include/harfbuzz" ] || {
+    echo "headers HarfBuzz absents: $VCPKG/include/harfbuzz" >&2
+    exit 1
+}
+[ -f "$VCPKG/lib/libharfbuzz.a" ] || {
+    echo "archive HarfBuzz absente: $VCPKG/lib/libharfbuzz.a" >&2
+    exit 1
+}
+
 say "== configure Ladybird services-only / Bouchaud =="
+printf '  vcpkg install root : %s\n' "$VCPKG_INSTALLED_ROOT"
+printf '  vcpkg triplet      : %s\n' "$VCPKG_TRIPLET"
 cmake -S "$SRC" -B "$BUILD" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_PREFIX_PATH="$VCPKG" \
+    -DVCPKG_INSTALLED_DIR="$VCPKG_INSTALLED_ROOT" \
+    -D_VCPKG_INSTALLED_DIR="$VCPKG_INSTALLED_ROOT" \
+    -DVCPKG_TARGET_TRIPLET="$VCPKG_TRIPLET" \
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     -DBUILD_SHARED_LIBS=OFF \
     -DBUILD_TESTING=OFF \
