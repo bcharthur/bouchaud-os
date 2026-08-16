@@ -78,7 +78,7 @@ QMAKE_CXXFLAGS += -fPIE
 # L'ordre compte : libpython vient avant les bibliotheques qu'elle reclame.
 # OpenSSL est la pour le module \`ssl\` — c'est lui qui donne HTTPS au
 # navigateur. brotli et bz2 sont les dependances statiques de freetype.
-# Les greffons d'image sont des archives statiques : `Q_IMPORT_PLUGIN` les
+# Les greffons d'image sont des archives statiques : Q_IMPORT_PLUGIN les
 # declare, encore faut-il les fournir a l'editeur de liens.
 GREFFONS = $QT/plugins/imageformats
 # L'ordre des bibliotheques FFmpeg compte : avformat appelle avcodec, qui
