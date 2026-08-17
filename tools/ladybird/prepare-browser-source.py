@@ -342,8 +342,18 @@ static bool bouchaud_m8_present(Gfx::ShareableBitmap const& screenshot)
         return false;
     }
 
+    u8 hello[8] {};
+    auto hello_put32 = [](u8* out, u32 value) {
+        out[0] = static_cast<u8>(value);
+        out[1] = static_cast<u8>(value >> 8);
+        out[2] = static_cast<u8>(value >> 16);
+        out[3] = static_cast<u8>(value >> 24);
+    };
+    hello_put32(hello + 0, 1); // protocol version
+    hello_put32(hello + 4, static_cast<u32>(getpid()));
+
     static constexpr char title[] = "Ladybird M8 - HTML local";
-    if (!bouchaud_gui_message(gui_fd, 1, 1, nullptr, 0)
+    if (!bouchaud_gui_message(gui_fd, 1, 1, hello, sizeof(hello))
         || !bouchaud_gui_message(gui_fd, 3, 2, title, sizeof(title) - 1)) {
         warnln("[ladybird-bouchaud] M8_GUI_HANDSHAKE_FAILED errno={}", errno);
         munmap(mapped, surface_bytes);
