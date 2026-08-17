@@ -121,7 +121,12 @@ fn read_u16(data: &[u8], offset: usize) -> u16 {
 }
 
 fn read_u32(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
+    u32::from_le_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ])
 }
 
 fn read_u64(data: &[u8], offset: usize) -> u64 {
@@ -178,7 +183,131 @@ pub fn parse(data: &[u8]) -> Result<ElfHeader, &'static str> {
         });
     }
 
-    Ok(ElfHeader { kind, entry, phoff, phentsize, phnum, headers })
+    Ok(ElfHeader {
+        kind,
+        entry,
+        phoff,
+        phentsize,
+        phnum,
+        headers,
+    })
+}
+
+/// Analyse un ELF sans charger son fichier complet.
+pub fn parse_node(node: usize) -> Result<ElfHeader, &'static str> {
+    let mut ehdr = [0u8; 64];
+    if crate::fs::backing::read_at(node, 0, &mut ehdr) != ehdr.len() {
+        return Err("fichier trop court pour un ELF64");
+    }
+    if ehdr[0..4] != ELF_MAGIC {
+        return Err("signature ELF absente");
+    }
+
+    let phoff = read_u64(&ehdr, 32) as usize;
+    let phentsize = read_u16(&ehdr, 54) as usize;
+    let phnum = read_u16(&ehdr, 56) as usize;
+    if phentsize < 56 {
+        return Err("taille d'en-tete de programme invalide");
+    }
+
+    let need = phoff
+        .checked_add(phentsize.checked_mul(phnum).ok_or("Phdr overflow")?)
+        .ok_or("Phdr overflow")?;
+    if need > crate::fs::backing::logical_len(node) {
+        return Err("en-tetes de programme hors du fichier");
+    }
+
+    let mut metadata = alloc::vec![0u8; need.max(64)];
+    if crate::fs::backing::read_at(node, 0, &mut metadata) != metadata.len() {
+        return Err("lecture metadata ELF incomplete");
+    }
+    parse(&metadata)
+}
+
+/// Transforme les PT_LOAD en promesses file-backed. Aucune frame n'est allouee.
+pub fn load_node_lazy(
+    node: usize,
+    base_hint: u64,
+    promises: &mut Vec<crate::kernel::task::Promesse>,
+) -> Result<LoadedImage, &'static str> {
+    let header = parse_node(node)?;
+    let base = if header.kind == ET_DYN { base_hint } else { 0 };
+    let total = crate::fs::backing::logical_len(node) as u64;
+
+    for ph in header.headers.iter().filter(|p| p.kind == PT_LOAD) {
+        let start = base + ph.vaddr;
+        let end = start.checked_add(ph.memsz).ok_or("segment overflow")?;
+        if !vmm::is_user_addr(start) || !vmm::is_user_addr(end) {
+            return Err("segment hors du creneau utilisateur (relier en PIE ou avec -Ttext-segment=0x400000000000)");
+        }
+        if ph.filesz > ph.memsz || ph.offset.saturating_add(ph.filesz) > total {
+            return Err("segment PT_LOAD hors du fichier");
+        }
+    }
+
+    let mut interp = None;
+    let mut tls = None;
+    let mut image_end = 0u64;
+    let mut phdr_addr = 0u64;
+
+    for ph in header.headers.iter() {
+        match ph.kind {
+            PT_INTERP => {
+                let mut raw = alloc::vec![0u8; ph.filesz as usize];
+                if crate::fs::backing::read_at(node, ph.offset as usize, &mut raw) != raw.len() {
+                    return Err("PT_INTERP hors du fichier");
+                }
+                let text = raw.split(|&b| b == 0).next().unwrap_or(&raw);
+                interp = Some(String::from_utf8_lossy(text).into_owned());
+            }
+            PT_TLS => {
+                tls = Some((base + ph.vaddr, ph.filesz, ph.memsz, ph.align.max(1)));
+            }
+            PT_PHDR => {
+                phdr_addr = base + ph.vaddr;
+            }
+            PT_LOAD => {
+                if ph.memsz == 0 {
+                    continue;
+                }
+                let vaddr = base + ph.vaddr;
+                let page_start = vaddr & !(PAGE_SIZE - 1);
+                let page_end = (vaddr + ph.memsz + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+                crate::kernel::vma::overlay(promises, crate::kernel::task::Promesse {
+                    debut: page_start,
+                    fin: page_end,
+                    drapeaux: page_flags(ph.flags),
+                    backing: crate::kernel::task::PromesseBacking::File {
+                        node,
+                        mapping_start: vaddr,
+                        file_offset: ph.offset,
+                        file_size: ph.filesz,
+                    },
+                });
+                image_end = image_end.max(page_end);
+            }
+            PT_DYNAMIC | PT_GNU_STACK => {}
+            _ => {}
+        }
+    }
+
+    if image_end == 0 {
+        return Err("aucun segment PT_LOAD chargeable");
+    }
+    if phdr_addr == 0 {
+        phdr_addr = base + header.phoff;
+    }
+
+    Ok(LoadedImage {
+        base,
+        entry: base + header.entry,
+        phdr_addr,
+        phentsize: header.phentsize as u64,
+        phnum: header.phnum as u64,
+        end: image_end,
+        interp,
+        tls,
+    })
 }
 
 /// Traduit les droits `PF_*` d'un segment en drapeaux de table de pages.
@@ -197,7 +326,11 @@ fn page_flags(flags: u32) -> u64 {
 ///
 /// `base_hint` sert de base de chargement pour un binaire PIE ; il est ignore
 /// pour un `ET_EXEC`, qui impose ses adresses.
-pub fn load(space: &mut AddressSpace, data: &[u8], base_hint: u64) -> Result<LoadedImage, &'static str> {
+pub fn load(
+    space: &mut AddressSpace,
+    data: &[u8],
+    base_hint: u64,
+) -> Result<LoadedImage, &'static str> {
     let header = parse(data)?;
     let base = if header.kind == ET_DYN { base_hint } else { 0 };
 
@@ -402,7 +535,7 @@ pub fn build_stack(space: &mut AddressSpace, layout: &StackLayout) -> Result<u64
     let words = 1                       // argc
         + argv_ptrs.len() + 1           // argv + NULL
         + envp_ptrs.len() + 1           // envp + NULL
-        + auxv.len() * 2;               // auxv
+        + auxv.len() * 2; // auxv
     let mut rsp = cursor - (words as u64) * 8;
     rsp &= !0xF;
 
@@ -434,13 +567,20 @@ pub fn describe(data: &[u8]) {
     match parse(data) {
         Err(message) => crate::println!("elfinfo: {}", message),
         Ok(header) => {
-            crate::println!("ELF64 x86-64, type {}", match header.kind {
-                ET_EXEC => "ET_EXEC (adresses fixes)",
-                ET_DYN => "ET_DYN (PIE / bibliotheque)",
-                _ => "?",
-            });
+            crate::println!(
+                "ELF64 x86-64, type {}",
+                match header.kind {
+                    ET_EXEC => "ET_EXEC (adresses fixes)",
+                    ET_DYN => "ET_DYN (PIE / bibliotheque)",
+                    _ => "?",
+                }
+            );
             crate::println!("  point d'entree : {:#x}", header.entry);
-            crate::println!("  {} en-tetes de programme ({} octets chacun)", header.phnum, header.phentsize);
+            crate::println!(
+                "  {} en-tetes de programme ({} octets chacun)",
+                header.phnum,
+                header.phentsize
+            );
             for ph in header.headers.iter() {
                 let kind = match ph.kind {
                     PT_LOAD => "LOAD",
@@ -456,7 +596,13 @@ pub fn describe(data: &[u8]) {
                 let x = if ph.flags & PF_X != 0 { 'x' } else { '-' };
                 crate::println!(
                     "  {:<9} {}{}{} vaddr={:#x} filesz={} memsz={}",
-                    kind, r, w, x, ph.vaddr, ph.filesz, ph.memsz
+                    kind,
+                    r,
+                    w,
+                    x,
+                    ph.vaddr,
+                    ph.filesz,
+                    ph.memsz
                 );
             }
             let interp = header.headers.iter().find(|p| p.kind == PT_INTERP);

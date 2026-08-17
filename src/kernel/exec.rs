@@ -34,13 +34,16 @@ pub fn default_environment() -> Vec<String> {
         "LD_LIBRARY_PATH=/lib:/usr/lib".to_string(),
         "TMPDIR=/tmp".to_string(),
         "XDG_RUNTIME_DIR=/var/run".to_string(),
-
         // --- Qt -----------------------------------------------------------
         // linuxfb : le seul backend possible ici (ni X11, ni Wayland, ni DRM).
         // On lui impose la geometrie pour lui epargner une autodetection, et on
         // le laisse prendre la main sur le terminal.
         "QT_QPA_PLATFORM=linuxfb".to_string(),
-        alloc::format!("QT_QPA_PLATFORM_PLUGIN_ARGS=fb=/dev/fb0:size={}x{}", width, height),
+        alloc::format!(
+            "QT_QPA_PLATFORM_PLUGIN_ARGS=fb=/dev/fb0:size={}x{}",
+            width,
+            height
+        ),
         "QT_QPA_FB_DRM=0".to_string(),
         "QT_QPA_FB_TTY=/dev/tty0".to_string(),
         "QT_QPA_FB_HIDECURSOR=0".to_string(),
@@ -51,11 +54,9 @@ pub fn default_environment() -> Vec<String> {
         "QT_NO_FONTCONFIG=1".to_string(),
         "QT_LOGGING_RULES=qt.qpa.*=false".to_string(),
         "DBUS_SESSION_BUS_ADDRESS=disabled:".to_string(),
-
         // --- SDL ----------------------------------------------------------
         "SDL_VIDEODRIVER=fbcon".to_string(),
         "SDL_FBDEV=/dev/fb0".to_string(),
-
         // --- Python -------------------------------------------------------
         "PYTHONHOME=/usr".to_string(),
         "PYTHONDONTWRITEBYTECODE=1".to_string(),
@@ -82,16 +83,20 @@ pub fn shell_environment() -> Vec<String> {
     env
 }
 
-/// Lit un fichier du RAMFS.
-fn read_file(path: &str, cwd: usize) -> Result<Vec<u8>, String> {
+/// Resout un executable sans recopier son contenu.
+fn resolve_file_node(path: &str, cwd: usize) -> Result<usize, String> {
     let fs = crate::fs::ramfs::fs();
     match fs.resolve(path, cwd) {
-        Some(node) if fs.nodes[node].kind == crate::fs::ramfs::NodeKind::File => {
-            Ok(fs.nodes[node].content.clone())
-        }
+        Some(node) if fs.nodes[node].kind == crate::fs::ramfs::NodeKind::File => Ok(node),
         Some(_) => Err(alloc::format!("{} : est un repertoire", path)),
         None => Err(alloc::format!("{} : fichier introuvable", path)),
     }
+}
+
+#[derive(Clone, Copy)]
+enum ImageSource<'a> {
+    Node(usize),
+    Memory(&'a [u8]),
 }
 
 /// Charge et execute un programme ELF, et attend sa fin.
@@ -101,8 +106,8 @@ pub fn exec(path: &str, argv: &[String], envp: &[String], cwd: usize) -> Result<
     if !crate::arch::x86_64::usermode::ready() {
         return Err("user-mode non initialise (ring 3 indisponible)".to_string());
     }
-    let data = read_file(path, cwd)?;
-    exec_image(path, &data, argv, envp, cwd)
+    let node = resolve_file_node(path, cwd)?;
+    exec_source(path, ImageSource::Node(node), argv, envp, cwd)
 }
 
 /// Charge un programme et lance sa premiere tache **sans attendre sa fin**.
@@ -126,8 +131,15 @@ pub fn lance_detache(
     if !crate::arch::x86_64::usermode::ready() {
         return Err("user-mode non initialise (ring 3 indisponible)".to_string());
     }
-    let data = read_file(path, cwd)?;
-    let (process, task) = construit_tache(path, &data, argv, envp, cwd, Some(prepare))?;
+    let node = resolve_file_node(path, cwd)?;
+    let (process, task) = construit_tache(
+        path,
+        ImageSource::Node(node),
+        argv,
+        envp,
+        cwd,
+        Some(prepare),
+    )?;
     let pid = process.borrow().pid;
     task::register(task);
     Ok(pid)
@@ -137,6 +149,16 @@ pub fn lance_detache(
 pub fn exec_image(
     name: &str,
     data: &[u8],
+    argv: &[String],
+    envp: &[String],
+    cwd: usize,
+) -> Result<i32, String> {
+    exec_source(name, ImageSource::Memory(data), argv, envp, cwd)
+}
+
+fn exec_source(
+    name: &str,
+    source: ImageSource<'_>,
     argv: &[String],
     envp: &[String],
     cwd: usize,
@@ -153,7 +175,7 @@ pub fn exec_image(
             name
         ));
     }
-    let (process, first) = construit_tache(name, data, argv, envp, cwd, None)?;
+    let (process, first) = construit_tache(name, source, argv, envp, cwd, None)?;
     let _ = &process;
 
     // Un programme qui ouvre /dev/fb0 fait basculer la carte en mode graphique ;
@@ -176,12 +198,18 @@ pub fn exec_image(
 /// chargeur : deux copies auraient diverge des le premier correctif d'`auxv`.
 fn construit_tache(
     name: &str,
-    data: &[u8],
+    source: ImageSource<'_>,
     argv: &[String],
     envp: &[String],
     cwd: usize,
     prepare: Option<&mut dyn FnMut(&mut task::Process) -> Vec<String>>,
-) -> Result<(alloc::rc::Rc<core::cell::RefCell<task::Process>>, alloc::boxed::Box<task::Task>), String> {
+) -> Result<
+    (
+        alloc::rc::Rc<core::cell::RefCell<task::Process>>,
+        alloc::boxed::Box<task::Task>,
+    ),
+    String,
+> {
     let process = match task::new_process(name, cwd) {
         Some(process) => process,
         None => return Err("memoire physique insuffisante (espace d'adressage)".to_string()),
@@ -217,8 +245,15 @@ fn construit_tache(
         let mut borrowed = process.borrow_mut();
         let borrowed = &mut *borrowed;
 
-        let image = elf::load(&mut borrowed.space, data, vmm::user_load_base())
-            .map_err(|message| alloc::format!("{} : {}", name, message))?;
+        let image = match source {
+            ImageSource::Memory(data) => {
+                elf::load(&mut borrowed.space, data, vmm::user_load_base())
+            }
+            ImageSource::Node(node) => {
+                elf::load_node_lazy(node, vmm::user_load_base(), &mut borrowed.promesses)
+            }
+        }
+        .map_err(|message| alloc::format!("{} : {}", name, message))?;
 
         // Binaire dynamique : on charge aussi l'editeur de liens et on lui donne
         // la main. Le programme est deja en memoire, ld.so le trouvera via
@@ -226,14 +261,19 @@ fn construit_tache(
         let (entry, interp_base) = match image.interp.as_deref() {
             None => (image.entry, 0),
             Some(interp_path) => {
-                let interp_data = read_file(interp_path, cwd).map_err(|_| {
+                let interp_node = resolve_file_node(interp_path, cwd).map_err(|_| {
                     alloc::format!(
-                        "{} : interpreteur {} absent du RAMFS (installer ld-musl-x86_64.so.1)",
-                        name, interp_path
+                        "{} : interpreteur {} absent du namespace",
+                        name,
+                        interp_path
                     )
                 })?;
-                let interp = elf::load(&mut borrowed.space, &interp_data, vmm::user_interp_base())
-                    .map_err(|message| alloc::format!("{} : {}", interp_path, message))?;
+                let interp = elf::load_node_lazy(
+                    interp_node,
+                    vmm::user_interp_base(),
+                    &mut borrowed.promesses,
+                )
+                .map_err(|message| alloc::format!("{} : {}", interp_path, message))?;
                 (interp.entry, interp.base)
             }
         };
@@ -364,7 +404,6 @@ pub fn selftest_image() -> Vec<u8> {
     image
 }
 
-
 /// Petit ELF64 autonome, genere en memoire, qui reproduit le reveil utilise par
 /// Ladybird LibIPC sans aucune libc ni outil Linux hote.
 ///
@@ -391,25 +430,25 @@ pub fn poll_selftest_image() -> Vec<u8> {
     // mmap(NULL, 4096, RW, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
     // La page porte pipefd[2], pollfd, timespec et les octets de test.
     code.extend_from_slice(&[0xB8, 0x09, 0x00, 0x00, 0x00]); // mov eax, 9
-    code.extend_from_slice(&[0x31, 0xFF]);                   // xor edi, edi
+    code.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
     code.extend_from_slice(&[0xBE, 0x00, 0x10, 0x00, 0x00]); // mov esi, 4096
     code.extend_from_slice(&[0xBA, 0x03, 0x00, 0x00, 0x00]); // mov edx, PROT_READ|PROT_WRITE
     code.extend_from_slice(&[0x41, 0xBA, 0x22, 0x00, 0x00, 0x00]); // mov r10d, MAP_PRIVATE|MAP_ANON
     code.extend_from_slice(&[0x49, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF]); // mov r8, -1
-    code.extend_from_slice(&[0x45, 0x31, 0xC9]);             // xor r9d, r9d
-    code.extend_from_slice(&[0x0F, 0x05]);                   // syscall
-    code.extend_from_slice(&[0x48, 0x85, 0xC0]);             // test rax, rax
-    code.extend_from_slice(&[0x0F, 0x88, 0, 0, 0, 0]);      // js fail
+    code.extend_from_slice(&[0x45, 0x31, 0xC9]); // xor r9d, r9d
+    code.extend_from_slice(&[0x0F, 0x05]); // syscall
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x0F, 0x88, 0, 0, 0, 0]); // js fail
     vers_echec.push(code.len() - 4);
-    code.extend_from_slice(&[0x49, 0x89, 0xC4]);             // mov r12, rax
+    code.extend_from_slice(&[0x49, 0x89, 0xC4]); // mov r12, rax
 
     // pipe2(state, O_NONBLOCK|O_CLOEXEC)
     code.extend_from_slice(&[0xB8, 0x25, 0x01, 0x00, 0x00]); // mov eax, 293
-    code.extend_from_slice(&[0x4C, 0x89, 0xE7]);             // mov rdi, r12
+    code.extend_from_slice(&[0x4C, 0x89, 0xE7]); // mov rdi, r12
     code.extend_from_slice(&[0xBE, 0x00, 0x08, 0x08, 0x00]); // mov esi, 0x80800
     code.extend_from_slice(&[0x0F, 0x05]);
     code.extend_from_slice(&[0x48, 0x85, 0xC0]);
-    code.extend_from_slice(&[0x0F, 0x88, 0, 0, 0, 0]);      // js fail
+    code.extend_from_slice(&[0x0F, 0x88, 0, 0, 0, 0]); // js fail
     vers_echec.push(code.len() - 4);
 
     // mmap(NULL, 64 KiB, RW, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) pour la pile enfant.
@@ -422,9 +461,9 @@ pub fn poll_selftest_image() -> Vec<u8> {
     code.extend_from_slice(&[0x45, 0x31, 0xC9]);
     code.extend_from_slice(&[0x0F, 0x05]);
     code.extend_from_slice(&[0x48, 0x85, 0xC0]);
-    code.extend_from_slice(&[0x0F, 0x88, 0, 0, 0, 0]);      // js fail
+    code.extend_from_slice(&[0x0F, 0x88, 0, 0, 0, 0]); // js fail
     vers_echec.push(code.len() - 4);
-    code.extend_from_slice(&[0x49, 0x89, 0xC5]);             // mov r13, rax
+    code.extend_from_slice(&[0x49, 0x89, 0xC5]); // mov r13, rax
 
     // timespec { 0 s, 50 000 000 ns } a state+32.
     code.extend_from_slice(&[0x49, 0xC7, 0x44, 0x24, 0x20, 0, 0, 0, 0]);
@@ -435,18 +474,18 @@ pub fn poll_selftest_image() -> Vec<u8> {
     code.extend_from_slice(&[0xB8, 0x38, 0x00, 0x00, 0x00]); // mov eax, 56
     code.extend_from_slice(&[0xBF, 0x00, 0x0F, 0x01, 0x00]); // mov edi, 0x10f00
     code.extend_from_slice(&[0x49, 0x8D, 0xB5, 0xF0, 0xFF, 0x00, 0x00]); // lea rsi,[r13+0xfff0]
-    code.extend_from_slice(&[0x31, 0xD2]);                   // xor edx, edx
-    code.extend_from_slice(&[0x45, 0x31, 0xD2]);             // xor r10d, r10d
-    code.extend_from_slice(&[0x45, 0x31, 0xC0]);             // xor r8d, r8d
+    code.extend_from_slice(&[0x31, 0xD2]); // xor edx, edx
+    code.extend_from_slice(&[0x45, 0x31, 0xD2]); // xor r10d, r10d
+    code.extend_from_slice(&[0x45, 0x31, 0xC0]); // xor r8d, r8d
     code.extend_from_slice(&[0x0F, 0x05]);
-    code.extend_from_slice(&[0x48, 0x85, 0xC0]);             // test rax,rax
-    code.extend_from_slice(&[0x0F, 0x88, 0, 0, 0, 0]);      // js fail
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax,rax
+    code.extend_from_slice(&[0x0F, 0x88, 0, 0, 0, 0]); // js fail
     vers_echec.push(code.len() - 4);
-    code.extend_from_slice(&[0x0F, 0x84, 0, 0, 0, 0]);      // jz child
+    code.extend_from_slice(&[0x0F, 0x84, 0, 0, 0, 0]); // jz child
     let vers_enfant = code.len() - 4;
 
     // Parent : pollfd { fd=pipe[0], events=POLLIN, revents=0 } a state+16.
-    code.extend_from_slice(&[0x41, 0x8B, 0x3C, 0x24]);       // mov edi,[r12]
+    code.extend_from_slice(&[0x41, 0x8B, 0x3C, 0x24]); // mov edi,[r12]
     code.extend_from_slice(&[0x41, 0x89, 0x7C, 0x24, 0x10]); // mov [r12+16],edi
     code.extend_from_slice(&[0x66, 0x41, 0xC7, 0x44, 0x24, 0x14, 0x01, 0x00]); // events=POLLIN
     code.extend_from_slice(&[0x66, 0x41, 0xC7, 0x44, 0x24, 0x16, 0x00, 0x00]); // revents=0
@@ -457,14 +496,14 @@ pub fn poll_selftest_image() -> Vec<u8> {
     code.extend_from_slice(&[0xBE, 0x01, 0x00, 0x00, 0x00]);
     code.extend_from_slice(&[0xBA, 0xFF, 0xFF, 0xFF, 0xFF]);
     code.extend_from_slice(&[0x0F, 0x05]);
-    code.extend_from_slice(&[0x48, 0x83, 0xF8, 0x01]);       // cmp rax,1
-    code.extend_from_slice(&[0x0F, 0x85, 0, 0, 0, 0]);      // jne fail
+    code.extend_from_slice(&[0x48, 0x83, 0xF8, 0x01]); // cmp rax,1
+    code.extend_from_slice(&[0x0F, 0x85, 0, 0, 0, 0]); // jne fail
     vers_echec.push(code.len() - 4);
 
     // revents & POLLIN
     code.extend_from_slice(&[0x41, 0x0F, 0xB7, 0x44, 0x24, 0x16]); // movzx eax,word [r12+22]
-    code.extend_from_slice(&[0xA9, 0x01, 0x00, 0x00, 0x00]);       // test eax,1
-    code.extend_from_slice(&[0x0F, 0x84, 0, 0, 0, 0]);            // jz fail
+    code.extend_from_slice(&[0xA9, 0x01, 0x00, 0x00, 0x00]); // test eax,1
+    code.extend_from_slice(&[0x0F, 0x84, 0, 0, 0, 0]); // jz fail
     vers_echec.push(code.len() - 4);
 
     // read(pipe[0], state+65, 1)
@@ -474,10 +513,10 @@ pub fn poll_selftest_image() -> Vec<u8> {
     code.extend_from_slice(&[0x31, 0xC0]);
     code.extend_from_slice(&[0x0F, 0x05]);
     code.extend_from_slice(&[0x48, 0x83, 0xF8, 0x01]);
-    code.extend_from_slice(&[0x0F, 0x85, 0, 0, 0, 0]);            // jne fail
+    code.extend_from_slice(&[0x0F, 0x85, 0, 0, 0, 0]); // jne fail
     vers_echec.push(code.len() - 4);
     code.extend_from_slice(&[0x41, 0x80, 0x7C, 0x24, 0x41, 0xA5]); // cmp byte [r12+65],0xa5
-    code.extend_from_slice(&[0x0F, 0x85, 0, 0, 0, 0]);            // jne fail
+    code.extend_from_slice(&[0x0F, 0x85, 0, 0, 0, 0]); // jne fail
     vers_echec.push(code.len() - 4);
 
     // write(stdout, success, len)
@@ -598,7 +637,9 @@ pub fn poll_selftest(cwd: usize) -> i32 {
         }
         Err(message) => {
             crate::println!("  ECHEC : {}", message);
-            crate::println!("  note  : depuis le bureau, relancer ce test dans le shell texte avant `desktop`");
+            crate::println!(
+                "  note  : depuis le bureau, relancer ce test dans le shell texte avant `desktop`"
+            );
             1
         }
     }
@@ -613,14 +654,27 @@ pub fn selftest(cwd: usize) {
     crate::println!("  frames   : {} libres sur {}", free, total);
 
     let image = selftest_image();
-    crate::println!("  image    : ELF64 genere en memoire, {} octets", image.len());
+    crate::println!(
+        "  image    : ELF64 genere en memoire, {} octets",
+        image.len()
+    );
 
     let before = crate::kernel::abi::syscall_count();
     let argv = alloc::vec!["usermode-selftest".to_string()];
-    match exec_image("usermode-selftest", &image, &argv, &default_environment(), cwd) {
+    match exec_image(
+        "usermode-selftest",
+        &image,
+        &argv,
+        &default_environment(),
+        cwd,
+    ) {
         Ok(code) => {
             let used = crate::kernel::abi::syscall_count() - before;
-            crate::println!("  resultat : sortie avec le code {} ({} appels systeme)", code, used);
+            crate::println!(
+                "  resultat : sortie avec le code {} ({} appels systeme)",
+                code,
+                used
+            );
             if code == 0 {
                 crate::println!("  OK : ring 3, syscall/sysret, mmap et exit_group fonctionnels");
             }

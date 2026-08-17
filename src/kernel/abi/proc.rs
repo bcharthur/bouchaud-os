@@ -25,8 +25,23 @@ use crate::kernel::{elf, vmm};
 pub fn sys_fork(frame: &TrapFrame) -> i64 {
     let parent = task::current_process();
 
-    let (space, files, brk_start, brk, mmap_next, cwd, uid, gid, name, parent_pid, signals,
-         partages, limite_as, promesses, ecran) = {
+    let (
+        space,
+        files,
+        brk_start,
+        brk,
+        mmap_next,
+        cwd,
+        uid,
+        gid,
+        name,
+        parent_pid,
+        signals,
+        partages,
+        limite_as,
+        promesses,
+        ecran,
+    ) = {
         let borrowed = parent.borrow();
         let space = match borrowed.space.duplicate() {
             Some(space) => space,
@@ -120,12 +135,10 @@ fn read_string_array(addr: u64) -> Option<Vec<String>> {
         if pointer == 0 {
             break;
         }
-        let process = task::current_process();
-        let text = {
-            let mut borrowed = process.borrow_mut();
-            borrowed.space.read_cstr(pointer, 4096)
-        };
-        out.push(text?);
+        // La chaine peut vivre dans une page file-backed encore non
+        // residente (typiquement .rodata du programme qui appelle execve).
+        // `user_string` sait materialiser ces pages avant copyin.
+        out.push(super::user_string(pointer)?);
     }
     Some(out)
 }
@@ -153,17 +166,15 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
     let process = task::current_process();
     let cwd = process.borrow().cwd;
 
-    let data = {
+    let node = {
         let fs = crate::fs::ramfs::fs();
         match fs.resolve(&path, cwd) {
-            Some(node) if fs.nodes[node].kind == crate::fs::ramfs::NodeKind::File => {
-                fs.nodes[node].content.clone()
-            }
+            Some(node) if fs.nodes[node].kind == crate::fs::ramfs::NodeKind::File => node,
             Some(_) => return -errno::EISDIR,
             None => return -errno::ENOENT,
         }
     };
-    if data.len() < 4 || &data[..4] != b"\x7FELF" {
+    if elf::parse_node(node).is_err() {
         return -errno::ENOEXEC;
     }
 
@@ -176,7 +187,8 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
         None => return -errno::ENOMEM,
     };
 
-    let image = match elf::load(&mut space, &data, vmm::user_load_base()) {
+    let mut new_promises = Vec::new();
+    let image = match elf::load_node_lazy(node, vmm::user_load_base(), &mut new_promises) {
         Ok(image) => image,
         Err(_) => return -errno::ENOEXEC,
     };
@@ -184,11 +196,11 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
         None => (image.entry, 0),
         Some(interp_path) => {
             let fs = crate::fs::ramfs::fs();
-            let interp_data = match fs.resolve(interp_path, cwd) {
-                Some(node) => fs.nodes[node].content.clone(),
+            let interp_node = match fs.resolve(interp_path, cwd) {
+                Some(node) => node,
                 None => return -errno::ENOENT,
             };
-            match elf::load(&mut space, &interp_data, vmm::user_interp_base()) {
+            match elf::load_node_lazy(interp_node, vmm::user_interp_base(), &mut new_promises) {
                 Ok(interp) => (interp.entry, interp.base),
                 Err(_) => return -errno::ENOEXEC,
             }
@@ -199,8 +211,19 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
         let borrowed = process.borrow();
         (borrowed.uid, borrowed.gid)
     };
-    let argv = if argv.is_empty() { alloc::vec![path.clone()] } else { argv };
-    let layout = elf::StackLayout { argv: &argv, envp: &envp, image: &image, interp_base, uid, gid };
+    let argv = if argv.is_empty() {
+        alloc::vec![path.clone()]
+    } else {
+        argv
+    };
+    let layout = elf::StackLayout {
+        argv: &argv,
+        envp: &envp,
+        image: &image,
+        interp_base,
+        uid,
+        gid,
+    };
     let stack = match elf::build_stack(&mut space, &layout) {
         Ok(stack) => stack,
         Err(_) => return -errno::ENOMEM,
@@ -218,6 +241,7 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
         // L'ancien espace disparait avec ses mappages : les references qu'il
         // tenait sur le cache partage doivent partir avec lui.
         borrowed.relache_partages();
+        borrowed.promesses = new_promises;
         // L'ancien espace est detruit ici. Son `Drop` remet CR3 sur la table du
         // noyau s'il etait actif : c'est pour cela qu'on active le nouveau
         // juste apres, avant de retourner en ring 3.
@@ -369,7 +393,11 @@ pub fn sys_rt_sigreturn(frame: &mut TrapFrame) -> i64 {
 pub fn send_signal(pid: u32, signal: u32) -> i64 {
     if signal == 0 {
         // Signal 0 : simple test d'existence du processus.
-        return if task::process_by_pid(pid).is_some() { 0 } else { -errno::ESRCH };
+        return if task::process_by_pid(pid).is_some() {
+            0
+        } else {
+            -errno::ESRCH
+        };
     }
     if signal as usize > signal::NSIG {
         return -errno::EINVAL;
@@ -443,7 +471,10 @@ pub fn deliver_pending(frame: &mut TrapFrame) {
             match signal::default_action(signal) {
                 signal::DefaultAction::Ignore => continue,
                 signal::DefaultAction::Terminate => {
-                    crate::serial_println!("[signal] {} non intercepte : processus termine", signal::name(signal));
+                    crate::serial_println!(
+                        "[signal] {} non intercepte : processus termine",
+                        signal::name(signal)
+                    );
                     task::exit_group(128 + signal as i32);
                 }
             }

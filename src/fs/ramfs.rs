@@ -84,10 +84,14 @@ impl Node {
     }
 
     pub fn name_eq(&self, name: &str) -> bool {
-        if self.name_len != name.len() { return false; }
+        if self.name_len != name.len() {
+            return false;
+        }
         let bytes = name.as_bytes();
         for i in 0..self.name_len {
-            if self.name[i] != bytes[i] { return false; }
+            if self.name[i] != bytes[i] {
+                return false;
+            }
         }
         true
     }
@@ -95,18 +99,28 @@ impl Node {
     /// Le nom commence-t-il par ce prefixe ? Sert a reconnaitre l'etiquette
     /// `memfd:` sans allouer.
     pub fn name_starts_with(&self, prefixe: &[u8]) -> bool {
-        if self.name_len < prefixe.len() { return false; }
+        if self.name_len < prefixe.len() {
+            return false;
+        }
         for i in 0..prefixe.len() {
-            if self.name[i] != prefixe[i] { return false; }
+            if self.name[i] != prefixe[i] {
+                return false;
+            }
         }
         true
     }
 
     pub fn set_name(&mut self, name: &str) -> bool {
         let bytes = name.as_bytes();
-        if bytes.is_empty() || bytes.len() > NAME_LEN { return false; }
-        for i in 0..NAME_LEN { self.name[i] = 0; }
-        for i in 0..bytes.len() { self.name[i] = bytes[i]; }
+        if bytes.is_empty() || bytes.len() > NAME_LEN {
+            return false;
+        }
+        for i in 0..NAME_LEN {
+            self.name[i] = 0;
+        }
+        for i in 0..bytes.len() {
+            self.name[i] = bytes[i];
+        }
         self.name_len = bytes.len();
         true
     }
@@ -116,7 +130,9 @@ pub struct FileSystem {
     pub nodes: [Node; MAX_NODES],
 }
 
-static mut FS: FileSystem = FileSystem { nodes: [const { Node::empty() }; MAX_NODES] };
+static mut FS: FileSystem = FileSystem {
+    nodes: [const { Node::empty() }; MAX_NODES],
+};
 
 /// Accede au systeme de fichiers global.
 pub fn fs() -> &'static mut FileSystem {
@@ -157,20 +173,29 @@ impl FileSystem {
         let apps = self.mkdir_at(0, "apps").unwrap_or(0);
         if apps != 0 {
             let t = self.touch_at(apps, "terminal.bapp").unwrap_or(0);
-            self.write_node(t, "name=Terminal\nexec=terminal\ntype=gui\npermission=normal");
+            self.write_node(
+                t,
+                "name=Terminal\nexec=terminal\ntype=gui\npermission=normal",
+            );
             let f = self.touch_at(apps, "files.bapp").unwrap_or(0);
             self.write_node(f, "name=Fichiers\nexec=files\ntype=gui\npermission=normal");
             let b = self.touch_at(apps, "browser.bapp").unwrap_or(0);
             self.write_node(b, "name=Nautile\nexec=browser\ntype=gui\npermission=normal");
             let s = self.touch_at(apps, "sysinfo.bapp").unwrap_or(0);
-            self.write_node(s, "name=Moniteur\nexec=monitor\ntype=gui\npermission=normal");
+            self.write_node(
+                s,
+                "name=Moniteur\nexec=monitor\ntype=gui\npermission=normal",
+            );
         }
 
         let readme = self.touch_at(0, "readme.txt").unwrap_or(0);
         self.write_node(readme, "Bienvenue dans Bouchaud OS. Connecte-toi (guest/guest ou root/root). Tape help, ou desktop pour le bureau graphique.");
 
         let passwd = self.touch_at(etc, "passwd").unwrap_or(0);
-        self.write_node(passwd, "root:x:0:0:root:/:/bin/bsh\nguest:x:1000:1000:guest:/home/guest:/bin/bsh");
+        self.write_node(
+            passwd,
+            "root:x:0:0:root:/:/bin/bsh\nguest:x:1000:1000:guest:/home/guest:/bin/bsh",
+        );
 
         // /tmp est ouvert a tous (comme sous Unix).
         if tmp != 0 {
@@ -199,15 +224,21 @@ impl FileSystem {
     }
 
     pub fn mkdir_at(&mut self, parent: usize, name: &str) -> Result<usize, &'static str> {
-        if self.nodes[parent].kind != NodeKind::Dir { return Err("parent not a directory"); }
-        if self.find_child(parent, name).is_some() { return Err("already exists"); }
+        if self.nodes[parent].kind != NodeKind::Dir {
+            return Err("parent not a directory");
+        }
+        if self.find_child(parent, name).is_some() {
+            return Err("already exists");
+        }
         let idx = self.alloc_node().ok_or("no free inode")?;
         self.nodes[idx].kind = NodeKind::Dir;
         self.nodes[idx].parent = parent;
         self.nodes[idx].mode = 0o755;
         self.nodes[idx].uid = users::session().uid();
         self.nodes[idx].gid = users::session().gid();
-        if !self.nodes[idx].set_name(name) { return Err("invalid name"); }
+        if !self.nodes[idx].set_name(name) {
+            return Err("invalid name");
+        }
         Ok(idx)
     }
 
@@ -262,15 +293,21 @@ impl FileSystem {
     }
 
     pub fn touch_at(&mut self, parent: usize, name: &str) -> Result<usize, &'static str> {
-        if self.nodes[parent].kind != NodeKind::Dir { return Err("parent not a directory"); }
-        if let Some(existing) = self.find_child(parent, name) { return Ok(existing); }
+        if self.nodes[parent].kind != NodeKind::Dir {
+            return Err("parent not a directory");
+        }
+        if let Some(existing) = self.find_child(parent, name) {
+            return Ok(existing);
+        }
         let idx = self.alloc_node().ok_or("no free inode")?;
         self.nodes[idx].kind = NodeKind::File;
         self.nodes[idx].parent = parent;
         self.nodes[idx].mode = 0o644;
         self.nodes[idx].uid = users::session().uid();
         self.nodes[idx].gid = users::session().gid();
-        if !self.nodes[idx].set_name(name) { return Err("invalid name"); }
+        if !self.nodes[idx].set_name(name) {
+            return Err("invalid name");
+        }
         Ok(idx)
     }
 
@@ -284,11 +321,17 @@ impl FileSystem {
         if data.len() > MAX_FILE_SIZE {
             return false;
         }
+        // Une ecriture explicite remplace le backing immutable eventuel.
+        crate::fs::backing::unregister(idx);
         self.nodes[idx].content = data.to_vec();
         true
     }
 
     pub fn append_node(&mut self, idx: usize, text: &str) {
+        // Les gros fichiers de l'archive sont immuables pendant cette etape.
+        if crate::fs::backing::is_disk_backed(idx) {
+            return;
+        }
         let node = &mut self.nodes[idx];
         let extra = text.len() + 1;
         if node.content.len() + extra > MAX_FILE_SIZE {
@@ -301,16 +344,24 @@ impl FileSystem {
     }
 
     pub fn resolve(&self, path: &str, cwd: usize) -> Option<usize> {
-        if path.is_empty() { return Some(cwd); }
+        if path.is_empty() {
+            return Some(cwd);
+        }
         let mut current = if path.as_bytes()[0] == b'/' { 0 } else { cwd };
         let bytes = path.as_bytes();
         let mut i = 0usize;
 
         while i < bytes.len() {
-            while i < bytes.len() && bytes[i] == b'/' { i += 1; }
-            if i >= bytes.len() { break; }
+            while i < bytes.len() && bytes[i] == b'/' {
+                i += 1;
+            }
+            if i >= bytes.len() {
+                break;
+            }
             let start = i;
-            while i < bytes.len() && bytes[i] != b'/' { i += 1; }
+            while i < bytes.len() && bytes[i] != b'/' {
+                i += 1;
+            }
             let comp = &path[start..i];
 
             if comp == "." {
@@ -327,14 +378,20 @@ impl FileSystem {
     pub fn resolve_parent_name<'a>(&self, path: &'a str, cwd: usize) -> Option<(usize, &'a str)> {
         let mut end = path.len();
         let bytes = path.as_bytes();
-        while end > 1 && bytes[end - 1] == b'/' { end -= 1; }
+        while end > 1 && bytes[end - 1] == b'/' {
+            end -= 1;
+        }
         let path = &path[..end];
-        if path.is_empty() || path == "/" { return None; }
+        if path.is_empty() || path == "/" {
+            return None;
+        }
 
         let bytes = path.as_bytes();
         let mut last_slash: Option<usize> = None;
         for i in 0..bytes.len() {
-            if bytes[i] == b'/' { last_slash = Some(i); }
+            if bytes[i] == b'/' {
+                last_slash = Some(i);
+            }
         }
 
         match last_slash {
@@ -353,7 +410,9 @@ impl FileSystem {
     /// sur l'inode `idx`. root contourne toutes les verifications.
     pub fn can(&self, idx: usize, want: u16) -> bool {
         let s = users::session();
-        if s.is_root() { return true; }
+        if s.is_root() {
+            return true;
+        }
         let n = &self.nodes[idx];
         let bits = if s.uid() == n.uid {
             (n.mode >> 6) & 0o7
@@ -369,16 +428,24 @@ impl FileSystem {
     /// repertoire parcouru, comme sous Unix. C'est ce controle qui empeche
     /// `guest` d'atteindre le contenu de `/home/arthur` (mode 700).
     pub fn resolve_checked(&self, path: &str, cwd: usize) -> Result<usize, &'static str> {
-        if path.is_empty() { return Ok(cwd); }
+        if path.is_empty() {
+            return Ok(cwd);
+        }
         let mut current = if path.as_bytes()[0] == b'/' { 0 } else { cwd };
         let bytes = path.as_bytes();
         let mut i = 0usize;
 
         while i < bytes.len() {
-            while i < bytes.len() && bytes[i] == b'/' { i += 1; }
-            if i >= bytes.len() { break; }
+            while i < bytes.len() && bytes[i] == b'/' {
+                i += 1;
+            }
+            if i >= bytes.len() {
+                break;
+            }
             let start = i;
-            while i < bytes.len() && bytes[i] != b'/' { i += 1; }
+            while i < bytes.len() && bytes[i] != b'/' {
+                i += 1;
+            }
             let comp = &path[start..i];
 
             if comp == "." {
@@ -398,17 +465,27 @@ impl FileSystem {
     }
 
     /// Variante verifiee de `resolve_parent_name` : controle la traversee.
-    pub fn resolve_parent_name_checked<'a>(&self, path: &'a str, cwd: usize) -> Result<(usize, &'a str), &'static str> {
+    pub fn resolve_parent_name_checked<'a>(
+        &self,
+        path: &'a str,
+        cwd: usize,
+    ) -> Result<(usize, &'a str), &'static str> {
         let mut end = path.len();
         let bytes = path.as_bytes();
-        while end > 1 && bytes[end - 1] == b'/' { end -= 1; }
+        while end > 1 && bytes[end - 1] == b'/' {
+            end -= 1;
+        }
         let path = &path[..end];
-        if path.is_empty() || path == "/" { return Err("chemin invalide"); }
+        if path.is_empty() || path == "/" {
+            return Err("chemin invalide");
+        }
 
         let bytes = path.as_bytes();
         let mut last_slash: Option<usize> = None;
         for i in 0..bytes.len() {
-            if bytes[i] == b'/' { last_slash = Some(i); }
+            if bytes[i] == b'/' {
+                last_slash = Some(i);
+            }
         }
 
         match last_slash {
@@ -435,7 +512,9 @@ impl FileSystem {
     pub fn used_nodes(&self) -> usize {
         let mut n = 0;
         for i in 0..MAX_NODES {
-            if self.nodes[i].used { n += 1; }
+            if self.nodes[i].used {
+                n += 1;
+            }
         }
         n
     }
@@ -455,7 +534,9 @@ pub fn print_path(fs: &FileSystem, idx: usize) {
 }
 
 fn print_path_rec(fs: &FileSystem, idx: usize) {
-    if idx == 0 { return; }
+    if idx == 0 {
+        return;
+    }
     let parent = fs.nodes[idx].parent;
     print_path_rec(fs, parent);
     print!("/{}", fs.nodes[idx].name_str());
@@ -465,12 +546,16 @@ fn print_path_rec(fs: &FileSystem, idx: usize) {
 pub fn path_string(fs: &FileSystem, idx: usize) -> String {
     let mut s = String::new();
     build_path(fs, idx, &mut s);
-    if s.is_empty() { s.push('/'); }
+    if s.is_empty() {
+        s.push('/');
+    }
     s
 }
 
 fn build_path(fs: &FileSystem, idx: usize, s: &mut String) {
-    if idx == 0 { return; }
+    if idx == 0 {
+        return;
+    }
     build_path(fs, fs.nodes[idx].parent, s);
     s.push('/');
     s.push_str(fs.nodes[idx].name_str());
@@ -479,7 +564,9 @@ fn build_path(fs: &FileSystem, idx: usize, s: &mut String) {
 /// Affiche les droits de style `ls -l` (ex. `drwxr-xr-x`).
 pub fn print_mode(kind: NodeKind, mode: u16) {
     print!("{}", if kind == NodeKind::Dir { 'd' } else { '-' });
-    let bits = [0o400, 0o200, 0o100, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001];
+    let bits = [
+        0o400, 0o200, 0o100, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001,
+    ];
     let chars = ['r', 'w', 'x', 'r', 'w', 'x', 'r', 'w', 'x'];
     for i in 0..9 {
         print!("{}", if mode & bits[i] != 0 { chars[i] } else { '-' });
@@ -491,7 +578,8 @@ pub fn print_node_line(fs: &FileSystem, idx: usize, long: bool) {
     let node = &fs.nodes[idx];
     if long {
         print_mode(node.kind, node.mode);
-        print!(" {}:{} {:>4} ", node.uid, node.gid, node.content.len());
+        let taille = crate::fs::backing::disk_len(idx).unwrap_or(node.content.len());
+        print!(" {}:{} {:>4} ", node.uid, node.gid, taille);
     }
     if node.kind == NodeKind::Dir {
         vga::set_color(COLOR_CYAN);

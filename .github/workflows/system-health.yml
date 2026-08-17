@@ -1,0 +1,163 @@
+name: system-health
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "src/**"
+      - "tools/health/**"
+      - ".github/workflows/system-health.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "x86_64-bouchaud_os.json"
+  pull_request:
+    paths:
+      - "src/**"
+      - "tools/health/**"
+      - ".github/workflows/system-health.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "x86_64-bouchaud_os.json"
+  workflow_dispatch:
+
+concurrency:
+  group: system-health-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    name: system-health/probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: health-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            health-cargo-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+
+      - name: Construire le noyau
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          cargo install bootimage --locked
+          cargo bootimage
+
+      - name: Installer QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 curl
+
+      - name: Fabriquer le disque de sante
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import tarfile
+
+          root = Path("health-scenario")
+          root.mkdir(exist_ok=True)
+          (root / "autorun").write_bytes(Path("tools/health/autorun.bsh").read_bytes())
+
+          image = Path("health.img")
+          with tarfile.open(image, "w", format=tarfile.USTAR_FORMAT) as tar:
+              info = tar.gettarinfo(str(root / "autorun"), arcname="./autorun")
+              info.uid = info.gid = 0
+              info.uname = info.gname = "root"
+              info.mode = 0o644
+              with (root / "autorun").open("rb") as src:
+                  tar.addfile(info, src)
+
+          with image.open("ab") as out:
+              out.write(b"\0" * (8 * 1024 * 1024))
+          print(f"health.img: {image.stat().st_size} octets")
+          PY
+
+      - name: Demarrer fixture HTTP locale
+        run: |
+          python3 tools/health/fixture_server.py --port 18080 >fixture.log 2>&1 &
+          echo $! > fixture.pid
+          sleep 1
+          curl --fail http://127.0.0.1:18080/health
+
+      - name: Executer la sonde bare-metal
+        run: |
+          set +e
+          timeout 180 qemu-system-x86_64 \
+            -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            -drive format=raw,file=health.img \
+            -m 2048 \
+            -display none \
+            -no-reboot \
+            -netdev user,id=net0 \
+            -device e1000,netdev=net0 \
+            -audiodev none,id=snd0 \
+            -device AC97,audiodev=snd0 \
+            -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+            -serial file:health.log
+          code=$?
+          set -e
+          cat health.log
+          echo "qemu exit=$code"
+          test "$code" -eq 33
+
+      - name: Barriere globale
+        run: |
+          ! grep -qi "panic" health.log
+          grep -F "=== AUTORUN FIN === statut=0" health.log
+          grep -F "HEALTH_COMPLETE" health.log
+          python3 tools/health/verify_health.py \
+            --log health.log \
+            --report health-report.json
+
+      - name: Publier les sondes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: system-health-log
+          path: |
+            health.log
+            health-report.json
+            fixture.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  layers:
+    name: health/${{ matrix.check }}
+    needs: probe
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        check:
+          - foundation
+          - memory
+          - storage
+          - abi
+          - osi-l1
+          - osi-l2
+          - osi-l3
+          - osi-l5-6
+          - osi-l4
+          - osi-l7
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: system-health-log
+          path: health-artifact
+
+      - name: Verifier ${{ matrix.check }}
+        run: |
+          python3 tools/health/verify_health.py \
+            --log health-artifact/health.log \
+            --check '${{ matrix.check }}'

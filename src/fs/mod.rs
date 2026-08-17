@@ -7,6 +7,7 @@
 //! La suite — pilote de bloc generique, virtio-blk, systeme de fichiers a
 //! blocs — est documentee dans `docs/ROADMAP.md`.
 
+pub mod backing;
 pub mod persistance;
 pub mod ramfs;
 pub mod tar;

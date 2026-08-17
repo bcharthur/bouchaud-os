@@ -75,7 +75,12 @@ fn entree(node: usize) -> usize {
     match position(node) {
         Some(index) => index,
         None => {
-            cache().push(Partagee { node, ouverts: 0, mappages: 0, pages: Vec::new() });
+            cache().push(Partagee {
+                node,
+                ouverts: 0,
+                mappages: 0,
+                pages: Vec::new(),
+            });
             cache().len() - 1
         }
     }
@@ -124,21 +129,10 @@ pub fn page(node: usize, numero: u64) -> Option<u64> {
         return Some(*frame);
     }
     let frame = vmm::alloc_frame()?;
-    {
-        let fs = crate::fs::ramfs::fs();
-        let contenu = &fs.nodes[node].content;
-        let debut = (numero * PAGE_SIZE) as usize;
-        if debut < contenu.len() {
-            let fin = core::cmp::min(contenu.len(), debut + PAGE_SIZE as usize);
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    contenu[debut..fin].as_ptr(),
-                    crate::kernel::memory::phys_to_virt(frame),
-                    fin - debut,
-                );
-            }
-        }
-    }
+    let debut = (numero * PAGE_SIZE) as usize;
+    let dst = crate::kernel::memory::phys_to_virt(frame);
+    let page = unsafe { core::slice::from_raw_parts_mut(dst, PAGE_SIZE as usize) };
+    let _ = crate::fs::backing::read_at(node, debut, page);
     cache()[index].pages.push((numero, frame));
     Some(frame)
 }
@@ -149,6 +143,9 @@ pub fn page(node: usize, numero: u64) -> Option<u64> {
 /// ordinaire. Les frames sont la source de verite ; le contenu n'en est que le
 /// reflet.
 pub fn writeback(node: usize) {
+    if crate::fs::backing::is_disk_backed(node) {
+        return;
+    }
     let index = match position(node) {
         Some(index) => index,
         None => return,
@@ -221,7 +218,10 @@ fn evince_si_orphelin(node: usize) {
 /// (nœuds suivis, pages detenues) — pour `shmstat` et les tests.
 pub fn statistiques() -> (usize, usize) {
     let liste = cache();
-    (liste.len(), liste.iter().map(|entree| entree.pages.len()).sum())
+    (
+        liste.len(),
+        liste.iter().map(|entree| entree.pages.len()).sum(),
+    )
 }
 
 /// Etat detaille d'un nœud : (ouverts, mappages, pages).

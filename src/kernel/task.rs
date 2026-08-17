@@ -48,6 +48,7 @@ use crate::arch::x86_64::cpu;
 use crate::arch::x86_64::usermode::{self, TrapFrame};
 use crate::kernel::fd::FdTable;
 use crate::kernel::vmm::AddressSpace;
+pub use crate::kernel::vma::{Backing as PromesseBacking, Vma as Promesse};
 
 /// Taille de la pile noyau d'une tache (64 KiB).
 const KSTACK_SIZE: usize = 64 * 1024;
@@ -119,41 +120,220 @@ pub struct Context {
 /// meurt comme avant — sans quoi le noyau transformerait chaque dereference de
 /// pointeur nul en allocation silencieuse, et l'on perdrait le seul mecanisme
 /// qui signale ces defauts.
+static mut FAULTS_ZERO: u64 = 0;
+static mut FAULTS_FILE: u64 = 0;
+
+/// Peuple a la demande une page promise.
+///
+/// La derniere promesse couvrant la page fixe les droits. Toutes les promesses
+/// file-backed couvrant cette meme page contribuent ensuite leurs octets : deux
+/// PT_LOAD ELF peuvent legalement partager une page de bordure.
 pub fn peuple_a_la_demande(adresse: u64) -> bool {
     if !crate::kernel::vmm::is_user_addr(adresse) || !in_user_task() {
         return false;
     }
+
     let processus = current_process();
     let mut p = processus.borrow_mut();
-
     let page = adresse & !(crate::kernel::vmm::PAGE_SIZE - 1);
-    let drapeaux = match p.promesses.iter().rev().find(|q| page >= q.debut && page < q.fin) {
-        // La derniere promesse couvrant l'adresse fait foi : un `mprotect` sur
-        // une plage deja promise en redefinit les droits, et c'est le plus
-        // recent qui vaut.
-        Some(promesse) => promesse.drapeaux,
+
+    let effective = match crate::kernel::vma::trouve(&p.promesses, page) {
+        Some(region) => region,
         None => return false,
     };
 
-    if p.space.translate(page).is_some() {
-        // Deja presente : la faute vient des droits, pas de l'absence. Ce n'est
-        // pas a nous de la reparer.
+    if effective.drapeaux & crate::kernel::vmm::PTE_USER == 0 {
         return false;
     }
 
-    p.space.map_alloc(page, crate::kernel::vmm::PAGE_SIZE, drapeaux)
+    if p.space.translate(page).is_some() {
+        return false;
+    }
+
+    match effective.backing {
+        PromesseBacking::Zero => {
+            if !p.space.map_alloc(
+                page,
+                crate::kernel::vmm::PAGE_SIZE,
+                effective.drapeaux,
+            ) {
+                return false;
+            }
+            unsafe {
+                FAULTS_ZERO = FAULTS_ZERO.saturating_add(1);
+            }
+            true
+        }
+
+        PromesseBacking::Framebuffer {
+            phys_base,
+            mapping_start,
+            phys_offset,
+        } => {
+            let delta = page.saturating_sub(mapping_start);
+            let phys = phys_base
+                .saturating_add(phys_offset)
+                .saturating_add(delta);
+            p.space.map_foreign(page, phys, effective.drapeaux)
+        }
+
+        PromesseBacking::SharedFile {
+            node,
+            mapping_start,
+            file_offset,
+            ..
+        } => {
+            let source =
+                file_offset.saturating_add(page.saturating_sub(mapping_start));
+            let numero = source / crate::kernel::vmm::PAGE_SIZE;
+            let frame = match crate::kernel::partage::page(node, numero) {
+                Some(frame) => frame,
+                None => return false,
+            };
+            if !p.space.map_foreign(page, frame, effective.drapeaux) {
+                return false;
+            }
+            unsafe {
+                FAULTS_FILE = FAULTS_FILE.saturating_add(1);
+            }
+            true
+        }
+
+        PromesseBacking::File { .. } => {
+            if !p.space.map_alloc(
+                page,
+                crate::kernel::vmm::PAGE_SIZE,
+                effective.drapeaux,
+            ) {
+                return false;
+            }
+
+            // Plusieurs PT_LOAD peuvent partager une page. On compose tous les
+            // fragments file-backed qui la couvrent.
+            let count = p.promesses.len();
+            for index in 0..count {
+                let region = p.promesses[index];
+                if page < region.debut || page >= region.fin {
+                    continue;
+                }
+
+                let (node, mapping_start, file_offset, file_size) =
+                    match region.backing {
+                        PromesseBacking::File {
+                            node,
+                            mapping_start,
+                            file_offset,
+                            file_size,
+                        } => (node, mapping_start, file_offset, file_size),
+                        _ => continue,
+                    };
+
+                let page_end = page + crate::kernel::vmm::PAGE_SIZE;
+                let data_start = mapping_start;
+                let data_end = mapping_start.saturating_add(file_size);
+                let start = core::cmp::max(page, data_start);
+                let end = core::cmp::min(page_end, data_end);
+                if end <= start {
+                    continue;
+                }
+
+                let wanted = (end - start) as usize;
+                let mut buffer =
+                    [0u8; crate::kernel::vmm::PAGE_SIZE as usize];
+                let source_offset = file_offset
+                    .saturating_add(start.saturating_sub(mapping_start));
+                let got = crate::fs::backing::read_at(
+                    node,
+                    source_offset as usize,
+                    &mut buffer[..wanted],
+                );
+
+                if got != wanted || !p.space.write(start, &buffer[..got]) {
+                    p.space.unmap(page, crate::kernel::vmm::PAGE_SIZE);
+                    return false;
+                }
+            }
+
+            unsafe {
+                FAULTS_FILE = FAULTS_FILE.saturating_add(1);
+                if FAULTS_FILE == 1 {
+                    crate::kernel::dmesg::log_fmt(format_args!(
+                        "memfabric: premier fault fichier page={:#x}",
+                        page
+                    ));
+                }
+            }
+            true
+        }
+    }
 }
 
-/// Une plage d'adresses promise a un processus, peuplee page par page.
-///
-/// `drapeaux` porte les droits demandes a la reservation : c'est avec eux que la
-/// page sera mappee au premier acces, et non avec des droits devines.
-#[derive(Clone, Copy)]
-pub struct Promesse {
-    pub debut: u64,
-    pub fin: u64,
-    pub drapeaux: u64,
+pub fn demand_fault_stats() -> (u64, u64) {
+    unsafe { (FAULTS_ZERO, FAULTS_FILE) }
 }
+
+/// Diagnostic d'une faute que la Memory Fabric n'a pas pu servir.
+pub fn log_fault_mapping(adresse: u64) {
+    if !in_user_task() {
+        return;
+    }
+
+    let process = current_process();
+    let mut p = process.borrow_mut();
+    let page = adresse & !(crate::kernel::vmm::PAGE_SIZE - 1);
+    let present = p.space.translate(page).is_some();
+    let writable = p.space.writable(page);
+
+    if let Some(region) = crate::kernel::vma::trouve(&p.promesses, page) {
+        crate::println!(
+            "[memfabric] FAULT_FATAL pid={} app={} addr={:#x} page={:#x} vma={:#x}..{:#x} backing={} flags={:#x} present={} writable={}",
+            p.pid,
+            p.name,
+            adresse,
+            page,
+            region.debut,
+            region.fin,
+            region.backing.label(),
+            region.drapeaux,
+            present,
+            writable
+        );
+    } else {
+        let (avant, apres) =
+            crate::kernel::vma::voisines(&p.promesses, page);
+        crate::println!(
+            "[memfabric] FAULT_FATAL pid={} app={} addr={:#x} page={:#x} AUCUNE_VMA vmas={} present={} writable={}",
+            p.pid,
+            p.name,
+            adresse,
+            page,
+            p.promesses.len(),
+            present,
+            writable
+        );
+        if let Some(region) = avant {
+            crate::println!(
+                "[memfabric] vma precedente {:#x}..{:#x} backing={} flags={:#x}",
+                region.debut,
+                region.fin,
+                region.backing.label(),
+                region.drapeaux
+            );
+        }
+        if let Some(region) = apres {
+            crate::println!(
+                "[memfabric] vma suivante {:#x}..{:#x} backing={} flags={:#x}",
+                region.debut,
+                region.fin,
+                region.backing.label(),
+                region.drapeaux
+            );
+        }
+    }
+}
+
+
+
 
 pub struct Process {
     pub pid: u32,
@@ -281,8 +461,12 @@ impl Process {
     /// immediatement ce qu'ils promettent. Taille virtuelle et taille residente
     /// coincident donc, et compter les pages possedees est une mesure exacte de
     /// ce que `RLIMIT_AS` borne.
-    pub fn taille_as(&self) -> u64 {
-        self.space.mapped_pages() as u64 * crate::kernel::vmm::PAGE_SIZE
+pub fn taille_as(&self) -> u64 {
+        let virtuel =
+            crate::kernel::vma::octets_virtuels(&self.promesses);
+        let resident = self.space.mapped_pages() as u64
+            * crate::kernel::vmm::PAGE_SIZE;
+        core::cmp::max(virtuel, resident)
     }
 
     /// Cette croissance tiendrait-elle sous `RLIMIT_AS` ?
@@ -402,7 +586,10 @@ pub fn process_by_pid(pid: u32) -> Option<Rc<RefCell<Process>>> {
 
 /// Retrouve le processus auquel appartient un thread donne.
 pub fn process_of_tid(tid: u32) -> Option<Rc<RefCell<Process>>> {
-    tasks().iter().find(|t| t.tid == tid).map(|t| t.process.clone())
+    tasks()
+        .iter()
+        .find(|t| t.tid == tid)
+        .map(|t| t.process.clone())
 }
 
 /// Alloue un identifiant de tache.
@@ -431,7 +618,11 @@ pub fn current() -> &'static mut Task {
 
 /// Tache courante, si elle existe.
 pub fn try_current() -> Option<&'static mut Task> {
-    if in_user_task() { Some(current()) } else { None }
+    if in_user_task() {
+        Some(current())
+    } else {
+        None
+    }
 }
 
 /// Processus de la tache courante.
@@ -457,7 +648,8 @@ impl Task {
             let area = fpu_area as *mut u8;
             core::ptr::copy_nonoverlapping(0x037Fu16.to_le_bytes().as_ptr(), area, 2); // FCW
             core::ptr::copy_nonoverlapping(0x1F80u32.to_le_bytes().as_ptr(), area.add(24), 4); // MXCSR
-            core::ptr::copy_nonoverlapping(0x0000_FFBFu32.to_le_bytes().as_ptr(), area.add(28), 4); // MXCSR_MASK
+            core::ptr::copy_nonoverlapping(0x0000_FFBFu32.to_le_bytes().as_ptr(), area.add(28), 4);
+            // MXCSR_MASK
         }
 
         let mut task = Box::new(Task {
@@ -557,12 +749,18 @@ pub fn by_tid(tid: u32) -> Option<&'static mut Task> {
 
 /// Nombre de taches vivantes (non zombies).
 pub fn live_count() -> usize {
-    tasks().iter().filter(|t| t.state != TaskState::Zombie).count()
+    tasks()
+        .iter()
+        .filter(|t| t.state != TaskState::Zombie)
+        .count()
 }
 
 /// Nombre de taches pretes.
 fn ready_count() -> usize {
-    tasks().iter().filter(|t| t.state == TaskState::Ready).count()
+    tasks()
+        .iter()
+        .filter(|t| t.state == TaskState::Ready)
+        .count()
 }
 
 // --- Changement de contexte --------------------------------------------------
@@ -630,7 +828,9 @@ extern "C" fn task_trampoline() -> ! {
 extern "C" fn kernel_task_trampoline() -> ! {
     let task = current();
     task.fresh = false;
-    let entree = task.entree_noyau.expect("task: fil noyau sans point d'entree");
+    let entree = task
+        .entree_noyau
+        .expect("task: fil noyau sans point d'entree");
     entree()
 }
 
@@ -680,9 +880,7 @@ fn pick_next(after: usize) -> Option<usize> {
         for offset in 1..=len {
             let index = (after.wrapping_add(offset)) % len;
             let candidate = &tasks()[index];
-            if candidate.state == TaskState::Ready
-                && candidate.priorite == Priorite::Interactive
-            {
+            if candidate.state == TaskState::Ready && candidate.priorite == Priorite::Interactive {
                 unsafe { TOURS_INTERACTIFS += 1 };
                 return Some(index);
             }
@@ -908,7 +1106,9 @@ pub fn exit_current(code: i32) -> ! {
             break;
         }
         if crate::kernel::timer::ticks().wrapping_sub(idle_since) > patience {
-            crate::kernel::dmesg::log("task: aucune tache executable depuis 30 s, interblocage suppose");
+            crate::kernel::dmesg::log(
+                "task: aucune tache executable depuis 30 s, interblocage suppose",
+            );
             for task in tasks().iter_mut() {
                 task.state = TaskState::Zombie;
             }
@@ -982,11 +1182,7 @@ pub fn collect_child(pid: u32) {
 pub fn exit_group(code: i32) -> ! {
     let (pid, tid, process) = {
         let task = current();
-        (
-            task.process.borrow().pid,
-            task.tid,
-            task.process.clone(),
-        )
+        (task.process.borrow().pid, task.tid, task.process.clone())
     };
     for task in tasks().iter_mut() {
         if task.tid != tid && task.process.borrow().pid == pid {
@@ -1132,7 +1328,11 @@ pub fn pose_priorite_de(pid: u32, priorite: Priorite) {
 pub fn code_de_sortie(pid: u32) -> Option<i32> {
     processes().iter().find_map(|p| {
         let borrowed = p.borrow();
-        if borrowed.pid == pid && borrowed.zombie { Some(borrowed.exit_code) } else { None }
+        if borrowed.pid == pid && borrowed.zombie {
+            Some(borrowed.exit_code)
+        } else {
+            None
+        }
     })
 }
 
@@ -1248,7 +1448,9 @@ pub fn preempt_from_irq() {
     let cur = unsafe { CURRENT };
     if let Some(next) = pick_next(cur) {
         if next != cur {
-            unsafe { IRQ_PREEMPTIONS = IRQ_PREEMPTIONS.wrapping_add(1); }
+            unsafe {
+                IRQ_PREEMPTIONS = IRQ_PREEMPTIONS.wrapping_add(1);
+            }
             switch_to(cur, next);
         }
     }
@@ -1308,7 +1510,13 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
             Some((_, ticks)) => *ticks += task.ticks_cpu,
             None => {
                 cumuls.push((pid, task.ticks_cpu));
-                mesures.push(Mesure { pid, nom, ticks: 0, octets, taches: 0 });
+                mesures.push(Mesure {
+                    pid,
+                    nom,
+                    ticks: 0,
+                    octets,
+                    taches: 0,
+                });
             }
         }
         if let Some(mesure) = mesures.iter_mut().find(|m| m.pid == pid) {
@@ -1326,8 +1534,14 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
 
     let mut total = 0u64;
     for mesure in mesures.iter_mut() {
-        let cumul = cumuls.iter().find(|(pid, _)| *pid == mesure.pid).map_or(0, |(_, t)| *t);
-        let avant = precedents.iter().find(|(pid, _)| *pid == mesure.pid).map_or(0, |(_, t)| *t);
+        let cumul = cumuls
+            .iter()
+            .find(|(pid, _)| *pid == mesure.pid)
+            .map_or(0, |(_, t)| *t);
+        let avant = precedents
+            .iter()
+            .find(|(pid, _)| *pid == mesure.pid)
+            .map_or(0, |(_, t)| *t);
         mesure.ticks = cumul.saturating_sub(avant);
         total += mesure.ticks;
     }
@@ -1390,7 +1604,9 @@ pub fn watchdog_from_timer() {
     let silence = now.wrapping_sub(heartbeat);
     let seuil = 2 * crate::kernel::timer::TICKS_PER_SECOND;
     if silence >= seuil && now.wrapping_sub(last_warning) >= seuil {
-        unsafe { WM_LAST_WARNING_TICK = now; }
+        unsafe {
+            WM_LAST_WARNING_TICK = now;
+        }
         crate::serial_println!(
             "[sched-watchdog] desktop sans heartbeat depuis {} ms ; switches={} irq-preempt={} deferred={}",
             silence.saturating_mul(1000) / crate::kernel::timer::TICKS_PER_SECOND,
@@ -1412,15 +1628,18 @@ pub struct OrdonnanceurStats {
 pub fn diagnostic_ordonnanceur() -> OrdonnanceurStats {
     let now = crate::kernel::timer::ticks();
     let (switches, irq, deferred, heartbeat) = unsafe {
-        (CONTEXT_SWITCHES, IRQ_PREEMPTIONS, DEFERRED_PREEMPTIONS, WM_HEARTBEAT_TICK)
+        (
+            CONTEXT_SWITCHES,
+            IRQ_PREEMPTIONS,
+            DEFERRED_PREEMPTIONS,
+            WM_HEARTBEAT_TICK,
+        )
     };
     OrdonnanceurStats {
         switches,
         irq_preemptions: irq,
         deferred_preemptions: deferred,
-        wm_age_ms: now
-            .saturating_sub(heartbeat)
-            .saturating_mul(1000)
+        wm_age_ms: now.saturating_sub(heartbeat).saturating_mul(1000)
             / crate::kernel::timer::TICKS_PER_SECOND,
         ready: ready_count(),
         live: live_count(),
@@ -1480,7 +1699,11 @@ fn alarms() -> &'static mut Vec<(u32, u64)> {
 pub fn set_alarm(deadline: u64) -> u64 {
     let pid = current().process.borrow().pid;
     let list = alarms();
-    let previous = list.iter().find(|(p, _)| *p == pid).map(|(_, t)| *t).unwrap_or(0);
+    let previous = list
+        .iter()
+        .find(|(p, _)| *p == pid)
+        .map(|(_, t)| *t)
+        .unwrap_or(0);
     list.retain(|(p, _)| *p != pid);
     if deadline != 0 {
         list.push((pid, deadline));
@@ -1491,7 +1714,11 @@ pub fn set_alarm(deadline: u64) -> u64 {
 /// Echeance de l'alarme du processus courant (0 s'il n'y en a pas).
 pub fn peek_alarm() -> u64 {
     let pid = current().process.borrow().pid;
-    alarms().iter().find(|(p, _)| *p == pid).map(|(_, t)| *t).unwrap_or(0)
+    alarms()
+        .iter()
+        .find(|(p, _)| *p == pid)
+        .map(|(_, t)| *t)
+        .unwrap_or(0)
 }
 
 /// Leve les `SIGALRM` dont l'echeance est atteinte.
@@ -1507,7 +1734,10 @@ fn fire_alarms(now: u64) {
     alarms().retain(|(_, deadline)| now < *deadline);
     for pid in expired {
         if let Some(process) = process_by_pid(pid) {
-            process.borrow_mut().signals.raise(crate::kernel::signal::SIGALRM);
+            process
+                .borrow_mut()
+                .signals
+                .raise(crate::kernel::signal::SIGALRM);
         }
         wake_for_signal(pid);
     }
@@ -1549,7 +1779,11 @@ pub fn futex_wait(uaddr: u64, expected: u32, timeout_ticks: u64) -> bool {
         return true; // EAGAIN cote appelant
     }
 
-    let deadline = if timeout_ticks == 0 { 0 } else { crate::kernel::timer::ticks() + timeout_ticks };
+    let deadline = if timeout_ticks == 0 {
+        0
+    } else {
+        crate::kernel::timer::ticks() + timeout_ticks
+    };
     {
         let task = current();
         task.futex_key = key;

@@ -29,5 +29,6 @@ pub mod syscall;
 pub mod sysroot;
 pub mod task;
 pub mod timer;
+pub mod vma;
 pub mod vmm;
 pub mod panic;

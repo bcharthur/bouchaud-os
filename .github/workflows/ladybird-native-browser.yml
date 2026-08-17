@@ -7,7 +7,16 @@ on:
     paths:
       - "tools/ladybird/**"
       - "src/gui/**"
+      - "src/fs/**"
+      - "src/drivers/block.rs"
+      - "src/kernel/elf.rs"
+      - "src/kernel/exec.rs"
+      - "src/kernel/abi/file.rs"
+      - "src/kernel/abi/mem.rs"
+      - "src/kernel/abi/proc.rs"
+      - "src/kernel/partage.rs"
       - "src/kernel/task.rs"
+      - "src/arch/x86_64/idt.rs"
       - "docs/ladybird/**"
       - "src/fs/tar.rs"
       - "src/gui/window.rs"
@@ -16,7 +25,16 @@ on:
     paths:
       - "tools/ladybird/**"
       - "src/gui/**"
+      - "src/fs/**"
+      - "src/drivers/block.rs"
+      - "src/kernel/elf.rs"
+      - "src/kernel/exec.rs"
+      - "src/kernel/abi/file.rs"
+      - "src/kernel/abi/mem.rs"
+      - "src/kernel/abi/proc.rs"
+      - "src/kernel/partage.rs"
       - "src/kernel/task.rs"
+      - "src/arch/x86_64/idt.rs"
       - "docs/ladybird/**"
       - "src/fs/tar.rs"
       - "src/gui/window.rs"
@@ -274,6 +292,8 @@ jobs:
       - name: Verdict M8
         run: |
           grep -F "tar: hdb deplie ->" serie-ladybird-browser.log
+          grep -F "fichiers paresseux" serie-ladybird-browser.log
+          grep -F "memfabric: premier fault fichier" serie-ladybird-browser.log
           if grep -Fq "[ARCHIVE TRONQUEE]" serie-ladybird-browser.log; then
             echo "Le disque Ladybird a ete tronque pendant le depliage" >&2
             exit 1

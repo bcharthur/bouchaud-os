@@ -166,6 +166,7 @@ extern "x86-interrupt" fn page_fault_handler(stack: InterruptStackFrame, code: P
         if crate::kernel::task::peuple_a_la_demande(addr.as_u64()) {
             return;
         }
+        crate::kernel::task::log_fault_mapping(addr.as_u64());
         crate::println!("faute de page utilisateur @ {:#x} ({:?})", addr.as_u64(), code);
         kill_faulting_task("faute de page", &stack);
     }

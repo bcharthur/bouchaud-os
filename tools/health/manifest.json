@@ -1,0 +1,137 @@
+{
+  "foundation": {
+    "title": "OS / boot foundation",
+    "start": "HEALTH_FOUNDATION_BEGIN",
+    "end": "HEALTH_MEMORY_BEGIN",
+    "requires": [
+      "Bouchaud OS",
+      "devices detected/configured:"
+    ],
+    "forbids": [
+      "panic"
+    ]
+  },
+  "memory": {
+    "title": "Memory / VMM",
+    "start": "HEALTH_MEMORY_BEGIN",
+    "end": "HEALTH_STORAGE_BEGIN",
+    "requires": [
+      "alloctest: OK (alloc fonctionne)",
+      "pagination:",
+      "vma-selftest: OK"
+    ],
+    "forbids": [
+      "insuffisante",
+      "panic"
+    ]
+  },
+  "storage": {
+    "title": "Storage / filesystem",
+    "start": "HEALTH_STORAGE_BEGIN",
+    "end": "HEALTH_ABI_BEGIN",
+    "requires": [
+      "hdb (donnees)",
+      "Archive userland"
+    ],
+    "forbids": [
+      "ARCHIVE TRONQUEE",
+      "panic"
+    ]
+  },
+  "abi": {
+    "title": "Ring3 / ABI / IPC",
+    "start": "HEALTH_ABI_BEGIN",
+    "end": "HEALTH_OSI_L1_BEGIN",
+    "requires": [
+      "[ring3] page mmap anonyme accessible en ecriture",
+      "[poll-selftest] OK"
+    ],
+    "forbids": [
+      "ECHEC",
+      "panic"
+    ]
+  },
+  "osi-l1": {
+    "title": "OSI L1 - device/link carrier",
+    "start": "HEALTH_OSI_L1_BEGIN",
+    "end": "HEALTH_OSI_L2_BEGIN",
+    "requires": [
+      "e1000:",
+      "lien=UP"
+    ],
+    "forbids": [
+      "non initialise",
+      "DOWN",
+      "panic"
+    ]
+  },
+  "osi-l2": {
+    "title": "OSI L2 - Ethernet/ARP",
+    "start": "HEALTH_OSI_L2_BEGIN",
+    "end": "HEALTH_OSI_L3_BEGIN",
+    "requires": [
+      "ARP qui a 10.0.2.2",
+      "reponse de 10.0.2.2"
+    ],
+    "forbids": [
+      "pas de reponse",
+      "timeout",
+      "panic"
+    ]
+  },
+  "osi-l3": {
+    "title": "OSI L3 - IPv4/ICMP",
+    "start": "HEALTH_OSI_L3_BEGIN",
+    "end": "HEALTH_OSI_L56_BEGIN",
+    "requires": [
+      "PING 10.0.2.2",
+      "icmp_seq=",
+      "0% perdus"
+    ],
+    "forbids": [
+      "delai depasse",
+      "ARP sans reponse",
+      "panic"
+    ]
+  },
+  "osi-l5-6": {
+    "title": "OSI L5/L6 - TLS/crypto/presentation",
+    "start": "HEALTH_OSI_L56_BEGIN",
+    "end": "HEALTH_OSI_L4_BEGIN",
+    "requires": [
+      "+ tls-selftest"
+    ],
+    "forbids": [
+      "ECHEC",
+      "FAIL",
+      "panic"
+    ]
+  },
+  "osi-l4": {
+    "title": "OSI L4 - TCP",
+    "start": "HEALTH_OSI_L4_BEGIN",
+    "end": "HEALTH_OSI_L7_BEGIN",
+    "requires": [
+      "HTTP/1.1 200 OK"
+    ],
+    "forbids": [
+      "connexion TCP echouee",
+      "reponse vide",
+      "panic"
+    ]
+  },
+  "osi-l7": {
+    "title": "OSI L7 - HTTP application",
+    "start": "HEALTH_OSI_L7_BEGIN",
+    "end": "HEALTH_COMPLETE",
+    "requires": [
+      "HTTP/1.1 200 OK",
+      "BOUCHAUD_HEALTH_HTTP_OK"
+    ],
+    "forbids": [
+      "connexion TCP echouee",
+      "reponse vide",
+      "panic"
+    ]
+  }
+}

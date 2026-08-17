@@ -1,0 +1,26 @@
+journal off
+echo HEALTH_FOUNDATION_BEGIN
+uname
+devices
+echo HEALTH_MEMORY_BEGIN
+meminfo
+alloctest
+vmstat
+echo HEALTH_STORAGE_BEGIN
+df
+echo HEALTH_ABI_BEGIN
+usermode
+poll-selftest
+echo HEALTH_OSI_L1_BEGIN
+ethinfo
+echo HEALTH_OSI_L2_BEGIN
+arping 10.0.2.2
+echo HEALTH_OSI_L3_BEGIN
+ping 10.0.2.2
+echo HEALTH_OSI_L56_BEGIN
+tls-selftest
+echo HEALTH_OSI_L4_BEGIN
+http http://10.0.2.2:18080/health
+echo HEALTH_OSI_L7_BEGIN
+http http://10.0.2.2:18080/health
+echo HEALTH_COMPLETE

@@ -192,18 +192,106 @@ fn sys_alarm(seconds: u32) -> i64 {
     }
 }
 
+/// Rend residente une plage utilisateur avant une copie noyau <-> userland.
+///
+/// Un page fault materiel n'a lieu que lorsque le CPU dereference directement
+/// l'adresse virtuelle. `AddressSpace::read/write`, eux, traduisent les pages
+/// manuellement : une page seulement promisee leur apparaissait donc absente et
+/// les syscalls rendaient EFAULT. Copyin/copyout doit resoudre le meme backing
+/// paresseux que le gestionnaire #PF.
+///
+/// `write=true` impose en plus PTE_WRITE : le noyau ne doit pas permettre a un
+/// syscall d'ecrire dans une page que le processus lui-meme voit read-only.
+fn fault_in_user_range(addr: u64, len: usize, write: bool) -> bool {
+    if len == 0 {
+        return true;
+    }
+
+    let last = match addr.checked_add(len as u64 - 1) {
+        Some(last) => last,
+        None => return false,
+    };
+
+    if !crate::kernel::vmm::is_user_addr(addr)
+        || !crate::kernel::vmm::is_user_addr(last)
+    {
+        return false;
+    }
+
+    let page_size = crate::kernel::vmm::PAGE_SIZE;
+    let mut page = addr & !(page_size - 1);
+    let last_page = last & !(page_size - 1);
+
+    loop {
+        let present = {
+            let process = task::current_process();
+            let mut process = process.borrow_mut();
+            process.space.translate(page).is_some()
+        };
+
+        if !present && !task::peuple_a_la_demande(page) {
+            return false;
+        }
+
+        if write {
+            let writable = {
+                let process = task::current_process();
+                let mut process = process.borrow_mut();
+                process.space.writable(page)
+            };
+            if !writable {
+                return false;
+            }
+        }
+
+        if page == last_page {
+            break;
+        }
+        page += page_size;
+    }
+
+    true
+}
+
 /// Copie une chaine C depuis l'espace utilisateur.
+///
+/// On avance page par page : demander arbitrairement 4096 octets d'avance
+/// rejetterait une chaine parfaitement valide terminee juste avant une page
+/// non mappee.
 pub(crate) fn user_string(addr: u64) -> Option<String> {
     if addr == 0 {
         return None;
     }
-    let process = task::current_process();
-    let mut process = process.borrow_mut();
-    process.space.read_cstr(addr, 4096)
+
+    const MAX: usize = 4096;
+    let page_size = crate::kernel::vmm::PAGE_SIZE as usize;
+    let mut bytes = Vec::new();
+    let mut cursor = addr;
+
+    while bytes.len() < MAX {
+        let in_page = (cursor as usize) & (page_size - 1);
+        let room = page_size - in_page;
+        let wanted = core::cmp::min(room, MAX - bytes.len());
+
+        let chunk = user_read(cursor, wanted)?;
+        if let Some(end) = chunk.iter().position(|&byte| byte == 0) {
+            bytes.extend_from_slice(&chunk[..end]);
+            return Some(String::from_utf8_lossy(&bytes).into_owned());
+        }
+
+        bytes.extend_from_slice(&chunk);
+        cursor = cursor.checked_add(wanted as u64)?;
+    }
+
+    None
 }
 
 /// Copie un tampon depuis l'espace utilisateur.
 pub fn user_read(addr: u64, len: usize) -> Option<Vec<u8>> {
+    if !fault_in_user_range(addr, len, false) {
+        return None;
+    }
+
     let mut buffer = alloc::vec![0u8; len];
     let process = task::current_process();
     let mut process = process.borrow_mut();
@@ -216,6 +304,10 @@ pub fn user_read(addr: u64, len: usize) -> Option<Vec<u8>> {
 
 /// Copie un tampon vers l'espace utilisateur.
 pub fn user_write(addr: u64, data: &[u8]) -> bool {
+    if !fault_in_user_range(addr, data.len(), true) {
+        return false;
+    }
+
     let process = task::current_process();
     let mut process = process.borrow_mut();
     process.space.write(addr, data)
@@ -360,7 +452,8 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
             mem::sys_msync(args[0], args[1]);
             0
         }
-        MADVISE | MLOCK | MUNLOCK | MLOCKALL | MUNLOCKALL => 0,
+        MADVISE => mem::sys_madvise(args[0], args[1], args[2] as i32),
+        MLOCK | MUNLOCK | MLOCKALL | MUNLOCKALL => 0,
 
         // --- Processus, threads, ordonnancement ---
         GETPID => task::current().process.borrow().pid as i64,

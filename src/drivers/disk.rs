@@ -44,10 +44,18 @@ pub fn print_df() {
         Some((files, dirs, bytes)) => {
             crate::println!("");
             crate::println!(
-                "Archive userland depliee depuis hdb : {} fichiers, {} repertoires, {} Kio",
+                "Archive userland indexee depuis hdb : {} fichiers, {} repertoires, {} Kio logiques",
                 files,
                 dirs,
                 bytes / 1024
+            );
+            let (lazy_files, lazy_bytes, read_ops, read_bytes) = crate::fs::backing::stats();
+            crate::println!(
+                "  backing paresseux : {} fichiers, {} Kio ; lectures={} ({} Kio)",
+                lazy_files,
+                lazy_bytes / 1024,
+                read_ops,
+                read_bytes / 1024
             );
         }
         None => {
