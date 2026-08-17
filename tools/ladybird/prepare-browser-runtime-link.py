@@ -124,6 +124,110 @@ replace_once(
     '''#endif\n#endif\n    }();\n\n    Core::ResourceImplementation::install(make<Core::ResourceImplementationFile>(MUST(String::from_byte_string(s_ladybird_resource_root))));''',
 )
 
+# M8 CPU screenshot fallback.
+#
+# In the pinned Ladybird tree LocalNavigable::render_screenshot() normally
+# delegates rasterization to a CompositorContext. Bouchaud deliberately reports
+# supports_compositor() == false at M8, so the upstream no-context branch merely
+# invokes the callback and leaves the screenshot bitmap untouched (all zeroes).
+#
+# Keep LibWeb's real layout/display-list machinery, but replay that display list
+# synchronously with DisplayListPlayerSkia into the screenshot PaintingSurface.
+# This is deliberately scoped to BOUCHAUD_PORT and disappears naturally when a
+# later milestone enables Ladybird's external Compositor.
+local_navigable = root / "Libraries/LibWeb/HTML/LocalNavigable.cpp"
+replace_once(
+    local_navigable,
+    "#include <LibWeb/Painting/DisplayListRecordingContext.h>\n",
+    "#include <LibWeb/Painting/DisplayListRecordingContext.h>\n"
+    "#include <LibWeb/Painting/DisplayListPlayerSkia.h>\n",
+)
+replace_once(
+    local_navigable,
+    '''void LocalNavigable::render_screenshot(Gfx::PaintingSurface& painting_surface, PaintConfig paint_config, Function<void()>&& callback)
+{
+    if (!has_compositor_context()) {
+        callback();
+        return;
+    }
+
+    if (!record_display_list_and_scroll_state(paint_config)) {
+        callback();
+        return;
+    }
+    compositor_context().request_screenshot(painting_surface, move(callback));
+}''',
+    '''void LocalNavigable::render_screenshot(Gfx::PaintingSurface& painting_surface, PaintConfig paint_config, Function<void()>&& callback)
+{
+#if defined(BOUCHAUD_PORT)
+    if (!has_compositor_context()) {
+        auto document = active_document();
+        if (!document) {
+            warnln("[ladybird-bouchaud] M8_CPU_SCREENSHOT_NO_DOCUMENT");
+            callback();
+            return;
+        }
+
+        outln("[ladybird-bouchaud] M8_CPU_SCREENSHOT_STAGE layout begin");
+        document->update_layout(DOM::UpdateLayoutReason::ProcessScreenshot);
+        document->update_paint_and_hit_testing_properties_if_needed();
+        outln("[ladybird-bouchaud] M8_CPU_SCREENSHOT_STAGE layout ok");
+
+        auto display_list = document->record_display_list(
+            paint_config,
+            m_display_list_resource_storage,
+            Painting::PaintCommandCacheMode::ReadWrite);
+        if (!display_list) {
+            warnln("[ladybird-bouchaud] M8_CPU_SCREENSHOT_NO_DISPLAY_LIST");
+            callback();
+            return;
+        }
+        outln("[ladybird-bouchaud] M8_CPU_SCREENSHOT_STAGE display-list ok bytes={}", display_list->command_bytes().size());
+
+        auto document_paintable = document->paintable();
+        if (!document_paintable) {
+            warnln("[ladybird-bouchaud] M8_CPU_SCREENSHOT_NO_PAINTABLE");
+            callback();
+            return;
+        }
+
+        // Match LocalNavigable's normal compositor recording path: the visual
+        // context tree and scroll snapshot must describe the same freshly
+        // recorded layout before DisplayListPlayerSkia replays the frame.
+        document_paintable->refresh_scroll_state();
+        Painting::ScrollStateSnapshot scroll_state_snapshot { document_paintable->scroll_state_snapshot() };
+        Painting::DisplayListPlayerSkia display_list_player;
+
+        outln("[ladybird-bouchaud] M8_CPU_SCREENSHOT_STAGE replay begin");
+        display_list_player.execute(
+            *display_list,
+            document_paintable->visual_context_tree(),
+            m_display_list_resource_storage,
+            scroll_state_snapshot,
+            painting_surface,
+            nullptr,
+            nullptr);
+        display_list_player.flush(painting_surface);
+        outln("[ladybird-bouchaud] M8_CPU_SCREENSHOT_RENDERED");
+
+        callback();
+        return;
+    }
+#endif
+
+    if (!has_compositor_context()) {
+        callback();
+        return;
+    }
+
+    if (!record_display_list_and_scroll_state(paint_config)) {
+        callback();
+        return;
+    }
+    compositor_context().request_screenshot(painting_surface, move(callback));
+}''',
+)
+
 # M8 intentionally has no Ladybird Compositor process. PageHost::initialize()
 # creates the first top-level traversable immediately; with the upstream
 # PageClient advertising compositor support, that creation path tries to obtain
