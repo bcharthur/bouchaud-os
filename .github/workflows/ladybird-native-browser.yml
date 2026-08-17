@@ -8,12 +8,14 @@ on:
       - "tools/ladybird/**"
       - "docs/ladybird/**"
       - "src/fs/tar.rs"
+      - "src/gui/window.rs"
       - ".github/workflows/ladybird-native-browser.yml"
   pull_request:
     paths:
       - "tools/ladybird/**"
       - "docs/ladybird/**"
       - "src/fs/tar.rs"
+      - "src/gui/window.rs"
       - ".github/workflows/ladybird-native-browser.yml"
 
 concurrency:
@@ -178,7 +180,7 @@ jobs:
           retention-days: 14
 
   qemu:
-    name: WebContent-ring3-QEMU
+    name: M8-HTML-local-fenetre-Bouchaud
     runs-on: ubuntu-latest
     needs: build
     timeout-minutes: 60
@@ -211,7 +213,7 @@ jobs:
           name: bouchaud-ladybird-native-browser
           path: native-browser
 
-      - name: Fabriquer le disque Ladybird
+      - name: Fabriquer le disque Ladybird M8
         run: |
           set -e
           # Gardes synchronisees avec src/fs/tar.rs. Une croissance future du
@@ -226,7 +228,10 @@ jobs:
           mkdir -p scenario/usr/libexec/ladybird scenario/usr/share/ladybird
           cp native-browser/WebContent scenario/usr/libexec/ladybird/WebContent
           cp native-browser/webcontent-bootstrap scenario/usr/libexec/ladybird/webcontent-bootstrap
-          chmod 755 scenario/usr/libexec/ladybird/*
+          # Le WM lance son client graphique a ce chemin. Le bootstrap reste le
+          # processus suivi par la fenetre et engendre le vrai WebContent.
+          cp native-browser/webcontent-bootstrap scenario/bo-navigateur
+          chmod 755 scenario/bo-navigateur scenario/usr/libexec/ladybird/*
           for svc in RequestServer ImageDecoder Compositor WebWorker; do
             if [ -x "native-browser/$svc" ]; then
               cp "native-browser/$svc" "scenario/usr/libexec/ladybird/$svc"
@@ -239,15 +244,17 @@ jobs:
           cat > scenario/autorun <<'SCENARIO'
           uname
           df
-          echo "=== Ladybird WebContent natif ==="
-          exec /usr/libexec/ladybird/webcontent-bootstrap /usr/libexec/ladybird/WebContent
+          echo "=== Ladybird M8 : HTML local dans fenetre Bouchaud ==="
+          export BO_AUTOSTART_BROWSER=1
+          export BOUCHAUD_M8=1
+          desktop
           SCENARIO
           (cd tools/userland && IMAGE="$GITHUB_WORKSPACE/ladybird-browser.img" ./mkdisk.sh "$GITHUB_WORKSPACE/scenario")
           DISK_SIZE=$(stat -c '%s' ladybird-browser.img)
           echo "hdb Ladybird: $DISK_SIZE octets"
           test "$DISK_SIZE" -le "$MAX_DATA_DISK"
 
-      - name: Executer WebContent en ring3
+      - name: Executer M8 en ring3
         run: |
           set +e
           timeout 240 qemu-system-x86_64 \
@@ -260,19 +267,27 @@ jobs:
           echo "qemu: code $?"
           cat serie-ladybird-browser.log
 
-      - name: Verdict WebContent natif
+      - name: Verdict M8
         run: |
           grep -F "tar: hdb deplie ->" serie-ladybird-browser.log
           if grep -Fq "[ARCHIVE TRONQUEE]" serie-ladybird-browser.log; then
             echo "Le disque Ladybird a ete tronque pendant le depliage" >&2
             exit 1
           fi
+          grep -F "[gui] window manager demarre" serie-ladybird-browser.log
+          grep -F "[gui] BO_AUTOSTART_BROWSER=1 -> /bo-navigateur" serie-ladybird-browser.log
+          grep -F "gui: client /bo-navigateur pid=" serie-ladybird-browser.log
           grep -F "[ladybird-bouchaud] WebContent lance pid=" serie-ladybird-browser.log
           grep -F "[ladybird-bouchaud] WEBCONTENT_READY" serie-ladybird-browser.log
-          grep -F "[ladybird-bouchaud] WEBCONTENT_PROCESS_ALIVE" serie-ladybird-browser.log
-          grep -F "[ladybird-bouchaud] RESULTAT : WebContent natif ring3 OK" serie-ladybird-browser.log
+          grep -F "[ladybird-bouchaud] M8_BOOTSTRAP" serie-ladybird-browser.log
+          grep -F "[ladybird-bouchaud] M8_LOCAL_HTML_RENDERED" serie-ladybird-browser.log
+          grep -F "[ladybird-bouchaud] M8_CAPTURE_MATCH" serie-ladybird-browser.log
+          grep -F "gui: client pid=" serie-ladybird-browser.log | grep -F "parle le protocole v1"
+          grep -F "gui: premiere trame du client pid=" serie-ladybird-browser.log
+          grep -F "[ladybird-bouchaud] M8_WEBCONTENT_EXIT_OK" serie-ladybird-browser.log
+          grep -F "[ladybird-bouchaud] RESULTAT : M8 HTML local dans fenetre Bouchaud OK" serie-ladybird-browser.log
 
-      - name: Journal Ladybird
+      - name: Journal Ladybird M8
         if: always()
         uses: actions/upload-artifact@v4
         with:
