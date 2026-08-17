@@ -2,12 +2,26 @@
   "foundation": {
     "title": "OS / boot foundation",
     "start": "HEALTH_FOUNDATION_BEGIN",
-    "end": "HEALTH_MEMORY_BEGIN",
+    "end": "HEALTH_RESOURCE_BEGIN",
     "requires": [
       "Bouchaud OS",
       "devices detected/configured:"
     ],
     "forbids": [
+      "panic"
+    ]
+  },
+  "resource": {
+    "title": "CPU / PMM / DMA / GPU Resource Core",
+    "start": "HEALTH_RESOURCE_BEGIN",
+    "end": "HEALTH_MEMORY_BEGIN",
+    "requires": [
+      "Resource Core v1",
+      "GPU Core v1",
+      "[resource-selftest] OK"
+    ],
+    "forbids": [
+      "[resource-selftest] ECHEC",
       "panic"
     ]
   },

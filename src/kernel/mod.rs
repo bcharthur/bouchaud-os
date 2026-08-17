@@ -23,6 +23,7 @@ pub mod handle;
 pub mod partage;
 pub mod power;
 pub mod process;
+pub mod resource;
 pub mod scheduler;
 pub mod signal;
 pub mod syscall;

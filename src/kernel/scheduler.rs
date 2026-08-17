@@ -1,26 +1,36 @@
-//! Ordonnanceur — socle.
+//! Facade de l'ordonnanceur reel de Bouchaud OS.
 //!
-//! Etape actuelle : ordonnancement **cooperatif** trivial (le noyau execute une
-//! tache a la fois : le shell ou le bureau). Pas encore de preemption ni de
-//! changement de contexte. A terme : scheduler round-robin sur timer (IRQ0),
-//! sauvegarde/restauration des registres, piles par tache.
+//! L'ancien fichier de ce nom etait reste un prototype cooperatif alors que
+//! l'ordonnanceur reel vit desormais dans `kernel::task` : threads, piles
+//! noyau, sauvegarde FPU/SSE, preemption IRQ0, priorites et blocage.
+//!
+//! Cette facade existe pour fournir un point d'entree stable aux diagnostics et
+//! aux futurs backends SMP sans maintenir deux implementations concurrentes.
 
-static mut CURRENT_PID: u32 = 1;
+pub use crate::kernel::task::OrdonnanceurStats;
 
-/// PID de la tache courante.
 pub fn current() -> u32 {
-    unsafe { CURRENT_PID }
+    match crate::kernel::task::try_current() {
+        Some(task) => task.process.borrow().pid,
+        None => 0,
+    }
 }
 
-/// Designe la tache courante (appele lors d'un changement logique d'activite).
-pub fn set_current(pid: u32) {
-    unsafe { CURRENT_PID = pid; }
+/// Compatibilite avec l'ancienne API. Le processus courant est maintenant une
+/// consequence du contexte ordonnance ; il ne peut plus etre force par un
+/// simple entier.
+pub fn set_current(_pid: u32) {}
+
+pub fn yield_now() {
+    if crate::kernel::task::in_user_task() {
+        let _ = crate::kernel::task::schedule();
+    }
 }
 
-/// Cede la main. Cooperatif : no-op pour l'instant (placeholder d'API).
-pub fn yield_now() {}
+pub fn stats() -> OrdonnanceurStats {
+    crate::kernel::task::diagnostic_ordonnanceur()
+}
 
-/// Etat de l'ordonnanceur, pour les commandes systeme.
 pub fn state() -> &'static str {
-    "cooperatif (pas de preemption ; round-robin sur timer planifie)"
+    "preemptif UP: IRQ0 ring3 + preemption differee ring0, priorites interactive/normale, FPU/SSE par tache"
 }

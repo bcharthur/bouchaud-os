@@ -187,6 +187,7 @@ pub fn handoff_to_userland() -> bool {
         return false;
     }
     unsafe { USERLAND_OWNS_DISPLAY = true; }
+    crate::drivers::gpu::note_handoff(true);
     crate::serial_println!("[gfx] framebuffer cede au userland (BGA conserve)");
     true
 }
@@ -200,6 +201,7 @@ pub fn resume_from_userland() {
         enter();
     }
     unsafe { USERLAND_OWNS_DISPLAY = false; }
+    crate::drivers::gpu::note_handoff(false);
     crate::serial_println!("[gfx] framebuffer repris par le bureau");
 }
 
@@ -217,11 +219,13 @@ pub fn enter() {
                 bga_set_mode(WIDTH as u16, HEIGHT as u16);
                 LFB = p;
                 HD_ACTIVE = true;
+                crate::drivers::gpu::activate_bga(WIDTH, HEIGHT, 32, LFB_PHYS);
                 crate::serial_println!("[gfx] BGA HD actif (1280x720x32, id={:#x})", id);
             }
             _ => {
                 LFB = core::ptr::null_mut();
                 HD_ACTIVE = false;
+                crate::drivers::gpu::deactivate();
                 crate::serial_println!("[gfx] BGA indisponible (id={:#x}) : present() inactif", id);
             }
         }
@@ -250,6 +254,7 @@ pub fn leave() {
         HD_ACTIVE = false;
         USERLAND_OWNS_DISPLAY = false;
     }
+    crate::drivers::gpu::deactivate();
     crate::serial_println!("[gfx] retour mode texte");
 }
 
@@ -367,6 +372,7 @@ pub fn present() {
     unsafe {
         core::ptr::copy_nonoverlapping(buf.as_ptr(), lfb, WIDTH * HEIGHT);
     }
+    crate::drivers::gpu::note_present(WIDTH * HEIGHT * core::mem::size_of::<u32>());
 }
 
 // --- Texte bitmap 8×8 (zéro allocation, zéro tas) ---------------------------

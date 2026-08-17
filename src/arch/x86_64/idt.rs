@@ -180,7 +180,7 @@ extern "x86-interrupt" fn page_fault_handler(stack: InterruptStackFrame, code: P
 extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
     let _gs = GsGuard::enter(&stack);
     timer::tick();
-    crate::kernel::task::echantillonne();
+    crate::kernel::task::echantillonne(from_user(&stack));
     notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
 
     crate::kernel::task::watchdog_from_timer();

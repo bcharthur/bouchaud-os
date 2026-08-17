@@ -11,6 +11,7 @@ pub mod disk;
 pub mod display;
 pub mod e1000;
 pub mod gfx;
+pub mod gpu;
 pub mod keyboard;
 pub mod mouse;
 pub mod net;

@@ -2,6 +2,10 @@ journal off
 echo HEALTH_FOUNDATION_BEGIN
 uname
 devices
+echo HEALTH_RESOURCE_BEGIN
+resstat
+gpuinfo
+resource-selftest
 echo HEALTH_MEMORY_BEGIN
 meminfo
 alloctest

@@ -20,7 +20,7 @@ pub fn help() {
     vga::set_color(COLOR_CYAN);
     println!("Commandes Bouchaud OS {}:", VERSION);
     vga::set_color(COLOR_DEFAULT);
-    println!("  systeme : help, clear, version, uname, sysinfo, cpuinfo, meminfo, devices");
+    println!("  systeme : help, clear, version, uname, sysinfo, cpuinfo, meminfo, resstat, memtop, gpuinfo, devices");
     println!("            dmesg, history, uptime, ticks, interrupts, breakpoint, serial-test");
     println!("            panic-test, roadmap");
     println!("  noyau   : ps, kill <pid>, free, syscalls, apps, launch <app>, df");
@@ -138,6 +138,16 @@ pub fn meminfo() {
                 / (1024 * 1024)
         );
     }
+    let pmm = crate::kernel::vmm::frame_stats_detailed();
+    let dma = crate::kernel::memory::dma_stats();
+    println!(
+        "pmm-accounting: high={} alloc={} free_ops={} failures={}",
+        pmm.high_watermark, pmm.allocations, pmm.frees, pmm.failures
+    );
+    println!(
+        "dma-accounting: used={} KiB free={} KiB alloc={} failures={}",
+        dma.used / 1024, dma.free / 1024, dma.allocations, dma.failures
+    );
     println!(
         "vma-selftest: {}",
         if crate::kernel::vma::self_test() {
@@ -145,6 +155,26 @@ pub fn meminfo() {
         } else {
             "ECHEC"
         }
+    );
+}
+
+pub fn resstat() {
+    crate::kernel::resource::print_system();
+}
+
+pub fn memtop() {
+    crate::kernel::resource::print_processes();
+}
+
+pub fn gpuinfo() {
+    crate::drivers::gpu::print_info();
+}
+
+pub fn resource_selftest() {
+    let ok = crate::kernel::resource::self_test();
+    println!(
+        "[resource-selftest] {}",
+        if ok { "OK" } else { "ECHEC" }
     );
 }
 

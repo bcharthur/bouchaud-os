@@ -11,6 +11,11 @@ pub fn height() -> usize { gfx::HEIGHT }
 
 /// Affiche l'etat de l'affichage (commande `display`/`devices`).
 pub fn print_info() {
-    crate::println!("display: framebuffer HD {}x{}x32 (Bochs VBE/BGA truecolor)", gfx::WIDTH, gfx::HEIGHT);
-    crate::println!("  texte: VGA 80x25 ; bureau graphique en HD via la commande 'desktop'");
+    crate::println!(
+        "display: framebuffer HD {}x{}x32 (backend via GPU Core)",
+        gfx::WIDTH,
+        gfx::HEIGHT
+    );
+    crate::println!("  texte: VGA 80x25 ; bureau graphique via la commande 'desktop'");
+    crate::drivers::gpu::print_info();
 }

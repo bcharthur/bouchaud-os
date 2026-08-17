@@ -1461,7 +1461,11 @@ pub fn preempt_from_irq() {
 /// Appele par IRQ0, y compris quand le timer interrompt du code noyau : le
 /// bureau est une tache comme les autres, et le temps qu'il passe a composer
 /// doit se voir au meme titre que celui du navigateur.
-pub fn echantillonne() {
+pub fn echantillonne(interrupted_user: bool) {
+    if cpu::account_timer_tick(interrupted_user) {
+        return;
+    }
+
     let index = unsafe { CURRENT };
     if index == usize::MAX {
         return;
@@ -1475,10 +1479,12 @@ pub fn echantillonne() {
 pub struct Mesure {
     pub pid: u32,
     pub nom: String,
-    /// Ticks consommes depuis le dernier appel a [`mesure_processus`].
+    /// Ticks CPU consommes depuis le dernier releve.
     pub ticks: u64,
-    /// Taille de l'espace d'adressage, en octets.
+    /// Compatibilite historique : desormais RSS reel, pas taille virtuelle.
     pub octets: u64,
+    pub rss_octets: u64,
+    pub vss_octets: u64,
     pub taches: usize,
 }
 
@@ -1488,6 +1494,7 @@ pub struct Mesure {
 /// tout le monde a « beaucoup » de ticks. Ce qu'on veut lire, c'est ce qui s'est
 /// passe depuis la ligne precedente du journal.
 static mut MESURE_PRECEDENTE: Option<Vec<(u32, u64)>> = None;
+static mut MESURE_TICK_PRECEDENT: u64 = 0;
 
 /// Mesure tous les processus vivants et remet les compteurs a la reference.
 ///
@@ -1502,9 +1509,10 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
         if task.state == TaskState::Zombie {
             continue;
         }
-        let (pid, nom, octets) = {
+        let (pid, nom, rss_octets, vss_octets) = {
             let process = task.process.borrow();
-            (process.pid, process.name.clone(), process.taille_as())
+            let usage = crate::kernel::resource::memory_usage(&process);
+            (process.pid, process.name.clone(), usage.rss, usage.vss)
         };
         match cumuls.iter_mut().find(|(autre, _)| *autre == pid) {
             Some((_, ticks)) => *ticks += task.ticks_cpu,
@@ -1514,7 +1522,9 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
                     pid,
                     nom,
                     ticks: 0,
-                    octets,
+                    octets: rss_octets,
+                    rss_octets,
+                    vss_octets,
                     taches: 0,
                 });
             }
@@ -1532,7 +1542,6 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
         (*pointeur).as_ref().unwrap().clone()
     };
 
-    let mut total = 0u64;
     for mesure in mesures.iter_mut() {
         let cumul = cumuls
             .iter()
@@ -1543,10 +1552,20 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
             .find(|(pid, _)| *pid == mesure.pid)
             .map_or(0, |(_, t)| *t);
         mesure.ticks = cumul.saturating_sub(avant);
-        total += mesure.ticks;
     }
-    unsafe { MESURE_PRECEDENTE = Some(cumuls) };
-    (mesures, total)
+
+    let now = crate::kernel::timer::ticks();
+    let previous_tick = unsafe { MESURE_TICK_PRECEDENT };
+    let window = if previous_tick == 0 {
+        now.max(1)
+    } else {
+        now.wrapping_sub(previous_tick).max(1)
+    };
+    unsafe {
+        MESURE_PRECEDENTE = Some(cumuls);
+        MESURE_TICK_PRECEDENT = now;
+    }
+    (mesures, window)
 }
 
 /// Signale qu'une commutation est souhaitable au prochain point sur.
