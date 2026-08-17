@@ -980,15 +980,25 @@ pub fn collect_child(pid: u32) {
 
 /// Termine tous les threads du processus courant (`exit_group`).
 pub fn exit_group(code: i32) -> ! {
-    let (pid, tid) = {
+    let (pid, tid, process) = {
         let task = current();
-        (task.process.borrow().pid, task.tid)
+        (
+            task.process.borrow().pid,
+            task.tid,
+            task.process.clone(),
+        )
     };
     for task in tasks().iter_mut() {
         if task.tid != tid && task.process.borrow().pid == pid {
             task.state = TaskState::Zombie;
         }
     }
+
+    // `exit_group` termine tous les autres threads du processus. Le thread
+    // courant est donc le seul encore vivant; `exit_current` le decrementera
+    // de 1 a 0 et rendra le processus zombie/recoltable par `wait4`.
+    process.borrow_mut().threads = 1;
+
     exit_current(code)
 }
 

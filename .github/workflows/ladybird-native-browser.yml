@@ -6,6 +6,8 @@ on:
     branches: ["**"]
     paths:
       - "tools/ladybird/**"
+      - "src/gui/**"
+      - "src/kernel/task.rs"
       - "docs/ladybird/**"
       - "src/fs/tar.rs"
       - "src/gui/window.rs"
@@ -13,6 +15,8 @@ on:
   pull_request:
     paths:
       - "tools/ladybird/**"
+      - "src/gui/**"
+      - "src/kernel/task.rs"
       - "docs/ladybird/**"
       - "src/fs/tar.rs"
       - "src/gui/window.rs"
