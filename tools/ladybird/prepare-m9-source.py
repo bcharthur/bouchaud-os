@@ -117,7 +117,6 @@ if "BOUCHAUD_REQUEST_FD" not in data:
         outln("[ladybird-bouchaud] M9_REQUESTSERVER_CONNECTED pid={} fd={}", Core::System::getpid(), request_fd);
     }
 #endif
-
     webcontent_client->on_request_server_connection = [&heap](auto const& handle) {'''
 
     if anchor not in data:
@@ -186,7 +185,7 @@ void ConnectionFromClient::bouchaud_m9_start()
     set_has_focus(page_id, true);
     set_system_visibility_state(page_id, Web::HTML::VisibilityState::Visible);
 
-    auto* requested_url = getenv("BOUCHAUD_M9_URL");
+    char const* requested_url = getenv("BOUCHAUD_M9_URL");
     if (!requested_url || !*requested_url)
         requested_url = "http://10.0.2.2:18080/m9.html";
 
