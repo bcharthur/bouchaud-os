@@ -200,24 +200,21 @@ static int bouchaud_env_dimension(char const* name, int fallback)
     return parsed > 0 ? parsed : fallback;
 }
 
-static bool bouchaud_write_all(int fd, void const* data, size_t size)
-{
-    auto* bytes = static_cast<u8 const*>(data);
-    while (size > 0) {
-        auto written = write(fd, bytes, size);
-        if (written < 0 && errno == EINTR)
-            continue;
-        if (written <= 0)
-            return false;
-        bytes += written;
-        size -= static_cast<size_t>(written);
-    }
-    return true;
-}
-
+// M8_GUI_SINGLE_WRITE
+// docs/GUI_USERLAND_PROTOCOL.md requires header + payload to be written as one
+// frame. Splitting them into two write() calls can strand the WM with a header
+// whose payload never arrives if the second write observes back-pressure.
 static bool bouchaud_gui_message(int fd, u16 kind, u32 serial, void const* payload, u32 payload_size)
 {
-    u8 header[16] {};
+    constexpr size_t header_size = 16;
+    constexpr u32 maximum_payload_size = 4096;
+
+    if (payload_size > maximum_payload_size || (payload_size > 0 && payload == nullptr)) {
+        errno = payload_size > maximum_payload_size ? EMSGSIZE : EINVAL;
+        return false;
+    }
+
+    u8 message[header_size + maximum_payload_size] {};
     auto put16 = [](u8* out, u16 value) {
         out[0] = static_cast<u8>(value);
         out[1] = static_cast<u8>(value >> 8);
@@ -228,14 +225,28 @@ static bool bouchaud_gui_message(int fd, u16 kind, u32 serial, void const* paylo
         out[2] = static_cast<u8>(value >> 16);
         out[3] = static_cast<u8>(value >> 24);
     };
-    put32(header + 0, 0x55474f42); // "BOGU" little-endian
-    put16(header + 4, 1);          // protocol version
-    put16(header + 6, kind);
-    put32(header + 8, payload_size);
-    put32(header + 12, serial);
-    if (!bouchaud_write_all(fd, header, sizeof(header)))
-        return false;
-    return payload_size == 0 || bouchaud_write_all(fd, payload, payload_size);
+
+    put32(message + 0, 0x55474f42); // "BOGU" little-endian
+    put16(message + 4, 1);          // protocol version
+    put16(message + 6, kind);
+    put32(message + 8, payload_size);
+    put32(message + 12, serial);
+    if (payload_size > 0)
+        memcpy(message + header_size, payload, payload_size);
+
+    auto message_size = header_size + static_cast<size_t>(payload_size);
+    for (;;) {
+        auto written = write(fd, message, message_size);
+        if (written < 0 && errno == EINTR)
+            continue;
+        if (written < 0)
+            return false;
+        if (static_cast<size_t>(written) != message_size) {
+            errno = EIO;
+            return false;
+        }
+        return true;
+    }
 }
 
 static u64 bouchaud_fnv1a_u32(u64 hash, u32 value)
@@ -266,12 +277,24 @@ static bool bouchaud_m8_present(Gfx::ShareableBitmap const& screenshot)
         return false;
     }
 
-    auto surface_bytes = static_cast<size_t>(stride) * static_cast<size_t>(surface_height);
-    auto* mapped = mmap(nullptr, surface_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, surface_fd, 0);
-    if (mapped == MAP_FAILED) {
-        warnln("[ladybird-bouchaud] M8_SURFACE_MMAP_FAILED errno={}", errno);
+    auto stride_bytes = static_cast<size_t>(stride);
+    auto height_rows = static_cast<size_t>(surface_height);
+    if (height_rows != 0 && stride_bytes > SIZE_MAX / height_rows) {
+        warnln("[ladybird-bouchaud] M8_SURFACE_SIZE_OVERFLOW stride={} height={}", stride, surface_height);
         return false;
     }
+    auto surface_bytes = stride_bytes * height_rows;
+    if (surface_bytes == 0) {
+        warnln("[ladybird-bouchaud] M8_SURFACE_SIZE_ZERO");
+        return false;
+    }
+
+    auto* mapped = mmap(nullptr, surface_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, surface_fd, 0);
+    if (mapped == MAP_FAILED) {
+        warnln("[ladybird-bouchaud] M8_SURFACE_MMAP_FAILED errno={} bytes={}", errno, surface_bytes);
+        return false;
+    }
+    outln("[ladybird-bouchaud] M8_SURFACE_MAPPED bytes={} stride={} size={}x{}", surface_bytes, stride, surface_width, surface_height);
 
     auto* destination = static_cast<u8*>(mapped);
     for (int y = 0; y < surface_height; ++y) {
@@ -359,6 +382,7 @@ static bool bouchaud_m8_present(Gfx::ShareableBitmap const& screenshot)
         munmap(mapped, surface_bytes);
         return false;
     }
+    outln("[ladybird-bouchaud] M8_GUI_HANDSHAKE_OK");
 
     u8 frame[24] {};
     auto put32 = [](u8* out, u32 value) {
@@ -379,6 +403,7 @@ static bool bouchaud_m8_present(Gfx::ShareableBitmap const& screenshot)
         warnln("[ladybird-bouchaud] M8_FRAME_READY_FAILED errno={}", errno);
         return false;
     }
+    outln("[ladybird-bouchaud] M8_FRAME_READY_OK serial=3");
 
     outln("[ladybird-bouchaud] M8_CAPTURE_MATCH hash={:#x} bitmap={}x{} window={}x{}", source_hash, bitmap.width(), bitmap.height(), surface_width, surface_height);
     return true;

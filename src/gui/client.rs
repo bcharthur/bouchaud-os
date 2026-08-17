@@ -397,7 +397,7 @@ impl Client {
                 }
                 self.degat = self.degat.union(&degat);
                 self.protocole_actif = true;
-                if self.etat == Etat::Demarrage {
+                if self.derniere_trame == 0 {
                     crate::kernel::dmesg::log_fmt(format_args!(
                         "gui: premiere trame du client pid={} ({}x{})",
                         self.pid, degat.largeur, degat.hauteur
