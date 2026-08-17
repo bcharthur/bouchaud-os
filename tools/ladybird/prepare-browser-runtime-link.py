@@ -15,6 +15,9 @@ It:
 - forces the no-op sandbox implementations for Bouchaud services instead of
   selecting the Linux sandbox merely because CMake itself runs on Ubuntu;
 - leaves every build-time generator/tool with the native Ubuntu link policy;
+- disables Ladybird's external Compositor for the M8 CPU-paint path: Bouchaud
+  deliberately has no Compositor process at this milestone and presents the
+  LibWeb/LibGfx screenshot directly through its own shared window surface;
 - instruments the M8-only local page bootstrap so a bare-metal failure can be
   located to one initialization stage from the serial log alone.
 """
@@ -92,6 +95,24 @@ replace_once(
     "if (BOUCHAUD_PORT)\n    target_sources(Compositor PRIVATE SandboxUnimplemented.cpp)\nelseif (LINUX)\n    target_sources(Compositor PRIVATE SandboxLinux.cpp)",
 )
 append_runtime_link_options(compositor, "Compositor")
+
+# M8 intentionally has no Ladybird Compositor process. PageHost::initialize()
+# creates the first top-level traversable immediately; with the upstream
+# PageClient advertising compositor support, that creation path tries to obtain
+# a compositor host from ConnectionFromClient before any compositor connection
+# exists and dereferences a null RefPtr. Tell LibWeb to stay on its local CPU
+# painting path. M7 never creates a page, so its bootstrap semantics are
+# unchanged; a later compositor milestone can remove this Bouchaud override.
+page_client_h = root / "Services/WebContent/PageClient.h"
+replace_once(
+    page_client_h,
+    "    virtual bool supports_compositor() const override { return true; }",
+    "#if defined(BOUCHAUD_PORT)\n"
+    "    virtual bool supports_compositor() const override { return false; }\n"
+    "#else\n"
+    "    virtual bool supports_compositor() const override { return true; }\n"
+    "#endif",
+)
 
 # M8 diagnostic stages. Keep these in the disposable source tree: they are
 # intentionally verbose only when BOUCHAUD_M8 calls bouchaud_m8_start(). The
