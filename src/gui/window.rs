@@ -174,12 +174,56 @@ pub(crate) fn clamp_win(w: &mut Win) {
     if w.y + w.h > HEIGHT as i32 - BAR_H as i32 { w.y = HEIGHT as i32 - BAR_H as i32 - w.h; }
 }
 
+/// Le scenario automatise M8 demande au bureau d'ouvrir directement le
+/// navigateur. La variable vient du shell/autorun et ne change donc rien au
+/// demarrage interactif normal. On la limite a la toute premiere fenetre : un
+/// clic ulterieur sur « Terminal » doit rester un terminal, meme pendant le test.
+fn autostart_browser_requested(first_window: bool) -> bool {
+    first_window
+        && crate::shell::exported()
+            .iter()
+            .any(|entry| entry == "BO_AUTOSTART_BROWSER=1")
+}
+
 /// Cree une fenetre d'application a partir d'un index de menu.
 pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
     let n = *spawn_n;
     *spawn_n += 1;
     let x = 30 + (n % 6) * 22;
     let y = 30 + (n % 6) * 18;
+
+    // Le WM cree historiquement un terminal comme premiere fenetre. Pour M8 on
+    // reutilise exactement ce point de creation afin de tester un vrai client
+    // graphique, avec sa Surface partagee et son canal GUI, sans simuler de clic
+    // souris en CI. En cas d'echec on retombe sur le terminal pour garder un
+    // bureau diagnostic visible.
+    if kind == 0 && autostart_browser_requested(n == 0) {
+        match crate::gui::client::Client::lance(
+            crate::gui::client::CHEMIN_NAVIGATEUR,
+            home,
+            NAV_LARGEUR as usize,
+            NAV_HAUTEUR as usize,
+        ) {
+            Ok(client) => {
+                let (w, h) = fenetre_pour_zone(NAV_LARGEUR, NAV_HAUTEUR);
+                crate::serial_println!("[gui] BO_AUTOSTART_BROWSER=1 -> /bo-navigateur");
+                return Win {
+                    title: "Bouchaud Browser".to_string(),
+                    x,
+                    y,
+                    w,
+                    h,
+                    min: false,
+                    restore: None,
+                    app: App::Navigateur { client: alloc::boxed::Box::new(client) },
+                };
+            }
+            Err(error) => {
+                crate::serial_println!("[gui] autostart navigateur impossible: {}", error);
+            }
+        }
+    }
+
     match kind {
         0 => Win {
             title: "Terminal".to_string(), x, y, w: 380, h: 280, min: false, restore: None,
