@@ -17,6 +17,7 @@ Bouchaud WM
                  -> load_html() d'un document local
                  -> layout + paint CPU LibWeb/LibGfx
                  -> screenshot BGRA8888
+                 -> invariant de contenu independant
                  -> normalisation XRGB8888
                  -> copie dans BO_SURFACE_FD
                  -> Hello + SetTitle + FrameReady sur BO_GUI_FD
@@ -40,11 +41,21 @@ ni GPU.
 
 ## Capture comparee
 
-La capture Ladybird est produite en BGRA8888. Bouchaud attend XRGB8888. Pour
-chaque pixel, M8 conserve les composantes B/G/R et force l'octet haut a zero.
-Un FNV-1a 64 bits est calcule sur les pixels normalises avant et apres la copie
-dans la surface partagee. Le jalon n'est valide que si les deux empreintes sont
-identiques.
+La validation se fait en deux etapes independantes.
+
+D'abord, la capture Ladybird doit verifier un invariant de contenu. La zone utile
+doit faire au moins 320x200 pixels, contenir au moins 256 pixels differents du
+pixel de reference du coin superieur gauche et presenter une plage de luminance
+d'au moins 48. Ces seuils sont volontairement larges : ils tolerent des variations
+de police et d'antialiasing, mais empechent une capture blanche, noire ou uniforme
+de faire passer M8 simplement parce qu'elle a ete copiee sans erreur.
+
+Ensuite, la capture Ladybird produite en BGRA8888 est normalisee vers le
+XRGB8888 attendu par Bouchaud. Pour chaque pixel, M8 conserve les composantes
+B/G/R et force l'octet haut a zero. Un FNV-1a 64 bits est calcule sur les pixels
+normalises avant et apres la copie dans la surface partagee. Cette empreinte ne
+valide que l'integrite du transfert ; le rendu lui-meme est deja controle par
+l'invariant precedent.
 
 Le test QEMU exige ensuite que le gestionnaire de fenetres ait effectivement
 recu le protocole et compose une premiere trame. Les marqueurs principaux sont :
@@ -53,6 +64,7 @@ recu le protocole et compose une premiere trame. Les marqueurs principaux sont :
 [ladybird-bouchaud] WEBCONTENT_READY
 [ladybird-bouchaud] M8_BOOTSTRAP
 [ladybird-bouchaud] M8_LOCAL_HTML_RENDERED
+[ladybird-bouchaud] M8_CONTENT_INVARIANT
 [ladybird-bouchaud] M8_CAPTURE_MATCH
 ... parle le protocole v1
 ... premiere trame du client ...
