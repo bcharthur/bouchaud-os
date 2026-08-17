@@ -164,9 +164,9 @@ void ConnectionFromClient::bouchaud_m8_start()
     connection_cpp.write_text(data.replace(marker, marker + addition, 1))
 
 # M8 screenshot bridge. Ladybird already knows how to render a complete document
-# into a CPU BGRA bitmap. We normalize those pixels to Bouchaud XRGB8888, copy
-# them into the shared surface supplied by the WM, compare hashes after the copy,
-# and then emit the existing Bouchaud GUI protocol (Hello, title, FrameReady).
+# into a CPU BGRA bitmap. We normalize those pixels to Bouchaud XRGB8888, verify
+# an independent content invariant, copy them into the shared surface supplied by
+# the WM, compare hashes after the copy, then emit Hello/title/FrameReady.
 page_cpp = root / "Services/WebContent/PageClient.cpp"
 data = page_cpp.read_text()
 if "M8_CAPTURE_MATCH" not in data:
@@ -282,8 +282,18 @@ static bool bouchaud_m8_present(Gfx::ShareableBitmap const& screenshot)
 
     auto copy_width = min(bitmap.width(), surface_width);
     auto copy_height = min(bitmap.height(), surface_height);
+    if (copy_width < 320 || copy_height < 200) {
+        warnln("[ladybird-bouchaud] M8_CONTENT_INVARIANT_FAILED bitmap trop petite {}x{}", copy_width, copy_height);
+        munmap(mapped, surface_bytes);
+        return false;
+    }
+
     constexpr u64 fnv_offset = 1469598103934665603ULL;
     auto source_hash = fnv_offset;
+    auto reference_pixel = bitmap.scanline(0)[0] & 0x00ffffffu;
+    size_t pixels_different = 0;
+    u32 min_luma = 255;
+    u32 max_luma = 0;
     for (int y = 0; y < copy_height; ++y) {
         auto const* source = bitmap.scanline(y);
         auto* row = reinterpret_cast<u32*>(destination + static_cast<size_t>(y) * stride);
@@ -291,8 +301,33 @@ static bool bouchaud_m8_present(Gfx::ShareableBitmap const& screenshot)
             auto pixel = source[x] & 0x00ffffffu;
             row[x] = pixel;
             source_hash = bouchaud_fnv1a_u32(source_hash, pixel);
+            if (pixel != reference_pixel)
+                ++pixels_different;
+            auto red = (pixel >> 16) & 0xffu;
+            auto green = (pixel >> 8) & 0xffu;
+            auto blue = pixel & 0xffu;
+            auto luma = (54u * red + 183u * green + 19u * blue) >> 8;
+            if (luma < min_luma)
+                min_luma = luma;
+            if (luma > max_luma)
+                max_luma = luma;
         }
     }
+
+    // This check is intentionally independent from the copy hash below. A blank
+    // white/black frame can copy perfectly and must not validate M8. The local
+    // HTML contains several text runs, so a real render has hundreds of pixels
+    // different from the background and a substantial luminance range. The
+    // thresholds are deliberately loose to tolerate font/antialiasing changes.
+    constexpr size_t minimum_content_pixels = 256;
+    constexpr u32 minimum_luma_range = 48;
+    auto luma_range = max_luma - min_luma;
+    if (pixels_different < minimum_content_pixels || luma_range < minimum_luma_range) {
+        warnln("[ladybird-bouchaud] M8_CONTENT_INVARIANT_FAILED different={} luma={}..{}", pixels_different, min_luma, max_luma);
+        munmap(mapped, surface_bytes);
+        return false;
+    }
+    outln("[ladybird-bouchaud] M8_CONTENT_INVARIANT different={} luma_range={}", pixels_different, luma_range);
 
     auto destination_hash = fnv_offset;
     for (int y = 0; y < copy_height; ++y) {
