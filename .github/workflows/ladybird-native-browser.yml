@@ -381,9 +381,9 @@ jobs:
           set -e
           MAX_DATA_DISK=$((768 * 1024 * 1024))
 
-          test -x native-browser/WebContent
-          test -x native-browser/RequestServer
-          test -x native-browser/webcontent-bootstrap
+          test -f native-browser/WebContent
+          test -f native-browser/RequestServer
+          test -f native-browser/webcontent-bootstrap
           test -f native-browser/M9_CAPABLE
 
           mkdir -p scenario-m9/usr/libexec/ladybird scenario-m9/usr/share/ladybird
