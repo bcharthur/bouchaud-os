@@ -15,12 +15,15 @@ It:
 - forces the no-op sandbox implementations for Bouchaud services instead of
   selecting the Linux sandbox merely because CMake itself runs on Ubuntu;
 - leaves every build-time generator/tool with the native Ubuntu link policy;
+- pins LibWebView's resource:// root to /usr/share/ladybird on Bouchaud, matching
+  the filesystem layout produced by the QEMU/runtime packaging instead of
+  deriving a Linux install prefix from /usr/libexec/ladybird/WebContent;
 - disables Ladybird's external Compositor for the M8 CPU-paint path: Bouchaud
   deliberately has no Compositor process at this milestone and presents the
   LibWeb/LibGfx screenshot directly through its own shared window surface;
 - restores the normal Browser-side system-font initialization before M8 creates
   its first document, using the SerenitySans resource already embedded by
-  WebContent;
+  WebContent, and verifies that the font really resolved before page creation;
 - instruments the M8-only local page bootstrap so a bare-metal failure can be
   located to one initialization stage from the serial log alone.
 """
@@ -99,6 +102,26 @@ replace_once(
 )
 append_runtime_link_options(compositor, "Compositor")
 
+# WebView::platform_init() normally derives resource:// from the executable's
+# Linux install prefix. Bouchaud intentionally packages helper processes under
+# /usr/libexec/ladybird while the milestone disk puts Ladybird resources in
+# /usr/share/ladybird. With the upstream derivation that executable location
+# becomes /usr/libexec/share/Lagom, so resource://fonts is empty and
+# StyleComputer later dereferences a null default-font RefPtr. Make the Bouchaud
+# resource root explicit in the disposable target worktree; Linux host tools
+# keep the untouched upstream discovery logic.
+utilities = root / "Libraries/LibWebView/Utilities.cpp"
+replace_once(
+    utilities,
+    '''    s_ladybird_resource_root = [] {\n        auto home = Core::Environment::get("XDG_CONFIG_HOME"sv)''',
+    '''    s_ladybird_resource_root = [] {\n#if defined(BOUCHAUD_PORT)\n        return ByteString { "/usr/share/ladybird" };\n#else\n        auto home = Core::Environment::get("XDG_CONFIG_HOME"sv)''',
+)
+replace_once(
+    utilities,
+    '''#endif\n    }();\n\n    Core::ResourceImplementation::install(make<Core::ResourceImplementationFile>(MUST(String::from_byte_string(s_ladybird_resource_root))));''',
+    '''#endif\n#endif\n    }();\n\n    Core::ResourceImplementation::install(make<Core::ResourceImplementationFile>(MUST(String::from_byte_string(s_ladybird_resource_root))));''',
+)
+
 # M8 intentionally has no Ladybird Compositor process. PageHost::initialize()
 # creates the first top-level traversable immediately; with the upstream
 # PageClient advertising compositor support, that creation path tries to obtain
@@ -119,16 +142,16 @@ replace_once(
 
 # M8 diagnostic stages. Keep these in the disposable source tree: they are
 # intentionally verbose only when BOUCHAUD_M8 calls bouchaud_m8_start(). The
-# first failing run reached WEBCONTENT_READY and then hit RefPtr::as_nonnull_ptr
-# before M8_BOOTSTRAP. The exact stack resolved this to StyleComputer asking the
-# FontPlugin for its default UI font before our minimal bootstrap had reproduced
-# the Browser process' SetSystemFontFamily IPC. Configure the embedded
-# SerenitySans family first, then retain the stage markers for later failures.
+# failing run reached WEBCONTENT_READY, printed the old M8_FONT_READY marker,
+# then hit RefPtr::as_nonnull_ptr in StyleComputer::StyleComputer(). The marker
+# only meant SetSystemFontFamily had been called; it did not prove the family
+# existed in FontDatabase. With resource:// fixed above, resolve the exact font
+# before page creation and fail explicitly if the packaging ever regresses.
 connection = root / "Services/WebContent/ConnectionFromClient.cpp"
 replace_once(
     connection,
     '''    initialize(page_id, root_navigable_id, allocator);\n\n    auto viewport = Gfx::IntSize { width, height }.to_type<Web::DevicePixels>();''',
-    '''    set_system_font_family("SerenitySans"_string);\n    outln("[ladybird-bouchaud] M8_FONT_READY family=SerenitySans");\n    outln("[ladybird-bouchaud] M8_STAGE initialize begin");\n    initialize(page_id, root_navigable_id, allocator);\n    outln("[ladybird-bouchaud] M8_STAGE initialize ok");\n\n    auto viewport = Gfx::IntSize { width, height }.to_type<Web::DevicePixels>();''',
+    '''    set_system_font_family("SerenitySans"_string);\n    auto m8_default_font = Web::Platform::FontPlugin::the().default_font(16);\n    if (!m8_default_font) {\n        warnln("[ladybird-bouchaud] M8_FONT_MISSING family=SerenitySans resource_root=/usr/share/ladybird");\n        Core::Process::terminate_immediately(71);\n    }\n    outln("[ladybird-bouchaud] M8_FONT_READY family=SerenitySans");\n    outln("[ladybird-bouchaud] M8_STAGE initialize begin");\n    initialize(page_id, root_navigable_id, allocator);\n    outln("[ladybird-bouchaud] M8_STAGE initialize ok");\n\n    auto viewport = Gfx::IntSize { width, height }.to_type<Web::DevicePixels>();''',
 )
 replace_once(
     connection,
