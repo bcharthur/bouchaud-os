@@ -5,17 +5,23 @@ param(
     # du userland classique.
     #
     # Usage :
-    #   .\run.ps1 -Ladybird
+    #   .\run.ps1 -Ladybird          # M9 interactif/persistant
+    #   .\run.ps1 -LadybirdM8        # regression M8 finie
+    #   .\run.ps1 -LadybirdM9Test    # M9 HTTP deterministe fini
     [switch]$Ladybird,
+
+    [switch]$LadybirdM8,
+
+    [switch]$LadybirdM9Test,
+
+    [string]$LadybirdUrl = "http://10.0.2.2:18080/m9.html",
 
     # Force le retelechargement de l'artefact Ladybird depuis GitHub Actions.
     [switch]$RefreshLadybird,
 
-    # Run GitHub Actions M8 valide contenant WebContent natif Bouchaud.
-    #
-    # Peut etre surcharge :
-    #   .\run.ps1 -Ladybird -LadybirdRunId 123456789
-    [long]$LadybirdRunId = 32037726275,
+    # Run GitHub Actions contenant l'artefact Ladybird.
+    # 0 = dernier run reussi de ladybird-native-browser sur la branche courante.
+    [long]$LadybirdRunId = 0,
 
     # Sortie audio hote.
     # Windows : "dsound"
@@ -148,6 +154,23 @@ function Ensure-GitHubCli {
 
 
 # =============================================================================
+# Selection du mode Ladybird
+# =============================================================================
+
+$LadybirdModeCount = @(
+    [bool]$Ladybird,
+    [bool]$LadybirdM8,
+    [bool]$LadybirdM9Test
+).Where({ $_ }).Count
+
+if ($LadybirdModeCount -gt 1) {
+    Fail "utiliser un seul mode parmi -Ladybird, -LadybirdM8, -LadybirdM9Test"
+}
+
+$LadybirdMode = $Ladybird -or $LadybirdM8 -or $LadybirdM9Test
+
+
+# =============================================================================
 # Etat de la source
 # =============================================================================
 
@@ -211,16 +234,23 @@ $qemuArgs = @(
 # Mode Ladybird
 # =============================================================================
 
-if ($Ladybird) {
+if ($LadybirdMode) {
 
     Write-Section "Ladybird natif"
 
     Ensure-Python
 
+    $IsLadybirdM8 = [bool]$LadybirdM8
+    $IsLadybirdM9Test = [bool]$LadybirdM9Test
+    $IsLadybirdM9 = -not $IsLadybirdM8
+
+    $NativeBrowserName = if ($IsLadybirdM8) { "native-browser-m8" } else { "native-browser-m9" }
+    $ScenarioName = if ($IsLadybirdM8) { "scenario-m8" } else { "scenario-m9" }
+
 
     $NativeBrowserDir = Join-Path `
         $RepoRoot `
-        "native-browser-m8"
+        $NativeBrowserName
 
 
     $LadybirdImage = Join-Path `
@@ -230,7 +260,7 @@ if ($Ladybird) {
 
     $ScenarioDir = Join-Path `
         $RepoRoot `
-        "scenario-m8"
+        $ScenarioName
 
 
     # -------------------------------------------------------------------------
@@ -248,10 +278,20 @@ if ($Ladybird) {
     # Cela evite de gonfler le disque a ~654 Mio.
     # -------------------------------------------------------------------------
 
-    $RequiredLadybirdFiles = @(
-        "WebContent",
-        "webcontent-bootstrap"
-    )
+    if ($IsLadybirdM8) {
+        $RequiredLadybirdFiles = @(
+            "WebContent",
+            "webcontent-bootstrap"
+        )
+    }
+    else {
+        $RequiredLadybirdFiles = @(
+            "WebContent",
+            "RequestServer",
+            "webcontent-bootstrap",
+            "M9_CAPABLE"
+        )
+    }
 
 
     # =========================================================================
@@ -299,9 +339,32 @@ if ($Ladybird) {
         Ensure-GitHubCli
 
 
+        $EffectiveLadybirdRunId = $LadybirdRunId
+
+        if ($EffectiveLadybirdRunId -eq 0) {
+            $CurrentBranch = (& git branch --show-current).Trim()
+            if (-not $CurrentBranch) {
+                Fail "impossible de determiner la branche pour trouver l'artefact Ladybird"
+            }
+
+            $latest = (& gh run list `
+                --workflow "ladybird-native-browser.yml" `
+                --branch $CurrentBranch `
+                --status success `
+                --limit 1 `
+                --json databaseId `
+                --jq '.[0].databaseId').Trim()
+
+            if (-not $latest) {
+                Fail "aucun build Ladybird reussi pour '$CurrentBranch'. Pousse la branche et attends le workflow ladybird-native-browser."
+            }
+
+            $EffectiveLadybirdRunId = [long]$latest
+        }
+
         Write-Host (
             "Ladybird : telechargement artefact du run {0}" -f `
-                $LadybirdRunId
+                $EffectiveLadybirdRunId
         ) -ForegroundColor Yellow
 
 
@@ -320,14 +383,14 @@ if ($Ladybird) {
             -Force | Out-Null
 
 
-        gh run download $LadybirdRunId `
+        gh run download $EffectiveLadybirdRunId `
             -n "bouchaud-ladybird-native-browser" `
             -D $NativeBrowserDir
 
 
         if ($LASTEXITCODE -ne 0) {
 
-            Fail "impossible de telecharger l'artefact Ladybird du run $LadybirdRunId"
+            Fail "impossible de telecharger l'artefact Ladybird du run $EffectiveLadybirdRunId"
         }
     }
     else {
@@ -441,6 +504,12 @@ if ($Ladybird) {
         (Join-Path $NativeBrowserDir "WebContent") `
         (Join-Path $LadybirdLibexec "WebContent")
 
+    if ($IsLadybirdM9) {
+        Copy-Item `
+            (Join-Path $NativeBrowserDir "RequestServer") `
+            (Join-Path $LadybirdLibexec "RequestServer")
+    }
+
 
     # =========================================================================
     # Bootstrap
@@ -492,15 +561,31 @@ if ($Ladybird) {
     # LF uniquement.
     #
     # Pas de CRLF Windows dans le fichier execute dans Bouchaud OS.
-    $autorun = @(
-        'uname',
-        'df',
-        'echo "=== Ladybird M8 : HTML local dans fenetre Bouchaud ==="',
-        'export BO_AUTOSTART_BROWSER=1',
-        'export BOUCHAUD_M8=1',
-        'desktop',
-        ''
-    ) -join "`n"
+    if ($IsLadybirdM8) {
+        $autorun = @(
+            'uname',
+            'df',
+            'echo "=== Ladybird M8 : HTML local dans fenetre Bouchaud ==="',
+            'export BO_AUTOSTART_BROWSER=1',
+            'export BOUCHAUD_M8=1',
+            'desktop',
+            ''
+        ) -join "`n"
+    }
+    else {
+        $m9TestLine = if ($IsLadybirdM9Test) { 'export BOUCHAUD_M9_TEST=1' } else { 'echo "M9 interactif : fermer la fenetre pour quitter"' }
+        $autorun = @(
+            'uname',
+            'df',
+            'echo "=== Ladybird M9 : HTTP distant via RequestServer ==="',
+            'export BO_AUTOSTART_BROWSER=1',
+            'export BOUCHAUD_M9=1',
+            "export BOUCHAUD_M9_URL=$LadybirdUrl",
+            $m9TestLine,
+            'desktop',
+            ''
+        ) -join "`n"
+    }
 
 
     [System.IO.File]::WriteAllText(
@@ -566,6 +651,7 @@ if not root.is_dir():
 executables = {
     "bo-navigateur",
     "usr/libexec/ladybird/WebContent",
+    "usr/libexec/ladybird/RequestServer",
     "usr/libexec/ladybird/webcontent-bootstrap",
 }
 
@@ -837,7 +923,7 @@ else {
 # RAM
 # =============================================================================
 
-if ($Ladybird) {
+if ($LadybirdMode) {
 
     # M8 CI utilise 4 Gio.
     $qemuArgs += @(
@@ -959,20 +1045,41 @@ if (-not (Test-Path $QemuExe)) {
 }
 
 
-if ($Ladybird) {
+if ($LadybirdMode) {
+
+    if ($IsLadybirdM8) {
+        $ModeLabel = "Ladybird natif M8"
+        $ServiceLabel = "WebContent uniquement (regression M8)"
+        $BrowserChain = "/bo-navigateur -> bootstrap -> WebContent"
+    }
+    elseif ($IsLadybirdM9Test) {
+        $ModeLabel = "Ladybird natif M9 TEST HTTP"
+        $ServiceLabel = "WebContent + RequestServer"
+        $BrowserChain = "/bo-navigateur -> bootstrap -> RequestServer + WebContent"
+    }
+    else {
+        $ModeLabel = "Ladybird natif M9 interactif"
+        $ServiceLabel = "WebContent + RequestServer"
+        $BrowserChain = "/bo-navigateur -> bootstrap -> RequestServer + WebContent"
+    }
 
     Write-Host `
-        "mode       : Ladybird natif M8" `
+        "mode       : $ModeLabel" `
         -ForegroundColor Green
 
     Write-Host `
         "RAM        : 4096 Mio"
 
     Write-Host `
-        "navigateur : /bo-navigateur -> webcontent-bootstrap -> WebContent"
+        "navigateur : $BrowserChain"
 
     Write-Host `
-        "services   : WebContent uniquement (M8 minimal)"
+        "services   : $ServiceLabel"
+
+    if ($IsLadybirdM9) {
+        Write-Host `
+            "URL        : $LadybirdUrl"
+    }
 
     Write-Host `
         "Linux/WSL  : aucun"
@@ -1012,11 +1119,60 @@ foreach ($arg in $qemuArgs) {
 Write-Host ""
 
 
-& $QemuExe @qemuArgs
+$FixtureProcess = $null
+$FixtureOut = Join-Path $env:TEMP "bouchaud-m9-fixture.out.log"
+$FixtureErr = Join-Path $env:TEMP "bouchaud-m9-fixture.err.log"
 
+if ($LadybirdMode -and $IsLadybirdM9) {
+    Remove-Item $FixtureOut, $FixtureErr -Force -ErrorAction SilentlyContinue
 
-$QemuExitCode = $LASTEXITCODE
+    $FixtureScript = Join-Path $RepoRoot "tools\health\fixture_server.py"
+    $FixtureProcess = Start-Process `
+        -FilePath "python" `
+        -ArgumentList @($FixtureScript, "--port", "18080") `
+        -RedirectStandardOutput $FixtureOut `
+        -RedirectStandardError $FixtureErr `
+        -WindowStyle Hidden `
+        -PassThru
 
+    Start-Sleep -Milliseconds 600
+
+    if ($FixtureProcess.HasExited) {
+        if (Test-Path $FixtureErr) { Get-Content $FixtureErr }
+        Fail "fixture HTTP M9 n'a pas demarre"
+    }
+
+    Write-Host "fixture M9 : http://10.0.2.2:18080/m9.html" -ForegroundColor DarkGray
+}
+
+try {
+    & $QemuExe @qemuArgs
+    $QemuExitCode = $LASTEXITCODE
+}
+finally {
+    if ($FixtureProcess -and -not $FixtureProcess.HasExited) {
+        Stop-Process -Id $FixtureProcess.Id -Force -ErrorAction SilentlyContinue
+        $FixtureProcess.WaitForExit()
+    }
+}
+
+if ($LadybirdMode -and $IsLadybirdM9) {
+    Write-Host ""
+    Write-Host "=== Journal fixture M9 ===" -ForegroundColor DarkGray
+    if (Test-Path $FixtureOut) {
+        Get-Content $FixtureOut
+    }
+    if (Test-Path $FixtureErr) {
+        Get-Content $FixtureErr
+    }
+
+    if ($IsLadybirdM9Test) {
+        $fixtureText = if (Test-Path $FixtureOut) { Get-Content $FixtureOut -Raw } else { "" }
+        if ($fixtureText -notmatch "M9_FIXTURE_HTTP_OK") {
+            Fail "M9 test: aucune requete /m9.html recue par la fixture hote"
+        }
+    }
+}
 
 Write-Host ""
 

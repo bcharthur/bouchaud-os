@@ -27,6 +27,7 @@ rm -rf "$SRC"
 git -C "$LB" worktree prune
 git -C "$LB" worktree add --force --detach "$SRC" HEAD >/dev/null
 python3 tools/ladybird/prepare-browser-source.py "$SRC"
+python3 tools/ladybird/prepare-m9-source.py "$SRC"
 python3 tools/ladybird/prepare-browser-runtime-link.py "$SRC"
 
 # Do not destroy a build directory restored by GitHub Actions. CMake/Ninja can
@@ -265,6 +266,10 @@ mkdir -p "$OUT"
 find "$BUILD" -type f \( -name WebContent -o -name RequestServer -o -name ImageDecoder -o -name WebWorker \) -perm -111 -exec cp -f {} "$OUT/" \;
 
 [ -x "$OUT/WebContent" ] || { echo "WebContent non produit" >&2; exit 1; }
+[ -x "$OUT/RequestServer" ] || { echo "RequestServer non produit (M9 requis)" >&2; exit 1; }
+printf 'Bouchaud Ladybird M9 capable
+pinned=%s
+' "$(git -C "$LB" rev-parse HEAD)" > "$OUT/M9_CAPABLE"
 file "$OUT/WebContent" | tee "$OUT/file.txt"
 if [ -d "$SRC/Base/res" ]; then
     mkdir -p "$OUT/resources"
