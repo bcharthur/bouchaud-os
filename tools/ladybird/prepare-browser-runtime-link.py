@@ -150,8 +150,8 @@ replace_once(
 connection = root / "Services/WebContent/ConnectionFromClient.cpp"
 replace_once(
     connection,
-    '''    set_system_font_family("SerenitySans"_string);\n    outln("[ladybird-bouchaud] M8_FONT_READY family=SerenitySans");\n    outln("[ladybird-bouchaud] M8_STAGE initialize begin");''',
-    '''    set_system_font_family("SerenitySans"_string);\n    auto m8_default_font = Web::Platform::FontPlugin::the().default_font(16);\n    if (!m8_default_font) {\n        warnln("[ladybird-bouchaud] M8_FONT_MISSING family=SerenitySans resource_root=/usr/share/ladybird");\n        Core::Process::terminate_immediately(71);\n    }\n    outln("[ladybird-bouchaud] M8_FONT_READY family=SerenitySans");\n    outln("[ladybird-bouchaud] M8_STAGE initialize begin");''',
+    '''    initialize(page_id, root_navigable_id, allocator);\n\n    auto viewport = Gfx::IntSize { width, height }.to_type<Web::DevicePixels>();''',
+    '''    set_system_font_family("SerenitySans"_string);\n    auto m8_default_font = Web::Platform::FontPlugin::the().default_font(16);\n    if (!m8_default_font) {\n        warnln("[ladybird-bouchaud] M8_FONT_MISSING family=SerenitySans resource_root=/usr/share/ladybird");\n        Core::Process::terminate_immediately(71);\n    }\n    outln("[ladybird-bouchaud] M8_FONT_READY family=SerenitySans");\n    outln("[ladybird-bouchaud] M8_STAGE initialize begin");\n    initialize(page_id, root_navigable_id, allocator);\n    outln("[ladybird-bouchaud] M8_STAGE initialize ok");\n\n    auto viewport = Gfx::IntSize { width, height }.to_type<Web::DevicePixels>();''',
 )
 replace_once(
     connection,
