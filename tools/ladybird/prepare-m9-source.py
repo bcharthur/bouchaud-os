@@ -175,7 +175,21 @@ void ConnectionFromClient::bouchaud_m9_start()
 
     Web::HTML::CrossProcessId root_navigable_id { .namespace_id = 1, .local_id = 1 };
     Web::HTML::CrossProcessIdAllocator allocator { .namespace_id = 1, .next_local_id = 2 };
+
+    // Browser normally sends the system font family before creating the first
+    // Page. Bouchaud has no Browser process at M9, so mirror the validated M8
+    // bootstrap explicitly. Without this, StyleComputer dereferences the null
+    // RefPtr returned by FontPlugin::default_font() during PageHost::initialize.
+    set_system_font_family("SerenitySans"_string);
+    auto m9_default_font = Web::Platform::FontPlugin::the().default_font(16);
+    if (!m9_default_font) {
+        warnln("[ladybird-bouchaud] M9_FONT_MISSING family=SerenitySans resource_root=/usr/share/ladybird");
+        Core::Process::terminate_immediately(71);
+    }
+    outln("[ladybird-bouchaud] M9_FONT_READY family=SerenitySans");
+    outln("[ladybird-bouchaud] M9_STAGE initialize begin");
     initialize(page_id, root_navigable_id, allocator);
+    outln("[ladybird-bouchaud] M9_STAGE initialize ok");
 
     auto viewport = Gfx::IntSize { width, height }.to_type<Web::DevicePixels>();
     auto screen = Gfx::IntRect { 0, 0, width, height }.to_type<Web::DevicePixels>();
