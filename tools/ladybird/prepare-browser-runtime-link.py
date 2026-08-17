@@ -18,6 +18,9 @@ It:
 - disables Ladybird's external Compositor for the M8 CPU-paint path: Bouchaud
   deliberately has no Compositor process at this milestone and presents the
   LibWeb/LibGfx screenshot directly through its own shared window surface;
+- restores the normal Browser-side system-font initialization before M8 creates
+  its first document, using the SerenitySans resource already embedded by
+  WebContent;
 - instruments the M8-only local page bootstrap so a bare-metal failure can be
   located to one initialization stage from the serial log alone.
 """
@@ -117,13 +120,15 @@ replace_once(
 # M8 diagnostic stages. Keep these in the disposable source tree: they are
 # intentionally verbose only when BOUCHAUD_M8 calls bouchaud_m8_start(). The
 # first failing run reached WEBCONTENT_READY and then hit RefPtr::as_nonnull_ptr
-# before M8_BOOTSTRAP, so these markers isolate the exact operation without
-# requiring symbols or a debugger inside QEMU.
+# before M8_BOOTSTRAP. The exact stack resolved this to StyleComputer asking the
+# FontPlugin for its default UI font before our minimal bootstrap had reproduced
+# the Browser process' SetSystemFontFamily IPC. Configure the embedded
+# SerenitySans family first, then retain the stage markers for later failures.
 connection = root / "Services/WebContent/ConnectionFromClient.cpp"
 replace_once(
     connection,
     '''    initialize(page_id, root_navigable_id, allocator);\n\n    auto viewport = Gfx::IntSize { width, height }.to_type<Web::DevicePixels>();''',
-    '''    outln("[ladybird-bouchaud] M8_STAGE initialize begin");\n    initialize(page_id, root_navigable_id, allocator);\n    outln("[ladybird-bouchaud] M8_STAGE initialize ok");\n\n    auto viewport = Gfx::IntSize { width, height }.to_type<Web::DevicePixels>();''',
+    '''    set_system_font_family("SerenitySans"_string);\n    outln("[ladybird-bouchaud] M8_FONT_READY family=SerenitySans");\n    outln("[ladybird-bouchaud] M8_STAGE initialize begin");\n    initialize(page_id, root_navigable_id, allocator);\n    outln("[ladybird-bouchaud] M8_STAGE initialize ok");\n\n    auto viewport = Gfx::IntSize { width, height }.to_type<Web::DevicePixels>();''',
 )
 replace_once(
     connection,
