@@ -32,7 +32,10 @@ static void drain_peer(int fd) {
 }
 
 int main(int argc, char** argv) {
-    char const* webcontent = argc > 1 ? argv[1] : "/usr/libexec/ladybird/WebContent";
+    // Keep the runtime layout expected by an uninstalled Ladybird build:
+    // /usr/libexec/<service> with resources below /usr/share/Lagom. WebView's
+    // platform_init() derives that resource root from the executable path.
+    char const* webcontent = argc > 1 ? argv[1] : "/usr/libexec/WebContent";
     int fd[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, fd) < 0) return fail("socketpair");
 
@@ -51,7 +54,7 @@ int main(int argc, char** argv) {
             (char*)"--headless",
             (char*)"--force-fontconfig",
             (char*)"--site-isolation", (char*)"disable",
-            (char*)"--config-path", (char*)"/usr/share/ladybird",
+            (char*)"--config-path", (char*)"/usr/share/Lagom",
             NULL
         };
         execv(webcontent, args);

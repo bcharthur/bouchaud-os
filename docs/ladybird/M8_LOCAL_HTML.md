@@ -14,7 +14,7 @@ Bouchaud WM
        -> webcontent-bootstrap
             -> fork/exec WebContent natif Ladybird
                  -> PageHost / PageClient
-                 -> load_html() d'un document local
+                 -> parse le HTML local dans le document initial avec HTMLParser
                  -> layout + paint CPU LibWeb/LibGfx
                  -> screenshot BGRA8888
                  -> invariant de contenu independant
@@ -27,6 +27,20 @@ Bouchaud WM
 Le bootstrap de M7 est conserve. M8 n'est active que lorsque
 `BOUCHAUD_M8=1` est present dans l'environnement. Le bureau normal et le test M7
 ne changent donc pas de comportement.
+
+## Pourquoi M8 parse directement le document
+
+`Page::load_html()` n'est pas un simple parseur : Ladybird l'implemente comme une
+vraie navigation `about:srcdoc`. Cette navigation demande au processus Browser de
+coordonner une operation d'historique de session. Or M8 ne lance volontairement
+pas encore le Browser Ladybird complet ; son bootstrap ne fournit que le canal
+minimal necessaire a `WebContent`.
+
+Pour garder la frontiere du jalon nette, M8 utilise donc le vrai `HTMLParser` de
+LibWeb avec le scripting desactive, sur le document initial deja cree par
+`PageHost`. La capture est ensuite traitee directement dans `WebContent`. La
+navigation, l'historique de session et leur coordination Browser/WebContent
+restent un chantier ulterieur au lieu d'etre simules dans le bootstrap M8.
 
 ## Pourquoi la capture ne depend pas encore du Compositor Ladybird
 
@@ -62,7 +76,11 @@ recu le protocole et compose une premiere trame. Les marqueurs principaux sont :
 
 ```text
 [ladybird-bouchaud] WEBCONTENT_READY
+[ladybird-bouchaud] M8_FONT_READY
+[ladybird-bouchaud] M8_STAGE initialize ok
 [ladybird-bouchaud] M8_BOOTSTRAP
+[ladybird-bouchaud] M8_STAGE parse begin
+[ladybird-bouchaud] M8_STAGE parse ok
 [ladybird-bouchaud] M8_LOCAL_HTML_RENDERED
 [ladybird-bouchaud] M8_CONTENT_INVARIANT
 [ladybird-bouchaud] M8_CAPTURE_MATCH

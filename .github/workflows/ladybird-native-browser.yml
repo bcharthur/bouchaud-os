@@ -20,7 +20,7 @@ on:
 
 concurrency:
   group: ladybird-native-browser-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -225,22 +225,27 @@ jobs:
           echo "WebContent: $WEB_SIZE octets"
           test "$WEB_SIZE" -le "$MAX_BOOT_FILE"
 
-          mkdir -p scenario/usr/libexec/ladybird scenario/usr/share/ladybird
-          cp native-browser/WebContent scenario/usr/libexec/ladybird/WebContent
-          cp native-browser/webcontent-bootstrap scenario/usr/libexec/ladybird/webcontent-bootstrap
+          # Match the layout expected by WebView::platform_init() in this
+          # uninstalled build. With WebContent in /usr/libexec, Ladybird derives
+          # /usr/share/Lagom as its resource root, so resource://fonts resolves
+          # to the fonts shipped in the same M8 disk image.
+          mkdir -p scenario/usr/libexec scenario/usr/share/Lagom
+          cp native-browser/WebContent scenario/usr/libexec/WebContent
+          cp native-browser/webcontent-bootstrap scenario/usr/libexec/webcontent-bootstrap
           # Le WM lance son client graphique a ce chemin. Le bootstrap reste le
           # processus suivi par la fenetre et engendre le vrai WebContent.
           cp native-browser/webcontent-bootstrap scenario/bo-navigateur
-          chmod 755 scenario/bo-navigateur scenario/usr/libexec/ladybird/*
+          chmod 755 scenario/bo-navigateur scenario/usr/libexec/*
           for svc in RequestServer ImageDecoder Compositor WebWorker; do
             if [ -x "native-browser/$svc" ]; then
-              cp "native-browser/$svc" "scenario/usr/libexec/ladybird/$svc"
-              chmod 755 "scenario/usr/libexec/ladybird/$svc"
+              cp "native-browser/$svc" "scenario/usr/libexec/$svc"
+              chmod 755 "scenario/usr/libexec/$svc"
             fi
           done
           if [ -d native-browser/resources ]; then
-            cp -a native-browser/resources/. scenario/usr/share/ladybird/
+            cp -a native-browser/resources/. scenario/usr/share/Lagom/
           fi
+          test -f scenario/usr/share/Lagom/fonts/SerenitySans-Regular.ttf
           cat > scenario/autorun <<'SCENARIO'
           uname
           df
@@ -279,8 +284,11 @@ jobs:
           grep -F "gui: client /bo-navigateur pid=" serie-ladybird-browser.log
           grep -F "[ladybird-bouchaud] WebContent lance pid=" serie-ladybird-browser.log
           grep -F "[ladybird-bouchaud] WEBCONTENT_READY" serie-ladybird-browser.log
+          grep -F "[ladybird-bouchaud] M8_FONT_READY" serie-ladybird-browser.log
+          grep -F "[ladybird-bouchaud] M8_STAGE initialize ok" serie-ladybird-browser.log
           grep -F "[ladybird-bouchaud] M8_BOOTSTRAP" serie-ladybird-browser.log
           grep -F "[ladybird-bouchaud] M8_LOCAL_HTML_RENDERED" serie-ladybird-browser.log
+          grep -F "[ladybird-bouchaud] M8_CONTENT_INVARIANT" serie-ladybird-browser.log
           grep -F "[ladybird-bouchaud] M8_CAPTURE_MATCH" serie-ladybird-browser.log
           grep -F "gui: client pid=" serie-ladybird-browser.log | grep -F "parle le protocole v1"
           grep -F "gui: premiere trame du client pid=" serie-ladybird-browser.log
