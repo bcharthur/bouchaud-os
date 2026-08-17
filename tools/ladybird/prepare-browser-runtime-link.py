@@ -14,7 +14,15 @@ It:
   _dl_relocate_static_pie asserts that DT_RPATH/DT_RUNPATH are absent;
 - forces the no-op sandbox implementations for Bouchaud services instead of
   selecting the Linux sandbox merely because CMake itself runs on Ubuntu;
-- leaves every build-time generator/tool with the native Ubuntu link policy.
+- leaves every build-time generator/tool with the native Ubuntu link policy;
+- disables Ladybird's external Compositor for the M8 CPU-paint path: Bouchaud
+  deliberately has no Compositor process at this milestone and presents the
+  LibWeb/LibGfx screenshot directly through its own shared window surface;
+- restores the normal Browser-side system-font initialization before M8 creates
+  its first document, using the SerenitySans resource already embedded by
+  WebContent;
+- instruments the M8-only local page bootstrap so a bare-metal failure can be
+  located to one initialization stage from the serial log alone.
 """
 from pathlib import Path
 import sys
@@ -90,5 +98,42 @@ replace_once(
     "if (BOUCHAUD_PORT)\n    target_sources(Compositor PRIVATE SandboxUnimplemented.cpp)\nelseif (LINUX)\n    target_sources(Compositor PRIVATE SandboxLinux.cpp)",
 )
 append_runtime_link_options(compositor, "Compositor")
+
+# M8 intentionally has no Ladybird Compositor process. PageHost::initialize()
+# creates the first top-level traversable immediately; with the upstream
+# PageClient advertising compositor support, that creation path tries to obtain
+# a compositor host from ConnectionFromClient before any compositor connection
+# exists and dereferences a null RefPtr. Tell LibWeb to stay on its local CPU
+# painting path. M7 never creates a page, so its bootstrap semantics are
+# unchanged; a later compositor milestone can remove this Bouchaud override.
+page_client_h = root / "Services/WebContent/PageClient.h"
+replace_once(
+    page_client_h,
+    "    virtual bool supports_compositor() const override { return true; }",
+    "#if defined(BOUCHAUD_PORT)\n"
+    "    virtual bool supports_compositor() const override { return false; }\n"
+    "#else\n"
+    "    virtual bool supports_compositor() const override { return true; }\n"
+    "#endif",
+)
+
+# M8 diagnostic stages. Keep these in the disposable source tree: they are
+# intentionally verbose only when BOUCHAUD_M8 calls bouchaud_m8_start(). The
+# first failing run reached WEBCONTENT_READY and then hit RefPtr::as_nonnull_ptr
+# before M8_BOOTSTRAP. The exact stack resolved this to StyleComputer asking the
+# FontPlugin for its default UI font before our minimal bootstrap had reproduced
+# the Browser process' SetSystemFontFamily IPC. Configure the embedded
+# SerenitySans family first, then retain the stage markers for later failures.
+connection = root / "Services/WebContent/ConnectionFromClient.cpp"
+replace_once(
+    connection,
+    '''    initialize(page_id, root_navigable_id, allocator);\n\n    auto viewport = Gfx::IntSize { width, height }.to_type<Web::DevicePixels>();''',
+    '''    set_system_font_family("SerenitySans"_string);\n    outln("[ladybird-bouchaud] M8_FONT_READY family=SerenitySans");\n    outln("[ladybird-bouchaud] M8_STAGE initialize begin");\n    initialize(page_id, root_navigable_id, allocator);\n    outln("[ladybird-bouchaud] M8_STAGE initialize ok");\n\n    auto viewport = Gfx::IntSize { width, height }.to_type<Web::DevicePixels>();''',
+)
+replace_once(
+    connection,
+    '''    update_screen_rects(page_id, Vector<Web::DevicePixelRect> { screen }, 0);\n    set_viewport(page_id, viewport, 1.0, Web::ViewportIsFullscreen::No);\n    set_window_size(page_id, viewport);\n    set_has_focus(page_id, true);\n    set_system_visibility_state(page_id, Web::HTML::VisibilityState::Visible);\n\n    static constexpr auto html''',
+    '''    outln("[ladybird-bouchaud] M8_STAGE screen begin");\n    update_screen_rects(page_id, Vector<Web::DevicePixelRect> { screen }, 0);\n    outln("[ladybird-bouchaud] M8_STAGE screen ok");\n    set_viewport(page_id, viewport, 1.0, Web::ViewportIsFullscreen::No);\n    outln("[ladybird-bouchaud] M8_STAGE viewport ok");\n    set_window_size(page_id, viewport);\n    outln("[ladybird-bouchaud] M8_STAGE window-size ok");\n    set_has_focus(page_id, true);\n    outln("[ladybird-bouchaud] M8_STAGE focus ok");\n    set_system_visibility_state(page_id, Web::HTML::VisibilityState::Visible);\n    outln("[ladybird-bouchaud] M8_STAGE visibility ok");\n\n    static constexpr auto html''',
+)
 
 print("Bouchaud host/runtime link split applied to", root)
