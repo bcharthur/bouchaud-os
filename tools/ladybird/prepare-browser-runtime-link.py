@@ -25,7 +25,9 @@ It:
   its first document, using the SerenitySans resource already embedded by
   WebContent, and verifies that the font really resolved before page creation;
 - instruments the M8-only local page bootstrap so a bare-metal failure can be
-  located to one initialization stage from the serial log alone.
+  located to one initialization stage from the serial log alone;
+- parses M8's static HTML directly in LibWeb instead of entering the
+  Browser-coordinated session-history navigation path.
 """
 from pathlib import Path
 import sys
@@ -150,6 +152,11 @@ replace_once(
 connection = root / "Services/WebContent/ConnectionFromClient.cpp"
 replace_once(
     connection,
+    "#include <LibWeb/HTML/LocalTraversableNavigable.h>\n",
+    "#include <LibWeb/HTML/LocalTraversableNavigable.h>\n#include <LibWeb/HTML/Parser/HTMLParser.h>\n",
+)
+replace_once(
+    connection,
     '''    initialize(page_id, root_navigable_id, allocator);\n\n    auto viewport = Gfx::IntSize { width, height }.to_type<Web::DevicePixels>();''',
     '''    set_system_font_family("SerenitySans"_string);\n    auto m8_default_font = Web::Platform::FontPlugin::the().default_font(16);\n    if (!m8_default_font) {\n        warnln("[ladybird-bouchaud] M8_FONT_MISSING family=SerenitySans resource_root=/usr/share/ladybird");\n        Core::Process::terminate_immediately(71);\n    }\n    outln("[ladybird-bouchaud] M8_FONT_READY family=SerenitySans");\n    outln("[ladybird-bouchaud] M8_STAGE initialize begin");\n    initialize(page_id, root_navigable_id, allocator);\n    outln("[ladybird-bouchaud] M8_STAGE initialize ok");\n\n    auto viewport = Gfx::IntSize { width, height }.to_type<Web::DevicePixels>();''',
 )
@@ -157,6 +164,19 @@ replace_once(
     connection,
     '''    update_screen_rects(page_id, Vector<Web::DevicePixelRect> { screen }, 0);\n    set_viewport(page_id, viewport, 1.0, Web::ViewportIsFullscreen::No);\n    set_window_size(page_id, viewport);\n    set_has_focus(page_id, true);\n    set_system_visibility_state(page_id, Web::HTML::VisibilityState::Visible);\n\n    static constexpr auto html''',
     '''    outln("[ladybird-bouchaud] M8_STAGE screen begin");\n    update_screen_rects(page_id, Vector<Web::DevicePixelRect> { screen }, 0);\n    outln("[ladybird-bouchaud] M8_STAGE screen ok");\n    set_viewport(page_id, viewport, 1.0, Web::ViewportIsFullscreen::No);\n    outln("[ladybird-bouchaud] M8_STAGE viewport ok");\n    set_window_size(page_id, viewport);\n    outln("[ladybird-bouchaud] M8_STAGE window-size ok");\n    set_has_focus(page_id, true);\n    outln("[ladybird-bouchaud] M8_STAGE focus ok");\n    set_system_visibility_state(page_id, Web::HTML::VisibilityState::Visible);\n    outln("[ladybird-bouchaud] M8_STAGE visibility ok");\n\n    static constexpr auto html''',
+)
+
+# Page::load_html() is a real about:srcdoc navigation and asks the Browser
+# process to coordinate a session-history operation. M8 deliberately has no
+# Browser process yet, so parse the deterministic local document directly with
+# LibWeb's real HTMLParser and drive the already-existing screenshot queue from
+# WebContent. StringView has no one-argument C-string constructor in the pinned
+# AK API; provide the pointer and length explicitly instead of constructing a
+# temporary ByteString (the exact compile failure from PR #189).
+replace_once(
+    connection,
+    '''    outln("[ladybird-bouchaud] M8_BOOTSTRAP page={} viewport={}x{}", page_id, width, height);\n    load_html(page_id, ByteString { html });''',
+    '''    outln("[ladybird-bouchaud] M8_BOOTSTRAP page={} viewport={}x{}", page_id, width, height);\n\n    auto page_client = this->page(page_id);\n    if (!page_client.has_value()) {\n        warnln("[ladybird-bouchaud] M8_PAGE_MISSING");\n        Core::Process::terminate_immediately(71);\n    }\n\n    auto document = page_client->page().top_level_traversable()->active_document();\n    if (!document) {\n        warnln("[ladybird-bouchaud] M8_DOCUMENT_MISSING");\n        Core::Process::terminate_immediately(72);\n    }\n\n    outln("[ladybird-bouchaud] M8_STAGE parse begin");\n    auto parser = Web::HTML::HTMLParser::create_from_byte_string(\n        *document,\n        StringView { html, __builtin_strlen(html) },\n        Web::HTML::ParserScriptingMode::Disabled,\n        "UTF-8"sv);\n    parser->run(URL::about_srcdoc());\n    outln("[ladybird-bouchaud] M8_STAGE parse ok");\n    outln("[ladybird-bouchaud] M8_LOCAL_HTML_RENDERED page={}", page_id);\n\n    auto traversable = page_client->page().top_level_traversable();\n    traversable->queue_screenshot_task({});\n    traversable->process_screenshot_requests();''',
 )
 
 print("Bouchaud host/runtime link split applied to", root)
