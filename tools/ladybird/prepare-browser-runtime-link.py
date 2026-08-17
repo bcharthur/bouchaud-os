@@ -14,7 +14,9 @@ It:
   _dl_relocate_static_pie asserts that DT_RPATH/DT_RUNPATH are absent;
 - forces the no-op sandbox implementations for Bouchaud services instead of
   selecting the Linux sandbox merely because CMake itself runs on Ubuntu;
-- leaves every build-time generator/tool with the native Ubuntu link policy.
+- leaves every build-time generator/tool with the native Ubuntu link policy;
+- instruments the M8-only local page bootstrap so a bare-metal failure can be
+  located to one initialization stage from the serial log alone.
 """
 from pathlib import Path
 import sys
@@ -90,5 +92,22 @@ replace_once(
     "if (BOUCHAUD_PORT)\n    target_sources(Compositor PRIVATE SandboxUnimplemented.cpp)\nelseif (LINUX)\n    target_sources(Compositor PRIVATE SandboxLinux.cpp)",
 )
 append_runtime_link_options(compositor, "Compositor")
+
+# M8 diagnostic stages. Keep these in the disposable source tree: they are
+# intentionally verbose only when BOUCHAUD_M8 calls bouchaud_m8_start(). The
+# first failing run reached WEBCONTENT_READY and then hit RefPtr::as_nonnull_ptr
+# before M8_BOOTSTRAP, so these markers isolate the exact operation without
+# requiring symbols or a debugger inside QEMU.
+connection = root / "Services/WebContent/ConnectionFromClient.cpp"
+replace_once(
+    connection,
+    '''    initialize(page_id, root_navigable_id, allocator);\n\n    auto viewport = Gfx::IntSize { width, height }.to_type<Web::DevicePixels>();''',
+    '''    outln("[ladybird-bouchaud] M8_STAGE initialize begin");\n    initialize(page_id, root_navigable_id, allocator);\n    outln("[ladybird-bouchaud] M8_STAGE initialize ok");\n\n    auto viewport = Gfx::IntSize { width, height }.to_type<Web::DevicePixels>();''',
+)
+replace_once(
+    connection,
+    '''    update_screen_rects(page_id, Vector<Web::DevicePixelRect> { screen }, 0);\n    set_viewport(page_id, viewport, 1.0, Web::ViewportIsFullscreen::No);\n    set_window_size(page_id, viewport);\n    set_has_focus(page_id, true);\n    set_system_visibility_state(page_id, Web::HTML::VisibilityState::Visible);\n\n    static constexpr auto html''',
+    '''    outln("[ladybird-bouchaud] M8_STAGE screen begin");\n    update_screen_rects(page_id, Vector<Web::DevicePixelRect> { screen }, 0);\n    outln("[ladybird-bouchaud] M8_STAGE screen ok");\n    set_viewport(page_id, viewport, 1.0, Web::ViewportIsFullscreen::No);\n    outln("[ladybird-bouchaud] M8_STAGE viewport ok");\n    set_window_size(page_id, viewport);\n    outln("[ladybird-bouchaud] M8_STAGE window-size ok");\n    set_has_focus(page_id, true);\n    outln("[ladybird-bouchaud] M8_STAGE focus ok");\n    set_system_visibility_state(page_id, Web::HTML::VisibilityState::Visible);\n    outln("[ladybird-bouchaud] M8_STAGE visibility ok");\n\n    static constexpr auto html''',
+)
 
 print("Bouchaud host/runtime link split applied to", root)
