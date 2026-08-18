@@ -123,9 +123,17 @@ Le port Ladybird a maintenant une barre d'adresse, un historique, des liens
 cliquables et HTTPS. Il s'utilise :
 
 ```powershell
-.\run.ps1 -Ladybird                                   # https://example.com/
-.\run.ps1 -Ladybird -LadybirdUrl "https://fr.wikipedia.org/"
+.\run.ps1 -Ladybird                                   # fixture locale, page reelle
+.\run.ps1 -Ladybird -LadybirdUrl "https://10.0.2.2:18443/"
 ```
+
+> **Un site par son nom ne se charge pas encore.** HTTPS est prouvé — chaîne
+> validée, nom d'hôte vérifié — mais uniquement contre un hôte désigné par son
+> **adresse**. Résoudre un nom fait boucler `RequestServer` : cinq minutes à
+> 50 % de processeur sans réponse, là où la même pile charge une adresse IP en
+> quinze secondes. C'est mesuré, pas supposé, et c'est le point qui sépare
+> « HTTPS fonctionne » de « on peut naviguer sur le Web » :
+> `docs/ladybird/M12_HTTPS.md`, section « Ce qui bloque encore ».
 
 | Dans la fenêtre | Effet |
 |---|---|
@@ -138,9 +146,9 @@ cliquables et HTTPS. Il s'utilise :
 
 QEMU donne au guest un accès sortant par NAT, et le magasin d'autorités requis
 par TLS est fabriqué au premier lancement à partir de celui de la machine hôte
-(`tools/ladybird/certs/README.md`). Aucune fixture locale n'est lancée en mode
-interactif : `-LadybirdM9Test` conserve la fixture `10.0.2.2:18080` afin que la
-régression CI reste déterministe.
+(`tools/ladybird/certs/README.md`). La page de départ est la fixture locale,
+`run.ps1` la démarre alors sur l'hôte — c'est le seul chemin réseau prouvé de
+bout en bout, et une page qui s'affiche vaut mieux qu'une page qui se fige.
 
 | Option Ladybird de `run.ps1` | Effet |
 |---|---|
@@ -150,9 +158,9 @@ régression CI reste déterministe.
 | `-LadybirdM9Test` | régression HTTP déterministe sur fixture locale |
 | `-LadybirdM8` | régression HTML local finie |
 
-Ce qui manque encore : les onglets (M13), le bac à sable du renderer (M14), le
-redimensionnement de la fenêtre, et l'écran d'avertissement pour un certificat
-invalide. Sans `-Ladybird`, `run.ps1` lance le navigateur Qt/QuickJS documenté
+Ce qui manque encore : **la résolution de nom** (ci-dessus), les onglets (M13),
+le bac à sable du renderer (M14), le redimensionnement de la fenêtre, et l'écran
+d'avertissement pour un certificat invalide. Sans `-Ladybird`, `run.ps1` lance le navigateur Qt/QuickJS documenté
 plus haut, qui reste le mode par défaut.
 
 

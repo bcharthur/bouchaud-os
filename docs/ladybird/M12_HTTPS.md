@@ -117,13 +117,49 @@ plutot que le controle.
 
 ## L'essai Internet reel
 
-Un job separe, **`continue-on-error`**, charge `https://example.com/` : nom
-resolu par DNS, chaine publique validee, document commite. Il est informatif par
-construction — une panne d'un site tiers ne doit pas rendre rouge une CI dont le
-role est de mesurer Bouchaud.
+Un job separe, **`continue-on-error`**, charge `https://example.com/`. Il est
+informatif par construction — une panne d'un site tiers ne doit pas rendre rouge
+une CI dont le role est de mesurer Bouchaud.
+
+## Ce qui bloque encore : resoudre un nom
+
+**L'essai Internet ne passe pas**, et le journal du 18 aout dit ou. Deux jobs de
+la meme execution, a quatre minutes d'intervalle, avec le meme binaire, le meme
+bundle CA et le meme serveur DNS configure :
+
+| | M12 (vert) | Internet (bloque) |
+|---|---|---|
+| URL | `https://10.0.2.2:18443/m12.html` | `https://example.com/` |
+| Forme de l'hote | **adresse IP litterale** | **nom** |
+| `M9_NAVIGATION_BEGIN` | 20:56:13 | 20:52:56 |
+| `M9_NAVIGATION_COMMITTED` | 20:56:28, soit +15 s | **jamais**, en cinq minutes |
+| RequestServer | termine | ~49 % de processeur, en continu |
+
+Cote Internet, le journal s'arrete net apres
+`M9_DOCUMENT_BODY_LOCAL_UNPAUSED` : **aucun** des trois marqueurs de retour de
+RequestServer (`M9_RS_REQUEST_STARTED`, `M9_RS_HEADERS`,
+`M9_RS_REQUEST_FINISHED`) n'apparait. La requete ne ressort donc pas de
+RequestServer, et celui-ci consomme du processeur au lieu d'attendre : ce n'est
+pas un blocage sur une socket, c'est une boucle.
+
+TLS n'est pas en cause, et c'est M12 qui l'etablit : la meme pile valide une
+chaine reelle et verifie un nom d'hote quinze secondes apres le debut de la
+navigation. La seule variable qui change est **la forme de l'hote**.
+
+Le suspect est donc la resolution de nom de `LibDNS`. Il reste un suspect : rien
+dans ce journal n'instrumente `LibDNS` lui-meme, et cette section sera reecrite
+par une mesure, pas completee par une conviction. Les hypotheses de M9 ont ete
+refutees trois fois ; celle-ci n'a pas plus de droits.
+
+**Consequence pratique.** `run.ps1 -Ladybird` demarre sur la fixture locale et
+non sur un site public : c'est le seul chemin reseau prouve de bout en bout. Une
+URL par nom se tape dans la barre d'adresse, et se figera tant que ce point ne
+sera pas ferme.
 
 ## Ce que M12 ne fait pas encore
 
+- **Aucun site joignable par son nom.** Voir la section precedente : c'est le
+  point qui separe « HTTPS fonctionne » de « on peut naviguer sur le Web ».
 - **Pas de gestion d'erreur de certificat cote interface.** Un certificat
   invalide fait echouer la requete ; il n'y a pas d'ecran d'avertissement, parce
   qu'il n'y a pas encore d'interface pour le porter (M11).
@@ -133,6 +169,7 @@ role est de mesurer Bouchaud.
 
 ## Etape suivante
 
-M12 rend HTTPS possible. Le rendre **utile** demande M11 — une barre d'adresse,
-un historique, des liens cliquables — sans quoi l'URL reste une variable
-d'environnement.
+M11 est fait : la barre d'adresse, l'historique et les liens existent
+(`M11_NAVIGATEUR.md`). Ce qui manque maintenant n'est plus l'interface, c'est la
+resolution de nom — sans elle, la barre d'adresse n'accepte que des adresses IP,
+ce qui n'est pas naviguer.

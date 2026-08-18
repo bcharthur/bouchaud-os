@@ -55,7 +55,8 @@ branche mouvante.
 | M8 | HTML local rendu dans une vraie fenetre Bouchaud | vert |
 | M9 | HTTP reel via RequestServer — page distante affichee | **vert** |
 | M11 | Chrome utilisable : barre d'adresse, historique, liens, defilement | **construit, a eprouver sous QEMU** |
-| M12a | HTTPS avec verification de chaine, fixture TLS locale | en verification |
+| M12a | HTTPS avec verification de chaine, fixture TLS locale | **vert** |
+| M12b | Un site public joignable par son **nom** | **rouge : la resolution boucle** |
 
 ### Ce que M8 prouve exactement
 
@@ -102,6 +103,25 @@ Bouchaud. La latence d'un clic, la fluidite du defilement et la tenue du canal
 GUI sous charge ne se mesurent qu'en demarrant l'OS. Cette ligne restera ici
 jusqu'a ce qu'une execution QEMU l'efface.
 
+## 3 ter. M12 — HTTPS acquis, resolution de nom non
+
+Le job M12 est passe le 18 aout : chaine reellement validee, nom d'hote verifie,
+document distant affiche dans une fenetre Bouchaud. C'est la premiere fois — la
+branche qui portait ce travail ne compilait pas, un `\0` interprete par Python
+ayant depose un octet NUL dans le C++ genere.
+
+Le job Internet, lui, ne passe pas, et l'ecart entre les deux **nomme le
+defaut** : meme execution, meme binaire, quatre minutes d'intervalle, une seule
+variable differente — l'hote designe par son nom au lieu de son adresse. Cote
+Internet, aucun des marqueurs de retour de RequestServer n'apparait et le
+processus consomme la moitie d'un cœur pendant cinq minutes. Ce n'est pas une
+attente sur une socket, c'est une boucle.
+
+Le suspect est `LibDNS`, et il reste **un suspect** : rien n'instrumente encore
+la resolution elle-meme. Voir `ladybird/M12_HTTPS.md`, section « Ce qui bloque
+encore ». Tant que ce point n'est pas ferme, la barre d'adresse n'accepte
+utilement que des adresses IP, ce qui n'est pas naviguer.
+
 ## 4. Ce qui n'est pas fait, et qu'il ne faut pas croire fait
 
 - **Le navigateur historique** (Python + QuickJS + Qt) reste le chemin par
@@ -109,6 +129,7 @@ jusqu'a ce qu'une execution QEMU l'efface.
   produit.
 - **Aucune isolation.** Le sandbox d'upstream est volontairement remplace par
   l'implementation non effective. C'est M14.
+- **Aucun site joignable par son nom.** HTTPS marche contre une adresse IP.
 - **Un seul onglet, un seul renderer.**
 - **Pas de redimensionnement de la fenetre du navigateur natif.** La surface est
   allouee une fois ; `Configure` est journalise, pas suivi.

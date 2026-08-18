@@ -14,9 +14,18 @@ param(
 
     [switch]$LadybirdM9Test,
 
-    # Page de depart du mode interactif. Le test M9 remplace toujours cette
-    # valeur par sa fixture deterministe, sauf surcharge explicite.
-    [string]$LadybirdUrl = "https://example.com/",
+    # Page de depart du mode interactif.
+    #
+    # La fixture locale, et non un site public, parce que c'est le seul chemin
+    # reseau **prouve** de bout en bout. Resoudre un nom bloque encore : la CI
+    # du 18 aout montre RequestServer a 50 % de processeur pendant cinq minutes
+    # sur `https://example.com/`, alors que la meme pile chargeait
+    # `https://10.0.2.2:18443/` en quinze secondes quatre minutes plus tot. Voir
+    # `docs/ladybird/M12_HTTPS.md`, section "Ce qui bloque encore".
+    #
+    # Une page de depart qui se fige cinq minutes serait un plus mauvais accueil
+    # qu'une page locale qui s'affiche. La barre d'adresse est la pour le reste.
+    [string]$LadybirdUrl = "http://10.0.2.2:18080/m9.html",
 
     # Retire la barre d'outils M11 et revient au comportement de M9 : une seule
     # capture, aucune entree. Utile pour isoler une regression entre le moteur
