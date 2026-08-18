@@ -121,7 +121,172 @@ if "M9_NAV_PROCESS_RESPONSE_TASK_RUN" not in nav_data:
 if "<cstdlib>" not in nav_data:
     first_include = nav_data.index("#include ")
     nav_data = nav_data[:first_include] + "#include <cstdlib>\n" + nav_data[first_include:]
+
+# After process_response the Fetch result runs through the HTML navigation
+# continuation, is turned into NavigationParams, then queued back onto the
+# navigation task source before MIME sniffing and document creation. Keep these
+# markers deliberately coarse enough to identify the exact boundary without
+# changing ordering or lifetime semantics.
+if "M9_NAV_GOT_RESPONSE_CONTINUATION" not in nav_data:
+    old = '''    state_holder->continuation_steps = GC::create_function(realm.heap(), [&realm, state_holder, ongoing_navigation_changed_observer, top_level_completion_steps, fetch_completion_steps](NavigationParamsFetchStateHolder::ContinuationReason continuation_reason) {
+        // If the latter condition occurs, then abort fetchController, and return. Otherwise, proceed onward.'''
+    new = '''    state_holder->continuation_steps = GC::create_function(realm.heap(), [&realm, state_holder, ongoing_navigation_changed_observer, top_level_completion_steps, fetch_completion_steps](NavigationParamsFetchStateHolder::ContinuationReason continuation_reason) {
+#if defined(BOUCHAUD_PORT)
+        if (getenv("BOUCHAUD_M9") != nullptr)
+            outln("[ladybird-bouchaud] M9_NAV_GOT_RESPONSE_CONTINUATION reason={}", static_cast<int>(continuation_reason));
+#endif
+        // If the latter condition occurs, then abort fetchController, and return. Otherwise, proceed onward.'''
+    if old not in nav_data:
+        raise SystemExit("M9 navigation: GotResponse continuation block changed upstream")
+    nav_data = nav_data.replace(old, new, 1)
+
+if "M9_NAV_NO_REDIRECT" not in nav_data:
+    old = '''        if (state_holder->location_url.is_error() || !state_holder->location_url.value().has_value()) {
+            fetch_completion_steps->function()();
+            return;
+        }'''
+    new = '''        if (state_holder->location_url.is_error() || !state_holder->location_url.value().has_value()) {
+#if defined(BOUCHAUD_PORT)
+            if (getenv("BOUCHAUD_M9") != nullptr)
+                outln("[ladybird-bouchaud] M9_NAV_NO_REDIRECT");
+#endif
+            fetch_completion_steps->function()();
+            return;
+        }'''
+    if old not in nav_data:
+        raise SystemExit("M9 navigation: no-redirect completion block changed upstream")
+    nav_data = nav_data.replace(old, new, 1)
+
+if "M9_NAV_FETCH_COMPLETION" not in nav_data:
+    old = '''    perform_navigation_params_fetch(realm, state_holder, completion_steps, GC::create_function(realm.heap(), [&realm, state_holder, user_involvement, completion_steps] {
+        auto result = realm.heap().allocate<InternalNavigationResult>();'''
+    new = '''    perform_navigation_params_fetch(realm, state_holder, completion_steps, GC::create_function(realm.heap(), [&realm, state_holder, user_involvement, completion_steps] {
+#if defined(BOUCHAUD_PORT)
+        if (getenv("BOUCHAUD_M9") != nullptr)
+            outln("[ladybird-bouchaud] M9_NAV_FETCH_COMPLETION");
+#endif
+        auto result = realm.heap().allocate<InternalNavigationResult>();'''
+    if old not in nav_data:
+        raise SystemExit("M9 navigation: fetch completion block changed upstream")
+    nav_data = nav_data.replace(old, new, 1)
+
+if "M9_NAV_PARAMS_READY" not in nav_data:
+    old = '''            state_holder->about_base_url,
+            user_involvement);
+        completion_steps->function()(*result);
+    }));'''
+    new = '''            state_holder->about_base_url,
+            user_involvement);
+#if defined(BOUCHAUD_PORT)
+        if (getenv("BOUCHAUD_M9") != nullptr)
+            outln("[ladybird-bouchaud] M9_NAV_PARAMS_READY");
+#endif
+        completion_steps->function()(*result);
+    }));'''
+    if old not in nav_data:
+        raise SystemExit("M9 navigation: NavigationParams completion block changed upstream")
+    nav_data = nav_data.replace(old, new, 1)
+
+if "M9_NAV_PARAMS_RECEIVED" not in nav_data:
+    old = '''    auto received_navigation_params = GC::create_function(heap(), [this, url, navigation_id, user_involvement, completion_steps, csp_navigation_type, source_snapshot_params](GC::Ref<InternalNavigationResult> result) {
+        // AD-HOC: Not in the spec but subsequent steps will fail if the navigable doesn't have an active window.'''
+    new = '''    auto received_navigation_params = GC::create_function(heap(), [this, url, navigation_id, user_involvement, completion_steps, csp_navigation_type, source_snapshot_params](GC::Ref<InternalNavigationResult> result) {
+#if defined(BOUCHAUD_PORT)
+        if (getenv("BOUCHAUD_M9") != nullptr)
+            outln("[ladybird-bouchaud] M9_NAV_PARAMS_RECEIVED");
+#endif
+        // AD-HOC: Not in the spec but subsequent steps will fail if the navigable doesn't have an active window.'''
+    if old not in nav_data:
+        raise SystemExit("M9 navigation: received NavigationParams block changed upstream")
+    nav_data = nav_data.replace(old, new, 1)
+
+if "M9_NAV_PARAMS_TASK_RUN" not in nav_data:
+    old = '''        queue_global_task(Task::Source::NavigationAndTraversal, HTML::relevant_global_object(*active_window()), GC::create_function(heap(), [this, url, result, navigation_id, user_involvement, completion_steps, csp_navigation_type, source_snapshot_params]() mutable {
+            auto& navigation_params = result->navigation_params;'''
+    new = '''        queue_global_task(Task::Source::NavigationAndTraversal, HTML::relevant_global_object(*active_window()), GC::create_function(heap(), [this, url, result, navigation_id, user_involvement, completion_steps, csp_navigation_type, source_snapshot_params]() mutable {
+#if defined(BOUCHAUD_PORT)
+            if (getenv("BOUCHAUD_M9") != nullptr)
+                outln("[ladybird-bouchaud] M9_NAV_PARAMS_TASK_RUN");
+#endif
+            auto& navigation_params = result->navigation_params;'''
+    if old not in nav_data:
+        raise SystemExit("M9 navigation: navigation params task block changed upstream")
+    nav_data = nav_data.replace(old, new, 1)
+
+if "M9_NAV_SNIFF_CHECK" not in nav_data:
+    old = '''                auto nav_params = navigation_params.get<GC::Ref<NavigationParams>>();
+                auto body = nav_params->response->body();
+
+                // Get sniff bytes for MIME type detection. For streaming responses where bytes
+                // haven't arrived yet, we must wait asynchronously.
+                auto sniff_bytes = body ? body->sniff_bytes_if_available() : Optional<ReadonlyBytes> { ReadonlyBytes {} };'''
+    new = '''                auto nav_params = navigation_params.get<GC::Ref<NavigationParams>>();
+                auto body = nav_params->response->body();
+
+#if defined(BOUCHAUD_PORT)
+                if (getenv("BOUCHAUD_M9") != nullptr)
+                    outln("[ladybird-bouchaud] M9_NAV_SNIFF_CHECK body={}", body != nullptr);
+#endif
+                // Get sniff bytes for MIME type detection. For streaming responses where bytes
+                // haven't arrived yet, we must wait asynchronously.
+                auto sniff_bytes = body ? body->sniff_bytes_if_available() : Optional<ReadonlyBytes> { ReadonlyBytes {} };
+#if defined(BOUCHAUD_PORT)
+                if (getenv("BOUCHAUD_M9") != nullptr)
+                    outln("[ladybird-bouchaud] M9_NAV_SNIFF_RESULT ready={}", sniff_bytes.has_value());
+#endif'''
+    if old not in nav_data:
+        raise SystemExit("M9 navigation: MIME sniff block changed upstream")
+    nav_data = nav_data.replace(old, new, 1)
+
+if "M9_LOAD_DOCUMENT_BEGIN" not in nav_data:
+    old = '''                // Sync path: bytes available immediately
+                output->document = load_document(nav_params, sniff_bytes.value());
+                if (!output->document) {'''
+    new = '''                // Sync path: bytes available immediately
+#if defined(BOUCHAUD_PORT)
+                if (getenv("BOUCHAUD_M9") != nullptr)
+                    outln("[ladybird-bouchaud] M9_LOAD_DOCUMENT_BEGIN bytes={}", sniff_bytes->size());
+#endif
+                output->document = load_document(nav_params, sniff_bytes.value());
+#if defined(BOUCHAUD_PORT)
+                if (getenv("BOUCHAUD_M9") != nullptr)
+                    outln("[ladybird-bouchaud] M9_LOAD_DOCUMENT_RETURN document={}", output->document != nullptr);
+#endif
+                if (!output->document) {'''
+    if old not in nav_data:
+        raise SystemExit("M9 navigation: sync load_document block changed upstream")
+    nav_data = nav_data.replace(old, new, 1)
+
 local_navigable_cpp.write_text(nav_data)
+
+# Fetch marks MIME sniffing complete synchronously, but closes the JS
+# ReadableStream through Core::EventLoopPlugin::deferred_invoke(). Trace that
+# deferred callback as a separate boundary: a missing close can stall the
+# incremental parser even when NavigationParams creation itself succeeds.
+fetched_receiver_cpp = root / "Libraries/LibWeb/Fetch/Fetching/FetchedDataReceiver.cpp"
+receiver_data = fetched_receiver_cpp.read_text()
+if "M9_FETCH_CLOSE_DEFERRED_RUN" not in receiver_data:
+    old = '''        Platform::EventLoopPlugin::the().deferred_invoke(GC::create_function(GC::Heap::the(), [this, &realm]() {
+            close_stream(realm);
+        }));'''
+    new = '''        Platform::EventLoopPlugin::the().deferred_invoke(GC::create_function(GC::Heap::the(), [this, &realm]() {
+#if defined(BOUCHAUD_PORT)
+            if (getenv("BOUCHAUD_M9") != nullptr)
+                outln("[ladybird-bouchaud] M9_FETCH_CLOSE_DEFERRED_RUN");
+#endif
+            close_stream(realm);
+#if defined(BOUCHAUD_PORT)
+            if (getenv("BOUCHAUD_M9") != nullptr)
+                outln("[ladybird-bouchaud] M9_FETCH_CLOSE_DEFERRED_DONE");
+#endif
+        }));'''
+    if old not in receiver_data:
+        raise SystemExit("M9 navigation: deferred Fetch stream close changed upstream")
+    receiver_data = receiver_data.replace(old, new, 1)
+if "<cstdlib>" not in receiver_data:
+    first_include = receiver_data.index("#include ")
+    receiver_data = receiver_data[:first_include] + "#include <cstdlib>\n#include <AK/Format.h>\n" + receiver_data[first_include:]
+fetched_receiver_cpp.write_text(receiver_data)
 
 # ParallelQueue::enqueue() feeds TaskQueue::add(), which arms a zero-delay
 # single-shot Platform::Timer. Seeing ENQUEUE without TASK_RUN narrows the fault
