@@ -204,4 +204,12 @@ for old, new, label in patches:
 
 page_cpp.write_text(data)
 
+# The next adaptation is deliberately kept in its own small source-patch file:
+# it changes one upstream Fetch behaviour (Document-body pausing), while this
+# file remains diagnostics/observability. browser-upstream.sh already invokes
+# this script, so chain the local-navigation patch here without another build
+# entry point.
+navigation_script = Path(__file__).with_name("prepare-m9-navigation.py")
+exec(compile(navigation_script.read_text(), str(navigation_script), "exec"))
+
 print("Bouchaud M9 body/Fetch diagnostics applied to", root)
