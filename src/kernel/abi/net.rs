@@ -337,10 +337,9 @@ pub fn sys_sendto(fd: i32, buffer: u64, len: usize, _flags: u32, addr: u64, addr
 ///
 /// La pile ne recoit que lorsqu'on l'interroge : c'est donc ici, dans le
 /// `recvfrom` de l'appelant, que les paquets sont effectivement lus sur la
-/// carte. Les datagrammes qui ne nous sont pas destines sont ignores.
+/// carte. Chaque datagramme est demultiplexe vers le socket destinataire.
 fn pump_udp(state: &Rc<RefCell<SocketState>>, budget: u32) {
-    let local_port = state.borrow().local_port;
-    if local_port == 0 {
+    if state.borrow().local_port == 0 {
         return;
     }
     let mut payload = [0u8; 2048];
@@ -352,21 +351,48 @@ fn pump_udp(state: &Rc<RefCell<SocketState>>, budget: u32) {
         );
         let (source, size) = match received {
             Some(value) => value,
-            None => continue,
+            // `poll_ip` est non bloquant. Une absence de trame signifie que
+            // l'anneau RX est vide maintenant ; la rappeler des milliers de
+            // fois ne peut rien faire arriver et constituait la boucle CPU de
+            // LibDNS pendant l'attente de sa reponse.
+            None => break,
         };
         if let Some(header) = crate::net::transport::udp::parse(&payload[..size]) {
-            if header.dst_port != local_port {
-                continue;
-            }
             let start = header.payload_off;
             let end = start + header.payload_len;
             if end <= size {
-                state.borrow_mut().datagrams.push((
-                    source,
-                    header.src_port,
-                    payload[start..end].to_vec(),
-                ));
-                return;
+                // La carte est partagee par tous les sockets du processus.
+                // L'ancien code jetait toute reponse destinee a un autre port
+                // que le socket que `poll()` examinait en premier. LibDNS
+                // emet A et AAAA sur plusieurs sockets : l'un consommait donc
+                // irrevocablement la reponse de l'autre. Demultiplexer avant
+                // de rendre la main, comme le ferait une pile reseau normale.
+                let process = task::current_process();
+                let destinations: Vec<Rc<RefCell<SocketState>>> = process
+                    .borrow()
+                    .files
+                    .iter()
+                    .filter_map(|desc| match &desc.kind {
+                        FdKind::Socket(socket) => {
+                            let socket_state = socket.borrow();
+                            let peer_matches = socket_state.peer.map_or(true, |(ip, port)| {
+                                ip == source && port == header.src_port
+                            });
+                            (socket_state.kind == SocketKind::Udp
+                                && socket_state.local_port == header.dst_port
+                                && peer_matches)
+                                .then(|| socket.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                for destination in destinations {
+                    destination.borrow_mut().datagrams.push((
+                        source,
+                        header.src_port,
+                        payload[start..end].to_vec(),
+                    ));
+                }
             }
         }
     }
@@ -459,8 +485,26 @@ pub fn sys_recvfrom(
             }
         }
         SocketKind::Udp => {
-            if state.borrow().datagrams.is_empty() {
-                pump_udp(&state, if nonblocking { 20_000 } else { 3_000_000 });
+            if nonblocking {
+                if state.borrow().datagrams.is_empty() {
+                    pump_udp(&state, 1);
+                }
+            } else {
+                // Un recvfrom bloquant attend sur le temps monotone, pas sur
+                // un nombre arbitraire de tours de boucle. Chaque tour cede le
+                // CPU puis dort jusqu'a une interruption (timer ou reseau).
+                let deadline = crate::kernel::timer::ticks()
+                    + crate::kernel::timer::ms_to_ticks(5_000);
+                while state.borrow().datagrams.is_empty()
+                    && crate::kernel::timer::ticks() < deadline
+                {
+                    pump_udp(&state, 1);
+                    if state.borrow().datagrams.is_empty() {
+                        if !task::schedule() {
+                            crate::arch::x86_64::cpu::wait_for_interrupt();
+                        }
+                    }
+                }
             }
             let datagram = state.borrow_mut().datagrams.pop();
             match datagram {
@@ -937,7 +981,7 @@ pub fn socket_readable(state: &Rc<RefCell<SocketState>>) -> bool {
         }
         SocketKind::Udp => {
             if state.borrow().datagrams.is_empty() {
-                pump_udp(state, 20_000);
+                pump_udp(state, 1);
             }
             !state.borrow().datagrams.is_empty()
         }

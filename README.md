@@ -117,23 +117,18 @@ croisée, comme un firmware.
 | `-Sync` | met à jour la branche courante avant de construire |
 | `-Fullscreen` | QEMU en plein écran |
 
-### Naviguer avec le port Ladybird
+### Naviguer avec Ladybird
 
-Le port Ladybird a maintenant une barre d'adresse, un historique, des liens
-cliquables et HTTPS. Il s'utilise :
+Ladybird est inclus dans le lancement normal :
 
 ```powershell
-.\run.ps1 -Ladybird                                   # fixture locale, page reelle
-.\run.ps1 -Ladybird -LadybirdUrl "https://10.0.2.2:18443/"
+.\run.ps1
 ```
 
-> **Un site par son nom ne se charge pas encore.** HTTPS est prouvé — chaîne
-> validée, nom d'hôte vérifié — mais uniquement contre un hôte désigné par son
-> **adresse**. Résoudre un nom fait boucler `RequestServer` : cinq minutes à
-> 50 % de processeur sans réponse, là où la même pile charge une adresse IP en
-> quinze secondes. C'est mesuré, pas supposé, et c'est le point qui sépare
-> « HTTPS fonctionne » de « on peut naviguer sur le Web » :
-> `docs/ladybird/M12_HTTPS.md`, section « Ce qui bloque encore ».
+Le bureau apparait sans ouvrir le navigateur. Double-cliquer sur **Navigateur**
+lance le vrai WebContent Ladybird ; le fermer rend la main au bureau et un
+second double-clic le relance. Le resolveur utilise le DNS du NAT QEMU et HTTPS
+valide toujours la chaine avec le magasin d'autorites embarque.
 
 | Dans la fenêtre | Effet |
 |---|---|
@@ -144,25 +139,14 @@ cliquables et HTTPS. Il s'utilise :
 | molette, flèches | défilement |
 | Échap | rend le foyer à la page, ou arrête le chargement |
 
-QEMU donne au guest un accès sortant par NAT, et le magasin d'autorités requis
-par TLS est fabriqué au premier lancement à partir de celui de la machine hôte
-(`tools/ladybird/certs/README.md`). La page de départ est la fixture locale,
-`run.ps1` la démarre alors sur l'hôte — c'est le seul chemin réseau prouvé de
-bout en bout, et une page qui s'affiche vaut mieux qu'une page qui se fige.
+Le profil QEMU par defaut donne 16 Gio de RAM et un vCPU. Le noyau reste
+BSP/mono-coeur : exposer huit vCPU ne l'accelererait pas, et `run.ps1` ne le
+pretend donc pas. Les options `-LadybirdM8` et `-LadybirdM9Test` restent des
+scenarios finis de CI, pas des lanceurs utilisateur.
 
-| Option Ladybird de `run.ps1` | Effet |
-|---|---|
-| `-LadybirdUrl <url>` | page de départ, `http://` ou `https://` |
-| `-LadybirdSansChrome` | retire la barre d'outils, revient à la capture unique de M9 |
-| `-LadybirdRamMiB <n>` | RAM donnée à QEMU (8192 par défaut) |
-| `-LadybirdM9Test` | régression HTTP déterministe sur fixture locale |
-| `-LadybirdM8` | régression HTML local finie |
-
-Ce qui manque encore : **la résolution de nom** (ci-dessus), les onglets (M13),
-le bac à sable du renderer (M14), le redimensionnement de la fenêtre, et l'écran
-d'avertissement pour un certificat invalide. Sans `-Ladybird`, `run.ps1` lance le navigateur Qt/QuickJS documenté
-plus haut, qui reste le mode par défaut.
-
+Ce qui manque encore : les onglets (M13), le bac a sable du renderer (M14), le
+redimensionnement de la fenetre et l'ecran d'avertissement pour un certificat
+invalide.
 
 **Jamais un userland d'un autre commit sans le dire.** Une image d'un autre jour
 ne se signale pas : elle démarre, et elle se comporte comme le système d'alors.

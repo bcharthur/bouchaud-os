@@ -16,16 +16,10 @@ param(
 
     # Page de depart du mode interactif.
     #
-    # La fixture locale, et non un site public, parce que c'est le seul chemin
-    # reseau **prouve** de bout en bout. Resoudre un nom bloque encore : la CI
-    # du 18 aout montre RequestServer a 50 % de processeur pendant cinq minutes
-    # sur `https://example.com/`, alors que la meme pile chargeait
-    # `https://10.0.2.2:18443/` en quinze secondes quatre minutes plus tot. Voir
-    # `docs/ladybird/M12_HTTPS.md`, section "Ce qui bloque encore".
-    #
-    # Une page de depart qui se fige cinq minutes serait un plus mauvais accueil
-    # qu'une page locale qui s'affiche. La barre d'adresse est la pour le reste.
-    [string]$LadybirdUrl = "http://10.0.2.2:18080/m9.html",
+    # Le DNS QEMU et le chemin HTTPS avec validation de certificat sont prepares
+    # avant le boot. Les fixtures locales restent accessibles via les options
+    # de regression M8/M9.
+    [string]$LadybirdUrl = "https://example.com/",
 
     # Retire la barre d'outils M11 et revient au comportement de M9 : une seule
     # capture, aucune entree. Utile pour isoler une regression entre le moteur
@@ -33,11 +27,11 @@ param(
     [switch]$LadybirdSansChrome,
 
     # Profil materiel du navigateur natif.
-    # 8192 Mio est volontairement le profil local par defaut : Bouchaud peut
+    # 16384 Mio est volontairement le profil local par defaut : Bouchaud peut
     # utiliser la RAM supplementaire, contrairement aux vCPU additionnels qui
     # attendent encore le vrai port SMP/APIC.
     [ValidateRange(2048, 16384)]
-    [int]$LadybirdRamMiB = 8192,
+    [int]$LadybirdRamMiB = 16384,
 
     # Expose la topologie QEMU pour preparer le futur SMP. Le noyau actuel ne
     # schedule encore que sur le BSP : >1 vCPU n'accelere donc PAS encore
@@ -216,6 +210,14 @@ $LadybirdModeCount = @(
 
 if ($LadybirdModeCount -gt 1) {
     Fail "utiliser un seul mode parmi -Ladybird, -LadybirdM8, -LadybirdM9Test"
+}
+
+# Ladybird est le navigateur du produit, pas un mode de demarrage. Sans option,
+# run.ps1 prepare son runtime puis arrive sur le bureau ; l'utilisateur le
+# lance avec l'icone Navigateur. Les commutateurs M8/M9 restent reserves aux
+# scenarios finis de CI.
+if ($LadybirdModeCount -eq 0) {
+    $Ladybird = $true
 }
 
 $LadybirdMode = $Ladybird -or $LadybirdM8 -or $LadybirdM9Test
@@ -718,7 +720,7 @@ if ($LadybirdMode) {
             'uname',
             'df',
             $banniere,
-            'export BO_AUTOSTART_BROWSER=1',
+            $(if ($LadybirdM9Test) { 'export BO_AUTOSTART_BROWSER=1' } else { 'echo "Ladybird pret : double-cliquer sur Navigateur"' }),
             'export BOUCHAUD_M9=1',
             "export BOUCHAUD_M9_URL=$(ConvertTo-ShellSingleQuoted $LadybirdUrl)",
             $chromeLine,

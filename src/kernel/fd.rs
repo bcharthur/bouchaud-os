@@ -393,6 +393,13 @@ impl FdTable {
         self.entries.get(fd as usize).and_then(|slot| slot.as_ref())
     }
 
+    /// Descripteurs ouverts, pour les sous-systemes qui doivent demultiplexer
+    /// une ressource partagee (notamment les datagrammes recus par une seule
+    /// carte reseau vers plusieurs sockets UDP).
+    pub fn iter(&self) -> impl Iterator<Item = &FileDesc> {
+        self.entries.iter().filter_map(|slot| slot.as_ref())
+    }
+
     /// Descripteur modifiable (avancee de l'offset, drapeaux).
     pub fn get_mut(&mut self, fd: i32) -> Option<&mut FileDesc> {
         if fd < 0 {
