@@ -29,7 +29,14 @@ git -C "$LB" worktree add --force --detach "$SRC" HEAD >/dev/null
 python3 tools/ladybird/prepare-browser-source.py "$SRC"
 python3 tools/ladybird/prepare-m9-source.py "$SRC"
 python3 tools/ladybird/prepare-m9-diagnostics.py "$SRC"
+python3 tools/ladybird/prepare-m11-chrome.py "$SRC"
 python3 tools/ladybird/prepare-browser-runtime-link.py "$SRC"
+
+# Le chrome M11 seul, avec les avertissements d'upstream, avant d'engager les
+# quinze minutes du build. Les fautes qu'il attrape sont des avertissements
+# promus en erreurs par Ladybird : elles ne se voient qu'au tout dernier objet
+# compile, apres que tout le reste a ete reconstruit pour rien.
+./tools/ladybird/verifie-chrome.sh
 
 # Do not destroy a build directory restored by GitHub Actions. CMake/Ninja can
 # reconfigure it in place and ccache catches recompilations forced only by fresh

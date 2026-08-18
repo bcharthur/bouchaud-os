@@ -53,7 +53,10 @@ branche mouvante.
 | M6 | LibGfx + Skia CPU — pixels BGRA en ring 3 | vert |
 | M7 | WebContent demarre comme processus separe, poignee de main IPC | vert |
 | M8 | HTML local rendu dans une vraie fenetre Bouchaud | vert |
-| M9 | HTTP reel via RequestServer | **en cours** |
+| M9 | HTTP reel via RequestServer — page distante affichee | **vert** |
+| M11 | Chrome utilisable : barre d'adresse, historique, liens, defilement | **construit, a eprouver sous QEMU** |
+| M12a | HTTPS avec verification de chaine, fixture TLS locale | **vert** |
+| M12b | Un site public joignable par son **nom** | **rouge : la resolution boucle** |
 
 ### Ce que M8 prouve exactement
 
@@ -64,62 +67,74 @@ branche mouvante.
 Pas Chromium. Pas Qt. Pas une WebView. Le vrai moteur d'upstream, compile pour
 Bouchaud, affichant dans une fenetre de Bouchaud.
 
-## 3. M9 — ou en est-on precisement
+## 3. M9 — clos, et ce qu'il a coute
 
-M9 est le jalon en cours. Il est plus avance que son voyant rouge ne le suggere,
-et le detail compte parce qu'il dit ou chercher.
+M9 est vert. La page distante est chargee par RequestServer, rendue par LibWeb
+et Skia, et affichee dans une fenetre Bouchaud.
 
-**Acquis, mesures :**
+Le jalon a demande sept passes de mesure, et **trois hypotheses annoncees puis
+refutees** : l'isolation de sites (deja neutralisee dans le port), la fin de
+fichier sur une paire de sockets (la comptabilite du noyau etait juste ; le
+defaut reel etait ailleurs et a ete corrige separement), et les en-tetes
+manquantes (elles arrivaient : statut 200, six en-tetes).
 
-    M9_REQUESTSERVER_LAUNCHED / READY / CONNECTED   RequestServer natif tourne
-    "GET /m9.html HTTP/1.1" 200                      la requete part de Bouchaud
-    M9_RS_REQUEST_STARTED  id=0                      le tube de reponse traverse
-    M9_RS_HEADERS  id=0 statut=200 nb=6              en-tetes recues
-    M9_RS_REQUEST_FINISHED id=0 taille=672           corps complet recu
+Ce qui a fini par tomber, ce sont des defauts que seule une navigation reelle
+pouvait faire sortir — la propagation de la fin de fichier apres le dernier
+ecrivain d'une paire, la coordination de l'historique inter-documents, la
+livraison du corps mise en pause et jamais relancee.
 
-Toute la chaine reseau fonctionne, **y compris** le mecanisme le plus exigeant :
-RequestServer fabrique une paire de sockets, en passe le bout lecteur a
-WebContent par **SCM_RIGHTS**, et y ecrit le corps.
+La lecon vaut d'etre gardee : chaque refutation a ferme une zone pour de bon.
+C'est plus lent qu'une intuition juste, et infiniment plus rapide qu'une
+intuition fausse qu'on n'a pas verifiee.
 
-**Non acquis :** le document n'est jamais commite. WebContent se fige, et QEMU
-le tue au bout de 240 s (`code 124`).
+## 3 bis. M11 — le chrome, et ce qui reste a prouver
 
-**Ce qui a ete elimine, definitivement :**
+Le jalon M11 (`ladybird/M11_NAVIGATEUR.md`) ajoute a WebContent la barre
+d'adresse, les boutons d'historique, le routage des entrees du gestionnaire de
+fenetres vers le document, et un repeint cadence au lieu d'une capture unique.
 
-- ce n'est pas le reseau — la fixture repond 200 ;
-- ce n'est pas le transfert du corps — 672 octets arrivent ;
-- ce ne sont pas les en-tetes — statut et six en-tetes arrivent ;
-- ce n'est pas une annulation — `page_did_cancel_loading` ne se declenche pas ;
-- ce n'est pas `FIONBIO`, `setsockopt` ni `MSG_NOSIGNAL` — verifies dans le noyau ;
-- ce n'est pas la comptabilite de `poll` sur une paire — `etat_pair()` signale
-  bien la fermeture du pair.
+**Ce qui est verifie hors QEMU** : l'en-tete du chrome compile en C++23 contre
+l'arbre Ladybird epingle ; les quatre scripts de preparation s'appliquent au SHA
+epingle et sont idempotents ; les trois implementations du protocole GUI —
+noyau, hote Qt, chrome — s'accordent (`tools/verifie-protocole-gui.py`).
 
-**Piste en cours de mesure :** `WebContentClient.ipc` declare vingt-cinq
-messages **synchrones** vers l'interface navigateur, et
-`ConnectionBase::wait_for_specific_endpoint_message_impl` les attend **sans delai
-d'expiration**. Une navigation `http://` en declenche que `load_html` — donc M8 —
-ne declenche jamais : cookies, HSTS, stockage. Le peer M9 n'est pas une interface
-complete. Le port court-circuite deja `decide_navigation_process` pour cette
-raison exacte.
+**Ce qui ne l'est pas encore** : le comportement reel sous l'ordonnanceur de
+Bouchaud. La latence d'un clic, la fluidite du defilement et la tenue du canal
+GUI sous charge ne se mesurent qu'en demarrant l'OS. Cette ligne restera ici
+jusqu'a ce qu'une execution QEMU l'efface.
 
-Une sonde nomme desormais chaque attente synchrone. Celui qui ne revient jamais
-sera le dernier imprime.
+## 3 ter. M12 — HTTPS acquis, resolution de nom non
 
-Le chronometre appuie la piste :
+Le job M12 est passe le 18 aout : chaine reellement validee, nom d'hote verifie,
+document distant affiche dans une fenetre Bouchaud. C'est la premiere fois — la
+branche qui portait ce travail ne compilait pas, un `\0` interprete par Python
+ayant depose un octet NUL dans le C++ genere.
 
-    09:49:28  navigation commence
-    09:49:38  la requete part enfin        (+10 s : une attente, pas un calcul)
-    09:49:39  reponse complete
-    ...       gel jusqu'au delai
+Le job Internet, lui, ne passe pas, et l'ecart entre les deux **nomme le
+defaut** : meme execution, meme binaire, quatre minutes d'intervalle, une seule
+variable differente — l'hote designe par son nom au lieu de son adresse. Cote
+Internet, aucun des marqueurs de retour de RequestServer n'apparait et le
+processus consomme la moitie d'un cœur pendant cinq minutes. Ce n'est pas une
+attente sur une socket, c'est une boucle.
+
+Le suspect est `LibDNS`, et il reste **un suspect** : rien n'instrumente encore
+la resolution elle-meme. Voir `ladybird/M12_HTTPS.md`, section « Ce qui bloque
+encore ». Tant que ce point n'est pas ferme, la barre d'adresse n'accepte
+utilement que des adresses IP, ce qui n'est pas naviguer.
 
 ## 4. Ce qui n'est pas fait, et qu'il ne faut pas croire fait
 
 - **Le navigateur historique** (Python + QuickJS + Qt) reste le chemin par
-  defaut. Ladybird n'est pas encore le moteur du produit.
+  defaut de `run.ps1` sans `-Ladybird`. Ladybird n'est pas encore le moteur du
+  produit.
 - **Aucune isolation.** Le sandbox d'upstream est volontairement remplace par
   l'implementation non effective. C'est M14.
-- **Pas de HTTPS.** Ni certificats, ni validation X.509.
+- **Aucun site joignable par son nom.** HTTPS marche contre une adresse IP.
 - **Un seul onglet, un seul renderer.**
+- **Pas de redimensionnement de la fenetre du navigateur natif.** La surface est
+  allouee une fois ; `Configure` est journalise, pas suivi.
+- **Pas de modificateurs clavier.** Le pilote du bureau n'expose pas encore
+  Ctrl/Alt separement : ni Ctrl+L, ni Ctrl+R.
 - **La dette ICU** reste entiere : environ 40 Mio de donnees statiques par
   binaire. Le chargement paresseux l'a rendue supportable, il ne l'a pas
   supprimee.

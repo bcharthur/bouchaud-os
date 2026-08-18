@@ -169,34 +169,60 @@ pub fn ifup() {
 }
 
 /// Resout l'adresse MAC d'une IP via ARP. Renvoie None en cas de timeout.
+/// Nombre de requetes ARP emises avant d'abandonner.
+///
+/// ARP se perd : c'est une diffusion, sans accuse de reception et sans
+/// retransmission dans le protocole lui-meme. Une implementation qui n'emet
+/// **qu'une** requete accepte donc d'echouer chaque fois que cette trame se
+/// perd — au demarrage notamment, quand la carte vient d'etre initialisee.
+///
+/// C'est exactement ce qu'on a observe : `arping 10.0.2.2` a expire dans une
+/// execution ou `ping` et HTTP vers **ce meme hote** ont reussi juste apres.
+/// Or ICMP et TCP exigent son adresse MAC : la resolution fonctionnait, seule
+/// la sonde en un coup avait perdu sa trame.
+///
+/// Trois emissions, chacune avec sa fenetre d'ecoute. `arping(8)` de Linux fait
+/// la meme chose pour la meme raison.
+const ARP_TENTATIVES: u32 = 3;
+
+/// Iterations d'ecoute apres chaque emission.
+const ARP_ECOUTE: u32 = 1_500_000;
+
 fn arp_resolve(target: Ipv4Addr) -> Option<[u8; 6]> {
     let mac = e1000::mac();
     let mut arp_buf = [0u8; arp::PACKET_LEN];
     arp::build(&mut arp_buf, arp::OP_REQUEST, mac, our_ip(), [0; 6], target)?;
     let mut frame = [0u8; ethernet::HEADER_LEN + arp::PACKET_LEN];
     let flen = ethernet::build_frame(&mut frame, ethernet::BROADCAST, mac, ethernet::ETHERTYPE_ARP, &arp_buf)?;
-    e1000::send(&frame[..flen]);
 
     let mut buf = [0u8; 2048];
-    for _ in 0..3_000_000u32 {
-        if let Some(n) = e1000::receive(&mut buf) {
-            if n >= ethernet::HEADER_LEN + arp::PACKET_LEN {
-                if let Some(h) = ethernet::parse_header(&buf[..n]) {
-                    if h.ethertype == ethernet::ETHERTYPE_ARP {
-                        if let Some(p) = arp::parse(&buf[ethernet::HEADER_LEN..n]) {
-                            if p.op == arp::OP_REPLY && p.sender_ip == target {
-                                return Some(p.sender_mac);
-                            }
-                            // Le pair nous interroge en meme temps qu'on
-                            // l'interroge : c'est le cas normal d'une premiere
-                            // prise de contact, et ne pas repondre ici ferait
-                            // echouer sa moitie de la resolution.
-                            if p.op == arp::OP_REQUEST {
-                                repond_arp(&buf[..n]);
-                            }
-                        }
-                    }
-                }
+    for _tentative in 0..ARP_TENTATIVES {
+        e1000::send(&frame[..flen]);
+        for _ in 0..ARP_ECOUTE {
+            let n = match e1000::receive(&mut buf) {
+                Some(n) => n,
+                None => continue,
+            };
+            if n < ethernet::HEADER_LEN + arp::PACKET_LEN {
+                continue;
+            }
+            let header = match ethernet::parse_header(&buf[..n]) {
+                Some(h) if h.ethertype == ethernet::ETHERTYPE_ARP => h,
+                _ => continue,
+            };
+            let _ = header;
+            let paquet = match arp::parse(&buf[ethernet::HEADER_LEN..n]) {
+                Some(p) => p,
+                None => continue,
+            };
+            if paquet.op == arp::OP_REPLY && paquet.sender_ip == target {
+                return Some(paquet.sender_mac);
+            }
+            // Le pair nous interroge en meme temps qu'on l'interroge : c'est le
+            // cas normal d'une premiere prise de contact, et ne pas repondre ici
+            // ferait echouer sa moitie de la resolution.
+            if paquet.op == arp::OP_REQUEST {
+                repond_arp(&buf[..n]);
             }
         }
     }

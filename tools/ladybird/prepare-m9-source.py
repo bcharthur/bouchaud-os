@@ -109,6 +109,26 @@ if "BOUCHAUD_REQUEST_FD" not in data:
         auto request_client = TRY(try_make_ref_counted<Requests::RequestClient>(
             make<IPC::Transport>(move(request_socket))));
 
+        // DNS. Ladybird n'utilise pas `getaddrinfo` : il embarque son propre
+        // resolveur (LibDNS), et `use_dns_over_tls` y vaut **true** par defaut.
+        // Sans configuration explicite, la premiere resolution voudrait donc
+        // ouvrir une session TLS vers un resolveur public — c'est-a-dire faire
+        // dependre le DNS d'un magasin d'autorites, et la resolution du nom du
+        // resolveur d'une resolution. Deux cercles pour rien.
+        //
+        // On lui designe donc un serveur par son **adresse**, en UDP simple.
+        // `set_dns_server` accepte une IP litterale sans rien resoudre.
+        // `10.0.2.3` est le resolveur du NAT de QEMU ; sur une machine reelle,
+        // `BOUCHAUD_DNS_SERVER` prend le relais.
+        char const* dns_server = getenv("BOUCHAUD_DNS_SERVER");
+        if (dns_server == nullptr || *dns_server == '\\0')
+            dns_server = "10.0.2.3";
+        // Le parametre genere est un `StringView` : on nomme la chaine pour que
+        // sa duree de vie couvre l'appel sans dependre d'un temporaire.
+        auto dns_server_string = ByteString { dns_server };
+        request_client->async_set_dns_server(dns_server_string.view(), 53, false, false);
+        outln("[ladybird-bouchaud] M12_DNS_SERVER {} port=53 tls=false", dns_server);
+
         if (Web::ResourceLoader::is_initialized())
             Web::ResourceLoader::the().set_client(move(request_client));
         else

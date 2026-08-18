@@ -58,6 +58,32 @@ static pid_t launch_request_server(char const* path, int server_fd, int other_fd
     snprintf(inherited, sizeof(inherited), "%d", REQUESTSERVER_FD);
     setenv("BOUCHAUD_REQUESTSERVER_FD", inherited, 1);
 
+    // Certificats racine. RequestServer pose le chemin recu en `CURLOPT_CAINFO` ;
+    // sans lui, curl retombe sur le chemin compile a la construction, qui
+    // n'existe pas sous Bouchaud — et toute connexion TLS echoue a la
+    // verification, meme contre un serveur parfaitement valide.
+    //
+    // Le paquet n'est ajoute que si le fichier est **lisible**. C'est ce qui
+    // permet a M9 (HTTP simple, sans certificats embarques) de continuer a
+    // fonctionner exactement comme avant : pas de fichier, pas d'argument.
+    char const* ca = getenv("BOUCHAUD_CA_BUNDLE");
+    if (ca == NULL || *ca == '\0')
+        ca = "/etc/ssl/certs/ca-certificates.crt";
+    int have_ca = access(ca, R_OK) == 0;
+    if (have_ca)
+        printf("[ladybird-bouchaud] M12_CA_BUNDLE %s\n", ca);
+    else
+        printf("[ladybird-bouchaud] M12_CA_BUNDLE absent (%s) — TLS indisponible\n", ca);
+    fflush(stdout);
+
+    char* const args_tls[] = {
+        (char*)path,
+        (char*)"--disable-sandbox",
+        (char*)"--http-disk-cache-mode", (char*)"disabled",
+        (char*)"--cache-path", (char*)"/tmp/ladybird-cache",
+        (char*)"--certificate", (char*)ca,
+        NULL
+    };
     char* const args[] = {
         (char*)path,
         (char*)"--disable-sandbox",
@@ -66,7 +92,7 @@ static pid_t launch_request_server(char const* path, int server_fd, int other_fd
         NULL
     };
 
-    execv(path, args);
+    execv(path, have_ca ? args_tls : args);
     perror("exec RequestServer");
     _exit(131);
 }

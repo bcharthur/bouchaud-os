@@ -29,9 +29,12 @@ const DMA_RESERVE: u64 = 32 * 1024 * 1024;
 /// 512 Mio : une pile graphique statique (Qt + son moteur de rendu) mappe
 /// facilement 100 a 200 Mio entre son image, ses tampons de dessin et le tas de
 /// ses threads. On ne les prend que si la RAM le permet (cf. `init`).
-const USER_RESERVE: u64 = 512 * 1024 * 1024;
+const USER_RESERVE_DEFAULT: u64 = 512 * 1024 * 1024;
 /// Repli lorsque la machine est trop juste pour la reserve complete.
 const USER_RESERVE_MIN: u64 = 192 * 1024 * 1024;
+/// Plafond de la reserve prelevee sur la plus grande region.
+/// Les autres regions `Usable` sont de toute facon ajoutees au VMM ensuite.
+const USER_RESERVE_MAX: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Initialise l'acces memoire physique, etend le tas sur la plus grande region
 /// de RAM libre, et reserve une arene DMA. La memoire physique est entierement
@@ -62,10 +65,16 @@ pub fn init(boot: &'static BootInfo) {
     let region_end = best_start + best_len;
     // Le tas noyau garde au moins la moitie de la region : le moteur de rendu
     // maison en depend autant que le ring 3 depend de ses frames.
-    let user_reserve = if best_len / 2 >= USER_RESERVE + DMA_RESERVE {
-        USER_RESERVE
+    // Dimensionnement dynamique : avec 8+ Gio donnes a QEMU, ne pas rester
+    // artificiellement bloque a la reserve historique de 512 Mio. On conserve
+    // toutefois au moins la moitie de la plus grande region pour le tas noyau,
+    // dont le rendu CPU Ladybird depend encore fortement.
+    let max_user_while_preserving_heap =
+        (best_len / 2).saturating_sub(DMA_RESERVE);
+    let user_reserve = if max_user_while_preserving_heap >= USER_RESERVE_DEFAULT {
+        max_user_while_preserving_heap.min(USER_RESERVE_MAX)
     } else {
-        USER_RESERVE_MIN
+        USER_RESERVE_MIN.min(max_user_while_preserving_heap)
     };
     if best_len > DMA_RESERVE + user_reserve + 16 * 1024 * 1024 {
         let dma_start = (region_end - DMA_RESERVE) & !0xFFF;

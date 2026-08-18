@@ -117,6 +117,53 @@ croisée, comme un firmware.
 | `-Sync` | met à jour la branche courante avant de construire |
 | `-Fullscreen` | QEMU en plein écran |
 
+### Naviguer avec le port Ladybird
+
+Le port Ladybird a maintenant une barre d'adresse, un historique, des liens
+cliquables et HTTPS. Il s'utilise :
+
+```powershell
+.\run.ps1 -Ladybird                                   # fixture locale, page reelle
+.\run.ps1 -Ladybird -LadybirdUrl "https://10.0.2.2:18443/"
+```
+
+> **Un site par son nom ne se charge pas encore.** HTTPS est prouvé — chaîne
+> validée, nom d'hôte vérifié — mais uniquement contre un hôte désigné par son
+> **adresse**. Résoudre un nom fait boucler `RequestServer` : cinq minutes à
+> 50 % de processeur sans réponse, là où la même pile charge une adresse IP en
+> quinze secondes. C'est mesuré, pas supposé, et c'est le point qui sépare
+> « HTTPS fonctionne » de « on peut naviguer sur le Web » :
+> `docs/ladybird/M12_HTTPS.md`, section « Ce qui bloque encore ».
+
+| Dans la fenêtre | Effet |
+|---|---|
+| clic sur la barre d'adresse | prend le foyer clavier |
+| texte + Entrée | navigue (une entrée sans point part en recherche) |
+| `<` `>` `@` | reculer, avancer, recharger |
+| clic dans la page | suit les liens, remplit les formulaires |
+| molette, flèches | défilement |
+| Échap | rend le foyer à la page, ou arrête le chargement |
+
+QEMU donne au guest un accès sortant par NAT, et le magasin d'autorités requis
+par TLS est fabriqué au premier lancement à partir de celui de la machine hôte
+(`tools/ladybird/certs/README.md`). La page de départ est la fixture locale,
+`run.ps1` la démarre alors sur l'hôte — c'est le seul chemin réseau prouvé de
+bout en bout, et une page qui s'affiche vaut mieux qu'une page qui se fige.
+
+| Option Ladybird de `run.ps1` | Effet |
+|---|---|
+| `-LadybirdUrl <url>` | page de départ, `http://` ou `https://` |
+| `-LadybirdSansChrome` | retire la barre d'outils, revient à la capture unique de M9 |
+| `-LadybirdRamMiB <n>` | RAM donnée à QEMU (8192 par défaut) |
+| `-LadybirdM9Test` | régression HTTP déterministe sur fixture locale |
+| `-LadybirdM8` | régression HTML local finie |
+
+Ce qui manque encore : **la résolution de nom** (ci-dessus), les onglets (M13),
+le bac à sable du renderer (M14), le redimensionnement de la fenêtre, et l'écran
+d'avertissement pour un certificat invalide. Sans `-Ladybird`, `run.ps1` lance le navigateur Qt/QuickJS documenté
+plus haut, qui reste le mode par défaut.
+
+
 **Jamais un userland d'un autre commit sans le dire.** Une image d'un autre jour
 ne se signale pas : elle démarre, et elle se comporte comme le système d'alors.
 La panne qui suit accuse le code source, qui n'y est pour rien.
@@ -189,6 +236,8 @@ ce qui était vrai à leur date, pas ce qui est vrai aujourd'hui.
 | `docs/ETAT_DES_LIEUX.md` | **ce qui est acquis, et la preuve pour chaque ligne** |
 | `docs/VISION.md` | **où va le système : mémoire, processeur, graphisme, IA** |
 | `docs/ladybird/MASTER_PLAN.md` | le portage Ladybird et son échelle de jalons |
+| `docs/ladybird/M11_NAVIGATEUR.md` | **le chrome du navigateur natif : barre d'adresse, entrées, trames** |
+| `docs/ladybird/M12_HTTPS.md` | HTTPS, autorités racine, résolution de noms |
 | `docs/ARCHITECTURE.md` | découpage du noyau et du userland |
 | `docs/BROWSER_ISOLATION.md` | le modèle multiprocessus du navigateur |
 | `docs/BROWSER_RENDERER_PROTOCOL.md` | le protocole navigateur ↔ renderer |

@@ -14,7 +14,36 @@ param(
 
     [switch]$LadybirdM9Test,
 
+    # Page de depart du mode interactif.
+    #
+    # La fixture locale, et non un site public, parce que c'est le seul chemin
+    # reseau **prouve** de bout en bout. Resoudre un nom bloque encore : la CI
+    # du 18 aout montre RequestServer a 50 % de processeur pendant cinq minutes
+    # sur `https://example.com/`, alors que la meme pile chargeait
+    # `https://10.0.2.2:18443/` en quinze secondes quatre minutes plus tot. Voir
+    # `docs/ladybird/M12_HTTPS.md`, section "Ce qui bloque encore".
+    #
+    # Une page de depart qui se fige cinq minutes serait un plus mauvais accueil
+    # qu'une page locale qui s'affiche. La barre d'adresse est la pour le reste.
     [string]$LadybirdUrl = "http://10.0.2.2:18080/m9.html",
+
+    # Retire la barre d'outils M11 et revient au comportement de M9 : une seule
+    # capture, aucune entree. Utile pour isoler une regression entre le moteur
+    # et le chrome : est-ce la page, ou est-ce la barre ?
+    [switch]$LadybirdSansChrome,
+
+    # Profil materiel du navigateur natif.
+    # 8192 Mio est volontairement le profil local par defaut : Bouchaud peut
+    # utiliser la RAM supplementaire, contrairement aux vCPU additionnels qui
+    # attendent encore le vrai port SMP/APIC.
+    [ValidateRange(2048, 16384)]
+    [int]$LadybirdRamMiB = 8192,
+
+    # Expose la topologie QEMU pour preparer le futur SMP. Le noyau actuel ne
+    # schedule encore que sur le BSP : >1 vCPU n'accelere donc PAS encore
+    # WebContent. Garder 1 tant que SMP/APIC n'est pas merge.
+    [ValidateRange(1, 16)]
+    [int]$LadybirdCpuCount = 1,
 
     # Force le retelechargement de l'artefact Ladybird depuis GitHub Actions.
     [switch]$RefreshLadybird,
@@ -80,6 +109,28 @@ function Fail {
     Write-Host "ERREUR: $Message" -ForegroundColor Red
 
     exit 1
+}
+
+
+function ConvertTo-ShellSingleQuoted {
+    param(
+        [string]$Value
+    )
+
+    # L'autorun est interprete par /bin/sh dans l'OS. Une apostrophe ne peut pas
+    # apparaitre telle quelle dans une chaine entre apostrophes : on ferme la
+    # chaine, on emet une apostrophe echappee, puis on la rouvre, soit la
+    # sequence POSIX \'\''. Ne jamais injecter directement une valeur venant du
+    # terminal.
+    #
+    # L'apostrophe est nommee au lieu d'etre ecrite : PowerShell n'echappe pas
+    # le guillemet avec une barre oblique inverse, et la version qui essayait
+    # rendait TOUT le script inanalysable - `.\run.ps1` refusait de demarrer,
+    # quel que soit le mode demande.
+    $apostrophe = [string][char]39
+    $echappee = $apostrophe + '\' + $apostrophe + $apostrophe
+
+    return $apostrophe + $Value.Replace($apostrophe, $echappee) + $apostrophe
 }
 
 
@@ -168,6 +219,32 @@ if ($LadybirdModeCount -gt 1) {
 }
 
 $LadybirdMode = $Ladybird -or $LadybirdM8 -or $LadybirdM9Test
+
+if ($LadybirdM9Test -and -not $PSBoundParameters.ContainsKey("LadybirdUrl")) {
+    $LadybirdUrl = "http://10.0.2.2:18080/m9.html"
+}
+
+# Le chrome M11 n'a de sens que dans le mode interactif. Le test M9 mesure le
+# moteur : lui ajouter une barre d'outils changerait ce qu'il mesure.
+$LadybirdChrome = $Ladybird -and -not $LadybirdSansChrome
+
+if ($Ladybird -or $LadybirdM9Test) {
+    $parsedLadybirdUrl = $null
+    if (-not [System.Uri]::TryCreate(
+        $LadybirdUrl,
+        [System.UriKind]::Absolute,
+        [ref]$parsedLadybirdUrl
+    )) {
+        Fail "LadybirdUrl doit etre une URL absolue http:// ou https://"
+    }
+
+    if ($parsedLadybirdUrl.Scheme -notin @("http", "https")) {
+        Fail (
+            "Ladybird accepte http:// et https:// uniquement, pas '{0}'" -f `
+                $parsedLadybirdUrl.Scheme
+        )
+    }
+}
 
 
 # =============================================================================
@@ -550,6 +627,62 @@ if ($LadybirdMode) {
 
 
     # =========================================================================
+    # Certificats publics pour HTTPS Internet
+    # =========================================================================
+
+    if ($IsLadybirdM9) {
+        $PublicCABundle = Join-Path `
+            $RepoRoot `
+            "tools\ladybird\certs\cacert.pem"
+
+        # Sans magasin d'autorites, RequestServer laisse curl retomber sur un
+        # chemin decide a la compilation, qui n'existe pas ici : chaque poignee
+        # de main TLS echoue, et le symptome ressemble a une panne reseau. On le
+        # fabrique donc au lieu d'attendre que l'utilisateur devine.
+        if (-not (Test-Path -LiteralPath $PublicCABundle -PathType Leaf)) {
+            $Fabrique = Join-Path `
+                $RepoRoot `
+                "tools\ladybird\certs\fabrique-bundle.ps1"
+
+            if (Test-Path -LiteralPath $Fabrique -PathType Leaf) {
+                Write-Host `
+                    "CA HTTPS   : fabrication du magasin d'autorites..." `
+                    -ForegroundColor DarkGray
+
+                & $Fabrique -Sortie $PublicCABundle | Out-Null
+            }
+        }
+
+        if (Test-Path -LiteralPath $PublicCABundle -PathType Leaf) {
+            $ScenarioCertDir = Join-Path `
+                $ScenarioDir `
+                "etc\ssl\certs"
+
+            New-Item `
+                -ItemType Directory `
+                -Path $ScenarioCertDir `
+                -Force | Out-Null
+
+            Copy-Item `
+                -LiteralPath $PublicCABundle `
+                -Destination (Join-Path $ScenarioCertDir "ca-certificates.crt") `
+                -Force
+
+            Write-Host `
+                "CA HTTPS   : Mozilla/curl -> /etc/ssl/certs/ca-certificates.crt" `
+                -ForegroundColor DarkGray
+        }
+        elseif ($LadybirdUrl -match '^https://') {
+            Fail (
+                ("URL HTTPS demandee mais aucun magasin d'autorites : {0}. " +
+                 "Lancer tools\ladybird\certs\fabrique-bundle.ps1, ou " +
+                 "demander une URL http://.") -f $PublicCABundle
+            )
+        }
+    }
+
+
+    # =========================================================================
     # Autorun
     # =========================================================================
 
@@ -573,14 +706,22 @@ if ($LadybirdMode) {
         ) -join "`n"
     }
     else {
-        $m9TestLine = if ($IsLadybirdM9Test) { 'export BOUCHAUD_M9_TEST=1' } else { 'echo "M9 interactif : fermer la fenetre pour quitter"' }
+        $m9TestLine = if ($IsLadybirdM9Test) { 'export BOUCHAUD_M9_TEST=1' } else { 'echo "Navigateur : fermer la fenetre pour quitter"' }
+        $chromeLine = if ($LadybirdChrome) { 'export BOUCHAUD_M11=1' } else { 'echo "M11 desactive : capture unique, sans entrees"' }
+        $banniere = if ($LadybirdChrome) {
+            'echo "=== Bouchaud Navigateur (Ladybird M11) ==="'
+        }
+        else {
+            'echo "=== Ladybird M9 : HTTP distant via RequestServer ==="'
+        }
         $autorun = @(
             'uname',
             'df',
-            'echo "=== Ladybird M9 : HTTP distant via RequestServer ==="',
+            $banniere,
             'export BO_AUTOSTART_BROWSER=1',
             'export BOUCHAUD_M9=1',
-            "export BOUCHAUD_M9_URL=$LadybirdUrl",
+            "export BOUCHAUD_M9_URL=$(ConvertTo-ShellSingleQuoted $LadybirdUrl)",
+            $chromeLine,
             $m9TestLine,
             'desktop',
             ''
@@ -925,11 +1066,21 @@ else {
 
 if ($LadybirdMode) {
 
-    # M8 CI utilise 4 Gio.
     $qemuArgs += @(
         "-m",
-        "4096"
+        "$LadybirdRamMiB"
     )
+
+    $qemuArgs += @(
+        "-smp",
+        "$LadybirdCpuCount"
+    )
+
+    if ($LadybirdCpuCount -gt 1) {
+        Write-Host `
+            "ATTENTION: $LadybirdCpuCount vCPU exposes, mais Bouchaud est encore BSP/PIC ; SMP guest n'est pas encore actif." `
+            -ForegroundColor Yellow
+    }
 }
 else {
 
@@ -1057,8 +1208,13 @@ if ($LadybirdMode) {
         $ServiceLabel = "WebContent + RequestServer"
         $BrowserChain = "/bo-navigateur -> bootstrap -> RequestServer + WebContent"
     }
+    elseif ($LadybirdChrome) {
+        $ModeLabel = "Bouchaud Navigateur (Ladybird M11)"
+        $ServiceLabel = "WebContent + RequestServer"
+        $BrowserChain = "/bo-navigateur -> bootstrap -> RequestServer + WebContent + chrome"
+    }
     else {
-        $ModeLabel = "Ladybird natif M9 interactif"
+        $ModeLabel = "Ladybird natif M9 interactif (sans chrome)"
         $ServiceLabel = "WebContent + RequestServer"
         $BrowserChain = "/bo-navigateur -> bootstrap -> RequestServer + WebContent"
     }
@@ -1068,7 +1224,10 @@ if ($LadybirdMode) {
         -ForegroundColor Green
 
     Write-Host `
-        "RAM        : 4096 Mio"
+        "RAM        : $LadybirdRamMiB Mio"
+
+    Write-Host `
+        "vCPU       : $LadybirdCpuCount (SMP guest: non, BSP actuel)"
 
     Write-Host `
         "navigateur : $BrowserChain"
@@ -1079,6 +1238,15 @@ if ($LadybirdMode) {
     if ($IsLadybirdM9) {
         Write-Host `
             "URL        : $LadybirdUrl"
+    }
+
+    if ($LadybirdChrome) {
+        Write-Host `
+            "chrome     : barre d'adresse, historique, liens, defilement"
+
+        Write-Host `
+            "clavier    : cliquer la barre pour la saisir, Entree pour aller, Echap pour rendre le foyer" `
+            -ForegroundColor DarkGray
     }
 
     Write-Host `
@@ -1123,7 +1291,15 @@ $FixtureProcess = $null
 $FixtureOut = Join-Path $env:TEMP "bouchaud-m9-fixture.out.log"
 $FixtureErr = Join-Path $env:TEMP "bouchaud-m9-fixture.err.log"
 
-if ($LadybirdMode -and $IsLadybirdM9) {
+# La fixture locale sert le test M9 deterministe, et rien d'autre. Le mode
+# interactif sort par le NAT de QEMU : la demarrer alors ouvrirait un port sur
+# l'hote sans qu'aucun code ne le consulte.
+$UseLocalM9Fixture = $LadybirdMode -and $IsLadybirdM9 -and (
+    $IsLadybirdM9Test -or
+    $LadybirdUrl.StartsWith("http://10.0.2.2:18080/")
+)
+
+if ($UseLocalM9Fixture) {
     Remove-Item $FixtureOut, $FixtureErr -Force -ErrorAction SilentlyContinue
 
     $FixtureScript = Join-Path $RepoRoot "tools\health\fixture_server.py"
@@ -1156,7 +1332,7 @@ finally {
     }
 }
 
-if ($LadybirdMode -and $IsLadybirdM9) {
+if ($UseLocalM9Fixture) {
     Write-Host ""
     Write-Host "=== Journal fixture M9 ===" -ForegroundColor DarkGray
     if (Test-Path $FixtureOut) {
