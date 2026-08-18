@@ -323,6 +323,29 @@ if old_decision in data:
 elif new_decision not in data:
     raise SystemExit("M9 navigation process decision hook missing")
 
+# Sonde d'annulation. Ancree sur la signature seule : le corps d'upstream porte
+# aussi une branche WebDriver, et recopier un corps entier fait dependre notre
+# patch de details qui ne nous concernent pas.
+old_cancel = """void PageClient::page_did_cancel_loading(Optional<Utf16String> const& navigation_id, URL::URL const& url)
+{
+"""
+new_cancel = """void PageClient::page_did_cancel_loading(Optional<Utf16String> const& navigation_id, URL::URL const& url)
+{
+#if defined(BOUCHAUD_PORT)
+    // Sans cette sonde, un chargement abandonne est indiscernable d'un
+    // chargement qui n'arrive jamais : dans les deux cas le journal se tait, et
+    // l'on ne sait pas s'il faut chercher dans le reseau ou dans la navigation.
+    if (bouchaud_m9_enabled())
+        outln("[ladybird-bouchaud] M9_NAVIGATION_CANCELLED page={} url={}", m_id, url);
+#endif
+"""
+if new_cancel in data:
+    pass
+elif old_cancel in data:
+    data = data.replace(old_cancel, new_cancel, 1)
+else:
+    raise SystemExit("M9 cancel-loading probe missing")
+
 old_change_url = '''void PageClient::page_did_change_url(URL::URL const& url)
 {
     client().async_did_change_url(m_id, url);
@@ -398,7 +421,6 @@ new_finish = '''void PageClient::page_did_finish_loading(Optional<Utf16String> c
             outln("[ladybird-bouchaud] M9_DOCUMENT_SKIPPED page={} url={} attendu={}", m_id, chargee, attendue);
             return;
         }
-        outln("[ladybird-bouchaud] M9_NAVIGATION_COMMITTED url={}", chargee);
         outln("[ladybird-bouchaud] M9_DOCUMENT_LOADED page={} url={}", m_id, chargee);
         outln("[ladybird-bouchaud] M9_CAPTURE_MATCH url={}", chargee);
         page().top_level_traversable()->queue_screenshot_task({});
