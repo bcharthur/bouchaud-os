@@ -259,6 +259,11 @@ if "bouchaud_m9_trace" not in data:
          "M9_RS_REQUEST_STARTED id={}", "request_id"),
         ("void RequestClient::request_finished(u64 request_id, u64 total_size, RequestTimingInfo timing_info, Optional<NetworkError> network_error)\n{\n",
          "M9_RS_REQUEST_FINISHED id={} taille={}", "request_id, total_size"),
+        # Le message central du trio. Le corps peut traverser entierement sans
+        # que LibWeb n'ait de reponse a commiter : c'est ici que le code de
+        # statut et les en-tetes arrivent, et sans eux il n'y a pas de document.
+        ("void RequestClient::headers_became_available(u64 request_id, Vector<HTTP::Header> response_headers, Optional<u32> status_code, Optional<String> reason_phrase, Optional<IPC::File> javascript_bytecode_file, u64 javascript_bytecode_size, Optional<u64> javascript_bytecode_cache_vary_key, CameFromCache came_from_cache)\n{\n",
+         "M9_RS_HEADERS id={} statut={} nb={}", "request_id, status_code.value_or(0), response_headers.size()"),
     ]
     for signature, message, args in sondes:
         if signature not in data:
