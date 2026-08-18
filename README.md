@@ -186,9 +186,12 @@ ce qui était vrai à leur date, pas ce qui est vrai aujourd'hui.
 
 | Document | Sujet |
 |---|---|
+| `docs/ETAT_DES_LIEUX.md` | **ce qui est acquis, et la preuve pour chaque ligne** |
+| `docs/VISION.md` | **où va le système : mémoire, processeur, graphisme, IA** |
+| `docs/ladybird/MASTER_PLAN.md` | le portage Ladybird et son échelle de jalons |
 | `docs/ARCHITECTURE.md` | découpage du noyau et du userland |
 | `docs/BROWSER_ISOLATION.md` | le modèle multiprocessus du navigateur |
 | `docs/BROWSER_RENDERER_PROTOCOL.md` | le protocole navigateur ↔ renderer |
 | `docs/RENDERER_PRIVILEGE_AUDIT.md` | ce que le renderer peut encore faire |
-| `docs/ROADMAP.md` | ce qui vient ensuite, et pourquoi |
+| `docs/ROADMAP.md` | journal des versions passées (pas un plan : voir `VISION.md`) |
 | `docs/WEB_ENGINE_MODULES.md` | carte des modules du moteur Web |

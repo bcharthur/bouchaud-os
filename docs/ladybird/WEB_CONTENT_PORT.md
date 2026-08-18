@@ -45,7 +45,7 @@ le generaliser en **politique nommee** plutot qu'en cas particulier du navigateu
 1. WebContent demarre et repond a la poignee de main IPC (M7).
 2. Il rend une page HTML **locale** dans une surface (M8).
 3. La surface est composee par le WM dans une fenetre Bouchaud.
-4. CSS (M9), puis JavaScript par LibJS (M10).
+4. HTTP reel via RequestServer (M9), puis CSS et JavaScript dans la page (M10).
 5. Un renderer par onglet (M13).
 6. Politique de privileges appliquee et testee : un WebContent qui tente
    d'ouvrir `/dev/fb0` ou une socket doit **echouer**, et le test doit le
