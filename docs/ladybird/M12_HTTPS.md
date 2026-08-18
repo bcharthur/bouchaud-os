@@ -72,18 +72,64 @@ Ce qui distingue M12 tient a trois lignes du verdict :
     M12_FIXTURE_HTTPS_OK path=/m12.html
     ! M9_FIXTURE_HTTP_OK          (preuve negative : rien n'a transite en clair)
 
+## DNS : Ladybird n'utilise pas `getaddrinfo`
+
+Point important, et contre-intuitif : **Ladybird embarque son propre
+resolveur**. `Services/RequestServer/Resolver.cpp` s'appuie sur `LibDNS`, et
+`DNSInfo::use_dns_over_tls` y vaut **`true` par defaut**.
+
+Laisse tel quel, cela produit deux cercles :
+
+- le DNS voudrait ouvrir une session **TLS** — donc dependre d'un magasin
+  d'autorites — avant meme d'avoir resolu quoi que ce soit ;
+- et resoudre le **nom du resolveur** demanderait une resolution.
+
+La sortie est donnee par upstream lui-meme : `set_dns_server(host_or_address,
+port, use_tls, dnssec)` accepte une **adresse IP litterale**, sans rien
+resoudre. Le port configure donc, a la connexion du `RequestClient` :
+
+    10.0.2.3:53, UDP simple    (le resolveur du NAT de QEMU)
+
+et `BOUCHAUD_DNS_SERVER` prend le relais sur une machine reelle. Le trajet est
+trace :
+
+    [ladybird-bouchaud] M12_DNS_SERVER 10.0.2.3 port=53 tls=false
+
+C'est une vraie resolution, pas une correspondance codee en dur : aucun nom
+n'est associe a une adresse dans le port.
+
+## Autorites publiques
+
+L'image embarque deux jeux concatenes : l'autorite de test, qui signe la
+fixture, et le magasin **public** du paquet `ca-certificates` du runner.
+
+Le magasin est verifie plutot que suppose — nombre de certificats, et presence
+d'une racine temoin (`ISRG Root X1`) — parce qu'un fichier tronque passerait
+autrement inapercu jusqu'a une poignee de main TLS incomprehensible. Son
+empreinte est journalisee.
+
+Epingler une empreinte figee a ete ecarte volontairement : cela casserait a la
+premiere mise a jour de securite du paquet, et donnerait l'illusion du controle
+plutot que le controle.
+
+**A aucun moment la verification n'est relachee** : ni `-k`, ni
+`CURLOPT_SSL_VERIFYPEER=0`, ni exception.
+
+## L'essai Internet reel
+
+Un job separe, **`continue-on-error`**, charge `https://example.com/` : nom
+resolu par DNS, chaine publique validee, document commite. Il est informatif par
+construction — une panne d'un site tiers ne doit pas rendre rouge une CI dont le
+role est de mesurer Bouchaud.
+
 ## Ce que M12 ne fait pas encore
 
-- **Pas de DNS eprouve.** L'adresse est litterale. Joindre `example.com`
-  demande que le resolveur de RequestServer fonctionne sur l'UDP de Bouchaud —
-  present dans le noyau, non encore verifie de bout en bout.
-- **Pas de magasin d'autorites publiques.** L'image n'embarque que l'autorite de
-  test. Pour l'Internet reel il faudra un vrai paquet de certificats racine, et
-  decider de sa provenance et de sa mise a jour.
 - **Pas de gestion d'erreur de certificat cote interface.** Un certificat
   invalide fait echouer la requete ; il n'y a pas d'ecran d'avertissement, parce
   qu'il n'y a pas encore d'interface pour le porter (M11).
 - **Pas de HSTS, pas de redirections `http` -> `https` eprouvees.**
+- **L'URL reste une variable d'environnement.** C'est precisement ce que M11
+  doit supprimer.
 
 ## Etape suivante
 

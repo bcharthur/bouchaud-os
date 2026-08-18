@@ -573,6 +573,36 @@ jobs:
       # Le certificat porte `IP:10.0.2.2` en SAN, parce que c'est l'adresse de
       # l'hote vue depuis QEMU et qu'un certificat pour un nom ne vaudrait rien
       # ici : la verification du nom fait partie de ce qu'on veut prouver.
+      # Magasin d'autorites **publiques**, pour joindre l'Internet reel.
+      #
+      # Il vient du paquet `ca-certificates` du runner, deja installe : aucun
+      # telechargement, donc aucun hote tiers a l'instant ou l'on teste. Meme
+      # lecon que le 403 de `dbus` — un paquet qu'on ne demande pas ne peut pas
+      # tomber.
+      #
+      # Il est verifie plutot que suppose : on compte les certificats et on
+      # exige une racine connue. Un fichier tronque passerait autrement
+      # inapercu jusqu'a une poignee de main TLS incomprehensible.
+      #
+      # L'empreinte est journalisee. Epingler une empreinte figee casserait a la
+      # premiere mise a jour de securite du paquet — un faux epinglage, qui
+      # donnerait l'illusion du controle.
+      - name: Preparer le magasin d'autorites publiques
+        run: |
+          set -e
+          SRC=/etc/ssl/certs/ca-certificates.crt
+          test -s "$SRC"
+          mkdir -p tls
+          cp "$SRC" tls/public-ca.crt
+          NB=$(grep -c 'BEGIN CERTIFICATE' tls/public-ca.crt)
+          echo "autorites publiques : $NB certificats"
+          test "$NB" -ge 100
+          openssl crl2pkcs7 -nocrl -certfile tls/public-ca.crt \
+            | openssl pkcs7 -print_certs -noout \
+            | grep -q 'ISRG Root X1'
+          echo "  racine temoin presente : ISRG Root X1"
+          sha256sum tls/public-ca.crt
+
       - name: Fabriquer l'autorite et le certificat locaux
         run: |
           set -e
@@ -626,8 +656,12 @@ jobs:
           # fichier il ne passe pas `--certificate`, RequestServer retombe sur
           # le chemin compile — inexistant sous Bouchaud — et toute connexion
           # TLS echoue a la verification.
+          # Les deux autorites concatenees : la locale, qui signe la fixture, et
+          # les publiques, qui ouvrent l'Internet reel. C'est le seul moyen de
+          # valider les deux sans jamais relacher la verification.
           mkdir -p scenario-m12/etc/ssl/certs
-          cp tls/ca.crt scenario-m12/etc/ssl/certs/ca-certificates.crt
+          cat tls/ca.crt tls/public-ca.crt > scenario-m12/etc/ssl/certs/ca-certificates.crt
+          grep -c 'BEGIN CERTIFICATE' scenario-m12/etc/ssl/certs/ca-certificates.crt
 
           cat > scenario-m12/autorun <<'SCENARIO'
           uname
@@ -719,6 +753,7 @@ jobs:
           # c'est voulu — seul le schema change. Ce qui distingue M12 tient aux
           # deux lignes suivantes.
           grep -F "[ladybird-bouchaud] M12_CA_BUNDLE /etc/ssl/certs/ca-certificates.crt" serie-ladybird-m12.log
+          grep -F "[ladybird-bouchaud] M12_DNS_SERVER 10.0.2.3 port=53 tls=false" serie-ladybird-m12.log
           grep -F "M12_FIXTURE_HTTPS_OK path=/m12.html" fixture-m12.log
           # Et la preuve negative : aucune page n'a ete servie en clair.
           ! grep -Fq "M9_FIXTURE_HTTP_OK" fixture-m12.log
@@ -731,4 +766,158 @@ jobs:
           path: |
             serie-ladybird-m12.log
             fixture-m12.log
+          if-no-files-found: warn
+
+  qemu-internet:
+    name: Internet-reel-example.com (informatif)
+    runs-on: ubuntu-latest
+    needs: build
+    # Informatif, et il doit le rester. Une panne d'un site tiers ne peut pas
+    # rendre rouge une CI dont le role est de mesurer Bouchaud. Le resultat se
+    # lit ; il ne bloque pas. C'est la separation demandee entre invariants
+    # deterministes et essais reels.
+    continue-on-error: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+
+      - name: Cache cargo noyau
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Construire le noyau
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          cargo install bootimage --locked
+          cargo bootimage
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+
+      - name: Preparer le magasin d'autorites publiques
+        run: |
+          set -e
+          mkdir -p tls
+          cp /etc/ssl/certs/ca-certificates.crt tls/public-ca.crt
+          test -s tls/public-ca.crt
+          sha256sum tls/public-ca.crt
+
+      - name: Fabriquer le disque Internet
+        run: |
+          set -e
+          MAX_DATA_DISK=$((768 * 1024 * 1024))
+
+          mkdir -p scenario-net/usr/libexec/ladybird scenario-net/usr/share/ladybird
+          cp native-browser/WebContent scenario-net/usr/libexec/ladybird/WebContent
+          cp native-browser/RequestServer scenario-net/usr/libexec/ladybird/RequestServer
+          cp native-browser/webcontent-bootstrap scenario-net/usr/libexec/ladybird/webcontent-bootstrap
+          cp native-browser/webcontent-bootstrap scenario-net/bo-navigateur
+          chmod 755 scenario-net/bo-navigateur scenario-net/usr/libexec/ladybird/*
+
+          if [ -d native-browser/resources ]; then
+            cp -a native-browser/resources/. scenario-net/usr/share/ladybird/
+          fi
+
+          # Uniquement les autorites publiques : la cible est un vrai site, et
+          # l'autorite de test n'aurait rien a y faire.
+          mkdir -p scenario-net/etc/ssl/certs
+          cp tls/public-ca.crt scenario-net/etc/ssl/certs/ca-certificates.crt
+
+          cat > scenario-net/autorun <<'SCENARIO'
+          uname
+          df
+          ifconfig
+          echo "=== Ladybird : Internet reel, https://example.com ==="
+          export BO_AUTOSTART_BROWSER=1
+          export BOUCHAUD_M9=1
+          export BOUCHAUD_M9_TEST=1
+          export BOUCHAUD_M9_URL=https://example.com/
+          desktop
+          SCENARIO
+
+          (cd tools/userland && IMAGE="$GITHUB_WORKSPACE/ladybird-net.img" ./mkdisk.sh "$GITHUB_WORKSPACE/scenario-net")
+          DISK_SIZE=$(stat -c '%s' ladybird-net.img)
+          echo "hdb Internet: $DISK_SIZE octets"
+          test "$DISK_SIZE" -le "$MAX_DATA_DISK"
+
+      - name: Executer l'essai Internet en ring3
+        run: |
+          set -u
+          LOG=serie-ladybird-net.log
+          SUCCESS='[ladybird-bouchaud] RESULTAT : M9 HTTP distant dans fenetre Bouchaud OK'
+          DEADLINE=$((SECONDS + 300))
+          : > "$LOG"
+
+          qemu-system-x86_64 \
+            -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            -drive format=raw,file=ladybird-net.img \
+            -m 4096 -display none -no-reboot \
+            -netdev user,id=net0 -device e1000,netdev=net0 \
+            -audiodev none,id=muet -device AC97,audiodev=muet \
+            -serial file:"$LOG" &
+          QEMU_PID=$!
+          echo "qemu: pid $QEMU_PID"
+
+          SUCCESS_SEEN=0
+          while kill -0 "$QEMU_PID" 2>/dev/null; do
+            if grep -Fq "$SUCCESS" "$LOG" 2>/dev/null; then
+              SUCCESS_SEEN=1
+              echo "qemu: succes M9 detecte, arret anticipe"
+              kill -TERM "$QEMU_PID" 2>/dev/null || true
+              break
+            fi
+            if (( SECONDS >= DEADLINE )); then
+              echo "qemu: timeout M9 apres 300 s"
+              kill -TERM "$QEMU_PID" 2>/dev/null || true
+              break
+            fi
+            sleep 0.25
+          done
+
+          for _ in $(seq 1 20); do
+            kill -0 "$QEMU_PID" 2>/dev/null || break
+            sleep 0.1
+          done
+          if kill -0 "$QEMU_PID" 2>/dev/null; then
+            kill -KILL "$QEMU_PID" 2>/dev/null || true
+          fi
+
+          set +e
+          wait "$QEMU_PID"
+          QEMU_CODE=$?
+          set -e
+          echo "qemu: code $QEMU_CODE success=$SUCCESS_SEEN"
+          cat "$LOG"
+          echo "=== fixture ==="
+          cat fixture-m12.log
+
+      - name: Verdict Internet
+        run: |
+          grep -F "[ladybird-bouchaud] M12_CA_BUNDLE /etc/ssl/certs/ca-certificates.crt" serie-ladybird-net.log
+          grep -F "[ladybird-bouchaud] M12_DNS_SERVER 10.0.2.3 port=53 tls=false" serie-ladybird-net.log
+          # Les preuves qui comptent : un **nom** a ete resolu par DNS, une
+          # chaine **publique** validee, et le document distant commite.
+          grep -F "[ladybird-bouchaud] M9_NAVIGATION_COMMITTED" serie-ladybird-net.log
+          grep -F "[ladybird-bouchaud] M9_DOCUMENT_LOADED" serie-ladybird-net.log
+          grep -F "https://example.com/" serie-ladybird-net.log
+
+      - name: Journaux Internet
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-internet-serie
+          path: serie-ladybird-net.log
           if-no-files-found: warn
