@@ -166,6 +166,7 @@ extern "x86-interrupt" fn page_fault_handler(stack: InterruptStackFrame, code: P
         if crate::kernel::task::peuple_a_la_demande(addr.as_u64()) {
             return;
         }
+        crate::kernel::task::log_fault_mapping(addr.as_u64());
         crate::println!("faute de page utilisateur @ {:#x} ({:?})", addr.as_u64(), code);
         kill_faulting_task("faute de page", &stack);
     }
@@ -179,7 +180,7 @@ extern "x86-interrupt" fn page_fault_handler(stack: InterruptStackFrame, code: P
 extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
     let _gs = GsGuard::enter(&stack);
     timer::tick();
-    crate::kernel::task::echantillonne();
+    crate::kernel::task::echantillonne(from_user(&stack));
     notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
 
     crate::kernel::task::watchdog_from_timer();

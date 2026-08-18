@@ -124,7 +124,11 @@ fn write_file(path: &str, content: &[u8], mode: u16) -> bool {
     if name.is_empty() {
         return false;
     }
-    let parent = if parent_path.is_empty() { 0 } else { mkdir_path(parent_path) };
+    let parent = if parent_path.is_empty() {
+        0
+    } else {
+        mkdir_path(parent_path)
+    };
 
     let fs = ramfs::fs();
     let node = match fs.find_child(parent, name) {
@@ -209,7 +213,11 @@ pub fn unpack(archive: &[u8]) -> Unpacked {
             }
             TYPE_FILE | TYPE_FILE_ALT => {
                 if !path.is_empty() {
-                    if write_file(path, &archive[offset..end], if mode == 0 { 0o644 } else { mode }) {
+                    if write_file(
+                        path,
+                        &archive[offset..end],
+                        if mode == 0 { 0o644 } else { mode },
+                    ) {
                         result.files += 1;
                         result.bytes += size;
                     } else {
@@ -293,23 +301,156 @@ pub fn mounted() -> Option<(usize, usize, usize)> {
     unsafe { MOUNTED }
 }
 
+/// Seuil sous lequel un fichier de boot reste resident dans le RAMFS.
+const INLINE_BOOT_FILE_SIZE: usize = 4 * 1024 * 1024;
+
+/// Indexe directement l'USTAR sur hdb, secteur par secteur.
+///
+/// Aucun `Vec` de la taille du disque n'est alloue. Les donnees d'un gros
+/// fichier ne sont meme pas lues au boot : seule son etendue est enregistree.
+fn index_data_disk() -> Option<Unpacked> {
+    if !ata::present(Drive::Slave) {
+        return None;
+    }
+
+    let (_, slave_sectors) = ata::capacities();
+    let max_sectors = (MAX_ARCHIVE_DISK_SIZE / SECTOR_SIZE) as u64;
+    let disk_sectors = core::cmp::min(slave_sectors, max_sectors);
+    if disk_sectors == 0 {
+        return None;
+    }
+
+    crate::fs::backing::reset();
+
+    let mut result = Unpacked {
+        files: 0,
+        directories: 0,
+        bytes: 0,
+        skipped: 0,
+        truncated: false,
+    };
+
+    let mut sector = 0u64;
+    while sector < disk_sectors {
+        let mut header = [0u8; SECTOR_SIZE];
+        if ata::read(Drive::Slave, sector, 1, &mut header) != 1 {
+            result.truncated = true;
+            break;
+        }
+
+        if header.iter().all(|&byte| byte == 0) {
+            break;
+        }
+        if !is_ustar(&header) {
+            if sector == 0 {
+                return None;
+            }
+            break;
+        }
+
+        let prefix = field(&header, PREFIX, 155);
+        let name = field(&header, NAME, 100);
+        let path = if prefix.is_empty() {
+            String::from(name)
+        } else {
+            alloc::format!("{}/{}", prefix, name)
+        };
+        let path = path.trim_start_matches("./").trim_start_matches('/');
+
+        let size = octal(&header, SIZE, 12) as usize;
+        let mode = octal(&header, MODE, 8) as u16 & 0o7777;
+        let kind = header[TYPEFLAG];
+        let data_lba = sector + 1;
+        let data_sectors = ((size + SECTOR_SIZE - 1) / SECTOR_SIZE) as u64;
+
+        if data_lba.saturating_add(data_sectors) > disk_sectors {
+            result.skipped += 1;
+            result.truncated = true;
+            break;
+        }
+
+        match kind {
+            TYPE_DIR => {
+                if !path.is_empty() && mkdir_path(path) != 0 {
+                    result.directories += 1;
+                }
+            }
+            TYPE_FILE | TYPE_FILE_ALT => {
+                if !path.is_empty() {
+                    let (parent_path, file_name) = match path.rfind('/') {
+                        Some(index) => (&path[..index], &path[index + 1..]),
+                        None => ("", path),
+                    };
+                    let parent = if parent_path.is_empty() {
+                        0
+                    } else {
+                        mkdir_path(parent_path)
+                    };
+
+                    let fs = ramfs::fs();
+                    let node = match fs.find_child(parent, file_name) {
+                        Some(existing) => existing,
+                        None => match fs.touch_at(parent, file_name) {
+                            Ok(created) => created,
+                            Err(_) => {
+                                result.skipped += 1;
+                                sector = data_lba + data_sectors;
+                                continue;
+                            }
+                        },
+                    };
+                    fs.nodes[node].mode = if mode == 0 { 0o644 } else { mode };
+
+                    if size <= INLINE_BOOT_FILE_SIZE {
+                        let sectors = data_sectors as usize;
+                        let mut content = alloc::vec![0u8; sectors * SECTOR_SIZE];
+                        if sectors > 0
+                            && ata::read(Drive::Slave, data_lba, sectors, &mut content) != sectors
+                        {
+                            result.skipped += 1;
+                            result.truncated = true;
+                            break;
+                        }
+                        content.truncate(size);
+                        crate::fs::backing::unregister(node);
+                        fs.nodes[node].content = content;
+                    } else {
+                        fs.nodes[node].content.clear();
+                        crate::fs::backing::register_disk(node, Drive::Slave, data_lba, size);
+                    }
+
+                    result.files += 1;
+                    result.bytes += size;
+                }
+            }
+            _ => result.skipped += 1,
+        }
+
+        sector = data_lba + data_sectors;
+    }
+
+    Some(result)
+}
+
 /// Cherche une archive sur le disque de donnees et la deplie dans le RAMFS.
 ///
 /// Sans archive, le systeme demarre normalement : c'est un enrichissement, pas
 /// une dependance.
 pub fn mount_data_disk() {
-    let archive = match read_archive(Drive::Slave) {
-        Some(archive) => archive,
+    let result = match index_data_disk() {
+        Some(result) => result,
         None => {
             crate::kernel::dmesg::log("tar: aucune archive sur hdb (demarrage sans userland)");
             return;
         }
     };
 
-    let result = unpack(&archive);
-    unsafe { MOUNTED = Some((result.files, result.directories, result.bytes)) };
+    unsafe {
+        MOUNTED = Some((result.files, result.directories, result.bytes));
+    }
+    let (lazy_files, lazy_bytes, _, _) = crate::fs::backing::stats();
     crate::kernel::dmesg::log_fmt(format_args!(
-        "tar: hdb deplie -> {} fichiers, {} repertoires, {} Kio{}{}",
+        "tar: hdb deplie -> {} fichiers, {} repertoires, {} Kio{}{} ({} fichiers paresseux, {} Kio non copies)",
         result.files,
         result.directories,
         result.bytes / 1024,
@@ -318,6 +459,8 @@ pub fn mount_data_disk() {
         } else {
             String::new()
         },
-        if result.truncated { " [ARCHIVE TRONQUEE]" } else { "" }
+        if result.truncated { " [ARCHIVE TRONQUEE]" } else { "" },
+        lazy_files,
+        lazy_bytes / 1024
     ));
 }

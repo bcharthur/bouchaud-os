@@ -17,6 +17,7 @@
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use core::ops::{Deref, DerefMut};
 
 /// Nature d'un descripteur ouvert.
 #[derive(Clone)]
@@ -139,10 +140,16 @@ impl FdKind {
             // Le nœud d'un fichier compte ses descripteurs : c'est la moitie du
             // critere qui autorise a evincer ses pages partagees.
             FdKind::File(node) => crate::kernel::partage::ouvre(*node),
-            // Chaque extremite lit dans sa boite aux lettres. Compter les
-            // lecteurs de ce canal-la, c'est savoir si l'ecrivain d'en face
-            // parle encore a quelqu'un.
-            FdKind::SocketPair(inbox, _) => inbox.borrow_mut().lecteurs += 1,
+            // Une extremite de socketpair lit son inbox et ecrit son outbox.
+            // `dup`, `fork` et `SCM_RIGHTS` dupliquent donc ces deux capacites :
+            // les compter ici garantit que l'EOF n'arrive qu'apres la fermeture
+            // du dernier descripteur capable d'ecrire dans le canal.
+            FdKind::SocketPair(inbox, outbox) => {
+                inbox.borrow_mut().lecteurs += 1;
+                let mut canal = outbox.borrow_mut();
+                canal.ecrivains += 1;
+                canal.octets.rouvre();
+            }
             _ => {}
         }
     }
@@ -156,9 +163,16 @@ impl FdKind {
                 *compteur = compteur.saturating_sub(1);
             }
             FdKind::File(node) => crate::kernel::partage::ferme(*node),
-            FdKind::SocketPair(inbox, _) => {
-                let mut canal = inbox.borrow_mut();
-                canal.lecteurs = canal.lecteurs.saturating_sub(1);
+            FdKind::SocketPair(inbox, outbox) => {
+                {
+                    let mut canal = inbox.borrow_mut();
+                    canal.lecteurs = canal.lecteurs.saturating_sub(1);
+                }
+                let mut canal = outbox.borrow_mut();
+                canal.ecrivains = canal.ecrivains.saturating_sub(1);
+                if canal.ecrivains == 0 {
+                    canal.octets.marque_eof();
+                }
             }
             _ => {}
         }
@@ -191,17 +205,67 @@ impl FdKind {
 /// `recvmsg` recoive les descripteurs d'un envoi et les octets d'un autre. En
 /// pratique les deux bouts s'echangent un message a la fois, et l'ecart ne
 /// s'observe pas.
+///
+/// `Vec::is_empty()` n'est pas suffisant pour un flux : un canal sans octet
+/// mais dont le dernier ecrivain vient de fermer est **lisible**, parce qu'un
+/// `read` doit rendre 0 immediatement. `OctetsCanal` conserve l'API de `Vec`
+/// pour les producteurs/consommateurs existants, tout en faisant de
+/// `is_empty()` la question utile a leurs boucles d'attente : « cette lecture
+/// devrait-elle encore bloquer ? ».
+#[derive(Default)]
+pub struct OctetsCanal {
+    buffer: Vec<u8>,
+    eof: bool,
+}
+
+impl OctetsCanal {
+    /// `true` uniquement lorsqu'il n'y a ni donnees ni EOF a consommer.
+    ///
+    /// A EOF, `len()` reste 0 ; les chemins de lecture existants sortent donc
+    /// de leur attente puis rendent naturellement 0 sans octet sentinelle.
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_empty() && !self.eof
+    }
+
+    fn marque_eof(&mut self) {
+        self.eof = true;
+    }
+
+    fn rouvre(&mut self) {
+        self.eof = false;
+    }
+}
+
+impl Deref for OctetsCanal {
+    type Target = Vec<u8>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.buffer
+    }
+}
+
+impl DerefMut for OctetsCanal {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.buffer
+    }
+}
+
 #[derive(Default)]
 pub struct Canal {
-    pub octets: Vec<u8>,
+    pub octets: OctetsCanal,
     pub descripteurs: Vec<FileDesc>,
     /// Descripteurs qui lisent dans ce canal.
     ///
     /// Un canal est unidirectionnel : une extremite y ecrit, l'autre y lit. Ce
-    /// compteur repond a la seule question qui compte pour l'ecrivain — « ce
-    /// que j'ecris sera-t-il lu par quelqu'un ? ». A zero, l'ecriture rend
-    /// `EPIPE` et `poll` leve `POLLHUP` au lieu de faire attendre pour rien.
+    /// compteur repond a la question de l'ecrivain — « ce que j'ecris sera-t-il
+    /// lu par quelqu'un ? ». A zero, l'ecriture rend `EPIPE`.
     pub lecteurs: usize,
+    /// Descripteurs qui peuvent encore ecrire dans ce canal.
+    ///
+    /// Le lecteur en a besoin pour distinguer un canal momentanement vide d'un
+    /// flux termine. Ce compteur suit exactement les `FileDesc`, y compris les
+    /// duplications par `dup`/`fork` et les transferts `SCM_RIGHTS`.
+    pub ecrivains: usize,
 }
 
 /// Capacite d'un canal ou d'un tube, en octets.
@@ -214,9 +278,14 @@ pub struct Canal {
 pub const CAPACITE_CANAL: usize = 64 * 1024;
 
 impl Canal {
-    /// Un canal neuf a exactement un lecteur : l'extremite d'en face.
+    /// Un canal neuf a exactement un lecteur et un ecrivain : les deux
+    /// extremites creees ensemble par `socketpair()`.
     pub fn neuf() -> Rc<RefCell<Canal>> {
-        Rc::new(RefCell::new(Canal { lecteurs: 1, ..Canal::default() }))
+        Rc::new(RefCell::new(Canal {
+            lecteurs: 1,
+            ecrivains: 1,
+            ..Canal::default()
+        }))
     }
 
     /// Place restante avant saturation.
@@ -238,9 +307,10 @@ pub struct FileDesc {
 impl FileDesc {
     pub fn new(kind: FdKind) -> Self {
         // Les objets qui comptent leurs extremites le font des leur creation :
-        // `PipeState::new` part a 1/1, `Canal::neuf` a un lecteur. Un nœud de
-        // fichier n'a pas de constructeur a lui — c'est donc ici qu'il prend sa
-        // premiere reference, et `clone`/`drop` s'occupent des suivantes.
+        // `PipeState::new` part a 1/1, `Canal::neuf` a un lecteur et un
+        // ecrivain. Un nœud de fichier n'a pas de constructeur a lui — c'est
+        // donc ici qu'il prend sa premiere reference, et `clone`/`drop`
+        // s'occupent des suivantes.
         if let FdKind::File(node) = kind {
             crate::kernel::partage::ouvre(node);
         }

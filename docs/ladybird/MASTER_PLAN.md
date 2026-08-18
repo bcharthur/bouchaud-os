@@ -109,16 +109,34 @@ l'architecture de Ladybird, et nous la conservons telle quelle.
 | M5 | LibIPC entre deux processus Bouchaud | test aller-retour |
 | M6 | LibGfx cree une surface | PNG rendu compare pixel a pixel |
 | M7 | WebContent demarre | poignee de main IPC |
-| M8 | HTML local rendu dans une fenetre Bouchaud | capture comparee |
-| M9 | CSS local | idem |
-| M10 | JavaScript via LibJS dans la page | idem |
-| M11 | RequestServer + HTTP | fixture locale, pas Internet |
-| M12 | HTTPS puis `example.com` | sonde reseau |
+| M8 | HTML local rendu dans une fenetre Bouchaud | capture comparee — **vert** |
+| M9 | **RequestServer + HTTP reel** : page distante affichee | fixture locale, pas Internet |
+| M10 | CSS + JavaScript + DOM interactif | la capture contient ce que seul le JS peut produire |
+| M11 | Navigateur mono-onglet reellement utilisable | barre d'adresse, historique, liens, defilement |
+| M12 | HTTPS puis un vrai site | sonde reseau, chaine CA validee |
 | M13 | Plusieurs onglets, plusieurs renderers | `[ps]` montre N WebContent |
-| M14 | Sandbox + WPT | politique appliquee, sous-ensemble WPT au vert |
+| M14 | Sandbox + isolation + WPT | politique appliquee, sous-ensemble WPT au vert |
+| M15+ | Images/SVG, workers, medias, telechargements, stockage, permissions, performance | voir `../VISION.md` |
 
 M4 est le jalon qui tranche : il prouve la chaine complete (toolchain, tiers-parti,
 ELF, ABI, ring 3) sur la brique la plus lourde apres LibWeb.
+
+### Pourquoi cette table a ete renumerotee
+
+La version initiale annoncait `M9 CSS -> M10 JavaScript -> M11 RequestServer`.
+Le depot a pris un autre chemin, et c'est le depot qui a raison : une fois M8
+acquis, le CSS et le JavaScript etaient **deja** dans la page — LibWeb et LibJS
+sont lies et fonctionnels des M7. Ce qui manquait n'etait pas la mise en forme,
+c'etait d'aller chercher la page ailleurs que dans un litteral de chaine.
+
+M9 est donc devenu HTTP, et le travail reel l'a confirme : c'est le jalon qui a
+fait tomber les vrais defauts — le reveil de `poll`, le tube de reponse, les
+appels IPC synchrones d'une navigation reelle.
+
+Les documents qui portaient encore l'ancienne numerotation ont ete corriges avec
+cette table. **Une numerotation qui ment coute plus cher qu'une numerotation
+laide** : elle envoie chercher un travail deja fait, ou fait croire acquis un
+travail qui ne l'est pas.
 
 ## 6. Synchronisation upstream
 

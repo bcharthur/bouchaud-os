@@ -14,6 +14,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::drivers::keyboard::{self, Key};
+use crate::fs::backing;
 use crate::fs::ramfs::{self, NodeKind};
 use crate::kernel::abi::{errno, user_read, user_read_u64, user_write};
 use crate::kernel::fd::{device_for_path, FdKind, FileDesc};
@@ -143,37 +144,56 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
         FdKind::Audio => 0,
         FdKind::Zero => {
             let zeros = alloc::vec![0u8; count];
-            if user_write(buffer, &zeros) { count as i64 } else { -errno::EFAULT }
+            if user_write(buffer, &zeros) {
+                count as i64
+            } else {
+                -errno::EFAULT
+            }
         }
         FdKind::Random => {
             let mut data = alloc::vec![0u8; count.min(4096)];
             crate::net::security::tls::rng::fill(&mut data);
             let len = data.len();
-            if user_write(buffer, &data) { len as i64 } else { -errno::EFAULT }
+            if user_write(buffer, &data) {
+                len as i64
+            } else {
+                -errno::EFAULT
+            }
         }
         FdKind::File(node) => {
-            let offset = process.borrow().files.get(fd).map(|d| d.offset).unwrap_or(0);
-            let fs = ramfs::fs();
-            let content = &fs.nodes[node].content;
-            if offset >= content.len() {
+            let offset = process
+                .borrow()
+                .files
+                .get(fd)
+                .map(|d| d.offset)
+                .unwrap_or(0);
+            let total = backing::logical_len(node);
+            if offset >= total {
                 return 0;
             }
-            let end = core::cmp::min(content.len(), offset + count);
-            let slice = content[offset..end].to_vec();
-            if !user_write(buffer, &slice) {
+            let wanted = core::cmp::min(count, total - offset);
+            let mut data = alloc::vec![0u8; wanted];
+            let got = backing::read_at(node, offset, &mut data);
+            data.truncate(got);
+            if !user_write(buffer, &data) {
                 return -errno::EFAULT;
             }
             if let Some(desc) = process.borrow_mut().files.get_mut(fd) {
-                desc.offset = end;
+                desc.offset = offset + got;
             }
-            (end - offset) as i64
+            got as i64
         }
         // Instantane : un fichier ordinaire, mais dont le contenu vit dans le
         // descripteur et non dans le RAMFS. La glibc lit `/proc/self/maps` par
         // `getdelim`, donc en plusieurs `read` successifs : le decalage doit
         // avancer comme pour un vrai fichier.
         FdKind::Instantane(ref contenu) => {
-            let offset = process.borrow().files.get(fd).map(|d| d.offset).unwrap_or(0);
+            let offset = process
+                .borrow()
+                .files
+                .get(fd)
+                .map(|d| d.offset)
+                .unwrap_or(0);
             if offset >= contenu.len() {
                 return 0;
             }
@@ -222,7 +242,11 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
             let len = core::cmp::min(count, state.buffer.len());
             let data: Vec<u8> = state.buffer.drain(..len).collect();
             drop(state);
-            if user_write(buffer, &data) { len as i64 } else { -errno::EFAULT }
+            if user_write(buffer, &data) {
+                len as i64
+            } else {
+                -errno::EFAULT
+            }
         }
         FdKind::EventFd(state) => {
             if count < 8 {
@@ -237,7 +261,11 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
             let value = if state.semaphore { 1 } else { state.counter };
             state.counter -= value;
             drop(state);
-            if user_write(buffer, &value.to_le_bytes()) { 8 } else { -errno::EFAULT }
+            if user_write(buffer, &value.to_le_bytes()) {
+                8
+            } else {
+                -errno::EFAULT
+            }
         }
         FdKind::TimerFd(state) => {
             if count < 8 {
@@ -253,7 +281,11 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
             if expired == 0 {
                 return -errno::EAGAIN;
             }
-            if user_write(buffer, &expired.to_le_bytes()) { 8 } else { -errno::EFAULT }
+            if user_write(buffer, &expired.to_le_bytes()) {
+                8
+            } else {
+                -errno::EFAULT
+            }
         }
         FdKind::Socket(_) => crate::kernel::abi::net::sys_recvfrom(fd, buffer, count, 0, 0, 0),
         FdKind::SocketPair(inbox, _) => {
@@ -263,11 +295,9 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
             // premier `recvmsg` d'un dialogue entre deux processus, celui qui
             // arrive avant que le pair ait eu la main.
             if inbox.borrow().octets.is_empty() && fd_flags(fd) & O_NONBLOCK == 0 {
-                let echeance = crate::kernel::timer::ticks()
-                    + crate::kernel::timer::ms_to_ticks(2000);
-                while inbox.borrow().octets.is_empty()
-                    && crate::kernel::timer::ticks() < echeance
-                {
+                let echeance =
+                    crate::kernel::timer::ticks() + crate::kernel::timer::ms_to_ticks(2000);
+                while inbox.borrow().octets.is_empty() && crate::kernel::timer::ticks() < echeance {
                     task::yield_now();
                     crate::arch::x86_64::cpu::wait_for_interrupt();
                 }
@@ -279,7 +309,11 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
             let len = core::cmp::min(count, guard.octets.len());
             let data: Vec<u8> = guard.octets.drain(..len).collect();
             drop(guard);
-            if user_write(buffer, &data) { len as i64 } else { -errno::EFAULT }
+            if user_write(buffer, &data) {
+                len as i64
+            } else {
+                -errno::EFAULT
+            }
         }
         FdKind::Epoll(_) => -errno::EINVAL,
     }
@@ -341,13 +375,17 @@ pub fn sys_write(fd: i32, buffer: u64, count: usize) -> i64 {
                 // qu'attend un programme qui pousse du son en boucle.
                 let bloquant = {
                     let borrowed = process.borrow();
-                    borrowed.files.get(fd).map(|d| d.flags & O_NONBLOCK == 0).unwrap_or(true)
+                    borrowed
+                        .files
+                        .get(fd)
+                        .map(|d| d.flags & O_NONBLOCK == 0)
+                        .unwrap_or(true)
                 };
                 if !bloquant {
                     return -errno::EAGAIN;
                 }
-                let echeance = crate::kernel::timer::ticks()
-                    + crate::kernel::timer::ms_to_ticks(200);
+                let echeance =
+                    crate::kernel::timer::ticks() + crate::kernel::timer::ms_to_ticks(200);
                 while crate::drivers::ac97::libres() == 0
                     && crate::kernel::timer::ticks() < echeance
                 {
@@ -355,12 +393,19 @@ pub fn sys_write(fd: i32, buffer: u64, count: usize) -> i64 {
                     crate::arch::x86_64::cpu::wait_for_interrupt();
                 }
                 let ecrits = crate::drivers::ac97::ecrit(&data);
-                if ecrits == 0 { -errno::EAGAIN } else { ecrits as i64 }
+                if ecrits == 0 {
+                    -errno::EAGAIN
+                } else {
+                    ecrits as i64
+                }
             } else {
                 ecrits as i64
             }
         }
         FdKind::File(node) => {
+            if backing::is_disk_backed(node) {
+                return -errno::EROFS;
+            }
             let (offset, append) = {
                 let borrowed = process.borrow();
                 let desc = borrowed.files.get(fd).unwrap();
@@ -396,7 +441,11 @@ pub fn sys_write(fd: i32, buffer: u64, count: usize) -> i64 {
             let place = match attends_place(
                 || {
                     let state = shared.borrow();
-                    if state.readers == 0 { Capacite::Rompu } else { Capacite::Place(state.place()) }
+                    if state.readers == 0 {
+                        Capacite::Rompu
+                    } else {
+                        Capacite::Place(state.place())
+                    }
                 },
                 non_bloquant,
             ) {
@@ -433,7 +482,11 @@ pub fn sys_write(fd: i32, buffer: u64, count: usize) -> i64 {
             let place = match attends_place(
                 || {
                     let canal = outbox.borrow();
-                    if canal.lecteurs == 0 { Capacite::Rompu } else { Capacite::Place(canal.place()) }
+                    if canal.lecteurs == 0 {
+                        Capacite::Rompu
+                    } else {
+                        Capacite::Place(canal.place())
+                    }
                 },
                 non_bloquant,
             ) {
@@ -567,7 +620,11 @@ pub fn sys_memfd_create(nom_addr: u64, _flags: u32) -> i64 {
     let mut desc = FileDesc::new(FdKind::File(idx));
     desc.cloexec = _flags & 1 != 0;
     let fd = borrowed.files.insert(desc);
-    if fd < 0 { -errno::EMFILE } else { fd as i64 }
+    if fd < 0 {
+        -errno::EMFILE
+    } else {
+        fd as i64
+    }
 }
 
 pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
@@ -629,9 +686,7 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
         // en perdrait une sur deux de chaque cote. C'est le genre de defaut qui
         // se diagnostique en une heure et se reproduit a chaque nouveau client
         // — a moins que le systeme ne le rende impossible.
-        if matches!(kind, FdKind::InputKeyboard | FdKind::InputMouse)
-            && ecran_virtuel().is_some()
-        {
+        if matches!(kind, FdKind::InputKeyboard | FdKind::InputMouse) && ecran_virtuel().is_some() {
             return -errno::EACCES;
         }
         // De meme pour la souris : son IRQ n'est armee qu'a l'entree du bureau.
@@ -685,15 +740,25 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
     if is_dir && (access == O_WRONLY || access == O_RDWR) {
         return -errno::EISDIR;
     }
+    if !is_dir
+        && backing::is_disk_backed(node)
+        && (access == O_WRONLY || access == O_RDWR || flags & O_TRUNC != 0)
+    {
+        return -errno::EROFS;
+    }
     if flags & O_TRUNC != 0 && !is_dir {
         fs.nodes[node].content.clear();
     }
 
-    let mut desc = FileDesc::new(if is_dir { FdKind::Dir(node) } else { FdKind::File(node) });
+    let mut desc = FileDesc::new(if is_dir {
+        FdKind::Dir(node)
+    } else {
+        FdKind::File(node)
+    });
     desc.flags = flags;
     desc.cloexec = flags & O_CLOEXEC != 0;
     if flags & O_APPEND != 0 {
-        desc.offset = fs.nodes[node].content.len();
+        desc.offset = backing::disk_len(node).unwrap_or(fs.nodes[node].content.len());
     }
     let fd = process.borrow_mut().files.insert(desc);
     fd as i64
@@ -703,7 +768,11 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
 pub fn sys_close(fd: i32) -> i64 {
     let process = task::current_process();
     let closed = process.borrow_mut().files.close(fd);
-    if closed { 0 } else { -errno::EBADF }
+    if closed {
+        0
+    } else {
+        -errno::EBADF
+    }
 }
 
 /// `lseek`.
@@ -718,7 +787,8 @@ pub fn sys_lseek(fd: i32, offset: i64, whence: u32) -> i64 {
         None => return -errno::EBADF,
     };
     let size = match desc.kind {
-        FdKind::File(node) | FdKind::Dir(node) => ramfs::fs().nodes[node].content.len() as i64,
+        FdKind::File(node) => backing::logical_len(node) as i64,
+        FdKind::Dir(_) => 0,
         FdKind::Instantane(ref contenu) => contenu.len() as i64,
         FdKind::Console | FdKind::Pipe(_, _) => return -errno::ESPIPE,
         _ => 0,
@@ -809,7 +879,11 @@ pub fn sys_fcntl(fd: i32, command: u32, arg: u64) -> i64 {
         }
         F_GETFD => match borrowed.files.get(fd) {
             Some(desc) => {
-                if desc.cloexec { FD_CLOEXEC as i64 } else { 0 }
+                if desc.cloexec {
+                    FD_CLOEXEC as i64
+                } else {
+                    0
+                }
             }
             None => -errno::EBADF,
         },
@@ -842,8 +916,17 @@ fn fill_stat(node: usize) -> [u8; 144] {
     let fs = ramfs::fs();
     let entry = &fs.nodes[node];
     let mode = (entry.mode as u32 & 0o7777)
-        | if entry.kind == NodeKind::Dir { S_IFDIR } else { S_IFREG };
-    stat_bytes(node as u64, mode, entry.uid as u32, entry.gid as u32, entry.content.len() as u64)
+        | if entry.kind == NodeKind::Dir {
+            S_IFDIR
+        } else {
+            S_IFREG
+        };
+    let size = if entry.kind == NodeKind::Dir {
+        0
+    } else {
+        backing::disk_len(node).unwrap_or(entry.content.len()) as u64
+    };
+    stat_bytes(node as u64, mode, entry.uid as u32, entry.gid as u32, size)
 }
 
 /// Compose les 144 octets d'un `struct stat`.
@@ -878,16 +961,26 @@ pub fn sys_stat_path(path_addr: u64, out: u64, _no_follow: bool) -> i64 {
         // caractere par caractere, et un `S_IFCHR` lui interdirait de chercher.
         let (mode, taille) = match kind {
             FdKind::Instantane(ref contenu) => (S_IFREG | 0o444, contenu.len() as u64),
-            FdKind::Framebuffer | FdKind::InputKeyboard | FdKind::InputMouse => (S_IFCHR | 0o660, 0),
+            FdKind::Framebuffer | FdKind::InputKeyboard | FdKind::InputMouse => {
+                (S_IFCHR | 0o660, 0)
+            }
             _ => (S_IFCHR | 0o666, 0),
         };
         let buffer = stat_bytes(1, mode, 0, 0, taille);
-        return if user_write(out, &buffer) { 0 } else { -errno::EFAULT };
+        return if user_write(out, &buffer) {
+            0
+        } else {
+            -errno::EFAULT
+        };
     }
     match resolve(&path) {
         Some(node) => {
             let buffer = fill_stat(node);
-            if user_write(out, &buffer) { 0 } else { -errno::EFAULT }
+            if user_write(out, &buffer) {
+                0
+            } else {
+                -errno::EFAULT
+            }
         }
         None => -errno::ENOENT,
     }
@@ -915,7 +1008,11 @@ pub fn sys_fstat(fd: i32, out: u64) -> i64 {
         }
         _ => stat_bytes(0, S_IFCHR | 0o666, 0, 0, 0),
     };
-    if user_write(out, &buffer) { 0 } else { -errno::EFAULT }
+    if user_write(out, &buffer) {
+        0
+    } else {
+        -errno::EFAULT
+    }
 }
 
 /// `newfstatat`.
@@ -956,8 +1053,17 @@ pub fn sys_statx(dirfd: i32, path_addr: u64, _flags: u32, _mask: u32, out: u64) 
             let fs = ramfs::fs();
             let entry = &fs.nodes[node];
             let mode = (entry.mode as u32 & 0o7777)
-                | if entry.kind == NodeKind::Dir { S_IFDIR } else { S_IFREG };
-            (mode, entry.content.len() as u64, entry.uid as u32, entry.gid as u32, node as u64)
+                | if entry.kind == NodeKind::Dir {
+                    S_IFDIR
+                } else {
+                    S_IFREG
+                };
+            let size = if entry.kind == NodeKind::Dir {
+                0
+            } else {
+                backing::disk_len(node).unwrap_or(entry.content.len()) as u64
+            };
+            (mode, size, entry.uid as u32, entry.gid as u32, node as u64)
         }
         None if !path.is_empty() && device_for_path(&absolute(&path)).is_some() => {
             match device_for_path(&absolute(&path)) {
@@ -981,7 +1087,11 @@ pub fn sys_statx(dirfd: i32, path_addr: u64, _flags: u32, _mask: u32, out: u64) 
     buffer[32..40].copy_from_slice(&inode.to_le_bytes());
     buffer[40..48].copy_from_slice(&size.to_le_bytes());
     buffer[48..56].copy_from_slice(&size.div_ceil(512).to_le_bytes());
-    if user_write(out, &buffer) { 0 } else { -errno::EFAULT }
+    if user_write(out, &buffer) {
+        0
+    } else {
+        -errno::EFAULT
+    }
 }
 
 /// `access` / `faccessat`.
@@ -1031,7 +1141,11 @@ pub fn sys_getdents64(fd: i32, buffer: u64, size: usize) -> i64 {
     for index in 0..ramfs::MAX_NODES {
         if fs.nodes[index].used && fs.nodes[index].parent == node && index != node {
             let entry = &fs.nodes[index];
-            children.push((index, entry.name_str().to_string(), entry.kind == NodeKind::Dir));
+            children.push((
+                index,
+                entry.name_str().to_string(),
+                entry.kind == NodeKind::Dir,
+            ));
         }
     }
 
@@ -1127,6 +1241,9 @@ pub fn sys_unlink(path_addr: u64) -> i64 {
     };
     match resolve(&path) {
         Some(node) if node != 0 => {
+            if backing::is_disk_backed(node) {
+                return -errno::EROFS;
+            }
             let fs = ramfs::fs();
             if fs.nodes[node].kind == NodeKind::Dir && !fs.is_empty_dir(node) {
                 return -errno::ENOTEMPTY;
@@ -1151,6 +1268,7 @@ pub fn sys_rename(from_addr: u64, to_addr: u64) -> i64 {
         None => return -errno::EFAULT,
     };
     let node = match resolve(&from) {
+        Some(node) if node != 0 && backing::is_disk_backed(node) => return -errno::EROFS,
         Some(node) if node != 0 => node,
         Some(_) => return -errno::EBUSY,
         None => return -errno::ENOENT,
@@ -1178,6 +1296,9 @@ pub fn sys_ftruncate(fd: i32, length: usize) -> i64 {
         },
         None => return -errno::EBADF,
     };
+    if backing::is_disk_backed(node) {
+        return -errno::EROFS;
+    }
     if length > ramfs::MAX_FILE_SIZE {
         return -errno::EFBIG;
     }
@@ -1271,8 +1392,7 @@ pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
                         None => return -errno::EFAULT,
                     };
                     let (_, voies, bits) = crate::drivers::ac97::format();
-                    let (retenue, _, _) =
-                        crate::drivers::ac97::configure(demande, voies, bits);
+                    let (retenue, _, _) = crate::drivers::ac97::configure(demande, voies, bits);
                     if !user_write(arg, &retenue.to_le_bytes()) {
                         return -errno::EFAULT;
                     }
@@ -1284,8 +1404,8 @@ pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
                         None => return -errno::EFAULT,
                     };
                     let (frequence, _, bits) = crate::drivers::ac97::format();
-                    let (_, retenues, _) = crate::drivers::ac97::configure(
-                        frequence, demande.min(255) as u8, bits);
+                    let (_, retenues, _) =
+                        crate::drivers::ac97::configure(frequence, demande.min(255) as u8, bits);
                     if !user_write(arg, &(retenues as u32).to_le_bytes()) {
                         return -errno::EFAULT;
                     }
@@ -1298,9 +1418,8 @@ pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
                     };
                     let (frequence, _, bits) = crate::drivers::ac97::format();
                     let voies = if demande != 0 { 2 } else { 1 };
-                    let (_, retenues, _) =
-                        crate::drivers::ac97::configure(frequence, voies, bits);
-                    if !user_write(arg, &((retenues as u32 - 1)).to_le_bytes()) {
+                    let (_, retenues, _) = crate::drivers::ac97::configure(frequence, voies, bits);
+                    if !user_write(arg, &(retenues as u32 - 1).to_le_bytes()) {
                         return -errno::EFAULT;
                     }
                     0
@@ -1315,8 +1434,7 @@ pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
                     // se voit repondre ce qu'on fera reellement, comme le veut
                     // le protocole.
                     let bits = if demande == AFMT_U8 { 8 } else { 16 };
-                    let (_, _, retenus) =
-                        crate::drivers::ac97::configure(frequence, voies, bits);
+                    let (_, _, retenus) = crate::drivers::ac97::configure(frequence, voies, bits);
                     let format = if retenus == 8 { AFMT_U8 } else { AFMT_S16_LE };
                     if !user_write(arg, &format.to_le_bytes()) {
                         return -errno::EFAULT;
@@ -1355,8 +1473,8 @@ pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
                     // savoir de combien l'image est en avance sur le son.
                     let (frequence, voies, bits) = crate::drivers::ac97::format();
                     let (_, _, _, _, en_vol, _) = crate::drivers::ac97::resume();
-                    let par_tampon = 2048 * voies as u32 * (bits as u32 / 8)
-                        * frequence / crate::drivers::ac97::FREQUENCE_NATIVE;
+                    let par_tampon = 2048 * voies as u32 * (bits as u32 / 8) * frequence
+                        / crate::drivers::ac97::FREQUENCE_NATIVE;
                     if !user_write(arg, &(en_vol as u32 * par_tampon).to_le_bytes()) {
                         return -errno::EFAULT;
                     }
@@ -1384,7 +1502,11 @@ pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
                 buffer[17] = 3; // VINTR
                 buffer[17 + 2] = 0x7f; // VERASE
                 buffer[17 + 6] = 1; // VMIN
-                if user_write(arg, &buffer) { 0 } else { -errno::EFAULT }
+                if user_write(arg, &buffer) {
+                    0
+                } else {
+                    -errno::EFAULT
+                }
             }
             TCSETS | FIONBIO => 0,
             TIOCGWINSZ => {
@@ -1392,24 +1514,44 @@ pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
                 let mut buffer = [0u8; 8];
                 buffer[0..2].copy_from_slice(&25u16.to_le_bytes());
                 buffer[2..4].copy_from_slice(&80u16.to_le_bytes());
-                if user_write(arg, &buffer) { 0 } else { -errno::EFAULT }
+                if user_write(arg, &buffer) {
+                    0
+                } else {
+                    -errno::EFAULT
+                }
             }
             TIOCGPGRP => {
-                if user_write(arg, &1u32.to_le_bytes()) { 0 } else { -errno::EFAULT }
+                if user_write(arg, &1u32.to_le_bytes()) {
+                    0
+                } else {
+                    -errno::EFAULT
+                }
             }
             FIONREAD => {
-                if user_write(arg, &0u32.to_le_bytes()) { 0 } else { -errno::EFAULT }
+                if user_write(arg, &0u32.to_le_bytes()) {
+                    0
+                } else {
+                    -errno::EFAULT
+                }
             }
             _ => -errno::ENOTTY,
         },
         FdKind::Framebuffer => match request {
             FBIOGET_VSCREENINFO => {
                 let buffer = fb_var_screeninfo();
-                if user_write(arg, &buffer) { 0 } else { -errno::EFAULT }
+                if user_write(arg, &buffer) {
+                    0
+                } else {
+                    -errno::EFAULT
+                }
             }
             FBIOGET_FSCREENINFO => {
                 let buffer = fb_fix_screeninfo();
-                if user_write(arg, &buffer) { 0 } else { -errno::EFAULT }
+                if user_write(arg, &buffer) {
+                    0
+                } else {
+                    -errno::EFAULT
+                }
             }
             // La resolution est imposee par le materiel : on accepte sans rien
             // changer (Qt et SDL reessaient sinon indefiniment).
@@ -1438,7 +1580,11 @@ pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
             }
             FIONREAD => {
                 let en_attente = pending_bytes(&kind) as u32;
-                if user_write(arg, &en_attente.to_le_bytes()) { 0 } else { -errno::EFAULT }
+                if user_write(arg, &en_attente.to_le_bytes()) {
+                    0
+                } else {
+                    -errno::EFAULT
+                }
             }
             _ => -errno::ENOTTY,
         },
@@ -1479,26 +1625,46 @@ fn vt_ioctl(request: u64, arg: u64) -> i64 {
     const KD_GRAPHICS: u32 = 1;
     match request {
         KDGETMODE => {
-            let mode = if crate::drivers::gfx::is_active() { KD_GRAPHICS } else { KD_TEXT };
-            if user_write(arg, &mode.to_le_bytes()) { 0 } else { -errno::EFAULT }
+            let mode = if crate::drivers::gfx::is_active() {
+                KD_GRAPHICS
+            } else {
+                KD_TEXT
+            };
+            if user_write(arg, &mode.to_le_bytes()) {
+                0
+            } else {
+                -errno::EFAULT
+            }
         }
         KDSETMODE => 0,
         KDGKBMODE => {
             // K_XLATE : le mode par defaut d'une console Linux.
-            if user_write(arg, &1u32.to_le_bytes()) { 0 } else { -errno::EFAULT }
+            if user_write(arg, &1u32.to_le_bytes()) {
+                0
+            } else {
+                -errno::EFAULT
+            }
         }
         KDSKBMODE => 0,
         VT_GETMODE => {
             // `struct vt_mode` : mode, waitv, relsig, acqsig, frsig.
             let buffer = [0u8; 8];
-            if user_write(arg, &buffer) { 0 } else { -errno::EFAULT }
+            if user_write(arg, &buffer) {
+                0
+            } else {
+                -errno::EFAULT
+            }
         }
         VT_SETMODE | VT_ACTIVATE | VT_WAITACTIVE => 0,
         VT_GETSTATE => {
             // `struct vt_stat` : v_active, v_signal, v_state. Une seule console.
             let mut buffer = [0u8; 6];
             buffer[0..2].copy_from_slice(&1u16.to_le_bytes());
-            if user_write(arg, &buffer) { 0 } else { -errno::EFAULT }
+            if user_write(arg, &buffer) {
+                0
+            } else {
+                -errno::EFAULT
+            }
         }
         TCGETS | TCSETS | TIOCGWINSZ | FIONBIO => 0,
         _ => -errno::ENOTTY,
@@ -1517,11 +1683,15 @@ fn fb_var_screeninfo() -> [u8; 160] {
     put(8, width as u32); // xres_virtual
     put(12, height as u32); // yres_virtual
     put(24, 32); // bits_per_pixel
-    // Canaux XRGB8888 : rouge en 16, vert en 8, bleu en 0.
-    put(32, 16); put(36, 8); // red offset/length
-    put(44, 8); put(48, 8); // green
-    put(56, 0); put(60, 8); // blue
-    put(68, 24); put(72, 0); // transp
+                 // Canaux XRGB8888 : rouge en 16, vert en 8, bleu en 0.
+    put(32, 16);
+    put(36, 8); // red offset/length
+    put(44, 8);
+    put(48, 8); // green
+    put(56, 0);
+    put(60, 8); // blue
+    put(68, 24);
+    put(72, 0); // transp
     put(100, 1_000_000_000 / 60); // pixclock indicatif
     buffer
 }
@@ -1560,7 +1730,11 @@ pub fn ecran_virtuel() -> Option<crate::kernel::task::EcranVirtuel> {
 /// Geometrie que voit le processus courant : (largeur, hauteur, pas en octets).
 fn geometrie_ecran() -> (usize, usize, usize) {
     match ecran_virtuel() {
-        Some(ecran) => (ecran.largeur as usize, ecran.hauteur as usize, ecran.pas as usize),
+        Some(ecran) => (
+            ecran.largeur as usize,
+            ecran.hauteur as usize,
+            ecran.pas as usize,
+        ),
         None => {
             let (largeur, hauteur) = crate::drivers::gfx::resolution();
             (largeur, hauteur, largeur * 4)
@@ -1586,12 +1760,20 @@ fn evdev_ioctl(request: u64, arg: u64, device: input::Device) -> i64 {
     match command {
         // EVIOCGVERSION : version du protocole evdev (1.0.1).
         0x01 => {
-            if user_write(arg, &0x0001_0001u32.to_le_bytes()) { 0 } else { -errno::EFAULT }
+            if user_write(arg, &0x0001_0001u32.to_le_bytes()) {
+                0
+            } else {
+                -errno::EFAULT
+            }
         }
         // EVIOCGID : `struct input_id`.
         0x02 => {
             let id = input::device_id(device);
-            if user_write(arg, &id) { 0 } else { -errno::EFAULT }
+            if user_write(arg, &id) {
+                0
+            } else {
+                -errno::EFAULT
+            }
         }
         // EVIOCGNAME : nom du peripherique.
         0x06 => write_string(arg, input::device_name(device), size),
@@ -1603,19 +1785,31 @@ fn evdev_ioctl(request: u64, arg: u64, device: input::Device) -> i64 {
         // EVIOCGPROP : proprietes (INPUT_PROP_*). Aucune : souris classique.
         0x09 => {
             let empty = alloc::vec![0u8; size];
-            if user_write(arg, &empty) { size as i64 } else { -errno::EFAULT }
+            if user_write(arg, &empty) {
+                size as i64
+            } else {
+                -errno::EFAULT
+            }
         }
         // EVIOCGKEY / EVIOCGLED / EVIOCGSW : etat courant des touches, des
         // diodes, des interrupteurs. Rien d'enfonce au moment de l'ouverture.
         0x18 | 0x19 | 0x1B => {
             let empty = alloc::vec![0u8; size];
-            if user_write(arg, &empty) { size as i64 } else { -errno::EFAULT }
+            if user_write(arg, &empty) {
+                size as i64
+            } else {
+                -errno::EFAULT
+            }
         }
         // EVIOCGBIT(type, len) : bitmap des codes supportes.
         0x20..=0x3F => {
             let kind = (command - 0x20) as u16;
             let bits = input::capability_bits(device, kind, size);
-            if user_write(arg, &bits) { bits.len() as i64 } else { -errno::EFAULT }
+            if user_write(arg, &bits) {
+                bits.len() as i64
+            } else {
+                -errno::EFAULT
+            }
         }
         // EVIOCGABS(axe) : pas d'axe absolu (c'est une souris relative).
         0x40..=0x7F => -errno::EINVAL,
@@ -1633,7 +1827,11 @@ fn evdev_ioctl(request: u64, arg: u64, device: input::Device) -> i64 {
 /// Ecrit une chaine dans un tampon utilisateur borne, renvoie sa longueur.
 fn write_string(addr: u64, text: &[u8], max: usize) -> i64 {
     let len = core::cmp::min(text.len(), max.max(1));
-    if user_write(addr, &text[..len]) { len as i64 } else { -errno::EFAULT }
+    if user_write(addr, &text[..len]) {
+        len as i64
+    } else {
+        -errno::EFAULT
+    }
 }
 
 // --- Peripheriques d'entree --------------------------------------------------
@@ -1650,7 +1848,11 @@ fn read_input(buffer: u64, count: usize, device: input::Device) -> i64 {
     if events.is_empty() {
         return -errno::EAGAIN;
     }
-    if user_write(buffer, &events) { events.len() as i64 } else { -errno::EFAULT }
+    if user_write(buffer, &events) {
+        events.len() as i64
+    } else {
+        -errno::EFAULT
+    }
 }
 
 // --- Attente d'evenements ----------------------------------------------------
@@ -1681,8 +1883,8 @@ const ATTENTE_ECRITURE_MS: u64 = 5_000;
 
 /// Attend qu'un canal ait de la place. Rend la place obtenue, ou l'erreur.
 fn attends_place<F: Fn() -> Capacite>(etat: F, non_bloquant: bool) -> Result<usize, i64> {
-    let echeance = crate::kernel::timer::ticks()
-        + crate::kernel::timer::ms_to_ticks(ATTENTE_ECRITURE_MS);
+    let echeance =
+        crate::kernel::timer::ticks() + crate::kernel::timer::ms_to_ticks(ATTENTE_ECRITURE_MS);
     loop {
         match etat() {
             // Ecrire dans un canal que plus personne ne lit n'a pas de sens :
@@ -1765,7 +1967,11 @@ fn readable(fd: i32) -> bool {
     };
     match kind {
         FdKind::Console => keyboard::has_pending(),
-        FdKind::File(_) | FdKind::Dir(_) | FdKind::Zero | FdKind::Random | FdKind::Null
+        FdKind::File(_)
+        | FdKind::Dir(_)
+        | FdKind::Zero
+        | FdKind::Random
+        | FdKind::Null
         | FdKind::Instantane(_) => true,
         // Un tube dont l'ecrivain a disparu est « pret » : la lecture rendra 0.
         // Le declarer bloque ferait tourner indefiniment une boucle `poll` qui
@@ -1844,7 +2050,13 @@ pub fn sys_poll(fds: u64, count: usize, timeout_ms: i32) -> i64 {
 }
 
 /// `select` / `pselect6`, ramene a une attente de lisibilite.
-pub fn sys_select(nfds: i32, read_set: u64, _write_set: u64, _except_set: u64, timeout: u64) -> i64 {
+pub fn sys_select(
+    nfds: i32,
+    read_set: u64,
+    _write_set: u64,
+    _except_set: u64,
+    timeout: u64,
+) -> i64 {
     let deadline = if timeout == 0 {
         u64::MAX
     } else {
@@ -2027,7 +2239,9 @@ pub fn sys_timerfd_settime(fd: i32, flags: u32, new_value: u64, old_value: u64) 
 
     if old_value != 0 {
         let previous = state.borrow();
-        let remaining = previous.deadline.saturating_sub(crate::kernel::timer::ticks());
+        let remaining = previous
+            .deadline
+            .saturating_sub(crate::kernel::timer::ticks());
         write_itimerspec(old_value, previous.interval, remaining);
     }
 
@@ -2049,9 +2263,11 @@ pub fn sys_timerfd_settime(fd: i32, flags: u32, new_value: u64, old_value: u64) 
         // Echeance absolue sur l'horloge monotone.
         let target_ms = value_ns / 1_000_000;
         let now_ms = crate::kernel::timer::monotonic_ms();
-        crate::kernel::timer::ticks() + crate::kernel::timer::ms_to_ticks(target_ms.saturating_sub(now_ms))
+        crate::kernel::timer::ticks()
+            + crate::kernel::timer::ms_to_ticks(target_ms.saturating_sub(now_ms))
     } else {
-        crate::kernel::timer::ticks() + crate::kernel::timer::ms_to_ticks(value_ns / 1_000_000).max(1)
+        crate::kernel::timer::ticks()
+            + crate::kernel::timer::ms_to_ticks(value_ns / 1_000_000).max(1)
     };
     0
 }

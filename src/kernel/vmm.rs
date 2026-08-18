@@ -140,6 +140,10 @@ struct FrameAllocator {
     freed: Vec<u64>,
     total: u64,
     used: u64,
+    allocations: u64,
+    frees: u64,
+    failures: u64,
+    high_watermark: u64,
 }
 
 static mut FRAMES: Option<FrameAllocator> = None;
@@ -152,6 +156,10 @@ fn frames() -> &'static mut FrameAllocator {
                 freed: Vec::new(),
                 total: 0,
                 used: 0,
+                allocations: 0,
+                frees: 0,
+                failures: 0,
+                high_watermark: 0,
             });
         }
         FRAMES.as_mut().unwrap()
@@ -176,8 +184,8 @@ pub fn add_region(start: u64, end: u64) {
 /// Alloue une frame physique de 4 KiB, mise a zero. `None` si plus de RAM.
 pub fn alloc_frame() -> Option<u64> {
     let f = frames();
-    let phys = if let Some(p) = f.freed.pop() {
-        p
+    let candidate = if let Some(p) = f.freed.pop() {
+        Some(p)
     } else {
         let mut found = None;
         for region in f.regions.iter_mut() {
@@ -187,10 +195,23 @@ pub fn alloc_frame() -> Option<u64> {
                 break;
             }
         }
-        found?
+        found
     };
-    f.used += 1;
-    unsafe { core::ptr::write_bytes(memory::phys_to_virt(phys), 0, PAGE_SIZE as usize) };
+
+    let phys = match candidate {
+        Some(phys) => phys,
+        None => {
+            f.failures = f.failures.wrapping_add(1);
+            return None;
+        }
+    };
+
+    f.used = f.used.saturating_add(1);
+    f.allocations = f.allocations.wrapping_add(1);
+    f.high_watermark = f.high_watermark.max(f.used);
+    unsafe {
+        core::ptr::write_bytes(memory::phys_to_virt(phys), 0, PAGE_SIZE as usize);
+    }
     Some(phys)
 }
 
@@ -200,6 +221,7 @@ pub fn free_frame(phys: u64) {
     if f.used > 0 {
         f.used -= 1;
     }
+    f.frees = f.frees.wrapping_add(1);
     f.freed.push(phys & !(PAGE_SIZE - 1));
 }
 
@@ -207,6 +229,30 @@ pub fn free_frame(phys: u64) {
 pub fn frame_stats() -> (u64, u64, u64) {
     let f = frames();
     (f.used, f.total.saturating_sub(f.used), f.total)
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FrameStatsDetailed {
+    pub used: u64,
+    pub free: u64,
+    pub total: u64,
+    pub allocations: u64,
+    pub frees: u64,
+    pub failures: u64,
+    pub high_watermark: u64,
+}
+
+pub fn frame_stats_detailed() -> FrameStatsDetailed {
+    let f = frames();
+    FrameStatsDetailed {
+        used: f.used,
+        free: f.total.saturating_sub(f.used),
+        total: f.total,
+        allocations: f.allocations,
+        frees: f.frees,
+        failures: f.failures,
+        high_watermark: f.high_watermark,
+    }
 }
 
 // --- Acces aux tables de pages ----------------------------------------------
@@ -304,6 +350,16 @@ pub struct AddressSpace {
     tables: Vec<u64>,
     /// Frames de donnees mappees pour l'utilisateur.
     pages: Vec<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ResidentStats {
+    pub total_pages: u64,
+    pub anonymous_pages: u64,
+    pub file_private_pages: u64,
+    pub shared_pages: u64,
+    pub device_pages: u64,
+    pub untracked_pages: u64,
 }
 
 impl AddressSpace {
@@ -459,6 +515,66 @@ impl AddressSpace {
     /// Nombre de pages de donnees actuellement mappees.
     pub fn mapped_pages(&self) -> usize {
         self.pages.len()
+    }
+
+    /// Compte les PTE utilisateur reellement presentes et les classe selon
+    /// leur VMA. C'est le RSS reel, y compris MAP_SHARED et device mappings.
+    pub fn resident_stats(
+        &self,
+        regions: &[crate::kernel::vma::Vma],
+    ) -> ResidentStats {
+        let mut stats = ResidentStats::default();
+        let pml4 = table_at(self.pml4);
+
+        for creneau in 0..USER_SLOTS {
+            let slot = user_slot() + creneau;
+            let entry4 = pml4[slot];
+            if entry4 & PTE_PRESENT == 0 {
+                continue;
+            }
+            let pdpt = table_at(entry4 & ADDR_MASK);
+            for (i3, &entry3) in pdpt.iter().enumerate() {
+                if entry3 & PTE_PRESENT == 0 {
+                    continue;
+                }
+                let pd = table_at(entry3 & ADDR_MASK);
+                for (i2, &entry2) in pd.iter().enumerate() {
+                    if entry2 & PTE_PRESENT == 0 || entry2 & PTE_HUGE != 0 {
+                        continue;
+                    }
+                    let pt = table_at(entry2 & ADDR_MASK);
+                    for (i1, &entry1) in pt.iter().enumerate() {
+                        if entry1 & PTE_PRESENT == 0 {
+                            continue;
+                        }
+                        let virt = ((slot as u64) << 39)
+                            | ((i3 as u64) << 30)
+                            | ((i2 as u64) << 21)
+                            | ((i1 as u64) << 12);
+                        stats.total_pages += 1;
+                        match crate::kernel::vma::trouve(regions, virt)
+                            .map(|region| region.backing)
+                        {
+                            Some(crate::kernel::vma::Backing::Zero) => {
+                                stats.anonymous_pages += 1;
+                            }
+                            Some(crate::kernel::vma::Backing::File { .. }) => {
+                                stats.file_private_pages += 1;
+                            }
+                            Some(crate::kernel::vma::Backing::SharedFile { .. }) => {
+                                stats.shared_pages += 1;
+                            }
+                            Some(crate::kernel::vma::Backing::Framebuffer { .. }) => {
+                                stats.device_pages += 1;
+                            }
+                            None => stats.untracked_pages += 1,
+                        }
+                    }
+                }
+            }
+        }
+
+        stats
     }
 
     /// Enumere les pages utilisateur mappees : (adresse virtuelle, entree).

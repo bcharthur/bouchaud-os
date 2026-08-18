@@ -10,8 +10,11 @@ use bootloader::BootInfo;
 use crate::kernel::heap;
 
 static mut PHYS_OFFSET: u64 = 0;
+static mut DMA_START: u64 = 0;
 static mut DMA_NEXT: u64 = 0;
 static mut DMA_END: u64 = 0;
+static mut DMA_ALLOCATIONS: u64 = 0;
+static mut DMA_FAILURES: u64 = 0;
 static mut USER_START: u64 = 0;
 static mut USER_END: u64 = 0;
 
@@ -72,6 +75,7 @@ pub fn init(boot: &'static BootInfo) {
             // Bascule le tas sur la grande arene physique (avant toute
             // allocation persistante : seul le bootstrap statique a servi).
             heap::switch_arena(phys_to_virt(heap_start), heap_size);
+            DMA_START = dma_start;
             DMA_NEXT = dma_start;
             DMA_END = region_end;
             USER_START = user_start;
@@ -82,12 +86,14 @@ pub fn init(boot: &'static BootInfo) {
         let heap_size = (dma_start - heap_start) as usize;
         unsafe {
             heap::switch_arena(phys_to_virt(heap_start), heap_size);
+            DMA_START = dma_start;
             DMA_NEXT = dma_start;
             DMA_END = region_end;
         }
     } else {
         // Region trop petite : DMA seule, tas bootstrap conserve.
         unsafe {
+            DMA_START = heap_start;
             DMA_NEXT = heap_start;
             DMA_END = region_end;
         }
@@ -133,11 +139,38 @@ pub fn alloc_dma(size: usize) -> Option<(u64, *mut u8)> {
     unsafe {
         let base = (DMA_NEXT + 0xFFF) & !0xFFF;
         let end = base + (((size as u64) + 0xFFF) & !0xFFF);
-        if DMA_END == 0 || end > DMA_END { return None; }
+        if DMA_END == 0 || end > DMA_END {
+            DMA_FAILURES = DMA_FAILURES.wrapping_add(1);
+            return None;
+        }
         DMA_NEXT = end;
+        DMA_ALLOCATIONS = DMA_ALLOCATIONS.wrapping_add(1);
         let virt = phys_to_virt(base);
         core::ptr::write_bytes(virt, 0, size);
         Some((base, virt))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DmaStats {
+    pub used: u64,
+    pub free: u64,
+    pub total: u64,
+    pub allocations: u64,
+    pub failures: u64,
+}
+
+pub fn dma_stats() -> DmaStats {
+    unsafe {
+        let total = DMA_END.saturating_sub(DMA_START);
+        let used = DMA_NEXT.saturating_sub(DMA_START).min(total);
+        DmaStats {
+            used,
+            free: total.saturating_sub(used),
+            total,
+            allocations: DMA_ALLOCATIONS,
+            failures: DMA_FAILURES,
+        }
     }
 }
 

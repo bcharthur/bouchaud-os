@@ -284,26 +284,27 @@ fn boucle() {
 ///
 /// Un gestionnaire des taches tient dans une ligne : le nom, le pid, la part de
 /// processeur sur la periode et la taille de l'espace d'adressage. Le
-/// denominateur du pourcentage est le nombre de ticks reellement distribues, pas
-/// la duree ecoulee — sinon une machine qui a dormi la moitie du temps afficherait
-/// des parts qui ne font pas cent.
+/// Le denominateur est le temps mur du timer. L'idle n'est donc plus
+/// redistribue artificiellement aux processus : la somme peut etre inferieure
+/// a 100 %, ce qui represente du vrai idle ou du travail noyau.
 fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
     let (mesures, total) = task::mesure_processus();
     if total > 0 {
         let mut ligne = String::new();
         for mesure in mesures.iter() {
-            if mesure.ticks == 0 && mesure.octets < 1024 * 1024 {
+            if mesure.ticks == 0 && mesure.rss_octets < 1024 * 1024 {
                 continue; // rien a dire d'un processus qui n'a rien fait
             }
             if !ligne.is_empty() {
                 ligne.push_str(" | ");
             }
             ligne.push_str(&alloc::format!(
-                "{} pid={} cpu {}% rss {} Mio{}",
+                "{} pid={} cpu {}% rss {} Mio vss {} Mio{}",
                 mesure.nom,
                 mesure.pid,
-                mesure.ticks * 100 / total,
-                mesure.octets / (1024 * 1024),
+                (mesure.ticks * 100 / total).min(100),
+                mesure.rss_octets / (1024 * 1024),
+                mesure.vss_octets / (1024 * 1024),
                 if mesure.taches > 1 { alloc::format!(" ({} fils)", mesure.taches) } else { String::new() },
             ));
         }

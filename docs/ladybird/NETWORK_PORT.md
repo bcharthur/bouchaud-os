@@ -25,7 +25,7 @@ l'interface IPC de RequestServer et on la sert avec notre pile. Divergence
 maitrisee, mais divergence quand meme : chaque evolution d'upstream doit etre
 reportee.
 
-Critere de decision, a etablir avant M11 : si OpenSSL doit de toute facon etre
+Critere de decision, a etablir avant M9 : si OpenSSL doit de toute facon etre
 porte pour `LibCrypto` (il le doit — liaison **publique**), alors le surcout de
 curl est faible et la voie 1 l'emporte. La question se reduit donc a : **peut-on
 porter OpenSSL ?** Elle est deja sur le chemin critique de LibJS.
@@ -45,7 +45,7 @@ porter OpenSSL ?** Elle est deja sur le chemin critique de LibJS.
 
 ## Etapes
 
-1. RequestServer demarre et repond en IPC (M11), sans reseau.
+1. RequestServer demarre et repond en IPC (M9), sans reseau.
 2. HTTP sur **fixture locale** — jamais Internet dans un test bloquant. Le depot
    a deja `navigateur/serveur_test.py` pour cela.
 3. HTTPS sur fixture locale avec autorite fabriquee (le mecanisme existe deja).
@@ -63,7 +63,7 @@ des greffons (`libnss_dns.so`, `libnss_files.so`) par `dlopen` a l'execution.
 Dans un binaire statique-PIE deploye sur Bouchaud, ces greffons n'existent pas :
 la resolution de noms echouera, silencieusement ou par une erreur sans rapport.
 
-Trois issues, a trancher avant M11 :
+Trois issues, a trancher avant M9 :
 
 1. **Ne pas utiliser `getaddrinfo`.** RequestServer passe par curl, qui peut
    etre construit avec son propre resolveur (`--enable-ares`) ou pointe sur le

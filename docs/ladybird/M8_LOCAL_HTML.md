@@ -81,5 +81,11 @@ la variable ; le bureau interactif normal reste inchange.
 ## Hors perimetre
 
 M8 utilise volontairement un HTML sans feuille CSS applicative ni JavaScript.
-M9 valide le CSS local, M10 le JavaScript dans la page, M11 branche
-RequestServer/HTTP, puis M12 HTTPS et Internet.
+M9 branche RequestServer et le HTTP reel : la page vient du reseau et non
+d'un litteral. M10 valide le CSS et le JavaScript **dans** cette page — DOM
+modifie, mise en page invalidee, nouvelle image. M11 fabrique le navigateur
+mono-onglet utilisable, puis M12 HTTPS et un vrai site.
+
+(Une version anterieure de ce paragraphe annoncait « M9 CSS, M10 JavaScript,
+M11 HTTP ». Voir `MASTER_PLAN.md`, section « Pourquoi cette table a ete
+renumerotee ».)

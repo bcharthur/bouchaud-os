@@ -1,6 +1,118 @@
 //! Decouverte CPU via CPUID et primitives bas niveau (halt, rdtsc).
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+
+/// Accounting global du CPU unique actuel.
+///
+/// L'etat idle est lu depuis IRQ0 pendant que l'instruction `hlt` n'a pas
+/// encore rendu la main au code interrompu. Il doit donc etre observable
+/// exactement a travers cette frontiere d'interruption.
+static IDLE: AtomicBool = AtomicBool::new(false);
+static CPU_TOTAL_TICKS: AtomicU64 = AtomicU64::new(0);
+static CPU_USER_TICKS: AtomicU64 = AtomicU64::new(0);
+static CPU_KERNEL_TICKS: AtomicU64 = AtomicU64::new(0);
+static CPU_IDLE_TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// Fenetre de charge systeme, alimentee directement par IRQ0.
+const LOAD_WINDOW_TICKS: u64 = 100;
+static LOAD_WINDOW_TOTAL: AtomicU64 = AtomicU64::new(0);
+static LOAD_WINDOW_IDLE: AtomicU64 = AtomicU64::new(0);
+static CPU_LOAD_PCT: AtomicU8 = AtomicU8::new(0);
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CpuAccounting {
+    pub total_ticks: u64,
+    pub user_ticks: u64,
+    pub kernel_ticks: u64,
+    pub idle_ticks: u64,
+}
+
+impl CpuAccounting {
+    pub fn idle_percent(self) -> u64 {
+        if self.total_ticks == 0 {
+            0
+        } else {
+            self.idle_ticks.saturating_mul(100) / self.total_ticks
+        }
+    }
+
+    pub fn busy_percent(self) -> u64 {
+        100u64.saturating_sub(self.idle_percent())
+    }
+}
+
+fn update_load_window(idle: bool) {
+    if idle {
+        LOAD_WINDOW_IDLE.fetch_add(1, Ordering::Relaxed);
+    }
+    let window = LOAD_WINDOW_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+    if window < LOAD_WINDOW_TICKS {
+        return;
+    }
+
+    // IRQ0 est l'unique ecrivain sur le CPU UP actuel.
+    let idle_ticks = LOAD_WINDOW_IDLE.swap(0, Ordering::Relaxed);
+    LOAD_WINDOW_TOTAL.store(0, Ordering::Relaxed);
+
+    let sample = 100u64.saturating_sub(
+        idle_ticks.saturating_mul(100) / window.max(1)
+    ) as u8;
+
+    // EWMA courte : stable dans l'UI sans masquer les changements rapides.
+    let old = CPU_LOAD_PCT.load(Ordering::Relaxed);
+    let filtered = if old == 0 {
+        sample
+    } else {
+        ((old as u16 * 3 + sample as u16) / 4) as u8
+    };
+    CPU_LOAD_PCT.store(filtered.min(100), Ordering::Relaxed);
+}
+
+/// Appele une fois par IRQ0. Rend true si le tick a reveille HLT.
+pub fn account_timer_tick(interrupted_user: bool) -> bool {
+    let idle = IDLE.load(Ordering::Acquire);
+
+    CPU_TOTAL_TICKS.fetch_add(1, Ordering::Relaxed);
+    if idle {
+        CPU_IDLE_TICKS.fetch_add(1, Ordering::Relaxed);
+    } else if interrupted_user {
+        CPU_USER_TICKS.fetch_add(1, Ordering::Relaxed);
+    } else {
+        CPU_KERNEL_TICKS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    update_load_window(idle);
+    idle
+}
+
+/// Snapshot coherent sur le CPU unique : si IRQ0 passe entre les lectures,
+/// on recommence afin de conserver user + kernel + idle == total.
+pub fn accounting() -> CpuAccounting {
+    loop {
+        let before = CPU_TOTAL_TICKS.load(Ordering::Acquire);
+        let user = CPU_USER_TICKS.load(Ordering::Relaxed);
+        let kernel = CPU_KERNEL_TICKS.load(Ordering::Relaxed);
+        let idle = CPU_IDLE_TICKS.load(Ordering::Relaxed);
+        let after = CPU_TOTAL_TICKS.load(Ordering::Acquire);
+
+        if before == after {
+            return CpuAccounting {
+                total_ticks: after,
+                user_ticks: user,
+                kernel_ticks: kernel,
+                idle_ticks: idle,
+            };
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Charge CPU systeme recente (0..=100), calculee depuis busy/idle IRQ0.
+pub fn load_percent() -> u8 {
+    CPU_LOAD_PCT.load(Ordering::Relaxed)
+}
+
 
 /// Boucle d'arret du CPU. Utilisee par le panic handler et l'arret du noyau.
 pub fn halt_loop() -> ! {
@@ -16,7 +128,13 @@ pub fn halt_loop() -> ! {
 /// arrete la machine pour de bon. Dans une attente de tache, preferer
 /// [`wait_for_interrupt`], qui garantit la condition.
 pub fn hlt() {
-    unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)); }
+    IDLE.store(true, Ordering::SeqCst);
+    // Pas de `nomem` ici : l'asm sert aussi de barriere compilateur pour
+    // l'etat IDLE observe depuis l'interruption qui reveille HLT.
+    unsafe {
+        asm!("hlt", options(nostack, preserves_flags));
+    }
+    IDLE.store(false, Ordering::SeqCst);
 }
 
 /// Attend la prochaine interruption, interruptions actives quoi qu'il arrive.
@@ -31,7 +149,13 @@ pub fn hlt() {
 /// est donc indivisible, aucune interruption ne peut se glisser entre les deux
 /// et etre perdue.
 pub fn wait_for_interrupt() {
-    unsafe { asm!("sti; hlt", options(nomem, nostack, preserves_flags)); }
+    IDLE.store(true, Ordering::SeqCst);
+    // `sti; hlt` garantit qu'aucune IRQ ne peut etre perdue entre
+    // l'activation des interruptions et le sommeil.
+    unsafe {
+        asm!("sti; hlt", options(nostack));
+    }
+    IDLE.store(false, Ordering::SeqCst);
 }
 
 /// Les interruptions sont-elles actives (drapeau `IF` de RFLAGS) ?

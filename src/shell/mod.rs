@@ -94,7 +94,7 @@ fn env_export(line: &str) {
 
 /// Liste des commandes connues, pour la tab-completion.
 pub const COMMANDS: &[&str] = &[
-    "help", "clear", "version", "uname", "sysinfo", "cpuinfo", "meminfo", "alloctest",
+    "help", "clear", "version", "uname", "sysinfo", "cpuinfo", "meminfo", "resstat", "memtop", "gpuinfo", "resource-selftest", "alloctest",
     "devices", "dmesg", "journal", "history", "uptime", "ticks", "interrupts", "breakpoint",
     "serial-test", "panic-test", "roadmap", "whoami", "id", "users", "useradd",
     "userdel", "passwd", "su", "pwd", "ls", "tree", "cd", "mkdir", "touch", "cat",
@@ -562,6 +562,14 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "sysinfo" => { c::sysinfo(); 0 }
         "cpuinfo" => { c::cpuinfo(); 0 }
         "meminfo" => { c::meminfo(); 0 }
+        "resstat" => { c::resstat(); 0 }
+        "memtop" => { c::memtop(); 0 }
+        "gpuinfo" => { c::gpuinfo(); 0 }
+        "resource-selftest" => {
+            let ok = crate::kernel::resource::self_test();
+            println!("[resource-selftest] {}", if ok { "OK" } else { "ECHEC" });
+            if ok { 0 } else { 1 }
+        }
         "alloctest" => { c::alloctest(); 0 }
         "devices" => { c::devices(); 0 }
         "dmesg" => { dmesg::print(); 0 }

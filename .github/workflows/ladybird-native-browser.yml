@@ -7,7 +7,23 @@ on:
     paths:
       - "tools/ladybird/**"
       - "src/gui/**"
+      - "src/fs/**"
+      - "src/drivers/block.rs"
+      - "src/kernel/elf.rs"
+      - "src/kernel/exec.rs"
+      - "src/kernel/abi/file.rs"
+      - "src/kernel/abi/mem.rs"
+      - "src/kernel/abi/proc.rs"
+      - "src/kernel/partage.rs"
       - "src/kernel/task.rs"
+      - "src/kernel/resource.rs"
+      - "src/kernel/scheduler.rs"
+      - "src/kernel/vmm.rs"
+      - "src/kernel/memory.rs"
+      - "src/drivers/gpu.rs"
+      - "src/drivers/gfx.rs"
+      - "src/arch/x86_64/cpu.rs"
+      - "src/arch/x86_64/idt.rs"
       - "docs/ladybird/**"
       - "src/fs/tar.rs"
       - "src/gui/window.rs"
@@ -16,7 +32,23 @@ on:
     paths:
       - "tools/ladybird/**"
       - "src/gui/**"
+      - "src/fs/**"
+      - "src/drivers/block.rs"
+      - "src/kernel/elf.rs"
+      - "src/kernel/exec.rs"
+      - "src/kernel/abi/file.rs"
+      - "src/kernel/abi/mem.rs"
+      - "src/kernel/abi/proc.rs"
+      - "src/kernel/partage.rs"
       - "src/kernel/task.rs"
+      - "src/kernel/resource.rs"
+      - "src/kernel/scheduler.rs"
+      - "src/kernel/vmm.rs"
+      - "src/kernel/memory.rs"
+      - "src/drivers/gpu.rs"
+      - "src/drivers/gfx.rs"
+      - "src/arch/x86_64/cpu.rs"
+      - "src/arch/x86_64/idt.rs"
       - "docs/ladybird/**"
       - "src/fs/tar.rs"
       - "src/gui/window.rs"
@@ -24,7 +56,7 @@ on:
 
 concurrency:
   group: ladybird-native-browser-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -170,7 +202,9 @@ jobs:
       - name: Verifier les artefacts
         run: |
           test -x third_party/native-browser-bouchaud/WebContent
+          test -x third_party/native-browser-bouchaud/RequestServer
           test -x third_party/native-browser-bouchaud/webcontent-bootstrap
+          test -f third_party/native-browser-bouchaud/M9_CAPABLE
           file third_party/native-browser-bouchaud/WebContent
           ! file third_party/native-browser-bouchaud/WebContent | grep -qi 'dynamically linked'
           ls -lh third_party/native-browser-bouchaud/
@@ -260,20 +294,58 @@ jobs:
 
       - name: Executer M8 en ring3
         run: |
-          set +e
-          timeout 240 qemu-system-x86_64 \
+          set -u
+          LOG=serie-ladybird-browser.log
+          SUCCESS='[ladybird-bouchaud] RESULTAT : M8 HTML local dans fenetre Bouchaud OK'
+          DEADLINE=$((SECONDS + 240))
+          : > "$LOG"
+
+          qemu-system-x86_64 \
             -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
             -drive format=raw,file=ladybird-browser.img \
             -m 4096 -display none -no-reboot \
             -netdev user,id=net0 -device e1000,netdev=net0 \
             -audiodev none,id=muet -device AC97,audiodev=muet \
-            -serial file:serie-ladybird-browser.log
-          echo "qemu: code $?"
-          cat serie-ladybird-browser.log
+            -serial file:"$LOG" &
+          QEMU_PID=$!
+          echo "qemu: pid $QEMU_PID"
+
+          SUCCESS_SEEN=0
+          while kill -0 "$QEMU_PID" 2>/dev/null; do
+            if grep -Fq "$SUCCESS" "$LOG" 2>/dev/null; then
+              SUCCESS_SEEN=1
+              echo "qemu: succes M8 detecte, arret anticipe"
+              kill -TERM "$QEMU_PID" 2>/dev/null || true
+              break
+            fi
+            if (( SECONDS >= DEADLINE )); then
+              echo "qemu: timeout M8 apres 240 s"
+              kill -TERM "$QEMU_PID" 2>/dev/null || true
+              break
+            fi
+            sleep 0.25
+          done
+
+          for _ in $(seq 1 20); do
+            kill -0 "$QEMU_PID" 2>/dev/null || break
+            sleep 0.1
+          done
+          if kill -0 "$QEMU_PID" 2>/dev/null; then
+            kill -KILL "$QEMU_PID" 2>/dev/null || true
+          fi
+
+          set +e
+          wait "$QEMU_PID"
+          QEMU_CODE=$?
+          set -e
+          echo "qemu: code $QEMU_CODE success=$SUCCESS_SEEN"
+          cat "$LOG"
 
       - name: Verdict M8
         run: |
           grep -F "tar: hdb deplie ->" serie-ladybird-browser.log
+          grep -F "fichiers paresseux" serie-ladybird-browser.log
+          grep -F "memfabric: premier fault fichier" serie-ladybird-browser.log
           if grep -Fq "[ARCHIVE TRONQUEE]" serie-ladybird-browser.log; then
             echo "Le disque Ladybird a ete tronque pendant le depliage" >&2
             exit 1
@@ -297,4 +369,164 @@ jobs:
         with:
           name: ladybird-native-browser-serie
           path: serie-ladybird-browser.log
+          if-no-files-found: warn
+
+  qemu-m9:
+    name: M9-HTTP-RequestServer-fenetre-Bouchaud
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+
+      - name: Cache cargo noyau
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Construire le noyau
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          cargo install bootimage --locked
+          cargo bootimage
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+
+      - name: Demarrer fixture HTTP M9
+        run: |
+          python3 tools/health/fixture_server.py --port 18080 > fixture-m9.log 2>&1 &
+          echo $! > fixture-m9.pid
+          sleep 1
+          kill -0 "$(cat fixture-m9.pid)"
+
+      - name: Fabriquer le disque Ladybird M9
+        run: |
+          set -e
+          MAX_DATA_DISK=$((768 * 1024 * 1024))
+
+          test -f native-browser/WebContent
+          test -f native-browser/RequestServer
+          test -f native-browser/webcontent-bootstrap
+          test -f native-browser/M9_CAPABLE
+
+          mkdir -p scenario-m9/usr/libexec/ladybird scenario-m9/usr/share/ladybird
+          cp native-browser/WebContent scenario-m9/usr/libexec/ladybird/WebContent
+          cp native-browser/RequestServer scenario-m9/usr/libexec/ladybird/RequestServer
+          cp native-browser/webcontent-bootstrap scenario-m9/usr/libexec/ladybird/webcontent-bootstrap
+          cp native-browser/webcontent-bootstrap scenario-m9/bo-navigateur
+          chmod 755 scenario-m9/bo-navigateur scenario-m9/usr/libexec/ladybird/*
+
+          if [ -d native-browser/resources ]; then
+            cp -a native-browser/resources/. scenario-m9/usr/share/ladybird/
+          fi
+
+          cat > scenario-m9/autorun <<'SCENARIO'
+          uname
+          df
+          echo "=== Ladybird M9 : HTTP distant via RequestServer ==="
+          export BO_AUTOSTART_BROWSER=1
+          export BOUCHAUD_M9=1
+          export BOUCHAUD_M9_TEST=1
+          export BOUCHAUD_M9_URL=http://10.0.2.2:18080/m9.html
+          desktop
+          SCENARIO
+
+          (cd tools/userland && IMAGE="$GITHUB_WORKSPACE/ladybird-m9.img" ./mkdisk.sh "$GITHUB_WORKSPACE/scenario-m9")
+          DISK_SIZE=$(stat -c '%s' ladybird-m9.img)
+          echo "hdb Ladybird M9: $DISK_SIZE octets"
+          test "$DISK_SIZE" -le "$MAX_DATA_DISK"
+
+      - name: Executer M9 en ring3
+        run: |
+          set -u
+          LOG=serie-ladybird-m9.log
+          SUCCESS='[ladybird-bouchaud] RESULTAT : M9 HTTP distant dans fenetre Bouchaud OK'
+          DEADLINE=$((SECONDS + 300))
+          : > "$LOG"
+
+          qemu-system-x86_64 \
+            -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            -drive format=raw,file=ladybird-m9.img \
+            -m 4096 -display none -no-reboot \
+            -netdev user,id=net0 -device e1000,netdev=net0 \
+            -audiodev none,id=muet -device AC97,audiodev=muet \
+            -serial file:"$LOG" &
+          QEMU_PID=$!
+          echo "qemu: pid $QEMU_PID"
+
+          SUCCESS_SEEN=0
+          while kill -0 "$QEMU_PID" 2>/dev/null; do
+            if grep -Fq "$SUCCESS" "$LOG" 2>/dev/null; then
+              SUCCESS_SEEN=1
+              echo "qemu: succes M9 detecte, arret anticipe"
+              kill -TERM "$QEMU_PID" 2>/dev/null || true
+              break
+            fi
+            if (( SECONDS >= DEADLINE )); then
+              echo "qemu: timeout M9 apres 300 s"
+              kill -TERM "$QEMU_PID" 2>/dev/null || true
+              break
+            fi
+            sleep 0.25
+          done
+
+          for _ in $(seq 1 20); do
+            kill -0 "$QEMU_PID" 2>/dev/null || break
+            sleep 0.1
+          done
+          if kill -0 "$QEMU_PID" 2>/dev/null; then
+            kill -KILL "$QEMU_PID" 2>/dev/null || true
+          fi
+
+          set +e
+          wait "$QEMU_PID"
+          QEMU_CODE=$?
+          set -e
+          echo "qemu: code $QEMU_CODE success=$SUCCESS_SEEN"
+          cat "$LOG"
+          echo "=== fixture ==="
+          cat fixture-m9.log
+
+      - name: Verdict M9
+        run: |
+          grep -F "tar: hdb deplie ->" serie-ladybird-m9.log
+          grep -F "fichiers paresseux" serie-ladybird-m9.log
+          ! grep -Fq "[ARCHIVE TRONQUEE]" serie-ladybird-m9.log
+
+          grep -F "[ladybird-bouchaud] M9_REQUESTSERVER_LAUNCHED" serie-ladybird-m9.log
+          grep -F "[ladybird-bouchaud] M9_REQUESTSERVER_READY" serie-ladybird-m9.log
+          grep -F "[ladybird-bouchaud] M9_REQUESTSERVER_CONNECTED" serie-ladybird-m9.log
+          grep -F "[ladybird-bouchaud] M9_NAVIGATION_BEGIN" serie-ladybird-m9.log
+          grep -F "[ladybird-bouchaud] M9_NAVIGATION_COMMITTED" serie-ladybird-m9.log
+          grep -F "[ladybird-bouchaud] M9_DOCUMENT_LOADED" serie-ladybird-m9.log
+          grep -F "[ladybird-bouchaud] M9_CAPTURE_MATCH" serie-ladybird-m9.log
+          grep -F "[ladybird-bouchaud] M9_CPU_SCREENSHOT_RENDERED" serie-ladybird-m9.log
+          grep -F "[ladybird-bouchaud] M9_GUI_HANDSHAKE_OK" serie-ladybird-m9.log
+          grep -F "[ladybird-bouchaud] M9_FRAME_READY_OK" serie-ladybird-m9.log
+          grep -F "[ladybird-bouchaud] M9_WEBCONTENT_EXIT_OK" serie-ladybird-m9.log
+          grep -F "[ladybird-bouchaud] RESULTAT : M9 HTTP distant dans fenetre Bouchaud OK" serie-ladybird-m9.log
+
+          grep -F "M9_FIXTURE_HTTP_OK path=/m9.html" fixture-m9.log
+
+      - name: Journaux Ladybird M9
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-m9-http-serie
+          path: |
+            serie-ladybird-m9.log
+            fixture-m9.log
           if-no-files-found: warn
