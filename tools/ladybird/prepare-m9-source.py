@@ -225,6 +225,52 @@ void ConnectionFromClient::bouchaud_m9_start()
     connection_cpp.write_text(data.replace(old_tail, new_tail, 1))
 
 
+
+# --- Sondes du chemin retour RequestServer -> WebContent ----------------------
+#
+# Le run precedent a etabli que le GET part, que la fixture repond 200, et que
+# la navigation n'est ni commitee ni annulee : elle se tait. Le trou est donc
+# dans les messages **retour**.
+#
+# Ce chemin n'est pas un simple flux d'octets sur la socket IPC : RequestServer
+# cree une paire de sockets (`RequestPipe`), en passe le bout lecteur a
+# WebContent par SCM_RIGHTS, et y ecrit le corps. Deux messages jalonnent
+# l'echange — `request_started`, qui porte le descripteur, puis
+# `request_finished`. Savoir lequel arrive et lequel manque partage le probleme
+# en deux moities dont une seule restera a explorer.
+requests_cpp = root / "Libraries/LibRequests/RequestClient.cpp"
+data = requests_cpp.read_text()
+
+if "bouchaud_m9_trace" not in data:
+    anchor = "namespace Requests {\n"
+    if anchor not in data:
+        raise SystemExit("M9 RequestClient: namespace Requests introuvable")
+    helper = anchor + "\nstatic bool bouchaud_m9_trace()\n{\n    return getenv(\"BOUCHAUD_M9\") != nullptr;\n}\n"
+    data = data.replace(anchor, helper, 1)
+    # `getenv` et `outln`. Le fichier utilise deja `warnln`, donc AK/Format.h
+    # arrive transitivement — mais une inclusion transitive est une dependance
+    # que personne n'a ecrite et que rien ne garantit.
+    if "<cstdlib>" not in data:
+        first_include = data.index("#include ")
+        data = data[:first_include] + "#include <cstdlib>\n#include <AK/Format.h>\n" + data[first_include:]
+
+    sondes = [
+        ("void RequestClient::request_started(u64 request_id, IPC::File response_file)\n{\n",
+         "M9_RS_REQUEST_STARTED id={}", "request_id"),
+        ("void RequestClient::request_finished(u64 request_id, u64 total_size, RequestTimingInfo timing_info, Optional<NetworkError> network_error)\n{\n",
+         "M9_RS_REQUEST_FINISHED id={} taille={}", "request_id, total_size"),
+    ]
+    for signature, message, args in sondes:
+        if signature not in data:
+            raise SystemExit("M9 RequestClient: signature introuvable -> " + message)
+        data = data.replace(
+            signature,
+            signature + "    if (bouchaud_m9_trace())\n        outln(\"[ladybird-bouchaud] " + message + "\", " + args + ");\n",
+            1)
+
+    requests_cpp.write_text(data)
+
+
 # PageClient: local policy + M9 screenshot bridge.
 page_cpp = root / "Services/WebContent/PageClient.cpp"
 data = page_cpp.read_text()
