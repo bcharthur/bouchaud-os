@@ -121,7 +121,7 @@ if "BOUCHAUD_REQUEST_FD" not in data:
         // `10.0.2.3` est le resolveur du NAT de QEMU ; sur une machine reelle,
         // `BOUCHAUD_DNS_SERVER` prend le relais.
         char const* dns_server = getenv("BOUCHAUD_DNS_SERVER");
-        if (dns_server == nullptr || *dns_server == '\0')
+        if (dns_server == nullptr || *dns_server == '\\0')
             dns_server = "10.0.2.3";
         // Le parametre genere est un `StringView` : on nomme la chaine pour que
         // sa duree de vie couvre l'appel sans dependre d'un temporaire.

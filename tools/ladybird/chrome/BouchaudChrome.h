@@ -212,7 +212,7 @@ inline constexpr u8 font8x8[95][8] = {
     { 0x33, 0x33, 0x33, 0x1E, 0x0C, 0x0C, 0x1E, 0x00 }, // 0x59 Y
     { 0x7F, 0x63, 0x31, 0x18, 0x4C, 0x66, 0x7F, 0x00 }, // 0x5A Z
     { 0x1E, 0x06, 0x06, 0x06, 0x06, 0x06, 0x1E, 0x00 }, // 0x5B [
-    { 0x03, 0x06, 0x0C, 0x18, 0x30, 0x60, 0x40, 0x00 }, // 0x5C \
+    { 0x03, 0x06, 0x0C, 0x18, 0x30, 0x60, 0x40, 0x00 }, // 0x5C (barre oblique inverse)
     { 0x1E, 0x18, 0x18, 0x18, 0x18, 0x18, 0x1E, 0x00 }, // 0x5D ]
     { 0x08, 0x1C, 0x36, 0x63, 0x00, 0x00, 0x00, 0x00 }, // 0x5E ^
     { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF }, // 0x5F _
@@ -316,8 +316,14 @@ struct State {
 
 inline State& state()
 {
-    static State the_state;
-    return the_state;
+    // Alloue une fois, jamais detruit. Un `static State` local imposerait un
+    // destructeur a la sortie du processus (`-Wexit-time-destructors`, erreur
+    // chez Ladybird), et le detruire n'aurait de toute facon aucun sens : cet
+    // etat porte les rappels que le moteur peut encore appeler pendant
+    // l'extinction. La duree de vie voulue est celle du processus, alors on
+    // l'ecrit.
+    static State* the_state = new State {};
+    return *the_state;
 }
 
 /// M11 est actif seulement si le lanceur l'a demande. Sans la variable, le
@@ -762,7 +768,10 @@ inline ByteString normalize_input(ByteString const& raw)
     if (looks_like_host)
         return ByteString::formatted("https://{}", trimmed);
 
-    auto* engine = getenv("BOUCHAUD_SEARCH_URL");
+    // `getenv` rend `char*`, pas `char const*` : sans le type explicite, `auto*`
+    // deduit `char*` et l'affectation du litteral devient une conversion que
+    // C++11 interdit (`-Wwritable-strings`).
+    char const* engine = getenv("BOUCHAUD_SEARCH_URL");
     if (engine == nullptr || *engine == '\0')
         engine = "https://duckduckgo.com/?q=";
 
@@ -1210,13 +1219,17 @@ inline int viewport_height()
     return height > 0 ? height : state().surface_height;
 }
 
-inline void set_committed_url(StringView url)
+/// Prend une `ByteString` et non une `StringView` : les appelants passent
+/// `url.to_byte_string()`, un temporaire dont AK **supprime** `view()` pour
+/// empecher exactement la vue pendante que cela produirait. La reference lie le
+/// temporaire jusqu'a la fin de l'appel.
+inline void set_committed_url(ByteString const& url)
 {
     auto& s = state();
     s.committed_url = url;
     s.secure = url.starts_with("https://"sv);
     if (!s.address_focused)
-        set_address_text(url);
+        set_address_text(url.view());
     request_frames();
 }
 
@@ -1228,7 +1241,7 @@ inline void set_loading(bool loading, StringView status)
     request_frames();
 }
 
-inline void set_title(StringView title)
+inline void set_title(ByteString const& title)
 {
     state().title = title;
     send_title();

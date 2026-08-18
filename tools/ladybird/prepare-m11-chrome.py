@@ -142,7 +142,7 @@ substitute(
     """    outln("[ladybird-bouchaud] M9_BOOTSTRAP page={} viewport={}x{}", page_id, width, page_height);
 
     if (BouchaudChrome::enabled()) {
-        BouchaudChrome::set_committed_url(url->to_byte_string().view());
+        BouchaudChrome::set_committed_url(url->to_byte_string());
         bouchaud_m11_start();
     }
 
@@ -287,7 +287,7 @@ substitute(
             outln("[ladybird-bouchaud] M11_DOCUMENT_SKIPPED url={}", chargee);
             return;
         }
-        BouchaudChrome::set_committed_url(chargee.view());
+        BouchaudChrome::set_committed_url(chargee);
         BouchaudChrome::set_loading(false, "pret"sv);
         outln("[ladybird-bouchaud] M11_DOCUMENT_LOADED page={} url={}", m_id, chargee);
         page().top_level_traversable()->queue_screenshot_task({});
@@ -307,7 +307,7 @@ substitute(
     """    if (bouchaud_m9_enabled()) {
         outln("[ladybird-bouchaud] M9_NAVIGATION_STARTED page={} url={} redirect={}", m_id, url, is_redirect);
         if (BouchaudChrome::enabled()) {
-            BouchaudChrome::set_committed_url(url.to_byte_string().view());
+            BouchaudChrome::set_committed_url(url.to_byte_string());
             BouchaudChrome::set_loading(true, "chargement..."sv);
             page().top_level_traversable()->queue_screenshot_task({});
         }
@@ -325,7 +325,7 @@ substitute(
     """    if (bouchaud_m9_enabled()) {
         outln("[ladybird-bouchaud] M9_NAVIGATION_COMMITTED page={} url={}", m_id, url);
         if (BouchaudChrome::enabled()) {
-            BouchaudChrome::set_committed_url(url.to_byte_string().view());
+            BouchaudChrome::set_committed_url(url.to_byte_string());
             page().top_level_traversable()->queue_screenshot_task({});
         }
         return;
@@ -361,7 +361,7 @@ substitute(
 #if defined(BOUCHAUD_PORT)
     if (bouchaud_m9_enabled()) {
         if (BouchaudChrome::enabled())
-            BouchaudChrome::set_title(ByteString::formatted("{}", title).view());
+            BouchaudChrome::set_title(ByteString::formatted("{}", title));
         return;
     }
 #endif
