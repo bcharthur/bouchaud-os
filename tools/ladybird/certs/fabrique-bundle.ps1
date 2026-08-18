@@ -35,7 +35,18 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$RepoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
+# Le script vit dans <depot>/tools/ladybird/certs/ : quatre remontees, pas
+# trois. Avec trois, la racine tombait sur <depot>/tools, le bundle etait ecrit
+# dans tools/tools/ladybird/certs/ (donc hors du chemin ignore par git et hors
+# de celui que run.ps1 lit), et le repli DER cherchait tools/src/net/... pour
+# annoncer qu'aucune racine n'existe.
+$RepoRoot = Split-Path -Parent (
+    Split-Path -Parent (
+        Split-Path -Parent (
+            Split-Path -Parent $PSCommandPath
+        )
+    )
+)
 
 if (-not $Sortie) {
     $Sortie = Join-Path $RepoRoot "tools\ladybird\certs\cacert.pem"
@@ -72,7 +83,7 @@ $empreintes = New-Object System.Collections.Generic.HashSet[string]
 $source = "aucune"
 
 
-# --- 1. Magasin racine de Windows -------------------------------------------
+# --- 1. Magasin racine du systeme -------------------------------------------
 
 try {
     foreach ($emplacement in @("LocalMachine", "CurrentUser")) {
@@ -100,7 +111,7 @@ try {
     }
 
     if ($blocs.Count -gt 0) {
-        $source = "magasin racine Windows"
+        $source = "magasin racine du systeme"
     }
 }
 catch {

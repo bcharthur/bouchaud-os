@@ -901,8 +901,13 @@ jobs:
           set -e
           echo "qemu: code $QEMU_CODE success=$SUCCESS_SEEN"
           cat "$LOG"
-          echo "=== fixture ==="
-          cat fixture-m12.log
+
+          # Pas de `cat fixture-m12.log` ici : la fixture TLS appartient au job
+          # M12, qui tourne ailleurs. Le lire depuis ce job faisait echouer
+          # l'etape sous `set -e` a *chaque* execution complete, et sautait
+          # silencieusement le verdict qui suit — les assertions DNS/TLS que ce
+          # job existe pour porter n'etaient donc jamais evaluees. L'essai
+          # Internet n'a pas de fixture : c'est tout son objet.
 
       - name: Verdict Internet
         run: |

@@ -108,10 +108,20 @@ function ConvertTo-ShellSingleQuoted {
         [string]$Value
     )
 
-    # L'autorun est interprete par /bin/sh dans l'OS. Une apostrophe se code
-    # en fermant la chaine, en emettant une apostrophe quotee, puis en la
-    # rouvrant. Ne jamais injecter directement une valeur venant du terminal.
-    return "'" + $Value.Replace("'", "'\"'\"'") + "'"
+    # L'autorun est interprete par /bin/sh dans l'OS. Une apostrophe ne peut pas
+    # apparaitre telle quelle dans une chaine entre apostrophes : on ferme la
+    # chaine, on emet une apostrophe echappee, puis on la rouvre, soit la
+    # sequence POSIX \'\''. Ne jamais injecter directement une valeur venant du
+    # terminal.
+    #
+    # L'apostrophe est nommee au lieu d'etre ecrite : PowerShell n'echappe pas
+    # le guillemet avec une barre oblique inverse, et la version qui essayait
+    # rendait TOUT le script inanalysable - `.\run.ps1` refusait de demarrer,
+    # quel que soit le mode demande.
+    $apostrophe = [string][char]39
+    $echappee = $apostrophe + '\' + $apostrophe + $apostrophe
+
+    return $apostrophe + $Value.Replace($apostrophe, $echappee) + $apostrophe
 }
 
 

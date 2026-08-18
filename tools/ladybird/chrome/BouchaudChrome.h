@@ -612,18 +612,35 @@ inline void draw_toolbar(Canvas const& canvas)
         builder.append(static_cast<char>(byte));
     auto address_text = builder.to_byte_string();
 
-    // Defilement de la saisie : quand le texte depasse, on montre la fin, qui
-    // est l'endroit ou le curseur travaille.
+    // Defilement de la saisie.
+    //
+    // La fenetre visible suit le **curseur**, pas la fin du texte. Les deux se
+    // confondent tant qu'on tape a la fin, et divergent des qu'on revient en
+    // arriere dans une URL longue : ancrer la vue sur la fin dessinerait alors
+    // le curseur colle au bord gauche pendant que les caracteres modifies
+    // resteraient hors champ. On ne peut pas corriger ce qu'on ne voit pas.
     auto visible_characters = available > 0 ? static_cast<size_t>(available / (glyph_width * 2)) : 0;
     size_t first = 0;
-    if (address_text.length() > visible_characters)
+    if (visible_characters > 0 && address_text.length() > visible_characters) {
+        // Par defaut la fin, qui est ce qu'on veut quand la barre n'a pas le
+        // foyer : c'est la partie significative d'une URL tronquee.
         first = address_text.length() - visible_characters;
+
+        if (s.address_focused) {
+            auto caret = min(s.caret, address_text.length());
+            if (caret < first)
+                first = caret;
+            else if (caret > first + visible_characters)
+                first = caret - visible_characters;
+        }
+    }
 
     auto visible = address_text.substring(first, address_text.length() - first);
     draw_text(canvas, text_x, text_y, visible.view(), color_field_text, 2, available);
 
     if (s.address_focused) {
-        auto caret_offset = s.caret > first ? s.caret - first : 0;
+        auto caret = min(s.caret, address_text.length());
+        auto caret_offset = caret > first ? caret - first : 0;
         auto caret_x = text_x + text_width(caret_offset, 2);
         fill_rect(canvas, caret_x, button_top + 4, 2, button_height - 8, color_field_text);
     }
