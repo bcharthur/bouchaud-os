@@ -16,6 +16,19 @@ param(
 
     [string]$LadybirdUrl = "http://10.0.2.2:18080/m9.html",
 
+    # Profil materiel du navigateur natif.
+    # 8192 Mio est volontairement le profil local par defaut : Bouchaud peut
+    # utiliser la RAM supplementaire, contrairement aux vCPU additionnels qui
+    # attendent encore le vrai port SMP/APIC.
+    [ValidateRange(2048, 16384)]
+    [int]$LadybirdRamMiB = 8192,
+
+    # Expose la topologie QEMU pour preparer le futur SMP. Le noyau actuel ne
+    # schedule encore que sur le BSP : >1 vCPU n'accelere donc PAS encore
+    # WebContent. Garder 1 tant que SMP/APIC n'est pas merge.
+    [ValidateRange(1, 16)]
+    [int]$LadybirdCpuCount = 1,
+
     # Force le retelechargement de l'artefact Ladybird depuis GitHub Actions.
     [switch]$RefreshLadybird,
 
@@ -550,6 +563,43 @@ if ($LadybirdMode) {
 
 
     # =========================================================================
+    # Certificats publics pour HTTPS Internet
+    # =========================================================================
+
+    if ($IsLadybirdM9) {
+        $PublicCABundle = Join-Path `
+            $RepoRoot `
+            "tools\ladybird\certs\cacert.pem"
+
+        if (Test-Path -LiteralPath $PublicCABundle -PathType Leaf) {
+            $ScenarioCertDir = Join-Path `
+                $ScenarioDir `
+                "etc\ssl\certs"
+
+            New-Item `
+                -ItemType Directory `
+                -Path $ScenarioCertDir `
+                -Force | Out-Null
+
+            Copy-Item `
+                -LiteralPath $PublicCABundle `
+                -Destination (Join-Path $ScenarioCertDir "ca-certificates.crt") `
+                -Force
+
+            Write-Host `
+                "CA HTTPS   : Mozilla/curl -> /etc/ssl/certs/ca-certificates.crt" `
+                -ForegroundColor DarkGray
+        }
+        elseif ($LadybirdUrl -match '^https://') {
+            Fail (
+                "URL HTTPS demandee mais bundle CA absent : {0}. " +
+                "Utilise run-ladybird-local.ps1 -Open/-Search pour le preparer."
+            ) -f $PublicCABundle
+        }
+    }
+
+
+    # =========================================================================
     # Autorun
     # =========================================================================
 
@@ -925,11 +975,21 @@ else {
 
 if ($LadybirdMode) {
 
-    # M8 CI utilise 4 Gio.
     $qemuArgs += @(
         "-m",
-        "4096"
+        "$LadybirdRamMiB"
     )
+
+    $qemuArgs += @(
+        "-smp",
+        "$LadybirdCpuCount"
+    )
+
+    if ($LadybirdCpuCount -gt 1) {
+        Write-Host `
+            "ATTENTION: $LadybirdCpuCount vCPU exposes, mais Bouchaud est encore BSP/PIC ; SMP guest n'est pas encore actif." `
+            -ForegroundColor Yellow
+    }
 }
 else {
 
@@ -1068,7 +1128,10 @@ if ($LadybirdMode) {
         -ForegroundColor Green
 
     Write-Host `
-        "RAM        : 4096 Mio"
+        "RAM        : $LadybirdRamMiB Mio"
+
+    Write-Host `
+        "vCPU       : $LadybirdCpuCount (SMP guest: non, BSP actuel)"
 
     Write-Host `
         "navigateur : $BrowserChain"
@@ -1123,7 +1186,12 @@ $FixtureProcess = $null
 $FixtureOut = Join-Path $env:TEMP "bouchaud-m9-fixture.out.log"
 $FixtureErr = Join-Path $env:TEMP "bouchaud-m9-fixture.err.log"
 
-if ($LadybirdMode -and $IsLadybirdM9) {
+$UseLocalM9Fixture = $LadybirdMode -and $IsLadybirdM9 -and (
+    $IsLadybirdM9Test -or
+    $LadybirdUrl.StartsWith("http://10.0.2.2:18080/")
+)
+
+if ($UseLocalM9Fixture) {
     Remove-Item $FixtureOut, $FixtureErr -Force -ErrorAction SilentlyContinue
 
     $FixtureScript = Join-Path $RepoRoot "tools\health\fixture_server.py"
