@@ -229,6 +229,17 @@ void ConnectionFromClient::bouchaud_m9_start()
 page_cpp = root / "Services/WebContent/PageClient.cpp"
 data = page_cpp.read_text()
 
+# `bouchaud_m9_expected_url()` appelle `URL::create_with_url_or_path`, declaree
+# dans <LibURL/URL.h>. PageClient.cpp manipule des `URL::URL` et obtient donc
+# l'en-tete par inclusion transitive — mais s'appuyer la-dessus, c'est accepter
+# qu'un remaniement d'upstream casse notre compilation quarante minutes apres le
+# debut du build. On l'inclut explicitement.
+if "#include <LibURL/URL.h>" not in data:
+    url_anchor = "#include <LibWeb/CSS/CSSImportRule.h>\n"
+    if url_anchor not in data:
+        raise SystemExit("M9 PageClient : ancre d'inclusion LibWeb introuvable")
+    data = data.replace(url_anchor, "#include <LibURL/URL.h>\n" + url_anchor, 1)
+
 if "static bool bouchaud_m9_enabled()" not in data:
     old = '''static bool bouchaud_m8_enabled()
 {
@@ -243,6 +254,20 @@ if "static bool bouchaud_m9_enabled()" not in data:
 static bool bouchaud_m9_enabled()
 {
     return getenv("BOUCHAUD_M9") != nullptr;
+}
+
+// L'URL que M9 attend, sous sa forme serialisee — la meme source et la meme
+// valeur par defaut que le bootstrap de ConnectionFromClient, pour que les deux
+// cotes ne puissent pas diverger.
+static ByteString bouchaud_m9_expected_url()
+{
+    char const* requested = getenv("BOUCHAUD_M9_URL");
+    if (!requested || !*requested)
+        requested = "http://10.0.2.2:18080/m9.html";
+    auto url = URL::create_with_url_or_path(ByteString { requested });
+    if (!url.has_value())
+        return ByteString { requested };
+    return url->to_byte_string();
 }
 '''
     if old not in data:
@@ -362,7 +387,20 @@ new_finish = '''void PageClient::page_did_finish_loading(Optional<Utf16String> c
         return;
     }
     if (bouchaud_m9_enabled()) {
-        outln("[ladybird-bouchaud] M9_DOCUMENT_LOADED page={} url={}", m_id, url);
+        // `page_did_finish_loading` se declenche pour **chaque** document, y
+        // compris le `about:blank` initial que Ladybird termine pendant que la
+        // navigation HTTP est encore en vol. Capturer la sans distinction
+        // photographiait une page blanche et faisait echouer l'invariant de
+        // contenu — le defaut n'etait pas le rendu, mais le moment.
+        auto chargee = url.to_byte_string();
+        auto attendue = bouchaud_m9_expected_url();
+        if (chargee != attendue) {
+            outln("[ladybird-bouchaud] M9_DOCUMENT_SKIPPED page={} url={} attendu={}", m_id, chargee, attendue);
+            return;
+        }
+        outln("[ladybird-bouchaud] M9_NAVIGATION_COMMITTED url={}", chargee);
+        outln("[ladybird-bouchaud] M9_DOCUMENT_LOADED page={} url={}", m_id, chargee);
+        outln("[ladybird-bouchaud] M9_CAPTURE_MATCH url={}", chargee);
         page().top_level_traversable()->queue_screenshot_task({});
         return;
     }
