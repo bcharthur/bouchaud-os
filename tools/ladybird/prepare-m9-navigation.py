@@ -130,7 +130,7 @@ new = '''void LocalTraversableNavigable::request_history_operation(HistoryOperat
             // has one local coordinator, so the already-unique initiation id is
             // a suitable operation id as well.
             auto operation_id = initiation_id;
-            outln("[ladybird-bouchaud] M9_HISTORY_LOCAL_BEGIN op={} nav={}", operation_id, navigable_id.value());
+            outln("[ladybird-bouchaud] M9_HISTORY_LOCAL_BEGIN op={} nav={}", operation_id, navigable_id);
 
             auto ready = GC::create_function(heap(), [this, operation_id, initiation_id, navigable_id, user_involvement, navigation_type](bool proceed, Optional<i32> step_override, HistoryStepResult abandon_result) {
                 if (!proceed || !step_override.has_value()) {
