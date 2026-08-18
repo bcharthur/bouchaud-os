@@ -56,7 +56,7 @@ on:
 
 concurrency:
   group: ladybird-native-browser-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
