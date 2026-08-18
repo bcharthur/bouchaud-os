@@ -28,6 +28,7 @@ git -C "$LB" worktree prune
 git -C "$LB" worktree add --force --detach "$SRC" HEAD >/dev/null
 python3 tools/ladybird/prepare-browser-source.py "$SRC"
 python3 tools/ladybird/prepare-m9-source.py "$SRC"
+python3 tools/ladybird/prepare-m9-diagnostics.py "$SRC"
 python3 tools/ladybird/prepare-browser-runtime-link.py "$SRC"
 
 # Do not destroy a build directory restored by GitHub Actions. CMake/Ninja can
