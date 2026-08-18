@@ -104,11 +104,16 @@ WebContent sort apres la frame verifiee et le bootstrap ferme RequestServer.
 ### M9 interactif
 
 ```powershell
-.\run.ps1 -Ladybird
+.\run.ps1 -Ladybird -LadybirdUrl "http://example.com/"
 ```
 
 Le document HTTP est charge et la fenetre reste vivante apres le premier rendu.
 Fermer la fenetre Bouchaud termine le bootstrap et ses descendants.
+
+Le mode interactif utilise directement le NAT sortant de QEMU et ne demarre pas
+la fixture M9. Sans `-LadybirdUrl`, sa page de depart est
+`http://example.com/`. La fixture locale est reservee a `-LadybirdM9Test`, dont
+elle garantit le caractere reproductible.
 
 On peut surcharger l'URL :
 

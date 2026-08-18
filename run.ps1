@@ -14,7 +14,9 @@ param(
 
     [switch]$LadybirdM9Test,
 
-    [string]$LadybirdUrl = "http://10.0.2.2:18080/m9.html",
+    # Page de depart du mode interactif. Le test M9 remplace toujours cette
+    # valeur par sa fixture deterministe, sauf surcharge explicite.
+    [string]$LadybirdUrl = "http://example.com/",
 
     # Force le retelechargement de l'artefact Ladybird depuis GitHub Actions.
     [switch]$RefreshLadybird,
@@ -80,6 +82,18 @@ function Fail {
     Write-Host "ERREUR: $Message" -ForegroundColor Red
 
     exit 1
+}
+
+
+function ConvertTo-ShellSingleQuoted {
+    param(
+        [string]$Value
+    )
+
+    # L'autorun est interprete par /bin/sh dans l'OS. Une apostrophe se code
+    # en fermant la chaine, en emettant une apostrophe quotee, puis en la
+    # rouvrant. Ne jamais injecter directement une valeur venant du terminal.
+    return "'" + $Value.Replace("'", "'\"'\"'") + "'"
 }
 
 
@@ -168,6 +182,25 @@ if ($LadybirdModeCount -gt 1) {
 }
 
 $LadybirdMode = $Ladybird -or $LadybirdM8 -or $LadybirdM9Test
+
+if ($LadybirdM9Test -and -not $PSBoundParameters.ContainsKey("LadybirdUrl")) {
+    $LadybirdUrl = "http://10.0.2.2:18080/m9.html"
+}
+
+if ($Ladybird -or $LadybirdM9Test) {
+    $parsedLadybirdUrl = $null
+    if (-not [System.Uri]::TryCreate(
+        $LadybirdUrl,
+        [System.UriKind]::Absolute,
+        [ref]$parsedLadybirdUrl
+    )) {
+        Fail "LadybirdUrl doit etre une URL HTTP absolue"
+    }
+
+    if ($parsedLadybirdUrl.Scheme -ne "http") {
+        Fail "Ladybird M9 accepte HTTP uniquement; HTTPS arrive au jalon M12"
+    }
+}
 
 
 # =============================================================================
@@ -580,7 +613,7 @@ if ($LadybirdMode) {
             'echo "=== Ladybird M9 : HTTP distant via RequestServer ==="',
             'export BO_AUTOSTART_BROWSER=1',
             'export BOUCHAUD_M9=1',
-            "export BOUCHAUD_M9_URL=$LadybirdUrl",
+            "export BOUCHAUD_M9_URL=$(ConvertTo-ShellSingleQuoted $LadybirdUrl)",
             $m9TestLine,
             'desktop',
             ''
@@ -1123,7 +1156,7 @@ $FixtureProcess = $null
 $FixtureOut = Join-Path $env:TEMP "bouchaud-m9-fixture.out.log"
 $FixtureErr = Join-Path $env:TEMP "bouchaud-m9-fixture.err.log"
 
-if ($LadybirdMode -and $IsLadybirdM9) {
+if ($LadybirdMode -and $IsLadybirdM9Test) {
     Remove-Item $FixtureOut, $FixtureErr -Force -ErrorAction SilentlyContinue
 
     $FixtureScript = Join-Path $RepoRoot "tools\health\fixture_server.py"
@@ -1156,7 +1189,7 @@ finally {
     }
 }
 
-if ($LadybirdMode -and $IsLadybirdM9) {
+if ($LadybirdMode -and $IsLadybirdM9Test) {
     Write-Host ""
     Write-Host "=== Journal fixture M9 ===" -ForegroundColor DarkGray
     if (Test-Path $FixtureOut) {

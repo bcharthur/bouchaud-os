@@ -117,6 +117,24 @@ croisée, comme un firmware.
 | `-Sync` | met à jour la branche courante avant de construire |
 | `-Fullscreen` | QEMU en plein écran |
 
+### Essayer Ladybird natif
+
+Le port Ladybird sait maintenant charger une page **HTTP** reelle par son
+`RequestServer` natif. Pour demarrer directement sur une page :
+
+```powershell
+.\run.ps1 -Ladybird -LadybirdUrl "http://example.com/"
+```
+
+QEMU donne au guest un acces sortant par NAT ; aucune fixture locale n'est
+lancee en mode interactif. `-LadybirdM9Test`, en revanche, conserve la fixture
+locale `10.0.2.2:18080` afin que la regression CI reste deterministe.
+
+Cette commande est un **aperçu du portage**, pas encore le navigateur quotidien :
+la page de depart reste choisie au lancement, il n'y a pas encore de barre
+d'adresse, et HTTPS/certificats est le jalon M12. Le navigateur Qt/QuickJS
+documente plus haut reste le mode utilisable par defaut pendant ces travaux.
+
 **Jamais un userland d'un autre commit sans le dire.** Une image d'un autre jour
 ne se signale pas : elle démarre, et elle se comporte comme le système d'alors.
 La panne qui suit accuse le code source, qui n'y est pour rien.
