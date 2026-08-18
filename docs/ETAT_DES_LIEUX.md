@@ -53,7 +53,8 @@ branche mouvante.
 | M6 | LibGfx + Skia CPU — pixels BGRA en ring 3 | vert |
 | M7 | WebContent demarre comme processus separe, poignee de main IPC | vert |
 | M8 | HTML local rendu dans une vraie fenetre Bouchaud | vert |
-| M9 | HTTP reel via RequestServer | **en cours** |
+| M9 | HTTP reel via RequestServer — page distante affichee | **vert** |
+| M12a | HTTPS avec verification de chaine, fixture TLS locale | en verification |
 
 ### Ce que M8 prouve exactement
 
@@ -64,53 +65,25 @@ branche mouvante.
 Pas Chromium. Pas Qt. Pas une WebView. Le vrai moteur d'upstream, compile pour
 Bouchaud, affichant dans une fenetre de Bouchaud.
 
-## 3. M9 — ou en est-on precisement
+## 3. M9 — clos, et ce qu'il a coute
 
-M9 est le jalon en cours. Il est plus avance que son voyant rouge ne le suggere,
-et le detail compte parce qu'il dit ou chercher.
+M9 est vert. La page distante est chargee par RequestServer, rendue par LibWeb
+et Skia, et affichee dans une fenetre Bouchaud.
 
-**Acquis, mesures :**
+Le jalon a demande sept passes de mesure, et **trois hypotheses annoncees puis
+refutees** : l'isolation de sites (deja neutralisee dans le port), la fin de
+fichier sur une paire de sockets (la comptabilite du noyau etait juste ; le
+defaut reel etait ailleurs et a ete corrige separement), et les en-tetes
+manquantes (elles arrivaient : statut 200, six en-tetes).
 
-    M9_REQUESTSERVER_LAUNCHED / READY / CONNECTED   RequestServer natif tourne
-    "GET /m9.html HTTP/1.1" 200                      la requete part de Bouchaud
-    M9_RS_REQUEST_STARTED  id=0                      le tube de reponse traverse
-    M9_RS_HEADERS  id=0 statut=200 nb=6              en-tetes recues
-    M9_RS_REQUEST_FINISHED id=0 taille=672           corps complet recu
+Ce qui a fini par tomber, ce sont des defauts que seule une navigation reelle
+pouvait faire sortir — la propagation de la fin de fichier apres le dernier
+ecrivain d'une paire, la coordination de l'historique inter-documents, la
+livraison du corps mise en pause et jamais relancee.
 
-Toute la chaine reseau fonctionne, **y compris** le mecanisme le plus exigeant :
-RequestServer fabrique une paire de sockets, en passe le bout lecteur a
-WebContent par **SCM_RIGHTS**, et y ecrit le corps.
-
-**Non acquis :** le document n'est jamais commite. WebContent se fige, et QEMU
-le tue au bout de 240 s (`code 124`).
-
-**Ce qui a ete elimine, definitivement :**
-
-- ce n'est pas le reseau — la fixture repond 200 ;
-- ce n'est pas le transfert du corps — 672 octets arrivent ;
-- ce ne sont pas les en-tetes — statut et six en-tetes arrivent ;
-- ce n'est pas une annulation — `page_did_cancel_loading` ne se declenche pas ;
-- ce n'est pas `FIONBIO`, `setsockopt` ni `MSG_NOSIGNAL` — verifies dans le noyau ;
-- ce n'est pas la comptabilite de `poll` sur une paire — `etat_pair()` signale
-  bien la fermeture du pair.
-
-**Piste en cours de mesure :** `WebContentClient.ipc` declare vingt-cinq
-messages **synchrones** vers l'interface navigateur, et
-`ConnectionBase::wait_for_specific_endpoint_message_impl` les attend **sans delai
-d'expiration**. Une navigation `http://` en declenche que `load_html` — donc M8 —
-ne declenche jamais : cookies, HSTS, stockage. Le peer M9 n'est pas une interface
-complete. Le port court-circuite deja `decide_navigation_process` pour cette
-raison exacte.
-
-Une sonde nomme desormais chaque attente synchrone. Celui qui ne revient jamais
-sera le dernier imprime.
-
-Le chronometre appuie la piste :
-
-    09:49:28  navigation commence
-    09:49:38  la requete part enfin        (+10 s : une attente, pas un calcul)
-    09:49:39  reponse complete
-    ...       gel jusqu'au delai
+La lecon vaut d'etre gardee : chaque refutation a ferme une zone pour de bon.
+C'est plus lent qu'une intuition juste, et infiniment plus rapide qu'une
+intuition fausse qu'on n'a pas verifiee.
 
 ## 4. Ce qui n'est pas fait, et qu'il ne faut pas croire fait
 

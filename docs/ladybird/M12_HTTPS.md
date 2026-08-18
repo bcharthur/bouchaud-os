@@ -1,0 +1,92 @@
+# M12 — HTTPS depuis Bouchaud OS
+
+## Ce que M12 ajoute a M9
+
+M9 a prouve la chaine complete jusqu'au reseau :
+
+    LibWeb -> ResourceLoader -> LibRequests -> IPC -> RequestServer
+           -> socket Bouchaud -> TCP/IP -> HTTP -> page affichee
+
+M12 n'y ajoute qu'une chose, mais c'est celle qui ouvre l'Internet reel :
+**TLS avec verification de la chaine**. Sans elle, aucun site moderne n'est
+joignable — pas meme un moteur de recherche.
+
+## Le seul blocage reel, et pourquoi
+
+Trois prerequis conditionnent HTTPS. Deux etaient deja tenus :
+
+| Prerequis | Etat | Pourquoi il compte |
+|---|---|---|
+| UDP + resolution de noms | present (`SOCK_DGRAM`) | sans DNS, seules les adresses IP sont joignables |
+| Horloge murale reelle | presente, ancree sur la RTC | un certificat se valide contre une date ; une horloge a zero les rend tous invalides |
+| **Certificats racine** | **absents** | sans autorite de confiance, toute chaine est refusee |
+
+Le troisieme etait le blocage, et il ne se contourne pas : refuser la
+verification serait rendre TLS decoratif.
+
+## Le contrat de lancement
+
+`RequestServer` accepte `--certificate <chemin>` et le pose en
+`CURLOPT_CAINFO` (`Services/RequestServer/Request.cpp`). Sans cet argument,
+`default_certificate_path()` est vide et curl retombe sur le chemin **compile a
+la construction**, qui n'existe pas sous Bouchaud : toute connexion TLS echoue
+a la verification, meme contre un serveur parfaitement valide.
+
+`tools/ladybird/webcontent-bootstrap.c` passe donc `--certificate` — mais
+**seulement si le fichier est lisible** :
+
+    BOUCHAUD_CA_BUNDLE, ou a defaut /etc/ssl/certs/ca-certificates.crt
+
+C'est ce qui permet a M9 de continuer a fonctionner exactement comme avant :
+pas de fichier, pas d'argument, comportement inchange. Le lanceur annonce ce
+qu'il a trouve :
+
+    [ladybird-bouchaud] M12_CA_BUNDLE /etc/ssl/certs/ca-certificates.crt
+
+## La CI reste hermetique
+
+La regle du projet n'a pas bouge : **aucun test ne depend d'un site externe**.
+M12 fabrique donc a chaque execution sa propre autorite et un certificat
+serveur, et embarque l'autorite dans l'image Bouchaud.
+
+La verification n'en est pas affaiblie : la chaine est reellement validee, le
+nom reellement verifie. Le certificat porte `IP:10.0.2.2` en `subjectAltName`,
+parce que c'est l'adresse de l'hote vue depuis QEMU — un certificat pour un nom
+ne prouverait rien ici, et la verification du nom fait partie de ce qu'on veut
+prouver.
+
+La fixture est d'abord testee **depuis l'hote**, avec `curl --cacert`. Si elle
+echoue la, le defaut est dans la fixture et non dans le systeme teste : on evite
+de chercher pendant une heure un defaut Bouchaud qui n'existe pas.
+
+## Le temoin est celui de M9, volontairement
+
+M12 rejoue le temoin de M9 avec une URL `https://`. C'est un choix, pas une
+economie : si un seul mode de test existe, alors ce que M12 mesure est
+**exactement** la difference entre HTTP et HTTPS, et rien d'autre. Les marqueurs
+`M9_*` du journal sont donc attendus.
+
+Ce qui distingue M12 tient a trois lignes du verdict :
+
+    [ladybird-bouchaud] M12_CA_BUNDLE /etc/ssl/certs/ca-certificates.crt
+    M12_FIXTURE_HTTPS_OK path=/m12.html
+    ! M9_FIXTURE_HTTP_OK          (preuve negative : rien n'a transite en clair)
+
+## Ce que M12 ne fait pas encore
+
+- **Pas de DNS eprouve.** L'adresse est litterale. Joindre `example.com`
+  demande que le resolveur de RequestServer fonctionne sur l'UDP de Bouchaud —
+  present dans le noyau, non encore verifie de bout en bout.
+- **Pas de magasin d'autorites publiques.** L'image n'embarque que l'autorite de
+  test. Pour l'Internet reel il faudra un vrai paquet de certificats racine, et
+  decider de sa provenance et de sa mise a jour.
+- **Pas de gestion d'erreur de certificat cote interface.** Un certificat
+  invalide fait echouer la requete ; il n'y a pas d'ecran d'avertissement, parce
+  qu'il n'y a pas encore d'interface pour le porter (M11).
+- **Pas de HSTS, pas de redirections `http` -> `https` eprouvees.**
+
+## Etape suivante
+
+M12 rend HTTPS possible. Le rendre **utile** demande M11 — une barre d'adresse,
+un historique, des liens cliquables — sans quoi l'URL reste une variable
+d'environnement.
