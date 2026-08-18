@@ -276,6 +276,39 @@ if "bouchaud_m9_trace" not in data:
     requests_cpp.write_text(data)
 
 
+
+# --- Sonde des appels IPC synchrones -----------------------------------------
+#
+# `ConnectionBase::wait_for_specific_endpoint_message_impl` est la boucle
+# d'attente d'un `send_sync`. Elle n'a **aucun delai d'expiration** : un message
+# synchrone auquel personne ne repond bloque pour toujours.
+#
+# C'est le point de sonde qui nomme le coupable. Une navigation `http://`
+# declenche des appels synchrones vers l'interface navigateur que `load_html`
+# ne declenche jamais — cookies, HSTS, stockage — et le peer M9 n'est pas une
+# interface complete. Le script court-circuite deja `decide_navigation_process`
+# pour cette raison exacte ; s'il en reste d'autres, ils s'annonceront ici.
+#
+# La sonde affiche le message **avant** d'attendre : celui qui ne revient jamais
+# est donc le dernier imprime.
+ipc_cpp = root / "Libraries/LibIPC/Connection.cpp"
+data = ipc_cpp.read_text()
+
+if "M9_IPC_SYNC_WAIT" not in data:
+    anchor = ("OwnPtr<IPC::Message> ConnectionBase::wait_for_specific_endpoint_message_impl(u32 endpoint_magic, int message_id)\n"
+              "{\n")
+    if anchor not in data:
+        raise SystemExit("M9 LibIPC: signature d'attente synchrone introuvable")
+    sonde = anchor + (
+        "    if (getenv(\"BOUCHAUD_M9\") != nullptr)\n"
+        "        outln(\"[ladybird-bouchaud] M9_IPC_SYNC_WAIT endpoint={} message={}\", endpoint_magic, message_id);\n")
+    data = data.replace(anchor, sonde, 1)
+    if "<cstdlib>" not in data:
+        first_include = data.index("#include ")
+        data = data[:first_include] + "#include <cstdlib>\n#include <AK/Format.h>\n" + data[first_include:]
+    ipc_cpp.write_text(data)
+
+
 # PageClient: local policy + M9 screenshot bridge.
 page_cpp = root / "Services/WebContent/PageClient.cpp"
 data = page_cpp.read_text()
