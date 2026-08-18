@@ -16,7 +16,12 @@ param(
 
     # Page de depart du mode interactif. Le test M9 remplace toujours cette
     # valeur par sa fixture deterministe, sauf surcharge explicite.
-    [string]$LadybirdUrl = "http://example.com/",
+    [string]$LadybirdUrl = "https://example.com/",
+
+    # Retire la barre d'outils M11 et revient au comportement de M9 : une seule
+    # capture, aucune entree. Utile pour isoler une regression entre le moteur
+    # et le chrome : est-ce la page, ou est-ce la barre ?
+    [switch]$LadybirdSansChrome,
 
     # Profil materiel du navigateur natif.
     # 8192 Mio est volontairement le profil local par defaut : Bouchaud peut
@@ -199,6 +204,10 @@ $LadybirdMode = $Ladybird -or $LadybirdM8 -or $LadybirdM9Test
 if ($LadybirdM9Test -and -not $PSBoundParameters.ContainsKey("LadybirdUrl")) {
     $LadybirdUrl = "http://10.0.2.2:18080/m9.html"
 }
+
+# Le chrome M11 n'a de sens que dans le mode interactif. Le test M9 mesure le
+# moteur : lui ajouter une barre d'outils changerait ce qu'il mesure.
+$LadybirdChrome = $Ladybird -and -not $LadybirdSansChrome
 
 if ($Ladybird -or $LadybirdM9Test) {
     $parsedLadybirdUrl = $null
@@ -607,6 +616,24 @@ if ($LadybirdMode) {
             $RepoRoot `
             "tools\ladybird\certs\cacert.pem"
 
+        # Sans magasin d'autorites, RequestServer laisse curl retomber sur un
+        # chemin decide a la compilation, qui n'existe pas ici : chaque poignee
+        # de main TLS echoue, et le symptome ressemble a une panne reseau. On le
+        # fabrique donc au lieu d'attendre que l'utilisateur devine.
+        if (-not (Test-Path -LiteralPath $PublicCABundle -PathType Leaf)) {
+            $Fabrique = Join-Path `
+                $RepoRoot `
+                "tools\ladybird\certs\fabrique-bundle.ps1"
+
+            if (Test-Path -LiteralPath $Fabrique -PathType Leaf) {
+                Write-Host `
+                    "CA HTTPS   : fabrication du magasin d'autorites..." `
+                    -ForegroundColor DarkGray
+
+                & $Fabrique -Sortie $PublicCABundle | Out-Null
+            }
+        }
+
         if (Test-Path -LiteralPath $PublicCABundle -PathType Leaf) {
             $ScenarioCertDir = Join-Path `
                 $ScenarioDir `
@@ -628,9 +655,10 @@ if ($LadybirdMode) {
         }
         elseif ($LadybirdUrl -match '^https://') {
             Fail (
-                "URL HTTPS demandee mais bundle CA absent : {0}. " +
-                "Utilise run-ladybird-local.ps1 -Open/-Search pour le preparer."
-            ) -f $PublicCABundle
+                ("URL HTTPS demandee mais aucun magasin d'autorites : {0}. " +
+                 "Lancer tools\ladybird\certs\fabrique-bundle.ps1, ou " +
+                 "demander une URL http://.") -f $PublicCABundle
+            )
         }
     }
 
@@ -659,14 +687,22 @@ if ($LadybirdMode) {
         ) -join "`n"
     }
     else {
-        $m9TestLine = if ($IsLadybirdM9Test) { 'export BOUCHAUD_M9_TEST=1' } else { 'echo "M9 interactif : fermer la fenetre pour quitter"' }
+        $m9TestLine = if ($IsLadybirdM9Test) { 'export BOUCHAUD_M9_TEST=1' } else { 'echo "Navigateur : fermer la fenetre pour quitter"' }
+        $chromeLine = if ($LadybirdChrome) { 'export BOUCHAUD_M11=1' } else { 'echo "M11 desactive : capture unique, sans entrees"' }
+        $banniere = if ($LadybirdChrome) {
+            'echo "=== Bouchaud Navigateur (Ladybird M11) ==="'
+        }
+        else {
+            'echo "=== Ladybird M9 : HTTP distant via RequestServer ==="'
+        }
         $autorun = @(
             'uname',
             'df',
-            'echo "=== Ladybird M9 : HTTP distant via RequestServer ==="',
+            $banniere,
             'export BO_AUTOSTART_BROWSER=1',
             'export BOUCHAUD_M9=1',
             "export BOUCHAUD_M9_URL=$(ConvertTo-ShellSingleQuoted $LadybirdUrl)",
+            $chromeLine,
             $m9TestLine,
             'desktop',
             ''
@@ -1153,8 +1189,13 @@ if ($LadybirdMode) {
         $ServiceLabel = "WebContent + RequestServer"
         $BrowserChain = "/bo-navigateur -> bootstrap -> RequestServer + WebContent"
     }
+    elseif ($LadybirdChrome) {
+        $ModeLabel = "Bouchaud Navigateur (Ladybird M11)"
+        $ServiceLabel = "WebContent + RequestServer"
+        $BrowserChain = "/bo-navigateur -> bootstrap -> RequestServer + WebContent + chrome"
+    }
     else {
-        $ModeLabel = "Ladybird natif M9 interactif"
+        $ModeLabel = "Ladybird natif M9 interactif (sans chrome)"
         $ServiceLabel = "WebContent + RequestServer"
         $BrowserChain = "/bo-navigateur -> bootstrap -> RequestServer + WebContent"
     }
@@ -1178,6 +1219,15 @@ if ($LadybirdMode) {
     if ($IsLadybirdM9) {
         Write-Host `
             "URL        : $LadybirdUrl"
+    }
+
+    if ($LadybirdChrome) {
+        Write-Host `
+            "chrome     : barre d'adresse, historique, liens, defilement"
+
+        Write-Host `
+            "clavier    : cliquer la barre pour la saisir, Entree pour aller, Echap pour rendre le foyer" `
+            -ForegroundColor DarkGray
     }
 
     Write-Host `

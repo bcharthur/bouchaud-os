@@ -54,6 +54,7 @@ branche mouvante.
 | M7 | WebContent demarre comme processus separe, poignee de main IPC | vert |
 | M8 | HTML local rendu dans une vraie fenetre Bouchaud | vert |
 | M9 | HTTP reel via RequestServer — page distante affichee | **vert** |
+| M11 | Chrome utilisable : barre d'adresse, historique, liens, defilement | **construit, a eprouver sous QEMU** |
 | M12a | HTTPS avec verification de chaine, fixture TLS locale | en verification |
 
 ### Ce que M8 prouve exactement
@@ -85,14 +86,34 @@ La lecon vaut d'etre gardee : chaque refutation a ferme une zone pour de bon.
 C'est plus lent qu'une intuition juste, et infiniment plus rapide qu'une
 intuition fausse qu'on n'a pas verifiee.
 
+## 3 bis. M11 — le chrome, et ce qui reste a prouver
+
+Le jalon M11 (`ladybird/M11_NAVIGATEUR.md`) ajoute a WebContent la barre
+d'adresse, les boutons d'historique, le routage des entrees du gestionnaire de
+fenetres vers le document, et un repeint cadence au lieu d'une capture unique.
+
+**Ce qui est verifie hors QEMU** : l'en-tete du chrome compile en C++23 contre
+l'arbre Ladybird epingle ; les quatre scripts de preparation s'appliquent au SHA
+epingle et sont idempotents ; les trois implementations du protocole GUI —
+noyau, hote Qt, chrome — s'accordent (`tools/verifie-protocole-gui.py`).
+
+**Ce qui ne l'est pas encore** : le comportement reel sous l'ordonnanceur de
+Bouchaud. La latence d'un clic, la fluidite du defilement et la tenue du canal
+GUI sous charge ne se mesurent qu'en demarrant l'OS. Cette ligne restera ici
+jusqu'a ce qu'une execution QEMU l'efface.
+
 ## 4. Ce qui n'est pas fait, et qu'il ne faut pas croire fait
 
 - **Le navigateur historique** (Python + QuickJS + Qt) reste le chemin par
-  defaut. Ladybird n'est pas encore le moteur du produit.
+  defaut de `run.ps1` sans `-Ladybird`. Ladybird n'est pas encore le moteur du
+  produit.
 - **Aucune isolation.** Le sandbox d'upstream est volontairement remplace par
   l'implementation non effective. C'est M14.
-- **Pas de HTTPS.** Ni certificats, ni validation X.509.
 - **Un seul onglet, un seul renderer.**
+- **Pas de redimensionnement de la fenetre du navigateur natif.** La surface est
+  allouee une fois ; `Configure` est journalise, pas suivi.
+- **Pas de modificateurs clavier.** Le pilote du bureau n'expose pas encore
+  Ctrl/Alt separement : ni Ctrl+L, ni Ctrl+R.
 - **La dette ICU** reste entiere : environ 40 Mio de donnees statiques par
   binaire. Le chargement paresseux l'a rendue supportable, il ne l'a pas
   supprimee.

@@ -112,8 +112,8 @@ l'architecture de Ladybird, et nous la conservons telle quelle.
 | M8 | HTML local rendu dans une fenetre Bouchaud | capture comparee — **vert** |
 | M9 | **RequestServer + HTTP reel** : page distante affichee | fixture locale, pas Internet |
 | M10 | CSS + JavaScript + DOM interactif | la capture contient ce que seul le JS peut produire |
-| M11 | Navigateur mono-onglet reellement utilisable | barre d'adresse, historique, liens, defilement |
-| M12 | HTTPS puis un vrai site | sonde reseau, chaine CA validee |
+| M11 | **Navigateur mono-onglet reellement utilisable** | barre d'adresse, historique, liens, defilement — **acquis**, cf. `M11_NAVIGATEUR.md` |
+| M12 | HTTPS puis un vrai site | sonde reseau, chaine CA validee — **acquis**, cf. `M12_HTTPS.md` |
 | M13 | Plusieurs onglets, plusieurs renderers | `[ps]` montre N WebContent |
 | M14 | Sandbox + isolation + WPT | politique appliquee, sous-ensemble WPT au vert |
 | M15+ | Images/SVG, workers, medias, telechargements, stockage, permissions, performance | voir `../VISION.md` |
@@ -137,6 +137,18 @@ Les documents qui portaient encore l'ancienne numerotation ont ete corriges avec
 cette table. **Une numerotation qui ment coute plus cher qu'une numerotation
 laide** : elle envoie chercher un travail deja fait, ou fait croire acquis un
 travail qui ne l'est pas.
+
+### M11 et M12 ont ete faits dans l'ordre inverse
+
+M12 (HTTPS) a ete construit avant M11 (le chrome), et la table n'a pas ete
+renumerotee pour autant. La raison est celle de la section precedente : la
+numerotation nomme des **contenus**, pas un ordre d'execution, et la tordre pour
+qu'elle raconte la chronologie ferait perdre la seule chose qu'elle sert a dire.
+
+L'ordre reel s'explique : M12 ne demandait qu'un magasin d'autorites et un
+resolveur, tous deux dans le port ; M11 demandait de decider ou vivrait le
+chrome. Faire HTTPS d'abord a evite de figer cette decision avant d'avoir vu
+une vraie page.
 
 ## 6. Synchronisation upstream
 

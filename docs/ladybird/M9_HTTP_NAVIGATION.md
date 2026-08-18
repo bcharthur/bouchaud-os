@@ -104,25 +104,25 @@ WebContent sort apres la frame verifiee et le bootstrap ferme RequestServer.
 ### M9 interactif
 
 ```powershell
-.\run.ps1 -Ladybird -LadybirdUrl "http://example.com/"
+.\run.ps1 -Ladybird -LadybirdSansChrome -LadybirdUrl "http://example.com/"
 ```
 
 Le document HTTP est charge et la fenetre reste vivante apres le premier rendu.
 Fermer la fenetre Bouchaud termine le bootstrap et ses descendants.
 
 Le mode interactif utilise directement le NAT sortant de QEMU et ne demarre pas
-la fixture M9. Sans `-LadybirdUrl`, sa page de depart est
-`http://example.com/`. La fixture locale est reservee a `-LadybirdM9Test`, dont
-elle garantit le caractere reproductible.
+la fixture M9. La fixture locale est reservee a `-LadybirdM9Test`, dont elle
+garantit le caractere reproductible ; elle est aussi demarree si l'URL demandee
+pointe explicitement sur `http://10.0.2.2:18080/`.
 
-On peut surcharger l'URL :
+`-LadybirdSansChrome` est ce qui reste du M9 interactif d'origine : une capture,
+aucune entree. Sans lui, `-Ladybird` demarre le navigateur complet du jalon M11
+(`M11_NAVIGATEUR.md`) — barre d'adresse, historique, liens, defilement — et la
+page de depart par defaut est `https://example.com/`.
 
-```powershell
-.\run.ps1 -Ladybird -LadybirdUrl "http://10.0.2.2:18080/m9.html"
-```
-
-M9 valide HTTP. HTTPS/TLS distant est un jalon ulterieur si les certificats,
-la compatibilite TLS RequestServer et l'horloge systeme doivent encore evoluer.
+M9 valide HTTP. HTTPS est acquis au jalon M12 (`M12_HTTPS.md`) : certificats
+racine passes a `RequestServer` par `--certificate`, resolveur DNS designe par
+son adresse, chaine reellement verifiee.
 
 ## Marqueurs
 

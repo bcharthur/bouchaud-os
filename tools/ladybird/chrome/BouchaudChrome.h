@@ -1,0 +1,1222 @@
+/*
+ * Bouchaud OS — M11 : le chrome du navigateur natif Ladybird.
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * ## Pourquoi ce fichier existe
+ *
+ * M9 a prouve la chaine « LibWeb -> RequestServer -> HTTP -> pixels dans une
+ * fenetre Bouchaud ». Il l'a prouvee avec une URL passee en variable
+ * d'environnement, une seule capture, et aucune entree : c'est une preuve, pas
+ * un navigateur. M11 ajoute exactement ce qui manque pour s'en servir — une
+ * barre d'adresse, un historique, des liens cliquables, du defilement — sans
+ * introduire le processus Browser d'upstream, qui reste un jalon ulterieur.
+ *
+ * ## Ou il s'insere
+ *
+ *     Bouchaud WM  --- Key/Pointer/Wheel (protocole GUI v1) --->  ce fichier
+ *          ^                                                          |
+ *          |                                          Web::MouseEvent / KeyEvent
+ *          |                                                          v
+ *          +---- FrameReady + surface partagee <---- composition <-- WebContent
+ *
+ * Il est **entierement en-tete** et volontairement sans dependance nouvelle :
+ * l'ajouter ne demande aucune modification de `Services/WebContent/CMakeLists.txt`,
+ * donc aucune divergence de plus avec l'arbre upstream epingle.
+ *
+ * ## Ce qu'il ne fait pas
+ *
+ * Pas d'onglets (M13), pas de bac a sable (M14), pas de rendu de texte vectoriel
+ * dans le chrome : la barre d'outils utilise la police bitmap 8x8 du noyau, la
+ * meme que `src/drivers/gfx/font.rs`, pour ne dependre d'aucune API de dessin
+ * susceptible de bouger chez upstream.
+ */
+
+#pragma once
+
+#if defined(BOUCHAUD_PORT)
+
+#    include <AK/ByteString.h>
+#    include <AK/Format.h>
+#    include <AK/Function.h>
+#    include <AK/StringBuilder.h>
+#    include <AK/StringView.h>
+#    include <AK/Types.h>
+#    include <AK/Vector.h>
+#    include <LibGfx/Bitmap.h>
+#    include <LibGfx/Point.h>
+#    include <LibGfx/ShareableBitmap.h>
+#    include <LibWeb/Page/InputEvent.h>
+#    include <LibWeb/UIEvents/KeyCode.h>
+#    include <LibWeb/UIEvents/MouseButton.h>
+
+#    include <cerrno>
+#    include <cstdint>
+#    include <cstdlib>
+#    include <cstring>
+#    include <fcntl.h>
+#    include <sys/mman.h>
+#    include <unistd.h>
+
+namespace WebContent::BouchaudChrome {
+
+// ----------------------------------------------------------------------------
+// Geometrie
+// ----------------------------------------------------------------------------
+
+/// Hauteur de la barre d'outils, en pixels de la surface.
+///
+/// Le viewport de la page vaut donc `hauteur_surface - toolbar_height`. Les deux
+/// valeurs se lisent au meme endroit pour qu'un clic tombe la ou la page a ete
+/// peinte : `page_origin_y()` est la seule conversion, et elle est utilisee
+/// aussi bien par la composition que par le routage des entrees.
+inline constexpr int toolbar_height = 36;
+
+inline constexpr int button_width = 30;
+inline constexpr int button_height = 24;
+inline constexpr int button_top = 6;
+inline constexpr int button_gap = 4;
+inline constexpr int margin = 6;
+
+inline constexpr int page_origin_y() { return toolbar_height; }
+
+// Couleurs XRGB8888 (l'octet de poids fort est ignore par le compositeur).
+inline constexpr u32 color_toolbar = 0x00'23'27'2b;
+inline constexpr u32 color_toolbar_edge = 0x00'11'13'15;
+inline constexpr u32 color_button = 0x00'3a'40'46;
+inline constexpr u32 color_button_off = 0x00'2b'2f'34;
+inline constexpr u32 color_field = 0x00'ff'ff'ff;
+inline constexpr u32 color_field_idle = 0x00'e3'e6'ea;
+inline constexpr u32 color_field_text = 0x00'16'1a'1e;
+inline constexpr u32 color_glyph = 0x00'e8'ea'ed;
+inline constexpr u32 color_glyph_off = 0x00'6b'71'78;
+inline constexpr u32 color_secure = 0x00'1e'8e'3e;
+inline constexpr u32 color_insecure = 0x00'c5'39'29;
+inline constexpr u32 color_page_backdrop = 0x00'ff'ff'ff;
+
+// ----------------------------------------------------------------------------
+// Protocole GUI
+//
+// Troisieme implementation du meme format de fil, apres `src/gui/protocole.rs`
+// (noyau) et `tools/userland/navigateur/hote.cpp` (client Qt). Rien dans la
+// chaine de construction ne relie les trois : c'est
+// `tools/verifie-protocole-gui.py` qui les compare, et il lit les constantes
+// ci-dessous par leur nom. Une valeur ecrite en clair dans le code lui
+// echapperait, et le desaccord ne se verrait qu'a l'execution, sous la forme
+// d'une fenetre qui ne s'ouvre pas.
+// ----------------------------------------------------------------------------
+
+constexpr u32 MAGIC = 0x55474f42; // "BOGU"
+constexpr u16 VERSION = 1;
+constexpr u32 TAILLE_ENTETE = 16;
+constexpr u32 CHARGE_MAX = 4096;
+constexpr u32 FENETRE = 1;
+
+enum Genre : u16 {
+    Hello = 1,
+    CreateWindow = 2,
+    SetTitle = 3,
+    Damage = 4,
+    Close = 5,
+    FrameReady = 6,
+    Surface = 0x100,
+    Configure = 0x101,
+    Focus = 0x102,
+    Key = 0x103,
+    Pointer = 0x104,
+    Wheel = 0x105,
+    CloseRequest = 0x106,
+};
+
+// Codes de touche du protocole (`docs/GUI_USERLAND_PROTOCOL.md` §4). Ce ne sont
+// pas des codes evdev : le bureau produit une touche deja interpretee.
+enum CodeTouche : u32 {
+    ToucheCaractere = 0,
+    ToucheEntree = 1,
+    ToucheRetour = 2,
+    ToucheTabulation = 3,
+    ToucheHaut = 4,
+    ToucheBas = 5,
+    ToucheGauche = 6,
+    ToucheDroite = 7,
+    ToucheEchap = 8,
+};
+
+// ----------------------------------------------------------------------------
+// Police bitmap 8x8
+//
+// Copie de `src/drivers/gfx/font.rs` (« font8x8 basic », domaine public), ASCII
+// 0x20..0x7E. Un octet par ligne, bit de poids faible = pixel de gauche. Le
+// chrome partage ainsi le dessin des lettres avec le reste du systeme, et ne
+// depend d'aucune police a charger ni d'aucune API de rendu d'upstream.
+// ----------------------------------------------------------------------------
+
+inline constexpr u8 font8x8[95][8] = {
+    { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, // 0x20 ' '
+    { 0x18, 0x3C, 0x3C, 0x18, 0x18, 0x00, 0x18, 0x00 }, // 0x21 !
+    { 0x36, 0x36, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, // 0x22 "
+    { 0x36, 0x36, 0x7F, 0x36, 0x7F, 0x36, 0x36, 0x00 }, // 0x23 #
+    { 0x0C, 0x3E, 0x03, 0x1E, 0x30, 0x1F, 0x0C, 0x00 }, // 0x24 $
+    { 0x00, 0x63, 0x33, 0x18, 0x0C, 0x66, 0x63, 0x00 }, // 0x25 %
+    { 0x1C, 0x36, 0x1C, 0x6E, 0x3B, 0x33, 0x6E, 0x00 }, // 0x26 &
+    { 0x06, 0x06, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00 }, // 0x27 '
+    { 0x18, 0x0C, 0x06, 0x06, 0x06, 0x0C, 0x18, 0x00 }, // 0x28 (
+    { 0x06, 0x0C, 0x18, 0x18, 0x18, 0x0C, 0x06, 0x00 }, // 0x29 )
+    { 0x00, 0x66, 0x3C, 0xFF, 0x3C, 0x66, 0x00, 0x00 }, // 0x2A *
+    { 0x00, 0x0C, 0x0C, 0x3F, 0x0C, 0x0C, 0x00, 0x00 }, // 0x2B +
+    { 0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C, 0x06 }, // 0x2C ,
+    { 0x00, 0x00, 0x00, 0x3F, 0x00, 0x00, 0x00, 0x00 }, // 0x2D -
+    { 0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C, 0x00 }, // 0x2E .
+    { 0x60, 0x30, 0x18, 0x0C, 0x06, 0x03, 0x01, 0x00 }, // 0x2F /
+    { 0x3E, 0x63, 0x73, 0x7B, 0x6F, 0x67, 0x3E, 0x00 }, // 0x30 0
+    { 0x0C, 0x0E, 0x0C, 0x0C, 0x0C, 0x0C, 0x3F, 0x00 }, // 0x31 1
+    { 0x1E, 0x33, 0x30, 0x1C, 0x06, 0x33, 0x3F, 0x00 }, // 0x32 2
+    { 0x1E, 0x33, 0x30, 0x1C, 0x30, 0x33, 0x1E, 0x00 }, // 0x33 3
+    { 0x38, 0x3C, 0x36, 0x33, 0x7F, 0x30, 0x78, 0x00 }, // 0x34 4
+    { 0x3F, 0x03, 0x1F, 0x30, 0x30, 0x33, 0x1E, 0x00 }, // 0x35 5
+    { 0x1C, 0x06, 0x03, 0x1F, 0x33, 0x33, 0x1E, 0x00 }, // 0x36 6
+    { 0x3F, 0x33, 0x30, 0x18, 0x0C, 0x0C, 0x0C, 0x00 }, // 0x37 7
+    { 0x1E, 0x33, 0x33, 0x1E, 0x33, 0x33, 0x1E, 0x00 }, // 0x38 8
+    { 0x1E, 0x33, 0x33, 0x3E, 0x30, 0x18, 0x0E, 0x00 }, // 0x39 9
+    { 0x00, 0x0C, 0x0C, 0x00, 0x00, 0x0C, 0x0C, 0x00 }, // 0x3A :
+    { 0x00, 0x0C, 0x0C, 0x00, 0x00, 0x0C, 0x0C, 0x06 }, // 0x3B ;
+    { 0x18, 0x0C, 0x06, 0x03, 0x06, 0x0C, 0x18, 0x00 }, // 0x3C <
+    { 0x00, 0x00, 0x3F, 0x00, 0x00, 0x3F, 0x00, 0x00 }, // 0x3D =
+    { 0x06, 0x0C, 0x18, 0x30, 0x18, 0x0C, 0x06, 0x00 }, // 0x3E >
+    { 0x1E, 0x33, 0x30, 0x18, 0x0C, 0x00, 0x0C, 0x00 }, // 0x3F ?
+    { 0x3E, 0x63, 0x7B, 0x7B, 0x7B, 0x03, 0x1E, 0x00 }, // 0x40 @
+    { 0x0C, 0x1E, 0x33, 0x33, 0x3F, 0x33, 0x33, 0x00 }, // 0x41 A
+    { 0x3F, 0x66, 0x66, 0x3E, 0x66, 0x66, 0x3F, 0x00 }, // 0x42 B
+    { 0x3C, 0x66, 0x03, 0x03, 0x03, 0x66, 0x3C, 0x00 }, // 0x43 C
+    { 0x1F, 0x36, 0x66, 0x66, 0x66, 0x36, 0x1F, 0x00 }, // 0x44 D
+    { 0x7F, 0x46, 0x16, 0x1E, 0x16, 0x46, 0x7F, 0x00 }, // 0x45 E
+    { 0x7F, 0x46, 0x16, 0x1E, 0x16, 0x06, 0x0F, 0x00 }, // 0x46 F
+    { 0x3C, 0x66, 0x03, 0x03, 0x73, 0x66, 0x7C, 0x00 }, // 0x47 G
+    { 0x33, 0x33, 0x33, 0x3F, 0x33, 0x33, 0x33, 0x00 }, // 0x48 H
+    { 0x1E, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x1E, 0x00 }, // 0x49 I
+    { 0x78, 0x30, 0x30, 0x30, 0x33, 0x33, 0x1E, 0x00 }, // 0x4A J
+    { 0x67, 0x66, 0x36, 0x1E, 0x36, 0x66, 0x67, 0x00 }, // 0x4B K
+    { 0x0F, 0x06, 0x06, 0x06, 0x46, 0x66, 0x7F, 0x00 }, // 0x4C L
+    { 0x63, 0x77, 0x7F, 0x7F, 0x6B, 0x63, 0x63, 0x00 }, // 0x4D M
+    { 0x63, 0x67, 0x6F, 0x7B, 0x73, 0x63, 0x63, 0x00 }, // 0x4E N
+    { 0x1C, 0x36, 0x63, 0x63, 0x63, 0x36, 0x1C, 0x00 }, // 0x4F O
+    { 0x3F, 0x66, 0x66, 0x3E, 0x06, 0x06, 0x0F, 0x00 }, // 0x50 P
+    { 0x1E, 0x33, 0x33, 0x33, 0x3B, 0x1E, 0x38, 0x00 }, // 0x51 Q
+    { 0x3F, 0x66, 0x66, 0x3E, 0x36, 0x66, 0x67, 0x00 }, // 0x52 R
+    { 0x1E, 0x33, 0x07, 0x0E, 0x38, 0x33, 0x1E, 0x00 }, // 0x53 S
+    { 0x3F, 0x2D, 0x0C, 0x0C, 0x0C, 0x0C, 0x1E, 0x00 }, // 0x54 T
+    { 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x3F, 0x00 }, // 0x55 U
+    { 0x33, 0x33, 0x33, 0x33, 0x33, 0x1E, 0x0C, 0x00 }, // 0x56 V
+    { 0x63, 0x63, 0x63, 0x6B, 0x7F, 0x77, 0x63, 0x00 }, // 0x57 W
+    { 0x63, 0x63, 0x36, 0x1C, 0x1C, 0x36, 0x63, 0x00 }, // 0x58 X
+    { 0x33, 0x33, 0x33, 0x1E, 0x0C, 0x0C, 0x1E, 0x00 }, // 0x59 Y
+    { 0x7F, 0x63, 0x31, 0x18, 0x4C, 0x66, 0x7F, 0x00 }, // 0x5A Z
+    { 0x1E, 0x06, 0x06, 0x06, 0x06, 0x06, 0x1E, 0x00 }, // 0x5B [
+    { 0x03, 0x06, 0x0C, 0x18, 0x30, 0x60, 0x40, 0x00 }, // 0x5C \
+    { 0x1E, 0x18, 0x18, 0x18, 0x18, 0x18, 0x1E, 0x00 }, // 0x5D ]
+    { 0x08, 0x1C, 0x36, 0x63, 0x00, 0x00, 0x00, 0x00 }, // 0x5E ^
+    { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF }, // 0x5F _
+    { 0x0C, 0x0C, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00 }, // 0x60 `
+    { 0x00, 0x00, 0x1E, 0x30, 0x3E, 0x33, 0x6E, 0x00 }, // 0x61 a
+    { 0x07, 0x06, 0x06, 0x3E, 0x66, 0x66, 0x3B, 0x00 }, // 0x62 b
+    { 0x00, 0x00, 0x1E, 0x33, 0x03, 0x33, 0x1E, 0x00 }, // 0x63 c
+    { 0x38, 0x30, 0x30, 0x3E, 0x33, 0x33, 0x6E, 0x00 }, // 0x64 d
+    { 0x00, 0x00, 0x1E, 0x33, 0x3F, 0x03, 0x1E, 0x00 }, // 0x65 e
+    { 0x1C, 0x36, 0x06, 0x0F, 0x06, 0x06, 0x0F, 0x00 }, // 0x66 f
+    { 0x00, 0x00, 0x6E, 0x33, 0x33, 0x3E, 0x30, 0x1F }, // 0x67 g
+    { 0x07, 0x06, 0x36, 0x6E, 0x66, 0x66, 0x67, 0x00 }, // 0x68 h
+    { 0x0C, 0x00, 0x0E, 0x0C, 0x0C, 0x0C, 0x1E, 0x00 }, // 0x69 i
+    { 0x30, 0x00, 0x30, 0x30, 0x30, 0x33, 0x33, 0x1E }, // 0x6A j
+    { 0x07, 0x06, 0x66, 0x36, 0x1E, 0x36, 0x67, 0x00 }, // 0x6B k
+    { 0x0E, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x1E, 0x00 }, // 0x6C l
+    { 0x00, 0x00, 0x33, 0x7F, 0x7F, 0x6B, 0x63, 0x00 }, // 0x6D m
+    { 0x00, 0x00, 0x1F, 0x33, 0x33, 0x33, 0x33, 0x00 }, // 0x6E n
+    { 0x00, 0x00, 0x1E, 0x33, 0x33, 0x33, 0x1E, 0x00 }, // 0x6F o
+    { 0x00, 0x00, 0x3B, 0x66, 0x66, 0x3E, 0x06, 0x0F }, // 0x70 p
+    { 0x00, 0x00, 0x6E, 0x33, 0x33, 0x3E, 0x30, 0x78 }, // 0x71 q
+    { 0x00, 0x00, 0x3B, 0x6E, 0x66, 0x06, 0x0F, 0x00 }, // 0x72 r
+    { 0x00, 0x00, 0x3E, 0x03, 0x1E, 0x30, 0x1F, 0x00 }, // 0x73 s
+    { 0x08, 0x0C, 0x3E, 0x0C, 0x0C, 0x2C, 0x18, 0x00 }, // 0x74 t
+    { 0x00, 0x00, 0x33, 0x33, 0x33, 0x33, 0x6E, 0x00 }, // 0x75 u
+    { 0x00, 0x00, 0x33, 0x33, 0x33, 0x1E, 0x0C, 0x00 }, // 0x76 v
+    { 0x00, 0x00, 0x63, 0x6B, 0x7F, 0x7F, 0x36, 0x00 }, // 0x77 w
+    { 0x00, 0x00, 0x63, 0x36, 0x1C, 0x36, 0x63, 0x00 }, // 0x78 x
+    { 0x00, 0x00, 0x33, 0x33, 0x33, 0x3E, 0x30, 0x1F }, // 0x79 y
+    { 0x00, 0x00, 0x3F, 0x19, 0x0C, 0x26, 0x3F, 0x00 }, // 0x7A z
+    { 0x38, 0x0C, 0x0C, 0x07, 0x0C, 0x0C, 0x38, 0x00 }, // 0x7B {
+    { 0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x18, 0x00 }, // 0x7C |
+    { 0x07, 0x0C, 0x0C, 0x38, 0x0C, 0x0C, 0x07, 0x00 }, // 0x7D }
+    { 0x6E, 0x3B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, // 0x7E ~
+};
+
+inline constexpr int glyph_width = 8;
+inline constexpr int glyph_height = 8;
+
+// ----------------------------------------------------------------------------
+// Etat
+// ----------------------------------------------------------------------------
+
+struct State {
+    // Descripteurs et geometrie fournis par le gestionnaire de fenetres.
+    int gui_fd { -1 };
+    int surface_fd { -1 };
+    int surface_width { 0 };
+    int surface_height { 0 };
+    int surface_stride { 0 };
+
+    // Barre d'adresse. Le texte est conserve en octets ASCII : le pilote clavier
+    // du bureau n'expose pas encore de disposition non latine, et pretendre le
+    // contraire ici ne rendrait pas la saisie plus juste.
+    Vector<u8> address;
+    size_t caret { 0 };
+    bool address_focused { false };
+
+    // Ce que la page dit d'elle-meme.
+    ByteString committed_url;
+    ByteString title;
+    ByteString status { "pret" };
+    bool loading { false };
+    bool secure { false };
+
+    // Suivi du pointeur : le protocole GUI envoie un etat de boutons absolu,
+    // pas des fronts. Les fronts se deduisent ici.
+    unsigned last_buttons { 0 };
+    int last_x { 0 };
+    int last_y { -1 };
+    bool pointer_in_page { false };
+
+    // Cadrage du flux entrant : un message n'est analyse qu'entier.
+    Vector<u8> incoming;
+
+    /// Trames a produire encore.
+    ///
+    /// Une entree ne peut pas etre peinte dans la foulee : elle est **mise en
+    /// file** dans WebContent, et la capture demandee au meme instant
+    /// photographierait l'etat d'avant. On demande donc quelques trames sur les
+    /// tics suivants — la premiere montre le resultat, les suivantes rattrapent
+    /// ce qu'une mise en page tardive aurait change. Le compteur retombe a zero
+    /// des que l'utilisateur s'arrete : au repos, rien n'est repeint.
+    int frames_pending { 0 };
+
+    // Compte de series des messages sortants.
+    u32 serial { 0 };
+    bool handshake_done { false };
+    bool frame_seen { false };
+
+    // Rappels vers WebContent. Poses par `ConnectionFromClient::bouchaud_m11_start`.
+    Function<void(Web::MouseEvent)> on_mouse_event;
+    Function<void(Web::KeyEvent)> on_key_event;
+    Function<void(ByteString)> on_navigate;
+    Function<void(int)> on_history_delta;
+    Function<void()> on_reload;
+    Function<void()> on_stop;
+    Function<void()> on_repaint;
+    Function<void()> on_close;
+};
+
+inline State& state()
+{
+    static State the_state;
+    return the_state;
+}
+
+/// M11 est actif seulement si le lanceur l'a demande. Sans la variable, le
+/// comportement de M9 est conserve octet pour octet.
+inline bool enabled()
+{
+    static bool const value = getenv("BOUCHAUD_M11") != nullptr;
+    return value;
+}
+
+/// Demande `count` trames sur les prochains tics du minuteur.
+inline void request_frames(int count = 3)
+{
+    auto& s = state();
+    if (count > s.frames_pending)
+        s.frames_pending = count;
+}
+
+inline int environment_int(char const* name, int fallback)
+{
+    auto* raw = getenv(name);
+    if (!raw || !*raw)
+        return fallback;
+    auto parsed = atoi(raw);
+    return parsed > 0 ? parsed : fallback;
+}
+
+// ----------------------------------------------------------------------------
+// Protocole GUI — ecriture
+// ----------------------------------------------------------------------------
+
+/// Ecrit un message d'un seul bloc, en-tete et charge ensemble.
+///
+/// `docs/GUI_USERLAND_PROTOCOL.md` §5 : deux `write()` separes peuvent laisser
+/// le compositeur devant un en-tete dont la charge n'arrive jamais. Le
+/// descripteur etant passe en non bloquant pour la lecture, `EAGAIN` est
+/// possible a l'ecriture ; on reessaie brievement puis on abandonne le message
+/// plutot que de bloquer la boucle d'evenements du moteur.
+inline bool send_message(u16 kind, void const* payload, u32 payload_size)
+{
+    auto& s = state();
+    if (s.gui_fd < 0)
+        return false;
+
+    constexpr size_t header_size = TAILLE_ENTETE;
+    constexpr u32 maximum_payload_size = CHARGE_MAX;
+    if (payload_size > maximum_payload_size || (payload_size > 0 && payload == nullptr)) {
+        errno = payload_size > maximum_payload_size ? EMSGSIZE : EINVAL;
+        return false;
+    }
+
+    u8 message[header_size + maximum_payload_size] {};
+    auto put16 = [](u8* out, u16 value) {
+        out[0] = static_cast<u8>(value);
+        out[1] = static_cast<u8>(value >> 8);
+    };
+    auto put32 = [](u8* out, u32 value) {
+        out[0] = static_cast<u8>(value);
+        out[1] = static_cast<u8>(value >> 8);
+        out[2] = static_cast<u8>(value >> 16);
+        out[3] = static_cast<u8>(value >> 24);
+    };
+
+    put32(message + 0, MAGIC);
+    put16(message + 4, VERSION);
+    put16(message + 6, kind);
+    put32(message + 8, payload_size);
+    put32(message + 12, ++s.serial);
+    if (payload_size > 0)
+        memcpy(message + header_size, payload, payload_size);
+
+    auto message_size = header_size + static_cast<size_t>(payload_size);
+    for (int attempt = 0; attempt < 64; ++attempt) {
+        auto written = write(s.gui_fd, message, message_size);
+        if (written < 0 && errno == EINTR)
+            continue;
+        if (written < 0 && errno == EAGAIN) {
+            usleep(1000);
+            continue;
+        }
+        if (written < 0)
+            return false;
+        if (static_cast<size_t>(written) != message_size) {
+            errno = EIO;
+            return false;
+        }
+        return true;
+    }
+    errno = EAGAIN;
+    return false;
+}
+
+inline void send_handshake()
+{
+    auto& s = state();
+    if (s.handshake_done)
+        return;
+
+    u8 hello[8] {};
+    auto put32 = [](u8* out, u32 value) {
+        out[0] = static_cast<u8>(value);
+        out[1] = static_cast<u8>(value >> 8);
+        out[2] = static_cast<u8>(value >> 16);
+        out[3] = static_cast<u8>(value >> 24);
+    };
+    put32(hello + 0, 1);
+    put32(hello + 4, static_cast<u32>(getpid()));
+    if (!send_message(Genre::Hello, hello, sizeof(hello))) {
+        warnln("[ladybird-bouchaud] M11_GUI_HELLO_FAILED errno={}", errno);
+        return;
+    }
+
+    static constexpr char default_title[] = "Bouchaud Navigateur";
+    send_message(Genre::SetTitle, default_title, sizeof(default_title) - 1);
+    s.handshake_done = true;
+    outln("[ladybird-bouchaud] M11_GUI_HANDSHAKE_OK");
+}
+
+inline void send_title()
+{
+    auto& s = state();
+    if (!s.handshake_done)
+        return;
+
+    StringBuilder builder;
+    if (!s.title.is_empty())
+        builder.append(s.title);
+    else if (!s.committed_url.is_empty())
+        builder.append(s.committed_url);
+    else
+        builder.append("Bouchaud Navigateur"sv);
+
+    auto text = builder.to_byte_string();
+    if (text.length() > 96)
+        text = text.substring(0, 96);
+    send_message(Genre::SetTitle, text.characters(), static_cast<u32>(text.length()));
+}
+
+inline void send_frame_ready()
+{
+    auto& s = state();
+    u8 frame[24] {};
+    auto put32 = [](u8* out, u32 value) {
+        out[0] = static_cast<u8>(value);
+        out[1] = static_cast<u8>(value >> 8);
+        out[2] = static_cast<u8>(value >> 16);
+        out[3] = static_cast<u8>(value >> 24);
+    };
+    put32(frame + 0, FENETRE);
+    put32(frame + 4, 0); // tampon
+    put32(frame + 8, 0); // degat x
+    put32(frame + 12, 0); // degat y
+    put32(frame + 16, static_cast<u32>(s.surface_width));
+    put32(frame + 20, static_cast<u32>(s.surface_height));
+    if (!send_message(Genre::FrameReady, frame, sizeof(frame)))
+        warnln("[ladybird-bouchaud] M11_FRAME_READY_FAILED errno={}", errno);
+}
+
+// ----------------------------------------------------------------------------
+// Dessin
+// ----------------------------------------------------------------------------
+
+struct Canvas {
+    u8* base { nullptr };
+    int width { 0 };
+    int height { 0 };
+    int stride { 0 };
+
+    u32* row(int y) const { return reinterpret_cast<u32*>(base + static_cast<size_t>(y) * stride); }
+};
+
+inline void fill_rect(Canvas const& canvas, int x, int y, int w, int h, u32 color)
+{
+    auto x0 = max(0, x);
+    auto y0 = max(0, y);
+    auto x1 = min(canvas.width, x + w);
+    auto y1 = min(canvas.height, y + h);
+    for (int row_index = y0; row_index < y1; ++row_index) {
+        auto* pixels = canvas.row(row_index);
+        for (int column = x0; column < x1; ++column)
+            pixels[column] = color;
+    }
+}
+
+inline void draw_glyph(Canvas const& canvas, int x, int y, char character, u32 color, int scale)
+{
+    auto code = static_cast<unsigned char>(character);
+    if (code < 0x20 || code > 0x7e)
+        code = '?';
+    auto const* glyph = font8x8[code - 0x20];
+
+    for (int row_index = 0; row_index < glyph_height; ++row_index) {
+        auto bits = glyph[row_index];
+        for (int column = 0; column < glyph_width; ++column) {
+            if ((bits & (1u << column)) == 0)
+                continue;
+            fill_rect(canvas, x + column * scale, y + row_index * scale, scale, scale, color);
+        }
+    }
+}
+
+/// Dessine `text` a partir de (x, y), rogne a `max_width` pixels.
+/// Rend l'abscisse suivant le dernier glyphe reellement dessine.
+inline int draw_text(Canvas const& canvas, int x, int y, StringView text, u32 color, int scale, int max_width)
+{
+    auto advance = glyph_width * scale;
+    auto cursor = x;
+    for (size_t index = 0; index < text.length(); ++index) {
+        if (cursor + advance > x + max_width)
+            break;
+        draw_glyph(canvas, cursor, y, text[index], color, scale);
+        cursor += advance;
+    }
+    return cursor;
+}
+
+inline int text_width(size_t characters, int scale)
+{
+    return static_cast<int>(characters) * glyph_width * scale;
+}
+
+struct Button {
+    int x { 0 };
+    int width { button_width };
+    char const* glyph { "" };
+};
+
+inline Button back_button() { return { margin, button_width, "<" }; }
+inline Button forward_button() { return { margin + button_width + button_gap, button_width, ">" }; }
+inline Button reload_button() { return { margin + 2 * (button_width + button_gap), button_width, "@" }; }
+
+inline int address_field_x() { return margin + 3 * (button_width + button_gap); }
+
+inline int address_field_width()
+{
+    auto& s = state();
+    auto width = s.surface_width - address_field_x() - margin;
+    return max(0, width);
+}
+
+inline bool point_in_button(Button const& button, int x, int y)
+{
+    return x >= button.x && x < button.x + button.width
+        && y >= button_top && y < button_top + button_height;
+}
+
+inline bool point_in_address_field(int x, int y)
+{
+    return x >= address_field_x() && x < address_field_x() + address_field_width()
+        && y >= button_top && y < button_top + button_height;
+}
+
+inline void draw_toolbar(Canvas const& canvas)
+{
+    auto& s = state();
+
+    fill_rect(canvas, 0, 0, canvas.width, toolbar_height, color_toolbar);
+    fill_rect(canvas, 0, toolbar_height - 1, canvas.width, 1, color_toolbar_edge);
+
+    auto draw_button = [&](Button const& button, bool active) {
+        fill_rect(canvas, button.x, button_top, button.width, button_height,
+            active ? color_button : color_button_off);
+        auto glyph_x = button.x + (button.width - glyph_width * 2) / 2;
+        auto glyph_y = button_top + (button_height - glyph_height * 2) / 2;
+        draw_glyph(canvas, glyph_x, glyph_y, button.glyph[0],
+            active ? color_glyph : color_glyph_off, 2);
+    };
+
+    // Les fleches restent dessinees en permanence : WebContent ne publie pas
+    // d'etat « peut reculer » sans le processus Browser, et griser un bouton
+    // sur une supposition serait mentir a l'utilisateur.
+    draw_button(back_button(), true);
+    draw_button(forward_button(), true);
+    draw_button(reload_button(), true);
+
+    auto field_x = address_field_x();
+    auto field_w = address_field_width();
+    fill_rect(canvas, field_x, button_top, field_w, button_height,
+        s.address_focused ? color_field : color_field_idle);
+
+    // Pastille de securite : verte pour https, rouge sinon. Elle ne prouve rien
+    // de plus que le schema — la chaine, elle, est verifiee par RequestServer.
+    fill_rect(canvas, field_x + 4, button_top + 6, 4, button_height - 12,
+        s.secure ? color_secure : color_insecure);
+
+    auto text_x = field_x + 14;
+    auto text_y = button_top + (button_height - glyph_height * 2) / 2;
+    auto available = field_w - 20;
+
+    StringBuilder builder;
+    for (auto byte : s.address)
+        builder.append(static_cast<char>(byte));
+    auto address_text = builder.to_byte_string();
+
+    // Defilement de la saisie : quand le texte depasse, on montre la fin, qui
+    // est l'endroit ou le curseur travaille.
+    auto visible_characters = available > 0 ? static_cast<size_t>(available / (glyph_width * 2)) : 0;
+    size_t first = 0;
+    if (address_text.length() > visible_characters)
+        first = address_text.length() - visible_characters;
+
+    auto visible = address_text.substring(first, address_text.length() - first);
+    draw_text(canvas, text_x, text_y, visible.view(), color_field_text, 2, available);
+
+    if (s.address_focused) {
+        auto caret_offset = s.caret > first ? s.caret - first : 0;
+        auto caret_x = text_x + text_width(caret_offset, 2);
+        fill_rect(canvas, caret_x, button_top + 4, 2, button_height - 8, color_field_text);
+    }
+
+    // Etat du chargement, a droite, en petit.
+    auto status_text = s.loading ? ByteString { "chargement..." } : s.status;
+    auto status_width = text_width(status_text.length(), 1);
+    auto status_x = canvas.width - margin - status_width;
+    if (status_x > field_x + field_w + 4)
+        draw_text(canvas, status_x, toolbar_height - glyph_height - 3, status_text.view(), color_glyph_off, 1, status_width);
+}
+
+// ----------------------------------------------------------------------------
+// Composition
+// ----------------------------------------------------------------------------
+
+/// Compose la barre d'outils et la capture de page dans la surface partagee,
+/// puis annonce la trame au compositeur.
+inline bool present(Gfx::ShareableBitmap const& screenshot)
+{
+    auto& s = state();
+    if (s.surface_fd < 0 || s.gui_fd < 0 || s.surface_width <= 0 || s.surface_height <= 0) {
+        warnln("[ladybird-bouchaud] M11_SURFACE_ENV_INVALID surface_fd={} gui_fd={} {}x{}",
+            s.surface_fd, s.gui_fd, s.surface_width, s.surface_height);
+        return false;
+    }
+
+    auto stride_bytes = static_cast<size_t>(s.surface_stride);
+    auto height_rows = static_cast<size_t>(s.surface_height);
+    if (height_rows != 0 && stride_bytes > SIZE_MAX / height_rows) {
+        warnln("[ladybird-bouchaud] M11_SURFACE_SIZE_OVERFLOW stride={} height={}", s.surface_stride, s.surface_height);
+        return false;
+    }
+    auto surface_bytes = stride_bytes * height_rows;
+    if (surface_bytes == 0) {
+        warnln("[ladybird-bouchaud] M11_SURFACE_SIZE_ZERO");
+        return false;
+    }
+
+    auto* mapped = mmap(nullptr, surface_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, s.surface_fd, 0);
+    if (mapped == MAP_FAILED) {
+        warnln("[ladybird-bouchaud] M11_SURFACE_MMAP_FAILED errno={} bytes={}", errno, surface_bytes);
+        return false;
+    }
+
+    Canvas canvas { static_cast<u8*>(mapped), s.surface_width, s.surface_height, s.surface_stride };
+
+    draw_toolbar(canvas);
+
+    auto page_top = page_origin_y();
+    auto page_height = s.surface_height - page_top;
+    fill_rect(canvas, 0, page_top, s.surface_width, page_height, color_page_backdrop);
+
+    size_t painted = 0;
+    if (screenshot.is_valid() && screenshot.bitmap()) {
+        auto const& bitmap = *screenshot.bitmap();
+        auto copy_width = min(bitmap.width(), s.surface_width);
+        auto copy_height = min(bitmap.height(), page_height);
+        for (int y = 0; y < copy_height; ++y) {
+            auto const* source = bitmap.scanline(y);
+            auto* destination = canvas.row(page_top + y);
+            for (int x = 0; x < copy_width; ++x)
+                destination[x] = source[x] & 0x00ffffffu;
+        }
+        painted = static_cast<size_t>(copy_width) * static_cast<size_t>(copy_height);
+    }
+
+    munmap(mapped, surface_bytes);
+
+    send_handshake();
+    send_frame_ready();
+
+    if (!s.frame_seen) {
+        s.frame_seen = true;
+        outln("[ladybird-bouchaud] M11_FIRST_FRAME pixels={} viewport={}x{}",
+            painted, s.surface_width, page_height);
+    }
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// Barre d'adresse
+// ----------------------------------------------------------------------------
+
+inline ByteString address_text()
+{
+    StringBuilder builder;
+    for (auto byte : state().address)
+        builder.append(static_cast<char>(byte));
+    return builder.to_byte_string();
+}
+
+inline void set_address_text(StringView text)
+{
+    auto& s = state();
+    s.address.clear_with_capacity();
+    for (size_t index = 0; index < text.length(); ++index)
+        s.address.append(static_cast<u8>(text[index]));
+    s.caret = s.address.size();
+}
+
+/// Complete une saisie humaine en URL.
+///
+/// « example.com » n'est pas une URL, et le refuser serait exact mais inutile :
+/// personne ne tape le schema. Une entree qui contient un espace ou aucun point
+/// est traitee comme une recherche, parce que c'est ce qu'elle est.
+inline ByteString normalize_input(ByteString const& raw)
+{
+    auto trimmed = raw.trim_whitespace();
+    if (trimmed.is_empty())
+        return {};
+
+    if (trimmed.starts_with("http://"sv) || trimmed.starts_with("https://"sv)
+        || trimmed.starts_with("about:"sv) || trimmed.starts_with("data:"sv)
+        || trimmed.starts_with("file://"sv))
+        return trimmed;
+
+    auto looks_like_host = !trimmed.contains(' ') && trimmed.contains('.');
+    if (looks_like_host)
+        return ByteString::formatted("https://{}", trimmed);
+
+    auto* engine = getenv("BOUCHAUD_SEARCH_URL");
+    if (engine == nullptr || *engine == '\0')
+        engine = "https://duckduckgo.com/?q=";
+
+    StringBuilder builder;
+    builder.append(StringView { engine, strlen(engine) });
+    for (size_t index = 0; index < trimmed.length(); ++index) {
+        auto character = static_cast<unsigned char>(trimmed[index]);
+        auto unreserved = (character >= 'a' && character <= 'z')
+            || (character >= 'A' && character <= 'Z')
+            || (character >= '0' && character <= '9')
+            || character == '-' || character == '_' || character == '.' || character == '~';
+        if (unreserved)
+            builder.append(static_cast<char>(character));
+        else if (character == ' ')
+            builder.append('+');
+        else
+            builder.appendff("%{:02X}", character);
+    }
+    return builder.to_byte_string();
+}
+
+inline void commit_address()
+{
+    auto& s = state();
+    auto target = normalize_input(address_text());
+    if (target.is_empty())
+        return;
+
+    s.address_focused = false;
+    s.loading = true;
+    s.status = "chargement...";
+    outln("[ladybird-bouchaud] M11_NAVIGATE url={}", target);
+    if (s.on_navigate)
+        s.on_navigate(target);
+}
+
+// ----------------------------------------------------------------------------
+// Entrees
+// ----------------------------------------------------------------------------
+
+inline Web::UIEvents::MouseButton buttons_from_mask(unsigned mask)
+{
+    auto buttons = Web::UIEvents::MouseButton::None;
+    if (mask & 1u)
+        buttons |= Web::UIEvents::MouseButton::Primary;
+    if (mask & 2u)
+        buttons |= Web::UIEvents::MouseButton::Secondary;
+    if (mask & 4u)
+        buttons |= Web::UIEvents::MouseButton::Middle;
+    return buttons;
+}
+
+inline void dispatch_mouse(Web::MouseEvent::Type type, int x, int y, unsigned button_mask, unsigned buttons_mask, double wheel_y)
+{
+    auto& s = state();
+    if (!s.on_mouse_event)
+        return;
+
+    Web::MouseEvent event {};
+    event.type = type;
+    auto point = Gfx::IntPoint { x, y }.to_type<Web::DevicePixels>();
+    event.position = point;
+    event.screen_position = point;
+    event.button = buttons_from_mask(button_mask);
+    event.buttons = buttons_from_mask(buttons_mask);
+    event.modifiers = Web::UIEvents::KeyModifier::Mod_None;
+    event.wheel_delta_x = 0;
+    event.wheel_delta_y = wheel_y;
+    event.click_count = type == Web::MouseEvent::Type::MouseDown ? 1 : 0;
+    s.on_mouse_event(move(event));
+    request_frames();
+}
+
+inline void handle_pointer(int x, int y, unsigned buttons)
+{
+    auto& s = state();
+    auto previous = s.last_buttons;
+    auto pressed = buttons & ~previous;
+    auto released = previous & ~buttons;
+    s.last_buttons = buttons;
+
+    auto in_toolbar = y < toolbar_height;
+
+    if (in_toolbar) {
+        // La page perd le pointeur des qu'il entre dans la barre : sans cela,
+        // un survol reste allume sous une barre d'outils que la page ne voit pas.
+        if (s.pointer_in_page && s.on_mouse_event) {
+            Web::MouseEvent leave {};
+            leave.type = Web::MouseEvent::Type::MouseLeave;
+            leave.position = Gfx::IntPoint { s.last_x, 0 }.to_type<Web::DevicePixels>();
+            leave.screen_position = leave.position;
+            s.on_mouse_event(move(leave));
+            s.pointer_in_page = false;
+        }
+
+        if (pressed & 1u) {
+            if (point_in_button(back_button(), x, y)) {
+                outln("[ladybird-bouchaud] M11_HISTORY delta=-1");
+                if (s.on_history_delta)
+                    s.on_history_delta(-1);
+            } else if (point_in_button(forward_button(), x, y)) {
+                outln("[ladybird-bouchaud] M11_HISTORY delta=+1");
+                if (s.on_history_delta)
+                    s.on_history_delta(1);
+            } else if (point_in_button(reload_button(), x, y)) {
+                outln("[ladybird-bouchaud] M11_RELOAD");
+                s.loading = true;
+                s.status = "chargement...";
+                if (s.on_reload)
+                    s.on_reload();
+            } else if (point_in_address_field(x, y)) {
+                s.address_focused = true;
+                s.caret = s.address.size();
+            } else {
+                s.address_focused = false;
+            }
+            request_frames();
+        }
+
+        s.last_x = x;
+        s.last_y = y;
+        return;
+    }
+
+    // Clic dans la page : la barre d'adresse rend le foyer au document, sinon
+    // les touches suivantes continueraient d'aller dans la barre.
+    if (pressed != 0 && s.address_focused) {
+        s.address_focused = false;
+        request_frames();
+    }
+
+    auto page_x = x;
+    auto page_y = y - page_origin_y();
+    s.pointer_in_page = true;
+
+    if (page_x != s.last_x || page_y != (s.last_y - page_origin_y()))
+        dispatch_mouse(Web::MouseEvent::Type::MouseMove, page_x, page_y, 0, buttons, 0);
+
+    if (pressed != 0)
+        dispatch_mouse(Web::MouseEvent::Type::MouseDown, page_x, page_y, pressed, buttons, 0);
+    if (released != 0)
+        dispatch_mouse(Web::MouseEvent::Type::MouseUp, page_x, page_y, released, buttons, 0);
+
+    s.last_x = x;
+    s.last_y = y;
+}
+
+inline void handle_wheel(int delta)
+{
+    auto& s = state();
+    if (s.last_y < toolbar_height)
+        return;
+
+    // Le protocole GUI compte positif vers le haut (convention Qt) ; le DOM
+    // compte positif vers le bas. Trois lignes de 18 pixels par cran, la meme
+    // valeur que les portages de bureau d'upstream.
+    auto page_y = s.last_y - page_origin_y();
+    dispatch_mouse(Web::MouseEvent::Type::MouseWheel, s.last_x, page_y, 0, s.last_buttons,
+        static_cast<double>(-delta) * 54.0);
+}
+
+inline void dispatch_key_to_page(Web::UIEvents::KeyCode code, u32 code_point, bool insert_text)
+{
+    auto& s = state();
+    if (!s.on_key_event)
+        return;
+
+    // Le gestionnaire de fenetres n'envoie que des appuis : il n'a pas de source
+    // de relachements a transmettre. Emettre le `keyup` juste apres evite qu'une
+    // page qui compte les deux reste persuadee qu'une touche est enfoncee.
+    Web::KeyEvent down {};
+    down.type = Web::KeyEvent::Type::KeyDown;
+    down.key = code;
+    down.modifiers = Web::UIEvents::KeyModifier::Mod_None;
+    down.code_point = code_point;
+    down.repeat = false;
+    down.should_insert_text = insert_text;
+    s.on_key_event(move(down));
+
+    Web::KeyEvent up {};
+    up.type = Web::KeyEvent::Type::KeyUp;
+    up.key = code;
+    up.modifiers = Web::UIEvents::KeyModifier::Mod_None;
+    up.code_point = code_point;
+    up.repeat = false;
+    up.should_insert_text = false;
+    s.on_key_event(move(up));
+    request_frames();
+}
+
+inline void handle_key(u32 code, u32 code_point, u32 modifiers, u32 pressed)
+{
+    auto& s = state();
+    if (pressed == 0)
+        return;
+    (void)modifiers;
+
+    if (s.address_focused) {
+        switch (code) {
+        case ToucheCaractere:
+            if (code_point >= 0x20 && code_point < 0x7f) {
+                if (s.caret > s.address.size())
+                    s.caret = s.address.size();
+                s.address.insert(s.caret, static_cast<u8>(code_point));
+                ++s.caret;
+            }
+            break;
+        case ToucheRetour:
+            if (s.caret > 0 && !s.address.is_empty()) {
+                --s.caret;
+                s.address.remove(s.caret);
+            }
+            break;
+        case ToucheGauche:
+            if (s.caret > 0)
+                --s.caret;
+            break;
+        case ToucheDroite:
+            if (s.caret < s.address.size())
+                ++s.caret;
+            break;
+        case ToucheEntree:
+            commit_address();
+            break;
+        case ToucheEchap:
+            // Echap rend le foyer a la page et restaure l'URL affichee : une
+            // saisie abandonnee ne doit pas laisser un texte qui ne correspond
+            // plus a ce qui est a l'ecran.
+            s.address_focused = false;
+            set_address_text(s.committed_url.view());
+            break;
+        case ToucheTabulation:
+        default:
+            break;
+        }
+        request_frames();
+        return;
+    }
+
+    switch (code) {
+    case ToucheCaractere:
+        dispatch_key_to_page(Web::UIEvents::code_point_to_key_code(code_point), code_point, true);
+        break;
+    case ToucheEntree:
+        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Return, '\n', true);
+        break;
+    case ToucheRetour:
+        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Backspace, 0, false);
+        break;
+    case ToucheTabulation:
+        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Tab, '\t', false);
+        break;
+    case ToucheHaut:
+        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Up, 0, false);
+        break;
+    case ToucheBas:
+        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Down, 0, false);
+        break;
+    case ToucheGauche:
+        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Left, 0, false);
+        break;
+    case ToucheDroite:
+        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Right, 0, false);
+        break;
+    case ToucheEchap:
+        // Echap arrete le chargement en cours, comme dans tout navigateur. Le
+        // gestionnaire de fenetres nous le laisse precisement pour cela.
+        if (s.loading) {
+            s.loading = false;
+            s.status = "arrete";
+            if (s.on_stop)
+                s.on_stop();
+        }
+        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Escape, 0, false);
+        break;
+    default:
+        break;
+    }
+    request_frames();
+}
+
+// ----------------------------------------------------------------------------
+// Protocole GUI — lecture
+// ----------------------------------------------------------------------------
+
+inline u32 read_u32(u8 const* data, size_t offset)
+{
+    return static_cast<u32>(data[offset])
+        | (static_cast<u32>(data[offset + 1]) << 8)
+        | (static_cast<u32>(data[offset + 2]) << 16)
+        | (static_cast<u32>(data[offset + 3]) << 24);
+}
+
+inline i32 read_i32(u8 const* data, size_t offset)
+{
+    return static_cast<i32>(read_u32(data, offset));
+}
+
+inline void handle_message(u16 kind, u8 const* payload, u32 size)
+{
+    auto& s = state();
+    switch (kind) {
+    case Genre::Configure:
+        if (size >= 16) {
+            auto width = static_cast<int>(read_u32(payload, 4));
+            auto height = static_cast<int>(read_u32(payload, 8));
+            // La surface n'est pas reallouee par ce jalon (§11 du protocole) :
+            // on note la geometrie sans y croire davantage que la surface.
+            if (width > 0 && height > 0 && (width != s.surface_width || height != s.surface_height))
+                outln("[ladybird-bouchaud] M11_CONFIGURE {}x{} (surface {}x{})",
+                    width, height, s.surface_width, s.surface_height);
+        }
+        break;
+    case Genre::Key:
+        if (size >= 20)
+            handle_key(read_u32(payload, 4), read_u32(payload, 12), read_u32(payload, 8), read_u32(payload, 16));
+        break;
+    case Genre::Pointer:
+        if (size >= 16)
+            handle_pointer(read_i32(payload, 4), read_i32(payload, 8), read_u32(payload, 12));
+        break;
+    case Genre::Wheel:
+        if (size >= 8)
+            handle_wheel(read_i32(payload, 4));
+        break;
+    case Genre::CloseRequest:
+        outln("[ladybird-bouchaud] M11_CLOSE_REQUEST");
+        if (s.on_close)
+            s.on_close();
+        break;
+    default:
+        break;
+    }
+}
+
+/// Vide le canal GUI et traite tous les messages entiers qu'il contient.
+///
+/// Appelee par un `Core::Notifier` **et** par un minuteur : la sonde M9 a montre
+/// qu'un notificateur de lecture pouvait rester endormi sous Bouchaud alors que
+/// la donnee etait deja la. Un navigateur dont la souris s'arrete par
+/// intermittence est inutilisable ; le minuteur est la ceinture.
+inline void drain()
+{
+    auto& s = state();
+    if (s.gui_fd < 0)
+        return;
+
+    u8 buffer[4096];
+    for (;;) {
+        auto received = read(s.gui_fd, buffer, sizeof(buffer));
+        if (received > 0) {
+            s.incoming.append(buffer, static_cast<size_t>(received));
+            continue;
+        }
+        if (received < 0 && errno == EINTR)
+            continue;
+        break;
+    }
+
+    constexpr size_t header_size = TAILLE_ENTETE;
+    size_t offset = 0;
+    while (s.incoming.size() - offset >= header_size) {
+        auto const* header = s.incoming.data() + offset;
+        auto magic = read_u32(header, 0);
+        if (magic != MAGIC) {
+            // Flux desynchronise : on ne devine pas, on jette. Le protocole est
+            // idempotent (positions absolues), la prochaine trame corrige tout.
+            warnln("[ladybird-bouchaud] M11_GUI_STREAM_DESYNC");
+            offset = s.incoming.size();
+            break;
+        }
+        auto kind = static_cast<u16>(header[6] | (header[7] << 8));
+        auto payload_size = read_u32(header, 8);
+        if (payload_size > CHARGE_MAX) {
+            warnln("[ladybird-bouchaud] M11_GUI_PAYLOAD_TOO_LARGE {}", payload_size);
+            offset = s.incoming.size();
+            break;
+        }
+        if (s.incoming.size() - offset < header_size + payload_size)
+            break;
+
+        handle_message(kind, header + header_size, payload_size);
+        offset += header_size + payload_size;
+    }
+
+    if (offset > 0)
+        s.incoming.remove(0, offset);
+}
+
+/// Un tic du minuteur : lire les entrees, puis produire au plus une trame.
+///
+/// Separer les deux est ce qui rend le rythme correct. `drain()` ne fait
+/// qu'empiler des evenements dans WebContent ; la capture demandee ici tombe au
+/// tic **suivant**, quand la boucle du moteur les a reellement traites.
+inline void tick()
+{
+    drain();
+
+    auto& s = state();
+    if (s.loading) {
+        // Pendant un chargement, la page se peint par morceaux. Suivre le
+        // rythme est ce qui distingue une page qui apparait d'une page qui
+        // surgit d'un coup au bout de trois secondes.
+        if (s.frames_pending < 1)
+            s.frames_pending = 1;
+    }
+
+    if (s.frames_pending <= 0)
+        return;
+
+    --s.frames_pending;
+    if (s.on_repaint)
+        s.on_repaint();
+}
+
+// ----------------------------------------------------------------------------
+// Initialisation
+// ----------------------------------------------------------------------------
+
+inline void initialize_from_environment()
+{
+    auto& s = state();
+    auto* gui = getenv("BO_GUI_FD");
+    auto* surface = getenv("BO_SURFACE_FD");
+    s.gui_fd = gui ? atoi(gui) : -1;
+    s.surface_fd = surface ? atoi(surface) : -1;
+    s.surface_width = environment_int("BO_SURFACE_WIDTH", 1100);
+    s.surface_height = environment_int("BO_SURFACE_HEIGHT", 604);
+    s.surface_stride = environment_int("BO_SURFACE_STRIDE", s.surface_width * 4);
+
+    if (s.gui_fd >= 0) {
+        auto flags = fcntl(s.gui_fd, F_GETFL, 0);
+        if (flags >= 0)
+            fcntl(s.gui_fd, F_SETFL, flags | O_NONBLOCK);
+    }
+
+    outln("[ladybird-bouchaud] M11_CHROME gui_fd={} surface_fd={} surface={}x{} toolbar={}",
+        s.gui_fd, s.surface_fd, s.surface_width, s.surface_height, toolbar_height);
+}
+
+/// Hauteur utile pour la page, une fois la barre d'outils retiree.
+inline int viewport_height()
+{
+    auto height = state().surface_height - toolbar_height;
+    return height > 0 ? height : state().surface_height;
+}
+
+inline void set_committed_url(StringView url)
+{
+    auto& s = state();
+    s.committed_url = url;
+    s.secure = url.starts_with("https://"sv);
+    if (!s.address_focused)
+        set_address_text(url);
+    request_frames();
+}
+
+inline void set_loading(bool loading, StringView status)
+{
+    auto& s = state();
+    s.loading = loading;
+    s.status = status;
+    request_frames();
+}
+
+inline void set_title(StringView title)
+{
+    state().title = title;
+    send_title();
+}
+
+}
+
+#endif
