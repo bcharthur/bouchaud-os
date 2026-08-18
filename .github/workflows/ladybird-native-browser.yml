@@ -294,16 +294,52 @@ jobs:
 
       - name: Executer M8 en ring3
         run: |
-          set +e
-          timeout 240 qemu-system-x86_64 \
+          set -u
+          LOG=serie-ladybird-browser.log
+          SUCCESS='[ladybird-bouchaud] RESULTAT : M8 HTML local dans fenetre Bouchaud OK'
+          DEADLINE=$((SECONDS + 240))
+          : > "$LOG"
+
+          qemu-system-x86_64 \
             -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
             -drive format=raw,file=ladybird-browser.img \
             -m 4096 -display none -no-reboot \
             -netdev user,id=net0 -device e1000,netdev=net0 \
             -audiodev none,id=muet -device AC97,audiodev=muet \
-            -serial file:serie-ladybird-browser.log
-          echo "qemu: code $?"
-          cat serie-ladybird-browser.log
+            -serial file:"$LOG" &
+          QEMU_PID=$!
+          echo "qemu: pid $QEMU_PID"
+
+          SUCCESS_SEEN=0
+          while kill -0 "$QEMU_PID" 2>/dev/null; do
+            if grep -Fq "$SUCCESS" "$LOG" 2>/dev/null; then
+              SUCCESS_SEEN=1
+              echo "qemu: succes M8 detecte, arret anticipe"
+              kill -TERM "$QEMU_PID" 2>/dev/null || true
+              break
+            fi
+            if (( SECONDS >= DEADLINE )); then
+              echo "qemu: timeout M8 apres 240 s"
+              kill -TERM "$QEMU_PID" 2>/dev/null || true
+              break
+            fi
+            sleep 0.25
+          done
+
+          for _ in $(seq 1 20); do
+            kill -0 "$QEMU_PID" 2>/dev/null || break
+            sleep 0.1
+          done
+          if kill -0 "$QEMU_PID" 2>/dev/null; then
+            kill -KILL "$QEMU_PID" 2>/dev/null || true
+          fi
+
+          set +e
+          wait "$QEMU_PID"
+          QEMU_CODE=$?
+          set -e
+          echo "qemu: code $QEMU_CODE success=$SUCCESS_SEEN"
+          cat "$LOG"
 
       - name: Verdict M8
         run: |
@@ -415,16 +451,52 @@ jobs:
 
       - name: Executer M9 en ring3
         run: |
-          set +e
-          timeout 300 qemu-system-x86_64 \
+          set -u
+          LOG=serie-ladybird-m9.log
+          SUCCESS='[ladybird-bouchaud] RESULTAT : M9 HTTP distant dans fenetre Bouchaud OK'
+          DEADLINE=$((SECONDS + 300))
+          : > "$LOG"
+
+          qemu-system-x86_64 \
             -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
             -drive format=raw,file=ladybird-m9.img \
             -m 4096 -display none -no-reboot \
             -netdev user,id=net0 -device e1000,netdev=net0 \
             -audiodev none,id=muet -device AC97,audiodev=muet \
-            -serial file:serie-ladybird-m9.log
-          echo "qemu: code $?"
-          cat serie-ladybird-m9.log
+            -serial file:"$LOG" &
+          QEMU_PID=$!
+          echo "qemu: pid $QEMU_PID"
+
+          SUCCESS_SEEN=0
+          while kill -0 "$QEMU_PID" 2>/dev/null; do
+            if grep -Fq "$SUCCESS" "$LOG" 2>/dev/null; then
+              SUCCESS_SEEN=1
+              echo "qemu: succes M9 detecte, arret anticipe"
+              kill -TERM "$QEMU_PID" 2>/dev/null || true
+              break
+            fi
+            if (( SECONDS >= DEADLINE )); then
+              echo "qemu: timeout M9 apres 300 s"
+              kill -TERM "$QEMU_PID" 2>/dev/null || true
+              break
+            fi
+            sleep 0.25
+          done
+
+          for _ in $(seq 1 20); do
+            kill -0 "$QEMU_PID" 2>/dev/null || break
+            sleep 0.1
+          done
+          if kill -0 "$QEMU_PID" 2>/dev/null; then
+            kill -KILL "$QEMU_PID" 2>/dev/null || true
+          fi
+
+          set +e
+          wait "$QEMU_PID"
+          QEMU_CODE=$?
+          set -e
+          echo "qemu: code $QEMU_CODE success=$SUCCESS_SEEN"
+          cat "$LOG"
           echo "=== fixture ==="
           cat fixture-m9.log
 
@@ -458,4 +530,3 @@ jobs:
             serie-ladybird-m9.log
             fixture-m9.log
           if-no-files-found: warn
-
