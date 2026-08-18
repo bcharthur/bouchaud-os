@@ -276,6 +276,45 @@ if "bouchaud_m9_trace" not in data:
     requests_cpp.write_text(data)
 
 
+# Bouchaud M9 receives the response through a RequestPipe socketpair. The
+# RequestServer marker above proves that the complete body has already been
+# written to that pipe before `request_finished` reaches WebContent. On the
+# current Bouchaud event loop the read notifier can nevertheless remain asleep,
+# leaving Fetch waiting forever with the payload already queued. Drain the
+# ready pipe once when completion is announced. This keeps the normal LibWeb
+# streaming path and only compensates for the missing notifier wake-up on the
+# Bouchaud M9 port; other platforms and M8 stay byte-for-byte untouched.
+request_cpp = root / "Libraries/LibRequests/Request.cpp"
+data = request_cpp.read_text()
+
+if "M9_BODY_DRAIN_BEGIN" not in data:
+    old = '''void Request::did_finish(Badge<RequestClient>, u64 total_size, RequestTimingInfo const& timing_info, Optional<NetworkError> const& network_error)
+{
+    auto effective_network_error = m_body_delivery_error.has_value() ? m_body_delivery_error : network_error;
+    if (on_finish)
+        on_finish(total_size, timing_info, effective_network_error);
+}'''
+    new = '''void Request::did_finish(Badge<RequestClient>, u64 total_size, RequestTimingInfo const& timing_info, Optional<NetworkError> const& network_error)
+{
+    auto effective_network_error = m_body_delivery_error.has_value() ? m_body_delivery_error : network_error;
+#if defined(BOUCHAUD_PORT)
+    if (getenv("BOUCHAUD_M9") != nullptr && m_internal_stream_data && m_internal_stream_data->read_notifier && m_internal_stream_data->read_notifier->on_activation) {
+        outln("[ladybird-bouchaud] M9_BODY_DRAIN_BEGIN total={}", total_size);
+        m_internal_stream_data->read_notifier->on_activation();
+        outln("[ladybird-bouchaud] M9_BODY_DRAIN_DONE total={}", total_size);
+    }
+#endif
+    if (on_finish)
+        on_finish(total_size, timing_info, effective_network_error);
+}'''
+    if old not in data:
+        raise SystemExit("M9 Request body completion hook changed upstream")
+    data = data.replace(old, new, 1)
+    if "<cstdlib>" not in data:
+        first_include = data.index("#include ")
+        data = data[:first_include] + "#include <cstdlib>\n#include <AK/Format.h>\n" + data[first_include:]
+    request_cpp.write_text(data)
+
 
 # --- Sonde des appels IPC synchrones -----------------------------------------
 #
