@@ -14,7 +14,9 @@ param(
 
     [switch]$LadybirdM9Test,
 
-    [string]$LadybirdUrl = "http://10.0.2.2:18080/m9.html",
+    # Page de depart du mode interactif. Le test M9 remplace toujours cette
+    # valeur par sa fixture deterministe, sauf surcharge explicite.
+    [string]$LadybirdUrl = "http://example.com/",
 
     # Profil materiel du navigateur natif.
     # 8192 Mio est volontairement le profil local par defaut : Bouchaud peut
@@ -93,6 +95,18 @@ function Fail {
     Write-Host "ERREUR: $Message" -ForegroundColor Red
 
     exit 1
+}
+
+
+function ConvertTo-ShellSingleQuoted {
+    param(
+        [string]$Value
+    )
+
+    # L'autorun est interprete par /bin/sh dans l'OS. Une apostrophe se code
+    # en fermant la chaine, en emettant une apostrophe quotee, puis en la
+    # rouvrant. Ne jamais injecter directement une valeur venant du terminal.
+    return "'" + $Value.Replace("'", "'\"'\"'") + "'"
 }
 
 
@@ -181,6 +195,28 @@ if ($LadybirdModeCount -gt 1) {
 }
 
 $LadybirdMode = $Ladybird -or $LadybirdM8 -or $LadybirdM9Test
+
+if ($LadybirdM9Test -and -not $PSBoundParameters.ContainsKey("LadybirdUrl")) {
+    $LadybirdUrl = "http://10.0.2.2:18080/m9.html"
+}
+
+if ($Ladybird -or $LadybirdM9Test) {
+    $parsedLadybirdUrl = $null
+    if (-not [System.Uri]::TryCreate(
+        $LadybirdUrl,
+        [System.UriKind]::Absolute,
+        [ref]$parsedLadybirdUrl
+    )) {
+        Fail "LadybirdUrl doit etre une URL absolue http:// ou https://"
+    }
+
+    if ($parsedLadybirdUrl.Scheme -notin @("http", "https")) {
+        Fail (
+            "Ladybird accepte http:// et https:// uniquement, pas '{0}'" -f `
+                $parsedLadybirdUrl.Scheme
+        )
+    }
+}
 
 
 # =============================================================================
@@ -630,7 +666,7 @@ if ($LadybirdMode) {
             'echo "=== Ladybird M9 : HTTP distant via RequestServer ==="',
             'export BO_AUTOSTART_BROWSER=1',
             'export BOUCHAUD_M9=1',
-            "export BOUCHAUD_M9_URL=$LadybirdUrl",
+            "export BOUCHAUD_M9_URL=$(ConvertTo-ShellSingleQuoted $LadybirdUrl)",
             $m9TestLine,
             'desktop',
             ''
@@ -1186,6 +1222,9 @@ $FixtureProcess = $null
 $FixtureOut = Join-Path $env:TEMP "bouchaud-m9-fixture.out.log"
 $FixtureErr = Join-Path $env:TEMP "bouchaud-m9-fixture.err.log"
 
+# La fixture locale sert le test M9 deterministe, et rien d'autre. Le mode
+# interactif sort par le NAT de QEMU : la demarrer alors ouvrirait un port sur
+# l'hote sans qu'aucun code ne le consulte.
 $UseLocalM9Fixture = $LadybirdMode -and $IsLadybirdM9 -and (
     $IsLadybirdM9Test -or
     $LadybirdUrl.StartsWith("http://10.0.2.2:18080/")
@@ -1224,7 +1263,7 @@ finally {
     }
 }
 
-if ($LadybirdMode -and $IsLadybirdM9) {
+if ($UseLocalM9Fixture) {
     Write-Host ""
     Write-Host "=== Journal fixture M9 ===" -ForegroundColor DarkGray
     if (Test-Path $FixtureOut) {

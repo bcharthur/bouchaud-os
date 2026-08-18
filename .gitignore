@@ -1,4 +1,8 @@
 /target/
+# Cette sonde est une application Rust autonome. Cargo regenere son verrou a
+# chaque build; seule la chaine principale verrouille ses dependances ici.
+tools/python-wasm/Cargo.lock
+tools/python-wasm/target/
 .idea/
 *.iml
 .DS_Store
