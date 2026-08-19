@@ -406,36 +406,58 @@ impl TcpConn {
         self.pump(budget);
     }
 
-    // Traite les segments entrants disponibles pendant `budget` iterations.
     /// Fait avancer la connexion : lit les segments disponibles, acquitte, et
     /// range les donnees dans `rx`.
     ///
     /// Publique parce que la couche socket en a besoin : c'est elle qui decide
     /// combien de temps un `recv` accepte d'attendre.
+    ///
+    /// `budget` borne le nombre de segments traites en un passage — une rafale
+    /// ne doit pas retenir l'appelant dans le noyau indefiniment. Ce n'est pas
+    /// une attente : `poll_ip` est **non bloquant**, et quand il rend `None`
+    /// l'anneau est vide a cet instant. Le rappeler ne peut rien faire arriver.
+    ///
+    /// La boucle epuisait pourtant son budget entier dans ce cas. Avec un
+    /// budget de 20 000 appele depuis `poll` a chaque tick — mille fois par
+    /// seconde — cela faisait vingt millions de lectures d'un anneau vide par
+    /// seconde et par connexion ouverte. C'est le meme defaut que M13 a corrige
+    /// pour UDP, reste ici : une attente comptee en tours de boucle n'est pas
+    /// une attente, c'est du processeur brule.
     pub fn pump(&mut self, budget: u32) {
         let mut rb = [0u8; 2048];
         let mut seg = [0u8; 64];
         for _ in 0..budget {
-            if let Some((_, n)) = net::poll_ip(6, Some(self.dst), &mut rb) {
-                if let Some(h) = parse(&rb[..n]) {
-                    if h.dport != self.sport { continue; }
-                    if h.flags & RST != 0 { self.closed = true; self.peer_fin = true; self.rst_seen = true; return; }
-                    let plen = n - h.data_off;
-                    if plen > 0 {
-                        self.accept_segment(h.seq, &rb[h.data_off..n]);
-                        // ACK cumulatif. Si le segment etait hors sequence, on re-ACK
-                        // volontairement le prochain octet attendu.
-                        let a = build(&mut seg, &self.dst, self.sport, self.dport, self.seq, self.ack, ACK, WINDOW, &[]);
-                        net::send_ip(self.dst, 6, &seg[..a]);
-                    }
-                    if h.flags & FIN != 0 && h.seq.wrapping_add(plen as u32) == self.ack {
-                        self.ack = self.ack.wrapping_add(1);
-                        self.peer_fin = true;
-                        self.fin_seen = true;
-                        let a = build(&mut seg, &self.dst, self.sport, self.dport, self.seq, self.ack, ACK, WINDOW, &[]);
-                        net::send_ip(self.dst, 6, &seg[..a]);
-                    }
-                }
+            // Anneau vide : insister ne fait rien arriver.
+            let Some((src, n)) = net::poll_ip(6, Some(self.dst), &mut rb) else {
+                return;
+            };
+            let Some(h) = parse(&rb[..n]) else { continue };
+            // Bon hote, autre connexion : ce segment est arrive, il n'est
+            // simplement pas pour nous. On le remet a disposition.
+            if h.dport != self.sport {
+                net::depose_en_attente(6, src, &rb[..n]);
+                continue;
+            }
+            if h.flags & RST != 0 {
+                self.closed = true;
+                self.peer_fin = true;
+                self.rst_seen = true;
+                return;
+            }
+            let plen = n - h.data_off;
+            if plen > 0 {
+                self.accept_segment(h.seq, &rb[h.data_off..n]);
+                // ACK cumulatif. Si le segment etait hors sequence, on re-ACK
+                // volontairement le prochain octet attendu.
+                let a = build(&mut seg, &self.dst, self.sport, self.dport, self.seq, self.ack, ACK, WINDOW, &[]);
+                net::send_ip(self.dst, 6, &seg[..a]);
+            }
+            if h.flags & FIN != 0 && h.seq.wrapping_add(plen as u32) == self.ack {
+                self.ack = self.ack.wrapping_add(1);
+                self.peer_fin = true;
+                self.fin_seen = true;
+                let a = build(&mut seg, &self.dst, self.sport, self.dport, self.seq, self.ack, ACK, WINDOW, &[]);
+                net::send_ip(self.dst, 6, &seg[..a]);
             }
         }
     }

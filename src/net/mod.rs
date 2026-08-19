@@ -358,7 +358,108 @@ fn repond_arp(trame: &[u8]) -> bool {
 /// compte quand l'emetteur envoie par rafales.
 const TRAMES_PAR_PASSAGE: usize = 32;
 
+/// Paquets IPv4 sortis de l'anneau mais destines a un autre appelant.
+///
+/// ## Le defaut que cette file corrige
+///
+/// M13 a corrige, au niveau des prises UDP, le fait qu'un datagramme sorti de
+/// l'anneau pour le compte d'une prise et destine a une autre etait **jete**.
+/// La meme faute existait un etage plus bas, dans `poll_ip` lui-meme, et pour
+/// tous les protocoles : un appelant qui demandait du TCP depuis une source
+/// donnee sortait de l'anneau les trames UDP, ICMP, ou TCP d'une autre
+/// connexion — puis les abandonnait par un `continue`.
+///
+/// Une seule carte alimente toute la machine. Des qu'un navigateur a une
+/// connexion TCP ouverte **et** une resolution DNS en cours — c'est-a-dire des
+/// la deuxieme page, ou la premiere page qui charge une ressource d'un autre
+/// hote — le `poll` de la prise TCP mangeait la reponse DNS. Le resolveur
+/// attendait une reponse qui etait deja passee, et la navigation s'arretait
+/// sans erreur.
+///
+/// Ce qui est sorti de l'anneau est donc **mis de cote** au lieu d'etre jete,
+/// et le prochain appelant qui le reclame le trouve ici avant de toucher la
+/// carte. C'est la meme regle que `livre_datagramme`, appliquee a l'etage IP :
+/// on route, on ne jette pas.
+///
+/// ## Bornes
+///
+/// La file est bornee en nombre **et** en age. En nombre, parce qu'un paquet
+/// que personne ne reclame ne doit pas faire grossir la memoire du noyau ; le
+/// plus ancien part en premier. En age, parce qu'un datagramme rendu dix
+/// secondes trop tard est pire qu'un datagramme perdu : le protocole a deja
+/// retransmis, et la reponse tardive arrive comme un doublon. Deux secondes
+/// couvrent largement l'aller-retour d'un resolveur local.
+struct PaquetEnAttente {
+    proto: u8,
+    src: Ipv4Addr,
+    charge: alloc::vec::Vec<u8>,
+    depose_a: u64,
+}
+
+const ATTENTE_MAX: usize = 64;
+const ATTENTE_AGE_MS: u64 = 2_000;
+
+static mut EN_ATTENTE: Option<alloc::vec::Vec<PaquetEnAttente>> = None;
+
+fn file_en_attente() -> &'static mut alloc::vec::Vec<PaquetEnAttente> {
+    unsafe {
+        let slot = &mut *core::ptr::addr_of_mut!(EN_ATTENTE);
+        slot.get_or_insert_with(alloc::vec::Vec::new)
+    }
+}
+
+/// Reclame un paquet deja sorti de l'anneau, s'il en existe un qui corresponde.
+///
+/// Purge au passage ce qui a trop vieilli : c'est le seul endroit ou la file est
+/// parcourue, donc le seul ou l'entretien ne coute rien de plus.
+fn reclame_en_attente(
+    proto: u8,
+    src_filter: Option<Ipv4Addr>,
+    out: &mut [u8],
+) -> Option<(Ipv4Addr, usize)> {
+    let file = file_en_attente();
+    if file.is_empty() {
+        return None;
+    }
+    let maintenant = crate::kernel::timer::monotonic_ms();
+    file.retain(|p| maintenant.wrapping_sub(p.depose_a) < ATTENTE_AGE_MS);
+
+    let position = file.iter().position(|p| {
+        p.proto == proto && src_filter.map_or(true, |s| p.src == s)
+    })?;
+    let paquet = file.remove(position);
+    let m = paquet.charge.len().min(out.len());
+    out[..m].copy_from_slice(&paquet.charge[..m]);
+    Some((paquet.src, m))
+}
+
+/// Met de cote un paquet destine a un autre appelant.
+///
+/// Publie au niveau du module : la couche transport en a besoin elle aussi. Un
+/// segment TCP venant du bon hote mais adresse a un **autre port local** est
+/// bien arrive, il n'est simplement pas pour la connexion qui l'a sorti de
+/// l'anneau — le jeter reintroduirait, entre deux connexions vers le meme
+/// serveur, exactement le defaut que cette file corrige entre protocoles.
+pub(crate) fn depose_en_attente(proto: u8, src: Ipv4Addr, charge: &[u8]) {
+    let file = file_en_attente();
+    if file.len() >= ATTENTE_MAX {
+        file.remove(0);
+    }
+    file.push(PaquetEnAttente {
+        proto,
+        src,
+        charge: charge.to_vec(),
+        depose_a: crate::kernel::timer::monotonic_ms(),
+    });
+}
+
 pub(crate) fn poll_ip(proto: u8, src_filter: Option<Ipv4Addr>, out: &mut [u8]) -> Option<(Ipv4Addr, usize)> {
+    // Ce qu'un autre appelant a sorti de l'anneau pour nous passe avant la
+    // carte : c'est deja arrive, le rendre plus tard n'aurait aucun sens.
+    if let Some(trouve) = reclame_en_attente(proto, src_filter, out) {
+        return Some(trouve);
+    }
+
     let mut buf = [0u8; 2048];
     for _ in 0..TRAMES_PAR_PASSAGE {
         let n = match e1000::receive(&mut buf) {
@@ -375,13 +476,17 @@ pub(crate) fn poll_ip(proto: u8, src_filter: Option<Ipv4Addr>, out: &mut [u8]) -
         let iph = match ipv4::parse_header(&buf[ethernet::HEADER_LEN..n]) {
             Some(h) => h, None => continue,
         };
-        if iph.proto != proto { continue; }
-        if let Some(s) = src_filter {
-            if iph.src != s { continue; }
-        }
         let start = ethernet::HEADER_LEN + iph.header_len;
         let end = ethernet::HEADER_LEN + iph.total_len;
         if start > end || end > n { continue; }
+
+        // Pas pour nous : on le met de cote pour celui qui l'attend, au lieu de
+        // l'abandonner. Voir `PaquetEnAttente`.
+        if iph.proto != proto || src_filter.is_some_and(|s| iph.src != s) {
+            depose_en_attente(iph.proto, iph.src, &buf[start..end]);
+            continue;
+        }
+
         let len = end - start;
         let m = len.min(out.len());
         out[..m].copy_from_slice(&buf[start..start + m]);
