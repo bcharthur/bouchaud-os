@@ -109,31 +109,20 @@ fait une fois par commit de `main` et le publie en release. Rien de Linux
 n'intervient à l'exécution : ce sont des ELF statiques produits par compilation
 croisée, comme un firmware.
 
-| Option de `run.ps1` | Effet |
-|---|---|
-| `-NoUserlandDownload` | démarre le noyau seul, sans chercher le userland |
-| `-RefreshUserland` | retélécharge même si l'image locale est valide |
-| `-AllowOlderUserland` | accepte le userland d'un ancêtre, en annonçant l'écart |
-| `-Sync` | met à jour la branche courante avant de construire |
-| `-Fullscreen` | QEMU en plein écran |
-
-### Naviguer avec le port Ladybird
-
-Le port Ladybird a maintenant une barre d'adresse, un historique, des liens
-cliquables et HTTPS. Il s'utilise :
+### Naviguer
 
 ```powershell
-.\run.ps1 -Ladybird                                   # fixture locale, page reelle
-.\run.ps1 -Ladybird -LadybirdUrl "https://10.0.2.2:18443/"
+.\run.ps1
 ```
 
-> **Un site par son nom ne se charge pas encore.** HTTPS est prouvé — chaîne
-> validée, nom d'hôte vérifié — mais uniquement contre un hôte désigné par son
-> **adresse**. Résoudre un nom fait boucler `RequestServer` : cinq minutes à
-> 50 % de processeur sans réponse, là où la même pile charge une adresse IP en
-> quinze secondes. C'est mesuré, pas supposé, et c'est le point qui sépare
-> « HTTPS fonctionne » de « on peut naviguer sur le Web » :
-> `docs/ladybird/M12_HTTPS.md`, section « Ce qui bloque encore ».
+Bouchaud OS démarre sur son bureau. **Double-clic sur l'icône « Navigateur »**
+— ou menu Démarrer — et Ladybird s'ouvre dans une fenêtre du bureau. Fermer la
+fenêtre rend la main au bureau ; double-cliquer à nouveau relance le navigateur.
+Une seule instance à la fois : deux moteurs Web sur un cœur unique ne rendraient
+service à personne.
+
+Le navigateur ne s'ouvre **pas** tout seul au démarrage. Un système qui ouvre un
+navigateur sans qu'on le lui demande est une démonstration, pas un système.
 
 | Dans la fenêtre | Effet |
 |---|---|
@@ -144,32 +133,46 @@ cliquables et HTTPS. Il s'utilise :
 | molette, flèches | défilement |
 | Échap | rend le foyer à la page, ou arrête le chargement |
 
-QEMU donne au guest un accès sortant par NAT, et le magasin d'autorités requis
-par TLS est fabriqué au premier lancement à partir de celui de la machine hôte
-(`tools/ladybird/certs/README.md`). La page de départ est la fixture locale,
-`run.ps1` la démarre alors sur l'hôte — c'est le seul chemin réseau prouvé de
-bout en bout, et une page qui s'affiche vaut mieux qu'une page qui se fige.
-
-| Option Ladybird de `run.ps1` | Effet |
+| Option de `run.ps1` | Effet |
 |---|---|
-| `-LadybirdUrl <url>` | page de départ, `http://` ou `https://` |
-| `-LadybirdSansChrome` | retire la barre d'outils, revient à la capture unique de M9 |
-| `-LadybirdRamMiB <n>` | RAM donnée à QEMU (8192 par défaut) |
-| `-LadybirdM9Test` | régression HTTP déterministe sur fixture locale |
-| `-LadybirdM8` | régression HTML local finie |
+| `-Legacy` | revient au userland historique (Qt + CPython + QuickJS) |
+| `-RamMiB <n>` | mémoire de la machine (12288 par défaut, voir plus bas) |
+| `-CpuCount <n>` | vCPU exposés — le noyau n'en ordonnance qu'un, voir plus bas |
+| `-LadybirdUrl <url>` | page de départ |
+| `-LadybirdSansChrome` | retire la barre d'outils, capture unique de M9 |
+| `-Fullscreen` | QEMU en plein écran |
+| `-LadybirdM8`, `-LadybirdM9Test` | régressions déterministes de la CI |
+| `-Sync` | met à jour la branche courante avant de construire |
+| `-NoUserlandDownload` | démarre le noyau seul, sans chercher de userland |
+| `-RefreshUserland` | retélécharge même si l'image locale est valide |
+| `-AllowOlderUserland` | accepte le userland d'un ancêtre, en annonçant l'écart |
 
-Ce qui manque encore : **la résolution de nom** (ci-dessus), les onglets (M13),
-le bac à sable du renderer (M14), le redimensionnement de la fenêtre, et l'écran
-d'avertissement pour un certificat invalide. Sans `-Ladybird`, `run.ps1` lance le navigateur Qt/QuickJS documenté
-plus haut, qui reste le mode par défaut.
+**Mémoire.** 12288 Mio par défaut : c'est la plus grande valeur réellement
+éprouvée — le noyau démarre, la sonde réseau passe, et le démarrage ne coûte que
+trois secondes de plus qu'à 2048 Mio. 16384 est accepté mais n'a pas pu être
+vérifié sur la machine de développement, qui n'a que 15 Gio.
 
+**Processeurs.** Un seul, et ce n'est pas une timidité : le noyau ne lit ni ACPI
+ni MADT, n'a pas de LAPIC, ne peut donc pas réveiller un processeur applicatif,
+et route ses interruptions par le PIC 8259 qui ne parle qu'au BSP. Demander huit
+vCPU en allumerait sept qui resteraient éteints — `run.ps1` prévient au lieu de
+laisser croire à une accélération. Détail dans `docs/ladybird/M13_DNS.md`.
+
+**Résolution de noms.** Elle marche depuis M13. Elle ne marchait pas avant, et
+la raison n'était pas dans Ladybird : la couche UDP du noyau jetait les
+datagrammes destinés à un autre socket que celui qu'elle regardait, et attendait
+en brûlant un cœur. `tools/net/verifie-dns.sh` le vérifie en quelques minutes,
+sans construire Ladybird.
 
 **Jamais un userland d'un autre commit sans le dire.** Une image d'un autre jour
 ne se signale pas : elle démarre, et elle se comporte comme le système d'alors.
 La panne qui suit accuse le code source, qui n'y est pour rien.
 
-`run-fullscreen.ps1` et `boot.ps1` enveloppent les mêmes commandes ;
-`check.ps1` enchaîne les vérifications.
+Il n'y a **qu'un** lanceur. `run-fullscreen.ps1` n'était qu'un alias de
+`.\run.ps1 -Fullscreen`, et `boot.ps1` n'existait que parce que `run.ps1`
+lançait QEMU même quand `bootimage` échouait — ce qui n'est plus vrai depuis
+qu'il s'arrête sur l'erreur. Les deux ont été supprimés. `check.ps1` reste : il
+compile sans lancer QEMU, ce qui est un autre métier.
 
 ### Construire le userland soi-même
 
@@ -236,6 +239,7 @@ ce qui était vrai à leur date, pas ce qui est vrai aujourd'hui.
 | `docs/ETAT_DES_LIEUX.md` | **ce qui est acquis, et la preuve pour chaque ligne** |
 | `docs/VISION.md` | **où va le système : mémoire, processeur, graphisme, IA** |
 | `docs/ladybird/MASTER_PLAN.md` | le portage Ladybird et son échelle de jalons |
+| `docs/ladybird/M13_DNS.md` | **résolution de noms : la cause, la preuve, la mesure mémoire/CPU** |
 | `docs/ladybird/M11_NAVIGATEUR.md` | **le chrome du navigateur natif : barre d'adresse, entrées, trames** |
 | `docs/ladybird/M12_HTTPS.md` | HTTPS, autorités racine, résolution de noms |
 | `docs/ARCHITECTURE.md` | découpage du noyau et du userland |
