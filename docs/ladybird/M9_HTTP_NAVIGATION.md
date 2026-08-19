@@ -124,6 +124,35 @@ M9 valide HTTP. HTTPS est acquis au jalon M12 (`M12_HTTPS.md`) : certificats
 racine passes a `RequestServer` par `--certificate`, resolveur DNS designe par
 son adresse, chaine reellement verifiee.
 
+## Analyse de l'URL demandee (M15)
+
+Avant toute navigation, le bootstrap lit `BOUCHAUD_M9_URL` et la donne a
+`URL::create_with_url_or_path()`. Trois marqueurs encadrent ce passage :
+
+```text
+M15_URL_INPUT source=BOUCHAUD_M9_URL longueur=20 valeur=<https://example.com/>
+M15_URL_PARSE_BEGIN
+M15_URL_PARSE_OK scheme=https host=example.com port=defaut serialise=https://example.com/
+```
+
+et, quand la chaine n'est pas une URL :
+
+```text
+M15_URL_PARSE_FAILED valeur=<::::not-an-url::::>
+M9_URL_INVALID ::::not-an-url::::
+```
+
+La valeur est encadree de chevrons et accompagnee de sa longueur pour une raison
+precise : le premier defaut trouve a cet endroit etait une paire d'apostrophes
+conservee par le shell (`export BOUCHAUD_M9_URL='https://example.com/'` posait la
+valeur *avec* les apostrophes, faute de suppression de guillemets POSIX). Dans un
+message non encadre, ces deux octets se lisaient comme la ponctuation du journal.
+Le shell fait desormais cette suppression ; les chevrons restent, parce qu'ils
+rendent la classe entiere de defauts visible et non la seule qu'on a corrigee.
+
+`M15_URL_PARSE_OK` est aussi le point de rendez-vous avec le reste de la chaine :
+le `host=` qu'il affiche est exactement le nom que `RequestServer` va resoudre.
+
 ## Marqueurs
 
 Le M9 test doit produire au minimum :

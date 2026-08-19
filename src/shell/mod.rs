@@ -75,6 +75,95 @@ fn env_list() {
     }
 }
 
+/// Retire les guillemets d'un mot, comme la *suppression de guillemets* POSIX
+/// (Shell Command Language, 2.2).
+///
+/// ## Pourquoi cette fonction existe
+///
+/// Un shell traite une ligne en deux temps : d'abord il developpe (`$NOM`,
+/// `$?`), ensuite il **retire** les guillemets qui ont protege le texte pendant
+/// le developpement. Le second temps manquait ici. Ecrire
+///
+/// ```text
+/// export BOUCHAUD_M9_URL='https://example.com/'
+/// ```
+///
+/// posait donc la valeur `'https://example.com/'`, apostrophes comprises, et
+/// `getenv()` la rendait telle quelle au programme. Ladybird recevait alors une
+/// chaine qui ne commence pas par une lettre : l'analyseur d'URL WHATWG sort a
+/// l'etat *scheme start*, et la navigation s'arretait sur `M9_URL_INVALID`
+/// avant meme d'atteindre RequestServer.
+///
+/// Le defaut ne se voyait pas depuis l'integration continue, qui ecrit ses
+/// `autorun` a la main et sans guillemets, mais `run.ps1` cite la valeur — a
+/// juste titre : une URL vient de la ligne de commande, et un shell qui ne
+/// permet pas de proteger une donnee invite a l'injection.
+///
+/// ## Ce qui est implemente
+///
+/// Les trois formes de citation POSIX, et rien d'autre :
+///
+/// * `'...'` : tout est litteral, aucun echappement possible a l'interieur ;
+///   la juxtaposition `'\''` — fermer, echapper, rouvrir — est l'idiome par
+///   lequel on ecrit une apostrophe, et il fonctionne ici parce que la
+///   concatenation de segments est ce que fait la boucle.
+/// * `"..."` : `\` ne protege que `"`, `\`, `` ` `` et `$` ; devant tout autre
+///   caractere il reste litteral, ce qui preserve les chemins Windows.
+/// * `\c` hors guillemets : `c` est pris litteralement.
+///
+/// Ni developpement (deja fait en amont), ni decoupage en mots : la valeur d'une
+/// affectation est un seul mot par construction.
+pub fn unquote(word: &str) -> String {
+    // Le cas de loin le plus frequent : rien a retirer, rien a reconstruire.
+    if !contains(word, "'") && !contains(word, "\"") && !contains(word, "\\") {
+        return String::from(word);
+    }
+
+    // Parcours par caracteres et non par octets : une valeur peut porter de
+    // l'UTF-8 (un chemin accentue, un domaine internationalise deja converti),
+    // et le recopier octet par octet dans un `char` le detruirait.
+    let mut out = String::new();
+    let mut reste = word.chars().peekable();
+
+    while let Some(c) = reste.next() {
+        match c {
+            // Guillemets simples : tout est litteral jusqu'a la fermeture.
+            '\'' => {
+                for c in reste.by_ref() {
+                    if c == '\'' { break; }
+                    out.push(c);
+                }
+            }
+            // Guillemets doubles : la barre oblique inverse ne protege que
+            // quatre caracteres ; ailleurs elle vaut pour elle-meme.
+            '"' => {
+                while let Some(c) = reste.next() {
+                    if c == '"' { break; }
+                    if c == '\\' {
+                        match reste.peek() {
+                            Some(&suivant @ ('"' | '\\' | '`' | '$')) => {
+                                out.push(suivant);
+                                reste.next();
+                            }
+                            _ => out.push('\\'),
+                        }
+                        continue;
+                    }
+                    out.push(c);
+                }
+            }
+            // Hors guillemets, elle protege le caractere suivant, quel qu'il soit.
+            '\\' => match reste.next() {
+                Some(suivant) => out.push(suivant),
+                None => out.push('\\'),
+            },
+            c => out.push(c),
+        }
+    }
+
+    out
+}
+
 /// Traite `export NOM=valeur` (a partir de la ligne complete).
 fn env_export(line: &str) {
     let rest = remainder_after_tokens(line, 1);
@@ -83,7 +172,9 @@ fn env_export(line: &str) {
             let name = trim(&rest[..p]);
             let val = trim(&rest[p + 1..]);
             if name.is_empty() { println!("usage: export NOM=valeur"); return; }
-            env_set(name, val);
+            // La valeur est une donnee, pas du texte a afficher : les guillemets
+            // qui l'ont protegee ne doivent pas se retrouver dans `getenv()`.
+            env_set(name, &unquote(val));
         }
         None => {
             // `export NOM` sans valeur : variable vide.
