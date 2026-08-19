@@ -338,13 +338,100 @@ pub fn sys_sendto(fd: i32, buffer: u64, len: usize, _flags: u32, addr: u64, addr
 /// La pile ne recoit que lorsqu'on l'interroge : c'est donc ici, dans le
 /// `recvfrom` de l'appelant, que les paquets sont effectivement lus sur la
 /// carte. Les datagrammes qui ne nous sont pas destines sont ignores.
-fn pump_udp(state: &Rc<RefCell<SocketState>>, budget: u32) {
-    let local_port = state.borrow().local_port;
-    if local_port == 0 {
+/// Nombre maximal de datagrammes traites en un passage.
+///
+/// Il ne s'agit pas d'un budget d'attente mais d'une borne de politesse : un
+/// flux soutenu ne doit pas retenir l'appelant dans le noyau indefiniment. La
+/// boucle s'arrete de toute facon des que l'anneau est vide.
+const DATAGRAMMES_PAR_PASSAGE: u32 = 64;
+
+/// Delai d'un `recvfrom` bloquant sur un socket UDP, en millisecondes.
+///
+/// UDP n'a pas de notion de fin de flux : sans delai, un `recvfrom` bloquant
+/// sur une reponse qui ne viendra jamais ne rendrait jamais la main. Cinq
+/// secondes est l'ordre de grandeur des resolveurs (`RES_TIMEOUT` vaut 5 dans
+/// la libc), ce qui laisse a un appelant le temps de reessayer lui-meme.
+const RECV_UDP_DELAI_MS: u64 = 5_000;
+
+/// Livre un datagramme au socket qui l'attend, parmi ceux du processus.
+///
+/// ## Pourquoi ce detour par la table des descripteurs
+///
+/// Une seule carte alimente tous les sockets. Le code qui lit l'anneau le fait
+/// pour le compte d'**un** socket, mais la trame qu'il en sort peut appartenir
+/// a un autre : elle est deja hors de l'anneau, et la jeter la perd
+/// definitivement. C'est ce que faisait la version precedente, et c'est ce qui
+/// bloquait toute resolution de nom : un resolveur emet plusieurs requetes en
+/// parallele — A et AAAA — et le premier socket servi mangeait la reponse du
+/// second. La sonde `tools/userland/dns-probe.c` reproduit exactement ce cas.
+///
+/// On fait donc ici ce que fait une pile normale : router sur le port de
+/// destination. Un datagramme adresse a un port que le processus n'a pas
+/// ouvert est ecarte, comme il doit l'etre.
+fn livre_datagramme(
+    source: crate::net::internet::ipv4::Ipv4Addr,
+    entete: &crate::net::transport::udp::Header,
+    donnees: &[u8],
+) {
+    let process = task::current_process();
+
+    // On choisit la destination avant d'emprunter quoi que ce soit en
+    // ecriture : un socket connecte a la source l'emporte sur un socket
+    // simplement lie, comme le veut la specification des sockets.
+    let mut lie: Option<Rc<RefCell<SocketState>>> = None;
+    let mut connecte: Option<Rc<RefCell<SocketState>>> = None;
+    {
+        let emprunte = process.borrow();
+        for desc in emprunte.files.iter() {
+            let socket = match &desc.kind {
+                FdKind::Socket(socket) => socket,
+                _ => continue,
+            };
+            let (kind, local_port, peer) = match socket.try_borrow() {
+                Ok(etat) => (etat.kind, etat.local_port, etat.peer),
+                // Un socket deja emprunte en ecriture est celui qui nous a
+                // appeles ; ses champs sont ceux qu'on connait par ailleurs.
+                Err(_) => continue,
+            };
+            if kind != SocketKind::Udp || local_port != entete.dst_port {
+                continue;
+            }
+            match peer {
+                Some((ip, port)) if ip == source && port == entete.src_port => {
+                    connecte = Some(socket.clone());
+                    break;
+                }
+                Some(_) => continue,
+                None => {
+                    if lie.is_none() {
+                        lie = Some(socket.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(destination) = connecte.or(lie) {
+        if let Ok(mut etat) = destination.try_borrow_mut() {
+            etat.datagrams
+                .push((source, entete.src_port, donnees.to_vec()));
+        }
+    }
+}
+
+/// Vide l'anneau de reception et route ce qu'il contient.
+///
+/// `poll_ip` est **non bloquant** : lorsqu'il rend `None`, l'anneau est vide a
+/// cet instant. Le rappeler des milliers de fois ne peut donc rien faire
+/// arriver — c'etait la boucle a plein processeur observee pendant l'attente
+/// d'une reponse DNS, et le motif pour lequel un `recvfrom` bloquant coutait
+/// cinq secondes de cœur au lieu de cinq secondes de sommeil.
+fn pump_udp(state: &Rc<RefCell<SocketState>>) {
+    if state.borrow().local_port == 0 {
         return;
     }
     let mut payload = [0u8; 2048];
-    for _ in 0..budget {
+    for _ in 0..DATAGRAMMES_PAR_PASSAGE {
         let received = crate::net::poll_ip(
             crate::net::internet::ipv4::PROTO_UDP,
             None,
@@ -352,22 +439,16 @@ fn pump_udp(state: &Rc<RefCell<SocketState>>, budget: u32) {
         );
         let (source, size) = match received {
             Some(value) => value,
+            None => break,
+        };
+        let header = match crate::net::transport::udp::parse(&payload[..size]) {
+            Some(header) => header,
             None => continue,
         };
-        if let Some(header) = crate::net::transport::udp::parse(&payload[..size]) {
-            if header.dst_port != local_port {
-                continue;
-            }
-            let start = header.payload_off;
-            let end = start + header.payload_len;
-            if end <= size {
-                state.borrow_mut().datagrams.push((
-                    source,
-                    header.src_port,
-                    payload[start..end].to_vec(),
-                ));
-                return;
-            }
+        let start = header.payload_off;
+        let end = start + header.payload_len;
+        if end <= size {
+            livre_datagramme(source, &header, &payload[start..end]);
         }
     }
 }
@@ -460,7 +541,31 @@ pub fn sys_recvfrom(
         }
         SocketKind::Udp => {
             if state.borrow().datagrams.is_empty() {
-                pump_udp(&state, if nonblocking { 20_000 } else { 3_000_000 });
+                pump_udp(&state);
+            }
+            // Attente bloquante : sur le temps, et en rendant le processeur.
+            //
+            // La version precedente comptait des tours de boucle — trois
+            // millions — ce qui revenait a attendre une duree que personne
+            // n'avait choisie, en brulant un cœur pendant ce temps. On attend
+            // desormais une duree nommee, et entre deux sondages on laisse
+            // tourner les autres taches puis on dort jusqu'a une interruption.
+            if !nonblocking && state.borrow().datagrams.is_empty() {
+                let echeance = crate::kernel::timer::monotonic_ms() + RECV_UDP_DELAI_MS;
+                while state.borrow().datagrams.is_empty()
+                    && crate::kernel::timer::monotonic_ms() < echeance
+                {
+                    // Une autre tache a pu remplir l'anneau : re-sonder avant
+                    // de dormir, sinon le reveil logiciel est perdu jusqu'a la
+                    // prochaine interruption materielle. Meme raison que dans
+                    // `sys_poll`.
+                    if task::schedule() {
+                        pump_udp(&state);
+                        continue;
+                    }
+                    crate::arch::x86_64::cpu::wait_for_interrupt();
+                    pump_udp(&state);
+                }
             }
             let datagram = state.borrow_mut().datagrams.pop();
             match datagram {
@@ -936,8 +1041,11 @@ pub fn socket_readable(state: &Rc<RefCell<SocketState>>) -> bool {
             }
         }
         SocketKind::Udp => {
+            // `poll` demande un etat, pas une attente : un seul passage sur
+            // l'anneau. C'est l'appelant qui decide s'il patiente, et c'est
+            // `sys_poll` qui sait dormir entre deux tours.
             if state.borrow().datagrams.is_empty() {
-                pump_udp(state, 20_000);
+                pump_udp(state);
             }
             !state.borrow().datagrams.is_empty()
         }
