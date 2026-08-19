@@ -99,8 +99,7 @@ fn console_read(max: usize) -> Vec<u8> {
             return out;
         }
         // Rien a lire : on rend la main plutot que de monopoliser le CPU.
-        task::yield_now();
-        crate::arch::x86_64::cpu::wait_for_interrupt();
+        task::attends_un_tick();
     }
 }
 
@@ -298,8 +297,7 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
                 let echeance =
                     crate::kernel::timer::ticks() + crate::kernel::timer::ms_to_ticks(2000);
                 while inbox.borrow().octets.is_empty() && crate::kernel::timer::ticks() < echeance {
-                    task::yield_now();
-                    crate::arch::x86_64::cpu::wait_for_interrupt();
+                    task::attends_un_tick();
                 }
             }
             let mut guard = inbox.borrow_mut();
@@ -389,8 +387,7 @@ pub fn sys_write(fd: i32, buffer: u64, count: usize) -> i64 {
                 while crate::drivers::ac97::libres() == 0
                     && crate::kernel::timer::ticks() < echeance
                 {
-                    task::yield_now();
-                    crate::arch::x86_64::cpu::wait_for_interrupt();
+                    task::attends_un_tick();
                 }
                 let ecrits = crate::drivers::ac97::ecrit(&data);
                 if ecrits == 0 {
@@ -2043,14 +2040,7 @@ pub fn sys_poll(fds: u64, count: usize, timeout_ms: i32) -> i64 {
         if ready > 0 || crate::kernel::timer::ticks() >= deadline {
             return ready;
         }
-        // Si schedule() a reellement bascule vers une autre tache, celle-ci a
-        // pu rendre un fd pret (ex. le tube de reveil de LibIPC). Au retour,
-        // reevaluer les descripteurs avant de faire hlt, sinon le reveil logiciel
-        // est perdu jusqu'a la prochaine interruption materielle.
-        if task::schedule() {
-            continue;
-        }
-        crate::arch::x86_64::cpu::wait_for_interrupt();
+        task::attends_un_tick();
     }
 }
 
@@ -2094,12 +2084,7 @@ pub fn sys_select(
         if ready > 0 || crate::kernel::timer::ticks() >= deadline {
             return ready;
         }
-        // Meme regle que poll(): apres une vraie commutation, une autre tache
-        // peut avoir rendu un descripteur lisible. Le reevaluer avant hlt.
-        if task::schedule() {
-            continue;
-        }
-        crate::arch::x86_64::cpu::wait_for_interrupt();
+        task::attends_un_tick();
     }
 }
 
@@ -2191,8 +2176,7 @@ pub fn sys_epoll_wait(epfd: i32, events: u64, max: usize, timeout_ms: i32) -> i6
         if written > 0 || crate::kernel::timer::ticks() >= deadline {
             return written as i64;
         }
-        task::yield_now();
-        crate::arch::x86_64::cpu::wait_for_interrupt();
+        task::attends_un_tick();
     }
 }
 

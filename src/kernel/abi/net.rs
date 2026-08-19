@@ -559,11 +559,7 @@ pub fn sys_recvfrom(
                     // de dormir, sinon le reveil logiciel est perdu jusqu'a la
                     // prochaine interruption materielle. Meme raison que dans
                     // `sys_poll`.
-                    if task::schedule() {
-                        pump_udp(&state);
-                        continue;
-                    }
-                    crate::arch::x86_64::cpu::wait_for_interrupt();
+                    task::attends_un_tick();
                     pump_udp(&state);
                 }
             }
@@ -874,8 +870,7 @@ pub fn sys_recvmsg(fd: i32, msghdr: u64, flags: u32) -> i64 {
                 && canal.borrow().octets.is_empty()
                 && crate::kernel::timer::ticks() < echeance
             {
-                task::yield_now();
-                crate::arch::x86_64::cpu::wait_for_interrupt();
+                task::attends_un_tick();
             }
         }
     }

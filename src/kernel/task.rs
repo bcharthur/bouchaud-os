@@ -1690,6 +1690,46 @@ pub fn diagnostic_ordonnanceur() -> OrdonnanceurStats {
 
 /// Endort la tache courante pendant `ticks` ticks du timer.
 
+/// Attente d'une boucle `poll`/`select`/`epoll_wait` qui n'a rien trouve de pret.
+///
+/// ## Le defaut que cette fonction corrige
+///
+/// Les trois boucles faisaient, chacune a sa facon :
+///
+/// ```text
+/// if task::schedule() { continue; }        // une autre tache est prete
+/// cpu::wait_for_interrupt();               // personne d'autre : on dort
+/// ```
+///
+/// Le raisonnement est juste tache par tache, et faux pour la machine. Un
+/// bureau Bouchaud avec le navigateur ouvert compte quatre processus — le
+/// compositeur, le bootstrap, WebContent, RequestServer — et quand ils
+/// attendent tous, ils attendent **tous dans `poll`**. Chacun reste alors
+/// `Ready` du point de vue de l'ordonnanceur : `schedule()` trouve toujours un
+/// autre candidat, rend `true`, et personne n'atteint jamais le `hlt`. Les
+/// quatre se relaient a plein regime pour ne rien faire.
+///
+/// C'est ce qui affichait 100 % de processeur des le demarrage, avant meme
+/// qu'une page soit demandee, et ce que le releve par processus montrait sans
+/// qu'on le lise ainsi : la somme des parts valait le cœur entier alors
+/// qu'aucun des quatre ne progressait.
+///
+/// ## Ce qu'elle fait
+///
+/// Elle marque la tache **bloquee** pour un tick, ce que `sleep_ticks` sait
+/// deja faire. Les autres taches reellement pretes continuent d'etre elues ;
+/// quand plus aucune ne l'est, `schedule()` tombe sur son propre
+/// `wait_for_interrupt()` et le processeur s'arrete pour de bon — ce que la
+/// mesure de charge compte enfin comme du repos.
+///
+/// La latence ne change pas : le tick vaut une milliseconde, exactement le
+/// delai qu'imposait deja le `hlt` reveille par l'horloge. Le reveil logiciel
+/// n'est pas perdu non plus — une tache qui rend un descripteur pret pendant
+/// notre tick le trouvera pret a notre reveil, un tour de boucle plus tard.
+pub fn attends_un_tick() {
+    sleep_ticks(1);
+}
+
 pub fn sleep_ticks(ticks: u64) {
     let deadline = crate::kernel::timer::ticks() + ticks.max(1);
     {
