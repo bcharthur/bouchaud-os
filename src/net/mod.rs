@@ -396,7 +396,13 @@ struct PaquetEnAttente {
     depose_a: u64,
 }
 
-const ATTENTE_MAX: usize = 64;
+/// Une page reelle ouvre plusieurs connexions vers plusieurs hotes : chaque
+/// pompe met alors de cote ce qui appartient aux autres, et la file doit
+/// absorber une rafale entiere sans en perdre. Deux cent cinquante-six entrees
+/// de 1500 octets plafonnent a 384 Kio — negligeable devant les 2 % de memoire
+/// physique que la machine utilise, et bien plus sur qu'une perte silencieuse
+/// que TCP paierait en retransmissions.
+const ATTENTE_MAX: usize = 256;
 const ATTENTE_AGE_MS: u64 = 2_000;
 
 static mut EN_ATTENTE: Option<alloc::vec::Vec<PaquetEnAttente>> = None;

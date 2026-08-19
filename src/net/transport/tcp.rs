@@ -426,23 +426,27 @@ impl TcpConn {
     pub fn pump(&mut self, budget: u32) {
         let mut rb = [0u8; 2048];
         let mut seg = [0u8; 64];
+        // Segments du bon hote mais d'une autre connexion. Ils sont remis a
+        // disposition **apres** la boucle, jamais pendant : les rendre tout de
+        // suite les ferait reprendre au tour suivant par ce meme appel, qui les
+        // redeposerait, indefiniment. Un differe borne evite ce va-et-vient.
+        let mut differes: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
+
         for _ in 0..budget {
             // Anneau vide : insister ne fait rien arriver.
-            let Some((src, n)) = net::poll_ip(6, Some(self.dst), &mut rb) else {
-                return;
+            let Some((_src, n)) = net::poll_ip(6, Some(self.dst), &mut rb) else {
+                break;
             };
             let Some(h) = parse(&rb[..n]) else { continue };
-            // Bon hote, autre connexion : ce segment est arrive, il n'est
-            // simplement pas pour nous. On le remet a disposition.
             if h.dport != self.sport {
-                net::depose_en_attente(6, src, &rb[..n]);
+                differes.push(rb[..n].to_vec());
                 continue;
             }
             if h.flags & RST != 0 {
                 self.closed = true;
                 self.peer_fin = true;
                 self.rst_seen = true;
-                return;
+                break;
             }
             let plen = n - h.data_off;
             if plen > 0 {
@@ -459,6 +463,10 @@ impl TcpConn {
                 let a = build(&mut seg, &self.dst, self.sport, self.dport, self.seq, self.ack, ACK, WINDOW, &[]);
                 net::send_ip(self.dst, 6, &seg[..a]);
             }
+        }
+
+        for segment in differes {
+            net::depose_en_attente(6, self.dst, &segment);
         }
     }
 
