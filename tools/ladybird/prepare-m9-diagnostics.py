@@ -362,3 +362,10 @@ navigation_script = Path(__file__).with_name("prepare-m9-navigation.py")
 exec(compile(navigation_script.read_text(), str(navigation_script), "exec"))
 
 print("Bouchaud M9 body/Fetch diagnostics applied to", root)
+
+# ---------------------------------------------------------------------------
+# M14 DNS: let timer-driven in-flight lookups reach LibDNS retransmission
+# instead of joining the existing pending Promise before the UDP wire write.
+# ---------------------------------------------------------------------------
+m14_dns_script = Path(__file__).with_name("prepare-m14-dns-retry-fix.py")
+exec(compile(m14_dns_script.read_text(), str(m14_dns_script), "exec"))
