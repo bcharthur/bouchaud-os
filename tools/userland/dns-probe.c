@@ -336,6 +336,53 @@ void principal(void) {
             ecris("[dns-probe] CAS3_ECHEC l attente consomme le processeur\n");
     }
 
+    // ---- Cas 4 : le chemin de LibDNS, par poll() -----------------------
+    //
+    // Les trois cas precedents lisent en bloquant. **Ce n'est pas ce que fait
+    // LibDNS** : il pose un `Core::Notifier` sur son socket et attend que la
+    // boucle d'evenements le declare lisible — c'est-a-dire qu'il depend de
+    // `poll()`, pas de `recvfrom`. Un `poll` qui ne signale jamais la
+    // lisibilite laisserait le resolveur attendre une reponse pourtant deja
+    // rangee dans le socket, et le journal de Ladybird ressemblerait
+    // exactement a ce qu'il montre : plus de boucle a plein processeur, mais
+    // toujours aucune navigation commitee.
+    //
+    // Ce cas ferme ou ouvre cette hypothese, du cote du noyau.
+    titre("CAS 4 : reveil par poll(), le chemin du resolveur");
+    {
+        int fd = ouvre_udp();
+        lie(fd, 40005);
+        envoie_requete(fd, 0x5555, "example.com", s1, s2, s3, s4);
+
+        struct { int fd; short events; short revents; } pfd;
+        pfd.fd = fd;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+
+        u64 depart = maintenant_ms();
+        i64 pret = sys3(SYS_poll, (i64)&pfd, 1, 3000);
+        u64 attente = maintenant_ms() - depart;
+
+        ecris("[dns-probe] CAS4 poll rend="); ecris_i64(pret);
+        ecris(" revents="); ecris_i64(pfd.revents);
+        ecris(" attente_ms="); ecris_u64(attente); ecris("\n");
+
+        i64 recu = -1;
+        u16 ident = 0;
+        if (pret > 0 && (pfd.revents & POLLIN)) {
+            u8 tampon[2048];
+            recu = sys6(SYS_recvfrom, fd, (i64)tampon, sizeof(tampon), MSG_DONTWAIT, 0, 0);
+            if (recu > 0) ident = (u16)(((u16)tampon[0] << 8) | tampon[1]);
+        }
+        ecris("[dns-probe] CAS4 recu="); ecris_i64(recu);
+        ecris(" id=0x"); ecris_hex16(ident); ecris("\n");
+
+        if (pret > 0 && recu > 0 && ident == 0x5555)
+            ecris("[dns-probe] CAS4_OK\n");
+        else
+            ecris("[dns-probe] CAS4_ECHEC poll ne signale pas la reponse\n");
+    }
+
     ecris("[dns-probe] FIN\n");
     sys1(SYS_exit, 0);
 }

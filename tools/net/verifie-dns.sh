@@ -15,6 +15,7 @@
 #   CAS1  un socket, une requete            -> une reponse
 #   CAS2  deux sockets, deux requetes       -> deux reponses
 #   CAS3  personne ne repond                -> l'attente ne consomme pas de CPU
+#   CAS4  reveil par poll()                -> le chemin reel du resolveur
 #
 # CAS2 est celui qui comptait : un resolveur interroge A et AAAA en parallele,
 # et la version precedente de `pump_udp` jetait le datagramme qui n'allait pas
@@ -78,7 +79,7 @@ grep -a 'dns-probe' "$JOURNAL" | sed 's/^\[[^]]*\]\[[^]]*\] //' || true
 echo
 
 echecs=0
-for marqueur in CAS1_OK CAS2_OK CAS3_ATTENTE_SANS_CPU; do
+for marqueur in CAS1_OK CAS2_OK CAS3_ATTENTE_SANS_CPU CAS4_OK; do
     if grep -aq "$marqueur" "$JOURNAL"; then
         vert "  ok     $marqueur"
     else
@@ -104,4 +105,4 @@ if [ "$echecs" -ne 0 ]; then
     rouge "journal complet : $JOURNAL"
     exit 1
 fi
-vert "resolution DNS : trois cas au vert, datagrammes routes, attente non brulante"
+vert "resolution DNS : quatre cas au vert - routage, attente sans CPU, reveil par poll"

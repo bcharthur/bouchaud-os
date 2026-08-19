@@ -136,8 +136,8 @@ Le CAS 3 compare maintenant les deux horloges :
 
 Entre les deux il n'y a rien a discuter.
 
-Il construit le noyau, la sonde et le disque, lance QEMU, et verifie trois
-marqueurs. Il est **bloquant en CI** (`DNS-UDP-ring3`) et ne demande aucun
+Il construit le noyau, la sonde et le disque, lance QEMU, et verifie quatre
+marqueurs — dont le CAS 4, qui rejoue le chemin reel du resolveur par `poll()`. Il est **bloquant en CI** (`DNS-UDP-ring3`) et ne demande aucun
 artefact Ladybird : quelques minutes, la ou le portage complet en demande
 quatre-vingt-dix.
 
@@ -172,6 +172,48 @@ second processeur :
 Demander huit vCPU donnerait huit cœurs a QEMU dont sept resteraient eteints.
 `run.ps1` accepte le parametre et **previent** au lieu de laisser croire a une
 acceleration.
+
+## Ce qui bloque encore, et ce qui est desormais ecarte
+
+Le job Internet ne passe toujours pas : `M9_NAVIGATION_COMMITTED` n'apparait
+pas pour `https://example.com/`. Mais la mesure a change de nature.
+
+**Ce que la correction a produit sur le vrai scenario Ladybird** — meme job,
+avant et apres :
+
+| | RequestServer |
+|---|---|
+| avant | `cpu 49 %` en continu, cinq minutes |
+| apres | `cpu 0 a 10 %` |
+
+La boucle a plein processeur est donc bien morte la aussi, dans le programme
+reel et pas seulement dans la sonde.
+
+**Ce qui est ecarte.** LibDNS ne lit pas en bloquant : il pose un
+`Core::Notifier` sur son socket et depend donc de `poll()`. L'hypothese la plus
+naturelle etait que `poll` ne signale jamais la lisibilite — le meme genre de
+defaut que le reveil manquant deja documente pour le corps HTTP (`M9_BODY_DRAIN`).
+Le CAS 4 de la sonde reproduit exactement ce chemin :
+
+```text
+[dns-probe] CAS4 poll rend=1 revents=1 attente_ms=22
+[dns-probe] CAS4 recu=61 id=0x5555
+[dns-probe] CAS4_OK
+```
+
+`poll` signale la lisibilite en 22 ms et le datagramme est bien la. **Cette
+hypothese est donc refutee**, et avec elle toute la couche noyau : routage,
+attente, et reveil par `poll` sont mesures corrects sur les quatre motifs.
+
+**Ce qui reste.** Le verrou est au-dessus du noyau — dans `LibDNS`,
+`RequestServer` ou la boucle d'evenements de `LibCore` telle qu'elle tourne sous
+Bouchaud. Le journal s'arrete apres `M9_DOCUMENT_BODY_LOCAL_UNPAUSED` sans
+qu'aucun des trois marqueurs de retour de RequestServer n'apparaisse. Aller plus
+loin demande d'instrumenter le port lui-meme, donc de reconstruire Ladybird —
+quatre-vingt-dix minutes d'integration continue.
+
+C'est une zone fermee de plus, pas une reussite : la navigation par nom n'est
+toujours pas acquise.
 
 ## Ce que M13 ne prouve pas
 
