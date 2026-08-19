@@ -51,6 +51,7 @@ typedef unsigned char u8;
 #define CLOCK_PROCESS_CPUTIME_ID 2
 #define MSG_DONTWAIT 0x40
 #define FIONREAD 0x541B
+#define SOCK_CLOEXEC 02000000
 
 static i64 sys1(i64 n, i64 a) {
     i64 r;
@@ -411,7 +412,14 @@ void principal(void) {
     // meme ordre.
     titre("CAS 5 : la sequence de LibCore, connect + double poll + FIONREAD");
     {
-        int fd = (int)sys3(SYS_socket, AF_INET, SOCK_DGRAM, 0);
+        // `Core::Socket::create_fd` demande toujours SOCK_CLOEXEC en plus du
+        // type. Un noyau qui refuserait ce drapeau ferait echouer la creation
+        // du socket, et LibDNS retomberait alors **en silence** sur le
+        // resolveur systeme (`getaddrinfo` sur un fil du ThreadPool) — sans
+        // erreur, sans marqueur, exactement le silence observe. La sonde pose
+        // donc le meme drapeau que LibCore, pas un equivalent approchant.
+        int fd = (int)sys3(SYS_socket, AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        ecris("[dns-probe] CAS5 socket(SOCK_DGRAM|SOCK_CLOEXEC)="); ecris_i64(fd); ecris("\n");
         if (fd < 0) { ecris("[dns-probe] CAS5_ECHEC socket\n"); goto fin_cas5; }
 
         struct sockaddr_in serveur;
