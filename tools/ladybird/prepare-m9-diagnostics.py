@@ -346,6 +346,13 @@ if "M9_RS_START_RECU" not in data:
     connection_rs_cpp.write_text(data)
 
 
+# ---------------------------------------------------------------------------
+# M13 DNS: instrument LibDNS between RequestServer::DNSLookup and the UDP wire.
+# Temporary local diagnostics; remove before the final cleanup PR.
+# ---------------------------------------------------------------------------
+m13_dns_script = Path(__file__).with_name("prepare-m13-dns-diagnostics.py")
+exec(compile(m13_dns_script.read_text(), str(m13_dns_script), "exec"))
+
 # The next adaptation is deliberately kept in its own small source-patch file:
 # it changes one upstream Fetch behaviour (Document-body pausing), while this
 # file remains diagnostics/observability. browser-upstream.sh already invokes
