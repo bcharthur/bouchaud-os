@@ -1610,6 +1610,11 @@ fn pending_bytes(kind: &FdKind) -> usize {
     match kind {
         FdKind::Pipe(shared, true) => shared.borrow().buffer.len(),
         FdKind::SocketPair(inbox, _) => inbox.borrow().octets.len(),
+        // Une prise inet rendait 0 quoi qu'il arrive, y compris avec un
+        // datagramme complet en attente. `net::octets_lisibles` applique la
+        // regle de Linux : le tampon de reception sur un flux, la taille du
+        // prochain datagramme sur un datagramme.
+        FdKind::Socket(state) => crate::kernel::abi::net::octets_lisibles(state),
         _ => 0,
     }
 }

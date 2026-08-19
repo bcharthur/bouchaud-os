@@ -1,14 +1,15 @@
 param(
     [switch]$Fullscreen,
 
-    # Lance le vrai Ladybird/WebContent natif au lieu du navigateur Qt/Python
-    # du userland classique.
-    #
-    # Usage :
-    #   .\run.ps1 -Ladybird          # M9 interactif/persistant
-    #   .\run.ps1 -LadybirdM8        # regression M8 finie
-    #   .\run.ps1 -LadybirdM9Test    # M9 HTTP deterministe fini
+    # Bouchaud OS demarre desormais sur son bureau avec le runtime Ladybird
+    # disponible : `.\run.ps1` suffit, et le navigateur s'ouvre par un
+    # double-clic sur l'icone "Navigateur". Ce commutateur ne sert plus qu'a
+    # ne pas casser les habitudes et les documents qui le mentionnent.
     [switch]$Ladybird,
+
+    # Revient au userland historique (Qt + CPython + QuickJS). Le navigateur du
+    # bureau est alors l'ancien moteur, pas Ladybird.
+    [switch]$Legacy,
 
     [switch]$LadybirdM8,
 
@@ -32,18 +33,28 @@ param(
     # et le chrome : est-ce la page, ou est-ce la barre ?
     [switch]$LadybirdSansChrome,
 
-    # Profil materiel du navigateur natif.
-    # 8192 Mio est volontairement le profil local par defaut : Bouchaud peut
-    # utiliser la RAM supplementaire, contrairement aux vCPU additionnels qui
-    # attendent encore le vrai port SMP/APIC.
+    # Memoire donnee a la machine.
+    #
+    # 12288 Mio est la plus grande valeur **verifiee** : le noyau demarre, la
+    # sonde reseau passe, et le temps de demarrage ne prend que trois secondes
+    # de plus qu'a 2048 Mio. 16384 reste accepte mais n'a pas pu etre eprouve
+    # ici, faute d'un hote assez grand - voir docs/ladybird/M13_DNS.md.
     [ValidateRange(2048, 16384)]
-    [int]$LadybirdRamMiB = 8192,
+    [Alias('LadybirdRamMiB')]
+    [int]$RamMiB = 12288,
 
-    # Expose la topologie QEMU pour preparer le futur SMP. Le noyau actuel ne
-    # schedule encore que sur le BSP : >1 vCPU n'accelere donc PAS encore
-    # WebContent. Garder 1 tant que SMP/APIC n'est pas merge.
+    # Nombre de vCPU exposes.
+    #
+    # **Un seul, et ce n'est pas une timidite.** Le noyau ne sait pas demarrer
+    # un second processeur : il ne lit ni ACPI ni la table MADT, n'a pas de
+    # LAPIC, ne peut donc pas emettre la sequence INIT/SIPI, et route ses
+    # interruptions par le PIC 8259, qui ne parle qu'au BSP. `kernel::task`
+    # tient par ailleurs une file d'ordonnancement unique sans verrou.
+    # Demander huit vCPU donnerait huit coeurs a QEMU dont sept resteraient
+    # eteints, et ferait croire a une acceleration qui n'existe pas.
     [ValidateRange(1, 16)]
-    [int]$LadybirdCpuCount = 1,
+    [Alias('LadybirdCpuCount')]
+    [int]$CpuCount = 1,
 
     # Force le retelechargement de l'artefact Ladybird depuis GitHub Actions.
     [switch]$RefreshLadybird,
@@ -208,17 +219,19 @@ function Ensure-GitHubCli {
 # Selection du mode Ladybird
 # =============================================================================
 
-$LadybirdModeCount = @(
-    [bool]$Ladybird,
+$ModeCount = @(
+    [bool]$Legacy,
     [bool]$LadybirdM8,
     [bool]$LadybirdM9Test
 ).Where({ $_ }).Count
 
-if ($LadybirdModeCount -gt 1) {
-    Fail "utiliser un seul mode parmi -Ladybird, -LadybirdM8, -LadybirdM9Test"
+if ($ModeCount -gt 1) {
+    Fail "utiliser un seul mode parmi -Legacy, -LadybirdM8, -LadybirdM9Test"
 }
 
-$LadybirdMode = $Ladybird -or $LadybirdM8 -or $LadybirdM9Test
+# Ladybird est le mode **normal**. `-Legacy` rend la main au userland
+# historique ; les deux autres sont les regressions de la CI.
+$LadybirdMode = -not $Legacy
 
 if ($LadybirdM9Test -and -not $PSBoundParameters.ContainsKey("LadybirdUrl")) {
     $LadybirdUrl = "http://10.0.2.2:18080/m9.html"
@@ -226,9 +239,10 @@ if ($LadybirdM9Test -and -not $PSBoundParameters.ContainsKey("LadybirdUrl")) {
 
 # Le chrome M11 n'a de sens que dans le mode interactif. Le test M9 mesure le
 # moteur : lui ajouter une barre d'outils changerait ce qu'il mesure.
-$LadybirdChrome = $Ladybird -and -not $LadybirdSansChrome
+$LadybirdInteractif = $LadybirdMode -and -not ($LadybirdM8 -or $LadybirdM9Test)
+$LadybirdChrome = $LadybirdInteractif -and -not $LadybirdSansChrome
 
-if ($Ladybird -or $LadybirdM9Test) {
+if ($LadybirdInteractif -or $LadybirdM9Test) {
     $parsedLadybirdUrl = $null
     if (-not [System.Uri]::TryCreate(
         $LadybirdUrl,
@@ -706,25 +720,42 @@ if ($LadybirdMode) {
         ) -join "`n"
     }
     else {
-        $m9TestLine = if ($IsLadybirdM9Test) { 'export BOUCHAUD_M9_TEST=1' } else { 'echo "Navigateur : fermer la fenetre pour quitter"' }
-        $chromeLine = if ($LadybirdChrome) { 'export BOUCHAUD_M11=1' } else { 'echo "M11 desactive : capture unique, sans entrees"' }
-        $banniere = if ($LadybirdChrome) {
-            'echo "=== Bouchaud Navigateur (Ladybird M11) ==="'
+        # `BO_AUTOSTART_BROWSER` n'est pose que par les regressions de CI, qui
+        # n'ont pas de main pour cliquer. Une session normale arrive sur le
+        # bureau et attend : le navigateur s'ouvre au double-clic sur l'icone
+        # "Navigateur". Un systeme qui ouvre un navigateur tout seul au
+        # demarrage n'est pas un systeme, c'est une demonstration.
+        #
+        # Les variables restent exportees dans les deux cas : le gestionnaire de
+        # fenetres transmet l'environnement du shell au client qu'il lance
+        # (`kernel::exec::shell_environment`), donc le navigateur lance a la
+        # souris recoit exactement la meme configuration.
+        $lignesScenario = if ($IsLadybirdM9Test) {
+            @(
+                'echo "=== Ladybird M9 : HTTP distant via RequestServer ==="',
+                'export BO_AUTOSTART_BROWSER=1',
+                'export BOUCHAUD_M9_TEST=1'
+            )
         }
         else {
-            'echo "=== Ladybird M9 : HTTP distant via RequestServer ==="'
+            @(
+                'echo "=== Bouchaud OS : bureau, navigateur au double-clic ==="',
+                'echo "Navigateur : double-clic sur l icone, ou menu Demarrer"'
+            )
         }
+
+        $chromeLine = if ($LadybirdChrome) { 'export BOUCHAUD_M11=1' } else { 'echo "M11 desactive : capture unique, sans entrees"' }
+
         $autorun = @(
-            'uname',
-            'df',
-            $banniere,
-            'export BO_AUTOSTART_BROWSER=1',
-            'export BOUCHAUD_M9=1',
-            "export BOUCHAUD_M9_URL=$(ConvertTo-ShellSingleQuoted $LadybirdUrl)",
-            $chromeLine,
-            $m9TestLine,
-            'desktop',
-            ''
+            @('uname', 'df') +
+            $lignesScenario +
+            @(
+                'export BOUCHAUD_M9=1',
+                "export BOUCHAUD_M9_URL=$(ConvertTo-ShellSingleQuoted $LadybirdUrl)",
+                $chromeLine,
+                'desktop',
+                ''
+            )
         ) -join "`n"
     }
 
@@ -1068,17 +1099,17 @@ if ($LadybirdMode) {
 
     $qemuArgs += @(
         "-m",
-        "$LadybirdRamMiB"
+        "$RamMiB"
     )
 
     $qemuArgs += @(
         "-smp",
-        "$LadybirdCpuCount"
+        "$CpuCount"
     )
 
-    if ($LadybirdCpuCount -gt 1) {
+    if ($CpuCount -gt 1) {
         Write-Host `
-            "ATTENTION: $LadybirdCpuCount vCPU exposes, mais Bouchaud est encore BSP/PIC ; SMP guest n'est pas encore actif." `
+            "ATTENTION: $CpuCount vCPU exposes. Le noyau ne demarre aucun processeur applicatif : ni ACPI/MADT, ni LAPIC, ni INIT/SIPI. Les autres resteront eteints." `
             -ForegroundColor Yellow
     }
 }
@@ -1224,10 +1255,10 @@ if ($LadybirdMode) {
         -ForegroundColor Green
 
     Write-Host `
-        "RAM        : $LadybirdRamMiB Mio"
+        "RAM        : $RamMiB Mio"
 
     Write-Host `
-        "vCPU       : $LadybirdCpuCount (SMP guest: non, BSP actuel)"
+        "vCPU       : $CpuCount (le noyau n ordonnance que sur le BSP)"
 
     Write-Host `
         "navigateur : $BrowserChain"

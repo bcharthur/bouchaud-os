@@ -682,12 +682,25 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 /// `clock_gettime` : horloge murale ou monotone.
 fn sys_clock_gettime(clock: i32, out: u64) -> i64 {
     const CLOCK_REALTIME: i32 = 0;
+    const CLOCK_PROCESS_CPUTIME_ID: i32 = 2;
+    const CLOCK_THREAD_CPUTIME_ID: i32 = 3;
     const CLOCK_REALTIME_COARSE: i32 = 5;
     const CLOCK_REALTIME_ALARM: i32 = 8;
-    // Toutes les autres horloges (MONOTONIC, MONOTONIC_RAW, BOOTTIME,
-    // les horloges de processus et de thread) partagent la meme base monotone.
+
+    // Les horloges de temps **processeur** ne sont pas des horloges murales, et
+    // les confondre avec le temps monotone — ce que faisait ce code — rend
+    // impossible la seule mesure qui distingue une attente qui dort d'une
+    // attente qui brule un cœur : les deux durent la meme chose au mur, pas du
+    // tout la meme chose en processeur.
+    //
+    // Le noyau compte deja, par echantillonnage a chaque IRQ0. Il suffisait de
+    // le dire a l'espace utilisateur.
     let ms = match clock {
         CLOCK_REALTIME | CLOCK_REALTIME_COARSE | CLOCK_REALTIME_ALARM => realtime_ms(),
+        CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
+            let pid = crate::kernel::task::current_process().borrow().pid;
+            crate::kernel::task::cpu_time_ms(pid)
+        }
         _ => crate::kernel::timer::monotonic_ms(),
     };
     if out == 0 {

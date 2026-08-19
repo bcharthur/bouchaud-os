@@ -2,7 +2,7 @@
 #
 #   .\tools\etat-source.ps1 [-Sync]
 #
-# `run.ps1` et `boot.ps1` l'appellent avant `cargo bootimage`, pour que la
+# `run.ps1` l'appelle avant `cargo bootimage`, pour que la
 # console dise quel commit part dans l'image. Il ne **bloque jamais** le
 # demarrage : un depot sans upstream, une machine hors ligne ou un `git`
 # introuvable donnent un avertissement, pas un refus de booter.

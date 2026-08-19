@@ -183,10 +183,22 @@ pub fn ifup() {
 ///
 /// Trois emissions, chacune avec sa fenetre d'ecoute. `arping(8)` de Linux fait
 /// la meme chose pour la meme raison.
-const ARP_TENTATIVES: u32 = 3;
+const ARP_TENTATIVES: u32 = 4;
 
-/// Iterations d'ecoute apres chaque emission.
-const ARP_ECOUTE: u32 = 1_500_000;
+/// Duree d'ecoute apres chaque emission, en millisecondes.
+///
+/// **Une duree, pas un nombre de tours.** L'ecoute se comptait en 1 500 000
+/// iterations, ce qui n'est pas un delai : c'est une quantite de travail, et le
+/// temps qu'elle represente depend de la vitesse de la machine. Sur un
+/// processeur rapide les trois tentatives s'epuisaient avant qu'un aller-retour
+/// ARP ait eu le temps de se faire, et le premier paquet sortant echouait en
+/// `ENETUNREACH` — observe en integration continue, jamais sur la machine de
+/// developpement, ce qui est la signature meme de ce defaut.
+///
+/// C'est la meme faute que celle corrigee dans `recvfrom` (cf.
+/// `docs/ladybird/M13_DNS.md`) : un delai qui varie avec le processeur n'est
+/// pas un delai.
+const ARP_ECOUTE_MS: u64 = 500;
 
 fn arp_resolve(target: Ipv4Addr) -> Option<[u8; 6]> {
     let mac = e1000::mac();
@@ -198,7 +210,13 @@ fn arp_resolve(target: Ipv4Addr) -> Option<[u8; 6]> {
     let mut buf = [0u8; 2048];
     for _tentative in 0..ARP_TENTATIVES {
         e1000::send(&frame[..flen]);
-        for _ in 0..ARP_ECOUTE {
+        let echeance = crate::kernel::timer::monotonic_ms() + ARP_ECOUTE_MS;
+        // Attente serree et **bornee dans le temps**. On ne cede pas le
+        // processeur ici : `arp_resolve` est appele depuis les couches basses
+        // de la pile, y compris pendant l'initialisation, ou ceder n'aurait pas
+        // le meme sens partout. Le cout reste borne a deux secondes au pire, et
+        // il n'est paye qu'a la premiere sortie vers un voisin inconnu.
+        while crate::kernel::timer::monotonic_ms() < echeance {
             let n = match e1000::receive(&mut buf) {
                 Some(n) => n,
                 None => continue,

@@ -231,6 +231,43 @@ jobs:
   # tant que le demarrage automatique et la collecte du verdict ne sont pas
   # assez sûrs pour qu'un echec ici veuille dire « le noyau est casse » plutot
   # que « l'emulation a expire ».
+  dns-udp:
+    name: DNS-UDP-ring3
+    runs-on: ubuntu-latest
+    needs: kernel-build
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+
+      - name: Cache cargo noyau
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      # Le test construit lui-meme son noyau et sa sonde : il n'attend aucun
+      # artefact Ladybird, et tourne donc en minutes la ou le portage complet
+      # demande une heure et demie. C'est ce qui lui permet d'etre bloquant.
+      - name: Resolution DNS depuis le ring 3
+        run: tools/net/verifie-dns.sh
+
+      - name: Journal serie
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dns-udp-serie
+          path: target/verifie-dns/serie.log
+          if-no-files-found: warn
+
   qemu-probes:
     name: qemu-probes
     runs-on: ubuntu-latest

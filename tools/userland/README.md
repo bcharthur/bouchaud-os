@@ -22,7 +22,7 @@ fabriquant l'image du disque de données :
 ./mkdisk.sh              # archive out/ dans userland.img
 ```
 
-`run.ps1` et `boot.ps1` attachent automatiquement cette image comme second
+`run.ps1` attache automatiquement cette image comme second
 disque si elle existe ; le noyau la déplie dans le RAMFS au démarrage. **Il n'y
 a plus besoin de recompiler l'OS pour y installer un programme.**
 

@@ -56,7 +56,8 @@ branche mouvante.
 | M9 | HTTP reel via RequestServer — page distante affichee | **vert** |
 | M11 | Chrome utilisable : barre d'adresse, historique, liens, defilement | **construit, a eprouver sous QEMU** |
 | M12a | HTTPS avec verification de chaine, fixture TLS locale | **vert** |
-| M12b | Un site public joignable par son **nom** | **rouge : la resolution boucle** |
+| M12b | Un site public joignable par son **nom** | la couche UDP est reparee, cf. M13 |
+| M13 | **Resolution de nom : demultiplexage UDP et attente non brulante** | **vert, eprouve sous QEMU** |
 
 ### Ce que M8 prouve exactement
 
@@ -103,6 +104,26 @@ Bouchaud. La latence d'un clic, la fluidite du defilement et la tenue du canal
 GUI sous charge ne se mesurent qu'en demarrant l'OS. Cette ligne restera ici
 jusqu'a ce qu'une execution QEMU l'efface.
 
+## 3 quater. M13 — la couche UDP reparee, et ce qui reste a montrer
+
+Le defaut n'etait pas dans Ladybird. `pump_udp`, dans le noyau, jetait tout
+datagramme dont le port de destination n'etait pas celui du socket qu'elle
+regardait — alors que la trame etait deja hors de l'anneau, donc perdue. Un
+resolveur qui emet deux requetes en parallele voyait donc la premiere reponse
+manger la seconde. Et l'attente etait une boucle : `poll_ip` est non bloquant,
+le rappeler trois millions de fois ne fait rien arriver.
+
+**Ce qui est eprouve, sous QEMU, sur le vrai noyau** : une sonde ring 3 sans
+libc (`tools/userland/dns-probe.c`) emet de vraies requetes DNS. Avant, la
+reponse du second socket etait perdue et le processeur restait a 100 % ; apres,
+elle arrive et le processeur retombe a 0 %. Le test
+(`tools/net/verifie-dns.sh`, job CI bloquant `DNS-UDP-ring3`) a ete verifie dans
+les deux sens : rouge sur le noyau non corrige, vert sur le corrige.
+
+**Ce qui ne l'est pas** : que Ladybird charge effectivement un site public par
+son nom. La sonde s'arrete a la couche UDP ; elle ne dit rien de TLS, de HTTP ni
+du moteur. Cette ligne restera jusqu'a ce que le scenario Internet le montre.
+
 ## 3 ter. M12 — HTTPS acquis, resolution de nom non
 
 Le job M12 est passe le 18 aout : chaine reellement validee, nom d'hote verifie,
@@ -124,12 +145,16 @@ utilement que des adresses IP, ce qui n'est pas naviguer.
 
 ## 4. Ce qui n'est pas fait, et qu'il ne faut pas croire fait
 
-- **Le navigateur historique** (Python + QuickJS + Qt) reste le chemin par
-  defaut de `run.ps1` sans `-Ladybird`. Ladybird n'est pas encore le moteur du
-  produit.
+- **Ladybird est desormais le chemin par defaut de `run.ps1`** ; le navigateur
+  historique (Python + QuickJS + Qt) se demande par `-Legacy`. Ce n'est pas la
+  meme chose que « Ladybird est le moteur du produit » : il ouvre une fenetre au
+  double-clic et charge une page, mais aucun site public n'a encore ete montre
+  charge par son nom de bout en bout (ligne suivante).
 - **Aucune isolation.** Le sandbox d'upstream est volontairement remplace par
   l'implementation non effective. C'est M14.
-- **Aucun site joignable par son nom.** HTTPS marche contre une adresse IP.
+- **Un site public charge par son nom n'a pas encore ete montre de bout en bout.**
+  La couche UDP est reparee et mesuree ; le trajet complet depuis Ladybird
+  attend le scenario Internet.
 - **Un seul onglet, un seul renderer.**
 - **Pas de redimensionnement de la fenetre du navigateur natif.** La surface est
   allouee une fois ; `Configure` est journalise, pas suivi.
