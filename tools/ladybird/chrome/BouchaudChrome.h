@@ -436,7 +436,10 @@ inline void send_handshake()
         return;
     }
 
-    static constexpr char default_title[] = "Bouchaud Navigateur";
+    // Le nom du moteur qu'on execute, pas un nom maison : c'est ce que le
+    // gestionnaire de fenetres affichera dans la barre de titre et dans la
+    // barre des taches, a cote de l'icone qui porte la meme coccinelle.
+    static constexpr char default_title[] = "Ladybird";
     send_message(Genre::SetTitle, default_title, sizeof(default_title) - 1);
     s.handshake_done = true;
     outln("[ladybird-bouchaud] M11_GUI_HANDSHAKE_OK");
@@ -448,17 +451,33 @@ inline void send_title()
     if (!s.handshake_done)
         return;
 
+    // « Titre de la page — Ladybird », la convention de tous les navigateurs :
+    // ce que l'utilisateur cherche d'abord dans une barre des taches, c'est la
+    // page ; le nom du navigateur sert a distinguer deux fenetres de deux
+    // programmes. L'ordre inverse mettrait le meme mot au debut de chaque
+    // fenetre, ce qui les rendrait indistinguables une fois tronquees.
+    static constexpr StringView suffixe = " - Ladybird"sv;
+    static constexpr size_t longueur_max = 96;
+
+    // On tronque la **page**, jamais le suffixe : couper apres coup aurait
+    // mange le nom du navigateur precisement sur les titres longs, c'est-a-dire
+    // dans le seul cas ou la distinction sert a quelque chose.
+    auto tete = s.title.is_empty() ? s.committed_url : s.title;
+    if (tete.is_empty()) {
+        auto seul = ByteString { "Ladybird" };
+        send_message(Genre::SetTitle, seul.characters(), static_cast<u32>(seul.length()));
+        return;
+    }
+
+    auto place = longueur_max - suffixe.length();
+    if (tete.length() > place)
+        tete = tete.substring(0, place);
+
     StringBuilder builder;
-    if (!s.title.is_empty())
-        builder.append(s.title);
-    else if (!s.committed_url.is_empty())
-        builder.append(s.committed_url);
-    else
-        builder.append("Bouchaud Navigateur"sv);
+    builder.append(tete);
+    builder.append(suffixe);
 
     auto text = builder.to_byte_string();
-    if (text.length() > 96)
-        text = text.substring(0, 96);
     send_message(Genre::SetTitle, text.characters(), static_cast<u32>(text.length()));
 }
 
