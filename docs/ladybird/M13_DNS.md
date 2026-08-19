@@ -68,6 +68,25 @@ Une couche qui route rend la reponse a B. Une couche qui jette l'a perdue. Le
 test a ete verifie dans les deux sens : rouge sur le noyau non corrige, vert sur
 le corrige.
 
+### 3. Le meme defaut ailleurs : la resolution ARP
+
+La CI a trouve ce que la machine de developpement ne pouvait pas montrer. Le
+tout premier `sendto` y echouait en `ENETUNREACH` :
+
+```text
+[dns-probe] envoye=-101
+```
+
+`arp_resolve` ecoutait la reponse pendant **1 500 000 iterations**. Ce n'est pas
+un delai, c'est une quantite de travail : le temps qu'elle represente depend de
+la vitesse du processeur. Sur un runner rapide, les trois tentatives
+s'epuisaient avant qu'un aller-retour ARP ait eu le temps de se faire ; sur la
+machine de developpement, jamais. **Un defaut qui ne se voit que sur certaines
+machines est la signature de ce genre de mesure.**
+
+L'ecoute compte desormais des millisecondes — quatre tentatives de 500 ms — et
+le cout n'est paye qu'a la premiere sortie vers un voisin inconnu.
+
 ## La correction
 
 C'est la primitive POSIX qui est reparee, pas un cas particulier Ladybird.
@@ -78,6 +97,7 @@ C'est la primitive POSIX qui est reparee, pas un cas particulier Ladybird.
 | anneau vide : rappeler `poll_ip` | s'arreter |
 | `recvfrom` bloquant : 3 000 000 de tours | delai nomme, avec `schedule()` puis `hlt` |
 | `poll` : 20 000 tours | un seul passage |
+| ARP : 1 500 000 iterations d'ecoute | 4 x 500 ms, comptes a l'horloge |
 
 `livre_datagramme` prefere un socket **connecte** a la source a un socket
 simplement lie, comme le veut la specification des sockets. Ce qui n'est adresse
@@ -92,6 +112,29 @@ variait avec la vitesse de la machine : ce n'etait pas un delai.
 ```bash
 tools/net/verifie-dns.sh
 ```
+
+### Mesurer le processeur, pas la montre
+
+Le CAS 3 comparait une duree ecoulee a un seuil. Cela ne prouvait rien : la
+boucle a plein processeur rendait la main au bout de ~4,9 s, donc elle aurait
+passe le meme seuil qu'une attente qui dort. **Une montre ne dit pas si le
+processeur travaille.**
+
+Le noyau n'exposait pas de quoi le savoir : `clock_gettime` renvoyait la base
+monotone pour *toutes* les horloges, y compris `CLOCK_PROCESS_CPUTIME_ID`. Il
+comptait pourtant deja — le profileur par echantillonnage incremente
+`ticks_cpu` a chaque IRQ0, et le PIT bat a 1000 Hz, donc un tick vaut une
+milliseconde de processeur. Il suffisait de le dire a l'espace utilisateur.
+`CLOCK_PROCESS_CPUTIME_ID` et `CLOCK_THREAD_CPUTIME_ID` sont donc implementees.
+
+Le CAS 3 compare maintenant les deux horloges :
+
+| | mur | processeur |
+|---|---|---|
+| noyau corrige | 5000 ms | **0 ms** |
+| ancienne boucle | 2926 ms | **2926 ms** |
+
+Entre les deux il n'y a rien a discuter.
 
 Il construit le noyau, la sonde et le disque, lance QEMU, et verifie trois
 marqueurs. Il est **bloquant en CI** (`DNS-UDP-ring3`) et ne demande aucun

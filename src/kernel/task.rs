@@ -630,6 +630,27 @@ pub fn current_process() -> Rc<RefCell<Process>> {
     current().process.clone()
 }
 
+/// Temps processeur consomme par un processus, en millisecondes.
+///
+/// Le profileur par echantillonnage incremente `ticks_cpu` de la tache courante
+/// a chaque IRQ0. Le PIT battant a `TICKS_PER_SECOND` = 1000 Hz, un tick vaut
+/// donc exactement une milliseconde de processeur — et la somme sur les taches
+/// du processus est son temps CPU.
+///
+/// Sert a `clock_gettime(CLOCK_PROCESS_CPUTIME_ID)`. Sans cette horloge, un
+/// programme ne peut pas distinguer une attente qui dort d'une attente qui
+/// brule un cœur : les deux durent le meme temps au mur. C'est exactement la
+/// question que posait la reparation de la couche UDP.
+pub fn cpu_time_ms(pid: u32) -> u64 {
+    let mut total = 0u64;
+    for task in tasks().iter() {
+        if task.process.borrow().pid == pid {
+            total = total.saturating_add(task.ticks_cpu);
+        }
+    }
+    total * (1000 / crate::kernel::timer::TICKS_PER_SECOND).max(1)
+}
+
 impl Task {
     /// Cree une tache prete a demarrer en ring 3 avec la trame donnee.
     pub fn new(process: Rc<RefCell<Process>>, frame: TrapFrame) -> Box<Task> {

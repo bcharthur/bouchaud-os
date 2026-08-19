@@ -46,6 +46,7 @@ typedef unsigned char u8;
 #define F_SETFL        4
 #define POLLIN         1
 #define CLOCK_MONOTONIC 1
+#define CLOCK_PROCESS_CPUTIME_ID 2
 #define MSG_DONTWAIT 0x40
 
 static i64 sys1(i64 n, i64 a) {
@@ -98,12 +99,22 @@ static void ecris_hex16(u16 v) {
     ecris(tampon);
 }
 
-/// Millisecondes monotones. Sans elles, « ca boucle » resterait une impression.
-static u64 maintenant_ms(void) {
+static u64 horloge_ms(i64 horloge) {
     struct { i64 sec; i64 nsec; } t = { 0, 0 };
-    if (sys3(SYS_clock_gettime, CLOCK_MONOTONIC, (i64)&t, 0) < 0) return 0;
+    if (sys3(SYS_clock_gettime, horloge, (i64)&t, 0) < 0) return 0;
     return (u64)t.sec * 1000u + (u64)(t.nsec / 1000000);
 }
+
+/// Millisecondes monotones : le temps qui passe au mur.
+static u64 maintenant_ms(void) { return horloge_ms(CLOCK_MONOTONIC); }
+
+/// Millisecondes de **processeur** consommees par ce processus.
+///
+/// C'est la seule mesure qui distingue une attente qui dort d'une attente qui
+/// brule un cœur : les deux durent le meme temps au mur. Une duree ecoulee ne
+/// prouve donc rien sur le cout d'une attente, et c'est pour cela que le noyau
+/// expose desormais `CLOCK_PROCESS_CPUTIME_ID`.
+static u64 processeur_ms(void) { return horloge_ms(CLOCK_PROCESS_CPUTIME_ID); }
 
 struct sockaddr_in {
     u16 famille;
@@ -289,27 +300,40 @@ void principal(void) {
             ecris("[dns-probe] CAS2_ECHEC demultiplexage : la reponse de B a ete jetee\n");
     }
 
-    // ---- Cas 3 : un socket sans reponse, cout de l'attente -------------
+    // ---- Cas 3 : personne ne repond, cout **processeur** de l'attente --
     //
-    // On interroge une adresse ou personne ne repond. Ce qui compte n'est pas
-    // l'echec, attendu, mais son prix : une attente doit rendre la main, pas
-    // bruler le processeur. La duree mesuree doit s'approcher du delai demande.
-    titre("CAS 3 : personne ne repond, cout de l'attente");
+    // Ce cas mesurait la duree ecoulee, ce qui ne prouvait rien : la boucle a
+    // plein processeur d'avant la correction rendait la main au bout de ~4,9 s,
+    // donc elle aurait passe le meme seuil qu'une attente qui dort. Une montre
+    // ne dit pas si le processeur travaille.
+    //
+    // On compare donc deux horloges. Une attente qui dort consomme quelques
+    // millisecondes de processeur pour cinq secondes au mur ; une attente qui
+    // boucle en consomme cinq mille.
+    titre("CAS 3 : personne ne repond, cout processeur de l'attente");
     {
         int fd = ouvre_udp();
         lie(fd, 40004);
         envoie_requete(fd, 0x4444, "example.net", 10, 0, 2, 99);
+
+        u64 mur_avant = maintenant_ms();
+        u64 cpu_avant = processeur_ms();
         u64 duree = 0; u16 ident = 0;
         i64 recu = attends_reponse(fd, 1500, &duree, &ident);
+        u64 mur = maintenant_ms() - mur_avant;
+        u64 cpu = processeur_ms() - cpu_avant;
+
         ecris("[dns-probe] CAS3 recu="); ecris_i64(recu);
-        ecris(" duree_ms="); ecris_u64(duree); ecris("\n");
-        // Le noyau annonce un delai de cinq secondes pour un `recvfrom`
-        // bloquant sur UDP. On verifie qu'il le tient : la version precedente
-        // comptait des tours de boucle, donc rendait la main apres une duree
-        // qui dependait de la vitesse de la machine et que personne n'avait
-        // choisie. Un delai qui varie avec le processeur n'est pas un delai.
-        if (duree >= 4500) ecris("[dns-probe] CAS3_ATTENTE_TENUE\n");
-        else ecris("[dns-probe] CAS3_ATTENTE_TRONQUEE duree inferieure au delai annonce\n");
+        ecris(" mur_ms="); ecris_u64(mur);
+        ecris(" cpu_ms="); ecris_u64(cpu); ecris("\n");
+
+        // Le seuil est large : un quart du temps au mur. Une attente qui dort
+        // reste tres en dessous, une attente qui boucle est au plafond. Entre
+        // les deux il n'y a rien a discuter.
+        if (mur >= 1000 && cpu * 4 < mur)
+            ecris("[dns-probe] CAS3_ATTENTE_SANS_CPU\n");
+        else
+            ecris("[dns-probe] CAS3_ECHEC l attente consomme le processeur\n");
     }
 
     ecris("[dns-probe] FIN\n");

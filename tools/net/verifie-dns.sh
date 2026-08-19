@@ -14,7 +14,7 @@
 #
 #   CAS1  un socket, une requete            -> une reponse
 #   CAS2  deux sockets, deux requetes       -> deux reponses
-#   CAS3  personne ne repond                -> l'attente est tenue, pas brulee
+#   CAS3  personne ne repond                -> l'attente ne consomme pas de CPU
 #
 # CAS2 est celui qui comptait : un resolveur interroge A et AAAA en parallele,
 # et la version precedente de `pump_udp` jetait le datagramme qui n'allait pas
@@ -78,7 +78,7 @@ grep -a 'dns-probe' "$JOURNAL" | sed 's/^\[[^]]*\]\[[^]]*\] //' || true
 echo
 
 echecs=0
-for marqueur in CAS1_OK CAS2_OK CAS3_ATTENTE_TENUE; do
+for marqueur in CAS1_OK CAS2_OK CAS3_ATTENTE_SANS_CPU; do
     if grep -aq "$marqueur" "$JOURNAL"; then
         vert "  ok     $marqueur"
     else
