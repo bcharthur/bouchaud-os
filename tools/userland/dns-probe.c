@@ -36,6 +36,8 @@ typedef unsigned char u8;
 #define SYS_recvfrom      45
 #define SYS_bind          49
 #define SYS_exit          60
+#define SYS_ioctl         16
+#define SYS_connect       42
 #define SYS_fcntl         72
 #define SYS_clock_gettime 228
 
@@ -48,6 +50,7 @@ typedef unsigned char u8;
 #define CLOCK_MONOTONIC 1
 #define CLOCK_PROCESS_CPUTIME_ID 2
 #define MSG_DONTWAIT 0x40
+#define FIONREAD 0x541B
 
 static i64 sys1(i64 n, i64 a) {
     i64 r;
@@ -382,6 +385,93 @@ void principal(void) {
         else
             ecris("[dns-probe] CAS4_ECHEC poll ne signale pas la reponse\n");
     }
+
+    // ---- Cas 5 : la sequence exacte de LibCore -------------------------
+    //
+    // Les quatre cas precedents mesurent des primitives isolees. LibDNS, lui,
+    // ne les appelle pas telles quelles : il passe par `Core::BufferedUDPSocket`
+    // et par `Core::UDPSocket`, dont le chemin de lecture enchaine trois choses
+    // dans un ordre precis.
+    //
+    // D'abord `UDPSocket::connect` pose un pair par `connect()` — la prise n'est
+    // donc plus seulement liee, elle est **connectee**, et c'est un autre chemin
+    // de routage dans le noyau.
+    //
+    // Ensuite `process_incoming_messages` interroge deux fois la lisibilite : la
+    // boucle d'evenements reveille le notifier, puis la fonction elle-meme
+    // redemande `can_read_without_blocking()` avant de lire, et **sort si cette
+    // seconde interrogation dit non**. Un noyau qui consommerait la lisibilite
+    // au premier `poll` laisserait donc LibDNS repartir sans jamais lire, avec
+    // le datagramme toujours en attente — exactement le silence observe.
+    //
+    // Enfin `UDPSocket::read_some` appelle `ioctl(FIONREAD)` avant chaque
+    // lecture, et refuse de lire si la valeur rendue depasse le tampon.
+    //
+    // Ce cas rejoue cette sequence telle quelle, avec les memes appels dans le
+    // meme ordre.
+    titre("CAS 5 : la sequence de LibCore, connect + double poll + FIONREAD");
+    {
+        int fd = (int)sys3(SYS_socket, AF_INET, SOCK_DGRAM, 0);
+        if (fd < 0) { ecris("[dns-probe] CAS5_ECHEC socket\n"); goto fin_cas5; }
+
+        struct sockaddr_in serveur;
+        remplis_adresse(&serveur, s1, s2, s3, s4, 53);
+        i64 lie_ok = sys3(SYS_connect, fd, (i64)&serveur, sizeof(serveur));
+        ecris("[dns-probe] CAS5 connect="); ecris_i64(lie_ok); ecris("\n");
+        if (lie_ok < 0) { ecris("[dns-probe] CAS5_ECHEC connect\n"); goto fin_cas5; }
+
+        // Sur une prise connectee, LibCore emet sans adresse de destination.
+        u8 requete[512];
+        int taille = fabrique_requete(requete, 0x7777, "example.com");
+        i64 envoye = sys6(SYS_sendto, fd, (i64)requete, taille, 0, 0, 0);
+        ecris("[dns-probe] CAS5 envoye="); ecris_i64(envoye); ecris("\n");
+        if (envoye < 0) { ecris("[dns-probe] CAS5_ECHEC sendto\n"); goto fin_cas5; }
+
+        struct { int fd; short events; short revents; } pfd;
+        pfd.fd = fd; pfd.events = POLLIN; pfd.revents = 0;
+
+        // Premiere interrogation : celle de la boucle d'evenements, avec un
+        // vrai delai. C'est elle qui reveille le notifier.
+        i64 premier = sys3(SYS_poll, (i64)&pfd, 1, 3000);
+
+        // Seconde interrogation : celle de `process_incoming_messages`, avec un
+        // delai **nul**. C'est le point de sortie silencieux.
+        pfd.revents = 0;
+        i64 second = sys3(SYS_poll, (i64)&pfd, 1, 0);
+
+        ecris("[dns-probe] CAS5 poll1="); ecris_i64(premier);
+        ecris(" poll2="); ecris_i64(second);
+        ecris(" revents="); ecris_i64(pfd.revents); ecris("\n");
+
+        // `FIONREAD` sur une prise a datagrammes : la taille du **prochain**
+        // datagramme, jamais zero quand il y en a un.
+        int en_attente = -1;
+        i64 code_ioctl = sys3(SYS_ioctl, fd, FIONREAD, (i64)&en_attente);
+        ecris("[dns-probe] CAS5 ioctl="); ecris_i64(code_ioctl);
+        ecris(" FIONREAD="); ecris_i64(en_attente); ecris("\n");
+
+        u8 tampon[2048];
+        i64 recu = sys6(SYS_recvfrom, fd, (i64)tampon, sizeof(tampon), MSG_DONTWAIT, 0, 0);
+        u16 ident = 0;
+        if (recu > 0) ident = (u16)(((u16)tampon[0] << 8) | tampon[1]);
+        ecris("[dns-probe] CAS5 recu="); ecris_i64(recu);
+        ecris(" id=0x"); ecris_hex16(ident); ecris("\n");
+
+        // Le verdict porte sur les trois maillons a la fois : la seconde
+        // interrogation doit encore signaler la lisibilite, `FIONREAD` doit
+        // annoncer la taille reelle, et la lecture doit rendre ce nombre
+        // d'octets.
+        if (second > 0 && (pfd.revents & POLLIN) && en_attente == (int)recu
+            && recu > 0 && ident == 0x7777)
+            ecris("[dns-probe] CAS5_OK\n");
+        else if (second <= 0)
+            ecris("[dns-probe] CAS5_ECHEC la seconde interrogation perd la lisibilite\n");
+        else if (en_attente != (int)recu)
+            ecris("[dns-probe] CAS5_ECHEC FIONREAD ne decrit pas le datagramme\n");
+        else
+            ecris("[dns-probe] CAS5_ECHEC la lecture ne rend pas la reponse\n");
+    }
+fin_cas5:
 
     ecris("[dns-probe] FIN\n");
     sys1(SYS_exit, 0);

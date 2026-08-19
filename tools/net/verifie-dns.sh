@@ -79,7 +79,7 @@ grep -a 'dns-probe' "$JOURNAL" | sed 's/^\[[^]]*\]\[[^]]*\] //' || true
 echo
 
 echecs=0
-for marqueur in CAS1_OK CAS2_OK CAS3_ATTENTE_SANS_CPU CAS4_OK; do
+for marqueur in CAS1_OK CAS2_OK CAS3_ATTENTE_SANS_CPU CAS4_OK CAS5_OK; do
     if grep -aq "$marqueur" "$JOURNAL"; then
         vert "  ok     $marqueur"
     else
@@ -94,6 +94,13 @@ if grep -aq 'CAS2_ECHEC' "$JOURNAL"; then
     echecs=$((echecs + 1))
 fi
 
+# Meme regle pour la sequence de LibCore : `FIONREAD` rendait 0 sur toute prise
+# inet, et ce message-la l'attrapait. Il ne doit plus apparaitre.
+if grep -aq 'CAS5_ECHEC' "$JOURNAL"; then
+    rouge "  ECHEC  la sequence de lecture de LibCore ne passe pas"
+    echecs=$((echecs + 1))
+fi
+
 if grep -aqi 'panic' "$JOURNAL"; then
     rouge "  ECHEC  panique du noyau"
     echecs=$((echecs + 1))
@@ -105,4 +112,4 @@ if [ "$echecs" -ne 0 ]; then
     rouge "journal complet : $JOURNAL"
     exit 1
 fi
-vert "resolution DNS : quatre cas au vert - routage, attente sans CPU, reveil par poll"
+vert "resolution DNS : cinq cas au vert - routage, attente sans CPU, reveil par poll, sequence LibCore"

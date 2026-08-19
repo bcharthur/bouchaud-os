@@ -275,6 +275,77 @@ utilise deja.
 Ces marqueurs n'ajoutent aucun comportement : ils n'observent que le chemin
 existant, et disparaissent des que `BOUCHAUD_M9` n'est pas pose.
 
+## Une primitive POSIX fausse, trouvee en chemin
+
+En suivant le chemin de lecture de LibDNS jusqu'au noyau, une des trois etapes
+s'est revelee fausse chez nous. `Core::UDPSocket::read_some` commence par
+demander combien d'octets attendent :
+
+```cpp
+auto pending_bytes = TRY(this->pending_bytes());   // ioctl(fd, FIONREAD)
+if (pending_bytes > buffer.size())
+    return Error::from_errno(EMSGSIZE);
+return m_helper.read(buffer, default_flags());
+```
+
+Le garde-fou existe parce qu'un `recv` sur une prise a datagrammes en consomme
+**un entier** : lire dans un tampon trop petit ne tronque pas la lecture, cela
+jette le reste. Ladybird prefere donc rendre `EMSGSIZE` et laisser l'appelant
+agrandir son tampon.
+
+Le noyau Bouchaud rendait `0` pour toute prise inet, quelle que soit la file :
+
+```rust
+fn pending_bytes(kind: &FdKind) -> usize {
+    match kind {
+        FdKind::Pipe(shared, true) => shared.borrow().buffer.len(),
+        FdKind::SocketPair(inbox, _) => inbox.borrow().octets.len(),
+        _ => 0,          // <- toute prise inet tombait ici
+    }
+}
+```
+
+Le test ne se declenchait donc jamais, et un datagramme plus grand que le tampon
+aurait ete tronque en silence au lieu d'etre signale.
+
+`net::octets_lisibles` applique desormais la regle de Linux, qui n'est pas la
+meme selon la famille : sur un flux, le contenu du tampon de reception ; sur un
+datagramme, la taille du **prochain** datagramme — jamais leur somme, sans quoi
+un lecteur qui dimensionne son tampon sur cette valeur tronquerait tout ce qui
+suit le premier.
+
+**Ce que cette correction n'est pas.** Elle ne debloque pas la navigation par
+nom, et le CAS 5 le montre lui-meme : avec `FIONREAD` a `0`, la ligne suivante
+lisait quand meme les 61 octets. La comparaison `pending > buffer.size()` est
+fausse dans le sens permissif, donc inoffensive tant que le tampon de 16 Kio de
+`BufferedSocket` depasse toute reponse DNS. C'est une primitive incorrecte
+corrigee parce qu'elle est incorrecte, pas un correctif de la panne.
+
+### Le CAS 5, et les deux hypotheses qu'il ferme
+
+La sonde rejoue la sequence de `Core::UDPSocket` telle quelle : `connect()` pour
+poser un pair, puis les **deux** interrogations de lisibilite que
+`process_incoming_messages` enchaine — celle de la boucle d'evenements, avec un
+delai, puis la sienne, avec un delai **nul** — puis `FIONREAD`, puis `recv`.
+
+```text
+[dns-probe] CAS5 connect=0
+[dns-probe] CAS5 envoye=29
+[dns-probe] CAS5 poll1=1 poll2=1 revents=1
+[dns-probe] CAS5 ioctl=0 FIONREAD=61
+[dns-probe] CAS5 recu=61 id=0x7777
+[dns-probe] CAS5_OK
+```
+
+`poll2=1` **refute** l'hypothese la plus seduisante : celle d'une lisibilite
+consommee par la premiere interrogation, qui aurait fait sortir LibDNS de sa
+boucle sans jamais lire, datagramme toujours en attente. Le noyau signale la
+lisibilite autant de fois qu'on la demande.
+
+La preuve negative tient dans les deux sens : en retirant la seule ligne du
+correctif, `FIONREAD` retombe a `0` et le CAS 5 echoue avec le message prevu.
+La sonde discrimine donc bien ce qu'elle pretend mesurer.
+
 ## Ce que M13 ne prouve pas
 
 Ni TLS, ni HTTP, ni Ladybird : la sonde s'arrete a la couche que le defaut

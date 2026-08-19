@@ -1052,6 +1052,60 @@ pub fn socket_readable(state: &Rc<RefCell<SocketState>>) -> bool {
     }
 }
 
+/// Octets immediatement lisibles sur une prise, pour `ioctl(FIONREAD)`.
+///
+/// Linux ne rend pas la meme chose selon la famille, et la difference compte :
+/// sur un flux il rend le contenu du tampon de reception, sur un datagramme il
+/// rend la taille du **prochain** datagramme — jamais leur somme. Un lecteur
+/// qui dimensionne son tampon sur cette valeur doit pouvoir en deduire qu'un
+/// seul `recv` suffira ; annoncer le total le ferait tronquer tout ce qui suit,
+/// puisqu'un `recv` sur une prise a datagrammes en consomme exactement un.
+///
+/// `LibCore` de Ladybird interroge cette valeur avant **chaque** lecture UDP,
+/// dans `UDPSocket::read_some`, precisement pour refuser de tronquer :
+///
+/// ```cpp
+/// auto pending_bytes = TRY(this->pending_bytes());
+/// if (pending_bytes > buffer.size())
+///     return Error::from_errno(EMSGSIZE);
+/// ```
+///
+/// Le noyau rendait jusqu'ici 0 pour toute prise inet : le test ne se
+/// declenchait donc jamais, et un datagramme plus grand que le tampon aurait
+/// ete tronque en silence au lieu d'etre signale. C'est une primitive POSIX
+/// fausse, independamment de qui l'appelle.
+///
+/// Comme `socket_readable`, un seul passage de pompe si rien n'est en attente :
+/// la valeur doit decrire l'etat courant, pas celui du dernier appel.
+pub fn octets_lisibles(state: &Rc<RefCell<SocketState>>) -> usize {
+    let kind = state.borrow().kind;
+    match kind {
+        SocketKind::Tcp => {
+            let mut borrowed = state.borrow_mut();
+            match borrowed.conn.as_mut() {
+                Some(conn) => {
+                    if conn.rx.is_empty() && !conn.peer_fin && !conn.closed {
+                        conn.pump(20_000);
+                    }
+                    conn.rx.len()
+                }
+                None => 0,
+            }
+        }
+        SocketKind::Udp => {
+            if state.borrow().datagrams.is_empty() {
+                pump_udp(state);
+            }
+            state
+                .borrow()
+                .datagrams
+                .first()
+                .map(|(_, _, donnees)| donnees.len())
+                .unwrap_or(0)
+        }
+    }
+}
+
 /// Taille de `struct mmsghdr` : un `msghdr` (56 octets) suivi de `msg_len`
 /// (4 octets) puis d'un remplissage d'alignement.
 const MMSGHDR_TAILLE: u64 = 64;
