@@ -69,6 +69,33 @@ const REPOS_TICKS: u64 = 4;
 /// qu'on lit quand on se demande « qui prend le processeur ».
 const PERIODE_RELEVE_MS: u64 = 5000;
 
+/// Duree pendant laquelle un client muet est recompose a pleine cadence apres
+/// une interaction, en millisecondes.
+///
+/// Un client qui n'annonce pas ses trames ne dit pas quand il peint : le
+/// compositeur ne peut que recopier sa surface « au cas ou ». Le faire a chaque
+/// tour de boucle coutait le prix fort — 1100x604 pixels recopies puis presentes
+/// jusqu'a soixante fois par seconde, y compris devant une surface qui n'avait
+/// pas change d'un pixel depuis cinq minutes. C'est ce qui mettait le bureau a
+/// 76 % de processeur pendant que le navigateur attendait une reponse DNS.
+///
+/// La cadence est donc liee a ce qui peut faire changer l'image : une entree.
+/// Apres une touche, un clic ou un mouvement transmis au client, on recompose a
+/// pleine cadence pendant cette duree — le temps qu'une page reagisse, defile,
+/// affiche un curseur. Passe ce delai sans aucune entree, plus rien ne peut
+/// bouger a l'ecran sans que le client nous le dise, et on retombe a la cadence
+/// de veille.
+const REACTIVITE_MUETTE_MS: u64 = 600;
+
+/// Periode de recomposition d'un client muet au repos, en millisecondes.
+///
+/// 200 ms, soit cinq trames par seconde. Ce n'est pas une cadence d'affichage :
+/// c'est un filet de securite pour le cas ou un client repeindrait de lui-meme
+/// sans entree — une animation, un chargement. Cinq fois par seconde suffit a
+/// ce qu'une telle page reste visiblement vivante, et divise par douze le cout
+/// que payait le repos.
+const REPOS_MUET_MS: u64 = 200;
+
 /// Lance le bureau (bloquant jusqu'a Quitter).
 pub fn run() {
     task::run_noyau(fil_bureau, "desktop");
@@ -123,6 +150,10 @@ fn boucle() {
     let mut derniere_souris = (usize::MAX, usize::MAX);
     let mut derniers_boutons = 0u32;
     let mut dernier_releve = 0u64;
+    // Derniere entree transmise a un client, et derniere recomposition
+    // « aveugle » : ensemble, ils donnent sa cadence a un client muet.
+    let mut derniere_entree = 0u64;
+    let mut dernier_aveugle = 0u64;
 
     while !quit {
         task::note_wm_heartbeat();
@@ -148,6 +179,7 @@ fn boucle() {
             if let Some(index) = actif {
                 if let App::Navigateur { client } = &mut wins[index].app {
                     envoie_touche(client, k);
+                    derniere_entree = maintenant;
                     continue;
                 }
                 if apps::key_to_app(&mut wins[index], k, home) {
@@ -176,10 +208,12 @@ fn boucle() {
             derniere_souris = (mxu, myu);
             derniers_boutons = boutons;
             sale = true;
+            derniere_entree = maintenant;
             transmet_position(&mut wins, mx, my, boutons);
         }
         if click || release || wheel != 0 {
             sale = true;
+            derniere_entree = maintenant;
         }
 
         if left {
@@ -237,7 +271,21 @@ fn boucle() {
         }
 
         // ---- Clients ring 3 ----
-        if pompe_clients(&mut wins) {
+        //
+        // Un client muet ne dit pas quand il peint : le compositeur recopie sa
+        // surface sans savoir si elle a change. On ne le fait donc pas a chaque
+        // tour, mais a une cadence qui suit ce qui peut faire bouger l'image —
+        // pleine cadence juste apres une entree, cadence de veille sinon.
+        let periode_aveugle = if maintenant.wrapping_sub(derniere_entree) < REACTIVITE_MUETTE_MS {
+            PERIODE_TRAME_MS
+        } else {
+            REPOS_MUET_MS
+        };
+        let recompose_aveugle = maintenant.wrapping_sub(dernier_aveugle) >= periode_aveugle;
+        if recompose_aveugle {
+            dernier_aveugle = maintenant;
+        }
+        if pompe_clients(&mut wins, recompose_aveugle) {
             sale = true;
         }
 
@@ -356,7 +404,7 @@ fn fenetre_active(wins: &[Win]) -> Option<usize> {
 /// Consulte tous les clients : trames recues, processus morts.
 ///
 /// Rend `true` si l'ecran doit etre recompose.
-fn pompe_clients(wins: &mut Vec<Win>) -> bool {
+fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> bool {
     let mut recompose = false;
     let mut morts: Vec<usize> = Vec::new();
     for (index, w) in wins.iter_mut().enumerate() {
@@ -364,9 +412,13 @@ fn pompe_clients(wins: &mut Vec<Win>) -> bool {
             if client.verifie_silence() {
                 recompose = true;
             }
-            // Un client qui n'annonce pas ses trames est recompose au rythme du
-            // compositeur : on ne sait pas quand il peint, seulement qu'il peint.
-            if client.sans_protocole && !w.min {
+            // Un client qui n'annonce pas ses trames est recompose « a
+            // l'aveugle » : on ne sait pas quand il peint, seulement qu'il
+            // peint. La cadence de cette recopie est decidee par l'appelant —
+            // voir `REACTIVITE_MUETTE_MS`. La declarer ici a chaque tour
+            // revenait a recopier 1100x604 pixels soixante fois par seconde
+            // devant une image immobile.
+            if recompose_aveugle && client.sans_protocole && !w.min {
                 client.abime_tout();
                 recompose = true;
             }
@@ -458,7 +510,7 @@ fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize) {
     };
 
     let mut w = Win {
-        title: String::from("Bouchaud Browser"),
+        title: String::from(window::TITRE_NAVIGATEUR),
         x: (fb::WIDTH as i32 - largeur_fenetre) / 2,
         y: BAR_H as i32 + 8,
         w: largeur_fenetre,

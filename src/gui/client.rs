@@ -173,7 +173,7 @@ impl Client {
         let mut client = Client {
             pid,
             etat: Etat::Demarrage,
-            titre: "Bouchaud Browser".to_string(),
+            titre: crate::gui::window::TITRE_NAVIGATEUR.to_string(),
             surface,
             vers_client,
             vers_wm,

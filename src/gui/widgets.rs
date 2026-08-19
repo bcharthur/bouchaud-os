@@ -169,7 +169,7 @@ fn draw_icons() {
 /// Dessine l'icone pixel-art de l'application `kind` dans un carre `vw x vw` en (vx, vy).
 fn draw_app_icon(icon_idx: usize, vx: usize, vy: usize, vw: usize) {
     match icon_idx {
-        0 => draw_icon_nautile(vx, vy, vw),
+        0 => draw_icon_ladybird(vx, vy, vw),
         1 => draw_icon_calculator(vx, vy, vw),
         2 => draw_icon_terminal(vx, vy, vw),
         3 => draw_icon_files(vx, vy, vw),
@@ -193,34 +193,70 @@ fn fill_circle(scx: i32, scy: i32, r: i32, col: u32, clip_x: usize, clip_y: usiz
     }
 }
 
-/// Logo Nautile Navigateur : coquille nautile en pixel art (spirale logarithmique simplifiee).
-fn draw_icon_nautile(vx: usize, vy: usize, vw: usize) {
-    // Fond : bleu ocean profond
-    fb::fill_rect_rgb(vx, vy, vw, vw, 0x081525);
+/// Logo Ladybird : la coccinelle du moteur qu'on execute reellement.
+///
+/// Le bureau affichait jusqu'ici un nautile, dessine du temps ou le navigateur
+/// etait un moteur maison. Le moteur est maintenant Ladybird, et l'icone doit
+/// dire lequel : c'est ce que l'utilisateur reconnait, et c'est aussi honnete
+/// vis-a-vis d'un projet dont on execute le code.
+///
+/// Le dessin est fait de disques et de rectangles clippes — les seules
+/// primitives dont ce compositeur dispose — et reste lisible a la taille reelle
+/// d'une icone de bureau (48 px) comme a celle d'une entree de menu.
+fn draw_icon_ladybird(vx: usize, vy: usize, vw: usize) {
+    // Fond : le meme bleu profond que les autres icones, pour que la rangee du
+    // bureau garde une famille visuelle.
+    for dy in 0..vw {
+        let c = lerp_color(0x10243c, 0x081525, dy, vw);
+        fb::fill_rect_rgb(vx, vy + dy, vw, 1, c);
+    }
 
     let vwi = vw as i32;
-    let cx  = vx as i32 + vwi / 2;
-    let cy  = vy as i32 + vwi / 2;
-    let r   = vwi / 2 - 2;
+    let cx = vx as i32 + vwi / 2;
+    let cy = vy as i32 + vwi / 2 + vwi / 12; // legerement bas : la tete prend le haut
+    let r = vwi * 2 / 5;
 
-    // Couche 1 : coque externe (or creme)
-    fill_circle(cx, cy, r, 0xf5c040, vx, vy, vw);
-    // Separateur de chambre (bord fonce)
-    fill_circle(cx - r / 5, cy + r / 5, r * 7 / 10 + 1, 0x050f1c, vx, vy, vw);
-    // Chambre 2 : orange dore
-    fill_circle(cx - r / 5, cy + r / 5, r * 7 / 10, 0xe09010, vx, vy, vw);
-    // Separateur
-    fill_circle(cx - r * 2 / 5, cy + r * 2 / 5, r / 2 + 1, 0x050f1c, vx, vy, vw);
-    // Chambre 3 : orange roux
-    fill_circle(cx - r * 2 / 5, cy + r * 2 / 5, r / 2, 0xb06808, vx, vy, vw);
-    // Separateur
-    fill_circle(cx - r * 3 / 5, cy + r * 3 / 5, r / 4 + 1, 0x050f1c, vx, vy, vw);
-    // Chambre 4 : brun dore (coeur)
-    fill_circle(cx - r * 3 / 5, cy + r * 3 / 5, r / 4, 0x7a3a06, vx, vy, vw);
-    // Oeil central (trou)
-    fill_circle(cx - r * 3 / 4, cy + r * 3 / 4, r / 7 + 1, 0x030a12, vx, vy, vw);
-    // Reflet blanc en haut a gauche de la coque
-    fill_circle(cx - r / 2, cy - r / 2, r / 6, 0xfff5d0, vx, vy, vw);
+    // Ombre portee, un disque decale d'un pixel vers le bas.
+    fill_circle(cx, cy + 1, r, 0x04080f, vx, vy, vw);
+
+    // Tete noire, posee au-dessus du corps et donc dessinee avant lui.
+    fill_circle(cx, cy - r * 3 / 4, r * 1 / 2, 0x1a1a1e, vx, vy, vw);
+    // Deux yeux blancs.
+    fill_circle(cx - r / 4, cy - r * 5 / 6, r / 8, 0xf2f2f2, vx, vy, vw);
+    fill_circle(cx + r / 4, cy - r * 5 / 6, r / 8, 0xf2f2f2, vx, vy, vw);
+
+    // Corps rouge.
+    fill_circle(cx, cy, r, 0xd8202a, vx, vy, vw);
+    // Reflet : un disque plus clair en haut a gauche, ecrete par le corps.
+    fill_circle(cx - r / 3, cy - r / 3, r / 3, 0xf0505a, vx, vy, vw);
+
+    // Ligne mediane entre les elytres.
+    let ligne_h = (vwi / 24).max(1);
+    let y0 = (cy - r).max(vy as i32);
+    let y1 = (cy + r).min((vy + vw) as i32 - 1);
+    if y1 > y0 {
+        fb::fill_rect_rgb(
+            (cx - ligne_h / 2).max(vx as i32) as usize,
+            y0 as usize,
+            ligne_h as usize,
+            (y1 - y0) as usize,
+            0x1a1a1e,
+        );
+    }
+
+    // Six points, trois par elytre. Les rayons decroissent vers le bas pour
+    // suivre le retrecissement apparent de la coque.
+    let points: [(i32, i32, i32); 6] = [
+        (-r / 2, -r / 3, r / 5),
+        (r / 2, -r / 3, r / 5),
+        (-r / 2, r / 4, r / 6),
+        (r / 2, r / 4, r / 6),
+        (-r / 4, r * 2 / 3, r / 8),
+        (r / 4, r * 2 / 3, r / 8),
+    ];
+    for (dx, dy, pr) in points {
+        fill_circle(cx + dx, cy + dy, pr.max(1), 0x1a1a1e, vx, vy, vw);
+    }
 }
 
 fn isqrt(n: i32) -> i32 {

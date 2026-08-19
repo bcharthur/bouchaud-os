@@ -26,6 +26,17 @@ concurrency:
   group: system-health-${{ github.ref }}
   cancel-in-progress: true
 
+
+# Jeton au minimum de ses droits.
+#
+# Sans bloc `permissions`, le `GITHUB_TOKEN` d'un travail herite du reglage du
+# depot — historiquement l'ecriture sur tout. Un workflow qui ne fait que lire
+# le code, construire et televerser des artefacts n'a besoin que de le lire :
+# une etape compromise (une action tierce, une dependance) ne peut alors pas
+# ecrire dans le depot. `actions/upload-artifact` n'utilise pas ce jeton.
+permissions:
+  contents: read
+
 jobs:
   probe:
     name: system-health/probe

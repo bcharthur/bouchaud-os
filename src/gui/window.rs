@@ -28,6 +28,15 @@ pub(crate) const KIND_NAVIGATEUR: usize = 6;
 /// et de faire admettre a `linuxfb` un changement de resolution a chaud — trois
 /// chantiers qui n'ont rien a voir entre eux, et aucun qui doive retarder le
 /// moment ou le navigateur devient une fenetre.
+/// Nom du navigateur, tel qu'il apparait pour qui utilise la machine.
+///
+/// Il est ecrit **une fois**. Le bureau, le menu Demarrer, la barre de titre et
+/// la barre des taches le lisent ici : un navigateur qui s'appelle « Ladybird »
+/// sur son icone et « Bouchaud Browser » sur sa fenetre n'est pas un produit,
+/// c'est deux moities de produit. C'est aussi le nom du moteur qu'on execute
+/// reellement, ce qui evite de faire croire a un moteur maison.
+pub(crate) const TITRE_NAVIGATEUR: &str = "Ladybird";
+
 pub(crate) const NAV_LARGEUR: i32 = 1100;
 pub(crate) const NAV_HAUTEUR: i32 = 604;
 
@@ -36,14 +45,14 @@ pub(crate) const NAV_HAUTEUR: i32 = 604;
 /// Le `kind` est explicite et non deduit de la position : retirer une entree ne
 /// doit pas decaler silencieusement les autres vers la mauvaise application.
 pub(crate) const MENU: [(&str, usize); 7] = [
-    ("Navigateur", KIND_NAVIGATEUR),
+    ("Ladybird", KIND_NAVIGATEUR),
     ("Terminal", 0), ("Fichiers", 1), ("Moniteur", 3),
     ("Calculatrice", 4), ("Rustpad", 5), ("Quitter", usize::MAX),
 ];
 
 /// Icones du bureau : (libelle, kind). Cliquables pour lancer l'application.
 pub(crate) const ICONS: [(&str, usize); 5] = [
-    ("Navigateur", KIND_NAVIGATEUR),
+    ("Ladybird", KIND_NAVIGATEUR),
     ("Calculatrice", 4), ("Terminal", 0), ("Fichiers", 1), ("Rustpad", 5),
 ];
 
@@ -208,7 +217,7 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
                 let (w, h) = fenetre_pour_zone(NAV_LARGEUR, NAV_HAUTEUR);
                 crate::serial_println!("[gui] BO_AUTOSTART_BROWSER=1 -> /bo-navigateur");
                 return Win {
-                    title: "Bouchaud Browser".to_string(),
+                    title: TITRE_NAVIGATEUR.to_string(),
                     x,
                     y,
                     w,
