@@ -208,12 +208,72 @@ attente, et reveil par `poll` sont mesures corrects sur les quatre motifs.
 **Ce qui reste.** Le verrou est au-dessus du noyau — dans `LibDNS`,
 `RequestServer` ou la boucle d'evenements de `LibCore` telle qu'elle tourne sous
 Bouchaud. Le journal s'arrete apres `M9_DOCUMENT_BODY_LOCAL_UNPAUSED` sans
-qu'aucun des trois marqueurs de retour de RequestServer n'apparaisse. Aller plus
-loin demande d'instrumenter le port lui-meme, donc de reconstruire Ladybird —
-quatre-vingt-dix minutes d'integration continue.
+qu'aucun des trois marqueurs de retour de RequestServer n'apparaisse.
 
 C'est une zone fermee de plus, pas une reussite : la navigation par nom n'est
 toujours pas acquise.
+
+## Pourquoi M9 et M12 passent alors que l'essai Internet echoue
+
+La difference entre les trois scenarios tient a un seul caractere dans l'URL.
+`M9_HTTP` vise `http://10.0.2.2:18080/`, `M12_HTTPS` vise
+`https://10.0.2.2:18443/` : deux **adresses**. L'essai Internet vise
+`https://example.com/` : un **nom**.
+
+Or `DNS::Resolver::lookup` court-circuite les adresses litterales — il
+reconnait la forme IPv4, fabrique un `LookupResult` sur place et ne touche
+jamais au reseau :
+
+```cpp
+if (auto maybe_ipv4 = IPv4Address::from_string(name); maybe_ipv4.has_value()) {
+    ...  // resultat synthetise, aucune requete emise
+}
+```
+
+Consequence directe, et elle vaut d'etre ecrite noir sur blanc : **M9 et M12 ne
+testent pas le DNS du tout**. Ils traversent bien l'etat `DNSLookup`, mais en
+ressortent sans avoir envoye un octet. Tout ce qu'ils prouvent — l'aller-retour
+IPC des cookies, libcurl, TLS, le `RequestPipe`, le rendu — est donc acquis
+*independamment* du DNS. Et symetriquement, la seule etape que l'essai Internet
+exerce en plus des deux autres est la resolution reelle d'un nom.
+
+Cela reduit la zone de recherche, mais ne designe pas encore le coupable : c'est
+un raisonnement, pas une mesure.
+
+## La sonde qui nomme l'etat d'arret
+
+`Request` est une machine a etats explicite — `Init`, `ReadCache`,
+`WaitForCache`, `DNSLookup`, `RetrieveCookie`, `Connect`, `Fetch`, `Complete`,
+`Error` — et chaque passage traverse `transition_to_state`. Une sonde a cet
+unique endroit remplace le silence par le nom de l'etat atteint, donc par un
+sous-systeme unique a examiner :
+
+| arret observe | sous-systeme designe |
+|---|---|
+| `DNSLookup` | `LibDNS`, ou le socket UDP du resolveur |
+| `RetrieveCookie` | l'aller-retour IPC des cookies |
+| `Connect` / `Fetch` | libcurl, TLS, ou les notifiers de socket |
+
+`prepare-m9-diagnostics.py` pose donc six marqueurs, tous derriere
+`BOUCHAUD_M9` comme le reste du portage :
+
+| marqueur | ce qu'il etablit |
+|---|---|
+| `M9_RS_START_RECU` | RequestServer a bien recu la requete par IPC |
+| `M9_RS_STATE` | chaque transition, donc l'etat exact ou la machine s'arrete |
+| `M9_RS_DNS_QUERY` | le nom interroge et le serveur retenu |
+| `M9_RS_DNS_RESOLU` | la resolution a abouti, et en combien d'adresses |
+| `M9_RS_COOKIE_DEMANDE` | la demande de cookie est partie vers le client |
+| `M9_RS_COOKIE_RECU` | le client a repondu |
+
+Upstream porte deja la ligne qu'il faut, mais derriere `REQUESTSERVER_DEBUG`,
+un drapeau de compilation : l'activer recompilerait tout RequestServer en mode
+verbeux et noierait la console serie sous le trafic de chaque requete. La sonde
+reprend la meme information sous la variable d'environnement que le portage
+utilise deja.
+
+Ces marqueurs n'ajoutent aucun comportement : ils n'observent que le chemin
+existant, et disparaissent des que `BOUCHAUD_M9` n'est pas pose.
 
 ## Ce que M13 ne prouve pas
 
