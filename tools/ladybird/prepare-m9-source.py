@@ -219,15 +219,40 @@ void ConnectionFromClient::bouchaud_m9_start()
     set_has_focus(page_id, true);
     set_system_visibility_state(page_id, Web::HTML::VisibilityState::Visible);
 
+    // M15 : sondes d'analyse d'URL.
+    //
+    // `M9_URL_INVALID` disait qu'une URL avait ete refusee sans dire laquelle.
+    // Le defaut trouve — un shell qui gardait les apostrophes de
+    // `export BOUCHAUD_M9_URL='https://example.com/'` — etait invisible dans
+    // ce message : l'oeil lit les apostrophes comme la ponctuation du journal,
+    // pas comme deux octets de la valeur. Les sondes ci-dessous encadrent donc
+    // la valeur de chevrons et donnent sa longueur, puis, en cas de succes,
+    // decomposent l'URL analysee — le schema et l'hote sont exactement ce que
+    // RequestServer va utiliser ensuite pour resoudre le nom.
     char const* requested_url = getenv("BOUCHAUD_M9_URL");
-    if (!requested_url || !*requested_url)
+    bool url_from_environment = requested_url && *requested_url;
+    if (!url_from_environment)
         requested_url = "http://10.0.2.2:18080/m9.html";
 
-    auto url = URL::create_with_url_or_path(ByteString { requested_url });
+    auto requested = ByteString { requested_url };
+    outln("[ladybird-bouchaud] M15_URL_INPUT source={} longueur={} valeur=<{}>",
+        url_from_environment ? "BOUCHAUD_M9_URL"sv : "defaut"sv,
+        requested.length(),
+        requested);
+    outln("[ladybird-bouchaud] M15_URL_PARSE_BEGIN");
+
+    auto url = URL::create_with_url_or_path(requested);
     if (!url.has_value()) {
-        warnln("[ladybird-bouchaud] M9_URL_INVALID {}", requested_url);
+        warnln("[ladybird-bouchaud] M15_URL_PARSE_FAILED valeur=<{}>", requested);
+        warnln("[ladybird-bouchaud] M9_URL_INVALID {}", requested);
         return;
     }
+
+    outln("[ladybird-bouchaud] M15_URL_PARSE_OK scheme={} host={} port={} serialise={}",
+        url->scheme(),
+        url->serialized_host(),
+        url->port().has_value() ? ByteString::number(*url->port()) : ByteString { "defaut" },
+        url->serialize());
 
     outln("[ladybird-bouchaud] M9_BOOTSTRAP page={} viewport={}x{}", page_id, width, height);
     outln("[ladybird-bouchaud] M9_NAVIGATION_BEGIN url={}", *url);

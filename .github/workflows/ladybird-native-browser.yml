@@ -11,6 +11,10 @@ on:
       - "src/drivers/block.rs"
       - "src/kernel/elf.rs"
       - "src/kernel/exec.rs"
+      # `src/shell` compose l'environnement que `exec.rs` transmet au
+      # navigateur : c'est de la que vient `BOUCHAUD_M9_URL`. Le scenario
+      # Ladybird depend donc de ce repertoire autant que des precedents.
+      - "src/shell/**"
       - "src/kernel/abi/file.rs"
       - "src/kernel/abi/mem.rs"
       - "src/kernel/abi/proc.rs"
@@ -36,6 +40,10 @@ on:
       - "src/drivers/block.rs"
       - "src/kernel/elf.rs"
       - "src/kernel/exec.rs"
+      # `src/shell` compose l'environnement que `exec.rs` transmet au
+      # navigateur : c'est de la que vient `BOUCHAUD_M9_URL`. Le scenario
+      # Ladybird depend donc de ce repertoire autant que des precedents.
+      - "src/shell/**"
       - "src/kernel/abi/file.rs"
       - "src/kernel/abi/mem.rs"
       - "src/kernel/abi/proc.rs"
@@ -440,7 +448,12 @@ jobs:
           export BO_AUTOSTART_BROWSER=1
           export BOUCHAUD_M9=1
           export BOUCHAUD_M9_TEST=1
-          export BOUCHAUD_M9_URL=http://10.0.2.2:18080/m9.html
+          # L'URL est citee comme le fait `run.ps1`, et non laissee nue : c'est
+          # la difference entre les deux qui a masque le defaut de suppression
+          # de guillemets du shell. Une variable que l'integration continue pose
+          # autrement que la machine de developpement ne teste pas la machine de
+          # developpement.
+          export BOUCHAUD_M9_URL='http://10.0.2.2:18080/m9.html'
           desktop
           SCENARIO
 
@@ -670,7 +683,7 @@ jobs:
           export BO_AUTOSTART_BROWSER=1
           export BOUCHAUD_M9=1
           export BOUCHAUD_M9_TEST=1
-          export BOUCHAUD_M9_URL=https://10.0.2.2:18443/m12.html
+          export BOUCHAUD_M9_URL='https://10.0.2.2:18443/m12.html'
           desktop
           SCENARIO
 
@@ -844,7 +857,7 @@ jobs:
           export BO_AUTOSTART_BROWSER=1
           export BOUCHAUD_M9=1
           export BOUCHAUD_M9_TEST=1
-          export BOUCHAUD_M9_URL=https://example.com/
+          export BOUCHAUD_M9_URL='https://example.com/'
           desktop
           SCENARIO
 
@@ -911,6 +924,16 @@ jobs:
 
       - name: Verdict Internet
         run: |
+          # Ce job est informatif : quand il echoue, ce qu'on veut savoir n'est
+          # pas *qu'il* a echoue mais **jusqu'ou** la chaine est allee. Les
+          # `grep` d'assertion qui suivent ne peuvent pas le dire : sous
+          # `set -e`, le premier qui manque coupe l'etape, et tout ce qui aurait
+          # situe l'arret reste dans un journal que personne n'ouvre. On imprime
+          # donc la trace d'abord, assertions ensuite.
+          echo "--- analyse d'URL, navigation, RequestServer, DNS ---"
+          grep -E "M15_URL|M9_URL_INVALID|M9_NAVIGATION_|M9_RS_|M13_DNS_|M14_DNS_" \
+              serie-ladybird-net.log || echo "(aucun de ces marqueurs)"
+          echo "--- assertions ---"
           grep -F "[ladybird-bouchaud] M12_CA_BUNDLE /etc/ssl/certs/ca-certificates.crt" serie-ladybird-net.log
           grep -F "[ladybird-bouchaud] M12_DNS_SERVER 10.0.2.3 port=53 tls=false" serie-ladybird-net.log
           # Les preuves qui comptent : un **nom** a ete resolu par DNS, une
