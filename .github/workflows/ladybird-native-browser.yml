@@ -26,10 +26,15 @@ on:
       - "src/kernel/memory.rs"
       - "src/drivers/gpu.rs"
       - "src/drivers/gfx.rs"
+      # La pile reseau manquait entierement, alors que M9 (HTTP), M12 (HTTPS)
+      # et l'essai Internet en dependent de bout en bout : une correction dans
+      # `poll_ip`, dans l'ABI socket ou dans le pilote de carte ne declenchait
+      # aucun des scenarios qu'elle pouvait casser.
+      - "src/net/**"
+      - "src/kernel/abi/net.rs"
+      - "src/drivers/e1000.rs"
       - "src/arch/x86_64/cpu.rs"
       - "src/arch/x86_64/idt.rs"
-      - "src/fs/tar.rs"
-      - "src/gui/window.rs"
       - ".github/workflows/ladybird-native-browser.yml"
   pull_request:
     paths:
@@ -54,10 +59,15 @@ on:
       - "src/kernel/memory.rs"
       - "src/drivers/gpu.rs"
       - "src/drivers/gfx.rs"
+      # La pile reseau manquait entierement, alors que M9 (HTTP), M12 (HTTPS)
+      # et l'essai Internet en dependent de bout en bout : une correction dans
+      # `poll_ip`, dans l'ABI socket ou dans le pilote de carte ne declenchait
+      # aucun des scenarios qu'elle pouvait casser.
+      - "src/net/**"
+      - "src/kernel/abi/net.rs"
+      - "src/drivers/e1000.rs"
       - "src/arch/x86_64/cpu.rs"
       - "src/arch/x86_64/idt.rs"
-      - "src/fs/tar.rs"
-      - "src/gui/window.rs"
       - ".github/workflows/ladybird-native-browser.yml"
 
 concurrency:
@@ -940,7 +950,7 @@ jobs:
           # situe l'arret reste dans un journal que personne n'ouvre. On imprime
           # donc la trace d'abord, assertions ensuite.
           echo "--- analyse d'URL, navigation, RequestServer, DNS ---"
-          grep -E "M15_URL|M9_URL_INVALID|M9_NAVIGATION_|M9_RS_|M13_DNS_|M14_DNS_" \
+          grep -E "M15_URL|M16_DNS_|M9_URL_INVALID|M9_NAVIGATION_|M9_RS_|M13_DNS_|M14_DNS_" \
               serie-ladybird-net.log || echo "(aucun de ces marqueurs)"
           echo "--- assertions ---"
           grep -F "[ladybird-bouchaud] M12_CA_BUNDLE /etc/ssl/certs/ca-certificates.crt" serie-ladybird-net.log
