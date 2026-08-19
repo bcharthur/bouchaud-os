@@ -950,8 +950,14 @@ jobs:
           # situe l'arret reste dans un journal que personne n'ouvre. On imprime
           # donc la trace d'abord, assertions ensuite.
           echo "--- analyse d'URL, navigation, RequestServer, DNS ---"
-          grep -E "M15_URL|M16_DNS_|M9_URL_INVALID|M9_NAVIGATION_|M9_RS_|M13_DNS_|M14_DNS_" \
+          grep -E "M15_URL|M16_DNS_|M17_UDP_|M9_URL_INVALID|M9_NAVIGATION_|M9_RS_|M13_DNS_|M14_DNS_" \
               serie-ladybird-net.log || echo "(aucun de ces marqueurs)"
+          # La derniere ligne de charge par processus. Elle dit qui prend le
+          # processeur, et c'est la seule mesure qui distingue « la machine
+          # attend » de « la machine tourne a vide » — les deux se ressemblent
+          # dans un journal, et pas du tout dans une main sur le ventilateur.
+          echo "--- charge par processus (dernier releve) ---"
+          grep -F "[ps]" serie-ladybird-net.log | tail -2 || echo "(aucun releve)"
           echo "--- assertions ---"
           grep -F "[ladybird-bouchaud] M12_CA_BUNDLE /etc/ssl/certs/ca-certificates.crt" serie-ladybird-net.log
           grep -F "[ladybird-bouchaud] M12_DNS_SERVER 10.0.2.3 port=53 tls=false" serie-ladybird-net.log

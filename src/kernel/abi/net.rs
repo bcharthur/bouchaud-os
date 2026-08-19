@@ -324,7 +324,14 @@ pub fn sys_sendto(fd: i32, buffer: u64, len: usize, _flags: u32, addr: u64, addr
                 Some(size) => size,
                 None => return -errno::EMSGSIZE,
             };
-            if crate::net::send_ip(ip, crate::net::internet::ipv4::PROTO_UDP, &packet[..size]) {
+            let parti = crate::net::send_ip(ip, crate::net::internet::ipv4::PROTO_UDP, &packet[..size]);
+            if trace_dns(port, source_port) {
+                crate::serial_println!(
+                    "[ladybird-bouchaud] M17_UDP_TX dst={}.{}.{}.{}:{} src_port={} octets={} parti={}",
+                    ip[0], ip[1], ip[2], ip[3], port, source_port, len, parti
+                );
+            }
+            if parti {
                 len as i64
             } else {
                 -errno::ENETUNREACH
@@ -352,6 +359,35 @@ const DATAGRAMMES_PAR_PASSAGE: u32 = 64;
 /// secondes est l'ordre de grandeur des resolveurs (`RES_TIMEOUT` vaut 5 dans
 /// la libc), ce qui laisse a un appelant le temps de reessayer lui-meme.
 const RECV_UDP_DELAI_MS: u64 = 5_000;
+
+/// Le port 53 est-il en cause dans ce datagramme ?
+///
+/// ## Pourquoi une sonde ici, et pourquoi bornee au port 53
+///
+/// Les sondes M16 ont ferme deux des trois hypotheses sur le blocage DNS : la
+/// socket vers le resolveur est bien creee (`M16_DNS_SOCKET_OK`), et la requete
+/// part reellement (`M16_DNS_TX id=57801 octets=46`). Le minuteur de
+/// retransmission tire (`M16_DNS_REPEAT`), donc la boucle d'evenements vit.
+/// Mais `M16_DNS_READY` n'apparait **jamais** : la socket ne se declare jamais
+/// lisible, pendant cinq minutes.
+///
+/// Reste un seul segment sans mesure — celui qui va de la carte a la file du
+/// socket. Trois issues y sont possibles et rien ne les distingue :
+///
+///  1. le datagramme n'arrive jamais sur la carte ;
+///  2. il arrive, et `livre_datagramme` ne trouve aucun socket a qui le rendre ;
+///  3. il arrive et il est rendu — et c'est alors `poll` ou le notificateur
+///     qu'il faut regarder, pas le reseau.
+///
+/// La sonde se limite au port 53. Ce n'est pas de la prudence : c'est ce qui la
+/// rend utilisable. Une trace de tout l'UDP noierait la console serie sous le
+/// trafic ordinaire, et une trace qu'on ne peut pas lire ne mesure rien. Deux a
+/// quatre paquets par resolution, c'est exactement le volume qu'on veut voir.
+///
+/// Elle est **temporaire** et disparaitra avec le defaut qu'elle sert a nommer.
+fn trace_dns(port_a: u16, port_b: u16) -> bool {
+    port_a == 53 || port_b == 53
+}
 
 /// Livre un datagramme au socket qui l'attend, parmi ceux du processus.
 ///
@@ -411,10 +447,41 @@ fn livre_datagramme(
         }
     }
 
-    if let Some(destination) = connecte.or(lie) {
-        if let Ok(mut etat) = destination.try_borrow_mut() {
-            etat.datagrams
-                .push((source, entete.src_port, donnees.to_vec()));
+    let trace = trace_dns(entete.src_port, entete.dst_port);
+    let connecte_trouve = connecte.is_some();
+
+    match connecte.or(lie) {
+        Some(destination) => match destination.try_borrow_mut() {
+            Ok(mut etat) => {
+                etat.datagrams
+                    .push((source, entete.src_port, donnees.to_vec()));
+                if trace {
+                    crate::serial_println!(
+                        "[ladybird-bouchaud] M17_UDP_LIVRE src={}.{}.{}.{}:{} vers_port={} octets={} connecte={}",
+                        source[0], source[1], source[2], source[3],
+                        entete.src_port, entete.dst_port, donnees.len(), connecte_trouve
+                    );
+                }
+            }
+            // Le socket destinataire est deja emprunte : c'est celui qui nous a
+            // appeles. Le datagramme est perdu, et il faut que cela se voie.
+            Err(_) => {
+                if trace {
+                    crate::serial_println!(
+                        "[ladybird-bouchaud] M17_UDP_PERDU_EMPRUNTE vers_port={} octets={}",
+                        entete.dst_port, donnees.len()
+                    );
+                }
+            }
+        },
+        None => {
+            if trace {
+                crate::serial_println!(
+                    "[ladybird-bouchaud] M17_UDP_SANS_DESTINATAIRE src={}.{}.{}.{}:{} vers_port={} octets={}",
+                    source[0], source[1], source[2], source[3],
+                    entete.src_port, entete.dst_port, donnees.len()
+                );
+            }
         }
     }
 }
