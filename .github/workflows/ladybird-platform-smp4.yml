@@ -122,7 +122,7 @@ jobs:
           set -u
           LOG=serie-platform-smp4.log
           : > "$LOG"
-          DEADLINE=$((SECONDS + 360))
+          DEADLINE=$((SECONDS + 600))
 
           qemu-system-x86_64 \
             -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
@@ -157,11 +157,22 @@ jobs:
           grep -aF "SMP4_SCHEDULER online=1 mode=UP-pending-refactor" serie-platform-smp4.log
           grep -aF "BROWSER_HOST_PLATFORM persistent=yes" serie-platform-smp4.log
           grep -aF "BROWSER_HOST_UPSTREAM clipboard=text downloads=FileDownloader" serie-platform-smp4.log
+          grep -aF "PLATFORM_DOM OK" serie-platform-smp4.log
+          grep -aF "PLATFORM_ASYNC OK" serie-platform-smp4.log
+          grep -aF "PLATFORM_TIMER OK" serie-platform-smp4.log
+          grep -aF "PLATFORM_TIMEZONE OK" serie-platform-smp4.log
           grep -aF "PLATFORM_CANVAS OK" serie-platform-smp4.log
+          grep -aF "PLATFORM_IMAGE_PNG OK" serie-platform-smp4.log
+          grep -aF "PLATFORM_IMAGE_JPEG OK" serie-platform-smp4.log
+          grep -aF "PLATFORM_IMAGE_PIXELS OK" serie-platform-smp4.log
+          grep -aF "PLATFORM_IMAGE_ERREUR OK" serie-platform-smp4.log
           grep -aF "PLATFORM_WORKER OK" serie-platform-smp4.log
           grep -aF "PLATFORM_WASM OK" serie-platform-smp4.log
           grep -aF "PLATFORM_INDEXEDDB OK" serie-platform-smp4.log
-          grep -aF "PLATFORM_FULL_OK passed=8/8" serie-platform-smp4.log
+          grep -aF "PLATFORM_NAVIGATION OK" serie-platform-smp4.log
+          grep -aF "PLATFORM_HISTORIQUE OK" serie-platform-smp4.log
+          grep -aF "PLATFORM_RECHARGEMENT OK" serie-platform-smp4.log
+          grep -aF "PLATFORM_FULL_OK passed=19/19" serie-platform-smp4.log
 
       - name: Journaux
         if: always()
