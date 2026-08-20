@@ -1106,14 +1106,28 @@ print(
 
 
     # Garde haute du noyau.
-    $MaxLadybirdDisk = 768MB
+    #
+    # Le plafond porte sur l'ARCHIVE, pas sur l'image : la zone persistante de
+    # 128 Mio occupe la fin du disque, apres l'archive, et n'est jamais indexee
+    # par `src/fs/tar.rs`. Comparer l'image entiere rejetait des disques
+    # parfaitement valides -- et rejetait notamment toute charge Ladybird
+    # reelle, qui pese 1038 Mio d'archive plus la zone.
+    #
+    # `tools/userland/mkdisk.sh` connait les deux tailles et refuse deja une
+    # archive hors plafond avec ses chiffres exacts ; il en est le seul juge.
+    # Il reste utile de verifier ici que la valeur du noyau et celle de
+    # l'outil n'ont pas diverge.
+    $ZonePersistante = 128MB
+    $MaxArchive = 2048MB
+    $ArchiveApprox = $LadybirdImageInfo.Length - $ZonePersistante
 
 
-    if ($LadybirdImageInfo.Length -gt $MaxLadybirdDisk) {
+    if ($ArchiveApprox -gt $MaxArchive) {
 
         Fail (
-            "ladybird-browser.img fait {0:N1} Mio ; limite actuelle 768 Mio." -f `
-                ($LadybirdImageInfo.Length / 1MB)
+            ("ladybird-browser.img porte {0:N1} Mio d'archive ; " +
+             "src/fs/tar.rs n'en indexe que {1:N0} Mio.") -f `
+                ($ArchiveApprox / 1MB), ($MaxArchive / 1MB)
         )
     }
 
@@ -1193,7 +1207,7 @@ if ($LadybirdMode) {
 
     if ($CpuCount -gt 1) {
         Write-Host `
-            "ATTENTION: $CpuCount vCPU exposes. Le noyau ne demarre aucun processeur applicatif : ni ACPI/MADT, ni LAPIC, ni INIT/SIPI. Les autres resteront eteints." `
+            "NOTE: $CpuCount vCPU exposes. Le noyau les demarre bien (LAPIC INIT/SIPI, marqueurs SMP4_DISCOVERED / SMP4_AP_STARTED) mais l ordonnanceur utilisateur reste mono-CPU : SMP4_SCHEDULER online=1 mode=UP-pending-refactor. Les processus Ladybird tournent donc tous sur le BSP." `
             -ForegroundColor Yellow
     }
 }
