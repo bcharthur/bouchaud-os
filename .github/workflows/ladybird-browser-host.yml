@@ -1,0 +1,167 @@
+name: ladybird-browser-host
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["feat/ladybird-browser-host"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ladybird-browser-host-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  browser-host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Outils
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config python3 python3-dev python3-venv perl \
+            clang lld ccache cmake ninja-build git curl wget gnupg lsb-release \
+            zip unzip tar xz-utils file autoconf autoconf-archive automake \
+            libtool libltdl-dev gettext m4 nasm bison flex libssl-dev \
+            libedit-dev linux-libc-dev mesa-common-dev ca-certificates \
+            qemu-system-x86
+
+          LLVM_VERSION=20
+          if ! command -v "clang-${LLVM_VERSION}" >/dev/null 2>&1; then
+            CODENAME="$(lsb_release -sc)"
+            wget -qO /tmp/llvm-snapshot.gpg.key https://apt.llvm.org/llvm-snapshot.gpg.key
+            sudo gpg --dearmor --yes -o /usr/share/keyrings/llvm-snapshot.gpg.gpg /tmp/llvm-snapshot.gpg.key
+            echo "deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg.gpg] https://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-${LLVM_VERSION} main" \
+              | sudo tee /etc/apt/sources.list.d/llvm-${LLVM_VERSION}.list
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends \
+              "clang-${LLVM_VERSION}" "lld-${LLVM_VERSION}" "llvm-${LLVM_VERSION}"
+          fi
+
+      - name: Cache Ladybird
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/ladybird
+            third_party/vcpkg-gfx
+            third_party/vcpkg-downloads
+            third_party/vcpkg-browser-manifest
+            ~/.cache/vcpkg
+            ~/.cache/ccache
+          key: browser-host-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md', 'tools/ladybird/**') }}
+          restore-keys: |
+            browser-host-${{ runner.os }}-
+
+      - name: Construire runtime + BrowserHost
+        run: tools/ladybird/native-browser-final.sh --cible
+
+      - name: Verifier artefacts
+        run: |
+          set -eux
+          OUT=third_party/native-browser-bouchaud
+          for f in BouchaudBrowserHost WebContent RequestServer ImageDecoder WebWorker Compositor; do
+            test -f "$OUT/$f"
+            file "$OUT/$f"
+            ! readelf -l "$OUT/$f" | grep -q INTERP
+          done
+          du -h "$OUT"/* || true
+
+      - name: Construire noyau
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          cargo install bootimage --locked
+          cargo bootimage
+
+      - name: Demarrer fixture BrowserHost
+        run: |
+          python3 tools/health/browser_host_fixture.py > fixture-browser-host.log 2>&1 &
+          echo $! > fixture-browser-host.pid
+          sleep 1
+          kill -0 "$(cat fixture-browser-host.pid)"
+
+      - name: Fabriquer disque BrowserHost
+        run: |
+          set -eux
+          OUT=third_party/native-browser-bouchaud
+          SCENARIO=scenario-browser-host
+
+          mkdir -p "$SCENARIO/usr/libexec/ladybird" "$SCENARIO/usr/share/ladybird" "$SCENARIO/etc/ssl/certs"
+
+          for f in BouchaudBrowserHost WebContent RequestServer ImageDecoder WebWorker Compositor; do
+            cp "$OUT/$f" "$SCENARIO/usr/libexec/ladybird/$f"
+            chmod 755 "$SCENARIO/usr/libexec/ladybird/$f"
+          done
+
+          if [ -d "$OUT/resources" ]; then
+            cp -a "$OUT/resources/." "$SCENARIO/usr/share/ladybird/"
+          fi
+
+          cp /etc/ssl/certs/ca-certificates.crt "$SCENARIO/etc/ssl/certs/ca-certificates.crt"
+
+          cat > "$SCENARIO/autorun" <<'SCENARIO_EOF'
+          uname
+          df
+          ifconfig
+          echo "=== Bouchaud BrowserHost upstream ==="
+          export BOUCHAUD_BROWSER_HOST=1
+          export BOUCHAUD_BROWSER_HOST_URL='http://10.0.2.2:18082/browser-host.html'
+          /usr/libexec/ladybird/BouchaudBrowserHost
+          SCENARIO_EOF
+
+          (cd tools/userland && IMAGE="$GITHUB_WORKSPACE/ladybird-browser-host.img" ./mkdisk.sh "$GITHUB_WORKSPACE/$SCENARIO")
+          stat -c 'BrowserHost disk: %s bytes' ladybird-browser-host.img
+          test "$(stat -c '%s' ladybird-browser-host.img)" -le $((768 * 1024 * 1024))
+
+      - name: Executer BrowserHost
+        run: |
+          set -u
+          LOG=serie-browser-host.log
+          : > "$LOG"
+          DEADLINE=$((SECONDS + 300))
+
+          qemu-system-x86_64 \
+            -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            -drive format=raw,file=ladybird-browser-host.img \
+            -m 8192 -display none -no-reboot \
+            -netdev user,id=net0 -device e1000,netdev=net0 \
+            -audiodev none,id=muet -device AC97,audiodev=muet \
+            -serial file:"$LOG" &
+          PID=$!
+
+          while kill -0 "$PID" 2>/dev/null; do
+            grep -aFq "HOST_SMOKE_OK canvas=1 worker=1" "$LOG" && break
+            if (( SECONDS >= DEADLINE )); then break; fi
+            sleep 0.5
+          done
+
+          kill -TERM "$PID" 2>/dev/null || true
+          sleep 1
+          kill -KILL "$PID" 2>/dev/null || true
+          wait "$PID" 2>/dev/null || true
+          cat "$LOG"
+
+      - name: Verdict
+        run: |
+          set -e
+          grep -aF "[ladybird-bouchaud] BROWSER_HOST_START" serie-browser-host.log
+          grep -aF "[ladybird-bouchaud] BROWSER_HOST_INITIALIZED" serie-browser-host.log
+          grep -aF "HOST_CANVAS OK" serie-browser-host.log
+          grep -aF "HOST_WORKER OK pong" serie-browser-host.log
+          grep -aF "HOST_SMOKE_OK canvas=1 worker=1" serie-browser-host.log
+          grep -F "BROWSER_HOST_FIXTURE_OK path=/browser-host.html" fixture-browser-host.log
+
+      - name: Journaux
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-host-logs
+          path: |
+            serie-browser-host.log
+            fixture-browser-host.log
+          if-no-files-found: warn
