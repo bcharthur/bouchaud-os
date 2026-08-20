@@ -45,9 +45,15 @@ JPEG = base64.b64decode(
 # annonce son identite au document parent : c'est ce qui permet de savoir vers
 # quelle page `history.back()` est reellement revenu.
 def page_navigation(nom: str) -> bytes:
+    # Le message part sur `load`, pas pendant l'analyse du document. Une page
+    # qui s'annonce avant d'avoir fini de charger fait enchainer la navigation
+    # suivante trop tot : l'entree d'historique de la premiere n'est pas encore
+    # validee, la seconde la REMPLACE au lieu de s'empiler, et un `back()`
+    # ulterieur remonte alors au-dela de l'iframe -- jusqu'au document de tete.
     return (
         "<!doctype html><meta charset=utf-8><title>%s</title>"
-        "<script>parent.postMessage('NAV:%s', '*')</script>" % (nom, nom)
+        "<script>addEventListener('load', () => parent.postMessage('NAV:%s', '*'))</script>"
+        % (nom, nom)
     ).encode()
 
 
@@ -65,6 +71,15 @@ PAGE_TELECHARGEMENT = (
 ).encode()
 
 
+# Sonde HTTPS : un fichier du depot, fige par un SHA, donc au contenu connu.
+# On y verifie le SHA upstream epingle -- c'est-a-dire que la page a bien lu le
+# fichier qui le porte, et pas une page d'erreur.
+HTTPS_SONDE_URL = (
+    "https://raw.githubusercontent.com/bcharthur/bouchaud-os/"
+    "df706e739cb98ca959aa29ba627462ac89eefa8c/third_party/UPSTREAM.md"
+)
+HTTPS_SONDE_ATTENDU = "cdfe5f858eb5fc64a8d9d3fcc247d71b03fbd1f6"
+
 PAGE = r'''<!doctype html>
 <meta charset="utf-8">
 <title>Bouchaud Ladybird full platform</title>
@@ -72,6 +87,8 @@ PAGE = r'''<!doctype html>
 <iframe id="cadre" style="width:120px;height:60px"></iframe>
 <script>
 (async () => {
+  const HTTPS_SONDE_URL = "__HTTPS_SONDE_URL__";
+  const HTTPS_SONDE_ATTENDU = "__HTTPS_SONDE_ATTENDU__";
   const results = {};
   const mark = (name, ok, detail = "") => {
     results[name] = !!ok;
@@ -166,6 +183,40 @@ PAGE = r'''<!doctype html>
   await essaie("fetch", 15000, async () => {
     const response = await fetch("/api");
     return response.ok && (await response.text()) === "fetch-ok";
+  });
+
+  // --- reseau reel : DNS, TLS 1.3, chaine de certification ----------------
+  //
+  // La fixture locale prouve HTTP jusqu'a 10.0.2.2, pas davantage. Ces deux
+  // tests-ci sortent de la machine :
+  //
+  // - `https` exige une resolution DNS reelle, une poignee de main TLS et la
+  //   validation de la chaine contre /etc/ssl/certs/ca-certificates.crt. Le
+  //   contenu attendu est fige par un SHA, donc le test reste deterministe :
+  //   il verifie le SHA upstream epingle, dans le fichier qui le porte.
+  //
+  // - `reseau_echec` verifie qu'un nom qui NE PEUT PAS resoudre -- `.invalid`
+  //   est reserve pour cela par la RFC 2606 -- fait echouer la requete SANS
+  //   emporter le moteur. Le test ne vaut que par sa seconde moitie : apres
+  //   l'echec, une requete valide doit encore aboutir.
+
+  await essaie("https", 45000, async () => {
+    const reponse = await fetch(HTTPS_SONDE_URL);
+    if (!reponse.ok) return false;
+    const texte = await reponse.text();
+    return texte.includes(HTTPS_SONDE_ATTENDU);
+  });
+
+  await essaie("reseau_echec", 45000, async () => {
+    let rompu = false;
+    try {
+      await fetch("https://nom-qui-ne-resout-pas.bouchaud.invalid/");
+    } catch (e) {
+      rompu = true;
+    }
+    // Le moteur doit encore repondre apres l'echec.
+    const apres = await fetch("/api");
+    return rompu && apres.ok && (await apres.text()) === "fetch-ok";
   });
 
   // --- DOM, JS, promesses, minuteries ------------------------------------
@@ -282,10 +333,25 @@ PAGE = r'''<!doctype html>
   });
 
   await essaie("historique", 30000, async () => {
-    // Retour arriere reel, entre deux documents distincts.
+    // `history.back()` traverse l'historique de session CONJOINT. Si l'iframe
+    // n'a pas empile sa propre entree, le retour remonte au document de tete et
+    // detruit la page de test : plus aucun marqueur ne peut alors s'imprimer,
+    // pas meme un echec, et le journal devient muet. Mesure dans Chromium :
+    //
+    //     13.1s  NAV[iframe] /nav-deux.html
+    //     13.1s  PLATFORM_NAVIGATION OK
+    //     13.2s  NAV[TETE] about:blank      <- la page de test a disparu
+    //
+    // On verifie donc que l'iframe a bien deux entrees avant de reculer. Si ce
+    // n'est pas le cas, le test ECHOUE au lieu d'emporter tout le reste.
+    const avant = cadre.contentWindow.history.length;
+    if (avant < 2) return `historique iframe trop court (${avant})`;
+
+    const tete = location.href;
     await attend_page("un", () => cadre.contentWindow.history.back());
+    if (location.href !== tete) return "le retour a deplace le document de tete";
     await attend_page("deux", () => cadre.contentWindow.history.forward());
-    return true;
+    return location.href === tete;
   });
 
   await essaie("rechargement", 30000, async () => {
@@ -301,6 +367,7 @@ PAGE = r'''<!doctype html>
     "canvas", "worker", "wasm", "indexeddb",
     "image_png", "image_jpeg", "image_pixels", "image_erreur",
     "navigation", "historique", "rechargement",
+    "https", "reseau_echec",
   ];
   const rates = required.filter(k => !results[k]);
   const bons = required.length - rates.length;
@@ -392,6 +459,8 @@ BLOC_PROCESSUS = r'''
 
 PAGE = PAGE.replace("  // --- navigation, historique, rechargement --------------------------------",
                     BLOC_PROCESSUS + "\n  // --- navigation, historique, rechargement --------------------------------")
+PAGE = PAGE.replace("__HTTPS_SONDE_URL__", HTTPS_SONDE_URL)
+PAGE = PAGE.replace("__HTTPS_SONDE_ATTENDU__", HTTPS_SONDE_ATTENDU)
 
 
 class Handler(BaseHTTPRequestHandler):
