@@ -1622,10 +1622,29 @@ pub fn python_selftest() {
 
 pub fn disk_placeholder(cmd: &str) {
     vga::set_color(COLOR_YELLOW);
-    println!("{}: stockage persistant non active dans V0.6", cmd);
+    println!("{}: pas encore implemente", cmd);
     vga::set_color(COLOR_DEFAULT);
-    println!("  actuel: RAMFS volatil monte sur /");
+    println!("  actuel: RAMFS volatil monte sur /, zone persistante sur {}", crate::fs::persistance::RACINE);
     println!("  roadmap: block device -> virtio-blk -> BFS (Bouchaud File System) persistant");
+}
+
+/// `sync` : ecrit la zone persistante sur le disque de donnees.
+///
+/// La commande annoncait jusqu'ici que « le stockage persistant n'est pas
+/// active dans V0.6 », alors que `/persist` existe et que les programmes y
+/// ecrivent deja par `fsync`. C'etait le seul moyen depuis le shell de prouver
+/// qu'un fichier survit a un redemarrage, et il mentait. Elle appelle donc
+/// maintenant la meme primitive que l'appel systeme : `persistance::synchronise`.
+pub fn sync_persistant() -> i32 {
+    let ecrits = crate::fs::persistance::synchronise();
+    if ecrits < 0 {
+        vga::set_color(COLOR_YELLOW);
+        println!("sync: zone persistante indisponible (disque de donnees trop petit ou absent)");
+        vga::set_color(COLOR_DEFAULT);
+        return 1;
+    }
+    println!("sync: {} fichier(s) ecrit(s) sous {}", ecrits, crate::fs::persistance::RACINE);
+    0
 }
 
 // ---------------------------------------------------------------------------

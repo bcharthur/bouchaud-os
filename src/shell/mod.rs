@@ -770,9 +770,10 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "tls" => { crate::net::tls_cmd(argc, &argv); 0 }
         "dhcp" => { crate::net::dhcp::run(); 0 }
 
-        // Disque (placeholders, roadmap BFS)
+        // Disque
         "df" => { crate::drivers::disk::print_df(); 0 }
-        "mount" | "sync" | "mkfs.bfs" => { c::disk_placeholder(argv[0]); 0 }
+        "sync" => c::sync_persistant(),
+        "mount" | "mkfs.bfs" => { c::disk_placeholder(argv[0]); 0 }
 
         // Git — contrôle de version natif
         "git" => crate::git::cmd(argc, &argv, *cwd),

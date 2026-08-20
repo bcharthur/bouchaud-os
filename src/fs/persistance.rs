@@ -20,9 +20,11 @@
 //!
 //! ```text
 //! secteur 0            en-tete : magie, version, nombre d'entrees
-//! secteurs 1 a 128     table : 256 entrees de 256 octets (chemin, taille)
-//! secteurs 129 a ...   contenu, chaque fichier aligne sur un secteur
+//! secteurs 1 a 1024    table : 2048 entrees de 256 octets (chemin, taille)
+//! secteurs 1025 a ...  contenu, chaque fichier aligne sur un secteur
 //! ```
+//!
+//! La zone entiere occupe `SECTEURS_ZONE` secteurs, soit 128 Mio.
 //!
 //! Aucune allocation de blocs, aucune table d'inodes : la zone est reecrite en
 //! entier a chaque `sync`. C'est ce qui convient a quelques mega-octets ecrits
@@ -66,7 +68,10 @@ const SECTEURS_TABLE: u64 = (ENTREES_MAX * TAILLE_ENTREE / SECTOR_SIZE) as u64;
 /// Premier secteur du contenu, relatif au debut de la zone.
 const SECTEUR_CONTENU: u64 = 1 + SECTEURS_TABLE;
 
-/// Taille de la zone, en secteurs. 8 Mio.
+/// Taille de la zone, en secteurs. 128 Mio.
+///
+/// `tools/userland/mkdisk.sh` ajoute exactement autant de secteurs nuls a la
+/// fin de l'image : les deux valeurs doivent bouger ensemble.
 const SECTEURS_ZONE: u64 = 262144;
 
 /// Racine des fichiers persistants dans le RAMFS.
@@ -76,6 +81,11 @@ pub const RACINE: &str = "/persist";
 ///
 /// La zone occupe la fin du disque. Un disque trop petit pour la porter n'en a
 /// pas : mieux vaut aucune persistance qu'une persistance qui ecrase l'archive.
+///
+/// Le seuil porte sur la zone **augmentee de son en-tete et de sa table** : une
+/// image dont l'archive tient dans moins de `SECTEUR_CONTENU` secteurs n'aurait
+/// pas de quoi ecrire une table complete. `mkdisk.sh` complete donc la region
+/// d'archive jusqu'a ce plancher avant d'ajouter la zone.
 fn debut() -> Option<u64> {
     let (_, secteurs) = ata::capacities();
     if secteurs <= SECTEURS_ZONE + SECTEUR_CONTENU {
