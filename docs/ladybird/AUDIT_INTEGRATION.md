@@ -414,7 +414,7 @@ Légende : ✅ intégré et prouvé · 🟡 intégré, non prouvé ou incomplet 
 
 ---
 
-## 8. Google : où exactement la poignée de main casse
+## 8. Google : la poignée de main ne casse plus
 
 Ce qu'on sait, et qui n'est pas rien :
 
@@ -444,7 +444,32 @@ Sur demande (`BOUCHAUD_CURL_TRACE=1`), la trace verbeuse de curl donne la
 poignée de main étape par étape.
 
 Un job d'intégration continue, informatif, vise `google.com` avec cette trace
-allumée. **La réponse arrivera de la CI, pas d'une hypothèse.**
+allumée. **La réponse est arrivée de la CI, pas d'une hypothèse** — et elle
+dit que la négociation réussit :
+
+```
+CURL * SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384 / X25519MLKEM768 / id-ecPublicKey
+CURL * OpenSSL verify result: 0
+CURL * SSL certificate verified via OpenSSL.
+```
+
+TLS 1.3, échange de clés post-quantique X25519MLKEM768, chaîne vérifiée. La
+trace montre ensuite une conversation HTTPS complète avec `play.google.com`,
+en-têtes et `alt-svc` compris, et aucun `RS_ECHEC`.
+
+**Ce que cela ne dit pas encore :** que la page s'affiche. Le verdict de ce job
+n'imprimait que la trace curl ; il imprime désormais aussi les marqueurs de
+navigation, et le prochain cycle tranchera. Réussir une poignée de main et
+afficher une page sont deux questions distinctes.
+
+**Sur la cause de l'échec observé en local**, aucune affirmation : rien dans
+cette branche ne touche au handshake, aux versions de protocole ni aux
+autorités. Deux différences plausibles subsistent avec la mesure locale — un
+magasin d'autorités différent (`tools/ladybird/certs/cacert.pem` côté `run.ps1`,
+`tls/public-ca.crt` côté CI) et surtout un processeur qui n'est plus tenu à
+97 % par la boucle de repeinture, ce qui change tout pour des poignées de main
+simultanées. Le refaire en local avec un artefact de cette branche est la
+mesure qui départagera.
 
 ---
 
