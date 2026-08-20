@@ -208,8 +208,18 @@ void ConnectionFromClient::bouchaud_m11_start()
         };
     }
 
-    // 16 ms : la cadence du bureau (`docs/GUI_USERLAND_PROTOCOL.md` §7). Aller
-    // plus vite ne ferait que voler du processeur au moteur sur un cœur unique.
+    // Bouchaud n'ordonnance que sur le processeur d'amorcage : chaque trame
+    // est prise au moteur, pas ajoutee a cote. Trente par seconde suffisent a
+    // un defilement fluide et laissent la moitie du cœur au reste — analyse,
+    // script, reseau. C'est LibWeb qui fait respecter ce plafond, dans
+    // `PageClient::request_frame()`.
+    if (auto page = this->page(page_id); page.has_value())
+        page->set_maximum_frames_per_second(30.0);
+
+    // 16 ms : la cadence du bureau (`docs/GUI_USERLAND_PROTOCOL.md` §7). Ce
+    // minuteur ne demande plus de trame de page — il lit les entrees et
+    // recompose la barre d'outils quand elle a change. Voir
+    // tools/ladybird/prepare-repaint.py.
     m_bouchaud_gui_timer = Core::Timer::create_repeating(16, [] {
         BouchaudChrome::tick();
     });

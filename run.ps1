@@ -17,16 +17,16 @@ param(
 
     # Page de depart du mode interactif.
     #
-    # La fixture locale, et non un site public, parce que c'est le seul chemin
-    # reseau **prouve** de bout en bout. Resoudre un nom bloque encore : la CI
-    # du 18 aout montre RequestServer a 50 % de processeur pendant cinq minutes
-    # sur `https://example.com/`, alors que la meme pile chargeait
-    # `https://10.0.2.2:18443/` en quinze secondes quatre minutes plus tot. Voir
-    # `docs/ladybird/M12_HTTPS.md`, section "Ce qui bloque encore".
+    # La raison de choisir une fixture locale a disparu : elle tenait a ce que
+    # resoudre un nom bloquait cinq minutes, ce que la correction DNS a leve
+    # (`tools/ladybird/prepare-dns-une-question.py`). Un navigateur dont la page
+    # d'accueil vit sur la machine de developpement n'est pas un navigateur.
     #
-    # Une page de depart qui se fige cinq minutes serait un plus mauvais accueil
-    # qu'une page locale qui s'affiche. La barre d'adresse est la pour le reste.
-    [string]$LadybirdUrl = "http://10.0.2.2:18080/m9.html",
+    # `example.com` plutot qu'un site riche : c'est la seule page publique dont
+    # la chaine complete - nom, DNS, TCP, TLS, HTTP, analyse, mise en page,
+    # peinture, ecran - soit verte en integration continue. La barre d'adresse
+    # est la pour le reste, et elle marche.
+    [string]$LadybirdUrl = "https://example.com/",
 
     # Retire la barre d'outils M11 et revient au comportement de M9 : une seule
     # capture, aucune entree. Utile pour isoler une regression entre le moteur
@@ -355,23 +355,26 @@ if ($LadybirdMode) {
 
 
     # -------------------------------------------------------------------------
-    # M8 n'a besoin QUE de WebContent + bootstrap.
+    # Services embarques.
+    #
+    # ImageDecoder n'est pas facultatif, meme pour une page locale : c'est lui
+    # qui installe `Web::Platform::ImageCodecPlugin` dans WebContent. Sans le
+    # greffon, la premiere balise <img> rencontree fait tomber
+    # `VERIFY(s_the)` - c'est ce qui tuait WebContent sur Wikipedia.
     #
     # RequestServer :
-    #   inutile avant M9 reseau.
-    #
-    # ImageDecoder :
-    #   inutile pour la page HTML locale M8.
+    #   DNS, TCP, TLS, HTTP. Inutile pour la page locale.
     #
     # WebWorker :
-    #   inutile pour M8.
-    #
-    # Cela evite de gonfler le disque a ~654 Mio.
+    #   pas encore lance : il exige un processus hote capable de repondre au
+    #   message synchrone `StartWorkerAgent`. Voir
+    #   docs/ladybird/AUDIT_INTEGRATION.md.
     # -------------------------------------------------------------------------
 
     if ($IsLadybirdM8) {
         $RequiredLadybirdFiles = @(
             "WebContent",
+            "ImageDecoder",
             "webcontent-bootstrap"
         )
     }
@@ -379,6 +382,7 @@ if ($LadybirdMode) {
         $RequiredLadybirdFiles = @(
             "WebContent",
             "RequestServer",
+            "ImageDecoder",
             "webcontent-bootstrap",
             "M9_CAPABLE"
         )
@@ -603,6 +607,17 @@ if ($LadybirdMode) {
 
 
     # =========================================================================
+    # ImageDecoder
+    #
+    # Toujours copie : les images ne dependent pas du jalon reseau.
+    # =========================================================================
+
+    Copy-Item `
+        (Join-Path $NativeBrowserDir "ImageDecoder") `
+        (Join-Path $LadybirdLibexec "ImageDecoder")
+
+
+    # =========================================================================
     # Bootstrap
     # =========================================================================
 
@@ -638,6 +653,38 @@ if ($LadybirdMode) {
         $LadybirdShare `
         -Recurse `
         -Force
+
+
+    # =========================================================================
+    # Configuration fontconfig
+    #
+    # Elle voyage normalement avec les ressources de l'artefact. On la repose
+    # depuis le depot quand l'artefact est anterieur a son introduction : sans
+    # elle, le gestionnaire de polices de Skia ne voit aucune police et tout le
+    # repli de familles CSS disparait. Voir tools/ladybird/fontconfig/fonts.conf.
+    # =========================================================================
+
+    $FontconfigTarget = Join-Path $LadybirdShare "fontconfig"
+
+    if (-not (Test-Path (Join-Path $FontconfigTarget "fonts.conf"))) {
+
+        $FontconfigSource = Join-Path `
+            $RepoRoot `
+            "tools\ladybird\fontconfig\fonts.conf"
+
+        if (Test-Path $FontconfigSource) {
+
+            New-Item `
+                -ItemType Directory `
+                -Path $FontconfigTarget `
+                -Force | Out-Null
+
+            Copy-Item `
+                $FontconfigSource `
+                (Join-Path $FontconfigTarget "fonts.conf") `
+                -Force
+        }
+    }
 
 
     # =========================================================================
@@ -813,17 +860,17 @@ if not root.is_dir():
     )
 
 
-# M8 minimal :
+# Le bit d'execution ne survit pas a un checkout Windows : cette liste le
+# repose au moment d'archiver. Tout binaire ajoute au scenario doit y figurer,
+# sinon Bouchaud refuse de l'executer.
 #
-# Pas de RequestServer.
-# Pas d'ImageDecoder.
-# Pas de WebWorker.
-#
-# Ils seront introduits quand leur jalon les utilisera vraiment.
+# WebWorker n'y est pas : il n'est pas encore lance faute de processus hote
+# capable de repondre a `StartWorkerAgent`.
 executables = {
     "bo-navigateur",
     "usr/libexec/ladybird/WebContent",
     "usr/libexec/ladybird/RequestServer",
+    "usr/libexec/ladybird/ImageDecoder",
     "usr/libexec/ladybird/webcontent-bootstrap",
 }
 
@@ -1231,23 +1278,23 @@ if ($LadybirdMode) {
 
     if ($IsLadybirdM8) {
         $ModeLabel = "Ladybird natif M8"
-        $ServiceLabel = "WebContent uniquement (regression M8)"
-        $BrowserChain = "/bo-navigateur -> bootstrap -> WebContent"
+        $ServiceLabel = "WebContent + ImageDecoder (regression locale)"
+        $BrowserChain = "/bo-navigateur -> bootstrap -> ImageDecoder + WebContent"
     }
     elseif ($IsLadybirdM9Test) {
         $ModeLabel = "Ladybird natif M9 TEST HTTP"
-        $ServiceLabel = "WebContent + RequestServer"
-        $BrowserChain = "/bo-navigateur -> bootstrap -> RequestServer + WebContent"
+        $ServiceLabel = "WebContent + RequestServer + ImageDecoder"
+        $BrowserChain = "/bo-navigateur -> bootstrap -> ImageDecoder + RequestServer + WebContent"
     }
     elseif ($LadybirdChrome) {
         $ModeLabel = "Bouchaud Navigateur (Ladybird M11)"
-        $ServiceLabel = "WebContent + RequestServer"
-        $BrowserChain = "/bo-navigateur -> bootstrap -> RequestServer + WebContent + chrome"
+        $ServiceLabel = "WebContent + RequestServer + ImageDecoder"
+        $BrowserChain = "/bo-navigateur -> bootstrap -> ImageDecoder + RequestServer + WebContent + chrome"
     }
     else {
         $ModeLabel = "Ladybird natif M9 interactif (sans chrome)"
-        $ServiceLabel = "WebContent + RequestServer"
-        $BrowserChain = "/bo-navigateur -> bootstrap -> RequestServer + WebContent"
+        $ServiceLabel = "WebContent + RequestServer + ImageDecoder"
+        $BrowserChain = "/bo-navigateur -> bootstrap -> ImageDecoder + RequestServer + WebContent"
     }
 
     Write-Host `

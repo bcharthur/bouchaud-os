@@ -39,6 +39,13 @@ const S_IFREG: u32 = 0o100000;
 const S_IFDIR: u32 = 0o40000;
 const S_IFCHR: u32 = 0o20000;
 const S_IFIFO: u32 = 0o10000;
+/// `S_IFSOCK`. Une socket doit se declarer comme telle : `S_ISSOCK` est la
+/// seule facon pour un programme de verifier qu'un descripteur herite est bien
+/// un canal de communication et non un fichier quelconque. Ladybird s'en sert
+/// avant d'adopter la socket que son lanceur lui passe
+/// (`LibCore/SystemServerTakeover.cpp`), et refuse le descripteur si `fstat`
+/// repond autre chose.
+const S_IFSOCK: u32 = 0o140000;
 
 // --- Chemins ----------------------------------------------------------------
 
@@ -994,6 +1001,14 @@ pub fn sys_fstat(fd: i32, out: u64) -> i64 {
         FdKind::File(node) | FdKind::Dir(node) => fill_stat(node),
         FdKind::Console => stat_bytes(0, S_IFCHR | 0o620, 0, 0, 0),
         FdKind::Pipe(_, _) => stat_bytes(0, S_IFIFO | 0o600, 0, 0, 0),
+        // Les deux sortes de sockets. Sans ce cas, elles tombaient dans le
+        // fourre-tout `S_IFCHR` ci-dessous et `S_ISSOCK` etait faux : le
+        // lanceur de Ladybird passe ses services par `SOCKET_TAKEOVER`, et le
+        // service refusait le descripteur avant meme d'ouvrir sa boucle
+        // d'evenements.
+        FdKind::Socket(_) | FdKind::SocketPair(_, _) => {
+            stat_bytes(0, S_IFSOCK | 0o777, 0, 0, 0)
+        }
         // Un fichier ordinaire, avec sa taille : la glibc dimensionne le tampon
         // de `fopen` dessus. Le declarer caractere ferait lire octet par octet.
         FdKind::Instantane(ref contenu) => {
@@ -2293,4 +2308,80 @@ fn write_itimerspec(addr: u64, interval_ticks: u64, value_ticks: u64) {
         user_write(addr + offset, &seconds.to_le_bytes());
         user_write(addr + offset + 8, &nanos.to_le_bytes());
     }
+}
+
+// --- Statistiques de systeme de fichiers -------------------------------------
+
+/// `statfs` / `fstatfs` : `struct statfs` de 120 octets (x86_64).
+///
+/// ## Pourquoi ce n'est pas un bouchon
+///
+/// Ladybird interroge l'espace disque par `statvfs`, et la glibc sert
+/// `statvfs`/`fstatvfs` a partir de `statfs`/`fstatfs`. Le seul appelant du
+/// portage est `LibHTTP/Cache/CacheIndex.cpp`, qui dimensionne le cache HTTP
+/// sur l'espace **libre** :
+///
+///     auto disk_space = TRY(FileSystem::compute_disk_space(cache_directory));
+///     auto maximum = compute_maximum_disk_cache_size(disk_space.free_bytes);
+///
+/// Rendre `0` ferait donc un cache de taille nulle, et rendre `ENOSYS` fait
+/// echouer l'initialisation du cache. Les deux sont des reponses fausses, pas
+/// une absence de reponse.
+///
+/// Sur Bouchaud le systeme de fichiers est en memoire vive : son espace libre
+/// **est** la memoire libre. C'est ce que rend cette implementation, avec le
+/// nombre reel de frames disponibles et le nombre reel de nœuds RAMFS encore
+/// alloues. Aucune de ces valeurs n'est inventee.
+fn statfs_bytes() -> [u8; 120] {
+    const BLOC: u64 = 4096;
+    let (_, frames_libres, frames_totales) = crate::kernel::vmm::frame_stats();
+    let fs = crate::fs::ramfs::fs();
+    let nœuds_utilises = fs.used_nodes() as u64;
+    let nœuds_totaux = crate::fs::ramfs::MAX_NODES as u64;
+
+    let mut buffer = [0u8; 120];
+    // f_type : `RAMFS_MAGIC`, la valeur que Linux rend pour un tmpfs/ramfs.
+    // Certains programmes s'en servent pour savoir qu'un chemin est volatil.
+    buffer[0..8].copy_from_slice(&0x8584_58f6u64.to_le_bytes()); // f_type
+    buffer[8..16].copy_from_slice(&BLOC.to_le_bytes()); // f_bsize
+    buffer[16..24].copy_from_slice(&(frames_totales as u64).to_le_bytes()); // f_blocks
+    buffer[24..32].copy_from_slice(&(frames_libres as u64).to_le_bytes()); // f_bfree
+    buffer[32..40].copy_from_slice(&(frames_libres as u64).to_le_bytes()); // f_bavail
+    buffer[40..48].copy_from_slice(&nœuds_totaux.to_le_bytes()); // f_files
+    buffer[48..56].copy_from_slice(&(nœuds_totaux - nœuds_utilises).to_le_bytes()); // f_ffree
+    // `f_fsid` ne fait que **huit** octets (deux entiers 32 bits), pas seize :
+    // les champs suivants commencent donc a 64 et 72, et non a 72 et 80.
+    // Decales, ils laissaient `f_namelen` a zero et faisaient passer 255 pour
+    // `f_frsize` — or `compute_disk_space` calcule `f_bavail * f_frsize`, donc
+    // l'espace libre etait annonce seize fois trop petit.
+    // f_fsid (56..64) laisse a zero : un seul systeme de fichiers.
+    buffer[64..72].copy_from_slice(&255u64.to_le_bytes()); // f_namelen
+    buffer[72..80].copy_from_slice(&BLOC.to_le_bytes()); // f_frsize
+    // f_flags (80..88) laisse a zero : aucun ST_RDONLY, ST_NOSUID ni ST_NOEXEC
+    // n'est vrai ici, et 4096 s'y retrouvait par le meme decalage.
+    buffer
+}
+
+/// `statfs(chemin, buf)`.
+pub fn sys_statfs(path_addr: u64, out: u64) -> i64 {
+    let path = match crate::kernel::abi::resolve_user_path(path_addr) {
+        Some(path) => absolute(&path),
+        None => return -errno::EFAULT,
+    };
+    // Le chemin doit exister : c'est la seule difference observable avec
+    // `fstatfs`, et un appelant qui teste un repertoire de cache absent doit
+    // recevoir `ENOENT` plutot qu'une taille.
+    if resolve(&path).is_none() && device_for_path(&path).is_none() {
+        return -errno::ENOENT;
+    }
+    if user_write(out, &statfs_bytes()) { 0 } else { -errno::EFAULT }
+}
+
+/// `fstatfs(fd, buf)`.
+pub fn sys_fstatfs(fd: i32, out: u64) -> i64 {
+    let process = task::current_process();
+    if process.borrow().files.get(fd).is_none() {
+        return -errno::EBADF;
+    }
+    if user_write(out, &statfs_bytes()) { 0 } else { -errno::EFAULT }
 }

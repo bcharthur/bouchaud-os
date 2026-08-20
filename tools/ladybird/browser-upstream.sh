@@ -31,6 +31,11 @@ python3 tools/ladybird/prepare-m9-source.py "$SRC"
 python3 tools/ladybird/prepare-m9-diagnostics.py "$SRC"
 python3 tools/ladybird/prepare-m16-dns.py "$SRC"
 python3 tools/ladybird/prepare-dns-une-question.py "$SRC"
+python3 tools/ladybird/prepare-image-decoder.py "$SRC"
+python3 tools/ladybird/prepare-repaint.py "$SRC"
+python3 tools/ladybird/prepare-tls-diagnostic.py "$SRC"
+python3 tools/ladybird/prepare-browser-host.py "$SRC"
+python3 tools/ladybird/prepare-console.py "$SRC"
 python3 tools/ladybird/prepare-m11-chrome.py "$SRC"
 python3 tools/ladybird/prepare-browser-runtime-link.py "$SRC"
 
@@ -261,22 +266,36 @@ say "== build WebContent + services =="
 # epingle. Il reste visible comme warning, sans couper la traversee Ninja.
 cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target WebContent -- -k 0
 
-# Services de processus utiles au chemin CPU-only. Le target GPU upstream est
-# `Compositor`, pas `WebContentCompositor`; on ne le construit volontairement
-# pas ici car Bouchaud vise Skia CPU -> shared surface -> WM, sans ANGLE/OpenGL.
-for target in RequestServer ImageDecoder WebWorker; do
+# ImageDecoder n'est plus facultatif : c'est lui qui installe
+# `Web::Platform::ImageCodecPlugin` dans WebContent, et sans greffon la
+# premiere image d'un vrai site fait tomber `VERIFY(s_the)`. Un build qui ne le
+# produit pas doit echouer ici, pas vingt-cinq minutes plus tard dans QEMU.
+#
+# Le target GPU upstream est `Compositor`, pas `WebContentCompositor` ; on ne le
+# construit volontairement pas ici car Bouchaud vise Skia CPU -> surface
+# partagee -> gestionnaire de fenetres, sans ANGLE/OpenGL.
+# Compositor est construit mais **pas encore lance** : il debloque le canvas 2D
+# (voir docs/ladybird/AUDIT_INTEGRATION.md section 4) et n'exige pas de GPU —
+# `main.cpp` n'ouvre un contexte que si `--force-cpu-painting` est absent. Le
+# construire ici donne sa taille reelle a l'etape suivante, qui devra decider
+# de l'embarquer ou non dans un disque deja proche de son plafond.
+for target in RequestServer ImageDecoder WebWorker Compositor; do
     if ninja -C "$BUILD" -t targets all 2>/dev/null | grep -q "^${target}:"; then
         cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target "$target" -- -k 0
+    elif [ "$target" = "ImageDecoder" ]; then
+        echo "ERREUR: la cible ImageDecoder a disparu de l'arbre Ladybird" >&2
+        exit 1
     fi
 done
 
 OUT="$ROOT/third_party/native-browser-bouchaud"
 rm -rf "$OUT"
 mkdir -p "$OUT"
-find "$BUILD" -type f \( -name WebContent -o -name RequestServer -o -name ImageDecoder -o -name WebWorker \) -perm -111 -exec cp -f {} "$OUT/" \;
+find "$BUILD" -type f \( -name WebContent -o -name RequestServer -o -name ImageDecoder -o -name WebWorker -o -name Compositor \) -perm -111 -exec cp -f {} "$OUT/" \;
 
 [ -x "$OUT/WebContent" ] || { echo "WebContent non produit" >&2; exit 1; }
-[ -x "$OUT/RequestServer" ] || { echo "RequestServer non produit (M9 requis)" >&2; exit 1; }
+[ -x "$OUT/RequestServer" ] || { echo "RequestServer non produit (reseau requis)" >&2; exit 1; }
+[ -x "$OUT/ImageDecoder" ] || { echo "ImageDecoder non produit (images requises)" >&2; exit 1; }
 printf 'Bouchaud Ladybird M9 capable
 pinned=%s
 ' "$(git -C "$LB" rev-parse HEAD)" > "$OUT/M9_CAPABLE"
@@ -286,9 +305,15 @@ if [ -d "$SRC/Base/res" ]; then
     cp -a "$SRC/Base/res/." "$OUT/resources/"
 fi
 
+# La configuration fontconfig voyage avec les ressources : elle designe le
+# repertoire de polices qu'on vient d'y copier, et les deux doivent arriver
+# ensemble sur le disque Bouchaud. Voir tools/ladybird/fontconfig/fonts.conf.
+mkdir -p "$OUT/resources/fontconfig"
+cp -f "$ROOT/tools/ladybird/fontconfig/fonts.conf" "$OUT/resources/fontconfig/fonts.conf"
+
 # `file` peut varier selon la version du runner; readelf est l'invariant utile
 # pour Bouchaud : aucun PT_INTERP ne doit demander ld-linux au demarrage.
-for runtime in WebContent RequestServer ImageDecoder WebWorker; do
+for runtime in WebContent RequestServer ImageDecoder WebWorker Compositor; do
     [ -x "$OUT/$runtime" ] || continue
     file "$OUT/$runtime" | tee "$OUT/$runtime.file.txt"
     if readelf -l "$OUT/$runtime" | grep -q 'INTERP'; then
