@@ -66,10 +66,17 @@ remplacement = """void PageClient::did_output_js_console_message(WebView::Consol
                     // `as_string()` n'existe que pour une chaine ; les autres
                     // valeurs se serialisent en JSON, ce qui est exactement ce
                     // que la console d'upstream affiche.
-                    if (argument.is_string())
-                        texte.append(argument.as_string());
-                    else
-                        texte.append(argument.serialized());
+                    // `String` ne se convertit pas implicitement en
+                    // `StringView` dans AK : il faut la vue, explicitement. Et
+                    // `serialized()` rend par valeur — AK supprime justement
+                    // `bytes_as_string_view()` sur un temporaire, alors on
+                    // nomme la valeur au lieu de la laisser pendre.
+                    if (argument.is_string()) {
+                        texte.append(argument.as_string().bytes_as_string_view());
+                    } else {
+                        auto serialise = argument.serialized();
+                        texte.append(serialise.bytes_as_string_view());
+                    }
                 }
                 // `LogLevel` n'a pas de conversion en chaine dans l'arbre
                 // epingle ; on nomme les niveaux qui comptent pour un journal
@@ -88,9 +95,11 @@ remplacement = """void PageClient::did_output_js_console_message(WebView::Consol
             [](WebView::ConsoleError const& erreur) {
                 outln("[ladybird-bouchaud] JS_CONSOLE_ERREUR {} : {}", erreur.name, erreur.message);
                 for (auto const& cadre : erreur.trace) {
+                    // Vues plutot que `value_or` : cela evite de construire
+                    // une `String` par cadre juste pour un mot par defaut.
                     outln("[ladybird-bouchaud] JS_CONSOLE_CADRE {} {}:{}",
-                        cadre.function.value_or("(anonyme)"_string),
-                        cadre.file.value_or("(inconnu)"_string),
+                        cadre.function.has_value() ? cadre.function->bytes_as_string_view() : "(anonyme)"sv,
+                        cadre.file.has_value() ? cadre.file->bytes_as_string_view() : "(inconnu)"sv,
                         cadre.line.value_or(0));
                 }
             },
@@ -109,7 +118,9 @@ data = data.replace(ancre, remplacement, 1)
 if "#include <LibWebView/ConsoleOutput.h>" not in data:
     data = data.replace(
         "#include <WebContent/WebUIConnection.h>",
-        "#include <LibWebView/ConsoleOutput.h>\n#include <WebContent/WebUIConnection.h>",
+        "#include <AK/StringBuilder.h>\n"
+        "#include <LibWebView/ConsoleOutput.h>\n"
+        "#include <WebContent/WebUIConnection.h>",
         1,
     )
 
