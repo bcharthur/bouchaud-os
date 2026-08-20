@@ -80,18 +80,54 @@ static mut SECTORS: [u64; 2] = [0, 0];
 static mut PROBED: bool = false;
 
 /// Attend que le controleur ne soit plus occupe. `false` en cas de blocage.
+/// Attend la fin de l'occupation du controleur.
+///
+/// Le budget est exprime en TEMPS, pas en tours de boucle. Quatre millions de
+/// lectures de port ne representent aucune duree connue : sous emulation, elles
+/// peuvent s'ecouler en bien moins de temps qu'il n'en faut au controleur pour
+/// terminer une commande, et l'attente rendait alors « occupe » un disque
+/// parfaitement sain. C'est ce qu'a montre le run 32427434260 :
+///
+///     [kernel] ata: ecriture lba=2128427 occupee, statut=0xc0 erreur=0x00
+///
+/// 0xC0 vaut BSY|DRDY et le registre d'erreur est vide : aucune faute, juste
+/// une commande pas encore finie. La norme ATA autorise des commandes longues ;
+/// on borne donc genereusement, et en secondes.
+///
+/// Le compteur de tours reste comme filet : au tout debut du demarrage, la
+/// sonde des disques tourne avant que le minuteur n'avance, et une borne
+/// exprimee en ticks ne progresserait jamais.
 fn wait_not_busy() -> bool {
-    for _ in 0..4_000_000u32 {
+    const TOURS_MAX: u64 = 400_000_000;
+    let debut = crate::kernel::timer::ticks();
+    let limite = 5 * crate::kernel::timer::TICKS_PER_SECOND;
+    let mut tours = 0u64;
+    loop {
         if unsafe { inb(STATUS) } & ST_BUSY == 0 {
             return true;
         }
+        tours += 1;
+        if tours > TOURS_MAX {
+            return false;
+        }
+        if crate::kernel::timer::ticks().wrapping_sub(debut) > limite {
+            return false;
+        }
     }
-    false
 }
 
 /// Attend que des donnees soient disponibles.
+/// Attend que des donnees soient disponibles.
+///
+/// Meme raison que [`wait_not_busy`] pour la borne en temps. Une erreur
+/// signalee par le controleur, elle, rend la main tout de suite : c'est une
+/// reponse, pas une attente.
 fn wait_data_ready() -> bool {
-    for _ in 0..4_000_000u32 {
+    const TOURS_MAX: u64 = 400_000_000;
+    let debut = crate::kernel::timer::ticks();
+    let limite = 5 * crate::kernel::timer::TICKS_PER_SECOND;
+    let mut tours = 0u64;
+    loop {
         let status = unsafe { inb(STATUS) };
         if status & (ST_ERR | ST_DF) != 0 {
             return false;
@@ -99,8 +135,14 @@ fn wait_data_ready() -> bool {
         if status & ST_BUSY == 0 && status & ST_DRQ != 0 {
             return true;
         }
+        tours += 1;
+        if tours > TOURS_MAX {
+            return false;
+        }
+        if crate::kernel::timer::ticks().wrapping_sub(debut) > limite {
+            return false;
+        }
     }
-    false
 }
 
 /// Registre de controle (ecriture) : meme port que le statut alternatif.
