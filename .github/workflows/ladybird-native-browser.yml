@@ -1020,3 +1020,196 @@ jobs:
           name: ladybird-internet-serie
           path: serie-ladybird-net.log
           if-no-files-found: warn
+
+  qemu-google-tls:
+    name: TLS-google.com (informatif, diagnostic)
+    runs-on: ubuntu-latest
+    needs: build
+    # Informatif, et il doit le rester. Une panne d'un site tiers ne peut pas
+    # rendre rouge une CI dont le role est de mesurer Bouchaud. Le resultat se
+    # lit ; il ne bloque pas. C'est la separation demandee entre invariants
+    # deterministes et essais reels.
+    continue-on-error: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+
+      - name: Cache cargo noyau
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Construire le noyau
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          cargo install bootimage --locked
+          cargo bootimage
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+
+      - name: Preparer le magasin d'autorites publiques
+        run: |
+          set -e
+          mkdir -p tls
+          cp /etc/ssl/certs/ca-certificates.crt tls/public-ca.crt
+          test -s tls/public-ca.crt
+          sha256sum tls/public-ca.crt
+
+      - name: Fabriquer le disque Google
+        run: |
+          set -e
+          MAX_DATA_DISK=$((768 * 1024 * 1024))
+
+          mkdir -p scenario-google/usr/libexec/ladybird scenario-google/usr/share/ladybird
+          cp native-browser/WebContent scenario-google/usr/libexec/ladybird/WebContent
+          cp native-browser/RequestServer scenario-google/usr/libexec/ladybird/RequestServer
+          test -f native-browser/ImageDecoder
+          cp native-browser/ImageDecoder scenario-google/usr/libexec/ladybird/ImageDecoder
+          cp native-browser/webcontent-bootstrap scenario-google/usr/libexec/ladybird/webcontent-bootstrap
+          cp native-browser/webcontent-bootstrap scenario-google/bo-navigateur
+          chmod 755 scenario-google/bo-navigateur scenario-google/usr/libexec/ladybird/*
+
+          if [ -d native-browser/resources ]; then
+            cp -a native-browser/resources/. scenario-google/usr/share/ladybird/
+          fi
+
+          # Uniquement les autorites publiques : la cible est un vrai site, et
+          # l'autorite de test n'aurait rien a y faire.
+          mkdir -p scenario-google/etc/ssl/certs
+          cp tls/public-ca.crt scenario-google/etc/ssl/certs/ca-certificates.crt
+
+          cat > scenario-google/autorun <<'SCENARIO'
+          uname
+          df
+          ifconfig
+          echo "=== Ladybird : poignee de main TLS, https://www.google.com ==="
+          export BO_AUTOSTART_BROWSER=1
+          export BOUCHAUD_M9=1
+          export BOUCHAUD_M9_TEST=1
+          export BOUCHAUD_M9_URL='https://www.google.com/'
+          # La trace verbeuse de curl : chaque etape de la poignee de main,
+          # dans l'ordre. Voir tools/ladybird/prepare-tls-diagnostic.py.
+          export BOUCHAUD_CURL_TRACE=1
+          desktop
+          SCENARIO
+
+          (cd tools/userland && IMAGE="$GITHUB_WORKSPACE/ladybird-google.img" ./mkdisk.sh "$GITHUB_WORKSPACE/scenario-google")
+          DISK_SIZE=$(stat -c '%s' ladybird-google.img)
+          echo "hdb Internet: $DISK_SIZE octets"
+          test "$DISK_SIZE" -le "$MAX_DATA_DISK"
+
+      - name: Executer l'essai Google en ring3
+        run: |
+          set -u
+          LOG=serie-ladybird-google.log
+          SUCCESS='[ladybird-bouchaud] RESULTAT : M9 HTTP distant dans fenetre Bouchaud OK'
+          DEADLINE=$((SECONDS + 300))
+          : > "$LOG"
+
+          qemu-system-x86_64 \
+            -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            -drive format=raw,file=ladybird-google.img \
+            -m 4096 -display none -no-reboot \
+            -netdev user,id=net0 -device e1000,netdev=net0 \
+            -audiodev none,id=muet -device AC97,audiodev=muet \
+            -serial file:"$LOG" &
+          QEMU_PID=$!
+          echo "qemu: pid $QEMU_PID"
+
+          SUCCESS_SEEN=0
+          while kill -0 "$QEMU_PID" 2>/dev/null; do
+            if grep -Fq "$SUCCESS" "$LOG" 2>/dev/null; then
+              SUCCESS_SEEN=1
+              echo "qemu: succes M9 detecte, arret anticipe"
+              kill -TERM "$QEMU_PID" 2>/dev/null || true
+              break
+            fi
+            if (( SECONDS >= DEADLINE )); then
+              echo "qemu: timeout M9 apres 300 s"
+              kill -TERM "$QEMU_PID" 2>/dev/null || true
+              break
+            fi
+            sleep 0.25
+          done
+
+          for _ in $(seq 1 20); do
+            kill -0 "$QEMU_PID" 2>/dev/null || break
+            sleep 0.1
+          done
+          if kill -0 "$QEMU_PID" 2>/dev/null; then
+            kill -KILL "$QEMU_PID" 2>/dev/null || true
+          fi
+
+          set +e
+          wait "$QEMU_PID"
+          QEMU_CODE=$?
+          set -e
+          echo "qemu: code $QEMU_CODE success=$SUCCESS_SEEN"
+          cat "$LOG"
+
+          # Pas de `cat fixture-m12.log` ici : la fixture TLS appartient au job
+          # M12, qui tourne ailleurs. Le lire depuis ce job faisait echouer
+          # l'etape sous `set -e` a *chaque* execution complete, et sautait
+          # silencieusement le verdict qui suit — les assertions DNS/TLS que ce
+          # job existe pour porter n'etaient donc jamais evaluees. L'essai
+          # Internet n'a pas de fixture : c'est tout son objet.
+
+      - name: Verdict TLS Google
+        run: |
+          # Ce job est informatif : quand il echoue, ce qu'on veut savoir n'est
+          # pas *qu'il* a echoue mais **jusqu'ou** la chaine est allee. Les
+          # `grep` d'assertion qui suivent ne peuvent pas le dire : sous
+          # `set -e`, le premier qui manque coupe l'etape, et tout ce qui aurait
+          # situe l'arret reste dans un journal que personne n'ouvre. On imprime
+          # donc la trace d'abord, assertions ensuite.
+          echo "--- analyse d'URL, navigation, RequestServer, DNS ---"
+          # Tous les marqueurs, sans exception, plus les paniques.
+          #
+          # Deux fois de suite, un motif ecrit a la main a coute une conclusion
+          # fausse : `M17_RING` manquait de la liste, puis `M9_DOCUMENT_` en
+          # aurait manque a son tour. Un filtre qui ne peut pas montrer ce qu'on
+          # cherche est pire que pas de filtre — il repond « rien » avec la meme
+          # assurance que s'il avait regarde.
+          #
+          # Le journal serie de ce scenario pese six kilooctets : il n'y a rien
+          # a economiser en choisissant, et tout a perdre en se trompant.
+          #
+          # Les fautes du noyau en font partie. `ECHEC M9 WebContent signal=11`
+          # dit qu'un processus est mort ; `[cpu] faute de page en ring 3 :
+          # rip=… cr2=…` et `[memfabric] FAULT_FATAL … vma=… backing=` disent
+          # **ou**. Le noyau les imprimait deja ; c'est le filtre qui les
+          # cachait — la troisieme fois que ce piege se referme ici.
+          grep -aE "\[ladybird-bouchaud\]|\[memfabric\] FAULT|\[cpu\]|faute de page|panic" \
+              serie-ladybird-google.log || echo "(aucun marqueur)"
+          # La derniere ligne de charge par processus. Elle dit qui prend le
+          # processeur, et c'est la seule mesure qui distingue « la machine
+          # attend » de « la machine tourne a vide » — les deux se ressemblent
+          # dans un journal, et pas du tout dans une main sur le ventilateur.
+          echo "--- charge par processus (dernier releve) ---"
+          grep -F "[ps]" serie-ladybird-google.log | tail -2 || echo "(aucun releve)"
+          echo "--- poignee de main TLS (trace curl) ---"
+          grep -aF "[ladybird-bouchaud] CURL" serie-ladybird-google.log || echo "(aucune trace curl)"
+          echo "--- raison de l'echec, telle que curl la donne ---"
+          grep -aF "[ladybird-bouchaud] RS_ECHEC" serie-ladybird-google.log || echo "(aucun echec RequestServer)"
+          echo "--- ce job est un diagnostic : il n'affirme rien, il montre ---"
+
+      - name: Journaux TLS Google
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-google-tls-serie
+          path: serie-ladybird-google.log
+          if-no-files-found: warn
