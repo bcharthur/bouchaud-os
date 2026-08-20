@@ -150,6 +150,9 @@ pub const STATFS: u64 = 137;
 pub const FSTATFS: u64 = 138;
 pub const UTIMENSAT: u64 = 280;
 pub const SYMLINK: u64 = 88;
+pub const LINK: u64 = 86;
+/// `inotify_init1` : surveillance de fichiers. Voir `nr::name`.
+pub const INOTIFY_INIT1: u64 = 294;
 pub const SETRLIMIT: u64 = 160;
 pub const SIGALTSTACK: u64 = 131;
 pub const RT_SIGSUSPEND: u64 = 130;
@@ -314,6 +317,8 @@ pub fn name(number: u64) -> &'static str {
         FSTATFS => "fstatfs",
         UTIMENSAT => "utimensat",
         SYMLINK => "symlink",
+        LINK => "link",
+        INOTIFY_INIT1 => "inotify_init1",
         _ => "?",
     }
 }

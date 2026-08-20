@@ -375,6 +375,8 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         UNLINK => file::sys_unlink(args[0]),
         UNLINKAT => file::sys_unlink(args[1]),
         RENAME => file::sys_rename(args[0], args[1]),
+        STATFS => file::sys_statfs(args[0], args[1]),
+        FSTATFS => file::sys_fstatfs(args[0] as i32, args[1]),
         FTRUNCATE => file::sys_ftruncate(args[0] as i32, args[1] as usize),
         DUP => file::sys_dup(args[0] as i32),
         DUP2 => file::sys_dup2(args[0] as i32, args[1] as i32),
@@ -621,7 +623,25 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
 
         _ => {
             unsafe { LAST_UNKNOWN = number };
-            crate::serial_println!("[syscall] non implemente : {} ({})", number, nr::name(number));
+            // Le numero seul ne dit pas *qui* appelle, et c'est la seule chose
+            // qui permette de decider entre implementer la vraie semantique et
+            // documenter pourquoi l'appel est facultatif. `frame.rip` est
+            // l'adresse de retour ring 3 sauvegardee par `syscall` ; les
+            // binaires Ladybird sont des PIE statiques charges a
+            // `user_load_base()`, donc la difference est directement un
+            // deplacement dans le fichier :
+            //
+            //     addr2line -f -C -e WebContent <offset>
+            let base = crate::kernel::vmm::user_load_base();
+            let offset = frame.rip.wrapping_sub(base);
+            crate::serial_println!(
+                "[syscall] non implemente : {} ({}) appelant={} rip={:#x} offset={:#x}",
+                number,
+                nr::name(number),
+                task::current_process().borrow().name,
+                frame.rip,
+                offset
+            );
             -errno::ENOSYS
         }
     }
