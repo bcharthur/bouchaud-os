@@ -274,7 +274,12 @@ cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target WebContent -- 
 # Le target GPU upstream est `Compositor`, pas `WebContentCompositor` ; on ne le
 # construit volontairement pas ici car Bouchaud vise Skia CPU -> surface
 # partagee -> gestionnaire de fenetres, sans ANGLE/OpenGL.
-for target in RequestServer ImageDecoder WebWorker; do
+# Compositor est construit mais **pas encore lance** : il debloque le canvas 2D
+# (voir docs/ladybird/AUDIT_INTEGRATION.md section 4) et n'exige pas de GPU —
+# `main.cpp` n'ouvre un contexte que si `--force-cpu-painting` est absent. Le
+# construire ici donne sa taille reelle a l'etape suivante, qui devra decider
+# de l'embarquer ou non dans un disque deja proche de son plafond.
+for target in RequestServer ImageDecoder WebWorker Compositor; do
     if ninja -C "$BUILD" -t targets all 2>/dev/null | grep -q "^${target}:"; then
         cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target "$target" -- -k 0
     elif [ "$target" = "ImageDecoder" ]; then
@@ -286,7 +291,7 @@ done
 OUT="$ROOT/third_party/native-browser-bouchaud"
 rm -rf "$OUT"
 mkdir -p "$OUT"
-find "$BUILD" -type f \( -name WebContent -o -name RequestServer -o -name ImageDecoder -o -name WebWorker \) -perm -111 -exec cp -f {} "$OUT/" \;
+find "$BUILD" -type f \( -name WebContent -o -name RequestServer -o -name ImageDecoder -o -name WebWorker -o -name Compositor \) -perm -111 -exec cp -f {} "$OUT/" \;
 
 [ -x "$OUT/WebContent" ] || { echo "WebContent non produit" >&2; exit 1; }
 [ -x "$OUT/RequestServer" ] || { echo "RequestServer non produit (reseau requis)" >&2; exit 1; }
@@ -308,7 +313,7 @@ cp -f "$ROOT/tools/ladybird/fontconfig/fonts.conf" "$OUT/resources/fontconfig/fo
 
 # `file` peut varier selon la version du runner; readelf est l'invariant utile
 # pour Bouchaud : aucun PT_INTERP ne doit demander ld-linux au demarrage.
-for runtime in WebContent RequestServer ImageDecoder WebWorker; do
+for runtime in WebContent RequestServer ImageDecoder WebWorker Compositor; do
     [ -x "$OUT/$runtime" ] || continue
     file "$OUT/$runtime" | tee "$OUT/$runtime.file.txt"
     if readelf -l "$OUT/$runtime" | grep -q 'INTERP'; then

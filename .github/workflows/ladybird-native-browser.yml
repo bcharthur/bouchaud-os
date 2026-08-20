@@ -301,7 +301,7 @@ jobs:
           WEB_SIZE=$(stat -c '%s' native-browser/WebContent)
           echo "WebContent: $WEB_SIZE octets"
           test "$WEB_SIZE" -le "$MAX_BOOT_FILE"
-          for svc in RequestServer ImageDecoder WebWorker; do
+          for svc in RequestServer ImageDecoder WebWorker Compositor; do
             [ -f "native-browser/$svc" ] && echo "$svc: $(stat -c '%s' "native-browser/$svc") octets"
           done
 
