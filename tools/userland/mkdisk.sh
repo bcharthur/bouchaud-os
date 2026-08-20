@@ -51,12 +51,13 @@ if [ "$PADDED" -gt "$SIZE" ]; then
 fi
 
 # Plafond de lecture de l'archive, en miroir de `MAX_ARCHIVE_DISK_SIZE` dans
-# `src/fs/tar.rs`. Le noyau n'indexe QUE les premiers 768 Mio du disque : une
-# archive plus grande verrait ses dernieres entrees disparaitre sans que rien
-# ne manque a l'appel cote outil. On refuse donc de fabriquer une telle image,
-# avec les tailles exactes, plutot que de laisser la troncature se decouvrir
-# dans QEMU vingt minutes plus tard.
-ARCHIVE_MAX=$((768 * 1024 * 1024))
+# `src/fs/tar.rs` : les deux valeurs doivent bouger ensemble. Le noyau n'indexe
+# QUE les premiers octets du disque jusqu'a ce plafond ; une archive plus grande
+# verrait ses dernieres entrees disparaitre sans que rien ne manque a l'appel
+# cote outil. On refuse donc de fabriquer une telle image, avec les tailles
+# exactes, plutot que de laisser la troncature se decouvrir dans QEMU vingt
+# minutes plus tard.
+ARCHIVE_MAX=$((2048 * 1024 * 1024))
 if [ "$PADDED" -gt "$ARCHIVE_MAX" ]; then
     echo "mkdisk: archive de $PADDED octets ($((PADDED / 1024 / 1024)) Mio) au-dela du plafond noyau de $ARCHIVE_MAX octets ($((ARCHIVE_MAX / 1024 / 1024)) Mio)" >&2
     echo "mkdisk: src/fs/tar.rs MAX_ARCHIVE_DISK_SIZE borne la lecture de hdb ; reduire la charge utile ou relever les deux ensemble" >&2

@@ -369,11 +369,11 @@ done
 # ici, ou la correction est possible, plutot que dans mkdisk.sh vingt minutes
 # plus tard -- et avec les tailles exactes, jamais par troncature.
 #
-# Le plafond reel est MAX_ARCHIVE_DISK_SIZE (768 Mio, src/fs/tar.rs). On garde
+# Le plafond reel est MAX_ARCHIVE_DISK_SIZE (2 Gio, src/fs/tar.rs). On garde
 # une marge de 64 Mio pour l'en-tete TAR, l'autorun, les certificats et le
 # `webcontent-bootstrap` que l'etape suivante ajoutera.
 CHARGE=$(du -sb "$OUT" | cut -f1)
-PLAFOND=$(( (768 - 64) * 1024 * 1024 ))
+PLAFOND=$(( (2048 - 64) * 1024 * 1024 ))
 printf 'charge utile Bouchaud : %s octets (%s Mio), plafond %s octets (%s Mio)\n' \
     "$CHARGE" "$((CHARGE / 1024 / 1024))" "$PLAFOND" "$((PLAFOND / 1024 / 1024))"
 if [ "$CHARGE" -gt "$PLAFOND" ]; then
