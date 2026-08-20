@@ -898,8 +898,10 @@ if not root.is_dir():
 # repose au moment d'archiver. Tout binaire ajoute au scenario doit y figurer,
 # sinon Bouchaud refuse de l'executer.
 #
-# WebWorker n'y est pas : il n'est pas encore lance faute de processus hote
-# capable de repondre a `StartWorkerAgent`.
+# WebDriver y manquait alors que run.ps1 le copie depuis l'artefact : il
+# arrivait dans l'image sans son bit d'execution, donc present mais
+# inutilisable. C'est precisement ce qu'une verification de presence dans
+# l'artefact ne peut pas voir.
 executables = {
     "bo-navigateur",
     "usr/libexec/ladybird/BouchaudBrowserHost",
@@ -908,6 +910,7 @@ executables = {
     "usr/libexec/ladybird/ImageDecoder",
     "usr/libexec/ladybird/Compositor",
     "usr/libexec/ladybird/WebWorker",
+    "usr/libexec/ladybird/WebDriver",
     "usr/libexec/ladybird/webcontent-bootstrap",
 }
 
