@@ -26,11 +26,15 @@ on:
       - "src/kernel/memory.rs"
       - "src/drivers/gpu.rs"
       - "src/drivers/gfx.rs"
+      # La pile reseau manquait entierement, alors que M9 (HTTP), M12 (HTTPS)
+      # et l'essai Internet en dependent de bout en bout : une correction dans
+      # `poll_ip`, dans l'ABI socket ou dans le pilote de carte ne declenchait
+      # aucun des scenarios qu'elle pouvait casser.
+      - "src/net/**"
+      - "src/kernel/abi/net.rs"
+      - "src/drivers/e1000.rs"
       - "src/arch/x86_64/cpu.rs"
       - "src/arch/x86_64/idt.rs"
-      - "docs/ladybird/**"
-      - "src/fs/tar.rs"
-      - "src/gui/window.rs"
       - ".github/workflows/ladybird-native-browser.yml"
   pull_request:
     paths:
@@ -55,16 +59,31 @@ on:
       - "src/kernel/memory.rs"
       - "src/drivers/gpu.rs"
       - "src/drivers/gfx.rs"
+      # La pile reseau manquait entierement, alors que M9 (HTTP), M12 (HTTPS)
+      # et l'essai Internet en dependent de bout en bout : une correction dans
+      # `poll_ip`, dans l'ABI socket ou dans le pilote de carte ne declenchait
+      # aucun des scenarios qu'elle pouvait casser.
+      - "src/net/**"
+      - "src/kernel/abi/net.rs"
+      - "src/drivers/e1000.rs"
       - "src/arch/x86_64/cpu.rs"
       - "src/arch/x86_64/idt.rs"
-      - "docs/ladybird/**"
-      - "src/fs/tar.rs"
-      - "src/gui/window.rs"
       - ".github/workflows/ladybird-native-browser.yml"
 
 concurrency:
   group: ladybird-native-browser-${{ github.ref }}
   cancel-in-progress: true
+
+
+# Jeton au minimum de ses droits.
+#
+# Sans bloc `permissions`, le `GITHUB_TOKEN` d'un travail herite du reglage du
+# depot — historiquement l'ecriture sur tout. Un workflow qui ne fait que lire
+# le code, construire et televerser des artefacts n'a besoin que de le lire :
+# une etape compromise (une action tierce, une dependance) ne peut alors pas
+# ecrire dans le depot. `actions/upload-artifact` n'utilise pas ce jeton.
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -931,8 +950,30 @@ jobs:
           # situe l'arret reste dans un journal que personne n'ouvre. On imprime
           # donc la trace d'abord, assertions ensuite.
           echo "--- analyse d'URL, navigation, RequestServer, DNS ---"
-          grep -E "M15_URL|M9_URL_INVALID|M9_NAVIGATION_|M9_RS_|M13_DNS_|M14_DNS_" \
-              serie-ladybird-net.log || echo "(aucun de ces marqueurs)"
+          # Tous les marqueurs, sans exception, plus les paniques.
+          #
+          # Deux fois de suite, un motif ecrit a la main a coute une conclusion
+          # fausse : `M17_RING` manquait de la liste, puis `M9_DOCUMENT_` en
+          # aurait manque a son tour. Un filtre qui ne peut pas montrer ce qu'on
+          # cherche est pire que pas de filtre — il repond « rien » avec la meme
+          # assurance que s'il avait regarde.
+          #
+          # Le journal serie de ce scenario pese six kilooctets : il n'y a rien
+          # a economiser en choisissant, et tout a perdre en se trompant.
+          #
+          # Les fautes du noyau en font partie. `ECHEC M9 WebContent signal=11`
+          # dit qu'un processus est mort ; `[cpu] faute de page en ring 3 :
+          # rip=… cr2=…` et `[memfabric] FAULT_FATAL … vma=… backing=` disent
+          # **ou**. Le noyau les imprimait deja ; c'est le filtre qui les
+          # cachait — la troisieme fois que ce piege se referme ici.
+          grep -aE "\[ladybird-bouchaud\]|\[memfabric\] FAULT|\[cpu\]|faute de page|panic" \
+              serie-ladybird-net.log || echo "(aucun marqueur)"
+          # La derniere ligne de charge par processus. Elle dit qui prend le
+          # processeur, et c'est la seule mesure qui distingue « la machine
+          # attend » de « la machine tourne a vide » — les deux se ressemblent
+          # dans un journal, et pas du tout dans une main sur le ventilateur.
+          echo "--- charge par processus (dernier releve) ---"
+          grep -F "[ps]" serie-ladybird-net.log | tail -2 || echo "(aucun releve)"
           echo "--- assertions ---"
           grep -F "[ladybird-bouchaud] M12_CA_BUNDLE /etc/ssl/certs/ca-certificates.crt" serie-ladybird-net.log
           grep -F "[ladybird-bouchaud] M12_DNS_SERVER 10.0.2.3 port=53 tls=false" serie-ladybird-net.log
