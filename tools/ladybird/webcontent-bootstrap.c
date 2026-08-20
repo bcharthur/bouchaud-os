@@ -1,11 +1,18 @@
-// Bouchaud M7/M8/M9 bootstrap.
+// Lanceur des services Ladybird sous Bouchaud OS.
 //
-// M8: WebContent only, finite local-HTML regression test.
-// M9: RequestServer + WebContent connected with a real Ladybird IPC socket.
-//     RequestServer performs HTTP through Bouchaud's POSIX socket ABI.
+// Il tient la place que le processus UI occupe chez upstream : creer les paires
+// de sockets, demarrer chaque service, et donner a WebContent le descripteur de
+// chacun. Les services sont les binaires upstream, non modifies pour deux
+// d'entre eux (ImageDecoder par `SOCKET_TAKEOVER`, exactement comme
+// `LibWebView/Process.cpp`).
 //
-// The process launched by the WM remains this bootstrap, so closing the Bouchaud
-// window terminates the whole descendant tree (RequestServer + WebContent).
+// Services demarres :
+//   ImageDecoder   decodage PNG/JPEG/WebP/GIF/... hors du moteur
+//   RequestServer  DNS, TCP, TLS, HTTP           (chemin reseau)
+//   WebContent     le moteur lui-meme
+//
+// Le processus lance par le gestionnaire de fenetres reste ce lanceur : fermer
+// la fenetre Bouchaud termine donc tout l'arbre de descendants.
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
@@ -17,6 +24,10 @@
 
 #define WEBCONTENT_CONTROL_FD 100
 #define REQUESTSERVER_FD 101
+// Cote service : le descripteur que `SOCKET_TAKEOVER` nomme a ImageDecoder.
+#define IMAGEDECODER_SERVICE_FD 102
+// Cote moteur : le descripteur que WebContent adopte pour parler au decodeur.
+#define IMAGEDECODER_CLIENT_FD 103
 
 static int fail(char const* what) {
     fprintf(stderr, "[ladybird-bouchaud] ECHEC %s: %s\n", what, strerror(errno));
@@ -39,6 +50,42 @@ static void terminate_child(pid_t pid) {
     sleep(1);
     kill(pid, SIGKILL);
     waitpid(pid, NULL, 0);
+}
+
+// ImageDecoder, lance exactement comme le lanceur d'upstream le fait
+// (`LibWebView/Process.cpp`) : une paire de sockets, `SOCKET_TAKEOVER` qui
+// nomme l'extremite du service, et le binaire upstream **non modifie** qui
+// l'adopte par `IPC::take_over_accepted_client_from_system_server`.
+//
+// Le service refuse le descripteur si `fstat` ne le declare pas `S_ISSOCK` :
+// c'est une verification d'upstream, et c'est elle qui a fait remonter le
+// defaut correspondant dans `sys_fstat` du noyau.
+static pid_t launch_image_decoder(char const* path, int service_fd, int other_fd) {
+    pid_t pid = fork();
+    if (pid != 0)
+        return pid;
+
+    if (dup2(service_fd, IMAGEDECODER_SERVICE_FD) < 0)
+        _exit(140);
+
+    if (service_fd != IMAGEDECODER_SERVICE_FD)
+        close(service_fd);
+    if (other_fd >= 0 && other_fd != IMAGEDECODER_SERVICE_FD)
+        close(other_fd);
+
+    char takeover[48];
+    snprintf(takeover, sizeof(takeover), "ImageDecoder:%d", IMAGEDECODER_SERVICE_FD);
+    setenv("SOCKET_TAKEOVER", takeover, 1);
+
+    char* const args[] = {
+        (char*)path,
+        (char*)"--disable-sandbox",
+        NULL
+    };
+
+    execv(path, args);
+    perror("exec ImageDecoder");
+    _exit(141);
 }
 
 static pid_t launch_request_server(char const* path, int server_fd, int other_fd) {
@@ -97,12 +144,50 @@ static pid_t launch_request_server(char const* path, int server_fd, int other_fd
     _exit(131);
 }
 
+// Demarre le service de decodage et rend le descripteur destine au moteur.
+//
+// Rend -1 si le binaire n'est pas installe. Ce cas n'est pas silencieux : le
+// journal le dit ici, WebContent le redit au demarrage, et la premiere image
+// rencontree fera tomber `VERIFY(s_the)` — c'est-a-dire que l'absence se voit
+// avant de couter une execution complete.
+static pid_t start_image_decoder(char const* path, int* client_fd) {
+    *client_fd = -1;
+
+    if (access(path, X_OK) != 0) {
+        printf("[ladybird-bouchaud] IMAGE_DECODER_INTROUVABLE %s\n", path);
+        fflush(stdout);
+        return -1;
+    }
+
+    int pair[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) < 0) {
+        fail("socketpair ImageDecoder");
+        return -1;
+    }
+
+    pid_t pid = launch_image_decoder(path, pair[0], pair[1]);
+    if (pid < 0) {
+        close(pair[0]);
+        close(pair[1]);
+        fail("fork ImageDecoder");
+        return -1;
+    }
+
+    close(pair[0]);
+    *client_fd = pair[1];
+    printf("[ladybird-bouchaud] IMAGE_DECODER_LANCE pid=%d fd=%d\n", (int)pid, pair[1]);
+    fflush(stdout);
+    return pid;
+}
+
 static pid_t launch_webcontent(
     char const* path,
     int control_child,
     int control_parent,
     int request_child,
     int request_parent,
+    int image_child,
+    int image_parent,
     int m9)
 {
     pid_t pid = fork();
@@ -114,6 +199,12 @@ static pid_t launch_webcontent(
 
     if (m9 && dup2(request_child, REQUESTSERVER_FD) < 0)
         _exit(122);
+
+    // Le decodeur d'images ne depend d'aucun jalon : il sert la page locale
+    // comme le site distant. Son descripteur suit donc sa propre disponibilite,
+    // pas `m9`.
+    if (image_child >= 0 && dup2(image_child, IMAGEDECODER_CLIENT_FD) < 0)
+        _exit(123);
 
     if (control_child != WEBCONTENT_CONTROL_FD)
         close(control_child);
@@ -127,6 +218,13 @@ static pid_t launch_webcontent(
             close(request_parent);
     }
 
+    if (image_child >= 0) {
+        if (image_child != IMAGEDECODER_CLIENT_FD)
+            close(image_child);
+        if (image_parent >= 0 && image_parent != IMAGEDECODER_CLIENT_FD)
+            close(image_parent);
+    }
+
     char control_fd[16];
     snprintf(control_fd, sizeof(control_fd), "%d", WEBCONTENT_CONTROL_FD);
     setenv("BOUCHAUD_WEBCONTENT_FD", control_fd, 1);
@@ -135,6 +233,12 @@ static pid_t launch_webcontent(
         char request_fd[16];
         snprintf(request_fd, sizeof(request_fd), "%d", REQUESTSERVER_FD);
         setenv("BOUCHAUD_REQUEST_FD", request_fd, 1);
+    }
+
+    if (image_child >= 0) {
+        char image_fd[16];
+        snprintf(image_fd, sizeof(image_fd), "%d", IMAGEDECODER_CLIENT_FD);
+        setenv("BOUCHAUD_IMAGEDECODER_FD", image_fd, 1);
     }
 
     char* const args[] = {
@@ -152,17 +256,27 @@ static pid_t launch_webcontent(
     _exit(121);
 }
 
-static int run_m8(char const* webcontent) {
+static int run_m8(char const* webcontent, char const* imagedecoder) {
+    // Le decodeur part en premier : il n'herite ainsi d'aucun descripteur des
+    // autres canaux, et la fermeture de la fenetre continue de propager son EOF
+    // a qui de droit.
+    int image_fd = -1;
+    pid_t image_pid = start_image_decoder(imagedecoder, &image_fd);
+
     int control[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, control) < 0)
         return fail("socketpair M8 control");
 
     pid_t web_pid = launch_webcontent(
-        webcontent, control[1], control[0], -1, -1, 0);
-    if (web_pid < 0)
+        webcontent, control[1], control[0], -1, -1, image_fd, -1, 0);
+    if (web_pid < 0) {
+        terminate_child(image_pid);
         return fail("fork WebContent");
+    }
 
     close(control[1]);
+    if (image_fd >= 0)
+        close(image_fd);
 
     printf("[ladybird-bouchaud] WebContent lance pid=%d\n", (int)web_pid);
     fflush(stdout);
@@ -181,6 +295,7 @@ static int run_m8(char const* webcontent) {
             printf("[ladybird-bouchaud] RESULTAT : M8 HTML local dans fenetre Bouchaud OK\n");
             fflush(stdout);
             sleep(2);
+            terminate_child(image_pid);
             close(control[0]);
             return 0;
         }
@@ -190,6 +305,7 @@ static int run_m8(char const* webcontent) {
         else if (WIFSIGNALED(status))
             printf("[ladybird-bouchaud] ECHEC M8 WebContent signal=%d\n", WTERMSIG(status));
         fflush(stdout);
+        terminate_child(image_pid);
         close(control[0]);
         return 2;
     }
@@ -197,13 +313,19 @@ static int run_m8(char const* webcontent) {
     printf("[ladybird-bouchaud] ECHEC M8 timeout WebContent\n");
     fflush(stdout);
     terminate_child(web_pid);
+    terminate_child(image_pid);
     close(control[0]);
     return 3;
 }
 
-static int run_m9(char const* webcontent, char const* requestserver) {
+static int run_m9(char const* webcontent, char const* requestserver, char const* imagedecoder) {
     int control[2];
     int request[2];
+
+    // Meme raison qu'en M8 : le decodeur d'abord, avant que les autres paires
+    // n'existent, pour qu'il n'en herite aucune extremite.
+    int image_fd = -1;
+    pid_t image_pid = start_image_decoder(imagedecoder, &image_fd);
 
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, control) < 0)
         return fail("socketpair M9 control");
@@ -218,15 +340,18 @@ static int run_m9(char const* webcontent, char const* requestserver) {
     fflush(stdout);
 
     pid_t web_pid = launch_webcontent(
-        webcontent, control[1], control[0], request[1], request[0], 1);
+        webcontent, control[1], control[0], request[1], request[0], image_fd, -1, 1);
     if (web_pid < 0) {
         terminate_child(request_pid);
+        terminate_child(image_pid);
         return fail("fork WebContent");
     }
 
     close(control[1]);
     close(request[0]);
     close(request[1]);
+    if (image_fd >= 0)
+        close(image_fd);
 
     printf("[ladybird-bouchaud] WebContent lance pid=%d\n", (int)web_pid);
     fflush(stdout);
@@ -250,6 +375,7 @@ static int run_m9(char const* webcontent, char const* requestserver) {
             printf("\n");
             fflush(stdout);
             terminate_child(web_pid);
+            terminate_child(image_pid);
             close(control[0]);
             return 4;
         }
@@ -265,6 +391,7 @@ static int run_m9(char const* webcontent, char const* requestserver) {
             fflush(stdout);
 
             terminate_child(request_pid);
+            terminate_child(image_pid);
             sleep(2);
             close(control[0]);
             return 0;
@@ -277,6 +404,7 @@ static int run_m9(char const* webcontent, char const* requestserver) {
         fflush(stdout);
 
         terminate_child(request_pid);
+        terminate_child(image_pid);
         close(control[0]);
         return 5;
     }
@@ -289,18 +417,21 @@ int main(int argc, char** argv) {
     char const* requestserver = argc > 2
         ? argv[2]
         : "/usr/libexec/ladybird/RequestServer";
+    char const* imagedecoder = argc > 3
+        ? argv[3]
+        : "/usr/libexec/ladybird/ImageDecoder";
 
     if (getenv("BOUCHAUD_M8"))
-        return run_m8(webcontent);
+        return run_m8(webcontent, imagedecoder);
 
     if (getenv("BOUCHAUD_M9"))
-        return run_m9(webcontent, requestserver);
+        return run_m9(webcontent, requestserver, imagedecoder);
 
     // Historical M7 liveness check.
     int control[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, control) < 0)
         return fail("socketpair");
-    pid_t pid = launch_webcontent(webcontent, control[1], control[0], -1, -1, 0);
+    pid_t pid = launch_webcontent(webcontent, control[1], control[0], -1, -1, -1, -1, 0);
     if (pid < 0)
         return fail("fork");
 

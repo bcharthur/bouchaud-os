@@ -355,23 +355,26 @@ if ($LadybirdMode) {
 
 
     # -------------------------------------------------------------------------
-    # M8 n'a besoin QUE de WebContent + bootstrap.
+    # Services embarques.
+    #
+    # ImageDecoder n'est pas facultatif, meme pour une page locale : c'est lui
+    # qui installe `Web::Platform::ImageCodecPlugin` dans WebContent. Sans le
+    # greffon, la premiere balise <img> rencontree fait tomber
+    # `VERIFY(s_the)` — c'est ce qui tuait WebContent sur Wikipedia.
     #
     # RequestServer :
-    #   inutile avant M9 reseau.
-    #
-    # ImageDecoder :
-    #   inutile pour la page HTML locale M8.
+    #   DNS, TCP, TLS, HTTP. Inutile pour la page locale.
     #
     # WebWorker :
-    #   inutile pour M8.
-    #
-    # Cela evite de gonfler le disque a ~654 Mio.
+    #   pas encore lance : il exige un processus hote capable de repondre au
+    #   message synchrone `StartWorkerAgent`. Voir
+    #   docs/ladybird/AUDIT_INTEGRATION.md.
     # -------------------------------------------------------------------------
 
     if ($IsLadybirdM8) {
         $RequiredLadybirdFiles = @(
             "WebContent",
+            "ImageDecoder",
             "webcontent-bootstrap"
         )
     }
@@ -379,6 +382,7 @@ if ($LadybirdMode) {
         $RequiredLadybirdFiles = @(
             "WebContent",
             "RequestServer",
+            "ImageDecoder",
             "webcontent-bootstrap",
             "M9_CAPABLE"
         )
@@ -603,6 +607,17 @@ if ($LadybirdMode) {
 
 
     # =========================================================================
+    # ImageDecoder
+    #
+    # Toujours copie : les images ne dependent pas du jalon reseau.
+    # =========================================================================
+
+    Copy-Item `
+        (Join-Path $NativeBrowserDir "ImageDecoder") `
+        (Join-Path $LadybirdLibexec "ImageDecoder")
+
+
+    # =========================================================================
     # Bootstrap
     # =========================================================================
 
@@ -813,17 +828,17 @@ if not root.is_dir():
     )
 
 
-# M8 minimal :
+# Le bit d'execution ne survit pas a un checkout Windows : cette liste le
+# repose au moment d'archiver. Tout binaire ajoute au scenario doit y figurer,
+# sinon Bouchaud refuse de l'executer.
 #
-# Pas de RequestServer.
-# Pas d'ImageDecoder.
-# Pas de WebWorker.
-#
-# Ils seront introduits quand leur jalon les utilisera vraiment.
+# WebWorker n'y est pas : il n'est pas encore lance faute de processus hote
+# capable de repondre a `StartWorkerAgent`.
 executables = {
     "bo-navigateur",
     "usr/libexec/ladybird/WebContent",
     "usr/libexec/ladybird/RequestServer",
+    "usr/libexec/ladybird/ImageDecoder",
     "usr/libexec/ladybird/webcontent-bootstrap",
 }
 
@@ -1231,23 +1246,23 @@ if ($LadybirdMode) {
 
     if ($IsLadybirdM8) {
         $ModeLabel = "Ladybird natif M8"
-        $ServiceLabel = "WebContent uniquement (regression M8)"
-        $BrowserChain = "/bo-navigateur -> bootstrap -> WebContent"
+        $ServiceLabel = "WebContent + ImageDecoder (regression locale)"
+        $BrowserChain = "/bo-navigateur -> bootstrap -> ImageDecoder + WebContent"
     }
     elseif ($IsLadybirdM9Test) {
         $ModeLabel = "Ladybird natif M9 TEST HTTP"
-        $ServiceLabel = "WebContent + RequestServer"
-        $BrowserChain = "/bo-navigateur -> bootstrap -> RequestServer + WebContent"
+        $ServiceLabel = "WebContent + RequestServer + ImageDecoder"
+        $BrowserChain = "/bo-navigateur -> bootstrap -> ImageDecoder + RequestServer + WebContent"
     }
     elseif ($LadybirdChrome) {
         $ModeLabel = "Bouchaud Navigateur (Ladybird M11)"
-        $ServiceLabel = "WebContent + RequestServer"
-        $BrowserChain = "/bo-navigateur -> bootstrap -> RequestServer + WebContent + chrome"
+        $ServiceLabel = "WebContent + RequestServer + ImageDecoder"
+        $BrowserChain = "/bo-navigateur -> bootstrap -> ImageDecoder + RequestServer + WebContent + chrome"
     }
     else {
         $ModeLabel = "Ladybird natif M9 interactif (sans chrome)"
-        $ServiceLabel = "WebContent + RequestServer"
-        $BrowserChain = "/bo-navigateur -> bootstrap -> RequestServer + WebContent"
+        $ServiceLabel = "WebContent + RequestServer + ImageDecoder"
+        $BrowserChain = "/bo-navigateur -> bootstrap -> ImageDecoder + RequestServer + WebContent"
     }
 
     Write-Host `

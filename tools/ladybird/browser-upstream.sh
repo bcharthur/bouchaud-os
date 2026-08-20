@@ -31,6 +31,7 @@ python3 tools/ladybird/prepare-m9-source.py "$SRC"
 python3 tools/ladybird/prepare-m9-diagnostics.py "$SRC"
 python3 tools/ladybird/prepare-m16-dns.py "$SRC"
 python3 tools/ladybird/prepare-dns-une-question.py "$SRC"
+python3 tools/ladybird/prepare-image-decoder.py "$SRC"
 python3 tools/ladybird/prepare-m11-chrome.py "$SRC"
 python3 tools/ladybird/prepare-browser-runtime-link.py "$SRC"
 
@@ -261,12 +262,20 @@ say "== build WebContent + services =="
 # epingle. Il reste visible comme warning, sans couper la traversee Ninja.
 cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target WebContent -- -k 0
 
-# Services de processus utiles au chemin CPU-only. Le target GPU upstream est
-# `Compositor`, pas `WebContentCompositor`; on ne le construit volontairement
-# pas ici car Bouchaud vise Skia CPU -> shared surface -> WM, sans ANGLE/OpenGL.
+# ImageDecoder n'est plus facultatif : c'est lui qui installe
+# `Web::Platform::ImageCodecPlugin` dans WebContent, et sans greffon la
+# premiere image d'un vrai site fait tomber `VERIFY(s_the)`. Un build qui ne le
+# produit pas doit echouer ici, pas vingt-cinq minutes plus tard dans QEMU.
+#
+# Le target GPU upstream est `Compositor`, pas `WebContentCompositor` ; on ne le
+# construit volontairement pas ici car Bouchaud vise Skia CPU -> surface
+# partagee -> gestionnaire de fenetres, sans ANGLE/OpenGL.
 for target in RequestServer ImageDecoder WebWorker; do
     if ninja -C "$BUILD" -t targets all 2>/dev/null | grep -q "^${target}:"; then
         cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target "$target" -- -k 0
+    elif [ "$target" = "ImageDecoder" ]; then
+        echo "ERREUR: la cible ImageDecoder a disparu de l'arbre Ladybird" >&2
+        exit 1
     fi
 done
 
@@ -276,7 +285,8 @@ mkdir -p "$OUT"
 find "$BUILD" -type f \( -name WebContent -o -name RequestServer -o -name ImageDecoder -o -name WebWorker \) -perm -111 -exec cp -f {} "$OUT/" \;
 
 [ -x "$OUT/WebContent" ] || { echo "WebContent non produit" >&2; exit 1; }
-[ -x "$OUT/RequestServer" ] || { echo "RequestServer non produit (M9 requis)" >&2; exit 1; }
+[ -x "$OUT/RequestServer" ] || { echo "RequestServer non produit (reseau requis)" >&2; exit 1; }
+[ -x "$OUT/ImageDecoder" ] || { echo "ImageDecoder non produit (images requises)" >&2; exit 1; }
 printf 'Bouchaud Ladybird M9 capable
 pinned=%s
 ' "$(git -C "$LB" rev-parse HEAD)" > "$OUT/M9_CAPABLE"

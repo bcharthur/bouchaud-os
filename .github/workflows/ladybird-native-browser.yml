@@ -289,6 +289,9 @@ jobs:
           WEB_SIZE=$(stat -c '%s' native-browser/WebContent)
           echo "WebContent: $WEB_SIZE octets"
           test "$WEB_SIZE" -le "$MAX_BOOT_FILE"
+          for svc in RequestServer ImageDecoder WebWorker; do
+            [ -f "native-browser/$svc" ] && echo "$svc: $(stat -c '%s' "native-browser/$svc") octets"
+          done
 
           mkdir -p scenario/usr/libexec/ladybird scenario/usr/share/ladybird
           cp native-browser/WebContent scenario/usr/libexec/ladybird/WebContent
@@ -297,8 +300,17 @@ jobs:
           # processus suivi par la fenetre et engendre le vrai WebContent.
           cp native-browser/webcontent-bootstrap scenario/bo-navigateur
           chmod 755 scenario/bo-navigateur scenario/usr/libexec/ladybird/*
-          for svc in RequestServer ImageDecoder Compositor WebWorker; do
-            if [ -x "native-browser/$svc" ]; then
+          # ImageDecoder installe `Web::Platform::ImageCodecPlugin` dans
+          # WebContent. Sans lui la premiere <img> fait tomber VERIFY(s_the) :
+          # son absence doit arreter la fabrication du disque, pas devenir un
+          # plantage QEMU vingt minutes plus tard.
+          test -f native-browser/ImageDecoder
+          cp native-browser/ImageDecoder scenario/usr/libexec/ladybird/ImageDecoder
+          chmod 755 scenario/usr/libexec/ladybird/ImageDecoder
+          # `-f` et non `-x` : l'artefact telecharge perd le bit d'execution,
+          # et le test `-x` d'origine ne pouvait donc jamais etre vrai.
+          for svc in RequestServer Compositor WebWorker; do
+            if [ -f "native-browser/$svc" ]; then
               cp "native-browser/$svc" "scenario/usr/libexec/ladybird/$svc"
               chmod 755 "scenario/usr/libexec/ladybird/$svc"
             fi
@@ -452,6 +464,8 @@ jobs:
           mkdir -p scenario-m9/usr/libexec/ladybird scenario-m9/usr/share/ladybird
           cp native-browser/WebContent scenario-m9/usr/libexec/ladybird/WebContent
           cp native-browser/RequestServer scenario-m9/usr/libexec/ladybird/RequestServer
+          test -f native-browser/ImageDecoder
+          cp native-browser/ImageDecoder scenario-m9/usr/libexec/ladybird/ImageDecoder
           cp native-browser/webcontent-bootstrap scenario-m9/usr/libexec/ladybird/webcontent-bootstrap
           cp native-browser/webcontent-bootstrap scenario-m9/bo-navigateur
           chmod 755 scenario-m9/bo-navigateur scenario-m9/usr/libexec/ladybird/*
@@ -676,6 +690,8 @@ jobs:
           mkdir -p scenario-m12/usr/libexec/ladybird scenario-m12/usr/share/ladybird
           cp native-browser/WebContent scenario-m12/usr/libexec/ladybird/WebContent
           cp native-browser/RequestServer scenario-m12/usr/libexec/ladybird/RequestServer
+          test -f native-browser/ImageDecoder
+          cp native-browser/ImageDecoder scenario-m12/usr/libexec/ladybird/ImageDecoder
           cp native-browser/webcontent-bootstrap scenario-m12/usr/libexec/ladybird/webcontent-bootstrap
           cp native-browser/webcontent-bootstrap scenario-m12/bo-navigateur
           chmod 755 scenario-m12/bo-navigateur scenario-m12/usr/libexec/ladybird/*
@@ -855,6 +871,8 @@ jobs:
           mkdir -p scenario-net/usr/libexec/ladybird scenario-net/usr/share/ladybird
           cp native-browser/WebContent scenario-net/usr/libexec/ladybird/WebContent
           cp native-browser/RequestServer scenario-net/usr/libexec/ladybird/RequestServer
+          test -f native-browser/ImageDecoder
+          cp native-browser/ImageDecoder scenario-net/usr/libexec/ladybird/ImageDecoder
           cp native-browser/webcontent-bootstrap scenario-net/usr/libexec/ladybird/webcontent-bootstrap
           cp native-browser/webcontent-bootstrap scenario-net/bo-navigateur
           chmod 755 scenario-net/bo-navigateur scenario-net/usr/libexec/ladybird/*
