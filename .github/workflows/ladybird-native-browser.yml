@@ -15,6 +15,12 @@ on:
       # navigateur : c'est de la que vient `BOUCHAUD_M9_URL`. Le scenario
       # Ladybird depend donc de ce repertoire autant que des precedents.
       - "src/shell/**"
+      # Le repartiteur d'appels systeme et sa table de numeros decident de
+      # tout ce que Ladybird peut demander a la machine. Les omettre laissait
+      # une correction d'ABI ne declencher aucun des scenarios qu'elle touche.
+      - "src/kernel/abi/mod.rs"
+      - "src/kernel/abi/nr.rs"
+      - "src/kernel/abi/errno.rs"
       - "src/kernel/abi/file.rs"
       - "src/kernel/abi/mem.rs"
       - "src/kernel/abi/proc.rs"
@@ -48,6 +54,12 @@ on:
       # navigateur : c'est de la que vient `BOUCHAUD_M9_URL`. Le scenario
       # Ladybird depend donc de ce repertoire autant que des precedents.
       - "src/shell/**"
+      # Le repartiteur d'appels systeme et sa table de numeros decident de
+      # tout ce que Ladybird peut demander a la machine. Les omettre laissait
+      # une correction d'ABI ne declencher aucun des scenarios qu'elle touche.
+      - "src/kernel/abi/mod.rs"
+      - "src/kernel/abi/nr.rs"
+      - "src/kernel/abi/errno.rs"
       - "src/kernel/abi/file.rs"
       - "src/kernel/abi/mem.rs"
       - "src/kernel/abi/proc.rs"
