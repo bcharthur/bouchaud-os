@@ -126,6 +126,37 @@ fn select(drive: Drive) {
     }
 }
 
+/// Selectionne un disque ET les quatre bits hauts du LBA, avec l'attente.
+///
+/// `read_batch` et `write_batch` ecrivaient DRIVE_HEAD directement, sans les
+/// 400 ns que `select` respecte. Or apres une ecriture dans ce registre, le
+/// contenu du registre de statut n'a pas de sens tant que le delai n'est pas
+/// ecoule : on peut y lire le statut du disque PRECEDEMMENT selectionne.
+///
+/// Les deux disques sont sur le meme canal et le noyau alterne entre eux --
+/// l'image de demarrage sur hda, l'archive et la zone persistante sur hdb. Un
+/// bit ERR laisse par une operation sur l'autre disque fait alors echouer
+/// `wait_data_ready`, et l'operation rend un compte court. C'est le mode de
+/// defaillance observe au run 32426569316 : une ecriture d'un seul secteur, au
+/// beau milieu d'une zone parfaitement valide, qui rend zero.
+fn select_lba(drive: Drive, lba: u64) {
+    unsafe {
+        outb(DEVICE_CONTROL, CTRL_NIEN);
+        outb(DRIVE_HEAD, drive.select_bits() | (((lba >> 24) & 0x0F) as u8));
+        for _ in 0..4 {
+            let _ = inb(ALT_STATUS);
+        }
+    }
+}
+
+/// Etat du controleur au moment d'un echec, pour le journal.
+///
+/// Un pilote qui echoue en silence oblige a deviner. Les deux registres disent
+/// lequel des bits a arrete l'operation.
+fn etat_controleur() -> (u8, u8) {
+    unsafe { (inb(STATUS), inb(ERROR)) }
+}
+
 /// Interroge un disque par IDENTIFY et renvoie sa taille en secteurs.
 fn identify(drive: Drive) -> u64 {
     select(drive);
@@ -235,13 +266,18 @@ pub fn read(drive: Drive, lba: u64, count: usize, out: &mut [u8]) -> usize {
 
 /// Lit un lot d'au plus 256 secteurs (une seule commande ATA).
 fn read_batch(drive: Drive, lba: u64, count: usize, out: &mut [u8]) -> bool {
+    // Selection AVEC le delai reglementaire : sans lui, le statut lu ensuite
+    // peut etre celui de l'autre disque du canal. Voir `select_lba`.
+    select_lba(drive, lba);
     if !wait_not_busy() {
+        let (statut, erreur) = etat_controleur();
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "ata: lecture lba={} occupee, statut={:#04x} erreur={:#04x}",
+            lba, statut, erreur
+        ));
         return false;
     }
     unsafe {
-        outb(DEVICE_CONTROL, CTRL_NIEN);
-        // Les quatre bits hauts du LBA logent dans le registre drive/head.
-        outb(DRIVE_HEAD, drive.select_bits() | (((lba >> 24) & 0x0F) as u8));
         outb(ERROR, 0);
         // Un compte de 0 signifie 256 secteurs.
         outb(SECTOR_COUNT, if count == 256 { 0 } else { count as u8 });
@@ -253,6 +289,11 @@ fn read_batch(drive: Drive, lba: u64, count: usize, out: &mut [u8]) -> bool {
 
     for index in 0..count {
         if !wait_data_ready() {
+            let (statut, erreur) = etat_controleur();
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "ata: lecture lba={} secteur {}/{} sans donnees, statut={:#04x} erreur={:#04x}",
+                lba, index, count, statut, erreur
+            ));
             return false;
         }
         let start = index * SECTOR_SIZE;
@@ -317,12 +358,16 @@ pub fn write(drive: Drive, lba: u64, count: usize, data: &[u8]) -> usize {
 
 /// Ecrit un lot d'au plus 256 secteurs (une seule commande ATA).
 fn write_batch(drive: Drive, lba: u64, count: usize, data: &[u8]) -> bool {
+    select_lba(drive, lba);
     if !wait_not_busy() {
+        let (statut, erreur) = etat_controleur();
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "ata: ecriture lba={} occupee, statut={:#04x} erreur={:#04x}",
+            lba, statut, erreur
+        ));
         return false;
     }
     unsafe {
-        outb(DEVICE_CONTROL, CTRL_NIEN);
-        outb(DRIVE_HEAD, drive.select_bits() | (((lba >> 24) & 0x0F) as u8));
         outb(ERROR, 0);
         outb(SECTOR_COUNT, if count == 256 { 0 } else { count as u8 });
         outb(LBA_LOW, (lba & 0xFF) as u8);
@@ -333,6 +378,11 @@ fn write_batch(drive: Drive, lba: u64, count: usize, data: &[u8]) -> bool {
 
     for index in 0..count {
         if !wait_data_ready() {
+            let (statut, erreur) = etat_controleur();
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "ata: ecriture lba={} secteur {}/{} refusee, statut={:#04x} erreur={:#04x}",
+                lba, index, count, statut, erreur
+            ));
             return false;
         }
         let start = index * SECTOR_SIZE;
@@ -340,16 +390,24 @@ fn write_batch(drive: Drive, lba: u64, count: usize, data: &[u8]) -> bool {
             write_sector_from(&data[start..start + SECTOR_SIZE]);
         }
     }
-    wait_not_busy()
+    if !wait_not_busy() {
+        let (statut, erreur) = etat_controleur();
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "ata: ecriture lba={} inachevee, statut={:#04x} erreur={:#04x}",
+            lba, statut, erreur
+        ));
+        return false;
+    }
+    true
 }
 
 /// Demande au disque de vider son cache d'ecriture.
 fn flush(drive: Drive) {
+    select(drive);
     if !wait_not_busy() {
         return;
     }
     unsafe {
-        outb(DRIVE_HEAD, drive.select_bits());
         outb(COMMAND, CMD_FLUSH_CACHE);
     }
     wait_not_busy();

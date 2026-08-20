@@ -230,6 +230,8 @@ pub fn name(number: u64) -> &'static str {
         UNAME => "uname",
         FCNTL => "fcntl",
         FTRUNCATE => "ftruncate",
+        FSYNC => "fsync",
+        FDATASYNC => "fdatasync",
         GETDENTS64 => "getdents64",
         GETCWD => "getcwd",
         CHDIR => "chdir",
