@@ -960,8 +960,14 @@ jobs:
           #
           # Le journal serie de ce scenario pese six kilooctets : il n'y a rien
           # a economiser en choisissant, et tout a perdre en se trompant.
-          grep -aE "\[ladybird-bouchaud\]|panic" serie-ladybird-net.log \
-              || echo "(aucun marqueur)"
+          #
+          # Les fautes du noyau en font partie. `ECHEC M9 WebContent signal=11`
+          # dit qu'un processus est mort ; `[cpu] faute de page en ring 3 :
+          # rip=… cr2=…` et `[memfabric] FAULT_FATAL … vma=… backing=` disent
+          # **ou**. Le noyau les imprimait deja ; c'est le filtre qui les
+          # cachait — la troisieme fois que ce piege se referme ici.
+          grep -aE "\[ladybird-bouchaud\]|\[memfabric\] FAULT|\[cpu\]|faute de page|panic" \
+              serie-ladybird-net.log || echo "(aucun marqueur)"
           # La derniere ligne de charge par processus. Elle dit qui prend le
           # processeur, et c'est la seule mesure qui distingue « la machine
           # attend » de « la machine tourne a vide » — les deux se ressemblent

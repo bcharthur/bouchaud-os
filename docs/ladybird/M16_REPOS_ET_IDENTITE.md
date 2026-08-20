@@ -235,10 +235,31 @@ prise — elle est pire, parce qu'elle donne la meme assurance.
 
 ## Ce qui reste
 
-`M9_DOCUMENT_LOADED` n'apparait pas, et WebContent a quitte la liste des
-processus apres le commit de la navigation. Le document distant est arrive
-entier ; ce qui suit — analyse, mise en page, peinture, capture — reste a
-mesurer. C'est le defaut suivant, et il est d'une autre nature que celui-ci.
+**WebContent meurt d'une faute de segmentation deux secondes apres le commit.**
+
+```text
+M9_BODY_READ chunk=559 delivered=559
+M9_BODY_DRAIN_DONE total=559
+M9_BODY_USER_FINISH delivered=559 total=559
+M9_HISTORY_LOCAL_COMMIT op=1 step=0
+M9_NAVIGATION_COMMITTED page=1 url=https://example.com/
+ECHEC M9 WebContent signal=11
+```
+
+Tout le pipeline reseau est sain : corps lu entier, draine, signale, historique
+commite. Le defaut est **apres**, dans ce que le moteur fait du document —
+analyse, style, mise en page ou peinture. M8, M9 et M12 rendent des fixtures
+ecrites a la main ; `example.com` est la premiere page reelle, avec sa feuille
+de style, ses requetes media et ses polices.
+
+`M9_DOCUMENT_SKIPPED page=1 url=about:blank attendu=https://example.com/` porte
+sur le document initial `about:blank`, correctement ecarte. Ce n'etait pas la
+cause — l'hypothese d'une serialisation d'URL divergente etait fausse.
+
+Le noyau rapporte deja tout ce qu'il faut pour situer la faute : `[cpu] faute de
+page en ring 3 : rip=… rsp=… cr2=…` et `[memfabric] FAULT_FATAL pid= app= addr=
+vma=… backing=… present=… writable=…`. Ces lignes etaient dans le journal depuis
+le debut ; c'est le filtre du verdict qui les cachait.
 
 Une seconde retransmission DNS n'a jamais lieu non plus : le minuteur n'est
 redemarre qu'apres l'ecriture, et la deuxieme recherche rejoint la recherche en
