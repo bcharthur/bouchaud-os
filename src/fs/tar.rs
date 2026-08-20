@@ -320,6 +320,22 @@ fn index_data_disk() -> Option<Unpacked> {
         return None;
     }
 
+    // Un disque plus grand que le plafond ne provoque pas d'erreur ici : la
+    // zone persistante occupe justement la fin de hdb, bien au-dela de
+    // l'archive. Mais la borne de lecture doit s'annoncer avec ses chiffres
+    // exacts, sinon une archive trop lourde perd ses dernieres entrees en
+    // silence et le defaut se decouvre a l'execution, sous la forme d'un
+    // fichier « absent » que l'image contient pourtant.
+    if slave_sectors > max_sectors {
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "tar: hdb = {} secteurs ({} Mio), indexation bornee a {} secteurs ({} Mio)",
+            slave_sectors,
+            slave_sectors * SECTOR_SIZE as u64 / (1024 * 1024),
+            max_sectors,
+            MAX_ARCHIVE_DISK_SIZE / (1024 * 1024)
+        ));
+    }
+
     crate::fs::backing::reset();
 
     let mut result = Unpacked {
@@ -364,6 +380,10 @@ fn index_data_disk() -> Option<Unpacked> {
         let data_sectors = ((size + SECTOR_SIZE - 1) / SECTOR_SIZE) as u64;
 
         if data_lba.saturating_add(data_sectors) > disk_sectors {
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "tar: ARCHIVE TRONQUEE sur '{}' ({} octets a partir du secteur {}), au-dela du secteur {}",
+                path, size, data_lba, disk_sectors
+            ));
             result.skipped += 1;
             result.truncated = true;
             break;

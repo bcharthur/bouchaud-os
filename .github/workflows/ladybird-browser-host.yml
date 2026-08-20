@@ -116,7 +116,11 @@ jobs:
 
           (cd tools/userland && IMAGE="$GITHUB_WORKSPACE/ladybird-browser-host.img" ./mkdisk.sh "$GITHUB_WORKSPACE/$SCENARIO")
           stat -c 'BrowserHost disk: %s bytes' ladybird-browser-host.img
-          test "$(stat -c '%s' ladybird-browser-host.img)" -le $((768 * 1024 * 1024))
+          # Le plafond porte sur l'ARCHIVE, pas sur l'image : la zone
+          # persistante de 128 Mio occupe la fin du disque, bien au-dela de ce
+          # que `src/fs/tar.rs` indexe. `mkdisk.sh` connait les deux tailles et
+          # refuse deja une archive hors plafond, avec ses chiffres exacts ;
+          # comparer ici l'image entiere rejetait des disques valides.
 
       - name: Executer BrowserHost
         run: |

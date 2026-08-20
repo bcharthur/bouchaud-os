@@ -50,21 +50,49 @@ if [ "$PADDED" -gt "$SIZE" ]; then
     dd if=/dev/zero bs=1 count=$((PADDED - SIZE)) >> "$IMAGE" 2>/dev/null
 fi
 
-# Zone persistante : 8 Mio a la FIN de l'image (voir `src/fs/persistance.rs`).
-# L'archive se lit depuis le debut, la zone s'ecrit depuis la fin ; tant que
-# l'image porte les deux, elles ne se rencontrent jamais. On complete donc
-# l'image de la taille de la zone plus une marge, et le noyau y ecrit ce qui
-# doit survivre a l'extinction.
+# Plafond de lecture de l'archive, en miroir de `MAX_ARCHIVE_DISK_SIZE` dans
+# `src/fs/tar.rs`. Le noyau n'indexe QUE les premiers 768 Mio du disque : une
+# archive plus grande verrait ses dernieres entrees disparaitre sans que rien
+# ne manque a l'appel cote outil. On refuse donc de fabriquer une telle image,
+# avec les tailles exactes, plutot que de laisser la troncature se decouvrir
+# dans QEMU vingt minutes plus tard.
+ARCHIVE_MAX=$((768 * 1024 * 1024))
+if [ "$PADDED" -gt "$ARCHIVE_MAX" ]; then
+    echo "mkdisk: archive de $PADDED octets ($((PADDED / 1024 / 1024)) Mio) au-dela du plafond noyau de $ARCHIVE_MAX octets ($((ARCHIVE_MAX / 1024 / 1024)) Mio)" >&2
+    echo "mkdisk: src/fs/tar.rs MAX_ARCHIVE_DISK_SIZE borne la lecture de hdb ; reduire la charge utile ou relever les deux ensemble" >&2
+    echo "mkdisk: entrees les plus lourdes de '$SOURCE' :" >&2
+    find "$SOURCE" -type f -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -10 >&2 || true
+    rm -f "$IMAGE"
+    exit 1
+fi
+
+# Zone persistante : 128 Mio a la FIN de l'image (voir `src/fs/persistance.rs`,
+# `SECTEURS_ZONE`). L'archive se lit depuis le debut, la zone s'ecrit depuis la
+# fin ; tant que l'image porte les deux, elles ne se rencontrent jamais.
 #
-# Les secteurs ajoutes sont nuls, donc sans magie : le premier demarrage trouve
-# une zone vierge, ce qui est exactement ce qu'il faut.
+# `persistance::debut()` exige en plus que le disque soit STRICTEMENT plus grand
+# que la zone augmentee de son en-tete et de sa table (`SECTEUR_CONTENU`), sans
+# quoi il declare « disque trop petit, zone absente ». Une archive minuscule --
+# un scenario de test qui ne porte qu'un `autorun` -- produisait donc une image
+# sans persistance du tout, et le test de survie au redemarrage n'avait alors
+# aucune zone ou ecrire. On complete la region d'archive jusqu'a ce plancher
+# avant d'ajouter la zone : les octets ajoutes sont nuls, donc invisibles pour
+# l'analyseur TAR qui s'arrete a son premier bloc nul.
 ZONE_SECTEURS=262144
 ZONE=$((ZONE_SECTEURS * 512))
+SECTEUR_CONTENU=1025
+PLANCHER_ARCHIVE=$(((SECTEUR_CONTENU + 1) * 512))
+if [ "$PADDED" -lt "$PLANCHER_ARCHIVE" ]; then
+    dd if=/dev/zero bs=1 count=$((PLANCHER_ARCHIVE - PADDED)) >> "$IMAGE" 2>/dev/null
+    PADDED=$PLANCHER_ARCHIVE
+fi
+
 dd if=/dev/zero bs=1M count=$((ZONE / 1024 / 1024)) >> "$IMAGE" 2>/dev/null
 TOTAL=$(wc -c < "$IMAGE")
 
 echo "image : $IMAGE ($((TOTAL / 1024)) Kio, $((TOTAL / 512)) secteurs)"
 echo "  dont archive $((PADDED / 1024)) Kio et zone persistante $((ZONE / 1024)) Kio"
+echo "  plafond archive noyau : $((ARCHIVE_MAX / 1024)) Kio (src/fs/tar.rs)"
 echo "contenu :"
 tar -tf "$IMAGE" | sed 's|^\./|  /|' | grep -v '^  /$' | head -40
 COUNT=$(tar -tf "$IMAGE" | wc -l)

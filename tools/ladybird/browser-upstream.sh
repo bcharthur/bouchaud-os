@@ -317,6 +317,42 @@ fi
 mkdir -p "$OUT/resources/fontconfig"
 cp -f "$ROOT/tools/ladybird/fontconfig/fonts.conf" "$OUT/resources/fontconfig/fonts.conf"
 
+# Le DWARF des runtimes n'a aucun lecteur dans Bouchaud OS.
+#
+# Ladybird se construit avec ses informations de debogage meme en Release, et
+# elles pesent l'essentiel du binaire : les sept runtimes non depouilles font
+# ensemble ~1,41 Gio, soit une image de 1,50 Gio la ou `src/fs/tar.rs` n'indexe
+# que les premiers 768 Mio du disque de donnees. Le run 32419136798 s'est arrete
+# exactement la (« platform disk: 1613805568 bytes »).
+#
+# Rien dans le guest ne consomme ce DWARF : LADYBIRD_ENABLE_CPPTRACE est OFF, il
+# n'y a pas de debogueur sous Bouchaud, et l'edition de liens statique-PIE ne
+# resout aucun symbole a l'execution. `--strip-debug` retire donc uniquement les
+# sections `.debug_*`, qui ne sont pas SHF_ALLOC : les segments PT_LOAD, PT_TLS,
+# PT_DYNAMIC et les relocations que le demarrage static-pie s'applique a lui-meme
+# restent intacts, et `.symtab` est conserve pour pouvoir encore nommer une
+# adresse hors ligne.
+#
+# Les binaires non depouilles restent disponibles dans "$BUILD/bin" -- que la CI
+# met en cache -- pour symboliser un plantage a posteriori.
+# BO_KEEP_LADYBIRD_DEBUG=1 desactive volontairement ce depouillement.
+STRIP=$(command -v "llvm-strip-${LLVM_VERSION}" || command -v llvm-strip || command -v strip || true)
+if [ "${BO_KEEP_LADYBIRD_DEBUG:-0}" = "1" ]; then
+    say "depouillement desactive (BO_KEEP_LADYBIRD_DEBUG=1) : image de disque probablement hors plafond"
+elif [ -z "$STRIP" ]; then
+    echo "ERREUR: aucun llvm-strip/strip disponible ; les runtimes non depouilles ne tiennent pas dans l'archive Bouchaud" >&2
+    exit 1
+else
+    say "== depouillement DWARF des runtimes (${STRIP##*/}) =="
+    for runtime in WebContent RequestServer ImageDecoder WebWorker Compositor WebDriver BouchaudBrowserHost; do
+        [ -x "$OUT/$runtime" ] || continue
+        avant=$(stat -c '%s' "$OUT/$runtime")
+        "$STRIP" --strip-debug "$OUT/$runtime"
+        apres=$(stat -c '%s' "$OUT/$runtime")
+        printf '  %-20s %12s -> %12s octets\n' "$runtime" "$avant" "$apres"
+    done
+fi
+
 # `file` peut varier selon la version du runner; readelf est l'invariant utile
 # pour Bouchaud : aucun PT_INTERP ne doit demander ld-linux au demarrage.
 for runtime in WebContent RequestServer ImageDecoder WebWorker Compositor WebDriver BouchaudBrowserHost; do
@@ -328,6 +364,23 @@ for runtime in WebContent RequestServer ImageDecoder WebWorker Compositor WebDri
         exit 1
     fi
 done
+
+# La charge utile doit tenir dans ce que le noyau sait indexer. On le verifie
+# ici, ou la correction est possible, plutot que dans mkdisk.sh vingt minutes
+# plus tard -- et avec les tailles exactes, jamais par troncature.
+#
+# Le plafond reel est MAX_ARCHIVE_DISK_SIZE (768 Mio, src/fs/tar.rs). On garde
+# une marge de 64 Mio pour l'en-tete TAR, l'autorun, les certificats et le
+# `webcontent-bootstrap` que l'etape suivante ajoutera.
+CHARGE=$(du -sb "$OUT" | cut -f1)
+PLAFOND=$(( (768 - 64) * 1024 * 1024 ))
+printf 'charge utile Bouchaud : %s octets (%s Mio), plafond %s octets (%s Mio)\n' \
+    "$CHARGE" "$((CHARGE / 1024 / 1024))" "$PLAFOND" "$((PLAFOND / 1024 / 1024))"
+if [ "$CHARGE" -gt "$PLAFOND" ]; then
+    echo "ERREUR: la charge utile depasse ce que src/fs/tar.rs sait indexer sur hdb" >&2
+    du -b "$OUT"/* | sort -rn | head -12 >&2 || true
+    exit 1
+fi
 
 # Le masque Cargo n'est utile que pour le build Ladybird. Restaurer avant la
 # sortie normale rend aussi l'etat du checkout explicite pour les etapes CI
