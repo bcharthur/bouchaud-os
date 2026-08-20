@@ -23,8 +23,8 @@ param(
     # d'accueil vit sur la machine de developpement n'est pas un navigateur.
     #
     # `example.com` plutot qu'un site riche : c'est la seule page publique dont
-    # la chaine complete — nom, DNS, TCP, TLS, HTTP, analyse, mise en page,
-    # peinture, ecran — soit verte en integration continue. La barre d'adresse
+    # la chaine complete - nom, DNS, TCP, TLS, HTTP, analyse, mise en page,
+    # peinture, ecran - soit verte en integration continue. La barre d'adresse
     # est la pour le reste, et elle marche.
     [string]$LadybirdUrl = "https://example.com/",
 
@@ -360,7 +360,7 @@ if ($LadybirdMode) {
     # ImageDecoder n'est pas facultatif, meme pour une page locale : c'est lui
     # qui installe `Web::Platform::ImageCodecPlugin` dans WebContent. Sans le
     # greffon, la premiere balise <img> rencontree fait tomber
-    # `VERIFY(s_the)` — c'est ce qui tuait WebContent sur Wikipedia.
+    # `VERIFY(s_the)` - c'est ce qui tuait WebContent sur Wikipedia.
     #
     # RequestServer :
     #   DNS, TCP, TLS, HTTP. Inutile pour la page locale.
