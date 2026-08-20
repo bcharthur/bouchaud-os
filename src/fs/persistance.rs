@@ -207,14 +207,31 @@ pub fn monte() -> usize {
 /// encore l'ancienne magie, donc l'ancien contenu. Une coupure au milieu laisse
 /// la version precedente, pas un melange des deux.
 pub fn synchronise() -> i64 {
+    // Chaque echec doit se nommer. `fsync` traduit un `-1` en EIO, et un
+    // programme qui recoit EIO n'a plus que « disk I/O error » a dire : c'est
+    // exactement ce que SQLite a rapporte au run 32424806818, sans qu'aucune
+    // ligne du journal n'indique laquelle des quatre causes s'appliquait.
     let base = match debut() {
         Some(base) => base,
-        None => return -1,
+        None => {
+            let (_, secteurs) = ata::capacities();
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "persistance: sync refuse, disque de {} secteurs, il en faut plus de {}",
+                secteurs,
+                SECTEURS_ZONE + SECTEUR_CONTENU
+            ));
+            return -1;
+        }
     };
 
     let entrees = rassemble();
     if entrees.len() > ENTREES_MAX {
-        crate::kernel::dmesg::log("persistance: trop de fichiers, sync refuse");
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "persistance: sync refuse, {} fichiers sous {} pour {} entrees possibles",
+            entrees.len(),
+            RACINE,
+            ENTREES_MAX
+        ));
         return -1;
     }
 
@@ -234,24 +251,37 @@ pub fn synchronise() -> i64 {
 
         let secteurs = ((entree.contenu.len() + SECTOR_SIZE - 1) / SECTOR_SIZE) as u64;
         if secteur + secteurs > fin_zone {
-            crate::kernel::dmesg::log("persistance: zone pleine, sync tronque");
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "persistance: zone pleine sur '{}', il faudrait le secteur {} et la zone s'arrete a {}",
+                entree.chemin,
+                secteur + secteurs,
+                fin_zone
+            ));
             return -1;
         }
         if secteurs > 0 {
             let mut tampon = vec![0u8; (secteurs as usize) * SECTOR_SIZE];
             tampon[..entree.contenu.len()].copy_from_slice(&entree.contenu);
-            if ata::write(Drive::Slave, secteur, secteurs as usize, &tampon)
-                != secteurs as usize
-            {
+            let ecrits = ata::write(Drive::Slave, secteur, secteurs as usize, &tampon);
+            if ecrits != secteurs as usize {
+                crate::kernel::dmesg::log_fmt(format_args!(
+                    "persistance: ecriture de '{}' incomplete, {} secteurs sur {} a partir de {}",
+                    entree.chemin, ecrits, secteurs, secteur
+                ));
                 return -1;
             }
         }
         secteur += secteurs;
     }
 
-    if ata::write(Drive::Slave, base + 1, SECTEURS_TABLE as usize, &table)
-        != SECTEURS_TABLE as usize
-    {
+    let table_ecrite = ata::write(Drive::Slave, base + 1, SECTEURS_TABLE as usize, &table);
+    if table_ecrite != SECTEURS_TABLE as usize {
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "persistance: table incomplete, {} secteurs sur {} a partir de {}",
+            table_ecrite,
+            SECTEURS_TABLE,
+            base + 1
+        ));
         return -1;
     }
 
@@ -260,6 +290,10 @@ pub fn synchronise() -> i64 {
     ecrit_u32(&mut entete[8..12], 1);
     ecrit_u32(&mut entete[12..16], entrees.len() as u32);
     if ata::write(Drive::Slave, base, 1, &entete) != 1 {
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "persistance: en-tete non ecrit au secteur {}",
+            base
+        ));
         return -1;
     }
 

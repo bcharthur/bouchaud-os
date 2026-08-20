@@ -107,6 +107,11 @@ jobs:
           echo "--- fichier telecharge au demarrage precedent ---"
           cat /persist/Downloads/preuve-bouchaud.bin
           echo "=== Ladybird platform + SMP4 ==="
+          # Seuls les appels systeme EN ECHEC, hors EAGAIN/EINTR. C'est ce qui
+          # relie un message applicatif -- « disk I/O error » cote SQLite au run
+          # 32424806818 -- a la primitive OS qui l'a produit. Le mode complet
+          # est inutilisable ici : un navigateur emet des millions d'appels.
+          strace echecs
           export BOUCHAUD_BROWSER_HOST=1
           export BOUCHAUD_M9_URL='http://10.0.2.2:18083/platform.html'
           export BOUCHAUD_ALLOW_POPUPS=1
@@ -140,6 +145,8 @@ jobs:
           LOG=serie-platform-smp4.log
           : > "$LOG"
           DEADLINE=$((SECONDS + 900))
+          MAX_LOG=$((64 * 1024 * 1024))
+          MAX_ECHO=$((512 * 1024))
 
           qemu-system-x86_64 \
             -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
@@ -155,6 +162,10 @@ jobs:
               echo "ECHEANCE atteinte au premier demarrage" >&2
               break
             fi
+            if (( $(stat -c '%s' "$LOG") > MAX_LOG )); then
+              echo "JOURNAL EMBALLE au premier demarrage: $(stat -c '%s' "$LOG") octets" >&2
+              break
+            fi
             sleep 0.5
           done
 
@@ -162,7 +173,8 @@ jobs:
           sleep 1
           kill -KILL "$PID" 2>/dev/null || true
           wait "$PID" 2>/dev/null || true
-          cat "$LOG"
+          echo "journal serie : $(stat -c '%s' "$LOG") octets"
+          tail -c "$MAX_ECHO" "$LOG"
 
       - name: QEMU 4 vCPU, second demarrage sur la meme image
         run: |
@@ -170,6 +182,8 @@ jobs:
           LOG=serie-platform-smp4-boot2.log
           : > "$LOG"
           DEADLINE=$((SECONDS + 900))
+          MAX_LOG=$((64 * 1024 * 1024))
+          MAX_ECHO=$((512 * 1024))
 
           qemu-system-x86_64 \
             -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
@@ -185,6 +199,10 @@ jobs:
               echo "ECHEANCE atteinte au second demarrage" >&2
               break
             fi
+            if (( $(stat -c '%s' "$LOG") > MAX_LOG )); then
+              echo "JOURNAL EMBALLE au second demarrage: $(stat -c '%s' "$LOG") octets" >&2
+              break
+            fi
             sleep 0.5
           done
 
@@ -192,7 +210,8 @@ jobs:
           sleep 1
           kill -KILL "$PID" 2>/dev/null || true
           wait "$PID" 2>/dev/null || true
-          cat "$LOG"
+          echo "journal serie : $(stat -c '%s' "$LOG") octets"
+          tail -c "$MAX_ECHO" "$LOG"
 
       - name: Verdict
         run: |
@@ -240,4 +259,5 @@ jobs:
             serie-platform-smp4.log
             serie-platform-smp4-boot2.log
             platform-fixture.log
+          compression-level: 9
           if-no-files-found: warn

@@ -1847,7 +1847,9 @@ pub fn elfinfo(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
 /// `strace on|off` : trace les appels systeme sur la sortie serie.
 pub fn strace(argc: usize, argv: &[&str; 12]) {
     if argc < 2 {
-        println!("usage: strace on|off");
+        println!("usage: strace on|echecs|off");
+        println!("  on      tous les appels : inutilisable sur un vrai programme");
+        println!("  echecs  seuls ceux qui rendent une erreur, hors EAGAIN/EINTR");
         println!(
             "etat actuel : {}",
             if crate::kernel::abi::trace_enabled() {
@@ -1860,13 +1862,17 @@ pub fn strace(argc: usize, argv: &[&str; 12]) {
     }
     match argv[1] {
         "on" => {
-            crate::kernel::abi::set_trace(true);
-            println!("strace: trace des appels systeme activee (sortie serie COM1)");
+            crate::kernel::abi::set_trace_mode(crate::kernel::abi::Trace::Tous);
+            println!("strace: tous les appels systeme (sortie serie COM1)");
+        }
+        "echecs" | "errors" => {
+            crate::kernel::abi::set_trace_mode(crate::kernel::abi::Trace::Echecs);
+            println!("strace: seuls les appels en echec (hors EAGAIN/EINTR)");
         }
         "off" => {
-            crate::kernel::abi::set_trace(false);
+            crate::kernel::abi::set_trace_mode(crate::kernel::abi::Trace::Aucune);
             println!("strace: trace desactivee");
         }
-        _ => println!("usage: strace on|off"),
+        _ => println!("usage: strace on|echecs|off"),
     }
 }

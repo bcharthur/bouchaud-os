@@ -57,17 +57,51 @@ use crate::kernel::task;
 static mut SYSCALL_COUNT: u64 = 0;
 /// Dernier appel systeme inconnu rencontre (numero), 0 si aucun.
 static mut LAST_UNKNOWN: u64 = 0;
-/// Trace des appels systeme sur la sortie serie (commande `strace`).
-static mut TRACE: bool = false;
-
-/// Active ou desactive la trace des appels systeme.
-pub fn set_trace(on: bool) {
-    unsafe { TRACE = on };
+/// Ce que la trace des appels systeme laisse passer (commande `strace`).
+///
+/// `Echecs` existe parce que `Tous` est inutilisable sur un vrai programme :
+/// un navigateur emet des millions d'appels, la sortie serie devient le facteur
+/// limitant et le journal noie ce qu'on cherche. Or ce qu'on cherche est
+/// presque toujours un appel qui a ECHOUE -- c'est ainsi qu'on relie un
+/// « disk I/O error » cote application a la primitive OS qui manque.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Trace {
+    Aucune,
+    /// Seuls les appels qui rendent une erreur, hors attente ordinaire.
+    Echecs,
+    Tous,
 }
 
-/// La trace est-elle active ?
-pub fn trace_enabled() -> bool {
+static mut TRACE: Trace = Trace::Aucune;
+
+/// Regle la trace des appels systeme.
+pub fn set_trace_mode(mode: Trace) {
+    unsafe { TRACE = mode };
+}
+
+/// Active ou desactive la trace complete.
+pub fn set_trace(on: bool) {
+    set_trace_mode(if on { Trace::Tous } else { Trace::Aucune });
+}
+
+/// Mode de trace courant.
+pub fn trace_mode() -> Trace {
     unsafe { TRACE }
+}
+
+/// La trace est-elle active, sous une forme ou une autre ?
+pub fn trace_enabled() -> bool {
+    trace_mode() != Trace::Aucune
+}
+
+/// Ce retour merite-t-il d'etre trace en mode `Echecs` ?
+///
+/// `EAGAIN` et `EINTR` ne sont pas des defaillances : ce sont les reponses
+/// ordinaires d'une entree/sortie non bloquante et d'un appel interrompu par un
+/// signal. Un navigateur en produit des milliers par seconde ; les tracer
+/// reviendrait a retrouver le probleme du mode `Tous`.
+fn echec_notable(resultat: i64) -> bool {
+    resultat < 0 && resultat != -errno::EAGAIN && resultat != -errno::EINTR
 }
 
 /// Nombre d'appels systeme traites depuis le boot.
@@ -85,16 +119,33 @@ pub fn handle(frame: &mut TrapFrame) {
     unsafe { SYSCALL_COUNT += 1 };
     let (number, args) = frame.syscall_args();
     let result = dispatch(number, args, frame);
-    if unsafe { TRACE } {
-        crate::serial_println!(
-            "[syscall] {} ({}) ({:#x}, {:#x}, {:#x}) = {}",
-            number,
-            nr::name(number),
-            args[0],
-            args[1],
-            args[2],
-            result
-        );
+    match trace_mode() {
+        Trace::Aucune => {}
+        Trace::Tous => {
+            crate::serial_println!(
+                "[syscall] {} ({}) ({:#x}, {:#x}, {:#x}) = {}",
+                number,
+                nr::name(number),
+                args[0],
+                args[1],
+                args[2],
+                result
+            );
+        }
+        Trace::Echecs => {
+            if echec_notable(result) {
+                crate::serial_println!(
+                    "[syscall-echec] {} ({}) ({:#x}, {:#x}, {:#x}) = {} ({})",
+                    number,
+                    nr::name(number),
+                    args[0],
+                    args[1],
+                    args[2],
+                    result,
+                    errno::name(-result)
+                );
+            }
+        }
     }
     // `rt_sigreturn` a deja reecrit toute la trame : y remettre une valeur de
     // retour ecraserait le rax restaure.
