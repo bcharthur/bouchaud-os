@@ -627,7 +627,22 @@ pub fn cat(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
         println!("cat: permission denied");
         return 1;
     }
-    print!("{}", fs.nodes[idx].content_str());
+    // `cat` diffuse par tranches : il n'a aucune raison de tenir en memoire un
+    // fichier de 190 Mio, et il doit fonctionner qu'il soit resident ou adosse
+    // au disque. `fs.nodes[idx].content` etait vide dans le second cas.
+    let taille = crate::fs::backing::logical_len(idx);
+    let mut position = 0usize;
+    let mut tranche = alloc::vec![0u8; 64 * 1024];
+    while position < taille {
+        let voulu = core::cmp::min(tranche.len(), taille - position);
+        let lus = crate::fs::backing::read_at(idx, position, &mut tranche[..voulu]);
+        if lus == 0 {
+            println!("cat: lecture interrompue a l'octet {}", position);
+            return 1;
+        }
+        print!("{}", String::from_utf8_lossy(&tranche[..lus]));
+        position += lus;
+    }
     println!("");
     0
 }
@@ -1221,6 +1236,38 @@ pub fn date() {
 
 /// Recupere le texte a traiter : depuis un fichier si fourni, sinon depuis le
 /// pipe (stdin). Renvoie None et affiche une erreur si le fichier est invalide.
+/// Ce qu'un outil texte du shell accepte de charger d'un coup.
+///
+/// Les fichiers de l'archive de boot qui depassent `INLINE_BOOT_FILE_SIZE` ne
+/// sont pas residents : `Node::content` est vide et leurs octets restent sur
+/// hdb. Un runtime Ladybird pese 190 Mio ; le charger entier dans le tas noyau
+/// pour un `grep` serait deraisonnable. Au-dela de cette borne, on le DIT.
+const MAX_TEXTE_SHELL: usize = 8 * 1024 * 1024;
+
+/// Lit le contenu d'un nœud, qu'il soit resident ou adosse au disque.
+///
+/// `Node::content` ne suffit pas : `tar::index_data_disk` le vide pour les gros
+/// fichiers et n'enregistre que leur etendue sur hdb. Les outils texte du shell
+/// lisaient ce champ directement et voyaient donc un fichier VIDE la ou `ls -l`
+/// annonce 190 Mio — un mensonge silencieux, exactement celui qu'on ne veut pas.
+fn lit_noeud(idx: usize, who: &str) -> Option<String> {
+    let taille = crate::fs::backing::logical_len(idx);
+    if taille > MAX_TEXTE_SHELL {
+        println!(
+            "{}: fichier de {} octets, au-dela des {} octets qu'un outil texte charge",
+            who, taille, MAX_TEXTE_SHELL
+        );
+        return None;
+    }
+    let mut octets = alloc::vec![0u8; taille];
+    let lus = crate::fs::backing::read_at(idx, 0, &mut octets);
+    if lus < taille {
+        println!("{}: lecture incomplete ({} sur {} octets)", who, lus, taille);
+        octets.truncate(lus);
+    }
+    Some(String::from_utf8_lossy(&octets).into_owned())
+}
+
 fn input_text(path: Option<&str>, cwd: usize, who: &str) -> Option<String> {
     match path {
         Some(p) => {
@@ -1240,10 +1287,7 @@ fn input_text(path: Option<&str>, cwd: usize, who: &str) -> Option<String> {
                 println!("{}: permission denied", who);
                 return None;
             }
-            let n = &fs.nodes[idx];
-            let mut s = String::new();
-            s.push_str(&n.content_str());
-            Some(s)
+            lit_noeud(idx, who)
         }
         None => Some(crate::shell::take_stdin().unwrap_or_default()),
     }
