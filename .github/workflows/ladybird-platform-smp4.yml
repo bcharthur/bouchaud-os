@@ -176,6 +176,15 @@ jobs:
           echo "journal serie : $(stat -c '%s' "$LOG") octets"
           tail -c "$MAX_ECHO" "$LOG"
 
+          # Si le premier demarrage n'a pas abouti, le second ne mesurerait
+          # rien : il n'y a ni profil ni telechargement a retrouver. On echoue
+          # ici, tout de suite, avec le journal sous les yeux, plutot que de
+          # depenser quinze minutes de plus a constater la meme chose.
+          if ! grep -aFq "PLATFORM_FULL_OK" "$LOG"; then
+            echo "Le premier demarrage n'a pas atteint son verdict." >&2
+            exit 1
+          fi
+
       - name: QEMU 4 vCPU, second demarrage sur la meme image
         run: |
           set -u
