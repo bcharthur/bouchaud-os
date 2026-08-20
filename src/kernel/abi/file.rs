@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 use crate::drivers::keyboard::{self, Key};
 use crate::fs::backing;
 use crate::fs::ramfs::{self, NodeKind};
-use crate::kernel::abi::{errno, user_read, user_read_u64, user_write};
+use crate::kernel::abi::{errno, user_read, user_read_u64, user_write, verrous};
 use crate::kernel::fd::{device_for_path, FdKind, FileDesc};
 use crate::kernel::input;
 use crate::kernel::task;
@@ -771,7 +771,27 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
 /// `close`.
 pub fn sys_close(fd: i32) -> i64 {
     let process = task::current_process();
+
+    // POSIX : fermer n'importe quel descripteur d'un processus sur un fichier
+    // relache TOUS les verrous d'enregistrement de ce processus sur ce fichier,
+    // meme s'il lui en reste d'autres ouverts dessus. SQLite compte dessus pour
+    // rendre la base a la fermeture ; sans cela un verrou survit au `close` et
+    // la reouverture suivante se croit bloquee par un fantome.
+    let verrouille = {
+        let borrowed = process.borrow();
+        match borrowed.files.get(fd) {
+            Some(desc) => match desc.kind {
+                FdKind::File(node) => Some((node, borrowed.pid)),
+                _ => None,
+            },
+            None => None,
+        }
+    };
+
     let closed = process.borrow_mut().files.close(fd);
+    if let Some((node, pid)) = verrouille {
+        verrous::libere_fichier(node, pid);
+    }
     if closed {
         0
     } else {
@@ -867,8 +887,18 @@ pub fn sys_fcntl(fd: i32, command: u32, arg: u64) -> i64 {
     const F_SETFD: u32 = 2;
     const F_GETFL: u32 = 3;
     const F_SETFL: u32 = 4;
+    const F_GETLK: u32 = 5;
+    const F_SETLK: u32 = 6;
+    const F_SETLKW: u32 = 7;
     const F_DUPFD_CLOEXEC: u32 = 1030;
     const FD_CLOEXEC: u64 = 1;
+
+    // Les verrous d'enregistrement prennent leur propre chemin : ils lisent et
+    // reecrivent une structure utilisateur, et `F_SETLKW` attend, ce qu'on ne
+    // peut pas faire en tenant le `RefCell` du processus.
+    if command == F_GETLK || command == F_SETLK || command == F_SETLKW {
+        return fcntl_verrou(fd, command, arg);
+    }
 
     let process = task::current_process();
     let mut borrowed = process.borrow_mut();
@@ -909,7 +939,136 @@ pub fn sys_fcntl(fd: i32, command: u32, arg: u64) -> i64 {
             }
             None => -errno::EBADF,
         },
-        _ => 0,
+        // Une commande qu'on ne sait pas honorer doit le dire. Repondre « 0 »
+        // a tout faisait croire a chaque appelant que sa demande avait ete
+        // prise en compte -- c'est ainsi que les verrous d'enregistrement
+        // semblaient fonctionner alors que rien n'etait pose.
+        _ => -errno::EINVAL,
+    }
+}
+
+/// `struct flock` de l'ABI Linux x86-64, 32 octets :
+///
+/// ```text
+/// 0   i16  l_type      F_RDLCK / F_WRLCK / F_UNLCK
+/// 2   i16  l_whence    SEEK_SET / SEEK_CUR / SEEK_END
+/// 4        (bourrage d'alignement pour l_start)
+/// 8   i64  l_start
+/// 16  i64  l_len       0 = jusqu'a la fin du fichier
+/// 24  i32  l_pid       rempli par F_GETLK
+/// 28       (bourrage de fin)
+/// ```
+const TAILLE_FLOCK: usize = 32;
+
+/// `fcntl(F_GETLK/F_SETLK/F_SETLKW)` : verrous d'enregistrement POSIX.
+///
+/// Voir `crate::kernel::abi::verrous` pour le modele et pour ce dont SQLite
+/// depend exactement.
+fn fcntl_verrou(fd: i32, command: u32, arg: u64) -> i64 {
+    const F_GETLK: u32 = 5;
+    const F_SETLKW: u32 = 7;
+    const SEEK_SET: i16 = 0;
+    const SEEK_CUR: i16 = 1;
+    const SEEK_END: i16 = 2;
+
+    let brut = match user_read(arg, TAILLE_FLOCK) {
+        Some(octets) => octets,
+        None => return -errno::EFAULT,
+    };
+    let genre = i16::from_le_bytes([brut[0], brut[1]]);
+    let origine = i16::from_le_bytes([brut[2], brut[3]]);
+    let depart = i64::from_le_bytes(brut[8..16].try_into().unwrap());
+    let longueur = i64::from_le_bytes(brut[16..24].try_into().unwrap());
+
+    if genre != verrous::F_RDLCK && genre != verrous::F_WRLCK && genre != verrous::F_UNLCK {
+        return -errno::EINVAL;
+    }
+
+    // Identite du fichier et contexte necessaires a la resolution de l_whence.
+    let process = task::current_process();
+    let (noeud, position, taille, pid) = {
+        let borrowed = process.borrow();
+        let desc = match borrowed.files.get(fd) {
+            Some(desc) => desc,
+            None => return -errno::EBADF,
+        };
+        let noeud = match desc.kind {
+            FdKind::File(node) => node,
+            // POSIX : les verrous d'enregistrement ne valent que pour les
+            // fichiers ordinaires. Un tube ou un socket doit recevoir EINVAL,
+            // pas un acquiescement muet.
+            _ => return -errno::EINVAL,
+        };
+        (
+            noeud,
+            desc.offset as i64,
+            backing::logical_len(noeud) as i64,
+            borrowed.pid,
+        )
+    };
+
+    let base = match origine {
+        SEEK_SET => 0,
+        SEEK_CUR => position,
+        SEEK_END => taille,
+        _ => return -errno::EINVAL,
+    };
+
+    // Une longueur negative decrit la plage qui PRECEDE l_start (POSIX.1-2001).
+    let (debut_signe, longueur_absolue) = if longueur < 0 {
+        (base + depart + longueur, -longueur)
+    } else {
+        (base + depart, longueur)
+    };
+    if debut_signe < 0 {
+        return -errno::EINVAL;
+    }
+    let debut = debut_signe as u64;
+    let longueur_absolue = longueur_absolue as u64;
+
+    if command == F_GETLK {
+        let mut sortie = brut.clone();
+        match verrous::interroge(noeud, pid, genre, debut, longueur_absolue) {
+            Some((genre_bloquant, debut_bloquant, longueur_bloquante, pid_bloquant)) => {
+                sortie[0..2].copy_from_slice(&genre_bloquant.to_le_bytes());
+                sortie[2..4].copy_from_slice(&SEEK_SET.to_le_bytes());
+                sortie[8..16].copy_from_slice(&(debut_bloquant as i64).to_le_bytes());
+                sortie[16..24].copy_from_slice(&(longueur_bloquante as i64).to_le_bytes());
+                sortie[24..28].copy_from_slice(&(pid_bloquant as i32).to_le_bytes());
+            }
+            None => {
+                // Rien ne bloque : c'est CETTE ecriture que SQLite lit pour
+                // decider qu'il peut avancer.
+                sortie[0..2].copy_from_slice(&verrous::F_UNLCK.to_le_bytes());
+            }
+        }
+        if !user_write(arg, &sortie) {
+            return -errno::EFAULT;
+        }
+        return 0;
+    }
+
+    // F_SETLK / F_SETLKW.
+    //
+    // `F_SETLKW` attend que la plage se libere. Bouchaud n'a pas de file
+    // d'attente par verrou ; on rend la main a l'ordonnanceur, comme le fait
+    // deja une lecture bloquante sur un tube. La patience est bornee : un
+    // interblocage franc doit se voir en EDEADLK, pas figer le systeme.
+    let patience = 5 * crate::kernel::timer::TICKS_PER_SECOND;
+    let depart_attente = crate::kernel::timer::ticks();
+    loop {
+        match verrous::pose(noeud, pid, genre, debut, longueur_absolue) {
+            verrous::Pose::Accorde => return 0,
+            verrous::Pose::Occupe => {
+                if command != F_SETLKW {
+                    return -errno::EAGAIN;
+                }
+                if crate::kernel::timer::ticks().saturating_sub(depart_attente) > patience {
+                    return -errno::EDEADLK;
+                }
+                task::yield_now();
+            }
+        }
     }
 }
 

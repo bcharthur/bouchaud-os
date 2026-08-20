@@ -40,6 +40,8 @@ pub const ENAMETOOLONG: i64 = 36;
 pub const ENOSYS: i64 = 38;
 pub const ENOTEMPTY: i64 = 39;
 pub const ELOOP: i64 = 40;
+/// Interblocage detecte sur un verrou d'enregistrement (`fcntl(F_SETLKW)`).
+pub const EDEADLK: i64 = 35;
 pub const ENODATA: i64 = 61;
 pub const EPROTO: i64 = 71;
 pub const EOVERFLOW: i64 = 75;
@@ -84,6 +86,7 @@ pub fn name(code: i64) -> &'static str {
         ENOTDIR => "ENOTDIR",
         EISDIR => "EISDIR",
         EINVAL => "EINVAL",
+        EDEADLK => "EDEADLK",
         ENOTTY => "ENOTTY",
         ENOSPC => "ENOSPC",
         ESPIPE => "ESPIPE",

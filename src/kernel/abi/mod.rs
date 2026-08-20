@@ -45,6 +45,7 @@ pub mod mem;
 pub mod net;
 pub mod nr;
 pub mod proc;
+pub mod verrous;
 
 use alloc::string::String;
 use alloc::vec::Vec;

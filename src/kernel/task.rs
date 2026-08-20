@@ -1089,6 +1089,10 @@ pub fn exit_current(code: i32) -> ! {
             // parent le recolte par `wait4`. C'est ce qui permet au parent de
             // recuperer le code de sortie apres coup.
             process.zombie = true;
+            // Les verrous d'enregistrement POSIX meurent avec leur detenteur.
+            // Un WebContent qui plante ne doit pas laisser la base SQL du
+            // navigateur verrouillee pour le reste de la session.
+            crate::kernel::abi::verrous::libere_processus(process.pid);
         }
     }
 
