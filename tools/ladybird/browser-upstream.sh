@@ -298,6 +298,12 @@ if [ -d "$SRC/Base/res" ]; then
     cp -a "$SRC/Base/res/." "$OUT/resources/"
 fi
 
+# La configuration fontconfig voyage avec les ressources : elle designe le
+# repertoire de polices qu'on vient d'y copier, et les deux doivent arriver
+# ensemble sur le disque Bouchaud. Voir tools/ladybird/fontconfig/fonts.conf.
+mkdir -p "$OUT/resources/fontconfig"
+cp -f "$ROOT/tools/ladybird/fontconfig/fonts.conf" "$OUT/resources/fontconfig/fonts.conf"
+
 # `file` peut varier selon la version du runner; readelf est l'invariant utile
 # pour Bouchaud : aucun PT_INTERP ne doit demander ld-linux au demarrage.
 for runtime in WebContent RequestServer ImageDecoder WebWorker; do

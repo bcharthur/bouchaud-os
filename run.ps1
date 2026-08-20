@@ -656,6 +656,38 @@ if ($LadybirdMode) {
 
 
     # =========================================================================
+    # Configuration fontconfig
+    #
+    # Elle voyage normalement avec les ressources de l'artefact. On la repose
+    # depuis le depot quand l'artefact est anterieur a son introduction : sans
+    # elle, le gestionnaire de polices de Skia ne voit aucune police et tout le
+    # repli de familles CSS disparait. Voir tools/ladybird/fontconfig/fonts.conf.
+    # =========================================================================
+
+    $FontconfigTarget = Join-Path $LadybirdShare "fontconfig"
+
+    if (-not (Test-Path (Join-Path $FontconfigTarget "fonts.conf"))) {
+
+        $FontconfigSource = Join-Path `
+            $RepoRoot `
+            "tools\ladybird\fontconfig\fonts.conf"
+
+        if (Test-Path $FontconfigSource) {
+
+            New-Item `
+                -ItemType Directory `
+                -Path $FontconfigTarget `
+                -Force | Out-Null
+
+            Copy-Item `
+                $FontconfigSource `
+                (Join-Path $FontconfigTarget "fonts.conf") `
+                -Force
+        }
+    }
+
+
+    # =========================================================================
     # Certificats publics pour HTTPS Internet
     # =========================================================================
 

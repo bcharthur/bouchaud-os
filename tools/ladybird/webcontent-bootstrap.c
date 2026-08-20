@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -28,6 +29,37 @@
 #define IMAGEDECODER_SERVICE_FD 102
 // Cote moteur : le descripteur que WebContent adopte pour parler au decodeur.
 #define IMAGEDECODER_CLIENT_FD 103
+
+// Fontconfig cherche sa configuration dans `FONTCONFIG_FILE`, puis dans
+// `$FONTCONFIG_PATH/fonts.conf`, puis dans un chemin fige a la compilation de
+// la bibliotheque — celui de la machine Ubuntu qui a construit le paquet, et
+// qui n'existe pas ici. D'ou, au demarrage :
+//
+//     Fontconfig error: Cannot load default config file: No such file: (null)
+//
+// Ce n'est pas un avertissement decoratif : `SkFontMgr_New_FontConfig` est le
+// gestionnaire de polices de Skia, donc tout le repli quand une page demande
+// une famille que le fournisseur de chemins de Ladybird ne connait pas. Sans
+// configuration, ce gestionnaire ne voit aucune police.
+//
+// Les deux variables sont posees dans le lanceur, avant tout `fork`, pour que
+// chaque service en herite : WebContent rasterise, ImageDecoder lie LibGfx.
+static void designer_fontconfig(void) {
+    static char const* const config = "/usr/share/ladybird/fontconfig/fonts.conf";
+    if (access(config, R_OK) != 0) {
+        printf("[ladybird-bouchaud] FONTCONFIG_ABSENT %s\n", config);
+        fflush(stdout);
+        return;
+    }
+    setenv("FONTCONFIG_FILE", config, 1);
+    setenv("FONTCONFIG_PATH", "/usr/share/ladybird/fontconfig", 1);
+    // Sans repertoire de cache inscriptible, fontconfig reanalyse chaque
+    // fichier de police a chaque appel. /tmp est le seul emplacement
+    // inscriptible d'un systeme de fichiers reconstruit a chaque demarrage.
+    mkdir("/tmp/fontconfig", 0777);
+    printf("[ladybird-bouchaud] FONTCONFIG %s\n", config);
+    fflush(stdout);
+}
 
 static int fail(char const* what) {
     fprintf(stderr, "[ladybird-bouchaud] ECHEC %s: %s\n", what, strerror(errno));
@@ -420,6 +452,8 @@ int main(int argc, char** argv) {
     char const* imagedecoder = argc > 3
         ? argv[3]
         : "/usr/libexec/ladybird/ImageDecoder";
+
+    designer_fontconfig();
 
     if (getenv("BOUCHAUD_M8"))
         return run_m8(webcontent, imagedecoder);
