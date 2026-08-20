@@ -105,7 +105,6 @@ jobs:
           /bin/disque-probe /bin/gros.bin
           strace off
           echo PRIMITIVES_FIN
-          shutdown
           AUTORUN
 
           (cd tools/userland && IMAGE="$GITHUB_WORKSPACE/primitives.img" \
