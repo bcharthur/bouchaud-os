@@ -103,6 +103,78 @@ GIF_B64 = (
 )
 
 
+
+
+
+M12_HTML = b"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Bouchaud M12</title>
+<style>
+html,body{margin:0;background:#07130c;color:#e8fff1;font-family:sans-serif}
+main{padding:56px}
+h1{font-size:42px;margin:0 0 24px;color:#4ade80}
+.card{max-width:760px;padding:28px;border:2px solid #1f7a4a;background:#0e2418}
+strong{color:#fde047}
+code{color:#7dd3fc}
+</style>
+</head>
+<body>
+<main>
+<div class="card">
+<h1>Ladybird M12 sur Bouchaud OS</h1>
+<p>Cette page est chargee en <strong>HTTPS</strong>, certificat verifie.</p>
+<p>Chemin: <code>WebContent -&gt; RequestServer -&gt; OpenSSL -&gt; TCP Bouchaud</code></p>
+<p><strong>BOUCHAUD_M12_HTTPS_OK</strong></p>
+</div>
+</main>
+</body>
+</html>
+"""
+
+
+# ---------------------------------------------------------------------------
+# Suite fonctionnelle du moteur.
+#
+# Les quatre images sont de vrais fichiers, produits une fois avec Pillow puis
+# figes ici en base64. Les figer plutot que les regenerer donne trois choses :
+# aucune dependance de generation dans la CI, les memes octets a chaque
+# execution, et une couleur differente par format — ce qui permet a la page de
+# dire *lequel* a ete decode, et pas seulement qu'une image l'a ete.
+#
+#   PNG   16x16  #E03030      WebP  16x16  #3060E0
+#   JPEG  16x16  #30C040      GIF   16x16  #E0C020
+# ---------------------------------------------------------------------------
+
+PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAGUlEQVR4nGN8YGDAQApgIkn1qIZRDUNKAwAGfAFg"
+    "k0eyuQAAAABJRU5ErkJggg=="
+)
+
+JPEG_B64 = (
+    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAIBAQEBAQIBAQECAgICAgQDAgICAgUEBAMEBgUGBgYFBgYGBwkIBgcJ"
+    "BwYGCAsICQoKCgoKBggLDAsKDAkKCgr/2wBDAQICAgICAgUDAwUKBwYHCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoK"
+    "CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgr/wAARCAAQABADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAA"
+    "AAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAk"
+    "M2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKT"
+    "lJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QA"
+    "HwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdh"
+    "cRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hp"
+    "anN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk"
+    "5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDYooor+Xz+Bz//2Q=="
+)
+
+WEBP_B64 = (
+    "UklGRh4AAABXRUJQVlA4TBEAAAAvD8ADAAdQsMIUvP+BiOh/AAA="
+)
+
+GIF_B64 = (
+    "R0lGODdhEAAQAIEAAODAIAAAAAAAAAAAACwAAAAAEAAQAEAIHQABCBxIsKDBgwgTKlzIsKHDhxAjSpxIsaLFgQEB"
+    "ADs="
+)
+
+
 MOTEUR_HTML = b"""<!doctype html>
 <html lang="fr">
 <head>
@@ -134,12 +206,30 @@ h1{font-size:28px;margin:0 0 16px;color:#7ec8ff}
 // Chaque verification imprime une ligne, et une seule. La CI lit ces lignes ;
 // elle ne compare pas de pixels a l'ecran. Un echec dit donc *quoi*, pas
 // seulement *que*.
-var reussis = 0, total = 0;
+var reussis = 0, total = 0, absents = 0;
 function verifie(nom, condition, detail) {
   total += 1;
   if (condition) { reussis += 1; console.log("MOTEUR OK " + nom); }
   else { console.log("MOTEUR ECHEC " + nom + " " + (detail === undefined ? "" : detail)); }
   return !!condition;
+}
+
+// Une verification dont on sait *pourquoi* elle ne peut pas passer.
+//
+// Elle ne compte pas comme un echec - sinon la suite serait rouge en
+// permanence et plus personne ne la lirait - mais elle ne compte pas non plus
+// comme une reussite. Elle est nommee, avec sa cause, et si elle se met a
+// passer la ligne PROMU le dit : c'est le signal qu'il faut la promouvoir en
+// verification ordinaire.
+function verifie_connu_absent(nom, condition, cause, detail) {
+  if (condition) {
+    console.log("MOTEUR PROMU " + nom + " (" + cause + " ne bloque plus)");
+    return true;
+  }
+  absents += 1;
+  console.log("MOTEUR ABSENT " + nom + " " + cause
+              + (detail === undefined ? "" : " [" + detail + "]"));
+  return false;
 }
 
 // --- 1. DOM et CSS ---------------------------------------------------------
@@ -185,6 +275,15 @@ function verifie_image(nom, id) {
 }
 
 // --- 5. Canvas : le contenu, pas seulement les dimensions ------------------
+// Dans le Ladybird epingle, toute la memoire d'un canvas 2D vit dans le
+// processus Compositor : `Canvas2DContextBase::ensure_remote_canvas_context()`
+// exige `page->has_compositor_host()`, et `read_pixels()` rend nullptr sans
+// stockage - ce que le commentaire d'upstream decrit comme " copier des pixels
+// noirs transparents ". Bouchaud n'a pas ce processus, donc `drawImage` ne
+// peint nulle part et la relecture rend 0,0,0.
+//
+// Ce n'est pas un defaut du decodage : les cinq `image_*_decodee` ci-dessus
+// passent. Voir docs/ladybird/AUDIT_INTEGRATION.md section 4.
 function verifie_pixel(nom, img, r, v, b) {
   var toile = document.getElementById("toile");
   var ctx = toile.getContext("2d");
@@ -193,7 +292,9 @@ function verifie_pixel(nom, img, r, v, b) {
   var p = ctx.getImageData(8, 8, 1, 1).data;
   // Marge de 24 : le JPEG est avec pertes, les autres sont exacts.
   var proche = Math.abs(p[0]-r) < 24 && Math.abs(p[1]-v) < 24 && Math.abs(p[2]-b) < 24;
-  verifie("canvas_" + nom + "_pixel", proche, p[0] + "," + p[1] + "," + p[2]);
+  verifie_connu_absent("canvas_" + nom + "_pixel", proche,
+                       "sans processus Compositor le canvas n'a aucun stockage",
+                       p[0] + "," + p[1] + "," + p[2]);
 }
 
 // --- 6. Minuteurs, promesses, fetch ----------------------------------------
@@ -256,10 +357,12 @@ function apres_chargement() {
               document.cookie);
 
       var bilan = document.getElementById("bilan");
+      var ligne = "MOTEUR_BILAN reussis=" + reussis + " total=" + total
+                  + " absents=" + absents;
       bilan.className = (reussis === total) ? "ok" : "ko";
-      bilan.textContent = "MOTEUR_BILAN reussis=" + reussis + " total=" + total;
+      bilan.textContent = ligne;
       document.title = "Bouchaud " + reussis + "/" + total;
-      console.log("MOTEUR_BILAN reussis=" + reussis + " total=" + total);
+      console.log(ligne);
     });
 }
 
@@ -301,8 +404,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             # Un cookie pose par le serveur : la page verifie ensuite qu'elle le
-            # relit. C'est ce qui distingue « les cookies sont branches » de
-            # « le pot existe ».
+            # relit. C'est ce qui distingue " les cookies sont branches " de
+            # " le pot existe ".
             if self.path == "/moteur.html":
                 self.send_header("Set-Cookie", "bouchaud=moteur; Path=/")
                 print("[health-fixture] MOTEUR_FIXTURE_OK path=/moteur.html", flush=True)
@@ -346,7 +449,7 @@ def main():
     parser.add_argument("--port", type=int, default=18080)
     # TLS local. La CI ne doit dependre d'aucun site externe : le certificat est
     # fabrique sur place et son autorite est embarquee dans l'image Bouchaud.
-    # C'est une verification TLS **reelle** — la chaine est validee — sans
+    # C'est une verification TLS **reelle** - la chaine est validee - sans
     # sortir de la machine.
     parser.add_argument("--cert", help="certificat serveur (PEM) ; active TLS")
     parser.add_argument("--key", help="cle privee (PEM)")

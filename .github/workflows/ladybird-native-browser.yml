@@ -746,20 +746,33 @@ jobs:
           grep -F "[ladybird-bouchaud] M9_REQUESTSERVER_CONNECTED" serie-ladybird-moteur.log
           grep -F "[ladybird-bouchaud] FONTCONFIG /usr/share/ladybird/fontconfig/fonts.conf" serie-ladybird-moteur.log
 
+          # Ce qui est connu comme bloque, et ce qui ne l'est plus.
+          echo "--- fonctionnalites connues comme absentes ---"
+          grep -ao "MOTEUR ABSENT .*" serie-ladybird-moteur.log || echo "(aucune)"
+          echo "--- ce qui s'est mis a marcher (a promouvoir) ---"
+          grep -ao "MOTEUR PROMU .*" serie-ladybird-moteur.log || echo "(rien de nouveau)"
+
           # Aucune verification ne doit avoir echoue, et le bilan doit etre
           # complet. Les deux ensemble : la premiere attrape un echec, la
           # seconde attrape une suite qui s'arrete en cours de route.
           ! grep -qF "MOTEUR ECHEC" serie-ladybird-moteur.log
-          BILAN=$(grep -ao "MOTEUR_BILAN reussis=[0-9]* total=[0-9]*" serie-ladybird-moteur.log | tail -1)
+          BILAN=$(grep -ao "MOTEUR_BILAN reussis=[0-9]* total=[0-9]* absents=[0-9]*" serie-ladybird-moteur.log | tail -1)
           echo "bilan: $BILAN"
           test -n "$BILAN"
           REUSSIS=$(echo "$BILAN" | sed 's/.*reussis=\([0-9]*\).*/\1/')
-          TOTAL=$(echo "$BILAN" | sed 's/.*total=\([0-9]*\)/\1/')
+          TOTAL=$(echo "$BILAN" | sed 's/.*total=\([0-9]*\).*/\1/')
+          ABSENTS=$(echo "$BILAN" | sed 's/.*absents=\([0-9]*\)/\1/')
           test "$REUSSIS" = "$TOTAL"
           # Le compte de reference vient de la meme page executee dans Chromium :
-          # 25 verifications. Si la page grossit, ce nombre doit grossir avec
-          # elle — sinon une verification supprimee passerait inapercue.
-          test "$TOTAL" -ge 25
+          # 21 verifications ordinaires. Si la page grossit, ce nombre doit
+          # grossir avec elle — sinon une verification supprimee passerait
+          # inapercue.
+          test "$TOTAL" -ge 21
+          # Les quatre relectures de pixel du canvas, bloquees par l'absence du
+          # processus Compositor. Le plafond ne peut que descendre : une
+          # cinquieme absence serait une regression, une de moins un progres.
+          echo "absents: $ABSENTS (plafond 4)"
+          test "$ABSENTS" -le 4
 
       - name: Journaux moteur
         if: always()

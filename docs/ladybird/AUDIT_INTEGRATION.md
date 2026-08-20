@@ -80,7 +80,7 @@ n'est pas une dépendance d'exécution.
 |---|---|---|---|---|---|---|---|
 | WebContent | oui | oui | oui | oui | descripteur hérité (`BOUCHAUD_WEBCONTENT_FD`) | M8, M9, M12, Internet | ✅ |
 | RequestServer | oui | oui | oui | oui | descripteur hérité (`BOUCHAUD_REQUESTSERVER_FD`) | M9, M12, Internet | ✅ |
-| ImageDecoder | oui | oui | **oui, désormais** | **oui, désormais** | `SOCKET_TAKEOVER` upstream | à prouver au prochain cycle | 🟡 |
+| ImageDecoder | oui | oui | **oui, désormais** | **oui, désormais** | `SOCKET_TAKEOVER` upstream | suite fonctionnelle : PNG, JPEG, WebP, GIF, SVG décodés | ✅ |
 | WebWorker | oui | oui | non | non | — | non | ❌ voir §5 |
 | Compositor | oui | non | non | non | — | non | ❌ voir §4 |
 | WebDriver | oui | non | non | non | — | non | ⚪ voir §7 |
@@ -126,17 +126,45 @@ Ce qui est **perdu** :
 
 | Fonctionnalité | Cause précise |
 |---|---|
-| WebGL / WebGL2 | `HostWebGLContext` vit dans le processus Compositor ; pas de contexte OpenGL sous Bouchaud |
+| **Canvas 2D** | `Canvas2DContextBase::ensure_remote_canvas_context()` exige `page->has_compositor_host()`. Sans lui, `has_backing_storage()` est faux : **rien n'est dessiné**, et `read_pixels()` rend `nullptr` — ce qu'upstream commente comme « copier des pixels noirs transparents » |
+| WebGL / WebGL2 | `HostWebGLContext` vit dans le processus Compositor |
 | Défilement asynchrone | `--disable-async-scrolling` non passé, mais sans compositor le défilement repasse par le moteur |
 | Cadence VSync | `VSyncScheduler` est côté Compositor ; le plafond de trames est ici fixé à 30 Hz |
 | Composition d'iframes distantes | `compositor_context_id_for_remote_child_frame` reste vide ; site isolation désactivée de toute façon |
 | Réutilisation de tuiles (`BackingStoreManager`) | chaque trame repart d'une surface neuve |
 
-**Peut-on intégrer le vrai Compositor ?** Pas sans pile OpenGL : le service
-ouvre un contexte GL dès `main.cpp`. Bouchaud n'a ni ANGLE, ni pilote GPU, ni
-`/dev/dri`. Le chemin honnête est celui déjà pris — Skia sur processeur — et il
-n'est pas un pis-aller : c'est le mode `--force-cpu-painting` qu'upstream
-supporte lui-même.
+La ligne « Canvas 2D » n'était pas prévue, et elle a été trouvée par la suite
+fonctionnelle : les cinq formats d'image se décodent (`image_png_decodee` …
+`image_svg_decodee` passent) mais les quatre relectures de pixel rendent
+`0,0,0`. Ce n'est donc pas le décodage — c'est que **la mémoire d'un canvas vit
+entièrement dans le processus Compositor** dans ce commit épinglé. Toute page
+qui dessine dans un `<canvas>` ne montre rien, en silence.
+
+**Peut-on intégrer le vrai Compositor ?** Oui, et la lecture du code répond
+mieux que l'intuition. `Services/Compositor/main.cpp` n'ouvre un contexte GPU
+que si `--force-cpu-painting` est **absent** :
+
+```cpp
+if (!force_cpu_painting)
+    Gfx::SkiaBackendContext::initialize_gpu_backend();
+```
+
+Ni ANGLE, ni pilote GPU, ni `/dev/dri` ne sont donc nécessaires : upstream
+lance lui-même ce service en peinture processeur. Il adopte sa socket par le
+même `SOCKET_TAKEOVER` qu'ImageDecoder — c'est-à-dire par un mécanisme déjà
+éprouvé ici.
+
+Ce qui reste à faire est identifié, et c'est plus qu'un branchement :
+
+1. lancer le service et lui passer sa socket depuis le lanceur (identique à
+   ImageDecoder) ;
+2. donner à WebContent le descripteur correspondant, là où upstream reçoit
+   `connect_to_compositor_process(IPC::TransportHandle)` ;
+3. **rendre `supports_compositor()` à `true`** — et c'est le pas risqué :
+   il remplace le pont capture par le vrai pipeline de trames, donc réécrit le
+   chemin de rendu que M8, M9, M12 et l'essai Internet valident aujourd'hui.
+
+C'est la prochaine priorité, et elle mérite sa propre branche.
 
 **Ce qui, en revanche, était un vrai défaut** et qui est corrigé dans cette
 branche : nous repeignions au rythme d'un minuteur au lieu du modèle
@@ -291,10 +319,10 @@ Légende : ✅ intégré et prouvé · 🟡 intégré, non prouvé ou incomplet 
 
 | Format | Upstream | Bouchaud | Cause |
 |---|---|---|---|
-| PNG, JPEG, WebP, GIF, BMP, ICO | `LibGfx/ImageFormats` via `ImageDecoder` | 🟡 | service désormais lancé et greffon installé ; décodage à prouver au prochain cycle |
-| AVIF, JPEG-XL, TIFF | idem | 🟡 | idem, dépend des paquets vcpkg présents |
+| PNG, JPEG, WebP, GIF | `LibGfx/ImageFormats` via `ImageDecoder` | ✅ | **prouvé** : la suite fonctionnelle vérifie `naturalWidth === 16` pour chacun, ce qui n'est vrai qu'après décodage réussi |
+| BMP, ICO, AVIF, JPEG-XL, TIFF | idem | 🟡 | même service, mêmes codecs ; non exercés |
 | Animations (APNG, GIF) | `request_animation_frames` | 🟡 | le chemin existe ; nécessite les rappels du greffon, non exercés |
-| SVG | dans le moteur | 🟡 | voir ci-dessus |
+| SVG | dans le moteur (`SVGDecodedImageData`) | ✅ | **prouvé** par la même mesure |
 
 ### Polices et texte
 
@@ -313,13 +341,13 @@ Légende : ✅ intégré et prouvé · 🟡 intégré, non prouvé ou incomplet 
 
 | Fonctionnalité | Upstream | Bouchaud | Cause |
 |---|---|---|---|
-| LibJS (interpréteur + bytecode) | `Libraries/LibJS` | 🟡 | lié, et Wikipedia télécharge ses scripts ; exécution jamais vérifiée par un test |
+| LibJS (interpréteur + bytecode) | `Libraries/LibJS` | ✅ | **prouvé** : la suite fonctionnelle est vingt-et-une assertions de JavaScript exécuté |
 | Modules ES | `LibJS` | 🟡 | idem |
-| Promesses, microtâches | `LibJS` + boucle d'événements | 🟡 | idem |
-| Minuteurs (`setTimeout`) | `LibWeb/HTML` | 🟡 | la boucle d'événements tourne (M16 l'a prouvé avec le minuteur DNS) |
-| Événements DOM | `LibWeb/DOM` | 🟡 | clavier et souris arrivent au moteur (M11), effets non vérifiés |
+| Promesses, microtâches | `LibJS` + boucle d'événements | ✅ | **prouvé** : chaîne de `then` et rejet capturé |
+| Minuteurs (`setTimeout`) | `LibWeb/HTML` | ✅ | **prouvé** par la suite fonctionnelle |
+| Événements DOM | `LibWeb/DOM` | ✅ | **prouvé** : `addEventListener` + `dispatchEvent`. Clavier et souris arrivent au moteur (M11), effets non vérifiés |
 | WebAssembly | `Libraries/LibWasm` | 🟡 | compilé — le portage a même dû contourner un plantage de Clang 18 dessus |
-| Canvas 2D | `LibWeb/HTML/Canvas*` | 🟡 | chemin processeur disponible via Skia |
+| Canvas 2D | `LibWeb/HTML/Canvas*` | 🚧 | `getContext("2d")` rend bien un contexte, mais tout dessin est perdu : le stockage d'un canvas vit dans le processus Compositor (§4). Mesuré par la suite fonctionnelle |
 | WebGL | `LibWeb/WebGL` | ❌ | exige le processus Compositor et un contexte OpenGL |
 | WebGPU | absent d'upstream | ⚪ | — |
 
@@ -339,10 +367,10 @@ Légende : ✅ intégré et prouvé · 🟡 intégré, non prouvé ou incomplet 
 | Cache HTTP disque | `LibHTTP/Cache` | ⚪ | désactivé explicitement (`--http-disk-cache-mode disabled`) ; `statfs` désormais implémenté si on le réactive |
 | Cache HTTP mémoire | `Fetch::set_http_memory_cache_enabled` | ❌ | `--enable-http-memory-cache` non passé |
 | Compression (gzip, brotli, zstd) | curl + `CURLOPT_ACCEPT_ENCODING` | 🟡 | activée par upstream, non vérifiée |
-| Cookies | `WebView::CookieJar` | 🟡 | **restauré** dans cette branche, non prouvé |
+| Cookies | `WebView::CookieJar` | ✅ | **prouvé** : cookie posé par le serveur relu par le document, puis cookie écrit par script relu |
 | HSTS | `WebView::HSTSStore` | 🟡 | idem |
 | WebSocket | `LibWebSocket` + `WebSocketImplCurl` | 🟡 | compilé, jamais exercé |
-| Fetch / XHR | `LibWeb/Fetch`, `LibWeb/XHR` | ✅ pour Fetch | toute navigation passe par Fetch |
+| Fetch / XHR | `LibWeb/Fetch`, `LibWeb/XHR` | ✅ | **prouvé** : `fetch()` d'un JSON, statut et corps, puis `XMLHttpRequest` sur la même ressource |
 | Autorités de certification | paquet `tools/ladybird/certs` | ✅ | `M12_CA_BUNDLE`, chaîne publique validée |
 | Certificats clients | curl | ⚪ | non demandé |
 
@@ -350,7 +378,7 @@ Légende : ✅ intégré et prouvé · 🟡 intégré, non prouvé ou incomplet 
 
 | Fonctionnalité | Upstream | Bouchaud | Cause |
 |---|---|---|---|
-| `localStorage` / `sessionStorage` | `WebView::StorageJar` | 🟡 | **restauré** dans cette branche ; bloquait le moteur avant |
+| `localStorage` / `sessionStorage` | `WebView::StorageJar` | ✅ | **prouvé** : aller-retour et suppression, sur les deux entrepôts |
 | IndexedDB | `LibWeb/IndexedDB` | 🟡 | compilé ; dépend de `StorageJar`, donc débloqué mais non vérifié |
 | Cache API, Service Worker | `LibWeb/ServiceWorker` | ❌ | exige le service `WebWorker` |
 | Historique de session | `LibWeb/HTML` + `LibWebView/SessionHistory` | 🟡 | `M9_HISTORY_LOCAL_COMMIT` ; `traverse_the_history_by_delta` câblé au chrome |
@@ -422,9 +450,11 @@ allumée. **La réponse arrivera de la CI, pas d'une hypothèse.**
 
 ## 9. Ce qui reste, par ordre de valeur
 
-1. **Prouver le décodage d'images.** Le service est lancé, le greffon installé.
-   Il faut une fixture locale déterministe avec un PNG, un JPEG, un WebP et un
-   SVG, et l'assertion que les pixels correspondent.
+1. **Le processus Compositor.** C'est lui qui débloque le canvas 2D — donc une
+   part sérieuse du web moderne — et qui remplacerait le pont capture par le
+   vrai pipeline de trames de Ladybird. Le chemin est identifié (§4) et ne
+   demande pas de GPU. C'est le plus gros gain restant, et le plus risqué :
+   il réécrit ce que quatre scénarios verts valident aujourd'hui.
 2. **Lire la trace TLS de Google** et corriger la vraie cause.
 3. **Un hôte navigateur.** C'est ce qui débloque `WebWorker`, les
    téléchargements, les nouvelles vues, le plein écran — et c'est la forme
