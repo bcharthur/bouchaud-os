@@ -950,7 +950,13 @@ jobs:
           # situe l'arret reste dans un journal que personne n'ouvre. On imprime
           # donc la trace d'abord, assertions ensuite.
           echo "--- analyse d'URL, navigation, RequestServer, DNS ---"
-          grep -E "M15_URL|M16_DNS_|M17_UDP_|M9_URL_INVALID|M9_NAVIGATION_|M9_RS_|M13_DNS_|M14_DNS_" \
+          # `M1[5-9]_` et non la liste des marqueurs un par un. La liste avait
+          # deja coute une conclusion fausse : `M17_RING` n'y figurait pas —
+          # seul `M17_UDP_` y etait — et son absence a l'ecran a ete lue comme
+          # l'absence de la mesure elle-meme. Un filtre qui ne peut pas montrer
+          # ce qu'on cherche est pire que pas de filtre : il repond « rien »
+          # avec la meme assurance que s'il avait regarde.
+          grep -E "M1[5-9]_|M9_URL_INVALID|M9_NAVIGATION_|M9_RS_|M13_DNS_|M14_DNS_" \
               serie-ladybird-net.log || echo "(aucun de ces marqueurs)"
           # La derniere ligne de charge par processus. Elle dit qui prend le
           # processeur, et c'est la seule mesure qui distingue « la machine
