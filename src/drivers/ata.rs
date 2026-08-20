@@ -110,6 +110,7 @@ const CTRL_NIEN: u8 = 0x02;
 
 /// Selectionne un disque et laisse au controleur le temps de commuter.
 fn select(drive: Drive) {
+    wait_not_busy();
     unsafe {
         // Interruptions coupees. Ce pilote fonctionne par interrogation : une
         // IRQ14 servie par un vecteur non installe leve une faute de protection
@@ -140,6 +141,11 @@ fn select(drive: Drive) {
 /// defaillance observe au run 32426569316 : une ecriture d'un seul secteur, au
 /// beau milieu d'une zone parfaitement valide, qui rend zero.
 fn select_lba(drive: Drive, lba: u64) {
+    // On n'ecrit JAMAIS dans DRIVE_HEAD pendant que le controleur est occupe :
+    // le registre n'est pas garanti pris en compte, et la commande suivante
+    // partirait vers le mauvais disque. `read_batch` ne guette pas la fin de
+    // BSY apres son dernier secteur, donc il faut l'attendre ici.
+    wait_not_busy();
     unsafe {
         outb(DEVICE_CONTROL, CTRL_NIEN);
         outb(DRIVE_HEAD, drive.select_bits() | (((lba >> 24) & 0x0F) as u8));
@@ -301,6 +307,9 @@ fn read_batch(drive: Drive, lba: u64, count: usize, out: &mut [u8]) -> bool {
             read_sector_into(&mut out[start..start + SECTOR_SIZE]);
         }
     }
+    // Rendre le controleur au repos avant de partir : la commande suivante
+    // vise souvent l'AUTRE disque du canal, et la trouverait sinon en cours.
+    wait_not_busy();
     true
 }
 
