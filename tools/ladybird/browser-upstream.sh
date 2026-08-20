@@ -35,6 +35,7 @@ python3 tools/ladybird/prepare-image-decoder.py "$SRC"
 python3 tools/ladybird/prepare-repaint.py "$SRC"
 python3 tools/ladybird/prepare-tls-diagnostic.py "$SRC"
 python3 tools/ladybird/prepare-browser-host.py "$SRC"
+python3 tools/ladybird/prepare-console.py "$SRC"
 python3 tools/ladybird/prepare-m11-chrome.py "$SRC"
 python3 tools/ladybird/prepare-browser-runtime-link.py "$SRC"
 

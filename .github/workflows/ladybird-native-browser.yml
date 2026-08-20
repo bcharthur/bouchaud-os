@@ -589,6 +589,188 @@ jobs:
             fixture-m9.log
           if-no-files-found: warn
 
+  qemu-moteur:
+    name: Suite-fonctionnelle-moteur
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+
+      - name: Cache cargo noyau
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Construire le noyau
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          cargo install bootimage --locked
+          cargo bootimage
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+
+      - name: Demarrer fixture HTTP moteur
+        run: |
+          python3 tools/health/fixture_server.py --port 18081 > fixture-moteur.log 2>&1 &
+          echo $! > fixture-moteur.pid
+          sleep 1
+          kill -0 "$(cat fixture-moteur.pid)"
+
+      - name: Fabriquer le disque moteur
+        run: |
+          set -e
+          MAX_DATA_DISK=$((768 * 1024 * 1024))
+
+          test -f native-browser/WebContent
+          test -f native-browser/RequestServer
+          test -f native-browser/webcontent-bootstrap
+          test -f native-browser/M9_CAPABLE
+
+          mkdir -p scenario-moteur/usr/libexec/ladybird scenario-moteur/usr/share/ladybird
+          cp native-browser/WebContent scenario-moteur/usr/libexec/ladybird/WebContent
+          cp native-browser/RequestServer scenario-moteur/usr/libexec/ladybird/RequestServer
+          test -f native-browser/ImageDecoder
+          cp native-browser/ImageDecoder scenario-moteur/usr/libexec/ladybird/ImageDecoder
+          cp native-browser/webcontent-bootstrap scenario-moteur/usr/libexec/ladybird/webcontent-bootstrap
+          cp native-browser/webcontent-bootstrap scenario-moteur/bo-navigateur
+          chmod 755 scenario-moteur/bo-navigateur scenario-moteur/usr/libexec/ladybird/*
+
+          if [ -d native-browser/resources ]; then
+            cp -a native-browser/resources/. scenario-moteur/usr/share/ladybird/
+          fi
+
+          cat > scenario-moteur/autorun <<'SCENARIO'
+          uname
+          df
+          echo "=== Suite fonctionnelle du moteur ==="
+          export BO_AUTOSTART_BROWSER=1
+          export BOUCHAUD_M9=1
+          # Pas de BOUCHAUD_M9_TEST ici, et c'est le point : ce drapeau termine
+          # WebContent des la premiere trame verifiee. La suite a besoin que le
+          # moteur reste vivant pendant que ses scripts s'executent — c'est
+          # exactement ce qu'un navigateur fait, et ce que le jalon M9 ne
+          # testait pas.
+          export BOUCHAUD_M9_URL='http://10.0.2.2:18081/moteur.html'
+          desktop
+          SCENARIO
+
+          (cd tools/userland && IMAGE="$GITHUB_WORKSPACE/ladybird-moteur.img" ./mkdisk.sh "$GITHUB_WORKSPACE/scenario-moteur")
+          DISK_SIZE=$(stat -c '%s' ladybird-moteur.img)
+          echo "hdb Ladybird M9: $DISK_SIZE octets"
+          test "$DISK_SIZE" -le "$MAX_DATA_DISK"
+
+      - name: Executer la suite moteur en ring3
+        run: |
+          set -u
+          LOG=serie-ladybird-moteur.log
+          # La page imprime son bilan quand elle a fini. C'est lui qui arrete
+          # QEMU, et non un marqueur de jalon : le sujet du test est ce que le
+          # moteur sait faire, pas qu'il ait demarre.
+          SUCCESS='[ladybird-bouchaud] JS_CONSOLE log MOTEUR_BILAN'
+          DEADLINE=$((SECONDS + 300))
+          : > "$LOG"
+
+          qemu-system-x86_64 \
+            -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            -drive format=raw,file=ladybird-moteur.img \
+            -m 4096 -display none -no-reboot \
+            -netdev user,id=net0 -device e1000,netdev=net0 \
+            -audiodev none,id=muet -device AC97,audiodev=muet \
+            -serial file:"$LOG" &
+          QEMU_PID=$!
+          echo "qemu: pid $QEMU_PID"
+
+          SUCCESS_SEEN=0
+          while kill -0 "$QEMU_PID" 2>/dev/null; do
+            if grep -Fq "$SUCCESS" "$LOG" 2>/dev/null; then
+              SUCCESS_SEEN=1
+              echo "qemu: bilan moteur detecte, arret anticipe"
+              kill -TERM "$QEMU_PID" 2>/dev/null || true
+              break
+            fi
+            if (( SECONDS >= DEADLINE )); then
+              echo "qemu: timeout suite moteur apres 300 s"
+              kill -TERM "$QEMU_PID" 2>/dev/null || true
+              break
+            fi
+            sleep 0.25
+          done
+
+          for _ in $(seq 1 20); do
+            kill -0 "$QEMU_PID" 2>/dev/null || break
+            sleep 0.1
+          done
+          if kill -0 "$QEMU_PID" 2>/dev/null; then
+            kill -KILL "$QEMU_PID" 2>/dev/null || true
+          fi
+
+          set +e
+          wait "$QEMU_PID"
+          QEMU_CODE=$?
+          set -e
+          echo "qemu: code $QEMU_CODE success=$SUCCESS_SEEN"
+          cat "$LOG"
+          echo "=== fixture ==="
+          cat fixture-moteur.log
+
+      - name: Verdict moteur
+        run: |
+          echo "--- resultats de la suite ---"
+          grep -aF "[ladybird-bouchaud] JS_CONSOLE" serie-ladybird-moteur.log || echo "(aucune sortie console)"
+          echo "--- fautes du noyau, s'il y en a ---"
+          grep -aE "\[memfabric\] FAULT|\[cpu\]|faute de page|panic|ECHEC" serie-ladybird-moteur.log || echo "(aucune)"
+          echo "--- charge par processus ---"
+          grep -F "[ps]" serie-ladybird-moteur.log | tail -2 || echo "(aucun releve)"
+
+          echo "--- assertions ---"
+          grep -F "MOTEUR_FIXTURE_OK path=/moteur.html" fixture-moteur.log
+
+          # Les services doivent tous les trois etre vivants : sans ImageDecoder
+          # il n'y a pas d'image, et sans RequestServer il n'y a pas de page.
+          grep -F "[ladybird-bouchaud] IMAGE_DECODER_LANCE" serie-ladybird-moteur.log
+          grep -F "[ladybird-bouchaud] IMAGE_DECODER_CONNECTED" serie-ladybird-moteur.log
+          grep -F "[ladybird-bouchaud] M9_REQUESTSERVER_CONNECTED" serie-ladybird-moteur.log
+          grep -F "[ladybird-bouchaud] FONTCONFIG /usr/share/ladybird/fontconfig/fonts.conf" serie-ladybird-moteur.log
+
+          # Aucune verification ne doit avoir echoue, et le bilan doit etre
+          # complet. Les deux ensemble : la premiere attrape un echec, la
+          # seconde attrape une suite qui s'arrete en cours de route.
+          ! grep -qF "MOTEUR ECHEC" serie-ladybird-moteur.log
+          BILAN=$(grep -ao "MOTEUR_BILAN reussis=[0-9]* total=[0-9]*" serie-ladybird-moteur.log | tail -1)
+          echo "bilan: $BILAN"
+          test -n "$BILAN"
+          REUSSIS=$(echo "$BILAN" | sed 's/.*reussis=\([0-9]*\).*/\1/')
+          TOTAL=$(echo "$BILAN" | sed 's/.*total=\([0-9]*\)/\1/')
+          test "$REUSSIS" = "$TOTAL"
+          # Le compte de reference vient de la meme page executee dans Chromium :
+          # 25 verifications. Si la page grossit, ce nombre doit grossir avec
+          # elle — sinon une verification supprimee passerait inapercue.
+          test "$TOTAL" -ge 25
+
+      - name: Journaux moteur
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-moteur-serie
+          path: |
+            serie-ladybird-moteur.log
+            fixture-moteur.log
+          if-no-files-found: warn
+
   qemu-m12:
     name: M12-HTTPS-fenetre-Bouchaud
     runs-on: ubuntu-latest
