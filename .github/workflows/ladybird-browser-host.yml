@@ -110,7 +110,11 @@ jobs:
           ifconfig
           echo "=== Bouchaud BrowserHost upstream ==="
           export BOUCHAUD_BROWSER_HOST=1
-          export BOUCHAUD_BROWSER_HOST_URL='http://10.0.2.2:18082/browser-host.html'
+          # BOUCHAUD_M9_URL est la variable que lit reellement le BrowserHost
+          # (prepare-full-browser-host.py). BOUCHAUD_BROWSER_HOST_URL n'etait
+          # lue nulle part : le host partait donc sur son URL par defaut,
+          # https://example.com/, et ce scenario ne testait pas sa fixture.
+          export BOUCHAUD_M9_URL='http://10.0.2.2:18082/browser-host.html'
           /usr/libexec/ladybird/BouchaudBrowserHost
           SCENARIO_EOF
 
