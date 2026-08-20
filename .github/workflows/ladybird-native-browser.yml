@@ -6,6 +6,11 @@ on:
     branches: ["**"]
     paths:
       - "tools/ladybird/**"
+      # La fixture HTTP porte la page de la suite fonctionnelle, ses images
+      # et ses assertions. Trois jobs l'executent — M9, la suite moteur et
+      # M12 — et aucun ne se declenchait quand elle changeait : on pouvait
+      # donc modifier le test qui valide le moteur sans jamais le lancer.
+      - "tools/health/**"
       - "src/gui/**"
       - "src/fs/**"
       - "src/drivers/block.rs"
@@ -45,6 +50,11 @@ on:
   pull_request:
     paths:
       - "tools/ladybird/**"
+      # La fixture HTTP porte la page de la suite fonctionnelle, ses images
+      # et ses assertions. Trois jobs l'executent — M9, la suite moteur et
+      # M12 — et aucun ne se declenchait quand elle changeait : on pouvait
+      # donc modifier le test qui valide le moteur sans jamais le lancer.
+      - "tools/health/**"
       - "src/gui/**"
       - "src/fs/**"
       - "src/drivers/block.rs"

@@ -2349,9 +2349,16 @@ fn statfs_bytes() -> [u8; 120] {
     buffer[32..40].copy_from_slice(&(frames_libres as u64).to_le_bytes()); // f_bavail
     buffer[40..48].copy_from_slice(&nœuds_totaux.to_le_bytes()); // f_files
     buffer[48..56].copy_from_slice(&(nœuds_totaux - nœuds_utilises).to_le_bytes()); // f_ffree
-    // f_fsid (56..72) laisse a zero : un seul systeme de fichiers.
-    buffer[72..80].copy_from_slice(&255u64.to_le_bytes()); // f_namelen
-    buffer[80..88].copy_from_slice(&BLOC.to_le_bytes()); // f_frsize
+    // `f_fsid` ne fait que **huit** octets (deux entiers 32 bits), pas seize :
+    // les champs suivants commencent donc a 64 et 72, et non a 72 et 80.
+    // Decales, ils laissaient `f_namelen` a zero et faisaient passer 255 pour
+    // `f_frsize` — or `compute_disk_space` calcule `f_bavail * f_frsize`, donc
+    // l'espace libre etait annonce seize fois trop petit.
+    // f_fsid (56..64) laisse a zero : un seul systeme de fichiers.
+    buffer[64..72].copy_from_slice(&255u64.to_le_bytes()); // f_namelen
+    buffer[72..80].copy_from_slice(&BLOC.to_le_bytes()); // f_frsize
+    // f_flags (80..88) laisse a zero : aucun ST_RDONLY, ST_NOSUID ni ST_NOEXEC
+    // n'est vrai ici, et 4096 s'y retrouvait par le meme decalage.
     buffer
 }
 
