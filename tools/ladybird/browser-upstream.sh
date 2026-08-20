@@ -38,6 +38,7 @@ python3 tools/ladybird/prepare-browser-host.py "$SRC"
 python3 tools/ladybird/prepare-console.py "$SRC"
 python3 tools/ladybird/prepare-m11-chrome.py "$SRC"
 python3 tools/ladybird/prepare-browser-runtime-link.py "$SRC"
+python3 tools/ladybird/prepare-full-browser-host.py "$SRC"
 
 # Le chrome M11 seul, avec les avertissements d'upstream, avant d'engager les
 # quinze minutes du build. Les fautes qu'il attrape sont des avertissements
@@ -279,7 +280,7 @@ cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target WebContent -- 
 # `main.cpp` n'ouvre un contexte que si `--force-cpu-painting` est absent. Le
 # construire ici donne sa taille reelle a l'etape suivante, qui devra decider
 # de l'embarquer ou non dans un disque deja proche de son plafond.
-for target in RequestServer ImageDecoder WebWorker Compositor; do
+for target in RequestServer ImageDecoder WebWorker Compositor BouchaudBrowserHost; do
     if ninja -C "$BUILD" -t targets all 2>/dev/null | grep -q "^${target}:"; then
         cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target "$target" -- -k 0
     elif [ "$target" = "ImageDecoder" ]; then
@@ -291,11 +292,15 @@ done
 OUT="$ROOT/third_party/native-browser-bouchaud"
 rm -rf "$OUT"
 mkdir -p "$OUT"
-find "$BUILD" -type f \( -name WebContent -o -name RequestServer -o -name ImageDecoder -o -name WebWorker -o -name Compositor \) -perm -111 -exec cp -f {} "$OUT/" \;
+find "$BUILD" -type f \( -name WebContent -o -name RequestServer -o -name ImageDecoder -o -name WebWorker -o -name Compositor -o -name BouchaudBrowserHost \) -perm -111 -exec cp -f {} "$OUT/" \;
 
 [ -x "$OUT/WebContent" ] || { echo "WebContent non produit" >&2; exit 1; }
 [ -x "$OUT/RequestServer" ] || { echo "RequestServer non produit (reseau requis)" >&2; exit 1; }
 [ -x "$OUT/ImageDecoder" ] || { echo "ImageDecoder non produit (images requises)" >&2; exit 1; }
+[ -x "$OUT/BouchaudBrowserHost" ] || { echo "BouchaudBrowserHost non produit" >&2; exit 1; }
+[ -x "$OUT/Compositor" ] || { echo "Compositor non produit (Browser Host requis)" >&2; exit 1; }
+[ -x "$OUT/WebWorker" ] || { echo "WebWorker non produit (Browser Host requis)" >&2; exit 1; }
+[ -x "$OUT/BouchaudBrowserHost" ] || { echo "BouchaudBrowserHost non produit" >&2; exit 1; }
 printf 'Bouchaud Ladybird M9 capable
 pinned=%s
 ' "$(git -C "$LB" rev-parse HEAD)" > "$OUT/M9_CAPABLE"
@@ -313,7 +318,7 @@ cp -f "$ROOT/tools/ladybird/fontconfig/fonts.conf" "$OUT/resources/fontconfig/fo
 
 # `file` peut varier selon la version du runner; readelf est l'invariant utile
 # pour Bouchaud : aucun PT_INTERP ne doit demander ld-linux au demarrage.
-for runtime in WebContent RequestServer ImageDecoder WebWorker Compositor; do
+for runtime in WebContent RequestServer ImageDecoder WebWorker Compositor BouchaudBrowserHost; do
     [ -x "$OUT/$runtime" ] || continue
     file "$OUT/$runtime" | tee "$OUT/$runtime.file.txt"
     if readelf -l "$OUT/$runtime" | grep -q 'INTERP'; then

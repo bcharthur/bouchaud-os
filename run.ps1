@@ -378,6 +378,18 @@ if ($LadybirdMode) {
             "webcontent-bootstrap"
         )
     }
+    elseif ($LadybirdInteractif) {
+        $RequiredLadybirdFiles = @(
+            "BouchaudBrowserHost",
+            "WebContent",
+            "RequestServer",
+            "ImageDecoder",
+            "Compositor",
+            "WebWorker",
+            "webcontent-bootstrap",
+            "M9_CAPABLE"
+        )
+    }
     else {
         $RequiredLadybirdFiles = @(
             "WebContent",
@@ -616,6 +628,14 @@ if ($LadybirdMode) {
         (Join-Path $NativeBrowserDir "ImageDecoder") `
         (Join-Path $LadybirdLibexec "ImageDecoder")
 
+    if ($LadybirdInteractif) {
+        foreach ($service in @("Compositor", "WebWorker", "BouchaudBrowserHost")) {
+            Copy-Item `
+                (Join-Path $NativeBrowserDir $service) `
+                (Join-Path $LadybirdLibexec $service)
+        }
+    }
+
 
     # =========================================================================
     # Bootstrap
@@ -637,8 +657,15 @@ if ($LadybirdMode) {
     # Il s'agit du bootstrap qui engendre le vrai WebContent Ladybird.
     # =========================================================================
 
+    $BrowserEntry = if ($LadybirdInteractif) {
+        "BouchaudBrowserHost"
+    }
+    else {
+        "webcontent-bootstrap"
+    }
+
     Copy-Item `
-        (Join-Path $NativeBrowserDir "webcontent-bootstrap") `
+        (Join-Path $NativeBrowserDir $BrowserEntry) `
         (Join-Path $ScenarioDir "bo-navigateur")
 
 
@@ -792,6 +819,7 @@ if ($LadybirdMode) {
         }
 
         $chromeLine = if ($LadybirdChrome) { 'export BOUCHAUD_M11=1' } else { 'echo "M11 desactive : capture unique, sans entrees"' }
+        $hostLine = if ($LadybirdInteractif) { 'export BOUCHAUD_BROWSER_HOST=1' } else { 'echo "Browser Host desactive : regression M9"' }
 
         $autorun = @(
             @('uname', 'df') +
@@ -800,6 +828,7 @@ if ($LadybirdMode) {
                 'export BOUCHAUD_M9=1',
                 "export BOUCHAUD_M9_URL=$(ConvertTo-ShellSingleQuoted $LadybirdUrl)",
                 $chromeLine,
+                $hostLine,
                 'desktop',
                 ''
             )
@@ -868,9 +897,12 @@ if not root.is_dir():
 # capable de repondre a `StartWorkerAgent`.
 executables = {
     "bo-navigateur",
+    "usr/libexec/ladybird/BouchaudBrowserHost",
     "usr/libexec/ladybird/WebContent",
     "usr/libexec/ladybird/RequestServer",
     "usr/libexec/ladybird/ImageDecoder",
+    "usr/libexec/ladybird/Compositor",
+    "usr/libexec/ladybird/WebWorker",
     "usr/libexec/ladybird/webcontent-bootstrap",
 }
 
