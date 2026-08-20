@@ -899,9 +899,11 @@ if not root.is_dir():
 # sinon Bouchaud refuse de l'executer.
 #
 # WebDriver y manquait alors que run.ps1 le copie depuis l'artefact : il
-# arrivait dans l'image sans son bit d'execution, donc present mais
-# inutilisable. C'est precisement ce qu'une verification de presence dans
-# l'artefact ne peut pas voir.
+# arrivait dans l'image sans son bit d'execution. Mesure sous QEMU, cela ne
+# l'empeche PAS de demarrer aujourd'hui, parce que `ramfs::can` accorde tout a
+# root et que l'autorun tourne en root. L'entree reste due : c'est l'invariant
+# annonce juste au-dessus, elle vaut pour tout uid non privilegie, et une image
+# ne doit pas dependre du fait que son unique utilisateur soit root.
 executables = {
     "bo-navigateur",
     "usr/libexec/ladybird/BouchaudBrowserHost",
