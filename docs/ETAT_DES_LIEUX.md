@@ -138,10 +138,15 @@ Internet, aucun des marqueurs de retour de RequestServer n'apparait et le
 processus consomme la moitie d'un cœur pendant cinq minutes. Ce n'est pas une
 attente sur une socket, c'est une boucle.
 
-Le suspect est `LibDNS`, et il reste **un suspect** : rien n'instrumente encore
-la resolution elle-meme. Voir `ladybird/M12_HTTPS.md`, section « Ce qui bloque
-encore ». Tant que ce point n'est pas ferme, la barre d'adresse n'accepte
-utilement que des adresses IP, ce qui n'est pas naviguer.
+Le suspect etait `LibDNS`, et il l'est reste jusqu'a ce que la mesure le nomme :
+LibDNS empilait A et AAAA dans **un seul message** DNS, avec `QDCOUNT=2`. Le
+resolveur integre de SLIRP ignore ces requetes en silence. Voir
+`ladybird/M16_REPOS_ET_IDENTITE.md`, section 5 — le defaut a ete trouve par
+arithmetique sur une seule valeur mesuree, `octets=46`.
+
+Depuis, `https://example.com/` charge de bout en bout : nom resolu par DNS,
+chaine TLS **publique** validee, HTTP 200, 559 octets, navigation commitee, en
+deux secondes. La barre d'adresse accepte donc enfin des noms.
 
 ## 4. Ce qui n'est pas fait, et qu'il ne faut pas croire fait
 
@@ -152,9 +157,11 @@ utilement que des adresses IP, ce qui n'est pas naviguer.
   charge par son nom de bout en bout (ligne suivante).
 - **Aucune isolation.** Le sandbox d'upstream est volontairement remplace par
   l'implementation non effective. C'est M14.
-- **Un site public charge par son nom n'a pas encore ete montre de bout en bout.**
-  La couche UDP est reparee et mesuree ; le trajet complet depuis Ladybird
-  attend le scenario Internet.
+- **Le document distant est commite, pas encore affiche.** `https://example.com/`
+  arrive entier (`M9_NAVIGATION_COMMITTED`, 559 octets) mais
+  `M9_DOCUMENT_LOADED` n'apparait pas et WebContent quitte la liste des
+  processus juste apres. Analyse, mise en page, peinture et capture restent a
+  mesurer sur une page publique.
 - **Un seul onglet, un seul renderer.**
 - **Pas de redimensionnement de la fenetre du navigateur natif.** La surface est
   allouee une fois ; `Configure` est journalise, pas suivi.

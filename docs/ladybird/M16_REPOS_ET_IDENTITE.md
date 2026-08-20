@@ -115,7 +115,82 @@ vingt millions de lectures par seconde et par connexion, appelees depuis `poll`
 a chaque tick. C'est le troisieme endroit ou une attente etait comptee en tours
 de boucle au lieu d'etre comptee en temps ; les deux premiers sont dans M13.
 
-## 5. Les sondes M16 (temporaires)
+## 5. La resolution de nom : la cause, et comment elle a ete nommee
+
+Une navigation vers `https://example.com/` emettait sa requete DNS et rien ne
+revenait. Cinq campagnes de mesure ont ferme les hypotheses une par une, et
+chacune a elimine plutot que devine.
+
+| Mesure | Ce qu'elle a ferme |
+|---|---|
+| `M16_DNS_LOOKUP path=async-query` | pas de bascule muette vers le resolveur systeme |
+| `M16_DNS_SOCKET_OK` | la socket vers 10.0.2.3:53 existe |
+| `M16_DNS_TX id=… octets=46` | LibDNS a bien ecrit sa requete |
+| `M16_DNS_REPEAT tentative=1` | la boucle d'evenements et ses minuteurs vivent |
+| `M17_UDP_TX … parti=true` | la carte a pris la trame |
+| `M17_RING appels=240000 trames=0` | on interroge la carte deux cent quarante mille fois, elle ne rend rien |
+
+`trames=0` elimine tout ce qui se trouve **apres** la carte : ni routage, ni
+notificateur, ni analyse. La reponse n'arrivait pas.
+
+Restait `octets=46`, et c'est de l'arithmetique :
+
+```text
+en-tete DNS                                  12
+QNAME "example.com" = 1+7 + 1+3 + 1          13
+QTYPE + QCLASS                              + 4
+                                    une question = 17
+
+12 + 1 x 17 = 29 octets
+12 + 2 x 17 = 46 octets   <- ce qui partait
+```
+
+LibDNS empile **A et AAAA dans un seul message**, avec `QDCOUNT=2`. La RFC 1035
+l'autorise ; aucun resolveur reel ne l'implemente, et celui qu'integre SLIRP —
+le 10.0.2.3 de QEMU — l'ignore en silence. Pas d'erreur, pas de `FormatError` :
+rien.
+
+Ce qui le prouve et ne le suggere pas : `tools/userland/dns-probe.c` emet des
+requetes a **une** question vers le meme 10.0.2.3, depuis le meme noyau, dans la
+meme execution d'integration continue, et recoit ses reponses. Son CAS5 rejoue
+la sequence exacte de `Core::UDPSocket`. C'est une barriere bloquante de
+`ci.yml`, verte sur le meme commit. Meme machine, meme pile, meme resolveur : ce
+qui distingue les deux requetes est leur nombre de questions.
+
+### La correction
+
+`tools/ladybird/prepare-dns-une-question.py` ne demande plus que `A`. Ce portage
+n'a pas d'IPv6 — `sys_socket` rend `EAFNOSUPPORT` pour `AF_INET6`, deliberement —
+donc un enregistrement AAAA designerait une adresse que rien dans la machine ne
+saurait utiliser.
+
+Ce n'est pas un contournement pour `example.com` : c'est la meme requete pour
+`google.com`, `github.com` ou n'importe quel nom. Le jour ou Bouchaud aura une
+pile IPv6, il faudra emettre **deux messages separes** — ce que font Chrome et
+Firefox — et remplacer ce script, pas l'etendre.
+
+### Ce que la mesure montre apres
+
+```text
+M17_UDP_TX dst=10.0.2.3:53 src_port=52463 octets=29 parti=true
+M16_DNS_TX id=39241 octets=29
+M17_UDP_LIVRE src=10.0.2.3:53 vers_port=52463 octets=61 connecte=true
+M16_DNS_READY
+M16_DNS_RX id=39241 rcode=0 reponses=2
+M9_RS_DNS_RESOLU id=0 host=example.com adresses=2
+M9_RS_STATE id=0 DNSLookup -> RetrieveCookie
+M9_RS_STATE id=0 RetrieveCookie -> Fetch
+M9_RS_HEADERS id=0 statut=200 nb=9
+M9_RS_STATE id=0 Fetch -> Complete
+M9_RS_REQUEST_FINISHED id=0 taille=559
+M9_NAVIGATION_COMMITTED page=1 url=https://example.com/
+```
+
+Deux secondes entre la requete et le document commite : nom resolu par DNS,
+chaine TLS **publique** validee, HTTP 200, 559 octets. C'est la premiere fois
+qu'un site public est charge par son nom de bout en bout depuis Bouchaud OS.
+
+## 6. Les sondes (temporaires)
 
 `tools/ladybird/prepare-m16-dns.py` instrumente `LibDNS/Resolver.h`, et rien
 d'autre. Le silence apres `Init -> DNSLookup` a trois causes incompatibles
@@ -136,12 +211,37 @@ qu'aucune mesure ne separait :
 | `M16_DNS_READY` | (2) — la socket se declare-t-elle lisible |
 | `M16_DNS_RX id= rcode= reponses=` | (3) — le message recu s'analyse-t-il |
 
-Elles s'allument avec `BOUCHAUD_M9`, comme le reste du portage, et disparaitront
-avec le defaut qu'elles servent a nommer.
+Elles s'allument avec `BOUCHAUD_M9`, comme le reste du portage.
+
+Deux sondes cote noyau les completaient. `M17_UDP_TX` / `M17_UDP_LIVRE`, bornees
+au port 53, disent ce qui sort et ce qui rentre ; elles restent, parce que deux a
+quatre lignes par resolution sont le prix juste d'une preuve permanente que la
+chaine tient. `M17_RING` (compteur d'interrogations de la carte) et `M18_POLL`
+(classement des descripteurs scrutes) ont ete **retirees** : leur question est
+close, et `M18_POLL` vivait sur le chemin le plus chaud du noyau.
+
+### Ce que ces sondes ont coute, et appris
+
+Deux fois, un motif de `grep` ecrit a la main a produit une conclusion fausse.
+`M17_RING` ne figurait pas dans la liste du verdict — seul `M17_UDP_` y etait —
+et son absence a l'ecran a ete lue comme l'absence de la mesure : « `poll_ip`
+n'est jamais appele », alors qu'il l'etait deux cent quarante mille fois. Le
+verdict imprime desormais **tous** les marqueurs, sans choisir. Le journal serie
+pese six kilooctets : il n'y a rien a economiser en filtrant, et tout a perdre en
+se trompant de filtre.
+
+Une mesure qu'on ne peut pas voir ne vaut pas mieux qu'une mesure qu'on n'a pas
+prise — elle est pire, parce qu'elle donne la meme assurance.
 
 ## Ce qui reste
 
-La resolution de nom. Tout le reste de la chaine est mesure et vert :
-analyse d'URL, navigation, IPC, entree dans `RequestServer`, emission de la
-requete DNS. Voir `M13_DNS.md` pour la couche UDP du noyau, deja corrigee et
-prouvee par `tools/net/dns-probe.c`.
+`M9_DOCUMENT_LOADED` n'apparait pas, et WebContent a quitte la liste des
+processus apres le commit de la navigation. Le document distant est arrive
+entier ; ce qui suit — analyse, mise en page, peinture, capture — reste a
+mesurer. C'est le defaut suivant, et il est d'une autre nature que celui-ci.
+
+Une seconde retransmission DNS n'a jamais lieu non plus : le minuteur n'est
+redemarre qu'apres l'ecriture, et la deuxieme recherche rejoint la recherche en
+attente au lieu de reemettre. Sans consequence maintenant que la premiere
+requete aboutit, mais cela veut dire qu'une perte de datagramme ne serait
+jamais rattrapee.

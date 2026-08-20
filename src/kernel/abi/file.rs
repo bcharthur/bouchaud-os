@@ -1998,50 +1998,6 @@ fn readable(fd: i32) -> bool {
     }
 }
 
-/// Compteurs de la sonde M18 : que scrute-t-on reellement ?
-///
-/// ## Ce qu'ils tranchent
-///
-/// `M17_RING` n'a jamais rien imprime : `poll_ip` est appele moins de vingt
-/// mille fois en cinq minutes, alors qu'une boucle d'evenements bloquee dans
-/// `poll` l'appellerait mille fois par seconde si un descripteur inet figurait
-/// dans son ensemble. Or l'IPC de RequestServer fonctionne — il recoit la
-/// requete, change d'etat, emet le datagramme — donc `sys_poll` **tourne**.
-///
-/// Les deux faits ne se concilient que d'une facon : `sys_poll` est appele, sur
-/// des paires de sockets, et **le descripteur UDP n'y est pas**. Ces compteurs
-/// le disent au lieu de le supposer, en classant chaque entree scrutee par
-/// nature de descripteur.
-///
-/// Ils sont globaux a la machine et non par processus : seul RequestServer
-/// possede une prise inet, donc `udp > 0` signifie exactement « RequestServer
-/// scrute sa prise DNS ».
-static mut M18_APPELS: u64 = 0;
-static mut M18_ENTREES: [u64; 5] = [0; 5];
-const M18_PERIODE: u64 = 20_000;
-/// Rangs dans `M18_ENTREES`.
-const M18_PAIRE: usize = 0;
-const M18_TUBE: usize = 1;
-const M18_UDP: usize = 2;
-const M18_TCP: usize = 3;
-const M18_AUTRE: usize = 4;
-
-/// Classe un descripteur pour la sonde M18, sans le consommer.
-fn m18_classe(fd: i32) -> usize {
-    let process = task::current_process();
-    let borrowed = process.borrow();
-    match borrowed.files.get(fd).map(|desc| &desc.kind) {
-        Some(FdKind::SocketPair(_, _)) => M18_PAIRE,
-        Some(FdKind::Pipe(_, _)) => M18_TUBE,
-        Some(FdKind::Socket(state)) => match state.try_borrow().map(|etat| etat.kind) {
-            Ok(crate::kernel::abi::net::SocketKind::Udp) => M18_UDP,
-            Ok(crate::kernel::abi::net::SocketKind::Tcp) => M18_TCP,
-            Err(_) => M18_AUTRE,
-        },
-        _ => M18_AUTRE,
-    }
-}
-
 /// `poll` / `ppoll` : `struct pollfd { int fd; short events; short revents; }`.
 pub fn sys_poll(fds: u64, count: usize, timeout_ms: i32) -> i64 {
     let deadline = if timeout_ms < 0 {
@@ -2049,20 +2005,6 @@ pub fn sys_poll(fds: u64, count: usize, timeout_ms: i32) -> i64 {
     } else {
         crate::kernel::timer::ticks() + crate::kernel::timer::ms_to_ticks(timeout_ms as u64)
     };
-
-    // Sonde M18 : une seule fois par appel, pas a chaque tour d'attente.
-    let mut m18_compte = true;
-    unsafe {
-        let appels = &mut *core::ptr::addr_of_mut!(M18_APPELS);
-        *appels += 1;
-        if *appels % M18_PERIODE == 0 {
-            let e = *(&*core::ptr::addr_of!(M18_ENTREES));
-            crate::serial_println!(
-                "[ladybird-bouchaud] M18_POLL appels={} nfds={} paire={} tube={} udp={} tcp={} autre={}",
-                *appels, count, e[M18_PAIRE], e[M18_TUBE], e[M18_UDP], e[M18_TCP], e[M18_AUTRE]
-            );
-        }
-    }
 
     loop {
         let mut ready = 0i64;
@@ -2072,13 +2014,6 @@ pub fn sys_poll(fds: u64, count: usize, timeout_ms: i32) -> i64 {
                 Some(bytes) => i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
                 None => return -errno::EFAULT,
             };
-            if m18_compte && fd >= 0 {
-                let rang = m18_classe(fd);
-                unsafe {
-                    let e = &mut *core::ptr::addr_of_mut!(M18_ENTREES);
-                    e[rang] += 1;
-                }
-            }
             let events = match user_read(base + 4, 2) {
                 Some(bytes) => u16::from_le_bytes([bytes[0], bytes[1]]) as u32,
                 None => return -errno::EFAULT,
@@ -2102,7 +2037,6 @@ pub fn sys_poll(fds: u64, count: usize, timeout_ms: i32) -> i64 {
             }
             user_write(base + 6, &(revents as u16).to_le_bytes());
         }
-        m18_compte = false;
         if ready > 0 || crate::kernel::timer::ticks() >= deadline {
             return ready;
         }
