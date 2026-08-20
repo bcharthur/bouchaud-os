@@ -31,7 +31,7 @@ jobs:
   platform-smp4:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
 
     steps:
       - uses: actions/checkout@v4
@@ -101,12 +101,18 @@ jobs:
           cat > "$SCENARIO/autorun" <<'EOF'
           uname
           df
+          echo "=== etat de /persist au demarrage ==="
+          ls -l /persist
+          ls -l /persist/Downloads
+          echo "--- fichier telecharge au demarrage precedent ---"
+          cat /persist/Downloads/preuve-bouchaud.bin
           echo "=== Ladybird platform + SMP4 ==="
           export BOUCHAUD_BROWSER_HOST=1
           export BOUCHAUD_M9_URL='http://10.0.2.2:18083/platform.html'
           export BOUCHAUD_ALLOW_POPUPS=1
           export BOUCHAUD_TIME_ZONE='Europe/Paris'
           /usr/libexec/ladybird/BouchaudBrowserHost
+          echo "=== BrowserHost termine ==="
           EOF
 
           (cd tools/userland && IMAGE="$GITHUB_WORKSPACE/ladybird-platform-smp4.img" ./mkdisk.sh "$GITHUB_WORKSPACE/$SCENARIO")
@@ -117,12 +123,23 @@ jobs:
           # refuse deja une archive hors plafond, avec ses chiffres exacts ;
           # comparer ici l'image entiere rejetait des disques valides.
 
-      - name: QEMU 4 vCPU
+      # Deux demarrages sur LA MEME image. Le premier remplit le profil du
+      # navigateur et telecharge un fichier ; le second doit les retrouver.
+      #
+      # On n'interrompt plus la machine des que le verdict parait : c'est
+      # l'extinction PROPRE qui ecrit la zone persistante (voir
+      # `kernel::power::shutdown`), et sans elle le second demarrage ne
+      # trouverait rien. La page appelle donc `window.close()`, ce qui fait
+      # quitter la boucle d'evenements du BrowserHost -- HeadlessMode::Manual
+      # est cable sur `load_page_and_exit_on_close` chez upstream -- puis
+      # l'autorun se termine et le noyau coupe de lui-meme. QEMU sort seul ;
+      # l'echeance n'est qu'un filet.
+      - name: QEMU 4 vCPU, premier demarrage
         run: |
           set -u
           LOG=serie-platform-smp4.log
           : > "$LOG"
-          DEADLINE=$((SECONDS + 600))
+          DEADLINE=$((SECONDS + 900))
 
           qemu-system-x86_64 \
             -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
@@ -134,10 +151,38 @@ jobs:
           PID=$!
 
           while kill -0 "$PID" 2>/dev/null; do
-            if grep -aFq "PLATFORM_FULL_OK" "$LOG"; then
+            if (( SECONDS >= DEADLINE )); then
+              echo "ECHEANCE atteinte au premier demarrage" >&2
               break
             fi
+            sleep 0.5
+          done
+
+          kill -TERM "$PID" 2>/dev/null || true
+          sleep 1
+          kill -KILL "$PID" 2>/dev/null || true
+          wait "$PID" 2>/dev/null || true
+          cat "$LOG"
+
+      - name: QEMU 4 vCPU, second demarrage sur la meme image
+        run: |
+          set -u
+          LOG=serie-platform-smp4-boot2.log
+          : > "$LOG"
+          DEADLINE=$((SECONDS + 900))
+
+          qemu-system-x86_64 \
+            -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            -drive format=raw,file=ladybird-platform-smp4.img \
+            -m 12288 -smp 4 -display none -no-reboot \
+            -netdev user,id=net0 -device e1000,netdev=net0 \
+            -audiodev none,id=muet -device AC97,audiodev=muet \
+            -serial file:"$LOG" &
+          PID=$!
+
+          while kill -0 "$PID" 2>/dev/null; do
             if (( SECONDS >= DEADLINE )); then
+              echo "ECHEANCE atteinte au second demarrage" >&2
               break
             fi
             sleep 0.5
@@ -174,6 +219,18 @@ jobs:
           grep -aF "PLATFORM_RECHARGEMENT OK" serie-platform-smp4.log
           grep -aF "PLATFORM_FULL_OK passed=19/19" serie-platform-smp4.log
 
+          # Le premier demarrage doit s'etre eteint PROPREMENT : c'est ce qui
+          # ecrit la zone persistante. Sans cette ligne, tout ce qui suit
+          # mesurerait autre chose.
+          grep -aE "persistance: [0-9]+ fichier\(s\) ecrit\(s\) a l.extinction" serie-platform-smp4.log
+
+          # Second demarrage : le moteur repasse la suite complete,
+          grep -aF "PLATFORM_FULL_OK passed=19/19" serie-platform-smp4-boot2.log
+          # le profil du navigateur a survecu a l'extinction,
+          grep -aF "PLATFORM_PERSIST_APRES_REDEMARRAGE OK" serie-platform-smp4-boot2.log
+          # et le fichier telecharge au demarrage precedent est relu par l'OS.
+          grep -aF "Bouchaud download proof" serie-platform-smp4-boot2.log
+
       - name: Journaux
         if: always()
         uses: actions/upload-artifact@v4
@@ -181,5 +238,6 @@ jobs:
           name: ladybird-platform-smp4-logs
           path: |
             serie-platform-smp4.log
+            serie-platform-smp4-boot2.log
             platform-fixture.log
           if-no-files-found: warn

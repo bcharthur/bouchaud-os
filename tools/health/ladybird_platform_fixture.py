@@ -51,6 +51,20 @@ def page_navigation(nom: str) -> bytes:
     ).encode()
 
 
+# Le telechargement est declenche depuis l'IFRAME, pas depuis le document de
+# tete : `window.close()` n'est autorise que si le traversable de tete n'a
+# qu'une seule entree d'historique (LocalNavigable::is_script_closable), et la
+# fermeture propre est ce qui permet au noyau d'ecrire /persist avant de couper.
+PAGE_TELECHARGEMENT = (
+    "<!doctype html><meta charset=utf-8><title>telechargement</title>"
+    "<a id=lien href='/download.bin' download='preuve-bouchaud.bin'>t</a>"
+    "<script>"
+    "document.getElementById('lien').click();"
+    "parent.postMessage('NAV:telechargement', '*');"
+    "</script>"
+).encode()
+
+
 PAGE = r'''<!doctype html>
 <meta charset="utf-8">
 <title>Bouchaud Ladybird full platform</title>
@@ -78,6 +92,59 @@ PAGE = r'''<!doctype html>
       mark(nom, false, String(e));
     }
   };
+
+  // --- survie au redemarrage ---------------------------------------------
+  //
+  // Ce bloc lit AVANT d'ecrire. Au premier demarrage il ne trouve rien, ce qui
+  // est normal et se dit ; au demarrage suivant, sur la meme image, il doit
+  // retrouver exactement ce que le precedent a laisse. C'est la seule facon de
+  // prouver une persistance : la meme valeur, de part et d'autre d'une
+  // extinction.
+  const TEMOIN = "profil-survivant-42";
+
+  const lit_idb = () => new Promise((resoudre) => {
+    let requete;
+    try { requete = indexedDB.open("bouchaud-persistance", 1); } catch (e) { return resoudre(null); }
+    requete.onupgradeneeded = () => requete.result.createObjectStore("kv");
+    requete.onerror = () => resoudre(null);
+    requete.onsuccess = () => {
+      const db = requete.result;
+      const rx = db.transaction("kv").objectStore("kv").get("temoin");
+      rx.onerror = () => { db.close(); resoudre(null); };
+      rx.onsuccess = () => { const v = rx.result; db.close(); resoudre(v ?? null); };
+    };
+  });
+
+  const ecrit_idb = (valeur) => new Promise((resoudre) => {
+    const requete = indexedDB.open("bouchaud-persistance", 1);
+    requete.onupgradeneeded = () => requete.result.createObjectStore("kv");
+    requete.onerror = () => resoudre(false);
+    requete.onsuccess = () => {
+      const db = requete.result;
+      const tx = db.transaction("kv", "readwrite");
+      tx.objectStore("kv").put(valeur, "temoin");
+      tx.oncomplete = () => { db.close(); resoudre(true); };
+      tx.onerror = () => { db.close(); resoudre(false); };
+    };
+  });
+
+  try {
+    const vu_local = localStorage.getItem("bouchaud_temoin");
+    const vu_cookie = document.cookie.includes(`bouchaud_temoin=${TEMOIN}`);
+    const vu_idb = await limite(lit_idb(), 20000, "persistance-lecture");
+    const complet = vu_local === TEMOIN && vu_cookie && vu_idb === TEMOIN;
+    if (complet) {
+      console.log("PLATFORM_PERSIST_APRES_REDEMARRAGE OK localStorage+cookie+indexeddb");
+    } else {
+      console.log(`PLATFORM_PERSIST_PREMIER_BOOT localStorage=${vu_local} cookie=${vu_cookie} indexeddb=${vu_idb}`);
+    }
+    localStorage.setItem("bouchaud_temoin", TEMOIN);
+    document.cookie = `bouchaud_temoin=${TEMOIN}; Max-Age=86400; SameSite=Lax`;
+    const ecrit = await limite(ecrit_idb(TEMOIN), 20000, "persistance-ecriture");
+    console.log(`PLATFORM_PERSIST_ECRIT ${ecrit ? "OK" : "FAIL"}`);
+  } catch (e) {
+    console.log(`PLATFORM_PERSIST_ECRIT FAIL ${e}`);
+  }
 
   // --- stockage, temoins, reseau -----------------------------------------
 
@@ -240,6 +307,30 @@ PAGE = r'''<!doctype html>
   if (rates.length)
     console.log(`PLATFORM_ECHECS ${rates.join(",")}`);
   console.log(`PLATFORM_FULL_${rates.length ? "FAIL" : "OK"} passed=${bons}/${required.length}`);
+
+  // --- telechargement, puis fermeture propre --------------------------------
+  //
+  // Le telechargement ne peut pas se verifier depuis le JavaScript : c'est le
+  // processus hote qui ecrit le fichier, et c'est donc l'OS qui doit le
+  // constater. On le declenche ici, et `/persist/Downloads` est relu par le
+  // shell au demarrage suivant.
+  try {
+    await limite(attend_page("telechargement", () => { cadre.src = "/telecharger.html"; }),
+                 20000, "telechargement");
+    console.log("PLATFORM_DOWNLOAD_DEMANDE preuve-bouchaud.bin");
+  } catch (e) {
+    console.log(`PLATFORM_DOWNLOAD_DEMANDE FAIL ${e}`);
+  }
+
+  // Laisser le telechargement s'ecrire avant de rendre la main.
+  await new Promise(r => setTimeout(r, 8000));
+
+  // `window.close()` fait quitter la boucle d'evenements du BrowserHost
+  // (HeadlessMode::Manual -> load_page_and_exit_on_close). L'autorun reprend
+  // alors la main, le noyau ecrit /persist et coupe : c'est ce qui rend le
+  // demarrage suivant capable de retrouver le profil et le fichier.
+  console.log("PLATFORM_FERMETURE demandee");
+  window.close();
 })();
 </script>
 
@@ -311,6 +402,7 @@ class Handler(BaseHTTPRequestHandler):
         "/image.jpg": (JPEG, "image/jpeg"),
         "/nav-un.html": (page_navigation("un"), "text/html; charset=utf-8"),
         "/nav-deux.html": (page_navigation("deux"), "text/html; charset=utf-8"),
+        "/telecharger.html": (PAGE_TELECHARGEMENT, "text/html; charset=utf-8"),
     }
 
     def do_GET(self):
@@ -329,6 +421,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        if path == "/download.bin":
+            self.send_header("Content-Disposition",
+                             'attachment; filename="preuve-bouchaud.bin"')
         self.end_headers()
         self.wfile.write(body)
         print(f"PLATFORM_FIXTURE path={path}", flush=True)
