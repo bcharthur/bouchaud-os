@@ -1395,10 +1395,18 @@ jobs:
           # dans un journal, et pas du tout dans une main sur le ventilateur.
           echo "--- charge par processus (dernier releve) ---"
           grep -F "[ps]" serie-ladybird-google.log | tail -2 || echo "(aucun releve)"
-          echo "--- poignee de main TLS (trace curl) ---"
-          grep -aF "[ladybird-bouchaud] CURL" serie-ladybird-google.log || echo "(aucune trace curl)"
+          echo "--- resultat de la negociation ---"
+          grep -aE "SSL connection using|OpenSSL verify result|certificate verified|TLS alert" \
+              serie-ladybird-google.log || echo "(aucune ligne de negociation)"
           echo "--- raison de l'echec, telle que curl la donne ---"
           grep -aF "[ladybird-bouchaud] RS_ECHEC" serie-ladybird-google.log || echo "(aucun echec RequestServer)"
+          # La poignee de main peut reussir sans que la page s'affiche : ce sont
+          # deux questions differentes, et le verdict doit montrer les deux.
+          echo "--- la page est-elle arrivee jusqu'a l'ecran ---"
+          grep -aE "M9_RS_DNS_RESOLU|M9_RS_HEADERS|M9_RS_REQUEST_FINISHED|M9_NAVIGATION|M9_DOCUMENT|M9_CPU_SCREENSHOT|ECHEC" \
+              serie-ladybird-google.log || echo "(aucun marqueur de navigation)"
+          echo "--- poignee de main TLS, etape par etape ---"
+          grep -aF "[ladybird-bouchaud] CURL" serie-ladybird-google.log || echo "(aucune trace curl)"
           echo "--- ce job est un diagnostic : il n'affirme rien, il montre ---"
 
       - name: Journaux TLS Google
