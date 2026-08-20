@@ -256,6 +256,7 @@ jobs:
           test -x third_party/native-browser-bouchaud/ImageDecoder
           test -x third_party/native-browser-bouchaud/Compositor
           test -x third_party/native-browser-bouchaud/WebWorker
+          test -x third_party/native-browser-bouchaud/WebDriver
           test -x third_party/native-browser-bouchaud/webcontent-bootstrap
           test -f third_party/native-browser-bouchaud/M9_CAPABLE
           file third_party/native-browser-bouchaud/WebContent

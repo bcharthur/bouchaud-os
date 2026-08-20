@@ -52,7 +52,7 @@ use crate::fs::ramfs::{fs, NodeKind};
 const MAGIE: &[u8; 8] = b"BOPERSI1";
 
 /// Nombre maximal de fichiers retenus.
-const ENTREES_MAX: usize = 256;
+const ENTREES_MAX: usize = 2048;
 
 /// Taille d'une entree de table, en octets.
 const TAILLE_ENTREE: usize = 256;
@@ -67,7 +67,7 @@ const SECTEURS_TABLE: u64 = (ENTREES_MAX * TAILLE_ENTREE / SECTOR_SIZE) as u64;
 const SECTEUR_CONTENU: u64 = 1 + SECTEURS_TABLE;
 
 /// Taille de la zone, en secteurs. 8 Mio.
-const SECTEURS_ZONE: u64 = 16384;
+const SECTEURS_ZONE: u64 = 262144;
 
 /// Racine des fichiers persistants dans le RAMFS.
 pub const RACINE: &str = "/persist";

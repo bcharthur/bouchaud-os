@@ -66,6 +66,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     //    fournit les frames et le creneau d'adressage du ring 3.
     kernel::vmm::init();
     arch::x86_64::init();
+    arch::x86_64::smp::init_probe();
 
     // Calibre le TSC (cycles -> ms reels) maintenant que IRQ0 fait avancer les
     // ticks PIT : necessaire pour que les logs de diagnostic (reseau, layout,

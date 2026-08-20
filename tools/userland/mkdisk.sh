@@ -58,7 +58,7 @@ fi
 #
 # Les secteurs ajoutes sont nuls, donc sans magie : le premier demarrage trouve
 # une zone vierge, ce qui est exactement ce qu'il faut.
-ZONE_SECTEURS=16384
+ZONE_SECTEURS=262144
 ZONE=$((ZONE_SECTEURS * 512))
 dd if=/dev/zero bs=1M count=$((ZONE / 1024 / 1024)) >> "$IMAGE" 2>/dev/null
 TOTAL=$(wc -c < "$IMAGE")

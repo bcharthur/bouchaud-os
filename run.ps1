@@ -54,7 +54,7 @@ param(
     # eteints, et ferait croire a une acceleration qui n'existe pas.
     [ValidateRange(1, 16)]
     [Alias('LadybirdCpuCount')]
-    [int]$CpuCount = 1,
+    [int]$CpuCount = 4,
 
     # Force le retelechargement de l'artefact Ladybird depuis GitHub Actions.
     [switch]$RefreshLadybird,
@@ -386,6 +386,7 @@ if ($LadybirdMode) {
             "ImageDecoder",
             "Compositor",
             "WebWorker",
+            "WebDriver",
             "webcontent-bootstrap",
             "M9_CAPABLE"
         )
@@ -629,7 +630,7 @@ if ($LadybirdMode) {
         (Join-Path $LadybirdLibexec "ImageDecoder")
 
     if ($LadybirdInteractif) {
-        foreach ($service in @("Compositor", "WebWorker", "BouchaudBrowserHost")) {
+        foreach ($service in @("Compositor", "WebWorker", "WebDriver", "BouchaudBrowserHost")) {
             Copy-Item `
                 (Join-Path $NativeBrowserDir $service) `
                 (Join-Path $LadybirdLibexec $service)
@@ -820,6 +821,8 @@ if ($LadybirdMode) {
 
         $chromeLine = if ($LadybirdChrome) { 'export BOUCHAUD_M11=1' } else { 'echo "M11 desactive : capture unique, sans entrees"' }
         $hostLine = if ($LadybirdInteractif) { 'export BOUCHAUD_BROWSER_HOST=1' } else { 'echo "Browser Host desactive : regression M9"' }
+        $timezoneLine = if ($LadybirdInteractif) { 'export BOUCHAUD_TIME_ZONE=Europe/Paris' } else { 'echo "Timezone Browser Host inactive"' }
+        $popupLine = if ($LadybirdInteractif) { 'export BOUCHAUD_ALLOW_POPUPS=1' } else { 'echo "Popups Browser Host inactifs"' }
 
         $autorun = @(
             @('uname', 'df') +
@@ -829,6 +832,8 @@ if ($LadybirdMode) {
                 "export BOUCHAUD_M9_URL=$(ConvertTo-ShellSingleQuoted $LadybirdUrl)",
                 $chromeLine,
                 $hostLine,
+                $timezoneLine,
+                $popupLine,
                 'desktop',
                 ''
             )
