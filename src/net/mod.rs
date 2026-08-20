@@ -459,7 +459,42 @@ pub(crate) fn depose_en_attente(proto: u8, src: Ipv4Addr, charge: &[u8]) {
     });
 }
 
+/// Compteurs de la sonde M17 : appels a `poll_ip` et trames reellement sorties
+/// de l'anneau.
+///
+/// ## Ce qu'ils tranchent
+///
+/// La requete DNS part (`M17_UDP_TX ... parti=true`) et rien ne revient jamais :
+/// aucun `M17_UDP_LIVRE`, aucun `M17_UDP_SANS_DESTINATAIRE`. Deux causes
+/// restent, et elles n'ont pas le meme correctif :
+///
+///  - **personne n'interroge la carte** — le descripteur UDP n'est pas dans
+///    l'ensemble scrute par la boucle d'evenements, donc `pump_udp` n'est
+///    jamais appele et l'anneau n'est jamais vide ;
+///  - **la carte ne recoit rien** — la reponse n'arrive pas, et c'est alors le
+///    reseau ou la trame emise qu'il faut regarder.
+///
+/// Un compteur d'appels et un compteur de trames separent les deux en une seule
+/// execution. Ils sont imprimes tous les `M17_RING_PERIODE` appels : a mille
+/// interrogations par seconde, cela fait une ligne toutes les vingt secondes,
+/// assez pour voir une progression et assez rare pour ne rien noyer.
+static mut M17_APPELS: u64 = 0;
+static mut M17_TRAMES: u64 = 0;
+const M17_RING_PERIODE: u64 = 20_000;
+
 pub(crate) fn poll_ip(proto: u8, src_filter: Option<Ipv4Addr>, out: &mut [u8]) -> Option<(Ipv4Addr, usize)> {
+    unsafe {
+        let appels = &mut *core::ptr::addr_of_mut!(M17_APPELS);
+        *appels += 1;
+        if *appels % M17_RING_PERIODE == 0 {
+            let trames = *(&*core::ptr::addr_of!(M17_TRAMES));
+            crate::serial_println!(
+                "[ladybird-bouchaud] M17_RING appels={} trames={}",
+                *appels, trames
+            );
+        }
+    }
+
     // Ce qu'un autre appelant a sorti de l'anneau pour nous passe avant la
     // carte : c'est deja arrive, le rendre plus tard n'aurait aucun sens.
     if let Some(trouve) = reclame_en_attente(proto, src_filter, out) {
@@ -472,6 +507,10 @@ pub(crate) fn poll_ip(proto: u8, src_filter: Option<Ipv4Addr>, out: &mut [u8]) -
             Some(n) => n,
             None => return None, // plus rien a lire
         };
+        unsafe {
+            let trames = &mut *core::ptr::addr_of_mut!(M17_TRAMES);
+            *trames += 1;
+        }
         // L'ARP passe avant tout : c'est du service de lien, il ne doit jamais
         // etre jete au motif qu'on attendait autre chose.
         if repond_arp(&buf[..n]) {
