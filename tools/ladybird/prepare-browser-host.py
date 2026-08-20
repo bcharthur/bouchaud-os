@@ -170,8 +170,10 @@ substitute(
 #endif
     auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::DidIsKnownHstsHost>(domain);""",
     """#if defined(BOUCHAUD_PORT)
+    // `is_known_hsts_host` prend une `StringView` et AK ne convertit pas
+    // implicitement une `String` : la vue est explicite.
     if (bouchaud_m9_enabled())
-        return bouchaud_hote_local().hsts->is_known_hsts_host(domain);
+        return bouchaud_hote_local().hsts->is_known_hsts_host(domain.bytes_as_string_view());
 #endif
     auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::DidIsKnownHstsHost>(domain);""",
     "interrogation HSTS",
