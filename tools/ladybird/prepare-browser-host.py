@@ -244,5 +244,69 @@ for nom, ancre, corps in stockage:
         f"stockage {nom}",
     )
 
+# ---------------------------------------------------------------------------
+# Les trois questions qu'un pot en memoire ne peut pas remplacer.
+#
+# Elles demandent de **creer** quelque chose — un processus de worker, une
+# nouvelle vue, un fichier telecharge — et cela exige un hote. Sans hote, elles
+# attendent pour toujours une reponse qui ne viendra jamais, et la page se fige
+# sans un mot.
+#
+# On decline donc, explicitement et bruyamment. Ce n'est pas un faux service :
+# les trois valeurs rendues sont celles qu'upstream lui-meme produit quand le
+# navigateur refuse. `page_did_request_new_web_view` a deja ce chemin
+# (`if (!response->new_page_id().has_value()) return {};`) — c'est ce que fait
+# un bloqueur de fenetres surgissantes. `page_did_start_download` rend un
+# `Optional` vide, c'est-a-dire « aucun telechargement n'a commence ». Et un
+# `WorkerAgentId` par defaut laisse `WorkerAgentParent` sans agent : le worker
+# ne demarre pas, la page continue.
+#
+# Une limitation nommee vaut infiniment mieux qu'un gel. Voir
+# docs/ladybird/AUDIT_INTEGRATION.md §5 pour la piece d'architecture qui les
+# levera toutes les trois d'un coup.
+# ---------------------------------------------------------------------------
+
+refus = [
+    (
+        "worker",
+        "    auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::StartWorkerAgent>(m_id, move(request));",
+        '        warnln("[ladybird-bouchaud] HOTE_ABSENT StartWorkerAgent : '
+        'ce portage n\'a pas de processus hote, le worker ne demarrera pas");\n'
+        "        return {};",
+    ),
+    (
+        "nouvelle vue",
+        "    auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::DidRequestNewWebView>(m_id, activate_tab, hints);",
+        '        warnln("[ladybird-bouchaud] HOTE_ABSENT DidRequestNewWebView : '
+        'un seul onglet, la fenetre surgissante est refusee");\n'
+        "        return {};",
+    ),
+    (
+        "telechargement",
+        "    auto response = client().send_sync<Messages::WebContentClient::DidStartDownload>(m_id, url, suggested_filename, total_size, request_server_client_id, request_server_request_id, move(initial_data));",
+        '        warnln("[ladybird-bouchaud] HOTE_ABSENT DidStartDownload : '
+        'aucun telechargement possible sans processus hote");\n'
+        "        return {};",
+    ),
+    (
+        "telechargement sans requete",
+        "    auto response = client().send_sync<Messages::WebContentClient::DidStartDownloadWithoutRequest>(m_id, url, suggested_filename, total_size);",
+        '        warnln("[ladybird-bouchaud] HOTE_ABSENT DidStartDownloadWithoutRequest : '
+        'aucun telechargement possible sans processus hote");\n'
+        "        return {};",
+    ),
+]
+
+for nom, ancre, corps in refus:
+    substitute(
+        ancre,
+        "#if defined(BOUCHAUD_PORT)\n"
+        "    if (bouchaud_m9_enabled()) {\n"
+        f"{corps}\n"
+        "    }\n"
+        "#endif\n" + ancre,
+        f"refus {nom}",
+    )
+
 page_cpp.write_text(data)
 print("Hote local (cookies, stockage, HSTS) branche dans", page_cpp)
