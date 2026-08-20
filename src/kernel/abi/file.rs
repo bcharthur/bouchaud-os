@@ -631,6 +631,24 @@ pub fn sys_memfd_create(nom_addr: u64, _flags: u32) -> i64 {
     }
 }
 
+/// Traduit l'echec d'une creation de nœud en numero d'erreur POSIX.
+///
+/// Ces echecs rendaient tous ENOSPC. Un nom trop long se presentait donc a
+/// l'application comme un disque plein, ce qui envoie chercher la cause a
+/// l'oppose de la verite : au run 32427953935, chaque telechargement de
+/// Ladybird echouait sur un nom de 67 octets et le journal annoncait ENOSPC
+/// sur un disque de 1166 Mio dont 4 % des inodes seulement etaient pris. La
+/// couche WASI faisait deja cette distinction ; l'ABI native, non.
+fn errno_creation(raison: &'static str) -> i64 {
+    match raison {
+        "invalid name" => errno::ENAMETOOLONG,
+        "no free inode" => errno::ENOSPC,
+        "parent not a directory" => errno::ENOTDIR,
+        "already exists" => errno::EEXIST,
+        _ => errno::ENOSPC,
+    }
+}
+
 pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
     let path = match crate::kernel::abi::resolve_user_path(path_addr) {
         Some(path) => path,
@@ -730,7 +748,7 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
                     fs.nodes[node].mode = (mode & 0o777) as u16;
                     node
                 }
-                Err(_) => return -errno::ENOSPC,
+                Err(raison) => return -errno_creation(raison),
             }
         }
     };
@@ -1400,7 +1418,7 @@ pub fn sys_mkdir(path_addr: u64) -> i64 {
     }
     match fs.mkdir_at(parent, name) {
         Ok(_) => 0,
-        Err(_) => -errno::ENOSPC,
+        Err(raison) => -errno_creation(raison),
     }
 }
 

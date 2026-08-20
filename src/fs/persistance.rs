@@ -241,7 +241,21 @@ pub fn synchronise() -> i64 {
 
     for (index, entree) in entrees.iter().enumerate() {
         let octets = entree.chemin.as_bytes();
-        let longueur = core::cmp::min(octets.len(), CHEMIN_MAX - 1);
+        // Un chemin trop long etait TRONQUE en silence. La table gardait alors
+        // un nom qui n'est celui d'aucun fichier, et le redemarrage suivant
+        // restaurait le contenu sous ce faux nom -- une corruption discrete,
+        // que rien dans le journal n'aurait signalee. Depuis que `NAME_LEN`
+        // vaut 255, un seul composant peut a lui seul approcher ce plafond.
+        if octets.len() >= CHEMIN_MAX {
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "persistance: chemin trop long, {} octets pour {} possibles : '{}'",
+                octets.len(),
+                CHEMIN_MAX - 1,
+                entree.chemin
+            ));
+            return -1;
+        }
+        let longueur = octets.len();
         let debut_entree = index * TAILLE_ENTREE;
         table[debut_entree..debut_entree + longueur].copy_from_slice(&octets[..longueur]);
         ecrit_u64(
