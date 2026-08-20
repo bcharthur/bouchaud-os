@@ -160,15 +160,15 @@ void ConnectionFromClient::bouchaud_m11_start()
     // M9/M11, WebContent n'a qu'une `ConnectionFromClient` et elle vit aussi
     // longtemps que le processus : la capture est sure tant que ce jalon ne cree
     // pas de second onglet, ce que M13 fera en introduisant un vrai Browser.
-    chrome.on_mouse_event = [this](Web::MouseEvent event) {
+    chrome.on_mouse_event = [this, page_id](Web::MouseEvent event) {
         mouse_event(page_id, move(event));
     };
 
-    chrome.on_key_event = [this](Web::KeyEvent event) {
+    chrome.on_key_event = [this, page_id](Web::KeyEvent event) {
         key_event(page_id, move(event));
     };
 
-    chrome.on_navigate = [this](ByteString target) {
+    chrome.on_navigate = [this, page_id](ByteString target) {
         auto url = URL::create_with_url_or_path(target);
         if (!url.has_value()) {
             warnln("[ladybird-bouchaud] M11_URL_INVALID {}", target);
@@ -178,20 +178,20 @@ void ConnectionFromClient::bouchaud_m11_start()
         load_url(page_id, *url, Web::Bindings::NavigationHistoryBehavior::Auto);
     };
 
-    chrome.on_history_delta = [this](int delta) {
+    chrome.on_history_delta = [this, page_id](int delta) {
         if (auto page = this->page(page_id); page.has_value())
             page->page().traverse_the_history_by_delta(delta);
     };
 
-    chrome.on_reload = [this] {
+    chrome.on_reload = [this, page_id] {
         reload(page_id);
     };
 
-    chrome.on_stop = [this] {
+    chrome.on_stop = [this, page_id] {
         stop_loading(page_id);
     };
 
-    chrome.on_repaint = [this] {
+    chrome.on_repaint = [this, page_id] {
         if (auto page = this->page(page_id); page.has_value())
             page->page().top_level_traversable()->queue_screenshot_task({});
     };
