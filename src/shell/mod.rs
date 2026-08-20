@@ -57,6 +57,15 @@ fn env_unset(name: &str) {
     env_mut().retain(|(k, _)| k != name);
 }
 
+/// Repertoires ou chercher un programme nomme sans barre oblique.
+///
+/// `PATH` s'il est defini par l'utilisateur, sinon les emplacements ou
+/// Bouchaud installe ses programmes. `/usr/libexec` n'y figure pas : ce qui
+/// s'y trouve est lance par son chemin complet, par un hote qui le connait.
+pub fn path_de_recherche() -> String {
+    env_get("PATH").unwrap_or_else(|| String::from("/bin:/usr/bin:/usr/local/bin:/"))
+}
+
 /// Variables exportees par le shell, sous la forme `NOM=valeur`.
 ///
 /// Ce que `export` a pose doit atteindre le programme lance : sans cela, un
@@ -800,12 +809,19 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "vmstat" => { crate::kernel::vmm::print_info(); 0 }
         "strace" => { c::strace(argc, &argv); 0 }
 
-        _ => {
-            vga::set_color(COLOR_RED);
-            println!("{}: commande inconnue", argv[0]);
-            vga::set_color(COLOR_DEFAULT);
-            127
-        }
+        // Un nom qui n'est pas une commande interne peut etre un programme.
+        //
+        // Le shell exigeait `exec /chemin/binaire` et rendait 127 sur
+        // `/chemin/binaire` seul, alors que c'est la forme qu'ecrit tout le
+        // monde. Le run 32421981699 s'est arrete precisement la :
+        //
+        //     + /usr/libexec/ladybird/BouchaudBrowserHost
+        //     /usr/libexec/ladybird/BouchaudBrowserHost: commande inconnue
+        //     === AUTORUN FIN === statut=127
+        //
+        // Un autorun, un lanceur de bureau ou un script tiers n'a aucune raison
+        // de connaitre ce mot-cle : il n'existe dans aucun shell POSIX.
+        _ => c::execute_programme(line, argc, &argv, *cwd),
     }
 }
 

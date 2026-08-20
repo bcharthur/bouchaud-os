@@ -1729,6 +1729,98 @@ pub fn exec_cmd(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
     }
 }
 
+/// Lance un programme nomme directement, sans le mot-cle `exec`.
+///
+/// C'est le repli du shell quand un mot n'est aucune de ses commandes
+/// internes, et c'est le comportement de tout shell POSIX : un token qui
+/// contient une barre oblique designe un chemin, sinon on le cherche dans
+/// `PATH`. Le shell rendait jusqu'ici « commande inconnue » et 127, si bien
+/// qu'un autorun ecrit normalement ne demarrait rien :
+///
+///     + /usr/libexec/ladybird/BouchaudBrowserHost
+///     /usr/libexec/ladybird/BouchaudBrowserHost: commande inconnue
+///
+/// Le diagnostic reste distinct dans les deux cas qui comptent : un nom
+/// introuvable dit qu'il est introuvable, un fichier present mais non
+/// executable dit qu'il ne l'est pas. Confondre les deux, c'est envoyer
+/// chercher un binaire manquant qui est en fait la, sans son bit `+x`.
+pub fn execute_programme(line: &str, argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
+    let nom = argv[0];
+    if nom.is_empty() {
+        return 0;
+    }
+
+    let chemin = match resout_programme(nom, cwd) {
+        Some(chemin) => chemin,
+        None => {
+            vga::set_color(vga::COLOR_RED);
+            println!("{}: commande inconnue", nom);
+            vga::set_color(COLOR_DEFAULT);
+            return 127;
+        }
+    };
+
+    {
+        let fs = ramfs::fs();
+        if let Some(idx) = fs.resolve(&chemin, cwd) {
+            if !fs.can(idx, PERM_X) {
+                vga::set_color(vga::COLOR_RED);
+                println!("{}: permission refusee (bit d'execution absent)", chemin);
+                vga::set_color(COLOR_DEFAULT);
+                return 126;
+            }
+        }
+    }
+
+    let mut args = alloc::vec::Vec::new();
+    args.push(String::from(chemin.as_str()));
+    for i in 1..argc {
+        if !argv[i].is_empty() {
+            args.push(String::from(argv[i]));
+        }
+    }
+    let _ = line;
+
+    let env = crate::kernel::exec::shell_environment();
+    match crate::kernel::exec::exec(&chemin, &args, &env, cwd) {
+        Ok(code) => code,
+        Err(message) => {
+            vga::set_color(vga::COLOR_RED);
+            println!("{}: {}", nom, message);
+            vga::set_color(COLOR_DEFAULT);
+            126
+        }
+    }
+}
+
+/// Le chemin d'un programme nomme, ou `None` s'il n'existe nulle part.
+///
+/// Un token qui contient `/` est un chemin, relatif ou absolu. Sinon on
+/// parcourt `PATH` s'il est defini, et a defaut les repertoires ou Bouchaud
+/// installe ses programmes.
+fn resout_programme(nom: &str, cwd: usize) -> Option<String> {
+    let fs = ramfs::fs();
+    let est_fichier = |chemin: &str| -> bool {
+        matches!(fs.resolve(chemin, cwd), Some(idx) if fs.nodes[idx].kind == NodeKind::File)
+    };
+
+    if nom.contains('/') {
+        return if est_fichier(nom) { Some(String::from(nom)) } else { None };
+    }
+
+    let chemin_env = crate::shell::path_de_recherche();
+    for repertoire in chemin_env.split(':') {
+        if repertoire.is_empty() {
+            continue;
+        }
+        let candidat = alloc::format!("{}/{}", repertoire.trim_end_matches('/'), nom);
+        if est_fichier(&candidat) {
+            return Some(candidat);
+        }
+    }
+    None
+}
+
 /// `elfinfo <fichier>` : analyse un binaire sans l'executer.
 pub fn elfinfo(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
     if argc < 2 {
