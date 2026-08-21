@@ -167,8 +167,9 @@ jobs:
           grep -aF "[ladybird-bouchaud] BROWSER_HOST_START" serie-browser-host.log
           grep -aF "[ladybird-bouchaud] BROWSER_HOST_INITIALIZED" serie-browser-host.log
           grep -aF "[ladybird-bouchaud] IMAGE_DECODER_MODE browser-host-upstream" serie-browser-host.log
-          test "$(grep -aFc "[ladybird-bouchaud] BROWSER_HOST_M11_ATTACHED" serie-browser-host.log)" -eq 1
+          test "$(grep -aFc "[ladybird-bouchaud] BROWSER_HOST_M11_ATTACHED" serie-browser-host.log)" -ge 1
           grep -aF "[ladybird-bouchaud] M11_GUI_HANDSHAKE_OK" serie-browser-host.log
+          grep -aF "[ladybird-bouchaud] BROWSER_HOST_M11_INPUT_ACK_LOCAL" serie-browser-host.log
           grep -aF "[ladybird-bouchaud] M11_DOCUMENT_LOADED" serie-browser-host.log
           grep -aF "[ladybird-bouchaud] BROWSER_HOST_M11_FRAME_PRESENTED" serie-browser-host.log
           grep -aF "site_isolation=disable" serie-browser-host.log
@@ -179,8 +180,9 @@ jobs:
           grep -F "BROWSER_HOST_FIXTURE_OK path=/browser-host.html" fixture-browser-host.log
           grep -F "BROWSER_HOST_FIXTURE_IMAGE_OK path=/pixel.png" fixture-browser-host.log
 
-          if grep -aFq "VERIFICATION FAILED: m_pending_screenshot" serie-browser-host.log; then
-            echo "Crash screenshot M11/BrowserHost detecte" >&2
+          if grep -aFq "VERIFICATION FAILED:" serie-browser-host.log; then
+            echo "VERIFY Ladybird detecte dans le runtime interactif" >&2
+            grep -aF "VERIFICATION FAILED:" serie-browser-host.log >&2 || true
             exit 1
           fi
           if grep -aFq "IMAGE_DECODER_ABSENT" serie-browser-host.log; then

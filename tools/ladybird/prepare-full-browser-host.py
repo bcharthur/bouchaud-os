@@ -511,6 +511,39 @@ if screenshot_route not in data:
     page_cpp.write_text(data)
 
 
+# BrowserHost+M11: les evenements GUI sont injectes directement dans WebContent.
+#
+# Upstream WebView::ViewImplementation place chaque evenement dans
+# `m_pending_input_events` AVANT de l'envoyer a WebContent. Le retour
+# `did_finish_handling_input_event()` depile donc cette queue. M11 contourne ce
+# chemin : il lit le fd GUI dans WebContent puis appelle les handlers localement.
+# Renvoyer l'ACK upstream ferait depiler une queue BrowserHost vide.
+data = page_cpp.read_text()
+input_ack_old = """void PageClient::report_finished_handling_input_event(u64 page_id, Web::EventResult event_was_handled)
+{
+    client().async_did_finish_handling_input_event(page_id, event_was_handled);
+}"""
+input_ack_new = """void PageClient::report_finished_handling_input_event(u64 page_id, Web::EventResult event_was_handled)
+{
+#if defined(BOUCHAUD_PORT)
+    if (getenv(\"BOUCHAUD_BROWSER_HOST\") != nullptr && BouchaudChrome::enabled()) {
+        static bool reported_local_input_ack = false;
+        if (!reported_local_input_ack) {
+            reported_local_input_ack = true;
+            outln(\"[ladybird-bouchaud] BROWSER_HOST_M11_INPUT_ACK_LOCAL page={}\", page_id);
+        }
+        return;
+    }
+#endif
+    client().async_did_finish_handling_input_event(page_id, event_was_handled);
+}"""
+if input_ack_new not in data:
+    if input_ack_old not in data:
+        raise SystemExit("BrowserHost: report_finished_handling_input_event introuvable")
+    data = data.replace(input_ack_old, input_ack_new, 1)
+    page_cpp.write_text(data)
+
+
 # `prepare-console.py` a installe la sortie serie sous BOUCHAUD_M9. Comme le
 # BrowserHost n'a pas besoin d'activer le bootstrap M9, on etend uniquement
 # cette condition d'observabilite au nouveau mode.
