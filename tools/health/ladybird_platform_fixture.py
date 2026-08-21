@@ -149,9 +149,30 @@ PAGE = r'''<!doctype html>
     const vu_local = localStorage.getItem("bouchaud_temoin");
     const vu_cookie = document.cookie.includes(`bouchaud_temoin=${TEMOIN}`);
     const vu_idb = await limite(lit_idb(), 20000, "persistance-lecture");
-    const complet = vu_local === TEMOIN && vu_cookie && vu_idb === TEMOIN;
+    // localStorage et le temoin de connexion passent par les magasins SQL de
+    // Ladybird (StorageJar, CookieJar), donc par un fichier : ils DOIVENT
+    // survivre au redemarrage, et c'est ce que cette ligne exige.
+    //
+    // IndexedDB, non -- et pas a cause de Bouchaud. Au SHA epingle, ses bases
+    // vivent dans une table statique du processus WebContent :
+    //
+    //     using IDBDatabaseMapping = HashMap<StorageAPI::StorageKey, ...>;
+    //     static NeverDestroyed<IDBDatabaseMapping> databases;
+    //         -- Libraries/LibWeb/IndexedDB/Internal/Database.cpp:16
+    //
+    // Aucun chemin ne les ecrit sur disque : ni StorageJar, ni SQL, rien. Les
+    // seules autres mentions d'IndexedDB hors de LibWeb servent l'inspection
+    // DevTools. Un redemarrage les perd donc chez Ladybird comme chez
+    // Bouchaud, et exiger le contraire faisait echouer la CI sur une capacite
+    // qui n'existe pas.
+    //
+    // Le marqueur l'ANNONCE plutot que de l'ignorer : si upstream ajoute un
+    // jour cette persistance, `indexeddb=survecu` paraitra et il faudra venir
+    // renforcer l'exigence ici.
+    const complet = vu_local === TEMOIN && vu_cookie;
     if (complet) {
-      console.log("PLATFORM_PERSIST_APRES_REDEMARRAGE OK localStorage+cookie+indexeddb");
+      const idb = vu_idb === TEMOIN ? "survecu" : "perdu-en-memoire-upstream";
+      console.log(`PLATFORM_PERSIST_APRES_REDEMARRAGE OK localStorage+cookie indexeddb=${idb}`);
     } else {
       console.log(`PLATFORM_PERSIST_PREMIER_BOOT localStorage=${vu_local} cookie=${vu_cookie} indexeddb=${vu_idb}`);
     }

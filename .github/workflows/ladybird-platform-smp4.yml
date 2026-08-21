@@ -299,7 +299,12 @@ jobs:
 
           # Second demarrage : le moteur repasse la suite complete,
           grep -aF "PLATFORM_FULL_OK passed=$ATTENDUS/$ATTENDUS" serie-platform-smp4-boot2.log
-          # le profil du navigateur a survecu a l'extinction,
+          # le profil du navigateur a survecu a l'extinction -- la ligne porte
+          # aussi l'etat d'IndexedDB, qu'aucun run ne doit avoir a deviner :
+          # ses bases vivent dans une table statique du processus WebContent au
+          # SHA epingle (LibWeb/IndexedDB/Internal/Database.cpp:16) et rien ne
+          # les ecrit sur disque, donc un redemarrage les perd chez Ladybird
+          # comme chez Bouchaud.
           grep -aF "PLATFORM_PERSIST_APRES_REDEMARRAGE OK" serie-platform-smp4-boot2.log
           # et le fichier telecharge au demarrage precedent est relu par l'OS.
           grep -aF "Bouchaud download proof" serie-platform-smp4-boot2.log
