@@ -137,6 +137,11 @@ public:
     ErrorOr<int> run(Main::Arguments const& arguments)
     {
         TRY(initialize(arguments));
+        // `BROWSER_HOST_START` est imprime AVANT `run()` : il ne prouve que le
+        // demarrage du processus. Cette ligne-ci prouve que `initialize()` est
+        // alle au bout -- chemins de ressources, magasins SQL, services --
+        // juste avant d'entrer dans la boucle d'evenements.
+        outln("[ladybird-bouchaud] BROWSER_HOST_INITIALIZED");
         return execute();
     }
 
