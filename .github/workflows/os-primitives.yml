@@ -89,6 +89,7 @@ jobs:
           cp tools/userland/out-sondes/wal-probe "$SCENARIO/bin/"
           cp tools/userland/out-sondes/disque-probe "$SCENARIO/bin/"
           cp tools/userland/out-sondes/nom-long-probe "$SCENARIO/bin/"
+          cp tools/userland/out-sondes/session-probe "$SCENARIO/bin/"
 
           # Un gros fichier a paginer : disque-probe a besoin d'une charge de
           # lecture concurrente pour valoir quelque chose.
@@ -106,6 +107,8 @@ jobs:
           /bin/wal-probe
           /bin/disque-probe /bin/gros.bin
           /bin/nom-long-probe
+          /bin/session-probe 4
+          echo SESSION_INVITE_REVENUE
           strace off
           echo PRIMITIVES_FIN
           AUTORUN
@@ -150,6 +153,11 @@ jobs:
           grep -aF "WAL_PROBE_OK" serie-primitives.log
           grep -aF "DISQUE_PROBE_OK" serie-primitives.log
           grep -aF "NOM_LONG_OK" serie-primitives.log
+          # L'invite doit revenir APRES un programme qui laisse des fils
+          # vivants : sans cela l'autorun ne se termine pas, `power::shutdown`
+          # n'est jamais appele, et /persist n'est pas ecrit a l'extinction.
+          grep -aF "SESSION_PERE_SORT fils=4" serie-primitives.log
+          grep -aF "SESSION_INVITE_REVENUE" serie-primitives.log
           grep -aF "PRIMITIVES_FIN" serie-primitives.log
 
           # Le pilote de disque ne doit signaler aucune commande en echec.

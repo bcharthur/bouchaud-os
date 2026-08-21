@@ -258,8 +258,25 @@ ErrorOr<int> ladybird_main(Main::Arguments)
     outln("[ladybird-bouchaud] BROWSER_HOST_STORAGE sql=disabled upstream-jars=in-memory");
     outln("[ladybird-bouchaud] BROWSER_HOST_SERVICES RequestServer ImageDecoder Compositor WebContent WebWorker:on-demand");
 
-    BouchaudBrowserApplication application;
-    return application.run(host_arguments);
+    // Trois etapes distinctes, et chacune se dit. Au run 32427953935 le
+    // processus s'est tu apres `window.close()` sans que rien ne permette de
+    // savoir OU : la boucle d'evenements ne quittait-elle pas, ou quittait-elle
+    // pour se bloquer ensuite dans l'arret des services ? Un processus qui
+    // disparait en silence oblige a deviner.
+    int code = 0;
+    {
+        BouchaudBrowserApplication application;
+        auto resultat = application.run(host_arguments);
+        if (resultat.is_error()) {
+            outln("[ladybird-bouchaud] BROWSER_HOST_EXIT erreur");
+            warnln("BouchaudBrowserHost: {}", resultat.error());
+            return resultat.release_error();
+        }
+        code = resultat.value();
+        outln("[ladybird-bouchaud] BROWSER_HOST_EXIT boucle_quittee code={}", code);
+    }
+    outln("[ladybird-bouchaud] BROWSER_HOST_ARRET services fermes");
+    return code;
 }
 ''')
 
