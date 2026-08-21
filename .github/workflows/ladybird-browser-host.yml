@@ -167,7 +167,10 @@ jobs:
           grep -aF "[ladybird-bouchaud] BROWSER_HOST_START" serie-browser-host.log
           grep -aF "[ladybird-bouchaud] BROWSER_HOST_INITIALIZED" serie-browser-host.log
           grep -aF "[ladybird-bouchaud] IMAGE_DECODER_MODE browser-host-upstream" serie-browser-host.log
-          test "$(grep -aFc "[ladybird-bouchaud] BROWSER_HOST_M11_ATTACHED" serie-browser-host.log)" -ge 1
+          grep -aF "[ladybird-bouchaud] BROWSER_HOST_M11_SPARE_DISABLED reason=shared-gui-stream" serie-browser-host.log
+          test "$(grep -aFc "[ladybird-bouchaud] WEBCONTENT_READY" serie-browser-host.log)" -eq 1
+          test "$(grep -aFc "[ladybird-bouchaud] M11_CHROME " serie-browser-host.log)" -eq 1
+          test "$(grep -aFc "[ladybird-bouchaud] BROWSER_HOST_M11_ATTACHED" serie-browser-host.log)" -eq 1
           grep -aF "[ladybird-bouchaud] M11_GUI_HANDSHAKE_OK" serie-browser-host.log
           grep -aF "[ladybird-bouchaud] BROWSER_HOST_M11_INPUT_ACK_LOCAL" serie-browser-host.log
           grep -aF "[ladybird-bouchaud] M11_DOCUMENT_LOADED" serie-browser-host.log
@@ -187,6 +190,10 @@ jobs:
           fi
           if grep -aFq "IMAGE_DECODER_ABSENT" serie-browser-host.log; then
             echo "Ancien diagnostic ImageDecoder legacy encore actif" >&2
+            exit 1
+          fi
+          if grep -aFq "M11_GUI_STREAM_DESYNC" serie-browser-host.log; then
+            echo "Flux GUI M11 desynchronise : plusieurs lecteurs ou framing casse" >&2
             exit 1
           fi
           if grep -aFq "instruction illegale dans le programme utilisateur" serie-browser-host.log; then

@@ -889,7 +889,10 @@ inline void dispatch_mouse(Web::MouseEvent::Type type, int x, int y, unsigned bu
     event.wheel_delta_y = wheel_y;
     event.click_count = type == Web::MouseEvent::Type::MouseDown ? 1 : 0;
     s.on_mouse_event(move(event));
-    request_chrome_frame();
+    // M11_PAGE_INPUT_NO_CHROME_COMPOSE:
+    // Le pointeur appartient a la page. Si :hover/scroll/clic change le rendu,
+    // LibWeb invalide et produit lui-meme une nouvelle frame. Recomposer ici
+    // ne ferait que recopier l'ancienne capture sur toute la surface.
 }
 
 inline void handle_pointer(int x, int y, unsigned buttons)
@@ -1006,7 +1009,8 @@ inline void dispatch_key_to_page(Web::UIEvents::KeyCode code, u32 code_point, bo
     up.repeat = false;
     up.should_insert_text = false;
     s.on_key_event(move(up));
-    request_chrome_frame();
+    // Même règle que pour la souris : une touche envoyee au document ne change
+    // pas le chrome. Le moteur demandera un repaint si le DOM visuel change.
 }
 
 inline void handle_key(u32 code, u32 code_point, u32 modifiers, u32 pressed)
@@ -1091,13 +1095,17 @@ inline void handle_key(u32 code, u32 code_point, u32 modifiers, u32 pressed)
             s.status = "arrete";
             if (s.on_stop)
                 s.on_stop();
+            // Ici le chrome change reellement ("arrete"), donc une seule
+            // recomposition est legitime.
+            request_chrome_frame();
         }
         dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Escape, 0, false);
         break;
     default:
         break;
     }
-    request_chrome_frame();
+    // Pas de request_chrome_frame() ici : hors barre d'adresse, ces touches
+    // appartiennent au document et son invalidation pilote le rendu.
 }
 
 // ----------------------------------------------------------------------------

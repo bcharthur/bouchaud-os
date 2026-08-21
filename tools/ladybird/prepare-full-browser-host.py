@@ -318,6 +318,26 @@ if "BOUCHAUD_PORT: pas encore de PR_SET_PDEATHSIG" not in process_cpp.read_text(
     )
 
 
+# 2b. M11 interactif partage le fd GUI et la surface du BrowserHost.
+#
+# Upstream Ladybird lance volontairement un WebContent "spare" apres la
+# creation du WebContent actif. Ce spare est une optimisation normale, mais un
+# descripteur GUI herite n'est pas une file multidestinataire : deux lecteurs
+# se repartissent les messages clavier/souris et deux BouchaudChrome independants
+# ecrivent ensuite dans la meme surface.
+#
+# Tant que M11 vit dans WebContent, une fenetre Bouchaud == un WebContent actif.
+application_cpp = root / "Libraries/LibWebView/Application.cpp"
+data = application_cpp.read_text()
+spare_signature = "void Application::launch_spare_web_content_process()\n{\n"
+spare_guard = "void Application::launch_spare_web_content_process()\n{\n#if defined(BOUCHAUD_PORT)\n    if (Core::Environment::has(\"BOUCHAUD_BROWSER_HOST\"sv) && Core::Environment::has(\"BOUCHAUD_M11\"sv)) {\n        static bool reported_m11_spare_disabled = false;\n        if (!reported_m11_spare_disabled) {\n            reported_m11_spare_disabled = true;\n            outln(\"[ladybird-bouchaud] BROWSER_HOST_M11_SPARE_DISABLED reason=shared-gui-stream\");\n        }\n        return;\n    }\n#endif\n"
+if spare_guard not in data:
+    if spare_signature not in data:
+        raise SystemExit("BrowserHost: Application::launch_spare_web_content_process introuvable")
+    data = data.replace(spare_signature, spare_guard, 1)
+    application_cpp.write_text(data)
+
+
 # 3. Le probe debugger Linux utilise /proc, absent de Bouchaud.
 utilities_cpp = root / "Libraries/LibWebView/Utilities.cpp"
 if "BOUCHAUD_PORT: pas de /proc/self/status" not in utilities_cpp.read_text():
