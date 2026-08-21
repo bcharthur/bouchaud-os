@@ -477,6 +477,40 @@ if new_guard not in data:
     data = data.replace(old_guard, new_guard)
     page_cpp.write_text(data)
 
+# BrowserHost+M11: route les captures du bridge GUI localement.
+#
+# `queue_screenshot_task()` est utilise par M11 comme mecanisme de
+# materialisation CPU d'une frame. Cette capture n'est PAS une reponse a
+# `WebView::ViewImplementation::take_screenshot()`. La transmettre au client
+# upstream ferait donc tomber `VERIFY(m_pending_screenshot)`.
+#
+# Garder le VERIFY upstream intact : c'est le protocole du bridge qui doit
+# distinguer ses frames des vraies demandes de screenshot.
+data = page_cpp.read_text()
+screenshot_signature = "void PageClient::page_did_take_screenshot(Gfx::ShareableBitmap const& screenshot)\n{\n"
+screenshot_route = """void PageClient::page_did_take_screenshot(Gfx::ShareableBitmap const& screenshot)
+{
+#if defined(BOUCHAUD_PORT)
+    if (getenv(\"BOUCHAUD_BROWSER_HOST\") != nullptr && BouchaudChrome::enabled()) {
+        if (!BouchaudChrome::present(screenshot))
+            Core::Process::terminate_immediately(70);
+
+        static bool first_frame_reported = false;
+        if (!first_frame_reported) {
+            first_frame_reported = true;
+            outln(\"[ladybird-bouchaud] BROWSER_HOST_M11_FRAME_PRESENTED page={}\", m_id);
+        }
+        return;
+    }
+#endif
+"""
+if screenshot_route not in data:
+    if screenshot_signature not in data:
+        raise SystemExit("BrowserHost: PageClient::page_did_take_screenshot introuvable")
+    data = data.replace(screenshot_signature, screenshot_route, 1)
+    page_cpp.write_text(data)
+
+
 # `prepare-console.py` a installe la sortie serie sous BOUCHAUD_M9. Comme le
 # BrowserHost n'a pas besoin d'activer le bootstrap M9, on etend uniquement
 # cette condition d'observabilite au nouveau mode.

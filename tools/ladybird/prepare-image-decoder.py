@@ -77,7 +77,12 @@ replacement = """#if defined(BOUCHAUD_PORT)
     // passe la socket du service ImageDecoder par heritage, faute de processus
     // UI capable d'emettre `connect_to_image_decoder`. Tout ce qui suit la
     // socket est le chemin d'upstream, inchange.
-    if (auto* inherited_image_fd = getenv("BOUCHAUD_IMAGEDECODER_FD")) {
+    if (getenv("BOUCHAUD_BROWSER_HOST") != nullptr) {
+        // Le vrai BrowserHost fournit ImageDecoder via le canal IPC upstream.
+        // `BOUCHAUD_IMAGEDECODER_FD` appartient uniquement au bootstrap M8/M9
+        // sans processus UI.
+        outln("[ladybird-bouchaud] IMAGE_DECODER_MODE browser-host-upstream");
+    } else if (auto* inherited_image_fd = getenv("BOUCHAUD_IMAGEDECODER_FD")) {
         auto image_fd = atoi(inherited_image_fd);
         if (image_fd < 0) {
             warnln("[ladybird-bouchaud] IMAGE_DECODER_FD_INVALID {}", inherited_image_fd);

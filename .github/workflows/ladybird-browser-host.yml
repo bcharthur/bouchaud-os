@@ -65,7 +65,7 @@ jobs:
         run: |
           set -eux
           OUT=third_party/native-browser-bouchaud
-          for f in BouchaudBrowserHost WebContent RequestServer ImageDecoder WebWorker Compositor; do
+          for f in BouchaudBrowserHost WebContent RequestServer ImageDecoder WebWorker Compositor WebDriver; do
             test -f "$OUT/$f"
             file "$OUT/$f"
             ! readelf -l "$OUT/$f" | grep -q INTERP
@@ -93,10 +93,15 @@ jobs:
 
           mkdir -p "$SCENARIO/usr/libexec/ladybird" "$SCENARIO/usr/share/ladybird" "$SCENARIO/etc/ssl/certs"
 
-          for f in BouchaudBrowserHost WebContent RequestServer ImageDecoder WebWorker Compositor; do
+          for f in BouchaudBrowserHost WebContent RequestServer ImageDecoder WebWorker Compositor WebDriver; do
             cp "$OUT/$f" "$SCENARIO/usr/libexec/ladybird/$f"
             chmod 755 "$SCENARIO/usr/libexec/ladybird/$f"
           done
+
+          # Le desktop lance /bo-navigateur. En mode interactif il s'agit du
+          # vrai BrowserHost, pas du bootstrap M9.
+          cp "$OUT/BouchaudBrowserHost" "$SCENARIO/bo-navigateur"
+          chmod 755 "$SCENARIO/bo-navigateur"
 
           if [ -d "$OUT/resources" ]; then
             cp -a "$OUT/resources/." "$SCENARIO/usr/share/ladybird/"
@@ -108,14 +113,14 @@ jobs:
           uname
           df
           ifconfig
-          echo "=== Bouchaud BrowserHost upstream ==="
+          echo "=== Bouchaud BrowserHost interactif M11 ==="
+          export BO_AUTOSTART_BROWSER=1
+          export BOUCHAUD_M9=1
           export BOUCHAUD_BROWSER_HOST=1
-          # BOUCHAUD_M9_URL est la variable que lit reellement le BrowserHost
-          # (prepare-full-browser-host.py). BOUCHAUD_BROWSER_HOST_URL n'etait
-          # lue nulle part : le host partait donc sur son URL par defaut,
-          # https://example.com/, et ce scenario ne testait pas sa fixture.
+          export BOUCHAUD_M11=1
+          export BOUCHAUD_TIME_ZONE=Europe/Paris
           export BOUCHAUD_M9_URL='http://10.0.2.2:18082/browser-host.html'
-          /usr/libexec/ladybird/BouchaudBrowserHost
+          desktop
           SCENARIO_EOF
 
           (cd tools/userland && IMAGE="$GITHUB_WORKSPACE/ladybird-browser-host.img" ./mkdisk.sh "$GITHUB_WORKSPACE/$SCENARIO")
@@ -143,7 +148,9 @@ jobs:
           PID=$!
 
           while kill -0 "$PID" 2>/dev/null; do
-            grep -aFq "HOST_SMOKE_OK canvas=1 worker=1" "$LOG" && break
+            if grep -aFq "HOST_SMOKE_OK canvas=1 worker=1 image=1" "$LOG"               && grep -aFq "BROWSER_HOST_M11_FRAME_PRESENTED" "$LOG"               && grep -aFq "M11_DOCUMENT_LOADED" "$LOG"; then
+              break
+            fi
             if (( SECONDS >= DEADLINE )); then break; fi
             sleep 0.5
           done
@@ -159,10 +166,31 @@ jobs:
           set -e
           grep -aF "[ladybird-bouchaud] BROWSER_HOST_START" serie-browser-host.log
           grep -aF "[ladybird-bouchaud] BROWSER_HOST_INITIALIZED" serie-browser-host.log
+          grep -aF "[ladybird-bouchaud] IMAGE_DECODER_MODE browser-host-upstream" serie-browser-host.log
+          test "$(grep -aFc "[ladybird-bouchaud] BROWSER_HOST_M11_ATTACHED" serie-browser-host.log)" -eq 1
+          grep -aF "[ladybird-bouchaud] M11_GUI_HANDSHAKE_OK" serie-browser-host.log
+          grep -aF "[ladybird-bouchaud] M11_DOCUMENT_LOADED" serie-browser-host.log
+          grep -aF "[ladybird-bouchaud] BROWSER_HOST_M11_FRAME_PRESENTED" serie-browser-host.log
+          grep -aF "site_isolation=disable" serie-browser-host.log
           grep -aF "HOST_CANVAS OK" serie-browser-host.log
           grep -aF "HOST_WORKER OK pong" serie-browser-host.log
-          grep -aF "HOST_SMOKE_OK canvas=1 worker=1" serie-browser-host.log
+          grep -aF "HOST_IMAGE OK 1x1" serie-browser-host.log
+          grep -aF "HOST_SMOKE_OK canvas=1 worker=1 image=1" serie-browser-host.log
           grep -F "BROWSER_HOST_FIXTURE_OK path=/browser-host.html" fixture-browser-host.log
+          grep -F "BROWSER_HOST_FIXTURE_IMAGE_OK path=/pixel.png" fixture-browser-host.log
+
+          if grep -aFq "VERIFICATION FAILED: m_pending_screenshot" serie-browser-host.log; then
+            echo "Crash screenshot M11/BrowserHost detecte" >&2
+            exit 1
+          fi
+          if grep -aFq "IMAGE_DECODER_ABSENT" serie-browser-host.log; then
+            echo "Ancien diagnostic ImageDecoder legacy encore actif" >&2
+            exit 1
+          fi
+          if grep -aFq "instruction illegale dans le programme utilisateur" serie-browser-host.log; then
+            echo "Instruction illegale detectee dans le runtime" >&2
+            exit 1
+          fi
 
       - name: Journaux
         if: always()

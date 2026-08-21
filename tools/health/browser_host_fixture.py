@@ -1,5 +1,23 @@
 #!/usr/bin/env python3
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import struct
+import zlib
+
+
+def _png_chunk(kind: bytes, payload: bytes) -> bytes:
+    body = kind + payload
+    return struct.pack(">I", len(payload)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+
+
+def _pixel_png() -> bytes:
+    # PNG RGBA 1x1 deterministe, pixel #112233 opaque.
+    signature = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
+    scanline = b"\x00\x11\x22\x33\xff"
+    return signature + _png_chunk(b"IHDR", ihdr) + _png_chunk(b"IDAT", zlib.compress(scanline)) + _png_chunk(b"IEND", b"")
+
+
+PIXEL_PNG = _pixel_png()
 
 HTML = r'''<!doctype html>
 <meta charset="utf-8">
@@ -8,6 +26,7 @@ HTML = r'''<!doctype html>
 (async () => {
   let canvasOK = false;
   let workerOK = false;
+  let imageOK = false;
 
   try {
     const canvas = document.createElement("canvas");
@@ -40,13 +59,37 @@ HTML = r'''<!doctype html>
     console.log("HOST_WORKER FAIL " + e);
   }
 
-  console.log(`HOST_SMOKE_${canvasOK && workerOK ? "OK" : "FAIL"} canvas=${canvasOK ? 1 : 0} worker=${workerOK ? 1 : 0}`);
+  try {
+    const image = new Image();
+    const loaded = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("image timeout")), 10000);
+      image.onload = () => { clearTimeout(timer); resolve(); };
+      image.onerror = () => { clearTimeout(timer); reject(new Error("image decode error")); };
+    });
+    image.src = "/pixel.png";
+    await loaded;
+    imageOK = image.naturalWidth === 1 && image.naturalHeight === 1;
+    console.log(imageOK ? "HOST_IMAGE OK 1x1" : `HOST_IMAGE FAIL ${image.naturalWidth}x${image.naturalHeight}`);
+  } catch (e) {
+    console.log("HOST_IMAGE FAIL " + e);
+  }
+
+  console.log(`HOST_SMOKE_${canvasOK && workerOK && imageOK ? "OK" : "FAIL"} canvas=${canvasOK ? 1 : 0} worker=${workerOK ? 1 : 0} image=${imageOK ? 1 : 0}`);
 })();
 </script></body>'''
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path.split("?", 1)[0] != "/browser-host.html":
+        path = self.path.split("?", 1)[0]
+        if path == "/pixel.png":
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(PIXEL_PNG)))
+            self.end_headers()
+            self.wfile.write(PIXEL_PNG)
+            print("BROWSER_HOST_FIXTURE_IMAGE_OK path=/pixel.png", flush=True)
+            return
+        if path != "/browser-host.html":
             self.send_response(404)
             self.end_headers()
             return

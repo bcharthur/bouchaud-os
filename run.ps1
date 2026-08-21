@@ -45,13 +45,11 @@ param(
 
     # Nombre de vCPU exposes.
     #
-    # **Un seul, et ce n'est pas une timidite.** Le noyau ne sait pas demarrer
-    # un second processeur : il ne lit ni ACPI ni la table MADT, n'a pas de
-    # LAPIC, ne peut donc pas emettre la sequence INIT/SIPI, et route ses
-    # interruptions par le PIC 8259, qui ne parle qu'au BSP. `kernel::task`
-    # tient par ailleurs une file d'ordonnancement unique sans verrou.
-    # Demander huit vCPU donnerait huit coeurs a QEMU dont sept resteraient
-    # eteints, et ferait croire a une acceleration qui n'existe pas.
+    # Le noyau sait maintenant decouvrir les CPU et demarrer les AP par
+    # LAPIC INIT/SIPI. En revanche l'ordonnanceur utilisateur reste UP :
+    # les AP secondaires sont parques et les processus Ladybird tournent
+    # encore sur le BSP. Le parametre sert donc a valider le bring-up SMP,
+    # pas encore a accelerer le navigateur.
     [ValidateRange(1, 16)]
     [Alias('LadybirdCpuCount')]
     [int]$CpuCount = 4,
@@ -1015,10 +1013,10 @@ with output.open("ab") as stream:
     # ========================================================================
     # Zone persistante Bouchaud
     #
-    # 16384 secteurs * 512 = 8 Mio.
+    # 262144 secteurs * 512 = 128 Mio, comme tools/userland/mkdisk.sh.
     # ========================================================================
 
-    remaining = 8 * 1024 * 1024
+    remaining = 128 * 1024 * 1024
 
     zero_block = b"\0" * (
         1024 * 1024
@@ -1282,16 +1280,31 @@ if ($Accel -ne "none") {
 
     if ($Accel -eq "auto") {
 
-        # Windows Hypervisor Platform.
-        #
-        # Si indisponible, QEMU retombe sur TCG.
-        $qemuArgs += @(
-            "-accel",
-            "whpx,kernel-irqchip=off",
+        if ($LadybirdMode -and $CpuCount -gt 1) {
+            # TCG force pour SMP : le run local WHPX avec `-smp 4` a expose
+            # seulement un CPU au probe (`SMP4_DISCOVERED count=1`), alors que
+            # le meme bring-up est prouve sous TCG en CI. On privilegie donc
+            # la correction du test SMP tant que le chemin APIC/WHPX n'est pas
+            # valide. `-Accel whpx` reste disponible explicitement.
+            Write-Host `
+                "accel      : TCG force pour SMP ($CpuCount vCPU)" `
+                -ForegroundColor Yellow
 
-            "-accel",
-            "tcg"
-        )
+            $qemuArgs += @(
+                "-accel",
+                "tcg"
+            )
+        }
+        else {
+            # Windows Hypervisor Platform, avec fallback TCG.
+            $qemuArgs += @(
+                "-accel",
+                "whpx,kernel-irqchip=off",
+
+                "-accel",
+                "tcg"
+            )
+        }
     }
     else {
 
@@ -1344,8 +1357,8 @@ if ($LadybirdMode) {
     }
     elseif ($LadybirdChrome) {
         $ModeLabel = "Bouchaud Navigateur (Ladybird M11)"
-        $ServiceLabel = "WebContent + RequestServer + ImageDecoder"
-        $BrowserChain = "/bo-navigateur -> bootstrap -> ImageDecoder + RequestServer + WebContent + chrome"
+        $ServiceLabel = "BouchaudBrowserHost + WebContent + RequestServer + ImageDecoder + Compositor + WebWorker"
+        $BrowserChain = "/bo-navigateur -> BouchaudBrowserHost -> services Ladybird upstream + bridge GUI M11"
     }
     else {
         $ModeLabel = "Ladybird natif M9 interactif (sans chrome)"

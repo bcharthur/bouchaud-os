@@ -115,8 +115,14 @@ new = r'''    arguments.append("--force-cpu-painting");
         arguments.append("--disable-async-scrolling");
 
     char const* site_isolation = getenv("BOUCHAUD_SITE_ISOLATION");
-    if (!site_isolation || !*site_isolation)
-        site_isolation = "top-level";
+    if (!site_isolation || !*site_isolation) {
+        // M11 vit encore dans WebContent et ecrit dans UNE surface GUI
+        // heritee. Un process-swap top-level ferait attacher deux WebContent
+        // concurrents a la meme surface. Le BrowserHost headless conserve
+        // l'isolation upstream; le bridge interactif reste mono-WebContent
+        // jusqu'a ce que la presentation sorte de WebContent.
+        site_isolation = getenv("BOUCHAUD_M11") ? "disable" : "top-level";
+    }
     arguments.append("--site-isolation");
     arguments.append(site_isolation);
 

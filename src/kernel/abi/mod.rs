@@ -428,6 +428,16 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         UNLINK => file::sys_unlink(args[0]),
         UNLINKAT => file::sys_unlink(args[1]),
         RENAME => file::sys_rename(args[0], args[1]),
+        // Le RAMFS actuel fusionne entree de repertoire et inode : il ne peut
+        // pas representer deux noms pointant vers le meme inode sans refonte
+        // de son modele. Retourner succes ou copier le contenu serait un faux
+        // hardlink et casserait les garanties POSIX.
+        LINK => -errno::ENOTSUP,
+        // La surveillance de fichiers n'est pas encore un service noyau
+        // Bouchaud. ENOSYS est intentionnel : les bibliotheques retombent sur
+        // leur chemin sans surveillance (ex. timezone) au lieu de croire que
+        // l'abonnement existe.
+        INOTIFY_INIT1 => -errno::ENOSYS,
         STATFS => file::sys_statfs(args[0], args[1]),
         FSTATFS => file::sys_fstatfs(args[0] as i32, args[1]),
         FTRUNCATE => file::sys_ftruncate(args[0] as i32, args[1] as usize),
