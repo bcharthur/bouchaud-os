@@ -151,7 +151,7 @@ jobs:
           qemu-system-x86_64 \
             -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
             -drive format=raw,file=ladybird-platform-smp4.img \
-            -m 12288 -smp 4 -display none -no-reboot \
+            -m 12288 -smp 4 -cpu max -display none -no-reboot \
             -netdev user,id=net0 -device e1000,netdev=net0 \
             -audiodev none,id=muet -device AC97,audiodev=muet \
             -serial file:"$LOG" &
@@ -221,7 +221,7 @@ jobs:
           qemu-system-x86_64 \
             -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
             -drive format=raw,file=ladybird-platform-smp4.img \
-            -m 12288 -smp 4 -display none -no-reboot \
+            -m 12288 -smp 4 -cpu max -display none -no-reboot \
             -netdev user,id=net0 -device e1000,netdev=net0 \
             -audiodev none,id=muet -device AC97,audiodev=muet \
             -serial file:"$LOG" &

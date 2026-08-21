@@ -343,7 +343,13 @@ if "M9_BODY_DRAIN_BEGIN" not in data:
 {
     auto effective_network_error = m_body_delivery_error.has_value() ? m_body_delivery_error : network_error;
 #if defined(BOUCHAUD_PORT)
-    if (getenv("BOUCHAUD_M9") != nullptr && m_internal_stream_data && m_internal_stream_data->read_notifier && m_internal_stream_data->read_notifier->on_activation) {
+    // Une reponse file-backed/cache-backed peut avoir un payload valide sans
+    // ReadStream. Le callback du notifier dereference read_stream : ne jamais
+    // le forcer dans ce cas, laisser la logique upstream appeler on_finish.
+    if (getenv("BOUCHAUD_M9") != nullptr && m_internal_stream_data && !m_internal_stream_data->read_stream)
+        outln("[ladybird-bouchaud] M9_BODY_DRAIN_SKIP reason=no-read-stream total={}", total_size);
+
+    if (getenv("BOUCHAUD_M9") != nullptr && m_internal_stream_data && m_internal_stream_data->read_stream && m_internal_stream_data->read_notifier && m_internal_stream_data->read_notifier->on_activation) {
         outln("[ladybird-bouchaud] M9_BODY_DRAIN_BEGIN total={}", total_size);
         m_internal_stream_data->read_notifier->on_activation();
         outln("[ladybird-bouchaud] M9_BODY_DRAIN_DONE total={}", total_size);

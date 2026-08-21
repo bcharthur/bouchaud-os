@@ -1290,9 +1290,14 @@ if ($Accel -ne "none") {
                 "accel      : TCG force pour SMP ($CpuCount vCPU)" `
                 -ForegroundColor Yellow
 
+            # LADYBIRD_TCG_CPU_MAX
+            # Les runtimes Ladybird construits utilisent notamment SSE4.1
+            # (`roundsd`). Le CPU TCG implicite n'est pas un contrat suffisant.
             $qemuArgs += @(
                 "-accel",
-                "tcg"
+                "tcg",
+                "-cpu",
+                "max"
             )
         }
         else {
@@ -1312,6 +1317,15 @@ if ($Accel -ne "none") {
             "-accel",
             $Accel
         )
+
+        # Un -Accel tcg explicite doit offrir le meme jeu d'instructions que
+        # le chemin TCG force ci-dessus.
+        if ($LadybirdMode -and $Accel -eq "tcg") {
+            $qemuArgs += @(
+                "-cpu",
+                "max"
+            )
+        }
     }
 }
 
