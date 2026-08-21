@@ -345,6 +345,7 @@ fn refresh_timerfd(state: &mut crate::kernel::fd::TimerFdState) {
 }
 
 /// `write`.
+/// `write`.
 pub fn sys_write(fd: i32, buffer: u64, count: usize) -> i64 {
     if count == 0 {
         return 0;
@@ -353,6 +354,20 @@ pub fn sys_write(fd: i32, buffer: u64, count: usize) -> i64 {
         Some(data) => data,
         None => return -errno::EFAULT,
     };
+    ecrit_octets(fd, &data)
+}
+
+/// `write`, une fois les octets deja en memoire noyau.
+///
+/// Separe de [`sys_write`] pour que `sendfile` puisse ecrire vers n'importe
+/// quelle sorte de descripteur sans repasser par un tampon utilisateur : la
+/// source d'un `sendfile` est un fichier, sa destination est le plus souvent
+/// une socket ou un tube, et les deux bouts vivent dans le noyau.
+pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
+    let count = data.len();
+    if count == 0 {
+        return 0;
+    }
     let process = task::current_process();
     let kind = match process.borrow().files.get(fd) {
         Some(desc) => desc.kind.clone(),
@@ -480,7 +495,7 @@ pub fn sys_write(fd: i32, buffer: u64, count: usize) -> i64 {
             8
         }
         FdKind::TimerFd(_) => -errno::EINVAL,
-        FdKind::Socket(_) => crate::kernel::abi::net::sys_sendto(fd, buffer, count, 0, 0, 0),
+        FdKind::Socket(_) => crate::kernel::abi::net::envoie_octets(fd, data, 0, 0, 0),
         FdKind::SocketPair(_, outbox) => {
             let non_bloquant = fd_flags(fd) & O_NONBLOCK != 0;
             let place = match attends_place(
@@ -562,6 +577,108 @@ pub fn sys_writev(fd: i32, iov: u64, count: usize) -> i64 {
         }
     }
     total
+}
+
+/// `sendfile`.
+///
+/// Copie jusqu'a `count` octets de `in_fd` vers `out_fd` sans passer par
+/// l'espace utilisateur. Si `offset_ptr` n'est pas nul, la lecture commence a
+/// `*offset_ptr`, la position de `in_fd` n'est PAS modifiee, et `*offset_ptr`
+/// avance du nombre d'octets lus ; sinon la position du descripteur sert de
+/// point de depart et avance.
+///
+/// Linux exige que `in_fd` designe quelque chose de projetable en memoire,
+/// c'est-a-dire un fichier ordinaire, et rend EINVAL sinon. Bouchaud repond de
+/// meme : un tube ou une socket en source rend EINVAL, pas un resultat partiel
+/// qui laisserait croire a une copie.
+///
+/// L'appel manquait, et RequestServer s'en sert precisement pour servir une
+/// reponse HTTP depuis son cache disque
+/// (`Core::System::transfer_file_through_socket`). Au run 32474068384, au
+/// SECOND demarrage -- celui ou le cache existe deja --, l'ENOSYS remontait
+/// jusqu'au JavaScript sous la forme « RequestServer encountered an error
+/// reading a cached HTTP response », et le test HTTPS echouait alors qu'il
+/// avait reussi au demarrage precedent.
+pub fn sys_sendfile(out_fd: i32, in_fd: i32, offset_ptr: u64, count: usize) -> i64 {
+    if count == 0 {
+        return 0;
+    }
+    let process = task::current_process();
+
+    let (source, position_courante) = {
+        let borrowed = process.borrow();
+        match borrowed.files.get(in_fd) {
+            Some(desc) => (desc.kind.clone(), desc.offset),
+            None => return -errno::EBADF,
+        }
+    };
+    if process.borrow().files.get(out_fd).is_none() {
+        return -errno::EBADF;
+    }
+
+    // La source doit etre un fichier : c'est la regle de Linux, et la seule
+    // qui permette de lire a un decalage sans consommer un flux.
+    let node = match source {
+        FdKind::File(node) => node,
+        _ => return -errno::EINVAL,
+    };
+
+    let explicite = offset_ptr != 0;
+    let depart = if explicite {
+        match user_read_u64(offset_ptr) {
+            Some(valeur) => valeur as usize,
+            None => return -errno::EFAULT,
+        }
+    } else {
+        position_courante
+    };
+
+    let total = backing::logical_len(node);
+    if depart >= total {
+        return 0;
+    }
+    let voulu = core::cmp::min(count, total - depart);
+
+    // Par tranches : `count` vient de l'application et peut valoir la taille
+    // entiere d'une reponse HTTP. Une seule allocation de cette taille dans le
+    // tas noyau serait un cout inutile, et un refus d'allocation transformerait
+    // une copie en panne.
+    const TRANCHE: usize = 64 * 1024;
+    let mut tampon = alloc::vec![0u8; core::cmp::min(voulu, TRANCHE)];
+    let mut envoyes = 0usize;
+
+    while envoyes < voulu {
+        let bloc = core::cmp::min(TRANCHE, voulu - envoyes);
+        let lus = backing::read_at(node, depart + envoyes, &mut tampon[..bloc]);
+        if lus == 0 {
+            break;
+        }
+        let ecrits = ecrit_octets(out_fd, &tampon[..lus]);
+        if ecrits < 0 {
+            // Rien n'est encore parti : l'erreur est celle de l'appel. Si en
+            // revanche des octets ont deja ete transmis, c'est ce compte qui
+            // fait foi -- un appelant doit pouvoir reprendre la ou il en est.
+            if envoyes == 0 {
+                return ecrits;
+            }
+            break;
+        }
+        envoyes += ecrits as usize;
+        if (ecrits as usize) < lus {
+            // Ecriture partielle : la destination est pleine.
+            break;
+        }
+    }
+
+    if explicite {
+        if !user_write(offset_ptr, &((depart + envoyes) as u64).to_le_bytes()) {
+            return -errno::EFAULT;
+        }
+    } else if let Some(desc) = process.borrow_mut().files.get_mut(in_fd) {
+        desc.offset = depart + envoyes;
+    }
+
+    envoyes as i64
 }
 
 /// `pread64`.

@@ -268,7 +268,24 @@ pub fn sys_bind(fd: i32, addr: u64, len: usize) -> i64 {
 }
 
 /// `sendto` / `send` / `write` sur un socket.
-pub fn sys_sendto(fd: i32, buffer: u64, len: usize, _flags: u32, addr: u64, addr_len: usize) -> i64 {
+pub fn sys_sendto(fd: i32, buffer: u64, len: usize, flags: u32, addr: u64, addr_len: usize) -> i64 {
+    if len == 0 {
+        return 0;
+    }
+    let data = match user_read(buffer, len) {
+        Some(data) => data,
+        None => return -errno::EFAULT,
+    };
+    envoie_octets(fd, &data, flags, addr, addr_len)
+}
+
+/// `sendto`, une fois les octets deja en memoire noyau.
+///
+/// Separe de [`sys_sendto`] pour `sendfile` : sa source est un fichier, sa
+/// destination une socket, et rien dans l'operation ne passe par l'espace
+/// utilisateur.
+pub fn envoie_octets(fd: i32, data: &[u8], _flags: u32, addr: u64, addr_len: usize) -> i64 {
+    let len = data.len();
     if len == 0 {
         return 0;
     }
@@ -277,17 +294,12 @@ pub fn sys_sendto(fd: i32, buffer: u64, len: usize, _flags: u32, addr: u64, addr
     // Sans cette bifurcation, `socket_of` rendait `ENOTSOCK` — c'est-a-dire
     // qu'une paire creee avec succes refusait ensuite le moindre octet.
     if est_paire(fd) {
-        return crate::kernel::abi::file::sys_write(fd, buffer, len);
+        return crate::kernel::abi::file::ecrit_octets(fd, data);
     }
     let state = match socket_of(fd) {
         Ok(state) => state,
         Err(code) => return code,
     };
-    let data = match user_read(buffer, len) {
-        Some(data) => data,
-        None => return -errno::EFAULT,
-    };
-
     let kind = state.borrow().kind;
     match kind {
         SocketKind::Tcp => {

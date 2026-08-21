@@ -410,6 +410,7 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         WRITEV => file::sys_writev(args[0] as i32, args[1], args[2] as usize),
         PREAD64 => file::sys_pread(args[0] as i32, args[1], args[2] as usize, args[3] as i64),
         PWRITE64 => file::sys_pwrite(args[0] as i32, args[1], args[2] as usize, args[3] as i64),
+        SENDFILE => file::sys_sendfile(args[0] as i32, args[1] as i32, args[2], args[3] as usize),
         STAT => file::sys_stat_path(args[0], args[1], false),
         LSTAT => file::sys_stat_path(args[0], args[1], true),
         FSTAT => file::sys_fstat(args[0] as i32, args[1]),
