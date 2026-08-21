@@ -157,6 +157,19 @@ jobs:
             -serial file:"$LOG" &
           PID=$!
 
+          # Un demarrage qui aboutit s'ETEINT : `kernel::autorun` appelle
+          # `power::shutdown` des que le script se termine, et c'est cette
+          # extinction qui ecrit /persist. Attendre l'echeance de quinze
+          # minutes n'apporte donc rien -- au run 32427953935 les deux
+          # demarrages l'ont fait, pour une suite finie en 92 s, et le journal
+          # n'etait lisible qu'apres.
+          #
+          # Des que le moteur a rendu son verdict, on accorde GRACE secondes au
+          # navigateur pour se fermer et rendre la main a l'invite. Passe ce
+          # delai, on s'arrete en NOMMANT ce qui manque, au lieu de laisser
+          # l'echeance conclure a notre place.
+          GRACE=240
+          VERDICT_VU=0
           while kill -0 "$PID" 2>/dev/null; do
             if (( SECONDS >= DEADLINE )); then
               echo "ECHEANCE atteinte au premier demarrage" >&2
@@ -164,6 +177,17 @@ jobs:
             fi
             if (( $(stat -c '%s' "$LOG") > MAX_LOG )); then
               echo "JOURNAL EMBALLE au premier demarrage: $(stat -c '%s' "$LOG") octets" >&2
+              break
+            fi
+            if (( VERDICT_VU == 0 )) && grep -aFq "PLATFORM_FULL_OK" "$LOG"; then
+              VERDICT_VU=$SECONDS
+            fi
+            if (( VERDICT_VU > 0 )) && (( SECONDS - VERDICT_VU > GRACE )) \
+               && ! grep -aFq "BrowserHost termine" "$LOG"; then
+              echo "Le moteur a rendu son verdict au premier demarrage, mais" >&2
+              echo "BouchaudBrowserHost ne s'est pas arrete dans les $GRACE s" >&2
+              echo "qui ont suivi : l'invite ne reprend pas, donc l'autorun ne" >&2
+              echo "se termine pas, donc /persist n'est jamais ecrit." >&2
               break
             fi
             sleep 0.5
@@ -203,6 +227,19 @@ jobs:
             -serial file:"$LOG" &
           PID=$!
 
+          # Un demarrage qui aboutit s'ETEINT : `kernel::autorun` appelle
+          # `power::shutdown` des que le script se termine, et c'est cette
+          # extinction qui ecrit /persist. Attendre l'echeance de quinze
+          # minutes n'apporte donc rien -- au run 32427953935 les deux
+          # demarrages l'ont fait, pour une suite finie en 92 s, et le journal
+          # n'etait lisible qu'apres.
+          #
+          # Des que le moteur a rendu son verdict, on accorde GRACE secondes au
+          # navigateur pour se fermer et rendre la main a l'invite. Passe ce
+          # delai, on s'arrete en NOMMANT ce qui manque, au lieu de laisser
+          # l'echeance conclure a notre place.
+          GRACE=240
+          VERDICT_VU=0
           while kill -0 "$PID" 2>/dev/null; do
             if (( SECONDS >= DEADLINE )); then
               echo "ECHEANCE atteinte au second demarrage" >&2
@@ -210,6 +247,17 @@ jobs:
             fi
             if (( $(stat -c '%s' "$LOG") > MAX_LOG )); then
               echo "JOURNAL EMBALLE au second demarrage: $(stat -c '%s' "$LOG") octets" >&2
+              break
+            fi
+            if (( VERDICT_VU == 0 )) && grep -aFq "PLATFORM_FULL_OK" "$LOG"; then
+              VERDICT_VU=$SECONDS
+            fi
+            if (( VERDICT_VU > 0 )) && (( SECONDS - VERDICT_VU > GRACE )) \
+               && ! grep -aFq "BrowserHost termine" "$LOG"; then
+              echo "Le moteur a rendu son verdict au second demarrage, mais" >&2
+              echo "BouchaudBrowserHost ne s'est pas arrete dans les $GRACE s" >&2
+              echo "qui ont suivi : l'invite ne reprend pas, donc l'autorun ne" >&2
+              echo "se termine pas, donc /persist n'est jamais ecrit." >&2
               break
             fi
             sleep 0.5
@@ -230,22 +278,19 @@ jobs:
           grep -aF "SMP4_SCHEDULER online=1 mode=UP-pending-refactor" serie-platform-smp4.log
           grep -aF "BROWSER_HOST_PLATFORM persistent=yes" serie-platform-smp4.log
           grep -aF "BROWSER_HOST_UPSTREAM clipboard=text downloads=FileDownloader" serie-platform-smp4.log
-          grep -aF "PLATFORM_DOM OK" serie-platform-smp4.log
-          grep -aF "PLATFORM_ASYNC OK" serie-platform-smp4.log
-          grep -aF "PLATFORM_TIMER OK" serie-platform-smp4.log
-          grep -aF "PLATFORM_TIMEZONE OK" serie-platform-smp4.log
-          grep -aF "PLATFORM_CANVAS OK" serie-platform-smp4.log
-          grep -aF "PLATFORM_IMAGE_PNG OK" serie-platform-smp4.log
-          grep -aF "PLATFORM_IMAGE_JPEG OK" serie-platform-smp4.log
-          grep -aF "PLATFORM_IMAGE_PIXELS OK" serie-platform-smp4.log
-          grep -aF "PLATFORM_IMAGE_ERREUR OK" serie-platform-smp4.log
-          grep -aF "PLATFORM_WORKER OK" serie-platform-smp4.log
-          grep -aF "PLATFORM_WASM OK" serie-platform-smp4.log
-          grep -aF "PLATFORM_INDEXEDDB OK" serie-platform-smp4.log
-          grep -aF "PLATFORM_NAVIGATION OK" serie-platform-smp4.log
-          grep -aF "PLATFORM_HISTORIQUE OK" serie-platform-smp4.log
-          grep -aF "PLATFORM_RECHARGEMENT OK" serie-platform-smp4.log
-          grep -aF "PLATFORM_FULL_OK passed=19/19" serie-platform-smp4.log
+          # La liste des tests exiges est celle de la fixture elle-meme, lue
+          # dans le fichier : deux listes tenues a la main divergent, et c'est
+          # ce qui est arrive -- le verdict reclamait « passed=19/19 » alors que
+          # la fixture en emettait 21 depuis l'ajout de `https` et
+          # `reseau_echec`. Aucun run ne pouvait plus passer.
+          python3 tools/health/marqueurs_fixture.py > marqueurs.txt
+          ATTENDUS=$(head -1 marqueurs.txt)
+          echo "tests exiges par la fixture : $ATTENDUS"
+          while read -r marqueur; do
+            grep -aF "$marqueur" serie-platform-smp4.log > /dev/null \
+              || { echo "marqueur absent du premier demarrage : $marqueur" >&2; exit 1; }
+          done < <(tail -n +2 marqueurs.txt)
+          grep -aF "PLATFORM_FULL_OK passed=$ATTENDUS/$ATTENDUS" serie-platform-smp4.log
 
           # Le premier demarrage doit s'etre eteint PROPREMENT : c'est ce qui
           # ecrit la zone persistante. Sans cette ligne, tout ce qui suit
@@ -253,7 +298,7 @@ jobs:
           grep -aE "persistance: [0-9]+ fichier\(s\) ecrit\(s\) a l.extinction" serie-platform-smp4.log
 
           # Second demarrage : le moteur repasse la suite complete,
-          grep -aF "PLATFORM_FULL_OK passed=19/19" serie-platform-smp4-boot2.log
+          grep -aF "PLATFORM_FULL_OK passed=$ATTENDUS/$ATTENDUS" serie-platform-smp4-boot2.log
           # le profil du navigateur a survecu a l'extinction,
           grep -aF "PLATFORM_PERSIST_APRES_REDEMARRAGE OK" serie-platform-smp4-boot2.log
           # et le fichier telecharge au demarrage precedent est relu par l'OS.
