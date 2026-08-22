@@ -118,10 +118,16 @@ if "M9_BODY_READ_ERROR" not in data:
                 break;
             }
 
+            auto previous_delivered_size = m_internal_stream_data->delivered_size;
             m_internal_stream_data->delivered_size += read_bytes.size();
 #if defined(BOUCHAUD_PORT)
-            if (getenv("BOUCHAUD_M9") != nullptr)
-                outln("[ladybird-bouchaud] M9_BODY_READ chunk={} delivered={}", read_bytes.size(), m_internal_stream_data->delivered_size);
+            if (getenv("BOUCHAUD_M9") != nullptr) {
+                constexpr size_t trace_step = 1 * 1024 * 1024;
+                auto previous_bucket = previous_delivered_size / trace_step;
+                auto current_bucket = m_internal_stream_data->delivered_size / trace_step;
+                if (previous_delivered_size == 0 || previous_bucket != current_bucket)
+                    outln("[ladybird-bouchaud] M9_BODY_READ_PROGRESS delivered={}", m_internal_stream_data->delivered_size);
+            }
 #endif
             m_internal_stream_data->on_data_available(ResponseData::from_bytes(read_bytes));'''
     if old not in data:

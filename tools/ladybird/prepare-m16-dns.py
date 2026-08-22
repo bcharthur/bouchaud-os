@@ -51,8 +51,44 @@ root = Path(sys.argv[1])
 resolver = root / "Libraries/LibDNS/Resolver.h"
 data = resolver.read_text()
 
+# Corriger avant l'idempotence des sondes : le recovery doit aussi pouvoir
+# etre ajoute a un worktree sur lequel M16 a deja pose ses traces.
+if "<cstdlib>" not in data:
+    premiere = data.index("#include ")
+    data = data[:premiere] + "#include <cstdlib>\n" + data[premiere:]
+
+if "M16_DNS_CACHE_STALE_REQUERY" not in data:
+    cache_anchor = """            auto& result = *it->value;
+            // For completed lookups, treat a previously-asked-about type with no records as a hit (negative cache)
+"""
+    cache_recovery = """            auto& result = *it->value;
+#if defined(BOUCHAUD_PORT)
+            // Une entree terminee peut conserver un CNAME/negative-cache alors
+            // que ses A/AAAA ont expire. Ne jamais livrer ce faux cache-hit
+            // vide a RequestServer : repasser par la resolution normale.
+            if (getenv("BOUCHAUD_M9") != nullptr) {
+                bool wants_address = false;
+                for (auto const& type : desired_types) {
+                    if (type == Messages::ResourceType::A || type == Messages::ResourceType::AAAA) {
+                        wants_address = true;
+                        break;
+                    }
+                }
+                if (wants_address && result.is_done() && result.cached_addresses().is_empty()) {
+                    outln("[ladybird-bouchaud] M16_DNS_CACHE_STALE_REQUERY name={}", name);
+                    return {};
+                }
+            }
+#endif
+            // For completed lookups, treat a previously-asked-about type with no records as a hit (negative cache)
+"""
+    if cache_anchor not in data:
+        raise SystemExit("M16: ancre cache DNS introuvable dans LibDNS/Resolver.h")
+    data = data.replace(cache_anchor, cache_recovery, 1)
+    resolver.write_text(data)
+
 if "M16_DNS_LOOKUP" in data:
-    print("M16 DNS probes already applied")
+    print("M16 DNS probes already applied; cache recovery verified")
     raise SystemExit(0)
 
 # `getenv` n'est pas garanti par les inclusions de cet en-tete.

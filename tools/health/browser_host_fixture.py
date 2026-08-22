@@ -27,6 +27,7 @@ HTML = r'''<!doctype html>
   let canvasOK = false;
   let workerOK = false;
   let imageOK = false;
+  let frameOK = false;
 
   try {
     const canvas = document.createElement("canvas");
@@ -74,7 +75,23 @@ HTML = r'''<!doctype html>
     console.log("HOST_IMAGE FAIL " + e);
   }
 
-  console.log(`HOST_SMOKE_${canvasOK && workerOK && imageOK ? "OK" : "FAIL"} canvas=${canvasOK ? 1 : 0} worker=${workerOK ? 1 : 0} image=${imageOK ? 1 : 0}`);
+  try {
+    const frame = document.createElement("iframe");
+    const loaded = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("iframe timeout")), 10000);
+      frame.onload = () => { clearTimeout(timer); resolve(); };
+      frame.onerror = () => { clearTimeout(timer); reject(new Error("iframe error")); };
+    });
+    frame.src = "/frame.html";
+    document.body.appendChild(frame);
+    await loaded;
+    frameOK = true;
+    console.log("HOST_IFRAME OK");
+  } catch (e) {
+    console.log("HOST_IFRAME FAIL " + e);
+  }
+
+  console.log(`HOST_SMOKE_${canvasOK && workerOK && imageOK && frameOK ? "OK" : "FAIL"} canvas=${canvasOK ? 1 : 0} worker=${workerOK ? 1 : 0} image=${imageOK ? 1 : 0} frame=${frameOK ? 1 : 0}`);
 })();
 </script></body>'''
 
@@ -88,6 +105,15 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(PIXEL_PNG)
             print("BROWSER_HOST_FIXTURE_IMAGE_OK path=/pixel.png", flush=True)
+            return
+        if path == "/frame.html":
+            body = b"<!doctype html><meta charset=utf-8><body>Bouchaud iframe</body>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            print("BROWSER_HOST_FIXTURE_FRAME_OK path=/frame.html", flush=True)
             return
         if path != "/browser-host.html":
             self.send_response(404)
