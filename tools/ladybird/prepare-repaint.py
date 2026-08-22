@@ -130,10 +130,173 @@ substitute(
     // Enfile une capture *sans* `set_needs_repaint()` ni `request_frame()` :
     // appelee depuis l'etape « update the rendering », ou la trame est deja en
     // cours et ou rearmer bouclerait. Voir tools/ladybird/prepare-repaint.py.
-    void bouchaud_enqueue_frame_capture() { m_screenshot_tasks.enqueue({ {} }); }
+    // BrowserHost possede un vrai Compositor et la capture est asynchrone.
+    // Ces deux entrees partagent donc un mini-pump a un seul screenshot en vol :
+    // - l'etape de rendu peut enfiler sans rearmer ;
+    // - le chrome / les callbacks de navigation peuvent programmer une capture.
+    // Toute invalidation qui survient pendant le screenshot est coalescee et
+    // provoque exactement une capture de rattrapage a la completion.
+    void bouchaud_enqueue_interactive_frame_capture_from_rendering();
+    void bouchaud_schedule_interactive_frame_capture();
 #endif
     void queue_screenshot_task(Optional<UniqueNodeID> node_id)""",
     "enfilage sans rearmement",
+)
+
+# ---------------------------------------------------------------------------
+# 2b. BrowserHost + M11 : un seul screenshot Compositor en vol.
+#
+# `paint_next_frame()` met a jour le vrai processus Compositor. La capture
+# utilise ensuite `request_screenshot()`, dont le callback est asynchrone. Sur
+# une page dynamique, plusieurs invalidations pouvaient donc empiler des
+# captures d'etats anciens et la surface Bouchaud finissait par rester sur la
+# page precedente alors que navigation/reseau/historique avaient avance.
+#
+# Le pump ci-dessous distingue :
+#   queued   : une tache attend la prochaine etape de rendu ;
+#   in_flight: le Compositor calcule actuellement le screenshot ;
+#   dirty    : une nouvelle invalidation est arrivee pendant in_flight.
+#
+# Il n'y a jamais plus d'une capture asynchrone en vol. Quand elle revient,
+# `dirty` rearme UNE occasion de rendu, sans timer et sans boucle 60 Hz.
+# ---------------------------------------------------------------------------
+
+substitute(
+    navigable_h,
+    """    struct ScreenshotTask {
+        Optional<Web::UniqueNodeID> node_id;
+    };
+    Queue<ScreenshotTask> m_screenshot_tasks;""",
+    """    struct ScreenshotTask {
+        Optional<Web::UniqueNodeID> node_id;
+#if defined(BOUCHAUD_PORT)
+        bool bouchaud_interactive_frame { false };
+#endif
+    };
+    Queue<ScreenshotTask> m_screenshot_tasks;
+#if defined(BOUCHAUD_PORT)
+    bool m_bouchaud_frame_capture_queued { false };
+    bool m_bouchaud_frame_capture_in_flight { false };
+    bool m_bouchaud_frame_capture_dirty { false };
+    void bouchaud_interactive_frame_capture_started();
+    void bouchaud_interactive_frame_capture_completed();
+#endif""",
+    "etat single-flight M11",
+)
+
+substitute(
+    navigable_cpp,
+    """void LocalTraversableNavigable::process_screenshot_requests()
+{""",
+    """#if defined(BOUCHAUD_PORT)
+void LocalTraversableNavigable::bouchaud_enqueue_interactive_frame_capture_from_rendering()
+{
+    // Si une tache est deja en file, cette etape de rendu est justement celle
+    // qui va la servir : ne pas creer un doublon et ne pas marquer dirty.
+    if (m_bouchaud_frame_capture_queued)
+        return;
+
+    // Le Compositor travaille deja sur une image. La display-list vient d'etre
+    // rafraichie par paint_next_frame(); retenir seulement qu'il faudra relire
+    // le dernier etat lorsque le callback courant reviendra.
+    if (m_bouchaud_frame_capture_in_flight) {
+        m_bouchaud_frame_capture_dirty = true;
+        return;
+    }
+
+    m_bouchaud_frame_capture_queued = true;
+    m_screenshot_tasks.enqueue({ {}, true });
+}
+
+void LocalTraversableNavigable::bouchaud_schedule_interactive_frame_capture()
+{
+    // Les callbacks M11 (navigation commencee/commitee/terminee, chrome) peuvent
+    // se telescoper. Une capture deja en file sera faite APRES le prochain
+    // paint, donc elle verra deja l'etat le plus recent.
+    if (m_bouchaud_frame_capture_queued)
+        return;
+
+    if (m_bouchaud_frame_capture_in_flight) {
+        m_bouchaud_frame_capture_dirty = true;
+        return;
+    }
+
+    m_bouchaud_frame_capture_queued = true;
+    m_screenshot_tasks.enqueue({ {}, true });
+    set_needs_repaint();
+    page().client().request_frame();
+}
+
+void LocalTraversableNavigable::bouchaud_interactive_frame_capture_started()
+{
+    m_bouchaud_frame_capture_queued = false;
+    m_bouchaud_frame_capture_in_flight = true;
+}
+
+void LocalTraversableNavigable::bouchaud_interactive_frame_capture_completed()
+{
+    if (!m_bouchaud_frame_capture_in_flight)
+        return;
+
+    m_bouchaud_frame_capture_in_flight = false;
+    if (!m_bouchaud_frame_capture_dirty)
+        return;
+
+    // Des changements sont arrives pendant le screenshot. En demander
+    // exactement un autre via la boucle de rendu normale. Pas de timer, pas de
+    // capture recursive depuis le callback IPC.
+    m_bouchaud_frame_capture_dirty = false;
+    bouchaud_schedule_interactive_frame_capture();
+}
+#endif
+
+void LocalTraversableNavigable::process_screenshot_requests()
+{""",
+    "implementation single-flight M11",
+)
+
+substitute(
+    navigable_cpp,
+    """            auto bitmap_or_error = Gfx::Bitmap::create(Gfx::BitmapFormat::BGRA8888, rect.size().to_type<int>());
+            if (bitmap_or_error.is_error()) {
+                client.page_did_take_screenshot({});
+                continue;
+            }
+            auto bitmap = bitmap_or_error.release_value();
+            auto painting_surface = Gfx::PaintingSurface::wrap_bitmap(*bitmap);
+            PaintConfig paint_config { .paint_overlay = true, .canvas_fill_rect = rect.to_type<int>() };
+            render_screenshot(painting_surface, paint_config, [bitmap, &client] {
+                client.page_did_take_screenshot(bitmap->to_shareable_bitmap());
+            });""",
+    """            auto bitmap_or_error = Gfx::Bitmap::create(Gfx::BitmapFormat::BGRA8888, rect.size().to_type<int>());
+#if defined(BOUCHAUD_PORT)
+            auto const bouchaud_interactive_frame = task.bouchaud_interactive_frame;
+            if (bouchaud_interactive_frame)
+                bouchaud_interactive_frame_capture_started();
+#endif
+            if (bitmap_or_error.is_error()) {
+                client.page_did_take_screenshot({});
+#if defined(BOUCHAUD_PORT)
+                if (bouchaud_interactive_frame)
+                    bouchaud_interactive_frame_capture_completed();
+#endif
+                continue;
+            }
+            auto bitmap = bitmap_or_error.release_value();
+            auto painting_surface = Gfx::PaintingSurface::wrap_bitmap(*bitmap);
+            PaintConfig paint_config { .paint_overlay = true, .canvas_fill_rect = rect.to_type<int>() };
+            render_screenshot(painting_surface, paint_config, [bitmap, &client
+#if defined(BOUCHAUD_PORT)
+                , this, bouchaud_interactive_frame
+#endif
+            ] {
+                client.page_did_take_screenshot(bitmap->to_shareable_bitmap());
+#if defined(BOUCHAUD_PORT)
+                if (bouchaud_interactive_frame)
+                    bouchaud_interactive_frame_capture_completed();
+#endif
+            });""",
+    "completion screenshot M11",
 )
 
 # ---------------------------------------------------------------------------
@@ -152,17 +315,16 @@ substitute(
         if (navigable->is_traversable()) {
             auto traversable = navigable->traversable_navigable();
 #if defined(BOUCHAUD_PORT)
-            // Bouchaud n'a pas de processus Compositor : `paint_next_frame()`
-            // n'a donc personne a qui remettre la liste d'affichage, et la
-            // trame se materialise par le chemin capture. On l'enfile ici, dans
-            // la boucle deja gardee par `needs_repaint()` juste au-dessus —
-            // c'est-a-dire exactement quand le moteur dit qu'il faut repeindre,
-            // et jamais autrement.
+            // BrowserHost possede maintenant un vrai processus Compositor.
+            // `paint_next_frame()` lui remet d'abord la display-list courante ;
+            // la capture M11 est ensuite un readback asynchrone de ce meme etat.
+            // Le helper single-flight ci-dessous coalesce les invalidations
+            // pendant le readback au lieu d'empiler des screenshots anciens.
             //
             // Reserve au navigateur interactif : les scenarios finis M8 et M9
             // choisissent eux-memes leur unique capture et se terminent dessus.
             if (bouchaud_frame_capture_in_rendering_step())
-                traversable->bouchaud_enqueue_frame_capture();
+                traversable->bouchaud_enqueue_interactive_frame_capture_from_rendering();
 #endif
             traversable->process_screenshot_requests();
         }""",

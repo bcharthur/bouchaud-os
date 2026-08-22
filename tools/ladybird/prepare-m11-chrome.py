@@ -193,7 +193,7 @@ void ConnectionFromClient::bouchaud_m11_start()
 
     chrome.on_repaint = [this, page_id] {
         if (auto page = this->page(page_id); page.has_value())
-            page->page().top_level_traversable()->queue_screenshot_task({});
+            page->page().top_level_traversable()->bouchaud_schedule_interactive_frame_capture();
     };
 
     chrome.on_close = [] {
@@ -300,7 +300,7 @@ substitute(
         BouchaudChrome::set_committed_url(chargee);
         BouchaudChrome::set_loading(false, "pret"sv);
         outln("[ladybird-bouchaud] M11_DOCUMENT_LOADED page={} url={}", m_id, chargee);
-        page().top_level_traversable()->queue_screenshot_task({});
+        page().top_level_traversable()->bouchaud_schedule_interactive_frame_capture();
         return;
     }
     if (bouchaud_m9_enabled()) {
@@ -319,7 +319,7 @@ substitute(
         if (BouchaudChrome::enabled()) {
             BouchaudChrome::set_committed_url(url.to_byte_string());
             BouchaudChrome::set_loading(true, "chargement..."sv);
-            page().top_level_traversable()->queue_screenshot_task({});
+            page().top_level_traversable()->bouchaud_schedule_interactive_frame_capture();
         }
         return;
     }""",
@@ -336,7 +336,7 @@ substitute(
         outln("[ladybird-bouchaud] M9_NAVIGATION_COMMITTED page={} url={}", m_id, url);
         if (BouchaudChrome::enabled()) {
             BouchaudChrome::set_committed_url(url.to_byte_string());
-            page().top_level_traversable()->queue_screenshot_task({});
+            page().top_level_traversable()->bouchaud_schedule_interactive_frame_capture();
         }
         return;
     }""",
@@ -354,7 +354,7 @@ substitute(
         outln("[ladybird-bouchaud] M9_NAVIGATION_CANCELLED page={} url={}", m_id, url);
         if (BouchaudChrome::enabled()) {
             BouchaudChrome::set_loading(false, "chargement interrompu"sv);
-            page().top_level_traversable()->queue_screenshot_task({});
+            page().top_level_traversable()->bouchaud_schedule_interactive_frame_capture();
         }
     }""",
     "annulation M11",
