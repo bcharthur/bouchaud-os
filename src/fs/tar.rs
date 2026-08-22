@@ -20,7 +20,6 @@
 //! avec un vrai systeme de fichiers ; ce n'est pas ce qui bloquait.
 
 use alloc::string::String;
-use alloc::vec::Vec;
 
 use crate::drivers::ata::{self, Drive, SECTOR_SIZE};
 use crate::fs::ramfs;
@@ -34,12 +33,25 @@ const BLOCK: usize = 512;
 /// restent protegees par `ramfs::MAX_FILE_SIZE` (64 Mio).
 const MAX_BOOT_FILE_SIZE: usize = 512 * 1024 * 1024;
 
-/// Garde-fou sur le second disque lu integralement au boot. Le run Ladybird
-/// #31966498412 produit une image d'environ 271 Mio ; l'ancienne limite de
-/// 192 Mio tronquait donc WebContent avant meme que le TAR atteigne le petit
-/// `webcontent-bootstrap` place juste apres. 768 Mio laisse une marge importante
-/// tout en bornant clairement l'allocation noyau.
-const MAX_ARCHIVE_DISK_SIZE: usize = 768 * 1024 * 1024;
+/// Jusqu'ou l'indexation du second disque a le droit d'aller.
+///
+/// Cette borne a ete ecrite pour l'ancien chemin **glouton**, qui allouait un
+/// `Vec` de la taille du disque entier avant de l'analyser : la limiter, c'etait
+/// limiter une allocation noyau. Ce chemin n'existe plus. `index_data_disk` lit
+/// un secteur d'en-tete par entree TAR, saute par-dessus les donnees, et ne
+/// copie en RAM que les fichiers de moins de `INLINE_BOOT_FILE_SIZE`. Son cout
+/// est proportionnel au NOMBRE d'entrees, pas a la taille du disque.
+///
+/// Le plafond reel est ailleurs : `drivers::ata::read` n'implemente que LBA28
+/// et s'arrete a 2^28 secteurs, soit 128 Gio. La borne ci-dessous reste donc un
+/// garde-fou contre un disque aberrant, pas une contrainte de ressources.
+///
+/// 768 Mio ne suffisaient plus : depouillees de leur DWARF, les sept runtimes
+/// Ladybird pesent encore 1038 Mio (run 32420097987), parce que WebContent,
+/// WebWorker, Compositor, WebDriver et le BrowserHost embarquent chacun tout
+/// LibWeb/LibJS/Skia par edition de liens statique. 2 Gio couvre cette charge
+/// avec de la marge sans rien couter au demarrage.
+const MAX_ARCHIVE_DISK_SIZE: usize = 2048 * 1024 * 1024;
 
 /// Champs d'un en-tete `ustar`, en octets depuis son debut.
 const NAME: usize = 0;
@@ -249,50 +261,6 @@ pub fn unpack(archive: &[u8]) -> Unpacked {
     result
 }
 
-/// Lit le disque de donnees et y cherche une archive.
-///
-/// Renvoie `None` si le disque est absent ou ne commence pas par un en-tete
-/// `ustar` — cas normal quand on demarre sans image userland.
-fn read_archive(drive: Drive) -> Option<Vec<u8>> {
-    if !ata::present(drive) {
-        return None;
-    }
-
-    // On lit d'abord un secteur pour verifier la signature avant d'engager la
-    // lecture complete : inutile d'aspirer des centaines de mega-octets d'un
-    // disque qui ne contient pas ce qu'on cherche.
-    let mut probe = alloc::vec![0u8; SECTOR_SIZE];
-    if ata::read(drive, 0, 1, &mut probe) != 1 {
-        return None;
-    }
-    if !is_ustar(&probe) {
-        return None;
-    }
-
-    let (_, slave_sectors) = ata::capacities();
-    let sectors = match drive {
-        Drive::Slave => slave_sectors,
-        Drive::Master => return None,
-    };
-    let max_sectors = (MAX_ARCHIVE_DISK_SIZE / SECTOR_SIZE) as u64;
-    if sectors > max_sectors {
-        crate::kernel::dmesg::log_fmt(format_args!(
-            "tar: hdb trop grand ({} Mio), lecture bornee a {} Mio",
-            sectors * SECTOR_SIZE as u64 / (1024 * 1024),
-            MAX_ARCHIVE_DISK_SIZE / (1024 * 1024)
-        ));
-    }
-    let to_read = core::cmp::min(sectors, max_sectors) as usize;
-
-    let mut data = alloc::vec![0u8; to_read * SECTOR_SIZE];
-    let read = ata::read(drive, 0, to_read, &mut data);
-    if read == 0 {
-        return None;
-    }
-    data.truncate(read * SECTOR_SIZE);
-    Some(data)
-}
-
 /// Etat du dernier montage, expose aux commandes systeme.
 static mut MOUNTED: Option<(usize, usize, usize)> = None;
 
@@ -318,6 +286,22 @@ fn index_data_disk() -> Option<Unpacked> {
     let disk_sectors = core::cmp::min(slave_sectors, max_sectors);
     if disk_sectors == 0 {
         return None;
+    }
+
+    // Un disque plus grand que le plafond ne provoque pas d'erreur ici : la
+    // zone persistante occupe justement la fin de hdb, bien au-dela de
+    // l'archive. Mais la borne de lecture doit s'annoncer avec ses chiffres
+    // exacts, sinon une archive trop lourde perd ses dernieres entrees en
+    // silence et le defaut se decouvre a l'execution, sous la forme d'un
+    // fichier « absent » que l'image contient pourtant.
+    if slave_sectors > max_sectors {
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "tar: hdb = {} secteurs ({} Mio), indexation bornee a {} secteurs ({} Mio)",
+            slave_sectors,
+            slave_sectors * SECTOR_SIZE as u64 / (1024 * 1024),
+            max_sectors,
+            MAX_ARCHIVE_DISK_SIZE / (1024 * 1024)
+        ));
     }
 
     crate::fs::backing::reset();
@@ -364,6 +348,10 @@ fn index_data_disk() -> Option<Unpacked> {
         let data_sectors = ((size + SECTOR_SIZE - 1) / SECTOR_SIZE) as u64;
 
         if data_lba.saturating_add(data_sectors) > disk_sectors {
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "tar: ARCHIVE TRONQUEE sur '{}' ({} octets a partir du secteur {}), au-dela du secteur {}",
+                path, size, data_lba, disk_sectors
+            ));
             result.skipped += 1;
             result.truncated = true;
             break;

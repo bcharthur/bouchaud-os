@@ -24,6 +24,10 @@ tools/userland/*.img
 tools/userland/userland-manifest.json
 # Artefacts du lanceur de sondes (tools/test.sh)
 tools/userland/test-out/
+# Sondes compilees par `OUT=out-sondes ./build.sh musl`, ce que fait le workflow
+# os-primitives et ce qu'on refait a la main pour reproduire un defaut. Meme
+# nature que `out/` juste au-dessus : des binaires regenerables.
+tools/userland/out-sondes/
 # Chantiers et resultats de build-python.sh / build-qt.sh (sources telechargees,
 # arbres de compilation, binaires produits)
 tools/userland/build-python-musl/

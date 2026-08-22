@@ -160,15 +160,15 @@ void ConnectionFromClient::bouchaud_m11_start()
     // M9/M11, WebContent n'a qu'une `ConnectionFromClient` et elle vit aussi
     // longtemps que le processus : la capture est sure tant que ce jalon ne cree
     // pas de second onglet, ce que M13 fera en introduisant un vrai Browser.
-    chrome.on_mouse_event = [this](Web::MouseEvent event) {
+    chrome.on_mouse_event = [this, page_id](Web::MouseEvent event) {
         mouse_event(page_id, move(event));
     };
 
-    chrome.on_key_event = [this](Web::KeyEvent event) {
+    chrome.on_key_event = [this, page_id](Web::KeyEvent event) {
         key_event(page_id, move(event));
     };
 
-    chrome.on_navigate = [this](ByteString target) {
+    chrome.on_navigate = [this, page_id](ByteString target) {
         auto url = URL::create_with_url_or_path(target);
         if (!url.has_value()) {
             warnln("[ladybird-bouchaud] M11_URL_INVALID {}", target);
@@ -178,22 +178,22 @@ void ConnectionFromClient::bouchaud_m11_start()
         load_url(page_id, *url, Web::Bindings::NavigationHistoryBehavior::Auto);
     };
 
-    chrome.on_history_delta = [this](int delta) {
+    chrome.on_history_delta = [this, page_id](int delta) {
         if (auto page = this->page(page_id); page.has_value())
             page->page().traverse_the_history_by_delta(delta);
     };
 
-    chrome.on_reload = [this] {
+    chrome.on_reload = [this, page_id] {
         reload(page_id);
     };
 
-    chrome.on_stop = [this] {
+    chrome.on_stop = [this, page_id] {
         stop_loading(page_id);
     };
 
-    chrome.on_repaint = [this] {
+    chrome.on_repaint = [this, page_id] {
         if (auto page = this->page(page_id); page.has_value())
-            page->page().top_level_traversable()->queue_screenshot_task({});
+            page->page().top_level_traversable()->bouchaud_schedule_interactive_frame_capture();
     };
 
     chrome.on_close = [] {
@@ -208,8 +208,18 @@ void ConnectionFromClient::bouchaud_m11_start()
         };
     }
 
-    // 16 ms : la cadence du bureau (`docs/GUI_USERLAND_PROTOCOL.md` §7). Aller
-    // plus vite ne ferait que voler du processeur au moteur sur un cœur unique.
+    // Bouchaud n'ordonnance que sur le processeur d'amorcage : chaque trame
+    // est prise au moteur, pas ajoutee a cote. Trente par seconde suffisent a
+    // un defilement fluide et laissent la moitie du cœur au reste — analyse,
+    // script, reseau. C'est LibWeb qui fait respecter ce plafond, dans
+    // `PageClient::request_frame()`.
+    if (auto page = this->page(page_id); page.has_value())
+        page->set_maximum_frames_per_second(30.0);
+
+    // 16 ms : la cadence du bureau (`docs/GUI_USERLAND_PROTOCOL.md` §7). Ce
+    // minuteur ne demande plus de trame de page — il lit les entrees et
+    // recompose la barre d'outils quand elle a change. Voir
+    // tools/ladybird/prepare-repaint.py.
     m_bouchaud_gui_timer = Core::Timer::create_repeating(16, [] {
         BouchaudChrome::tick();
     });
@@ -290,7 +300,7 @@ substitute(
         BouchaudChrome::set_committed_url(chargee);
         BouchaudChrome::set_loading(false, "pret"sv);
         outln("[ladybird-bouchaud] M11_DOCUMENT_LOADED page={} url={}", m_id, chargee);
-        page().top_level_traversable()->queue_screenshot_task({});
+        page().top_level_traversable()->bouchaud_schedule_interactive_frame_capture();
         return;
     }
     if (bouchaud_m9_enabled()) {
@@ -309,7 +319,7 @@ substitute(
         if (BouchaudChrome::enabled()) {
             BouchaudChrome::set_committed_url(url.to_byte_string());
             BouchaudChrome::set_loading(true, "chargement..."sv);
-            page().top_level_traversable()->queue_screenshot_task({});
+            page().top_level_traversable()->bouchaud_schedule_interactive_frame_capture();
         }
         return;
     }""",
@@ -326,7 +336,7 @@ substitute(
         outln("[ladybird-bouchaud] M9_NAVIGATION_COMMITTED page={} url={}", m_id, url);
         if (BouchaudChrome::enabled()) {
             BouchaudChrome::set_committed_url(url.to_byte_string());
-            page().top_level_traversable()->queue_screenshot_task({});
+            page().top_level_traversable()->bouchaud_schedule_interactive_frame_capture();
         }
         return;
     }""",
@@ -344,7 +354,7 @@ substitute(
         outln("[ladybird-bouchaud] M9_NAVIGATION_CANCELLED page={} url={}", m_id, url);
         if (BouchaudChrome::enabled()) {
             BouchaudChrome::set_loading(false, "chargement interrompu"sv);
-            page().top_level_traversable()->queue_screenshot_task({});
+            page().top_level_traversable()->bouchaud_schedule_interactive_frame_capture();
         }
     }""",
     "annulation M11",

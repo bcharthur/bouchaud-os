@@ -343,7 +343,13 @@ if "M9_BODY_DRAIN_BEGIN" not in data:
 {
     auto effective_network_error = m_body_delivery_error.has_value() ? m_body_delivery_error : network_error;
 #if defined(BOUCHAUD_PORT)
-    if (getenv("BOUCHAUD_M9") != nullptr && m_internal_stream_data && m_internal_stream_data->read_notifier && m_internal_stream_data->read_notifier->on_activation) {
+    // Une reponse file-backed/cache-backed peut avoir un payload valide sans
+    // ReadStream. Le callback du notifier dereference read_stream : ne jamais
+    // le forcer dans ce cas, laisser la logique upstream appeler on_finish.
+    if (getenv("BOUCHAUD_M9") != nullptr && m_internal_stream_data && !m_internal_stream_data->read_stream)
+        outln("[ladybird-bouchaud] M9_BODY_DRAIN_SKIP reason=no-read-stream total={}", total_size);
+
+    if (getenv("BOUCHAUD_M9") != nullptr && m_internal_stream_data && m_internal_stream_data->read_stream && m_internal_stream_data->read_notifier && m_internal_stream_data->read_notifier->on_activation) {
         outln("[ladybird-bouchaud] M9_BODY_DRAIN_BEGIN total={}", total_size);
         m_internal_stream_data->read_notifier->on_activation();
         outln("[ladybird-bouchaud] M9_BODY_DRAIN_DONE total={}", total_size);
@@ -384,7 +390,7 @@ if "M9_IPC_SYNC_WAIT" not in data:
     if anchor not in data:
         raise SystemExit("M9 LibIPC: signature d'attente synchrone introuvable")
     sonde = anchor + (
-        "    if (getenv(\"BOUCHAUD_M9\") != nullptr)\n"
+        "    if (getenv(\"BOUCHAUD_M9\") != nullptr && getenv(\"BOUCHAUD_BROWSER_HOST\") == nullptr)\n"
         "        outln(\"[ladybird-bouchaud] M9_IPC_SYNC_WAIT endpoint={} message={}\", endpoint_magic, message_id);\n")
     data = data.replace(anchor, sonde, 1)
     if "<cstdlib>" not in data:
@@ -466,7 +472,11 @@ old_allocate = '''#if defined(BOUCHAUD_PORT)
         return Web::Compositor::compositor_context_id_for_page(m_id);
 #endif'''
 new_allocate = '''#if defined(BOUCHAUD_PORT)
-    if (bouchaud_m8_enabled() || bouchaud_m9_enabled())
+    // Le bootstrap M8/M9 historique conserve son identifiant deterministe.
+    // En BrowserHost, upstream doit distinguer contexte de page et contextes
+    // enfants (iframe / nested navigable).
+    if ((bouchaud_m8_enabled() || bouchaud_m9_enabled())
+        && getenv("BOUCHAUD_BROWSER_HOST") == nullptr)
         return Web::Compositor::compositor_context_id_for_page(m_id);
 #endif'''
 if old_allocate in data:

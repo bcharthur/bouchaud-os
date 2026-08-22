@@ -17,16 +17,16 @@ param(
 
     # Page de depart du mode interactif.
     #
-    # La fixture locale, et non un site public, parce que c'est le seul chemin
-    # reseau **prouve** de bout en bout. Resoudre un nom bloque encore : la CI
-    # du 18 aout montre RequestServer a 50 % de processeur pendant cinq minutes
-    # sur `https://example.com/`, alors que la meme pile chargeait
-    # `https://10.0.2.2:18443/` en quinze secondes quatre minutes plus tot. Voir
-    # `docs/ladybird/M12_HTTPS.md`, section "Ce qui bloque encore".
+    # La raison de choisir une fixture locale a disparu : elle tenait a ce que
+    # resoudre un nom bloquait cinq minutes, ce que la correction DNS a leve
+    # (`tools/ladybird/prepare-dns-une-question.py`). Un navigateur dont la page
+    # d'accueil vit sur la machine de developpement n'est pas un navigateur.
     #
-    # Une page de depart qui se fige cinq minutes serait un plus mauvais accueil
-    # qu'une page locale qui s'affiche. La barre d'adresse est la pour le reste.
-    [string]$LadybirdUrl = "http://10.0.2.2:18080/m9.html",
+    # `example.com` plutot qu'un site riche : c'est la seule page publique dont
+    # la chaine complete - nom, DNS, TCP, TLS, HTTP, analyse, mise en page,
+    # peinture, ecran - soit verte en integration continue. La barre d'adresse
+    # est la pour le reste, et elle marche.
+    [string]$LadybirdUrl = "https://example.com/",
 
     # Retire la barre d'outils M11 et revient au comportement de M9 : une seule
     # capture, aucune entree. Utile pour isoler une regression entre le moteur
@@ -45,16 +45,14 @@ param(
 
     # Nombre de vCPU exposes.
     #
-    # **Un seul, et ce n'est pas une timidite.** Le noyau ne sait pas demarrer
-    # un second processeur : il ne lit ni ACPI ni la table MADT, n'a pas de
-    # LAPIC, ne peut donc pas emettre la sequence INIT/SIPI, et route ses
-    # interruptions par le PIC 8259, qui ne parle qu'au BSP. `kernel::task`
-    # tient par ailleurs une file d'ordonnancement unique sans verrou.
-    # Demander huit vCPU donnerait huit coeurs a QEMU dont sept resteraient
-    # eteints, et ferait croire a une acceleration qui n'existe pas.
+    # Le noyau sait maintenant decouvrir les CPU et demarrer les AP par
+    # LAPIC INIT/SIPI. En revanche l'ordonnanceur utilisateur reste UP :
+    # les AP secondaires sont parques et les processus Ladybird tournent
+    # encore sur le BSP. Le parametre sert donc a valider le bring-up SMP,
+    # pas encore a accelerer le navigateur.
     [ValidateRange(1, 16)]
     [Alias('LadybirdCpuCount')]
-    [int]$CpuCount = 1,
+    [int]$CpuCount = 4,
 
     # Force le retelechargement de l'artefact Ladybird depuis GitHub Actions.
     [switch]$RefreshLadybird,
@@ -355,30 +353,47 @@ if ($LadybirdMode) {
 
 
     # -------------------------------------------------------------------------
-    # M8 n'a besoin QUE de WebContent + bootstrap.
+    # Services embarques.
+    #
+    # ImageDecoder n'est pas facultatif, meme pour une page locale : c'est lui
+    # qui installe `Web::Platform::ImageCodecPlugin` dans WebContent. Sans le
+    # greffon, la premiere balise <img> rencontree fait tomber
+    # `VERIFY(s_the)` - c'est ce qui tuait WebContent sur Wikipedia.
     #
     # RequestServer :
-    #   inutile avant M9 reseau.
-    #
-    # ImageDecoder :
-    #   inutile pour la page HTML locale M8.
+    #   DNS, TCP, TLS, HTTP. Inutile pour la page locale.
     #
     # WebWorker :
-    #   inutile pour M8.
-    #
-    # Cela evite de gonfler le disque a ~654 Mio.
+    #   pas encore lance : il exige un processus hote capable de repondre au
+    #   message synchrone `StartWorkerAgent`. Voir
+    #   docs/ladybird/AUDIT_INTEGRATION.md.
     # -------------------------------------------------------------------------
 
     if ($IsLadybirdM8) {
         $RequiredLadybirdFiles = @(
             "WebContent",
+            "ImageDecoder",
             "webcontent-bootstrap"
+        )
+    }
+    elseif ($LadybirdInteractif) {
+        $RequiredLadybirdFiles = @(
+            "BouchaudBrowserHost",
+            "WebContent",
+            "RequestServer",
+            "ImageDecoder",
+            "Compositor",
+            "WebWorker",
+            "WebDriver",
+            "webcontent-bootstrap",
+            "M9_CAPABLE"
         )
     }
     else {
         $RequiredLadybirdFiles = @(
             "WebContent",
             "RequestServer",
+            "ImageDecoder",
             "webcontent-bootstrap",
             "M9_CAPABLE"
         )
@@ -603,6 +618,25 @@ if ($LadybirdMode) {
 
 
     # =========================================================================
+    # ImageDecoder
+    #
+    # Toujours copie : les images ne dependent pas du jalon reseau.
+    # =========================================================================
+
+    Copy-Item `
+        (Join-Path $NativeBrowserDir "ImageDecoder") `
+        (Join-Path $LadybirdLibexec "ImageDecoder")
+
+    if ($LadybirdInteractif) {
+        foreach ($service in @("Compositor", "WebWorker", "WebDriver", "BouchaudBrowserHost")) {
+            Copy-Item `
+                (Join-Path $NativeBrowserDir $service) `
+                (Join-Path $LadybirdLibexec $service)
+        }
+    }
+
+
+    # =========================================================================
     # Bootstrap
     # =========================================================================
 
@@ -622,8 +656,15 @@ if ($LadybirdMode) {
     # Il s'agit du bootstrap qui engendre le vrai WebContent Ladybird.
     # =========================================================================
 
+    $BrowserEntry = if ($LadybirdInteractif) {
+        "BouchaudBrowserHost"
+    }
+    else {
+        "webcontent-bootstrap"
+    }
+
     Copy-Item `
-        (Join-Path $NativeBrowserDir "webcontent-bootstrap") `
+        (Join-Path $NativeBrowserDir $BrowserEntry) `
         (Join-Path $ScenarioDir "bo-navigateur")
 
 
@@ -638,6 +679,38 @@ if ($LadybirdMode) {
         $LadybirdShare `
         -Recurse `
         -Force
+
+
+    # =========================================================================
+    # Configuration fontconfig
+    #
+    # Elle voyage normalement avec les ressources de l'artefact. On la repose
+    # depuis le depot quand l'artefact est anterieur a son introduction : sans
+    # elle, le gestionnaire de polices de Skia ne voit aucune police et tout le
+    # repli de familles CSS disparait. Voir tools/ladybird/fontconfig/fonts.conf.
+    # =========================================================================
+
+    $FontconfigTarget = Join-Path $LadybirdShare "fontconfig"
+
+    if (-not (Test-Path (Join-Path $FontconfigTarget "fonts.conf"))) {
+
+        $FontconfigSource = Join-Path `
+            $RepoRoot `
+            "tools\ladybird\fontconfig\fonts.conf"
+
+        if (Test-Path $FontconfigSource) {
+
+            New-Item `
+                -ItemType Directory `
+                -Path $FontconfigTarget `
+                -Force | Out-Null
+
+            Copy-Item `
+                $FontconfigSource `
+                (Join-Path $FontconfigTarget "fonts.conf") `
+                -Force
+        }
+    }
 
 
     # =========================================================================
@@ -745,6 +818,9 @@ if ($LadybirdMode) {
         }
 
         $chromeLine = if ($LadybirdChrome) { 'export BOUCHAUD_M11=1' } else { 'echo "M11 desactive : capture unique, sans entrees"' }
+        $hostLine = if ($LadybirdInteractif) { 'export BOUCHAUD_BROWSER_HOST=1' } else { 'echo "Browser Host desactive : regression M9"' }
+        $timezoneLine = if ($LadybirdInteractif) { 'export BOUCHAUD_TIME_ZONE=Europe/Paris' } else { 'echo "Timezone Browser Host inactive"' }
+        $popupLine = if ($LadybirdInteractif) { 'export BOUCHAUD_ALLOW_POPUPS=1' } else { 'echo "Popups Browser Host inactifs"' }
 
         $autorun = @(
             @('uname', 'df') +
@@ -753,6 +829,9 @@ if ($LadybirdMode) {
                 'export BOUCHAUD_M9=1',
                 "export BOUCHAUD_M9_URL=$(ConvertTo-ShellSingleQuoted $LadybirdUrl)",
                 $chromeLine,
+                $hostLine,
+                $timezoneLine,
+                $popupLine,
                 'desktop',
                 ''
             )
@@ -813,17 +892,25 @@ if not root.is_dir():
     )
 
 
-# M8 minimal :
+# Le bit d'execution ne survit pas a un checkout Windows : cette liste le
+# repose au moment d'archiver. Tout binaire ajoute au scenario doit y figurer,
+# sinon Bouchaud refuse de l'executer.
 #
-# Pas de RequestServer.
-# Pas d'ImageDecoder.
-# Pas de WebWorker.
-#
-# Ils seront introduits quand leur jalon les utilisera vraiment.
+# WebDriver y manquait alors que run.ps1 le copie depuis l'artefact : il
+# arrivait dans l'image sans son bit d'execution. Mesure sous QEMU, cela ne
+# l'empeche PAS de demarrer aujourd'hui, parce que `ramfs::can` accorde tout a
+# root et que l'autorun tourne en root. L'entree reste due : c'est l'invariant
+# annonce juste au-dessus, elle vaut pour tout uid non privilegie, et une image
+# ne doit pas dependre du fait que son unique utilisateur soit root.
 executables = {
     "bo-navigateur",
+    "usr/libexec/ladybird/BouchaudBrowserHost",
     "usr/libexec/ladybird/WebContent",
     "usr/libexec/ladybird/RequestServer",
+    "usr/libexec/ladybird/ImageDecoder",
+    "usr/libexec/ladybird/Compositor",
+    "usr/libexec/ladybird/WebWorker",
+    "usr/libexec/ladybird/WebDriver",
     "usr/libexec/ladybird/webcontent-bootstrap",
 }
 
@@ -926,10 +1013,10 @@ with output.open("ab") as stream:
     # ========================================================================
     # Zone persistante Bouchaud
     #
-    # 16384 secteurs * 512 = 8 Mio.
+    # 262144 secteurs * 512 = 128 Mio, comme tools/userland/mkdisk.sh.
     # ========================================================================
 
-    remaining = 8 * 1024 * 1024
+    remaining = 128 * 1024 * 1024
 
     zero_block = b"\0" * (
         1024 * 1024
@@ -1022,14 +1109,28 @@ print(
 
 
     # Garde haute du noyau.
-    $MaxLadybirdDisk = 768MB
+    #
+    # Le plafond porte sur l'ARCHIVE, pas sur l'image : la zone persistante de
+    # 128 Mio occupe la fin du disque, apres l'archive, et n'est jamais indexee
+    # par `src/fs/tar.rs`. Comparer l'image entiere rejetait des disques
+    # parfaitement valides -- et rejetait notamment toute charge Ladybird
+    # reelle, qui pese 1038 Mio d'archive plus la zone.
+    #
+    # `tools/userland/mkdisk.sh` connait les deux tailles et refuse deja une
+    # archive hors plafond avec ses chiffres exacts ; il en est le seul juge.
+    # Il reste utile de verifier ici que la valeur du noyau et celle de
+    # l'outil n'ont pas diverge.
+    $ZonePersistante = 128MB
+    $MaxArchive = 2048MB
+    $ArchiveApprox = $LadybirdImageInfo.Length - $ZonePersistante
 
 
-    if ($LadybirdImageInfo.Length -gt $MaxLadybirdDisk) {
+    if ($ArchiveApprox -gt $MaxArchive) {
 
         Fail (
-            "ladybird-browser.img fait {0:N1} Mio ; limite actuelle 768 Mio." -f `
-                ($LadybirdImageInfo.Length / 1MB)
+            ("ladybird-browser.img porte {0:N1} Mio d'archive ; " +
+             "src/fs/tar.rs n'en indexe que {1:N0} Mio.") -f `
+                ($ArchiveApprox / 1MB), ($MaxArchive / 1MB)
         )
     }
 
@@ -1109,7 +1210,7 @@ if ($LadybirdMode) {
 
     if ($CpuCount -gt 1) {
         Write-Host `
-            "ATTENTION: $CpuCount vCPU exposes. Le noyau ne demarre aucun processeur applicatif : ni ACPI/MADT, ni LAPIC, ni INIT/SIPI. Les autres resteront eteints." `
+            "NOTE: $CpuCount vCPU exposes. Le noyau les demarre bien (LAPIC INIT/SIPI, marqueurs SMP4_DISCOVERED / SMP4_AP_STARTED) mais l ordonnanceur utilisateur reste mono-CPU : SMP4_SCHEDULER online=1 mode=UP-pending-refactor. Les processus Ladybird tournent donc tous sur le BSP." `
             -ForegroundColor Yellow
     }
 }
@@ -1179,16 +1280,36 @@ if ($Accel -ne "none") {
 
     if ($Accel -eq "auto") {
 
-        # Windows Hypervisor Platform.
-        #
-        # Si indisponible, QEMU retombe sur TCG.
-        $qemuArgs += @(
-            "-accel",
-            "whpx,kernel-irqchip=off",
+        if ($LadybirdMode -and $CpuCount -gt 1) {
+            # TCG force pour SMP : le run local WHPX avec `-smp 4` a expose
+            # seulement un CPU au probe (`SMP4_DISCOVERED count=1`), alors que
+            # le meme bring-up est prouve sous TCG en CI. On privilegie donc
+            # la correction du test SMP tant que le chemin APIC/WHPX n'est pas
+            # valide. `-Accel whpx` reste disponible explicitement.
+            Write-Host `
+                "accel      : TCG force pour SMP ($CpuCount vCPU)" `
+                -ForegroundColor Yellow
 
-            "-accel",
-            "tcg"
-        )
+            # LADYBIRD_TCG_CPU_MAX
+            # Les runtimes Ladybird construits utilisent notamment SSE4.1
+            # (`roundsd`). Le CPU TCG implicite n'est pas un contrat suffisant.
+            $qemuArgs += @(
+                "-accel",
+                "tcg",
+                "-cpu",
+                "max"
+            )
+        }
+        else {
+            # Windows Hypervisor Platform, avec fallback TCG.
+            $qemuArgs += @(
+                "-accel",
+                "whpx,kernel-irqchip=off",
+
+                "-accel",
+                "tcg"
+            )
+        }
     }
     else {
 
@@ -1196,6 +1317,15 @@ if ($Accel -ne "none") {
             "-accel",
             $Accel
         )
+
+        # Un -Accel tcg explicite doit offrir le meme jeu d'instructions que
+        # le chemin TCG force ci-dessus.
+        if ($LadybirdMode -and $Accel -eq "tcg") {
+            $qemuArgs += @(
+                "-cpu",
+                "max"
+            )
+        }
     }
 }
 
@@ -1231,23 +1361,23 @@ if ($LadybirdMode) {
 
     if ($IsLadybirdM8) {
         $ModeLabel = "Ladybird natif M8"
-        $ServiceLabel = "WebContent uniquement (regression M8)"
-        $BrowserChain = "/bo-navigateur -> bootstrap -> WebContent"
+        $ServiceLabel = "WebContent + ImageDecoder (regression locale)"
+        $BrowserChain = "/bo-navigateur -> bootstrap -> ImageDecoder + WebContent"
     }
     elseif ($IsLadybirdM9Test) {
         $ModeLabel = "Ladybird natif M9 TEST HTTP"
-        $ServiceLabel = "WebContent + RequestServer"
-        $BrowserChain = "/bo-navigateur -> bootstrap -> RequestServer + WebContent"
+        $ServiceLabel = "WebContent + RequestServer + ImageDecoder"
+        $BrowserChain = "/bo-navigateur -> bootstrap -> ImageDecoder + RequestServer + WebContent"
     }
     elseif ($LadybirdChrome) {
         $ModeLabel = "Bouchaud Navigateur (Ladybird M11)"
-        $ServiceLabel = "WebContent + RequestServer"
-        $BrowserChain = "/bo-navigateur -> bootstrap -> RequestServer + WebContent + chrome"
+        $ServiceLabel = "BouchaudBrowserHost + WebContent + RequestServer + ImageDecoder + Compositor + WebWorker"
+        $BrowserChain = "/bo-navigateur -> BouchaudBrowserHost -> services Ladybird upstream + bridge GUI M11"
     }
     else {
         $ModeLabel = "Ladybird natif M9 interactif (sans chrome)"
-        $ServiceLabel = "WebContent + RequestServer"
-        $BrowserChain = "/bo-navigateur -> bootstrap -> RequestServer + WebContent"
+        $ServiceLabel = "WebContent + RequestServer + ImageDecoder"
+        $BrowserChain = "/bo-navigateur -> bootstrap -> ImageDecoder + RequestServer + WebContent"
     }
 
     Write-Host `

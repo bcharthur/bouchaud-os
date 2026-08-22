@@ -1,0 +1,322 @@
+name: ladybird-platform-smp4
+
+on:
+  workflow_dispatch:
+    inputs:
+      ladybird_run_id:
+        description: "Run ID du workflow ladybird-native-browser contenant l'artefact"
+        required: true
+        type: string
+  push:
+    branches:
+      - "feat/ladybird-platform-smp4"
+    paths:
+      - ".github/workflows/ladybird-platform-smp4.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ladybird-platform-smp4-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  push-marker:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "CI SMP4 complet desactivee sur push ; utiliser workflow_dispatch apres un build Ladybird vert."
+
+  platform-smp4:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 file
+
+      - name: Cache cargo noyau
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Construire noyau une seule fois
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          cargo install bootimage --locked
+          cargo bootimage
+
+      - name: Telecharger Ladybird deja construit
+        uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+          run-id: ${{ inputs.ladybird_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verifier tous les services
+        run: |
+          set -eux
+          for f in BouchaudBrowserHost WebContent RequestServer ImageDecoder Compositor WebWorker WebDriver; do
+            test -f "native-browser/$f"
+            file "native-browser/$f"
+            ! readelf -l "native-browser/$f" | grep -q INTERP
+          done
+          test -d native-browser/resources
+
+      - name: Demarrer fixture plateforme
+        run: |
+          python3 tools/health/ladybird_platform_fixture.py > platform-fixture.log 2>&1 &
+          echo $! > platform-fixture.pid
+          sleep 1
+          kill -0 "$(cat platform-fixture.pid)"
+
+      - name: Fabriquer image
+        run: |
+          set -eux
+          SCENARIO=scenario-platform-smp4
+
+          mkdir -p "$SCENARIO/usr/libexec/ladybird" "$SCENARIO/usr/share/ladybird" "$SCENARIO/etc/ssl/certs"
+
+          for f in BouchaudBrowserHost WebContent RequestServer ImageDecoder Compositor WebWorker WebDriver; do
+            cp "native-browser/$f" "$SCENARIO/usr/libexec/ladybird/$f"
+            chmod 755 "$SCENARIO/usr/libexec/ladybird/$f"
+          done
+
+          cp -a native-browser/resources/. "$SCENARIO/usr/share/ladybird/"
+          cp /etc/ssl/certs/ca-certificates.crt "$SCENARIO/etc/ssl/certs/ca-certificates.crt"
+
+          cat > "$SCENARIO/autorun" <<'EOF'
+          uname
+          df
+          echo "=== etat de /persist au demarrage ==="
+          ls -l /persist
+          ls -l /persist/Downloads
+          echo "--- fichier telecharge au demarrage precedent ---"
+          cat /persist/Downloads/preuve-bouchaud.bin
+          echo "=== Ladybird platform + SMP4 ==="
+          # Seuls les appels systeme EN ECHEC, hors EAGAIN/EINTR. C'est ce qui
+          # relie un message applicatif -- « disk I/O error » cote SQLite au run
+          # 32424806818 -- a la primitive OS qui l'a produit. Le mode complet
+          # est inutilisable ici : un navigateur emet des millions d'appels.
+          strace echecs
+          export BOUCHAUD_BROWSER_HOST=1
+          export BOUCHAUD_M9_URL='http://10.0.2.2:18083/platform.html'
+          export BOUCHAUD_ALLOW_POPUPS=1
+          export BOUCHAUD_TIME_ZONE='Europe/Paris'
+          /usr/libexec/ladybird/BouchaudBrowserHost
+          echo "=== BrowserHost termine ==="
+          EOF
+
+          (cd tools/userland && IMAGE="$GITHUB_WORKSPACE/ladybird-platform-smp4.img" ./mkdisk.sh "$GITHUB_WORKSPACE/$SCENARIO")
+          stat -c 'platform disk: %s bytes' ladybird-platform-smp4.img
+          # Le plafond porte sur l'ARCHIVE, pas sur l'image : la zone
+          # persistante de 128 Mio occupe la fin du disque, bien au-dela de ce
+          # que `src/fs/tar.rs` indexe. `mkdisk.sh` connait les deux tailles et
+          # refuse deja une archive hors plafond, avec ses chiffres exacts ;
+          # comparer ici l'image entiere rejetait des disques valides.
+
+      # Deux demarrages sur LA MEME image. Le premier remplit le profil du
+      # navigateur et telecharge un fichier ; le second doit les retrouver.
+      #
+      # On n'interrompt plus la machine des que le verdict parait : c'est
+      # l'extinction PROPRE qui ecrit la zone persistante (voir
+      # `kernel::power::shutdown`), et sans elle le second demarrage ne
+      # trouverait rien. La page appelle donc `window.close()`, ce qui fait
+      # quitter la boucle d'evenements du BrowserHost -- HeadlessMode::Manual
+      # est cable sur `load_page_and_exit_on_close` chez upstream -- puis
+      # l'autorun se termine et le noyau coupe de lui-meme. QEMU sort seul ;
+      # l'echeance n'est qu'un filet.
+      - name: QEMU 4 vCPU, premier demarrage
+        run: |
+          set -u
+          LOG=serie-platform-smp4.log
+          : > "$LOG"
+          DEADLINE=$((SECONDS + 900))
+          MAX_LOG=$((64 * 1024 * 1024))
+          MAX_ECHO=$((512 * 1024))
+
+          qemu-system-x86_64 \
+            -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            -drive format=raw,file=ladybird-platform-smp4.img \
+            -m 12288 -smp 4 -cpu max -display none -no-reboot \
+            -netdev user,id=net0 -device e1000,netdev=net0 \
+            -audiodev none,id=muet -device AC97,audiodev=muet \
+            -serial file:"$LOG" &
+          PID=$!
+
+          # Un demarrage qui aboutit s'ETEINT : `kernel::autorun` appelle
+          # `power::shutdown` des que le script se termine, et c'est cette
+          # extinction qui ecrit /persist. Attendre l'echeance de quinze
+          # minutes n'apporte donc rien -- au run 32427953935 les deux
+          # demarrages l'ont fait, pour une suite finie en 92 s, et le journal
+          # n'etait lisible qu'apres.
+          #
+          # Des que le moteur a rendu son verdict, on accorde GRACE secondes au
+          # navigateur pour se fermer et rendre la main a l'invite. Passe ce
+          # delai, on s'arrete en NOMMANT ce qui manque, au lieu de laisser
+          # l'echeance conclure a notre place.
+          GRACE=240
+          VERDICT_VU=0
+          while kill -0 "$PID" 2>/dev/null; do
+            if (( SECONDS >= DEADLINE )); then
+              echo "ECHEANCE atteinte au premier demarrage" >&2
+              break
+            fi
+            if (( $(stat -c '%s' "$LOG") > MAX_LOG )); then
+              echo "JOURNAL EMBALLE au premier demarrage: $(stat -c '%s' "$LOG") octets" >&2
+              break
+            fi
+            if (( VERDICT_VU == 0 )) && grep -aFq "PLATFORM_FULL_OK" "$LOG"; then
+              VERDICT_VU=$SECONDS
+            fi
+            if (( VERDICT_VU > 0 )) && (( SECONDS - VERDICT_VU > GRACE )) \
+               && ! grep -aFq "BrowserHost termine" "$LOG"; then
+              echo "Le moteur a rendu son verdict au premier demarrage, mais" >&2
+              echo "BouchaudBrowserHost ne s'est pas arrete dans les $GRACE s" >&2
+              echo "qui ont suivi : l'invite ne reprend pas, donc l'autorun ne" >&2
+              echo "se termine pas, donc /persist n'est jamais ecrit." >&2
+              break
+            fi
+            sleep 0.5
+          done
+
+          kill -TERM "$PID" 2>/dev/null || true
+          sleep 1
+          kill -KILL "$PID" 2>/dev/null || true
+          wait "$PID" 2>/dev/null || true
+          echo "journal serie : $(stat -c '%s' "$LOG") octets"
+          tail -c "$MAX_ECHO" "$LOG"
+
+          # Si le premier demarrage n'a pas abouti, le second ne mesurerait
+          # rien : il n'y a ni profil ni telechargement a retrouver. On echoue
+          # ici, tout de suite, avec le journal sous les yeux, plutot que de
+          # depenser quinze minutes de plus a constater la meme chose.
+          if ! grep -aFq "PLATFORM_FULL_OK" "$LOG"; then
+            echo "Le premier demarrage n'a pas atteint son verdict." >&2
+            exit 1
+          fi
+
+      - name: QEMU 4 vCPU, second demarrage sur la meme image
+        run: |
+          set -u
+          LOG=serie-platform-smp4-boot2.log
+          : > "$LOG"
+          DEADLINE=$((SECONDS + 900))
+          MAX_LOG=$((64 * 1024 * 1024))
+          MAX_ECHO=$((512 * 1024))
+
+          qemu-system-x86_64 \
+            -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            -drive format=raw,file=ladybird-platform-smp4.img \
+            -m 12288 -smp 4 -cpu max -display none -no-reboot \
+            -netdev user,id=net0 -device e1000,netdev=net0 \
+            -audiodev none,id=muet -device AC97,audiodev=muet \
+            -serial file:"$LOG" &
+          PID=$!
+
+          # Un demarrage qui aboutit s'ETEINT : `kernel::autorun` appelle
+          # `power::shutdown` des que le script se termine, et c'est cette
+          # extinction qui ecrit /persist. Attendre l'echeance de quinze
+          # minutes n'apporte donc rien -- au run 32427953935 les deux
+          # demarrages l'ont fait, pour une suite finie en 92 s, et le journal
+          # n'etait lisible qu'apres.
+          #
+          # Des que le moteur a rendu son verdict, on accorde GRACE secondes au
+          # navigateur pour se fermer et rendre la main a l'invite. Passe ce
+          # delai, on s'arrete en NOMMANT ce qui manque, au lieu de laisser
+          # l'echeance conclure a notre place.
+          GRACE=240
+          VERDICT_VU=0
+          while kill -0 "$PID" 2>/dev/null; do
+            if (( SECONDS >= DEADLINE )); then
+              echo "ECHEANCE atteinte au second demarrage" >&2
+              break
+            fi
+            if (( $(stat -c '%s' "$LOG") > MAX_LOG )); then
+              echo "JOURNAL EMBALLE au second demarrage: $(stat -c '%s' "$LOG") octets" >&2
+              break
+            fi
+            if (( VERDICT_VU == 0 )) && grep -aFq "PLATFORM_FULL_OK" "$LOG"; then
+              VERDICT_VU=$SECONDS
+            fi
+            if (( VERDICT_VU > 0 )) && (( SECONDS - VERDICT_VU > GRACE )) \
+               && ! grep -aFq "BrowserHost termine" "$LOG"; then
+              echo "Le moteur a rendu son verdict au second demarrage, mais" >&2
+              echo "BouchaudBrowserHost ne s'est pas arrete dans les $GRACE s" >&2
+              echo "qui ont suivi : l'invite ne reprend pas, donc l'autorun ne" >&2
+              echo "se termine pas, donc /persist n'est jamais ecrit." >&2
+              break
+            fi
+            sleep 0.5
+          done
+
+          kill -TERM "$PID" 2>/dev/null || true
+          sleep 1
+          kill -KILL "$PID" 2>/dev/null || true
+          wait "$PID" 2>/dev/null || true
+          echo "journal serie : $(stat -c '%s' "$LOG") octets"
+          tail -c "$MAX_ECHO" "$LOG"
+
+      - name: Verdict
+        run: |
+          set -e
+          grep -aF "SMP4_DISCOVERED count=4" serie-platform-smp4.log
+          grep -aF "SMP4_AP_STARTED count=3" serie-platform-smp4.log
+          grep -aF "SMP4_SCHEDULER online=1 mode=UP-pending-refactor" serie-platform-smp4.log
+          grep -aF "BROWSER_HOST_PLATFORM persistent=yes" serie-platform-smp4.log
+          grep -aF "BROWSER_HOST_UPSTREAM clipboard=text downloads=FileDownloader" serie-platform-smp4.log
+          # La liste des tests exiges est celle de la fixture elle-meme, lue
+          # dans le fichier : deux listes tenues a la main divergent, et c'est
+          # ce qui est arrive -- le verdict reclamait « passed=19/19 » alors que
+          # la fixture en emettait 21 depuis l'ajout de `https` et
+          # `reseau_echec`. Aucun run ne pouvait plus passer.
+          python3 tools/health/marqueurs_fixture.py > marqueurs.txt
+          ATTENDUS=$(head -1 marqueurs.txt)
+          echo "tests exiges par la fixture : $ATTENDUS"
+          while read -r marqueur; do
+            grep -aF "$marqueur" serie-platform-smp4.log > /dev/null \
+              || { echo "marqueur absent du premier demarrage : $marqueur" >&2; exit 1; }
+          done < <(tail -n +2 marqueurs.txt)
+          grep -aF "PLATFORM_FULL_OK passed=$ATTENDUS/$ATTENDUS" serie-platform-smp4.log
+
+          # Le premier demarrage doit s'etre eteint PROPREMENT : c'est ce qui
+          # ecrit la zone persistante. Sans cette ligne, tout ce qui suit
+          # mesurerait autre chose.
+          grep -aE "persistance: [0-9]+ fichier\(s\) ecrit\(s\) a l.extinction" serie-platform-smp4.log
+
+          # Second demarrage : le moteur repasse la suite complete,
+          grep -aF "PLATFORM_FULL_OK passed=$ATTENDUS/$ATTENDUS" serie-platform-smp4-boot2.log
+          # le profil du navigateur a survecu a l'extinction -- la ligne porte
+          # aussi l'etat d'IndexedDB, qu'aucun run ne doit avoir a deviner :
+          # ses bases vivent dans une table statique du processus WebContent au
+          # SHA epingle (LibWeb/IndexedDB/Internal/Database.cpp:16) et rien ne
+          # les ecrit sur disque, donc un redemarrage les perd chez Ladybird
+          # comme chez Bouchaud.
+          grep -aF "PLATFORM_PERSIST_APRES_REDEMARRAGE OK" serie-platform-smp4-boot2.log
+          # et le fichier telecharge au demarrage precedent est relu par l'OS.
+          grep -aF "Bouchaud download proof" serie-platform-smp4-boot2.log
+
+      - name: Journaux
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-platform-smp4-logs
+          path: |
+            serie-platform-smp4.log
+            serie-platform-smp4-boot2.log
+            platform-fixture.log
+          compression-level: 9
+          if-no-files-found: warn

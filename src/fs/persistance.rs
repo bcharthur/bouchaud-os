@@ -20,9 +20,11 @@
 //!
 //! ```text
 //! secteur 0            en-tete : magie, version, nombre d'entrees
-//! secteurs 1 a 128     table : 256 entrees de 256 octets (chemin, taille)
-//! secteurs 129 a ...   contenu, chaque fichier aligne sur un secteur
+//! secteurs 1 a 1024    table : 2048 entrees de 256 octets (chemin, taille)
+//! secteurs 1025 a ...  contenu, chaque fichier aligne sur un secteur
 //! ```
+//!
+//! La zone entiere occupe `SECTEURS_ZONE` secteurs, soit 128 Mio.
 //!
 //! Aucune allocation de blocs, aucune table d'inodes : la zone est reecrite en
 //! entier a chaque `sync`. C'est ce qui convient a quelques mega-octets ecrits
@@ -52,7 +54,7 @@ use crate::fs::ramfs::{fs, NodeKind};
 const MAGIE: &[u8; 8] = b"BOPERSI1";
 
 /// Nombre maximal de fichiers retenus.
-const ENTREES_MAX: usize = 256;
+const ENTREES_MAX: usize = 2048;
 
 /// Taille d'une entree de table, en octets.
 const TAILLE_ENTREE: usize = 256;
@@ -66,8 +68,11 @@ const SECTEURS_TABLE: u64 = (ENTREES_MAX * TAILLE_ENTREE / SECTOR_SIZE) as u64;
 /// Premier secteur du contenu, relatif au debut de la zone.
 const SECTEUR_CONTENU: u64 = 1 + SECTEURS_TABLE;
 
-/// Taille de la zone, en secteurs. 8 Mio.
-const SECTEURS_ZONE: u64 = 16384;
+/// Taille de la zone, en secteurs. 128 Mio.
+///
+/// `tools/userland/mkdisk.sh` ajoute exactement autant de secteurs nuls a la
+/// fin de l'image : les deux valeurs doivent bouger ensemble.
+const SECTEURS_ZONE: u64 = 262144;
 
 /// Racine des fichiers persistants dans le RAMFS.
 pub const RACINE: &str = "/persist";
@@ -76,6 +81,11 @@ pub const RACINE: &str = "/persist";
 ///
 /// La zone occupe la fin du disque. Un disque trop petit pour la porter n'en a
 /// pas : mieux vaut aucune persistance qu'une persistance qui ecrase l'archive.
+///
+/// Le seuil porte sur la zone **augmentee de son en-tete et de sa table** : une
+/// image dont l'archive tient dans moins de `SECTEUR_CONTENU` secteurs n'aurait
+/// pas de quoi ecrire une table complete. `mkdisk.sh` complete donc la region
+/// d'archive jusqu'a ce plancher avant d'ajouter la zone.
 fn debut() -> Option<u64> {
     let (_, secteurs) = ata::capacities();
     if secteurs <= SECTEURS_ZONE + SECTEUR_CONTENU {
@@ -197,14 +207,31 @@ pub fn monte() -> usize {
 /// encore l'ancienne magie, donc l'ancien contenu. Une coupure au milieu laisse
 /// la version precedente, pas un melange des deux.
 pub fn synchronise() -> i64 {
+    // Chaque echec doit se nommer. `fsync` traduit un `-1` en EIO, et un
+    // programme qui recoit EIO n'a plus que « disk I/O error » a dire : c'est
+    // exactement ce que SQLite a rapporte au run 32424806818, sans qu'aucune
+    // ligne du journal n'indique laquelle des quatre causes s'appliquait.
     let base = match debut() {
         Some(base) => base,
-        None => return -1,
+        None => {
+            let (_, secteurs) = ata::capacities();
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "persistance: sync refuse, disque de {} secteurs, il en faut plus de {}",
+                secteurs,
+                SECTEURS_ZONE + SECTEUR_CONTENU
+            ));
+            return -1;
+        }
     };
 
     let entrees = rassemble();
     if entrees.len() > ENTREES_MAX {
-        crate::kernel::dmesg::log("persistance: trop de fichiers, sync refuse");
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "persistance: sync refuse, {} fichiers sous {} pour {} entrees possibles",
+            entrees.len(),
+            RACINE,
+            ENTREES_MAX
+        ));
         return -1;
     }
 
@@ -214,7 +241,21 @@ pub fn synchronise() -> i64 {
 
     for (index, entree) in entrees.iter().enumerate() {
         let octets = entree.chemin.as_bytes();
-        let longueur = core::cmp::min(octets.len(), CHEMIN_MAX - 1);
+        // Un chemin trop long etait TRONQUE en silence. La table gardait alors
+        // un nom qui n'est celui d'aucun fichier, et le redemarrage suivant
+        // restaurait le contenu sous ce faux nom -- une corruption discrete,
+        // que rien dans le journal n'aurait signalee. Depuis que `NAME_LEN`
+        // vaut 255, un seul composant peut a lui seul approcher ce plafond.
+        if octets.len() >= CHEMIN_MAX {
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "persistance: chemin trop long, {} octets pour {} possibles : '{}'",
+                octets.len(),
+                CHEMIN_MAX - 1,
+                entree.chemin
+            ));
+            return -1;
+        }
+        let longueur = octets.len();
         let debut_entree = index * TAILLE_ENTREE;
         table[debut_entree..debut_entree + longueur].copy_from_slice(&octets[..longueur]);
         ecrit_u64(
@@ -224,24 +265,37 @@ pub fn synchronise() -> i64 {
 
         let secteurs = ((entree.contenu.len() + SECTOR_SIZE - 1) / SECTOR_SIZE) as u64;
         if secteur + secteurs > fin_zone {
-            crate::kernel::dmesg::log("persistance: zone pleine, sync tronque");
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "persistance: zone pleine sur '{}', il faudrait le secteur {} et la zone s'arrete a {}",
+                entree.chemin,
+                secteur + secteurs,
+                fin_zone
+            ));
             return -1;
         }
         if secteurs > 0 {
             let mut tampon = vec![0u8; (secteurs as usize) * SECTOR_SIZE];
             tampon[..entree.contenu.len()].copy_from_slice(&entree.contenu);
-            if ata::write(Drive::Slave, secteur, secteurs as usize, &tampon)
-                != secteurs as usize
-            {
+            let ecrits = ata::write(Drive::Slave, secteur, secteurs as usize, &tampon);
+            if ecrits != secteurs as usize {
+                crate::kernel::dmesg::log_fmt(format_args!(
+                    "persistance: ecriture de '{}' incomplete, {} secteurs sur {} a partir de {}",
+                    entree.chemin, ecrits, secteurs, secteur
+                ));
                 return -1;
             }
         }
         secteur += secteurs;
     }
 
-    if ata::write(Drive::Slave, base + 1, SECTEURS_TABLE as usize, &table)
-        != SECTEURS_TABLE as usize
-    {
+    let table_ecrite = ata::write(Drive::Slave, base + 1, SECTEURS_TABLE as usize, &table);
+    if table_ecrite != SECTEURS_TABLE as usize {
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "persistance: table incomplete, {} secteurs sur {} a partir de {}",
+            table_ecrite,
+            SECTEURS_TABLE,
+            base + 1
+        ));
         return -1;
     }
 
@@ -250,6 +304,10 @@ pub fn synchronise() -> i64 {
     ecrit_u32(&mut entete[8..12], 1);
     ecrit_u32(&mut entete[12..16], entrees.len() as u32);
     if ata::write(Drive::Slave, base, 1, &entete) != 1 {
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "persistance: en-tete non ecrit au secteur {}",
+            base
+        ));
         return -1;
     }
 

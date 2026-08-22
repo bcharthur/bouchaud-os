@@ -45,6 +45,7 @@ pub mod mem;
 pub mod net;
 pub mod nr;
 pub mod proc;
+pub mod verrous;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -56,17 +57,51 @@ use crate::kernel::task;
 static mut SYSCALL_COUNT: u64 = 0;
 /// Dernier appel systeme inconnu rencontre (numero), 0 si aucun.
 static mut LAST_UNKNOWN: u64 = 0;
-/// Trace des appels systeme sur la sortie serie (commande `strace`).
-static mut TRACE: bool = false;
-
-/// Active ou desactive la trace des appels systeme.
-pub fn set_trace(on: bool) {
-    unsafe { TRACE = on };
+/// Ce que la trace des appels systeme laisse passer (commande `strace`).
+///
+/// `Echecs` existe parce que `Tous` est inutilisable sur un vrai programme :
+/// un navigateur emet des millions d'appels, la sortie serie devient le facteur
+/// limitant et le journal noie ce qu'on cherche. Or ce qu'on cherche est
+/// presque toujours un appel qui a ECHOUE -- c'est ainsi qu'on relie un
+/// « disk I/O error » cote application a la primitive OS qui manque.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Trace {
+    Aucune,
+    /// Seuls les appels qui rendent une erreur, hors attente ordinaire.
+    Echecs,
+    Tous,
 }
 
-/// La trace est-elle active ?
-pub fn trace_enabled() -> bool {
+static mut TRACE: Trace = Trace::Aucune;
+
+/// Regle la trace des appels systeme.
+pub fn set_trace_mode(mode: Trace) {
+    unsafe { TRACE = mode };
+}
+
+/// Active ou desactive la trace complete.
+pub fn set_trace(on: bool) {
+    set_trace_mode(if on { Trace::Tous } else { Trace::Aucune });
+}
+
+/// Mode de trace courant.
+pub fn trace_mode() -> Trace {
     unsafe { TRACE }
+}
+
+/// La trace est-elle active, sous une forme ou une autre ?
+pub fn trace_enabled() -> bool {
+    trace_mode() != Trace::Aucune
+}
+
+/// Ce retour merite-t-il d'etre trace en mode `Echecs` ?
+///
+/// `EAGAIN` et `EINTR` ne sont pas des defaillances : ce sont les reponses
+/// ordinaires d'une entree/sortie non bloquante et d'un appel interrompu par un
+/// signal. Un navigateur en produit des milliers par seconde ; les tracer
+/// reviendrait a retrouver le probleme du mode `Tous`.
+fn echec_notable(resultat: i64) -> bool {
+    resultat < 0 && resultat != -errno::EAGAIN && resultat != -errno::EINTR
 }
 
 /// Nombre d'appels systeme traites depuis le boot.
@@ -84,16 +119,33 @@ pub fn handle(frame: &mut TrapFrame) {
     unsafe { SYSCALL_COUNT += 1 };
     let (number, args) = frame.syscall_args();
     let result = dispatch(number, args, frame);
-    if unsafe { TRACE } {
-        crate::serial_println!(
-            "[syscall] {} ({}) ({:#x}, {:#x}, {:#x}) = {}",
-            number,
-            nr::name(number),
-            args[0],
-            args[1],
-            args[2],
-            result
-        );
+    match trace_mode() {
+        Trace::Aucune => {}
+        Trace::Tous => {
+            crate::serial_println!(
+                "[syscall] {} ({}) ({:#x}, {:#x}, {:#x}) = {}",
+                number,
+                nr::name(number),
+                args[0],
+                args[1],
+                args[2],
+                result
+            );
+        }
+        Trace::Echecs => {
+            if echec_notable(result) {
+                crate::serial_println!(
+                    "[syscall-echec] {} ({}) ({:#x}, {:#x}, {:#x}) = {} ({})",
+                    number,
+                    nr::name(number),
+                    args[0],
+                    args[1],
+                    args[2],
+                    result,
+                    errno::name(-result)
+                );
+            }
+        }
     }
     // `rt_sigreturn` a deja reecrit toute la trame : y remettre une valeur de
     // retour ecraserait le rax restaure.
@@ -358,6 +410,7 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         WRITEV => file::sys_writev(args[0] as i32, args[1], args[2] as usize),
         PREAD64 => file::sys_pread(args[0] as i32, args[1], args[2] as usize, args[3] as i64),
         PWRITE64 => file::sys_pwrite(args[0] as i32, args[1], args[2] as usize, args[3] as i64),
+        SENDFILE => file::sys_sendfile(args[0] as i32, args[1] as i32, args[2], args[3] as usize),
         STAT => file::sys_stat_path(args[0], args[1], false),
         LSTAT => file::sys_stat_path(args[0], args[1], true),
         FSTAT => file::sys_fstat(args[0] as i32, args[1]),
@@ -375,6 +428,18 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         UNLINK => file::sys_unlink(args[0]),
         UNLINKAT => file::sys_unlink(args[1]),
         RENAME => file::sys_rename(args[0], args[1]),
+        // Le RAMFS actuel fusionne entree de repertoire et inode : il ne peut
+        // pas representer deux noms pointant vers le meme inode sans refonte
+        // de son modele. Retourner succes ou copier le contenu serait un faux
+        // hardlink et casserait les garanties POSIX.
+        LINK => -errno::ENOTSUP,
+        // La surveillance de fichiers n'est pas encore un service noyau
+        // Bouchaud. ENOSYS est intentionnel : les bibliotheques retombent sur
+        // leur chemin sans surveillance (ex. timezone) au lieu de croire que
+        // l'abonnement existe.
+        INOTIFY_INIT1 => -errno::ENOSYS,
+        STATFS => file::sys_statfs(args[0], args[1]),
+        FSTATFS => file::sys_fstatfs(args[0] as i32, args[1]),
         FTRUNCATE => file::sys_ftruncate(args[0] as i32, args[1] as usize),
         DUP => file::sys_dup(args[0] as i32),
         DUP2 => file::sys_dup2(args[0] as i32, args[1] as i32),
@@ -621,7 +686,25 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
 
         _ => {
             unsafe { LAST_UNKNOWN = number };
-            crate::serial_println!("[syscall] non implemente : {} ({})", number, nr::name(number));
+            // Le numero seul ne dit pas *qui* appelle, et c'est la seule chose
+            // qui permette de decider entre implementer la vraie semantique et
+            // documenter pourquoi l'appel est facultatif. `frame.rip` est
+            // l'adresse de retour ring 3 sauvegardee par `syscall` ; les
+            // binaires Ladybird sont des PIE statiques charges a
+            // `user_load_base()`, donc la difference est directement un
+            // deplacement dans le fichier :
+            //
+            //     addr2line -f -C -e WebContent <offset>
+            let base = crate::kernel::vmm::user_load_base();
+            let offset = frame.rip.wrapping_sub(base);
+            crate::serial_println!(
+                "[syscall] non implemente : {} ({}) appelant={} rip={:#x} offset={:#x}",
+                number,
+                nr::name(number),
+                task::current_process().borrow().name,
+                frame.rip,
+                offset
+            );
             -errno::ENOSYS
         }
     }

@@ -15,7 +15,20 @@ use alloc::vec::Vec;
 /// Nombre d'inodes. Une distribution minimale (libc, `ld.so`, quelques
 /// bibliotheques, des polices) depasse largement le millier de fichiers.
 pub const MAX_NODES: usize = 4096;
-pub const NAME_LEN: usize = 64;
+/// Longueur maximale d'un composant de chemin, en octets.
+///
+/// C'est `NAME_MAX`, et sa valeur n'est pas libre : Linux la fixe a 255 sur
+/// tous ses systemes de fichiers, et le code applicatif compte dessus sans
+/// jamais l'interroger. Ladybird, par exemple, ecrit un telechargement dans un
+/// fichier temporaire nomme `<fichier>.<numero>.<uuid>.download` -- l'UUID a
+/// lui seul fait 36 octets, le suffixe complet 48. Avec l'ancienne limite de
+/// 64, `preuve-bouchaud.bin` donnait 67 octets et la creation echouait, donc
+/// AUCUN telechargement n'aboutissait (run 32427953935).
+///
+/// Le cout est un tableau de 255 octets par inode au lieu de 64, soit environ
+/// 1 Mio pour les 4096 inodes : sans commune mesure avec les centaines de Mio
+/// du tas noyau.
+pub const NAME_LEN: usize = 255;
 /// Taille maximale d'un fichier (garde-fou du tas noyau).
 ///
 /// L'ancienne limite de 4 Mio suffisait aux scripts Python mais rendait
@@ -110,9 +123,16 @@ impl Node {
         true
     }
 
+    /// Un nom que `set_name` acceptera. Permet de le verifier sans avoir
+    /// deja un inode sous la main.
+    pub fn nom_acceptable(name: &str) -> bool {
+        let bytes = name.as_bytes();
+        !bytes.is_empty() && bytes.len() <= NAME_LEN
+    }
+
     pub fn set_name(&mut self, name: &str) -> bool {
         let bytes = name.as_bytes();
-        if bytes.is_empty() || bytes.len() > NAME_LEN {
+        if !Self::nom_acceptable(name) {
             return false;
         }
         for i in 0..NAME_LEN {
@@ -230,6 +250,14 @@ impl FileSystem {
         if self.find_child(parent, name).is_some() {
             return Err("already exists");
         }
+        // Le nom est valide AVANT de prendre un inode : le refuser apres
+        // l'allocation laissait un inode marque occupe que plus aucun
+        // repertoire ne nommait, donc definitivement perdu. Un programme qui
+        // reessaie -- ce que fait un navigateur apres un telechargement
+        // refuse -- epuisait ainsi la table.
+        if !Node::nom_acceptable(name) {
+            return Err("invalid name");
+        }
         let idx = self.alloc_node().ok_or("no free inode")?;
         self.nodes[idx].kind = NodeKind::Dir;
         self.nodes[idx].parent = parent;
@@ -298,6 +326,10 @@ impl FileSystem {
         }
         if let Some(existing) = self.find_child(parent, name) {
             return Ok(existing);
+        }
+        // Meme raison qu'au-dessus : valider avant d'allouer.
+        if !Node::nom_acceptable(name) {
+            return Err("invalid name");
         }
         let idx = self.alloc_node().ok_or("no free inode")?;
         self.nodes[idx].kind = NodeKind::File;

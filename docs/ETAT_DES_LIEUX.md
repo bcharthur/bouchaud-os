@@ -59,6 +59,13 @@ branche mouvante.
 | M12b | Un site public joignable par son **nom** | la couche UDP est reparee, cf. M13 |
 | M13 | **Resolution de nom : demultiplexage UDP et attente non brulante** | **vert, eprouve sous QEMU** |
 
+Depuis, le raisonnement par jalons a atteint sa limite : ce n'etait plus un
+« M18 » qu'il fallait, mais savoir ce que le moteur epingle sait faire et ce que
+le portage ne lui laisse pas faire. Cet inventaire vit dans
+[`ladybird/AUDIT_INTEGRATION.md`](ladybird/AUDIT_INTEGRATION.md) — services,
+greffons, ressources, appels systeme, et une matrice fonctionnelle ou chaque
+case porte sa preuve ou sa cause.
+
 ### Ce que M8 prouve exactement
 
     Window Manager -> surface partagee -> /bo-navigateur -> webcontent-bootstrap
@@ -157,11 +164,21 @@ deux secondes. La barre d'adresse accepte donc enfin des noms.
   charge par son nom de bout en bout (ligne suivante).
 - **Aucune isolation.** Le sandbox d'upstream est volontairement remplace par
   l'implementation non effective. C'est M14.
-- **Le document distant est commite, pas encore affiche.** `https://example.com/`
-  arrive entier (`M9_NAVIGATION_COMMITTED`, 559 octets) mais
-  `M9_DOCUMENT_LOADED` n'apparait pas et WebContent quitte la liste des
-  processus juste apres. Analyse, mise en page, peinture et capture restent a
-  mesurer sur une page publique.
+- **Trois services d'upstream sur six sont lances**, et un quatrieme n'est meme
+  pas construit. WebContent, RequestServer et ImageDecoder tournent ; WebWorker
+  est construit mais sans personne pour le lancer ; Compositor et WebDriver sont
+  absents. Ce que chaque absence coute exactement est dans
+  [`ladybird/AUDIT_INTEGRATION.md`](ladybird/AUDIT_INTEGRATION.md) §3-§5.
+- **Pas de Worker, pas de telechargement, pas de nouvelle vue.** Ces trois
+  questions du moteur attendent un processus hote qui n'existe pas encore ; une
+  page qui construit un `Worker` fige WebContent. C'est la prochaine piece
+  d'architecture, et c'est ce qui remplacera `webcontent-bootstrap.c`.
+- **Une seule police de texte.** L'arbre epingle n'empaquete que SerenitySans et
+  NotoEmoji : tout site rend dans SerenitySans, et les ecritures non latines
+  n'ont aucune police. C'est une limite de ce qu'upstream empaquette, pas de ce
+  qu'il sait faire.
+- **google.com n'ouvre pas sa session TLS** alors que wikipedia.org l'ouvre. Le
+  diagnostic est instrumente, pas encore lu.
 - **Un seul onglet, un seul renderer.**
 - **Pas de redimensionnement de la fenetre du navigateur natif.** La surface est
   allouee une fois ; `Configure` est journalise, pas suivi.

@@ -560,6 +560,45 @@ static mut WM_HEARTBEAT_TICK: u64 = 0;
 static mut WM_WATCHDOG_ARMED: bool = false;
 static mut WM_LAST_WARNING_TICK: u64 = 0;
 
+/// PID du programme lance au premier plan par [`run`], 0 si aucun.
+///
+/// Un `exec` synchrone doit rendre la main quand CE programme se termine. Sans
+/// ce reperage, `exit_current` n'avait qu'un seul critere -- « plus aucune
+/// tache executable » -- et un programme qui laisse des fils vivants ne rendait
+/// donc JAMAIS la main : les fils tournent, l'ordonnanceur a toujours quelqu'un
+/// a servir, et l'invite ne revient pas.
+///
+/// C'est ce qui est arrive au run 32427953935. `BouchaudBrowserHost` quitte
+/// proprement sur `window.close()`, mais ses services -- WebContent,
+/// RequestServer, ImageDecoder, Compositor -- restent dans leur boucle
+/// d'evenements. L'autorun ne reprenait pas, donc `power::shutdown` n'etait
+/// jamais appele, donc /persist n'etait jamais ecrit a l'extinction.
+static mut RACINE_PREMIER_PLAN: u32 = 0;
+
+/// Le processus `pid` descend-il de `racine` (ou est-il `racine`) ?
+fn descend_de(pid: u32, racine: u32) -> bool {
+    let mut courant = pid;
+    // La table est finie et un cycle de filiation serait une corruption : la
+    // borne evite d'y tourner sans fin.
+    for _ in 0..processes().len() + 1 {
+        if courant == racine {
+            return true;
+        }
+        if courant == 0 {
+            return false;
+        }
+        let parent = processes()
+            .iter()
+            .find(|p| p.borrow().pid == courant)
+            .map(|p| p.borrow().parent);
+        match parent {
+            Some(suivant) => courant = suivant,
+            None => return false,
+        }
+    }
+    false
+}
+
 fn tasks() -> &'static mut Vec<Box<Task>> {
     unsafe {
         if TASKS.is_none() {
@@ -1089,11 +1128,49 @@ pub fn exit_current(code: i32) -> ! {
             // parent le recolte par `wait4`. C'est ce qui permet au parent de
             // recuperer le code de sortie apres coup.
             process.zombie = true;
+            // Les verrous d'enregistrement POSIX meurent avec leur detenteur.
+            // Un WebContent qui plante ne doit pas laisser la base SQL du
+            // navigateur verrouillee pour le reste de la session.
+            crate::kernel::abi::verrous::libere_processus(process.pid);
         }
     }
 
     // Previent le parent : SIGCHLD, et reveil s'il attendait dans `wait4`.
     notify_parent_of_exit();
+
+    // Le programme de premier plan vient-il de se terminer ? Alors la session
+    // est finie, et ce qu'il a laisse derriere lui n'a plus personne pour
+    // l'attendre. C'est la semantique POSIX d'un shell : le meneur de session
+    // part, le groupe de premier plan recoit SIGHUP.
+    //
+    // `run` faisait deja ce menage -- mais APRES son retour, c'est-a-dire
+    // jamais, puisque c'est precisement ce qui l'empechait de revenir.
+    let racine = unsafe { RACINE_PREMIER_PLAN };
+    if racine != 0 {
+        let fini = {
+            let process = current().process.borrow();
+            process.zombie && process.pid == racine
+        };
+        if fini {
+            let mut emportes = 0usize;
+            for index in 0..tasks().len() {
+                if tasks()[index].state == TaskState::Zombie {
+                    continue;
+                }
+                let pid = tasks()[index].process.borrow().pid;
+                if descend_de(pid, racine) {
+                    tasks()[index].state = TaskState::Zombie;
+                    emportes += 1;
+                }
+            }
+            if emportes > 0 {
+                crate::kernel::dmesg::log_fmt(format_args!(
+                    "task: pid {} termine, {} tache(s) de sa session arretees avec lui",
+                    racine, emportes
+                ));
+            }
+        }
+    }
 
     // On ne rend la main au noyau que lorsque **plus aucune** tache ne peut
     // reprendre. Se contenter de « aucune tache prete a cet instant » serait
@@ -1231,17 +1308,23 @@ pub fn exit_group(code: i32) -> ! {
 /// [`in_user_task`] avant d'arriver ici — voir `exec::exec_image`.
 pub fn run(first: Box<Task>) -> i32 {
     let process = first.process.clone();
+    let racine = process.borrow().pid;
     let index = register(first);
     unsafe {
+        RACINE_PREMIER_PLAN = racine;
         CURRENT = index;
         let list = tasks();
         let to_ptr = &mut **list.get_mut(index).unwrap() as *mut Task;
         install(&mut *to_ptr);
         switch_context(&mut KERNEL_CTX.rsp, (*to_ptr).ctx.rsp);
     }
-    // Retour ici quand plus aucune tache n'est prete.
+    // Retour ici quand le programme de premier plan s'est termine, ou quand
+    // plus aucune tache n'est prete.
     crate::kernel::vmm::activate_kernel();
-    unsafe { CURRENT = usize::MAX };
+    unsafe {
+        CURRENT = usize::MAX;
+        RACINE_PREMIER_PLAN = 0;
+    };
     let (code, pid) = {
         let borrowed = process.borrow();
         (borrowed.exit_code, borrowed.pid)

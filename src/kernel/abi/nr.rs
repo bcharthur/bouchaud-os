@@ -150,6 +150,9 @@ pub const STATFS: u64 = 137;
 pub const FSTATFS: u64 = 138;
 pub const UTIMENSAT: u64 = 280;
 pub const SYMLINK: u64 = 88;
+pub const LINK: u64 = 86;
+/// `inotify_init1` : surveillance de fichiers. Voir `nr::name`.
+pub const INOTIFY_INIT1: u64 = 294;
 pub const SETRLIMIT: u64 = 160;
 pub const SIGALTSTACK: u64 = 131;
 pub const RT_SIGSUSPEND: u64 = 130;
@@ -227,6 +230,8 @@ pub fn name(number: u64) -> &'static str {
         UNAME => "uname",
         FCNTL => "fcntl",
         FTRUNCATE => "ftruncate",
+        FSYNC => "fsync",
+        FDATASYNC => "fdatasync",
         GETDENTS64 => "getdents64",
         GETCWD => "getcwd",
         CHDIR => "chdir",
@@ -314,7 +319,43 @@ pub fn name(number: u64) -> &'static str {
         FSTATFS => "fstatfs",
         UTIMENSAT => "utimensat",
         SYMLINK => "symlink",
-        _ => "?",
+        LINK => "link",
+        INOTIFY_INIT1 => "inotify_init1",
+                SENDFILE => "sendfile",
+        GETDENTS => "getdents",
+        FCHDIR => "fchdir",
+        RMDIR => "rmdir",
+        CREAT => "creat",
+        CHMOD => "chmod",
+        FCHMOD => "fchmod",
+        CHOWN => "chown",
+        FCHOWN => "fchown",
+        UMASK => "umask",
+        TIMES => "times",
+        SYSLOG => "syslog",
+        SETUID => "setuid",
+        SETGID => "setgid",
+        SETPGID => "setpgid",
+        GETPGRP => "getpgrp",
+        SETSID => "setsid",
+        SCHED_SETPARAM => "sched_setparam",
+        SCHED_SETSCHEDULER => "sched_setscheduler",
+        SCHED_GETSCHEDULER => "sched_getscheduler",
+        SCHED_GET_PRIORITY_MAX => "sched_get_priority_max",
+        SCHED_GET_PRIORITY_MIN => "sched_get_priority_min",
+        MLOCK => "mlock",
+        MUNLOCK => "munlock",
+        MLOCKALL => "mlockall",
+        MUNLOCKALL => "munlockall",
+        SCHED_SETAFFINITY => "sched_setaffinity",
+        EPOLL_CREATE => "epoll_create",
+        GET_ROBUST_LIST => "get_robust_list",
+        MKDIRAT => "mkdirat",
+        PSELECT6 => "pselect6",
+        SETRLIMIT => "setrlimit",
+        GETPGID => "getpgid",
+        GETSID => "getsid",
+_ => "?",
     }
 }
 

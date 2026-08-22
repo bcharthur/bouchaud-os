@@ -31,8 +31,15 @@ python3 tools/ladybird/prepare-m9-source.py "$SRC"
 python3 tools/ladybird/prepare-m9-diagnostics.py "$SRC"
 python3 tools/ladybird/prepare-m16-dns.py "$SRC"
 python3 tools/ladybird/prepare-dns-une-question.py "$SRC"
+python3 tools/ladybird/prepare-image-decoder.py "$SRC"
+python3 tools/ladybird/prepare-repaint.py "$SRC"
+python3 tools/ladybird/prepare-tls-diagnostic.py "$SRC"
+python3 tools/ladybird/prepare-browser-host.py "$SRC"
+python3 tools/ladybird/prepare-console.py "$SRC"
 python3 tools/ladybird/prepare-m11-chrome.py "$SRC"
 python3 tools/ladybird/prepare-browser-runtime-link.py "$SRC"
+python3 tools/ladybird/prepare-full-browser-host.py "$SRC"
+python3 tools/ladybird/prepare-platform-complete.py "$SRC"
 
 # Le chrome M11 seul, avec les avertissements d'upstream, avant d'engager les
 # quinze minutes du build. Les fautes qu'il attrape sont des avertissements
@@ -261,22 +268,40 @@ say "== build WebContent + services =="
 # epingle. Il reste visible comme warning, sans couper la traversee Ninja.
 cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target WebContent -- -k 0
 
-# Services de processus utiles au chemin CPU-only. Le target GPU upstream est
-# `Compositor`, pas `WebContentCompositor`; on ne le construit volontairement
-# pas ici car Bouchaud vise Skia CPU -> shared surface -> WM, sans ANGLE/OpenGL.
-for target in RequestServer ImageDecoder WebWorker; do
+# ImageDecoder n'est plus facultatif : c'est lui qui installe
+# `Web::Platform::ImageCodecPlugin` dans WebContent, et sans greffon la
+# premiere image d'un vrai site fait tomber `VERIFY(s_the)`. Un build qui ne le
+# produit pas doit echouer ici, pas vingt-cinq minutes plus tard dans QEMU.
+#
+# Le target GPU upstream est `Compositor`, pas `WebContentCompositor` ; on ne le
+# construit volontairement pas ici car Bouchaud vise Skia CPU -> surface
+# partagee -> gestionnaire de fenetres, sans ANGLE/OpenGL.
+# Compositor est construit mais **pas encore lance** : il debloque le canvas 2D
+# (voir docs/ladybird/AUDIT_INTEGRATION.md section 4) et n'exige pas de GPU —
+# `main.cpp` n'ouvre un contexte que si `--force-cpu-painting` est absent. Le
+# construire ici donne sa taille reelle a l'etape suivante, qui devra decider
+# de l'embarquer ou non dans un disque deja proche de son plafond.
+for target in RequestServer ImageDecoder WebWorker Compositor WebDriver BouchaudBrowserHost; do
     if ninja -C "$BUILD" -t targets all 2>/dev/null | grep -q "^${target}:"; then
         cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target "$target" -- -k 0
+    elif [ "$target" = "ImageDecoder" ]; then
+        echo "ERREUR: la cible ImageDecoder a disparu de l'arbre Ladybird" >&2
+        exit 1
     fi
 done
 
 OUT="$ROOT/third_party/native-browser-bouchaud"
 rm -rf "$OUT"
 mkdir -p "$OUT"
-find "$BUILD" -type f \( -name WebContent -o -name RequestServer -o -name ImageDecoder -o -name WebWorker \) -perm -111 -exec cp -f {} "$OUT/" \;
+find "$BUILD" -type f \( -name WebContent -o -name RequestServer -o -name ImageDecoder -o -name WebWorker -o -name Compositor -o -name WebDriver -o -name BouchaudBrowserHost \) -perm -111 -exec cp -f {} "$OUT/" \;
 
 [ -x "$OUT/WebContent" ] || { echo "WebContent non produit" >&2; exit 1; }
-[ -x "$OUT/RequestServer" ] || { echo "RequestServer non produit (M9 requis)" >&2; exit 1; }
+[ -x "$OUT/RequestServer" ] || { echo "RequestServer non produit (reseau requis)" >&2; exit 1; }
+[ -x "$OUT/ImageDecoder" ] || { echo "ImageDecoder non produit (images requises)" >&2; exit 1; }
+[ -x "$OUT/BouchaudBrowserHost" ] || { echo "BouchaudBrowserHost non produit" >&2; exit 1; }
+[ -x "$OUT/Compositor" ] || { echo "Compositor non produit (Browser Host requis)" >&2; exit 1; }
+[ -x "$OUT/WebWorker" ] || { echo "WebWorker non produit (Browser Host requis)" >&2; exit 1; }
+[ -x "$OUT/BouchaudBrowserHost" ] || { echo "BouchaudBrowserHost non produit" >&2; exit 1; }
 printf 'Bouchaud Ladybird M9 capable
 pinned=%s
 ' "$(git -C "$LB" rev-parse HEAD)" > "$OUT/M9_CAPABLE"
@@ -286,9 +311,51 @@ if [ -d "$SRC/Base/res" ]; then
     cp -a "$SRC/Base/res/." "$OUT/resources/"
 fi
 
+# La configuration fontconfig voyage avec les ressources : elle designe le
+# repertoire de polices qu'on vient d'y copier, et les deux doivent arriver
+# ensemble sur le disque Bouchaud. Voir tools/ladybird/fontconfig/fonts.conf.
+mkdir -p "$OUT/resources/fontconfig"
+cp -f "$ROOT/tools/ladybird/fontconfig/fonts.conf" "$OUT/resources/fontconfig/fonts.conf"
+
+# Le DWARF des runtimes n'a aucun lecteur dans Bouchaud OS.
+#
+# Ladybird se construit avec ses informations de debogage meme en Release, et
+# elles pesent l'essentiel du binaire : les sept runtimes non depouilles font
+# ensemble ~1,41 Gio, soit une image de 1,50 Gio la ou `src/fs/tar.rs` n'indexe
+# que les premiers 768 Mio du disque de donnees. Le run 32419136798 s'est arrete
+# exactement la (« platform disk: 1613805568 bytes »).
+#
+# Rien dans le guest ne consomme ce DWARF : LADYBIRD_ENABLE_CPPTRACE est OFF, il
+# n'y a pas de debogueur sous Bouchaud, et l'edition de liens statique-PIE ne
+# resout aucun symbole a l'execution. `--strip-debug` retire donc uniquement les
+# sections `.debug_*`, qui ne sont pas SHF_ALLOC : les segments PT_LOAD, PT_TLS,
+# PT_DYNAMIC et les relocations que le demarrage static-pie s'applique a lui-meme
+# restent intacts, et `.symtab` est conserve pour pouvoir encore nommer une
+# adresse hors ligne.
+#
+# Les binaires non depouilles restent disponibles dans "$BUILD/bin" -- que la CI
+# met en cache -- pour symboliser un plantage a posteriori.
+# BO_KEEP_LADYBIRD_DEBUG=1 desactive volontairement ce depouillement.
+STRIP=$(command -v "llvm-strip-${LLVM_VERSION}" || command -v llvm-strip || command -v strip || true)
+if [ "${BO_KEEP_LADYBIRD_DEBUG:-0}" = "1" ]; then
+    say "depouillement desactive (BO_KEEP_LADYBIRD_DEBUG=1) : image de disque probablement hors plafond"
+elif [ -z "$STRIP" ]; then
+    echo "ERREUR: aucun llvm-strip/strip disponible ; les runtimes non depouilles ne tiennent pas dans l'archive Bouchaud" >&2
+    exit 1
+else
+    say "== depouillement DWARF des runtimes (${STRIP##*/}) =="
+    for runtime in WebContent RequestServer ImageDecoder WebWorker Compositor WebDriver BouchaudBrowserHost; do
+        [ -x "$OUT/$runtime" ] || continue
+        avant=$(stat -c '%s' "$OUT/$runtime")
+        "$STRIP" --strip-debug "$OUT/$runtime"
+        apres=$(stat -c '%s' "$OUT/$runtime")
+        printf '  %-20s %12s -> %12s octets\n' "$runtime" "$avant" "$apres"
+    done
+fi
+
 # `file` peut varier selon la version du runner; readelf est l'invariant utile
 # pour Bouchaud : aucun PT_INTERP ne doit demander ld-linux au demarrage.
-for runtime in WebContent RequestServer ImageDecoder WebWorker; do
+for runtime in WebContent RequestServer ImageDecoder WebWorker Compositor WebDriver BouchaudBrowserHost; do
     [ -x "$OUT/$runtime" ] || continue
     file "$OUT/$runtime" | tee "$OUT/$runtime.file.txt"
     if readelf -l "$OUT/$runtime" | grep -q 'INTERP'; then
@@ -297,6 +364,23 @@ for runtime in WebContent RequestServer ImageDecoder WebWorker; do
         exit 1
     fi
 done
+
+# La charge utile doit tenir dans ce que le noyau sait indexer. On le verifie
+# ici, ou la correction est possible, plutot que dans mkdisk.sh vingt minutes
+# plus tard -- et avec les tailles exactes, jamais par troncature.
+#
+# Le plafond reel est MAX_ARCHIVE_DISK_SIZE (2 Gio, src/fs/tar.rs). On garde
+# une marge de 64 Mio pour l'en-tete TAR, l'autorun, les certificats et le
+# `webcontent-bootstrap` que l'etape suivante ajoutera.
+CHARGE=$(du -sb "$OUT" | cut -f1)
+PLAFOND=$(( (2048 - 64) * 1024 * 1024 ))
+printf 'charge utile Bouchaud : %s octets (%s Mio), plafond %s octets (%s Mio)\n' \
+    "$CHARGE" "$((CHARGE / 1024 / 1024))" "$PLAFOND" "$((PLAFOND / 1024 / 1024))"
+if [ "$CHARGE" -gt "$PLAFOND" ]; then
+    echo "ERREUR: la charge utile depasse ce que src/fs/tar.rs sait indexer sur hdb" >&2
+    du -b "$OUT"/* | sort -rn | head -12 >&2 || true
+    exit 1
+fi
 
 # Le masque Cargo n'est utile que pour le build Ladybird. Restaurer avant la
 # sortie normale rend aussi l'etat du checkout explicite pour les etapes CI

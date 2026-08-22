@@ -37,6 +37,33 @@ const VBOX_SHUTDOWN: u16 = 0x4004;
 /// eteignent sans rien rapporter.
 pub fn shutdown(code: u8) -> ! {
     crate::serial_println!("[kernel] extinction demandee (code {})", code);
+
+    // La zone persistante n'atteint le disque que sur `fsync` explicite. Un
+    // programme qui ecrit sous /persist et se contente de fermer son fichier --
+    // ce que fait la plupart du code, et notamment le telechargement d'un
+    // fichier par le navigateur -- laissait donc ses octets dans le RAMFS, et
+    // l'extinction les emportait. Une persistance qui ne survit qu'aux
+    // programmes pensant a `fsync` n'est pas une persistance.
+    //
+    // L'ecriture a lieu ICI, avant de couper : c'est le dernier instant ou elle
+    // est possible, et `synchronise` ecrit son en-tete en dernier, donc une
+    // coupure pendant l'operation laisse l'etat precedent plutot qu'un melange.
+    //
+    // `synchronise` rend `-1` sur ECHEC, pas sur « zone vide » : une zone vide
+    // rend zero. Annoncer « rien a ecrire » sur un `-1` presentait donc une
+    // panne d'ecriture comme une situation normale -- exactement le genre de
+    // message qui a fait chercher la cause de « disk I/O error » ailleurs
+    // pendant plusieurs runs. La ligne dit maintenant ce qui s'est passe ; la
+    // raison precise, elle, est deja journalisee par `synchronise`.
+    match crate::fs::persistance::synchronise() {
+        -1 => crate::serial_println!(
+            "[kernel] persistance: ECHEC de l'ecriture a l'extinction, /persist n'est pas a jour"
+        ),
+        ecrits => crate::serial_println!(
+            "[kernel] persistance: {} fichier(s) ecrit(s) a l'extinction",
+            ecrits
+        ),
+    }
     unsafe {
         // Ne repond que si QEMU a ete lance avec `-device isa-debug-exit` ;
         // sinon l'ecriture part dans le vide, ce qui est sans consequence.

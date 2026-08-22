@@ -11,6 +11,7 @@ pub mod idt;
 pub mod interrupts;
 pub mod pci;
 pub mod rtc;
+pub mod smp;
 pub mod usermode;
 
 /// Initialise les briques bas niveau de l'architecture au boot.

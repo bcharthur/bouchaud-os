@@ -627,7 +627,22 @@ pub fn cat(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
         println!("cat: permission denied");
         return 1;
     }
-    print!("{}", fs.nodes[idx].content_str());
+    // `cat` diffuse par tranches : il n'a aucune raison de tenir en memoire un
+    // fichier de 190 Mio, et il doit fonctionner qu'il soit resident ou adosse
+    // au disque. `fs.nodes[idx].content` etait vide dans le second cas.
+    let taille = crate::fs::backing::logical_len(idx);
+    let mut position = 0usize;
+    let mut tranche = alloc::vec![0u8; 64 * 1024];
+    while position < taille {
+        let voulu = core::cmp::min(tranche.len(), taille - position);
+        let lus = crate::fs::backing::read_at(idx, position, &mut tranche[..voulu]);
+        if lus == 0 {
+            println!("cat: lecture interrompue a l'octet {}", position);
+            return 1;
+        }
+        print!("{}", String::from_utf8_lossy(&tranche[..lus]));
+        position += lus;
+    }
     println!("");
     0
 }
@@ -1221,6 +1236,38 @@ pub fn date() {
 
 /// Recupere le texte a traiter : depuis un fichier si fourni, sinon depuis le
 /// pipe (stdin). Renvoie None et affiche une erreur si le fichier est invalide.
+/// Ce qu'un outil texte du shell accepte de charger d'un coup.
+///
+/// Les fichiers de l'archive de boot qui depassent `INLINE_BOOT_FILE_SIZE` ne
+/// sont pas residents : `Node::content` est vide et leurs octets restent sur
+/// hdb. Un runtime Ladybird pese 190 Mio ; le charger entier dans le tas noyau
+/// pour un `grep` serait deraisonnable. Au-dela de cette borne, on le DIT.
+const MAX_TEXTE_SHELL: usize = 8 * 1024 * 1024;
+
+/// Lit le contenu d'un nœud, qu'il soit resident ou adosse au disque.
+///
+/// `Node::content` ne suffit pas : `tar::index_data_disk` le vide pour les gros
+/// fichiers et n'enregistre que leur etendue sur hdb. Les outils texte du shell
+/// lisaient ce champ directement et voyaient donc un fichier VIDE la ou `ls -l`
+/// annonce 190 Mio — un mensonge silencieux, exactement celui qu'on ne veut pas.
+fn lit_noeud(idx: usize, who: &str) -> Option<String> {
+    let taille = crate::fs::backing::logical_len(idx);
+    if taille > MAX_TEXTE_SHELL {
+        println!(
+            "{}: fichier de {} octets, au-dela des {} octets qu'un outil texte charge",
+            who, taille, MAX_TEXTE_SHELL
+        );
+        return None;
+    }
+    let mut octets = alloc::vec![0u8; taille];
+    let lus = crate::fs::backing::read_at(idx, 0, &mut octets);
+    if lus < taille {
+        println!("{}: lecture incomplete ({} sur {} octets)", who, lus, taille);
+        octets.truncate(lus);
+    }
+    Some(String::from_utf8_lossy(&octets).into_owned())
+}
+
 fn input_text(path: Option<&str>, cwd: usize, who: &str) -> Option<String> {
     match path {
         Some(p) => {
@@ -1240,10 +1287,7 @@ fn input_text(path: Option<&str>, cwd: usize, who: &str) -> Option<String> {
                 println!("{}: permission denied", who);
                 return None;
             }
-            let n = &fs.nodes[idx];
-            let mut s = String::new();
-            s.push_str(&n.content_str());
-            Some(s)
+            lit_noeud(idx, who)
         }
         None => Some(crate::shell::take_stdin().unwrap_or_default()),
     }
@@ -1622,10 +1666,29 @@ pub fn python_selftest() {
 
 pub fn disk_placeholder(cmd: &str) {
     vga::set_color(COLOR_YELLOW);
-    println!("{}: stockage persistant non active dans V0.6", cmd);
+    println!("{}: pas encore implemente", cmd);
     vga::set_color(COLOR_DEFAULT);
-    println!("  actuel: RAMFS volatil monte sur /");
+    println!("  actuel: RAMFS volatil monte sur /, zone persistante sur {}", crate::fs::persistance::RACINE);
     println!("  roadmap: block device -> virtio-blk -> BFS (Bouchaud File System) persistant");
+}
+
+/// `sync` : ecrit la zone persistante sur le disque de donnees.
+///
+/// La commande annoncait jusqu'ici que « le stockage persistant n'est pas
+/// active dans V0.6 », alors que `/persist` existe et que les programmes y
+/// ecrivent deja par `fsync`. C'etait le seul moyen depuis le shell de prouver
+/// qu'un fichier survit a un redemarrage, et il mentait. Elle appelle donc
+/// maintenant la meme primitive que l'appel systeme : `persistance::synchronise`.
+pub fn sync_persistant() -> i32 {
+    let ecrits = crate::fs::persistance::synchronise();
+    if ecrits < 0 {
+        vga::set_color(COLOR_YELLOW);
+        println!("sync: zone persistante indisponible (disque de donnees trop petit ou absent)");
+        vga::set_color(COLOR_DEFAULT);
+        return 1;
+    }
+    println!("sync: {} fichier(s) ecrit(s) sous {}", ecrits, crate::fs::persistance::RACINE);
+    0
 }
 
 // ---------------------------------------------------------------------------
@@ -1666,6 +1729,98 @@ pub fn exec_cmd(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
     }
 }
 
+/// Lance un programme nomme directement, sans le mot-cle `exec`.
+///
+/// C'est le repli du shell quand un mot n'est aucune de ses commandes
+/// internes, et c'est le comportement de tout shell POSIX : un token qui
+/// contient une barre oblique designe un chemin, sinon on le cherche dans
+/// `PATH`. Le shell rendait jusqu'ici « commande inconnue » et 127, si bien
+/// qu'un autorun ecrit normalement ne demarrait rien :
+///
+///     + /usr/libexec/ladybird/BouchaudBrowserHost
+///     /usr/libexec/ladybird/BouchaudBrowserHost: commande inconnue
+///
+/// Le diagnostic reste distinct dans les deux cas qui comptent : un nom
+/// introuvable dit qu'il est introuvable, un fichier present mais non
+/// executable dit qu'il ne l'est pas. Confondre les deux, c'est envoyer
+/// chercher un binaire manquant qui est en fait la, sans son bit `+x`.
+pub fn execute_programme(line: &str, argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
+    let nom = argv[0];
+    if nom.is_empty() {
+        return 0;
+    }
+
+    let chemin = match resout_programme(nom, cwd) {
+        Some(chemin) => chemin,
+        None => {
+            vga::set_color(vga::COLOR_RED);
+            println!("{}: commande inconnue", nom);
+            vga::set_color(COLOR_DEFAULT);
+            return 127;
+        }
+    };
+
+    {
+        let fs = ramfs::fs();
+        if let Some(idx) = fs.resolve(&chemin, cwd) {
+            if !fs.can(idx, PERM_X) {
+                vga::set_color(vga::COLOR_RED);
+                println!("{}: permission refusee (bit d'execution absent)", chemin);
+                vga::set_color(COLOR_DEFAULT);
+                return 126;
+            }
+        }
+    }
+
+    let mut args = alloc::vec::Vec::new();
+    args.push(String::from(chemin.as_str()));
+    for i in 1..argc {
+        if !argv[i].is_empty() {
+            args.push(String::from(argv[i]));
+        }
+    }
+    let _ = line;
+
+    let env = crate::kernel::exec::shell_environment();
+    match crate::kernel::exec::exec(&chemin, &args, &env, cwd) {
+        Ok(code) => code,
+        Err(message) => {
+            vga::set_color(vga::COLOR_RED);
+            println!("{}: {}", nom, message);
+            vga::set_color(COLOR_DEFAULT);
+            126
+        }
+    }
+}
+
+/// Le chemin d'un programme nomme, ou `None` s'il n'existe nulle part.
+///
+/// Un token qui contient `/` est un chemin, relatif ou absolu. Sinon on
+/// parcourt `PATH` s'il est defini, et a defaut les repertoires ou Bouchaud
+/// installe ses programmes.
+fn resout_programme(nom: &str, cwd: usize) -> Option<String> {
+    let fs = ramfs::fs();
+    let est_fichier = |chemin: &str| -> bool {
+        matches!(fs.resolve(chemin, cwd), Some(idx) if fs.nodes[idx].kind == NodeKind::File)
+    };
+
+    if nom.contains('/') {
+        return if est_fichier(nom) { Some(String::from(nom)) } else { None };
+    }
+
+    let chemin_env = crate::shell::path_de_recherche();
+    for repertoire in chemin_env.split(':') {
+        if repertoire.is_empty() {
+            continue;
+        }
+        let candidat = alloc::format!("{}/{}", repertoire.trim_end_matches('/'), nom);
+        if est_fichier(&candidat) {
+            return Some(candidat);
+        }
+    }
+    None
+}
+
 /// `elfinfo <fichier>` : analyse un binaire sans l'executer.
 pub fn elfinfo(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
     if argc < 2 {
@@ -1692,7 +1847,9 @@ pub fn elfinfo(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
 /// `strace on|off` : trace les appels systeme sur la sortie serie.
 pub fn strace(argc: usize, argv: &[&str; 12]) {
     if argc < 2 {
-        println!("usage: strace on|off");
+        println!("usage: strace on|echecs|off");
+        println!("  on      tous les appels : inutilisable sur un vrai programme");
+        println!("  echecs  seuls ceux qui rendent une erreur, hors EAGAIN/EINTR");
         println!(
             "etat actuel : {}",
             if crate::kernel::abi::trace_enabled() {
@@ -1705,13 +1862,17 @@ pub fn strace(argc: usize, argv: &[&str; 12]) {
     }
     match argv[1] {
         "on" => {
-            crate::kernel::abi::set_trace(true);
-            println!("strace: trace des appels systeme activee (sortie serie COM1)");
+            crate::kernel::abi::set_trace_mode(crate::kernel::abi::Trace::Tous);
+            println!("strace: tous les appels systeme (sortie serie COM1)");
+        }
+        "echecs" | "errors" => {
+            crate::kernel::abi::set_trace_mode(crate::kernel::abi::Trace::Echecs);
+            println!("strace: seuls les appels en echec (hors EAGAIN/EINTR)");
         }
         "off" => {
-            crate::kernel::abi::set_trace(false);
+            crate::kernel::abi::set_trace_mode(crate::kernel::abi::Trace::Aucune);
             println!("strace: trace desactivee");
         }
-        _ => println!("usage: strace on|off"),
+        _ => println!("usage: strace on|echecs|off"),
     }
 }

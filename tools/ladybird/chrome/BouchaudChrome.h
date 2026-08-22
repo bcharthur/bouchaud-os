@@ -288,15 +288,22 @@ struct State {
     // Cadrage du flux entrant : un message n'est analyse qu'entier.
     Vector<u8> incoming;
 
-    /// Trames a produire encore.
+    /// Recompositions du chrome encore dues.
     ///
-    /// Une entree ne peut pas etre peinte dans la foulee : elle est **mise en
-    /// file** dans WebContent, et la capture demandee au meme instant
-    /// photographierait l'etat d'avant. On demande donc quelques trames sur les
-    /// tics suivants — la premiere montre le resultat, les suivantes rattrapent
-    /// ce qu'une mise en page tardive aurait change. Le compteur retombe a zero
-    /// des que l'utilisateur s'arrete : au repos, rien n'est repeint.
-    int frames_pending { 0 };
+    /// Le *contenu de la page* n'entre pas dans ce compteur, et c'est tout le
+    /// changement : LibWeb sait seul quand son rendu a change, et le dit par
+    /// `request_frame()`. Ce compteur ne couvre que ce que le moteur ne peut
+    /// pas savoir — une lettre tapee dans la barre d'adresse, un bouton
+    /// enfonce, un libelle d'etat. Recomposer pour cela ne coute qu'une copie
+    /// de surface : ni mise en page, ni liste d'affichage, ni rasterisation.
+    int chrome_frames_pending { 0 };
+
+    /// Derniere capture de page recue.
+    ///
+    /// La garder est ce qui permet de redessiner la barre d'outils sans
+    /// redemander une page au moteur. `ShareableBitmap` porte un tampon
+    /// anonyme partage et compte ses references : la retenir ne copie rien.
+    Gfx::ShareableBitmap last_page;
 
     // Compte de series des messages sortants.
     u32 serial { 0 };
@@ -334,12 +341,13 @@ inline bool enabled()
     return value;
 }
 
-/// Demande `count` trames sur les prochains tics du minuteur.
-inline void request_frames(int count = 3)
+/// Demande une recomposition du chrome au prochain tic.
+///
+/// A n'appeler que pour un changement **du chrome**. Une page qui change se
+/// signale toute seule : voir tools/ladybird/prepare-repaint.py.
+inline void request_chrome_frame()
 {
-    auto& s = state();
-    if (count > s.frames_pending)
-        s.frames_pending = count;
+    state().chrome_frames_pending = 1;
 }
 
 inline int environment_int(char const* name, int fallback)
@@ -682,9 +690,13 @@ inline void draw_toolbar(Canvas const& canvas)
 // Composition
 // ----------------------------------------------------------------------------
 
-/// Compose la barre d'outils et la capture de page dans la surface partagee,
-/// puis annonce la trame au compositeur.
-inline bool present(Gfx::ShareableBitmap const& screenshot)
+/// Compose la barre d'outils et la derniere page connue dans la surface
+/// partagee, puis annonce la trame au compositeur.
+///
+/// Ne demande rien au moteur : c'est une copie de pixels deja rasterises.
+/// C'est ce qui permet a une lettre tapee dans la barre d'adresse de ne pas
+/// declencher une mise en page complete du document.
+inline bool compose()
 {
     auto& s = state();
     if (s.surface_fd < 0 || s.gui_fd < 0 || s.surface_width <= 0 || s.surface_height <= 0) {
@@ -720,8 +732,8 @@ inline bool present(Gfx::ShareableBitmap const& screenshot)
     fill_rect(canvas, 0, page_top, s.surface_width, page_height, color_page_backdrop);
 
     size_t painted = 0;
-    if (screenshot.is_valid() && screenshot.bitmap()) {
-        auto const& bitmap = *screenshot.bitmap();
+    if (s.last_page.is_valid() && s.last_page.bitmap()) {
+        auto const& bitmap = *s.last_page.bitmap();
         auto copy_width = min(bitmap.width(), s.surface_width);
         auto copy_height = min(bitmap.height(), page_height);
         for (int y = 0; y < copy_height; ++y) {
@@ -744,6 +756,22 @@ inline bool present(Gfx::ShareableBitmap const& screenshot)
             painted, s.surface_width, page_height);
     }
     return true;
+}
+
+/// Recoit une nouvelle capture du moteur et l'affiche.
+///
+/// C'est le seul point ou `last_page` change. Une capture invalide n'ecrase
+/// pas la precedente : mieux vaut reafficher la page d'avant qu'un rectangle
+/// vide.
+inline bool present(Gfx::ShareableBitmap const& screenshot)
+{
+    auto& s = state();
+    if (screenshot.is_valid() && screenshot.bitmap())
+        s.last_page = screenshot;
+    // La page vient d'etre recomposee : une recomposition de chrome encore en
+    // attente serait redondante.
+    s.chrome_frames_pending = 0;
+    return compose();
 }
 
 // ----------------------------------------------------------------------------
@@ -861,7 +889,10 @@ inline void dispatch_mouse(Web::MouseEvent::Type type, int x, int y, unsigned bu
     event.wheel_delta_y = wheel_y;
     event.click_count = type == Web::MouseEvent::Type::MouseDown ? 1 : 0;
     s.on_mouse_event(move(event));
-    request_frames();
+    // M11_PAGE_INPUT_NO_CHROME_COMPOSE:
+    // Le pointeur appartient a la page. Si :hover/scroll/clic change le rendu,
+    // LibWeb invalide et produit lui-meme une nouvelle frame. Recomposer ici
+    // ne ferait que recopier l'ancienne capture sur toute la surface.
 }
 
 inline void handle_pointer(int x, int y, unsigned buttons)
@@ -907,7 +938,7 @@ inline void handle_pointer(int x, int y, unsigned buttons)
             } else {
                 s.address_focused = false;
             }
-            request_frames();
+            request_chrome_frame();
         }
 
         s.last_x = x;
@@ -919,7 +950,7 @@ inline void handle_pointer(int x, int y, unsigned buttons)
     // les touches suivantes continueraient d'aller dans la barre.
     if (pressed != 0 && s.address_focused) {
         s.address_focused = false;
-        request_frames();
+        request_chrome_frame();
     }
 
     auto page_x = x;
@@ -978,7 +1009,8 @@ inline void dispatch_key_to_page(Web::UIEvents::KeyCode code, u32 code_point, bo
     up.repeat = false;
     up.should_insert_text = false;
     s.on_key_event(move(up));
-    request_frames();
+    // Même règle que pour la souris : une touche envoyee au document ne change
+    // pas le chrome. Le moteur demandera un repaint si le DOM visuel change.
 }
 
 inline void handle_key(u32 code, u32 code_point, u32 modifiers, u32 pressed)
@@ -1026,7 +1058,7 @@ inline void handle_key(u32 code, u32 code_point, u32 modifiers, u32 pressed)
         default:
             break;
         }
-        request_frames();
+        request_chrome_frame();
         return;
     }
 
@@ -1063,13 +1095,17 @@ inline void handle_key(u32 code, u32 code_point, u32 modifiers, u32 pressed)
             s.status = "arrete";
             if (s.on_stop)
                 s.on_stop();
+            // Ici le chrome change reellement ("arrete"), donc une seule
+            // recomposition est legitime.
+            request_chrome_frame();
         }
         dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Escape, 0, false);
         break;
     default:
         break;
     }
-    request_frames();
+    // Pas de request_chrome_frame() ici : hors barre d'adresse, ces touches
+    // appartiennent au document et son invalidation pilote le rendu.
 }
 
 // ----------------------------------------------------------------------------
@@ -1099,9 +1135,15 @@ inline void handle_message(u16 kind, u8 const* payload, u32 size)
             auto height = static_cast<int>(read_u32(payload, 8));
             // La surface n'est pas reallouee par ce jalon (§11 du protocole) :
             // on note la geometrie sans y croire davantage que la surface.
-            if (width > 0 && height > 0 && (width != s.surface_width || height != s.surface_height))
+            if (width > 0 && height > 0 && (width != s.surface_width || height != s.surface_height)) {
                 outln("[ladybird-bouchaud] M11_CONFIGURE {}x{} (surface {}x{})",
                     width, height, s.surface_width, s.surface_height);
+                // Le seul cas ou le chrome sait avant le moteur qu'il faut
+                // repeindre la page : la geometrie a change, et rien dans le
+                // document ne s'en est apercu.
+                if (s.on_repaint)
+                    s.on_repaint();
+            }
         }
         break;
     case Genre::Key:
@@ -1180,30 +1222,27 @@ inline void drain()
         s.incoming.remove(0, offset);
 }
 
-/// Un tic du minuteur : lire les entrees, puis produire au plus une trame.
+/// Un tic du minuteur : lire les entrees, puis recomposer si le chrome a change.
 ///
-/// Separer les deux est ce qui rend le rythme correct. `drain()` ne fait
-/// qu'empiler des evenements dans WebContent ; la capture demandee ici tombe au
-/// tic **suivant**, quand la boucle du moteur les a reellement traites.
+/// Ce que ce tic ne fait plus : reclamer une trame de page. Il le faisait a
+/// chaque tic pendant un chargement, et `queue_screenshot_task()` appelle
+/// `set_needs_repaint()` — donc soixante fois par seconde nous repondions
+/// « oui, repeins » a la question que le moteur n'avait pas encore posee. Son
+/// modele d'invalidation en devenait inoperant, et la machine passait 90 a 98 %
+/// de son unique cœur a remettre en page un document inchange.
+///
+/// Le contenu de la page arrive maintenant par `present()`, quand LibWeb a
+/// decide qu'il fallait repeindre. Voir tools/ladybird/prepare-repaint.py.
 inline void tick()
 {
     drain();
 
     auto& s = state();
-    if (s.loading) {
-        // Pendant un chargement, la page se peint par morceaux. Suivre le
-        // rythme est ce qui distingue une page qui apparait d'une page qui
-        // surgit d'un coup au bout de trois secondes.
-        if (s.frames_pending < 1)
-            s.frames_pending = 1;
-    }
-
-    if (s.frames_pending <= 0)
+    if (s.chrome_frames_pending <= 0)
         return;
 
-    --s.frames_pending;
-    if (s.on_repaint)
-        s.on_repaint();
+    --s.chrome_frames_pending;
+    compose();
 }
 
 // ----------------------------------------------------------------------------
@@ -1249,7 +1288,7 @@ inline void set_committed_url(ByteString const& url)
     s.secure = url.starts_with("https://"sv);
     if (!s.address_focused)
         set_address_text(url.view());
-    request_frames();
+    request_chrome_frame();
 }
 
 inline void set_loading(bool loading, StringView status)
@@ -1257,7 +1296,7 @@ inline void set_loading(bool loading, StringView status)
     auto& s = state();
     s.loading = loading;
     s.status = status;
-    request_frames();
+    request_chrome_frame();
 }
 
 inline void set_title(ByteString const& title)

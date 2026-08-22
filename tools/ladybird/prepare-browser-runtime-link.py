@@ -104,6 +104,11 @@ replace_once(
 )
 append_runtime_link_options(compositor, "Compositor")
 
+# WebDriver est un runtime Bouchaud lui aussi.
+# Il doit etre lie en static PIE comme les autres services embarques.
+webdriver = root / "Services/WebDriver/CMakeLists.txt"
+append_runtime_link_options(webdriver, "WebDriver")
+
 # WebView::platform_init() normally derives resource:// from the executable's
 # Linux install prefix. Bouchaud intentionally packages helper processes under
 # /usr/libexec/ladybird while the milestone disk puts Ladybird resources in

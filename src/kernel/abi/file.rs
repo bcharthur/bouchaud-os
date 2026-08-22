@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 use crate::drivers::keyboard::{self, Key};
 use crate::fs::backing;
 use crate::fs::ramfs::{self, NodeKind};
-use crate::kernel::abi::{errno, user_read, user_read_u64, user_write};
+use crate::kernel::abi::{errno, user_read, user_read_u64, user_write, verrous};
 use crate::kernel::fd::{device_for_path, FdKind, FileDesc};
 use crate::kernel::input;
 use crate::kernel::task;
@@ -39,6 +39,13 @@ const S_IFREG: u32 = 0o100000;
 const S_IFDIR: u32 = 0o40000;
 const S_IFCHR: u32 = 0o20000;
 const S_IFIFO: u32 = 0o10000;
+/// `S_IFSOCK`. Une socket doit se declarer comme telle : `S_ISSOCK` est la
+/// seule facon pour un programme de verifier qu'un descripteur herite est bien
+/// un canal de communication et non un fichier quelconque. Ladybird s'en sert
+/// avant d'adopter la socket que son lanceur lui passe
+/// (`LibCore/SystemServerTakeover.cpp`), et refuse le descripteur si `fstat`
+/// repond autre chose.
+const S_IFSOCK: u32 = 0o140000;
 
 // --- Chemins ----------------------------------------------------------------
 
@@ -338,6 +345,7 @@ fn refresh_timerfd(state: &mut crate::kernel::fd::TimerFdState) {
 }
 
 /// `write`.
+/// `write`.
 pub fn sys_write(fd: i32, buffer: u64, count: usize) -> i64 {
     if count == 0 {
         return 0;
@@ -346,6 +354,20 @@ pub fn sys_write(fd: i32, buffer: u64, count: usize) -> i64 {
         Some(data) => data,
         None => return -errno::EFAULT,
     };
+    ecrit_octets(fd, &data)
+}
+
+/// `write`, une fois les octets deja en memoire noyau.
+///
+/// Separe de [`sys_write`] pour que `sendfile` puisse ecrire vers n'importe
+/// quelle sorte de descripteur sans repasser par un tampon utilisateur : la
+/// source d'un `sendfile` est un fichier, sa destination est le plus souvent
+/// une socket ou un tube, et les deux bouts vivent dans le noyau.
+pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
+    let count = data.len();
+    if count == 0 {
+        return 0;
+    }
     let process = task::current_process();
     let kind = match process.borrow().files.get(fd) {
         Some(desc) => desc.kind.clone(),
@@ -473,7 +495,7 @@ pub fn sys_write(fd: i32, buffer: u64, count: usize) -> i64 {
             8
         }
         FdKind::TimerFd(_) => -errno::EINVAL,
-        FdKind::Socket(_) => crate::kernel::abi::net::sys_sendto(fd, buffer, count, 0, 0, 0),
+        FdKind::Socket(_) => crate::kernel::abi::net::envoie_octets(fd, data, 0, 0, 0),
         FdKind::SocketPair(_, outbox) => {
             let non_bloquant = fd_flags(fd) & O_NONBLOCK != 0;
             let place = match attends_place(
@@ -557,6 +579,108 @@ pub fn sys_writev(fd: i32, iov: u64, count: usize) -> i64 {
     total
 }
 
+/// `sendfile`.
+///
+/// Copie jusqu'a `count` octets de `in_fd` vers `out_fd` sans passer par
+/// l'espace utilisateur. Si `offset_ptr` n'est pas nul, la lecture commence a
+/// `*offset_ptr`, la position de `in_fd` n'est PAS modifiee, et `*offset_ptr`
+/// avance du nombre d'octets lus ; sinon la position du descripteur sert de
+/// point de depart et avance.
+///
+/// Linux exige que `in_fd` designe quelque chose de projetable en memoire,
+/// c'est-a-dire un fichier ordinaire, et rend EINVAL sinon. Bouchaud repond de
+/// meme : un tube ou une socket en source rend EINVAL, pas un resultat partiel
+/// qui laisserait croire a une copie.
+///
+/// L'appel manquait, et RequestServer s'en sert precisement pour servir une
+/// reponse HTTP depuis son cache disque
+/// (`Core::System::transfer_file_through_socket`). Au run 32474068384, au
+/// SECOND demarrage -- celui ou le cache existe deja --, l'ENOSYS remontait
+/// jusqu'au JavaScript sous la forme « RequestServer encountered an error
+/// reading a cached HTTP response », et le test HTTPS echouait alors qu'il
+/// avait reussi au demarrage precedent.
+pub fn sys_sendfile(out_fd: i32, in_fd: i32, offset_ptr: u64, count: usize) -> i64 {
+    if count == 0 {
+        return 0;
+    }
+    let process = task::current_process();
+
+    let (source, position_courante) = {
+        let borrowed = process.borrow();
+        match borrowed.files.get(in_fd) {
+            Some(desc) => (desc.kind.clone(), desc.offset),
+            None => return -errno::EBADF,
+        }
+    };
+    if process.borrow().files.get(out_fd).is_none() {
+        return -errno::EBADF;
+    }
+
+    // La source doit etre un fichier : c'est la regle de Linux, et la seule
+    // qui permette de lire a un decalage sans consommer un flux.
+    let node = match source {
+        FdKind::File(node) => node,
+        _ => return -errno::EINVAL,
+    };
+
+    let explicite = offset_ptr != 0;
+    let depart = if explicite {
+        match user_read_u64(offset_ptr) {
+            Some(valeur) => valeur as usize,
+            None => return -errno::EFAULT,
+        }
+    } else {
+        position_courante
+    };
+
+    let total = backing::logical_len(node);
+    if depart >= total {
+        return 0;
+    }
+    let voulu = core::cmp::min(count, total - depart);
+
+    // Par tranches : `count` vient de l'application et peut valoir la taille
+    // entiere d'une reponse HTTP. Une seule allocation de cette taille dans le
+    // tas noyau serait un cout inutile, et un refus d'allocation transformerait
+    // une copie en panne.
+    const TRANCHE: usize = 64 * 1024;
+    let mut tampon = alloc::vec![0u8; core::cmp::min(voulu, TRANCHE)];
+    let mut envoyes = 0usize;
+
+    while envoyes < voulu {
+        let bloc = core::cmp::min(TRANCHE, voulu - envoyes);
+        let lus = backing::read_at(node, depart + envoyes, &mut tampon[..bloc]);
+        if lus == 0 {
+            break;
+        }
+        let ecrits = ecrit_octets(out_fd, &tampon[..lus]);
+        if ecrits < 0 {
+            // Rien n'est encore parti : l'erreur est celle de l'appel. Si en
+            // revanche des octets ont deja ete transmis, c'est ce compte qui
+            // fait foi -- un appelant doit pouvoir reprendre la ou il en est.
+            if envoyes == 0 {
+                return ecrits;
+            }
+            break;
+        }
+        envoyes += ecrits as usize;
+        if (ecrits as usize) < lus {
+            // Ecriture partielle : la destination est pleine.
+            break;
+        }
+    }
+
+    if explicite {
+        if !user_write(offset_ptr, &((depart + envoyes) as u64).to_le_bytes()) {
+            return -errno::EFAULT;
+        }
+    } else if let Some(desc) = process.borrow_mut().files.get_mut(in_fd) {
+        desc.offset = depart + envoyes;
+    }
+
+    envoyes as i64
+}
+
 /// `pread64`.
 pub fn sys_pread(fd: i32, buffer: u64, count: usize, offset: i64) -> i64 {
     let process = task::current_process();
@@ -621,6 +745,24 @@ pub fn sys_memfd_create(nom_addr: u64, _flags: u32) -> i64 {
         -errno::EMFILE
     } else {
         fd as i64
+    }
+}
+
+/// Traduit l'echec d'une creation de nœud en numero d'erreur POSIX.
+///
+/// Ces echecs rendaient tous ENOSPC. Un nom trop long se presentait donc a
+/// l'application comme un disque plein, ce qui envoie chercher la cause a
+/// l'oppose de la verite : au run 32427953935, chaque telechargement de
+/// Ladybird echouait sur un nom de 67 octets et le journal annoncait ENOSPC
+/// sur un disque de 1166 Mio dont 4 % des inodes seulement etaient pris. La
+/// couche WASI faisait deja cette distinction ; l'ABI native, non.
+fn errno_creation(raison: &'static str) -> i64 {
+    match raison {
+        "invalid name" => errno::ENAMETOOLONG,
+        "no free inode" => errno::ENOSPC,
+        "parent not a directory" => errno::ENOTDIR,
+        "already exists" => errno::EEXIST,
+        _ => errno::ENOSPC,
     }
 }
 
@@ -723,7 +865,7 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
                     fs.nodes[node].mode = (mode & 0o777) as u16;
                     node
                 }
-                Err(_) => return -errno::ENOSPC,
+                Err(raison) => return -errno_creation(raison),
             }
         }
     };
@@ -764,7 +906,27 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
 /// `close`.
 pub fn sys_close(fd: i32) -> i64 {
     let process = task::current_process();
+
+    // POSIX : fermer n'importe quel descripteur d'un processus sur un fichier
+    // relache TOUS les verrous d'enregistrement de ce processus sur ce fichier,
+    // meme s'il lui en reste d'autres ouverts dessus. SQLite compte dessus pour
+    // rendre la base a la fermeture ; sans cela un verrou survit au `close` et
+    // la reouverture suivante se croit bloquee par un fantome.
+    let verrouille = {
+        let borrowed = process.borrow();
+        match borrowed.files.get(fd) {
+            Some(desc) => match desc.kind {
+                FdKind::File(node) => Some((node, borrowed.pid)),
+                _ => None,
+            },
+            None => None,
+        }
+    };
+
     let closed = process.borrow_mut().files.close(fd);
+    if let Some((node, pid)) = verrouille {
+        verrous::libere_fichier(node, pid);
+    }
     if closed {
         0
     } else {
@@ -860,8 +1022,18 @@ pub fn sys_fcntl(fd: i32, command: u32, arg: u64) -> i64 {
     const F_SETFD: u32 = 2;
     const F_GETFL: u32 = 3;
     const F_SETFL: u32 = 4;
+    const F_GETLK: u32 = 5;
+    const F_SETLK: u32 = 6;
+    const F_SETLKW: u32 = 7;
     const F_DUPFD_CLOEXEC: u32 = 1030;
     const FD_CLOEXEC: u64 = 1;
+
+    // Les verrous d'enregistrement prennent leur propre chemin : ils lisent et
+    // reecrivent une structure utilisateur, et `F_SETLKW` attend, ce qu'on ne
+    // peut pas faire en tenant le `RefCell` du processus.
+    if command == F_GETLK || command == F_SETLK || command == F_SETLKW {
+        return fcntl_verrou(fd, command, arg);
+    }
 
     let process = task::current_process();
     let mut borrowed = process.borrow_mut();
@@ -902,7 +1074,136 @@ pub fn sys_fcntl(fd: i32, command: u32, arg: u64) -> i64 {
             }
             None => -errno::EBADF,
         },
-        _ => 0,
+        // Une commande qu'on ne sait pas honorer doit le dire. Repondre « 0 »
+        // a tout faisait croire a chaque appelant que sa demande avait ete
+        // prise en compte -- c'est ainsi que les verrous d'enregistrement
+        // semblaient fonctionner alors que rien n'etait pose.
+        _ => -errno::EINVAL,
+    }
+}
+
+/// `struct flock` de l'ABI Linux x86-64, 32 octets :
+///
+/// ```text
+/// 0   i16  l_type      F_RDLCK / F_WRLCK / F_UNLCK
+/// 2   i16  l_whence    SEEK_SET / SEEK_CUR / SEEK_END
+/// 4        (bourrage d'alignement pour l_start)
+/// 8   i64  l_start
+/// 16  i64  l_len       0 = jusqu'a la fin du fichier
+/// 24  i32  l_pid       rempli par F_GETLK
+/// 28       (bourrage de fin)
+/// ```
+const TAILLE_FLOCK: usize = 32;
+
+/// `fcntl(F_GETLK/F_SETLK/F_SETLKW)` : verrous d'enregistrement POSIX.
+///
+/// Voir `crate::kernel::abi::verrous` pour le modele et pour ce dont SQLite
+/// depend exactement.
+fn fcntl_verrou(fd: i32, command: u32, arg: u64) -> i64 {
+    const F_GETLK: u32 = 5;
+    const F_SETLKW: u32 = 7;
+    const SEEK_SET: i16 = 0;
+    const SEEK_CUR: i16 = 1;
+    const SEEK_END: i16 = 2;
+
+    let brut = match user_read(arg, TAILLE_FLOCK) {
+        Some(octets) => octets,
+        None => return -errno::EFAULT,
+    };
+    let genre = i16::from_le_bytes([brut[0], brut[1]]);
+    let origine = i16::from_le_bytes([brut[2], brut[3]]);
+    let depart = i64::from_le_bytes(brut[8..16].try_into().unwrap());
+    let longueur = i64::from_le_bytes(brut[16..24].try_into().unwrap());
+
+    if genre != verrous::F_RDLCK && genre != verrous::F_WRLCK && genre != verrous::F_UNLCK {
+        return -errno::EINVAL;
+    }
+
+    // Identite du fichier et contexte necessaires a la resolution de l_whence.
+    let process = task::current_process();
+    let (noeud, position, taille, pid) = {
+        let borrowed = process.borrow();
+        let desc = match borrowed.files.get(fd) {
+            Some(desc) => desc,
+            None => return -errno::EBADF,
+        };
+        let noeud = match desc.kind {
+            FdKind::File(node) => node,
+            // POSIX : les verrous d'enregistrement ne valent que pour les
+            // fichiers ordinaires. Un tube ou un socket doit recevoir EINVAL,
+            // pas un acquiescement muet.
+            _ => return -errno::EINVAL,
+        };
+        (
+            noeud,
+            desc.offset as i64,
+            backing::logical_len(noeud) as i64,
+            borrowed.pid,
+        )
+    };
+
+    let base = match origine {
+        SEEK_SET => 0,
+        SEEK_CUR => position,
+        SEEK_END => taille,
+        _ => return -errno::EINVAL,
+    };
+
+    // Une longueur negative decrit la plage qui PRECEDE l_start (POSIX.1-2001).
+    let (debut_signe, longueur_absolue) = if longueur < 0 {
+        (base + depart + longueur, -longueur)
+    } else {
+        (base + depart, longueur)
+    };
+    if debut_signe < 0 {
+        return -errno::EINVAL;
+    }
+    let debut = debut_signe as u64;
+    let longueur_absolue = longueur_absolue as u64;
+
+    if command == F_GETLK {
+        let mut sortie = brut.clone();
+        match verrous::interroge(noeud, pid, genre, debut, longueur_absolue) {
+            Some((genre_bloquant, debut_bloquant, longueur_bloquante, pid_bloquant)) => {
+                sortie[0..2].copy_from_slice(&genre_bloquant.to_le_bytes());
+                sortie[2..4].copy_from_slice(&SEEK_SET.to_le_bytes());
+                sortie[8..16].copy_from_slice(&(debut_bloquant as i64).to_le_bytes());
+                sortie[16..24].copy_from_slice(&(longueur_bloquante as i64).to_le_bytes());
+                sortie[24..28].copy_from_slice(&(pid_bloquant as i32).to_le_bytes());
+            }
+            None => {
+                // Rien ne bloque : c'est CETTE ecriture que SQLite lit pour
+                // decider qu'il peut avancer.
+                sortie[0..2].copy_from_slice(&verrous::F_UNLCK.to_le_bytes());
+            }
+        }
+        if !user_write(arg, &sortie) {
+            return -errno::EFAULT;
+        }
+        return 0;
+    }
+
+    // F_SETLK / F_SETLKW.
+    //
+    // `F_SETLKW` attend que la plage se libere. Bouchaud n'a pas de file
+    // d'attente par verrou ; on rend la main a l'ordonnanceur, comme le fait
+    // deja une lecture bloquante sur un tube. La patience est bornee : un
+    // interblocage franc doit se voir en EDEADLK, pas figer le systeme.
+    let patience = 5 * crate::kernel::timer::TICKS_PER_SECOND;
+    let depart_attente = crate::kernel::timer::ticks();
+    loop {
+        match verrous::pose(noeud, pid, genre, debut, longueur_absolue) {
+            verrous::Pose::Accorde => return 0,
+            verrous::Pose::Occupe => {
+                if command != F_SETLKW {
+                    return -errno::EAGAIN;
+                }
+                if crate::kernel::timer::ticks().saturating_sub(depart_attente) > patience {
+                    return -errno::EDEADLK;
+                }
+                task::yield_now();
+            }
+        }
     }
 }
 
@@ -994,6 +1295,14 @@ pub fn sys_fstat(fd: i32, out: u64) -> i64 {
         FdKind::File(node) | FdKind::Dir(node) => fill_stat(node),
         FdKind::Console => stat_bytes(0, S_IFCHR | 0o620, 0, 0, 0),
         FdKind::Pipe(_, _) => stat_bytes(0, S_IFIFO | 0o600, 0, 0, 0),
+        // Les deux sortes de sockets. Sans ce cas, elles tombaient dans le
+        // fourre-tout `S_IFCHR` ci-dessous et `S_ISSOCK` etait faux : le
+        // lanceur de Ladybird passe ses services par `SOCKET_TAKEOVER`, et le
+        // service refusait le descripteur avant meme d'ouvrir sa boucle
+        // d'evenements.
+        FdKind::Socket(_) | FdKind::SocketPair(_, _) => {
+            stat_bytes(0, S_IFSOCK | 0o777, 0, 0, 0)
+        }
         // Un fichier ordinaire, avec sa taille : la glibc dimensionne le tampon
         // de `fopen` dessus. Le declarer caractere ferait lire octet par octet.
         FdKind::Instantane(ref contenu) => {
@@ -1226,7 +1535,7 @@ pub fn sys_mkdir(path_addr: u64) -> i64 {
     }
     match fs.mkdir_at(parent, name) {
         Ok(_) => 0,
-        Err(_) => -errno::ENOSPC,
+        Err(raison) => -errno_creation(raison),
     }
 }
 
@@ -2293,4 +2602,80 @@ fn write_itimerspec(addr: u64, interval_ticks: u64, value_ticks: u64) {
         user_write(addr + offset, &seconds.to_le_bytes());
         user_write(addr + offset + 8, &nanos.to_le_bytes());
     }
+}
+
+// --- Statistiques de systeme de fichiers -------------------------------------
+
+/// `statfs` / `fstatfs` : `struct statfs` de 120 octets (x86_64).
+///
+/// ## Pourquoi ce n'est pas un bouchon
+///
+/// Ladybird interroge l'espace disque par `statvfs`, et la glibc sert
+/// `statvfs`/`fstatvfs` a partir de `statfs`/`fstatfs`. Le seul appelant du
+/// portage est `LibHTTP/Cache/CacheIndex.cpp`, qui dimensionne le cache HTTP
+/// sur l'espace **libre** :
+///
+///     auto disk_space = TRY(FileSystem::compute_disk_space(cache_directory));
+///     auto maximum = compute_maximum_disk_cache_size(disk_space.free_bytes);
+///
+/// Rendre `0` ferait donc un cache de taille nulle, et rendre `ENOSYS` fait
+/// echouer l'initialisation du cache. Les deux sont des reponses fausses, pas
+/// une absence de reponse.
+///
+/// Sur Bouchaud le systeme de fichiers est en memoire vive : son espace libre
+/// **est** la memoire libre. C'est ce que rend cette implementation, avec le
+/// nombre reel de frames disponibles et le nombre reel de nœuds RAMFS encore
+/// alloues. Aucune de ces valeurs n'est inventee.
+fn statfs_bytes() -> [u8; 120] {
+    const BLOC: u64 = 4096;
+    let (_, frames_libres, frames_totales) = crate::kernel::vmm::frame_stats();
+    let fs = crate::fs::ramfs::fs();
+    let nœuds_utilises = fs.used_nodes() as u64;
+    let nœuds_totaux = crate::fs::ramfs::MAX_NODES as u64;
+
+    let mut buffer = [0u8; 120];
+    // f_type : `RAMFS_MAGIC`, la valeur que Linux rend pour un tmpfs/ramfs.
+    // Certains programmes s'en servent pour savoir qu'un chemin est volatil.
+    buffer[0..8].copy_from_slice(&0x8584_58f6u64.to_le_bytes()); // f_type
+    buffer[8..16].copy_from_slice(&BLOC.to_le_bytes()); // f_bsize
+    buffer[16..24].copy_from_slice(&(frames_totales as u64).to_le_bytes()); // f_blocks
+    buffer[24..32].copy_from_slice(&(frames_libres as u64).to_le_bytes()); // f_bfree
+    buffer[32..40].copy_from_slice(&(frames_libres as u64).to_le_bytes()); // f_bavail
+    buffer[40..48].copy_from_slice(&nœuds_totaux.to_le_bytes()); // f_files
+    buffer[48..56].copy_from_slice(&(nœuds_totaux - nœuds_utilises).to_le_bytes()); // f_ffree
+    // `f_fsid` ne fait que **huit** octets (deux entiers 32 bits), pas seize :
+    // les champs suivants commencent donc a 64 et 72, et non a 72 et 80.
+    // Decales, ils laissaient `f_namelen` a zero et faisaient passer 255 pour
+    // `f_frsize` — or `compute_disk_space` calcule `f_bavail * f_frsize`, donc
+    // l'espace libre etait annonce seize fois trop petit.
+    // f_fsid (56..64) laisse a zero : un seul systeme de fichiers.
+    buffer[64..72].copy_from_slice(&255u64.to_le_bytes()); // f_namelen
+    buffer[72..80].copy_from_slice(&BLOC.to_le_bytes()); // f_frsize
+    // f_flags (80..88) laisse a zero : aucun ST_RDONLY, ST_NOSUID ni ST_NOEXEC
+    // n'est vrai ici, et 4096 s'y retrouvait par le meme decalage.
+    buffer
+}
+
+/// `statfs(chemin, buf)`.
+pub fn sys_statfs(path_addr: u64, out: u64) -> i64 {
+    let path = match crate::kernel::abi::resolve_user_path(path_addr) {
+        Some(path) => absolute(&path),
+        None => return -errno::EFAULT,
+    };
+    // Le chemin doit exister : c'est la seule difference observable avec
+    // `fstatfs`, et un appelant qui teste un repertoire de cache absent doit
+    // recevoir `ENOENT` plutot qu'une taille.
+    if resolve(&path).is_none() && device_for_path(&path).is_none() {
+        return -errno::ENOENT;
+    }
+    if user_write(out, &statfs_bytes()) { 0 } else { -errno::EFAULT }
+}
+
+/// `fstatfs(fd, buf)`.
+pub fn sys_fstatfs(fd: i32, out: u64) -> i64 {
+    let process = task::current_process();
+    if process.borrow().files.get(fd).is_none() {
+        return -errno::EBADF;
+    }
+    if user_write(out, &statfs_bytes()) { 0 } else { -errno::EFAULT }
 }
