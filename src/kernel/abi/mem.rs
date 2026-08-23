@@ -264,7 +264,7 @@ pub fn sys_mmap(
                     if populate {
                         let mut page = base;
                         while page < base + length {
-                            if !task::peuple_a_la_demande(page) {
+                            if !task::peuple_a_la_demande(page, false) {
                                 return -errno::ENOMEM;
                             }
                             page += PAGE_SIZE;
@@ -354,7 +354,7 @@ pub fn sys_mmap(
     if populate {
         let mut page = base;
         while page < base + length {
-            if !task::peuple_a_la_demande(page) {
+            if !task::peuple_a_la_demande(page, false) {
                 return -errno::ENOMEM;
             }
             page += PAGE_SIZE;

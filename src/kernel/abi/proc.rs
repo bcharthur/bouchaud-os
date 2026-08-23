@@ -261,6 +261,28 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
     usermode::set_kernel_stack(task.kstack_top);
     let frame = TrapFrame::new_user(entry, stack);
     task.frame = frame;
+
+    // BOUCHAUD_EXECVE_NORETURN_BKL_FIX_V1
+    //
+    // `sys_execve` ne retourne jamais vers `syscall_dispatch`: il saute
+    // directement vers le nouveau ring3 via `resume_usermode`. Le RAII
+    // `KernelGuard` cree dans syscall_dispatch est donc abandonne sur l'ancienne
+    // pile noyau et son Drop ne peut jamais liberer le BKL.
+    //
+    // Avant ce fix, un execve reussi laissait OWNER=CPU courant et DEPTH=1
+    // indefiniment. Le nouveau programme pouvait etre preempte, mais toute la
+    // machine continuait avec un BKL fantome, ce qui gelait Ladybird.
+    //
+    // Comme cette pile ne reprendra jamais, on libere explicitement toute la
+    // profondeur BKL et on ferme aussi la sonde syscall avant l'iretq.
+    task::stall_site_clear();
+    task::stall_syscall_exit();
+    let abandoned_depth = crate::kernel::smp_lock::suspend_for_schedule();
+    debug_assert!(
+        abandoned_depth > 0,
+        "execve: chemin no-return sans BKL syscall actif"
+    );
+
     unsafe { usermode::resume_usermode(&task.frame) }
 }
 

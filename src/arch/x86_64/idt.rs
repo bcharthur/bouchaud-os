@@ -36,10 +36,11 @@ pub fn init() {
         IDT[InterruptIndex::AtaPrimary.as_usize()].set_handler_fn(ata_primary_handler);
         IDT[InterruptIndex::AtaSecondary.as_usize()].set_handler_fn(ata_secondary_handler);
         IDT[smp::RESCHEDULE_VECTOR as usize].set_handler_fn(reschedule_interrupt_handler);
+        IDT[smp::TLB_SHOOTDOWN_VECTOR as usize].set_handler_fn(tlb_shootdown_interrupt_handler);
         IDT.load();
         READY = true;
     }
-    dmesg::log("idt: IDT chargee (exceptions + IRQ + IPI reschedule SMP)");
+    dmesg::log("idt: IDT chargee (exceptions + IRQ + IPI reschedule/TLB SMP-NG2)");
 }
 
 /// IDTR est un registre par CPU : les AP rechargent la meme table immutable.
@@ -149,7 +150,10 @@ extern "x86-interrupt" fn page_fault_handler(stack: InterruptStackFrame, code: P
     let _kernel = crate::kernel::smp_lock::enter();
     crate::kernel::task::stall_site_set(21, addr.as_u64());
     if from_user(&stack) && crate::kernel::task::in_user_task() {
-        if crate::kernel::task::peuple_a_la_demande(addr.as_u64()) {
+        if crate::kernel::task::peuple_a_la_demande(
+            addr.as_u64(),
+            code.contains(PageFaultErrorCode::PROTECTION_VIOLATION),
+        ) {
             crate::kernel::task::stall_pf_done(addr.as_u64());
             crate::kernel::task::stall_site_clear();
             return;
@@ -212,6 +216,14 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
     }
 }
 
+
+// BOUCHAUD_SMP_NG2_TLB_HANDLER_V1
+/// Shootdown TLB: aucun BKL ici. L'emetteur peut justement etre en train de
+/// tenir le BKL pendant un munmap/mprotect et attend notre ACK.
+extern "x86-interrupt" fn tlb_shootdown_interrupt_handler(stack: InterruptStackFrame) {
+    let _gs = GsGuard::enter(&stack);
+    smp::handle_tlb_shootdown();
+}
 
 /// IPI de quantum sur AP. S'il faudrait attendre le Big Kernel Lock, on ne
 /// bloque pas le coeur dans l'IRQ : on pose seulement NEED_RESCHED, qui sera

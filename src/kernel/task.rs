@@ -130,7 +130,7 @@ static mut FAULTS_FILE: u64 = 0;
 /// La derniere promesse couvrant la page fixe les droits. Toutes les promesses
 /// file-backed couvrant cette meme page contribuent ensuite leurs octets : deux
 /// PT_LOAD ELF peuvent legalement partager une page de bordure.
-pub fn peuple_a_la_demande(adresse: u64) -> bool {
+pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> bool {
     if !crate::kernel::vmm::is_user_addr(adresse) || !in_user_task() {
         return false;
     }
@@ -152,7 +152,10 @@ pub fn peuple_a_la_demande(adresse: u64) -> bool {
     }
 
     if p.space.translate(page).is_some() {
-        return false;
+        // Un autre CPU du meme processus a pu materialiser la page pendant que
+        // cette faute attendait le BKL. Dans ce cas le fault est deja resolu.
+        // Une faute de protection, elle, reste fatale et ne doit pas boucler.
+        return !protection_fault;
     }
 
     match effective.backing {
@@ -508,8 +511,14 @@ pub struct Task {
     pub state: TaskState,
     /// Classe d'ordonnancement. Voir [`Priorite`].
     pub priorite: Priorite,
-    /// CPU d'affinite. Tous les threads d'un meme processus partagent ce CPU.
-    pub home_cpu: u8,
+    // BOUCHAUD_SMP_NG2_THREAD_BALANCER_TLB_V1
+    /// Masque d'affinite par THREAD. Les taches user naissent sur tous les CPU
+    /// online; les fils noyau restent CPU0.
+    pub affinity_mask: u64,
+    /// Proprietaire logique de la runqueue quand la tache est Ready.
+    pub runq_cpu: u8,
+    /// Dernier CPU sur lequel la tache a reellement execute.
+    pub last_cpu: u8,
     /// CPU qui execute actuellement cette tache, -1 si elle est en runqueue.
     pub on_cpu: i8,
     /// Etat ring 3 quand la tache n'est pas en cours d'execution.
@@ -571,6 +580,8 @@ static mut KERNEL_CTX: [Context; MAX_CPUS] = [Context { rsp: 0 }; MAX_CPUS];
 static NEED_RESCHED: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 static CURRENT_IS_KERNEL: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 static TOURS_INTERACTIFS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+static RUNQ_STEALS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static CPU_MIGRATIONS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
 static CONTEXT_SWITCHES: AtomicU64 = AtomicU64::new(0);
 static IRQ_PREEMPTIONS: AtomicU64 = AtomicU64::new(0);
@@ -1016,7 +1027,9 @@ impl Task {
             // interactive — un programme qui ne demande rien ne doit pas
             // pouvoir prendre le pas sur l'interface par accident.
             priorite: Priorite::Normale,
-            home_cpu: u8::MAX,
+            affinity_mask: 0,
+            runq_cpu: u8::MAX,
+            last_cpu: u8::MAX,
             on_cpu: -1,
             frame,
             ctx: Context::default(),
@@ -1055,7 +1068,9 @@ impl Task {
         // restauree, puisque le trampoline noyau ne fait pas d'`iretq`.
         let mut task = Task::new(process, TrapFrame::new_user(0, 0));
         task.noyau = true;
-        task.home_cpu = 0;
+        task.affinity_mask = 1;
+        task.runq_cpu = 0;
+        task.last_cpu = 0;
         task.entree_noyau = Some(entree);
         // Un fil noyau demarre **interruptions actives** : rien ne les
         // retablira pour lui plus tard. Sans `IF`, sa premiere attente
@@ -1088,45 +1103,89 @@ fn amorce_pile(task: &mut Task, trampoline: extern "C" fn() -> !, rflags: u64) {
     }
 }
 
-/// Choisit le CPU d'un nouveau processus. Les threads d'un processus existant
-/// reprennent obligatoirement son CPU : pas de migration d'espace d'adressage,
-/// donc pas de TLB shootdown requis dans ce jalon.
-fn choose_home_cpu(process: &Rc<RefCell<Process>>) -> u8 {
-    let pid = process.borrow().pid;
-    if let Some(existing) = tasks().iter().find(|t| {
-        t.state != TaskState::Zombie && t.home_cpu != u8::MAX && t.process.borrow().pid == pid
-    }) {
-        return existing.home_cpu;
-    }
+/// Masque des CPU logiques actuellement utilisables.
+fn online_affinity_mask() -> u64 {
+    let online = smp::schedulable_cpus().max(1).min(MAX_CPUS).min(64);
+    if online >= 64 { u64::MAX } else { (1u64 << online) - 1 }
+}
 
+#[inline]
+fn allowed_on(task: &Task, cpu: usize) -> bool {
+    cpu < 64 && task.affinity_mask & (1u64 << cpu) != 0
+}
+
+fn running_count_cpu(cpu: usize) -> usize {
+    tasks().iter()
+        .filter(|t| t.state != TaskState::Zombie && t.on_cpu == cpu as i8)
+        .count()
+}
+
+fn queue_pressure(cpu_id: usize) -> usize {
+    tasks().iter()
+        .filter(|t| {
+            t.state == TaskState::Ready
+                && t.on_cpu < 0
+                && t.runq_cpu as usize == cpu_id
+                && allowed_on(t, cpu_id)
+        })
+        .count()
+}
+
+/// Placement initial d'un THREAD. Le score combine pression de runqueue,
+/// nombre de taches deja running et charge mesuree. CPU0 recoit une petite
+/// penalite car il porte le desktop/PIC, sans devenir interdit au userland.
+fn choose_runq_cpu(mask: u64) -> u8 {
     let online = smp::schedulable_cpus().max(1).min(MAX_CPUS);
-    let mut load = [0usize; MAX_CPUS];
-    // Le BSP porte le desktop, le PIT et les IRQ PIC : reserver davantage sa
-    // capacite aux interactions et envoyer les services Ladybird vers les AP.
-    load[0] = 2;
-    for task in tasks().iter() {
-        if task.state != TaskState::Zombie && task.home_cpu != u8::MAX {
-            let cpu = task.home_cpu as usize;
-            if cpu < online && !task.noyau {
-                load[cpu] = load[cpu].saturating_add(1);
-            }
+    let mut best_cpu = 0usize;
+    let mut best_score = usize::MAX;
+
+    for cpu_id in 0..online {
+        if cpu_id >= 64 || mask & (1u64 << cpu_id) == 0 {
+            continue;
+        }
+        let rq = queue_pressure(cpu_id);
+        let running = running_count_cpu(cpu_id);
+        let measured = cpu::load_percent_cpu(cpu_id) as usize;
+        let bsp_penalty = if cpu_id == 0 && online > 1 { 24 } else { 0 };
+        let score = rq.saturating_mul(32)
+            .saturating_add(running.saturating_mul(16))
+            .saturating_add(measured)
+            .saturating_add(bsp_penalty);
+        if score < best_score {
+            best_score = score;
+            best_cpu = cpu_id;
         }
     }
-    (0..online).min_by_key(|&cpu| load[cpu]).unwrap_or(0) as u8
+    best_cpu as u8
 }
 
 /// Ajoute une tache a la table et renvoie son indice. En SMP les indices ne
 /// bougent jamais : un slot zombie est recycle au lieu de compacter le Vec.
 pub fn register(mut task: Box<Task>) -> usize {
     let _kernel = smp_lock::enter();
+
     if task.noyau {
-        task.home_cpu = 0;
-    } else if task.home_cpu == u8::MAX {
-        task.home_cpu = choose_home_cpu(&task.process);
+        task.affinity_mask = 1;
+        task.runq_cpu = 0;
+        task.last_cpu = 0;
+    } else {
+        if task.affinity_mask == 0 {
+            task.affinity_mask = online_affinity_mask();
+        } else {
+            task.affinity_mask &= online_affinity_mask();
+            if task.affinity_mask == 0 {
+                task.affinity_mask = online_affinity_mask();
+            }
+        }
+        if task.runq_cpu == u8::MAX || !allowed_on(&task, task.runq_cpu as usize) {
+            task.runq_cpu = choose_runq_cpu(task.affinity_mask);
+        }
     }
     task.on_cpu = -1;
 
-    let reuse = tasks().iter().position(|old| old.state == TaskState::Zombie && old.on_cpu < 0);
+    let reuse = tasks().iter().position(|old| {
+        old.state == TaskState::Zombie && old.on_cpu < 0
+    });
     let index = if let Some(index) = reuse {
         tasks()[index] = task;
         index
@@ -1135,15 +1194,25 @@ pub fn register(mut task: Box<Task>) -> usize {
         list.push(task);
         list.len() - 1
     };
+
     {
         let registered = &tasks()[index];
         let process = registered.process.borrow();
         crate::serial_println!(
-            "[SMP-TASK] idx={} tid={} pid={} home={} on={} kernel={} prio={:?} name={}",
-            index, registered.tid, process.pid, registered.home_cpu, registered.on_cpu,
-            registered.noyau, registered.priorite, process.name.as_str(),
+            "[SMP-TASK] idx={} tid={} pid={} rq={} last={} aff={:#x} on={} kernel={} prio={:?} name={}",
+            index,
+            registered.tid,
+            process.pid,
+            registered.runq_cpu,
+            registered.last_cpu,
+            registered.affinity_mask,
+            registered.on_cpu,
+            registered.noyau,
+            registered.priorite,
+            process.name.as_str(),
         );
     }
+
     smp::broadcast_reschedule();
     index
 }
@@ -1174,7 +1243,20 @@ fn ready_count() -> usize {
 
 fn ready_count_cpu(cpu: usize) -> usize {
     tasks().iter().filter(|t| {
-        t.state == TaskState::Ready && t.on_cpu < 0 && t.home_cpu as usize == cpu
+        t.state == TaskState::Ready
+            && t.on_cpu < 0
+            && t.runq_cpu as usize == cpu
+            && allowed_on(t, cpu)
+    }).count()
+}
+
+fn stealable_count_cpu(cpu: usize) -> usize {
+    tasks().iter().filter(|t| {
+        t.state == TaskState::Ready
+            && t.on_cpu < 0
+            && !t.noyau
+            && t.runq_cpu as usize != cpu
+            && allowed_on(t, cpu)
     }).count()
 }
 
@@ -1283,6 +1365,26 @@ fn install(task: &mut Task) {
     }
 }
 
+#[inline]
+fn deactivate_task_space(task: &Task, cpu_id: usize) {
+    if !task.noyau {
+        task.process.borrow().space.mark_inactive(cpu_id);
+    }
+}
+
+#[inline]
+fn mark_task_running(task: &mut Task, cpu_id: usize) {
+    if task.last_cpu != u8::MAX && task.last_cpu as usize != cpu_id {
+        CPU_MIGRATIONS[cpu_id].fetch_add(1, Ordering::Relaxed);
+        if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu_id) {
+            crate::arch::x86_64::cpu_local::local(id).note_migration();
+        }
+    }
+    task.last_cpu = cpu_id as u8;
+    task.runq_cpu = cpu_id as u8;
+    task.on_cpu = cpu_id as i8;
+}
+
 /// Choisit la prochaine tache prete apres `after`.
 ///
 /// Un tourniquet a deux etages. On cherche d'abord une tache **interactive**
@@ -1295,15 +1397,25 @@ fn install(task: &mut Task) {
 /// ignore pour un tour et le tourniquet ordinaire reprend. Une tache normale
 /// avance donc toujours, meme face a une tache interactive qui ne se bloque
 /// jamais.
-fn runnable_on_cpu(task: &Task, cpu: usize) -> bool {
+fn runnable_local(task: &Task, cpu: usize) -> bool {
     task.state == TaskState::Ready
         && task.on_cpu < 0
-        && task.home_cpu as usize == cpu
+        && task.runq_cpu as usize == cpu
+        && allowed_on(task, cpu)
+}
+
+fn runnable_steal(task: &Task, cpu: usize) -> bool {
+    task.state == TaskState::Ready
+        && task.on_cpu < 0
+        && !task.noyau
+        && task.runq_cpu as usize != cpu
+        && allowed_on(task, cpu)
 }
 
 fn pick_next(after: usize, cpu: usize) -> Option<usize> {
     let len = tasks().len();
     if len == 0 { return None; }
+
     let start = if after == NO_TASK { 0 } else { after % len };
     let tours = TOURS_INTERACTIFS[cpu].load(Ordering::Relaxed);
     let force_partage = tours >= TOURS_INTERACTIFS_MAX;
@@ -1312,7 +1424,9 @@ fn pick_next(after: usize, cpu: usize) -> Option<usize> {
         for offset in 1..=len {
             let index = (start.wrapping_add(offset)) % len;
             let candidate = &tasks()[index];
-            if runnable_on_cpu(candidate, cpu) && candidate.priorite == Priorite::Interactive {
+            if runnable_local(candidate, cpu)
+                && candidate.priorite == Priorite::Interactive
+            {
                 TOURS_INTERACTIFS[cpu].fetch_add(1, Ordering::Relaxed);
                 return Some(index);
             }
@@ -1321,7 +1435,7 @@ fn pick_next(after: usize, cpu: usize) -> Option<usize> {
 
     for offset in 1..=len {
         let index = (start.wrapping_add(offset)) % len;
-        if runnable_on_cpu(&tasks()[index], cpu) {
+        if runnable_local(&tasks()[index], cpu) {
             if tasks()[index].priorite == Priorite::Normale {
                 TOURS_INTERACTIFS[cpu].store(0, Ordering::Relaxed);
             } else {
@@ -1330,6 +1444,37 @@ fn pick_next(after: usize, cpu: usize) -> Option<usize> {
             return Some(index);
         }
     }
+
+    let mut pressure = [0usize; MAX_CPUS];
+    for task in tasks().iter() {
+        if task.state == TaskState::Ready && task.on_cpu < 0 {
+            let owner = task.runq_cpu as usize;
+            if owner < MAX_CPUS {
+                pressure[owner] = pressure[owner].saturating_add(1);
+            }
+        }
+    }
+
+    let mut best: Option<(usize, usize)> = None;
+    for offset in 1..=len {
+        let index = (start.wrapping_add(offset)) % len;
+        let candidate = &tasks()[index];
+        if !runnable_steal(candidate, cpu) {
+            continue;
+        }
+        let owner = candidate.runq_cpu as usize;
+        let score = if owner < MAX_CPUS { pressure[owner] } else { 0 };
+        if best.map_or(true, |(_, old)| score > old) {
+            best = Some((index, score));
+        }
+    }
+
+    if let Some((index, _)) = best {
+        tasks()[index].runq_cpu = cpu as u8;
+        RUNQ_STEALS[cpu].fetch_add(1, Ordering::Relaxed);
+        return Some(index);
+    }
+
     None
 }
 
@@ -1469,14 +1614,17 @@ fn switch_to(from: usize, to: usize) {
         CONTEXT_SWITCHES.fetch_add(1, Ordering::Relaxed);
         usermode::fxsave((*from_ptr).fpu_ptr() as *mut u8);
         (*from_ptr).fs_base = usermode::fs_base();
+        deactivate_task_space(&*from_ptr, cpu_id);
         if (*from_ptr).state == TaskState::Zombie {
             RETIRED[cpu_id].store(from, Ordering::Release);
             // Reste marque running jusqu'a ce que le nouveau contexte confirme
             // que le switch assembleur a effectivement quitte cette pile.
         } else {
             (*from_ptr).on_cpu = -1;
+            (*from_ptr).last_cpu = cpu_id as u8;
+            (*from_ptr).runq_cpu = cpu_id as u8;
         }
-        (*to_ptr).on_cpu = cpu_id as i8;
+        mark_task_running(&mut *to_ptr, cpu_id);
 
         set_current_index(to);
         install(&mut *to_ptr);
@@ -1496,6 +1644,7 @@ fn switch_to_kernel() -> ! {
     let from_ptr = unsafe {
         let list = tasks();
         let ptr = &mut **list.get_mut(cur).unwrap() as *mut Task;
+        deactivate_task_space(&*ptr, local_cpu());
         if (*ptr).state == TaskState::Zombie {
             RETIRED[local_cpu()].store(cur, Ordering::Release);
         } else {
@@ -1545,7 +1694,7 @@ pub fn secondary_cpu_loop() -> ! {
             let to_ptr = unsafe {
                 let list = tasks();
                 let ptr = &mut **list.get_mut(next).unwrap() as *mut Task;
-                (*ptr).on_cpu = cpu_id as i8;
+                mark_task_running(&mut *ptr, cpu_id);
                 ptr
             };
             set_current_index(next);
@@ -1681,14 +1830,14 @@ pub fn exit_current(code: i32) -> ! {
         if crate::kernel::timer::ticks().wrapping_sub(idle_since) > patience {
             crate::kernel::dmesg::log("task: aucune tache executable CPU0 depuis 30 s, interblocage suppose");
             for task in tasks().iter_mut() {
-                if task.home_cpu == 0 { task.state = TaskState::Zombie; }
+                if task.runq_cpu == 0 && allowed_on(task, 0) { task.state = TaskState::Zombie; }
             }
             break;
         }
         let depth = smp_lock::suspend_for_schedule();
         cpu::wait_for_interrupt();
         smp_lock::resume_after_schedule(depth);
-        if tasks().iter().any(|t| t.state == TaskState::Ready && t.home_cpu == 0) {
+        if tasks().iter().any(|t| runnable_local(t, 0) || runnable_steal(t, 0)) {
             idle_since = crate::kernel::timer::ticks();
         }
     }
@@ -1782,9 +1931,13 @@ pub fn exit_group(code: i32) -> ! {
 /// [`in_user_task`] avant d'arriver ici — voir `exec::exec_image`.
 pub fn run(mut first: Box<Task>) -> i32 {
     let _kernel = smp_lock::enter();
-    // Un lancement synchrone doit revenir sur la pile de son appelant : il est
-    // donc volontairement fixe au CPU qui appelle (le BSP dans le shell).
-    first.home_cpu = local_cpu() as u8;
+    // Le thread racine d'un lancement synchrone doit revenir sur la pile
+    // noyau de son CPU appelant. Lui seul est pince; les pthreads qu'il cree
+    // naissent avec une affinite machine complete et peuvent etre balances.
+    let caller_cpu = local_cpu();
+    first.affinity_mask = 1u64 << caller_cpu;
+    first.runq_cpu = caller_cpu as u8;
+    first.last_cpu = caller_cpu as u8;
     let process = first.process.clone();
     let racine = process.borrow().pid;
     let index = register(first);
@@ -1793,7 +1946,7 @@ pub fn run(mut first: Box<Task>) -> i32 {
         RACINE_PREMIER_PLAN.store(racine, Ordering::Release);
         let list = tasks();
         let ptr = &mut **list.get_mut(index).unwrap() as *mut Task;
-        (*ptr).on_cpu = cpu_id as i8;
+        mark_task_running(&mut *ptr, cpu_id);
         ptr
     };
     set_current_index(index);
@@ -1832,12 +1985,14 @@ pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
     };
     let mut task = Task::new_kernel(process.clone(), entree);
     task.priorite = Priorite::Interactive;
-    task.home_cpu = 0;
+    task.affinity_mask = 1;
+    task.runq_cpu = 0;
+    task.last_cpu = 0;
     let index = register(task);
     let to_ptr = unsafe {
         let list = tasks();
         let ptr = &mut **list.get_mut(index).unwrap() as *mut Task;
-        (*ptr).on_cpu = 0;
+        mark_task_running(&mut *ptr, 0);
         ptr
     };
     set_current_index(index);
@@ -2038,7 +2193,7 @@ pub fn preempt_from_irq() {
     wake_sleepers();
 
     let cpu_id = local_cpu();
-    if ready_count_cpu(cpu_id) == 0 {
+    if ready_count_cpu(cpu_id) == 0 && stealable_count_cpu(cpu_id) == 0 {
         return;
     }
 
@@ -2059,8 +2214,11 @@ pub fn preempt_from_irq() {
 
         usermode::fxsave((*from_ptr).fpu_ptr() as *mut u8);
         (*from_ptr).fs_base = usermode::fs_base();
+        deactivate_task_space(&*from_ptr, cpu_id);
         (*from_ptr).on_cpu = -1;
-        (*to_ptr).on_cpu = cpu_id as i8;
+        (*from_ptr).last_cpu = cpu_id as u8;
+        (*from_ptr).runq_cpu = cpu_id as u8;
+        mark_task_running(&mut *to_ptr, cpu_id);
 
         set_current_index(next);
         install(&mut *to_ptr);
@@ -2106,6 +2264,40 @@ pub fn echantillonne_tache_bsp() {
 /// horloge murale ; ici on ne fait que comptabiliser le temps CPU de la tache.
 pub fn echantillonne_quantum(_interrupted_user: bool, ticks: u64) {
     add_current_ticks(ticks.max(1));
+}
+
+/// Snapshot SMP-NG2: charge physique, pression de runqueue, tache courante,
+/// steals et migrations par CPU.
+pub fn log_smp_load() {
+    let _kernel = smp_lock::enter();
+    let online = smp::schedulable_cpus().max(1).min(MAX_CPUS);
+    let mut line = alloc::string::String::from("[SMP-LOAD]");
+    line.push_str(&alloc::format!(
+        " total={} tlb={}",
+        cpu::load_percent(),
+        smp::tlb_shootdown_count(),
+    ));
+
+    for cpu_id in 0..online {
+        let current_index = CURRENT[cpu_id].load(Ordering::Acquire);
+        let (tid, pid) = if current_index != NO_TASK && current_index < tasks().len() {
+            let t = &tasks()[current_index];
+            (t.tid, t.process.borrow().pid)
+        } else {
+            (0, 0)
+        };
+        line.push_str(&alloc::format!(
+            " c{}={} rq={} cur={}:{} steal={} mig={}",
+            cpu_id,
+            cpu::load_percent_cpu(cpu_id),
+            ready_count_cpu(cpu_id),
+            pid,
+            tid,
+            RUNQ_STEALS[cpu_id].load(Ordering::Relaxed),
+            CPU_MIGRATIONS[cpu_id].load(Ordering::Relaxed),
+        ));
+    }
+    crate::kernel::dmesg::log_fmt(format_args!("{}", line));
 }
 
 /// Instantane d'un processus pour le journal : (pid, nom, ticks, octets).
@@ -2519,6 +2711,9 @@ pub fn futex_wake(uaddr: u64, count: u32) -> u32 {
             task.state = TaskState::Ready;
             woken += 1;
         }
+    }
+    if woken > 0 {
+        smp::broadcast_reschedule();
     }
     woken
 }

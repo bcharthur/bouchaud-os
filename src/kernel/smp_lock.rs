@@ -156,7 +156,21 @@ impl Drop for KernelGuard {
         if !self.active {
             return;
         }
-        release_one(self.cpu);
+
+        // BOUCHAUD_SMP_NG2_BKL_MIGRATION_HOTFIX_V1
+        //
+        // Un KernelGuard vit sur la pile noyau de la tache. Depuis NG2 cette
+        // pile peut reprendre sur un autre CPU apres suspend_for_schedule().
+        // resume_after_schedule() restaure alors DEPTH/OWNER sur le NOUVEAU
+        // CPU. Le champ `self.cpu` ne represente plus le proprietaire actuel:
+        // il indique seulement le CPU sur lequel le guard a ete cree.
+        //
+        // Liberer `self.cpu` apres une migration donne DEPTH[ancien_cpu] == 0
+        // et provoque exactement: "smp_lock: release sans acquisition".
+        // La profondeur BKL suit la continuation; son Drop doit donc liberer le
+        // CPU physique/logique sur lequel cette continuation s'execute maintenant.
+        let release_cpu = cpu();
+        release_one(release_cpu);
     }
 }
 

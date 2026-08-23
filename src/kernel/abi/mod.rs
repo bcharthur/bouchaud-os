@@ -281,7 +281,7 @@ fn fault_in_user_range(addr: u64, len: usize, write: bool) -> bool {
             process.space.translate(page).is_some()
         };
 
-        if !present && !task::peuple_a_la_demande(page) {
+        if !present && !task::peuple_a_la_demande(page, false) {
             return false;
         }
 

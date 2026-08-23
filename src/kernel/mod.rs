@@ -26,6 +26,7 @@ pub mod process;
 pub mod resource;
 pub mod scheduler;
 pub mod smp_lock;
+pub mod sync; // BOUCHAUD_SMP_NG1_SYNC_FOUNDATION
 pub mod signal;
 pub mod syscall;
 pub mod sysroot;

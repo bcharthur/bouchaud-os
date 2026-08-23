@@ -16,6 +16,16 @@ static LOAD_WINDOW_TOTAL: AtomicU64 = AtomicU64::new(0);
 static LOAD_WINDOW_IDLE: AtomicU64 = AtomicU64::new(0);
 static CPU_LOAD_PCT: AtomicU8 = AtomicU8::new(0);
 
+// BOUCHAUD_SMP_NG2_PERCPU_LOAD_V1
+// Fenetre de charge par CPU logique. Le PIT BSP echantillonne IDLE[] pour tous
+// les CPU online; aucun IPI supplementaire n'est necessaire.
+static CORE_WINDOW_TOTAL: [AtomicU64; smp::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; smp::MAX_CPUS];
+static CORE_WINDOW_IDLE: [AtomicU64; smp::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; smp::MAX_CPUS];
+static CORE_LOAD_PCT: [AtomicU8; smp::MAX_CPUS] =
+    [const { AtomicU8::new(0) }; smp::MAX_CPUS];
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CpuAccounting {
     pub total_ticks: u64,
@@ -31,14 +41,36 @@ impl CpuAccounting {
     pub fn busy_percent(self) -> u64 { 100u64.saturating_sub(self.idle_percent()) }
 }
 
+/// Logical Bouchaud CPU index used by per-CPU accounting arrays.
+///
+/// The historical name is kept for source compatibility during NG1.
 pub fn hardware_cpu_index() -> usize {
-    #[cfg(target_arch = "x86_64")]
-    {
-        use core::arch::x86_64::__cpuid;
-        (((__cpuid(1).ebx >> 24) & 0xff) as usize).min(smp::MAX_CPUS - 1)
+    smp::cpu_index().min(smp::MAX_CPUS - 1)
+}
+
+fn update_core_load_windows(online: usize) {
+    for cpu in 0..online.min(smp::MAX_CPUS) {
+        let idle = IDLE[cpu].load(Ordering::Acquire);
+        if idle {
+            CORE_WINDOW_IDLE[cpu].fetch_add(1, Ordering::Relaxed);
+        }
+        let total = CORE_WINDOW_TOTAL[cpu].fetch_add(1, Ordering::Relaxed) + 1;
+        if total < LOAD_WINDOW_TICKS {
+            continue;
+        }
+
+        let idle_ticks = CORE_WINDOW_IDLE[cpu].swap(0, Ordering::Relaxed);
+        let window = CORE_WINDOW_TOTAL[cpu].swap(0, Ordering::Relaxed).max(1);
+        let sample =
+            100u64.saturating_sub(idle_ticks.saturating_mul(100) / window) as u8;
+        let old = CORE_LOAD_PCT[cpu].load(Ordering::Relaxed);
+        let filtered = if old == 0 {
+            sample
+        } else {
+            ((old as u16 * 3 + sample as u16) / 4) as u8
+        };
+        CORE_LOAD_PCT[cpu].store(filtered.min(100), Ordering::Relaxed);
     }
-    #[cfg(not(target_arch = "x86_64"))]
-    { 0 }
 }
 
 fn update_load_window(idle_count: u64, online: u64) {
@@ -65,6 +97,8 @@ pub fn account_timer_tick(interrupted_user: bool) -> bool {
     for cpu in 0..online {
         if IDLE[cpu].load(Ordering::Acquire) { idle_count += 1; }
     }
+
+    update_core_load_windows(online);
 
     let bsp_idle = IDLE[bsp].load(Ordering::Acquire);
     CPU_TOTAL_TICKS.fetch_add(online as u64, Ordering::Relaxed);
@@ -99,6 +133,24 @@ pub fn accounting() -> CpuAccounting {
 }
 
 pub fn load_percent() -> u8 { CPU_LOAD_PCT.load(Ordering::Relaxed) }
+
+pub fn load_percent_cpu(cpu: usize) -> u8 {
+    if cpu >= smp::MAX_CPUS {
+        0
+    } else {
+        CORE_LOAD_PCT[cpu].load(Ordering::Relaxed)
+    }
+}
+
+pub fn load_snapshot() -> [u8; smp::MAX_CPUS] {
+    let mut out = [0u8; smp::MAX_CPUS];
+    let mut cpu = 0usize;
+    while cpu < smp::MAX_CPUS {
+        out[cpu] = CORE_LOAD_PCT[cpu].load(Ordering::Relaxed);
+        cpu += 1;
+    }
+    out
+}
 
 pub fn halt_loop() -> ! {
     loop { unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)); } }
@@ -163,5 +215,5 @@ pub fn print_cpuinfo() {
     println!("features:");
     println!("  sse3={} pclmulqdq={} vmx={} ssse3={}", bit(leaf1.ecx, 0), bit(leaf1.ecx, 1), bit(leaf1.ecx, 5), bit(leaf1.ecx, 9));
     println!("  sse={} sse2={} htt={}", bit(leaf1.edx, 25), bit(leaf1.edx, 26), bit(leaf1.edx, 28));
-    println!("  smp_online={} apic_id={}", smp::schedulable_cpus(), hardware_cpu_index());
+    println!("  smp_online={} logical_cpu={} apic_id={}", smp::schedulable_cpus(), hardware_cpu_index(), smp::hardware_apic_id());
 }

@@ -346,6 +346,8 @@ fn boucle() {
 /// redistribue artificiellement aux processus : la somme peut etre inferieure
 /// a 100 %, ce qui represente du vrai idle ou du travail noyau.
 fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
+    // BOUCHAUD_SMP_NG2_LOAD_LOG_V1
+    task::log_smp_load();
     let (mesures, total) = task::mesure_processus();
     if total > 0 {
         let mut ligne = String::new();

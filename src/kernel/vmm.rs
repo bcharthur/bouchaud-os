@@ -28,10 +28,12 @@
 //! sont detruites avec lui, et ne peuvent pas empieter sur le noyau.
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::registers::control::{Cr3, Cr3Flags};
 use x86_64::structures::paging::PhysFrame;
 use x86_64::PhysAddr;
 
+use crate::arch::x86_64::smp;
 use crate::kernel::memory;
 
 /// Taille d'une page (et d'une frame) : 4 KiB.
@@ -389,6 +391,9 @@ pub fn is_user_addr(virt: u64) -> bool {
 /// Espace d'adressage d'un processus : une PML4 + les frames qu'elle possede.
 pub struct AddressSpace {
     pml4: u64,
+    // BOUCHAUD_SMP_NG2_ADDRESS_SPACE_ACTIVE_CPUS_V1
+    /// CPU logiques dont le CR3 pointe actuellement sur cet espace.
+    active_cpus: AtomicU64,
     /// Frames de tables intermediaires, liberees avec l'espace.
     tables: Vec<u64>,
     /// Frames de donnees mappees pour l'utilisateur.
@@ -421,12 +426,40 @@ impl AddressSpace {
         for i in 0..USER_SLOTS {
             dst[user_slot() + i] = 0;
         }
-        Some(AddressSpace { pml4, tables: Vec::new(), pages: Vec::new() })
+        Some(AddressSpace {
+            pml4,
+            active_cpus: AtomicU64::new(0),
+            tables: Vec::new(),
+            pages: Vec::new(),
+        })
     }
 
     /// Adresse physique de la PML4 (valeur a charger dans CR3).
     pub fn pml4(&self) -> u64 {
         self.pml4
+    }
+
+    #[inline]
+    pub fn mark_active(&self, cpu: usize) {
+        if cpu < 64 {
+            self.active_cpus.fetch_or(1u64 << cpu, Ordering::AcqRel);
+        }
+    }
+
+    #[inline]
+    pub fn mark_inactive(&self, cpu: usize) {
+        if cpu < 64 {
+            self.active_cpus.fetch_and(!(1u64 << cpu), Ordering::AcqRel);
+        }
+    }
+
+    pub fn active_cpus(&self) -> u64 {
+        self.active_cpus.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    fn shootdown_range(&self, start: u64, len: u64) {
+        smp::shootdown_tlb(self.pml4, start, len);
     }
 
     /// Active cet espace d'adressage sur le CPU courant.
@@ -437,6 +470,7 @@ impl AddressSpace {
     pub unsafe fn activate(&self) {
         let frame = PhysFrame::containing_address(PhysAddr::new(self.pml4));
         Cr3::write(frame, Cr3Flags::empty());
+        self.mark_active(smp::cpu_index());
     }
 
     /// Descend (en creant si besoin) jusqu'a l'entree de table de pages qui
@@ -467,14 +501,22 @@ impl AddressSpace {
 
     /// Mappe `virt` (aligne page) sur la frame physique `phys`.
     pub fn map(&mut self, virt: u64, phys: u64, flags: u64) -> bool {
-        match self.entry_mut(virt, true) {
+        let mut replaced_present = false;
+        let ok = match self.entry_mut(virt, true) {
             Some(entry) => {
-                *entry = (phys & ADDR_MASK) | flags | PTE_PRESENT;
+                let old = *entry;
+                let new = (phys & ADDR_MASK) | flags | PTE_PRESENT;
+                *entry = new;
                 flush(virt);
+                replaced_present = old & PTE_PRESENT != 0 && old != new;
                 true
             }
             None => false,
+        };
+        if replaced_present {
+            self.shootdown_range(virt & !(PAGE_SIZE - 1), PAGE_SIZE);
         }
+        ok
     }
 
     /// Alloue et mappe `len` octets a partir de `virt` (arrondi a la page).
@@ -504,37 +546,57 @@ impl AddressSpace {
         let start = virt & !(PAGE_SIZE - 1);
         let end = (virt + len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         let mut page = start;
+        let mut changed = false;
         while page < end {
             if let Some(entry) = self.entry_mut(page, false) {
                 if *entry & PTE_PRESENT != 0 {
-                    *entry = (*entry & ADDR_MASK) | flags | PTE_PRESENT;
-                    flush(page);
+                    let new = (*entry & ADDR_MASK) | flags | PTE_PRESENT;
+                    if *entry != new {
+                        *entry = new;
+                        flush(page);
+                        changed = true;
+                    }
                 }
             }
             page += PAGE_SIZE;
         }
+        if changed {
+            self.shootdown_range(start, end.saturating_sub(start));
+        }
         true
     }
 
-    /// Supprime le mapping d'une plage (munmap). Les frames de donnees
-    /// possedees par l'espace sont rendues a l'allocateur.
+    /// Supprime le mapping d'une plage (munmap). Les PTE sont d'abord
+    /// retirees partout, puis le shootdown TLB est ACKe, et seulement ensuite
+    /// les frames sont rendues. Cet ordre interdit tout use-after-free TLB.
     pub fn unmap(&mut self, virt: u64, len: u64) {
         let start = virt & !(PAGE_SIZE - 1);
         let end = (virt + len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         let mut page = start;
+        let mut retired: Vec<u64> = Vec::new();
         while page < end {
             if let Some(entry) = self.entry_mut(page, false) {
                 let phys = *entry & ADDR_MASK;
                 if *entry & PTE_PRESENT != 0 {
                     *entry = 0;
                     flush(page);
-                    if let Some(pos) = self.pages.iter().position(|&f| f == phys) {
-                        self.pages.swap_remove(pos);
-                        free_frame(phys);
+                    if self.pages.contains(&phys) {
+                        retired.push(phys);
                     }
                 }
             }
             page += PAGE_SIZE;
+        }
+
+        if end > start {
+            self.shootdown_range(start, end.saturating_sub(start));
+        }
+
+        for phys in retired {
+            if let Some(pos) = self.pages.iter().position(|&f| f == phys) {
+                self.pages.swap_remove(pos);
+                free_frame(phys);
+            }
         }
     }
 
@@ -779,11 +841,17 @@ impl Drop for AddressSpace {
     fn drop(&mut self) {
         // Ne jamais liberer un espace encore actif dans CR3.
         if current_pml4() == self.pml4 {
+            self.mark_inactive(smp::cpu_index());
             unsafe {
                 let frame = PhysFrame::containing_address(PhysAddr::new(KERNEL_PML4));
                 Cr3::write(frame, Cr3Flags::empty());
             }
         }
+        debug_assert_eq!(
+            self.active_cpus(),
+            0,
+            "vmm: destruction d'un AddressSpace encore actif sur un CPU"
+        );
         for &frame in self.pages.iter() {
             free_frame(frame);
         }
@@ -798,6 +866,31 @@ impl Drop for AddressSpace {
 pub fn flush(virt: u64) {
     unsafe {
         core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
+    }
+}
+
+/// Invalidation locale utilisee par le handler IPI TLB.
+/// Une grande plage recharge CR3 en une seule operation; une petite plage
+/// utilise INVLPG pour limiter le cout.
+pub fn flush_local_range(start: u64, len: u64) {
+    let pages = if len == 0 {
+        u64::MAX
+    } else {
+        (len + PAGE_SIZE - 1) / PAGE_SIZE
+    };
+
+    if pages > 64 {
+        let (frame, flags) = Cr3::read();
+        unsafe { Cr3::write(frame, flags); }
+        return;
+    }
+
+    let begin = start & !(PAGE_SIZE - 1);
+    let mut page = begin;
+    let end = begin.saturating_add(pages.saturating_mul(PAGE_SIZE));
+    while page < end {
+        flush(page);
+        page = page.saturating_add(PAGE_SIZE);
     }
 }
 

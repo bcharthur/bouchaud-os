@@ -6,7 +6,7 @@ use crate::gui::window::{
     clip, icon_rect, menu_rect, start_btn, taskbar_btn, Win,
     BAR_H, ICONS, MENU, MENU_HEADER_H, MENU_ITEM_H, TITLE_H,
 };
-use crate::arch::x86_64::rtc;
+use crate::arch::x86_64::{cpu, rtc, smp};
 use crate::kernel::timer;
 use crate::fs::ramfs;
 use alloc::format;
@@ -96,7 +96,16 @@ fn draw_topbar() {
 }
 
 fn sys_stats_str() -> String {
-    let cpu = timer::cpu_load_pct();
+    // BOUCHAUD_SMP_NG2_TOPBAR_PERCPU_V1
+    let total_cpu = timer::cpu_load_pct();
+    let online = smp::schedulable_cpus().max(1).min(smp::MAX_CPUS);
+    let mut cores = String::new();
+    for index in 0..online.min(8) {
+        if index != 0 { cores.push('/'); }
+        cores.push_str(&format!("{}", cpu::load_percent_cpu(index)));
+    }
+    if online > 8 { cores.push_str("/+"); }
+
     let (used, _free, total) = crate::kernel::heap::stats();
     let ram_pct = if total > 0 { (used * 100 / total) as u8 } else { 0 };
     let ram_used_str = human_bytes(used);
@@ -106,7 +115,7 @@ fn sys_stats_str() -> String {
     let disk_total = crate::fs::ramfs::MAX_NODES;
     let disk_pct = if disk_total > 0 { (disk_used * 100 / disk_total) as u8 } else { 0 };
     format!(
-        "CPU:{cpu:3}%  RAM:{ram_used_str}/{ram_total_str} {ram_pct:3}%  Disk:{disk_used}/{disk_total} {disk_pct:3}%"
+        "CPU:{total_cpu:3}% [{cores}]  RAM:{ram_used_str}/{ram_total_str} {ram_pct:3}%  Disk:{disk_used}/{disk_total} {disk_pct:3}%"
     )
 }
 
