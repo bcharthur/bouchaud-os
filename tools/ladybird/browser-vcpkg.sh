@@ -112,18 +112,26 @@ grep -Fq "REF $FONTCONFIG_GIT_COMMIT" "$FONTCONFIG_OVERLAY/portfile.cmake"
 grep -Fq '"port-version": 1' "$FONTCONFIG_OVERLAY/vcpkg.json"
 say "fontconfig : port 2.17.1#1 conserve, source miroir GitHub epinglee"
 
-# IMPORTANT : l'install root n'est PAS un cache de compilation. Il contient
-# l'etat de resolution du manifeste. Le restaurer depuis une ancienne tentative
-# peut conserver des dependances qui ont depuis ete retirees du manifeste.
-# C'est exactement ce qui a maintenu `dbus[systemd]` vivant apres sa suppression
-# du manifeste Bouchaud.
-#
-# On reconstruit donc cet arbre a chaque run. Le travail couteux n'est pas perdu :
-# vcpkg restaure les paquets deja construits depuis son binary cache
-# (~/.cache/vcpkg/archives) et reutilise les sources dans $DOWNLOADS.
-say "vcpkg : reconstruction propre de l'install root navigateur"
-rm -rf "$INSTALLED"
-mkdir -p "$INSTALLED"
+# L'install root est réutilisable uniquement si le manifeste transformé, les
+# overlays réellement consommés et la baseline sont identiques. Le stamp ferme
+# la régression historique où un cache ancien conservait dbus[systemd] après sa
+# suppression: au moindre changement, l'arbre est reconstruit intégralement.
+INSTALL_STAMP="$INSTALLED/.bouchaud-inputs.sha256"
+INPUT_FINGERPRINT=$(
+    {
+        printf '%s\n' "$BASELINE"
+        sha256sum "$MANIFEST/vcpkg.json"
+        find "$LOCAL_OVERLAY_PORTS" "$OVERLAY_PORTS" -type f -print0 \
+            | sort -z | xargs -0 sha256sum
+    } | sha256sum | cut -d' ' -f1
+)
+if [ -f "$INSTALL_STAMP" ] && [ "$(cat "$INSTALL_STAMP")" = "$INPUT_FINGERPRINT" ]; then
+    say "vcpkg : install root exact restauré"
+else
+    say "vcpkg : entrées modifiées, reconstruction propre de l'install root"
+    rm -rf "$INSTALLED"
+    mkdir -p "$INSTALLED"
+fi
 
 # Garde-fou contre une regression du transformateur de manifeste lui-meme.
 python3 - "$MANIFEST/vcpkg.json" <<'PYCHECK'
@@ -176,6 +184,8 @@ while :; do
     ATTENTE=$((ATTENTE * 2))
     TENTATIVE=$((TENTATIVE + 1))
 done
+
+printf '%s\n' "$INPUT_FINGERPRINT" > "$INSTALL_STAMP"
 
 PREFIX="$INSTALLED/x64-linux"
 for f in "$PREFIX/lib/libskia.a" "$PREFIX/lib/libssl.a" "$PREFIX/lib/libcrypto.a"; do

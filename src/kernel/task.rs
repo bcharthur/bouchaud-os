@@ -449,6 +449,10 @@ pub struct Process {
     /// PID du parent (0 pour le processus lance depuis le shell).
     pub parent: u32,
     pub name: String,
+    /// Groupe applicatif léger. Un nouveau processus racine crée son groupe;
+    /// fork hérite l'identité, sans influencer le placement scheduler.
+    pub resource_group_id: u32,
+    pub resource_group_name: String,
     pub space: AddressSpace,
     pub files: FdTable,
     /// Debut et sommet courant du tas `brk`.
@@ -1535,6 +1539,8 @@ fn deactivate_task_space(task: &Task, cpu_id: usize) {
 #[inline]
 fn mark_task_running(task: &mut Task, cpu_id: usize) {
     let now = crate::kernel::timer::monotonic_ns();
+    debug_assert!(task.on_cpu < 0, "task: tentative de double execution tid={}", task.tid);
+    debug_assert_eq!(task.last_account_ns, 0, "task: cursor CPU encore arme hors CPU tid={}", task.tid);
     if task.last_cpu != u8::MAX && task.last_cpu as usize != cpu_id {
         CPU_MIGRATIONS[cpu_id].fetch_add(1, Ordering::Relaxed);
         task.migrations = task.migrations.saturating_add(1);
@@ -1547,15 +1553,21 @@ fn mark_task_running(task: &mut Task, cpu_id: usize) {
     task.runq_cpu = cpu_id as u8;
     task.on_cpu = cpu_id as i8;
     task.slice_start_ns = now;
+    task.last_account_ns = now;
     task.context_switches = task.context_switches.saturating_add(1);
 }
 
-fn account_slice_end(task: &mut Task) {
-    if task.slice_start_ns == 0 {
+/// Avance une seule fois le curseur CPU de la tâche jusqu'à `now`.
+///
+/// Toutes les frontières (syscall, préemption, blocage) utilisent le même
+/// curseur. Une seconde frontière au même instant voit donc un delta nul au
+/// lieu de recompter la tranche précédente.
+fn account_until(task: &mut Task, now: u64) {
+    if task.last_account_ns == 0 {
         return;
     }
-    let elapsed = crate::kernel::timer::monotonic_ns()
-        .saturating_sub(task.slice_start_ns);
+    debug_assert!(task.on_cpu >= 0, "task: accounting armé pour une tâche hors CPU tid={}", task.tid);
+    let elapsed = now.saturating_sub(task.last_account_ns);
     if task.in_kernel {
         task.kernel_cpu_ns = task.kernel_cpu_ns.saturating_add(elapsed);
     } else {
@@ -1570,22 +1582,30 @@ fn account_slice_end(task: &mut Task) {
         .saturating_mul(7)
         .saturating_add(elapsed)
         / 8;
+    task.last_account_ns = now;
+    task.slice_start_ns = now;
+}
+
+fn account_slice_end(task: &mut Task) {
+    let now = crate::kernel::timer::monotonic_ns();
+    account_until(task, now);
+    task.last_account_ns = 0;
     task.slice_start_ns = 0;
 }
 
 /// Frontières syscall utilisées pour séparer user/kernel sans dépendre du PIT.
 pub fn account_kernel_enter() {
+    let now = crate::kernel::timer::monotonic_ns();
     let task = current();
-    account_slice_end(task);
+    account_until(task, now);
     task.in_kernel = true;
-    task.slice_start_ns = crate::kernel::timer::monotonic_ns();
 }
 
 pub fn account_kernel_exit() {
+    let now = crate::kernel::timer::monotonic_ns();
     let task = current();
-    account_slice_end(task);
+    account_until(task, now);
     task.in_kernel = false;
-    task.slice_start_ns = crate::kernel::timer::monotonic_ns();
 }
 
 pub fn account_resume_user_noreturn() {
@@ -2480,7 +2500,12 @@ pub fn preempt_from_irq() {
     wake_sleepers();
 
     let cpu_id = local_cpu();
-    if ready_count_cpu(cpu_id) == 0 && stealable_count_cpu(cpu_id) == 0 {
+    // Une IRQ de quantum signifie que la tâche courante est encore runnable :
+    // ce CPU n'est donc PAS idle. Voler ici une tâche distante échangeait deux
+    // tâches actives entre CPU à chaque quantum et produisait le ping-pong NG4.
+    // Le pull distant reste réservé au chemin schedule() lorsque la tâche
+    // courante s'est réellement bloquée.
+    if ready_count_cpu(cpu_id) == 0 {
         return;
     }
 
@@ -2594,6 +2619,12 @@ pub fn log_smp_load() {
         "[BKL-STATS] wait_ns={} hold_ns={} acquisitions={}",
         bkl_wait, bkl_hold, bkl_acq,
     ));
+    let (_, _, backing_reads, backing_bytes) = crate::fs::backing::stats();
+    let (cache_hits, readahead_hits) = crate::fs::backing::cache_stats();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "[BACKING-CACHE] reads={} bytes={} hits={} readahead_hits={}",
+        backing_reads, backing_bytes, cache_hits, readahead_hits,
+    ));
     log_smp_sample(online);
 }
 
@@ -2671,6 +2702,8 @@ fn log_smp_sample(online: usize) {
 pub struct Mesure {
     pub pid: u32,
     pub nom: String,
+    pub resource_group_id: u32,
+    pub resource_group_name: String,
     /// Ticks CPU consommes depuis le dernier releve.
     pub ticks: u64,
     /// Compatibilite historique : desormais RSS reel, pas taille virtuelle.
@@ -2691,6 +2724,9 @@ pub struct Mesure {
 /// passe depuis la ligne precedente du journal.
 static mut MESURE_PRECEDENTE: Option<Vec<(u32, u64, [u64; MAX_CPUS], u64, u64)>> = None;
 static mut MESURE_NS_PRECEDENT: u64 = 0;
+/// Runtime par TID au snapshot précédent, uniquement pour vérifier l'invariant
+/// qu'un thread ne peut consommer plus d'un CPU logique sur une fenêtre.
+static mut MESURE_TACHE_PRECEDENTE: Option<Vec<(u32, u64)>> = None;
 
 /// Mesure tous les processus vivants et remet les compteurs a la reference.
 ///
@@ -2698,6 +2734,11 @@ static mut MESURE_NS_PRECEDENT: u64 = 0;
 /// honnete d'un pourcentage : compter sur l'horloge murale donnerait des totaux
 /// qui depassent 100 % des que la machine dort.
 pub fn mesure_processus() -> (Vec<Mesure>, u64) {
+    let now = crate::kernel::timer::monotonic_ns();
+    let previous_ns = unsafe { MESURE_NS_PRECEDENT };
+    let window = if previous_ns == 0 { now.max(1) } else { now.saturating_sub(previous_ns).max(1) };
+    let previous_tasks = unsafe { MESURE_TACHE_PRECEDENTE.clone().unwrap_or_default() };
+    let mut current_tasks: Vec<(u32, u64)> = Vec::new();
     let mut cumuls: Vec<(u32, u64, [u64; MAX_CPUS], u64, u64)> = Vec::new();
     let mut mesures: Vec<Mesure> = Vec::new();
 
@@ -2705,26 +2746,45 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
         if task.state == TaskState::Zombie {
             continue;
         }
-        let (pid, nom, rss_octets, vss_octets) = {
+        let (pid, nom, group_id, group_name, rss_octets, vss_octets) = {
             let process = task.process.borrow();
             let usage = crate::kernel::resource::memory_usage(&process);
-            (process.pid, process.name.clone(), usage.rss, usage.vss)
+            (process.pid, process.name.clone(), process.resource_group_id,
+                process.resource_group_name.clone(), usage.rss, usage.vss)
         };
-        let runtime = task.user_cpu_ns.saturating_add(task.kernel_cpu_ns);
+        // Inclure la tranche actuellement en cours sans modifier le curseur :
+        // le delta du prochain snapshot soustraira exactement ce même préfixe.
+        let live = if task.last_account_ns != 0 {
+            now.saturating_sub(task.last_account_ns)
+        } else { 0 };
+        let runtime = task.user_cpu_ns.saturating_add(task.kernel_cpu_ns).saturating_add(live);
+        let mut cpu_map_snapshot = task.cpu_ns;
+        if live != 0 && task.on_cpu >= 0 {
+            let cpu = task.on_cpu as usize;
+            if cpu < MAX_CPUS { cpu_map_snapshot[cpu] = cpu_map_snapshot[cpu].saturating_add(live); }
+        }
+        if let Some((_, before)) = previous_tasks.iter().find(|(tid, _)| *tid == task.tid) {
+            let delta = runtime.saturating_sub(*before);
+            debug_assert!(delta <= window.saturating_add(1_000_000),
+                "task: runtime > fenêtre tid={} delta={} window={}", task.tid, delta, window);
+        }
+        current_tasks.push((task.tid, runtime));
         match cumuls.iter_mut().find(|(autre, _, _, _, _)| *autre == pid) {
             Some((_, total, cpu_map, migrations, switches)) => {
                 *total = total.saturating_add(runtime);
                 *migrations = migrations.saturating_add(task.migrations);
                 *switches = switches.saturating_add(task.context_switches);
                 for cpu in 0..MAX_CPUS {
-                    cpu_map[cpu] = cpu_map[cpu].saturating_add(task.cpu_ns[cpu]);
+                    cpu_map[cpu] = cpu_map[cpu].saturating_add(cpu_map_snapshot[cpu]);
                 }
             }
             None => {
-                cumuls.push((pid, runtime, task.cpu_ns, task.migrations, task.context_switches));
+                cumuls.push((pid, runtime, cpu_map_snapshot, task.migrations, task.context_switches));
                 mesures.push(Mesure {
                     pid,
                     nom,
+                    resource_group_id: group_id,
+                    resource_group_name: group_name,
                     ticks: 0,
                     octets: rss_octets,
                     rss_octets,
@@ -2786,15 +2846,9 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
         mesure.context_switches = current_switches.saturating_sub(previous_switches);
     }
 
-    let now = crate::kernel::timer::monotonic_ns();
-    let previous_ns = unsafe { MESURE_NS_PRECEDENT };
-    let window = if previous_ns == 0 {
-        now.max(1)
-    } else {
-        now.saturating_sub(previous_ns).max(1)
-    };
     unsafe {
         MESURE_PRECEDENTE = Some(cumuls);
+        MESURE_TACHE_PRECEDENTE = Some(current_tasks);
         MESURE_NS_PRECEDENT = now;
     }
     // Vue processus: 100% représente un CPU logique complet; un processus
@@ -3171,6 +3225,8 @@ pub fn new_process(name: &str, cwd: usize) -> Option<Rc<RefCell<Process>>> {
         pid,
         parent: 0,
         name: name.to_string(),
+        resource_group_id: pid,
+        resource_group_name: name.to_string(),
         space,
         files: FdTable::new(),
         brk_start: 0,

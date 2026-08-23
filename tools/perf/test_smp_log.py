@@ -10,7 +10,7 @@ class LogEncodingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "run.log"
             path.write_bytes(payload)
-            smp, _, _ = parse(path)
+            smp, _, _, _ = parse(path)
             self.assertEqual(len(smp), 1)
             self.assertEqual(summarize(path)["mig_s"], 2)
 

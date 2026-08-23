@@ -79,6 +79,7 @@ jobs:
             third_party/vcpkg-gfx
             third_party/vcpkg-downloads
             third_party/vcpkg-browser-manifest
+            third_party/vcpkg-browser-installed
             ~/.cache/vcpkg
           key: ladybird-browser-vcpkg-v2-${{ runner.os }}-${{ hashFiles('tools/ladybird/browser-vcpkg.sh', 'third_party/UPSTREAM.md') }}
           restore-keys: |

@@ -399,6 +399,29 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
         if !ligne.is_empty() {
             crate::serial_println!("[ps] {}", ligne);
         }
+
+        // ResourceGroup est une vue d'agrégation, pas une contrainte scheduler.
+        // Un groupe multithread/multiprocessus peut utiliser tous les CPU.
+        let mut groups: Vec<(u32, String, u64, u64, usize, u64, u64)> = Vec::new();
+        for mesure in mesures.iter() {
+            if let Some(group) = groups.iter_mut().find(|g| g.0 == mesure.resource_group_id) {
+                group.2 = group.2.saturating_add(mesure.ticks);
+                group.3 = group.3.saturating_add(mesure.rss_octets);
+                group.4 = group.4.saturating_add(1);
+                group.5 = group.5.saturating_add(mesure.context_switches);
+                group.6 = group.6.saturating_add(mesure.migrations);
+            } else {
+                groups.push((mesure.resource_group_id, mesure.resource_group_name.clone(),
+                    mesure.ticks, mesure.rss_octets, 1, mesure.context_switches, mesure.migrations));
+            }
+        }
+        for (id, name, cpu_ns, rss, processes, ctx, migrations) in groups {
+            crate::serial_println!(
+                "[APP-SAMPLE] v=1 t_ns={} id={} name={} cpu_pct={} rss={} processes={} ctx_delta={} mig_delta={}",
+                sample_ns, id, name, cpu_ns.saturating_mul(100) / total,
+                rss, processes, ctx, migrations,
+            );
+        }
     }
 
 

@@ -23,6 +23,23 @@ struct DiskExtent {
 static mut EXTENTS: Option<Vec<DiskExtent>> = None;
 static mut DISK_READ_OPS: u64 = 0;
 static mut DISK_READ_BYTES: u64 = 0;
+static mut CACHE_HITS: u64 = 0;
+static mut READAHEAD_HITS: u64 = 0;
+const READAHEAD_BYTES: usize = 16 * 1024;
+const CACHE_ENTRIES_MAX: usize = 256;
+
+struct ReadCacheEntry {
+    node: usize,
+    base: usize,
+    valid: usize,
+    data: Vec<u8>,
+    prefetched_from: usize,
+}
+static mut READ_CACHE: Option<Vec<ReadCacheEntry>> = None;
+
+fn read_cache() -> &'static mut Vec<ReadCacheEntry> {
+    unsafe { (&mut *core::ptr::addr_of_mut!(READ_CACHE)).get_or_insert_with(Vec::new) }
+}
 
 fn extents() -> &'static mut Vec<DiskExtent> {
     unsafe {
@@ -36,6 +53,9 @@ pub fn reset() {
         EXTENTS = Some(Vec::new());
         DISK_READ_OPS = 0;
         DISK_READ_BYTES = 0;
+        CACHE_HITS = 0;
+        READAHEAD_HITS = 0;
+        READ_CACHE = Some(Vec::new());
     }
 }
 
@@ -51,6 +71,7 @@ pub fn register_disk(node: usize, drive: Drive, data_lba: u64, size: usize) {
 
 pub fn unregister(node: usize) {
     extents().retain(|extent| extent.node != node);
+    read_cache().retain(|entry| entry.node != node);
 }
 
 pub fn is_disk_backed(node: usize) -> bool {
@@ -72,7 +93,7 @@ pub fn logical_len(node: usize) -> usize {
 }
 
 /// Lit une plage sans materialiser le fichier complet.
-pub fn read_at(node: usize, offset: usize, out: &mut [u8]) -> usize {
+fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
     if out.is_empty() {
         return 0;
     }
@@ -149,6 +170,56 @@ pub fn read_at(node: usize, offset: usize, out: &mut [u8]) -> usize {
         DISK_READ_BYTES = DISK_READ_BYTES.saturating_add(done as u64);
     }
     done
+}
+
+/// Lit via une fenêtre read-ahead partagée entre processus.
+///
+/// Les faults ELF sont typiquement des lectures de 4 KiB consécutives. Une
+/// fenêtre alignée de 16 KiB transforme quatre faults en une commande backing,
+/// sans précharger un binaire entier. Le cache est borné à 4 MiB et partagé par
+/// identité de nœud; les processus Ladybird relisant les mêmes pages propres
+/// réutilisent donc les octets déjà lus.
+pub fn read_at(node: usize, offset: usize, out: &mut [u8]) -> usize {
+    if out.is_empty() || !is_disk_backed(node) || out.len() > READAHEAD_BYTES {
+        return read_at_uncached(node, offset, out);
+    }
+    if let Some(entry) = read_cache().iter().find(|entry| {
+        entry.node == node && offset >= entry.base
+            && offset.saturating_add(out.len()) <= entry.base.saturating_add(entry.valid)
+    }) {
+        let start = offset - entry.base;
+        out.copy_from_slice(&entry.data[start..start + out.len()]);
+        unsafe {
+            CACHE_HITS = CACHE_HITS.saturating_add(1);
+            if offset >= entry.prefetched_from { READAHEAD_HITS = READAHEAD_HITS.saturating_add(1); }
+        }
+        return out.len();
+    }
+
+    let base = offset & !(READAHEAD_BYTES - 1);
+    let mut data = alloc::vec![0u8; READAHEAD_BYTES];
+    let valid = read_at_uncached(node, base, &mut data);
+    if valid == 0 || offset < base || offset - base >= valid {
+        return 0;
+    }
+    let start = offset - base;
+    let copied = core::cmp::min(out.len(), valid - start);
+    out[..copied].copy_from_slice(&data[start..start + copied]);
+    let cache = read_cache();
+    if cache.len() >= CACHE_ENTRIES_MAX { cache.remove(0); }
+    cache.push(ReadCacheEntry {
+        node,
+        base,
+        valid,
+        data,
+        prefetched_from: offset.saturating_add(copied),
+    });
+    copied
+}
+
+/// (hits cache, hits read-ahead).
+pub fn cache_stats() -> (u64, u64) {
+    unsafe { (CACHE_HITS, READAHEAD_HITS) }
 }
 
 /// (fichiers paresseux, octets logiques, operations disque, octets lus).

@@ -39,6 +39,7 @@
 #    include <AK/ByteString.h>
 #    include <AK/Format.h>
 #    include <AK/Function.h>
+#    include <AK/Optional.h>
 #    include <AK/StringBuilder.h>
 #    include <AK/StringView.h>
 #    include <AK/Types.h>
@@ -263,6 +264,11 @@ struct State {
     int surface_width { 0 };
     int surface_height { 0 };
     int surface_stride { 0 };
+    // La surface GUI garde le même fd et la même géométrie pendant la vie du
+    // client. La mapper une fois évite mmap/munmap et les shootdowns TLB à
+    // chaque frame chrome/page.
+    u8* surface_mapping { nullptr };
+    size_t surface_mapping_bytes { 0 };
 
     // Barre d'adresse. Le texte est conserve en octets ASCII : le pilote clavier
     // du bureau n'expose pas encore de disposition non latine, et pretendre le
@@ -562,6 +568,35 @@ struct Canvas {
     u32* row(int y) const { return reinterpret_cast<u32*>(base + static_cast<size_t>(y) * stride); }
 };
 
+inline Optional<Canvas> mapped_surface()
+{
+    auto& s = state();
+    if (s.surface_fd < 0 || s.gui_fd < 0 || s.surface_width <= 0 || s.surface_height <= 0)
+        return {};
+    auto stride_bytes = static_cast<size_t>(s.surface_stride);
+    auto height_rows = static_cast<size_t>(s.surface_height);
+    if (height_rows != 0 && stride_bytes > SIZE_MAX / height_rows)
+        return {};
+    auto bytes = stride_bytes * height_rows;
+    if (bytes == 0)
+        return {};
+    if (!s.surface_mapping) {
+        auto* mapped = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, s.surface_fd, 0);
+        if (mapped == MAP_FAILED) {
+            warnln("[ladybird-bouchaud] M11_SURFACE_MMAP_FAILED errno={} bytes={}", errno, bytes);
+            return {};
+        }
+        s.surface_mapping = static_cast<u8*>(mapped);
+        s.surface_mapping_bytes = bytes;
+        outln("[ladybird-bouchaud] M11_SURFACE_MAPPED bytes={}", bytes);
+    }
+    if (s.surface_mapping_bytes != bytes) {
+        warnln("[ladybird-bouchaud] M11_SURFACE_GEOMETRY_CHANGED old={} new={}", s.surface_mapping_bytes, bytes);
+        return {};
+    }
+    return Canvas { s.surface_mapping, s.surface_width, s.surface_height, s.surface_stride };
+}
+
 inline void fill_rect(Canvas const& canvas, int x, int y, int w, int h, u32 color)
 {
     auto x0 = max(0, x);
@@ -745,25 +780,10 @@ inline bool compose_full()
         return false;
     }
 
-    auto stride_bytes = static_cast<size_t>(s.surface_stride);
-    auto height_rows = static_cast<size_t>(s.surface_height);
-    if (height_rows != 0 && stride_bytes > SIZE_MAX / height_rows) {
-        warnln("[ladybird-bouchaud] M11_SURFACE_SIZE_OVERFLOW stride={} height={}", s.surface_stride, s.surface_height);
+    auto canvas_or_error = mapped_surface();
+    if (!canvas_or_error.has_value())
         return false;
-    }
-    auto surface_bytes = stride_bytes * height_rows;
-    if (surface_bytes == 0) {
-        warnln("[ladybird-bouchaud] M11_SURFACE_SIZE_ZERO");
-        return false;
-    }
-
-    auto* mapped = mmap(nullptr, surface_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, s.surface_fd, 0);
-    if (mapped == MAP_FAILED) {
-        warnln("[ladybird-bouchaud] M11_SURFACE_MMAP_FAILED errno={} bytes={}", errno, surface_bytes);
-        return false;
-    }
-
-    Canvas canvas { static_cast<u8*>(mapped), s.surface_width, s.surface_height, s.surface_stride };
+    auto canvas = canvas_or_error.release_value();
 
     draw_toolbar(canvas);
 
@@ -784,8 +804,6 @@ inline bool compose_full()
         }
         painted = static_cast<size_t>(copy_width) * static_cast<size_t>(copy_height);
     }
-
-    munmap(mapped, surface_bytes);
 
     send_handshake();
     ++s.chrome_full_frames;
@@ -810,23 +828,11 @@ inline bool compose_toolbar_only()
     if (s.surface_fd < 0 || s.gui_fd < 0 || s.surface_width <= 0 || s.surface_height <= 0)
         return false;
 
-    auto stride_bytes = static_cast<size_t>(s.surface_stride);
-    auto height_rows = static_cast<size_t>(s.surface_height);
-    if (height_rows != 0 && stride_bytes > SIZE_MAX / height_rows)
+    auto canvas_or_error = mapped_surface();
+    if (!canvas_or_error.has_value())
         return false;
-    auto surface_bytes = stride_bytes * height_rows;
-    if (surface_bytes == 0)
-        return false;
-
-    auto* mapped = mmap(nullptr, surface_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, s.surface_fd, 0);
-    if (mapped == MAP_FAILED) {
-        warnln("[ladybird-bouchaud] M11_TOOLBAR_MMAP_FAILED errno={} bytes={}", errno, surface_bytes);
-        return false;
-    }
-
-    Canvas canvas { static_cast<u8*>(mapped), s.surface_width, s.surface_height, s.surface_stride };
+    auto canvas = canvas_or_error.release_value();
     draw_toolbar(canvas);
-    munmap(mapped, surface_bytes);
 
     send_handshake();
     ++s.chrome_toolbar_frames;

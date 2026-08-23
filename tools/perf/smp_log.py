@@ -31,7 +31,7 @@ def _decode_log(path):
     return raw.decode("utf-8", errors="replace")
 
 def parse(path):
-    smp, proc, perf = [], [], []
+    smp, proc, perf, app = [], [], [], []
     text = _decode_log(path)
     for line_number, line in enumerate(text.splitlines(), 1):
         if "[SMP-SAMPLE]" in line:
@@ -41,11 +41,12 @@ def parse(path):
                 raise ValueError(f"SMP-SAMPLE ligne {line_number} invalide: champs manquants {sorted(missing)}")
             smp.append(sample)
         elif "[PROC-SAMPLE]" in line: proc.append(fields(line))
+        elif "[APP-SAMPLE]" in line: app.append(fields(line))
         elif "PERF_" in line: perf.append((line.strip(), fields(line)))
-    return smp, proc, perf
+    return smp, proc, perf, app
 
 def summarize(path):
-    smp, proc, perf = parse(path)
+    smp, proc, perf, app = parse(path)
     duration = sum(number(s.get("window_ns")) for s in smp) / 1e9
     loads = [vec(s.get("load")) for s in smp]
     width = max((len(x) for x in loads), default=0)
@@ -64,6 +65,12 @@ def summarize(path):
     for p in proc:
         d=processes[p.get("name", p.get("pid","?"))]; d["cpu"].append(number(p.get("cpu_pct"))); d["maps"].append(vec(p.get("cpu_map")))
         d["ctx"] += number(p.get("ctx_delta")); d["mig"] += number(p.get("mig_delta")); d["rss"] = max(d["rss"], number(p.get("rss")))
+    applications = defaultdict(lambda: {"cpu": [], "rss": 0.0, "ctx": 0.0, "mig": 0.0})
+    for entry in app:
+        d = applications[entry.get("name", entry.get("id", "?"))]
+        d["cpu"].append(number(entry.get("cpu_pct")))
+        d["rss"] = max(d["rss"], number(entry.get("rss")))
+        d["ctx"] += number(entry.get("ctx_delta")); d["mig"] += number(entry.get("mig_delta"))
     click_to_paint = None
     for line, f in perf:
         if "PERF_FIRST_PAINT" in line and number(f.get("since_click_ms")) > 0: click_to_paint = number(f["since_click_ms"])
@@ -72,4 +79,4 @@ def summarize(path):
       "steal_success_pct":100*sums["steal_ok"]/sums["steal_try"] if sums["steal_try"] else 0,
       "rej_bal_s":rate("rej_bal"),"rej_aff_s":rate("rej_aff"),"bkl_wait_ms_s":rate("bkl_wait")/1e6,
       "bkl_hold_ms_s":rate("bkl_hold")/1e6,"pf_s":rate("pf"),"tlb_s":rate("tlb"),"processes":processes,
-      "click_first_paint_ms":click_to_paint}
+      "click_first_paint_ms":click_to_paint,"applications":applications}
