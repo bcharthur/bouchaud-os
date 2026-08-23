@@ -46,6 +46,11 @@ static PROBE_LAST_RELEASE_TICK: AtomicU64 = AtomicU64::new(0);
 static PROBE_LAST_RELEASE_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
 static PROBE_LAST_RELEASE_KIND: AtomicU32 = AtomicU32::new(0);
 static PROBE_LAST_RELEASE_GEN: AtomicU64 = AtomicU64::new(0);
+static TOTAL_WAIT_NS: AtomicU64 = AtomicU64::new(0);
+static TOTAL_HOLD_NS: AtomicU64 = AtomicU64::new(0);
+static TOTAL_ACQUISITIONS: AtomicU64 = AtomicU64::new(0);
+static ACQUIRED_AT_NS: [AtomicU64; MAX_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_CPUS];
 
 #[inline]
 fn cpu() -> usize {
@@ -64,6 +69,8 @@ fn probe_note_reenter() {
 
 #[inline]
 fn probe_note_acquire(cpu: usize, kind: u32) {
+    TOTAL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
+    ACQUIRED_AT_NS[cpu].store(crate::kernel::timer::monotonic_ns(), Ordering::Relaxed);
     // GEN=0 signifie uniquement "transition de metadata". Le token OWNER
     // est deja installe par le CAS ; le PIT sait donc ignorer ce tres court
     // intervalle plutot que de fabriquer un faux snapshot coherent.
@@ -84,6 +91,9 @@ fn probe_note_acquire(cpu: usize, kind: u32) {
 
 #[inline]
 fn probe_note_release(cpu: usize, kind: u32) {
+    let now_ns = crate::kernel::timer::monotonic_ns();
+    let acquired = ACQUIRED_AT_NS[cpu].swap(0, Ordering::Relaxed);
+    TOTAL_HOLD_NS.fetch_add(now_ns.saturating_sub(acquired), Ordering::Relaxed);
     let generation = PROBE_OWNER_GEN.load(Ordering::Acquire);
     PROBE_RELEASE_SEQ.fetch_add(1, Ordering::AcqRel);
     PROBE_LAST_RELEASE_TICK.store(crate::kernel::timer::ticks(), Ordering::Release);
@@ -200,6 +210,7 @@ pub fn enter() -> KernelGuard {
     let cpu = cpu();
     let mine = token(cpu);
     let mut active_spins = 0usize;
+    let wait_start = crate::kernel::timer::monotonic_ns();
 
     loop {
         // Ne masquer les IRQ que pour le snapshot + la transition locale.
@@ -221,6 +232,10 @@ pub fn enter() -> KernelGuard {
                 // Aucun handler local ne peut voir OWNER=mine avec DEPTH=0.
                 DEPTH[cpu].store(1, Ordering::Relaxed);
                 probe_note_acquire(cpu, 1);
+                TOTAL_WAIT_NS.fetch_add(
+                    crate::kernel::timer::monotonic_ns().saturating_sub(wait_start),
+                    Ordering::Relaxed,
+                );
                 return KernelGuard { cpu, active: true };
             }
         }
@@ -308,6 +323,7 @@ pub fn resume_after_schedule(depth: usize) {
     let cpu = cpu();
     let mine = token(cpu);
     let mut active_spins = 0usize;
+    let wait_start = crate::kernel::timer::monotonic_ns();
 
     loop {
         {
@@ -321,6 +337,10 @@ pub fn resume_after_schedule(depth: usize) {
                 // la profondeur de la pile reprise soit restauree.
                 DEPTH[cpu].store(depth, Ordering::Relaxed);
                 probe_note_acquire(cpu, 3);
+                TOTAL_WAIT_NS.fetch_add(
+                    crate::kernel::timer::monotonic_ns().saturating_sub(wait_start),
+                    Ordering::Relaxed,
+                );
                 return;
             }
         }
@@ -328,6 +348,14 @@ pub fn resume_after_schedule(depth: usize) {
         // Meme politique adaptative lors de la reprise d'une pile noyau.
         wait_for_owner_change(&mut active_spins);
     }
+}
+
+pub fn contention_stats() -> (u64, u64, u64) {
+    (
+        TOTAL_WAIT_NS.load(Ordering::Relaxed),
+        TOTAL_HOLD_NS.load(Ordering::Relaxed),
+        TOTAL_ACQUISITIONS.load(Ordering::Relaxed),
+    )
 }
 
 pub fn owner_cpu() -> Option<usize> {

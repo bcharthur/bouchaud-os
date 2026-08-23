@@ -141,7 +141,7 @@ pub fn print_processes() {
         crate::println!(
             "{:<6} {:>3}% {:>10} {:>10} {:>4}  {}",
             mesure.pid,
-            cpu.min(100),
+            cpu,
             mesure.rss_octets / (1024 * 1024),
             mesure.vss_octets / (1024 * 1024),
             mesure.taches,

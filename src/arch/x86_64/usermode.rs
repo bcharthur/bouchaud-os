@@ -265,7 +265,9 @@ unsafe extern "C" fn syscall_dispatch(frame: *mut TrapFrame) {
     crate::kernel::task::stall_syscall_enter((*frame).rax);
     let kernel = crate::kernel::smp_lock::enter();
     crate::kernel::task::stall_syscall_bkl_acquired();
+    crate::kernel::task::account_kernel_enter();
     crate::kernel::abi::handle(&mut *frame);
+    crate::kernel::task::account_kernel_exit();
     drop(kernel);
     crate::kernel::task::stall_syscall_exit();
 }

@@ -358,14 +358,27 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
             if !ligne.is_empty() {
                 ligne.push_str(" | ");
             }
+            let online = crate::arch::x86_64::smp::schedulable_cpus();
+            let mut cpu_map = String::from("[");
+            for cpu in 0..online {
+                if cpu != 0 { cpu_map.push(','); }
+                cpu_map.push_str(&alloc::format!(
+                    "{}",
+                    mesure.cpu_map_ns[cpu].saturating_mul(100) / total,
+                ));
+            }
+            cpu_map.push(']');
             ligne.push_str(&alloc::format!(
-                "{} pid={} cpu {}% rss {} Mio vss {} Mio{}",
+                "{} pid={} cpu {}% cpu_map={} rss {} Mio vss {} Mio thr={} ctx={} mig={}",
                 mesure.nom,
                 mesure.pid,
-                (mesure.ticks * 100 / total).min(100),
+                mesure.ticks * 100 / total,
+                cpu_map,
                 mesure.rss_octets / (1024 * 1024),
                 mesure.vss_octets / (1024 * 1024),
-                if mesure.taches > 1 { alloc::format!(" ({} fils)", mesure.taches) } else { String::new() },
+                mesure.taches,
+                mesure.context_switches,
+                mesure.migrations,
             ));
         }
         if !ligne.is_empty() {

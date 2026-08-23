@@ -277,6 +277,7 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
     // profondeur BKL et on ferme aussi la sonde syscall avant l'iretq.
     task::stall_site_clear();
     task::stall_syscall_exit();
+    task::account_resume_user_noreturn();
     let abandoned_depth = crate::kernel::smp_lock::suspend_for_schedule();
     debug_assert!(
         abandoned_depth > 0,
