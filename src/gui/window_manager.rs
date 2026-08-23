@@ -54,13 +54,15 @@ const PERIODE_TRAME_MS: u64 = 16;
 /// granularite de l'horloge : rafraichir plus vite ne montrerait rien de plus.
 const PERIODE_HORLOGE_MS: u64 = 1000;
 
-/// Duree de sommeil quand il n'y a rien a faire, en ticks (1 tick = 1 ms).
-///
-/// C'est la latence maximale d'un clic ou d'une touche : les interruptions
-/// d'entree ne reveillent pas un dormeur, seul l'echeance le fait. Quatre
-/// millisecondes sont imperceptibles a la main et laissent au navigateur des
-/// tranches de temps utilisables.
-const REPOS_TICKS: u64 = 4;
+/// Repos court tant que l'utilisateur interagit ou qu'une trame est encore sale.
+/// Les IRQ d'entree ne reveillent pas directement le fil bureau, donc on garde
+/// la latence historique de 4 ms pendant la phase interactive.
+const REPOS_ACTIF_TICKS: u64 = 4;
+
+/// BOUCHAUD_CPU_OPT_DYNAMIC_WM_SLEEP: au repos, 16 ms suffisent largement (une periode de trame).
+/// Cela divise jusqu'a quatre le nombre de reveils du fil noyau du bureau tout
+/// en plafonnant la latence de reprise a environ une frame.
+const REPOS_CALME_TICKS: u64 = 16;
 
 /// Periode du releve de charge par processus, en millisecondes.
 ///
@@ -316,10 +318,18 @@ fn boucle() {
             releve_charge(&mut wins, periode);
         }
 
-        // Rend la main : c'est ici que les clients ring 3 avancent. Sans autre
-        // tache prete, `sleep_ticks` s'arrete sur un `hlt` — le bureau au repos
-        // ne consomme donc pas plus qu'avant.
-        task::sleep_ticks(REPOS_TICKS);
+        // Rend la main. Pendant une interaction on conserve la reactivite 4 ms ;
+        // une fois calme, on n'eveille plus le bureau 250 fois/s sans raison.
+        // Le navigateur garde ainsi des tranches CPU nettement plus longues.
+        let repos_ticks = if sale
+            || left
+            || maintenant.wrapping_sub(derniere_entree) < REACTIVITE_MUETTE_MS
+        {
+            REPOS_ACTIF_TICKS
+        } else {
+            REPOS_CALME_TICKS
+        };
+        task::sleep_ticks(repos_ticks);
         task::nettoie_zombies();
     }
 

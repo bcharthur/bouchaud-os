@@ -335,6 +335,49 @@ pub fn user_slot_base() -> u64 {
     (user_slot() as u64) << 39
 }
 
+
+/// Mappe une page physique basse a la meme adresse virtuelle dans la PML4
+/// noyau. Sert uniquement au trampoline AP (0x8000/0x9000) pendant le passage
+/// real mode -> long mode. Les entrees creees restent supervisor-only.
+pub fn identity_map_kernel_page(virt_phys: u64) -> bool {
+    let page = virt_phys & !(PAGE_SIZE - 1);
+    let root = unsafe { KERNEL_PML4 };
+    if root == 0 {
+        return false;
+    }
+
+    let mut table = table_at(root);
+    for level in (1..4).rev() {
+        let shift = 12 + 9 * level;
+        let index = ((page >> shift) & 0x1FF) as usize;
+        let entry = table[index];
+        if entry & PTE_PRESENT != 0 {
+            if entry & PTE_HUGE != 0 {
+                // 1 GiB (niveau 3) ou 2 MiB (niveau 2) deja identitaire : rien
+                // a modifier. Une huge page non identitaire ne doit surtout pas
+                // etre decoupee silencieusement pendant le boot.
+                let span = 1u64 << shift;
+                let phys_base = (entry & ADDR_MASK) & !(span - 1);
+                return phys_base + (page & (span - 1)) == page;
+            }
+            table = table_at(entry & ADDR_MASK);
+            continue;
+        }
+
+        let frame = match alloc_frame() {
+            Some(frame) => frame,
+            None => return false,
+        };
+        table[index] = frame | PTE_PRESENT | PTE_WRITE;
+        table = table_at(frame);
+    }
+
+    let leaf = ((page >> 12) & 0x1FF) as usize;
+    table[leaf] = page | PTE_PRESENT | PTE_WRITE;
+    flush(page);
+    true
+}
+
 /// Une adresse est-elle dans le creneau utilisateur ?
 pub fn is_user_addr(virt: u64) -> bool {
     let base = user_slot_base();

@@ -25,6 +25,7 @@ pub mod power;
 pub mod process;
 pub mod resource;
 pub mod scheduler;
+pub mod smp_lock;
 pub mod signal;
 pub mod syscall;
 pub mod sysroot;

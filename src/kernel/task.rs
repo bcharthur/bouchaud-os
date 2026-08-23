@@ -1,3 +1,4 @@
+// BOUCHAUD_SMP4_DEADLOCK_FIX
 //! Taches utilisateur : threads, changement de contexte, futex.
 //!
 //! Un **processus** ([`Process`]) possede un espace d'adressage, une table de
@@ -43,10 +44,12 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
-use crate::arch::x86_64::cpu;
+use crate::arch::x86_64::{cpu, smp};
 use crate::arch::x86_64::usermode::{self, TrapFrame};
 use crate::kernel::fd::FdTable;
+use crate::kernel::smp_lock;
 use crate::kernel::vmm::AddressSpace;
 pub use crate::kernel::vma::{Backing as PromesseBacking, Vma as Promesse};
 
@@ -80,12 +83,11 @@ pub enum Priorite {
 /// « rien d'autre ne tourne ». Au-dela du compte, le tourniquet reprend ses
 /// droits pour un tour, ce qui garantit une progression a toute tache prete.
 ///
-/// Huit : assez pour que l'interface enchaine plusieurs reveils courts sans
-/// interruption, assez peu pour qu'une tache de fond conserve au moins un
-/// neuvieme du temps dans le pire des cas.
-const TOURS_INTERACTIFS_MAX: u32 = 8;
+/// Quatre : l'interface conserve des rafales courtes, mais une tache normale
+/// recupere au moins un tour sur cinq sous pression interactive continue.
+/// C'est volontairement plus favorable a WebContent et aux workers CPU.
+const TOURS_INTERACTIFS_MAX: u32 = 4;
 
-static mut TOURS_INTERACTIFS: u32 = 0;
 
 /// Etat d'ordonnancement d'une tache.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -133,9 +135,12 @@ pub fn peuple_a_la_demande(adresse: u64) -> bool {
         return false;
     }
 
+    stall_pf_phase(210, adresse);
     let processus = current_process();
+    stall_pf_phase(211, adresse);
     let mut p = processus.borrow_mut();
     let page = adresse & !(crate::kernel::vmm::PAGE_SIZE - 1);
+    stall_pf_phase(212, page);
 
     let effective = match crate::kernel::vma::trouve(&p.promesses, page) {
         Some(region) => region,
@@ -152,6 +157,7 @@ pub fn peuple_a_la_demande(adresse: u64) -> bool {
 
     match effective.backing {
         PromesseBacking::Zero => {
+            stall_pf_phase(220, page);
             if !p.space.map_alloc(
                 page,
                 crate::kernel::vmm::PAGE_SIZE,
@@ -162,6 +168,7 @@ pub fn peuple_a_la_demande(adresse: u64) -> bool {
             unsafe {
                 FAULTS_ZERO = FAULTS_ZERO.saturating_add(1);
             }
+            stall_pf_phase(229, page);
             true
         }
 
@@ -183,6 +190,7 @@ pub fn peuple_a_la_demande(adresse: u64) -> bool {
             file_offset,
             ..
         } => {
+            stall_pf_phase(230, page);
             let source =
                 file_offset.saturating_add(page.saturating_sub(mapping_start));
             let numero = source / crate::kernel::vmm::PAGE_SIZE;
@@ -196,10 +204,12 @@ pub fn peuple_a_la_demande(adresse: u64) -> bool {
             unsafe {
                 FAULTS_FILE = FAULTS_FILE.saturating_add(1);
             }
+            stall_pf_phase(239, page);
             true
         }
 
         PromesseBacking::File { .. } => {
+            stall_pf_phase(240, page);
             if !p.space.map_alloc(
                 page,
                 crate::kernel::vmm::PAGE_SIZE,
@@ -210,6 +220,7 @@ pub fn peuple_a_la_demande(adresse: u64) -> bool {
 
             // Plusieurs PT_LOAD peuvent partager une page. On compose tous les
             // fragments file-backed qui la couvrent.
+            stall_pf_phase(241, page);
             let count = p.promesses.len();
             for index in 0..count {
                 let region = p.promesses[index];
@@ -242,18 +253,22 @@ pub fn peuple_a_la_demande(adresse: u64) -> bool {
                     [0u8; crate::kernel::vmm::PAGE_SIZE as usize];
                 let source_offset = file_offset
                     .saturating_add(start.saturating_sub(mapping_start));
+                stall_pf_file_begin(source_offset);
                 let got = crate::fs::backing::read_at(
                     node,
                     source_offset as usize,
                     &mut buffer[..wanted],
                 );
+                stall_pf_file_done(got, wanted);
 
+                stall_pf_phase(244, start);
                 if got != wanted || !p.space.write(start, &buffer[..got]) {
                     p.space.unmap(page, crate::kernel::vmm::PAGE_SIZE);
                     return false;
                 }
             }
 
+            stall_pf_phase(249, page);
             unsafe {
                 FAULTS_FILE = FAULTS_FILE.saturating_add(1);
                 if FAULTS_FILE == 1 {
@@ -493,6 +508,10 @@ pub struct Task {
     pub state: TaskState,
     /// Classe d'ordonnancement. Voir [`Priorite`].
     pub priorite: Priorite,
+    /// CPU d'affinite. Tous les threads d'un meme processus partagent ce CPU.
+    pub home_cpu: u8,
+    /// CPU qui execute actuellement cette tache, -1 si elle est en runqueue.
+    pub on_cpu: i8,
     /// Etat ring 3 quand la tache n'est pas en cours d'execution.
     pub frame: TrapFrame,
     /// Contexte noyau (pile) pour le changement de tache.
@@ -538,27 +557,311 @@ pub struct Task {
 }
 
 static mut TASKS: Option<Vec<Box<Task>>> = None;
-/// Tous les processus vivants ou zombies, y compris ceux dont plus aucune
-/// tache ne tourne : c'est ce qui permet a `wait4` de retrouver un fils
-/// termine longtemps apres sa mort.
+/// Tous les processus vivants ou zombies.
 static mut PROCESSES: Option<Vec<Rc<RefCell<Process>>>> = None;
-static mut CURRENT: usize = usize::MAX;
-static mut NEXT_TID: u32 = 100;
-/// Contexte du fil noyau (shell/bureau) qui a lance le programme.
-static mut KERNEL_CTX: Context = Context { rsp: 0 };
-/// Une tache utilisateur a-t-elle demande une preemption ?
-static mut NEED_RESCHED: bool = false;
 
-/// Miroir IRQ-safe du type de tache courante : evite de parcourir TASKS quand
-/// IRQ0 interrompt un syscall en ring 0.
-static mut CURRENT_IS_KERNEL: bool = false;
+const NO_TASK: usize = usize::MAX;
+const MAX_CPUS: usize = smp::MAX_CPUS;
+static CURRENT: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(NO_TASK) }; MAX_CPUS];
+/// Zombie qui vient de quitter physiquement la pile de ce CPU. Le contexte
+/// entrant le rend recyclable une fois le switch assembleur effectivement fini.
+static RETIRED: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(NO_TASK) }; MAX_CPUS];
+static NEXT_TID: AtomicU32 = AtomicU32::new(100);
+static mut KERNEL_CTX: [Context; MAX_CPUS] = [Context { rsp: 0 }; MAX_CPUS];
+static NEED_RESCHED: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+static CURRENT_IS_KERNEL: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+static TOURS_INTERACTIFS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 
-static mut CONTEXT_SWITCHES: u64 = 0;
-static mut IRQ_PREEMPTIONS: u64 = 0;
-static mut DEFERRED_PREEMPTIONS: u64 = 0;
-static mut WM_HEARTBEAT_TICK: u64 = 0;
-static mut WM_WATCHDOG_ARMED: bool = false;
-static mut WM_LAST_WARNING_TICK: u64 = 0;
+static CONTEXT_SWITCHES: AtomicU64 = AtomicU64::new(0);
+static IRQ_PREEMPTIONS: AtomicU64 = AtomicU64::new(0);
+static DEFERRED_PREEMPTIONS: AtomicU64 = AtomicU64::new(0);
+static WM_HEARTBEAT_TICK: AtomicU64 = AtomicU64::new(0);
+static WM_WATCHDOG_ARMED: AtomicBool = AtomicBool::new(false);
+static WM_LAST_WARNING_TICK: AtomicU64 = AtomicU64::new(0);
+
+// BOUCHAUD_SMP4_STALL_PROBE_V1
+// phase: 0=hors syscall, 1=attente BKL, 2=dans ABI avec BKL.
+const STALL_NO_SYSCALL: u64 = u64::MAX;
+static STALL_SYSCALL_NR: [AtomicU64; MAX_CPUS] =
+    [const { AtomicU64::new(STALL_NO_SYSCALL) }; MAX_CPUS];
+static STALL_SYSCALL_PHASE: [AtomicU32; MAX_CPUS] =
+    [const { AtomicU32::new(0) }; MAX_CPUS];
+static STALL_SYSCALL_TICK: [AtomicU64; MAX_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_CPUS];
+
+// BOUCHAUD_SMP4_OWNER_SITE_PROBE_V2
+// Site noyau courant par CPU, uniquement pour diagnostic.
+// 0=aucun/user, 21=page fault+BKL, 31=IPI+BKL, 41=preempt+BKL,
+// 50=AP loop+BKL, 52=AP retour switch avant reacquire, 53=AP post-reacquire,
+// 54=complete_retired, 55=activate_kernel, 61=timer+BKL.
+static STALL_KERNEL_SITE: [AtomicU32; MAX_CPUS] =
+    [const { AtomicU32::new(0) }; MAX_CPUS];
+static STALL_KERNEL_AUX: [AtomicU64; MAX_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_CPUS];
+
+// BOUCHAUD_SMP4_OWNER_PROVENANCE_PROBE_V3
+// Heartbeat IPI : capture avant toute tentative de BKL. Si l'age IPI du
+// CPU proprietaire explose, il ne prend plus ses interruptions.
+static STALL_IPI_COUNT: [AtomicU64; MAX_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_CPUS];
+static STALL_IPI_TICK: [AtomicU64; MAX_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_CPUS];
+static STALL_IPI_RIP: [AtomicU64; MAX_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_CPUS];
+static STALL_IPI_USER: [AtomicU32; MAX_CPUS] =
+    [const { AtomicU32::new(0) }; MAX_CPUS];
+static STALL_IPI_BKL_HIT: [AtomicU64; MAX_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_CPUS];
+static STALL_IPI_BKL_MISS: [AtomicU64; MAX_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_CPUS];
+
+// Compteurs page-fault. begin/done mesurent le handler ; file begin/done
+// encadrent exactement fs::backing::read_at dans le demand paging.
+static STALL_PF_BEGIN: [AtomicU64; MAX_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_CPUS];
+static STALL_PF_DONE: [AtomicU64; MAX_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_CPUS];
+static STALL_PF_FAIL: [AtomicU64; MAX_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_CPUS];
+static STALL_PF_FILE_BEGIN: [AtomicU64; MAX_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_CPUS];
+static STALL_PF_FILE_DONE: [AtomicU64; MAX_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_CPUS];
+
+#[inline]
+pub fn stall_site_set(site: u32, aux: u64) {
+    let cpu = local_cpu();
+    STALL_KERNEL_AUX[cpu].store(aux, Ordering::Release);
+    STALL_KERNEL_SITE[cpu].store(site, Ordering::Release);
+}
+
+#[inline]
+pub fn stall_site_clear() {
+    STALL_KERNEL_SITE[local_cpu()].store(0, Ordering::Release);
+}
+
+#[inline]
+fn local_cpu() -> usize {
+    usermode::cpu_index().min(MAX_CPUS - 1)
+}
+
+#[inline]
+fn current_index_raw() -> usize {
+    CURRENT[local_cpu()].load(Ordering::Acquire)
+}
+
+/// Contexte uniquement atomique, lu par smp_lock au moment exact ou un CPU
+/// devient proprietaire. Aucun Rc/RefCell n'est touche ici.
+pub fn stall_probe_local_context() -> (usize, u64, u32, u32, u64) {
+    let cpu = local_cpu();
+    (
+        CURRENT[cpu].load(Ordering::Acquire),
+        STALL_SYSCALL_NR[cpu].load(Ordering::Acquire),
+        STALL_SYSCALL_PHASE[cpu].load(Ordering::Acquire),
+        STALL_KERNEL_SITE[cpu].load(Ordering::Acquire),
+        STALL_KERNEL_AUX[cpu].load(Ordering::Acquire),
+    )
+}
+
+pub fn stall_ipi_observe(rip: u64, interrupted_user: bool) {
+    let cpu = local_cpu();
+    STALL_IPI_RIP[cpu].store(rip, Ordering::Release);
+    STALL_IPI_USER[cpu].store(interrupted_user as u32, Ordering::Release);
+    STALL_IPI_TICK[cpu].store(crate::kernel::timer::ticks(), Ordering::Release);
+    STALL_IPI_COUNT[cpu].fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn stall_ipi_bkl_result(acquired: bool) {
+    let cpu = local_cpu();
+    if acquired {
+        STALL_IPI_BKL_HIT[cpu].fetch_add(1, Ordering::Relaxed);
+    } else {
+        STALL_IPI_BKL_MISS[cpu].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub fn stall_pf_begin(addr: u64) {
+    let cpu = local_cpu();
+    STALL_PF_BEGIN[cpu].fetch_add(1, Ordering::Relaxed);
+    stall_site_set(20, addr);
+}
+
+pub fn stall_pf_phase(site: u32, aux: u64) {
+    stall_site_set(site, aux);
+}
+
+pub fn stall_pf_file_begin(source_offset: u64) {
+    STALL_PF_FILE_BEGIN[local_cpu()].fetch_add(1, Ordering::Relaxed);
+    stall_site_set(242, source_offset);
+}
+
+pub fn stall_pf_file_done(got: usize, wanted: usize) {
+    STALL_PF_FILE_DONE[local_cpu()].fetch_add(1, Ordering::Relaxed);
+    let packed = ((got as u64) << 32) | (wanted as u64 & 0xffff_ffff);
+    stall_site_set(243, packed);
+}
+
+pub fn stall_pf_done(addr: u64) {
+    STALL_PF_DONE[local_cpu()].fetch_add(1, Ordering::Relaxed);
+    stall_site_set(299, addr);
+}
+
+pub fn stall_pf_fail(addr: u64) {
+    STALL_PF_FAIL[local_cpu()].fetch_add(1, Ordering::Relaxed);
+    stall_site_set(298, addr);
+}
+
+
+// --- Sonde de stall SMP : aucun acces Rc/RefCell, uniquement atomiques. ---
+pub fn stall_syscall_enter(nr: u64) {
+    let cpu = local_cpu();
+    STALL_SYSCALL_NR[cpu].store(nr, Ordering::Release);
+    STALL_SYSCALL_TICK[cpu].store(crate::kernel::timer::ticks(), Ordering::Release);
+    STALL_SYSCALL_PHASE[cpu].store(1, Ordering::Release);
+}
+
+pub fn stall_syscall_bkl_acquired() {
+    STALL_SYSCALL_PHASE[local_cpu()].store(2, Ordering::Release);
+}
+
+pub fn stall_syscall_exit() {
+    let cpu = local_cpu();
+    STALL_SYSCALL_PHASE[cpu].store(0, Ordering::Release);
+    STALL_SYSCALL_NR[cpu].store(STALL_NO_SYSCALL, Ordering::Release);
+}
+
+/// Appelee par le PIT BSP AVANT tout try_enter(BKL). Si les logs normaux
+/// meurent parce qu'un AP garde le BKL, cette ligne continue donc a sortir.
+pub fn stall_probe_from_timer() {
+    let now = crate::kernel::timer::ticks();
+    if now == 0 || now % crate::kernel::timer::TICKS_PER_SECOND != 0 {
+        return;
+    }
+
+    let nr0 = STALL_SYSCALL_NR[0].load(Ordering::Acquire);
+    let nr1 = STALL_SYSCALL_NR[1].load(Ordering::Acquire);
+    let nr2 = STALL_SYSCALL_NR[2].load(Ordering::Acquire);
+    let nr3 = STALL_SYSCALL_NR[3].load(Ordering::Acquire);
+    let ph0 = STALL_SYSCALL_PHASE[0].load(Ordering::Acquire);
+    let ph1 = STALL_SYSCALL_PHASE[1].load(Ordering::Acquire);
+    let ph2 = STALL_SYSCALL_PHASE[2].load(Ordering::Acquire);
+    let ph3 = STALL_SYSCALL_PHASE[3].load(Ordering::Acquire);
+    let st0 = STALL_SYSCALL_TICK[0].load(Ordering::Acquire);
+    let st1 = STALL_SYSCALL_TICK[1].load(Ordering::Acquire);
+    let st2 = STALL_SYSCALL_TICK[2].load(Ordering::Acquire);
+    let st3 = STALL_SYSCALL_TICK[3].load(Ordering::Acquire);
+    let age0 = if ph0 == 0 { 0 } else { now.wrapping_sub(st0) };
+    let age1 = if ph1 == 0 { 0 } else { now.wrapping_sub(st1) };
+    let age2 = if ph2 == 0 { 0 } else { now.wrapping_sub(st2) };
+    let age3 = if ph3 == 0 { 0 } else { now.wrapping_sub(st3) };
+    let site0 = STALL_KERNEL_SITE[0].load(Ordering::Acquire);
+    let site1 = STALL_KERNEL_SITE[1].load(Ordering::Acquire);
+    let site2 = STALL_KERNEL_SITE[2].load(Ordering::Acquire);
+    let site3 = STALL_KERNEL_SITE[3].load(Ordering::Acquire);
+    let aux0 = STALL_KERNEL_AUX[0].load(Ordering::Acquire);
+    let aux1 = STALL_KERNEL_AUX[1].load(Ordering::Acquire);
+    let aux2 = STALL_KERNEL_AUX[2].load(Ordering::Acquire);
+    let aux3 = STALL_KERNEL_AUX[3].load(Ordering::Acquire);
+
+    crate::serial_println!(
+        "[SMP-STALL] t={} owner={} depth=[{},{},{},{}] cur=[{},{},{},{}] site=[{}:{:#x} {}:{:#x} {}:{:#x} {}:{:#x}] syscall=[{}:{}/{} {}:{}/{} {}:{}/{} {}:{}/{}]",
+        now,
+        crate::kernel::smp_lock::stall_probe_owner_token(),
+        crate::kernel::smp_lock::stall_probe_depth(0),
+        crate::kernel::smp_lock::stall_probe_depth(1),
+        crate::kernel::smp_lock::stall_probe_depth(2),
+        crate::kernel::smp_lock::stall_probe_depth(3),
+        CURRENT[0].load(Ordering::Acquire),
+        CURRENT[1].load(Ordering::Acquire),
+        CURRENT[2].load(Ordering::Acquire),
+        CURRENT[3].load(Ordering::Acquire),
+        site0, aux0, site1, aux1, site2, aux2, site3, aux3,
+        nr0, ph0, age0,
+        nr1, ph1, age1,
+        nr2, ph2, age2,
+        nr3, ph3, age3,
+    );
+
+    let prov = crate::kernel::smp_lock::stall_probe_provenance();
+    let owner_cpu = if prov.owner_token == 0 { 255usize } else { prov.owner_token - 1 };
+    let held = if prov.owner_token == 0 || prov.generation == 0 {
+        0
+    } else {
+        now.wrapping_sub(prov.since_tick)
+    };
+    let (live_site, live_aux, live_depth) = if owner_cpu < MAX_CPUS {
+        (
+            STALL_KERNEL_SITE[owner_cpu].load(Ordering::Acquire),
+            STALL_KERNEL_AUX[owner_cpu].load(Ordering::Acquire),
+            crate::kernel::smp_lock::stall_probe_depth(owner_cpu),
+        )
+    } else {
+        (0, 0, 0)
+    };
+    let last_rel_age = if prov.last_release_tick == 0 {
+        0
+    } else {
+        now.wrapping_sub(prov.last_release_tick)
+    };
+    crate::serial_println!(
+        "[SMP-PROV] t={} owner={} cpu={} gen={} coherent={} held={}ms depth={} acq={} rel={} reent={} kind={} task={} syscall={}:{} acquired_site={}:{:#x} live_site={}:{:#x} lastrel={}@cpu{}:kind{} gen={} age={}ms",
+        now, prov.owner_token, owner_cpu, prov.generation, prov.coherent as u8,
+        held, live_depth, prov.acquire_seq, prov.release_seq, prov.reenter_seq,
+        prov.acquire_kind, prov.task, prov.syscall_nr, prov.syscall_phase,
+        prov.site, prov.aux, live_site, live_aux, prov.last_release_tick,
+        prov.last_release_cpu, prov.last_release_kind, prov.last_release_gen, last_rel_age,
+    );
+
+    let ipi_age = |cpu: usize| {
+        let count = STALL_IPI_COUNT[cpu].load(Ordering::Acquire);
+        let tick = STALL_IPI_TICK[cpu].load(Ordering::Acquire);
+        if count == 0 { 0 } else { now.wrapping_sub(tick) }
+    };
+    crate::serial_println!(
+        "[SMP-IPI] t={} c0={}/{}ms/{:#x}/u{}/{}/{} c1={}/{}ms/{:#x}/u{}/{}/{} c2={}/{}ms/{:#x}/u{}/{}/{} c3={}/{}ms/{:#x}/u{}/{}/{}",
+        now,
+        STALL_IPI_COUNT[0].load(Ordering::Acquire), ipi_age(0), STALL_IPI_RIP[0].load(Ordering::Acquire), STALL_IPI_USER[0].load(Ordering::Acquire), STALL_IPI_BKL_HIT[0].load(Ordering::Acquire), STALL_IPI_BKL_MISS[0].load(Ordering::Acquire),
+        STALL_IPI_COUNT[1].load(Ordering::Acquire), ipi_age(1), STALL_IPI_RIP[1].load(Ordering::Acquire), STALL_IPI_USER[1].load(Ordering::Acquire), STALL_IPI_BKL_HIT[1].load(Ordering::Acquire), STALL_IPI_BKL_MISS[1].load(Ordering::Acquire),
+        STALL_IPI_COUNT[2].load(Ordering::Acquire), ipi_age(2), STALL_IPI_RIP[2].load(Ordering::Acquire), STALL_IPI_USER[2].load(Ordering::Acquire), STALL_IPI_BKL_HIT[2].load(Ordering::Acquire), STALL_IPI_BKL_MISS[2].load(Ordering::Acquire),
+        STALL_IPI_COUNT[3].load(Ordering::Acquire), ipi_age(3), STALL_IPI_RIP[3].load(Ordering::Acquire), STALL_IPI_USER[3].load(Ordering::Acquire), STALL_IPI_BKL_HIT[3].load(Ordering::Acquire), STALL_IPI_BKL_MISS[3].load(Ordering::Acquire),
+    );
+
+    crate::serial_println!(
+        "[SMP-PF] t={} c0={}/{}/{}/{}/{} c1={}/{}/{}/{}/{} c2={}/{}/{}/{}/{} c3={}/{}/{}/{}/{}",
+        now,
+        STALL_PF_BEGIN[0].load(Ordering::Acquire), STALL_PF_DONE[0].load(Ordering::Acquire), STALL_PF_FAIL[0].load(Ordering::Acquire), STALL_PF_FILE_BEGIN[0].load(Ordering::Acquire), STALL_PF_FILE_DONE[0].load(Ordering::Acquire),
+        STALL_PF_BEGIN[1].load(Ordering::Acquire), STALL_PF_DONE[1].load(Ordering::Acquire), STALL_PF_FAIL[1].load(Ordering::Acquire), STALL_PF_FILE_BEGIN[1].load(Ordering::Acquire), STALL_PF_FILE_DONE[1].load(Ordering::Acquire),
+        STALL_PF_BEGIN[2].load(Ordering::Acquire), STALL_PF_DONE[2].load(Ordering::Acquire), STALL_PF_FAIL[2].load(Ordering::Acquire), STALL_PF_FILE_BEGIN[2].load(Ordering::Acquire), STALL_PF_FILE_DONE[2].load(Ordering::Acquire),
+        STALL_PF_BEGIN[3].load(Ordering::Acquire), STALL_PF_DONE[3].load(Ordering::Acquire), STALL_PF_FAIL[3].load(Ordering::Acquire), STALL_PF_FILE_BEGIN[3].load(Ordering::Acquire), STALL_PF_FILE_DONE[3].load(Ordering::Acquire),
+    );
+}
+
+#[inline]
+fn set_current_index(index: usize) {
+    CURRENT[local_cpu()].store(index, Ordering::Release);
+}
+
+#[inline]
+fn set_current_is_kernel(value: bool) {
+    CURRENT_IS_KERNEL[local_cpu()].store(value, Ordering::Release);
+}
+
+#[inline]
+fn kernel_ctx() -> &'static mut Context {
+    unsafe { &mut KERNEL_CTX[local_cpu()] }
+}
+
+/// A appeler dans le contexte qui vient de PRENDRE le CPU, BKL tenu. Le zombie
+/// note avant le switch ne peut plus utiliser sa pile : son slot devient donc
+/// recyclable sans use-after-free.
+fn complete_retired() {
+    let cpu = local_cpu();
+    let retired = RETIRED[cpu].swap(NO_TASK, Ordering::AcqRel);
+    if retired == NO_TASK { return; }
+    if let Some(task) = tasks().get_mut(retired) {
+        if task.state == TaskState::Zombie { task.on_cpu = -1; }
+    }
+}
 
 /// PID du programme lance au premier plan par [`run`], 0 si aucun.
 ///
@@ -573,7 +876,7 @@ static mut WM_LAST_WARNING_TICK: u64 = 0;
 /// RequestServer, ImageDecoder, Compositor -- restent dans leur boucle
 /// d'evenements. L'autorun ne reprenait pas, donc `power::shutdown` n'etait
 /// jamais appele, donc /persist n'etait jamais ecrit a l'extinction.
-static mut RACINE_PREMIER_PLAN: u32 = 0;
+static RACINE_PREMIER_PLAN: AtomicU32 = AtomicU32::new(0);
 
 /// Le processus `pid` descend-il de `racine` (ou est-il `racine`) ?
 fn descend_de(pid: u32, racine: u32) -> bool {
@@ -633,25 +936,18 @@ pub fn process_of_tid(tid: u32) -> Option<Rc<RefCell<Process>>> {
 
 /// Alloue un identifiant de tache.
 pub fn alloc_tid() -> u32 {
-    unsafe {
-        let tid = NEXT_TID;
-        NEXT_TID += 1;
-        tid
-    }
+    NEXT_TID.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Y a-t-il une tache utilisateur en cours ?
 pub fn in_user_task() -> bool {
-    unsafe { CURRENT != usize::MAX }
+    current_index_raw() != NO_TASK
 }
 
-/// Tache courante.
-///
-/// # Panique
-/// Si aucune tache utilisateur n'est active (appel depuis le shell).
+/// Tache courante du CPU local.
 pub fn current() -> &'static mut Task {
-    let index = unsafe { CURRENT };
-    assert!(index != usize::MAX, "task: aucune tache utilisateur active");
+    let index = current_index_raw();
+    assert!(index != NO_TASK, "task: aucune tache active sur ce CPU");
     unsafe { &mut *(&mut **tasks().get_mut(index).unwrap() as *mut Task) }
 }
 
@@ -720,6 +1016,8 @@ impl Task {
             // interactive — un programme qui ne demande rien ne doit pas
             // pouvoir prendre le pas sur l'interface par accident.
             priorite: Priorite::Normale,
+            home_cpu: u8::MAX,
+            on_cpu: -1,
             frame,
             ctx: Context::default(),
             kstack,
@@ -757,6 +1055,7 @@ impl Task {
         // restauree, puisque le trampoline noyau ne fait pas d'`iretq`.
         let mut task = Task::new(process, TrapFrame::new_user(0, 0));
         task.noyau = true;
+        task.home_cpu = 0;
         task.entree_noyau = Some(entree);
         // Un fil noyau demarre **interruptions actives** : rien ne les
         // retablira pour lui plus tard. Sans `IF`, sa premiere attente
@@ -789,11 +1088,64 @@ fn amorce_pile(task: &mut Task, trampoline: extern "C" fn() -> !, rflags: u64) {
     }
 }
 
-/// Ajoute une tache a la table et renvoie son indice.
-pub fn register(task: Box<Task>) -> usize {
-    let list = tasks();
-    list.push(task);
-    list.len() - 1
+/// Choisit le CPU d'un nouveau processus. Les threads d'un processus existant
+/// reprennent obligatoirement son CPU : pas de migration d'espace d'adressage,
+/// donc pas de TLB shootdown requis dans ce jalon.
+fn choose_home_cpu(process: &Rc<RefCell<Process>>) -> u8 {
+    let pid = process.borrow().pid;
+    if let Some(existing) = tasks().iter().find(|t| {
+        t.state != TaskState::Zombie && t.home_cpu != u8::MAX && t.process.borrow().pid == pid
+    }) {
+        return existing.home_cpu;
+    }
+
+    let online = smp::schedulable_cpus().max(1).min(MAX_CPUS);
+    let mut load = [0usize; MAX_CPUS];
+    // Le BSP porte le desktop, le PIT et les IRQ PIC : reserver davantage sa
+    // capacite aux interactions et envoyer les services Ladybird vers les AP.
+    load[0] = 2;
+    for task in tasks().iter() {
+        if task.state != TaskState::Zombie && task.home_cpu != u8::MAX {
+            let cpu = task.home_cpu as usize;
+            if cpu < online && !task.noyau {
+                load[cpu] = load[cpu].saturating_add(1);
+            }
+        }
+    }
+    (0..online).min_by_key(|&cpu| load[cpu]).unwrap_or(0) as u8
+}
+
+/// Ajoute une tache a la table et renvoie son indice. En SMP les indices ne
+/// bougent jamais : un slot zombie est recycle au lieu de compacter le Vec.
+pub fn register(mut task: Box<Task>) -> usize {
+    let _kernel = smp_lock::enter();
+    if task.noyau {
+        task.home_cpu = 0;
+    } else if task.home_cpu == u8::MAX {
+        task.home_cpu = choose_home_cpu(&task.process);
+    }
+    task.on_cpu = -1;
+
+    let reuse = tasks().iter().position(|old| old.state == TaskState::Zombie && old.on_cpu < 0);
+    let index = if let Some(index) = reuse {
+        tasks()[index] = task;
+        index
+    } else {
+        let list = tasks();
+        list.push(task);
+        list.len() - 1
+    };
+    {
+        let registered = &tasks()[index];
+        let process = registered.process.borrow();
+        crate::serial_println!(
+            "[SMP-TASK] idx={} tid={} pid={} home={} on={} kernel={} prio={:?} name={}",
+            index, registered.tid, process.pid, registered.home_cpu, registered.on_cpu,
+            registered.noyau, registered.priorite, process.name.as_str(),
+        );
+    }
+    smp::broadcast_reschedule();
+    index
 }
 
 /// Indice d'une tache par son tid.
@@ -817,10 +1169,17 @@ pub fn live_count() -> usize {
 
 /// Nombre de taches pretes.
 fn ready_count() -> usize {
-    tasks()
-        .iter()
-        .filter(|t| t.state == TaskState::Ready)
-        .count()
+    tasks().iter().filter(|t| t.state == TaskState::Ready).count()
+}
+
+fn ready_count_cpu(cpu: usize) -> usize {
+    tasks().iter().filter(|t| {
+        t.state == TaskState::Ready && t.on_cpu < 0 && t.home_cpu as usize == cpu
+    }).count()
+}
+
+fn running_count() -> usize {
+    tasks().iter().filter(|t| t.state != TaskState::Zombie && t.on_cpu >= 0).count()
 }
 
 // --- Changement de contexte --------------------------------------------------
@@ -876,21 +1235,28 @@ unsafe extern "C" fn switch_context(from: *mut u64, to: u64) {
     )
 }
 
-/// Point d'entree d'une tache neuve : installe son contexte puis part en ring 3.
+/// Point d'entree d'une tache neuve : le scheduler a relache le BKL avant le
+/// switch. On le reprend uniquement le temps d'installer l'etat materiel, puis
+/// on le rend avant l'iretq utilisateur.
 extern "C" fn task_trampoline() -> ! {
-    let task = current();
-    install(task);
-    let frame = task.frame;
+    let frame = {
+        let _kernel = smp_lock::enter();
+        complete_retired();
+        let task = current();
+        install(task);
+        task.frame
+    };
     unsafe { usermode::resume_usermode(&frame) }
 }
 
-/// Point d'entree d'un fil noyau : appelle sa fonction, qui ne revient pas.
+/// Les fils noyau sont pin CPU0 et gardent le BKL pendant leur travail. Chaque
+/// `schedule()` le suspend autour du changement de contexte.
 extern "C" fn kernel_task_trampoline() -> ! {
+    let _kernel = smp_lock::enter();
+    complete_retired();
     let task = current();
     task.fresh = false;
-    let entree = task
-        .entree_noyau
-        .expect("task: fil noyau sans point d'entree");
+    let entree = task.entree_noyau.expect("task: fil noyau sans point d'entree");
     entree()
 }
 
@@ -898,7 +1264,7 @@ extern "C" fn kernel_task_trampoline() -> ! {
 /// base FS (TLS) et etat FPU.
 fn install(task: &mut Task) {
     unsafe {
-        CURRENT_IS_KERNEL = task.noyau;
+        set_current_is_kernel(task.noyau);
         // Un fil noyau n'a pas d'espace utilisateur a activer, et surtout ne
         // doit pas activer celui d'un programme : il lirait alors, sous les
         // memes adresses, la memoire du dernier processus installe.
@@ -929,33 +1295,37 @@ fn install(task: &mut Task) {
 /// ignore pour un tour et le tourniquet ordinaire reprend. Une tache normale
 /// avance donc toujours, meme face a une tache interactive qui ne se bloque
 /// jamais.
-fn pick_next(after: usize) -> Option<usize> {
-    let len = tasks().len();
-    if len == 0 {
-        return None;
-    }
+fn runnable_on_cpu(task: &Task, cpu: usize) -> bool {
+    task.state == TaskState::Ready
+        && task.on_cpu < 0
+        && task.home_cpu as usize == cpu
+}
 
-    let force_partage = unsafe { TOURS_INTERACTIFS >= TOURS_INTERACTIFS_MAX };
+fn pick_next(after: usize, cpu: usize) -> Option<usize> {
+    let len = tasks().len();
+    if len == 0 { return None; }
+    let start = if after == NO_TASK { 0 } else { after % len };
+    let tours = TOURS_INTERACTIFS[cpu].load(Ordering::Relaxed);
+    let force_partage = tours >= TOURS_INTERACTIFS_MAX;
+
     if !force_partage {
         for offset in 1..=len {
-            let index = (after.wrapping_add(offset)) % len;
+            let index = (start.wrapping_add(offset)) % len;
             let candidate = &tasks()[index];
-            if candidate.state == TaskState::Ready && candidate.priorite == Priorite::Interactive {
-                unsafe { TOURS_INTERACTIFS += 1 };
+            if runnable_on_cpu(candidate, cpu) && candidate.priorite == Priorite::Interactive {
+                TOURS_INTERACTIFS[cpu].fetch_add(1, Ordering::Relaxed);
                 return Some(index);
             }
         }
     }
 
     for offset in 1..=len {
-        let index = (after.wrapping_add(offset)) % len;
-        if tasks()[index].state == TaskState::Ready {
-            // Une tache normale a eu la main : le compte repart. C'est ce qui
-            // rend la borne glissante plutot que definitive.
+        let index = (start.wrapping_add(offset)) % len;
+        if runnable_on_cpu(&tasks()[index], cpu) {
             if tasks()[index].priorite == Priorite::Normale {
-                unsafe { TOURS_INTERACTIFS = 0 };
+                TOURS_INTERACTIFS[cpu].store(0, Ordering::Relaxed);
             } else {
-                unsafe { TOURS_INTERACTIFS += 1 };
+                TOURS_INTERACTIFS[cpu].fetch_add(1, Ordering::Relaxed);
             }
             return Some(index);
         }
@@ -1037,26 +1407,49 @@ fn debug_assert_interrupts_enabled() {
     );
 }
 
+/// Dort jusqu'a la prochaine interruption en garantissant que le Big Kernel
+/// Lock n'est jamais conserve pendant HLT.
+///
+/// Cette primitive est la seule autorisee depuis les attentes ABI qui dorment
+/// directement (sigsuspend/pause, WASI clock poll). `syscall_dispatch` garde
+/// un BKL externe pendant `abi::handle`; la suspension explicite est donc
+/// obligatoire avant HLT.
+pub fn wait_for_interrupt_releasing_bkl() {
+    debug_assert_interrupts_enabled();
+    let depth = smp_lock::suspend_for_schedule();
+
+    #[cfg(debug_assertions)]
+    debug_assert!(
+        !smp_lock::held_by_current_cpu(),
+        "task: HLT interdit tant que le BKL est detenu"
+    );
+
+    cpu::wait_for_interrupt();
+    smp_lock::resume_after_schedule(depth);
+}
+
 /// Rend la main : bascule sur une autre tache prete s'il y en a une.
 ///
 /// Renvoie `true` si un changement de tache a eu lieu. Si la tache courante est
 /// la seule prete, la fonction attend une interruption (`hlt`) et rend la main a
 /// l'appelant, qui doit reevaluer sa condition d'attente.
 pub fn schedule() -> bool {
-    let cur = unsafe { CURRENT };
-    if cur == usize::MAX {
-        return false;
-    }
+    let _kernel = smp_lock::enter();
+    let cur = current_index_raw();
+    if cur == NO_TASK { return false; }
     debug_assert_borrows_released();
     debug_assert_interrupts_enabled();
     wake_sleepers();
-    let next = match pick_next(cur) {
-        Some(n) if n != cur => n,
+    let cpu_id = local_cpu();
+    let next = match pick_next(cur, cpu_id) {
+        Some(next) if next != cur => next,
         _ => {
-            // Personne d'autre : si la tache courante est bloquee, on attend une
-            // interruption plutot que de bruler du CPU.
             if tasks()[cur].state != TaskState::Ready {
+                // Ne jamais dormir en tenant le BKL : les autres CPU doivent
+                // pouvoir entrer dans leurs syscalls pendant notre HLT.
+                let depth = smp_lock::suspend_for_schedule();
                 cpu::wait_for_interrupt();
+                smp_lock::resume_after_schedule(depth);
             }
             return false;
         }
@@ -1065,38 +1458,123 @@ pub fn schedule() -> bool {
     true
 }
 
-/// Bascule de la tache `from` vers la tache `to`.
 fn switch_to(from: usize, to: usize) {
-    unsafe {
-        CONTEXT_SWITCHES = CONTEXT_SWITCHES.wrapping_add(1);
+    let _kernel = smp_lock::enter();
+    let cpu_id = local_cpu();
+    let (from_ptr, to_ptr) = unsafe {
         let list = tasks();
         let from_ptr = &mut **list.get_mut(from).unwrap() as *mut Task;
         let to_ptr = &mut **list.get_mut(to).unwrap() as *mut Task;
 
+        CONTEXT_SWITCHES.fetch_add(1, Ordering::Relaxed);
         usermode::fxsave((*from_ptr).fpu_ptr() as *mut u8);
         (*from_ptr).fs_base = usermode::fs_base();
+        if (*from_ptr).state == TaskState::Zombie {
+            RETIRED[cpu_id].store(from, Ordering::Release);
+            // Reste marque running jusqu'a ce que le nouveau contexte confirme
+            // que le switch assembleur a effectivement quitte cette pile.
+        } else {
+            (*from_ptr).on_cpu = -1;
+        }
+        (*to_ptr).on_cpu = cpu_id as i8;
 
-        CURRENT = to;
+        set_current_index(to);
         install(&mut *to_ptr);
+        (from_ptr, to_ptr)
+    };
 
-        switch_context(&mut (*from_ptr).ctx.rsp, (*to_ptr).ctx.rsp);
-    }
+    let depth = smp_lock::suspend_for_schedule();
+    unsafe { switch_context(&mut (*from_ptr).ctx.rsp, (*to_ptr).ctx.rsp); }
+    smp_lock::resume_after_schedule(depth);
+    complete_retired();
 }
 
 /// Retour definitif au fil noyau appelant (la tache courante est terminee).
 fn switch_to_kernel() -> ! {
-    unsafe {
-        let cur = CURRENT;
+    let _kernel = smp_lock::enter();
+    let cur = current_index_raw();
+    let from_ptr = unsafe {
         let list = tasks();
-        let from_ptr = &mut **list.get_mut(cur).unwrap() as *mut Task;
-        CURRENT = usize::MAX;
-        CURRENT_IS_KERNEL = false;
-        usermode::per_cpu().current = 0;
-        crate::kernel::vmm::activate_kernel();
-        switch_context(&mut (*from_ptr).ctx.rsp, KERNEL_CTX.rsp);
-    }
-    // `switch_context` ne revient jamais ici : la tache est zombie.
+        let ptr = &mut **list.get_mut(cur).unwrap() as *mut Task;
+        if (*ptr).state == TaskState::Zombie {
+            RETIRED[local_cpu()].store(cur, Ordering::Release);
+        } else {
+            (*ptr).on_cpu = -1;
+        }
+        ptr
+    };
+    set_current_index(NO_TASK);
+    set_current_is_kernel(false);
+    usermode::per_cpu().current = 0;
+    crate::kernel::vmm::activate_kernel();
+    let target_rsp = kernel_ctx().rsp;
+    let depth = smp_lock::suspend_for_schedule();
+    unsafe { switch_context(&mut (*from_ptr).ctx.rsp, target_rsp); }
+    smp_lock::resume_after_schedule(depth);
     unreachable!("task: reprise d'une tache terminee")
+}
+
+/// Boucle idle/scheduler des AP. Le contexte `KERNEL_CTX[cpu]` est la pile de
+/// cette boucle ; `switch_to_kernel` y revient lorsqu'un processus local n'a
+/// plus de tache executable.
+pub fn secondary_cpu_loop() -> ! {
+    let cpu_id = local_cpu();
+    assert!(cpu_id != 0, "task: secondary_cpu_loop sur BSP");
+    set_current_index(NO_TASK);
+    set_current_is_kernel(false);
+    usermode::per_cpu().current = 0;
+
+    loop {
+        let _kernel = smp_lock::enter();
+        stall_site_set(50, current_index_raw() as u64);
+        // Avant le premier register() du BSP, ne meme pas materialiser TASKS :
+        // cela permet d'activer les AP juste avant l'autorun sans mettre le boot
+        // historique en concurrence avec une allocation secondaire.
+        let aucune_tache = unsafe { TASKS.as_ref().map_or(true, |list| list.is_empty()) };
+        if aucune_tache {
+            let depth = smp_lock::suspend_for_schedule();
+            stall_site_clear();
+            cpu::wait_for_interrupt();
+            stall_site_set(52, current_index_raw() as u64);
+            smp_lock::resume_after_schedule(depth);
+            stall_site_set(53, current_index_raw() as u64);
+            continue;
+        }
+        wake_sleepers();
+        if let Some(next) = pick_next(NO_TASK, cpu_id) {
+            let to_ptr = unsafe {
+                let list = tasks();
+                let ptr = &mut **list.get_mut(next).unwrap() as *mut Task;
+                (*ptr).on_cpu = cpu_id as i8;
+                ptr
+            };
+            set_current_index(next);
+            unsafe { install(&mut *to_ptr); }
+            let kernel_rsp = &mut kernel_ctx().rsp as *mut u64;
+            let depth = smp_lock::suspend_for_schedule();
+            stall_site_clear();
+            unsafe { switch_context(kernel_rsp, (*to_ptr).ctx.rsp); }
+            stall_site_set(52, current_index_raw() as u64);
+            smp_lock::resume_after_schedule(depth);
+            stall_site_set(53, current_index_raw() as u64);
+            stall_site_set(54, RETIRED[cpu_id].load(Ordering::Acquire) as u64);
+            complete_retired();
+            stall_site_set(50, current_index_raw() as u64);
+            set_current_index(NO_TASK);
+            set_current_is_kernel(false);
+            usermode::per_cpu().current = 0;
+            stall_site_set(55, 0);
+            crate::kernel::vmm::activate_kernel();
+            stall_site_set(50, NO_TASK as u64);
+        } else {
+            let depth = smp_lock::suspend_for_schedule();
+            stall_site_clear();
+            cpu::wait_for_interrupt();
+            stall_site_set(52, current_index_raw() as u64);
+            smp_lock::resume_after_schedule(depth);
+            stall_site_set(53, current_index_raw() as u64);
+        }
+    }
 }
 
 /// Marque la tache courante terminee et rend la main.
@@ -1104,7 +1582,7 @@ fn switch_to_kernel() -> ! {
 /// Si d'autres threads du programme tournent encore, on bascule sur eux ;
 /// sinon, retour au fil noyau qui a lance le programme.
 pub fn exit_current(code: i32) -> ! {
-    let cur = unsafe { CURRENT };
+    let cur = current_index_raw();
     {
         let task = current();
         task.state = TaskState::Zombie;
@@ -1145,7 +1623,7 @@ pub fn exit_current(code: i32) -> ! {
     //
     // `run` faisait deja ce menage -- mais APRES son retour, c'est-a-dire
     // jamais, puisque c'est precisement ce qui l'empechait de revenir.
-    let racine = unsafe { RACINE_PREMIER_PLAN };
+    let racine = RACINE_PREMIER_PLAN.load(Ordering::Acquire);
     if racine != 0 {
         let fini = {
             let process = current().process.borrow();
@@ -1172,49 +1650,45 @@ pub fn exit_current(code: i32) -> ! {
         }
     }
 
-    // On ne rend la main au noyau que lorsque **plus aucune** tache ne peut
-    // reprendre. Se contenter de « aucune tache prete a cet instant » serait
-    // faux : au moment ou un processus fils se termine, son parent est souvent
-    // endormi (il attend justement cet evenement). Abandonner la aurait
-    // demonte tout le programme au lieu de reveiller le parent.
-    //
-    // Filet de securite : si rien ne redevient executable pendant une longue
-    // duree, c'est un interblocage franc. On termine plutot que de figer le
-    // systeme, faute de Ctrl-C a offrir a l'utilisateur.
+    // Sur un AP, le contexte noyau appelant est la boucle idle : si ce CPU
+    // n'a plus rien de runnable, on y revient immediatement. Les autres CPU
+    // continuent independamment.
+    let cpu_id = local_cpu();
+    if cpu_id != 0 {
+        let cur = current_index_raw();
+        wake_sleepers();
+        if let Some(next) = pick_next(cur, cpu_id) {
+            switch_to(cur, next);
+            unreachable!("task: reprise d'une tache terminee sur AP");
+        }
+        switch_to_kernel();
+    }
+
+    // BSP : conserve la semantique historique des lancements synchrones et du
+    // desktop, mais ne choisit que des taches affinees CPU0.
+    let cur = current_index_raw();
     let patience = 30 * crate::kernel::timer::TICKS_PER_SECOND;
     let mut idle_since = crate::kernel::timer::ticks();
     loop {
         wake_sleepers();
-        if let Some(next) = pick_next(cur) {
+        if let Some(next) = pick_next(cur, 0) {
             if next != cur {
-                // La pile noyau de la tache morte reste vivante jusqu'au
-                // nettoyage fait par `reap` depuis le fil noyau.
-                unsafe {
-                    let list = tasks();
-                    let from_ptr = &mut **list.get_mut(cur).unwrap() as *mut Task;
-                    let to_ptr = &mut **list.get_mut(next).unwrap() as *mut Task;
-                    CURRENT = next;
-                    install(&mut *to_ptr);
-                    switch_context(&mut (*from_ptr).ctx.rsp, (*to_ptr).ctx.rsp);
-                }
-                unreachable!("task: reprise d'une tache terminee")
+                switch_to(cur, next);
+                unreachable!("task: reprise d'une tache terminee");
             }
         }
-        if tasks().iter().all(|t| t.state == TaskState::Zombie) {
-            break;
-        }
+        if tasks().iter().all(|t| t.state == TaskState::Zombie) { break; }
         if crate::kernel::timer::ticks().wrapping_sub(idle_since) > patience {
-            crate::kernel::dmesg::log(
-                "task: aucune tache executable depuis 30 s, interblocage suppose",
-            );
+            crate::kernel::dmesg::log("task: aucune tache executable CPU0 depuis 30 s, interblocage suppose");
             for task in tasks().iter_mut() {
-                task.state = TaskState::Zombie;
+                if task.home_cpu == 0 { task.state = TaskState::Zombie; }
             }
             break;
         }
+        let depth = smp_lock::suspend_for_schedule();
         cpu::wait_for_interrupt();
-        // Le compteur repart des qu'une tache redevient prete.
-        if tasks().iter().any(|t| t.state == TaskState::Ready) {
+        smp_lock::resume_after_schedule(depth);
+        if tasks().iter().any(|t| t.state == TaskState::Ready && t.home_cpu == 0) {
             idle_since = crate::kernel::timer::ticks();
         }
     }
@@ -1303,35 +1777,41 @@ pub fn exit_group(code: i32) -> ! {
 /// # Securite
 /// A n'appeler que depuis le fil noyau appelant, `CURRENT` valant `usize::MAX`.
 /// `KERNEL_CTX` est unique : un appel imbrique depuis une tache y ecraserait le
-/// contexte du fil qui attend deja, et `CURRENT = usize::MAX` a la sortie
+/// contexte du fil qui attend deja, et `set_current_index(usize::MAX` a la sortie
 /// effacerait l'identite de la tache appelante. Les appelants verifient
 /// [`in_user_task`] avant d'arriver ici — voir `exec::exec_image`.
-pub fn run(first: Box<Task>) -> i32 {
+pub fn run(mut first: Box<Task>) -> i32 {
+    let _kernel = smp_lock::enter();
+    // Un lancement synchrone doit revenir sur la pile de son appelant : il est
+    // donc volontairement fixe au CPU qui appelle (le BSP dans le shell).
+    first.home_cpu = local_cpu() as u8;
     let process = first.process.clone();
     let racine = process.borrow().pid;
     let index = register(first);
-    unsafe {
-        RACINE_PREMIER_PLAN = racine;
-        CURRENT = index;
+    let cpu_id = local_cpu();
+    let to_ptr = unsafe {
+        RACINE_PREMIER_PLAN.store(racine, Ordering::Release);
         let list = tasks();
-        let to_ptr = &mut **list.get_mut(index).unwrap() as *mut Task;
-        install(&mut *to_ptr);
-        switch_context(&mut KERNEL_CTX.rsp, (*to_ptr).ctx.rsp);
-    }
-    // Retour ici quand le programme de premier plan s'est termine, ou quand
-    // plus aucune tache n'est prete.
-    crate::kernel::vmm::activate_kernel();
-    unsafe {
-        CURRENT = usize::MAX;
-        RACINE_PREMIER_PLAN = 0;
+        let ptr = &mut **list.get_mut(index).unwrap() as *mut Task;
+        (*ptr).on_cpu = cpu_id as i8;
+        ptr
     };
+    set_current_index(index);
+    unsafe { install(&mut *to_ptr); }
+    let kernel_rsp = &mut kernel_ctx().rsp as *mut u64;
+    let depth = smp_lock::suspend_for_schedule();
+    unsafe { switch_context(kernel_rsp, (*to_ptr).ctx.rsp); }
+    smp_lock::resume_after_schedule(depth);
+    complete_retired();
+
+    crate::kernel::vmm::activate_kernel();
+    set_current_index(NO_TASK);
+    RACINE_PREMIER_PLAN.store(0, Ordering::Release);
     let (code, pid) = {
         let borrowed = process.borrow();
         (borrowed.exit_code, borrowed.pid)
     };
     reap();
-    // Tout ce qui reste est orphelin : le programme de premier plan est fini,
-    // ses eventuels fils non recoltes n'ont plus personne pour les attendre.
     for stale in processes().iter() {
         crate::kernel::process::kill(stale.borrow().pid);
     }
@@ -1340,38 +1820,36 @@ pub fn run(first: Box<Task>) -> i32 {
     code
 }
 
-/// Lance un fil noyau depuis le fil appelant et attend qu'il ait fini.
-///
-/// C'est `run` pour du code ring 0. Le gestionnaire de fenetres passe par la :
-/// il devient une tache comme les autres, l'ordonnanceur peut donc lui rendre la
-/// main pendant qu'un programme ring 3 tourne, ce qu'un simple appel de fonction
-/// depuis le shell ne permettait pas.
 pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
-    // Meme invariant que `run` : un seul `KERNEL_CTX`, donc un seul fil noyau
-    // appelant a la fois.
+    let _kernel = smp_lock::enter();
     if in_user_task() {
         crate::kernel::dmesg::log("task: run_noyau imbrique refuse");
         return -1;
     }
-    // Racine comme repertoire courant : un fil noyau n'ouvre pas de chemin
-    // relatif, et la valeur n'existe que parce que `Process` la porte.
     let process = match new_process(nom, 0) {
         Some(process) => process,
         None => return -1,
     };
     let mut task = Task::new_kernel(process.clone(), entree);
-    // Le serveur graphique est de l'UI : meme classe interactive que le navigateur.
     task.priorite = Priorite::Interactive;
+    task.home_cpu = 0;
     let index = register(task);
-    unsafe {
-        CURRENT = index;
+    let to_ptr = unsafe {
         let list = tasks();
-        let to_ptr = &mut **list.get_mut(index).unwrap() as *mut Task;
-        install(&mut *to_ptr);
-        switch_context(&mut KERNEL_CTX.rsp, (*to_ptr).ctx.rsp);
-    }
+        let ptr = &mut **list.get_mut(index).unwrap() as *mut Task;
+        (*ptr).on_cpu = 0;
+        ptr
+    };
+    set_current_index(index);
+    unsafe { install(&mut *to_ptr); }
+    let kernel_rsp = &mut kernel_ctx().rsp as *mut u64;
+    let depth = smp_lock::suspend_for_schedule();
+    unsafe { switch_context(kernel_rsp, (*to_ptr).ctx.rsp); }
+    smp_lock::resume_after_schedule(depth);
+    complete_retired();
+
     crate::kernel::vmm::activate_kernel();
-    unsafe { CURRENT = usize::MAX };
+    set_current_index(NO_TASK);
     let (code, pid) = {
         let borrowed = process.borrow();
         (borrowed.exit_code, borrowed.pid)
@@ -1392,27 +1870,19 @@ pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
 /// la table est un `Vec` et `CURRENT` en est un indice. Depuis une tache,
 /// utiliser [`nettoie_zombies`].
 pub fn reap() {
-    tasks().retain(|t| t.state != TaskState::Zombie);
+    // Les CURRENT per-CPU sont des indices stables. En SMP on ne compacte donc
+    // jamais le Vec ; `register` recycle les slots zombies. En UP, conserver le
+    // comportement historique est sans risque.
+    if smp::schedulable_cpus() <= 1 {
+        tasks().retain(|t| t.state != TaskState::Zombie);
+    }
 }
 
-/// Meme chose, appelable depuis une tache vivante.
-///
-/// Retirer une tache decale toutes les suivantes dans le `Vec` ; `CURRENT`,
-/// qui est un indice, designerait alors quelqu'un d'autre — c'est-a-dire que la
-/// prochaine commutation sauverait le contexte de la tache courante par-dessus
-/// celui d'une autre. On retrouve donc l'indice par le tid, seule identite
-/// stable.
 pub fn nettoie_zombies() {
-    let cur = unsafe { CURRENT };
-    if cur == usize::MAX {
+    if smp::schedulable_cpus() <= 1 && current_index_raw() == NO_TASK {
         reap();
-        return;
     }
-    let tid = tasks()[cur].tid;
-    tasks().retain(|t| t.state != TaskState::Zombie);
-    if let Some(index) = index_of(tid) {
-        unsafe { CURRENT = index };
-    }
+    // SMP : aucun deplacement d'indice ; reclamation au prochain register().
 }
 
 /// Change la classe d'ordonnancement de toutes les taches d'un processus.
@@ -1542,41 +2012,100 @@ pub fn kill_all(code: i32) {
 /// changements de contexte par tick.
 
 pub fn preempt_from_irq() {
-    if unsafe { CURRENT } == usize::MAX {
+    // BOUCHAUD_SMP4_DEADLOCK_FIX
+    //
+    // Une IRQ ne doit jamais attendre le BKL avec IF=0. Si le verrou est
+    // occupe, on differe simplement la preemption.
+    debug_assert!(
+        !cpu::interrupts_enabled(),
+        "task: preempt_from_irq appelee hors contexte IRQ"
+    );
+
+    stall_site_set(40, 0);
+    let Some(kernel) = smp_lock::try_enter() else {
+        stall_site_clear();
+        request_deferred_preempt();
+        return;
+    };
+    stall_site_set(41, 0);
+
+    let cur = current_index_raw();
+    if cur == NO_TASK {
         return;
     }
+
+    complete_retired();
     wake_sleepers();
-    if ready_count() < 2 {
+
+    let cpu_id = local_cpu();
+    if ready_count_cpu(cpu_id) == 0 {
         return;
     }
-    let cur = unsafe { CURRENT };
-    if let Some(next) = pick_next(cur) {
-        if next != cur {
-            unsafe {
-                IRQ_PREEMPTIONS = IRQ_PREEMPTIONS.wrapping_add(1);
-            }
-            switch_to(cur, next);
-        }
+
+    let Some(next) = pick_next(cur, cpu_id) else {
+        return;
+    };
+    if next == cur {
+        return;
+    }
+
+    let (from_ptr, to_ptr) = unsafe {
+        let list = tasks();
+        let from_ptr = &mut **list.get_mut(cur).unwrap() as *mut Task;
+        let to_ptr = &mut **list.get_mut(next).unwrap() as *mut Task;
+
+        IRQ_PREEMPTIONS.fetch_add(1, Ordering::Relaxed);
+        CONTEXT_SWITCHES.fetch_add(1, Ordering::Relaxed);
+
+        usermode::fxsave((*from_ptr).fpu_ptr() as *mut u8);
+        (*from_ptr).fs_base = usermode::fs_base();
+        (*from_ptr).on_cpu = -1;
+        (*to_ptr).on_cpu = cpu_id as i8;
+
+        set_current_index(next);
+        install(&mut *to_ptr);
+        (from_ptr, to_ptr)
+    };
+
+    // Le BKL est libere AVANT le switch IRQ. Quand cette pile IRQ sera reprise
+    // plus tard avec IF=0, elle n'aura aucun BKL a reacquerir avant IRETQ.
+    drop(kernel);
+    // Le nouveau contexte ne doit pas heriter d'un tag "preempt kernel".
+    stall_site_clear();
+    unsafe { switch_context(&mut (*from_ptr).ctx.rsp, (*to_ptr).ctx.rsp); }
+
+    // Ne jamais bloquer ici. Nettoyage opportuniste uniquement.
+    stall_site_set(42, 0);
+    if let Some(_kernel) = smp_lock::try_enter() {
+        stall_site_set(43, 0);
+        complete_retired();
+    }
+    stall_site_clear();
+}
+
+fn add_current_ticks(delta: u64) {
+    let index = current_index_raw();
+    if index == NO_TASK { return; }
+    if let Some(task) = tasks().get_mut(index) {
+        task.ticks_cpu = task.ticks_cpu.wrapping_add(delta);
     }
 }
 
-/// Compte un tick du timer pour la tache courante.
-///
-/// Appele par IRQ0, y compris quand le timer interrompt du code noyau : le
-/// bureau est une tache comme les autres, et le temps qu'il passe a composer
-/// doit se voir au meme titre que celui du navigateur.
 pub fn echantillonne(interrupted_user: bool) {
-    if cpu::account_timer_tick(interrupted_user) {
-        return;
-    }
+    if cpu::account_timer_tick(interrupted_user) { return; }
+    add_current_ticks(1);
+}
 
-    let index = unsafe { CURRENT };
-    if index == usize::MAX {
-        return;
-    }
-    if let Some(task) = tasks().get_mut(index) {
-        task.ticks_cpu = task.ticks_cpu.wrapping_add(1);
-    }
+/// Compte uniquement la tache BSP apres que l'accounting machine a deja ete
+/// fait hors BKL dans l'IRQ PIT.
+pub fn echantillonne_tache_bsp() {
+    add_current_ticks(1);
+}
+
+/// Echantillon des AP, cadence par IPI de quantum. Le PIT reste l'unique
+/// horloge murale ; ici on ne fait que comptabiliser le temps CPU de la tache.
+pub fn echantillonne_quantum(_interrupted_user: bool, ticks: u64) {
+    add_current_ticks(ticks.max(1));
 }
 
 /// Instantane d'un processus pour le journal : (pid, nom, ticks, octets).
@@ -1669,71 +2198,48 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
         MESURE_PRECEDENTE = Some(cumuls);
         MESURE_TICK_PRECEDENT = now;
     }
-    (mesures, window)
+    (mesures, window.saturating_mul(smp::schedulable_cpus() as u64))
 }
 
 /// Signale qu'une commutation est souhaitable au prochain point sur.
 pub fn set_need_resched() {
-    unsafe { NEED_RESCHED = true };
+    NEED_RESCHED[local_cpu()].store(true, Ordering::Release);
 }
 
-/// Consomme le drapeau de preemption.
 pub fn take_need_resched() -> bool {
-    unsafe {
-        let value = NEED_RESCHED;
-        NEED_RESCHED = false;
-        value
-    }
+    NEED_RESCHED[local_cpu()].swap(false, Ordering::AcqRel)
 }
 
-/// Le timer a interrompu du ring 0 appartenant a une tache utilisateur.
-/// On ne commute pas au milieu du noyau : `abi::handle` consommera la demande.
 pub fn request_deferred_preempt() {
-    unsafe {
-        DEFERRED_PREEMPTIONS = DEFERRED_PREEMPTIONS.wrapping_add(1);
-        NEED_RESCHED = true;
-    }
+    DEFERRED_PREEMPTIONS.fetch_add(1, Ordering::Relaxed);
+    set_need_resched();
 }
 
-/// Lecture IRQ-safe, sans parcourir TASKS.
 pub fn current_is_kernel_task() -> bool {
-    unsafe { core::ptr::read_volatile(&raw const CURRENT_IS_KERNEL) }
+    CURRENT_IS_KERNEL[local_cpu()].load(Ordering::Acquire)
 }
 
-/// Heartbeat du compositor.
 pub fn note_wm_heartbeat() {
-    unsafe {
-        WM_HEARTBEAT_TICK = crate::kernel::timer::ticks();
-        WM_WATCHDOG_ARMED = true;
-    }
+    WM_HEARTBEAT_TICK.store(crate::kernel::timer::ticks(), Ordering::Relaxed);
+    WM_WATCHDOG_ARMED.store(true, Ordering::Release);
 }
 
-/// Watchdog IRQ0 : si le timer vit mais pas le WM, le journal serie continue.
 pub fn watchdog_from_timer() {
+    if !WM_WATCHDOG_ARMED.load(Ordering::Acquire) { return; }
     let now = crate::kernel::timer::ticks();
-    let (armed, heartbeat, last_warning, switches, irq, deferred) = unsafe {
-        (
-            core::ptr::read_volatile(&raw const WM_WATCHDOG_ARMED),
-            core::ptr::read_volatile(&raw const WM_HEARTBEAT_TICK),
-            core::ptr::read_volatile(&raw const WM_LAST_WARNING_TICK),
-            core::ptr::read_volatile(&raw const CONTEXT_SWITCHES),
-            core::ptr::read_volatile(&raw const IRQ_PREEMPTIONS),
-            core::ptr::read_volatile(&raw const DEFERRED_PREEMPTIONS),
-        )
-    };
-    if !armed {
-        return;
-    }
+    let heartbeat = WM_HEARTBEAT_TICK.load(Ordering::Relaxed);
+    let last_warning = WM_LAST_WARNING_TICK.load(Ordering::Relaxed);
     let silence = now.wrapping_sub(heartbeat);
     let seuil = 2 * crate::kernel::timer::TICKS_PER_SECOND;
     if silence >= seuil && now.wrapping_sub(last_warning) >= seuil {
-        unsafe {
-            WM_LAST_WARNING_TICK = now;
-        }
+        WM_LAST_WARNING_TICK.store(now, Ordering::Relaxed);
         crate::serial_println!(
-            "[sched-watchdog] desktop sans heartbeat depuis {} ms ; switches={} irq-preempt={} deferred={}",
+            "[sched-watchdog] desktop sans heartbeat depuis {} ms ; switches={} irq-preempt={} deferred={} online={}",
             silence.saturating_mul(1000) / crate::kernel::timer::TICKS_PER_SECOND,
-            switches, irq, deferred
+            CONTEXT_SWITCHES.load(Ordering::Relaxed),
+            IRQ_PREEMPTIONS.load(Ordering::Relaxed),
+            DEFERRED_PREEMPTIONS.load(Ordering::Relaxed),
+            smp::schedulable_cpus(),
         );
     }
 }
@@ -1750,18 +2256,11 @@ pub struct OrdonnanceurStats {
 
 pub fn diagnostic_ordonnanceur() -> OrdonnanceurStats {
     let now = crate::kernel::timer::ticks();
-    let (switches, irq, deferred, heartbeat) = unsafe {
-        (
-            CONTEXT_SWITCHES,
-            IRQ_PREEMPTIONS,
-            DEFERRED_PREEMPTIONS,
-            WM_HEARTBEAT_TICK,
-        )
-    };
+    let heartbeat = WM_HEARTBEAT_TICK.load(Ordering::Relaxed);
     OrdonnanceurStats {
-        switches,
-        irq_preemptions: irq,
-        deferred_preemptions: deferred,
+        switches: CONTEXT_SWITCHES.load(Ordering::Relaxed),
+        irq_preemptions: IRQ_PREEMPTIONS.load(Ordering::Relaxed),
+        deferred_preemptions: DEFERRED_PREEMPTIONS.load(Ordering::Relaxed),
         wm_age_ms: now.saturating_sub(heartbeat).saturating_mul(1000)
             / crate::kernel::timer::TICKS_PER_SECOND,
         ready: ready_count(),
@@ -1809,6 +2308,26 @@ pub fn diagnostic_ordonnanceur() -> OrdonnanceurStats {
 /// delai qu'imposait deja le `hlt` reveille par l'horloge. Le reveil logiciel
 /// n'est pas perdu non plus — une tache qui rend un descripteur pret pendant
 /// notre tick le trouvera pret a notre reveil, un tour de boucle plus tard.
+// BOUCHAUD_CPU_OPT_ADAPTIVE_IO: attente adaptative pour poll/select/epoll.
+//
+// La pile reseau Bouchaud reste aujourd'hui pilotee par interrogation. Bloquer
+// sans limite ici serait donc incorrect : personne ne pomperait les paquets.
+// On garde une phase tres reactive a 1 ms, puis on espace progressivement les
+// tours vides jusqu'a 8 ms. Une I/O qui repart quitte son syscall et le compteur
+// local repart automatiquement de zero a l'appel suivant.
+pub fn attends_io_adaptatif(tours_vides: &mut u32) {
+    let ticks = match *tours_vides {
+        0..=2 => 1,
+        3..=7 => 2,
+        8..=15 => 4,
+        _ => 8,
+    };
+    *tours_vides = tours_vides.saturating_add(1).min(64);
+    sleep_ticks(ticks);
+}
+
+/// Attente historique stricte d'un tick. Conservee pour les chemins ou la
+/// latence minimale prime (console, audio, petites attentes protocolaires).
 pub fn attends_un_tick() {
     sleep_ticks(1);
 }
@@ -1835,14 +2354,17 @@ pub fn sleep_ticks(ticks: u64) {
 /// Reveille les taches dont le sommeil est echu, et declenche les `SIGALRM`.
 fn wake_sleepers() {
     let now = crate::kernel::timer::ticks();
+    let mut woke = false;
     for task in tasks().iter_mut() {
         if task.state == TaskState::Blocked && task.wake_tick != 0 && now >= task.wake_tick {
             task.wake_tick = 0;
             task.futex_key = 0;
             task.state = TaskState::Ready;
+            woke = true;
         }
     }
     fire_alarms(now);
+    if woke { smp::broadcast_reschedule(); }
 }
 
 /// Echeance du prochain `SIGALRM` par processus : (pid, tick).
@@ -1956,7 +2478,8 @@ pub fn futex_wait(uaddr: u64, expected: u32, timeout_ticks: u64) -> bool {
 
     loop {
         if !schedule() {
-            cpu::wait_for_interrupt();
+            // schedule() a deja dormi si cette tache etait la seule runnable.
+            // Ne jamais refaire HLT apres reprise du BKL de syscall.
             wake_sleepers();
         }
         // L'ordre des deux tests compte. `wake_sleepers` remet la tache en

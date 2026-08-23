@@ -32,5 +32,5 @@ pub fn stats() -> OrdonnanceurStats {
 }
 
 pub fn state() -> &'static str {
-    "preemptif UP: IRQ0 ring3 + preemption differee ring0, priorites interactive/normale, FPU/SSE par tache"
+    "preemptif SMP: affinite processus, runqueue multi-CPU, quantum IPI, BKL reentrant"
 }

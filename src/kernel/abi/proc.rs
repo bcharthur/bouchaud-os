@@ -306,9 +306,8 @@ pub fn sys_wait4(pid: i64, status_addr: u64, options: u32, _rusage: u64) -> i64 
             task.waiting_for_child = true;
             task.state = task::TaskState::Blocked;
         }
-        if !task::schedule() {
-            crate::arch::x86_64::cpu::wait_for_interrupt();
-        }
+        // schedule() effectue deja HLT avec le BKL suspendu si necessaire.
+        let _ = task::schedule();
         let task = task::current();
         task.waiting_for_child = false;
         task.state = task::TaskState::Ready;

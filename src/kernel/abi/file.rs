@@ -242,7 +242,10 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
                 // Un `read` bloquant attend. Sans cela, tout code qui lit un
                 // tube sans passer par `poll` — c'est-a-dire l'immense
                 // majorite — recevrait EAGAIN sur un tube parfaitement valide.
-                task::yield_now();
+                // BOUCHAUD_SMP_BLOCKING_IO_FIX_V1: une attente bloquante doit
+                // marquer la tache Blocked afin que schedule() libere le BKL global
+                // pendant que le producteur/consommateur progresse sur un autre CPU.
+                task::attends_un_tick();
             }
             let mut state = shared.borrow_mut();
             let len = core::cmp::min(count, state.buffer.len());
@@ -1201,7 +1204,10 @@ fn fcntl_verrou(fd: i32, command: u32, arg: u64) -> i64 {
                 if crate::kernel::timer::ticks().saturating_sub(depart_attente) > patience {
                     return -errno::EDEADLK;
                 }
-                task::yield_now();
+                // BOUCHAUD_SMP_BLOCKING_IO_FIX_V1: une attente bloquante doit
+                // marquer la tache Blocked afin que schedule() libere le BKL global
+                // pendant que le producteur/consommateur progresse sur un autre CPU.
+                task::attends_un_tick();
             }
         }
     }
@@ -2214,7 +2220,10 @@ fn attends_place<F: Fn() -> Capacite>(etat: F, non_bloquant: bool) -> Result<usi
         }
         // Ceder la main est ce qui permet au lecteur de vider le canal : c'est
         // tout le mecanisme de contre-pression sur un noyau a un seul cœur.
-        task::yield_now();
+        // BOUCHAUD_SMP_BLOCKING_IO_FIX_V1: une attente bloquante doit
+        // marquer la tache Blocked afin que schedule() libere le BKL global
+        // pendant que le producteur/consommateur progresse sur un autre CPU.
+        task::attends_un_tick();
     }
 }
 
@@ -2309,6 +2318,8 @@ fn readable(fd: i32) -> bool {
 
 /// `poll` / `ppoll` : `struct pollfd { int fd; short events; short revents; }`.
 pub fn sys_poll(fds: u64, count: usize, timeout_ms: i32) -> i64 {
+    // BOUCHAUD_CPU_OPT_POLL_BACKOFF: backoff borne pour les boucles d'I/O sans evenement.
+    let mut bouchaud_idle_rounds = 0u32;
     let deadline = if timeout_ms < 0 {
         u64::MAX
     } else {
@@ -2349,7 +2360,7 @@ pub fn sys_poll(fds: u64, count: usize, timeout_ms: i32) -> i64 {
         if ready > 0 || crate::kernel::timer::ticks() >= deadline {
             return ready;
         }
-        task::attends_un_tick();
+        task::attends_io_adaptatif(&mut bouchaud_idle_rounds);
     }
 }
 
@@ -2361,6 +2372,8 @@ pub fn sys_select(
     _except_set: u64,
     timeout: u64,
 ) -> i64 {
+    // BOUCHAUD_CPU_OPT_POLL_BACKOFF: backoff borne pour les boucles d'I/O sans evenement.
+    let mut bouchaud_idle_rounds = 0u32;
     let deadline = if timeout == 0 {
         u64::MAX
     } else {
@@ -2393,7 +2406,7 @@ pub fn sys_select(
         if ready > 0 || crate::kernel::timer::ticks() >= deadline {
             return ready;
         }
-        task::attends_un_tick();
+        task::attends_io_adaptatif(&mut bouchaud_idle_rounds);
     }
 }
 
@@ -2446,6 +2459,8 @@ pub fn sys_epoll_ctl(epfd: i32, operation: u32, fd: i32, event: u64) -> i64 {
 
 /// `epoll_wait` / `epoll_pwait`.
 pub fn sys_epoll_wait(epfd: i32, events: u64, max: usize, timeout_ms: i32) -> i64 {
+    // BOUCHAUD_CPU_OPT_POLL_BACKOFF: backoff borne pour les boucles d'I/O sans evenement.
+    let mut bouchaud_idle_rounds = 0u32;
     let process = task::current_process();
     let list = match process.borrow().files.get(epfd) {
         Some(desc) => match &desc.kind {
@@ -2485,7 +2500,7 @@ pub fn sys_epoll_wait(epfd: i32, events: u64, max: usize, timeout_ms: i32) -> i6
         if written > 0 || crate::kernel::timer::ticks() >= deadline {
             return written as i64;
         }
-        task::attends_un_tick();
+        task::attends_io_adaptatif(&mut bouchaud_idle_rounds);
     }
 }
 

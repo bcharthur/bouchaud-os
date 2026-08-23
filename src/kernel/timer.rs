@@ -1,10 +1,11 @@
 //! Gestion du temps noyau : ticks PIT et mesure de charge CPU via TSC.
 
+use core::sync::atomic::{AtomicU64, Ordering};
 use crate::arch::x86_64::cpu;
 use crate::arch::x86_64::interrupts;
 use crate::arch::x86_64::ports::outb;
 
-static mut TICKS: u64 = 0;
+static TICKS: AtomicU64 = AtomicU64::new(0);
 static mut BOOT_TSC: u64 = 0;
 
 /// Frequence de base du PIT 8253/8254, en hertz.
@@ -36,17 +37,14 @@ fn program_pit(hz: u32) {
 }
 
 pub fn tick() {
-    unsafe {
-        let t = core::ptr::read_volatile(&TICKS);
-        core::ptr::write_volatile(&mut TICKS, t.wrapping_add(1));
-    }
+    TICKS.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Frequence du tick noyau. Le PIT est programme sur cette valeur par [`init`].
 pub const TICKS_PER_SECOND: u64 = 1000;
 
 pub fn ticks() -> u64 {
-    unsafe { core::ptr::read_volatile(&TICKS) }
+    TICKS.load(Ordering::Acquire)
 }
 
 pub fn seconds() -> u64 {

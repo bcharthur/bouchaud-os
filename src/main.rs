@@ -111,6 +111,12 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // 5. Banniere d'accueil.
     banner();
 
+    // Le BSP a fini toute l'initialisation materielle et systeme. Les AP, deja
+    // en long mode, peuvent maintenant entrer dans la runqueue SMP. Tant
+    // qu'aucune tache n'est enregistree ils restent en HLT et ne touchent
+    // ni le tas ni les structures historiques.
+    arch::x86_64::smp::enable_scheduler();
+
     // 6. Mode non interactif : si le disque de donnees a depose un `/autorun`,
     //    on le joue et la machine s'eteint. Ne rend la main que sans script.
     kernel::autorun::run_if_present();

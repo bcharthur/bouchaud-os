@@ -1210,7 +1210,7 @@ if ($LadybirdMode) {
 
     if ($CpuCount -gt 1) {
         Write-Host `
-            "NOTE: $CpuCount vCPU exposes. Le noyau les demarre bien (LAPIC INIT/SIPI, marqueurs SMP4_DISCOVERED / SMP4_AP_STARTED) mais l ordonnanceur utilisateur reste mono-CPU : SMP4_SCHEDULER online=1 mode=UP-pending-refactor. Les processus Ladybird tournent donc tous sur le BSP." `
+            "NOTE: $CpuCount vCPU exposes. Scheduler SMP actif: processus Ladybird repartis sur BSP/AP avec affinite par processus; threads d un meme processus fixes sur le meme CPU." `
             -ForegroundColor Yellow
     }
 }
@@ -1388,7 +1388,7 @@ if ($LadybirdMode) {
         "RAM        : $RamMiB Mio"
 
     Write-Host `
-        "vCPU       : $CpuCount (le noyau n ordonnance que sur le BSP)"
+        "vCPU       : $CpuCount (scheduler SMP multi-CPU)"
 
     Write-Host `
         "navigateur : $BrowserChain"

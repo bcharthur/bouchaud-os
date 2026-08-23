@@ -1,56 +1,27 @@
-//! Global Descriptor Table (GDT) + Task State Segment (TSS).
+//! GDT + TSS par CPU.
 //!
-//! La GDT decrit les segments utilises par le CPU en long mode. Son contenu est
-//! contraint par l'instruction `syscall`/`sysret`, qui ne prend pas de selecteur
-//! en operande mais deduit tout du MSR `IA32_STAR` :
-//!
-//! ```text
-//!   syscall : CS = STAR[47:32]        SS = STAR[47:32] + 8
-//!   sysret  : CS = STAR[63:48] + 16   SS = STAR[63:48] + 8   (RPL force a 3)
-//! ```
-//!
-//! D'ou l'ordre **impose** des entrees :
-//!
-//! ```text
-//!   0x00 null
-//!   0x08 code noyau   (ring 0)   <- STAR[47:32]
-//!   0x10 donnees noyau(ring 0)
-//!   0x18 donnees user (ring 3)   <- STAR[63:48] + 8
-//!   0x20 code user    (ring 3)   <- STAR[63:48] + 16
-//!   0x28 TSS (descripteur systeme sur 16 octets)
-//! ```
-//!
-//! Le TSS fournit deux choses indispensables au ring 3 :
-//!   - `privilege_stack_table[0]` (RSP0) : la pile sur laquelle le CPU bascule
-//!     quand une interruption survient pendant l'execution d'un processus
-//!     utilisateur. Elle est reprogrammee a chaque changement de tache
-//!     (cf. `kernel::task`), sinon deux taches se marcheraient dessus.
-//!   - une pile IST dediee a la double faute, qui evite la triple faute
-//!     (reboot) meme si la pile noyau est corrompue.
+//! En SMP, RSP0 et la pile IST sont un etat materiel local au coeur. Partager
+//! un TSS entre plusieurs CPU ferait pointer une interruption ring3 vers la
+//! pile noyau de la derniere tache installee sur n'importe quel coeur. Chaque
+//! CPU possede donc sa propre GDT (meme disposition de selecteurs) et son TSS.
 
-use core::ptr::addr_of;
+use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::hint::spin_loop;
+use core::sync::atomic::{AtomicBool, Ordering};
 use x86_64::instructions::segmentation::{Segment, CS, DS, ES, SS};
 use x86_64::instructions::tables::load_tss;
 use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
 use x86_64::structures::tss::TaskStateSegment;
-use x86_64::PrivilegeLevel;
-use x86_64::VirtAddr;
+use x86_64::{PrivilegeLevel, VirtAddr};
+
+use crate::arch::x86_64::smp::MAX_CPUS;
 use crate::kernel::dmesg;
 
-/// Index de la pile dediee au gestionnaire de double faute.
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
-
 const STACK_SIZE: usize = 4096 * 5;
-static mut DF_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
 
-/// Pile noyau par defaut pour les interruptions venues du ring 3, utilisee tant
-/// qu'aucune tache utilisateur n'a installe la sienne.
-static mut RING0_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
-
-static mut TSS: TaskStateSegment = TaskStateSegment::new();
-static mut GDT: GlobalDescriptorTable = GlobalDescriptorTable::new();
-
-/// Selecteurs de segments, figes par [`init`].
 #[derive(Clone, Copy)]
 pub struct Selectors {
     pub kernel_code: SegmentSelector,
@@ -60,72 +31,141 @@ pub struct Selectors {
     pub tss: SegmentSelector,
 }
 
-static mut SELECTORS: Option<Selectors> = None;
-static mut READY: bool = false;
-
-/// Selecteurs charges (panique si appele avant `init`).
-pub fn selectors() -> Selectors {
-    unsafe { SELECTORS.expect("gdt: selecteurs non initialises") }
+struct CpuGdt {
+    gdt: GlobalDescriptorTable,
+    selectors: Selectors,
+    tss: *mut TaskStateSegment,
 }
 
-/// Etat courant de la GDT, expose aux commandes systeme.
+static mut CPU_GDTS: Option<Vec<CpuGdt>> = None;
+static mut BASE_SELECTORS: Option<Selectors> = None;
+static READY: AtomicBool = AtomicBool::new(false);
+// Les AP chargent leur GDT avant que le BKL soit utilisable (GS n'est pas
+// encore initialise). Ce mini-verrou ne sert qu'au bootstrap GDT/TSS.
+static ACCESS: AtomicBool = AtomicBool::new(false);
+
+struct AccessGuard;
+impl Drop for AccessGuard {
+    fn drop(&mut self) { ACCESS.store(false, Ordering::Release); }
+}
+
+fn access() -> AccessGuard {
+    while ACCESS
+        .compare_exchange_weak(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        spin_loop();
+    }
+    AccessGuard
+}
+
+fn build_cpu() -> CpuGdt {
+    let df_stack = Box::leak(vec![0u8; STACK_SIZE].into_boxed_slice());
+    let ring0_stack = Box::leak(vec![0u8; STACK_SIZE].into_boxed_slice());
+    let tss_mut = Box::leak(Box::new(TaskStateSegment::new()));
+    let tss_ptr = tss_mut as *mut TaskStateSegment;
+
+    let df_start = VirtAddr::from_ptr(df_stack.as_ptr());
+    tss_mut.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] =
+        df_start + STACK_SIZE as u64;
+    let ring0 = VirtAddr::from_ptr(ring0_stack.as_ptr());
+    tss_mut.privilege_stack_table[0] = ring0 + STACK_SIZE as u64;
+
+    // Le descripteur TSS exige une reference 'static immutable. Le TSS reste
+    // pourtant modifiable via son pointeur brut pour RSP0 : c'est exactement le
+    // modele de l'ancien static mut TSS, mais replique par CPU.
+    let tss_ref: &'static TaskStateSegment = unsafe { &*tss_ptr };
+
+    let mut gdt = GlobalDescriptorTable::new();
+    let kernel_code = gdt.add_entry(Descriptor::kernel_code_segment());
+    let kernel_data = gdt.add_entry(Descriptor::kernel_data_segment());
+    let user_data_raw = gdt.add_entry(Descriptor::user_data_segment());
+    let user_code_raw = gdt.add_entry(Descriptor::user_code_segment());
+    let tss_sel = gdt.add_entry(Descriptor::tss_segment(tss_ref));
+
+    let selectors = Selectors {
+        kernel_code,
+        kernel_data,
+        user_data: SegmentSelector::new(user_data_raw.index(), PrivilegeLevel::Ring3),
+        user_code: SegmentSelector::new(user_code_raw.index(), PrivilegeLevel::Ring3),
+        tss: tss_sel,
+    };
+
+    CpuGdt { gdt, selectors, tss: tss_ptr }
+}
+
+fn all_unlocked() -> &'static mut Vec<CpuGdt> {
+    unsafe {
+        if CPU_GDTS.is_none() {
+            let mut states = Vec::with_capacity(MAX_CPUS);
+            for _ in 0..MAX_CPUS { states.push(build_cpu()); }
+            BASE_SELECTORS = Some(states[0].selectors);
+            CPU_GDTS = Some(states);
+        }
+        CPU_GDTS.as_mut().unwrap()
+    }
+}
+
+fn load_cpu(cpu: usize) {
+    let _access = access();
+    let state = &mut all_unlocked()[cpu.min(MAX_CPUS - 1)];
+    unsafe { state.gdt.load_unsafe(); }
+    unsafe {
+        CS::set_reg(state.selectors.kernel_code);
+        DS::set_reg(state.selectors.kernel_data);
+        ES::set_reg(state.selectors.kernel_data);
+        SS::set_reg(state.selectors.kernel_data);
+        load_tss(state.selectors.tss);
+    }
+}
+
+pub fn init() {
+    {
+        let _access = access();
+        let _ = all_unlocked(); // construit tout pendant le boot BSP mono-CPU
+    }
+    load_cpu(0);
+    READY.store(true, Ordering::Release);
+    dmesg::log("gdt: GDT/TSS per-CPU prets (RSP0 + IST double faute)");
+}
+
+pub fn init_ap(cpu: usize) { load_cpu(cpu); }
+
+/// La disposition des selecteurs est identique sur chaque GDT. Un cache Copy
+/// evite qu'un AP lisant STAR ait a emprunter le Vec pendant qu'un autre AP
+/// charge son propre GDTR/TSS.
+pub fn selectors() -> Selectors {
+    unsafe { BASE_SELECTORS.expect("gdt: selecteurs non initialises") }
+}
+
+pub fn selectors_for(_cpu: usize) -> Selectors { selectors() }
+
 pub fn state() -> &'static str {
-    if unsafe { READY } {
-        "initialisee (GDT ring0+ring3, TSS avec RSP0, IST double faute)"
+    if READY.load(Ordering::Acquire) {
+        "initialisee (GDT/TSS per-CPU, ring0+ring3, RSP0, IST)"
     } else {
         "non chargee"
     }
 }
 
-/// Construit et charge la GDT et le TSS.
-pub fn init() {
-    unsafe {
-        // Pile IST pour la double faute.
-        let stack_start = VirtAddr::from_ptr(addr_of!(DF_STACK));
-        TSS.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = stack_start + STACK_SIZE as u64;
-
-        // RSP0 : pile noyau utilisee lors d'une entree depuis le ring 3.
-        let ring0 = VirtAddr::from_ptr(addr_of!(RING0_STACK));
-        TSS.privilege_stack_table[0] = ring0 + STACK_SIZE as u64;
-
-        let tss_ref: &'static TaskStateSegment = &*addr_of!(TSS);
-
-        // L'ordre ci-dessous est impose par syscall/sysret (voir l'entete).
-        let kernel_code = GDT.add_entry(Descriptor::kernel_code_segment());
-        let kernel_data = GDT.add_entry(Descriptor::kernel_data_segment());
-        let user_data = GDT.add_entry(Descriptor::user_data_segment());
-        let user_code = GDT.add_entry(Descriptor::user_code_segment());
-        let tss = GDT.add_entry(Descriptor::tss_segment(tss_ref));
-
-        GDT.load();
-        CS::set_reg(kernel_code);
-        DS::set_reg(kernel_data);
-        ES::set_reg(kernel_data);
-        SS::set_reg(kernel_data);
-        load_tss(tss);
-
-        SELECTORS = Some(Selectors {
-            kernel_code,
-            kernel_data,
-            // Les descripteurs utilisateur sont accedes avec RPL 3.
-            user_data: SegmentSelector::new(user_data.index(), PrivilegeLevel::Ring3),
-            user_code: SegmentSelector::new(user_code.index(), PrivilegeLevel::Ring3),
-            tss,
-        });
-        READY = true;
-    }
-    dmesg::log("gdt: GDT chargee (code/donnees ring0 + ring3) + TSS (RSP0, IST)");
+pub fn set_kernel_stack_for(cpu: usize, top: u64) {
+    let _access = access();
+    let state = &mut all_unlocked()[cpu.min(MAX_CPUS - 1)];
+    unsafe { (*state.tss).privilege_stack_table[0] = VirtAddr::new(top); }
 }
 
-/// Reprogramme RSP0 : pile noyau sur laquelle le CPU basculera a la prochaine
-/// interruption venue du ring 3. Appele a chaque changement de tache.
+pub fn kernel_stack_for(cpu: usize) -> u64 {
+    let _access = access();
+    let state = &mut all_unlocked()[cpu.min(MAX_CPUS - 1)];
+    unsafe { (*state.tss).privilege_stack_table[0].as_u64() }
+}
+
 pub fn set_kernel_stack(top: u64) {
-    unsafe {
-        TSS.privilege_stack_table[0] = VirtAddr::new(top);
-    }
+    let cpu = crate::arch::x86_64::usermode::cpu_index();
+    set_kernel_stack_for(cpu, top);
 }
 
-/// Valeur courante de RSP0 (diagnostic).
 pub fn kernel_stack() -> u64 {
-    unsafe { TSS.privilege_stack_table[0].as_u64() }
+    let cpu = crate::arch::x86_64::usermode::cpu_index();
+    kernel_stack_for(cpu)
 }
