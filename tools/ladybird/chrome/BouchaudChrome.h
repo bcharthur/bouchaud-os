@@ -309,6 +309,7 @@ struct State {
     u32 serial { 0 };
     bool handshake_done { false };
     bool frame_seen { false };
+    bool frame_after_wheel_pending { false };
 
     // Rappels vers WebContent. Poses par `ConnectionFromClient::bouchaud_m11_start`.
     Function<void(Web::MouseEvent)> on_mouse_event;
@@ -507,6 +508,10 @@ inline void send_frame_ready()
     put32(frame + 20, static_cast<u32>(s.surface_height));
     if (!send_message(Genre::FrameReady, frame, sizeof(frame)))
         warnln("[ladybird-bouchaud] M11_FRAME_READY_FAILED errno={}", errno);
+    if (s.frame_after_wheel_pending) {
+        s.frame_after_wheel_pending = false;
+        outln("[ladybird-bouchaud] M11_FRAME_AFTER_SCROLL");
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -969,18 +974,24 @@ inline void handle_pointer(int x, int y, unsigned buttons)
     s.last_y = y;
 }
 
-inline void handle_wheel(int delta)
+inline void handle_wheel(int delta, int x, int y)
 {
     auto& s = state();
-    if (s.last_y < toolbar_height)
+    outln("[ladybird-bouchaud] M11_WHEEL_RX dx=0 dy={} client_x={} client_y={}", delta, x, y);
+    if (y < toolbar_height) {
+        outln("[ladybird-bouchaud] WEB_WHEEL_DROP reason=toolbar client_x={} client_y={}", x, y);
         return;
+    }
 
     // Le protocole GUI compte positif vers le haut (convention Qt) ; le DOM
     // compte positif vers le bas. Trois lignes de 18 pixels par cran, la meme
     // valeur que les portages de bureau d'upstream.
-    auto page_y = s.last_y - page_origin_y();
-    dispatch_mouse(Web::MouseEvent::Type::MouseWheel, s.last_x, page_y, 0, s.last_buttons,
-        static_cast<double>(-delta) * 54.0);
+    auto page_y = y - page_origin_y();
+    auto wheel_y = static_cast<double>(-delta) * 54.0;
+    outln("[ladybird-bouchaud] WEB_WHEEL_DISPATCH viewport_x={} viewport_y={} delta_y={}", x, page_y, wheel_y);
+    dispatch_mouse(Web::MouseEvent::Type::MouseWheel, x, page_y, 0, s.last_buttons,
+        wheel_y);
+    s.frame_after_wheel_pending = true;
 }
 
 inline void dispatch_key_to_page(Web::UIEvents::KeyCode code, u32 code_point, bool insert_text)
@@ -1155,8 +1166,8 @@ inline void handle_message(u16 kind, u8 const* payload, u32 size)
             handle_pointer(read_i32(payload, 4), read_i32(payload, 8), read_u32(payload, 12));
         break;
     case Genre::Wheel:
-        if (size >= 8)
-            handle_wheel(read_i32(payload, 4));
+        if (size >= 16)
+            handle_wheel(read_i32(payload, 4), read_i32(payload, 8), read_i32(payload, 12));
         break;
     case Genre::CloseRequest:
         outln("[ladybird-bouchaud] M11_CLOSE_REQUEST");

@@ -709,6 +709,24 @@ static STEAL_ATTEMPTS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX
 static STEAL_REJECT_BALANCE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static STEAL_REJECT_AFFINITY: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
+#[derive(Clone, Copy)]
+struct SmpSamplePrevious {
+    t_ns: u64,
+    ctx: u64,
+    migrations: [u64; MAX_CPUS],
+    steal_ok: [u64; MAX_CPUS],
+    steal_try: [u64; MAX_CPUS],
+    reject_balance: [u64; MAX_CPUS],
+    reject_affinity: [u64; MAX_CPUS],
+    page_faults: [u64; MAX_CPUS],
+    tlb: u64,
+    bkl_wait: u64,
+    bkl_hold: u64,
+    bkl_acq: u64,
+}
+
+static mut SMP_SAMPLE_PREVIOUS: Option<SmpSamplePrevious> = None;
+
 static CONTEXT_SWITCHES: AtomicU64 = AtomicU64::new(0);
 static IRQ_PREEMPTIONS: AtomicU64 = AtomicU64::new(0);
 static DEFERRED_PREEMPTIONS: AtomicU64 = AtomicU64::new(0);
@@ -2576,6 +2594,77 @@ pub fn log_smp_load() {
         "[BKL-STATS] wait_ns={} hold_ns={} acquisitions={}",
         bkl_wait, bkl_hold, bkl_acq,
     ));
+    log_smp_sample(online);
+}
+
+fn sample_list(values: &[u64], online: usize) -> String {
+    let mut out = String::from("[");
+    for cpu in 0..online {
+        if cpu != 0 { out.push(','); }
+        out.push_str(&alloc::format!("{}", values[cpu]));
+    }
+    out.push(']');
+    out
+}
+
+fn log_smp_sample(online: usize) {
+    let now = crate::kernel::timer::monotonic_ns();
+    let mut current = SmpSamplePrevious {
+        t_ns: now,
+        ctx: CONTEXT_SWITCHES.load(Ordering::Relaxed),
+        migrations: [0; MAX_CPUS],
+        steal_ok: [0; MAX_CPUS],
+        steal_try: [0; MAX_CPUS],
+        reject_balance: [0; MAX_CPUS],
+        reject_affinity: [0; MAX_CPUS],
+        page_faults: [0; MAX_CPUS],
+        tlb: smp::tlb_shootdown_count(),
+        bkl_wait: 0,
+        bkl_hold: 0,
+        bkl_acq: 0,
+    };
+    (current.bkl_wait, current.bkl_hold, current.bkl_acq) = smp_lock::contention_stats();
+    let mut load = [0u64; MAX_CPUS];
+    let mut runnable = [0u64; MAX_CPUS];
+    let mut rq = [0u64; MAX_CPUS];
+    for cpu in 0..online {
+        load[cpu] = crate::arch::x86_64::cpu::load_percent_cpu(cpu) as u64;
+        runnable[cpu] = ready_count_cpu(cpu) as u64;
+        if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu) {
+            rq[cpu] = crate::arch::x86_64::cpu_local::local(id).run_queue_len() as u64;
+        }
+        current.migrations[cpu] = CPU_MIGRATIONS[cpu].load(Ordering::Relaxed);
+        current.steal_ok[cpu] = RUNQ_STEALS[cpu].load(Ordering::Relaxed);
+        current.steal_try[cpu] = STEAL_ATTEMPTS[cpu].load(Ordering::Relaxed);
+        current.reject_balance[cpu] = STEAL_REJECT_BALANCE[cpu].load(Ordering::Relaxed);
+        current.reject_affinity[cpu] = STEAL_REJECT_AFFINITY[cpu].load(Ordering::Relaxed);
+        current.page_faults[cpu] = STALL_PF_BEGIN[cpu].load(Ordering::Relaxed);
+    }
+    let previous = unsafe { SMP_SAMPLE_PREVIOUS.replace(current) };
+    let Some(previous) = previous else { return; };
+    let elapsed = now.saturating_sub(previous.t_ns);
+    if elapsed < 500_000_000 { return; }
+    let delta = |a: &[u64; MAX_CPUS], b: &[u64; MAX_CPUS]| {
+        let mut out = [0u64; MAX_CPUS];
+        for cpu in 0..online { out[cpu] = a[cpu].saturating_sub(b[cpu]); }
+        out
+    };
+    let migrations = delta(&current.migrations, &previous.migrations);
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "[SMP-SAMPLE] v=1 t_ns={} window_ns={} load={} runnable={} rq={} ctx_delta={} mig_delta={} steal_ok_delta={} steal_try_delta={} steal_rej_bal_delta={} steal_rej_aff_delta={} bkl_wait_delta_ns={} bkl_hold_delta_ns={} bkl_acq_delta={} pf_delta={} tlb_delta={}",
+        now, elapsed, sample_list(&load, online), sample_list(&runnable, online),
+        sample_list(&rq, online), current.ctx.saturating_sub(previous.ctx),
+        migrations[..online].iter().copied().sum::<u64>(),
+        sample_list(&delta(&current.steal_ok, &previous.steal_ok), online),
+        sample_list(&delta(&current.steal_try, &previous.steal_try), online),
+        sample_list(&delta(&current.reject_balance, &previous.reject_balance), online),
+        sample_list(&delta(&current.reject_affinity, &previous.reject_affinity), online),
+        current.bkl_wait.saturating_sub(previous.bkl_wait),
+        current.bkl_hold.saturating_sub(previous.bkl_hold),
+        current.bkl_acq.saturating_sub(previous.bkl_acq),
+        sample_list(&delta(&current.page_faults, &previous.page_faults), online),
+        current.tlb.saturating_sub(previous.tlb),
+    ));
 }
 
 /// Instantane d'un processus pour le journal : (pid, nom, ticks, octets).
@@ -2592,6 +2681,7 @@ pub struct Mesure {
     pub cpu_map_ns: [u64; MAX_CPUS],
     pub migrations: u64,
     pub context_switches: u64,
+    pub runnable_threads: usize,
 }
 
 /// Compteurs de la derniere mesure, pour rendre un delta plutot qu'un cumul.
@@ -2599,7 +2689,7 @@ pub struct Mesure {
 /// Un cumul depuis le demarrage ne dit rien d'utile : au bout d'une minute,
 /// tout le monde a « beaucoup » de ticks. Ce qu'on veut lire, c'est ce qui s'est
 /// passe depuis la ligne precedente du journal.
-static mut MESURE_PRECEDENTE: Option<Vec<(u32, u64, [u64; MAX_CPUS])>> = None;
+static mut MESURE_PRECEDENTE: Option<Vec<(u32, u64, [u64; MAX_CPUS], u64, u64)>> = None;
 static mut MESURE_NS_PRECEDENT: u64 = 0;
 
 /// Mesure tous les processus vivants et remet les compteurs a la reference.
@@ -2608,7 +2698,7 @@ static mut MESURE_NS_PRECEDENT: u64 = 0;
 /// honnete d'un pourcentage : compter sur l'horloge murale donnerait des totaux
 /// qui depassent 100 % des que la machine dort.
 pub fn mesure_processus() -> (Vec<Mesure>, u64) {
-    let mut cumuls: Vec<(u32, u64, [u64; MAX_CPUS])> = Vec::new();
+    let mut cumuls: Vec<(u32, u64, [u64; MAX_CPUS], u64, u64)> = Vec::new();
     let mut mesures: Vec<Mesure> = Vec::new();
 
     for task in tasks().iter() {
@@ -2621,15 +2711,17 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
             (process.pid, process.name.clone(), usage.rss, usage.vss)
         };
         let runtime = task.user_cpu_ns.saturating_add(task.kernel_cpu_ns);
-        match cumuls.iter_mut().find(|(autre, _, _)| *autre == pid) {
-            Some((_, total, cpu_map)) => {
+        match cumuls.iter_mut().find(|(autre, _, _, _, _)| *autre == pid) {
+            Some((_, total, cpu_map, migrations, switches)) => {
                 *total = total.saturating_add(runtime);
+                *migrations = migrations.saturating_add(task.migrations);
+                *switches = switches.saturating_add(task.context_switches);
                 for cpu in 0..MAX_CPUS {
                     cpu_map[cpu] = cpu_map[cpu].saturating_add(task.cpu_ns[cpu]);
                 }
             }
             None => {
-                cumuls.push((pid, runtime, task.cpu_ns));
+                cumuls.push((pid, runtime, task.cpu_ns, task.migrations, task.context_switches));
                 mesures.push(Mesure {
                     pid,
                     nom,
@@ -2641,6 +2733,7 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
                     cpu_map_ns: [0; MAX_CPUS],
                     migrations: 0,
                     context_switches: 0,
+                    runnable_threads: 0,
                 });
             }
         }
@@ -2648,6 +2741,9 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
             mesure.taches += 1;
             mesure.migrations = mesure.migrations.saturating_add(task.migrations);
             mesure.context_switches = mesure.context_switches.saturating_add(task.context_switches);
+            if task.state == TaskState::Ready {
+                mesure.runnable_threads += 1;
+            }
         }
     }
 
@@ -2662,24 +2758,32 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
     for mesure in mesures.iter_mut() {
         let cumul = cumuls
             .iter()
-            .find(|(pid, _, _)| *pid == mesure.pid)
-            .map_or(0, |(_, total, _)| *total);
+            .find(|(pid, _, _, _, _)| *pid == mesure.pid)
+            .map_or(0, |(_, total, _, _, _)| *total);
         let avant = precedents
             .iter()
-            .find(|(pid, _, _)| *pid == mesure.pid)
-            .map_or(0, |(_, total, _)| *total);
+            .find(|(pid, _, _, _, _)| *pid == mesure.pid)
+            .map_or(0, |(_, total, _, _, _)| *total);
         mesure.ticks = cumul.saturating_sub(avant);
         let current_map = cumuls
             .iter()
-            .find(|(pid, _, _)| *pid == mesure.pid)
-            .map_or([0; MAX_CPUS], |(_, _, map)| *map);
+            .find(|(pid, _, _, _, _)| *pid == mesure.pid)
+            .map_or([0; MAX_CPUS], |(_, _, map, _, _)| *map);
         let previous_map = precedents
             .iter()
-            .find(|(pid, _, _)| *pid == mesure.pid)
-            .map_or([0; MAX_CPUS], |(_, _, map)| *map);
+            .find(|(pid, _, _, _, _)| *pid == mesure.pid)
+            .map_or([0; MAX_CPUS], |(_, _, map, _, _)| *map);
         for cpu in 0..MAX_CPUS {
             mesure.cpu_map_ns[cpu] = current_map[cpu].saturating_sub(previous_map[cpu]);
         }
+        let (_, _, _, current_migrations, current_switches) = cumuls
+            .iter().find(|(pid, _, _, _, _)| *pid == mesure.pid)
+            .copied().unwrap_or((mesure.pid, 0, [0; MAX_CPUS], 0, 0));
+        let (_, _, _, previous_migrations, previous_switches) = precedents
+            .iter().find(|(pid, _, _, _, _)| *pid == mesure.pid)
+            .copied().unwrap_or((mesure.pid, 0, [0; MAX_CPUS], 0, 0));
+        mesure.migrations = current_migrations.saturating_sub(previous_migrations);
+        mesure.context_switches = current_switches.saturating_sub(previous_switches);
     }
 
     let now = crate::kernel::timer::monotonic_ns();

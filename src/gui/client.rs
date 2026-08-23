@@ -282,8 +282,13 @@ impl Client {
         true
     }
 
-    pub fn envoie_molette(&mut self, delta: i32) {
-        let charge = proto::Molette { fenetre: proto::FENETRE_PRINCIPALE, delta }.encode();
+    pub fn envoie_molette(&mut self, delta: i32, x: i32, y: i32) {
+        let charge = proto::Molette {
+            fenetre: proto::FENETRE_PRINCIPALE,
+            delta,
+            x,
+            y,
+        }.encode();
         self.envoie(Genre::Wheel, &charge);
     }
 

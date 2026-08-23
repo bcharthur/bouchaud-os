@@ -126,7 +126,14 @@ unsafe fn apply_packet(with_wheel: bool) {
     BTN = flags & 0x07;
     if with_wheel {
         // En mode IntelliMouse 3 boutons, l'octet 4 est un delta signe.
-        WHEEL_DELTA += PKT[3] as i8 as i32;
+        let wheel = PKT[3] as i8 as i32;
+        WHEEL_DELTA += wheel;
+        if wheel != 0 {
+            crate::serial_println!(
+                "[INPUT-WHEEL] raw={} dx={} dy={} x={} y={}",
+                wheel, dx, dy, MX, MY,
+            );
+        }
     }
 }
 

@@ -351,6 +351,7 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
     let (mesures, total) = task::mesure_processus();
     if total > 0 {
         let mut ligne = String::new();
+        let sample_ns = crate::kernel::timer::monotonic_ns();
         for mesure in mesures.iter() {
             if mesure.ticks == 0 && mesure.rss_octets < 1024 * 1024 {
                 continue; // rien a dire d'un processus qui n'a rien fait
@@ -368,6 +369,20 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
                 ));
             }
             cpu_map.push(']');
+            crate::serial_println!(
+                "[PROC-SAMPLE] v=1 t_ns={} pid={} name={} cpu_pct={} cpu_map={} ctx_delta={} mig_delta={} runnable_threads={} threads={} rss={} vss={}",
+                sample_ns,
+                mesure.pid,
+                mesure.nom,
+                mesure.ticks.saturating_mul(100) / total,
+                cpu_map,
+                mesure.context_switches,
+                mesure.migrations,
+                mesure.runnable_threads,
+                mesure.taches,
+                mesure.rss_octets,
+                mesure.vss_octets,
+            );
             ligne.push_str(&alloc::format!(
                 "{} pid={} cpu {}% cpu_map={} rss {} Mio vss {} Mio thr={} ctx={} mig={}",
                 mesure.nom,
@@ -589,8 +604,17 @@ fn handle_wheel(mx: i32, my: i32, delta: i32, wins: &mut Vec<Win>) {
         if !w.min && mx >= w.x && mx < w.x + w.w && my >= w.y && my < w.y + w.h {
             let zone = zone_utile(w);
             if let App::Navigateur { client } = &mut wins[i].app {
-                if crate::gui::protocole::vers_local(&zone, mx, my).is_some() {
-                    client.envoie_molette(delta);
+                if let Some((client_x, client_y)) = crate::gui::protocole::vers_local(&zone, mx, my) {
+                    crate::serial_println!(
+                        "[GUI-WHEEL-TX] pid={} dx=0 dy={} screen_x={} screen_y={} client_x={} client_y={}",
+                        client.pid, delta, mx, my, client_x, client_y,
+                    );
+                    client.envoie_molette(delta, client_x, client_y);
+                } else {
+                    crate::serial_println!(
+                        "[GUI-WHEEL-DROP] pid={} reason=outside-client screen_x={} screen_y={} dy={}",
+                        client.pid, mx, my, delta,
+                    );
                 }
                 return;
             }
