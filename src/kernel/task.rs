@@ -125,6 +125,43 @@ pub struct Context {
 static mut FAULTS_ZERO: u64 = 0;
 static mut FAULTS_FILE: u64 = 0;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FaultPageState {
+    Missing,
+    Loading,
+    Present,
+    Failed,
+}
+
+struct FaultPage {
+    pml4: u64,
+    page: u64,
+    state: FaultPageState,
+    waiters: crate::kernel::sync::WaitQueue,
+}
+
+static mut FAULT_PAGES: Option<Vec<Box<FaultPage>>> = None;
+
+fn fault_page(pml4: u64, page: u64) -> &'static mut FaultPage {
+    debug_assert!(smp_lock::held_by_current_cpu());
+    unsafe {
+        let pages = FAULT_PAGES.get_or_insert_with(Vec::new);
+        if let Some(index) = pages
+            .iter()
+            .position(|entry| entry.pml4 == pml4 && entry.page == page)
+        {
+            return &mut *pages[index];
+        }
+        pages.push(Box::new(FaultPage {
+            pml4,
+            page,
+            state: FaultPageState::Missing,
+            waiters: crate::kernel::sync::WaitQueue::new(),
+        }));
+        &mut *pages.last_mut().unwrap()
+    }
+}
+
 /// Peuple a la demande une page promise.
 ///
 /// La derniere promesse couvrant la page fixe les droits. Toutes les promesses
@@ -134,6 +171,49 @@ pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> bool {
     if !crate::kernel::vmm::is_user_addr(adresse) || !in_user_task() {
         return false;
     }
+
+    // Une faute de protection n'est jamais transformee en demand paging.
+    if protection_fault {
+        return false;
+    }
+
+    let page = adresse & !(crate::kernel::vmm::PAGE_SIZE - 1);
+    loop {
+        let record = fault_page(crate::kernel::vmm::current_pml4(), page);
+        match record.state {
+            FaultPageState::Loading => {
+                let ticket = record.waiters.ticket();
+                record.waiters.wait(ticket);
+                continue;
+            }
+            FaultPageState::Present => {
+                if current_process().borrow_mut().space.translate(page).is_some() {
+                    return true;
+                }
+                // munmap a pu retirer la PTE depuis le dernier fault.
+                record.state = FaultPageState::Loading;
+                break;
+            }
+            FaultPageState::Missing => {
+                record.state = FaultPageState::Loading;
+                break;
+            }
+            FaultPageState::Failed => return false,
+        }
+    }
+
+    let result = peuple_page_loader(adresse);
+    let record = fault_page(crate::kernel::vmm::current_pml4(), page);
+    record.state = if result {
+        FaultPageState::Present
+    } else {
+        FaultPageState::Failed
+    };
+    record.waiters.wake_all();
+    result
+}
+
+fn peuple_page_loader(adresse: u64) -> bool {
 
     stall_pf_phase(210, adresse);
     let processus = current_process();
@@ -155,7 +235,7 @@ pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> bool {
         // Un autre CPU du meme processus a pu materialiser la page pendant que
         // cette faute attendait le BKL. Dans ce cas le fault est deja resolu.
         // Une faute de protection, elle, reste fatale et ne doit pas boucler.
-        return !protection_fault;
+        return true;
     }
 
     match effective.backing {
@@ -537,8 +617,10 @@ pub struct Task {
     pub clear_child_tid: u64,
     /// Cle du futex attendu, si la tache est bloquee dessus.
     pub futex_key: u64,
-    /// Tick a partir duquel un sommeil se termine (0 = pas de sommeil).
-    pub wake_tick: u64,
+    /// Identite d'une WaitQueue noyau, 0 lorsqu'aucune attente n'est armee.
+    pub wait_queue_key: usize,
+    /// Deadline monotone en nanosecondes (0 = pas de sommeil).
+    pub wake_deadline_ns: u64,
     /// La tache attend la fin d'un processus fils (`wait4`).
     pub waiting_for_child: bool,
     /// La tache n'a pas encore rejoint le ring 3.
@@ -1040,7 +1122,8 @@ impl Task {
             fs_base: 0,
             clear_child_tid: 0,
             futex_key: 0,
-            wake_tick: 0,
+            wait_queue_key: 0,
+            wake_deadline_ns: 0,
             waiting_for_child: false,
             fresh: true,
             ticks_cpu: 0,
@@ -1214,6 +1297,11 @@ pub fn register(mut task: Box<Task>) -> usize {
     }
 
     smp::broadcast_reschedule();
+    if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(
+        tasks()[index].runq_cpu as usize,
+    ) {
+        crate::arch::x86_64::cpu_local::local(id).enqueue(index);
+    }
     index
 }
 
@@ -1416,6 +1504,28 @@ fn pick_next(after: usize, cpu: usize) -> Option<usize> {
     let len = tasks().len();
     if len == 0 { return None; }
 
+    if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu) {
+        let local = crate::arch::x86_64::cpu_local::local(id);
+        while let Some(index) = local.dequeue() {
+            if index < len && runnable_local(&tasks()[index], cpu) {
+                return Some(index);
+            }
+        }
+        // Transition NG3: les anciens callsites de wake ne connaissent pas
+        // encore tous RunQueue. On reconcilie sous BKL, sans doublon, puis les
+        // prochains choix consomment exclusivement la queue locale.
+        for index in 0..len {
+            if runnable_local(&tasks()[index], cpu) {
+                local.enqueue(index);
+            }
+        }
+        while let Some(index) = local.dequeue() {
+            if index < len && runnable_local(&tasks()[index], cpu) {
+                return Some(index);
+            }
+        }
+    }
+
     let start = if after == NO_TASK { 0 } else { after % len };
     let tours = TOURS_INTERACTIFS[cpu].load(Ordering::Relaxed);
     let force_partage = tours >= TOURS_INTERACTIFS_MAX;
@@ -1456,6 +1566,32 @@ fn pick_next(after: usize, cpu: usize) -> Option<usize> {
     }
 
     let mut best: Option<(usize, usize)> = None;
+    // Vole d'abord physiquement la queue la plus chargee. La validation sous
+    // BKL ci-dessous garantit qu'une entree obsolete ne peut jamais executer
+    // une Task deja Running sur un autre CPU.
+    let mut donor = None;
+    for candidate_cpu in 0..smp::schedulable_cpus().min(MAX_CPUS) {
+        if candidate_cpu == cpu {
+            continue;
+        }
+        let id = crate::arch::x86_64::cpu_local::CpuId::from_index(candidate_cpu).unwrap();
+        let load = crate::arch::x86_64::cpu_local::local(id).run_queue_len();
+        if donor.map_or(true, |(_, best_load)| load > best_load) {
+            donor = Some((candidate_cpu, load));
+        }
+    }
+    if let Some((donor_cpu, load)) = donor {
+        if load > 1 {
+            let id = crate::arch::x86_64::cpu_local::CpuId::from_index(donor_cpu).unwrap();
+            if let Some(index) = crate::arch::x86_64::cpu_local::local(id).steal() {
+                if index < len && runnable_steal(&tasks()[index], cpu) {
+                    tasks()[index].runq_cpu = cpu as u8;
+                    RUNQ_STEALS[cpu].fetch_add(1, Ordering::Relaxed);
+                    return Some(index);
+                }
+            }
+        }
+    }
     for offset in 1..=len {
         let index = (start.wrapping_add(offset)) % len;
         let candidate = &tasks()[index];
@@ -2133,11 +2269,46 @@ pub fn wake_for_signal(pid: u32) {
     for task in tasks().iter_mut() {
         if task.state == TaskState::Blocked && task.process.borrow().pid == pid {
             task.futex_key = 0;
-            task.wake_tick = 0;
+            task.wait_queue_key = 0;
+            task.wake_deadline_ns = 0;
             task.waiting_for_child = false;
             task.state = TaskState::Ready;
         }
     }
+}
+
+/// Endort la tache courante sur une WaitQueue. L'appelant doit avoir valide la
+/// generation sous le BKL juste avant cet appel pour fermer le lost wakeup.
+pub(crate) fn park_current_on(wait_queue_key: usize) {
+    {
+        let task = current();
+        task.wait_queue_key = wait_queue_key;
+        task.state = TaskState::Blocked;
+    }
+    while current().state == TaskState::Blocked {
+        schedule();
+    }
+    current().wait_queue_key = 0;
+}
+
+/// Reveille au plus `limit` taches inscrites sur la queue.
+pub(crate) fn wake_wait_queue(wait_queue_key: usize, limit: usize) -> usize {
+    let _kernel = smp_lock::enter();
+    let mut woke = 0;
+    for task in tasks().iter_mut() {
+        if woke == limit {
+            break;
+        }
+        if task.state == TaskState::Blocked && task.wait_queue_key == wait_queue_key {
+            task.wait_queue_key = 0;
+            task.state = TaskState::Ready;
+            woke += 1;
+        }
+    }
+    if woke != 0 {
+        smp::broadcast_reschedule();
+    }
+    woke
 }
 
 /// Y a-t-il un signal livrable pour la tache courante ?
@@ -2525,13 +2696,15 @@ pub fn attends_un_tick() {
 }
 
 pub fn sleep_ticks(ticks: u64) {
-    let deadline = crate::kernel::timer::ticks() + ticks.max(1);
+    let duration_ns = ticks.max(1)
+        .saturating_mul(1_000_000_000 / crate::kernel::timer::TICKS_PER_SECOND);
+    let deadline = crate::kernel::timer::monotonic_ns().saturating_add(duration_ns);
     {
         let task = current();
-        task.wake_tick = deadline;
+        task.wake_deadline_ns = deadline;
         task.state = TaskState::Blocked;
     }
-    while crate::kernel::timer::ticks() < deadline {
+    while crate::kernel::timer::monotonic_ns() < deadline {
         // schedule() fait deja HLT si la tache est bloquee et seule.
         schedule();
         if current().state == TaskState::Ready {
@@ -2539,17 +2712,20 @@ pub fn sleep_ticks(ticks: u64) {
         }
     }
     let task = current();
-    task.wake_tick = 0;
+    task.wake_deadline_ns = 0;
     task.state = TaskState::Ready;
 }
 
 /// Reveille les taches dont le sommeil est echu, et declenche les `SIGALRM`.
 fn wake_sleepers() {
-    let now = crate::kernel::timer::ticks();
+    let now = crate::kernel::timer::monotonic_ns();
     let mut woke = false;
     for task in tasks().iter_mut() {
-        if task.state == TaskState::Blocked && task.wake_tick != 0 && now >= task.wake_tick {
-            task.wake_tick = 0;
+        if task.state == TaskState::Blocked
+            && task.wake_deadline_ns != 0
+            && now >= task.wake_deadline_ns
+        {
+            task.wake_deadline_ns = 0;
             task.futex_key = 0;
             task.state = TaskState::Ready;
             woke = true;
@@ -2638,9 +2814,9 @@ fn futex_key(uaddr: u64) -> u64 {
 
 /// `FUTEX_WAIT` : endort la tache si `*uaddr == expected`.
 ///
-/// `timeout_ticks` a 0 signifie « sans limite ». Renvoie `true` si la tache a
+/// `timeout_ms` a 0 signifie « sans limite ». Renvoie `true` si la tache a
 /// ete reveillee par un `FUTEX_WAKE`, `false` sur delai expire.
-pub fn futex_wait(uaddr: u64, expected: u32, timeout_ticks: u64) -> bool {
+pub fn futex_wait(uaddr: u64, expected: u32, timeout_ms: u64) -> bool {
     let key = futex_key(uaddr);
     // Verification atomique vis-a-vis des autres taches : le noyau n'est pas
     // preemptible ici, donc lire puis dormir est indivisible.
@@ -2656,15 +2832,16 @@ pub fn futex_wait(uaddr: u64, expected: u32, timeout_ticks: u64) -> bool {
         return true; // EAGAIN cote appelant
     }
 
-    let deadline = if timeout_ticks == 0 {
+    let deadline_ns = if timeout_ms == 0 {
         0
     } else {
-        crate::kernel::timer::ticks() + timeout_ticks
+        crate::kernel::timer::monotonic_ns()
+            .saturating_add(timeout_ms.saturating_mul(1_000_000))
     };
     {
         let task = current();
         task.futex_key = key;
-        task.wake_tick = deadline;
+        task.wake_deadline_ns = 0;
         task.state = TaskState::Blocked;
     }
 
@@ -2680,17 +2857,18 @@ pub fn futex_wait(uaddr: u64, expected: u32, timeout_ticks: u64) -> bool {
         // expire pour un reveil. La libc croirait alors avoir ete signalee, se
         // rendormirait pour la meme duree, et `pthread_cond_timedwait`
         // attendrait un multiple de ce qu'on lui a demande.
-        let expired = deadline != 0 && crate::kernel::timer::ticks() >= deadline;
+        let expired = deadline_ns != 0
+            && crate::kernel::timer::monotonic_ns() >= deadline_ns;
         let task = current();
         if expired {
             task.futex_key = 0;
-            task.wake_tick = 0;
+            task.wake_deadline_ns = 0;
             task.state = TaskState::Ready;
             return false;
         }
         if task.state == TaskState::Ready {
             task.futex_key = 0;
-            task.wake_tick = 0;
+            task.wake_deadline_ns = 0;
             return true;
         }
     }
@@ -2707,7 +2885,7 @@ pub fn futex_wake(uaddr: u64, count: u32) -> u32 {
         }
         if task.state == TaskState::Blocked && task.futex_key == key {
             task.futex_key = 0;
-            task.wake_tick = 0;
+            task.wake_deadline_ns = 0;
             task.state = TaskState::Ready;
             woken += 1;
         }

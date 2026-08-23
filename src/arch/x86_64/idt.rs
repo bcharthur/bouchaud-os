@@ -147,6 +147,13 @@ extern "x86-interrupt" fn page_fault_handler(stack: InterruptStackFrame, code: P
     let _gs = GsGuard::enter(&stack);
     let addr = x86_64::registers::control::Cr2::read();
     crate::kernel::task::stall_pf_begin(addr.as_u64());
+    // Une exception user arrive avec IF masque par la porte IDT. Autoriser les
+    // IPI avant toute attente de verrou: un CPU bloque sur la synchronisation
+    // MM doit toujours pouvoir ACK un shootdown. IRET restaurera les RFLAGS
+    // utilisateur sauvegardes dans `stack`.
+    if from_user(&stack) {
+        x86_64::instructions::interrupts::enable();
+    }
     let _kernel = crate::kernel::smp_lock::enter();
     crate::kernel::task::stall_site_set(21, addr.as_u64());
     if from_user(&stack) && crate::kernel::task::in_user_task() {
@@ -179,7 +186,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
     crate::kernel::task::stall_probe_from_timer();
 
     let quantum = timer::ticks() % smp::SCHED_QUANTUM_TICKS == 0;
-    if quantum {
+    if quantum && !smp::local_scheduler_timer_enabled() {
         smp::broadcast_reschedule();
     }
 
@@ -236,6 +243,9 @@ extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFram
         interrupted_user,
     );
     smp::eoi_local();
+    if smp::local_scheduler_timer_enabled() {
+        smp::arm_local_scheduler_timer();
+    }
 
     let mut preempt_now = false;
     {

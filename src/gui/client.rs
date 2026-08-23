@@ -403,6 +403,9 @@ impl Client {
                         self.pid, degat.largeur, degat.hauteur
                     ));
                 }
+                if self.trames == 0 {
+                    crate::kernel::perf::first_paint();
+                }
                 self.etat = Etat::Actif;
                 self.trames += 1;
                 self.derniere_trame = crate::kernel::timer::ticks();

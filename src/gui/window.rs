@@ -207,6 +207,7 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
     // souris en CI. En cas d'echec on retombe sur le terminal pour garder un
     // bureau diagnostic visible.
     if kind == 0 && autostart_browser_requested(n == 0) {
+        crate::kernel::perf::browser_click();
         match crate::gui::client::Client::lance(
             crate::gui::client::CHEMIN_NAVIGATEUR,
             home,

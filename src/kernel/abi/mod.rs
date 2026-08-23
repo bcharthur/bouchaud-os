@@ -889,19 +889,19 @@ fn sys_futex(args: [u64; 6]) -> i64 {
             // seconde forme qu'emploie `pthread_cond_timedwait`. Traiter une
             // date absolue comme une duree donnerait un delai de plusieurs
             // decennies : l'attente ne rendrait jamais la main.
-            let timeout = match timespec_ms(args[3]) {
+            let timeout_ms = match timespec_ms(args[3]) {
                 None => 0, // sans limite
-                Some(ms) if operation == FUTEX_WAIT => crate::kernel::timer::ms_to_ticks(ms).max(1),
+                Some(ms) if operation == FUTEX_WAIT => ms.max(1),
                 Some(deadline_ms) => {
                     let now_ms = if raw_operation & FUTEX_CLOCK_REALTIME != 0 {
                         unix_time().saturating_mul(1000)
                     } else {
                         crate::kernel::timer::monotonic_ms()
                     };
-                    crate::kernel::timer::ms_to_ticks(deadline_ms.saturating_sub(now_ms)).max(1)
+                    deadline_ms.saturating_sub(now_ms).max(1)
                 }
             };
-            if task::futex_wait(uaddr, expected, timeout) {
+            if task::futex_wait(uaddr, expected, timeout_ms) {
                 0
             } else {
                 -errno::ETIMEDOUT

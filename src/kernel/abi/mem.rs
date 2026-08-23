@@ -441,11 +441,21 @@ pub fn sys_munmap(addr: u64, length: u64) -> i64 {
     };
 
     let process = task::current_process();
-    let mut process = process.borrow_mut();
+    let (retirement, liberes) = {
+        let mut process = process.borrow_mut();
+        let liberes = process.retire_partages(addr, length);
+        vma::retire(&mut process.promesses, addr, fin);
+        let retirement = process.space.prepare_unmap(addr, length);
+        (retirement, liberes)
+    };
 
-    let liberes = process.retire_partages(addr, length);
-    process.space.unmap(addr, length);
-    vma::retire(&mut process.promesses, addr, fin);
+    // Aucun RefCell borrow ne traverse cette fenetre. Le CPU cible peut donc
+    // finir une #PF/IRQ, tandis que le handler IPI ACK sans jamais prendre BKL.
+    let depth = crate::kernel::smp_lock::suspend_for_schedule();
+    retirement.invalidation().execute();
+    crate::kernel::smp_lock::resume_after_schedule(depth);
+
+    process.borrow_mut().space.finish_unmap(retirement);
 
     for node in liberes {
         partage::demappe(node);
@@ -511,9 +521,15 @@ pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> i64 {
         );
     }
 
-    process
+    let invalidation = process
         .space
-        .protect(addr, length, prot_to_flags(prot));
+        .prepare_protect(addr, length, prot_to_flags(prot));
+    drop(process);
+    if let Some(invalidation) = invalidation {
+        let depth = crate::kernel::smp_lock::suspend_for_schedule();
+        invalidation.execute();
+        crate::kernel::smp_lock::resume_after_schedule(depth);
+    }
     0
 }
 

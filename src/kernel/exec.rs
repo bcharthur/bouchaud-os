@@ -210,6 +210,7 @@ fn construit_tache(
     ),
     String,
 > {
+    crate::kernel::perf::exec_start(name);
     let process = match task::new_process(name, cwd) {
         Some(process) => process,
         None => return Err("memoire physique insuffisante (espace d'adressage)".to_string()),

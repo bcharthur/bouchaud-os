@@ -5,6 +5,8 @@
 //! state instead of adding new BKL dependencies.
 
 mod spinlock;
+mod sleep_mutex;
+mod wait_queue;
 
 pub use spinlock::{
     SpinLock,
@@ -12,6 +14,8 @@ pub use spinlock::{
     SpinLockIrq,
     SpinLockIrqGuard,
 };
+pub use sleep_mutex::{SleepMutex, SleepMutexGuard};
+pub use wait_queue::{WaitQueue, WaitTicket};
 
 // CpuMask lives with the architecture-neutral logical CPU identity for NG1.
 // It is re-exported here so scheduler and kernel code have one stable import.

@@ -9,12 +9,14 @@
 //! logical [`CpuId`] and the rest of the kernel can stop assuming
 //! `logical_cpu == APIC_ID`.
 
+use alloc::vec::Vec;
 use core::arch::x86_64::{__cpuid, __cpuid_count};
 use core::sync::atomic::{
     AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering,
 };
 
 use crate::arch::x86_64::smp::MAX_CPUS;
+use crate::kernel::sync::SpinLock;
 
 /// No task is currently attached to a CPU-local slot.
 pub const NO_TASK: usize = usize::MAX;
@@ -151,6 +153,7 @@ pub struct CpuLocal {
     need_resched: AtomicBool,
     irq_depth: AtomicU32,
     preempt_count: AtomicU32,
+    run_queue: SpinLock<Vec<usize>>,
 
     context_switches: AtomicU64,
     migrations: AtomicU64,
@@ -173,6 +176,7 @@ impl CpuLocal {
             need_resched: AtomicBool::new(false),
             irq_depth: AtomicU32::new(0),
             preempt_count: AtomicU32::new(0),
+            run_queue: SpinLock::new(Vec::new()),
             context_switches: AtomicU64::new(0),
             migrations: AtomicU64::new(0),
             ipi_rx: AtomicU64::new(0),
@@ -225,6 +229,26 @@ impl CpuLocal {
 
     pub fn preempt_count(&self) -> u32 {
         self.preempt_count.load(Ordering::Relaxed)
+    }
+
+    pub fn enqueue(&self, task: usize) {
+        let mut queue = self.run_queue.lock();
+        if !queue.contains(&task) {
+            queue.push(task);
+        }
+    }
+
+    pub fn dequeue(&self) -> Option<usize> {
+        let mut queue = self.run_queue.lock();
+        if queue.is_empty() { None } else { Some(queue.remove(0)) }
+    }
+
+    pub fn steal(&self) -> Option<usize> {
+        self.run_queue.lock().pop()
+    }
+
+    pub fn run_queue_len(&self) -> usize {
+        self.run_queue.lock().len()
     }
 
     pub fn note_context_switch(&self) {

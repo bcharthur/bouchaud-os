@@ -400,6 +400,40 @@ pub struct AddressSpace {
     pages: Vec<u64>,
 }
 
+/// Invalidation distante preparee pendant une mutation de tables, puis executee
+/// seulement apres avoir relache le BKL et tout emprunt de `Process`.
+#[derive(Clone, Copy)]
+pub struct TlbInvalidation {
+    pml4: u64,
+    active_cpus: u64,
+    start: u64,
+    len: u64,
+}
+
+impl TlbInvalidation {
+    pub fn execute(self) {
+        smp::shootdown_tlb(self.pml4, self.active_cpus, self.start, self.len);
+    }
+}
+
+fn execute_outside_bkl(invalidation: TlbInvalidation) {
+    let depth = crate::kernel::smp_lock::suspend_for_schedule();
+    invalidation.execute();
+    crate::kernel::smp_lock::resume_after_schedule(depth);
+}
+
+/// Frames detachees des PTE mais conservees jusqu'a la fin du shootdown.
+pub struct UnmapRetirement {
+    invalidation: TlbInvalidation,
+    frames: Vec<u64>,
+}
+
+impl UnmapRetirement {
+    pub fn invalidation(&self) -> TlbInvalidation {
+        self.invalidation
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ResidentStats {
     pub total_pages: u64,
@@ -458,8 +492,13 @@ impl AddressSpace {
     }
 
     #[inline]
-    fn shootdown_range(&self, start: u64, len: u64) {
-        smp::shootdown_tlb(self.pml4, start, len);
+    fn invalidation(&self, start: u64, len: u64) -> TlbInvalidation {
+        TlbInvalidation {
+            pml4: self.pml4,
+            active_cpus: self.active_cpus(),
+            start,
+            len,
+        }
     }
 
     /// Active cet espace d'adressage sur le CPU courant.
@@ -468,9 +507,12 @@ impl AddressSpace {
     /// Le noyau doit rester mappe (garanti par `new`) et l'espace doit rester
     /// vivant tant qu'il est actif dans CR3.
     pub unsafe fn activate(&self) {
+        // Publier l'activite AVANT CR3 ferme la race avec un unmap concurrent:
+        // soit son snapshot nous cible, soit notre chargement CR3 est posterieur
+        // a la mutation PTE et ne peut importer aucune traduction retiree.
+        self.mark_active(smp::cpu_index());
         let frame = PhysFrame::containing_address(PhysAddr::new(self.pml4));
         Cr3::write(frame, Cr3Flags::empty());
-        self.mark_active(smp::cpu_index());
     }
 
     /// Descend (en creant si besoin) jusqu'a l'entree de table de pages qui
@@ -514,7 +556,7 @@ impl AddressSpace {
             None => false,
         };
         if replaced_present {
-            self.shootdown_range(virt & !(PAGE_SIZE - 1), PAGE_SIZE);
+            execute_outside_bkl(self.invalidation(virt & !(PAGE_SIZE - 1), PAGE_SIZE));
         }
         ok
     }
@@ -542,7 +584,7 @@ impl AddressSpace {
     }
 
     /// Change les droits d'une plage deja mappee (mprotect).
-    pub fn protect(&mut self, virt: u64, len: u64, flags: u64) -> bool {
+    pub fn prepare_protect(&mut self, virt: u64, len: u64, flags: u64) -> Option<TlbInvalidation> {
         let start = virt & !(PAGE_SIZE - 1);
         let end = (virt + len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         let mut page = start;
@@ -560,8 +602,14 @@ impl AddressSpace {
             }
             page += PAGE_SIZE;
         }
-        if changed {
-            self.shootdown_range(start, end.saturating_sub(start));
+        changed.then(|| self.invalidation(start, end.saturating_sub(start)))
+    }
+
+    /// Compatibilite des constructeurs d'image et chemins MM internes. Les
+    /// syscalls concurrents utilisent les phases explicites prepare/execute.
+    pub fn protect(&mut self, virt: u64, len: u64, flags: u64) -> bool {
+        if let Some(invalidation) = self.prepare_protect(virt, len, flags) {
+            execute_outside_bkl(invalidation);
         }
         true
     }
@@ -569,7 +617,7 @@ impl AddressSpace {
     /// Supprime le mapping d'une plage (munmap). Les PTE sont d'abord
     /// retirees partout, puis le shootdown TLB est ACKe, et seulement ensuite
     /// les frames sont rendues. Cet ordre interdit tout use-after-free TLB.
-    pub fn unmap(&mut self, virt: u64, len: u64) {
+    pub fn prepare_unmap(&mut self, virt: u64, len: u64) -> UnmapRetirement {
         let start = virt & !(PAGE_SIZE - 1);
         let end = (virt + len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         let mut page = start;
@@ -588,16 +636,28 @@ impl AddressSpace {
             page += PAGE_SIZE;
         }
 
-        if end > start {
-            self.shootdown_range(start, end.saturating_sub(start));
+        UnmapRetirement {
+            invalidation: self.invalidation(start, end.saturating_sub(start)),
+            frames: retired,
         }
+    }
 
-        for phys in retired {
+    /// Rend les frames uniquement apres `UnmapRetirement::invalidation()`.
+    pub fn finish_unmap(&mut self, retirement: UnmapRetirement) {
+        for phys in retirement.frames {
             if let Some(pos) = self.pages.iter().position(|&f| f == phys) {
                 self.pages.swap_remove(pos);
                 free_frame(phys);
             }
         }
+    }
+
+    /// Variante synchrone pour les chemins qui ne conservent aucune metadata
+    /// de processus a mettre a jour. L'attente ACK se fait toujours hors BKL.
+    pub fn unmap(&mut self, virt: u64, len: u64) {
+        let retirement = self.prepare_unmap(virt, len);
+        execute_outside_bkl(retirement.invalidation());
+        self.finish_unmap(retirement);
     }
 
     /// Traduit une adresse virtuelle utilisateur en adresse physique.
