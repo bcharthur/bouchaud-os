@@ -20,12 +20,45 @@
 //! `/dev/fb0` suit une troisieme voie : ses pages sont celles de la memoire
 //! video, empruntees telles quelles.
 
+use alloc::rc::Rc;
+use core::cell::RefCell;
+
 use crate::kernel::abi::errno;
 use crate::kernel::fd::FdKind;
 use crate::kernel::partage;
 use crate::kernel::task;
 use crate::kernel::vma::{self, Backing, Vma};
 use crate::kernel::vmm::{self, PAGE_SIZE};
+
+fn execute_process_invalidation(
+    process: &Rc<RefCell<task::Process>>,
+    invalidation: vmm::TlbInvalidation,
+) {
+    // Vérifie exactement l'invariant qui a paniqué sous SMP4: aucun Ref/RefMut
+    // Process ne doit survivre à la fenêtre où le BKL est suspendu.
+    debug_assert!(
+        process.try_borrow_mut().is_ok(),
+        "MM shootdown: Process encore emprunte avant suspension BKL"
+    );
+    let depth = crate::kernel::smp_lock::suspend_for_schedule();
+    invalidation.execute();
+    crate::kernel::smp_lock::resume_after_schedule(depth);
+}
+
+fn finish_mapping_replacement(
+    process: &Rc<RefCell<task::Process>>,
+    retirement: Option<vmm::UnmapRetirement>,
+    shared_nodes: &[usize],
+) {
+    if let Some(retirement) = retirement {
+        execute_process_invalidation(process, retirement.invalidation());
+        process.borrow_mut().space.finish_unmap(retirement);
+    }
+    // Une frame MAP_SHARED ne peut être rendue qu'après le même ACK TLB.
+    for &node in shared_nodes {
+        partage::demappe(node);
+    }
+}
 
 pub const PROT_NONE: u32 = 0;
 pub const PROT_READ: u32 = 1;
@@ -63,42 +96,49 @@ pub fn prot_to_flags(prot: u32) -> u64 {
 /// libc compare simplement le retour a sa demande).
 pub fn sys_brk(addr: u64) -> i64 {
     let process = task::current_process();
-    let mut process = process.borrow_mut();
+    let mut retirement = None;
+    let result = {
+        let mut borrowed = process.borrow_mut();
+        if addr == 0 || addr < borrowed.brk_start {
+            return borrowed.brk as i64;
+        }
 
-    if addr == 0 || addr < process.brk_start {
-        return process.brk as i64;
-    }
-
-    let current = process.brk;
-    if addr > current {
-        let start = (current + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-        let end = (addr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-        if end > start {
-            let growth = end - start;
-            if !process.tient_sous_limite(growth) {
-                return current as i64;
+        let current = borrowed.brk;
+        if addr > current {
+            let start = (current + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let end = (addr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            if end > start {
+                let growth = end - start;
+                if !borrowed.tient_sous_limite(growth) {
+                    return current as i64;
+                }
+                vma::remplace(
+                    &mut borrowed.promesses,
+                    Vma {
+                        debut: start,
+                        fin: end,
+                        drapeaux: prot_to_flags(PROT_READ | PROT_WRITE),
+                        backing: Backing::Zero,
+                    },
+                );
             }
-            vma::remplace(
-                &mut process.promesses,
-                Vma {
-                    debut: start,
-                    fin: end,
-                    drapeaux: prot_to_flags(PROT_READ | PROT_WRITE),
-                    backing: Backing::Zero,
-                },
-            );
+        } else if addr < current {
+            let start = (addr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let end = (current + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            if end > start {
+                vma::retire(&mut borrowed.promesses, start, end);
+                retirement = Some(borrowed.space.prepare_unmap(start, end - start));
+            }
         }
-    } else if addr < current {
-        let start = (addr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-        let end = (current + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-        if end > start {
-            process.space.unmap(start, end - start);
-            vma::retire(&mut process.promesses, start, end);
-        }
-    }
+        borrowed.brk = addr;
+        addr as i64
+    };
 
-    process.brk = addr;
-    addr as i64
+    if let Some(retirement) = retirement {
+        execute_process_invalidation(&process, retirement.invalidation());
+        process.borrow_mut().space.finish_unmap(retirement);
+    }
+    result
 }
 
 
@@ -172,12 +212,16 @@ fn installe_vma(
     drapeaux: u64,
     backing: Backing,
     fixed: bool,
-) {
+) -> (Option<vmm::UnmapRetirement>, alloc::vec::Vec<usize>) {
     let fin = base + length;
-    if fixed {
-        process.space.unmap(base, length);
+    let (retirement, shared_nodes) = if fixed {
+        let shared_nodes = process.retire_partages(base, length);
+        let retirement = process.space.prepare_unmap(base, length);
         vma::retire(&mut process.promesses, base, fin);
-    }
+        (Some(retirement), shared_nodes)
+    } else {
+        (None, alloc::vec::Vec::new())
+    };
     vma::remplace(
         &mut process.promesses,
         Vma {
@@ -187,6 +231,7 @@ fn installe_vma(
             backing,
         },
     );
+    (retirement, shared_nodes)
 }
 
 /// `mmap`.
@@ -226,13 +271,6 @@ pub fn sys_mmap(
     };
     let fixed = flags & MAP_FIXED != 0;
 
-    if fixed {
-        let liberes = process.retire_partages(base, length);
-        for node in liberes {
-            partage::demappe(node);
-        }
-    }
-
     let drapeaux = prot_to_flags(prot);
 
     if flags & MAP_ANONYMOUS == 0 && fd >= 0 {
@@ -240,12 +278,7 @@ pub fn sys_mmap(
         if let Some(FdKind::Framebuffer) = fd_kind {
                 if let Some(ecran) = process.ecran {
                     partage::mappe(ecran.node);
-                    process.partages.push(task::Partage {
-                        base,
-                        length,
-                        node: ecran.node,
-                    });
-                    installe_vma(
+                    let (retirement, liberes) = installe_vma(
                         &mut process,
                         base,
                         length,
@@ -258,9 +291,15 @@ pub fn sys_mmap(
                         },
                         fixed,
                     );
+                    process.partages.push(task::Partage {
+                        base,
+                        length,
+                        node: ecran.node,
+                    });
                     let populate =
                         flags & MAP_POPULATE != 0 && prot != PROT_NONE;
                     drop(process);
+                    finish_mapping_replacement(&process_rc, retirement, &liberes);
                     if populate {
                         let mut page = base;
                         while page < base + length {
@@ -277,7 +316,7 @@ pub fn sys_mmap(
                     Some(phys) => phys,
                     None => return -errno::ENODEV,
                 };
-                installe_vma(
+                let (retirement, liberes) = installe_vma(
                     &mut process,
                     base,
                     length,
@@ -290,10 +329,12 @@ pub fn sys_mmap(
                     fixed,
                 );
                 drop(process);
+                finish_mapping_replacement(&process_rc, retirement, &liberes);
                 return base as i64;
         }
     }
 
+    let mut new_shared_node = None;
     let backing = if flags & MAP_ANONYMOUS != 0 {
         Backing::Zero
     } else {
@@ -308,11 +349,7 @@ pub fn sys_mmap(
         let file_size = total.saturating_sub(offset).min(length);
         if flags & MAP_SHARED != 0 {
             partage::mappe(node);
-            process.partages.push(task::Partage {
-                base,
-                length,
-                node,
-            });
+            new_shared_node = Some(node);
             Backing::SharedFile {
                 node,
                 mapping_start: base,
@@ -332,14 +369,11 @@ pub fn sys_mmap(
     if !fixed && !process.tient_sous_limite(length) {
         if let Backing::SharedFile { node, .. } = backing {
             partage::demappe(node);
-            process
-                .partages
-                .retain(|p| !(p.base == base && p.length == length));
         }
         return -errno::ENOMEM;
     }
 
-    installe_vma(
+    let (retirement, liberes) = installe_vma(
         &mut process,
         base,
         length,
@@ -347,9 +381,13 @@ pub fn sys_mmap(
         backing,
         fixed,
     );
+    if let Some(node) = new_shared_node {
+        process.partages.push(task::Partage { base, length, node });
+    }
 
     let populate = flags & MAP_POPULATE != 0 && prot != PROT_NONE;
     drop(process);
+    finish_mapping_replacement(&process_rc, retirement, &liberes);
 
     if populate {
         let mut page = base;
@@ -451,9 +489,7 @@ pub fn sys_munmap(addr: u64, length: u64) -> i64 {
 
     // Aucun RefCell borrow ne traverse cette fenetre. Le CPU cible peut donc
     // finir une #PF/IRQ, tandis que le handler IPI ACK sans jamais prendre BKL.
-    let depth = crate::kernel::smp_lock::suspend_for_schedule();
-    retirement.invalidation().execute();
-    crate::kernel::smp_lock::resume_after_schedule(depth);
+    execute_process_invalidation(&process, retirement.invalidation());
 
     process.borrow_mut().space.finish_unmap(retirement);
 
@@ -487,8 +523,8 @@ pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> i64 {
         return -errno::ENOMEM;
     }
 
-    let process = task::current_process();
-    let mut process = process.borrow_mut();
+    let process_rc = task::current_process();
+    let mut process = process_rc.borrow_mut();
 
     if !vma::protege(
         &mut process.promesses,
@@ -526,9 +562,7 @@ pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> i64 {
         .prepare_protect(addr, length, prot_to_flags(prot));
     drop(process);
     if let Some(invalidation) = invalidation {
-        let depth = crate::kernel::smp_lock::suspend_for_schedule();
-        invalidation.execute();
-        crate::kernel::smp_lock::resume_after_schedule(depth);
+        execute_process_invalidation(&process_rc, invalidation);
     }
     0
 }
@@ -632,27 +666,32 @@ pub fn sys_madvise(addr: u64, length: u64, advice: i32) -> i64 {
     };
 
     let process = task::current_process();
-    let mut process = process.borrow_mut();
-    if !vma::couvre(&process.promesses, addr, fin) {
-        return -errno::ENOMEM;
-    }
-
-    match advice {
-        MADV_DONTNEED | MADV_FREE => {
-            process.space.unmap(addr, length);
-            // La VMA reste : le prochain acces rematerialise la page.
-            0
+    let retirement = {
+        let mut borrowed = process.borrow_mut();
+        if !vma::couvre(&borrowed.promesses, addr, fin) {
+            return -errno::ENOMEM;
         }
-        MADV_NORMAL
-        | MADV_RANDOM
-        | MADV_SEQUENTIAL
-        | MADV_WILLNEED
-        | MADV_DONTFORK
-        | MADV_DOFORK
-        | MADV_HUGEPAGE
-        | MADV_NOHUGEPAGE => 0,
-        _ => -errno::EINVAL,
+        match advice {
+            // La VMA reste : le prochain accès rematérialise la page.
+            MADV_DONTNEED | MADV_FREE => {
+                Some(borrowed.space.prepare_unmap(addr, length))
+            }
+            MADV_NORMAL
+            | MADV_RANDOM
+            | MADV_SEQUENTIAL
+            | MADV_WILLNEED
+            | MADV_DONTFORK
+            | MADV_DOFORK
+            | MADV_HUGEPAGE
+            | MADV_NOHUGEPAGE => None,
+            _ => return -errno::EINVAL,
+        }
+    };
+    if let Some(retirement) = retirement {
+        execute_process_invalidation(&process, retirement.invalidation());
+        process.borrow_mut().space.finish_unmap(retirement);
     }
+    0
 }
 
 /// `msync` : repercute les ecritures d'un `MAP_SHARED` vers le fichier.

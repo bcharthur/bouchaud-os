@@ -346,7 +346,18 @@ fn peuple_page_loader(adresse: u64) -> bool {
 
                 stall_pf_phase(244, start);
                 if got != wanted || !p.space.write(start, &buffer[..got]) {
-                    p.space.unmap(page, crate::kernel::vmm::PAGE_SIZE);
+                    let retirement = p
+                        .space
+                        .prepare_unmap(page, crate::kernel::vmm::PAGE_SIZE);
+                    drop(p);
+                    debug_assert!(
+                        processus.try_borrow_mut().is_ok(),
+                        "page fault cleanup: Process encore emprunte"
+                    );
+                    let depth = smp_lock::suspend_for_schedule();
+                    retirement.invalidation().execute();
+                    smp_lock::resume_after_schedule(depth);
+                    processus.borrow_mut().space.finish_unmap(retirement);
                     return false;
                 }
             }
@@ -650,6 +661,23 @@ pub struct Task {
 static mut TASKS: Option<Vec<Box<Task>>> = None;
 /// Tous les processus vivants ou zombies.
 static mut PROCESSES: Option<Vec<Rc<RefCell<Process>>>> = None;
+
+/// Assertion de frontière SMP: suspendre le BKL autorise un autre CPU à
+/// installer un sibling et donc à consulter son Process. Aucun Ref/RefMut ne
+/// peut rester vivant à cet instant.
+#[cfg(debug_assertions)]
+pub(crate) fn debug_assert_no_process_borrows() {
+    unsafe {
+        if let Some(processes) = PROCESSES.as_ref() {
+            for process in processes.iter() {
+                debug_assert!(
+                    process.try_borrow_mut().is_ok(),
+                    "suspension BKL avec un Process encore emprunte"
+                );
+            }
+        }
+    }
+}
 
 const NO_TASK: usize = usize::MAX;
 const MAX_CPUS: usize = smp::MAX_CPUS;

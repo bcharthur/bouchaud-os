@@ -416,12 +416,6 @@ impl TlbInvalidation {
     }
 }
 
-fn execute_outside_bkl(invalidation: TlbInvalidation) {
-    let depth = crate::kernel::smp_lock::suspend_for_schedule();
-    invalidation.execute();
-    crate::kernel::smp_lock::resume_after_schedule(depth);
-}
-
 /// Frames detachees des PTE mais conservees jusqu'a la fin du shootdown.
 pub struct UnmapRetirement {
     invalidation: TlbInvalidation,
@@ -543,22 +537,22 @@ impl AddressSpace {
 
     /// Mappe `virt` (aligne page) sur la frame physique `phys`.
     pub fn map(&mut self, virt: u64, phys: u64, flags: u64) -> bool {
-        let mut replaced_present = false;
-        let ok = match self.entry_mut(virt, true) {
+        match self.entry_mut(virt, true) {
             Some(entry) => {
                 let old = *entry;
                 let new = (phys & ADDR_MASK) | flags | PTE_PRESENT;
+                // Un remplacement doit retirer l'ancienne PTE et attendre ses
+                // ACK avant de publier la nouvelle. Refuser ici est plus sûr
+                // qu'un remplacement silencieux sans invalidation en release.
+                if old & PTE_PRESENT != 0 && old != new {
+                    return false;
+                }
                 *entry = new;
                 flush(virt);
-                replaced_present = old & PTE_PRESENT != 0 && old != new;
                 true
             }
             None => false,
-        };
-        if replaced_present {
-            execute_outside_bkl(self.invalidation(virt & !(PAGE_SIZE - 1), PAGE_SIZE));
         }
-        ok
     }
 
     /// Alloue et mappe `len` octets a partir de `virt` (arrondi a la page).
@@ -605,15 +599,6 @@ impl AddressSpace {
         changed.then(|| self.invalidation(start, end.saturating_sub(start)))
     }
 
-    /// Compatibilite des constructeurs d'image et chemins MM internes. Les
-    /// syscalls concurrents utilisent les phases explicites prepare/execute.
-    pub fn protect(&mut self, virt: u64, len: u64, flags: u64) -> bool {
-        if let Some(invalidation) = self.prepare_protect(virt, len, flags) {
-            execute_outside_bkl(invalidation);
-        }
-        true
-    }
-
     /// Supprime le mapping d'une plage (munmap). Les PTE sont d'abord
     /// retirees partout, puis le shootdown TLB est ACKe, et seulement ensuite
     /// les frames sont rendues. Cet ordre interdit tout use-after-free TLB.
@@ -650,14 +635,6 @@ impl AddressSpace {
                 free_frame(phys);
             }
         }
-    }
-
-    /// Variante synchrone pour les chemins qui ne conservent aucune metadata
-    /// de processus a mettre a jour. L'attente ACK se fait toujours hors BKL.
-    pub fn unmap(&mut self, virt: u64, len: u64) {
-        let retirement = self.prepare_unmap(virt, len);
-        execute_outside_bkl(retirement.invalidation());
-        self.finish_unmap(retirement);
     }
 
     /// Traduit une adresse virtuelle utilisateur en adresse physique.

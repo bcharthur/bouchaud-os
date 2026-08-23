@@ -36,3 +36,18 @@ BKL.
 Les fautes de page utilisateur réactivent IF avant toute attente du verrou
 legacy. Même durant la migration du #PF vers un verrou MM fin, un CPU cible peut
 donc toujours traiter immédiatement le vecteur TLB.
+
+## Frontière `Process` / BKL
+
+Le retour runtime SMP4 a montré qu'une API `AddressSpace::unmap()` ne peut pas
+suspendre le BKL de façon cachée : son appelant peut encore détenir un
+`RefMut<Process>`. Toutes les mutations actives utilisent désormais uniquement
+les phases explicites `prepare_unmap`/`prepare_protect`, abandon de l'emprunt,
+`TlbInvalidation::execute`, puis `finish_unmap`. `brk` shrink, `MAP_FIXED`,
+`madvise`, `munmap`, `mprotect` et le nettoyage d'un fault fichier suivent cette
+frontière.
+
+En debug, toute suspension effective du BKL vérifie que chaque `Process` peut
+être emprunté exclusivement. L'assertion signale ainsi le callsite qui laisse
+fuir un `Ref`/`RefMut`, avant qu'un autre CPU ne panique plus tard dans
+`scheduler::install`.

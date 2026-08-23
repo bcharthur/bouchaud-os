@@ -283,6 +283,9 @@ pub fn suspend_for_schedule() -> usize {
         return 0;
     }
 
+    #[cfg(debug_assertions)]
+    crate::kernel::task::debug_assert_no_process_borrows();
+
     debug_assert_eq!(
         OWNER.load(Ordering::Acquire),
         mine,

@@ -407,7 +407,15 @@ pub fn load(
                     }
                 }
 
-                space.protect(page_start, page_end - page_start, page_flags(ph.flags));
+                if let Some(invalidation) = space.prepare_protect(
+                    page_start,
+                    page_end - page_start,
+                    page_flags(ph.flags),
+                ) {
+                    // L'espace ELF est encore inactif: execute() ne cible
+                    // aucun CPU et n'attend donc jamais sous le borrow appelant.
+                    invalidation.execute();
+                }
                 image_end = image_end.max(page_end);
             }
             PT_DYNAMIC | PT_GNU_STACK => {}
