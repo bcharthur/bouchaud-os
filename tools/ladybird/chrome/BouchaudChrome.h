@@ -310,6 +310,14 @@ struct State {
     bool handshake_done { false };
     bool frame_seen { false };
     bool frame_after_wheel_pending { false };
+    bool wheel_input_pending { false };
+
+    // Rendu M11: compteurs cumulatifs, journalises par paquets de 16 trames.
+    u64 chrome_full_frames { 0 };
+    u64 chrome_toolbar_frames { 0 };
+    u64 page_frames { 0 };
+    u64 chrome_pixels_written { 0 };
+    u64 published_frames { 0 };
 
     // Rappels vers WebContent. Poses par `ConnectionFromClient::bouchaud_m11_start`.
     Function<void(Web::MouseEvent)> on_mouse_event;
@@ -490,9 +498,34 @@ inline void send_title()
     send_message(Genre::SetTitle, text.characters(), static_cast<u32>(text.length()));
 }
 
-inline void send_frame_ready()
+struct DamageRect {
+    int x { 0 };
+    int y { 0 };
+    int width { 0 };
+    int height { 0 };
+};
+
+inline void log_render_stats_if_due()
 {
     auto& s = state();
+    if (s.published_frames == 0 || (s.published_frames % 16) != 0)
+        return;
+    outln("[ladybird-bouchaud] M11_RENDER_STATS full={} toolbar={} page={} pixels={}",
+        s.chrome_full_frames, s.chrome_toolbar_frames, s.page_frames, s.chrome_pixels_written);
+}
+
+inline void send_frame_ready(DamageRect damage)
+{
+    auto& s = state();
+    // Ne jamais publier un rectangle hors surface, meme si une future taille
+    // de toolbar devient dynamique.
+    damage.x = clamp(damage.x, 0, s.surface_width);
+    damage.y = clamp(damage.y, 0, s.surface_height);
+    damage.width = clamp(damage.width, 0, s.surface_width - damage.x);
+    damage.height = clamp(damage.height, 0, s.surface_height - damage.y);
+    if (damage.width == 0 || damage.height == 0)
+        return;
+
     u8 frame[24] {};
     auto put32 = [](u8* out, u32 value) {
         out[0] = static_cast<u8>(value);
@@ -502,13 +535,15 @@ inline void send_frame_ready()
     };
     put32(frame + 0, FENETRE);
     put32(frame + 4, 0); // tampon
-    put32(frame + 8, 0); // degat x
-    put32(frame + 12, 0); // degat y
-    put32(frame + 16, static_cast<u32>(s.surface_width));
-    put32(frame + 20, static_cast<u32>(s.surface_height));
+    put32(frame + 8, static_cast<u32>(damage.x));
+    put32(frame + 12, static_cast<u32>(damage.y));
+    put32(frame + 16, static_cast<u32>(damage.width));
+    put32(frame + 20, static_cast<u32>(damage.height));
     if (!send_message(Genre::FrameReady, frame, sizeof(frame)))
         warnln("[ladybird-bouchaud] M11_FRAME_READY_FAILED errno={}", errno);
-    if (s.frame_after_wheel_pending) {
+    ++s.published_frames;
+    log_render_stats_if_due();
+    if (s.frame_after_wheel_pending && damage.y == 0 && damage.height == s.surface_height) {
         s.frame_after_wheel_pending = false;
         outln("[ladybird-bouchaud] M11_FRAME_AFTER_SCROLL");
     }
@@ -701,7 +736,7 @@ inline void draw_toolbar(Canvas const& canvas)
 /// Ne demande rien au moteur : c'est une copie de pixels deja rasterises.
 /// C'est ce qui permet a une lettre tapee dans la barre d'adresse de ne pas
 /// declencher une mise en page complete du document.
-inline bool compose()
+inline bool compose_full()
 {
     auto& s = state();
     if (s.surface_fd < 0 || s.gui_fd < 0 || s.surface_width <= 0 || s.surface_height <= 0) {
@@ -753,13 +788,51 @@ inline bool compose()
     munmap(mapped, surface_bytes);
 
     send_handshake();
-    send_frame_ready();
+    ++s.chrome_full_frames;
+    ++s.page_frames;
+    s.chrome_pixels_written += static_cast<u64>(s.surface_width) * static_cast<u64>(s.surface_height)
+        + static_cast<u64>(painted);
+    send_frame_ready({ 0, 0, s.surface_width, s.surface_height });
 
     if (!s.frame_seen) {
         s.frame_seen = true;
         outln("[ladybird-bouchaud] M11_FIRST_FRAME pixels={} viewport={}x{}",
             painted, s.surface_width, page_height);
     }
+    return true;
+}
+
+/// Met a jour uniquement les pixels du chrome. Les pixels de page resident deja
+/// dans la surface MAP_SHARED et ne sont ni effaces ni recopies.
+inline bool compose_toolbar_only()
+{
+    auto& s = state();
+    if (s.surface_fd < 0 || s.gui_fd < 0 || s.surface_width <= 0 || s.surface_height <= 0)
+        return false;
+
+    auto stride_bytes = static_cast<size_t>(s.surface_stride);
+    auto height_rows = static_cast<size_t>(s.surface_height);
+    if (height_rows != 0 && stride_bytes > SIZE_MAX / height_rows)
+        return false;
+    auto surface_bytes = stride_bytes * height_rows;
+    if (surface_bytes == 0)
+        return false;
+
+    auto* mapped = mmap(nullptr, surface_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, s.surface_fd, 0);
+    if (mapped == MAP_FAILED) {
+        warnln("[ladybird-bouchaud] M11_TOOLBAR_MMAP_FAILED errno={} bytes={}", errno, surface_bytes);
+        return false;
+    }
+
+    Canvas canvas { static_cast<u8*>(mapped), s.surface_width, s.surface_height, s.surface_stride };
+    draw_toolbar(canvas);
+    munmap(mapped, surface_bytes);
+
+    send_handshake();
+    ++s.chrome_toolbar_frames;
+    auto damage_height = min(toolbar_height, s.surface_height);
+    s.chrome_pixels_written += static_cast<u64>(s.surface_width) * static_cast<u64>(damage_height);
+    send_frame_ready({ 0, 0, s.surface_width, damage_height });
     return true;
 }
 
@@ -771,12 +844,15 @@ inline bool compose()
 inline bool present(Gfx::ShareableBitmap const& screenshot)
 {
     auto& s = state();
-    if (screenshot.is_valid() && screenshot.bitmap())
+    auto const valid = screenshot.is_valid() && screenshot.bitmap();
+    if (s.frame_after_wheel_pending)
+        outln("[ladybird-bouchaud] WEB_SCREENSHOT_READY after_wheel=1 valid={}", valid ? 1 : 0);
+    if (valid)
         s.last_page = screenshot;
     // La page vient d'etre recomposee : une recomposition de chrome encore en
     // attente serait redondante.
     s.chrome_frames_pending = 0;
-    return compose();
+    return compose_full();
 }
 
 // ----------------------------------------------------------------------------
@@ -894,6 +970,8 @@ inline void dispatch_mouse(Web::MouseEvent::Type type, int x, int y, unsigned bu
     event.wheel_delta_y = wheel_y;
     event.click_count = type == Web::MouseEvent::Type::MouseDown ? 1 : 0;
     s.on_mouse_event(move(event));
+    if (type == Web::MouseEvent::Type::MouseWheel)
+        outln("[ladybird-bouchaud] WEB_WHEEL_CALLBACK queued=1");
     // M11_PAGE_INPUT_NO_CHROME_COMPOSE:
     // Le pointeur appartient a la page. Si :hover/scroll/clic change le rendu,
     // LibWeb invalide et produit lui-meme une nouvelle frame. Recomposer ici
@@ -989,9 +1067,10 @@ inline void handle_wheel(int delta, int x, int y)
     auto page_y = y - page_origin_y();
     auto wheel_y = static_cast<double>(-delta) * 54.0;
     outln("[ladybird-bouchaud] WEB_WHEEL_DISPATCH viewport_x={} viewport_y={} delta_y={}", x, page_y, wheel_y);
+    s.wheel_input_pending = true;
+    s.frame_after_wheel_pending = true;
     dispatch_mouse(Web::MouseEvent::Type::MouseWheel, x, page_y, 0, s.last_buttons,
         wheel_y);
-    s.frame_after_wheel_pending = true;
 }
 
 inline void dispatch_key_to_page(Web::UIEvents::KeyCode code, u32 code_point, bool insert_text)
@@ -1233,6 +1312,20 @@ inline void drain()
         s.incoming.remove(0, offset);
 }
 
+inline bool wheel_input_pending()
+{
+    return state().wheel_input_pending;
+}
+
+inline void wheel_handled_and_capture_requested(int result)
+{
+    auto& s = state();
+    if (!s.wheel_input_pending)
+        return;
+    s.wheel_input_pending = false;
+    outln("[ladybird-bouchaud] WEB_WHEEL_HANDLED result={} capture=scheduled", result);
+}
+
 /// Un tic du minuteur : lire les entrees, puis recomposer si le chrome a change.
 ///
 /// Ce que ce tic ne fait plus : reclamer une trame de page. Il le faisait a
@@ -1253,7 +1346,7 @@ inline void tick()
         return;
 
     --s.chrome_frames_pending;
-    compose();
+    compose_toolbar_only();
 }
 
 // ----------------------------------------------------------------------------

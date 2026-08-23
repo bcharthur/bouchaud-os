@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import re
 from collections import defaultdict
+from pathlib import Path
 
 KV = re.compile(r"([A-Za-z_]+)=((?:\[[^]]*\])|(?:[^ ]+))")
 
@@ -15,13 +16,32 @@ def number(value, default=0.0):
     try: return float(value)
     except (TypeError, ValueError): return default
 
+def _decode_log(path):
+    raw = Path(path).read_bytes()
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw.decode("utf-16")
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw.decode("utf-8-sig")
+    # Windows PowerShell 5 peut produire UTF-16LE sans BOM après certaines
+    # concaténations. Un NUL sur les octets impairs est un signal fiable pour
+    # nos lignes ASCII de télémétrie.
+    probe = raw[:256]
+    if probe and len(probe) >= 4 and probe[1::2].count(0) * 4 >= len(probe):
+        return raw.decode("utf-16-le")
+    return raw.decode("utf-8", errors="replace")
+
 def parse(path):
     smp, proc, perf = [], [], []
-    with open(path, encoding="utf-8", errors="replace") as stream:
-        for line in stream:
-            if "[SMP-SAMPLE]" in line: smp.append(fields(line))
-            elif "[PROC-SAMPLE]" in line: proc.append(fields(line))
-            elif "PERF_" in line: perf.append((line.strip(), fields(line)))
+    text = _decode_log(path)
+    for line_number, line in enumerate(text.splitlines(), 1):
+        if "[SMP-SAMPLE]" in line:
+            sample = fields(line)
+            missing = {"v", "t_ns", "window_ns", "load"} - sample.keys()
+            if missing:
+                raise ValueError(f"SMP-SAMPLE ligne {line_number} invalide: champs manquants {sorted(missing)}")
+            smp.append(sample)
+        elif "[PROC-SAMPLE]" in line: proc.append(fields(line))
+        elif "PERF_" in line: perf.append((line.strip(), fields(line)))
     return smp, proc, perf
 
 def summarize(path):

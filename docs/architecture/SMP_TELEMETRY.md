@@ -34,3 +34,11 @@ la même fenêtre que le runtime processus.
 `python tools/perf/analyze-smp-log.py run.log` produit les taux par seconde,
 l'imbalance, le BKL, faults/TLB et un tableau processus. `compare-smp-logs.py`
 affiche baseline, candidat et delta sans porter de jugement automatique.
+
+## Encodages Windows
+
+Le lecteur détecte UTF-8, UTF-8 avec BOM, UTF-16 avec BOM et UTF-16LE sans BOM,
+puis utilise `splitlines()` pour accepter LF et CRLF. Si le texte décodé contient
+`[SMP-SAMPLE]` mais qu'aucun sample n'est produit, il lève une erreur au lieu
+d'afficher un rapport silencieusement nul. Les quatre variantes sont couvertes
+par `tools/perf/test_smp_log.py`.
