@@ -78,6 +78,7 @@ impl Drive {
 /// Nombre de secteurs de chaque disque, 0 s'il est absent.
 static mut SECTORS: [u64; 2] = [0, 0];
 static mut PROBED: bool = false;
+static CONTROLLER: crate::kernel::sync::SpinLock<()> = crate::kernel::sync::SpinLock::new(());
 
 /// Attend que le controleur ne soit plus occupe. `false` en cas de blocage.
 /// Attend la fin de l'occupation du controleur.
@@ -248,6 +249,7 @@ fn identify(drive: Drive) -> u64 {
 
 /// Detecte les disques presents. Idempotent.
 pub fn probe() {
+    let _controller = CONTROLLER.lock();
     if unsafe { PROBED } {
         return;
     }
@@ -256,6 +258,7 @@ pub fn probe() {
         SECTORS[1] = identify(Drive::Slave);
         PROBED = true;
     }
+    drop(_controller);
     let (master, slave) = capacities();
     crate::kernel::dmesg::log_fmt(format_args!(
         "ata: hda {} secteurs ({} Mio), hdb {} secteurs ({} Mio)",
@@ -293,6 +296,7 @@ pub fn read(drive: Drive, lba: u64, count: usize, out: &mut [u8]) -> usize {
     if !present(drive) || count == 0 {
         return 0;
     }
+    let _controller = CONTROLLER.lock();
     let mut done = 0usize;
     while done < count {
         let batch = core::cmp::min(count - done, 256);
@@ -385,6 +389,7 @@ pub fn write(drive: Drive, lba: u64, count: usize, data: &[u8]) -> usize {
     if !present(drive) || count == 0 {
         return 0;
     }
+    let _controller = CONTROLLER.lock();
     let mut done = 0usize;
     while done < count {
         let batch = core::cmp::min(count - done, 256);

@@ -163,6 +163,10 @@ extern "x86-interrupt" fn page_fault_handler(stack: InterruptStackFrame, code: P
         ) {
             crate::kernel::task::stall_pf_done(addr.as_u64());
             crate::kernel::task::stall_site_clear();
+            // execve may have retired this sibling while its fault loader was
+            // outside the BKL doing I/O. Do not return it to the old user CR3.
+            let _kernel = crate::kernel::smp_lock::enter();
+            crate::kernel::task::retire_current_if_zombie();
             return;
         }
         crate::kernel::task::stall_pf_fail(addr.as_u64());

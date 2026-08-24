@@ -95,6 +95,7 @@ pub fn logical_len(node: usize) -> usize {
     if let Some(size) = disk_len(node) {
         return size;
     }
+    let _kernel = crate::kernel::smp_lock::enter();
     crate::fs::ramfs::fs().nodes[node].content.len()
 }
 
@@ -108,6 +109,7 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
     let extent = match EXTENTS.lock().iter().find(|extent| extent.node == node).copied() {
         Some(extent) => extent,
         None => {
+            let _kernel = crate::kernel::smp_lock::enter();
             let fs = crate::fs::ramfs::fs();
             let content = &fs.nodes[node].content;
             if offset >= content.len() {

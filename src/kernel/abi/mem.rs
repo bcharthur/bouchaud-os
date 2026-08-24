@@ -21,6 +21,7 @@
 //! video, empruntees telles quelles.
 
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::kernel::abi::errno;
 use crate::kernel::fd::FdKind;
@@ -28,6 +29,8 @@ use crate::kernel::partage;
 use crate::kernel::task;
 use crate::kernel::vma::{self, Backing, Vma};
 use crate::kernel::vmm::{self, PAGE_SIZE};
+
+static CLEAN_WRITE_REJECTS: AtomicU64 = AtomicU64::new(0);
 
 fn execute_process_invalidation(
     _process: &Arc<task::Process>,
@@ -118,20 +121,26 @@ pub fn sys_brk(addr: u64) -> i64 {
                         backing: Backing::Zero,
                     },
                 );
+                borrowed.bump_mapping_epoch();
             }
         } else if addr < current {
             let start = (addr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
             let end = (current + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
             if end > start {
                 vma::retire(&mut borrowed.promesses, start, end);
-                retirement = Some(borrowed.space.prepare_unmap(start, end - start));
+                borrowed.bump_mapping_epoch();
+                retirement = Some((
+                    borrowed.space.prepare_unmap(start, end - start),
+                    borrowed.space.pml4(), borrowed.mapping_epoch, start, end - start,
+                ));
             }
         }
         borrowed.brk = addr;
         addr as i64
     };
 
-    if let Some(retirement) = retirement {
+    if let Some((retirement, pml4, epoch, start, len)) = retirement {
+        task::retire_stale_fault_range(pml4, epoch, start, len);
         execute_process_invalidation(&process, retirement.invalidation());
         process.mm.lock().space.finish_unmap(retirement);
     }
@@ -211,6 +220,7 @@ fn installe_vma(
     fixed: bool,
 ) -> (Option<vmm::UnmapRetirement>, alloc::vec::Vec<usize>, alloc::vec::Vec<crate::kernel::clean_page_cache::Key>) {
     let fin = base + length;
+    process.bump_mapping_epoch();
     let (retirement, shared_nodes, clean_pages) = if fixed {
         let shared_nodes = process.retire_partages(base, length);
         let clean_pages = process.retire_clean_pages(base, length);
@@ -297,7 +307,9 @@ pub fn sys_mmap(
                     });
                     let populate =
                         flags & MAP_POPULATE != 0 && prot != PROT_NONE;
+                    let (pml4, epoch) = (process.space.pml4(), process.mapping_epoch);
                     drop(process);
+                    if fixed { task::retire_stale_fault_range(pml4, epoch, base, length); }
                     finish_mapping_replacement(&process_rc, retirement, &liberes, &clean_liberes);
                     if populate {
                         let mut page = base;
@@ -327,7 +339,9 @@ pub fn sys_mmap(
                     },
                     fixed,
                 );
+                let (pml4, epoch) = (process.space.pml4(), process.mapping_epoch);
                 drop(process);
+                if fixed { task::retire_stale_fault_range(pml4, epoch, base, length); }
                 finish_mapping_replacement(&process_rc, retirement, &liberes, &clean_liberes);
                 return base as i64;
         }
@@ -346,6 +360,9 @@ pub fn sys_mmap(
         let total = crate::fs::backing::logical_len(node) as u64;
         let file_size = total.saturating_sub(offset).min(length);
         if flags & MAP_SHARED != 0 {
+            if prot & PROT_WRITE != 0 && crate::fs::backing::is_disk_backed(node) {
+                return -errno::EACCES;
+            }
             partage::mappe(node);
             new_shared_node = Some(node);
             Backing::SharedFile {
@@ -384,7 +401,9 @@ pub fn sys_mmap(
     }
 
     let populate = flags & MAP_POPULATE != 0 && prot != PROT_NONE;
+    let (pml4, epoch) = (process.space.pml4(), process.mapping_epoch);
     drop(process);
+    if fixed { task::retire_stale_fault_range(pml4, epoch, base, length); }
     finish_mapping_replacement(&process_rc, retirement, &liberes, &clean_liberes);
 
     if populate {
@@ -477,14 +496,19 @@ pub fn sys_munmap(addr: u64, length: u64) -> i64 {
     };
 
     let process = task::current_process();
-    let (retirement, liberes, clean_liberes) = {
+    let (retirement, liberes, clean_liberes, pml4, epoch) = {
         let mut process = process.mm.lock();
         let liberes = process.retire_partages(addr, length);
         let clean_liberes = process.retire_clean_pages(addr, length);
         vma::retire(&mut process.promesses, addr, fin);
+        process.bump_mapping_epoch();
         let retirement = process.space.prepare_unmap(addr, length);
-        (retirement, liberes, clean_liberes)
+        let pml4 = process.space.pml4();
+        let epoch = process.mapping_epoch;
+        (retirement, liberes, clean_liberes, pml4, epoch)
     };
+
+    task::retire_stale_fault_range(pml4, epoch, addr, length);
 
     // No Mm guard crosses this window; remote faults and the IPI handler can progress.
     execute_process_invalidation(&process, retirement.invalidation());
@@ -531,8 +555,20 @@ pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> i64 {
     // writable in place: that would grant one process writes into every other
     // address space mapping the same ELF page.
     if prot & PROT_WRITE != 0 && process.has_clean_pages(addr, length) {
+        let count = CLEAN_WRITE_REJECTS.fetch_add(1, Ordering::Relaxed) + 1;
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "[MM-CLEAN-WRITE-REJECT] pid={} addr={:#x} len={} count={}",
+            process_rc.pid, addr, length, count,
+        ));
         return -errno::EACCES;
     }
+    if prot & PROT_WRITE != 0 && process.promesses.iter().any(|vma| {
+        vma.debut < fin && vma.fin > addr && matches!(vma.backing,
+            Backing::SharedFile { node, .. } if crate::fs::backing::is_disk_backed(node))
+    }) {
+        return -errno::EACCES;
+    }
+    process.bump_mapping_epoch();
 
     if !vma::protege(
         &mut process.promesses,
@@ -568,7 +604,9 @@ pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> i64 {
     let invalidation = process
         .space
         .prepare_protect(addr, length, prot_to_flags(prot));
+    let (pml4, epoch) = (process.space.pml4(), process.mapping_epoch);
     drop(process);
+    task::retire_stale_fault_range(pml4, epoch, addr, length);
     if let Some(invalidation) = invalidation {
         execute_process_invalidation(&process_rc, invalidation);
     }

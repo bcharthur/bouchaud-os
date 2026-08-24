@@ -132,28 +132,31 @@ enum FaultPageState {
     Loading,
     Present,
     Failed,
+    Retired,
 }
 
 struct FaultPage {
     pml4: u64,
     page: u64,
+    epoch: u64,
     state: SpinLock<FaultPageState>,
     waiters: crate::kernel::sync::WaitQueue,
 }
 
 static FAULT_PAGES: SpinLock<Vec<Arc<FaultPage>>> = SpinLock::new(Vec::new());
 
-fn fault_page(pml4: u64, page: u64) -> Arc<FaultPage> {
+fn fault_page(pml4: u64, page: u64, epoch: u64) -> Arc<FaultPage> {
     let mut pages = FAULT_PAGES.lock();
     if let Some(entry) = pages
         .iter()
-        .find(|entry| entry.pml4 == pml4 && entry.page == page)
+        .find(|entry| entry.pml4 == pml4 && entry.page == page && entry.epoch == epoch)
     {
         return Arc::clone(entry);
     }
     let entry = Arc::new(FaultPage {
         pml4,
         page,
+        epoch,
         state: SpinLock::new(FaultPageState::Missing),
         waiters: crate::kernel::sync::WaitQueue::new(),
     });
@@ -166,7 +169,31 @@ fn forget_fault_page(entry: &Arc<FaultPage>) {
 }
 
 pub fn forget_fault_space(pml4: u64) {
-    FAULT_PAGES.lock().retain(|entry| entry.pml4 != pml4);
+    retire_fault_records(|entry| entry.pml4 == pml4);
+}
+
+pub fn retire_stale_fault_range(pml4: u64, current_epoch: u64, start: u64, len: u64) {
+    let end = start.saturating_add(len);
+    retire_fault_records(|entry| entry.pml4 == pml4 && entry.epoch != current_epoch
+        && entry.page >= start && entry.page < end);
+}
+
+fn retire_fault_records(mut predicate: impl FnMut(&FaultPage) -> bool) {
+    let retired = {
+        let mut registry = FAULT_PAGES.lock();
+        let mut retired = Vec::new();
+        registry.retain(|entry| {
+            if predicate(entry) {
+                retired.push(Arc::clone(entry));
+                false
+            } else { true }
+        });
+        retired
+    };
+    for entry in retired {
+        *entry.state.lock() = FaultPageState::Retired;
+        entry.waiters.wake_all();
+    }
 }
 
 /// Peuple a la demande une page promise.
@@ -193,8 +220,12 @@ pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> bool {
     };
 
     let page = adresse & !(crate::kernel::vmm::PAGE_SIZE - 1);
+    let (fault_pml4, fault_epoch) = {
+        let mm = processus.mm.lock();
+        (mm.space.pml4(), mm.mapping_epoch)
+    };
+    let record = fault_page(fault_pml4, page, fault_epoch);
     loop {
-        let record = fault_page(crate::kernel::vmm::current_pml4(), page);
         let mut state = record.state.lock();
         match *state {
             FaultPageState::Loading => {
@@ -216,16 +247,19 @@ pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> bool {
                 *state = FaultPageState::Loading;
                 break;
             }
-            FaultPageState::Failed => return false,
+            FaultPageState::Failed | FaultPageState::Retired => return false,
         }
     }
 
-    let result = peuple_page_loader(&processus, adresse);
-    let record = fault_page(crate::kernel::vmm::current_pml4(), page);
-    *record.state.lock() = if result {
-        FaultPageState::Present
-    } else {
-        FaultPageState::Failed
+    let loaded = peuple_page_loader(&processus, adresse, fault_pml4, fault_epoch);
+    let result = {
+        let mut state = record.state.lock();
+        if *state == FaultPageState::Retired {
+            false
+        } else {
+            *state = if loaded { FaultPageState::Present } else { FaultPageState::Failed };
+            loaded
+        }
     };
     record.waiters.wake_all();
     if !result {
@@ -234,13 +268,16 @@ pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> bool {
     result
 }
 
-fn peuple_page_loader(processus: &Arc<Process>, adresse: u64) -> bool {
+fn peuple_page_loader(processus: &Arc<Process>, adresse: u64, fault_pml4: u64, fault_epoch: u64) -> bool {
 
     stall_pf_phase(210, adresse);
     stall_pf_phase(211, adresse);
     let mut p = processus.mm.lock();
     let page = adresse & !(crate::kernel::vmm::PAGE_SIZE - 1);
     stall_pf_phase(212, page);
+    if p.space.pml4() != fault_pml4 || p.mapping_epoch != fault_epoch {
+        return false;
+    }
 
     let effective = match crate::kernel::vma::trouve(&p.promesses, page) {
         Some(region) => region,
@@ -303,6 +340,9 @@ fn peuple_page_loader(processus: &Arc<Process>, adresse: u64) -> bool {
                 None => return false,
             };
             let mut p = processus.mm.lock();
+            if p.space.pml4() != fault_pml4 || p.mapping_epoch != fault_epoch {
+                return false;
+            }
             let Some(current) = crate::kernel::vma::trouve(&p.promesses, page) else {
                 return false;
             };
@@ -347,6 +387,12 @@ fn peuple_page_loader(processus: &Arc<Process>, adresse: u64) -> bool {
             if let Some(key) = clean_key {
                 if let Some(frame) = crate::kernel::clean_page_cache::acquire(key) {
                     let mut current_mm = processus.mm.lock();
+                    if current_mm.space.pml4() != fault_pml4
+                        || current_mm.mapping_epoch != fault_epoch
+                    {
+                        crate::kernel::clean_page_cache::release(key);
+                        return false;
+                    }
                     let valid = crate::kernel::vma::trouve(&current_mm.promesses, page)
                         .map(|current| current.backing == effective.backing
                             && current.drapeaux == effective.drapeaux)
@@ -365,6 +411,9 @@ fn peuple_page_loader(processus: &Arc<Process>, adresse: u64) -> bool {
             }
 
             let mut p = processus.mm.lock();
+            if p.space.pml4() != fault_pml4 || p.mapping_epoch != fault_epoch {
+                return false;
+            }
             if !p.space.map_alloc(
                 page,
                 crate::kernel::vmm::PAGE_SIZE,
@@ -422,7 +471,8 @@ fn peuple_page_loader(processus: &Arc<Process>, adresse: u64) -> bool {
                     // A concurrent munmap/MAP_FIXED/exec may have replaced the
                     // promise while disk I/O was in progress. Never publish
                     // old bytes into the replacement mapping.
-                    if !mm.promesses.iter().any(|current| *current == region) {
+                    if mm.space.pml4() != fault_pml4 || mm.mapping_epoch != fault_epoch
+                        || !mm.promesses.iter().any(|current| *current == region) {
                         return false;
                     }
                     let written = got == wanted && mm.space.write(start, &buffer[..got]);
@@ -536,6 +586,7 @@ pub struct MmState {
     pub limite_as: u64,
     pub promesses: Vec<Promesse>,
     pub clean_pages: Vec<CleanPageMapping>,
+    pub mapping_epoch: u64,
 }
 
 pub struct Mm {
@@ -551,17 +602,22 @@ impl Mm {
         }
     }
     pub fn lock(&self) -> SpinLockGuard<'_, MmState> { self.inner.lock() }
-    pub fn refresh_activation(&self) {
-        let identity = self.inner.lock().space.identity();
-        *self.activation.lock() = identity;
-    }
     pub fn activate(&self) {
-        let identity = Arc::clone(&self.activation.lock());
-        unsafe { identity.activate(); }
+        loop {
+            let identity = Arc::clone(&self.activation.lock());
+            if unsafe { identity.try_activate() } {
+                return;
+            }
+            core::hint::spin_loop();
+        }
     }
     pub fn mark_inactive(&self, cpu: usize) {
         let identity = Arc::clone(&self.activation.lock());
         identity.mark_inactive(cpu);
+    }
+
+    pub fn replace_activation(&self, identity: Arc<crate::kernel::vmm::AddressSpaceIdentity>) {
+        *self.activation.lock() = identity;
     }
 }
 
@@ -637,6 +693,9 @@ pub struct CleanPageMapping {
 }
 
 impl MmState {
+    pub fn bump_mapping_epoch(&mut self) {
+        self.mapping_epoch = self.mapping_epoch.wrapping_add(1).max(1);
+    }
     pub fn retire_clean_pages(&mut self, addr: u64, len: u64) -> Vec<crate::kernel::clean_page_cache::Key> {
         let fin = addr.saturating_add(len);
         let mut keys = Vec::new();
@@ -743,10 +802,20 @@ impl Drop for Process {
     /// mort brutale — un `SIGKILL`, une faute de page fatale, un `exit` sans
     /// menage. Sans lui, tuer un renderer suffirait a faire fuir ses surfaces.
     fn drop(&mut self) {
-        let mut mm = self.mm.lock();
-        forget_fault_space(mm.space.pml4());
-        mm.release_clean_pages();
-        mm.relache_partages();
+        let (pml4, clean, shared) = {
+            let mut mm = self.mm.lock();
+            let pml4 = mm.space.pml4();
+            let clean = core::mem::take(&mut mm.clean_pages);
+            let shared = core::mem::take(&mut mm.partages);
+            (pml4, clean, shared)
+        };
+        forget_fault_space(pml4);
+        for mapping in clean {
+            crate::kernel::clean_page_cache::release(mapping.key);
+        }
+        for mapping in shared {
+            crate::kernel::partage::demappe(mapping.node);
+        }
     }
 }
 
@@ -2461,6 +2530,15 @@ pub fn terminate_sibling_threads() {
     }
 }
 
+/// Called with the BKL immediately before returning from a syscall. An exec
+/// may have retired this sibling while it ran an audited BKL-bypass syscall.
+pub fn retire_current_if_zombie() {
+    if in_user_task() && current().state == TaskState::Zombie {
+        schedule();
+        panic!("zombie task resumed after exec quiescence");
+    }
+}
+
 /// Reveille les taches d'un processus qui dorment, pour qu'elles constatent
 /// un signal en attente.
 pub fn wake_for_signal(pid: u32) {
@@ -3297,7 +3375,7 @@ pub fn new_process(name: &str, cwd: usize) -> Option<Arc<Process>> {
         resource_group_name: name.to_string(),
         mm: Arc::new(Mm::new(MmState { space, brk_start: 0, brk: 0,
             mmap_next: crate::kernel::vmm::user_mmap_base(), partages: Vec::new(),
-            limite_as: 0, promesses: Vec::new(), clean_pages: Vec::new() })),
+            limite_as: 0, promesses: Vec::new(), clean_pages: Vec::new(), mapping_epoch: 1 })),
         files: Arc::new(FileTable::new(FdTable::new())),
         metadata: SpinLock::new(ProcessMetadata { name: name.to_string(), cwd,
             uid: crate::users::session().uid() as u32,

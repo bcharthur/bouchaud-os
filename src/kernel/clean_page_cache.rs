@@ -7,7 +7,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::kernel::sync::{SpinLock, WaitQueue};
 use crate::kernel::vmm::{self, PAGE_SIZE};
 
-const MAX_PAGES: usize = 2048;
+/// Maximum number of reclaimable (zero-mapping) pages. Live mapped entries are
+/// not evictable and may exceed this number by design.
+const MAX_RECLAIMABLE_PAGES: usize = 2048;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Key {
@@ -39,7 +41,7 @@ pub fn acquire(key: Key) -> Option<u64> {
             let mut state = entry.state.lock();
             match *state {
                 State::Present { frame, mappings } => {
-                    *state = State::Present { frame, mappings: mappings + 1 };
+                    *state = State::Present { frame, mappings: mappings.checked_add(1).expect("clean cache ref overflow") };
                     HITS.fetch_add(1, Ordering::Relaxed);
                     if mappings != 0 { SHARED_MAPS.fetch_add(1, Ordering::Relaxed); }
                     return Some(frame);
@@ -48,7 +50,7 @@ pub fn acquire(key: Key) -> Option<u64> {
                 State::Loading => (Arc::clone(entry), false, None),
             }
         } else {
-            let evicted = if cache.len() >= MAX_PAGES {
+            let evicted = if cache.len() >= MAX_RECLAIMABLE_PAGES {
                 cache.iter().position(|entry| matches!(
                     *entry.state.lock(), State::Present { mappings: 0, .. } | State::Failed
                 )).map(|index| cache.swap_remove(index))
@@ -63,7 +65,17 @@ pub fn acquire(key: Key) -> Option<u64> {
         }
     };
     if let Some(old) = evicted {
-        if let State::Present { frame, mappings: 0 } = *old.state.lock() {
+        let frame = {
+            let mut state = old.state.lock();
+            match *state {
+                State::Present { frame, mappings: 0 } => {
+                    *state = State::Failed;
+                    Some(frame)
+                }
+                _ => None,
+            }
+        };
+        if let Some(frame) = frame {
             vmm::free_frame(frame);
         }
     }
@@ -74,7 +86,13 @@ pub fn acquire(key: Key) -> Option<u64> {
             let dst = crate::kernel::memory::phys_to_virt(frame);
             let bytes = unsafe { core::slice::from_raw_parts_mut(dst, PAGE_SIZE as usize) };
             let got = crate::fs::backing::read_at(key.node, key.offset as usize, bytes);
-            if got == 0 { vmm::free_frame(frame); None } else { Some(frame) }
+            if got == PAGE_SIZE as usize
+                && crate::fs::backing::generation(key.node) == Some(key.generation) {
+                Some(frame)
+            } else {
+                vmm::free_frame(frame);
+                None
+            }
         });
         *entry.state.lock() = match result {
             Some(frame) => State::Present { frame, mappings: 1 },
@@ -89,7 +107,7 @@ pub fn acquire(key: Key) -> Option<u64> {
         let mut state = entry.state.lock();
         match *state {
             State::Present { frame, mappings } => {
-                *state = State::Present { frame, mappings: mappings + 1 };
+                *state = State::Present { frame, mappings: mappings.checked_add(1).expect("clean cache ref overflow") };
                 HITS.fetch_add(1, Ordering::Relaxed);
                 if mappings != 0 { SHARED_MAPS.fetch_add(1, Ordering::Relaxed); }
                 return Some(frame);
@@ -109,17 +127,55 @@ pub fn retain(key: Key) -> bool {
     let Some(entry) = cache.iter().find(|entry| entry.key == key) else { return false; };
     let mut state = entry.state.lock();
     if let State::Present { frame, mappings } = *state {
-        *state = State::Present { frame, mappings: mappings + 1 };
+        *state = State::Present { frame, mappings: mappings.checked_add(1).expect("clean cache ref overflow") };
         true
     } else { false }
 }
 
 pub fn release(key: Key) {
     let entry = CACHE.lock().iter().find(|entry| entry.key == key).cloned();
-    let Some(entry) = entry else { return; };
+    let Some(entry) = entry else {
+        panic!("clean page cache: release of unregistered key");
+    };
     let mut state = entry.state.lock();
     if let State::Present { frame, mappings } = *state {
-        *state = State::Present { frame, mappings: mappings.saturating_sub(1) };
+        assert!(mappings != 0, "clean page cache: double release");
+        *state = State::Present { frame, mappings: mappings - 1 };
+    } else {
+        panic!("clean page cache: release of non-present entry");
+    }
+    drop(state);
+    drop(entry);
+    reclaim_excess();
+}
+
+fn reclaim_excess() {
+    loop {
+        let frame = {
+            let mut cache = CACHE.lock();
+            let reclaimable = cache.iter().filter(|entry| matches!(
+                *entry.state.lock(), State::Present { mappings: 0, .. } | State::Failed
+            )).count();
+            if reclaimable <= MAX_RECLAIMABLE_PAGES {
+                return;
+            }
+            let Some(index) = cache.iter().position(|entry| matches!(
+                *entry.state.lock(), State::Present { mappings: 0, .. } | State::Failed
+            )) else { return; };
+            let entry = cache.swap_remove(index);
+            let mut state = entry.state.lock();
+            match *state {
+                State::Present { frame, mappings: 0 } => {
+                    *state = State::Failed;
+                    Some(frame)
+                }
+                State::Failed => None,
+                _ => unreachable!(),
+            }
+        };
+        if let Some(frame) = frame {
+            vmm::free_frame(frame);
+        }
     }
 }
 

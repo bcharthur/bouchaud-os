@@ -28,6 +28,8 @@ struct Partagee {
     ouverts: usize,
     mappages: usize,
     pages: Vec<Arc<SharedPage>>,
+    evicting: bool,
+    lifecycle: Arc<WaitQueue>,
 }
 
 static CACHE: SpinLock<Vec<Partagee>> = SpinLock::new(Vec::new());
@@ -41,38 +43,62 @@ fn entree_locked(cache: &mut Vec<Partagee>, node: usize) -> usize {
         ouverts: 0,
         mappages: 0,
         pages: Vec::new(),
+        evicting: false,
+        lifecycle: Arc::new(WaitQueue::new()),
     });
     cache.len() - 1
 }
 
 pub fn ouvre(node: usize) {
-    let mut cache = CACHE.lock();
-    let index = entree_locked(&mut cache, node);
-    cache[index].ouverts += 1;
+    loop {
+        let wait = {
+            let mut cache = CACHE.lock();
+            let index = entree_locked(&mut cache, node);
+            if cache[index].evicting {
+                Some((Arc::clone(&cache[index].lifecycle), cache[index].lifecycle.ticket()))
+            } else {
+                cache[index].ouverts += 1;
+                None
+            }
+        };
+        match wait { Some((queue, ticket)) => queue.wait(ticket), None => return }
+    }
 }
 
 pub fn ferme(node: usize) {
     {
         let mut cache = CACHE.lock();
-        if let Some(entry) = cache.iter_mut().find(|entry| entry.node == node) {
-            entry.ouverts = entry.ouverts.saturating_sub(1);
-        }
+        let entry = cache.iter_mut().find(|entry| entry.node == node)
+            .expect("shared cache: close of unknown node");
+        assert!(entry.ouverts != 0, "shared cache: descriptor ref underflow");
+        entry.ouverts -= 1;
     }
     evince_si_orphelin(node);
 }
 
 pub fn mappe(node: usize) {
-    let mut cache = CACHE.lock();
-    let index = entree_locked(&mut cache, node);
-    cache[index].mappages += 1;
+    loop {
+        let wait = {
+            let mut cache = CACHE.lock();
+            let index = entree_locked(&mut cache, node);
+            if cache[index].evicting {
+                Some((Arc::clone(&cache[index].lifecycle), cache[index].lifecycle.ticket()))
+            } else {
+                cache[index].mappages += 1;
+                None
+            }
+        };
+        match wait { Some((queue, ticket)) => queue.wait(ticket), None => return }
+    }
 }
 
 pub fn demappe(node: usize) {
     {
         let mut cache = CACHE.lock();
-        if let Some(entry) = cache.iter_mut().find(|entry| entry.node == node) {
-            entry.mappages = entry.mappages.saturating_sub(1);
-        }
+        let entry = cache.iter_mut().find(|entry| entry.node == node)
+            .expect("shared cache: unmap of unknown node");
+        assert!(entry.mappages != 0, "shared cache: mapping ref underflow");
+        entry.mappages -= 1;
     }
     evince_si_orphelin(node);
 }
@@ -82,35 +108,51 @@ pub fn demappe(node: usize) {
 /// A registry miss publishes `Loading` before allocation and I/O. Contenders
 /// clone the stable page object, drop every spin lock, and sleep on its queue.
 pub fn page(node: usize, numero: u64) -> Option<u64> {
-    let (page, loader) = {
-        let mut cache = CACHE.lock();
-        let index = entree_locked(&mut cache, node);
-        if let Some(page) = cache[index]
-            .pages
-            .iter()
-            .find(|page| page.numero == numero)
-        {
-            (Arc::clone(page), false)
-        } else {
-            let page = Arc::new(SharedPage {
-                numero,
-                state: SpinLock::new(SharedPageState::Loading),
-                waiters: WaitQueue::new(),
-            });
-            cache[index].pages.push(Arc::clone(&page));
-            (page, true)
+    let (page, loader) = loop {
+        let result = {
+            let mut cache = CACHE.lock();
+            let index = entree_locked(&mut cache, node);
+            if cache[index].evicting {
+                Err((Arc::clone(&cache[index].lifecycle), cache[index].lifecycle.ticket()))
+            } else if let Some(page) = cache[index]
+                .pages.iter().find(|page| page.numero == numero)
+            {
+                Ok((Arc::clone(page), false))
+            } else {
+                let page = Arc::new(SharedPage {
+                    numero,
+                    state: SpinLock::new(SharedPageState::Loading),
+                    waiters: WaitQueue::new(),
+                });
+                cache[index].pages.push(Arc::clone(&page));
+                Ok((page, true))
+            }
+        };
+        match result {
+            Ok(result) => break result,
+            Err((queue, ticket)) => queue.wait(ticket),
         }
     };
 
     if loader {
-        let result = vmm::alloc_frame().map(|frame| {
+        let result = vmm::alloc_frame().and_then(|frame| {
             let debut = (numero * PAGE_SIZE) as usize;
             let dst = crate::kernel::memory::phys_to_virt(frame);
             let bytes = unsafe {
                 core::slice::from_raw_parts_mut(dst, PAGE_SIZE as usize)
             };
-            let _ = crate::fs::backing::read_at(node, debut, bytes);
-            frame
+            // alloc_frame() zeroes the complete page. A tail page therefore
+            // has explicit zero-fill semantics, but a short read before EOF is
+            // an I/O failure and must never be published as Present.
+            let logical = crate::fs::backing::logical_len(node);
+            let expected = logical.saturating_sub(debut).min(PAGE_SIZE as usize);
+            let got = crate::fs::backing::read_at(node, debut, &mut bytes[..expected]);
+            if got == expected {
+                Some(frame)
+            } else {
+                vmm::free_frame(frame);
+                None
+            }
         });
         *page.state.lock() = match result {
             Some(frame) => SharedPageState::Present(frame),
@@ -122,33 +164,49 @@ pub fn page(node: usize, numero: u64) -> Option<u64> {
 
     loop {
         let ticket = page.waiters.ticket();
-        match *page.state.lock() {
+        let state = page.state.lock();
+        match *state {
             SharedPageState::Present(frame) => return Some(frame),
             SharedPageState::Failed => return None,
-            SharedPageState::Loading => page.waiters.wait(ticket),
+            SharedPageState::Loading => {
+                drop(state);
+                page.waiters.wait(ticket);
+            }
         }
     }
 }
 
 fn present_pages(node: usize) -> Vec<(u64, u64)> {
-    let cache = CACHE.lock();
-    let Some(entry) = cache.iter().find(|entry| entry.node == node) else {
-        return Vec::new();
-    };
-    entry
-        .pages
-        .iter()
-        .filter_map(|page| match *page.state.lock() {
-            SharedPageState::Present(frame) => Some((page.numero, frame)),
-            _ => None,
-        })
-        .collect()
+    loop {
+        let snapshot = {
+            let cache = CACHE.lock();
+            let Some(entry) = cache.iter().find(|entry| entry.node == node) else {
+                return Vec::new();
+            };
+            if entry.evicting {
+                Err((Arc::clone(&entry.lifecycle), entry.lifecycle.ticket()))
+            } else {
+                Ok(entry.pages.clone())
+            }
+        };
+        match snapshot {
+            Ok(pages) => return pages.iter().filter_map(|page| {
+                let state = page.state.lock();
+                match *state {
+                    SharedPageState::Present(frame) => Some((page.numero, frame)),
+                    _ => None,
+                }
+            }).collect(),
+            Err((queue, ticket)) => queue.wait(ticket),
+        }
+    }
 }
 
 fn writeback_pages(node: usize, pages: &[(u64, u64)]) {
     if crate::fs::backing::is_disk_backed(node) || pages.is_empty() {
         return;
     }
+    let _kernel = crate::kernel::smp_lock::enter();
     let fs = crate::fs::ramfs::fs();
     for &(numero, frame) in pages {
         let debut = (numero * PAGE_SIZE) as usize;
@@ -167,8 +225,13 @@ fn writeback_pages(node: usize, pages: &[(u64, u64)]) {
 }
 
 pub fn writeback(node: usize) {
+    // Pin the node with a descriptor-style lifecycle reference so eviction
+    // cannot free a frame after present_pages() snapshots it but before the
+    // physical copy completes.
+    ouvre(node);
     let pages = present_pages(node);
     writeback_pages(node, &pages);
+    ferme(node);
 }
 
 pub fn writeback_tout() {
@@ -179,7 +242,7 @@ pub fn writeback_tout() {
 }
 
 fn evince_si_orphelin(node: usize) {
-    let removed = {
+    let (lifecycle, pages) = {
         let mut cache = CACHE.lock();
         let Some(index) = cache.iter().position(|entry| entry.node == node) else {
             return;
@@ -194,12 +257,17 @@ fn evince_si_orphelin(node: usize) {
         }) {
             return;
         }
-        cache.swap_remove(index)
+        cache[index].evicting = true;
+        let lifecycle = Arc::clone(&cache[index].lifecycle);
+        let pages = core::mem::take(&mut cache[index].pages);
+        (lifecycle, pages)
     };
 
-    let anonyme = crate::fs::ramfs::fs().est_anonyme(node);
-    let pages: Vec<(u64, u64)> = removed
-        .pages
+    let anonyme = {
+        let _kernel = crate::kernel::smp_lock::enter();
+        crate::fs::ramfs::fs().est_anonyme(node)
+    };
+    let pages: Vec<(u64, u64)> = pages
         .iter()
         .filter_map(|page| match *page.state.lock() {
             SharedPageState::Present(frame) => Some((page.numero, frame)),
@@ -213,8 +281,19 @@ fn evince_si_orphelin(node: usize) {
         vmm::free_frame(frame);
     }
     if anonyme {
+        let _kernel = crate::kernel::smp_lock::enter();
         crate::fs::ramfs::fs().libere_anonyme(node);
     }
+    {
+        let mut cache = CACHE.lock();
+        if let Some(index) = cache.iter().position(|entry| {
+            entry.node == node && Arc::ptr_eq(&entry.lifecycle, &lifecycle)
+        }) {
+            debug_assert!(cache[index].evicting);
+            cache.swap_remove(index);
+        }
+    }
+    lifecycle.wake_all();
 }
 
 pub fn statistiques() -> (usize, usize) {

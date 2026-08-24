@@ -29,13 +29,14 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use x86_64::registers::control::{Cr3, Cr3Flags};
 use x86_64::structures::paging::PhysFrame;
 use x86_64::PhysAddr;
 
 use crate::arch::x86_64::smp;
 use crate::kernel::memory;
+use crate::kernel::sync::{SpinLock, SpinLockGuard};
 
 /// Taille d'une page (et d'une frame) : 4 KiB.
 pub const PAGE_SIZE: u64 = 4096;
@@ -149,24 +150,19 @@ struct FrameAllocator {
     high_watermark: u64,
 }
 
-static mut FRAMES: Option<FrameAllocator> = None;
+static FRAMES: SpinLock<FrameAllocator> = SpinLock::new(FrameAllocator {
+    regions: Vec::new(),
+    freed: Vec::new(),
+    total: 0,
+    used: 0,
+    allocations: 0,
+    frees: 0,
+    failures: 0,
+    high_watermark: 0,
+});
 
-fn frames() -> &'static mut FrameAllocator {
-    unsafe {
-        if FRAMES.is_none() {
-            FRAMES = Some(FrameAllocator {
-                regions: Vec::new(),
-                freed: Vec::new(),
-                total: 0,
-                used: 0,
-                allocations: 0,
-                frees: 0,
-                failures: 0,
-                high_watermark: 0,
-            });
-        }
-        FRAMES.as_mut().unwrap()
-    }
+fn frames() -> SpinLockGuard<'static, FrameAllocator> {
+    FRAMES.lock()
 }
 
 /// Ajoute une region physique [start, end) a l'allocateur de frames.
@@ -179,39 +175,41 @@ pub fn add_region(start: u64, end: u64) {
     if end <= start {
         return;
     }
-    let f = frames();
+    let mut f = frames();
     f.total += (end - start) / PAGE_SIZE;
     f.regions.push((start, end));
 }
 
 /// Alloue une frame physique de 4 KiB, mise a zero. `None` si plus de RAM.
 pub fn alloc_frame() -> Option<u64> {
-    let f = frames();
-    let candidate = if let Some(p) = f.freed.pop() {
-        Some(p)
-    } else {
-        let mut found = None;
-        for region in f.regions.iter_mut() {
-            if region.0 + PAGE_SIZE <= region.1 {
-                found = Some(region.0);
-                region.0 += PAGE_SIZE;
-                break;
+    let phys = {
+        let mut f = frames();
+        let candidate = if let Some(p) = f.freed.pop() {
+            Some(p)
+        } else {
+            let mut found = None;
+            for region in f.regions.iter_mut() {
+                if region.0 + PAGE_SIZE <= region.1 {
+                    found = Some(region.0);
+                    region.0 += PAGE_SIZE;
+                    break;
+                }
             }
-        }
-        found
-    };
+            found
+        };
 
-    let phys = match candidate {
-        Some(phys) => phys,
-        None => {
-            f.failures = f.failures.wrapping_add(1);
-            return None;
-        }
+        let phys = match candidate {
+            Some(phys) => phys,
+            None => {
+                f.failures = f.failures.wrapping_add(1);
+                return None;
+            }
+        };
+        f.used = f.used.saturating_add(1);
+        f.allocations = f.allocations.wrapping_add(1);
+        f.high_watermark = f.high_watermark.max(f.used);
+        phys
     };
-
-    f.used = f.used.saturating_add(1);
-    f.allocations = f.allocations.wrapping_add(1);
-    f.high_watermark = f.high_watermark.max(f.used);
     unsafe {
         core::ptr::write_bytes(memory::phys_to_virt(phys), 0, PAGE_SIZE as usize);
     }
@@ -220,12 +218,14 @@ pub fn alloc_frame() -> Option<u64> {
 
 /// Rend une frame a l'allocateur.
 pub fn free_frame(phys: u64) {
-    let f = frames();
+    let mut f = frames();
+    let phys = phys & !(PAGE_SIZE - 1);
+    debug_assert!(!f.freed.contains(&phys), "vmm: double free frame {phys:#x}");
     if f.used > 0 {
         f.used -= 1;
     }
     f.frees = f.frees.wrapping_add(1);
-    f.freed.push(phys & !(PAGE_SIZE - 1));
+    f.freed.push(phys);
 }
 
 /// (frames utilisees, frames libres, frames totales).
@@ -405,13 +405,22 @@ pub struct AddressSpace {
 pub(crate) struct AddressSpaceIdentity {
     pml4: u64,
     active_cpus: AtomicU64,
+    retiring: AtomicBool,
 }
 
 impl AddressSpaceIdentity {
-    pub(crate) unsafe fn activate(&self) {
+    pub(crate) unsafe fn try_activate(&self) -> bool {
+        if self.retiring.load(Ordering::Acquire) {
+            return false;
+        }
         self.mark_active(smp::cpu_index());
+        if self.retiring.load(Ordering::Acquire) {
+            self.mark_inactive(smp::cpu_index());
+            return false;
+        }
         let frame = PhysFrame::containing_address(PhysAddr::new(self.pml4));
         Cr3::write(frame, Cr3Flags::empty());
+        true
     }
 
     pub(crate) fn mark_active(&self, cpu: usize) {
@@ -424,6 +433,14 @@ impl AddressSpaceIdentity {
         if cpu < 64 {
             self.active_cpus.fetch_and(!(1u64 << cpu), Ordering::AcqRel);
         }
+    }
+
+    pub(crate) fn begin_retire(&self) {
+        self.retiring.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn active_cpus(&self) -> u64 {
+        self.active_cpus.load(Ordering::Acquire)
     }
 }
 
@@ -486,6 +503,7 @@ impl AddressSpace {
             identity: Arc::new(AddressSpaceIdentity {
                 pml4,
                 active_cpus: AtomicU64::new(0),
+                retiring: AtomicBool::new(false),
             }),
             tables: Vec::new(),
             pages: Vec::new(),
@@ -512,7 +530,7 @@ impl AddressSpace {
     }
 
     pub fn active_cpus(&self) -> u64 {
-        self.identity.active_cpus.load(Ordering::Acquire)
+        self.identity.active_cpus()
     }
 
     #[inline]
@@ -534,7 +552,7 @@ impl AddressSpace {
         // Publier l'activite AVANT CR3 ferme la race avec un unmap concurrent:
         // soit son snapshot nous cible, soit notre chargement CR3 est posterieur
         // a la mutation PTE et ne peut importer aucune traduction retiree.
-        self.identity.activate();
+        assert!(self.identity.try_activate(), "vmm: activation of retiring address space");
     }
 
     /// Descend (en creant si besoin) jusqu'a l'entree de table de pages qui
