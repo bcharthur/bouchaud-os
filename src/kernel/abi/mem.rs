@@ -660,7 +660,9 @@ pub fn sys_madvise(addr: u64, length: u64, advice: i32) -> i64 {
         match advice {
             // La VMA reste : le prochain accès rematérialise la page.
             MADV_DONTNEED | MADV_FREE => {
-                Some(borrowed.space.prepare_unmap(addr, length))
+                let clean = borrowed.retire_clean_pages(addr, length);
+                let pml4 = borrowed.space.pml4();
+                Some((borrowed.space.prepare_unmap(addr, length), clean, pml4))
             }
             MADV_NORMAL
             | MADV_RANDOM
@@ -673,9 +675,17 @@ pub fn sys_madvise(addr: u64, length: u64, advice: i32) -> i64 {
             _ => return -errno::EINVAL,
         }
     };
-    if let Some(retirement) = retirement {
+    if let Some((retirement, clean, pml4)) = retirement {
+        // Cancel a loader for this range before it can republish a PTE after
+        // DONTNEED. No Mm guard crosses FaultRegistry or the TLB ACK wait.
+        task::retire_fault_range(pml4, addr, length);
         execute_process_invalidation(&process, retirement.invalidation());
         process.mm.lock().space.finish_unmap(retirement);
+        // The remote CPUs have acknowledged removal before the cache mapping
+        // references are returned, so no stale TLB can access a reclaimed frame.
+        for key in clean {
+            crate::kernel::clean_page_cache::release(key);
+        }
     }
     0
 }

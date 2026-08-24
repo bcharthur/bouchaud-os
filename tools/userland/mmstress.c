@@ -83,6 +83,24 @@ static int race_mode(const char *mode, const char *self) {
     return 0;
 }
 
+static int discard_refault(const char *self, unsigned rounds, uint64_t *checksum) {
+    int fd = open(self, O_RDONLY);
+    if (fd < 0) return 20;
+    unsigned char *mapped = mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (mapped == MAP_FAILED) { close(fd); return 21; }
+    uint64_t sum = 0;
+    for (unsigned i = 0; i < rounds; ++i) {
+        sum += mapped[(i * 193u) & 4095u];
+        if (madvise(mapped, 4096, MADV_DONTNEED)) {
+            munmap(mapped, 4096); close(fd); return 22;
+        }
+    }
+    sum += mapped[0];
+    if (munmap(mapped, 4096) || close(fd)) return 23;
+    *checksum += sum;
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && (!strcmp(argv[1], "unrelated") || !strcmp(argv[1], "aba")))
         return race_mode(argv[1], argv[0]);
@@ -107,6 +125,7 @@ int main(int argc, char **argv) {
         if (result) return 4;
         checksum += jobs[i].checksum;
     }
+    if (churn && discard_refault(argv[0], 512, &checksum)) return 6;
     clock_gettime(CLOCK_MONOTONIC, &b);
     pid_t child = fork();
     if (child == 0) {

@@ -7,6 +7,7 @@ on:
       - 'src/fs/backing.rs'
       - 'src/drivers/ata.rs'
       - 'tools/userland/mmstress.c'
+      - 'tools/userland/build-mmstress.sh'
       - '.github/workflows/mm-ng6-smp4.yml'
   workflow_dispatch:
 
@@ -19,7 +20,7 @@ jobs:
       - name: Install build and QEMU dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 musl-tools
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 musl-tools file
       - name: Build kernel and guest stressor
         run: |
           rustup show active-toolchain || rustup toolchain install
@@ -31,17 +32,18 @@ jobs:
             echo 'mmstress must use the static Bouchaud-compatible Linux ABI' >&2
             exit 1
           fi
+          # Boot files below 4 MiB stay inline in RAMFS. Pad after ELF
+          # validation so argv[0] is genuinely disk-backed and churn's
+          # DONTNEED/refault loop exercises the clean physical page cache.
+          truncate -s 5M mmstress
+          sha256sum mmstress > mmstress.sha256
       - name: Build guest scenario disk
         run: |
           set -eu
           mkdir -p scenario/bin
           cp mmstress scenario/bin/mmstress
           cat > scenario/autorun <<'AUTORUN'
-          /bin/mmstress 4 512 4 && echo MMSTRESS_BASIC_OK
-          /bin/mmstress unrelated && echo MMSTRESS_UNRELATED_OK
-          /bin/mmstress aba && echo MMSTRESS_ABA_OK
-          /bin/mmstress churn && echo MMSTRESS_CHURN_OK_GUEST
-          echo MMSTRESS_NG6_ALL_DONE
+          echo MMSTRESS_BASIC_BEGIN && /bin/mmstress 4 512 4 && echo MMSTRESS_BASIC_OK && echo MMSTRESS_UNRELATED_BEGIN && /bin/mmstress unrelated && echo MMSTRESS_UNRELATED_OK && echo MMSTRESS_ABA_BEGIN && /bin/mmstress aba && echo MMSTRESS_ABA_OK && echo MMSTRESS_CHURN_BEGIN && /bin/mmstress churn && echo MMSTRESS_CHURN_OK_GUEST && echo MMSTRESS_NG6_ALL_DONE
           AUTORUN
           (cd tools/userland && IMAGE="$GITHUB_WORKSPACE/mm-ng6.img" \
             ./mkdisk.sh "$GITHUB_WORKSPACE/scenario")
@@ -51,7 +53,7 @@ jobs:
           timeout 300 qemu-system-x86_64 \
             -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
             -drive format=raw,file=mm-ng6.img \
-            -m 2048 -smp 4 -display none -no-reboot \
+            -m 2048 -smp 4 -accel tcg -cpu max -display none -no-reboot \
             -netdev user,id=net0 -device e1000,netdev=net0 \
             -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
             -serial file:mm-ng6.log
@@ -68,9 +70,13 @@ jobs:
       - name: Verify guest completion and failures
         run: |
           set -eu
+          grep -aF 'MMSTRESS_BASIC_BEGIN' mm-ng6.log
           grep -aF 'MMSTRESS_BASIC_OK' mm-ng6.log
+          grep -aF 'MMSTRESS_UNRELATED_BEGIN' mm-ng6.log
           grep -aF 'MMSTRESS_UNRELATED_OK' mm-ng6.log
+          grep -aF 'MMSTRESS_ABA_BEGIN' mm-ng6.log
           grep -aF 'MMSTRESS_ABA_OK' mm-ng6.log
+          grep -aF 'MMSTRESS_CHURN_BEGIN' mm-ng6.log
           grep -aF 'MMSTRESS_CHURN_OK_GUEST' mm-ng6.log
           grep -aF 'MMSTRESS_NG6_ALL_DONE' mm-ng6.log
           grep -aF '=== AUTORUN FIN === statut=0' mm-ng6.log
@@ -82,4 +88,7 @@ jobs:
         if: always()
         with:
           name: mm-ng6-smp4-log
-          path: mm-ng6.log
+          path: |
+            mm-ng6.log
+            mmstress.readelf.txt
+            mmstress.sha256

@@ -1811,6 +1811,13 @@ fn install(task: &mut Task) {
         } else {
             Some(Arc::clone(&task.process))
         };
+        if !task.noyau {
+            debug_assert_eq!(
+                current_process_local().map(|process| process.pid),
+                Some(task.process.pid),
+                "task: stale CPU-local current Process after install"
+            );
+        }
         // Un fil noyau n'a pas d'espace utilisateur a activer, et surtout ne
         // doit pas activer celui d'un programme : il lirait alors, sous les
         // memes adresses, la memoire du dernier processus installe.
@@ -2230,7 +2237,6 @@ pub fn secondary_cpu_loop() -> ! {
 /// Si d'autres threads du programme tournent encore, on bascule sur eux ;
 /// sinon, retour au fil noyau qui a lance le programme.
 pub fn exit_current(code: i32) -> ! {
-    let cur = current_index_raw();
     {
         let task = current();
         task.state = TaskState::Zombie;
