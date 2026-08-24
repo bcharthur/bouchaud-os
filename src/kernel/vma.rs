@@ -68,7 +68,11 @@ pub struct Vma {
 static NEXT_VMA_ID: AtomicU64 = AtomicU64::new(1);
 
 pub fn nouvelle_identite() -> u64 {
-    NEXT_VMA_ID.fetch_add(1, Ordering::Relaxed)
+    NEXT_VMA_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .expect("vma: monotonic identity space exhausted")
 }
 
 impl Vma {
@@ -350,6 +354,12 @@ pub fn self_test() -> bool {
     if trouve(&regions, 0x8000).map(|r| r.drapeaux) != Some(rw) {
         return false;
     }
+    let unchanged_id = trouve(&regions, 0x8000).unwrap().id;
+    if !protege(&mut regions, 0x7000, 0x9000, rw)
+        || trouve(&regions, 0x8000).unwrap().id != unchanged_id
+    {
+        return false;
+    }
 
     remplace(
         &mut regions,
@@ -365,6 +375,19 @@ pub fn self_test() -> bool {
         return false;
     }
     if !couvre(&regions, 0x1000, 0x9000) {
+        return false;
+    }
+
+    // A single mprotect spanning distinct VMAs renews each changed middle,
+    // while the untouched outer fragments retain their logical identities.
+    let left_id = trouve(&regions, 0x2000).unwrap().id;
+    let replacement_id = trouve(&regions, 0x4000).unwrap().id;
+    if !protege(&mut regions, 0x2000, 0x4000, ro)
+        || trouve(&regions, 0x1000).unwrap().id != left_id
+        || trouve(&regions, 0x2000).unwrap().id == left_id
+        || trouve(&regions, 0x3000).unwrap().id == replacement_id
+        || trouve(&regions, 0x4000).unwrap().id != replacement_id
+    {
         return false;
     }
 

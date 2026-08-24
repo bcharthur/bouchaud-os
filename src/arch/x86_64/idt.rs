@@ -173,6 +173,7 @@ extern "x86-interrupt" fn page_fault_handler(stack: InterruptStackFrame, code: P
                 core::hint::spin_loop();
             }
         };
+        crate::kernel::task::fault_retry_chain_complete(retries as u64);
         if outcome == crate::kernel::task::FaultOutcome::Resolved {
             crate::kernel::task::stall_pf_done(addr.as_u64());
             crate::kernel::task::stall_site_clear();

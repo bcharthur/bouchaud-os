@@ -43,6 +43,11 @@ impl WaitQueue {
 
     /// Sleep only if no producer has signalled since `ticket()`.
     pub fn wait(&self, ticket: WaitTicket) {
+        // The common notification-before-wait case needs no TASKS/BKL lookup.
+        // The second check under BKL still closes notification-before-park.
+        if self.generation.load(Ordering::Acquire) != ticket.0 {
+            return;
+        }
         let _kernel = enter_bkl();
         if self.generation.load(Ordering::Acquire) != ticket.0 {
             return;

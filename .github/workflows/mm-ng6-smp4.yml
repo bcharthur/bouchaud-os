@@ -26,16 +26,21 @@ jobs:
           cargo install bootimage --locked
           cargo bootimage
           CC=musl-gcc tools/userland/build-mmstress.sh
+          file mmstress | grep -F 'statically linked'
+          if readelf -l mmstress | grep -q 'Requesting program interpreter'; then
+            echo 'mmstress must use the static Bouchaud-compatible Linux ABI' >&2
+            exit 1
+          fi
       - name: Build guest scenario disk
         run: |
           set -eu
           mkdir -p scenario/bin
           cp mmstress scenario/bin/mmstress
           cat > scenario/autorun <<'AUTORUN'
-          /bin/mmstress 4 512 4
-          echo MMSTRESS_NORMAL_DONE
-          /bin/mmstress unrelated
-          /bin/mmstress aba
+          /bin/mmstress 4 512 4 && echo MMSTRESS_BASIC_OK
+          /bin/mmstress unrelated && echo MMSTRESS_UNRELATED_OK
+          /bin/mmstress aba && echo MMSTRESS_ABA_OK
+          /bin/mmstress churn && echo MMSTRESS_CHURN_OK_GUEST
           echo MMSTRESS_NG6_ALL_DONE
           AUTORUN
           (cd tools/userland && IMAGE="$GITHUB_WORKSPACE/mm-ng6.img" \
@@ -48,6 +53,7 @@ jobs:
             -drive format=raw,file=mm-ng6.img \
             -m 2048 -smp 4 -display none -no-reboot \
             -netdev user,id=net0 -device e1000,netdev=net0 \
+            -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
             -serial file:mm-ng6.log
           code=$?
           cat mm-ng6.log || true
@@ -55,14 +61,20 @@ jobs:
             echo 'QEMU MM stress timed out' >&2
             exit 1
           fi
+          if [ "$code" -ne 33 ]; then
+            echo "unexpected QEMU guest exit code: $code (expected 33)" >&2
+            exit 1
+          fi
       - name: Verify guest completion and failures
         run: |
           set -eu
-          grep -aF 'MMSTRESS_NORMAL_DONE' mm-ng6.log
-          grep -aF 'MMSTRESS_UNRELATED_DONE' mm-ng6.log
-          grep -aF 'MMSTRESS_ABA_DONE' mm-ng6.log
+          grep -aF 'MMSTRESS_BASIC_OK' mm-ng6.log
+          grep -aF 'MMSTRESS_UNRELATED_OK' mm-ng6.log
+          grep -aF 'MMSTRESS_ABA_OK' mm-ng6.log
+          grep -aF 'MMSTRESS_CHURN_OK_GUEST' mm-ng6.log
           grep -aF 'MMSTRESS_NG6_ALL_DONE' mm-ng6.log
-          if grep -aqE '\*\*\* KERNEL PANIC \*\*\*|FAULT_FATAL|faute de page utilisateur' mm-ng6.log; then
+          grep -aF '=== AUTORUN FIN === statut=0' mm-ng6.log
+          if grep -aqE '\*\*\* KERNEL PANIC \*\*\*|DOUBLE FAULT|FAULT_FATAL|faute de page utilisateur|assertion failed|panicked at' mm-ng6.log; then
             echo 'fatal kernel or user fault in MM stress log' >&2
             exit 1
           fi

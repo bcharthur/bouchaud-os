@@ -183,3 +183,12 @@ pub fn stats() -> (u64, u64, u64, u64) {
     (HITS.load(Ordering::Relaxed), MISSES.load(Ordering::Relaxed),
      WAITS.load(Ordering::Relaxed), SHARED_MAPS.load(Ordering::Relaxed))
 }
+
+/// (all entries, entries eligible for reclaim).
+pub fn lifetime_stats() -> (usize, usize) {
+    let cache = CACHE.lock();
+    let reclaimable = cache.iter().filter(|entry| matches!(
+        *entry.state.lock(), State::Present { mappings: 0, .. } | State::Failed
+    )).count();
+    (cache.len(), reclaimable)
+}

@@ -131,6 +131,9 @@ static FAULT_INVALID: AtomicU64 = AtomicU64::new(0);
 static FAULT_IO_ERROR: AtomicU64 = AtomicU64::new(0);
 static FAULT_RETIRED: AtomicU64 = AtomicU64::new(0);
 static PF_BKL_ENTERS: AtomicU64 = AtomicU64::new(0);
+static FAULT_REGISTRY_PEAK: AtomicU64 = AtomicU64::new(0);
+static FAULT_RETRY_YIELDS: AtomicU64 = AtomicU64::new(0);
+static FAULT_RETRY_MAX_CHAIN: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FaultOutcome {
@@ -208,6 +211,7 @@ fn fault_page(pml4: u64, page: u64, token: &MappingToken) -> Arc<FaultPage> {
         waiters: crate::kernel::sync::WaitQueue::new(),
     });
     pages.push(Arc::clone(&entry));
+    FAULT_REGISTRY_PEAK.fetch_max(pages.len() as u64, Ordering::Relaxed);
     entry
 }
 
@@ -229,44 +233,35 @@ pub fn retire_fault_range(pml4: u64, start: u64, len: u64) {
     });
 }
 
-fn cancel_fault_records(mut predicate: impl FnMut(&FaultPage) -> bool) {
-    let cancelled = {
-        let mut registry = FAULT_PAGES.lock();
-        let mut cancelled = Vec::new();
-        registry.retain(|entry| {
-            if predicate(entry) {
-                cancelled.push(Arc::clone(entry));
-                false
-            } else {
-                true
-            }
-        });
-        cancelled
+fn transition_fault_records(
+    mut predicate: impl FnMut(&FaultPage) -> bool,
+    terminal: FaultPageState,
+) {
+    // Publish the terminal state while every matching entry is still
+    // discoverable. A concurrent lookup can therefore never recreate a second
+    // loader in the remove-before-cancel window.
+    let entries = {
+        let registry = FAULT_PAGES.lock();
+        let entries: Vec<_> = registry.iter().filter(|entry| predicate(entry)).cloned().collect();
+        for entry in &entries {
+            *entry.state.lock() = terminal.clone();
+        }
+        entries
     };
-    for entry in cancelled {
-        *entry.state.lock() = FaultPageState::Cancelled;
+    for entry in &entries {
         entry.waiters.wake_all();
     }
+    FAULT_PAGES.lock().retain(|candidate| {
+        !entries.iter().any(|entry| Arc::ptr_eq(entry, candidate))
+    });
 }
 
-fn retire_fault_records(mut predicate: impl FnMut(&FaultPage) -> bool) {
-    let retired = {
-        let mut registry = FAULT_PAGES.lock();
-        let mut retired = Vec::new();
-        registry.retain(|entry| {
-            if predicate(entry) {
-                retired.push(Arc::clone(entry));
-                false
-            } else {
-                true
-            }
-        });
-        retired
-    };
-    for entry in retired {
-        *entry.state.lock() = FaultPageState::Retired;
-        entry.waiters.wake_all();
-    }
+fn cancel_fault_records(predicate: impl FnMut(&FaultPage) -> bool) {
+    transition_fault_records(predicate, FaultPageState::Cancelled);
+}
+
+fn retire_fault_records(predicate: impl FnMut(&FaultPage) -> bool) {
+    transition_fault_records(predicate, FaultPageState::Retired);
 }
 
 fn record_fault_outcome(outcome: FaultOutcome) {
@@ -361,9 +356,10 @@ pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> FaultOutcome
         }
     };
     record.waiters.wake_all();
-    if outcome != FaultOutcome::Resolved {
-        forget_fault_page(&record);
-    }
+    // The PTE (for Present) or the Arc already held by each waiter is the
+    // durable state. Keeping terminal records here leaked one Vec entry per
+    // fault and made future lookup O(total faults). Publish, wake, then detach.
+    forget_fault_page(&record);
     record_fault_outcome(outcome);
     outcome
 }
@@ -420,8 +416,8 @@ fn peuple_page_loader(
             let source = file_offset.saturating_add(page.saturating_sub(mapping_start));
             let numero = source / crate::kernel::vmm::PAGE_SIZE;
             drop(p);
-            let frame = match crate::kernel::partage::page(node, numero) {
-                Some(frame) => frame,
+            let lease = match crate::kernel::partage::page(node, numero) {
+                Some(lease) => lease,
                 None => return FaultOutcome::IoError,
             };
             let mut p = processus.mm.lock();
@@ -434,7 +430,7 @@ fn peuple_page_loader(
             if p.space.translate(page).is_some() {
                 return FaultOutcome::Resolved;
             }
-            if !p.space.map_foreign(page, frame, effective.drapeaux) {
+            if !p.space.map_foreign(page, lease.frame(), effective.drapeaux) {
                 return FaultOutcome::IoError;
             }
             FAULTS_FILE.fetch_add(1, Ordering::Relaxed);
@@ -557,6 +553,13 @@ pub fn fault_outcome_stats() -> (u64, u64, u64, u64, u64) {
         FAULT_INVALID.load(Ordering::Relaxed),
         FAULT_IO_ERROR.load(Ordering::Relaxed),
         FAULT_RETIRED.load(Ordering::Relaxed),
+    )
+}
+
+pub fn fault_registry_stats() -> (u64, u64) {
+    (
+        FAULT_PAGES.lock().len() as u64,
+        FAULT_REGISTRY_PEAK.load(Ordering::Relaxed),
     )
 }
 
@@ -1380,7 +1383,25 @@ fn clear_current_process_local() {
 
 pub fn fault_retry_yield() {
     PF_BKL_ENTERS.fetch_add(1, Ordering::Relaxed);
-    schedule();
+    FAULT_RETRY_YIELDS.fetch_add(1, Ordering::Relaxed);
+    if !schedule() {
+        // With no local peer, schedule() deliberately does not HLT a Ready
+        // task. A continuously mutating remote mapping would otherwise leave
+        // this fault in an unbounded busy loop; wait for the next IRQ instead.
+        debug_assert!(!smp_lock::held_by_current_cpu());
+        cpu::wait_for_interrupt();
+    }
+}
+
+pub fn fault_retry_chain_complete(chain: u64) {
+    FAULT_RETRY_MAX_CHAIN.fetch_max(chain, Ordering::Relaxed);
+}
+
+pub fn fault_retry_stats() -> (u64, u64) {
+    (
+        FAULT_RETRY_YIELDS.load(Ordering::Relaxed),
+        FAULT_RETRY_MAX_CHAIN.load(Ordering::Relaxed),
+    )
 }
 
 pub fn pf_bkl_enters() -> u64 {
@@ -2854,10 +2875,17 @@ pub fn log_smp_load() {
     let (waitq_bkl, waitq_bkl_ns) = crate::kernel::sync::waitq_bkl_stats();
     let (ata_acquires, ata_wait_ns, ata_max_ns) = crate::drivers::ata::contention_stats();
     let (exec_wait_ns, exec_max_ns) = crate::kernel::abi::proc::exec_quiesce_stats();
+    let (fault_registry_current, fault_registry_peak) = fault_registry_stats();
+    let (retry_yields, retry_max_chain) = fault_retry_stats();
+    let (clean_entries, clean_reclaimable) = crate::kernel::clean_page_cache::lifetime_stats();
+    let (shared_nodes, shared_pages, shared_orphans) = crate::kernel::partage::lifetime_stats();
     crate::kernel::dmesg::log_fmt(format_args!(
-        "[MM-NG6] fault_resolved={} fault_retry={} fault_invalid={} fault_io_error={} fault_retired={} pf_bkl_enters={} waitq_bkl_enters={} waitq_bkl_wait_ns={} ramfs_bkl_enters={} exec_wait_ns={} exec_max_ns={} ata_acquires={} ata_wait_ns={} ata_max_ns={}",
-        resolved, retry, invalid, io_error, retired, pf_bkl_enters(), waitq_bkl,
-        waitq_bkl_ns, crate::fs::backing::ramfs_bkl_enters(), exec_wait_ns,
+        "[MM-NG6] fault_resolved={} fault_retry={} fault_invalid={} fault_io_error={} fault_retired={} fault_retry_yields={} fault_retry_max_chain={} fault_registry_current={} fault_registry_peak={} clean_cache_entries={} clean_cache_reclaimable={} shared_cache_nodes={} shared_cache_pages={} shared_cache_orphans={} pf_bkl_enters={} waitq_bkl_enters={} waitq_bkl_wait_ns={} ramfs_bkl_enters={} exec_wait_ns={} exec_max_ns={} ata_acquires={} ata_wait_ns={} ata_max_ns={}",
+        resolved, retry, invalid, io_error, retired, retry_yields, retry_max_chain,
+        fault_registry_current, fault_registry_peak,
+        clean_entries, clean_reclaimable, shared_nodes, shared_pages, shared_orphans,
+        pf_bkl_enters(), waitq_bkl, waitq_bkl_ns,
+        crate::fs::backing::ramfs_bkl_enters(), exec_wait_ns,
         exec_max_ns, ata_acquires, ata_wait_ns, ata_max_ns,
     ));
     log_smp_sample(online);

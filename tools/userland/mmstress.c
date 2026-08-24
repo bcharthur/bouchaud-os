@@ -86,9 +86,10 @@ static int race_mode(const char *mode, const char *self) {
 int main(int argc, char **argv) {
     if (argc > 1 && (!strcmp(argv[1], "unrelated") || !strcmp(argv[1], "aba")))
         return race_mode(argv[1], argv[0]);
-    int workers = argc > 1 ? atoi(argv[1]) : 1;
-    size_t pages = argc > 2 ? strtoull(argv[2], NULL, 10) : 4096;
-    unsigned rounds = argc > 3 ? (unsigned)strtoul(argv[3], NULL, 10) : 8;
+    int churn = argc > 1 && !strcmp(argv[1], "churn");
+    int workers = churn ? 4 : (argc > 1 ? atoi(argv[1]) : 1);
+    size_t pages = churn ? 512 : (argc > 2 ? strtoull(argv[2], NULL, 10) : 4096);
+    unsigned rounds = churn ? 128 : (argc > 3 ? (unsigned)strtoul(argv[3], NULL, 10) : 8);
     if (workers < 1 || workers > 64 || pages < 1 || rounds < 1) return 2;
     pthread_t *threads = calloc((size_t)workers, sizeof(*threads));
     struct worker *jobs = calloc((size_t)workers, sizeof(*jobs));
@@ -121,6 +122,9 @@ int main(int argc, char **argv) {
     printf("mmstress workers=%d pages=%zu rounds=%u wall_ms=%llu checksum=%llu\n",
            workers, pages, rounds, (unsigned long long)(ns / 1000000),
            (unsigned long long)checksum);
+    if (churn)
+        printf("MMSTRESS_CHURN_OK workers=%d rounds=%u checksum=%llu failures=0\n",
+               workers, rounds, (unsigned long long)checksum);
     free(jobs); free(threads);
     return 0;
 }

@@ -220,10 +220,9 @@ pub fn alloc_frame() -> Option<u64> {
 pub fn free_frame(phys: u64) {
     let mut f = frames();
     let phys = phys & !(PAGE_SIZE - 1);
-    debug_assert!(!f.freed.contains(&phys), "vmm: double free frame {phys:#x}");
-    if f.used > 0 {
-        f.used -= 1;
-    }
+    assert!(!f.freed.contains(&phys), "vmm: double free frame {phys:#x}");
+    assert!(f.used != 0, "vmm: frame accounting underflow for {phys:#x}");
+    f.used -= 1;
     f.frees = f.frees.wrapping_add(1);
     f.freed.push(phys);
 }
@@ -456,6 +455,10 @@ impl AddressSpaceIdentity {
     /// disabled across the final sequence/mask recheck and `sti; hlt`, closing
     /// the classic notification-before-HLT lost-wakeup window.
     pub(crate) fn wait_remote_quiescent(&self, self_cpu: usize) {
+        debug_assert!(
+            !crate::kernel::smp_lock::held_by_current_cpu(),
+            "vmm: exec quiescence must not HLT while holding the BKL"
+        );
         self.quiescence_waiter.store(self_cpu as u64, Ordering::Release);
         let self_bit = 1u64 << self_cpu;
         while self.active_cpus() & !self_bit != 0 {

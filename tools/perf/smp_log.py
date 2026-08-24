@@ -16,6 +16,11 @@ def number(value, default=0.0):
     try: return float(value)
     except (TypeError, ValueError): return default
 
+def optional_number(value):
+    if value is None: return None
+    try: return float(value)
+    except (TypeError, ValueError): return None
+
 def _decode_log(path):
     raw = Path(path).read_bytes()
     if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
@@ -42,7 +47,8 @@ def parse(path):
             smp.append(sample)
         elif "[PROC-SAMPLE]" in line: proc.append(fields(line))
         elif "[APP-SAMPLE]" in line: app.append(fields(line))
-        elif "PERF_" in line: perf.append((line.strip(), fields(line)))
+        elif "PERF_" in line or "[MM-NG6]" in line:
+            perf.append((line.strip(), fields(line)))
     return smp, proc, perf, app
 
 def summarize(path):
@@ -72,11 +78,20 @@ def summarize(path):
         d["rss"] = max(d["rss"], number(entry.get("rss")))
         d["ctx"] += number(entry.get("ctx_delta")); d["mig"] += number(entry.get("mig_delta"))
     click_to_paint = None
+    mm_lifetime = {}
     for line, f in perf:
         if "PERF_FIRST_PAINT" in line and number(f.get("since_click_ms")) > 0: click_to_paint = number(f["since_click_ms"])
+        if "[MM-NG6]" in line: mm_lifetime = f
     return {"duration":duration,"total_cpu_avg":total_avg,"cores_avg":core_avg,"imbalance_avg":imbalance,
       "ctx_s":rate("ctx"),"mig_s":rate("mig"),"steal_try_s":rate("steal_try"),"steal_ok_s":rate("steal_ok"),
       "steal_success_pct":100*sums["steal_ok"]/sums["steal_try"] if sums["steal_try"] else 0,
       "rej_bal_s":rate("rej_bal"),"rej_aff_s":rate("rej_aff"),"bkl_wait_ms_s":rate("bkl_wait")/1e6,
       "bkl_hold_ms_s":rate("bkl_hold")/1e6,"pf_s":rate("pf"),"tlb_s":rate("tlb"),"processes":processes,
-      "click_first_paint_ms":click_to_paint,"applications":applications}
+      "click_first_paint_ms":click_to_paint,"applications":applications,
+      "mm_lifetime": {key: optional_number(mm_lifetime.get(key)) for key in (
+        "fault_resolved", "fault_retry", "fault_invalid", "fault_io_error", "fault_retired",
+        "fault_retry_yields", "fault_retry_max_chain", "fault_registry_current",
+        "fault_registry_peak", "clean_cache_entries", "clean_cache_reclaimable",
+        "shared_cache_nodes", "shared_cache_pages", "shared_cache_orphans",
+        "pf_bkl_enters", "waitq_bkl_enters", "waitq_bkl_wait_ns", "ramfs_bkl_enters",
+        "exec_wait_ns", "exec_max_ns", "ata_acquires", "ata_wait_ns", "ata_max_ns")}}

@@ -71,7 +71,7 @@ impl Surface {
         surface.frames.reserve(pages);
         for numero in 0..pages {
             match partage::page(node, numero as u64) {
-                Some(frame) => surface.frames.push(frame),
+                Some(lease) => surface.frames.push(lease.frame()),
                 None => {
                     crate::kernel::dmesg::log_fmt(format_args!(
                         "gui: surface {}x{} refusee, memoire physique insuffisante",

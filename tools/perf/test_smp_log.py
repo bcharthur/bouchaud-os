@@ -26,4 +26,19 @@ class LogEncodingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 parse(path)
 
+    def test_mm_lifetime_absent_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "old.log"
+            path.write_text(SAMPLE, encoding="utf-8")
+            self.assertIsNone(summarize(path)["mm_lifetime"]["fault_registry_peak"])
+
+    def test_mm_lifetime_fields_are_parsed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ng6.log"
+            path.write_text(SAMPLE + "[MM-NG6] fault_retry=7 fault_registry_current=2 fault_registry_peak=9 ata_wait_ns=44\n", encoding="utf-8")
+            lifetime = summarize(path)["mm_lifetime"]
+            self.assertEqual(lifetime["fault_retry"], 7)
+            self.assertEqual(lifetime["fault_registry_peak"], 9)
+            self.assertIsNone(lifetime["exec_max_ns"])
+
 if __name__ == "__main__": unittest.main()

@@ -6,6 +6,7 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::kernel::sync::{SpinLock, WaitQueue};
 use crate::kernel::vmm::{self, PAGE_SIZE};
@@ -21,6 +22,40 @@ struct SharedPage {
     numero: u64,
     state: SpinLock<SharedPageState>,
     waiters: WaitQueue,
+    pins: AtomicUsize,
+}
+
+fn pin_page(page: &SharedPage) {
+    page.pins.fetch_update(Ordering::AcqRel, Ordering::Acquire, |pins| {
+        pins.checked_add(1)
+    }).expect("shared cache: transient pin overflow");
+}
+
+struct SharedPagePin {
+    node: usize,
+    page: Arc<SharedPage>,
+}
+
+impl Drop for SharedPagePin {
+    fn drop(&mut self) {
+        let previous = self.page.pins.fetch_sub(1, Ordering::AcqRel);
+        assert!(previous != 0, "shared cache: transient pin underflow");
+        if previous == 1 {
+            evince_si_orphelin(self.node);
+        }
+    }
+}
+
+/// A frame may only be observed while this lease pins its SharedPage. The
+/// node's durable mapping/open reference must be established before dropping
+/// the lease after `map_foreign`.
+pub struct SharedPageLease {
+    pin: SharedPagePin,
+    frame: u64,
+}
+
+impl SharedPageLease {
+    pub fn frame(&self) -> u64 { self.frame }
 }
 
 struct Partagee {
@@ -107,7 +142,7 @@ pub fn demappe(node: usize) {
 ///
 /// A registry miss publishes `Loading` before allocation and I/O. Contenders
 /// clone the stable page object, drop every spin lock, and sleep on its queue.
-pub fn page(node: usize, numero: u64) -> Option<u64> {
+pub fn page(node: usize, numero: u64) -> Option<SharedPageLease> {
     let (page, loader) = loop {
         let result = {
             let mut cache = CACHE.lock();
@@ -117,12 +152,14 @@ pub fn page(node: usize, numero: u64) -> Option<u64> {
             } else if let Some(page) = cache[index]
                 .pages.iter().find(|page| page.numero == numero)
             {
+                pin_page(page);
                 Ok((Arc::clone(page), false))
             } else {
                 let page = Arc::new(SharedPage {
                     numero,
                     state: SpinLock::new(SharedPageState::Loading),
                     waiters: WaitQueue::new(),
+                    pins: AtomicUsize::new(1),
                 });
                 cache[index].pages.push(Arc::clone(&page));
                 Ok((page, true))
@@ -133,6 +170,7 @@ pub fn page(node: usize, numero: u64) -> Option<u64> {
             Err((queue, ticket)) => queue.wait(ticket),
         }
     };
+    let pin = SharedPagePin { node, page: Arc::clone(&page) };
 
     if loader {
         let result = vmm::alloc_frame().and_then(|frame| {
@@ -163,14 +201,14 @@ pub fn page(node: usize, numero: u64) -> Option<u64> {
         // was outside CACHE doing I/O. Re-run orphan collection now; otherwise
         // no later lifecycle event is guaranteed to reclaim the frame.
         evince_si_orphelin(node);
-        return result;
+        return result.map(|frame| SharedPageLease { pin, frame });
     }
 
     loop {
         let ticket = page.waiters.ticket();
         let state = page.state.lock();
         match *state {
-            SharedPageState::Present(frame) => return Some(frame),
+            SharedPageState::Present(frame) => return Some(SharedPageLease { pin, frame }),
             SharedPageState::Failed => return None,
             SharedPageState::Loading => {
                 drop(state);
@@ -254,6 +292,9 @@ fn evince_si_orphelin(node: usize) {
         if cache[index].ouverts != 0 || cache[index].mappages != 0 {
             return;
         }
+        if cache[index].pages.iter().any(|page| page.pins.load(Ordering::Acquire) != 0) {
+            return;
+        }
         // A caller still materialising a page will retry eviction when its
         // descriptor/mapping reference is eventually released.
         if cache[index].pages.iter().any(|page| {
@@ -303,6 +344,16 @@ fn evince_si_orphelin(node: usize) {
 pub fn statistiques() -> (usize, usize) {
     let cache = CACHE.lock();
     (cache.len(), cache.iter().map(|entry| entry.pages.len()).sum())
+}
+
+/// (nodes, pages, nodes without durable refs that await a loader/pin).
+pub fn lifetime_stats() -> (usize, usize, usize) {
+    let cache = CACHE.lock();
+    let pages = cache.iter().map(|entry| entry.pages.len()).sum();
+    let orphans = cache.iter().filter(|entry| {
+        entry.ouverts == 0 && entry.mappages == 0 && !entry.evicting
+    }).count();
+    (cache.len(), pages, orphans)
 }
 
 pub fn etat(node: usize) -> Option<(usize, usize, usize)> {
