@@ -1280,14 +1280,9 @@ fn running_count_cpu(cpu: usize) -> usize {
 }
 
 fn queue_pressure(cpu_id: usize) -> usize {
-    tasks().iter()
-        .filter(|t| {
-            t.state == TaskState::Ready
-                && t.on_cpu < 0
-                && t.runq_cpu as usize == cpu_id
-                && allowed_on(t, cpu_id)
-        })
-        .count()
+    crate::arch::x86_64::cpu_local::CpuId::from_index(cpu_id)
+        .map(|id| crate::arch::x86_64::cpu_local::local(id).run_queue_len())
+        .unwrap_or(0)
 }
 
 /// Placement initial d'un THREAD. Le score combine pression de runqueue,
@@ -1316,6 +1311,26 @@ fn choose_runq_cpu(mask: u64) -> u8 {
         }
     }
     best_cpu as u8
+}
+
+/// Publish a Ready task exactly once to its owning physical runqueue and wake
+/// only that CPU when it is halted.
+fn publish_ready(index: usize) {
+    if index >= tasks().len() || tasks()[index].state != TaskState::Ready
+        || tasks()[index].on_cpu >= 0
+    {
+        return;
+    }
+    let target = if allowed_on(&tasks()[index], tasks()[index].runq_cpu as usize) {
+        tasks()[index].runq_cpu as usize
+    } else {
+        choose_runq_cpu(tasks()[index].affinity_mask) as usize
+    };
+    tasks()[index].runq_cpu = target as u8;
+    if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(target) {
+        crate::arch::x86_64::cpu_local::local(id).enqueue(index);
+    }
+    if cpu::is_idle(target) { smp::reschedule_cpu(target); }
 }
 
 /// Ajoute une tache a la table et renvoie son indice. En SMP les indices ne
@@ -1372,12 +1387,7 @@ pub fn register(mut task: Box<Task>) -> usize {
         );
     }
 
-    smp::broadcast_reschedule();
-    if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(
-        tasks()[index].runq_cpu as usize,
-    ) {
-        crate::arch::x86_64::cpu_local::local(id).enqueue(index);
-    }
+    publish_ready(index);
     index
 }
 
@@ -1639,7 +1649,7 @@ fn runnable_steal(task: &Task, cpu: usize) -> bool {
         && allowed_on(task, cpu)
 }
 
-fn pick_next(after: usize, cpu: usize) -> Option<usize> {
+fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
     let len = tasks().len();
     if len == 0 { return None; }
 
@@ -1650,58 +1660,11 @@ fn pick_next(after: usize, cpu: usize) -> Option<usize> {
                 return Some(index);
             }
         }
-        // Transition NG3: les anciens callsites de wake ne connaissent pas
-        // encore tous RunQueue. On reconcilie sous BKL, sans doublon, puis les
-        // prochains choix consomment exclusivement la queue locale.
-        for index in 0..len {
-            if runnable_local(&tasks()[index], cpu) {
-                local.enqueue(index);
-            }
-        }
-        while let Some(index) = local.dequeue() {
-            if index < len && runnable_local(&tasks()[index], cpu) {
-                return Some(index);
-            }
-        }
-    }
-
-    let start = if after == NO_TASK { 0 } else { after % len };
-    let tours = TOURS_INTERACTIFS[cpu].load(Ordering::Relaxed);
-    let force_partage = tours >= TOURS_INTERACTIFS_MAX;
-
-    if !force_partage {
-        for offset in 1..=len {
-            let index = (start.wrapping_add(offset)) % len;
-            let candidate = &tasks()[index];
-            if runnable_local(candidate, cpu)
-                && candidate.priorite == Priorite::Interactive
-            {
-                TOURS_INTERACTIFS[cpu].fetch_add(1, Ordering::Relaxed);
-                return Some(index);
-            }
-        }
-    }
-
-    for offset in 1..=len {
-        let index = (start.wrapping_add(offset)) % len;
-        if runnable_local(&tasks()[index], cpu) {
-            if tasks()[index].priorite == Priorite::Normale {
-                TOURS_INTERACTIFS[cpu].store(0, Ordering::Relaxed);
-            } else {
-                TOURS_INTERACTIFS[cpu].fetch_add(1, Ordering::Relaxed);
-            }
-            return Some(index);
-        }
     }
 
     let mut pressure = [0usize; MAX_CPUS];
-    for task in tasks().iter() {
-        if task.state == TaskState::Ready && task.on_cpu < 0 {
-            let owner = task.runq_cpu as usize;
-            if owner < MAX_CPUS {
-                pressure[owner] = pressure[owner].saturating_add(1);
-            }
-        }
+    for owner in 0..smp::schedulable_cpus().min(MAX_CPUS) {
+        pressure[owner] = queue_pressure(owner);
     }
 
     STEAL_ATTEMPTS[cpu].fetch_add(1, Ordering::Relaxed);
@@ -1720,33 +1683,28 @@ fn pick_next(after: usize, cpu: usize) -> Option<usize> {
 
     const MIN_MIGRATION_RESIDENCY_NS: u64 = 20_000_000;
     let now = crate::kernel::timer::monotonic_ns();
-    let mut best: Option<(usize, u64)> = None;
-    for offset in 1..=len {
-        let index = (start.wrapping_add(offset)) % len;
-        let candidate = &tasks()[index];
-        if !runnable_steal(candidate, cpu) || candidate.runq_cpu as usize != donor {
-            continue;
-        }
+    let Some(donor_id) = crate::arch::x86_64::cpu_local::CpuId::from_index(donor) else {
+        return None;
+    };
+    let donor_queue = crate::arch::x86_64::cpu_local::local(donor_id);
+    let Some(index) = donor_queue.steal() else { return None; };
+    let candidate = &tasks()[index];
+    if !runnable_steal(candidate, cpu) || candidate.runq_cpu as usize != donor {
+        donor_queue.enqueue(index);
+        return None;
+    }
+    {
         if candidate.last_migration_ns != 0
             && now.saturating_sub(candidate.last_migration_ns) < MIN_MIGRATION_RESIDENCY_NS
         {
             STEAL_REJECT_AFFINITY[cpu].fetch_add(1, Ordering::Relaxed);
-            continue;
-        }
-        // Préférer une tâche qui a réellement consommé du CPU: déplacer un
-        // waiter qui se rendort immédiatement ne corrige aucune imbalance.
-        if best.map_or(true, |(_, old_weight)| candidate.recent_runtime_ns > old_weight) {
-            best = Some((index, candidate.recent_runtime_ns));
+            donor_queue.enqueue(index);
+            return None;
         }
     }
-
-    if let Some((index, _)) = best {
-        tasks()[index].runq_cpu = cpu as u8;
-        RUNQ_STEALS[cpu].fetch_add(1, Ordering::Relaxed);
-        return Some(index);
-    }
-
-    None
+    tasks()[index].runq_cpu = cpu as u8;
+    RUNQ_STEALS[cpu].fetch_add(1, Ordering::Relaxed);
+    Some(index)
 }
 
 /// Change la classe d'ordonnancement du processus courant.
@@ -1895,6 +1853,11 @@ fn switch_to(from: usize, to: usize) {
             (*from_ptr).on_cpu = -1;
             (*from_ptr).last_cpu = cpu_id as u8;
             (*from_ptr).runq_cpu = cpu_id as u8;
+            if (*from_ptr).state == TaskState::Ready {
+                if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu_id) {
+                    crate::arch::x86_64::cpu_local::local(id).enqueue(from);
+                }
+            }
         }
         mark_task_running(&mut *to_ptr, cpu_id);
 
@@ -2128,12 +2091,12 @@ fn notify_parent_of_exit() {
     if !is_zombie || parent_pid == 0 {
         return;
     }
-    for task in tasks().iter_mut() {
-        if task.state == TaskState::Zombie {
+    for index in 0..tasks().len() {
+        if tasks()[index].state == TaskState::Zombie {
             continue;
         }
         let matches = {
-            let mut process = task.process.borrow_mut();
+            let mut process = tasks()[index].process.borrow_mut();
             if process.pid == parent_pid {
                 process.signals.raise(crate::kernel::signal::SIGCHLD);
                 true
@@ -2141,9 +2104,10 @@ fn notify_parent_of_exit() {
                 false
             }
         };
-        if matches && task.waiting_for_child {
-            task.waiting_for_child = false;
-            task.state = TaskState::Ready;
+        if matches && tasks()[index].waiting_for_child {
+            tasks()[index].waiting_for_child = false;
+            tasks()[index].state = TaskState::Ready;
+            publish_ready(index);
         }
     }
 }
@@ -2402,13 +2366,16 @@ pub fn terminate_sibling_threads() {
 /// Reveille les taches d'un processus qui dorment, pour qu'elles constatent
 /// un signal en attente.
 pub fn wake_for_signal(pid: u32) {
-    for task in tasks().iter_mut() {
-        if task.state == TaskState::Blocked && task.process.borrow().pid == pid {
-            task.futex_key = 0;
-            task.wait_queue_key = 0;
-            task.wake_deadline_ns = 0;
-            task.waiting_for_child = false;
-            task.state = TaskState::Ready;
+    for index in 0..tasks().len() {
+        if tasks()[index].state == TaskState::Blocked
+            && tasks()[index].process.borrow().pid == pid
+        {
+            tasks()[index].futex_key = 0;
+            tasks()[index].wait_queue_key = 0;
+            tasks()[index].wake_deadline_ns = 0;
+            tasks()[index].waiting_for_child = false;
+            tasks()[index].state = TaskState::Ready;
+            publish_ready(index);
         }
     }
 }
@@ -2431,18 +2398,18 @@ pub(crate) fn park_current_on(wait_queue_key: usize) {
 pub(crate) fn wake_wait_queue(wait_queue_key: usize, limit: usize) -> usize {
     let _kernel = smp_lock::enter();
     let mut woke = 0;
-    for task in tasks().iter_mut() {
+    for index in 0..tasks().len() {
         if woke == limit {
             break;
         }
-        if task.state == TaskState::Blocked && task.wait_queue_key == wait_queue_key {
-            task.wait_queue_key = 0;
-            task.state = TaskState::Ready;
+        if tasks()[index].state == TaskState::Blocked
+            && tasks()[index].wait_queue_key == wait_queue_key
+        {
+            tasks()[index].wait_queue_key = 0;
+            tasks()[index].state = TaskState::Ready;
+            publish_ready(index);
             woke += 1;
         }
-    }
-    if woke != 0 {
-        smp::broadcast_reschedule();
     }
     woke
 }
@@ -2531,6 +2498,11 @@ pub fn preempt_from_irq() {
         (*from_ptr).on_cpu = -1;
         (*from_ptr).last_cpu = cpu_id as u8;
         (*from_ptr).runq_cpu = cpu_id as u8;
+        if (*from_ptr).state == TaskState::Ready {
+            if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu_id) {
+                crate::arch::x86_64::cpu_local::local(id).enqueue(cur);
+            }
+        }
         mark_task_running(&mut *to_ptr, cpu_id);
 
         set_current_index(next);
@@ -3012,20 +2984,18 @@ pub fn sleep_ticks(ticks: u64) {
 /// Reveille les taches dont le sommeil est echu, et declenche les `SIGALRM`.
 fn wake_sleepers() {
     let now = crate::kernel::timer::monotonic_ns();
-    let mut woke = false;
-    for task in tasks().iter_mut() {
-        if task.state == TaskState::Blocked
-            && task.wake_deadline_ns != 0
-            && now >= task.wake_deadline_ns
+    for index in 0..tasks().len() {
+        if tasks()[index].state == TaskState::Blocked
+            && tasks()[index].wake_deadline_ns != 0
+            && now >= tasks()[index].wake_deadline_ns
         {
-            task.wake_deadline_ns = 0;
-            task.futex_key = 0;
-            task.state = TaskState::Ready;
-            woke = true;
+            tasks()[index].wake_deadline_ns = 0;
+            tasks()[index].futex_key = 0;
+            tasks()[index].state = TaskState::Ready;
+            publish_ready(index);
         }
     }
     fire_alarms(now);
-    if woke { smp::broadcast_reschedule(); }
 }
 
 /// Echeance du prochain `SIGALRM` par processus : (pid, tick).
@@ -3172,19 +3142,17 @@ pub fn futex_wait(uaddr: u64, expected: u32, timeout_ms: u64) -> bool {
 pub fn futex_wake(uaddr: u64, count: u32) -> u32 {
     let key = futex_key(uaddr);
     let mut woken = 0;
-    for task in tasks().iter_mut() {
+    for index in 0..tasks().len() {
         if woken >= count {
             break;
         }
-        if task.state == TaskState::Blocked && task.futex_key == key {
-            task.futex_key = 0;
-            task.wake_deadline_ns = 0;
-            task.state = TaskState::Ready;
+        if tasks()[index].state == TaskState::Blocked && tasks()[index].futex_key == key {
+            tasks()[index].futex_key = 0;
+            tasks()[index].wake_deadline_ns = 0;
+            tasks()[index].state = TaskState::Ready;
+            publish_ready(index);
             woken += 1;
         }
-    }
-    if woken > 0 {
-        smp::broadcast_reschedule();
     }
     woken
 }

@@ -159,6 +159,18 @@ pub fn load_snapshot() -> [u8; smp::MAX_CPUS] {
     out
 }
 
+pub fn is_idle(cpu: usize) -> bool {
+    cpu < smp::MAX_CPUS && IDLE[cpu].load(Ordering::Acquire)
+}
+
+pub fn idle_mask() -> u64 {
+    let mut mask = 0u64;
+    for cpu in 0..smp::schedulable_cpus().min(64) {
+        if is_idle(cpu) { mask |= 1u64 << cpu; }
+    }
+    mask
+}
+
 pub fn halt_loop() -> ! {
     loop { unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)); } }
 }

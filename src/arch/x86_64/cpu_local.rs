@@ -247,6 +247,15 @@ impl CpuLocal {
         self.run_queue.lock().pop()
     }
 
+    pub fn remove(&self, task: usize) -> bool {
+        let mut queue = self.run_queue.lock();
+        let Some(index) = queue.iter().position(|candidate| *candidate == task) else {
+            return false;
+        };
+        queue.remove(index);
+        true
+    }
+
     pub fn run_queue_len(&self) -> usize {
         self.run_queue.lock().len()
     }

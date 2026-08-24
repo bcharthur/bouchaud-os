@@ -223,6 +223,29 @@ pub fn broadcast_reschedule() {
     unsafe { send_all_excluding_self(RESCHEDULE_VECTOR as u32) };
 }
 
+/// Wake one logical CPU. Normal task wakeups use this path; broadcasts are
+/// reserved for exceptional machine-wide state changes.
+pub fn reschedule_cpu(cpu: usize) {
+    if cpu >= schedulable_cpus() || cpu == cpu_index() {
+        return;
+    }
+    let Some(id) = cpu_local::CpuId::from_index(cpu) else { return; };
+    let Some(target) = cpu_local::descriptor(id) else { return; };
+    unsafe {
+        let (x2, lapic) = local_apic();
+        if x2 {
+            usermode::write_msr(
+                X2APIC_ICR,
+                ((target.apic_id as u64) << 32) | RESCHEDULE_VECTOR as u64,
+            );
+        } else {
+            lapic_write(lapic, LAPIC_ICR_HIGH, (target.legacy_apic_id as u32) << 24);
+            lapic_write(lapic, LAPIC_ICR_LOW, RESCHEDULE_VECTOR as u32);
+            wait_xapic_delivery(lapic);
+        }
+    }
+}
+
 fn tsc_deadline_supported() -> bool {
     __cpuid(1).ecx & (1 << 24) != 0 && crate::kernel::timer::tsc_hz().is_some()
 }

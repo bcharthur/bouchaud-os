@@ -10,7 +10,9 @@
 
 use crate::drivers::ata::{Drive, SECTOR_SIZE};
 use crate::drivers::block;
+use crate::kernel::sync::SpinLock;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Copy)]
 struct DiskExtent {
@@ -20,11 +22,11 @@ struct DiskExtent {
     size: usize,
 }
 
-static mut EXTENTS: Option<Vec<DiskExtent>> = None;
-static mut DISK_READ_OPS: u64 = 0;
-static mut DISK_READ_BYTES: u64 = 0;
-static mut CACHE_HITS: u64 = 0;
-static mut READAHEAD_HITS: u64 = 0;
+static EXTENTS: SpinLock<Vec<DiskExtent>> = SpinLock::new(Vec::new());
+static DISK_READ_OPS: AtomicU64 = AtomicU64::new(0);
+static DISK_READ_BYTES: AtomicU64 = AtomicU64::new(0);
+static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static READAHEAD_HITS: AtomicU64 = AtomicU64::new(0);
 const READAHEAD_BYTES: usize = 16 * 1024;
 const CACHE_ENTRIES_MAX: usize = 256;
 
@@ -35,33 +37,20 @@ struct ReadCacheEntry {
     data: Vec<u8>,
     prefetched_from: usize,
 }
-static mut READ_CACHE: Option<Vec<ReadCacheEntry>> = None;
-
-fn read_cache() -> &'static mut Vec<ReadCacheEntry> {
-    unsafe { (&mut *core::ptr::addr_of_mut!(READ_CACHE)).get_or_insert_with(Vec::new) }
-}
-
-fn extents() -> &'static mut Vec<DiskExtent> {
-    unsafe {
-        let slot = &mut *core::ptr::addr_of_mut!(EXTENTS);
-        slot.get_or_insert_with(Vec::new)
-    }
-}
+static READ_CACHE: SpinLock<Vec<ReadCacheEntry>> = SpinLock::new(Vec::new());
 
 pub fn reset() {
-    unsafe {
-        EXTENTS = Some(Vec::new());
-        DISK_READ_OPS = 0;
-        DISK_READ_BYTES = 0;
-        CACHE_HITS = 0;
-        READAHEAD_HITS = 0;
-        READ_CACHE = Some(Vec::new());
-    }
+    EXTENTS.lock().clear();
+    READ_CACHE.lock().clear();
+    DISK_READ_OPS.store(0, Ordering::Relaxed);
+    DISK_READ_BYTES.store(0, Ordering::Relaxed);
+    CACHE_HITS.store(0, Ordering::Relaxed);
+    READAHEAD_HITS.store(0, Ordering::Relaxed);
 }
 
 pub fn register_disk(node: usize, drive: Drive, data_lba: u64, size: usize) {
     unregister(node);
-    extents().push(DiskExtent {
+    EXTENTS.lock().push(DiskExtent {
         node,
         drive,
         data_lba,
@@ -70,8 +59,8 @@ pub fn register_disk(node: usize, drive: Drive, data_lba: u64, size: usize) {
 }
 
 pub fn unregister(node: usize) {
-    extents().retain(|extent| extent.node != node);
-    read_cache().retain(|entry| entry.node != node);
+    EXTENTS.lock().retain(|extent| extent.node != node);
+    READ_CACHE.lock().retain(|entry| entry.node != node);
 }
 
 pub fn is_disk_backed(node: usize) -> bool {
@@ -79,7 +68,7 @@ pub fn is_disk_backed(node: usize) -> bool {
 }
 
 pub fn disk_len(node: usize) -> Option<usize> {
-    extents()
+    EXTENTS.lock()
         .iter()
         .find(|extent| extent.node == node)
         .map(|extent| extent.size)
@@ -98,7 +87,8 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
         return 0;
     }
 
-    let extent = match extents().iter().find(|extent| extent.node == node).copied() {
+    // Copy metadata under the cache lock, then release it before any disk I/O.
+    let extent = match EXTENTS.lock().iter().find(|extent| extent.node == node).copied() {
         Some(extent) => extent,
         None => {
             let fs = crate::fs::ramfs::fs();
@@ -147,10 +137,8 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
         done += got;
         absolute += got;
         if read != full_sectors {
-            unsafe {
-                DISK_READ_OPS = DISK_READ_OPS.saturating_add(1);
-                DISK_READ_BYTES = DISK_READ_BYTES.saturating_add(done as u64);
-            }
+            DISK_READ_OPS.fetch_add(1, Ordering::Relaxed);
+            DISK_READ_BYTES.fetch_add(done as u64, Ordering::Relaxed);
             return done;
         }
     }
@@ -165,10 +153,8 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
         }
     }
 
-    unsafe {
-        DISK_READ_OPS = DISK_READ_OPS.saturating_add(1);
-        DISK_READ_BYTES = DISK_READ_BYTES.saturating_add(done as u64);
-    }
+    DISK_READ_OPS.fetch_add(1, Ordering::Relaxed);
+    DISK_READ_BYTES.fetch_add(done as u64, Ordering::Relaxed);
     done
 }
 
@@ -183,17 +169,20 @@ pub fn read_at(node: usize, offset: usize, out: &mut [u8]) -> usize {
     if out.is_empty() || !is_disk_backed(node) || out.len() > READAHEAD_BYTES {
         return read_at_uncached(node, offset, out);
     }
-    if let Some(entry) = read_cache().iter().find(|entry| {
-        entry.node == node && offset >= entry.base
-            && offset.saturating_add(out.len()) <= entry.base.saturating_add(entry.valid)
-    }) {
-        let start = offset - entry.base;
-        out.copy_from_slice(&entry.data[start..start + out.len()]);
-        unsafe {
-            CACHE_HITS = CACHE_HITS.saturating_add(1);
-            if offset >= entry.prefetched_from { READAHEAD_HITS = READAHEAD_HITS.saturating_add(1); }
+    {
+        let cache = READ_CACHE.lock();
+        if let Some(entry) = cache.iter().find(|entry| {
+            entry.node == node && offset >= entry.base
+                && offset.saturating_add(out.len()) <= entry.base.saturating_add(entry.valid)
+        }) {
+            let start = offset - entry.base;
+            out.copy_from_slice(&entry.data[start..start + out.len()]);
+            CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+            if offset >= entry.prefetched_from {
+                READAHEAD_HITS.fetch_add(1, Ordering::Relaxed);
+            }
+            return out.len();
         }
-        return out.len();
     }
 
     let base = offset & !(READAHEAD_BYTES - 1);
@@ -205,7 +194,8 @@ pub fn read_at(node: usize, offset: usize, out: &mut [u8]) -> usize {
     let start = offset - base;
     let copied = core::cmp::min(out.len(), valid - start);
     out[..copied].copy_from_slice(&data[start..start + copied]);
-    let cache = read_cache();
+    // Publication is short; the global cache lock is never held during I/O.
+    let mut cache = READ_CACHE.lock();
     if cache.len() >= CACHE_ENTRIES_MAX { cache.remove(0); }
     cache.push(ReadCacheEntry {
         node,
@@ -219,12 +209,21 @@ pub fn read_at(node: usize, offset: usize, out: &mut [u8]) -> usize {
 
 /// (hits cache, hits read-ahead).
 pub fn cache_stats() -> (u64, u64) {
-    unsafe { (CACHE_HITS, READAHEAD_HITS) }
+    (
+        CACHE_HITS.load(Ordering::Relaxed),
+        READAHEAD_HITS.load(Ordering::Relaxed),
+    )
 }
 
 /// (fichiers paresseux, octets logiques, operations disque, octets lus).
 pub fn stats() -> (usize, u64, u64, u64) {
-    let files = extents().len();
-    let logical = extents().iter().map(|extent| extent.size as u64).sum();
-    unsafe { (files, logical, DISK_READ_OPS, DISK_READ_BYTES) }
+    let extents = EXTENTS.lock();
+    let files = extents.len();
+    let logical = extents.iter().map(|extent| extent.size as u64).sum();
+    (
+        files,
+        logical,
+        DISK_READ_OPS.load(Ordering::Relaxed),
+        DISK_READ_BYTES.load(Ordering::Relaxed),
+    )
 }
