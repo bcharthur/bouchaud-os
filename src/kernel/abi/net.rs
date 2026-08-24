@@ -24,9 +24,9 @@
 //! d'ecoute reclamerait d'abord une reception en tache de fond. C'est signale
 //! par `ENOSYS` plutot que simule.
 
-use alloc::rc::Rc;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::cell::RefCell;
+use crate::kernel::sync::SpinLock;
 
 use crate::kernel::abi::{errno, user_read, user_write};
 use crate::kernel::fd::{FdKind, FileDesc};
@@ -154,8 +154,8 @@ fn write_sockaddr(addr: u64, len_addr: u64, ip: Ipv4Addr, port: u16) -> bool {
 /// tourne sous Bouchaud OS.
 fn est_paire(fd: i32) -> bool {
     let process = task::current_process();
-    let borrowed = process.borrow();
-    matches!(borrowed.files.get(fd).map(|desc| &desc.kind),
+    let borrowed = process.files.lock();
+    matches!(borrowed.get(fd).map(|desc| &desc.kind),
              Some(FdKind::SocketPair(_, _)))
 }
 
@@ -166,17 +166,17 @@ fn est_paire(fd: i32) -> bool {
 /// vivent dans `FileDesc::flags`.
 fn fd_non_bloquant(fd: i32) -> bool {
     let process = task::current_process();
-    let borrowed = process.borrow();
-    borrowed.files.get(fd)
+    let borrowed = process.files.lock();
+    borrowed.get(fd)
         .map(|desc| desc.flags & O_NONBLOCK != 0)
         .unwrap_or(false)
 }
 
 /// Recupere l'etat d'un socket depuis son descripteur.
-fn socket_of(fd: i32) -> Result<Rc<RefCell<SocketState>>, i64> {
+fn socket_of(fd: i32) -> Result<Arc<SpinLock<SocketState>>, i64> {
     let process = task::current_process();
-    let borrowed = process.borrow();
-    match borrowed.files.get(fd) {
+    let borrowed = process.files.lock();
+    match borrowed.get(fd) {
         Some(desc) => match &desc.kind {
             FdKind::Socket(state) => Ok(state.clone()),
             _ => Err(-errno::ENOTSOCK),
@@ -207,10 +207,10 @@ pub fn sys_socket(domain: u32, kind: u32, _protocol: u32) -> i64 {
 
     let mut state = SocketState::new(socket_kind);
     state.nonblocking = nonblocking;
-    let mut desc = FileDesc::new(FdKind::Socket(Rc::new(RefCell::new(state))));
+    let mut desc = FileDesc::new(FdKind::Socket(Arc::new(SpinLock::new(state))));
     desc.cloexec = cloexec;
     let process = task::current_process();
-    let fd = process.borrow_mut().files.insert(desc);
+    let fd = process.files.lock().insert(desc);
     fd as i64
 }
 
@@ -225,11 +225,11 @@ pub fn sys_connect(fd: i32, addr: u64, len: usize) -> i64 {
         None => return -errno::EAFNOSUPPORT,
     };
 
-    let kind = state.borrow().kind;
+    let kind = state.lock().kind;
     match kind {
         SocketKind::Udp => {
             // En UDP, `connect` ne fait que fixer la destination par defaut.
-            let mut borrowed = state.borrow_mut();
+            let mut borrowed = state.lock();
             borrowed.peer = Some((ip, port));
             if borrowed.local_port == 0 {
                 borrowed.local_port = ephemeral_port();
@@ -237,14 +237,14 @@ pub fn sys_connect(fd: i32, addr: u64, len: usize) -> i64 {
             0
         }
         SocketKind::Tcp => {
-            if state.borrow().conn.is_some() {
+            if state.lock().conn.is_some() {
                 return -errno::EISCONN;
             }
             // La poignee de main est synchrone : la pile est pilotee par
             // interrogation, il n'y a personne d'autre pour la faire avancer.
             match TcpConn::connect(ip, port) {
                 Some(conn) => {
-                    let mut borrowed = state.borrow_mut();
+                    let mut borrowed = state.lock();
                     borrowed.conn = Some(conn);
                     borrowed.peer = Some((ip, port));
                     0
@@ -262,7 +262,7 @@ pub fn sys_bind(fd: i32, addr: u64, len: usize) -> i64 {
         Err(code) => return code,
     };
     let port = read_sockaddr(addr, len).map(|(_, port)| port).unwrap_or(0);
-    let mut borrowed = state.borrow_mut();
+    let mut borrowed = state.lock();
     borrowed.local_port = if port == 0 { ephemeral_port() } else { port };
     0
 }
@@ -300,10 +300,10 @@ pub fn envoie_octets(fd: i32, data: &[u8], _flags: u32, addr: u64, addr_len: usi
         Ok(state) => state,
         Err(code) => return code,
     };
-    let kind = state.borrow().kind;
+    let kind = state.lock().kind;
     match kind {
         SocketKind::Tcp => {
-            let mut borrowed = state.borrow_mut();
+            let mut borrowed = state.lock();
             match borrowed.conn.as_mut() {
                 Some(conn) => {
                     if conn.send(&data) {
@@ -318,14 +318,14 @@ pub fn envoie_octets(fd: i32, data: &[u8], _flags: u32, addr: u64, addr_len: usi
         SocketKind::Udp => {
             let target = match read_sockaddr(addr, addr_len) {
                 Some(value) => Some(value),
-                None => state.borrow().peer,
+                None => state.lock().peer,
             };
             let (ip, port) = match target {
                 Some(value) => value,
                 None => return -errno::EDESTADDRREQ,
             };
             let source_port = {
-                let mut borrowed = state.borrow_mut();
+                let mut borrowed = state.lock();
                 if borrowed.local_port == 0 {
                     borrowed.local_port = ephemeral_port();
                 }
@@ -426,20 +426,20 @@ fn livre_datagramme(
     // On choisit la destination avant d'emprunter quoi que ce soit en
     // ecriture : un socket connecte a la source l'emporte sur un socket
     // simplement lie, comme le veut la specification des sockets.
-    let mut lie: Option<Rc<RefCell<SocketState>>> = None;
-    let mut connecte: Option<Rc<RefCell<SocketState>>> = None;
+    let mut lie: Option<Arc<SpinLock<SocketState>>> = None;
+    let mut connecte: Option<Arc<SpinLock<SocketState>>> = None;
     {
-        let emprunte = process.borrow();
-        for desc in emprunte.files.iter() {
+        let emprunte = process.files.lock();
+        for desc in emprunte.iter() {
             let socket = match &desc.kind {
                 FdKind::Socket(socket) => socket,
                 _ => continue,
             };
-            let (kind, local_port, peer) = match socket.try_borrow() {
-                Ok(etat) => (etat.kind, etat.local_port, etat.peer),
+            let (kind, local_port, peer) = match socket.try_lock() {
+                Some(etat) => (etat.kind, etat.local_port, etat.peer),
                 // Un socket deja emprunte en ecriture est celui qui nous a
                 // appeles ; ses champs sont ceux qu'on connait par ailleurs.
-                Err(_) => continue,
+                None => continue,
             };
             if kind != SocketKind::Udp || local_port != entete.dst_port {
                 continue;
@@ -463,8 +463,8 @@ fn livre_datagramme(
     let connecte_trouve = connecte.is_some();
 
     match connecte.or(lie) {
-        Some(destination) => match destination.try_borrow_mut() {
-            Ok(mut etat) => {
+        Some(destination) => match destination.try_lock() {
+            Some(mut etat) => {
                 etat.datagrams
                     .push((source, entete.src_port, donnees.to_vec()));
                 if trace {
@@ -477,7 +477,7 @@ fn livre_datagramme(
             }
             // Le socket destinataire est deja emprunte : c'est celui qui nous a
             // appeles. Le datagramme est perdu, et il faut que cela se voie.
-            Err(_) => {
+            None => {
                 if trace {
                     crate::serial_println!(
                         "[ladybird-bouchaud] M17_UDP_PERDU_EMPRUNTE vers_port={} octets={}",
@@ -505,8 +505,8 @@ fn livre_datagramme(
 /// arriver — c'etait la boucle a plein processeur observee pendant l'attente
 /// d'une reponse DNS, et le motif pour lequel un `recvfrom` bloquant coutait
 /// cinq secondes de cœur au lieu de cinq secondes de sommeil.
-fn pump_udp(state: &Rc<RefCell<SocketState>>) {
-    if state.borrow().local_port == 0 {
+fn pump_udp(state: &Arc<SpinLock<SocketState>>) {
+    if state.lock().local_port == 0 {
         return;
     }
     let mut payload = [0u8; 2048];
@@ -560,9 +560,9 @@ pub fn sys_recvfrom(
         if fd_non_bloquant(fd) || flags & MSG_DONTWAIT != 0 {
             let vide = {
                 let process = task::current_process();
-                let borrowed = process.borrow();
-                match borrowed.files.get(fd).map(|desc| &desc.kind) {
-                    Some(FdKind::SocketPair(inbox, _)) => inbox.borrow().octets.is_empty(),
+                let borrowed = process.files.lock();
+                match borrowed.get(fd).map(|desc| &desc.kind) {
+                    Some(FdKind::SocketPair(inbox, _)) => inbox.lock().octets.is_empty(),
                     _ => return -errno::ENOTSOCK,
                 }
             };
@@ -582,7 +582,7 @@ pub fn sys_recvfrom(
         Err(code) => return code,
     };
     let (kind, nonblocking) = {
-        let borrowed = state.borrow();
+        let borrowed = state.lock();
         (
             borrowed.kind,
             borrowed.nonblocking || fd_non_bloquant(fd) || flags & MSG_DONTWAIT != 0,
@@ -591,7 +591,7 @@ pub fn sys_recvfrom(
 
     match kind {
         SocketKind::Tcp => {
-            let mut borrowed = state.borrow_mut();
+            let mut borrowed = state.lock();
             let conn = match borrowed.conn.as_mut() {
                 Some(conn) => conn,
                 None => return -errno::ENOTCONN,
@@ -619,7 +619,7 @@ pub fn sys_recvfrom(
             }
         }
         SocketKind::Udp => {
-            if state.borrow().datagrams.is_empty() {
+            if state.lock().datagrams.is_empty() {
                 pump_udp(&state);
             }
             // Attente bloquante : sur le temps, et en rendant le processeur.
@@ -629,9 +629,9 @@ pub fn sys_recvfrom(
             // n'avait choisie, en brulant un cœur pendant ce temps. On attend
             // desormais une duree nommee, et entre deux sondages on laisse
             // tourner les autres taches puis on dort jusqu'a une interruption.
-            if !nonblocking && state.borrow().datagrams.is_empty() {
+            if !nonblocking && state.lock().datagrams.is_empty() {
                 let echeance = crate::kernel::timer::monotonic_ms() + RECV_UDP_DELAI_MS;
-                while state.borrow().datagrams.is_empty()
+                while state.lock().datagrams.is_empty()
                     && crate::kernel::timer::monotonic_ms() < echeance
                 {
                     // Une autre tache a pu remplir l'anneau : re-sonder avant
@@ -642,7 +642,7 @@ pub fn sys_recvfrom(
                     pump_udp(&state);
                 }
             }
-            let datagram = state.borrow_mut().datagrams.pop();
+            let datagram = state.lock().datagrams.pop();
             match datagram {
                 None => {
                     if nonblocking {
@@ -816,7 +816,7 @@ pub fn sys_sendmsg(fd: i32, msghdr: u64, flags: u32) -> i64 {
     let a_passer = lit_descripteurs_envoyes(msghdr);
     if !a_passer.is_empty() {
         let process = task::current_process();
-        let sortant = match process.borrow().files.get(fd).map(|d| d.kind.clone()) {
+        let sortant = match process.files.lock().get(fd).map(|d| d.kind.clone()) {
             Some(FdKind::SocketPair(_, sortant)) => Some(sortant),
             // Passer un descripteur n'a de sens que sur un socket local.
             _ => return -errno::EINVAL,
@@ -827,9 +827,9 @@ pub fn sys_sendmsg(fd: i32, msghdr: u64, flags: u32) -> i64 {
                 // obtiendra un a lui, et l'emetteur garde le sien. C'est ce que
                 // dit la norme, et c'est ce qui evite qu'un envoi ferme un
                 // fichier sous les pieds de celui qui l'envoie.
-                let copie = process.borrow().files.get(*fd_source).cloned();
+                let copie = process.files.lock().get(*fd_source).cloned();
                 match copie {
-                    Some(desc) => canal.borrow_mut().descripteurs.push(desc),
+                    Some(desc) => canal.lock().descripteurs.push(desc),
                     None => return -errno::EBADF,
                 }
             }
@@ -842,13 +842,13 @@ pub fn sys_sendmsg(fd: i32, msghdr: u64, flags: u32) -> i64 {
     // pas parti, alors que les descripteurs, eux, etaient bien arrives.
     {
         let process = task::current_process();
-        let sortant = match process.borrow().files.get(fd).map(|d| d.kind.clone()) {
+        let sortant = match process.files.lock().get(fd).map(|d| d.kind.clone()) {
             Some(FdKind::SocketPair(_, sortant)) => Some(sortant),
             _ => None,
         };
         if let Some(canal) = sortant {
             let ecrits = payload.len();
-            canal.borrow_mut().octets.extend_from_slice(&payload);
+            canal.lock().octets.extend_from_slice(&payload);
             return ecrits as i64;
         }
     }
@@ -870,10 +870,10 @@ fn send_bytes(fd: i32, data: &[u8], addr: u64, addr_len: usize, _flags: u32) -> 
         Ok(state) => state,
         Err(code) => return code,
     };
-    let kind = state.borrow().kind;
+    let kind = state.lock().kind;
     match kind {
         SocketKind::Tcp => {
-            let mut borrowed = state.borrow_mut();
+            let mut borrowed = state.lock();
             match borrowed.conn.as_mut() {
                 Some(conn) => {
                     if conn.send(data) { data.len() as i64 } else { -errno::EPIPE }
@@ -884,14 +884,14 @@ fn send_bytes(fd: i32, data: &[u8], addr: u64, addr_len: usize, _flags: u32) -> 
         SocketKind::Udp => {
             let target = match read_sockaddr(addr, addr_len) {
                 Some(value) => Some(value),
-                None => state.borrow().peer,
+                None => state.lock().peer,
             };
             let (ip, port) = match target {
                 Some(value) => value,
                 None => return -errno::EDESTADDRREQ,
             };
             let source_port = {
-                let mut borrowed = state.borrow_mut();
+                let mut borrowed = state.lock();
                 if borrowed.local_port == 0 {
                     borrowed.local_port = ephemeral_port();
                 }
@@ -928,7 +928,7 @@ pub fn sys_recvmsg(fd: i32, msghdr: u64, flags: u32) -> i64 {
     // `recvmsg` qui ne recoit *que* des descripteurs — le cas courant — de les
     // rendre malgre un corps vide.
     let process = task::current_process();
-    let entrant = match process.borrow().files.get(fd).map(|d| d.kind.clone()) {
+    let entrant = match process.files.lock().get(fd).map(|d| d.kind.clone()) {
         Some(FdKind::SocketPair(entrant, _)) => Some(entrant),
         _ => None,
     };
@@ -940,13 +940,13 @@ pub fn sys_recvmsg(fd: i32, msghdr: u64, flags: u32) -> i64 {
         // doit conduire a `EAGAIN` immediatement si le canal est vide.
         let bloquant = !fd_non_bloquant(fd)
             && flags & MSG_DONTWAIT == 0;
-        if bloquant && canal.borrow().descripteurs.is_empty()
-            && canal.borrow().octets.is_empty()
+        if bloquant && canal.lock().descripteurs.is_empty()
+            && canal.lock().octets.is_empty()
         {
             let echeance = crate::kernel::timer::ticks()
                 + crate::kernel::timer::ms_to_ticks(2000);
-            while canal.borrow().descripteurs.is_empty()
-                && canal.borrow().octets.is_empty()
+            while canal.lock().descripteurs.is_empty()
+                && canal.lock().octets.is_empty()
                 && crate::kernel::timer::ticks() < echeance
             {
                 task::attends_un_tick();
@@ -954,9 +954,9 @@ pub fn sys_recvmsg(fd: i32, msghdr: u64, flags: u32) -> i64 {
         }
     }
     if let Some(canal) = entrant {
-        let recus: Vec<_> = canal.borrow_mut().descripteurs.drain(..).collect();
+        let recus: Vec<_> = canal.lock().descripteurs.drain(..).collect();
         for desc in recus {
-            let numero = process.borrow_mut().files.insert(desc);
+            let numero = process.files.lock().insert(desc);
             if numero >= 0 {
                 installes.push(numero);
             }
@@ -984,7 +984,7 @@ pub fn sys_shutdown(fd: i32, _how: u32) -> i64 {
         Ok(state) => state,
         Err(code) => return code,
     };
-    let mut borrowed = state.borrow_mut();
+    let mut borrowed = state.lock();
     if let Some(conn) = borrowed.conn.as_mut() {
         conn.close();
     }
@@ -1011,7 +1011,7 @@ pub fn sys_getsockname(fd: i32, addr: u64, len_addr: u64, peer: bool) -> i64 {
         Ok(state) => state,
         Err(code) => return code,
     };
-    let borrowed = state.borrow();
+    let borrowed = state.lock();
     let (ip, port) = if peer {
         match borrowed.peer {
             Some(value) => value,
@@ -1052,7 +1052,7 @@ pub fn sys_getsockopt(fd: i32, _level: u32, option: u32, value: u64, len_addr: u
         match option {
             // `connect` etant synchrone ici, il n'y a jamais d'erreur differee.
             SO_ERROR => 0,
-            SO_TYPE => match state.borrow().kind {
+            SO_TYPE => match state.lock().kind {
                 SocketKind::Tcp => SOCK_STREAM,
                 SocketKind::Udp => SOCK_DGRAM,
             },
@@ -1078,12 +1078,12 @@ pub fn sys_socketpair(_domain: u32, kind: u32, _protocol: u32, out: u64) -> i64 
 
     let process = task::current_process();
     let (first, second) = {
-        let mut borrowed = process.borrow_mut();
+        let mut borrowed = process.files.lock();
         let mut end_a = FileDesc::new(FdKind::SocketPair(b_to_a.clone(), a_to_b.clone()));
         let mut end_b = FileDesc::new(FdKind::SocketPair(a_to_b, b_to_a));
         end_a.cloexec = cloexec;
         end_b.cloexec = cloexec;
-        (borrowed.files.insert(end_a), borrowed.files.insert(end_b))
+        (borrowed.insert(end_a), borrowed.insert(end_b))
     };
     if !user_write(out, &first.to_le_bytes()) || !user_write(out + 4, &second.to_le_bytes()) {
         return -errno::EFAULT;
@@ -1097,11 +1097,11 @@ pub fn sys_listen_unsupported() -> i64 {
 }
 
 /// Un socket a-t-il des donnees a lire ? (pour `poll`/`select`)
-pub fn socket_readable(state: &Rc<RefCell<SocketState>>) -> bool {
-    let kind = state.borrow().kind;
+pub fn socket_readable(state: &Arc<SpinLock<SocketState>>) -> bool {
+    let kind = state.lock().kind;
     match kind {
         SocketKind::Tcp => {
-            let mut borrowed = state.borrow_mut();
+            let mut borrowed = state.lock();
             match borrowed.conn.as_mut() {
                 Some(conn) => {
                     if conn.rx.is_empty() && !conn.peer_fin && !conn.closed {
@@ -1118,10 +1118,10 @@ pub fn socket_readable(state: &Rc<RefCell<SocketState>>) -> bool {
             // `poll` demande un etat, pas une attente : un seul passage sur
             // l'anneau. C'est l'appelant qui decide s'il patiente, et c'est
             // `sys_poll` qui sait dormir entre deux tours.
-            if state.borrow().datagrams.is_empty() {
+            if state.lock().datagrams.is_empty() {
                 pump_udp(state);
             }
-            !state.borrow().datagrams.is_empty()
+            !state.lock().datagrams.is_empty()
         }
     }
 }
@@ -1151,11 +1151,11 @@ pub fn socket_readable(state: &Rc<RefCell<SocketState>>) -> bool {
 ///
 /// Comme `socket_readable`, un seul passage de pompe si rien n'est en attente :
 /// la valeur doit decrire l'etat courant, pas celui du dernier appel.
-pub fn octets_lisibles(state: &Rc<RefCell<SocketState>>) -> usize {
-    let kind = state.borrow().kind;
+pub fn octets_lisibles(state: &Arc<SpinLock<SocketState>>) -> usize {
+    let kind = state.lock().kind;
     match kind {
         SocketKind::Tcp => {
-            let mut borrowed = state.borrow_mut();
+            let mut borrowed = state.lock();
             match borrowed.conn.as_mut() {
                 Some(conn) => {
                     if conn.rx.is_empty() && !conn.peer_fin && !conn.closed {
@@ -1167,11 +1167,11 @@ pub fn octets_lisibles(state: &Rc<RefCell<SocketState>>) -> usize {
             }
         }
         SocketKind::Udp => {
-            if state.borrow().datagrams.is_empty() {
+            if state.lock().datagrams.is_empty() {
                 pump_udp(state);
             }
             state
-                .borrow()
+                .lock()
                 .datagrams
                 .first()
                 .map(|(_, _, donnees)| donnees.len())

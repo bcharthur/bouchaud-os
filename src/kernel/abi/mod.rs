@@ -14,30 +14,9 @@
 //! les entrees/sorties sur descripteurs ([`file`]), et la memoire du processus
 //! ([`mem`]).
 //!
-//! ## Invariant de non-reentrance
-//!
-//! > **Aucun emprunt du [`Process`](crate::kernel::task::Process) ne doit
-//! > survivre a un point de commutation.**
-//!
-//! Le noyau n'est pas reentrant, et tout le reste s'appuie la-dessus. L'etat
-//! d'un processus vit dans un `Rc<RefCell<Process>>` : le `RefCell` compte les
-//! emprunts a l'execution, pas a la compilation. Un appel systeme qui garderait
-//! un `borrow_mut()` ouvert en appelant quelque chose qui rend la main —
-//! [`yield_now`](crate::kernel::task::yield_now), un `futex` qui attend, une
-//! lecture bloquante — laisserait le compteur d'emprunts arme pendant que la
-//! tache suivante entre dans le meme processus. Le second emprunt paniquerait
-//! sur un `BorrowMutError`, c'est-a-dire une panique noyau, avec une trace
-//! designant la seconde tache et non celle qui a laisse l'emprunt ouvert.
-//!
-//! En pratique : relacher le `borrow` (fin de portee, ou copie de ce dont on a
-//! besoin) **avant** tout appel susceptible de bloquer. Le point de commutation
-//! unique, [`task::schedule`](crate::kernel::task::schedule), verifie
-//! l'invariant par un `debug_assert` : la panique designe alors le fautif au
-//! lieu de sa victime.
-//!
-//! La preemption par le timer, elle, ne peut pas casser l'invariant : elle
-//! n'agit que si l'interruption a surpris du code ring 3, ou aucun emprunt
-//! noyau n'est detenu (voir `arch::x86_64::idt`).
+//! Process ownership is SMP-safe independently of the BKL: memory, descriptor,
+//! signal, metadata and lifecycle state have distinct synchronization domains.
+//! No domain guard may cross a blocking or scheduling boundary.
 
 pub mod errno;
 pub mod file;
@@ -167,18 +146,17 @@ pub fn handle(frame: &mut TrapFrame) {
 /// `rt_sigsuspend` / `pause` : attend qu'un signal arrive.
 fn sys_sigsuspend(set: u64) -> i64 {
     let process = task::current_process();
-    let saved = process.borrow().signals.blocked;
+    let saved = process.signals.lock().blocked;
     if set != 0 {
         if let Some(mask) = user_read_u64(set) {
-            let mut borrowed = process.borrow_mut();
-            borrowed.signals.blocked = mask & !(1 << (crate::kernel::signal::SIGKILL - 1));
+            process.signals.lock().blocked = mask & !(1 << (crate::kernel::signal::SIGKILL - 1));
         }
     }
     while !task::signal_pending() {
         task::yield_now();
         task::wait_for_interrupt_releasing_bkl();
     }
-    process.borrow_mut().signals.blocked = saved;
+    process.signals.lock().blocked = saved;
     // POSIX impose ce retour : l'attente s'est terminee par un signal.
     -errno::EINTR
 }
@@ -277,8 +255,8 @@ fn fault_in_user_range(addr: u64, len: usize, write: bool) -> bool {
     loop {
         let present = {
             let process = task::current_process();
-            let mut process = process.borrow_mut();
-            process.space.translate(page).is_some()
+            let present = process.mm.lock().space.translate(page).is_some();
+            present
         };
 
         if !present && !task::peuple_a_la_demande(page, false) {
@@ -288,8 +266,8 @@ fn fault_in_user_range(addr: u64, len: usize, write: bool) -> bool {
         if write {
             let writable = {
                 let process = task::current_process();
-                let mut process = process.borrow_mut();
-                process.space.writable(page)
+                let writable = process.mm.lock().space.writable(page);
+                writable
             };
             if !writable {
                 return false;
@@ -346,8 +324,7 @@ pub fn user_read(addr: u64, len: usize) -> Option<Vec<u8>> {
 
     let mut buffer = alloc::vec![0u8; len];
     let process = task::current_process();
-    let mut process = process.borrow_mut();
-    if process.space.read(addr, &mut buffer) {
+    if process.mm.lock().space.read(addr, &mut buffer) {
         Some(buffer)
     } else {
         None
@@ -361,8 +338,8 @@ pub fn user_write(addr: u64, data: &[u8]) -> bool {
     }
 
     let process = task::current_process();
-    let mut process = process.borrow_mut();
-    process.space.write(addr, data)
+    let written = process.mm.lock().space.write(addr, data);
+    written
 }
 
 /// Ecrit une valeur 64 bits dans l'espace utilisateur.
@@ -482,8 +459,7 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         MEMFD_CREATE => file::sys_memfd_create(args[0], args[1] as u32),
         FSYNC | FDATASYNC => {
             let noeud = match crate::kernel::task::current_process()
-                .borrow()
-                .files
+                .files.lock()
                 .get(args[0] as i32)
                 .map(|desc| desc.kind.clone())
             {
@@ -521,7 +497,7 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         MLOCK | MUNLOCK | MLOCKALL | MUNLOCKALL => 0,
 
         // --- Processus, threads, ordonnancement ---
-        GETPID => task::current().process.borrow().pid as i64,
+        GETPID => task::current().process.pid as i64,
         GETPPID => 1,
         GETTID => task::current().tid as i64,
         SET_TID_ADDRESS => {
@@ -559,8 +535,8 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         FUTEX => sys_futex(args),
         NANOSLEEP => sys_nanosleep(args[0], args[1]),
         CLOCK_NANOSLEEP => sys_clock_nanosleep(args[0] as i32, args[1], args[2], args[3]),
-        GETUID | GETEUID => task::current().process.borrow().uid as i64,
-        GETGID | GETEGID => task::current().process.borrow().gid as i64,
+        GETUID | GETEUID => task::current().process.metadata.lock().uid as i64,
+        GETGID | GETEGID => task::current().process.metadata.lock().gid as i64,
         SETUID | SETGID | SETPGID | SETSID => 0,
         GETPGRP | GETPGID | GETSID => 1,
         SCHED_GETAFFINITY => {
@@ -615,7 +591,7 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         // courante, sous la zone rouge.
         SIGALTSTACK => 0,
         RT_SIGPENDING => {
-            let pending = task::current_process().borrow().signals.pending;
+            let pending = task::current_process().signals.lock().pending;
             if args[0] != 0 && !user_write(args[0], &pending.to_le_bytes()) {
                 -errno::EFAULT
             } else {
@@ -701,7 +677,7 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
                 "[syscall] non implemente : {} ({}) appelant={} rip={:#x} offset={:#x}",
                 number,
                 nr::name(number),
-                task::current_process().borrow().name,
+                task::current_process().metadata.lock().name,
                 frame.rip,
                 offset
             );
@@ -781,7 +757,7 @@ fn sys_clock_gettime(clock: i32, out: u64) -> i64 {
     let ms = match clock {
         CLOCK_REALTIME | CLOCK_REALTIME_COARSE | CLOCK_REALTIME_ALARM => realtime_ms(),
         CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
-            let pid = crate::kernel::task::current_process().borrow().pid;
+            let pid = crate::kernel::task::current_process().pid;
             crate::kernel::task::cpu_time_ms(pid)
         }
         _ => crate::kernel::timer::monotonic_ms(),
@@ -1061,7 +1037,7 @@ fn proc_clone(args: [u64; 6], frame: &TrapFrame) -> i64 {
     child_frame.rax = 0;
 
     let process = task::current().process.clone();
-    process.borrow_mut().threads += 1;
+    process.lifecycle.lock().threads += 1;
     let mut child = task::Task::new(process, child_frame);
     if flags & CLONE_SETTLS != 0 {
         child.fs_base = tls;
@@ -1168,7 +1144,7 @@ fn sys_prlimit(args: [u64; 6]) -> i64 {
             RLIMIT_STACK => (crate::kernel::vmm::USER_STACK_SIZE, crate::kernel::vmm::USER_STACK_SIZE),
             RLIMIT_NOFILE => (1024, 1024),
             RLIMIT_AS => {
-                let limite = task::current_process().borrow().limite_as;
+                let limite = task::current_process().mm.lock().limite_as;
                 let valeur = if limite == 0 { RLIM_INFINITY } else { limite };
                 (valeur, RLIM_INFINITY)
             }
@@ -1185,7 +1161,7 @@ fn sys_prlimit(args: [u64; 6]) -> i64 {
         };
         // 0 en interne veut dire « pas de plafond » ; c'est ce que represente
         // `RLIM_INFINITY` cote utilisateur.
-        task::current_process().borrow_mut().limite_as =
+        task::current_process().mm.lock().limite_as =
             if soft == RLIM_INFINITY { 0 } else { soft };
     }
     0

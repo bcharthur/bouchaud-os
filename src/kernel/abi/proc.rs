@@ -4,15 +4,15 @@
 //! parent `wait4`, et le noyau lui envoie `SIGCHLD`. Les implementer separement
 //! n'aurait pas de sens — c'est leur enchainement qui doit fonctionner.
 
-use alloc::rc::Rc;
+use alloc::sync::Arc;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cell::RefCell;
 
 use crate::arch::x86_64::usermode::{self, TrapFrame};
 use crate::kernel::abi::{errno, user_read_u64, user_write, user_write_u32};
 use crate::kernel::signal::{self, SigAction, SIG_DFL, SIG_IGN};
-use crate::kernel::task::{self, Process, Task};
+use crate::kernel::task::{self, FileTable, Mm, MmState, Process, ProcessLifecycle, ProcessMetadata, Task};
+use crate::kernel::sync::SpinLock;
 use crate::kernel::{elf, vmm};
 
 /// `fork` : duplique le processus courant.
@@ -25,54 +25,24 @@ use crate::kernel::{elf, vmm};
 pub fn sys_fork(frame: &TrapFrame) -> i64 {
     let parent = task::current_process();
 
-    let (
-        space,
-        files,
-        brk_start,
-        brk,
-        mmap_next,
-        cwd,
-        uid,
-        gid,
-        name,
-        parent_pid,
-        resource_group_id,
-        resource_group_name,
-        signals,
-        partages,
-        limite_as,
-        promesses,
-        ecran,
-    ) = {
-        let borrowed = parent.borrow();
-        let space = match borrowed.space.duplicate() {
+    let (space, brk_start, brk, mmap_next, partages, limite_as, promesses) = {
+        let mm = parent.mm.lock();
+        let space = match mm.space.duplicate() {
             Some(space) => space,
             None => return -errno::ENOMEM,
         };
-        (
-            space,
-            borrowed.files.clone(),
-            borrowed.brk_start,
-            borrowed.brk,
-            borrowed.mmap_next,
-            borrowed.cwd,
-            borrowed.uid,
-            borrowed.gid,
-            borrowed.name.clone(),
-            borrowed.pid,
-            borrowed.resource_group_id,
-            borrowed.resource_group_name.clone(),
-            borrowed.signals.clone(),
-            borrowed.partages.clone(),
-            borrowed.limite_as,
-            borrowed.promesses.clone(),
-            // L'ecran virtuel se transmet comme le reste de la vue du monde :
-            // le renderer, ne d'un `fork` du navigateur, doit voir le meme
-            // `/dev/fb0` que son parent — c'est-a-dire la surface du
-            // gestionnaire de fenetres, jamais le framebuffer physique.
-            borrowed.ecran,
-        )
+        (space, mm.brk_start, mm.brk, mm.mmap_next, mm.partages.clone(),
+            mm.limite_as, mm.promesses.clone())
     };
+    let files = parent.files.lock().clone();
+    let (cwd, uid, gid, name, ecran) = {
+        let metadata = parent.metadata.lock();
+        (metadata.cwd, metadata.uid, metadata.gid, metadata.name.clone(), metadata.ecran)
+    };
+    let signals = parent.signals.lock().clone();
+    let parent_pid = parent.pid;
+    let resource_group_id = parent.resource_group_id;
+    let resource_group_name = parent.resource_group_name.clone();
 
     // `duplicate` a re-mappe les pages empruntees sur les memes frames — c'est
     // la semantique de `MAP_SHARED` a travers `fork`. Le fils tient donc
@@ -87,33 +57,18 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
     // Les signaux en attente ne sont pas herites : ils appartenaient au parent.
     child_signals.pending = 0;
 
-    let child = Rc::new(RefCell::new(Process {
+    let child = Arc::new(Process {
         pid,
         parent: parent_pid,
-        name,
         resource_group_id,
         resource_group_name,
-        space,
-        files,
-        brk_start,
-        brk,
-        mmap_next,
-        cwd,
-        exit_code: 0,
-        zombie: false,
-        threads: 1,
-        uid,
-        gid,
-        signals: child_signals,
-        partages,
-        limite_as,
-        // Les promesses de pagination a la demande suivent le `fork` : les
-        // pages deja peuplees ont ete dupliquees par `duplicate`, celles qui
-        // ne le sont pas encore doivent le rester dans le fils aussi. Sans cela
-        // l'enfant fauterait sur une plage que son pere considere sienne.
-        promesses,
-        ecran,
-    }));
+        mm: Arc::new(Mm::new(MmState { space, brk_start, brk, mmap_next,
+            partages, limite_as, promesses })),
+        files: Arc::new(FileTable::new(files)),
+        metadata: SpinLock::new(ProcessMetadata { name, cwd, uid, gid, ecran }),
+        lifecycle: SpinLock::new(ProcessLifecycle { exit_code: 0, zombie: false, threads: 1 }),
+        signals: SpinLock::new(child_signals),
+    });
     task::register_process(child.clone());
 
     // L'enfant reprend a l'instruction suivant le `syscall`, avec 0 dans rax :
@@ -170,7 +125,7 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
     };
 
     let process = task::current_process();
-    let cwd = process.borrow().cwd;
+    let cwd = process.metadata.lock().cwd;
 
     let node = {
         let fs = crate::fs::ramfs::fs();
@@ -214,8 +169,8 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
     };
 
     let (uid, gid) = {
-        let borrowed = process.borrow();
-        (borrowed.uid, borrowed.gid)
+        let metadata = process.metadata.lock();
+        (metadata.uid, metadata.gid)
     };
     let argv = if argv.is_empty() {
         alloc::vec![path.clone()]
@@ -235,25 +190,26 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
         Err(_) => return -errno::ENOMEM,
     };
 
+    process.metadata.lock().name = path;
+    process.files.lock().close_on_exec();
+    process.signals.lock().reset_for_exec();
+    process.lifecycle.lock().threads = 1;
     {
-        let mut borrowed = process.borrow_mut();
-        borrowed.name = path;
-        borrowed.brk_start = (image.end + 0x10_0000) & !0xFFF;
-        borrowed.brk = borrowed.brk_start;
-        borrowed.mmap_next = vmm::user_mmap_base();
-        borrowed.files.close_on_exec();
-        borrowed.signals.reset_for_exec();
-        borrowed.threads = 1;
+        let mut mm = process.mm.lock();
+        mm.brk_start = (image.end + 0x10_0000) & !0xFFF;
+        mm.brk = mm.brk_start;
+        mm.mmap_next = vmm::user_mmap_base();
         // L'ancien espace disparait avec ses mappages : les references qu'il
         // tenait sur le cache partage doivent partir avec lui.
-        borrowed.relache_partages();
-        borrowed.promesses = new_promises;
+        mm.relache_partages();
+        mm.promesses = new_promises;
         // L'ancien espace est detruit ici. Son `Drop` remet CR3 sur la table du
         // noyau s'il etait actif : c'est pour cela qu'on active le nouveau
         // juste apres, avant de retourner en ring 3.
-        let old = core::mem::replace(&mut borrowed.space, space);
+        let old = core::mem::replace(&mut mm.space, space);
+        drop(mm);
         drop(old);
-        unsafe { borrowed.space.activate() };
+        process.mm.activate();
     }
 
     // La tache repart de zero : nouvelle trame, pile noyau reinitialisee. La
@@ -296,7 +252,7 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
 /// `wait4` : attend la fin d'un processus fils.
 pub fn sys_wait4(pid: i64, status_addr: u64, options: u32, _rusage: u64) -> i64 {
     const WNOHANG: u32 = 1;
-    let parent_pid = task::current_process().borrow().pid;
+    let parent_pid = task::current_process().pid;
 
     loop {
         let zombies = task::zombie_children(parent_pid);
@@ -358,7 +314,7 @@ pub fn sys_rt_sigaction(signal: u32, act: u64, oldact: u64) -> i64 {
     let index = signal as usize - 1;
 
     if oldact != 0 {
-        let previous = process.borrow().signals.actions[index];
+        let previous = process.signals.lock().actions[index];
         if !signal::write_sigaction(oldact, &previous) {
             return -errno::EFAULT;
         }
@@ -368,7 +324,7 @@ pub fn sys_rt_sigaction(signal: u32, act: u64, oldact: u64) -> i64 {
             Some(action) => action,
             None => return -errno::EFAULT,
         };
-        process.borrow_mut().signals.actions[index] = action;
+        process.signals.lock().actions[index] = action;
     }
     0
 }
@@ -376,7 +332,7 @@ pub fn sys_rt_sigaction(signal: u32, act: u64, oldact: u64) -> i64 {
 /// `rt_sigprocmask`.
 pub fn sys_rt_sigprocmask(how: i32, set: u64, oldset: u64) -> i64 {
     let process = task::current_process();
-    let current_mask = process.borrow().signals.blocked;
+    let current_mask = process.signals.lock().blocked;
     if oldset != 0 && !user_write(oldset, &current_mask.to_le_bytes()) {
         return -errno::EFAULT;
     }
@@ -385,16 +341,16 @@ pub fn sys_rt_sigprocmask(how: i32, set: u64, oldset: u64) -> i64 {
             Some(value) => value,
             None => return -errno::EFAULT,
         };
-        let mut borrowed = process.borrow_mut();
-        borrowed.signals.blocked = match how {
+        let mut signals = process.signals.lock();
+        signals.blocked = match how {
             signal::SIG_BLOCK => current_mask | new,
             signal::SIG_UNBLOCK => current_mask & !new,
             signal::SIG_SETMASK => new,
             _ => return -errno::EINVAL,
         };
         // Ces deux-la ne se bloquent pas, quoi qu'on demande.
-        borrowed.signals.blocked &= !(1 << (signal::SIGKILL - 1));
-        borrowed.signals.blocked &= !(1 << (signal::SIGSTOP - 1));
+        signals.blocked &= !(1 << (signal::SIGKILL - 1));
+        signals.blocked &= !(1 << (signal::SIGSTOP - 1));
     }
     0
 }
@@ -406,7 +362,7 @@ pub fn sys_rt_sigprocmask(how: i32, set: u64, oldset: u64) -> i64 {
 pub fn sys_rt_sigreturn(frame: &mut TrapFrame) -> i64 {
     match signal::restore(frame) {
         Some(mask) => {
-            task::current_process().borrow_mut().signals.blocked = mask;
+            task::current_process().signals.lock().blocked = mask;
             frame.rax as i64
         }
         None => {
@@ -432,7 +388,7 @@ pub fn send_signal(pid: u32, signal: u32) -> i64 {
     }
     match task::process_by_pid(pid) {
         Some(process) => {
-            process.borrow_mut().signals.raise(signal);
+            process.signals.lock().raise(signal);
             // Un signal doit reveiller une tache endormie, sinon un `SIGTERM`
             // sur un processus bloque resterait sans effet.
             task::wake_for_signal(pid);
@@ -446,7 +402,7 @@ pub fn send_signal(pid: u32, signal: u32) -> i64 {
 pub fn sys_kill(pid: i64, signal: u32) -> i64 {
     if pid <= 0 {
         // Groupes de processus : on traite comme « moi-meme ».
-        let self_pid = task::current_process().borrow().pid;
+        let self_pid = task::current_process().pid;
         return send_signal(self_pid, signal);
     }
     send_signal(pid as u32, signal)
@@ -462,7 +418,7 @@ pub fn sys_kill(pid: i64, signal: u32) -> i64 {
 pub fn sys_tkill(tid: u32, signal: u32) -> i64 {
     match task::process_of_tid(tid) {
         Some(process) => {
-            let pid = process.borrow().pid;
+            let pid = process.pid;
             send_signal(pid, signal)
         }
         None => -errno::ESRCH,
@@ -480,17 +436,17 @@ pub fn deliver_pending(frame: &mut TrapFrame) {
     loop {
         let process = task::current_process();
         let (signal, action, blocked) = {
-            let borrowed = process.borrow();
-            match borrowed.signals.next_deliverable() {
+            let signals = process.signals.lock();
+            match signals.next_deliverable() {
                 None => return,
                 Some(signal) => (
                     signal,
-                    borrowed.signals.actions[signal as usize - 1],
-                    borrowed.signals.blocked,
+                    signals.actions[signal as usize - 1],
+                    signals.blocked,
                 ),
             }
         };
-        process.borrow_mut().signals.clear(signal);
+        process.signals.lock().clear(signal);
 
         if action.handler == SIG_IGN {
             continue;
@@ -520,16 +476,16 @@ pub fn deliver_pending(frame: &mut TrapFrame) {
         }
 
         {
-            let mut borrowed = process.borrow_mut();
+            let mut signals = process.signals.lock();
             // Le signal livre est bloque pendant l'execution de son
             // gestionnaire (sauf SA_NODEFER), plus ceux demandes par sa_mask :
             // c'est ce qui evite qu'il se reentre indefiniment.
-            borrowed.signals.blocked |= action.mask;
+            signals.blocked |= action.mask;
             if action.flags & signal::SA_NODEFER == 0 {
-                borrowed.signals.blocked |= 1 << (signal - 1);
+                signals.blocked |= 1 << (signal - 1);
             }
             if action.flags & signal::SA_RESETHAND != 0 {
-                borrowed.signals.actions[signal as usize - 1] = SigAction::default();
+                signals.actions[signal as usize - 1] = SigAction::default();
             }
         }
         // Un seul signal par retour : le suivant sera livre au retour du

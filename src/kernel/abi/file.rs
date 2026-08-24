@@ -54,7 +54,7 @@ fn absolute(path: &str) -> String {
     if path.starts_with('/') {
         return path.to_string();
     }
-    let cwd = task::current_process().borrow().cwd;
+    let cwd = task::current_process().metadata.lock().cwd;
     let mut base = ramfs::path_string(ramfs::fs(), cwd);
     if !base.ends_with('/') {
         base.push('/');
@@ -65,7 +65,7 @@ fn absolute(path: &str) -> String {
 
 /// Resout un chemin utilisateur en index de nœud RAMFS.
 fn resolve(path: &str) -> Option<usize> {
-    let cwd = task::current_process().borrow().cwd;
+    let cwd = task::current_process().metadata.lock().cwd;
     ramfs::fs().resolve(path, cwd)
 }
 
@@ -117,8 +117,7 @@ fn console_read(max: usize) -> Vec<u8> {
 /// qu'on attend dessus.
 fn fd_flags(fd: i32) -> u32 {
     task::current_process()
-        .borrow()
-        .files
+        .files.lock()
         .get(fd)
         .map(|desc| desc.flags)
         .unwrap_or(0)
@@ -130,7 +129,7 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
         return 0;
     }
     let process = task::current_process();
-    let kind = match process.borrow().files.get(fd) {
+    let kind = match process.files.lock().get(fd) {
         Some(desc) => desc.kind.clone(),
         None => return -errno::EBADF,
     };
@@ -168,8 +167,7 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
         }
         FdKind::File(node) => {
             let offset = process
-                .borrow()
-                .files
+                .files.lock()
                 .get(fd)
                 .map(|d| d.offset)
                 .unwrap_or(0);
@@ -184,7 +182,7 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
             if !user_write(buffer, &data) {
                 return -errno::EFAULT;
             }
-            if let Some(desc) = process.borrow_mut().files.get_mut(fd) {
+            if let Some(desc) = process.files.lock().get_mut(fd) {
                 desc.offset = offset + got;
             }
             got as i64
@@ -195,8 +193,7 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
         // avancer comme pour un vrai fichier.
         FdKind::Instantane(ref contenu) => {
             let offset = process
-                .borrow()
-                .files
+                .files.lock()
                 .get(fd)
                 .map(|d| d.offset)
                 .unwrap_or(0);
@@ -207,7 +204,7 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
             if !user_write(buffer, &contenu[offset..fin]) {
                 return -errno::EFAULT;
             }
-            if let Some(desc) = process.borrow_mut().files.get_mut(fd) {
+            if let Some(desc) = process.files.lock().get_mut(fd) {
                 desc.offset = fin;
             }
             (fin - offset) as i64
@@ -222,10 +219,10 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
             }
             let non_bloquant = fd_flags(fd) & O_NONBLOCK != 0;
             loop {
-                // L'emprunt du tampon ne doit jamais survivre a l'attente :
-                // l'ecrivain qu'on attend a besoin du meme `RefCell`.
+                // Le guard du tampon ne doit jamais survivre a l'attente :
+                // l'ecrivain qu'on attend a besoin du meme SpinLock.
                 let (vide, plus_d_ecrivain) = {
-                    let state = shared.borrow();
+                    let state = shared.lock();
                     (state.buffer.is_empty(), state.writers == 0)
                 };
                 if !vide {
@@ -247,7 +244,7 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
                 // pendant que le producteur/consommateur progresse sur un autre CPU.
                 task::attends_un_tick();
             }
-            let mut state = shared.borrow_mut();
+            let mut state = shared.lock();
             let len = core::cmp::min(count, state.buffer.len());
             let data: Vec<u8> = state.buffer.drain(..len).collect();
             drop(state);
@@ -261,7 +258,7 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
             if count < 8 {
                 return -errno::EINVAL;
             }
-            let mut state = state.borrow_mut();
+            let mut state = state.lock();
             if state.counter == 0 {
                 return -errno::EAGAIN;
             }
@@ -281,7 +278,7 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
                 return -errno::EINVAL;
             }
             let expired = {
-                let mut state = state.borrow_mut();
+                let mut state = state.lock();
                 refresh_timerfd(&mut state);
                 let value = state.expirations;
                 state.expirations = 0;
@@ -303,14 +300,14 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
             // appelant a boucler lui-meme — et surtout, cela faisait echouer le
             // premier `recvmsg` d'un dialogue entre deux processus, celui qui
             // arrive avant que le pair ait eu la main.
-            if inbox.borrow().octets.is_empty() && fd_flags(fd) & O_NONBLOCK == 0 {
+            if inbox.lock().octets.is_empty() && fd_flags(fd) & O_NONBLOCK == 0 {
                 let echeance =
                     crate::kernel::timer::ticks() + crate::kernel::timer::ms_to_ticks(2000);
-                while inbox.borrow().octets.is_empty() && crate::kernel::timer::ticks() < echeance {
+                while inbox.lock().octets.is_empty() && crate::kernel::timer::ticks() < echeance {
                     task::attends_un_tick();
                 }
             }
-            let mut guard = inbox.borrow_mut();
+            let mut guard = inbox.lock();
             if guard.octets.is_empty() {
                 return -errno::EAGAIN;
             }
@@ -372,7 +369,7 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
         return 0;
     }
     let process = task::current_process();
-    let kind = match process.borrow().files.get(fd) {
+    let kind = match process.files.lock().get(fd) {
         Some(desc) => desc.kind.clone(),
         None => return -errno::EBADF,
     };
@@ -397,10 +394,8 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
                 // tampon se libere plutot que de rendre une erreur : c'est ce
                 // qu'attend un programme qui pousse du son en boucle.
                 let bloquant = {
-                    let borrowed = process.borrow();
-                    borrowed
-                        .files
-                        .get(fd)
+                    let borrowed = process.files.lock();
+                    borrowed.get(fd)
                         .map(|d| d.flags & O_NONBLOCK == 0)
                         .unwrap_or(true)
                 };
@@ -429,8 +424,8 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
                 return -errno::EROFS;
             }
             let (offset, append) = {
-                let borrowed = process.borrow();
-                let desc = borrowed.files.get(fd).unwrap();
+                let borrowed = process.files.lock();
+                let desc = borrowed.get(fd).unwrap();
                 (desc.offset, desc.flags & O_APPEND != 0)
             };
             let fs = ramfs::fs();
@@ -447,7 +442,7 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
                 content.resize(end, 0);
             }
             content[start..end].copy_from_slice(&data);
-            if let Some(desc) = process.borrow_mut().files.get_mut(fd) {
+            if let Some(desc) = process.files.lock().get_mut(fd) {
                 desc.offset = end;
             }
             data.len() as i64
@@ -462,7 +457,7 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
             let non_bloquant = fd_flags(fd) & O_NONBLOCK != 0;
             let place = match attends_place(
                 || {
-                    let state = shared.borrow();
+                    let state = shared.lock();
                     if state.readers == 0 {
                         Capacite::Rompu
                     } else {
@@ -478,7 +473,7 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
             // semantique POSIX d'un tube presque plein, et c'est elle qui donne
             // sa contre-pression a l'appelant — un `write` qui rendrait `count`
             // sans avoir tout ecrit ferait perdre des octets en silence.
-            let mut state = shared.borrow_mut();
+            let mut state = shared.lock();
             let ecrits = core::cmp::min(place, data.len());
             state.buffer.extend_from_slice(&data[..ecrits]);
             ecrits as i64
@@ -494,7 +489,7 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
             if value == u64::MAX {
                 return -errno::EINVAL;
             }
-            state.borrow_mut().counter += value;
+            state.lock().counter += value;
             8
         }
         FdKind::TimerFd(_) => -errno::EINVAL,
@@ -503,7 +498,7 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
             let non_bloquant = fd_flags(fd) & O_NONBLOCK != 0;
             let place = match attends_place(
                 || {
-                    let canal = outbox.borrow();
+                    let canal = outbox.lock();
                     if canal.lecteurs == 0 {
                         Capacite::Rompu
                     } else {
@@ -515,7 +510,7 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
                 Ok(place) => place,
                 Err(erreur) => return erreur,
             };
-            let mut canal = outbox.borrow_mut();
+            let mut canal = outbox.lock();
             let ecrits = core::cmp::min(place, data.len());
             canal.octets.extend_from_slice(&data[..ecrits]);
             ecrits as i64
@@ -609,13 +604,13 @@ pub fn sys_sendfile(out_fd: i32, in_fd: i32, offset_ptr: u64, count: usize) -> i
     let process = task::current_process();
 
     let (source, position_courante) = {
-        let borrowed = process.borrow();
-        match borrowed.files.get(in_fd) {
+        let borrowed = process.files.lock();
+        match borrowed.get(in_fd) {
             Some(desc) => (desc.kind.clone(), desc.offset),
             None => return -errno::EBADF,
         }
     };
-    if process.borrow().files.get(out_fd).is_none() {
+    if process.files.lock().get(out_fd).is_none() {
         return -errno::EBADF;
     }
 
@@ -677,7 +672,7 @@ pub fn sys_sendfile(out_fd: i32, in_fd: i32, offset_ptr: u64, count: usize) -> i
         if !user_write(offset_ptr, &((depart + envoyes) as u64).to_le_bytes()) {
             return -errno::EFAULT;
         }
-    } else if let Some(desc) = process.borrow_mut().files.get_mut(in_fd) {
+    } else if let Some(desc) = process.files.lock().get_mut(in_fd) {
         desc.offset = depart + envoyes;
     }
 
@@ -687,15 +682,15 @@ pub fn sys_sendfile(out_fd: i32, in_fd: i32, offset_ptr: u64, count: usize) -> i
 /// `pread64`.
 pub fn sys_pread(fd: i32, buffer: u64, count: usize, offset: i64) -> i64 {
     let process = task::current_process();
-    let saved = match process.borrow().files.get(fd) {
+    let saved = match process.files.lock().get(fd) {
         Some(desc) => desc.offset,
         None => return -errno::EBADF,
     };
-    if let Some(desc) = process.borrow_mut().files.get_mut(fd) {
+    if let Some(desc) = process.files.lock().get_mut(fd) {
         desc.offset = offset.max(0) as usize;
     }
     let result = sys_read(fd, buffer, count);
-    if let Some(desc) = process.borrow_mut().files.get_mut(fd) {
+    if let Some(desc) = process.files.lock().get_mut(fd) {
         desc.offset = saved;
     }
     result
@@ -704,15 +699,15 @@ pub fn sys_pread(fd: i32, buffer: u64, count: usize, offset: i64) -> i64 {
 /// `pwrite64`.
 pub fn sys_pwrite(fd: i32, buffer: u64, count: usize, offset: i64) -> i64 {
     let process = task::current_process();
-    let saved = match process.borrow().files.get(fd) {
+    let saved = match process.files.lock().get(fd) {
         Some(desc) => desc.offset,
         None => return -errno::EBADF,
     };
-    if let Some(desc) = process.borrow_mut().files.get_mut(fd) {
+    if let Some(desc) = process.files.lock().get_mut(fd) {
         desc.offset = offset.max(0) as usize;
     }
     let result = sys_write(fd, buffer, count);
-    if let Some(desc) = process.borrow_mut().files.get_mut(fd) {
+    if let Some(desc) = process.files.lock().get_mut(fd) {
         desc.offset = saved;
     }
     result
@@ -738,12 +733,12 @@ pub fn sys_memfd_create(nom_addr: u64, _flags: u32) -> i64 {
         Err(_) => return -errno::ENFILE,
     };
     let process = task::current_process();
-    let mut borrowed = process.borrow_mut();
+    let mut borrowed = process.files.lock();
     // `MFD_CLOEXEC` vaut 1 : c'est le seul drapeau que les appelants posent en
     // pratique, et le respecter evite qu'un tampon fuie dans un `execve`.
     let mut desc = FileDesc::new(FdKind::File(idx));
     desc.cloexec = _flags & 1 != 0;
-    let fd = borrowed.files.insert(desc);
+    let fd = borrowed.insert(desc);
     if fd < 0 {
         -errno::EMFILE
     } else {
@@ -777,7 +772,7 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
     let path = if dirfd != AT_FDCWD && !path.starts_with('/') {
         // Chemin relatif a un descripteur de repertoire ouvert.
         let process = task::current_process();
-        let node = match process.borrow().files.get(dirfd) {
+        let node = match process.files.lock().get(dirfd) {
             Some(desc) => match desc.kind {
                 FdKind::Dir(node) | FdKind::File(node) => Some(node),
                 _ => None,
@@ -841,7 +836,7 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
         let mut desc = FileDesc::new(kind);
         desc.flags = flags;
         desc.cloexec = flags & O_CLOEXEC != 0;
-        let fd = process.borrow_mut().files.insert(desc);
+        let fd = process.files.lock().insert(desc);
         return fd as i64;
     }
 
@@ -857,7 +852,7 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
             if flags & O_CREAT == 0 {
                 return -errno::ENOENT;
             }
-            let cwd = process.borrow().cwd;
+            let cwd = process.metadata.lock().cwd;
             let fs = ramfs::fs();
             let (parent, name) = match fs.resolve_parent_name(&path, cwd) {
                 Some(value) => value,
@@ -902,7 +897,7 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
     if flags & O_APPEND != 0 {
         desc.offset = backing::disk_len(node).unwrap_or(fs.nodes[node].content.len());
     }
-    let fd = process.borrow_mut().files.insert(desc);
+    let fd = process.files.lock().insert(desc);
     fd as i64
 }
 
@@ -916,17 +911,17 @@ pub fn sys_close(fd: i32) -> i64 {
     // rendre la base a la fermeture ; sans cela un verrou survit au `close` et
     // la reouverture suivante se croit bloquee par un fantome.
     let verrouille = {
-        let borrowed = process.borrow();
-        match borrowed.files.get(fd) {
+        let borrowed = process.files.lock();
+        match borrowed.get(fd) {
             Some(desc) => match desc.kind {
-                FdKind::File(node) => Some((node, borrowed.pid)),
+                FdKind::File(node) => Some((node, process.pid)),
                 _ => None,
             },
             None => None,
         }
     };
 
-    let closed = process.borrow_mut().files.close(fd);
+    let closed = process.files.lock().close(fd);
     if let Some((node, pid)) = verrouille {
         verrous::libere_fichier(node, pid);
     }
@@ -943,8 +938,8 @@ pub fn sys_lseek(fd: i32, offset: i64, whence: u32) -> i64 {
     const SEEK_CUR: u32 = 1;
     const SEEK_END: u32 = 2;
     let process = task::current_process();
-    let mut borrowed = process.borrow_mut();
-    let desc = match borrowed.files.get_mut(fd) {
+    let mut borrowed = process.files.lock();
+    let desc = match borrowed.get_mut(fd) {
         Some(desc) => desc,
         None => return -errno::EBADF,
     };
@@ -972,12 +967,12 @@ pub fn sys_lseek(fd: i32, offset: i64, whence: u32) -> i64 {
 /// `dup`.
 pub fn sys_dup(fd: i32) -> i64 {
     let process = task::current_process();
-    let mut borrowed = process.borrow_mut();
-    let desc = match borrowed.files.get(fd) {
+    let mut borrowed = process.files.lock();
+    let desc = match borrowed.get(fd) {
         Some(desc) => desc.clone(),
         None => return -errno::EBADF,
     };
-    borrowed.files.insert(desc) as i64
+    borrowed.insert(desc) as i64
 }
 
 /// `dup2` / `dup3`.
@@ -989,12 +984,12 @@ pub fn sys_dup2(old: i32, new: i32) -> i64 {
         return new as i64;
     }
     let process = task::current_process();
-    let mut borrowed = process.borrow_mut();
-    let desc = match borrowed.files.get(old) {
+    let mut borrowed = process.files.lock();
+    let desc = match borrowed.get(old) {
         Some(desc) => desc.clone(),
         None => return -errno::EBADF,
     };
-    borrowed.files.set(new as usize, desc);
+    borrowed.set(new as usize, desc);
     new as i64
 }
 
@@ -1002,15 +997,15 @@ pub fn sys_dup2(old: i32, new: i32) -> i64 {
 pub fn sys_pipe(addr: u64, flags: u32) -> i64 {
     let shared = crate::kernel::fd::new_pipe();
     let process = task::current_process();
-    let mut borrowed = process.borrow_mut();
+    let mut borrowed = process.files.lock();
     let mut read_end = FileDesc::new(FdKind::Pipe(shared.clone(), true));
     let mut write_end = FileDesc::new(FdKind::Pipe(shared, false));
     read_end.flags = flags;
     write_end.flags = flags;
     read_end.cloexec = flags & O_CLOEXEC != 0;
     write_end.cloexec = flags & O_CLOEXEC != 0;
-    let read_fd = borrowed.files.insert(read_end);
-    let write_fd = borrowed.files.insert(write_end);
+    let read_fd = borrowed.insert(read_end);
+    let write_fd = borrowed.insert(write_end);
     drop(borrowed);
     if !user_write(addr, &read_fd.to_le_bytes()) || !user_write(addr + 4, &write_fd.to_le_bytes()) {
         return -errno::EFAULT;
@@ -1033,23 +1028,23 @@ pub fn sys_fcntl(fd: i32, command: u32, arg: u64) -> i64 {
 
     // Les verrous d'enregistrement prennent leur propre chemin : ils lisent et
     // reecrivent une structure utilisateur, et `F_SETLKW` attend, ce qu'on ne
-    // peut pas faire en tenant le `RefCell` du processus.
+    // ne peut pas faire en tenant le verrou de la table du processus.
     if command == F_GETLK || command == F_SETLK || command == F_SETLKW {
         return fcntl_verrou(fd, command, arg);
     }
 
     let process = task::current_process();
-    let mut borrowed = process.borrow_mut();
+    let mut borrowed = process.files.lock();
     match command {
         F_DUPFD | F_DUPFD_CLOEXEC => {
-            let mut desc = match borrowed.files.get(fd) {
+            let mut desc = match borrowed.get(fd) {
                 Some(desc) => desc.clone(),
                 None => return -errno::EBADF,
             };
             desc.cloexec = command == F_DUPFD_CLOEXEC;
-            borrowed.files.insert_at_least(desc, arg as usize) as i64
+            borrowed.insert_at_least(desc, arg as usize) as i64
         }
-        F_GETFD => match borrowed.files.get(fd) {
+        F_GETFD => match borrowed.get(fd) {
             Some(desc) => {
                 if desc.cloexec {
                     FD_CLOEXEC as i64
@@ -1059,18 +1054,18 @@ pub fn sys_fcntl(fd: i32, command: u32, arg: u64) -> i64 {
             }
             None => -errno::EBADF,
         },
-        F_SETFD => match borrowed.files.get_mut(fd) {
+        F_SETFD => match borrowed.get_mut(fd) {
             Some(desc) => {
                 desc.cloexec = arg & FD_CLOEXEC != 0;
                 0
             }
             None => -errno::EBADF,
         },
-        F_GETFL => match borrowed.files.get(fd) {
+        F_GETFL => match borrowed.get(fd) {
             Some(desc) => desc.flags as i64,
             None => -errno::EBADF,
         },
-        F_SETFL => match borrowed.files.get_mut(fd) {
+        F_SETFL => match borrowed.get_mut(fd) {
             Some(desc) => {
                 desc.flags = arg as u32;
                 0
@@ -1125,8 +1120,8 @@ fn fcntl_verrou(fd: i32, command: u32, arg: u64) -> i64 {
     // Identite du fichier et contexte necessaires a la resolution de l_whence.
     let process = task::current_process();
     let (noeud, position, taille, pid) = {
-        let borrowed = process.borrow();
-        let desc = match borrowed.files.get(fd) {
+        let borrowed = process.files.lock();
+        let desc = match borrowed.get(fd) {
             Some(desc) => desc,
             None => return -errno::EBADF,
         };
@@ -1141,7 +1136,7 @@ fn fcntl_verrou(fd: i32, command: u32, arg: u64) -> i64 {
             noeud,
             desc.offset as i64,
             backing::logical_len(noeud) as i64,
-            borrowed.pid,
+            process.pid,
         )
     };
 
@@ -1293,7 +1288,7 @@ pub fn sys_stat_path(path_addr: u64, out: u64, _no_follow: bool) -> i64 {
 /// `fstat`.
 pub fn sys_fstat(fd: i32, out: u64) -> i64 {
     let process = task::current_process();
-    let kind = match process.borrow().files.get(fd) {
+    let kind = match process.files.lock().get(fd) {
         Some(desc) => desc.kind.clone(),
         None => return -errno::EBADF,
     };
@@ -1343,8 +1338,8 @@ pub fn sys_statx(dirfd: i32, path_addr: u64, _flags: u32, _mask: u32, out: u64) 
     let node = if path.is_empty() {
         let process = task::current_process();
         let found = {
-            let borrowed = process.borrow();
-            match borrowed.files.get(dirfd) {
+            let borrowed = process.files.lock();
+            match borrowed.get(dirfd) {
                 Some(desc) => match desc.kind {
                     FdKind::File(node) | FdKind::Dir(node) => Ok(Some(node)),
                     _ => Ok(None),
@@ -1426,7 +1421,7 @@ pub fn sys_readlink(path_addr: u64, buffer: u64, size: usize) -> i64 {
         None => return -errno::EFAULT,
     };
     if path == "/proc/self/exe" {
-        let name = task::current_process().borrow().name.clone();
+        let name = task::current_process().metadata.lock().name.clone();
         let bytes = name.as_bytes();
         let len = bytes.len().min(size);
         if !user_write(buffer, &bytes[..len]) {
@@ -1440,7 +1435,7 @@ pub fn sys_readlink(path_addr: u64, buffer: u64, size: usize) -> i64 {
 /// `getdents64` : `struct linux_dirent64` a la suite dans le tampon.
 pub fn sys_getdents64(fd: i32, buffer: u64, size: usize) -> i64 {
     let process = task::current_process();
-    let (node, start) = match process.borrow().files.get(fd) {
+    let (node, start) = match process.files.lock().get(fd) {
         Some(desc) => match desc.kind {
             FdKind::Dir(node) => (node, desc.offset),
             _ => return -errno::ENOTDIR,
@@ -1484,7 +1479,7 @@ pub fn sys_getdents64(fd: i32, buffer: u64, size: usize) -> i64 {
     if !user_write(buffer, &out) {
         return -errno::EFAULT;
     }
-    if let Some(desc) = process.borrow_mut().files.get_mut(fd) {
+    if let Some(desc) = process.files.lock().get_mut(fd) {
         desc.offset = consumed;
     }
     out.len() as i64
@@ -1492,7 +1487,7 @@ pub fn sys_getdents64(fd: i32, buffer: u64, size: usize) -> i64 {
 
 /// `getcwd`.
 pub fn sys_getcwd(buffer: u64, size: usize) -> i64 {
-    let cwd = task::current_process().borrow().cwd;
+    let cwd = task::current_process().metadata.lock().cwd;
     let mut path = ramfs::path_string(ramfs::fs(), cwd);
     if path.is_empty() {
         path = "/".to_string();
@@ -1516,7 +1511,7 @@ pub fn sys_chdir(path_addr: u64) -> i64 {
     };
     match resolve(&path) {
         Some(node) if ramfs::fs().nodes[node].kind == NodeKind::Dir => {
-            task::current_process().borrow_mut().cwd = node;
+            task::current_process().metadata.lock().cwd = node;
             0
         }
         Some(_) => -errno::ENOTDIR,
@@ -1530,7 +1525,7 @@ pub fn sys_mkdir(path_addr: u64) -> i64 {
         Some(path) => absolute(&path),
         None => return -errno::EFAULT,
     };
-    let cwd = task::current_process().borrow().cwd;
+    let cwd = task::current_process().metadata.lock().cwd;
     let fs = ramfs::fs();
     let (parent, name) = match fs.resolve_parent_name(&path, cwd) {
         Some(value) => value,
@@ -1585,7 +1580,7 @@ pub fn sys_rename(from_addr: u64, to_addr: u64) -> i64 {
         Some(_) => return -errno::EBUSY,
         None => return -errno::ENOENT,
     };
-    let cwd = task::current_process().borrow().cwd;
+    let cwd = task::current_process().metadata.lock().cwd;
     let fs = ramfs::fs();
     let (parent, name) = match fs.resolve_parent_name(&to, cwd) {
         Some(value) => value,
@@ -1601,7 +1596,7 @@ pub fn sys_rename(from_addr: u64, to_addr: u64) -> i64 {
 /// `ftruncate`.
 pub fn sys_ftruncate(fd: i32, length: usize) -> i64 {
     let process = task::current_process();
-    let node = match process.borrow().files.get(fd) {
+    let node = match process.files.lock().get(fd) {
         Some(desc) => match desc.kind {
             FdKind::File(node) => node,
             _ => return -errno::EINVAL,
@@ -1675,7 +1670,7 @@ pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
     // aucune comparaison ne correspond plus. On ne garde que les 32 bits utiles.
     let request = request & 0xFFFF_FFFF;
     let process = task::current_process();
-    let kind = match process.borrow().files.get(fd) {
+    let kind = match process.files.lock().get(fd) {
         Some(desc) => desc.kind.clone(),
         None => return -errno::EBADF,
     };
@@ -1907,8 +1902,8 @@ pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
 /// Pose ou retire `O_NONBLOCK` sur un descripteur.
 fn set_nonblocking(fd: i32, actif: bool) {
     let process = task::current_process();
-    let mut borrowed = process.borrow_mut();
-    if let Some(desc) = borrowed.files.get_mut(fd) {
+    let mut borrowed = process.files.lock();
+    if let Some(desc) = borrowed.get_mut(fd) {
         if actif {
             desc.flags |= O_NONBLOCK;
         } else {
@@ -1920,8 +1915,8 @@ fn set_nonblocking(fd: i32, actif: bool) {
 /// Octets lisibles immediatement sur un descripteur tamponne (`FIONREAD`).
 fn pending_bytes(kind: &FdKind) -> usize {
     match kind {
-        FdKind::Pipe(shared, true) => shared.borrow().buffer.len(),
-        FdKind::SocketPair(inbox, _) => inbox.borrow().octets.len(),
+        FdKind::Pipe(shared, true) => shared.lock().buffer.len(),
+        FdKind::SocketPair(inbox, _) => inbox.lock().octets.len(),
         // Une prise inet rendait 0 quoi qu'il arrive, y compris avec un
         // datagramme complet en attente. `net::octets_lisibles` applique la
         // regle de Linux : le tampon de reception sur un flux, la taille du
@@ -2040,7 +2035,7 @@ fn fb_fix_screeninfo() -> [u8; 80] {
 /// surface d'une fenetre plutot que la memoire video.
 pub fn ecran_virtuel() -> Option<crate::kernel::task::EcranVirtuel> {
     let process = task::current_process();
-    let ecran = process.borrow().ecran;
+    let ecran = process.metadata.lock().ecran;
     ecran
 }
 
@@ -2235,7 +2230,7 @@ fn attends_place<F: Fn() -> Capacite>(etat: F, non_bloquant: bool) -> Result<usi
 /// repondent maintenant selon leur place reelle.
 fn writable(fd: i32) -> bool {
     let process = task::current_process();
-    let kind = match process.borrow().files.get(fd) {
+    let kind = match process.files.lock().get(fd) {
         Some(desc) => desc.kind.clone(),
         None => return false,
     };
@@ -2244,12 +2239,12 @@ fn writable(fd: i32) -> bool {
         // echouer tout de suite en EPIPE, pas attendre une place qui ne
         // servira jamais.
         FdKind::Pipe(state, false) => {
-            let state = state.borrow();
+            let state = state.lock();
             state.readers == 0 || state.place() > 0
         }
         FdKind::Pipe(_, true) => false,
         FdKind::SocketPair(_, outbox) => {
-            let canal = outbox.borrow();
+            let canal = outbox.lock();
             canal.lecteurs == 0 || canal.place() > 0
         }
         // Les autres n'ont pas de tampon borne : ils acceptent toujours.
@@ -2266,14 +2261,14 @@ fn writable(fd: i32) -> bool {
 /// puisque personne ne consomme) et croirait pouvoir continuer.
 fn etat_pair(fd: i32) -> u32 {
     let process = task::current_process();
-    let kind = match process.borrow().files.get(fd) {
+    let kind = match process.files.lock().get(fd) {
         Some(desc) => desc.kind.clone(),
         None => return 0,
     };
     match kind {
-        FdKind::Pipe(state, true) if state.borrow().writers == 0 => POLLHUP,
-        FdKind::Pipe(state, false) if state.borrow().readers == 0 => POLLHUP | POLLERR,
-        FdKind::SocketPair(_, outbox) if outbox.borrow().lecteurs == 0 => POLLHUP | POLLERR,
+        FdKind::Pipe(state, true) if state.lock().writers == 0 => POLLHUP,
+        FdKind::Pipe(state, false) if state.lock().readers == 0 => POLLHUP | POLLERR,
+        FdKind::SocketPair(_, outbox) if outbox.lock().lecteurs == 0 => POLLHUP | POLLERR,
         _ => 0,
     }
 }
@@ -2281,7 +2276,7 @@ fn etat_pair(fd: i32) -> u32 {
 /// Un descripteur est-il pret en lecture ?
 fn readable(fd: i32) -> bool {
     let process = task::current_process();
-    let kind = match process.borrow().files.get(fd) {
+    let kind = match process.files.lock().get(fd) {
         Some(desc) => desc.kind.clone(),
         None => return false,
     };
@@ -2297,21 +2292,21 @@ fn readable(fd: i32) -> bool {
         // Le declarer bloque ferait tourner indefiniment une boucle `poll` qui
         // attend la fin de fichier.
         FdKind::Pipe(shared, true) => {
-            let state = shared.borrow();
+            let state = shared.lock();
             !state.buffer.is_empty() || state.writers == 0
         }
         // Interroger sans consommer : `poll` ne doit pas voler l'evenement au
         // `read` qui va suivre.
         FdKind::InputKeyboard => input::keyboard_pending(),
         FdKind::InputMouse => input::mouse_pending(),
-        FdKind::EventFd(state) => state.borrow().counter > 0,
+        FdKind::EventFd(state) => state.lock().counter > 0,
         FdKind::TimerFd(state) => {
-            let mut state = state.borrow_mut();
+            let mut state = state.lock();
             refresh_timerfd(&mut state);
             state.expirations > 0
         }
         FdKind::Socket(state) => crate::kernel::abi::net::socket_readable(&state),
-        FdKind::SocketPair(inbox, _) => !inbox.borrow().octets.is_empty(),
+        FdKind::SocketPair(inbox, _) => !inbox.lock().octets.is_empty(),
         _ => false,
     }
 }
@@ -2412,11 +2407,9 @@ pub fn sys_select(
 
 /// `epoll_create` / `epoll_create1`.
 pub fn sys_epoll_create() -> i64 {
-    use alloc::rc::Rc;
-    use core::cell::RefCell;
     let process = task::current_process();
-    let desc = FileDesc::new(FdKind::Epoll(Rc::new(RefCell::new(Vec::new()))));
-    let fd = process.borrow_mut().files.insert(desc);
+    let desc = FileDesc::new(FdKind::Epoll(alloc::sync::Arc::new(crate::kernel::sync::SpinLock::new(Vec::new()))));
+    let fd = process.files.lock().insert(desc);
     fd as i64
 }
 
@@ -2427,7 +2420,7 @@ pub fn sys_epoll_ctl(epfd: i32, operation: u32, fd: i32, event: u64) -> i64 {
     const EPOLL_CTL_MOD: u32 = 3;
 
     let process = task::current_process();
-    let list = match process.borrow().files.get(epfd) {
+    let list = match process.files.lock().get(epfd) {
         Some(desc) => match &desc.kind {
             FdKind::Epoll(list) => list.clone(),
             _ => return -errno::EINVAL,
@@ -2444,13 +2437,13 @@ pub fn sys_epoll_ctl(epfd: i32, operation: u32, fd: i32, event: u64) -> i64 {
                 None => return -errno::EFAULT,
             };
             let data = user_read_u64(event + 4).unwrap_or(0);
-            let mut list = list.borrow_mut();
+            let mut list = list.lock();
             list.retain(|entry| entry.0 != fd);
             list.push((fd, events, data));
             0
         }
         EPOLL_CTL_DEL => {
-            list.borrow_mut().retain(|entry| entry.0 != fd);
+            list.lock().retain(|entry| entry.0 != fd);
             0
         }
         _ => -errno::EINVAL,
@@ -2462,7 +2455,7 @@ pub fn sys_epoll_wait(epfd: i32, events: u64, max: usize, timeout_ms: i32) -> i6
     // BOUCHAUD_CPU_OPT_POLL_BACKOFF: backoff borne pour les boucles d'I/O sans evenement.
     let mut bouchaud_idle_rounds = 0u32;
     let process = task::current_process();
-    let list = match process.borrow().files.get(epfd) {
+    let list = match process.files.lock().get(epfd) {
         Some(desc) => match &desc.kind {
             FdKind::Epoll(list) => list.clone(),
             _ => return -errno::EINVAL,
@@ -2478,7 +2471,7 @@ pub fn sys_epoll_wait(epfd: i32, events: u64, max: usize, timeout_ms: i32) -> i6
 
     loop {
         let mut written = 0usize;
-        for &(fd, wanted, data) in list.borrow().iter() {
+        for &(fd, wanted, data) in list.lock().iter() {
             if written >= max {
                 break;
             }
@@ -2506,27 +2499,27 @@ pub fn sys_epoll_wait(epfd: i32, events: u64, max: usize, timeout_ms: i32) -> i6
 
 /// `eventfd2` : compteur de reveils partage entre threads.
 pub fn sys_eventfd(initial: u32, flags: u32) -> i64 {
-    use alloc::rc::Rc;
-    use core::cell::RefCell;
+    use alloc::sync::Arc;
+    use crate::kernel::sync::SpinLock;
     const EFD_SEMAPHORE: u32 = 1;
     const EFD_CLOEXEC: u32 = 0o2000000;
-    let state = Rc::new(RefCell::new(crate::kernel::fd::EventFdState {
+    let state = Arc::new(SpinLock::new(crate::kernel::fd::EventFdState {
         counter: initial as u64,
         semaphore: flags & EFD_SEMAPHORE != 0,
     }));
     let mut desc = FileDesc::new(FdKind::EventFd(state));
     desc.cloexec = flags & EFD_CLOEXEC != 0;
     let process = task::current_process();
-    let fd = process.borrow_mut().files.insert(desc);
+    let fd = process.files.lock().insert(desc);
     fd as i64
 }
 
 /// `timerfd_create`.
 pub fn sys_timerfd_create(flags: u32) -> i64 {
-    use alloc::rc::Rc;
-    use core::cell::RefCell;
+    use alloc::sync::Arc;
+    use crate::kernel::sync::SpinLock;
     const TFD_CLOEXEC: u32 = 0o2000000;
-    let state = Rc::new(RefCell::new(crate::kernel::fd::TimerFdState {
+    let state = Arc::new(SpinLock::new(crate::kernel::fd::TimerFdState {
         deadline: 0,
         interval: 0,
         expirations: 0,
@@ -2534,7 +2527,7 @@ pub fn sys_timerfd_create(flags: u32) -> i64 {
     let mut desc = FileDesc::new(FdKind::TimerFd(state));
     desc.cloexec = flags & TFD_CLOEXEC != 0;
     let process = task::current_process();
-    let fd = process.borrow_mut().files.insert(desc);
+    let fd = process.files.lock().insert(desc);
     fd as i64
 }
 
@@ -2542,7 +2535,7 @@ pub fn sys_timerfd_create(flags: u32) -> i64 {
 pub fn sys_timerfd_settime(fd: i32, flags: u32, new_value: u64, old_value: u64) -> i64 {
     const TFD_TIMER_ABSTIME: u32 = 1;
     let process = task::current_process();
-    let state = match process.borrow().files.get(fd) {
+    let state = match process.files.lock().get(fd) {
         Some(desc) => match &desc.kind {
             FdKind::TimerFd(state) => state.clone(),
             _ => return -errno::EINVAL,
@@ -2551,7 +2544,7 @@ pub fn sys_timerfd_settime(fd: i32, flags: u32, new_value: u64, old_value: u64) 
     };
 
     if old_value != 0 {
-        let previous = state.borrow();
+        let previous = state.lock();
         let remaining = previous
             .deadline
             .saturating_sub(crate::kernel::timer::ticks());
@@ -2567,7 +2560,7 @@ pub fn sys_timerfd_settime(fd: i32, flags: u32, new_value: u64, old_value: u64) 
         None => return -errno::EFAULT,
     };
 
-    let mut state = state.borrow_mut();
+    let mut state = state.lock();
     state.interval = crate::kernel::timer::ms_to_ticks(interval_ns / 1_000_000);
     state.expirations = 0;
     state.deadline = if value_ns == 0 {
@@ -2588,14 +2581,14 @@ pub fn sys_timerfd_settime(fd: i32, flags: u32, new_value: u64, old_value: u64) 
 /// `timerfd_gettime`.
 pub fn sys_timerfd_gettime(fd: i32, out: u64) -> i64 {
     let process = task::current_process();
-    let state = match process.borrow().files.get(fd) {
+    let state = match process.files.lock().get(fd) {
         Some(desc) => match &desc.kind {
             FdKind::TimerFd(state) => state.clone(),
             _ => return -errno::EINVAL,
         },
         None => return -errno::EBADF,
     };
-    let state = state.borrow();
+    let state = state.lock();
     let remaining = state.deadline.saturating_sub(crate::kernel::timer::ticks());
     write_itimerspec(out, state.interval, remaining);
     0
@@ -2689,7 +2682,7 @@ pub fn sys_statfs(path_addr: u64, out: u64) -> i64 {
 /// `fstatfs(fd, buf)`.
 pub fn sys_fstatfs(fd: i32, out: u64) -> i64 {
     let process = task::current_process();
-    if process.borrow().files.get(fd).is_none() {
+    if process.files.lock().get(fd).is_none() {
         return -errno::EBADF;
     }
     if user_write(out, &statfs_bytes()) { 0 } else { -errno::EFAULT }

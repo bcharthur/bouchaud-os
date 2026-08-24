@@ -100,8 +100,8 @@ impl Surface {
     /// dans la table du processus qu'il vient de creer. Le jour ou un serveur
     /// graphique passera en ring 3, c'est cette fonction — et elle seule — qui
     /// deviendra un `sendmsg`.
-    pub fn descripteur(&self, processus: &mut Process) -> i32 {
-        processus.files.insert(FileDesc::new(FdKind::File(self.node)))
+    pub fn descripteur(&self, processus: &Process) -> i32 {
+        processus.files.lock().insert(FileDesc::new(FdKind::File(self.node)))
     }
 
     /// Adresse noyau du premier octet d'une page, si elle existe.

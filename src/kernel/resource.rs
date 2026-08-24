@@ -22,9 +22,11 @@ pub struct MemoryUsage {
 }
 
 pub fn memory_usage(process: &Process) -> MemoryUsage {
-    let resident = process.space.resident_stats(&process.promesses);
+    let mm = process.mm.lock();
+    let promises = mm.promesses.clone();
+    let resident = mm.space.resident_stats(&promises);
     MemoryUsage {
-        vss: crate::kernel::vma::octets_virtuels(&process.promesses),
+        vss: crate::kernel::vma::octets_virtuels(&promises),
         rss: resident.total_pages * PAGE_SIZE,
         anonymous: resident.anonymous_pages * PAGE_SIZE,
         file_private: resident.file_private_pages * PAGE_SIZE,

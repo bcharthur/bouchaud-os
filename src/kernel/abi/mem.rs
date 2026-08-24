@@ -20,8 +20,7 @@
 //! `/dev/fb0` suit une troisieme voie : ses pages sont celles de la memoire
 //! video, empruntees telles quelles.
 
-use alloc::rc::Rc;
-use core::cell::RefCell;
+use alloc::sync::Arc;
 
 use crate::kernel::abi::errno;
 use crate::kernel::fd::FdKind;
@@ -31,28 +30,22 @@ use crate::kernel::vma::{self, Backing, Vma};
 use crate::kernel::vmm::{self, PAGE_SIZE};
 
 fn execute_process_invalidation(
-    process: &Rc<RefCell<task::Process>>,
+    _process: &Arc<task::Process>,
     invalidation: vmm::TlbInvalidation,
 ) {
-    // Vérifie exactement l'invariant qui a paniqué sous SMP4: aucun Ref/RefMut
-    // Process ne doit survivre à la fenêtre où le BKL est suspendu.
-    debug_assert!(
-        process.try_borrow_mut().is_ok(),
-        "MM shootdown: Process encore emprunte avant suspension BKL"
-    );
     let depth = crate::kernel::smp_lock::suspend_for_schedule();
     invalidation.execute();
     crate::kernel::smp_lock::resume_after_schedule(depth);
 }
 
 fn finish_mapping_replacement(
-    process: &Rc<RefCell<task::Process>>,
+    process: &Arc<task::Process>,
     retirement: Option<vmm::UnmapRetirement>,
     shared_nodes: &[usize],
 ) {
     if let Some(retirement) = retirement {
         execute_process_invalidation(process, retirement.invalidation());
-        process.borrow_mut().space.finish_unmap(retirement);
+        process.mm.lock().space.finish_unmap(retirement);
     }
     // Une frame MAP_SHARED ne peut être rendue qu'après le même ACK TLB.
     for &node in shared_nodes {
@@ -98,7 +91,7 @@ pub fn sys_brk(addr: u64) -> i64 {
     let process = task::current_process();
     let mut retirement = None;
     let result = {
-        let mut borrowed = process.borrow_mut();
+        let mut borrowed = process.mm.lock();
         if addr == 0 || addr < borrowed.brk_start {
             return borrowed.brk as i64;
         }
@@ -136,7 +129,7 @@ pub fn sys_brk(addr: u64) -> i64 {
 
     if let Some(retirement) = retirement {
         execute_process_invalidation(&process, retirement.invalidation());
-        process.borrow_mut().space.finish_unmap(retirement);
+        process.mm.lock().space.finish_unmap(retirement);
     }
     result
 }
@@ -154,7 +147,7 @@ fn plage_user_valide(base: u64, length: u64) -> bool {
 }
 
 fn choisit_base_mmap(
-    process: &mut task::Process,
+    process: &mut task::MmState,
     addr: u64,
     length: u64,
     flags: u32,
@@ -206,7 +199,7 @@ fn choisit_base_mmap(
 }
 
 fn installe_vma(
-    process: &mut task::Process,
+    process: &mut task::MmState,
     base: u64,
     length: u64,
     drapeaux: u64,
@@ -264,7 +257,9 @@ pub fn sys_mmap(
     }
 
     let process_rc = task::current_process();
-    let mut process = process_rc.borrow_mut();
+    let fd_kind = process_rc.files.lock().get(fd).map(|desc| desc.kind.clone());
+    let ecran = process_rc.metadata.lock().ecran;
+    let mut process = process_rc.mm.lock();
     let base = match choisit_base_mmap(&mut process, addr, length, flags) {
         Ok(base) => base,
         Err(error) => return error,
@@ -274,9 +269,8 @@ pub fn sys_mmap(
     let drapeaux = prot_to_flags(prot);
 
     if flags & MAP_ANONYMOUS == 0 && fd >= 0 {
-        let fd_kind = process.files.get(fd).map(|desc| desc.kind.clone());
-        if let Some(FdKind::Framebuffer) = fd_kind {
-                if let Some(ecran) = process.ecran {
+        if let Some(FdKind::Framebuffer) = &fd_kind {
+                if let Some(ecran) = ecran {
                     partage::mappe(ecran.node);
                     let (retirement, liberes) = installe_vma(
                         &mut process,
@@ -338,7 +332,6 @@ pub fn sys_mmap(
     let backing = if flags & MAP_ANONYMOUS != 0 {
         Backing::Zero
     } else {
-        let fd_kind = process.files.get(fd).map(|desc| desc.kind.clone());
         let node = match fd_kind {
             Some(FdKind::File(node)) => node,
             Some(_) => return -errno::ENODEV,
@@ -410,7 +403,7 @@ pub fn sys_mmap(
 /// resteraient allouees pour toujours — c'est precisement le defaut que le
 /// module `partage` corrige.
 fn map_shared_file(
-    process: &mut task::Process,
+    process: &mut task::MmState,
     node: usize,
     base: u64,
     length: u64,
@@ -438,7 +431,7 @@ fn map_shared_file(
 
 /// Mappe le framebuffer materiel dans l'espace utilisateur.
 fn map_framebuffer(
-    process: &mut task::Process,
+    process: &mut task::MmState,
     base: u64,
     length: u64,
     offset: u64,
@@ -480,18 +473,17 @@ pub fn sys_munmap(addr: u64, length: u64) -> i64 {
 
     let process = task::current_process();
     let (retirement, liberes) = {
-        let mut process = process.borrow_mut();
+        let mut process = process.mm.lock();
         let liberes = process.retire_partages(addr, length);
         vma::retire(&mut process.promesses, addr, fin);
         let retirement = process.space.prepare_unmap(addr, length);
         (retirement, liberes)
     };
 
-    // Aucun RefCell borrow ne traverse cette fenetre. Le CPU cible peut donc
-    // finir une #PF/IRQ, tandis que le handler IPI ACK sans jamais prendre BKL.
+    // No Mm guard crosses this window; remote faults and the IPI handler can progress.
     execute_process_invalidation(&process, retirement.invalidation());
 
-    process.borrow_mut().space.finish_unmap(retirement);
+    process.mm.lock().space.finish_unmap(retirement);
 
     for node in liberes {
         partage::demappe(node);
@@ -524,7 +516,7 @@ pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> i64 {
     }
 
     let process_rc = task::current_process();
-    let mut process = process_rc.borrow_mut();
+    let mut process = process_rc.mm.lock();
 
     if !vma::protege(
         &mut process.promesses,
@@ -667,7 +659,7 @@ pub fn sys_madvise(addr: u64, length: u64, advice: i32) -> i64 {
 
     let process = task::current_process();
     let retirement = {
-        let mut borrowed = process.borrow_mut();
+        let mut borrowed = process.mm.lock();
         if !vma::couvre(&borrowed.promesses, addr, fin) {
             return -errno::ENOMEM;
         }
@@ -689,7 +681,7 @@ pub fn sys_madvise(addr: u64, length: u64, advice: i32) -> i64 {
     };
     if let Some(retirement) = retirement {
         execute_process_invalidation(&process, retirement.invalidation());
-        process.borrow_mut().space.finish_unmap(retirement);
+        process.mm.lock().space.finish_unmap(retirement);
     }
     0
 }
@@ -702,7 +694,7 @@ pub fn sys_madvise(addr: u64, length: u64, advice: i32) -> i64 {
 pub fn sys_msync(addr: u64, _length: u64) -> i64 {
     let node = {
         let process = task::current_process();
-        let process = process.borrow();
+        let process = process.mm.lock();
         process.partage_a(addr)
     };
     match node {

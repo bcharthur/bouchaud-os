@@ -14,9 +14,9 @@
 //! reveiller elle-meme depuis un autre thread : c'est exactement ce que fait la
 //! boucle d'evenements de Qt (le « wakeup pipe »).
 
-use alloc::rc::Rc;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::cell::RefCell;
+use crate::kernel::sync::SpinLock;
 use core::ops::{Deref, DerefMut};
 
 /// Nature d'un descripteur ouvert.
@@ -43,20 +43,20 @@ pub enum FdKind {
     /// `/dev/dsp` : sortie audio PCM, facon OSS.
     Audio,
     /// Extremite d'un tube : (etat partage, cote lecture ?).
-    Pipe(Rc<RefCell<PipeState>>, bool),
+    Pipe(Arc<SpinLock<PipeState>>, bool),
     /// Instance `epoll` : liste de (fd surveille, evenements demandes, donnee).
-    Epoll(Rc<RefCell<Vec<(i32, u32, u64)>>>),
+    Epoll(Arc<SpinLock<Vec<(i32, u32, u64)>>>),
     /// `eventfd` : compteur 64 bits partage entre threads.
-    EventFd(Rc<RefCell<EventFdState>>),
+    EventFd(Arc<SpinLock<EventFdState>>),
     /// `timerfd` : echeance et periode, en ticks du timer noyau.
-    TimerFd(Rc<RefCell<TimerFdState>>),
+    TimerFd(Arc<SpinLock<TimerFdState>>),
     /// Socket reseau (TCP ou UDP).
-    Socket(Rc<RefCell<crate::kernel::abi::net::SocketState>>),
+    Socket(Arc<SpinLock<crate::kernel::abi::net::SocketState>>),
     /// Extremite de `socketpair` : (tampon de lecture, tampon d'ecriture).
     ///
     /// Deux tampons et non un : un socket est bidirectionnel, chaque extremite
     /// lit dans celui que l'autre alimente.
-    SocketPair(Rc<RefCell<Canal>>, Rc<RefCell<Canal>>),
+    SocketPair(Arc<SpinLock<Canal>>, Arc<SpinLock<Canal>>),
     /// Console virtuelle `/dev/tty0` : ne sert qu'a ses ioctls de mode
     /// graphique, les entrees/sorties passent par la console.
     VirtualTerminal,
@@ -72,7 +72,7 @@ pub enum FdKind {
     /// autres fichiers de `/proc` sur Bouchaud (voir `sysroot.rs` : « ce sont
     /// des instantanes, pas des vues vivantes »), et elle suffit aux
     /// consommateurs reels, qui ouvrent, lisent d'un trait et referment.
-    Instantane(Rc<Vec<u8>>),
+    Instantane(Arc<Vec<u8>>),
 }
 
 /// Etat partage d'un tube.
@@ -103,8 +103,8 @@ impl PipeState {
 }
 
 /// Cree l'etat partage d'un nouveau tube.
-pub fn new_pipe() -> Rc<RefCell<PipeState>> {
-    Rc::new(RefCell::new(PipeState::new()))
+pub fn new_pipe() -> Arc<SpinLock<PipeState>> {
+    Arc::new(SpinLock::new(PipeState::new()))
 }
 
 /// Etat d'un `eventfd`.
@@ -134,7 +134,7 @@ impl FdKind {
     fn retain(&self) {
         match self {
             FdKind::Pipe(state, readable) => {
-                let mut state = state.borrow_mut();
+                let mut state = state.lock();
                 if *readable { state.readers += 1 } else { state.writers += 1 }
             }
             // Le nœud d'un fichier compte ses descripteurs : c'est la moitie du
@@ -145,8 +145,8 @@ impl FdKind {
             // les compter ici garantit que l'EOF n'arrive qu'apres la fermeture
             // du dernier descripteur capable d'ecrire dans le canal.
             FdKind::SocketPair(inbox, outbox) => {
-                inbox.borrow_mut().lecteurs += 1;
-                let mut canal = outbox.borrow_mut();
+                inbox.lock().lecteurs += 1;
+                let mut canal = outbox.lock();
                 canal.ecrivains += 1;
                 canal.octets.rouvre();
             }
@@ -158,17 +158,17 @@ impl FdKind {
     fn release(&self) {
         match self {
             FdKind::Pipe(state, readable) => {
-                let mut state = state.borrow_mut();
+                let mut state = state.lock();
                 let compteur = if *readable { &mut state.readers } else { &mut state.writers };
                 *compteur = compteur.saturating_sub(1);
             }
             FdKind::File(node) => crate::kernel::partage::ferme(*node),
             FdKind::SocketPair(inbox, outbox) => {
                 {
-                    let mut canal = inbox.borrow_mut();
+                    let mut canal = inbox.lock();
                     canal.lecteurs = canal.lecteurs.saturating_sub(1);
                 }
-                let mut canal = outbox.borrow_mut();
+                let mut canal = outbox.lock();
                 canal.ecrivains = canal.ecrivains.saturating_sub(1);
                 if canal.ecrivains == 0 {
                     canal.octets.marque_eof();
@@ -280,8 +280,8 @@ pub const CAPACITE_CANAL: usize = 64 * 1024;
 impl Canal {
     /// Un canal neuf a exactement un lecteur et un ecrivain : les deux
     /// extremites creees ensemble par `socketpair()`.
-    pub fn neuf() -> Rc<RefCell<Canal>> {
-        Rc::new(RefCell::new(Canal {
+    pub fn neuf() -> Arc<SpinLock<Canal>> {
+        Arc::new(SpinLock::new(Canal {
             lecteurs: 1,
             ecrivains: 1,
             ..Canal::default()
@@ -340,7 +340,7 @@ impl Drop for FileDesc {
 ///
 /// `Clone` est ce dont `fork` a besoin : les descripteurs sont dupliques mais
 /// les objets sous-jacents (tubes, sockets, `eventfd`) restent partages via
-/// leur `Rc`. C'est le comportement POSIX, et ce sur quoi repose le chainage
+/// leur `Arc`. C'est le comportement POSIX, et ce sur quoi repose le chainage
 /// `cmd1 | cmd2`.
 #[derive(Clone)]
 pub struct FdTable {
@@ -458,7 +458,7 @@ pub fn device_for_path(path: &str) -> Option<FdKind> {
         // historique : les deux menent au meme pilote AC'97.
         "/dev/dsp" | "/dev/dsp0" | "/dev/audio" | "/dev/sound/dsp" => Some(FdKind::Audio),
         "/proc/self/maps" | "/proc/self/smaps" => {
-            Some(FdKind::Instantane(Rc::new(carte_memoire())))
+            Some(FdKind::Instantane(Arc::new(carte_memoire())))
         }
         _ => None,
     }
@@ -507,7 +507,8 @@ fn carte_memoire() -> Vec<u8> {
     use alloc::string::String;
 
     let processus = crate::kernel::task::current_process();
-    let p = processus.borrow();
+    let p = processus.mm.lock();
+    let name = processus.metadata.lock().name.clone();
 
     let sommet = crate::kernel::vmm::user_stack_top();
     let base_pile = sommet - crate::kernel::vmm::USER_STACK_SIZE;
@@ -521,7 +522,7 @@ fn carte_memoire() -> Vec<u8> {
     if p.brk_start > base_image {
         texte.push_str(&format!(
             "{:012x}-{:012x} r-xp 00000000 00:00 0                          /{}\n",
-            base_image, p.brk_start, p.name
+            base_image, p.brk_start, name
         ));
     }
 

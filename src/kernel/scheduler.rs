@@ -11,7 +11,7 @@ pub use crate::kernel::task::OrdonnanceurStats;
 
 pub fn current() -> u32 {
     match crate::kernel::task::try_current() {
-        Some(task) => task.process.borrow().pid,
+        Some(task) => task.process.pid,
         None => 0,
     }
 }
