@@ -36,7 +36,7 @@ use x86_64::PhysAddr;
 
 use crate::arch::x86_64::smp;
 use crate::kernel::memory;
-use crate::kernel::sync::{SpinLock, SpinLockGuard};
+use crate::kernel::sync::{SpinLockIrq, SpinLockIrqGuard};
 
 /// Taille d'une page (et d'une frame) : 4 KiB.
 pub const PAGE_SIZE: u64 = 4096;
@@ -134,14 +134,17 @@ pub const PTE_NO_EXEC: u64 = 1 << 63;
 
 /// Masque de l'adresse physique dans une entree (bits 12..51).
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+const FREE_LIST_END: u64 = u64::MAX;
 
 // --- Allocateur de frames physiques -----------------------------------------
 
 struct FrameAllocator {
     /// Regions encore vierges : (prochaine frame libre, fin exclusive).
     regions: Vec<(u64, u64)>,
-    /// Frames rendues par `free_frame`, reutilisees en priorite.
-    freed: Vec<u64>,
+    /// Tete d'une liste intrusive de frames rendues. Le premier mot de chaque
+    /// frame libre contient l'adresse de la suivante (`u64::MAX` la termine),
+    /// ce qui interdit toute allocation de tas dans `free_frame`.
+    freed_head: Option<u64>,
     total: u64,
     used: u64,
     allocations: u64,
@@ -150,9 +153,9 @@ struct FrameAllocator {
     high_watermark: u64,
 }
 
-static FRAMES: SpinLock<FrameAllocator> = SpinLock::new(FrameAllocator {
+static FRAMES: SpinLockIrq<FrameAllocator> = SpinLockIrq::new(FrameAllocator {
     regions: Vec::new(),
-    freed: Vec::new(),
+    freed_head: None,
     total: 0,
     used: 0,
     allocations: 0,
@@ -160,8 +163,12 @@ static FRAMES: SpinLock<FrameAllocator> = SpinLock::new(FrameAllocator {
     failures: 0,
     high_watermark: 0,
 });
+// Eventually-consistent mirrors for interrupt/panic-safe telemetry. Allocator
+// ownership and detailed accounting remain protected exclusively by FRAMES.
+static FRAME_TOTAL_RELAXED: AtomicU64 = AtomicU64::new(0);
+static FRAME_USED_RELAXED: AtomicU64 = AtomicU64::new(0);
 
-fn frames() -> SpinLockGuard<'static, FrameAllocator> {
+fn frames() -> SpinLockIrqGuard<'static, FrameAllocator> {
     FRAMES.lock()
 }
 
@@ -176,15 +183,21 @@ pub fn add_region(start: u64, end: u64) {
         return;
     }
     let mut f = frames();
-    f.total += (end - start) / PAGE_SIZE;
+    f.total = f
+        .total
+        .checked_add((end - start) / PAGE_SIZE)
+        .expect("vmm: total frame accounting overflow");
     f.regions.push((start, end));
+    FRAME_TOTAL_RELAXED.store(f.total, Ordering::Relaxed);
 }
 
 /// Alloue une frame physique de 4 KiB, mise a zero. `None` si plus de RAM.
 pub fn alloc_frame() -> Option<u64> {
     let phys = {
         let mut f = frames();
-        let candidate = if let Some(p) = f.freed.pop() {
+        let candidate = if let Some(p) = f.freed_head {
+            let next = unsafe { *(memory::phys_to_virt(p) as *const u64) };
+            f.freed_head = if next == FREE_LIST_END { None } else { Some(next) };
             Some(p)
         } else {
             let mut found = None;
@@ -205,9 +218,13 @@ pub fn alloc_frame() -> Option<u64> {
                 return None;
             }
         };
-        f.used = f.used.saturating_add(1);
+        f.used = f
+            .used
+            .checked_add(1)
+            .expect("vmm: used frame accounting overflow");
         f.allocations = f.allocations.wrapping_add(1);
         f.high_watermark = f.high_watermark.max(f.used);
+        FRAME_USED_RELAXED.store(f.used, Ordering::Relaxed);
         phys
     };
     unsafe {
@@ -220,11 +237,31 @@ pub fn alloc_frame() -> Option<u64> {
 pub fn free_frame(phys: u64) {
     let mut f = frames();
     let phys = phys & !(PAGE_SIZE - 1);
-    assert!(!f.freed.contains(&phys), "vmm: double free frame {phys:#x}");
+    let mut cursor = f.freed_head;
+    while let Some(free) = cursor {
+        assert!(free != phys, "vmm: double free frame {phys:#x}");
+        let next = unsafe { *(memory::phys_to_virt(free) as *const u64) };
+        cursor = if next == FREE_LIST_END { None } else { Some(next) };
+    }
     assert!(f.used != 0, "vmm: frame accounting underflow for {phys:#x}");
     f.used -= 1;
     f.frees = f.frees.wrapping_add(1);
-    f.freed.push(phys);
+    unsafe {
+        *(memory::phys_to_virt(phys) as *mut u64) = f.freed_head.unwrap_or(FREE_LIST_END);
+    }
+    f.freed_head = Some(phys);
+    FRAME_USED_RELAXED.store(f.used, Ordering::Relaxed);
+}
+
+/// Approximate frame usage for interrupt/panic-safe diagnostics.
+///
+/// This deliberately never touches `FRAMES`: the two atomics may describe
+/// adjacent allocator mutations, which is sufficient for a visual percentage.
+pub fn frame_stats_relaxed() -> (u64, u64) {
+    (
+        FRAME_USED_RELAXED.load(Ordering::Relaxed),
+        FRAME_TOTAL_RELAXED.load(Ordering::Relaxed),
+    )
 }
 
 /// (frames utilisees, frames libres, frames totales).
