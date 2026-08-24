@@ -1,0 +1,73 @@
+name: MM NG6 SMP4
+
+on:
+  pull_request:
+    paths:
+      - 'src/kernel/**'
+      - 'src/fs/backing.rs'
+      - 'src/drivers/ata.rs'
+      - 'tools/userland/mmstress.c'
+      - '.github/workflows/mm-ng6-smp4.yml'
+  workflow_dispatch:
+
+jobs:
+  mmstress-smp4:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build and QEMU dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 musl-tools
+      - name: Build kernel and guest stressor
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          cargo install bootimage --locked
+          cargo bootimage
+          CC=musl-gcc tools/userland/build-mmstress.sh
+      - name: Build guest scenario disk
+        run: |
+          set -eu
+          mkdir -p scenario/bin
+          cp mmstress scenario/bin/mmstress
+          cat > scenario/autorun <<'AUTORUN'
+          /bin/mmstress 4 512 4
+          echo MMSTRESS_NORMAL_DONE
+          /bin/mmstress unrelated
+          /bin/mmstress aba
+          echo MMSTRESS_NG6_ALL_DONE
+          AUTORUN
+          (cd tools/userland && IMAGE="$GITHUB_WORKSPACE/mm-ng6.img" \
+            ./mkdisk.sh "$GITHUB_WORKSPACE/scenario")
+      - name: Run Bouchaud OS with four CPUs
+        run: |
+          set +e
+          timeout 300 qemu-system-x86_64 \
+            -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            -drive format=raw,file=mm-ng6.img \
+            -m 2048 -smp 4 -display none -no-reboot \
+            -netdev user,id=net0 -device e1000,netdev=net0 \
+            -serial file:mm-ng6.log
+          code=$?
+          cat mm-ng6.log || true
+          if [ "$code" -eq 124 ]; then
+            echo 'QEMU MM stress timed out' >&2
+            exit 1
+          fi
+      - name: Verify guest completion and failures
+        run: |
+          set -eu
+          grep -aF 'MMSTRESS_NORMAL_DONE' mm-ng6.log
+          grep -aF 'MMSTRESS_UNRELATED_DONE' mm-ng6.log
+          grep -aF 'MMSTRESS_ABA_DONE' mm-ng6.log
+          grep -aF 'MMSTRESS_NG6_ALL_DONE' mm-ng6.log
+          if grep -aqE '\*\*\* KERNEL PANIC \*\*\*|FAULT_FATAL|faute de page utilisateur' mm-ng6.log; then
+            echo 'fatal kernel or user fault in MM stress log' >&2
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mm-ng6-smp4-log
+          path: mm-ng6.log

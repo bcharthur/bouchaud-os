@@ -9,6 +9,7 @@
 //! jeter la metadata des portions gauche/droite encore vivantes.
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::kernel::vmm::PAGE_SIZE;
 
@@ -51,6 +52,9 @@ impl Backing {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Vma {
+    /// Identite monotone du mapping logique. Elle ferme l'ABA adresse/backing
+    /// lors d'un fault concurrent avec munmap/MAP_FIXED.
+    pub id: u64,
     pub debut: u64,
     pub fin: u64,
     /// Drapeaux feuille x86 a appliquer quand une page devient residente.
@@ -59,6 +63,12 @@ pub struct Vma {
     /// drapeaux sans `PTE_USER`, donc le fault handler refuse de la peupler.
     pub drapeaux: u64,
     pub backing: Backing,
+}
+
+static NEXT_VMA_ID: AtomicU64 = AtomicU64::new(1);
+
+pub fn nouvelle_identite() -> u64 {
+    NEXT_VMA_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 impl Vma {
@@ -195,7 +205,11 @@ pub fn protege(regions: &mut Vec<Vma>, debut: u64, fin: u64, drapeaux: u64) -> b
         let mut milieu = region;
         milieu.debut = region.debut.max(debut);
         milieu.fin = region.fin.min(fin);
+        let protection_change = region.drapeaux != drapeaux;
         milieu.drapeaux = drapeaux;
+        if protection_change {
+            milieu.id = nouvelle_identite();
+        }
         if milieu.debut < milieu.fin {
             next.push(milieu);
         }
@@ -302,17 +316,24 @@ pub fn self_test() -> bool {
     remplace(
         &mut regions,
         Vma {
+            id: nouvelle_identite(),
             debut: 0x1000,
             fin: 0x9000,
             drapeaux: rw,
             backing: Backing::Zero,
         },
     );
+    let original_id = trouve(&regions, 0x2000).unwrap().id;
 
     retire(&mut regions, 0x3000, 0x5000);
     if !couvre(&regions, 0x1000, 0x3000)
         || couvre(&regions, 0x3000, 0x5000)
         || !couvre(&regions, 0x5000, 0x9000)
+    {
+        return false;
+    }
+    if trouve(&regions, 0x2000).unwrap().id != original_id
+        || trouve(&regions, 0x8000).unwrap().id != original_id
     {
         return false;
     }
@@ -323,6 +344,9 @@ pub fn self_test() -> bool {
     if trouve(&regions, 0x6000).map(|r| r.drapeaux) != Some(ro) {
         return false;
     }
+    if trouve(&regions, 0x6000).unwrap().id == original_id {
+        return false;
+    }
     if trouve(&regions, 0x8000).map(|r| r.drapeaux) != Some(rw) {
         return false;
     }
@@ -330,12 +354,16 @@ pub fn self_test() -> bool {
     remplace(
         &mut regions,
         Vma {
+            id: nouvelle_identite(),
             debut: 0x3000,
             fin: 0x5000,
             drapeaux: rw,
             backing: Backing::Zero,
         },
     );
+    if trouve(&regions, 0x4000).unwrap().id == original_id {
+        return false;
+    }
     if !couvre(&regions, 0x1000, 0x9000) {
         return false;
     }

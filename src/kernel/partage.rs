@@ -159,6 +159,10 @@ pub fn page(node: usize, numero: u64) -> Option<u64> {
             None => SharedPageState::Failed,
         };
         page.waiters.wake_all();
+        // The last mapping/descriptor may have disappeared while this loader
+        // was outside CACHE doing I/O. Re-run orphan collection now; otherwise
+        // no later lifecycle event is guaranteed to reclaim the frame.
+        evince_si_orphelin(node);
         return result;
     }
 

@@ -50,7 +50,7 @@ use crate::arch::x86_64::usermode::{self, TrapFrame};
 use crate::kernel::fd::FdTable;
 use crate::kernel::smp_lock;
 use crate::kernel::vmm::AddressSpace;
-use crate::kernel::sync::{SpinLock, SpinLockGuard};
+use crate::kernel::sync::{SpinLock, SpinLockGuard, SpinLockIrq};
 pub use crate::kernel::vma::{Backing as PromesseBacking, Vma as Promesse};
 
 /// Taille de la pile noyau d'une tache (64 KiB).
@@ -125,38 +125,85 @@ pub struct Context {
 static FAULTS_ZERO: AtomicU64 = AtomicU64::new(0);
 static FAULTS_FILE: AtomicU64 = AtomicU64::new(0);
 static FAULT_WAITS: AtomicU64 = AtomicU64::new(0);
+static FAULT_RESOLVED: AtomicU64 = AtomicU64::new(0);
+static FAULT_RETRY: AtomicU64 = AtomicU64::new(0);
+static FAULT_INVALID: AtomicU64 = AtomicU64::new(0);
+static FAULT_IO_ERROR: AtomicU64 = AtomicU64::new(0);
+static FAULT_RETIRED: AtomicU64 = AtomicU64::new(0);
+static PF_BKL_ENTERS: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultOutcome {
+    Resolved,
+    Retry,
+    Invalid,
+    IoError,
+    Retired,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MappingPart {
+    id: u64,
+    start: u64,
+    end: u64,
+    drapeaux: u64,
+    backing: PromesseBacking,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MappingToken {
+    effective_id: u64,
+    parts: Vec<MappingPart>,
+}
+
+fn mapping_token(regions: &[Promesse], page: u64) -> Option<MappingToken> {
+    let page_end = page.checked_add(crate::kernel::vmm::PAGE_SIZE)?;
+    let effective_id = crate::kernel::vma::trouve(regions, page)?.id;
+    let parts = regions
+        .iter()
+        .filter(|region| region.chevauche(page, page_end))
+        .map(|region| MappingPart {
+            id: region.id,
+            start: region.debut.max(page),
+            end: region.fin.min(page_end),
+            drapeaux: region.drapeaux,
+            backing: region.backing,
+        })
+        .collect();
+    Some(MappingToken { effective_id, parts })
+}
+
+#[derive(Clone, PartialEq, Eq)]
 enum FaultPageState {
     Missing,
     Loading,
     Present,
-    Failed,
+    Failed(FaultOutcome),
+    Cancelled,
     Retired,
 }
 
 struct FaultPage {
     pml4: u64,
     page: u64,
-    epoch: u64,
+    token: MappingToken,
     state: SpinLock<FaultPageState>,
     waiters: crate::kernel::sync::WaitQueue,
 }
 
 static FAULT_PAGES: SpinLock<Vec<Arc<FaultPage>>> = SpinLock::new(Vec::new());
 
-fn fault_page(pml4: u64, page: u64, epoch: u64) -> Arc<FaultPage> {
+fn fault_page(pml4: u64, page: u64, token: &MappingToken) -> Arc<FaultPage> {
     let mut pages = FAULT_PAGES.lock();
-    if let Some(entry) = pages
-        .iter()
-        .find(|entry| entry.pml4 == pml4 && entry.page == page && entry.epoch == epoch)
-    {
+    if let Some(entry) = pages.iter().find(|entry| {
+        entry.pml4 == pml4 && entry.page == page && entry.token == *token
+    }) {
         return Arc::clone(entry);
     }
     let entry = Arc::new(FaultPage {
         pml4,
         page,
-        epoch,
+        token: token.clone(),
         state: SpinLock::new(FaultPageState::Missing),
         waiters: crate::kernel::sync::WaitQueue::new(),
     });
@@ -172,10 +219,34 @@ pub fn forget_fault_space(pml4: u64) {
     retire_fault_records(|entry| entry.pml4 == pml4);
 }
 
-pub fn retire_stale_fault_range(pml4: u64, current_epoch: u64, start: u64, len: u64) {
+/// Retire only loaders whose virtual page intersects a changed mapping range.
+/// Unrelated mmap/brk/mprotect operations therefore cannot cancel this fault.
+pub fn retire_fault_range(pml4: u64, start: u64, len: u64) {
     let end = start.saturating_add(len);
-    retire_fault_records(|entry| entry.pml4 == pml4 && entry.epoch != current_epoch
-        && entry.page >= start && entry.page < end);
+    cancel_fault_records(|entry| {
+        entry.pml4 == pml4 && entry.page < end
+            && entry.page.saturating_add(crate::kernel::vmm::PAGE_SIZE) > start
+    });
+}
+
+fn cancel_fault_records(mut predicate: impl FnMut(&FaultPage) -> bool) {
+    let cancelled = {
+        let mut registry = FAULT_PAGES.lock();
+        let mut cancelled = Vec::new();
+        registry.retain(|entry| {
+            if predicate(entry) {
+                cancelled.push(Arc::clone(entry));
+                false
+            } else {
+                true
+            }
+        });
+        cancelled
+    };
+    for entry in cancelled {
+        *entry.state.lock() = FaultPageState::Cancelled;
+        entry.waiters.wake_all();
+    }
 }
 
 fn retire_fault_records(mut predicate: impl FnMut(&FaultPage) -> bool) {
@@ -186,7 +257,9 @@ fn retire_fault_records(mut predicate: impl FnMut(&FaultPage) -> bool) {
             if predicate(entry) {
                 retired.push(Arc::clone(entry));
                 false
-            } else { true }
+            } else {
+                true
+            }
         });
         retired
     };
@@ -196,50 +269,55 @@ fn retire_fault_records(mut predicate: impl FnMut(&FaultPage) -> bool) {
     }
 }
 
-/// Peuple a la demande une page promise.
-///
-/// La derniere promesse couvrant la page fixe les droits. Toutes les promesses
-/// file-backed couvrant cette meme page contribuent ensuite leurs octets : deux
-/// PT_LOAD ELF peuvent legalement partager une page de bordure.
-pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> bool {
-    if !crate::kernel::vmm::is_user_addr(adresse) || !in_user_task() {
-        return false;
+fn record_fault_outcome(outcome: FaultOutcome) {
+    match outcome {
+        FaultOutcome::Resolved => &FAULT_RESOLVED,
+        FaultOutcome::Retry => &FAULT_RETRY,
+        FaultOutcome::Invalid => &FAULT_INVALID,
+        FaultOutcome::IoError => &FAULT_IO_ERROR,
+        FaultOutcome::Retired => &FAULT_RETIRED,
+    }
+    .fetch_add(1, Ordering::Relaxed);
+}
+
+/// Resolve one demand-fault attempt. Mapping replacement is a typed retry,
+/// never an accidental SIGSEGV; a genuine missing/protected VMA is Invalid.
+pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> FaultOutcome {
+    if !crate::kernel::vmm::is_user_addr(adresse) || !in_user_task() || protection_fault {
+        record_fault_outcome(FaultOutcome::Invalid);
+        return FaultOutcome::Invalid;
     }
 
-    // Une faute de protection n'est jamais transformee en demand paging.
-    if protection_fault {
-        return false;
-    }
-
-    // TASKS remains a legacy registry protected by the BKL. Clone the stable
-    // Arc while holding it, then perform the entire fault resolution through
-    // the process domains without retaining the machine-wide lock.
-    let processus = {
-        let _kernel = smp_lock::enter();
-        current_process()
+    let Some(processus) = current_process_local() else {
+        record_fault_outcome(FaultOutcome::Retired);
+        return FaultOutcome::Retired;
     };
 
     let page = adresse & !(crate::kernel::vmm::PAGE_SIZE - 1);
-    let (fault_pml4, fault_epoch) = {
+    let (fault_pml4, token) = {
         let mm = processus.mm.lock();
-        (mm.space.pml4(), mm.mapping_epoch)
+        let Some(token) = mapping_token(&mm.promesses, page) else {
+            record_fault_outcome(FaultOutcome::Invalid);
+            return FaultOutcome::Invalid;
+        };
+        (mm.space.pml4(), token)
     };
-    let record = fault_page(fault_pml4, page, fault_epoch);
+    let record = fault_page(fault_pml4, page, &token);
     loop {
         let mut state = record.state.lock();
-        match *state {
+        match &*state {
             FaultPageState::Loading => {
                 let ticket = record.waiters.ticket();
                 drop(state);
                 FAULT_WAITS.fetch_add(1, Ordering::Relaxed);
                 record.waiters.wait(ticket);
-                continue;
             }
             FaultPageState::Present => {
-                if processus.mm.lock().space.translate(page).is_some() {
-                    return true;
+                let resolved = processus.mm.lock().space.translate(page).is_some();
+                if resolved {
+                    record_fault_outcome(FaultOutcome::Resolved);
+                    return FaultOutcome::Resolved;
                 }
-                // munmap a pu retirer la PTE depuis le dernier fault.
                 *state = FaultPageState::Loading;
                 break;
             }
@@ -247,125 +325,129 @@ pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> bool {
                 *state = FaultPageState::Loading;
                 break;
             }
-            FaultPageState::Failed | FaultPageState::Retired => return false,
+            FaultPageState::Failed(outcome) => {
+                let outcome = *outcome;
+                drop(state);
+                record_fault_outcome(outcome);
+                return outcome;
+            }
+            FaultPageState::Cancelled => {
+                drop(state);
+                record_fault_outcome(FaultOutcome::Retry);
+                return FaultOutcome::Retry;
+            }
+            FaultPageState::Retired => {
+                drop(state);
+                record_fault_outcome(FaultOutcome::Retired);
+                return FaultOutcome::Retired;
+            }
         }
     }
 
-    let loaded = peuple_page_loader(&processus, adresse, fault_pml4, fault_epoch);
-    let result = {
+    let loaded = peuple_page_loader(&processus, adresse, fault_pml4, &token);
+    let outcome = {
         let mut state = record.state.lock();
-        if *state == FaultPageState::Retired {
-            false
-        } else {
-            *state = if loaded { FaultPageState::Present } else { FaultPageState::Failed };
-            loaded
+        match *state {
+            FaultPageState::Retired => FaultOutcome::Retired,
+            FaultPageState::Cancelled => FaultOutcome::Retry,
+            _ => {
+                *state = if loaded == FaultOutcome::Resolved {
+                    FaultPageState::Present
+                } else {
+                    FaultPageState::Failed(loaded)
+                };
+                loaded
+            }
         }
     };
     record.waiters.wake_all();
-    if !result {
+    if outcome != FaultOutcome::Resolved {
         forget_fault_page(&record);
     }
-    result
+    record_fault_outcome(outcome);
+    outcome
 }
 
-fn peuple_page_loader(processus: &Arc<Process>, adresse: u64, fault_pml4: u64, fault_epoch: u64) -> bool {
-
+fn peuple_page_loader(
+    processus: &Arc<Process>,
+    adresse: u64,
+    fault_pml4: u64,
+    token: &MappingToken,
+) -> FaultOutcome {
     stall_pf_phase(210, adresse);
     stall_pf_phase(211, adresse);
     let mut p = processus.mm.lock();
     let page = adresse & !(crate::kernel::vmm::PAGE_SIZE - 1);
     stall_pf_phase(212, page);
-    if p.space.pml4() != fault_pml4 || p.mapping_epoch != fault_epoch {
-        return false;
+    if p.space.pml4() != fault_pml4 {
+        return FaultOutcome::Retired;
+    }
+    if mapping_token(&p.promesses, page).as_ref() != Some(token) {
+        return FaultOutcome::Retry;
     }
 
     let effective = match crate::kernel::vma::trouve(&p.promesses, page) {
         Some(region) => region,
-        None => return false,
+        None => return FaultOutcome::Invalid,
     };
-
     if effective.drapeaux & crate::kernel::vmm::PTE_USER == 0 {
-        return false;
+        return FaultOutcome::Invalid;
     }
-
     if p.space.translate(page).is_some() {
-        // Un autre CPU du meme processus a pu materialiser la page pendant que
-        // cette faute attendait le BKL. Dans ce cas le fault est deja resolu.
-        // Une faute de protection, elle, reste fatale et ne doit pas boucler.
-        return true;
+        return FaultOutcome::Resolved;
     }
 
     match effective.backing {
         PromesseBacking::Zero => {
             stall_pf_phase(220, page);
-            if !p.space.map_alloc(
-                page,
-                crate::kernel::vmm::PAGE_SIZE,
-                effective.drapeaux,
-            ) {
-                return false;
+            if !p.space.map_alloc(page, crate::kernel::vmm::PAGE_SIZE, effective.drapeaux) {
+                return FaultOutcome::IoError;
             }
             FAULTS_ZERO.fetch_add(1, Ordering::Relaxed);
             stall_pf_phase(229, page);
-            true
+            FaultOutcome::Resolved
         }
-
-        PromesseBacking::Framebuffer {
-            phys_base,
-            mapping_start,
-            phys_offset,
-        } => {
-            let delta = page.saturating_sub(mapping_start);
-            let phys = phys_base
-                .saturating_add(phys_offset)
-                .saturating_add(delta);
-            p.space.map_foreign(page, phys, effective.drapeaux)
+        PromesseBacking::Framebuffer { phys_base, mapping_start, phys_offset } => {
+            let phys = phys_base.saturating_add(phys_offset)
+                .saturating_add(page.saturating_sub(mapping_start));
+            if p.space.map_foreign(page, phys, effective.drapeaux) {
+                FaultOutcome::Resolved
+            } else {
+                FaultOutcome::IoError
+            }
         }
-
-        PromesseBacking::SharedFile {
-            node,
-            mapping_start,
-            file_offset,
-            ..
-        } => {
-            stall_pf_phase(230, page);
-            let source =
-                file_offset.saturating_add(page.saturating_sub(mapping_start));
+        PromesseBacking::SharedFile { node, mapping_start, file_offset, .. } => {
+            let source = file_offset.saturating_add(page.saturating_sub(mapping_start));
             let numero = source / crate::kernel::vmm::PAGE_SIZE;
-            // The shared-page registry may allocate, read backing storage, or
-            // sleep behind another loader. No Mm guard may cross that phase.
             drop(p);
             let frame = match crate::kernel::partage::page(node, numero) {
                 Some(frame) => frame,
-                None => return false,
+                None => return FaultOutcome::IoError,
             };
             let mut p = processus.mm.lock();
-            if p.space.pml4() != fault_pml4 || p.mapping_epoch != fault_epoch {
-                return false;
+            if p.space.pml4() != fault_pml4 {
+                return FaultOutcome::Retired;
             }
-            let Some(current) = crate::kernel::vma::trouve(&p.promesses, page) else {
-                return false;
-            };
-            if current.backing != effective.backing || p.space.translate(page).is_some() {
-                return p.space.translate(page).is_some();
+            if mapping_token(&p.promesses, page).as_ref() != Some(token) {
+                return FaultOutcome::Retry;
+            }
+            if p.space.translate(page).is_some() {
+                return FaultOutcome::Resolved;
             }
             if !p.space.map_foreign(page, frame, effective.drapeaux) {
-                return false;
+                return FaultOutcome::IoError;
             }
             FAULTS_FILE.fetch_add(1, Ordering::Relaxed);
-            stall_pf_phase(239, page);
-            true
+            FaultOutcome::Resolved
         }
-
         PromesseBacking::File { .. } => {
-            stall_pf_phase(240, page);
             let regions = p.promesses.clone();
             let page_end = page + crate::kernel::vmm::PAGE_SIZE;
             let mut clean_key = None;
             if effective.drapeaux & crate::kernel::vmm::PTE_WRITE == 0 {
                 let covering: Vec<_> = regions.iter().filter(|region| {
                     matches!(region.backing, PromesseBacking::File { .. })
-                        && page < region.fin && page_end > region.debut
+                        && region.chevauche(page, page_end)
                 }).collect();
                 if covering.len() == 1 {
                     if let PromesseBacking::File { node, mapping_start, file_offset, file_size } = effective.backing {
@@ -386,119 +468,73 @@ fn peuple_page_loader(processus: &Arc<Process>, adresse: u64, fault_pml4: u64, f
 
             if let Some(key) = clean_key {
                 if let Some(frame) = crate::kernel::clean_page_cache::acquire(key) {
-                    let mut current_mm = processus.mm.lock();
-                    if current_mm.space.pml4() != fault_pml4
-                        || current_mm.mapping_epoch != fault_epoch
-                    {
-                        crate::kernel::clean_page_cache::release(key);
-                        return false;
-                    }
-                    let valid = crate::kernel::vma::trouve(&current_mm.promesses, page)
-                        .map(|current| current.backing == effective.backing
-                            && current.drapeaux == effective.drapeaux)
-                        .unwrap_or(false);
-                    if valid && current_mm.space.translate(page).is_none()
-                        && current_mm.space.map_foreign(page, frame, effective.drapeaux)
-                    {
-                        current_mm.clean_pages.push(CleanPageMapping { virt: page, key });
+                    let mut mm = processus.mm.lock();
+                    let outcome = if mm.space.pml4() != fault_pml4 {
+                        FaultOutcome::Retired
+                    } else if mapping_token(&mm.promesses, page).as_ref() != Some(token) {
+                        FaultOutcome::Retry
+                    } else if mm.space.translate(page).is_some() {
+                        FaultOutcome::Resolved
+                    } else if mm.space.map_foreign(page, frame, effective.drapeaux) {
+                        mm.clean_pages.push(CleanPageMapping { virt: page, key });
                         FAULTS_FILE.fetch_add(1, Ordering::Relaxed);
-                        return true;
-                    }
-                    crate::kernel::clean_page_cache::release(key);
-                    if current_mm.space.translate(page).is_some() { return true; }
-                    return false;
-                }
-            }
-
-            let mut p = processus.mm.lock();
-            if p.space.pml4() != fault_pml4 || p.mapping_epoch != fault_epoch {
-                return false;
-            }
-            if !p.space.map_alloc(
-                page,
-                crate::kernel::vmm::PAGE_SIZE,
-                effective.drapeaux,
-            ) {
-                return false;
-            }
-
-            // Plusieurs PT_LOAD peuvent partager une page. Snapshot metadata,
-            // then release Mm while the backing device performs I/O.
-            // fragments file-backed qui la couvrent.
-            stall_pf_phase(241, page);
-            drop(p);
-            for region in regions {
-                if page < region.debut || page >= region.fin {
-                    continue;
-                }
-
-                let (node, mapping_start, file_offset, file_size) =
-                    match region.backing {
-                        PromesseBacking::File {
-                            node,
-                            mapping_start,
-                            file_offset,
-                            file_size,
-                        } => (node, mapping_start, file_offset, file_size),
-                        _ => continue,
+                        return FaultOutcome::Resolved;
+                    } else {
+                        FaultOutcome::IoError
                     };
-
-                let page_end = page + crate::kernel::vmm::PAGE_SIZE;
-                let data_start = mapping_start;
-                let data_end = mapping_start.saturating_add(file_size);
-                let start = core::cmp::max(page, data_start);
-                let end = core::cmp::min(page_end, data_end);
-                if end <= start {
-                    continue;
+                    crate::kernel::clean_page_cache::release(key);
+                    return outcome;
                 }
+            }
 
+            // Build the complete private page off-MM and publish it only
+            // after the range-local token has been revalidated. Mapping a zero
+            // frame before I/O allowed concurrent mprotect to leave a present
+            // but never-populated page behind.
+            let mut page_data = [0u8; crate::kernel::vmm::PAGE_SIZE as usize];
+            for region in regions {
+                if !region.chevauche(page, page_end) { continue; }
+                let (node, mapping_start, file_offset, file_size) = match region.backing {
+                    PromesseBacking::File { node, mapping_start, file_offset, file_size } =>
+                        (node, mapping_start, file_offset, file_size),
+                    _ => continue,
+                };
+                let start = core::cmp::max(page, mapping_start);
+                let end = core::cmp::min(page_end, mapping_start.saturating_add(file_size));
+                if end <= start { continue; }
                 let wanted = (end - start) as usize;
-                let mut buffer =
-                    [0u8; crate::kernel::vmm::PAGE_SIZE as usize];
-                let source_offset = file_offset
-                    .saturating_add(start.saturating_sub(mapping_start));
+                let destination = (start - page) as usize;
+                let source_offset = file_offset.saturating_add(start.saturating_sub(mapping_start));
                 stall_pf_file_begin(source_offset);
                 let got = crate::fs::backing::read_at(
                     node,
                     source_offset as usize,
-                    &mut buffer[..wanted],
+                    &mut page_data[destination..destination + wanted],
                 );
                 stall_pf_file_done(got, wanted);
-
-                stall_pf_phase(244, start);
-                let (written, failed_retirement) = {
-                    let mut mm = processus.mm.lock();
-                    // A concurrent munmap/MAP_FIXED/exec may have replaced the
-                    // promise while disk I/O was in progress. Never publish
-                    // old bytes into the replacement mapping.
-                    if mm.space.pml4() != fault_pml4 || mm.mapping_epoch != fault_epoch
-                        || !mm.promesses.iter().any(|current| *current == region) {
-                        return false;
-                    }
-                    let written = got == wanted && mm.space.write(start, &buffer[..got]);
-                    let retirement = if written { None } else {
-                        Some(mm.space.prepare_unmap(page, crate::kernel::vmm::PAGE_SIZE))
-                    };
-                    (written, retirement)
-                };
-                if !written {
-                    let retirement = failed_retirement.unwrap();
-                    let depth = smp_lock::suspend_for_schedule();
-                    retirement.invalidation().execute();
-                    smp_lock::resume_after_schedule(depth);
-                    processus.mm.lock().space.finish_unmap(retirement);
-                    return false;
-                }
+                if got != wanted { return FaultOutcome::IoError; }
             }
 
-            stall_pf_phase(249, page);
-            if FAULTS_FILE.fetch_add(1, Ordering::Relaxed) == 0 {
-                crate::kernel::dmesg::log_fmt(format_args!(
-                    "memfabric: premier fault fichier page={:#x}",
-                    page
-                ));
+            let mut mm = processus.mm.lock();
+            if mm.space.pml4() != fault_pml4 { return FaultOutcome::Retired; }
+            if mapping_token(&mm.promesses, page).as_ref() != Some(token) {
+                return FaultOutcome::Retry;
             }
-            true
+            if mm.space.translate(page).is_some() { return FaultOutcome::Resolved; }
+            if !mm.space.map_alloc(page, crate::kernel::vmm::PAGE_SIZE, effective.drapeaux) {
+                return FaultOutcome::IoError;
+            }
+            if !mm.space.write(page, &page_data) {
+                let retirement = mm.space.prepare_unmap(page, crate::kernel::vmm::PAGE_SIZE);
+                drop(mm);
+                let depth = smp_lock::suspend_for_schedule();
+                retirement.invalidation().execute();
+                smp_lock::resume_after_schedule(depth);
+                processus.mm.lock().space.finish_unmap(retirement);
+                return FaultOutcome::IoError;
+            }
+            FAULTS_FILE.fetch_add(1, Ordering::Relaxed);
+            FaultOutcome::Resolved
         }
     }
 }
@@ -512,6 +548,16 @@ pub fn demand_fault_stats() -> (u64, u64) {
 
 pub fn demand_fault_waits() -> u64 {
     FAULT_WAITS.load(Ordering::Relaxed)
+}
+
+pub fn fault_outcome_stats() -> (u64, u64, u64, u64, u64) {
+    (
+        FAULT_RESOLVED.load(Ordering::Relaxed),
+        FAULT_RETRY.load(Ordering::Relaxed),
+        FAULT_INVALID.load(Ordering::Relaxed),
+        FAULT_IO_ERROR.load(Ordering::Relaxed),
+        FAULT_RETIRED.load(Ordering::Relaxed),
+    )
 }
 
 /// Diagnostic d'une faute que la Memory Fabric n'a pas pu servir.
@@ -586,7 +632,6 @@ pub struct MmState {
     pub limite_as: u64,
     pub promesses: Vec<Promesse>,
     pub clean_pages: Vec<CleanPageMapping>,
-    pub mapping_epoch: u64,
 }
 
 pub struct Mm {
@@ -693,9 +738,6 @@ pub struct CleanPageMapping {
 }
 
 impl MmState {
-    pub fn bump_mapping_epoch(&mut self) {
-        self.mapping_epoch = self.mapping_epoch.wrapping_add(1).max(1);
-    }
     pub fn retire_clean_pages(&mut self, addr: u64, len: u64) -> Vec<crate::kernel::clean_page_cache::Key> {
         let fin = addr.saturating_add(len);
         let mut keys = Vec::new();
@@ -903,6 +945,8 @@ static PROCESSES: SpinLock<Vec<Arc<Process>>> = SpinLock::new(Vec::new());
 const NO_TASK: usize = usize::MAX;
 const MAX_CPUS: usize = smp::MAX_CPUS;
 static CURRENT: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(NO_TASK) }; MAX_CPUS];
+static CURRENT_PROCESS: [SpinLockIrq<Option<Arc<Process>>>; MAX_CPUS] =
+    [const { SpinLockIrq::new(None) }; MAX_CPUS];
 /// Zombie qui vient de quitter physiquement la pile de ce CPU. Le contexte
 /// entrant le rend recyclable une fois le switch assembleur effectivement fini.
 static RETIRED: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(NO_TASK) }; MAX_CPUS];
@@ -1324,6 +1368,25 @@ pub fn current_process() -> Arc<Process> {
     current().process.clone()
 }
 
+/// Clone the current process from CPU-local stable ownership. `SpinLockIrq`
+/// prevents a same-CPU interrupt from observing a half-published Arc.
+pub fn current_process_local() -> Option<Arc<Process>> {
+    CURRENT_PROCESS[local_cpu()].lock().as_ref().map(Arc::clone)
+}
+
+fn clear_current_process_local() {
+    *CURRENT_PROCESS[local_cpu()].lock() = None;
+}
+
+pub fn fault_retry_yield() {
+    PF_BKL_ENTERS.fetch_add(1, Ordering::Relaxed);
+    schedule();
+}
+
+pub fn pf_bkl_enters() -> u64 {
+    PF_BKL_ENTERS.load(Ordering::Relaxed)
+}
+
 /// Temps processeur consomme par un processus, en millisecondes.
 ///
 /// Le profileur par echantillonnage incremente `ticks_cpu` de la tache courante
@@ -1722,6 +1785,11 @@ extern "C" fn kernel_task_trampoline() -> ! {
 fn install(task: &mut Task) {
     unsafe {
         set_current_is_kernel(task.noyau);
+        *CURRENT_PROCESS[local_cpu()].lock() = if task.noyau {
+            None
+        } else {
+            Some(Arc::clone(&task.process))
+        };
         // Un fil noyau n'a pas d'espace utilisateur a activer, et surtout ne
         // doit pas activer celui d'un programme : il lirait alors, sous les
         // memes adresses, la memoire du dernier processus installe.
@@ -2060,6 +2128,7 @@ fn switch_to_kernel() -> ! {
         ptr
     };
     set_current_index(NO_TASK);
+    clear_current_process_local();
     set_current_is_kernel(false);
     usermode::per_cpu().current = 0;
     crate::kernel::vmm::activate_kernel();
@@ -2077,6 +2146,7 @@ pub fn secondary_cpu_loop() -> ! {
     let cpu_id = local_cpu();
     assert!(cpu_id != 0, "task: secondary_cpu_loop sur BSP");
     set_current_index(NO_TASK);
+    clear_current_process_local();
     set_current_is_kernel(false);
     usermode::per_cpu().current = 0;
 
@@ -2117,6 +2187,7 @@ pub fn secondary_cpu_loop() -> ! {
             complete_retired();
             stall_site_set(50, current_index_raw() as u64);
             set_current_index(NO_TASK);
+            clear_current_process_local();
             set_current_is_kernel(false);
             usermode::per_cpu().current = 0;
             stall_site_set(55, 0);
@@ -2365,6 +2436,7 @@ pub fn run(mut first: Box<Task>) -> i32 {
 
     crate::kernel::vmm::activate_kernel();
     set_current_index(NO_TASK);
+    clear_current_process_local();
     RACINE_PREMIER_PLAN.store(0, Ordering::Release);
     let (code, pid) = {
         (process.lifecycle.lock().exit_code, process.pid)
@@ -2410,6 +2482,7 @@ pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
 
     crate::kernel::vmm::activate_kernel();
     set_current_index(NO_TASK);
+    clear_current_process_local();
     let (code, pid) = {
         (process.lifecycle.lock().exit_code, process.pid)
     };
@@ -2776,6 +2849,16 @@ pub fn log_smp_load() {
         "[BACKING-CACHE] reads={} bytes={} hits={} readahead_hits={} readahead_pages={} clean_hit={} clean_miss={} clean_wait={} clean_shared={} fault_wait={}",
         backing_reads, backing_bytes, cache_hits, readahead_hits, readahead_pages,
         clean_hits, clean_misses, clean_waits, clean_shared, demand_fault_waits(),
+    ));
+    let (resolved, retry, invalid, io_error, retired) = fault_outcome_stats();
+    let (waitq_bkl, waitq_bkl_ns) = crate::kernel::sync::waitq_bkl_stats();
+    let (ata_acquires, ata_wait_ns, ata_max_ns) = crate::drivers::ata::contention_stats();
+    let (exec_wait_ns, exec_max_ns) = crate::kernel::abi::proc::exec_quiesce_stats();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "[MM-NG6] fault_resolved={} fault_retry={} fault_invalid={} fault_io_error={} fault_retired={} pf_bkl_enters={} waitq_bkl_enters={} waitq_bkl_wait_ns={} ramfs_bkl_enters={} exec_wait_ns={} exec_max_ns={} ata_acquires={} ata_wait_ns={} ata_max_ns={}",
+        resolved, retry, invalid, io_error, retired, pf_bkl_enters(), waitq_bkl,
+        waitq_bkl_ns, crate::fs::backing::ramfs_bkl_enters(), exec_wait_ns,
+        exec_max_ns, ata_acquires, ata_wait_ns, ata_max_ns,
     ));
     log_smp_sample(online);
 }
@@ -3375,7 +3458,7 @@ pub fn new_process(name: &str, cwd: usize) -> Option<Arc<Process>> {
         resource_group_name: name.to_string(),
         mm: Arc::new(Mm::new(MmState { space, brk_start: 0, brk: 0,
             mmap_next: crate::kernel::vmm::user_mmap_base(), partages: Vec::new(),
-            limite_as: 0, promesses: Vec::new(), clean_pages: Vec::new(), mapping_epoch: 1 })),
+            limite_as: 0, promesses: Vec::new(), clean_pages: Vec::new() })),
         files: Arc::new(FileTable::new(FdTable::new())),
         metadata: SpinLock::new(ProcessMetadata { name: name.to_string(), cwd,
             uid: crate::users::session().uid() as u32,

@@ -7,6 +7,7 @@
 use alloc::sync::Arc;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arch::x86_64::{smp, usermode::{self, TrapFrame}};
 use crate::kernel::abi::{errno, user_read_u64, user_write, user_write_u32};
@@ -14,6 +15,16 @@ use crate::kernel::signal::{self, SigAction, SIG_DFL, SIG_IGN};
 use crate::kernel::task::{self, FileTable, Mm, MmState, Process, ProcessLifecycle, ProcessMetadata, Task};
 use crate::kernel::sync::SpinLock;
 use crate::kernel::{elf, vmm};
+
+static EXEC_QUIESCE_WAIT_NS: AtomicU64 = AtomicU64::new(0);
+static EXEC_QUIESCE_MAX_NS: AtomicU64 = AtomicU64::new(0);
+
+pub fn exec_quiesce_stats() -> (u64, u64) {
+    (
+        EXEC_QUIESCE_WAIT_NS.load(Ordering::Relaxed),
+        EXEC_QUIESCE_MAX_NS.load(Ordering::Relaxed),
+    )
+}
 
 /// `fork` : duplique le processus courant.
 ///
@@ -25,14 +36,14 @@ use crate::kernel::{elf, vmm};
 pub fn sys_fork(frame: &TrapFrame) -> i64 {
     let parent = task::current_process();
 
-    let (space, brk_start, brk, mmap_next, partages, limite_as, promesses, clean_pages, mapping_epoch) = {
+    let (space, brk_start, brk, mmap_next, partages, limite_as, promesses, clean_pages) = {
         let mm = parent.mm.lock();
         let space = match mm.space.duplicate() {
             Some(space) => space,
             None => return -errno::ENOMEM,
         };
         (space, mm.brk_start, mm.brk, mm.mmap_next, mm.partages.clone(),
-            mm.limite_as, mm.promesses.clone(), mm.clean_pages.clone(), mm.mapping_epoch)
+            mm.limite_as, mm.promesses.clone(), mm.clean_pages.clone())
     };
     let files = parent.files.lock().clone();
     let (cwd, uid, gid, name, ecran) = {
@@ -74,7 +85,7 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
         resource_group_id,
         resource_group_name,
         mm: Arc::new(Mm::new(MmState { space, brk_start, brk, mmap_next,
-            partages, limite_as, promesses, clean_pages, mapping_epoch })),
+            partages, limite_as, promesses, clean_pages })),
         files: Arc::new(FileTable::new(files)),
         metadata: SpinLock::new(ProcessMetadata { name, cwd, uid, gid, ecran }),
         lifecycle: SpinLock::new(ProcessLifecycle { exit_code: 0, zombie: false, threads: 1 }),
@@ -203,12 +214,19 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
     // Stop every sibling on the old CR3 before replacement.
     let old_identity = process.mm.lock().space.identity();
     old_identity.begin_retire();
-    let self_bit = 1u64 << smp::cpu_index();
+    let self_cpu = smp::cpu_index();
+    let active = old_identity.active_cpus() & !(1u64 << self_cpu);
     let depth = crate::kernel::smp_lock::suspend_for_schedule();
-    smp::broadcast_reschedule();
-    while old_identity.active_cpus() & !self_bit != 0 {
-        core::hint::spin_loop();
+    for cpu in 0..smp::MAX_CPUS.min(64) {
+        if active & (1u64 << cpu) != 0 {
+            smp::reschedule_cpu(cpu);
+        }
     }
+    let wait_start = crate::kernel::timer::monotonic_ns();
+    old_identity.wait_remote_quiescent(self_cpu);
+    let waited = crate::kernel::timer::monotonic_ns().saturating_sub(wait_start);
+    EXEC_QUIESCE_WAIT_NS.fetch_add(waited, Ordering::Relaxed);
+    EXEC_QUIESCE_MAX_NS.fetch_max(waited, Ordering::Relaxed);
     crate::kernel::smp_lock::resume_after_schedule(depth);
 
     process.metadata.lock().name = path;
@@ -225,7 +243,6 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
         let old_shared = core::mem::take(&mut mm.partages);
         let old_clean = core::mem::take(&mut mm.clean_pages);
         mm.promesses = new_promises;
-        mm.mapping_epoch = mm.mapping_epoch.wrapping_add(1).max(1);
         // L'ancien espace est detruit ici. Son `Drop` remet CR3 sur la table du
         // noyau s'il etait actif : c'est pour cela qu'on active le nouveau
         // juste apres, avant de retourner en ring 3.

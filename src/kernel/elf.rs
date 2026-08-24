@@ -274,6 +274,7 @@ pub fn load_node_lazy(
                 let page_start = vaddr & !(PAGE_SIZE - 1);
                 let page_end = (vaddr + ph.memsz + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
                 crate::kernel::vma::overlay(promises, crate::kernel::task::Promesse {
+                    id: crate::kernel::vma::nouvelle_identite(),
                     debut: page_start,
                     fin: page_end,
                     drapeaux: page_flags(ph.flags),

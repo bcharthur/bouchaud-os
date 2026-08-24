@@ -406,6 +406,8 @@ pub(crate) struct AddressSpaceIdentity {
     pml4: u64,
     active_cpus: AtomicU64,
     retiring: AtomicBool,
+    quiescence_seq: AtomicU64,
+    quiescence_waiter: AtomicU64,
 }
 
 impl AddressSpaceIdentity {
@@ -432,6 +434,13 @@ impl AddressSpaceIdentity {
     pub(crate) fn mark_inactive(&self, cpu: usize) {
         if cpu < 64 {
             self.active_cpus.fetch_and(!(1u64 << cpu), Ordering::AcqRel);
+            if self.retiring.load(Ordering::Acquire) {
+                self.quiescence_seq.fetch_add(1, Ordering::Release);
+                let waiter = self.quiescence_waiter.load(Ordering::Acquire);
+                if waiter < 64 && waiter as usize != cpu {
+                    smp::reschedule_cpu(waiter as usize);
+                }
+            }
         }
     }
 
@@ -441,6 +450,26 @@ impl AddressSpaceIdentity {
 
     pub(crate) fn active_cpus(&self) -> u64 {
         self.active_cpus.load(Ordering::Acquire)
+    }
+
+    /// Wait without burning a CPU while remote CR3 users leave. Interrupts are
+    /// disabled across the final sequence/mask recheck and `sti; hlt`, closing
+    /// the classic notification-before-HLT lost-wakeup window.
+    pub(crate) fn wait_remote_quiescent(&self, self_cpu: usize) {
+        self.quiescence_waiter.store(self_cpu as u64, Ordering::Release);
+        let self_bit = 1u64 << self_cpu;
+        while self.active_cpus() & !self_bit != 0 {
+            let ticket = self.quiescence_seq.load(Ordering::Acquire);
+            x86_64::instructions::interrupts::disable();
+            if self.quiescence_seq.load(Ordering::Acquire) == ticket
+                && self.active_cpus() & !self_bit != 0
+            {
+                x86_64::instructions::interrupts::enable_and_hlt();
+            } else {
+                x86_64::instructions::interrupts::enable();
+            }
+        }
+        self.quiescence_waiter.store(u64::MAX, Ordering::Release);
     }
 }
 
@@ -504,6 +533,8 @@ impl AddressSpace {
                 pml4,
                 active_cpus: AtomicU64::new(0),
                 retiring: AtomicBool::new(false),
+                quiescence_seq: AtomicU64::new(0),
+                quiescence_waiter: AtomicU64::new(u64::MAX),
             }),
             tables: Vec::new(),
             pages: Vec::new(),

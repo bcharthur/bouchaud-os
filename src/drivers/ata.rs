@@ -18,6 +18,7 @@
 //! Un second `-drive` passe a QEMU se presente exactement la.
 
 use crate::arch::x86_64::ports::{inb, inw, outb};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Taille d'un secteur ATA.
 pub const SECTOR_SIZE: usize = 512;
@@ -79,6 +80,27 @@ impl Drive {
 static mut SECTORS: [u64; 2] = [0, 0];
 static mut PROBED: bool = false;
 static CONTROLLER: crate::kernel::sync::SpinLock<()> = crate::kernel::sync::SpinLock::new(());
+static CONTROLLER_ACQUIRES: AtomicU64 = AtomicU64::new(0);
+static CONTROLLER_WAIT_NS: AtomicU64 = AtomicU64::new(0);
+static CONTROLLER_MAX_WAIT_NS: AtomicU64 = AtomicU64::new(0);
+
+fn lock_controller() -> crate::kernel::sync::SpinLockGuard<'static, ()> {
+    let start = crate::kernel::timer::monotonic_ns();
+    let guard = CONTROLLER.lock();
+    let waited = crate::kernel::timer::monotonic_ns().saturating_sub(start);
+    CONTROLLER_ACQUIRES.fetch_add(1, Ordering::Relaxed);
+    CONTROLLER_WAIT_NS.fetch_add(waited, Ordering::Relaxed);
+    CONTROLLER_MAX_WAIT_NS.fetch_max(waited, Ordering::Relaxed);
+    guard
+}
+
+pub fn contention_stats() -> (u64, u64, u64) {
+    (
+        CONTROLLER_ACQUIRES.load(Ordering::Relaxed),
+        CONTROLLER_WAIT_NS.load(Ordering::Relaxed),
+        CONTROLLER_MAX_WAIT_NS.load(Ordering::Relaxed),
+    )
+}
 
 /// Attend que le controleur ne soit plus occupe. `false` en cas de blocage.
 /// Attend la fin de l'occupation du controleur.
@@ -249,7 +271,7 @@ fn identify(drive: Drive) -> u64 {
 
 /// Detecte les disques presents. Idempotent.
 pub fn probe() {
-    let _controller = CONTROLLER.lock();
+    let _controller = lock_controller();
     if unsafe { PROBED } {
         return;
     }
@@ -296,7 +318,7 @@ pub fn read(drive: Drive, lba: u64, count: usize, out: &mut [u8]) -> usize {
     if !present(drive) || count == 0 {
         return 0;
     }
-    let _controller = CONTROLLER.lock();
+    let _controller = lock_controller();
     let mut done = 0usize;
     while done < count {
         let batch = core::cmp::min(count - done, 256);
@@ -389,7 +411,7 @@ pub fn write(drive: Drive, lba: u64, count: usize, data: &[u8]) -> usize {
     if !present(drive) || count == 0 {
         return 0;
     }
-    let _controller = CONTROLLER.lock();
+    let _controller = lock_controller();
     let mut done = 0usize;
     while done < count {
         let batch = core::cmp::min(count - done, 256);

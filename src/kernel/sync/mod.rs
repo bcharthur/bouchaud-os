@@ -16,6 +16,7 @@ pub use spinlock::{
 };
 pub use sleep_mutex::{SleepMutex, SleepMutexGuard};
 pub use wait_queue::{WaitQueue, WaitTicket};
+pub use wait_queue::bkl_stats as waitq_bkl_stats;
 
 // CpuMask lives with the architecture-neutral logical CPU identity for NG1.
 // It is re-exported here so scheduler and kernel code have one stable import.

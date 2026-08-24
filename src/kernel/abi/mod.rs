@@ -264,7 +264,7 @@ fn fault_in_user_range(addr: u64, len: usize, write: bool) -> bool {
             present
         };
 
-        if !present && !task::peuple_a_la_demande(page, false) {
+        if !present && task::peuple_a_la_demande(page, false) != task::FaultOutcome::Resolved {
             return false;
         }
 

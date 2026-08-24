@@ -115,23 +115,22 @@ pub fn sys_brk(addr: u64) -> i64 {
                 vma::remplace(
                     &mut borrowed.promesses,
                     Vma {
+                        id: vma::nouvelle_identite(),
                         debut: start,
                         fin: end,
                         drapeaux: prot_to_flags(PROT_READ | PROT_WRITE),
                         backing: Backing::Zero,
                     },
                 );
-                borrowed.bump_mapping_epoch();
             }
         } else if addr < current {
             let start = (addr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
             let end = (current + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
             if end > start {
                 vma::retire(&mut borrowed.promesses, start, end);
-                borrowed.bump_mapping_epoch();
                 retirement = Some((
                     borrowed.space.prepare_unmap(start, end - start),
-                    borrowed.space.pml4(), borrowed.mapping_epoch, start, end - start,
+                    borrowed.space.pml4(), start, end - start,
                 ));
             }
         }
@@ -139,8 +138,8 @@ pub fn sys_brk(addr: u64) -> i64 {
         addr as i64
     };
 
-    if let Some((retirement, pml4, epoch, start, len)) = retirement {
-        task::retire_stale_fault_range(pml4, epoch, start, len);
+    if let Some((retirement, pml4, start, len)) = retirement {
+        task::retire_fault_range(pml4, start, len);
         execute_process_invalidation(&process, retirement.invalidation());
         process.mm.lock().space.finish_unmap(retirement);
     }
@@ -220,7 +219,6 @@ fn installe_vma(
     fixed: bool,
 ) -> (Option<vmm::UnmapRetirement>, alloc::vec::Vec<usize>, alloc::vec::Vec<crate::kernel::clean_page_cache::Key>) {
     let fin = base + length;
-    process.bump_mapping_epoch();
     let (retirement, shared_nodes, clean_pages) = if fixed {
         let shared_nodes = process.retire_partages(base, length);
         let clean_pages = process.retire_clean_pages(base, length);
@@ -233,6 +231,7 @@ fn installe_vma(
     vma::remplace(
         &mut process.promesses,
         Vma {
+            id: vma::nouvelle_identite(),
             debut: base,
             fin,
             drapeaux,
@@ -307,14 +306,14 @@ pub fn sys_mmap(
                     });
                     let populate =
                         flags & MAP_POPULATE != 0 && prot != PROT_NONE;
-                    let (pml4, epoch) = (process.space.pml4(), process.mapping_epoch);
+                    let pml4 = process.space.pml4();
                     drop(process);
-                    if fixed { task::retire_stale_fault_range(pml4, epoch, base, length); }
+                    if fixed { task::retire_fault_range(pml4, base, length); }
                     finish_mapping_replacement(&process_rc, retirement, &liberes, &clean_liberes);
                     if populate {
                         let mut page = base;
                         while page < base + length {
-                            if !task::peuple_a_la_demande(page, false) {
+                            if task::peuple_a_la_demande(page, false) != task::FaultOutcome::Resolved {
                                 return -errno::ENOMEM;
                             }
                             page += PAGE_SIZE;
@@ -339,9 +338,9 @@ pub fn sys_mmap(
                     },
                     fixed,
                 );
-                let (pml4, epoch) = (process.space.pml4(), process.mapping_epoch);
+                let pml4 = process.space.pml4();
                 drop(process);
-                if fixed { task::retire_stale_fault_range(pml4, epoch, base, length); }
+                if fixed { task::retire_fault_range(pml4, base, length); }
                 finish_mapping_replacement(&process_rc, retirement, &liberes, &clean_liberes);
                 return base as i64;
         }
@@ -401,15 +400,15 @@ pub fn sys_mmap(
     }
 
     let populate = flags & MAP_POPULATE != 0 && prot != PROT_NONE;
-    let (pml4, epoch) = (process.space.pml4(), process.mapping_epoch);
+    let pml4 = process.space.pml4();
     drop(process);
-    if fixed { task::retire_stale_fault_range(pml4, epoch, base, length); }
+    if fixed { task::retire_fault_range(pml4, base, length); }
     finish_mapping_replacement(&process_rc, retirement, &liberes, &clean_liberes);
 
     if populate {
         let mut page = base;
         while page < base + length {
-            if !task::peuple_a_la_demande(page, false) {
+            if task::peuple_a_la_demande(page, false) != task::FaultOutcome::Resolved {
                 return -errno::ENOMEM;
             }
             page += PAGE_SIZE;
@@ -417,63 +416,6 @@ pub fn sys_mmap(
     }
 
     base as i64
-}
-
-/// Mappe un fichier en partage sur les frames du cache.
-///
-/// Le mappage est **declare** au cache (`partage::mappe`) et enregistre dans le
-/// processus : c'est ce qui permettra a `munmap`, a `execve` et a la mort du
-/// processus de rendre la reference. Sans cette declaration, les frames
-/// resteraient allouees pour toujours — c'est precisement le defaut que le
-/// module `partage` corrige.
-fn map_shared_file(
-    process: &mut task::MmState,
-    node: usize,
-    base: u64,
-    length: u64,
-    offset: u64,
-) -> bool {
-    let flags = vmm::PTE_PRESENT | vmm::PTE_USER | vmm::PTE_WRITE;
-    let mut done = 0u64;
-    while done < length {
-        let page_index = (offset + done) / PAGE_SIZE;
-        let frame = match partage::page(node, page_index) {
-            Some(frame) => frame,
-            None => return false,
-        };
-        // `map_foreign` : la frame appartient au cache, pas au processus. Elle
-        // ne sera donc ni liberee avec lui, ni dupliquee par `fork`.
-        if !process.space.map_foreign(base + done, frame, flags) {
-            return false;
-        }
-        done += PAGE_SIZE;
-    }
-    partage::mappe(node);
-    process.partages.push(task::Partage { base, length, node });
-    true
-}
-
-/// Mappe le framebuffer materiel dans l'espace utilisateur.
-fn map_framebuffer(
-    process: &mut task::MmState,
-    base: u64,
-    length: u64,
-    offset: u64,
-) -> Option<u64> {
-    let phys = crate::drivers::gfx::lfb_phys()?;
-    let flags = vmm::PTE_PRESENT
-        | vmm::PTE_USER
-        | vmm::PTE_WRITE
-        | vmm::PTE_NO_EXEC
-        | vmm::PTE_WRITE_THROUGH;
-    let mut done = 0u64;
-    while done < length {
-        if !process.space.map(base + done, phys + offset + done, flags) {
-            return None;
-        }
-        done += PAGE_SIZE;
-    }
-    Some(base)
 }
 
 /// `munmap`.
@@ -496,19 +438,17 @@ pub fn sys_munmap(addr: u64, length: u64) -> i64 {
     };
 
     let process = task::current_process();
-    let (retirement, liberes, clean_liberes, pml4, epoch) = {
+    let (retirement, liberes, clean_liberes, pml4) = {
         let mut process = process.mm.lock();
         let liberes = process.retire_partages(addr, length);
         let clean_liberes = process.retire_clean_pages(addr, length);
         vma::retire(&mut process.promesses, addr, fin);
-        process.bump_mapping_epoch();
         let retirement = process.space.prepare_unmap(addr, length);
         let pml4 = process.space.pml4();
-        let epoch = process.mapping_epoch;
-        (retirement, liberes, clean_liberes, pml4, epoch)
+        (retirement, liberes, clean_liberes, pml4)
     };
 
-    task::retire_stale_fault_range(pml4, epoch, addr, length);
+    task::retire_fault_range(pml4, addr, length);
 
     // No Mm guard crosses this window; remote faults and the IPI handler can progress.
     execute_process_invalidation(&process, retirement.invalidation());
@@ -568,7 +508,6 @@ pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> i64 {
     }) {
         return -errno::EACCES;
     }
-    process.bump_mapping_epoch();
 
     if !vma::protege(
         &mut process.promesses,
@@ -593,6 +532,7 @@ pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> i64 {
         vma::remplace(
             &mut process.promesses,
             Vma {
+                id: vma::nouvelle_identite(),
                 debut: addr,
                 fin,
                 drapeaux: prot_to_flags(prot),
@@ -604,9 +544,9 @@ pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> i64 {
     let invalidation = process
         .space
         .prepare_protect(addr, length, prot_to_flags(prot));
-    let (pml4, epoch) = (process.space.pml4(), process.mapping_epoch);
+    let pml4 = process.space.pml4();
     drop(process);
-    task::retire_stale_fault_range(pml4, epoch, addr, length);
+    task::retire_fault_range(pml4, addr, length);
     if let Some(invalidation) = invalidation {
         execute_process_invalidation(&process_rc, invalidation);
     }

@@ -157,10 +157,23 @@ extern "x86-interrupt" fn page_fault_handler(stack: InterruptStackFrame, code: P
     }
     crate::kernel::task::stall_site_set(21, addr.as_u64());
     if from_user(&stack) && crate::kernel::task::in_user_task() {
-        if crate::kernel::task::peuple_a_la_demande(
-            addr.as_u64(),
-            code.contains(PageFaultErrorCode::PROTECTION_VIOLATION),
-        ) {
+        let mut retries = 0u32;
+        let outcome = loop {
+            let outcome = crate::kernel::task::peuple_a_la_demande(
+                addr.as_u64(),
+                code.contains(PageFaultErrorCode::PROTECTION_VIOLATION),
+            );
+            if outcome != crate::kernel::task::FaultOutcome::Retry {
+                break outcome;
+            }
+            retries = retries.wrapping_add(1);
+            if retries % 8 == 0 {
+                crate::kernel::task::fault_retry_yield();
+            } else {
+                core::hint::spin_loop();
+            }
+        };
+        if outcome == crate::kernel::task::FaultOutcome::Resolved {
             crate::kernel::task::stall_pf_done(addr.as_u64());
             crate::kernel::task::stall_site_clear();
             // execve may have retired this sibling while its fault loader was
@@ -168,6 +181,10 @@ extern "x86-interrupt" fn page_fault_handler(stack: InterruptStackFrame, code: P
             let _kernel = crate::kernel::smp_lock::enter();
             crate::kernel::task::retire_current_if_zombie();
             return;
+        }
+        if outcome == crate::kernel::task::FaultOutcome::Retired {
+            let _kernel = crate::kernel::smp_lock::enter();
+            crate::kernel::task::retire_current_if_zombie();
         }
         crate::kernel::task::stall_pf_fail(addr.as_u64());
         crate::kernel::task::log_fault_mapping(addr.as_u64());
