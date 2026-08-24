@@ -27,7 +27,7 @@ jobs:
           cargo install bootimage --locked
           cargo bootimage
           CC=musl-gcc tools/userland/build-mmstress.sh
-          file mmstress | grep -F 'statically linked'
+          file mmstress | grep -E 'static-pie linked|statically linked'
           if readelf -l mmstress | grep -q 'Requesting program interpreter'; then
             echo 'mmstress must use the static Bouchaud-compatible Linux ABI' >&2
             exit 1
