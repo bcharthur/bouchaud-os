@@ -122,8 +122,9 @@ pub struct Context {
 /// meurt comme avant — sans quoi le noyau transformerait chaque dereference de
 /// pointeur nul en allocation silencieuse, et l'on perdrait le seul mecanisme
 /// qui signale ces defauts.
-static mut FAULTS_ZERO: u64 = 0;
-static mut FAULTS_FILE: u64 = 0;
+static FAULTS_ZERO: AtomicU64 = AtomicU64::new(0);
+static FAULTS_FILE: AtomicU64 = AtomicU64::new(0);
+static FAULT_WAITS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FaultPageState {
@@ -136,30 +137,36 @@ enum FaultPageState {
 struct FaultPage {
     pml4: u64,
     page: u64,
-    state: FaultPageState,
+    state: SpinLock<FaultPageState>,
     waiters: crate::kernel::sync::WaitQueue,
 }
 
-static mut FAULT_PAGES: Option<Vec<Box<FaultPage>>> = None;
+static FAULT_PAGES: SpinLock<Vec<Arc<FaultPage>>> = SpinLock::new(Vec::new());
 
-fn fault_page(pml4: u64, page: u64) -> &'static mut FaultPage {
-    debug_assert!(smp_lock::held_by_current_cpu());
-    unsafe {
-        let pages = FAULT_PAGES.get_or_insert_with(Vec::new);
-        if let Some(index) = pages
-            .iter()
-            .position(|entry| entry.pml4 == pml4 && entry.page == page)
-        {
-            return &mut *pages[index];
-        }
-        pages.push(Box::new(FaultPage {
-            pml4,
-            page,
-            state: FaultPageState::Missing,
-            waiters: crate::kernel::sync::WaitQueue::new(),
-        }));
-        &mut *pages.last_mut().unwrap()
+fn fault_page(pml4: u64, page: u64) -> Arc<FaultPage> {
+    let mut pages = FAULT_PAGES.lock();
+    if let Some(entry) = pages
+        .iter()
+        .find(|entry| entry.pml4 == pml4 && entry.page == page)
+    {
+        return Arc::clone(entry);
     }
+    let entry = Arc::new(FaultPage {
+        pml4,
+        page,
+        state: SpinLock::new(FaultPageState::Missing),
+        waiters: crate::kernel::sync::WaitQueue::new(),
+    });
+    pages.push(Arc::clone(&entry));
+    entry
+}
+
+fn forget_fault_page(entry: &Arc<FaultPage>) {
+    FAULT_PAGES.lock().retain(|candidate| !Arc::ptr_eq(candidate, entry));
+}
+
+pub fn forget_fault_space(pml4: u64) {
+    FAULT_PAGES.lock().retain(|entry| entry.pml4 != pml4);
 }
 
 /// Peuple a la demande une page promise.
@@ -177,46 +184,59 @@ pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> bool {
         return false;
     }
 
+    // TASKS remains a legacy registry protected by the BKL. Clone the stable
+    // Arc while holding it, then perform the entire fault resolution through
+    // the process domains without retaining the machine-wide lock.
+    let processus = {
+        let _kernel = smp_lock::enter();
+        current_process()
+    };
+
     let page = adresse & !(crate::kernel::vmm::PAGE_SIZE - 1);
     loop {
         let record = fault_page(crate::kernel::vmm::current_pml4(), page);
-        match record.state {
+        let mut state = record.state.lock();
+        match *state {
             FaultPageState::Loading => {
                 let ticket = record.waiters.ticket();
+                drop(state);
+                FAULT_WAITS.fetch_add(1, Ordering::Relaxed);
                 record.waiters.wait(ticket);
                 continue;
             }
             FaultPageState::Present => {
-                if current_process().mm.lock().space.translate(page).is_some() {
+                if processus.mm.lock().space.translate(page).is_some() {
                     return true;
                 }
                 // munmap a pu retirer la PTE depuis le dernier fault.
-                record.state = FaultPageState::Loading;
+                *state = FaultPageState::Loading;
                 break;
             }
             FaultPageState::Missing => {
-                record.state = FaultPageState::Loading;
+                *state = FaultPageState::Loading;
                 break;
             }
             FaultPageState::Failed => return false,
         }
     }
 
-    let result = peuple_page_loader(adresse);
+    let result = peuple_page_loader(&processus, adresse);
     let record = fault_page(crate::kernel::vmm::current_pml4(), page);
-    record.state = if result {
+    *record.state.lock() = if result {
         FaultPageState::Present
     } else {
         FaultPageState::Failed
     };
     record.waiters.wake_all();
+    if !result {
+        forget_fault_page(&record);
+    }
     result
 }
 
-fn peuple_page_loader(adresse: u64) -> bool {
+fn peuple_page_loader(processus: &Arc<Process>, adresse: u64) -> bool {
 
     stall_pf_phase(210, adresse);
-    let processus = current_process();
     stall_pf_phase(211, adresse);
     let mut p = processus.mm.lock();
     let page = adresse & !(crate::kernel::vmm::PAGE_SIZE - 1);
@@ -248,9 +268,7 @@ fn peuple_page_loader(adresse: u64) -> bool {
             ) {
                 return false;
             }
-            unsafe {
-                FAULTS_ZERO = FAULTS_ZERO.saturating_add(1);
-            }
+            FAULTS_ZERO.fetch_add(1, Ordering::Relaxed);
             stall_pf_phase(229, page);
             true
         }
@@ -277,22 +295,76 @@ fn peuple_page_loader(adresse: u64) -> bool {
             let source =
                 file_offset.saturating_add(page.saturating_sub(mapping_start));
             let numero = source / crate::kernel::vmm::PAGE_SIZE;
+            // The shared-page registry may allocate, read backing storage, or
+            // sleep behind another loader. No Mm guard may cross that phase.
+            drop(p);
             let frame = match crate::kernel::partage::page(node, numero) {
                 Some(frame) => frame,
                 None => return false,
             };
+            let mut p = processus.mm.lock();
+            let Some(current) = crate::kernel::vma::trouve(&p.promesses, page) else {
+                return false;
+            };
+            if current.backing != effective.backing || p.space.translate(page).is_some() {
+                return p.space.translate(page).is_some();
+            }
             if !p.space.map_foreign(page, frame, effective.drapeaux) {
                 return false;
             }
-            unsafe {
-                FAULTS_FILE = FAULTS_FILE.saturating_add(1);
-            }
+            FAULTS_FILE.fetch_add(1, Ordering::Relaxed);
             stall_pf_phase(239, page);
             true
         }
 
         PromesseBacking::File { .. } => {
             stall_pf_phase(240, page);
+            let regions = p.promesses.clone();
+            let page_end = page + crate::kernel::vmm::PAGE_SIZE;
+            let mut clean_key = None;
+            if effective.drapeaux & crate::kernel::vmm::PTE_WRITE == 0 {
+                let covering: Vec<_> = regions.iter().filter(|region| {
+                    matches!(region.backing, PromesseBacking::File { .. })
+                        && page < region.fin && page_end > region.debut
+                }).collect();
+                if covering.len() == 1 {
+                    if let PromesseBacking::File { node, mapping_start, file_offset, file_size } = effective.backing {
+                        let data_end = mapping_start.saturating_add(file_size);
+                        let offset = file_offset.saturating_add(page.saturating_sub(mapping_start));
+                        if page >= mapping_start && page_end <= data_end
+                            && offset % crate::kernel::vmm::PAGE_SIZE == 0
+                            && crate::fs::backing::is_disk_backed(node)
+                        {
+                            if let Some(generation) = crate::fs::backing::generation(node) {
+                                clean_key = Some(crate::kernel::clean_page_cache::Key { node, offset, generation });
+                            }
+                        }
+                    }
+                }
+            }
+            drop(p);
+
+            if let Some(key) = clean_key {
+                if let Some(frame) = crate::kernel::clean_page_cache::acquire(key) {
+                    let mut current_mm = processus.mm.lock();
+                    let valid = crate::kernel::vma::trouve(&current_mm.promesses, page)
+                        .map(|current| current.backing == effective.backing
+                            && current.drapeaux == effective.drapeaux)
+                        .unwrap_or(false);
+                    if valid && current_mm.space.translate(page).is_none()
+                        && current_mm.space.map_foreign(page, frame, effective.drapeaux)
+                    {
+                        current_mm.clean_pages.push(CleanPageMapping { virt: page, key });
+                        FAULTS_FILE.fetch_add(1, Ordering::Relaxed);
+                        return true;
+                    }
+                    crate::kernel::clean_page_cache::release(key);
+                    if current_mm.space.translate(page).is_some() { return true; }
+                    return false;
+                }
+            }
+
+            let mut p = processus.mm.lock();
             if !p.space.map_alloc(
                 page,
                 crate::kernel::vmm::PAGE_SIZE,
@@ -305,7 +377,6 @@ fn peuple_page_loader(adresse: u64) -> bool {
             // then release Mm while the backing device performs I/O.
             // fragments file-backed qui la couvrent.
             stall_pf_phase(241, page);
-            let regions = p.promesses.clone();
             drop(p);
             for region in regions {
                 if page < region.debut || page >= region.fin {
@@ -346,10 +417,22 @@ fn peuple_page_loader(adresse: u64) -> bool {
                 stall_pf_file_done(got, wanted);
 
                 stall_pf_phase(244, start);
-                let written = got == wanted && processus.mm.lock().space.write(start, &buffer[..got]);
+                let (written, failed_retirement) = {
+                    let mut mm = processus.mm.lock();
+                    // A concurrent munmap/MAP_FIXED/exec may have replaced the
+                    // promise while disk I/O was in progress. Never publish
+                    // old bytes into the replacement mapping.
+                    if !mm.promesses.iter().any(|current| *current == region) {
+                        return false;
+                    }
+                    let written = got == wanted && mm.space.write(start, &buffer[..got]);
+                    let retirement = if written { None } else {
+                        Some(mm.space.prepare_unmap(page, crate::kernel::vmm::PAGE_SIZE))
+                    };
+                    (written, retirement)
+                };
                 if !written {
-                    let retirement = processus.mm.lock().space
-                        .prepare_unmap(page, crate::kernel::vmm::PAGE_SIZE);
+                    let retirement = failed_retirement.unwrap();
                     let depth = smp_lock::suspend_for_schedule();
                     retirement.invalidation().execute();
                     smp_lock::resume_after_schedule(depth);
@@ -359,14 +442,11 @@ fn peuple_page_loader(adresse: u64) -> bool {
             }
 
             stall_pf_phase(249, page);
-            unsafe {
-                FAULTS_FILE = FAULTS_FILE.saturating_add(1);
-                if FAULTS_FILE == 1 {
-                    crate::kernel::dmesg::log_fmt(format_args!(
-                        "memfabric: premier fault fichier page={:#x}",
-                        page
-                    ));
-                }
+            if FAULTS_FILE.fetch_add(1, Ordering::Relaxed) == 0 {
+                crate::kernel::dmesg::log_fmt(format_args!(
+                    "memfabric: premier fault fichier page={:#x}",
+                    page
+                ));
             }
             true
         }
@@ -374,7 +454,14 @@ fn peuple_page_loader(adresse: u64) -> bool {
 }
 
 pub fn demand_fault_stats() -> (u64, u64) {
-    unsafe { (FAULTS_ZERO, FAULTS_FILE) }
+    (
+        FAULTS_ZERO.load(Ordering::Relaxed),
+        FAULTS_FILE.load(Ordering::Relaxed),
+    )
+}
+
+pub fn demand_fault_waits() -> u64 {
+    FAULT_WAITS.load(Ordering::Relaxed)
 }
 
 /// Diagnostic d'une faute que la Memory Fabric n'a pas pu servir.
@@ -448,14 +535,34 @@ pub struct MmState {
     pub partages: Vec<Partage>,
     pub limite_as: u64,
     pub promesses: Vec<Promesse>,
+    pub clean_pages: Vec<CleanPageMapping>,
 }
 
-pub struct Mm { inner: SpinLock<MmState> }
+pub struct Mm {
+    inner: SpinLock<MmState>,
+    activation: SpinLock<Arc<crate::kernel::vmm::AddressSpaceIdentity>>,
+}
 impl Mm {
-    pub fn new(state: MmState) -> Self { Self { inner: SpinLock::new(state) } }
+    pub fn new(state: MmState) -> Self {
+        let activation = state.space.identity();
+        Self {
+            inner: SpinLock::new(state),
+            activation: SpinLock::new(activation),
+        }
+    }
     pub fn lock(&self) -> SpinLockGuard<'_, MmState> { self.inner.lock() }
-    pub fn activate(&self) { unsafe { self.inner.lock().space.activate(); } }
-    pub fn mark_inactive(&self, cpu: usize) { self.inner.lock().space.mark_inactive(cpu); }
+    pub fn refresh_activation(&self) {
+        let identity = self.inner.lock().space.identity();
+        *self.activation.lock() = identity;
+    }
+    pub fn activate(&self) {
+        let identity = Arc::clone(&self.activation.lock());
+        unsafe { identity.activate(); }
+    }
+    pub fn mark_inactive(&self, cpu: usize) {
+        let identity = Arc::clone(&self.activation.lock());
+        identity.mark_inactive(cpu);
+    }
 }
 
 pub struct FileTable { inner: SpinLock<FdTable> }
@@ -523,7 +630,35 @@ pub struct Partage {
     pub node: usize,
 }
 
+#[derive(Clone, Copy)]
+pub struct CleanPageMapping {
+    pub virt: u64,
+    pub key: crate::kernel::clean_page_cache::Key,
+}
+
 impl MmState {
+    pub fn retire_clean_pages(&mut self, addr: u64, len: u64) -> Vec<crate::kernel::clean_page_cache::Key> {
+        let fin = addr.saturating_add(len);
+        let mut keys = Vec::new();
+        self.clean_pages.retain(|mapping| {
+            if mapping.virt >= addr && mapping.virt < fin {
+                keys.push(mapping.key);
+                false
+            } else { true }
+        });
+        keys
+    }
+
+    pub fn has_clean_pages(&self, addr: u64, len: u64) -> bool {
+        let fin = addr.saturating_add(len);
+        self.clean_pages.iter().any(|mapping| mapping.virt >= addr && mapping.virt < fin)
+    }
+
+    pub fn release_clean_pages(&mut self) {
+        for mapping in self.clean_pages.drain(..) {
+            crate::kernel::clean_page_cache::release(mapping.key);
+        }
+    }
     /// Le nœud partage qui couvre cette adresse, s'il y en a un.
     pub fn partage_a(&self, addr: u64) -> Option<usize> {
         self.partages
@@ -532,25 +667,43 @@ impl MmState {
             .map(|p| p.node)
     }
 
-    /// Retire les plages entierement couvertes par `[addr, addr+len)` et rend
-    /// les nœuds dont la reference est a relacher.
-    ///
-    /// Un recouvrement **partiel** ne relache rien : la plage reste inscrite
-    /// telle quelle. C'est deliberement conservateur. Un `munmap` de la moitie
-    /// d'une surface partagee est assez rare pour qu'une fuite bornee soit
-    /// preferable a la seule autre erreur possible ici — liberer une frame
-    /// qu'un mappage vivant designe encore.
+    /// Retire `[addr, addr+len)` des plages partagees. A middle punch splits
+    /// one mapping reference into two; prefix/suffix punches retain exactly
+    /// one reference, and complete removal returns the reference to release.
     pub fn retire_partages(&mut self, addr: u64, len: u64) -> Vec<usize> {
-        let fin = addr + len;
+        let fin = addr.saturating_add(len);
         let mut rendus = Vec::new();
-        self.partages.retain(|p| {
-            if addr <= p.base && p.base + p.length <= fin {
-                rendus.push(p.node);
-                false
-            } else {
-                true
+        let mut restantes = Vec::with_capacity(self.partages.len() + 1);
+        for p in self.partages.drain(..) {
+            let p_fin = p.base.saturating_add(p.length);
+            if fin <= p.base || addr >= p_fin {
+                restantes.push(p);
+                continue;
             }
-        });
+
+            let gauche = addr.saturating_sub(p.base);
+            let droite = p_fin.saturating_sub(fin);
+            if gauche != 0 {
+                restantes.push(Partage {
+                    base: p.base,
+                    length: gauche,
+                    node: p.node,
+                });
+            }
+            if droite != 0 {
+                restantes.push(Partage {
+                    base: fin,
+                    length: droite,
+                    node: p.node,
+                });
+            }
+            match (gauche != 0, droite != 0) {
+                (false, false) => rendus.push(p.node),
+                (true, true) => crate::kernel::partage::mappe(p.node),
+                _ => {}
+            }
+        }
+        self.partages = restantes;
         rendus
     }
 
@@ -590,7 +743,10 @@ impl Drop for Process {
     /// mort brutale — un `SIGKILL`, une faute de page fatale, un `exit` sans
     /// menage. Sans lui, tuer un renderer suffirait a faire fuir ses surfaces.
     fn drop(&mut self) {
-        self.mm.lock().relache_partages();
+        let mut mm = self.mm.lock();
+        forget_fault_space(mm.space.pml4());
+        mm.release_clean_pages();
+        mm.relache_partages();
     }
 }
 
@@ -1095,6 +1251,7 @@ pub fn try_current() -> Option<&'static mut Task> {
 
 /// Processus de la tache courante.
 pub fn current_process() -> Arc<Process> {
+    let _kernel = smp_lock::enter();
     current().process.clone()
 }
 
@@ -2534,9 +2691,13 @@ pub fn log_smp_load() {
     ));
     let (_, _, backing_reads, backing_bytes) = crate::fs::backing::stats();
     let (cache_hits, readahead_hits) = crate::fs::backing::cache_stats();
+    let readahead_pages = crate::fs::backing::readahead_pages();
+    let (clean_hits, clean_misses, clean_waits, clean_shared) =
+        crate::kernel::clean_page_cache::stats();
     crate::kernel::dmesg::log_fmt(format_args!(
-        "[BACKING-CACHE] reads={} bytes={} hits={} readahead_hits={}",
-        backing_reads, backing_bytes, cache_hits, readahead_hits,
+        "[BACKING-CACHE] reads={} bytes={} hits={} readahead_hits={} readahead_pages={} clean_hit={} clean_miss={} clean_wait={} clean_shared={} fault_wait={}",
+        backing_reads, backing_bytes, cache_hits, readahead_hits, readahead_pages,
+        clean_hits, clean_misses, clean_waits, clean_shared, demand_fault_waits(),
     ));
     log_smp_sample(online);
 }
@@ -3136,7 +3297,7 @@ pub fn new_process(name: &str, cwd: usize) -> Option<Arc<Process>> {
         resource_group_name: name.to_string(),
         mm: Arc::new(Mm::new(MmState { space, brk_start: 0, brk: 0,
             mmap_next: crate::kernel::vmm::user_mmap_base(), partages: Vec::new(),
-            limite_as: 0, promesses: Vec::new() })),
+            limite_as: 0, promesses: Vec::new(), clean_pages: Vec::new() })),
         files: Arc::new(FileTable::new(FdTable::new())),
         metadata: SpinLock::new(ProcessMetadata { name: name.to_string(), cwd,
             uid: crate::users::session().uid() as u32,

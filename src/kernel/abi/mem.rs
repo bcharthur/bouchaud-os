@@ -42,6 +42,7 @@ fn finish_mapping_replacement(
     process: &Arc<task::Process>,
     retirement: Option<vmm::UnmapRetirement>,
     shared_nodes: &[usize],
+    clean_pages: &[crate::kernel::clean_page_cache::Key],
 ) {
     if let Some(retirement) = retirement {
         execute_process_invalidation(process, retirement.invalidation());
@@ -50,6 +51,9 @@ fn finish_mapping_replacement(
     // Une frame MAP_SHARED ne peut être rendue qu'après le même ACK TLB.
     for &node in shared_nodes {
         partage::demappe(node);
+    }
+    for &key in clean_pages {
+        crate::kernel::clean_page_cache::release(key);
     }
 }
 
@@ -205,15 +209,16 @@ fn installe_vma(
     drapeaux: u64,
     backing: Backing,
     fixed: bool,
-) -> (Option<vmm::UnmapRetirement>, alloc::vec::Vec<usize>) {
+) -> (Option<vmm::UnmapRetirement>, alloc::vec::Vec<usize>, alloc::vec::Vec<crate::kernel::clean_page_cache::Key>) {
     let fin = base + length;
-    let (retirement, shared_nodes) = if fixed {
+    let (retirement, shared_nodes, clean_pages) = if fixed {
         let shared_nodes = process.retire_partages(base, length);
+        let clean_pages = process.retire_clean_pages(base, length);
         let retirement = process.space.prepare_unmap(base, length);
         vma::retire(&mut process.promesses, base, fin);
-        (Some(retirement), shared_nodes)
+        (Some(retirement), shared_nodes, clean_pages)
     } else {
-        (None, alloc::vec::Vec::new())
+        (None, alloc::vec::Vec::new(), alloc::vec::Vec::new())
     };
     vma::remplace(
         &mut process.promesses,
@@ -224,7 +229,7 @@ fn installe_vma(
             backing,
         },
     );
-    (retirement, shared_nodes)
+    (retirement, shared_nodes, clean_pages)
 }
 
 /// `mmap`.
@@ -272,7 +277,7 @@ pub fn sys_mmap(
         if let Some(FdKind::Framebuffer) = &fd_kind {
                 if let Some(ecran) = ecran {
                     partage::mappe(ecran.node);
-                    let (retirement, liberes) = installe_vma(
+                    let (retirement, liberes, clean_liberes) = installe_vma(
                         &mut process,
                         base,
                         length,
@@ -293,7 +298,7 @@ pub fn sys_mmap(
                     let populate =
                         flags & MAP_POPULATE != 0 && prot != PROT_NONE;
                     drop(process);
-                    finish_mapping_replacement(&process_rc, retirement, &liberes);
+                    finish_mapping_replacement(&process_rc, retirement, &liberes, &clean_liberes);
                     if populate {
                         let mut page = base;
                         while page < base + length {
@@ -310,7 +315,7 @@ pub fn sys_mmap(
                     Some(phys) => phys,
                     None => return -errno::ENODEV,
                 };
-                let (retirement, liberes) = installe_vma(
+                let (retirement, liberes, clean_liberes) = installe_vma(
                     &mut process,
                     base,
                     length,
@@ -323,7 +328,7 @@ pub fn sys_mmap(
                     fixed,
                 );
                 drop(process);
-                finish_mapping_replacement(&process_rc, retirement, &liberes);
+                finish_mapping_replacement(&process_rc, retirement, &liberes, &clean_liberes);
                 return base as i64;
         }
     }
@@ -366,7 +371,7 @@ pub fn sys_mmap(
         return -errno::ENOMEM;
     }
 
-    let (retirement, liberes) = installe_vma(
+    let (retirement, liberes, clean_liberes) = installe_vma(
         &mut process,
         base,
         length,
@@ -380,7 +385,7 @@ pub fn sys_mmap(
 
     let populate = flags & MAP_POPULATE != 0 && prot != PROT_NONE;
     drop(process);
-    finish_mapping_replacement(&process_rc, retirement, &liberes);
+    finish_mapping_replacement(&process_rc, retirement, &liberes, &clean_liberes);
 
     if populate {
         let mut page = base;
@@ -472,12 +477,13 @@ pub fn sys_munmap(addr: u64, length: u64) -> i64 {
     };
 
     let process = task::current_process();
-    let (retirement, liberes) = {
+    let (retirement, liberes, clean_liberes) = {
         let mut process = process.mm.lock();
         let liberes = process.retire_partages(addr, length);
+        let clean_liberes = process.retire_clean_pages(addr, length);
         vma::retire(&mut process.promesses, addr, fin);
         let retirement = process.space.prepare_unmap(addr, length);
-        (retirement, liberes)
+        (retirement, liberes, clean_liberes)
     };
 
     // No Mm guard crosses this window; remote faults and the IPI handler can progress.
@@ -487,6 +493,9 @@ pub fn sys_munmap(addr: u64, length: u64) -> i64 {
 
     for node in liberes {
         partage::demappe(node);
+    }
+    for key in clean_liberes {
+        crate::kernel::clean_page_cache::release(key);
     }
     0
 }
@@ -517,6 +526,13 @@ pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> i64 {
 
     let process_rc = task::current_process();
     let mut process = process_rc.mm.lock();
+
+    // Clean cache frames are deliberately shared without COW. Never make one
+    // writable in place: that would grant one process writes into every other
+    // address space mapping the same ELF page.
+    if prot & PROT_WRITE != 0 && process.has_clean_pages(addr, length) {
+        return -errno::EACCES;
+    }
 
     if !vma::protege(
         &mut process.promesses,

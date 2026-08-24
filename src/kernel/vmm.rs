@@ -27,6 +27,7 @@
 //! celui de [`USER_SPACE_BASE`]) : ses PDPT/PD/PT appartiennent au processus,
 //! sont detruites avec lui, et ne peuvent pas empieter sur le noyau.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::registers::control::{Cr3, Cr3Flags};
@@ -393,11 +394,37 @@ pub struct AddressSpace {
     pml4: u64,
     // BOUCHAUD_SMP_NG2_ADDRESS_SPACE_ACTIVE_CPUS_V1
     /// CPU logiques dont le CR3 pointe actuellement sur cet espace.
-    active_cpus: AtomicU64,
+    identity: Arc<AddressSpaceIdentity>,
     /// Frames de tables intermediaires, liberees avec l'espace.
     tables: Vec<u64>,
     /// Frames de donnees mappees pour l'utilisateur.
     pages: Vec<u64>,
+}
+
+/// Stable CR3 identity shared with `Mm`'s context-switch fast path.
+pub(crate) struct AddressSpaceIdentity {
+    pml4: u64,
+    active_cpus: AtomicU64,
+}
+
+impl AddressSpaceIdentity {
+    pub(crate) unsafe fn activate(&self) {
+        self.mark_active(smp::cpu_index());
+        let frame = PhysFrame::containing_address(PhysAddr::new(self.pml4));
+        Cr3::write(frame, Cr3Flags::empty());
+    }
+
+    pub(crate) fn mark_active(&self, cpu: usize) {
+        if cpu < 64 {
+            self.active_cpus.fetch_or(1u64 << cpu, Ordering::AcqRel);
+        }
+    }
+
+    pub(crate) fn mark_inactive(&self, cpu: usize) {
+        if cpu < 64 {
+            self.active_cpus.fetch_and(!(1u64 << cpu), Ordering::AcqRel);
+        }
+    }
 }
 
 /// Invalidation distante preparee pendant une mutation de tables, puis executee
@@ -456,7 +483,10 @@ impl AddressSpace {
         }
         Some(AddressSpace {
             pml4,
-            active_cpus: AtomicU64::new(0),
+            identity: Arc::new(AddressSpaceIdentity {
+                pml4,
+                active_cpus: AtomicU64::new(0),
+            }),
             tables: Vec::new(),
             pages: Vec::new(),
         })
@@ -467,22 +497,22 @@ impl AddressSpace {
         self.pml4
     }
 
+    pub(crate) fn identity(&self) -> Arc<AddressSpaceIdentity> {
+        Arc::clone(&self.identity)
+    }
+
     #[inline]
     pub fn mark_active(&self, cpu: usize) {
-        if cpu < 64 {
-            self.active_cpus.fetch_or(1u64 << cpu, Ordering::AcqRel);
-        }
+        self.identity.mark_active(cpu);
     }
 
     #[inline]
     pub fn mark_inactive(&self, cpu: usize) {
-        if cpu < 64 {
-            self.active_cpus.fetch_and(!(1u64 << cpu), Ordering::AcqRel);
-        }
+        self.identity.mark_inactive(cpu);
     }
 
     pub fn active_cpus(&self) -> u64 {
-        self.active_cpus.load(Ordering::Acquire)
+        self.identity.active_cpus.load(Ordering::Acquire)
     }
 
     #[inline]
@@ -504,9 +534,7 @@ impl AddressSpace {
         // Publier l'activite AVANT CR3 ferme la race avec un unmap concurrent:
         // soit son snapshot nous cible, soit notre chargement CR3 est posterieur
         // a la mutation PTE et ne peut importer aucune traduction retiree.
-        self.mark_active(smp::cpu_index());
-        let frame = PhysFrame::containing_address(PhysAddr::new(self.pml4));
-        Cr3::write(frame, Cr3Flags::empty());
+        self.identity.activate();
     }
 
     /// Descend (en creant si besoin) jusqu'a l'entree de table de pages qui

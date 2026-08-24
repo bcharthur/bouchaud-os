@@ -88,6 +88,7 @@ impl Drop for GsGuard {
 }
 
 fn kill_faulting_task(reason: &str, stack: &InterruptStackFrame) -> ! {
+    let _kernel = crate::kernel::smp_lock::enter();
     let cr2 = x86_64::registers::control::Cr2::read().as_u64();
     crate::println!(
         "{} dans le programme utilisateur (rip={:#x}) : processus termine",
@@ -154,7 +155,6 @@ extern "x86-interrupt" fn page_fault_handler(stack: InterruptStackFrame, code: P
     if from_user(&stack) {
         x86_64::instructions::interrupts::enable();
     }
-    let _kernel = crate::kernel::smp_lock::enter();
     crate::kernel::task::stall_site_set(21, addr.as_u64());
     if from_user(&stack) && crate::kernel::task::in_user_task() {
         if crate::kernel::task::peuple_a_la_demande(

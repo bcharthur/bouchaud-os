@@ -31,11 +31,13 @@ impl WaitQueue {
 
     pub fn wake_one(&self) -> bool {
         self.generation.fetch_add(1, Ordering::Release);
+        let _kernel = crate::kernel::smp_lock::enter();
         crate::kernel::task::wake_wait_queue(self.key(), 1) != 0
     }
 
     pub fn wake_all(&self) -> usize {
         self.generation.fetch_add(1, Ordering::Release);
+        let _kernel = crate::kernel::smp_lock::enter();
         crate::kernel::task::wake_wait_queue(self.key(), usize::MAX)
     }
 

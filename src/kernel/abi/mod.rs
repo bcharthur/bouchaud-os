@@ -28,14 +28,15 @@ pub mod verrous;
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use crate::arch::x86_64::usermode::{self, TrapFrame};
 use crate::kernel::task;
 
 /// Compteur d'appels systeme, pour le diagnostic.
-static mut SYSCALL_COUNT: u64 = 0;
+static SYSCALL_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Dernier appel systeme inconnu rencontre (numero), 0 si aucun.
-static mut LAST_UNKNOWN: u64 = 0;
+static LAST_UNKNOWN: AtomicU64 = AtomicU64::new(0);
 /// Ce que la trace des appels systeme laisse passer (commande `strace`).
 ///
 /// `Echecs` existe parce que `Tous` est inutilisable sur un vrai programme :
@@ -51,11 +52,11 @@ pub enum Trace {
     Tous,
 }
 
-static mut TRACE: Trace = Trace::Aucune;
+static TRACE: AtomicU8 = AtomicU8::new(0);
 
 /// Regle la trace des appels systeme.
 pub fn set_trace_mode(mode: Trace) {
-    unsafe { TRACE = mode };
+    TRACE.store(mode as u8, Ordering::Release);
 }
 
 /// Active ou desactive la trace complete.
@@ -65,7 +66,11 @@ pub fn set_trace(on: bool) {
 
 /// Mode de trace courant.
 pub fn trace_mode() -> Trace {
-    unsafe { TRACE }
+    match TRACE.load(Ordering::Acquire) {
+        1 => Trace::Echecs,
+        2 => Trace::Tous,
+        _ => Trace::Aucune,
+    }
 }
 
 /// La trace est-elle active, sous une forme ou une autre ?
@@ -85,17 +90,17 @@ fn echec_notable(resultat: i64) -> bool {
 
 /// Nombre d'appels systeme traites depuis le boot.
 pub fn syscall_count() -> u64 {
-    unsafe { SYSCALL_COUNT }
+    SYSCALL_COUNT.load(Ordering::Relaxed)
 }
 
 /// Dernier numero d'appel systeme non implemente (0 si aucun).
 pub fn last_unknown() -> u64 {
-    unsafe { LAST_UNKNOWN }
+    LAST_UNKNOWN.load(Ordering::Relaxed)
 }
 
 /// Point d'entree du dispatch : lit la trame, execute, ecrit le retour.
 pub fn handle(frame: &mut TrapFrame) {
-    unsafe { SYSCALL_COUNT += 1 };
+    SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);
     let (number, args) = frame.syscall_args();
     let result = dispatch(number, args, frame);
     match trace_mode() {
@@ -661,7 +666,7 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         MEMBARRIER => 0,
 
         _ => {
-            unsafe { LAST_UNKNOWN = number };
+            LAST_UNKNOWN.store(number, Ordering::Relaxed);
             // Le numero seul ne dit pas *qui* appelle, et c'est la seule chose
             // qui permette de decider entre implementer la vraie semantique et
             // documenter pourquoi l'appel est facultatif. `frame.rip` est

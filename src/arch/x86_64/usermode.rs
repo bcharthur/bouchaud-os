@@ -266,9 +266,21 @@ unsafe extern "C" fn syscall_dispatch(frame: *mut TrapFrame) {
     let kernel = crate::kernel::smp_lock::enter();
     crate::kernel::task::stall_syscall_bkl_acquired();
     crate::kernel::task::account_kernel_enter();
-    crate::kernel::abi::handle(&mut *frame);
-    crate::kernel::task::account_kernel_exit();
-    drop(kernel);
+    // These MM calls touch only Arc<Process>::Mm and the IRQ-safe TLB
+    // protocol. Release the legacy syscall BKL after accounting so sibling
+    // threads can mutate independent address spaces concurrently.
+    let audited_mm = matches!((*frame).rax, 10 | 11 | 12);
+    if audited_mm {
+        drop(kernel);
+        crate::kernel::abi::handle(&mut *frame);
+        let kernel = crate::kernel::smp_lock::enter();
+        crate::kernel::task::account_kernel_exit();
+        drop(kernel);
+    } else {
+        crate::kernel::abi::handle(&mut *frame);
+        crate::kernel::task::account_kernel_exit();
+        drop(kernel);
+    }
     crate::kernel::task::stall_syscall_exit();
 }
 

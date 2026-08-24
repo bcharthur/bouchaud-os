@@ -20,6 +20,7 @@ pub mod journal;
 pub mod input;
 pub mod memory;
 pub mod perf;
+pub mod clean_page_cache;
 pub mod handle;
 pub mod partage;
 pub mod power;

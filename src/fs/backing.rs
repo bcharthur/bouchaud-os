@@ -20,6 +20,7 @@ struct DiskExtent {
     drive: Drive,
     data_lba: u64,
     size: usize,
+    generation: u64,
 }
 
 static EXTENTS: SpinLock<Vec<DiskExtent>> = SpinLock::new(Vec::new());
@@ -27,7 +28,8 @@ static DISK_READ_OPS: AtomicU64 = AtomicU64::new(0);
 static DISK_READ_BYTES: AtomicU64 = AtomicU64::new(0);
 static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
 static READAHEAD_HITS: AtomicU64 = AtomicU64::new(0);
-const READAHEAD_BYTES: usize = 16 * 1024;
+const READAHEAD_MIN: usize = 16 * 1024;
+const READAHEAD_MAX: usize = 64 * 1024;
 const CACHE_ENTRIES_MAX: usize = 256;
 
 struct ReadCacheEntry {
@@ -38,14 +40,20 @@ struct ReadCacheEntry {
     prefetched_from: usize,
 }
 static READ_CACHE: SpinLock<Vec<ReadCacheEntry>> = SpinLock::new(Vec::new());
+struct ReadPattern { node: usize, last_end: usize, sequential: u8 }
+static READ_PATTERNS: SpinLock<Vec<ReadPattern>> = SpinLock::new(Vec::new());
+static READAHEAD_PAGES: AtomicU64 = AtomicU64::new(0);
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 pub fn reset() {
     EXTENTS.lock().clear();
     READ_CACHE.lock().clear();
+    READ_PATTERNS.lock().clear();
     DISK_READ_OPS.store(0, Ordering::Relaxed);
     DISK_READ_BYTES.store(0, Ordering::Relaxed);
     CACHE_HITS.store(0, Ordering::Relaxed);
     READAHEAD_HITS.store(0, Ordering::Relaxed);
+    READAHEAD_PAGES.store(0, Ordering::Relaxed);
 }
 
 pub fn register_disk(node: usize, drive: Drive, data_lba: u64, size: usize) {
@@ -55,12 +63,14 @@ pub fn register_disk(node: usize, drive: Drive, data_lba: u64, size: usize) {
         drive,
         data_lba,
         size,
+        generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
     });
 }
 
 pub fn unregister(node: usize) {
     EXTENTS.lock().retain(|extent| extent.node != node);
     READ_CACHE.lock().retain(|entry| entry.node != node);
+    READ_PATTERNS.lock().retain(|entry| entry.node != node);
 }
 
 pub fn is_disk_backed(node: usize) -> bool {
@@ -72,6 +82,13 @@ pub fn disk_len(node: usize) -> Option<usize> {
         .iter()
         .find(|extent| extent.node == node)
         .map(|extent| extent.size)
+}
+
+pub fn generation(node: usize) -> Option<u64> {
+    EXTENTS.lock()
+        .iter()
+        .find(|extent| extent.node == node)
+        .map(|extent| extent.generation)
 }
 
 pub fn logical_len(node: usize) -> usize {
@@ -166,7 +183,7 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
 /// identité de nœud; les processus Ladybird relisant les mêmes pages propres
 /// réutilisent donc les octets déjà lus.
 pub fn read_at(node: usize, offset: usize, out: &mut [u8]) -> usize {
-    if out.is_empty() || !is_disk_backed(node) || out.len() > READAHEAD_BYTES {
+    if out.is_empty() || !is_disk_backed(node) || out.len() > READAHEAD_MAX {
         return read_at_uncached(node, offset, out);
     }
     {
@@ -185,8 +202,26 @@ pub fn read_at(node: usize, offset: usize, out: &mut [u8]) -> usize {
         }
     }
 
-    let base = offset & !(READAHEAD_BYTES - 1);
-    let mut data = alloc::vec![0u8; READAHEAD_BYTES];
+    let window = {
+        let mut patterns = READ_PATTERNS.lock();
+        let pattern = if let Some(pattern) = patterns.iter_mut().find(|p| p.node == node) {
+            pattern
+        } else {
+            patterns.push(ReadPattern { node, last_end: 0, sequential: 0 });
+            patterns.last_mut().unwrap()
+        };
+        pattern.sequential = if offset == pattern.last_end {
+            pattern.sequential.saturating_add(1)
+        } else { 0 };
+        pattern.last_end = offset.saturating_add(out.len());
+        match pattern.sequential {
+            0 | 1 => READAHEAD_MIN,
+            2 | 3 => 32 * 1024,
+            _ => READAHEAD_MAX,
+        }
+    };
+    let base = offset & !(window - 1);
+    let mut data = alloc::vec![0u8; window];
     let valid = read_at_uncached(node, base, &mut data);
     if valid == 0 || offset < base || offset - base >= valid {
         return 0;
@@ -194,6 +229,10 @@ pub fn read_at(node: usize, offset: usize, out: &mut [u8]) -> usize {
     let start = offset - base;
     let copied = core::cmp::min(out.len(), valid - start);
     out[..copied].copy_from_slice(&data[start..start + copied]);
+    READAHEAD_PAGES.fetch_add(
+        valid.saturating_sub(copied).div_ceil(crate::kernel::vmm::PAGE_SIZE as usize) as u64,
+        Ordering::Relaxed,
+    );
     // Publication is short; the global cache lock is never held during I/O.
     let mut cache = READ_CACHE.lock();
     if cache.len() >= CACHE_ENTRIES_MAX { cache.remove(0); }
@@ -213,6 +252,10 @@ pub fn cache_stats() -> (u64, u64) {
         CACHE_HITS.load(Ordering::Relaxed),
         READAHEAD_HITS.load(Ordering::Relaxed),
     )
+}
+
+pub fn readahead_pages() -> u64 {
+    READAHEAD_PAGES.load(Ordering::Relaxed)
 }
 
 /// (fichiers paresseux, octets logiques, operations disque, octets lus).

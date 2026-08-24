@@ -25,14 +25,14 @@ use crate::kernel::{elf, vmm};
 pub fn sys_fork(frame: &TrapFrame) -> i64 {
     let parent = task::current_process();
 
-    let (space, brk_start, brk, mmap_next, partages, limite_as, promesses) = {
+    let (space, brk_start, brk, mmap_next, partages, limite_as, promesses, clean_pages) = {
         let mm = parent.mm.lock();
         let space = match mm.space.duplicate() {
             Some(space) => space,
             None => return -errno::ENOMEM,
         };
         (space, mm.brk_start, mm.brk, mm.mmap_next, mm.partages.clone(),
-            mm.limite_as, mm.promesses.clone())
+            mm.limite_as, mm.promesses.clone(), mm.clean_pages.clone())
     };
     let files = parent.files.lock().clone();
     let (cwd, uid, gid, name, ecran) = {
@@ -51,6 +51,9 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
     for plage in &partages {
         crate::kernel::partage::mappe(plage.node);
     }
+    for mapping in &clean_pages {
+        debug_assert!(crate::kernel::clean_page_cache::retain(mapping.key));
+    }
 
     let pid = crate::kernel::process::spawn(&name, uid as u16);
     let mut child_signals = signals;
@@ -63,7 +66,7 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
         resource_group_id,
         resource_group_name,
         mm: Arc::new(Mm::new(MmState { space, brk_start, brk, mmap_next,
-            partages, limite_as, promesses })),
+            partages, limite_as, promesses, clean_pages })),
         files: Arc::new(FileTable::new(files)),
         metadata: SpinLock::new(ProcessMetadata { name, cwd, uid, gid, ecran }),
         lifecycle: SpinLock::new(ProcessLifecycle { exit_code: 0, zombie: false, threads: 1 }),
@@ -202,12 +205,15 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
         // L'ancien espace disparait avec ses mappages : les references qu'il
         // tenait sur le cache partage doivent partir avec lui.
         mm.relache_partages();
+        mm.release_clean_pages();
         mm.promesses = new_promises;
         // L'ancien espace est detruit ici. Son `Drop` remet CR3 sur la table du
         // noyau s'il etait actif : c'est pour cela qu'on active le nouveau
         // juste apres, avant de retourner en ring 3.
         let old = core::mem::replace(&mut mm.space, space);
+        task::forget_fault_space(old.pml4());
         drop(mm);
+        process.mm.refresh_activation();
         drop(old);
         process.mm.activate();
     }
