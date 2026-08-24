@@ -2090,6 +2090,11 @@ pub fn schedule() -> bool {
                 // Ne jamais dormir en tenant le BKL : les autres CPU doivent
                 // pouvoir entrer dans leurs syscalls pendant notre HLT.
                 let depth = smp_lock::suspend_for_schedule();
+                #[cfg(debug_assertions)]
+                debug_assert!(
+                    !smp_lock::held_by_current_cpu(),
+                    "task: schedule HLT interdit tant que le BKL est detenu"
+                );
                 cpu::wait_for_interrupt();
                 smp_lock::resume_after_schedule(depth);
             }
@@ -3259,6 +3264,10 @@ pub fn attends_un_tick() {
 }
 
 pub fn sleep_ticks(ticks: u64) {
+    debug_assert!(
+        smp_lock::held_by_current_cpu(),
+        "task: sleep_ticks requiert le BKL externe de l'appelant"
+    );
     let duration_ns = ticks.max(1)
         .saturating_mul(1_000_000_000 / crate::kernel::timer::TICKS_PER_SECOND);
     let deadline = crate::kernel::timer::monotonic_ns().saturating_add(duration_ns);
@@ -3267,13 +3276,26 @@ pub fn sleep_ticks(ticks: u64) {
         task.wake_deadline_ns = deadline;
         task.state = TaskState::Blocked;
     }
+
+    // `syscall_dispatch` conserve un BKL externe. Le suspendre ici, avant
+    // meme de savoir si schedule() trouvera une autre tache, ferme le cas ou
+    // wake_sleepers() remet la tache courante Ready parce que son court delai
+    // a deja expire : schedule() ne dort alors pas et ne suspendrait sinon que
+    // son propre niveau recursif, laissant le niveau syscall acquis pendant
+    // toute la boucle poll/select/epoll.
+    let outer_depth = smp_lock::suspend_for_schedule();
     while crate::kernel::timer::monotonic_ns() < deadline {
         // schedule() fait deja HLT si la tache est bloquee et seule.
         schedule();
-        if current().state == TaskState::Ready {
+        let ready = {
+            let _kernel = smp_lock::enter();
+            current().state == TaskState::Ready
+        };
+        if ready {
             break;
         }
     }
+    smp_lock::resume_after_schedule(outer_depth);
     let task = current();
     task.wake_deadline_ns = 0;
     task.state = TaskState::Ready;
