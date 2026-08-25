@@ -18,6 +18,7 @@
 //! signal, metadata and lifecycle state have distinct synchronization domains.
 //! No domain guard may cross a blocking or scheduling boundary.
 
+pub mod bkl;
 pub mod errno;
 pub mod file;
 pub mod mem;

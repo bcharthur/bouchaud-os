@@ -87,6 +87,15 @@ jobs:
       - name: Protocole d'entree du navigateur (propriete des accuses)
         run: tools/ladybird/test-input-ownership.sh
 
+      # Quels appels systeme se passent du gros verrou noyau est une decision
+      # qui se prend appel par appel, avec une preuve. Une preuve fausse ne se
+      # voit ni a la compilation ni au boot : elle se voit sous charge, a
+      # quatre coeurs. Cette barriere relit la table `abi::bkl::SANS_BKL` et
+      # l'aiguillage, et refuse qu'un appel soit declare sans verrou si son
+      # bras fait autre chose que rendre une constante -- sauf audit nomme.
+      - name: Verrouillage des appels systeme (table contre aiguillage)
+        run: python3 tools/verifie-verrouillage.py
+
       # L'image bootable est une etape de plus que `cargo build` : elle passe par
       # `bootimage`, qui assemble le bootloader et le noyau. La construire ici
       # attrape les ruptures de ce chemin-la, que la compilation seule ne voit
