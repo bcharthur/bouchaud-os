@@ -1129,6 +1129,35 @@ pub fn stall_site_set(site: u32, aux: u64) {
     let cpu = local_cpu();
     STALL_KERNEL_AUX[cpu].store(aux, Ordering::Release);
     STALL_KERNEL_SITE[cpu].store(site, Ordering::Release);
+    if site != 0 {
+        STALL_SITE_TENUE[cpu].store(site, Ordering::Release);
+    }
+}
+
+/// Dernier site NON NUL marque sur ce CPU depuis la prise du verrou.
+///
+/// `stall_site_courant` seul ne suffit pas a attribuer une tenue : le site est
+/// souvent efface avant que le verrou soit relache, et la jauge de tenue
+/// maximale rendait alors un zero orphelin. Celui-ci ne repart de zero qu'a
+/// l'acquisition suivante.
+static STALL_SITE_TENUE: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+
+/// Site le plus recent marque pendant la tenue en cours.
+#[inline]
+pub fn stall_site_de_la_tenue() -> u32 {
+    STALL_SITE_TENUE[local_cpu()].load(Ordering::Acquire)
+}
+
+/// Ouvre une nouvelle tenue : le site attribue repart de zero.
+#[inline]
+pub fn stall_site_tenue_reset() {
+    STALL_SITE_TENUE[local_cpu()].store(0, Ordering::Release);
+}
+
+/// Site noyau marque sur CE CPU, pour attribuer une tenue de verrou.
+#[inline]
+pub fn stall_site_courant() -> u32 {
+    STALL_KERNEL_SITE[local_cpu()].load(Ordering::Acquire)
 }
 
 #[inline]
@@ -3179,10 +3208,11 @@ pub fn log_smp_load() {
     crate::kernel::dmesg::log_fmt(format_args!("{}", line));
     let (bkl_wait, bkl_hold, bkl_acq) = smp_lock::contention_stats();
     let (acq_enter, acq_try, acq_resume) = smp_lock::acquisitions_par_origine();
+    let (max_tenue, max_site) = smp_lock::plus_longue_tenue();
     crate::kernel::dmesg::log_fmt(format_args!(
-        "[BKL-STATS] wait_ns={} hold_ns={} acquisitions={} enter={} try_enter={} resume={} preempt_irq_bkl_tenu={} identite_repli={}",
+        "[BKL-STATS] wait_ns={} hold_ns={} acquisitions={} enter={} try_enter={} resume={} max_hold_ns={} max_hold_site={} preempt_irq_bkl_tenu={} identite_repli={}",
         bkl_wait, bkl_hold, bkl_acq, acq_enter, acq_try, acq_resume,
-        preempt_irq_bkl_tenu(), identite_repli(),
+        max_tenue, max_site, preempt_irq_bkl_tenu(), identite_repli(),
     ));
     let (_, _, backing_reads, backing_bytes) = crate::fs::backing::stats();
     let (cache_hits, readahead_hits) = crate::fs::backing::cache_stats();

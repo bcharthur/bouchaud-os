@@ -48,6 +48,14 @@ static PROBE_LAST_RELEASE_KIND: AtomicU32 = AtomicU32::new(0);
 static PROBE_LAST_RELEASE_GEN: AtomicU64 = AtomicU64::new(0);
 static TOTAL_WAIT_NS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_HOLD_NS: AtomicU64 = AtomicU64::new(0);
+/// Plus longue tenue continue du verrou, et ou elle s'est produite.
+///
+/// Un cumul ne dit rien d'une panne de vivacite : mille tenues d'une
+/// microseconde et une tenue de deux secondes donnent la meme somme. C'est le
+/// MAXIMUM qui distingue un noyau qui travaille d'un noyau qui gele, et c'est
+/// donc lui qu'une non-regression peut affirmer.
+static PLUS_LONGUE_TENUE_NS: AtomicU64 = AtomicU64::new(0);
+static PLUS_LONGUE_TENUE_SITE: AtomicU32 = AtomicU32::new(0);
 static TOTAL_ACQUISITIONS: AtomicU64 = AtomicU64::new(0);
 /// Acquisitions ventilees par origine : 1 = `enter`, 2 = `try_enter*` (IRQ),
 /// 3 = `resume_after_schedule` (reprise d'une pile apres un changement de
@@ -74,6 +82,7 @@ fn probe_note_reenter() {
 #[inline]
 fn probe_note_acquire(cpu: usize, kind: u32) {
     TOTAL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
+    crate::kernel::task::stall_site_tenue_reset();
     ACQ_PAR_ORIGINE[(kind as usize).min(3)].fetch_add(1, Ordering::Relaxed);
     ACQUIRED_AT_NS[cpu].store(crate::kernel::timer::monotonic_ns(), Ordering::Relaxed);
     // GEN=0 signifie uniquement "transition de metadata". Le token OWNER
@@ -98,7 +107,15 @@ fn probe_note_acquire(cpu: usize, kind: u32) {
 fn probe_note_release(cpu: usize, kind: u32) {
     let now_ns = crate::kernel::timer::monotonic_ns();
     let acquired = ACQUIRED_AT_NS[cpu].swap(0, Ordering::Relaxed);
-    TOTAL_HOLD_NS.fetch_add(now_ns.saturating_sub(acquired), Ordering::Relaxed);
+    let tenue = now_ns.saturating_sub(acquired);
+    TOTAL_HOLD_NS.fetch_add(tenue, Ordering::Relaxed);
+    if acquired != 0 && tenue > PLUS_LONGUE_TENUE_NS.load(Ordering::Relaxed) {
+        PLUS_LONGUE_TENUE_NS.store(tenue, Ordering::Relaxed);
+        PLUS_LONGUE_TENUE_SITE.store(
+            crate::kernel::task::stall_site_de_la_tenue(),
+            Ordering::Relaxed,
+        );
+    }
     let generation = PROBE_OWNER_GEN.load(Ordering::Acquire);
     PROBE_RELEASE_SEQ.fetch_add(1, Ordering::AcqRel);
     PROBE_LAST_RELEASE_TICK.store(crate::kernel::timer::ticks(), Ordering::Release);
@@ -405,6 +422,15 @@ pub fn acquisitions_par_origine() -> (u64, u64, u64) {
         ACQ_PAR_ORIGINE[1].load(Ordering::Relaxed),
         ACQ_PAR_ORIGINE[2].load(Ordering::Relaxed),
         ACQ_PAR_ORIGINE[3].load(Ordering::Relaxed),
+    )
+}
+
+/// Plus longue tenue continue observee, et le site noyau marque a ce
+/// moment-la (voir `task::stall_site_set`).
+pub fn plus_longue_tenue() -> (u64, u32) {
+    (
+        PLUS_LONGUE_TENUE_NS.load(Ordering::Relaxed),
+        PLUS_LONGUE_TENUE_SITE.load(Ordering::Relaxed),
     )
 }
 
