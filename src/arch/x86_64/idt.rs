@@ -147,6 +147,10 @@ extern "x86-interrupt" fn stack_segment_handler(stack: InterruptStackFrame, code
 extern "x86-interrupt" fn page_fault_handler(stack: InterruptStackFrame, code: PageFaultErrorCode) {
     let _gs = GsGuard::enter(&stack);
     let addr = x86_64::registers::control::Cr2::read();
+    // L'exception s'execute dans le contexte de la tache interrompue : son
+    // marqueur de site doit revenir en place en sortant, sinon la sonde ne
+    // reverra jamais le site du syscall qui a pris la faute.
+    let _site = crate::kernel::task::SiteIrq::enter(20, addr.as_u64());
     crate::kernel::task::stall_pf_begin(addr.as_u64());
     // Une exception user arrive avec IF masque par la porte IDT. Autoriser les
     // IPI avant toute attente de verrou: un CPU bloque sur la synchronisation
@@ -176,7 +180,6 @@ extern "x86-interrupt" fn page_fault_handler(stack: InterruptStackFrame, code: P
         crate::kernel::task::fault_retry_chain_complete(retries as u64);
         if outcome == crate::kernel::task::FaultOutcome::Resolved {
             crate::kernel::task::stall_pf_done(addr.as_u64());
-            crate::kernel::task::stall_site_clear();
             // execve may have retired this sibling while its fault loader was
             // outside the BKL doing I/O. Do not return it to the old user CR3.
             let _kernel = crate::kernel::smp_lock::enter();
@@ -214,9 +217,8 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
 
     let mut preempt_now = false;
     {
-        crate::kernel::task::stall_site_set(60, 0);
+        let _site = crate::kernel::task::SiteIrq::enter(60, 0);
         let Some(_kernel) = crate::kernel::smp_lock::try_enter() else {
-            crate::kernel::task::stall_site_clear();
             if quantum && crate::kernel::task::in_user_task() {
                 crate::kernel::task::request_deferred_preempt();
             }
@@ -237,7 +239,6 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
                 crate::kernel::task::request_deferred_preempt();
             }
         }
-        crate::kernel::task::stall_site_clear();
     }
 
     if preempt_now {
@@ -271,10 +272,9 @@ extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFram
 
     let mut preempt_now = false;
     {
-        crate::kernel::task::stall_site_set(30, 0);
+        let _site = crate::kernel::task::SiteIrq::enter(30, 0);
         let Some(_kernel) = crate::kernel::smp_lock::try_enter() else {
             crate::kernel::task::stall_ipi_bkl_result(false);
-            crate::kernel::task::stall_site_clear();
             crate::kernel::task::set_need_resched();
             return;
         };
@@ -293,7 +293,6 @@ extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFram
                 crate::kernel::task::request_deferred_preempt();
             }
         }
-        crate::kernel::task::stall_site_clear();
     }
 
     if preempt_now {

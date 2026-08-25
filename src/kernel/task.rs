@@ -1165,6 +1165,52 @@ pub fn stall_site_clear() {
     STALL_KERNEL_SITE[local_cpu()].store(0, Ordering::Release);
 }
 
+/// Marqueur de site pose depuis une interruption, rendu en sortant.
+///
+/// Une interruption s'execute *dans* le contexte qu'elle interrompt. Ecrire
+/// `STALL_KERNEL_SITE` depuis le gestionnaire puis l'effacer detruit donc le
+/// marqueur pose par la tache interrompue — et le timer le fait mille fois par
+/// seconde. C'est exactement pourquoi `[SMP-STALL] site=0:0x0` n'a jamais rien
+/// dit d'un blocage : au moment ou la sonde lit le champ, la derniere IRQ
+/// vient de le remettre a zero. C'est aussi pourquoi `max_hold_site` designait
+/// 31 (le marqueur de l'IPI) au lieu du code qui tenait reellement le verrou :
+/// `stall_site_set` ecrase aussi `STALL_SITE_TENUE`.
+///
+/// Le gestionnaire sauve donc les trois champs a l'entree et les rend a la
+/// sortie. Pendant l'interruption le site decrit l'interruption ; apres, il
+/// decrit de nouveau la tache.
+pub struct SiteIrq {
+    cpu: usize,
+    site: u32,
+    aux: u64,
+    tenue: u32,
+}
+
+impl SiteIrq {
+    /// Sauve le site du contexte interrompu, puis marque celui de l'IRQ.
+    #[inline]
+    pub fn enter(site: u32, aux: u64) -> Self {
+        let cpu = local_cpu();
+        let garde = Self {
+            cpu,
+            site: STALL_KERNEL_SITE[cpu].load(Ordering::Acquire),
+            aux: STALL_KERNEL_AUX[cpu].load(Ordering::Acquire),
+            tenue: STALL_SITE_TENUE[cpu].load(Ordering::Acquire),
+        };
+        stall_site_set(site, aux);
+        garde
+    }
+}
+
+impl Drop for SiteIrq {
+    #[inline]
+    fn drop(&mut self) {
+        STALL_KERNEL_AUX[self.cpu].store(self.aux, Ordering::Release);
+        STALL_KERNEL_SITE[self.cpu].store(self.site, Ordering::Release);
+        STALL_SITE_TENUE[self.cpu].store(self.tenue, Ordering::Release);
+    }
+}
+
 #[inline]
 fn local_cpu() -> usize {
     usermode::cpu_index().min(MAX_CPUS - 1)
