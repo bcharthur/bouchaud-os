@@ -1,5 +1,5 @@
 [build]
-target = "x86_64-bouchaud_os.json"
+target = "targets/x86_64-bouchaud_os.json"
 
 [unstable]
 json-target-spec = true

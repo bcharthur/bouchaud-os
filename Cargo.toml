@@ -7,52 +7,31 @@ description = "Bouchaud OS - noyau expérimental from scratch en Rust"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-# Bootloader expérimental x86_64 utilisé uniquement pour la phase 0.
-# Objectif futur : écrire/maîtriser notre propre chaîne de boot.
-# map_physical_memory : mappe toute la RAM physique a un offset connu
-# (necessaire pour le MMIO et le DMA du driver reseau e1000).
-bootloader = { version = "0.9.31", features = ["map_physical_memory"] }
-
-# Briques bas niveau standard de l'OSdev Rust (no_std) : structures GDT/IDT,
-# instructions privilegiees, et controleur d'interruptions PIC 8259.
-x86_64 = "0.14.2"
-pic8259 = "0.10.1"
-
 # Allocateur de tas pour activer `alloc` (Vec/String/BTreeMap).
 linked_list_allocator = "0.10"
 
-# Interpreteur WebAssembly no_std (alloc) : execute des modules `.wasm` compiles
-# depuis n'importe quel langage. `default-features = false` desactive `std`
-# (on fournit notre propre allocateur global + point d'entree). Voir `src/wasm/`.
+# Interpreteur WebAssembly no_std (alloc).
 wasmi = { version = "0.31", default-features = false }
 
-
-# Pile TCP/IP reelle (embarque/no_std), no_std+alloc uniquement : backend
-# experimental pour transport::smol_tcp::fetch (RFC 793 correct -- RTT,
-# retransmission, fenetre glissante -- au lieu du TCP maison de tcp.rs).
-# Verifiee a la compilation pour cette cible ; PAS ENCORE branchee comme
-# chemin par defaut (fetch_document utilise toujours tcp.rs/TcpConn) tant
-# qu'elle n'a pas ete testee a l'execution -- voir la commande shell
-# `smoltest <hote>`.
+# Pile TCP/IP no_std + alloc.
 smoltcp = { version = "0.12", default-features = false, features = ["alloc", "proto-ipv4", "medium-ethernet", "socket-tcp"] }
 
-
-
-# Rasterizer de police TrueType/OpenType mature (AA par couverture, metriques
-# completes), no_std+alloc. Remplace le rasterizer maison de font_ttf.rs comme
-# chemin primaire ; le maison reste en repli si l'init fontdue echoue.
+# Rasterizer TrueType/OpenType no_std + alloc.
 fontdue = { version = "0.9", default-features = false, features = ["hashbrown"] }
 
-# HashMap O(1) no_std (celle de la std, extraite) : remplace BTreeMap (O(log n)
-# + comparaisons de cles) sur les chemins chauds -- resolution de variables JS
-# a chaque identifiant, tables de Huffman WebP consultees bit par bit.
+# HashMap no_std.
 hashbrown = { version = "0.15", default-features = false, features = ["default-hasher"] }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+# Dépendances du backend x86_64 uniquement. Elles ne doivent pas contaminer
+# le futur graphe de compilation AArch64.
+bootloader = { version = "0.9.31", features = ["map_physical_memory"] }
+x86_64 = "0.14.2"
+pic8259 = "0.10.1"
 
 [profile.dev]
 panic = "abort"
-# Optimisation activee meme en debug : la crypto TLS (RSA/EC/bignum) devient
-# ~20x plus rapide -> handshake quasi instantane au lieu de plusieurs secondes
-# de "lag" a chaque chargement. Cout : compilation un peu plus longue.
+# La crypto TLS/bignum est beaucoup trop lente sans optimisation.
 opt-level = 2
 
 [profile.release]
