@@ -1329,6 +1329,38 @@ pub fn poll_phase_set(phase: u32, detail: u64) {
     POLL_PHASE[cpu].store(phase, Ordering::Release);
 }
 
+/// Etapes d'UN tour de balayage, encodees dans le detail.
+///
+/// « balayage detail=0 » ne distinguait pas deux instructions differentes : le
+/// tout premier descripteur avant meme sa lecture, et le descripteur 0 une
+/// fois lu. Le gel du 25 aout a rendu exactement cette valeur pendant cent
+/// sept secondes, donc sans dire laquelle des six etapes tenait le CPU.
+pub const ETAPE_LIT_FD: u32 = 1;
+pub const ETAPE_LIT_EVENTS: u32 = 2;
+pub const ETAPE_LISIBLE: u32 = 3;
+pub const ETAPE_INSCRIPTIBLE: u32 = 4;
+pub const ETAPE_ETAT_PAIR: u32 = 5;
+pub const ETAPE_REND_REVENTS: u32 = 6;
+
+/// Descripteur pas encore connu a cette etape.
+pub const FD_INCONNU: u32 = u32::MAX;
+
+/// `etape | index | descripteur` dans un seul mot, sans collision possible.
+#[inline]
+pub fn poll_detail(etape: u32, index: usize, fd: u32) -> u64 {
+    ((etape as u64) << 48) | (((index as u64) & 0xffff) << 32) | fd as u64
+}
+
+/// Inverse de [`poll_detail`], pour la sonde.
+#[inline]
+pub fn poll_detail_decode(detail: u64) -> (u32, u64, u32) {
+    (
+        (detail >> 48) as u32,
+        (detail >> 32) & 0xffff,
+        (detail & 0xffff_ffff) as u32,
+    )
+}
+
 #[inline]
 pub fn poll_phase(cpu: usize) -> (u32, u64) {
     let cpu = cpu.min(MAX_CPUS - 1);
@@ -1454,14 +1486,36 @@ pub fn stall_probe_from_timer() {
             POLL_RETOUR => "retour",
             _ => "hors-poll",
         };
-        crate::serial_println!(
-            "[SMP-POLL] cpu={} tenue={}ms phase={} detail={:#x} tx_plein={}",
-            owner_cpu,
-            held,
-            nom,
-            detail,
-            crate::drivers::e1000::tx_anneau_plein(),
-        );
+        if phase == POLL_BALAYAGE {
+            let (etape, index, fd) = poll_detail_decode(detail);
+            let quoi = match etape {
+                ETAPE_LIT_FD => "lit-fd",
+                ETAPE_LIT_EVENTS => "lit-events",
+                ETAPE_LISIBLE => "lisible",
+                ETAPE_INSCRIPTIBLE => "inscriptible",
+                ETAPE_ETAT_PAIR => "etat-pair",
+                ETAPE_REND_REVENTS => "rend-revents",
+                _ => "?",
+            };
+            crate::serial_println!(
+                "[SMP-POLL] cpu={} tenue={}ms phase=balayage etape={} index={} fd={} tx_plein={}",
+                owner_cpu,
+                held,
+                quoi,
+                index,
+                fd as i32,
+                crate::drivers::e1000::tx_anneau_plein(),
+            );
+        } else {
+            crate::serial_println!(
+                "[SMP-POLL] cpu={} tenue={}ms phase={} detail={:#x} tx_plein={}",
+                owner_cpu,
+                held,
+                nom,
+                detail,
+                crate::drivers::e1000::tx_anneau_plein(),
+            );
+        }
     }
     let (live_site, live_aux, live_depth) = if owner_cpu < MAX_CPUS {
         (

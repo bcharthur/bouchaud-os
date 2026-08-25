@@ -2325,24 +2325,31 @@ pub fn sys_poll(fds: u64, count: usize, timeout_ms: i32) -> i64 {
     loop {
         let mut ready = 0i64;
         for index in 0..count {
-            // Le detail porte le descripteur en cours : « balayage » sans lui
-            // ne dirait pas LEQUEL bloque.
-            task::poll_phase_set(task::POLL_BALAYAGE, index as u64);
+            // Le detail porte l'etape, le rang et le descripteur : « balayage »
+            // sans eux ne dit ni LEQUEL bloque, ni a QUELLE instruction. Un
+            // rang zero et un descripteur zero encodaient la meme valeur, et
+            // c'est precisement celle qu'un gel de cent sept secondes a rendue.
+            let etape = |etape: u32, fd: u32| {
+                task::poll_phase_set(task::POLL_BALAYAGE, task::poll_detail(etape, index, fd));
+            };
+            etape(task::ETAPE_LIT_FD, task::FD_INCONNU);
             let base = fds + (index * 8) as u64;
             let fd = match user_read(base, 4) {
                 Some(bytes) => i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
                 None => { task::poll_phase_set(task::POLL_HORS, 0); return -errno::EFAULT; }
             };
+            etape(task::ETAPE_LIT_EVENTS, fd as u32);
             let events = match user_read(base + 4, 2) {
                 Some(bytes) => u16::from_le_bytes([bytes[0], bytes[1]]) as u32,
                 None => { task::poll_phase_set(task::POLL_HORS, 0); return -errno::EFAULT; }
             };
             let mut revents = 0u32;
             if fd >= 0 {
-                task::poll_phase_set(task::POLL_BALAYAGE, ((index as u64) << 32) | (fd as u32 as u64));
+                etape(task::ETAPE_LISIBLE, fd as u32);
                 if events & POLLIN != 0 && readable(fd) {
                     revents |= POLLIN;
                 }
+                etape(task::ETAPE_INSCRIPTIBLE, fd as u32);
                 if events & POLLOUT != 0 && writable(fd) {
                     revents |= POLLOUT;
                 }
@@ -2350,11 +2357,13 @@ pub fn sys_poll(fds: u64, count: usize, timeout_ms: i32) -> i64 {
                 // rend toujours. Un ecrivain dont le lecteur a ferme doit
                 // l'apprendre de son `poll`, meme s'il n'a demande que
                 // `POLLOUT` — sinon il boucle sur un canal mort.
+                etape(task::ETAPE_ETAT_PAIR, fd as u32);
                 revents |= etat_pair(fd);
             }
             if revents != 0 {
                 ready += 1;
             }
+            etape(task::ETAPE_REND_REVENTS, fd as u32);
             user_write(base + 6, &(revents as u16).to_le_bytes());
         }
         if ready > 0 || crate::kernel::timer::ticks() >= deadline {
