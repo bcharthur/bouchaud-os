@@ -78,6 +78,15 @@ jobs:
       - name: Protocole GUI (tests hote + coherence Rust/C++)
         run: tools/gui/test-protocole.sh
 
+      # Le meme genre de barriere, pour le protocole d'entree du navigateur :
+      # WebContent doit rendre exactement un accuse de reception par evenement
+      # mis en file par l'hote. Le chrome M11 vit dans WebContent et injecte sa
+      # propre entree ; chaque injection rendait un accuse de trop et faisait
+      # tomber `AK/Queue.h:50` des le premier clic. La CI ne l'avait jamais vu :
+      # elle boote en `--headless=manual`, sans le moindre evenement d'entree.
+      - name: Protocole d'entree du navigateur (propriete des accuses)
+        run: tools/ladybird/test-input-ownership.sh
+
       # L'image bootable est une etape de plus que `cargo build` : elle passe par
       # `bootimage`, qui assemble le bootloader et le noyau. La construire ici
       # attrape les ruptures de ce chemin-la, que la compilation seule ne voit

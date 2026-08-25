@@ -39,6 +39,7 @@ python3 tools/ladybird/prepare-console.py "$SRC"
 python3 tools/ladybird/prepare-m11-chrome.py "$SRC"
 python3 tools/ladybird/prepare-browser-runtime-link.py "$SRC"
 python3 tools/ladybird/prepare-full-browser-host.py "$SRC"
+python3 tools/ladybird/prepare-m11-input-ownership.py "$SRC"
 python3 tools/ladybird/prepare-platform-complete.py "$SRC"
 
 # Le chrome M11 seul, avec les avertissements d'upstream, avant d'engager les
