@@ -96,6 +96,14 @@ jobs:
       - name: Verrouillage des appels systeme (table contre aiguillage)
         run: python3 tools/verifie-verrouillage.py
 
+      # Un verrou tournant tenu pendant une attente du gros verrou fige la
+      # machine entiere : un cœur tient le verrou et attend le BKL, un autre
+      # tient le BKL et demande le verrou. C'est le gel du 25 aout, et rien ne
+      # le signalait -- ni le compilateur, ni le boot, ni quinze minutes de
+      # navigation. Cette barriere refuse la forme qui l'a produit.
+      - name: Verrous tournants (aucune attente du gros verrou dessous)
+        run: python3 tools/verifie-verrous-tournants.py
+
       # L'image bootable est une etape de plus que `cargo build` : elle passe par
       # `bootimage`, qui assemble le bootloader et le noyau. La construire ici
       # attrape les ruptures de ce chemin-la, que la compilation seule ne voit
