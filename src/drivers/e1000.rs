@@ -50,6 +50,21 @@ static mut TX_BUF_V: *mut u8 = core::ptr::null_mut();
 static mut TX_BUF_P: u64 = 0;
 static mut RX_CUR: usize = 0;
 static mut TX_CUR: usize = 0;
+/// Descripteurs deja utilises au moins une fois : eux seuls doivent etre
+/// attendus avant reecriture.
+static mut TX_UTILISE: [bool; N_TX] = [false; N_TX];
+/// Emissions abandonnees faute de descripteur libre. Doit rester tres bas ;
+/// une valeur qui grimpe veut dire que la carte ne rend plus ses descripteurs.
+static mut TX_ANNEAU_PLEIN: u64 = 0;
+/// Tours de `pause` accordes a la carte pour rendre UN descripteur. La trame
+/// part en quelques microsecondes ; au-dela, c'est que l'anneau est bouche, et
+/// insister ne le debouche pas.
+const ATTENTE_TX: u32 = 20_000;
+
+/// Nombre d'emissions abandonnees faute de descripteur libre.
+pub fn tx_anneau_plein() -> u64 {
+    unsafe { TX_ANNEAU_PLEIN }
+}
 
 unsafe fn reg_read(off: u32) -> u32 {
     read_volatile((MMIO + off as u64) as *const u32)
@@ -205,6 +220,32 @@ pub fn send(frame: &[u8]) -> bool {
     unsafe {
         if !READY || frame.is_empty() || frame.len() > BUF { return false; }
         let i = TX_CUR;
+
+        // ## L'attente est ICI, avant d'ecrire, et elle est courte
+        //
+        // Le code precedent envoyait la trame PUIS attendait le bit DD jusqu'a
+        // UN MILLION de tours de `pause`, gros verrou noyau tenu -- et rendait
+        // `true` de toute facon a l'expiration. Cette attente ne servait donc a
+        // rien qu'a immobiliser le noyau : `pump` emet un accuse par segment
+        // recu, et chacun payait ce prix.
+        //
+        // La seule attente qui ait un sens est celle-ci : le descripteur que
+        // l'on s'apprete a REUTILISER doit avoir ete rendu par la carte. On
+        // l'attend brievement, et si l'anneau est encore plein on rend `false`
+        // -- ce que les appelants savent traiter, c'est deja ce que rend un
+        // `hop_mac` sans reponse. Un accuse TCP est cumulatif, un datagramme
+        // est retransmis : ne pas emettre ce tour-ci ne perd rien.
+        if TX_UTILISE[i] && desc_get_u8(TX_RING, i, 12) & 0x1 == 0 {
+            let mut libre = false;
+            for _ in 0..ATTENTE_TX {
+                if desc_get_u8(TX_RING, i, 12) & 0x1 != 0 { libre = true; break; }
+                core::arch::asm!("pause", options(nomem, nostack));
+            }
+            if !libre {
+                TX_ANNEAU_PLEIN += 1;
+                return false;
+            }
+        }
         // Copie la trame dans le tampon DMA de ce descripteur.
         let dst = TX_BUF_V.add(i * BUF);
         core::ptr::copy_nonoverlapping(frame.as_ptr(), dst, frame.len());
@@ -214,11 +255,7 @@ pub fn send(frame: &[u8]) -> bool {
         desc_set_u8(TX_RING, i, 12, 0);                   // status
         TX_CUR = (i + 1) % N_TX;
         reg_write(REG_TDT, TX_CUR as u32);
-        // Attend que la carte signale l'envoi (DD), avec garde-fou.
-        for _ in 0..1_000_000 {
-            if desc_get_u8(TX_RING, i, 12) & 0x1 != 0 { return true; }
-            core::arch::asm!("pause", options(nomem, nostack));
-        }
+        TX_UTILISE[i] = true;
         true
     }
 }

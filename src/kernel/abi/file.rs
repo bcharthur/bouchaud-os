@@ -2321,20 +2321,25 @@ pub fn sys_poll(fds: u64, count: usize, timeout_ms: i32) -> i64 {
         crate::kernel::timer::ticks() + crate::kernel::timer::ms_to_ticks(timeout_ms as u64)
     };
 
+    task::poll_phase_set(task::POLL_ENTREE, count as u64);
     loop {
         let mut ready = 0i64;
         for index in 0..count {
+            // Le detail porte le descripteur en cours : « balayage » sans lui
+            // ne dirait pas LEQUEL bloque.
+            task::poll_phase_set(task::POLL_BALAYAGE, index as u64);
             let base = fds + (index * 8) as u64;
             let fd = match user_read(base, 4) {
                 Some(bytes) => i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-                None => return -errno::EFAULT,
+                None => { task::poll_phase_set(task::POLL_HORS, 0); return -errno::EFAULT; }
             };
             let events = match user_read(base + 4, 2) {
                 Some(bytes) => u16::from_le_bytes([bytes[0], bytes[1]]) as u32,
-                None => return -errno::EFAULT,
+                None => { task::poll_phase_set(task::POLL_HORS, 0); return -errno::EFAULT; }
             };
             let mut revents = 0u32;
             if fd >= 0 {
+                task::poll_phase_set(task::POLL_BALAYAGE, ((index as u64) << 32) | (fd as u32 as u64));
                 if events & POLLIN != 0 && readable(fd) {
                     revents |= POLLIN;
                 }
@@ -2353,9 +2358,13 @@ pub fn sys_poll(fds: u64, count: usize, timeout_ms: i32) -> i64 {
             user_write(base + 6, &(revents as u16).to_le_bytes());
         }
         if ready > 0 || crate::kernel::timer::ticks() >= deadline {
+            task::poll_phase_set(task::POLL_RETOUR, ready as u64);
+            task::poll_phase_set(task::POLL_HORS, 0);
             return ready;
         }
+        task::poll_phase_set(task::POLL_ATTENTE, bouchaud_idle_rounds as u64);
         task::attends_io_adaptatif(&mut bouchaud_idle_rounds);
+        task::poll_phase_set(task::POLL_REVEIL, bouchaud_idle_rounds as u64);
     }
 }
 

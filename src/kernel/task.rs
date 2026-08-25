@@ -1249,6 +1249,49 @@ pub fn stall_syscall_bkl_acquired() {
     STALL_SYSCALL_PHASE[local_cpu()].store(2, Ordering::Release);
 }
 
+/// Ou en est la boucle de disponibilite de `poll`/`select`, par CPU.
+///
+/// # Pourquoi c'est necessaire
+///
+/// La sonde de blocage ne disait que `syscall=7 phase=2` et `site=0`. Sur le
+/// gel observe au 25 aout, cela suffisait a savoir QUE le CPU etait dans
+/// `poll` avec le verrou, et pas du tout OU : le balayage des descripteurs,
+/// l'emission d'un accuse, l'attente, ou la reprise. Deux corrections de suite
+/// ont ete guidees a l'aveugle par ce manque.
+///
+/// Une case par CPU, un `store` relaxe par transition. Rien n'est journalise
+/// en continu -- c'est la sonde de blocage qui LIT cette case quand une tenue
+/// depasse son seuil, donc au plus une ligne par seconde et seulement quand
+/// quelque chose ne va pas.
+pub const POLL_HORS: u32 = 0;
+pub const POLL_ENTREE: u32 = 1;
+pub const POLL_BALAYAGE: u32 = 2;
+pub const POLL_PRET: u32 = 3;
+pub const POLL_ATTENTE: u32 = 4;
+pub const POLL_REVEIL: u32 = 5;
+pub const POLL_RETOUR: u32 = 6;
+
+static POLL_PHASE: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+/// Detail de la phase : le descripteur en cours de sondage, ou le tour de
+/// boucle. Sans lui, « balayage » ne dit pas QUEL descripteur bloque.
+static POLL_DETAIL: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+#[inline]
+pub fn poll_phase_set(phase: u32, detail: u64) {
+    let cpu = local_cpu();
+    POLL_DETAIL[cpu].store(detail, Ordering::Release);
+    POLL_PHASE[cpu].store(phase, Ordering::Release);
+}
+
+#[inline]
+pub fn poll_phase(cpu: usize) -> (u32, u64) {
+    let cpu = cpu.min(MAX_CPUS - 1);
+    (
+        POLL_PHASE[cpu].load(Ordering::Acquire),
+        POLL_DETAIL[cpu].load(Ordering::Acquire),
+    )
+}
+
 /// Phase 3 : dans le corps de l'appel, SANS le gros verrou.
 ///
 /// La phase 2 veut dire « le verrou est pris ». Un appel libere n'y passe plus
@@ -1323,6 +1366,31 @@ pub fn stall_probe_from_timer() {
     } else {
         now.wrapping_sub(prov.since_tick)
     };
+
+    // Ou en est la boucle de disponibilite du proprietaire, s'il y en a un qui
+    // dure. Rien n'est imprime en marche normale : la ligne ne sort que
+    // lorsqu'une tenue depasse le demi-seconde, c'est-a-dire exactement quand
+    // `syscall=7 phase=2 site=0` ne suffit plus a dire ou l'on est bloque.
+    if owner_cpu < MAX_CPUS && held >= 500 {
+        let (phase, detail) = poll_phase(owner_cpu);
+        let nom = match phase {
+            POLL_ENTREE => "entree",
+            POLL_BALAYAGE => "balayage",
+            POLL_PRET => "pret",
+            POLL_ATTENTE => "attente",
+            POLL_REVEIL => "reveil",
+            POLL_RETOUR => "retour",
+            _ => "hors-poll",
+        };
+        crate::serial_println!(
+            "[SMP-POLL] cpu={} tenue={}ms phase={} detail={:#x} tx_plein={}",
+            owner_cpu,
+            held,
+            nom,
+            detail,
+            crate::drivers::e1000::tx_anneau_plein(),
+        );
+    }
     let (live_site, live_aux, live_depth) = if owner_cpu < MAX_CPUS {
         (
             STALL_KERNEL_SITE[owner_cpu].load(Ordering::Acquire),
