@@ -219,6 +219,7 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
             }
             let non_bloquant = fd_flags(fd) & O_NONBLOCK != 0;
             loop {
+                let ticket = crate::kernel::fd::readiness_ticket();
                 // Le guard du tampon ne doit jamais survivre a l'attente :
                 // l'ecrivain qu'on attend a besoin du meme SpinLock.
                 let (vide, plus_d_ecrivain) = {
@@ -242,12 +243,13 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
                 // BOUCHAUD_SMP_BLOCKING_IO_FIX_V1: une attente bloquante doit
                 // marquer la tache Blocked afin que schedule() libere le BKL global
                 // pendant que le producteur/consommateur progresse sur un autre CPU.
-                task::attends_un_tick();
+                crate::kernel::fd::wait_readiness(ticket, None);
             }
             let mut state = shared.lock();
             let len = core::cmp::min(count, state.buffer.len());
             let data: Vec<u8> = state.buffer.drain(..len).collect();
             drop(state);
+            crate::kernel::fd::notify_readiness(); // le tube redevient inscriptible
             if user_write(buffer, &data) {
                 len as i64
             } else {
@@ -301,10 +303,15 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
             // premier `recvmsg` d'un dialogue entre deux processus, celui qui
             // arrive avant que le pair ait eu la main.
             if inbox.lock().octets.is_empty() && fd_flags(fd) & O_NONBLOCK == 0 {
-                let echeance =
-                    crate::kernel::timer::ticks() + crate::kernel::timer::ms_to_ticks(2000);
-                while inbox.lock().octets.is_empty() && crate::kernel::timer::ticks() < echeance {
-                    task::attends_un_tick();
+                let echeance = crate::kernel::timer::monotonic_ns().saturating_add(2_000_000_000);
+                loop {
+                    let ticket = crate::kernel::fd::readiness_ticket();
+                    if !inbox.lock().octets.is_empty()
+                        || crate::kernel::timer::monotonic_ns() >= echeance
+                    {
+                        break;
+                    }
+                    crate::kernel::fd::wait_readiness(ticket, Some(echeance));
                 }
             }
             let mut guard = inbox.lock();
@@ -314,6 +321,7 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
             let len = core::cmp::min(count, guard.octets.len());
             let data: Vec<u8> = guard.octets.drain(..len).collect();
             drop(guard);
+            crate::kernel::fd::notify_readiness(); // le pair peut de nouveau ecrire
             if user_write(buffer, &data) {
                 len as i64
             } else {
@@ -476,6 +484,8 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
             let mut state = shared.lock();
             let ecrits = core::cmp::min(place, data.len());
             state.buffer.extend_from_slice(&data[..ecrits]);
+            drop(state);
+            crate::kernel::fd::notify_readiness();
             ecrits as i64
         }
         FdKind::EventFd(state) => {
@@ -490,6 +500,7 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
                 return -errno::EINVAL;
             }
             state.lock().counter += value;
+            crate::kernel::fd::notify_readiness();
             8
         }
         FdKind::TimerFd(_) => -errno::EINVAL,
@@ -513,6 +524,8 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
             let mut canal = outbox.lock();
             let ecrits = core::cmp::min(place, data.len());
             canal.octets.extend_from_slice(&data[..ecrits]);
+            drop(canal);
+            crate::kernel::fd::notify_readiness();
             ecrits as i64
         }
         FdKind::Epoll(_) => -errno::EINVAL,
@@ -926,6 +939,9 @@ pub fn sys_close(fd: i32) -> i64 {
         verrous::libere_fichier(node, pid);
     }
     if closed {
+        // EOF/HUP et place d'un canal peuvent changer a la disparition de la
+        // derniere extremite. Le FileTable lock est deja relache ici.
+        crate::kernel::fd::notify_readiness();
         0
     } else {
         -errno::EBADF
@@ -2195,9 +2211,10 @@ const ATTENTE_ECRITURE_MS: u64 = 5_000;
 
 /// Attend qu'un canal ait de la place. Rend la place obtenue, ou l'erreur.
 fn attends_place<F: Fn() -> Capacite>(etat: F, non_bloquant: bool) -> Result<usize, i64> {
-    let echeance =
-        crate::kernel::timer::ticks() + crate::kernel::timer::ms_to_ticks(ATTENTE_ECRITURE_MS);
+    let echeance = crate::kernel::timer::monotonic_ns()
+        .saturating_add(ATTENTE_ECRITURE_MS.saturating_mul(1_000_000));
     loop {
+        let ticket = crate::kernel::fd::readiness_ticket();
         match etat() {
             // Ecrire dans un canal que plus personne ne lit n'a pas de sens :
             // Linux leve SIGPIPE et rend EPIPE. Faute de SIGPIPE ici, on rend
@@ -2210,7 +2227,7 @@ fn attends_place<F: Fn() -> Capacite>(etat: F, non_bloquant: bool) -> Result<usi
         if non_bloquant {
             return Err(-errno::EAGAIN);
         }
-        if crate::kernel::timer::ticks() >= echeance {
+        if crate::kernel::timer::monotonic_ns() >= echeance {
             return Err(-errno::EAGAIN);
         }
         // Ceder la main est ce qui permet au lecteur de vider le canal : c'est
@@ -2218,7 +2235,7 @@ fn attends_place<F: Fn() -> Capacite>(etat: F, non_bloquant: bool) -> Result<usi
         // BOUCHAUD_SMP_BLOCKING_IO_FIX_V1: une attente bloquante doit
         // marquer la tache Blocked afin que schedule() libere le BKL global
         // pendant que le producteur/consommateur progresse sur un autre CPU.
-        task::attends_un_tick();
+        crate::kernel::fd::wait_readiness(ticket, Some(echeance));
     }
 }
 
@@ -2311,18 +2328,53 @@ fn readable(fd: i32) -> bool {
     }
 }
 
+/// Prochaine echeance a laquelle l'etat d'un objet peut changer sans notifier.
+///
+/// Les timerfd ont une vraie echeance. Les sockets inet gardent provisoirement
+/// un coup de pompe court car le pilote e1000 masque encore ses IRQ RX; les
+/// pipes, socketpair, eventfd et GUI restent, eux, purement event-driven.
+fn readiness_deadline_ns(fd: i32) -> Option<u64> {
+    let process = task::current_process();
+    let kind = process.files.lock().get(fd).map(|desc| desc.kind.clone())?;
+    match kind {
+        FdKind::TimerFd(state) => {
+            let deadline = state.lock().deadline;
+            if deadline == 0 { return None; }
+            let now_ticks = crate::kernel::timer::ticks();
+            let remaining = deadline.saturating_sub(now_ticks);
+            Some(crate::kernel::timer::monotonic_ns().saturating_add(
+                remaining.saturating_mul(1_000_000_000 / crate::kernel::timer::TICKS_PER_SECOND),
+            ))
+        }
+        FdKind::Socket(_) => Some(crate::kernel::timer::monotonic_ns().saturating_add(2_000_000)),
+        _ => None,
+    }
+}
+
+fn plus_proche(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
 /// `poll` / `ppoll` : `struct pollfd { int fd; short events; short revents; }`.
 pub fn sys_poll(fds: u64, count: usize, timeout_ms: i32) -> i64 {
-    // BOUCHAUD_CPU_OPT_POLL_BACKOFF: backoff borne pour les boucles d'I/O sans evenement.
-    let mut bouchaud_idle_rounds = 0u32;
-    let deadline = if timeout_ms < 0 {
-        u64::MAX
+    let deadline_ns = if timeout_ms < 0 {
+        None
     } else {
-        crate::kernel::timer::ticks() + crate::kernel::timer::ms_to_ticks(timeout_ms as u64)
+        Some(crate::kernel::timer::monotonic_ns()
+            .saturating_add((timeout_ms as u64).saturating_mul(1_000_000)))
     };
 
     task::poll_phase_set(task::POLL_ENTREE, count as u64);
     loop {
+        // Armer AVANT le scan ferme la course producteur entre « pas pret » et
+        // parking: la generation aura change et wait_readiness ne dormira pas.
+        let ticket = crate::kernel::fd::readiness_ticket();
+        let mut attente_ns = deadline_ns;
         let mut ready = 0i64;
         for index in 0..count {
             // Le detail porte l'etape, le rang et le descripteur : « balayage »
@@ -2345,6 +2397,7 @@ pub fn sys_poll(fds: u64, count: usize, timeout_ms: i32) -> i64 {
             };
             let mut revents = 0u32;
             if fd >= 0 {
+                attente_ns = plus_proche(attente_ns, readiness_deadline_ns(fd));
                 etape(task::ETAPE_LISIBLE, fd as u32);
                 if events & POLLIN != 0 && readable(fd) {
                     revents |= POLLIN;
@@ -2366,14 +2419,14 @@ pub fn sys_poll(fds: u64, count: usize, timeout_ms: i32) -> i64 {
             etape(task::ETAPE_REND_REVENTS, fd as u32);
             user_write(base + 6, &(revents as u16).to_le_bytes());
         }
-        if ready > 0 || crate::kernel::timer::ticks() >= deadline {
+        if ready > 0 || deadline_ns.map_or(false, |d| crate::kernel::timer::monotonic_ns() >= d) {
             task::poll_phase_set(task::POLL_RETOUR, ready as u64);
             task::poll_phase_set(task::POLL_HORS, 0);
             return ready;
         }
-        task::poll_phase_set(task::POLL_ATTENTE, bouchaud_idle_rounds as u64);
-        task::attends_io_adaptatif(&mut bouchaud_idle_rounds);
-        task::poll_phase_set(task::POLL_REVEIL, bouchaud_idle_rounds as u64);
+        task::poll_phase_set(task::POLL_ATTENTE, 0);
+        crate::kernel::fd::wait_readiness(ticket, attente_ns);
+        task::poll_phase_set(task::POLL_REVEIL, 0);
     }
 }
 
@@ -2385,18 +2438,18 @@ pub fn sys_select(
     _except_set: u64,
     timeout: u64,
 ) -> i64 {
-    // BOUCHAUD_CPU_OPT_POLL_BACKOFF: backoff borne pour les boucles d'I/O sans evenement.
-    let mut bouchaud_idle_rounds = 0u32;
-    let deadline = if timeout == 0 {
-        u64::MAX
+    let deadline_ns = if timeout == 0 {
+        None
     } else {
         let seconds = user_read_u64(timeout).unwrap_or(0);
         let micros = user_read_u64(timeout + 8).unwrap_or(0);
         let ms = seconds * 1000 + micros / 1000;
-        crate::kernel::timer::ticks() + crate::kernel::timer::ms_to_ticks(ms)
+        Some(crate::kernel::timer::monotonic_ns().saturating_add(ms.saturating_mul(1_000_000)))
     };
 
     loop {
+        let ticket = crate::kernel::fd::readiness_ticket();
+        let mut attente_ns = deadline_ns;
         let mut ready = 0i64;
         if read_set != 0 {
             let words = (nfds.max(0) as usize).div_ceil(64);
@@ -2412,14 +2465,17 @@ pub fn sys_select(
                         result |= 1 << bit;
                         ready += 1;
                     }
+                    if bits & (1 << bit) != 0 {
+                        attente_ns = plus_proche(attente_ns, readiness_deadline_ns(fd));
+                    }
                 }
                 user_write(read_set + (word * 8) as u64, &result.to_le_bytes());
             }
         }
-        if ready > 0 || crate::kernel::timer::ticks() >= deadline {
+        if ready > 0 || deadline_ns.map_or(false, |d| crate::kernel::timer::monotonic_ns() >= d) {
             return ready;
         }
-        task::attends_io_adaptatif(&mut bouchaud_idle_rounds);
+        crate::kernel::fd::wait_readiness(ticket, attente_ns);
     }
 }
 
@@ -2470,8 +2526,6 @@ pub fn sys_epoll_ctl(epfd: i32, operation: u32, fd: i32, event: u64) -> i64 {
 
 /// `epoll_wait` / `epoll_pwait`.
 pub fn sys_epoll_wait(epfd: i32, events: u64, max: usize, timeout_ms: i32) -> i64 {
-    // BOUCHAUD_CPU_OPT_POLL_BACKOFF: backoff borne pour les boucles d'I/O sans evenement.
-    let mut bouchaud_idle_rounds = 0u32;
     let process = task::current_process();
     let list = match process.files.lock().get(epfd) {
         Some(desc) => match &desc.kind {
@@ -2481,19 +2535,23 @@ pub fn sys_epoll_wait(epfd: i32, events: u64, max: usize, timeout_ms: i32) -> i6
         None => return -errno::EBADF,
     };
 
-    let deadline = if timeout_ms < 0 {
-        u64::MAX
+    let deadline_ns = if timeout_ms < 0 {
+        None
     } else {
-        crate::kernel::timer::ticks() + crate::kernel::timer::ms_to_ticks(timeout_ms as u64)
+        Some(crate::kernel::timer::monotonic_ns()
+            .saturating_add((timeout_ms as u64).saturating_mul(1_000_000)))
     };
 
     loop {
+        let ticket = crate::kernel::fd::readiness_ticket();
+        let mut attente_ns = deadline_ns;
         let mut written = 0usize;
         for &(fd, wanted, data) in list.lock().iter() {
             if written >= max {
                 break;
             }
             let mut prets = 0u32;
+            attente_ns = plus_proche(attente_ns, readiness_deadline_ns(fd));
             if wanted & POLLIN != 0 && readable(fd) {
                 prets |= POLLIN;
             }
@@ -2508,10 +2566,10 @@ pub fn sys_epoll_wait(epfd: i32, events: u64, max: usize, timeout_ms: i32) -> i6
                 written += 1;
             }
         }
-        if written > 0 || crate::kernel::timer::ticks() >= deadline {
+        if written > 0 || deadline_ns.map_or(false, |d| crate::kernel::timer::monotonic_ns() >= d) {
             return written as i64;
         }
-        task::attends_io_adaptatif(&mut bouchaud_idle_rounds);
+        crate::kernel::fd::wait_readiness(ticket, attente_ns);
     }
 }
 

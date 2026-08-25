@@ -8,7 +8,7 @@
 pub use crate::drivers::gfx::{
     draw_text, draw_text_scaled, draw_text_rgb, draw_text_prop, text_width,
     fill_rect_rgb, blit_rgb, blend_rgb, pixel_rgb, get_pixel_rgb, ligne_mut,
-    enter, fill_rect, handoff_to_userland, leave, pixel, present, rect,
+    enter, fill_rect, handoff_to_userland, leave, pixel, present, present_rect, rect,
     resume_from_userland, userland_owns_display,
     HEIGHT, WIDTH,
     C_BLACK, C_BLUE, C_CYAN, C_DKGRAY, C_GRAY, C_GREEN, C_RED, C_TITLE,

@@ -55,6 +55,19 @@ impl WaitQueue {
         crate::kernel::task::park_current_on(self.key());
     }
 
+    /// Attend une notification, mais jamais au-dela de `deadline_ns`.
+    /// Rend `true` si une notification a precede l'echeance.
+    pub fn wait_until(&self, ticket: WaitTicket, deadline_ns: u64) -> bool {
+        if self.generation.load(Ordering::Acquire) != ticket.0 {
+            return true;
+        }
+        let _kernel = enter_bkl();
+        if self.generation.load(Ordering::Acquire) != ticket.0 {
+            return true;
+        }
+        crate::kernel::task::park_current_on_until(self.key(), deadline_ns)
+    }
+
     pub fn wake_one(&self) -> bool {
         self.generation.fetch_add(1, Ordering::Release);
         let _kernel = enter_bkl();

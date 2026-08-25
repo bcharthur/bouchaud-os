@@ -17,6 +17,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use crate::kernel::sync::SpinLock;
+use crate::kernel::sync::{WaitQueue, WaitTicket};
 use core::ops::{Deref, DerefMut};
 
 /// Nature d'un descripteur ouvert.
@@ -276,6 +277,29 @@ pub struct Canal {
 /// multiplie les reveils ; trop haute, elle laisse la contre-pression arriver
 /// bien apres que le producteur ait pris trop d'avance.
 pub const CAPACITE_CANAL: usize = 64 * 1024;
+
+/// Queue de changement de readiness des objets FD.
+///
+/// La generation ferme le lost-wakeup entre le scan final de `poll` et le
+/// parking. Une queue globale peut produire des reveils parasites entre objets,
+/// mais elle supprime le polling periodique et constitue un contrat extensible:
+/// tout producteur appelle `notify_readiness` apres avoir publie son etat.
+static READINESS: WaitQueue = WaitQueue::new();
+
+pub fn readiness_ticket() -> WaitTicket {
+    READINESS.ticket()
+}
+
+pub fn wait_readiness(ticket: WaitTicket, deadline_ns: Option<u64>) {
+    match deadline_ns {
+        Some(deadline) => { READINESS.wait_until(ticket, deadline); }
+        None => READINESS.wait(ticket),
+    }
+}
+
+pub fn notify_readiness() {
+    READINESS.wake_all();
+}
 
 impl Canal {
     /// Un canal neuf a exactement un lecteur et un ecrivain : les deux

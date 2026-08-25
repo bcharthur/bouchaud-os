@@ -1049,6 +1049,9 @@ static CPU_MIGRATIONS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX
 static STEAL_ATTEMPTS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static STEAL_REJECT_BALANCE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static STEAL_REJECT_AFFINITY: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+/// Echeance avant laquelle un CPU ne rescane pas les donneurs apres un echec.
+/// Le reveil d'une tache locale contourne naturellement ce chemin.
+static STEAL_RETRY_AFTER_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
 #[derive(Clone, Copy)]
 struct SmpSamplePrevious {
@@ -1064,6 +1067,10 @@ struct SmpSamplePrevious {
     bkl_wait: u64,
     bkl_hold: u64,
     bkl_acq: u64,
+    gpu_presents: u64,
+    gpu_bytes: u64,
+    irq_preemptions: u64,
+    deferred_preemptions: u64,
 }
 
 static mut SMP_SAMPLE_PREVIOUS: Option<SmpSamplePrevious> = None;
@@ -2437,27 +2444,24 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
         }
     }
 
-    let mut pressure = [0usize; MAX_CPUS];
-    for owner in 0..smp::schedulable_cpus().min(MAX_CPUS) {
-        pressure[owner] = queue_pressure(owner);
-    }
-
-    STEAL_ATTEMPTS[cpu].fetch_add(1, Ordering::Relaxed);
-    let donor = (0..smp::schedulable_cpus().min(MAX_CPUS))
-        .filter(|&candidate| candidate != cpu)
-        .max_by_key(|&candidate| pressure[candidate]);
-    let Some(donor) = donor else { return None; };
-
-    // Ne jamais voler la dernière tâche Ready d'un CPU: NG3 le faisait dans
-    // le fallback ci-dessous, puis un autre CPU la revolait quelques ms plus
-    // tard. C'était la source directe des milliers de migrations observées.
-    if pressure[donor] <= pressure[cpu].saturating_add(1) {
-        STEAL_REJECT_BALANCE[cpu].fetch_add(1, Ordering::Relaxed);
+    let now = crate::kernel::timer::monotonic_ns();
+    if now < STEAL_RETRY_AFTER_NS[cpu].load(Ordering::Relaxed) {
         return None;
     }
+    let online = smp::schedulable_cpus().min(MAX_CPUS);
+    let donor = (0..online)
+        .filter(|&candidate| candidate != cpu)
+        .map(|candidate| (candidate, queue_pressure(candidate)))
+        // Garder une tache au donneur: en dessous de deux elements le vol ne
+        // cree aucun parallelisme et ne fait que deplacer le prochain quantum.
+        .filter(|(_, pressure)| *pressure > 1)
+        .max_by_key(|(_, pressure)| *pressure)
+        .map(|(candidate, _)| candidate);
+    let Some(donor) = donor else { return None; };
+
+    STEAL_ATTEMPTS[cpu].fetch_add(1, Ordering::Relaxed);
 
     const MIN_MIGRATION_RESIDENCY_NS: u64 = 20_000_000;
-    let now = crate::kernel::timer::monotonic_ns();
     let Some(donor_id) = crate::arch::x86_64::cpu_local::CpuId::from_index(donor) else {
         return None;
     };
@@ -2466,6 +2470,7 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
     let candidate = &tasks()[index];
     if !runnable_steal(candidate, cpu) || candidate.runq_cpu as usize != donor {
         donor_queue.enqueue(index);
+        STEAL_RETRY_AFTER_NS[cpu].store(now.saturating_add(2_000_000), Ordering::Relaxed);
         return None;
     }
     {
@@ -2474,11 +2479,15 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
         {
             STEAL_REJECT_AFFINITY[cpu].fetch_add(1, Ordering::Relaxed);
             donor_queue.enqueue(index);
+            STEAL_RETRY_AFTER_NS[cpu].store(
+                now.saturating_add(MIN_MIGRATION_RESIDENCY_NS), Ordering::Relaxed,
+            );
             return None;
         }
     }
     tasks()[index].runq_cpu = cpu as u8;
     RUNQ_STEALS[cpu].fetch_add(1, Ordering::Relaxed);
+    STEAL_RETRY_AFTER_NS[cpu].store(0, Ordering::Relaxed);
     Some(index)
 }
 
@@ -3182,6 +3191,28 @@ pub(crate) fn park_current_on(wait_queue_key: usize) {
     current().wait_queue_key = 0;
 }
 
+/// Endort la tache sur une WaitQueue jusqu'a notification ou echeance.
+///
+/// Le deadline partage le mecanisme de `sleep_ticks`: l'IRQ timer remet la
+/// tache Ready. La cle de queue reste posee jusqu'au reveil, de sorte qu'une
+/// notification et l'echeance puissent courir sans perdre le reveil.
+pub(crate) fn park_current_on_until(wait_queue_key: usize, deadline_ns: u64) -> bool {
+    {
+        let task = current();
+        task.wait_queue_key = wait_queue_key;
+        task.wake_deadline_ns = deadline_ns;
+        task.state = TaskState::Blocked;
+    }
+    while current().state == TaskState::Blocked {
+        schedule();
+    }
+    let notified = crate::kernel::timer::monotonic_ns() < deadline_ns;
+    let task = current();
+    task.wait_queue_key = 0;
+    task.wake_deadline_ns = 0;
+    notified
+}
+
 /// Reveille au plus `limit` taches inscrites sur la queue.
 pub(crate) fn wake_wait_queue(wait_queue_key: usize, limit: usize) -> usize {
     let _kernel = smp_lock::enter();
@@ -3463,8 +3494,15 @@ fn log_smp_sample(online: usize) {
         bkl_wait: 0,
         bkl_hold: 0,
         bkl_acq: 0,
+        gpu_presents: 0,
+        gpu_bytes: 0,
+        irq_preemptions: IRQ_PREEMPTIONS.load(Ordering::Relaxed),
+        deferred_preemptions: DEFERRED_PREEMPTIONS.load(Ordering::Relaxed),
     };
     (current.bkl_wait, current.bkl_hold, current.bkl_acq) = smp_lock::contention_stats();
+    let gpu = crate::drivers::gpu::stats();
+    current.gpu_presents = gpu.presents;
+    current.gpu_bytes = gpu.bytes_presented;
     let mut load = [0u64; MAX_CPUS];
     let mut runnable = [0u64; MAX_CPUS];
     let mut rq = [0u64; MAX_CPUS];
@@ -3492,7 +3530,7 @@ fn log_smp_sample(online: usize) {
     };
     let migrations = delta(&current.migrations, &previous.migrations);
     crate::kernel::dmesg::log_fmt(format_args!(
-        "[SMP-SAMPLE] v=1 t_ns={} window_ns={} load={} runnable={} rq={} ctx_delta={} mig_delta={} steal_ok_delta={} steal_try_delta={} steal_rej_bal_delta={} steal_rej_aff_delta={} bkl_wait_delta_ns={} bkl_hold_delta_ns={} bkl_acq_delta={} pf_delta={} tlb_delta={}",
+        "[SMP-SAMPLE] v=2 t_ns={} window_ns={} load={} runnable={} rq={} ctx_delta={} mig_delta={} steal_ok_delta={} steal_try_delta={} steal_rej_bal_delta={} steal_rej_aff_delta={} bkl_wait_delta_ns={} bkl_hold_delta_ns={} bkl_acq_delta={} pf_delta={} tlb_delta={} irq_preempt_delta={} deferred_preempt_delta={} fb_presents_delta={} fb_bytes_delta={}",
         now, elapsed, sample_list(&load, online), sample_list(&runnable, online),
         sample_list(&rq, online), current.ctx.saturating_sub(previous.ctx),
         migrations[..online].iter().copied().sum::<u64>(),
@@ -3505,6 +3543,10 @@ fn log_smp_sample(online: usize) {
         current.bkl_acq.saturating_sub(previous.bkl_acq),
         sample_list(&delta(&current.page_faults, &previous.page_faults), online),
         current.tlb.saturating_sub(previous.tlb),
+        current.irq_preemptions.saturating_sub(previous.irq_preemptions),
+        current.deferred_preemptions.saturating_sub(previous.deferred_preemptions),
+        current.gpu_presents.saturating_sub(previous.gpu_presents),
+        current.gpu_bytes.saturating_sub(previous.gpu_bytes),
     ));
 }
 

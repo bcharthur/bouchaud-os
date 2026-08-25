@@ -214,6 +214,7 @@ impl Client {
         }
         canal.octets.extend_from_slice(&message);
         drop(canal);
+        crate::kernel::fd::notify_readiness();
         self.evenements_envoyes += 1;
         true
     }

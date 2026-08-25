@@ -375,6 +375,30 @@ pub fn present() {
     crate::drivers::gpu::note_present(WIDTH * HEIGHT * core::mem::size_of::<u32>());
 }
 
+/// Copie uniquement une region du double-buffer vers le scanout lineaire.
+///
+/// BGA n'offre pas de commande de damage: la bonne primitive est donc un
+/// memcpy par ligne. Les coordonnees sont rognees avant toute arithmetique afin
+/// qu'un rectangle client hostile ne puisse sortir du framebuffer.
+pub fn present_rect(x: usize, y: usize, width: usize, height: usize) {
+    if userland_owns_display() { return; }
+    let buf = back();
+    if buf.is_empty() { return; }
+    let lfb = unsafe { LFB };
+    if lfb.is_null() { return; }
+    let x1 = x.saturating_add(width).min(WIDTH);
+    let y1 = y.saturating_add(height).min(HEIGHT);
+    if x >= x1 || y >= y1 { return; }
+    let count = x1 - x;
+    for row in y..y1 {
+        let offset = row * WIDTH + x;
+        unsafe {
+            core::ptr::copy_nonoverlapping(buf.as_ptr().add(offset), lfb.add(offset), count);
+        }
+    }
+    crate::drivers::gpu::note_present(count * (y1 - y) * core::mem::size_of::<u32>());
+}
+
 // --- Texte bitmap 8×8 (zéro allocation, zéro tas) ---------------------------
 
 fn draw_char_bmp(x: usize, y: usize, c: u8, color: u8) {

@@ -873,6 +873,7 @@ pub fn sys_sendmsg(fd: i32, msghdr: u64, flags: u32) -> i64 {
         if let Some(canal) = sortant {
             let ecrits = payload.len();
             canal.lock().octets.extend_from_slice(&payload);
+            crate::kernel::fd::notify_readiness();
             return ecrits as i64;
         }
     }

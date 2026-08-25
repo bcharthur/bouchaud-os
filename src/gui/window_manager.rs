@@ -28,6 +28,7 @@ use crate::gui::client::{self, Client};
 use crate::gui::event::Key;
 use crate::gui::framebuffer as fb;
 use crate::gui::mouse;
+use crate::gui::protocole::Rect;
 use crate::gui::widgets;
 use crate::gui::window::{
     self as window,
@@ -98,6 +99,15 @@ const REACTIVITE_MUETTE_MS: u64 = 600;
 /// que payait le repos.
 const REPOS_MUET_MS: u64 = 200;
 
+fn plein_ecran() -> Rect {
+    Rect::neuf(0, 0, fb::WIDTH as u32, fb::HEIGHT as u32)
+}
+
+/// Empreinte volontairement un peu large du curseur logiciel (fleche 12x19).
+fn degat_curseur(x: usize, y: usize) -> Rect {
+    Rect::neuf(x as i32, y as i32, 14, 22)
+}
+
 /// Lance le bureau (bloquant jusqu'a Quitter).
 pub fn run() {
     task::run_noyau(fil_bureau, "desktop");
@@ -147,6 +157,7 @@ fn boucle() {
     let mut quit = false;
     // Tout est sale au premier tour : il n'y a encore rien a l'ecran.
     let mut sale = true;
+    let mut degat_ecran = plein_ecran();
     let mut derniere_trame = 0u64;
     let mut derniere_horloge = 0u64;
     let mut derniere_souris = (usize::MAX, usize::MAX);
@@ -164,6 +175,7 @@ fn boucle() {
         // ---- Clavier (non bloquant) ----
         while let Some(k) = keyboard::try_key() {
             sale = true;
+            degat_ecran = degat_ecran.union(&plein_ecran());
             // Echap ferme le menu, puis la fenetre du dessus, puis le bureau —
             // sauf quand un client a le focus. Un navigateur a besoin d'Echap
             // (arreter un chargement, fermer une boite de dialogue) et le lui
@@ -207,19 +219,25 @@ fn boucle() {
         // fonctionnait, puis plus aucun.
         let boutons = crate::drivers::mouse::buttons() as u32;
         if (mxu, myu) != derniere_souris || boutons != derniers_boutons {
+            if derniere_souris.0 != usize::MAX {
+                degat_ecran = degat_ecran.union(&degat_curseur(derniere_souris.0, derniere_souris.1));
+            }
             derniere_souris = (mxu, myu);
             derniers_boutons = boutons;
             sale = true;
+            degat_ecran = degat_ecran.union(&degat_curseur(mxu, myu));
             derniere_entree = maintenant;
             transmet_position(&mut wins, mx, my, boutons);
         }
         if click || release || wheel != 0 {
             sale = true;
+            degat_ecran = degat_ecran.union(&plein_ecran());
             derniere_entree = maintenant;
         }
 
         if left {
             if let Some(d) = drag {
+                degat_ecran = degat_ecran.union(&plein_ecran());
                 if let Some(w) = wins.last_mut() {
                     match d {
                         Drag::Move(ox, oy) => { w.x = mx - ox; w.y = my - oy; }
@@ -233,6 +251,7 @@ fn boucle() {
                     clamp_win(w);
                 }
             } else if let Some((idx, ox, oy, _, _)) = icon_drag {
+                degat_ecran = degat_ecran.union(&plein_ecran());
                 let new_x = (mx - ox).max(0);
                 let new_y = (my - oy).max(BAR_H as i32);
                 unsafe { window::ICON_POSITIONS[idx] = (new_x, new_y); }
@@ -287,14 +306,19 @@ fn boucle() {
         if recompose_aveugle {
             dernier_aveugle = maintenant;
         }
-        if pompe_clients(&mut wins, recompose_aveugle) {
+        let degat_clients = pompe_clients(&mut wins, recompose_aveugle);
+        if !degat_clients.vide() {
             sale = true;
+            degat_ecran = degat_ecran.union(&degat_clients);
         }
 
         // ---- Rendu ----
         if maintenant.wrapping_sub(derniere_horloge) >= PERIODE_HORLOGE_MS {
             derniere_horloge = maintenant;
             sale = true; // horloge, charge CPU, memoire : ils bougent seuls
+            degat_ecran = degat_ecran.union(&Rect::neuf(
+                0, (fb::HEIGHT - BAR_H) as i32, fb::WIDTH as u32, BAR_H as u32,
+            ));
         }
         if sale && maintenant.wrapping_sub(derniere_trame) >= PERIODE_TRAME_MS {
             crate::kernel::timer::frame_start();
@@ -303,9 +327,14 @@ fn boucle() {
             widgets::draw_taskbar(&wins, menu_open);
             widgets::draw_cursor(mxu, myu);
             crate::kernel::timer::mark_frame();
-            fb::present();
+            let present = proto_rect_ecran(degat_ecran);
+            fb::present_rect(
+                present.x as usize, present.y as usize,
+                present.largeur as usize, present.hauteur as usize,
+            );
             derniere_trame = maintenant;
             sale = false;
+            degat_ecran = Rect::default();
         }
 
         if maintenant.wrapping_sub(dernier_releve) >= PERIODE_RELEVE_MS {
@@ -467,13 +496,14 @@ fn fenetre_active(wins: &[Win]) -> Option<usize> {
 /// Consulte tous les clients : trames recues, processus morts.
 ///
 /// Rend `true` si l'ecran doit etre recompose.
-fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> bool {
-    let mut recompose = false;
+fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> Rect {
+    let mut degat_ecran = Rect::default();
     let mut morts: Vec<usize> = Vec::new();
     for (index, w) in wins.iter_mut().enumerate() {
+        let zone_fenetre = zone_utile(w);
         if let App::Navigateur { client } = &mut w.app {
             if client.verifie_silence() {
-                recompose = true;
+                degat_ecran = degat_ecran.union(&zone_fenetre);
             }
             // Un client qui n'annonce pas ses trames est recompose « a
             // l'aveugle » : on ne sait pas quand il peint, seulement qu'il
@@ -483,7 +513,7 @@ fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> bool {
             // devant une image immobile.
             if recompose_aveugle && client.sans_protocole && !w.min {
                 client.abime_tout();
-                recompose = true;
+                degat_ecran = degat_ecran.union(&zone_fenetre);
             }
             if client.pompe() {
                 // Le degat est consomme meme si la fenetre est minimisee :
@@ -491,7 +521,13 @@ fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> bool {
                 // personne ne lit, et la restauration recompose de toute facon.
                 let degat = client.prend_degat();
                 if !w.min && !degat.vide() {
-                    recompose = true;
+                    let ecran = Rect::neuf(
+                        zone_fenetre.x.saturating_add(degat.x),
+                        zone_fenetre.y.saturating_add(degat.y),
+                        degat.largeur,
+                        degat.hauteur,
+                    );
+                    degat_ecran = degat_ecran.union(&ecran);
                 }
             }
             if client.fermeture_demandee || !client.vivant() {
@@ -502,9 +538,13 @@ fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> bool {
     // A l'envers : retirer une fenetre decale celles qui suivent.
     for index in morts.into_iter().rev() {
         ferme_fenetre(wins, index);
-        recompose = true;
+        degat_ecran = plein_ecran();
     }
-    recompose
+    degat_ecran
+}
+
+fn proto_rect_ecran(rect: Rect) -> Rect {
+    crate::gui::protocole::rogne_degat(rect, fb::WIDTH as u32, fb::HEIGHT as u32)
 }
 
 /// Ferme une fenetre, en terminant son client s'il y en a un.

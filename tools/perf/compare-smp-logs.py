@@ -3,7 +3,7 @@ import sys
 from smp_log import summarize
 if len(sys.argv)!=3: raise SystemExit("usage: compare-smp-logs.py baseline.log candidate.log")
 a,b=summarize(sys.argv[1]),summarize(sys.argv[2])
-metrics=[("migrations/s","mig_s"),("context switches/s","ctx_s"),("steal success %","steal_success_pct"),("imbalance","imbalance_avg"),("BKL wait ms/s","bkl_wait_ms_s"),("BKL hold ms/s","bkl_hold_ms_s"),("page faults/s","pf_s"),("TLB shootdowns/s","tlb_s"),("click->first paint ms","click_first_paint_ms")]
+metrics=[("migrations/s","mig_s"),("context switches/s","ctx_s"),("IRQ preemptions/s","irq_preempt_s"),("deferred preemptions/s","deferred_preempt_s"),("runqueue average","rq_avg"),("runqueue maximum","rq_max"),("steal success %","steal_success_pct"),("imbalance","imbalance_avg"),("BKL wait ms/s","bkl_wait_ms_s"),("BKL hold ms/s","bkl_hold_ms_s"),("BKL acquisitions/s","bkl_acq_s"),("BKL maximum hold ms","bkl_max_hold_ms"),("framebuffer presents/s","fb_fps"),("framebuffer MiB/s","fb_mib_s"),("page faults/s","pf_s"),("TLB shootdowns/s","tlb_s"),("click->first paint ms","click_first_paint_ms")]
 print(f"{'metric':28} {'baseline':>12} {'candidate':>12} {'delta':>12}")
 print("-"*68)
 for label,key in metrics:
