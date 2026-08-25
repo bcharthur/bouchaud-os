@@ -49,6 +49,19 @@ DISPATCH = RACINE / "src" / "kernel" / "abi" / "mod.rs"
 AUDITS_NOMMES = {
     "MPROTECT": "jalon SMP4 -- domaine Arc<Process>::Mm + protocole TLB sur IRQ",
     "BRK": "jalon SMP4 -- domaine Arc<Process>::Mm + protocole TLB sur IRQ",
+    # A1 lot 2 -- voir l'en-tete de bkl.rs et la preuve de duree de vie sur
+    # `task::identite_courante`. Chacun de ces appels a son audit ecrit en
+    # commentaire au-dessus de sa ligne dans SANS_BKL.
+    "GETPID": "A1 lot 2 -- domaine CPU-local, aucune lecture de TASKS",
+    "GETTID": "A1 lot 2 -- domaine CPU-local, aucune lecture de TASKS",
+    "GETUID": "A1 lot 2 -- domaine CPU-local + verrou metadata du Process",
+    "GETEUID": "A1 lot 2 -- domaine CPU-local + verrou metadata du Process",
+    "GETGID": "A1 lot 2 -- domaine CPU-local + verrou metadata du Process",
+    "GETEGID": "A1 lot 2 -- domaine CPU-local + verrou metadata du Process",
+    "CLOCK_GETTIME": "A1 lot 2 -- horloges atomiques + Mm ; verrou local a la branche CPUTIME",
+    "CLOCK_GETRES": "A1 lot 2 -- constante calculee + Mm",
+    "GETTIMEOFDAY": "A1 lot 2 -- ancre d'epoque atomique + Mm",
+    "TIME": "A1 lot 2 -- ancre d'epoque atomique + Mm",
 }
 
 # Une constante rendue directement : `0`, `1`, `-errno::ENOSYS`.

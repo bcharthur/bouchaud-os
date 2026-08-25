@@ -29,13 +29,28 @@ pub mod verrous;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use crate::arch::x86_64::usermode::{self, TrapFrame};
 use crate::kernel::task;
 
 /// Compteur d'appels systeme, pour le diagnostic.
 static SYSCALL_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Compteur PAR appel systeme.
+///
+/// Sortir un appel du gros verrou coute une preuve ; la depenser sur un appel
+/// que personne n'emet ne fait rien gagner. Le premier lot A1 l'a montre en
+/// chiffres : vingt-trois appels liberes, aucun gain mesurable, parce qu'ils
+/// etaient rares. Choisir les suivants demande de savoir lesquels sont chauds,
+/// et le savoir demande de compter.
+///
+/// Un `fetch_add` relaxe sur un tableau indexe par le numero : pas de verrou,
+/// pas d'allocation, rien qui se voie dans une mesure. Les numeros Linux
+/// x86-64 utilises par ce noyau vont jusqu'a 334 (`rseq`) ; au-dela, l'appel
+/// est compte dans la derniere case, qui vaut « hors table ».
+const SYSCALL_HITS_LEN: usize = 336;
+static SYSCALL_HITS: [AtomicU32; SYSCALL_HITS_LEN] =
+    [const { AtomicU32::new(0) }; SYSCALL_HITS_LEN];
 /// Dernier appel systeme inconnu rencontre (numero), 0 si aucun.
 static LAST_UNKNOWN: AtomicU64 = AtomicU64::new(0);
 /// Ce que la trace des appels systeme laisse passer (commande `strace`).
@@ -103,6 +118,7 @@ pub fn last_unknown() -> u64 {
 pub fn handle(frame: &mut TrapFrame) {
     SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);
     let (number, args) = frame.syscall_args();
+    SYSCALL_HITS[(number as usize).min(SYSCALL_HITS_LEN - 1)].fetch_add(1, Ordering::Relaxed);
     let result = dispatch(number, args, frame);
     match trace_mode() {
         Trace::Aucune => {}
@@ -238,6 +254,20 @@ fn sys_alarm(seconds: u32) -> i64 {
 ///
 /// `write=true` impose en plus PTE_WRITE : le noyau ne doit pas permettre a un
 /// syscall d'ecrire dans une page que le processus lui-meme voit read-only.
+/// Le processus courant, sans le gros verrou quand c'est possible.
+///
+/// `task::current_process()` prend le gros verrou parce qu'il passe par
+/// `task::current()`, donc par la table des taches. Le domaine CPU-local
+/// (`task::current_process_local`) rend le meme `Arc` sans rien verrouiller ;
+/// il ne rend `None` que pour un fil noyau, cas ou l'on retombe sur le chemin
+/// historique. Aucun comportement ne change : c'est le meme processus.
+fn processus_courant() -> alloc::sync::Arc<task::Process> {
+    match task::current_process_local() {
+        Some(process) => process,
+        None => task::current_process(),
+    }
+}
+
 fn fault_in_user_range(addr: u64, len: usize, write: bool) -> bool {
     if len == 0 {
         return true;
@@ -260,7 +290,7 @@ fn fault_in_user_range(addr: u64, len: usize, write: bool) -> bool {
 
     loop {
         let present = {
-            let process = task::current_process();
+            let process = processus_courant();
             let present = process.mm.lock().space.translate(page).is_some();
             present
         };
@@ -271,7 +301,7 @@ fn fault_in_user_range(addr: u64, len: usize, write: bool) -> bool {
 
         if write {
             let writable = {
-                let process = task::current_process();
+                let process = processus_courant();
                 let writable = process.mm.lock().space.writable(page);
                 writable
             };
@@ -329,7 +359,7 @@ pub fn user_read(addr: u64, len: usize) -> Option<Vec<u8>> {
     }
 
     let mut buffer = alloc::vec![0u8; len];
-    let process = task::current_process();
+    let process = processus_courant();
     if process.mm.lock().space.read(addr, &mut buffer) {
         Some(buffer)
     } else {
@@ -343,7 +373,7 @@ pub fn user_write(addr: u64, data: &[u8]) -> bool {
         return false;
     }
 
-    let process = task::current_process();
+    let process = processus_courant();
     let written = process.mm.lock().space.write(addr, data);
     written
 }
@@ -503,9 +533,26 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         MLOCK | MUNLOCK | MLOCKALL | MUNLOCKALL => 0,
 
         // --- Processus, threads, ordonnancement ---
-        GETPID => task::current().process.pid as i64,
+        // --- Identite : servie par le domaine CPU-local, sans le gros verrou --
+        //
+        // `task::identite_courante()` rend une COPIE (un entier, une part
+        // d'`Arc`) lue dans le bloc par-CPU adresse par `GS` et dans
+        // `CURRENT_PROCESS[cpu]`, tous deux publies par `install` sous le gros
+        // verrou. La table des taches n'est pas touchee. Voir la preuve de
+        // duree de vie sur `identite_courante`.
+        //
+        // Le repli sur `task::current()` couvre le fil noyau, qui n'a pas
+        // d'identite utilisateur publiee ; aucun appel systeme ne vient de la,
+        // mais rendre une valeur fausse serait pire que de reprendre le verrou.
+        GETPID => match task::identite_courante() {
+            Some(identite) => identite.process.pid as i64,
+            None => task::current_process().pid as i64,
+        },
         GETPPID => 1,
-        GETTID => task::current().tid as i64,
+        GETTID => match task::identite_courante() {
+            Some(identite) => identite.tid as i64,
+            None => task::current().tid as i64,
+        },
         SET_TID_ADDRESS => {
             task::current().clear_child_tid = args[0];
             task::current().tid as i64
@@ -541,8 +588,17 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         FUTEX => sys_futex(args),
         NANOSLEEP => sys_nanosleep(args[0], args[1]),
         CLOCK_NANOSLEEP => sys_clock_nanosleep(args[0] as i32, args[1], args[2], args[3]),
-        GETUID | GETEUID => task::current().process.metadata.lock().uid as i64,
-        GETGID | GETEGID => task::current().process.metadata.lock().gid as i64,
+        // `metadata` est un verrou a lui, sur le `Process` : son domaine ne
+        // depend pas de la table des taches. L'`Arc` rendu par
+        // `identite_courante` garantit que le `Process` vit encore.
+        GETUID | GETEUID => match task::identite_courante() {
+            Some(identite) => identite.process.metadata.lock().uid as i64,
+            None => task::current_process().metadata.lock().uid as i64,
+        },
+        GETGID | GETEGID => match task::identite_courante() {
+            Some(identite) => identite.process.metadata.lock().gid as i64,
+            None => task::current_process().metadata.lock().gid as i64,
+        },
         SETUID | SETGID | SETPGID | SETSID => 0,
         GETPGRP | GETPGID | GETSID => 1,
         SCHED_GETAFFINITY => {
@@ -694,7 +750,23 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
 
 /// Ancrage de l'horloge murale : (secondes Unix, ticks) releves au premier
 /// appel. Voir [`realtime_ms`].
-static mut EPOCH_ANCHOR: Option<(u64, u64)> = None;
+/// Ancre de l'horloge murale : la seconde RTC lue une fois, et le tick auquel
+/// elle a ete lue.
+///
+/// C'etait un `static mut Option<(u64, u64)>` initialise paresseusement. Tant
+/// que `clock_gettime` s'executait sous le gros verrou, un seul CPU pouvait y
+/// etre a la fois. Le liberer expose la course : deux CPU lisent `None`,
+/// appellent tous deux la RTC, et se marchent dessus sur une paire de 128 bits
+/// qui n'a rien d'atomique. Un `Option` a moitie ecrit lu par un troisieme CPU
+/// n'est pas une valeur approximative, c'est un comportement indefini.
+///
+/// Deux atomiques et un drapeau : le premier qui pose l'ancre gagne, les autres
+/// jettent la leur et lisent la sienne. Tout le monde voit donc la MEME ancre,
+/// ce qui est la vraie exigence -- une horloge murale qui differe d'un CPU a
+/// l'autre reculerait a chaque migration.
+static EPOCH_SECONDS: AtomicU64 = AtomicU64::new(0);
+static EPOCH_TICKS: AtomicU64 = AtomicU64::new(0);
+static EPOCH_POSEE: AtomicU8 = AtomicU8::new(0);
 
 /// Lit la RTC et la convertit en secondes depuis l'epoch Unix.
 fn rtc_seconds() -> u64 {
@@ -715,16 +787,26 @@ fn rtc_seconds() -> u64 {
 /// milliseconde et, accessoirement, une horloge qui ne recule jamais.
 pub fn realtime_ms() -> u64 {
     let now_ticks = crate::kernel::timer::ticks();
-    let (base_seconds, base_ticks) = unsafe {
-        match EPOCH_ANCHOR {
-            Some(anchor) => anchor,
-            None => {
-                let anchor = (rtc_seconds(), now_ticks);
-                EPOCH_ANCHOR = Some(anchor);
-                anchor
-            }
+    if EPOCH_POSEE.load(Ordering::Acquire) == 0 {
+        let seconds = rtc_seconds();
+        // Les deux valeurs sont publiees AVANT le drapeau ; le drapeau est lu
+        // en `Acquire` : personne ne peut voir le drapeau leve sur une ancre
+        // incomplete. Le perdant du `compare_exchange` jette simplement sa
+        // lecture RTC.
+        if EPOCH_POSEE
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            EPOCH_SECONDS.store(seconds, Ordering::Relaxed);
+            EPOCH_TICKS.store(now_ticks, Ordering::Relaxed);
+            EPOCH_POSEE.store(2, Ordering::Release);
         }
-    };
+        while EPOCH_POSEE.load(Ordering::Acquire) != 2 {
+            core::hint::spin_loop();
+        }
+    }
+    let base_seconds = EPOCH_SECONDS.load(Ordering::Relaxed);
+    let base_ticks = EPOCH_TICKS.load(Ordering::Relaxed);
     let elapsed_ticks = now_ticks.saturating_sub(base_ticks);
     base_seconds * 1000 + elapsed_ticks * 1000 / crate::kernel::timer::TICKS_PER_SECOND
 }
@@ -763,6 +845,12 @@ fn sys_clock_gettime(clock: i32, out: u64) -> i64 {
     let ms = match clock {
         CLOCK_REALTIME | CLOCK_REALTIME_COARSE | CLOCK_REALTIME_ALARM => realtime_ms(),
         CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
+            // Seule branche de cet appel qui touche la table des taches :
+            // `cpu_time_ms` la parcourt pour additionner les ticks de tous les
+            // fils du processus. Elle prend donc le gros verrou, ici et nulle
+            // part ailleurs. Le reste de `clock_gettime` -- c'est-a-dire tout
+            // ce qu'emet une boucle d'evenements -- s'en passe.
+            let _kernel = crate::kernel::smp_lock::enter();
             let pid = crate::kernel::task::current_process().pid;
             crate::kernel::task::cpu_time_ms(pid)
         }
@@ -1193,6 +1281,34 @@ pub fn resolve_user_path(addr: u64) -> Option<String> {
 }
 
 /// Affiche la table des appels systeme implementes (commande `syscalls`).
+/// Les appels systeme les plus emis depuis le boot, du plus chaud au moins.
+///
+/// C'est la donnee sur laquelle se decide quel appel merite qu'on lui ecrive
+/// une preuve de synchronisation (voir [`bkl`]). Le verrouillage de chacun est
+/// affiche a cote : on voit d'un coup d'oeil ou passe le temps sous verrou.
+pub fn print_frequences(combien: usize) {
+    let mut top: Vec<(u64, u32)> = Vec::new();
+    for numero in 0..SYSCALL_HITS_LEN {
+        let hits = SYSCALL_HITS[numero].load(Ordering::Relaxed);
+        if hits != 0 {
+            top.push((numero as u64, hits));
+        }
+    }
+    top.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    crate::println!("");
+    crate::println!("appels les plus emis (numero, nom, compte, verrou) :");
+    for (numero, hits) in top.iter().take(combien) {
+        crate::println!(
+            "  {:>4} {:<20} {:>10}  {}",
+            numero,
+            nr::name(*numero),
+            hits,
+            if bkl::exige_bkl(*numero) { "BKL" } else { "sans" },
+        );
+    }
+    crate::println!("  ({} numeros distincts emis)", top.len());
+}
+
 pub fn print_table() {
     crate::println!("ABI Bouchaud OS : appels systeme Linux x86-64");
     crate::println!("(numeros, structures et codes d'erreur identiques a Linux)");
@@ -1200,6 +1316,7 @@ pub fn print_table() {
     nr::print_implemented();
     crate::println!("");
     crate::println!("appels traites depuis le boot : {}", syscall_count());
+    print_frequences(12);
     let unknown = last_unknown();
     if unknown != 0 {
         crate::println!("dernier appel non implemente : {} ({})", unknown, nr::name(unknown));

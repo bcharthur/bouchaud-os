@@ -710,6 +710,12 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         }
         "free" => { crate::kernel::memory::print_info(); 0 }
         "syscalls" => { crate::kernel::abi::print_table(); 0 }
+        // Instantane SMP : charge par CPU, vols, migrations, et surtout
+        // `[BKL-STATS]` -- acquisitions du gros verrou, attente et tenue
+        // cumulees. Deux appels encadrant une charge donnent le cout en
+        // verrou de cette charge, ce qu'aucune mesure de temps ne
+        // distingue toute seule.
+        "smpstat" => { crate::kernel::task::log_smp_load(); 0 }
         "apps" => { crate::app::launcher::list(); 0 }
         "launch" => { if argc >= 2 { crate::app::launcher::launch(argv[1]); } else { println!("usage: launch <app>"); } 0 }
         "poweroff" | "halt" | "shutdown" => {

@@ -43,12 +43,20 @@
 //!
 //! ## Etat du chantier
 //!
-//! Ce que la table libere aujourd'hui ne fait pas gagner de temps mesurable :
-//! ce sont des appels rares, la plupart rendant une constante. C'est voulu. Le
-//! premier lot sert a poser le mecanisme et sa verification, pas a courir apres
-//! un chiffre. Les familles qui comptent vraiment -- identite, temps,
-//! descripteurs -- attendent que la table des taches et l'acces a la memoire
-//! utilisateur aient chacun leur propre domaine.
+//! Premier lot : le mecanisme, sa verification, et vingt-trois appels rendant
+//! une constante. Aucun gain mesurable, et c'etait annonce.
+//!
+//! Deuxieme lot : l'identite et le temps, une fois la tache courante dotee de
+//! son propre domaine ([`crate::kernel::task::identite_courante`]). Les
+//! frequences mesurees sur les sondes libc de ce depot -- `syscalls` les
+//! affiche desormais -- placent `clock_gettime` dans la tete de liste d'une
+//! boucle d'evenements ; l'identite, elle, y est rare, et c'est dit tel quel
+//! dans le journal du commit plutot que maquille.
+//!
+//! Ce qui reste, et qui est le vrai gisement : `writev`/`write`/`read`,
+//! `mmap`/`munmap`/`close`, `rt_sigprocmask`, `poll`. Ils demandent chacun un
+//! domaine que ce noyau n'a pas encore -- table des descripteurs, coeur du
+//! systeme de fichiers, etat de signaux par tache.
 
 use super::nr;
 
@@ -78,6 +86,54 @@ pub const SANS_BKL: &[(u64, &str)] = &[
     // MAP_SHARED vers le RAMFS, dont le coeur est encore sous BKL.
     (nr::MPROTECT, "metadonnees Mm + protocole TLB, aucun etat global"),
     (nr::BRK, "metadonnees Mm + protocole TLB, aucun etat global"),
+    // --- Identite : domaine CPU-local (`task::identite_courante`) -----------
+    //
+    // Lu :    `usermode::per_cpu().current` (le tid, bloc par-CPU adresse par
+    //         GS) et `CURRENT_PROCESS[cpu]` (un `Arc<Process>`), plus
+    //         `Process::metadata` pour uid/gid.
+    // Ecrit : rien.
+    // Verrou : les deux emplacements par-CPU ne sont ecrits que par `install`,
+    //         sous le gros verrou, et seulement par CE CPU ; la lecture coupe
+    //         les interruptions, donc aucun changement de contexte ne peut s'y
+    //         intercaler. `metadata` est un `SpinLock` sur le `Process`, un
+    //         domaine independant de la table des taches.
+    // Duree de vie : le tid est une valeur ; le `Process` est retenu par une
+    //         part d'`Arc` prise avant de rendre la main, donc il survit a la
+    //         mort de la tache. Aucune reference vers une `Task` ne sort.
+    // Memoire utilisateur : aucune.
+    // Pourquoi pas de gros verrou : `TASKS` n'est pas touchee. C'etait sa
+    //         seule raison d'etre sur ce chemin.
+    (nr::GETPID, "domaine CPU-local, aucune lecture de TASKS"),
+    (nr::GETTID, "domaine CPU-local, aucune lecture de TASKS"),
+    (nr::GETUID, "domaine CPU-local + verrou metadata du Process"),
+    (nr::GETEUID, "domaine CPU-local + verrou metadata du Process"),
+    (nr::GETGID, "domaine CPU-local + verrou metadata du Process"),
+    (nr::GETEGID, "domaine CPU-local + verrou metadata du Process"),
+    // --- Temps : horloges atomiques + memoire utilisateur -------------------
+    //
+    // Lu :    `kernel::timer` (TICKS, TSC_HZ, BOOT_TSC : que des atomiques,
+    //         `monotonic_ns` maintient meme la monotonie inter-CPU par
+    //         `fetch_max`) et l'ancre d'epoque, elle aussi atomique depuis ce
+    //         lot -- c'etait un `static mut Option<(u64, u64)>` en
+    //         initialisation paresseuse, donc une course des que deux CPU
+    //         lisent l'heure sans verrou. Corrige a la source, pas contourne.
+    // Ecrit : la memoire utilisateur, et rien d'autre.
+    // Verrou : `Mm` pour la traduction et l'ecriture -- le domaine deja audite
+    //         au jalon SMP4 pour `mprotect`/`brk`. Le remplissage a la demande
+    //         (`peuple_a_la_demande`) est deja appele SANS gros verrou par le
+    //         gestionnaire de faute de page, sur tous les CPU : ce chemin-la
+    //         n'est pas nouveau.
+    // Duree de vie : `user_read`/`user_write` tiennent une part d'`Arc` sur le
+    //         `Process` pendant toute l'operation.
+    // Memoire utilisateur : oui, en ecriture, par `user_write`.
+    // Pourquoi pas de gros verrou : la seule branche qui touchait la table des
+    //         taches est `CLOCK_PROCESS_CPUTIME_ID`/`CLOCK_THREAD_CPUTIME_ID`,
+    //         qui passe par `cpu_time_ms` ; elle prend le gros verrou
+    //         explicitement, dans le corps de l'appel. Le reste s'en passe.
+    (nr::CLOCK_GETTIME, "horloges atomiques + Mm ; le verrou est pris dans la branche CPUTIME"),
+    (nr::CLOCK_GETRES, "constante calculee + Mm"),
+    (nr::GETTIMEOFDAY, "ancre d'epoque atomique + Mm"),
+    (nr::TIME, "ancre d'epoque atomique + Mm"),
     // --- Constantes : le bras d'aiguillage ne lit ni n'ecrit rien ------------
     //
     // Ces appels rendent une valeur litterale. Ils ne touchent ni la table des
