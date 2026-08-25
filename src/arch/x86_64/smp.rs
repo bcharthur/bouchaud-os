@@ -30,11 +30,14 @@ const X2APIC_ENABLE: u64 = 1 << 10;
 const X2APIC_EOI: u32 = 0x80B;
 const X2APIC_SVR: u32 = 0x80F;
 const X2APIC_ICR: u32 = 0x830;
+const X2APIC_LVT_TIMER: u32 = 0x832;
+const IA32_TSC_DEADLINE: u32 = 0x6E0;
 
 const LAPIC_EOI: usize = 0xB0;
 const LAPIC_SVR: usize = 0xF0;
 const LAPIC_ICR_LOW: usize = 0x300;
 const LAPIC_ICR_HIGH: usize = 0x310;
+const LAPIC_LVT_TIMER: usize = 0x320;
 
 const TRAMPOLINE_PHYS: u64 = 0x8000;
 const MAILBOX_PHYS: u64 = 0x9000;
@@ -70,16 +73,37 @@ static DISCOVERED: AtomicUsize = AtomicUsize::new(1);
 static ONLINE_CPUS: AtomicUsize = AtomicUsize::new(1);
 static ONLINE_MASK: AtomicUsize = AtomicUsize::new(1);
 static SCHEDULER_ENABLED: AtomicBool = AtomicBool::new(false);
+static LOCAL_SCHED_TIMER: AtomicBool = AtomicBool::new(false);
 
-// BOUCHAUD_SMP_NG2_TLB_SHOOTDOWN_V1
-// Un seul shootdown peut etre emis a la fois aujourd'hui car toutes les
-// mutations de page tables passent encore sous le BKL. Le handler IPI ne prend
-// JAMAIS le BKL: le CPU emetteur peut donc attendre les ACK sans interblocage.
-static TLB_TARGET_PML4: AtomicU64 = AtomicU64::new(0);
-static TLB_START: AtomicU64 = AtomicU64::new(0);
-static TLB_LEN: AtomicU64 = AtomicU64::new(0);
-static TLB_TARGET_MASK: AtomicU64 = AtomicU64::new(0);
-static TLB_ACK_MASK: AtomicU64 = AtomicU64::new(0);
+// BOUCHAUD_SMP_NG3_TLB_SHOOTDOWN_V2
+// Une slot par CPU emetteur remplace la mailbox globale NG2. Un CPU ne peut
+// avoir qu'un shootdown synchrone en vol (le noyau n'est pas preemptible), mais
+// tous les CPU peuvent publier simultanement sans ecraser leurs parametres.
+// `sequence == 0` signifie libre; les autres valeurs sont des generations.
+struct TlbSlot {
+    sequence: AtomicU64,
+    pml4: AtomicU64,
+    start: AtomicU64,
+    len: AtomicU64,
+    targets: AtomicU64,
+    acknowledgements: AtomicU64,
+}
+
+impl TlbSlot {
+    const fn new() -> Self {
+        Self {
+            sequence: AtomicU64::new(0),
+            pml4: AtomicU64::new(0),
+            start: AtomicU64::new(0),
+            len: AtomicU64::new(0),
+            targets: AtomicU64::new(0),
+            acknowledgements: AtomicU64::new(0),
+        }
+    }
+}
+
+static TLB_SLOTS: [TlbSlot; MAX_CPUS] = [const { TlbSlot::new() }; MAX_CPUS];
+static TLB_NEXT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static TLB_SHOOTDOWN_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Best APIC identifier exposed by CPUID. It is an identifier, never a runtime
@@ -199,6 +223,74 @@ pub fn broadcast_reschedule() {
     unsafe { send_all_excluding_self(RESCHEDULE_VECTOR as u32) };
 }
 
+/// Wake one logical CPU. Normal task wakeups use this path; broadcasts are
+/// reserved for exceptional machine-wide state changes.
+pub fn reschedule_cpu(cpu: usize) {
+    if cpu >= schedulable_cpus() || cpu == cpu_index() {
+        return;
+    }
+    let Some(id) = cpu_local::CpuId::from_index(cpu) else { return; };
+    let Some(target) = cpu_local::descriptor(id) else { return; };
+    unsafe {
+        let (x2, lapic) = local_apic();
+        if x2 {
+            usermode::write_msr(
+                X2APIC_ICR,
+                ((target.apic_id as u64) << 32) | RESCHEDULE_VECTOR as u64,
+            );
+        } else {
+            lapic_write(lapic, LAPIC_ICR_HIGH, (target.legacy_apic_id as u32) << 24);
+            lapic_write(lapic, LAPIC_ICR_LOW, RESCHEDULE_VECTOR as u32);
+            wait_xapic_delivery(lapic);
+        }
+    }
+}
+
+fn tsc_deadline_supported() -> bool {
+    __cpuid(1).ecx & (1 << 24) != 0 && crate::kernel::timer::tsc_hz().is_some()
+}
+
+/// Programme un quantum local TSC-deadline. Chaque CPU rearme son propre
+/// timer; aucun broadcast BSP n'est requis dans ce mode.
+fn init_local_scheduler_timer() -> bool {
+    if !tsc_deadline_supported() {
+        return false;
+    }
+    unsafe {
+        let (x2, lapic) = local_apic();
+        let lvt = RESCHEDULE_VECTOR as u32 | (2 << 17); // mode TSC deadline
+        if x2 {
+            usermode::write_msr(X2APIC_LVT_TIMER, lvt as u64);
+        } else {
+            lapic_write(lapic, LAPIC_LVT_TIMER, lvt);
+        }
+    }
+    arm_local_scheduler_timer();
+    true
+}
+
+pub fn arm_local_scheduler_timer() {
+    if !LOCAL_SCHED_TIMER.load(Ordering::Acquire) && !tsc_deadline_supported() {
+        return;
+    }
+    if let Some(hz) = crate::kernel::timer::tsc_hz() {
+        let delta = (hz as u128)
+            .saturating_mul(SCHED_QUANTUM_TICKS as u128)
+            .div_ceil(1000)
+            .min(u64::MAX as u128) as u64;
+        unsafe {
+            usermode::write_msr(
+                IA32_TSC_DEADLINE,
+                crate::arch::x86_64::cpu::rdtsc().saturating_add(delta.max(1)),
+            );
+        }
+    }
+}
+
+pub fn local_scheduler_timer_enabled() -> bool {
+    LOCAL_SCHED_TIMER.load(Ordering::Acquire)
+}
+
 /// Invalide sur les autres CPU les traductions appartenant a `pml4`.
 ///
 /// Le broadcast est volontaire au premier jalon thread-SMP: tous les CPU
@@ -206,57 +298,73 @@ pub fn broadcast_reschedule() {
 /// TLB. Cela privilegie la correction et evite de dependre d'un active_cpus
 /// parfait pendant la migration. `AddressSpace::active_cpus` est tout de meme
 /// maintenu pour le diagnostic et l'optimisation future.
-pub fn shootdown_tlb(pml4: u64, start: u64, len: u64) {
-    let online = schedulable_cpus().max(1).min(MAX_CPUS);
-    if online <= 1 {
-        return;
-    }
-
+pub fn shootdown_tlb(pml4: u64, active_cpus: u64, start: u64, len: u64) {
     let current = cpu_index();
-    let mut targets = 0u64;
-    for cpu in 0..online.min(64) {
-        if cpu != current && is_online(cpu) {
-            targets |= 1u64 << cpu;
-        }
-    }
+    let online = ONLINE_MASK.load(Ordering::Acquire) as u64;
+    let self_bit = if current < 64 { 1u64 << current } else { 0 };
+    let targets = active_cpus & online & !self_bit;
     if targets == 0 {
         return;
     }
 
-    TLB_TARGET_PML4.store(pml4, Ordering::Release);
-    TLB_START.store(start, Ordering::Release);
-    TLB_LEN.store(len, Ordering::Release);
-    TLB_ACK_MASK.store(0, Ordering::Release);
-    TLB_TARGET_MASK.store(targets, Ordering::Release);
+    debug_assert!(
+        !crate::kernel::smp_lock::held_by_current_cpu(),
+        "TLB shootdown: attente ACK sous BKL interdite"
+    );
+
+    let slot = &TLB_SLOTS[current];
+    debug_assert_eq!(slot.sequence.load(Ordering::Acquire), 0);
+    let mut sequence = TLB_NEXT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    if sequence == 0 {
+        sequence = TLB_NEXT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    }
+    slot.pml4.store(pml4, Ordering::Relaxed);
+    slot.start.store(start, Ordering::Relaxed);
+    slot.len.store(len, Ordering::Relaxed);
+    slot.targets.store(targets, Ordering::Relaxed);
+    slot.acknowledgements.store(0, Ordering::Relaxed);
+    // Publication release: le handler qui observe la generation voit tous les
+    // champs precedents. La slot n'est rendue libre qu'apres tous les ACK.
+    slot.sequence.store(sequence, Ordering::Release);
     TLB_SHOOTDOWN_COUNT.fetch_add(1, Ordering::Relaxed);
 
     unsafe { send_all_excluding_self(TLB_SHOOTDOWN_VECTOR as u32) };
 
-    while TLB_ACK_MASK.load(Ordering::Acquire) & targets != targets {
+    while slot.acknowledgements.load(Ordering::Acquire) & targets != targets {
         spin_loop();
     }
-
-    TLB_TARGET_MASK.store(0, Ordering::Release);
+    slot.sequence.store(0, Ordering::Release);
 }
 
 /// Handler minimal appele directement depuis l'IDT, sans BKL.
 pub fn handle_tlb_shootdown() {
     let cpu = cpu_index();
     let bit = if cpu < 64 { 1u64 << cpu } else { 0 };
-    let targets = TLB_TARGET_MASK.load(Ordering::Acquire);
 
-    if bit != 0 && targets & bit != 0 {
-        let pml4 = TLB_TARGET_PML4.load(Ordering::Acquire);
-        if vmm::current_pml4() == pml4 {
-            let start = TLB_START.load(Ordering::Acquire);
-            let len = TLB_LEN.load(Ordering::Acquire);
-            vmm::flush_local_range(start, len);
-
-            if let Some(id) = cpu_local::CpuId::from_index(cpu) {
-                cpu_local::local(id).note_tlb_shootdown();
+    if bit != 0 {
+        for slot in TLB_SLOTS.iter() {
+            let sequence = slot.sequence.load(Ordering::Acquire);
+            if sequence == 0 || slot.targets.load(Ordering::Relaxed) & bit == 0 {
+                continue;
             }
+            if slot.acknowledgements.load(Ordering::Relaxed) & bit != 0 {
+                continue;
+            }
+
+            let pml4 = slot.pml4.load(Ordering::Relaxed);
+            if vmm::current_pml4() == pml4 {
+                vmm::flush_local_range(
+                    slot.start.load(Ordering::Relaxed),
+                    slot.len.load(Ordering::Relaxed),
+                );
+
+                if let Some(id) = cpu_local::CpuId::from_index(cpu) {
+                    cpu_local::local(id).note_tlb_shootdown();
+                }
+            }
+            // AcqRel ordonne l'invalidation avant l'ACK observe par l'emetteur.
+            slot.acknowledgements.fetch_or(bit, Ordering::AcqRel);
         }
-        TLB_ACK_MASK.fetch_or(bit, Ordering::AcqRel);
     }
     eoi_local();
 }
@@ -269,8 +377,13 @@ pub fn tlb_shootdown_count() -> u64 {
 /// les sous-systemes noyau initialises, afin qu'un AP ne touche pas l'allocateur
 /// pendant le boot mono-CPU.
 pub fn enable_scheduler() {
+    if init_local_scheduler_timer() {
+        LOCAL_SCHED_TIMER.store(true, Ordering::Release);
+    }
     SCHEDULER_ENABLED.store(true, Ordering::Release);
-    broadcast_reschedule();
+    if !local_scheduler_timer_enabled() {
+        broadcast_reschedule();
+    }
     dmesg::log_fmt(format_args!(
         "SMP_NG2_SCHEDULER online={} mode=thread-load-balance+work-steal quantum={}ms",
         schedulable_cpus(),
@@ -427,6 +540,9 @@ pub extern "C" fn bouchaud_ap_entry() -> ! {
     // autoriser a toucher la runqueue / le tas noyau.
     while !SCHEDULER_ENABLED.load(Ordering::Acquire) {
         crate::arch::x86_64::cpu::wait_for_interrupt();
+    }
+    if LOCAL_SCHED_TIMER.load(Ordering::Acquire) {
+        let _ = init_local_scheduler_timer();
     }
 
     // Pas de log ici : au moment ou le BSP libere les AP, il peut encore etre

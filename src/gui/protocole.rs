@@ -382,20 +382,29 @@ impl Pointeur {
 pub struct Molette {
     pub fenetre: u32,
     pub delta: i32,
+    pub x: i32,
+    pub y: i32,
 }
 
 impl Molette {
-    pub fn encode(&self) -> [u8; 8] {
-        let mut o = [0u8; 8];
+    pub fn encode(&self) -> [u8; 16] {
+        let mut o = [0u8; 16];
         o[0..4].copy_from_slice(&self.fenetre.to_le_bytes());
         o[4..8].copy_from_slice(&self.delta.to_le_bytes());
+        o[8..12].copy_from_slice(&self.x.to_le_bytes());
+        o[12..16].copy_from_slice(&self.y.to_le_bytes());
         o
     }
     pub fn decode(o: &[u8]) -> Option<Molette> {
-        if o.len() < 8 {
+        if o.len() < 16 {
             return None;
         }
-        Some(Molette { fenetre: lit_u32(o, 0), delta: lit_i32(o, 4) })
+        Some(Molette {
+            fenetre: lit_u32(o, 0),
+            delta: lit_i32(o, 4),
+            x: lit_i32(o, 8),
+            y: lit_i32(o, 12),
+        })
     }
 }
 
@@ -611,7 +620,7 @@ mod tests {
         let touche = Touche { fenetre: 1, code: 30, modificateurs: 2, unicode: 'a' as u32, appui: 1 };
         assert_eq!(Touche::decode(&touche.encode()), Some(touche));
 
-        let molette = Molette { fenetre: 1, delta: -120 };
+        let molette = Molette { fenetre: 1, delta: -120, x: 320, y: 240 };
         assert_eq!(Molette::decode(&molette.encode()), Some(molette));
 
         let trame = Trame { fenetre: 1, tampon: 0, degat: Rect::neuf(10, 20, 30, 40) };

@@ -27,14 +27,16 @@
 //! celui de [`USER_SPACE_BASE`]) : ses PDPT/PD/PT appartiennent au processus,
 //! sont detruites avec lui, et ne peuvent pas empieter sur le noyau.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use x86_64::registers::control::{Cr3, Cr3Flags};
 use x86_64::structures::paging::PhysFrame;
 use x86_64::PhysAddr;
 
 use crate::arch::x86_64::smp;
 use crate::kernel::memory;
+use crate::kernel::sync::{SpinLockIrq, SpinLockIrqGuard};
 
 /// Taille d'une page (et d'une frame) : 4 KiB.
 pub const PAGE_SIZE: u64 = 4096;
@@ -132,14 +134,17 @@ pub const PTE_NO_EXEC: u64 = 1 << 63;
 
 /// Masque de l'adresse physique dans une entree (bits 12..51).
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+const FREE_LIST_END: u64 = u64::MAX;
 
 // --- Allocateur de frames physiques -----------------------------------------
 
 struct FrameAllocator {
     /// Regions encore vierges : (prochaine frame libre, fin exclusive).
     regions: Vec<(u64, u64)>,
-    /// Frames rendues par `free_frame`, reutilisees en priorite.
-    freed: Vec<u64>,
+    /// Tete d'une liste intrusive de frames rendues. Le premier mot de chaque
+    /// frame libre contient l'adresse de la suivante (`u64::MAX` la termine),
+    /// ce qui interdit toute allocation de tas dans `free_frame`.
+    freed_head: Option<u64>,
     total: u64,
     used: u64,
     allocations: u64,
@@ -148,24 +153,23 @@ struct FrameAllocator {
     high_watermark: u64,
 }
 
-static mut FRAMES: Option<FrameAllocator> = None;
+static FRAMES: SpinLockIrq<FrameAllocator> = SpinLockIrq::new(FrameAllocator {
+    regions: Vec::new(),
+    freed_head: None,
+    total: 0,
+    used: 0,
+    allocations: 0,
+    frees: 0,
+    failures: 0,
+    high_watermark: 0,
+});
+// Eventually-consistent mirrors for interrupt/panic-safe telemetry. Allocator
+// ownership and detailed accounting remain protected exclusively by FRAMES.
+static FRAME_TOTAL_RELAXED: AtomicU64 = AtomicU64::new(0);
+static FRAME_USED_RELAXED: AtomicU64 = AtomicU64::new(0);
 
-fn frames() -> &'static mut FrameAllocator {
-    unsafe {
-        if FRAMES.is_none() {
-            FRAMES = Some(FrameAllocator {
-                regions: Vec::new(),
-                freed: Vec::new(),
-                total: 0,
-                used: 0,
-                allocations: 0,
-                frees: 0,
-                failures: 0,
-                high_watermark: 0,
-            });
-        }
-        FRAMES.as_mut().unwrap()
-    }
+fn frames() -> SpinLockIrqGuard<'static, FrameAllocator> {
+    FRAMES.lock()
 }
 
 /// Ajoute une region physique [start, end) a l'allocateur de frames.
@@ -178,39 +182,51 @@ pub fn add_region(start: u64, end: u64) {
     if end <= start {
         return;
     }
-    let f = frames();
-    f.total += (end - start) / PAGE_SIZE;
+    let mut f = frames();
+    f.total = f
+        .total
+        .checked_add((end - start) / PAGE_SIZE)
+        .expect("vmm: total frame accounting overflow");
     f.regions.push((start, end));
+    FRAME_TOTAL_RELAXED.store(f.total, Ordering::Relaxed);
 }
 
 /// Alloue une frame physique de 4 KiB, mise a zero. `None` si plus de RAM.
 pub fn alloc_frame() -> Option<u64> {
-    let f = frames();
-    let candidate = if let Some(p) = f.freed.pop() {
-        Some(p)
-    } else {
-        let mut found = None;
-        for region in f.regions.iter_mut() {
-            if region.0 + PAGE_SIZE <= region.1 {
-                found = Some(region.0);
-                region.0 += PAGE_SIZE;
-                break;
+    let phys = {
+        let mut f = frames();
+        let candidate = if let Some(p) = f.freed_head {
+            let next = unsafe { *(memory::phys_to_virt(p) as *const u64) };
+            f.freed_head = if next == FREE_LIST_END { None } else { Some(next) };
+            Some(p)
+        } else {
+            let mut found = None;
+            for region in f.regions.iter_mut() {
+                if region.0 + PAGE_SIZE <= region.1 {
+                    found = Some(region.0);
+                    region.0 += PAGE_SIZE;
+                    break;
+                }
             }
-        }
-        found
-    };
+            found
+        };
 
-    let phys = match candidate {
-        Some(phys) => phys,
-        None => {
-            f.failures = f.failures.wrapping_add(1);
-            return None;
-        }
+        let phys = match candidate {
+            Some(phys) => phys,
+            None => {
+                f.failures = f.failures.wrapping_add(1);
+                return None;
+            }
+        };
+        f.used = f
+            .used
+            .checked_add(1)
+            .expect("vmm: used frame accounting overflow");
+        f.allocations = f.allocations.wrapping_add(1);
+        f.high_watermark = f.high_watermark.max(f.used);
+        FRAME_USED_RELAXED.store(f.used, Ordering::Relaxed);
+        phys
     };
-
-    f.used = f.used.saturating_add(1);
-    f.allocations = f.allocations.wrapping_add(1);
-    f.high_watermark = f.high_watermark.max(f.used);
     unsafe {
         core::ptr::write_bytes(memory::phys_to_virt(phys), 0, PAGE_SIZE as usize);
     }
@@ -219,12 +235,33 @@ pub fn alloc_frame() -> Option<u64> {
 
 /// Rend une frame a l'allocateur.
 pub fn free_frame(phys: u64) {
-    let f = frames();
-    if f.used > 0 {
-        f.used -= 1;
+    let mut f = frames();
+    let phys = phys & !(PAGE_SIZE - 1);
+    let mut cursor = f.freed_head;
+    while let Some(free) = cursor {
+        assert!(free != phys, "vmm: double free frame {phys:#x}");
+        let next = unsafe { *(memory::phys_to_virt(free) as *const u64) };
+        cursor = if next == FREE_LIST_END { None } else { Some(next) };
     }
+    assert!(f.used != 0, "vmm: frame accounting underflow for {phys:#x}");
+    f.used -= 1;
     f.frees = f.frees.wrapping_add(1);
-    f.freed.push(phys & !(PAGE_SIZE - 1));
+    unsafe {
+        *(memory::phys_to_virt(phys) as *mut u64) = f.freed_head.unwrap_or(FREE_LIST_END);
+    }
+    f.freed_head = Some(phys);
+    FRAME_USED_RELAXED.store(f.used, Ordering::Relaxed);
+}
+
+/// Approximate frame usage for interrupt/panic-safe diagnostics.
+///
+/// This deliberately never touches `FRAMES`: the two atomics may describe
+/// adjacent allocator mutations, which is sufficient for a visual percentage.
+pub fn frame_stats_relaxed() -> (u64, u64) {
+    (
+        FRAME_USED_RELAXED.load(Ordering::Relaxed),
+        FRAME_TOTAL_RELAXED.load(Ordering::Relaxed),
+    )
 }
 
 /// (frames utilisees, frames libres, frames totales).
@@ -393,11 +430,115 @@ pub struct AddressSpace {
     pml4: u64,
     // BOUCHAUD_SMP_NG2_ADDRESS_SPACE_ACTIVE_CPUS_V1
     /// CPU logiques dont le CR3 pointe actuellement sur cet espace.
-    active_cpus: AtomicU64,
+    identity: Arc<AddressSpaceIdentity>,
     /// Frames de tables intermediaires, liberees avec l'espace.
     tables: Vec<u64>,
     /// Frames de donnees mappees pour l'utilisateur.
     pages: Vec<u64>,
+}
+
+/// Stable CR3 identity shared with `Mm`'s context-switch fast path.
+pub(crate) struct AddressSpaceIdentity {
+    pml4: u64,
+    active_cpus: AtomicU64,
+    retiring: AtomicBool,
+    quiescence_seq: AtomicU64,
+    quiescence_waiter: AtomicU64,
+}
+
+impl AddressSpaceIdentity {
+    pub(crate) unsafe fn try_activate(&self) -> bool {
+        if self.retiring.load(Ordering::Acquire) {
+            return false;
+        }
+        self.mark_active(smp::cpu_index());
+        if self.retiring.load(Ordering::Acquire) {
+            self.mark_inactive(smp::cpu_index());
+            return false;
+        }
+        let frame = PhysFrame::containing_address(PhysAddr::new(self.pml4));
+        Cr3::write(frame, Cr3Flags::empty());
+        true
+    }
+
+    pub(crate) fn mark_active(&self, cpu: usize) {
+        if cpu < 64 {
+            self.active_cpus.fetch_or(1u64 << cpu, Ordering::AcqRel);
+        }
+    }
+
+    pub(crate) fn mark_inactive(&self, cpu: usize) {
+        if cpu < 64 {
+            self.active_cpus.fetch_and(!(1u64 << cpu), Ordering::AcqRel);
+            if self.retiring.load(Ordering::Acquire) {
+                self.quiescence_seq.fetch_add(1, Ordering::Release);
+                let waiter = self.quiescence_waiter.load(Ordering::Acquire);
+                if waiter < 64 && waiter as usize != cpu {
+                    smp::reschedule_cpu(waiter as usize);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn begin_retire(&self) {
+        self.retiring.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn active_cpus(&self) -> u64 {
+        self.active_cpus.load(Ordering::Acquire)
+    }
+
+    /// Wait without burning a CPU while remote CR3 users leave. Interrupts are
+    /// disabled across the final sequence/mask recheck and `sti; hlt`, closing
+    /// the classic notification-before-HLT lost-wakeup window.
+    pub(crate) fn wait_remote_quiescent(&self, self_cpu: usize) {
+        debug_assert!(
+            !crate::kernel::smp_lock::held_by_current_cpu(),
+            "vmm: exec quiescence must not HLT while holding the BKL"
+        );
+        self.quiescence_waiter.store(self_cpu as u64, Ordering::Release);
+        let self_bit = 1u64 << self_cpu;
+        while self.active_cpus() & !self_bit != 0 {
+            let ticket = self.quiescence_seq.load(Ordering::Acquire);
+            x86_64::instructions::interrupts::disable();
+            if self.quiescence_seq.load(Ordering::Acquire) == ticket
+                && self.active_cpus() & !self_bit != 0
+            {
+                x86_64::instructions::interrupts::enable_and_hlt();
+            } else {
+                x86_64::instructions::interrupts::enable();
+            }
+        }
+        self.quiescence_waiter.store(u64::MAX, Ordering::Release);
+    }
+}
+
+/// Invalidation distante preparee pendant une mutation de tables, puis executee
+/// seulement apres avoir relache le BKL et tout emprunt de `Process`.
+#[derive(Clone, Copy)]
+pub struct TlbInvalidation {
+    pml4: u64,
+    active_cpus: u64,
+    start: u64,
+    len: u64,
+}
+
+impl TlbInvalidation {
+    pub fn execute(self) {
+        smp::shootdown_tlb(self.pml4, self.active_cpus, self.start, self.len);
+    }
+}
+
+/// Frames detachees des PTE mais conservees jusqu'a la fin du shootdown.
+pub struct UnmapRetirement {
+    invalidation: TlbInvalidation,
+    frames: Vec<u64>,
+}
+
+impl UnmapRetirement {
+    pub fn invalidation(&self) -> TlbInvalidation {
+        self.invalidation
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -428,7 +569,13 @@ impl AddressSpace {
         }
         Some(AddressSpace {
             pml4,
-            active_cpus: AtomicU64::new(0),
+            identity: Arc::new(AddressSpaceIdentity {
+                pml4,
+                active_cpus: AtomicU64::new(0),
+                retiring: AtomicBool::new(false),
+                quiescence_seq: AtomicU64::new(0),
+                quiescence_waiter: AtomicU64::new(u64::MAX),
+            }),
             tables: Vec::new(),
             pages: Vec::new(),
         })
@@ -439,27 +586,32 @@ impl AddressSpace {
         self.pml4
     }
 
+    pub(crate) fn identity(&self) -> Arc<AddressSpaceIdentity> {
+        Arc::clone(&self.identity)
+    }
+
     #[inline]
     pub fn mark_active(&self, cpu: usize) {
-        if cpu < 64 {
-            self.active_cpus.fetch_or(1u64 << cpu, Ordering::AcqRel);
-        }
+        self.identity.mark_active(cpu);
     }
 
     #[inline]
     pub fn mark_inactive(&self, cpu: usize) {
-        if cpu < 64 {
-            self.active_cpus.fetch_and(!(1u64 << cpu), Ordering::AcqRel);
-        }
+        self.identity.mark_inactive(cpu);
     }
 
     pub fn active_cpus(&self) -> u64 {
-        self.active_cpus.load(Ordering::Acquire)
+        self.identity.active_cpus()
     }
 
     #[inline]
-    fn shootdown_range(&self, start: u64, len: u64) {
-        smp::shootdown_tlb(self.pml4, start, len);
+    fn invalidation(&self, start: u64, len: u64) -> TlbInvalidation {
+        TlbInvalidation {
+            pml4: self.pml4,
+            active_cpus: self.active_cpus(),
+            start,
+            len,
+        }
     }
 
     /// Active cet espace d'adressage sur le CPU courant.
@@ -468,9 +620,10 @@ impl AddressSpace {
     /// Le noyau doit rester mappe (garanti par `new`) et l'espace doit rester
     /// vivant tant qu'il est actif dans CR3.
     pub unsafe fn activate(&self) {
-        let frame = PhysFrame::containing_address(PhysAddr::new(self.pml4));
-        Cr3::write(frame, Cr3Flags::empty());
-        self.mark_active(smp::cpu_index());
+        // Publier l'activite AVANT CR3 ferme la race avec un unmap concurrent:
+        // soit son snapshot nous cible, soit notre chargement CR3 est posterieur
+        // a la mutation PTE et ne peut importer aucune traduction retiree.
+        assert!(self.identity.try_activate(), "vmm: activation of retiring address space");
     }
 
     /// Descend (en creant si besoin) jusqu'a l'entree de table de pages qui
@@ -501,22 +654,22 @@ impl AddressSpace {
 
     /// Mappe `virt` (aligne page) sur la frame physique `phys`.
     pub fn map(&mut self, virt: u64, phys: u64, flags: u64) -> bool {
-        let mut replaced_present = false;
-        let ok = match self.entry_mut(virt, true) {
+        match self.entry_mut(virt, true) {
             Some(entry) => {
                 let old = *entry;
                 let new = (phys & ADDR_MASK) | flags | PTE_PRESENT;
+                // Un remplacement doit retirer l'ancienne PTE et attendre ses
+                // ACK avant de publier la nouvelle. Refuser ici est plus sûr
+                // qu'un remplacement silencieux sans invalidation en release.
+                if old & PTE_PRESENT != 0 && old != new {
+                    return false;
+                }
                 *entry = new;
                 flush(virt);
-                replaced_present = old & PTE_PRESENT != 0 && old != new;
                 true
             }
             None => false,
-        };
-        if replaced_present {
-            self.shootdown_range(virt & !(PAGE_SIZE - 1), PAGE_SIZE);
         }
-        ok
     }
 
     /// Alloue et mappe `len` octets a partir de `virt` (arrondi a la page).
@@ -542,7 +695,7 @@ impl AddressSpace {
     }
 
     /// Change les droits d'une plage deja mappee (mprotect).
-    pub fn protect(&mut self, virt: u64, len: u64, flags: u64) -> bool {
+    pub fn prepare_protect(&mut self, virt: u64, len: u64, flags: u64) -> Option<TlbInvalidation> {
         let start = virt & !(PAGE_SIZE - 1);
         let end = (virt + len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         let mut page = start;
@@ -560,16 +713,13 @@ impl AddressSpace {
             }
             page += PAGE_SIZE;
         }
-        if changed {
-            self.shootdown_range(start, end.saturating_sub(start));
-        }
-        true
+        changed.then(|| self.invalidation(start, end.saturating_sub(start)))
     }
 
     /// Supprime le mapping d'une plage (munmap). Les PTE sont d'abord
     /// retirees partout, puis le shootdown TLB est ACKe, et seulement ensuite
     /// les frames sont rendues. Cet ordre interdit tout use-after-free TLB.
-    pub fn unmap(&mut self, virt: u64, len: u64) {
+    pub fn prepare_unmap(&mut self, virt: u64, len: u64) -> UnmapRetirement {
         let start = virt & !(PAGE_SIZE - 1);
         let end = (virt + len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         let mut page = start;
@@ -588,11 +738,15 @@ impl AddressSpace {
             page += PAGE_SIZE;
         }
 
-        if end > start {
-            self.shootdown_range(start, end.saturating_sub(start));
+        UnmapRetirement {
+            invalidation: self.invalidation(start, end.saturating_sub(start)),
+            frames: retired,
         }
+    }
 
-        for phys in retired {
+    /// Rend les frames uniquement apres `UnmapRetirement::invalidation()`.
+    pub fn finish_unmap(&mut self, retirement: UnmapRetirement) {
+        for phys in retirement.frames {
             if let Some(pos) = self.pages.iter().position(|&f| f == phys) {
                 self.pages.swap_remove(pos);
                 free_frame(phys);

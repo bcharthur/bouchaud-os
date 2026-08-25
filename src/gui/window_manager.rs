@@ -351,6 +351,7 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
     let (mesures, total) = task::mesure_processus();
     if total > 0 {
         let mut ligne = String::new();
+        let sample_ns = crate::kernel::timer::monotonic_ns();
         for mesure in mesures.iter() {
             if mesure.ticks == 0 && mesure.rss_octets < 1024 * 1024 {
                 continue; // rien a dire d'un processus qui n'a rien fait
@@ -358,18 +359,68 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
             if !ligne.is_empty() {
                 ligne.push_str(" | ");
             }
+            let online = crate::arch::x86_64::smp::schedulable_cpus();
+            let mut cpu_map = String::from("[");
+            for cpu in 0..online {
+                if cpu != 0 { cpu_map.push(','); }
+                cpu_map.push_str(&alloc::format!(
+                    "{}",
+                    mesure.cpu_map_ns[cpu].saturating_mul(100) / total,
+                ));
+            }
+            cpu_map.push(']');
+            crate::serial_println!(
+                "[PROC-SAMPLE] v=1 t_ns={} pid={} name={} cpu_pct={} cpu_map={} ctx_delta={} mig_delta={} runnable_threads={} threads={} rss={} vss={}",
+                sample_ns,
+                mesure.pid,
+                mesure.nom,
+                mesure.ticks.saturating_mul(100) / total,
+                cpu_map,
+                mesure.context_switches,
+                mesure.migrations,
+                mesure.runnable_threads,
+                mesure.taches,
+                mesure.rss_octets,
+                mesure.vss_octets,
+            );
             ligne.push_str(&alloc::format!(
-                "{} pid={} cpu {}% rss {} Mio vss {} Mio{}",
+                "{} pid={} cpu {}% cpu_map={} rss {} Mio vss {} Mio thr={} ctx={} mig={}",
                 mesure.nom,
                 mesure.pid,
-                (mesure.ticks * 100 / total).min(100),
+                mesure.ticks * 100 / total,
+                cpu_map,
                 mesure.rss_octets / (1024 * 1024),
                 mesure.vss_octets / (1024 * 1024),
-                if mesure.taches > 1 { alloc::format!(" ({} fils)", mesure.taches) } else { String::new() },
+                mesure.taches,
+                mesure.context_switches,
+                mesure.migrations,
             ));
         }
         if !ligne.is_empty() {
             crate::serial_println!("[ps] {}", ligne);
+        }
+
+        // ResourceGroup est une vue d'agrégation, pas une contrainte scheduler.
+        // Un groupe multithread/multiprocessus peut utiliser tous les CPU.
+        let mut groups: Vec<(u32, String, u64, u64, usize, u64, u64)> = Vec::new();
+        for mesure in mesures.iter() {
+            if let Some(group) = groups.iter_mut().find(|g| g.0 == mesure.resource_group_id) {
+                group.2 = group.2.saturating_add(mesure.ticks);
+                group.3 = group.3.saturating_add(mesure.rss_octets);
+                group.4 = group.4.saturating_add(1);
+                group.5 = group.5.saturating_add(mesure.context_switches);
+                group.6 = group.6.saturating_add(mesure.migrations);
+            } else {
+                groups.push((mesure.resource_group_id, mesure.resource_group_name.clone(),
+                    mesure.ticks, mesure.rss_octets, 1, mesure.context_switches, mesure.migrations));
+            }
+        }
+        for (id, name, cpu_ns, rss, processes, ctx, migrations) in groups {
+            crate::serial_println!(
+                "[APP-SAMPLE] v=1 t_ns={} id={} name={} cpu_pct={} rss={} processes={} ctx_delta={} mig_delta={}",
+                sample_ns, id, name, cpu_ns.saturating_mul(100) / total,
+                rss, processes, ctx, migrations,
+            );
         }
     }
 
@@ -576,8 +627,17 @@ fn handle_wheel(mx: i32, my: i32, delta: i32, wins: &mut Vec<Win>) {
         if !w.min && mx >= w.x && mx < w.x + w.w && my >= w.y && my < w.y + w.h {
             let zone = zone_utile(w);
             if let App::Navigateur { client } = &mut wins[i].app {
-                if crate::gui::protocole::vers_local(&zone, mx, my).is_some() {
-                    client.envoie_molette(delta);
+                if let Some((client_x, client_y)) = crate::gui::protocole::vers_local(&zone, mx, my) {
+                    crate::serial_println!(
+                        "[GUI-WHEEL-TX] pid={} dx=0 dy={} screen_x={} screen_y={} client_x={} client_y={}",
+                        client.pid, delta, mx, my, client_x, client_y,
+                    );
+                    client.envoie_molette(delta, client_x, client_y);
+                } else {
+                    crate::serial_println!(
+                        "[GUI-WHEEL-DROP] pid={} reason=outside-client screen_x={} screen_y={} dy={}",
+                        client.pid, mx, my, delta,
+                    );
                 }
                 return;
             }

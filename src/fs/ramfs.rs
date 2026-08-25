@@ -11,6 +11,7 @@ use crate::drivers::vga::{self, COLOR_CYAN, COLOR_DEFAULT};
 use crate::users;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Nombre d'inodes. Une distribution minimale (libc, `ld.so`, quelques
 /// bibliotheques, des polices) depasse largement le millier de fichiers.
@@ -153,6 +154,12 @@ pub struct FileSystem {
 static mut FS: FileSystem = FileSystem {
     nodes: [const { Node::empty() }; MAX_NODES],
 };
+/// Lock-free mirror used by interrupt/panic-safe journal prefixes.
+static USED_NODES_RELAXED: AtomicUsize = AtomicUsize::new(0);
+
+pub fn used_nodes_relaxed() -> usize {
+    USED_NODES_RELAXED.load(Ordering::Relaxed)
+}
 
 /// Accede au systeme de fichiers global.
 pub fn fs() -> &'static mut FileSystem {
@@ -172,6 +179,7 @@ impl FileSystem {
         self.nodes[0].mode = 0o755;
         self.nodes[0].uid = 0;
         self.nodes[0].gid = 0;
+        USED_NODES_RELAXED.store(1, Ordering::Relaxed);
 
         let home = self.mkdir_at(0, "home").unwrap_or(0);
         let tmp = self.mkdir_at(0, "tmp").unwrap_or(0);
@@ -228,6 +236,8 @@ impl FileSystem {
             if !self.nodes[i].used {
                 self.nodes[i] = Node::empty();
                 self.nodes[i].used = true;
+                let old = USED_NODES_RELAXED.fetch_add(1, Ordering::Relaxed);
+                assert!(old < MAX_NODES, "ramfs: used-node accounting overflow");
                 return Some(i);
             }
         }
@@ -317,6 +327,8 @@ impl FileSystem {
             return false;
         }
         self.nodes[idx] = Node::empty();
+        let old = USED_NODES_RELAXED.fetch_sub(1, Ordering::Relaxed);
+        assert!(old != 0, "ramfs: used-node accounting underflow");
         true
     }
 

@@ -126,7 +126,7 @@ pub fn lance_detache(
     argv: &[String],
     envp: &[String],
     cwd: usize,
-    prepare: &mut dyn FnMut(&mut task::Process) -> Vec<String>,
+    prepare: &mut dyn FnMut(&task::Process) -> Vec<String>,
 ) -> Result<u32, String> {
     if !crate::arch::x86_64::usermode::ready() {
         return Err("user-mode non initialise (ring 3 indisponible)".to_string());
@@ -140,7 +140,7 @@ pub fn lance_detache(
         cwd,
         Some(prepare),
     )?;
-    let pid = process.borrow().pid;
+    let pid = process.pid;
     task::register(task);
     Ok(pid)
 }
@@ -202,14 +202,15 @@ fn construit_tache(
     argv: &[String],
     envp: &[String],
     cwd: usize,
-    prepare: Option<&mut dyn FnMut(&mut task::Process) -> Vec<String>>,
+    prepare: Option<&mut dyn FnMut(&task::Process) -> Vec<String>>,
 ) -> Result<
     (
-        alloc::rc::Rc<core::cell::RefCell<task::Process>>,
+        alloc::sync::Arc<task::Process>,
         alloc::boxed::Box<task::Task>,
     ),
     String,
 > {
+    crate::kernel::perf::exec_start(name);
     let process = match task::new_process(name, cwd) {
         Some(process) => process,
         None => return Err("memoire physique insuffisante (espace d'adressage)".to_string()),
@@ -227,7 +228,7 @@ fn construit_tache(
     let envp = match prepare {
         Some(prepare) => {
             let mut complet = envp.to_vec();
-            for entree in prepare(&mut process.borrow_mut()) {
+            for entree in prepare(&process) {
                 let nom = match entree.find('=') {
                     Some(position) => entree[..position + 1].to_string(),
                     None => continue,
@@ -242,8 +243,11 @@ fn construit_tache(
     let envp = &envp[..];
 
     let (entry, stack) = {
-        let mut borrowed = process.borrow_mut();
-        let borrowed = &mut *borrowed;
+        let metadata = process.metadata.lock();
+        let uid = metadata.uid;
+        let gid = metadata.gid;
+        drop(metadata);
+        let mut borrowed = process.mm.lock();
 
         let image = match source {
             ImageSource::Memory(data) => {
@@ -287,8 +291,8 @@ fn construit_tache(
             envp,
             image: &image,
             interp_base,
-            uid: borrowed.uid,
-            gid: borrowed.gid,
+            uid,
+            gid,
         };
         let stack = elf::build_stack(&mut borrowed.space, &layout)
             .map_err(|message| message.to_string())?;

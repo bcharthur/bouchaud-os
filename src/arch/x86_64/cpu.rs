@@ -6,6 +6,14 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use crate::arch::x86_64::smp;
 
 static IDLE: [AtomicBool; smp::MAX_CPUS] = [const { AtomicBool::new(false) }; smp::MAX_CPUS];
+static IDLE_SINCE_NS: [AtomicU64; smp::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; smp::MAX_CPUS];
+static IDLE_ACCUM_NS: [AtomicU64; smp::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; smp::MAX_CPUS];
+static LOAD_LAST_NS: [AtomicU64; smp::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; smp::MAX_CPUS];
+static LOAD_LAST_IDLE_NS: [AtomicU64; smp::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; smp::MAX_CPUS];
 static CPU_TOTAL_TICKS: AtomicU64 = AtomicU64::new(0);
 static CPU_USER_TICKS: AtomicU64 = AtomicU64::new(0);
 static CPU_KERNEL_TICKS: AtomicU64 = AtomicU64::new(0);
@@ -19,10 +27,6 @@ static CPU_LOAD_PCT: AtomicU8 = AtomicU8::new(0);
 // BOUCHAUD_SMP_NG2_PERCPU_LOAD_V1
 // Fenetre de charge par CPU logique. Le PIT BSP echantillonne IDLE[] pour tous
 // les CPU online; aucun IPI supplementaire n'est necessaire.
-static CORE_WINDOW_TOTAL: [AtomicU64; smp::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; smp::MAX_CPUS];
-static CORE_WINDOW_IDLE: [AtomicU64; smp::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; smp::MAX_CPUS];
 static CORE_LOAD_PCT: [AtomicU8; smp::MAX_CPUS] =
     [const { AtomicU8::new(0) }; smp::MAX_CPUS];
 
@@ -49,20 +53,17 @@ pub fn hardware_cpu_index() -> usize {
 }
 
 fn update_core_load_windows(online: usize) {
+    let now = crate::kernel::timer::monotonic_ns();
     for cpu in 0..online.min(smp::MAX_CPUS) {
-        let idle = IDLE[cpu].load(Ordering::Acquire);
-        if idle {
-            CORE_WINDOW_IDLE[cpu].fetch_add(1, Ordering::Relaxed);
-        }
-        let total = CORE_WINDOW_TOTAL[cpu].fetch_add(1, Ordering::Relaxed) + 1;
-        if total < LOAD_WINDOW_TICKS {
+        let last = LOAD_LAST_NS[cpu].swap(now, Ordering::AcqRel);
+        let idle_total = idle_ns_at(cpu, now);
+        let last_idle = LOAD_LAST_IDLE_NS[cpu].swap(idle_total, Ordering::AcqRel);
+        if last == 0 {
             continue;
         }
-
-        let idle_ticks = CORE_WINDOW_IDLE[cpu].swap(0, Ordering::Relaxed);
-        let window = CORE_WINDOW_TOTAL[cpu].swap(0, Ordering::Relaxed).max(1);
-        let sample =
-            100u64.saturating_sub(idle_ticks.saturating_mul(100) / window) as u8;
+        let elapsed = now.saturating_sub(last).max(1);
+        let idle = idle_total.saturating_sub(last_idle).min(elapsed);
+        let sample = 100u64.saturating_sub(idle.saturating_mul(100) / elapsed) as u8;
         let old = CORE_LOAD_PCT[cpu].load(Ordering::Relaxed);
         let filtered = if old == 0 {
             sample
@@ -132,7 +133,13 @@ pub fn accounting() -> CpuAccounting {
     }
 }
 
-pub fn load_percent() -> u8 { CPU_LOAD_PCT.load(Ordering::Relaxed) }
+pub fn load_percent() -> u8 {
+    let online = smp::schedulable_cpus().max(1).min(smp::MAX_CPUS);
+    let sum: u64 = (0..online)
+        .map(|cpu| CORE_LOAD_PCT[cpu].load(Ordering::Relaxed) as u64)
+        .sum();
+    (sum / online as u64).min(100) as u8
+}
 
 pub fn load_percent_cpu(cpu: usize) -> u8 {
     if cpu >= smp::MAX_CPUS {
@@ -152,22 +159,67 @@ pub fn load_snapshot() -> [u8; smp::MAX_CPUS] {
     out
 }
 
+pub fn is_idle(cpu: usize) -> bool {
+    cpu < smp::MAX_CPUS && IDLE[cpu].load(Ordering::Acquire)
+}
+
+pub fn idle_mask() -> u64 {
+    let mut mask = 0u64;
+    for cpu in 0..smp::schedulable_cpus().min(64) {
+        if is_idle(cpu) { mask |= 1u64 << cpu; }
+    }
+    mask
+}
+
 pub fn halt_loop() -> ! {
     loop { unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)); } }
 }
 
 pub fn hlt() {
     let cpu = hardware_cpu_index();
-    IDLE[cpu].store(true, Ordering::SeqCst);
+    idle_enter(cpu);
     unsafe { asm!("hlt", options(nostack, preserves_flags)); }
-    IDLE[cpu].store(false, Ordering::SeqCst);
+    idle_exit(cpu);
 }
 
 pub fn wait_for_interrupt() {
     let cpu = hardware_cpu_index();
-    IDLE[cpu].store(true, Ordering::SeqCst);
+    idle_enter(cpu);
     unsafe { asm!("sti; hlt", options(nostack)); }
-    IDLE[cpu].store(false, Ordering::SeqCst);
+    idle_exit(cpu);
+}
+
+fn idle_enter(cpu: usize) {
+    let now = crate::kernel::timer::monotonic_ns();
+    IDLE_SINCE_NS[cpu].store(now, Ordering::Release);
+    IDLE[cpu].store(true, Ordering::Release);
+}
+
+fn idle_exit(cpu: usize) {
+    let now = crate::kernel::timer::monotonic_ns();
+    if IDLE[cpu].swap(false, Ordering::AcqRel) {
+        let since = IDLE_SINCE_NS[cpu].swap(0, Ordering::AcqRel);
+        IDLE_ACCUM_NS[cpu].fetch_add(now.saturating_sub(since), Ordering::Relaxed);
+    }
+}
+
+fn idle_ns_at(cpu: usize, now: u64) -> u64 {
+    let accumulated = IDLE_ACCUM_NS[cpu].load(Ordering::Acquire);
+    if IDLE[cpu].load(Ordering::Acquire) {
+        accumulated.saturating_add(
+            now.saturating_sub(IDLE_SINCE_NS[cpu].load(Ordering::Acquire)),
+        )
+    } else {
+        accumulated
+    }
+}
+
+pub fn idle_ns(cpu: usize) -> u64 {
+    if cpu >= smp::MAX_CPUS {
+        0
+    } else {
+        idle_ns_at(cpu, crate::kernel::timer::monotonic_ns())
+    }
 }
 
 pub fn interrupts_enabled() -> bool {
@@ -180,6 +232,33 @@ pub fn rdtsc() -> u64 {
     let lo: u32;
     let hi: u32;
     unsafe { asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack, preserves_flags)); }
+    ((hi as u64) << 32) | lo as u64
+}
+
+/// Lecture TSC ordonnee pour le timekeeping. RDTSCP attend les instructions
+/// anterieures; LFENCE+RDTSC fournit le meme ordre minimal sur le fallback.
+pub fn read_tsc_ordered(rdtscp: bool) -> u64 {
+    let lo: u32;
+    let hi: u32;
+    unsafe {
+        if rdtscp {
+            asm!(
+                "rdtscp",
+                out("eax") lo,
+                out("edx") hi,
+                out("ecx") _,
+                options(nomem, nostack)
+            );
+        } else {
+            asm!(
+                "lfence",
+                "rdtsc",
+                out("eax") lo,
+                out("edx") hi,
+                options(nomem, nostack)
+            );
+        }
+    }
     ((hi as u64) << 32) | lo as u64
 }
 

@@ -552,6 +552,16 @@ input_ack_new = """void PageClient::report_finished_handling_input_event(u64 pag
             reported_local_input_ack = true;
             outln(\"[ladybird-bouchaud] BROWSER_HOST_M11_INPUT_ACK_LOCAL page={}\", page_id);
         }
+        if (BouchaudChrome::wheel_input_pending()) {
+            // Le MouseWheel est passe par Page/EventHandler (DOM, overflow,
+            // iframe, preventDefault et async scrolling). M11 ne modifie aucun
+            // offset: son unique responsabilite supplementaire est de demander
+            // le readback du Compositor, puisque sa fenetre Bouchaud presente
+            // des screenshots et non la surface native du Compositor.
+            BouchaudChrome::wheel_handled_and_capture_requested(static_cast<int>(event_was_handled));
+            outln(\"[ladybird-bouchaud] WEB_SCREENSHOT_REQUEST after_wheel=1 page={}\", page_id);
+            page().top_level_traversable()->bouchaud_schedule_interactive_frame_capture();
+        }
         return;
     }
 #endif

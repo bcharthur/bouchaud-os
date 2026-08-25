@@ -1,21 +1,37 @@
 //! Gestion du temps noyau : ticks PIT et mesure de charge CPU via TSC.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::arch::x86_64::{__cpuid, __cpuid_count};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::arch::x86_64::cpu;
 use crate::arch::x86_64::interrupts;
 use crate::arch::x86_64::ports::outb;
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
-static mut BOOT_TSC: u64 = 0;
+static BOOT_TSC: AtomicU64 = AtomicU64::new(0);
+static TSC_HZ: AtomicU64 = AtomicU64::new(0);
+static LAST_MONOTONIC_NS: AtomicU64 = AtomicU64::new(0);
+static INVARIANT_TSC: AtomicBool = AtomicBool::new(false);
+static HAS_RDTSCP: AtomicBool = AtomicBool::new(false);
 
 /// Frequence de base du PIT 8253/8254, en hertz.
 const PIT_BASE_HZ: u32 = 1_193_182;
 
 pub fn init() {
+    let (invariant, rdtscp) = detect_tsc_features();
+    INVARIANT_TSC.store(invariant, Ordering::Release);
+    HAS_RDTSCP.store(rdtscp, Ordering::Release);
+    let boot_tsc = cpu::read_tsc_ordered(rdtscp);
+    BOOT_TSC.store(boot_tsc, Ordering::Release);
+    // Un TSC dont la frequence varie avec P-state n'est pas une horloge. Dans
+    // ce cas on force la calibration/fallback au lieu de publier des deadlines
+    // architecturales trompeuses.
+    TSC_HZ.store(
+        if invariant { detect_tsc_hz().unwrap_or(0) } else { 0 },
+        Ordering::Release,
+    );
     unsafe {
-        BOOT_TSC = cpu::rdtsc();
-        LAST_FRAME_TSC = BOOT_TSC;
-        RENDER_START_TSC = BOOT_TSC;
+        LAST_FRAME_TSC = boot_tsc;
+        RENDER_START_TSC = boot_tsc;
     }
     program_pit(TICKS_PER_SECOND as u32);
 }
@@ -56,7 +72,59 @@ pub fn seconds() -> u64 {
 /// Le tick etant a la milliseconde, c'est directement le compteur ; on garde
 /// une fonction dediee pour que le reste du code ne depende pas de ce choix.
 pub fn monotonic_ms() -> u64 {
-    ticks() * 1000 / TICKS_PER_SECOND
+    monotonic_ns() / 1_000_000
+}
+
+/// Nanosecondes monotones depuis le boot, independantes de la livraison des
+/// IRQ PIT. QEMU/TCG peut retarder fortement IRQ0 lorsqu'un vCPU monopolise le
+/// traducteur; le TSC virtuel continue en revanche de representer le temps de
+/// la machine invite.
+pub fn monotonic_ns() -> u64 {
+    let hz = TSC_HZ.load(Ordering::Acquire);
+    let candidate = if hz != 0 {
+        let cycles = cpu::read_tsc_ordered(HAS_RDTSCP.load(Ordering::Relaxed))
+            .wrapping_sub(BOOT_TSC.load(Ordering::Acquire));
+        ((cycles as u128).saturating_mul(1_000_000_000) / hz as u128)
+            .min(u64::MAX as u128) as u64
+    } else {
+        ticks().saturating_mul(1_000_000_000 / TICKS_PER_SECOND)
+    };
+
+    // Preserve la monotonie entre CPU meme si leur TSC presente un leger
+    // decalage. fetch_max renvoie l'ancienne valeur, d'ou le max final.
+    candidate.max(LAST_MONOTONIC_NS.fetch_max(candidate, Ordering::AcqRel))
+}
+
+/// Frequence architecturale du TSC annoncee par CPUID, si exploitable.
+fn detect_tsc_hz() -> Option<u64> {
+    let max_basic = __cpuid(0).eax;
+    if max_basic >= 0x15 {
+        let leaf = __cpuid_count(0x15, 0);
+        if leaf.eax != 0 && leaf.ebx != 0 && leaf.ecx != 0 {
+            let hz = (leaf.ecx as u128)
+                .saturating_mul(leaf.ebx as u128)
+                / leaf.eax as u128;
+            if hz != 0 && hz <= u64::MAX as u128 {
+                return Some(hz as u64);
+            }
+        }
+    }
+    if max_basic >= 0x16 {
+        let mhz = __cpuid(0x16).eax as u64;
+        if mhz != 0 {
+            return mhz.checked_mul(1_000_000);
+        }
+    }
+    None
+}
+
+fn detect_tsc_features() -> (bool, bool) {
+    let max_extended = __cpuid(0x8000_0000).eax;
+    let rdtscp = max_extended >= 0x8000_0001
+        && (__cpuid(0x8000_0001).edx & (1 << 27)) != 0;
+    let invariant = max_extended >= 0x8000_0007
+        && (__cpuid(0x8000_0007).edx & (1 << 8)) != 0;
+    (invariant, rdtscp)
 }
 
 /// Convertit une duree en millisecondes en nombre de ticks, arrondi au
@@ -66,11 +134,17 @@ pub fn ms_to_ticks(ms: u64) -> u64 {
 }
 
 pub fn cycles_since_boot() -> u64 {
-    unsafe { cpu::rdtsc().wrapping_sub(BOOT_TSC) }
+    cpu::read_tsc_ordered(HAS_RDTSCP.load(Ordering::Relaxed))
+        .wrapping_sub(BOOT_TSC.load(Ordering::Acquire))
 }
 
 pub fn timer_enabled() -> bool {
     interrupts::enabled()
+}
+
+pub fn tsc_hz() -> Option<u64> {
+    let hz = TSC_HZ.load(Ordering::Acquire);
+    (hz != 0).then_some(hz)
 }
 
 // ── Calibration TSC -> temps reel ──────────────────────────────────────────
@@ -104,7 +178,14 @@ pub fn calibrate() {
     let elapsed_tsc = cpu::rdtsc().wrapping_sub(start_tsc);
     let elapsed_ms = elapsed_ticks * 1000 / TICKS_PER_SECOND;
     if elapsed_ms > 0 {
-        unsafe { CYCLES_PER_MS = elapsed_tsc / elapsed_ms; }
+        let cycles_per_ms = elapsed_tsc / elapsed_ms;
+        unsafe { CYCLES_PER_MS = cycles_per_ms; }
+        // La calibration PIT n'est qu'un repli pour les machines qui ne
+        // publient aucune frequence CPUID. Elle ne remplace jamais une valeur
+        // architecturale, car des IRQ perdues faussent précisément ce calcul.
+        if TSC_HZ.load(Ordering::Acquire) == 0 {
+            TSC_HZ.store(cycles_per_ms.saturating_mul(1000), Ordering::Release);
+        }
     }
 }
 

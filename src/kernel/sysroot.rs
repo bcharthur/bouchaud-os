@@ -97,12 +97,15 @@ pub fn install() {
         mkdir_path(path);
     }
 
+    let fixtures = mkdir_path("/usr/share/bouchaud");
+    write_file(fixtures, "scroll-test.html", include_str!("scroll-test.html"), 0o444);
+
     install_fonts();
     install_proc();
     install_sys();
     install_etc();
 
-    crate::kernel::dmesg::log("sysroot: /usr/share/fonts, /proc, /sys et /etc installes");
+    crate::kernel::dmesg::log("sysroot: fonts, fixtures, /proc, /sys et /etc installes");
 }
 
 /// Depose les polices DejaVu dans `/usr/share/fonts`.

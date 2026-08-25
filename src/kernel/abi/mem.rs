@@ -20,12 +20,45 @@
 //! `/dev/fb0` suit une troisieme voie : ses pages sont celles de la memoire
 //! video, empruntees telles quelles.
 
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use crate::kernel::abi::errno;
 use crate::kernel::fd::FdKind;
 use crate::kernel::partage;
 use crate::kernel::task;
 use crate::kernel::vma::{self, Backing, Vma};
 use crate::kernel::vmm::{self, PAGE_SIZE};
+
+static CLEAN_WRITE_REJECTS: AtomicU64 = AtomicU64::new(0);
+
+fn execute_process_invalidation(
+    _process: &Arc<task::Process>,
+    invalidation: vmm::TlbInvalidation,
+) {
+    let depth = crate::kernel::smp_lock::suspend_for_schedule();
+    invalidation.execute();
+    crate::kernel::smp_lock::resume_after_schedule(depth);
+}
+
+fn finish_mapping_replacement(
+    process: &Arc<task::Process>,
+    retirement: Option<vmm::UnmapRetirement>,
+    shared_nodes: &[usize],
+    clean_pages: &[crate::kernel::clean_page_cache::Key],
+) {
+    if let Some(retirement) = retirement {
+        execute_process_invalidation(process, retirement.invalidation());
+        process.mm.lock().space.finish_unmap(retirement);
+    }
+    // Une frame MAP_SHARED ne peut être rendue qu'après le même ACK TLB.
+    for &node in shared_nodes {
+        partage::demappe(node);
+    }
+    for &key in clean_pages {
+        crate::kernel::clean_page_cache::release(key);
+    }
+}
 
 pub const PROT_NONE: u32 = 0;
 pub const PROT_READ: u32 = 1;
@@ -63,42 +96,54 @@ pub fn prot_to_flags(prot: u32) -> u64 {
 /// libc compare simplement le retour a sa demande).
 pub fn sys_brk(addr: u64) -> i64 {
     let process = task::current_process();
-    let mut process = process.borrow_mut();
+    let mut retirement = None;
+    let result = {
+        let mut borrowed = process.mm.lock();
+        if addr == 0 || addr < borrowed.brk_start {
+            return borrowed.brk as i64;
+        }
 
-    if addr == 0 || addr < process.brk_start {
-        return process.brk as i64;
-    }
-
-    let current = process.brk;
-    if addr > current {
-        let start = (current + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-        let end = (addr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-        if end > start {
-            let growth = end - start;
-            if !process.tient_sous_limite(growth) {
-                return current as i64;
+        let current = borrowed.brk;
+        if addr > current {
+            let start = (current + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let end = (addr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            if end > start {
+                let growth = end - start;
+                if !borrowed.tient_sous_limite(growth) {
+                    return current as i64;
+                }
+                vma::remplace(
+                    &mut borrowed.promesses,
+                    Vma {
+                        id: vma::nouvelle_identite(),
+                        debut: start,
+                        fin: end,
+                        drapeaux: prot_to_flags(PROT_READ | PROT_WRITE),
+                        backing: Backing::Zero,
+                    },
+                );
             }
-            vma::remplace(
-                &mut process.promesses,
-                Vma {
-                    debut: start,
-                    fin: end,
-                    drapeaux: prot_to_flags(PROT_READ | PROT_WRITE),
-                    backing: Backing::Zero,
-                },
-            );
+        } else if addr < current {
+            let start = (addr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let end = (current + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            if end > start {
+                vma::retire(&mut borrowed.promesses, start, end);
+                retirement = Some((
+                    borrowed.space.prepare_unmap(start, end - start),
+                    borrowed.space.pml4(), start, end - start,
+                ));
+            }
         }
-    } else if addr < current {
-        let start = (addr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-        let end = (current + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-        if end > start {
-            process.space.unmap(start, end - start);
-            vma::retire(&mut process.promesses, start, end);
-        }
-    }
+        borrowed.brk = addr;
+        addr as i64
+    };
 
-    process.brk = addr;
-    addr as i64
+    if let Some((retirement, pml4, start, len)) = retirement {
+        task::retire_fault_range(pml4, start, len);
+        execute_process_invalidation(&process, retirement.invalidation());
+        process.mm.lock().space.finish_unmap(retirement);
+    }
+    result
 }
 
 
@@ -114,7 +159,7 @@ fn plage_user_valide(base: u64, length: u64) -> bool {
 }
 
 fn choisit_base_mmap(
-    process: &mut task::Process,
+    process: &mut task::MmState,
     addr: u64,
     length: u64,
     flags: u32,
@@ -166,27 +211,34 @@ fn choisit_base_mmap(
 }
 
 fn installe_vma(
-    process: &mut task::Process,
+    process: &mut task::MmState,
     base: u64,
     length: u64,
     drapeaux: u64,
     backing: Backing,
     fixed: bool,
-) {
+) -> (Option<vmm::UnmapRetirement>, alloc::vec::Vec<usize>, alloc::vec::Vec<crate::kernel::clean_page_cache::Key>) {
     let fin = base + length;
-    if fixed {
-        process.space.unmap(base, length);
+    let (retirement, shared_nodes, clean_pages) = if fixed {
+        let shared_nodes = process.retire_partages(base, length);
+        let clean_pages = process.retire_clean_pages(base, length);
+        let retirement = process.space.prepare_unmap(base, length);
         vma::retire(&mut process.promesses, base, fin);
-    }
+        (Some(retirement), shared_nodes, clean_pages)
+    } else {
+        (None, alloc::vec::Vec::new(), alloc::vec::Vec::new())
+    };
     vma::remplace(
         &mut process.promesses,
         Vma {
+            id: vma::nouvelle_identite(),
             debut: base,
             fin,
             drapeaux,
             backing,
         },
     );
+    (retirement, shared_nodes, clean_pages)
 }
 
 /// `mmap`.
@@ -219,33 +271,22 @@ pub fn sys_mmap(
     }
 
     let process_rc = task::current_process();
-    let mut process = process_rc.borrow_mut();
+    let fd_kind = process_rc.files.lock().get(fd).map(|desc| desc.kind.clone());
+    let ecran = process_rc.metadata.lock().ecran;
+    let mut process = process_rc.mm.lock();
     let base = match choisit_base_mmap(&mut process, addr, length, flags) {
         Ok(base) => base,
         Err(error) => return error,
     };
     let fixed = flags & MAP_FIXED != 0;
 
-    if fixed {
-        let liberes = process.retire_partages(base, length);
-        for node in liberes {
-            partage::demappe(node);
-        }
-    }
-
     let drapeaux = prot_to_flags(prot);
 
     if flags & MAP_ANONYMOUS == 0 && fd >= 0 {
-        let fd_kind = process.files.get(fd).map(|desc| desc.kind.clone());
-        if let Some(FdKind::Framebuffer) = fd_kind {
-                if let Some(ecran) = process.ecran {
+        if let Some(FdKind::Framebuffer) = &fd_kind {
+                if let Some(ecran) = ecran {
                     partage::mappe(ecran.node);
-                    process.partages.push(task::Partage {
-                        base,
-                        length,
-                        node: ecran.node,
-                    });
-                    installe_vma(
+                    let (retirement, liberes, clean_liberes) = installe_vma(
                         &mut process,
                         base,
                         length,
@@ -258,13 +299,21 @@ pub fn sys_mmap(
                         },
                         fixed,
                     );
+                    process.partages.push(task::Partage {
+                        base,
+                        length,
+                        node: ecran.node,
+                    });
                     let populate =
                         flags & MAP_POPULATE != 0 && prot != PROT_NONE;
+                    let pml4 = process.space.pml4();
                     drop(process);
+                    if fixed { task::retire_fault_range(pml4, base, length); }
+                    finish_mapping_replacement(&process_rc, retirement, &liberes, &clean_liberes);
                     if populate {
                         let mut page = base;
                         while page < base + length {
-                            if !task::peuple_a_la_demande(page, false) {
+                            if task::peuple_a_la_demande(page, false) != task::FaultOutcome::Resolved {
                                 return -errno::ENOMEM;
                             }
                             page += PAGE_SIZE;
@@ -277,7 +326,7 @@ pub fn sys_mmap(
                     Some(phys) => phys,
                     None => return -errno::ENODEV,
                 };
-                installe_vma(
+                let (retirement, liberes, clean_liberes) = installe_vma(
                     &mut process,
                     base,
                     length,
@@ -289,15 +338,18 @@ pub fn sys_mmap(
                     },
                     fixed,
                 );
+                let pml4 = process.space.pml4();
                 drop(process);
+                if fixed { task::retire_fault_range(pml4, base, length); }
+                finish_mapping_replacement(&process_rc, retirement, &liberes, &clean_liberes);
                 return base as i64;
         }
     }
 
+    let mut new_shared_node = None;
     let backing = if flags & MAP_ANONYMOUS != 0 {
         Backing::Zero
     } else {
-        let fd_kind = process.files.get(fd).map(|desc| desc.kind.clone());
         let node = match fd_kind {
             Some(FdKind::File(node)) => node,
             Some(_) => return -errno::ENODEV,
@@ -307,12 +359,11 @@ pub fn sys_mmap(
         let total = crate::fs::backing::logical_len(node) as u64;
         let file_size = total.saturating_sub(offset).min(length);
         if flags & MAP_SHARED != 0 {
+            if prot & PROT_WRITE != 0 && crate::fs::backing::is_disk_backed(node) {
+                return -errno::EACCES;
+            }
             partage::mappe(node);
-            process.partages.push(task::Partage {
-                base,
-                length,
-                node,
-            });
+            new_shared_node = Some(node);
             Backing::SharedFile {
                 node,
                 mapping_start: base,
@@ -332,14 +383,11 @@ pub fn sys_mmap(
     if !fixed && !process.tient_sous_limite(length) {
         if let Backing::SharedFile { node, .. } = backing {
             partage::demappe(node);
-            process
-                .partages
-                .retain(|p| !(p.base == base && p.length == length));
         }
         return -errno::ENOMEM;
     }
 
-    installe_vma(
+    let (retirement, liberes, clean_liberes) = installe_vma(
         &mut process,
         base,
         length,
@@ -347,14 +395,20 @@ pub fn sys_mmap(
         backing,
         fixed,
     );
+    if let Some(node) = new_shared_node {
+        process.partages.push(task::Partage { base, length, node });
+    }
 
     let populate = flags & MAP_POPULATE != 0 && prot != PROT_NONE;
+    let pml4 = process.space.pml4();
     drop(process);
+    if fixed { task::retire_fault_range(pml4, base, length); }
+    finish_mapping_replacement(&process_rc, retirement, &liberes, &clean_liberes);
 
     if populate {
         let mut page = base;
         while page < base + length {
-            if !task::peuple_a_la_demande(page, false) {
+            if task::peuple_a_la_demande(page, false) != task::FaultOutcome::Resolved {
                 return -errno::ENOMEM;
             }
             page += PAGE_SIZE;
@@ -362,63 +416,6 @@ pub fn sys_mmap(
     }
 
     base as i64
-}
-
-/// Mappe un fichier en partage sur les frames du cache.
-///
-/// Le mappage est **declare** au cache (`partage::mappe`) et enregistre dans le
-/// processus : c'est ce qui permettra a `munmap`, a `execve` et a la mort du
-/// processus de rendre la reference. Sans cette declaration, les frames
-/// resteraient allouees pour toujours — c'est precisement le defaut que le
-/// module `partage` corrige.
-fn map_shared_file(
-    process: &mut task::Process,
-    node: usize,
-    base: u64,
-    length: u64,
-    offset: u64,
-) -> bool {
-    let flags = vmm::PTE_PRESENT | vmm::PTE_USER | vmm::PTE_WRITE;
-    let mut done = 0u64;
-    while done < length {
-        let page_index = (offset + done) / PAGE_SIZE;
-        let frame = match partage::page(node, page_index) {
-            Some(frame) => frame,
-            None => return false,
-        };
-        // `map_foreign` : la frame appartient au cache, pas au processus. Elle
-        // ne sera donc ni liberee avec lui, ni dupliquee par `fork`.
-        if !process.space.map_foreign(base + done, frame, flags) {
-            return false;
-        }
-        done += PAGE_SIZE;
-    }
-    partage::mappe(node);
-    process.partages.push(task::Partage { base, length, node });
-    true
-}
-
-/// Mappe le framebuffer materiel dans l'espace utilisateur.
-fn map_framebuffer(
-    process: &mut task::Process,
-    base: u64,
-    length: u64,
-    offset: u64,
-) -> Option<u64> {
-    let phys = crate::drivers::gfx::lfb_phys()?;
-    let flags = vmm::PTE_PRESENT
-        | vmm::PTE_USER
-        | vmm::PTE_WRITE
-        | vmm::PTE_NO_EXEC
-        | vmm::PTE_WRITE_THROUGH;
-    let mut done = 0u64;
-    while done < length {
-        if !process.space.map(base + done, phys + offset + done, flags) {
-            return None;
-        }
-        done += PAGE_SIZE;
-    }
-    Some(base)
 }
 
 /// `munmap`.
@@ -441,14 +438,28 @@ pub fn sys_munmap(addr: u64, length: u64) -> i64 {
     };
 
     let process = task::current_process();
-    let mut process = process.borrow_mut();
+    let (retirement, liberes, clean_liberes, pml4) = {
+        let mut process = process.mm.lock();
+        let liberes = process.retire_partages(addr, length);
+        let clean_liberes = process.retire_clean_pages(addr, length);
+        vma::retire(&mut process.promesses, addr, fin);
+        let retirement = process.space.prepare_unmap(addr, length);
+        let pml4 = process.space.pml4();
+        (retirement, liberes, clean_liberes, pml4)
+    };
 
-    let liberes = process.retire_partages(addr, length);
-    process.space.unmap(addr, length);
-    vma::retire(&mut process.promesses, addr, fin);
+    task::retire_fault_range(pml4, addr, length);
+
+    // No Mm guard crosses this window; remote faults and the IPI handler can progress.
+    execute_process_invalidation(&process, retirement.invalidation());
+
+    process.mm.lock().space.finish_unmap(retirement);
 
     for node in liberes {
         partage::demappe(node);
+    }
+    for key in clean_liberes {
+        crate::kernel::clean_page_cache::release(key);
     }
     0
 }
@@ -477,8 +488,26 @@ pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> i64 {
         return -errno::ENOMEM;
     }
 
-    let process = task::current_process();
-    let mut process = process.borrow_mut();
+    let process_rc = task::current_process();
+    let mut process = process_rc.mm.lock();
+
+    // Clean cache frames are deliberately shared without COW. Never make one
+    // writable in place: that would grant one process writes into every other
+    // address space mapping the same ELF page.
+    if prot & PROT_WRITE != 0 && process.has_clean_pages(addr, length) {
+        let count = CLEAN_WRITE_REJECTS.fetch_add(1, Ordering::Relaxed) + 1;
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "[MM-CLEAN-WRITE-REJECT] pid={} addr={:#x} len={} count={}",
+            process_rc.pid, addr, length, count,
+        ));
+        return -errno::EACCES;
+    }
+    if prot & PROT_WRITE != 0 && process.promesses.iter().any(|vma| {
+        vma.debut < fin && vma.fin > addr && matches!(vma.backing,
+            Backing::SharedFile { node, .. } if crate::fs::backing::is_disk_backed(node))
+    }) {
+        return -errno::EACCES;
+    }
 
     if !vma::protege(
         &mut process.promesses,
@@ -503,6 +532,7 @@ pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> i64 {
         vma::remplace(
             &mut process.promesses,
             Vma {
+                id: vma::nouvelle_identite(),
                 debut: addr,
                 fin,
                 drapeaux: prot_to_flags(prot),
@@ -511,9 +541,15 @@ pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> i64 {
         );
     }
 
-    process
+    let invalidation = process
         .space
-        .protect(addr, length, prot_to_flags(prot));
+        .prepare_protect(addr, length, prot_to_flags(prot));
+    let pml4 = process.space.pml4();
+    drop(process);
+    task::retire_fault_range(pml4, addr, length);
+    if let Some(invalidation) = invalidation {
+        execute_process_invalidation(&process_rc, invalidation);
+    }
     0
 }
 
@@ -616,27 +652,42 @@ pub fn sys_madvise(addr: u64, length: u64, advice: i32) -> i64 {
     };
 
     let process = task::current_process();
-    let mut process = process.borrow_mut();
-    if !vma::couvre(&process.promesses, addr, fin) {
-        return -errno::ENOMEM;
-    }
-
-    match advice {
-        MADV_DONTNEED | MADV_FREE => {
-            process.space.unmap(addr, length);
-            // La VMA reste : le prochain acces rematerialise la page.
-            0
+    let retirement = {
+        let mut borrowed = process.mm.lock();
+        if !vma::couvre(&borrowed.promesses, addr, fin) {
+            return -errno::ENOMEM;
         }
-        MADV_NORMAL
-        | MADV_RANDOM
-        | MADV_SEQUENTIAL
-        | MADV_WILLNEED
-        | MADV_DONTFORK
-        | MADV_DOFORK
-        | MADV_HUGEPAGE
-        | MADV_NOHUGEPAGE => 0,
-        _ => -errno::EINVAL,
+        match advice {
+            // La VMA reste : le prochain accès rematérialise la page.
+            MADV_DONTNEED | MADV_FREE => {
+                let clean = borrowed.retire_clean_pages(addr, length);
+                let pml4 = borrowed.space.pml4();
+                Some((borrowed.space.prepare_unmap(addr, length), clean, pml4))
+            }
+            MADV_NORMAL
+            | MADV_RANDOM
+            | MADV_SEQUENTIAL
+            | MADV_WILLNEED
+            | MADV_DONTFORK
+            | MADV_DOFORK
+            | MADV_HUGEPAGE
+            | MADV_NOHUGEPAGE => None,
+            _ => return -errno::EINVAL,
+        }
+    };
+    if let Some((retirement, clean, pml4)) = retirement {
+        // Cancel a loader for this range before it can republish a PTE after
+        // DONTNEED. No Mm guard crosses FaultRegistry or the TLB ACK wait.
+        task::retire_fault_range(pml4, addr, length);
+        execute_process_invalidation(&process, retirement.invalidation());
+        process.mm.lock().space.finish_unmap(retirement);
+        // The remote CPUs have acknowledged removal before the cache mapping
+        // references are returned, so no stale TLB can access a reclaimed frame.
+        for key in clean {
+            crate::kernel::clean_page_cache::release(key);
+        }
     }
+    0
 }
 
 /// `msync` : repercute les ecritures d'un `MAP_SHARED` vers le fichier.
@@ -647,7 +698,7 @@ pub fn sys_madvise(addr: u64, length: u64, advice: i32) -> i64 {
 pub fn sys_msync(addr: u64, _length: u64) -> i64 {
     let node = {
         let process = task::current_process();
-        let process = process.borrow();
+        let process = process.mm.lock();
         process.partage_a(addr)
     };
     match node {

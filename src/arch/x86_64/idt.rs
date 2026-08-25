@@ -88,6 +88,7 @@ impl Drop for GsGuard {
 }
 
 fn kill_faulting_task(reason: &str, stack: &InterruptStackFrame) -> ! {
+    let _kernel = crate::kernel::smp_lock::enter();
     let cr2 = x86_64::registers::control::Cr2::read().as_u64();
     crate::println!(
         "{} dans le programme utilisateur (rip={:#x}) : processus termine",
@@ -147,16 +148,44 @@ extern "x86-interrupt" fn page_fault_handler(stack: InterruptStackFrame, code: P
     let _gs = GsGuard::enter(&stack);
     let addr = x86_64::registers::control::Cr2::read();
     crate::kernel::task::stall_pf_begin(addr.as_u64());
-    let _kernel = crate::kernel::smp_lock::enter();
+    // Une exception user arrive avec IF masque par la porte IDT. Autoriser les
+    // IPI avant toute attente de verrou: un CPU bloque sur la synchronisation
+    // MM doit toujours pouvoir ACK un shootdown. IRET restaurera les RFLAGS
+    // utilisateur sauvegardes dans `stack`.
+    if from_user(&stack) {
+        x86_64::instructions::interrupts::enable();
+    }
     crate::kernel::task::stall_site_set(21, addr.as_u64());
     if from_user(&stack) && crate::kernel::task::in_user_task() {
-        if crate::kernel::task::peuple_a_la_demande(
-            addr.as_u64(),
-            code.contains(PageFaultErrorCode::PROTECTION_VIOLATION),
-        ) {
+        let mut retries = 0u32;
+        let outcome = loop {
+            let outcome = crate::kernel::task::peuple_a_la_demande(
+                addr.as_u64(),
+                code.contains(PageFaultErrorCode::PROTECTION_VIOLATION),
+            );
+            if outcome != crate::kernel::task::FaultOutcome::Retry {
+                break outcome;
+            }
+            retries = retries.wrapping_add(1);
+            if retries % 8 == 0 {
+                crate::kernel::task::fault_retry_yield();
+            } else {
+                core::hint::spin_loop();
+            }
+        };
+        crate::kernel::task::fault_retry_chain_complete(retries as u64);
+        if outcome == crate::kernel::task::FaultOutcome::Resolved {
             crate::kernel::task::stall_pf_done(addr.as_u64());
             crate::kernel::task::stall_site_clear();
+            // execve may have retired this sibling while its fault loader was
+            // outside the BKL doing I/O. Do not return it to the old user CR3.
+            let _kernel = crate::kernel::smp_lock::enter();
+            crate::kernel::task::retire_current_if_zombie();
             return;
+        }
+        if outcome == crate::kernel::task::FaultOutcome::Retired {
+            let _kernel = crate::kernel::smp_lock::enter();
+            crate::kernel::task::retire_current_if_zombie();
         }
         crate::kernel::task::stall_pf_fail(addr.as_u64());
         crate::kernel::task::log_fault_mapping(addr.as_u64());
@@ -179,7 +208,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
     crate::kernel::task::stall_probe_from_timer();
 
     let quantum = timer::ticks() % smp::SCHED_QUANTUM_TICKS == 0;
-    if quantum {
+    if quantum && !smp::local_scheduler_timer_enabled() {
         smp::broadcast_reschedule();
     }
 
@@ -236,6 +265,9 @@ extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFram
         interrupted_user,
     );
     smp::eoi_local();
+    if smp::local_scheduler_timer_enabled() {
+        smp::arm_local_scheduler_timer();
+    }
 
     let mut preempt_now = false;
     {

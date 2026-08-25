@@ -10,7 +10,9 @@
 
 use crate::drivers::ata::{Drive, SECTOR_SIZE};
 use crate::drivers::block;
+use crate::kernel::sync::SpinLock;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Copy)]
 struct DiskExtent {
@@ -18,39 +20,58 @@ struct DiskExtent {
     drive: Drive,
     data_lba: u64,
     size: usize,
+    generation: u64,
 }
 
-static mut EXTENTS: Option<Vec<DiskExtent>> = None;
-static mut DISK_READ_OPS: u64 = 0;
-static mut DISK_READ_BYTES: u64 = 0;
+static EXTENTS: SpinLock<Vec<DiskExtent>> = SpinLock::new(Vec::new());
+static DISK_READ_OPS: AtomicU64 = AtomicU64::new(0);
+static DISK_READ_BYTES: AtomicU64 = AtomicU64::new(0);
+static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static READAHEAD_HITS: AtomicU64 = AtomicU64::new(0);
+const READAHEAD_MIN: usize = 16 * 1024;
+const READAHEAD_MAX: usize = 64 * 1024;
+const CACHE_ENTRIES_MAX: usize = 256;
 
-fn extents() -> &'static mut Vec<DiskExtent> {
-    unsafe {
-        let slot = &mut *core::ptr::addr_of_mut!(EXTENTS);
-        slot.get_or_insert_with(Vec::new)
-    }
+struct ReadCacheEntry {
+    node: usize,
+    base: usize,
+    valid: usize,
+    data: Vec<u8>,
+    prefetched_from: usize,
 }
+static READ_CACHE: SpinLock<Vec<ReadCacheEntry>> = SpinLock::new(Vec::new());
+struct ReadPattern { node: usize, last_end: usize, sequential: u8 }
+static READ_PATTERNS: SpinLock<Vec<ReadPattern>> = SpinLock::new(Vec::new());
+static READAHEAD_PAGES: AtomicU64 = AtomicU64::new(0);
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+static RAMFS_BKL_ENTERS: AtomicU64 = AtomicU64::new(0);
 
 pub fn reset() {
-    unsafe {
-        EXTENTS = Some(Vec::new());
-        DISK_READ_OPS = 0;
-        DISK_READ_BYTES = 0;
-    }
+    EXTENTS.lock().clear();
+    READ_CACHE.lock().clear();
+    READ_PATTERNS.lock().clear();
+    DISK_READ_OPS.store(0, Ordering::Relaxed);
+    DISK_READ_BYTES.store(0, Ordering::Relaxed);
+    CACHE_HITS.store(0, Ordering::Relaxed);
+    READAHEAD_HITS.store(0, Ordering::Relaxed);
+    READAHEAD_PAGES.store(0, Ordering::Relaxed);
 }
 
 pub fn register_disk(node: usize, drive: Drive, data_lba: u64, size: usize) {
     unregister(node);
-    extents().push(DiskExtent {
+    EXTENTS.lock().push(DiskExtent {
         node,
         drive,
         data_lba,
         size,
+        generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
     });
 }
 
 pub fn unregister(node: usize) {
-    extents().retain(|extent| extent.node != node);
+    EXTENTS.lock().retain(|extent| extent.node != node);
+    READ_CACHE.lock().retain(|entry| entry.node != node);
+    READ_PATTERNS.lock().retain(|entry| entry.node != node);
 }
 
 pub fn is_disk_backed(node: usize) -> bool {
@@ -58,28 +79,40 @@ pub fn is_disk_backed(node: usize) -> bool {
 }
 
 pub fn disk_len(node: usize) -> Option<usize> {
-    extents()
+    EXTENTS.lock()
         .iter()
         .find(|extent| extent.node == node)
         .map(|extent| extent.size)
+}
+
+pub fn generation(node: usize) -> Option<u64> {
+    EXTENTS.lock()
+        .iter()
+        .find(|extent| extent.node == node)
+        .map(|extent| extent.generation)
 }
 
 pub fn logical_len(node: usize) -> usize {
     if let Some(size) = disk_len(node) {
         return size;
     }
+    let _kernel = crate::kernel::smp_lock::enter();
+    RAMFS_BKL_ENTERS.fetch_add(1, Ordering::Relaxed);
     crate::fs::ramfs::fs().nodes[node].content.len()
 }
 
 /// Lit une plage sans materialiser le fichier complet.
-pub fn read_at(node: usize, offset: usize, out: &mut [u8]) -> usize {
+fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
     if out.is_empty() {
         return 0;
     }
 
-    let extent = match extents().iter().find(|extent| extent.node == node).copied() {
+    // Copy metadata under the cache lock, then release it before any disk I/O.
+    let extent = match EXTENTS.lock().iter().find(|extent| extent.node == node).copied() {
         Some(extent) => extent,
         None => {
+            let _kernel = crate::kernel::smp_lock::enter();
+            RAMFS_BKL_ENTERS.fetch_add(1, Ordering::Relaxed);
             let fs = crate::fs::ramfs::fs();
             let content = &fs.nodes[node].content;
             if offset >= content.len() {
@@ -126,10 +159,8 @@ pub fn read_at(node: usize, offset: usize, out: &mut [u8]) -> usize {
         done += got;
         absolute += got;
         if read != full_sectors {
-            unsafe {
-                DISK_READ_OPS = DISK_READ_OPS.saturating_add(1);
-                DISK_READ_BYTES = DISK_READ_BYTES.saturating_add(done as u64);
-            }
+            DISK_READ_OPS.fetch_add(1, Ordering::Relaxed);
+            DISK_READ_BYTES.fetch_add(done as u64, Ordering::Relaxed);
             return done;
         }
     }
@@ -144,16 +175,107 @@ pub fn read_at(node: usize, offset: usize, out: &mut [u8]) -> usize {
         }
     }
 
-    unsafe {
-        DISK_READ_OPS = DISK_READ_OPS.saturating_add(1);
-        DISK_READ_BYTES = DISK_READ_BYTES.saturating_add(done as u64);
-    }
+    DISK_READ_OPS.fetch_add(1, Ordering::Relaxed);
+    DISK_READ_BYTES.fetch_add(done as u64, Ordering::Relaxed);
     done
+}
+
+/// Lit via une fenêtre read-ahead partagée entre processus.
+///
+/// Les faults ELF sont typiquement des lectures de 4 KiB consécutives. Une
+/// fenêtre alignée de 16 KiB transforme quatre faults en une commande backing,
+/// sans précharger un binaire entier. Le cache est borné à 4 MiB et partagé par
+/// identité de nœud; les processus Ladybird relisant les mêmes pages propres
+/// réutilisent donc les octets déjà lus.
+pub fn read_at(node: usize, offset: usize, out: &mut [u8]) -> usize {
+    if out.is_empty() || !is_disk_backed(node) || out.len() > READAHEAD_MAX {
+        return read_at_uncached(node, offset, out);
+    }
+    {
+        let cache = READ_CACHE.lock();
+        if let Some(entry) = cache.iter().find(|entry| {
+            entry.node == node && offset >= entry.base
+                && offset.saturating_add(out.len()) <= entry.base.saturating_add(entry.valid)
+        }) {
+            let start = offset - entry.base;
+            out.copy_from_slice(&entry.data[start..start + out.len()]);
+            CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+            if offset >= entry.prefetched_from {
+                READAHEAD_HITS.fetch_add(1, Ordering::Relaxed);
+            }
+            return out.len();
+        }
+    }
+
+    let window = {
+        let mut patterns = READ_PATTERNS.lock();
+        let pattern = if let Some(pattern) = patterns.iter_mut().find(|p| p.node == node) {
+            pattern
+        } else {
+            patterns.push(ReadPattern { node, last_end: 0, sequential: 0 });
+            patterns.last_mut().unwrap()
+        };
+        pattern.sequential = if offset == pattern.last_end {
+            pattern.sequential.saturating_add(1)
+        } else { 0 };
+        pattern.last_end = offset.saturating_add(out.len());
+        match pattern.sequential {
+            0 | 1 => READAHEAD_MIN,
+            2 | 3 => 32 * 1024,
+            _ => READAHEAD_MAX,
+        }
+    };
+    let base = offset & !(window - 1);
+    let mut data = alloc::vec![0u8; window];
+    let valid = read_at_uncached(node, base, &mut data);
+    if valid == 0 || offset < base || offset - base >= valid {
+        return 0;
+    }
+    let start = offset - base;
+    let copied = core::cmp::min(out.len(), valid - start);
+    out[..copied].copy_from_slice(&data[start..start + copied]);
+    READAHEAD_PAGES.fetch_add(
+        valid.saturating_sub(copied).div_ceil(crate::kernel::vmm::PAGE_SIZE as usize) as u64,
+        Ordering::Relaxed,
+    );
+    // Publication is short; the global cache lock is never held during I/O.
+    let mut cache = READ_CACHE.lock();
+    if cache.len() >= CACHE_ENTRIES_MAX { cache.remove(0); }
+    cache.push(ReadCacheEntry {
+        node,
+        base,
+        valid,
+        data,
+        prefetched_from: offset.saturating_add(copied),
+    });
+    copied
+}
+
+/// (hits cache, hits read-ahead).
+pub fn cache_stats() -> (u64, u64) {
+    (
+        CACHE_HITS.load(Ordering::Relaxed),
+        READAHEAD_HITS.load(Ordering::Relaxed),
+    )
+}
+
+pub fn readahead_pages() -> u64 {
+    READAHEAD_PAGES.load(Ordering::Relaxed)
+}
+
+pub fn ramfs_bkl_enters() -> u64 {
+    RAMFS_BKL_ENTERS.load(Ordering::Relaxed)
 }
 
 /// (fichiers paresseux, octets logiques, operations disque, octets lus).
 pub fn stats() -> (usize, u64, u64, u64) {
-    let files = extents().len();
-    let logical = extents().iter().map(|extent| extent.size as u64).sum();
-    unsafe { (files, logical, DISK_READ_OPS, DISK_READ_BYTES) }
+    let extents = EXTENTS.lock();
+    let files = extents.len();
+    let logical = extents.iter().map(|extent| extent.size as u64).sum();
+    (
+        files,
+        logical,
+        DISK_READ_OPS.load(Ordering::Relaxed),
+        DISK_READ_BYTES.load(Ordering::Relaxed),
+    )
 }

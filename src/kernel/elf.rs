@@ -274,6 +274,7 @@ pub fn load_node_lazy(
                 let page_start = vaddr & !(PAGE_SIZE - 1);
                 let page_end = (vaddr + ph.memsz + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
                 crate::kernel::vma::overlay(promises, crate::kernel::task::Promesse {
+                    id: crate::kernel::vma::nouvelle_identite(),
                     debut: page_start,
                     fin: page_end,
                     drapeaux: page_flags(ph.flags),
@@ -407,7 +408,15 @@ pub fn load(
                     }
                 }
 
-                space.protect(page_start, page_end - page_start, page_flags(ph.flags));
+                if let Some(invalidation) = space.prepare_protect(
+                    page_start,
+                    page_end - page_start,
+                    page_flags(ph.flags),
+                ) {
+                    // L'espace ELF est encore inactif: execute() ne cible
+                    // aucun CPU et n'attend donc jamais sous le borrow appelant.
+                    invalidation.execute();
+                }
                 image_end = image_end.max(page_end);
             }
             PT_DYNAMIC | PT_GNU_STACK => {}

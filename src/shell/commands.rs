@@ -130,11 +130,12 @@ pub fn meminfo() {
         file_faults
     );
     if let Some(task) = crate::kernel::task::try_current() {
-        let process = task.process.borrow();
+        let process = &task.process;
+        let mm = process.mm.lock();
         println!(
             "vma: {} regions, {} Mio virtuels",
-            process.promesses.len(),
-            crate::kernel::vma::octets_virtuels(&process.promesses)
+            mm.promesses.len(),
+            crate::kernel::vma::octets_virtuels(&mm.promesses)
                 / (1024 * 1024)
         );
     }

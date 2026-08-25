@@ -71,7 +71,7 @@ impl Surface {
         surface.frames.reserve(pages);
         for numero in 0..pages {
             match partage::page(node, numero as u64) {
-                Some(frame) => surface.frames.push(frame),
+                Some(lease) => surface.frames.push(lease.frame()),
                 None => {
                     crate::kernel::dmesg::log_fmt(format_args!(
                         "gui: surface {}x{} refusee, memoire physique insuffisante",
@@ -100,8 +100,8 @@ impl Surface {
     /// dans la table du processus qu'il vient de creer. Le jour ou un serveur
     /// graphique passera en ring 3, c'est cette fonction — et elle seule — qui
     /// deviendra un `sendmsg`.
-    pub fn descripteur(&self, processus: &mut Process) -> i32 {
-        processus.files.insert(FileDesc::new(FdKind::File(self.node)))
+    pub fn descripteur(&self, processus: &Process) -> i32 {
+        processus.files.lock().insert(FileDesc::new(FdKind::File(self.node)))
     }
 
     /// Adresse noyau du premier octet d'une page, si elle existe.

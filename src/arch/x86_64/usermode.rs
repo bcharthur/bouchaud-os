@@ -265,8 +265,27 @@ unsafe extern "C" fn syscall_dispatch(frame: *mut TrapFrame) {
     crate::kernel::task::stall_syscall_enter((*frame).rax);
     let kernel = crate::kernel::smp_lock::enter();
     crate::kernel::task::stall_syscall_bkl_acquired();
-    crate::kernel::abi::handle(&mut *frame);
-    drop(kernel);
+    crate::kernel::task::account_kernel_enter();
+    // These MM calls touch only Arc<Process>::Mm and the IRQ-safe TLB
+    // protocol. Release the legacy syscall BKL after accounting so sibling
+    // threads can mutate independent address spaces concurrently.
+    // mprotect and brk touch only Mm-serialized metadata, the SMP-safe frame
+    // allocator, and the IRQ-safe TLB protocol. munmap may trigger RAMFS
+    // MAP_SHARED writeback, whose filesystem core is still legacy-BKL-only.
+    let audited_mm = matches!((*frame).rax, 10 | 12);
+    if audited_mm {
+        drop(kernel);
+        crate::kernel::abi::handle(&mut *frame);
+        let kernel = crate::kernel::smp_lock::enter();
+        crate::kernel::task::account_kernel_exit();
+        crate::kernel::task::retire_current_if_zombie();
+        drop(kernel);
+    } else {
+        crate::kernel::abi::handle(&mut *frame);
+        crate::kernel::task::account_kernel_exit();
+        crate::kernel::task::retire_current_if_zombie();
+        drop(kernel);
+    }
     crate::kernel::task::stall_syscall_exit();
 }
 

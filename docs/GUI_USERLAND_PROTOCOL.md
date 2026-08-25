@@ -97,7 +97,7 @@ Tout est en petit-boutiste explicite. En-tete de 16 octets devant chaque charge 
 | `Focus` | 0x102 | reserve |
 | `Key` | 0x103 | `fenetre`, `code`, `modificateurs`, `unicode`, `appui` |
 | `Pointer` | 0x104 | `fenetre`, `x:i32`, `y:i32`, `boutons` |
-| `Wheel` | 0x105 | `fenetre`, `delta:i32` |
+| `Wheel` | 0x105 | `fenetre`, `delta:i32`, `x:i32`, `y:i32` (coordonnées client) |
 | `CloseRequest` | 0x106 | `fenetre:u32` |
 
 `Rect` fait 16 octets : `x:i32`, `y:i32`, `largeur:u32`, `hauteur:u32`, exprime

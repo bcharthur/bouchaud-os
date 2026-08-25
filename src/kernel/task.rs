@@ -39,11 +39,10 @@
 //! nu.
 
 use alloc::boxed::Box;
-use alloc::rc::Rc;
+use alloc::sync::Arc;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use crate::arch::x86_64::{cpu, smp};
@@ -51,6 +50,7 @@ use crate::arch::x86_64::usermode::{self, TrapFrame};
 use crate::kernel::fd::FdTable;
 use crate::kernel::smp_lock;
 use crate::kernel::vmm::AddressSpace;
+use crate::kernel::sync::{SpinLock, SpinLockGuard, SpinLockIrq};
 pub use crate::kernel::vma::{Backing as PromesseBacking, Vma as Promesse};
 
 /// Taille de la pile noyau d'une tache (64 KiB).
@@ -122,172 +122,445 @@ pub struct Context {
 /// meurt comme avant — sans quoi le noyau transformerait chaque dereference de
 /// pointeur nul en allocation silencieuse, et l'on perdrait le seul mecanisme
 /// qui signale ces defauts.
-static mut FAULTS_ZERO: u64 = 0;
-static mut FAULTS_FILE: u64 = 0;
+static FAULTS_ZERO: AtomicU64 = AtomicU64::new(0);
+static FAULTS_FILE: AtomicU64 = AtomicU64::new(0);
+static FAULT_WAITS: AtomicU64 = AtomicU64::new(0);
+static FAULT_RESOLVED: AtomicU64 = AtomicU64::new(0);
+static FAULT_RETRY: AtomicU64 = AtomicU64::new(0);
+static FAULT_INVALID: AtomicU64 = AtomicU64::new(0);
+static FAULT_IO_ERROR: AtomicU64 = AtomicU64::new(0);
+static FAULT_RETIRED: AtomicU64 = AtomicU64::new(0);
+static PF_BKL_ENTERS: AtomicU64 = AtomicU64::new(0);
+static FAULT_REGISTRY_PEAK: AtomicU64 = AtomicU64::new(0);
+static FAULT_RETRY_YIELDS: AtomicU64 = AtomicU64::new(0);
+static FAULT_RETRY_MAX_CHAIN: AtomicU64 = AtomicU64::new(0);
 
-/// Peuple a la demande une page promise.
-///
-/// La derniere promesse couvrant la page fixe les droits. Toutes les promesses
-/// file-backed couvrant cette meme page contribuent ensuite leurs octets : deux
-/// PT_LOAD ELF peuvent legalement partager une page de bordure.
-pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> bool {
-    if !crate::kernel::vmm::is_user_addr(adresse) || !in_user_task() {
-        return false;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultOutcome {
+    Resolved,
+    Retry,
+    Invalid,
+    IoError,
+    Retired,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MappingPart {
+    id: u64,
+    start: u64,
+    end: u64,
+    drapeaux: u64,
+    backing: PromesseBacking,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MappingToken {
+    effective_id: u64,
+    parts: Vec<MappingPart>,
+}
+
+fn mapping_token(regions: &[Promesse], page: u64) -> Option<MappingToken> {
+    let page_end = page.checked_add(crate::kernel::vmm::PAGE_SIZE)?;
+    let effective_id = crate::kernel::vma::trouve(regions, page)?.id;
+    let parts = regions
+        .iter()
+        .filter(|region| region.chevauche(page, page_end))
+        .map(|region| MappingPart {
+            id: region.id,
+            start: region.debut.max(page),
+            end: region.fin.min(page_end),
+            drapeaux: region.drapeaux,
+            backing: region.backing,
+        })
+        .collect();
+    Some(MappingToken { effective_id, parts })
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum FaultPageState {
+    Missing,
+    Loading,
+    Present,
+    Failed(FaultOutcome),
+    Cancelled,
+    Retired,
+}
+
+struct FaultPage {
+    pml4: u64,
+    page: u64,
+    token: MappingToken,
+    state: SpinLock<FaultPageState>,
+    waiters: crate::kernel::sync::WaitQueue,
+}
+
+static FAULT_PAGES: SpinLock<Vec<Arc<FaultPage>>> = SpinLock::new(Vec::new());
+
+fn fault_page(pml4: u64, page: u64, token: &MappingToken) -> Arc<FaultPage> {
+    let mut pages = FAULT_PAGES.lock();
+    if let Some(entry) = pages.iter().find(|entry| {
+        entry.pml4 == pml4 && entry.page == page && entry.token == *token
+    }) {
+        return Arc::clone(entry);
+    }
+    let entry = Arc::new(FaultPage {
+        pml4,
+        page,
+        token: token.clone(),
+        state: SpinLock::new(FaultPageState::Missing),
+        waiters: crate::kernel::sync::WaitQueue::new(),
+    });
+    pages.push(Arc::clone(&entry));
+    FAULT_REGISTRY_PEAK.fetch_max(pages.len() as u64, Ordering::Relaxed);
+    entry
+}
+
+fn forget_fault_page(entry: &Arc<FaultPage>) {
+    FAULT_PAGES.lock().retain(|candidate| !Arc::ptr_eq(candidate, entry));
+}
+
+pub fn forget_fault_space(pml4: u64) {
+    retire_fault_records(|entry| entry.pml4 == pml4);
+}
+
+/// Retire only loaders whose virtual page intersects a changed mapping range.
+/// Unrelated mmap/brk/mprotect operations therefore cannot cancel this fault.
+pub fn retire_fault_range(pml4: u64, start: u64, len: u64) {
+    let end = start.saturating_add(len);
+    cancel_fault_records(|entry| {
+        entry.pml4 == pml4 && entry.page < end
+            && entry.page.saturating_add(crate::kernel::vmm::PAGE_SIZE) > start
+    });
+}
+
+fn transition_fault_records(
+    mut predicate: impl FnMut(&FaultPage) -> bool,
+    terminal: FaultPageState,
+) {
+    // Publish the terminal state while every matching entry is still
+    // discoverable. A concurrent lookup can therefore never recreate a second
+    // loader in the remove-before-cancel window.
+    let entries = {
+        let registry = FAULT_PAGES.lock();
+        let entries: Vec<_> = registry.iter().filter(|entry| predicate(entry)).cloned().collect();
+        for entry in &entries {
+            *entry.state.lock() = terminal.clone();
+        }
+        entries
+    };
+    for entry in &entries {
+        entry.waiters.wake_all();
+    }
+    FAULT_PAGES.lock().retain(|candidate| {
+        !entries.iter().any(|entry| Arc::ptr_eq(entry, candidate))
+    });
+}
+
+fn cancel_fault_records(predicate: impl FnMut(&FaultPage) -> bool) {
+    transition_fault_records(predicate, FaultPageState::Cancelled);
+}
+
+fn retire_fault_records(predicate: impl FnMut(&FaultPage) -> bool) {
+    transition_fault_records(predicate, FaultPageState::Retired);
+}
+
+fn record_fault_outcome(outcome: FaultOutcome) {
+    match outcome {
+        FaultOutcome::Resolved => &FAULT_RESOLVED,
+        FaultOutcome::Retry => &FAULT_RETRY,
+        FaultOutcome::Invalid => &FAULT_INVALID,
+        FaultOutcome::IoError => &FAULT_IO_ERROR,
+        FaultOutcome::Retired => &FAULT_RETIRED,
+    }
+    .fetch_add(1, Ordering::Relaxed);
+}
+
+/// Resolve one demand-fault attempt. Mapping replacement is a typed retry,
+/// never an accidental SIGSEGV; a genuine missing/protected VMA is Invalid.
+pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> FaultOutcome {
+    if !crate::kernel::vmm::is_user_addr(adresse) || !in_user_task() || protection_fault {
+        record_fault_outcome(FaultOutcome::Invalid);
+        return FaultOutcome::Invalid;
     }
 
+    let Some(processus) = current_process_local() else {
+        record_fault_outcome(FaultOutcome::Retired);
+        return FaultOutcome::Retired;
+    };
+
+    let page = adresse & !(crate::kernel::vmm::PAGE_SIZE - 1);
+    let (fault_pml4, token) = {
+        let mm = processus.mm.lock();
+        let Some(token) = mapping_token(&mm.promesses, page) else {
+            record_fault_outcome(FaultOutcome::Invalid);
+            return FaultOutcome::Invalid;
+        };
+        (mm.space.pml4(), token)
+    };
+    let record = fault_page(fault_pml4, page, &token);
+    loop {
+        let mut state = record.state.lock();
+        match &*state {
+            FaultPageState::Loading => {
+                let ticket = record.waiters.ticket();
+                drop(state);
+                FAULT_WAITS.fetch_add(1, Ordering::Relaxed);
+                record.waiters.wait(ticket);
+            }
+            FaultPageState::Present => {
+                let resolved = processus.mm.lock().space.translate(page).is_some();
+                if resolved {
+                    record_fault_outcome(FaultOutcome::Resolved);
+                    return FaultOutcome::Resolved;
+                }
+                *state = FaultPageState::Loading;
+                break;
+            }
+            FaultPageState::Missing => {
+                *state = FaultPageState::Loading;
+                break;
+            }
+            FaultPageState::Failed(outcome) => {
+                let outcome = *outcome;
+                drop(state);
+                record_fault_outcome(outcome);
+                return outcome;
+            }
+            FaultPageState::Cancelled => {
+                drop(state);
+                record_fault_outcome(FaultOutcome::Retry);
+                return FaultOutcome::Retry;
+            }
+            FaultPageState::Retired => {
+                drop(state);
+                record_fault_outcome(FaultOutcome::Retired);
+                return FaultOutcome::Retired;
+            }
+        }
+    }
+
+    let loaded = peuple_page_loader(&processus, adresse, fault_pml4, &token);
+    let outcome = {
+        let mut state = record.state.lock();
+        match *state {
+            FaultPageState::Retired => FaultOutcome::Retired,
+            FaultPageState::Cancelled => FaultOutcome::Retry,
+            _ => {
+                *state = if loaded == FaultOutcome::Resolved {
+                    FaultPageState::Present
+                } else {
+                    FaultPageState::Failed(loaded)
+                };
+                loaded
+            }
+        }
+    };
+    record.waiters.wake_all();
+    // The PTE (for Present) or the Arc already held by each waiter is the
+    // durable state. Keeping terminal records here leaked one Vec entry per
+    // fault and made future lookup O(total faults). Publish, wake, then detach.
+    forget_fault_page(&record);
+    record_fault_outcome(outcome);
+    outcome
+}
+
+fn peuple_page_loader(
+    processus: &Arc<Process>,
+    adresse: u64,
+    fault_pml4: u64,
+    token: &MappingToken,
+) -> FaultOutcome {
     stall_pf_phase(210, adresse);
-    let processus = current_process();
     stall_pf_phase(211, adresse);
-    let mut p = processus.borrow_mut();
+    let mut p = processus.mm.lock();
     let page = adresse & !(crate::kernel::vmm::PAGE_SIZE - 1);
     stall_pf_phase(212, page);
+    if p.space.pml4() != fault_pml4 {
+        return FaultOutcome::Retired;
+    }
+    if mapping_token(&p.promesses, page).as_ref() != Some(token) {
+        return FaultOutcome::Retry;
+    }
 
     let effective = match crate::kernel::vma::trouve(&p.promesses, page) {
         Some(region) => region,
-        None => return false,
+        None => return FaultOutcome::Invalid,
     };
-
     if effective.drapeaux & crate::kernel::vmm::PTE_USER == 0 {
-        return false;
+        return FaultOutcome::Invalid;
     }
-
     if p.space.translate(page).is_some() {
-        // Un autre CPU du meme processus a pu materialiser la page pendant que
-        // cette faute attendait le BKL. Dans ce cas le fault est deja resolu.
-        // Une faute de protection, elle, reste fatale et ne doit pas boucler.
-        return !protection_fault;
+        return FaultOutcome::Resolved;
     }
 
     match effective.backing {
         PromesseBacking::Zero => {
             stall_pf_phase(220, page);
-            if !p.space.map_alloc(
-                page,
-                crate::kernel::vmm::PAGE_SIZE,
-                effective.drapeaux,
-            ) {
-                return false;
+            if !p.space.map_alloc(page, crate::kernel::vmm::PAGE_SIZE, effective.drapeaux) {
+                return FaultOutcome::IoError;
             }
-            unsafe {
-                FAULTS_ZERO = FAULTS_ZERO.saturating_add(1);
-            }
+            FAULTS_ZERO.fetch_add(1, Ordering::Relaxed);
             stall_pf_phase(229, page);
-            true
+            FaultOutcome::Resolved
         }
-
-        PromesseBacking::Framebuffer {
-            phys_base,
-            mapping_start,
-            phys_offset,
-        } => {
-            let delta = page.saturating_sub(mapping_start);
-            let phys = phys_base
-                .saturating_add(phys_offset)
-                .saturating_add(delta);
-            p.space.map_foreign(page, phys, effective.drapeaux)
+        PromesseBacking::Framebuffer { phys_base, mapping_start, phys_offset } => {
+            let phys = phys_base.saturating_add(phys_offset)
+                .saturating_add(page.saturating_sub(mapping_start));
+            if p.space.map_foreign(page, phys, effective.drapeaux) {
+                FaultOutcome::Resolved
+            } else {
+                FaultOutcome::IoError
+            }
         }
-
-        PromesseBacking::SharedFile {
-            node,
-            mapping_start,
-            file_offset,
-            ..
-        } => {
-            stall_pf_phase(230, page);
-            let source =
-                file_offset.saturating_add(page.saturating_sub(mapping_start));
+        PromesseBacking::SharedFile { node, mapping_start, file_offset, .. } => {
+            let source = file_offset.saturating_add(page.saturating_sub(mapping_start));
             let numero = source / crate::kernel::vmm::PAGE_SIZE;
-            let frame = match crate::kernel::partage::page(node, numero) {
-                Some(frame) => frame,
-                None => return false,
+            drop(p);
+            let lease = match crate::kernel::partage::page(node, numero) {
+                Some(lease) => lease,
+                None => return FaultOutcome::IoError,
             };
-            if !p.space.map_foreign(page, frame, effective.drapeaux) {
-                return false;
+            let mut p = processus.mm.lock();
+            if p.space.pml4() != fault_pml4 {
+                return FaultOutcome::Retired;
             }
-            unsafe {
-                FAULTS_FILE = FAULTS_FILE.saturating_add(1);
+            if mapping_token(&p.promesses, page).as_ref() != Some(token) {
+                return FaultOutcome::Retry;
             }
-            stall_pf_phase(239, page);
-            true
+            if p.space.translate(page).is_some() {
+                return FaultOutcome::Resolved;
+            }
+            if !p.space.map_foreign(page, lease.frame(), effective.drapeaux) {
+                return FaultOutcome::IoError;
+            }
+            FAULTS_FILE.fetch_add(1, Ordering::Relaxed);
+            FaultOutcome::Resolved
         }
-
         PromesseBacking::File { .. } => {
-            stall_pf_phase(240, page);
-            if !p.space.map_alloc(
-                page,
-                crate::kernel::vmm::PAGE_SIZE,
-                effective.drapeaux,
-            ) {
-                return false;
+            let regions = p.promesses.clone();
+            let page_end = page + crate::kernel::vmm::PAGE_SIZE;
+            let mut clean_key = None;
+            if effective.drapeaux & crate::kernel::vmm::PTE_WRITE == 0 {
+                let covering: Vec<_> = regions.iter().filter(|region| {
+                    matches!(region.backing, PromesseBacking::File { .. })
+                        && region.chevauche(page, page_end)
+                }).collect();
+                if covering.len() == 1 {
+                    if let PromesseBacking::File { node, mapping_start, file_offset, file_size } = effective.backing {
+                        let data_end = mapping_start.saturating_add(file_size);
+                        let offset = file_offset.saturating_add(page.saturating_sub(mapping_start));
+                        if page >= mapping_start && page_end <= data_end
+                            && offset % crate::kernel::vmm::PAGE_SIZE == 0
+                            && crate::fs::backing::is_disk_backed(node)
+                        {
+                            if let Some(generation) = crate::fs::backing::generation(node) {
+                                clean_key = Some(crate::kernel::clean_page_cache::Key { node, offset, generation });
+                            }
+                        }
+                    }
+                }
+            }
+            drop(p);
+
+            if let Some(key) = clean_key {
+                if let Some(frame) = crate::kernel::clean_page_cache::acquire(key) {
+                    let mut mm = processus.mm.lock();
+                    let outcome = if mm.space.pml4() != fault_pml4 {
+                        FaultOutcome::Retired
+                    } else if mapping_token(&mm.promesses, page).as_ref() != Some(token) {
+                        FaultOutcome::Retry
+                    } else if mm.space.translate(page).is_some() {
+                        FaultOutcome::Resolved
+                    } else if mm.space.map_foreign(page, frame, effective.drapeaux) {
+                        mm.clean_pages.push(CleanPageMapping { virt: page, key });
+                        FAULTS_FILE.fetch_add(1, Ordering::Relaxed);
+                        return FaultOutcome::Resolved;
+                    } else {
+                        FaultOutcome::IoError
+                    };
+                    crate::kernel::clean_page_cache::release(key);
+                    return outcome;
+                }
             }
 
-            // Plusieurs PT_LOAD peuvent partager une page. On compose tous les
-            // fragments file-backed qui la couvrent.
-            stall_pf_phase(241, page);
-            let count = p.promesses.len();
-            for index in 0..count {
-                let region = p.promesses[index];
-                if page < region.debut || page >= region.fin {
-                    continue;
-                }
-
-                let (node, mapping_start, file_offset, file_size) =
-                    match region.backing {
-                        PromesseBacking::File {
-                            node,
-                            mapping_start,
-                            file_offset,
-                            file_size,
-                        } => (node, mapping_start, file_offset, file_size),
-                        _ => continue,
-                    };
-
-                let page_end = page + crate::kernel::vmm::PAGE_SIZE;
-                let data_start = mapping_start;
-                let data_end = mapping_start.saturating_add(file_size);
-                let start = core::cmp::max(page, data_start);
-                let end = core::cmp::min(page_end, data_end);
-                if end <= start {
-                    continue;
-                }
-
+            // Build the complete private page off-MM and publish it only
+            // after the range-local token has been revalidated. Mapping a zero
+            // frame before I/O allowed concurrent mprotect to leave a present
+            // but never-populated page behind.
+            let mut page_data = [0u8; crate::kernel::vmm::PAGE_SIZE as usize];
+            for region in regions {
+                if !region.chevauche(page, page_end) { continue; }
+                let (node, mapping_start, file_offset, file_size) = match region.backing {
+                    PromesseBacking::File { node, mapping_start, file_offset, file_size } =>
+                        (node, mapping_start, file_offset, file_size),
+                    _ => continue,
+                };
+                let start = core::cmp::max(page, mapping_start);
+                let end = core::cmp::min(page_end, mapping_start.saturating_add(file_size));
+                if end <= start { continue; }
                 let wanted = (end - start) as usize;
-                let mut buffer =
-                    [0u8; crate::kernel::vmm::PAGE_SIZE as usize];
-                let source_offset = file_offset
-                    .saturating_add(start.saturating_sub(mapping_start));
+                let destination = (start - page) as usize;
+                let source_offset = file_offset.saturating_add(start.saturating_sub(mapping_start));
                 stall_pf_file_begin(source_offset);
                 let got = crate::fs::backing::read_at(
                     node,
                     source_offset as usize,
-                    &mut buffer[..wanted],
+                    &mut page_data[destination..destination + wanted],
                 );
                 stall_pf_file_done(got, wanted);
-
-                stall_pf_phase(244, start);
-                if got != wanted || !p.space.write(start, &buffer[..got]) {
-                    p.space.unmap(page, crate::kernel::vmm::PAGE_SIZE);
-                    return false;
-                }
+                if got != wanted { return FaultOutcome::IoError; }
             }
 
-            stall_pf_phase(249, page);
-            unsafe {
-                FAULTS_FILE = FAULTS_FILE.saturating_add(1);
-                if FAULTS_FILE == 1 {
-                    crate::kernel::dmesg::log_fmt(format_args!(
-                        "memfabric: premier fault fichier page={:#x}",
-                        page
-                    ));
-                }
+            let mut mm = processus.mm.lock();
+            if mm.space.pml4() != fault_pml4 { return FaultOutcome::Retired; }
+            if mapping_token(&mm.promesses, page).as_ref() != Some(token) {
+                return FaultOutcome::Retry;
             }
-            true
+            if mm.space.translate(page).is_some() { return FaultOutcome::Resolved; }
+            if !mm.space.map_alloc(page, crate::kernel::vmm::PAGE_SIZE, effective.drapeaux) {
+                return FaultOutcome::IoError;
+            }
+            if !mm.space.write(page, &page_data) {
+                let retirement = mm.space.prepare_unmap(page, crate::kernel::vmm::PAGE_SIZE);
+                drop(mm);
+                let depth = smp_lock::suspend_for_schedule();
+                retirement.invalidation().execute();
+                smp_lock::resume_after_schedule(depth);
+                processus.mm.lock().space.finish_unmap(retirement);
+                return FaultOutcome::IoError;
+            }
+            FAULTS_FILE.fetch_add(1, Ordering::Relaxed);
+            FaultOutcome::Resolved
         }
     }
 }
 
 pub fn demand_fault_stats() -> (u64, u64) {
-    unsafe { (FAULTS_ZERO, FAULTS_FILE) }
+    (
+        FAULTS_ZERO.load(Ordering::Relaxed),
+        FAULTS_FILE.load(Ordering::Relaxed),
+    )
+}
+
+pub fn demand_fault_waits() -> u64 {
+    FAULT_WAITS.load(Ordering::Relaxed)
+}
+
+pub fn fault_outcome_stats() -> (u64, u64, u64, u64, u64) {
+    (
+        FAULT_RESOLVED.load(Ordering::Relaxed),
+        FAULT_RETRY.load(Ordering::Relaxed),
+        FAULT_INVALID.load(Ordering::Relaxed),
+        FAULT_IO_ERROR.load(Ordering::Relaxed),
+        FAULT_RETIRED.load(Ordering::Relaxed),
+    )
+}
+
+pub fn fault_registry_stats() -> (u64, u64) {
+    (
+        FAULT_PAGES.lock().len() as u64,
+        FAULT_REGISTRY_PEAK.load(Ordering::Relaxed),
+    )
 }
 
 /// Diagnostic d'une faute que la Memory Fabric n'a pas pu servir.
@@ -297,7 +570,7 @@ pub fn log_fault_mapping(adresse: u64) {
     }
 
     let process = current_process();
-    let mut p = process.borrow_mut();
+    let mut p = process.mm.lock();
     let page = adresse & !(crate::kernel::vmm::PAGE_SIZE - 1);
     let present = p.space.translate(page).is_some();
     let writable = p.space.writable(page);
@@ -305,8 +578,8 @@ pub fn log_fault_mapping(adresse: u64) {
     if let Some(region) = crate::kernel::vma::trouve(&p.promesses, page) {
         crate::println!(
             "[memfabric] FAULT_FATAL pid={} app={} addr={:#x} page={:#x} vma={:#x}..{:#x} backing={} flags={:#x} present={} writable={}",
-            p.pid,
-            p.name,
+            process.pid,
+            process.metadata.lock().name,
             adresse,
             page,
             region.debut,
@@ -321,8 +594,8 @@ pub fn log_fault_mapping(adresse: u64) {
             crate::kernel::vma::voisines(&p.promesses, page);
         crate::println!(
             "[memfabric] FAULT_FATAL pid={} app={} addr={:#x} page={:#x} AUCUNE_VMA vmas={} present={} writable={}",
-            p.pid,
-            p.name,
+            process.pid,
+            process.metadata.lock().name,
             adresse,
             page,
             p.promesses.len(),
@@ -353,60 +626,88 @@ pub fn log_fault_mapping(adresse: u64) {
 
 
 
+pub struct MmState {
+    pub space: AddressSpace,
+    pub brk_start: u64,
+    pub brk: u64,
+    pub mmap_next: u64,
+    pub partages: Vec<Partage>,
+    pub limite_as: u64,
+    pub promesses: Vec<Promesse>,
+    pub clean_pages: Vec<CleanPageMapping>,
+}
+
+pub struct Mm {
+    inner: SpinLock<MmState>,
+    activation: SpinLock<Arc<crate::kernel::vmm::AddressSpaceIdentity>>,
+}
+impl Mm {
+    pub fn new(state: MmState) -> Self {
+        let activation = state.space.identity();
+        Self {
+            inner: SpinLock::new(state),
+            activation: SpinLock::new(activation),
+        }
+    }
+    pub fn lock(&self) -> SpinLockGuard<'_, MmState> { self.inner.lock() }
+    pub fn activate(&self) {
+        loop {
+            let identity = Arc::clone(&self.activation.lock());
+            if unsafe { identity.try_activate() } {
+                return;
+            }
+            core::hint::spin_loop();
+        }
+    }
+    pub fn mark_inactive(&self, cpu: usize) {
+        let identity = Arc::clone(&self.activation.lock());
+        identity.mark_inactive(cpu);
+    }
+
+    pub fn replace_activation(&self, identity: Arc<crate::kernel::vmm::AddressSpaceIdentity>) {
+        *self.activation.lock() = identity;
+    }
+}
+
+pub struct FileTable { inner: SpinLock<FdTable> }
+impl FileTable {
+    pub fn new(table: FdTable) -> Self { Self { inner: SpinLock::new(table) } }
+    pub fn lock(&self) -> SpinLockGuard<'_, FdTable> { self.inner.lock() }
+}
+
+pub struct ProcessMetadata {
+    pub name: String,
+    pub cwd: usize,
+    pub uid: u32,
+    pub gid: u32,
+    pub ecran: Option<EcranVirtuel>,
+}
+
+pub struct ProcessLifecycle { pub exit_code: i32, pub zombie: bool, pub threads: usize }
+
 pub struct Process {
     pub pid: u32,
     /// PID du parent (0 pour le processus lance depuis le shell).
     pub parent: u32,
-    pub name: String,
-    pub space: AddressSpace,
-    pub files: FdTable,
-    /// Debut et sommet courant du tas `brk`.
-    pub brk_start: u64,
-    pub brk: u64,
-    /// Prochaine adresse libre pour `mmap`.
-    pub mmap_next: u64,
-    /// Repertoire courant (index de nœud RAMFS).
-    pub cwd: usize,
-    /// Code de sortie renseigne par `exit_group`.
-    pub exit_code: i32,
-    /// Le processus est termine et attend d'etre recolte par son parent.
-    pub zombie: bool,
-    /// Nombre de threads encore vivants.
-    pub threads: usize,
-    /// uid/gid vus par le programme.
-    pub uid: u32,
-    pub gid: u32,
-    /// Gestionnaires et masques de signaux.
-    pub signals: crate::kernel::signal::SignalState,
-    /// Plages `MAP_SHARED` vivantes, chacune tenant une reference sur le cache
-    /// de pages partage.
-    pub partages: Vec<Partage>,
-    /// Taille maximale de l'espace d'adressage (`RLIMIT_AS`), 0 = illimite.
-    pub limite_as: u64,
-    /// Plages promises mais pas encore peuplees : la pagination a la demande.
-    ///
-    /// Un `mmap` en `MAP_NORESERVE` demande une plage utilisable **sans**
-    /// engager la memoire d'avance. C'est ainsi que mimalloc — l'allocateur
-    /// d'AK, donc de tout Ladybird — prend ses arenes : **un gibioctet a la
-    /// fois**, en lecture-ecriture, dont il ne touchera qu'une fraction.
-    ///
-    /// Les peupler a l'appel epuisait la machine en deux arenes. Les refuser
-    /// aurait fait echouer l'allocateur. La seule reponse juste est celle de
-    /// Linux : noter la promesse, et n'allouer chaque page qu'a son premier
-    /// acces — c'est ce que fait `crate::kernel::vmm::peuple_a_la_demande`,
-    /// appele depuis le gestionnaire de faute de page.
-    pub promesses: Vec<Promesse>,
-    /// Ecran virtuel : `/dev/fb0` de ce processus designe cette surface
-    /// partagee, et non le framebuffer physique.
-    ///
-    /// C'est ce qui fait du navigateur une application parmi d'autres plutot
-    /// qu'un programme qui prend l'ecran. Il ouvre `/dev/fb0`, l'interroge, le
-    /// projette — tout son code reste celui d'un client framebuffer Linux
-    /// ordinaire — et ce qu'il obtient est la surface que le gestionnaire de
-    /// fenetres compose dans sa fenetre. La regle « le WM est seul proprietaire
-    /// du framebuffer physique » est donc tenue par le noyau, pas par la bonne
-    /// volonte du client.
-    pub ecran: Option<EcranVirtuel>,
+    /// Groupe applicatif léger. Un nouveau processus racine crée son groupe;
+    /// fork hérite l'identité, sans influencer le placement scheduler.
+    pub resource_group_id: u32,
+    pub resource_group_name: String,
+    pub mm: Arc<Mm>,
+    pub files: Arc<FileTable>,
+    pub metadata: SpinLock<ProcessMetadata>,
+    pub lifecycle: SpinLock<ProcessLifecycle>,
+    pub signals: SpinLock<crate::kernel::signal::SignalState>,
+}
+
+// Compile-time contract: Task and the registry may transfer/share Process
+// references across CPUs without relying on the BKL.
+#[allow(dead_code)]
+fn assert_process_is_send_sync() {
+    fn assert_traits<T: Send + Sync>() {}
+    assert_traits::<Process>();
+    assert_traits::<Mm>();
+    assert_traits::<FileTable>();
 }
 
 /// Redirection de `/dev/fb0` vers une surface partagee.
@@ -433,7 +734,35 @@ pub struct Partage {
     pub node: usize,
 }
 
-impl Process {
+#[derive(Clone, Copy)]
+pub struct CleanPageMapping {
+    pub virt: u64,
+    pub key: crate::kernel::clean_page_cache::Key,
+}
+
+impl MmState {
+    pub fn retire_clean_pages(&mut self, addr: u64, len: u64) -> Vec<crate::kernel::clean_page_cache::Key> {
+        let fin = addr.saturating_add(len);
+        let mut keys = Vec::new();
+        self.clean_pages.retain(|mapping| {
+            if mapping.virt >= addr && mapping.virt < fin {
+                keys.push(mapping.key);
+                false
+            } else { true }
+        });
+        keys
+    }
+
+    pub fn has_clean_pages(&self, addr: u64, len: u64) -> bool {
+        let fin = addr.saturating_add(len);
+        self.clean_pages.iter().any(|mapping| mapping.virt >= addr && mapping.virt < fin)
+    }
+
+    pub fn release_clean_pages(&mut self) {
+        for mapping in self.clean_pages.drain(..) {
+            crate::kernel::clean_page_cache::release(mapping.key);
+        }
+    }
     /// Le nœud partage qui couvre cette adresse, s'il y en a un.
     pub fn partage_a(&self, addr: u64) -> Option<usize> {
         self.partages
@@ -442,25 +771,43 @@ impl Process {
             .map(|p| p.node)
     }
 
-    /// Retire les plages entierement couvertes par `[addr, addr+len)` et rend
-    /// les nœuds dont la reference est a relacher.
-    ///
-    /// Un recouvrement **partiel** ne relache rien : la plage reste inscrite
-    /// telle quelle. C'est deliberement conservateur. Un `munmap` de la moitie
-    /// d'une surface partagee est assez rare pour qu'une fuite bornee soit
-    /// preferable a la seule autre erreur possible ici — liberer une frame
-    /// qu'un mappage vivant designe encore.
+    /// Retire `[addr, addr+len)` des plages partagees. A middle punch splits
+    /// one mapping reference into two; prefix/suffix punches retain exactly
+    /// one reference, and complete removal returns the reference to release.
     pub fn retire_partages(&mut self, addr: u64, len: u64) -> Vec<usize> {
-        let fin = addr + len;
+        let fin = addr.saturating_add(len);
         let mut rendus = Vec::new();
-        self.partages.retain(|p| {
-            if addr <= p.base && p.base + p.length <= fin {
-                rendus.push(p.node);
-                false
-            } else {
-                true
+        let mut restantes = Vec::with_capacity(self.partages.len() + 1);
+        for p in self.partages.drain(..) {
+            let p_fin = p.base.saturating_add(p.length);
+            if fin <= p.base || addr >= p_fin {
+                restantes.push(p);
+                continue;
             }
-        });
+
+            let gauche = addr.saturating_sub(p.base);
+            let droite = p_fin.saturating_sub(fin);
+            if gauche != 0 {
+                restantes.push(Partage {
+                    base: p.base,
+                    length: gauche,
+                    node: p.node,
+                });
+            }
+            if droite != 0 {
+                restantes.push(Partage {
+                    base: fin,
+                    length: droite,
+                    node: p.node,
+                });
+            }
+            match (gauche != 0, droite != 0) {
+                (false, false) => rendus.push(p.node),
+                (true, true) => crate::kernel::partage::mappe(p.node),
+                _ => {}
+            }
+        }
+        self.partages = restantes;
         rendus
     }
 
@@ -500,14 +847,27 @@ impl Drop for Process {
     /// mort brutale — un `SIGKILL`, une faute de page fatale, un `exit` sans
     /// menage. Sans lui, tuer un renderer suffirait a faire fuir ses surfaces.
     fn drop(&mut self) {
-        self.relache_partages();
+        let (pml4, clean, shared) = {
+            let mut mm = self.mm.lock();
+            let pml4 = mm.space.pml4();
+            let clean = core::mem::take(&mut mm.clean_pages);
+            let shared = core::mem::take(&mut mm.partages);
+            (pml4, clean, shared)
+        };
+        forget_fault_space(pml4);
+        for mapping in clean {
+            crate::kernel::clean_page_cache::release(mapping.key);
+        }
+        for mapping in shared {
+            crate::kernel::partage::demappe(mapping.node);
+        }
     }
 }
 
 /// Un fil d'execution utilisateur.
 pub struct Task {
     pub tid: u32,
-    pub process: Rc<RefCell<Process>>,
+    pub process: Arc<Process>,
     pub state: TaskState,
     /// Classe d'ordonnancement. Voir [`Priorite`].
     pub priorite: Priorite,
@@ -521,6 +881,19 @@ pub struct Task {
     pub last_cpu: u8,
     /// CPU qui execute actuellement cette tache, -1 si elle est en runqueue.
     pub on_cpu: i8,
+    /// Derniere migration effective, pour imposer une residence cache minimale.
+    pub last_migration_ns: u64,
+    /// Runtime recent lisse, utilise comme estimation du poids de la tache.
+    pub recent_runtime_ns: u64,
+    /// Debut de la tranche courante.
+    pub slice_start_ns: u64,
+    pub last_account_ns: u64,
+    pub user_cpu_ns: u64,
+    pub kernel_cpu_ns: u64,
+    pub cpu_ns: [u64; MAX_CPUS],
+    pub in_kernel: bool,
+    pub context_switches: u64,
+    pub migrations: u64,
     /// Etat ring 3 quand la tache n'est pas en cours d'execution.
     pub frame: TrapFrame,
     /// Contexte noyau (pile) pour le changement de tache.
@@ -537,8 +910,10 @@ pub struct Task {
     pub clear_child_tid: u64,
     /// Cle du futex attendu, si la tache est bloquee dessus.
     pub futex_key: u64,
-    /// Tick a partir duquel un sommeil se termine (0 = pas de sommeil).
-    pub wake_tick: u64,
+    /// Identite d'une WaitQueue noyau, 0 lorsqu'aucune attente n'est armee.
+    pub wait_queue_key: usize,
+    /// Deadline monotone en nanosecondes (0 = pas de sommeil).
+    pub wake_deadline_ns: u64,
     /// La tache attend la fin d'un processus fils (`wait4`).
     pub waiting_for_child: bool,
     /// La tache n'a pas encore rejoint le ring 3.
@@ -567,11 +942,14 @@ pub struct Task {
 
 static mut TASKS: Option<Vec<Box<Task>>> = None;
 /// Tous les processus vivants ou zombies.
-static mut PROCESSES: Option<Vec<Rc<RefCell<Process>>>> = None;
+static PROCESSES: SpinLock<Vec<Arc<Process>>> = SpinLock::new(Vec::new());
+
 
 const NO_TASK: usize = usize::MAX;
 const MAX_CPUS: usize = smp::MAX_CPUS;
 static CURRENT: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(NO_TASK) }; MAX_CPUS];
+static CURRENT_PROCESS: [SpinLockIrq<Option<Arc<Process>>>; MAX_CPUS] =
+    [const { SpinLockIrq::new(None) }; MAX_CPUS];
 /// Zombie qui vient de quitter physiquement la pile de ce CPU. Le contexte
 /// entrant le rend recyclable une fois le switch assembleur effectivement fini.
 static RETIRED: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(NO_TASK) }; MAX_CPUS];
@@ -582,6 +960,27 @@ static CURRENT_IS_KERNEL: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(fals
 static TOURS_INTERACTIFS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 static RUNQ_STEALS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static CPU_MIGRATIONS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static STEAL_ATTEMPTS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static STEAL_REJECT_BALANCE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static STEAL_REJECT_AFFINITY: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+#[derive(Clone, Copy)]
+struct SmpSamplePrevious {
+    t_ns: u64,
+    ctx: u64,
+    migrations: [u64; MAX_CPUS],
+    steal_ok: [u64; MAX_CPUS],
+    steal_try: [u64; MAX_CPUS],
+    reject_balance: [u64; MAX_CPUS],
+    reject_affinity: [u64; MAX_CPUS],
+    page_faults: [u64; MAX_CPUS],
+    tlb: u64,
+    bkl_wait: u64,
+    bkl_hold: u64,
+    bkl_acq: u64,
+}
+
+static mut SMP_SAMPLE_PREVIOUS: Option<SmpSamplePrevious> = None;
 
 static CONTEXT_SWITCHES: AtomicU64 = AtomicU64::new(0);
 static IRQ_PREEMPTIONS: AtomicU64 = AtomicU64::new(0);
@@ -662,7 +1061,7 @@ fn current_index_raw() -> usize {
 }
 
 /// Contexte uniquement atomique, lu par smp_lock au moment exact ou un CPU
-/// devient proprietaire. Aucun Rc/RefCell n'est touche ici.
+/// devient proprietaire. Aucun domaine Process verrouille n'est touche ici.
 pub fn stall_probe_local_context() -> (usize, u64, u32, u32, u64) {
     let cpu = local_cpu();
     (
@@ -723,7 +1122,7 @@ pub fn stall_pf_fail(addr: u64) {
 }
 
 
-// --- Sonde de stall SMP : aucun acces Rc/RefCell, uniquement atomiques. ---
+// --- Sonde de stall SMP : aucun verrou Process, uniquement atomiques. ---
 pub fn stall_syscall_enter(nr: u64) {
     let cpu = local_cpu();
     STALL_SYSCALL_NR[cpu].store(nr, Ordering::Release);
@@ -903,8 +1302,8 @@ fn descend_de(pid: u32, racine: u32) -> bool {
         }
         let parent = processes()
             .iter()
-            .find(|p| p.borrow().pid == courant)
-            .map(|p| p.borrow().parent);
+            .find(|p| p.pid == courant)
+            .map(|p| p.parent);
         match parent {
             Some(suivant) => courant = suivant,
             None => return false,
@@ -923,22 +1322,17 @@ fn tasks() -> &'static mut Vec<Box<Task>> {
 }
 
 /// Table des processus.
-pub fn processes() -> &'static mut Vec<Rc<RefCell<Process>>> {
-    unsafe {
-        if PROCESSES.is_none() {
-            PROCESSES = Some(Vec::new());
-        }
-        PROCESSES.as_mut().unwrap()
-    }
+pub fn processes() -> Vec<Arc<Process>> {
+    PROCESSES.lock().clone()
 }
 
 /// Retrouve un processus par son pid.
-pub fn process_by_pid(pid: u32) -> Option<Rc<RefCell<Process>>> {
-    processes().iter().find(|p| p.borrow().pid == pid).cloned()
+pub fn process_by_pid(pid: u32) -> Option<Arc<Process>> {
+    PROCESSES.lock().iter().find(|p| p.pid == pid).cloned()
 }
 
 /// Retrouve le processus auquel appartient un thread donne.
-pub fn process_of_tid(tid: u32) -> Option<Rc<RefCell<Process>>> {
+pub fn process_of_tid(tid: u32) -> Option<Arc<Process>> {
     tasks()
         .iter()
         .find(|t| t.tid == tid)
@@ -972,8 +1366,46 @@ pub fn try_current() -> Option<&'static mut Task> {
 }
 
 /// Processus de la tache courante.
-pub fn current_process() -> Rc<RefCell<Process>> {
+pub fn current_process() -> Arc<Process> {
+    let _kernel = smp_lock::enter();
     current().process.clone()
+}
+
+/// Clone the current process from CPU-local stable ownership. `SpinLockIrq`
+/// prevents a same-CPU interrupt from observing a half-published Arc.
+pub fn current_process_local() -> Option<Arc<Process>> {
+    CURRENT_PROCESS[local_cpu()].lock().as_ref().map(Arc::clone)
+}
+
+fn clear_current_process_local() {
+    *CURRENT_PROCESS[local_cpu()].lock() = None;
+}
+
+pub fn fault_retry_yield() {
+    PF_BKL_ENTERS.fetch_add(1, Ordering::Relaxed);
+    FAULT_RETRY_YIELDS.fetch_add(1, Ordering::Relaxed);
+    if !schedule() {
+        // With no local peer, schedule() deliberately does not HLT a Ready
+        // task. A continuously mutating remote mapping would otherwise leave
+        // this fault in an unbounded busy loop; wait for the next IRQ instead.
+        debug_assert!(!smp_lock::held_by_current_cpu());
+        cpu::wait_for_interrupt();
+    }
+}
+
+pub fn fault_retry_chain_complete(chain: u64) {
+    FAULT_RETRY_MAX_CHAIN.fetch_max(chain, Ordering::Relaxed);
+}
+
+pub fn fault_retry_stats() -> (u64, u64) {
+    (
+        FAULT_RETRY_YIELDS.load(Ordering::Relaxed),
+        FAULT_RETRY_MAX_CHAIN.load(Ordering::Relaxed),
+    )
+}
+
+pub fn pf_bkl_enters() -> u64 {
+    PF_BKL_ENTERS.load(Ordering::Relaxed)
 }
 
 /// Temps processeur consomme par un processus, en millisecondes.
@@ -990,7 +1422,7 @@ pub fn current_process() -> Rc<RefCell<Process>> {
 pub fn cpu_time_ms(pid: u32) -> u64 {
     let mut total = 0u64;
     for task in tasks().iter() {
-        if task.process.borrow().pid == pid {
+        if task.process.pid == pid {
             total = total.saturating_add(task.ticks_cpu);
         }
     }
@@ -999,7 +1431,7 @@ pub fn cpu_time_ms(pid: u32) -> u64 {
 
 impl Task {
     /// Cree une tache prete a demarrer en ring 3 avec la trame donnee.
-    pub fn new(process: Rc<RefCell<Process>>, frame: TrapFrame) -> Box<Task> {
+    pub fn new(process: Arc<Process>, frame: TrapFrame) -> Box<Task> {
         let kstack = vec![0u8; KSTACK_SIZE];
         // Sommet aligne 16 : l'ABI System V l'exige avant chaque `call`, et le
         // stub d'entree syscall empile un nombre pair de quadmots.
@@ -1031,6 +1463,16 @@ impl Task {
             runq_cpu: u8::MAX,
             last_cpu: u8::MAX,
             on_cpu: -1,
+            last_migration_ns: 0,
+            recent_runtime_ns: 0,
+            slice_start_ns: 0,
+            last_account_ns: 0,
+            user_cpu_ns: 0,
+            kernel_cpu_ns: 0,
+            cpu_ns: [0; MAX_CPUS],
+            in_kernel: false,
+            context_switches: 0,
+            migrations: 0,
             frame,
             ctx: Context::default(),
             kstack,
@@ -1040,7 +1482,8 @@ impl Task {
             fs_base: 0,
             clear_child_tid: 0,
             futex_key: 0,
-            wake_tick: 0,
+            wait_queue_key: 0,
+            wake_deadline_ns: 0,
             waiting_for_child: false,
             fresh: true,
             ticks_cpu: 0,
@@ -1063,7 +1506,7 @@ impl Task {
     /// se demander qui les porte (pid, table de descripteurs). Son espace
     /// d'adressage n'est jamais active : [`install`] bascule sur celui du noyau
     /// pour un fil noyau.
-    pub fn new_kernel(process: Rc<RefCell<Process>>, entree: fn() -> !) -> Box<Task> {
+    pub fn new_kernel(process: Arc<Process>, entree: fn() -> !) -> Box<Task> {
         // La trame ring 3 n'a aucun sens ici ; elle reste a zero et n'est jamais
         // restauree, puisque le trampoline noyau ne fait pas d'`iretq`.
         let mut task = Task::new(process, TrapFrame::new_user(0, 0));
@@ -1121,14 +1564,9 @@ fn running_count_cpu(cpu: usize) -> usize {
 }
 
 fn queue_pressure(cpu_id: usize) -> usize {
-    tasks().iter()
-        .filter(|t| {
-            t.state == TaskState::Ready
-                && t.on_cpu < 0
-                && t.runq_cpu as usize == cpu_id
-                && allowed_on(t, cpu_id)
-        })
-        .count()
+    crate::arch::x86_64::cpu_local::CpuId::from_index(cpu_id)
+        .map(|id| crate::arch::x86_64::cpu_local::local(id).run_queue_len())
+        .unwrap_or(0)
 }
 
 /// Placement initial d'un THREAD. Le score combine pression de runqueue,
@@ -1157,6 +1595,26 @@ fn choose_runq_cpu(mask: u64) -> u8 {
         }
     }
     best_cpu as u8
+}
+
+/// Publish a Ready task exactly once to its owning physical runqueue and wake
+/// only that CPU when it is halted.
+fn publish_ready(index: usize) {
+    if index >= tasks().len() || tasks()[index].state != TaskState::Ready
+        || tasks()[index].on_cpu >= 0
+    {
+        return;
+    }
+    let target = if allowed_on(&tasks()[index], tasks()[index].runq_cpu as usize) {
+        tasks()[index].runq_cpu as usize
+    } else {
+        choose_runq_cpu(tasks()[index].affinity_mask) as usize
+    };
+    tasks()[index].runq_cpu = target as u8;
+    if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(target) {
+        crate::arch::x86_64::cpu_local::local(id).enqueue(index);
+    }
+    if cpu::is_idle(target) { smp::reschedule_cpu(target); }
 }
 
 /// Ajoute une tache a la table et renvoie son indice. En SMP les indices ne
@@ -1197,7 +1655,8 @@ pub fn register(mut task: Box<Task>) -> usize {
 
     {
         let registered = &tasks()[index];
-        let process = registered.process.borrow();
+        let process = &registered.process;
+        let metadata = process.metadata.lock();
         crate::serial_println!(
             "[SMP-TASK] idx={} tid={} pid={} rq={} last={} aff={:#x} on={} kernel={} prio={:?} name={}",
             index,
@@ -1209,11 +1668,11 @@ pub fn register(mut task: Box<Task>) -> usize {
             registered.on_cpu,
             registered.noyau,
             registered.priorite,
-            process.name.as_str(),
+            metadata.name.as_str(),
         );
     }
 
-    smp::broadcast_reschedule();
+    publish_ready(index);
     index
 }
 
@@ -1347,13 +1806,25 @@ extern "C" fn kernel_task_trampoline() -> ! {
 fn install(task: &mut Task) {
     unsafe {
         set_current_is_kernel(task.noyau);
+        *CURRENT_PROCESS[local_cpu()].lock() = if task.noyau {
+            None
+        } else {
+            Some(Arc::clone(&task.process))
+        };
+        if !task.noyau {
+            debug_assert_eq!(
+                current_process_local().map(|process| process.pid),
+                Some(task.process.pid),
+                "task: stale CPU-local current Process after install"
+            );
+        }
         // Un fil noyau n'a pas d'espace utilisateur a activer, et surtout ne
         // doit pas activer celui d'un programme : il lirait alors, sous les
         // memes adresses, la memoire du dernier processus installe.
         if task.noyau {
             crate::kernel::vmm::activate_kernel();
         } else {
-            task.process.borrow().space.activate();
+            task.process.mm.activate();
         }
         usermode::set_kernel_stack(task.kstack_top);
         usermode::set_fs_base(task.fs_base);
@@ -1368,14 +1839,19 @@ fn install(task: &mut Task) {
 #[inline]
 fn deactivate_task_space(task: &Task, cpu_id: usize) {
     if !task.noyau {
-        task.process.borrow().space.mark_inactive(cpu_id);
+        task.process.mm.mark_inactive(cpu_id);
     }
 }
 
 #[inline]
 fn mark_task_running(task: &mut Task, cpu_id: usize) {
+    let now = crate::kernel::timer::monotonic_ns();
+    debug_assert!(task.on_cpu < 0, "task: tentative de double execution tid={}", task.tid);
+    debug_assert_eq!(task.last_account_ns, 0, "task: cursor CPU encore arme hors CPU tid={}", task.tid);
     if task.last_cpu != u8::MAX && task.last_cpu as usize != cpu_id {
         CPU_MIGRATIONS[cpu_id].fetch_add(1, Ordering::Relaxed);
+        task.migrations = task.migrations.saturating_add(1);
+        task.last_migration_ns = now;
         if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu_id) {
             crate::arch::x86_64::cpu_local::local(id).note_migration();
         }
@@ -1383,6 +1859,64 @@ fn mark_task_running(task: &mut Task, cpu_id: usize) {
     task.last_cpu = cpu_id as u8;
     task.runq_cpu = cpu_id as u8;
     task.on_cpu = cpu_id as i8;
+    task.slice_start_ns = now;
+    task.last_account_ns = now;
+    task.context_switches = task.context_switches.saturating_add(1);
+}
+
+/// Avance une seule fois le curseur CPU de la tâche jusqu'à `now`.
+///
+/// Toutes les frontières (syscall, préemption, blocage) utilisent le même
+/// curseur. Une seconde frontière au même instant voit donc un delta nul au
+/// lieu de recompter la tranche précédente.
+fn account_until(task: &mut Task, now: u64) {
+    if task.last_account_ns == 0 {
+        return;
+    }
+    debug_assert!(task.on_cpu >= 0, "task: accounting armé pour une tâche hors CPU tid={}", task.tid);
+    let elapsed = now.saturating_sub(task.last_account_ns);
+    if task.in_kernel {
+        task.kernel_cpu_ns = task.kernel_cpu_ns.saturating_add(elapsed);
+    } else {
+        task.user_cpu_ns = task.user_cpu_ns.saturating_add(elapsed);
+    }
+    let cpu = local_cpu();
+    task.cpu_ns[cpu] = task.cpu_ns[cpu].saturating_add(elapsed);
+    // EWMA 7/8 historique + 1/8 dernière tranche: stable mais réactif en
+    // quelques quanta, sans utiliser les ticks comme unité.
+    task.recent_runtime_ns = task
+        .recent_runtime_ns
+        .saturating_mul(7)
+        .saturating_add(elapsed)
+        / 8;
+    task.last_account_ns = now;
+    task.slice_start_ns = now;
+}
+
+fn account_slice_end(task: &mut Task) {
+    let now = crate::kernel::timer::monotonic_ns();
+    account_until(task, now);
+    task.last_account_ns = 0;
+    task.slice_start_ns = 0;
+}
+
+/// Frontières syscall utilisées pour séparer user/kernel sans dépendre du PIT.
+pub fn account_kernel_enter() {
+    let now = crate::kernel::timer::monotonic_ns();
+    let task = current();
+    account_until(task, now);
+    task.in_kernel = true;
+}
+
+pub fn account_kernel_exit() {
+    let now = crate::kernel::timer::monotonic_ns();
+    let task = current();
+    account_until(task, now);
+    task.in_kernel = false;
+}
+
+pub fn account_resume_user_noreturn() {
+    account_kernel_exit();
 }
 
 /// Choisit la prochaine tache prete apres `after`.
@@ -1412,70 +1946,62 @@ fn runnable_steal(task: &Task, cpu: usize) -> bool {
         && allowed_on(task, cpu)
 }
 
-fn pick_next(after: usize, cpu: usize) -> Option<usize> {
+fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
     let len = tasks().len();
     if len == 0 { return None; }
 
-    let start = if after == NO_TASK { 0 } else { after % len };
-    let tours = TOURS_INTERACTIFS[cpu].load(Ordering::Relaxed);
-    let force_partage = tours >= TOURS_INTERACTIFS_MAX;
-
-    if !force_partage {
-        for offset in 1..=len {
-            let index = (start.wrapping_add(offset)) % len;
-            let candidate = &tasks()[index];
-            if runnable_local(candidate, cpu)
-                && candidate.priorite == Priorite::Interactive
-            {
-                TOURS_INTERACTIFS[cpu].fetch_add(1, Ordering::Relaxed);
+    if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu) {
+        let local = crate::arch::x86_64::cpu_local::local(id);
+        while let Some(index) = local.dequeue() {
+            if index < len && runnable_local(&tasks()[index], cpu) {
                 return Some(index);
             }
         }
     }
 
-    for offset in 1..=len {
-        let index = (start.wrapping_add(offset)) % len;
-        if runnable_local(&tasks()[index], cpu) {
-            if tasks()[index].priorite == Priorite::Normale {
-                TOURS_INTERACTIFS[cpu].store(0, Ordering::Relaxed);
-            } else {
-                TOURS_INTERACTIFS[cpu].fetch_add(1, Ordering::Relaxed);
-            }
-            return Some(index);
-        }
-    }
-
     let mut pressure = [0usize; MAX_CPUS];
-    for task in tasks().iter() {
-        if task.state == TaskState::Ready && task.on_cpu < 0 {
-            let owner = task.runq_cpu as usize;
-            if owner < MAX_CPUS {
-                pressure[owner] = pressure[owner].saturating_add(1);
-            }
-        }
+    for owner in 0..smp::schedulable_cpus().min(MAX_CPUS) {
+        pressure[owner] = queue_pressure(owner);
     }
 
-    let mut best: Option<(usize, usize)> = None;
-    for offset in 1..=len {
-        let index = (start.wrapping_add(offset)) % len;
-        let candidate = &tasks()[index];
-        if !runnable_steal(candidate, cpu) {
-            continue;
-        }
-        let owner = candidate.runq_cpu as usize;
-        let score = if owner < MAX_CPUS { pressure[owner] } else { 0 };
-        if best.map_or(true, |(_, old)| score > old) {
-            best = Some((index, score));
-        }
+    STEAL_ATTEMPTS[cpu].fetch_add(1, Ordering::Relaxed);
+    let donor = (0..smp::schedulable_cpus().min(MAX_CPUS))
+        .filter(|&candidate| candidate != cpu)
+        .max_by_key(|&candidate| pressure[candidate]);
+    let Some(donor) = donor else { return None; };
+
+    // Ne jamais voler la dernière tâche Ready d'un CPU: NG3 le faisait dans
+    // le fallback ci-dessous, puis un autre CPU la revolait quelques ms plus
+    // tard. C'était la source directe des milliers de migrations observées.
+    if pressure[donor] <= pressure[cpu].saturating_add(1) {
+        STEAL_REJECT_BALANCE[cpu].fetch_add(1, Ordering::Relaxed);
+        return None;
     }
 
-    if let Some((index, _)) = best {
-        tasks()[index].runq_cpu = cpu as u8;
-        RUNQ_STEALS[cpu].fetch_add(1, Ordering::Relaxed);
-        return Some(index);
+    const MIN_MIGRATION_RESIDENCY_NS: u64 = 20_000_000;
+    let now = crate::kernel::timer::monotonic_ns();
+    let Some(donor_id) = crate::arch::x86_64::cpu_local::CpuId::from_index(donor) else {
+        return None;
+    };
+    let donor_queue = crate::arch::x86_64::cpu_local::local(donor_id);
+    let Some(index) = donor_queue.steal() else { return None; };
+    let candidate = &tasks()[index];
+    if !runnable_steal(candidate, cpu) || candidate.runq_cpu as usize != donor {
+        donor_queue.enqueue(index);
+        return None;
     }
-
-    None
+    {
+        if candidate.last_migration_ns != 0
+            && now.saturating_sub(candidate.last_migration_ns) < MIN_MIGRATION_RESIDENCY_NS
+        {
+            STEAL_REJECT_AFFINITY[cpu].fetch_add(1, Ordering::Relaxed);
+            donor_queue.enqueue(index);
+            return None;
+        }
+    }
+    tasks()[index].runq_cpu = cpu as u8;
+    RUNQ_STEALS[cpu].fetch_add(1, Ordering::Relaxed);
+    Some(index)
 }
 
 /// Change la classe d'ordonnancement du processus courant.
@@ -1485,10 +2011,10 @@ fn pick_next(after: usize, cpu: usize) -> Option<usize> {
 /// seule la moitie des fils serait prioritaire aurait une interface qui saccade
 /// une fois sur deux.
 pub fn pose_priorite(priorite: Priorite) -> Priorite {
-    let pid = current().process.borrow().pid;
+    let pid = current().process.pid;
     let ancienne = current().priorite;
     for task in tasks().iter_mut() {
-        if task.process.borrow().pid == pid {
+        if task.process.pid == pid {
             task.priorite = priorite;
         }
     }
@@ -1498,34 +2024,6 @@ pub fn pose_priorite(priorite: Priorite) -> Priorite {
 /// La classe d'ordonnancement du processus courant.
 pub fn priorite() -> Priorite {
     current().priorite
-}
-
-/// Verifie l'invariant de non-reentrance avant de commuter.
-///
-/// La regle est enoncee en tete de [`crate::kernel::abi`] : aucun emprunt du
-/// `Process` ne doit survivre a un point de commutation. Elle n'est pas
-/// verifiable a la compilation, `RefCell` comptant ses emprunts a l'execution ;
-/// mais elle l'est ici, et c'est le seul endroit qui compte, puisque toutes les
-/// attentes du noyau — `yield_now`, futex, lecture bloquante — passent par
-/// [`schedule`].
-///
-/// Sans ce controle, un emprunt oublie ne se manifeste qu'au moment ou une
-/// **autre** tache du meme processus tente d'emprunter a son tour : le
-/// `BorrowMutError` designe alors la victime, jamais le coupable, et rien dans
-/// la trace ne mene a l'appel systeme fautif. Le cout est d'un essai d'emprunt
-/// par commutation, uniquement en compilation de debogage.
-#[inline]
-fn debug_assert_borrows_released() {
-    #[cfg(debug_assertions)]
-    {
-        if let Some(task) = try_current() {
-            debug_assert!(
-                task.process.try_borrow_mut().is_ok(),
-                "task: un emprunt du Process est encore actif au moment de commuter \
-                 — relacher le borrow avant toute attente (invariant : voir kernel::abi)"
-            );
-        }
-    }
 }
 
 /// Second invariant du meme point de passage : **on ne commute jamais
@@ -1582,7 +2080,6 @@ pub fn schedule() -> bool {
     let _kernel = smp_lock::enter();
     let cur = current_index_raw();
     if cur == NO_TASK { return false; }
-    debug_assert_borrows_released();
     debug_assert_interrupts_enabled();
     wake_sleepers();
     let cpu_id = local_cpu();
@@ -1593,6 +2090,11 @@ pub fn schedule() -> bool {
                 // Ne jamais dormir en tenant le BKL : les autres CPU doivent
                 // pouvoir entrer dans leurs syscalls pendant notre HLT.
                 let depth = smp_lock::suspend_for_schedule();
+                #[cfg(debug_assertions)]
+                debug_assert!(
+                    !smp_lock::held_by_current_cpu(),
+                    "task: schedule HLT interdit tant que le BKL est detenu"
+                );
                 cpu::wait_for_interrupt();
                 smp_lock::resume_after_schedule(depth);
             }
@@ -1612,6 +2114,7 @@ fn switch_to(from: usize, to: usize) {
         let to_ptr = &mut **list.get_mut(to).unwrap() as *mut Task;
 
         CONTEXT_SWITCHES.fetch_add(1, Ordering::Relaxed);
+        account_slice_end(&mut *from_ptr);
         usermode::fxsave((*from_ptr).fpu_ptr() as *mut u8);
         (*from_ptr).fs_base = usermode::fs_base();
         deactivate_task_space(&*from_ptr, cpu_id);
@@ -1623,6 +2126,11 @@ fn switch_to(from: usize, to: usize) {
             (*from_ptr).on_cpu = -1;
             (*from_ptr).last_cpu = cpu_id as u8;
             (*from_ptr).runq_cpu = cpu_id as u8;
+            if (*from_ptr).state == TaskState::Ready {
+                if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu_id) {
+                    crate::arch::x86_64::cpu_local::local(id).enqueue(from);
+                }
+            }
         }
         mark_task_running(&mut *to_ptr, cpu_id);
 
@@ -1653,6 +2161,7 @@ fn switch_to_kernel() -> ! {
         ptr
     };
     set_current_index(NO_TASK);
+    clear_current_process_local();
     set_current_is_kernel(false);
     usermode::per_cpu().current = 0;
     crate::kernel::vmm::activate_kernel();
@@ -1670,6 +2179,7 @@ pub fn secondary_cpu_loop() -> ! {
     let cpu_id = local_cpu();
     assert!(cpu_id != 0, "task: secondary_cpu_loop sur BSP");
     set_current_index(NO_TASK);
+    clear_current_process_local();
     set_current_is_kernel(false);
     usermode::per_cpu().current = 0;
 
@@ -1710,6 +2220,7 @@ pub fn secondary_cpu_loop() -> ! {
             complete_retired();
             stall_site_set(50, current_index_raw() as u64);
             set_current_index(NO_TASK);
+            clear_current_process_local();
             set_current_is_kernel(false);
             usermode::per_cpu().current = 0;
             stall_site_set(55, 0);
@@ -1731,7 +2242,6 @@ pub fn secondary_cpu_loop() -> ! {
 /// Si d'autres threads du programme tournent encore, on bascule sur eux ;
 /// sinon, retour au fil noyau qui a lance le programme.
 pub fn exit_current(code: i32) -> ! {
-    let cur = current_index_raw();
     {
         let task = current();
         task.state = TaskState::Zombie;
@@ -1739,22 +2249,20 @@ pub fn exit_current(code: i32) -> ! {
         let clear = task.clear_child_tid;
         if clear != 0 {
             let process = task.process.clone();
-            let mut process = process.borrow_mut();
-            process.space.write(clear, &0u32.to_le_bytes());
-            drop(process);
+            process.mm.lock().space.write(clear, &0u32.to_le_bytes());
             futex_wake(clear, 1);
         }
         let process = task.process.clone();
-        let mut process = process.borrow_mut();
-        if process.threads > 0 {
-            process.threads -= 1;
+        let mut lifecycle = process.lifecycle.lock();
+        if lifecycle.threads > 0 {
+            lifecycle.threads -= 1;
         }
-        process.exit_code = code;
-        if process.threads == 0 {
+        lifecycle.exit_code = code;
+        if lifecycle.threads == 0 {
             // Dernier thread : le processus devient zombie jusqu'a ce que son
             // parent le recolte par `wait4`. C'est ce qui permet au parent de
             // recuperer le code de sortie apres coup.
-            process.zombie = true;
+            lifecycle.zombie = true;
             // Les verrous d'enregistrement POSIX meurent avec leur detenteur.
             // Un WebContent qui plante ne doit pas laisser la base SQL du
             // navigateur verrouillee pour le reste de la session.
@@ -1775,8 +2283,8 @@ pub fn exit_current(code: i32) -> ! {
     let racine = RACINE_PREMIER_PLAN.load(Ordering::Acquire);
     if racine != 0 {
         let fini = {
-            let process = current().process.borrow();
-            process.zombie && process.pid == racine
+            let process = &current().process;
+            process.lifecycle.lock().zombie && process.pid == racine
         };
         if fini {
             let mut emportes = 0usize;
@@ -1784,7 +2292,7 @@ pub fn exit_current(code: i32) -> ! {
                 if tasks()[index].state == TaskState::Zombie {
                     continue;
                 }
-                let pid = tasks()[index].process.borrow().pid;
+                let pid = tasks()[index].process.pid;
                 if descend_de(pid, racine) {
                     tasks()[index].state = TaskState::Zombie;
                     emportes += 1;
@@ -1850,28 +2358,29 @@ pub fn exit_current(code: i32) -> ! {
 /// peut avoir choisi d'intercepter) et le reveil d'un `wait4` bloquant.
 fn notify_parent_of_exit() {
     let (parent_pid, is_zombie) = {
-        let process = current().process.borrow();
-        (process.parent, process.zombie)
+        let process = &current().process;
+        (process.parent, process.lifecycle.lock().zombie)
     };
     if !is_zombie || parent_pid == 0 {
         return;
     }
-    for task in tasks().iter_mut() {
-        if task.state == TaskState::Zombie {
+    for index in 0..tasks().len() {
+        if tasks()[index].state == TaskState::Zombie {
             continue;
         }
         let matches = {
-            let mut process = task.process.borrow_mut();
+            let process = &tasks()[index].process;
             if process.pid == parent_pid {
-                process.signals.raise(crate::kernel::signal::SIGCHLD);
+                process.signals.lock().raise(crate::kernel::signal::SIGCHLD);
                 true
             } else {
                 false
             }
         };
-        if matches && task.waiting_for_child {
-            task.waiting_for_child = false;
-            task.state = TaskState::Ready;
+        if matches && tasks()[index].waiting_for_child {
+            tasks()[index].waiting_for_child = false;
+            tasks()[index].state = TaskState::Ready;
+            publish_ready(index);
         }
     }
 }
@@ -1880,9 +2389,9 @@ fn notify_parent_of_exit() {
 pub fn zombie_children(parent_pid: u32) -> Vec<(u32, i32)> {
     let mut out = Vec::new();
     for process in processes().iter() {
-        let borrowed = process.borrow();
-        if borrowed.parent == parent_pid && borrowed.zombie {
-            out.push((borrowed.pid, borrowed.exit_code));
+        let lifecycle = process.lifecycle.lock();
+        if process.parent == parent_pid && lifecycle.zombie {
+            out.push((process.pid, lifecycle.exit_code));
         }
     }
     out
@@ -1890,12 +2399,12 @@ pub fn zombie_children(parent_pid: u32) -> Vec<(u32, i32)> {
 
 /// Ce pid a-t-il encore des fils (zombies ou vivants) ?
 pub fn has_children(parent_pid: u32) -> bool {
-    processes().iter().any(|p| p.borrow().parent == parent_pid)
+    processes().iter().any(|p| p.parent == parent_pid)
 }
 
 /// Retire un processus zombie de la table (il a ete recolte).
 pub fn collect_child(pid: u32) {
-    processes().retain(|p| p.borrow().pid != pid);
+    PROCESSES.lock().retain(|p| p.pid != pid);
     crate::kernel::process::kill(pid);
 }
 
@@ -1903,10 +2412,10 @@ pub fn collect_child(pid: u32) {
 pub fn exit_group(code: i32) -> ! {
     let (pid, tid, process) = {
         let task = current();
-        (task.process.borrow().pid, task.tid, task.process.clone())
+        (task.process.pid, task.tid, task.process.clone())
     };
     for task in tasks().iter_mut() {
-        if task.tid != tid && task.process.borrow().pid == pid {
+        if task.tid != tid && task.process.pid == pid {
             task.state = TaskState::Zombie;
         }
     }
@@ -1914,7 +2423,7 @@ pub fn exit_group(code: i32) -> ! {
     // `exit_group` termine tous les autres threads du processus. Le thread
     // courant est donc le seul encore vivant; `exit_current` le decrementera
     // de 1 a 0 et rendra le processus zombie/recoltable par `wait4`.
-    process.borrow_mut().threads = 1;
+    process.lifecycle.lock().threads = 1;
 
     exit_current(code)
 }
@@ -1939,7 +2448,7 @@ pub fn run(mut first: Box<Task>) -> i32 {
     first.runq_cpu = caller_cpu as u8;
     first.last_cpu = caller_cpu as u8;
     let process = first.process.clone();
-    let racine = process.borrow().pid;
+    let racine = process.pid;
     let index = register(first);
     let cpu_id = local_cpu();
     let to_ptr = unsafe {
@@ -1959,16 +2468,16 @@ pub fn run(mut first: Box<Task>) -> i32 {
 
     crate::kernel::vmm::activate_kernel();
     set_current_index(NO_TASK);
+    clear_current_process_local();
     RACINE_PREMIER_PLAN.store(0, Ordering::Release);
     let (code, pid) = {
-        let borrowed = process.borrow();
-        (borrowed.exit_code, borrowed.pid)
+        (process.lifecycle.lock().exit_code, process.pid)
     };
     reap();
     for stale in processes().iter() {
-        crate::kernel::process::kill(stale.borrow().pid);
+        crate::kernel::process::kill(stale.pid);
     }
-    processes().clear();
+    PROCESSES.lock().clear();
     crate::kernel::process::kill(pid);
     code
 }
@@ -2005,15 +2514,15 @@ pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
 
     crate::kernel::vmm::activate_kernel();
     set_current_index(NO_TASK);
+    clear_current_process_local();
     let (code, pid) = {
-        let borrowed = process.borrow();
-        (borrowed.exit_code, borrowed.pid)
+        (process.lifecycle.lock().exit_code, process.pid)
     };
     reap();
     for stale in processes().iter() {
-        crate::kernel::process::kill(stale.borrow().pid);
+        crate::kernel::process::kill(stale.pid);
     }
-    processes().clear();
+    PROCESSES.lock().clear();
     crate::kernel::process::kill(pid);
     code
 }
@@ -2047,7 +2556,7 @@ pub fn nettoie_zombies() {
 /// lancer, sans que celui-ci ait a le demander.
 pub fn pose_priorite_de(pid: u32, priorite: Priorite) {
     for task in tasks().iter_mut() {
-        if task.process.borrow().pid == pid {
+        if task.process.pid == pid {
             task.priorite = priorite;
         }
     }
@@ -2056,9 +2565,9 @@ pub fn pose_priorite_de(pid: u32, priorite: Priorite) {
 /// Le processus est-il termine, et avec quel code ?
 pub fn code_de_sortie(pid: u32) -> Option<i32> {
     processes().iter().find_map(|p| {
-        let borrowed = p.borrow();
-        if borrowed.pid == pid && borrowed.zombie {
-            Some(borrowed.exit_code)
+        let lifecycle = p.lifecycle.lock();
+        if p.pid == pid && lifecycle.zombie {
+            Some(lifecycle.exit_code)
         } else {
             None
         }
@@ -2077,9 +2586,8 @@ pub fn arbre_de(racine: u32) -> Vec<u32> {
     while index < cibles.len() {
         let parent = cibles[index];
         for process in processes().iter() {
-            let enfant = process.borrow();
-            if enfant.parent == parent && !cibles.contains(&enfant.pid) {
-                cibles.push(enfant.pid);
+            if process.parent == parent && !cibles.contains(&process.pid) {
+                cibles.push(process.pid);
             }
         }
         index += 1;
@@ -2098,15 +2606,15 @@ pub fn tue_processus(pid: u32, code: i32) {
         if Some(task.tid) == courant {
             continue;
         }
-        if task.process.borrow().pid == pid {
+        if task.process.pid == pid {
             task.state = TaskState::Zombie;
         }
     }
     if let Some(process) = process_by_pid(pid) {
-        let mut borrowed = process.borrow_mut();
-        borrowed.threads = 0;
-        borrowed.exit_code = code;
-        borrowed.zombie = true;
+        let mut lifecycle = process.lifecycle.lock();
+        lifecycle.threads = 0;
+        lifecycle.exit_code = code;
+        lifecycle.zombie = true;
     }
 }
 
@@ -2118,26 +2626,73 @@ pub fn tue_processus(pid: u32, code: i32) {
 pub fn terminate_sibling_threads() {
     let (pid, tid) = {
         let task = current();
-        (task.process.borrow().pid, task.tid)
+        (task.process.pid, task.tid)
     };
     for task in tasks().iter_mut() {
-        if task.tid != tid && task.process.borrow().pid == pid {
+        if task.tid != tid && task.process.pid == pid {
             task.state = TaskState::Zombie;
         }
+    }
+}
+
+/// Called with the BKL immediately before returning from a syscall. An exec
+/// may have retired this sibling while it ran an audited BKL-bypass syscall.
+pub fn retire_current_if_zombie() {
+    if in_user_task() && current().state == TaskState::Zombie {
+        schedule();
+        panic!("zombie task resumed after exec quiescence");
     }
 }
 
 /// Reveille les taches d'un processus qui dorment, pour qu'elles constatent
 /// un signal en attente.
 pub fn wake_for_signal(pid: u32) {
-    for task in tasks().iter_mut() {
-        if task.state == TaskState::Blocked && task.process.borrow().pid == pid {
-            task.futex_key = 0;
-            task.wake_tick = 0;
-            task.waiting_for_child = false;
-            task.state = TaskState::Ready;
+    for index in 0..tasks().len() {
+        if tasks()[index].state == TaskState::Blocked
+            && tasks()[index].process.pid == pid
+        {
+            tasks()[index].futex_key = 0;
+            tasks()[index].wait_queue_key = 0;
+            tasks()[index].wake_deadline_ns = 0;
+            tasks()[index].waiting_for_child = false;
+            tasks()[index].state = TaskState::Ready;
+            publish_ready(index);
         }
     }
+}
+
+/// Endort la tache courante sur une WaitQueue. L'appelant doit avoir valide la
+/// generation sous le BKL juste avant cet appel pour fermer le lost wakeup.
+pub(crate) fn park_current_on(wait_queue_key: usize) {
+    {
+        let task = current();
+        task.wait_queue_key = wait_queue_key;
+        task.state = TaskState::Blocked;
+    }
+    while current().state == TaskState::Blocked {
+        schedule();
+    }
+    current().wait_queue_key = 0;
+}
+
+/// Reveille au plus `limit` taches inscrites sur la queue.
+pub(crate) fn wake_wait_queue(wait_queue_key: usize, limit: usize) -> usize {
+    let _kernel = smp_lock::enter();
+    let mut woke = 0;
+    for index in 0..tasks().len() {
+        if woke == limit {
+            break;
+        }
+        if tasks()[index].state == TaskState::Blocked
+            && tasks()[index].wait_queue_key == wait_queue_key
+        {
+            tasks()[index].wait_queue_key = 0;
+            tasks()[index].state = TaskState::Ready;
+            publish_ready(index);
+            woke += 1;
+        }
+    }
+    woke
 }
 
 /// Y a-t-il un signal livrable pour la tache courante ?
@@ -2146,7 +2701,7 @@ pub fn wake_for_signal(pid: u32) {
 /// sans limite de temps doit pouvoir etre interrompue par un signal.
 pub fn signal_pending() -> bool {
     match try_current() {
-        Some(task) => task.process.borrow().signals.next_deliverable().is_some(),
+        Some(task) => task.process.signals.lock().next_deliverable().is_some(),
         None => false,
     }
 }
@@ -2155,7 +2710,7 @@ pub fn signal_pending() -> bool {
 pub fn kill_all(code: i32) {
     for task in tasks().iter_mut() {
         task.state = TaskState::Zombie;
-        task.process.borrow_mut().exit_code = code;
+        task.process.lifecycle.lock().exit_code = code;
     }
 }
 
@@ -2193,7 +2748,12 @@ pub fn preempt_from_irq() {
     wake_sleepers();
 
     let cpu_id = local_cpu();
-    if ready_count_cpu(cpu_id) == 0 && stealable_count_cpu(cpu_id) == 0 {
+    // Une IRQ de quantum signifie que la tâche courante est encore runnable :
+    // ce CPU n'est donc PAS idle. Voler ici une tâche distante échangeait deux
+    // tâches actives entre CPU à chaque quantum et produisait le ping-pong NG4.
+    // Le pull distant reste réservé au chemin schedule() lorsque la tâche
+    // courante s'est réellement bloquée.
+    if ready_count_cpu(cpu_id) == 0 {
         return;
     }
 
@@ -2211,6 +2771,7 @@ pub fn preempt_from_irq() {
 
         IRQ_PREEMPTIONS.fetch_add(1, Ordering::Relaxed);
         CONTEXT_SWITCHES.fetch_add(1, Ordering::Relaxed);
+        account_slice_end(&mut *from_ptr);
 
         usermode::fxsave((*from_ptr).fpu_ptr() as *mut u8);
         (*from_ptr).fs_base = usermode::fs_base();
@@ -2218,6 +2779,11 @@ pub fn preempt_from_irq() {
         (*from_ptr).on_cpu = -1;
         (*from_ptr).last_cpu = cpu_id as u8;
         (*from_ptr).runq_cpu = cpu_id as u8;
+        if (*from_ptr).state == TaskState::Ready {
+            if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu_id) {
+                crate::arch::x86_64::cpu_local::local(id).enqueue(cur);
+            }
+        }
         mark_task_running(&mut *to_ptr, cpu_id);
 
         set_current_index(next);
@@ -2282,28 +2848,136 @@ pub fn log_smp_load() {
         let current_index = CURRENT[cpu_id].load(Ordering::Acquire);
         let (tid, pid) = if current_index != NO_TASK && current_index < tasks().len() {
             let t = &tasks()[current_index];
-            (t.tid, t.process.borrow().pid)
+            (t.tid, t.process.pid)
         } else {
             (0, 0)
         };
         line.push_str(&alloc::format!(
-            " c{}={} rq={} cur={}:{} steal={} mig={}",
+            " c{}={} rq={} cur={}:{} steal={}/{} rej_bal={} rej_aff={} mig={}",
             cpu_id,
             cpu::load_percent_cpu(cpu_id),
             ready_count_cpu(cpu_id),
             pid,
             tid,
             RUNQ_STEALS[cpu_id].load(Ordering::Relaxed),
+            STEAL_ATTEMPTS[cpu_id].load(Ordering::Relaxed),
+            STEAL_REJECT_BALANCE[cpu_id].load(Ordering::Relaxed),
+            STEAL_REJECT_AFFINITY[cpu_id].load(Ordering::Relaxed),
             CPU_MIGRATIONS[cpu_id].load(Ordering::Relaxed),
         ));
     }
     crate::kernel::dmesg::log_fmt(format_args!("{}", line));
+    let (bkl_wait, bkl_hold, bkl_acq) = smp_lock::contention_stats();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "[BKL-STATS] wait_ns={} hold_ns={} acquisitions={}",
+        bkl_wait, bkl_hold, bkl_acq,
+    ));
+    let (_, _, backing_reads, backing_bytes) = crate::fs::backing::stats();
+    let (cache_hits, readahead_hits) = crate::fs::backing::cache_stats();
+    let readahead_pages = crate::fs::backing::readahead_pages();
+    let (clean_hits, clean_misses, clean_waits, clean_shared) =
+        crate::kernel::clean_page_cache::stats();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "[BACKING-CACHE] reads={} bytes={} hits={} readahead_hits={} readahead_pages={} clean_hit={} clean_miss={} clean_wait={} clean_shared={} fault_wait={}",
+        backing_reads, backing_bytes, cache_hits, readahead_hits, readahead_pages,
+        clean_hits, clean_misses, clean_waits, clean_shared, demand_fault_waits(),
+    ));
+    let (resolved, retry, invalid, io_error, retired) = fault_outcome_stats();
+    let (waitq_bkl, waitq_bkl_ns) = crate::kernel::sync::waitq_bkl_stats();
+    let (ata_acquires, ata_wait_ns, ata_max_ns) = crate::drivers::ata::contention_stats();
+    let (exec_wait_ns, exec_max_ns) = crate::kernel::abi::proc::exec_quiesce_stats();
+    let (fault_registry_current, fault_registry_peak) = fault_registry_stats();
+    let (retry_yields, retry_max_chain) = fault_retry_stats();
+    let (clean_entries, clean_reclaimable) = crate::kernel::clean_page_cache::lifetime_stats();
+    let (shared_nodes, shared_pages, shared_orphans) = crate::kernel::partage::lifetime_stats();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "[MM-NG6] fault_resolved={} fault_retry={} fault_invalid={} fault_io_error={} fault_retired={} fault_retry_yields={} fault_retry_max_chain={} fault_registry_current={} fault_registry_peak={} clean_cache_entries={} clean_cache_reclaimable={} shared_cache_nodes={} shared_cache_pages={} shared_cache_orphans={} pf_bkl_enters={} waitq_bkl_enters={} waitq_bkl_wait_ns={} ramfs_bkl_enters={} exec_wait_ns={} exec_max_ns={} ata_acquires={} ata_wait_ns={} ata_max_ns={}",
+        resolved, retry, invalid, io_error, retired, retry_yields, retry_max_chain,
+        fault_registry_current, fault_registry_peak,
+        clean_entries, clean_reclaimable, shared_nodes, shared_pages, shared_orphans,
+        pf_bkl_enters(), waitq_bkl, waitq_bkl_ns,
+        crate::fs::backing::ramfs_bkl_enters(), exec_wait_ns,
+        exec_max_ns, ata_acquires, ata_wait_ns, ata_max_ns,
+    ));
+    log_smp_sample(online);
+}
+
+fn sample_list(values: &[u64], online: usize) -> String {
+    let mut out = String::from("[");
+    for cpu in 0..online {
+        if cpu != 0 { out.push(','); }
+        out.push_str(&alloc::format!("{}", values[cpu]));
+    }
+    out.push(']');
+    out
+}
+
+fn log_smp_sample(online: usize) {
+    let now = crate::kernel::timer::monotonic_ns();
+    let mut current = SmpSamplePrevious {
+        t_ns: now,
+        ctx: CONTEXT_SWITCHES.load(Ordering::Relaxed),
+        migrations: [0; MAX_CPUS],
+        steal_ok: [0; MAX_CPUS],
+        steal_try: [0; MAX_CPUS],
+        reject_balance: [0; MAX_CPUS],
+        reject_affinity: [0; MAX_CPUS],
+        page_faults: [0; MAX_CPUS],
+        tlb: smp::tlb_shootdown_count(),
+        bkl_wait: 0,
+        bkl_hold: 0,
+        bkl_acq: 0,
+    };
+    (current.bkl_wait, current.bkl_hold, current.bkl_acq) = smp_lock::contention_stats();
+    let mut load = [0u64; MAX_CPUS];
+    let mut runnable = [0u64; MAX_CPUS];
+    let mut rq = [0u64; MAX_CPUS];
+    for cpu in 0..online {
+        load[cpu] = crate::arch::x86_64::cpu::load_percent_cpu(cpu) as u64;
+        runnable[cpu] = ready_count_cpu(cpu) as u64;
+        if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu) {
+            rq[cpu] = crate::arch::x86_64::cpu_local::local(id).run_queue_len() as u64;
+        }
+        current.migrations[cpu] = CPU_MIGRATIONS[cpu].load(Ordering::Relaxed);
+        current.steal_ok[cpu] = RUNQ_STEALS[cpu].load(Ordering::Relaxed);
+        current.steal_try[cpu] = STEAL_ATTEMPTS[cpu].load(Ordering::Relaxed);
+        current.reject_balance[cpu] = STEAL_REJECT_BALANCE[cpu].load(Ordering::Relaxed);
+        current.reject_affinity[cpu] = STEAL_REJECT_AFFINITY[cpu].load(Ordering::Relaxed);
+        current.page_faults[cpu] = STALL_PF_BEGIN[cpu].load(Ordering::Relaxed);
+    }
+    let previous = unsafe { SMP_SAMPLE_PREVIOUS.replace(current) };
+    let Some(previous) = previous else { return; };
+    let elapsed = now.saturating_sub(previous.t_ns);
+    if elapsed < 500_000_000 { return; }
+    let delta = |a: &[u64; MAX_CPUS], b: &[u64; MAX_CPUS]| {
+        let mut out = [0u64; MAX_CPUS];
+        for cpu in 0..online { out[cpu] = a[cpu].saturating_sub(b[cpu]); }
+        out
+    };
+    let migrations = delta(&current.migrations, &previous.migrations);
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "[SMP-SAMPLE] v=1 t_ns={} window_ns={} load={} runnable={} rq={} ctx_delta={} mig_delta={} steal_ok_delta={} steal_try_delta={} steal_rej_bal_delta={} steal_rej_aff_delta={} bkl_wait_delta_ns={} bkl_hold_delta_ns={} bkl_acq_delta={} pf_delta={} tlb_delta={}",
+        now, elapsed, sample_list(&load, online), sample_list(&runnable, online),
+        sample_list(&rq, online), current.ctx.saturating_sub(previous.ctx),
+        migrations[..online].iter().copied().sum::<u64>(),
+        sample_list(&delta(&current.steal_ok, &previous.steal_ok), online),
+        sample_list(&delta(&current.steal_try, &previous.steal_try), online),
+        sample_list(&delta(&current.reject_balance, &previous.reject_balance), online),
+        sample_list(&delta(&current.reject_affinity, &previous.reject_affinity), online),
+        current.bkl_wait.saturating_sub(previous.bkl_wait),
+        current.bkl_hold.saturating_sub(previous.bkl_hold),
+        current.bkl_acq.saturating_sub(previous.bkl_acq),
+        sample_list(&delta(&current.page_faults, &previous.page_faults), online),
+        current.tlb.saturating_sub(previous.tlb),
+    ));
 }
 
 /// Instantane d'un processus pour le journal : (pid, nom, ticks, octets).
 pub struct Mesure {
     pub pid: u32,
     pub nom: String,
+    pub resource_group_id: u32,
+    pub resource_group_name: String,
     /// Ticks CPU consommes depuis le dernier releve.
     pub ticks: u64,
     /// Compatibilite historique : desormais RSS reel, pas taille virtuelle.
@@ -2311,6 +2985,10 @@ pub struct Mesure {
     pub rss_octets: u64,
     pub vss_octets: u64,
     pub taches: usize,
+    pub cpu_map_ns: [u64; MAX_CPUS],
+    pub migrations: u64,
+    pub context_switches: u64,
+    pub runnable_threads: usize,
 }
 
 /// Compteurs de la derniere mesure, pour rendre un delta plutot qu'un cumul.
@@ -2318,8 +2996,11 @@ pub struct Mesure {
 /// Un cumul depuis le demarrage ne dit rien d'utile : au bout d'une minute,
 /// tout le monde a « beaucoup » de ticks. Ce qu'on veut lire, c'est ce qui s'est
 /// passe depuis la ligne precedente du journal.
-static mut MESURE_PRECEDENTE: Option<Vec<(u32, u64)>> = None;
-static mut MESURE_TICK_PRECEDENT: u64 = 0;
+static mut MESURE_PRECEDENTE: Option<Vec<(u32, u64, [u64; MAX_CPUS], u64, u64)>> = None;
+static mut MESURE_NS_PRECEDENT: u64 = 0;
+/// Runtime par TID au snapshot précédent, uniquement pour vérifier l'invariant
+/// qu'un thread ne peut consommer plus d'un CPU logique sur une fenêtre.
+static mut MESURE_TACHE_PRECEDENTE: Option<Vec<(u32, u64)>> = None;
 
 /// Mesure tous les processus vivants et remet les compteurs a la reference.
 ///
@@ -2327,35 +3008,77 @@ static mut MESURE_TICK_PRECEDENT: u64 = 0;
 /// honnete d'un pourcentage : compter sur l'horloge murale donnerait des totaux
 /// qui depassent 100 % des que la machine dort.
 pub fn mesure_processus() -> (Vec<Mesure>, u64) {
-    let mut cumuls: Vec<(u32, u64)> = Vec::new();
+    let now = crate::kernel::timer::monotonic_ns();
+    let previous_ns = unsafe { MESURE_NS_PRECEDENT };
+    let window = if previous_ns == 0 { now.max(1) } else { now.saturating_sub(previous_ns).max(1) };
+    let previous_tasks = unsafe { MESURE_TACHE_PRECEDENTE.clone().unwrap_or_default() };
+    let mut current_tasks: Vec<(u32, u64)> = Vec::new();
+    let mut cumuls: Vec<(u32, u64, [u64; MAX_CPUS], u64, u64)> = Vec::new();
     let mut mesures: Vec<Mesure> = Vec::new();
 
     for task in tasks().iter() {
         if task.state == TaskState::Zombie {
             continue;
         }
-        let (pid, nom, rss_octets, vss_octets) = {
-            let process = task.process.borrow();
-            let usage = crate::kernel::resource::memory_usage(&process);
-            (process.pid, process.name.clone(), usage.rss, usage.vss)
+        let (pid, nom, group_id, group_name, rss_octets, vss_octets) = {
+            let process = &task.process;
+            let usage = crate::kernel::resource::memory_usage(process);
+            let name = process.metadata.lock().name.clone();
+            (process.pid, name, process.resource_group_id,
+                process.resource_group_name.clone(), usage.rss, usage.vss)
         };
-        match cumuls.iter_mut().find(|(autre, _)| *autre == pid) {
-            Some((_, ticks)) => *ticks += task.ticks_cpu,
+        // Inclure la tranche actuellement en cours sans modifier le curseur :
+        // le delta du prochain snapshot soustraira exactement ce même préfixe.
+        let live = if task.last_account_ns != 0 {
+            now.saturating_sub(task.last_account_ns)
+        } else { 0 };
+        let runtime = task.user_cpu_ns.saturating_add(task.kernel_cpu_ns).saturating_add(live);
+        let mut cpu_map_snapshot = task.cpu_ns;
+        if live != 0 && task.on_cpu >= 0 {
+            let cpu = task.on_cpu as usize;
+            if cpu < MAX_CPUS { cpu_map_snapshot[cpu] = cpu_map_snapshot[cpu].saturating_add(live); }
+        }
+        if let Some((_, before)) = previous_tasks.iter().find(|(tid, _)| *tid == task.tid) {
+            let delta = runtime.saturating_sub(*before);
+            debug_assert!(delta <= window.saturating_add(1_000_000),
+                "task: runtime > fenêtre tid={} delta={} window={}", task.tid, delta, window);
+        }
+        current_tasks.push((task.tid, runtime));
+        match cumuls.iter_mut().find(|(autre, _, _, _, _)| *autre == pid) {
+            Some((_, total, cpu_map, migrations, switches)) => {
+                *total = total.saturating_add(runtime);
+                *migrations = migrations.saturating_add(task.migrations);
+                *switches = switches.saturating_add(task.context_switches);
+                for cpu in 0..MAX_CPUS {
+                    cpu_map[cpu] = cpu_map[cpu].saturating_add(cpu_map_snapshot[cpu]);
+                }
+            }
             None => {
-                cumuls.push((pid, task.ticks_cpu));
+                cumuls.push((pid, runtime, cpu_map_snapshot, task.migrations, task.context_switches));
                 mesures.push(Mesure {
                     pid,
                     nom,
+                    resource_group_id: group_id,
+                    resource_group_name: group_name,
                     ticks: 0,
                     octets: rss_octets,
                     rss_octets,
                     vss_octets,
                     taches: 0,
+                    cpu_map_ns: [0; MAX_CPUS],
+                    migrations: 0,
+                    context_switches: 0,
+                    runnable_threads: 0,
                 });
             }
         }
         if let Some(mesure) = mesures.iter_mut().find(|m| m.pid == pid) {
             mesure.taches += 1;
+            mesure.migrations = mesure.migrations.saturating_add(task.migrations);
+            mesure.context_switches = mesure.context_switches.saturating_add(task.context_switches);
+            if task.state == TaskState::Ready {
+                mesure.runnable_threads += 1;
+            }
         }
     }
 
@@ -2370,27 +3093,43 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
     for mesure in mesures.iter_mut() {
         let cumul = cumuls
             .iter()
-            .find(|(pid, _)| *pid == mesure.pid)
-            .map_or(0, |(_, t)| *t);
+            .find(|(pid, _, _, _, _)| *pid == mesure.pid)
+            .map_or(0, |(_, total, _, _, _)| *total);
         let avant = precedents
             .iter()
-            .find(|(pid, _)| *pid == mesure.pid)
-            .map_or(0, |(_, t)| *t);
+            .find(|(pid, _, _, _, _)| *pid == mesure.pid)
+            .map_or(0, |(_, total, _, _, _)| *total);
         mesure.ticks = cumul.saturating_sub(avant);
+        let current_map = cumuls
+            .iter()
+            .find(|(pid, _, _, _, _)| *pid == mesure.pid)
+            .map_or([0; MAX_CPUS], |(_, _, map, _, _)| *map);
+        let previous_map = precedents
+            .iter()
+            .find(|(pid, _, _, _, _)| *pid == mesure.pid)
+            .map_or([0; MAX_CPUS], |(_, _, map, _, _)| *map);
+        for cpu in 0..MAX_CPUS {
+            mesure.cpu_map_ns[cpu] = current_map[cpu].saturating_sub(previous_map[cpu]);
+        }
+        let (_, _, _, current_migrations, current_switches) = cumuls
+            .iter().find(|(pid, _, _, _, _)| *pid == mesure.pid)
+            .copied().unwrap_or((mesure.pid, 0, [0; MAX_CPUS], 0, 0));
+        let (_, _, _, previous_migrations, previous_switches) = precedents
+            .iter().find(|(pid, _, _, _, _)| *pid == mesure.pid)
+            .copied().unwrap_or((mesure.pid, 0, [0; MAX_CPUS], 0, 0));
+        mesure.migrations = current_migrations.saturating_sub(previous_migrations);
+        mesure.context_switches = current_switches.saturating_sub(previous_switches);
     }
 
-    let now = crate::kernel::timer::ticks();
-    let previous_tick = unsafe { MESURE_TICK_PRECEDENT };
-    let window = if previous_tick == 0 {
-        now.max(1)
-    } else {
-        now.wrapping_sub(previous_tick).max(1)
-    };
     unsafe {
         MESURE_PRECEDENTE = Some(cumuls);
-        MESURE_TICK_PRECEDENT = now;
+        MESURE_TACHE_PRECEDENTE = Some(current_tasks);
+        MESURE_NS_PRECEDENT = now;
     }
-    (mesures, window.saturating_mul(smp::schedulable_cpus() as u64))
+    // Vue processus: 100% représente un CPU logique complet; un processus
+    // multithread peut donc atteindre N*100%. La topbar conserve séparément
+    // sa convention 100%=machine entière.
+    (mesures, window)
 }
 
 /// Signale qu'une commutation est souhaitable au prochain point sur.
@@ -2525,38 +3264,58 @@ pub fn attends_un_tick() {
 }
 
 pub fn sleep_ticks(ticks: u64) {
-    let deadline = crate::kernel::timer::ticks() + ticks.max(1);
+    debug_assert!(
+        smp_lock::held_by_current_cpu(),
+        "task: sleep_ticks requiert le BKL externe de l'appelant"
+    );
+    let duration_ns = ticks.max(1)
+        .saturating_mul(1_000_000_000 / crate::kernel::timer::TICKS_PER_SECOND);
+    let deadline = crate::kernel::timer::monotonic_ns().saturating_add(duration_ns);
     {
         let task = current();
-        task.wake_tick = deadline;
+        task.wake_deadline_ns = deadline;
         task.state = TaskState::Blocked;
     }
-    while crate::kernel::timer::ticks() < deadline {
+
+    // `syscall_dispatch` conserve un BKL externe. Le suspendre ici, avant
+    // meme de savoir si schedule() trouvera une autre tache, ferme le cas ou
+    // wake_sleepers() remet la tache courante Ready parce que son court delai
+    // a deja expire : schedule() ne dort alors pas et ne suspendrait sinon que
+    // son propre niveau recursif, laissant le niveau syscall acquis pendant
+    // toute la boucle poll/select/epoll.
+    let outer_depth = smp_lock::suspend_for_schedule();
+    while crate::kernel::timer::monotonic_ns() < deadline {
         // schedule() fait deja HLT si la tache est bloquee et seule.
         schedule();
-        if current().state == TaskState::Ready {
+        let ready = {
+            let _kernel = smp_lock::enter();
+            current().state == TaskState::Ready
+        };
+        if ready {
             break;
         }
     }
+    smp_lock::resume_after_schedule(outer_depth);
     let task = current();
-    task.wake_tick = 0;
+    task.wake_deadline_ns = 0;
     task.state = TaskState::Ready;
 }
 
 /// Reveille les taches dont le sommeil est echu, et declenche les `SIGALRM`.
 fn wake_sleepers() {
-    let now = crate::kernel::timer::ticks();
-    let mut woke = false;
-    for task in tasks().iter_mut() {
-        if task.state == TaskState::Blocked && task.wake_tick != 0 && now >= task.wake_tick {
-            task.wake_tick = 0;
-            task.futex_key = 0;
-            task.state = TaskState::Ready;
-            woke = true;
+    let now = crate::kernel::timer::monotonic_ns();
+    for index in 0..tasks().len() {
+        if tasks()[index].state == TaskState::Blocked
+            && tasks()[index].wake_deadline_ns != 0
+            && now >= tasks()[index].wake_deadline_ns
+        {
+            tasks()[index].wake_deadline_ns = 0;
+            tasks()[index].futex_key = 0;
+            tasks()[index].state = TaskState::Ready;
+            publish_ready(index);
         }
     }
     fire_alarms(now);
-    if woke { smp::broadcast_reschedule(); }
 }
 
 /// Echeance du prochain `SIGALRM` par processus : (pid, tick).
@@ -2574,7 +3333,7 @@ fn alarms() -> &'static mut Vec<(u32, u64)> {
 /// Programme (ou annule, avec 0) l'alarme du processus courant.
 /// Renvoie l'echeance precedente, 0 s'il n'y en avait pas.
 pub fn set_alarm(deadline: u64) -> u64 {
-    let pid = current().process.borrow().pid;
+    let pid = current().process.pid;
     let list = alarms();
     let previous = list
         .iter()
@@ -2590,7 +3349,7 @@ pub fn set_alarm(deadline: u64) -> u64 {
 
 /// Echeance de l'alarme du processus courant (0 s'il n'y en a pas).
 pub fn peek_alarm() -> u64 {
-    let pid = current().process.borrow().pid;
+    let pid = current().process.pid;
     alarms()
         .iter()
         .find(|(p, _)| *p == pid)
@@ -2611,10 +3370,7 @@ fn fire_alarms(now: u64) {
     alarms().retain(|(_, deadline)| now < *deadline);
     for pid in expired {
         if let Some(process) = process_by_pid(pid) {
-            process
-                .borrow_mut()
-                .signals
-                .raise(crate::kernel::signal::SIGALRM);
+            process.signals.lock().raise(crate::kernel::signal::SIGALRM);
         }
         wake_for_signal(pid);
     }
@@ -2632,23 +3388,22 @@ pub fn yield_now() {
 /// differentes.
 fn futex_key(uaddr: u64) -> u64 {
     let process = current().process.clone();
-    let mut process = process.borrow_mut();
-    process.space.translate(uaddr).unwrap_or(uaddr)
+    let physical = process.mm.lock().space.translate(uaddr).unwrap_or(uaddr);
+    physical
 }
 
 /// `FUTEX_WAIT` : endort la tache si `*uaddr == expected`.
 ///
-/// `timeout_ticks` a 0 signifie « sans limite ». Renvoie `true` si la tache a
+/// `timeout_ms` a 0 signifie « sans limite ». Renvoie `true` si la tache a
 /// ete reveillee par un `FUTEX_WAKE`, `false` sur delai expire.
-pub fn futex_wait(uaddr: u64, expected: u32, timeout_ticks: u64) -> bool {
+pub fn futex_wait(uaddr: u64, expected: u32, timeout_ms: u64) -> bool {
     let key = futex_key(uaddr);
     // Verification atomique vis-a-vis des autres taches : le noyau n'est pas
     // preemptible ici, donc lire puis dormir est indivisible.
     let mut value = [0u8; 4];
     {
         let process = current().process.clone();
-        let mut process = process.borrow_mut();
-        if !process.space.read(uaddr, &mut value) {
+        if !process.mm.lock().space.read(uaddr, &mut value) {
             return false;
         }
     }
@@ -2656,15 +3411,16 @@ pub fn futex_wait(uaddr: u64, expected: u32, timeout_ticks: u64) -> bool {
         return true; // EAGAIN cote appelant
     }
 
-    let deadline = if timeout_ticks == 0 {
+    let deadline_ns = if timeout_ms == 0 {
         0
     } else {
-        crate::kernel::timer::ticks() + timeout_ticks
+        crate::kernel::timer::monotonic_ns()
+            .saturating_add(timeout_ms.saturating_mul(1_000_000))
     };
     {
         let task = current();
         task.futex_key = key;
-        task.wake_tick = deadline;
+        task.wake_deadline_ns = 0;
         task.state = TaskState::Blocked;
     }
 
@@ -2680,17 +3436,18 @@ pub fn futex_wait(uaddr: u64, expected: u32, timeout_ticks: u64) -> bool {
         // expire pour un reveil. La libc croirait alors avoir ete signalee, se
         // rendormirait pour la meme duree, et `pthread_cond_timedwait`
         // attendrait un multiple de ce qu'on lui a demande.
-        let expired = deadline != 0 && crate::kernel::timer::ticks() >= deadline;
+        let expired = deadline_ns != 0
+            && crate::kernel::timer::monotonic_ns() >= deadline_ns;
         let task = current();
         if expired {
             task.futex_key = 0;
-            task.wake_tick = 0;
+            task.wake_deadline_ns = 0;
             task.state = TaskState::Ready;
             return false;
         }
         if task.state == TaskState::Ready {
             task.futex_key = 0;
-            task.wake_tick = 0;
+            task.wake_deadline_ns = 0;
             return true;
         }
     }
@@ -2701,19 +3458,17 @@ pub fn futex_wait(uaddr: u64, expected: u32, timeout_ticks: u64) -> bool {
 pub fn futex_wake(uaddr: u64, count: u32) -> u32 {
     let key = futex_key(uaddr);
     let mut woken = 0;
-    for task in tasks().iter_mut() {
+    for index in 0..tasks().len() {
         if woken >= count {
             break;
         }
-        if task.state == TaskState::Blocked && task.futex_key == key {
-            task.futex_key = 0;
-            task.wake_tick = 0;
-            task.state = TaskState::Ready;
+        if tasks()[index].state == TaskState::Blocked && tasks()[index].futex_key == key {
+            tasks()[index].futex_key = 0;
+            tasks()[index].wake_deadline_ns = 0;
+            tasks()[index].state = TaskState::Ready;
+            publish_ready(index);
             woken += 1;
         }
-    }
-    if woken > 0 {
-        smp::broadcast_reschedule();
     }
     woken
 }
@@ -2729,7 +3484,9 @@ pub fn print_table() {
     }
     crate::println!("  TID  PID  ETAT      PAGES  NOM");
     for task in list.iter() {
-        let process = task.process.borrow();
+        let process = &task.process;
+        let metadata = process.metadata.lock();
+        let pages = process.mm.lock().space.mapped_pages();
         let state = match task.state {
             TaskState::Ready => "ready",
             TaskState::Blocked => "blocked",
@@ -2740,42 +3497,36 @@ pub fn print_table() {
             task.tid,
             process.pid,
             state,
-            process.space.mapped_pages(),
-            process.name
+            pages,
+            metadata.name
         );
     }
 }
 
 /// Cree un processus vide (espace d'adressage neuf, descripteurs standards).
-pub fn new_process(name: &str, cwd: usize) -> Option<Rc<RefCell<Process>>> {
+pub fn new_process(name: &str, cwd: usize) -> Option<Arc<Process>> {
     let space = AddressSpace::new()?;
     let pid = crate::kernel::process::spawn(name, crate::users::session().uid());
-    let process = Rc::new(RefCell::new(Process {
+    let process = Arc::new(Process {
         pid,
         parent: 0,
-        name: name.to_string(),
-        space,
-        files: FdTable::new(),
-        brk_start: 0,
-        brk: 0,
-        mmap_next: crate::kernel::vmm::user_mmap_base(),
-        cwd,
-        exit_code: 0,
-        zombie: false,
-        threads: 1,
-        uid: crate::users::session().uid() as u32,
-        gid: crate::users::session().uid() as u32,
-        signals: crate::kernel::signal::SignalState::default(),
-        partages: Vec::new(),
-        limite_as: 0,
-        promesses: Vec::new(),
-        ecran: None,
-    }));
-    processes().push(process.clone());
+        resource_group_id: pid,
+        resource_group_name: name.to_string(),
+        mm: Arc::new(Mm::new(MmState { space, brk_start: 0, brk: 0,
+            mmap_next: crate::kernel::vmm::user_mmap_base(), partages: Vec::new(),
+            limite_as: 0, promesses: Vec::new(), clean_pages: Vec::new() })),
+        files: Arc::new(FileTable::new(FdTable::new())),
+        metadata: SpinLock::new(ProcessMetadata { name: name.to_string(), cwd,
+            uid: crate::users::session().uid() as u32,
+            gid: crate::users::session().uid() as u32, ecran: None }),
+        lifecycle: SpinLock::new(ProcessLifecycle { exit_code: 0, zombie: false, threads: 1 }),
+        signals: SpinLock::new(crate::kernel::signal::SignalState::default()),
+    });
+    PROCESSES.lock().push(process.clone());
     Some(process)
 }
 
 /// Enregistre un processus cree par `fork` (espace deja duplique).
-pub fn register_process(process: Rc<RefCell<Process>>) {
-    processes().push(process);
+pub fn register_process(process: Arc<Process>) {
+    PROCESSES.lock().push(process);
 }

@@ -32,10 +32,10 @@
 //! l'autre sens : un producteur qui insiste finit par prendre toute la memoire,
 //! ou par corrompre son cadrage.
 
-use alloc::rc::Rc;
+use alloc::sync::Arc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::cell::RefCell;
+use crate::kernel::sync::SpinLock;
 
 use crate::gui::protocole::{self as proto, Genre, Lecture, Rect};
 use crate::gui::surface::Surface;
@@ -62,9 +62,9 @@ pub struct Client {
     pub titre: String,
     pub surface: Surface,
     /// Ce que le gestionnaire de fenetres ecrit, le client lit.
-    vers_client: Rc<RefCell<Canal>>,
+    vers_client: Arc<SpinLock<Canal>>,
     /// Ce que le client ecrit, le gestionnaire de fenetres lit.
-    vers_wm: Rc<RefCell<Canal>>,
+    vers_wm: Arc<SpinLock<Canal>>,
     /// Messages recus incomplets, en attente de la suite.
     tampon: Vec<u8>,
     /// Degat accumule depuis la derniere composition, dans le repere surface.
@@ -133,10 +133,11 @@ impl Client {
         let canal_client = vers_client.clone();
         let canal_wm = vers_wm.clone();
 
-        let mut prepare = move |processus: &mut task::Process| -> Vec<String> {
-            processus.ecran = Some(ecran);
-            let fd_surface = processus.files.insert(FileDesc::new(FdKind::File(surface_node)));
-            let fd_gui = processus.files.insert(FileDesc::new(FdKind::SocketPair(
+        let mut prepare = move |processus: &task::Process| -> Vec<String> {
+            processus.metadata.lock().ecran = Some(ecran);
+            let mut files = processus.files.lock();
+            let fd_surface = files.insert(FileDesc::new(FdKind::File(surface_node)));
+            let fd_gui = files.insert(FileDesc::new(FdKind::SocketPair(
                 canal_client.clone(),
                 canal_wm.clone(),
             )));
@@ -205,7 +206,7 @@ impl Client {
     fn envoie(&mut self, genre: Genre, charge: &[u8]) -> bool {
         self.serie = self.serie.wrapping_add(1);
         let message = proto::message(genre, self.serie, charge);
-        let mut canal = self.vers_client.borrow_mut();
+        let mut canal = self.vers_client.lock();
         if canal.lecteurs == 0 || canal.place() < message.len() {
             drop(canal);
             self.evenements_perdus += 1;
@@ -258,7 +259,7 @@ impl Client {
     /// Remplace en place le dernier message du canal s'il est du meme genre et
     /// n'a pas encore ete lu. Rend `true` si le remplacement a eu lieu.
     fn remplace_dernier(&mut self, genre: Genre, charge: &[u8]) -> bool {
-        let mut canal = self.vers_client.borrow_mut();
+        let mut canal = self.vers_client.lock();
         let taille = proto::TAILLE_ENTETE + charge.len();
         if canal.octets.len() < taille {
             return false;
@@ -282,8 +283,13 @@ impl Client {
         true
     }
 
-    pub fn envoie_molette(&mut self, delta: i32) {
-        let charge = proto::Molette { fenetre: proto::FENETRE_PRINCIPALE, delta }.encode();
+    pub fn envoie_molette(&mut self, delta: i32, x: i32, y: i32) {
+        let charge = proto::Molette {
+            fenetre: proto::FENETRE_PRINCIPALE,
+            delta,
+            x,
+            y,
+        }.encode();
         self.envoie(Genre::Wheel, &charge);
     }
 
@@ -315,7 +321,7 @@ impl Client {
     /// depuis le mauvais octet.
     pub fn pompe(&mut self) -> bool {
         {
-            let mut canal = self.vers_wm.borrow_mut();
+            let mut canal = self.vers_wm.lock();
             if !canal.octets.is_empty() {
                 self.octets_recus += canal.octets.len() as u64;
                 self.tampon.append(&mut canal.octets);
@@ -402,6 +408,9 @@ impl Client {
                         "gui: premiere trame du client pid={} ({}x{})",
                         self.pid, degat.largeur, degat.hauteur
                     ));
+                }
+                if self.trames == 0 {
+                    crate::kernel::perf::first_paint();
                 }
                 self.etat = Etat::Actif;
                 self.trames += 1;

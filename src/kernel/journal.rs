@@ -52,14 +52,15 @@
 //! acces au CMOS — est reelle.
 
 use crate::arch::x86_64::rtc;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 /// Les mesures de charge sont-elles disponibles ?
-static mut PRET: bool = false;
+static PRET: AtomicBool = AtomicBool::new(false);
 /// Sequences ANSI actives ?
-static mut COULEURS: bool = true;
+static COULEURS: AtomicBool = AtomicBool::new(true);
 /// Derniere mesure, et le tick auquel elle a ete prise.
-static mut CACHE: (u8, u8, u8) = (0, 0, 0);
-static mut CACHE_TICK: u64 = 0;
+static CACHE: AtomicU32 = AtomicU32::new(0);
+static CACHE_TICK: AtomicU64 = AtomicU64::new(0);
 
 /// Duree de validite d'une mesure, en ticks (1 tick = 1 ms).
 ///
@@ -72,7 +73,7 @@ const VALIDITE_TICKS: u64 = 250;
 ///
 /// A appeler quand le tas, le RAMFS et le timer sont prets — pas avant.
 pub fn demarre() {
-    unsafe { PRET = true };
+    PRET.store(true, Ordering::Release);
     crate::serial_println!(
         "[journal] prefixe des lignes : [heure][cpu%:memoire physique%:nœuds RAMFS%]"
     );
@@ -84,11 +85,11 @@ pub fn demarre() {
 /// de Windows, ou c'est le cas depuis Windows 10 — mais un journal redirige
 /// vers un fichier, lui, gagne a rester en texte pur.
 pub fn pose_couleurs(actif: bool) {
-    unsafe { COULEURS = actif };
+    COULEURS.store(actif, Ordering::Relaxed);
 }
 
 pub fn couleurs() -> bool {
-    unsafe { COULEURS }
+    COULEURS.load(Ordering::Relaxed)
 }
 
 // --- Couleurs ---------------------------------------------------------------
@@ -124,31 +125,30 @@ fn ecris_couleur(couleur: &str) {
 
 /// (cpu %, ram %, disque %), mise en cache un quart de seconde.
 fn charge() -> (u8, u8, u8) {
-    if !unsafe { PRET } {
+    if !PRET.load(Ordering::Acquire) {
         return (u8::MAX, u8::MAX, u8::MAX);
     }
     let maintenant = crate::kernel::timer::ticks();
-    unsafe {
-        if maintenant.wrapping_sub(CACHE_TICK) < VALIDITE_TICKS && CACHE_TICK != 0 {
-            return CACHE;
-        }
+    let cache_tick = CACHE_TICK.load(Ordering::Relaxed);
+    if maintenant.wrapping_sub(cache_tick) < VALIDITE_TICKS && cache_tick != 0 {
+        let packed = CACHE.load(Ordering::Relaxed);
+        return (packed as u8, (packed >> 8) as u8, (packed >> 16) as u8);
     }
 
     let cpu = crate::kernel::timer::cpu_load_pct();
-    let (utilise, _, total) = crate::kernel::vmm::frame_stats();
+    let (utilise, total) = crate::kernel::vmm::frame_stats_relaxed();
     let ram = if total > 0 { (utilise * 100 / total) as u8 } else { 0 };
-    let nœuds = crate::fs::ramfs::fs().used_nodes();
+    let nœuds = crate::fs::ramfs::used_nodes_relaxed();
     let disque = if crate::fs::ramfs::MAX_NODES > 0 {
         (nœuds * 100 / crate::fs::ramfs::MAX_NODES) as u8
     } else {
         0
     };
 
-    unsafe {
-        CACHE = (cpu, ram, disque);
-        CACHE_TICK = maintenant.max(1);
-        CACHE
-    }
+    let packed = cpu as u32 | (ram as u32) << 8 | (disque as u32) << 16;
+    CACHE.store(packed, Ordering::Relaxed);
+    CACHE_TICK.store(maintenant.max(1), Ordering::Relaxed);
+    (cpu, ram, disque)
 }
 
 fn ecris_pourcentage(valeur: u8) {
