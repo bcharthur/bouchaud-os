@@ -1405,6 +1405,32 @@ pub fn stall_probe_from_timer() {
         nr3, ph3, age3,
     );
 
+    // Un CPU qui tourne sur un verrou tournant ne laisse aucune autre trace :
+    // pas d'acquisition BKL, pas de faute, pas de changement de tache. Cette
+    // ligne est la seule qui distingue un noyau bloque d'un noyau occupe, et
+    // elle ne sort que si un CPU attend depuis assez longtemps pour que ce soit
+    // anormal.
+    for cpu in 0..4usize {
+        let Some(attente) = crate::kernel::sync::attente_verrou(cpu) else {
+            continue;
+        };
+        let genre = if attente.etat == crate::kernel::sync::ATTENTE_REENTRANTE {
+            "reentrant"
+        } else {
+            "contendu"
+        };
+        crate::serial_println!(
+            "[SMP-SPIN] cpu={} genre={} verrou={:#x} proprio={} depuis={}ms site={}:{}",
+            cpu,
+            genre,
+            attente.verrou,
+            attente.proprietaire as i64,
+            now.wrapping_sub(attente.depuis),
+            attente.fichier,
+            attente.ligne,
+        );
+    }
+
     let prov = crate::kernel::smp_lock::stall_probe_provenance();
     let owner_cpu = if prov.owner_token == 0 { 255usize } else { prov.owner_token - 1 };
     let held = if prov.owner_token == 0 || prov.generation == 0 {

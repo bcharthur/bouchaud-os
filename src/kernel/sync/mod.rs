@@ -14,6 +14,12 @@ pub use spinlock::{
     SpinLockIrq,
     SpinLockIrqGuard,
 };
+pub use spinlock::{
+    attente_verrou,
+    AttenteVerrou,
+    ATTENTE_LONGUE,
+    ATTENTE_REENTRANTE,
+};
 pub use sleep_mutex::{SleepMutex, SleepMutexGuard};
 pub use wait_queue::{WaitQueue, WaitTicket};
 pub use wait_queue::bkl_stats as waitq_bkl_stats;
