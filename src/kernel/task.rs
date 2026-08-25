@@ -949,6 +949,76 @@ static PROCESSES: SpinLock<Vec<Arc<Process>>> = SpinLock::new(Vec::new());
 const NO_TASK: usize = usize::MAX;
 const MAX_CPUS: usize = smp::MAX_CPUS;
 static CURRENT: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(NO_TASK) }; MAX_CPUS];
+/// Comptabilite du temps CPU de la tache en cours, tenue PAR CPU.
+///
+/// # Pourquoi elle ne vit plus sur la `Task`
+///
+/// `account_kernel_enter`/`account_kernel_exit` encadrent chaque appel systeme.
+/// Ils passaient par `current()`, donc par `TASKS`, donc exigeaient le gros
+/// verrou -- et un appel systeme LIBERE le prenait alors deux fois, une a
+/// l'entree et une a la sortie, la ou un appel non libere le prend une seule
+/// fois et le garde. La mesure du lot precedent l'a chiffre : 130 000
+/// acquisitions contre 387 000 pour le meme travail, sans gain de debit. Tant
+/// que la comptabilite reste la, liberer un appel court ne peut pas payer.
+///
+/// # Ce que ce bloc contient
+///
+/// Le strict minimum pour dater les frontieres et cumuler les deltas :
+///
+///  * `COMPTA_DEBUT_NS` -- instant de la derniere frontiere sur ce CPU ;
+///  * `COMPTA_USER_NS` / `COMPTA_NOYAU_NS` -- deltas accumules, pas encore
+///    replies dans la `Task` ;
+///  * `COMPTA_EN_NOYAU` -- de quel cote du mur on se trouve maintenant.
+///
+/// Aucune `Task` n'est touchee : ni lecture, ni ecriture, ni reference.
+///
+/// # Quand cela redevient durable
+///
+/// Au changement de contexte, qui tient deja le gros verrou et a deja la
+/// `&mut Task` en main : [`account_slice_end`] replie les compteurs dans la
+/// tache sortante, [`mark_task_running`] les rearme pour l'entrante. Les
+/// totaux `user_cpu_ns`, `kernel_cpu_ns` et `cpu_ns[cpu]` restent donc EXACTS ;
+/// seule leur cadence de mise a jour change.
+///
+/// Et cela ne se voit nulle part, parce que le seul lecteur, `mesure_processus`,
+/// ajoute deja la tranche en cours : `live = now - task.last_account_ns`.
+/// `last_account_ns` marquant desormais le debut de la tranche non repliee,
+/// `live` couvre exactement ce que les compteurs par CPU retiennent. La somme
+/// rendue est identique a l'octet pres.
+static COMPTA_DEBUT_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static COMPTA_USER_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static COMPTA_NOYAU_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static COMPTA_EN_NOYAU: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+
+/// « Une tache qui etait sur ce CPU vient d'etre marquee zombie. »
+///
+/// `retire_current_if_zombie` s'execute a la sortie de CHAQUE appel systeme et
+/// lisait `current().state`, donc la table des taches, donc le gros verrou --
+/// pour une condition qui est fausse presque toujours. Le drapeau rend le
+/// chemin commun a une seule lecture atomique ; le gros verrou n'est pris que
+/// lorsqu'une retraite est reellement demandee.
+///
+/// Il est pose par [`marque_zombie`], qui tient le gros verrou et connait le
+/// CPU de la tache (`on_cpu`), et efface par [`mark_task_running`] quand une
+/// nouvelle tache prend le CPU. Une tache qui tourne ne peut pas changer de CPU
+/// sans passer par un changement de contexte, et un zombie n'est jamais
+/// reordonnance : le drapeau designe donc bien la tache courante de ce CPU.
+static RETRAITE_DEMANDEE: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+
+/// Fois ou le domaine CPU-local n'a PAS su repondre, et ou l'appelant a du
+/// retomber sur `current_process()`, donc sur le gros verrou.
+///
+/// Sans ce compteur, « l'identite est servie sans verrou » est une intention.
+/// Avec lui, c'est une mesure : si le repli est frequent, le gain annonce
+/// n'existe pas, et on le voit dans `smpstat` au lieu de le deduire d'un
+/// chronometre.
+static IDENTITE_REPLI: AtomicU64 = AtomicU64::new(0);
+
+/// Nombre de replis du domaine CPU-local vers le chemin sous gros verrou.
+pub fn identite_repli() -> u64 {
+    IDENTITE_REPLI.load(Ordering::Relaxed)
+}
+
 static CURRENT_PROCESS: [SpinLockIrq<Option<Arc<Process>>>; MAX_CPUS] =
     [const { SpinLockIrq::new(None) }; MAX_CPUS];
 /// Zombie qui vient de quitter physiquement la pile de ce CPU. Le contexte
@@ -1133,6 +1203,15 @@ pub fn stall_syscall_enter(nr: u64) {
 
 pub fn stall_syscall_bkl_acquired() {
     STALL_SYSCALL_PHASE[local_cpu()].store(2, Ordering::Release);
+}
+
+/// Phase 3 : dans le corps de l'appel, SANS le gros verrou.
+///
+/// La phase 2 veut dire « le verrou est pris ». Un appel libere n'y passe plus
+/// jamais ; lui faire dire 2 rendrait la sonde de blocage menteuse au moment
+/// precis ou l'on s'en sert pour savoir qui detient quoi.
+pub fn stall_syscall_sans_verrou() {
+    STALL_SYSCALL_PHASE[local_cpu()].store(3, Ordering::Release);
 }
 
 pub fn stall_syscall_exit() {
@@ -1443,7 +1522,7 @@ pub struct IdentiteCourante {
 /// reference qui lui aurait survecu pendrait dans le vide. La regle est donc
 /// qu'aucune reference vers une `Task` ne sorte de ce module par ce chemin.
 pub fn identite_courante() -> Option<IdentiteCourante> {
-    interrupts::without_interrupts(|| {
+    let identite = interrupts::without_interrupts(|| {
         let cpu = local_cpu();
         let process = CURRENT_PROCESS[cpu].lock().as_ref().map(Arc::clone)?;
         let tid = usermode::per_cpu().current as u32;
@@ -1457,7 +1536,11 @@ pub fn identite_courante() -> Option<IdentiteCourante> {
             return None;
         }
         Some(IdentiteCourante { tid, process })
-    })
+    });
+    if identite.is_none() {
+        IDENTITE_REPLI.fetch_add(1, Ordering::Relaxed);
+    }
+    identite
 }
 
 fn clear_current_process_local() {
@@ -1945,6 +2028,15 @@ fn mark_task_running(task: &mut Task, cpu_id: usize) {
     task.slice_start_ns = now;
     task.last_account_ns = now;
     task.context_switches = task.context_switches.saturating_add(1);
+    // Rearme le bloc de comptabilite de ce CPU pour la tache entrante, et
+    // restaure de quel cote du mur elle s'etait arretee.
+    COMPTA_DEBUT_NS[cpu_id].store(now, Ordering::Relaxed);
+    COMPTA_USER_NS[cpu_id].store(0, Ordering::Relaxed);
+    COMPTA_NOYAU_NS[cpu_id].store(0, Ordering::Relaxed);
+    COMPTA_EN_NOYAU[cpu_id].store(task.in_kernel, Ordering::Relaxed);
+    // Nouvelle tache sur ce CPU : la retraite eventuellement demandee par
+    // l'ancienne ne la concerne pas.
+    RETRAITE_DEMANDEE[cpu_id].store(task.state == TaskState::Zombie, Ordering::Release);
 }
 
 /// Avance une seule fois le curseur CPU de la tâche jusqu'à `now`.
@@ -1957,13 +2049,25 @@ fn account_until(task: &mut Task, now: u64) {
         return;
     }
     debug_assert!(task.on_cpu >= 0, "task: accounting armé pour une tâche hors CPU tid={}", task.tid);
-    let elapsed = now.saturating_sub(task.last_account_ns);
-    if task.in_kernel {
-        task.kernel_cpu_ns = task.kernel_cpu_ns.saturating_add(elapsed);
-    } else {
-        task.user_cpu_ns = task.user_cpu_ns.saturating_add(elapsed);
-    }
     let cpu = local_cpu();
+
+    // Ce que les frontieres d'appel systeme ont accumule depuis le dernier
+    // repli, plus le fragment encore ouvert.
+    let mut user = COMPTA_USER_NS[cpu].swap(0, Ordering::Relaxed);
+    let mut noyau = COMPTA_NOYAU_NS[cpu].swap(0, Ordering::Relaxed);
+    let debut = COMPTA_DEBUT_NS[cpu].load(Ordering::Relaxed);
+    if debut != 0 {
+        let fragment = now.saturating_sub(debut);
+        if COMPTA_EN_NOYAU[cpu].load(Ordering::Relaxed) {
+            noyau = noyau.saturating_add(fragment);
+        } else {
+            user = user.saturating_add(fragment);
+        }
+    }
+    let elapsed = user.saturating_add(noyau);
+
+    task.user_cpu_ns = task.user_cpu_ns.saturating_add(user);
+    task.kernel_cpu_ns = task.kernel_cpu_ns.saturating_add(noyau);
     task.cpu_ns[cpu] = task.cpu_ns[cpu].saturating_add(elapsed);
     // EWMA 7/8 historique + 1/8 dernière tranche: stable mais réactif en
     // quelques quanta, sans utiliser les ticks comme unité.
@@ -1972,8 +2076,34 @@ fn account_until(task: &mut Task, now: u64) {
         .saturating_mul(7)
         .saturating_add(elapsed)
         / 8;
+    // `in_kernel` doit survivre a un changement de contexte AU MILIEU d'un
+    // appel systeme : une tache qui se bloque dans un `futex` repart du cote
+    // noyau. On le range donc dans la tache au repli, et `mark_task_running` le
+    // ressort au reveil.
+    task.in_kernel = COMPTA_EN_NOYAU[cpu].load(Ordering::Relaxed);
+    COMPTA_DEBUT_NS[cpu].store(now, Ordering::Relaxed);
     task.last_account_ns = now;
     task.slice_start_ns = now;
+}
+
+/// Marque une tache zombie, et previent le CPU sur lequel elle tourne.
+///
+/// Point de passage unique : `retire_current_if_zombie` s'execute a la sortie
+/// de chaque appel systeme, et son chemin commun ne doit plus consulter la
+/// table des taches. Il lit un drapeau par CPU ; c'est ici qu'on le pose.
+///
+/// Tous les appelants tiennent le gros verrou -- c'est ce qui leur permet de
+/// tenir une `&mut Task` -- et `on_cpu` designe le CPU ou la tache s'execute,
+/// ou -1 si elle n'est nulle part. Une tache qui n'est sur aucun CPU n'a
+/// personne a prevenir : elle ne reviendra pas en espace utilisateur.
+fn marque_zombie(task: &mut Task) {
+    task.state = TaskState::Zombie;
+    if task.on_cpu >= 0 {
+        let cpu = task.on_cpu as usize;
+        if cpu < MAX_CPUS {
+            RETRAITE_DEMANDEE[cpu].store(true, Ordering::Release);
+        }
+    }
 }
 
 fn account_slice_end(task: &mut Task) {
@@ -1981,21 +2111,48 @@ fn account_slice_end(task: &mut Task) {
     account_until(task, now);
     task.last_account_ns = 0;
     task.slice_start_ns = 0;
+    // Le CPU n'a plus de tache a qui imputer le temps : on desarme, sinon le
+    // premier repli de la tache SUIVANTE lui attribuerait le temps passe entre
+    // les deux.
+    let cpu = local_cpu();
+    COMPTA_DEBUT_NS[cpu].store(0, Ordering::Relaxed);
+    COMPTA_USER_NS[cpu].store(0, Ordering::Relaxed);
+    COMPTA_NOYAU_NS[cpu].store(0, Ordering::Relaxed);
 }
 
 /// Frontières syscall utilisées pour séparer user/kernel sans dépendre du PIT.
+/// Frontiere utilisateur -> noyau. Ne touche que le bloc par CPU.
 pub fn account_kernel_enter() {
-    let now = crate::kernel::timer::monotonic_ns();
-    let task = current();
-    account_until(task, now);
-    task.in_kernel = true;
+    frontiere_compta(true);
 }
 
+/// Frontiere noyau -> utilisateur. Ne touche que le bloc par CPU.
 pub fn account_kernel_exit() {
-    let now = crate::kernel::timer::monotonic_ns();
-    let task = current();
-    account_until(task, now);
-    task.in_kernel = false;
+    frontiere_compta(false);
+}
+
+/// Ferme le fragment en cours et ouvre le suivant, du cote demande.
+///
+/// Les interruptions sont coupees : sans cela, le numero de CPU pourrait etre
+/// lu ici et les compteurs mis a jour la-bas, apres une migration. C'est le
+/// meme raisonnement que pour `identite_courante`, et c'est tout ce qu'il faut
+/// -- aucun autre CPU n'ecrit dans notre case.
+fn frontiere_compta(vers_noyau: bool) {
+    interrupts::without_interrupts(|| {
+        let cpu = local_cpu();
+        let now = crate::kernel::timer::monotonic_ns();
+        let debut = COMPTA_DEBUT_NS[cpu].load(Ordering::Relaxed);
+        if debut != 0 {
+            let ecoule = now.saturating_sub(debut);
+            if COMPTA_EN_NOYAU[cpu].load(Ordering::Relaxed) {
+                COMPTA_NOYAU_NS[cpu].fetch_add(ecoule, Ordering::Relaxed);
+            } else {
+                COMPTA_USER_NS[cpu].fetch_add(ecoule, Ordering::Relaxed);
+            }
+            COMPTA_DEBUT_NS[cpu].store(now, Ordering::Relaxed);
+        }
+        COMPTA_EN_NOYAU[cpu].store(vers_noyau, Ordering::Relaxed);
+    });
 }
 
 pub fn account_resume_user_noreturn() {
@@ -2235,6 +2392,13 @@ fn switch_to_kernel() -> ! {
     let from_ptr = unsafe {
         let list = tasks();
         let ptr = &mut **list.get_mut(cur).unwrap() as *mut Task;
+        // Replier AVANT de rendre `on_cpu` negatif : depuis que la
+        // comptabilite d'appel systeme vit par CPU, c'est ici -- et non plus a
+        // chaque `account_kernel_exit` -- que la derniere tranche de cette
+        // tache devient durable. Sans ce repli, le temps passe entre le dernier
+        // changement de contexte et la fin de la tache serait perdu, et pire,
+        // impute a la tache suivante installee sur ce CPU.
+        account_slice_end(&mut *ptr);
         deactivate_task_space(&*ptr, local_cpu());
         if (*ptr).state == TaskState::Zombie {
             RETIRED[local_cpu()].store(cur, Ordering::Release);
@@ -2327,7 +2491,7 @@ pub fn secondary_cpu_loop() -> ! {
 pub fn exit_current(code: i32) -> ! {
     {
         let task = current();
-        task.state = TaskState::Zombie;
+        marque_zombie(task);
         // pthread_join s'appuie sur cette ecriture suivie d'un futex_wake.
         let clear = task.clear_child_tid;
         if clear != 0 {
@@ -2377,7 +2541,7 @@ pub fn exit_current(code: i32) -> ! {
                 }
                 let pid = tasks()[index].process.pid;
                 if descend_de(pid, racine) {
-                    tasks()[index].state = TaskState::Zombie;
+                    marque_zombie(&mut tasks()[index]);
                     emportes += 1;
                 }
             }
@@ -2421,7 +2585,7 @@ pub fn exit_current(code: i32) -> ! {
         if crate::kernel::timer::ticks().wrapping_sub(idle_since) > patience {
             crate::kernel::dmesg::log("task: aucune tache executable CPU0 depuis 30 s, interblocage suppose");
             for task in tasks().iter_mut() {
-                if task.runq_cpu == 0 && allowed_on(task, 0) { task.state = TaskState::Zombie; }
+                if task.runq_cpu == 0 && allowed_on(task, 0) { marque_zombie(task); }
             }
             break;
         }
@@ -2499,7 +2663,7 @@ pub fn exit_group(code: i32) -> ! {
     };
     for task in tasks().iter_mut() {
         if task.tid != tid && task.process.pid == pid {
-            task.state = TaskState::Zombie;
+            marque_zombie(task);
         }
     }
 
@@ -2690,7 +2854,7 @@ pub fn tue_processus(pid: u32, code: i32) {
             continue;
         }
         if task.process.pid == pid {
-            task.state = TaskState::Zombie;
+            marque_zombie(task);
         }
     }
     if let Some(process) = process_by_pid(pid) {
@@ -2713,14 +2877,36 @@ pub fn terminate_sibling_threads() {
     };
     for task in tasks().iter_mut() {
         if task.tid != tid && task.process.pid == pid {
-            task.state = TaskState::Zombie;
+            marque_zombie(task);
         }
     }
 }
 
 /// Called with the BKL immediately before returning from a syscall. An exec
 /// may have retired this sibling while it ran an audited BKL-bypass syscall.
+/// Ne rentre pas en espace utilisateur si la tache courante a ete tuee.
+///
+/// Appelee a la sortie de CHAQUE appel systeme, pour une condition qui est
+/// fausse presque toujours. Elle lisait `current().state`, donc `TASKS`, donc
+/// exigeait le gros verrou a chaque retour d'appel systeme.
+///
+/// Chemin commun : une lecture atomique d'un drapeau par CPU, rien d'autre.
+///
+/// Chemin rare : le drapeau est leve, on prend le gros verrou et on RELIT
+/// l'etat reel avant d'agir. Le drapeau n'est donc qu'un filtre -- s'il est
+/// devenu obsolete (la tache qu'il visait a deja quitte ce CPU), la relecture
+/// le constate et l'on repart sans rien faire.
+///
+/// Une tache qui s'execute ne change pas de CPU sans passer par un changement
+/// de contexte, et un zombie n'est jamais reordonnance : le drapeau du CPU
+/// courant designe donc bien la tache courante.
 pub fn retire_current_if_zombie() {
+    let cpu = interrupts::without_interrupts(local_cpu);
+    if !RETRAITE_DEMANDEE[cpu].load(Ordering::Acquire) {
+        return;
+    }
+    let _kernel = smp_lock::enter();
+    RETRAITE_DEMANDEE[cpu].store(false, Ordering::Release);
     if in_user_task() && current().state == TaskState::Zombie {
         schedule();
         panic!("zombie task resumed after exec quiescence");
@@ -2792,7 +2978,7 @@ pub fn signal_pending() -> bool {
 /// Termine de force toutes les taches (utilise apres une faute fatale).
 pub fn kill_all(code: i32) {
     for task in tasks().iter_mut() {
-        task.state = TaskState::Zombie;
+        marque_zombie(task);
         task.process.lifecycle.lock().exit_code = code;
     }
 }
@@ -2951,9 +3137,10 @@ pub fn log_smp_load() {
     }
     crate::kernel::dmesg::log_fmt(format_args!("{}", line));
     let (bkl_wait, bkl_hold, bkl_acq) = smp_lock::contention_stats();
+    let (acq_enter, acq_try, acq_resume) = smp_lock::acquisitions_par_origine();
     crate::kernel::dmesg::log_fmt(format_args!(
-        "[BKL-STATS] wait_ns={} hold_ns={} acquisitions={}",
-        bkl_wait, bkl_hold, bkl_acq,
+        "[BKL-STATS] wait_ns={} hold_ns={} acquisitions={} enter={} try_enter={} resume={} identite_repli={}",
+        bkl_wait, bkl_hold, bkl_acq, acq_enter, acq_try, acq_resume, identite_repli(),
     ));
     let (_, _, backing_reads, backing_bytes) = crate::fs::backing::stats();
     let (cache_hits, readahead_hits) = crate::fs::backing::cache_stats();

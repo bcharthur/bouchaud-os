@@ -485,7 +485,16 @@ pub fn deliver_pending(frame: &mut TrapFrame) {
         return;
     }
     loop {
-        let process = task::current_process();
+        // `deliver_pending` s'execute a la fin de CHAQUE appel systeme, et
+        // `task::current_process()` prend le gros verrou parce qu'il passe par
+        // la table des taches. C'etait donc une acquisition par appel systeme,
+        // AVANT meme de regarder s'il y a un signal a livrer -- et sur un appel
+        // libere, elle annulait a elle seule tout le benefice de la
+        // liberation : mesure, 20 123 acquisitions pour 20 000 `getpid`.
+        //
+        // Le domaine CPU-local rend le meme `Arc` sans rien verrouiller, et
+        // `signals` a son propre verrou sur le `Process`.
+        let process = super::processus_courant();
         let (signal, action, blocked) = {
             let signals = process.signals.lock();
             match signals.next_deliverable() {

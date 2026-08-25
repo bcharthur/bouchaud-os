@@ -49,6 +49,10 @@ static PROBE_LAST_RELEASE_GEN: AtomicU64 = AtomicU64::new(0);
 static TOTAL_WAIT_NS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_HOLD_NS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_ACQUISITIONS: AtomicU64 = AtomicU64::new(0);
+/// Acquisitions ventilees par origine : 1 = `enter`, 2 = `try_enter*` (IRQ),
+/// 3 = `resume_after_schedule` (reprise d'une pile apres un changement de
+/// contexte). Un total seul ne dit pas OU passe le verrou ; ce detail-la, si.
+static ACQ_PAR_ORIGINE: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 static ACQUIRED_AT_NS: [AtomicU64; MAX_CPUS] =
     [const { AtomicU64::new(0) }; MAX_CPUS];
 
@@ -70,6 +74,7 @@ fn probe_note_reenter() {
 #[inline]
 fn probe_note_acquire(cpu: usize, kind: u32) {
     TOTAL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
+    ACQ_PAR_ORIGINE[(kind as usize).min(3)].fetch_add(1, Ordering::Relaxed);
     ACQUIRED_AT_NS[cpu].store(crate::kernel::timer::monotonic_ns(), Ordering::Relaxed);
     // GEN=0 signifie uniquement "transition de metadata". Le token OWNER
     // est deja installe par le CAS ; le PIT sait donc ignorer ce tres court
@@ -347,6 +352,15 @@ pub fn resume_after_schedule(depth: usize) {
         // Meme politique adaptative lors de la reprise d'une pile noyau.
         wait_for_owner_change(&mut active_spins);
     }
+}
+
+/// Acquisitions par origine : (`enter`, `try_enter`, `resume_after_schedule`).
+pub fn acquisitions_par_origine() -> (u64, u64, u64) {
+    (
+        ACQ_PAR_ORIGINE[1].load(Ordering::Relaxed),
+        ACQ_PAR_ORIGINE[2].load(Ordering::Relaxed),
+        ACQ_PAR_ORIGINE[3].load(Ordering::Relaxed),
+    )
 }
 
 pub fn contention_stats() -> (u64, u64, u64) {

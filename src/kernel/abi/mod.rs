@@ -261,7 +261,7 @@ fn sys_alarm(seconds: u32) -> i64 {
 /// (`task::current_process_local`) rend le meme `Arc` sans rien verrouiller ;
 /// il ne rend `None` que pour un fil noyau, cas ou l'on retombe sur le chemin
 /// historique. Aucun comportement ne change : c'est le meme processus.
-fn processus_courant() -> alloc::sync::Arc<task::Process> {
+pub(crate) fn processus_courant() -> alloc::sync::Arc<task::Process> {
     match task::current_process_local() {
         Some(process) => process,
         None => task::current_process(),
