@@ -78,15 +78,28 @@ struct EvenementEnFile {
 struct WebContent {
     Hote& hote;
     bool corrige;                     // false = portage d'avant A0
+    // false = A0 sans sa sortie locale : l'accuse est coupe, et la fin du
+    // traitement ne se dit plus a personne. C'est l'etat qui rendait
+    // `WEB_WHEEL_HANDLED` et le readback du Compositor inatteignables.
+    bool notifie_localement;
     std::set<unsigned> pages_vivantes;
     std::deque<EvenementEnFile> file;
     unsigned m_bouchaud_local_input_depth = 0;
+    // Entrees mises en file pour le compte du chrome, et notifications locales
+    // rendues. Le protocole en veut exactement une par entree.
+    long entrees_locales = 0;
+    long notifications_locales = 0;
 
-    WebContent(Hote& h, bool c)
+    WebContent(Hote& h, bool c, bool n)
         : hote(h)
         , corrige(c)
+        , notifie_localement(n)
     {
     }
+
+    // Le second point de sortie : il dit au PORT que le pipeline a fini, et ne
+    // touche jamais la file de l'hote. C'est toute la difference avec l'accuse.
+    void bouchaud_input_event_completed_locally() { ++notifications_locales; }
 
     bool page_absente(unsigned page_id) const { return pages_vivantes.count(page_id) == 0; }
 
@@ -107,6 +120,8 @@ struct WebContent {
             bouchaud_report_input_dropped(event.page_id);
             return;
         }
+        if (!event.report_completion_to_client)
+            ++entrees_locales;
         file.push_back(event);
     }
 
@@ -156,8 +171,11 @@ struct WebContent {
         while (!file.empty()) {
             auto event = file.front();
             file.pop_front();
-            if (corrige && !event.report_completion_to_client)
+            if (corrige && !event.report_completion_to_client) {
+                if (notifie_localement)
+                    bouchaud_input_event_completed_locally();
                 continue;
+            }
             for (std::size_t i = 0; i < event.coalesced_event_count; ++i)
                 hote.did_finish_handling_input_event();
             hote.did_finish_handling_input_event();
@@ -183,18 +201,20 @@ void entree_hote_mouvement(WebContent& wc, unsigned page_id)
 struct Resultat {
     bool accuse_de_trop;
     long reste_en_attente;
+    long entrees_locales;
+    long notifications_locales;
 };
 
 using Scenario = void (*)(WebContent&);
 
-Resultat joue(Scenario scenario, bool corrige)
+Resultat joue(Scenario scenario, bool corrige, bool notifie_localement = true)
 {
     Hote hote;
-    WebContent wc(hote, corrige);
+    WebContent wc(hote, corrige, notifie_localement);
     wc.pages_vivantes = { 1, 2 };
     scenario(wc);
     wc.boucle_evenements();
-    return { hote.accuse_de_trop, hote.en_attente };
+    return { hote.accuse_de_trop, hote.en_attente, wc.entrees_locales, wc.notifications_locales };
 }
 
 void seulement_hote(WebContent& wc)
@@ -301,6 +321,49 @@ int main()
         verifie(!r.accuse_de_trop, std::string(c.nom) + " : aucun accuse de trop");
         verifie(r.reste_en_attente == 0, std::string(c.nom) + " : aucun accuse manquant");
     }
+
+    // La fin du traitement doit se dire au port pour CHAQUE entree injectee.
+    // C'est la que le pont M11 programme le readback du Compositor apres une
+    // molette ; sans elle, la molette traverse tout le moteur et la fenetre
+    // Bouchaud reste sur l'image d'avant, sans que rien ne le signale.
+    std::printf("\n== la fin d'une entree injectee se dit au port ==\n");
+    for (auto const& c : cas) {
+        auto r = joue(c.scenario, true);
+        verifie(r.notifications_locales == r.entrees_locales,
+            std::string(c.nom) + " : une notification locale par entree injectee");
+    }
+
+    // Et elle ne doit JAMAIS emprunter le chemin de l'accuse : c'est la meme
+    // assertion d'AK qui reviendrait, par une autre porte.
+    std::printf("\n== la sortie locale ne rend aucun accuse ==\n");
+    for (auto const& c : cas) {
+        auto avec = joue(c.scenario, true, true);
+        auto sans = joue(c.scenario, true, false);
+        verifie(avec.accuse_de_trop == sans.accuse_de_trop
+                && avec.reste_en_attente == sans.reste_en_attente,
+            std::string(c.nom) + " : la file de l'hote ne voit pas la difference");
+    }
+
+    // Le defaut que ce chemin repare : l'accuse coupe emportait la
+    // notification avec lui, et le portage se taisait au lieu de repeindre.
+    //
+    // Une entree injectee sur un `page_id` obsolete n'entre jamais dans la
+    // file : elle sort par le chemin « page absente », sans traitement et donc
+    // sans fin de traitement a annoncer. La sonde compte donc les entreees
+    // effectivement mises en file, et exige que le total ne soit pas nul --
+    // sans quoi « aucune notification » serait vrai pour de mauvaises raisons.
+    std::printf("\n== sans la sortie locale : le port n'apprend rien ==\n");
+    long total_entrees_locales = 0;
+    for (auto const& c : cas) {
+        if (!c.casse_avant_a0)
+            continue;
+        auto r = joue(c.scenario, true, false);
+        total_entrees_locales += r.entrees_locales;
+        verifie(r.notifications_locales == 0,
+            std::string(c.nom) + " : la fin du traitement etait perdue");
+    }
+    verifie(total_entrees_locales > 0,
+        "des entrees injectees ont bien ete mises en file dans ces scenarios");
 
     std::printf("\n== avant A0 : la sonde voit bien le defaut ==\n");
     for (auto const& c : cas) {

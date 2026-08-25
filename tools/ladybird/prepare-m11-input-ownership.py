@@ -59,7 +59,25 @@ CE QUE FAIT CE SCRIPT
    grossir sans fin et l'entree de l'hote se bloquer. Les deux chemins de
    fusion refusent donc de traverser cette frontiere.
 
-2. La propriete du pont M11 devient explicite. `initialize()` est appele dans
+2. L'accuse coupe n'emporte plus la fin du traitement avec lui.
+
+   Un seul appel portait deux choses : « l'hote peut depiler » et « le
+   pipeline d'entree a fini cet evenement, avec ce resultat ». Couper le
+   premier a fait disparaitre le second, et avec lui tout ce que le pont M11
+   y avait accroche -- `WEB_WHEEL_HANDLED`, `WEB_SCREENSHOT_REQUEST`, et le
+   readback du Compositor apres une molette
+   (`prepare-full-browser-host.py`). Du code mort des que M11 est le seul a
+   produire de l'entree, c'est-a-dire toujours : l'hote tourne en
+   `--headless=manual`.
+
+   Le port a donc un second point de sortie,
+   `bouchaud_input_event_completed_locally`, qui dit la fin du traitement
+   sans jamais toucher a la file de l'hote. `tools/ladybird/
+   input-ownership-probe.cpp` verifie les deux moities : une notification
+   locale par entree injectee mise en file, et une file de l'hote qui ne voit
+   aucune difference selon que ce chemin existe ou non.
+
+3. La propriete du pont M11 devient explicite. `initialize()` est appele dans
    CHAQUE processus WebContent, et `BO_GUI_FD`/`BO_SURFACE_FD` sont heritees
    par tout descendant : avec `site_isolation=top-level`, un second WebContent
    attachait un second chrome sur LES MEMES descripteurs. Le journal du
@@ -136,6 +154,21 @@ patch(
 )
 
 # --- 2. La boucle d'evenements respecte le drapeau --------------------------
+#
+# Le drapeau ne coupe que l'ACCUSE. Un seul appel portait deux choses
+# distinctes, et les couper ensemble a fait disparaitre la seconde :
+#
+#   1. « l'hote peut depiler » -- ce qu'un evenement injecte ne doit surtout
+#      pas dire, puisque l'hote n'a rien empile ;
+#   2. « le pipeline d'entree a fini cet evenement, avec ce resultat » -- ce
+#      dont le pont M11 a besoin pour TOUT evenement, injecte ou non, parce
+#      que c'est la qu'il programme le readback du Compositor apres une
+#      molette (`prepare-full-browser-host.py`).
+#
+# Le port a donc un second point de sortie, pour la notification purement
+# locale. Sans lui, `WEB_WHEEL_HANDLED` et `WEB_SCREENSHOT_REQUEST` etaient du
+# code mort des que M11 etait le seul a produire de l'entree -- c'est-a-dire
+# toujours, l'hote tournant en `--headless=manual`.
 patch(
     "Libraries/LibWeb/HTML/EventLoop/EventLoop.cpp",
     """            for (size_t i = 0; i < event.coalesced_event_count; ++i)
@@ -144,15 +177,76 @@ patch(
             page_client.report_finished_handling_input_event(event.page_id, result);""",
     """            // BOUCHAUD : `did_handle_input_event` reste inconditionnel (il tient
             // l'etat de la methode de saisie), mais l'accuse de reception ne
-            // part que si l'hote attend vraiment cet evenement.
+            // part que si l'hote attend vraiment cet evenement. La fin du
+            // traitement, elle, se dit dans les deux cas : voir
+            // `bouchaud_input_event_completed_locally`.
             if (event.report_completion_to_client) {
                 for (size_t i = 0; i < event.coalesced_event_count; ++i)
                     page_client.report_finished_handling_input_event(event.page_id, EventResult::Dropped);
             }
             page_client.did_handle_input_event(event.page_id, event.event);
-            if (event.report_completion_to_client)
-                page_client.report_finished_handling_input_event(event.page_id, result);""",
+            if (event.report_completion_to_client) {
+                page_client.report_finished_handling_input_event(event.page_id, result);
+            }
+#if defined(BOUCHAUD_PORT)
+            else {
+                page_client.bouchaud_input_event_completed_locally(event.page_id, result);
+            }
+#endif""",
     "boucle d'evenements",
+)
+
+# --- 2b. Le point de sortie local ------------------------------------------
+# Corps vide par defaut : aucune autre implementation de `Web::PageClient` n'a
+# a le savoir, et rien ne change hors du port.
+patch(
+    "Libraries/LibWeb/Page/Page.h",
+    """    virtual void report_finished_handling_input_event(u64 page_id, EventResult event_was_handled) = 0;""",
+    """    virtual void report_finished_handling_input_event(u64 page_id, EventResult event_was_handled) = 0;
+
+    // BOUCHAUD : l'entree injectee par le chrome M11 a fini son traitement.
+    // L'hote ne doit pas en etre averti (il n'a rien empile), mais le port,
+    // si : c'est la qu'il programme le readback du Compositor apres une
+    // molette. Voir tools/ladybird/prepare-m11-input-ownership.py.
+    virtual void bouchaud_input_event_completed_locally([[maybe_unused]] u64 page_id, [[maybe_unused]] EventResult event_was_handled) { }""",
+    "sortie locale de fin d'entree",
+)
+
+patch(
+    "Services/WebContent/PageClient.h",
+    """    virtual void report_finished_handling_input_event(u64 page_id, Web::EventResult event_was_handled) override;""",
+    """    virtual void report_finished_handling_input_event(u64 page_id, Web::EventResult event_was_handled) override;
+#if defined(BOUCHAUD_PORT)
+    virtual void bouchaud_input_event_completed_locally(u64 page_id, Web::EventResult event_was_handled) override;
+#endif""",
+    "declaration de la sortie locale",
+)
+
+# `report_finished_handling_input_event` a deja, sous BrowserHost+M11, une
+# premiere branche qui rend AUCUN accuse : elle sort avant l'IPC. Ce qu'elle
+# fait avant de sortir -- la sonde et le readback -- est exactement ce qu'un
+# evenement injecte doit encore declencher. On l'y renvoie plutot que de
+# recopier ce corps, sous la meme condition que sa sortie anticipee : ainsi
+# les deux ne peuvent pas diverger et aucun accuse ne peut fuir.
+patch(
+    "Services/WebContent/PageClient.cpp",
+    """void PageClient::report_finished_handling_input_event(u64 page_id, Web::EventResult event_was_handled)
+{""",
+    """#if defined(BOUCHAUD_PORT)
+void PageClient::bouchaud_input_event_completed_locally(u64 page_id, Web::EventResult event_was_handled)
+{
+    // Meme condition que la sortie anticipee de
+    // `report_finished_handling_input_event` : sous elle, cette fonction ne
+    // touche pas a l'IPC et ne fait plus que le travail local. L'appeler ici
+    // ne peut donc pas rendre l'accuse que ce chemin existe pour supprimer.
+    if (getenv("BOUCHAUD_BROWSER_HOST") != nullptr && BouchaudChrome::enabled())
+        report_finished_handling_input_event(page_id, event_was_handled);
+}
+#endif
+
+void PageClient::report_finished_handling_input_event(u64 page_id, Web::EventResult event_was_handled)
+{""",
+    "implementation de la sortie locale",
 )
 
 # --- 3. L'injection locale, cote WebContent ---------------------------------
