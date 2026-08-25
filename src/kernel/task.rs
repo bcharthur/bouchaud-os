@@ -46,6 +46,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use crate::arch::x86_64::{cpu, smp};
+use x86_64::instructions::interrupts;
 use crate::arch::x86_64::usermode::{self, TrapFrame};
 use crate::kernel::fd::FdTable;
 use crate::kernel::smp_lock;
@@ -1373,8 +1374,90 @@ pub fn current_process() -> Arc<Process> {
 
 /// Clone the current process from CPU-local stable ownership. `SpinLockIrq`
 /// prevents a same-CPU interrupt from observing a half-published Arc.
+///
+/// Les interruptions sont coupees autour de `local_cpu()` **et** de la prise du
+/// verrou. Sans cela, l'index de CPU est lu, la tache migre, et l'on verrouille
+/// la case d'un CPU qui n'est plus le notre — donc l'identite d'une autre
+/// tache. Le verrou seul ne suffisait pas : il ne protege que ce qui vient
+/// apres lui.
 pub fn current_process_local() -> Option<Arc<Process>> {
-    CURRENT_PROCESS[local_cpu()].lock().as_ref().map(Arc::clone)
+    interrupts::without_interrupts(|| {
+        CURRENT_PROCESS[local_cpu()].lock().as_ref().map(Arc::clone)
+    })
+}
+
+/// Identite de la tache courante, lue **sans le gros verrou noyau**.
+///
+/// C'est une COPIE, pas une vue : le `tid` est un entier, le processus est un
+/// `Arc` dont le compteur est incremente. Rien ne pointe plus vers la table des
+/// taches une fois la fonction rendue.
+pub struct IdentiteCourante {
+    pub tid: u32,
+    pub process: Arc<Process>,
+}
+
+/// Lit l'identite de la tache courante depuis le domaine CPU-local.
+///
+/// # Le domaine
+///
+/// Deux emplacements, tous deux ecrits par [`install`] pendant un changement de
+/// contexte, c'est-a-dire sous le gros verrou :
+///
+///  * `usermode::per_cpu().current` — le `tid`, dans le bloc par-CPU adresse par
+///    `GS`. Il y etait deja : `install` l'ecrit depuis toujours, pour que le
+///    stub d'entree des appels systeme sache qui appelle.
+///  * `CURRENT_PROCESS[cpu]` — un `Arc<Process>` (`None` pour un fil noyau).
+///
+/// Aucun des deux ne touche `TASKS`. C'est tout l'objet de cette fonction : la
+/// table des taches est un `static mut Vec<Box<Task>>` sans verrou, et c'est
+/// elle — pas le processus, pas le tid — qui obligeait `getpid` a prendre le
+/// gros verrou.
+///
+/// # Preuve de duree de vie
+///
+/// *Publication.* `install` a six appelants — `task_trampoline`, `switch_to`,
+/// `secondary_cpu_loop`, `run`, `run_noyau` et `preempt_from_irq` — et les six
+/// tiennent le gros verrou au moment de l'appel (verifie un par un).
+/// Un CPU ne peut donc jamais observer une publication a moitie faite : elle est
+/// faite par lui-meme, ou sous un verrou qu'il devrait prendre pour la voir.
+///
+/// *Changement.* Les deux champs ne changent qu'a un changement de contexte sur
+/// CE CPU. Comme cette fonction coupe les interruptions, aucun changement ne
+/// peut s'intercaler entre la lecture du numero de CPU et celle des champs : ni
+/// preemption par le PIT, ni IPI de quantum. Un autre CPU, lui, n'ecrit jamais
+/// dans notre case.
+///
+/// *Destruction.* Le `tid` est une valeur : rien a detruire. Le `Process` est
+/// tenu par un `Arc` dont on prend une part avant de rendre la main ; il survit
+/// donc a la mort de la tache, meme si celle-ci se termine juste apres.
+///
+/// *Fin de tache, exec, idle.* `switch_to_kernel` et `secondary_cpu_loop`
+/// remettent les deux champs a zero (`clear_current_process_local` et
+/// `per_cpu().current = 0`) AVANT de quitter la pile de la tache. Un CPU au
+/// repos rend donc `None`, il ne rend pas l'identite du dernier occupant.
+///
+/// # Pourquoi pas un `&'static mut Task`
+///
+/// Parce qu'il ne serait pas sur. `register` recycle un emplacement zombie par
+/// `tasks()[index] = task`, ce qui **detruit** l'ancienne `Box<Task>` : toute
+/// reference qui lui aurait survecu pendrait dans le vide. La regle est donc
+/// qu'aucune reference vers une `Task` ne sorte de ce module par ce chemin.
+pub fn identite_courante() -> Option<IdentiteCourante> {
+    interrupts::without_interrupts(|| {
+        let cpu = local_cpu();
+        let process = CURRENT_PROCESS[cpu].lock().as_ref().map(Arc::clone)?;
+        let tid = usermode::per_cpu().current as u32;
+        // `NEXT_TID` part de 100 et ne fait que croitre : aucune tache ne porte
+        // le tid 0. C'est donc la valeur que `switch_to_kernel`,
+        // `secondary_cpu_loop` et l'initialisation ecrivent pour dire « aucune
+        // tache ici ». La rencontrer alors qu'un `Process` est publie voudrait
+        // dire qu'une publication a ete coupee en deux, ce que le gros verrou
+        // interdit : on refuse de deviner.
+        if tid == 0 {
+            return None;
+        }
+        Some(IdentiteCourante { tid, process })
+    })
 }
 
 fn clear_current_process_local() {
