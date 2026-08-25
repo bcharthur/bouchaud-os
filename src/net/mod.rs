@@ -200,6 +200,113 @@ const ARP_TENTATIVES: u32 = 4;
 /// pas un delai.
 const ARP_ECOUTE_MS: u64 = 500;
 
+/// Cache ARP : ce que l'on sait d'un voisin, y compris qu'il ne repond pas.
+///
+/// # Pourquoi l'entree NEGATIVE compte autant que la positive
+///
+/// `arp_resolve` est une attente bornee par l'horloge : quatre tentatives de
+/// 500 ms. Sans memoire d'un echec, chaque paquet a destination d'un voisin
+/// muet repayait ces deux secondes. Et `TcpConn::pump` emet un accuse par
+/// segment recu : une rafale de quarante segments valait quatre-vingts secondes
+/// de noyau immobile. C'est exactement la panne observee sur CPU4.
+///
+/// Retenir l'echec transforme « deux secondes par paquet » en « deux secondes
+/// par fenetre de deux secondes ». Ce n'est pas un contournement du defaut de
+/// vivacite -- celui-la est corrige separement, en cedant le verrou pendant
+/// l'attente et en n'attendant jamais depuis le chemin de disponibilite -- mais
+/// c'est ce qui empeche le cout de se repeter sans fin.
+///
+/// `static mut` sous gros verrou, comme le cache DNS juste en dessous : toute
+/// la pile reseau s'execute deja sous ce verrou.
+struct EntreeArp {
+    ip: Ipv4Addr,
+    /// `None` = ce voisin n'a pas repondu (entree negative).
+    mac: Option<[u8; 6]>,
+    pose_a: u64,
+}
+
+static mut CACHE_ARP: Option<alloc::vec::Vec<EntreeArp>> = None;
+const ARP_CACHE_MAX: usize = 64;
+/// Un voisin qui repond reste valable une minute.
+const ARP_TTL_MS: u64 = 60_000;
+/// Un voisin muet n'est reinterroge qu'apres ce delai. Assez court pour qu'un
+/// voisin qui apparait soit vu vite, assez long pour que l'attente ne se
+/// repaie pas a chaque paquet.
+const ARP_TTL_NEGATIF_MS: u64 = 2_000;
+
+fn cache_arp() -> &'static mut alloc::vec::Vec<EntreeArp> {
+    unsafe {
+        let slot = &mut *core::ptr::addr_of_mut!(CACHE_ARP);
+        if slot.is_none() {
+            *slot = Some(alloc::vec::Vec::new());
+        }
+        slot.as_mut().unwrap()
+    }
+}
+
+/// Ce que l'on sait de `ip`.
+///
+/// `None` : rien (ou l'entree a expire). `Some(None)` : on sait qu'il ne
+/// repond pas. `Some(Some(mac))` : on connait son adresse.
+fn arp_cache_lit(ip: Ipv4Addr) -> Option<Option<[u8; 6]>> {
+    let maintenant = crate::kernel::timer::monotonic_ms();
+    let file = cache_arp();
+    file.retain(|e| {
+        let ttl = if e.mac.is_some() { ARP_TTL_MS } else { ARP_TTL_NEGATIF_MS };
+        maintenant.wrapping_sub(e.pose_a) < ttl
+    });
+    file.iter().find(|e| e.ip == ip).map(|e| e.mac)
+}
+
+fn arp_cache_pose(ip: Ipv4Addr, mac: Option<[u8; 6]>) {
+    let file = cache_arp();
+    file.retain(|e| e.ip != ip);
+    if file.len() >= ARP_CACHE_MAX {
+        file.remove(0);
+    }
+    file.push(EntreeArp { ip, mac, pose_a: crate::kernel::timer::monotonic_ms() });
+}
+
+/// Enregistre ce qu'une trame ARP nous apprend, quelle qu'elle soit.
+///
+/// Une requete comme une reponse portent `sender_ip`/`sender_mac` : un voisin
+/// qui nous parle se presente, et c'est gratuit a retenir. C'est aussi ce qui
+/// referme la boucle du chemin non bloquant : la requete partie sans attendre
+/// trouvera sa reponse ici, au prochain passage de `poll_ip`.
+fn arp_apprend(paquet: &arp::Packet) {
+    if paquet.sender_ip != [0, 0, 0, 0] {
+        arp_cache_pose(paquet.sender_ip, Some(paquet.sender_mac));
+    }
+}
+
+/// Une pause qui ne garde pas le gros verrou.
+///
+/// L'attente ARP etait la plus longue du noyau qui se compte en secondes. La passer en
+/// `spin_loop` gardait le verrou global tout du long : tous les autres CPU
+/// s'arretaient, l'ordonnanceur ne commutait plus, et un appel systeme trivial
+/// sur un autre coeur mettait deux secondes. Mesure : `POLL_BKL_PIRE_US
+/// 2016000`.
+///
+/// `sleep_ticks` suspend la profondeur COMPLETE du verrou externe avant de
+/// rendre la main, et ne restaure que celle-la au reveil. On ne l'emploie que
+/// depuis une tache utilisateur : ailleurs (initialisation, contexte noyau
+/// sans tache) il n'y a personne a qui ceder.
+///
+/// # Ce que l'appelant doit garantir
+///
+/// Aucun verrou tournant tenu. C'est pour cela que le chemin de disponibilite
+/// (`TcpConn::pump`, appele sous le verrou du socket) n'attend JAMAIS : il
+/// passe par [`send_ip_immediat`].
+pub(crate) fn attente_cedante() {
+    if crate::kernel::task::in_user_task()
+        && crate::kernel::smp_lock::held_by_current_cpu()
+    {
+        crate::kernel::task::sleep_ticks(1);
+    } else {
+        core::hint::spin_loop();
+    }
+}
+
 fn arp_resolve(target: Ipv4Addr) -> Option<[u8; 6]> {
     let mac = e1000::mac();
     let mut arp_buf = [0u8; arp::PACKET_LEN];
@@ -208,6 +315,10 @@ fn arp_resolve(target: Ipv4Addr) -> Option<[u8; 6]> {
     let flen = ethernet::build_frame(&mut frame, ethernet::BROADCAST, mac, ethernet::ETHERTYPE_ARP, &arp_buf)?;
 
     let mut buf = [0u8; 2048];
+    // Site 70 : cette attente est la seule du noyau qui se compte en secondes.
+    // La marquer permet a la jauge de tenue maximale du BKL de la NOMMER au
+    // lieu de rendre un nombre orphelin.
+    crate::kernel::task::stall_site_set(70, u64::from(target[3]));
     for _tentative in 0..ARP_TENTATIVES {
         e1000::send(&frame[..flen]);
         let echeance = crate::kernel::timer::monotonic_ms() + ARP_ECOUTE_MS;
@@ -219,7 +330,12 @@ fn arp_resolve(target: Ipv4Addr) -> Option<[u8; 6]> {
         while crate::kernel::timer::monotonic_ms() < echeance {
             let n = match e1000::receive(&mut buf) {
                 Some(n) => n,
-                None => continue,
+                None => {
+                    // Rien sur l'anneau : ceder, et surtout ne pas garder le
+                    // gros verrou pendant ce temps-la.
+                    attente_cedante();
+                    continue;
+                }
             };
             if n < ethernet::HEADER_LEN + arp::PACKET_LEN {
                 continue;
@@ -233,7 +349,9 @@ fn arp_resolve(target: Ipv4Addr) -> Option<[u8; 6]> {
                 Some(p) => p,
                 None => continue,
             };
+            arp_apprend(&paquet);
             if paquet.op == arp::OP_REPLY && paquet.sender_ip == target {
+                crate::kernel::task::stall_site_clear();
                 return Some(paquet.sender_mac);
             }
             // Le pair nous interroge en meme temps qu'on l'interroge : c'est le
@@ -244,6 +362,10 @@ fn arp_resolve(target: Ipv4Addr) -> Option<[u8; 6]> {
             }
         }
     }
+    crate::kernel::task::stall_site_clear();
+    // Retenir l'echec : c'est ce qui empeche les deux secondes de se repayer au
+    // paquet suivant.
+    arp_cache_pose(target, None);
     None
 }
 
@@ -284,22 +406,67 @@ fn next_ip_id() -> u16 {
 }
 
 /// MAC du prochain saut pour atteindre `dst` (cache la MAC de la passerelle).
-fn hop_mac(dst: &Ipv4Addr) -> Option<[u8; 6]> {
-    if same_subnet(dst) {
-        return arp_resolve(*dst);
+/// Adresse materielle du prochain saut, en consultant d'abord le cache.
+///
+/// `bloquant = false` : on ne repond que depuis le cache, et sur une absence on
+/// emet UNE requete sans l'attendre. C'est le mode obligatoire pour tout
+/// appelant qui tient un verrou tournant ou qui sert un chemin de
+/// disponibilite.
+fn hop_mac(dst: &Ipv4Addr, bloquant: bool) -> Option<[u8; 6]> {
+    let cible = if same_subnet(dst) { *dst } else { gateway() };
+
+    match arp_cache_lit(cible) {
+        Some(Some(mac)) => return Some(mac),
+        Some(None) => return None, // connu muet : ne pas repayer l'attente
+        None => {}
     }
-    unsafe {
-        if let Some(m) = GW_MAC { return Some(m); }
-        let m = arp_resolve(gateway())?;
-        GW_MAC = Some(m);
-        Some(m)
+
+    if !bloquant {
+        arp_demande_sans_attendre(cible);
+        return None;
+    }
+
+    let mac = arp_resolve(cible)?;
+    arp_cache_pose(cible, Some(mac));
+    Some(mac)
+}
+
+/// Emet une requete ARP et rend la main immediatement.
+///
+/// La reponse sera apprise par `arp_apprend`, appele sur chaque trame ARP que
+/// `poll_ip` sort de la carte. L'appelant retentera au tour suivant : un accuse
+/// TCP est cumulatif, un datagramme perdu est retransmis.
+fn arp_demande_sans_attendre(target: Ipv4Addr) {
+    let mac = e1000::mac();
+    let mut arp_buf = [0u8; arp::PACKET_LEN];
+    if arp::build(&mut arp_buf, arp::OP_REQUEST, mac, our_ip(), [0; 6], target).is_none() {
+        return;
+    }
+    let mut frame = [0u8; ethernet::HEADER_LEN + arp::PACKET_LEN];
+    if let Some(flen) = ethernet::build_frame(
+        &mut frame, ethernet::BROADCAST, mac, ethernet::ETHERTYPE_ARP, &arp_buf,
+    ) {
+        e1000::send(&frame[..flen]);
     }
 }
 
 /// Emet un paquet IPv4 (`proto`/`payload`) vers `dst` via e1000.
 pub(crate) fn send_ip(dst: Ipv4Addr, proto: u8, payload: &[u8]) -> bool {
+    envoie(dst, proto, payload, true)
+}
+
+/// Emet sans jamais attendre une resolution ARP.
+///
+/// A employer partout ou l'appelant ne peut pas dormir : sous un verrou
+/// tournant, ou sur un chemin de disponibilite (`poll`). Une absence de cache
+/// rend `false` apres avoir emis une requete ; l'appelant retentera.
+pub(crate) fn send_ip_immediat(dst: Ipv4Addr, proto: u8, payload: &[u8]) -> bool {
+    envoie(dst, proto, payload, false)
+}
+
+fn envoie(dst: Ipv4Addr, proto: u8, payload: &[u8], bloquant: bool) -> bool {
     if !e1000::is_ready() && !e1000::init() { return false; }
-    let mac = match hop_mac(&dst) { Some(m) => m, None => return false };
+    let mac = match hop_mac(&dst, bloquant) { Some(m) => m, None => return false };
     let mut ip = [0u8; 1500];
     let ipl = match ipv4::build_packet(&mut ip, our_ip(), dst, proto, next_ip_id(), payload) {
         Some(n) => n, None => return false,
@@ -332,6 +499,9 @@ fn repond_arp(trame: &[u8]) -> bool {
         Some(p) => p,
         None => return false,
     };
+    // Toute trame ARP nous apprend qui est son emetteur, requete comme reponse.
+    // C'est ce qui referme la boucle du chemin non bloquant.
+    arp_apprend(&paquet);
     if paquet.op != arp::OP_REQUEST || paquet.target_ip != our_ip() {
         return true; // c'est de l'ARP, mais pas pour nous : deja consomme
     }

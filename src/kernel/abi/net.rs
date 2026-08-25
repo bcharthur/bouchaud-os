@@ -591,31 +591,55 @@ pub fn sys_recvfrom(
 
     match kind {
         SocketKind::Tcp => {
-            let mut borrowed = state.lock();
-            let conn = match borrowed.conn.as_mut() {
-                Some(conn) => conn,
-                None => return -errno::ENOTCONN,
-            };
-            if conn.rx.is_empty() && !conn.peer_fin && !conn.closed {
-                if nonblocking {
-                    conn.pump(50_000);
-                    if conn.rx.is_empty() {
-                        return -errno::EAGAIN;
+            // Attente bloquante : sur le temps, et en rendant le processeur.
+            //
+            // `conn.fill(1)` faisait cela SOUS le verrou du socket et sans
+            // jamais ceder : jusqu'a trois secondes de gros verrou tenu, la
+            // meme panne de vivacite que l'attente ARP corrigee dans ce lot.
+            // Un verrou tournant interdit de dormir ; on adopte donc la forme
+            // que la branche UDP emploie deja juste en dessous -- pomper sous
+            // le verrou, attendre dehors.
+            //
+            // Les issues sont inchangees : donnees -> les rendre ; pair ferme
+            // et tampon vide -> fin de flux ; non bloquant et rien -> EAGAIN ;
+            // trois secondes sans rien -> tampon vide, donc 0, exactement ce
+            // que rendait `fill(1)` epuise.
+            let mut tours_vides = 0u32;
+            let echeance = crate::kernel::timer::ticks()
+                + 3 * crate::kernel::timer::TICKS_PER_SECOND.max(1);
+            loop {
+                let pret = {
+                    let mut borrowed = state.lock();
+                    let conn = match borrowed.conn.as_mut() {
+                        Some(conn) => conn,
+                        None => return -errno::ENOTCONN,
+                    };
+                    if conn.rx.is_empty() && !conn.peer_fin && !conn.closed {
+                        conn.pump(50_000);
                     }
-                } else {
-                    conn.fill(1);
+                    if !conn.rx.is_empty() {
+                        Some(conn.take(len))
+                    } else if conn.peer_fin || conn.closed {
+                        return 0;
+                    } else {
+                        None
+                    }
+                };
+                if let Some(data) = pret {
+                    let read = data.len();
+                    return if user_write(buffer, &data) {
+                        read as i64
+                    } else {
+                        -errno::EFAULT
+                    };
                 }
-            }
-            if conn.rx.is_empty() {
-                // Tampon vide et pair ferme : fin de flux.
-                return 0;
-            }
-            let data = conn.take(len);
-            let read = data.len();
-            if user_write(buffer, &data) {
-                read as i64
-            } else {
-                -errno::EFAULT
+                if nonblocking {
+                    return -errno::EAGAIN;
+                }
+                if crate::kernel::timer::ticks() >= echeance {
+                    return 0;
+                }
+                task::attends_io_adaptatif(&mut tours_vides);
             }
         }
         SocketKind::Udp => {

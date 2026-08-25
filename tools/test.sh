@@ -104,6 +104,7 @@ exec /persist-probe
 exec /shm-probe
 exec /ipc-probe
 exec /ordonnanceur-probe
+exec /poll-bkl-probe
 exec /qpa-probe
 exec /cpp23-probe
 SCENARIO

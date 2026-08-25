@@ -372,7 +372,7 @@ impl TcpConn {
             let end = (off + mss).min(data.len());
             let chunk = &data[off..end];
             let l = build(&mut seg, &self.dst, self.sport, self.dport, self.seq, self.ack, PSH | ACK, WINDOW, chunk);
-            net::send_ip(self.dst, 6, &seg[..l]);
+            net::send_ip_immediat(self.dst, 6, &seg[..l]);
             self.seq = self.seq.wrapping_add(chunk.len() as u32);
             off = end;
             // Petite fenetre de drainage des ACK/segments entrants.
@@ -393,7 +393,7 @@ impl TcpConn {
             let end = (off + mss).min(data.len());
             let chunk = &data[off..end];
             let l = build(&mut seg, &self.dst, self.sport, self.dport, self.seq, self.ack, PSH | ACK, WINDOW, chunk);
-            net::send_ip(self.dst, 6, &seg[..l]);
+            net::send_ip_immediat(self.dst, 6, &seg[..l]);
             self.seq = self.seq.wrapping_add(chunk.len() as u32);
             off = end;
         }
@@ -454,14 +454,14 @@ impl TcpConn {
                 // ACK cumulatif. Si le segment etait hors sequence, on re-ACK
                 // volontairement le prochain octet attendu.
                 let a = build(&mut seg, &self.dst, self.sport, self.dport, self.seq, self.ack, ACK, WINDOW, &[]);
-                net::send_ip(self.dst, 6, &seg[..a]);
+                net::send_ip_immediat(self.dst, 6, &seg[..a]);
             }
             if h.flags & FIN != 0 && h.seq.wrapping_add(plen as u32) == self.ack {
                 self.ack = self.ack.wrapping_add(1);
                 self.peer_fin = true;
                 self.fin_seen = true;
                 let a = build(&mut seg, &self.dst, self.sport, self.dport, self.seq, self.ack, ACK, WINDOW, &[]);
-                net::send_ip(self.dst, 6, &seg[..a]);
+                net::send_ip_immediat(self.dst, 6, &seg[..a]);
             }
         }
 
@@ -543,6 +543,17 @@ impl TcpConn {
                 last = timer::ticks();
             } else if timer::ticks().wrapping_sub(last) >= deadline {
                 break;
+            } else {
+                // Trois secondes d'attente sur l'horloge, sans jamais rendre le
+                // gros verrou, gelaient tous les autres CPU -- la meme panne de
+                // vivacite que l'attente ARP. `attente_cedante` suspend la
+                // profondeur COMPLETE du verrou externe avant de dormir un
+                // tick, et ne restaure que celle-la au reveil.
+                //
+                // Sur : depuis que `sys_recvfrom` pompe lui-meme, `fill` n'est
+                // plus appele que depuis la poignee de main TLS, qui possede sa
+                // `TcpConn` en propre et ne tient aucun verrou tournant.
+                net::attente_cedante();
             }
         }
         self.rx.len() >= want
@@ -561,7 +572,7 @@ impl TcpConn {
         if self.closed { return; }
         let mut seg = [0u8; 64];
         let f = build(&mut seg, &self.dst, self.sport, self.dport, self.seq, self.ack, FIN | ACK, WINDOW, &[]);
-        net::send_ip(self.dst, 6, &seg[..f]);
+        net::send_ip_immediat(self.dst, 6, &seg[..f]);
         self.seq = self.seq.wrapping_add(1);
         self.closed = true;
     }
