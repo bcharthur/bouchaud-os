@@ -283,14 +283,25 @@ impl Client {
         true
     }
 
-    pub fn envoie_molette(&mut self, delta: i32, x: i32, y: i32) {
+    /// Un cran de molette. Rend `false` si le canal l'a abandonne.
+    ///
+    /// Le resultat n'est pas decoratif : le canal est borne, et un client qui
+    /// ne lit pas ses evenements voit les siens jetes (§ « Contre-pression »).
+    /// Sans cette reponse, « le bureau a envoye » et « le client a recu » se
+    /// ressemblent exactement dans le journal, et il n'y a plus moyen de dire
+    /// lequel des deux a perdu le defilement.
+    ///
+    /// Contrairement au pointeur, une molette n'est jamais fusionnee ni
+    /// remplacee : elle est un increment, pas un etat. En perdre une perd du
+    /// defilement, et rien ne le rattrape.
+    pub fn envoie_molette(&mut self, delta: i32, x: i32, y: i32) -> bool {
         let charge = proto::Molette {
             fenetre: proto::FENETRE_PRINCIPALE,
             delta,
             x,
             y,
         }.encode();
-        self.envoie(Genre::Wheel, &charge);
+        self.envoie(Genre::Wheel, &charge)
     }
 
     pub fn envoie_touche(&mut self, code: u32, unicode: u32, modificateurs: u32) {

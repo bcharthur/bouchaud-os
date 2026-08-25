@@ -621,6 +621,13 @@ fn envoie_touche(client: &mut Client, k: Key) {
     client.envoie_touche(code, unicode, 0);
 }
 
+/// Route un cran de molette vers la fenetre sous le pointeur.
+///
+/// Chaque sortie se dit. Un cran perdu en silence ne se distingue pas d'un
+/// cran jamais produit, et le defilement traverse cinq couches avant d'arriver
+/// a la page : il faut pouvoir nommer celle qui l'a arrete. `delta` est deja
+/// dans la convention du protocole (positif vers le haut), la conversion ayant
+/// eu lieu dans `gui::mouse`.
 fn handle_wheel(mx: i32, my: i32, delta: i32, wins: &mut Vec<Win>) {
     for i in (0..wins.len()).rev() {
         let w = &wins[i];
@@ -628,11 +635,17 @@ fn handle_wheel(mx: i32, my: i32, delta: i32, wins: &mut Vec<Win>) {
             let zone = zone_utile(w);
             if let App::Navigateur { client } = &mut wins[i].app {
                 if let Some((client_x, client_y)) = crate::gui::protocole::vers_local(&zone, mx, my) {
+                    // Le journal part APRES l'envoi, et porte son resultat : le
+                    // canal est borne, et un client qui ne lit pas voit ses
+                    // evenements abandonnes. Annoncer la transmission avant de
+                    // la tenter faisait dire au bureau une chose qu'il ne
+                    // savait pas encore.
+                    let transmis = client.envoie_molette(delta, client_x, client_y);
                     crate::serial_println!(
-                        "[GUI-WHEEL-TX] pid={} dx=0 dy={} screen_x={} screen_y={} client_x={} client_y={}",
+                        "[GUI-WHEEL-TX] pid={} dx=0 dy={} screen_x={} screen_y={} client_x={} client_y={} transmis={} perdus={}",
                         client.pid, delta, mx, my, client_x, client_y,
+                        transmis as u8, client.evenements_perdus,
                     );
-                    client.envoie_molette(delta, client_x, client_y);
                 } else {
                     crate::serial_println!(
                         "[GUI-WHEEL-DROP] pid={} reason=outside-client screen_x={} screen_y={} dy={}",
@@ -641,10 +654,21 @@ fn handle_wheel(mx: i32, my: i32, delta: i32, wins: &mut Vec<Win>) {
                 }
                 return;
             }
+            // Une application du noyau, pas le navigateur : le cran est bien
+            // consomme, mais pas par la page. C'est une reponse a « ou est
+            // passe mon defilement », pas une panne.
+            crate::serial_println!(
+                "[GUI-WHEEL-APP] fenetre={} screen_x={} screen_y={} dy={}",
+                i, mx, my, delta,
+            );
             apps::wheel_to_app(&mut wins[i], mx, my, delta);
-            break;
+            return;
         }
     }
+    crate::serial_println!(
+        "[GUI-WHEEL-DROP] reason=no-window screen_x={} screen_y={} dy={}",
+        mx, my, delta,
+    );
 }
 
 fn handle_click(
