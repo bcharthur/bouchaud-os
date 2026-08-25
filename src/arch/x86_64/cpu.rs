@@ -189,6 +189,41 @@ pub fn wait_for_interrupt() {
     idle_exit(cpu);
 }
 
+// BOUCHAUD_P0_IDLE_WAKE_HANDSHAKE_V14
+//
+// Scheduler sleep is a two-phase handshake.
+//
+// PREPARE runs while the caller still owns the BKL:
+//   1. IF is cleared;
+//   2. IDLE[cpu] becomes visible.
+//
+// Only then may the caller release the BKL. Every normal Ready publication is
+// serialized by that same BKL, so a producer can no longer enqueue work in the
+// old "not idle yet / already released the BKL" window.
+//
+// COMMIT uses the architectural STI;HLT interrupt shadow. If a targeted wakeup
+// became pending after PREPARE, HLT executes atomically with respect to that
+// pending interrupt and returns immediately instead of losing the wakeup.
+pub fn prepare_scheduler_idle() {
+    debug_assert!(
+        interrupts_enabled(),
+        "cpu: prepare_scheduler_idle requires IF=1"
+    );
+    let cpu = hardware_cpu_index();
+    unsafe { asm!("cli", options(nomem, nostack)); }
+    idle_enter(cpu);
+}
+
+pub fn commit_scheduler_idle() {
+    debug_assert!(
+        !interrupts_enabled(),
+        "cpu: commit_scheduler_idle requires IF=0"
+    );
+    let cpu = hardware_cpu_index();
+    unsafe { asm!("sti; hlt", options(nostack)); }
+    idle_exit(cpu);
+}
+
 fn idle_enter(cpu: usize) {
     let now = crate::kernel::timer::monotonic_ns();
     IDLE_SINCE_NS[cpu].store(now, Ordering::Release);

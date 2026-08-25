@@ -1674,6 +1674,29 @@ pub fn in_user_task() -> bool {
     current_index_raw() != NO_TASK
 }
 
+// BOUCHAUD_P0_TARGETED_SCHED_IPI_V1
+/// Lock-free mask of secondary CPUs currently running a user task.
+///
+/// The BSP timer reads only atomics here, before any BKL attempt.
+/// Idle CPUs and kernel threads are excluded. A user task temporarily inside a
+/// syscall remains included so it can still receive its periodic quantum.
+pub fn running_user_cpu_mask() -> u64 {
+    let online = smp::schedulable_cpus().min(MAX_CPUS).min(64);
+    let mut mask = 0u64;
+    let mut cpu = 1usize;
+
+    while cpu < online {
+        let current = CURRENT[cpu].load(Ordering::Acquire);
+        let kernel_task = CURRENT_IS_KERNEL[cpu].load(Ordering::Acquire);
+        if current != NO_TASK && !kernel_task {
+            mask |= 1u64 << cpu;
+        }
+        cpu += 1;
+    }
+
+    mask
+}
+
 /// Tache courante du CPU local.
 pub fn current() -> &'static mut Task {
     let index = current_index_raw();
@@ -2546,6 +2569,8 @@ fn debug_assert_interrupts_enabled() {
 /// obligatoire avant HLT.
 pub fn wait_for_interrupt_releasing_bkl() {
     debug_assert_interrupts_enabled();
+    // BOUCHAUD_P0_IDLE_WAKE_HANDSHAKE_V14
+    cpu::prepare_scheduler_idle();
     let depth = smp_lock::suspend_for_schedule();
 
     #[cfg(debug_assertions)]
@@ -2554,7 +2579,7 @@ pub fn wait_for_interrupt_releasing_bkl() {
         "task: HLT interdit tant que le BKL est detenu"
     );
 
-    cpu::wait_for_interrupt();
+    cpu::commit_scheduler_idle();
     smp_lock::resume_after_schedule(depth);
 }
 
@@ -2576,13 +2601,15 @@ pub fn schedule() -> bool {
             if tasks()[cur].state != TaskState::Ready {
                 // Ne jamais dormir en tenant le BKL : les autres CPU doivent
                 // pouvoir entrer dans leurs syscalls pendant notre HLT.
+                // BOUCHAUD_P0_IDLE_WAKE_HANDSHAKE_V14
+                cpu::prepare_scheduler_idle();
                 let depth = smp_lock::suspend_for_schedule();
                 #[cfg(debug_assertions)]
                 debug_assert!(
                     !smp_lock::held_by_current_cpu(),
                     "task: schedule HLT interdit tant que le BKL est detenu"
                 );
-                cpu::wait_for_interrupt();
+                cpu::commit_scheduler_idle();
                 smp_lock::resume_after_schedule(depth);
             }
             return false;
@@ -2685,9 +2712,11 @@ pub fn secondary_cpu_loop() -> ! {
         // historique en concurrence avec une allocation secondaire.
         let aucune_tache = unsafe { TASKS.as_ref().map_or(true, |list| list.is_empty()) };
         if aucune_tache {
+            // BOUCHAUD_P0_IDLE_WAKE_HANDSHAKE_V14
+            cpu::prepare_scheduler_idle();
             let depth = smp_lock::suspend_for_schedule();
             stall_site_clear();
-            cpu::wait_for_interrupt();
+            cpu::commit_scheduler_idle();
             stall_site_set(52, current_index_raw() as u64);
             smp_lock::resume_after_schedule(depth);
             stall_site_set(53, current_index_raw() as u64);
@@ -2721,9 +2750,11 @@ pub fn secondary_cpu_loop() -> ! {
             crate::kernel::vmm::activate_kernel();
             stall_site_set(50, NO_TASK as u64);
         } else {
+            // BOUCHAUD_P0_IDLE_WAKE_HANDSHAKE_V14
+            cpu::prepare_scheduler_idle();
             let depth = smp_lock::suspend_for_schedule();
             stall_site_clear();
-            cpu::wait_for_interrupt();
+            cpu::commit_scheduler_idle();
             stall_site_set(52, current_index_raw() as u64);
             smp_lock::resume_after_schedule(depth);
             stall_site_set(53, current_index_raw() as u64);
@@ -2836,8 +2867,10 @@ pub fn exit_current(code: i32) -> ! {
             }
             break;
         }
+        // BOUCHAUD_P0_IDLE_WAKE_HANDSHAKE_V14
+        cpu::prepare_scheduler_idle();
         let depth = smp_lock::suspend_for_schedule();
-        cpu::wait_for_interrupt();
+        cpu::commit_scheduler_idle();
         smp_lock::resume_after_schedule(depth);
         if tasks().iter().any(|t| runnable_local(t, 0) || runnable_steal(t, 0)) {
             idle_since = crate::kernel::timer::ticks();

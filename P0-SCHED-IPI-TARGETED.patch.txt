@@ -1,0 +1,19 @@
+P0 #1 conceptual diff (the APPLY script performs the same edit safely)
+=========================================================================
+
+src/kernel/process/thread.rs
+----------------------------
+After in_user_task(), add a lock-free running_user_cpu_mask() built from
+CURRENT[] and CURRENT_IS_KERNEL[] atomics.
+
+src/arch/x86_64/idt.rs
+-----------------------
+Replace:
+
+    if quantum && !smp::local_scheduler_timer_enabled() {
+        smp::broadcast_reschedule();
+    }
+
+with a loop over running_user_cpu_mask() and smp::reschedule_cpu(cpu).
+
+The actual APPLY script validates exact anchors before writing.

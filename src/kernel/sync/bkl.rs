@@ -388,7 +388,6 @@ pub fn resume_after_schedule(depth: usize) {
 
     let cpu = cpu();
     let mine = token(cpu);
-    let mut active_spins = 0usize;
     let wait_start = crate::kernel::timer::monotonic_ns();
 
     loop {
@@ -411,8 +410,16 @@ pub fn resume_after_schedule(depth: usize) {
             }
         }
 
-        // Meme politique adaptative lors de la reprise d'une pile noyau.
-        wait_for_owner_change(&mut active_spins);
+        // BOUCHAUD_P0_TARGETED_IPI_LIVENESS_V13
+        //
+        // Do NOT HLT while resuming a suspended scheduler/kernel continuation.
+        // With targeted scheduler IPIs there is no longer a 4 ms broadcast
+        // heartbeat guaranteed to wake this CPU after BKL release.
+        //
+        // The CPU was explicitly woken because it has useful work. Busy-wait
+        // here until OWNER becomes free; ordinary enter() keeps the adaptive
+        // HLT policy for unrelated BKL contention.
+        spin_loop();
     }
 }
 

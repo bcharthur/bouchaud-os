@@ -208,11 +208,23 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
     notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
 
     // BOUCHAUD_SMP4_STALL_PROBE_V1 : volontairement AVANT le BKL.
-    crate::kernel::task::stall_probe_from_timer();
-
-    let quantum = timer::ticks() % smp::SCHED_QUANTUM_TICKS == 0;
+    crate::kernel::task::stall_probe_from_timer();    let quantum = timer::ticks() % smp::SCHED_QUANTUM_TICKS == 0;
     if quantum && !smp::local_scheduler_timer_enabled() {
-        smp::broadcast_reschedule();
+        // BOUCHAUD_P0_TARGETED_SCHED_IPI_V1
+        //
+        // PIT fallback used when local TSC-deadline scheduling is unavailable.
+        // Do not broadcast every 4 ms to idle APs. Wake only secondary CPUs
+        // that are currently executing a user task.
+        let targets = crate::kernel::task::running_user_cpu_mask();
+        let online = smp::schedulable_cpus().min(64);
+        let mut cpu = 1usize;
+
+        while cpu < online {
+            if targets & (1u64 << cpu) != 0 {
+                smp::reschedule_cpu(cpu);
+            }
+            cpu += 1;
+        }
     }
 
     let mut preempt_now = false;
