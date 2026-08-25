@@ -280,6 +280,51 @@ pub fn try_enter() -> Option<KernelGuard> {
     }
 }
 
+/// Comme [`try_enter`], mais **refuse la reentrance**.
+///
+/// # Pourquoi elle existe
+///
+/// Le BKL appartient a un CPU, pas a une tache. Un changement de contexte
+/// effectue alors que `OWNER` designe encore ce CPU donnerait la propriete du
+/// verrou a la tache ENTRANTE, qui ne l'a jamais demandee, pendant que la pile
+/// de la tache sortante croit toujours la detenir. Les deux se croiraient
+/// proprietaires ; la premiere a relacher libererait le verrou sous les pieds
+/// de l'autre.
+///
+/// `try_enter` est reentrante, et c'est ce qu'il faut a ses autres appelants :
+/// les gestionnaires d'interruption qui veulent seulement toucher un compteur
+/// sous verrou, qu'ils l'aient deja ou non. Mais la preemption depuis une IRQ,
+/// elle, va COMMUTER : elle doit acquerir depuis la profondeur zero, ou ne pas
+/// acquerir du tout.
+///
+/// Rendre `None` quand ce CPU est deja proprietaire n'est donc pas un echec :
+/// c'est la reponse « pas maintenant », que l'appelant traduit en preemption
+/// differee.
+pub fn try_enter_depuis_zero() -> Option<KernelGuard> {
+    let cpu = cpu();
+    let mine = token(cpu);
+    let _irq = LocalIrqGuard::acquire();
+
+    // Un `OWNER` non libre couvre les deux cas de refus d'un seul test : un
+    // autre CPU le detient, ou c'est nous -- et nous, c'est precisement le cas
+    // qu'il ne faut pas approfondir. Aucune fenetre entre le test et la prise :
+    // les interruptions sont masquees et seul le proprietaire ecrit `OWNER`.
+    if OWNER.load(Ordering::Acquire) != FREE {
+        return None;
+    }
+
+    if OWNER
+        .compare_exchange(FREE, mine, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        DEPTH[cpu].store(1, Ordering::Relaxed);
+        probe_note_acquire(cpu, 2);
+        Some(KernelGuard { cpu, active: true })
+    } else {
+        None
+    }
+}
+
 pub fn held_by_current_cpu() -> bool {
     let cpu = cpu();
     let _irq = LocalIrqGuard::acquire();

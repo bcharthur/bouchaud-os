@@ -1005,6 +1005,15 @@ static COMPTA_EN_NOYAU: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false)
 /// reordonnance : le drapeau designe donc bien la tache courante de ce CPU.
 static RETRAITE_DEMANDEE: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 
+/// Preemptions IRQ refusees parce que ce CPU detenait deja le gros verrou.
+///
+/// Doit rester a zero : `preempt_now` n'est arme que si l'IRQ a interrompu du
+/// ring 3, qui ne peut rien detenir. Le compteur est la pour que ce « doit »
+/// soit une mesure et non une croyance -- y compris dans une construction sans
+/// assertions de debogage, ou `debug_assert!` ne dit rien. Publie par
+/// `[SMP-LOAD]`, donc lisible par `smpstat`.
+static PREEMPT_IRQ_BKL_TENU: AtomicU64 = AtomicU64::new(0);
+
 /// Fois ou le domaine CPU-local n'a PAS su repondre, et ou l'appelant a du
 /// retomber sur `current_process()`, donc sur le gros verrou.
 ///
@@ -1017,6 +1026,12 @@ static IDENTITE_REPLI: AtomicU64 = AtomicU64::new(0);
 /// Nombre de replis du domaine CPU-local vers le chemin sous gros verrou.
 pub fn identite_repli() -> u64 {
     IDENTITE_REPLI.load(Ordering::Relaxed)
+}
+
+/// Nombre de preemptions IRQ refusees faute d'avoir pu prendre le verrou depuis
+/// la profondeur zero alors que ce CPU le detenait.
+pub fn preempt_irq_bkl_tenu() -> u64 {
+    PREEMPT_IRQ_BKL_TENU.load(Ordering::Relaxed)
 }
 
 static CURRENT_PROCESS: [SpinLockIrq<Option<Arc<Process>>>; MAX_CPUS] =
@@ -3001,8 +3016,26 @@ pub fn preempt_from_irq() {
     );
 
     stall_site_set(40, 0);
-    let Some(kernel) = smp_lock::try_enter() else {
+    // Le BKL appartient au CPU, pas a la tache. Commuter alors que `OWNER`
+    // designe encore ce CPU donnerait le verrou a la tache ENTRANTE, qui ne l'a
+    // jamais demande, pendant que la pile sortante croirait toujours le tenir.
+    //
+    // `try_enter` est REENTRANTE : si le contexte interrompu detenait deja le
+    // verrou, elle aurait rendu un garde de profondeur N+1, et le `drop`
+    // ci-dessous ne serait redescendu qu'a N -- `OWNER` reste nous, et l'on
+    // commute quand meme. Le commentaire « le BKL est libere AVANT le switch
+    // IRQ » n'aurait alors ete vrai que par accident.
+    //
+    // Cet appel-ci refuse la reentrance. Ce n'est pas une regression : sur ce
+    // chemin, `preempt_now` n'est arme que si l'IRQ a interrompu du RING 3
+    // (`from_user`), donc un contexte qui ne peut rien detenir. Le refus est
+    // donc la ceinture, pas le comportement nominal -- et s'il se declenche, il
+    // se compte et se DIFFERE au lieu de casser silencieusement.
+    let Some(kernel) = smp_lock::try_enter_depuis_zero() else {
         stall_site_clear();
+        if smp_lock::held_by_current_cpu() {
+            PREEMPT_IRQ_BKL_TENU.fetch_add(1, Ordering::Relaxed);
+        }
         request_deferred_preempt();
         return;
     };
@@ -3062,7 +3095,15 @@ pub fn preempt_from_irq() {
 
     // Le BKL est libere AVANT le switch IRQ. Quand cette pile IRQ sera reprise
     // plus tard avec IF=0, elle n'aura aucun BKL a reacquerir avant IRETQ.
+    //
+    // Le garde vient de `try_enter_depuis_zero` : sa profondeur est donc 1, et
+    // ce `drop` libere reellement `OWNER`. L'assertion ci-dessous le verifie au
+    // lieu de le supposer -- c'est l'invariant central de ce chemin.
     drop(kernel);
+    debug_assert!(
+        !smp_lock::held_by_current_cpu(),
+        "task: changement de contexte IRQ alors que ce CPU detient encore le BKL"
+    );
     // Le nouveau contexte ne doit pas heriter d'un tag "preempt kernel".
     stall_site_clear();
     unsafe { switch_context(&mut (*from_ptr).ctx.rsp, (*to_ptr).ctx.rsp); }
@@ -3139,8 +3180,9 @@ pub fn log_smp_load() {
     let (bkl_wait, bkl_hold, bkl_acq) = smp_lock::contention_stats();
     let (acq_enter, acq_try, acq_resume) = smp_lock::acquisitions_par_origine();
     crate::kernel::dmesg::log_fmt(format_args!(
-        "[BKL-STATS] wait_ns={} hold_ns={} acquisitions={} enter={} try_enter={} resume={} identite_repli={}",
-        bkl_wait, bkl_hold, bkl_acq, acq_enter, acq_try, acq_resume, identite_repli(),
+        "[BKL-STATS] wait_ns={} hold_ns={} acquisitions={} enter={} try_enter={} resume={} preempt_irq_bkl_tenu={} identite_repli={}",
+        bkl_wait, bkl_hold, bkl_acq, acq_enter, acq_try, acq_resume,
+        preempt_irq_bkl_tenu(), identite_repli(),
     ));
     let (_, _, backing_reads, backing_bytes) = crate::fs::backing::stats();
     let (cache_hits, readahead_hits) = crate::fs::backing::cache_stats();
