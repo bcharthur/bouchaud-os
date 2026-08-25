@@ -107,21 +107,28 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
         return 0;
     }
 
-    // Copy metadata under the cache lock, then release it before any disk I/O.
-    let extent = match EXTENTS.lock().iter().find(|extent| extent.node == node).copied() {
-        Some(extent) => extent,
-        None => {
-            let _kernel = crate::kernel::smp_lock::enter();
-            RAMFS_BKL_ENTERS.fetch_add(1, Ordering::Relaxed);
-            let fs = crate::fs::ramfs::fs();
-            let content = &fs.nodes[node].content;
-            if offset >= content.len() {
-                return 0;
-            }
-            let len = core::cmp::min(out.len(), content.len() - offset);
-            out[..len].copy_from_slice(&content[offset..offset + len]);
-            return len;
+    // Copier la metadonnee sous le verrou, puis le rendre avant toute decision.
+    //
+    // Ce `let` compte : ecrit en `match EXTENTS.lock()...`, le garde temporaire
+    // du sujet du match vivait jusqu'a la fin de la construction — donc aussi
+    // dans la branche « pas d'etendue », qui prend le BKL. `EXTENTS` etait
+    // alors tenu pendant une attente du BKL, tandis qu'un autre cœur tenant
+    // deja le BKL demandait `EXTENTS` par `disk_len`. Les deux s'attendaient
+    // pour toujours. En `let`, le garde tombe au point-virgule, avant meme que
+    // l'on sache s'il y a une etendue.
+    let extent = EXTENTS.lock().iter().find(|extent| extent.node == node).copied();
+
+    let Some(extent) = extent else {
+        let _kernel = crate::kernel::smp_lock::enter();
+        RAMFS_BKL_ENTERS.fetch_add(1, Ordering::Relaxed);
+        let fs = crate::fs::ramfs::fs();
+        let content = &fs.nodes[node].content;
+        if offset >= content.len() {
+            return 0;
         }
+        let len = core::cmp::min(out.len(), content.len() - offset);
+        out[..len].copy_from_slice(&content[offset..offset + len]);
+        return len;
     };
 
     if offset >= extent.size {
