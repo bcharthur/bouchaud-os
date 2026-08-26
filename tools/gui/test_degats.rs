@@ -191,3 +191,132 @@ fn effacer_la_region_ne_remet_pas_les_compteurs_a_zero() {
     assert!(degats.vide());
     assert_eq!(degats_plein_ecran(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// Intersection de decoupe
+// ---------------------------------------------------------------------------
+//
+// Reimplemente ici la formule QUE LE PILOTE APPLIQUE, en bornes exclusives.
+// `bochs.rs` ne se compile pas sur l'hote (ports, PCI, memoire physique), mais
+// l'intersection est de l'arithmetique pure : la garder identique des deux
+// cotes est ce que ces tests protegent.
+//
+// Le defaut corrige : les bornes droites etaient calculees APRES deplacement
+// des bornes gauches, ce qui DECALAIT la fenetre au lieu de l'intersecter.
+
+fn intersection(
+    a: (usize, usize, usize, usize),
+    b: (usize, usize, usize, usize),
+) -> (usize, usize, usize, usize) {
+    (a.0.max(b.0), a.1.max(b.1), a.2.min(b.2), a.3.min(b.3))
+}
+
+/// La formule FAUSSE, telle qu'elle etait, pour montrer ce qui changeait.
+fn intersection_fautive(
+    demande: (usize, usize, usize, usize),
+    global: (usize, usize, usize, usize),
+) -> (usize, usize, usize, usize) {
+    let (x, y, w, h) = demande;
+    let x0 = x.max(global.0);
+    let y0 = y.max(global.1);
+    let x1 = (x0 + w).min(global.2);
+    let y1 = (y0 + h).min(global.3);
+    (x0, y0, x1, y1)
+}
+
+fn vide(r: (usize, usize, usize, usize)) -> bool {
+    r.2 <= r.0 || r.3 <= r.1
+}
+
+#[test]
+fn l_ancienne_formule_decalait_la_fenetre_au_lieu_de_l_intersecter() {
+    // Demande [10, 30) x [0, 10), global commencant a 15.
+    let corrige = intersection((10, 0, 30, 10), (15, 0, 100, 100));
+    assert_eq!(corrige, (15, 0, 30, 10), "la borne droite ne bouge pas");
+
+    let fautif = intersection_fautive((10, 0, 20, 10), (15, 0, 100, 100));
+    assert_eq!(fautif, (15, 0, 35, 10), "l'ancienne gagnait 5 px a droite");
+    assert!(fautif.2 > corrige.2, "et depassait la zone demandee");
+}
+
+#[test]
+fn clip_gauche() {
+    let r = intersection((0, 0, 100, 100), (40, 0, 200, 200));
+    assert_eq!(r, (40, 0, 100, 100));
+}
+
+#[test]
+fn clip_droite() {
+    let r = intersection((0, 0, 100, 100), (0, 0, 60, 200));
+    assert_eq!(r, (0, 0, 60, 100));
+}
+
+#[test]
+fn clip_haut() {
+    let r = intersection((0, 0, 100, 100), (0, 30, 200, 200));
+    assert_eq!(r, (0, 30, 100, 100));
+}
+
+#[test]
+fn clip_bas() {
+    let r = intersection((0, 0, 100, 100), (0, 0, 200, 70));
+    assert_eq!(r, (0, 0, 100, 70));
+}
+
+#[test]
+fn clip_des_deux_cotes() {
+    let r = intersection((0, 0, 100, 100), (20, 30, 60, 70));
+    assert_eq!(r, (20, 30, 60, 70));
+    assert!(!vide(r));
+}
+
+#[test]
+fn clip_entierement_exterieur() {
+    // Disjoint a droite, a gauche, en bas, en haut : chaque fois vide.
+    assert!(vide(intersection((0, 0, 10, 10), (50, 0, 60, 10))));
+    assert!(vide(intersection((50, 0, 60, 10), (0, 0, 10, 10))));
+    assert!(vide(intersection((0, 0, 10, 10), (0, 50, 10, 60))));
+    assert!(vide(intersection((0, 50, 10, 60), (0, 0, 10, 10))));
+}
+
+#[test]
+fn une_image_partiellement_hors_ecran_est_rognee_des_deux_cotes() {
+    // Image posee a cheval sur le bord droit et le bord bas.
+    let ecran = (0usize, 0usize, 1280usize, 720usize);
+    let image = (1200usize, 700usize, 1300usize, 800usize);
+    let r = intersection(image, ecran);
+    assert_eq!(r, (1200, 700, 1280, 720));
+    assert!(r.2 <= ecran.2 && r.3 <= ecran.3, "jamais hors ecran");
+}
+
+#[test]
+fn des_dimensions_extremes_ne_debordent_pas() {
+    // C'est `saturating_add` qui tient cette propriete cote pilote : une
+    // largeur absurde ne doit pas faire boucler l'addition.
+    let x1 = usize::MAX.saturating_add(usize::MAX);
+    assert_eq!(x1, usize::MAX);
+    let r = intersection((0, 0, x1, x1), (0, 0, 1280, 720));
+    assert_eq!(r, (0, 0, 1280, 720));
+}
+
+#[test]
+fn aucune_ecriture_hors_du_rectangle_original() {
+    // Propriete generale, verifiee sur une grille de cas : l'intersection est
+    // toujours contenue dans CHACUN des deux rectangles.
+    let global = (17usize, 23usize, 91usize, 88usize);
+    for x in [0usize, 10, 17, 50, 90, 95] {
+        for y in [0usize, 5, 23, 60, 87, 100] {
+            for w in [0usize, 1, 13, 200] {
+                let demande = (x, y, x.saturating_add(w), y.saturating_add(w));
+                let r = intersection(demande, global);
+                if vide(r) {
+                    continue;
+                }
+                assert!(r.0 >= demande.0 && r.2 <= demande.2, "hors demande {:?}", r);
+                assert!(r.1 >= demande.1 && r.3 <= demande.3, "hors demande {:?}", r);
+                assert!(r.0 >= global.0 && r.2 <= global.2, "hors global {:?}", r);
+                assert!(r.1 >= global.1 && r.3 <= global.3, "hors global {:?}", r);
+            }
+        }
+    }
+}

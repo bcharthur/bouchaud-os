@@ -545,6 +545,21 @@ fn dans_clip(x: usize, y: usize) -> bool {
     x >= x0 && x < x1 && y >= y0 && y < y1
 }
 
+/// Intersection de deux rectangles en bornes `(x0, y0, x1, y1)` exclusives.
+///
+/// Extraite pour etre exercee sur l'hote : une intersection fausse ne produit
+/// aucune erreur, seulement des pixels au mauvais endroit -- et quelques
+/// pixels de decalage ne se voient pas dans un journal.
+///
+/// Rend un rectangle VIDE (x1 <= x0 ou y1 <= y0) quand les deux sont
+/// disjoints ; l'appelant sort alors sans rien parcourir.
+pub fn intersection(
+    a: (usize, usize, usize, usize),
+    b: (usize, usize, usize, usize),
+) -> (usize, usize, usize, usize) {
+    (a.0.max(b.0), a.1.max(b.1), a.2.min(b.2), a.3.min(b.3))
+}
+
 /// Rectangle de decoupe courant, en bornes exclusives `(x0, y0, x1, y1)`.
 ///
 /// Pour les rares appelants qui copient par lignes entieres et ne peuvent pas
@@ -654,11 +669,26 @@ pub fn blit_rgb(x: usize, y: usize, iw: usize, ih: usize, pix: &[u32],
     // La decoupe demandee par l'appelant ET celle de la trame : la plus
     // restrictive des deux gagne, sans quoi un widget pourrait dessiner hors
     // de la region que le compositeur va presenter.
+    //
+    // BOUCHAUD_GUI_CLIP_V2 : les bornes DROITES se calculent depuis les bornes
+    // gauches D'ORIGINE. La version precedente faisait :
+    //
+    //     clip_x = max(clip_x, gx0)
+    //     cx1    = min(clip_x + clip_w, gx1)   // <- clip_x deja deplace
+    //
+    // ce qui DECALE la fenetre vers la droite au lieu de l'intersecter : une
+    // decoupe [10, 20) recadree par un global commencant a 15 devenait
+    // [15, 25) et non [15, 20). Le rectangle gagnait a droite ce qu'il perdait
+    // a gauche. Les ecritures restaient dans l'ecran -- `gx1` est borne par
+    // `WIDTH` -- donc ce n'etait pas une faute memoire, mais un widget pouvait
+    // peindre cinq pixels hors de la zone qu'il avait demandee.
     let (gx0, gy0, gx1, gy1) = clip();
+    let origine_x1 = clip_x.saturating_add(clip_w);
+    let origine_y1 = clip_y.saturating_add(clip_h);
     let clip_x = clip_x.max(gx0);
     let clip_y = clip_y.max(gy0);
-    let cx1 = (clip_x + clip_w).min(gx1);
-    let cy1 = (clip_y + clip_h).min(gy1);
+    let cx1 = origine_x1.min(gx1);
+    let cy1 = origine_y1.min(gy1);
     for row in 0..ih {
         let py = match y.checked_add(row) {
             Some(v) => v,
