@@ -165,9 +165,10 @@ pub fn init() {
             IRQ_COUNT = 0;
             DROPPED_COUNT = 0;
             LAST_SCANCODE = 0;
-            SHIFT = false;
-            ALTGR = false;
-            EXTENDED_PENDING = false;
+            // Reconfigurer le 8042 fait perdre des octets : un Shift enfonce
+            // avant la reconfiguration n'aura jamais son relachement. Repartir
+            // d'un etat neuf est la seule position honnete.
+            ETAT = EtatClavier::neuf();
         }
 
         for _ in 0..64 {
@@ -299,173 +300,21 @@ fn read_scancode() -> u8 {
     }
 }
 
-fn ascii_letter(ch: u8, shift: bool) -> char {
-    if shift && ch >= b'a' && ch <= b'z' {
-        (ch - 32) as char
-    } else {
-        ch as char
-    }
-}
+#[path = "clavier_decodeur.rs"]
+mod decodeur;
+pub use decodeur::{EtatClavier, Key, KeyEvent, Modificateurs};
 
-/// Traduit un scancode en caractere selon la disposition AZERTY-FR.
+/// L'unique etat du decodeur pour le clavier physique de la machine.
 ///
-/// `altgr` active la 3e couche (AltGr) qui fournit les symboles indispensables
-/// au shell ( | < > { } [ ] \ @ # ~ ` ^ ), utile notamment sur les claviers
-/// portables depourvus de la touche ISO `<>` (ex. Dell a pave numerique).
-///
-/// Les caracteres accentues sont translitteres tant que l'affichage reste en
-/// ASCII pur (ex. la touche `é` produit `e`).
-fn scancode_to_char(sc: u8, shift: bool, altgr: bool) -> Option<char> {
-    if altgr {
-        // Couche AltGr (FR) + raccourcis Bouchaud OS pour < et > sans touche ISO.
-        return match sc {
-            0x03 => Some('~'),   // AltGr+2
-            0x04 => Some('#'),   // AltGr+3
-            0x05 => Some('{'),   // AltGr+4
-            0x06 => Some('['),   // AltGr+5
-            0x07 => Some('|'),   // AltGr+6
-            0x08 => Some('`'),   // AltGr+7
-            0x09 => Some('\\'),  // AltGr+8
-            0x0a => Some('^'),   // AltGr+9
-            0x0b => Some('@'),   // AltGr+0
-            0x0c => Some(']'),   // AltGr+)
-            0x0d => Some('}'),   // AltGr+=
-            0x32 => Some('<'),   // AltGr+, (touche virgule)
-            0x33 => Some('>'),   // AltGr+; (touche point-virgule)
-            _ => None,
-        };
-    }
-    match sc {
-        0x01 => Some('\x1b'),
-        0x0e => Some('\x08'),
-        0x0f => Some('\t'),
-        0x1c => Some('\n'),
-        0x39 => Some(' '),
-
-        // Ligne numerique AZERTY. Les accents sont translitteres pour l'instant.
-        0x02 => Some(if shift { '1' } else { '&' }),
-        0x03 => Some(if shift { '2' } else { 'e' }),
-        0x04 => Some(if shift { '3' } else { '"' }),
-        0x05 => Some(if shift { '4' } else { '\'' }),
-        0x06 => Some(if shift { '5' } else { '(' }),
-        0x07 => Some(if shift { '6' } else { '-' }),
-        0x08 => Some(if shift { '7' } else { 'e' }),
-        0x09 => Some(if shift { '8' } else { '_' }),
-        0x0a => Some(if shift { '9' } else { 'c' }),
-        0x0b => Some(if shift { '0' } else { 'a' }),
-        0x0c => Some(if shift { ')' } else { ')' }),
-        0x0d => Some(if shift { '+' } else { '=' }),
-
-        // AZERTY lettres principales
-        0x10 => Some(ascii_letter(b'a', shift)),
-        0x11 => Some(ascii_letter(b'z', shift)),
-        0x12 => Some(ascii_letter(b'e', shift)),
-        0x13 => Some(ascii_letter(b'r', shift)),
-        0x14 => Some(ascii_letter(b't', shift)),
-        0x15 => Some(ascii_letter(b'y', shift)),
-        0x16 => Some(ascii_letter(b'u', shift)),
-        0x17 => Some(ascii_letter(b'i', shift)),
-        0x18 => Some(ascii_letter(b'o', shift)),
-        0x19 => Some(ascii_letter(b'p', shift)),
-        0x1a => Some(if shift { '^' } else { '^' }),
-        0x1b => Some(if shift { '*' } else { '$' }),
-
-        0x1e => Some(ascii_letter(b'q', shift)),
-        0x1f => Some(ascii_letter(b's', shift)),
-        0x20 => Some(ascii_letter(b'd', shift)),
-        0x21 => Some(ascii_letter(b'f', shift)),
-        0x22 => Some(ascii_letter(b'g', shift)),
-        0x23 => Some(ascii_letter(b'h', shift)),
-        0x24 => Some(ascii_letter(b'j', shift)),
-        0x25 => Some(ascii_letter(b'k', shift)),
-        0x26 => Some(ascii_letter(b'l', shift)),
-        0x27 => Some(ascii_letter(b'm', shift)),
-        0x28 => Some(if shift { '%' } else { 'u' }),
-        0x2b => Some(if shift { '|' } else { '*' }),
-
-        0x2c => Some(ascii_letter(b'w', shift)),
-        0x2d => Some(ascii_letter(b'x', shift)),
-        0x2e => Some(ascii_letter(b'c', shift)),
-        0x2f => Some(ascii_letter(b'v', shift)),
-        0x30 => Some(ascii_letter(b'b', shift)),
-        0x31 => Some(ascii_letter(b'n', shift)),
-        0x32 => Some(if shift { '?' } else { ',' }),
-        0x33 => Some(if shift { '.' } else { ';' }),
-        0x34 => Some(if shift { '/' } else { ':' }),
-        0x35 => Some(if shift { '/' } else { '!' }),
-
-        // Touche ISO "<>" (a gauche de W) presente sur la plupart des AZERTY.
-        0x56 => Some(if shift { '>' } else { '<' }),
-        _ => None,
-    }
-}
-
-
-/// Touche logique renvoyee par `read_key`.
-#[derive(Clone, Copy, PartialEq)]
-pub enum Key {
-    Char(u8),
-    Enter,
-    Backspace,
-    Tab,
-    Up,
-    Down,
-    Left,
-    Right,
-    Other,
-}
-
-/// Etat persistant de la touche Shift entre deux appels a `read_key`.
-static mut SHIFT: bool = false;
-/// Etat persistant de la touche AltGr (Alt droit, sequence E0 38 / E0 B8).
-static mut ALTGR: bool = false;
-/// Prefixe E0 recu sans son second octet : `try_key` reste non bloquant.
-static mut EXTENDED_PENDING: bool = false;
-
-/// Decode un scancode (et son eventuel 2e octet etendu) en touche logique.
-/// Renvoie None pour les codes qui ne font que modifier un etat (Shift/AltGr)
-/// ou les relachements.
-
-fn decode_from(sc: u8) -> Option<Key> {
-    if unsafe { EXTENDED_PENDING } {
-        unsafe { EXTENDED_PENDING = false; }
-        return match sc {
-            0x38 => { unsafe { ALTGR = true; } None }
-            0xb8 => { unsafe { ALTGR = false; } None }
-            0x48 => Some(Key::Up),
-            0x50 => Some(Key::Down),
-            0x4b => Some(Key::Left),
-            0x4d => Some(Key::Right),
-            0x53 => Some(Key::Backspace),
-            _ => None,
-        };
-    }
-    if sc == 0xe0 {
-        unsafe { EXTENDED_PENDING = true; }
-        return None;
-    }
-    match sc {
-        0x2a | 0x36 => { unsafe { SHIFT = true; } None }
-        0xaa | 0xb6 => { unsafe { SHIFT = false; } None }
-        _ => {
-            if sc & 0x80 != 0 { return None; }
-            let shift = unsafe { SHIFT };
-            let altgr = unsafe { ALTGR };
-            scancode_to_char(sc, shift, altgr).map(|ch| match ch {
-                '\n' => Key::Enter,
-                '\x08' => Key::Backspace,
-                '\t' => Key::Tab,
-                '\x1b' => Key::Other,
-                c => Key::Char(c as u8),
-            })
-        }
-    }
-}
+/// Le decodage lui-meme vit dans `clavier_decodeur.rs`, sans etat global, ce
+/// qui le rend exercable sur l'hote. Ici il n'y a plus qu'un porteur.
+static mut ETAT: EtatClavier = EtatClavier::neuf();
 
 /// Lit la prochaine touche logique (bloquant).
 pub fn read_key() -> Key {
     loop {
-        if let Some(k) = decode_from(read_scancode()) { return k; }
+        let sc = read_scancode();
+        if let Some(k) = unsafe { ETAT.decode_touche(sc) } { return k; }
     }
 }
 
@@ -473,9 +322,21 @@ pub fn read_key() -> Key {
 pub fn try_key() -> Option<Key> {
     loop {
         let sc = try_scancode()?;
-        if let Some(k) = decode_from(sc) { return Some(k); }
+        if let Some(k) = unsafe { ETAT.decode_touche(sc) } { return Some(k); }
     }
 }
+
+/// Lecture non bloquante d'une transition de touche. Pour le bureau.
+///
+/// Contrairement a [`try_key`], les relachements sortent aussi : c'est toute
+/// la raison d'etre de cette fonction.
+pub fn try_key_event() -> Option<KeyEvent> {
+    loop {
+        let sc = try_scancode()?;
+        if let Some(evenement) = unsafe { ETAT.decode(sc) } { return Some(evenement); }
+    }
+}
+
 
 /// Lit une ligne complete au clavier dans `buf`, renvoie le nombre d'octets.
 pub fn read_line(buf: &mut [u8]) -> usize {

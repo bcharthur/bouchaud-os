@@ -78,6 +78,12 @@ jobs:
       - name: Protocole GUI (tests hote + coherence Rust/C++)
         run: tools/gui/test-protocole.sh
 
+      # Un decodeur clavier casse en silence : une touche perdue passe pour une
+      # frappe ratee, un relachement perdu pour une bizarrerie de la page. Rien
+      # dans un boot ne le signale. Le decodage est pur, donc exercable ici.
+      - name: Decodage clavier (transitions appui/relachement)
+        run: tools/gui/test-clavier.sh
+
       # Le meme genre de barriere, pour le protocole d'entree du navigateur :
       # WebContent doit rendre exactement un accuse de reception par evenement
       # mis en file par l'hote. Le chrome M11 vit dans WebContent et injecte sa

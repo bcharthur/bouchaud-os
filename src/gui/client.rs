@@ -305,13 +305,20 @@ impl Client {
         self.envoie(Genre::Wheel, &charge)
     }
 
-    pub fn envoie_touche(&mut self, code: u32, unicode: u32, modificateurs: u32) {
+    /// Une transition de touche : `appui` distingue l'enfoncement du relachement.
+    ///
+    /// Le parametre n'est pas une commodite. Sans lui le client ne recevait que
+    /// des appuis, et le pont Ladybird fabriquait un relachement synthetique
+    /// aussitot apres -- une page qui ecoute `keyup` voyait donc toutes ses
+    /// touches relachees dans l'instant, et une touche maintenue n'existait
+    /// pas.
+    pub fn envoie_touche(&mut self, code: u32, unicode: u32, modificateurs: u32, appui: bool) {
         let charge = proto::Touche {
             fenetre: proto::FENETRE_PRINCIPALE,
             code,
             modificateurs,
             unicode,
-            appui: 1,
+            appui: appui as u32,
         }
         .encode();
         self.envoie(Genre::Key, &charge);

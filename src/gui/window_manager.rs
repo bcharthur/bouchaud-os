@@ -25,7 +25,7 @@
 
 use crate::gui::apps;
 use crate::gui::client::{self, Client};
-use crate::gui::event::Key;
+use crate::gui::event::{Key, KeyEvent};
 use crate::gui::framebuffer as fb;
 use crate::gui::mouse;
 use crate::gui::protocole::Rect;
@@ -167,6 +167,20 @@ mod touche {
     pub const ECHAP: u32 = 8;
 }
 
+/// Bits du champ `modificateurs` d'un message `Key`.
+///
+/// Meme raison d'etre que `touche` : c'est le bureau qui les produit, donc
+/// c'est ici qu'ils sont definis, et `tools/verifie-protocole-gui.py` verifie
+/// que les trois implementations du protocole s'accordent dessus. Les valeurs
+/// etaient deja ecrites en clair chez l'hote Qt ; les nommer est ce qui permet
+/// a la barriere de les voir.
+mod modificateur {
+    pub const SHIFT: u32 = 1;
+    pub const CTRL: u32 = 2;
+    pub const ALT: u32 = 4;
+    pub const ALTGR: u32 = 8;
+}
+
 fn boucle() {
     fb::enter();
     mouse::init();
@@ -217,7 +231,8 @@ fn boucle() {
         // l'ecran -- a chaque lettre. C'est exactement ce qui se voyait comme
         // « la page se recharge » : ni navigation, ni requete HTTP, ni capture
         // LibWeb supplementaire, seulement le bureau redessine par-dessus.
-        while let Some(k) = keyboard::try_key() {
+        while let Some(evenement) = keyboard::try_key_event() {
+            let k = evenement.logique;
             // Echap ferme le menu, puis la fenetre du dessus, puis le bureau —
             // sauf quand un client a le focus. Un navigateur a besoin d'Echap
             // (arreter un chargement, fermer une boite de dialogue) et le lui
@@ -227,6 +242,23 @@ fn boucle() {
             let actif = fenetre_active(&wins);
             let client_actif = actif
                 .map_or(false, |index| window::est_client(&wins[index]));
+            // Un client recoit les deux transitions ; le bureau, lui, n'agit
+            // que sur l'appui. Fermer une fenetre sur le relachement d'Echap la
+            // fermerait une seconde fois, et une application du noyau
+            // insererait chaque caractere en double.
+            if !evenement.appui && client_actif && !menu_open {
+                if let Some(index) = actif {
+                    if let App::Navigateur { client } = &mut wins[index].app {
+                        envoie_touche(client, evenement);
+                        TOUCHES_VERS_CLIENT.fetch_add(1, Ordering::Relaxed);
+                        derniere_entree = maintenant;
+                    }
+                }
+                continue;
+            }
+            if !evenement.appui {
+                continue;
+            }
             if k == Key::Other && (menu_open || !client_actif) {
                 // Un menu ou une fenetre disparait : ce qu'elle couvrait
                 // redevient fond, et personne d'autre ne le sait.
@@ -240,7 +272,7 @@ fn boucle() {
             }
             if let Some(index) = actif {
                 if let App::Navigateur { client } = &mut wins[index].app {
-                    envoie_touche(client, k);
+                    envoie_touche(client, evenement);
                     TOUCHES_VERS_CLIENT.fetch_add(1, Ordering::Relaxed);
                     derniere_entree = maintenant;
                     continue;
@@ -712,8 +744,12 @@ fn transmet_position(wins: &mut Vec<Win>, mx: i32, my: i32, boutons: u32) {
     }
 }
 
-fn envoie_touche(client: &mut Client, k: Key) {
-    let (code, unicode) = match k {
+/// Transmet une transition de touche au client, appui comme relachement.
+///
+/// Le message porte `appui` depuis le premier jour du protocole ; ce qui
+/// manquait, c'etait un pilote capable de le remplir.
+fn envoie_touche(client: &mut Client, evenement: KeyEvent) {
+    let (code, unicode) = match evenement.logique {
         Key::Char(octet) => (touche::CARACTERE, octet as u32),
         Key::Enter => (touche::ENTREE, 0),
         Key::Backspace => (touche::RETOUR, 0),
@@ -724,7 +760,12 @@ fn envoie_touche(client: &mut Client, k: Key) {
         Key::Right => (touche::DROITE, 0),
         Key::Other => (touche::ECHAP, 0),
     };
-    client.envoie_touche(code, unicode, 0);
+    let m = evenement.modificateurs;
+    let masque = (if m.shift { modificateur::SHIFT } else { 0 })
+        | (if m.ctrl { modificateur::CTRL } else { 0 })
+        | (if m.alt { modificateur::ALT } else { 0 })
+        | (if m.altgr { modificateur::ALTGR } else { 0 });
+    client.envoie_touche(code, unicode, masque, evenement.appui);
 }
 
 /// Route un cran de molette vers la fenetre sous le pointeur.

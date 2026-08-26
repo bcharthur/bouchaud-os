@@ -96,6 +96,14 @@ Tout est en petit-boutiste explicite. En-tete de 16 octets devant chaque charge 
 | `Configure` | 0x101 | `fenetre`, `largeur`, `hauteur`, `focus` |
 | `Focus` | 0x102 | reserve |
 | `Key` | 0x103 | `fenetre`, `code`, `modificateurs`, `unicode`, `appui` |
+
+`appui` vaut 1 pour un enfoncement, 0 pour un relachement. Les deux sont
+envoyes : un client qui ne veut que les frappes filtre lui-meme.
+
+`modificateurs` est un masque : `1` Shift, `2` Ctrl, `4` Alt, `8` AltGr. Les
+valeurs sont nommees dans les trois implementations
+(`window_manager::modificateur`, `enum Modificateur` cote hote Qt et cote chrome
+Ladybird) et `tools/verifie-protocole-gui.py` refuse un desaccord.
 | `Pointer` | 0x104 | `fenetre`, `x:i32`, `y:i32`, `boutons` |
 | `Wheel` | 0x105 | `fenetre`, `delta:i32`, `x:i32`, `y:i32` (coordonnées client) |
 | `CloseRequest` | 0x106 | `fenetre:u32` |
@@ -229,8 +237,9 @@ ni le reseau.
   fenetre du navigateur, et la poignee de redimensionnement absente.
 - **Pas de double tampon.** Voir la section 2 : inutile tant que le compositeur
   ne peut pas etre preempte.
-- **Pas de modificateurs clavier.** Le pilote du bureau n'expose pas encore
-  Ctrl/Alt separement ; le champ existe dans le message.
+- **Pas de repetition annoncee.** Le pilote distingue une touche maintenue
+  d'une nouvelle frappe (`KeyEvent::repeat`), mais le message `Key` ne porte pas
+  encore ce bit : le client recoit la repetition comme un appui de plus.
 - **Pas de recomposition partielle de l'ecran.** Voir la section 6.
 - **Une seule instance.** Deux navigateurs, ce sont deux Qt qui demarrent en
   meme temps sur un cœur unique.
