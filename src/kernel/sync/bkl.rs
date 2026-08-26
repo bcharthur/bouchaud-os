@@ -96,6 +96,16 @@ static MAX_TENUE_ORIGINE: AtomicU32 = AtomicU32::new(0);
 // compare-exchange sur la duree, pas par cette generation.
 static MAX_TENUE_GEN: AtomicU64 = AtomicU64::new(0);
 
+// BOUCHAUD_P1_BKL_MAX_COHERENT_V3
+//
+// Le CAS sur la duree ne serialise PAS l'ecriture de la provenance :
+// plusieurs CPU peuvent successivement battre le maximum puis ecrire leurs
+// metadonnees en parallele. Un seqlock n'est correct qu'avec un writer unique.
+//
+// Ce verrou ne couvre que le chemin RARE "nouveau record". Le chemin normal
+// d'une liberation du BKL ne paie qu'un load Relaxed.
+static MAX_TENUE_WRITER: AtomicUsize = AtomicUsize::new(0);
+
 /// Publie une tenue si elle bat le record, avec sa provenance.
 ///
 /// # Pourquoi ce n'est pas `if tenue > max { max = tenue }`
@@ -116,23 +126,26 @@ static MAX_TENUE_GEN: AtomicU64 = AtomicU64::new(0);
 /// le mauvais appel systeme. La generation encadre ces six stores : le lecteur
 /// qui la voit impaire, ou changer, recommence.
 fn publie_si_plus_longue(cpu: usize, tenue: u64) {
-    let mut record = PLUS_LONGUE_TENUE_NS.load(Ordering::Relaxed);
-    loop {
-        if tenue <= record {
-            return;
-        }
-        match PLUS_LONGUE_TENUE_NS.compare_exchange_weak(
-            record,
-            tenue,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => break,
-            Err(actuel) => record = actuel,
-        }
+    // Fast path : la quasi-totalite des liberations ne battent pas le record.
+    if tenue <= PLUS_LONGUE_TENUE_NS.load(Ordering::Relaxed) {
+        return;
     }
 
-    // Gagne : on est seul a ecrire la provenance de CETTE duree.
+    // Un nouveau record est rare. Serialiser uniquement ce chemin garantit
+    // l'invariant fondamental du seqlock : un seul writer a la fois.
+    while MAX_TENUE_WRITER
+        .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        spin_loop();
+    }
+
+    // Un autre CPU a pu publier mieux pendant notre attente.
+    if tenue <= PLUS_LONGUE_TENUE_NS.load(Ordering::Relaxed) {
+        MAX_TENUE_WRITER.store(0, Ordering::Release);
+        return;
+    }
+
     MAX_TENUE_GEN.fetch_add(1, Ordering::AcqRel); // -> impaire
     MAX_TENUE_CPU.store(cpu, Ordering::Relaxed);
     MAX_TENUE_TACHE.store(TENUE_TACHE[cpu].load(Ordering::Relaxed), Ordering::Relaxed);
@@ -140,14 +153,15 @@ fn publie_si_plus_longue(cpu: usize, tenue: u64) {
     MAX_TENUE_PHASE.store(TENUE_PHASE[cpu].load(Ordering::Relaxed), Ordering::Relaxed);
     MAX_TENUE_SITE_ACQ.store(TENUE_SITE_ACQ[cpu].load(Ordering::Relaxed), Ordering::Relaxed);
     MAX_TENUE_ORIGINE.store(TENUE_ORIGINE[cpu].load(Ordering::Relaxed), Ordering::Relaxed);
-    // Le site marque PENDANT la tenue : quand il existe il est plus precis que
-    // la provenance de l'acquisition ; quand il vaut zero -- le cas des tenues
-    // longues -- la provenance prend le relais.
     PLUS_LONGUE_TENUE_SITE.store(
         crate::kernel::task::stall_site_de_la_tenue(),
         Ordering::Relaxed,
     );
+    // Duree et provenance appartiennent au meme snapshot.
+    PLUS_LONGUE_TENUE_NS.store(tenue, Ordering::Relaxed);
     MAX_TENUE_GEN.fetch_add(1, Ordering::AcqRel); // -> paire
+
+    MAX_TENUE_WRITER.store(0, Ordering::Release);
 }
 static TOTAL_ACQUISITIONS: AtomicU64 = AtomicU64::new(0);
 /// Acquisitions ventilees par origine : 1 = `enter`, 2 = `try_enter*` (IRQ),
@@ -721,10 +735,21 @@ pub fn acquisitions_par_origine() -> (u64, u64, u64) {
 /// Plus longue tenue continue observee, et le site noyau marque a ce
 /// moment-la (voir `task::stall_site_set`).
 pub fn plus_longue_tenue() -> (u64, u32) {
-    (
-        PLUS_LONGUE_TENUE_NS.load(Ordering::Relaxed),
-        PLUS_LONGUE_TENUE_SITE.load(Ordering::Relaxed),
-    )
+    loop {
+        let debut = MAX_TENUE_GEN.load(Ordering::Acquire);
+        if debut % 2 != 0 {
+            spin_loop();
+            continue;
+        }
+        let releve = (
+            PLUS_LONGUE_TENUE_NS.load(Ordering::Relaxed),
+            PLUS_LONGUE_TENUE_SITE.load(Ordering::Relaxed),
+        );
+        if MAX_TENUE_GEN.load(Ordering::Acquire) == debut {
+            return releve;
+        }
+        spin_loop();
+    }
 }
 
 /// Provenance de la plus longue tenue : (cpu, tache, syscall, phase, site
@@ -733,12 +758,12 @@ pub fn plus_longue_tenue() -> (u64, u32) {
 /// `origine` reprend le codage de `probe_note_acquire` : 1 = `enter`,
 /// 2 = `try_enter`, 3 = `resume_after_schedule`.
 pub fn provenance_plus_longue_tenue() -> (usize, usize, u64, u32, u32, u32) {
-    // Lecture seqlock : reessayer tant que la generation bouge ou est impaire.
-    // Quatre tours suffisent -- l'ecriture ne fait que six stores -- et au-dela
-    // on rend ce qu'on a plutot que de boucler dans un chemin de journal.
-    for _ in 0..4 {
+    // Ne jamais rendre un releve incoherent : cette fonction est du diagnostic,
+    // une provenance fausse est pire qu'une attente de quelques instructions.
+    loop {
         let debut = MAX_TENUE_GEN.load(Ordering::Acquire);
         if debut % 2 != 0 {
+            spin_loop();
             continue;
         }
         let releve = (
@@ -752,15 +777,8 @@ pub fn provenance_plus_longue_tenue() -> (usize, usize, u64, u32, u32, u32) {
         if MAX_TENUE_GEN.load(Ordering::Acquire) == debut {
             return releve;
         }
+        spin_loop();
     }
-    (
-        MAX_TENUE_CPU.load(Ordering::Relaxed),
-        MAX_TENUE_TACHE.load(Ordering::Relaxed),
-        MAX_TENUE_SYSCALL.load(Ordering::Relaxed),
-        MAX_TENUE_PHASE.load(Ordering::Relaxed),
-        MAX_TENUE_SITE_ACQ.load(Ordering::Relaxed),
-        MAX_TENUE_ORIGINE.load(Ordering::Relaxed),
-    )
 }
 
 /// Etat et cout du parking : (CPU actuellement arretes, parkings, IPI de reveil).

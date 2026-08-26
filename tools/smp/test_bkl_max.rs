@@ -24,6 +24,7 @@ use std::sync::Arc;
 struct Maximum {
     duree: AtomicU64,
     generation: AtomicU64,
+    writer: AtomicUsize,
     cpu: AtomicUsize,
     syscall: AtomicU64,
 }
@@ -33,39 +34,49 @@ impl Maximum {
         Self {
             duree: AtomicU64::new(0),
             generation: AtomicU64::new(0),
+            writer: AtomicUsize::new(0),
             cpu: AtomicUsize::new(usize::MAX),
             syscall: AtomicU64::new(u64::MAX),
         }
     }
 
-    /// La formule du noyau : compare-exchange sur la duree, puis seqlock sur
-    /// la provenance.
+    /// Formule V3 : fast-path, writer unique sur le rare nouveau record, puis
+    /// seqlock sur duree + provenance.
     fn publie(&self, cpu: usize, syscall: u64, tenue: u64) {
-        let mut record = self.duree.load(Ordering::Relaxed);
-        loop {
-            if tenue <= record {
-                return;
-            }
-            match self.duree.compare_exchange_weak(
-                record, tenue, Ordering::AcqRel, Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(actuel) => record = actuel,
-            }
+        if tenue <= self.duree.load(Ordering::Relaxed) {
+            return;
         }
+
+        while self
+            .writer
+            .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            std::hint::spin_loop();
+        }
+
+        if tenue <= self.duree.load(Ordering::Relaxed) {
+            self.writer.store(0, Ordering::Release);
+            return;
+        }
+
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.cpu.store(cpu, Ordering::Relaxed);
         self.syscall.store(syscall, Ordering::Relaxed);
+        self.duree.store(tenue, Ordering::Relaxed);
         self.generation.fetch_add(1, Ordering::AcqRel);
+        self.writer.store(0, Ordering::Release);
     }
 
-    fn lit_provenance(&self) -> Option<(usize, u64)> {
+    fn lit_releve(&self) -> Option<(u64, usize, u64)> {
         for _ in 0..4 {
             let debut = self.generation.load(Ordering::Acquire);
             if debut % 2 != 0 {
+                std::hint::spin_loop();
                 continue;
             }
             let releve = (
+                self.duree.load(Ordering::Relaxed),
                 self.cpu.load(Ordering::Relaxed),
                 self.syscall.load(Ordering::Relaxed),
             );
@@ -75,9 +86,14 @@ impl Maximum {
         }
         None
     }
+
+    fn lit_provenance(&self) -> Option<(usize, u64)> {
+        self.lit_releve().map(|(_, cpu, syscall)| (cpu, syscall))
+    }
 }
 
 /// L'ancienne formule, celle qui perdait des maximums.
+#[allow(dead_code)]
 fn publie_naivement(max: &AtomicU64, tenue: u64) {
     if tenue > max.load(Ordering::Relaxed) {
         max.store(tenue, Ordering::Relaxed);
@@ -160,8 +176,10 @@ fn l_ancienne_formule_perd_reellement_des_maximums() {
 
 #[test]
 fn la_provenance_accompagne_toujours_sa_duree() {
-    // Chaque fil publie une provenance qui IDENTIFIE sa duree : syscall = cpu.
-    // Un releve qui melangerait deux publications se verrait immediatement.
+    // Chaque publication s'auto-identifie :
+    // - les deux bits bas de la duree codent le CPU ;
+    // - syscall == duree.
+    // Le lecteur detecte donc un melange duree/cpu/syscall.
     let maximum = Arc::new(Maximum::neuf());
     let mut fils = Vec::new();
 
@@ -170,8 +188,10 @@ fn la_provenance_accompagne_toujours_sa_duree() {
         std::thread::spawn(move || {
             let mut incoherences = 0usize;
             for _ in 0..200_000 {
-                if let Some((cpu, syscall)) = maximum.lit_provenance() {
-                    if cpu != usize::MAX && syscall != cpu as u64 {
+                if let Some((duree, cpu, syscall)) = maximum.lit_releve() {
+                    if cpu != usize::MAX
+                        && (syscall != duree || cpu != (duree & 0b11) as usize)
+                    {
                         incoherences += 1;
                     }
                 }
@@ -184,7 +204,8 @@ fn la_provenance_accompagne_toujours_sa_duree() {
         let maximum = Arc::clone(&maximum);
         fils.push(std::thread::spawn(move || {
             for tour in 1..=20_000u64 {
-                maximum.publie(cpu, cpu as u64, tour * (cpu as u64 + 1));
+                let tenue = (tour << 2) | cpu as u64;
+                maximum.publie(cpu, tenue, tenue);
             }
         }));
     }
