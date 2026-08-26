@@ -594,3 +594,326 @@ pub fn valide_avant_projection(
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Preparation
+// ---------------------------------------------------------------------------
+
+use super::image::{Droits, ImagePreparee, RefusImage, Segment};
+
+/// Ce qu'une preparation peut refuser : un probleme du FORMAT, ou un probleme
+/// de la description produite.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum RefusPreparation {
+    Format(RefusPe),
+    Image(RefusImage),
+    /// L'image doit etre chargee ailleurs que sa base, et ne porte pas de table
+    /// de relocations. Le refus est explicite : la charger quand meme
+    /// produirait un programme dont toutes les adresses absolues sont fausses.
+    RelocationsAbsentes,
+    /// Une relocation d'un type que ce chargeur n'applique pas. AMD64 ne
+    /// produit que `DIR64` et `ABSOLUTE` ; tout autre type vient d'un
+    /// generateur qu'on ne connait pas, et deviner serait pire que refuser.
+    RelocationInconnue { genre: u16, rva: u32 },
+    /// Une relocation designe une adresse hors de l'image.
+    RelocationHorsImage { rva: u32 },
+}
+
+impl From<RefusPe> for RefusPreparation {
+    fn from(refus: RefusPe) -> Self {
+        RefusPreparation::Format(refus)
+    }
+}
+
+impl From<RefusImage> for RefusPreparation {
+    fn from(refus: RefusImage) -> Self {
+        RefusPreparation::Image(refus)
+    }
+}
+
+/// Capacite du tableau de sections utilise pendant la preparation.
+pub const MAX_SECTIONS_PREPARATION: usize = 32;
+
+/// Traduit les caracteristiques d'une section en droits de page.
+///
+/// Une section PE sans aucun drapeau memoire est implicitement lisible : les
+/// generateurs omettent regulierement `MEM_READ` sur du `.rdata`. Refuser
+/// serait pedant ; accorder l'ECRITURE ou l'EXECUTION par defaut serait
+/// dangereux. On accorde donc la lecture, et rien d'autre.
+fn droits_de_section(section: &Section) -> Droits {
+    Droits {
+        lecture: section.lisible() || (!section.inscriptible() && !section.executable()),
+        ecriture: section.inscriptible(),
+        execution: section.executable(),
+    }
+}
+
+/// Transforme les octets d'un PE32+ en [`ImagePreparee`], sans rien projeter.
+///
+/// # Ce que cette fonction fait, et pourquoi elle s'arrete la
+///
+/// Elle lit, valide et decrit. Elle ne touche ni a l'espace d'adressage, ni a
+/// la table des taches, ni au gros verrou : c'est du travail purement local sur
+/// un `&[u8]`, donc la part qui pourra sortir du verrou quand `execve` sera
+/// scinde en `prepare` / `commit`.
+///
+/// # Ce qu'elle refuse plutot que de deviner
+///
+/// * une image qui importe une bibliotheque Windows -- il faudrait une couche
+///   Win32, qui n'existe pas ;
+/// * une base differente sans table de relocations ;
+/// * une relocation d'un type qu'AMD64 ne produit pas ;
+/// * tout ce que [`valide_avant_projection`] refuse deja.
+///
+/// `base_souhaitee` vaut `None` pour charger l'image la ou elle le demande.
+pub fn prepare(
+    data: &[u8],
+    base_souhaitee: Option<u64>,
+) -> Result<ImagePreparee, RefusPreparation> {
+    let entete = lit_entete(data)?;
+    let mut sections = [Section {
+        nom: [0; 8],
+        taille_virtuelle: 0,
+        rva: 0,
+        taille_brute: 0,
+        offset_brut: 0,
+        caracteristiques: 0,
+    }; MAX_SECTIONS_PREPARATION];
+    let nombre = lit_sections(data, &entete, &mut sections)?;
+    let sections = &sections[..nombre];
+    valide_avant_projection(&entete, sections)?;
+
+    // Les dependances d'abord : refuser tot coute moins cher que decrire une
+    // image qu'on refusera de toute facon, et le message nomme la bibliotheque.
+    match classe_dependances(data, &entete, |rva| offset_de_rva(sections, rva))? {
+        Dependances::Windows { offset_nom } => {
+            let nom = chaine_c(data, offset_nom).unwrap_or(b"");
+            let mut tampon = [0u8; 32];
+            let longueur = nom.len().min(tampon.len());
+            tampon[..longueur].copy_from_slice(&nom[..longueur]);
+            return Err(RefusPreparation::Format(RefusPe::SousSystemeWindows {
+                bibliotheque: tampon,
+                longueur,
+            }));
+        }
+        Dependances::Aucune | Dependances::Bouchaud => {}
+    }
+
+    let base = base_souhaitee.unwrap_or(entete.base_image);
+    if base.checked_add(entete.taille_image as u64).is_none() {
+        return Err(RefusPreparation::Format(RefusPe::ImageTropGrande));
+    }
+    let decalage = (base as i64).wrapping_sub(entete.base_image as i64);
+
+    if decalage != 0 {
+        verifie_relocations_applicables(data, &entete, sections)?;
+    }
+
+    let mut image = ImagePreparee::neuve(
+        base,
+        base.wrapping_add(entete.point_entree_rva as u64),
+        entete.taille_image as usize,
+        decalage,
+    );
+
+    // Les en-tetes sont projetes en lecture seule. Ce n'est pas de la
+    // cosmetique : un programme qui lit sa propre table d'exports, ou un
+    // deverminage qui remonte a `IMAGE_DOS_HEADER`, s'attend a les trouver a
+    // `base`. Les omettre laisserait un trou a une adresse que le format
+    // declare pourtant valide.
+    let taille_entetes = (entete.taille_entetes as usize).min(data.len());
+    if taille_entetes != 0 {
+        image.ajoute(Segment {
+            adresse: base,
+            taille: etendue_projetee(0, taille_entetes, &entete),
+            offset_source: 0,
+            taille_source: taille_entetes,
+            droits: Droits::lecture_seule(),
+        })?;
+    }
+
+    for section in sections {
+        let etendue = section.taille_virtuelle.max(section.taille_brute) as usize;
+        if etendue == 0 {
+            continue;
+        }
+        // Une section BSS (`CNT_UNINITIALIZED_DATA`) ou dont `SizeOfRawData`
+        // vaut zero n'a pas de source : tout son contenu est du zero.
+        let taille_source = if section.caracteristiques & SCN_CNT_BSS != 0 {
+            0
+        } else {
+            (section.taille_brute as usize).min(etendue)
+        };
+        image.ajoute(Segment {
+            adresse: base.wrapping_add(section.rva as u64),
+            taille: etendue_projetee(section.rva as usize, etendue, &entete),
+            offset_source: section.offset_brut as usize,
+            taille_source,
+            droits: droits_de_section(section),
+        })?;
+    }
+
+    image.valide(data.len())?;
+    Ok(image)
+}
+
+/// Etendue reellement projetee pour une portion d'image commencant a `rva`.
+///
+/// Le bourrage d'alignement est utile -- il evite qu'une page porte deux
+/// sections aux droits differents -- mais il ne doit JAMAIS sortir de l'image :
+/// `SizeOfImage` est ce que le binaire declare occuper, et projeter au-dela
+/// reviendrait a reserver, au nom du programme, des adresses qu'il n'a pas
+/// demandees. Les images produites par un editeur de liens reel alignent deja
+/// leurs RVA, donc l'ecretage ne joue pas ; il ne sert que pour celles qui ne
+/// le font pas, et il vaut mieux qu'il joue qu'un refus incomprehensible.
+fn etendue_projetee(rva: usize, etendue: usize, entete: &EnTetePe) -> usize {
+    let alignee = aligne_vers_le_haut(etendue, entete.alignement_section as usize);
+    let reste = (entete.taille_image as usize).saturating_sub(rva);
+    alignee.min(reste.max(etendue))
+}
+
+/// Arrondit vers le haut sur un alignement puissance de deux, sans deborder.
+fn aligne_vers_le_haut(valeur: usize, alignement: usize) -> usize {
+    if alignement <= 1 {
+        return valeur;
+    }
+    match valeur.checked_add(alignement - 1) {
+        Some(somme) => somme & !(alignement - 1),
+        None => valeur,
+    }
+}
+
+/// Index du repertoire de donnees des relocations de base.
+///
+/// Les repertoires suivent l'en-tete optionnel PE32+ a l'offset 112, huit
+/// octets chacun : RVA puis taille. Le cinquieme est `BaseRelocationTable`.
+pub const REPERTOIRE_RELOCATIONS: usize = 5;
+
+/// RVA et taille de la table de relocations, `None` si l'image n'en a pas.
+///
+/// Lu a la demande plutot que range dans [`EnTetePe`] : seules les images
+/// chargees ailleurs que leur base en ont besoin, et un champ de plus dans une
+/// structure que tout le monde copie se paie a chaque `exec`.
+pub fn table_relocations(data: &[u8], _entete: &EnTetePe) -> Option<(u32, u32)> {
+    let optionnel = offset_optionnel(data)?;
+    let nombre_repertoires = lit_u32(data, optionnel + 108)?;
+    if (nombre_repertoires as usize) <= REPERTOIRE_RELOCATIONS {
+        return None;
+    }
+    let base = optionnel + 112 + REPERTOIRE_RELOCATIONS * 8;
+    let rva = lit_u32(data, base)?;
+    let taille = lit_u32(data, base + 4)?;
+    if rva == 0 || taille == 0 {
+        return None;
+    }
+    Some((rva, taille))
+}
+
+/// Verifie que toutes les relocations sont applicables AVANT d'en appliquer une.
+///
+/// Une image dont la moitie des relocations passe et l'autre pas serait pire
+/// qu'une image refusee : elle s'executerait, avec des adresses fausses par
+/// endroits, et fauterait loin de la cause.
+fn verifie_relocations_applicables(
+    data: &[u8],
+    entete: &EnTetePe,
+    sections: &[Section],
+) -> Result<(), RefusPreparation> {
+    let Some((rva_table, taille_table)) = table_relocations(data, entete) else {
+        return Err(RefusPreparation::RelocationsAbsentes);
+    };
+    if rva_table == 0 || taille_table == 0 {
+        return Err(RefusPreparation::RelocationsAbsentes);
+    }
+
+    let mut refus: Option<RefusPreparation> = None;
+    parcourt_relocations(
+        data,
+        rva_table,
+        taille_table,
+        |rva| offset_de_rva(sections, rva),
+        |relocation| {
+            if refus.is_some() {
+                return;
+            }
+            match relocation.genre {
+                REL_ABSOLUTE => {}
+                REL_DIR64 => {
+                    // Huit octets a ecrire : ils doivent tenir dans l'image.
+                    let fin = relocation.rva as u64 + 8;
+                    if fin > entete.taille_image as u64 {
+                        refus = Some(RefusPreparation::RelocationHorsImage {
+                            rva: relocation.rva,
+                        });
+                    }
+                }
+                genre => {
+                    refus = Some(RefusPreparation::RelocationInconnue {
+                        genre,
+                        rva: relocation.rva,
+                    });
+                }
+            }
+        },
+    )?;
+
+    match refus {
+        Some(refus) => Err(refus),
+        None => Ok(()),
+    }
+}
+
+/// Applique les relocations DIR64 a une image DEJA projetee en memoire.
+///
+/// `image_projetee` couvre `[base, base + taille_image)` : les RVA y sont donc
+/// des indices directs. Separee de [`prepare`] parce qu'elle ecrit, et que
+/// preparer n'ecrit jamais.
+///
+/// Rend le nombre de relocations appliquees.
+pub fn applique_relocations(
+    fichier: &[u8],
+    entete: &EnTetePe,
+    sections: &[Section],
+    decalage: i64,
+    image_projetee: &mut [u8],
+) -> Result<usize, RefusPreparation> {
+    if decalage == 0 {
+        return Ok(0);
+    }
+    let Some((rva_table, taille_table)) = table_relocations(fichier, entete) else {
+        return Err(RefusPreparation::RelocationsAbsentes);
+    };
+
+    let mut appliquees = 0usize;
+    let mut refus: Option<RefusPreparation> = None;
+    parcourt_relocations(
+        fichier,
+        rva_table,
+        taille_table,
+        |rva| offset_de_rva(sections, rva),
+        |relocation| {
+            if refus.is_some() || relocation.genre != REL_DIR64 {
+                return;
+            }
+            let debut = relocation.rva as usize;
+            let Some(fin) = debut.checked_add(8) else {
+                refus = Some(RefusPreparation::RelocationHorsImage { rva: relocation.rva });
+                return;
+            };
+            if fin > image_projetee.len() {
+                refus = Some(RefusPreparation::RelocationHorsImage { rva: relocation.rva });
+                return;
+            }
+            let mut octets = [0u8; 8];
+            octets.copy_from_slice(&image_projetee[debut..fin]);
+            let valeur = u64::from_le_bytes(octets).wrapping_add(decalage as u64);
+            image_projetee[debut..fin].copy_from_slice(&valeur.to_le_bytes());
+            appliquees += 1;
+        },
+    )?;
+
+    match refus {
+        Some(refus) => Err(refus),
+        None => Ok(appliquees),
+    }
+}

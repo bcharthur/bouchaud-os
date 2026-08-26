@@ -14,12 +14,21 @@
 //!
 //! # Etat
 //!
-//! `format` et `pe` sont complets pour ce qu'ils annoncent : reconnaitre et
-//! classer. ELF continue d'etre charge par `kernel::elf`, inchange -- c'est ce
-//! qui fait tourner Ladybird, et le deplacer sans besoin serait un risque pour
-//! rien. Le chargement d'un PE Bouchaud n'existe pas encore.
+//! `format` et `pe` sont complets pour ce qu'ils annoncent : reconnaitre,
+//! classer, et desormais PREPARER -- `pe::prepare` rend une
+//! [`image::ImagePreparee`], description projetable et neutre vis-a-vis du
+//! format.
+//!
+//! Ce qui n'existe PAS encore : la projection elle-meme. Aucune image PE n'a
+//! ete mappee ni executee par ce noyau. Tant que ce n'est pas le cas, il n'y a
+//! pas de « support PE » : il y a un analyseur et un preparateur, tous deux
+//! testes sur l'hote.
+//!
+//! ELF continue d'etre charge par `kernel::elf`, inchange -- c'est ce qui fait
+//! tourner Ladybird, et le deplacer sans besoin serait un risque pour rien.
 
 pub mod format;
+pub mod image;
 pub mod pe;
 
 pub use format::{identifie, Format};

@@ -10,6 +10,9 @@
 #[path = "../../src/kernel/process/loader/format.rs"]
 mod format;
 
+#[path = "../../src/kernel/process/loader/image.rs"]
+mod image;
+
 #[path = "../../src/kernel/process/loader/pe.rs"]
 mod pe;
 
