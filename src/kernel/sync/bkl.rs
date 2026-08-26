@@ -86,6 +86,69 @@ static MAX_TENUE_SYSCALL: AtomicU64 = AtomicU64::new(u64::MAX);
 static MAX_TENUE_PHASE: AtomicU32 = AtomicU32::new(0);
 static MAX_TENUE_SITE_ACQ: AtomicU32 = AtomicU32::new(0);
 static MAX_TENUE_ORIGINE: AtomicU32 = AtomicU32::new(0);
+
+// BOUCHAUD_P1_BKL_MAX_MONOTONE_V2
+//
+// Generation du releve maximum, pour que duree et provenance aillent ENSEMBLE.
+//
+// Impaire = ecriture en cours, paire = etat publie. C'est un seqlock a un seul
+// ecrivain a la fois : la course d'ecriture est resolue par le
+// compare-exchange sur la duree, pas par cette generation.
+static MAX_TENUE_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// Publie une tenue si elle bat le record, avec sa provenance.
+///
+/// # Pourquoi ce n'est pas `if tenue > max { max = tenue }`
+///
+/// Entre la lecture et l'ecriture, un autre CPU peut publier une tenue PLUS
+/// LONGUE que la notre : on l'ecraserait avec la notre, et `max_hold_ns`
+/// DIMINUERAIT. Un maximum qui diminue n'est pas un maximum, et c'est
+/// exactement le genre de metrique qui fait chercher au mauvais endroit.
+///
+/// La boucle de compare-exchange rend la mise a jour reellement monotone : on
+/// ne remplace que ce qu'on a lu, et on relit si quelqu'un est passe entre-temps.
+///
+/// # Pourquoi une generation en plus
+///
+/// Gagner le compare-exchange donne le droit d'ecrire la duree. Ecrire la
+/// PROVENANCE prend six stores de plus, pendant lesquels un lecteur pourrait
+/// voir la nouvelle duree avec l'ancienne provenance -- un journal qui accuse
+/// le mauvais appel systeme. La generation encadre ces six stores : le lecteur
+/// qui la voit impaire, ou changer, recommence.
+fn publie_si_plus_longue(cpu: usize, tenue: u64) {
+    let mut record = PLUS_LONGUE_TENUE_NS.load(Ordering::Relaxed);
+    loop {
+        if tenue <= record {
+            return;
+        }
+        match PLUS_LONGUE_TENUE_NS.compare_exchange_weak(
+            record,
+            tenue,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(actuel) => record = actuel,
+        }
+    }
+
+    // Gagne : on est seul a ecrire la provenance de CETTE duree.
+    MAX_TENUE_GEN.fetch_add(1, Ordering::AcqRel); // -> impaire
+    MAX_TENUE_CPU.store(cpu, Ordering::Relaxed);
+    MAX_TENUE_TACHE.store(TENUE_TACHE[cpu].load(Ordering::Relaxed), Ordering::Relaxed);
+    MAX_TENUE_SYSCALL.store(TENUE_SYSCALL[cpu].load(Ordering::Relaxed), Ordering::Relaxed);
+    MAX_TENUE_PHASE.store(TENUE_PHASE[cpu].load(Ordering::Relaxed), Ordering::Relaxed);
+    MAX_TENUE_SITE_ACQ.store(TENUE_SITE_ACQ[cpu].load(Ordering::Relaxed), Ordering::Relaxed);
+    MAX_TENUE_ORIGINE.store(TENUE_ORIGINE[cpu].load(Ordering::Relaxed), Ordering::Relaxed);
+    // Le site marque PENDANT la tenue : quand il existe il est plus precis que
+    // la provenance de l'acquisition ; quand il vaut zero -- le cas des tenues
+    // longues -- la provenance prend le relais.
+    PLUS_LONGUE_TENUE_SITE.store(
+        crate::kernel::task::stall_site_de_la_tenue(),
+        Ordering::Relaxed,
+    );
+    MAX_TENUE_GEN.fetch_add(1, Ordering::AcqRel); // -> paire
+}
 static TOTAL_ACQUISITIONS: AtomicU64 = AtomicU64::new(0);
 /// Acquisitions ventilees par origine : 1 = `enter`, 2 = `try_enter*` (IRQ),
 /// 3 = `resume_after_schedule` (reprise d'une pile apres un changement de
@@ -156,22 +219,8 @@ fn probe_note_release(cpu: usize, kind: u32) {
     let acquired = ACQUIRED_AT_NS[cpu].swap(0, Ordering::Relaxed);
     let tenue = now_ns.saturating_sub(acquired);
     TOTAL_HOLD_NS.fetch_add(tenue, Ordering::Relaxed);
-    if acquired != 0 && tenue > PLUS_LONGUE_TENUE_NS.load(Ordering::Relaxed) {
-        PLUS_LONGUE_TENUE_NS.store(tenue, Ordering::Relaxed);
-        // Le site marque PENDANT la tenue reste publie : quand il existe, il
-        // est plus precis que la provenance de l'acquisition. Quand il vaut
-        // zero -- le cas des tenues longues -- la provenance prend le relais
-        // au lieu de laisser un journal muet.
-        PLUS_LONGUE_TENUE_SITE.store(
-            crate::kernel::task::stall_site_de_la_tenue(),
-            Ordering::Relaxed,
-        );
-        MAX_TENUE_CPU.store(cpu, Ordering::Relaxed);
-        MAX_TENUE_TACHE.store(TENUE_TACHE[cpu].load(Ordering::Relaxed), Ordering::Relaxed);
-        MAX_TENUE_SYSCALL.store(TENUE_SYSCALL[cpu].load(Ordering::Relaxed), Ordering::Relaxed);
-        MAX_TENUE_PHASE.store(TENUE_PHASE[cpu].load(Ordering::Relaxed), Ordering::Relaxed);
-        MAX_TENUE_SITE_ACQ.store(TENUE_SITE_ACQ[cpu].load(Ordering::Relaxed), Ordering::Relaxed);
-        MAX_TENUE_ORIGINE.store(TENUE_ORIGINE[cpu].load(Ordering::Relaxed), Ordering::Relaxed);
+    if acquired != 0 {
+        publie_si_plus_longue(cpu, tenue);
     }
     let generation = PROBE_OWNER_GEN.load(Ordering::Acquire);
     PROBE_RELEASE_SEQ.fetch_add(1, Ordering::AcqRel);
@@ -603,6 +652,26 @@ pub fn plus_longue_tenue() -> (u64, u32) {
 /// `origine` reprend le codage de `probe_note_acquire` : 1 = `enter`,
 /// 2 = `try_enter`, 3 = `resume_after_schedule`.
 pub fn provenance_plus_longue_tenue() -> (usize, usize, u64, u32, u32, u32) {
+    // Lecture seqlock : reessayer tant que la generation bouge ou est impaire.
+    // Quatre tours suffisent -- l'ecriture ne fait que six stores -- et au-dela
+    // on rend ce qu'on a plutot que de boucler dans un chemin de journal.
+    for _ in 0..4 {
+        let debut = MAX_TENUE_GEN.load(Ordering::Acquire);
+        if debut % 2 != 0 {
+            continue;
+        }
+        let releve = (
+            MAX_TENUE_CPU.load(Ordering::Relaxed),
+            MAX_TENUE_TACHE.load(Ordering::Relaxed),
+            MAX_TENUE_SYSCALL.load(Ordering::Relaxed),
+            MAX_TENUE_PHASE.load(Ordering::Relaxed),
+            MAX_TENUE_SITE_ACQ.load(Ordering::Relaxed),
+            MAX_TENUE_ORIGINE.load(Ordering::Relaxed),
+        );
+        if MAX_TENUE_GEN.load(Ordering::Acquire) == debut {
+            return releve;
+        }
+    }
     (
         MAX_TENUE_CPU.load(Ordering::Relaxed),
         MAX_TENUE_TACHE.load(Ordering::Relaxed),

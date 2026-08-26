@@ -96,6 +96,12 @@ jobs:
       - name: Manifeste des polices
         run: python3 tools/gui/verifie-polices.py
 
+      # Un maximum qui diminue fait chercher au mauvais endroit, une provenance
+      # melangee accuse le mauvais appel systeme. Les deux se cassent en
+      # silence, et seule une vraie concurrence les revele.
+      - name: Maximum de tenue BKL (monotonie et provenance)
+        run: tools/smp/test-bkl-max.sh
+
       # Reconnaitre un format d'executable est une fonction des seuls octets du
       # fichier. Un MZ pris pour un PE32+, ou un offset qui deborde, se lisent
       # ici et pas dans QEMU.
