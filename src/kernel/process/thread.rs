@@ -3486,6 +3486,7 @@ pub fn log_smp_load() {
     ));
     let (resolved, retry, invalid, io_error, retired) = fault_outcome_stats();
     let (waitq_bkl, waitq_bkl_ns) = crate::kernel::sync::waitq_bkl_stats();
+    let waitq_sans_verrou = crate::kernel::sync::waitq_wake_sans_verrou();
     let (ata_acquires, ata_wait_ns, ata_max_ns) = crate::drivers::ata::contention_stats();
     let (exec_wait_ns, exec_max_ns) = crate::kernel::abi::proc::exec_quiesce_stats();
     let (fault_registry_current, fault_registry_peak) = fault_registry_stats();
@@ -3493,11 +3494,11 @@ pub fn log_smp_load() {
     let (clean_entries, clean_reclaimable) = crate::kernel::clean_page_cache::lifetime_stats();
     let (shared_nodes, shared_pages, shared_orphans) = crate::kernel::partage::lifetime_stats();
     crate::kernel::dmesg::log_fmt(format_args!(
-        "[MM-NG6] fault_resolved={} fault_retry={} fault_invalid={} fault_io_error={} fault_retired={} fault_retry_yields={} fault_retry_max_chain={} fault_registry_current={} fault_registry_peak={} clean_cache_entries={} clean_cache_reclaimable={} shared_cache_nodes={} shared_cache_pages={} shared_cache_orphans={} pf_bkl_enters={} waitq_bkl_enters={} waitq_bkl_wait_ns={} ramfs_bkl_enters={} exec_wait_ns={} exec_max_ns={} ata_acquires={} ata_wait_ns={} ata_max_ns={}",
+        "[MM-NG6] fault_resolved={} fault_retry={} fault_invalid={} fault_io_error={} fault_retired={} fault_retry_yields={} fault_retry_max_chain={} fault_registry_current={} fault_registry_peak={} clean_cache_entries={} clean_cache_reclaimable={} shared_cache_nodes={} shared_cache_pages={} shared_cache_orphans={} pf_bkl_enters={} waitq_bkl_enters={} waitq_bkl_wait_ns={} waitq_wake_sans_verrou={} ramfs_bkl_enters={} exec_wait_ns={} exec_max_ns={} ata_acquires={} ata_wait_ns={} ata_max_ns={}",
         resolved, retry, invalid, io_error, retired, retry_yields, retry_max_chain,
         fault_registry_current, fault_registry_peak,
         clean_entries, clean_reclaimable, shared_nodes, shared_pages, shared_orphans,
-        pf_bkl_enters(), waitq_bkl, waitq_bkl_ns,
+        pf_bkl_enters(), waitq_bkl, waitq_bkl_ns, waitq_sans_verrou,
         crate::fs::backing::ramfs_bkl_enters(), exec_wait_ns,
         exec_max_ns, ata_acquires, ata_wait_ns, ata_max_ns,
     ));
