@@ -33,6 +33,10 @@ param(
     # et le chrome : est-ce la page, ou est-ce la barre ?
     [switch]$LadybirdSansChrome,
 
+    # BOUCHAUD_GATE0_AUTOSTART_V1
+    # Test reproductible uniquement : ouvre Ladybird M11 automatiquement.
+    [switch]$Gate0Autostart,
+
     # Memoire donnee a la machine.
     #
     # 12288 Mio est la plus grande valeur **verifiee** : le noyau demarre, la
@@ -808,6 +812,13 @@ if ($LadybirdMode) {
                 'echo "=== Ladybird M9 : HTTP distant via RequestServer ==="',
                 'export BO_AUTOSTART_BROWSER=1',
                 'export BOUCHAUD_M9_TEST=1'
+            )
+        }
+        elseif ($Gate0Autostart) {
+            @(
+                'echo "=== GATE0 : autostart Ladybird M11 complet ==="',
+                'export BO_AUTOSTART_BROWSER=1',
+                'export BOUCHAUD_GATE0=1'
             )
         }
         else {

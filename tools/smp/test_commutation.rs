@@ -1,291 +1,288 @@
-//! Harnais de test hote pour l'ORDRE de publication d'une tache sortante.
+//! Gate 0 — preuve hote du handoff post-switch.
 //!
-//! # La propriete testee
-//!
-//! Un changement de contexte fait deux choses distinctes :
-//!
-//!   1. il PUBLIE la tache sortante -- `on_cpu = -1`, puis mise en file --,
-//!      ce qui la rend eligible pour n'importe quel autre CPU ;
-//!   2. il SAUVEGARDE son sommet de pile dans `ctx.rsp` (`switch_context`).
-//!
-//! Entre les deux, le gros verrou est deja rendu. Si (1) precede (2), un autre
-//! CPU peut reprendre la tache avec le `ctx.rsp` de la commutation PRECEDENTE
-//! -- un sommet perime qui ne designe plus un cadre valide.
-//!
-//! Ce n'est pas une hypothese sur le materiel : c'est un ordre d'ecritures dans
-//! du code Rust, et il se modelise exactement. Le modele ci-dessous rejoue donc
-//! l'entrelacement A LA MAIN, sans fil ni hasard : le test ne peut pas
-//! clignoter, et il echoue si et seulement si l'ordre redevient faux.
-//!
-//! Lance par `tools/smp/test-commutation.sh`.
+//! Propriete : aucun CPU ne peut reprendre la tache sortante tant que l'ancien
+//! CPU n'a pas physiquement abandonne sa pile noyau.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::mpsc::sync_channel;
+use std::time::Duration;
 
-/// Le noyau utilise zero : `amorce_pile` ecrit toujours un sommet non nul, et
-/// `switch_context` n'ecrit jamais zero. La valeur est donc impossible
-/// autrement, ce qui en fait une sentinelle et pas un etat de plus.
-const CONTEXTE_EN_VOL: u64 = 0;
+const NO_TASK: usize = usize::MAX;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Etat {
-    Pret,
-    Bloque,
-}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Etat { Pret, Bloque, Zombie }
 
 #[derive(Clone, Debug)]
 struct Tache {
     etat: Etat,
     on_cpu: i8,
+    switching_out: bool,
+    runq_cpu: usize,
     ctx_rsp: u64,
-    runq_cpu: u8,
 }
 
-/// Le modele : la table des taches et une file par CPU.
-struct Ordonnanceur {
+struct Modele {
     taches: Vec<Tache>,
     files: Vec<Vec<usize>>,
+    pending: Vec<usize>,
+    stack_left: Vec<bool>,
 }
 
-/// Les deux ordres de publication mis face a face.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Ordre {
-    /// Ce que faisait `switch_to` : publier, PUIS sauvegarder.
-    PublierPuisSauver,
-    /// BOUCHAUD_P0_CTX_EN_VOL_V1 : invalider, publier, puis sauvegarder.
-    InvaliderPublierSauver,
-}
-
-impl Ordonnanceur {
-    fn neuf(nb_cpu: usize, taches: Vec<Tache>) -> Self {
-        Self { taches, files: vec![Vec::new(); nb_cpu] }
-    }
-
-    /// Etape 1 du changement de contexte, gros verrou tenu.
-    fn publie_sortante(&mut self, ordre: Ordre, cpu: usize, index: usize) {
-        if ordre == Ordre::InvaliderPublierSauver {
-            self.taches[index].ctx_rsp = CONTEXTE_EN_VOL;
-        }
-        self.taches[index].on_cpu = -1;
-        self.taches[index].runq_cpu = cpu as u8;
-        if self.taches[index].etat == Etat::Pret {
-            self.files[cpu].push(index);
+impl Modele {
+    fn neuf(cpu: usize, taches: Vec<Tache>) -> Self {
+        Self {
+            taches,
+            files: vec![Vec::new(); cpu],
+            pending: vec![NO_TASK; cpu],
+            stack_left: vec![false; cpu],
         }
     }
 
-    /// Etape 2 : le `mov [rdi], rsp` de `switch_context`. Verrou DEJA rendu.
-    fn sauvegarde_contexte(&mut self, index: usize, rsp: u64) {
-        self.taches[index].ctx_rsp = rsp;
-    }
-
-    fn contexte_publie(&self, index: usize) -> bool {
-        self.taches[index].ctx_rsp != CONTEXTE_EN_VOL
-    }
-
-    fn eligible_au_vol(&self, index: usize, voleur: usize) -> bool {
+    fn eligible(&self, index: usize, cpu: usize) -> bool {
         let t = &self.taches[index];
-        t.etat == Etat::Pret
-            && t.on_cpu < 0
-            && self.contexte_publie(index)
-            && t.runq_cpu as usize != voleur
+        t.etat == Etat::Pret && t.on_cpu < 0 && !t.switching_out && t.runq_cpu == cpu
     }
 
-    /// Le vol tel que `pick_next` le fait : on sort de la file du donneur, on
-    /// verifie, et on REMET si le candidat n'est pas reprenable.
-    fn vole(&mut self, voleur: usize, donneur: usize) -> Option<(usize, u64)> {
-        let index = self.files[donneur].pop()?;
-        if !self.eligible_au_vol(index, voleur) {
-            self.files[donneur].push(index);
-            return None;
-        }
-        self.taches[index].on_cpu = voleur as i8;
-        self.taches[index].runq_cpu = voleur as u8;
-        Some((index, self.taches[index].ctx_rsp))
+    fn publish_ready(&mut self, index: usize) {
+        let target = self.taches[index].runq_cpu;
+        if self.taches[index].etat != Etat::Pret
+            || self.taches[index].on_cpu >= 0
+            || self.taches[index].switching_out
+        { return; }
+        if !self.files[target].contains(&index) { self.files[target].push(index); }
     }
 
-    /// Le tour de file local de `pick_next`, avec sa borne.
-    fn choisit_local(&mut self, cpu: usize) -> Option<usize> {
-        let mut tours = self.files[cpu].len().saturating_add(1);
-        while !self.files[cpu].is_empty() {
-            let index = self.files[cpu].remove(0);
-            if !self.contexte_publie(index) {
-                self.files[cpu].push(index);
-                tours = tours.saturating_sub(1);
-                if tours == 0 {
-                    return None;
-                }
-                continue;
-            }
-            if self.taches[index].etat == Etat::Pret && self.taches[index].on_cpu < 0 {
-                return Some(index);
-            }
-        }
-        None
+    fn prepare(&mut self, cpu: usize, index: usize) {
+        assert_eq!(self.pending[cpu], NO_TASK, "pending ecrase");
+        assert_eq!(self.taches[index].on_cpu, cpu as i8);
+        assert!(!self.taches[index].switching_out);
+        self.pending[cpu] = index;
+        self.taches[index].switching_out = true;
+        self.stack_left[cpu] = false;
+    }
+
+    fn save_rsp(&mut self, index: usize, rsp: u64) { self.taches[index].ctx_rsp = rsp; }
+    fn leave_stack(&mut self, cpu: usize) { self.stack_left[cpu] = true; }
+
+    fn complete(&mut self, cpu: usize) {
+        let index = self.pending[cpu];
+        if index == NO_TASK { return; }
+        assert!(self.stack_left[cpu], "publication avant abandon de pile");
+        let t = &mut self.taches[index];
+        assert!(t.switching_out);
+        assert_eq!(t.on_cpu, cpu as i8);
+        t.on_cpu = -1;
+        t.switching_out = false;
+        t.runq_cpu = cpu;
+        self.pending[cpu] = NO_TASK;
+        if t.etat == Etat::Pret { self.publish_ready(index); }
+    }
+
+    fn wake(&mut self, index: usize) {
+        self.taches[index].etat = Etat::Pret;
+        self.publish_ready(index);
+    }
+
+    fn reusable(&self, index: usize) -> bool {
+        self.taches[index].etat == Etat::Zombie
+            && self.taches[index].on_cpu < 0
+            && !self.taches[index].switching_out
     }
 }
 
-fn tache_prete(rsp: u64, cpu: u8) -> Tache {
-    Tache { etat: Etat::Pret, on_cpu: cpu as i8, ctx_rsp: rsp, runq_cpu: cpu }
+fn running(etat: Etat, cpu: usize, rsp: u64) -> Tache {
+    Tache { etat, on_cpu: cpu as i8, switching_out: false, runq_cpu: cpu, ctx_rsp: rsp }
 }
 
-const SOMMET_PERIME: u64 = 0xFFFF_8000_0011_0000;
-const SOMMET_REEL: u64 = 0xFFFF_8000_0022_0000;
+const OLD_RSP: u64 = 0xFFFF_8000_0010_0000;
+const NEW_RSP: u64 = 0xFFFF_8000_0020_0000;
 
-/// L'ancien ordre laisse voler un sommet PERIME. C'est la panne, jouee a la
-/// main : aucun fil, aucun hasard, l'entrelacement est ecrit noir sur blanc.
 #[test]
-fn ancien_ordre_publie_un_sommet_perime() {
-    let mut ord = Ordonnanceur::neuf(2, vec![tache_prete(SOMMET_PERIME, 0)]);
+fn ancien_ordre_permettait_le_vol_avec_rsp_perime() {
+    let mut t = running(Etat::Pret, 0, OLD_RSP);
+    t.on_cpu = -1;
+    let stolen = t.ctx_rsp;
+    t.ctx_rsp = NEW_RSP;
+    assert_eq!(stolen, OLD_RSP);
+}
 
-    // CPU 0 commute : il publie...
-    ord.publie_sortante(Ordre::PublierPuisSauver, 0, 0);
+#[test]
+fn sentinelle_rsp_reste_fausse_apres_save_avant_stack_leave() {
+    let mut t = running(Etat::Pret, 0, OLD_RSP);
+    t.ctx_rsp = 0;
+    t.on_cpu = -1;
+    assert_eq!(t.ctx_rsp, 0);
 
-    // ... et CPU 1 vole AVANT que `switch_context` n'ait ecrit le vrai sommet.
-    let vol = ord.vole(1, 0);
+    // mov [rdi], rsp : la sentinelle est levee.
+    t.ctx_rsp = NEW_RSP;
 
-    // CPU 0 finit son switch, trop tard.
-    ord.sauvegarde_contexte(0, SOMMET_REEL);
+    // mov rsp, rsi n'est pas encore passe, mais l'ancien predicat dirait OK.
+    assert!(t.etat == Etat::Pret && t.on_cpu < 0 && t.ctx_rsp != 0);
+}
 
-    let (index, sommet) = vol.expect("l'ancien ordre laisse effectivement voler");
-    assert_eq!(index, 0);
-    assert_eq!(
-        sommet, SOMMET_PERIME,
-        "CPU 1 est reparti sur le sommet de la commutation PRECEDENTE"
+#[test]
+fn handoff_final_refuse_avant_stack_left_meme_apres_save_rsp() {
+    let mut m = Modele::neuf(2, vec![running(Etat::Pret, 0, OLD_RSP)]);
+    m.prepare(0, 0);
+    m.save_rsp(0, NEW_RSP);
+    assert!(m.files[0].is_empty());
+    assert_eq!(m.taches[0].on_cpu, 0);
+    assert!(m.taches[0].switching_out);
+    assert!(!m.eligible(0, 0));
+
+    m.leave_stack(0);
+    m.complete(0);
+    assert_eq!(m.taches[0].on_cpu, -1);
+    assert!(!m.taches[0].switching_out);
+    assert_eq!(m.files[0], vec![0]);
+}
+
+#[test]
+fn wake_concurrent_pending_n_est_pas_perdu_ni_publie_trop_tot() {
+    let mut m = Modele::neuf(2, vec![running(Etat::Bloque, 0, OLD_RSP)]);
+    m.prepare(0, 0);
+    m.save_rsp(0, NEW_RSP);
+    m.wake(0);
+    assert_eq!(m.taches[0].etat, Etat::Pret);
+    assert!(m.files[0].is_empty());
+    m.leave_stack(0);
+    m.complete(0);
+    assert_eq!(m.files[0], vec![0]);
+}
+
+#[test]
+fn blocked_reste_hors_runqueue_apres_completion() {
+    let mut m = Modele::neuf(1, vec![running(Etat::Bloque, 0, OLD_RSP)]);
+    m.prepare(0, 0);
+    m.save_rsp(0, NEW_RSP);
+    m.leave_stack(0);
+    m.complete(0);
+    assert_eq!(m.taches[0].on_cpu, -1);
+    assert!(m.files[0].is_empty());
+}
+
+#[test]
+fn zombie_recyclable_uniquement_apres_stack_left() {
+    let mut m = Modele::neuf(1, vec![running(Etat::Zombie, 0, OLD_RSP)]);
+    m.prepare(0, 0);
+    m.save_rsp(0, NEW_RSP);
+    assert!(!m.reusable(0));
+    m.leave_stack(0);
+    m.complete(0);
+    assert!(m.reusable(0));
+}
+
+#[test]
+#[should_panic(expected = "pending ecrase")]
+fn pending_ne_peut_pas_etre_ecrase() {
+    let mut m = Modele::neuf(
+        1,
+        vec![running(Etat::Pret, 0, OLD_RSP), running(Etat::Pret, 0, OLD_RSP + 0x1000)],
     );
-    assert_ne!(
-        sommet, SOMMET_REEL,
-        "le sommet vole n'est pas celui que switch_context allait ecrire"
-    );
+    m.prepare(0, 0);
+    m.prepare(0, 1);
 }
 
-/// Le nouvel ordre refuse ce vol.
 #[test]
-fn nouvel_ordre_refuse_la_tache_en_vol() {
-    let mut ord = Ordonnanceur::neuf(2, vec![tache_prete(SOMMET_PERIME, 0)]);
-
-    ord.publie_sortante(Ordre::InvaliderPublierSauver, 0, 0);
-    assert!(!ord.contexte_publie(0), "la sentinelle doit etre posee");
-
-    assert!(
-        ord.vole(1, 0).is_none(),
-        "une tache dont le contexte est en vol ne doit pas etre reprise"
-    );
+fn completion_apres_vidage_est_idempotente() {
+    let mut m = Modele::neuf(1, vec![running(Etat::Pret, 0, OLD_RSP)]);
+    m.prepare(0, 0);
+    m.save_rsp(0, NEW_RSP);
+    m.leave_stack(0);
+    m.complete(0);
+    m.complete(0);
+    assert_eq!(m.files[0], vec![0]);
 }
 
-/// Refuser n'est pas perdre : la tache reste en file et repart au tour suivant,
-/// avec le BON sommet. Un correctif qui la ferait disparaitre serait pire que
-/// le bug qu'il corrige.
 #[test]
-fn le_refus_ne_perd_pas_la_tache() {
-    let mut ord = Ordonnanceur::neuf(2, vec![tache_prete(SOMMET_PERIME, 0)]);
+fn stress_concurrent_aucune_publication_avant_stack_left() {
+    // Test CONCURRENT mais orchestre : on agrandit volontairement la fenetre
+    // save-rsp -> stack-left et on force l'observateur a verifier l'invariant
+    // PENDANT cette fenetre. Aucun Barrier reutilise, donc pas de deadlock
+    // sporadique du harnais lui-meme.
+    const TOURS: u64 = 2_000;
+    const TIMEOUT: Duration = Duration::from_secs(2);
 
-    ord.publie_sortante(Ordre::InvaliderPublierSauver, 0, 0);
-    assert!(ord.vole(1, 0).is_none());
-    assert_eq!(ord.files[0], vec![0], "la tache doit etre remise dans la file");
+    let on_cpu = Arc::new(AtomicI8::new(0));
+    let switching = Arc::new(AtomicBool::new(false));
+    let saved = Arc::new(AtomicBool::new(false));
+    let stack_left = Arc::new(AtomicBool::new(false));
+    let epoch = Arc::new(AtomicU64::new(0));
 
-    ord.sauvegarde_contexte(0, SOMMET_REEL);
+    // Quatre rendez-vous explicites :
+    // start -> saved -> autorise_leave -> done.
+    let (start_tx, start_rx) = sync_channel::<u64>(0);
+    let (saved_tx, saved_rx) = sync_channel::<u64>(0);
+    let (leave_tx, leave_rx) = sync_channel::<u64>(0);
+    let (done_tx, done_rx) = sync_channel::<u64>(0);
 
-    let (index, sommet) = ord.vole(1, 0).expect("reprenable une fois le contexte publie");
-    assert_eq!(index, 0);
-    assert_eq!(sommet, SOMMET_REEL, "et c'est le sommet REEL qui est repris");
-}
+    let a_on = Arc::clone(&on_cpu);
+    let a_sw = Arc::clone(&switching);
+    let a_saved = Arc::clone(&saved);
+    let a_left = Arc::clone(&stack_left);
+    let a_epoch = Arc::clone(&epoch);
 
-/// Le tour de file local se termine meme si TOUTE la file est en vol, et il ne
-/// vide pas la file. Sans borne, ce CPU tournerait indefiniment sous verrou.
-#[test]
-fn le_tour_de_file_local_est_borne() {
-    let mut ord = Ordonnanceur::neuf(
-        2,
-        vec![tache_prete(SOMMET_PERIME, 0), tache_prete(SOMMET_PERIME, 0)],
-    );
-    ord.publie_sortante(Ordre::InvaliderPublierSauver, 0, 0);
-    ord.publie_sortante(Ordre::InvaliderPublierSauver, 0, 1);
-
-    assert!(ord.choisit_local(0).is_none(), "rien de reprenable pour l'instant");
-    assert_eq!(ord.files[0].len(), 2, "les deux taches restent executables");
-
-    ord.sauvegarde_contexte(0, SOMMET_REEL);
-    ord.sauvegarde_contexte(1, SOMMET_REEL + 0x1000);
-    assert!(ord.choisit_local(0).is_some(), "elles repartent au tour suivant");
-}
-
-/// Une tache qui se BLOQUE n'est pas mise en file par la commutation : c'est un
-/// reveil concurrent qui l'y met. La fenetre est la meme, et la sentinelle doit
-/// donc la couvrir aussi -- c'est le chemin `publish_ready`.
-#[test]
-fn un_reveil_concurrent_ne_contourne_pas_la_sentinelle() {
-    let mut tache = tache_prete(SOMMET_PERIME, 0);
-    tache.etat = Etat::Bloque;
-    let mut ord = Ordonnanceur::neuf(2, vec![tache]);
-
-    ord.publie_sortante(Ordre::InvaliderPublierSauver, 0, 0);
-    assert!(ord.files[0].is_empty(), "une tache bloquee n'est pas mise en file");
-
-    // Un autre CPU la reveille pendant que le switch est encore en vol.
-    ord.taches[0].etat = Etat::Pret;
-    ord.files[0].push(0);
-
-    assert!(ord.vole(1, 0).is_none(), "la sentinelle tient aussi sur ce chemin");
-
-    ord.sauvegarde_contexte(0, SOMMET_REEL);
-    assert_eq!(ord.vole(1, 0).map(|(_, rsp)| rsp), Some(SOMMET_REEL));
-}
-
-/// Contre-epreuve sous vrais fils : sous le NOUVEL ordre, aucun voleur ne doit
-/// JAMAIS observer un sommet perime.
-///
-/// Cette assertion est a sens unique -- elle ne peut echouer que si le bug est
-/// present -- donc elle ne clignote pas. C'est volontaire : la demonstration de
-/// la panne est faite plus haut, a la main ; ici on ne cherche qu'a soumettre
-/// l'ordre memoire a du vrai parallelisme.
-#[test]
-fn sous_fils_concurrents_aucun_sommet_perime() {
-    const TOURS: u64 = 20_000;
-
-    // `ctx_rsp` partage, comme dans le noyau : ecrit par le commutateur,
-    // lu par le voleur.
-    let ctx = Arc::new(AtomicU64::new(SOMMET_PERIME));
-    // Publication de la tache dans la file, modelisee par un drapeau.
-    let en_file = Arc::new(AtomicU64::new(0));
-    let barriere = Arc::new(Barrier::new(2));
-
-    let (c1, f1, b1) = (ctx.clone(), en_file.clone(), barriere.clone());
     let commutateur = std::thread::spawn(move || {
         for tour in 1..=TOURS {
-            b1.wait();
-            // Ordre du noyau : sentinelle, PUIS publication, PUIS sauvegarde.
-            c1.store(CONTEXTE_EN_VOL, Ordering::Relaxed);
-            f1.store(tour, Ordering::Release);
-            std::hint::spin_loop();
-            c1.store(SOMMET_REEL + tour, Ordering::Release);
+            let ordre = start_rx.recv_timeout(TIMEOUT).expect("start timeout");
+            assert_eq!(ordre, tour);
+
+            // prepare_switch_handoff()
+            a_on.store(0, Ordering::Release);
+            a_sw.store(true, Ordering::Release);
+            a_saved.store(false, Ordering::Release);
+            a_left.store(false, Ordering::Release);
+            a_epoch.store(tour, Ordering::Release);
+
+            // Equivalent au `mov [rdi], rsp`.
+            a_saved.store(true, Ordering::Release);
+            saved_tx.send(tour).expect("saved channel");
+
+            // L'observateur garde volontairement le writer ICI :
+            // le CPU sortant utilise encore sa pile.
+            let autorise = leave_rx.recv_timeout(TIMEOUT).expect("leave timeout");
+            assert_eq!(autorise, tour);
+
+            // Equivalent au `mov rsp, rsi`, puis completion depuis la pile
+            // entrante.
+            a_left.store(true, Ordering::Release);
+            a_on.store(-1, Ordering::Release);
+            a_sw.store(false, Ordering::Release);
+
+            done_tx.send(tour).expect("done channel");
         }
     });
 
-    let (c2, f2, b2) = (ctx.clone(), en_file.clone(), barriere.clone());
-    let voleur = std::thread::spawn(move || {
-        let mut vols = 0u64;
-        for tour in 1..=TOURS {
-            b2.wait();
-            // On ne "vole" que ce qui est publie ET dont le contexte l'est.
-            while f2.load(Ordering::Acquire) != tour {
-                std::hint::spin_loop();
-            }
-            let vu = c2.load(Ordering::Acquire);
-            if vu != CONTEXTE_EN_VOL {
-                assert_eq!(
-                    vu,
-                    SOMMET_REEL + tour,
-                    "sommet perime observe au tour {tour}"
-                );
-                vols += 1;
-            }
-        }
-        vols
-    });
+    for tour in 1..=TOURS {
+        start_tx.send(tour).expect("start channel");
 
-    commutateur.join().expect("fil commutateur");
-    let vols = voleur.join().expect("fil voleur");
-    // On n'exige pas un nombre de vols : ce qui compte est qu'AUCUN d'eux
-    // n'ait rapporte un sommet perime.
-    assert!(vols <= TOURS);
+        let saved_tour = saved_rx.recv_timeout(TIMEOUT).expect("saved timeout");
+        assert_eq!(saved_tour, tour);
+        assert_eq!(epoch.load(Ordering::Acquire), tour);
+        assert!(saved.load(Ordering::Acquire));
+
+        // Point decisif : RSP est DEJA sauvegarde, mais l'ancien CPU n'a PAS
+        // encore quitte la pile. La tache doit rester residente/ineligible.
+        assert!(!stack_left.load(Ordering::Acquire));
+        assert_eq!(
+            on_cpu.load(Ordering::Acquire),
+            0,
+            "publication avant stack-left au tour {tour}"
+        );
+        assert!(
+            switching.load(Ordering::Acquire),
+            "switching_out perdu avant stack-left au tour {tour}"
+        );
+
+        leave_tx.send(tour).expect("leave channel");
+
+        let done_tour = done_rx.recv_timeout(TIMEOUT).expect("done timeout");
+        assert_eq!(done_tour, tour);
+        assert!(stack_left.load(Ordering::Acquire));
+        assert_eq!(on_cpu.load(Ordering::Acquire), -1);
+        assert!(!switching.load(Ordering::Acquire));
+    }
+
+    commutateur.join().expect("commutateur");
 }

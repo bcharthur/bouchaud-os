@@ -880,8 +880,15 @@ pub struct Task {
     pub runq_cpu: u8,
     /// Dernier CPU sur lequel la tache a reellement execute.
     pub last_cpu: u8,
-    /// CPU qui execute actuellement cette tache, -1 si elle est en runqueue.
+    /// CPU qui possede encore l'execution/la pile de cette tache.
+    ///
+    /// Pendant une commutation sortante, la valeur RESTE >= 0 jusqu'a la
+    /// confirmation post-switch. Ainsi aucun autre CPU ne peut republier la
+    /// tache tant que l'ancien CPU utilise encore physiquement sa pile.
     pub on_cpu: i8,
+    /// Vrai entre prepare_switch_handoff() et complete_switch_handoff().
+    /// Protege par le BKL ; ce n'est pas une primitive atomique autonome.
+    switching_out: bool,
     /// Derniere migration effective, pour imposer une residence cache minimale.
     pub last_migration_ns: u64,
     /// Runtime recent lisse, utilise comme estimation du poids de la tache.
@@ -1036,9 +1043,15 @@ pub fn preempt_irq_bkl_tenu() -> u64 {
 
 static CURRENT_PROCESS: [SpinLockIrq<Option<Arc<Process>>>; MAX_CPUS] =
     [const { SpinLockIrq::new(None) }; MAX_CPUS];
-/// Zombie qui vient de quitter physiquement la pile de ce CPU. Le contexte
-/// entrant le rend recyclable une fois le switch assembleur effectivement fini.
-static RETIRED: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(NO_TASK) }; MAX_CPUS];
+// BOUCHAUD_GATE0_POST_SWITCH_HANDOFF_V2
+/// Tache dont CE CPU est en train d'abandonner la pile.
+///
+/// Invariant Gate 0 : tant que cette case n'est pas completee depuis la pile
+/// entrante, la tache sortante garde `on_cpu >= 0`, `switching_out = true` et
+/// n'apparait dans AUCUNE runqueue. La publication n'arrive qu'apres le
+/// `mov rsp, rsi` de switch_context, jamais apres le seul `mov [rdi], rsp`.
+static SWITCH_PENDING: [AtomicUsize; MAX_CPUS] =
+    [const { AtomicUsize::new(NO_TASK) }; MAX_CPUS];
 static NEXT_TID: AtomicU32 = AtomicU32::new(100);
 static mut KERNEL_CTX: [Context; MAX_CPUS] = [Context { rsp: 0 }; MAX_CPUS];
 static NEED_RESCHED: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
@@ -1128,7 +1141,7 @@ static STALL_SYSCALL_TICK: [AtomicU64; MAX_CPUS] =
 // Site noyau courant par CPU, uniquement pour diagnostic.
 // 0=aucun/user, 21=page fault+BKL, 31=IPI+BKL, 41=preempt+BKL,
 // 50=AP loop+BKL, 52=AP retour switch avant reacquire, 53=AP post-reacquire,
-// 54=complete_retired, 55=activate_kernel, 61=timer+BKL.
+// 54=complete_switch_handoff, 55=activate_kernel, 61=timer+BKL.
 static STALL_KERNEL_SITE: [AtomicU32; MAX_CPUS] =
     [const { AtomicU32::new(0) }; MAX_CPUS];
 static STALL_KERNEL_AUX: [AtomicU64; MAX_CPUS] =
@@ -1754,15 +1767,123 @@ fn kernel_ctx() -> &'static mut Context {
     unsafe { &mut KERNEL_CTX[local_cpu()] }
 }
 
-/// A appeler dans le contexte qui vient de PRENDRE le CPU, BKL tenu. Le zombie
-/// note avant le switch ne peut plus utiliser sa pile : son slot devient donc
-/// recyclable sans use-after-free.
-fn complete_retired() {
+/// RSP physique courant, uniquement pour verifier l'invariant de passation.
+#[inline]
+fn rsp_courant_passation() -> u64 {
+    let rsp: u64;
+    unsafe {
+        core::arch::asm!(
+            "mov {}, rsp",
+            out(reg) rsp,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    rsp
+}
+
+/// Prepare la sortie d'une tache SANS la publier.
+///
+/// Le BKL est tenu. La tache reste `on_cpu == cpu` et n'est pas mise en file.
+/// C'est volontaire : `switch_context` sauvegarde d'abord son RSP puis change
+/// de pile ; entre ces deux instructions, l'ancien CPU utilise encore la pile.
+#[inline]
+fn prepare_switch_handoff(index: usize, task: &mut Task, cpu: usize) {
+    debug_assert!(
+        smp_lock::held_by_current_cpu(),
+        "task: preparation de passation sans BKL"
+    );
+    assert_eq!(
+        task.on_cpu,
+        cpu as i8,
+        "task: passation d'une tache non residente sur ce CPU tid={}",
+        task.tid
+    );
+    assert!(
+        !task.switching_out,
+        "task: double preparation de passation tid={}",
+        task.tid
+    );
+
+    match SWITCH_PENDING[cpu].compare_exchange(
+        NO_TASK,
+        index,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => task.switching_out = true,
+        Err(previous) => panic!(
+            "task: passation precedente non terminee cpu={} pending={} nouveau={}",
+            cpu, previous, index
+        ),
+    }
+}
+
+/// Publie la tache sortante depuis la pile ENTRANTE.
+///
+/// C'est LE point qui ferme Gate 0 : `on_cpu` ne devient negatif qu'ici.
+/// Un reveil concurrent pendant la commutation peut mettre `state=Ready`, mais
+/// `publish_ready()` refuse encore la tache tant que `on_cpu >= 0`. Ici, apres
+/// abandon physique de l'ancienne pile, on republie exactement une fois.
+fn complete_switch_handoff() {
     let cpu = local_cpu();
-    let retired = RETIRED[cpu].swap(NO_TASK, Ordering::AcqRel);
-    if retired == NO_TASK { return; }
-    if let Some(task) = tasks().get_mut(retired) {
-        if task.state == TaskState::Zombie { task.on_cpu = -1; }
+    let outgoing = SWITCH_PENDING[cpu].load(Ordering::Acquire);
+    if outgoing == NO_TASK {
+        return;
+    }
+
+    debug_assert!(
+        smp_lock::held_by_current_cpu(),
+        "task: completion de passation sans BKL"
+    );
+    assert!(
+        outgoing < tasks().len(),
+        "task: passation vers slot invalide cpu={} slot={}",
+        cpu,
+        outgoing
+    );
+
+    let publish = {
+        let task = &mut tasks()[outgoing];
+
+        assert!(
+            task.switching_out,
+            "task: passation pending sans switching_out tid={}",
+            task.tid
+        );
+        assert_eq!(
+            task.on_cpu,
+            cpu as i8,
+            "task: outgoing publie avant completion tid={} on_cpu={} cpu={}",
+            task.tid,
+            task.on_cpu,
+            cpu
+        );
+
+        #[cfg(debug_assertions)]
+        {
+            let rsp = rsp_courant_passation();
+            let base = task.kstack_top.saturating_sub(KSTACK_SIZE as u64);
+            debug_assert!(
+                rsp < base || rsp >= task.kstack_top,
+                "task: publication avant abandon physique de la pile tid={} rsp={:#x} pile={:#x}..{:#x}",
+                task.tid,
+                rsp,
+                base,
+                task.kstack_top
+            );
+        }
+
+        task.last_cpu = cpu as u8;
+        task.runq_cpu = cpu as u8;
+        task.on_cpu = -1;
+        task.switching_out = false;
+        task.state == TaskState::Ready
+    };
+
+    SWITCH_PENDING[cpu].store(NO_TASK, Ordering::Release);
+
+    if publish {
+        publish_ready(outgoing);
     }
 }
 
@@ -2065,6 +2186,7 @@ impl Task {
             runq_cpu: u8::MAX,
             last_cpu: u8::MAX,
             on_cpu: -1,
+            switching_out: false,
             last_migration_ns: 0,
             recent_runtime_ns: 0,
             slice_start_ns: 0,
@@ -2161,7 +2283,11 @@ fn allowed_on(task: &Task, cpu: usize) -> bool {
 
 fn running_count_cpu(cpu: usize) -> usize {
     tasks().iter()
-        .filter(|t| t.state != TaskState::Zombie && t.on_cpu == cpu as i8)
+        .filter(|t| {
+            t.state != TaskState::Zombie
+                && t.on_cpu == cpu as i8
+                && !t.switching_out
+        })
         .count()
 }
 
@@ -2204,6 +2330,7 @@ fn choose_runq_cpu(mask: u64) -> u8 {
 fn publish_ready(index: usize) {
     if index >= tasks().len() || tasks()[index].state != TaskState::Ready
         || tasks()[index].on_cpu >= 0
+        || tasks()[index].switching_out
     {
         return;
     }
@@ -2242,9 +2369,10 @@ pub fn register(mut task: Box<Task>) -> usize {
         }
     }
     task.on_cpu = -1;
+    task.switching_out = false;
 
     let reuse = tasks().iter().position(|old| {
-        old.state == TaskState::Zombie && old.on_cpu < 0
+        old.state == TaskState::Zombie && old.on_cpu < 0 && !old.switching_out
     });
     let index = if let Some(index) = reuse {
         tasks()[index] = task;
@@ -2306,6 +2434,7 @@ fn ready_count_cpu(cpu: usize) -> usize {
     tasks().iter().filter(|t| {
         t.state == TaskState::Ready
             && t.on_cpu < 0
+            && !t.switching_out
             && t.runq_cpu as usize == cpu
             && allowed_on(t, cpu)
     }).count()
@@ -2315,6 +2444,7 @@ fn stealable_count_cpu(cpu: usize) -> usize {
     tasks().iter().filter(|t| {
         t.state == TaskState::Ready
             && t.on_cpu < 0
+            && !t.switching_out
             && !t.noyau
             && t.runq_cpu as usize != cpu
             && allowed_on(t, cpu)
@@ -2384,7 +2514,7 @@ unsafe extern "C" fn switch_context(from: *mut u64, to: u64) {
 extern "C" fn task_trampoline() -> ! {
     let frame = {
         let _kernel = smp_lock::enter();
-        complete_retired();
+        complete_switch_handoff();
         let task = current();
         install(task);
         task.frame
@@ -2396,7 +2526,7 @@ extern "C" fn task_trampoline() -> ! {
 /// `schedule()` le suspend autour du changement de contexte.
 extern "C" fn kernel_task_trampoline() -> ! {
     let _kernel = smp_lock::enter();
-    complete_retired();
+    complete_switch_handoff();
     let task = current();
     task.fresh = false;
     let entree = task.entree_noyau.expect("task: fil noyau sans point d'entree");
@@ -2449,14 +2579,10 @@ fn deactivate_task_space(task: &Task, cpu_id: usize) {
 #[inline]
 fn mark_task_running(task: &mut Task, cpu_id: usize) {
     let now = crate::kernel::timer::monotonic_ns();
-    debug_assert!(task.on_cpu < 0, "task: tentative de double execution tid={}", task.tid);
-    // BOUCHAUD_P0_CTX_EN_VOL_V1 : reprendre une tache dont `switch_context`
-    // n'a pas encore ecrit le sommet ferait repartir CE CPU sur une pile deja
-    // occupee par un autre. L'invariant est verifie ici, une fois, pour les
-    // deux appelants (`switch_to` et `preempt_from_irq`).
-    debug_assert!(
-        contexte_publie(task),
-        "task: reprise d'une tache dont le contexte est encore en vol tid={}",
+    assert!(task.on_cpu < 0, "task: tentative de double execution tid={}", task.tid);
+    assert!(
+        !task.switching_out,
+        "task: tentative de reprendre une tache dont la passation n'est pas terminee tid={}",
         task.tid
     );
     debug_assert_eq!(task.last_account_ns, 0, "task: cursor CPU encore arme hors CPU tid={}", task.tid);
@@ -2471,6 +2597,7 @@ fn mark_task_running(task: &mut Task, cpu_id: usize) {
     task.last_cpu = cpu_id as u8;
     task.runq_cpu = cpu_id as u8;
     task.on_cpu = cpu_id as i8;
+    task.switching_out = false;
     task.slice_start_ns = now;
     task.last_account_ns = now;
     task.context_switches = task.context_switches.saturating_add(1);
@@ -2544,7 +2671,7 @@ fn account_until(task: &mut Task, now: u64) {
 /// personne a prevenir : elle ne reviendra pas en espace utilisateur.
 fn marque_zombie(task: &mut Task) {
     task.state = TaskState::Zombie;
-    if task.on_cpu >= 0 {
+    if task.on_cpu >= 0 && !task.switching_out {
         let cpu = task.on_cpu as usize;
         if cpu < MAX_CPUS {
             RETRAITE_DEMANDEE[cpu].store(true, Ordering::Release);
@@ -2617,79 +2744,16 @@ pub fn account_resume_user_noreturn() {
 /// ignore pour un tour et le tourniquet ordinaire reprend. Une tache normale
 /// avance donc toujours, meme face a une tache interactive qui ne se bloque
 /// jamais.
-// BOUCHAUD_P0_CTX_EN_VOL_V1
+// BOUCHAUD_GATE0_POST_SWITCH_HANDOFF_V2
 //
-// LE TROU QUE CETTE SENTINELLE BOUCHE
-// -----------------------------------
-// `switch_to` et `preempt_from_irq` rendaient la tache sortante VISIBLE des
-// autres CPU -- `on_cpu = -1`, puis `enqueue` dans la file locale -- AVANT que
-// `switch_context` n'ait ecrit son sommet de pile dans `ctx.rsp`. Entre les
-// deux, le gros verrou est deja rendu (`suspend_for_schedule` pour `switch_to`,
-// `drop(kernel)` pour la preemption IRQ) et `IF` est remis a 1.
-//
-// Un autre CPU pouvait donc, dans cette fenetre :
-//   1. voler la tache (`runnable_steal` ne regardait que `state`/`on_cpu`),
-//   2. faire `switch_context(&mut prev.ctx.rsp, sortante.ctx.rsp)` avec la
-//      valeur PERIMEE -- celle de la commutation PRECEDENTE.
-//
-// Deux CPU se retrouvent alors sur la MEME pile noyau. La valeur perimee ne
-// designe plus un cadre `switch_context` valide (la tache a repris depuis, et
-// a reecrit cette zone), donc les `pop` puis le `ret` partent sur un quadmot
-// arbitraire de la pile de la victime.
-//
-// C'est suffisant pour produire les deux symptomes observes :
-//   * un `ret` qui tombe sur le champ `ss` d'une `TrapFrame` donne RIP=0x1b
-//     (le selecteur de donnees utilisateur) avec CS=8 -- la signature exacte du
-//     DOUBLE FAULT ;
-//   * un `resume_after_schedule`/`Drop` execute deux fois, ou execute sur un
-//     cadre qui n'est plus le sien, decouple DEPTH de OWNER -- exactement
-//     `DEPTH[0] > 0 && OWNER == FREE`.
-//
-// Le cas ZOMBIE etait deja protege : `switch_to` laisse un zombie `on_cpu >= 0`
-// et ne le rend recyclable qu'au `complete_retired()` de la pile ENTRANTE,
-// c'est-a-dire apres le switch. Il manquait exactement la meme protection pour
-// les taches encore vivantes.
-//
-// POURQUOI `ctx.rsp` SERT DE DRAPEAU
-// ----------------------------------
-// Parce que c'est precisement la donnee dont la publication est en retard : la
-// rendre invalide pendant le vol, c'est dire la verite, pas ajouter un etat.
-// Zero est impossible autrement (`amorce_pile` ecrit un sommet non nul des la
-// creation, et `switch_context` n'ecrit jamais zero).
-//
-// ORDRE MEMOIRE
-// -------------
-// La sentinelle est posee sous BKL, avant la publication. Le lecteur voit donc
-// necessairement la sentinelle avec l'entree de file : soit par la chaine
-// acquire/release du verrou de la file (`enqueue`/`steal`), soit par celle du
-// BKL (`publish_ready`). L'ecriture qui la leve est le `mov [rdi], rsp` de
-// `switch_context`, un store 8 octets aligne : sur x86-64 (TSO) le lecteur voit
-// soit la sentinelle, soit le nouveau sommet, jamais l'ancien ni un mot dechire.
-pub const CONTEXTE_EN_VOL: u64 = 0;
-
-/// Marque une tache sortante comme « contexte pas encore sauvegarde ».
-///
-/// A appeler **avant** toute publication (`on_cpu = -1`, `enqueue`), le BKL
-/// encore tenu. C'est `switch_context` qui la leve, en ecrivant le vrai sommet.
-#[inline]
-fn marque_contexte_en_vol(task: &mut Task) {
-    task.ctx.rsp = CONTEXTE_EN_VOL;
-}
-
-/// Vrai si `switch_context` a deja publie le sommet de pile de cette tache.
-///
-/// Lecture volatile : l'ecriture qui la leve vient d'un AUTRE CPU et se fait
-/// hors BKL, depuis l'assembleur de `switch_context`. Le compilateur n'a donc
-/// pas le droit de la mettre en cache d'une iteration a l'autre.
-#[inline]
-fn contexte_publie(task: &Task) -> bool {
-    unsafe { core::ptr::read_volatile(&task.ctx.rsp) != CONTEXTE_EN_VOL }
-}
-
+// La tache sortante n'est plus publiee au moment ou `ctx.rsp` change.
+// Elle devient schedulable uniquement depuis la continuation entrante, donc
+// APRES le changement physique de pile. `ctx.rsp` redevient un simple contexte
+// machine et n'est plus un drapeau de synchronisation.
 fn runnable_local(task: &Task, cpu: usize) -> bool {
     task.state == TaskState::Ready
         && task.on_cpu < 0
-        && contexte_publie(task)
+        && !task.switching_out
         && task.runq_cpu as usize == cpu
         && allowed_on(task, cpu)
 }
@@ -2697,7 +2761,7 @@ fn runnable_local(task: &Task, cpu: usize) -> bool {
 fn runnable_steal(task: &Task, cpu: usize) -> bool {
     task.state == TaskState::Ready
         && task.on_cpu < 0
-        && contexte_publie(task)
+        && !task.switching_out
         && !task.noyau
         && task.runq_cpu as usize != cpu
         && allowed_on(task, cpu)
@@ -2709,20 +2773,7 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
 
     if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu) {
         let local = crate::arch::x86_64::cpu_local::local(id);
-        // Une tache en vol reste EXECUTABLE : la laisser tomber de la file la
-        // perdrait pour de bon. On la remet donc en queue et on passe a la
-        // suivante. Le tour de file est borne pour qu'une file entierement en
-        // vol ne fasse pas tourner ce CPU indefiniment.
-        let mut tours_restants = local.run_queue_len().saturating_add(1);
         while let Some(index) = local.dequeue() {
-            if index < len && !contexte_publie(&tasks()[index]) {
-                local.enqueue(index);
-                tours_restants = tours_restants.saturating_sub(1);
-                if tours_restants == 0 {
-                    break;
-                }
-                continue;
-            }
             if index < len && runnable_local(&tasks()[index], cpu) {
                 return Some(index);
             }
@@ -2870,6 +2921,7 @@ pub fn wait_for_interrupt_releasing_bkl() {
 /// l'appelant, qui doit reevaluer sa condition d'attente.
 pub fn schedule() -> bool {
     let _kernel = smp_lock::enter();
+    complete_switch_handoff();
     let cur = current_index_raw();
     if cur == NO_TASK { return false; }
     debug_assert_interrupts_enabled();
@@ -2901,6 +2953,7 @@ pub fn schedule() -> bool {
 
 fn switch_to(from: usize, to: usize) {
     let _kernel = smp_lock::enter();
+    complete_switch_handoff();
     let cpu_id = local_cpu();
     let (from_ptr, to_ptr) = unsafe {
         let list = tasks();
@@ -2912,22 +2965,8 @@ fn switch_to(from: usize, to: usize) {
         usermode::fxsave((*from_ptr).fpu_ptr() as *mut u8);
         (*from_ptr).fs_base = usermode::fs_base();
         deactivate_task_space(&*from_ptr, cpu_id);
-        // BOUCHAUD_P0_CTX_EN_VOL_V1 : avant toute publication.
-        marque_contexte_en_vol(&mut *from_ptr);
-        if (*from_ptr).state == TaskState::Zombie {
-            RETIRED[cpu_id].store(from, Ordering::Release);
-            // Reste marque running jusqu'a ce que le nouveau contexte confirme
-            // que le switch assembleur a effectivement quitte cette pile.
-        } else {
-            (*from_ptr).on_cpu = -1;
-            (*from_ptr).last_cpu = cpu_id as u8;
-            (*from_ptr).runq_cpu = cpu_id as u8;
-            if (*from_ptr).state == TaskState::Ready {
-                if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu_id) {
-                    crate::arch::x86_64::cpu_local::local(id).enqueue(from);
-                }
-            }
-        }
+        prepare_switch_handoff(from, &mut *from_ptr, cpu_id);
+        // PAS de on_cpu=-1, PAS d'enqueue ici. Cette pile est encore active.
         mark_task_running(&mut *to_ptr, cpu_id);
 
         set_current_index(to);
@@ -2940,12 +2979,14 @@ fn switch_to(from: usize, to: usize) {
     unsafe { switch_context(&mut (*from_ptr).ctx.rsp, (*to_ptr).ctx.rsp); }
     smp_lock::note_switch(false, from, to);
     smp_lock::resume_after_schedule(depth);
-    complete_retired();
+    complete_switch_handoff();
 }
 
 /// Retour definitif au fil noyau appelant (la tache courante est terminee).
 fn switch_to_kernel() -> ! {
     let _kernel = smp_lock::enter();
+    complete_switch_handoff();
+    let cpu_id = local_cpu();
     let cur = current_index_raw();
     let from_ptr = unsafe {
         let list = tasks();
@@ -2957,15 +2998,8 @@ fn switch_to_kernel() -> ! {
         // changement de contexte et la fin de la tache serait perdu, et pire,
         // impute a la tache suivante installee sur ce CPU.
         account_slice_end(&mut *ptr);
-        deactivate_task_space(&*ptr, local_cpu());
-        // BOUCHAUD_P0_CTX_EN_VOL_V1 : meme regle, meme raison -- un reveil
-        // concurrent peut republier cette tache avant notre `switch_context`.
-        marque_contexte_en_vol(&mut *ptr);
-        if (*ptr).state == TaskState::Zombie {
-            RETIRED[local_cpu()].store(cur, Ordering::Release);
-        } else {
-            (*ptr).on_cpu = -1;
-        }
+        deactivate_task_space(&*ptr, cpu_id);
+        prepare_switch_handoff(cur, &mut *ptr, cpu_id);
         ptr
     };
     set_current_index(NO_TASK);
@@ -3028,8 +3062,8 @@ pub fn secondary_cpu_loop() -> ! {
             stall_site_set(52, current_index_raw() as u64);
             smp_lock::resume_after_schedule(depth);
             stall_site_set(53, current_index_raw() as u64);
-            stall_site_set(54, RETIRED[cpu_id].load(Ordering::Acquire) as u64);
-            complete_retired();
+            stall_site_set(54, SWITCH_PENDING[cpu_id].load(Ordering::Acquire) as u64);
+            complete_switch_handoff();
             stall_site_set(50, current_index_raw() as u64);
             set_current_index(NO_TASK);
             clear_current_process_local();
@@ -3280,7 +3314,7 @@ pub fn run(mut first: Box<Task>) -> i32 {
     let depth = smp_lock::suspend_for_schedule();
     unsafe { switch_context(kernel_rsp, (*to_ptr).ctx.rsp); }
     smp_lock::resume_after_schedule(depth);
-    complete_retired();
+    complete_switch_handoff();
 
     crate::kernel::vmm::activate_kernel();
     set_current_index(NO_TASK);
@@ -3326,7 +3360,7 @@ pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
     let depth = smp_lock::suspend_for_schedule();
     unsafe { switch_context(kernel_rsp, (*to_ptr).ctx.rsp); }
     smp_lock::resume_after_schedule(depth);
-    complete_retired();
+    complete_switch_handoff();
 
     crate::kernel::vmm::activate_kernel();
     set_current_index(NO_TASK);
@@ -3622,7 +3656,7 @@ pub fn preempt_from_irq() {
         return;
     }
 
-    complete_retired();
+    complete_switch_handoff();
     wake_sleepers();
 
     let cpu_id = local_cpu();
@@ -3654,18 +3688,8 @@ pub fn preempt_from_irq() {
         usermode::fxsave((*from_ptr).fpu_ptr() as *mut u8);
         (*from_ptr).fs_base = usermode::fs_base();
         deactivate_task_space(&*from_ptr, cpu_id);
-        // BOUCHAUD_P0_CTX_EN_VOL_V1 : la fenetre est ici la PLUS large des
-        // trois -- `drop(kernel)` rend le verrou plusieurs instructions avant
-        // `switch_context`.
-        marque_contexte_en_vol(&mut *from_ptr);
-        (*from_ptr).on_cpu = -1;
-        (*from_ptr).last_cpu = cpu_id as u8;
-        (*from_ptr).runq_cpu = cpu_id as u8;
-        if (*from_ptr).state == TaskState::Ready {
-            if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu_id) {
-                crate::arch::x86_64::cpu_local::local(id).enqueue(cur);
-            }
-        }
+        prepare_switch_handoff(cur, &mut *from_ptr, cpu_id);
+        // Meme si drop(kernel) precede le switch, l'outgoing reste resident.
         mark_task_running(&mut *to_ptr, cpu_id);
 
         set_current_index(next);
@@ -3694,7 +3718,7 @@ pub fn preempt_from_irq() {
     stall_site_set(42, 0);
     if let Some(_kernel) = smp_lock::try_enter() {
         stall_site_set(43, 0);
-        complete_retired();
+        complete_switch_handoff();
     }
     stall_site_clear();
 }
