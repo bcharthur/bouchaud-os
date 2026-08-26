@@ -1098,6 +1098,21 @@ static WM_LAST_WARNING_TICK: AtomicU64 = AtomicU64::new(0);
 // BOUCHAUD_SMP4_STALL_PROBE_V1
 // phase: 0=hors syscall, 1=attente BKL, 2=dans ABI avec BKL.
 const STALL_NO_SYSCALL: u64 = u64::MAX;
+// BOUCHAUD_P0_BKL_ENREGISTREUR_V1
+//
+// PID de la tache installee sur ce CPU, lisible SANS verrou.
+//
+// `CURRENT_PROCESS[cpu]` est derriere un `Mutex` : le lire depuis le chemin
+// chaud du gros verrou pourrait bloquer sur le verrou qu'on est en train
+// d'instrumenter. `install()` connait deja le pid ; il le depose ici, ce qui
+// coute un `store` relaxe par changement de contexte.
+static PID_LOCAL: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// PID de la tache courante sur ce CPU, sans prendre le moindre verrou.
+pub fn pid_local_pour_sonde() -> u64 {
+    PID_LOCAL[local_cpu()].load(Ordering::Relaxed)
+}
+
 static STALL_SYSCALL_NR: [AtomicU64; MAX_CPUS] =
     [const { AtomicU64::new(STALL_NO_SYSCALL) }; MAX_CPUS];
 static STALL_SYSCALL_PHASE: [AtomicU32; MAX_CPUS] =
@@ -2406,6 +2421,7 @@ fn install(task: &mut Task) {
         usermode::set_kernel_stack(task.kstack_top);
         usermode::set_fs_base(task.fs_base);
         usermode::per_cpu().current = task.tid as u64;
+        PID_LOCAL[local_cpu()].store(task.process.pid as u64, Ordering::Relaxed);
         // La zone est initialisee a un etat FPU valide des `Task::new` : on peut
         // restaurer inconditionnellement, y compris au premier passage.
         usermode::fxrstor(task.fpu_ptr() as *const u8);
@@ -2910,7 +2926,9 @@ fn switch_to(from: usize, to: usize) {
     };
 
     let depth = smp_lock::suspend_for_schedule();
+    smp_lock::note_switch(true, from, to);
     unsafe { switch_context(&mut (*from_ptr).ctx.rsp, (*to_ptr).ctx.rsp); }
+    smp_lock::note_switch(false, from, to);
     smp_lock::resume_after_schedule(depth);
     complete_retired();
 }
@@ -2947,7 +2965,9 @@ fn switch_to_kernel() -> ! {
     crate::kernel::vmm::activate_kernel();
     let target_rsp = kernel_ctx().rsp;
     let depth = smp_lock::suspend_for_schedule();
+    smp_lock::note_switch(true, cur, NO_TASK);
     unsafe { switch_context(&mut (*from_ptr).ctx.rsp, target_rsp); }
+    smp_lock::note_switch(false, cur, NO_TASK);
     smp_lock::resume_after_schedule(depth);
     unreachable!("task: reprise d'une tache terminee")
 }
@@ -3656,7 +3676,9 @@ pub fn preempt_from_irq() {
     );
     // Le nouveau contexte ne doit pas heriter d'un tag "preempt kernel".
     stall_site_clear();
+    smp_lock::note_switch(true, cur, next);
     unsafe { switch_context(&mut (*from_ptr).ctx.rsp, (*to_ptr).ctx.rsp); }
+    smp_lock::note_switch(false, cur, next);
 
     // Ne jamais bloquer ici. Nettoyage opportuniste uniquement.
     stall_site_set(42, 0);
