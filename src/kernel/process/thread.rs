@@ -1243,6 +1243,63 @@ fn current_index_raw() -> usize {
 
 /// Contexte uniquement atomique, lu par smp_lock au moment exact ou un CPU
 /// devient proprietaire. Aucun domaine Process verrouille n'est touche ici.
+// BOUCHAUD_DF_FORENSIC_V1
+//
+// Identite de la tache courante pour un gestionnaire de faute fatale.
+//
+// Aucun verrou, aucune allocation, aucun `Arc::clone` : ce chemin s'execute
+// apres qu'une faute a rendu l'etat du noyau douteux. Prendre un verrou qui se
+// trouverait deja tenu par le CPU fautif transformerait un diagnostic en gel,
+// et un gel ne se lit pas.
+//
+// Rend `None` si aucune tache n'est installee sur ce CPU -- ce qui est en soi
+// une information : la faute a eu lieu dans la boucle idle ou avant le premier
+// ordonnancement.
+pub fn identite_pour_faute() -> Option<(usize, u32, u32, u64, u64, bool)> {
+    let index = CURRENT[local_cpu()].load(Ordering::Acquire);
+    if index == NO_TASK {
+        return None;
+    }
+    // `tasks()` materialise le Vec global. Le lire sans verrou est un pari
+    // assume ici et seulement ici : l'alternative est de ne rien pouvoir dire.
+    let table = tasks();
+    let task = table.get(index)?;
+    Some((
+        index,
+        task.process.pid,
+        task.tid,
+        task.kstack_top,
+        task.kstack_top.saturating_sub(KSTACK_SIZE as u64),
+        task.in_kernel,
+    ))
+}
+
+/// Une replanification est-elle demandee sur ce CPU ?
+pub fn besoin_de_replanifier() -> bool {
+    NEED_RESCHED[local_cpu()].load(Ordering::Acquire)
+}
+
+/// Nom du processus courant, sans allocation : une tranche empruntee.
+pub fn nom_pour_faute() -> &'static str {
+    let index = CURRENT[local_cpu()].load(Ordering::Acquire);
+    if index == NO_TASK {
+        return "<aucune>";
+    }
+    match tasks().get(index) {
+        // `&str` emprunte a la `String` du processus : aucune copie, aucune
+        // allocation. La duree de vie est etendue parce que ce chemin ne
+        // revient jamais -- la faute est fatale.
+        // `resource_group_name` est un champ NU du processus : le lire ne prend
+        // aucun verrou. `metadata.name` serait plus precis mais vit derriere un
+        // SpinLock, que le CPU fautif peut deja tenir -- l'attendre changerait
+        // un diagnostic en gel.
+        Some(task) => unsafe {
+            &*(task.process.resource_group_name.as_str() as *const str)
+        },
+        None => "<index invalide>",
+    }
+}
+
 pub fn stall_probe_local_context() -> (usize, u64, u32, u32, u64) {
     let cpu = local_cpu();
     (

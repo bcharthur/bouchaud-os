@@ -2,7 +2,8 @@
 //! IDT partagee en contenu, chargee separement sur chaque CPU.
 
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
-use crate::arch::x86_64::{gdt, ports, smp};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use crate::arch::x86_64::{gdt, ports, smp, usermode};
 use crate::arch::x86_64::interrupts::{notify_end_of_interrupt, InterruptIndex};
 use crate::drivers::{keyboard, mouse};
 use crate::kernel::{dmesg, timer};
@@ -36,6 +37,7 @@ pub fn init() {
         IDT[InterruptIndex::AtaPrimary.as_usize()].set_handler_fn(ata_primary_handler);
         IDT[InterruptIndex::AtaSecondary.as_usize()].set_handler_fn(ata_secondary_handler);
         IDT[smp::RESCHEDULE_VECTOR as usize].set_handler_fn(reschedule_interrupt_handler);
+        IDT[smp::PANIC_STOP_VECTOR as usize].set_handler_fn(panic_stop_handler);
         IDT[smp::TLB_SHOOTDOWN_VECTOR as usize].set_handler_fn(tlb_shootdown_interrupt_handler);
         IDT.load();
         READY = true;
@@ -58,9 +60,168 @@ extern "x86-interrupt" fn breakpoint_handler(stack: InterruptStackFrame) {
     serial_println!("[cpu] breakpoint at {:?}", stack.instruction_pointer);
 }
 
-extern "x86-interrupt" fn double_fault_handler(stack: InterruptStackFrame, _code: u64) -> ! {
-    serial_println!("[cpu] DOUBLE FAULT\n{:#?}", stack);
-    panic!("EXCEPTION: double faute\n{:#?}", stack);
+// BOUCHAUD_DF_FORENSIC_V1
+//
+// Un double fault est fatal, et il arrive precisement quand l'etat du noyau
+// n'est plus fiable. Le gestionnaire doit donc rendre le maximum d'etat AVANT
+// de faire quoi que ce soit qui pourrait echouer a son tour.
+//
+// Ce qu'il ne fait jamais : allouer, prendre un verrou, appeler du code qui
+// pourrait fauter. `serial_println!` ecrit directement sur le port serie.
+//
+// Le run du 26 aout a donne `RIP=0x1b CS=8 RSP=0x18102618040 SS=16`. Dans la
+// GDT de ce noyau, 0x1b est le selecteur de DONNEES UTILISATEUR : une valeur de
+// segment s'etait retrouvee la ou RIP est attendu. Ce n'est pas une ecriture
+// sauvage, c'est un cadre de pile decale ou un contexte restaure depuis une
+// pile fausse. Distinguer les deux demande de savoir si RSP appartient encore
+// a la pile noyau de la tache -- d'ou ce releve.
+static PANIC_GLOBAL: AtomicBool = AtomicBool::new(false);
+static CPU_FAUTIF: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// Un autre CPU a-t-il deja declare la panique ?
+pub fn panique_globale_en_cours() -> bool {
+    PANIC_GLOBAL.load(Ordering::Acquire)
+}
+
+/// Prend la panique globale. Rend `false` si un autre CPU l'a deja prise :
+/// l'appelant doit alors se taire et s'arreter, pour laisser le premier
+/// produire une sortie lisible plutot que d'entrelacer deux traces.
+fn prends_la_panique(cpu: usize) -> bool {
+    if PANIC_GLOBAL
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
+    CPU_FAUTIF.store(cpu, Ordering::Release);
+    true
+}
+
+/// Arrete definitivement ce CPU, sans rien ecrire.
+fn arret_definitif() -> ! {
+    loop {
+        unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
+    }
+}
+
+/// Releve complet de l'etat au moment d'une faute fatale.
+///
+/// Aucune allocation, aucun verrou, aucun appel qui puisse fauter.
+fn releve_faute_fatale(nom: &str, stack: &InterruptStackFrame, code: u64) {
+    let cpu = smp::cpu_index();
+    let rsp_frame = stack.stack_pointer.as_u64();
+
+    serial_println!("");
+    serial_println!("======== [{}] ========", nom);
+    serial_println!(
+        "[FAULT] cpu={} apic={} code={:#x}",
+        cpu,
+        crate::arch::x86_64::cpu_local::CpuId::from_index(cpu)
+            .and_then(crate::arch::x86_64::cpu_local::descriptor)
+            .map(|d| d.apic_id)
+            .unwrap_or(u32::MAX),
+        code,
+    );
+    serial_println!(
+        "[FAULT] rip={:#x} cs={:#x} rflags={:#x} rsp={:#x} ss={:#x}",
+        stack.instruction_pointer.as_u64(),
+        stack.code_segment,
+        stack.cpu_flags,
+        rsp_frame,
+        stack.stack_segment,
+    );
+
+    let (cr2, cr3) = unsafe {
+        let cr2: u64;
+        let cr3: u64;
+        core::arch::asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack));
+        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack));
+        (cr2, cr3)
+    };
+    serial_println!("[FAULT] cr2={:#x} cr3={:#x}", cr2, cr3);
+
+    // La pile attendue. C'est la reponse qui tranche entre « pile debordee »
+    // et « contexte restaure depuis une pile fausse » : dans le premier cas
+    // RSP est juste SOUS la base, dans le second il est ailleurs.
+    match crate::kernel::task::identite_pour_faute() {
+        Some((index, pid, tid, kstack_top, kstack_base, in_kernel)) => {
+            serial_println!(
+                "[FAULT] task={} pid={} tid={} nom={} in_kernel={}",
+                index, pid, tid, crate::kernel::task::nom_pour_faute(), in_kernel,
+            );
+            serial_println!(
+                "[FAULT] kstack base={:#x} top={:#x} taille={}",
+                kstack_base, kstack_top, kstack_top.saturating_sub(kstack_base),
+            );
+            let dedans = rsp_frame >= kstack_base && rsp_frame <= kstack_top;
+            serial_println!(
+                "[FAULT] rsp_dans_kstack={} ecart_sous_base={}",
+                dedans,
+                kstack_base.saturating_sub(rsp_frame),
+            );
+        }
+        None => serial_println!("[FAULT] task=<aucune> (idle ou avant premier switch)"),
+    }
+
+    serial_println!(
+        "[FAULT] tss_rsp0={:#x} gs_cpu_index={}",
+        gdt::rsp0_courant(cpu),
+        usermode::cpu_index(),
+    );
+
+    let provenance = crate::kernel::smp_lock::stall_probe_provenance();
+    serial_println!(
+        "[FAULT] bkl owner_token={} depth={} coherent={} acquire_kind={} acquire_seq={} release_seq={}",
+        provenance.owner_token,
+        crate::kernel::smp_lock::stall_probe_depth(cpu),
+        provenance.coherent,
+        provenance.acquire_kind,
+        provenance.acquire_seq,
+        provenance.release_seq,
+    );
+    serial_println!(
+        "[FAULT] syscall_nr={} phase={} site={} aux={:#x} task_bkl={}",
+        provenance.syscall_nr,
+        provenance.syscall_phase,
+        provenance.site,
+        provenance.aux,
+        provenance.task,
+    );
+    // Pas de compteur d'imbrication d'IRQ dans ce noyau : ne pas en inventer
+    // un ici. `need_resched` dit au moins si une preemption etait en attente au
+    // moment de la faute.
+    serial_println!(
+        "[FAULT] need_resched={} irq_profondeur=<non suivi>",
+        crate::kernel::task::besoin_de_replanifier(),
+    );
+    serial_println!("======== fin du releve ========");
+}
+
+/// Recu par les CPU secondaires quand un autre a pris la panique globale.
+///
+/// Ne fait rien d'autre que s'arreter : ni verrou, ni journal, ni commutation.
+/// Ecrire ici entrelacerait la sortie avec celle du CPU fautif.
+extern "x86-interrupt" fn panic_stop_handler(_stack: InterruptStackFrame) {
+    arret_definitif();
+}
+
+extern "x86-interrupt" fn double_fault_handler(stack: InterruptStackFrame, code: u64) -> ! {
+    let cpu = smp::cpu_index();
+
+    // Un second CPU qui double-faute pendant qu'on ecrit n'a rien a ajouter :
+    // sa trace entrelacee rendrait les deux illisibles. Il s'arrete.
+    if !prends_la_panique(cpu) {
+        arret_definitif();
+    }
+
+    releve_faute_fatale("DOUBLE FAULT", &stack, code);
+
+    // Les autres CPU sont arretes APRES le releve : s'ils s'arretaient avant,
+    // une faute pendant le releve laisserait la machine muette et figee.
+    smp::arrete_les_autres_cpu();
+
+    serial_println!("*** KERNEL PANIC *** double faute, cpu={}", cpu);
+    arret_definitif();
 }
 
 fn from_user(stack: &InterruptStackFrame) -> bool {
@@ -112,7 +273,10 @@ extern "x86-interrupt" fn general_protection_handler(stack: InterruptStackFrame,
     if from_user(&stack) && crate::kernel::task::in_user_task() {
         kill_faulting_task("faute de protection generale", &stack);
     }
-    serial_println!("[cpu] general protection fault, code {}", code);
+    // Meme releve que le double fault : une GP en mode noyau a exactement les
+    // memes causes candidates -- selecteur invalide, cadre decale, contexte
+    // restaure depuis une pile fausse -- et le meme besoin de les distinguer.
+    releve_faute_fatale("GENERAL PROTECTION FAULT", &stack, code);
     panic!("EXCEPTION: general protection fault (code {})\n{:#?}", code, stack);
 }
 
@@ -140,7 +304,8 @@ extern "x86-interrupt" fn stack_segment_handler(stack: InterruptStackFrame, code
     if from_user(&stack) && crate::kernel::task::in_user_task() {
         kill_faulting_task("faute de pile", &stack);
     }
-    panic!("EXCEPTION: faute de segment de pile (code {})\n{:#?}", code, stack);
+    releve_faute_fatale("STACK SEGMENT FAULT", &stack, code);
+    panic!("EXCEPTION: faute de segment de pile (code {})", code);
 }
 
 // BOUCHAUD_SMP4_OWNER_PROVENANCE_PROBE_V3

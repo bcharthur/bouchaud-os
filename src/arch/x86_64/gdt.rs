@@ -131,6 +131,26 @@ pub fn init() {
 
 pub fn init_ap(cpu: usize) { load_cpu(cpu); }
 
+/// RSP0 courant du TSS de ce CPU, pour un releve de faute fatale.
+///
+/// Lecture d'un champ, sans verrou : ce chemin s'execute apres une faute et ne
+/// doit rien pouvoir attendre.
+pub fn rsp0_courant(cpu: usize) -> u64 {
+    let etats = unsafe { core::ptr::addr_of!(CPU_GDTS).read() };
+    let _ = etats;
+    match all_unlocked_pour_faute(cpu) {
+        Some(tss) => unsafe { (*tss).privilege_stack_table[0].as_u64() },
+        None => 0,
+    }
+}
+
+fn all_unlocked_pour_faute(cpu: usize) -> Option<*mut TaskStateSegment> {
+    unsafe {
+        let etats = CPU_GDTS.as_ref()?;
+        etats.get(cpu).map(|etat| etat.tss)
+    }
+}
+
 /// La disposition des selecteurs est identique sur chaque GDT. Un cache Copy
 /// evite qu'un AP lisant STAR ait a emprunter le Vec pendant qu'un autre AP
 /// charge son propre GDTR/TSS.
