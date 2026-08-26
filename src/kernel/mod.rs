@@ -13,6 +13,8 @@ pub mod clean_page_cache;
 pub mod dmesg;
 #[path = "process/elf.rs"]
 pub mod elf;
+#[path = "process/loader/mod.rs"]
+pub mod loader;
 #[path = "process/exec.rs"]
 pub mod exec;
 #[path = "object/fd.rs"]

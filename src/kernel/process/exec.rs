@@ -146,6 +146,37 @@ pub fn lance_detache(
 }
 
 /// Meme chose a partir d'une image ELF deja en memoire (autotest embarque).
+/// Refuse une image que ce noyau ne sait pas executer, en NOMMANT ce qu'elle est.
+///
+/// `elf::parse` repondait « signature ELF absente » a un `.exe`, ce qui est
+/// vrai et n'apprend rien. Un `.exe` compile pour Windows echouera de toute
+/// facon ; la difference est qu'il le dira, et pourquoi.
+fn verifie_format(name: &str, data: &[u8]) -> Result<(), String> {
+    use crate::kernel::loader::{identifie, pe, Format};
+
+    match identifie(data) {
+        Format::Elf64 => Ok(()),
+        Format::Pe32Plus => match pe::lit_entete(data) {
+            Err(refus) => Err(alloc::format!(
+                "{} : PE32+ illisible ({:?})",
+                name, refus
+            )),
+            Ok(_) => Err(alloc::format!(
+                "{} : PE32+ reconnu, mais ce noyau ne sait pas encore le charger",
+                name
+            )),
+        },
+        Format::Script => Err(alloc::format!(
+            "{} : script #! -- l'interpreteur doit etre lance explicitement",
+            name
+        )),
+        Format::Inconnu => Err(alloc::format!(
+            "{} : format non reconnu (ni ELF64, ni PE32+, ni script)",
+            name
+        )),
+    }
+}
+
 pub fn exec_image(
     name: &str,
     data: &[u8],
@@ -251,6 +282,7 @@ fn construit_tache(
 
         let image = match source {
             ImageSource::Memory(data) => {
+                verifie_format(name, data)?;
                 elf::load(&mut borrowed.space, data, vmm::user_load_base())
             }
             ImageSource::Node(node) => {

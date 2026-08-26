@@ -84,6 +84,12 @@ jobs:
       - name: Decodage clavier (transitions appui/relachement)
         run: tools/gui/test-clavier.sh
 
+      # Reconnaitre un format d'executable est une fonction des seuls octets du
+      # fichier. Un MZ pris pour un PE32+, ou un offset qui deborde, se lisent
+      # ici et pas dans QEMU.
+      - name: Formats d'executable (ELF / PE32+)
+        run: tools/exec/test-format.sh
+
       # Le meme genre de barriere, pour le protocole d'entree du navigateur :
       # WebContent doit rendre exactement un accuse de reception par evenement
       # mis en file par l'hote. Le chrome M11 vit dans WebContent et injecte sa
