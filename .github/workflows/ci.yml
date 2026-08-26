@@ -84,6 +84,12 @@ jobs:
       - name: Decodage clavier (transitions appui/relachement)
         run: tools/gui/test-clavier.sh
 
+      # « Cent clics et cent crans de molette dans une page ne produisent aucun
+      # degat plein ecran » : une regle qui se demontre, alors qu'un journal ne
+      # montrerait que la session qu'on a jouee.
+      - name: Politique de degat du bureau
+        run: tools/gui/test-degats.sh
+
       # Reconnaitre un format d'executable est une fonction des seuls octets du
       # fichier. Un MZ pris pour un PE32+, ou un offset qui deborde, se lisent
       # ici et pas dans QEMU.

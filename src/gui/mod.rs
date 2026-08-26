@@ -21,6 +21,7 @@
 
 pub mod apps;
 pub mod client;
+pub mod degats;
 pub mod protocole;
 pub mod surface;
 pub mod desktop;

@@ -28,6 +28,7 @@ use crate::gui::client::{self, Client};
 use crate::gui::event::{Key, KeyEvent};
 use crate::gui::framebuffer as fb;
 use crate::gui::mouse;
+use crate::gui::degats::{Degats, Origine};
 use crate::gui::protocole::Rect;
 use crate::gui::widgets;
 use crate::gui::window::{
@@ -111,12 +112,6 @@ fn plein_ecran() -> Rect {
 // touche, qui changerait justement ce qu'on cherche a mesurer.
 static TOUCHES_VERS_CLIENT: AtomicU64 = AtomicU64::new(0);
 static TOUCHES_VERS_BUREAU: AtomicU64 = AtomicU64::new(0);
-static DEGATS_PLEIN_ECRAN: AtomicU64 = AtomicU64::new(0);
-
-#[inline]
-fn note_degat_plein() {
-    DEGATS_PLEIN_ECRAN.fetch_add(1, Ordering::Relaxed);
-}
 
 /// Compteurs d'entree du bureau : (touches remises a un client, touches
 /// traitees par le bureau, degats plein ecran imposes).
@@ -124,8 +119,23 @@ pub fn stats_entree() -> (u64, u64, u64) {
     (
         TOUCHES_VERS_CLIENT.load(Ordering::Relaxed),
         TOUCHES_VERS_BUREAU.load(Ordering::Relaxed),
-        DEGATS_PLEIN_ECRAN.load(Ordering::Relaxed),
+        crate::gui::degats::degats_plein_ecran(),
     )
+}
+
+/// Rectangle de widget (`window::Rect`) vers rectangle de degat.
+///
+/// Les deux existent pour des raisons differentes -- l'un decrit une zone
+/// cliquable en largeur/hauteur signees, l'autre une region de degat que le
+/// protocole GUI transporte. La conversion est ecrite une fois ici plutot que
+/// dupliquee a chaque appel.
+fn depuis_widget(r: window::Rect) -> Rect {
+    Rect::neuf(r.x, r.y, r.w.max(0) as u32, r.h.max(0) as u32)
+}
+
+/// Rectangle de la barre des taches.
+fn barre_taches_rect() -> Rect {
+    Rect::neuf(0, (fb::HEIGHT - BAR_H) as i32, fb::WIDTH as u32, BAR_H as u32)
 }
 
 /// Rectangle ecran d'une fenetre, cadre et barre de titre compris.
@@ -201,7 +211,8 @@ fn boucle() {
     let mut quit = false;
     // Tout est sale au premier tour : il n'y a encore rien a l'ecran.
     let mut sale = true;
-    let mut degat_ecran = plein_ecran();
+    let mut degats = Degats::neuf(plein_ecran());
+    degats.tout(); // premier tour : rien n'est encore a l'ecran
     let mut derniere_trame = 0u64;
     let mut derniere_horloge = 0u64;
     let mut derniere_souris = (usize::MAX, usize::MAX);
@@ -263,8 +274,7 @@ fn boucle() {
                 // Un menu ou une fenetre disparait : ce qu'elle couvrait
                 // redevient fond, et personne d'autre ne le sait.
                 sale = true;
-                degat_ecran = degat_ecran.union(&plein_ecran());
-                note_degat_plein();
+                degats.tout();
                 TOUCHES_VERS_BUREAU.fetch_add(1, Ordering::Relaxed);
                 if menu_open { menu_open = false; }
                 else if !ferme_fenetre_du_dessus(&mut wins) { quit = true; }
@@ -280,12 +290,13 @@ fn boucle() {
                 // Application du noyau : c'est le bureau qui la dessine, donc
                 // c'est bien lui qui se salit — mais sa fenetre seulement.
                 sale = true;
-                degat_ecran = degat_ecran.union(&cadre_fenetre(&wins[index]));
+                degats.ajoute(Origine::Fenetre, cadre_fenetre(&wins[index]));
                 TOUCHES_VERS_BUREAU.fetch_add(1, Ordering::Relaxed);
                 if apps::key_to_app(&mut wins[index], k, home) {
                     ferme_fenetre(&mut wins, index);
-                    degat_ecran = degat_ecran.union(&plein_ecran());
-                    note_degat_plein();
+                    // Une fenetre qui disparait decouvre ce qu'elle couvrait,
+                    // et le bureau est seul a le savoir.
+                    degats.tout();
                 }
             }
         }
@@ -308,24 +319,39 @@ fn boucle() {
         let boutons = crate::drivers::mouse::buttons() as u32;
         if (mxu, myu) != derniere_souris || boutons != derniers_boutons {
             if derniere_souris.0 != usize::MAX {
-                degat_ecran = degat_ecran.union(&degat_curseur(derniere_souris.0, derniere_souris.1));
+                degats.ajoute(
+                    Origine::Curseur,
+                    degat_curseur(derniere_souris.0, derniere_souris.1),
+                );
             }
             derniere_souris = (mxu, myu);
             derniers_boutons = boutons;
             sale = true;
-            degat_ecran = degat_ecran.union(&degat_curseur(mxu, myu));
+            degats.ajoute(Origine::Curseur, degat_curseur(mxu, myu));
             derniere_entree = maintenant;
             transmet_position(&mut wins, mx, my, boutons);
         }
+        // BOUCHAUD_GUI_DAMAGE_ORIGIN_V1
+        //
+        // Ce qui etait ici : `click || release || wheel != 0` -> plein ecran.
+        // Le meme defaut que le clavier, par une autre porte. Un clic dans une
+        // page ne change rien au BUREAU : le client recoit l'evenement et
+        // annoncera son degat s'il repeint. Un cran de molette encore moins.
+        //
+        // L'entree reste notee -- elle pilote la cadence de recomposition d'un
+        // client muet -- mais elle ne salit plus rien par elle-meme. Ce sont
+        // `handle_click` et `handle_wheel` qui disent ce qu'ils ont change.
         if click || release || wheel != 0 {
-            sale = true;
-            degat_ecran = degat_ecran.union(&plein_ecran());
             derniere_entree = maintenant;
         }
 
         if left {
             if let Some(d) = drag {
-                degat_ecran = degat_ecran.union(&plein_ecran());
+                // Deplacer ou redimensionner ne salit que l'union de la
+                // position quittee et de celle atteinte. Le fond redecouvert
+                // est dans la premiere, le cadre nouveau dans la seconde.
+                let avant = wins.last().map(cadre_fenetre).unwrap_or_default();
+                degats.ajoute(Origine::Fenetre, avant);
                 if let Some(w) = wins.last_mut() {
                     match d {
                         Drag::Move(ox, oy) => { w.x = mx - ox; w.y = my - oy; }
@@ -338,11 +364,16 @@ fn boucle() {
                     }
                     clamp_win(w);
                 }
+                let apres = wins.last().map(cadre_fenetre).unwrap_or_default();
+                degats.ajoute(Origine::Fenetre, apres);
+                sale = true;
             } else if let Some((idx, ox, oy, _, _)) = icon_drag {
-                degat_ecran = degat_ecran.union(&plein_ecran());
+                degats.ajoute(Origine::Icone, depuis_widget(icon_rect(idx)));
                 let new_x = (mx - ox).max(0);
                 let new_y = (my - oy).max(BAR_H as i32);
                 unsafe { window::ICON_POSITIONS[idx] = (new_x, new_y); }
+                degats.ajoute(Origine::Icone, depuis_widget(icon_rect(idx)));
+                sale = true;
             }
         } else {
             drag = None;
@@ -373,10 +404,13 @@ fn boucle() {
         }
 
         if click {
-            handle_click(mx, my, &mut wins, &mut menu_open, &mut drag, &mut quit, home, &mut spawn_n, &mut icon_drag);
+            handle_click(mx, my, &mut wins, &mut menu_open, &mut drag, &mut quit, home, &mut spawn_n, &mut icon_drag, &mut degats);
+            sale = true;
         }
         if wheel != 0 {
-            handle_wheel(mx, my, wheel, &mut wins);
+            if handle_wheel(mx, my, wheel, &mut wins, &mut degats) {
+                sale = true;
+            }
         }
 
         // ---- Clients ring 3 ----
@@ -394,19 +428,22 @@ fn boucle() {
         if recompose_aveugle {
             dernier_aveugle = maintenant;
         }
-        let degat_clients = pompe_clients(&mut wins, recompose_aveugle);
+        let (degat_clients, perte_fenetre) = pompe_clients(&mut wins, recompose_aveugle);
         if !degat_clients.vide() {
             sale = true;
-            degat_ecran = degat_ecran.union(&degat_clients);
+            degats.ajoute(Origine::Client, degat_clients);
+        }
+        if perte_fenetre {
+            // Une fenetre a disparu : ce qu'elle couvrait redevient fond.
+            degats.tout();
+            sale = true;
         }
 
         // ---- Rendu ----
         if maintenant.wrapping_sub(derniere_horloge) >= PERIODE_HORLOGE_MS {
             derniere_horloge = maintenant;
             sale = true; // horloge, charge CPU, memoire : ils bougent seuls
-            degat_ecran = degat_ecran.union(&Rect::neuf(
-                0, (fb::HEIGHT - BAR_H) as i32, fb::WIDTH as u32, BAR_H as u32,
-            ));
+            degats.ajoute(Origine::BarreTaches, barre_taches_rect());
         }
         if sale && maintenant.wrapping_sub(derniere_trame) >= PERIODE_TRAME_MS {
             crate::kernel::timer::frame_start();
@@ -415,14 +452,15 @@ fn boucle() {
             widgets::draw_taskbar(&wins, menu_open);
             widgets::draw_cursor(mxu, myu);
             crate::kernel::timer::mark_frame();
-            let present = proto_rect_ecran(degat_ecran);
+            let present = proto_rect_ecran(degats.region());
             fb::present_rect(
                 present.x as usize, present.y as usize,
                 present.largeur as usize, present.hauteur as usize,
             );
+            crate::gui::degats::note_presentation(present);
             derniere_trame = maintenant;
             sale = false;
-            degat_ecran = Rect::default();
+            degats.efface();
         }
 
         if maintenant.wrapping_sub(dernier_releve) >= PERIODE_RELEVE_MS {
@@ -474,6 +512,15 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
     crate::serial_println!(
         "[GUI-INPUT] touches_client={} touches_bureau={} degats_plein_ecran={}",
         touches_client, touches_bureau, degats_pleins,
+    );
+
+    // BOUCHAUD_GUI_DAMAGE_ORIGIN_V1 : d'ou viennent les degats, et ce que la
+    // composition finit par copier. Une ligne par releve, jamais par evenement.
+    let (par_origine, trames, pixels) = crate::gui::degats::stats_degats();
+    crate::serial_println!(
+        "[GUI-DAMAGE] full={} window={} cursor={} client={} taskbar={} menu={} icon={} presents={} presented_pixels={}",
+        par_origine[0], par_origine[1], par_origine[2], par_origine[3],
+        par_origine[4], par_origine[5], par_origine[6], trames, pixels,
     );
     let (mesures, total) = task::mesure_processus();
     if total > 0 {
@@ -594,7 +641,13 @@ fn fenetre_active(wins: &[Win]) -> Option<usize> {
 /// Consulte tous les clients : trames recues, processus morts.
 ///
 /// Rend `true` si l'ecran doit etre recompose.
-fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> Rect {
+/// Rend le degat accumule et **si une fenetre a disparu**.
+///
+/// Les deux ne se deduisent pas l'un de l'autre : un degat peut etre vide
+/// alors qu'une fenetre vient de se fermer, et c'est precisement ce cas qui
+/// exige que le bureau redessine ce qu'elle couvrait. Rendre un plein ecran
+/// ici, comme avant, obligeait l'appelant a le subir sans savoir pourquoi.
+fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> (Rect, bool) {
     let mut degat_ecran = Rect::default();
     let mut morts: Vec<usize> = Vec::new();
     for (index, w) in wins.iter_mut().enumerate() {
@@ -634,11 +687,11 @@ fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> Rect {
         }
     }
     // A l'envers : retirer une fenetre decale celles qui suivent.
+    let perte = !morts.is_empty();
     for index in morts.into_iter().rev() {
         ferme_fenetre(wins, index);
-        degat_ecran = plein_ecran();
     }
-    degat_ecran
+    (degat_ecran, perte)
 }
 
 fn proto_rect_ecran(rect: Rect) -> Rect {
@@ -775,7 +828,13 @@ fn envoie_touche(client: &mut Client, evenement: KeyEvent) {
 /// a la page : il faut pouvoir nommer celle qui l'a arrete. `delta` est deja
 /// dans la convention du protocole (positif vers le haut), la conversion ayant
 /// eu lieu dans `gui::mouse`.
-fn handle_wheel(mx: i32, my: i32, delta: i32, wins: &mut Vec<Win>) {
+fn handle_wheel(
+    mx: i32,
+    my: i32,
+    delta: i32,
+    wins: &mut Vec<Win>,
+    degats: &mut Degats,
+) -> bool {
     for i in (0..wins.len()).rev() {
         let w = &wins[i];
         if !w.min && mx >= w.x && mx < w.x + w.w && my >= w.y && my < w.y + w.h {
@@ -799,7 +858,10 @@ fn handle_wheel(mx: i32, my: i32, delta: i32, wins: &mut Vec<Win>) {
                         client.pid, mx, my, delta,
                     );
                 }
-                return;
+                // Un cran remis a un client ne salit RIEN cote bureau. Le
+                // client repeindra s'il defile, et annoncera son degat ; le
+                // fond, la barre et les cadres n'ont pas bouge.
+                return false;
             }
             // Une application du noyau, pas le navigateur : le cran est bien
             // consomme, mais pas par la page. C'est une reponse a « ou est
@@ -809,13 +871,16 @@ fn handle_wheel(mx: i32, my: i32, delta: i32, wins: &mut Vec<Win>) {
                 i, mx, my, delta,
             );
             apps::wheel_to_app(&mut wins[i], mx, my, delta);
-            return;
+            // Celle-la, c'est le bureau qui la dessine : sa fenetre se salit.
+            degats.ajoute(Origine::Fenetre, cadre_fenetre(&wins[i]));
+            return true;
         }
     }
     crate::serial_println!(
         "[GUI-WHEEL-DROP] reason=no-window screen_x={} screen_y={} dy={}",
         mx, my, delta,
     );
+    false
 }
 
 fn handle_click(
@@ -827,26 +892,45 @@ fn handle_click(
     home: usize,
     spawn_n: &mut i32,
     icon_drag: &mut Option<(usize, i32, i32, i32, i32)>,
+    degats: &mut Degats,
 ) {
+    // BOUCHAUD_GUI_DAMAGE_ORIGIN_V1
+    //
+    // Chaque sortie declare CE QU'ELLE A CHANGE. Le plein ecran n'est plus le
+    // choix par defaut : il reste reserve a ce qui change vraiment la majorite
+    // de l'image -- une fenetre qui apparait ou disparait, parce que le fond
+    // qu'elle decouvre n'est connu de personne d'autre.
     if *menu_open {
         let mr = menu_rect();
+        let mut ouvre_fenetre = false;
         if mr.hit(mx, my) {
             let row = ((my - mr.y - MENU_HEADER_H) / MENU_ITEM_H).max(0) as usize;
             if let Some(&(_, kind)) = MENU.get(row) {
                 if kind == usize::MAX { *quit = true; }
-                else if kind == window::KIND_NAVIGATEUR { lance_navigateur(wins, home); }
-                else { wins.push(make_app(kind, home, spawn_n)); }
+                else if kind == window::KIND_NAVIGATEUR { lance_navigateur(wins, home); ouvre_fenetre = true; }
+                else { wins.push(make_app(kind, home, spawn_n)); ouvre_fenetre = true; }
             }
         }
         *menu_open = false;
+        // Le menu se referme : la zone qu'il couvrait redevient bureau.
+        degats.ajoute(Origine::Menu, depuis_widget(mr));
+        if ouvre_fenetre {
+            degats.tout();
+        }
         return;
     }
-    if start_btn().hit(mx, my) { *menu_open = true; return; }
+    if start_btn().hit(mx, my) {
+        *menu_open = true;
+        degats.ajoute(Origine::Menu, depuis_widget(menu_rect()));
+        degats.ajoute(Origine::BarreTaches, barre_taches_rect());
+        return;
+    }
 
     // Barre des taches : restaure (si minimisee) et donne le focus.
     for i in 0..wins.len() {
         if taskbar_btn(i).hit(mx, my) {
             let mut w = wins.remove(i);
+            let etait_minimisee = w.min;
             w.min = false;
             // Le contenu d'un client n'est pas redessine par le bureau : il est
             // recopie depuis sa surface. Apres une restauration, il faut donc
@@ -855,6 +939,14 @@ fn handle_click(
             // si la page est statique.
             if let App::Navigateur { client } = &mut w.app {
                 client.abime_tout();
+            }
+            degats.ajoute(Origine::Fenetre, cadre_fenetre(&w));
+            degats.ajoute(Origine::BarreTaches, barre_taches_rect());
+            if etait_minimisee {
+                // Une fenetre reapparait : ce qu'elle recouvre n'a jamais ete
+                // dessine sous elle. Seul cas ou le plein ecran est justifie
+                // ici, et il est desormais conditionnel.
+                degats.tout();
             }
             wins.push(w);
             return;
@@ -881,10 +973,20 @@ fn handle_click(
         }
     }
     if let Some(i) = hit {
+        // Remonter une fenetre ne change des pixels QUE dans son propre
+        // rectangle : elle etait deja dessinee, elle etait seulement
+        // partiellement recouverte. Rien ne bouge en dehors.
+        let deja_au_dessus = i + 1 == wins.len();
         let w = wins.remove(i);
         wins.push(w);
         let index = wins.len() - 1;
+        if !deja_au_dessus {
+            degats.ajoute(Origine::Fenetre, cadre_fenetre(&wins[index]));
+            // Le focus change : la barre des taches le montre.
+            degats.ajoute(Origine::BarreTaches, barre_taches_rect());
+        }
         let top = wins.last_mut().unwrap();
+        let cadre_avant = cadre_fenetre(top);
         let r = top.x + top.w;
         let on_title = my >= top.y + 1 && my < top.y + TITLE_H;
         if on_title && mx >= r - 10 && mx < r - 1 {
@@ -895,13 +997,21 @@ fn handle_click(
                 client.demande_fermeture();
             } else {
                 ferme_fenetre(wins, index);
+                // Une fenetre disparait : le fond qu'elle couvrait n'est connu
+                // de personne d'autre que du bureau.
+                degats.tout();
             }
         } else if on_title && mx >= r - 19 && mx < r - 10 {
             toggle_max(top);
+            // Maximiser ou restaurer : l'union des deux geometries suffit.
+            degats.ajoute(Origine::Fenetre, cadre_avant);
+            degats.ajoute(Origine::Fenetre, cadre_fenetre(&wins[index]));
         } else if on_title && mx >= r - 28 && mx < r - 19 {
             top.min = true;
             let m = wins.pop().unwrap();
             wins.insert(0, m);
+            // Elle s'efface : ce qui etait dessous doit reapparaitre.
+            degats.tout();
         } else if !window::est_client(top) && my >= top.y + top.h - 8 && mx >= r - 8 {
             *drag = Some(Drag::Resize);
         } else if my < top.y + TITLE_H {
@@ -913,8 +1023,13 @@ fn handle_click(
                     if let Some((x, y)) = crate::gui::protocole::vers_local(&zone, mx, my) {
                         client.envoie_pointeur(x, y, 1);
                     }
+                    // Un clic remis a un client ne salit rien : il repeindra
+                    // s'il en a besoin, et annoncera lui-meme son degat.
                 }
-                _ => apps::app_click(&mut wins[index], mx, my, home),
+                _ => {
+                    apps::app_click(&mut wins[index], mx, my, home);
+                    degats.ajoute(Origine::Fenetre, cadre_fenetre(&wins[index]));
+                }
             }
         }
     }
