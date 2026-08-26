@@ -9,8 +9,8 @@ corruption qu'on ne saura pas relier a sa cause.
 Ce script est la barriere externe. Il relit deux fichiers qui ne se parlent pas
 autrement :
 
-  * `src/kernel/abi/bkl.rs`  -- la table `SANS_BKL` : qui est libere, et pourquoi ;
-  * `src/kernel/abi/mod.rs`  -- l'aiguillage : ce que l'appel fait REELLEMENT.
+  * `src/compat/linux/bkl.rs` -- la table `SANS_BKL` : qui est libere, et pourquoi ;
+  * `src/compat/linux/mod.rs` -- l'aiguillage : ce que l'appel fait REELLEMENT.
 
 Et il refuse :
 
@@ -39,9 +39,22 @@ import sys
 from pathlib import Path
 
 RACINE = Path(__file__).resolve().parent.parent
-NR = RACINE / "src" / "kernel" / "abi" / "nr.rs"
-BKL = RACINE / "src" / "kernel" / "abi" / "bkl.rs"
-DISPATCH = RACINE / "src" / "kernel" / "abi" / "mod.rs"
+# La compatibilite Linux a quitte le coeur du noyau avec la fondation
+# multiplateforme (0b3eb17) : ces trois fichiers vivent desormais sous
+# `src/compat/linux/`. Le chemin est resolu, et non devine, pour que le
+# prochain deplacement echoue en le disant plutot qu'en ne verifiant plus rien.
+ABI = RACINE / "src" / "compat" / "linux"
+NR = ABI / "nr.rs"
+BKL = ABI / "bkl.rs"
+DISPATCH = ABI / "mod.rs"
+
+for _chemin in (NR, BKL, DISPATCH):
+    if not _chemin.exists():
+        raise SystemExit(
+            f"verifie-verrouillage : {_chemin} est introuvable.\n"
+            "La table des appels systeme a ete deplacee : mets ce chemin a jour,\n"
+            "sinon cette barriere ne verifie plus rien."
+        )
 
 # Les appels liberes dont le bras d'aiguillage n'est PAS une constante, et dont
 # l'audit est donc humain. Chaque entree nomme ou lire cet audit ; sans cela, la
