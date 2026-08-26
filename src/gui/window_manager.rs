@@ -42,6 +42,7 @@ use crate::kernel::task;
 use crate::users;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Periode minimale entre deux trames composees, en millisecondes.
 ///
@@ -101,6 +102,35 @@ const REPOS_MUET_MS: u64 = 200;
 
 fn plein_ecran() -> Rect {
     Rect::neuf(0, 0, fb::WIDTH as u32, fb::HEIGHT as u32)
+}
+
+// BOUCHAUD_UX_KEY_DAMAGE_V1
+//
+// De quoi prouver, et non supposer, qu'une frappe ne repeint plus le bureau.
+// Trois compteurs, publies une fois par releve : ce n'est pas une trace par
+// touche, qui changerait justement ce qu'on cherche a mesurer.
+static TOUCHES_VERS_CLIENT: AtomicU64 = AtomicU64::new(0);
+static TOUCHES_VERS_BUREAU: AtomicU64 = AtomicU64::new(0);
+static DEGATS_PLEIN_ECRAN: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+fn note_degat_plein() {
+    DEGATS_PLEIN_ECRAN.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Compteurs d'entree du bureau : (touches remises a un client, touches
+/// traitees par le bureau, degats plein ecran imposes).
+pub fn stats_entree() -> (u64, u64, u64) {
+    (
+        TOUCHES_VERS_CLIENT.load(Ordering::Relaxed),
+        TOUCHES_VERS_BUREAU.load(Ordering::Relaxed),
+        DEGATS_PLEIN_ECRAN.load(Ordering::Relaxed),
+    )
+}
+
+/// Rectangle ecran d'une fenetre, cadre et barre de titre compris.
+fn cadre_fenetre(w: &Win) -> Rect {
+    Rect::neuf(w.x, w.y, w.w.max(0) as u32, w.h.max(0) as u32)
 }
 
 /// Empreinte volontairement un peu large du curseur logiciel (fleche 12x19).
@@ -173,9 +203,21 @@ fn boucle() {
         let maintenant = crate::kernel::timer::monotonic_ms();
 
         // ---- Clavier (non bloquant) ----
+        //
+        // BOUCHAUD_UX_KEY_DAMAGE_V1
+        //
+        // Une touche ne salit l'ecran que si le BUREAU change. Ce qui part chez
+        // un client n'en fait pas partie : le client annoncera son propre degat
+        // quand il aura repeint, et `pompe_clients` le reprend. Le bureau, lui,
+        // n'a rien a redessiner.
+        //
+        // Chaque frappe imposait ici `sale = true` et un degat PLEIN ECRAN,
+        // avant meme de savoir ou allait la touche. Le compositeur repeignait
+        // donc fond, barre des taches, cadres et curseur, puis reprojetait tout
+        // l'ecran -- a chaque lettre. C'est exactement ce qui se voyait comme
+        // « la page se recharge » : ni navigation, ni requete HTTP, ni capture
+        // LibWeb supplementaire, seulement le bureau redessine par-dessus.
         while let Some(k) = keyboard::try_key() {
-            sale = true;
-            degat_ecran = degat_ecran.union(&plein_ecran());
             // Echap ferme le menu, puis la fenetre du dessus, puis le bureau —
             // sauf quand un client a le focus. Un navigateur a besoin d'Echap
             // (arreter un chargement, fermer une boite de dialogue) et le lui
@@ -186,6 +228,12 @@ fn boucle() {
             let client_actif = actif
                 .map_or(false, |index| window::est_client(&wins[index]));
             if k == Key::Other && (menu_open || !client_actif) {
+                // Un menu ou une fenetre disparait : ce qu'elle couvrait
+                // redevient fond, et personne d'autre ne le sait.
+                sale = true;
+                degat_ecran = degat_ecran.union(&plein_ecran());
+                note_degat_plein();
+                TOUCHES_VERS_BUREAU.fetch_add(1, Ordering::Relaxed);
                 if menu_open { menu_open = false; }
                 else if !ferme_fenetre_du_dessus(&mut wins) { quit = true; }
                 continue;
@@ -193,11 +241,19 @@ fn boucle() {
             if let Some(index) = actif {
                 if let App::Navigateur { client } = &mut wins[index].app {
                     envoie_touche(client, k);
+                    TOUCHES_VERS_CLIENT.fetch_add(1, Ordering::Relaxed);
                     derniere_entree = maintenant;
                     continue;
                 }
+                // Application du noyau : c'est le bureau qui la dessine, donc
+                // c'est bien lui qui se salit — mais sa fenetre seulement.
+                sale = true;
+                degat_ecran = degat_ecran.union(&cadre_fenetre(&wins[index]));
+                TOUCHES_VERS_BUREAU.fetch_add(1, Ordering::Relaxed);
                 if apps::key_to_app(&mut wins[index], k, home) {
                     ferme_fenetre(&mut wins, index);
+                    degat_ecran = degat_ecran.union(&plein_ecran());
+                    note_degat_plein();
                 }
             }
         }
@@ -377,6 +433,16 @@ fn boucle() {
 fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
     // BOUCHAUD_SMP_NG2_LOAD_LOG_V1
     task::log_smp_load();
+
+    // BOUCHAUD_UX_KEY_DAMAGE_V1 : la preuve que la frappe ne repeint plus le
+    // bureau. Taper du texte dans une page doit faire monter `vers_client`
+    // seul ; `plein_ecran` ne bouge que sur une fermeture de fenetre ou de
+    // menu. Une ligne par releve, pas une par touche.
+    let (touches_client, touches_bureau, degats_pleins) = stats_entree();
+    crate::serial_println!(
+        "[GUI-INPUT] touches_client={} touches_bureau={} degats_plein_ecran={}",
+        touches_client, touches_bureau, degats_pleins,
+    );
     let (mesures, total) = task::mesure_processus();
     if total > 0 {
         let mut ligne = String::new();
