@@ -1441,6 +1441,22 @@ impl core::fmt::Display for EtatSyscall {
     }
 }
 
+/// Rend `none` plutot qu'une sentinelle.
+///
+/// `18446744073709551615` et `4294967295` se lisent comme des valeurs alors
+/// qu'ils veulent dire « pas encore observe ». Un journal qui les affiche
+/// oblige a savoir de tete lesquels sont des absences.
+struct Absent(u64);
+
+impl core::fmt::Display for Absent {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.0 == u64::MAX || self.0 == u32::MAX as u64 {
+            return f.write_str("none");
+        }
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Numero d'acquisition BKL vu au releve precedent.
 ///
 /// Seul le PIT du BSP ecrit ici, une fois par seconde : pas de course.
@@ -3556,11 +3572,30 @@ pub fn log_smp_load() {
     let (acq_enter, acq_try, acq_resume) = smp_lock::acquisitions_par_origine();
     let (max_tenue, max_site) = smp_lock::plus_longue_tenue();
     let (parked_waiters, parks, wake_ipis) = smp_lock::park_stats();
+    // BOUCHAUD_P1_BKL_MAX_HOLD_PROVENANCE_V1 : le texte est fabrique ICI, une
+    // fois par releve. Le chemin d'acquisition ne range que des entiers.
+    let (max_cpu, max_tache, max_syscall, max_phase, max_site_acq, max_origine) =
+        smp_lock::provenance_plus_longue_tenue();
     crate::kernel::dmesg::log_fmt(format_args!(
         "[BKL-STATS] wait_ns={} hold_ns={} acquisitions={} enter={} try_enter={} resume={} max_hold_ns={} max_hold_site={} preempt_irq_bkl_tenu={} identite_repli={} parked_waiters={} parks={} wake_ipis={}",
         bkl_wait, bkl_hold, bkl_acq, acq_enter, acq_try, acq_resume,
         max_tenue, max_site, preempt_irq_bkl_tenu(), identite_repli(),
         parked_waiters, parks, wake_ipis,
+    ));
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "[BKL-MAX-HOLD] ns={} cpu={} task={} syscall={} site_acquisition={} origine={} site_tenue={}",
+        max_tenue,
+        Absent(max_cpu as u64),
+        Absent(max_tache as u64),
+        EtatSyscall { nr: max_syscall, phase: max_phase, age_ticks: 0 },
+        max_site_acq,
+        match max_origine {
+            1 => "enter",
+            2 => "try_enter",
+            3 => "resume_after_schedule",
+            _ => "none",
+        },
+        max_site,
     ));
     let (_, _, backing_reads, backing_bytes) = crate::fs::backing::stats();
     let (cache_hits, readahead_hits) = crate::fs::backing::cache_stats();

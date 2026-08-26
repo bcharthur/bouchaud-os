@@ -56,6 +56,36 @@ static TOTAL_HOLD_NS: AtomicU64 = AtomicU64::new(0);
 /// donc lui qu'une non-regression peut affirmer.
 static PLUS_LONGUE_TENUE_NS: AtomicU64 = AtomicU64::new(0);
 static PLUS_LONGUE_TENUE_SITE: AtomicU32 = AtomicU32::new(0);
+
+// BOUCHAUD_P1_BKL_MAX_HOLD_PROVENANCE_V1
+//
+// `max_hold_site` valait 0 pour la tenue de 2,94 s -- donc inutilisable.
+//
+// La raison : le site attribue a une tenue n'est ecrit que par
+// `stall_site_set`, et il est remis a zero a chaque acquisition. Un code qui
+// tient le verrou SANS jamais marquer de site -- ce que font justement
+// `execve`, `poll` et `futex` sur leurs chemins longs -- laisse donc zero.
+// Chercher le coupable la ou il ne s'annonce pas ne pouvait pas marcher.
+//
+// La provenance de l'ACQUISITION, elle, est toujours connue : qui, sur quel
+// CPU, dans quel appel systeme, a quelle phase. Elle est deja lue a chaque
+// acquisition pour la sonde de blocage ; il suffisait de la garder.
+//
+// Rien n'est formate ni alloue sur ce chemin : ce sont des entiers, ranges
+// dans des atomiques. Le texte est fabrique au releve, une fois par seconde.
+static TENUE_CPU: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(usize::MAX) }; MAX_CPUS];
+static TENUE_TACHE: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(usize::MAX) }; MAX_CPUS];
+static TENUE_SYSCALL: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(u64::MAX) }; MAX_CPUS];
+static TENUE_PHASE: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+static TENUE_SITE_ACQ: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+static TENUE_ORIGINE: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+
+static MAX_TENUE_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
+static MAX_TENUE_TACHE: AtomicUsize = AtomicUsize::new(usize::MAX);
+static MAX_TENUE_SYSCALL: AtomicU64 = AtomicU64::new(u64::MAX);
+static MAX_TENUE_PHASE: AtomicU32 = AtomicU32::new(0);
+static MAX_TENUE_SITE_ACQ: AtomicU32 = AtomicU32::new(0);
+static MAX_TENUE_ORIGINE: AtomicU32 = AtomicU32::new(0);
 static TOTAL_ACQUISITIONS: AtomicU64 = AtomicU64::new(0);
 /// Acquisitions ventilees par origine : 1 = `enter`, 2 = `try_enter*` (IRQ),
 /// 3 = `resume_after_schedule` (reprise d'une pile apres un changement de
@@ -109,7 +139,15 @@ fn probe_note_acquire(cpu: usize, kind: u32) {
     PROBE_OWNER_SITE.store(site, Ordering::Release);
     PROBE_OWNER_AUX.store(aux, Ordering::Release);
     PROBE_OWNER_GEN.store(generation, Ordering::Release);
-    let _ = cpu;
+
+    // BOUCHAUD_P1_BKL_MAX_HOLD_PROVENANCE_V1 : la meme lecture, conservee par
+    // CPU pour pouvoir l'attribuer a la tenue quand elle se terminera.
+    TENUE_CPU[cpu].store(cpu, Ordering::Relaxed);
+    TENUE_TACHE[cpu].store(task, Ordering::Relaxed);
+    TENUE_SYSCALL[cpu].store(syscall_nr, Ordering::Relaxed);
+    TENUE_PHASE[cpu].store(syscall_phase, Ordering::Relaxed);
+    TENUE_SITE_ACQ[cpu].store(site, Ordering::Relaxed);
+    TENUE_ORIGINE[cpu].store(kind, Ordering::Relaxed);
 }
 
 #[inline]
@@ -120,10 +158,20 @@ fn probe_note_release(cpu: usize, kind: u32) {
     TOTAL_HOLD_NS.fetch_add(tenue, Ordering::Relaxed);
     if acquired != 0 && tenue > PLUS_LONGUE_TENUE_NS.load(Ordering::Relaxed) {
         PLUS_LONGUE_TENUE_NS.store(tenue, Ordering::Relaxed);
+        // Le site marque PENDANT la tenue reste publie : quand il existe, il
+        // est plus precis que la provenance de l'acquisition. Quand il vaut
+        // zero -- le cas des tenues longues -- la provenance prend le relais
+        // au lieu de laisser un journal muet.
         PLUS_LONGUE_TENUE_SITE.store(
             crate::kernel::task::stall_site_de_la_tenue(),
             Ordering::Relaxed,
         );
+        MAX_TENUE_CPU.store(cpu, Ordering::Relaxed);
+        MAX_TENUE_TACHE.store(TENUE_TACHE[cpu].load(Ordering::Relaxed), Ordering::Relaxed);
+        MAX_TENUE_SYSCALL.store(TENUE_SYSCALL[cpu].load(Ordering::Relaxed), Ordering::Relaxed);
+        MAX_TENUE_PHASE.store(TENUE_PHASE[cpu].load(Ordering::Relaxed), Ordering::Relaxed);
+        MAX_TENUE_SITE_ACQ.store(TENUE_SITE_ACQ[cpu].load(Ordering::Relaxed), Ordering::Relaxed);
+        MAX_TENUE_ORIGINE.store(TENUE_ORIGINE[cpu].load(Ordering::Relaxed), Ordering::Relaxed);
     }
     let generation = PROBE_OWNER_GEN.load(Ordering::Acquire);
     PROBE_RELEASE_SEQ.fetch_add(1, Ordering::AcqRel);
@@ -546,6 +594,22 @@ pub fn plus_longue_tenue() -> (u64, u32) {
     (
         PLUS_LONGUE_TENUE_NS.load(Ordering::Relaxed),
         PLUS_LONGUE_TENUE_SITE.load(Ordering::Relaxed),
+    )
+}
+
+/// Provenance de la plus longue tenue : (cpu, tache, syscall, phase, site
+/// d'acquisition, origine de l'acquisition).
+///
+/// `origine` reprend le codage de `probe_note_acquire` : 1 = `enter`,
+/// 2 = `try_enter`, 3 = `resume_after_schedule`.
+pub fn provenance_plus_longue_tenue() -> (usize, usize, u64, u32, u32, u32) {
+    (
+        MAX_TENUE_CPU.load(Ordering::Relaxed),
+        MAX_TENUE_TACHE.load(Ordering::Relaxed),
+        MAX_TENUE_SYSCALL.load(Ordering::Relaxed),
+        MAX_TENUE_PHASE.load(Ordering::Relaxed),
+        MAX_TENUE_SITE_ACQ.load(Ordering::Relaxed),
+        MAX_TENUE_ORIGINE.load(Ordering::Relaxed),
     )
 }
 
