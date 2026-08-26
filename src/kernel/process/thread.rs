@@ -1405,6 +1405,47 @@ pub fn stall_syscall_exit() {
     STALL_SYSCALL_NR[cpu].store(STALL_NO_SYSCALL, Ordering::Release);
 }
 
+/// Etat syscall d'un CPU, rendu lisible sans rien allouer.
+///
+/// Ce releve sort du gestionnaire du PIT, avant toute tentative de verrou :
+/// construire une `String` ici ferait entrer l'allocateur dans le seul chemin
+/// cense survivre a un noyau bloque. D'ou l'adaptateur `Display`.
+struct EtatSyscall {
+    nr: u64,
+    phase: u32,
+    age_ticks: u64,
+}
+
+impl core::fmt::Display for EtatSyscall {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // `18446744073709551615` etait la sentinelle « aucun appel en cours ».
+        // Elle se lisait comme une valeur, pas comme une absence.
+        if self.nr == STALL_NO_SYSCALL {
+            return f.write_str("none");
+        }
+        let phase = match self.phase {
+            0 => "sortie",
+            1 => "attente-verrou",
+            2 => "verrou-tenu",
+            3 => "sans-verrou",
+            _ => "?",
+        };
+        write!(
+            f,
+            "{}({})/{}/{}t",
+            crate::kernel::abi::nr::name(self.nr),
+            self.nr,
+            phase,
+            self.age_ticks,
+        )
+    }
+}
+
+/// Numero d'acquisition BKL vu au releve precedent.
+///
+/// Seul le PIT du BSP ecrit ici, une fois par seconde : pas de course.
+static STALL_DERNIER_ACQUIRE_SEQ: AtomicU64 = AtomicU64::new(u64::MAX);
+
 /// Appelee par le PIT BSP AVANT tout try_enter(BKL). Si les logs normaux
 /// meurent parce qu'un AP garde le BKL, cette ligne continue donc a sortir.
 pub fn stall_probe_from_timer() {
@@ -1438,10 +1479,26 @@ pub fn stall_probe_from_timer() {
     let aux2 = STALL_KERNEL_AUX[2].load(Ordering::Acquire);
     let aux3 = STALL_KERNEL_AUX[3].load(Ordering::Acquire);
 
+    // Un releve periodique n'est pas un blocage. La ligne s'appelait
+    // `[SMP-STALL]` a chaque seconde, y compris avec `owner=0
+    // depth=[0,0,0,0]` -- c'est-a-dire avec un verrou libre et personne
+    // dedans. Une alarme qui sonne en permanence ne se lit plus.
+    //
+    // Le verdict se prend sur une donnee, pas sur la periodicite : si le
+    // numero d'acquisition n'a PAS bouge depuis le releve precedent, personne
+    // n'a pris le verrou pendant toute cette seconde. Joint a un proprietaire
+    // non nul, cela veut dire qu'une seule et meme tenue dure depuis au moins
+    // une seconde. C'est un blocage, et rien d'autre ne l'est.
+    let owner = crate::kernel::smp_lock::stall_probe_owner_token();
+    let acquire_seq = crate::kernel::smp_lock::stall_probe_acquire_seq();
+    let precedent = STALL_DERNIER_ACQUIRE_SEQ.swap(acquire_seq, Ordering::AcqRel);
+    let bloque = owner != 0 && precedent == acquire_seq;
+
     crate::serial_println!(
-        "[SMP-STALL] t={} owner={} depth=[{},{},{},{}] cur=[{},{},{},{}] site=[{}:{:#x} {}:{:#x} {}:{:#x} {}:{:#x}] syscall=[{}:{}/{} {}:{}/{} {}:{}/{} {}:{}/{}]",
+        "[{}] t={} owner={} depth=[{},{},{},{}] cur=[{},{},{},{}] site=[{}:{:#x} {}:{:#x} {}:{:#x} {}:{:#x}] syscall=[{} {} {} {}]",
+        if bloque { "SMP-STALL" } else { "SMP-SNAPSHOT" },
         now,
-        crate::kernel::smp_lock::stall_probe_owner_token(),
+        owner,
         crate::kernel::smp_lock::stall_probe_depth(0),
         crate::kernel::smp_lock::stall_probe_depth(1),
         crate::kernel::smp_lock::stall_probe_depth(2),
@@ -1451,10 +1508,10 @@ pub fn stall_probe_from_timer() {
         CURRENT[2].load(Ordering::Acquire),
         CURRENT[3].load(Ordering::Acquire),
         site0, aux0, site1, aux1, site2, aux2, site3, aux3,
-        nr0, ph0, age0,
-        nr1, ph1, age1,
-        nr2, ph2, age2,
-        nr3, ph3, age3,
+        EtatSyscall { nr: nr0, phase: ph0, age_ticks: age0 },
+        EtatSyscall { nr: nr1, phase: ph1, age_ticks: age1 },
+        EtatSyscall { nr: nr2, phase: ph2, age_ticks: age2 },
+        EtatSyscall { nr: nr3, phase: ph3, age_ticks: age3 },
     );
 
     // Un CPU qui tourne sur un verrou tournant ne laisse aucune autre trace :

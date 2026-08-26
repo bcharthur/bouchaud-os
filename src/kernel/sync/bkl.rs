@@ -651,6 +651,13 @@ pub fn stall_probe_provenance() -> StallBklProvenance {
         last_release_gen: PROBE_LAST_RELEASE_GEN.load(Ordering::Acquire),
     }
 }
+/// Numero de la derniere acquisition. Deux releves egaux a une seconde
+/// d'intervalle veulent dire que PERSONNE n'a pris le verrou entre-temps : avec
+/// un proprietaire non nul, c'est la meme tenue qui dure.
+pub fn stall_probe_acquire_seq() -> u64 {
+    PROBE_ACQUIRE_SEQ.load(Ordering::Acquire)
+}
+
 pub fn stall_probe_owner_token() -> usize {
     OWNER.load(Ordering::Acquire)
 }
