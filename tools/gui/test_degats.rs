@@ -320,3 +320,87 @@ fn aucune_ecriture_hors_du_rectangle_original() {
         }
     }
 }
+
+// BOUCHAUD_GATE1A_DAMAGE_TESTS_V1
+#[test]
+fn deux_regions_eloignees_ne_deviennent_plus_une_enorme_boite() {
+    remise_a_zero();
+    let mut d = Degats::neuf(ecran());
+    d.ajoute(Origine::Curseur, Rect::neuf(10, 10, 14, 22));
+    d.ajoute(Origine::BarreTaches, Rect::neuf(1000, 690, 200, 28));
+
+    assert_eq!(d.nombre_regions(), 2);
+    let sparse = d.pixels_regions();
+    let bbox = d.region();
+    let bbox_pixels = bbox.largeur as u64 * bbox.hauteur as u64;
+    assert!(sparse * 20 < bbox_pixels, "sparse={} bbox={}", sparse, bbox_pixels);
+}
+
+#[test]
+fn regions_qui_se_chevauchent_sont_fusionnees() {
+    remise_a_zero();
+    let mut d = Degats::neuf(ecran());
+    d.ajoute(Origine::Fenetre, Rect::neuf(100, 100, 200, 120));
+    d.ajoute(Origine::Fenetre, Rect::neuf(150, 120, 200, 120));
+    assert_eq!(d.nombre_regions(), 1);
+    assert_eq!(d.region(), Rect::neuf(100, 100, 250, 140));
+}
+
+#[test]
+fn seize_regions_eloignees_restent_bornees_sans_heap() {
+    remise_a_zero();
+    let mut d = Degats::neuf(ecran());
+    for i in 0..16 {
+        d.ajoute(
+            Origine::Icone,
+            Rect::neuf((i % 8) * 150, (i / 8) * 300, 10, 10),
+        );
+    }
+    assert!(d.nombre_regions() <= gui::degats::CAPACITE_REGIONS);
+}
+
+#[test]
+fn dix_septieme_region_ne_perd_aucun_degat() {
+    remise_a_zero();
+    let mut d = Degats::neuf(ecran());
+    for i in 0..17 {
+        d.ajoute(
+            Origine::Icone,
+            Rect::neuf((i % 9) * 130, (i / 9) * 300, 8, 8),
+        );
+    }
+    assert!(d.nombre_regions() <= gui::degats::CAPACITE_REGIONS);
+    assert!(!d.region().vide());
+}
+
+#[test]
+fn tout_ecrase_les_fragments_en_un_seul_plein_ecran() {
+    remise_a_zero();
+    let mut d = Degats::neuf(ecran());
+    d.ajoute(Origine::Curseur, Rect::neuf(10, 10, 14, 22));
+    d.ajoute(Origine::Icone, Rect::neuf(900, 500, 30, 30));
+    d.tout();
+    assert_eq!(d.nombre_regions(), 1);
+    assert_eq!(d.regions()[0], ecran());
+    assert_eq!(degats_plein_ecran(), 1);
+}
+
+#[test]
+fn metriques_comparent_sparse_a_la_boite_gate0() {
+    remise_a_zero();
+    let mut d = Degats::neuf(ecran());
+    d.ajoute(Origine::Curseur, Rect::neuf(10, 10, 10, 10));
+    d.ajoute(Origine::Curseur, Rect::neuf(1200, 700, 10, 10));
+
+    gui::degats::note_trame(&d);
+    for r in d.regions().iter().copied() {
+        gui::degats::note_presentation(r);
+    }
+
+    let (_, trames, pixels) = gui::degats::stats_degats();
+    let (rects, _, bbox, _, _) = gui::degats::stats_regions();
+    assert_eq!(trames, 1);
+    assert_eq!(rects, 2);
+    assert_eq!(pixels, 200);
+    assert!(bbox > pixels);
+}

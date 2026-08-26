@@ -446,30 +446,41 @@ fn boucle() {
             degats.ajoute(Origine::BarreTaches, barre_taches_rect());
         }
         if sale && maintenant.wrapping_sub(derniere_trame) >= PERIODE_TRAME_MS {
-            crate::kernel::timer::frame_start();
-            // BOUCHAUD_GUI_CLIP_V1
+            // BOUCHAUD_GUI_DAMAGE_REGION_V2
             //
-            // Le rectangle est calcule AVANT de dessiner, et sert aux deux :
-            // decoupe du dessin puis copie vers l'ecran. C'est ce qui tient
-            // l'invariant -- ce qui n'est pas dessine n'est pas copie, et ce
-            // qui est copie vient d'etre dessine. Les separer laisserait
-            // presenter du backbuffer perime.
-            let present = proto_rect_ecran(degats.region());
-            fb::set_clip(
-                present.x as usize, present.y as usize,
-                present.largeur as usize, present.hauteur as usize,
-            );
-            widgets::draw_desktop(&wins);
-            if menu_open { widgets::draw_menu(mx, my); }
-            widgets::draw_taskbar(&wins, menu_open);
-            widgets::draw_cursor(mxu, myu);
-            fb::reset_clip();
-            crate::kernel::timer::mark_frame();
-            fb::present_rect(
-                present.x as usize, present.y as usize,
-                present.largeur as usize, present.hauteur as usize,
-            );
-            crate::gui::degats::note_presentation(present);
+            // Une trame peut maintenant porter plusieurs rectangles eloignes.
+            // Pour chaque rectangle, le MEME clip borne le dessin et la copie :
+            // aucun pixel de backbuffer perime ne peut etre presente.
+            if !degats.vide() {
+                crate::kernel::timer::frame_start();
+                crate::gui::degats::note_trame(&degats);
+
+                for region in degats.regions().iter().copied() {
+                    let present = proto_rect_ecran(region);
+                    if present.vide() {
+                        continue;
+                    }
+
+                    fb::set_clip(
+                        present.x as usize, present.y as usize,
+                        present.largeur as usize, present.hauteur as usize,
+                    );
+                    widgets::draw_desktop(&wins);
+                    if menu_open { widgets::draw_menu(mx, my); }
+                    widgets::draw_taskbar(&wins, menu_open);
+                    widgets::draw_cursor(mxu, myu);
+                    fb::reset_clip();
+
+                    fb::present_rect(
+                        present.x as usize, present.y as usize,
+                        present.largeur as usize, present.hauteur as usize,
+                    );
+                    crate::gui::degats::note_presentation(present);
+                }
+
+                crate::kernel::timer::mark_frame();
+            }
+
             derniere_trame = maintenant;
             sale = false;
             degats.efface();
@@ -529,11 +540,14 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
     // BOUCHAUD_GUI_DAMAGE_ORIGIN_V1 : d'ou viennent les degats, et ce que la
     // composition finit par copier. Une ligne par releve, jamais par evenement.
     let (par_origine, trames, pixels) = crate::gui::degats::stats_degats();
+    let (rects, demandes, boite_gate0, fusions, debordements) =
+        crate::gui::degats::stats_regions();
+    let evites = boite_gate0.saturating_sub(pixels);
     crate::serial_println!(
-        "[GUI-DAMAGE] full={} window={} cursor={} client={} taskbar={} menu={} icon={} presents={} presented_pixels={} drawn_pixels={}",
+        "[GUI-DAMAGE] full={} window={} cursor={} client={} taskbar={} menu={} icon={} presents={} rects={} presented_pixels={} requested_pixels={} gate0_bbox_pixels={} saved_pixels={} merges={} overflows={} drawn_pixels={}",
         par_origine[0], par_origine[1], par_origine[2], par_origine[3],
-        par_origine[4], par_origine[5], par_origine[6], trames, pixels,
-        fb::pixels_dessines(),
+        par_origine[4], par_origine[5], par_origine[6], trames, rects, pixels,
+        demandes, boite_gate0, evites, fusions, debordements, fb::pixels_dessines(),
     );
     let (mesures, total) = task::mesure_processus();
     if total > 0 {
