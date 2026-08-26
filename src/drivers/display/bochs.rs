@@ -12,6 +12,7 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use crate::arch::x86_64::ports::{inb, outb};
 use crate::arch::x86_64::pci;
 use crate::kernel::memory;
@@ -332,6 +333,12 @@ pub fn clear(color: u8) {
     for p in back().iter_mut() { *p = c; }
 }
 
+/// Voie palette 16 couleurs : console de demarrage et affichage de secours.
+///
+/// Volontairement HORS de la decoupe (`BOUCHAUD_GUI_CLIP_V1`). C'est par ici
+/// que passe ce qui doit s'afficher quand plus rien d'autre ne marche -- une
+/// panique, un message de demarrage. Le decouper reviendrait a pouvoir masquer
+/// exactement le message qu'on a besoin de lire.
 #[inline]
 pub fn pixel(x: usize, y: usize, color: u8) {
     if x < WIDTH && y < HEIGHT {
@@ -476,10 +483,95 @@ pub mod font;
 // Utilisees par le moteur de rendu web (couleurs CSS + images) ; le framebuffer
 // est deja 32 bits, donc on ecrit la valeur RGB telle quelle.
 
+// BOUCHAUD_GUI_CLIP_V1
+//
+// Rectangle de decoupe du backbuffer.
+//
+// # Le probleme qu'il resout
+//
+// Le compositeur bornait deja la COPIE finale vers l'ecran (`present_rect`),
+// mais pas le DESSIN. `draw_wallpaper` repeignait un degrade plein ecran ligne
+// par ligne a chaque trame -- 921 600 ecritures a 1280x720 -- meme quand seul
+// un curseur de 14x22 avait bouge. Les icones, la barre, les cadres et tout le
+// texte suivaient.
+//
+// Plutot qu'un parametre de region a chaque widget -- « une foret de conditions
+// specifiques » -- la decoupe vit au seul endroit par ou passent tous les
+// pixels : les quatre ecrivains ci-dessous. Aucun widget ne change, et aucun ne
+// peut l'oublier.
+//
+// # Pourquoi c'est sur
+//
+// Le backbuffer persiste d'une trame a l'autre. Ne pas dessiner hors de la
+// decoupe n'est donc correct que si l'on ne PRESENTE jamais hors d'elle. Le
+// compositeur pose la decoupe egale au rectangle qu'il va presenter, ce qui
+// tient l'invariant par construction : ce qui n'est pas dessine n'est pas
+// copie, et ce qui est copie vient d'etre dessine.
+static CLIP_X0: AtomicUsize = AtomicUsize::new(0);
+static CLIP_Y0: AtomicUsize = AtomicUsize::new(0);
+static CLIP_X1: AtomicUsize = AtomicUsize::new(WIDTH);
+static CLIP_Y1: AtomicUsize = AtomicUsize::new(HEIGHT);
+static PIXELS_DESSINES: AtomicU64 = AtomicU64::new(0);
+
+/// Borne le dessin a ce rectangle jusqu'au prochain [`reset_clip`].
+pub fn set_clip(x: usize, y: usize, w: usize, h: usize) {
+    CLIP_X0.store(x.min(WIDTH), Ordering::Relaxed);
+    CLIP_Y0.store(y.min(HEIGHT), Ordering::Relaxed);
+    CLIP_X1.store((x + w).min(WIDTH), Ordering::Relaxed);
+    CLIP_Y1.store((y + h).min(HEIGHT), Ordering::Relaxed);
+}
+
+/// Rend le dessin a l'ecran entier.
+pub fn reset_clip() {
+    CLIP_X0.store(0, Ordering::Relaxed);
+    CLIP_Y0.store(0, Ordering::Relaxed);
+    CLIP_X1.store(WIDTH, Ordering::Relaxed);
+    CLIP_Y1.store(HEIGHT, Ordering::Relaxed);
+}
+
+#[inline]
+fn clip() -> (usize, usize, usize, usize) {
+    (
+        CLIP_X0.load(Ordering::Relaxed),
+        CLIP_Y0.load(Ordering::Relaxed),
+        CLIP_X1.load(Ordering::Relaxed),
+        CLIP_Y1.load(Ordering::Relaxed),
+    )
+}
+
+#[inline]
+fn dans_clip(x: usize, y: usize) -> bool {
+    let (x0, y0, x1, y1) = clip();
+    x >= x0 && x < x1 && y >= y0 && y < y1
+}
+
+/// Rectangle de decoupe courant, en bornes exclusives `(x0, y0, x1, y1)`.
+///
+/// Pour les rares appelants qui copient par lignes entieres et ne peuvent pas
+/// passer par les primitives ci-dessus -- la recopie d'une surface cliente.
+pub fn clip_rect() -> (usize, usize, usize, usize) {
+    clip()
+}
+
+/// Compte des pixels ecrits par un chemin qui n'utilise pas les primitives.
+pub fn note_pixels_dessines(nombre: u64) {
+    PIXELS_DESSINES.fetch_add(nombre, Ordering::Relaxed);
+}
+
+/// Pixels reellement ecrits dans le backbuffer depuis le demarrage.
+///
+/// C'est la mesure qui distingue « on copie moins » de « on dessine moins ».
+/// La premiere etait deja vraie avant la decoupe ; seule la seconde compte
+/// pour le temps passe.
+pub fn pixels_dessines() -> u64 {
+    PIXELS_DESSINES.load(Ordering::Relaxed)
+}
+
 #[inline]
 pub fn pixel_rgb(x: usize, y: usize, rgb: u32) {
-    if x < WIDTH && y < HEIGHT {
+    if dans_clip(x, y) {
         back()[y * WIDTH + x] = rgb;
+        PIXELS_DESSINES.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -515,7 +607,7 @@ pub fn get_pixel_rgb(x: usize, y: usize) -> u32 {
 /// Melange `rgb` sur le pixel (x,y) selon une couverture `alpha` (0..=255).
 /// Lit le pixel de fond et compose : sert au rendu de police antialiasee.
 pub fn blend_rgb(x: usize, y: usize, rgb: u32, alpha: u8) {
-    if x >= WIDTH || y >= HEIGHT || alpha == 0 { return; }
+    if alpha == 0 || !dans_clip(x, y) { return; }
     let buf = back();
     if buf.is_empty() { return; }
     let idx = y * WIDTH + x;
@@ -534,15 +626,23 @@ pub fn blend_rgb(x: usize, y: usize, rgb: u32, alpha: u8) {
 pub fn fill_rect_rgb(x: usize, y: usize, w: usize, h: usize, rgb: u32) {
     let buf = back();
     if buf.is_empty() { return; }
-    let x1 = (x + w).min(WIDTH);
-    let y1 = (y + h).min(HEIGHT);
-    let mut yy = y;
+    let (cx0, cy0, cx1, cy1) = clip();
+    // L'intersection est faite UNE fois, pas par pixel : un remplissage
+    // entierement hors decoupe sort sans avoir rien parcouru, et c'est
+    // exactement le cas du fond d'ecran quand seul un curseur a bouge.
+    let x0 = x.max(cx0);
+    let y0 = y.max(cy0);
+    let x1 = (x + w).min(cx1);
+    let y1 = (y + h).min(cy1);
+    if x1 <= x0 || y1 <= y0 { return; }
+    let mut yy = y0;
     while yy < y1 {
         let row = yy * WIDTH;
-        let mut xx = x;
+        let mut xx = x0;
         while xx < x1 { buf[row + xx] = rgb; xx += 1; }
         yy += 1;
     }
+    PIXELS_DESSINES.fetch_add(((x1 - x0) * (y1 - y0)) as u64, Ordering::Relaxed);
 }
 
 /// Copie un bloc d'image RGB (`pix` de `iw`x`ih`) a la position (x,y), borne
@@ -551,8 +651,14 @@ pub fn blit_rgb(x: usize, y: usize, iw: usize, ih: usize, pix: &[u32],
                 clip_x: usize, clip_y: usize, clip_w: usize, clip_h: usize) {
     let buf = back();
     if buf.is_empty() { return; }
-    let cx1 = (clip_x + clip_w).min(WIDTH);
-    let cy1 = (clip_y + clip_h).min(HEIGHT);
+    // La decoupe demandee par l'appelant ET celle de la trame : la plus
+    // restrictive des deux gagne, sans quoi un widget pourrait dessiner hors
+    // de la region que le compositeur va presenter.
+    let (gx0, gy0, gx1, gy1) = clip();
+    let clip_x = clip_x.max(gx0);
+    let clip_y = clip_y.max(gy0);
+    let cx1 = (clip_x + clip_w).min(gx1);
+    let cy1 = (clip_y + clip_h).min(gy1);
     for row in 0..ih {
         let py = match y.checked_add(row) {
             Some(v) => v,

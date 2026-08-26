@@ -447,12 +447,24 @@ fn boucle() {
         }
         if sale && maintenant.wrapping_sub(derniere_trame) >= PERIODE_TRAME_MS {
             crate::kernel::timer::frame_start();
+            // BOUCHAUD_GUI_CLIP_V1
+            //
+            // Le rectangle est calcule AVANT de dessiner, et sert aux deux :
+            // decoupe du dessin puis copie vers l'ecran. C'est ce qui tient
+            // l'invariant -- ce qui n'est pas dessine n'est pas copie, et ce
+            // qui est copie vient d'etre dessine. Les separer laisserait
+            // presenter du backbuffer perime.
+            let present = proto_rect_ecran(degats.region());
+            fb::set_clip(
+                present.x as usize, present.y as usize,
+                present.largeur as usize, present.hauteur as usize,
+            );
             widgets::draw_desktop(&wins);
             if menu_open { widgets::draw_menu(mx, my); }
             widgets::draw_taskbar(&wins, menu_open);
             widgets::draw_cursor(mxu, myu);
+            fb::reset_clip();
             crate::kernel::timer::mark_frame();
-            let present = proto_rect_ecran(degats.region());
             fb::present_rect(
                 present.x as usize, present.y as usize,
                 present.largeur as usize, present.hauteur as usize,
@@ -518,9 +530,10 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
     // composition finit par copier. Une ligne par releve, jamais par evenement.
     let (par_origine, trames, pixels) = crate::gui::degats::stats_degats();
     crate::serial_println!(
-        "[GUI-DAMAGE] full={} window={} cursor={} client={} taskbar={} menu={} icon={} presents={} presented_pixels={}",
+        "[GUI-DAMAGE] full={} window={} cursor={} client={} taskbar={} menu={} icon={} presents={} presented_pixels={} drawn_pixels={}",
         par_origine[0], par_origine[1], par_origine[2], par_origine[3],
         par_origine[4], par_origine[5], par_origine[6], trames, pixels,
+        fb::pixels_dessines(),
     );
     let (mesures, total) = task::mesure_processus();
     if total > 0 {

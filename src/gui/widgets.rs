@@ -452,11 +452,10 @@ fn draw_window(w: &Win, focused: bool) {
 /// Compose la surface d'un client dans sa fenetre, ou son ecran de demarrage.
 ///
 /// Le gestionnaire de fenetres redessine tout le bureau a chaque trame : la
-/// zone utile est donc recopiee en entier, et le rectangle de degat ne sert
-/// qu'a decider s'il faut recomposer. C'est le repli assume du jalon : la
-/// recomposition partielle de l'ecran demande de savoir quels pixels du bureau
-/// sont encore valides, ce qui est un autre chantier — celui des regions sales
-/// du compositeur lui-meme.
+/// zone utile est recopiee sous la DECOUPE de la trame : le rectangle de degat
+/// decide s'il faut recomposer, et la decoupe decide de combien. Sans elle, une
+/// fenetre de navigateur coutait 664 400 pixels a chaque trame, y compris quand
+/// seul le curseur avait bouge.
 pub(crate) fn compose_client(w: &Win, client: &crate::gui::client::Client) {
     use crate::gui::client::Etat;
     let zone = crate::gui::window::zone_utile(w);
@@ -472,14 +471,37 @@ pub(crate) fn compose_client(w: &Win, client: &crate::gui::client::Client) {
     let hauteur = (zone.hauteur as usize).min(surface.hauteur);
     let largeur = (zone.largeur as usize).min(surface.largeur);
     let (zx, zy) = (zone.x.max(0) as usize, zone.y.max(0) as usize);
-    for ligne in 0..hauteur {
-        let destination = fb::ligne_mut(zx, zy + ligne, largeur);
+
+    // BOUCHAUD_GUI_CLIP_V1
+    //
+    // Cette recopie ne passe pas par les primitives de dessin : elle ecrit des
+    // lignes entieres par `copy_from_slice`, ce qui est justement ce qui la
+    // rend rapide. Elle doit donc appliquer la decoupe elle-meme.
+    //
+    // Ce qu'elle coutait sans : 1100x604, soit 664 400 pixels a CHAQUE trame,
+    // pour une fenetre de navigateur -- davantage que le fond d'ecran. Et cela
+    // meme quand la seule chose qui avait bouge etait le curseur.
+    let (cx0, cy0, cx1, cy1) = fb::clip_rect();
+    let x_debut = zx.max(cx0);
+    let x_fin = (zx + largeur).min(cx1);
+    let y_debut = zy.max(cy0);
+    let y_fin = (zy + hauteur).min(cy1);
+    if x_fin <= x_debut || y_fin <= y_debut {
+        return;
+    }
+    // Colonne de depart DANS la surface : la decoupe peut couper a gauche.
+    let colonne = x_debut - zx;
+    let compte = x_fin - x_debut;
+
+    for y in y_debut..y_fin {
+        let destination = fb::ligne_mut(x_debut, y, compte);
         if destination.is_empty() {
             continue;
         }
-        let compte = destination.len();
-        surface.copie_ligne(ligne, 0, compte, destination);
+        let pris = destination.len();
+        surface.copie_ligne(y - zy, colonne, pris, destination);
     }
+    fb::note_pixels_dessines(((x_fin - x_debut) * (y_fin - y_debut)) as u64);
 }
 
 /// Ecran d'attente dessine **dans la fenetre** du client.
