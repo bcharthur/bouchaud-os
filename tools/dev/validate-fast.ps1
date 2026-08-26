@@ -63,12 +63,14 @@ try {
     Invoke-RustTest "protocole GUI" "tools\gui\test_protocole.rs"
     Invoke-RustTest "BKL max/provenance" "tools\smp\test_bkl_max.rs"
     Invoke-RustTest "commutation SMP" "tools\smp\test_commutation.rs"
+    Invoke-RustTest "profondeur BKL" "tools\smp\test_profondeur_bkl.rs"
 
     $env:BO_HELLO_EXE = Join-Path $Tmp "bo-hello.exe"
     Invoke-Step "fixture PE32+" {
         & python .\tools\exec\fabrique-hello-exe.py $env:BO_HELLO_EXE
     }
     Invoke-RustTest "formats ELF/PE" "tools\exec\test_format.rs"
+    Invoke-RustTest "preparation d'image" "tools\exec\test_image.rs"
 
     Invoke-Step "manifeste polices" {
         & python .\tools\gui\verifie-polices.py
