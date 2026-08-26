@@ -86,7 +86,7 @@ pub fn panique_globale_en_cours() -> bool {
 /// Prend la panique globale. Rend `false` si un autre CPU l'a deja prise :
 /// l'appelant doit alors se taire et s'arreter, pour laisser le premier
 /// produire une sortie lisible plutot que d'entrelacer deux traces.
-fn prends_la_panique(cpu: usize) -> bool {
+pub fn prends_la_panique(cpu: usize) -> bool {
     if PANIC_GLOBAL
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
@@ -98,7 +98,7 @@ fn prends_la_panique(cpu: usize) -> bool {
 }
 
 /// Arrete definitivement ce CPU, sans rien ecrire.
-fn arret_definitif() -> ! {
+pub fn arret_definitif() -> ! {
     loop {
         unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
     }
@@ -140,6 +140,21 @@ fn releve_faute_fatale(nom: &str, stack: &InterruptStackFrame, code: u64) {
     };
     serial_println!("[FAULT] cr2={:#x} cr3={:#x}", cr2, cr3);
 
+    releve_contexte_courant(cpu, Some(rsp_frame));
+    serial_println!("======== fin du releve ========");
+}
+
+/// Partie du releve qui ne depend PAS d'une trame d'exception : identite de la
+/// tache, pile noyau attendue, etat du gros verrou.
+///
+/// Le `panic!` Rust n'a pas d'`InterruptStackFrame` -- et c'est justement lui
+/// qui declenche les assertions du BKL. Il a pourtant besoin exactement de ces
+/// informations-la, d'ou le partage.
+///
+/// `rsp_connu` n'est renseigne que quand une trame le donne ; sans lui on ne
+/// peut pas conclure « pile debordee » contre « pile fausse », et on ne le
+/// pretend donc pas.
+pub fn releve_contexte_courant(cpu: usize, rsp_connu: Option<u64>) {
     // La pile attendue. C'est la reponse qui tranche entre « pile debordee »
     // et « contexte restaure depuis une pile fausse » : dans le premier cas
     // RSP est juste SOUS la base, dans le second il est ailleurs.
@@ -153,12 +168,14 @@ fn releve_faute_fatale(nom: &str, stack: &InterruptStackFrame, code: u64) {
                 "[FAULT] kstack base={:#x} top={:#x} taille={}",
                 kstack_base, kstack_top, kstack_top.saturating_sub(kstack_base),
             );
-            let dedans = rsp_frame >= kstack_base && rsp_frame <= kstack_top;
-            serial_println!(
-                "[FAULT] rsp_dans_kstack={} ecart_sous_base={}",
-                dedans,
-                kstack_base.saturating_sub(rsp_frame),
-            );
+            match rsp_connu {
+                Some(rsp) => serial_println!(
+                    "[FAULT] rsp_dans_kstack={} ecart_sous_base={}",
+                    rsp >= kstack_base && rsp <= kstack_top,
+                    kstack_base.saturating_sub(rsp),
+                ),
+                None => serial_println!("[FAULT] rsp_dans_kstack=<pas de trame>"),
+            }
         }
         None => serial_println!("[FAULT] task=<aucune> (idle ou avant premier switch)"),
     }
@@ -194,7 +211,6 @@ fn releve_faute_fatale(nom: &str, stack: &InterruptStackFrame, code: u64) {
         "[FAULT] need_resched={} irq_profondeur=<non suivi>",
         crate::kernel::task::besoin_de_replanifier(),
     );
-    serial_println!("======== fin du releve ========");
 }
 
 /// Recu par les CPU secondaires quand un autre a pris la panique globale.
