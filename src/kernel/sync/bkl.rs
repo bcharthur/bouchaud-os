@@ -1093,17 +1093,17 @@ pub mod enregistreur {
         }
         let derniere = SEQUENCE.load(Ordering::Acquire);
         if derniere == 0 {
-            crate::serial_println!("[BKL-FR] anneau vide");
+            crate::serial_println_brut!("[BKL-FR] anneau vide");
             return;
         }
         let premiere = derniere.saturating_sub(VIDAGE as u64 - 1).max(1);
-        crate::serial_println!(
+        crate::serial_println_brut!(
             "[BKL-FR] {} transitions (seq {}..{}), la plus recente en dernier",
             derniere - premiere + 1,
             premiere,
             derniere,
         );
-        crate::serial_println!(
+        crate::serial_println_brut!(
             "[BKL-FR] seq kind cpu owner(av->ap) depth(av->ap) garde tache tid pid syscall/phase aux rsp kstack"
         );
 
@@ -1113,13 +1113,13 @@ pub mod enregistreur {
             // notre calcul et notre lecture. On le DIT au lieu d'imprimer des
             // champs qui appartiennent a une autre transition.
             if case.seq.load(Ordering::Acquire) != seq {
-                crate::serial_println!("[BKL-FR] {} <recyclee>", seq);
+                crate::serial_println_brut!("[BKL-FR] {} <recyclee>", seq);
                 continue;
             }
             let etat = case.etat.load(Ordering::Relaxed);
             let tache = case.tache.load(Ordering::Relaxed);
             let garde = ((etat >> 48) & 0xFF) as usize;
-            crate::serial_println!(
+            crate::serial_println_brut!(
                 "[BKL-FR] {} {} cpu={} owner={}->{} depth={}->{} garde={} tache={} tid={} pid={} sys={}/{} aux={:#x} rsp={:#x} kstack={:#x}",
                 seq,
                 nom((etat & 0xFF) as u8),
@@ -1139,7 +1139,7 @@ pub mod enregistreur {
                 case.kstack.load(Ordering::Relaxed),
             );
         }
-        crate::serial_println!("[BKL-FR] fin");
+        crate::serial_println_brut!("[BKL-FR] fin");
     }
 }
 
@@ -1164,7 +1164,7 @@ pub mod enregistreur {
 
     #[inline(always)]
     pub fn vide() {
-        crate::serial_println!("[BKL-FR] non compile (release)");
+        crate::serial_println_brut!("[BKL-FR] non compile (release)");
     }
 }
 

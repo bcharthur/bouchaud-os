@@ -88,9 +88,69 @@ pub fn _print(args: fmt::Arguments) {
     unsafe { let _ = SERIAL.write_fmt(args); }
 }
 
+// BOUCHAUD_P0_SERIE_BRUTE_V1
+//
+// POURQUOI UNE SECONDE SORTIE
+// ---------------------------
+// `SerialPort` pose un prefixe de journal au premier octet de chaque ligne, et
+// ce prefixe n'est pas gratuit : `journal::ecris_prefixe` lit l'horloge RTC par
+// ports d'E/S, puis la charge CPU, la memoire et le disque.
+//
+// Ce sont des lectures parfaitement raisonnables pour un journal. Elles n'ont
+// rien a faire dans le chemin de forensic d'une panique : a ce moment precis
+// l'etat du noyau est, par definition, celui qu'on ne comprend pas. Le vidage
+// de l'enregistreur de vol du gros verrou doit dependre du strict minimum --
+// un `outb` sur COM1 -- et de rien d'autre.
+//
+// Ce que cette sortie ne fait pas : pas de prefixe, pas d'allocation, pas de
+// verrou, aucun appel hors de ce fichier.
+pub struct SerialBrut;
+
+static mut SERIAL_BRUT: SerialBrut = SerialBrut;
+
+impl fmt::Write for SerialBrut {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for byte in s.bytes() {
+            // Tenir `DEBUT_LIGNE` a jour malgre l'absence de prefixe : sinon un
+            // `serial_println!` ordinaire qui suivrait une ligne brute croirait
+            // etre en milieu de ligne, et sauterait SON prefixe.
+            unsafe { DEBUT_LIGNE = byte == b'\n'; }
+            write_byte(byte);
+        }
+        Ok(())
+    }
+}
+
+/// Sortie serie brute : COM1 directement, sans prefixe de journal.
+///
+/// Reservee au chemin de diagnostic de panique. Pour tout le reste,
+/// `serial_println!` reste la bonne macro : un journal sans horodatage est
+/// beaucoup moins utile qu'il n'y parait.
+pub fn _print_raw(args: fmt::Arguments) {
+    use core::fmt::Write;
+    if !is_ready() { return; }
+    unsafe { let _ = SERIAL_BRUT.write_fmt(args); }
+}
+
 #[macro_export]
 macro_rules! serial_print {
     ($($arg:tt)*) => {{ $crate::drivers::serial::_print(format_args!($($arg)*)) }};
+}
+
+/// Comme `serial_print!`, mais sans prefixe de journal. Voir [`_print_raw`].
+#[macro_export]
+macro_rules! serial_print_brut {
+    ($($arg:tt)*) => {{ $crate::drivers::serial::_print_raw(format_args!($($arg)*)) }};
+}
+
+/// Comme `serial_println!`, mais sans prefixe de journal. Voir [`_print_raw`].
+#[macro_export]
+macro_rules! serial_println_brut {
+    () => {{ $crate::serial_print_brut!("\n") }};
+    ($fmt:expr) => {{ $crate::serial_print_brut!(concat!($fmt, "\n")) }};
+    ($fmt:expr, $($arg:tt)*) => {{
+        $crate::serial_print_brut!(concat!($fmt, "\n"), $($arg)*)
+    }};
 }
 
 #[macro_export]
