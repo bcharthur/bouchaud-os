@@ -1053,6 +1053,19 @@ static STEAL_REJECT_AFFINITY: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0)
 /// Le reveil d'une tache locale contourne naturellement ce chemin.
 static STEAL_RETRY_AFTER_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
+/// Temporisation apres un scan de donneurs qui n'avait rien a prendre.
+///
+/// Ce scan est en O(nombre de CPU) et se fait **le gros verrou en main**, a
+/// chaque `pick_next` dont la file locale est vide -- c'est-a-dire en
+/// permanence sur un CPU peu charge. Deux millisecondes, la meme valeur que le
+/// refus de candidat qui existait deja : assez pour ne pas rescaner a chaque
+/// commutation, assez court pour qu'un desequilibre reel soit repris avant un
+/// quantum.
+///
+/// Cette temporisation ne peut pas retarder du travail LOCAL : la file locale
+/// est videe avant elle, sans condition. Elle ne differe qu'un reequilibrage.
+const STEAL_BACKOFF_STERILE_NS: u64 = 2_000_000;
+
 #[derive(Clone, Copy)]
 struct SmpSamplePrevious {
     t_ns: u64,
@@ -2480,7 +2493,18 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
         .filter(|(_, pressure)| *pressure > 1)
         .max_by_key(|(_, pressure)| *pressure)
         .map(|(candidate, _)| candidate);
-    let Some(donor) = donor else { return None; };
+    let Some(donor) = donor else {
+        // BOUCHAUD_P1_STEAL_STERILE_BACKOFF_V1
+        // Personne n'est assez charge : c'est un refus d'EQUILIBRE. Il se
+        // compte -- `rej_bal` etait publie et n'etait jamais incremente, donc
+        // toujours nul -- et il se temporise : rescaner tous les CPU au
+        // prochain `pick_next` ne repondra pas autre chose tant que personne
+        // ne s'est charge, et ce scan a lieu le gros verrou en main.
+        STEAL_REJECT_BALANCE[cpu].fetch_add(1, Ordering::Relaxed);
+        STEAL_RETRY_AFTER_NS[cpu]
+            .store(now.saturating_add(STEAL_BACKOFF_STERILE_NS), Ordering::Relaxed);
+        return None;
+    };
 
     STEAL_ATTEMPTS[cpu].fetch_add(1, Ordering::Relaxed);
 
@@ -2489,7 +2513,14 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
         return None;
     };
     let donor_queue = crate::arch::x86_64::cpu_local::local(donor_id);
-    let Some(index) = donor_queue.steal() else { return None; };
+    let Some(index) = donor_queue.steal() else {
+        // La pression lue n'existait deja plus : la file s'est videe entre le
+        // scan et le vol. Meme conclusion, meme temporisation.
+        STEAL_REJECT_BALANCE[cpu].fetch_add(1, Ordering::Relaxed);
+        STEAL_RETRY_AFTER_NS[cpu]
+            .store(now.saturating_add(STEAL_BACKOFF_STERILE_NS), Ordering::Relaxed);
+        return None;
+    };
     let candidate = &tasks()[index];
     if !runnable_steal(candidate, cpu) || candidate.runq_cpu as usize != donor {
         donor_queue.enqueue(index);
