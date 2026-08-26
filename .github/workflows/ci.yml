@@ -90,6 +90,12 @@ jobs:
       - name: Politique de degat du bureau
         run: tools/gui/test-degats.sh
 
+      # Une police manquante ne produit aucune erreur : le texte tombe en
+      # silence sur une autre famille. Manifeste, assets et fontconfig doivent
+      # dire la meme chose.
+      - name: Manifeste des polices
+        run: python3 tools/gui/verifie-polices.py
+
       # Reconnaitre un format d'executable est une fonction des seuls octets du
       # fichier. Un MZ pris pour un PE32+, ou un offset qui deborde, se lisent
       # ici et pas dans QEMU.

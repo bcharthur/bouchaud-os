@@ -28,6 +28,7 @@ pub mod desktop;
 pub mod event;
 pub mod framebuffer;
 pub mod mouse;
+pub mod polices;
 pub mod widgets;
 pub mod window;
 pub mod window_manager;

@@ -30,13 +30,7 @@ use crate::fs::ramfs;
 /// La romaine est celle deja embarquee pour le moteur de rendu du noyau : on
 /// la reference au lieu de l'inclure une seconde fois, ce qui eviterait
 /// d'alourdir l'image de boot de 750 Kio pour rien.
-fn fonts() -> [(&'static str, &'static [u8]); 3] {
-    [
-        ("DejaVuSans.ttf", crate::gui::font::FONT_DATA),
-        ("DejaVuSans-Bold.ttf", include_bytes!("../assets/fonts/DejaVuSans-Bold.ttf")),
-        ("DejaVuSansMono.ttf", include_bytes!("../assets/fonts/DejaVuSansMono.ttf")),
-    ]
-}
+
 
 /// Cree (ou retrouve) un repertoire par son chemin absolu.
 fn mkdir_path(path: &str) -> usize {
@@ -114,12 +108,15 @@ pub fn install() {
 /// n'affiche aucun texte — panne d'autant plus deroutante qu'elle ne produit
 /// aucune erreur.
 fn install_fonts() {
-    let dir = mkdir_path("/usr/share/fonts/truetype/dejavu");
+    // Le manifeste est la seule liste. `DejaVuSansMono-Bold.ttf` etait embarque
+    // dans le binaire et n'arrivait jamais ici : une graisse manquante ne
+    // produit pas d'erreur, seulement du texte qui tombe sur une autre police.
+    let dir = mkdir_path(crate::gui::polices::REPERTOIRE);
     if dir == 0 {
         return;
     }
-    for (name, data) in fonts().iter() {
-        write_binary(dir, name, data, 0o644);
+    for police in crate::gui::polices::manifeste().iter() {
+        write_binary(dir, police.fichier, police.octets, 0o644);
     }
 }
 
