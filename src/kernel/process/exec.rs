@@ -179,13 +179,10 @@ fn verdict_pe(name: &str, data: &[u8]) -> String {
     };
     let sections = &tampon[..nombre];
 
-    for section in sections {
-        if section.viole_w_xor_x() {
-            return alloc::format!(
-                "{} : section rva={:#x} demande ecriture ET execution, refuse",
-                name, section.rva
-            );
-        }
+    // Toute la geometrie est verifiee AVANT la moindre projection : une image
+    // invalide qu'on projette quand meme ne faute pas la ou elle est fausse.
+    if let Err(refus) = pe::valide_avant_projection(&entete, sections) {
+        return alloc::format!("{} : image PE32+ invalide ({:?})", name, refus);
     }
 
     match pe::classe_dependances(data, &entete, |rva| pe::offset_de_rva(sections, rva)) {

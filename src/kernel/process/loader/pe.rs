@@ -87,6 +87,16 @@ pub enum RefusPe {
     ImportsHorsFichier,
     /// Une section demande a la fois l'ecriture et l'execution.
     EcritureEtExecution { rva: u32 },
+    /// L'image annonce plus de sections que le chargeur ne peut en tenir.
+    TropDeSections { annoncees: u16, capacite: usize },
+    /// Deux sections se recouvrent en memoire ou dans le fichier.
+    SectionsQuiSeRecouvrent { premiere: u32, seconde: u32 },
+    /// Le point d'entree ne tombe dans aucune section executable.
+    PointEntreeInvalide { rva: u32 },
+    /// `SizeOfImage`, `SizeOfHeaders` ou un alignement est incoherent.
+    GeometrieIncoherente(&'static str),
+    /// `ImageBase + SizeOfImage` deborde l'espace d'adressage.
+    ImageTropGrande,
 }
 
 impl RefusPe {
@@ -274,7 +284,24 @@ pub fn lit_sections(
     entete: &EnTetePe,
     sortie: &mut [Section],
 ) -> Result<usize, RefusPe> {
-    let nombre = (entete.nombre_sections as usize).min(sortie.len());
+    // BOUCHAUD_PE_HARDENING_V1
+    //
+    // `min(annoncees, capacite)` TRONQUAIT en silence. Une image annoncant
+    // cinquante sections aurait ete chargee avec les trente-deux premieres :
+    // un programme a moitie projete, dont les sections manquantes sont
+    // simplement absentes de l'espace d'adressage. Il aurait faute plus loin,
+    // a un endroit sans rapport.
+    //
+    // Un chargeur de binaire traite son entree comme HOSTILE. Ce qu'il ne peut
+    // pas charger entierement, il le refuse.
+    let annoncees = entete.nombre_sections;
+    if annoncees as usize > sortie.len() {
+        return Err(RefusPe::TropDeSections {
+            annoncees,
+            capacite: sortie.len(),
+        });
+    }
+    let nombre = annoncees as usize;
     for index in 0..nombre {
         let base = entete.offset_sections + index * TAILLE_SECTION;
         if data.len() < base + TAILLE_SECTION {
@@ -456,4 +483,114 @@ pub fn offset_de_rva(sections: &[Section], rva: u32) -> Option<usize> {
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// Validation avant projection
+// ---------------------------------------------------------------------------
+
+/// Verifie tout ce qui doit l'etre AVANT de projeter une image en memoire.
+///
+/// # Pourquoi cette fonction existe separement
+///
+/// Une image invalide qu'on projette quand meme ne faute pas au moment ou elle
+/// est fausse : elle faute plus tard, ailleurs, dans du code sans rapport. Les
+/// verifications sont donc groupees ici, avant que le moindre octet ne soit
+/// mappe, et chacune rend un refus qui NOMME ce qu'elle a trouve.
+///
+/// Un chargeur de binaire traite son entree comme hostile. Ce fichier peut
+/// venir d'un disque, d'un telechargement, d'un autre programme.
+pub fn valide_avant_projection(
+    entete: &EnTetePe,
+    sections: &[Section],
+) -> Result<(), RefusPe> {
+    // --- geometrie generale ------------------------------------------------
+    if entete.alignement_section == 0 || !entete.alignement_section.is_power_of_two() {
+        return Err(RefusPe::GeometrieIncoherente("SectionAlignment"));
+    }
+    if entete.alignement_fichier == 0 || !entete.alignement_fichier.is_power_of_two() {
+        return Err(RefusPe::GeometrieIncoherente("FileAlignment"));
+    }
+    if entete.alignement_fichier > entete.alignement_section {
+        return Err(RefusPe::GeometrieIncoherente(
+            "FileAlignment superieur a SectionAlignment",
+        ));
+    }
+    if entete.taille_image == 0 {
+        return Err(RefusPe::GeometrieIncoherente("SizeOfImage nul"));
+    }
+    if entete.taille_entetes as usize > entete.taille_image as usize {
+        return Err(RefusPe::GeometrieIncoherente(
+            "SizeOfHeaders depasse SizeOfImage",
+        ));
+    }
+    // `ImageBase + SizeOfImage` doit tenir dans l'espace d'adressage : sans ce
+    // test, le calcul d'adresse d'une section pourrait boucler et designer une
+    // page qui n'a rien a voir.
+    if entete
+        .base_image
+        .checked_add(entete.taille_image as u64)
+        .is_none()
+    {
+        return Err(RefusPe::ImageTropGrande);
+    }
+
+    // --- chaque section tient dans l'image ---------------------------------
+    for section in sections {
+        let etendue = section.taille_virtuelle.max(section.taille_brute);
+        let fin = section
+            .rva
+            .checked_add(etendue)
+            .ok_or(RefusPe::SectionHorsFichier { rva: section.rva })?;
+        if fin > entete.taille_image {
+            return Err(RefusPe::SectionHorsFichier { rva: section.rva });
+        }
+        if section.viole_w_xor_x() {
+            return Err(RefusPe::EcritureEtExecution { rva: section.rva });
+        }
+    }
+
+    // --- aucune section ne recouvre une autre ------------------------------
+    //
+    // Deux sections qui se recouvrent en memoire donnent une projection dont le
+    // resultat depend de l'ORDRE de mapping -- donc du chargeur, pas du
+    // binaire. C'est le genre de dependance qu'on refuse plutot que de figer.
+    for (index, section) in sections.iter().enumerate() {
+        let etendue = section.taille_virtuelle.max(section.taille_brute);
+        if etendue == 0 {
+            continue; // une section vide ne recouvre rien
+        }
+        let fin = section.rva + etendue;
+        for autre in &sections[index + 1..] {
+            let autre_etendue = autre.taille_virtuelle.max(autre.taille_brute);
+            if autre_etendue == 0 {
+                continue;
+            }
+            let autre_fin = autre.rva + autre_etendue;
+            if section.rva < autre_fin && autre.rva < fin {
+                return Err(RefusPe::SectionsQuiSeRecouvrent {
+                    premiere: section.rva,
+                    seconde: autre.rva,
+                });
+            }
+        }
+    }
+
+    // --- le point d'entree tombe dans du code executable -------------------
+    //
+    // Un point d'entree hors d'une section executable est soit une image
+    // corrompue, soit une tentative de faire sauter le chargeur ailleurs.
+    let entree_valide = sections.iter().any(|section| {
+        let etendue = section.taille_virtuelle.max(section.taille_brute);
+        section.executable()
+            && entete.point_entree_rva >= section.rva
+            && entete.point_entree_rva < section.rva.saturating_add(etendue)
+    });
+    if !entree_valide {
+        return Err(RefusPe::PointEntreeInvalide {
+            rva: entete.point_entree_rva,
+        });
+    }
+
+    Ok(())
 }

@@ -326,3 +326,214 @@ fn une_rva_sans_section_ne_rend_aucun_offset() {
     assert_eq!(pe::offset_de_rva(&sections, 0x0fff), None);
     assert_eq!(pe::offset_de_rva(&sections, 0x1100), None);
 }
+
+// ---------------------------------------------------------------------------
+// Durcissement : l'entree est traitee comme hostile
+// ---------------------------------------------------------------------------
+
+fn entete_type() -> pe::EnTetePe {
+    pe::EnTetePe {
+        machine: pe::MACHINE_AMD64,
+        nombre_sections: 2,
+        caracteristiques: pe::FILE_EXECUTABLE,
+        magic_optionnel: pe::OPTIONAL_PE32PLUS,
+        point_entree_rva: 0x1000,
+        base_image: 0x1_4000_0000,
+        alignement_section: 0x1000,
+        alignement_fichier: 0x200,
+        sous_systeme: pe::SUBSYSTEM_WINDOWS_CUI,
+        taille_image: 0x4000,
+        taille_entetes: 0x400,
+        import_rva: 0,
+        import_taille: 0,
+        offset_sections: 0,
+    }
+}
+
+fn section(rva: u32, taille: u32, caracteristiques: u32) -> pe::Section {
+    pe::Section {
+        nom: *b"........",
+        taille_virtuelle: taille,
+        rva,
+        taille_brute: taille,
+        offset_brut: 0x400,
+        caracteristiques,
+    }
+}
+
+const CODE: u32 = pe::SCN_MEM_EXECUTE | pe::SCN_MEM_READ;
+const DONNEES: u32 = pe::SCN_MEM_READ | pe::SCN_MEM_WRITE;
+
+/// Une image qui annonce plus de sections que le chargeur ne peut en tenir est
+/// REFUSEE, pas tronquee.
+#[test]
+fn test_pe_too_many_sections() {
+    let image = hello_exe();
+    let mut entete = pe::lit_entete(&image).expect("valide");
+    entete.nombre_sections = 50;
+
+    let mut tampon = [section(0, 0, 0); 32];
+    let resultat = pe::lit_sections(&image, &entete, &mut tampon);
+    match resultat {
+        Err(pe::RefusPe::TropDeSections { annoncees, capacite }) => {
+            assert_eq!(annoncees, 50);
+            assert_eq!(capacite, 32);
+        }
+        autre => panic!(
+            "une image de 50 sections doit etre refusee, pas chargee a moitie : {:?}",
+            autre
+        ),
+    }
+}
+
+#[test]
+fn test_pe_section_overlap() {
+    // Deux sections qui se recouvrent donnent une projection dependant de
+    // l'ORDRE de mapping. On refuse plutot que de figer ce hasard.
+    let sections = [section(0x1000, 0x2000, CODE), section(0x2000, 0x1000, DONNEES)];
+    let resultat = pe::valide_avant_projection(&entete_type(), &sections);
+    assert!(
+        matches!(resultat, Err(pe::RefusPe::SectionsQuiSeRecouvrent { .. })),
+        "obtenu {:?}", resultat
+    );
+
+    // Adjacentes sans recouvrement : acceptees.
+    let sections = [section(0x1000, 0x1000, CODE), section(0x2000, 0x1000, DONNEES)];
+    assert_eq!(pe::valide_avant_projection(&entete_type(), &sections), Ok(()));
+}
+
+#[test]
+fn test_pe_bad_entry() {
+    // Point d'entree dans une section de DONNEES : refuse.
+    let sections = [section(0x1000, 0x1000, DONNEES), section(0x2000, 0x1000, CODE)];
+    let resultat = pe::valide_avant_projection(&entete_type(), &sections);
+    assert!(
+        matches!(resultat, Err(pe::RefusPe::PointEntreeInvalide { rva: 0x1000 })),
+        "obtenu {:?}", resultat
+    );
+
+    // Point d'entree hors de toute section : refuse aussi.
+    let mut entete = entete_type();
+    entete.point_entree_rva = 0x3500;
+    let sections = [section(0x1000, 0x1000, CODE)];
+    assert!(matches!(
+        pe::valide_avant_projection(&entete, &sections),
+        Err(pe::RefusPe::PointEntreeInvalide { .. })
+    ));
+}
+
+#[test]
+fn test_pe_wx() {
+    // W^X : une section a la fois inscriptible et executable est refusee. Le
+    // format l'autorise ; ce noyau ne l'offrira pas.
+    let sections = [section(0x1000, 0x1000, CODE | pe::SCN_MEM_WRITE)];
+    let resultat = pe::valide_avant_projection(&entete_type(), &sections);
+    assert!(
+        matches!(resultat, Err(pe::RefusPe::EcritureEtExecution { rva: 0x1000 })),
+        "obtenu {:?}", resultat
+    );
+}
+
+#[test]
+fn test_pe_geometrie_incoherente() {
+    // Alignements non puissances de deux, SizeOfHeaders qui depasse
+    // SizeOfImage, SizeOfImage nul : chacun a son message.
+    let sections = [section(0x1000, 0x1000, CODE)];
+
+    let mut entete = entete_type();
+    entete.alignement_section = 0x1234;
+    assert!(matches!(
+        pe::valide_avant_projection(&entete, &sections),
+        Err(pe::RefusPe::GeometrieIncoherente(_))
+    ));
+
+    let mut entete = entete_type();
+    entete.alignement_fichier = 0x4000; // superieur a SectionAlignment
+    assert!(matches!(
+        pe::valide_avant_projection(&entete, &sections),
+        Err(pe::RefusPe::GeometrieIncoherente(_))
+    ));
+
+    let mut entete = entete_type();
+    entete.taille_entetes = 0x9000; // depasse SizeOfImage
+    assert!(matches!(
+        pe::valide_avant_projection(&entete, &sections),
+        Err(pe::RefusPe::GeometrieIncoherente(_))
+    ));
+
+    let mut entete = entete_type();
+    entete.taille_image = 0;
+    assert!(matches!(
+        pe::valide_avant_projection(&entete, &sections),
+        Err(pe::RefusPe::GeometrieIncoherente(_))
+    ));
+}
+
+#[test]
+fn test_pe_section_hors_image() {
+    // Une section qui deborde SizeOfImage : sans ce test, le calcul d'adresse
+    // designerait une page hors de l'image reservee.
+    let sections = [section(0x3800, 0x2000, CODE)];
+    let mut entete = entete_type();
+    entete.point_entree_rva = 0x3800;
+    assert!(matches!(
+        pe::valide_avant_projection(&entete, &sections),
+        Err(pe::RefusPe::SectionHorsFichier { .. })
+    ));
+}
+
+#[test]
+fn test_pe_image_trop_grande() {
+    // `ImageBase + SizeOfImage` qui deborde l'espace d'adressage : le calcul
+    // d'adresse bouclerait et designerait une page sans rapport.
+    let sections = [section(0x1000, 0x1000, CODE)];
+    let mut entete = entete_type();
+    entete.base_image = u64::MAX - 0x100;
+    assert_eq!(
+        pe::valide_avant_projection(&entete, &sections),
+        Err(pe::RefusPe::ImageTropGrande)
+    );
+}
+
+#[test]
+fn test_pe_bad_relocation() {
+    // Une relocation qui vise hors de l'image ne doit pas etre appliquee : elle
+    // ecrirait huit octets a une adresse arbitraire du processus.
+    let image = hello_exe();
+    let (entete, sections) = sections_de(&image);
+    let optionnel = pe::offset_optionnel(&image).expect("offset");
+    let rva = u32::from_le_bytes(
+        image[optionnel + 152..optionnel + 156].try_into().unwrap(),
+    );
+    let taille = u32::from_le_bytes(
+        image[optionnel + 156..optionnel + 160].try_into().unwrap(),
+    );
+
+    let mut hors_image = 0usize;
+    pe::parcourt_relocations(&image, rva, taille, |r| pe::offset_de_rva(&sections, r), |reloc| {
+        if reloc.rva >= entete.taille_image {
+            hors_image += 1;
+        }
+    })
+    .expect("table lisible");
+    assert_eq!(hors_image, 0, "la fixture ne vise que l'interieur de l'image");
+
+    // Une table qui pointe hors du fichier est refusee.
+    assert_eq!(
+        pe::parcourt_relocations(&image, 0x7fff_0000, 16,
+            |r| pe::offset_de_rva(&sections, r), |_| {}),
+        Err(pe::RefusPe::RelocationsHorsFichier)
+    );
+}
+
+/// La fixture reelle passe toute la validation : sans ce test, les precedents
+/// prouveraient seulement qu'on sait dire non.
+#[test]
+fn test_pe_hello_exe_passe_la_validation() {
+    let image = hello_exe();
+    let (entete, sections) = sections_de(&image);
+    assert_eq!(
+        pe::valide_avant_projection(&entete, &sections), Ok(()),
+        "hello.exe doit etre accepte",
+    );
+}
