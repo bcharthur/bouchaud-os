@@ -224,6 +224,68 @@ pub fn commit_scheduler_idle() {
     idle_exit(cpu);
 }
 
+// BOUCHAUD_P1_BKL_PARK_WAKE_V1
+//
+// Meme handshake en deux temps que le sommeil du scheduler, pour un CPU qui
+// s'arrete faute d'obtenir un verrou plutot que faute de travail.
+//
+// La difference tient au reveilleur. Le scheduler endort un CPU qui n'a rien a
+// faire : c'est la publication d'une tache Ready qui le rappelle. Ici le CPU a
+// du travail et lui manque seulement le verrou : c'est donc la LIBERATION de ce
+// verrou qui doit le rappeler, et elle seule.
+//
+// Ces trois fonctions existent pour que `kernel::sync` n'ait pas a connaitre
+// `sti`, `hlt` ni l'APIC. Le protocole -- publier l'attente avant de relire le
+// proprietaire, et ne dormir qu'ensuite -- vit cote noyau, ou il peut etre
+// relu sans savoir sur quelle machine il tourne.
+
+/// PREPARE : masque les interruptions et publie l'arret de ce CPU.
+///
+/// A appeler AVANT de publier l'attente et de relire le proprietaire du verrou.
+/// Une fois IF a zero, un reveil qui arrive reste en attente dans l'APIC local
+/// au lieu d'etre consomme avant le `hlt`.
+pub fn prepare_lock_park() {
+    debug_assert!(interrupts_enabled(), "cpu: prepare_lock_park requires IF=1");
+    let cpu = hardware_cpu_index();
+    unsafe { asm!("cli", options(nomem, nostack)); }
+    idle_enter(cpu);
+}
+
+/// COMMIT : dort jusqu'au prochain reveil, puis reprend.
+///
+/// `sti; hlt` est atomique vis-a-vis d'une interruption devenue pendante depuis
+/// le PREPARE : l'ombre du `sti` garantit que le `hlt` s'execute et rend la
+/// main aussitot, au lieu de perdre le reveil.
+pub fn commit_lock_park() {
+    debug_assert!(!interrupts_enabled(), "cpu: commit_lock_park requires IF=0");
+    let cpu = hardware_cpu_index();
+    unsafe { asm!("sti; hlt", options(nostack)); }
+    idle_exit(cpu);
+}
+
+/// ANNULE le PREPARE : rend les interruptions sans jamais dormir.
+///
+/// Le verrou s'est libere entre le spin et la publication de l'attente. Dormir
+/// maintenant serait attendre un reveil que plus personne n'enverra, puisque le
+/// liberateur est deja passe.
+pub fn abort_lock_park() {
+    debug_assert!(!interrupts_enabled(), "cpu: abort_lock_park requires IF=0");
+    let cpu = hardware_cpu_index();
+    idle_exit(cpu);
+    unsafe { asm!("sti", options(nomem, nostack)); }
+}
+
+/// Rappelle un CPU arrete par [`commit_lock_park`].
+///
+/// Le vecteur est celui de la preemption : son gestionnaire prend le verrou par
+/// `try_enter`, echoue proprement s'il est pris, et ne commute jamais depuis un
+/// contexte noyau interrompu. Le recevoir sans raison ne coute donc qu'un
+/// aller-retour d'interruption -- c'est ce qui permet de l'envoyer sans savoir
+/// si la cible dort vraiment.
+pub fn wake_parked_cpu(cpu: usize) {
+    smp::reschedule_cpu(cpu);
+}
+
 fn idle_enter(cpu: usize) {
     let now = crate::kernel::timer::monotonic_ns();
     IDLE_SINCE_NS[cpu].store(now, Ordering::Release);

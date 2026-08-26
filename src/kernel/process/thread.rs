@@ -3467,10 +3467,12 @@ pub fn log_smp_load() {
     let (bkl_wait, bkl_hold, bkl_acq) = smp_lock::contention_stats();
     let (acq_enter, acq_try, acq_resume) = smp_lock::acquisitions_par_origine();
     let (max_tenue, max_site) = smp_lock::plus_longue_tenue();
+    let (parked_waiters, parks, wake_ipis) = smp_lock::park_stats();
     crate::kernel::dmesg::log_fmt(format_args!(
-        "[BKL-STATS] wait_ns={} hold_ns={} acquisitions={} enter={} try_enter={} resume={} max_hold_ns={} max_hold_site={} preempt_irq_bkl_tenu={} identite_repli={}",
+        "[BKL-STATS] wait_ns={} hold_ns={} acquisitions={} enter={} try_enter={} resume={} max_hold_ns={} max_hold_site={} preempt_irq_bkl_tenu={} identite_repli={} parked_waiters={} parks={} wake_ipis={}",
         bkl_wait, bkl_hold, bkl_acq, acq_enter, acq_try, acq_resume,
         max_tenue, max_site, preempt_irq_bkl_tenu(), identite_repli(),
+        parked_waiters, parks, wake_ipis,
     ));
     let (_, _, backing_reads, backing_bytes) = crate::fs::backing::stats();
     let (cache_hits, readahead_hits) = crate::fs::backing::cache_stats();

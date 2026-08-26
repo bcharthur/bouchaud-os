@@ -64,6 +64,15 @@ static ACQ_PAR_ORIGINE: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 static ACQUIRED_AT_NS: [AtomicU64; MAX_CPUS] =
     [const { AtomicU64::new(0) }; MAX_CPUS];
 
+// BOUCHAUD_P1_BKL_PARK_WAKE_V1
+//
+// Masque des CPU arretes en attendant ce verrou, et de quoi le mesurer.
+// `PARKED` est la seule donnee que le liberateur consulte : tant qu'il vaut
+// zero, une liberation ne coute rien de plus qu'avant.
+static PARKED: AtomicU64 = AtomicU64::new(0);
+static TOTAL_PARKS: AtomicU64 = AtomicU64::new(0);
+static TOTAL_WAKE_IPIS: AtomicU64 = AtomicU64::new(0);
+
 #[inline]
 fn cpu() -> usize {
     crate::arch::x86_64::usermode::cpu_index().min(MAX_CPUS - 1)
@@ -130,13 +139,63 @@ fn probe_note_release(cpu: usize, kind: u32) {
 // serialise encore ces passages : un spin pur faisait alors consommer un vCPU
 // entier a chaque contender. On garde un court spin actif pour les sections
 // critiques tres breves, puis on parque le CPU avec HLT si IF est actif.
-//
-// Le reveil est borne par l'architecture SMP actuelle : PIT sur le BSP et IPI
-// de quantum sur les AP (4 ms actuellement).
 const BKL_ACTIVE_SPINS: usize = 64;
 
+// BOUCHAUD_P1_BKL_PARK_WAKE_V1
+//
+// CE QUI A CHANGE, ET POURQUOI
+// ----------------------------
+// Ce parking datait d'un noyau ou un IPI de quantum partait toutes les 4 ms a
+// TOUS les AP. Le dormeur n'avait donc pas besoin d'etre reveille : il l'etait
+// de toute facon. BOUCHAUD_P0_TARGETED_SCHED_IPI_V1 a supprime cette diffusion
+// -- a juste titre, elle coutait ~250 IPI/s par coeur inutilement -- et le
+// parking s'est retrouve sans reveilleur.
+//
+// Ce qui reste ne suffit pas :
+//   * le PIT ne bat que sur le BSP ;
+//   * l'IPI de quantum ne vise que les AP qui executent une tache UTILISATEUR
+//     (`running_user_cpu_mask`), donc jamais un AP dont `CURRENT` vaut NO_TASK
+//     -- exactement l'etat de sa boucle idle, qui appelle pourtant `enter()` ;
+//   * `publish_ready` ne reveille que le CPU auquel il destine une tache, et
+//     seulement s'il l'a vu `is_idle` -- un CPU peut donc s'arreter juste
+//     apres ce test.
+//
+// Un AP pouvait ainsi s'arreter sur un verrou libre. Les autres chemins le
+// rattrapaient en pratique, mais aucun ne le garantissait : c'est la
+// definition d'un reveil perdu.
+//
+// LE PROTOCOLE
+// ------------
+// Symetrique de celui du scheduler (V14), avec le liberateur pour reveilleur :
+//
+//     dormeur                          liberateur
+//     -------                          ----------
+//     CLI                              OWNER <- FREE      (SeqCst)
+//     PARKED |= bit    (SeqCst)        lire PARKED        (SeqCst)
+//     relire OWNER     (SeqCst)        reveiller ce qui y est
+//     libre ? -> repartir sans dormir
+//     STI; HLT
+//
+// AUCUN REVEIL PERDU
+// ------------------
+// Les quatre acces sont SeqCst, donc totalement ordonnes. Supposons que le
+// dormeur s'arrete (il n'a pas vu FREE) et qu'un liberateur R ne voie pas son
+// bit. Alors la lecture de PARKED par R precede la pose du bit, et comme R
+// ecrit FREE avant de lire PARKED :
+//
+//     R.store(FREE) < R.load(PARKED) < dormeur.pose(bit) < dormeur.load(OWNER)
+//
+// La relecture du dormeur voit donc FREE -- il ne dort pas -- ou un
+// proprietaire O acquis APRES. Dans ce second cas O relira PARKED apres sa
+// propre acquisition, donc apres la pose du bit, et le reveillera. Un
+// `Release`/`Acquire` ne suffirait pas ici : c'est un motif de tampon
+// d'ecriture, que seul l'ordre total interdit.
+//
+// Le `sti; hlt` ferme la derniere fenetre : un IPI arrive entre la pose du bit
+// et le `hlt` reste pendant dans l'APIC local, et l'ombre du `sti` garantit que
+// le `hlt` le prend au lieu de le perdre.
 #[inline]
-fn wait_for_owner_change(active_spins: &mut usize) {
+fn wait_for_owner_change(cpu: usize, active_spins: &mut usize) {
     if *active_spins < BKL_ACTIVE_SPINS {
         *active_spins += 1;
         spin_loop();
@@ -146,11 +205,53 @@ fn wait_for_owner_change(active_spins: &mut usize) {
     *active_spins = 0;
 
     // Ne jamais faire STI depuis un contexte qui avait IF=0 (ex. IRQ).
-    // Dans ce cas rare on conserve le spin actif.
-    if interrupts::are_enabled() {
-        crate::arch::x86_64::cpu::wait_for_interrupt();
-    } else {
+    // Dans ce cas rare on conserve le spin actif : un tel contexte ne peut pas
+    // dormir, et il n'a donc pas besoin d'etre reveille.
+    if !interrupts::are_enabled() {
         spin_loop();
+        return;
+    }
+
+    let bit = 1u64 << cpu;
+    crate::arch::x86_64::cpu::prepare_lock_park();
+    PARKED.fetch_or(bit, Ordering::SeqCst);
+
+    if OWNER.load(Ordering::SeqCst) == FREE {
+        // Libere entre le spin et la publication : repartir tout de suite
+        // plutot que dormir en attendant un reveil qui n'aura plus lieu.
+        PARKED.fetch_and(!bit, Ordering::SeqCst);
+        crate::arch::x86_64::cpu::abort_lock_park();
+        return;
+    }
+
+    TOTAL_PARKS.fetch_add(1, Ordering::Relaxed);
+    crate::arch::x86_64::cpu::commit_lock_park();
+    PARKED.fetch_and(!bit, Ordering::SeqCst);
+}
+
+/// Rappelle les CPU arretes sur ce verrou. A appeler APRES `OWNER <- FREE`.
+///
+/// Tous, et non le premier venu : ils sont au plus `MAX_CPUS - 1`, ils ne font
+/// rien d'autre, et n'en reveiller qu'un ferait dependre la vivacite d'un choix
+/// -- si le CPU choisi se rendort sans avoir pris le verrou, plus personne ne
+/// releve. `TOTAL_WAKE_IPIS` rend le cout mesurable : s'il devient grand devant
+/// le nombre d'acquisitions, c'est qu'un reveil cible vaudrait la peine.
+#[inline]
+fn wake_parked_waiters(releasing_cpu: usize) {
+    let parked = PARKED.load(Ordering::SeqCst);
+    if parked == 0 {
+        return;
+    }
+
+    // Ne parcourir que les bits poses : sous contention normale il y en a un,
+    // parfois deux. Balayer les seize CPU a chaque liberation couterait plus
+    // cher que le reveil lui-meme.
+    let mut restants = parked & !(1u64 << releasing_cpu);
+    while restants != 0 {
+        let target = restants.trailing_zeros() as usize;
+        restants &= restants - 1;
+        TOTAL_WAKE_IPIS.fetch_add(1, Ordering::Relaxed);
+        crate::arch::x86_64::cpu::wake_parked_cpu(target);
     }
 }
 
@@ -225,7 +326,10 @@ fn release_one(cpu: usize) {
 
     DEPTH[cpu].store(0, Ordering::Relaxed);
     probe_note_release(cpu, 1);
-    OWNER.store(FREE, Ordering::Release);
+    // SeqCst, et non Release : c'est l'ordre total avec la lecture de PARKED
+    // ci-dessous qui interdit le reveil perdu. Voir wait_for_owner_change.
+    OWNER.store(FREE, Ordering::SeqCst);
+    wake_parked_waiters(cpu);
 }
 
 pub fn enter() -> KernelGuard {
@@ -263,7 +367,7 @@ pub fn enter() -> KernelGuard {
         }
 
         // Spin court puis HLT : ne plus bruler un coeur entier sur contention.
-        wait_for_owner_change(&mut active_spins);
+        wait_for_owner_change(cpu, &mut active_spins);
     }
 }
 
@@ -375,7 +479,11 @@ pub fn suspend_for_schedule() -> usize {
 
     DEPTH[cpu].store(0, Ordering::Relaxed);
     probe_note_release(cpu, 2);
-    OWNER.store(FREE, Ordering::Release);
+    OWNER.store(FREE, Ordering::SeqCst);
+    // Un changement de contexte libere le verrou aussi reellement qu'un Drop :
+    // l'oublier ici laisserait dormir un CPU jusqu'a la prochaine liberation
+    // ordinaire, qui peut ne jamais venir si c'est lui qui devait la produire.
+    wake_parked_waiters(cpu);
     depth
 }
 
@@ -438,6 +546,20 @@ pub fn plus_longue_tenue() -> (u64, u32) {
     (
         PLUS_LONGUE_TENUE_NS.load(Ordering::Relaxed),
         PLUS_LONGUE_TENUE_SITE.load(Ordering::Relaxed),
+    )
+}
+
+/// Etat et cout du parking : (CPU actuellement arretes, parkings, IPI de reveil).
+///
+/// `parked` est un instantane, les deux autres des cumuls. Ensemble ils disent
+/// si le parking sert (parks > 0) et ce qu'il coute (wake_ipis rapporte aux
+/// acquisitions). Un `parked` durablement non nul avec des acquisitions qui
+/// n'avancent plus serait, lui, la signature d'un reveil perdu.
+pub fn park_stats() -> (u32, u64, u64) {
+    (
+        PARKED.load(Ordering::SeqCst).count_ones(),
+        TOTAL_PARKS.load(Ordering::Relaxed),
+        TOTAL_WAKE_IPIS.load(Ordering::Relaxed),
     )
 }
 
