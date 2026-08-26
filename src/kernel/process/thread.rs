@@ -2424,6 +2424,15 @@ fn deactivate_task_space(task: &Task, cpu_id: usize) {
 fn mark_task_running(task: &mut Task, cpu_id: usize) {
     let now = crate::kernel::timer::monotonic_ns();
     debug_assert!(task.on_cpu < 0, "task: tentative de double execution tid={}", task.tid);
+    // BOUCHAUD_P0_CTX_EN_VOL_V1 : reprendre une tache dont `switch_context`
+    // n'a pas encore ecrit le sommet ferait repartir CE CPU sur une pile deja
+    // occupee par un autre. L'invariant est verifie ici, une fois, pour les
+    // deux appelants (`switch_to` et `preempt_from_irq`).
+    debug_assert!(
+        contexte_publie(task),
+        "task: reprise d'une tache dont le contexte est encore en vol tid={}",
+        task.tid
+    );
     debug_assert_eq!(task.last_account_ns, 0, "task: cursor CPU encore arme hors CPU tid={}", task.tid);
     if task.last_cpu != u8::MAX && task.last_cpu as usize != cpu_id {
         CPU_MIGRATIONS[cpu_id].fetch_add(1, Ordering::Relaxed);
@@ -2582,9 +2591,79 @@ pub fn account_resume_user_noreturn() {
 /// ignore pour un tour et le tourniquet ordinaire reprend. Une tache normale
 /// avance donc toujours, meme face a une tache interactive qui ne se bloque
 /// jamais.
+// BOUCHAUD_P0_CTX_EN_VOL_V1
+//
+// LE TROU QUE CETTE SENTINELLE BOUCHE
+// -----------------------------------
+// `switch_to` et `preempt_from_irq` rendaient la tache sortante VISIBLE des
+// autres CPU -- `on_cpu = -1`, puis `enqueue` dans la file locale -- AVANT que
+// `switch_context` n'ait ecrit son sommet de pile dans `ctx.rsp`. Entre les
+// deux, le gros verrou est deja rendu (`suspend_for_schedule` pour `switch_to`,
+// `drop(kernel)` pour la preemption IRQ) et `IF` est remis a 1.
+//
+// Un autre CPU pouvait donc, dans cette fenetre :
+//   1. voler la tache (`runnable_steal` ne regardait que `state`/`on_cpu`),
+//   2. faire `switch_context(&mut prev.ctx.rsp, sortante.ctx.rsp)` avec la
+//      valeur PERIMEE -- celle de la commutation PRECEDENTE.
+//
+// Deux CPU se retrouvent alors sur la MEME pile noyau. La valeur perimee ne
+// designe plus un cadre `switch_context` valide (la tache a repris depuis, et
+// a reecrit cette zone), donc les `pop` puis le `ret` partent sur un quadmot
+// arbitraire de la pile de la victime.
+//
+// C'est suffisant pour produire les deux symptomes observes :
+//   * un `ret` qui tombe sur le champ `ss` d'une `TrapFrame` donne RIP=0x1b
+//     (le selecteur de donnees utilisateur) avec CS=8 -- la signature exacte du
+//     DOUBLE FAULT ;
+//   * un `resume_after_schedule`/`Drop` execute deux fois, ou execute sur un
+//     cadre qui n'est plus le sien, decouple DEPTH de OWNER -- exactement
+//     `DEPTH[0] > 0 && OWNER == FREE`.
+//
+// Le cas ZOMBIE etait deja protege : `switch_to` laisse un zombie `on_cpu >= 0`
+// et ne le rend recyclable qu'au `complete_retired()` de la pile ENTRANTE,
+// c'est-a-dire apres le switch. Il manquait exactement la meme protection pour
+// les taches encore vivantes.
+//
+// POURQUOI `ctx.rsp` SERT DE DRAPEAU
+// ----------------------------------
+// Parce que c'est precisement la donnee dont la publication est en retard : la
+// rendre invalide pendant le vol, c'est dire la verite, pas ajouter un etat.
+// Zero est impossible autrement (`amorce_pile` ecrit un sommet non nul des la
+// creation, et `switch_context` n'ecrit jamais zero).
+//
+// ORDRE MEMOIRE
+// -------------
+// La sentinelle est posee sous BKL, avant la publication. Le lecteur voit donc
+// necessairement la sentinelle avec l'entree de file : soit par la chaine
+// acquire/release du verrou de la file (`enqueue`/`steal`), soit par celle du
+// BKL (`publish_ready`). L'ecriture qui la leve est le `mov [rdi], rsp` de
+// `switch_context`, un store 8 octets aligne : sur x86-64 (TSO) le lecteur voit
+// soit la sentinelle, soit le nouveau sommet, jamais l'ancien ni un mot dechire.
+pub const CONTEXTE_EN_VOL: u64 = 0;
+
+/// Marque une tache sortante comme « contexte pas encore sauvegarde ».
+///
+/// A appeler **avant** toute publication (`on_cpu = -1`, `enqueue`), le BKL
+/// encore tenu. C'est `switch_context` qui la leve, en ecrivant le vrai sommet.
+#[inline]
+fn marque_contexte_en_vol(task: &mut Task) {
+    task.ctx.rsp = CONTEXTE_EN_VOL;
+}
+
+/// Vrai si `switch_context` a deja publie le sommet de pile de cette tache.
+///
+/// Lecture volatile : l'ecriture qui la leve vient d'un AUTRE CPU et se fait
+/// hors BKL, depuis l'assembleur de `switch_context`. Le compilateur n'a donc
+/// pas le droit de la mettre en cache d'une iteration a l'autre.
+#[inline]
+fn contexte_publie(task: &Task) -> bool {
+    unsafe { core::ptr::read_volatile(&task.ctx.rsp) != CONTEXTE_EN_VOL }
+}
+
 fn runnable_local(task: &Task, cpu: usize) -> bool {
     task.state == TaskState::Ready
         && task.on_cpu < 0
+        && contexte_publie(task)
         && task.runq_cpu as usize == cpu
         && allowed_on(task, cpu)
 }
@@ -2592,6 +2671,7 @@ fn runnable_local(task: &Task, cpu: usize) -> bool {
 fn runnable_steal(task: &Task, cpu: usize) -> bool {
     task.state == TaskState::Ready
         && task.on_cpu < 0
+        && contexte_publie(task)
         && !task.noyau
         && task.runq_cpu as usize != cpu
         && allowed_on(task, cpu)
@@ -2603,7 +2683,20 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
 
     if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu) {
         let local = crate::arch::x86_64::cpu_local::local(id);
+        // Une tache en vol reste EXECUTABLE : la laisser tomber de la file la
+        // perdrait pour de bon. On la remet donc en queue et on passe a la
+        // suivante. Le tour de file est borne pour qu'une file entierement en
+        // vol ne fasse pas tourner ce CPU indefiniment.
+        let mut tours_restants = local.run_queue_len().saturating_add(1);
         while let Some(index) = local.dequeue() {
+            if index < len && !contexte_publie(&tasks()[index]) {
+                local.enqueue(index);
+                tours_restants = tours_restants.saturating_sub(1);
+                if tours_restants == 0 {
+                    break;
+                }
+                continue;
+            }
             if index < len && runnable_local(&tasks()[index], cpu) {
                 return Some(index);
             }
@@ -2793,6 +2886,8 @@ fn switch_to(from: usize, to: usize) {
         usermode::fxsave((*from_ptr).fpu_ptr() as *mut u8);
         (*from_ptr).fs_base = usermode::fs_base();
         deactivate_task_space(&*from_ptr, cpu_id);
+        // BOUCHAUD_P0_CTX_EN_VOL_V1 : avant toute publication.
+        marque_contexte_en_vol(&mut *from_ptr);
         if (*from_ptr).state == TaskState::Zombie {
             RETIRED[cpu_id].store(from, Ordering::Release);
             // Reste marque running jusqu'a ce que le nouveau contexte confirme
@@ -2835,6 +2930,9 @@ fn switch_to_kernel() -> ! {
         // impute a la tache suivante installee sur ce CPU.
         account_slice_end(&mut *ptr);
         deactivate_task_space(&*ptr, local_cpu());
+        // BOUCHAUD_P0_CTX_EN_VOL_V1 : meme regle, meme raison -- un reveil
+        // concurrent peut republier cette tache avant notre `switch_context`.
+        marque_contexte_en_vol(&mut *ptr);
         if (*ptr).state == TaskState::Zombie {
             RETIRED[local_cpu()].store(cur, Ordering::Release);
         } else {
@@ -3526,6 +3624,10 @@ pub fn preempt_from_irq() {
         usermode::fxsave((*from_ptr).fpu_ptr() as *mut u8);
         (*from_ptr).fs_base = usermode::fs_base();
         deactivate_task_space(&*from_ptr, cpu_id);
+        // BOUCHAUD_P0_CTX_EN_VOL_V1 : la fenetre est ici la PLUS large des
+        // trois -- `drop(kernel)` rend le verrou plusieurs instructions avant
+        // `switch_context`.
+        marque_contexte_en_vol(&mut *from_ptr);
         (*from_ptr).on_cpu = -1;
         (*from_ptr).last_cpu = cpu_id as u8;
         (*from_ptr).runq_cpu = cpu_id as u8;
