@@ -151,21 +151,66 @@ pub fn lance_detache(
 /// `elf::parse` repondait « signature ELF absente » a un `.exe`, ce qui est
 /// vrai et n'apprend rien. Un `.exe` compile pour Windows echouera de toute
 /// facon ; la difference est qu'il le dira, et pourquoi.
+/// Verdict detaille sur une image PE32+.
+///
+/// Le format est reconnu, les sections et les dependances sont lues. Ce qui
+/// manque est la PROJECTION en memoire ; le message le dit, plutot que de
+/// laisser croire a un format non supporte. Un binaire Windows, lui, est
+/// refuse pour ce qu'il est -- pas parce que le chargeur est incomplet.
+fn verdict_pe(name: &str, data: &[u8]) -> String {
+    use crate::kernel::loader::pe;
+
+    let entete = match pe::lit_entete(data) {
+        Ok(entete) => entete,
+        Err(refus) => return alloc::format!("{} : PE32+ illisible ({:?})", name, refus),
+    };
+
+    let mut tampon = [pe::Section {
+        nom: [0; 8],
+        taille_virtuelle: 0,
+        rva: 0,
+        taille_brute: 0,
+        offset_brut: 0,
+        caracteristiques: 0,
+    }; 32];
+    let nombre = match pe::lit_sections(data, &entete, &mut tampon) {
+        Ok(nombre) => nombre,
+        Err(refus) => return alloc::format!("{} : sections illisibles ({:?})", name, refus),
+    };
+    let sections = &tampon[..nombre];
+
+    for section in sections {
+        if section.viole_w_xor_x() {
+            return alloc::format!(
+                "{} : section rva={:#x} demande ecriture ET execution, refuse",
+                name, section.rva
+            );
+        }
+    }
+
+    match pe::classe_dependances(data, &entete, |rva| pe::offset_de_rva(sections, rva)) {
+        Err(refus) => alloc::format!("{} : table d'import illisible ({:?})", name, refus),
+        Ok(pe::Dependances::Windows { offset_nom }) => {
+            let nom = pe::chaine_c(data, offset_nom).unwrap_or(b"?");
+            alloc::format!(
+                "{} : Windows imports unsupported ({}) — il faudrait une couche Win32, qui n'existe pas",
+                name,
+                core::str::from_utf8(nom).unwrap_or("?"),
+            )
+        }
+        Ok(dependances) => alloc::format!(
+            "{} : PE32+ Bouchaud valide ({} sections, entree {:#x}, {:?}), mais la projection memoire n'est pas encore implementee",
+            name, nombre, entete.point_entree_rva, dependances,
+        ),
+    }
+}
+
 fn verifie_format(name: &str, data: &[u8]) -> Result<(), String> {
     use crate::kernel::loader::{identifie, pe, Format};
 
     match identifie(data) {
         Format::Elf64 => Ok(()),
-        Format::Pe32Plus => match pe::lit_entete(data) {
-            Err(refus) => Err(alloc::format!(
-                "{} : PE32+ illisible ({:?})",
-                name, refus
-            )),
-            Ok(_) => Err(alloc::format!(
-                "{} : PE32+ reconnu, mais ce noyau ne sait pas encore le charger",
-                name
-            )),
-        },
+        Format::Pe32Plus => Err(verdict_pe(name, data)),
         Format::Script => Err(alloc::format!(
             "{} : script #! -- l'interpreteur doit etre lance explicitement",
             name

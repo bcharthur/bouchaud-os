@@ -150,3 +150,179 @@ fn une_bibliotheque_bouchaud_n_est_pas_prise_pour_windows() {
         assert!(!pe::est_bibliotheque_windows(nom), "{:?}", core::str::from_utf8(nom));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Sections, relocations, imports
+// ---------------------------------------------------------------------------
+
+/// La fixture `hello.exe`, generee par `tools/exec/fabrique-hello-exe.py`.
+///
+/// Le generateur et le parseur sont ecrits separement, l'un en Python, l'autre
+/// en Rust, a partir de la specification et non l'un de l'autre. Qu'ils
+/// s'accordent est donc une VERIFICATION, pas une tautologie.
+fn hello_exe() -> Vec<u8> {
+    // Le chemin est fourni par `test-format.sh`, qui a lance le generateur.
+    // Passer par une variable plutot que par un chemin en dur laisse le test
+    // fonctionner quel que soit le repertoire courant.
+    let chemin = match std::env::var("BO_HELLO_EXE") {
+        Ok(valeur) => valeur,
+        Err(_) => {
+            panic!(
+                "BO_HELLO_EXE absent : lance ce test par tools/exec/test-format.sh, \
+                 qui fabrique la fixture d'abord"
+            )
+        }
+    };
+    std::fs::read(&chemin).unwrap_or_else(|e| panic!("{} illisible : {}", chemin, e))
+}
+
+fn sections_de(image: &[u8]) -> (pe::EnTetePe, Vec<pe::Section>) {
+    let entete = pe::lit_entete(image).expect("en-tete valide");
+    let mut tampon = [pe::Section {
+        nom: [0; 8], taille_virtuelle: 0, rva: 0,
+        taille_brute: 0, offset_brut: 0, caracteristiques: 0,
+    }; 16];
+    let nombre = pe::lit_sections(image, &entete, &mut tampon).expect("sections valides");
+    (entete, tampon[..nombre].to_vec())
+}
+
+/// F : le parseur de sections lit ce que le generateur a ecrit.
+#[test]
+fn les_sections_sont_lues_avec_leurs_protections() {
+    let image = hello_exe();
+    let (entete, sections) = sections_de(&image);
+    assert_eq!(sections.len(), 2, "text et rdata");
+    assert_eq!(entete.base_image, 0x1_4000_0000);
+    assert_eq!(entete.point_entree_rva, 0x1000);
+
+    let texte = &sections[0];
+    assert_eq!(&texte.nom[..5], b".text");
+    assert!(texte.executable() && texte.lisible());
+    assert!(!texte.inscriptible(), "le code n'est pas inscriptible");
+    assert!(!texte.viole_w_xor_x(), "W^X respecte");
+
+    let donnees = &sections[1];
+    assert_eq!(&donnees.nom[..6], b".rdata");
+    assert!(donnees.lisible() && !donnees.executable());
+}
+
+/// Une section dont les octets debordent du fichier est refusee, pas bornee.
+#[test]
+fn une_section_hors_fichier_est_refusee() {
+    let mut image = hello_exe();
+    let entete = pe::lit_entete(&image).unwrap();
+    // Gonfler la taille brute de `.text` au-dela du fichier.
+    let base = entete.offset_sections + 16;
+    image[base..base + 4].copy_from_slice(&0x00ff_ffffu32.to_le_bytes());
+    let mut tampon = [pe::Section {
+        nom: [0; 8], taille_virtuelle: 0, rva: 0,
+        taille_brute: 0, offset_brut: 0, caracteristiques: 0,
+    }; 16];
+    let resultat = pe::lit_sections(&image, &entete, &mut tampon);
+    assert!(
+        matches!(resultat, Err(pe::RefusPe::SectionHorsFichier { .. })),
+        "obtenu {:?}", resultat
+    );
+}
+
+/// G : la relocation DIR64 de la fixture est trouvee, et une seule.
+#[test]
+fn la_relocation_dir64_est_lue() {
+    let image = hello_exe();
+    let (entete, sections) = sections_de(&image);
+
+    // Le repertoire 5 porte la table de relocations. Le generateur y met un
+    // unique DIR64, sur l'immediat 64 bits du `movabs`.
+    let optionnel = pe::offset_optionnel(&image).expect("offset optionnel");
+    let rva = u32::from_le_bytes(image[optionnel + 112 + 40..optionnel + 112 + 44].try_into().unwrap());
+    let taille = u32::from_le_bytes(image[optionnel + 112 + 44..optionnel + 112 + 48].try_into().unwrap());
+    assert!(rva != 0 && taille != 0, "table de relocations presente");
+
+    let mut vues = Vec::new();
+    let comptees = pe::parcourt_relocations(
+        &image, rva, taille,
+        |r| pe::offset_de_rva(&sections, r),
+        |relocation| vues.push(relocation),
+    ).expect("table lisible");
+
+    assert_eq!(comptees, 1, "une seule relocation utile");
+    assert_eq!(vues[0].genre, pe::REL_DIR64);
+    // Elle vise bien un octet dans `.text`.
+    assert!(vues[0].rva >= 0x1000 && vues[0].rva < 0x2000, "rva={:#x}", vues[0].rva);
+    let _ = entete;
+}
+
+/// Un bloc de relocation incoherent ne fait ni boucler ni lire hors fichier.
+#[test]
+fn un_bloc_de_relocation_absurde_est_refuse() {
+    let sections = [pe::Section {
+        nom: *b".fake   ", taille_virtuelle: 0x1000, rva: 0x1000,
+        taille_brute: 0x40, offset_brut: 0, caracteristiques: 0,
+    }];
+    // Bloc annoncant une taille de 4 : plus petit que son propre en-tete.
+    let mut data = vec![0u8; 0x40];
+    data[0..4].copy_from_slice(&0x1000u32.to_le_bytes());
+    data[4..8].copy_from_slice(&4u32.to_le_bytes());
+    let resultat = pe::parcourt_relocations(
+        &data, 0x1000, 16,
+        |r| pe::offset_de_rva(&sections, r),
+        |_| panic!("aucune entree ne doit sortir"),
+    );
+    assert_eq!(resultat, Err(pe::RefusPe::RelocationsHorsFichier));
+}
+
+/// H + I : la fixture n'importe rien, donc elle est reconnue comme native.
+#[test]
+fn hello_exe_est_une_image_bouchaud_sans_importation() {
+    let image = hello_exe();
+    let (entete, sections) = sections_de(&image);
+    let verdict = pe::classe_dependances(&image, &entete, |r| pe::offset_de_rva(&sections, r))
+        .expect("table d'import lisible");
+    assert_eq!(verdict, pe::Dependances::Aucune);
+}
+
+/// H : une image qui importe kernel32 est classee Windows, en nommant la
+/// bibliotheque fautive.
+#[test]
+fn une_image_qui_importe_kernel32_est_classee_windows() {
+    // Une section unique porte a la fois le descripteur et le nom.
+    let sections = [pe::Section {
+        nom: *b".idata  ", taille_virtuelle: 0x200, rva: 0x1000,
+        taille_brute: 0x200, offset_brut: 0, caracteristiques: 0,
+    }];
+    let mut data = vec![0u8; 0x200];
+    // Descripteur : le RVA du nom est en offset 12.
+    data[12..16].copy_from_slice(&(0x1000u32 + 0x40).to_le_bytes());
+    data[0x40..0x40 + 12].copy_from_slice(b"KERNEL32.dll");
+    // Terminateur nul apres le premier descripteur.
+
+    let entete = pe::EnTetePe {
+        machine: pe::MACHINE_AMD64, nombre_sections: 1, caracteristiques: 0,
+        magic_optionnel: pe::OPTIONAL_PE32PLUS, point_entree_rva: 0x1000,
+        base_image: 0x1_4000_0000, alignement_section: 0x1000,
+        alignement_fichier: 0x200, sous_systeme: pe::SUBSYSTEM_WINDOWS_CUI,
+        taille_image: 0x2000, taille_entetes: 0x200,
+        import_rva: 0x1000, import_taille: 20, offset_sections: 0,
+    };
+    let verdict = pe::classe_dependances(&data, &entete, |r| pe::offset_de_rva(&sections, r))
+        .expect("lisible");
+    match verdict {
+        pe::Dependances::Windows { offset_nom } => {
+            assert_eq!(&data[offset_nom..offset_nom + 8], b"KERNEL32");
+        }
+        autre => panic!("attendu Windows, obtenu {:?}", autre),
+    }
+}
+
+/// Une RVA que ne couvre aucune section ne se devine pas.
+#[test]
+fn une_rva_sans_section_ne_rend_aucun_offset() {
+    let sections = [pe::Section {
+        nom: *b".text   ", taille_virtuelle: 0x100, rva: 0x1000,
+        taille_brute: 0x100, offset_brut: 0x200, caracteristiques: 0,
+    }];
+    assert_eq!(pe::offset_de_rva(&sections, 0x1000), Some(0x200));
+    assert_eq!(pe::offset_de_rva(&sections, 0x10ff), Some(0x2ff));
+    assert_eq!(pe::offset_de_rva(&sections, 0x0fff), None);
+    assert_eq!(pe::offset_de_rva(&sections, 0x1100), None);
+}

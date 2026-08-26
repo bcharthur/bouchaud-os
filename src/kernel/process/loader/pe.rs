@@ -79,6 +79,14 @@ pub enum RefusPe {
     /// Le binaire importe une bibliotheque Windows : il lui faut une couche
     /// Win32, qui n'existe pas.
     SousSystemeWindows { bibliotheque: [u8; 32], longueur: usize },
+    /// Une section annonce des octets hors du fichier.
+    SectionHorsFichier { rva: u32 },
+    /// La table de relocations deborde, ou un bloc est incoherent.
+    RelocationsHorsFichier,
+    /// La table d'import pointe hors du fichier.
+    ImportsHorsFichier,
+    /// Une section demande a la fois l'ecriture et l'execution.
+    EcritureEtExecution { rva: u32 },
 }
 
 impl RefusPe {
@@ -181,6 +189,15 @@ pub fn lit_entete(data: &[u8]) -> Result<EnTetePe, RefusPe> {
     })
 }
 
+/// Offset de l'en-tete optionnel dans le fichier.
+pub fn offset_optionnel(data: &[u8]) -> Option<usize> {
+    let pe = offset_pe(data)?;
+    if data.len() < pe + 4 || data[pe..pe + 4] != PE_MAGIC {
+        return None;
+    }
+    Some(pe + 4 + 20)
+}
+
 /// Bibliotheques dont la presence prouve qu'un binaire attend Windows.
 ///
 /// La liste est volontairement courte et sure : ce sont les DLL que tout
@@ -207,4 +224,236 @@ pub fn est_bibliotheque_windows(nom: &[u8]) -> bool {
                 .zip(base.iter())
                 .all(|(a, b)| a.eq_ignore_ascii_case(b))
     })
+}
+
+// ---------------------------------------------------------------------------
+// Sections
+// ---------------------------------------------------------------------------
+
+/// `IMAGE_SCN_MEM_*` : les seuls drapeaux qui decident d'une protection.
+pub const SCN_MEM_EXECUTE: u32 = 0x2000_0000;
+pub const SCN_MEM_READ: u32 = 0x4000_0000;
+pub const SCN_MEM_WRITE: u32 = 0x8000_0000;
+/// `IMAGE_SCN_CNT_UNINITIALIZED_DATA` : `.bss`, sans octets dans le fichier.
+pub const SCN_CNT_BSS: u32 = 0x0000_0080;
+
+/// Taille d'un `IMAGE_SECTION_HEADER`.
+pub const TAILLE_SECTION: usize = 40;
+
+/// Une section, telle qu'elle devra etre projetee.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Section {
+    pub nom: [u8; 8],
+    /// Taille en memoire. Peut depasser `taille_brute` : le reste est zero.
+    pub taille_virtuelle: u32,
+    /// Adresse relative a `base_image`.
+    pub rva: u32,
+    /// Octets presents dans le fichier.
+    pub taille_brute: u32,
+    pub offset_brut: u32,
+    pub caracteristiques: u32,
+}
+
+impl Section {
+    pub fn executable(&self) -> bool { self.caracteristiques & SCN_MEM_EXECUTE != 0 }
+    pub fn lisible(&self) -> bool { self.caracteristiques & SCN_MEM_READ != 0 }
+    pub fn inscriptible(&self) -> bool { self.caracteristiques & SCN_MEM_WRITE != 0 }
+
+    /// Une section a la fois inscriptible et executable viole W^X.
+    ///
+    /// Le format l'autorise ; ce noyau ne le fera pas. Une image qui l'exige
+    /// est refusee plutot que projetee dans un etat qu'on ne veut pas offrir.
+    pub fn viole_w_xor_x(&self) -> bool {
+        self.executable() && self.inscriptible()
+    }
+}
+
+/// Lit les en-tetes de section. Le nombre vient de l'en-tete COFF.
+pub fn lit_sections(
+    data: &[u8],
+    entete: &EnTetePe,
+    sortie: &mut [Section],
+) -> Result<usize, RefusPe> {
+    let nombre = (entete.nombre_sections as usize).min(sortie.len());
+    for index in 0..nombre {
+        let base = entete.offset_sections + index * TAILLE_SECTION;
+        if data.len() < base + TAILLE_SECTION {
+            return Err(RefusPe::Tronque("en-tete de section"));
+        }
+        let mut nom = [0u8; 8];
+        nom.copy_from_slice(&data[base..base + 8]);
+        let section = Section {
+            nom,
+            taille_virtuelle: lit_u32(data, base + 8).ok_or(RefusPe::Tronque("taille virtuelle"))?,
+            rva: lit_u32(data, base + 12).ok_or(RefusPe::Tronque("rva de section"))?,
+            taille_brute: lit_u32(data, base + 16).ok_or(RefusPe::Tronque("taille brute"))?,
+            offset_brut: lit_u32(data, base + 20).ok_or(RefusPe::Tronque("offset brut"))?,
+            caracteristiques: lit_u32(data, base + 36)
+                .ok_or(RefusPe::Tronque("caracteristiques de section"))?,
+        };
+        // Une section dont les octets debordent du fichier ferait lire
+        // n'importe quoi. C'est une image invalide, pas une lecture a borner
+        // silencieusement : la borner produirait un programme a moitie charge.
+        if section.taille_brute > 0 {
+            let fin = section.offset_brut as usize + section.taille_brute as usize;
+            if fin > data.len() {
+                return Err(RefusPe::SectionHorsFichier { rva: section.rva });
+            }
+        }
+        sortie[index] = section;
+    }
+    Ok(nombre)
+}
+
+// ---------------------------------------------------------------------------
+// Relocations (base relocation table)
+// ---------------------------------------------------------------------------
+
+/// `IMAGE_REL_BASED_ABSOLUTE` : bourrage, a ignorer.
+pub const REL_ABSOLUTE: u16 = 0;
+/// `IMAGE_REL_BASED_DIR64` : le seul type qu'un binaire AMD64 produit.
+pub const REL_DIR64: u16 = 10;
+
+/// Une relocation a appliquer : ajouter le decalage a l'adresse `rva`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Relocation {
+    pub rva: u32,
+    pub genre: u16,
+}
+
+/// Parcourt la table de relocations et remet chaque entree a `visite`.
+///
+/// Le format est une suite de blocs : huit octets d'en-tete (RVA de page,
+/// taille du bloc), puis des entrees de 16 bits dont les 4 bits hauts donnent
+/// le type et les 12 bas le decalage dans la page.
+///
+/// `visite` plutot qu'un `Vec` : ce code doit pouvoir tourner sans allocateur,
+/// et une image peut porter des milliers de relocations.
+pub fn parcourt_relocations<F: FnMut(Relocation)>(
+    data: &[u8],
+    rva_table: u32,
+    taille_table: u32,
+    offset_de_rva: impl Fn(u32) -> Option<usize>,
+    mut visite: F,
+) -> Result<usize, RefusPe> {
+    if rva_table == 0 || taille_table == 0 {
+        return Ok(0);
+    }
+    let debut = offset_de_rva(rva_table).ok_or(RefusPe::RelocationsHorsFichier)?;
+    let fin = debut
+        .checked_add(taille_table as usize)
+        .ok_or(RefusPe::RelocationsHorsFichier)?;
+    if fin > data.len() {
+        return Err(RefusPe::RelocationsHorsFichier);
+    }
+
+    let mut curseur = debut;
+    let mut comptees = 0usize;
+    while curseur + 8 <= fin {
+        let page = lit_u32(data, curseur).ok_or(RefusPe::Tronque("bloc de relocation"))?;
+        let taille_bloc =
+            lit_u32(data, curseur + 8 - 4).ok_or(RefusPe::Tronque("taille de bloc"))? as usize;
+        // Un bloc plus petit que son en-tete, ou qui deborde, ferait boucler
+        // sans fin ou lire hors du fichier. Les deux se refusent ici.
+        if taille_bloc < 8 || curseur + taille_bloc > fin {
+            return Err(RefusPe::RelocationsHorsFichier);
+        }
+        let mut entree = curseur + 8;
+        while entree + 2 <= curseur + taille_bloc {
+            let brut = lit_u16(data, entree).ok_or(RefusPe::Tronque("entree de relocation"))?;
+            let genre = brut >> 12;
+            let decalage = (brut & 0x0fff) as u32;
+            if genre != REL_ABSOLUTE {
+                visite(Relocation { rva: page + decalage, genre });
+                comptees += 1;
+            }
+            entree += 2;
+        }
+        curseur += taille_bloc;
+    }
+    Ok(comptees)
+}
+
+// ---------------------------------------------------------------------------
+// Imports
+// ---------------------------------------------------------------------------
+
+/// Taille d'un `IMAGE_IMPORT_DESCRIPTOR`.
+pub const TAILLE_DESCRIPTEUR_IMPORT: usize = 20;
+
+/// Verdict sur les dependances d'une image.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Dependances {
+    /// Aucune importation : une image autonome, ce qu'est un `hello.exe`
+    /// Bouchaud de premiere generation.
+    Aucune,
+    /// Des importations, toutes hors de l'univers Windows.
+    Bouchaud,
+    /// Au moins une bibliotheque Windows. Position dans le fichier du nom
+    /// fautif, pour pouvoir le citer.
+    Windows { offset_nom: usize },
+}
+
+/// Classe les dependances d'une image sans rien charger.
+pub fn classe_dependances(
+    data: &[u8],
+    entete: &EnTetePe,
+    offset_de_rva: impl Fn(u32) -> Option<usize>,
+) -> Result<Dependances, RefusPe> {
+    if entete.import_rva == 0 || entete.import_taille == 0 {
+        return Ok(Dependances::Aucune);
+    }
+    let mut curseur = offset_de_rva(entete.import_rva).ok_or(RefusPe::ImportsHorsFichier)?;
+    let mut vues = 0usize;
+
+    // Le tableau se termine par un descripteur entierement nul.
+    while curseur + TAILLE_DESCRIPTEUR_IMPORT <= data.len() {
+        let bloc = &data[curseur..curseur + TAILLE_DESCRIPTEUR_IMPORT];
+        if bloc.iter().all(|&octet| octet == 0) {
+            break;
+        }
+        let rva_nom = lit_u32(data, curseur + 12).ok_or(RefusPe::Tronque("nom d'import"))?;
+        let offset_nom = offset_de_rva(rva_nom).ok_or(RefusPe::ImportsHorsFichier)?;
+        let nom = chaine_c(data, offset_nom).ok_or(RefusPe::ImportsHorsFichier)?;
+        if est_bibliotheque_windows(nom) {
+            return Ok(Dependances::Windows { offset_nom });
+        }
+        vues += 1;
+        curseur += TAILLE_DESCRIPTEUR_IMPORT;
+    }
+
+    if vues == 0 {
+        Ok(Dependances::Aucune)
+    } else {
+        Ok(Dependances::Bouchaud)
+    }
+}
+
+/// Chaine terminee par zero a partir d'un offset, sans deborder.
+pub fn chaine_c(data: &[u8], offset: usize) -> Option<&[u8]> {
+    let reste = data.get(offset..)?;
+    // Une chaine sans terminateur jusqu'a la fin du fichier est une image
+    // invalide, pas une chaine tres longue.
+    let fin = reste.iter().position(|&octet| octet == 0)?;
+    Some(&reste[..fin])
+}
+
+/// Traduit une adresse virtuelle relative en offset dans le fichier.
+///
+/// Rend `None` quand aucune section ne la couvre : une RVA qui ne correspond a
+/// rien est une image invalide, et deviner l'offset produirait un programme
+/// charge depuis les mauvais octets.
+pub fn offset_de_rva(sections: &[Section], rva: u32) -> Option<usize> {
+    for section in sections {
+        let debut = section.rva;
+        let fin = debut.checked_add(section.taille_virtuelle.max(section.taille_brute))?;
+        if rva >= debut && rva < fin {
+            let dans_section = rva - debut;
+            if dans_section >= section.taille_brute {
+                return None; // dans le `.bss` : aucun octet dans le fichier
+            }
+            return Some(section.offset_brut as usize + dans_section as usize);
+        }
+    }
+    None
 }

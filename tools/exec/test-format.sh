@@ -16,8 +16,18 @@ set -eu
 cd "$(dirname "$0")/../.."
 
 SORTIE=${TMPDIR:-/tmp}/bo-test-format-exec
+export BO_HELLO_EXE=${TMPDIR:-/tmp}/bo-hello.exe
 
+# La fixture est REGENEREE a chaque execution. Un binaire commite serait un
+# fichier que personne ne relit ; regenere, il reste le produit d'un source
+# lisible, et le generateur (Python) comme le parseur (Rust) sont ecrits
+# separement a partir de la specification. Qu'ils s'accordent est donc une
+# verification, pas une tautologie.
+echo "== fixture hello.exe =="
+python3 tools/exec/fabrique-hello-exe.py "$BO_HELLO_EXE"
+
+echo
 echo "== tests d'unite des formats d'executable (hote) =="
 rustc --edition 2021 --test -o "$SORTIE" tools/exec/test_format.rs
 "$SORTIE"
-rm -f "$SORTIE"
+rm -f "$SORTIE" "$BO_HELLO_EXE"
