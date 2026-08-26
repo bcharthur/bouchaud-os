@@ -2900,6 +2900,7 @@ fn debug_assert_interrupts_enabled() {
 /// obligatoire avant HLT.
 pub fn wait_for_interrupt_releasing_bkl() {
     debug_assert_interrupts_enabled();
+    let profondeur_entree = smp_lock::profondeur_locale();
     // BOUCHAUD_P0_IDLE_WAKE_HANDSHAKE_V14
     cpu::prepare_scheduler_idle();
     let depth = smp_lock::suspend_for_schedule();
@@ -2912,6 +2913,63 @@ pub fn wait_for_interrupt_releasing_bkl() {
 
     cpu::commit_scheduler_idle();
     smp_lock::resume_after_schedule(depth);
+    verifie_profondeur_rendue("wait_for_interrupt_releasing_bkl", profondeur_entree);
+}
+
+// BOUCHAUD_P0_CONTRAT_PROFONDEUR_V1
+//
+// LE CONTRAT, ET POURQUOI IL N'ETAIT NULLE PART
+// ---------------------------------------------
+// Toute primitive bloquante du noyau rend la main en gardant le gros verrou a
+// la profondeur exacte ou elle l'a trouve. `suspend_for_schedule` la met a
+// zero, `resume_after_schedule` la restaure : le contrat est simple, et il
+// n'etait verifie nulle part.
+//
+// La consequence pratique est ce qui a rendu
+// `smp_lock: release sans acquisition` si difficile a attribuer. Une primitive
+// qui perd une profondeur ne provoque AUCUNE erreur : la panique arrive plus
+// tard, au Drop d'un garde quelconque -- souvent d'une autre fonction, parfois
+// d'une autre tache. La victime n'est pas le coupable, et la trace accuse le
+// mauvais code.
+//
+// Ces post-conditions transforment ce panic differe et anonyme en echec
+// immediat et NOMME. Elles ne masquent rien : elles s'ajoutent aux assertions
+// de `release_one`, qui restent intactes.
+#[inline]
+fn verifie_profondeur_rendue(site: &str, attendue: usize) {
+    #[cfg(debug_assertions)]
+    {
+        let rendue = smp_lock::profondeur_locale();
+        if rendue != attendue {
+            smp_lock::vide_enregistreur();
+            panic!(
+                "task: {} a rendu une profondeur BKL de {} au lieu de {} \
+                 (contrat de suspension rompu)",
+                site, rendue, attendue,
+            );
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = (site, attendue);
+}
+
+/// Meme controle, mais applique a la SORTIE d'une portee, quelle qu'elle soit.
+///
+/// `schedule()` a plusieurs retours -- pas de tache courante, rien a elire,
+/// commutation effective. Un controle ecrit a la main sur chacun d'eux se
+/// serait desynchronise au premier retour ajoute ; celui-ci ne le peut pas.
+struct ControleProfondeur {
+    site: &'static str,
+    attendue: usize,
+}
+
+impl Drop for ControleProfondeur {
+    fn drop(&mut self) {
+        // Le garde de `schedule()` n'est pas encore relache quand ce Drop
+        // s'execute : la profondeur attendue est donc celle d'entree, PLUS le
+        // niveau que `schedule()` detient encore.
+        verifie_profondeur_rendue(self.site, self.attendue.saturating_add(1));
+    }
 }
 
 /// Rend la main : bascule sur une autre tache prete s'il y en a une.
@@ -2920,7 +2978,9 @@ pub fn wait_for_interrupt_releasing_bkl() {
 /// la seule prete, la fonction attend une interruption (`hlt`) et rend la main a
 /// l'appelant, qui doit reevaluer sa condition d'attente.
 pub fn schedule() -> bool {
+    let profondeur_entree = smp_lock::profondeur_locale();
     let _kernel = smp_lock::enter();
+    let _controle = ControleProfondeur { site: "schedule", attendue: profondeur_entree };
     complete_switch_handoff();
     let cur = current_index_raw();
     if cur == NO_TASK { return false; }
@@ -3541,9 +3601,11 @@ pub(crate) fn park_current_on(wait_queue_key: usize) {
         task.wait_queue_key = wait_queue_key;
         task.state = TaskState::Blocked;
     }
+    let profondeur_entree = smp_lock::profondeur_locale();
     while current().state == TaskState::Blocked {
         schedule();
     }
+    verifie_profondeur_rendue("park_current_on", profondeur_entree);
     current().wait_queue_key = 0;
 }
 
@@ -3559,9 +3621,11 @@ pub(crate) fn park_current_on_until(wait_queue_key: usize, deadline_ns: u64) -> 
         task.wake_deadline_ns = deadline_ns;
         task.state = TaskState::Blocked;
     }
+    let profondeur_entree = smp_lock::profondeur_locale();
     while current().state == TaskState::Blocked {
         schedule();
     }
+    verifie_profondeur_rendue("park_current_on_until", profondeur_entree);
     let notified = crate::kernel::timer::monotonic_ns() < deadline_ns;
     let task = current();
     task.wait_queue_key = 0;
@@ -4220,6 +4284,8 @@ pub fn sleep_ticks(ticks: u64) {
         smp_lock::held_by_current_cpu(),
         "task: sleep_ticks requiert le BKL externe de l'appelant"
     );
+    // BOUCHAUD_P0_CONTRAT_PROFONDEUR_V1 : voir `verifie_profondeur_rendue`.
+    let profondeur_entree = smp_lock::profondeur_locale();
     let duration_ns = ticks.max(1)
         .saturating_mul(1_000_000_000 / crate::kernel::timer::TICKS_PER_SECOND);
     let deadline = crate::kernel::timer::monotonic_ns().saturating_add(duration_ns);
@@ -4248,6 +4314,7 @@ pub fn sleep_ticks(ticks: u64) {
         }
     }
     smp_lock::resume_after_schedule(outer_depth);
+    verifie_profondeur_rendue("sleep_ticks", profondeur_entree);
     let task = current();
     task.wake_deadline_ns = 0;
     task.state = TaskState::Ready;

@@ -463,6 +463,22 @@ fn release_one(cpu: usize) {
         token(cpu) as u64,
     );
 
+    // Vider ICI, et pas seulement dans le `panic_handler`.
+    //
+    // Le handler y arrive desormais avant le releve riche, mais il passe quand
+    // meme par l'arbitrage global, la VGA et `println!`. Or ce qu'on tient a cet
+    // instant precis est la transition FAUTIVE elle-meme : c'est le moment ou
+    // l'anneau vaut le plus cher, et le moment ou le noyau est le moins digne
+    // de confiance. Le vidage est idempotent (l'anneau se gele au premier
+    // appel), donc le handler n'en produira pas un second.
+    if depth == 0 || owner != token(cpu) {
+        crate::serial_println_brut!(
+            "[BKL-FR] VIOLATION release cpu={} depth={} owner={} attendu={}",
+            cpu, depth, owner, token(cpu),
+        );
+        vide_enregistreur();
+    }
+
     debug_assert!(depth > 0, "smp_lock: release sans acquisition");
     debug_assert_eq!(
         owner,
@@ -614,6 +630,20 @@ pub fn try_enter_depuis_zero() -> Option<KernelGuard> {
     } else {
         None
     }
+}
+
+/// Profondeur BKL du CPU courant.
+///
+/// Sert aux POST-CONDITIONS des primitives bloquantes. Une primitive qui rend
+/// la main doit rendre au verrou exactement la profondeur qu'elle a trouvee ;
+/// sans ce controle, une profondeur perdue ne se manifeste qu'au Drop d'un
+/// garde quelconque, beaucoup plus tard, sous la forme anonyme
+/// « release sans acquisition ». La victime n'est alors pas le coupable, et
+/// c'est ce qui rendait ce panic si difficile a attribuer.
+pub fn profondeur_locale() -> usize {
+    let cpu = cpu();
+    let _irq = LocalIrqGuard::acquire();
+    DEPTH[cpu].load(Ordering::Relaxed)
 }
 
 pub fn held_by_current_cpu() -> bool {
