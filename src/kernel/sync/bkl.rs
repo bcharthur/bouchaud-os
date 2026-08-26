@@ -1028,10 +1028,14 @@ pub mod enregistreur {
         let seq = SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1;
         let case = &ANNEAU[(seq as usize) % TAILLE];
 
+        // Tout est lu POUR `cpu`, l'index que le verrou lui-meme utilise --
+        // jamais via GS. Trois `rdmsr` par transition enregistree seraient
+        // trois sorties de machine virtuelle, et l'effet Heisenberg suffirait a
+        // deplacer la course qu'on cherche a observer.
         let (index, syscall_nr, phase, _site, _aux) =
-            crate::kernel::task::stall_probe_local_context();
+            crate::kernel::task::stall_probe_context_pour(cpu);
         let (tid, kstack) = {
-            let per_cpu = crate::arch::x86_64::usermode::per_cpu();
+            let per_cpu = crate::arch::x86_64::usermode::per_cpu_for(cpu);
             (per_cpu.current, per_cpu.kernel_rsp)
         };
 
@@ -1048,10 +1052,8 @@ pub mod enregistreur {
         );
         case.tache
             .store((index as u64 & 0xFFFF_FFFF) | (tid << 32), Ordering::Relaxed);
-        case.pid.store(
-            crate::kernel::task::pid_local_pour_sonde(),
-            Ordering::Relaxed,
-        );
+        case.pid
+            .store(crate::kernel::task::pid_pour_sonde(cpu), Ordering::Relaxed);
         case.syscall.store(syscall_nr, Ordering::Relaxed);
         case.aux.store(aux, Ordering::Relaxed);
         case.rsp.store(rsp_courant(), Ordering::Relaxed);

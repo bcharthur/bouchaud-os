@@ -1108,9 +1108,13 @@ const STALL_NO_SYSCALL: u64 = u64::MAX;
 // coute un `store` relaxe par changement de contexte.
 static PID_LOCAL: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
-/// PID de la tache courante sur ce CPU, sans prendre le moindre verrou.
-pub fn pid_local_pour_sonde() -> u64 {
-    PID_LOCAL[local_cpu()].load(Ordering::Relaxed)
+/// PID de la tache installee sur `cpu`, sans verrou et sans `rdmsr`.
+///
+/// L'index est passe par l'appelant : `local_cpu()` lit GS via `rdmsr`, et
+/// l'enregistreur de vol du BKL connait deja son CPU. Le refaire lire coutait
+/// une sortie de machine virtuelle par transition enregistree.
+pub fn pid_pour_sonde(cpu: usize) -> u64 {
+    PID_LOCAL[cpu.min(MAX_CPUS - 1)].load(Ordering::Relaxed)
 }
 
 static STALL_SYSCALL_NR: [AtomicU64; MAX_CPUS] =
@@ -1316,7 +1320,13 @@ pub fn nom_pour_faute() -> &'static str {
 }
 
 pub fn stall_probe_local_context() -> (usize, u64, u32, u32, u64) {
-    let cpu = local_cpu();
+    stall_probe_context_pour(local_cpu())
+}
+
+/// Meme releve, pour un CPU deja connu : evite un `rdmsr` a l'appelant qui a
+/// deja son index sous la main.
+pub fn stall_probe_context_pour(cpu: usize) -> (usize, u64, u32, u32, u64) {
+    let cpu = cpu.min(MAX_CPUS - 1);
     (
         CURRENT[cpu].load(Ordering::Acquire),
         STALL_SYSCALL_NR[cpu].load(Ordering::Acquire),
