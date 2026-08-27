@@ -42,23 +42,30 @@ Compatibilité ABI (Linux aujourd'hui, Bouchaud native à terme)
                  Hardware
 ```
 
-La règle de dépendance est simple : **le cœur générique ne doit pas connaître un
+La règle de dépendance cible est simple : **le cœur générique ne doit pas connaître un
 CPU ou un périphérique concret**. `x86_64`, `AArch64`, `e1000`, VGA, ATA ou un
-Raspberry Pi sont des backends, pas des concepts du kernel.
+Raspberry Pi sont des backends, pas des concepts du kernel. La structure existe,
+mais la suppression de toutes les dépendances historiques reste progressive.
 
 ## État actuel
 
+> **Références vivantes :** [Current status](STATUS.md) distingue les éléments
+> prouvés, implémentés, en cours et planifiés. Le périmètre de la première
+> release est défini dans [Bouchaud OS 0.1](docs/BOUCHAUD_OS_0_1.md).
+
 - noyau Rust `no_std`, mémoire virtuelle, ELF, ring 3 et ABI Linux-compatible ;
-- processus, threads et ordonnanceur SMP expérimental ;
+- processus, threads et ordonnanceur SMP ; Gate0 a validé trois boots QEMU
+  SMP4, sans généraliser cette preuve à SMP8 ou au matériel physique ;
 - pile réseau, TCP/IP, DNS et TLS ;
 - framebuffer/GUI historique et entrées clavier/souris ;
-- intégration Ladybird native en cours, avec plusieurs processus/services ;
+- intégration de WebContent/Ladybird et de plusieurs services ; le frontend
+  Ladybird complet, sa sandbox et la compatibilité Web générale restent à faire ;
 - x86_64/QEMU : cible fonctionnelle ;
 - AArch64/QEMU `virt` : structure créée, bring-up à faire ;
 - Raspberry Pi 4 : cible matérielle suivante ;
 - Raspberry Pi 5 : hors du premier port, volontairement.
 
-Le BKL historique et plusieurs structures issues de la première architecture UP
+Le BKL historique et plusieurs structures issues de la première architecture
 restent des dettes connues. La restructuration multiplateforme ne prétend pas les
 masquer : elle crée les frontières nécessaires pour les supprimer proprement.
 
@@ -175,6 +182,10 @@ ne perdre aucune information historique.
 
 Documents utiles :
 
+- `STATUS.md` — statut avec preuves et limites explicites ;
+- `docs/BOUCHAUD_OS_0_1.md` — scope et Definition of Done de la version 0.1 ;
+- `docs/ARCHITECTURE_DIRECTION.md` — architecture actuelle et cible sans les
+  confondre ;
 - `docs/ETAT_DES_LIEUX.md` — état réel et preuves ;
 - `docs/VISION.md` — direction du système ;
 - `docs/ARCHITECTURE.md` — architecture générale ;

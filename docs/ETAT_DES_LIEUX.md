@@ -159,9 +159,9 @@ deux secondes. La barre d'adresse accepte donc enfin des noms.
 
 - **Ladybird est desormais le chemin par defaut de `run.ps1`** ; le navigateur
   historique (Python + QuickJS + Qt) se demande par `-Legacy`. Ce n'est pas la
-  meme chose que « Ladybird est le moteur du produit » : il ouvre une fenetre au
-  double-clic et charge une page, mais aucun site public n'a encore ete montre
-  charge par son nom de bout en bout (ligne suivante).
+  meme chose que « le frontend Ladybird complet est porte » : WebContent et les
+  services integres ouvrent une fenetre et chargent une page publique par son
+  nom, mais les limites ci-dessous restent applicables.
 - **Aucune isolation.** Le sandbox d'upstream est volontairement remplace par
   l'implementation non effective. C'est M14.
 - **Trois services d'upstream sur six sont lances**, et un quatrieme n'est meme
