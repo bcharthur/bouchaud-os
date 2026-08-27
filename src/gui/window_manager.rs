@@ -363,7 +363,6 @@ fn boucle() {
     let mut icon_drag: Option<(usize, i32, i32, i32, i32)> = None;
     let mut last_icon_tap: Option<(usize, u64)> = None;
 
-    wins.push(make_app(0, home, &mut spawn_n)); // un terminal pour commencer
 
     let mut quit = false;
     // Tout est sale au premier tour : il n'y a encore rien a l'ecran.
@@ -372,6 +371,14 @@ fn boucle() {
     // Reutilise d'une trame a l'autre : construire le plan ne doit pas allouer.
     let mut calques: Vec<Calque> = Vec::new();
     degats.tout(); // premier tour : rien n'est encore a l'ecran
+
+    // Un terminal pour commencer. Le premier tour est deja plein ecran, mais on
+    // passe par le meme chemin que tout le monde : c'est ce qui rend la regle
+    // verifiable au lieu d'etre une habitude.
+    {
+        let fenetre = make_app(0, home, &mut spawn_n);
+        ouvre_fenetre(&mut wins, fenetre, &mut degats);
+    }
     let mut derniere_trame = 0u64;
     let mut derniere_horloge = 0u64;
     let mut derniere_souris = (usize::MAX, usize::MAX);
@@ -574,10 +581,14 @@ fn boucle() {
                         if double {
                             let kind = ICONS[idx].1;
                             if kind == window::KIND_NAVIGATEUR {
-                                lance_navigateur(&mut wins, home);
+                                lance_navigateur(&mut wins, home, &mut degats);
                             } else {
-                                wins.push(make_app(kind, home, &mut spawn_n));
+                                let fenetre = make_app(kind, home, &mut spawn_n);
+                                ouvre_fenetre(&mut wins, fenetre, &mut degats);
                             }
+                            // Une fenetre vient d'apparaitre : sans cela, la
+                            // trame ne serait composee qu'au prochain degat.
+                            sale = true;
                             last_icon_tap = None;
                         } else {
                             last_icon_tap = Some((idx, tick));
@@ -1162,12 +1173,54 @@ fn ferme_tous_les_clients(wins: &mut Vec<Win>) {
 ///
 /// Le processus est lance sans attendre : la fenetre existe immediatement, avec
 /// son ecran de demarrage, et se remplira a la premiere trame du client.
-fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize) {
+// BOUCHAUD_GUI_OUVERTURE_DAMAGE_V1
+//
+// LE DEFAUT QUE CE HELPER SUPPRIME
+// --------------------------------
+// Ouvrir une application par DOUBLE-CLIC sur une icone du bureau poussait la
+// fenetre dans `wins` et n'annoncait RIEN : ni degat, ni `sale`. Le chemin par
+// le menu Demarrer, lui, appelait `degats.tout()`.
+//
+// Consequence exacte, et c'est celle qu'on a vue a l'ecran : la fenetre et son
+// bouton de barre des taches n'existaient que dans l'etat. Ils n'apparaissaient
+// qu'au moment ou un AUTRE degat passait par la — le curseur qu'on promene par
+// exemple, d'ou « la barre des taches n'affiche Fichiers que si je passe la
+// souris dessus ».
+//
+// Une fenetre qui apparait est le seul cas ou le plein ecran est justifie : ce
+// qu'elle recouvre n'a jamais ete dessine, et le bureau est seul a le savoir.
+//
+// Pousser directement dans `wins` est desormais interdit ailleurs qu'ici :
+// `tools/verifie-ouverture-fenetre.py` echoue si un `wins.push` reapparait hors
+// de cette fonction. Le contrat ne peut donc plus etre oublie a un appelant.
+
+/// Ajoute une fenetre au bureau ET annonce ce que son apparition change.
+fn ouvre_fenetre(wins: &mut Vec<Win>, fenetre: Win, degats: &mut Degats) {
+    wins.push(fenetre);
+    degats.tout();
+}
+
+/// Remonte au premier plan une fenetre DEJA presente, et rend son nouvel index.
+///
+/// Ce n'est pas une apparition : la fenetre etait deja dessinee, elle etait
+/// seulement partiellement recouverte. Le degat correspondant est celui du
+/// focus (`transition::focus_transfere`), pas le plein ecran — d'ou une
+/// fonction distincte de `ouvre_fenetre`, pour que les deux intentions ne se
+/// confondent pas a la relecture.
+fn remonte_fenetre(wins: &mut Vec<Win>, index: usize) -> usize {
+    let fenetre = wins.remove(index);
+    wins.push(fenetre);
+    wins.len() - 1
+}
+
+fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
     // Une seule instance : deux navigateurs, ce sont deux surfaces de 2,6 Mio et
     // deux Qt qui demarrent en meme temps sur un cœur unique.
     if let Some(index) = wins.iter().position(|w| window::est_client(w)) {
         let w = wins.remove(index);
-        wins.push(w);
+        // Une instance existante remonte et se demasque : meme raison qu'une
+        // apparition, ce qu'elle recouvre n'a pas ete dessine sous elle.
+        ouvre_fenetre(wins, w, degats);
         if let Some(w) = wins.last_mut() {
             w.min = false;
         }
@@ -1199,7 +1252,7 @@ fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize) {
         app: App::Navigateur { client: alloc::boxed::Box::new(client) },
     };
     clamp_win(&mut w);
-    wins.push(w);
+    ouvre_fenetre(wins, w, degats);
     if let Some(App::Navigateur { client }) = wins.last_mut().map(|w| &mut w.app) {
         client.envoie_configuration(true);
     }
@@ -1326,7 +1379,7 @@ fn handle_click(
     // de l'image -- une fenetre qui apparait ou disparait, parce que le fond
     // qu'elle decouvre n'est connu de personne d'autre.
     if *menu_open {
-        let mut ouvre_fenetre = false;
+        let mut fenetre_ouverte = false;
         // BOUCHAUD_GUI_HOVER_CONTRAT_V1
         //
         // Le clic lisait la ligne avec sa PROPRE formule :
@@ -1343,8 +1396,14 @@ fn handle_click(
         if let Some(row) = window::ligne_menu_survolee(mx, my) {
             if let Some(&(_, kind)) = MENU.get(row) {
                 if kind == usize::MAX { *quit = true; }
-                else if kind == window::KIND_NAVIGATEUR { lance_navigateur(wins, home); ouvre_fenetre = true; }
-                else { wins.push(make_app(kind, home, spawn_n)); ouvre_fenetre = true; }
+                else if kind == window::KIND_NAVIGATEUR {
+                    lance_navigateur(wins, home, degats);
+                    fenetre_ouverte = true;
+                } else {
+                    let fenetre = make_app(kind, home, spawn_n);
+                    ouvre_fenetre(wins, fenetre, degats);
+                    fenetre_ouverte = true;
+                }
             }
         }
         *menu_open = false;
@@ -1354,8 +1413,10 @@ fn handle_click(
         for rect in transition::menu_bascule(window::menu_proto(), barre_taches_rect()).iter() {
             degats.ajoute(Origine::Menu, rect);
         }
-        if ouvre_fenetre {
-            degats.tout();
+        if fenetre_ouverte {
+            // `ouvre_fenetre` a deja annonce le plein ecran ; ce drapeau ne
+            // sert plus qu'a documenter qu'une fenetre est apparue ici.
+            debug_assert!(!degats.vide());
         }
         return;
     }
@@ -1376,30 +1437,29 @@ fn handle_click(
             let cadre_focus_perdu = widgets::indice_focus(wins)
                 .filter(|&precedent| precedent != i)
                 .map(|precedent| cadre_fenetre(&wins[precedent]));
-            let mut w = wins.remove(i);
-            let etait_minimisee = w.min;
-            w.min = false;
+            let etait_minimisee = wins[i].min;
+            wins[i].min = false;
             // Le contenu d'un client n'est pas redessine par le bureau : il est
             // recopie depuis sa surface. Apres une restauration, il faut donc
             // redemander cette recopie, sinon la fenetre reapparait vide
             // jusqu'a la prochaine trame du client — qui peut ne jamais venir
             // si la page est statique.
-            if let App::Navigateur { client } = &mut w.app {
+            if let App::Navigateur { client } = &mut wins[i].app {
                 client.abime_tout();
             }
+            // Remonter n'est pas apparaitre : on reordonne, on ne cree rien.
+            let index = remonte_fenetre(wins, i);
             let bascule = transition::focus_transfere(
-                cadre_focus_perdu, cadre_fenetre(&w), barre_taches_rect(),
+                cadre_focus_perdu, cadre_fenetre(&wins[index]), barre_taches_rect(),
             );
             for rect in bascule.iter() {
                 degats.ajoute(Origine::Fenetre, rect);
             }
             if etait_minimisee {
                 // Une fenetre reapparait : ce qu'elle recouvre n'a jamais ete
-                // dessine sous elle. Seul cas ou le plein ecran est justifie
-                // ici, et il est desormais conditionnel.
+                // dessine sous elle. Seul cas ou le plein ecran est justifie.
                 degats.tout();
             }
-            wins.push(w);
             return;
         }
     }
@@ -1448,9 +1508,7 @@ fn handle_click(
         let cadre_focus_perdu = widgets::indice_focus(wins)
             .filter(|&precedent| precedent != i)
             .map(|precedent| cadre_fenetre(&wins[precedent]));
-        let w = wins.remove(i);
-        wins.push(w);
-        let index = wins.len() - 1;
+        let index = remonte_fenetre(wins, i);
         if !deja_au_dessus {
             let bascule = transition::focus_transfere(
                 cadre_focus_perdu, cadre_fenetre(&wins[index]), barre_taches_rect(),

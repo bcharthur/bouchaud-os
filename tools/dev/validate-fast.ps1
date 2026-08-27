@@ -93,6 +93,10 @@ try {
         & python .\tools\verifie-ordre-verrous.py
     }
 
+    Invoke-Step "ouverture de fenetre (source)" {
+        & python .\tools\verifie-ouverture-fenetre.py
+    }
+
     if (Test-Path ".\tools\verifie-protocole-gui.py") {
         Invoke-Step "coherence protocole GUI" {
             & python .\tools\verifie-protocole-gui.py
