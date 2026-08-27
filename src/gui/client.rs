@@ -41,6 +41,7 @@ use crate::gui::protocole::{self as proto, Genre, Lecture, Rect};
 use crate::gui::surface::Surface;
 use crate::kernel::fd::{Canal, FdKind, FileDesc, CAPACITE_CANAL};
 use crate::kernel::task::{self, EcranVirtuel, Priorite};
+use crate::gui::silence::VerdictProtocole;
 
 /// Chemin du navigateur dans le RAMFS.
 pub const CHEMIN_NAVIGATEUR: &str = "/bo-navigateur";
@@ -70,9 +71,10 @@ pub struct Client {
     /// Degat accumule depuis la derniere composition, dans le repere surface.
     degat: Rect,
     serie: u32,
-    /// Le client a-t-il dit bonjour ? Tant qu'il ne l'a pas fait, il n'utilise
-    /// pas le protocole et le compositeur retombe sur un rythme fixe.
-    pub protocole_actif: bool,
+    /// Ce client annonce-t-il ses trames ? Voir [`VerdictProtocole`] : les deux
+    /// etats possibles y sont tenus ensemble, parce qu'ils repondent a la meme
+    /// question et ne peuvent pas etre vrais en meme temps.
+    verdict: VerdictProtocole,
     /// Le client a demande sa fermeture (`Close`).
     pub fermeture_demandee: bool,
     /// Compteurs, pour que le journal puisse dire ce que fait ce client.
@@ -89,8 +91,6 @@ pub struct Client {
     pub derniere_trame: u64,
     /// Tick du lancement.
     debut: u64,
-    /// Le client peint sans annoncer ses trames : on compose au rythme fixe.
-    pub sans_protocole: bool,
 }
 
 impl Client {
@@ -185,7 +185,7 @@ impl Client {
             tampon: Vec::new(),
             degat: Rect::default(),
             serie: 0,
-            protocole_actif: false,
+            verdict: VerdictProtocole::neuf(),
             fermeture_demandee: false,
             trames: 0,
             octets_recus: 0,
@@ -193,7 +193,6 @@ impl Client {
             evenements_perdus: 0,
             derniere_trame: 0,
             debut: crate::kernel::timer::ticks(),
-            sans_protocole: false,
         };
         client.annonce_surface();
         Ok(client)
@@ -354,7 +353,7 @@ impl Client {
             // laisser manger la memoire du noyau.
             if self.tampon.len() > CAPACITE_CANAL {
                 self.tampon.clear();
-                self.protocole_actif = false;
+                self.verdict.retire_le_protocole();
             }
         }
 
@@ -365,7 +364,7 @@ impl Client {
                 Lecture::Invalide => {
                     crate::kernel::dmesg::log("gui: flux client invalide, canal ignore");
                     self.tampon.clear();
-                    self.protocole_actif = false;
+                    self.verdict.retire_le_protocole();
                     break;
                 }
                 Lecture::Message { genre, debut, taille, total } => {
@@ -380,11 +379,50 @@ impl Client {
         trame_prete
     }
 
+    /// Ce client parle-t-il le protocole ?
+    pub fn protocole_actif(&self) -> bool {
+        self.verdict.protocole_actif()
+    }
+
+    /// Le compositeur doit-il recopier sa surface sans y etre invite ?
+    pub fn recompose_a_l_aveugle(&self) -> bool {
+        self.verdict.recompose_a_l_aveugle()
+    }
+
+    // BOUCHAUD_GUI_PROTOCOLE_TARDIF_V1
+    /// Enregistre qu'un message VALIDE prouve que ce client parle le protocole.
+    ///
+    /// # Pourquoi une fonction et pas deux affectations
+    ///
+    /// `protocole_actif = true` etait pose a quatre endroits, et `sans_protocole`
+    /// a aucun. Les deux drapeaux repondent pourtant a la meme question --
+    /// « ce client annonce-t-il ses trames ? » -- et ne peuvent pas etre vrais
+    /// en meme temps.
+    ///
+    /// Le resultat en production : Ladybird met plus de six secondes a demarrer
+    /// sous TCG, depasse le delai de patience, est declare muet, puis se met a
+    /// parler le protocole. `protocole_actif` passait a vrai, `sans_protocole`
+    /// restait vrai, et `client_muet_visible` avec lui. Le compositeur
+    /// recomposait donc a l'aveugle pour toujours : sur un intervalle mesure,
+    /// 94 trames utiles pour 94 recompositions aveugles -- exactement les
+    /// memes.
+    ///
+    /// Un seul point de passage rend l'incoherence impossible a reintroduire.
+    fn marque_protocole_actif(&mut self) {
+        if self.verdict.marque_protocole_actif() {
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "gui: client pid={} parle finalement le protocole — fin de la \
+                 recomposition au rythme fixe",
+                self.pid
+            ));
+        }
+    }
+
     /// Traite un message client. Rend `true` si c'est une trame a composer.
     fn traite(&mut self, genre: Genre, charge: &[u8]) -> bool {
         match genre {
             Genre::Hello => {
-                self.protocole_actif = true;
+                self.marque_protocole_actif();
                 crate::kernel::dmesg::log_fmt(format_args!(
                     "gui: client pid={} parle le protocole v{}",
                     self.pid,
@@ -394,7 +432,7 @@ impl Client {
                 false
             }
             Genre::CreateWindow => {
-                self.protocole_actif = true;
+                self.marque_protocole_actif();
                 false
             }
             Genre::SetTitle => {
@@ -425,7 +463,7 @@ impl Client {
                     return false;
                 }
                 self.degat = self.degat.union(&degat);
-                self.protocole_actif = true;
+                self.marque_protocole_actif();
                 if self.derniere_trame == 0 {
                     crate::kernel::dmesg::log_fmt(format_args!(
                         "gui: premiere trame du client pid={} ({}x{})",
@@ -467,7 +505,10 @@ impl Client {
     /// moins efficace — on recopie parfois pour rien — mais c'est la difference
     /// entre un navigateur qui s'affiche et une fenetre vide.
     pub fn verifie_silence(&mut self) -> bool {
-        if self.protocole_actif || self.sans_protocole || self.etat == Etat::Termine {
+        if self.verdict.protocole_actif()
+            || self.verdict.recompose_a_l_aveugle()
+            || self.etat == Etat::Termine
+        {
             return false;
         }
         let age = crate::kernel::timer::ticks().saturating_sub(self.debut);
@@ -479,7 +520,7 @@ impl Client {
             self.pid,
             Self::PATIENCE_MS / 1000
         ));
-        self.sans_protocole = true;
+        self.verdict.declare_muet();
         self.etat = Etat::Actif;
         self.abime_tout();
         true
