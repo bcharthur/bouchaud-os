@@ -30,7 +30,10 @@ degradation progressive**. Google se rend correctement au depart puis devient
 inutilisable, parce que la liste libre et l'ensemble resident ne cessent de
 grandir.
 
-## `poll` est une victime, pas une cause
+## `poll` etait une victime — et le suivant
+
+*Cette section decrit le profil de `249a005`. Elle reste vraie de ce
+profil-la ; voir « Le suivant, nomme par la mesure » pour ce qui a suivi.*
 
 `poll(7)` montait a 11,4 s puis 12,4 s sur CPU0. L'audit du chemin dit que ce
 ne peut pas etre de la DETENTION :
@@ -115,6 +118,62 @@ qui le reprend apres un changement de contexte le rend avant de bloquer de
 nouveau. `tools/smp/test_discipline_bkl.rs` decrit les chemins reels de
 `madvise` et `poll`, rejoue les trois defauts comme traces fautives, et exige
 qu'elles soient refusees.
+
+## Le resultat mesure
+
+Runtime reel sur `5b196fa`, chargement de `https://www.google.com/`, 4 vCPU TCG.
+
+| Mesure | Avant (`249a005`) | Apres (`5b196fa`) |
+|---|---|---|
+| `bkl_hold_delta_ns` / fenetre | 5,23 s / 5,24 s — **99,96 %** | 1,0 a 2,0 s / 5,0 s — **20 a 40 %** |
+| `bkl_wait_delta_ns` | 15,59 s | 2,1 a 3,5 s |
+| `max_hold_ns` | **15,09 s**, `madvise(28)`, origine `resume_after_schedule` | 1,52 s, `syscall=none`, origine `enter`, **a l'amorcage** (t=3 s, avant le navigateur) |
+| `madvise` dans `[BKL-SYSCALL]` | le coupable | **absent du classement** |
+
+Les trois quadratiques ont disparu du profil. `madvise` ne figure plus une seule
+fois dans les cinq relevés `[BKL-SYSCALL]` de la session, et la plus longue
+tenue restante appartient a l'amorcage — donc a du travail qui n'a pas de
+concurrent.
+
+`bkl_acq_delta` est reste entre 16 000 et 31 000 par fenetre. C'etait attendu et
+c'est dit plus bas : les corrections changent le cout DANS des sections
+critiques, pas leur nombre.
+
+## Le suivant, nomme par la mesure
+
+Avec `madvise` corrige, `[BKL-SYSCALL]` a designe le suivant sans ambiguite :
+
+```
+poll=[hold_delta_ns=1949720609 hold_pct=38 acq_total=20567  wait_total_ns=3093632469]
+poll=[hold_delta_ns=1554120148 hold_pct=31 acq_total=31339  ...]
+poll=[hold_delta_ns=1527715238 hold_pct=30 acq_total=43625  ...]
+poll=[hold_delta_ns=1197268826 hold_pct=23 acq_total=57546  ...]
+poll=[hold_delta_ns= 580945784 hold_pct=11 acq_total=100898 wait_total_ns=10163942444]
+```
+
+`acq_total` passe de 20 000 a 100 000 en quarante secondes : environ 2 500
+appels `poll` par seconde, chacun tenant le gros verrou pour toute sa duree.
+
+**L'audit de `poll` disait qu'il etait une victime. Il l'etait — et il etait
+aussi le suivant.** La phrase de la version precedente de ce document,
+« `poll` est une victime, pas une cause », etait vraie du profil de l'epoque et
+fausse comme prediction : une fois `madvise` corrige, `poll` est devenu la
+premiere cause. La partie de l'audit qui tenait, c'est que son propre travail
+est `O(count)` et qu'il ne dort pas le verrou tenu ; ce qui manquait, c'est que
+tenir le verrou longtemps sans rien faire d'interdit reste desastreux pour trois
+autres coeurs.
+
+Ce qui l'obligeait au gros verrou n'etait pas son domaine — la table des
+descripteurs a son verrou, chaque objet a le sien — mais la ROUTE vers le
+processus : `task::current_process()` commence par `smp_lock::enter()`, et les
+quatre sondes de readiness l'appelaient chacune, par descripteur et par
+balayage. L'en-tete de `bkl.rs` avait deja nomme ce piege.
+
+`current_process_local()` rend le meme `Arc` depuis le bloc par-CPU sans toucher
+`TASKS`. `POLL` et `PPOLL` sont donc passes dans `SANS_BKL`, avec trois branches
+— clavier, souris, socket inet — qui prennent le verrou elles-memes parce
+qu'elles touchent un etat global sans verrou propre (l'anneau e1000 est
+entierement en `static mut`).
 
 ## Comment lire l'avant/apres
 
