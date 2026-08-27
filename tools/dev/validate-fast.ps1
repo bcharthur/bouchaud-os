@@ -67,6 +67,7 @@ try {
     Invoke-RustTest "BKL max/provenance" "tools\smp\test_bkl_max.rs"
     Invoke-RustTest "commutation SMP" "tools\smp\test_commutation.rs"
     Invoke-RustTest "profondeur BKL" "tools\smp\test_profondeur_bkl.rs"
+    Invoke-RustTest "re-entree IRQ runqueue" "tools\smp\test_runqueue_irq.rs"
 
     $env:BO_HELLO_EXE = Join-Path $Tmp "bo-hello.exe"
     Invoke-Step "fixture PE32+" {
