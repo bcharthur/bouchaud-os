@@ -32,6 +32,11 @@ use scene::{
     calques_retenus, doit_dessiner, premier_calque, recouvre, se_touchent, Calque, Element,
 };
 
+/// Bornes de dessin d'un cadre plus son ombre portee de 4 pixels.
+fn avec_ombre(cadre: Rect) -> Rect {
+    Rect::neuf(cadre.x, cadre.y, cadre.largeur + 4, cadre.hauteur + 4)
+}
+
 const LARGEUR: u32 = 1280;
 const HAUTEUR: u32 = 800;
 const BARRE_H: u32 = 28;
@@ -44,43 +49,36 @@ fn ecran() -> Rect {
 /// (dessin + occultation), barre des taches, curseur.
 fn bureau(fenetre: Option<Rect>) -> Vec<Calque> {
     let mut calques = alloc_vec(fenetre);
-    calques.push(Calque::neuf(
+    calques.push(Calque::plein(
         Element::BarreTaches,
         Rect::neuf(0, (HAUTEUR - BARRE_H) as i32, LARGEUR, BARRE_H),
-        true,
     ));
-    calques.push(Calque::neuf(
+    calques.push(Calque::transparent(
         Element::Curseur,
         Rect::neuf(640, 400, 14, 22),
-        false,
     ));
     calques
 }
 
 fn alloc_vec(fenetre: Option<Rect>) -> Vec<Calque> {
     let mut calques = Vec::new();
-    calques.push(Calque::neuf(Element::Fond, ecran(), true));
-    calques.push(Calque::neuf(
+    calques.push(Calque::plein(Element::Fond, ecran()));
+    calques.push(Calque::transparent(
         Element::Filigrane,
         Rect::neuf(540, (HAUTEUR - 64) as i32, 200, 24),
-        false,
     ));
-    calques.push(Calque::neuf(Element::Icone(0), Rect::neuf(20, 40, 56, 60), false));
-    calques.push(Calque::neuf(Element::Icone(1), Rect::neuf(20, 120, 56, 60), false));
-    calques.push(Calque::neuf(
+    calques.push(Calque::transparent(Element::Icone(0), Rect::neuf(20, 40, 56, 60)));
+    calques.push(Calque::transparent(Element::Icone(1), Rect::neuf(20, 120, 56, 60)));
+    calques.push(Calque::plein(
         Element::BarreHaute,
         Rect::neuf(0, 0, LARGEUR, BARRE_H),
-        true,
     ));
     if let Some(cadre) = fenetre {
-        let avec_ombre = Rect::neuf(
-            cadre.x,
-            cadre.y,
-            cadre.largeur + 4,
-            cadre.hauteur + 4,
-        );
-        calques.push(Calque::neuf(Element::Fenetre(0), avec_ombre, false));
-        calques.push(Calque::neuf(Element::ZonePleine, cadre, true));
+        calques.push(Calque::avec_ombre(
+            Element::Fenetre(0),
+            avec_ombre(cadre),
+            cadre,
+        ));
     }
     calques
 }
@@ -170,16 +168,9 @@ fn une_fenetre_opaque_ecarte_tout_ce_qui_est_dessous() {
     let debut = premier_calque(&calques, &zone);
     assert_eq!(
         calques[debut].element,
-        Element::ZonePleine,
-        "on repart de la zone pleine de la fenetre"
+        Element::Fenetre(0),
+        "on repart de la fenetre elle-meme, pas d'un calque qui ne dessine rien"
     );
-    // Le fond d'ecran, le filigrane, les icones et la barre haute sont derriere.
-    for calque in &calques[..debut] {
-        assert!(
-            calque.element != Element::ZonePleine,
-            "aucune zone pleine ne doit rester derriere"
-        );
-    }
     assert!(
         calques[..debut].iter().any(|c| c.element == Element::Fond),
         "le fond d'ecran est bien parmi les calques ecartes"
@@ -241,6 +232,148 @@ fn sans_recouvrement_on_repart_du_fond() {
     assert_eq!(premier_calque(&calques, &zone), 0);
 }
 
+// ------------------------------------------- regression : trainees de curseur
+
+/// LE TEST QUI AURAIT ATTRAPE LE BUG.
+///
+/// Scene minimale `[Fond, Fenetre]`, degat = petit rectangle strictement dans
+/// le cadre opaque de la fenetre. Le calque retenu doit etre la FENETRE --
+/// celle qui peint reellement ces pixels -- et elle doit figurer parmi les
+/// calques dessines.
+///
+/// La version precedente rendait ici l'index d'un calque `ZonePleine` place
+/// APRES la fenetre et qui ne dessinait rien. La boucle
+/// `for calque in &calques[debut..]` excluait donc la fenetre, les pixels
+/// restaient tels quels, et l'ancien curseur demeurait a l'ecran.
+#[test]
+fn un_degat_dans_une_fenetre_opaque_redessine_la_fenetre() {
+    let cadre = Rect::neuf(100, 100, 800, 500);
+    let calques = alloc::vec![
+        Calque::plein(Element::Fond, ecran()),
+        Calque::avec_ombre(Element::Fenetre(0), avec_ombre(cadre), cadre),
+    ];
+    let zone = Rect::neuf(300, 250, 14, 22);
+
+    let debut = premier_calque(&calques, &zone);
+    assert_eq!(
+        calques[debut].element,
+        Element::Fenetre(0),
+        "le calque retenu doit etre celui qui PEINT ces pixels"
+    );
+
+    let dessines: Vec<Element> = calques[debut..]
+        .iter()
+        .filter(|c| doit_dessiner(c, &zone))
+        .map(|c| c.element)
+        .collect();
+    assert!(
+        dessines.contains(&Element::Fenetre(0)),
+        "sans la fenetre dans les calques dessines, rien ne recouvre l'ancien \
+         curseur : c'est exactement la trainee observee, obtenu {dessines:?}"
+    );
+}
+
+/// Le cas observe a l'ecran : l'empreinte de l'ANCIEN curseur, dans la fenetre
+/// Ladybird, doit etre repeinte par le contenu de cette fenetre.
+#[test]
+fn l_empreinte_de_l_ancien_curseur_dans_une_fenetre_est_repeinte() {
+    // Une fenetre de navigateur qui occupe presque tout l'ecran.
+    let cadre = Rect::neuf(40, BARRE_H as i32 + 8, LARGEUR - 80, HAUTEUR - BARRE_H * 3);
+    let calques = bureau(Some(cadre));
+
+    // Le curseur s'est deplace : on invalide son ancienne empreinte.
+    let ancienne = Rect::neuf(600, 380, 14, 22);
+    assert!(
+        recouvre(&cadre, &ancienne),
+        "prealable du test : l'ancienne empreinte est bien dans la fenetre"
+    );
+
+    let debut = premier_calque(&calques, &ancienne);
+    let dessines: Vec<Element> = calques[debut..]
+        .iter()
+        .filter(|c| doit_dessiner(c, &ancienne))
+        .map(|c| c.element)
+        .collect();
+
+    assert!(
+        dessines.contains(&Element::Fenetre(0)),
+        "l'ancienne empreinte doit etre recouverte par la fenetre, obtenu {dessines:?}"
+    );
+    assert!(
+        !dessines.contains(&Element::Fond),
+        "mais pas par le fond : il est integralement cache par la fenetre"
+    );
+}
+
+/// Meme propriete pour le menu, qui porte lui aussi une ombre debordante.
+#[test]
+fn un_degat_dans_le_menu_redessine_le_menu() {
+    let cadre_menu = Rect::neuf(2, 400, 220, 300);
+    let mut calques = bureau(None);
+    // Le menu s'insere juste avant la barre des taches et le curseur.
+    let position = calques.len() - 2;
+    calques.insert(
+        position,
+        Calque::avec_ombre(Element::Menu, avec_ombre(cadre_menu), cadre_menu),
+    );
+
+    let zone = Rect::neuf(60, 500, 14, 22);
+    let debut = premier_calque(&calques, &zone);
+    assert_eq!(calques[debut].element, Element::Menu);
+
+    let dessines: Vec<Element> = calques[debut..]
+        .iter()
+        .filter(|c| doit_dessiner(c, &zone))
+        .map(|c| c.element)
+        .collect();
+    assert!(dessines.contains(&Element::Menu));
+}
+
+/// La contrepartie : l'ombre du menu n'est PAS opaque, donc le fond doit y
+/// rester dessine. C'est la moitie du contrat que la separation en deux
+/// rectangles doit preserver.
+#[test]
+fn l_ombre_du_menu_laisse_voir_le_fond() {
+    let cadre_menu = Rect::neuf(2, 400, 220, 300);
+    let calques = alloc::vec![
+        Calque::plein(Element::Fond, ecran()),
+        Calque::avec_ombre(Element::Menu, avec_ombre(cadre_menu), cadre_menu),
+    ];
+    // Dans l'ombre (4 px hors du cadre), pas dans le cadre.
+    let zone = Rect::neuf(223, 701, 2, 2);
+
+    let debut = premier_calque(&calques, &zone);
+    assert_eq!(
+        calques[debut].element,
+        Element::Fond,
+        "l'ombre ne cache rien : on repart du fond"
+    );
+}
+
+/// Aucun calque ne peut declarer une zone opaque plus large que ce qu'il
+/// dessine. `bornes_dessin` MAJORE, `opaque_sur` MINORE : les deux exigences
+/// sont opposees, et les confondre est precisement l'erreur d'origine.
+#[test]
+fn la_zone_opaque_ne_deborde_jamais_les_bornes_de_dessin() {
+    let cadre = Rect::neuf(100, 100, 200, 200);
+    let mut calques = bureau(Some(cadre));
+    calques.push(Calque::avec_ombre(
+        Element::Menu,
+        avec_ombre(cadre),
+        cadre,
+    ));
+
+    for calque in &calques {
+        if let Some(opaque) = calque.opaque_sur {
+            assert!(
+                recouvre(&calque.bornes_dessin, &opaque),
+                "{:?} declare une zone opaque hors de ses bornes de dessin",
+                calque.element,
+            );
+        }
+    }
+}
+
 // ------------------------------------------------------------------ mesure
 
 #[test]
@@ -257,10 +390,9 @@ fn le_culling_reduit_reellement_le_nombre_de_calques() {
         retenus < total,
         "le culling doit retenir moins que tout : {retenus} sur {total}"
     );
-    assert!(
-        retenus <= 2,
-        "dans une fenetre opaque, seuls la fenetre et son occultation restent, \
-         obtenu {retenus}"
+    assert_eq!(
+        retenus, 1,
+        "dans une fenetre opaque, seule la fenetre reste"
     );
 }
 
@@ -297,7 +429,7 @@ fn l_ordre_de_dessin_est_preserve() {
         "le curseur est toujours au-dessus de tout"
     );
     assert!(
-        position(Element::Fenetre(0)) < position(Element::ZonePleine),
-        "l'occultation vient juste apres sa fenetre, sinon elle ne l'occulterait pas"
+        position(Element::Fenetre(0)) < position(Element::BarreTaches),
+        "la barre des taches passe au-dessus des fenetres"
     );
 }
