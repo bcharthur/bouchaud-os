@@ -143,6 +143,54 @@ fn il_se_tait_quand_la_chaine_va_jusqu_a_l_ecran() {
     assert!(!veilleur.arme(), "la surveillance est terminee");
 }
 
+/// LE contrat d'armement, et le faux positif qu'il empeche.
+///
+/// Le veilleur doit memoriser la chaine TELLE QU'ELLE ETAIT AVANT l'entree qui
+/// l'arme. Arme apres, sa reference contient deja l'evenement : le premier
+/// maillon ne peut plus avancer, et il annonce « aucune entree recue » chaque
+/// fois que la souris s'arrete.
+///
+/// Cela s'est vu au runtime -- des paires BROKEN/RECOVERED sur `input_received`
+/// a longueur de journal, alors que les entrees arrivaient parfaitement. Un
+/// diagnostic qui crie au loup apprend a ne pas le lire.
+#[test]
+fn arme_avec_l_etat_d_avant_l_entree_ne_blame_jamais_l_entree() {
+    let mut veilleur = Veilleur::neuf();
+    let avant = depart();
+
+    // Le bon ordre : reference d'abord, comptage ensuite.
+    veilleur.note_entree(1_000, avant);
+    let mut courant = avant;
+    courant.entrees += 1; // l'entree qui vient d'arriver
+
+    // Rien d'autre n'avance : la faute est le DEGAT, jamais l'entree.
+    assert_eq!(
+        veilleur.examine(2_000, courant, DELAI),
+        Verdict::Rupture(Maillon::Degat),
+        "l'entree est arrivee par construction : l'accuser serait absurde"
+    );
+}
+
+/// Le mauvais ordre, tel qu'il etait, et ce qu'il produisait.
+#[test]
+fn arme_avec_l_etat_d_apres_accuse_l_entree_a_tort() {
+    let mut veilleur = Veilleur::neuf();
+    let avant = depart();
+    let mut apres = avant;
+    apres.entrees += 1;
+
+    // L'ordre fautif : on compte, PUIS on prend la reference.
+    veilleur.note_entree(1_000, apres);
+
+    // La souris s'arrete. Rien de plus n'arrive.
+    assert_eq!(
+        veilleur.examine(2_000, apres, DELAI),
+        Verdict::Rupture(Maillon::Entree),
+        "c'est le faux positif : le bureau n'a rien de casse, la souris \
+         s'est simplement arretee"
+    );
+}
+
 /// La propriete anti-inondation : un episode, une ligne.
 #[test]
 fn il_ne_repete_pas_le_meme_diagnostic() {

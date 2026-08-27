@@ -233,6 +233,30 @@ fn dessine_calque(
 //
 // Sans cela, `[GUI-DAMAGE] taskbar=0` sur une session entiere, pendant que la
 // barre des taches etait repeinte des dizaines de fois.
+// BOUCHAUD_GUI_CHAINE_ENTREE_LFB_V1
+//
+// LE FAUX POSITIF QUE CE HELPER SUPPRIME
+// --------------------------------------
+// Les deux gestes -- compter l'entree, armer la surveillance -- doivent se
+// faire dans CET ordre : le veilleur memorise la chaine TELLE QU'ELLE ETAIT
+// AVANT l'entree qui l'arme.
+//
+// Arme apres, sa reference contient deja l'evenement. Le premier maillon ne
+// peut alors plus avancer, et le veilleur annonce « aucune entree recue »
+// chaque fois que la souris s'arrete cinq cents millisecondes. C'est ce qui
+// s'est vu au runtime : des paires BROKEN/RECOVERED sur `input_received` a
+// longueur de journal, alors que les entrees arrivaient parfaitement.
+//
+// Un diagnostic qui crie au loup est pire qu'aucun diagnostic : il apprend a
+// ne pas le lire. Les deux gestes sont donc reunis ici, ou l'ordre se voit.
+
+/// Compte une entree du bureau ET arme la surveillance de la chaine.
+fn note_entree_bureau(veilleur: &mut Veilleur, maintenant_ms: u64) {
+    // La reference D'ABORD : l'etat d'avant cette entree.
+    veilleur.note_entree(maintenant_ms, reveil::chaine());
+    reveil::note_entree();
+}
+
 fn origine_de(cible: transition::Cible) -> Origine {
     match cible {
         transition::Cible::Fenetre => Origine::Fenetre,
@@ -532,8 +556,7 @@ fn boucle() {
             derniers_boutons = boutons;
             sale = true;
             derniere_entree = maintenant;
-            reveil::note_entree();
-            veilleur.note_entree(maintenant, reveil::chaine());
+            note_entree_bureau(&mut veilleur, maintenant);
             transmet_position(&mut wins, mx, my, boutons);
         }
         // BOUCHAUD_GUI_DAMAGE_ORIGIN_V1
@@ -548,8 +571,7 @@ fn boucle() {
         // `handle_click` et `handle_wheel` qui disent ce qu'ils ont change.
         if click || release || wheel != 0 {
             derniere_entree = maintenant;
-            reveil::note_entree();
-            veilleur.note_entree(maintenant, reveil::chaine());
+            note_entree_bureau(&mut veilleur, maintenant);
         }
 
         if left {
