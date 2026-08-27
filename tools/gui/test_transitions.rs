@@ -581,7 +581,7 @@ fn oracle(nom: &str, avant: &Etat, apres: &Etat, degats: &[Rect]) {
 }
 
 fn liste(rects: Rects) -> alloc::vec::Vec<Rect> {
-    rects.iter().collect()
+    rects.rects().collect()
 }
 
 /// Le degat plein ecran, tel que `Degats::tout` le produit.
@@ -995,6 +995,85 @@ fn un_client_agrandit_sa_tache() {
     // L'union : ce qui etait peint, et ce qui l'est maintenant.
     let degats = alloc::vec![a.fenetres[0].tache_ecran(), b.fenetres[0].tache_ecran()];
     oracle("le client agrandit sa tache", &a, &b, &degats);
+}
+
+// ─── Ce que chaque rectangle VISE ──────────────────────────────────────────
+//
+// Une transition touche parfois deux elements de nature differente. Si tous ses
+// rectangles portent la meme etiquette, les degats restent JUSTES -- les bons
+// pixels sont presentes -- mais la mesure devient fausse, et un compteur a zero
+// fait chercher un bug qui n'existe pas.
+//
+// C'est arrive : `[GUI-DAMAGE] taskbar=0` sur une session entiere, pendant que
+// la barre des taches etait repeinte des dizaines de fois.
+
+use transition::Cible;
+
+fn cibles(rects: Rects) -> alloc::vec::Vec<Cible> {
+    rects.iter().map(|(_, cible)| cible).collect()
+}
+
+#[test]
+fn ouvrir_le_menu_vise_le_menu_ET_la_barre_des_taches() {
+    let vues = cibles(transition::menu_bascule(menu(), barre_taches()));
+    assert!(vues.contains(&Cible::Menu), "le menu lui-meme");
+    assert!(
+        vues.contains(&Cible::BarreTaches),
+        "le bouton Demarrer change de couleur : c'est la barre des taches, \
+         et la trace doit le dire ({vues:?})"
+    );
+}
+
+#[test]
+fn changer_le_focus_vise_les_fenetres_ET_la_barre_des_taches() {
+    let vues = cibles(transition::focus_transfere(
+        Some(Rect::neuf(10, 20, 100, 80)),
+        Rect::neuf(50, 60, 100, 80),
+        barre_taches(),
+    ));
+    assert_eq!(
+        vues.iter().filter(|c| **c == Cible::Fenetre).count(),
+        2,
+        "celle qui gagne le focus et celle qui le perd"
+    );
+    assert!(vues.contains(&Cible::BarreTaches), "les boutons suivent le focus");
+}
+
+#[test]
+fn le_tic_d_horloge_vise_la_barre_du_haut() {
+    assert_eq!(
+        cibles(transition::tic_horloge(L as u32)),
+        alloc::vec![Cible::BarreHaute],
+    );
+}
+
+#[test]
+fn un_deplacement_du_curseur_ne_vise_que_le_curseur() {
+    let vues = cibles(transition::curseur_deplace(Some((10, 10)), (80, 90)));
+    assert_eq!(vues, alloc::vec![Cible::Curseur, Cible::Curseur]);
+}
+
+#[test]
+fn le_survol_du_menu_ne_vise_que_le_menu() {
+    let vues = cibles(transition::survol_menu_change(menu(), Some(1), Some(3)));
+    assert_eq!(vues, alloc::vec![Cible::Menu, Cible::Menu]);
+}
+
+#[test]
+fn un_deplacement_de_fenetre_ne_vise_que_la_fenetre() {
+    let vues = cibles(transition::fenetre_bougee(
+        Rect::neuf(10, 20, 100, 80),
+        Rect::neuf(60, 20, 100, 80),
+    ));
+    assert_eq!(vues, alloc::vec![Cible::Fenetre, Cible::Fenetre]);
+}
+
+/// La recoloration vise le curseur, pas ce qui l'a declenchee.
+#[test]
+fn la_recoloration_du_curseur_vise_le_curseur() {
+    let empreinte = disposition::curseur(100, 100);
+    let vues = cibles(transition::recoloration_curseur(&[empreinte], (100, 100)));
+    assert_eq!(vues, alloc::vec![Cible::Curseur]);
 }
 
 // ─── Icones du bureau ──────────────────────────────────────────────────────

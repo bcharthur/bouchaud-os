@@ -223,6 +223,27 @@ fn dessine_calque(
     }
 }
 
+// BOUCHAUD_GUI_CIBLE_DEGAT_V1
+//
+// La seule traduction entre ce qu'une transition VISE et ce que la mesure
+// COMPTE. Une transition qui touche deux elements de nature differente -- le
+// menu et le bouton Demarrer, deux fenetres et les boutons de la barre -- rend
+// desormais chaque rectangle avec sa cible, au lieu de laisser l'appelant les
+// etiqueter tous pareil.
+//
+// Sans cela, `[GUI-DAMAGE] taskbar=0` sur une session entiere, pendant que la
+// barre des taches etait repeinte des dizaines de fois.
+fn origine_de(cible: transition::Cible) -> Origine {
+    match cible {
+        transition::Cible::Fenetre => Origine::Fenetre,
+        transition::Cible::Menu => Origine::Menu,
+        transition::Cible::BarreTaches => Origine::BarreTaches,
+        transition::Cible::BarreHaute => Origine::BarreHaute,
+        transition::Cible::Curseur => Origine::Curseur,
+        transition::Cible::Icone => Origine::Icone,
+    }
+}
+
 /// Rectangle de la barre des taches — celle du BAS.
 ///
 /// Bouton Demarrer et boutons de fenetres. Rien n'y change avec le temps.
@@ -504,8 +525,8 @@ fn boucle() {
             } else {
                 Some((derniere_souris.0 as i32, derniere_souris.1 as i32))
             };
-            for rect in transition::curseur_deplace(avant, (mx, my)).iter() {
-                degats.ajoute(Origine::Curseur, rect);
+            for (rect, cible) in transition::curseur_deplace(avant, (mx, my)).iter() {
+                degats.ajoute(origine_de(cible), rect);
             }
             derniere_souris = (mxu, myu);
             derniers_boutons = boutons;
@@ -550,8 +571,8 @@ fn boucle() {
                     clamp_win(w);
                 }
                 let apres = wins.last().map(cadre_fenetre).unwrap_or_default();
-                for rect in transition::fenetre_bougee(avant, apres).iter() {
-                    degats.ajoute(Origine::Fenetre, rect);
+                for (rect, cible) in transition::fenetre_bougee(avant, apres).iter() {
+                    degats.ajoute(origine_de(cible), rect);
                 }
                 sale = true;
             } else if let Some((idx, ox, oy, _, _)) = icon_drag {
@@ -642,8 +663,8 @@ fn boucle() {
             let lignes = transition::survol_menu_change(
                 window::menu_proto(), survol_menu, nouveau_survol,
             );
-            for rect in lignes.iter() {
-                degats.ajoute(Origine::Menu, rect);
+            for (rect, cible) in lignes.iter() {
+                degats.ajoute(origine_de(cible), rect);
             }
             survol_menu = nouveau_survol;
             sale = true;
@@ -694,8 +715,8 @@ fn boucle() {
             sale = true; // horloge, charge CPU, memoire : ils bougent seuls
             // BOUCHAUD_GUI_TOPBAR_DAMAGE_V1 : la barre du HAUT. Voir
             // `barre_haute_rect`. La barre du bas n'a rien qui bouge tout seul.
-            for rect in transition::tic_horloge(fb::WIDTH as u32).iter() {
-                degats.ajoute(Origine::BarreHaute, rect);
+            for (rect, cible) in transition::tic_horloge(fb::WIDTH as u32).iter() {
+                degats.ajoute(origine_de(cible), rect);
             }
         }
         if sale && maintenant.wrapping_sub(derniere_trame) < PERIODE_TRAME_MS {
@@ -715,8 +736,8 @@ fn boucle() {
             // compris les parties qu'il ne couvre pas. On l'ajoute une fois que
             // les degats de ce tour sont connus, jamais avant.
             let recoloration = transition::recoloration_curseur(degats.regions(), (mx, my));
-            for rect in recoloration.iter() {
-                degats.ajoute(Origine::Curseur, rect);
+            for (rect, cible) in recoloration.iter() {
+                degats.ajoute(origine_de(cible), rect);
             }
 
             if !degats.vide() {
@@ -1410,8 +1431,8 @@ fn handle_click(
         // Le menu se referme : la zone qu'il OCCUPAIT redevient bureau -- son
         // ombre portee comprise, sans quoi la bande sombre resterait a l'ecran --
         // ET le bouton Demarrer, qui change de couleur avec l'ouverture du menu.
-        for rect in transition::menu_bascule(window::menu_proto(), barre_taches_rect()).iter() {
-            degats.ajoute(Origine::Menu, rect);
+        for (rect, cible) in transition::menu_bascule(window::menu_proto(), barre_taches_rect()).iter() {
+            degats.ajoute(origine_de(cible), rect);
         }
         if fenetre_ouverte {
             // `ouvre_fenetre` a deja annonce le plein ecran ; ce drapeau ne
@@ -1422,8 +1443,8 @@ fn handle_click(
     }
     if start_btn().hit(mx, my) {
         *menu_open = true;
-        for rect in transition::menu_bascule(window::menu_proto(), barre_taches_rect()).iter() {
-            degats.ajoute(Origine::Menu, rect);
+        for (rect, cible) in transition::menu_bascule(window::menu_proto(), barre_taches_rect()).iter() {
+            degats.ajoute(origine_de(cible), rect);
         }
         return;
     }
@@ -1452,8 +1473,8 @@ fn handle_click(
             let bascule = transition::focus_transfere(
                 cadre_focus_perdu, cadre_fenetre(&wins[index]), barre_taches_rect(),
             );
-            for rect in bascule.iter() {
-                degats.ajoute(Origine::Fenetre, rect);
+            for (rect, cible) in bascule.iter() {
+                degats.ajoute(origine_de(cible), rect);
             }
             if etait_minimisee {
                 // Une fenetre reapparait : ce qu'elle recouvre n'a jamais ete
@@ -1513,8 +1534,8 @@ fn handle_click(
             let bascule = transition::focus_transfere(
                 cadre_focus_perdu, cadre_fenetre(&wins[index]), barre_taches_rect(),
             );
-            for rect in bascule.iter() {
-                degats.ajoute(Origine::Fenetre, rect);
+            for (rect, cible) in bascule.iter() {
+                degats.ajoute(origine_de(cible), rect);
             }
         }
         let top = wins.last_mut().unwrap();
@@ -1539,8 +1560,8 @@ fn handle_click(
             let mouvement = transition::fenetre_bougee(
                 cadre_avant, cadre_fenetre(&wins[index]),
             );
-            for rect in mouvement.iter() {
-                degats.ajoute(Origine::Fenetre, rect);
+            for (rect, cible) in mouvement.iter() {
+                degats.ajoute(origine_de(cible), rect);
             }
         } else if on_title && mx >= r - 28 && mx < r - 19 {
             top.min = true;

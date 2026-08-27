@@ -35,29 +35,70 @@ use super::protocole::Rect;
 /// Une transition n'a jamais produit plus de quatre rectangles.
 pub const MAX_RECTS: usize = 4;
 
-/// Petite liste de rectangles, sans allocation.
-#[derive(Clone, Copy, Default)]
+// BOUCHAUD_GUI_CIBLE_DEGAT_V1
+//
+// POURQUOI UN RECTANGLE PORTE SA CIBLE
+// ------------------------------------
+// Une transition touche parfois DEUX elements de nature differente : ouvrir le
+// menu repeint le menu ET le bouton Demarrer de la barre des taches ; changer
+// le focus repeint deux fenetres ET les boutons de la barre.
+//
+// `Rects` ne rendait que des rectangles, alors l'appelant les etiquetait tous
+// avec une seule `Origine` : `Origine::Menu` pour la barre des taches,
+// `Origine::Fenetre` pour elle aussi. Les degats etaient JUSTES -- les bons
+// pixels etaient bien presentes -- mais la mesure, elle, etait fausse.
+//
+// Cela s'est vu sur un vrai releve : `[GUI-DAMAGE] ... taskbar=0` pour une
+// session entiere pendant que la barre des taches etait repeinte des dizaines
+// de fois. Un compteur a zero est une invitation a chercher un bug qui n'existe
+// pas, et il cache celui qui existe.
+//
+// Chaque rectangle porte donc ce qu'il vise. L'appelant traduit en `Origine`,
+// et la trace redevient lisible.
+
+/// Ce qu'un rectangle de degat vise.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Cible {
+    Fenetre,
+    Menu,
+    BarreTaches,
+    BarreHaute,
+    Curseur,
+    Icone,
+}
+
+/// Petite liste de rectangles etiquetes, sans allocation.
+#[derive(Clone, Copy)]
 pub struct Rects {
-    tampon: [Rect; MAX_RECTS],
+    tampon: [(Rect, Cible); MAX_RECTS],
     nombre: usize,
+}
+
+impl Default for Rects {
+    fn default() -> Self {
+        Self::vide()
+    }
 }
 
 impl Rects {
     pub const fn vide() -> Self {
-        Self { tampon: [Rect::neuf(0, 0, 0, 0); MAX_RECTS], nombre: 0 }
+        Self {
+            tampon: [(Rect::neuf(0, 0, 0, 0), Cible::Fenetre); MAX_RECTS],
+            nombre: 0,
+        }
     }
 
     /// Ajoute un rectangle. Un rectangle vide n'apporte rien et est ignore.
     ///
     /// Un debordement au-dela de `MAX_RECTS` est un defaut de programmation,
     /// pas une condition d'execution : aucune transition n'en produit autant.
-    pub fn pousse(&mut self, rect: Rect) {
+    pub fn pousse(&mut self, rect: Rect, cible: Cible) {
         if rect.vide() {
             return;
         }
         debug_assert!(self.nombre < MAX_RECTS, "transition a plus de 4 rectangles");
         if self.nombre < MAX_RECTS {
-            self.tampon[self.nombre] = rect;
+            self.tampon[self.nombre] = (rect, cible);
             self.nombre += 1;
         }
     }
@@ -70,16 +111,23 @@ impl Rects {
         self.nombre == 0
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = Rect> + '_ {
+    /// Les rectangles avec leur cible : c'est la forme que le compositeur
+    /// consomme, parce que c'est lui qui sait traduire en `Origine`.
+    pub fn iter(&self) -> impl Iterator<Item = (Rect, Cible)> + '_ {
         self.tampon[..self.nombre].iter().copied()
+    }
+
+    /// Les rectangles seuls, pour qui n'a que faire de la provenance.
+    pub fn rects(&self) -> impl Iterator<Item = Rect> + '_ {
+        self.tampon[..self.nombre].iter().map(|(rect, _)| *rect)
     }
 }
 
-impl core::iter::FromIterator<Rect> for Rects {
-    fn from_iter<I: IntoIterator<Item = Rect>>(iterable: I) -> Self {
+impl core::iter::FromIterator<(Rect, Cible)> for Rects {
+    fn from_iter<I: IntoIterator<Item = (Rect, Cible)>>(iterable: I) -> Self {
         let mut rects = Rects::vide();
-        for rect in iterable {
-            rects.pousse(rect);
+        for (rect, cible) in iterable {
+            rects.pousse(rect, cible);
         }
         rects
     }
@@ -89,11 +137,11 @@ impl core::iter::FromIterator<Rect> for Rects {
 ///
 /// Presque toutes les transitions du bureau s'y ramenent. Ce qui a change de
 /// place laisse derriere lui des pixels que personne d'autre ne connait.
-fn ancien_puis_nouveau(ancien: Rect, nouveau: Rect) -> Rects {
+fn ancien_puis_nouveau(ancien: Rect, nouveau: Rect, cible: Cible) -> Rects {
     let mut rects = Rects::vide();
-    rects.pousse(ancien);
+    rects.pousse(ancien, cible);
     if nouveau != ancien {
-        rects.pousse(nouveau);
+        rects.pousse(nouveau, cible);
     }
     rects
 }
@@ -111,9 +159,9 @@ fn ancien_puis_nouveau(ancien: Rect, nouveau: Rect) -> Rects {
 pub fn curseur_deplace(avant: Option<(i32, i32)>, apres: (i32, i32)) -> Rects {
     let mut rects = Rects::vide();
     if let Some((x, y)) = avant {
-        rects.pousse(disposition::curseur(x, y));
+        rects.pousse(disposition::curseur(x, y), Cible::Curseur);
     }
-    rects.pousse(disposition::curseur(apres.0, apres.1));
+    rects.pousse(disposition::curseur(apres.0, apres.1), Cible::Curseur);
     rects
 }
 
@@ -147,7 +195,7 @@ pub fn recoloration_curseur(regions: &[Rect], souris: (i32, i32)) -> Rects {
     let mut rects = Rects::vide();
     for region in regions.iter() {
         if !region.intersecte(&empreinte).vide() {
-            rects.pousse(empreinte);
+            rects.pousse(empreinte, Cible::Curseur);
             break;
         }
     }
@@ -170,10 +218,10 @@ pub fn survol_menu_change(menu: Rect, avant: Option<usize>, apres: Option<usize>
         return rects;
     }
     if let Some(index) = avant {
-        rects.pousse(disposition::rect_ligne_menu(menu, index));
+        rects.pousse(disposition::rect_ligne_menu(menu, index), Cible::Menu);
     }
     if let Some(index) = apres {
-        rects.pousse(disposition::rect_ligne_menu(menu, index));
+        rects.pousse(disposition::rect_ligne_menu(menu, index), Cible::Menu);
     }
     rects
 }
@@ -187,8 +235,10 @@ pub fn survol_menu_change(menu: Rect, avant: Option<usize>, apres: Option<usize>
 ///   meme rectangle, il n'y en a donc qu'un a annoncer.
 pub fn menu_bascule(menu: Rect, barre_taches: Rect) -> Rects {
     let mut rects = Rects::vide();
-    rects.pousse(disposition::empreinte_avec_ombre(menu));
-    rects.pousse(barre_taches);
+    rects.pousse(disposition::empreinte_avec_ombre(menu), Cible::Menu);
+    // Le bouton Demarrer change de couleur avec l'ouverture du menu : c'est la
+    // BARRE DES TACHES qui est repeinte, et la trace doit le dire.
+    rects.pousse(barre_taches, Cible::BarreTaches);
     rects
 }
 
@@ -208,6 +258,7 @@ pub fn fenetre_bougee(cadre_avant: Rect, cadre_apres: Rect) -> Rects {
     ancien_puis_nouveau(
         disposition::empreinte_avec_ombre(cadre_avant),
         disposition::empreinte_avec_ombre(cadre_apres),
+        Cible::Fenetre,
     )
 }
 
@@ -226,11 +277,12 @@ pub fn focus_transfere(
     barre_taches: Rect,
 ) -> Rects {
     let mut rects = Rects::vide();
-    rects.pousse(disposition::empreinte_avec_ombre(cadre_gagne));
+    rects.pousse(disposition::empreinte_avec_ombre(cadre_gagne), Cible::Fenetre);
     if let Some(cadre) = cadre_perdu {
-        rects.pousse(disposition::empreinte_avec_ombre(cadre));
+        rects.pousse(disposition::empreinte_avec_ombre(cadre), Cible::Fenetre);
     }
-    rects.pousse(barre_taches);
+    // Les boutons de la barre des taches suivent le focus.
+    rects.pousse(barre_taches, Cible::BarreTaches);
     rects
 }
 
@@ -245,6 +297,6 @@ pub fn focus_transfere(
 /// * QUI INVALIDE L'ANCIEN et LE NOUVEAU : ici. Les deux sont au meme endroit.
 pub fn tic_horloge(largeur: u32) -> Rects {
     let mut rects = Rects::vide();
-    rects.pousse(disposition::barre_haute(largeur));
+    rects.pousse(disposition::barre_haute(largeur), Cible::BarreHaute);
     rects
 }
