@@ -78,6 +78,62 @@ jobs:
       - name: Protocole GUI (tests hote + coherence Rust/C++)
         run: tools/gui/test-protocole.sh
 
+      # Un decodeur clavier casse en silence : une touche perdue passe pour une
+      # frappe ratee, un relachement perdu pour une bizarrerie de la page. Rien
+      # dans un boot ne le signale. Le decodage est pur, donc exercable ici.
+      - name: Decodage clavier (transitions appui/relachement)
+        run: tools/gui/test-clavier.sh
+
+      # « Cent clics et cent crans de molette dans une page ne produisent aucun
+      # degat plein ecran » : une regle qui se demontre, alors qu'un journal ne
+      # montrerait que la session qu'on a jouee.
+      - name: Politique de degat du bureau
+        run: tools/gui/test-degats.sh
+
+      # Une police manquante ne produit aucune erreur : le texte tombe en
+      # silence sur une autre famille. Manifeste, assets et fontconfig doivent
+      # dire la meme chose.
+      - name: Manifeste des polices
+        run: python3 tools/gui/verifie-polices.py
+
+      # Un maximum qui diminue fait chercher au mauvais endroit, une provenance
+      # melangee accuse le mauvais appel systeme. Les deux se cassent en
+      # silence, et seule une vraie concurrence les revele.
+      - name: Maximum de tenue BKL (monotonie et provenance)
+        run: tools/smp/test-bkl-max.sh
+
+      # Reconnaitre un format d'executable est une fonction des seuls octets du
+      # fichier. Un MZ pris pour un PE32+, ou un offset qui deborde, se lisent
+      # ici et pas dans QEMU.
+      - name: Formats d'executable (ELF / PE32+)
+        run: tools/exec/test-format.sh
+
+      # Le meme genre de barriere, pour le protocole d'entree du navigateur :
+      # WebContent doit rendre exactement un accuse de reception par evenement
+      # mis en file par l'hote. Le chrome M11 vit dans WebContent et injecte sa
+      # propre entree ; chaque injection rendait un accuse de trop et faisait
+      # tomber `AK/Queue.h:50` des le premier clic. La CI ne l'avait jamais vu :
+      # elle boote en `--headless=manual`, sans le moindre evenement d'entree.
+      - name: Protocole d'entree du navigateur (propriete des accuses)
+        run: tools/ladybird/test-input-ownership.sh
+
+      # Quels appels systeme se passent du gros verrou noyau est une decision
+      # qui se prend appel par appel, avec une preuve. Une preuve fausse ne se
+      # voit ni a la compilation ni au boot : elle se voit sous charge, a
+      # quatre coeurs. Cette barriere relit la table `abi::bkl::SANS_BKL` et
+      # l'aiguillage, et refuse qu'un appel soit declare sans verrou si son
+      # bras fait autre chose que rendre une constante -- sauf audit nomme.
+      - name: Verrouillage des appels systeme (table contre aiguillage)
+        run: python3 tools/verifie-verrouillage.py
+
+      # Un verrou tournant tenu pendant une attente du gros verrou fige la
+      # machine entiere : un cœur tient le verrou et attend le BKL, un autre
+      # tient le BKL et demande le verrou. C'est le gel du 25 aout, et rien ne
+      # le signalait -- ni le compilateur, ni le boot, ni quinze minutes de
+      # navigation. Cette barriere refuse la forme qui l'a produit.
+      - name: Verrous tournants (aucune attente du gros verrou dessous)
+        run: python3 tools/verifie-verrous-tournants.py
+
       # L'image bootable est une etape de plus que `cargo build` : elle passe par
       # `bootimage`, qui assemble le bootloader et le noyau. La construire ici
       # attrape les ruptures de ce chemin-la, que la compilation seule ne voit

@@ -47,7 +47,7 @@ def parse(path):
             smp.append(sample)
         elif "[PROC-SAMPLE]" in line: proc.append(fields(line))
         elif "[APP-SAMPLE]" in line: app.append(fields(line))
-        elif "PERF_" in line or "[MM-NG6]" in line:
+        elif "PERF_" in line or "[MM-NG6]" in line or "[BKL-STATS]" in line or "[BACKING-CACHE]" in line:
             perf.append((line.strip(), fields(line)))
     return smp, proc, perf, app
 
@@ -65,7 +65,10 @@ def summarize(path):
         sums["steal_ok"] += sum(vec(s.get("steal_ok_delta"))); sums["steal_try"] += sum(vec(s.get("steal_try_delta")))
         sums["rej_bal"] += sum(vec(s.get("steal_rej_bal_delta"))); sums["rej_aff"] += sum(vec(s.get("steal_rej_aff_delta")))
         sums["bkl_wait"] += number(s.get("bkl_wait_delta_ns")); sums["bkl_hold"] += number(s.get("bkl_hold_delta_ns"))
+        sums["bkl_acq"] += number(s.get("bkl_acq_delta"))
         sums["pf"] += sum(vec(s.get("pf_delta"))); sums["tlb"] += number(s.get("tlb_delta"))
+        sums["irq_preempt"] += number(s.get("irq_preempt_delta")); sums["deferred_preempt"] += number(s.get("deferred_preempt_delta"))
+        sums["fb_presents"] += number(s.get("fb_presents_delta")); sums["fb_bytes"] += number(s.get("fb_bytes_delta"))
     rate = lambda key: sums[key] / duration if duration else 0.0
     processes = defaultdict(lambda: {"cpu":[], "maps":[], "ctx":0.0, "mig":0.0, "rss":0.0})
     for p in proc:
@@ -79,16 +82,33 @@ def summarize(path):
         d["ctx"] += number(entry.get("ctx_delta")); d["mig"] += number(entry.get("mig_delta"))
     click_to_paint = None
     mm_lifetime = {}
+    bkl_lifetime = {}
+    backing_first = backing_last = None
     for line, f in perf:
         if "PERF_FIRST_PAINT" in line and number(f.get("since_click_ms")) > 0: click_to_paint = number(f["since_click_ms"])
         if "[MM-NG6]" in line: mm_lifetime = f
+        if "[BKL-STATS]" in line: bkl_lifetime = f
+        if "[BACKING-CACHE]" in line:
+            if backing_first is None: backing_first = f
+            backing_last = f
+    rq_values = [value for sample in smp for value in vec(sample.get("rq"))]
+    backing_rates = {}
+    for key in ("reads", "bytes", "hits", "readahead_hits", "clean_hit", "clean_miss", "clean_wait", "fault_wait"):
+        delta = number((backing_last or {}).get(key)) - number((backing_first or {}).get(key))
+        backing_rates[key + "_s"] = delta / duration if duration and backing_first is not None else None
     return {"duration":duration,"total_cpu_avg":total_avg,"cores_avg":core_avg,"imbalance_avg":imbalance,
       "ctx_s":rate("ctx"),"mig_s":rate("mig"),"steal_try_s":rate("steal_try"),"steal_ok_s":rate("steal_ok"),
       "steal_success_pct":100*sums["steal_ok"]/sums["steal_try"] if sums["steal_try"] else 0,
       "rej_bal_s":rate("rej_bal"),"rej_aff_s":rate("rej_aff"),"bkl_wait_ms_s":rate("bkl_wait")/1e6,
-      "bkl_hold_ms_s":rate("bkl_hold")/1e6,"pf_s":rate("pf"),"tlb_s":rate("tlb"),"processes":processes,
+      "bkl_hold_ms_s":rate("bkl_hold")/1e6,"bkl_acq_s":rate("bkl_acq"),
+      "bkl_max_hold_ms":number(bkl_lifetime.get("max_hold_ns"))/1e6 if bkl_lifetime else None,
+      "bkl_max_hold_site":bkl_lifetime.get("max_hold_site"),
+      "irq_preempt_s":rate("irq_preempt"),"deferred_preempt_s":rate("deferred_preempt"),
+      "rq_avg":sum(rq_values)/len(rq_values) if rq_values else 0.0,"rq_max":max(rq_values, default=0.0),
+      "fb_fps":rate("fb_presents"),"fb_mib_s":rate("fb_bytes")/(1024*1024),
+      "pf_s":rate("pf"),"tlb_s":rate("tlb"),"processes":processes,
       "click_first_paint_ms":click_to_paint,"applications":applications,
-      "mm_lifetime": {key: optional_number(mm_lifetime.get(key)) for key in (
+      "backing_rates":backing_rates,"mm_lifetime": {key: optional_number(mm_lifetime.get(key)) for key in (
         "fault_resolved", "fault_retry", "fault_invalid", "fault_io_error", "fault_retired",
         "fault_retry_yields", "fault_retry_max_chain", "fault_registry_current",
         "fault_registry_peak", "clean_cache_entries", "clean_cache_reclaimable",

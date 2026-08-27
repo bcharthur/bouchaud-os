@@ -1,6 +1,18 @@
-//! Couche d'abstraction architecture.
+//! Façade d'abstraction de l'architecture CPU.
 //!
-//! Bouchaud OS cible aujourd'hui uniquement x86_64 sous QEMU, mais tout le code
-//! dependant du materiel est isole ici pour preparer d'eventuels portages.
+//! Le code générique doit progressivement utiliser cette couche et ne plus
+//! importer directement `arch::x86_64` ou `arch::aarch64`.
 
+pub mod api;
+
+#[cfg(target_arch = "x86_64")]
 pub mod x86_64;
+
+#[cfg(target_arch = "aarch64")]
+pub mod aarch64;
+
+#[cfg(target_arch = "x86_64")]
+pub use x86_64 as current;
+
+#[cfg(target_arch = "aarch64")]
+pub use aarch64 as current;

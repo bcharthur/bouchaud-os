@@ -3,7 +3,7 @@
 use crate::gui::apps;
 use crate::gui::framebuffer as fb;
 use crate::gui::window::{
-    clip, icon_rect, menu_rect, start_btn, taskbar_btn, Win,
+    self, clip, icon_rect, menu_rect, start_btn, taskbar_btn, Win,
     BAR_H, ICONS, MENU, MENU_HEADER_H, MENU_ITEM_H, TITLE_H,
 };
 use crate::arch::x86_64::{cpu, rtc, smp};
@@ -54,16 +54,113 @@ fn draw_circle_highlight(cx: usize, cy: usize, r: i32, base: u32) {
 // ─── Bureau ────────────────────────────────────────────────────────────────
 
 /// Dessine le fond du bureau, la barre du haut et toutes les fenetres visibles.
-pub(crate) fn draw_desktop(wins: &[Win]) {
-    draw_wallpaper();
+// BOUCHAUD_GUI_SCENE_CULLING_V1
+//
+// `draw_desktop` dessinait la scene entiere en un bloc. Le compositeur ne
+// pouvait donc rien eviter : meme pour un rectangle de curseur de 16x16, il
+// payait la lecture de l'horloge RTC, deux formatages de chaine et trois
+// rasterisations TrueType de la barre du haut.
+//
+// Les morceaux sont desormais separes et adressables un par un. C'est
+// `gui::scene` qui decide lesquels appeler, a partir de leurs bornes.
+//
+// La fonction d'origine reste, pour les appelants qui veulent tout : elle
+// n'est plus utilisee par la boucle de composition.
 
-    // Filigrane "Bouchaud OS" centré en bas
+/// Filigrane « Bouchaud OS », en bas au centre.
+pub(crate) fn draw_filigrane() {
     fb::draw_text_rgb(fb::WIDTH / 2 - 88, fb::HEIGHT - 60, "Bouchaud OS", 0x33476b, 2);
+}
 
+/// Bornes du filigrane. Volontairement large : un calque qui deborde ses
+/// bornes laisserait des trainees, l'inverse ne coute qu'un peu de travail.
+pub(crate) fn filigrane_rect() -> (usize, usize, usize, usize) {
+    let largeur = 200usize;
+    let hauteur = 24usize;
+    ((fb::WIDTH / 2).saturating_sub(96), fb::HEIGHT.saturating_sub(64), largeur, hauteur)
+}
+
+/// Fond d'ecran seul.
+pub(crate) fn draw_fond() {
+    draw_wallpaper();
+}
+
+/// Barre superieure seule.
+pub(crate) fn draw_barre_haute() {
+    draw_topbar();
+}
+
+/// Une icone du bureau.
+pub(crate) fn draw_icone(index: usize) {
+    draw_icon_at(index);
+}
+
+// BOUCHAUD_GUI_EMPREINTE_ICONE_V1
+//
+// CE QUE L'ICONE PEINT, par opposition a son rectangle.
+//
+// `icon_rect` fait 56 x 60. Le libelle, lui, est centre sur cette largeur mais
+// n'y est pas contraint : `lx = (r.x + (r.w - lw) / 2).max(0)`. Des que le
+// texte est plus large que l'icone — et « Calculatrice » l'est a 10 pixels —
+// `lx` passe A GAUCHE de `r.x` et le texte deborde des deux cotes.
+//
+// Le calque annoncait `r.w + 6` et `r.h + 6`, un debord vers la droite et le
+// bas seulement. Deux consequences, toutes deux visibles : un degat clippe
+// exactement sur ces bornes tronque le libelle, et deplacer une icone laisse
+// derriere elle les moities de texte qui sortaient des bornes.
+//
+// Ce que le calque annonce doit MAJORER ce qu'il peint. Cette fonction est donc
+// la seule reponse a « ou une icone met-elle des pixels ? » : le carre, son
+// ombre portee de 3 pixels, et le libelle avec la sienne d'un pixel.
+
+/// Empreinte reelle de l'icone `index`, libelle compris.
+pub(crate) fn empreinte_icone(index: usize) -> crate::gui::protocole::Rect {
+    let (label, _kind) = ICONS[index];
+    let r = icon_rect(index);
+    let vw = 40i32;
+    let vx = r.x + (r.w - vw) / 2;
+    let vy = r.y;
+
+    let lw = fb::text_width(label, 10.0, false) as i32;
+    let lx = (r.x + (r.w - lw) / 2).max(0);
+    let ly = vy + vw + 3;
+    // Hauteur majoree d'une ligne de 10 pixels : jambages et ombre comprises.
+    const HAUTEUR_LIBELLE: i32 = 16;
+
+    let gauche = r.x.min(lx);
+    let haut = r.y.min(vy);
+    let droite = (r.x + r.w)
+        .max(vx + 3 + vw)      // ombre portee du carre
+        .max(lx + lw + 2);     // libelle plus son ombre d'un pixel
+    let bas = (r.y + r.h)
+        .max(vy + 3 + vw)
+        .max(ly + HAUTEUR_LIBELLE);
+
+    crate::gui::protocole::Rect::neuf(
+        gauche,
+        haut,
+        (droite - gauche).max(0) as u32,
+        (bas - haut).max(0) as u32,
+    )
+}
+
+/// Une fenetre, focalisee ou non.
+pub(crate) fn draw_fenetre(w: &Win, focused: bool) {
+    draw_window(w, focused);
+}
+
+/// Indice de la fenetre focalisee, s'il y en a une.
+pub(crate) fn indice_focus(wins: &[Win]) -> Option<usize> {
+    wins.iter().rposition(|w| !w.min)
+}
+
+pub(crate) fn draw_desktop(wins: &[Win]) {
+    draw_fond();
+    draw_filigrane();
     draw_icons();
     draw_topbar();
 
-    let focus = wins.iter().rposition(|w| !w.min);
+    let focus = indice_focus(wins);
     for (i, w) in wins.iter().enumerate() {
         if w.min { continue; }
         draw_window(w, Some(i) == focus);
@@ -150,6 +247,14 @@ fn draw_wallpaper() {
 
 fn draw_icons() {
     for i in 0..ICONS.len() {
+        draw_icon_at(i);
+    }
+}
+
+/// Une seule icone. Extrait de `draw_icons` pour que `gui::scene` puisse en
+/// ecarter une qui ne touche pas le rectangle en cours.
+fn draw_icon_at(i: usize) {
+    {
         let (label, _kind) = ICONS[i];
         let r = icon_rect(i);
         let vw = 40i32;
@@ -387,14 +492,27 @@ fn draw_icon_rustpad(vx: usize, vy: usize, vw: usize) {
 
 // ─── Fenêtres ──────────────────────────────────────────────────────────────
 
+// BOUCHAUD_GUI_EMPREINTE_OMBRE_V1
+/// Debordement de l'ombre portee d'une fenetre ou d'un menu, en pixels.
+///
+/// Une seule definition, ici, parce que TROIS endroits doivent s'accorder :
+/// ce que `draw_window` / `draw_menu` peignent, les bornes que `plan_de_scene`
+/// declare, et le rectangle que le compositeur invalide. Les deux derniers
+/// avaient diverge du premier -- l'invalidation ne couvrait que le cadre --, et
+/// la bande d'ombre d'une fenetre deplacee restait a l'ecran : des rectangles
+/// sombres, exactement de cette couleur, abandonnes sur le bureau.
+pub(crate) const DEBORD_OMBRE: i32 = 4;
+
 fn draw_window(w: &Win, focused: bool) {
     let x = w.x.max(0) as usize;
     let y = w.y.max(0) as usize;
     let ww = w.w as usize;
     let wh = w.h as usize;
 
-    // Ombre portée
-    fb::fill_rect_rgb(x + 4, y + 4, ww, wh, 0x04080f);
+    // Ombre portée. Elle deborde du cadre de `DEBORD_OMBRE` : tout ce qui
+    // calcule une empreinte ou une invalidation doit l'inclure.
+    let debord = DEBORD_OMBRE as usize;
+    fb::fill_rect_rgb(x + debord, y + debord, ww, wh, 0x04080f);
 
     // Fond de la fenêtre
     fb::fill_rect_rgb(x, y, ww, wh, 0x111827);
@@ -452,11 +570,10 @@ fn draw_window(w: &Win, focused: bool) {
 /// Compose la surface d'un client dans sa fenetre, ou son ecran de demarrage.
 ///
 /// Le gestionnaire de fenetres redessine tout le bureau a chaque trame : la
-/// zone utile est donc recopiee en entier, et le rectangle de degat ne sert
-/// qu'a decider s'il faut recomposer. C'est le repli assume du jalon : la
-/// recomposition partielle de l'ecran demande de savoir quels pixels du bureau
-/// sont encore valides, ce qui est un autre chantier — celui des regions sales
-/// du compositeur lui-meme.
+/// zone utile est recopiee sous la DECOUPE de la trame : le rectangle de degat
+/// decide s'il faut recomposer, et la decoupe decide de combien. Sans elle, une
+/// fenetre de navigateur coutait 664 400 pixels a chaque trame, y compris quand
+/// seul le curseur avait bouge.
 pub(crate) fn compose_client(w: &Win, client: &crate::gui::client::Client) {
     use crate::gui::client::Etat;
     let zone = crate::gui::window::zone_utile(w);
@@ -472,14 +589,37 @@ pub(crate) fn compose_client(w: &Win, client: &crate::gui::client::Client) {
     let hauteur = (zone.hauteur as usize).min(surface.hauteur);
     let largeur = (zone.largeur as usize).min(surface.largeur);
     let (zx, zy) = (zone.x.max(0) as usize, zone.y.max(0) as usize);
-    for ligne in 0..hauteur {
-        let destination = fb::ligne_mut(zx, zy + ligne, largeur);
+
+    // BOUCHAUD_GUI_CLIP_V1
+    //
+    // Cette recopie ne passe pas par les primitives de dessin : elle ecrit des
+    // lignes entieres par `copy_from_slice`, ce qui est justement ce qui la
+    // rend rapide. Elle doit donc appliquer la decoupe elle-meme.
+    //
+    // Ce qu'elle coutait sans : 1100x604, soit 664 400 pixels a CHAQUE trame,
+    // pour une fenetre de navigateur -- davantage que le fond d'ecran. Et cela
+    // meme quand la seule chose qui avait bouge etait le curseur.
+    let (cx0, cy0, cx1, cy1) = fb::clip_rect();
+    let x_debut = zx.max(cx0);
+    let x_fin = (zx + largeur).min(cx1);
+    let y_debut = zy.max(cy0);
+    let y_fin = (zy + hauteur).min(cy1);
+    if x_fin <= x_debut || y_fin <= y_debut {
+        return;
+    }
+    // Colonne de depart DANS la surface : la decoupe peut couper a gauche.
+    let colonne = x_debut - zx;
+    let compte = x_fin - x_debut;
+
+    for y in y_debut..y_fin {
+        let destination = fb::ligne_mut(x_debut, y, compte);
         if destination.is_empty() {
             continue;
         }
-        let compte = destination.len();
-        surface.copie_ligne(ligne, 0, compte, destination);
+        let pris = destination.len();
+        surface.copie_ligne(y - zy, colonne, pris, destination);
     }
+    fb::note_pixels_dessines(((x_fin - x_debut) * (y_fin - y_debut)) as u64);
 }
 
 /// Ecran d'attente dessine **dans la fenetre** du client.
@@ -584,8 +724,9 @@ pub(crate) fn draw_menu(mx: i32, my: i32) {
     let mw = mr.w as usize;
     let mh = mr.h as usize;
 
-    // Ombre portée
-    fb::fill_rect_rgb(mxi + 4, myi + 4, mw, mh, 0x030608);
+    // Ombre portée, meme debordement que les fenetres.
+    let debord = DEBORD_OMBRE as usize;
+    fb::fill_rect_rgb(mxi + debord, myi + debord, mw, mh, 0x030608);
 
     // Fond principal sombre
     for dy in 0..mh {
@@ -616,17 +757,14 @@ pub(crate) fn draw_menu(mx: i32, my: i32) {
         0xef4444, // Quitter
     ];
 
-    // Calcul de l'item survolé
-    let hover_row: Option<usize> = {
-        let rel_y = my - mr.y - MENU_HEADER_H;
-        if mx >= mr.x + stripe_w as i32 && mx < mr.x + mr.w
-            && rel_y >= 0 && rel_y < (MENU.len() as i32 * MENU_ITEM_H)
-        {
-            Some((rel_y / MENU_ITEM_H) as usize)
-        } else {
-            None
-        }
-    };
+    // BOUCHAUD_GUI_HOVER_CONTRAT_V1
+    //
+    // Le survol n'est plus calcule ici. `window::ligne_menu_survolee` est la
+    // seule definition, et c'est elle que le gestionnaire de fenetres consulte
+    // pour invalider l'ancienne et la nouvelle ligne. Recalculer localement,
+    // meme a l'identique, rouvrirait la porte a l'ecart qui laissait une ligne
+    // en surbrillance derriere le pointeur.
+    let hover_row: Option<usize> = window::ligne_menu_survolee(mx, my);
 
     let sep_idx = MENU.len() - 1; // index de "Quitter"
 

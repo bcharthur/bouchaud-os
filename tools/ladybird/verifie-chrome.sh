@@ -16,12 +16,25 @@
 # qu'il faut reproduire, et il est copie ci-dessous depuis la ligne de commande
 # reelle de la CI.
 #
+# ## Deuxieme phase : l'entree du navigateur (A0)
+#
+# `prepare-m11-input-ownership.py` ajoute un champ a `Web::QueuedInputEvent`.
+# Upstream initialise cet agregat avec TROIS initialiseurs, a cinq endroits
+# (`enqueue_input_event({ page_id, move(event), 0 })`). Or Ladybird compile avec
+# `-Wmissing-field-initializers` ET `-Werror` : un champ ajoute sans
+# initialiseur par defaut aurait casse le tout dernier objet du build, apres une
+# heure et demie de compilation, exactement comme les avertissements ci-dessus.
+#
+# Cette phase compile donc l'en-tete PATCHE et la forme d'initialisation
+# d'upstream, avec le meme jeu d'avertissements. Elle ne tourne que si l'arbre
+# prepare existe (`third_party/ladybird-browser-src`), c'est-a-dire quand
+# `browser-upstream.sh` a deja joue la chaine de portage.
+#
 # ## Ce qu'il ne prouve pas
 #
-# Uniquement l'en-tete. Le code greffe dans `ConnectionFromClient.cpp` et
-# `PageClient.cpp` par `prepare-m11-chrome.py` a besoin des en-tetes generes de
-# LibWeb, donc du build complet. Ce script reduit la surface non verifiee, il ne
-# l'annule pas.
+# Des en-tetes. Le code greffe dans `ConnectionFromClient.cpp`, `PageClient.cpp`
+# et `EventLoop.cpp` a besoin des en-tetes generes de LibWeb, donc du build
+# complet. Ce script reduit la surface non verifiee, il ne l'annule pas.
 #
 # ## Usage
 #
@@ -118,3 +131,80 @@ TU
     "$TMP/tu.cpp"
 
 printf '\033[32m%s\033[0m\n' "chrome M11 : compile sans avertissement"
+
+# --- Phase 2 : l'entree du navigateur, sur l'arbre PREPARE -------------------
+SRC="$RACINE/third_party/ladybird-browser-src"
+if [ ! -f "$SRC/Libraries/LibWeb/Page/InputEvent.h" ]; then
+    info "arbre prepare absent : phase A0 sautee (lancer browser-upstream.sh)"
+    exit 0
+fi
+
+if ! grep -q "report_completion_to_client" "$SRC/Libraries/LibWeb/Page/InputEvent.h"; then
+    rouge "A0 : InputEvent.h prepare ne porte pas report_completion_to_client"
+    exit 1
+fi
+
+info "== entree du navigateur (A0) contre $($CLANGXX --version | head -n1) =="
+
+cat > "$TMP/entree.cpp" <<'TU'
+#define BOUCHAUD_PORT 1
+#include <LibWeb/Page/InputEvent.h>
+
+// `-fsyntax-only` n'edite aucun lien : une fonction declaree suffit a fabriquer
+// un evenement sans avoir a construire tout LibWeb.
+Web::KeyEvent fabrique_touche();
+
+// Ce que ce fichier prouve :
+//
+//  1. la forme d'initialisation d'UPSTREAM -- trois initialiseurs -- compile
+//     encore avec le champ ajoute par A0 ;
+//  2. et elle compile SANS avertissement, avec le jeu exact de Ladybird, ou
+//     `-Wmissing-field-initializers` est promu en erreur.
+static bool a0_forme_upstream()
+{
+    Web::QueuedInputEvent evenement { 1, fabrique_touche(), 0 };
+    static_assert(__is_same(decltype(evenement.report_completion_to_client), bool),
+        "A0 : report_completion_to_client doit etre un bool");
+    return evenement.report_completion_to_client;
+}
+
+bool a0_appel();
+bool a0_appel() { return a0_forme_upstream(); }
+TU
+
+"$CLANGXX" \
+    -std=c++23 \
+    -fsyntax-only \
+    -DBOUCHAUD_PORT=1 \
+    -I"$SRC" \
+    -I"$SRC/Libraries" \
+    -I"$SRC/Services" \
+    -I"$TMP" \
+    -I"$TMP/stub" \
+    -O3 -DNDEBUG \
+    -march=x86-64 -mtune=generic \
+    -fno-exceptions \
+    -Werror \
+    -Wall -Wextra \
+    -Wcast-qual \
+    -Wformat=2 \
+    -Wimplicit-fallthrough \
+    -Wmissing-declarations \
+    -Wmissing-field-initializers \
+    -Wmissing-prototypes \
+    -Wsuggest-override \
+    -Wexit-time-destructors \
+    -Wpadded-bitfield \
+    -Wno-error=invalid-constexpr \
+    -Wno-expansion-to-defined \
+    -Wno-invalid-offsetof \
+    -Wno-shorten-64-to-32 \
+    -Wno-unknown-warning-option \
+    -Wno-unused-command-line-argument \
+    -Wno-user-defined-literals \
+    -Wno-implicit-const-int-float-conversion \
+    -Wno-unqualified-std-cast-call \
+    -Wno-c23-extensions \
+    "$TMP/entree.cpp"
+
+printf '\033[32m%s\033[0m\n' "entree A0 : l'agregat d'upstream compile sans avertissement"

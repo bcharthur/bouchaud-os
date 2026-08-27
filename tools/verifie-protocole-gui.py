@@ -119,6 +119,29 @@ def codes_touche_rust():
     }
 
 
+def modificateurs_rust():
+    """Les bits de modificateur vivent avec les codes de touche, et pour la
+    meme raison : c'est le bureau qui les produit."""
+    source = (RACINE / "src" / "gui" / "window_manager.rs").read_text(encoding="utf-8")
+    bloc = re.search(r"mod modificateur \{(.*?)\n\}", source, re.S)
+    if not bloc:
+        raise SystemExit("window_manager.rs : module `modificateur` introuvable")
+    return {
+        nom: entier(valeur)
+        for nom, valeur in re.findall(r"pub const (\w+): u32 = (\d+);", bloc.group(1))
+    }
+
+
+def modificateurs_cpp(source, motif):
+    bloc = re.search(motif, source, re.S)
+    if not bloc:
+        return {}
+    return {
+        nom: entier(valeur)
+        for nom, valeur in re.findall(r"(\w+)\s*=\s*(\w+),", bloc.group(1))
+    }
+
+
 def compare(quoi, gauche, droite, correspondances, echecs):
     for nom_rust, nom_cpp in correspondances.items():
         a = gauche.get(nom_rust)
@@ -154,6 +177,21 @@ TOUCHES = {
 }
 
 
+MODIFICATEURS_QT = {
+    "SHIFT": "ModShift",
+    "CTRL": "ModCtrl",
+    "ALT": "ModAlt",
+    "ALTGR": "ModAltGr",
+}
+
+MODIFICATEURS_CHROME = {
+    "SHIFT": "Shift",
+    "CTRL": "Ctrl",
+    "ALT": "Alt",
+    "ALTGR": "AltGr",
+}
+
+
 def main():
     valeurs_rust, genres_rust = constantes_rust(RUST.read_text(encoding="utf-8"))
     valeurs_cpp, genres_cpp, touches_cpp = constantes_cpp(CPP.read_text(encoding="utf-8"))
@@ -161,15 +199,23 @@ def main():
         CHROME.read_text(encoding="utf-8")
     )
     touches_rust = codes_touche_rust()
+    mods_rust = modificateurs_rust()
+    mods_cpp = modificateurs_cpp(
+        CPP.read_text(encoding="utf-8"), r"enum Modificateur : uint32_t \{(.*?)\n\};"
+    )
+    mods_chrome = modificateurs_cpp(
+        CHROME.read_text(encoding="utf-8"), r"enum Modificateur : u32 \{(.*?)\n\};"
+    )
 
     echecs = []
 
     # Le noyau est la reference : c'est lui qui produit les messages. Chaque
     # client est compare a lui, jamais les clients entre eux — sinon deux
     # clients pourraient s'accorder sur une valeur fausse.
-    for nom_client, valeurs, genres, touches in (
-        ("hote Qt", valeurs_cpp, genres_cpp, touches_cpp),
-        ("chrome Ladybird", valeurs_chrome, genres_chrome, touches_chrome),
+    for nom_client, valeurs, genres, touches, mods, table_mods in (
+        ("hote Qt", valeurs_cpp, genres_cpp, touches_cpp, mods_cpp, MODIFICATEURS_QT),
+        ("chrome Ladybird", valeurs_chrome, genres_chrome, touches_chrome,
+         mods_chrome, MODIFICATEURS_CHROME),
     ):
         print(f"\n-- noyau contre {nom_client} --")
         compare("constante", valeurs_rust, valeurs, CONSTANTES, echecs)
@@ -181,6 +227,10 @@ def main():
             compare("genre", genres_rust, genres, {nom: nom}, echecs)
 
         compare("touche", touches_rust, touches, TOUCHES, echecs)
+        # Un bit de modificateur mal aligne ne casse rien visiblement : il
+        # rend seulement Ctrl+F ou Alt+fleche inoperants, dans une seule des
+        # implementations, et sans aucun message.
+        compare("modificateur", mods_rust, mods, table_mods, echecs)
 
     if echecs:
         print()

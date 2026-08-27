@@ -1,5 +1,12 @@
 # Architecture de Bouchaud OS
 
+> **Note de statut (27 août 2026).** Ce document conserve une description
+> détaillée du chemin navigateur historique et certains chemins antérieurs à la
+> refonte multiplateforme. Pour distinguer l'architecture réellement en service
+> de la migration projetée, voir [`ARCHITECTURE_DIRECTION.md`](ARCHITECTURE_DIRECTION.md)
+> et [`../STATUS.md`](../STATUS.md). Les schémas cibles ne sont pas des preuves
+> d'implémentation.
+
 *Ce document decrit ce qui existe. Les versions precedentes — qui decrivaient
 une GDT en stub, un noyau sans allocateur et un reseau a l'etat de feuille de
 route — sont dans `docs/history/`.*

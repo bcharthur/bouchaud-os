@@ -216,6 +216,24 @@ pub fn eoi_local() {
 }
 
 /// Reveille les CPU secondaires et leur demande un point d'ordonnancement.
+/// Vecteur d'arret de panique : le CPU qui le recoit s'arrete definitivement.
+pub const PANIC_STOP_VECTOR: u8 = 0xF3;
+
+/// Arrete tous les autres CPU apres une faute fatale.
+///
+/// # Pourquoi un vecteur dedie
+///
+/// Le vecteur de replanification prend le gros verrou et peut commuter : c'est
+/// exactement ce qu'il ne faut pas faire quand l'etat du noyau est douteux. Ce
+/// vecteur-ci ne fait rien d'autre que `cli; hlt`.
+///
+/// Un seul envoi, en diffusion. Pas de boucle d'attente, pas d'accuse : un CPU
+/// qui ne repond pas est deja perdu, et l'attendre empecherait la sortie de
+/// panique de partir.
+pub fn arrete_les_autres_cpu() {
+    unsafe { send_all_excluding_self(PANIC_STOP_VECTOR as u32) };
+}
+
 pub fn broadcast_reschedule() {
     if schedulable_cpus() <= 1 {
         return;

@@ -129,6 +129,16 @@ enum Genre : u16 {
     CloseRequest = 0x106,
 };
 
+// Bits du champ `modificateurs` d'un message `Key`. Definis cote noyau dans
+// `window_manager::modificateur` ; `tools/verifie-protocole-gui.py` refuse un
+// desaccord.
+enum Modificateur : u32 {
+    Shift = 1,
+    Ctrl = 2,
+    Alt = 4,
+    AltGr = 8,
+};
+
 // Codes de touche du protocole (`docs/GUI_USERLAND_PROTOCOL.md` §4). Ce ne sont
 // pas des codes evdev : le bureau produit une touche deja interpretee.
 enum CodeTouche : u32 {
@@ -1079,32 +1089,47 @@ inline void handle_wheel(int delta, int x, int y)
         wheel_y);
 }
 
-inline void dispatch_key_to_page(Web::UIEvents::KeyCode code, u32 code_point, bool insert_text)
+/// Traduit le masque de modificateurs du protocole GUI
+/// (`window_manager::modificateur`) vers celui de LibWeb.
+inline Web::UIEvents::KeyModifier modifiers_from_mask(u32 mask)
+{
+    auto modifiers = Web::UIEvents::KeyModifier::Mod_None;
+    if (mask & Modificateur::Shift)
+        modifiers |= Web::UIEvents::KeyModifier::Mod_Shift;
+    if (mask & Modificateur::Ctrl)
+        modifiers |= Web::UIEvents::KeyModifier::Mod_Ctrl;
+    if (mask & Modificateur::Alt)
+        modifiers |= Web::UIEvents::KeyModifier::Mod_Alt;
+    if (mask & Modificateur::AltGr)
+        modifiers |= Web::UIEvents::KeyModifier::Mod_AltGr;
+    return modifiers;
+}
+
+/// Transmet UNE transition de touche a la page : celle qui s'est reellement
+/// produite.
+///
+/// Ce qui existait avant : le bureau n'envoyait que des appuis, et cette
+/// fonction fabriquait le relachement dans la foulee. Une page qui ecoute
+/// `keyup` voyait donc chaque touche relachee dans l'instant, une touche
+/// maintenue n'existait pas, et la repetition automatique etait indiscernable
+/// d'une rafale de frappes. Le pilote PS/2 connaissait pourtant les codes
+/// make/break depuis toujours -- ils etaient jetes avant le protocole GUI.
+inline void dispatch_key_to_page(
+    Web::UIEvents::KeyCode code, u32 code_point, bool insert_text, u32 modifiers, bool pressed, bool repeat)
 {
     auto& s = state();
     if (!s.on_key_event)
         return;
 
-    // Le gestionnaire de fenetres n'envoie que des appuis : il n'a pas de source
-    // de relachements a transmettre. Emettre le `keyup` juste apres evite qu'une
-    // page qui compte les deux reste persuadee qu'une touche est enfoncee.
-    Web::KeyEvent down {};
-    down.type = Web::KeyEvent::Type::KeyDown;
-    down.key = code;
-    down.modifiers = Web::UIEvents::KeyModifier::Mod_None;
-    down.code_point = code_point;
-    down.repeat = false;
-    down.should_insert_text = insert_text;
-    s.on_key_event(move(down));
-
-    Web::KeyEvent up {};
-    up.type = Web::KeyEvent::Type::KeyUp;
-    up.key = code;
-    up.modifiers = Web::UIEvents::KeyModifier::Mod_None;
-    up.code_point = code_point;
-    up.repeat = false;
-    up.should_insert_text = false;
-    s.on_key_event(move(up));
+    Web::KeyEvent event {};
+    event.type = pressed ? Web::KeyEvent::Type::KeyDown : Web::KeyEvent::Type::KeyUp;
+    event.key = code;
+    event.modifiers = modifiers_from_mask(modifiers);
+    event.code_point = code_point;
+    event.repeat = repeat;
+    // Un relachement n'insere jamais de texte : c'est l'appui qui compose.
+    event.should_insert_text = pressed && insert_text;
+    s.on_key_event(move(event));
     // Même règle que pour la souris : une touche envoyee au document ne change
     // pas le chrome. Le moteur demandera un repaint si le DOM visuel change.
 }
@@ -1112,11 +1137,13 @@ inline void dispatch_key_to_page(Web::UIEvents::KeyCode code, u32 code_point, bo
 inline void handle_key(u32 code, u32 code_point, u32 modifiers, u32 pressed)
 {
     auto& s = state();
-    if (pressed == 0)
-        return;
-    (void)modifiers;
+    auto const appui = pressed != 0;
 
+    // La barre d'adresse est un widget du chrome, pas un document : elle
+    // n'agit que sur l'appui. La page, elle, recoit les deux transitions.
     if (s.address_focused) {
+        if (!appui)
+            return;
         switch (code) {
         case ToucheCaractere:
             if (code_point >= 0x20 && code_point < 0x7f) {
@@ -1160,33 +1187,37 @@ inline void handle_key(u32 code, u32 code_point, u32 modifiers, u32 pressed)
 
     switch (code) {
     case ToucheCaractere:
-        dispatch_key_to_page(Web::UIEvents::code_point_to_key_code(code_point), code_point, true);
+        dispatch_key_to_page(Web::UIEvents::code_point_to_key_code(code_point), code_point, true, modifiers, appui, false);
         break;
     case ToucheEntree:
-        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Return, '\n', true);
+        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Return, '\n', true, modifiers, appui, false);
         break;
     case ToucheRetour:
-        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Backspace, 0, false);
+        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Backspace, 0, false, modifiers, appui, false);
         break;
     case ToucheTabulation:
-        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Tab, '\t', false);
+        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Tab, '\t', false, modifiers, appui, false);
         break;
     case ToucheHaut:
-        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Up, 0, false);
+        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Up, 0, false, modifiers, appui, false);
         break;
     case ToucheBas:
-        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Down, 0, false);
+        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Down, 0, false, modifiers, appui, false);
         break;
     case ToucheGauche:
-        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Left, 0, false);
+        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Left, 0, false, modifiers, appui, false);
         break;
     case ToucheDroite:
-        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Right, 0, false);
+        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Right, 0, false, modifiers, appui, false);
         break;
     case ToucheEchap:
         // Echap arrete le chargement en cours, comme dans tout navigateur. Le
         // gestionnaire de fenetres nous le laisse precisement pour cela.
-        if (s.loading) {
+        //
+        // L'arret est declenche par l'APPUI seul : le faire aussi au
+        // relachement le demanderait deux fois par frappe, et la seconde
+        // porterait sur un chargement deja arrete.
+        if (appui && s.loading) {
             s.loading = false;
             s.status = "arrete";
             if (s.on_stop)
@@ -1195,7 +1226,7 @@ inline void handle_key(u32 code, u32 code_point, u32 modifiers, u32 pressed)
             // recomposition est legitime.
             request_chrome_frame();
         }
-        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Escape, 0, false);
+        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Escape, 0, false, modifiers, appui, false);
         break;
     default:
         break;

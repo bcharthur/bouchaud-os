@@ -295,6 +295,16 @@ enum Genre : uint16_t {
     CloseRequest = 0x106,
 };
 
+/// Bits du champ `modificateurs` d'un message `Key`. Definis cote noyau dans
+/// `window_manager::modificateur` ; `tools/verifie-protocole-gui.py` refuse un
+/// desaccord entre les trois implementations.
+enum Modificateur : uint32_t {
+    ModShift = 1,
+    ModCtrl = 2,
+    ModAlt = 4,
+    ModAltGr = 8,
+};
+
 /// Codes de touche du protocole. Ce ne sont pas des codes evdev : le bureau
 /// envoie une touche deja interpretee selon sa disposition clavier.
 enum CodeTouche : uint32_t {
@@ -1322,12 +1332,16 @@ void PontFenetre::traite(uint16_t genre, const unsigned char *charge, size_t tai
             qtKey = texte.at(0).toUpper().unicode();
             break;
         }
-        // Le bureau ne rapporte pas encore l'etat des modificateurs ; le champ
-        // existe pour que le jour ou il le fera, seul ce fichier-ci change.
+        // Le bureau rapporte desormais l'etat des modificateurs : le pilote
+        // PS/2 suit Shift, Ctrl, Alt et AltGr et le champ n'est plus toujours
+        // nul. Les valeurs sont nommees des deux cotes, et la barriere du
+        // protocole verifie qu'elles concordent.
         int qtMods = 0;
-        if (modificateurs & 0x2)
+        if (modificateurs & Modificateur::ModShift)
+            qtMods |= Qt::ShiftModifier;
+        if (modificateurs & Modificateur::ModCtrl)
             qtMods |= Qt::ControlModifier;
-        if (modificateurs & 0x4)
+        if (modificateurs & Modificateur::ModAlt)
             qtMods |= Qt::AltModifier;
         appelle("touche", "(isi)", qtKey, texte.toUtf8().constData(), qtMods);
         if (g_toile)

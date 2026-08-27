@@ -33,6 +33,18 @@ param(
     # et le chrome : est-ce la page, ou est-ce la barre ?
     [switch]$LadybirdSansChrome,
 
+    # BOUCHAUD_GATE0_AUTOSTART_V1
+    # Test reproductible uniquement : ouvre Ladybird M11 automatiquement.
+    [switch]$Gate0Autostart,
+
+    # BOUCHAUD_GATE0_TCP_SERIAL_V7
+    # Canal serie dedie au runner Gate0. 0 conserve le comportement normal
+    # `-serial stdio`. Une valeur >0 fait ecouter QEMU sur loopback et ATTEND
+    # la connexion du runner avant de laisser demarrer la VM : aucun octet de
+    # boot ne peut donc etre perdu.
+    [ValidateRange(0, 65535)]
+    [int]$Gate0SerialPort = 0,
+
     # Memoire donnee a la machine.
     #
     # 12288 Mio est la plus grande valeur **verifiee** : le noyau demarre, la
@@ -810,6 +822,13 @@ if ($LadybirdMode) {
                 'export BOUCHAUD_M9_TEST=1'
             )
         }
+        elseif ($Gate0Autostart) {
+            @(
+                'echo "=== GATE0 : autostart Ladybird M11 complet ==="',
+                'export BO_AUTOSTART_BROWSER=1',
+                'export BOUCHAUD_GATE0=1'
+            )
+        }
         else {
             @(
                 'echo "=== Bouchaud OS : bureau, navigateur au double-clic ==="',
@@ -1227,10 +1246,22 @@ else {
 # Serie
 # =============================================================================
 
-$qemuArgs += @(
-    "-serial",
-    "stdio"
-)
+if ($Gate0SerialPort -gt 0) {
+    $qemuArgs += @(
+        "-serial",
+        ("tcp:127.0.0.1:{0},server=on,wait=on,nodelay=on" -f $Gate0SerialPort)
+    )
+    Write-Host (
+        "serie Gate0 : tcp://127.0.0.1:{0} (QEMU attend le collecteur)" -f `
+            $Gate0SerialPort
+    ) -ForegroundColor Yellow
+}
+else {
+    $qemuArgs += @(
+        "-serial",
+        "stdio"
+    )
+}
 
 
 # =============================================================================

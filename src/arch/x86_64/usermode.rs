@@ -263,24 +263,49 @@ unsafe extern "C" fn syscall_dispatch(frame: *mut TrapFrame) {
     // BOUCHAUD_SMP4_STALL_PROBE_V1
     // Phase 1 est visible meme si ce CPU se bloque dans enter(BKL).
     crate::kernel::task::stall_syscall_enter((*frame).rax);
-    let kernel = crate::kernel::smp_lock::enter();
-    crate::kernel::task::stall_syscall_bkl_acquired();
-    crate::kernel::task::account_kernel_enter();
-    // These MM calls touch only Arc<Process>::Mm and the IRQ-safe TLB
-    // protocol. Release the legacy syscall BKL after accounting so sibling
-    // threads can mutate independent address spaces concurrently.
-    // mprotect and brk touch only Mm-serialized metadata, the SMP-safe frame
-    // allocator, and the IRQ-safe TLB protocol. munmap may trigger RAMFS
-    // MAP_SHARED writeback, whose filesystem core is still legacy-BKL-only.
-    let audited_mm = matches!((*frame).rax, 10 | 12);
-    if audited_mm {
-        drop(kernel);
+
+    // Quels appels systeme se passent du gros verrou est une decision qui se
+    // prend appel par appel, avec une preuve a l'appui. Elle ne se prend pas
+    // ici, dans un `matches!` sans nom au fond de la glu d'entree : elle vit
+    // dans `abi::bkl::SANS_BKL`, ou chaque numero libere porte sa
+    // justification et ou le defaut -- garder le verrou -- s'applique tout
+    // seul a tout ce qui n'y figure pas. `tools/verifie-verrouillage.py`
+    // relit cette table et l'aiguillage pour qu'un appel complexe ne puisse
+    // pas y entrer par megarde.
+    //
+    // La trace, elle, vit DANS `abi::handle`. Or le port serie n'a aucun
+    // verrou a lui (`drivers::serial` : `static mut SERIAL`, plus deux
+    // drapeaux de prefixe eux aussi `static mut`) : deux CPU qui tracent en
+    // meme temps entrelacent leurs octets. Tant que la sortie serie n'a pas sa
+    // propre serialisation, un appel libere reste sous le verrou quand
+    // `strace` est actif -- et cela ne coute rien, la trace est eteinte par
+    // defaut.
+    let sans_verrou = !crate::kernel::abi::bkl::exige_bkl((*frame).rax)
+        && !crate::kernel::abi::trace_enabled();
+
+    if sans_verrou {
+        // ZERO acquisition du gros verrou sur ce chemin.
+        //
+        // C'etait le defaut mesure au lot precedent : la comptabilite
+        // d'entree/sortie passait par `task::current()`, donc par la table des
+        // taches, donc exigeait le verrou -- que l'on prenait alors DEUX fois
+        // pour un appel libere (une a l'entree, une a la sortie) contre UNE
+        // seule, gardee, pour un appel non libere. 130 000 acquisitions contre
+        // 387 000 pour le meme travail, sans gain de debit : liberer un appel
+        // court coutait plus qu'il ne rapportait.
+        //
+        // La comptabilite vit desormais dans un bloc par CPU, et la retraite
+        // d'un zombie se decide sur un drapeau par CPU. Les deux ne consultent
+        // plus la table.
+        crate::kernel::task::stall_syscall_sans_verrou();
+        crate::kernel::task::account_kernel_enter();
         crate::kernel::abi::handle(&mut *frame);
-        let kernel = crate::kernel::smp_lock::enter();
         crate::kernel::task::account_kernel_exit();
         crate::kernel::task::retire_current_if_zombie();
-        drop(kernel);
     } else {
+        let kernel = crate::kernel::smp_lock::enter();
+        crate::kernel::task::stall_syscall_bkl_acquired();
+        crate::kernel::task::account_kernel_enter();
         crate::kernel::abi::handle(&mut *frame);
         crate::kernel::task::account_kernel_exit();
         crate::kernel::task::retire_current_if_zombie();

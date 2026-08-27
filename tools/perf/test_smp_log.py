@@ -4,6 +4,7 @@ from pathlib import Path
 from smp_log import parse, summarize
 
 SAMPLE = "[SMP-SAMPLE] v=1 t_ns=100 window_ns=1000000000 load=[80,20] runnable=[1,1] rq=[0,0] ctx_delta=10 mig_delta=2 steal_ok_delta=[1,0] steal_try_delta=[2,1] steal_rej_bal_delta=[1,1] steal_rej_aff_delta=[0,0] bkl_wait_delta_ns=1000 bkl_hold_delta_ns=2000 bkl_acq_delta=3 pf_delta=[4,5] tlb_delta=1\r\n"
+SAMPLE_V2 = "[SMP-SAMPLE] v=2 t_ns=200 window_ns=1000000000 load=[90,30] runnable=[2,1] rq=[2,1] ctx_delta=20 mig_delta=4 steal_ok_delta=[2,0] steal_try_delta=[3,1] steal_rej_bal_delta=[1,1] steal_rej_aff_delta=[0,0] bkl_wait_delta_ns=2000 bkl_hold_delta_ns=4000 bkl_acq_delta=6 pf_delta=[6,7] tlb_delta=2 irq_preempt_delta=5 deferred_preempt_delta=7 fb_presents_delta=8 fb_bytes_delta=8388608\r\n"
 
 class LogEncodingTests(unittest.TestCase):
     def check_encoding(self, payload):
@@ -40,5 +41,18 @@ class LogEncodingTests(unittest.TestCase):
             self.assertEqual(lifetime["fault_retry"], 7)
             self.assertEqual(lifetime["fault_registry_peak"], 9)
             self.assertIsNone(lifetime["exec_max_ns"])
+
+    def test_interactivity_rates_and_bkl_maximum(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "v2.log"
+            path.write_text(SAMPLE_V2 + "[BKL-STATS] max_hold_ns=2500000 max_hold_site=syscall:59\n", encoding="utf-8")
+            summary = summarize(path)
+            self.assertEqual(summary["irq_preempt_s"], 5)
+            self.assertEqual(summary["deferred_preempt_s"], 7)
+            self.assertEqual(summary["bkl_acq_s"], 6)
+            self.assertEqual(summary["rq_max"], 2)
+            self.assertEqual(summary["fb_fps"], 8)
+            self.assertEqual(summary["fb_mib_s"], 8)
+            self.assertEqual(summary["bkl_max_hold_ms"], 2.5)
 
 if __name__ == "__main__": unittest.main()

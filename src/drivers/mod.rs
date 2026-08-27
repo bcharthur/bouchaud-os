@@ -1,19 +1,33 @@
-//! Pilotes materiels de Bouchaud OS.
+//! Couche pilotes de Bouchaud OS.
 //!
-//! - `vga`      : sortie texte VGA (0xb8000), cible principale de l'affichage ;
-//! - `serial`   : UART 16550 sur COM1, sortie de debug pour QEMU (`-serial stdio`) ;
-//! - `keyboard` : clavier PS/2 en polling, mapping AZERTY-FR.
+//! Les fichiers sont désormais classés physiquement par classe de périphérique.
+//! Pendant la migration multiplateforme, les anciens noms publics
+//! (`drivers::ata`, `drivers::e1000`, etc.) sont conservés afin de dissocier le
+//! déplacement des fichiers des changements de comportement.
 
+#[path = "audio/ac97.rs"]
 pub mod ac97;
+#[path = "block/ata.rs"]
 pub mod ata;
+#[path = "api/block.rs"]
 pub mod block;
+#[path = "block/disk.rs"]
 pub mod disk;
+#[path = "api/display.rs"]
 pub mod display;
+#[path = "network/e1000.rs"]
 pub mod e1000;
+#[path = "display/bochs.rs"]
 pub mod gfx;
+#[path = "api/gpu.rs"]
 pub mod gpu;
+#[path = "input/ps2_keyboard.rs"]
 pub mod keyboard;
+#[path = "input/ps2_mouse.rs"]
 pub mod mouse;
+#[path = "api/network.rs"]
 pub mod net;
+#[path = "serial/uart16550.rs"]
 pub mod serial;
+#[path = "display/vga_text.rs"]
 pub mod vga;

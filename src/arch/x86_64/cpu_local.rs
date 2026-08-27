@@ -16,7 +16,7 @@ use core::sync::atomic::{
 };
 
 use crate::arch::x86_64::smp::MAX_CPUS;
-use crate::kernel::sync::SpinLock;
+use crate::kernel::sync::SpinLockIrq;
 
 /// No task is currently attached to a CPU-local slot.
 pub const NO_TASK: usize = usize::MAX;
@@ -153,7 +153,43 @@ pub struct CpuLocal {
     need_resched: AtomicBool,
     irq_depth: AtomicU32,
     preempt_count: AtomicU32,
-    run_queue: SpinLock<Vec<usize>>,
+// BOUCHAUD_RUNQ_IRQ_V1
+    //
+    // POURQUOI `SpinLockIrq` ET NON `SpinLock`
+    //
+    // Cette file est atteignable depuis un GESTIONNAIRE D'INTERRUPTION. Le
+    // chemin exact, observe au runtime :
+    //
+    //     IRQ clavier/souris (8042)
+    //       -> push_scancode / mouse::handle_byte
+    //       -> kernel::sync::signale_interface(...)      [reveil du compositeur]
+    //       -> WaitQueue::wake_all
+    //       -> task::wake_wait_queue
+    //       -> task::publish_ready
+    //       -> CpuLocal::enqueue        <-- reprend cette meme file
+    //
+    // Un `SpinLock` ordinaire ne masque pas les interruptions. Si l'IRQ tombe
+    // pendant qu'une tache du MEME CPU est a l'interieur d'un accesseur --
+    // `enqueue`, `dequeue`, `steal`, `run_queue_len` --, le gestionnaire
+    // reprend le verrou que le contexte interrompu detient deja. Le
+    // `debug_assert!` de recursion de `SpinLock` le voit et panique :
+    //
+    //     SpinLock recursive acquisition on CPU 0
+    //
+    // La fenetre n'est pas theorique : `queue.contains()` est lineaire,
+    // `queue.remove(0)` deplace tout le vecteur, et `queue.push()` peut
+    // reallouer -- donc allouer -- sous le verrou.
+    //
+    // Le gros verrou ne protege PAS de ce cas : il appartient a un CPU, pas a
+    // une tache, et `smp_lock::enter()` est REENTRANTE. Un gestionnaire
+    // d'interruption qui le reprend sur un CPU qui le detient deja obtient donc
+    // un garde valide et continue -- c'est le comportement voulu, et c'est
+    // precisement ce qui amene le handler jusqu'ici.
+    //
+    // `SpinLockIrq` masque les interruptions pour la duree de la section
+    // critique. L'IRQ ne disparait pas : elle reste en attente dans l'APIC
+    // local et est delivree des le relachement. Aucun reveil n'est perdu.
+    run_queue: SpinLockIrq<Vec<usize>>,
 
     context_switches: AtomicU64,
     migrations: AtomicU64,
@@ -176,7 +212,7 @@ impl CpuLocal {
             need_resched: AtomicBool::new(false),
             irq_depth: AtomicU32::new(0),
             preempt_count: AtomicU32::new(0),
-            run_queue: SpinLock::new(Vec::new()),
+            run_queue: SpinLockIrq::new(Vec::new()),
             context_switches: AtomicU64::new(0),
             migrations: AtomicU64::new(0),
             ipi_rx: AtomicU64::new(0),

@@ -267,6 +267,27 @@ pub fn vers_local(zone: &Rect, x_ecran: i32, y_ecran: i32) -> Option<(i32, i32)>
     Some((x_ecran - zone.x, y_ecran - zone.y))
 }
 
+/// Delta de molette PS/2 brut -> delta du protocole GUI.
+///
+/// Les deux comptent a l'envers l'un de l'autre, et rien dans le typage ne le
+/// dit : ce sont deux `i32`. Le quatrieme octet d'un paquet IntelliMouse est
+/// **negatif quand la molette tourne vers le haut** (loin de l'utilisateur) —
+/// c'est ce que produit QEMU (`hw/input/ps2.c` : `WHEEL_UP` fait `mouse_dz--`)
+/// et c'est ce que suppose Linux, qui publie `REL_WHEEL = -(signed char)
+/// packet[3]` dans `drivers/input/mouse/psmouse-base.c`. Notre propre couche
+/// evdev fait deja cette negation (`kernel::input::read_mouse`).
+///
+/// Le protocole GUI, lui, compte **positif vers le haut** (convention Qt, voir
+/// [`Molette`]). Les trois consommateurs le lisent ainsi : `apps::wheel_to_app`
+/// et `rustpad::on_wheel` font `scroll - delta`, et le pont M11 fait
+/// `wheel_delta_y = -delta` pour retrouver la convention du DOM (positif vers
+/// le bas). Passer l'octet brut sur le fil inversait donc tout defilement du
+/// systeme : sur une page en haut de course, le geste « vers le bas » demandait
+/// de remonter, et ne bougeait rien.
+pub fn molette_depuis_ps2(brut: i32) -> i32 {
+    -brut
+}
+
 // --- Charges utiles ----------------------------------------------------------
 
 /// `Surface` : le gestionnaire de fenetres decrit au client la memoire qu'il
@@ -628,6 +649,25 @@ mod tests {
 
         let configure = Configure { fenetre: 1, largeur: 1100, hauteur: 604, focus: 1 };
         assert_eq!(Configure::decode(&configure.encode()), Some(configure));
+    }
+
+    #[test]
+    fn la_molette_ps2_est_retournee_pour_le_protocole() {
+        // Molette vers le haut : le paquet PS/2 porte un delta negatif, le
+        // protocole GUI demande un positif. Le test fixe le sens dans les deux
+        // directions, parce qu'une inversion se lit pareil dans le typage.
+        assert_eq!(molette_depuis_ps2(-1), 1, "un cran vers le haut");
+        assert_eq!(molette_depuis_ps2(1), -1, "un cran vers le bas");
+        assert_eq!(molette_depuis_ps2(0), 0);
+        // Plusieurs crans accumules entre deux tours du bureau.
+        assert_eq!(molette_depuis_ps2(-3), 3);
+
+        // Et le sens attendu par le consommateur : un cran vers le haut doit
+        // faire *diminuer* la position de defilement, comme `wheel_to_app` et
+        // `rustpad::on_wheel` la calculent (`scroll - delta`).
+        let scroll = 10i32;
+        assert_eq!(scroll - molette_depuis_ps2(-1), 9, "vers le haut remonte");
+        assert_eq!(scroll - molette_depuis_ps2(1), 11, "vers le bas descend");
     }
 
     #[test]

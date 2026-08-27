@@ -1,0 +1,161 @@
+//! Pilote serie UART 16550 sur COM1 (port 0x3F8).
+//!
+//! Sortie de debug pour QEMU lance avec `-serial stdio` : les logs noyau
+//! importants y sont copies, ce qui permet de tracer le boot meme si l'ecran
+//! VGA est efface. Fournit les macros `serial_print!` / `serial_println!`.
+
+use core::fmt;
+use crate::arch::x86_64::ports::{inb, outb};
+
+const COM1: u16 = 0x3F8;
+
+/// Etat global du port serie, pour eviter d'ecrire avant l'init.
+static mut INITIALISED: bool = false;
+
+pub struct SerialPort;
+
+static mut SERIAL: SerialPort = SerialPort;
+
+/// Initialise COM1 : 38400 bauds, 8N1, FIFO active.
+pub fn init() {
+    unsafe {
+        outb(COM1 + 1, 0x00); // desactive les interruptions
+        outb(COM1 + 3, 0x80); // active DLAB pour regler le diviseur
+        outb(COM1 + 0, 0x03); // diviseur bas  (3 -> 38400 bauds)
+        outb(COM1 + 1, 0x00); // diviseur haut
+        outb(COM1 + 3, 0x03); // 8 bits, pas de parite, 1 stop (8N1)
+        outb(COM1 + 2, 0xC7); // active et purge le FIFO, seuil 14 octets
+        outb(COM1 + 4, 0x0B); // IRQ active, RTS/DSR positionnes
+        INITIALISED = true;
+    }
+}
+
+/// Indique si COM1 a ete initialise.
+pub fn is_ready() -> bool {
+    unsafe { INITIALISED }
+}
+
+fn transmit_empty() -> bool {
+    unsafe { inb(COM1 + 5) & 0x20 != 0 }
+}
+
+fn write_byte(byte: u8) {
+    // Convertit les sauts de ligne Unix en CRLF pour les terminaux serie.
+    if byte == b'\n' {
+        write_raw(b'\r');
+    }
+    write_raw(byte);
+}
+
+fn write_raw(byte: u8) {
+    let mut spin = 0u32;
+    while !transmit_empty() {
+        spin += 1;
+        if spin > 100_000 { break; } // garde-fou si COM1 absent
+    }
+    unsafe { outb(COM1, byte); }
+}
+
+/// Le prochain octet ecrit commence-t-il une ligne ?
+static mut DEBUT_LIGNE: bool = true;
+/// Vrai pendant l'ecriture du prefixe lui-meme (garde de reentrance).
+static mut DANS_PREFIXE: bool = false;
+
+impl fmt::Write for SerialPort {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for byte in s.bytes() {
+            // Le prefixe est pose au premier octet non vide d'une ligne, et non
+            // a chaque appel : une ligne construite par plusieurs `serial_print!`
+            // n'en recoit donc qu'un, et une ligne vide n'en recoit aucun.
+            unsafe {
+                if DEBUT_LIGNE && byte != b'\n' && !DANS_PREFIXE {
+                    DANS_PREFIXE = true;
+                    crate::kernel::journal::ecris_prefixe();
+                    DANS_PREFIXE = false;
+                }
+                DEBUT_LIGNE = byte == b'\n';
+            }
+            write_byte(byte);
+        }
+        Ok(())
+    }
+}
+
+/// Implementation reelle derriere `serial_print!` / `serial_println!`.
+pub fn _print(args: fmt::Arguments) {
+    use core::fmt::Write;
+    if !is_ready() { return; }
+    unsafe { let _ = SERIAL.write_fmt(args); }
+}
+
+// BOUCHAUD_P0_SERIE_BRUTE_V1
+//
+// POURQUOI UNE SECONDE SORTIE
+// ---------------------------
+// `SerialPort` pose un prefixe de journal au premier octet de chaque ligne, et
+// ce prefixe n'est pas gratuit : `journal::ecris_prefixe` lit l'horloge RTC par
+// ports d'E/S, puis la charge CPU, la memoire et le disque.
+//
+// Ce sont des lectures parfaitement raisonnables pour un journal. Elles n'ont
+// rien a faire dans le chemin de forensic d'une panique : a ce moment precis
+// l'etat du noyau est, par definition, celui qu'on ne comprend pas. Le vidage
+// de l'enregistreur de vol du gros verrou doit dependre du strict minimum --
+// un `outb` sur COM1 -- et de rien d'autre.
+//
+// Ce que cette sortie ne fait pas : pas de prefixe, pas d'allocation, pas de
+// verrou, aucun appel hors de ce fichier.
+pub struct SerialBrut;
+
+static mut SERIAL_BRUT: SerialBrut = SerialBrut;
+
+impl fmt::Write for SerialBrut {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for byte in s.bytes() {
+            // Tenir `DEBUT_LIGNE` a jour malgre l'absence de prefixe : sinon un
+            // `serial_println!` ordinaire qui suivrait une ligne brute croirait
+            // etre en milieu de ligne, et sauterait SON prefixe.
+            unsafe { DEBUT_LIGNE = byte == b'\n'; }
+            write_byte(byte);
+        }
+        Ok(())
+    }
+}
+
+/// Sortie serie brute : COM1 directement, sans prefixe de journal.
+///
+/// Reservee au chemin de diagnostic de panique. Pour tout le reste,
+/// `serial_println!` reste la bonne macro : un journal sans horodatage est
+/// beaucoup moins utile qu'il n'y parait.
+pub fn _print_raw(args: fmt::Arguments) {
+    use core::fmt::Write;
+    if !is_ready() { return; }
+    unsafe { let _ = SERIAL_BRUT.write_fmt(args); }
+}
+
+#[macro_export]
+macro_rules! serial_print {
+    ($($arg:tt)*) => {{ $crate::drivers::serial::_print(format_args!($($arg)*)) }};
+}
+
+/// Comme `serial_print!`, mais sans prefixe de journal. Voir [`_print_raw`].
+#[macro_export]
+macro_rules! serial_print_brut {
+    ($($arg:tt)*) => {{ $crate::drivers::serial::_print_raw(format_args!($($arg)*)) }};
+}
+
+/// Comme `serial_println!`, mais sans prefixe de journal. Voir [`_print_raw`].
+#[macro_export]
+macro_rules! serial_println_brut {
+    () => {{ $crate::serial_print_brut!("\n") }};
+    ($fmt:expr) => {{ $crate::serial_print_brut!(concat!($fmt, "\n")) }};
+    ($fmt:expr, $($arg:tt)*) => {{
+        $crate::serial_print_brut!(concat!($fmt, "\n"), $($arg)*)
+    }};
+}
+
+#[macro_export]
+macro_rules! serial_println {
+    () => {{ $crate::serial_print!("\n") }};
+    ($fmt:expr) => {{ $crate::serial_print!(concat!($fmt, "\n")) }};
+    ($fmt:expr, $($arg:tt)*) => {{ $crate::serial_print!(concat!($fmt, "\n"), $($arg)*) }};
+}
