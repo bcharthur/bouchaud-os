@@ -27,6 +27,7 @@
 //! celui de [`USER_SPACE_BASE`]) : ses PDPT/PD/PT appartiennent au processus,
 //! sont detruites avec lui, et ne peuvent pas empieter sur le noyau.
 
+use alloc::collections::BTreeSet;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -470,8 +471,28 @@ pub struct AddressSpace {
     identity: Arc<AddressSpaceIdentity>,
     /// Frames de tables intermediaires, liberees avec l'espace.
     tables: Vec<u64>,
+    // BOUCHAUD_P2_PAGES_POSSEDEES_SET_V1
+    //
+    // ENSEMBLE, ET NON LISTE.
+    //
+    // `pages` etait un `Vec<u64>` interroge par balayage lineaire :
+    //
+    //   * `prepare_unmap`  : `self.pages.contains(&phys)` PAR PAGE de la plage ;
+    //   * `finish_unmap`   : `self.pages.iter().position(..)` PAR frame rendue ;
+    //   * `owns_frame`     : `contains`, appele PAR PAGE par `clone_for_fork`.
+    //
+    // Soit `O(R x P)` ou R est la plage traitee et P le nombre de frames
+    // residentes du processus. Pour un WebContent a 200 Mio resident
+    // (P = 51 200) et un `madvise(DONTNEED)` de 16 Mio (R = 4096), c'est
+    // 2 x 10^8 comparaisons pour `prepare_unmap` et autant pour `finish_unmap`
+    // — le gros verrou tenu. `fork` payait le meme prix, en `O(P^2)`.
+    //
+    // Un ensemble ordonne rend les trois operations `O(log P)`. Il est aussi
+    // plus juste : une frame ne peut appartenir qu'une fois a un espace, ce que
+    // le `Vec` n'imposait pas — et `finish_unmap` n'en retirait alors qu'une
+    // occurrence, laissant fuir les autres.
     /// Frames de donnees mappees pour l'utilisateur.
-    pages: Vec<u64>,
+    pages: BTreeSet<u64>,
 }
 
 /// Stable CR3 identity shared with `Mm`'s context-switch fast path.
@@ -614,7 +635,7 @@ impl AddressSpace {
                 quiescence_waiter: AtomicU64::new(u64::MAX),
             }),
             tables: Vec::new(),
-            pages: Vec::new(),
+            pages: BTreeSet::new(),
         })
     }
 
@@ -721,7 +742,7 @@ impl AddressSpace {
                     Some(f) => f,
                     None => return false,
                 };
-                self.pages.push(frame);
+                self.pages.insert(frame);
                 if !self.map(page, frame, flags) {
                     return false;
                 }
@@ -784,8 +805,10 @@ impl AddressSpace {
     /// Rend les frames uniquement apres `UnmapRetirement::invalidation()`.
     pub fn finish_unmap(&mut self, retirement: UnmapRetirement) {
         for phys in retirement.frames {
-            if let Some(pos) = self.pages.iter().position(|&f| f == phys) {
-                self.pages.swap_remove(pos);
+            // `remove` rend `false` si la frame a deja ete retiree : c'est le
+            // cas quand la meme frame apparait deux fois dans `retirement`,
+            // et c'est ce qui interdit le double `free`.
+            if self.pages.remove(&phys) {
                 free_frame(phys);
             }
         }
@@ -961,7 +984,7 @@ impl AddressSpace {
                         PAGE_SIZE as usize,
                     );
                 }
-                child.pages.push(frame);
+                child.pages.insert(frame);
                 if !child.map(virt, frame, flags) {
                     return None;
                 }

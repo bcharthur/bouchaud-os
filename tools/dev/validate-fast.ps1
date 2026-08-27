@@ -73,6 +73,7 @@ try {
     Invoke-RustTest "profondeur BKL" "tools\smp\test_profondeur_bkl.rs"
     Invoke-RustTest "re-entree IRQ runqueue" "tools\smp\test_runqueue_irq.rs"
     Invoke-RustTest "cout des frames libres" "tools\smp\test_frames_libres.rs"
+    Invoke-RustTest "cout des frames possedees" "tools\smp\test_pages_possedees.rs"
 
     $env:BO_HELLO_EXE = Join-Path $Tmp "bo-hello.exe"
     Invoke-Step "fixture PE32+" {
