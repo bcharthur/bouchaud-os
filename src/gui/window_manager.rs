@@ -380,6 +380,10 @@ fn boucle() {
     let mut derniere_horloge = 0u64;
     let mut derniere_souris = (usize::MAX, usize::MAX);
     let mut derniers_boutons = 0u32;
+    // BOUCHAUD_GUI_HOVER_CONTRAT_V1 : la ligne du menu actuellement en
+    // surbrillance. C'est de l'etat du BUREAU, pas du peintre : sans elle,
+    // personne ne sait quelle ligne doit cesser de l'etre. Voir plus bas.
+    let mut survol_menu: Option<usize> = None;
     let mut dernier_releve = 0u64;
     // Derniere entree transmise a un client, et derniere recomposition
     // « aveugle » : ensemble, ils donnent sa cadence a un client muet.
@@ -583,6 +587,47 @@ fn boucle() {
             if handle_wheel(mx, my, wheel, &mut wins, &mut degats) {
                 sale = true;
             }
+        }
+
+        // BOUCHAUD_GUI_HOVER_CONTRAT_V1
+        //
+        // LE BUG QUE CE BLOC CORRIGE
+        // --------------------------
+        // `draw_menu` met en valeur la ligne sous le pointeur : fond plus clair
+        // sur toute la largeur, bordure de selection a gauche, texte blanc et
+        // en gras. Cela repeint une bande de 178 x 22 pixels.
+        //
+        // Un deplacement de souris n'invalidait pourtant que deux empreintes de
+        // curseur de 14 x 22. Passer d'une entree du menu a la suivante
+        // presentait donc la nouvelle ligne — le curseur est dessus, son
+        // empreinte la recoupe — mais JAMAIS l'ancienne. Deux lignes
+        // apparaissaient en surbrillance, puis trois, puis toute la colonne
+        // parcourue : le menu gardait la trace du chemin du pointeur.
+        //
+        // Entrer dans le menu et en sortir sont le meme defaut par les bords :
+        // en sortant, la derniere ligne survolee n'etait invalidee par personne.
+        //
+        // CE QUI N'EST PAS FAIT : `degats.tout()`. Le survol change une ligne,
+        // parfois deux. Repeindre l'ecran pour cela rendrait le compositeur
+        // event-driven inutile a chaque pixel de deplacement dans le menu.
+        //
+        // Le bureau garde donc l'ancien survol, et invalide les DEUX lignes.
+        // `window::ligne_menu_survolee` est la meme fonction que celle dont
+        // `draw_menu` deduit ce qu'il peint : les deux ne peuvent pas diverger.
+        let nouveau_survol = if menu_open {
+            window::ligne_menu_survolee(mx, my)
+        } else {
+            None
+        };
+        if nouveau_survol != survol_menu {
+            if let Some(ancien) = survol_menu {
+                degats.ajoute(Origine::Menu, window::rect_ligne_menu(ancien));
+            }
+            if let Some(nouveau) = nouveau_survol {
+                degats.ajoute(Origine::Menu, window::rect_ligne_menu(nouveau));
+            }
+            survol_menu = nouveau_survol;
+            sale = true;
         }
 
         // ---- Clients ring 3 ----

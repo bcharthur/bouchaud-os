@@ -3,7 +3,7 @@
 use crate::gui::apps;
 use crate::gui::framebuffer as fb;
 use crate::gui::window::{
-    clip, icon_rect, menu_rect, start_btn, taskbar_btn, Win,
+    self, clip, icon_rect, menu_rect, start_btn, taskbar_btn, Win,
     BAR_H, ICONS, MENU, MENU_HEADER_H, MENU_ITEM_H, TITLE_H,
 };
 use crate::arch::x86_64::{cpu, rtc, smp};
@@ -708,17 +708,14 @@ pub(crate) fn draw_menu(mx: i32, my: i32) {
         0xef4444, // Quitter
     ];
 
-    // Calcul de l'item survolé
-    let hover_row: Option<usize> = {
-        let rel_y = my - mr.y - MENU_HEADER_H;
-        if mx >= mr.x + stripe_w as i32 && mx < mr.x + mr.w
-            && rel_y >= 0 && rel_y < (MENU.len() as i32 * MENU_ITEM_H)
-        {
-            Some((rel_y / MENU_ITEM_H) as usize)
-        } else {
-            None
-        }
-    };
+    // BOUCHAUD_GUI_HOVER_CONTRAT_V1
+    //
+    // Le survol n'est plus calcule ici. `window::ligne_menu_survolee` est la
+    // seule definition, et c'est elle que le gestionnaire de fenetres consulte
+    // pour invalider l'ancienne et la nouvelle ligne. Recalculer localement,
+    // meme a l'identique, rouvrirait la porte a l'ecart qui laissait une ligne
+    // en surbrillance derriere le pointeur.
+    let hover_row: Option<usize> = window::ligne_menu_survolee(mx, my);
 
     let sep_idx = MENU.len() - 1; // index de "Quitter"
 

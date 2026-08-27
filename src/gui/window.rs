@@ -12,6 +12,16 @@ pub(crate) const MENU_ITEM_H: i32 = 22;    // hauteur d'un item du menu Démarre
 pub(crate) const MENU_HEADER_H: i32 = 8;   // zone vide en haut du menu
 pub(crate) const MENU_W: i32 = 178;        // largeur du menu Démarrer
 
+// Les constantes ci-dessus et celles de `gui::disposition` decrivent le MEME
+// bureau. Elles sont declarees deux fois parce que l'une doit rester pure et
+// testable sur l'hote ; ces assertions garantissent qu'elles ne peuvent pas
+// diverger sans casser la compilation.
+const _: () = {
+    assert!(BAR_H as u32 == crate::gui::disposition::HAUTEUR_BARRE);
+    assert!(MENU_ITEM_H == crate::gui::disposition::HAUTEUR_LIGNE_MENU);
+    assert!(MENU_HEADER_H == crate::gui::disposition::ENTETE_MENU);
+};
+
 /// `kind` du navigateur.
 ///
 /// Il fabrique desormais une fenetre comme les autres. Le programme vit toujours
@@ -120,6 +130,35 @@ pub(crate) fn start_btn() -> Rect {
 pub(crate) fn menu_rect() -> Rect {
     let h = MENU.len() as i32 * MENU_ITEM_H + MENU_HEADER_H + 8;
     Rect { x: 2, y: HEIGHT as i32 - BAR_H as i32 - h, w: MENU_W, h }
+}
+
+/// Le menu, dans le systeme de coordonnees du compositeur.
+pub(crate) fn menu_proto() -> crate::gui::protocole::Rect {
+    let r = menu_rect();
+    crate::gui::protocole::Rect::neuf(r.x, r.y, r.w.max(0) as u32, r.h.max(0) as u32)
+}
+
+// BOUCHAUD_GUI_HOVER_CONTRAT_V1
+//
+// LA definition du survol du menu, pour tout le systeme.
+//
+// `draw_menu` la calculait chez lui, et personne d'autre ne la connaissait. Le
+// survol repeint pourtant TOUTE une ligne -- fond, bordure de selection,
+// couleur et graisse du texte -- alors qu'un deplacement de souris n'invalide
+// que les deux empreintes 14x22 du curseur. Passer d'une ligne a l'autre
+// laissait donc l'ancienne surbrillance a l'ecran.
+//
+// Le peintre et l'invalidation appellent maintenant la meme fonction. Elles ne
+// peuvent plus repondre differemment.
+
+/// Ligne du menu sous le pointeur, ou `None` si le menu n'est pas survole.
+pub(crate) fn ligne_menu_survolee(mx: i32, my: i32) -> Option<usize> {
+    crate::gui::disposition::ligne_menu_survolee(menu_proto(), mx, my)
+}
+
+/// Rectangle repeint quand la ligne `index` prend ou perd le survol.
+pub(crate) fn rect_ligne_menu(index: usize) -> crate::gui::protocole::Rect {
+    crate::gui::disposition::rect_ligne_menu(menu_proto(), index)
 }
 
 pub(crate) fn taskbar_btn(i: usize) -> Rect {
