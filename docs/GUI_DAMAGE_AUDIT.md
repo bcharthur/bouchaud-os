@@ -54,6 +54,8 @@ Cinq entrees etaient fausses, toutes a la colonne « ancien etat ».
 | Le focus n'invalidait pas la fenetre qui le perdait | deux fenetres a la barre de titre bleue en meme temps |
 | Le libelle d'une icone debordait des bornes de son calque | libelle tronque ; moities de texte laissees derriere une icone deplacee |
 | Le curseur n'etait pas recolore quand son fond changeait | fleche bicolore, moitie noire moitie blanche |
+| La fermeture du menu n'invalidait pas la barre des taches | le bouton Demarrer restait allume apres la fermeture |
+| Le clic dans le menu lisait la ligne avec sa propre formule | l'entete de 8 px et la bande d'accent, qui ne surlignent rien, lancaient la premiere entree |
 
 Les deux barres etant disjointes, la premiere erreur ne pouvait pas se
 rattraper toute seule ; le libelle debordant violait le contrat `bornes_dessin`

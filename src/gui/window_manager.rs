@@ -37,7 +37,7 @@ use crate::gui::widgets;
 use crate::gui::window::{
     self as window,
     clamp_win, icon_rect, make_app, menu_rect, start_btn, taskbar_btn, toggle_max,
-    zone_utile, App, Drag, Win, BAR_H, ICONS, MENU, MENU_HEADER_H, MENU_ITEM_H, MIN_H, MIN_W,
+    zone_utile, App, Drag, Win, BAR_H, ICONS, MENU, MIN_H, MIN_W,
     NAV_HAUTEUR, NAV_LARGEUR, TITLE_H,
 };
 use crate::drivers::keyboard;
@@ -1326,10 +1326,21 @@ fn handle_click(
     // de l'image -- une fenetre qui apparait ou disparait, parce que le fond
     // qu'elle decouvre n'est connu de personne d'autre.
     if *menu_open {
-        let mr = menu_rect();
         let mut ouvre_fenetre = false;
-        if mr.hit(mx, my) {
-            let row = ((my - mr.y - MENU_HEADER_H) / MENU_ITEM_H).max(0) as usize;
+        // BOUCHAUD_GUI_HOVER_CONTRAT_V1
+        //
+        // Le clic lisait la ligne avec sa PROPRE formule :
+        // `((my - mr.y - MENU_HEADER_H) / MENU_ITEM_H).max(0)`. Deux ecarts avec
+        // ce que `draw_menu` met en valeur, et tous deux se voyaient :
+        //
+        //   * `.max(0)` ramene a la ligne 0 tout clic dans les 8 pixels
+        //     d'entete, qui ne surlignent rien : on cliquait sur du vide et
+        //     Ladybird se lancait ;
+        //   * la bande d'accent de gauche n'etait pas exclue, alors qu'elle ne
+        //     surligne rien non plus.
+        //
+        // Ce qui est surligne doit etre ce qui s'ouvre. Une seule definition.
+        if let Some(row) = window::ligne_menu_survolee(mx, my) {
             if let Some(&(_, kind)) = MENU.get(row) {
                 if kind == usize::MAX { *quit = true; }
                 else if kind == window::KIND_NAVIGATEUR { lance_navigateur(wins, home); ouvre_fenetre = true; }
@@ -1338,8 +1349,11 @@ fn handle_click(
         }
         *menu_open = false;
         // Le menu se referme : la zone qu'il OCCUPAIT redevient bureau -- son
-        // ombre portee comprise, sans quoi la bande sombre resterait a l'ecran.
-        degats.ajoute(Origine::Menu, empreinte_menu());
+        // ombre portee comprise, sans quoi la bande sombre resterait a l'ecran --
+        // ET le bouton Demarrer, qui change de couleur avec l'ouverture du menu.
+        for rect in transition::menu_bascule(window::menu_proto(), barre_taches_rect()).iter() {
+            degats.ajoute(Origine::Menu, rect);
+        }
         if ouvre_fenetre {
             degats.tout();
         }
