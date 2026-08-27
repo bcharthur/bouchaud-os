@@ -144,21 +144,20 @@ fn plan_de_scene(
     calques: &mut Vec<Calque>,
 ) {
     calques.clear();
-    calques.push(Calque::neuf(Element::Fond, plein_ecran(), true));
+    calques.push(Calque::plein(Element::Fond, plein_ecran()));
 
     let (fx, fy, fw, fh) = widgets::filigrane_rect();
-    calques.push(Calque::neuf(
+    calques.push(Calque::transparent(
         Element::Filigrane,
         Rect::neuf(fx as i32, fy as i32, fw as u32, fh as u32),
-        false,
     ));
 
     for index in 0..window::ICONS.len() {
-        // Bornes elargies de 4 pixels : l'icone porte une ombre portee, et un
-        // calque qui deborde ses bornes laisse des trainees. L'inverse ne
-        // coute qu'un peu de travail.
+        // Bornes elargies de 6 pixels : l'icone porte une ombre portee et un
+        // libelle. Un calque qui deborde ses bornes laisse des trainees ;
+        // l'inverse ne coute qu'un peu de travail.
         let r = icon_rect(index);
-        calques.push(Calque::neuf(
+        calques.push(Calque::transparent(
             Element::Icone(index),
             Rect::neuf(
                 r.x,
@@ -166,23 +165,22 @@ fn plan_de_scene(
                 (r.w.max(0) as u32).saturating_add(6),
                 (r.h.max(0) as u32).saturating_add(6),
             ),
-            false, // ombre portee et coins : pas de recouvrement garanti
         ));
     }
 
-    calques.push(Calque::neuf(
+    calques.push(Calque::plein(
         Element::BarreHaute,
         Rect::neuf(0, 0, fb::WIDTH as u32, BAR_H as u32),
-        true,
     ));
 
     for (index, w) in wins.iter().enumerate() {
         if w.min {
             continue;
         }
-        // Bornes = cadre PLUS l'ombre portee, qui deborde de 4 pixels en bas a
-        // droite. Opacite = le cadre SEUL : l'ombre, elle, laisse voir le fond.
-        // Confondre les deux ferait disparaitre le fond sous l'ombre.
+        // Deux rectangles, deux exigences opposees : `bornes_dessin` MAJORE ce
+        // que la fenetre touche -- cadre plus l'ombre portee de 4 pixels --,
+        // `opaque_sur` MINORE ce qu'elle remplit vraiment -- le cadre seul,
+        // l'ombre laissant voir le fond.
         let cadre = cadre_fenetre(w);
         let avec_ombre = Rect::neuf(
             cadre.x,
@@ -190,38 +188,25 @@ fn plan_de_scene(
             cadre.largeur.saturating_add(4),
             cadre.hauteur.saturating_add(4),
         );
-        calques.push(Calque {
-            element: Element::Fenetre(index),
-            bornes: avec_ombre,
-            opaque: false,
-        });
-        // Second calque, purement declaratif : il ne dessine rien de plus, il
-        // dit seulement « cette zone-ci est pleine ». C'est lui qui permet
-        // d'ecarter le fond d'ecran sous une fenetre de navigateur.
-        calques.push(Calque::neuf(Element::ZonePleine, cadre, true));
+        calques.push(Calque::avec_ombre(Element::Fenetre(index), avec_ombre, cadre));
     }
 
     if menu_open {
-        // Meme traitement que les fenetres : le menu porte une ombre de 4
-        // pixels qui deborde de son cadre et laisse voir ce qu'il y a dessous.
+        // Meme forme que les fenetres, meme raison.
         let cadre = depuis_widget(menu_rect());
-        calques.push(Calque::neuf(
-            Element::Menu,
-            Rect::neuf(
-                cadre.x,
-                cadre.y,
-                cadre.largeur.saturating_add(4),
-                cadre.hauteur.saturating_add(4),
-            ),
-            false,
-        ));
-        calques.push(Calque::neuf(Element::ZonePleine, cadre, true));
+        let avec_ombre = Rect::neuf(
+            cadre.x,
+            cadre.y,
+            cadre.largeur.saturating_add(4),
+            cadre.hauteur.saturating_add(4),
+        );
+        calques.push(Calque::avec_ombre(Element::Menu, avec_ombre, cadre));
     }
-    calques.push(Calque::neuf(Element::BarreTaches, barre_taches_rect(), true));
-    calques.push(Calque::neuf(
+
+    calques.push(Calque::plein(Element::BarreTaches, barre_taches_rect()));
+    calques.push(Calque::transparent(
         Element::Curseur,
         degat_curseur(souris.0, souris.1),
-        false,
     ));
 }
 
@@ -244,9 +229,6 @@ fn dessine_calque(
                 widgets::draw_fenetre(w, widgets::indice_focus(wins) == Some(index));
             }
         }
-        // Ne dessine rien : ce calque ne sert qu'a declarer une zone pleine
-        // pour le calcul d'occlusion.
-        Element::ZonePleine => {}
         Element::Menu => widgets::draw_menu(mx, my),
         Element::BarreTaches => widgets::draw_taskbar(wins, menu_open),
         Element::Curseur => widgets::draw_cursor(souris.0, souris.1),
@@ -551,7 +533,7 @@ fn boucle() {
         // tour, mais a une cadence qui suit ce qui peut faire bouger l'image —
         // pleine cadence juste apres une entree, cadence de veille sinon.
         let client_muet_visible = wins.iter().any(|w| {
-            !w.min && matches!(&w.app, App::Navigateur { client } if client.sans_protocole)
+            !w.min && matches!(&w.app, App::Navigateur { client } if client.recompose_a_l_aveugle())
         });
         let etat_aveugle = politique::Etat {
             maintenant_ms: maintenant,
@@ -913,7 +895,7 @@ fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> (Rect, bool) {
             // voir `REACTIVITE_MUETTE_MS`. La declarer ici a chaque tour
             // revenait a recopier 1100x604 pixels soixante fois par seconde
             // devant une image immobile.
-            if recompose_aveugle && client.sans_protocole && !w.min {
+            if recompose_aveugle && client.recompose_a_l_aveugle() && !w.min {
                 client.abime_tout();
                 degat_ecran = degat_ecran.union(&zone_fenetre);
             }
