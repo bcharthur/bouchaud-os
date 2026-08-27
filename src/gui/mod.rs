@@ -5,6 +5,8 @@
 //!   - `event` / `mouse` : entrees clavier / souris ;
 //!   - `window` : fenetres et types partages ;
 //!   - `widgets` : rendu (fenetres, barre des taches, menu, curseur, icones) ;
+//!   - `politique` : quand composer, quand dormir -- arithmetique pure ;
+//!   - `reveil` : comptabilite du reveil evenementiel du compositeur ;
 //!   - `window_manager` : boucle d'evenements (focus, z-order, drag, resize) ;
 //!   - `desktop` : point d'entree ;
 //!   - `apps/` : applications natives (terminal, fichiers, moniteur,
@@ -29,6 +31,8 @@ pub mod event;
 pub mod framebuffer;
 pub mod mouse;
 pub mod polices;
+pub mod politique;
+pub mod reveil;
 pub mod widgets;
 pub mod window;
 pub mod window_manager;

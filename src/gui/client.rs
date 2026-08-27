@@ -117,6 +117,10 @@ impl Client {
             .ok_or_else(|| "surface partagee impossible (memoire)".to_string())?;
         let vers_client = Canal::neuf();
         let vers_wm = Canal::neuf();
+        // BOUCHAUD_GUI_EVENT_DRIVEN_V1 : ce canal-ci, et lui seul, porte les
+        // trames et les degats du client vers le compositeur. C'est donc le
+        // seul dont une ecriture doit tirer le bureau de son sommeil.
+        vers_wm.lock().reveille_compositeur = true;
 
         let ecran = EcranVirtuel {
             node: surface.node,

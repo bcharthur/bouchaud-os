@@ -524,8 +524,16 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
             let mut canal = outbox.lock();
             let ecrits = core::cmp::min(place, data.len());
             canal.octets.extend_from_slice(&data[..ecrits]);
+            let reveille = canal.reveille_compositeur;
             drop(canal);
             crate::kernel::fd::notify_readiness();
+            // BOUCHAUD_GUI_EVENT_DRIVEN_V1 : seul le canal client -> WM porte
+            // ce drapeau. Un `write` de zero octet n'annonce rien.
+            if reveille && ecrits != 0 {
+                crate::kernel::sync::signale_interface(
+                    crate::kernel::sync::SourceReveil::Client,
+                );
+            }
             ecrits as i64
         }
         FdKind::Epoll(_) => -errno::EINVAL,

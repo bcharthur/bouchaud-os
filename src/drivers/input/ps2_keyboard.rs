@@ -244,6 +244,7 @@ pub fn rearm_after_8042_reconfigure() {
 /// Empile un scancode. Appele depuis le gestionnaire d'interruption clavier.
 
 pub fn push_scancode(sc: u8) {
+    let mut range = false;
     unsafe {
         IRQ_COUNT = IRQ_COUNT.wrapping_add(1);
         LAST_SCANCODE = sc;
@@ -251,9 +252,22 @@ pub fn push_scancode(sc: u8) {
         if next != Q_HEAD {
             QUEUE[Q_TAIL] = sc;
             Q_TAIL = next;
+            range = true;
         } else {
             DROPPED_COUNT = DROPPED_COUNT.wrapping_add(1);
         }
+    }
+    // BOUCHAUD_GUI_EVENT_DRIVEN_V1
+    //
+    // Signaler seulement ce qui est REELLEMENT entre en file. Un scancode
+    // perdu faute de place ne donne aucun travail a personne ; le compter
+    // comme invalidation ferait croire a une activite qui n'existe pas, et
+    // reveillerait le compositeur pour rien.
+    //
+    // Le pilote ne connait pas le compositeur : il parle au noyau, qui detient
+    // le reveil. Aucune dependance de `drivers/` vers `gui/`.
+    if range {
+        crate::kernel::sync::signale_interface(crate::kernel::sync::SourceReveil::Clavier);
     }
 }
 

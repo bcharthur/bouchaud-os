@@ -267,6 +267,15 @@ pub struct Canal {
     /// flux termine. Ce compteur suit exactement les `FileDesc`, y compris les
     /// duplications par `dup`/`fork` et les transferts `SCM_RIGHTS`.
     pub ecrivains: usize,
+    // BOUCHAUD_GUI_EVENT_DRIVEN_V1
+    /// Une ecriture dans ce canal doit reveiller le compositeur.
+    ///
+    /// Pose uniquement sur le canal client -> gestionnaire de fenetres. Sans ce
+    /// drapeau il faudrait signaler a CHAQUE ecriture de descripteur -- tubes,
+    /// sockets reseau, journaux -- et le compositeur se reveillerait pour du
+    /// trafic qui ne le concerne pas. Un reveil inutile coute une composition
+    /// complete ; le drapeau coute un booleen.
+    pub reveille_compositeur: bool,
 }
 
 /// Capacite d'un canal ou d'un tube, en octets.

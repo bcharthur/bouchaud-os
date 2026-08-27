@@ -39,6 +39,9 @@ use crate::gui::window::{
 };
 use crate::drivers::keyboard;
 use crate::fs::ramfs;
+use crate::gui::politique;
+use crate::gui::reveil;
+use crate::kernel::sync::reveil::INTERFACE;
 use crate::kernel::task;
 use crate::users;
 use alloc::string::String;
@@ -49,30 +52,22 @@ use core::sync::atomic::{AtomicU64, Ordering};
 ///
 /// 16 ms, soit environ 60 par seconde. Ce n'est pas une cadence a tenir, c'est
 /// un plafond : sans changement a l'ecran, aucune trame n'est produite.
-const PERIODE_TRAME_MS: u64 = 16;
+use politique::PERIODE_TRAME_MS;
 
 /// Periode de rafraichissement des indicateurs systeme (heure, CPU, memoire).
 ///
 /// Ils changent tout seuls, sans evenement pour l'annoncer. Une seconde est la
 /// granularite de l'horloge : rafraichir plus vite ne montrerait rien de plus.
-const PERIODE_HORLOGE_MS: u64 = 1000;
+use politique::PERIODE_HORLOGE_MS;
 
-/// Repos court tant que l'utilisateur interagit ou qu'une trame est encore sale.
-/// Les IRQ d'entree ne reveillent pas directement le fil bureau, donc on garde
-/// la latence historique de 4 ms pendant la phase interactive.
-const REPOS_ACTIF_TICKS: u64 = 4;
 
-/// BOUCHAUD_CPU_OPT_DYNAMIC_WM_SLEEP: au repos, 16 ms suffisent largement (une periode de trame).
-/// Cela divise jusqu'a quatre le nombre de reveils du fil noyau du bureau tout
-/// en plafonnant la latence de reprise a environ une frame.
-const REPOS_CALME_TICKS: u64 = 16;
 
 /// Periode du releve de charge par processus, en millisecondes.
 ///
 /// Cinq secondes : assez rare pour ne pas noyer le journal, assez frequent pour
 /// qu'une lenteur de quelques secondes laisse au moins une trace. C'est la ligne
 /// qu'on lit quand on se demande « qui prend le processeur ».
-const PERIODE_RELEVE_MS: u64 = 5000;
+use politique::PERIODE_RELEVE_MS;
 
 /// Duree pendant laquelle un client muet est recompose a pleine cadence apres
 /// une interaction, en millisecondes.
@@ -90,7 +85,6 @@ const PERIODE_RELEVE_MS: u64 = 5000;
 /// affiche un curseur. Passe ce delai sans aucune entree, plus rien ne peut
 /// bouger a l'ecran sans que le client nous le dise, et on retombe a la cadence
 /// de veille.
-const REACTIVITE_MUETTE_MS: u64 = 600;
 
 /// Periode de recomposition d'un client muet au repos, en millisecondes.
 ///
@@ -99,7 +93,6 @@ const REACTIVITE_MUETTE_MS: u64 = 600;
 /// sans entree — une animation, un chargement. Cinq fois par seconde suffit a
 /// ce qu'une telle page reste visiblement vivante, et divise par douze le cout
 /// que payait le repos.
-const REPOS_MUET_MS: u64 = 200;
 
 fn plein_ecran() -> Rect {
     Rect::neuf(0, 0, fb::WIDTH as u32, fb::HEIGHT as u32)
@@ -224,6 +217,15 @@ fn boucle() {
     let mut dernier_aveugle = 0u64;
 
     while !quit {
+        // BOUCHAUD_GUI_EVENT_DRIVEN_V1
+        //
+        // Le billet est pris AVANT toute lecture d'etat, et c'est tout
+        // l'interet : un evenement qui arrive pendant le traitement rend ce
+        // billet perime, et le sommeil de fin de tour sera refuse. Le prendre
+        // apres avoir constate « rien a faire » rouvrirait exactement la
+        // fenetre de reveil perdu que ce protocole existe pour fermer.
+        let billet = INTERFACE.billet();
+        reveil::note_tour();
         task::note_wm_heartbeat();
         let maintenant = crate::kernel::timer::monotonic_ms();
 
@@ -419,14 +421,20 @@ fn boucle() {
         // surface sans savoir si elle a change. On ne le fait donc pas a chaque
         // tour, mais a une cadence qui suit ce qui peut faire bouger l'image —
         // pleine cadence juste apres une entree, cadence de veille sinon.
-        let periode_aveugle = if maintenant.wrapping_sub(derniere_entree) < REACTIVITE_MUETTE_MS {
-            PERIODE_TRAME_MS
-        } else {
-            REPOS_MUET_MS
+        let client_muet_visible = wins.iter().any(|w| {
+            !w.min && matches!(&w.app, App::Navigateur { client } if client.sans_protocole)
+        });
+        let etat_aveugle = politique::Etat {
+            maintenant_ms: maintenant,
+            client_muet_visible,
+            dernier_aveugle_ms: dernier_aveugle,
+            derniere_entree_ms: derniere_entree,
+            ..Default::default()
         };
-        let recompose_aveugle = maintenant.wrapping_sub(dernier_aveugle) >= periode_aveugle;
+        let recompose_aveugle = politique::doit_recomposer_aveugle(&etat_aveugle);
         if recompose_aveugle {
             dernier_aveugle = maintenant;
+            reveil::note_recomposition_aveugle();
         }
         let (degat_clients, perte_fenetre) = pompe_clients(&mut wins, recompose_aveugle);
         if !degat_clients.vide() {
@@ -440,10 +448,20 @@ fn boucle() {
         }
 
         // ---- Rendu ----
+        // L'horloge est la SEULE animation permanente du bureau : elle change
+        // sans que rien puisse l'annoncer. Voir `politique::PERIODE_HORLOGE_MS`.
+        // On note si le degat de ce tour ne vient QUE d'elle, pour que la mesure
+        // d'inactivite puisse distinguer « le bureau dort » de « le bureau se
+        // reveille pour rien ».
+        let mut horloge_seule = false;
         if maintenant.wrapping_sub(derniere_horloge) >= PERIODE_HORLOGE_MS {
             derniere_horloge = maintenant;
+            horloge_seule = !sale;
             sale = true; // horloge, charge CPU, memoire : ils bougent seuls
             degats.ajoute(Origine::BarreTaches, barre_taches_rect());
+        }
+        if sale && maintenant.wrapping_sub(derniere_trame) < PERIODE_TRAME_MS {
+            reveil::note_trame_differee();
         }
         if sale && maintenant.wrapping_sub(derniere_trame) >= PERIODE_TRAME_MS {
             // BOUCHAUD_GUI_DAMAGE_REGION_V2
@@ -479,6 +497,7 @@ fn boucle() {
                 }
 
                 crate::kernel::timer::mark_frame();
+                reveil::note_trame(horloge_seule);
             }
 
             derniere_trame = maintenant;
@@ -496,19 +515,74 @@ fn boucle() {
             releve_charge(&mut wins, periode);
         }
 
-        // Rend la main. Pendant une interaction on conserve la reactivite 4 ms ;
-        // une fois calme, on n'eveille plus le bureau 250 fois/s sans raison.
-        // Le navigateur garde ainsi des tranches CPU nettement plus longues.
-        let repos_ticks = if sale
-            || left
-            || maintenant.wrapping_sub(derniere_entree) < REACTIVITE_MUETTE_MS
-        {
-            REPOS_ACTIF_TICKS
-        } else {
-            REPOS_CALME_TICKS
-        };
-        task::sleep_ticks(repos_ticks);
         task::nettoie_zombies();
+
+        // BOUCHAUD_GUI_EVENT_DRIVEN_V1
+        //
+        // CE QUI A CHANGE, ET POURQUOI CE N'EST PAS UN SLEEP PLUS LONG
+        // -----------------------------------------------------------
+        // Avant : `sleep_ticks(4 ou 16)`. Le bureau se reveillait entre quinze
+        // et soixante fois par seconde pour CONSTATER qu'il n'y avait rien a
+        // faire. Allonger ce delai n'aurait rien change au fond : c'est encore
+        // du polling, seulement plus lent -- et cela aurait ajoute de la
+        // latence a la premiere frappe.
+        //
+        // Maintenant : le bureau dort jusqu'a ce qu'un producteur signale, ou
+        // jusqu'a la prochaine echeance REELLE. Sans horloge affichee, sans
+        // client muet et sans degat en attente, `prochaine_echeance` rend
+        // `None` et le sommeil n'a pas de fin.
+        //
+        // L'echeance du releve de charge existe toujours : elle n'affiche rien,
+        // elle ecrit dans le journal, et c'est elle qui garantit qu'on ne perd
+        // jamais totalement la trace d'un bureau endormi.
+        let etat = politique::Etat {
+            maintenant_ms: maintenant,
+            sale,
+            client_muet_visible,
+            horloge_visible: true,
+            derniere_trame_ms: derniere_trame,
+            derniere_horloge_ms: derniere_horloge,
+            dernier_releve_ms: dernier_releve,
+            dernier_aveugle_ms: dernier_aveugle,
+            derniere_entree_ms: derniere_entree,
+        };
+
+        // Pas de traitement particulier du glisser. Il serait tentant de
+        // reboucler sans dormir tant que le bouton est enfonce -- « la fenetre
+        // doit suivre le curseur ». Ce serait une attente active : sans paquet
+        // PS/2, le curseur n'a pas bouge, et il n'y a donc rien a suivre. Le
+        // moindre mouvement produit un paquet, donc un signal, donc un reveil.
+        match politique::prochaine_echeance(&etat) {
+            // Echeance deja atteinte : reboucler tout de suite plutot que de
+            // payer deux changements de contexte pour un sommeil nul.
+            Some(date) if date <= maintenant => {}
+            Some(date) => {
+                let attente_ns = date
+                    .saturating_sub(maintenant)
+                    .saturating_mul(1_000_000);
+                let echeance_ns = crate::kernel::timer::monotonic_ns()
+                    .saturating_add(attente_ns);
+                let _ = INTERFACE.attends(billet, echeance_ns);
+            }
+            None => {
+                // Rien ne changera tout seul : le sommeil n'a pas de fin, seul
+                // un signal en sortira.
+                //
+                // CE CHEMIN N'EST PAS ATTEINT AUJOURD'HUI, et il faut le dire :
+                // `horloge_visible` vaut toujours `true` ci-dessus, parce que la
+                // barre des taches est toujours affichee. L'architecture le
+                // permet, la configuration actuelle non.
+                //
+                // Deux choses devront changer avant : une barre des taches
+                // masquable, et un chien de garde (`task::watchdog_from_timer`)
+                // qui sache distinguer un bureau VOLONTAIREMENT endormi d'un
+                // bureau bloque -- il crie aujourd'hui apres deux secondes sans
+                // battement. Le compteur est la pour que le jour ou ce chemin
+                // s'ouvre, on le voie.
+                reveil::note_sommeil_sans_fin();
+                let _ = INTERFACE.attends(billet, u64::MAX);
+            }
+        }
     }
 
     ferme_tous_les_clients(&mut wins);
@@ -549,6 +623,10 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
         par_origine[4], par_origine[5], par_origine[6], trames, rects, pixels,
         demandes, boite_gate0, evites, fusions, debordements, fb::pixels_dessines(),
     );
+    // BOUCHAUD_GUI_EVENT_DRIVEN_V1 : ce que le compositeur a reellement fait,
+    // et surtout ce qu'il n'a PAS fait. Une ligne par releve.
+    crate::gui::reveil::publie();
+
     let (mesures, total) = task::mesure_processus();
     if total > 0 {
         let mut ligne = String::new();

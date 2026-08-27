@@ -117,6 +117,7 @@ unsafe fn apply_packet(with_wheel: bool) {
     let flags = PKT[0];
     let dx = PKT[1] as i8 as i32;
     let dy = PKT[2] as i8 as i32;
+    let avant = (MX, MY, BTN, WHEEL_DELTA);
     MX += dx;
     MY -= dy; // l'axe Y ecran est inverse
     if MX < 0 { MX = 0; }
@@ -134,6 +135,16 @@ unsafe fn apply_packet(with_wheel: bool) {
                 wheel, dx, dy, MX, MY,
             );
         }
+    }
+
+    // BOUCHAUD_GUI_EVENT_DRIVEN_V1
+    //
+    // Un paquet PS/2 n'implique pas un changement : la souris emet aussi des
+    // paquets de delta nul, et le curseur bute contre les bords de l'ecran
+    // sans bouger. Ne signaler que ce qui a REELLEMENT change evite de
+    // reveiller le compositeur pour recomposer une image identique.
+    if (MX, MY, BTN, WHEEL_DELTA) != avant {
+        crate::kernel::sync::signale_interface(crate::kernel::sync::SourceReveil::Souris);
     }
 }
 
