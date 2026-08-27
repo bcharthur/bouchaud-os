@@ -62,6 +62,7 @@ try {
     Invoke-RustTest "damage" "tools\gui\test_degats.rs" -SingleThread
     Invoke-RustTest "protocole GUI" "tools\gui\test_protocole.rs"
     Invoke-RustTest "compositeur event-driven" "tools\gui\test_reveil.rs"
+    Invoke-RustTest "culling de scene" "tools\gui\test_scene.rs"
     Invoke-RustTest "BKL max/provenance" "tools\smp\test_bkl_max.rs"
     Invoke-RustTest "commutation SMP" "tools\smp\test_commutation.rs"
     Invoke-RustTest "profondeur BKL" "tools\smp\test_profondeur_bkl.rs"
