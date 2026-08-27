@@ -29,6 +29,7 @@ use crate::gui::event::{Key, KeyEvent};
 use crate::gui::framebuffer as fb;
 use crate::gui::mouse;
 use crate::gui::degats::{Degats, Origine};
+use crate::gui::disposition;
 use crate::gui::protocole::Rect;
 use crate::gui::widgets;
 use crate::gui::window::{
@@ -168,10 +169,7 @@ fn plan_de_scene(
         ));
     }
 
-    calques.push(Calque::plein(
-        Element::BarreHaute,
-        Rect::neuf(0, 0, fb::WIDTH as u32, BAR_H as u32),
-    ));
+    calques.push(Calque::plein(Element::BarreHaute, barre_haute_rect()));
 
     for (index, w) in wins.iter().enumerate() {
         if w.min {
@@ -229,9 +227,43 @@ fn dessine_calque(
     }
 }
 
-/// Rectangle de la barre des taches.
+/// Rectangle de la barre des taches — celle du BAS.
+///
+/// Bouton Demarrer et boutons de fenetres. Rien n'y change avec le temps.
 fn barre_taches_rect() -> Rect {
-    Rect::neuf(0, (fb::HEIGHT - BAR_H) as i32, fb::WIDTH as u32, BAR_H as u32)
+    disposition::barre_taches(fb::WIDTH as u32, fb::HEIGHT as u32)
+}
+
+// BOUCHAUD_GUI_TOPBAR_DAMAGE_V1
+//
+// LE BUG QUE CETTE FONCTION CORRIGE
+// ---------------------------------
+// Le bureau a deux barres. En haut : titre, charge CPU par coeur, memoire,
+// disque, et l'horloge. En bas : Demarrer et les fenetres. Ce sont deux
+// rectangles opposes de l'ecran.
+//
+// Les seuls pixels du bureau qui changent SANS que personne ne l'annonce sont
+// tous dans celle du HAUT. C'est pour eux que `PERIODE_HORLOGE_MS` existe.
+//
+// Le tic invalidait pourtant `barre_taches_rect()` — la barre du BAS. Le
+// compositeur faisait alors exactement ce qu'on lui demandait : il recomposait
+// et presentait une bande de 11 pixels tout en bas, ou strictement rien n'avait
+// change, et laissait intacte celle du haut ou l'heure venait d'avancer.
+//
+// Le symptome est trompeur : `frames_clock_only` monte, `presents` monte,
+// `presented_pixels` monte — toutes les metriques disent « je travaille » —
+// et `HH:MM:SS` reste fige a l'ecran. Rien dans les compteurs ne pouvait le
+// reveler, parce que le compositeur n'avait commis aucune faute : il presentait
+// fidelement la zone qu'on lui avait designee.
+//
+// Ce n'est donc pas un renommage d'`Origine` : c'est le RECTANGLE qui etait
+// faux. Il vient maintenant de `gui::disposition`, la meme definition que celle
+// dont `plan_de_scene` derive les bornes d'`Element::BarreHaute`. Les deux ne
+// peuvent plus designer deux bandes differentes.
+
+/// Rectangle de la barre du HAUT : horloge, CPU, RAM, disque.
+fn barre_haute_rect() -> Rect {
+    disposition::barre_haute(fb::WIDTH as u32)
 }
 
 // BOUCHAUD_GUI_EMPREINTE_OMBRE_V1
@@ -256,24 +288,12 @@ fn barre_taches_rect() -> Rect {
 // calque occupe a l'ecran ». `plan_de_scene` et toutes les invalidations
 // passent par elles, de sorte qu'elles ne peuvent plus diverger.
 fn empreinte_fenetre(w: &Win) -> Rect {
-    let cadre = cadre_fenetre(w);
-    Rect::neuf(
-        cadre.x,
-        cadre.y,
-        cadre.largeur.saturating_add(widgets::DEBORD_OMBRE as u32),
-        cadre.hauteur.saturating_add(widgets::DEBORD_OMBRE as u32),
-    )
+    disposition::empreinte_avec_ombre(cadre_fenetre(w))
 }
 
 /// Idem pour le menu deroulant.
 fn empreinte_menu() -> Rect {
-    let cadre = depuis_widget(menu_rect());
-    Rect::neuf(
-        cadre.x,
-        cadre.y,
-        cadre.largeur.saturating_add(widgets::DEBORD_OMBRE as u32),
-        cadre.hauteur.saturating_add(widgets::DEBORD_OMBRE as u32),
-    )
+    disposition::empreinte_avec_ombre(depuis_widget(menu_rect()))
 }
 
 /// Rectangle ecran d'une fenetre, cadre et barre de titre compris.
@@ -286,7 +306,7 @@ fn cadre_fenetre(w: &Win) -> Rect {
 
 /// Empreinte volontairement un peu large du curseur logiciel (fleche 12x19).
 fn degat_curseur(x: usize, y: usize) -> Rect {
-    Rect::neuf(x as i32, y as i32, 14, 22)
+    disposition::curseur(x as i32, y as i32)
 }
 
 /// Lance le bureau (bloquant jusqu'a Quitter).
@@ -608,7 +628,9 @@ fn boucle() {
             derniere_horloge = maintenant;
             horloge_seule = !sale;
             sale = true; // horloge, charge CPU, memoire : ils bougent seuls
-            degats.ajoute(Origine::BarreTaches, barre_taches_rect());
+            // BOUCHAUD_GUI_TOPBAR_DAMAGE_V1 : la barre du HAUT. Voir
+            // `barre_haute_rect`. La barre du bas n'a rien qui bouge tout seul.
+            degats.ajoute(Origine::BarreHaute, barre_haute_rect());
         }
         if sale && maintenant.wrapping_sub(derniere_trame) < PERIODE_TRAME_MS {
             reveil::note_trame_differee();
@@ -785,9 +807,10 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
         crate::gui::degats::stats_regions();
     let evites = boite_gate0.saturating_sub(pixels);
     crate::serial_println!(
-        "[GUI-DAMAGE] full={} window={} cursor={} client={} taskbar={} menu={} icon={} presents={} rects={} presented_pixels={} requested_pixels={} gate0_bbox_pixels={} saved_pixels={} merges={} overflows={} drawn_pixels={}",
+        "[GUI-DAMAGE] full={} window={} cursor={} client={} taskbar={} menu={} icon={} topbar={} presents={} rects={} presented_pixels={} requested_pixels={} gate0_bbox_pixels={} saved_pixels={} merges={} overflows={} drawn_pixels={}",
         par_origine[0], par_origine[1], par_origine[2], par_origine[3],
-        par_origine[4], par_origine[5], par_origine[6], trames, rects, pixels,
+        par_origine[4], par_origine[5], par_origine[6], par_origine[7],
+        trames, rects, pixels,
         demandes, boite_gate0, evites, fusions, debordements, fb::pixels_dessines(),
     );
     // BOUCHAUD_GUI_EVENT_DRIVEN_V1 : ce que le compositeur a reellement fait,

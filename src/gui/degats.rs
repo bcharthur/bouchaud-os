@@ -24,11 +24,17 @@ pub enum Origine {
     Curseur,
     Client,
     BarreTaches,
+    /// Barre du HAUT : horloge, charge CPU, memoire, disque.
+    ///
+    /// Distincte de `BarreTaches` parce que ce sont deux barres differentes, a
+    /// deux extremites de l'ecran. Les confondre a fige l'horloge a l'ecran
+    /// pendant que le compositeur presentait consciencieusement la barre du bas.
+    BarreHaute,
     Menu,
     Icone,
 }
 
-const NOMBRE_ORIGINES: usize = 7;
+const NOMBRE_ORIGINES: usize = 8;
 static DEGATS_PAR_ORIGINE: [AtomicU64; NOMBRE_ORIGINES] =
     [const { AtomicU64::new(0) }; NOMBRE_ORIGINES];
 
@@ -51,6 +57,7 @@ impl Origine {
             Origine::BarreTaches => 4,
             Origine::Menu => 5,
             Origine::Icone => 6,
+            Origine::BarreHaute => 7,
         }
     }
 }
