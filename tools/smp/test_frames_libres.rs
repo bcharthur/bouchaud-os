@@ -108,6 +108,128 @@ fn un_double_free_est_refuse() {
     assert_eq!(set.compte(), 1, "et ne doit pas compter deux fois");
 }
 
+// ─── Regions disjointes : le trou n'existe pas ─────────────────────────────
+//
+// Un bitmap unique indexe depuis une base commune represente l'ENVELOPPE des
+// regions, pas leur union. Une adresse dans le trou entre deux regions y a un
+// index valide — et `couverte()` repondait « oui » pour une frame qui n'existe
+// pas, ce qui vidait de sens l'assertion de `free_frame`.
+
+const REGION_A: (u64, u64) = (0x1000, 0x9000);
+const TROU: (u64, u64) = (0x9000, 0x20000);
+const REGION_B: (u64, u64) = (0x20000, 0x30000);
+
+fn deux_regions_disjointes() -> FramesLibres {
+    let mut set = FramesLibres::neuf();
+    set.couvre(REGION_A.0, REGION_A.1);
+    set.couvre(REGION_B.0, REGION_B.1);
+    set
+}
+
+/// LE test que la semantique d'enveloppe ne peut pas passer.
+#[test]
+fn un_trou_entre_deux_regions_n_est_pas_couvert() {
+    let set = deux_regions_disjointes();
+
+    let mut phys = REGION_A.0;
+    while phys < REGION_A.1 {
+        assert!(set.couverte(phys), "region A : {phys:#x} doit etre valide");
+        phys += TAILLE_PAGE;
+    }
+    let mut phys = REGION_B.0;
+    while phys < REGION_B.1 {
+        assert!(set.couverte(phys), "region B : {phys:#x} doit etre valide");
+        phys += TAILLE_PAGE;
+    }
+    let mut phys = TROU.0;
+    while phys < TROU.1 {
+        assert!(
+            !set.couverte(phys),
+            "TROU : {phys:#x} ne doit PAS etre valide — c'est du reserve/MMIO, \
+             aucune frame n'y existe"
+        );
+        phys += TAILLE_PAGE;
+    }
+}
+
+/// L'enveloppe reste indexable — c'est ce qui rend le defaut possible — mais
+/// elle ne dit rien de la validite.
+#[test]
+fn l_enveloppe_est_plus_large_que_l_union() {
+    let set = deux_regions_disjointes();
+    let pages_a = (REGION_A.1 - REGION_A.0) / TAILLE_PAGE;
+    let pages_b = (REGION_B.1 - REGION_B.0) / TAILLE_PAGE;
+    assert_eq!(
+        set.frames_valides() as u64,
+        pages_a + pages_b,
+        "l'union exacte, et rien de plus"
+    );
+    assert!(
+        set.capacite() as u64 > pages_a + pages_b,
+        "l'enveloppe, elle, couvre aussi le trou : c'est bien pourquoi la \
+         validite ne peut pas se deduire de l'index"
+    );
+}
+
+#[test]
+fn une_frame_du_trou_ne_peut_pas_etre_liberee() {
+    let mut set = deux_regions_disjointes();
+    assert!(
+        !set.marque_libre(TROU.0 + 4 * TAILLE_PAGE),
+        "liberer une frame inexistante doit etre refuse"
+    );
+    assert_eq!(set.compte(), 0);
+    assert!(!set.est_libre(TROU.0 + 4 * TAILLE_PAGE));
+}
+
+#[test]
+fn une_frame_du_trou_ne_peut_pas_etre_allouee() {
+    let mut set = deux_regions_disjointes();
+    assert!(!set.marque_occupee(TROU.0 + TAILLE_PAGE));
+    assert_eq!(set.compte(), 0, "le compte ne doit pas passer sous zero");
+}
+
+/// Les frontieres exactes : derniere page de A, premiere du trou, derniere du
+/// trou, premiere de B.
+#[test]
+fn les_frontieres_des_regions_sont_justes() {
+    let set = deux_regions_disjointes();
+    assert!(set.couverte(REGION_A.1 - TAILLE_PAGE), "derniere page de A");
+    assert!(!set.couverte(REGION_A.1), "premiere page du trou");
+    assert!(!set.couverte(REGION_B.0 - TAILLE_PAGE), "derniere page du trou");
+    assert!(set.couverte(REGION_B.0), "premiere page de B");
+    assert!(set.couverte(REGION_B.1 - TAILLE_PAGE), "derniere page de B");
+    assert!(!set.couverte(REGION_B.1), "au-dela de B");
+}
+
+/// Une region qui arrive plus bas doit rebaser SANS perdre la validite deja
+/// declaree — sinon les regions hautes deviendraient des trous.
+#[test]
+fn un_rebasage_conserve_la_validite_des_regions_hautes() {
+    let mut set = FramesLibres::neuf();
+    set.couvre(REGION_B.0, REGION_B.1);
+    set.couvre(REGION_A.0, REGION_A.1);
+    assert!(set.couverte(REGION_A.0), "region basse declaree apres");
+    assert!(set.couverte(REGION_B.0), "region haute conservee");
+    assert!(!set.couverte(TROU.0), "et le trou reste un trou");
+    let pages_a = (REGION_A.1 - REGION_A.0) / TAILLE_PAGE;
+    let pages_b = (REGION_B.1 - REGION_B.0) / TAILLE_PAGE;
+    assert_eq!(set.frames_valides() as u64, pages_a + pages_b);
+}
+
+/// Une region dont les bornes ne sont pas alignees ne declare que les pages
+/// ENTIEREMENT contenues : une page a cheval sur un trou n'existe pas.
+#[test]
+fn une_region_mal_alignee_ne_declare_que_ses_pages_entieres() {
+    let mut set = FramesLibres::neuf();
+    set.couvre(0x1800, 0x4800); // de la moitie de la page 1 a la moitie de la 4
+    assert!(!set.couverte(0x1000), "page 1 : entamee, donc exclue");
+    assert!(set.couverte(0x2000), "page 2 : entiere");
+    assert!(set.couverte(0x3000), "page 3 : entiere");
+    assert!(!set.couverte(0x4000), "page 4 : entamee, donc exclue");
+    assert_eq!(set.frames_valides(), 2);
+}
+
 #[test]
 fn un_free_hors_des_regions_est_refuse() {
     let set = couvrant(64);
