@@ -741,11 +741,22 @@ pub fn fill_rect_rgb(x: usize, y: usize, w: usize, h: usize, rgb: u32) {
     let x1 = (x + w).min(cx1);
     let y1 = (y + h).min(cy1);
     if x1 <= x0 || y1 <= y0 { return; }
+    // BOUCHAUD_GFX_REMPLISSAGE_TRANCHE_V1
+    //
+    // `buf[row + xx] = rgb` dans une boucle indexee, c'est une verification de
+    // bornes par pixel. `fill` sur une tranche donne au compilateur ce qu'il
+    // lui faut pour emettre un remplissage memoire vectorise : une seule
+    // verification de bornes pour toute la ligne.
+    //
+    // Le fond d'ecran, les barres et desormais chaque segment de la forme des
+    // fenetres passent par ici. Sur un remplissage plein ecran, cela fait 720
+    // verifications de bornes au lieu de 921 600 -- et sous TCG, ou chaque
+    // instruction est traduite, la boucle serree compte autant que le nombre
+    // de pixels.
     let mut yy = y0;
     while yy < y1 {
         let row = yy * WIDTH;
-        let mut xx = x0;
-        while xx < x1 { buf[row + xx] = rgb; xx += 1; }
+        buf[row + x0..row + x1].fill(rgb);
         yy += 1;
     }
     PIXELS_DESSINES.fetch_add(((x1 - x0) * (y1 - y0)) as u64, Ordering::Relaxed);
