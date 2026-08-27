@@ -11,6 +11,7 @@ pub use crate::drivers::gfx::{
     enter, fill_rect, handoff_to_userland, leave, pixel, present, present_rect, rect,
     resume_from_userland, userland_owns_display,
     set_clip, reset_clip, pixels_dessines, clip_rect, note_pixels_dessines,
+    dernier_present_rect, lfb_present_generation, trace_present,
     HEIGHT, WIDTH,
     C_BLACK, C_BLUE, C_CYAN, C_DKGRAY, C_GRAY, C_GREEN, C_RED, C_TITLE,
     C_WHITE, C_YELLOW,

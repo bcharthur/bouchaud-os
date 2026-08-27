@@ -46,6 +46,9 @@ static PIXELS_DEMANDES: AtomicU64 = AtomicU64::new(0);
 static PIXELS_BOITE_ENGLOBANTE: AtomicU64 = AtomicU64::new(0);
 static FUSIONS_RECTS: AtomicU64 = AtomicU64::new(0);
 static DEBORDEMENTS_REGION: AtomicU64 = AtomicU64::new(0);
+/// Degats crees, toutes origines confondues. Deuxieme maillon de la chaine
+/// `entree -> degat -> trame -> present -> LFB` (voir `gui::chaine`).
+static DEGATS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 impl Origine {
     fn index(self) -> usize {
@@ -108,6 +111,7 @@ impl Degats {
         }
 
         DEGATS_PAR_ORIGINE[origine.index()].fetch_add(1, Ordering::Relaxed);
+        DEGATS_TOTAL.fetch_add(1, Ordering::Relaxed);
         PIXELS_DEMANDES.fetch_add(aire(rect), Ordering::Relaxed);
         self.insere(rect);
     }
@@ -161,6 +165,7 @@ impl Degats {
     /// Plein ecran intentionnel : une seule region, pas 16 fragments.
     pub fn tout(&mut self) {
         DEGATS_PAR_ORIGINE[Origine::PleinEcran.index()].fetch_add(1, Ordering::Relaxed);
+        DEGATS_TOTAL.fetch_add(1, Ordering::Relaxed);
         PIXELS_DEMANDES.fetch_add(aire(self.ecran), Ordering::Relaxed);
         self.regions = [Rect::default(); CAPACITE_REGIONS];
         self.regions[0] = self.ecran;
@@ -252,6 +257,7 @@ pub fn remise_a_zero() {
     for compteur in DEGATS_PAR_ORIGINE.iter() {
         compteur.store(0, Ordering::Relaxed);
     }
+    DEGATS_TOTAL.store(0, Ordering::Relaxed);
     PIXELS_PRESENTES.store(0, Ordering::Relaxed);
     RECTS_PRESENTES.store(0, Ordering::Relaxed);
     TRAMES_PRESENTEES.store(0, Ordering::Relaxed);
@@ -259,6 +265,11 @@ pub fn remise_a_zero() {
     PIXELS_BOITE_ENGLOBANTE.store(0, Ordering::Relaxed);
     FUSIONS_RECTS.store(0, Ordering::Relaxed);
     DEBORDEMENTS_REGION.store(0, Ordering::Relaxed);
+}
+
+/// Degats crees depuis le demarrage, toutes origines confondues.
+pub fn total_degats() -> u64 {
+    DEGATS_TOTAL.load(Ordering::Relaxed)
 }
 
 pub fn degats_plein_ecran() -> u64 {

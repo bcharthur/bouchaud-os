@@ -49,6 +49,14 @@ pub const PERIODE_HORLOGE_MS: u64 = 1000;
 /// Periode du releve de charge par processus, en millisecondes.
 pub const PERIODE_RELEVE_MS: u64 = 5000;
 
+// BOUCHAUD_GUI_CHAINE_ENTREE_LFB_V1
+//
+// Delai au bout duquel une entree qui n'a produit aucun pixel a l'ecran devient
+// un diagnostic. Genereux devant la cadence de trame (16 ms) : en dessous, une
+// trame simplement differee — cadence, client muet, ordonnancement — passerait
+// pour une rupture. Au-dela d'une demi-seconde, un bureau fige l'est vraiment.
+pub const DELAI_VEILLE_MS: u64 = 500;
+
 /// Duree pendant laquelle un client muet est recompose a pleine cadence apres
 /// une interaction, en millisecondes.
 pub const REACTIVITE_MUETTE_MS: u64 = 600;

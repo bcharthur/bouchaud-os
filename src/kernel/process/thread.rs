@@ -4253,6 +4253,12 @@ pub fn note_wm_heartbeat() {
     WM_WATCHDOG_ARMED.store(true, Ordering::Release);
 }
 
+/// Tick du dernier battement du bureau. Deuxieme reponse de la chaine de
+/// diagnostic : le noyau vit-il, et le fil du bureau vit-il ?
+pub fn wm_heartbeat() -> u64 {
+    WM_HEARTBEAT_TICK.load(Ordering::Relaxed)
+}
+
 pub fn watchdog_from_timer() {
     if !WM_WATCHDOG_ARMED.load(Ordering::Acquire) { return; }
     let now = crate::kernel::timer::ticks();

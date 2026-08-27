@@ -37,6 +37,41 @@ static RECOMPOSITIONS_AVEUGLES: AtomicU64 = AtomicU64::new(0);
 /// Sommeils sans echeance : le bureau n'avait strictement aucune raison de se
 /// reveiller. C'est la mesure que Gate 1B cherche a faire monter.
 static SOMMEILS_SANS_FIN: AtomicU64 = AtomicU64::new(0);
+/// Evenements d'entree recus par le bureau. Premier maillon de la chaine
+/// `entree -> degat -> trame -> present -> LFB` (voir `gui::chaine`).
+static ENTREES: AtomicU64 = AtomicU64::new(0);
+
+/// Une entree (souris ou clavier) vient d'atteindre le bureau.
+pub fn note_entree() {
+    ENTREES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Tours de boucle du compositeur.
+pub fn tours() -> u64 {
+    TOURS.load(Ordering::Relaxed)
+}
+
+/// Evenements d'entree recus par le bureau.
+pub fn entrees() -> u64 {
+    ENTREES.load(Ordering::Relaxed)
+}
+
+/// Trames composees.
+pub fn trames_composees() -> u64 {
+    TRAMES_COMPOSEES.load(Ordering::Relaxed)
+}
+
+/// Instantane de la chaine, du premier maillon au dernier.
+pub fn chaine() -> crate::gui::chaine::Chaine {
+    let (presents, copies, ..) = crate::gui::framebuffer::trace_present();
+    crate::gui::chaine::Chaine {
+        entrees: ENTREES.load(Ordering::Relaxed),
+        degats: crate::gui::degats::total_degats(),
+        trames: TRAMES_COMPOSEES.load(Ordering::Relaxed),
+        presents,
+        copies,
+    }
+}
 
 #[inline]
 pub fn note_tour() {

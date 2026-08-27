@@ -387,15 +387,101 @@ pub fn present() {
 /// BGA n'offre pas de commande de damage: la bonne primitive est donc un
 /// memcpy par ligne. Les coordonnees sont rognees avant toute arithmetique afin
 /// qu'un rectangle client hostile ne puisse sortir du framebuffer.
+// BOUCHAUD_GFX_PRESENT_TRACE_V1
+//
+// POURQUOI CETTE FONCTION EST INSTRUMENTEE
+// ----------------------------------------
+// `present_rect` a cinq sorties anticipees et aucune ne dit rien. Le
+// compositeur, lui, compte sa presentation AVANT d'appeler. Les compteurs
+// `presents`, `presented_pixels` et `frames_composed` peuvent donc monter
+// regulierement pendant qu'AUCUN pixel n'atteint le framebuffer lineaire :
+//
+//   * l'affichage a ete remis a un programme ring 3 et ne revient pas ;
+//   * le backbuffer n'est pas alloue ;
+//   * le LFB n'est pas mappe ;
+//   * le rectangle est vide une fois ramene a l'ecran.
+//
+// C'est exactement la forme d'un bureau « vivant mais fige » : le noyau tourne,
+// la boucle tourne, les trames se composent, et l'ecran ne change pas. Sans ces
+// compteurs, rien dans la trace ne permet de distinguer ce cas d'un compositeur
+// qui ne compose plus.
+//
+// `lfb_present_generation` ne monte que si des pixels ont ete ECRITS dans le
+// LFB. C'est le dernier maillon de la chaine, et le seul qui prouve l'affichage.
+
+static PRESENTS_DEMANDES: AtomicU64 = AtomicU64::new(0);
+static PRESENTS_COPIES: AtomicU64 = AtomicU64::new(0);
+static PIXELS_COPIES_LFB: AtomicU64 = AtomicU64::new(0);
+static REFUS_USERLAND: AtomicU64 = AtomicU64::new(0);
+static REFUS_TAMPON: AtomicU64 = AtomicU64::new(0);
+static REFUS_LFB: AtomicU64 = AtomicU64::new(0);
+static REFUS_RECT_VIDE: AtomicU64 = AtomicU64::new(0);
+static DERNIER_PRESENT_NS: AtomicU64 = AtomicU64::new(0);
+/// Dernier rectangle reellement copie, empaquete `x | y << 16 | w << 32 | h << 48`.
+static DERNIER_PRESENT_RECT: AtomicU64 = AtomicU64::new(0);
+
+fn empaquete_rect(x: usize, y: usize, largeur: usize, hauteur: usize) -> u64 {
+    ((x as u64) & 0xffff)
+        | (((y as u64) & 0xffff) << 16)
+        | (((largeur as u64) & 0xffff) << 32)
+        | (((hauteur as u64) & 0xffff) << 48)
+}
+
+/// `(x, y, largeur, hauteur)` du dernier rectangle copie dans le LFB.
+pub fn dernier_present_rect() -> (usize, usize, usize, usize) {
+    let brut = DERNIER_PRESENT_RECT.load(Ordering::Relaxed);
+    (
+        (brut & 0xffff) as usize,
+        ((brut >> 16) & 0xffff) as usize,
+        ((brut >> 32) & 0xffff) as usize,
+        ((brut >> 48) & 0xffff) as usize,
+    )
+}
+
+/// Trace du dernier maillon : `(demandes, copies, pixels_copies, refus_userland,
+/// refus_tampon, refus_lfb, refus_rect_vide, dernier_present_ns)`.
+pub fn trace_present() -> (u64, u64, u64, u64, u64, u64, u64, u64) {
+    (
+        PRESENTS_DEMANDES.load(Ordering::Relaxed),
+        PRESENTS_COPIES.load(Ordering::Relaxed),
+        PIXELS_COPIES_LFB.load(Ordering::Relaxed),
+        REFUS_USERLAND.load(Ordering::Relaxed),
+        REFUS_TAMPON.load(Ordering::Relaxed),
+        REFUS_LFB.load(Ordering::Relaxed),
+        REFUS_RECT_VIDE.load(Ordering::Relaxed),
+        DERNIER_PRESENT_NS.load(Ordering::Relaxed),
+    )
+}
+
+/// Nombre de presentations qui ont reellement ecrit dans le LFB.
+///
+/// Le seul compteur qui prouve que l'ecran a change.
+pub fn lfb_present_generation() -> u64 {
+    PRESENTS_COPIES.load(Ordering::Relaxed)
+}
+
 pub fn present_rect(x: usize, y: usize, width: usize, height: usize) {
-    if userland_owns_display() { return; }
+    PRESENTS_DEMANDES.fetch_add(1, Ordering::Relaxed);
+    if userland_owns_display() {
+        REFUS_USERLAND.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
     let buf = back();
-    if buf.is_empty() { return; }
+    if buf.is_empty() {
+        REFUS_TAMPON.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
     let lfb = unsafe { LFB };
-    if lfb.is_null() { return; }
+    if lfb.is_null() {
+        REFUS_LFB.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
     let x1 = x.saturating_add(width).min(WIDTH);
     let y1 = y.saturating_add(height).min(HEIGHT);
-    if x >= x1 || y >= y1 { return; }
+    if x >= x1 || y >= y1 {
+        REFUS_RECT_VIDE.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
     let count = x1 - x;
     for row in y..y1 {
         let offset = row * WIDTH + x;
@@ -403,6 +489,11 @@ pub fn present_rect(x: usize, y: usize, width: usize, height: usize) {
             core::ptr::copy_nonoverlapping(buf.as_ptr().add(offset), lfb.add(offset), count);
         }
     }
+    // Ici, et seulement ici, des pixels ont atteint l'ecran.
+    PRESENTS_COPIES.fetch_add(1, Ordering::Relaxed);
+    PIXELS_COPIES_LFB.fetch_add((count * (y1 - y)) as u64, Ordering::Relaxed);
+    DERNIER_PRESENT_RECT.store(empaquete_rect(x, y, count, y1 - y), Ordering::Relaxed);
+    DERNIER_PRESENT_NS.store(crate::kernel::timer::monotonic_ns(), Ordering::Relaxed);
     crate::drivers::gpu::note_present(count * (y1 - y) * core::mem::size_of::<u32>());
 }
 

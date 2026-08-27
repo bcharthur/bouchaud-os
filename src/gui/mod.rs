@@ -25,6 +25,7 @@
 
 pub mod apps;
 pub mod client;
+pub mod chaine;
 pub mod degats;
 pub mod disposition;
 pub mod transition;

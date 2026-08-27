@@ -61,6 +61,7 @@ try {
     Invoke-RustTest "clavier" "tools\gui\test_clavier.rs"
     Invoke-RustTest "damage" "tools\gui\test_degats.rs" -SingleThread
     Invoke-RustTest "geometrie du bureau" "tools\gui\test_disposition.rs"
+    Invoke-RustTest "chaine entree -> LFB" "tools\gui\test_chaine.rs"
     Invoke-RustTest "protocole GUI" "tools\gui\test_protocole.rs"
     Invoke-RustTest "compositeur event-driven" "tools\gui\test_reveil.rs"
     Invoke-RustTest "culling de scene" "tools\gui\test_scene.rs"

@@ -31,6 +31,7 @@ use crate::gui::mouse;
 use crate::gui::degats::{Degats, Origine};
 use crate::gui::disposition;
 use crate::gui::transition;
+use crate::gui::chaine::{Veilleur, Verdict};
 use crate::gui::protocole::Rect;
 use crate::gui::widgets;
 use crate::gui::window::{
@@ -384,6 +385,8 @@ fn boucle() {
     // « aveugle » : ensemble, ils donnent sa cadence a un client muet.
     let mut derniere_entree = 0u64;
     let mut dernier_aveugle = 0u64;
+    // BOUCHAUD_GUI_CHAINE_ENTREE_LFB_V1 : voir `gui::chaine`.
+    let mut veilleur = Veilleur::neuf();
 
     while !quit {
         // BOUCHAUD_GUI_EVENT_DRIVEN_V1
@@ -501,6 +504,8 @@ fn boucle() {
             derniers_boutons = boutons;
             sale = true;
             derniere_entree = maintenant;
+            reveil::note_entree();
+            veilleur.note_entree(maintenant, reveil::chaine());
             transmet_position(&mut wins, mx, my, boutons);
         }
         // BOUCHAUD_GUI_DAMAGE_ORIGIN_V1
@@ -515,6 +520,8 @@ fn boucle() {
         // `handle_click` et `handle_wheel` qui disent ce qu'ils ont change.
         if click || release || wheel != 0 {
             derniere_entree = maintenant;
+            reveil::note_entree();
+            veilleur.note_entree(maintenant, reveil::chaine());
         }
 
         if left {
@@ -764,6 +771,46 @@ fn boucle() {
             releve_charge(&mut wins, periode);
         }
 
+        // BOUCHAUD_GUI_CHAINE_ENTREE_LFB_V1
+        //
+        // Une seule ligne par episode, et seulement quand la chaine est
+        // reellement rompue. Voir `gui::chaine` pour pourquoi ce n'est ni une
+        // trace par mouvement ni un simple « le bureau ne repond plus ».
+        match veilleur.examine(maintenant, reveil::chaine(), politique::DELAI_VEILLE_MS) {
+            Verdict::Rupture(maillon) => {
+                let (demandes, copies, pixels, userland, tampon, lfb, vide, ns) =
+                    fb::trace_present();
+                let (px, py, pw, ph) = fb::dernier_present_rect();
+                crate::serial_println!(
+                    "[GUI-CHAIN] BROKEN at={} hint=\"{}\" \
+                     kernel_alive=1 wm_heartbeat={} loops={} \
+                     input_events={} damages={} frames_composed={} \
+                     present_calls={} lfb_copies={} lfb_pixels={} \
+                     backbuffer_generation={} \
+                     refused_userland={} refused_backbuffer={} refused_lfb={} \
+                     refused_empty_rect={} last_present_rect={},{},{},{} \
+                     last_present_ns={} now_ns={}",
+                    maillon.nom(), maillon.piste(),
+                    task::wm_heartbeat(), reveil::tours(),
+                    reveil::entrees(), crate::gui::degats::total_degats(),
+                    reveil::trames_composees(),
+                    demandes, copies, pixels,
+                    fb::pixels_dessines(),
+                    userland, tampon, lfb, vide,
+                    px, py, pw, ph, ns,
+                    crate::kernel::timer::monotonic_ns(),
+                );
+            }
+            Verdict::Retabli(maillon) => {
+                crate::serial_println!(
+                    "[GUI-CHAIN] RECOVERED at={} lfb_copies={}",
+                    maillon.nom(),
+                    fb::lfb_present_generation(),
+                );
+            }
+            Verdict::Rien => {}
+        }
+
         task::nettoie_zombies();
 
         // BOUCHAUD_GUI_EVENT_DRIVEN_V1
@@ -873,6 +920,29 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
         trames, rects, pixels,
         demandes, boite_gate0, evites, fusions, debordements, fb::pixels_dessines(),
     );
+    // BOUCHAUD_GFX_PRESENT_TRACE_V1
+    //
+    // Le dernier maillon, sans lequel tout le reste ment. `present_calls` monte
+    // meme quand `present_rect` refuse ; seul `lfb_copies` prouve que des pixels
+    // ont atteint l'ecran. Si `present_calls` avance et `lfb_copies` non, le
+    // motif de refus est dans les quatre compteurs suivants.
+    let (demandes, copies, pixels_lfb, userland, tampon, lfb, vide, dernier_ns) =
+        fb::trace_present();
+    let (px, py, pw, ph) = fb::dernier_present_rect();
+    let maintenant_ns = crate::kernel::timer::monotonic_ns();
+    crate::serial_println!(
+        "[GUI-PRESENT] present_calls={} lfb_copies={} lfb_pixels={} \
+         backbuffer_generation={} refused_userland={} refused_backbuffer={} \
+         refused_lfb={} refused_empty_rect={} last_present_rect={},{},{},{} \
+         last_present_ns={} since_last_present_ms={}",
+        demandes, copies, pixels_lfb,
+        fb::pixels_dessines(),
+        userland, tampon, lfb, vide,
+        px, py, pw, ph,
+        dernier_ns,
+        if dernier_ns == 0 { 0 } else { maintenant_ns.saturating_sub(dernier_ns) / 1_000_000 },
+    );
+
     // BOUCHAUD_GUI_EVENT_DRIVEN_V1 : ce que le compositeur a reellement fait,
     // et surtout ce qu'il n'a PAS fait. Une ligne par releve.
     crate::gui::reveil::publie();
