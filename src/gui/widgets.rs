@@ -54,16 +54,64 @@ fn draw_circle_highlight(cx: usize, cy: usize, r: i32, base: u32) {
 // ─── Bureau ────────────────────────────────────────────────────────────────
 
 /// Dessine le fond du bureau, la barre du haut et toutes les fenetres visibles.
-pub(crate) fn draw_desktop(wins: &[Win]) {
-    draw_wallpaper();
+// BOUCHAUD_GUI_SCENE_CULLING_V1
+//
+// `draw_desktop` dessinait la scene entiere en un bloc. Le compositeur ne
+// pouvait donc rien eviter : meme pour un rectangle de curseur de 16x16, il
+// payait la lecture de l'horloge RTC, deux formatages de chaine et trois
+// rasterisations TrueType de la barre du haut.
+//
+// Les morceaux sont desormais separes et adressables un par un. C'est
+// `gui::scene` qui decide lesquels appeler, a partir de leurs bornes.
+//
+// La fonction d'origine reste, pour les appelants qui veulent tout : elle
+// n'est plus utilisee par la boucle de composition.
 
-    // Filigrane "Bouchaud OS" centré en bas
+/// Filigrane « Bouchaud OS », en bas au centre.
+pub(crate) fn draw_filigrane() {
     fb::draw_text_rgb(fb::WIDTH / 2 - 88, fb::HEIGHT - 60, "Bouchaud OS", 0x33476b, 2);
+}
 
+/// Bornes du filigrane. Volontairement large : un calque qui deborde ses
+/// bornes laisserait des trainees, l'inverse ne coute qu'un peu de travail.
+pub(crate) fn filigrane_rect() -> (usize, usize, usize, usize) {
+    let largeur = 200usize;
+    let hauteur = 24usize;
+    ((fb::WIDTH / 2).saturating_sub(96), fb::HEIGHT.saturating_sub(64), largeur, hauteur)
+}
+
+/// Fond d'ecran seul.
+pub(crate) fn draw_fond() {
+    draw_wallpaper();
+}
+
+/// Barre superieure seule.
+pub(crate) fn draw_barre_haute() {
+    draw_topbar();
+}
+
+/// Une icone du bureau.
+pub(crate) fn draw_icone(index: usize) {
+    draw_icon_at(index);
+}
+
+/// Une fenetre, focalisee ou non.
+pub(crate) fn draw_fenetre(w: &Win, focused: bool) {
+    draw_window(w, focused);
+}
+
+/// Indice de la fenetre focalisee, s'il y en a une.
+pub(crate) fn indice_focus(wins: &[Win]) -> Option<usize> {
+    wins.iter().rposition(|w| !w.min)
+}
+
+pub(crate) fn draw_desktop(wins: &[Win]) {
+    draw_fond();
+    draw_filigrane();
     draw_icons();
     draw_topbar();
 
-    let focus = wins.iter().rposition(|w| !w.min);
+    let focus = indice_focus(wins);
     for (i, w) in wins.iter().enumerate() {
         if w.min { continue; }
         draw_window(w, Some(i) == focus);
@@ -150,6 +198,14 @@ fn draw_wallpaper() {
 
 fn draw_icons() {
     for i in 0..ICONS.len() {
+        draw_icon_at(i);
+    }
+}
+
+/// Une seule icone. Extrait de `draw_icons` pour que `gui::scene` puisse en
+/// ecarter une qui ne touche pas le rectangle en cours.
+fn draw_icon_at(i: usize) {
+    {
         let (label, _kind) = ICONS[i];
         let r = icon_rect(i);
         let vw = 40i32;

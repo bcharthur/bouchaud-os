@@ -61,6 +61,26 @@ pub fn note_recomposition_aveugle() {
     RECOMPOSITIONS_AVEUGLES.fetch_add(1, Ordering::Relaxed);
 }
 
+// BOUCHAUD_GUI_SCENE_CULLING_V1
+/// Calques que la composition AURAIT traverses sans culling.
+static CALQUES_OFFERTS: AtomicU64 = AtomicU64::new(0);
+/// Calques reellement dessines.
+static CALQUES_DESSINES: AtomicU64 = AtomicU64::new(0);
+/// Calques ecartes parce qu'un calque opaque les recouvrait.
+static CALQUES_OCCULTES: AtomicU64 = AtomicU64::new(0);
+
+/// Comptabilise le culling d'un rectangle.
+///
+/// `offerts` est le plan complet, `occultes` ce qu'un calque opaque a rendu
+/// invisible, `dessines` ce qui a reellement ete appele. Les trois ensemble
+/// disent OU va l'economie : occlusion ou intersection.
+#[inline]
+pub fn note_culling(offerts: usize, occultes: usize, dessines: usize) {
+    CALQUES_OFFERTS.fetch_add(offerts as u64, Ordering::Relaxed);
+    CALQUES_OCCULTES.fetch_add(occultes as u64, Ordering::Relaxed);
+    CALQUES_DESSINES.fetch_add(dessines as u64, Ordering::Relaxed);
+}
+
 #[inline]
 pub fn note_sommeil_sans_fin() {
     SOMMEILS_SANS_FIN.fetch_add(1, Ordering::Relaxed);
@@ -101,6 +121,18 @@ pub fn publie() {
         reveils_echeance,
         SOMMEILS_SANS_FIN.load(Ordering::Relaxed),
         TOURS.load(Ordering::Relaxed),
+    );
+
+    let offerts = CALQUES_OFFERTS.load(Ordering::Relaxed);
+    let dessines = CALQUES_DESSINES.load(Ordering::Relaxed);
+    crate::serial_println!(
+        "[GUI-SCENE] layers_offered={} layers_drawn={} layers_occluded={} \
+         layers_culled={} cull_ratio_pct={}",
+        offerts,
+        dessines,
+        CALQUES_OCCULTES.load(Ordering::Relaxed),
+        offerts.saturating_sub(dessines),
+        if offerts == 0 { 0 } else { offerts.saturating_sub(dessines) * 100 / offerts },
     );
 
     // Le detail par source : « 4000 reveils » ne dit pas s'il faut regarder la

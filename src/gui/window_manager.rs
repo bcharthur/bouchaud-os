@@ -40,6 +40,7 @@ use crate::gui::window::{
 use crate::drivers::keyboard;
 use crate::fs::ramfs;
 use crate::gui::politique;
+use crate::gui::scene::{self, Calque, Element};
 use crate::gui::reveil;
 use crate::kernel::sync::reveil::INTERFACE;
 use crate::kernel::task;
@@ -126,6 +127,132 @@ fn depuis_widget(r: window::Rect) -> Rect {
     Rect::neuf(r.x, r.y, r.w.max(0) as u32, r.h.max(0) as u32)
 }
 
+// BOUCHAUD_GUI_SCENE_CULLING_V1
+//
+// Les calques du bureau, du fond vers le haut. L'ordre EST celui du dessin :
+// c'est le meme que celui de l'ancien `draw_desktop` suivi de `draw_menu`,
+// `draw_taskbar` et `draw_cursor`, et il ne doit pas changer -- une inversion
+// se verrait a l'ecran, pas dans un test.
+//
+// Chaque calque annonce des bornes qui MAJORENT ce qu'il dessine, et dit s'il
+// est opaque. Dans le doute, non : un calque declare opaque a tort fait
+// disparaitre ce qu'il y a dessous ; l'inverse ne coute qu'un peu de travail.
+fn plan_de_scene(
+    wins: &[Win],
+    menu_open: bool,
+    souris: (usize, usize),
+    calques: &mut Vec<Calque>,
+) {
+    calques.clear();
+    calques.push(Calque::neuf(Element::Fond, plein_ecran(), true));
+
+    let (fx, fy, fw, fh) = widgets::filigrane_rect();
+    calques.push(Calque::neuf(
+        Element::Filigrane,
+        Rect::neuf(fx as i32, fy as i32, fw as u32, fh as u32),
+        false,
+    ));
+
+    for index in 0..window::ICONS.len() {
+        // Bornes elargies de 4 pixels : l'icone porte une ombre portee, et un
+        // calque qui deborde ses bornes laisse des trainees. L'inverse ne
+        // coute qu'un peu de travail.
+        let r = icon_rect(index);
+        calques.push(Calque::neuf(
+            Element::Icone(index),
+            Rect::neuf(
+                r.x,
+                r.y,
+                (r.w.max(0) as u32).saturating_add(6),
+                (r.h.max(0) as u32).saturating_add(6),
+            ),
+            false, // ombre portee et coins : pas de recouvrement garanti
+        ));
+    }
+
+    calques.push(Calque::neuf(
+        Element::BarreHaute,
+        Rect::neuf(0, 0, fb::WIDTH as u32, BAR_H as u32),
+        true,
+    ));
+
+    for (index, w) in wins.iter().enumerate() {
+        if w.min {
+            continue;
+        }
+        // Bornes = cadre PLUS l'ombre portee, qui deborde de 4 pixels en bas a
+        // droite. Opacite = le cadre SEUL : l'ombre, elle, laisse voir le fond.
+        // Confondre les deux ferait disparaitre le fond sous l'ombre.
+        let cadre = cadre_fenetre(w);
+        let avec_ombre = Rect::neuf(
+            cadre.x,
+            cadre.y,
+            cadre.largeur.saturating_add(4),
+            cadre.hauteur.saturating_add(4),
+        );
+        calques.push(Calque {
+            element: Element::Fenetre(index),
+            bornes: avec_ombre,
+            opaque: false,
+        });
+        // Second calque, purement declaratif : il ne dessine rien de plus, il
+        // dit seulement « cette zone-ci est pleine ». C'est lui qui permet
+        // d'ecarter le fond d'ecran sous une fenetre de navigateur.
+        calques.push(Calque::neuf(Element::ZonePleine, cadre, true));
+    }
+
+    if menu_open {
+        // Meme traitement que les fenetres : le menu porte une ombre de 4
+        // pixels qui deborde de son cadre et laisse voir ce qu'il y a dessous.
+        let cadre = depuis_widget(menu_rect());
+        calques.push(Calque::neuf(
+            Element::Menu,
+            Rect::neuf(
+                cadre.x,
+                cadre.y,
+                cadre.largeur.saturating_add(4),
+                cadre.hauteur.saturating_add(4),
+            ),
+            false,
+        ));
+        calques.push(Calque::neuf(Element::ZonePleine, cadre, true));
+    }
+    calques.push(Calque::neuf(Element::BarreTaches, barre_taches_rect(), true));
+    calques.push(Calque::neuf(
+        Element::Curseur,
+        degat_curseur(souris.0, souris.1),
+        false,
+    ));
+}
+
+/// Dessine un calque. Le seul endroit qui traduit un `Element` en pixels.
+fn dessine_calque(
+    calque: &Calque,
+    wins: &[Win],
+    menu_open: bool,
+    souris: (usize, usize),
+    mx: i32,
+    my: i32,
+) {
+    match calque.element {
+        Element::Fond => widgets::draw_fond(),
+        Element::Filigrane => widgets::draw_filigrane(),
+        Element::Icone(index) => widgets::draw_icone(index),
+        Element::BarreHaute => widgets::draw_barre_haute(),
+        Element::Fenetre(index) => {
+            if let Some(w) = wins.get(index) {
+                widgets::draw_fenetre(w, widgets::indice_focus(wins) == Some(index));
+            }
+        }
+        // Ne dessine rien : ce calque ne sert qu'a declarer une zone pleine
+        // pour le calcul d'occlusion.
+        Element::ZonePleine => {}
+        Element::Menu => widgets::draw_menu(mx, my),
+        Element::BarreTaches => widgets::draw_taskbar(wins, menu_open),
+        Element::Curseur => widgets::draw_cursor(souris.0, souris.1),
+    }
+}
+
 /// Rectangle de la barre des taches.
 fn barre_taches_rect() -> Rect {
     Rect::neuf(0, (fb::HEIGHT - BAR_H) as i32, fb::WIDTH as u32, BAR_H as u32)
@@ -205,6 +332,8 @@ fn boucle() {
     // Tout est sale au premier tour : il n'y a encore rien a l'ecran.
     let mut sale = true;
     let mut degats = Degats::neuf(plein_ecran());
+    // Reutilise d'une trame a l'autre : construire le plan ne doit pas allouer.
+    let mut calques: Vec<Calque> = Vec::new();
     degats.tout(); // premier tour : rien n'est encore a l'ecran
     let mut derniere_trame = 0u64;
     let mut derniere_horloge = 0u64;
@@ -473,6 +602,12 @@ fn boucle() {
                 crate::kernel::timer::frame_start();
                 crate::gui::degats::note_trame(&degats);
 
+                // BOUCHAUD_GUI_SCENE_CULLING_V1
+                //
+                // Le plan est construit UNE fois par trame, pas une fois par
+                // rectangle : ses bornes ne dependent pas du rectangle.
+                plan_de_scene(&wins, menu_open, (mxu, myu), &mut calques);
+
                 for region in degats.regions().iter().copied() {
                     let present = proto_rect_ecran(region);
                     if present.vide() {
@@ -483,10 +618,21 @@ fn boucle() {
                         present.x as usize, present.y as usize,
                         present.largeur as usize, present.hauteur as usize,
                     );
-                    widgets::draw_desktop(&wins);
-                    if menu_open { widgets::draw_menu(mx, my); }
-                    widgets::draw_taskbar(&wins, menu_open);
-                    widgets::draw_cursor(mxu, myu);
+
+                    // Deux regles, dans cet ordre : on part du premier calque
+                    // opaque qui recouvre entierement la zone -- tout ce qui est
+                    // dessous est invisible --, puis on ecarte ceux qui ne la
+                    // touchent pas.
+                    let debut = scene::premier_calque(&calques, &present);
+                    let mut dessines = 0usize;
+                    for calque in &calques[debut..] {
+                        if !scene::doit_dessiner(calque, &present) {
+                            continue;
+                        }
+                        dessine_calque(calque, &wins, menu_open, (mxu, myu), mx, my);
+                        dessines += 1;
+                    }
+                    reveil::note_culling(calques.len(), debut, dessines);
                     fb::reset_clip();
 
                     fb::present_rect(

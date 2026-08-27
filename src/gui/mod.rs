@@ -7,6 +7,7 @@
 //!   - `widgets` : rendu (fenetres, barre des taches, menu, curseur, icones) ;
 //!   - `politique` : quand composer, quand dormir -- arithmetique pure ;
 //!   - `reveil` : comptabilite du reveil evenementiel du compositeur ;
+//!   - `scene` : quels calques dessiner pour un rectangle -- geometrie pure ;
 //!   - `window_manager` : boucle d'evenements (focus, z-order, drag, resize) ;
 //!   - `desktop` : point d'entree ;
 //!   - `apps/` : applications natives (terminal, fichiers, moniteur,
@@ -33,6 +34,7 @@ pub mod mouse;
 pub mod polices;
 pub mod politique;
 pub mod reveil;
+pub mod scene;
 pub mod widgets;
 pub mod window;
 pub mod window_manager;
