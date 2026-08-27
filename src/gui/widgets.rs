@@ -443,14 +443,27 @@ fn draw_icon_rustpad(vx: usize, vy: usize, vw: usize) {
 
 // ─── Fenêtres ──────────────────────────────────────────────────────────────
 
+// BOUCHAUD_GUI_EMPREINTE_OMBRE_V1
+/// Debordement de l'ombre portee d'une fenetre ou d'un menu, en pixels.
+///
+/// Une seule definition, ici, parce que TROIS endroits doivent s'accorder :
+/// ce que `draw_window` / `draw_menu` peignent, les bornes que `plan_de_scene`
+/// declare, et le rectangle que le compositeur invalide. Les deux derniers
+/// avaient diverge du premier -- l'invalidation ne couvrait que le cadre --, et
+/// la bande d'ombre d'une fenetre deplacee restait a l'ecran : des rectangles
+/// sombres, exactement de cette couleur, abandonnes sur le bureau.
+pub(crate) const DEBORD_OMBRE: i32 = 4;
+
 fn draw_window(w: &Win, focused: bool) {
     let x = w.x.max(0) as usize;
     let y = w.y.max(0) as usize;
     let ww = w.w as usize;
     let wh = w.h as usize;
 
-    // Ombre portée
-    fb::fill_rect_rgb(x + 4, y + 4, ww, wh, 0x04080f);
+    // Ombre portée. Elle deborde du cadre de `DEBORD_OMBRE` : tout ce qui
+    // calcule une empreinte ou une invalidation doit l'inclure.
+    let debord = DEBORD_OMBRE as usize;
+    fb::fill_rect_rgb(x + debord, y + debord, ww, wh, 0x04080f);
 
     // Fond de la fenêtre
     fb::fill_rect_rgb(x, y, ww, wh, 0x111827);
@@ -662,8 +675,9 @@ pub(crate) fn draw_menu(mx: i32, my: i32) {
     let mw = mr.w as usize;
     let mh = mr.h as usize;
 
-    // Ombre portée
-    fb::fill_rect_rgb(mxi + 4, myi + 4, mw, mh, 0x030608);
+    // Ombre portée, meme debordement que les fenetres.
+    let debord = DEBORD_OMBRE as usize;
+    fb::fill_rect_rgb(mxi + debord, myi + debord, mw, mh, 0x030608);
 
     // Fond principal sombre
     for dy in 0..mh {

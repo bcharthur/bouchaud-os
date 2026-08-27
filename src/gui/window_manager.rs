@@ -181,26 +181,20 @@ fn plan_de_scene(
         // que la fenetre touche -- cadre plus l'ombre portee de 4 pixels --,
         // `opaque_sur` MINORE ce qu'elle remplit vraiment -- le cadre seul,
         // l'ombre laissant voir le fond.
-        let cadre = cadre_fenetre(w);
-        let avec_ombre = Rect::neuf(
-            cadre.x,
-            cadre.y,
-            cadre.largeur.saturating_add(4),
-            cadre.hauteur.saturating_add(4),
-        );
-        calques.push(Calque::avec_ombre(Element::Fenetre(index), avec_ombre, cadre));
+        calques.push(Calque::avec_ombre(
+            Element::Fenetre(index),
+            empreinte_fenetre(w),
+            cadre_fenetre(w),
+        ));
     }
 
     if menu_open {
         // Meme forme que les fenetres, meme raison.
-        let cadre = depuis_widget(menu_rect());
-        let avec_ombre = Rect::neuf(
-            cadre.x,
-            cadre.y,
-            cadre.largeur.saturating_add(4),
-            cadre.hauteur.saturating_add(4),
-        );
-        calques.push(Calque::avec_ombre(Element::Menu, avec_ombre, cadre));
+        calques.push(Calque::avec_ombre(
+            Element::Menu,
+            empreinte_menu(),
+            depuis_widget(menu_rect()),
+        ));
     }
 
     calques.push(Calque::plein(Element::BarreTaches, barre_taches_rect()));
@@ -240,7 +234,52 @@ fn barre_taches_rect() -> Rect {
     Rect::neuf(0, (fb::HEIGHT - BAR_H) as i32, fb::WIDTH as u32, BAR_H as u32)
 }
 
+// BOUCHAUD_GUI_EMPREINTE_OMBRE_V1
+//
+// CE QUE LA FENETRE PEINT, par opposition a son cadre.
+//
+// `draw_window` peint une ombre decalee de `DEBORD_OMBRE` pixels : son
+// empreinte reelle deborde donc du cadre en bas et a droite. Les
+// invalidations, elles, utilisaient `cadre_fenetre` -- le cadre seul.
+//
+// Consequence a l'ecran : quand une fenetre bouge, se restaure ou se ferme, la
+// bande d'ombre de son ANCIENNE position n'est jamais invalidee. Personne ne la
+// repeint, et elle reste : un rectangle sombre abandonne sur le bureau. Le
+// menu Demarrer avait exactement le meme defaut, d'ou les artefacts autour de
+// lui.
+//
+// Ce n'est PAS un probleme de culling : le culling ne peut rien redessiner en
+// dehors du degat qu'on lui donne. C'est le degat lui-meme qui etait trop
+// petit.
+//
+// Ces deux fonctions sont donc la seule facon autorisee de designer « ce que ce
+// calque occupe a l'ecran ». `plan_de_scene` et toutes les invalidations
+// passent par elles, de sorte qu'elles ne peuvent plus diverger.
+fn empreinte_fenetre(w: &Win) -> Rect {
+    let cadre = cadre_fenetre(w);
+    Rect::neuf(
+        cadre.x,
+        cadre.y,
+        cadre.largeur.saturating_add(widgets::DEBORD_OMBRE as u32),
+        cadre.hauteur.saturating_add(widgets::DEBORD_OMBRE as u32),
+    )
+}
+
+/// Idem pour le menu deroulant.
+fn empreinte_menu() -> Rect {
+    let cadre = depuis_widget(menu_rect());
+    Rect::neuf(
+        cadre.x,
+        cadre.y,
+        cadre.largeur.saturating_add(widgets::DEBORD_OMBRE as u32),
+        cadre.hauteur.saturating_add(widgets::DEBORD_OMBRE as u32),
+    )
+}
+
 /// Rectangle ecran d'une fenetre, cadre et barre de titre compris.
+///
+/// C'est la zone PLEINE -- ce que la fenetre remplit reellement. Pour ce
+/// qu'elle OCCUPE, ombre comprise, voir [`empreinte_fenetre`].
 fn cadre_fenetre(w: &Win) -> Rect {
     Rect::neuf(w.x, w.y, w.w.max(0) as u32, w.h.max(0) as u32)
 }
@@ -403,7 +442,7 @@ fn boucle() {
                 // Application du noyau : c'est le bureau qui la dessine, donc
                 // c'est bien lui qui se salit — mais sa fenetre seulement.
                 sale = true;
-                degats.ajoute(Origine::Fenetre, cadre_fenetre(&wins[index]));
+                degats.ajoute(Origine::Fenetre, empreinte_fenetre(&wins[index]));
                 TOUCHES_VERS_BUREAU.fetch_add(1, Ordering::Relaxed);
                 if apps::key_to_app(&mut wins[index], k, home) {
                     ferme_fenetre(&mut wins, index);
@@ -463,7 +502,7 @@ fn boucle() {
                 // Deplacer ou redimensionner ne salit que l'union de la
                 // position quittee et de celle atteinte. Le fond redecouvert
                 // est dans la premiere, le cadre nouveau dans la seconde.
-                let avant = wins.last().map(cadre_fenetre).unwrap_or_default();
+                let avant = wins.last().map(empreinte_fenetre).unwrap_or_default();
                 degats.ajoute(Origine::Fenetre, avant);
                 if let Some(w) = wins.last_mut() {
                     match d {
@@ -477,7 +516,7 @@ fn boucle() {
                     }
                     clamp_win(w);
                 }
-                let apres = wins.last().map(cadre_fenetre).unwrap_or_default();
+                let apres = wins.last().map(empreinte_fenetre).unwrap_or_default();
                 degats.ajoute(Origine::Fenetre, apres);
                 sale = true;
             } else if let Some((idx, ox, oy, _, _)) = icon_drag {
@@ -1105,7 +1144,7 @@ fn handle_wheel(
             );
             apps::wheel_to_app(&mut wins[i], mx, my, delta);
             // Celle-la, c'est le bureau qui la dessine : sa fenetre se salit.
-            degats.ajoute(Origine::Fenetre, cadre_fenetre(&wins[i]));
+            degats.ajoute(Origine::Fenetre, empreinte_fenetre(&wins[i]));
             return true;
         }
     }
@@ -1145,8 +1184,9 @@ fn handle_click(
             }
         }
         *menu_open = false;
-        // Le menu se referme : la zone qu'il couvrait redevient bureau.
-        degats.ajoute(Origine::Menu, depuis_widget(mr));
+        // Le menu se referme : la zone qu'il OCCUPAIT redevient bureau -- son
+        // ombre portee comprise, sans quoi la bande sombre resterait a l'ecran.
+        degats.ajoute(Origine::Menu, empreinte_menu());
         if ouvre_fenetre {
             degats.tout();
         }
@@ -1154,7 +1194,7 @@ fn handle_click(
     }
     if start_btn().hit(mx, my) {
         *menu_open = true;
-        degats.ajoute(Origine::Menu, depuis_widget(menu_rect()));
+        degats.ajoute(Origine::Menu, empreinte_menu());
         degats.ajoute(Origine::BarreTaches, barre_taches_rect());
         return;
     }
@@ -1173,7 +1213,7 @@ fn handle_click(
             if let App::Navigateur { client } = &mut w.app {
                 client.abime_tout();
             }
-            degats.ajoute(Origine::Fenetre, cadre_fenetre(&w));
+            degats.ajoute(Origine::Fenetre, empreinte_fenetre(&w));
             degats.ajoute(Origine::BarreTaches, barre_taches_rect());
             if etait_minimisee {
                 // Une fenetre reapparait : ce qu'elle recouvre n'a jamais ete
@@ -1214,12 +1254,12 @@ fn handle_click(
         wins.push(w);
         let index = wins.len() - 1;
         if !deja_au_dessus {
-            degats.ajoute(Origine::Fenetre, cadre_fenetre(&wins[index]));
+            degats.ajoute(Origine::Fenetre, empreinte_fenetre(&wins[index]));
             // Le focus change : la barre des taches le montre.
             degats.ajoute(Origine::BarreTaches, barre_taches_rect());
         }
         let top = wins.last_mut().unwrap();
-        let cadre_avant = cadre_fenetre(top);
+        let cadre_avant = empreinte_fenetre(top);
         let r = top.x + top.w;
         let on_title = my >= top.y + 1 && my < top.y + TITLE_H;
         if on_title && mx >= r - 10 && mx < r - 1 {
@@ -1238,7 +1278,7 @@ fn handle_click(
             toggle_max(top);
             // Maximiser ou restaurer : l'union des deux geometries suffit.
             degats.ajoute(Origine::Fenetre, cadre_avant);
-            degats.ajoute(Origine::Fenetre, cadre_fenetre(&wins[index]));
+            degats.ajoute(Origine::Fenetre, empreinte_fenetre(&wins[index]));
         } else if on_title && mx >= r - 28 && mx < r - 19 {
             top.min = true;
             let m = wins.pop().unwrap();
@@ -1261,7 +1301,7 @@ fn handle_click(
                 }
                 _ => {
                     apps::app_click(&mut wins[index], mx, my, home);
-                    degats.ajoute(Origine::Fenetre, cadre_fenetre(&wins[index]));
+                    degats.ajoute(Origine::Fenetre, empreinte_fenetre(&wins[index]));
                 }
             }
         }
