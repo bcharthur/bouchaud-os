@@ -85,6 +85,77 @@ if ($faults.Count -gt 0) {
     @($faults | Select-Object -Last 80) | ForEach-Object { Write-Host $_.Line }
 }
 
+# BOUCHAUD_GATE1B_MESURE_V1
+#
+# Les compteurs GUI sont CUMULATIFS depuis le demarrage. Un total ne dit donc
+# rien d'une periode d'inactivite : il faut la difference entre deux releves
+# consecutifs. C'est cette difference, et elle seule, qui repond a "le bureau
+# dort-il quand rien ne bouge".
+function Parse-Compteurs([string]$Line) {
+    $table = @{}
+    if (-not $Line) { return $table }
+    foreach ($paire in ([regex]::Matches($Line, "([A-Za-z0-9_]+)=(-?\d+)"))) {
+        $table[$paire.Groups[1].Value] = [int64]$paire.Groups[2].Value
+    }
+    return $table
+}
+
+function Deltas([string]$Pattern, [string]$Titre, [string[]]$Cles) {
+    $releves = @(Matching $Pattern | ForEach-Object { Parse-Compteurs $_.Line })
+    if ($releves.Count -lt 2) {
+        Write-Host "$Titre : moins de deux releves, aucun delta calculable" -ForegroundColor DarkYellow
+        return
+    }
+    $avant = $releves[$releves.Count - 2]
+    $apres = $releves[$releves.Count - 1]
+    Write-Host "$Titre (dernier intervalle de releve)"
+    foreach ($cle in $Cles) {
+        if ($apres.ContainsKey($cle) -and $avant.ContainsKey($cle)) {
+            $d = $apres[$cle] - $avant[$cle]
+            Write-Host ("    {0,-26} delta={1,-12} total={2}" -f $cle, $d, $apres[$cle])
+        }
+    }
+}
+
+Write-Host "`n=== GATE 1B / 1C : COMPOSITEUR ===" -ForegroundColor Cyan
+foreach ($pattern in @("\[GUI-COMPOSITOR\]", "\[GUI-COMPOSITOR-SOURCES\]", "\[GUI-SCENE\]")) {
+    $line = Last-Match $pattern
+    if ($line) { Write-Host $line }
+}
+
+Deltas "\[GUI-COMPOSITOR\]" "compositeur" @(
+    "wakeups", "invalidations", "frames_composed", "frames_clock_only",
+    "frames_useful", "frames_skipped", "blind_recomposes",
+    "idle_sleeps", "idle_wakeups_signal", "idle_wakeups_deadline", "loops"
+)
+Deltas "\[GUI-SCENE\]" "culling de scene" @(
+    "layers_offered", "layers_drawn", "layers_occluded", "layers_culled"
+)
+Deltas "\[GUI-DAMAGE\]" "degats" @(
+    "presents", "rects", "presented_pixels", "requested_pixels",
+    "gate0_bbox_pixels", "saved_pixels", "drawn_pixels", "merges", "overflows"
+)
+
+# Le critere d'inactivite. `frames_clock_only` est attendu non nul : l'horloge
+# de la barre des taches est la seule animation permanente du bureau, et elle
+# impose une trame par seconde. Ce qui doit tomber a zero, c'est le RESTE.
+$compos = @(Matching "\[GUI-COMPOSITOR\]" | ForEach-Object { Parse-Compteurs $_.Line })
+if ($compos.Count -ge 2) {
+    $a = $compos[$compos.Count - 2]
+    $b = $compos[$compos.Count - 1]
+    if ($b.ContainsKey("frames_useful") -and $a.ContainsKey("frames_useful")) {
+        $utiles = $b["frames_useful"] - $a["frames_useful"]
+        $horloge = $b["frames_clock_only"] - $a["frames_clock_only"]
+        Write-Host ""
+        Write-Host ("IDLE frames_useful_delta={0} frames_clock_only_delta={1}" -f $utiles, $horloge)
+        if ($utiles -eq 0) {
+            Write-Host "IDLE_OK : aucune trame hors horloge sur le dernier intervalle." -ForegroundColor Green
+        } else {
+            Write-Host "IDLE_ACTIF : $utiles trame(s) utile(s) -- le bureau avait du travail." -ForegroundColor DarkYellow
+        }
+    }
+}
+
 $allMarkers = ($markers.Values | Where-Object { $_ -le 0 }).Count -eq 0
 $pass = $allMarkers -and ($fatalCount -eq 0)
 
