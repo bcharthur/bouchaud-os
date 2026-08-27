@@ -2679,6 +2679,71 @@ fn marque_zombie(task: &mut Task) {
     }
 }
 
+// BOUCHAUD_COMPTA_IDLE_V1
+//
+// LE TEMPS PASSE EN `hlt` N'EST LE TEMPS DE PERSONNE
+// --------------------------------------------------
+// `account_until` impute a la tache courante tout l'ecart depuis
+// `COMPTA_DEBUT_NS[cpu]`. Or la branche idle de `schedule()` execute un `hlt`
+// SANS replier la tranche : la tache reste courante sur ce CPU, le curseur
+// continue de courir, et le premier repli suivant lui attribue la totalite du
+// sommeil.
+//
+// Ce defaut est ancien, mais il etait invisible tant que le bureau dormait par
+// tranches de 4 a 16 ms. Depuis que le compositeur dort jusqu'au prochain
+// evenement, ces tranches durent des centaines de millisecondes -- et le
+// journal affiche `desktop cpu_pct=100` pendant que la machine ne fait rien.
+//
+// La comptabilite MACHINE, elle, etait deja juste : `prepare_scheduler_idle`
+// pose `IDLE[cpu]` avant le `hlt`, et la charge globale se calcule depuis
+// busy/idle. Seule l'imputation PAR TACHE etait fausse.
+//
+// Replier avant le `hlt` et rearmer apres suffit. On ne peut pas reutiliser
+// `mark_task_running` pour rearmer : elle compte une migration, incremente les
+// changements de contexte et exige `on_cpu < 0` -- rien de tout cela n'est vrai
+// ici, la tache n'a pas quitte son CPU.
+
+/// Replie la tranche de la tache courante avant un `hlt`, si elle est armee.
+///
+/// Rend `true` s'il faudra rearmer au reveil.
+fn suspend_compta_pour_idle() -> bool {
+    let index = current_index_raw();
+    if index == NO_TASK {
+        return false;
+    }
+    let Some(task) = tasks().get_mut(index) else {
+        return false;
+    };
+    if task.last_account_ns == 0 {
+        return false;
+    }
+    account_slice_end(task);
+    true
+}
+
+/// Rearme la comptabilite de la tache courante apres un `hlt`.
+///
+/// Le cote du mur -- noyau ou utilisateur -- est celui que le repli avait
+/// range dans la tache : un fil noyau qui dort repart du cote noyau.
+fn rearme_compta_apres_idle() {
+    let index = current_index_raw();
+    if index == NO_TASK {
+        return;
+    }
+    let now = crate::kernel::timer::monotonic_ns();
+    let cpu = local_cpu();
+    let Some(task) = tasks().get_mut(index) else {
+        return;
+    };
+    task.last_account_ns = now;
+    task.slice_start_ns = now;
+    let en_noyau = task.in_kernel;
+    COMPTA_DEBUT_NS[cpu].store(now, Ordering::Relaxed);
+    COMPTA_USER_NS[cpu].store(0, Ordering::Relaxed);
+    COMPTA_NOYAU_NS[cpu].store(0, Ordering::Relaxed);
+    COMPTA_EN_NOYAU[cpu].store(en_noyau, Ordering::Relaxed);
+}
+
 fn account_slice_end(task: &mut Task) {
     let now = crate::kernel::timer::monotonic_ns();
     account_until(task, now);
@@ -2901,6 +2966,9 @@ fn debug_assert_interrupts_enabled() {
 pub fn wait_for_interrupt_releasing_bkl() {
     debug_assert_interrupts_enabled();
     let profondeur_entree = smp_lock::profondeur_locale();
+    // BOUCHAUD_COMPTA_IDLE_V1 : replier AVANT le hlt, gros verrou encore tenu
+    // -- `tasks()` l'exige.
+    let rearmer = suspend_compta_pour_idle();
     // BOUCHAUD_P0_IDLE_WAKE_HANDSHAKE_V14
     cpu::prepare_scheduler_idle();
     let depth = smp_lock::suspend_for_schedule();
@@ -2913,6 +2981,9 @@ pub fn wait_for_interrupt_releasing_bkl() {
 
     cpu::commit_scheduler_idle();
     smp_lock::resume_after_schedule(depth);
+    if rearmer {
+        rearme_compta_apres_idle();
+    }
     verifie_profondeur_rendue("wait_for_interrupt_releasing_bkl", profondeur_entree);
 }
 
@@ -2993,6 +3064,9 @@ pub fn schedule() -> bool {
             if tasks()[cur].state != TaskState::Ready {
                 // Ne jamais dormir en tenant le BKL : les autres CPU doivent
                 // pouvoir entrer dans leurs syscalls pendant notre HLT.
+                // BOUCHAUD_COMPTA_IDLE_V1 : c'est ICI que le bureau passait
+                // ses sommeils depuis Gate 1B, et c'est ce repli qui manquait.
+                let rearmer = suspend_compta_pour_idle();
                 // BOUCHAUD_P0_IDLE_WAKE_HANDSHAKE_V14
                 cpu::prepare_scheduler_idle();
                 let depth = smp_lock::suspend_for_schedule();
@@ -3003,6 +3077,9 @@ pub fn schedule() -> bool {
                 );
                 cpu::commit_scheduler_idle();
                 smp_lock::resume_after_schedule(depth);
+                if rearmer {
+                    rearme_compta_apres_idle();
+                }
             }
             return false;
         }
@@ -3250,11 +3327,16 @@ pub fn exit_current(code: i32) -> ! {
             }
             break;
         }
+        // BOUCHAUD_COMPTA_IDLE_V1
+        let rearmer = suspend_compta_pour_idle();
         // BOUCHAUD_P0_IDLE_WAKE_HANDSHAKE_V14
         cpu::prepare_scheduler_idle();
         let depth = smp_lock::suspend_for_schedule();
         cpu::commit_scheduler_idle();
         smp_lock::resume_after_schedule(depth);
+        if rearmer {
+            rearme_compta_apres_idle();
+        }
         if tasks().iter().any(|t| runnable_local(t, 0) || runnable_steal(t, 0)) {
             idle_since = crate::kernel::timer::ticks();
         }
