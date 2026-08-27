@@ -520,19 +520,28 @@ fn draw_window(w: &Win, focused: bool) {
         TITLE_H as u32, crate::gui::theme::RADIUS_WINDOW,
         crate::gui::windowing::manager::SHADOW_EXTENT);
     let border = if focused { 0x454c58 } else { crate::gui::theme::COLOR_BORDER };
-    crate::gui::graphics::paint_window_shape(geometry,
+    // BOUCHAUD_GUI_RASTER_SEGMENTS_V1 : par SEGMENTS, pas par pixels. Une
+    // fenetre maximisee coutait huit millions d'iterations et autant de
+    // `fetch_add` atomiques par trame ; elle en coute maintenant ~700.
+    crate::gui::graphics::paint_window_shape_spans(geometry,
         crate::gui::theme::RADIUS_WINDOW,
         crate::gui::windowing::manager::SHADOW_EXTENT, damage,
         crate::gui::theme::COLOR_SURFACE, border,
-        |px, py, color| fb::pixel_rgb(px as usize, py as usize, color));
+        |px, py, largeur, color| {
+            fb::fill_rect_rgb(px.max(0) as usize, py.max(0) as usize,
+                largeur as usize, 1, color)
+        });
 
     let title_h = TITLE_H as usize;
     let title_color = if focused { crate::gui::theme::COLOR_SURFACE_ELEVATED }
         else { crate::gui::theme::COLOR_SURFACE };
     let title = crate::gui::windowing::titlebar_rect(outer,
         crate::gui::windowing::WINDOW_CHROME);
-    crate::gui::graphics::fill_rounded_rect(title, crate::gui::theme::RADIUS_WINDOW,
-        damage, |px, py| fb::pixel_rgb(px as usize, py as usize, title_color));
+    crate::gui::graphics::spans_rounded_rect(title, crate::gui::theme::RADIUS_WINDOW,
+        damage, |px, py, largeur| {
+            fb::fill_rect_rgb(px.max(0) as usize, py.max(0) as usize,
+                largeur as usize, 1, title_color)
+        });
     fb::fill_rect_rgb(x + 1, y + title_h - 1, ww.saturating_sub(2), 1,
         crate::gui::theme::COLOR_BORDER);
 

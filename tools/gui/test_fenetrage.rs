@@ -221,3 +221,109 @@ fn real_oracle(m:&mut BouchaudWindowManager,command:WindowCommand){let mut parti
     assert!(!contains_rect(geometry.opaque,corner));
     assert!(contains_rect(geometry.outer,corner),"falsified outer opacity would incorrectly cull background");
 }
+// ─── Rasterisation par segments ────────────────────────────────────────────
+//
+// La forme arrondie a deux descriptions : `inside_rounded`, qui teste un pixel,
+// et `bornes_ligne`, qui calcule les bornes d'une ligne. Le compositeur
+// n'utilise que la seconde. Si elles divergent, la fenetre est deformee -- et
+// aucun test de placement ne le verrait.
+
+#[test]
+fn les_deux_descriptions_de_la_forme_sont_identiques() {
+    // Exhaustif sur les tailles et rayons qui comptent : les degenerescences
+    // (rayon nul, rayon superieur a la moitie), les petites fenetres ou le
+    // rayon est ecrete, et une taille realiste.
+    for (largeur, hauteur) in [(1, 1), (2, 2), (7, 5), (20, 20), (21, 13), (40, 30), (120, 80)] {
+        for radius in [0u32, 1, 2, 3, 7, 10, 40] {
+            for y in 0..hauteur {
+                assert!(
+                    graphics::ligne_conforme(largeur, hauteur, radius as i32, y),
+                    "forme divergente : {largeur}x{hauteur} rayon {radius} ligne {y}"
+                );
+            }
+        }
+    }
+}
+
+/// Le rayon effectif est ecrete a la moitie du plus petit cote : un rayon
+/// absurde ne doit pas produire une forme vide ni deborder.
+#[test]
+fn un_rayon_demesure_est_ecrete_sans_casser_la_forme() {
+    let mut lignes = 0;
+    let couverts = graphics::spans_rounded_rect(
+        Rect::new(0, 0, 20, 20), 500, Rect::new(0, 0, 20, 20),
+        |_, _, largeur| { lignes += 1; assert!(largeur <= 20) },
+    );
+    assert_eq!(lignes, 20, "une ligne par rangee, aucune perdue");
+    assert!(couverts > 0 && couverts <= 400);
+}
+
+/// LA propriete de cout : un segment par ligne, pas un appel par pixel.
+///
+/// C'est ce qui separe un bureau qui repond d'un bureau qui rame. Une fenetre
+/// maximisee faisait 893 440 appels de fermeture par remplissage ; elle en fait
+/// desormais un par ligne.
+#[test]
+fn le_remplissage_coute_une_operation_par_ligne() {
+    let rect = Rect::new(0, 0, 1280, 698);
+    let mut segments = 0usize;
+    let couverts = graphics::spans_rounded_rect(rect, 10, rect,
+        |_, _, _| segments += 1);
+
+    assert_eq!(segments, 698, "un segment par ligne");
+    assert!(
+        couverts > 800_000,
+        "et pourtant la surface entiere est couverte ({couverts} pixels)"
+    );
+    assert!(
+        (couverts / segments) > 1_000,
+        "chaque operation couvre plus de mille pixels : c'est tout le gain"
+    );
+}
+
+/// Le contour ne balaie plus l'aire : au plus deux segments par ligne.
+///
+/// `paint_window_shape` l'appelle une fois par anneau d'ombre plus une fois
+/// pour la bordure -- neuf fois pour une fenetre. A l'ancienne, neuf balayages
+/// complets de 893 440 pixels, soit huit millions d'iterations par trame.
+#[test]
+fn le_contour_ne_balaie_plus_toute_l_aire() {
+    let rect = Rect::new(0, 0, 1280, 698);
+    let mut segments = 0usize;
+    let couverts = graphics::spans_stroke_rounded_rect(rect, 10, 1, rect,
+        |_, _, _| segments += 1);
+
+    assert!(segments <= 698 * 2, "au plus deux segments par ligne ({segments})");
+    assert!(
+        couverts < 10_000,
+        "un contour d'un pixel ne couvre que son perimetre ({couverts})"
+    );
+    // A l'ancienne : 1280 x 698 = 893 440 iterations pour ces memes pixels.
+    assert!(
+        segments * 500 < 1280 * 698,
+        "le cout doit etre d'un autre ordre de grandeur que l'aire"
+    );
+}
+
+/// Une decoupe etroite ne doit produire que les lignes qu'elle croise.
+#[test]
+fn une_decoupe_etroite_borne_le_nombre_de_segments() {
+    let rect = Rect::new(0, 0, 1280, 698);
+    let mut segments = 0usize;
+    graphics::spans_rounded_rect(rect, 10, Rect::new(600, 300, 14, 22),
+        |_, _, largeur| { segments += 1; assert!(largeur <= 14) });
+    assert_eq!(segments, 22, "une par ligne de la decoupe, et rien de plus");
+}
+
+/// Le contour d'une forme sans rayon reste un cadre exact.
+#[test]
+fn un_contour_sans_rayon_est_un_cadre_exact() {
+    let rect = Rect::new(0, 0, 10, 6);
+    let mut peints = alloc::vec::Vec::new();
+    graphics::stroke_rounded_rect(rect, 0, 1, rect, |x, y| peints.push((x, y)));
+    // Perimetre d'un cadre 10x6 d'un pixel : 2*10 + 2*(6-2) = 28.
+    assert_eq!(peints.len(), 28);
+    for (x, y) in peints {
+        assert!(x == 0 || x == 9 || y == 0 || y == 5, "({x},{y}) n'est pas sur le bord");
+    }
+}
