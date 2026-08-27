@@ -30,6 +30,7 @@ use crate::gui::framebuffer as fb;
 use crate::gui::mouse;
 use crate::gui::degats::{Degats, Origine};
 use crate::gui::disposition;
+use crate::gui::transition;
 use crate::gui::protocole::Rect;
 use crate::gui::widgets;
 use crate::gui::window::{
@@ -494,16 +495,17 @@ fn boucle() {
         // fonctionnait, puis plus aucun.
         let boutons = crate::drivers::mouse::buttons() as u32;
         if (mxu, myu) != derniere_souris || boutons != derniers_boutons {
-            if derniere_souris.0 != usize::MAX {
-                degats.ajoute(
-                    Origine::Curseur,
-                    degat_curseur(derniere_souris.0, derniere_souris.1),
-                );
+            let avant = if derniere_souris.0 == usize::MAX {
+                None // premier tour : rien n'a encore ete dessine
+            } else {
+                Some((derniere_souris.0 as i32, derniere_souris.1 as i32))
+            };
+            for rect in transition::curseur_deplace(avant, (mx, my)).iter() {
+                degats.ajoute(Origine::Curseur, rect);
             }
             derniere_souris = (mxu, myu);
             derniers_boutons = boutons;
             sale = true;
-            degats.ajoute(Origine::Curseur, degat_curseur(mxu, myu));
             derniere_entree = maintenant;
             transmet_position(&mut wins, mx, my, boutons);
         }
@@ -526,8 +528,7 @@ fn boucle() {
                 // Deplacer ou redimensionner ne salit que l'union de la
                 // position quittee et de celle atteinte. Le fond redecouvert
                 // est dans la premiere, le cadre nouveau dans la seconde.
-                let avant = wins.last().map(empreinte_fenetre).unwrap_or_default();
-                degats.ajoute(Origine::Fenetre, avant);
+                let avant = wins.last().map(cadre_fenetre).unwrap_or_default();
                 if let Some(w) = wins.last_mut() {
                     match d {
                         Drag::Move(ox, oy) => { w.x = mx - ox; w.y = my - oy; }
@@ -540,8 +541,10 @@ fn boucle() {
                     }
                     clamp_win(w);
                 }
-                let apres = wins.last().map(empreinte_fenetre).unwrap_or_default();
-                degats.ajoute(Origine::Fenetre, apres);
+                let apres = wins.last().map(cadre_fenetre).unwrap_or_default();
+                for rect in transition::fenetre_bougee(avant, apres).iter() {
+                    degats.ajoute(Origine::Fenetre, rect);
+                }
                 sale = true;
             } else if let Some((idx, ox, oy, _, _)) = icon_drag {
                 degats.ajoute(Origine::Icone, depuis_widget(icon_rect(idx)));
@@ -620,11 +623,11 @@ fn boucle() {
             None
         };
         if nouveau_survol != survol_menu {
-            if let Some(ancien) = survol_menu {
-                degats.ajoute(Origine::Menu, window::rect_ligne_menu(ancien));
-            }
-            if let Some(nouveau) = nouveau_survol {
-                degats.ajoute(Origine::Menu, window::rect_ligne_menu(nouveau));
+            let lignes = transition::survol_menu_change(
+                window::menu_proto(), survol_menu, nouveau_survol,
+            );
+            for rect in lignes.iter() {
+                degats.ajoute(Origine::Menu, rect);
             }
             survol_menu = nouveau_survol;
             sale = true;
@@ -675,7 +678,9 @@ fn boucle() {
             sale = true; // horloge, charge CPU, memoire : ils bougent seuls
             // BOUCHAUD_GUI_TOPBAR_DAMAGE_V1 : la barre du HAUT. Voir
             // `barre_haute_rect`. La barre du bas n'a rien qui bouge tout seul.
-            degats.ajoute(Origine::BarreHaute, barre_haute_rect());
+            for rect in transition::tic_horloge(fb::WIDTH as u32).iter() {
+                degats.ajoute(Origine::BarreHaute, rect);
+            }
         }
         if sale && maintenant.wrapping_sub(derniere_trame) < PERIODE_TRAME_MS {
             reveil::note_trame_differee();
@@ -1262,8 +1267,9 @@ fn handle_click(
     }
     if start_btn().hit(mx, my) {
         *menu_open = true;
-        degats.ajoute(Origine::Menu, empreinte_menu());
-        degats.ajoute(Origine::BarreTaches, barre_taches_rect());
+        for rect in transition::menu_bascule(window::menu_proto(), barre_taches_rect()).iter() {
+            degats.ajoute(Origine::Menu, rect);
+        }
         return;
     }
 
@@ -1273,9 +1279,9 @@ fn handle_click(
             // BOUCHAUD_GUI_FOCUS_DAMAGE_V1 : meme raison qu'a la remontee par
             // clic. Le bouton de la barre des taches donne aussi le focus, donc
             // il le retire aussi a quelqu'un.
-            let empreinte_focus_perdu = widgets::indice_focus(wins)
+            let cadre_focus_perdu = widgets::indice_focus(wins)
                 .filter(|&precedent| precedent != i)
-                .map(|precedent| empreinte_fenetre(&wins[precedent]));
+                .map(|precedent| cadre_fenetre(&wins[precedent]));
             let mut w = wins.remove(i);
             let etait_minimisee = w.min;
             w.min = false;
@@ -1287,11 +1293,12 @@ fn handle_click(
             if let App::Navigateur { client } = &mut w.app {
                 client.abime_tout();
             }
-            degats.ajoute(Origine::Fenetre, empreinte_fenetre(&w));
-            if let Some(perdue) = empreinte_focus_perdu {
-                degats.ajoute(Origine::Fenetre, perdue);
+            let bascule = transition::focus_transfere(
+                cadre_focus_perdu, cadre_fenetre(&w), barre_taches_rect(),
+            );
+            for rect in bascule.iter() {
+                degats.ajoute(Origine::Fenetre, rect);
             }
-            degats.ajoute(Origine::BarreTaches, barre_taches_rect());
             if etait_minimisee {
                 // Une fenetre reapparait : ce qu'elle recouvre n'a jamais ete
                 // dessine sous elle. Seul cas ou le plein ecran est justifie
@@ -1344,22 +1351,22 @@ fn handle_click(
         // On note son empreinte AVANT la reorganisation : la fenetre ne bouge
         // pas, son rectangle est donc le meme apres, et on evite l'arithmetique
         // d'indices que `remove` puis `push` imposeraient.
-        let empreinte_focus_perdu = widgets::indice_focus(wins)
+        let cadre_focus_perdu = widgets::indice_focus(wins)
             .filter(|&precedent| precedent != i)
-            .map(|precedent| empreinte_fenetre(&wins[precedent]));
+            .map(|precedent| cadre_fenetre(&wins[precedent]));
         let w = wins.remove(i);
         wins.push(w);
         let index = wins.len() - 1;
         if !deja_au_dessus {
-            degats.ajoute(Origine::Fenetre, empreinte_fenetre(&wins[index]));
-            if let Some(perdue) = empreinte_focus_perdu {
-                degats.ajoute(Origine::Fenetre, perdue);
+            let bascule = transition::focus_transfere(
+                cadre_focus_perdu, cadre_fenetre(&wins[index]), barre_taches_rect(),
+            );
+            for rect in bascule.iter() {
+                degats.ajoute(Origine::Fenetre, rect);
             }
-            // Le focus change : la barre des taches le montre.
-            degats.ajoute(Origine::BarreTaches, barre_taches_rect());
         }
         let top = wins.last_mut().unwrap();
-        let cadre_avant = empreinte_fenetre(top);
+        let cadre_avant = cadre_fenetre(top);
         let r = top.x + top.w;
         let on_title = my >= top.y + 1 && my < top.y + TITLE_H;
         if on_title && mx >= r - 10 && mx < r - 1 {
@@ -1376,9 +1383,13 @@ fn handle_click(
             }
         } else if on_title && mx >= r - 19 && mx < r - 10 {
             toggle_max(top);
-            // Maximiser ou restaurer : l'union des deux geometries suffit.
-            degats.ajoute(Origine::Fenetre, cadre_avant);
-            degats.ajoute(Origine::Fenetre, empreinte_fenetre(&wins[index]));
+            // Maximiser ou restaurer : l'ancien cadre et le nouveau.
+            let mouvement = transition::fenetre_bougee(
+                cadre_avant, cadre_fenetre(&wins[index]),
+            );
+            for rect in mouvement.iter() {
+                degats.ajoute(Origine::Fenetre, rect);
+            }
         } else if on_title && mx >= r - 28 && mx < r - 19 {
             top.min = true;
             let m = wins.pop().unwrap();

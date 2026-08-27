@@ -65,6 +65,7 @@ try {
     Invoke-RustTest "compositeur event-driven" "tools\gui\test_reveil.rs"
     Invoke-RustTest "culling de scene" "tools\gui\test_scene.rs"
     Invoke-RustTest "equivalence de rendu" "tools\gui\test_rendu.rs"
+    Invoke-RustTest "oracle de transition d'etat" "tools\gui\test_transitions.rs"
     Invoke-RustTest "verdict protocole client" "tools\gui\test_silence.rs"
     Invoke-RustTest "BKL max/provenance" "tools\smp\test_bkl_max.rs"
     Invoke-RustTest "commutation SMP" "tools\smp\test_commutation.rs"
