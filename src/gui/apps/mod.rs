@@ -96,9 +96,11 @@ pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
         return;
     }
 
+    let window_x = w.window.x;
+    let window_y = w.window.y;
     if let App::Files { cur, scroll, selected } = &mut w.app {
-        let bx  = (w.x + 3).max(0) as usize;
-        let by  = (w.y + TITLE_H + 2).max(0) as usize;
+        let bx  = (window_x + 3).max(0) as usize;
+        let by  = (window_y + TITLE_H + 2).max(0) as usize;
         let bw  = (win_w - 6).max(1) as usize;
         let tbh = file_explorer::TOOLBAR_H;
 
@@ -176,4 +178,3 @@ pub(crate) fn draw_app(w: &Win) {
         App::Navigateur { client }          => crate::gui::widgets::compose_client(w, client),
     }
 }
-

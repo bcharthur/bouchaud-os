@@ -43,6 +43,9 @@ pub mod silence;
 pub mod widgets;
 pub mod window;
 pub mod window_manager;
+pub mod windowing;
+pub mod theme;
+pub mod graphics;
 
 pub mod font;
 
