@@ -1270,6 +1270,12 @@ fn handle_click(
     // Barre des taches : restaure (si minimisee) et donne le focus.
     for i in 0..wins.len() {
         if taskbar_btn(i).hit(mx, my) {
+            // BOUCHAUD_GUI_FOCUS_DAMAGE_V1 : meme raison qu'a la remontee par
+            // clic. Le bouton de la barre des taches donne aussi le focus, donc
+            // il le retire aussi a quelqu'un.
+            let empreinte_focus_perdu = widgets::indice_focus(wins)
+                .filter(|&precedent| precedent != i)
+                .map(|precedent| empreinte_fenetre(&wins[precedent]));
             let mut w = wins.remove(i);
             let etait_minimisee = w.min;
             w.min = false;
@@ -1282,6 +1288,9 @@ fn handle_click(
                 client.abime_tout();
             }
             degats.ajoute(Origine::Fenetre, empreinte_fenetre(&w));
+            if let Some(perdue) = empreinte_focus_perdu {
+                degats.ajoute(Origine::Fenetre, perdue);
+            }
             degats.ajoute(Origine::BarreTaches, barre_taches_rect());
             if etait_minimisee {
                 // Une fenetre reapparait : ce qu'elle recouvre n'a jamais ete
@@ -1318,11 +1327,34 @@ fn handle_click(
         // rectangle : elle etait deja dessinee, elle etait seulement
         // partiellement recouverte. Rien ne bouge en dehors.
         let deja_au_dessus = i + 1 == wins.len();
+        // BOUCHAUD_GUI_FOCUS_DAMAGE_V1
+        //
+        // LE MEME DEFAUT QUE L'HORLOGE ET LE SURVOL, PAR UNE TROISIEME PORTE
+        // ------------------------------------------------------------------
+        // `draw_window(w, focused)` ne peint pas seulement un cadre : la barre
+        // de titre passe du bleu au gris, la ligne qui la separe du contenu et
+        // les quatre bordures changent de couleur avec le focus. Remonter une
+        // fenetre change donc des pixels dans DEUX fenetres : celle qui monte,
+        // et celle qui vient de perdre le focus.
+        //
+        // Seule la premiere etait invalidee. L'ancienne gardait sa barre de
+        // titre bleue a l'ecran jusqu'a ce qu'un autre degat passe par la —
+        // deux fenetres actives en meme temps, ce qu'aucune ne peut etre.
+        //
+        // On note son empreinte AVANT la reorganisation : la fenetre ne bouge
+        // pas, son rectangle est donc le meme apres, et on evite l'arithmetique
+        // d'indices que `remove` puis `push` imposeraient.
+        let empreinte_focus_perdu = widgets::indice_focus(wins)
+            .filter(|&precedent| precedent != i)
+            .map(|precedent| empreinte_fenetre(&wins[precedent]));
         let w = wins.remove(i);
         wins.push(w);
         let index = wins.len() - 1;
         if !deja_au_dessus {
             degats.ajoute(Origine::Fenetre, empreinte_fenetre(&wins[index]));
+            if let Some(perdue) = empreinte_focus_perdu {
+                degats.ajoute(Origine::Fenetre, perdue);
+            }
             // Le focus change : la barre des taches le montre.
             degats.ajoute(Origine::BarreTaches, barre_taches_rect());
         }
