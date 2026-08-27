@@ -652,9 +652,14 @@ pub fn sys_madvise(addr: u64, length: u64, advice: i32) -> i64 {
     };
 
     let process = task::current_process();
+    // BOUCHAUD_P2_VM_PHASE_V1 : les quatre etapes n'ont pas le meme profil, et
+    // une tenue de plusieurs secondes vient forcement de l'une des trois qui
+    // restent sous le gros verrou. Voir `task::vm_phase_set`.
+    task::vm_phase_set(task::VM_VALIDATION, length / PAGE_SIZE);
     let retirement = {
         let mut borrowed = process.mm.lock();
         if !vma::couvre(&borrowed.promesses, addr, fin) {
+            task::vm_phase_set(task::VM_HORS, 0);
             return -errno::ENOMEM;
         }
         match advice {
@@ -662,6 +667,7 @@ pub fn sys_madvise(addr: u64, length: u64, advice: i32) -> i64 {
             MADV_DONTNEED | MADV_FREE => {
                 let clean = borrowed.retire_clean_pages(addr, length);
                 let pml4 = borrowed.space.pml4();
+                task::vm_phase_set(task::VM_PREPARATION, length / PAGE_SIZE);
                 Some((borrowed.space.prepare_unmap(addr, length), clean, pml4))
             }
             MADV_NORMAL
@@ -672,21 +678,28 @@ pub fn sys_madvise(addr: u64, length: u64, advice: i32) -> i64 {
             | MADV_DOFORK
             | MADV_HUGEPAGE
             | MADV_NOHUGEPAGE => None,
-            _ => return -errno::EINVAL,
+            _ => {
+                task::vm_phase_set(task::VM_HORS, 0);
+                return -errno::EINVAL;
+            }
         }
     };
     if let Some((retirement, clean, pml4)) = retirement {
         // Cancel a loader for this range before it can republish a PTE after
         // DONTNEED. No Mm guard crosses FaultRegistry or the TLB ACK wait.
         task::retire_fault_range(pml4, addr, length);
+        task::vm_phase_set(task::VM_SHOOTDOWN, length / PAGE_SIZE);
         execute_process_invalidation(&process, retirement.invalidation());
+        task::vm_phase_set(task::VM_FINITION, retirement.frames_a_rendre() as u64);
         process.mm.lock().space.finish_unmap(retirement);
         // The remote CPUs have acknowledged removal before the cache mapping
         // references are returned, so no stale TLB can access a reclaimed frame.
+        task::vm_phase_set(task::VM_PAGES_PROPRES, clean.len() as u64);
         for key in clean {
             crate::kernel::clean_page_cache::release(key);
         }
     }
+    task::vm_phase_set(task::VM_HORS, 0);
     0
 }
 

@@ -1432,6 +1432,37 @@ pub const POLL_ATTENTE: u32 = 4;
 pub const POLL_REVEIL: u32 = 5;
 pub const POLL_RETOUR: u32 = 6;
 
+// BOUCHAUD_P2_VM_PHASE_V1
+//
+// Les phases d'un `madvise`/`munmap`, pour que « quelle phase tenait le
+// verrou » ait une reponse au lieu d'un zero.
+//
+// Les quatre etapes n'ont pas du tout le meme profil : la validation est
+// courte et sous le verrou du `Mm`, la preparation parcourt la plage, le
+// shootdown TLB RELACHE le gros verrou et attend des CPU distants, et la
+// finition rend les frames. Une tenue de plusieurs secondes vient forcement
+// de l'une des trois qui restent sous le verrou, et il faut savoir laquelle.
+pub const VM_HORS: u32 = 0;
+/// Validation de la plage contre les VMA, sous le verrou du `Mm`.
+pub const VM_VALIDATION: u32 = 20;
+/// Retrait des PTE et collecte des frames a rendre.
+pub const VM_PREPARATION: u32 = 21;
+/// Invalidation TLB distante. Le gros verrou est SUSPENDU pendant cette phase.
+pub const VM_SHOOTDOWN: u32 = 22;
+/// Retour des frames a l'allocateur, gros verrou repris.
+pub const VM_FINITION: u32 = 23;
+/// Retour des references du cache de pages propres.
+pub const VM_PAGES_PROPRES: u32 = 24;
+
+/// Marque la phase VM courante. Meme canal que `poll_phase_set` : c'est ce que
+/// la sonde de blocage et la provenance du maximum de tenue relisent.
+#[inline]
+pub fn vm_phase_set(phase: u32, detail: u64) {
+    let cpu = local_cpu();
+    STALL_KERNEL_AUX[cpu].store(detail, Ordering::Release);
+    STALL_SYSCALL_PHASE[cpu].store(phase, Ordering::Release);
+}
+
 static POLL_PHASE: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 /// Detail de la phase : le descripteur en cours de sondage, ou le tour de
 /// boucle. Sans lui, « balayage » ne dit pas QUEL descripteur bloque.
@@ -4068,6 +4099,79 @@ fn log_smp_sample(online: usize) {
         current.gpu_presents.saturating_sub(previous.gpu_presents),
         current.gpu_bytes.saturating_sub(previous.gpu_bytes),
     ));
+    publie_bkl_par_appel(elapsed);
+}
+
+// BOUCHAUD_P2_BKL_PAR_APPEL_V1
+//
+// « BKL detenu 99,96 % de la fenetre » dit qu'il y a un probleme, pas OU. Le
+// maximum et sa provenance donnent UN coupable — celui d'une seule tenue. Ils
+// ne disent pas s'il est isole ou systematique, ni ce que les autres appels
+// coutent a cote.
+//
+// Cette ligne classe les appels systeme par temps de DETENTION sur la fenetre.
+// C'est elle qui permet d'affirmer un avant/apres chiffre plutot qu'une
+// impression.
+static mut BKL_APPEL_PRECEDENT: Option<alloc::vec::Vec<u64>> = None;
+
+fn publie_bkl_par_appel(fenetre_ns: u64) {
+    let seaux = smp_lock::nombre_de_seaux();
+    let mut hold = alloc::vec![0u64; seaux];
+    for index in 0..seaux {
+        hold[index] = smp_lock::stats_du_seau(index).0;
+    }
+    let precedent = unsafe {
+        let ancien = BKL_APPEL_PRECEDENT.replace(hold.clone());
+        ancien
+    };
+    let Some(precedent) = precedent else { return; };
+    if precedent.len() != seaux {
+        return;
+    }
+
+    // Les trois plus gros consommateurs de la fenetre. Trois, parce qu'une
+    // ligne de journal qui deroule cinquante appels ne se lit pas — et parce
+    // qu'un quatrieme n'a jamais rien explique jusqu'ici.
+    let mut classement: [(usize, u64); 3] = [(usize::MAX, 0); 3];
+    for index in 0..seaux {
+        let delta = hold[index].saturating_sub(precedent[index]);
+        if delta == 0 {
+            continue;
+        }
+        if delta > classement[2].1 {
+            classement[2] = (index, delta);
+            classement.sort_by(|a, b| b.1.cmp(&a.1));
+        }
+    }
+    if classement[0].0 == usize::MAX {
+        return;
+    }
+
+    let mut ligne = alloc::string::String::from("[BKL-SYSCALL]");
+    let _ = core::fmt::Write::write_fmt(
+        &mut ligne,
+        format_args!(" window_ns={fenetre_ns}"),
+    );
+    for (index, delta) in classement.iter().copied() {
+        if index == usize::MAX {
+            continue;
+        }
+        let (_, attente, acquisitions, max_hold) = smp_lock::stats_du_seau(index);
+        let nom = if index == smp_lock::SEAU_NOYAU {
+            "hors-syscall"
+        } else {
+            crate::kernel::abi::nr::name(index as u64)
+        };
+        let part = if fenetre_ns == 0 { 0 } else { delta.saturating_mul(100) / fenetre_ns };
+        let _ = core::fmt::Write::write_fmt(
+            &mut ligne,
+            format_args!(
+                " {nom}=[hold_delta_ns={delta} hold_pct={part} \
+                 max_hold_ns={max_hold} acq_total={acquisitions} wait_total_ns={attente}]"
+            ),
+        );
+    }
+    crate::kernel::dmesg::log_fmt(format_args!("{}", ligne));
 }
 
 /// Instantane d'un processus pour le journal : (pid, nom, ticks, octets).

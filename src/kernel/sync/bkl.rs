@@ -48,6 +48,81 @@ static PROBE_LAST_RELEASE_KIND: AtomicU32 = AtomicU32::new(0);
 static PROBE_LAST_RELEASE_GEN: AtomicU64 = AtomicU64::new(0);
 static TOTAL_WAIT_NS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_HOLD_NS: AtomicU64 = AtomicU64::new(0);
+
+// BOUCHAUD_P2_BKL_PAR_APPEL_V1
+//
+// POURQUOI UN TOTAL NE SUFFIT PAS
+// -------------------------------
+// « BKL detenu 99,96 % de la fenetre » dit qu'il y a un probleme, pas OU. Le
+// maximum et sa provenance donnent UN coupable — celui d'une seule tenue. Ils
+// ne disent pas si ce coupable est isole ou systematique, ni ce que les autres
+// appels coutent a cote.
+//
+// Ce tableau attribue chaque nanoseconde de detention et d'attente a l'appel
+// systeme qui la provoque. C'est ce qui permet d'affirmer un avant/apres :
+// « madvise tenait 5,2 s par fenetre, il en tient 12 ms » est une mesure ;
+// « c'est plus rapide » n'en est pas une.
+//
+// Rien n'est formate sur le chemin chaud : ce sont des `fetch_add` relaxes sur
+// un index deja connu. Le texte est fabrique au releve, une fois par seconde.
+const APPELS_SUIVIS: usize = 512;
+static HOLD_PAR_APPEL: [AtomicU64; APPELS_SUIVIS] =
+    [const { AtomicU64::new(0) }; APPELS_SUIVIS];
+static ATTENTE_PAR_APPEL: [AtomicU64; APPELS_SUIVIS] =
+    [const { AtomicU64::new(0) }; APPELS_SUIVIS];
+static ACQ_PAR_APPEL: [AtomicU64; APPELS_SUIVIS] =
+    [const { AtomicU64::new(0) }; APPELS_SUIVIS];
+static MAX_HOLD_PAR_APPEL: [AtomicU64; APPELS_SUIVIS] =
+    [const { AtomicU64::new(0) }; APPELS_SUIVIS];
+
+/// Index du seau d'un numero d'appel systeme.
+///
+/// `u64::MAX` designe « hors appel systeme » — une IRQ, un fil noyau — et tombe
+/// dans le dernier seau, qui est donc celui du noyau lui-meme.
+#[inline]
+fn seau(syscall_nr: u64) -> usize {
+    if syscall_nr == u64::MAX {
+        APPELS_SUIVIS - 1
+    } else {
+        (syscall_nr as usize).min(APPELS_SUIVIS - 2)
+    }
+}
+
+/// Seau « hors appel systeme ».
+pub const SEAU_NOYAU: usize = APPELS_SUIVIS - 1;
+
+/// `(hold_ns, attente_ns, acquisitions, max_hold_ns)` pour un appel systeme.
+pub fn stats_par_appel(syscall_nr: u64) -> (u64, u64, u64, u64) {
+    let index = seau(syscall_nr);
+    (
+        HOLD_PAR_APPEL[index].load(Ordering::Relaxed),
+        ATTENTE_PAR_APPEL[index].load(Ordering::Relaxed),
+        ACQ_PAR_APPEL[index].load(Ordering::Relaxed),
+        MAX_HOLD_PAR_APPEL[index].load(Ordering::Relaxed),
+    )
+}
+
+/// Nombre de seaux, pour un appelant qui veut les parcourir tous.
+pub fn nombre_de_seaux() -> usize {
+    APPELS_SUIVIS
+}
+
+/// Les mesures du seau `index`, sans passer par un numero d'appel.
+pub fn stats_du_seau(index: usize) -> (u64, u64, u64, u64) {
+    let index = index.min(APPELS_SUIVIS - 1);
+    (
+        HOLD_PAR_APPEL[index].load(Ordering::Relaxed),
+        ATTENTE_PAR_APPEL[index].load(Ordering::Relaxed),
+        ACQ_PAR_APPEL[index].load(Ordering::Relaxed),
+        MAX_HOLD_PAR_APPEL[index].load(Ordering::Relaxed),
+    )
+}
+
+#[inline]
+fn note_attente(syscall_nr: u64, attente: u64) {
+    TOTAL_WAIT_NS.fetch_add(attente, Ordering::Relaxed);
+    ATTENTE_PAR_APPEL[seau(syscall_nr)].fetch_add(attente, Ordering::Relaxed);
+}
 /// Plus longue tenue continue du verrou, et ou elle s'est produite.
 ///
 /// Un cumul ne dit rien d'une panne de vivacite : mille tenues d'une
@@ -225,6 +300,7 @@ fn probe_note_acquire(cpu: usize, kind: u32) {
     TENUE_PHASE[cpu].store(syscall_phase, Ordering::Relaxed);
     TENUE_SITE_ACQ[cpu].store(site, Ordering::Relaxed);
     TENUE_ORIGINE[cpu].store(kind, Ordering::Relaxed);
+    ACQ_PAR_APPEL[seau(syscall_nr)].fetch_add(1, Ordering::Relaxed);
 }
 
 #[inline]
@@ -234,6 +310,21 @@ fn probe_note_release(cpu: usize, kind: u32) {
     let tenue = now_ns.saturating_sub(acquired);
     TOTAL_HOLD_NS.fetch_add(tenue, Ordering::Relaxed);
     if acquired != 0 {
+        // BOUCHAUD_P2_BKL_PAR_APPEL_V1 : l'appel systeme attribue est celui
+        // note a l'ACQUISITION, pas celui en cours maintenant. Les deux
+        // different quand une IRQ preempte, et c'est bien l'acquereur qui a
+        // tenu le verrou pendant tout l'intervalle.
+        let index = seau(TENUE_SYSCALL[cpu].load(Ordering::Relaxed));
+        HOLD_PAR_APPEL[index].fetch_add(tenue, Ordering::Relaxed);
+        let mut record = MAX_HOLD_PAR_APPEL[index].load(Ordering::Relaxed);
+        while tenue > record {
+            match MAX_HOLD_PAR_APPEL[index].compare_exchange_weak(
+                record, tenue, Ordering::Relaxed, Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observe) => record = observe,
+            }
+        }
         publie_si_plus_longue(cpu, tenue);
     }
     let generation = PROBE_OWNER_GEN.load(Ordering::Acquire);
@@ -533,9 +624,9 @@ pub fn enter() -> KernelGuard {
                 enregistreur::note(
                     enregistreur::ENTER, cpu, FREE, mine, avant, 1, usize::MAX, 0,
                 );
-                TOTAL_WAIT_NS.fetch_add(
+                note_attente(
+                    TENUE_SYSCALL[cpu].load(Ordering::Relaxed),
                     crate::kernel::timer::monotonic_ns().saturating_sub(wait_start),
-                    Ordering::Relaxed,
                 );
                 return KernelGuard { cpu, active: true };
             }
@@ -732,9 +823,9 @@ pub fn resume_after_schedule(depth: usize) {
                     enregistreur::RESUME_OK, cpu, FREE, mine,
                     avant, depth, usize::MAX, depth as u64,
                 );
-                TOTAL_WAIT_NS.fetch_add(
+                note_attente(
+                    TENUE_SYSCALL[cpu].load(Ordering::Relaxed),
                     crate::kernel::timer::monotonic_ns().saturating_sub(wait_start),
-                    Ordering::Relaxed,
                 );
                 return;
             }

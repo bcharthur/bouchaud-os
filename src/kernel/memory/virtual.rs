@@ -597,6 +597,12 @@ impl UnmapRetirement {
     pub fn invalidation(&self) -> TlbInvalidation {
         self.invalidation
     }
+
+    /// Combien de frames `finish_unmap` aura a rendre. Sert au marqueur de
+    /// phase : une finition longue doit pouvoir dire COMBIEN de pages.
+    pub fn frames_a_rendre(&self) -> usize {
+        self.frames.len()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
