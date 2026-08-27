@@ -3,7 +3,7 @@
 use crate::gui::apps;
 use crate::gui::framebuffer as fb;
 use crate::gui::window::{
-    self, clip, icon_rect, menu_rect, start_btn, taskbar_btn, Win,
+    self, icon_rect, menu_rect, start_btn, taskbar_btn, Win,
     BAR_H, ICONS, MENU, MENU_HEADER_H, MENU_ITEM_H, TITLE_H,
 };
 use crate::arch::x86_64::{cpu, rtc, smp};
@@ -225,8 +225,15 @@ fn human_bytes(n: usize) -> String {
 
 fn draw_wallpaper() {
     // Gradient bleu nuit du haut (profond) vers le bas (moins foncé)
+    //
+    // BOUCHAUD_GFX_CULLING_AMONT_V1 : la couleur d'une ligne est une fonction
+    // PURE de son ordonnee, donc ne parcourir que les lignes presentees rend
+    // exactement la meme image. Sans ce bornage, un degat de curseur de 22
+    // lignes faisait quand meme 720 tours de boucle -- et 720 lectures de la
+    // decoupe, une par appel a `fill_rect_rgb`, pour 698 lignes jetees.
     let h = fb::HEIGHT.max(1);
-    for y in 0..fb::HEIGHT {
+    let (_, cy0, _, cy1) = fb::clip_rect();
+    for y in cy0..cy1.min(fb::HEIGHT) {
         let c = lerp_color(0x080e1c, 0x1a2f50, y, h);
         fb::fill_rect_rgb(0, y, fb::WIDTH, 1, c);
     }
@@ -545,9 +552,17 @@ fn draw_window(w: &Win, focused: bool) {
     fb::fill_rect_rgb(x + 1, y + title_h - 1, ww.saturating_sub(2), 1,
         crate::gui::theme::COLOR_BORDER);
 
-    // Titre fenêtre en TTF
-    let title_clipped = clip(&w.title, (ww / 8).saturating_sub(6));
-    fb::draw_text_prop(x + 12, y + 8, title_clipped,
+    // Titre fenêtre en TTF, tronque a la place REELLE : de son origine jusqu'au
+    // premier bouton de la barre de titre. Le compte de caracteres precedent
+    // -- `ww / 8 - 6` -- ignorait la largeur des lettres, et un titre etroit
+    // comme « Fichiers » laissait un vide pendant qu'un titre large passait
+    // sous les boutons.
+    let origine_titre = x + 12;
+    let premier_bouton = crate::gui::windowing::minimize_button_rect(outer,
+        crate::gui::windowing::WINDOW_CHROME).x.max(0) as usize;
+    let place = premier_bouton.saturating_sub(origine_titre + 6);
+    let title_clipped = tronque_a_largeur(&w.title, place, 11.0);
+    fb::draw_text_prop(origine_titre, y + 8, title_clipped,
         crate::gui::theme::COLOR_TEXT_PRIMARY, 11.0, false);
 
     let mouse = crate::gui::mouse::pos();
@@ -696,6 +711,27 @@ fn dessine_demarrage(zone: &crate::gui::protocole::Rect, titre: &str) {
 // ─── Barre des tâches ──────────────────────────────────────────────────────
 
 /// Dessine la barre des taches.
+/// Plus long prefixe de `s` dont le rendu tient dans `largeur` pixels.
+///
+/// `window::clip` compte des CARACTERES, ce qui n'a pas de sens pour une police
+/// proportionnelle : sept caracteres font quarante pixels ou soixante selon le
+/// mot. Les libelles debordaient donc de leur bouton -- et un debord interdit
+/// tout culling par rectangle, puisque le voisin ecarte emporte les pixels
+/// qu'il posait chez l'autre.
+fn tronque_a_largeur(s: &str, largeur: usize, px: f32) -> &str {
+    if fb::text_width(s, px, false) <= largeur {
+        return s;
+    }
+    let mut fin = 0;
+    for (indice, _) in s.char_indices().skip(1) {
+        if fb::text_width(&s[..indice], px, false) > largeur {
+            break;
+        }
+        fin = indice;
+    }
+    &s[..fin]
+}
+
 pub(crate) fn draw_taskbar(wins: &[Win], menu_open: bool) {
     // Fond gradient foncé
     for y in 0..BAR_H {
@@ -729,6 +765,16 @@ pub(crate) fn draw_taskbar(wins: &[Win], menu_open: bool) {
         if b.x + b.w > fb::WIDTH as i32 { break; }
         let bx = b.x as usize; let by = b.y as usize;
         let bw = b.w as usize; let bh = b.h as usize;
+        // BOUCHAUD_GFX_CULLING_AMONT_V1 : un degat sur un bouton n'a aucune
+        // raison de faire dessiner les autres. `continue`, et non `break` : la
+        // barre est parcourue de gauche a droite, mais rien ne garantit que le
+        // degat soit d'un seul tenant.
+        //
+        // Ce test n'est CORRECT que parce que le bouton ne peint rien hors de
+        // son rectangle -- d'ou la troncature du libelle a la largeur reelle,
+        // juste en dessous. Un libelle qui debordait chez le voisin aurait ete
+        // emporte par le culling.
+        if !fb::decoupe_touche(bx, by, bw, bh) { continue }
         // Fond du bouton
         for dy in 0..bh {
             let c = lerp_color(0x1e3462, 0x142446, dy, bh);
@@ -739,8 +785,10 @@ pub(crate) fn draw_taskbar(wins: &[Win], menu_open: bool) {
         // Bordure
         fb::fill_rect_rgb(bx, by, 1, bh, 0x2a4a88);
         fb::fill_rect_rgb(bx + bw - 1, by, 1, bh, 0x2a4a88);
-        // Label
-        let lbl = clip(&w.title, 7);
+        // Label, tronque a la LARGEUR du bouton et non a un nombre de
+        // caracteres : « Navigateur » et « Fichiers » n'ont pas la meme largeur
+        // a sept caracteres, et le premier debordait sur le bouton suivant.
+        let lbl = tronque_a_largeur(&w.title, bw.saturating_sub(4), 9.0);
         fb::draw_text_prop(bx + 2, by + 1, lbl, 0xd0e8ff, 9.0, false);
     }
 }

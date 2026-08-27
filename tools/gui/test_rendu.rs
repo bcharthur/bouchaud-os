@@ -799,3 +799,60 @@ fn les_transitions_de_fenetre_recoivent_des_cadres() {
         "cadre_avant doit rester un cadre : il alimente fenetre_bougee"
     );
 }
+
+/// UN LIBELLE QUI DEBORDE DE SA BOITE REND LE CULLING FAUX.
+///
+/// Le compositeur, et desormais les peintres eux-memes, ecartent le travail
+/// dont la boite ne croise pas le degat. Cette decision n'est correcte que si
+/// chaque boite MAJORE ce que son contenu peint.
+///
+/// Deux libelles ne la respectaient pas, parce qu'ils etaient tronques a un
+/// nombre de CARACTERES : la police est proportionnelle, sept caracteres font
+/// quarante pixels ou soixante selon le mot. Un bouton de barre des taches
+/// ecrivait donc chez son voisin, et le titre d'une fenetre passait sous ses
+/// boutons. Ecartez le voisin, et la moitie de libelle disparait.
+#[test]
+fn aucun_libelle_n_est_tronque_au_nombre_de_caracteres() {
+    const WIDGETS: &str = include_str!("../../src/gui/widgets.rs");
+
+    assert!(
+        WIDGETS.contains("fn tronque_a_largeur("),
+        "la troncature a la largeur reelle doit rester la seule facon de \
+         faire tenir un libelle dans sa boite"
+    );
+    for motif in ["clip(&w.title, 7)", "clip(&w.title, (ww / 8)"] {
+        assert!(
+            !WIDGETS.contains(motif),
+            "`{motif}` tronque au nombre de caracteres : le libelle deborde de \
+             sa boite, et le culling par rectangle en perd la moitie"
+        );
+    }
+}
+
+/// Le culling amont doit rester ECRIT, pas seulement souhaite.
+///
+/// La decoupe rejette les pixels ; elle ne peut rien contre le parcours qui les
+/// produit. `apps::draw_app` etait rappele pour chaque rectangle de degat
+/// touchant la fenetre -- l'explorateur y reparcourait le RAMFS, le moniteur y
+/// relisait l'horloge par ports d'E/S, sous le gros verrou du noyau.
+#[test]
+fn les_peintres_couteux_sont_precedes_d_un_test_de_decoupe() {
+    const APPS: &str = include_str!("../../src/gui/apps/mod.rs");
+    const EXPLORATEUR: &str = include_str!("../../src/gui/apps/file_explorer.rs");
+    const WIDGETS: &str = include_str!("../../src/gui/widgets.rs");
+
+    assert!(
+        APPS.contains("decoupe_touche("),
+        "draw_app doit sortir quand le degat ne touche pas la zone utile"
+    );
+    assert!(
+        EXPLORATEUR.matches("decoupe_touche(").count() >= 4,
+        "les trois bandes de l'explorateur et ses cellules doivent chacune \
+         etre gardees : chacune coute un parcours du RAMFS ou une allocation"
+    );
+    assert!(
+        WIDGETS.contains("decoupe_touche("),
+        "un bouton de la barre des taches ne doit pas etre peint pour un degat \
+         qui vise son voisin"
+    );
+}

@@ -671,6 +671,36 @@ pub fn clip_rect() -> (usize, usize, usize, usize) {
     clip()
 }
 
+// BOUCHAUD_GFX_CULLING_AMONT_V1
+//
+// La trame va-t-elle presenter un seul pixel de ce rectangle ?
+//
+// # Pourquoi un predicat, alors que la decoupe rejette deja
+//
+// Parce que la decoupe rejette les PIXELS, pas le TRAVAIL qui les produit.
+//
+// Le compositeur dessine une fois par rectangle de degat. `apps::draw_app`
+// etait donc rappele pour chacun -- y compris pour un degat qui ne touche que
+// la barre de titre. L'explorateur de fichiers y parcourt le RAMFS pour
+// compter ses entrees et alloue une chaine par ligne ; le moniteur systeme y
+// lit l'horloge temps reel par ports d'E/S, les statistiques du tas et le
+// nombre de processus. Tout cela pour des pixels que la decoupe jetait.
+//
+// Sous TCG et sous le gros verrou du noyau, ce n'est pas un detail : ce sont
+// des acces materiel et des prises de verrou faits plusieurs fois par trame
+// pour rien.
+//
+// Un appelant qui l'oublie ne dessine pas faux -- la decoupe est toujours la.
+// Il paie seulement ce qu'il aurait pu ne pas payer.
+pub fn decoupe_touche(x: usize, y: usize, w: usize, h: usize) -> bool {
+    if w == 0 || h == 0 { return false }
+    let (x0, y0, x1, y1) = intersection(
+        clip(),
+        (x, y, x.saturating_add(w), y.saturating_add(h)),
+    );
+    x1 > x0 && y1 > y0
+}
+
 /// Compte des pixels ecrits par un chemin qui n'utilise pas les primitives.
 pub fn note_pixels_dessines(nombre: u64) {
     PIXELS_DESSINES.fetch_add(nombre, Ordering::Relaxed);
