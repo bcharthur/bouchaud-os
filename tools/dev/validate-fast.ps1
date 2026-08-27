@@ -63,6 +63,7 @@ try {
     Invoke-RustTest "protocole GUI" "tools\gui\test_protocole.rs"
     Invoke-RustTest "compositeur event-driven" "tools\gui\test_reveil.rs"
     Invoke-RustTest "culling de scene" "tools\gui\test_scene.rs"
+    Invoke-RustTest "verdict protocole client" "tools\gui\test_silence.rs"
     Invoke-RustTest "BKL max/provenance" "tools\smp\test_bkl_max.rs"
     Invoke-RustTest "commutation SMP" "tools\smp\test_commutation.rs"
     Invoke-RustTest "profondeur BKL" "tools\smp\test_profondeur_bkl.rs"
