@@ -1049,11 +1049,16 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
         crate::gui::degats::stats_regions();
     let evites = boite_gate0.saturating_sub(pixels);
     crate::serial_println!(
-        "[GUI-DAMAGE] full={} window={} cursor={} client={} taskbar={} menu={} icon={} topbar={} presents={} rects={} presented_pixels={} requested_pixels={} gate0_bbox_pixels={} saved_pixels={} merges={} overflows={} drawn_pixels={}",
+        "[GUI-DAMAGE] full={} window={} cursor={} client={} taskbar={} menu={} icon={} topbar={} presents={} rects={} presented_pixels={} requested_pixels={} gate0_bbox_pixels={} saved_pixels={} merges={} overflows={} drawn_pixels={} text_pixels={}",
         par_origine[0], par_origine[1], par_origine[2], par_origine[3],
         par_origine[4], par_origine[5], par_origine[6], par_origine[7],
         trames, rects, pixels,
         demandes, boite_gate0, evites, fusions, debordements, fb::pixels_dessines(),
+        // BOUCHAUD_GFX_TEXTE_SEGMENT_V1 : la depense qui n'apparaissait nulle
+        // part. `blend_rgb` ne comptait rien, donc le rendu du texte etait le
+        // seul chemin de dessin invisible aux metriques -- et c'est celui que
+        // le compositeur repayait a CHAQUE rectangle de degat.
+        fb::pixels_texte(),
     );
     // BOUCHAUD_GFX_PRESENT_TRACE_V1
     //

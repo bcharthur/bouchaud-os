@@ -604,6 +604,18 @@ static CLIP_X1: AtomicUsize = AtomicUsize::new(WIDTH);
 static CLIP_Y1: AtomicUsize = AtomicUsize::new(HEIGHT);
 static PIXELS_DESSINES: AtomicU64 = AtomicU64::new(0);
 
+// BOUCHAUD_GFX_TEXTE_SEGMENT_V1
+//
+// Pixels de TEXTE melanges dans le backbuffer. Comptes a part, et non ajoutes
+// a `PIXELS_DESSINES`, pour que les releves d'avant et d'apres restent
+// comparables : le texte n'a jamais ete compte, il l'est desormais, et
+// confondre les deux ferait passer une mesure nouvelle pour une regression.
+//
+// C'est la mesure qui manquait. Le rendu du texte etait le seul chemin de
+// dessin invisible aux metriques, et c'est precisement la que le compositeur
+// depensait le plus par rectangle de degat.
+static PIXELS_TEXTE: AtomicU64 = AtomicU64::new(0);
+
 /// Borne le dessin a ce rectangle jusqu'au prochain [`reset_clip`].
 pub fn set_clip(x: usize, y: usize, w: usize, h: usize) {
     CLIP_X0.store(x.min(WIDTH), Ordering::Relaxed);
@@ -664,6 +676,11 @@ pub fn note_pixels_dessines(nombre: u64) {
     PIXELS_DESSINES.fetch_add(nombre, Ordering::Relaxed);
 }
 
+/// Pixels de texte melanges dans le backbuffer depuis le demarrage.
+pub fn pixels_texte() -> u64 {
+    PIXELS_TEXTE.load(Ordering::Relaxed)
+}
+
 /// Pixels reellement ecrits dans le backbuffer depuis le demarrage.
 ///
 /// C'est la mesure qui distingue « on copie moins » de « on dessine moins ».
@@ -717,6 +734,54 @@ pub fn blend_rgb(x: usize, y: usize, rgb: u32, alpha: u8) {
     let buf = back();
     if buf.is_empty() { return; }
     let idx = y * WIDTH + x;
+    if alpha >= 255 { buf[idx] = rgb & 0x00ff_ffff; return; }
+    let a = alpha as u32;
+    let inv = 255 - a;
+    let dst = buf[idx];
+    let dr = (dst >> 16) & 0xff; let dg = (dst >> 8) & 0xff; let db = dst & 0xff;
+    let sr = (rgb >> 16) & 0xff; let sg = (rgb >> 8) & 0xff; let sb = rgb & 0xff;
+    let r = (sr * a + dr * inv) / 255;
+    let g = (sg * a + dg * inv) / 255;
+    let b = (sb * a + db * inv) / 255;
+    buf[idx] = (r << 16) | (g << 8) | b;
+}
+
+// BOUCHAUD_GFX_TEXTE_SEGMENT_V1
+//
+// Melange une SUITE de pixels d'un glyphe sur une ligne, decoupe comprise.
+//
+// `blend_rgb` relit la decoupe -- quatre chargements atomiques -- a chaque
+// pixel. Un glyphe de 9x12 en coutait donc 432 rien que pour decider de ne pas
+// dessiner. Ici la decoupe est evaluee UNE fois pour la ligne, et le writer
+// reste le seul endroit qui l'applique : `BOUCHAUD_GUI_CLIP_V1` tient.
+//
+// `couverture[i]` est l'alpha du pixel `x + i`. Zero ne touche rien.
+pub fn blend_span(x: usize, y: usize, rgb: u32, couverture: &[u8], gras: bool) {
+    if couverture.is_empty() { return; }
+    let buf = back();
+    if buf.is_empty() { return; }
+    let (cx0, cy0, cx1, cy1) = clip();
+    if y < cy0 || y >= cy1 { return; }
+    let row = y * WIDTH;
+    let mut ecrits = 0u64;
+    for (index, &alpha) in couverture.iter().enumerate() {
+        if alpha == 0 { continue }
+        let px = x + index;
+        // Le gras redouble chaque pixel vers la droite ; les deux passent par
+        // la meme decoupe.
+        for px in [px, px + 1] {
+            if px < cx0 || px >= cx1 { continue }
+            melange_pixel(buf, row + px, rgb, alpha);
+            ecrits += 1;
+            if !gras { break }
+        }
+    }
+    if ecrits != 0 { PIXELS_TEXTE.fetch_add(ecrits, Ordering::Relaxed); }
+}
+
+/// Melange source sur destination a l'index deja verifie.
+#[inline]
+fn melange_pixel(buf: &mut [u32], idx: usize, rgb: u32, alpha: u8) {
     if alpha >= 255 { buf[idx] = rgb & 0x00ff_ffff; return; }
     let a = alpha as u32;
     let inv = 255 - a;

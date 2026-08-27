@@ -47,6 +47,7 @@ pub mod windowing;
 pub mod theme;
 pub mod graphics;
 
+pub mod texte;
 pub mod font;
 
 
