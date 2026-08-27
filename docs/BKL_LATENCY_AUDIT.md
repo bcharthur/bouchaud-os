@@ -116,6 +116,31 @@ nouveau. `tools/smp/test_discipline_bkl.rs` decrit les chemins reels de
 `madvise` et `poll`, rejoue les trois defauts comme traces fautives, et exige
 qu'elles soient refusees.
 
+## Comment lire l'avant/apres
+
+Les corrections changent le cout **a l'interieur** de sections critiques qui
+existaient deja. Elles ne suppriment aucune prise de verrou et n'en ajoutent
+aucune.
+
+**Le nombre d'acquisitions n'est donc pas un critere.** `bkl_acq_delta` peut
+rester autour de 77 tout en ayant parfaitement mordu — c'est meme le resultat
+attendu si la charge est identique. Le prendre pour un signe d'echec ferait
+chercher au mauvais endroit.
+
+Les criteres sont, dans cet ordre :
+
+| Mesure | Ou | Ce qu'elle dit |
+|---|---|---|
+| `bkl_hold_delta_ns` | `[SMP-SAMPLE]` | Part de la fenetre pendant laquelle le verrou est confisque. |
+| `bkl_wait_delta_ns` | `[SMP-SAMPLE]` | Ce que les autres CPU perdent a l'attendre. |
+| `max_hold_ns` | `[BKL-MAX-HOLD]` | La plus longue tenue continue — la seule qui distingue un noyau qui travaille d'un noyau qui gele. |
+| `madvise=[...]` | `[BKL-SYSCALL]` | La detention attribuee a l'appel incrimine, et sa separation d'avec l'attente. |
+| `vm_phase` | `[SMP-STALL]` | Laquelle des cinq phases tenait le verrou. |
+
+Les valeurs visees — moins de 5 % de detention, moins de 50 ms de tenue
+maximale — sont des **objectifs**, pas des invariants. Elles disent ou l'on
+voudrait arriver ; elles ne definissent pas la reussite d'un run.
+
 ## Ce que cet audit ne prouve pas
 
 Que les traces de `test_discipline_bkl.rs` decrivent fidelement le code : c'est
