@@ -493,74 +493,96 @@ fn draw_icon_rustpad(vx: usize, vy: usize, vw: usize) {
 // ─── Fenêtres ──────────────────────────────────────────────────────────────
 
 // BOUCHAUD_GUI_EMPREINTE_OMBRE_V1
-/// Debordement de l'ombre portee d'une fenetre ou d'un menu, en pixels.
+/// Debordement de l'ombre portee du menu Demarrer, en pixels.
 ///
-/// Une seule definition, ici, parce que TROIS endroits doivent s'accorder :
-/// ce que `draw_window` / `draw_menu` peignent, les bornes que `plan_de_scene`
-/// declare, et le rectangle que le compositeur invalide. Les deux derniers
-/// avaient diverge du premier -- l'invalidation ne couvrait que le cadre --, et
-/// la bande d'ombre d'une fenetre deplacee restait a l'ecran : des rectangles
-/// sombres, exactement de cette couleur, abandonnes sur le bureau.
-pub(crate) const DEBORD_OMBRE: i32 = 4;
+/// Simple relais de `disposition::DEBORD_OMBRE`, qui est LA definition : trois
+/// endroits doivent s'accorder -- ce que `draw_menu` peint, les bornes que
+/// `plan_de_scene` declare, et le rectangle que le compositeur invalide. Les
+/// deux derniers avaient diverge du premier, et la bande d'ombre restait a
+/// l'ecran : des rectangles sombres abandonnes sur le bureau.
+///
+/// `draw_window` n'utilise plus ce chemin : sa forme et son debord viennent de
+/// `WindowRenderGeometry`, et `window::verifie_constantes` refuse de compiler
+/// si `SHADOW_EXTENT` s'ecarte de cette valeur.
+pub(crate) const DEBORD_OMBRE: i32 = crate::gui::disposition::DEBORD_OMBRE as i32;
 
 fn draw_window(w: &Win, focused: bool) {
     let x = w.x.max(0) as usize;
     let y = w.y.max(0) as usize;
     let ww = w.w as usize;
-    let wh = w.h as usize;
 
-    // Ombre portée. Elle deborde du cadre de `DEBORD_OMBRE` : tout ce qui
-    // calcule une empreinte ou une invalidation doit l'inclure.
-    let debord = DEBORD_OMBRE as usize;
-    fb::fill_rect_rgb(x + debord, y + debord, ww, wh, 0x04080f);
+    let clip_bounds = fb::clip_rect();
+    let damage = crate::gui::windowing::Rect::new(clip_bounds.0 as i32, clip_bounds.1 as i32,
+        clip_bounds.2.saturating_sub(clip_bounds.0) as u32,
+        clip_bounds.3.saturating_sub(clip_bounds.1) as u32);
+    let outer = w.rect();
+    let geometry = crate::gui::windowing::window_render_geometry(outer,
+        TITLE_H as u32, crate::gui::theme::RADIUS_WINDOW,
+        crate::gui::windowing::manager::SHADOW_EXTENT);
+    let border = if focused { 0x454c58 } else { crate::gui::theme::COLOR_BORDER };
+    crate::gui::graphics::paint_window_shape(geometry,
+        crate::gui::theme::RADIUS_WINDOW,
+        crate::gui::windowing::manager::SHADOW_EXTENT, damage,
+        crate::gui::theme::COLOR_SURFACE, border,
+        |px, py, color| fb::pixel_rgb(px as usize, py as usize, color));
 
-    // Fond de la fenêtre
-    fb::fill_rect_rgb(x, y, ww, wh, 0x111827);
-
-    // Barre de titre : gradient bleu (focused) ou gris foncé (inactive)
     let title_h = TITLE_H as usize;
-    let (tc_top, tc_bot) = if focused {
-        (0x1a4c8f, 0x0e2d57)
-    } else {
-        (0x1f2937, 0x111827)
-    };
-    for ty in 0..title_h {
-        let c = lerp_color(tc_top, tc_bot, ty, title_h);
-        fb::fill_rect_rgb(x, y + ty, ww, 1, c);
-    }
-    // Séparateur bas de la barre de titre
-    fb::fill_rect_rgb(x, y + title_h, ww, 1, if focused { 0x2563eb } else { 0x1f2937 });
+    let title_color = if focused { crate::gui::theme::COLOR_SURFACE_ELEVATED }
+        else { crate::gui::theme::COLOR_SURFACE };
+    let title = crate::gui::windowing::titlebar_rect(outer,
+        crate::gui::windowing::WINDOW_CHROME);
+    crate::gui::graphics::fill_rounded_rect(title, crate::gui::theme::RADIUS_WINDOW,
+        damage, |px, py| fb::pixel_rgb(px as usize, py as usize, title_color));
+    fb::fill_rect_rgb(x + 1, y + title_h - 1, ww.saturating_sub(2), 1,
+        crate::gui::theme::COLOR_BORDER);
 
     // Titre fenêtre en TTF
     let title_clipped = clip(&w.title, (ww / 8).saturating_sub(6));
-    fb::draw_text_prop(x + 4, y + 1, title_clipped, 0xe2e8f0, 9.0, false);
+    fb::draw_text_prop(x + 12, y + 8, title_clipped,
+        crate::gui::theme::COLOR_TEXT_PRIMARY, 11.0, false);
 
-    // Boutons de contrôle style macOS (cercles colorés)
-    if ww > 36 {
-        let btn_y = y + title_h / 2;
-        // Minimiser (jaune)
-        draw_circle_highlight(x + ww - 26, btn_y, 3, 0xe5a820);
-        // Maximiser (vert)
-        draw_circle_highlight(x + ww - 17, btn_y, 3, 0x1da44a);
-        // Fermer (rouge)
-        draw_circle_highlight(x + ww - 8, btn_y, 3, 0xe5463a);
-    }
+    let mouse = crate::gui::mouse::pos();
+    let hovered = crate::gui::windowing::hit_test(outer,
+        crate::gui::windowing::Point { x: mouse.0 as i32, y: mouse.1 as i32 },
+        crate::gui::windowing::WINDOW_CHROME, w.flags.resizable);
+    draw_window_controls(outer, hovered, focused);
 
     // Contenu de l'application
     apps::draw_app(w);
 
-    // Bordure de fenêtre
-    let bc = if focused { 0x2563eb } else { 0x1f2937 };
-    fb::fill_rect_rgb(x, y, ww, 1, bc);
-    fb::fill_rect_rgb(x, y, 1, wh, bc);
-    fb::fill_rect_rgb(x + ww - 1, y, 1, wh, bc);
-    fb::fill_rect_rgb(x, y + wh - 1, ww, 1, bc);
+}
 
-    // Poignée de redimensionnement (coin bas-droit)
-    if ww > 10 && wh > 10 {
-        for i in 0..5usize {
-            fb::pixel_rgb(x + ww - 2 - i, y + wh - 2, 0x4a7bbb);
-            fb::pixel_rgb(x + ww - 2, y + wh - 2 - i, 0x4a7bbb);
+fn draw_window_controls(outer: crate::gui::windowing::Rect,
+    hover: crate::gui::windowing::HitRegion, focused: bool) {
+    use crate::gui::windowing::{close_button_rect, maximize_button_rect,
+        minimize_button_rect, HitRegion, WINDOW_CHROME};
+    let buttons = [(minimize_button_rect(outer, WINDOW_CHROME), HitRegion::Minimize),
+        (maximize_button_rect(outer, WINDOW_CHROME), HitRegion::Maximize),
+        (close_button_rect(outer, WINDOW_CHROME), HitRegion::Close)];
+    for (rect, region) in buttons {
+        if hover == region {
+            let color = if region == HitRegion::Close { crate::gui::theme::COLOR_DANGER }
+                else { 0x303640 };
+            fb::fill_rect_rgb(rect.x.max(0) as usize, rect.y.max(0) as usize,
+                rect.width as usize, rect.height as usize, color);
+        }
+        let color = if focused { crate::gui::theme::COLOR_TEXT_PRIMARY }
+            else { crate::gui::theme::COLOR_TEXT_SECONDARY };
+        let cx = rect.x + rect.width as i32 / 2;
+        let cy = rect.y + rect.height as i32 / 2;
+        match region {
+            HitRegion::Minimize => fb::fill_rect_rgb((cx - 5) as usize, cy as usize, 10, 1, color),
+            HitRegion::Maximize => {
+                fb::fill_rect_rgb((cx - 5) as usize, (cy - 4) as usize, 10, 1, color);
+                fb::fill_rect_rgb((cx - 5) as usize, (cy + 4) as usize, 10, 1, color);
+                fb::fill_rect_rgb((cx - 5) as usize, (cy - 4) as usize, 1, 9, color);
+                fb::fill_rect_rgb((cx + 4) as usize, (cy - 4) as usize, 1, 9, color);
+            }
+            HitRegion::Close => for offset in -4..=4 {
+                fb::pixel_rgb((cx + offset) as usize, (cy + offset) as usize, color);
+                fb::pixel_rgb((cx + offset) as usize, (cy - offset) as usize, color);
+            },
+            _ => {}
         }
     }
 }

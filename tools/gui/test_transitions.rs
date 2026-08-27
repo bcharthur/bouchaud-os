@@ -164,7 +164,7 @@ impl Fen {
     }
 
     fn empreinte(&self) -> Rect {
-        disposition::empreinte_avec_ombre(self.cadre())
+        disposition::empreinte_fenetre_peinte(self.cadre())
     }
 
     /// Interieur : sous la barre de titre, dans les bordures.
@@ -351,11 +351,11 @@ fn peins_fenetre(toile: &mut Toile, fen: &Fen, focalisee: bool) {
     if cadre.vide() {
         return;
     }
-    // Ombre portee, decalee de 4 : elle deborde du cadre en bas et a droite.
-    toile.remplis(
-        Rect::neuf(cadre.x + 4, cadre.y + 4, cadre.largeur, cadre.hauteur),
-        0x05_07_0a,
-    );
+    // Ombre portee : `paint_window_shape` peint des anneaux AUTOUR du cadre,
+    // donc elle deborde des quatre cotes. Le modele suit exactement ce que
+    // `disposition::empreinte_fenetre_peinte` declare, sinon l'oracle
+    // validerait un degat qui ne couvre pas ce que le noyau peint.
+    toile.remplis(disposition::empreinte_fenetre_peinte(cadre), 0x05_07_0a);
     toile.remplis(cadre, 0x2a_2a_3a + fen.teinte);
     // Barre de titre et bordures : leur couleur depend du FOCUS.
     let couleur_focus = if focalisee { 0x25_63_eb } else { 0x1f_29_37 };
@@ -367,7 +367,13 @@ fn peins_fenetre(toile: &mut Toile, fen: &Fen, focalisee: bool) {
 
 fn peins_menu(toile: &mut Toile, etat: &Etat) {
     let m = menu();
-    toile.remplis(Rect::neuf(m.x + 4, m.y + 4, m.largeur, m.hauteur), 0x05_07_0a);
+    // Le menu garde une ombre DECALEE : `draw_menu` peint une copie du cadre
+    // translatee vers le bas et la droite.
+    let debord = disposition::DEBORD_OMBRE as i32;
+    toile.remplis(
+        Rect::neuf(m.x + debord, m.y + debord, m.largeur, m.hauteur),
+        0x05_07_0a,
+    );
     toile.remplis(m, 0x14_20_3a);
     toile.remplis(Rect::neuf(m.x, m.y, BANDE_ACCENT as u32, m.hauteur), 0x25_63_eb);
     for index in 0..disposition::lignes_menu(m) {

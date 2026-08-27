@@ -67,6 +67,7 @@ try {
     Invoke-RustTest "culling de scene" "tools\gui\test_scene.rs"
     Invoke-RustTest "equivalence de rendu" "tools\gui\test_rendu.rs"
     Invoke-RustTest "oracle de transition d'etat" "tools\gui\test_transitions.rs"
+    Invoke-RustTest "systeme de fenetrage" "tools\gui\test_fenetrage.rs"
     Invoke-RustTest "verdict protocole client" "tools\gui\test_silence.rs"
     Invoke-RustTest "BKL max/provenance" "tools\smp\test_bkl_max.rs"
     Invoke-RustTest "commutation SMP" "tools\smp\test_commutation.rs"
@@ -95,6 +96,10 @@ try {
 
     Invoke-Step "ouverture de fenetre (source)" {
         & python .\tools\verifie-ouverture-fenetre.py
+    }
+
+    Invoke-Step "mutation d'etat de fenetre (source)" {
+        & python .\tools\verifie-mutations-fenetre.py
     }
 
     if (Test-Path ".\tools\verifie-protocole-gui.py") {

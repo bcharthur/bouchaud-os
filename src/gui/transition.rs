@@ -256,8 +256,8 @@ pub fn menu_bascule(menu: Rect, barre_taches: Rect) -> Rects {
 /// debord ne puisse pas etre oublie a un appelant.
 pub fn fenetre_bougee(cadre_avant: Rect, cadre_apres: Rect) -> Rects {
     ancien_puis_nouveau(
-        disposition::empreinte_avec_ombre(cadre_avant),
-        disposition::empreinte_avec_ombre(cadre_apres),
+        disposition::empreinte_fenetre_peinte(cadre_avant),
+        disposition::empreinte_fenetre_peinte(cadre_apres),
         Cible::Fenetre,
     )
 }
@@ -277,9 +277,9 @@ pub fn focus_transfere(
     barre_taches: Rect,
 ) -> Rects {
     let mut rects = Rects::vide();
-    rects.pousse(disposition::empreinte_avec_ombre(cadre_gagne), Cible::Fenetre);
+    rects.pousse(disposition::empreinte_fenetre_peinte(cadre_gagne), Cible::Fenetre);
     if let Some(cadre) = cadre_perdu {
-        rects.pousse(disposition::empreinte_avec_ombre(cadre), Cible::Fenetre);
+        rects.pousse(disposition::empreinte_fenetre_peinte(cadre), Cible::Fenetre);
     }
     // Les boutons de la barre des taches suivent le focus.
     rects.pousse(barre_taches, Cible::BarreTaches);
