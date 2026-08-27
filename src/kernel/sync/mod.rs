@@ -7,6 +7,7 @@
 mod spinlock;
 mod sleep_mutex;
 pub mod discipline;
+pub mod ordre_verrous;
 pub mod reveil;
 mod wait_queue;
 

@@ -76,6 +76,7 @@ try {
     Invoke-RustTest "cout des frames possedees" "tools\smp\test_pages_possedees.rs"
     Invoke-RustTest "cache de pages propres" "tools\smp\test_cache_pages.rs"
     Invoke-RustTest "discipline du gros verrou" "tools\smp\test_discipline_bkl.rs"
+    Invoke-RustTest "ordre des verrous du cache" "tools\smp\test_ordre_verrous.rs"
 
     $env:BO_HELLO_EXE = Join-Path $Tmp "bo-hello.exe"
     Invoke-Step "fixture PE32+" {
@@ -86,6 +87,10 @@ try {
 
     Invoke-Step "manifeste polices" {
         & python .\tools\gui\verifie-polices.py
+    }
+
+    Invoke-Step "ordre des verrous (source)" {
+        & python .\tools\verifie-ordre-verrous.py
     }
 
     if (Test-Path ".\tools\verifie-protocole-gui.py") {

@@ -1,4 +1,32 @@
 //! Physical page cache for immutable disk-backed, read-only mappings.
+//!
+//! # ORDRE DES VERROUS
+//!
+//! Ce module a deux niveaux de verrou, et un seul ordre est permis :
+//!
+//! ```text
+//!     CACHE  ->  Entry::state
+//! ```
+//!
+//! Jamais l'inverse. Un chemin qui tient `state` et demande `CACHE` pendant
+//! qu'un autre tient `CACHE` et demande `state` bloque les deux CPU pour
+//! toujours.
+//!
+//! Deux chemins publient un etat PUIS proposent la cle a la recuperation —
+//! `acquire` quand le chargement echoue, et `release` quand le dernier mapping
+//! tombe. Ils ne prenaient pas les deux verrous en meme temps : le garde
+//! d'etat etait un TEMPORAIRE, detruit a la fin de son instruction, donc
+//! relache avant `CACHE.lock()`. Il n'y avait pas d'interblocage.
+//!
+//! Mais la surete tenait alors a une regle de duree de vie des temporaires, pas
+//! a quelque chose de visible. Il suffisait de nommer le garde — un refactor
+//! ordinaire — pour transformer un code correct en interblocage SMP, sans que
+//! rien ne le signale.
+//!
+//! Les gardes sont donc desormais NOMMES et relaches explicitement avant toute
+//! prise de `CACHE`. L'ordre se lit au lieu de se deduire, et
+//! `tools/verifie-ordre-verrous.py` echoue si un chemin `state -> CACHE`
+//! reapparait.
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::Arc;
@@ -166,16 +194,23 @@ pub fn acquire(key: Key) -> Option<u64> {
                 None
             }
         });
-        *entry.state.lock() = match result {
+        // ORDRE DES VERROUS : le garde d'etat est NOMME et relache avant toute
+        // prise de `CACHE`. Voir l'en-tete du module.
+        let mut etat = entry.state.lock();
+        *etat = match result {
             Some(frame) => State::Present { frame, mappings: 1 },
             None => State::Failed,
         };
+        drop(etat);
+
         if result.is_none() {
             // Une entree en echec ne sera jamais referencee : elle rejoint
             // les candidats a la recuperation des maintenant.
             devient_recuperable();
             CACHE.lock().propose(key);
         }
+        // Reveiller APRES avoir tout publie : un dormeur reveille lit l'etat,
+        // et il ne doit pas pouvoir le lire avant qu'il soit ecrit.
         entry.waiters.wake_all();
         return result;
     }
@@ -222,15 +257,16 @@ pub fn release(key: Key) {
     let Some(entry) = entry else {
         panic!("clean page cache: release of unregistered key");
     };
-    let mut state = entry.state.lock();
-    let devenue_libre = if let State::Present { frame, mappings } = *state {
+    // ORDRE DES VERROUS : `state` est relache avant `CACHE`. Voir l'en-tete.
+    let mut etat = entry.state.lock();
+    let devenue_libre = if let State::Present { frame, mappings } = *etat {
         assert!(mappings != 0, "clean page cache: double release");
-        *state = State::Present { frame, mappings: mappings - 1 };
+        *etat = State::Present { frame, mappings: mappings - 1 };
         mappings == 1
     } else {
         panic!("clean page cache: release of non-present entry");
     };
-    drop(state);
+    drop(etat);
     drop(entry);
     if devenue_libre {
         devient_recuperable();
