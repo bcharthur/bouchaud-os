@@ -55,5 +55,7 @@ pub mod task;
 pub mod timer;
 #[path = "memory/vma.rs"]
 pub mod vma;
+#[path = "memory/frames_libres.rs"]
+pub mod frames_libres;
 #[path = "memory/virtual.rs"]
 pub mod vmm;

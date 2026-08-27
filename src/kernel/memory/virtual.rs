@@ -151,10 +151,18 @@ struct FrameAllocator {
     frees: u64,
     failures: u64,
     high_watermark: u64,
+    // BOUCHAUD_P2_FREE_FRAME_O1_V1
+    //
+    // Quelles frames sont DANS la liste libre, un bit chacune. La liste
+    // chainee reste la structure d'allocation ; ce bitmap n'est que le test
+    // d'appartenance, qui etait auparavant un parcours integral. Voir
+    // `kernel::frames_libres`.
+    libres: crate::kernel::frames_libres::FramesLibres,
 }
 
 static FRAMES: SpinLockIrq<FrameAllocator> = SpinLockIrq::new(FrameAllocator {
     regions: Vec::new(),
+    libres: crate::kernel::frames_libres::FramesLibres::neuf(),
     freed_head: None,
     total: 0,
     used: 0,
@@ -188,6 +196,7 @@ pub fn add_region(start: u64, end: u64) {
         .checked_add((end - start) / PAGE_SIZE)
         .expect("vmm: total frame accounting overflow");
     f.regions.push((start, end));
+    f.libres.couvre(start, end);
     FRAME_TOTAL_RELAXED.store(f.total, Ordering::Relaxed);
 }
 
@@ -198,6 +207,13 @@ pub fn alloc_frame() -> Option<u64> {
         let candidate = if let Some(p) = f.freed_head {
             let next = unsafe { *(memory::phys_to_virt(p) as *const u64) };
             f.freed_head = if next == FREE_LIST_END { None } else { Some(next) };
+            // La frame quitte la liste libre : le bit tombe AVANT qu'elle ne
+            // soit rendue a un appelant, sinon un `free` immediat passerait
+            // pour un double `free`.
+            assert!(
+                f.libres.marque_occupee(p),
+                "vmm: frame {p:#x} en tete de liste libre mais absente du bitmap",
+            );
             Some(p)
         } else {
             let mut found = None;
@@ -234,16 +250,37 @@ pub fn alloc_frame() -> Option<u64> {
 }
 
 /// Rend une frame a l'allocateur.
+// BOUCHAUD_P2_FREE_FRAME_O1_V1
+//
+// LE DEFAUT QUE CETTE FONCTION AVAIT
+// ----------------------------------
+// Le double `free` etait detecte en parcourant TOUTE la liste libre. Cette
+// liste est chainee dans les frames liberees elles-memes : chaque pas
+// dereference une page physique froide. Le cout d'un `free` etait donc
+// `O(frames libres)` defauts de cache, et la liste libre grandit avec l'age de
+// la session.
+//
+// Liberer R frames coutait `O(R x L)`. Un `madvise(DONTNEED)` de 16 Mio
+// (R = 4096) avec 100 000 frames libres, c'est 4 x 10^8 lectures memoire
+// froides — des dizaines de secondes sous TCG, LE GROS VERROU TENU. C'est la
+// tenue de 15 s attribuee a `madvise`, et l'explication de la degradation
+// progressive : plus la session dure, plus la liste libre est longue.
+//
+// L'assertion n'est pas supprimee — elle est rendue exacte et constante. Un
+// `free` d'une frame etrangere aux regions est desormais detecte lui aussi,
+// ce que le parcours ne voyait pas.
 pub fn free_frame(phys: u64) {
     let mut f = frames();
     let phys = phys & !(PAGE_SIZE - 1);
-    let mut cursor = f.freed_head;
-    while let Some(free) = cursor {
-        assert!(free != phys, "vmm: double free frame {phys:#x}");
-        let next = unsafe { *(memory::phys_to_virt(free) as *const u64) };
-        cursor = if next == FREE_LIST_END { None } else { Some(next) };
-    }
+    assert!(
+        f.libres.couverte(phys),
+        "vmm: free d'une frame {phys:#x} hors des regions de l'allocateur",
+    );
     assert!(f.used != 0, "vmm: frame accounting underflow for {phys:#x}");
+    assert!(
+        f.libres.marque_libre(phys),
+        "vmm: double free frame {phys:#x}",
+    );
     f.used -= 1;
     f.frees = f.frees.wrapping_add(1);
     unsafe {
