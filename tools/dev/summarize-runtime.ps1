@@ -66,6 +66,8 @@ foreach ($pattern in @(
     "\[GUI-INPUT\]",
     "\[BKL-MAX-HOLD\]",
     "\[BKL-STATS\]",
+    "\[BKL-SYSCALL\]",
+    "\[GUI-PRESENT\]",
     "\[SMP-SNAPSHOT\]",
     "\[SMP-STALL\]"
 )) {
@@ -115,6 +117,17 @@ function Deltas([string]$Pattern, [string]$Titre, [string[]]$Cles) {
             Write-Host ("    {0,-26} delta={1,-12} total={2}" -f $cle, $d, $apres[$cle])
         }
     }
+}
+
+Write-Host "`n=== BKL PAR APPEL SYSTEME ===" -ForegroundColor Cyan
+# Un total ne dit pas OU. Cette section montre, fenetre par fenetre, quels
+# appels systeme ont reellement detenu le gros verrou. C'est la mesure qui
+# permet d'affirmer un avant/apres chiffre plutot qu'une impression.
+$bklSyscall = @(Matching "\[BKL-SYSCALL\]")
+if ($bklSyscall.Count -eq 0) {
+    Write-Host "aucune ligne [BKL-SYSCALL] : noyau anterieur, ou aucun appel n'a tenu le verrou"
+} else {
+    $bklSyscall | Select-Object -Last 5 | ForEach-Object { Write-Host $_.Line.Trim() }
 }
 
 Write-Host "`n=== GATE 1B / 1C : COMPOSITEUR ===" -ForegroundColor Cyan
