@@ -117,6 +117,43 @@ pub fn curseur_deplace(avant: Option<(i32, i32)>, apres: (i32, i32)) -> Rects {
     rects
 }
 
+// BOUCHAUD_GUI_CURSEUR_ADAPTATIF_V1
+//
+// LE CURSEUR EST DE L'ETAT DERIVE
+// -------------------------------
+// `draw_cursor` lit le pixel du backbuffer SOUS son point chaud et en deduit
+// sa luminance : sur un fond clair il se peint noir cercle de blanc, sur un
+// fond sombre l'inverse. Sa couleur est donc une fonction de ce qu'il y a
+// dessous — c'est-a-dire de l'etat compose, pas de l'etat du bureau.
+//
+// Consequence : si un degat repeint ce qu'il y a sous le point chaud, la
+// fleche entiere change de couleur, y compris les pixels que ce degat ne
+// couvre pas. Un rectangle qui ne recouvre qu'une partie de l'empreinte
+// laisse alors un curseur bicolore, moitie noir moitie blanc.
+//
+// La regle est donc : des qu'un degat touche l'empreinte du curseur,
+// l'empreinte ENTIERE est invalidee. Cela coute au plus un rectangle de
+// 14 x 22 par trame, et seulement quand quelque chose bouge sous la fleche.
+
+/// L'empreinte a repeindre quand un degat touche le curseur, s'il y a lieu.
+///
+/// * QUEL ETAT : la couleur du curseur, deduite du pixel compose sous son
+///   point chaud.
+/// * QUELS PIXELS : toute la fleche.
+/// * QUI INVALIDE L'ANCIEN et LE NOUVEAU : ici, et personne d'autre. Le degat
+///   qui a change le fond ne connait pas cette dependance.
+pub fn recoloration_curseur(regions: &[Rect], souris: (i32, i32)) -> Rects {
+    let empreinte = disposition::curseur(souris.0, souris.1);
+    let mut rects = Rects::vide();
+    for region in regions.iter() {
+        if !region.intersecte(&empreinte).vide() {
+            rects.pousse(empreinte);
+            break;
+        }
+    }
+    rects
+}
+
 // ─── Menu ──────────────────────────────────────────────────────────────────
 
 /// Le survol passe d'une ligne du menu a une autre, ou entre et sort du menu.

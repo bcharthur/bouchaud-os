@@ -88,11 +88,38 @@ fn filigrane() -> Rect {
     Rect::neuf(L as i32 / 2 - 60, H as i32 - 64, 120, 24)
 }
 
-fn icone(index: usize) -> Rect {
-    Rect::neuf(8, 20 + index as i32 * 64, 56, 60)
+const ICONES: usize = 3;
+
+/// Largeur du libelle de l'icone `index`. La deuxieme deborde de son carre,
+/// comme « Calculatrice » deborde du sien a l'ecran.
+fn largeur_libelle(index: usize) -> i32 {
+    [40, 72, 30][index]
 }
 
-const ICONES: usize = 3;
+fn icone(position: (i32, i32)) -> Rect {
+    Rect::neuf(position.0, position.1, 56, 60)
+}
+
+/// Ce que l'icone peint reellement : le carre, son ombre, et le libelle —
+/// qui passe A GAUCHE du carre des qu'il est plus large que lui.
+fn empreinte_icone(index: usize, position: (i32, i32)) -> Rect {
+    let r = icone(position);
+    let carre = 40i32;
+    let vx = r.x + (r.largeur as i32 - carre) / 2;
+    let lw = largeur_libelle(index);
+    let lx = (r.x + (r.largeur as i32 - lw) / 2).max(0);
+    let ly = r.y + carre + 3;
+
+    let gauche = r.x.min(lx);
+    let haut = r.y;
+    let droite = (r.droite() as i32).max(vx + 3 + carre).max(lx + lw + 2);
+    let bas = (r.bas() as i32).max(r.y + 3 + carre).max(ly + 16);
+    Rect::neuf(gauche, haut, (droite - gauche) as u32, (bas - haut) as u32)
+}
+
+fn positions_initiales() -> [(i32, i32); ICONES] {
+    [(8, 20), (8, 84), (8, 148)]
+}
 
 fn bouton_demarrer() -> Rect {
     Rect::neuf(2, H as i32 - HAUTEUR_BARRE as i32 + 1, 38, 9)
@@ -172,6 +199,7 @@ struct Etat {
     survol: Option<usize>,
     /// L'ordre EST le z-order. La derniere non minimisee a le focus.
     fenetres: alloc::vec::Vec<Fen>,
+    icones: [(i32, i32); ICONES],
     horloge: u32,
     stats: u32,
 }
@@ -204,6 +232,7 @@ fn bureau_vide() -> Etat {
         menu_ouvert: false,
         survol: None,
         fenetres: alloc::vec::Vec::new(),
+        icones: positions_initiales(),
         horloge: 0,
         stats: 0,
     }
@@ -292,11 +321,22 @@ fn peins_filigrane(toile: &mut Toile) {
     toile.remplis(filigrane(), 0x33_47_6b);
 }
 
-fn peins_icone(toile: &mut Toile, index: usize) {
-    let r = icone(index);
-    // Ombre portee : dans les bornes elargies de 6 pixels du calque.
-    toile.remplis(Rect::neuf(r.x + 3, r.y + 3, r.largeur, r.hauteur), 0x06_09_0f);
-    toile.remplis(r, 0x20_50_20 + index as u32 * 0x10_10_10);
+fn peins_icone(toile: &mut Toile, index: usize, etat: &Etat) {
+    let position = etat.icones[index];
+    let r = icone(position);
+    let carre = 40i32;
+    let vx = r.x + (r.largeur as i32 - carre) / 2;
+    toile.remplis(Rect::neuf(vx + 3, r.y + 3, carre as u32, carre as u32), 0x06_09_0f);
+    toile.remplis(
+        Rect::neuf(vx, r.y, carre as u32, carre as u32),
+        0x20_50_20 + index as u32 * 0x10_10_10,
+    );
+    // Libelle, centre sur le carre mais pas contraint par lui.
+    let lw = largeur_libelle(index);
+    let lx = (r.x + (r.largeur as i32 - lw) / 2).max(0);
+    let ly = r.y + carre + 3;
+    toile.remplis(Rect::neuf(lx + 1, ly + 1, lw as u32, 14), 0x00_00_00);
+    toile.remplis(Rect::neuf(lx, ly, lw as u32, 14), 0xe8_f4_fd);
 }
 
 fn peins_barre_haute(toile: &mut Toile, etat: &Etat) {
@@ -375,13 +415,20 @@ fn peins_barre_taches(toile: &mut Toile, etat: &Etat) {
 
 fn peins_curseur(toile: &mut Toile, etat: &Etat) {
     let (x, y) = etat.souris;
-    // Fleche : 12 colonnes, 19 lignes, dans l'empreinte 14x22 annoncee.
+    // BOUCHAUD_GUI_CURSEUR_ADAPTATIF_V1 : la couleur de la fleche est lue SOUS
+    // son point chaud, exactement comme `widgets::draw_cursor`. C'est de l'etat
+    // derive du tampon compose, et c'est ce qui rend un degat partiel visible.
+    let px = (x.max(0) as usize).min(L - 1);
+    let py = (y.max(0) as usize).min(H - 1);
+    let fond = toile.pixels[py * L + px];
+    let luminance = ((fond >> 16 & 0xff) * 299 + (fond >> 8 & 0xff) * 587 + (fond & 0xff) * 114) / 1000;
+    let couleur = if luminance > 140 { 0x00_00_00 } else { 0xff_ff_ff };
     for ligne in 0..19i32 {
         let largeur = if ligne < 7 { ligne + 1 } else { 19 - ligne };
         if largeur <= 0 {
             continue;
         }
-        toile.remplis(Rect::neuf(x, y + ligne, largeur as u32, 1), 0xff_ff_ff);
+        toile.remplis(Rect::neuf(x, y + ligne, largeur as u32, 1), couleur);
     }
 }
 
@@ -392,10 +439,9 @@ fn plan(etat: &Etat) -> alloc::vec::Vec<Calque> {
     calques.push(Calque::plein(Element::Fond, ecran()));
     calques.push(Calque::transparent(Element::Filigrane, filigrane()));
     for index in 0..ICONES {
-        let r = icone(index);
         calques.push(Calque::transparent(
             Element::Icone(index),
-            Rect::neuf(r.x, r.y, r.largeur + 6, r.hauteur + 6),
+            empreinte_icone(index, etat.icones[index]),
         ));
     }
     calques.push(Calque::plein(Element::BarreHaute, barre_haute()));
@@ -428,7 +474,7 @@ fn peins_calque(toile: &mut Toile, calque: &Calque, etat: &Etat) {
     match calque.element {
         Element::Fond => peins_fond(toile),
         Element::Filigrane => peins_filigrane(toile),
-        Element::Icone(index) => peins_icone(toile, index),
+        Element::Icone(index) => peins_icone(toile, index, etat),
         Element::BarreHaute => peins_barre_haute(toile, etat),
         Element::Fenetre(index) => {
             if let Some(fen) = etat.fenetres.get(index) {
@@ -493,6 +539,13 @@ fn quel_calque(etat: &Etat, x: usize, y: usize) -> alloc::string::String {
 /// annonces, comparee au rendu complet de B sur TOUT l'ecran.
 #[track_caller]
 fn oracle(nom: &str, avant: &Etat, apres: &Etat, degats: &[Rect]) {
+    // Le compositeur applique cette regle une fois par trame, sur les degats
+    // accumules. L'oracle fait donc de meme, sinon il testerait autre chose.
+    let mut degats = degats.to_vec();
+    let recoloration = liste(transition::recoloration_curseur(&degats, apres.souris));
+    degats.extend(recoloration);
+    let degats = &degats[..];
+
     let mut test = rendu_complet(avant);
     rendu_partiel(&mut test, apres, degats);
     let reference = rendu_complet(apres);
@@ -942,6 +995,109 @@ fn un_client_agrandit_sa_tache() {
     // L'union : ce qui etait peint, et ce qui l'est maintenant.
     let degats = alloc::vec![a.fenetres[0].tache_ecran(), b.fenetres[0].tache_ecran()];
     oracle("le client agrandit sa tache", &a, &b, &degats);
+}
+
+// ─── Icones du bureau ──────────────────────────────────────────────────────
+
+fn deplace_icone(etat: &Etat, index: usize, dx: i32, dy: i32) -> Etat {
+    let mut suivant = etat.clone();
+    suivant.icones[index].0 += dx;
+    suivant.icones[index].1 += dy;
+    suivant
+}
+
+/// Le libelle deborde du carre de l'icone : c'est le cas qui compte.
+#[test]
+fn une_icone_au_libelle_large_est_deplacee() {
+    let a = bureau_vide();
+    assert!(
+        largeur_libelle(1) > icone(a.icones[1]).largeur as i32,
+        "l'icone 1 doit avoir un libelle plus large que son carre"
+    );
+    for (dx, dy) in [(1, 0), (0, 1), (37, 24), (-4, 40)] {
+        let b = deplace_icone(&a, 1, dx, dy);
+        let degats = alloc::vec![
+            empreinte_icone(1, a.icones[1]),
+            empreinte_icone(1, b.icones[1]),
+        ];
+        oracle(&alloc::format!("icone large ({dx}, {dy})"), &a, &b, &degats);
+    }
+}
+
+#[test]
+fn une_icone_au_libelle_etroit_est_deplacee() {
+    let a = bureau_vide();
+    let b = deplace_icone(&a, 2, 30, 20);
+    let degats = alloc::vec![
+        empreinte_icone(2, a.icones[2]),
+        empreinte_icone(2, b.icones[2]),
+    ];
+    oracle("icone etroite deplacee", &a, &b, &degats);
+}
+
+// ─── Curseur adaptatif ─────────────────────────────────────────────────────
+//
+// `draw_cursor` lit le pixel sous son point chaud pour choisir sa couleur. Un
+// degat qui repeint ce pixel change donc TOUTE la fleche, y compris ce qu'il
+// ne couvre pas.
+
+/// Un bureau ou le curseur pose son point chaud sur une tache claire, plus
+/// petite que son empreinte.
+fn bureau_curseur_sur_tache_claire() -> Etat {
+    let mut etat = bureau_vide();
+    let mut fen = Fen::neuve(60, 40, 160, 110, 0x00_10_00);
+    fen.tache = Rect::neuf(10, 8, 24, 6);
+    fen.couleur_tache = 0xff_ff_ff;
+    etat.fenetres.push(fen);
+    let tache = etat.fenetres[0].tache_ecran();
+    etat.avec_souris(tache.x + 4, tache.y + 2)
+}
+
+#[test]
+fn le_fond_sous_le_point_chaud_change_de_luminance() {
+    let a = bureau_curseur_sur_tache_claire();
+    let mut b = a.clone();
+    b.fenetres[0].couleur_tache = 0x08_08_08;
+
+    let tache = b.fenetres[0].tache_ecran();
+    let empreinte = disposition::curseur(a.souris.0, a.souris.1);
+    assert!(
+        !tache.intersecte(&empreinte).vide() && tache.intersecte(&empreinte) != empreinte,
+        "la tache doit couvrir le point chaud SANS couvrir toute la fleche"
+    );
+
+    // Le client annonce exactement ce qu'il a repeint, et rien d'autre.
+    oracle("le fond sous le curseur s'assombrit", &a, &b, &alloc::vec![tache]);
+}
+
+#[test]
+fn le_fond_sous_le_point_chaud_s_eclaircit() {
+    let mut a = bureau_curseur_sur_tache_claire();
+    a.fenetres[0].couleur_tache = 0x08_08_08;
+    let mut b = a.clone();
+    b.fenetres[0].couleur_tache = 0xff_ff_ff;
+    let tache = b.fenetres[0].tache_ecran();
+    oracle("le fond sous le curseur s'eclaircit", &a, &b, &alloc::vec![tache]);
+}
+
+/// Le meme changement, mais loin du curseur : rien ne doit etre ajoute.
+#[test]
+fn un_fond_qui_change_loin_du_curseur_ne_touche_pas_la_fleche() {
+    let mut a = bureau_curseur_sur_tache_claire();
+    a = a.avec_souris(300, 200);
+    let mut b = a.clone();
+    b.fenetres[0].couleur_tache = 0x08_08_08;
+    let tache = b.fenetres[0].tache_ecran();
+    assert!(
+        tache
+            .intersecte(&disposition::curseur(a.souris.0, a.souris.1))
+            .vide()
+    );
+    assert!(
+        transition::recoloration_curseur(&[tache], a.souris).est_vide(),
+        "aucune recoloration ne doit etre demandee"
+    );
+    oracle("fond loin du curseur", &a, &b, &alloc::vec![tache]);
 }
 
 // ─── Barre du haut ─────────────────────────────────────────────────────────

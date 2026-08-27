@@ -95,6 +95,55 @@ pub(crate) fn draw_icone(index: usize) {
     draw_icon_at(index);
 }
 
+// BOUCHAUD_GUI_EMPREINTE_ICONE_V1
+//
+// CE QUE L'ICONE PEINT, par opposition a son rectangle.
+//
+// `icon_rect` fait 56 x 60. Le libelle, lui, est centre sur cette largeur mais
+// n'y est pas contraint : `lx = (r.x + (r.w - lw) / 2).max(0)`. Des que le
+// texte est plus large que l'icone — et « Calculatrice » l'est a 10 pixels —
+// `lx` passe A GAUCHE de `r.x` et le texte deborde des deux cotes.
+//
+// Le calque annoncait `r.w + 6` et `r.h + 6`, un debord vers la droite et le
+// bas seulement. Deux consequences, toutes deux visibles : un degat clippe
+// exactement sur ces bornes tronque le libelle, et deplacer une icone laisse
+// derriere elle les moities de texte qui sortaient des bornes.
+//
+// Ce que le calque annonce doit MAJORER ce qu'il peint. Cette fonction est donc
+// la seule reponse a « ou une icone met-elle des pixels ? » : le carre, son
+// ombre portee de 3 pixels, et le libelle avec la sienne d'un pixel.
+
+/// Empreinte reelle de l'icone `index`, libelle compris.
+pub(crate) fn empreinte_icone(index: usize) -> crate::gui::protocole::Rect {
+    let (label, _kind) = ICONS[index];
+    let r = icon_rect(index);
+    let vw = 40i32;
+    let vx = r.x + (r.w - vw) / 2;
+    let vy = r.y;
+
+    let lw = fb::text_width(label, 10.0, false) as i32;
+    let lx = (r.x + (r.w - lw) / 2).max(0);
+    let ly = vy + vw + 3;
+    // Hauteur majoree d'une ligne de 10 pixels : jambages et ombre comprises.
+    const HAUTEUR_LIBELLE: i32 = 16;
+
+    let gauche = r.x.min(lx);
+    let haut = r.y.min(vy);
+    let droite = (r.x + r.w)
+        .max(vx + 3 + vw)      // ombre portee du carre
+        .max(lx + lw + 2);     // libelle plus son ombre d'un pixel
+    let bas = (r.y + r.h)
+        .max(vy + 3 + vw)
+        .max(ly + HAUTEUR_LIBELLE);
+
+    crate::gui::protocole::Rect::neuf(
+        gauche,
+        haut,
+        (droite - gauche).max(0) as u32,
+        (bas - haut).max(0) as u32,
+    )
+}
+
 /// Une fenetre, focalisee ou non.
 pub(crate) fn draw_fenetre(w: &Win, focused: bool) {
     draw_window(w, focused);

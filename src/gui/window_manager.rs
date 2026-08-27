@@ -158,15 +158,9 @@ fn plan_de_scene(
         // Bornes elargies de 6 pixels : l'icone porte une ombre portee et un
         // libelle. Un calque qui deborde ses bornes laisse des trainees ;
         // l'inverse ne coute qu'un peu de travail.
-        let r = icon_rect(index);
         calques.push(Calque::transparent(
             Element::Icone(index),
-            Rect::neuf(
-                r.x,
-                r.y,
-                (r.w.max(0) as u32).saturating_add(6),
-                (r.h.max(0) as u32).saturating_add(6),
-            ),
+            widgets::empreinte_icone(index),
         ));
     }
 
@@ -547,11 +541,15 @@ fn boucle() {
                 }
                 sale = true;
             } else if let Some((idx, ox, oy, _, _)) = icon_drag {
-                degats.ajoute(Origine::Icone, depuis_widget(icon_rect(idx)));
+                // BOUCHAUD_GUI_EMPREINTE_ICONE_V1 : le libelle deborde de
+                // l'icone. C'est son empreinte, pas son rectangle, qu'il faut
+                // invalider — des deux cotes du deplacement.
+                let avant = widgets::empreinte_icone(idx);
                 let new_x = (mx - ox).max(0);
                 let new_y = (my - oy).max(BAR_H as i32);
                 unsafe { window::ICON_POSITIONS[idx] = (new_x, new_y); }
-                degats.ajoute(Origine::Icone, depuis_widget(icon_rect(idx)));
+                degats.ajoute(Origine::Icone, avant);
+                degats.ajoute(Origine::Icone, widgets::empreinte_icone(idx));
                 sale = true;
             }
         } else {
@@ -691,6 +689,18 @@ fn boucle() {
             // Une trame peut maintenant porter plusieurs rectangles eloignes.
             // Pour chaque rectangle, le MEME clip borne le dessin et la copie :
             // aucun pixel de backbuffer perime ne peut etre presente.
+            // BOUCHAUD_GUI_CURSEUR_ADAPTATIF_V1
+            //
+            // Derniere regle avant de composer, et elle doit l'etre : le
+            // curseur choisit sa couleur d'apres le pixel sous son point chaud.
+            // Tout degat qui repeint ce pixel change donc la fleche ENTIERE, y
+            // compris les parties qu'il ne couvre pas. On l'ajoute une fois que
+            // les degats de ce tour sont connus, jamais avant.
+            let recoloration = transition::recoloration_curseur(degats.regions(), (mx, my));
+            for rect in recoloration.iter() {
+                degats.ajoute(Origine::Curseur, rect);
+            }
+
             if !degats.vide() {
                 crate::kernel::timer::frame_start();
                 crate::gui::degats::note_trame(&degats);
