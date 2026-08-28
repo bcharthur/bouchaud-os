@@ -6,6 +6,7 @@
 
 mod spinlock;
 mod sleep_mutex;
+pub mod bkl_compte;
 pub mod discipline;
 pub mod ordre_verrous;
 pub mod reveil;

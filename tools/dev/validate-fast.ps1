@@ -74,6 +74,7 @@ try {
     Invoke-RustTest "echeances de reveil" "tools\smp\test_echeances.rs"
     Invoke-RustTest "verdict protocole client" "tools\gui\test_silence.rs"
     Invoke-RustTest "BKL max/provenance" "tools\smp\test_bkl_max.rs"
+    Invoke-RustTest "comptabilite du gros verrou" "tools\smp\test_bkl_comptes.rs"
     Invoke-RustTest "commutation SMP" "tools\smp\test_commutation.rs"
     Invoke-RustTest "profondeur BKL" "tools\smp\test_profondeur_bkl.rs"
     Invoke-RustTest "re-entree IRQ runqueue" "tools\smp\test_runqueue_irq.rs"
@@ -136,6 +137,14 @@ try {
 
     Invoke-Step "echeances de reveil (source)" {
         & python .\tools\verifie-echeances.py
+    }
+
+    Invoke-Step "attente du gros verrou (source)" {
+        & python .\tools\verifie-bkl-parking.py
+    }
+
+    Invoke-Step "comptabilite du gros verrou (source)" {
+        & python .\tools\verifie-bkl-comptes.py
     }
 
     if (Test-Path ".\tools\verifie-protocole-gui.py") {

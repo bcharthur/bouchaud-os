@@ -3990,6 +3990,42 @@ pub fn log_smp_load() {
         },
         max_site,
     ));
+    // BOUCHAUD_P0_BKL_COMPTABILITE_V1
+    //
+    // Les grandeurs sont SEPAREES, et leurs unites annoncees : les melanger
+    // est ce qui avait produit un `hold_pct` de 183 % sur un verrou exclusif.
+    //
+    //   tenue_ns    temps de muraille -- majore par la fenetre, comparable a elle
+    //   attente_ns  temps de CPU -- quatre coeurs qui attendent en cumulent quatre
+    //   reprise_ns  la part de l'attente subie apres une commutation
+    //
+    // `anomalies=0/0/0` est la CONDITION pour croire les trois premieres. Non
+    // nulles, elles disent ou le modele s'est decroche de la machine, au lieu
+    // de laisser un cumul absurde le suggerer.
+    let c = smp_lock::comptes();
+    let mut ventilation = String::new();
+    for cpu_id in 0..online.min(MAX_CPUS) {
+        let _ = core::fmt::Write::write_fmt(
+            &mut ventilation,
+            format_args!(
+                " c{}=[parks_sur={} wakes_recus={}]",
+                cpu_id,
+                smp_lock::parks_sur(cpu_id),
+                smp_lock::wakes_vers(cpu_id),
+            ),
+        );
+    }
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "[BKL-COMPTES] tenue_ns={} attente_ns={} reprise_ns={} reprise_max_ns={} \
+spins={} parks={} wake_ipis={} reveils_sans_acq={} liberations_migrees={} \
+anomalies={}/{}/{} proprietaire={}{}",
+        c.tenue_ns, c.attente_ns, c.reprise_ns, c.reprise_max_ns,
+        c.spins, c.parks, c.wake_ipis, c.reveils_sans_acquisition,
+        c.liberations_migrees,
+        c.sans_debut, c.sur_tenue, c.horloge_a_rebours,
+        Absent(c.proprietaire as u64),
+        ventilation,
+    ));
     let (_, _, backing_reads, backing_bytes) = crate::fs::backing::stats();
     let (cache_hits, readahead_hits) = crate::fs::backing::cache_stats();
     let readahead_pages = crate::fs::backing::readahead_pages();

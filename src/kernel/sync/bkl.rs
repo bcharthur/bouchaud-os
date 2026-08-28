@@ -17,6 +17,7 @@
 
 use core::hint::spin_loop;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use crate::kernel::sync::bkl_compte::Comptes;
 use x86_64::instructions::interrupts;
 
 pub const MAX_CPUS: usize = 16;
@@ -206,6 +207,13 @@ fn publie_si_plus_longue(cpu: usize, tenue: u64) {
         return;
     }
 
+    // Le CPU vient desormais de l'INTERVALLE, pas de l'appelant : il vaut
+    // `AUCUN` si la comptabilite s'est decrochee. Indexer avec serait un
+    // depassement de tableau -- on prefere une provenance absente a un panic.
+    if cpu >= MAX_CPUS {
+        return;
+    }
+
     // Un nouveau record est rare. Serialiser uniquement ce chemin garantit
     // l'invariant fondamental du seqlock : un seul writer a la fois.
     while MAX_TENUE_WRITER
@@ -243,8 +251,26 @@ static TOTAL_ACQUISITIONS: AtomicU64 = AtomicU64::new(0);
 /// 3 = `resume_after_schedule` (reprise d'une pile apres un changement de
 /// contexte). Un total seul ne dit pas OU passe le verrou ; ce detail-la, si.
 static ACQ_PAR_ORIGINE: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
-static ACQUIRED_AT_NS: [AtomicU64; MAX_CPUS] =
-    [const { AtomicU64::new(0) }; MAX_CPUS];
+
+// BOUCHAUD_P0_BKL_COMPTABILITE_V1
+//
+// L'INTERVALLE DE TENUE APPARTIENT AU VERROU, PAS A UN CPU
+// -------------------------------------------------------
+// Ici vivait `ACQUIRED_AT_NS: [AtomicU64; MAX_CPUS]` : un horodatage par CPU.
+// Le verrou est pourtant EXCLUSIF -- il n'y a jamais qu'une tenue en cours --
+// et la continuation qui le detient peut changer de CPU. Une case laissee non
+// nulle par une acquisition dont la liberation n'a pas eu lieu sur le meme CPU
+// restait en place, et une liberation SANS RAPPORT la consommait bien plus
+// tard : la duree publiee couvrait alors tout ce qui s'etait passe entre les
+// deux. C'est ce qui a produit `hold_pct=183 %` -- impossible pour un verrou
+// exclusif -- et une pointe de 29 secondes attribuee a `resume_after_schedule`.
+//
+// `Comptes` tient UN seul intervalle, celui du verrou. La sonde de liberation
+// s'executant avant que `OWNER` ne repasse a `FREE`, les intervalles factures
+// sont deux a deux disjoints : leur somme est majoree par le temps ecoule, et
+// `hold_pct <= 100` devient une propriete de la structure.
+// `tools/smp/test_bkl_comptes.rs` en fait un test, et falsifie l'ancien schema.
+static COMPTES: Comptes = Comptes::neuf();
 
 // BOUCHAUD_P1_BKL_PARK_WAKE_V1
 //
@@ -275,7 +301,6 @@ fn probe_note_acquire(cpu: usize, kind: u32) {
     TOTAL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
     crate::kernel::task::stall_site_tenue_reset();
     ACQ_PAR_ORIGINE[(kind as usize).min(3)].fetch_add(1, Ordering::Relaxed);
-    ACQUIRED_AT_NS[cpu].store(crate::kernel::timer::monotonic_ns(), Ordering::Relaxed);
     // GEN=0 signifie uniquement "transition de metadata". Le token OWNER
     // est deja installe par le CAS ; le PIT sait donc ignorer ce tres court
     // intervalle plutot que de fabriquer un faux snapshot coherent.
@@ -301,31 +326,45 @@ fn probe_note_acquire(cpu: usize, kind: u32) {
     TENUE_SITE_ACQ[cpu].store(site, Ordering::Relaxed);
     TENUE_ORIGINE[cpu].store(kind, Ordering::Relaxed);
     ACQ_PAR_APPEL[seau(syscall_nr)].fetch_add(1, Ordering::Relaxed);
+
+    // Le seau est fige ICI : c'est l'acquereur qui tiendra le verrou pendant
+    // tout l'intervalle, meme si une IRQ le preempte ensuite.
+    COMPTES.ouvre(
+        crate::kernel::timer::monotonic_ns(),
+        seau(syscall_nr),
+        cpu,
+        kind,
+    );
 }
 
 #[inline]
 fn probe_note_release(cpu: usize, kind: u32) {
     let now_ns = crate::kernel::timer::monotonic_ns();
-    let acquired = ACQUIRED_AT_NS[cpu].swap(0, Ordering::Relaxed);
-    let tenue = now_ns.saturating_sub(acquired);
-    TOTAL_HOLD_NS.fetch_add(tenue, Ordering::Relaxed);
-    if acquired != 0 {
+    // `ferme` ne rend une duree QUE si un intervalle etait reellement ouvert.
+    // Une liberation orpheline incremente un compteur d'anomalie et ne facture
+    // rien -- l'ancien code ajoutait `now - 0`, c'est-a-dire tout le temps
+    // ecoule depuis le demarrage, a chaque fois.
+    if let Some(t) = COMPTES.ferme(now_ns, cpu) {
+        TOTAL_HOLD_NS.fetch_add(t.ns, Ordering::Relaxed);
         // BOUCHAUD_P2_BKL_PAR_APPEL_V1 : l'appel systeme attribue est celui
         // note a l'ACQUISITION, pas celui en cours maintenant. Les deux
         // different quand une IRQ preempte, et c'est bien l'acquereur qui a
-        // tenu le verrou pendant tout l'intervalle.
-        let index = seau(TENUE_SYSCALL[cpu].load(Ordering::Relaxed));
-        HOLD_PAR_APPEL[index].fetch_add(tenue, Ordering::Relaxed);
+        // tenu le verrou pendant tout l'intervalle. Le seau voyage avec
+        // l'intervalle, et non dans une case indexee par le CPU qui libere :
+        // apres une migration, cette case-la decrit une AUTRE tenue.
+        let index = t.seau;
+        HOLD_PAR_APPEL[index].fetch_add(t.ns, Ordering::Relaxed);
         let mut record = MAX_HOLD_PAR_APPEL[index].load(Ordering::Relaxed);
-        while tenue > record {
+        while t.ns > record {
             match MAX_HOLD_PAR_APPEL[index].compare_exchange_weak(
-                record, tenue, Ordering::Relaxed, Ordering::Relaxed,
+                record, t.ns, Ordering::Relaxed, Ordering::Relaxed,
             ) {
                 Ok(_) => break,
                 Err(observe) => record = observe,
             }
         }
-        publie_si_plus_longue(cpu, tenue);
+        // La provenance est celle de l'ACQUEREUR : c'est lui qui a tenu.
+        publie_si_plus_longue(t.cpu_acquisition, t.ns);
     }
     let generation = PROBE_OWNER_GEN.load(Ordering::Acquire);
     PROBE_RELEASE_SEQ.fetch_add(1, Ordering::AcqRel);
@@ -396,10 +435,24 @@ const BKL_ACTIVE_SPINS: usize = 64;
 // Le `sti; hlt` ferme la derniere fenetre : un IPI arrive entre la pose du bit
 // et le `hlt` reste pendant dans l'APIC local, et l'ombre du `sti` garantit que
 // le `hlt` le prend au lieu de le perdre.
+///
+/// # Le CPU est relu ICI, apres le masquage
+///
+/// L'appelant capture son index de CPU avant sa boucle d'attente. Entre deux
+/// tours, les interruptions sont ACTIVES : une IPI de preemption peut commuter,
+/// et la pile noyau reprendre ailleurs. L'index capture designe alors un AUTRE
+/// coeur -- et poser le bit d'un autre coeur dans `PARKED` avant de s'arreter
+/// est un reveil perdu par construction : le liberateur reveille celui dont le
+/// bit est pose, jamais celui qui dort. Le dormeur ne repart qu'a la prochaine
+/// interruption sans rapport, ce qui se compte en secondes.
+///
+/// `prepare_lock_park` commence par un `cli`. Apres lui, ce CPU ne peut plus
+/// changer sous nos pieds : c'est le seul endroit ou lire l'index soit sur.
 #[inline]
-fn wait_for_owner_change(cpu: usize, active_spins: &mut usize) {
+fn wait_for_owner_change(active_spins: &mut usize) {
     if *active_spins < BKL_ACTIVE_SPINS {
         *active_spins += 1;
+        COMPTES.note_spin();
         spin_loop();
         return;
     }
@@ -410,15 +463,18 @@ fn wait_for_owner_change(cpu: usize, active_spins: &mut usize) {
     // Dans ce cas rare on conserve le spin actif : un tel contexte ne peut pas
     // dormir, et il n'a donc pas besoin d'etre reveille.
     if !interrupts::are_enabled() {
+        COMPTES.note_spin();
         spin_loop();
         return;
     }
 
-    let bit = 1u64 << cpu;
     crate::arch::x86_64::cpu::prepare_lock_park();
+    let cpu = cpu();
+    let bit = 1u64 << cpu;
     PARKED.fetch_or(bit, Ordering::SeqCst);
 
-    if OWNER.load(Ordering::SeqCst) == FREE {
+    let owner = OWNER.load(Ordering::SeqCst);
+    if owner == FREE {
         // Libere entre le spin et la publication : repartir tout de suite
         // plutot que dormir en attendant un reveil qui n'aura plus lieu.
         PARKED.fetch_and(!bit, Ordering::SeqCst);
@@ -427,8 +483,31 @@ fn wait_for_owner_change(cpu: usize, active_spins: &mut usize) {
     }
 
     TOTAL_PARKS.fetch_add(1, Ordering::Relaxed);
+    // Sur QUI on s'arrete. Un proprietaire qui domine cette ventilation est le
+    // detenteur a instrumenter ; une repartition plate est de la contention.
+    COMPTES.note_park(owner.wrapping_sub(1));
+    PARKS_DEPUIS_ACQUISITION[cpu].fetch_add(1, Ordering::Relaxed);
     crate::arch::x86_64::cpu::commit_lock_park();
     PARKED.fetch_and(!bit, Ordering::SeqCst);
+}
+
+/// Parkings subis par ce CPU depuis sa derniere acquisition reussie.
+///
+/// Au-dela du premier, chacun est un reveil qui n'a servi a rien : le CPU a
+/// ete rappele, n'a pas obtenu le verrou, et s'est rendormi. C'est la mesure du
+/// troupeau -- `wake_parked_waiters` reveille tous les gares, un seul acquiert.
+static PARKS_DEPUIS_ACQUISITION: [AtomicU64; MAX_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// Solde les parkings de ce CPU au moment ou il obtient enfin le verrou.
+///
+/// Le PREMIER parking d'une attente a servi : il a mene a cette acquisition.
+/// Chacun des suivants est un reveil qui n'a rien produit -- le CPU a ete
+/// rappele, un autre a gagne, il s'est rendormi.
+#[inline]
+fn solde_parkings(cpu: usize) {
+    let parks = PARKS_DEPUIS_ACQUISITION[cpu].swap(0, Ordering::Relaxed);
+    COMPTES.note_reveils_improductifs(parks.saturating_sub(1));
 }
 
 /// Rappelle les CPU arretes sur ce verrou. A appeler APRES `OWNER <- FREE`.
@@ -453,6 +532,7 @@ fn wake_parked_waiters(releasing_cpu: usize) {
         let target = restants.trailing_zeros() as usize;
         restants &= restants - 1;
         TOTAL_WAKE_IPIS.fetch_add(1, Ordering::Relaxed);
+        COMPTES.note_wake(target);
         crate::arch::x86_64::cpu::wake_parked_cpu(target);
     }
 }
@@ -515,6 +595,12 @@ impl Drop for KernelGuard {
         // et provoque exactement: "smp_lock: release sans acquisition".
         // La profondeur BKL suit la continuation; son Drop doit donc liberer le
         // CPU physique/logique sur lequel cette continuation s'execute maintenant.
+        // Masquer AVANT de lire l'index : sans cela une IRQ pourrait commuter
+        // entre la lecture et la liberation, et `release_one` rendrait le
+        // verrou au nom d'un CPU qui ne le detient pas. Le garde interne de
+        // `release_one` s'imbrique sans dommage : chacun restaure l'etat qu'il
+        // a trouve.
+        let _irq = LocalIrqGuard::acquire();
         let release_cpu = cpu();
         {
             let owner = OWNER.load(Ordering::Relaxed);
@@ -591,8 +677,6 @@ fn release_one(cpu: usize) {
 }
 
 pub fn enter() -> KernelGuard {
-    let cpu = cpu();
-    let mine = token(cpu);
     let mut active_spins = 0usize;
     let wait_start = crate::kernel::timer::monotonic_ns();
 
@@ -600,6 +684,19 @@ pub fn enter() -> KernelGuard {
         // Ne masquer les IRQ que pour le snapshot + la transition locale.
         {
             let _irq = LocalIrqGuard::acquire();
+            // BOUCHAUD_P0_BKL_CPU_SOUS_MASQUE_V1
+            //
+            // L'index du CPU est relu a CHAQUE tour, sous interruptions
+            // masquees, et non capture une fois avant la boucle. Entre deux
+            // tours les interruptions sont actives : une IPI de preemption
+            // peut commuter, et cette pile noyau reprendre sur un autre coeur.
+            // L'index capture designerait alors un CPU etranger -- `OWNER`
+            // recevrait SON jeton pendant que `DEPTH` serait pose sur le
+            // notre. Les deux moities de l'etat du verrou parleraient de deux
+            // coeurs differents, et la liberation suivante trouverait
+            // « release sans acquisition ».
+            let cpu = cpu();
+            let mine = token(cpu);
             let owner = OWNER.load(Ordering::Acquire);
 
             if owner == mine {
@@ -624,6 +721,7 @@ pub fn enter() -> KernelGuard {
                 enregistreur::note(
                     enregistreur::ENTER, cpu, FREE, mine, avant, 1, usize::MAX, 0,
                 );
+                solde_parkings(cpu);
                 note_attente(
                     TENUE_SYSCALL[cpu].load(Ordering::Relaxed),
                     crate::kernel::timer::monotonic_ns().saturating_sub(wait_start),
@@ -633,16 +731,18 @@ pub fn enter() -> KernelGuard {
         }
 
         // Spin court puis HLT : ne plus bruler un coeur entier sur contention.
-        wait_for_owner_change(cpu, &mut active_spins);
+        wait_for_owner_change(&mut active_spins);
     }
 }
 
 /// Variante non bloquante, utile aux IPI de preemption : un IPI ne doit pas
 /// immobiliser un coeur utilisateur entier si un autre CPU est deja dans le noyau.
 pub fn try_enter() -> Option<KernelGuard> {
+    // Masquer AVANT de lire l'index : une IRQ entre les deux pourrait commuter
+    // et faire reprendre cette pile ailleurs. Voir `enter`.
+    let _irq = LocalIrqGuard::acquire();
     let cpu = cpu();
     let mine = token(cpu);
-    let _irq = LocalIrqGuard::acquire();
 
     let owner = OWNER.load(Ordering::Acquire);
     if owner == mine {
@@ -695,9 +795,10 @@ pub fn try_enter() -> Option<KernelGuard> {
 /// c'est la reponse « pas maintenant », que l'appelant traduit en preemption
 /// differee.
 pub fn try_enter_depuis_zero() -> Option<KernelGuard> {
+    // Masquer AVANT de lire l'index, comme `enter` et `try_enter`.
+    let _irq = LocalIrqGuard::acquire();
     let cpu = cpu();
     let mine = token(cpu);
-    let _irq = LocalIrqGuard::acquire();
 
     // Un `OWNER` non libre couvre les deux cas de refus d'un seul test : un
     // autre CPU le detient, ou c'est nous -- et nous, c'est precisement le cas
@@ -732,14 +833,14 @@ pub fn try_enter_depuis_zero() -> Option<KernelGuard> {
 /// « release sans acquisition ». La victime n'est alors pas le coupable, et
 /// c'est ce qui rendait ce panic si difficile a attribuer.
 pub fn profondeur_locale() -> usize {
-    let cpu = cpu();
     let _irq = LocalIrqGuard::acquire();
+    let cpu = cpu();
     DEPTH[cpu].load(Ordering::Relaxed)
 }
 
 pub fn held_by_current_cpu() -> bool {
-    let cpu = cpu();
     let _irq = LocalIrqGuard::acquire();
+    let cpu = cpu();
     OWNER.load(Ordering::Acquire) == token(cpu)
         && DEPTH[cpu].load(Ordering::Relaxed) > 0
 }
@@ -747,13 +848,16 @@ pub fn held_by_current_cpu() -> bool {
 /// Libere completement le BKL avant un switch de contexte et rend la profondeur
 /// a restaurer lorsque cette pile noyau reprendra.
 pub fn suspend_for_schedule() -> usize {
-    let cpu = cpu();
-    let mine = token(cpu);
-
     // C'etait la race observee : auparavant DEPTH passait a 0 avant OWNER,
     // avec IRQ encore actives. Le PIT pouvait alors entrer reentrant, puis
     // liberer OWNER avant notre assertion.
+    //
+    // L'index du CPU se lit APRES le masquage, pour la meme raison qu'ailleurs
+    // dans ce fichier : lu avant, une commutation entre les deux ferait
+    // suspendre au nom d'un coeur qui ne detient rien.
     let _irq = LocalIrqGuard::acquire();
+    let cpu = cpu();
+    let mine = token(cpu);
 
     let depth = DEPTH[cpu].load(Ordering::Relaxed);
     if depth == 0 {
@@ -788,12 +892,12 @@ pub fn resume_after_schedule(depth: usize) {
         return;
     }
 
-    let cpu = cpu();
-    let mine = token(cpu);
     let wait_start = crate::kernel::timer::monotonic_ns();
     let mut spins = 0usize;
 
     {
+        let _irq = LocalIrqGuard::acquire();
+        let cpu = cpu();
         let owner = OWNER.load(Ordering::Relaxed);
         enregistreur::note(
             enregistreur::RESUME_BEGIN,
@@ -810,6 +914,12 @@ pub fn resume_after_schedule(depth: usize) {
     loop {
         {
             let _irq = LocalIrqGuard::acquire();
+            // Relu a chaque tour, sous masque. Une pile REPRISE est justement
+            // celle qui vient de changer de coeur : capturer l'index une fois
+            // avant la boucle, alors que l'attente ci-dessous peut a son tour
+            // etre preemptee, est la faute la plus facile a commettre ici.
+            let cpu = cpu();
+            let mine = token(cpu);
 
             if OWNER
                 .compare_exchange(FREE, mine, Ordering::AcqRel, Ordering::Acquire)
@@ -824,10 +934,14 @@ pub fn resume_after_schedule(depth: usize) {
                     enregistreur::RESUME_OK, cpu, FREE, mine,
                     avant, depth, usize::MAX, depth as u64,
                 );
-                note_attente(
-                    TENUE_SYSCALL[cpu].load(Ordering::Relaxed),
-                    crate::kernel::timer::monotonic_ns().saturating_sub(wait_start),
-                );
+                solde_parkings(cpu);
+                let attente =
+                    crate::kernel::timer::monotonic_ns().saturating_sub(wait_start);
+                note_attente(TENUE_SYSCALL[cpu].load(Ordering::Relaxed), attente);
+                // La MEME attente, isolee : c'est la reprise apres commutation
+                // qu'on soupconne de durer des secondes, et un cumul global la
+                // noierait dans celui de tous les `enter` du systeme.
+                COMPTES.note_reprise(attente);
                 return;
             }
         }
@@ -842,29 +956,27 @@ pub fn resume_after_schedule(depth: usize) {
         // liberation appelle `wake_parked_waiters`, que ce soit par
         // `release_one` ou par `suspend_for_schedule`. Un CPU inscrit dans
         // `PARKED` est donc TOUJOURS reveille, et le protocole de publication
-        // de `wait_for_owner_change` ferme la course du reveil perdu.
+        // ci-dessous ferme la course du reveil perdu.
         //
         // Le prix, lui, etait bien reel. Sous TCG les quatre vCPU se partagent
-        // les coeurs de l'hote : un vCPU qui tourne a vide ne perd pas
-        // seulement son temps, il VOLE celui dont le DETENTEUR a besoin pour
-        // finir. Plus les autres attendent, plus il tient -- c'est la
-        // pathologie du detenteur preempte, et le runtime la montrait telle
-        // quelle :
+        // les coeurs de l'hote : un vCPU qui tourne a vide vole le temps dont
+        // le DETENTEUR a besoin pour finir. Plus il attend, plus il tient. Le
+        // runtime le montrait sans ambiguite :
         //
         //     [SMP-PROV] owner=1 held=690ms depth=1 syscall=poll/attente
         //     [BKL-MAX-HOLD] ns=29562372510 origine=resume_after_schedule
         //     window_ns=11353070412   <- une fenetre de 5 s en a pris 11
         //     [gui] client actif 0 trames (silence 61818 ms)
         //
-        // Une tenue de 690 ms, une pointe annoncee a 29 secondes, et le
-        // compositeur muet pendant une minute : c'est le figement ressenti au
-        // defilement.
+        // Une tenue de 690 ms, une pointe a 29 secondes, et le compositeur
+        // muet pendant une minute : c'est le figement ressenti au defilement.
         //
         // `wait_for_owner_change` garde un court spin actif -- une reprise est
-        // le plus souvent immediate -- puis se gare. Il refuse de lui-meme de
-        // dormir dans un contexte a interruptions masquees, ou dormir serait
-        // fatal.
-        wait_for_owner_change(cpu, &mut spins);
+        // le plus souvent immediate, le verrou vient d'etre relache par
+        // nous-memes -- puis se gare. Il refuse de lui-meme de dormir dans un
+        // contexte a interruptions masquees, ou dormir serait fatal, et relit
+        // l'index de son CPU une fois les interruptions masquees.
+        wait_for_owner_change(&mut spins);
     }
 }
 
@@ -895,6 +1007,78 @@ pub fn plus_longue_tenue() -> (u64, u32) {
         }
         spin_loop();
     }
+}
+
+/// Les grandeurs de la comptabilite du verrou, chacune avec son unite.
+///
+/// Elles ne se comparent PAS entre elles, et c'est tout l'interet de les
+/// separer : `tenue_ns` est du temps de muraille, majore par la fenetre ;
+/// `attente_ns` et `reprise_ns` sont du temps de CPU, qu'un cumul sur quatre
+/// coeurs peut legitimement porter au quadruple de la fenetre ; le reste
+/// compte des evenements. Les avoir confondues est ce qui a produit un
+/// `hold_pct` de 183 % sur un verrou exclusif.
+pub struct ComptesBkl {
+    /// Temps REELLEMENT proprietaire. Intervalles disjoints par construction :
+    /// `tenue_ns <= temps ecoule`, toujours.
+    pub tenue_ns: u64,
+    /// Temps passe a attendre avant d'acquerir, tous CPU confondus.
+    pub attente_ns: u64,
+    /// La part de cette attente subie par une pile REPRISE apres commutation.
+    pub reprise_ns: u64,
+    /// La plus longue attente unique dans `resume_after_schedule`.
+    pub reprise_max_ns: u64,
+    pub spins: u64,
+    pub parks: u64,
+    pub wake_ipis: u64,
+    /// Reveils qui n'ont pas abouti a une acquisition. Proche de `wake_ipis`,
+    /// c'est un troupeau : on reveille tout le monde pour un seul gagnant.
+    pub reveils_sans_acquisition: u64,
+    /// Tenues fermees par un autre CPU que celui qui les a ouvertes. Non nul,
+    /// c'est la preuve directe qu'une continuation a migre verrou en main --
+    /// exactement ce que l'ancienne comptabilite par CPU ne pouvait pas voir.
+    pub liberations_migrees: u64,
+    /// Les trois anomalies. Non nulles, les durees ci-dessus ne decrivent plus
+    /// la machine, et il faut les lire comme telles au lieu d'y croire.
+    pub sans_debut: u64,
+    pub sur_tenue: u64,
+    pub horloge_a_rebours: u64,
+    /// CPU proprietaire a l'instant du releve, ou `usize::MAX`.
+    pub proprietaire: usize,
+}
+
+/// Instantane de la comptabilite. Aucune serialisation : c'est du diagnostic,
+/// et un compteur lu une nanoseconde trop tot ne change aucune conclusion.
+pub fn comptes() -> ComptesBkl {
+    let (sans_debut, sur_tenue, horloge_a_rebours) = COMPTES.anomalies();
+    ComptesBkl {
+        tenue_ns: COMPTES.tenue_ns(),
+        attente_ns: COMPTES.attente_ns(),
+        reprise_ns: COMPTES.reprise_ns(),
+        reprise_max_ns: COMPTES.reprise_max_ns(),
+        spins: COMPTES.spins(),
+        parks: COMPTES.parks(),
+        wake_ipis: COMPTES.wake_ipis(),
+        reveils_sans_acquisition: COMPTES.reveils_sans_acquisition(),
+        liberations_migrees: COMPTES.liberations_migrees(),
+        sans_debut,
+        sur_tenue,
+        horloge_a_rebours,
+        proprietaire: COMPTES.proprietaire(),
+    }
+}
+
+/// Parkings subis en attendant que `cpu` rende le verrou.
+///
+/// Repond a « sur QUI attend-on ». Un coeur qui domine cette ventilation est
+/// le detenteur a instrumenter ; une repartition plate est de la contention
+/// ordinaire, et se traite autrement.
+pub fn parks_sur(cpu: usize) -> u64 {
+    COMPTES.parks_sur(cpu)
+}
+
+/// IPI de reveil recus par `cpu`. Repond a « QUI paie les reveils ».
+pub fn wakes_vers(cpu: usize) -> u64 {
+    COMPTES.wakes_vers(cpu)
 }
 
 /// Provenance de la plus longue tenue : (cpu, tache, syscall, phase, site
