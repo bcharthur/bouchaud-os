@@ -120,6 +120,7 @@ pub struct Comptes {
 
     // --- des evenements ---
     spins: AtomicU64,
+    spins_irq_masquees: AtomicU64,
     parks: AtomicU64,
     wake_ipis: AtomicU64,
     reveils_sans_acquisition: AtomicU64,
@@ -170,6 +171,7 @@ impl Comptes {
             reprise_ns: AtomicU64::new(0),
             reprise_max_ns: AtomicU64::new(0),
             spins: AtomicU64::new(0),
+            spins_irq_masquees: AtomicU64::new(0),
             parks: AtomicU64::new(0),
             wake_ipis: AtomicU64::new(0),
             reveils_sans_acquisition: AtomicU64::new(0),
@@ -312,6 +314,21 @@ impl Comptes {
         self.spins.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Un tour d'attente qui n'a PAS PU se garer : le contexte avait les
+    /// interruptions masquees, et un `sti; hlt` y serait fatal.
+    ///
+    /// Ce compteur existe parce que ce repli est INVISIBLE autrement. Un
+    /// chemin qui arriverait systematiquement ici tournerait a vide comme
+    /// avant le parking, et le releve montrerait exactement la meme chose
+    /// qu'un parking qui fonctionne : des spins. Sans ce compteur, croire que
+    /// le correctif s'applique la ou il ne s'applique pas ne coute rien --
+    /// et c'est la facon la plus economique de se tromper longtemps.
+    #[inline]
+    pub fn note_spin_irq_masquees(&self) {
+        self.spins.fetch_add(1, Ordering::Relaxed);
+        self.spins_irq_masquees.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Un CPU s'arrete. `proprietaire` est celui qu'il voyait detenir le
     /// verrou, ou [`AUCUN`] s'il etait deja libre -- ce second cas est une
     /// course benigne, mais nombreuse elle signale un parking inutile.
@@ -354,6 +371,10 @@ impl Comptes {
     pub fn reprise_max_ns(&self) -> u64 { self.reprise_max_ns.load(Ordering::Relaxed) }
     #[inline]
     pub fn spins(&self) -> u64 { self.spins.load(Ordering::Relaxed) }
+    #[inline]
+    pub fn spins_irq_masquees(&self) -> u64 {
+        self.spins_irq_masquees.load(Ordering::Relaxed)
+    }
     #[inline]
     pub fn parks(&self) -> u64 { self.parks.load(Ordering::Relaxed) }
     #[inline]

@@ -465,7 +465,9 @@ fn wait_for_owner_change(active_spins: &mut usize) {
     // Dans ce cas rare on conserve le spin actif : un tel contexte ne peut pas
     // dormir, et il n'a donc pas besoin d'etre reveille.
     if !interrupts::are_enabled() {
-        COMPTES.note_spin();
+        // Compte a part : ce repli est le SEUL chemin qui tourne encore a vide,
+        // et il se lit comme un spin ordinaire dans tout autre compteur.
+        COMPTES.note_spin_irq_masquees();
         spin_loop();
         return;
     }
@@ -1045,6 +1047,10 @@ pub struct ComptesBkl {
     /// La plus longue attente unique dans `resume_after_schedule`.
     pub reprise_max_ns: u64,
     pub spins: u64,
+    /// Tours d'attente qui n'ont pas pu se garer, interruptions masquees. Une
+    /// part elevee veut dire que le parking ne s'applique PAS au chemin
+    /// observe, et qu'il tourne a vide comme avant.
+    pub spins_irq_masquees: u64,
     pub parks: u64,
     pub wake_ipis: u64,
     /// Reveils qui n'ont pas abouti a une acquisition. Proche de `wake_ipis`,
@@ -1079,6 +1085,7 @@ pub fn comptes() -> ComptesBkl {
         reprise_ns: COMPTES.reprise_ns(),
         reprise_max_ns: COMPTES.reprise_max_ns(),
         spins: COMPTES.spins(),
+        spins_irq_masquees: COMPTES.spins_irq_masquees(),
         parks: COMPTES.parks(),
         wake_ipis: COMPTES.wake_ipis(),
         reveils_sans_acquisition: COMPTES.reveils_sans_acquisition(),

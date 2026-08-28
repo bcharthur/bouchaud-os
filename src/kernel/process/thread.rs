@@ -4018,7 +4018,7 @@ pub fn log_smp_load() {
     crate::kernel::dmesg::log_fmt(format_args!(
         "[BKL-COMPTES] tenue_ns={} attente_ns={} attente_max_ns={} \
 attente_max=[origine={} cpu={} appel={}] reprise_ns={} reprise_max_ns={} \
-spins={} parks={} wake_ipis={} reveils_sans_acq={} liberations_migrees={} \
+spins={} spins_irq_masquees={} parks={} wake_ipis={} reveils_sans_acq={} liberations_migrees={} \
 anomalies={}/{}/{} proprietaire={}{}",
         c.tenue_ns, c.attente_ns, c.attente_max_ns,
         match c.attente_max_origine {
@@ -4034,7 +4034,7 @@ anomalies={}/{}/{} proprietaire={}{}",
             crate::kernel::abi::nr::name(c.attente_max_seau as u64)
         },
         c.reprise_ns, c.reprise_max_ns,
-        c.spins, c.parks, c.wake_ipis, c.reveils_sans_acquisition,
+        c.spins, c.spins_irq_masquees, c.parks, c.wake_ipis, c.reveils_sans_acquisition,
         c.liberations_migrees,
         c.sans_debut, c.sur_tenue, c.horloge_a_rebours,
         Absent(c.proprietaire as u64),

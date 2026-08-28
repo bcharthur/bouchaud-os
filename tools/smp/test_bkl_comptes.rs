@@ -309,6 +309,19 @@ fn la_reprise_est_isolee_de_l_attente_globale() {
 }
 
 #[test]
+fn un_spin_qui_n_a_pas_pu_se_garer_reste_distinguable() {
+    // Sans ce compteur, un chemin qui arriverait TOUJOURS au repli tournerait
+    // a vide comme avant le parking -- et le releve montrerait exactement la
+    // meme chose qu'un parking qui fonctionne : des spins.
+    let c = Comptes::neuf();
+    c.note_spin();
+    c.note_spin_irq_masquees();
+    assert_eq!(c.spins(), 2, "un repli reste un tour d'attente");
+    assert_eq!(c.spins_irq_masquees(), 1);
+    assert_eq!(c.parks(), 0, "et il ne s'est justement pas gare");
+}
+
+#[test]
 fn la_plus_longue_attente_garde_son_contexte_avec_elle() {
     // « Aucune acquisition ne doit prendre plus de 50 ms » est un critere sur
     // le MAXIMUM. Un cumul ne peut pas y repondre : mille attentes d'une
