@@ -29,6 +29,7 @@ C'est un outil de comparaison, pas une option. Quand une page se comporte mal,
 il tranche la question « est-ce le moteur, ou la separation ? ».
 """
 
+import math
 import sys
 import time
 import traceback
@@ -552,7 +553,6 @@ class Navigateur:
         liste.append(("rect", 0, 0, self.largeur, HAUTEUR_CHROME, FOND_CHROME))
         liste.append(("rect", 0, HAUTEUR_CHROME - 1, self.largeur, 1, 0xFF2A4580))
 
-        etiquettes = {"reculer": "←", "avancer": "→", "recharger": "⟳", "accueil": "⌂"}
         actifs = {
             "reculer": self.onglet.peut_reculer(),
             "avancer": self.onglet.peut_avancer(),
@@ -562,10 +562,7 @@ class Navigateur:
         for nom, x, y, l, h in self._boutons():
             liste.append(("rond", x, y, l, h, 6, FOND_CHAMP))
             teinte = TEXTE_CHROME if actifs[nom] else TEXTE_ESTOMPE
-            texte = etiquettes[nom]
-            largeur_texte = bo.largeur_texte(texte, 15, False, False)
-            liste.append(("texte", x + (l - largeur_texte) / 2, y + (h - 18) / 2,
-                          texte, teinte, 15, False, False, False, False))
+            self._icone_bouton(liste, nom, x + l / 2.0, y + h / 2.0, teinte)
 
         x, y, l, h = self._champ()
         liste.append(("rond", x, y, l, h, 8,
@@ -582,6 +579,78 @@ class Navigateur:
             position = x + 10 + bo.largeur_texte(avant, 14, False, False)
             liste.append(("rect", position, y + 6, 1.5, h - 12, ACCENT))
         liste.append(("declip",))
+
+    def _icone_bouton(self, liste, nom, cx, cy, teinte):
+        """Les quatre icones du chrome, en TRAITS.
+
+        Elles etaient des caracteres : « ← », « → », « ⟳ », « ⌂ ». Deux
+        problemes, tous deux visibles a l'ecran.
+
+        Le premier est qu'une police n'a pas forcement le glyphe. `U+27F3`, la
+        fleche de rechargement, ne figure dans aucune DejaVu : le bouton
+        affichait le carre de `.notdef`.
+
+        Le second est qu'un glyphe de quinze pixels rendu par la police de
+        repli de Qt — une bitmap ASCII — donne exactement l'escalier qu'on
+        voyait sur les captures : la barre d'outils etait en pixels pendant que
+        le reste de la fenetre etait antialiase.
+
+        Un trait n'a ni police ni glyphe manquant. Qt l'antialiase, et l'icone
+        est la meme a toutes les tailles.
+        """
+        epaisseur = 1.8
+        rayon = 5.0
+        if nom in ("reculer", "avancer"):
+            # Un chevron : deux segments, pointe vers l'exterieur.
+            sens = -1.0 if nom == "reculer" else 1.0
+            pointe = cx + sens * rayon * 0.6
+            dos = cx - sens * rayon * 0.5
+            liste.append(("ligne", dos, cy - rayon * 0.9, pointe, cy,
+                          epaisseur, teinte))
+            liste.append(("ligne", dos, cy + rayon * 0.9, pointe, cy,
+                          epaisseur, teinte))
+            # La barre du « aller au bout », qui distingue le chevron d'un
+            # simple accent circonflexe couche.
+            liste.append(("ligne", pointe, cy, pointe - sens * rayon * 1.6, cy,
+                          epaisseur, teinte))
+            return
+
+        if nom == "recharger":
+            # Un arc ouvert, approche par segments, plus une pointe.
+            pas = 14
+            depart, arrivee = -0.35, 5.0
+            precedent = None
+            for index in range(pas + 1):
+                angle = depart + (arrivee - depart) * index / pas
+                point = (cx + rayon * math.cos(angle), cy + rayon * math.sin(angle))
+                if precedent is not None:
+                    liste.append(("ligne", precedent[0], precedent[1],
+                                  point[0], point[1], epaisseur, teinte))
+                precedent = point
+            angle = depart
+            pointe = (cx + rayon * math.cos(angle), cy + rayon * math.sin(angle))
+            liste.append(("polygone", (
+                (pointe[0] + 3.2, pointe[1] - 0.6),
+                (pointe[0] - 2.2, pointe[1] - 2.6),
+                (pointe[0] - 1.0, pointe[1] + 3.0),
+            ), teinte))
+            return
+
+        # L'accueil : un toit large, un corps carre, une porte. Un toit
+        # etroit sur un corps etroit se lit comme une fleche vers le haut.
+        toit = cy - rayon * 0.9
+        base = cy + rayon * 1.1
+        liste.append(("polygone", (
+            (cx, toit),
+            (cx + rayon * 1.35, cy + 0.4),
+            (cx - rayon * 1.35, cy + 0.4),
+        ), teinte))
+        liste.append(("rect", cx - rayon * 0.95, cy + 0.4,
+                      rayon * 1.9, base - (cy + 0.4), teinte))
+        # La porte, evidee dans la couleur du bouton : c'est elle qui fait lire
+        # une maison plutot qu'un pentagone.
+        liste.append(("rect", cx - rayon * 0.3, base - rayon * 0.75,
+                      rayon * 0.6, rayon * 0.75, FOND_CHAMP))
 
     def _barre_etat(self, liste):
         y = self.hauteur - HAUTEUR_ETAT

@@ -483,10 +483,28 @@ pub fn present_rect(x: usize, y: usize, width: usize, height: usize) {
         return;
     }
     let count = x1 - x;
-    for row in y..y1 {
-        let offset = row * WIDTH + x;
+    // BOUCHAUD_GFX_PRESENT_BLOC_V1
+    //
+    // Un rectangle qui prend toute la largeur est CONTIGU des deux cotes : ses
+    // lignes se suivent dans le tampon comme dans le framebuffer. Une seule
+    // copie suffit alors, au lieu d'une par ligne.
+    //
+    // Ce n'est pas un cas rare : le compositeur presente la barre du haut a
+    // chaque seconde -- `last_present_rect=0,0,1280,30` --, la barre des taches
+    // a chaque changement de fenetre, et l'ecran entier a chaque apparition.
+    // Trente appels deviennent un, sept cent vingt deviennent un.
+    if count == WIDTH {
+        let offset = y * WIDTH;
         unsafe {
-            core::ptr::copy_nonoverlapping(buf.as_ptr().add(offset), lfb.add(offset), count);
+            core::ptr::copy_nonoverlapping(
+                buf.as_ptr().add(offset), lfb.add(offset), count * (y1 - y));
+        }
+    } else {
+        for row in y..y1 {
+            let offset = row * WIDTH + x;
+            unsafe {
+                core::ptr::copy_nonoverlapping(buf.as_ptr().add(offset), lfb.add(offset), count);
+            }
         }
     }
     // Ici, et seulement ici, des pixels ont atteint l'ecran.
