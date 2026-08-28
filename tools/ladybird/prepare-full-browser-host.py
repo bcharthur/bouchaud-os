@@ -147,7 +147,25 @@ public:
 
     virtual Optional<String> system_font_family() const override
     {
-        return "SerenitySans"_string;
+        // BOUCHAUD_POLICE_SYSTEME_V1
+        //
+        // C'etait "SerenitySans" : la seule police de texte de l'arbre
+        // Ladybird epingle, et une police d'INTERFACE geometrique, sans la
+        // plupart des lettres accentuees.
+        //
+        // Ladybird s'en sert pour la police par defaut, pour `system-ui`, et
+        // comme dernier recours quand aucune famille demandee n'est trouvee.
+        // C'est-a-dire, en pratique, pour presque tout : la page d'accueil de
+        // Google demande `arial, sans-serif` et ne telecharge aucune police.
+        //
+        // D'ou ce qu'on voyait : tout le Web en lettres geometriques, et un
+        // carre vide a la place de chaque lettre accentuee --
+        // « Avant d'acc[carre]der [carre] Google ».
+        //
+        // DejaVu Sans est deposee par le noyau dans /usr/share/fonts
+        // (`kernel::sysroot::install_fonts`) et indexee par le fontconfig du
+        // depot. Elle couvre le Latin accentue, et c'est une police de TEXTE.
+        return "DejaVu Sans"_string;
     }
 
 protected:
