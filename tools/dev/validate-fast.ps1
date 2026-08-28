@@ -122,6 +122,10 @@ try {
         & python .\tools\verifie-polices-navigateur.py
     }
 
+    Invoke-Step "polices du Web (fontconfig)" {
+        & python .\tools\verifie-polices-web.py
+    }
+
     Invoke-Step "echeances de reveil (source)" {
         & python .\tools\verifie-echeances.py
     }
