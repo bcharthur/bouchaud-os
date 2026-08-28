@@ -27,7 +27,12 @@ pub mod keyboard;
 pub mod mouse;
 #[path = "api/network.rs"]
 pub mod net;
-#[path = "serial/uart16550.rs"]
-pub mod serial;
+pub mod serial {
+    #[path = "lots.rs"]
+    pub mod lots;
+    #[path = "uart16550.rs"]
+    mod uart16550;
+    pub use uart16550::*;
+}
 #[path = "display/vga_text.rs"]
 pub mod vga;

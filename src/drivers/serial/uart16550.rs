@@ -39,21 +39,55 @@ fn transmit_empty() -> bool {
     unsafe { inb(COM1 + 5) & 0x20 != 0 }
 }
 
-fn write_byte(byte: u8) {
-    // Convertit les sauts de ligne Unix en CRLF pour les terminaux serie.
-    if byte == b'\n' {
-        write_raw(b'\r');
-    }
-    write_raw(byte);
-}
+// BOUCHAUD_SERIE_FIFO_V1
+//
+// # Ce que coutait un octet a la fois
+//
+// `write_raw` attendait THRE -- « registre de maintien vide » -- AVANT CHAQUE
+// octet, puis en poussait un seul. Chaque tour de cette attente est un `inb`,
+// c'est-a-dire une sortie du mode traduit sous TCG ; chaque octet en coutait
+// donc au moins un, souvent plusieurs.
+//
+// Et `write` s'execute sous le gros verrou du noyau. Un programme qui ecrit
+// quelques centaines d'octets sur sa sortie standard -- Ladybird en produit
+// sans arret -- serialisait les quatre coeurs derriere un port serie, un octet
+// a la fois. C'est ce que `[BKL-SYSCALL]` mesurait : `write`, jusqu'a 152 ms
+// de detention pour un seul appel.
+//
+// # Ce que le 16550 permet
+//
+// Ce n'est pas un 8250 : il a un FIFO d'emission de seize octets, active a
+// l'initialisation (`outb(COM1 + 2, 0xC7)`). Quand THRE monte, la place
+// disponible n'est pas d'un octet mais de seize. Attendre une fois puis en
+// pousser seize divise par seize le nombre d'attentes -- a debit serie
+// rigoureusement identique, puisque c'est la ligne qui impose le debit, pas
+// le pilote.
+//
+// Aucun octet n'est perdu ni reordonne : l'ordre d'ecriture dans le FIFO est
+// l'ordre d'emission.
+const PROFONDEUR_FIFO: usize = 16;
 
-fn write_raw(byte: u8) {
+/// Attend que le registre de maintien se vide, avec le meme garde-fou qu'avant
+/// pour le cas ou COM1 n'existe pas.
+fn attends_place() {
     let mut spin = 0u32;
     while !transmit_empty() {
         spin += 1;
-        if spin > 100_000 { break; } // garde-fou si COM1 absent
+        if spin > 100_000 { break; }
     }
-    unsafe { outb(COM1, byte); }
+}
+
+/// Pousse un lot d'octets deja convertis en CRLF.
+fn write_lot(octets: &[u8]) {
+    let mut pose = 0usize;
+    while pose < octets.len() {
+        attends_place();
+        let fin = (pose + PROFONDEUR_FIFO).min(octets.len());
+        while pose < fin {
+            unsafe { outb(COM1, octets[pose]); }
+            pose += 1;
+        }
+    }
 }
 
 /// Le prochain octet ecrit commence-t-il une ligne ?
@@ -61,22 +95,48 @@ static mut DEBUT_LIGNE: bool = true;
 /// Vrai pendant l'ecriture du prefixe lui-meme (garde de reentrance).
 static mut DANS_PREFIXE: bool = false;
 
+/// Emet des octets sur COM1, prefixe de journal compris.
+///
+/// C'est le corps de `write_str`, extrait pour que `write(2)` puisse pousser la
+/// sortie d'un programme SANS la faire passer par un formateur.
+///
+/// `console_write` ecrivait `serial_print!("{}", octet as char)` -- un
+/// `write_fmt` complet par octet. Outre le cout, c'etait faux : un octet de
+/// 0x80 a 0xFF devient un `char` Latin-1, que le formateur reencode en DEUX
+/// octets UTF-8. Toute sortie UTF-8 d'un programme arrivait donc en mojibake
+/// sur la console serie. Passer les octets tels quels est a la fois plus rapide
+/// et correct.
+pub fn ecris_octets(octets: &[u8]) {
+    if !is_ready() { return }
+    // Tampon d'etape, LOCAL : `ecris_prefixe` reentre ici, et une pile de
+    // tampons locaux garde naturellement l'ordre -- le segment qui precede le
+    // prefixe est deja emis quand la reentrance se produit.
+    let mut lot = [0u8; 64];
+    let mut debut = 0usize;
+
+    for (indice, &byte) in octets.iter().enumerate() {
+        // Le prefixe est pose au premier octet non vide d'une ligne, et non
+        // a chaque appel : une ligne construite par plusieurs `serial_print!`
+        // n'en recoit donc qu'un, et une ligne vide n'en recoit aucun.
+        unsafe {
+            if DEBUT_LIGNE && byte != b'\n' && !DANS_PREFIXE {
+                // Emettre AVANT de reentrer : ce qui precede le prefixe a ete
+                // ecrit avant lui.
+                super::lots::en_lots(&octets[debut..indice], &mut lot, write_lot);
+                debut = indice;
+                DANS_PREFIXE = true;
+                crate::kernel::journal::ecris_prefixe();
+                DANS_PREFIXE = false;
+            }
+            DEBUT_LIGNE = byte == b'\n';
+        }
+    }
+    super::lots::en_lots(&octets[debut..], &mut lot, write_lot);
+}
+
 impl fmt::Write for SerialPort {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        for byte in s.bytes() {
-            // Le prefixe est pose au premier octet non vide d'une ligne, et non
-            // a chaque appel : une ligne construite par plusieurs `serial_print!`
-            // n'en recoit donc qu'un, et une ligne vide n'en recoit aucun.
-            unsafe {
-                if DEBUT_LIGNE && byte != b'\n' && !DANS_PREFIXE {
-                    DANS_PREFIXE = true;
-                    crate::kernel::journal::ecris_prefixe();
-                    DANS_PREFIXE = false;
-                }
-                DEBUT_LIGNE = byte == b'\n';
-            }
-            write_byte(byte);
-        }
+        ecris_octets(s.as_bytes());
         Ok(())
     }
 }
@@ -110,13 +170,18 @@ static mut SERIAL_BRUT: SerialBrut = SerialBrut;
 
 impl fmt::Write for SerialBrut {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        for byte in s.bytes() {
-            // Tenir `DEBUT_LIGNE` a jour malgre l'absence de prefixe : sinon un
-            // `serial_println!` ordinaire qui suivrait une ligne brute croirait
-            // etre en milieu de ligne, et sauterait SON prefixe.
-            unsafe { DEBUT_LIGNE = byte == b'\n'; }
-            write_byte(byte);
+        // Chemin de panique : les memes lots, mais sans prefixe. Un octet a la
+        // fois y coutait aussi cher qu'ailleurs, et une panique a d'autant plus
+        // besoin d'etre ecrite vite qu'elle peut etre suivie d'un triple faute.
+        //
+        // Tenir `DEBUT_LIGNE` a jour malgre l'absence de prefixe : sinon un
+        // `serial_println!` ordinaire qui suivrait une ligne brute croirait
+        // etre en milieu de ligne, et sauterait SON prefixe.
+        if let Some(dernier) = s.bytes().last() {
+            unsafe { DEBUT_LIGNE = dernier == b'\n'; }
         }
+        let mut lot = [0u8; 64];
+        super::lots::en_lots(s.as_bytes(), &mut lot, write_lot);
         Ok(())
     }
 }
