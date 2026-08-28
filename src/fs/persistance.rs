@@ -122,16 +122,118 @@ pub fn sous_racine(mut noeud: usize) -> bool {
 }
 
 
-/// Un fichier retenu : son chemin sous [`RACINE`] et son contenu.
+/// Un fichier retenu : son chemin sous [`RACINE`] et OU le trouver.
+///
+/// Le contenu n'est plus recopie a la collecte. Il l'etait pour tous les
+/// fichiers, a chaque `fsync`, et la plupart ne sont pas ecrits : voir
+/// [`synchronise`].
 struct Entree {
     chemin: String,
-    contenu: Vec<u8>,
+    noeud: usize,
+    longueur: usize,
+}
+
+// BOUCHAUD_PERSIST_ECRITURE_INCREMENTALE_V1
+//
+// CE QUE `fsync` COUTAIT
+// ----------------------
+// L'en-tete de ce fichier posait une hypothese : « quelques mega-octets ecrits
+// rarement ». Le runtime l'a dementie. Ladybird stocke ses temoins et son cache
+// dans SQLite, qui appelle `fsync` a chaque transaction -- et `fsync` reecrivait
+// LA ZONE ENTIERE : chaque fichier recopie en memoire, puis chaque secteur
+// repousse sur le disque en PIO, sous le gros verrou du noyau. `[BKL-SYSCALL]`
+// donnait `fsync` a 17-18 % de detention.
+//
+// Un `fsync` qui suit l'ecriture d'un seul fichier reecrivait donc tous les
+// autres, octet pour octet identiques.
+//
+// CE QUI EST GARDE
+// ----------------
+// L'empreinte de ce que le dernier `synchronise` REUSSI a laisse sur le disque :
+// pour chaque entree, son chemin, le secteur ou elle commence, sa longueur et
+// un sceau de son contenu. Une entree dont les quatre coincident est deja sur
+// le disque, a cet endroit exact : la reecrire n'ecrirait rien de nouveau.
+//
+// POURQUOI C'EST SUR
+// ------------------
+// * L'empreinte n'est mise a jour qu'apres un `synchronise` COMPLETEMENT
+//   reussi. Le moindre echec la vide, et le `sync` suivant reecrit tout.
+// * Le secteur fait partie de la cle : si un fichier precedent change de
+//   taille, tous ceux qui le suivent se decalent, leur secteur ne correspond
+//   plus, et ils sont reecrits.
+// * La table et l'en-tete sont TOUJOURS reecrits. Ils sont bornes
+//   (1025 secteurs) et ce sont eux qui rendent la zone lisible ; les
+//   economiser ferait courir un risque sans rapport avec le gain.
+// * Le sceau est un couple de deux FNV-1a de bases differentes, plus la
+//   longueur : 128 bits pour decider de NE PAS ecrire. Une collision serait
+//   une perte de donnees, d'ou les deux.
+//
+// Ces variables ne sont touchees que par `synchronise` et `monte`, qui
+// s'executent sous le gros verrou -- `FSYNC`, `FDATASYNC` et `SYNC` ne figurent
+// pas dans `compat::linux::bkl::SANS_BKL`, et `tools/verifie-persistance.py`
+// le verifie.
+struct SurDisque {
+    chemin: String,
+    secteur: u64,
+    longueur: usize,
+    sceau: (u64, u64),
+}
+
+static mut DISQUE: Vec<SurDisque> = Vec::new();
+
+/// Sceau de contenu : deux FNV-1a de bases differentes.
+///
+/// Sert uniquement a decider de ne PAS reecrire un secteur. Un sceau de 64 bits
+/// suffirait en pratique ; deux en font 128, parce que le prix d'une collision
+/// serait un fichier perime sur le disque, et le prix d'un second passage est
+/// une multiplication par octet.
+fn sceau(contenu: &[u8]) -> (u64, u64) {
+    let mut a: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut b: u64 = 0x9e37_79b9_7f4a_7c15;
+    for &octet in contenu {
+        a = (a ^ octet as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        b = (b ^ octet as u64).wrapping_mul(0x8864_0000_0000_003d);
+    }
+    (a, b)
+}
+
+/// L'entree `index` est-elle deja sur le disque, a ce secteur, avec ce sceau ?
+fn deja_ecrite(index: usize, chemin: &str, secteur: u64, longueur: usize,
+    sceau_courant: (u64, u64)) -> bool {
+    let disque = unsafe { &*core::ptr::addr_of!(DISQUE) };
+    match disque.get(index) {
+        Some(connu) => {
+            connu.chemin == chemin
+                && connu.secteur == secteur
+                && connu.longueur == longueur
+                && connu.sceau == sceau_courant
+        }
+        None => false,
+    }
+}
+
+/// Oublie ce qu'on croyait savoir du disque : le prochain `sync` reecrit tout.
+///
+/// Appele des qu'une ecriture echoue, et au montage. Ne jamais s'en passer :
+/// une empreinte qui survit a un echec ferait sauter des ecritures qui n'ont
+/// jamais eu lieu.
+fn oublie_le_disque() {
+    unsafe {
+        let disque = &mut *core::ptr::addr_of_mut!(DISQUE);
+        disque.clear();
+    }
 }
 
 /// Deplie la zone persistante dans `/persist`. A appeler une fois au demarrage.
 ///
 /// Rend le nombre de fichiers restaures.
 pub fn monte() -> usize {
+    // Rien n'est encore connu du disque de ce cote : le premier `sync` ecrira
+    // tout. Le contenu lu ici a beau venir du disque, `depose` peut le
+    // transformer -- un fichier deja present, un dossier manquant --, et une
+    // empreinte tiree d'une lecture ne prouverait donc pas ce que le disque
+    // porte apres coup.
+    oublie_le_disque();
     let systeme = fs();
     let racine = match systeme.resolve(RACINE, 0) {
         Some(idx) => idx,
@@ -220,6 +322,7 @@ pub fn synchronise() -> i64 {
                 secteurs,
                 SECTEURS_ZONE + SECTEUR_CONTENU
             ));
+            oublie_le_disque();
             return -1;
         }
     };
@@ -232,12 +335,17 @@ pub fn synchronise() -> i64 {
             RACINE,
             ENTREES_MAX
         ));
+        oublie_le_disque();
         return -1;
     }
 
     let mut table = vec![0u8; (SECTEURS_TABLE as usize) * SECTOR_SIZE];
     let mut secteur = base + SECTEUR_CONTENU;
     let fin_zone = base + SECTEURS_ZONE;
+
+    let mut nouveau: Vec<SurDisque> = Vec::with_capacity(entrees.len());
+    let mut ecrites = 0usize;
+    let mut sautees = 0usize;
 
     for (index, entree) in entrees.iter().enumerate() {
         let octets = entree.chemin.as_bytes();
@@ -253,6 +361,7 @@ pub fn synchronise() -> i64 {
                 CHEMIN_MAX - 1,
                 entree.chemin
             ));
+            oublie_le_disque();
             return -1;
         }
         let longueur = octets.len();
@@ -260,10 +369,10 @@ pub fn synchronise() -> i64 {
         table[debut_entree..debut_entree + longueur].copy_from_slice(&octets[..longueur]);
         ecrit_u64(
             &mut table[debut_entree + CHEMIN_MAX..debut_entree + CHEMIN_MAX + 8],
-            entree.contenu.len() as u64,
+            entree.longueur as u64,
         );
 
-        let secteurs = ((entree.contenu.len() + SECTOR_SIZE - 1) / SECTOR_SIZE) as u64;
+        let secteurs = ((entree.longueur + SECTOR_SIZE - 1) / SECTOR_SIZE) as u64;
         if secteur + secteurs > fin_zone {
             crate::kernel::dmesg::log_fmt(format_args!(
                 "persistance: zone pleine sur '{}', il faudrait le secteur {} et la zone s'arrete a {}",
@@ -271,20 +380,45 @@ pub fn synchronise() -> i64 {
                 secteur + secteurs,
                 fin_zone
             ));
+            oublie_le_disque();
             return -1;
         }
+        // BOUCHAUD_PERSIST_ECRITURE_INCREMENTALE_V1 : le sceau se calcule sur
+        // le contenu la ou il est. C'est une lecture memoire ; l'ecriture qu'il
+        // evite est une rafale PIO vers l'ATA, plusieurs ordres de grandeur
+        // plus chere.
+        let sceau_courant = {
+            let systeme = fs();
+            sceau(&systeme.nodes[entree.noeud].content[..entree.longueur])
+        };
         if secteurs > 0 {
-            let mut tampon = vec![0u8; (secteurs as usize) * SECTOR_SIZE];
-            tampon[..entree.contenu.len()].copy_from_slice(&entree.contenu);
-            let ecrits = ata::write(Drive::Slave, secteur, secteurs as usize, &tampon);
-            if ecrits != secteurs as usize {
-                crate::kernel::dmesg::log_fmt(format_args!(
-                    "persistance: ecriture de '{}' incomplete, {} secteurs sur {} a partir de {}",
-                    entree.chemin, ecrits, secteurs, secteur
-                ));
-                return -1;
+            if deja_ecrite(index, &entree.chemin, secteur, entree.longueur, sceau_courant) {
+                sautees += 1;
+            } else {
+                let mut tampon = vec![0u8; (secteurs as usize) * SECTOR_SIZE];
+                {
+                    let systeme = fs();
+                    tampon[..entree.longueur]
+                        .copy_from_slice(&systeme.nodes[entree.noeud].content[..entree.longueur]);
+                }
+                let ecrits = ata::write(Drive::Slave, secteur, secteurs as usize, &tampon);
+                if ecrits != secteurs as usize {
+                    crate::kernel::dmesg::log_fmt(format_args!(
+                        "persistance: ecriture de '{}' incomplete, {} secteurs sur {} a partir de {}",
+                        entree.chemin, ecrits, secteurs, secteur
+                    ));
+                    oublie_le_disque();
+                    return -1;
+                }
+                ecrites += 1;
             }
         }
+        nouveau.push(SurDisque {
+            chemin: entree.chemin.clone(),
+            secteur,
+            longueur: entree.longueur,
+            sceau: sceau_courant,
+        });
         secteur += secteurs;
     }
 
@@ -296,6 +430,7 @@ pub fn synchronise() -> i64 {
             SECTEURS_TABLE,
             base + 1
         ));
+        oublie_le_disque();
         return -1;
     }
 
@@ -308,7 +443,21 @@ pub fn synchronise() -> i64 {
             "persistance: en-tete non ecrit au secteur {}",
             base
         ));
+        oublie_le_disque();
         return -1;
+    }
+
+    // Tout est passe : ce que le disque porte est maintenant connu. C'est le
+    // SEUL endroit ou l'empreinte est adoptee.
+    unsafe {
+        let disque = &mut *core::ptr::addr_of_mut!(DISQUE);
+        *disque = nouveau;
+    }
+    if sautees != 0 {
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "persistance: sync, {} fichier(s) ecrit(s), {} inchange(s)",
+            ecrites, sautees
+        ));
     }
 
     entrees.len() as i64
@@ -354,9 +503,10 @@ fn collecte(dossier: usize, prefixe: &str, entrees: &mut Vec<Entree>) {
                 if longueur == 0 || chemin.len() >= CHEMIN_MAX {
                     continue;
                 }
-                let mut contenu = Vec::with_capacity(longueur);
-                contenu.extend_from_slice(&systeme.nodes[index].content[..longueur]);
-                entrees.push(Entree { chemin, contenu });
+                // Le contenu reste ou il est : `synchronise` le lit dans le
+                // RAMFS au moment d'ecrire, et pour les entrees inchangees il
+                // ne le lit que pour en calculer le sceau.
+                entrees.push(Entree { chemin, noeud: index, longueur });
             }
         }
     }

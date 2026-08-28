@@ -104,6 +104,10 @@ try {
         & python .\tools\verifie-mutations-fenetre.py
     }
 
+    Invoke-Step "ecriture incrementale de /persist (source)" {
+        & python .\tools\verifie-persistance.py
+    }
+
     if (Test-Path ".\tools\verifie-protocole-gui.py") {
         Invoke-Step "coherence protocole GUI" {
             & python .\tools\verifie-protocole-gui.py
