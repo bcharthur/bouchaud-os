@@ -39,6 +39,12 @@ POLICES = RACINE / "src" / "gui" / "polices.rs"
 FAMILLES_ATTENDUES = [
     "sans-serif", "serif", "monospace", "system-ui",
     "Arial", "Helvetica", "Roboto", "Segoe UI",
+    # Les polices de MARQUE, citees en PREMIER par les sites qui en ont une --
+    # et c'est la premiere qui decide. Sans alias, Ladybird retombe sur sa
+    # police par defaut : c'est ce qui laissait « FR », « Se connecter » et
+    # « Tout accepter » en lettres geometriques sur une page dont le corps de
+    # texte etait deja correct.
+    "Google Sans", "Product Sans", "Open Sans", "Inter",
 ]
 
 
@@ -49,6 +55,24 @@ def main() -> int:
         print(f"introuvable : {CONF}")
         return 1
     conf = CONF.read_text(encoding="utf-8")
+
+    # --- 0. le fichier doit etre du XML VALIDE ------------------------------
+    #
+    # fontconfig qui ne peut pas lire sa configuration n'en charge AUCUNE : ni
+    # repertoires, ni alias. Toute la page retombe alors sur la police par
+    # defaut, et le seul indice est une ligne d'avertissement noyee dans le
+    # journal. Un `--` egare dans un commentaire suffit -- XML l'interdit --,
+    # et c'est exactement ce qui a failli passer en ajoutant les alias de
+    # marque.
+    try:
+        import xml.dom.minidom
+        xml.dom.minidom.parseString(conf)
+    except Exception as erreur:  # noqa: BLE001
+        fautes.append(
+            f"  fonts.conf  XML invalide ({erreur}) : fontconfig ne chargerait "
+            f"AUCUNE configuration, et tout le Web retomberait sur la police "
+            f"par defaut"
+        )
 
     # --- 1. installation inconditionnelle ---------------------------------
     if RUN.exists():
@@ -102,6 +126,18 @@ def main() -> int:
                 f"  fonts.conf  `{famille}` designe SerenitySans en PREMIER : "
                 f"c'est la police sans lettres accentuees"
             )
+
+    # --- 4. les graisses intermediaires -------------------------------------
+    #
+    # Un bouton de Google demande `font-weight: 500`. DejaVu n'a que Book et
+    # Bold : sans regle de rabattement, fontconfig peut ne trouver aucune
+    # correspondance et rendre la main a la police par defaut.
+    if "compare=\"more_eq\"" not in conf or "weight" not in conf:
+        fautes.append(
+            "  fonts.conf  aucune regle ne rabat les graisses intermediaires "
+            "(500, 600) sur celles que DejaVu possede : les boutons d'un site "
+            "retomberaient sur la police par defaut"
+        )
 
     if fautes:
         print("polices du Web : regle violee")
