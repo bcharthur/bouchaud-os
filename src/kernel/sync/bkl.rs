@@ -791,6 +791,7 @@ pub fn resume_after_schedule(depth: usize) {
     let cpu = cpu();
     let mine = token(cpu);
     let wait_start = crate::kernel::timer::monotonic_ns();
+    let mut spins = 0usize;
 
     {
         let owner = OWNER.load(Ordering::Relaxed);
@@ -831,16 +832,39 @@ pub fn resume_after_schedule(depth: usize) {
             }
         }
 
-        // BOUCHAUD_P0_TARGETED_IPI_LIVENESS_V13
+        // BOUCHAUD_BKL_RESUME_PARK_V1
         //
-        // Do NOT HLT while resuming a suspended scheduler/kernel continuation.
-        // With targeted scheduler IPIs there is no longer a 4 ms broadcast
-        // heartbeat guaranteed to wake this CPU after BKL release.
+        // # Ce que le busy-wait coutait
         //
-        // The CPU was explicitly woken because it has useful work. Busy-wait
-        // here until OWNER becomes free; ordinary enter() keeps the adaptive
-        // HLT policy for unrelated BKL contention.
-        spin_loop();
+        // Cette boucle etait un `spin_loop()` pur, sans jamais se garer. La
+        // raison invoquee -- « avec des IPI d'ordonnancement cibles, plus aucun
+        // battement de 4 ms ne garantit le reveil » -- ne tient pas : chaque
+        // liberation appelle `wake_parked_waiters`, que ce soit par
+        // `release_one` ou par `suspend_for_schedule`. Un CPU inscrit dans
+        // `PARKED` est donc TOUJOURS reveille, et le protocole de publication
+        // de `wait_for_owner_change` ferme la course du reveil perdu.
+        //
+        // Le prix, lui, etait bien reel. Sous TCG les quatre vCPU se partagent
+        // les coeurs de l'hote : un vCPU qui tourne a vide ne perd pas
+        // seulement son temps, il VOLE celui dont le DETENTEUR a besoin pour
+        // finir. Plus les autres attendent, plus il tient -- c'est la
+        // pathologie du detenteur preempte, et le runtime la montrait telle
+        // quelle :
+        //
+        //     [SMP-PROV] owner=1 held=690ms depth=1 syscall=poll/attente
+        //     [BKL-MAX-HOLD] ns=29562372510 origine=resume_after_schedule
+        //     window_ns=11353070412   <- une fenetre de 5 s en a pris 11
+        //     [gui] client actif 0 trames (silence 61818 ms)
+        //
+        // Une tenue de 690 ms, une pointe annoncee a 29 secondes, et le
+        // compositeur muet pendant une minute : c'est le figement ressenti au
+        // defilement.
+        //
+        // `wait_for_owner_change` garde un court spin actif -- une reprise est
+        // le plus souvent immediate -- puis se gare. Il refuse de lui-meme de
+        // dormir dans un contexte a interruptions masquees, ou dormir serait
+        // fatal.
+        wait_for_owner_change(cpu, &mut spins);
     }
 }
 
