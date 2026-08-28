@@ -4,13 +4,31 @@ use crate::gui::framebuffer::{HEIGHT, WIDTH};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-pub(crate) const BAR_H: usize = 11;        // hauteur des barres haut/bas
+// BOUCHAUD_GUI_COQUILLE_V1
+//
+// Les deux barres faisaient ONZE pixels. C'est la hauteur d'une ligne de texte
+// bitmap 8x8 plus deux, et cela se voyait : des libelles colles aux bords, des
+// boutons de neuf pixels, aucune place pour un rayon ni pour une marge. Le
+// reste du bureau -- fenetres arrondies, ombres portees, titres en DejaVu --
+// avait avance sans elles.
+//
+// Trente pixels laissent respirer un texte de treize, un bouton arrondi de
+// vingt-deux et huit pixels de marge. Toutes les geometries en descendent, y
+// compris celles du menu et des boutons : rien ici n'est un nombre pose a la
+// main deux fois.
+pub(crate) const BAR_H: usize = 30;        // hauteur des barres haut/bas
+
+/// Marge verticale d'un bouton dans une barre, en haut comme en bas.
+pub(crate) const MARGE_BARRE: i32 = 4;
+
+/// Hauteur d'un bouton de barre : la barre, moins ses deux marges.
+pub(crate) const BOUTON_BARRE_H: i32 = BAR_H as i32 - MARGE_BARRE * 2;
 pub(crate) const TITLE_H: i32 = crate::gui::windowing::TITLEBAR_HEIGHT as i32;
 pub(crate) const MIN_W: i32 = 90;
 pub(crate) const MIN_H: i32 = 50;
-pub(crate) const MENU_ITEM_H: i32 = 22;    // hauteur d'un item du menu Démarrer
-pub(crate) const MENU_HEADER_H: i32 = 8;   // zone vide en haut du menu
-pub(crate) const MENU_W: i32 = 178;        // largeur du menu Démarrer
+pub(crate) const MENU_ITEM_H: i32 = 30;    // hauteur d'un item du menu Démarrer
+pub(crate) const MENU_HEADER_H: i32 = 10;  // zone vide en haut du menu
+pub(crate) const MENU_W: i32 = 226;        // largeur du menu Démarrer
 
 // Les constantes ci-dessus et celles de `gui::disposition` decrivent le MEME
 // bureau. Elles sont declarees deux fois parce que l'une doit rester pure et
@@ -76,7 +94,7 @@ pub(crate) const ICONS: [(&str, usize); 5] = [
 
 /// Positions des icones de bureau (x, y). Modifiables par drag-and-drop.
 pub(crate) static mut ICON_POSITIONS: [(i32, i32); 5] = [
-    (10, 25), (10, 91), (10, 157), (10, 223), (10, 289),
+    (14, 44), (14, 122), (14, 200), (14, 278), (14, 356),
 ];
 
 /// Etat applicatif porte par une fenetre.
@@ -142,8 +160,25 @@ pub(crate) fn clip(s: &str, n: usize) -> &str {
     &s[..end]
 }
 
+/// Largeur du bouton Demarrer.
+pub(crate) const DEMARRER_W: i32 = 74;
+
+/// Largeur d'un bouton de fenetre dans la barre des taches.
+pub(crate) const TACHE_W: i32 = 148;
+
+/// Pas entre deux boutons de la barre des taches.
+pub(crate) const TACHE_PAS: i32 = TACHE_W + 6;
+
+/// Abscisse du premier bouton de fenetre : apres le bouton Demarrer.
+pub(crate) const TACHE_X0: i32 = MARGE_BARRE + DEMARRER_W + 10;
+
 pub(crate) fn start_btn() -> Rect {
-    Rect { x: 2, y: HEIGHT as i32 - BAR_H as i32 + 1, w: 38, h: 9 }
+    Rect {
+        x: MARGE_BARRE,
+        y: HEIGHT as i32 - BAR_H as i32 + MARGE_BARRE,
+        w: DEMARRER_W,
+        h: BOUTON_BARRE_H,
+    }
 }
 
 pub(crate) fn menu_rect() -> Rect {
@@ -181,7 +216,12 @@ pub(crate) fn rect_ligne_menu(index: usize) -> crate::gui::protocole::Rect {
 }
 
 pub(crate) fn taskbar_btn(i: usize) -> Rect {
-    Rect { x: 44 + i as i32 * 56, y: HEIGHT as i32 - BAR_H as i32 + 1, w: 54, h: 9 }
+    Rect {
+        x: TACHE_X0 + i as i32 * TACHE_PAS,
+        y: HEIGHT as i32 - BAR_H as i32 + MARGE_BARRE,
+        w: TACHE_W,
+        h: BOUTON_BARRE_H,
+    }
 }
 
 /// Rectangle de l'icone de bureau `i`. Position pilotee par ICON_POSITIONS (drag).

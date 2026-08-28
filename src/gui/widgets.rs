@@ -68,16 +68,46 @@ fn draw_circle_highlight(cx: usize, cy: usize, r: i32, base: u32) {
 // n'est plus utilisee par la boucle de composition.
 
 /// Filigrane « Bouchaud OS », en bas au centre.
+/// Texte du filigrane du bureau.
+const FILIGRANE: &str = "Bouchaud OS";
+
+/// Corps du filigrane, en pixels.
+const FILIGRANE_CORPS: f32 = 34.0;
+
+/// Interligne reserve au filigrane : jambages et debord d'antialiassage.
+const FILIGRANE_HAUTEUR: usize = 44;
+
+// BOUCHAUD_GUI_FILIGRANE_VECTORIEL_V1
+//
+// Le filigrane etait peint par `draw_text_rgb(.., scale = 2)`, c'est-a-dire la
+// police BITMAP 8x8 du noyau, agrandie deux fois : des marches d'escalier a
+// chaque diagonale, alors que le bureau dispose d'une DejaVu vectorielle
+// antialiasee -- celle qui sert deja aux titres de fenetres et aux libelles.
+//
+// Le rectangle du calque ne peut plus etre une constante : la largeur d'un mot
+// en police proportionnelle ne se devine pas. Il est MESURE, avec une marge
+// pour l'antialiassage, et `draw_filigrane` part exactement du meme point.
+fn filigrane_origine() -> (usize, usize) {
+    let largeur = fb::text_width(FILIGRANE, FILIGRANE_CORPS, false);
+    (
+        (fb::WIDTH / 2).saturating_sub(largeur / 2),
+        fb::HEIGHT.saturating_sub(FILIGRANE_HAUTEUR + 22),
+    )
+}
+
 pub(crate) fn draw_filigrane() {
-    fb::draw_text_rgb(fb::WIDTH / 2 - 88, fb::HEIGHT - 60, "Bouchaud OS", 0x33476b, 2);
+    let (x, y) = filigrane_origine();
+    fb::draw_text_prop(x, y, FILIGRANE, 0x2f4468, FILIGRANE_CORPS, false);
 }
 
 /// Bornes du filigrane. Volontairement large : un calque qui deborde ses
 /// bornes laisserait des trainees, l'inverse ne coute qu'un peu de travail.
 pub(crate) fn filigrane_rect() -> (usize, usize, usize, usize) {
-    let largeur = 200usize;
-    let hauteur = 24usize;
-    ((fb::WIDTH / 2).saturating_sub(96), fb::HEIGHT.saturating_sub(64), largeur, hauteur)
+    let (x, y) = filigrane_origine();
+    let largeur = fb::text_width(FILIGRANE, FILIGRANE_CORPS, false);
+    // Marge : `draw_text_prop` pose les glyphes a partir de `x`, mais un `B`
+    // peut deborder d'un pixel a gauche et l'antialiassage d'un autre.
+    (x.saturating_sub(4), y, largeur + 8, FILIGRANE_HAUTEUR)
 }
 
 /// Fond d'ecran seul.
@@ -167,29 +197,75 @@ pub(crate) fn draw_desktop(wins: &[Win]) {
     }
 }
 
-fn draw_topbar() {
-    // Fond gradient vertical foncé
-    for y in 0..BAR_H {
-        let c = lerp_color(0x0d1a30, 0x162340, y, BAR_H);
-        fb::fill_rect_rgb(0, y, fb::WIDTH, 1, c);
+// BOUCHAUD_GUI_COQUILLE_V1
+//
+// Les deux barres partagent la meme matiere que les fenetres : la surface du
+// theme, un degrade a peine perceptible, un filet de bordure du cote de
+// l'ecran, et du texte en DejaVu -- plus de bitmap 8x8 colle au bord.
+//
+// Un seul endroit decrit cette matiere, pour que la barre du haut et celle du
+// bas ne puissent pas se mettre a diverger : elles se ressemblent trop dans le
+// code pour qu'on remarque la difference.
+
+/// Corps du texte des barres, en pixels.
+const CORPS_BARRE: f32 = 13.0;
+
+/// Ligne de base du texte dans une barre de `BAR_H` pixels.
+fn ligne_texte_barre(sommet: usize) -> usize {
+    sommet + (BAR_H - CORPS_BARRE as usize) / 2 - 1
+}
+
+/// Fond commun aux deux barres : degrade vertical plus filet de separation.
+///
+/// `filet_en_bas` distingue la barre du haut -- dont la bordure regarde le
+/// bureau, donc vers le bas -- de celle du bas.
+fn fond_de_barre(sommet: usize, filet_en_bas: bool) {
+    for ligne in 0..BAR_H {
+        let couleur = lerp_color(
+            crate::gui::theme::COLOR_SURFACE_ELEVATED,
+            crate::gui::theme::COLOR_SURFACE,
+            if filet_en_bas { ligne } else { BAR_H - 1 - ligne },
+            BAR_H,
+        );
+        fb::fill_rect_rgb(0, sommet + ligne, fb::WIDTH, 1, couleur);
     }
-    // Ligne de séparation en bas
-    fb::fill_rect_rgb(0, BAR_H - 1, fb::WIDTH, 1, 0x2a4580);
+    let filet = if filet_en_bas { sommet + BAR_H - 1 } else { sommet };
+    fb::fill_rect_rgb(0, filet, fb::WIDTH, 1, crate::gui::theme::COLOR_BORDER);
+}
 
-    // "Bouchaud OS" à gauche en TTF gras
-    fb::draw_text_prop(4, 1, "Bouchaud OS", 0x7ab8f5, 9.0, true);
+/// Remplit un rectangle arrondi par SEGMENTS, comme le chrome des fenetres.
+fn pave_arrondi(rect: crate::gui::windowing::Rect, rayon: u32, couleur: u32) {
+    let (cx0, cy0, cx1, cy1) = fb::clip_rect();
+    let decoupe = crate::gui::windowing::Rect::new(cx0 as i32, cy0 as i32,
+        cx1.saturating_sub(cx0) as u32, cy1.saturating_sub(cy0) as u32);
+    crate::gui::graphics::spans_rounded_rect(rect, rayon, decoupe,
+        |x, y, largeur| {
+            fb::fill_rect_rgb(x.max(0) as usize, y.max(0) as usize,
+                largeur as usize, 1, couleur)
+        });
+}
 
-    // Stats CPU/RAM/Disk au centre
+fn draw_topbar() {
+    fond_de_barre(0, true);
+    let ligne = ligne_texte_barre(0);
+
+    // Marque du systeme, a gauche.
+    fb::draw_text_prop(window::MARGE_BARRE as usize * 2 + 2, ligne, "Bouchaud OS",
+        crate::gui::theme::COLOR_TEXT_PRIMARY, CORPS_BARRE, true);
+
+    // Statistiques CPU/RAM/Disque, au centre.
     let stats = sys_stats_str();
-    let sw = fb::text_width(&stats, 9.0, false);
-    let sx = (fb::WIDTH / 2).saturating_sub(sw / 2);
-    fb::draw_text_prop(sx, 1, &stats, 0x5ab4d6, 9.0, false);
+    let largeur = fb::text_width(&stats, CORPS_BARRE - 1.0, false);
+    let x = (fb::WIDTH / 2).saturating_sub(largeur / 2);
+    fb::draw_text_prop(x, ligne, &stats,
+        crate::gui::theme::COLOR_TEXT_SECONDARY, CORPS_BARRE - 1.0, false);
 
-    // Horloge à droite
+    // Horloge, a droite.
     let dt = rtc::now();
-    let clk = format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second);
-    let cw = fb::text_width(&clk, 9.0, true);
-    fb::draw_text_prop(fb::WIDTH - cw - 4, 1, &clk, 0xf0c060, 9.0, true);
+    let heure = format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second);
+    let largeur = fb::text_width(&heure, CORPS_BARRE, true);
+    fb::draw_text_prop(fb::WIDTH - largeur - window::MARGE_BARRE as usize * 2 - 2,
+        ligne, &heure, crate::gui::theme::COLOR_TEXT_PRIMARY, CORPS_BARRE, true);
 }
 
 fn sys_stats_str() -> String {
@@ -733,33 +809,32 @@ fn tronque_a_largeur(s: &str, largeur: usize, px: f32) -> &str {
 }
 
 pub(crate) fn draw_taskbar(wins: &[Win], menu_open: bool) {
-    // Fond gradient foncé
-    for y in 0..BAR_H {
-        let c = lerp_color(0x0d1a30, 0x0a1224, y, BAR_H);
-        fb::fill_rect_rgb(0, fb::HEIGHT - BAR_H + y, fb::WIDTH, 1, c);
-    }
-    // Ligne de séparation en haut
-    fb::fill_rect_rgb(0, fb::HEIGHT - BAR_H, fb::WIDTH, 1, 0x1e4080);
+    let sommet = fb::HEIGHT - BAR_H;
+    fond_de_barre(sommet, false);
 
-    // Bouton Start
+    let focus = indice_focus(wins);
+    let rayon = crate::gui::theme::RADIUS_SM;
+
+    // Bouton Demarrer : accentue quand le menu est ouvert, sourd sinon. Meme
+    // forme arrondie que le chrome des fenetres.
     let sb = start_btn();
-    let (sb_top, sb_bot) = if menu_open {
-        (0x0c5cbf, 0x0a4a9e)
-    } else {
-        (0x1a3f6b, 0x102a4a)
-    };
-    for dy in 0..(sb.h as usize) {
-        let c = lerp_color(sb_top, sb_bot, dy, sb.h as usize);
-        fb::fill_rect_rgb(sb.x as usize, sb.y as usize + dy, sb.w as usize, 1, c);
-    }
-    // Reflet haut du bouton Start
-    fb::fill_rect_rgb(sb.x as usize, sb.y as usize, sb.w as usize, 1, 0x5599ee);
-    // Bordure Start
-    fb::fill_rect_rgb(sb.x as usize, sb.y as usize, 1, sb.h as usize, 0x2a5aaa);
-    fb::fill_rect_rgb(sb.x as usize + sb.w as usize - 1, sb.y as usize, 1, sb.h as usize, 0x2a5aaa);
-    fb::draw_text_prop(sb.x as usize + 4, sb.y as usize + 1, "Start", 0xffffff, 9.0, true);
+    let cadre = crate::gui::windowing::Rect::new(sb.x, sb.y, sb.w as u32, sb.h as u32);
+    let fond = if menu_open { crate::gui::theme::COLOR_ACCENT }
+        else { crate::gui::theme::COLOR_SURFACE_ELEVATED };
+    pave_arrondi(cadre, rayon, fond);
+    let corps = CORPS_BARRE - 1.0;
+    let etiquette = "Demarrer";
+    let largeur = fb::text_width(etiquette, corps, true);
+    fb::draw_text_prop(
+        (sb.x as usize) + (sb.w as usize).saturating_sub(largeur) / 2,
+        ligne_texte_barre(sommet),
+        etiquette,
+        crate::gui::theme::COLOR_TEXT_PRIMARY,
+        corps,
+        true,
+    );
 
-    // Boutons des fenêtres dans la barre
+    // Boutons des fenetres.
     for (i, w) in wins.iter().enumerate() {
         let b = taskbar_btn(i);
         if b.x + b.w > fb::WIDTH as i32 { break; }
@@ -775,21 +850,29 @@ pub(crate) fn draw_taskbar(wins: &[Win], menu_open: bool) {
         // juste en dessous. Un libelle qui debordait chez le voisin aurait ete
         // emporte par le culling.
         if !fb::decoupe_touche(bx, by, bw, bh) { continue }
-        // Fond du bouton
-        for dy in 0..bh {
-            let c = lerp_color(0x1e3462, 0x142446, dy, bh);
-            fb::fill_rect_rgb(bx, by + dy, bw, 1, c);
+
+        let actif = focus == Some(i) && !w.min;
+        let cadre = crate::gui::windowing::Rect::new(b.x, b.y, bw as u32, bh as u32);
+        let fond = if actif { crate::gui::theme::COLOR_SURFACE_ELEVATED }
+            else { crate::gui::theme::COLOR_SURFACE };
+        pave_arrondi(cadre, rayon, fond);
+
+        // La fenetre au premier plan porte un liset d'accent en bas, comme un
+        // onglet actif. Une fenetre minimisee n'en a pas : c'est le seul signe
+        // qui distingue « au-dessus » de « rangee », et il manquait.
+        if actif {
+            fb::fill_rect_rgb(bx + 3, by + bh - 2, bw.saturating_sub(6), 2,
+                crate::gui::theme::COLOR_ACCENT);
         }
-        // Reflet
-        fb::fill_rect_rgb(bx, by, bw, 1, 0x4477cc);
-        // Bordure
-        fb::fill_rect_rgb(bx, by, 1, bh, 0x2a4a88);
-        fb::fill_rect_rgb(bx + bw - 1, by, 1, bh, 0x2a4a88);
+
+        let couleur = if w.min { crate::gui::theme::COLOR_TEXT_SECONDARY }
+            else { crate::gui::theme::COLOR_TEXT_PRIMARY };
         // Label, tronque a la LARGEUR du bouton et non a un nombre de
         // caracteres : « Navigateur » et « Fichiers » n'ont pas la meme largeur
         // a sept caracteres, et le premier debordait sur le bouton suivant.
-        let lbl = tronque_a_largeur(&w.title, bw.saturating_sub(4), 9.0);
-        fb::draw_text_prop(bx + 2, by + 1, lbl, 0xd0e8ff, 9.0, false);
+        let lbl = tronque_a_largeur(&w.title, bw.saturating_sub(20), corps);
+        fb::draw_text_prop(bx + 10, ligne_texte_barre(sommet), lbl, couleur,
+            corps, false);
     }
 }
 
@@ -807,33 +890,27 @@ pub(crate) fn draw_menu(mx: i32, my: i32) {
     let debord = DEBORD_OMBRE as usize;
     fb::fill_rect_rgb(mxi + debord, myi + debord, mw, mh, 0x030608);
 
-    // Fond principal sombre
-    for dy in 0..mh {
-        let c = lerp_color(0x131c2e, 0x0d1424, dy, mh);
-        fb::fill_rect_rgb(mxi, myi + dy, mw, 1, c);
-    }
+    // BOUCHAUD_GUI_COQUILLE_V1 : meme matiere que les fenetres -- surface du
+    // theme, coins arrondis, filet de bordure -- plutot que les bleus en dur
+    // d'un theme qui n'existe plus ailleurs.
+    let cadre = crate::gui::windowing::Rect::new(mr.x, mr.y, mw as u32, mh as u32);
+    let rayon = crate::gui::theme::RADIUS_MD;
+    pave_arrondi(cadre, rayon, crate::gui::theme::COLOR_SURFACE);
 
-    // Bande d'accent bleue à gauche
-    let stripe_w = 4usize;
-    for dy in 0..mh {
-        let c = lerp_color(0x0078d4, 0x004a8a, dy, mh);
-        fb::fill_rect_rgb(mxi, myi + dy, stripe_w, 1, c);
-    }
+    // Bordure
+    fb::fill_rect_rgb(mxi, myi, mw, 1, crate::gui::theme::COLOR_BORDER);
+    fb::fill_rect_rgb(mxi, myi, 1, mh, crate::gui::theme::COLOR_BORDER);
+    fb::fill_rect_rgb(mxi + mw - 1, myi, 1, mh, crate::gui::theme::COLOR_BORDER);
+    fb::fill_rect_rgb(mxi, myi + mh - 1, mw, 1, crate::gui::theme::COLOR_BORDER);
 
-    // Bordure du menu
-    fb::fill_rect_rgb(mxi, myi, mw, 1, 0x2a4580);
-    fb::fill_rect_rgb(mxi, myi, 1, mh, 0x2a4580);
-    fb::fill_rect_rgb(mxi + mw - 1, myi, 1, mh, 0x2a4580);
-    fb::fill_rect_rgb(mxi, myi + mh - 1, mw, 1, 0x2a4580);
-
-    // Icônes associées à chaque item
-    let icon_colors: &[u32] = &[
-        0x28c840, // Terminal
-        0xf9ab00, // Fichiers
-        0x00b4d8, // Moniteur
-        0x888888, // Calculatrice
+    // Pastilles des entrees : la seule couleur vive du menu, une par action.
+    let pastilles: &[u32] = &[
+        0x3fb950, // Terminal
+        0xd29922, // Fichiers
+        0x39c5cf, // Moniteur
+        0x8b949e, // Calculatrice
         0xff7b72, // Rustpad
-        0xef4444, // Quitter
+        crate::gui::theme::COLOR_DANGER, // Quitter
     ];
 
     // BOUCHAUD_GUI_HOVER_CONTRAT_V1
@@ -846,52 +923,48 @@ pub(crate) fn draw_menu(mx: i32, my: i32) {
     let hover_row: Option<usize> = window::ligne_menu_survolee(mx, my);
 
     let sep_idx = MENU.len() - 1; // index de "Quitter"
-
-    // Zone vide en haut
-    // (optionnel: on pourrait y mettre un logo)
+    let bande = crate::gui::disposition::BANDE_ACCENT as usize;
 
     for (i, (item, _kind)) in MENU.iter().enumerate() {
         let iy = myi + MENU_HEADER_H as usize + i * MENU_ITEM_H as usize;
 
         // Séparateur avant Quitter
         if i == sep_idx {
-            fb::fill_rect_rgb(mxi + stripe_w + 4, iy, mw - stripe_w - 8, 1, 0x1e3a5f);
+            fb::fill_rect_rgb(mxi + bande + 4, iy, mw - bande - 8, 1,
+                crate::gui::theme::COLOR_BORDER);
         }
 
-        // Fond survolé (highlight)
+        // Fond survolé : un pave arrondi, comme un bouton de barre.
         if hover_row == Some(i) {
-            for dy in 0..MENU_ITEM_H as usize {
-                let c = lerp_color(0x1e3f6b, 0x162f55, dy, MENU_ITEM_H as usize);
-                fb::fill_rect_rgb(mxi + stripe_w, iy + dy, mw - stripe_w, 1, c);
-            }
-            // Bordure de sélection à gauche
-            fb::fill_rect_rgb(mxi + stripe_w, iy, 2, MENU_ITEM_H as usize, 0x4a9eff);
+            let ligne = crate::gui::windowing::Rect::new(
+                mr.x + bande as i32, iy as i32,
+                (mw - bande * 2) as u32, MENU_ITEM_H as u32);
+            pave_arrondi(ligne, crate::gui::theme::RADIUS_SM,
+                crate::gui::theme::COLOR_SURFACE_ELEVATED);
         }
 
-        // Icône de l'item (petit carré coloré 12x12)
-        let ic = icon_colors.get(i).copied().unwrap_or(0x555577);
-        let icon_x = mxi + stripe_w + 6;
-        let icon_y = iy + (MENU_ITEM_H as usize - 12) / 2;
-        fb::fill_rect_rgb(icon_x, icon_y, 12, 12, ic);
-        // Reflet en haut de l'icône
-        fb::fill_rect_rgb(icon_x, icon_y, 12, 1, lerp_color(ic, 0xffffff, 50, 100));
-        fb::fill_rect_rgb(icon_x, icon_y, 1, 12, lerp_color(ic, 0xffffff, 30, 100));
+        // Pastille de l'entree.
+        let teinte = pastilles.get(i).copied().unwrap_or(0x555577);
+        let pastille_x = mxi + bande + 8;
+        let pastille_y = iy + (MENU_ITEM_H as usize - 10) / 2;
+        pave_arrondi(
+            crate::gui::windowing::Rect::new(pastille_x as i32, pastille_y as i32, 10, 10),
+            3, teinte);
 
-        // Texte de l'item en TTF
-        let is_quit = i == sep_idx;
-        let text_col = if is_quit {
-            0xff7b7b
+        // Texte de l'entree.
+        let couleur = if i == sep_idx {
+            crate::gui::theme::COLOR_DANGER
         } else if hover_row == Some(i) {
-            0xffffff
+            crate::gui::theme::COLOR_TEXT_PRIMARY
         } else {
-            0xb8d0ee
+            crate::gui::theme::COLOR_TEXT_SECONDARY
         };
         fb::draw_text_prop(
-            mxi + stripe_w + 24,
-            iy + (MENU_ITEM_H as usize - 10) / 2,
+            mxi + bande + 26,
+            iy + (MENU_ITEM_H as usize - 12) / 2,
             item,
-            text_col,
-            10.0,
+            couleur,
+            12.0,
             hover_row == Some(i),
         );
     }

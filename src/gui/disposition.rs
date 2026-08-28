@@ -30,7 +30,7 @@
 use super::protocole::Rect;
 
 /// Hauteur des barres haut et bas. Doit rester egale a `window::BAR_H`.
-pub const HAUTEUR_BARRE: u32 = 11;
+pub const HAUTEUR_BARRE: u32 = 30;
 
 /// Debord de l'ombre portee, en pixels.
 ///
@@ -41,16 +41,16 @@ pub const HAUTEUR_BARRE: u32 = 11;
 pub const DEBORD_OMBRE: u32 = 8;
 
 /// Hauteur d'une entree du menu Demarrer. Egale a `window::MENU_ITEM_H`.
-pub const HAUTEUR_LIGNE_MENU: i32 = 22;
+pub const HAUTEUR_LIGNE_MENU: i32 = 30;
 
 /// Bandeau vide en haut du menu. Egale a `window::MENU_HEADER_H`.
-pub const ENTETE_MENU: i32 = 8;
+pub const ENTETE_MENU: i32 = 10;
 
 /// Largeur de la bande d'accent bleue, a gauche du menu.
 ///
 /// `draw_menu` la peint puis commence les lignes juste apres : c'est aussi la
 /// borne gauche de la zone sensible au survol.
-pub const BANDE_ACCENT: i32 = 4;
+pub const BANDE_ACCENT: i32 = 6;
 
 /// Empreinte du curseur logiciel (fleche 12x19), volontairement un peu large.
 pub const LARGEUR_CURSEUR: u32 = 14;

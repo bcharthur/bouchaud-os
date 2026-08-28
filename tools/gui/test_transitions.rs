@@ -121,22 +121,37 @@ fn positions_initiales() -> [(i32, i32); ICONES] {
     [(8, 20), (8, 84), (8, 148)]
 }
 
+// Les boutons de la coquille, tels que `window::start_btn` et
+// `window::taskbar_btn` les posent. Le modele suit la vraie geometrie : c'est
+// elle que les degats de `transition` doivent couvrir.
+const MARGE_BARRE: i32 = 4;
+const BOUTON_H: u32 = HAUTEUR_BARRE - MARGE_BARRE as u32 * 2;
+const DEMARRER_W: u32 = 74;
+const TACHE_W: u32 = 148;
+const TACHE_PAS: i32 = TACHE_W as i32 + 6;
+const TACHE_X0: i32 = MARGE_BARRE + DEMARRER_W as i32 + 10;
+
+fn sommet_barre_basse() -> i32 {
+    H as i32 - HAUTEUR_BARRE as i32 + MARGE_BARRE
+}
+
 fn bouton_demarrer() -> Rect {
-    Rect::neuf(2, H as i32 - HAUTEUR_BARRE as i32 + 1, 38, 9)
+    Rect::neuf(MARGE_BARRE, sommet_barre_basse(), DEMARRER_W, BOUTON_H)
 }
 
 fn bouton_taches(index: usize) -> Rect {
-    Rect::neuf(44 + index as i32 * 56, H as i32 - HAUTEUR_BARRE as i32 + 1, 54, 9)
+    Rect::neuf(TACHE_X0 + index as i32 * TACHE_PAS, sommet_barre_basse(),
+        TACHE_W, BOUTON_H)
 }
 
 /// Champ de l'heure : coin haut droit de la barre du haut.
 fn champ_horloge() -> Rect {
-    Rect::neuf(L as i32 - 60, 1, 56, 9)
+    Rect::neuf(L as i32 - 90, MARGE_BARRE, 82, BOUTON_H)
 }
 
 /// Champ des statistiques CPU/RAM/Disque : centre de la barre du haut.
 fn champ_stats() -> Rect {
-    Rect::neuf(L as i32 / 2 - 80, 1, 160, 9)
+    Rect::neuf(L as i32 / 2 - 140, MARGE_BARRE, 280, BOUTON_H)
 }
 
 // ─── Etat du bureau ────────────────────────────────────────────────────────

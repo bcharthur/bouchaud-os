@@ -99,7 +99,7 @@ fn le_rectangle_de_l_horloge_contient_les_pixels_de_l_heure() {
 #[test]
 fn le_rectangle_de_l_horloge_contient_aussi_les_statistiques() {
     let haute = barre_haute(L);
-    let stats = Rect::neuf(L as i32 / 2 - 200, 1, 400, 9);
+    let stats = Rect::neuf(L as i32 / 2 - 200, 1, 400, HAUTEUR_BARRE - 2);
     assert_eq!(stats.intersecte(&haute), stats);
     assert!(!se_touchent(stats, barre_taches(L, H)));
 }
@@ -107,7 +107,11 @@ fn le_rectangle_de_l_horloge_contient_aussi_les_statistiques() {
 #[test]
 fn une_barre_reste_dans_l_ecran() {
     for largeur in [1u32, 320, 1280] {
-        for hauteur in [11u32, 200, 720] {
+        // La plus petite hauteur d'ecran qui a un sens est celle d'une barre :
+        // ecrire `11` en dur figeait une valeur qui a change avec le style de
+        // la coquille, alors que la propriete testee -- une barre reste dans
+        // l'ecran -- n'en depend pas.
+        for hauteur in [HAUTEUR_BARRE, 200, 720] {
             let ecran = Rect::neuf(0, 0, largeur, hauteur);
             let haute = barre_haute(largeur);
             let basse = barre_taches(largeur, hauteur);
