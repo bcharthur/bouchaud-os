@@ -113,6 +113,14 @@ try {
         & python .\tools\assets\fabrique-icones.py --verifie
     }
 
+    Invoke-Step "jeu de caracteres des pages" {
+        & python .\tools\userland\navigateur\test_charset.py
+    }
+
+    Invoke-Step "polices du navigateur (source)" {
+        & python .\tools\verifie-polices-navigateur.py
+    }
+
     if (Test-Path ".\tools\verifie-protocole-gui.py") {
         Invoke-Step "coherence protocole GUI" {
             & python .\tools\verifie-protocole-gui.py
