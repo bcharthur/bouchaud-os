@@ -113,6 +113,8 @@ pub struct Comptes {
     // --- du temps, et chaque ligne a son unite ---
     tenue_ns: AtomicU64,
     attente_ns: AtomicU64,
+    attente_max_ns: AtomicU64,
+    attente_max_contexte: AtomicU64,
     reprise_ns: AtomicU64,
     reprise_max_ns: AtomicU64,
 
@@ -135,6 +137,25 @@ pub struct Comptes {
     horloge_a_rebours: AtomicU64,
 }
 
+/// Empaquette l'origine, le CPU et le seau dans un seul atomique.
+///
+/// Trois champs separes se liraient a trois instants differents : le lecteur
+/// pourrait composer l'origine d'un releve avec le CPU d'un autre, et designer
+/// un coupable qui n'existe pas. Un seul mot les rend indissociables.
+#[inline]
+const fn contexte(origine: u32, cpu: usize, seau: usize) -> u64 {
+    ((origine as u64) << 48) | (((cpu as u64) & 0xffff) << 32) | ((seau as u64) & 0xffff_ffff)
+}
+
+#[inline]
+const fn decontexte(mot: u64) -> (u32, usize, usize) {
+    (
+        (mot >> 48) as u32,
+        ((mot >> 32) & 0xffff) as usize,
+        (mot & 0xffff_ffff) as usize,
+    )
+}
+
 impl Comptes {
     pub const fn neuf() -> Self {
         Self {
@@ -144,6 +165,8 @@ impl Comptes {
             debut_origine: AtomicU64::new(0),
             tenue_ns: AtomicU64::new(0),
             attente_ns: AtomicU64::new(0),
+            attente_max_ns: AtomicU64::new(0),
+            attente_max_contexte: AtomicU64::new(0),
             reprise_ns: AtomicU64::new(0),
             reprise_max_ns: AtomicU64::new(0),
             spins: AtomicU64::new(0),
@@ -227,9 +250,46 @@ impl Comptes {
 
     /// Temps d'attente avant une acquisition reussie. Du temps de CPU : le
     /// cumul de plusieurs coeurs peut depasser la fenetre, et c'est normal.
+    ///
+    /// Le cumul ne repond PAS a la question qui compte. « Aucune acquisition
+    /// ne doit prendre plus de 50 ms » est un critere sur le MAXIMUM : mille
+    /// attentes d'une microseconde et une attente de deux secondes donnent le
+    /// meme cumul, et seule la seconde est un figement. On garde donc la plus
+    /// longue, avec de quoi la situer.
     #[inline]
-    pub fn note_attente(&self, ns: u64) {
+    pub fn note_attente(&self, ns: u64, origine: u32, cpu: usize, seau: usize) {
         self.attente_ns.fetch_add(ns, Ordering::Relaxed);
+
+        let mut record = self.attente_max_ns.load(Ordering::Relaxed);
+        while ns > record {
+            match self.attente_max_ns.compare_exchange_weak(
+                record, ns, Ordering::Relaxed, Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    // La DUREE est exacte -- c'est elle que le critere teste.
+                    // Le contexte est publie juste apres : un CPU qui battrait
+                    // le record dans cet intervalle pourrait laisser sa duree
+                    // avec notre contexte. Le rendre atomique demanderait un
+                    // seqlock sur un chemin d'acquisition, ce qui couterait
+                    // plus que ce que ce diagnostic vaut.
+                    self.attente_max_contexte.store(
+                        contexte(origine, cpu, seau),
+                        Ordering::Relaxed,
+                    );
+                    break;
+                }
+                Err(vu) => record = vu,
+            }
+        }
+    }
+
+    /// `(ns, origine, cpu, seau)` de la plus longue attente avant acquisition.
+    #[inline]
+    pub fn attente_max(&self) -> (u64, u32, usize, usize) {
+        let ns = self.attente_max_ns.load(Ordering::Relaxed);
+        let (origine, cpu, seau) =
+            decontexte(self.attente_max_contexte.load(Ordering::Relaxed));
+        (ns, origine, cpu, seau)
     }
 
     /// La part de l'attente subie par une pile reprise apres commutation.

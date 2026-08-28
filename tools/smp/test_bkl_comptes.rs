@@ -94,6 +94,7 @@ fn la_somme_des_tenues_ne_depasse_jamais_le_temps_ecoule() {
                 let tenue = comptes.ferme(horloge.maintenant(), cpu);
                 drop(garde);
 
+                comptes.note_attente(17, 1, cpu, (tour % 17) as usize);
                 let tenue = tenue.expect("toute acquisition a sa liberation");
                 assert_eq!(tenue.cpu_acquisition, cpu);
                 assert_eq!(tenue.cpu_liberation, cpu);
@@ -281,11 +282,11 @@ fn un_horodatage_nul_ne_se_confond_pas_avec_l_absence_de_tenue() {
 fn la_reprise_est_isolee_de_l_attente_globale() {
     let c = Comptes::neuf();
     // Un `enter` ordinaire : de l'attente, pas de la reprise.
-    c.note_attente(300);
+    c.note_attente(300, 1, 0, 7);
     // Une reprise apres commutation : les deux.
-    c.note_attente(9_000_000_000);
+    c.note_attente(9_000_000_000, 3, 2, 23);
     c.note_reprise(9_000_000_000);
-    c.note_attente(50);
+    c.note_attente(50, 3, 1, 23);
     c.note_reprise(50);
 
     assert_eq!(c.attente_ns(), 9_000_000_350);
@@ -305,6 +306,38 @@ fn la_reprise_est_isolee_de_l_attente_globale() {
     c.note_spin();
     c.note_spin();
     assert_eq!(c.spins(), 2);
+}
+
+#[test]
+fn la_plus_longue_attente_garde_son_contexte_avec_elle() {
+    // « Aucune acquisition ne doit prendre plus de 50 ms » est un critere sur
+    // le MAXIMUM. Un cumul ne peut pas y repondre : mille attentes d'une
+    // microseconde et une attente de deux secondes le laissent identique.
+    let c = Comptes::neuf();
+    c.note_attente(1_000, 1, 0, 7);
+    c.note_attente(2_000_000_000, 3, 2, 23);
+    c.note_attente(5_000, 1, 1, 7);
+
+    let (ns, origine, cpu, seau) = c.attente_max();
+    assert_eq!(ns, 2_000_000_000);
+    assert_eq!(
+        (origine, cpu, seau), (3, 2, 23),
+        "duree et contexte doivent designer LA MEME attente : une duree juste          avec le mauvais coupable fait chercher au mauvais endroit",
+    );
+    assert_eq!(c.attente_ns(), 2_000_006_000, "le cumul reste, il repond a une                                                 autre question");
+}
+
+#[test]
+fn le_contexte_d_une_attente_survit_aux_valeurs_extremes() {
+    // Les trois champs partagent un mot de 64 bits. Un empaquetage errone ne
+    // se verrait qu'a la lecture d'un journal, sur un chiffre plausible.
+    let c = Comptes::neuf();
+    c.note_attente(1, 3, MAX_CPUS - 1, 511);
+    assert_eq!(c.attente_max(), (1, 3, MAX_CPUS - 1, 511));
+
+    let d = Comptes::neuf();
+    d.note_attente(u64::MAX, 0, 0, 0);
+    assert_eq!(d.attente_max(), (u64::MAX, 0, 0, 0));
 }
 
 #[test]

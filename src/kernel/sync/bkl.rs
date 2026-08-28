@@ -120,9 +120,11 @@ pub fn stats_du_seau(index: usize) -> (u64, u64, u64, u64) {
 }
 
 #[inline]
-fn note_attente(syscall_nr: u64, attente: u64) {
+fn note_attente(syscall_nr: u64, attente: u64, origine: u32, cpu: usize) {
+    let index = seau(syscall_nr);
     TOTAL_WAIT_NS.fetch_add(attente, Ordering::Relaxed);
-    ATTENTE_PAR_APPEL[seau(syscall_nr)].fetch_add(attente, Ordering::Relaxed);
+    ATTENTE_PAR_APPEL[index].fetch_add(attente, Ordering::Relaxed);
+    COMPTES.note_attente(attente, origine, cpu, index);
 }
 /// Plus longue tenue continue du verrou, et ou elle s'est produite.
 ///
@@ -725,6 +727,8 @@ pub fn enter() -> KernelGuard {
                 note_attente(
                     TENUE_SYSCALL[cpu].load(Ordering::Relaxed),
                     crate::kernel::timer::monotonic_ns().saturating_sub(wait_start),
+                    1,
+                    cpu,
                 );
                 return KernelGuard { cpu, active: true };
             }
@@ -937,7 +941,9 @@ pub fn resume_after_schedule(depth: usize) {
                 solde_parkings(cpu);
                 let attente =
                     crate::kernel::timer::monotonic_ns().saturating_sub(wait_start);
-                note_attente(TENUE_SYSCALL[cpu].load(Ordering::Relaxed), attente);
+                note_attente(
+                    TENUE_SYSCALL[cpu].load(Ordering::Relaxed), attente, 3, cpu,
+                );
                 // La MEME attente, isolee : c'est la reprise apres commutation
                 // qu'on soupconne de durer des secondes, et un cumul global la
                 // noierait dans celui de tous les `enter` du systeme.
@@ -1023,6 +1029,17 @@ pub struct ComptesBkl {
     pub tenue_ns: u64,
     /// Temps passe a attendre avant d'acquerir, tous CPU confondus.
     pub attente_ns: u64,
+    /// La plus longue attente UNIQUE avant acquisition, et ou elle a eu lieu.
+    ///
+    /// C'est sur elle que porte le critere « aucune acquisition ne doit
+    /// prendre plus de 50 ms » : mille attentes d'une microseconde et une
+    /// attente de deux secondes donnent le meme cumul, et seule la seconde est
+    /// un figement.
+    pub attente_max_ns: u64,
+    /// 1 = `enter`, 3 = `resume_after_schedule`.
+    pub attente_max_origine: u32,
+    pub attente_max_cpu: usize,
+    pub attente_max_seau: usize,
     /// La part de cette attente subie par une pile REPRISE apres commutation.
     pub reprise_ns: u64,
     /// La plus longue attente unique dans `resume_after_schedule`.
@@ -1050,7 +1067,13 @@ pub struct ComptesBkl {
 /// et un compteur lu une nanoseconde trop tot ne change aucune conclusion.
 pub fn comptes() -> ComptesBkl {
     let (sans_debut, sur_tenue, horloge_a_rebours) = COMPTES.anomalies();
+    let (attente_max_ns, attente_max_origine, attente_max_cpu, attente_max_seau) =
+        COMPTES.attente_max();
     ComptesBkl {
+        attente_max_ns,
+        attente_max_origine,
+        attente_max_cpu,
+        attente_max_seau,
         tenue_ns: COMPTES.tenue_ns(),
         attente_ns: COMPTES.attente_ns(),
         reprise_ns: COMPTES.reprise_ns(),
