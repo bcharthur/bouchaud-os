@@ -71,6 +71,7 @@ try {
     Invoke-RustTest "decoupe du texte" "tools\gui\test_texte.rs"
     Invoke-RustTest "lots du port serie" "tools\serie\test_lots.rs"
     Invoke-RustTest "decodeur PNG" "tools\gui\test_png.rs"
+    Invoke-RustTest "echeances de reveil" "tools\smp\test_echeances.rs"
     Invoke-RustTest "verdict protocole client" "tools\gui\test_silence.rs"
     Invoke-RustTest "BKL max/provenance" "tools\smp\test_bkl_max.rs"
     Invoke-RustTest "commutation SMP" "tools\smp\test_commutation.rs"
@@ -119,6 +120,10 @@ try {
 
     Invoke-Step "polices du navigateur (source)" {
         & python .\tools\verifie-polices-navigateur.py
+    }
+
+    Invoke-Step "echeances de reveil (source)" {
+        & python .\tools\verifie-echeances.py
     }
 
     if (Test-Path ".\tools\verifie-protocole-gui.py") {

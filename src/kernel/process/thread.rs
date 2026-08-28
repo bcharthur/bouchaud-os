@@ -3734,6 +3734,7 @@ pub(crate) fn park_current_on_until(wait_queue_key: usize, deadline_ns: u64) -> 
         task.wake_deadline_ns = deadline_ns;
         task.state = TaskState::Blocked;
     }
+    arme_echeance(deadline_ns);
     let profondeur_entree = smp_lock::profondeur_locale();
     while current().state == TaskState::Blocked {
         schedule();
@@ -4486,6 +4487,7 @@ pub fn sleep_ticks(ticks: u64) {
         task.wake_deadline_ns = deadline;
         task.state = TaskState::Blocked;
     }
+    arme_echeance(deadline);
 
     // `syscall_dispatch` conserve un BKL externe. Le suspendre ici, avant
     // meme de savoir si schedule() trouvera une autre tache, ferme le cas ou
@@ -4513,8 +4515,70 @@ pub fn sleep_ticks(ticks: u64) {
 }
 
 /// Reveille les taches dont le sommeil est echu, et declenche les `SIGALRM`.
+// BOUCHAUD_SCHED_ECHEANCE_HINT_V1
+//
+// # Ce que `wake_sleepers` coutait
+//
+// `schedule()` l'appelle a CHAQUE tour. Une tache bloquee -- un fil arrete sur
+// un futex, un `poll` en attente -- reste dans sa boucle `while Blocked
+// { schedule() }` : elle s'endort au `hlt`, le tick la reveille une
+// milliseconde plus tard, elle reprend le gros verrou, appelle `schedule()`,
+// qui balaie TOUTE la table des taches, puis se rendort.
+//
+// Avec quatre fils de Ladybird bloques -- ce que `[SMP-STALL]` montrait, deux
+// CPU dans `futex` pendant cent secondes d'affilee --, cela fait quatre mille
+// balayages complets par seconde, chacun sous le gros verrou, pour ne rien
+// trouver. C'est ce que mesurait `bkl_wait_delta_ns` : sept secondes d'attente
+// du verrou par fenetre de cinq.
+//
+// # Le raccourci
+//
+// Une borne INFERIEURE de la plus proche echeance. Tant que l'heure ne l'a pas
+// atteinte, aucune tache ne peut etre due, et le balayage est inutile.
+//
+// Le sens de l'inegalite est ce qui rend le raccourci sur : la borne peut etre
+// TROP TOT -- on balaie pour rien, ce qui coute mais ne perd rien --, jamais
+// trop tard. Chaque pose d'echeance la ramene vers le passe par `fetch_min`,
+// et chaque balayage reel la recalcule exactement.
+static PROCHAINE_ECHEANCE: crate::kernel::echeances::Echeances =
+    crate::kernel::echeances::Echeances::neuve();
+
+/// Declare une echeance. A appeler POUR CHAQUE `wake_deadline_ns` non nul.
+///
+/// `tools/verifie-echeances.py` refuse une ecriture qui ne passerait pas par
+/// ici : une echeance inconnue du raccourci ne serait jamais servie.
+pub(crate) fn arme_echeance(deadline_ns: u64) {
+    PROCHAINE_ECHEANCE.arme(deadline_ns);
+}
+
+/// Recalcule la borne exactement, apres un balayage.
+fn recalcule_echeance() {
+    let mut minimum = crate::kernel::echeances::JAMAIS;
+    for index in 0..tasks().len() {
+        let echeance = tasks()[index].wake_deadline_ns;
+        if tasks()[index].state == TaskState::Blocked && echeance != 0 && echeance < minimum {
+            minimum = echeance;
+        }
+    }
+    // Les alarmes vivent en TICKS ; la borne est en nanosecondes. Convertir --
+    // et non comparer les deux tels quels, ce qui est precisement l'erreur que
+    // `fire_alarms` portait.
+    let par_tick = 1_000_000_000 / crate::kernel::timer::TICKS_PER_SECOND;
+    for (_, echeance_ticks) in alarms().iter() {
+        let echeance = echeance_ticks.saturating_mul(par_tick);
+        if echeance < minimum {
+            minimum = echeance;
+        }
+    }
+    PROCHAINE_ECHEANCE.recale(minimum);
+}
+
 fn wake_sleepers() {
     let now = crate::kernel::timer::monotonic_ns();
+    // Le raccourci : une charge atomique au lieu d'un balayage complet.
+    if !PROCHAINE_ECHEANCE.doit_balayer(now) {
+        return;
+    }
     for index in 0..tasks().len() {
         if tasks()[index].state == TaskState::Blocked
             && tasks()[index].wake_deadline_ns != 0
@@ -4526,7 +4590,8 @@ fn wake_sleepers() {
             publish_ready(index);
         }
     }
-    fire_alarms(now);
+    fire_alarms(crate::kernel::timer::ticks());
+    recalcule_echeance();
 }
 
 /// Echeance du prochain `SIGALRM` par processus : (pid, tick).
@@ -4554,6 +4619,9 @@ pub fn set_alarm(deadline: u64) -> u64 {
     list.retain(|(p, _)| *p != pid);
     if deadline != 0 {
         list.push((pid, deadline));
+        // La borne est en nanosecondes, l'alarme en ticks.
+        let par_tick = 1_000_000_000 / crate::kernel::timer::TICKS_PER_SECOND;
+        arme_echeance(deadline.saturating_mul(par_tick));
     }
     previous
 }
@@ -4569,16 +4637,26 @@ pub fn peek_alarm() -> u64 {
 }
 
 /// Leve les `SIGALRM` dont l'echeance est atteinte.
-fn fire_alarms(now: u64) {
+// BOUCHAUD_SCHED_ALARME_UNITE_V1
+//
+// Les alarmes sont posees en TICKS -- `sys_alarm` et `sys_setitimer` ecrivent
+// `timer::ticks() + n` --, et `fire_alarms` recevait des NANOSECONDES. Une
+// nanoseconde vaut un millionieme de tick : `now >= deadline` etait donc vrai
+// des le premier appel, et tout `alarm(60)` livrait son `SIGALRM`
+// immediatement.
+//
+// Rien ne le signalait : un signal livre trop tot ressemble a un signal livre.
+// La fonction prend desormais des ticks, comme les valeurs qu'elle compare.
+fn fire_alarms(maintenant_ticks: u64) {
     let expired: Vec<u32> = alarms()
         .iter()
-        .filter(|(_, deadline)| now >= *deadline)
+        .filter(|(_, deadline)| maintenant_ticks >= *deadline)
         .map(|(pid, _)| *pid)
         .collect();
     if expired.is_empty() {
         return;
     }
-    alarms().retain(|(_, deadline)| now < *deadline);
+    alarms().retain(|(_, deadline)| maintenant_ticks < *deadline);
     for pid in expired {
         if let Some(process) = process_by_pid(pid) {
             process.signals.lock().raise(crate::kernel::signal::SIGALRM);
@@ -4628,19 +4706,38 @@ pub fn futex_wait(uaddr: u64, expected: u32, timeout_ms: u64) -> bool {
         crate::kernel::timer::monotonic_ns()
             .saturating_add(timeout_ms.saturating_mul(1_000_000))
     };
+    // BOUCHAUD_SCHED_FUTEX_ECHEANCE_V1
+    //
+    // # Le defaut
+    //
+    // L'echeance ne vivait que dans la variable locale `deadline_ns` :
+    // `task.wake_deadline_ns` restait a ZERO. Or c'est ce champ que
+    // `wake_sleepers` consulte. Une attente a delai ne pouvait donc jamais
+    // etre servie par un autre CPU : elle n'expirait que lorsque CETTE tache
+    // reprenait la main et testait `expired` elle-meme.
+    //
+    // Conjugue a la boucle ci-dessous, cela donnait ce que `[SMP-STALL]`
+    // montrait : deux CPU dans `futex` pendant plus de cent secondes
+    // d'affilee, chacun reveille par le tick, reprenant le gros verrou et
+    // balayant la table des taches mille fois par seconde pour rien.
+    //
+    // L'echeance est desormais PUBLIEE, comme celle de `sleep_ticks` et de
+    // `park_current_on_until`. `wake_sleepers` la sert depuis n'importe quel
+    // CPU, et le test `expired` ci-dessous redevient ce qu'il aurait toujours
+    // du etre : un filet, pas le seul mecanisme.
     {
         let task = current();
         task.futex_key = key;
-        task.wake_deadline_ns = 0;
+        task.wake_deadline_ns = deadline_ns;
         task.state = TaskState::Blocked;
     }
+    arme_echeance(deadline_ns);
 
     loop {
-        if !schedule() {
-            // schedule() a deja dormi si cette tache etait la seule runnable.
-            // Ne jamais refaire HLT apres reprise du BKL de syscall.
-            wake_sleepers();
-        }
+        // `schedule()` appelle DEJA `wake_sleepers()` a chaque tour. L'appeler
+        // une seconde fois ici doublait le balayage de la table des taches --
+        // sous le gros verrou, a chaque tick, pour chaque fil bloque.
+        schedule();
         // L'ordre des deux tests compte. `wake_sleepers` remet la tache en
         // `Ready` des que son echeance est atteinte, exactement comme le ferait
         // un `FUTEX_WAKE` : tester l'etat en premier ferait passer tout delai
