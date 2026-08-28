@@ -70,6 +70,7 @@ try {
     Invoke-RustTest "systeme de fenetrage" "tools\gui\test_fenetrage.rs"
     Invoke-RustTest "decoupe du texte" "tools\gui\test_texte.rs"
     Invoke-RustTest "lots du port serie" "tools\serie\test_lots.rs"
+    Invoke-RustTest "decodeur PNG" "tools\gui\test_png.rs"
     Invoke-RustTest "verdict protocole client" "tools\gui\test_silence.rs"
     Invoke-RustTest "BKL max/provenance" "tools\smp\test_bkl_max.rs"
     Invoke-RustTest "commutation SMP" "tools\smp\test_commutation.rs"
@@ -106,6 +107,10 @@ try {
 
     Invoke-Step "ecriture incrementale de /persist (source)" {
         & python .\tools\verifie-persistance.py
+    }
+
+    Invoke-Step "icones du bureau (reproductibles)" {
+        & python .\tools\assets\fabrique-icones.py --verifie
     }
 
     if (Test-Path ".\tools\verifie-protocole-gui.py") {

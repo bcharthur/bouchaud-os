@@ -48,6 +48,8 @@ pub mod theme;
 pub mod graphics;
 
 pub mod texte;
+pub mod png;
+pub mod icones;
 pub mod font;
 
 

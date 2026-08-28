@@ -94,7 +94,7 @@ pub(crate) const ICONS: [(&str, usize); 5] = [
 
 /// Positions des icones de bureau (x, y). Modifiables par drag-and-drop.
 pub(crate) static mut ICON_POSITIONS: [(i32, i32); 5] = [
-    (14, 44), (14, 122), (14, 200), (14, 278), (14, 356),
+    (16, 42), (16, 132), (16, 222), (16, 312), (16, 402),
 ];
 
 /// Etat applicatif porte par une fenetre.
@@ -225,9 +225,13 @@ pub(crate) fn taskbar_btn(i: usize) -> Rect {
 }
 
 /// Rectangle de l'icone de bureau `i`. Position pilotee par ICON_POSITIONS (drag).
+/// Taille d'une cellule d'icone de bureau : l'image, plus la place du libelle.
+pub(crate) const ICONE_CELLULE_W: i32 = 78;
+pub(crate) const ICONE_CELLULE_H: i32 = 80;
+
 pub(crate) fn icon_rect(i: usize) -> Rect {
     let (x, y) = unsafe { ICON_POSITIONS[i] };
-    Rect { x, y, w: 56, h: 60 }
+    Rect { x, y, w: ICONE_CELLULE_W, h: ICONE_CELLULE_H }
 }
 
 /// Zone utile d'une fenetre : l'interieur des bordures, sous la barre de titre.

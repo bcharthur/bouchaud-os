@@ -824,6 +824,38 @@ fn melange_pixel(buf: &mut [u32], idx: usize, rgb: u32, alpha: u8) {
     buf[idx] = (r << 16) | (g << 8) | b;
 }
 
+// BOUCHAUD_GFX_IMAGE_SEGMENT_V1
+//
+// Compose une ligne d'image `0xAARRGGBB` sur le backbuffer.
+//
+// Meme raison d'etre que `blend_span` : la decoupe est evaluee UNE fois pour la
+// ligne au lieu d'une fois par pixel. Une icone de 56x56 coutait sinon 3 136
+// appels a `blend_rgb`, chacun relisant quatre atomiques -- pour une image que
+// le compositeur repeint a chaque degat qui la touche.
+//
+// L'alpha n'est PAS premultiplie : c'est ce que rend `gui::png::decode`, et le
+// melange se fait ici.
+pub fn blit_argb_span(x: usize, y: usize, ligne: &[u32]) {
+    if ligne.is_empty() { return }
+    let buf = back();
+    if buf.is_empty() { return }
+    let (cx0, cy0, cx1, cy1) = clip();
+    if y < cy0 || y >= cy1 { return }
+    // Bornes de colonnes, une fois pour toute la ligne.
+    let debut = cx0.saturating_sub(x).min(ligne.len());
+    let fin = cx1.saturating_sub(x).min(ligne.len());
+    if fin <= debut { return }
+    let base = y * WIDTH + x;
+    let mut ecrits = 0u64;
+    for (decalage, &source) in ligne[debut..fin].iter().enumerate() {
+        let alpha = (source >> 24) as u8;
+        if alpha == 0 { continue }
+        melange_pixel(buf, base + debut + decalage, source & 0x00ff_ffff, alpha);
+        ecrits += 1;
+    }
+    if ecrits != 0 { PIXELS_DESSINES.fetch_add(ecrits, Ordering::Relaxed); }
+}
+
 pub fn fill_rect_rgb(x: usize, y: usize, w: usize, h: usize, rgb: u32) {
     let buf = back();
     if buf.is_empty() { return; }

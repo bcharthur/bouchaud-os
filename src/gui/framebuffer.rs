@@ -7,7 +7,8 @@
 #[allow(unused_imports)]
 pub use crate::drivers::gfx::{
     draw_text, draw_text_scaled, draw_text_rgb, draw_text_prop, text_width,
-    fill_rect_rgb, blit_rgb, blend_rgb, blend_span, pixel_rgb, get_pixel_rgb, ligne_mut,
+    fill_rect_rgb, blit_rgb, blend_rgb, blend_span, blit_argb_span, pixel_rgb,
+    get_pixel_rgb, ligne_mut,
     enter, fill_rect, handoff_to_userland, leave, pixel, present, present_rect, rect,
     resume_from_userland, userland_owns_display,
     set_clip, reset_clip, pixels_dessines, pixels_texte, clip_rect, decoupe_touche,
