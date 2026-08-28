@@ -62,6 +62,18 @@ if not source_header.is_file():
 destination = root / "Services/WebContent/BouchaudChrome.h"
 shutil.copyfile(source_header, destination)
 
+# BOUCHAUD_CHROME_ATLAS_V1
+#
+# Le chrome inclut son atlas de glyphes, qui doit donc voyager avec lui.
+# L'oublier ne se voit pas ici : cela echoue a la compilation de WebContent,
+# c'est-a-dire vingt minutes plus tard.
+source_atlas = here / "chrome" / "BouchaudAtlas.h"
+if not source_atlas.is_file():
+    raise SystemExit(
+        f"M11 : {source_atlas} absent -- lancer "
+        f"tools/ladybird/chrome/fabrique-atlas.py")
+shutil.copyfile(source_atlas, root / "Services/WebContent/BouchaudAtlas.h")
+
 # En-tete seul : aucune modification de `Services/WebContent/CMakeLists.txt`,
 # donc aucune divergence de construction de plus avec l'arbre epingle.
 

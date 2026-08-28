@@ -126,6 +126,14 @@ try {
         & python .\tools\verifie-polices-web.py
     }
 
+    Invoke-Step "atlas de glyphes du chrome" {
+        & python .\tools\ladybird\chrome\test_atlas.py
+    }
+
+    Invoke-Step "atlas du chrome (reproductible)" {
+        & python .\tools\ladybird\chrome\fabrique-atlas.py --verifie
+    }
+
     Invoke-Step "echeances de reveil (source)" {
         & python .\tools\verifie-echeances.py
     }
