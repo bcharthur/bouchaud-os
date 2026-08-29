@@ -1,0 +1,38 @@
+Bouchaud OS — BKL P0 V3 — drop-in
+
+Contenu
+=======
+src/kernel/sync/bkl.rs
+
+Ce patch part du BKL P0/P1 V2 (réveil ciblé) et ajoute ce qui manquait encore
+dans le chemin critique observé avec Ladybird :
+
+- priorité aux continuations qui reviennent de suspend_for_schedule();
+- anti-barging : un nouvel enter()/try_enter() ne peut plus passer devant une
+  continuation déjà entrée dans resume_after_schedule();
+- double vérification autour du CAS OWNER pour fermer la course publication/CAS;
+- parking conscient de la priorité : un nouvel entrant reste endormi si OWNER
+  est libre mais réservé de fait à une reprise;
+- wake ciblé qui privilégie les continuations de reprise;
+- déplacement sûr du bit de priorité si une future migration pendant la reprise
+  devient possible;
+- compteur runtime resume_waiters_count() pour le diagnostic.
+
+Le ZIP est prévu pour être extrait à la racine du dépôt et remplacer directement
+le fichier concerné. Aucun script d'application n'est nécessaire.
+
+Important
+=========
+Ce patch corrige le P0 d'équité/vivacité du BKL. Il ne prétend pas supprimer le
+BKL ni résoudre à lui seul les P1 qui vivent hors de ce fichier (fsync, getrandom,
+read/write, readiness par objet, etc.).
+
+Validation attendue
+===================
+Sur Google + scroll continu :
+- aucun SMP-STALL;
+- reprise_max_ns idéalement < 50 ms;
+- resume_waiters_count() revient rapidement à 0;
+- wake_ipis reste proche de parks;
+- reveils_sans_acquisition chute fortement;
+- pas de silence GUI multi-seconde imputable à la réacquisition BKL.

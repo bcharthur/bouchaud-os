@@ -28,9 +28,11 @@ static DISK_READ_OPS: AtomicU64 = AtomicU64::new(0);
 static DISK_READ_BYTES: AtomicU64 = AtomicU64::new(0);
 static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
 static READAHEAD_HITS: AtomicU64 = AtomicU64::new(0);
-const READAHEAD_MIN: usize = 16 * 1024;
-const READAHEAD_MAX: usize = 64 * 1024;
-const CACHE_ENTRIES_MAX: usize = 256;
+// V14: amortise ATA/TCG overhead aggressively but keep a hard memory bound.
+const READAHEAD_MIN: usize = 64 * 1024;
+const READAHEAD_MID: usize = 128 * 1024;
+const READAHEAD_MAX: usize = 256 * 1024;
+const CACHE_ENTRIES_MAX: usize = 512;
 
 struct ReadCacheEntry {
     node: usize,
@@ -214,7 +216,7 @@ pub fn read_at(node: usize, offset: usize, out: &mut [u8]) -> usize {
         }
     }
 
-    let window = {
+    let (window, sequentiel) = {
         let mut patterns = READ_PATTERNS.lock();
         let pattern = if let Some(pattern) = patterns.iter_mut().find(|p| p.node == node) {
             pattern
@@ -226,13 +228,27 @@ pub fn read_at(node: usize, offset: usize, out: &mut [u8]) -> usize {
             pattern.sequential.saturating_add(1)
         } else { 0 };
         pattern.last_end = offset.saturating_add(out.len());
-        match pattern.sequential {
+        let fenetre = match pattern.sequential {
             0 | 1 => READAHEAD_MIN,
-            2 | 3 => 32 * 1024,
+            2 | 3 => READAHEAD_MID,
             _ => READAHEAD_MAX,
-        }
+        };
+        (fenetre, pattern.sequential >= 2)
     };
-    let base = offset & !(window - 1);
+    // BOUCHAUD_DISQUE_ANTICIPATION_AVANT_V1
+    //
+    // La fenetre etait TOUJOURS alignee vers le bas. Sur un flux de fautes
+    // sequentiel -- ce que produit le chargement d'un ELF ou d'une bibliotheque
+    // --, cela relit jusqu'a `window - 4096` octets DERRIERE la demande : des
+    // octets que le lecteur vient de depasser et ne redemandera pas.
+    //
+    // Des que le motif est reconnu sequentiel, la fenetre part donc de la
+    // demande elle-meme. Le cache reste correct : ses entrees sont trouvees par
+    // CONTENANCE d'intervalle, pas par alignement.
+    //
+    // L'alignement est garde pour un acces isole : sans motif, on ne sait pas
+    // de quel cote le suivant tombera, et l'alignement est le pari neutre.
+    let base = if sequentiel { offset } else { offset & !(window - 1) };
     let mut data = alloc::vec![0u8; window];
     let valid = read_at_uncached(node, base, &mut data);
     if valid == 0 || offset < base || offset - base >= valid {

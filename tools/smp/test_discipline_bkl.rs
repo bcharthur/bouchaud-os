@@ -55,12 +55,41 @@ fn madvise_actuel() -> alloc::vec::Vec<Evenement> {
     ]
 }
 
-/// `sys_poll`, tel qu'il est.
+/// `sys_poll`, tel qu'il est depuis qu'il est libere du gros verrou.
 ///
-/// Le verrou est pris pour tout l'appel, mais `wait_readiness` passe par
-/// `park_current_on` -> `schedule()` -> `suspend_for_schedule` : le sommeil
-/// n'a donc pas lieu sous le verrou.
+/// `usermode.rs` ne prend plus rien : `POLL` figure dans `SANS_BKL`. Le
+/// balayage n'utilise que le verrou de la table des descripteurs et celui de
+/// chaque objet. Trois branches touchent un etat global sans verrou propre --
+/// clavier, souris, socket inet -- et prennent le gros verrou elles-memes, au
+/// plus court. L'attente le prend aussi, le temps de s'inscrire, puis le
+/// suspend pour de bon avant de commuter.
 fn poll_actuel() -> alloc::vec::Vec<Evenement> {
+    alloc::vec![
+        // Aucun `Prend` d'entree : l'appel est libere.
+        Phase("readiness_ticket", Cout::Constant),
+        Phase("balayage des descripteurs", Cout::LineaireEnDemande),
+        // Une branche a etat global, prise au plus court.
+        Prend,
+        Phase("socket_readable (anneau e1000)", Cout::Constant),
+        Rend,
+        // L'attente : inscription sous le verrou, puis suspension.
+        Prend,
+        Phase("inscription sur la WaitQueue", Cout::Constant),
+        Suspend,
+        Dort("park_current_on"),
+        Reprend,
+        Rend,
+        Phase("balayage des descripteurs", Cout::LineaireEnDemande),
+    ]
+}
+
+/// Ce que `poll` faisait AVANT : le verrou pris pour tout l'appel.
+///
+/// La trace reste correcte au regard de la discipline -- rien n'y dort sous le
+/// verrou, aucune phase n'y est globale. C'est justement ce que ce test dit :
+/// la discipline ne suffisait pas a trouver ce probleme-la, et c'est la mesure
+/// par appel systeme (`[BKL-SYSCALL]`) qui l'a nomme.
+fn poll_avant_liberation() -> alloc::vec::Vec<Evenement> {
     alloc::vec![
         Prend,                                              // usermode.rs
         Phase("readiness_ticket", Cout::Constant),
@@ -81,6 +110,57 @@ fn madvise_respecte_la_discipline() {
 #[test]
 fn poll_respecte_la_discipline() {
     assert_eq!(verifie(&poll_actuel()), Ok(()));
+}
+
+/// L'ancienne forme la respectait AUSSI. Ce n'est pas un aveu d'echec de la
+/// regle : c'est sa portee. Tenir le verrou tres longtemps sans jamais dormir
+/// ni rien faire de global est parfaitement discipline, et parfaitement
+/// desastreux pour trois autres coeurs. C'est `[BKL-SYSCALL]` qui l'a montre.
+#[test]
+fn l_ancienne_forme_de_poll_respectait_deja_la_discipline() {
+    assert_eq!(
+        verifie(&poll_avant_liberation()),
+        Ok(()),
+        "la discipline ne dit rien de la DUREE d'une tenue, seulement de ce \
+         qu'on a le droit d'y faire"
+    );
+}
+
+/// Ce que la liberation change, et qui se lit dans la trace : le verrou n'est
+/// plus tenu pendant le balayage.
+#[test]
+fn le_balayage_de_poll_ne_tient_plus_le_verrou() {
+    let mut profondeur = 0i32;
+    let mut balayages_sous_verrou = 0;
+    for evenement in poll_actuel() {
+        match evenement {
+            Prend => profondeur += 1,
+            Rend => profondeur -= 1,
+            Suspend => profondeur = 0,
+            Phase("balayage des descripteurs", _) if profondeur > 0 => {
+                balayages_sous_verrou += 1;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        balayages_sous_verrou, 0,
+        "le balayage des descripteurs ne doit plus s'executer verrou tenu"
+    );
+
+    // Et l'ancienne forme, elle, le faisait : c'est la difference mesuree.
+    let mut profondeur = 0i32;
+    let mut avant = 0;
+    for evenement in poll_avant_liberation() {
+        match evenement {
+            Prend => profondeur += 1,
+            Rend => profondeur -= 1,
+            Suspend => profondeur = 0,
+            Phase("balayage des descripteurs", _) if profondeur > 0 => avant += 1,
+            _ => {}
+        }
+    }
+    assert!(avant > 0, "l'ancienne forme balayait bien sous le verrou");
 }
 
 // ─── Les trois defauts reels, rejoues ──────────────────────────────────────
@@ -130,9 +210,15 @@ fn madvise_qui_recompte_le_cache_de_pages_est_refuse() {
 /// LE defaut que le veilleur doit attraper : `poll` qui dort le verrou tenu.
 #[test]
 fn poll_qui_dort_sous_le_verrou_est_refuse() {
+    // On retire la suspension -- par valeur, pas par position : la trace de
+    // `poll` a change quand l'appel a ete libere du gros verrou, et un test qui
+    // vise un index se serait tu au lieu d'echouer.
     let mut trace = poll_actuel();
-    // On retire la suspension : le sommeil a lieu verrou tenu.
-    trace.remove(3);
+    let position = trace
+        .iter()
+        .position(|evenement| *evenement == Suspend)
+        .expect("la trace de poll doit suspendre avant de dormir");
+    trace.remove(position);
     let attendu = Err(Faute::DortSousVerrou {
         quoi: "park_current_on",
         profondeur: 1,

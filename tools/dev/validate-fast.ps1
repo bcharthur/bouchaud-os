@@ -67,8 +67,14 @@ try {
     Invoke-RustTest "culling de scene" "tools\gui\test_scene.rs"
     Invoke-RustTest "equivalence de rendu" "tools\gui\test_rendu.rs"
     Invoke-RustTest "oracle de transition d'etat" "tools\gui\test_transitions.rs"
+    Invoke-RustTest "systeme de fenetrage" "tools\gui\test_fenetrage.rs"
+    Invoke-RustTest "decoupe du texte" "tools\gui\test_texte.rs"
+    Invoke-RustTest "lots du port serie" "tools\serie\test_lots.rs"
+    Invoke-RustTest "decodeur PNG" "tools\gui\test_png.rs"
+    Invoke-RustTest "echeances de reveil" "tools\smp\test_echeances.rs"
     Invoke-RustTest "verdict protocole client" "tools\gui\test_silence.rs"
     Invoke-RustTest "BKL max/provenance" "tools\smp\test_bkl_max.rs"
+    Invoke-RustTest "comptabilite du gros verrou" "tools\smp\test_bkl_comptes.rs"
     Invoke-RustTest "commutation SMP" "tools\smp\test_commutation.rs"
     Invoke-RustTest "profondeur BKL" "tools\smp\test_profondeur_bkl.rs"
     Invoke-RustTest "re-entree IRQ runqueue" "tools\smp\test_runqueue_irq.rs"
@@ -91,6 +97,54 @@ try {
 
     Invoke-Step "ordre des verrous (source)" {
         & python .\tools\verifie-ordre-verrous.py
+    }
+
+    Invoke-Step "ouverture de fenetre (source)" {
+        & python .\tools\verifie-ouverture-fenetre.py
+    }
+
+    Invoke-Step "mutation d'etat de fenetre (source)" {
+        & python .\tools\verifie-mutations-fenetre.py
+    }
+
+    Invoke-Step "ecriture incrementale de /persist (source)" {
+        & python .\tools\verifie-persistance.py
+    }
+
+    Invoke-Step "icones du bureau (reproductibles)" {
+        & python .\tools\assets\fabrique-icones.py --verifie
+    }
+
+    Invoke-Step "jeu de caracteres des pages" {
+        & python .\tools\userland\navigateur\test_charset.py
+    }
+
+    Invoke-Step "polices du navigateur (source)" {
+        & python .\tools\verifie-polices-navigateur.py
+    }
+
+    Invoke-Step "polices du Web (fontconfig)" {
+        & python .\tools\verifie-polices-web.py
+    }
+
+    Invoke-Step "atlas de glyphes du chrome" {
+        & python .\tools\ladybird\chrome\test_atlas.py
+    }
+
+    Invoke-Step "atlas du chrome (reproductible)" {
+        & python .\tools\ladybird\chrome\fabrique-atlas.py --verifie
+    }
+
+    Invoke-Step "echeances de reveil (source)" {
+        & python .\tools\verifie-echeances.py
+    }
+
+    Invoke-Step "attente du gros verrou (source)" {
+        & python .\tools\verifie-bkl-parking.py
+    }
+
+    Invoke-Step "comptabilite du gros verrou (source)" {
+        & python .\tools\verifie-bkl-comptes.py
     }
 
     if (Test-Path ".\tools\verifie-protocole-gui.py") {

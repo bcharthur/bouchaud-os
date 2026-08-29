@@ -1,0 +1,12 @@
+{
+  "name": "Bouchaud OS V13.3 runner false-negative fix",
+  "date": "2026-08-29",
+  "base": "V13.2",
+  "kernel_change": false,
+  "root_cause": "PowerShell ErrorActionPreference=Stop turns successful cargo stderr output into terminating NativeCommandError",
+  "files": [
+    "tools/run/cargo-bootimage-safe.cmd",
+    "run.ps1.patch",
+    "BOUCHAUD-V13.3-RUNNER-FIX.md"
+  ]
+}

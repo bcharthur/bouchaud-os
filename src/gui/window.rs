@@ -4,13 +4,31 @@ use crate::gui::framebuffer::{HEIGHT, WIDTH};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-pub(crate) const BAR_H: usize = 11;        // hauteur des barres haut/bas
-pub(crate) const TITLE_H: i32 = 10;        // hauteur barre de titre fenetre
+// BOUCHAUD_GUI_COQUILLE_V1
+//
+// Les deux barres faisaient ONZE pixels. C'est la hauteur d'une ligne de texte
+// bitmap 8x8 plus deux, et cela se voyait : des libelles colles aux bords, des
+// boutons de neuf pixels, aucune place pour un rayon ni pour une marge. Le
+// reste du bureau -- fenetres arrondies, ombres portees, titres en DejaVu --
+// avait avance sans elles.
+//
+// Trente pixels laissent respirer un texte de treize, un bouton arrondi de
+// vingt-deux et huit pixels de marge. Toutes les geometries en descendent, y
+// compris celles du menu et des boutons : rien ici n'est un nombre pose a la
+// main deux fois.
+pub(crate) const BAR_H: usize = 30;        // hauteur des barres haut/bas
+
+/// Marge verticale d'un bouton dans une barre, en haut comme en bas.
+pub(crate) const MARGE_BARRE: i32 = 4;
+
+/// Hauteur d'un bouton de barre : la barre, moins ses deux marges.
+pub(crate) const BOUTON_BARRE_H: i32 = BAR_H as i32 - MARGE_BARRE * 2;
+pub(crate) const TITLE_H: i32 = crate::gui::windowing::TITLEBAR_HEIGHT as i32;
 pub(crate) const MIN_W: i32 = 90;
 pub(crate) const MIN_H: i32 = 50;
-pub(crate) const MENU_ITEM_H: i32 = 22;    // hauteur d'un item du menu Démarrer
-pub(crate) const MENU_HEADER_H: i32 = 8;   // zone vide en haut du menu
-pub(crate) const MENU_W: i32 = 178;        // largeur du menu Démarrer
+pub(crate) const MENU_ITEM_H: i32 = 30;    // hauteur d'un item du menu Démarrer
+pub(crate) const MENU_HEADER_H: i32 = 10;  // zone vide en haut du menu
+pub(crate) const MENU_W: i32 = 226;        // largeur du menu Démarrer
 
 // Les constantes ci-dessus et celles de `gui::disposition` decrivent le MEME
 // bureau. Elles sont declarees deux fois parce que l'une doit rester pure et
@@ -20,6 +38,14 @@ const _: () = {
     assert!(BAR_H as u32 == crate::gui::disposition::HAUTEUR_BARRE);
     assert!(MENU_ITEM_H == crate::gui::disposition::HAUTEUR_LIGNE_MENU);
     assert!(MENU_HEADER_H == crate::gui::disposition::ENTETE_MENU);
+    // Le debord d'ombre pilote DEUX choses qui doivent coincider : ce que
+    // `paint_window_shape` peint (SHADOW_EXTENT anneaux) et ce que
+    // `disposition::empreinte_fenetre_peinte` declare occupe. Quand elles ont
+    // diverge, chaque fenetre deplacee a laisse une bande sombre a l'ecran.
+    assert!(
+        crate::gui::windowing::manager::SHADOW_EXTENT
+            == crate::gui::disposition::DEBORD_OMBRE
+    );
 };
 
 /// `kind` du navigateur.
@@ -68,7 +94,7 @@ pub(crate) const ICONS: [(&str, usize); 5] = [
 
 /// Positions des icones de bureau (x, y). Modifiables par drag-and-drop.
 pub(crate) static mut ICON_POSITIONS: [(i32, i32); 5] = [
-    (10, 25), (10, 91), (10, 157), (10, 223), (10, 289),
+    (16, 42), (16, 132), (16, 222), (16, 312), (16, 402),
 ];
 
 /// Etat applicatif porte par une fenetre.
@@ -83,21 +109,32 @@ pub(crate) enum App {
 }
 
 pub(crate) struct Win {
-    pub title: String,
-    pub x: i32,
-    pub y: i32,
-    pub w: i32,
-    pub h: i32,
-    pub min: bool,
-    pub restore: Option<(i32, i32, i32, i32)>, // rect avant maximisation
+    pub window: crate::gui::windowing::Window,
     pub app: App,
+}
+
+impl Win {
+    pub(crate) fn new(title: String, x: i32, y: i32, w: i32, h: i32,
+        flags: crate::gui::windowing::WindowFlags, app: App) -> Self {
+        let id = crate::gui::windowing::WindowId::allocate();
+        let rect = crate::gui::windowing::Rect::new(x, y, w.max(0) as u32, h.max(0) as u32);
+        Self { window: crate::gui::windowing::Window::new(id, title, rect, flags), app }
+    }
+}
+
+impl core::ops::Deref for Win {
+    type Target = crate::gui::windowing::Window;
+    fn deref(&self) -> &Self::Target { &self.window }
+}
+impl core::ops::DerefMut for Win {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.window }
 }
 
 /// Mode de manipulation de la fenetre du dessus a la souris.
 #[derive(Clone, Copy)]
 pub(crate) enum Drag {
     Move(i32, i32),
-    Resize,
+    Resize(crate::gui::windowing::ResizeEdge),
 }
 
 pub(crate) struct Rect {
@@ -123,8 +160,25 @@ pub(crate) fn clip(s: &str, n: usize) -> &str {
     &s[..end]
 }
 
+/// Largeur du bouton Demarrer.
+pub(crate) const DEMARRER_W: i32 = 74;
+
+/// Largeur d'un bouton de fenetre dans la barre des taches.
+pub(crate) const TACHE_W: i32 = 148;
+
+/// Pas entre deux boutons de la barre des taches.
+pub(crate) const TACHE_PAS: i32 = TACHE_W + 6;
+
+/// Abscisse du premier bouton de fenetre : apres le bouton Demarrer.
+pub(crate) const TACHE_X0: i32 = MARGE_BARRE + DEMARRER_W + 10;
+
 pub(crate) fn start_btn() -> Rect {
-    Rect { x: 2, y: HEIGHT as i32 - BAR_H as i32 + 1, w: 38, h: 9 }
+    Rect {
+        x: MARGE_BARRE,
+        y: HEIGHT as i32 - BAR_H as i32 + MARGE_BARRE,
+        w: DEMARRER_W,
+        h: BOUTON_BARRE_H,
+    }
 }
 
 pub(crate) fn menu_rect() -> Rect {
@@ -162,13 +216,22 @@ pub(crate) fn rect_ligne_menu(index: usize) -> crate::gui::protocole::Rect {
 }
 
 pub(crate) fn taskbar_btn(i: usize) -> Rect {
-    Rect { x: 44 + i as i32 * 56, y: HEIGHT as i32 - BAR_H as i32 + 1, w: 54, h: 9 }
+    Rect {
+        x: TACHE_X0 + i as i32 * TACHE_PAS,
+        y: HEIGHT as i32 - BAR_H as i32 + MARGE_BARRE,
+        w: TACHE_W,
+        h: BOUTON_BARRE_H,
+    }
 }
 
 /// Rectangle de l'icone de bureau `i`. Position pilotee par ICON_POSITIONS (drag).
+/// Taille d'une cellule d'icone de bureau : l'image, plus la place du libelle.
+pub(crate) const ICONE_CELLULE_W: i32 = 78;
+pub(crate) const ICONE_CELLULE_H: i32 = 80;
+
 pub(crate) fn icon_rect(i: usize) -> Rect {
     let (x, y) = unsafe { ICON_POSITIONS[i] };
-    Rect { x, y, w: 56, h: 60 }
+    Rect { x, y, w: ICONE_CELLULE_W, h: ICONE_CELLULE_H }
 }
 
 /// Zone utile d'une fenetre : l'interieur des bordures, sous la barre de titre.
@@ -178,16 +241,16 @@ pub(crate) fn icon_rect(i: usize) -> Rect {
 /// zone donneraient un decalage entre l'endroit ou l'on peint et celui ou l'on
 /// clique — un pixel, invisible a la lecture, evident a l'usage.
 pub(crate) fn zone_utile(w: &Win) -> crate::gui::protocole::Rect {
-    let x = w.x + 1;
-    let y = w.y + TITLE_H + 1;
-    let largeur = (w.w - 2).max(0) as u32;
-    let hauteur = (w.h - TITLE_H - 2).max(0) as u32;
-    crate::gui::protocole::Rect::neuf(x, y, largeur, hauteur)
+    let rect = crate::gui::windowing::client_rect(w.rect(), TITLE_H as u32);
+    crate::gui::protocole::Rect::neuf(rect.x, rect.y, rect.width, rect.height)
 }
 
 /// Geometrie d'une fenetre dont la zone utile doit faire `largeur` x `hauteur`.
 pub(crate) fn fenetre_pour_zone(largeur: i32, hauteur: i32) -> (i32, i32) {
-    (largeur + 2, hauteur + TITLE_H + 2)
+    let rect = crate::gui::windowing::outer_rect_for_client_size(
+        crate::gui::windowing::Point { x: 0, y: 0 }, largeur.max(0) as u32,
+        hauteur.max(0) as u32, TITLE_H as u32);
+    (rect.width as i32, rect.height as i32)
 }
 
 /// La fenetre porte-t-elle un client ring 3 ?
@@ -203,15 +266,16 @@ pub(crate) fn toggle_max(w: &mut Win) {
     if est_client(w) {
         return;
     }
-    match w.restore.take() {
-        Some((x, y, ww, hh)) => { w.x = x; w.y = y; w.w = ww; w.h = hh; }
-        None => {
-            w.restore = Some((w.x, w.y, w.w, w.h));
-            w.x = 0;
-            w.y = BAR_H as i32;
-            w.w = WIDTH as i32;
-            w.h = HEIGHT as i32 - 2 * BAR_H as i32;
+    if w.placement == crate::gui::windowing::WindowPlacement::Maximized {
+        if let Some(rect) = w.restore_rect.take() { w.set_rect(rect); }
+        w.placement = crate::gui::windowing::WindowPlacement::Normal;
+    } else if w.flags.maximizable {
+        if w.placement == crate::gui::windowing::WindowPlacement::Normal {
+            w.restore_rect = Some(w.rect());
         }
+        w.set_rect(crate::gui::windowing::Rect::new(0, BAR_H as i32,
+            WIDTH as u32, (HEIGHT - 2 * BAR_H) as u32));
+        w.placement = crate::gui::windowing::WindowPlacement::Maximized;
     }
 }
 
@@ -256,16 +320,9 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
             Ok(client) => {
                 let (w, h) = fenetre_pour_zone(NAV_LARGEUR, NAV_HAUTEUR);
                 crate::serial_println!("[gui] BO_AUTOSTART_BROWSER=1 -> /bo-navigateur");
-                return Win {
-                    title: TITRE_NAVIGATEUR.to_string(),
-                    x,
-                    y,
-                    w,
-                    h,
-                    min: false,
-                    restore: None,
-                    app: App::Navigateur { client: alloc::boxed::Box::new(client) },
-                };
+                return Win::new(TITRE_NAVIGATEUR.to_string(), x, y, w, h,
+                    crate::gui::windowing::WindowFlags::FIXED_SURFACE,
+                    App::Navigateur { client: alloc::boxed::Box::new(client) });
             }
             Err(error) => {
                 crate::serial_println!("[gui] autostart navigateur impossible: {}", error);
@@ -274,25 +331,18 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
     }
 
     match kind {
-        0 => Win {
-            title: "Terminal".to_string(), x, y, w: 380, h: 280, min: false, restore: None,
-            app: App::Terminal { sb: { let mut v = Vec::new(); v.push("Bouchaud OS terminal".to_string()); v }, input: String::new(), cwd: home },
-        },
-        1 => Win {
-            title: "Fichiers".to_string(), x, y, w: 420, h: 320, min: false, restore: None,
-            app: App::Files { cur: home, scroll: 0, selected: None },
-        },
-        4 => Win {
-            title: "Calculatrice".to_string(), x, y, w: 220, h: 300, min: false, restore: None,
-            app: App::Calc { expr: String::new() },
-        },
-        5 => Win {
-            title: "Rustpad — Hello World".to_string(), x, y, w: 560, h: 400, min: false, restore: None,
-            app: App::Rustpad { state: crate::gui::apps::rustpad::RustpadState::new() },
-        },
-        _ => Win {
-            title: "Moniteur".to_string(), x, y, w: 300, h: 200, min: false, restore: None,
-            app: App::Monitor,
-        },
+        0 => Win::new("Terminal".to_string(), x, y, 380, 280,
+            crate::gui::windowing::WindowFlags::STANDARD,
+            App::Terminal { sb: { let mut v = Vec::new(); v.push("Bouchaud OS terminal".to_string()); v }, input: String::new(), cwd: home }),
+        1 => Win::new("Fichiers".to_string(), x, y, 420, 320,
+            crate::gui::windowing::WindowFlags::STANDARD,
+            App::Files { cur: home, scroll: 0, selected: None }),
+        4 => Win::new("Calculatrice".to_string(), x, y, 220, 300,
+            crate::gui::windowing::WindowFlags::STANDARD, App::Calc { expr: String::new() }),
+        5 => Win::new("Rustpad — Hello World".to_string(), x, y, 560, 400,
+            crate::gui::windowing::WindowFlags::STANDARD,
+            App::Rustpad { state: crate::gui::apps::rustpad::RustpadState::new() }),
+        _ => Win::new("Moniteur".to_string(), x, y, 300, 200,
+            crate::gui::windowing::WindowFlags::STANDARD, App::Monitor),
     }
 }

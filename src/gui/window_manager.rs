@@ -36,7 +36,7 @@ use crate::gui::protocole::Rect;
 use crate::gui::widgets;
 use crate::gui::window::{
     self as window,
-    clamp_win, icon_rect, make_app, menu_rect, start_btn, taskbar_btn, toggle_max,
+    clamp_win, icon_rect, make_app, menu_rect, start_btn, taskbar_btn,
     zone_utile, App, Drag, Win, BAR_H, ICONS, MENU, MIN_H, MIN_W,
     NAV_HAUTEUR, NAV_LARGEUR, TITLE_H,
 };
@@ -51,6 +51,16 @@ use crate::users;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
+
+// Diagnostic matrix only; MODE 0 is the shipped behavior.
+// 1 = full damage + normal culling, 2 = sparse damage + no occlusion,
+// 3 = full damage + no occlusion. Never use these as a permanent fix.
+const GUI_RENDER_DIAGNOSTIC_MODE: u8 = 0;
+
+fn diagnostic_mode_name() -> &'static str {
+    match GUI_RENDER_DIAGNOSTIC_MODE { 1 => "full-damage", 2 => "no-occlusion",
+        3 => "full-no-occlusion", _ => "normal" }
+}
 
 /// Periode minimale entre deux trames composees, en millisecondes.
 ///
@@ -130,6 +140,16 @@ fn depuis_widget(r: window::Rect) -> Rect {
     Rect::neuf(r.x, r.y, r.w.max(0) as u32, r.h.max(0) as u32)
 }
 
+/// Lossless bridge from policy transitions into the established sparse damage
+/// pipeline; no second compositor queue is retained.
+#[allow(dead_code)]
+fn ajoute_transition(degats: &mut Degats, transition: &crate::gui::windowing::Transition) {
+    for crate::gui::windowing::Damage(rect) in &transition.damage {
+        degats.ajoute(Origine::Fenetre,
+            Rect::neuf(rect.x, rect.y, rect.width, rect.height));
+    }
+}
+
 // BOUCHAUD_GUI_SCENE_CULLING_V1
 //
 // Les calques du bureau, du fond vers le haut. L'ordre EST celui du dessin :
@@ -171,14 +191,13 @@ fn plan_de_scene(
         if w.min {
             continue;
         }
-        // Deux rectangles, deux exigences opposees : `bornes_dessin` MAJORE ce
-        // que la fenetre touche -- cadre plus l'ombre portee de 4 pixels --,
-        // `opaque_sur` MINORE ce qu'elle remplit vraiment -- le cadre seul,
-        // l'ombre laissant voir le fond.
+        // One canonical contract: painted bounds include the full eight-pixel
+        // shadow; opacity is only the rounded shape's guaranteed central strip.
+        let geometry = render_geometry(w);
         calques.push(Calque::avec_ombre(
             Element::Fenetre(index),
-            empreinte_fenetre(w),
-            cadre_fenetre(w),
+            proto_from_window_rect(geometry.painted_bounds),
+            proto_from_window_rect(geometry.opaque),
         ));
     }
 
@@ -220,6 +239,51 @@ fn dessine_calque(
         Element::Menu => widgets::draw_menu(mx, my),
         Element::BarreTaches => widgets::draw_taskbar(wins, menu_open),
         Element::Curseur => widgets::draw_cursor(souris.0, souris.1),
+    }
+}
+
+// BOUCHAUD_GUI_CIBLE_DEGAT_V1
+//
+// La seule traduction entre ce qu'une transition VISE et ce que la mesure
+// COMPTE. Une transition qui touche deux elements de nature differente -- le
+// menu et le bouton Demarrer, deux fenetres et les boutons de la barre -- rend
+// desormais chaque rectangle avec sa cible, au lieu de laisser l'appelant les
+// etiqueter tous pareil.
+//
+// Sans cela, `[GUI-DAMAGE] taskbar=0` sur une session entiere, pendant que la
+// barre des taches etait repeinte des dizaines de fois.
+// BOUCHAUD_GUI_CHAINE_ENTREE_LFB_V1
+//
+// LE FAUX POSITIF QUE CE HELPER SUPPRIME
+// --------------------------------------
+// Les deux gestes -- compter l'entree, armer la surveillance -- doivent se
+// faire dans CET ordre : le veilleur memorise la chaine TELLE QU'ELLE ETAIT
+// AVANT l'entree qui l'arme.
+//
+// Arme apres, sa reference contient deja l'evenement. Le premier maillon ne
+// peut alors plus avancer, et le veilleur annonce « aucune entree recue »
+// chaque fois que la souris s'arrete cinq cents millisecondes. C'est ce qui
+// s'est vu au runtime : des paires BROKEN/RECOVERED sur `input_received` a
+// longueur de journal, alors que les entrees arrivaient parfaitement.
+//
+// Un diagnostic qui crie au loup est pire qu'aucun diagnostic : il apprend a
+// ne pas le lire. Les deux gestes sont donc reunis ici, ou l'ordre se voit.
+
+/// Compte une entree du bureau ET arme la surveillance de la chaine.
+fn note_entree_bureau(veilleur: &mut Veilleur, maintenant_ms: u64) {
+    // La reference D'ABORD : l'etat d'avant cette entree.
+    veilleur.note_entree(maintenant_ms, reveil::chaine());
+    reveil::note_entree();
+}
+
+fn origine_de(cible: transition::Cible) -> Origine {
+    match cible {
+        transition::Cible::Fenetre => Origine::Fenetre,
+        transition::Cible::Menu => Origine::Menu,
+        transition::Cible::BarreTaches => Origine::BarreTaches,
+        transition::Cible::BarreHaute => Origine::BarreHaute,
+        transition::Cible::Curseur => Origine::Curseur,
+        transition::Cible::Icone => Origine::Icone,
     }
 }
 
@@ -276,15 +340,26 @@ fn barre_haute_rect() -> Rect {
 // menu Demarrer avait exactement le meme defaut, d'ou les artefacts autour de
 // lui.
 //
-// Ce n'est PAS un probleme de culling : le culling ne peut rien redessiner en
-// dehors du degat qu'on lui donne. C'est le degat lui-meme qui etait trop
-// petit.
+// Lot 2 exposed both failure modes: transitions used the outer rectangle while
+// the painter touched an eight-pixel outset, and scene culling advertised the
+// entire rectangular outer frame as opaque although rounded corners are not
+// painted. Both now derive from `WindowRenderGeometry`.
 //
 // Ces deux fonctions sont donc la seule facon autorisee de designer « ce que ce
 // calque occupe a l'ecran ». `plan_de_scene` et toutes les invalidations
 // passent par elles, de sorte qu'elles ne peuvent plus diverger.
 fn empreinte_fenetre(w: &Win) -> Rect {
-    disposition::empreinte_avec_ombre(cadre_fenetre(w))
+    proto_from_window_rect(render_geometry(w).painted_bounds)
+}
+
+fn render_geometry(w: &Win) -> crate::gui::windowing::WindowRenderGeometry {
+    crate::gui::windowing::window_render_geometry(w.rect(), TITLE_H as u32,
+        crate::gui::windowing::WINDOW_RADIUS,
+        crate::gui::windowing::manager::SHADOW_EXTENT)
+}
+
+fn proto_from_window_rect(rect: crate::gui::windowing::Rect) -> Rect {
+    Rect::neuf(rect.x, rect.y, rect.width, rect.height)
 }
 
 /// Idem pour le menu deroulant.
@@ -296,6 +371,12 @@ fn empreinte_menu() -> Rect {
 ///
 /// C'est la zone PLEINE -- ce que la fenetre remplit reellement. Pour ce
 /// qu'elle OCCUPE, ombre comprise, voir [`empreinte_fenetre`].
+///
+/// C'est aussi ce qu'attendent `transition::fenetre_bougee` et
+/// `transition::focus_transfere` : elles ajoutent l'ombre elles-memes, pour
+/// qu'un appelant ne puisse pas l'oublier. Leur passer une empreinte deja
+/// dilatee la dilaterait deux fois -- des degats trop larges, donc du travail
+/// de composition inutile a chaque deplacement.
 fn cadre_fenetre(w: &Win) -> Rect {
     Rect::neuf(w.x, w.y, w.w.max(0) as u32, w.h.max(0) as u32)
 }
@@ -352,6 +433,12 @@ fn boucle() {
     fb::enter();
     mouse::init();
     crate::serial_println!("[gui] window manager demarre (fil noyau)");
+    crate::serial_println!(
+        "[GUI-RENDER-CONTRACT] mode={} titlebar={} shadow={} rounded={} window_bounds=outer+shadow",
+        diagnostic_mode_name(), TITLE_H,
+        crate::gui::windowing::manager::SHADOW_EXTENT,
+        crate::gui::windowing::WINDOW_RADIUS,
+    );
 
     let home = ramfs::fs().resolve(users::session().home(), 0).unwrap_or(0);
     let mut wins: Vec<Win> = Vec::new();
@@ -362,8 +449,9 @@ fn boucle() {
     // (icon_idx, offset_x_from_icon, offset_y_from_icon, start_mx, start_my)
     let mut icon_drag: Option<(usize, i32, i32, i32, i32)> = None;
     let mut last_icon_tap: Option<(usize, u64)> = None;
+    let mut title_clicks = crate::gui::windowing::DoubleClickDetector::default();
+    let mut hover_button: Option<Rect> = None;
 
-    wins.push(make_app(0, home, &mut spawn_n)); // un terminal pour commencer
 
     let mut quit = false;
     // Tout est sale au premier tour : il n'y a encore rien a l'ecran.
@@ -372,6 +460,14 @@ fn boucle() {
     // Reutilise d'une trame a l'autre : construire le plan ne doit pas allouer.
     let mut calques: Vec<Calque> = Vec::new();
     degats.tout(); // premier tour : rien n'est encore a l'ecran
+
+    // Un terminal pour commencer. Le premier tour est deja plein ecran, mais on
+    // passe par le meme chemin que tout le monde : c'est ce qui rend la regle
+    // verifiable au lieu d'etre une habitude.
+    {
+        let fenetre = make_app(0, home, &mut spawn_n);
+        ouvre_fenetre(&mut wins, fenetre, &mut degats);
+    }
     let mut derniere_trame = 0u64;
     let mut derniere_horloge = 0u64;
     let mut derniere_souris = (usize::MAX, usize::MAX);
@@ -497,16 +593,21 @@ fn boucle() {
             } else {
                 Some((derniere_souris.0 as i32, derniere_souris.1 as i32))
             };
-            for rect in transition::curseur_deplace(avant, (mx, my)).iter() {
-                degats.ajoute(Origine::Curseur, rect);
+            for (rect, cible) in transition::curseur_deplace(avant, (mx, my)).iter() {
+                degats.ajoute(origine_de(cible), rect);
             }
             derniere_souris = (mxu, myu);
             derniers_boutons = boutons;
             sale = true;
             derniere_entree = maintenant;
-            reveil::note_entree();
-            veilleur.note_entree(maintenant, reveil::chaine());
+            note_entree_bureau(&mut veilleur, maintenant);
             transmet_position(&mut wins, mx, my, boutons);
+            let new_hover = hovered_button_rect(&wins, mx, my);
+            if new_hover != hover_button {
+                if let Some(rect) = hover_button { degats.ajoute(Origine::Fenetre, rect); }
+                if let Some(rect) = new_hover { degats.ajoute(Origine::Fenetre, rect); }
+                hover_button = new_hover;
+            }
         }
         // BOUCHAUD_GUI_DAMAGE_ORIGIN_V1
         //
@@ -520,8 +621,7 @@ fn boucle() {
         // `handle_click` et `handle_wheel` qui disent ce qu'ils ont change.
         if click || release || wheel != 0 {
             derniere_entree = maintenant;
-            reveil::note_entree();
-            veilleur.note_entree(maintenant, reveil::chaine());
+            note_entree_bureau(&mut veilleur, maintenant);
         }
 
         if left {
@@ -533,9 +633,16 @@ fn boucle() {
                 if let Some(w) = wins.last_mut() {
                     match d {
                         Drag::Move(ox, oy) => { w.x = mx - ox; w.y = my - oy; }
-                        Drag::Resize => {
-                            w.w = (mx - w.x).max(MIN_W);
-                            w.h = (my - w.y).max(MIN_H);
+                        Drag::Resize(edge) => {
+                            use crate::gui::windowing::ResizeEdge::*;
+                            if matches!(edge, Left | NorthWest | SouthWest) {
+                                let right = w.x + w.w; w.x = mx.min(right - MIN_W); w.w = right - w.x;
+                            }
+                            if matches!(edge, Right | NorthEast | SouthEast) { w.w = (mx - w.x).max(MIN_W); }
+                            if matches!(edge, Top | NorthWest | NorthEast) {
+                                let bottom = w.y + w.h; w.y = my.min(bottom - MIN_H); w.h = bottom - w.y;
+                            }
+                            if matches!(edge, Bottom | SouthWest | SouthEast) { w.h = (my - w.y).max(MIN_H); }
                             if w.x + w.w > fb::WIDTH as i32 { w.w = fb::WIDTH as i32 - w.x; }
                             if w.y + w.h > fb::HEIGHT as i32 - BAR_H as i32 { w.h = fb::HEIGHT as i32 - BAR_H as i32 - w.y; }
                         }
@@ -543,8 +650,8 @@ fn boucle() {
                     clamp_win(w);
                 }
                 let apres = wins.last().map(cadre_fenetre).unwrap_or_default();
-                for rect in transition::fenetre_bougee(avant, apres).iter() {
-                    degats.ajoute(Origine::Fenetre, rect);
+                for (rect, cible) in transition::fenetre_bougee(avant, apres).iter() {
+                    degats.ajoute(origine_de(cible), rect);
                 }
                 sale = true;
             } else if let Some((idx, ox, oy, _, _)) = icon_drag {
@@ -560,8 +667,28 @@ fn boucle() {
                 sale = true;
             }
         } else {
-            drag = None;
+            let ended_drag = drag.take();
             if release {
+                if matches!(ended_drag, Some(Drag::Move(..))) {
+                    if let Some(window) = wins.last_mut() {
+                        let before = cadre_fenetre(window);
+                        if mx <= crate::gui::windowing::SNAP_THRESHOLD && window.flags.snappable {
+                            let id = window.id;
+                            route_window_command(window, crate::gui::windowing::WindowCommand::Snap(
+                                id, crate::gui::windowing::SnapZone::Left));
+                        } else if mx >= fb::WIDTH as i32 - crate::gui::windowing::SNAP_THRESHOLD && window.flags.snappable {
+                            let id = window.id;
+                            route_window_command(window, crate::gui::windowing::WindowCommand::Snap(
+                                id, crate::gui::windowing::SnapZone::Right));
+                        } else if my <= BAR_H as i32 + crate::gui::windowing::SNAP_THRESHOLD {
+                            let id = window.id;
+                            route_window_command(window, crate::gui::windowing::WindowCommand::Maximize(id));
+                        }
+                        for (rect, cible) in transition::fenetre_bougee(before, cadre_fenetre(window)).iter() {
+                            degats.ajoute(origine_de(cible), rect);
+                        }
+                    }
+                }
                 if let Some((idx, _, _, smx, smy)) = icon_drag.take() {
                     let moved = (mx - smx).abs().max((my - smy).abs());
                     if moved < 6 {
@@ -574,10 +701,14 @@ fn boucle() {
                         if double {
                             let kind = ICONS[idx].1;
                             if kind == window::KIND_NAVIGATEUR {
-                                lance_navigateur(&mut wins, home);
+                                lance_navigateur(&mut wins, home, &mut degats);
                             } else {
-                                wins.push(make_app(kind, home, &mut spawn_n));
+                                let fenetre = make_app(kind, home, &mut spawn_n);
+                                ouvre_fenetre(&mut wins, fenetre, &mut degats);
                             }
+                            // Une fenetre vient d'apparaitre : sans cela, la
+                            // trame ne serait composee qu'au prochain degat.
+                            sale = true;
                             last_icon_tap = None;
                         } else {
                             last_icon_tap = Some((idx, tick));
@@ -588,7 +719,8 @@ fn boucle() {
         }
 
         if click {
-            handle_click(mx, my, &mut wins, &mut menu_open, &mut drag, &mut quit, home, &mut spawn_n, &mut icon_drag, &mut degats);
+            handle_click(mx, my, maintenant, &mut title_clicks, &mut wins, &mut menu_open,
+                &mut drag, &mut quit, home, &mut spawn_n, &mut icon_drag, &mut degats);
             sale = true;
         }
         if wheel != 0 {
@@ -631,8 +763,8 @@ fn boucle() {
             let lignes = transition::survol_menu_change(
                 window::menu_proto(), survol_menu, nouveau_survol,
             );
-            for rect in lignes.iter() {
-                degats.ajoute(Origine::Menu, rect);
+            for (rect, cible) in lignes.iter() {
+                degats.ajoute(origine_de(cible), rect);
             }
             survol_menu = nouveau_survol;
             sale = true;
@@ -683,8 +815,8 @@ fn boucle() {
             sale = true; // horloge, charge CPU, memoire : ils bougent seuls
             // BOUCHAUD_GUI_TOPBAR_DAMAGE_V1 : la barre du HAUT. Voir
             // `barre_haute_rect`. La barre du bas n'a rien qui bouge tout seul.
-            for rect in transition::tic_horloge(fb::WIDTH as u32).iter() {
-                degats.ajoute(Origine::BarreHaute, rect);
+            for (rect, cible) in transition::tic_horloge(fb::WIDTH as u32).iter() {
+                degats.ajoute(origine_de(cible), rect);
             }
         }
         if sale && maintenant.wrapping_sub(derniere_trame) < PERIODE_TRAME_MS {
@@ -704,10 +836,11 @@ fn boucle() {
             // compris les parties qu'il ne couvre pas. On l'ajoute une fois que
             // les degats de ce tour sont connus, jamais avant.
             let recoloration = transition::recoloration_curseur(degats.regions(), (mx, my));
-            for rect in recoloration.iter() {
-                degats.ajoute(Origine::Curseur, rect);
+            for (rect, cible) in recoloration.iter() {
+                degats.ajoute(origine_de(cible), rect);
             }
 
+            if matches!(GUI_RENDER_DIAGNOSTIC_MODE, 1 | 3) { degats.tout(); }
             if !degats.vide() {
                 crate::kernel::timer::frame_start();
                 crate::gui::degats::note_trame(&degats);
@@ -733,7 +866,9 @@ fn boucle() {
                     // opaque qui recouvre entierement la zone -- tout ce qui est
                     // dessous est invisible --, puis on ecarte ceux qui ne la
                     // touchent pas.
-                    let debut = scene::premier_calque(&calques, &present);
+                    let debut = if matches!(GUI_RENDER_DIAGNOSTIC_MODE, 2 | 3) {
+                        0
+                    } else { scene::premier_calque(&calques, &present) };
                     let mut dessines = 0usize;
                     for calque in &calques[debut..] {
                         if !scene::doit_dessiner(calque, &present) {
@@ -914,11 +1049,16 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
         crate::gui::degats::stats_regions();
     let evites = boite_gate0.saturating_sub(pixels);
     crate::serial_println!(
-        "[GUI-DAMAGE] full={} window={} cursor={} client={} taskbar={} menu={} icon={} topbar={} presents={} rects={} presented_pixels={} requested_pixels={} gate0_bbox_pixels={} saved_pixels={} merges={} overflows={} drawn_pixels={}",
+        "[GUI-DAMAGE] full={} window={} cursor={} client={} taskbar={} menu={} icon={} topbar={} presents={} rects={} presented_pixels={} requested_pixels={} gate0_bbox_pixels={} saved_pixels={} merges={} overflows={} drawn_pixels={} text_pixels={}",
         par_origine[0], par_origine[1], par_origine[2], par_origine[3],
         par_origine[4], par_origine[5], par_origine[6], par_origine[7],
         trames, rects, pixels,
         demandes, boite_gate0, evites, fusions, debordements, fb::pixels_dessines(),
+        // BOUCHAUD_GFX_TEXTE_SEGMENT_V1 : la depense qui n'apparaissait nulle
+        // part. `blend_rgb` ne comptait rien, donc le rendu du texte etait le
+        // seul chemin de dessin invisible aux metriques -- et c'est celui que
+        // le compositeur repayait a CHAQUE rectangle de degat.
+        fb::pixels_texte(),
     );
     // BOUCHAUD_GFX_PRESENT_TRACE_V1
     //
@@ -1077,6 +1217,7 @@ fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> (Rect, bool) {
     let mut morts: Vec<usize> = Vec::new();
     for (index, w) in wins.iter_mut().enumerate() {
         let zone_fenetre = zone_utile(w);
+        let visible = !w.window.min;
         if let App::Navigateur { client } = &mut w.app {
             if client.verifie_silence() {
                 degat_ecran = degat_ecran.union(&zone_fenetre);
@@ -1087,7 +1228,7 @@ fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> (Rect, bool) {
             // voir `REACTIVITE_MUETTE_MS`. La declarer ici a chaque tour
             // revenait a recopier 1100x604 pixels soixante fois par seconde
             // devant une image immobile.
-            if recompose_aveugle && client.recompose_a_l_aveugle() && !w.min {
+            if recompose_aveugle && client.recompose_a_l_aveugle() && visible {
                 client.abime_tout();
                 degat_ecran = degat_ecran.union(&zone_fenetre);
             }
@@ -1096,7 +1237,7 @@ fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> (Rect, bool) {
                 // l'accumuler pour rien ferait grossir un rectangle que
                 // personne ne lit, et la restauration recompose de toute facon.
                 let degat = client.prend_degat();
-                if !w.min && !degat.vide() {
+                if visible && !degat.vide() {
                     let ecran = Rect::neuf(
                         zone_fenetre.x.saturating_add(degat.x),
                         zone_fenetre.y.saturating_add(degat.y),
@@ -1162,14 +1303,57 @@ fn ferme_tous_les_clients(wins: &mut Vec<Win>) {
 ///
 /// Le processus est lance sans attendre : la fenetre existe immediatement, avec
 /// son ecran de demarrage, et se remplira a la premiere trame du client.
-fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize) {
+// BOUCHAUD_GUI_OUVERTURE_DAMAGE_V1
+//
+// LE DEFAUT QUE CE HELPER SUPPRIME
+// --------------------------------
+// Ouvrir une application par DOUBLE-CLIC sur une icone du bureau poussait la
+// fenetre dans `wins` et n'annoncait RIEN : ni degat, ni `sale`. Le chemin par
+// le menu Demarrer, lui, appelait `degats.tout()`.
+//
+// Consequence exacte, et c'est celle qu'on a vue a l'ecran : la fenetre et son
+// bouton de barre des taches n'existaient que dans l'etat. Ils n'apparaissaient
+// qu'au moment ou un AUTRE degat passait par la — le curseur qu'on promene par
+// exemple, d'ou « la barre des taches n'affiche Fichiers que si je passe la
+// souris dessus ».
+//
+// Une fenetre qui apparait est le seul cas ou le plein ecran est justifie : ce
+// qu'elle recouvre n'a jamais ete dessine, et le bureau est seul a le savoir.
+//
+// Pousser directement dans `wins` est desormais interdit ailleurs qu'ici :
+// `tools/verifie-ouverture-fenetre.py` echoue si un `wins.push` reapparait hors
+// de cette fonction. Le contrat ne peut donc plus etre oublie a un appelant.
+
+/// Ajoute une fenetre au bureau ET annonce ce que son apparition change.
+fn ouvre_fenetre(wins: &mut Vec<Win>, fenetre: Win, degats: &mut Degats) {
+    wins.push(fenetre);
+    degats.tout();
+}
+
+/// Remonte au premier plan une fenetre DEJA presente, et rend son nouvel index.
+///
+/// Ce n'est pas une apparition : la fenetre etait deja dessinee, elle etait
+/// seulement partiellement recouverte. Le degat correspondant est celui du
+/// focus (`transition::focus_transfere`), pas le plein ecran — d'ou une
+/// fonction distincte de `ouvre_fenetre`, pour que les deux intentions ne se
+/// confondent pas a la relecture.
+fn remonte_fenetre(wins: &mut Vec<Win>, index: usize) -> usize {
+    let fenetre = wins.remove(index);
+    wins.push(fenetre);
+    wins.len() - 1
+}
+
+fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
     // Une seule instance : deux navigateurs, ce sont deux surfaces de 2,6 Mio et
     // deux Qt qui demarrent en meme temps sur un cœur unique.
     if let Some(index) = wins.iter().position(|w| window::est_client(w)) {
         let w = wins.remove(index);
-        wins.push(w);
+        // Une instance existante remonte et se demasque : meme raison qu'une
+        // apparition, ce qu'elle recouvre n'a pas ete dessine sous elle.
+        ouvre_fenetre(wins, w, degats);
         if let Some(w) = wins.last_mut() {
-            w.min = false;
+            let id = w.id;
+            route_window_command(w, crate::gui::windowing::WindowCommand::Restore(id));
         }
         return;
     }
@@ -1188,18 +1372,13 @@ fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize) {
         }
     };
 
-    let mut w = Win {
-        title: String::from(window::TITRE_NAVIGATEUR),
-        x: (fb::WIDTH as i32 - largeur_fenetre) / 2,
-        y: BAR_H as i32 + 8,
-        w: largeur_fenetre,
-        h: hauteur_fenetre,
-        min: false,
-        restore: None,
-        app: App::Navigateur { client: alloc::boxed::Box::new(client) },
-    };
+    let mut w = Win::new(String::from(window::TITRE_NAVIGATEUR),
+        (fb::WIDTH as i32 - largeur_fenetre) / 2, BAR_H as i32 + 8,
+        largeur_fenetre, hauteur_fenetre,
+        crate::gui::windowing::WindowFlags::FIXED_SURFACE,
+        App::Navigateur { client: alloc::boxed::Box::new(client) });
     clamp_win(&mut w);
-    wins.push(w);
+    ouvre_fenetre(wins, w, degats);
     if let Some(App::Navigateur { client }) = wins.last_mut().map(|w| &mut w.app) {
         client.envoie_configuration(true);
     }
@@ -1309,7 +1488,8 @@ fn handle_wheel(
 }
 
 fn handle_click(
-    mx: i32, my: i32,
+    mx: i32, my: i32, now_ms: u64,
+    title_clicks: &mut crate::gui::windowing::DoubleClickDetector,
     wins: &mut Vec<Win>,
     menu_open: &mut bool,
     drag: &mut Option<Drag>,
@@ -1326,7 +1506,7 @@ fn handle_click(
     // de l'image -- une fenetre qui apparait ou disparait, parce que le fond
     // qu'elle decouvre n'est connu de personne d'autre.
     if *menu_open {
-        let mut ouvre_fenetre = false;
+        let mut fenetre_ouverte = false;
         // BOUCHAUD_GUI_HOVER_CONTRAT_V1
         //
         // Le clic lisait la ligne avec sa PROPRE formule :
@@ -1343,26 +1523,34 @@ fn handle_click(
         if let Some(row) = window::ligne_menu_survolee(mx, my) {
             if let Some(&(_, kind)) = MENU.get(row) {
                 if kind == usize::MAX { *quit = true; }
-                else if kind == window::KIND_NAVIGATEUR { lance_navigateur(wins, home); ouvre_fenetre = true; }
-                else { wins.push(make_app(kind, home, spawn_n)); ouvre_fenetre = true; }
+                else if kind == window::KIND_NAVIGATEUR {
+                    lance_navigateur(wins, home, degats);
+                    fenetre_ouverte = true;
+                } else {
+                    let fenetre = make_app(kind, home, spawn_n);
+                    ouvre_fenetre(wins, fenetre, degats);
+                    fenetre_ouverte = true;
+                }
             }
         }
         *menu_open = false;
         // Le menu se referme : la zone qu'il OCCUPAIT redevient bureau -- son
         // ombre portee comprise, sans quoi la bande sombre resterait a l'ecran --
         // ET le bouton Demarrer, qui change de couleur avec l'ouverture du menu.
-        for rect in transition::menu_bascule(window::menu_proto(), barre_taches_rect()).iter() {
-            degats.ajoute(Origine::Menu, rect);
+        for (rect, cible) in transition::menu_bascule(window::menu_proto(), barre_taches_rect()).iter() {
+            degats.ajoute(origine_de(cible), rect);
         }
-        if ouvre_fenetre {
-            degats.tout();
+        if fenetre_ouverte {
+            // `ouvre_fenetre` a deja annonce le plein ecran ; ce drapeau ne
+            // sert plus qu'a documenter qu'une fenetre est apparue ici.
+            debug_assert!(!degats.vide());
         }
         return;
     }
     if start_btn().hit(mx, my) {
         *menu_open = true;
-        for rect in transition::menu_bascule(window::menu_proto(), barre_taches_rect()).iter() {
-            degats.ajoute(Origine::Menu, rect);
+        for (rect, cible) in transition::menu_bascule(window::menu_proto(), barre_taches_rect()).iter() {
+            degats.ajoute(origine_de(cible), rect);
         }
         return;
     }
@@ -1376,30 +1564,30 @@ fn handle_click(
             let cadre_focus_perdu = widgets::indice_focus(wins)
                 .filter(|&precedent| precedent != i)
                 .map(|precedent| cadre_fenetre(&wins[precedent]));
-            let mut w = wins.remove(i);
-            let etait_minimisee = w.min;
-            w.min = false;
+            let etait_minimisee = wins[i].min;
+            let id = wins[i].id;
+            route_window_command(&mut wins[i], crate::gui::windowing::WindowCommand::Restore(id));
             // Le contenu d'un client n'est pas redessine par le bureau : il est
             // recopie depuis sa surface. Apres une restauration, il faut donc
             // redemander cette recopie, sinon la fenetre reapparait vide
             // jusqu'a la prochaine trame du client — qui peut ne jamais venir
             // si la page est statique.
-            if let App::Navigateur { client } = &mut w.app {
+            if let App::Navigateur { client } = &mut wins[i].app {
                 client.abime_tout();
             }
+            // Remonter n'est pas apparaitre : on reordonne, on ne cree rien.
+            let index = remonte_fenetre(wins, i);
             let bascule = transition::focus_transfere(
-                cadre_focus_perdu, cadre_fenetre(&w), barre_taches_rect(),
+                cadre_focus_perdu, cadre_fenetre(&wins[index]), barre_taches_rect(),
             );
-            for rect in bascule.iter() {
-                degats.ajoute(Origine::Fenetre, rect);
+            for (rect, cible) in bascule.iter() {
+                degats.ajoute(origine_de(cible), rect);
             }
             if etait_minimisee {
                 // Une fenetre reapparait : ce qu'elle recouvre n'a jamais ete
-                // dessine sous elle. Seul cas ou le plein ecran est justifie
-                // ici, et il est desormais conditionnel.
+                // dessine sous elle. Seul cas ou le plein ecran est justifie.
                 degats.tout();
             }
-            wins.push(w);
             return;
         }
     }
@@ -1448,22 +1636,21 @@ fn handle_click(
         let cadre_focus_perdu = widgets::indice_focus(wins)
             .filter(|&precedent| precedent != i)
             .map(|precedent| cadre_fenetre(&wins[precedent]));
-        let w = wins.remove(i);
-        wins.push(w);
-        let index = wins.len() - 1;
+        let index = remonte_fenetre(wins, i);
         if !deja_au_dessus {
             let bascule = transition::focus_transfere(
                 cadre_focus_perdu, cadre_fenetre(&wins[index]), barre_taches_rect(),
             );
-            for rect in bascule.iter() {
-                degats.ajoute(Origine::Fenetre, rect);
+            for (rect, cible) in bascule.iter() {
+                degats.ajoute(origine_de(cible), rect);
             }
         }
         let top = wins.last_mut().unwrap();
         let cadre_avant = cadre_fenetre(top);
-        let r = top.x + top.w;
-        let on_title = my >= top.y + 1 && my < top.y + TITLE_H;
-        if on_title && mx >= r - 10 && mx < r - 1 {
+        let region = crate::gui::windowing::hit_test(top.rect(),
+            crate::gui::windowing::Point { x: mx, y: my },
+            crate::gui::windowing::WINDOW_CHROME, top.flags.resizable);
+        if region == crate::gui::windowing::HitRegion::Close && top.flags.closable {
             // Fermeture : un client a le droit d'etre prevenu et de refuser
             // (une page qui demande confirmation). Il est termine de force si
             // sa fenetre disparait de toute facon a l'iteration suivante.
@@ -1475,24 +1662,47 @@ fn handle_click(
                 // de personne d'autre que du bureau.
                 degats.tout();
             }
-        } else if on_title && mx >= r - 19 && mx < r - 10 {
-            toggle_max(top);
-            // Maximiser ou restaurer : l'ancien cadre et le nouveau.
-            let mouvement = transition::fenetre_bougee(
-                cadre_avant, cadre_fenetre(&wins[index]),
-            );
-            for rect in mouvement.iter() {
-                degats.ajoute(Origine::Fenetre, rect);
+        } else if region == crate::gui::windowing::HitRegion::Maximize {
+            let command = if top.placement == crate::gui::windowing::WindowPlacement::Maximized {
+                crate::gui::windowing::WindowCommand::Restore(top.id)
+            } else { crate::gui::windowing::WindowCommand::Maximize(top.id) };
+            if route_window_command(top, command) {
+                // Maximiser ou restaurer : l'ancienne empreinte peinte et la nouvelle.
+                let mouvement = transition::fenetre_bougee(
+                    cadre_avant, cadre_fenetre(&wins[index]),
+                );
+                for (rect, cible) in mouvement.iter() {
+                    degats.ajoute(origine_de(cible), rect);
+                }
             }
-        } else if on_title && mx >= r - 28 && mx < r - 19 {
-            top.min = true;
+        } else if region == crate::gui::windowing::HitRegion::Minimize && top.flags.minimizable {
+            route_window_command(top, crate::gui::windowing::WindowCommand::Minimize(top.id));
             let m = wins.pop().unwrap();
             wins.insert(0, m);
             // Elle s'efface : ce qui etait dessous doit reapparaitre.
             degats.tout();
-        } else if !window::est_client(top) && my >= top.y + top.h - 8 && mx >= r - 8 {
-            *drag = Some(Drag::Resize);
-        } else if my < top.y + TITLE_H {
+        } else if let Some(edge) = hit_resize_edge(region) {
+            if top.flags.resizable { *drag = Some(Drag::Resize(edge)); }
+        } else if region == crate::gui::windowing::HitRegion::Titlebar {
+            if title_clicks.click(top.id, 1, crate::gui::windowing::Point { x: mx, y: my }, now_ms) {
+                let command = if top.placement == crate::gui::windowing::WindowPlacement::Maximized {
+                    crate::gui::windowing::WindowCommand::Restore(top.id)
+                } else { crate::gui::windowing::WindowCommand::Maximize(top.id) };
+                if route_window_command(top, command) {
+                    for (rect, cible) in transition::fenetre_bougee(cadre_avant, cadre_fenetre(top)).iter() {
+                        degats.ajoute(origine_de(cible), rect);
+                    }
+                }
+                return;
+            }
+            if top.placement != crate::gui::windowing::WindowPlacement::Normal {
+                let id = top.id;
+                if route_window_command(top, crate::gui::windowing::WindowCommand::Restore(id)) {
+                    for (rect, cible) in transition::fenetre_bougee(cadre_avant, cadre_fenetre(top)).iter() {
+                        degats.ajoute(origine_de(cible), rect);
+                    }
+                }
+            }
             *drag = Some(Drag::Move(mx - top.x, my - top.y));
         } else {
             let zone = zone_utile(top);
@@ -1510,5 +1720,62 @@ fn handle_click(
                 }
             }
         }
+    }
+}
+
+fn hit_resize_edge(region: crate::gui::windowing::HitRegion)
+    -> Option<crate::gui::windowing::ResizeEdge> {
+    use crate::gui::windowing::{HitRegion as H, ResizeEdge as E};
+    match region {
+        H::Left => Some(E::Left), H::Right => Some(E::Right), H::Top => Some(E::Top),
+        H::Bottom => Some(E::Bottom), H::NorthWest => Some(E::NorthWest),
+        H::NorthEast => Some(E::NorthEast), H::SouthWest => Some(E::SouthWest),
+        H::SouthEast => Some(E::SouthEast), _ => None,
+    }
+}
+
+fn hovered_button_rect(wins: &[Win], mx: i32, my: i32) -> Option<Rect> {
+    use crate::gui::windowing::{close_button_rect, hit_test, maximize_button_rect,
+        minimize_button_rect, HitRegion, Point, WINDOW_CHROME};
+    let window = wins.iter().rev().find(|window| !window.min && window.rect().contains(Point { x: mx, y: my }))?;
+    let rect = match hit_test(window.rect(), Point { x: mx, y: my }, WINDOW_CHROME,
+        window.flags.resizable) {
+        HitRegion::Close => close_button_rect(window.rect(), WINDOW_CHROME),
+        HitRegion::Maximize => maximize_button_rect(window.rect(), WINDOW_CHROME),
+        HitRegion::Minimize => minimize_button_rect(window.rect(), WINDOW_CHROME),
+        _ => return None,
+    };
+    Some(Rect::neuf(rect.x, rect.y, rect.width, rect.height))
+}
+
+/// Runtime adapter: the legacy event loop now emits the same explicit command
+/// model as the policy tests while `Win::window` remains the sole state owner.
+fn route_window_command(window: &mut Win, command: crate::gui::windowing::WindowCommand) -> bool {
+    use crate::gui::windowing::{SnapZone, WindowCommand, WindowPlacement};
+    match command {
+        WindowCommand::Close(id) if id == window.id => window.flags.closable,
+        WindowCommand::Minimize(id) if id == window.id && window.flags.minimizable => {
+            window.min = true; true
+        }
+        WindowCommand::Maximize(id) if id == window.id && window.flags.maximizable => {
+            if window.placement == WindowPlacement::Normal { window.restore_rect = Some(window.rect()); }
+            window.set_rect(crate::gui::windowing::Rect::new(0, BAR_H as i32,
+                fb::WIDTH as u32, (fb::HEIGHT - 2 * BAR_H) as u32));
+            window.placement = WindowPlacement::Maximized; true
+        }
+        WindowCommand::Restore(id) if id == window.id => {
+            if window.min { window.min = false; return true }
+            if let Some(rect) = window.restore_rect.take() { window.set_rect(rect); }
+            window.placement = WindowPlacement::Normal; true
+        }
+        WindowCommand::Snap(id, zone) if id == window.id && window.flags.snappable => {
+            if window.placement == WindowPlacement::Normal { window.restore_rect = Some(window.rect()); }
+            let work = crate::gui::windowing::WorkArea(crate::gui::windowing::Rect::new(
+                0, BAR_H as i32, fb::WIDTH as u32, (fb::HEIGHT - 2 * BAR_H) as u32));
+            match zone { SnapZone::Left => { window.set_rect(work.snap_left()); window.placement=WindowPlacement::SnappedLeft; }
+                SnapZone::Right => { window.set_rect(work.snap_right()); window.placement=WindowPlacement::SnappedRight; } }
+            true
+        }
+        _ => false,
     }
 }

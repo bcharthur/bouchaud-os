@@ -1,149 +1,224 @@
-//! Pilote serie UART 16550 sur COM1 (port 0x3F8).
+//! Pilote série UART 16550 sur COM1 (port 0x3F8).
 //!
-//! Sortie de debug pour QEMU lance avec `-serial stdio` : les logs noyau
-//! importants y sont copies, ce qui permet de tracer le boot meme si l'ecran
-//! VGA est efface. Fournit les macros `serial_print!` / `serial_println!`.
+//! V16.2 garde COM1 comme sortie de diagnostic mais retire son coût du chemin
+//! critique autant que possible :
+//! - 115200 bauds au lieu de 38400 ;
+//! - FIFO 16 octets ;
+//! - un tampon de formatage sur pile pour que `write_fmt` n'attende pas THRE à
+//!   chaque fragment de `fmt` ;
+//! - le préfixe de journal peut être émis d'un seul bloc sans réentrer dans le
+//!   formateur série.
 
 use core::fmt;
 use crate::arch::x86_64::ports::{inb, outb};
 
 const COM1: u16 = 0x3F8;
+const PROFONDEUR_FIFO: usize = 16;
+const FORMAT_BUFFER_SIZE: usize = 2048;
 
-/// Etat global du port serie, pour eviter d'ecrire avant l'init.
+/// État global du port série, pour éviter d'écrire avant l'init.
 static mut INITIALISED: bool = false;
 
-pub struct SerialPort;
-
-static mut SERIAL: SerialPort = SerialPort;
-
-/// Initialise COM1 : 38400 bauds, 8N1, FIFO active.
-pub fn init() {
-    unsafe {
-        outb(COM1 + 1, 0x00); // desactive les interruptions
-        outb(COM1 + 3, 0x80); // active DLAB pour regler le diviseur
-        outb(COM1 + 0, 0x03); // diviseur bas  (3 -> 38400 bauds)
-        outb(COM1 + 1, 0x00); // diviseur haut
-        outb(COM1 + 3, 0x03); // 8 bits, pas de parite, 1 stop (8N1)
-        outb(COM1 + 2, 0xC7); // active et purge le FIFO, seuil 14 octets
-        outb(COM1 + 4, 0x0B); // IRQ active, RTS/DSR positionnes
-        INITIALISED = true;
-    }
-}
-
-/// Indique si COM1 a ete initialise.
-pub fn is_ready() -> bool {
-    unsafe { INITIALISED }
-}
-
-fn transmit_empty() -> bool {
-    unsafe { inb(COM1 + 5) & 0x20 != 0 }
-}
-
-fn write_byte(byte: u8) {
-    // Convertit les sauts de ligne Unix en CRLF pour les terminaux serie.
-    if byte == b'\n' {
-        write_raw(b'\r');
-    }
-    write_raw(byte);
-}
-
-fn write_raw(byte: u8) {
-    let mut spin = 0u32;
-    while !transmit_empty() {
-        spin += 1;
-        if spin > 100_000 { break; } // garde-fou si COM1 absent
-    }
-    unsafe { outb(COM1, byte); }
-}
-
-/// Le prochain octet ecrit commence-t-il une ligne ?
+/// Le prochain octet normal écrit commence-t-il une ligne ?
 static mut DEBUT_LIGNE: bool = true;
-/// Vrai pendant l'ecriture du prefixe lui-meme (garde de reentrance).
+/// Garde de réentrance pendant la génération du préfixe.
 static mut DANS_PREFIXE: bool = false;
 
-impl fmt::Write for SerialPort {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for byte in s.bytes() {
-            // Le prefixe est pose au premier octet non vide d'une ligne, et non
-            // a chaque appel : une ligne construite par plusieurs `serial_print!`
-            // n'en recoit donc qu'un, et une ligne vide n'en recoit aucun.
-            unsafe {
-                if DEBUT_LIGNE && byte != b'\n' && !DANS_PREFIXE {
-                    DANS_PREFIXE = true;
-                    crate::kernel::journal::ecris_prefixe();
-                    DANS_PREFIXE = false;
-                }
-                DEBUT_LIGNE = byte == b'\n';
-            }
-            write_byte(byte);
-        }
-        Ok(())
-    }
-}
-
-/// Implementation reelle derriere `serial_print!` / `serial_println!`.
-pub fn _print(args: fmt::Arguments) {
-    use core::fmt::Write;
-    if !is_ready() { return; }
-    unsafe { let _ = SERIAL.write_fmt(args); }
-}
-
-// BOUCHAUD_P0_SERIE_BRUTE_V1
-//
-// POURQUOI UNE SECONDE SORTIE
-// ---------------------------
-// `SerialPort` pose un prefixe de journal au premier octet de chaque ligne, et
-// ce prefixe n'est pas gratuit : `journal::ecris_prefixe` lit l'horloge RTC par
-// ports d'E/S, puis la charge CPU, la memoire et le disque.
-//
-// Ce sont des lectures parfaitement raisonnables pour un journal. Elles n'ont
-// rien a faire dans le chemin de forensic d'une panique : a ce moment precis
-// l'etat du noyau est, par definition, celui qu'on ne comprend pas. Le vidage
-// de l'enregistreur de vol du gros verrou doit dependre du strict minimum --
-// un `outb` sur COM1 -- et de rien d'autre.
-//
-// Ce que cette sortie ne fait pas : pas de prefixe, pas d'allocation, pas de
-// verrou, aucun appel hors de ce fichier.
+pub struct SerialPort;
 pub struct SerialBrut;
 
 static mut SERIAL_BRUT: SerialBrut = SerialBrut;
 
-impl fmt::Write for SerialBrut {
+/// Initialise COM1 : 115200 bauds, 8N1, FIFO active.
+///
+/// QEMU émule un 16550 ; un diviseur de 1 est le débit standard maximal du
+/// périphérique et divise par trois la durée de vidage par rapport à l'ancien
+/// diviseur 3 (38400 bauds).
+pub fn init() {
+    unsafe {
+        outb(COM1 + 1, 0x00);
+        outb(COM1 + 3, 0x80);
+        outb(COM1 + 0, 0x01); // diviseur bas : 1 -> 115200
+        outb(COM1 + 1, 0x00);
+        outb(COM1 + 3, 0x03); // 8N1
+        outb(COM1 + 2, 0xC7); // FIFO active, purge, seuil RX 14
+        outb(COM1 + 4, 0x0B);
+        INITIALISED = true;
+    }
+}
+
+pub fn is_ready() -> bool {
+    unsafe { INITIALISED }
+}
+
+#[inline]
+fn transmit_empty() -> bool {
+    unsafe { inb(COM1 + 5) & 0x20 != 0 }
+}
+
+#[inline]
+fn attends_place() {
+    let mut spin = 0u32;
+    while !transmit_empty() {
+        spin = spin.wrapping_add(1);
+        if spin > 100_000 {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+fn write_lot(octets: &[u8]) {
+    let mut pose = 0usize;
+    while pose < octets.len() {
+        attends_place();
+        let fin = (pose + PROFONDEUR_FIFO).min(octets.len());
+        while pose < fin {
+            unsafe { outb(COM1, octets[pose]); }
+            pose += 1;
+        }
+    }
+}
+
+/// Écrit directement sur COM1 sans déclencher de préfixe de journal.
+///
+/// Utilisé par `journal::ecris_prefixe`: le préfixe est déjà entièrement
+/// construit sur pile, le refaire passer par `ecris_octets` récursivement
+/// recréerait précisément le coût que V16.2 veut supprimer.
+pub fn ecris_octets_sans_prefixe(octets: &[u8]) {
+    if !is_ready() || octets.is_empty() {
+        return;
+    }
+    let mut lot = [0u8; 64];
+    super::lots::en_lots(octets, &mut lot, write_lot);
+    if let Some(&dernier) = octets.last() {
+        unsafe { DEBUT_LIGNE = dernier == b'\n'; }
+    }
+}
+
+/// Émet des octets normaux, préfixe de journal compris.
+pub fn ecris_octets(octets: &[u8]) {
+    if !is_ready() || octets.is_empty() {
+        return;
+    }
+
+    let mut lot = [0u8; 64];
+    let mut debut = 0usize;
+
+    for (indice, &byte) in octets.iter().enumerate() {
+        unsafe {
+            if DEBUT_LIGNE && byte != b'\n' && !DANS_PREFIXE {
+                super::lots::en_lots(&octets[debut..indice], &mut lot, write_lot);
+                debut = indice;
+
+                DANS_PREFIXE = true;
+                crate::kernel::journal::ecris_prefixe();
+                DANS_PREFIXE = false;
+            }
+            DEBUT_LIGNE = byte == b'\n';
+        }
+    }
+
+    super::lots::en_lots(&octets[debut..], &mut lot, write_lot);
+}
+
+// BOUCHAUD_V16_2_SERIAL_FORMAT_BUFFER
+//
+// `fmt::write` appelle `write_str` plusieurs fois pour une seule ligne
+// formatée. L'ancien `SerialPort::write_str` descendait jusqu'au UART à chaque
+// fragment ; sous TCG, chaque vérification THRE est un I/O émulé très coûteux.
+// Ce tampon sur pile transforme une ligne ordinaire en un ou quelques gros
+// envois, sans allocation et sans état global supplémentaire.
+struct TamponFormat {
+    donnees: [u8; FORMAT_BUFFER_SIZE],
+    len: usize,
+}
+
+impl TamponFormat {
+    const fn neuf() -> Self {
+        Self { donnees: [0; FORMAT_BUFFER_SIZE], len: 0 }
+    }
+
+    fn vide(&mut self) {
+        if self.len == 0 {
+            return;
+        }
+        ecris_octets(&self.donnees[..self.len]);
+        self.len = 0;
+    }
+}
+
+impl fmt::Write for TamponFormat {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        for byte in s.bytes() {
-            // Tenir `DEBUT_LIGNE` a jour malgre l'absence de prefixe : sinon un
-            // `serial_println!` ordinaire qui suivrait une ligne brute croirait
-            // etre en milieu de ligne, et sauterait SON prefixe.
-            unsafe { DEBUT_LIGNE = byte == b'\n'; }
-            write_byte(byte);
+        let mut reste = s.as_bytes();
+        while !reste.is_empty() {
+            if self.len == self.donnees.len() {
+                self.vide();
+            }
+            let place = self.donnees.len() - self.len;
+            let n = place.min(reste.len());
+            self.donnees[self.len..self.len + n].copy_from_slice(&reste[..n]);
+            self.len += n;
+            reste = &reste[n..];
         }
         Ok(())
     }
 }
 
-/// Sortie serie brute : COM1 directement, sans prefixe de journal.
+impl fmt::Write for SerialPort {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        ecris_octets(s.as_bytes());
+        Ok(())
+    }
+}
+
+/// Implémentation derrière `serial_print!` / `serial_println!`.
+pub fn _print(args: fmt::Arguments) {
+    use core::fmt::Write;
+    if !is_ready() {
+        return;
+    }
+
+    let mut sortie = TamponFormat::neuf();
+    let _ = sortie.write_fmt(args);
+    sortie.vide();
+}
+
+impl fmt::Write for SerialBrut {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        ecris_octets_sans_prefixe(s.as_bytes());
+        Ok(())
+    }
+}
+
+/// Sortie brute de forensic/panique : aucun préfixe.
 ///
-/// Reservee au chemin de diagnostic de panique. Pour tout le reste,
-/// `serial_println!` reste la bonne macro : un journal sans horodatage est
-/// beaucoup moins utile qu'il n'y parait.
+/// Le chemin de panique privilégie la simplicité : il ne dépend ni du journal
+/// ni du tampon de formatage normal.
 pub fn _print_raw(args: fmt::Arguments) {
     use core::fmt::Write;
-    if !is_ready() { return; }
-    unsafe { let _ = SERIAL_BRUT.write_fmt(args); }
+    if !is_ready() {
+        return;
+    }
+    unsafe {
+        let _ = SERIAL_BRUT.write_fmt(args);
+    }
 }
 
 #[macro_export]
 macro_rules! serial_print {
-    ($($arg:tt)*) => {{ $crate::drivers::serial::_print(format_args!($($arg)*)) }};
+    ($($arg:tt)*) => {{
+        $crate::drivers::serial::_print(format_args!($($arg)*))
+    }};
 }
 
-/// Comme `serial_print!`, mais sans prefixe de journal. Voir [`_print_raw`].
 #[macro_export]
 macro_rules! serial_print_brut {
-    ($($arg:tt)*) => {{ $crate::drivers::serial::_print_raw(format_args!($($arg)*)) }};
+    ($($arg:tt)*) => {{
+        $crate::drivers::serial::_print_raw(format_args!($($arg)*))
+    }};
 }
 
-/// Comme `serial_println!`, mais sans prefixe de journal. Voir [`_print_raw`].
 #[macro_export]
 macro_rules! serial_println_brut {
     () => {{ $crate::serial_print_brut!("\n") }};
@@ -157,5 +232,7 @@ macro_rules! serial_println_brut {
 macro_rules! serial_println {
     () => {{ $crate::serial_print!("\n") }};
     ($fmt:expr) => {{ $crate::serial_print!(concat!($fmt, "\n")) }};
-    ($fmt:expr, $($arg:tt)*) => {{ $crate::serial_print!(concat!($fmt, "\n"), $($arg)*) }};
+    ($fmt:expr, $($arg:tt)*) => {{
+        $crate::serial_print!(concat!($fmt, "\n"), $($arg)*)
+    }};
 }

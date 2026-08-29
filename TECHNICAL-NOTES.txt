@@ -1,0 +1,22 @@
+NOTES TECHNIQUES
+================
+
+Le défaut ciblé est concret : sys_poll impose actuellement 2 ms dès qu'une socket
+est présente parce que le e1000 ne produit aucun wake RX. Le driver confirme qu'il
+masque toutes les interruptions avec IMC=0xffffffff.
+
+Le handler ajouté reste volontairement minuscule :
+- lecture ICR = acquittement matériel ;
+- compteur atomique ;
+- wake de READINESS ;
+- aucun accès RX_CUR/TX_CUR ;
+- aucun drain réseau dans l'IRQ.
+
+Le vrai traitement des paquets reste dans la pile réseau existante au réveil de poll.
+
+Le watchdog 50 ms est conservateur : le fonctionnement nominal devient événementiel,
+mais une IRQ perdue ne peut pas bloquer poll indéfiniment.
+
+Si, après ce patch, poll chute fortement mais WebContent reste à 100 % CPU et muet,
+alors le prochain problème est réellement dans futex / event loop / frame production
+Ladybird, et non plus masqué par le polling réseau.

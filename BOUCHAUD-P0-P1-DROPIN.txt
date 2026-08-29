@@ -1,0 +1,82 @@
+BOUCHAUD OS — correctif P0/P1 prêt à déposer
+Base étudiée : branche perf/gui-event-driven, commit 91023f8854c7a6356938f59665c8c6bdde95fa8b
+Date : 2026-08-28
+
+UTILISATION
+===========
+Ce ZIP n'embarque AUCUN script d'application.
+Décompresse son contenu à la racine du dépôt Bouchaud OS et accepte le
+remplacement des fichiers existants.
+
+Fichiers remplacés :
+  src/kernel/sync/bkl.rs
+  src/fs/persistance.rs
+
+IMPORTANT — arbre local
+========================
+Le dernier run signalait 35 fichiers non commités. Ce paquet a été construit
+contre le contenu publié au commit 91023f8 pour les deux fichiers ci-dessus.
+Si l'un de ces DEUX fichiers contient encore des changements locaux que tu veux
+conserver, fais-en une copie avant le glisser-déposer.
+
+P0 — BKL / resume_after_schedule
+================================
+Le parking actuel fonctionne, mais chaque libération du BKL réveille tous les
+CPU garés. Les mesures du run Google montrent alors beaucoup de wake IPIs et de
+réveils sans acquisition, alors qu'un BKL n'a qu'un seul gagnant possible.
+
+Le correctif :
+  - garde le protocole SeqCst anti-lost-wakeup existant ;
+  - ne modifie ni OWNER ni DEPTH ni la logique de migration ;
+  - réveille exactement UN CPU garé par libération ;
+  - choisit la cible en round-robin pour éviter un biais permanent ;
+  - conserve le court spin actif et le fallback IRQ masquées existants.
+
+La vivacité reste assurée : si le CPU réveillé perd la course, c'est qu'un autre
+CPU a acquis le BKL ; ce nouveau propriétaire réveillera à son tour un waiter
+lors de sa libération. Si personne n'a acquis le verrou, le waiter voit FREE et
+ne peut pas se rendormir sur cet état.
+
+P1 — fsync / persistance
+========================
+La V1 évitait déjà de réécrire le contenu des fichiers inchangés, mais chaque
+fsync réécrivait encore les 1024 secteurs réservés à la table, soit 512 Kio de
+PIO sous le BKL.
+
+Le correctif :
+  - conserve le format disque et SECTEUR_CONTENU = 1025 ;
+  - conserve 1024 secteurs réservés, donc compatibilité avec les images V1 ;
+  - lit et écrit uniquement le préfixe de table réellement utilisé ;
+  - 8 fichiers = 4 secteurs de table au lieu de 1024 ;
+  - l'en-tête reste écrit en dernier ;
+  - l'empreinte DISQUE et tous les chemins d'échec restent inchangés dans leur
+    principe.
+
+Ce que ce paquet NE change PAS
+==============================
+La readiness de poll reste une WaitQueue globale avec wake_all. La remplacer
+naïvement par wake_one serait incorrect : on pourrait réveiller un poller qui
+ne surveille pas l'objet devenu prêt et laisser le bon poller endormi.
+Le vrai P1 suivant, si les mesures le justifient encore, sera une readiness
+ciblée par objet / groupe de descripteurs.
+
+VALIDATION ATTENDUE
+===================
+Après remplacement :
+  1. lancer la validation rapide habituelle et vérifier qu'elle reste verte ;
+  2. démarrer Ladybird sur Google ;
+  3. faire au moins 60 s de scroll soutenu ;
+  4. vérifier :
+       - aucun SMP-STALL ;
+       - reprise_max_ns < 50 000 000 ns visé ;
+       - forte chute de wake_ipis / reveils_sans_acq ;
+       - fsync max_hold_ns nettement inférieur aux ~94 ms observés ;
+       - aucune régression SMP4 ni GUI.
+
+Ce correctif est ciblé par les mesures et la source, mais il ne peut être
+déclaré « P0 clos » qu'après ce test QEMU réel.
+
+ENCODAGE
+========
+Tous les fichiers de ce paquet sont en UTF-8 sans BOM, fins de ligne LF.
+Test volontaire de caractères : cœur, nœud, écriture, « guillemets », œ.

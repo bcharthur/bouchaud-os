@@ -3,7 +3,7 @@
 use crate::gui::apps;
 use crate::gui::framebuffer as fb;
 use crate::gui::window::{
-    self, clip, icon_rect, menu_rect, start_btn, taskbar_btn, Win,
+    self, icon_rect, menu_rect, start_btn, taskbar_btn, Win,
     BAR_H, ICONS, MENU, MENU_HEADER_H, MENU_ITEM_H, TITLE_H,
 };
 use crate::arch::x86_64::{cpu, rtc, smp};
@@ -68,16 +68,46 @@ fn draw_circle_highlight(cx: usize, cy: usize, r: i32, base: u32) {
 // n'est plus utilisee par la boucle de composition.
 
 /// Filigrane « Bouchaud OS », en bas au centre.
+/// Texte du filigrane du bureau.
+const FILIGRANE: &str = "Bouchaud OS";
+
+/// Corps du filigrane, en pixels.
+const FILIGRANE_CORPS: f32 = 34.0;
+
+/// Interligne reserve au filigrane : jambages et debord d'antialiassage.
+const FILIGRANE_HAUTEUR: usize = 44;
+
+// BOUCHAUD_GUI_FILIGRANE_VECTORIEL_V1
+//
+// Le filigrane etait peint par `draw_text_rgb(.., scale = 2)`, c'est-a-dire la
+// police BITMAP 8x8 du noyau, agrandie deux fois : des marches d'escalier a
+// chaque diagonale, alors que le bureau dispose d'une DejaVu vectorielle
+// antialiasee -- celle qui sert deja aux titres de fenetres et aux libelles.
+//
+// Le rectangle du calque ne peut plus etre une constante : la largeur d'un mot
+// en police proportionnelle ne se devine pas. Il est MESURE, avec une marge
+// pour l'antialiassage, et `draw_filigrane` part exactement du meme point.
+fn filigrane_origine() -> (usize, usize) {
+    let largeur = fb::text_width(FILIGRANE, FILIGRANE_CORPS, false);
+    (
+        (fb::WIDTH / 2).saturating_sub(largeur / 2),
+        fb::HEIGHT.saturating_sub(FILIGRANE_HAUTEUR + 22),
+    )
+}
+
 pub(crate) fn draw_filigrane() {
-    fb::draw_text_rgb(fb::WIDTH / 2 - 88, fb::HEIGHT - 60, "Bouchaud OS", 0x33476b, 2);
+    let (x, y) = filigrane_origine();
+    fb::draw_text_prop(x, y, FILIGRANE, 0x2f4468, FILIGRANE_CORPS, false);
 }
 
 /// Bornes du filigrane. Volontairement large : un calque qui deborde ses
 /// bornes laisserait des trainees, l'inverse ne coute qu'un peu de travail.
 pub(crate) fn filigrane_rect() -> (usize, usize, usize, usize) {
-    let largeur = 200usize;
-    let hauteur = 24usize;
-    ((fb::WIDTH / 2).saturating_sub(96), fb::HEIGHT.saturating_sub(64), largeur, hauteur)
+    let (x, y) = filigrane_origine();
+    let largeur = fb::text_width(FILIGRANE, FILIGRANE_CORPS, false);
+    // Marge : `draw_text_prop` pose les glyphes a partir de `x`, mais un `B`
+    // peut deborder d'un pixel a gauche et l'antialiassage d'un autre.
+    (x.saturating_sub(4), y, largeur + 8, FILIGRANE_HAUTEUR)
 }
 
 /// Fond d'ecran seul.
@@ -115,26 +145,19 @@ pub(crate) fn draw_icone(index: usize) {
 
 /// Empreinte reelle de l'icone `index`, libelle compris.
 pub(crate) fn empreinte_icone(index: usize) -> crate::gui::protocole::Rect {
-    let (label, _kind) = ICONS[index];
     let r = icon_rect(index);
-    let vw = 40i32;
-    let vx = r.x + (r.w - vw) / 2;
-    let vy = r.y;
+    let (vx, vy) = image_icone(index);
+    let cote = crate::gui::icones::TAILLE_BUREAU as i32;
+    let (lx, ly, lw) = libelle_icone(index);
 
-    let lw = fb::text_width(label, 10.0, false) as i32;
-    let lx = (r.x + (r.w - lw) / 2).max(0);
-    let ly = vy + vw + 3;
-    // Hauteur majoree d'une ligne de 10 pixels : jambages et ombre comprises.
-    const HAUTEUR_LIBELLE: i32 = 16;
-
-    let gauche = r.x.min(lx);
+    // L'union de TROIS choses : la cellule, l'image, et le libelle avec son
+    // ombre portee d'un pixel. Le libelle est centre sur la cellule mais n'y
+    // est pas contraint -- « Calculatrice » est plus large qu'elle --, donc il
+    // deborde des deux cotes, et c'est ce debord que le calque doit annoncer.
+    let gauche = r.x.min(vx).min(lx);
     let haut = r.y.min(vy);
-    let droite = (r.x + r.w)
-        .max(vx + 3 + vw)      // ombre portee du carre
-        .max(lx + lw + 2);     // libelle plus son ombre d'un pixel
-    let bas = (r.y + r.h)
-        .max(vy + 3 + vw)
-        .max(ly + HAUTEUR_LIBELLE);
+    let droite = (r.x + r.w).max(vx + cote).max(lx + lw + 2);
+    let bas = (r.y + r.h).max(vy + cote).max(ly + HAUTEUR_LIBELLE);
 
     crate::gui::protocole::Rect::neuf(
         gauche,
@@ -167,29 +190,75 @@ pub(crate) fn draw_desktop(wins: &[Win]) {
     }
 }
 
-fn draw_topbar() {
-    // Fond gradient vertical foncé
-    for y in 0..BAR_H {
-        let c = lerp_color(0x0d1a30, 0x162340, y, BAR_H);
-        fb::fill_rect_rgb(0, y, fb::WIDTH, 1, c);
+// BOUCHAUD_GUI_COQUILLE_V1
+//
+// Les deux barres partagent la meme matiere que les fenetres : la surface du
+// theme, un degrade a peine perceptible, un filet de bordure du cote de
+// l'ecran, et du texte en DejaVu -- plus de bitmap 8x8 colle au bord.
+//
+// Un seul endroit decrit cette matiere, pour que la barre du haut et celle du
+// bas ne puissent pas se mettre a diverger : elles se ressemblent trop dans le
+// code pour qu'on remarque la difference.
+
+/// Corps du texte des barres, en pixels.
+const CORPS_BARRE: f32 = 13.0;
+
+/// Ligne de base du texte dans une barre de `BAR_H` pixels.
+fn ligne_texte_barre(sommet: usize) -> usize {
+    sommet + (BAR_H - CORPS_BARRE as usize) / 2 - 1
+}
+
+/// Fond commun aux deux barres : degrade vertical plus filet de separation.
+///
+/// `filet_en_bas` distingue la barre du haut -- dont la bordure regarde le
+/// bureau, donc vers le bas -- de celle du bas.
+fn fond_de_barre(sommet: usize, filet_en_bas: bool) {
+    for ligne in 0..BAR_H {
+        let couleur = lerp_color(
+            crate::gui::theme::COLOR_SURFACE_ELEVATED,
+            crate::gui::theme::COLOR_SURFACE,
+            if filet_en_bas { ligne } else { BAR_H - 1 - ligne },
+            BAR_H,
+        );
+        fb::fill_rect_rgb(0, sommet + ligne, fb::WIDTH, 1, couleur);
     }
-    // Ligne de séparation en bas
-    fb::fill_rect_rgb(0, BAR_H - 1, fb::WIDTH, 1, 0x2a4580);
+    let filet = if filet_en_bas { sommet + BAR_H - 1 } else { sommet };
+    fb::fill_rect_rgb(0, filet, fb::WIDTH, 1, crate::gui::theme::COLOR_BORDER);
+}
 
-    // "Bouchaud OS" à gauche en TTF gras
-    fb::draw_text_prop(4, 1, "Bouchaud OS", 0x7ab8f5, 9.0, true);
+/// Remplit un rectangle arrondi par SEGMENTS, comme le chrome des fenetres.
+fn pave_arrondi(rect: crate::gui::windowing::Rect, rayon: u32, couleur: u32) {
+    let (cx0, cy0, cx1, cy1) = fb::clip_rect();
+    let decoupe = crate::gui::windowing::Rect::new(cx0 as i32, cy0 as i32,
+        cx1.saturating_sub(cx0) as u32, cy1.saturating_sub(cy0) as u32);
+    crate::gui::graphics::spans_rounded_rect(rect, rayon, decoupe,
+        |x, y, largeur| {
+            fb::fill_rect_rgb(x.max(0) as usize, y.max(0) as usize,
+                largeur as usize, 1, couleur)
+        });
+}
 
-    // Stats CPU/RAM/Disk au centre
+fn draw_topbar() {
+    fond_de_barre(0, true);
+    let ligne = ligne_texte_barre(0);
+
+    // Marque du systeme, a gauche.
+    fb::draw_text_prop(window::MARGE_BARRE as usize * 2 + 2, ligne, "Bouchaud OS",
+        crate::gui::theme::COLOR_TEXT_PRIMARY, CORPS_BARRE, true);
+
+    // Statistiques CPU/RAM/Disque, au centre.
     let stats = sys_stats_str();
-    let sw = fb::text_width(&stats, 9.0, false);
-    let sx = (fb::WIDTH / 2).saturating_sub(sw / 2);
-    fb::draw_text_prop(sx, 1, &stats, 0x5ab4d6, 9.0, false);
+    let largeur = fb::text_width(&stats, CORPS_BARRE - 1.0, false);
+    let x = (fb::WIDTH / 2).saturating_sub(largeur / 2);
+    fb::draw_text_prop(x, ligne, &stats,
+        crate::gui::theme::COLOR_TEXT_SECONDARY, CORPS_BARRE - 1.0, false);
 
-    // Horloge à droite
+    // Horloge, a droite.
     let dt = rtc::now();
-    let clk = format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second);
-    let cw = fb::text_width(&clk, 9.0, true);
-    fb::draw_text_prop(fb::WIDTH - cw - 4, 1, &clk, 0xf0c060, 9.0, true);
+    let heure = format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second);
+    let largeur = fb::text_width(&heure, CORPS_BARRE, true);
+    fb::draw_text_prop(fb::WIDTH - largeur - window::MARGE_BARRE as usize * 2 - 2,
+        ligne, &heure, crate::gui::theme::COLOR_TEXT_PRIMARY, CORPS_BARRE, true);
 }
 
 fn sys_stats_str() -> String {
@@ -225,8 +294,15 @@ fn human_bytes(n: usize) -> String {
 
 fn draw_wallpaper() {
     // Gradient bleu nuit du haut (profond) vers le bas (moins foncé)
+    //
+    // BOUCHAUD_GFX_CULLING_AMONT_V1 : la couleur d'une ligne est une fonction
+    // PURE de son ordonnee, donc ne parcourir que les lignes presentees rend
+    // exactement la meme image. Sans ce bornage, un degat de curseur de 22
+    // lignes faisait quand meme 720 tours de boucle -- et 720 lectures de la
+    // decoupe, une par appel a `fill_rect_rgb`, pour 698 lignes jetees.
     let h = fb::HEIGHT.max(1);
-    for y in 0..fb::HEIGHT {
+    let (_, cy0, _, cy1) = fb::clip_rect();
+    for y in cy0..cy1.min(fb::HEIGHT) {
         let c = lerp_color(0x080e1c, 0x1a2f50, y, h);
         fb::fill_rect_rgb(0, y, fb::WIDTH, 1, c);
     }
@@ -244,6 +320,24 @@ fn draw_wallpaper() {
 }
 
 // ─── Icônes ────────────────────────────────────────────────────────────────
+//
+// BOUCHAUD_GUI_ICONES_IMAGES_V1
+//
+// Les cinq icones etaient DESSINEES ici : plus de deux cents lignes de disques,
+// de rectangles et de degrades, un peintre par application, rejoues a chaque
+// rectangle de degat. Elles ne ressemblaient pas a des icones, et elles ne
+// pouvaient pas : ce compositeur n'a ni courbes ni antialiassage.
+//
+// Ce sont maintenant de vraies images -- quatre PNG fabriques par
+// `tools/assets/fabrique-icones.py`, plus le VRAI logo de Ladybird, pris a son
+// depot. `gui::icones` les decode et les reduit UNE fois, dans la taille exacte
+// ou elles seront posees.
+
+/// Corps du libelle d'une icone de bureau.
+const CORPS_LIBELLE: f32 = 12.0;
+
+/// Hauteur reservee au libelle sous l'icone.
+const HAUTEUR_LIBELLE: i32 = 18;
 
 fn draw_icons() {
     for i in 0..ICONS.len() {
@@ -251,316 +345,159 @@ fn draw_icons() {
     }
 }
 
+/// Origine de l'image d'une icone, dans son rectangle.
+fn image_icone(index: usize) -> (i32, i32) {
+    let r = icon_rect(index);
+    (r.x + (r.w - crate::gui::icones::TAILLE_BUREAU as i32) / 2, r.y)
+}
+
+/// Origine du libelle d'une icone, et sa largeur.
+fn libelle_icone(index: usize) -> (i32, i32, i32) {
+    let (label, _kind) = ICONS[index];
+    let r = icon_rect(index);
+    let largeur = fb::text_width(label, CORPS_LIBELLE, false) as i32;
+    let x = r.x + (r.w - largeur) / 2;
+    let y = r.y + crate::gui::icones::TAILLE_BUREAU as i32 + 6;
+    (x, y, largeur)
+}
+
 /// Une seule icone. Extrait de `draw_icons` pour que `gui::scene` puisse en
 /// ecarter une qui ne touche pas le rectangle en cours.
 fn draw_icon_at(i: usize) {
-    {
-        let (label, _kind) = ICONS[i];
-        let r = icon_rect(i);
-        let vw = 40i32;
-        let vx = r.x + (r.w - vw) / 2;
-        let vy = r.y;
+    let (label, _kind) = ICONS[i];
+    let (vx, vy) = image_icone(i);
+    crate::gui::icones::dessine(i, vx.max(0) as usize, vy.max(0) as usize,
+        crate::gui::icones::TAILLE_BUREAU);
 
-        // Ombre portée
-        fb::fill_rect_rgb((vx + 3) as usize, (vy + 3) as usize, vw as usize, vw as usize, 0x06090f);
-
-        // Fond de l'icône (carré arrondi simulé)
-        draw_app_icon(i, vx as usize, vy as usize, vw as usize);
-
-        // Halo de sélection (cadre bleu subtil)
-        // fb::rect(vx as usize, vy as usize, vw as usize, vw as usize, fb::C_DKBLUE);
-
-        // Label TTF antialiasé avec ombre
-        let lw = fb::text_width(label, 10.0, false) as i32;
-        let lx = (r.x + (r.w - lw) / 2).max(0) as usize;
-        let ly = (vy + vw + 3) as usize;
-        // Ombre du texte
-        fb::draw_text_prop(lx + 1, ly + 1, label, 0x000000, 10.0, false);
-        fb::draw_text_prop(lx, ly, label, 0xe8f4fd, 10.0, false);
-    }
+    // Libelle : une ombre portee d'un pixel le detache du fond d'ecran, dont la
+    // clarte varie du haut au bas de l'ecran.
+    let (lx, ly, _) = libelle_icone(i);
+    let (lx, ly) = (lx.max(0) as usize, ly.max(0) as usize);
+    fb::draw_text_prop(lx + 1, ly + 1, label, 0x050a12, CORPS_LIBELLE, false);
+    fb::draw_text_prop(lx, ly, label, crate::gui::theme::COLOR_TEXT_PRIMARY,
+        CORPS_LIBELLE, false);
 }
 
-/// Dessine l'icone pixel-art de l'application `kind` dans un carre `vw x vw` en (vx, vy).
-fn draw_app_icon(icon_idx: usize, vx: usize, vy: usize, vw: usize) {
-    match icon_idx {
-        0 => draw_icon_ladybird(vx, vy, vw),
-        1 => draw_icon_calculator(vx, vy, vw),
-        2 => draw_icon_terminal(vx, vy, vw),
-        3 => draw_icon_files(vx, vy, vw),
-        4 => draw_icon_rustpad(vx, vy, vw),
-        _ => { fb::fill_rect_rgb(vx, vy, vw, vw, 0x555555); }
-    }
-}
-
-/// Remplit un disque plein (cx, cy = coordonnees ecran) clippé dans la zone icone.
-fn fill_circle(scx: i32, scy: i32, r: i32, col: u32, clip_x: usize, clip_y: usize, clip_w: usize) {
-    if r <= 0 { return; }
-    for dy in -r..=r {
-        let hw = isqrt(r * r - dy * dy);
-        let y = scy + dy;
-        if y < clip_y as i32 || y >= (clip_y + clip_w) as i32 { continue; }
-        let x0 = (scx - hw).max(clip_x as i32);
-        let x1 = (scx + hw).min((clip_x + clip_w - 1) as i32);
-        if x0 <= x1 {
-            fb::fill_rect_rgb(x0 as usize, y as usize, (x1 - x0 + 1) as usize, 1, col);
-        }
-    }
-}
-
-/// Logo Ladybird : la coccinelle du moteur qu'on execute reellement.
-///
-/// Le bureau affichait jusqu'ici un nautile, dessine du temps ou le navigateur
-/// etait un moteur maison. Le moteur est maintenant Ladybird, et l'icone doit
-/// dire lequel : c'est ce que l'utilisateur reconnait, et c'est aussi honnete
-/// vis-a-vis d'un projet dont on execute le code.
-///
-/// Le dessin est fait de disques et de rectangles clippes — les seules
-/// primitives dont ce compositeur dispose — et reste lisible a la taille reelle
-/// d'une icone de bureau (48 px) comme a celle d'une entree de menu.
-fn draw_icon_ladybird(vx: usize, vy: usize, vw: usize) {
-    // Fond : le meme bleu profond que les autres icones, pour que la rangee du
-    // bureau garde une famille visuelle.
-    for dy in 0..vw {
-        let c = lerp_color(0x10243c, 0x081525, dy, vw);
-        fb::fill_rect_rgb(vx, vy + dy, vw, 1, c);
-    }
-
-    let vwi = vw as i32;
-    let cx = vx as i32 + vwi / 2;
-    let cy = vy as i32 + vwi / 2 + vwi / 12; // legerement bas : la tete prend le haut
-    let r = vwi * 2 / 5;
-
-    // Ombre portee, un disque decale d'un pixel vers le bas.
-    fill_circle(cx, cy + 1, r, 0x04080f, vx, vy, vw);
-
-    // Tete noire, posee au-dessus du corps et donc dessinee avant lui.
-    fill_circle(cx, cy - r * 3 / 4, r * 1 / 2, 0x1a1a1e, vx, vy, vw);
-    // Deux yeux blancs.
-    fill_circle(cx - r / 4, cy - r * 5 / 6, r / 8, 0xf2f2f2, vx, vy, vw);
-    fill_circle(cx + r / 4, cy - r * 5 / 6, r / 8, 0xf2f2f2, vx, vy, vw);
-
-    // Corps rouge.
-    fill_circle(cx, cy, r, 0xd8202a, vx, vy, vw);
-    // Reflet : un disque plus clair en haut a gauche, ecrete par le corps.
-    fill_circle(cx - r / 3, cy - r / 3, r / 3, 0xf0505a, vx, vy, vw);
-
-    // Ligne mediane entre les elytres.
-    let ligne_h = (vwi / 24).max(1);
-    let y0 = (cy - r).max(vy as i32);
-    let y1 = (cy + r).min((vy + vw) as i32 - 1);
-    if y1 > y0 {
-        fb::fill_rect_rgb(
-            (cx - ligne_h / 2).max(vx as i32) as usize,
-            y0 as usize,
-            ligne_h as usize,
-            (y1 - y0) as usize,
-            0x1a1a1e,
-        );
-    }
-
-    // Six points, trois par elytre. Les rayons decroissent vers le bas pour
-    // suivre le retrecissement apparent de la coque.
-    let points: [(i32, i32, i32); 6] = [
-        (-r / 2, -r / 3, r / 5),
-        (r / 2, -r / 3, r / 5),
-        (-r / 2, r / 4, r / 6),
-        (r / 2, r / 4, r / 6),
-        (-r / 4, r * 2 / 3, r / 8),
-        (r / 4, r * 2 / 3, r / 8),
-    ];
-    for (dx, dy, pr) in points {
-        fill_circle(cx + dx, cy + dy, pr.max(1), 0x1a1a1e, vx, vy, vw);
-    }
-}
-
-fn isqrt(n: i32) -> i32 {
-    if n <= 0 { return 0; }
-    let mut x = n;
-    let mut y = (x + 1) / 2;
-    while y < x { x = y; y = (x + n / x) / 2; }
-    x
-}
-
-
-fn draw_icon_calculator(vx: usize, vy: usize, vw: usize) {
-    // Fond gris clair avec dégradé
-    for dy in 0..vw {
-        let c = lerp_color(0xf0f0f0, 0xd0d0d0, dy, vw);
-        fb::fill_rect_rgb(vx, vy + dy, vw, 1, c);
-    }
-    // Cadre foncé
-    fb::fill_rect_rgb(vx, vy, vw, 1, 0x888888);
-    fb::fill_rect_rgb(vx, vy + vw - 1, vw, 1, 0x888888);
-    fb::fill_rect_rgb(vx, vy, 1, vw, 0x888888);
-    fb::fill_rect_rgb(vx + vw - 1, vy, 1, vw, 0x888888);
-    // Écran
-    fb::fill_rect_rgb(vx + 3, vy + 3, vw - 6, 10, 0x0a1628);
-    fb::fill_rect_rgb(vx + 3, vy + 3, vw - 6, 1, 0x1e3a5f);
-    fb::draw_text_rgb(vx + 6, vy + 5, "0", 0x00ff88, 1);
-    // Grille boutons (3x4)
-    let colors = [
-        [0xdddddd, 0xdddddd, 0xff5555u32],
-        [0xdddddd, 0xdddddd, 0xdddddd],
-        [0xdddddd, 0xdddddd, 0xdddddd],
-        [0xdddddd, 0xdddddd, 0x3377ff],
-    ];
-    for row in 0..4usize {
-        for col in 0..3usize {
-            let bx = vx + 3 + col * 11;
-            let by = vy + 15 + row * 6;
-            fb::fill_rect_rgb(bx, by, 10, 5, colors[row][col]);
-            fb::fill_rect_rgb(bx, by, 10, 1, lerp_color(colors[row][col], 0xffffff, 60, 100));
-        }
-    }
-}
-
-fn draw_icon_terminal(vx: usize, vy: usize, vw: usize) {
-    // Fond noir profond
-    fb::fill_rect_rgb(vx, vy, vw, vw, 0x0a0e1a);
-    // Barre de titre macOS-style
-    fb::fill_rect_rgb(vx, vy, vw, 8, 0x1c1c1c);
-    // Boutons traffic lights
-    draw_circle(vx + 5, vy + 4, 2, 0xff5f57);
-    draw_circle(vx + 11, vy + 4, 2, 0xffbd2e);
-    draw_circle(vx + 17, vy + 4, 2, 0x28c840);
-    // Prompt
-    fb::draw_text_rgb(vx + 2, vy + 10, ">_", 0x00ff88, 1);
-    // Lignes de texte simulées
-    let line_cols = [0x3d6b8a, 0x2a4f6e, 0x3d6b8a, 0x1e3a52, 0x2a4f6e];
-    for (i, &c) in line_cols.iter().enumerate() {
-        let ly = vy + 20 + i * 4;
-        let lw = if i % 2 == 0 { vw * 3 / 4 } else { vw / 2 };
-        fb::fill_rect_rgb(vx + 2, ly, lw, 2, c);
-    }
-    // Curseur clignotant (bleu)
-    fb::fill_rect_rgb(vx + 10, vy + 10, 2, 7, 0x4488ff);
-}
-
-fn draw_icon_files(vx: usize, vy: usize, vw: usize) {
-    // Corps du dossier avec dégradé
-    let body_y = vy + 8;
-    let body_h = vw - 10;
-    for dy in 0..body_h {
-        let c = lerp_color(0xffc107, 0xf57f17, dy, body_h);
-        fb::fill_rect_rgb(vx + 1, body_y + dy, vw - 2, 1, c);
-    }
-    // Onglet
-    for dy in 0..5usize {
-        let c = lerp_color(0xffca28, 0xffa000, dy, 5);
-        fb::fill_rect_rgb(vx + 1, vy + 4 + dy, 14, 1, c);
-    }
-    // Reflet en haut du dossier
-    fb::fill_rect_rgb(vx + 1, body_y, vw - 2, 2, 0xffe082);
-    // Ombre en bas
-    fb::fill_rect_rgb(vx + 1, body_y + body_h - 3, vw - 2, 3, 0xe65100);
-    // Documents à l'intérieur
-    fb::fill_rect_rgb(vx + 6, body_y + 5, vw - 14, 2, 0xfff8e1);
-    fb::fill_rect_rgb(vx + 6, body_y + 9, vw - 14, 2, 0xfff8e1);
-    fb::fill_rect_rgb(vx + 6, body_y + 13, (vw - 14) * 2 / 3, 2, 0xfff8e1);
-}
-
-fn draw_icon_rustpad(vx: usize, vy: usize, vw: usize) {
-    // Fond GitHub dark
-    fb::fill_rect_rgb(vx, vy, vw, vw, 0x0d1117);
-    // Cadre de l'éditeur
-    let pad = vw / 8;
-    fb::fill_rect_rgb(vx + pad, vy + pad, vw - pad*2, vw - pad*2, 0x161b22);
-    fb::fill_rect_rgb(vx + pad, vy + pad, vw - pad*2, 1, 0x30363d);
-    // Lignes de code colorées (syntaxe highlight)
-    let lh = (vw / 9).max(2);
-    let lx = vx + pad + 3;
-    let pairs: &[(u32, usize)] = &[
-        (0xff7b72, vw / 2),       // fn (rouge)
-        (0xa5d6ff, vw / 3),       // let (bleu)
-        (0x3fb950, vw * 2 / 5),   // string (vert)
-        (0xa5d6ff, vw / 4),       // valeur
-        (0x8b949e, vw / 3),       // commentaire
-    ];
-    for (i, &(color, w)) in pairs.iter().enumerate() {
-        let indent = if i == 0 { 0 } else { vw / 8 };
-        fb::fill_rect_rgb(lx + indent, vy + pad + 3 + i * (lh + 2), w, lh, color);
-    }
-    // Bouton Run ▶ (triangle vert)
-    let bx = vx + vw - pad - vw / 5;
-    let by = vy + pad + 2;
-    let bs = (vw / 5).max(4);
-    for row in 0..bs {
-        let w = (row * 2 + 1).min(bs);
-        fb::fill_rect_rgb(bx, by + row, w, 1, 0x238636);
-    }
-}
 
 // ─── Fenêtres ──────────────────────────────────────────────────────────────
 
 // BOUCHAUD_GUI_EMPREINTE_OMBRE_V1
-/// Debordement de l'ombre portee d'une fenetre ou d'un menu, en pixels.
+/// Debordement de l'ombre portee du menu Demarrer, en pixels.
 ///
-/// Une seule definition, ici, parce que TROIS endroits doivent s'accorder :
-/// ce que `draw_window` / `draw_menu` peignent, les bornes que `plan_de_scene`
-/// declare, et le rectangle que le compositeur invalide. Les deux derniers
-/// avaient diverge du premier -- l'invalidation ne couvrait que le cadre --, et
-/// la bande d'ombre d'une fenetre deplacee restait a l'ecran : des rectangles
-/// sombres, exactement de cette couleur, abandonnes sur le bureau.
-pub(crate) const DEBORD_OMBRE: i32 = 4;
+/// Simple relais de `disposition::DEBORD_OMBRE`, qui est LA definition : trois
+/// endroits doivent s'accorder -- ce que `draw_menu` peint, les bornes que
+/// `plan_de_scene` declare, et le rectangle que le compositeur invalide. Les
+/// deux derniers avaient diverge du premier, et la bande d'ombre restait a
+/// l'ecran : des rectangles sombres abandonnes sur le bureau.
+///
+/// `draw_window` n'utilise plus ce chemin : sa forme et son debord viennent de
+/// `WindowRenderGeometry`, et `window::verifie_constantes` refuse de compiler
+/// si `SHADOW_EXTENT` s'ecarte de cette valeur.
+pub(crate) const DEBORD_OMBRE: i32 = crate::gui::disposition::DEBORD_OMBRE as i32;
 
 fn draw_window(w: &Win, focused: bool) {
     let x = w.x.max(0) as usize;
     let y = w.y.max(0) as usize;
     let ww = w.w as usize;
-    let wh = w.h as usize;
 
-    // Ombre portée. Elle deborde du cadre de `DEBORD_OMBRE` : tout ce qui
-    // calcule une empreinte ou une invalidation doit l'inclure.
-    let debord = DEBORD_OMBRE as usize;
-    fb::fill_rect_rgb(x + debord, y + debord, ww, wh, 0x04080f);
+    let clip_bounds = fb::clip_rect();
+    let damage = crate::gui::windowing::Rect::new(clip_bounds.0 as i32, clip_bounds.1 as i32,
+        clip_bounds.2.saturating_sub(clip_bounds.0) as u32,
+        clip_bounds.3.saturating_sub(clip_bounds.1) as u32);
+    let outer = w.rect();
+    let geometry = crate::gui::windowing::window_render_geometry(outer,
+        TITLE_H as u32, crate::gui::theme::RADIUS_WINDOW,
+        crate::gui::windowing::manager::SHADOW_EXTENT);
+    let border = if focused { 0x454c58 } else { crate::gui::theme::COLOR_BORDER };
+    // BOUCHAUD_GUI_RASTER_SEGMENTS_V1 : par SEGMENTS, pas par pixels. Une
+    // fenetre maximisee coutait huit millions d'iterations et autant de
+    // `fetch_add` atomiques par trame ; elle en coute maintenant ~700.
+    crate::gui::graphics::paint_window_shape_spans(geometry,
+        crate::gui::theme::RADIUS_WINDOW,
+        crate::gui::windowing::manager::SHADOW_EXTENT, damage,
+        crate::gui::theme::COLOR_SURFACE, border,
+        |px, py, largeur, color| {
+            fb::fill_rect_rgb(px.max(0) as usize, py.max(0) as usize,
+                largeur as usize, 1, color)
+        });
 
-    // Fond de la fenêtre
-    fb::fill_rect_rgb(x, y, ww, wh, 0x111827);
-
-    // Barre de titre : gradient bleu (focused) ou gris foncé (inactive)
     let title_h = TITLE_H as usize;
-    let (tc_top, tc_bot) = if focused {
-        (0x1a4c8f, 0x0e2d57)
-    } else {
-        (0x1f2937, 0x111827)
-    };
-    for ty in 0..title_h {
-        let c = lerp_color(tc_top, tc_bot, ty, title_h);
-        fb::fill_rect_rgb(x, y + ty, ww, 1, c);
-    }
-    // Séparateur bas de la barre de titre
-    fb::fill_rect_rgb(x, y + title_h, ww, 1, if focused { 0x2563eb } else { 0x1f2937 });
+    let title_color = if focused { crate::gui::theme::COLOR_SURFACE_ELEVATED }
+        else { crate::gui::theme::COLOR_SURFACE };
+    let title = crate::gui::windowing::titlebar_rect(outer,
+        crate::gui::windowing::WINDOW_CHROME);
+    crate::gui::graphics::spans_rounded_rect(title, crate::gui::theme::RADIUS_WINDOW,
+        damage, |px, py, largeur| {
+            fb::fill_rect_rgb(px.max(0) as usize, py.max(0) as usize,
+                largeur as usize, 1, title_color)
+        });
+    fb::fill_rect_rgb(x + 1, y + title_h - 1, ww.saturating_sub(2), 1,
+        crate::gui::theme::COLOR_BORDER);
 
-    // Titre fenêtre en TTF
-    let title_clipped = clip(&w.title, (ww / 8).saturating_sub(6));
-    fb::draw_text_prop(x + 4, y + 1, title_clipped, 0xe2e8f0, 9.0, false);
-
-    // Boutons de contrôle style macOS (cercles colorés)
-    if ww > 36 {
-        let btn_y = y + title_h / 2;
-        // Minimiser (jaune)
-        draw_circle_highlight(x + ww - 26, btn_y, 3, 0xe5a820);
-        // Maximiser (vert)
-        draw_circle_highlight(x + ww - 17, btn_y, 3, 0x1da44a);
-        // Fermer (rouge)
-        draw_circle_highlight(x + ww - 8, btn_y, 3, 0xe5463a);
+    // L'icone de l'application dans sa barre de titre, comme dans la barre des
+    // taches : c'est ce qui permet de reconnaitre une fenetre au coin de
+    // l'oeil, sans lire.
+    let petite = crate::gui::icones::TAILLE_PETITE;
+    let mut origine_titre = x + 12;
+    if let Some(icone) = crate::gui::icones::pour_app(&w.app) {
+        crate::gui::icones::dessine(icone, x + 10, y + (title_h - petite) / 2, petite);
+        origine_titre = x + 10 + petite + 8;
     }
+
+    // Titre fenêtre en TTF, tronque a la place REELLE : de son origine jusqu'au
+    // premier bouton de la barre de titre. Le compte de caracteres precedent
+    // -- `ww / 8 - 6` -- ignorait la largeur des lettres, et un titre etroit
+    // comme « Fichiers » laissait un vide pendant qu'un titre large passait
+    // sous les boutons.
+    let premier_bouton = crate::gui::windowing::minimize_button_rect(outer,
+        crate::gui::windowing::WINDOW_CHROME).x.max(0) as usize;
+    let place = premier_bouton.saturating_sub(origine_titre + 6);
+    let title_clipped = tronque_a_largeur(&w.title, place, 12.0);
+    fb::draw_text_prop(origine_titre, y + (title_h - 12) / 2, title_clipped,
+        crate::gui::theme::COLOR_TEXT_PRIMARY, 12.0, false);
+
+    let mouse = crate::gui::mouse::pos();
+    let hovered = crate::gui::windowing::hit_test(outer,
+        crate::gui::windowing::Point { x: mouse.0 as i32, y: mouse.1 as i32 },
+        crate::gui::windowing::WINDOW_CHROME, w.flags.resizable);
+    draw_window_controls(outer, hovered, focused);
 
     // Contenu de l'application
     apps::draw_app(w);
 
-    // Bordure de fenêtre
-    let bc = if focused { 0x2563eb } else { 0x1f2937 };
-    fb::fill_rect_rgb(x, y, ww, 1, bc);
-    fb::fill_rect_rgb(x, y, 1, wh, bc);
-    fb::fill_rect_rgb(x + ww - 1, y, 1, wh, bc);
-    fb::fill_rect_rgb(x, y + wh - 1, ww, 1, bc);
+}
 
-    // Poignée de redimensionnement (coin bas-droit)
-    if ww > 10 && wh > 10 {
-        for i in 0..5usize {
-            fb::pixel_rgb(x + ww - 2 - i, y + wh - 2, 0x4a7bbb);
-            fb::pixel_rgb(x + ww - 2, y + wh - 2 - i, 0x4a7bbb);
+fn draw_window_controls(outer: crate::gui::windowing::Rect,
+    hover: crate::gui::windowing::HitRegion, focused: bool) {
+    use crate::gui::windowing::{close_button_rect, maximize_button_rect,
+        minimize_button_rect, HitRegion, WINDOW_CHROME};
+    let buttons = [(minimize_button_rect(outer, WINDOW_CHROME), HitRegion::Minimize),
+        (maximize_button_rect(outer, WINDOW_CHROME), HitRegion::Maximize),
+        (close_button_rect(outer, WINDOW_CHROME), HitRegion::Close)];
+    for (rect, region) in buttons {
+        if hover == region {
+            let color = if region == HitRegion::Close { crate::gui::theme::COLOR_DANGER }
+                else { 0x303640 };
+            fb::fill_rect_rgb(rect.x.max(0) as usize, rect.y.max(0) as usize,
+                rect.width as usize, rect.height as usize, color);
+        }
+        let color = if focused { crate::gui::theme::COLOR_TEXT_PRIMARY }
+            else { crate::gui::theme::COLOR_TEXT_SECONDARY };
+        let cx = rect.x + rect.width as i32 / 2;
+        let cy = rect.y + rect.height as i32 / 2;
+        match region {
+            HitRegion::Minimize => fb::fill_rect_rgb((cx - 5) as usize, cy as usize, 10, 1, color),
+            HitRegion::Maximize => {
+                fb::fill_rect_rgb((cx - 5) as usize, (cy - 4) as usize, 10, 1, color);
+                fb::fill_rect_rgb((cx - 5) as usize, (cy + 4) as usize, 10, 1, color);
+                fb::fill_rect_rgb((cx - 5) as usize, (cy - 4) as usize, 1, 9, color);
+                fb::fill_rect_rgb((cx + 4) as usize, (cy - 4) as usize, 1, 9, color);
+            }
+            HitRegion::Close => for offset in -4..=4 {
+                fb::pixel_rgb((cx + offset) as usize, (cy + offset) as usize, color);
+                fb::pixel_rgb((cx + offset) as usize, (cy - offset) as usize, color);
+            },
+            _ => {}
         }
     }
 }
@@ -665,52 +602,103 @@ fn dessine_demarrage(zone: &crate::gui::protocole::Rect, titre: &str) {
 // ─── Barre des tâches ──────────────────────────────────────────────────────
 
 /// Dessine la barre des taches.
+/// Plus long prefixe de `s` dont le rendu tient dans `largeur` pixels.
+///
+/// `window::clip` compte des CARACTERES, ce qui n'a pas de sens pour une police
+/// proportionnelle : sept caracteres font quarante pixels ou soixante selon le
+/// mot. Les libelles debordaient donc de leur bouton -- et un debord interdit
+/// tout culling par rectangle, puisque le voisin ecarte emporte les pixels
+/// qu'il posait chez l'autre.
+fn tronque_a_largeur(s: &str, largeur: usize, px: f32) -> &str {
+    if fb::text_width(s, px, false) <= largeur {
+        return s;
+    }
+    let mut fin = 0;
+    for (indice, _) in s.char_indices().skip(1) {
+        if fb::text_width(&s[..indice], px, false) > largeur {
+            break;
+        }
+        fin = indice;
+    }
+    &s[..fin]
+}
+
 pub(crate) fn draw_taskbar(wins: &[Win], menu_open: bool) {
-    // Fond gradient foncé
-    for y in 0..BAR_H {
-        let c = lerp_color(0x0d1a30, 0x0a1224, y, BAR_H);
-        fb::fill_rect_rgb(0, fb::HEIGHT - BAR_H + y, fb::WIDTH, 1, c);
-    }
-    // Ligne de séparation en haut
-    fb::fill_rect_rgb(0, fb::HEIGHT - BAR_H, fb::WIDTH, 1, 0x1e4080);
+    let sommet = fb::HEIGHT - BAR_H;
+    fond_de_barre(sommet, false);
 
-    // Bouton Start
+    let focus = indice_focus(wins);
+    let rayon = crate::gui::theme::RADIUS_SM;
+
+    // Bouton Demarrer : accentue quand le menu est ouvert, sourd sinon. Meme
+    // forme arrondie que le chrome des fenetres.
     let sb = start_btn();
-    let (sb_top, sb_bot) = if menu_open {
-        (0x0c5cbf, 0x0a4a9e)
-    } else {
-        (0x1a3f6b, 0x102a4a)
-    };
-    for dy in 0..(sb.h as usize) {
-        let c = lerp_color(sb_top, sb_bot, dy, sb.h as usize);
-        fb::fill_rect_rgb(sb.x as usize, sb.y as usize + dy, sb.w as usize, 1, c);
-    }
-    // Reflet haut du bouton Start
-    fb::fill_rect_rgb(sb.x as usize, sb.y as usize, sb.w as usize, 1, 0x5599ee);
-    // Bordure Start
-    fb::fill_rect_rgb(sb.x as usize, sb.y as usize, 1, sb.h as usize, 0x2a5aaa);
-    fb::fill_rect_rgb(sb.x as usize + sb.w as usize - 1, sb.y as usize, 1, sb.h as usize, 0x2a5aaa);
-    fb::draw_text_prop(sb.x as usize + 4, sb.y as usize + 1, "Start", 0xffffff, 9.0, true);
+    let cadre = crate::gui::windowing::Rect::new(sb.x, sb.y, sb.w as u32, sb.h as u32);
+    let fond = if menu_open { crate::gui::theme::COLOR_ACCENT }
+        else { crate::gui::theme::COLOR_SURFACE_ELEVATED };
+    pave_arrondi(cadre, rayon, fond);
+    let corps = CORPS_BARRE - 1.0;
+    let etiquette = "Demarrer";
+    let largeur = fb::text_width(etiquette, corps, true);
+    fb::draw_text_prop(
+        (sb.x as usize) + (sb.w as usize).saturating_sub(largeur) / 2,
+        ligne_texte_barre(sommet),
+        etiquette,
+        crate::gui::theme::COLOR_TEXT_PRIMARY,
+        corps,
+        true,
+    );
 
-    // Boutons des fenêtres dans la barre
+    // Boutons des fenetres.
     for (i, w) in wins.iter().enumerate() {
         let b = taskbar_btn(i);
         if b.x + b.w > fb::WIDTH as i32 { break; }
         let bx = b.x as usize; let by = b.y as usize;
         let bw = b.w as usize; let bh = b.h as usize;
-        // Fond du bouton
-        for dy in 0..bh {
-            let c = lerp_color(0x1e3462, 0x142446, dy, bh);
-            fb::fill_rect_rgb(bx, by + dy, bw, 1, c);
+        // BOUCHAUD_GFX_CULLING_AMONT_V1 : un degat sur un bouton n'a aucune
+        // raison de faire dessiner les autres. `continue`, et non `break` : la
+        // barre est parcourue de gauche a droite, mais rien ne garantit que le
+        // degat soit d'un seul tenant.
+        //
+        // Ce test n'est CORRECT que parce que le bouton ne peint rien hors de
+        // son rectangle -- d'ou la troncature du libelle a la largeur reelle,
+        // juste en dessous. Un libelle qui debordait chez le voisin aurait ete
+        // emporte par le culling.
+        if !fb::decoupe_touche(bx, by, bw, bh) { continue }
+
+        let actif = focus == Some(i) && !w.min;
+        let cadre = crate::gui::windowing::Rect::new(b.x, b.y, bw as u32, bh as u32);
+        let fond = if actif { crate::gui::theme::COLOR_SURFACE_ELEVATED }
+            else { crate::gui::theme::COLOR_SURFACE };
+        pave_arrondi(cadre, rayon, fond);
+
+        // La fenetre au premier plan porte un liset d'accent en bas, comme un
+        // onglet actif. Une fenetre minimisee n'en a pas : c'est le seul signe
+        // qui distingue « au-dessus » de « rangee », et il manquait.
+        if actif {
+            fb::fill_rect_rgb(bx + 3, by + bh - 2, bw.saturating_sub(6), 2,
+                crate::gui::theme::COLOR_ACCENT);
         }
-        // Reflet
-        fb::fill_rect_rgb(bx, by, bw, 1, 0x4477cc);
-        // Bordure
-        fb::fill_rect_rgb(bx, by, 1, bh, 0x2a4a88);
-        fb::fill_rect_rgb(bx + bw - 1, by, 1, bh, 0x2a4a88);
-        // Label
-        let lbl = clip(&w.title, 7);
-        fb::draw_text_prop(bx + 2, by + 1, lbl, 0xd0e8ff, 9.0, false);
+
+        // L'icone de l'application, la meme que sur le bureau. Une barre des
+        // taches sans icones oblige a lire pour reconnaitre une fenetre.
+        let petite = crate::gui::icones::TAILLE_PETITE;
+        let mut texte_x = bx + 10;
+        if let Some(icone) = crate::gui::icones::pour_app(&w.app) {
+            crate::gui::icones::dessine(icone, bx + 8,
+                by + (bh - petite) / 2, petite);
+            texte_x = bx + 8 + petite + 8;
+        }
+
+        let couleur = if w.min { crate::gui::theme::COLOR_TEXT_SECONDARY }
+            else { crate::gui::theme::COLOR_TEXT_PRIMARY };
+        // Label, tronque a la LARGEUR du bouton et non a un nombre de
+        // caracteres : « Navigateur » et « Fichiers » n'ont pas la meme largeur
+        // a sept caracteres, et le premier debordait sur le bouton suivant.
+        let reste = (bx + bw).saturating_sub(texte_x + 8);
+        let lbl = tronque_a_largeur(&w.title, reste, corps);
+        fb::draw_text_prop(texte_x, ligne_texte_barre(sommet), lbl, couleur,
+            corps, false);
     }
 }
 
@@ -728,34 +716,18 @@ pub(crate) fn draw_menu(mx: i32, my: i32) {
     let debord = DEBORD_OMBRE as usize;
     fb::fill_rect_rgb(mxi + debord, myi + debord, mw, mh, 0x030608);
 
-    // Fond principal sombre
-    for dy in 0..mh {
-        let c = lerp_color(0x131c2e, 0x0d1424, dy, mh);
-        fb::fill_rect_rgb(mxi, myi + dy, mw, 1, c);
-    }
+    // BOUCHAUD_GUI_COQUILLE_V1 : meme matiere que les fenetres -- surface du
+    // theme, coins arrondis, filet de bordure -- plutot que les bleus en dur
+    // d'un theme qui n'existe plus ailleurs.
+    let cadre = crate::gui::windowing::Rect::new(mr.x, mr.y, mw as u32, mh as u32);
+    let rayon = crate::gui::theme::RADIUS_MD;
+    pave_arrondi(cadre, rayon, crate::gui::theme::COLOR_SURFACE);
 
-    // Bande d'accent bleue à gauche
-    let stripe_w = 4usize;
-    for dy in 0..mh {
-        let c = lerp_color(0x0078d4, 0x004a8a, dy, mh);
-        fb::fill_rect_rgb(mxi, myi + dy, stripe_w, 1, c);
-    }
-
-    // Bordure du menu
-    fb::fill_rect_rgb(mxi, myi, mw, 1, 0x2a4580);
-    fb::fill_rect_rgb(mxi, myi, 1, mh, 0x2a4580);
-    fb::fill_rect_rgb(mxi + mw - 1, myi, 1, mh, 0x2a4580);
-    fb::fill_rect_rgb(mxi, myi + mh - 1, mw, 1, 0x2a4580);
-
-    // Icônes associées à chaque item
-    let icon_colors: &[u32] = &[
-        0x28c840, // Terminal
-        0xf9ab00, // Fichiers
-        0x00b4d8, // Moniteur
-        0x888888, // Calculatrice
-        0xff7b72, // Rustpad
-        0xef4444, // Quitter
-    ];
+    // Bordure
+    fb::fill_rect_rgb(mxi, myi, mw, 1, crate::gui::theme::COLOR_BORDER);
+    fb::fill_rect_rgb(mxi, myi, 1, mh, crate::gui::theme::COLOR_BORDER);
+    fb::fill_rect_rgb(mxi + mw - 1, myi, 1, mh, crate::gui::theme::COLOR_BORDER);
+    fb::fill_rect_rgb(mxi, myi + mh - 1, mw, 1, crate::gui::theme::COLOR_BORDER);
 
     // BOUCHAUD_GUI_HOVER_CONTRAT_V1
     //
@@ -767,52 +739,58 @@ pub(crate) fn draw_menu(mx: i32, my: i32) {
     let hover_row: Option<usize> = window::ligne_menu_survolee(mx, my);
 
     let sep_idx = MENU.len() - 1; // index de "Quitter"
-
-    // Zone vide en haut
-    // (optionnel: on pourrait y mettre un logo)
+    let bande = crate::gui::disposition::BANDE_ACCENT as usize;
 
     for (i, (item, _kind)) in MENU.iter().enumerate() {
         let iy = myi + MENU_HEADER_H as usize + i * MENU_ITEM_H as usize;
 
         // Séparateur avant Quitter
         if i == sep_idx {
-            fb::fill_rect_rgb(mxi + stripe_w + 4, iy, mw - stripe_w - 8, 1, 0x1e3a5f);
+            fb::fill_rect_rgb(mxi + bande + 4, iy, mw - bande - 8, 1,
+                crate::gui::theme::COLOR_BORDER);
         }
 
-        // Fond survolé (highlight)
+        // Fond survolé : un pave arrondi, comme un bouton de barre.
         if hover_row == Some(i) {
-            for dy in 0..MENU_ITEM_H as usize {
-                let c = lerp_color(0x1e3f6b, 0x162f55, dy, MENU_ITEM_H as usize);
-                fb::fill_rect_rgb(mxi + stripe_w, iy + dy, mw - stripe_w, 1, c);
-            }
-            // Bordure de sélection à gauche
-            fb::fill_rect_rgb(mxi + stripe_w, iy, 2, MENU_ITEM_H as usize, 0x4a9eff);
+            let ligne = crate::gui::windowing::Rect::new(
+                mr.x + bande as i32, iy as i32,
+                (mw - bande * 2) as u32, MENU_ITEM_H as u32);
+            pave_arrondi(ligne, crate::gui::theme::RADIUS_SM,
+                crate::gui::theme::COLOR_SURFACE_ELEVATED);
         }
 
-        // Icône de l'item (petit carré coloré 12x12)
-        let ic = icon_colors.get(i).copied().unwrap_or(0x555577);
-        let icon_x = mxi + stripe_w + 6;
-        let icon_y = iy + (MENU_ITEM_H as usize - 12) / 2;
-        fb::fill_rect_rgb(icon_x, icon_y, 12, 12, ic);
-        // Reflet en haut de l'icône
-        fb::fill_rect_rgb(icon_x, icon_y, 12, 1, lerp_color(ic, 0xffffff, 50, 100));
-        fb::fill_rect_rgb(icon_x, icon_y, 1, 12, lerp_color(ic, 0xffffff, 30, 100));
+        // L'icone de l'application, la meme que sur le bureau et dans la barre
+        // des taches. « Quitter » et « Moniteur » n'en ont pas : une pastille
+        // prend leur place, rouge pour la premiere.
+        let petite = crate::gui::icones::TAILLE_PETITE;
+        let image_x = mxi + bande + 8;
+        let image_y = iy + (MENU_ITEM_H as usize - petite) / 2;
+        match crate::gui::icones::pour_kind(*_kind) {
+            Some(icone) => crate::gui::icones::dessine(icone, image_x, image_y, petite),
+            None => {
+                let teinte = if i == sep_idx { crate::gui::theme::COLOR_DANGER }
+                    else { crate::gui::theme::COLOR_TEXT_SECONDARY };
+                pave_arrondi(
+                    crate::gui::windowing::Rect::new(
+                        (image_x + 4) as i32, (image_y + 4) as i32, 10, 10),
+                    3, teinte);
+            }
+        }
 
-        // Texte de l'item en TTF
-        let is_quit = i == sep_idx;
-        let text_col = if is_quit {
-            0xff7b7b
+        // Texte de l'entree.
+        let couleur = if i == sep_idx {
+            crate::gui::theme::COLOR_DANGER
         } else if hover_row == Some(i) {
-            0xffffff
+            crate::gui::theme::COLOR_TEXT_PRIMARY
         } else {
-            0xb8d0ee
+            crate::gui::theme::COLOR_TEXT_SECONDARY
         };
         fb::draw_text_prop(
-            mxi + stripe_w + 24,
-            iy + (MENU_ITEM_H as usize - 10) / 2,
+            mxi + bande + 8 + crate::gui::icones::TAILLE_PETITE + 10,
+            iy + (MENU_ITEM_H as usize - 12) / 2,
             item,
-            text_col,
-            10.0,
+            couleur,
+            12.0,
             hover_row == Some(i),
         );
     }

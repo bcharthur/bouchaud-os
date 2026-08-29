@@ -521,26 +521,60 @@ pub fn text_width(s: &str, px: i32) -> i32 {
     }
 }
 
+// BOUCHAUD_GFX_TEXTE_SEGMENT_V1
+//
+// CE QUE CETTE FONCTION FAISAIT DE TROP
+// -------------------------------------
+// Elle parcourait toute la couverture du glyphe et appelait `fb::blend_rgb`
+// pour chaque pixel non nul. Ce writer relit la decoupe -- quatre chargements
+// atomiques -- puis rejette le pixel s'il est dehors.
+//
+// Le compositeur dessine une fois par RECTANGLE DE DEGAT. Pour un curseur qui
+// traverse le bureau, chaque titre de fenetre, chaque champ de la barre du
+// haut, l'horloge, chaque libelle de la barre des taches et des icones etaient
+// rasterises en entier, puis jetes pixel par pixel. Aucune metrique ne le
+// montrait : `blend_rgb` ne compte rien.
+//
+// Desormais : l'intersection avec la decoupe est calculee une fois
+// (`texte::portion_visible`), et seules les lignes utiles sont soumises au
+// writer, une par une, sous forme de segment. La decoupe reste appliquee par
+// le writer -- ce calcul ne fait que lui epargner des appels.
 fn blit_glyph(g: &Glyph, gx0: i32, gy0: i32, rgb: u32, bold: bool) {
     if g.w == 0 || g.h == 0 { return; }
-    for ry in 0..g.h {
-        let py = gy0 + ry as i32;
-        if py < 0 || py as usize >= fb::HEIGHT { continue; }
-        for rx in 0..g.w {
-            let a = g.cov[ry * g.w + rx];
-            if a == 0 { continue; }
-            let pxs = gx0 + rx as i32;
-            if pxs >= 0 && (pxs as usize) < fb::WIDTH {
-                fb::blend_rgb(pxs as usize, py as usize, rgb, a);
-                if bold && (pxs as usize) + 1 < fb::WIDTH { fb::blend_rgb(pxs as usize + 1, py as usize, rgb, a); }
-            }
-        }
+    let debord = if bold { 1 } else { 0 };
+    let Some(((x0, x1), (y0, y1))) = crate::gui::texte::portion_visible(
+        gx0, gy0, g.w, g.h, debord, (fb::WIDTH, fb::HEIGHT), fb::clip_rect(),
+    ) else { return };
+
+    for ry in y0..y1 {
+        let debut = ry * g.w + x0;
+        let fin = ry * g.w + x1;
+        let ligne = &g.cov[debut..fin];
+        // `gx0 + x0` est positif : `portion_visible` n'a garde que des colonnes
+        // dont l'image ecran tombe dans la decoupe, elle-meme dans l'ecran.
+        fb::blend_span((gx0 + x0 as i32) as usize, (gy0 + ry as i32) as usize,
+            rgb, ligne, bold);
     }
 }
 
 /// Dessine `s` a la couleur `rgb`, sommet du texte a `y_top`, taille `px`.
 /// Renvoie `false` si la police vectorielle est indisponible (repli appelant).
 pub fn draw_text(x: i32, y_top: i32, s: &str, rgb: u32, px: i32, bold: bool) -> bool {
+    // BOUCHAUD_GFX_TEXTE_SEGMENT_V1 : test de BANDE, une fois par chaine.
+    //
+    // Culler glyphe par glyphe suffirait a ne rien dessiner de trop, mais le
+    // parcours coute quand meme : une recherche dans le cache et un calcul de
+    // metriques par caractere. Le titre d'une fenetre n'a aucune raison d'etre
+    // parcouru quand le degat est le curseur, trois cents pixels plus bas.
+    //
+    // La bande est volontairement genereuse -- deux fois la taille nominale --
+    // car jambages et diacritiques debordent de `px`. Trop large ne fait que
+    // manquer une occasion de sortir ; trop etroite effacerait du texte.
+    if !crate::gui::texte::bande_visible(
+        y_top - px, (px.max(0) as usize).saturating_mul(3), fb::clip_rect(),
+    ) {
+        return true;
+    }
     // Chemin primaire : fontdue.
     if let Some(f) = fd_font() {
         let baseline = y_top + fd_ascent(f, px);

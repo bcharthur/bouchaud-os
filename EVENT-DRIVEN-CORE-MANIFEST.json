@@ -1,0 +1,30 @@
+{
+  "name": "Bouchaud OS Event-Driven Core",
+  "date": "2026-08-29",
+  "base_expected": "Final V12",
+  "goals": [
+    "enable real BSP sti;hlt idle",
+    "detach desktop INTERFACE wait from root BKL",
+    "fragment kernel interface wake subsystem",
+    "add desktop phase sites 700..773"
+  ],
+  "independence": "100% Bouchaud-native kernel changes; no Linux/Windows/macOS kernel component",
+  "modified": [
+    "src/arch/x86_64/cpu.rs",
+    "src/arch/x86_64/cpu/idle/etat.rs",
+    "src/arch/x86_64/cpu/idle/trace.rs",
+    "src/kernel/sync/reveil.rs",
+    "src/gui/reveil_v9.rs",
+    "src/gui/framebuffer_v9.rs"
+  ],
+  "new": [
+    "src/arch/x86_64/cpu/idle/politique.rs",
+    "src/kernel/sync/reveil/types.rs",
+    "src/kernel/sync/reveil/etat.rs",
+    "src/kernel/sync/reveil/signal.rs",
+    "src/kernel/sync/reveil/attente.rs",
+    "src/kernel/sync/reveil/diagnostic.rs",
+    "src/kernel/sync/reveil/global.rs",
+    "tools/perf/analyse-event-driven-core.py"
+  ]
+}

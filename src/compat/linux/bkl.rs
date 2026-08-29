@@ -53,10 +53,17 @@
 //! boucle d'evenements ; l'identite, elle, y est rare, et c'est dit tel quel
 //! dans le journal du commit plutot que maquille.
 //!
+//! Troisieme lot : `poll` et `ppoll`. Son domaine existait deja -- le verrou de
+//! la table des descripteurs, plus celui de chaque objet ; ce qui l'obligeait au
+//! gros verrou etait la ROUTE vers le processus, `current_process()`, qui le
+//! reprend. `current_process_local()` donne le meme `Arc` sans toucher `TASKS`.
+//! Mesure a l'appui : `poll` tenait 23 a 38 % du verrou sur des fenetres de 5 s
+//! d'un vrai chargement de Google.
+//!
 //! Ce qui reste, et qui est le vrai gisement : `writev`/`write`/`read`,
-//! `mmap`/`munmap`/`close`, `rt_sigprocmask`, `poll`. Ils demandent chacun un
-//! domaine que ce noyau n'a pas encore -- table des descripteurs, coeur du
-//! systeme de fichiers, etat de signaux par tache.
+//! `mmap`/`munmap`/`close`, `rt_sigprocmask`. Ils demandent chacun un domaine
+//! que ce noyau n'a pas encore -- coeur du systeme de fichiers, etat de signaux
+//! par tache.
 
 use super::nr;
 
@@ -86,6 +93,12 @@ pub const SANS_BKL: &[(u64, &str)] = &[
     // MAP_SHARED vers le RAMFS, dont le coeur est encore sous BKL.
     (nr::MPROTECT, "metadonnees Mm + protocole TLB, aucun etat global"),
     (nr::BRK, "metadonnees Mm + protocole TLB, aucun etat global"),
+    // V14: munmap/madvise are now fully domain-owned: Mm serialises VMA/PTE
+    // metadata, the shared/clean caches own their locks, and TLB ACK waits run
+    // with no Mm guard. RAMFS writeback already takes a short internal BKL in
+    // `memory/shared.rs`; neither syscall needs an outer global lock.
+    (nr::MUNMAP, "V14: Mm + TLB + caches auto-synchronises; no outer BKL"),
+    (nr::MADVISE, "V14: Mm + TLB + clean-cache; no outer BKL"),
     // --- Identite : domaine CPU-local (`task::identite_courante`) -----------
     //
     // Lu :    `usermode::per_cpu().current` (le tid, bloc par-CPU adresse par
@@ -103,6 +116,45 @@ pub const SANS_BKL: &[(u64, &str)] = &[
     // Memoire utilisateur : aucune.
     // Pourquoi pas de gros verrou : `TASKS` n'est pas touchee. C'etait sa
     //         seule raison d'etre sur ce chemin.
+    // --- Attente de readiness : domaine table des descripteurs + objets -----
+    //
+    // BOUCHAUD_P3_POLL_SANS_BKL_V1
+    //
+    // Lu :    `process.files` (un `SpinLock<FdTable>`), puis le verrou propre
+    //         de chaque objet -- `PipeState`, `Canal`, `EventFd`, `TimerFd`.
+    //         La memoire utilisateur, pour lire les `pollfd` et y ecrire les
+    //         `revents`.
+    // Ecrit : `revents` en memoire utilisateur ; `TimerFd::expirations` sous le
+    //         verrou de l'objet.
+    // Verrou : chaque objet a le sien, et la table des descripteurs a le sien.
+    //         `TASKS` n'est jamais touchee : le processus courant vient de
+    //         `current_process_local()`, qui lit le bloc par-CPU interruptions
+    //         coupees. C'etait la seule raison pour laquelle ce chemin reprenait
+    //         le gros verrou, et elle a disparu.
+    // Attente : `wait_readiness` passe par `WaitQueue::wait`, qui prend le gros
+    //         verrou LUI-MEME, le temps d'inscrire la tache et de la parquer.
+    //         `park_current_on` le suspend ensuite pour de bon avant de commuter
+    //         (voir `smp_lock::suspend_for_schedule`). Personne ne dort en le
+    //         tenant.
+    // Etat global sans verrou : trois branches en touchent, et elles prennent
+    //         le gros verrou elles-memes, au plus court -- clavier et souris
+    //         (`static mut` de `kernel::input`), et socket inet (l'anneau e1000,
+    //         entierement en `static mut`). Voir `file.rs`.
+    // Pourquoi le liberer : mesure. Sur un vrai Ladybird chargeant Google,
+    //         `[BKL-SYSCALL]` a donne `poll` a 23-38 % de detention du verrou
+    //         sur des fenetres de 5 s, pour 100 000 acquisitions -- de loin le
+    //         premier consommateur une fois `madvise` corrige. Un `poll` de
+    //         sept descripteurs n'a aucune raison de serialiser trois autres
+    //         coeurs.
+    (nr::POLL, "table des descripteurs + verrou par objet ; l'attente prend le verrou elle-meme"),
+    (nr::PPOLL, "table des descripteurs + verrou par objet ; l'attente prend le verrou elle-meme"),
+    // V14: copyin and iovec walking execute with no outer BKL. `ecrit_octets`
+    // uses per-object locks for pipe/eventfd/socketpair, and takes a short
+    // internal BKL only for legacy global console/RAMFS/audio/inet branches.
+    // This prevents a demand fault during write/writev copyin from owning the
+    // global lock -- the exact site=212 / ~239 ms stall seen on V13.3.1.
+    (nr::WRITE, "V14: copyin sans BKL; legacy global sinks lock internally"),
+    (nr::WRITEV, "V14: iovec/copyin sans BKL; sys_write preserves sink domains"),
     (nr::GETPID, "domaine CPU-local, aucune lecture de TASKS"),
     (nr::GETTID, "domaine CPU-local, aucune lecture de TASKS"),
     (nr::GETUID, "domaine CPU-local + verrou metadata du Process"),

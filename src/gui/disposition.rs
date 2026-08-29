@@ -30,24 +30,27 @@
 use super::protocole::Rect;
 
 /// Hauteur des barres haut et bas. Doit rester egale a `window::BAR_H`.
-pub const HAUTEUR_BARRE: u32 = 11;
+pub const HAUTEUR_BARRE: u32 = 30;
 
-/// Debord de l'ombre portee des fenetres et du menu, en pixels.
+/// Debord de l'ombre portee, en pixels.
 ///
-/// Doit rester egal a `widgets::DEBORD_OMBRE`.
-pub const DEBORD_OMBRE: u32 = 4;
+/// UNE seule definition pour trois accords : ce que les peintres dessinent, les
+/// bornes que `plan_de_scene` declare, et le rectangle que le compositeur
+/// invalide. `window::verifie_constantes` refuse de compiler si elle s'ecarte
+/// de `windowing::manager::SHADOW_EXTENT`, qui pilote le peintre de fenetres.
+pub const DEBORD_OMBRE: u32 = 8;
 
 /// Hauteur d'une entree du menu Demarrer. Egale a `window::MENU_ITEM_H`.
-pub const HAUTEUR_LIGNE_MENU: i32 = 22;
+pub const HAUTEUR_LIGNE_MENU: i32 = 30;
 
 /// Bandeau vide en haut du menu. Egale a `window::MENU_HEADER_H`.
-pub const ENTETE_MENU: i32 = 8;
+pub const ENTETE_MENU: i32 = 10;
 
 /// Largeur de la bande d'accent bleue, a gauche du menu.
 ///
 /// `draw_menu` la peint puis commence les lignes juste apres : c'est aussi la
 /// borne gauche de la zone sensible au survol.
-pub const BANDE_ACCENT: i32 = 4;
+pub const BANDE_ACCENT: i32 = 6;
 
 /// Empreinte du curseur logiciel (fleche 12x19), volontairement un peu large.
 pub const LARGEUR_CURSEUR: u32 = 14;
@@ -79,10 +82,13 @@ pub const fn curseur(x: i32, y: i32) -> Rect {
     Rect::neuf(x, y, LARGEUR_CURSEUR, HAUTEUR_CURSEUR)
 }
 
-/// Ce qu'un cadre OCCUPE reellement : lui-meme plus son ombre portee.
+/// Ce qu'un cadre a ombre DECALEE occupe : lui-meme plus le debord bas-droite.
 ///
-/// L'ombre est decalee vers le bas et la droite ; un degat limite au cadre
-/// laisse donc une bande sombre derriere tout ce qui bouge.
+/// C'est la forme du menu Demarrer : `draw_menu` peint une copie du cadre
+/// translatee de `DEBORD_OMBRE` vers le bas et la droite. Un degat limite au
+/// cadre laisse donc une bande sombre derriere lui.
+///
+/// Les FENETRES n'ont plus cette ombre : voir [`empreinte_fenetre_peinte`].
 pub fn empreinte_avec_ombre(cadre: Rect) -> Rect {
     if cadre.vide() {
         return cadre;
@@ -92,6 +98,30 @@ pub fn empreinte_avec_ombre(cadre: Rect) -> Rect {
         cadre.y,
         cadre.largeur.saturating_add(DEBORD_OMBRE),
         cadre.hauteur.saturating_add(DEBORD_OMBRE),
+    )
+}
+
+/// Ce qu'une FENETRE occupe : son cadre dilate de `DEBORD_OMBRE` de tous les
+/// cotes.
+///
+/// `paint_window_shape` peint `SHADOW_EXTENT` anneaux d'ombre AUTOUR du cadre,
+/// pas une copie decalee : l'ombre deborde donc aussi a gauche et en haut.
+/// Une invalidation qui n'ajouterait le debord qu'en bas et a droite laisserait
+/// deux bandes sombres derriere chaque fenetre deplacee -- exactement la
+/// regression que `empreinte_avec_ombre` avait ete ecrite pour empecher.
+///
+/// Doit rendre le meme rectangle que
+/// `windowing::window_render_geometry(..).painted_bounds` ; un test d'hote les
+/// compare.
+pub fn empreinte_fenetre_peinte(cadre: Rect) -> Rect {
+    if cadre.vide() {
+        return cadre;
+    }
+    Rect::neuf(
+        cadre.x - DEBORD_OMBRE as i32,
+        cadre.y - DEBORD_OMBRE as i32,
+        cadre.largeur.saturating_add(DEBORD_OMBRE * 2),
+        cadre.hauteur.saturating_add(DEBORD_OMBRE * 2),
     )
 }
 

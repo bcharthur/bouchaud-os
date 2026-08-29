@@ -99,7 +99,7 @@ fn le_rectangle_de_l_horloge_contient_les_pixels_de_l_heure() {
 #[test]
 fn le_rectangle_de_l_horloge_contient_aussi_les_statistiques() {
     let haute = barre_haute(L);
-    let stats = Rect::neuf(L as i32 / 2 - 200, 1, 400, 9);
+    let stats = Rect::neuf(L as i32 / 2 - 200, 1, 400, HAUTEUR_BARRE - 2);
     assert_eq!(stats.intersecte(&haute), stats);
     assert!(!se_touchent(stats, barre_taches(L, H)));
 }
@@ -107,7 +107,11 @@ fn le_rectangle_de_l_horloge_contient_aussi_les_statistiques() {
 #[test]
 fn une_barre_reste_dans_l_ecran() {
     for largeur in [1u32, 320, 1280] {
-        for hauteur in [11u32, 200, 720] {
+        // La plus petite hauteur d'ecran qui a un sens est celle d'une barre :
+        // ecrire `11` en dur figeait une valeur qui a change avec le style de
+        // la coquille, alors que la propriete testee -- une barre reste dans
+        // l'ecran -- n'en depend pas.
+        for hauteur in [HAUTEUR_BARRE, 200, 720] {
             let ecran = Rect::neuf(0, 0, largeur, hauteur);
             let haute = barre_haute(largeur);
             let basse = barre_taches(largeur, hauteur);
@@ -119,14 +123,58 @@ fn une_barre_reste_dans_l_ecran() {
 
 // ─── Ombre portee ──────────────────────────────────────────────────────────
 
+/// L'ombre DECALEE du menu Demarrer : `draw_menu` peint une copie du cadre
+/// translatee vers le bas et la droite.
 #[test]
-fn l_empreinte_deborde_du_cadre_en_bas_et_a_droite() {
+fn l_empreinte_du_menu_deborde_en_bas_et_a_droite() {
     let cadre = Rect::neuf(100, 100, 200, 150);
     let empreinte = empreinte_avec_ombre(cadre);
-    assert_eq!(empreinte.x, cadre.x, "l'ombre ne deborde pas a gauche");
+    assert_eq!(empreinte.x, cadre.x, "l'ombre du menu ne deborde pas a gauche");
     assert_eq!(empreinte.y, cadre.y, "ni en haut");
     assert_eq!(empreinte.droite(), cadre.droite() + DEBORD_OMBRE as i64);
     assert_eq!(empreinte.bas(), cadre.bas() + DEBORD_OMBRE as i64);
+}
+
+/// L'ombre d'une FENETRE est un anneau : `paint_window_shape` peint
+/// `SHADOW_EXTENT` contours AUTOUR du cadre. Elle deborde donc des QUATRE
+/// cotes, et un degat qui ne l'ajouterait qu'en bas et a droite laisserait
+/// deux bandes sombres derriere chaque fenetre deplacee.
+#[test]
+fn l_empreinte_d_une_fenetre_deborde_des_quatre_cotes() {
+    let cadre = Rect::neuf(100, 100, 200, 150);
+    let empreinte = empreinte_fenetre_peinte(cadre);
+    assert_eq!(empreinte.x, cadre.x - DEBORD_OMBRE as i32, "a gauche");
+    assert_eq!(empreinte.y, cadre.y - DEBORD_OMBRE as i32, "en haut");
+    assert_eq!(empreinte.droite(), cadre.droite() + DEBORD_OMBRE as i64, "a droite");
+    assert_eq!(empreinte.bas(), cadre.bas() + DEBORD_OMBRE as i64, "en bas");
+}
+
+/// L'empreinte d'une fenetre CONTIENT toujours son cadre, meme colle a un bord
+/// de l'ecran ou l'ombre sort du framebuffer : c'est au compositeur d'ecreter,
+/// pas a la geometrie de mentir.
+#[test]
+fn l_empreinte_d_une_fenetre_contient_toujours_son_cadre() {
+    for cadre in [
+        Rect::neuf(0, 0, 40, 30),
+        Rect::neuf(2, 2, 1, 1),
+        Rect::neuf(L as i32 - 10, H as i32 - 10, 40, 30),
+        Rect::neuf(-5, -5, 60, 60),
+    ] {
+        let empreinte = empreinte_fenetre_peinte(cadre);
+        assert_eq!(
+            empreinte.intersecte(&cadre),
+            cadre,
+            "l'empreinte doit contenir le cadre pour {cadre:?}"
+        );
+    }
+}
+
+/// Un cadre vide n'a pas d'ombre non plus dans la version fenetre : sinon une
+/// fenetre de taille nulle produirait un degat de 16 pixels de cote.
+#[test]
+fn un_cadre_vide_n_a_pas_d_ombre_de_fenetre() {
+    assert!(empreinte_fenetre_peinte(Rect::default()).vide());
+    assert!(empreinte_fenetre_peinte(Rect::neuf(10, 10, 0, 50)).vide());
 }
 
 #[test]

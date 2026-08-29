@@ -24,6 +24,7 @@ demandees en parallele et deposees ici, pretes a etre reprises sans reseau.
 import gzip
 import http.client
 import os
+import re
 import socket
 import threading
 import time
@@ -216,7 +217,11 @@ def charge_localement(url, methode="GET", corps=None, entetes=None, brut=False,
             if garde is not None:
                 octets, entetes_gardes = garde
                 type_mime = entetes_gardes.get("content-type", "").split(";")[0]
-                return Reponse(url, octets.decode("utf-8", "replace"),
+                # Meme regle que pour une reponse fraiche : les en-tetes ont ete
+                # gardes avec le corps, donc le jeu de caracteres aussi.
+                return Reponse(url,
+                               decode_charge(octets,
+                                             entetes_gardes.get("content-type", "")),
                                type_mime or "application/octet-stream", 200,
                                entetes=entetes_gardes, octets=octets)
         # YouTube n'est pas servi tel quel : sa page de lecture est une
@@ -304,7 +309,9 @@ def _charge_fichier(url, brut=False):
         # Une image, un son, une video : le contenu doit rester binaire, et
         # l'enrober de HTML le rendrait indecodable.
         return Reponse(url, "", _type_mime_du_chemin(chemin), 200, octets=donnees)
-    texte = donnees.decode("utf-8", "replace")
+    # Un fichier local n'a pas d'en-tete : seul son `<meta charset>` peut dire
+    # dans quel jeu il est ecrit, et `decode_charge` sait le chercher.
+    texte = decode_charge(donnees)
     if chemin.endswith((".html", ".htm")):
         return Reponse(url, texte, "text/html", octets=donnees)
     return Reponse(url, "<pre>%s</pre>" % _echappe(texte), "text/html",
@@ -458,6 +465,58 @@ def _meme_hote(depart, arrivee):
     return securite.meme_origine(depart, arrivee)
 
 
+_MOTIF_META_CHARSET = re.compile(
+    rb"""<meta[^>]*?charset\s*=\s*["']?\s*([A-Za-z0-9_\-:.]+)""", re.I)
+
+
+def decode_charge(donnees, content_type=""):
+    """Le texte d'une reponse, dans le bon jeu de caracteres.
+
+    # Pourquoi ce n'est pas juste `decode("utf-8")`
+
+    L'en-tete HTTP ne porte un `charset` que dans une minorite de cas. Le reste
+    du web le declare dans le document, par `<meta charset>` — et une page en
+    ISO-8859-1 lue comme de l'UTF-8 rend un `U+FFFD` par octet accentue,
+    c'est-a-dire un carre vide a la place de chaque `e` accentue.
+
+    L'ordre est celui de la norme HTML, du plus fort au plus faible :
+
+      1. une marque d'ordre des octets (BOM), qui prime sur tout, y compris sur
+         un en-tete qui dirait le contraire ;
+      2. le `charset` de l'en-tete HTTP ;
+      3. le `<meta charset>` du document, cherche dans le premier kilo-octet —
+         la norme dit 1024 octets, et une declaration qui vient apres arrive de
+         toute facon trop tard pour un vrai analyseur ;
+      4. UTF-8, qui est le defaut du web moderne.
+
+    `errors="replace"` reste le dernier filet : mieux vaut une page avec
+    quelques carres qu'une exception au milieu du chargement.
+    """
+    if donnees.startswith(b"\xef\xbb\xbf"):
+        return donnees[3:].decode("utf-8", "replace")
+    if donnees.startswith(b"\xff\xfe"):
+        return donnees[2:].decode("utf-16-le", "replace")
+    if donnees.startswith(b"\xfe\xff"):
+        return donnees[2:].decode("utf-16-be", "replace")
+
+    jeu = ""
+    if "charset=" in (content_type or ""):
+        jeu = content_type.split("charset=")[1].split(";")[0].strip().strip('"\'')
+    if not jeu:
+        trouve = _MOTIF_META_CHARSET.search(donnees[:1024])
+        if trouve:
+            jeu = trouve.group(1).decode("ascii", "replace")
+    if not jeu:
+        jeu = "utf-8"
+
+    try:
+        return donnees.decode(jeu, "replace")
+    except LookupError:
+        # Un jeu inconnu de Python — `x-user-defined`, une faute de frappe —
+        # ne doit pas faire echouer le chargement.
+        return donnees.decode("utf-8", "replace")
+
+
 def _charge_http(url, restantes=REDIRECTIONS_MAX, methode="GET", corps=None,
                  entetes=None, brut=False):
     morceaux = urllib.parse.urlsplit(url)
@@ -570,15 +629,8 @@ def _charge_http(url, restantes=REDIRECTIONS_MAX, methode="GET", corps=None,
                                 entetes=reprises, brut=brut)
 
     type_mime = entetes.get("content-type", "text/html").split(";")[0].strip()
-    jeu = "utf-8"
-    complet = entetes.get("content-type", "")
-    if "charset=" in complet:
-        jeu = complet.split("charset=")[1].split(";")[0].strip() or "utf-8"
     donnees = reponse_corps
-    try:
-        texte = donnees.decode(jeu, "replace")
-    except LookupError:
-        texte = donnees.decode("utf-8", "replace")
+    texte = decode_charge(donnees, entetes.get("content-type", ""))
 
     if brut:
         # Image, script, feuille de style : l'appelant sait quoi en faire, et

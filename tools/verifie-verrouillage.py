@@ -65,6 +65,16 @@ AUDITS_NOMMES = {
     # A1 lot 2 -- voir l'en-tete de bkl.rs et la preuve de duree de vie sur
     # `task::identite_courante`. Chacun de ces appels a son audit ecrit en
     # commentaire au-dessus de sa ligne dans SANS_BKL.
+    # A1 lot 3 -- voir l'en-tete de bkl.rs et l'audit ecrit au-dessus de la
+    # ligne POLL dans SANS_BKL : domaine table des descripteurs + verrou par
+    # objet, `current_process_local` a la place de `current_process`, et les
+    # trois branches a etat global qui prennent le verrou elles-memes.
+    "POLL": "A1 lot 3 -- table des descripteurs + verrou par objet",
+    "PPOLL": "A1 lot 3 -- table des descripteurs + verrou par objet",
+    "WRITE": "V14 -- copyin sans BKL + domaines locaux; sinks legacy verrouillent en interne",
+    "WRITEV": "V14 -- iovec/copyin sans BKL + chemin WRITE audite",
+    "MUNMAP": "V14 -- Mm + TLB + caches SMP-safe, aucun writeback sous verrou externe",
+    "MADVISE": "V14 -- Mm + TLB + clean-cache SMP-safe",
     "GETPID": "A1 lot 2 -- domaine CPU-local, aucune lecture de TASKS",
     "GETTID": "A1 lot 2 -- domaine CPU-local, aucune lecture de TASKS",
     "GETUID": "A1 lot 2 -- domaine CPU-local + verrou metadata du Process",
@@ -80,11 +90,54 @@ AUDITS_NOMMES = {
 # Une constante rendue directement : `0`, `1`, `-errno::ENOSYS`.
 CONSTANTE = re.compile(r"^-?(?:\d+|errno::[A-Z0-9_]+)$")
 
+# BOUCHAUD_P3_POLL_SANS_BKL_V1
+#
+# Les sondes de readiness de `poll` ne doivent JAMAIS passer par
+# `task::current_process()`, qui reprend le gros verrou. Remettre cet appel les
+# ferait acquerir le verrou depuis zero une fois par descripteur et par sonde --
+# 70 000 fois par seconde sur un vrai Ladybird -- et la liberation de `poll`
+# couterait plus qu'elle ne rapporte, sans que rien ne le signale.
+SONDES_READINESS = ("readable", "writable", "etat_pair", "readiness_deadline_ns")
+FICHIER_SONDES = "src/compat/linux/file.rs"
+
 erreurs = []
 
 
 def echec(message):
     erreurs.append(message)
+
+
+def verifie_sondes_readiness():
+    """Aucune sonde de readiness ne doit reprendre le gros verrou."""
+    chemin = RACINE / FICHIER_SONDES
+    if not chemin.exists():
+        echec(f"{FICHIER_SONDES} introuvable : impossible de verifier les sondes")
+        return
+    lignes = chemin.read_text(encoding="utf-8").splitlines()
+
+    courante = None
+    profondeur = 0
+    for numero, brute in enumerate(lignes, 1):
+        ligne = brute.split("//")[0]
+        for sonde in SONDES_READINESS:
+            if re.search(rf"\bfn\s+{sonde}\s*\(", ligne):
+                courante = sonde
+                profondeur = 0
+        if courante is None:
+            continue
+        if "task::current_process()" in ligne:
+            echec(
+                f"{FICHIER_SONDES}:{numero} `{courante}` appelle "
+                f"`task::current_process()`, qui REPREND le gros verrou.\n"
+                f"           {brute.strip()}\n"
+                "           Utilise `current_process_local()` : sans cela, "
+                "liberer `poll` coute\n"
+                "           une acquisition par descripteur et par sonde, soit "
+                "plus que le gain."
+            )
+        profondeur += ligne.count("{") - ligne.count("}")
+        if profondeur <= 0 and "}" in ligne:
+            courante = None
 
 
 def numeros_syscalls():
@@ -159,6 +212,8 @@ def main():
                 f"Soit on ecrit l'audit dans AUDITS_NOMMES, soit on le remet "
                 f"sous le gros verrou."
             )
+
+    verifie_sondes_readiness()
 
     for nom in AUDITS_NOMMES:
         if nom not in vus.values():

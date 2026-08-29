@@ -1,0 +1,11 @@
+{
+  "version": "BKL V4 diagnostic",
+  "base": "BKL fragmenté V3.1",
+  "logic_change": "observability counters only; no ownership/parking semantics changed",
+  "new_file": "src/kernel/sync/bkl/diagnostic.rs",
+  "modified": [
+    "src/kernel/sync/bkl.rs",
+    "src/kernel/sync/bkl/attente.rs",
+    "src/kernel/sync/bkl/metriques.rs"
+  ]
+}

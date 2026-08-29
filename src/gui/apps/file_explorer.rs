@@ -18,22 +18,38 @@ pub(crate) fn draw(cur: usize, scroll: i32, selected: Option<usize>, bx: usize, 
     // ── Fond ──
     fb::fill_rect_rgb(bx, by, bw, bh, 0xffffff);
 
+    // BOUCHAUD_GFX_CULLING_AMONT_V1
+    //
+    // Les trois bandes sont independantes, et chacune coute autre chose que des
+    // pixels : la grille parcourt le RAMFS entier et alloue une chaine par
+    // entree, la barre d'etat le reparcourt pour compter, la barre d'outils
+    // formate le chemin courant. Un degat ne touche presque jamais les trois.
+    //
+    // La decoupe jetait deja les pixels ; elle ne pouvait rien contre le
+    // parcours qui les produit.
+
     // ── Barre d'outils ──
-    draw_toolbar(cur, scroll, bx, by, bw);
+    if fb::decoupe_touche(bx, by, bw, TOOLBAR_H + 1) {
+        draw_toolbar(cur, scroll, bx, by, bw);
+    }
 
     // ── Grille de fichiers ──
     let grid_y = by + TOOLBAR_H + 1;
     let grid_h = bh.saturating_sub(TOOLBAR_H + STATUS_H + 2);
-    fb::fill_rect_rgb(bx, grid_y, bw, grid_h, 0xf8f8f8);
-    draw_grid(cur, scroll, selected, bx, grid_y, bw, grid_h);
+    if fb::decoupe_touche(bx, grid_y, bw, grid_h) {
+        fb::fill_rect_rgb(bx, grid_y, bw, grid_h, 0xf8f8f8);
+        draw_grid(cur, scroll, selected, bx, grid_y, bw, grid_h);
+    }
 
     // ── Barre d'etat ──
     let status_y = by + bh - STATUS_H;
-    fb::fill_rect_rgb(bx, status_y, bw, STATUS_H, 0xe0e0e0);
-    fb::fill_rect_rgb(bx, status_y, bw, 1, 0xaaaaaa);
-    let count = count_entries(cur);
-    let status = format!("  {} element{}", count, if count != 1 { "s" } else { "" });
-    fb::draw_text_rgb(bx + 2, status_y + 1, &status, 0x333333, 1);
+    if fb::decoupe_touche(bx, status_y, bw, STATUS_H) {
+        fb::fill_rect_rgb(bx, status_y, bw, STATUS_H, 0xe0e0e0);
+        fb::fill_rect_rgb(bx, status_y, bw, 1, 0xaaaaaa);
+        let count = count_entries(cur);
+        let status = format!("  {} element{}", count, if count != 1 { "s" } else { "" });
+        fb::draw_text_rgb(bx + 2, status_y + 1, &status, 0x333333, 1);
+    }
 }
 
 fn draw_toolbar(cur: usize, _scroll: i32, bx: usize, by: usize, bw: usize) {
@@ -98,9 +114,39 @@ fn draw_grid(cur: usize, scroll: i32, selected: Option<usize>, bx: usize, by: us
         let iy = by + row * ICON_ROW_H + 4;
         if iy + ICON_ROW_H > by + bh { break; }
 
+        let cellule_x = bx + col * ICON_COL_W;
+        let cellule_y = by + row * ICON_ROW_H;
+
+        // Le libelle est centre sur la cellule mais n'y est PAS contraint :
+        // `draw_text_rgb` avance de huit pixels par caractere, et onze
+        // caracteres font 88 pixels pour une cellule de 72. Il faut donc
+        // connaitre son rectangle reel AVANT de decider si la cellule est
+        // visible -- sinon une cellule ecartee emporterait la moitie de libelle
+        // qu'elle pose chez sa voisine.
+        //
+        // La largeur venait d'etre calculee a six pixels par caractere : le
+        // libelle etait donc decentre vers la droite d'un pixel par caractere.
+        const AVANCE: usize = 8;
+        const HAUTEUR_LIBELLE: usize = 8;
+        let max_chars = (ICON_COL_W - 4) / 6;
+        let display = clip(name, max_chars);
+        let tw = display.chars().count() * AVANCE;
+        let tx = cellule_x + (ICON_COL_W.saturating_sub(tw)) / 2;
+        let ty = iy + ICON_SIZE + 2;
+
+        // BOUCHAUD_GFX_CULLING_AMONT_V1 : une cellule hors du degat ne coute
+        // plus que son tour de boucle -- ni icone rasterisee, ni libelle pose
+        // caractere par caractere. L'union couvre la cellule ET le debord du
+        // libelle, de sorte que le culling ne peut rien perdre.
+        let gauche = cellule_x.min(tx);
+        let droite = (cellule_x + ICON_COL_W).max(tx + tw);
+        let bas = (cellule_y + ICON_ROW_H).max(ty + HAUTEUR_LIBELLE);
+        if !fb::decoupe_touche(gauche, cellule_y, droite - gauche,
+            bas - cellule_y) { continue }
+
         let is_sel = selected == Some(idx);
         if is_sel {
-            fb::fill_rect_rgb(bx + col * ICON_COL_W, by + row * ICON_ROW_H, ICON_COL_W, ICON_ROW_H, 0xcce4ff);
+            fb::fill_rect_rgb(cellule_x, cellule_y, ICON_COL_W, ICON_ROW_H, 0xcce4ff);
         }
 
         if is_dir {
@@ -109,11 +155,6 @@ fn draw_grid(cur: usize, scroll: i32, selected: Option<usize>, bx: usize, by: us
             draw_file_icon(ix + (ICON_COL_W - 8 - ICON_SIZE) / 2, iy, ICON_SIZE);
         }
 
-        let max_chars = (ICON_COL_W - 4) / 6;
-        let display = clip(name, max_chars);
-        let tw = display.len() * 6;
-        let tx = bx + col * ICON_COL_W + (ICON_COL_W.saturating_sub(tw)) / 2;
-        let ty = iy + ICON_SIZE + 2;
         fb::draw_text_rgb(tx, ty, display, 0x222222, 1);
     }
 }

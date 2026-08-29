@@ -34,6 +34,10 @@
 
 #pragma once
 
+// Atlas de glyphes DejaVu, genere par tools/ladybird/chrome/fabrique-atlas.py.
+// C'est de la donnee : ce fichier ne gagne aucune dependance de dessin.
+#include "BouchaudAtlas.h"
+
 #if defined(BOUCHAUD_PORT)
 
 #    include <AK/ByteString.h>
@@ -620,19 +624,162 @@ inline void fill_rect(Canvas const& canvas, int x, int y, int w, int h, u32 colo
     }
 }
 
-inline void draw_glyph(Canvas const& canvas, int x, int y, char character, u32 color, int scale)
-{
-    auto code = static_cast<unsigned char>(character);
-    if (code < 0x20 || code > 0x7e)
-        code = '?';
-    auto const* glyph = font8x8[code - 0x20];
+// BOUCHAUD_CHROME_ATLAS_V1
+//
+// # Ce que le texte du chrome etait
+//
+// La bitmap `font8x8` ci-dessus : un bit par pixel, agrandie par un facteur
+// entier. D'ou l'escalier a chaque diagonale sur les captures d'ecran, dans
+// une fenetre dont tout le reste est antialiase -- et strictement aucune
+// lettre accentuee, puisqu'elle s'arrete a `0x7e`.
+//
+// # Ce qu'il est
+//
+// Un atlas de DejaVu Sans, rasterise a la CONSTRUCTION par
+// `tools/ladybird/chrome/fabrique-atlas.py` et embarque en octets de
+// couverture. Le chrome n'a plus qu'a les melanger.
+//
+// La contrainte qui avait fait choisir la bitmap tient toujours : ce fichier
+// ne depend d'aucune API de dessin, et reste donc utilisable quand la page a
+// plante. Un atlas est de la donnee, pas une dependance.
+//
+// `font8x8` reste le repli exact pour ce que l'atlas ne couvre pas : mieux
+// vaut un caractere en escalier qu'un caractere absent.
 
-    for (int row_index = 0; row_index < glyph_height; ++row_index) {
-        auto bits = glyph[row_index];
-        for (int column = 0; column < glyph_width; ++column) {
-            if ((bits & (1u << column)) == 0)
+/// Melange un pixel de couverture. Les couleurs sont en 0x00RRGGBB.
+inline void blend_pixel(Canvas const& canvas, int x, int y, u32 color, unsigned int alpha)
+{
+    if (alpha == 0 || x < 0 || y < 0 || x >= canvas.width || y >= canvas.height)
+        return;
+    auto* pixels = canvas.row(y);
+    if (alpha >= 255) {
+        pixels[x] = color;
+        return;
+    }
+    auto destination = pixels[x];
+    auto inverse = 255u - alpha;
+    auto canal = [&](unsigned int decalage) {
+        auto source = (color >> decalage) & 0xffu;
+        auto fond = (destination >> decalage) & 0xffu;
+        return ((source * alpha + fond * inverse) / 255u) << decalage;
+    };
+    pixels[x] = canal(16) | canal(8) | canal(0);
+}
+
+/// Le glyphe de l'atlas pour ce point de code, ou `nullptr`.
+inline BouchaudAtlas::Glyphe const* atlas_glyphe(unsigned int point_de_code)
+{
+    for (int index = 0; index < BouchaudAtlas::nombre; ++index) {
+        if (BouchaudAtlas::glyphes[index].point_de_code == point_de_code)
+            return &BouchaudAtlas::glyphes[index];
+    }
+    return nullptr;
+}
+
+/// Decode un point de code UTF-8 a partir de `index`, qu'il avance.
+///
+/// Le champ d'adresse retient des octets ; une adresse ou un titre accentues y
+/// arrivent donc en UTF-8. Les lire octet par octet afficherait deux
+/// caracteres la ou il y en a un.
+inline unsigned int decode_utf8(StringView text, size_t& index)
+{
+    auto premier = static_cast<unsigned char>(text[index]);
+    auto reste = text.length() - index;
+    auto continuation = [&](size_t rang) {
+        return static_cast<unsigned char>(text[index + rang]) & 0x3fu;
+    };
+    if (premier < 0x80) {
+        index += 1;
+        return premier;
+    }
+    if ((premier & 0xe0) == 0xc0 && reste >= 2) {
+        auto valeur = ((premier & 0x1fu) << 6) | continuation(1);
+        index += 2;
+        return valeur;
+    }
+    if ((premier & 0xf0) == 0xe0 && reste >= 3) {
+        auto valeur = ((premier & 0x0fu) << 12) | (continuation(1) << 6) | continuation(2);
+        index += 3;
+        return valeur;
+    }
+    if ((premier & 0xf8) == 0xf0 && reste >= 4) {
+        auto valeur = ((premier & 0x07u) << 18) | (continuation(1) << 12)
+            | (continuation(2) << 6) | continuation(3);
+        index += 4;
+        return valeur;
+    }
+    index += 1;
+    return premier;
+}
+
+/// L'avance d'un point de code, en pixels, a cette echelle.
+inline int glyph_advance(unsigned int point_de_code, int scale)
+{
+    if (auto const* glyphe = atlas_glyphe(point_de_code)) {
+        auto avance = scale >= 2 ? glyphe->avance * (scale / 2) : (glyphe->avance + 1) / 2;
+        return avance > 0 ? avance : 1;
+    }
+    return glyph_width * scale;
+}
+
+inline void draw_glyph_point(Canvas const& canvas, int x, int y, unsigned int point_de_code,
+    u32 color, int scale)
+{
+    auto const* glyphe = atlas_glyphe(point_de_code);
+    if (glyphe == nullptr) {
+        // Repli exact d'avant : la bitmap, agrandie.
+        auto code = point_de_code;
+        if (code < 0x20 || code > 0x7e)
+            code = '?';
+        auto const* bitmap = font8x8[code - 0x20];
+        for (int row_index = 0; row_index < glyph_height; ++row_index) {
+            auto bits = bitmap[row_index];
+            for (int column = 0; column < glyph_width; ++column) {
+                if ((bits & (1u << column)) == 0)
+                    continue;
+                fill_rect(canvas, x + column * scale, y + row_index * scale, scale, scale, color);
+            }
+        }
+        return;
+    }
+
+    auto const* couverture = &BouchaudAtlas::couverture[glyphe->decalage];
+    if (scale >= 2) {
+        auto facteur = scale / 2;
+        for (int row_index = 0; row_index < glyphe->hauteur; ++row_index) {
+            for (int column = 0; column < glyphe->largeur; ++column) {
+                auto alpha = couverture[row_index * glyphe->largeur + column];
+                if (alpha == 0)
+                    continue;
+                for (int dy = 0; dy < facteur; ++dy) {
+                    for (int dx = 0; dx < facteur; ++dx) {
+                        blend_pixel(canvas,
+                            x + (glyphe->gauche + column) * facteur + dx,
+                            y + (glyphe->haut + row_index) * facteur + dy,
+                            color, alpha);
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    // Echelle 1 : moyenne de blocs 2x2. L'atlas est rasterise a quinze
+    // pixels ; le reduire ici evite d'en embarquer un second.
+    for (int row_index = 0; row_index < glyphe->hauteur; row_index += 2) {
+        for (int column = 0; column < glyphe->largeur; column += 2) {
+            unsigned int somme = 0;
+            int compte = 0;
+            for (int dy = 0; dy < 2 && row_index + dy < glyphe->hauteur; ++dy) {
+                for (int dx = 0; dx < 2 && column + dx < glyphe->largeur; ++dx) {
+                    somme += couverture[(row_index + dy) * glyphe->largeur + column + dx];
+                    ++compte;
+                }
+            }
+            if (compte == 0 || somme == 0)
                 continue;
-            fill_rect(canvas, x + column * scale, y + row_index * scale, scale, scale, color);
+            blend_pixel(canvas, x + (glyphe->gauche + column) / 2,
+                y + (glyphe->haut + row_index) / 2, color, somme / compte);
         }
     }
 }
@@ -641,20 +788,29 @@ inline void draw_glyph(Canvas const& canvas, int x, int y, char character, u32 c
 /// Rend l'abscisse suivant le dernier glyphe reellement dessine.
 inline int draw_text(Canvas const& canvas, int x, int y, StringView text, u32 color, int scale, int max_width)
 {
-    auto advance = glyph_width * scale;
     auto cursor = x;
-    for (size_t index = 0; index < text.length(); ++index) {
+    size_t index = 0;
+    while (index < text.length()) {
+        auto point_de_code = decode_utf8(text, index);
+        auto advance = glyph_advance(point_de_code, scale);
         if (cursor + advance > x + max_width)
             break;
-        draw_glyph(canvas, cursor, y, text[index], color, scale);
+        draw_glyph_point(canvas, cursor, y, point_de_code, color, scale);
         cursor += advance;
     }
     return cursor;
 }
 
-inline int text_width(size_t characters, int scale)
+/// Largeur REELLE d'une chaine. Elle se comptait en caracteres, ce qui n'a de
+/// sens que pour une police a chasse fixe : le curseur du champ d'adresse et
+/// la troncature du titre auraient tous deux glisse.
+inline int text_width(StringView text, int scale)
 {
-    return static_cast<int>(characters) * glyph_width * scale;
+    auto total = 0;
+    size_t index = 0;
+    while (index < text.length())
+        total += glyph_advance(decode_utf8(text, index), scale);
+    return total;
 }
 
 struct Button {
@@ -737,19 +893,40 @@ inline void draw_toolbar(Canvas const& canvas)
     // arriere dans une URL longue : ancrer la vue sur la fin dessinerait alors
     // le curseur colle au bord gauche pendant que les caracteres modifies
     // resteraient hors champ. On ne peut pas corriger ce qu'on ne voit pas.
-    auto visible_characters = available > 0 ? static_cast<size_t>(available / (glyph_width * 2)) : 0;
+    // BOUCHAUD_CHROME_ATLAS_V1 : la fenetre visible se mesure en PIXELS.
+    //
+    // Elle se comptait en caracteres -- `available / (glyph_width * 2)` --, ce
+    // qui n'a de sens que pour une chasse fixe. Avec une police
+    // proportionnelle, « iii » et « WWW » n'occupent pas la meme place, et
+    // l'ancre du defilement aurait glisse a chaque frappe.
+    //
+    // Le nombre de caracteres visibles est donc CHERCHE : on recule depuis la
+    // fin tant que le texte tient. C'est au plus une passe sur la chaine, et
+    // le champ d'adresse en compte quelques dizaines.
+    auto tient = [&](size_t debut) {
+        auto morceau = address_text.substring(debut, address_text.length() - debut);
+        return text_width(morceau.view(), 2) <= available;
+    };
     size_t first = 0;
-    if (visible_characters > 0 && address_text.length() > visible_characters) {
-        // Par defaut la fin, qui est ce qu'on veut quand la barre n'a pas le
-        // foyer : c'est la partie significative d'une URL tronquee.
-        first = address_text.length() - visible_characters;
+    if (available > 0 && !tient(0)) {
+        first = address_text.length();
+        while (first > 0 && tient(first - 1))
+            --first;
 
         if (s.address_focused) {
             auto caret = min(s.caret, address_text.length());
-            if (caret < first)
+            if (caret < first) {
                 first = caret;
-            else if (caret > first + visible_characters)
-                first = caret - visible_characters;
+            } else {
+                // Le curseur doit rester visible : on avance l'ancre jusqu'a
+                // ce que le texte du curseur tienne.
+                while (first < caret) {
+                    auto morceau = address_text.substring(first, caret - first);
+                    if (text_width(morceau.view(), 2) <= available)
+                        break;
+                    ++first;
+                }
+            }
         }
     }
 
@@ -759,13 +936,14 @@ inline void draw_toolbar(Canvas const& canvas)
     if (s.address_focused) {
         auto caret = min(s.caret, address_text.length());
         auto caret_offset = caret > first ? caret - first : 0;
-        auto caret_x = text_x + text_width(caret_offset, 2);
+        auto avant = address_text.substring(first, caret_offset);
+        auto caret_x = text_x + text_width(avant.view(), 2);
         fill_rect(canvas, caret_x, button_top + 4, 2, button_height - 8, color_field_text);
     }
 
     // Etat du chargement, a droite, en petit.
     auto status_text = s.loading ? ByteString { "chargement..." } : s.status;
-    auto status_width = text_width(status_text.length(), 1);
+    auto status_width = text_width(status_text.view(), 1);
     auto status_x = canvas.width - margin - status_width;
     if (status_x > field_x + field_w + 4)
         draw_text(canvas, status_x, toolbar_height - glyph_height - 3, status_text.view(), color_glyph_off, 1, status_width);

@@ -1,0 +1,15 @@
+{
+  "name": "Bouchaud OS Final V12 Blocking / Readiness",
+  "date": "2026-08-29",
+  "base_expected": "Final V11C + V11B + prior patches",
+  "final_stabilization_cycle": true,
+  "changes": [
+    "WaitQueue fragmentation",
+    "depth-0 BKL-detached scheduler wait",
+    "task prepare/finish detached blocking protocol",
+    "kernel-task stale syscall mask",
+    "WAITQ-DETACHED metrics",
+    "UTF-16-aware analyzer"
+  ],
+  "independence": "Bouchaud-native kernel implementation; no Linux/Windows/macOS kernel component integrated"
+}

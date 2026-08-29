@@ -1,0 +1,29 @@
+{
+  "name": "Bouchaud Performance Observatory V1",
+  "date": "2026-08-28",
+  "base_commit": "91023f8854c7a6356938f59665c8c6bdde95fa8b",
+  "base_bkl": "V4 diagnostic",
+  "drop_in": true,
+  "apply_script": false,
+  "does_not_include": [
+    "src/fs/persistance.rs"
+  ],
+  "tracked_replacements": [
+    "src/kernel/debug/perf.rs",
+    "src/kernel/debug/panic.rs",
+    "src/gui/client.rs",
+    "src/kernel/sync/bkl.rs"
+  ],
+  "new_modules": [
+    "src/kernel/debug/perf/types.rs",
+    "src/kernel/debug/perf/flight_recorder.rs",
+    "src/kernel/debug/perf/browser.rs",
+    "src/kernel/debug/perf/watchdog.rs",
+    "src/kernel/debug/perf/report.rs",
+    "tools/perf/analyse-bouchaud-perf.py"
+  ],
+  "safe_optimizations": [
+    "coalesce consecutive unread Wheel messages while preserving total delta",
+    "no per-event serial logging on hot paths; aggregate periodic reports"
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "name": "Bouchaud Desktop BKL Scoped V9",
+  "date": "2026-08-29",
+  "base_commit_for_gui_mod": "91023f8854c7a6356938f59665c8c6bdde95fa8b",
+  "expects": [
+    "Preempt IRQ V8",
+    "Mouse IRQ V7",
+    "Idle IRQ V6",
+    "BKL Scheduler V5.1"
+  ],
+  "goal": "bound continuous BKL ownership of desktop without breaking nested kernel critical sections",
+  "mode": "Scoped",
+  "safety": {
+    "desktop_only": true,
+    "interrupts_enabled_required": true,
+    "bkl_depth_required": 1,
+    "nested_depth_release": false,
+    "legacy_kernel_thread_contract_preserved": true
+  },
+  "modified": [
+    "src/gui/mod.rs",
+    "src/arch/x86_64/cpu/idle/trace.rs"
+  ],
+  "new": [
+    "src/gui/desktop_bkl.rs",
+    "src/gui/desktop_bkl/etat.rs",
+    "src/gui/desktop_bkl/scope.rs",
+    "src/gui/desktop_bkl/diagnostic.rs",
+    "src/gui/reveil_v9.rs",
+    "src/gui/framebuffer_v9.rs",
+    "tools/perf/analyse-kthread-bkl-v9.py"
+  ],
+  "does_not_replace": [
+    "src/gui/window_manager.rs",
+    "src/gui/reveil.rs",
+    "src/gui/framebuffer.rs",
+    "src/kernel/process/thread.rs",
+    "src/kernel/sync/bkl.rs",
+    "src/fs/persistance.rs",
+    "src/gui/client.rs"
+  ]
+}

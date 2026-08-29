@@ -49,6 +49,8 @@ use alloc::vec::Vec;
 
 use crate::drivers::ata::{self, Drive, SECTOR_SIZE};
 use crate::fs::ramfs::{fs, NodeKind};
+use crate::kernel::sync::{SleepMutex, SpinLock};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Reconnait une zone deja formatee.
 const MAGIE: &[u8; 8] = b"BOPERSI1";
@@ -62,7 +64,11 @@ const TAILLE_ENTREE: usize = 256;
 /// Longueur maximale d'un chemin dans la table.
 const CHEMIN_MAX: usize = TAILLE_ENTREE - 16;
 
-/// Secteurs occupes par la table.
+/// Secteurs reserves par la table.
+///
+/// Le format garde 1024 secteurs reserves afin que `SECTEUR_CONTENU` reste
+/// strictement compatible avec les disques deja crees. En revanche, un sync
+/// n'ecrit plus les 1024 secteurs quand seules quelques entrees sont utilisees.
 const SECTEURS_TABLE: u64 = (ENTREES_MAX * TAILLE_ENTREE / SECTOR_SIZE) as u64;
 
 /// Premier secteur du contenu, relatif au debut de la zone.
@@ -77,340 +83,18 @@ const SECTEURS_ZONE: u64 = 262144;
 /// Racine des fichiers persistants dans le RAMFS.
 pub const RACINE: &str = "/persist";
 
-/// Premier secteur de la zone sur le disque de donnees, ou `None`.
-///
-/// La zone occupe la fin du disque. Un disque trop petit pour la porter n'en a
-/// pas : mieux vaut aucune persistance qu'une persistance qui ecrase l'archive.
-///
-/// Le seuil porte sur la zone **augmentee de son en-tete et de sa table** : une
-/// image dont l'archive tient dans moins de `SECTEUR_CONTENU` secteurs n'aurait
-/// pas de quoi ecrire une table complete. `mkdisk.sh` complete donc la region
-/// d'archive jusqu'a ce plancher avant d'ajouter la zone.
-fn debut() -> Option<u64> {
-    let (_, secteurs) = ata::capacities();
-    if secteurs <= SECTEURS_ZONE + SECTEUR_CONTENU {
-        return None;
-    }
-    Some(secteurs - SECTEURS_ZONE)
-}
 
-/// Ce nœud est-il sous [`RACINE`] ?
-///
-/// C'est ce qui permet a `fsync` de n'ecrire sur le disque que lorsque le
-/// descripteur en cause designe vraiment un fichier persistant : les programmes
-/// appellent `fsync` sans compter, et chacun coute sinon une reecriture de toute
-/// la zone.
-pub fn sous_racine(mut noeud: usize) -> bool {
-    let systeme = fs();
-    let racine = match systeme.resolve(RACINE, 0) {
-        Some(idx) => idx,
-        None => return false,
-    };
-    // La remontee est bornee par le nombre de nœuds : un cycle dans les parents
-    // ne doit pas faire boucler le noyau.
-    for _ in 0..systeme.nodes.len() {
-        if noeud == racine {
-            return true;
-        }
-        let parent = systeme.nodes[noeud].parent;
-        if parent == noeud {
-            return false;
-        }
-        noeud = parent;
-    }
-    false
-}
-
-
-/// Un fichier retenu : son chemin sous [`RACINE`] et son contenu.
-struct Entree {
-    chemin: String,
-    contenu: Vec<u8>,
-}
-
-/// Deplie la zone persistante dans `/persist`. A appeler une fois au demarrage.
-///
-/// Rend le nombre de fichiers restaures.
-pub fn monte() -> usize {
-    let systeme = fs();
-    let racine = match systeme.resolve(RACINE, 0) {
-        Some(idx) => idx,
-        None => match systeme.mkdir_at(0, "persist") {
-            Ok(idx) => idx,
-            Err(_) => return 0,
-        },
-    };
-
-    let base = match debut() {
-        Some(base) => base,
-        None => {
-            crate::kernel::dmesg::log("persistance: disque trop petit, zone absente");
-            return 0;
-        }
-    };
-
-    let mut entete = vec![0u8; SECTOR_SIZE];
-    if ata::read(Drive::Slave, base, 1, &mut entete) != 1 {
-        crate::kernel::dmesg::log("persistance: zone illisible");
-        return 0;
-    }
-    if &entete[0..8] != MAGIE {
-        // Zone neuve : rien a restaurer, et ce n'est pas une erreur.
-        crate::kernel::dmesg::log("persistance: zone vierge");
-        return 0;
-    }
-    let nombre = lit_u32(&entete[12..16]) as usize;
-    if nombre == 0 || nombre > ENTREES_MAX {
-        return 0;
-    }
-
-    let mut table = vec![0u8; (SECTEURS_TABLE as usize) * SECTOR_SIZE];
-    if ata::read(Drive::Slave, base + 1, SECTEURS_TABLE as usize, &mut table)
-        != SECTEURS_TABLE as usize
-    {
-        return 0;
-    }
-
-    let mut restaures = 0usize;
-    let mut secteur = base + SECTEUR_CONTENU;
-    for index in 0..nombre {
-        let debut_entree = index * TAILLE_ENTREE;
-        let brut = &table[debut_entree..debut_entree + TAILLE_ENTREE];
-        let taille = lit_u64(&brut[CHEMIN_MAX..CHEMIN_MAX + 8]) as usize;
-        let chemin = chaine(&brut[..CHEMIN_MAX]);
-        let secteurs = ((taille + SECTOR_SIZE - 1) / SECTOR_SIZE) as u64;
-
-        if !chemin.is_empty() && taille > 0 {
-            let mut tampon = vec![0u8; (secteurs as usize) * SECTOR_SIZE];
-            if ata::read(Drive::Slave, secteur, secteurs as usize, &mut tampon)
-                == secteurs as usize
-            {
-                tampon.truncate(taille);
-                if depose(racine, &chemin, &tampon) {
-                    restaures += 1;
-                }
-            }
-        }
-        secteur += secteurs;
-    }
-
-    crate::kernel::dmesg::log_fmt(format_args!(
-        "persistance: {} fichier(s) restaure(s) depuis le disque",
-        restaures
-    ));
-    restaures
-}
-
-/// Ecrit `/persist` sur le disque. Rend le nombre de fichiers ecrits, ou -1.
-///
-/// L'en-tete part **en dernier** : jusqu'a ce qu'il soit ecrit, la zone porte
-/// encore l'ancienne magie, donc l'ancien contenu. Une coupure au milieu laisse
-/// la version precedente, pas un melange des deux.
-pub fn synchronise() -> i64 {
-    // Chaque echec doit se nommer. `fsync` traduit un `-1` en EIO, et un
-    // programme qui recoit EIO n'a plus que « disk I/O error » a dire : c'est
-    // exactement ce que SQLite a rapporte au run 32424806818, sans qu'aucune
-    // ligne du journal n'indique laquelle des quatre causes s'appliquait.
-    let base = match debut() {
-        Some(base) => base,
-        None => {
-            let (_, secteurs) = ata::capacities();
-            crate::kernel::dmesg::log_fmt(format_args!(
-                "persistance: sync refuse, disque de {} secteurs, il en faut plus de {}",
-                secteurs,
-                SECTEURS_ZONE + SECTEUR_CONTENU
-            ));
-            return -1;
-        }
-    };
-
-    let entrees = rassemble();
-    if entrees.len() > ENTREES_MAX {
-        crate::kernel::dmesg::log_fmt(format_args!(
-            "persistance: sync refuse, {} fichiers sous {} pour {} entrees possibles",
-            entrees.len(),
-            RACINE,
-            ENTREES_MAX
-        ));
-        return -1;
-    }
-
-    let mut table = vec![0u8; (SECTEURS_TABLE as usize) * SECTOR_SIZE];
-    let mut secteur = base + SECTEUR_CONTENU;
-    let fin_zone = base + SECTEURS_ZONE;
-
-    for (index, entree) in entrees.iter().enumerate() {
-        let octets = entree.chemin.as_bytes();
-        // Un chemin trop long etait TRONQUE en silence. La table gardait alors
-        // un nom qui n'est celui d'aucun fichier, et le redemarrage suivant
-        // restaurait le contenu sous ce faux nom -- une corruption discrete,
-        // que rien dans le journal n'aurait signalee. Depuis que `NAME_LEN`
-        // vaut 255, un seul composant peut a lui seul approcher ce plafond.
-        if octets.len() >= CHEMIN_MAX {
-            crate::kernel::dmesg::log_fmt(format_args!(
-                "persistance: chemin trop long, {} octets pour {} possibles : '{}'",
-                octets.len(),
-                CHEMIN_MAX - 1,
-                entree.chemin
-            ));
-            return -1;
-        }
-        let longueur = octets.len();
-        let debut_entree = index * TAILLE_ENTREE;
-        table[debut_entree..debut_entree + longueur].copy_from_slice(&octets[..longueur]);
-        ecrit_u64(
-            &mut table[debut_entree + CHEMIN_MAX..debut_entree + CHEMIN_MAX + 8],
-            entree.contenu.len() as u64,
-        );
-
-        let secteurs = ((entree.contenu.len() + SECTOR_SIZE - 1) / SECTOR_SIZE) as u64;
-        if secteur + secteurs > fin_zone {
-            crate::kernel::dmesg::log_fmt(format_args!(
-                "persistance: zone pleine sur '{}', il faudrait le secteur {} et la zone s'arrete a {}",
-                entree.chemin,
-                secteur + secteurs,
-                fin_zone
-            ));
-            return -1;
-        }
-        if secteurs > 0 {
-            let mut tampon = vec![0u8; (secteurs as usize) * SECTOR_SIZE];
-            tampon[..entree.contenu.len()].copy_from_slice(&entree.contenu);
-            let ecrits = ata::write(Drive::Slave, secteur, secteurs as usize, &tampon);
-            if ecrits != secteurs as usize {
-                crate::kernel::dmesg::log_fmt(format_args!(
-                    "persistance: ecriture de '{}' incomplete, {} secteurs sur {} a partir de {}",
-                    entree.chemin, ecrits, secteurs, secteur
-                ));
-                return -1;
-            }
-        }
-        secteur += secteurs;
-    }
-
-    let table_ecrite = ata::write(Drive::Slave, base + 1, SECTEURS_TABLE as usize, &table);
-    if table_ecrite != SECTEURS_TABLE as usize {
-        crate::kernel::dmesg::log_fmt(format_args!(
-            "persistance: table incomplete, {} secteurs sur {} a partir de {}",
-            table_ecrite,
-            SECTEURS_TABLE,
-            base + 1
-        ));
-        return -1;
-    }
-
-    let mut entete = vec![0u8; SECTOR_SIZE];
-    entete[0..8].copy_from_slice(MAGIE);
-    ecrit_u32(&mut entete[8..12], 1);
-    ecrit_u32(&mut entete[12..16], entrees.len() as u32);
-    if ata::write(Drive::Slave, base, 1, &entete) != 1 {
-        crate::kernel::dmesg::log_fmt(format_args!(
-            "persistance: en-tete non ecrit au secteur {}",
-            base
-        ));
-        return -1;
-    }
-
-    entrees.len() as i64
-}
-
-/// Tous les fichiers sous `/persist`, chemins relatifs a cette racine.
-fn rassemble() -> Vec<Entree> {
-    let systeme = fs();
-    let racine = match systeme.resolve(RACINE, 0) {
-        Some(idx) => idx,
-        None => return Vec::new(),
-    };
-    let mut entrees = Vec::new();
-    collecte(racine, &String::new(), &mut entrees);
-    entrees
-}
-
-fn collecte(dossier: usize, prefixe: &str, entrees: &mut Vec<Entree>) {
-    let systeme = fs();
-    // Les indices sont releves d'abord : la collecte n'ecrit pas, mais elle
-    // emprunte le systeme de fichiers a chaque tour, et garder un iterateur
-    // ouvert par-dessus serait fragile.
-    let mut enfants = Vec::new();
-    for index in 0..systeme.nodes.len() {
-        if systeme.nodes[index].used && systeme.nodes[index].parent == dossier
-            && index != dossier
-        {
-            enfants.push(index);
-        }
-    }
-
-    for index in enfants {
-        let nom = systeme.nodes[index].name_str();
-        let chemin = if prefixe.is_empty() {
-            String::from(nom)
-        } else {
-            format!("{}/{}", prefixe, nom)
-        };
-        match systeme.nodes[index].kind {
-            NodeKind::Dir => collecte(index, &chemin, entrees),
-            NodeKind::File => {
-                let longueur = systeme.nodes[index].content_len();
-                if longueur == 0 || chemin.len() >= CHEMIN_MAX {
-                    continue;
-                }
-                let mut contenu = Vec::with_capacity(longueur);
-                contenu.extend_from_slice(&systeme.nodes[index].content[..longueur]);
-                entrees.push(Entree { chemin, contenu });
-            }
-        }
-    }
-}
-
-/// Cree (dossiers compris) puis remplit un fichier sous `/persist`.
-fn depose(racine: usize, chemin: &str, contenu: &[u8]) -> bool {
-    let systeme = fs();
-    let mut parent = racine;
-    let mut morceaux = chemin.split('/').filter(|m| !m.is_empty()).peekable();
-
-    while let Some(morceau) = morceaux.next() {
-        if morceaux.peek().is_none() {
-            let noeud = match systeme.find_child(parent, morceau) {
-                Some(idx) => idx,
-                None => match systeme.touch_at(parent, morceau) {
-                    Ok(idx) => idx,
-                    Err(_) => return false,
-                },
-            };
-            return systeme.write_node_bytes(noeud, contenu);
-        }
-        parent = match systeme.find_child(parent, morceau) {
-            Some(idx) => idx,
-            None => match systeme.mkdir_at(parent, morceau) {
-                Ok(idx) => idx,
-                Err(_) => return false,
-            },
-        };
-    }
-    false
-}
-
-// --- Lecture et ecriture des champs -------------------------------------------
-
-fn lit_u32(octets: &[u8]) -> u32 {
-    u32::from_le_bytes([octets[0], octets[1], octets[2], octets[3]])
-}
-
-fn lit_u64(octets: &[u8]) -> u64 {
-    let mut brut = [0u8; 8];
-    brut.copy_from_slice(&octets[..8]);
-    u64::from_le_bytes(brut)
-}
-
-fn ecrit_u32(cible: &mut [u8], valeur: u32) {
-    cible[..4].copy_from_slice(&valeur.to_le_bytes());
-}
-
-fn ecrit_u64(cible: &mut [u8], valeur: u64) {
-    cible[..8].copy_from_slice(&valeur.to_le_bytes());
-}
-
-fn chaine(octets: &[u8]) -> String {
-    let fin = octets.iter().position(|&c| c == 0).unwrap_or(octets.len());
-    String::from_utf8_lossy(&octets[..fin]).into_owned()
-}
+// BOUCHAUD_DEEP_FRAGMENTATION_V11A
+// Façade de persistance. Les fragments sont inclus dans CE module :
+// format disque, statiques privées et API publique restent identiques.
+include!("persistance/format.rs");
+include!("persistance/transaction.rs");
+include!("persistance/arbre.rs");
+include!("persistance/index.rs");
+include!("persistance/montage.rs");
+include!("persistance/snapshot.rs");
+include!("persistance/io.rs");
+include!("persistance/sync.rs");
+include!("persistance/diagnostic.rs");
+include!("persistance/collecte.rs");
+include!("persistance/codec.rs");

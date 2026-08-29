@@ -9,6 +9,8 @@ pub mod abi;
 pub mod autorun;
 #[path = "memory/page_cache.rs"]
 pub mod clean_page_cache;
+#[path = "memory/readahead.rs"]
+pub mod readahead;
 #[path = "debug/dmesg.rs"]
 pub mod dmesg;
 #[path = "process/elf.rs"]
@@ -41,6 +43,8 @@ pub mod process;
 pub mod resource;
 #[path = "scheduler/core.rs"]
 pub mod scheduler;
+#[path = "scheduler/echeances.rs"]
+pub mod echeances;
 #[path = "process/signal.rs"]
 pub mod signal;
 #[path = "sync/bkl.rs"]
@@ -59,3 +63,12 @@ pub mod vma;
 pub mod frames_libres;
 #[path = "memory/virtual.rs"]
 pub mod vmm;
+
+// BOUCHAUD_NATIVE_CORE_V11B
+//
+// Ces deux modules sont des frontières NATIVES de Bouchaud OS. Ils ne sont pas
+// des wrappers Linux : la couche `compat/linux` devra progressivement traduire
+// ses ABI vers ces concepts génériques.
+pub mod native;
+#[path = "object/readiness.rs"]
+pub mod readiness;

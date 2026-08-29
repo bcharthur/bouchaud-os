@@ -1,0 +1,37 @@
+{
+  "name": "Bouchaud Mouse IRQ Bottom-Half V7",
+  "date": "2026-08-29",
+  "base_commit_for_tracked_files": "91023f8854c7a6356938f59665c8c6bdde95fa8b",
+  "expects": [
+    "Idle/IRQ V6",
+    "BKL Scheduler V5.1"
+  ],
+  "goal": "remove BKL and scheduler wake from hard mouse IRQ",
+  "hard_irq_mouse": {
+    "bkl_enter": false,
+    "task_scan": false,
+    "serial_logging": false,
+    "deferred_gui_signal": true
+  },
+  "bottom_half": "PIT after successful smp_lock::try_enter",
+  "modified": [
+    "src/arch/x86_64/idt.rs",
+    "src/drivers/input/ps2_mouse.rs",
+    "src/kernel/sync/reveil.rs",
+    "src/kernel/sync/wait_queue.rs",
+    "src/arch/x86_64/cpu/idle/trace.rs"
+  ],
+  "new": [
+    "src/drivers/input/mouse/etat.rs",
+    "src/drivers/input/mouse/ps2.rs",
+    "src/drivers/input/mouse/paquet.rs",
+    "src/drivers/input/mouse/diagnostic.rs",
+    "tools/perf/analyse-mouse-v7.py"
+  ],
+  "does_not_touch": [
+    "src/fs/persistance.rs",
+    "src/gui/client.rs",
+    "src/kernel/sync/bkl.rs",
+    "src/kernel/process/thread.rs"
+  ]
+}

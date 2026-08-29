@@ -1,0 +1,22 @@
+BOUCHAUD OS - GATE 0 PASSED
+date=2026-08-26T20:24:36.3960137+02:00
+commit=2ad9d394e790b5929e9903b61a787026aa182fc0
+branch=gate0/final-20260826
+boots=3/3
+stable_seconds=20
+transport=QEMU serial TCP loopback wait=on
+
+Checks:
+  OK SMP discover 4
+  OK SMP AP 3/3
+  OK SMP load 4 CPUs
+  OK BrowserHost
+  OK WebContent
+  OK M11 ready
+  OK M11 GUI handshake
+  OK M11 document loaded
+
+Runtime logs:
+  C:\Users\Arthur\RustroverProjects\bouchaud-os\gate0-results\boot-1-20260826-201945.serial.log
+  C:\Users\Arthur\RustroverProjects\bouchaud-os\gate0-results\boot-2-20260826-202119.serial.log
+  C:\Users\Arthur\RustroverProjects\bouchaud-os\gate0-results\boot-3-20260826-202255.serial.log

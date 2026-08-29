@@ -1,0 +1,118 @@
+name: ladybird-native-browser-v16
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "feat/ladybird-platform-smp4"
+      - "perf/gui-event-driven"
+    paths:
+      - "tools/ladybird/**"
+      - "third_party/UPSTREAM.md"
+      - ".github/workflows/ladybird-native-browser-v16.yml"
+  pull_request:
+    paths:
+      - "tools/ladybird/**"
+      - "third_party/UPSTREAM.md"
+      - ".github/workflows/ladybird-native-browser-v16.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ladybird-native-browser-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Ladybird-fast-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - name: Outils de construction
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config python3 python3-dev python3-venv perl \
+            clang lld ccache cmake ninja-build git curl wget gnupg lsb-release zip unzip tar xz-utils file \
+            autoconf autoconf-archive automake libtool libltdl-dev gettext m4 \
+            nasm bison flex libssl-dev libedit-dev linux-libc-dev mesa-common-dev ca-certificates
+          LLVM_VERSION=20
+          if ! command -v "clang-${LLVM_VERSION}" >/dev/null 2>&1; then
+            CODENAME="$(lsb_release -sc)"
+            wget -qO /tmp/llvm-snapshot.gpg.key https://apt.llvm.org/llvm-snapshot.gpg.key
+            sudo gpg --dearmor --yes -o /usr/share/keyrings/llvm-snapshot.gpg.gpg /tmp/llvm-snapshot.gpg.key
+            echo "deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg.gpg] https://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-${LLVM_VERSION} main" | sudo tee /etc/apt/sources.list.d/llvm-${LLVM_VERSION}.list
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends "clang-${LLVM_VERSION}" "lld-${LLVM_VERSION}" "llvm-${LLVM_VERSION}"
+          fi
+      - name: Cache cargo Ladybird
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ladybird-browser-cargo-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md', 'tools/ladybird/native-browser-final.sh') }}
+          restore-keys: ladybird-browser-cargo-${{ runner.os }}-
+      - name: Cache arbre Ladybird
+        uses: actions/cache@v4
+        with:
+          path: third_party/ladybird
+          key: ladybird-source-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md', 'tools/ladybird/patches/**') }}
+      - name: Cache vcpkg navigateur
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/vcpkg-gfx
+            third_party/vcpkg-downloads
+            third_party/vcpkg-browser-manifest
+            third_party/vcpkg-browser-installed
+            ~/.cache/vcpkg
+          key: ladybird-browser-vcpkg-v2-${{ runner.os }}-${{ hashFiles('tools/ladybird/browser-vcpkg.sh', 'third_party/UPSTREAM.md') }}
+          restore-keys: |
+            ladybird-browser-vcpkg-v2-${{ runner.os }}-
+            ladybird-browser-vcpkg-${{ runner.os }}-
+      - name: Dependances navigateur
+        run: tools/ladybird/browser-vcpkg.sh
+      - name: Cache build Ladybird
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/build-ladybird-browser-bouchaud
+            third_party/native-browser-bouchaud
+          key: ladybird-browser-build-v4-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md', 'tools/ladybird/**') }}-${{ github.sha }}
+          restore-keys: ladybird-browser-build-v4-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md') }}-
+      - name: Cache ccache Ladybird
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ladybird-browser-ccache-v1-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md') }}-${{ github.sha }}
+          restore-keys: ladybird-browser-ccache-v1-${{ runner.os }}-
+      - name: Construire Ladybird
+        run: tools/ladybird/native-browser-final.sh --cible
+      - name: Marquer artefact UI V16
+        run: |
+          set -eux
+          OUT=third_party/native-browser-bouchaud
+          printf 'Bouchaud V16 chrome=fontconfig+svg loading=1\n' > "$OUT/V16_UI_CAPABLE"
+      - name: Verifier les artefacts runtime
+        run: |
+          set -eux
+          OUT=third_party/native-browser-bouchaud
+          for f in BouchaudBrowserHost WebContent RequestServer ImageDecoder Compositor WebWorker WebDriver; do
+            test -f "$OUT/$f"
+            file "$OUT/$f"
+            ! readelf -l "$OUT/$f" | grep -q INTERP
+          done
+          test -x "$OUT/webcontent-bootstrap"
+          test -f "$OUT/M9_CAPABLE"
+          test -f "$OUT/V16_UI_CAPABLE"
+          test -d "$OUT/resources"
+      - name: Publier Ladybird natif
+        uses: actions/upload-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: third_party/native-browser-bouchaud/
+          if-no-files-found: error
+          retention-days: 14

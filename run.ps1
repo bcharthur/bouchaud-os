@@ -293,7 +293,7 @@ Write-Section "Construction du noyau"
 
 Ensure-Cargo
 
-cargo bootimage
+& "$RepoRoot\tools\run\cargo-bootimage-safe.cmd"
 
 if ($LASTEXITCODE -ne 0) {
 
@@ -702,26 +702,49 @@ if ($LadybirdMode) {
     # repli de familles CSS disparait. Voir tools/ladybird/fontconfig/fonts.conf.
     # =========================================================================
 
+    # BOUCHAUD_FONTCONFIG_DEPOT_FAIT_FOI_V1
+    #
+    # Cette copie etait conditionnee a l'ABSENCE d'un fonts.conf dans
+    # l'artefact. La consequence n'etait pas celle qu'on croyait : un artefact
+    # construit apres l'introduction du fichier en porte SA version, et la
+    # copie du depot n'avait donc plus jamais lieu.
+    #
+    # Toute correction apportee a tools\ladybird\fontconfig\fonts.conf --
+    # dont les alias qui font pointer Arial, Helvetica, Roboto et les
+    # generiques CSS vers DejaVu -- restait ainsi sans effet, et le Web
+    # continuait de s'afficher dans SerenitySans : une police d'interface
+    # geometrique, sans la plupart des lettres accentuees. C'est l'aspect
+    # "cartoon" et les carres vides des captures d'ecran.
+    #
+    # Le depot fait foi. Il est le seul endroit ou ce fichier est relu et
+    # corrige ; un artefact ne doit pas pouvoir en imposer une version plus
+    # ancienne.
     $FontconfigTarget = Join-Path $LadybirdShare "fontconfig"
 
-    if (-not (Test-Path (Join-Path $FontconfigTarget "fonts.conf"))) {
+    $FontconfigSource = Join-Path `
+        $RepoRoot `
+        "tools\ladybird\fontconfig\fonts.conf"
 
-        $FontconfigSource = Join-Path `
-            $RepoRoot `
-            "tools\ladybird\fontconfig\fonts.conf"
+    if (Test-Path $FontconfigSource) {
 
-        if (Test-Path $FontconfigSource) {
+        New-Item `
+            -ItemType Directory `
+            -Path $FontconfigTarget `
+            -Force | Out-Null
 
-            New-Item `
-                -ItemType Directory `
-                -Path $FontconfigTarget `
-                -Force | Out-Null
+        Copy-Item `
+            $FontconfigSource `
+            (Join-Path $FontconfigTarget "fonts.conf") `
+            -Force
 
-            Copy-Item `
-                $FontconfigSource `
-                (Join-Path $FontconfigTarget "fonts.conf") `
-                -Force
-        }
+        Write-Host `
+            "Polices    : fontconfig du depot installe (alias CSS -> DejaVu)" `
+            -ForegroundColor DarkGray
+    }
+    else {
+        Write-Host `
+            "Polices    : fonts.conf absent du depot, le Web s'affichera en SerenitySans" `
+            -ForegroundColor Yellow
     }
 
 

@@ -483,10 +483,28 @@ pub fn present_rect(x: usize, y: usize, width: usize, height: usize) {
         return;
     }
     let count = x1 - x;
-    for row in y..y1 {
-        let offset = row * WIDTH + x;
+    // BOUCHAUD_GFX_PRESENT_BLOC_V1
+    //
+    // Un rectangle qui prend toute la largeur est CONTIGU des deux cotes : ses
+    // lignes se suivent dans le tampon comme dans le framebuffer. Une seule
+    // copie suffit alors, au lieu d'une par ligne.
+    //
+    // Ce n'est pas un cas rare : le compositeur presente la barre du haut a
+    // chaque seconde -- `last_present_rect=0,0,1280,30` --, la barre des taches
+    // a chaque changement de fenetre, et l'ecran entier a chaque apparition.
+    // Trente appels deviennent un, sept cent vingt deviennent un.
+    if count == WIDTH {
+        let offset = y * WIDTH;
         unsafe {
-            core::ptr::copy_nonoverlapping(buf.as_ptr().add(offset), lfb.add(offset), count);
+            core::ptr::copy_nonoverlapping(
+                buf.as_ptr().add(offset), lfb.add(offset), count * (y1 - y));
+        }
+    } else {
+        for row in y..y1 {
+            let offset = row * WIDTH + x;
+            unsafe {
+                core::ptr::copy_nonoverlapping(buf.as_ptr().add(offset), lfb.add(offset), count);
+            }
         }
     }
     // Ici, et seulement ici, des pixels ont atteint l'ecran.
@@ -604,6 +622,18 @@ static CLIP_X1: AtomicUsize = AtomicUsize::new(WIDTH);
 static CLIP_Y1: AtomicUsize = AtomicUsize::new(HEIGHT);
 static PIXELS_DESSINES: AtomicU64 = AtomicU64::new(0);
 
+// BOUCHAUD_GFX_TEXTE_SEGMENT_V1
+//
+// Pixels de TEXTE melanges dans le backbuffer. Comptes a part, et non ajoutes
+// a `PIXELS_DESSINES`, pour que les releves d'avant et d'apres restent
+// comparables : le texte n'a jamais ete compte, il l'est desormais, et
+// confondre les deux ferait passer une mesure nouvelle pour une regression.
+//
+// C'est la mesure qui manquait. Le rendu du texte etait le seul chemin de
+// dessin invisible aux metriques, et c'est precisement la que le compositeur
+// depensait le plus par rectangle de degat.
+static PIXELS_TEXTE: AtomicU64 = AtomicU64::new(0);
+
 /// Borne le dessin a ce rectangle jusqu'au prochain [`reset_clip`].
 pub fn set_clip(x: usize, y: usize, w: usize, h: usize) {
     CLIP_X0.store(x.min(WIDTH), Ordering::Relaxed);
@@ -659,9 +689,44 @@ pub fn clip_rect() -> (usize, usize, usize, usize) {
     clip()
 }
 
+// BOUCHAUD_GFX_CULLING_AMONT_V1
+//
+// La trame va-t-elle presenter un seul pixel de ce rectangle ?
+//
+// # Pourquoi un predicat, alors que la decoupe rejette deja
+//
+// Parce que la decoupe rejette les PIXELS, pas le TRAVAIL qui les produit.
+//
+// Le compositeur dessine une fois par rectangle de degat. `apps::draw_app`
+// etait donc rappele pour chacun -- y compris pour un degat qui ne touche que
+// la barre de titre. L'explorateur de fichiers y parcourt le RAMFS pour
+// compter ses entrees et alloue une chaine par ligne ; le moniteur systeme y
+// lit l'horloge temps reel par ports d'E/S, les statistiques du tas et le
+// nombre de processus. Tout cela pour des pixels que la decoupe jetait.
+//
+// Sous TCG et sous le gros verrou du noyau, ce n'est pas un detail : ce sont
+// des acces materiel et des prises de verrou faits plusieurs fois par trame
+// pour rien.
+//
+// Un appelant qui l'oublie ne dessine pas faux -- la decoupe est toujours la.
+// Il paie seulement ce qu'il aurait pu ne pas payer.
+pub fn decoupe_touche(x: usize, y: usize, w: usize, h: usize) -> bool {
+    if w == 0 || h == 0 { return false }
+    let (x0, y0, x1, y1) = intersection(
+        clip(),
+        (x, y, x.saturating_add(w), y.saturating_add(h)),
+    );
+    x1 > x0 && y1 > y0
+}
+
 /// Compte des pixels ecrits par un chemin qui n'utilise pas les primitives.
 pub fn note_pixels_dessines(nombre: u64) {
     PIXELS_DESSINES.fetch_add(nombre, Ordering::Relaxed);
+}
+
+/// Pixels de texte melanges dans le backbuffer depuis le demarrage.
+pub fn pixels_texte() -> u64 {
+    PIXELS_TEXTE.load(Ordering::Relaxed)
 }
 
 /// Pixels reellement ecrits dans le backbuffer depuis le demarrage.
@@ -729,6 +794,86 @@ pub fn blend_rgb(x: usize, y: usize, rgb: u32, alpha: u8) {
     buf[idx] = (r << 16) | (g << 8) | b;
 }
 
+// BOUCHAUD_GFX_TEXTE_SEGMENT_V1
+//
+// Melange une SUITE de pixels d'un glyphe sur une ligne, decoupe comprise.
+//
+// `blend_rgb` relit la decoupe -- quatre chargements atomiques -- a chaque
+// pixel. Un glyphe de 9x12 en coutait donc 432 rien que pour decider de ne pas
+// dessiner. Ici la decoupe est evaluee UNE fois pour la ligne, et le writer
+// reste le seul endroit qui l'applique : `BOUCHAUD_GUI_CLIP_V1` tient.
+//
+// `couverture[i]` est l'alpha du pixel `x + i`. Zero ne touche rien.
+pub fn blend_span(x: usize, y: usize, rgb: u32, couverture: &[u8], gras: bool) {
+    if couverture.is_empty() { return; }
+    let buf = back();
+    if buf.is_empty() { return; }
+    let (cx0, cy0, cx1, cy1) = clip();
+    if y < cy0 || y >= cy1 { return; }
+    let row = y * WIDTH;
+    let mut ecrits = 0u64;
+    for (index, &alpha) in couverture.iter().enumerate() {
+        if alpha == 0 { continue }
+        let px = x + index;
+        // Le gras redouble chaque pixel vers la droite ; les deux passent par
+        // la meme decoupe.
+        for px in [px, px + 1] {
+            if px < cx0 || px >= cx1 { continue }
+            melange_pixel(buf, row + px, rgb, alpha);
+            ecrits += 1;
+            if !gras { break }
+        }
+    }
+    if ecrits != 0 { PIXELS_TEXTE.fetch_add(ecrits, Ordering::Relaxed); }
+}
+
+/// Melange source sur destination a l'index deja verifie.
+#[inline]
+fn melange_pixel(buf: &mut [u32], idx: usize, rgb: u32, alpha: u8) {
+    if alpha >= 255 { buf[idx] = rgb & 0x00ff_ffff; return; }
+    let a = alpha as u32;
+    let inv = 255 - a;
+    let dst = buf[idx];
+    let dr = (dst >> 16) & 0xff; let dg = (dst >> 8) & 0xff; let db = dst & 0xff;
+    let sr = (rgb >> 16) & 0xff; let sg = (rgb >> 8) & 0xff; let sb = rgb & 0xff;
+    let r = (sr * a + dr * inv) / 255;
+    let g = (sg * a + dg * inv) / 255;
+    let b = (sb * a + db * inv) / 255;
+    buf[idx] = (r << 16) | (g << 8) | b;
+}
+
+// BOUCHAUD_GFX_IMAGE_SEGMENT_V1
+//
+// Compose une ligne d'image `0xAARRGGBB` sur le backbuffer.
+//
+// Meme raison d'etre que `blend_span` : la decoupe est evaluee UNE fois pour la
+// ligne au lieu d'une fois par pixel. Une icone de 56x56 coutait sinon 3 136
+// appels a `blend_rgb`, chacun relisant quatre atomiques -- pour une image que
+// le compositeur repeint a chaque degat qui la touche.
+//
+// L'alpha n'est PAS premultiplie : c'est ce que rend `gui::png::decode`, et le
+// melange se fait ici.
+pub fn blit_argb_span(x: usize, y: usize, ligne: &[u32]) {
+    if ligne.is_empty() { return }
+    let buf = back();
+    if buf.is_empty() { return }
+    let (cx0, cy0, cx1, cy1) = clip();
+    if y < cy0 || y >= cy1 { return }
+    // Bornes de colonnes, une fois pour toute la ligne.
+    let debut = cx0.saturating_sub(x).min(ligne.len());
+    let fin = cx1.saturating_sub(x).min(ligne.len());
+    if fin <= debut { return }
+    let base = y * WIDTH + x;
+    let mut ecrits = 0u64;
+    for (decalage, &source) in ligne[debut..fin].iter().enumerate() {
+        let alpha = (source >> 24) as u8;
+        if alpha == 0 { continue }
+        melange_pixel(buf, base + debut + decalage, source & 0x00ff_ffff, alpha);
+        ecrits += 1;
+    }
+    if ecrits != 0 { PIXELS_DESSINES.fetch_add(ecrits, Ordering::Relaxed); }
+}
+
 pub fn fill_rect_rgb(x: usize, y: usize, w: usize, h: usize, rgb: u32) {
     let buf = back();
     if buf.is_empty() { return; }
@@ -741,11 +886,22 @@ pub fn fill_rect_rgb(x: usize, y: usize, w: usize, h: usize, rgb: u32) {
     let x1 = (x + w).min(cx1);
     let y1 = (y + h).min(cy1);
     if x1 <= x0 || y1 <= y0 { return; }
+    // BOUCHAUD_GFX_REMPLISSAGE_TRANCHE_V1
+    //
+    // `buf[row + xx] = rgb` dans une boucle indexee, c'est une verification de
+    // bornes par pixel. `fill` sur une tranche donne au compilateur ce qu'il
+    // lui faut pour emettre un remplissage memoire vectorise : une seule
+    // verification de bornes pour toute la ligne.
+    //
+    // Le fond d'ecran, les barres et desormais chaque segment de la forme des
+    // fenetres passent par ici. Sur un remplissage plein ecran, cela fait 720
+    // verifications de bornes au lieu de 921 600 -- et sous TCG, ou chaque
+    // instruction est traduite, la boucle serree compte autant que le nombre
+    // de pixels.
     let mut yy = y0;
     while yy < y1 {
         let row = yy * WIDTH;
-        let mut xx = x0;
-        while xx < x1 { buf[row + xx] = rgb; xx += 1; }
+        buf[row + x0..row + x1].fill(rgb);
         yy += 1;
     }
     PIXELS_DESSINES.fetch_add(((x1 - x0) * (y1 - y0)) as u64, Ordering::Relaxed);

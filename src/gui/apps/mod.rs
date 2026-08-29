@@ -96,9 +96,11 @@ pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
         return;
     }
 
+    let window_x = w.window.x;
+    let window_y = w.window.y;
     if let App::Files { cur, scroll, selected } = &mut w.app {
-        let bx  = (w.x + 3).max(0) as usize;
-        let by  = (w.y + TITLE_H + 2).max(0) as usize;
+        let bx  = (window_x + 3).max(0) as usize;
+        let by  = (window_y + TITLE_H + 2).max(0) as usize;
         let bw  = (win_w - 6).max(1) as usize;
         let tbh = file_explorer::TOOLBAR_H;
 
@@ -165,6 +167,30 @@ pub(crate) fn draw_app(w: &Win) {
     let by = w.y.max(0) as usize + TITLE_H as usize + 2;
     let bw = w.w as usize - 6;
     let bh = w.h as usize - TITLE_H as usize - 4;
+    // BOUCHAUD_GFX_CULLING_AMONT_V1
+    //
+    // Le compositeur rappelle ce peintre pour CHAQUE rectangle de degat qui
+    // touche la fenetre -- y compris un degat limite a la barre de titre, a une
+    // bordure ou a l'ombre. Les peintres d'application ne se contentent pas de
+    // poser des pixels : l'explorateur parcourt le RAMFS et alloue une chaine
+    // par ligne, le moniteur lit l'horloge par ports d'E/S et prend les verrous
+    // du tas et de l'ordonnanceur -- le tout sous le gros verrou du noyau.
+    //
+    // La decoupe jetait les pixels ; elle ne pouvait rien contre le travail qui
+    // les produit. Ce test le peut.
+    //
+    // Le rectangle teste est `zone_utile`, pas la boite passee aux peintres :
+    // `compose_client` recopie la surface d'un client sur la zone utile
+    // ENTIERE, qui deborde de deux pixels a gauche et a droite et d'un en haut
+    // et en bas. Tester la boite la plus etroite ecarterait les degats limites
+    // a cette bordure, et personne ne la repeindrait.
+    let visible = crate::gui::window::zone_utile(w);
+    if !crate::gui::framebuffer::decoupe_touche(
+        visible.x.max(0) as usize, visible.y.max(0) as usize,
+        visible.largeur as usize, visible.hauteur as usize,
+    ) {
+        return;
+    }
     match &w.app {
         App::Terminal { sb, input, cwd }    => terminal::draw(sb, input, *cwd, bx, by, bw, bh),
         App::Files { cur, scroll, selected } => file_explorer::draw(*cur, *scroll, *selected, bx, by, bw, bh),
@@ -176,4 +202,3 @@ pub(crate) fn draw_app(w: &Win) {
         App::Navigateur { client }          => crate::gui::widgets::compose_client(w, client),
     }
 }
-

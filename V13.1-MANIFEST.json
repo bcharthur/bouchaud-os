@@ -1,0 +1,21 @@
+{
+  "name": "Bouchaud OS V13.1 compile fix",
+  "date": "2026-08-29",
+  "base": "V13 Grand Saut Native Performance",
+  "compile_fix_only": true,
+  "root_cause": "E0597 caused by tail-expression lifetime of process.mm SpinLockGuard in wait_word_key",
+  "changed_files": [
+    "src/kernel/sync/wait_word/cle.rs",
+    "tools/dev/verifie-v13.py",
+    "tools/dev/verifie-v13.1.py"
+  ],
+  "behavior_change": false,
+  "architecture_preserved": [
+    "Bouchaud native WaitWord",
+    "64 local buckets",
+    "targeted WaitSource wake",
+    "transactional persistence",
+    "memory readahead",
+    "event-driven desktop/BSP"
+  ]
+}

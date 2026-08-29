@@ -73,12 +73,21 @@ fn resolve(path: &str) -> Option<usize> {
 
 /// Ecrit sur la console : ecran (VGA ou bureau) et port serie de debug.
 fn console_write(data: &[u8]) {
+    // BOUCHAUD_SERIE_FIFO_V1
+    //
+    // Ce chemin ecrivait `serial_print!("{}", octet as char)` -- un `write_fmt`
+    // complet par octet, sous le gros verrou du noyau. Un programme bavard y
+    // serialisait les quatre coeurs derriere COM1 ; `[BKL-SYSCALL]` mesurait
+    // jusqu'a 152 ms de detention pour un seul `write`.
+    //
+    // C'etait aussi FAUX : un octet de 0x80 a 0xFF devient un `char` Latin-1,
+    // que le formateur reencode en deux octets UTF-8. La sortie UTF-8 d'un
+    // programme arrivait en mojibake. Les octets passent maintenant tels quels.
+    //
     // En mode non interactif, `print!` recopie deja tout sur COM1 : ecrire ici
     // en plus afficherait chaque ligne du programme en double.
     if !crate::drivers::vga::serial_mirror() {
-        for &byte in data {
-            crate::serial_print!("{}", byte as char);
-        }
+        crate::drivers::serial::ecris_octets(data);
     }
     let text = String::from_utf8_lossy(data);
     crate::print!("{}", text);
@@ -116,7 +125,7 @@ fn console_read(max: usize) -> Vec<u8> {
 /// basculer un descripteur en non bloquant depuis un autre thread pendant
 /// qu'on attend dessus.
 fn fd_flags(fd: i32) -> u32 {
-    task::current_process()
+    crate::kernel::abi::processus_courant()
         .files.lock()
         .get(fd)
         .map(|desc| desc.flags)
@@ -376,7 +385,9 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
     if count == 0 {
         return 0;
     }
-    let process = task::current_process();
+    // V14: no TASKS/BKL lookup on the hot write path. The Process Arc is
+    // CPU-local and each descriptor/object supplies its own synchronisation.
+    let process = crate::kernel::abi::processus_courant();
     let kind = match process.files.lock().get(fd) {
         Some(desc) => desc.kind.clone(),
         None => return -errno::EBADF,
@@ -384,6 +395,7 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
 
     match kind {
         FdKind::Console => {
+            let _kernel = crate::kernel::smp_lock::enter();
             console_write(&data);
             count as i64
         }
@@ -393,6 +405,9 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
         // `/proc/self/maps` decrit un etat, il ne le recoit pas.
         FdKind::Instantane(_) => -errno::EBADF,
         FdKind::Audio => {
+            // AC97 still has legacy global driver state. Keep its safety domain
+            // local to this rare branch instead of serialising every write.
+            let _kernel = crate::kernel::smp_lock::enter();
             if !crate::drivers::ac97::pret() && !crate::drivers::ac97::init() {
                 return -errno::ENODEV;
             }
@@ -431,6 +446,9 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
             if backing::is_disk_backed(node) {
                 return -errno::EROFS;
             }
+            // RAMFS metadata/content is still a legacy global domain. User
+            // copyin has already finished, so no demand fault occurs under it.
+            let _kernel = crate::kernel::smp_lock::enter();
             let (offset, append) = {
                 let borrowed = process.files.lock();
                 let desc = borrowed.get(fd).unwrap();
@@ -504,7 +522,12 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
             8
         }
         FdKind::TimerFd(_) => -errno::EINVAL,
-        FdKind::Socket(_) => crate::kernel::abi::net::envoie_octets(fd, data, 0, 0, 0),
+        FdKind::Socket(_) => {
+            // Inet/e1000 is not yet fully object-owned. Constrain the BKL to
+            // the network mutation itself; copyin and fd lookup stay parallel.
+            let _kernel = crate::kernel::smp_lock::enter();
+            crate::kernel::abi::net::envoie_octets(fd, data, 0, 0, 0)
+        }
         FdKind::SocketPair(_, outbox) => {
             let non_bloquant = fd_flags(fd) & O_NONBLOCK != 0;
             let place = match attends_place(
@@ -2253,8 +2276,36 @@ fn attends_place<F: Fn() -> Capacite>(etat: F, non_bloquant: bool) -> Result<usi
 /// contre-pression : un producteur interrogeait `poll`, recevait un feu vert
 /// permanent, et remplissait le tampon jusqu'a la memoire. Les canaux bornes
 /// repondent maintenant selon leur place reelle.
+// BOUCHAUD_P3_POLL_SANS_BKL_V1
+//
+// POURQUOI `current_process_local` ET NON `current_process`
+// ---------------------------------------------------------
+// `task::current_process()` commence par `smp_lock::enter()` : elle REPREND le
+// gros verrou. Les quatre sondes de readiness ci-dessous l'appelaient chacune,
+// une fois par descripteur et par tour de balayage.
+//
+// Sur le vrai Ladybird cela faisait, pour un `poll(7)` : 7 descripteurs x 4
+// sondes = 28 prises par balayage, a ~2500 balayages par seconde. Tant que
+// `poll` tenait lui-meme le verrou, elles etaient reentrantes -- donc peu
+// couteuses mais invisibles. Des qu'on veut liberer `poll`, elles deviennent
+// 70 000 acquisitions par seconde depuis zero, et la liberation coute plus
+// qu'elle ne rapporte.
+//
+// `current_process_local()` rend le meme `Arc<Process>` depuis le bloc par-CPU,
+// interruptions coupees, sans toucher `TASKS` ni le gros verrou. C'est la
+// primitive qui manquait pour que le domaine de `poll` -- le verrou de la table
+// des descripteurs, plus celui de chaque objet -- suffise vraiment.
+//
+// `None` signifie « pas de processus courant » : un fil noyau. Aucune de ces
+// sondes n'a alors de descripteur a examiner.
+
+/// Le processus courant, sans prendre le gros verrou.
+fn processus_local() -> Option<alloc::sync::Arc<crate::kernel::task::Process>> {
+    task::current_process_local()
+}
+
 fn writable(fd: i32) -> bool {
-    let process = task::current_process();
+    let Some(process) = processus_local() else { return false };
     let kind = match process.files.lock().get(fd) {
         Some(desc) => desc.kind.clone(),
         None => return false,
@@ -2285,7 +2336,7 @@ fn writable(fd: i32) -> bool {
 /// l'annonce — sans quoi un producteur verrait `POLLOUT` (la place est libre,
 /// puisque personne ne consomme) et croirait pouvoir continuer.
 fn etat_pair(fd: i32) -> u32 {
-    let process = task::current_process();
+    let Some(process) = processus_local() else { return 0 };
     let kind = match process.files.lock().get(fd) {
         Some(desc) => desc.kind.clone(),
         None => return 0,
@@ -2300,7 +2351,7 @@ fn etat_pair(fd: i32) -> u32 {
 
 /// Un descripteur est-il pret en lecture ?
 fn readable(fd: i32) -> bool {
-    let process = task::current_process();
+    let Some(process) = processus_local() else { return false };
     let kind = match process.files.lock().get(fd) {
         Some(desc) => desc.kind.clone(),
         None => return false,
@@ -2322,15 +2373,39 @@ fn readable(fd: i32) -> bool {
         }
         // Interroger sans consommer : `poll` ne doit pas voler l'evenement au
         // `read` qui va suivre.
-        FdKind::InputKeyboard => input::keyboard_pending(),
-        FdKind::InputMouse => input::mouse_pending(),
+        // BOUCHAUD_P3_POLL_SANS_BKL_V1
+        //
+        // Ces trois branches sont les SEULES du balayage a toucher un etat
+        // global que rien ne protege :
+        //
+        //   * `input::keyboard_pending` draine dans un tampon `static mut` ;
+        //   * `input::mouse_pending` compare a des `static mut LAST_*` ;
+        //   * `socket_readable` pompe l'anneau e1000, dont tout l'etat est en
+        //     `static mut` sans verrou -- il ne tient QUE par le gros verrou.
+        //
+        // Elles le prennent donc elles-memes, au plus court. Le reste du
+        // balayage -- tubes, paires de sockets, eventfd, timerfd, console,
+        // fichiers, ce qu'utilise l'IPC de Ladybird -- s'en passe entierement.
+        FdKind::InputKeyboard => {
+            let _kernel = crate::kernel::smp_lock::enter();
+            input::keyboard_pending()
+        }
+        FdKind::InputMouse => {
+            let _kernel = crate::kernel::smp_lock::enter();
+            input::mouse_pending()
+        }
         FdKind::EventFd(state) => state.lock().counter > 0,
         FdKind::TimerFd(state) => {
             let mut state = state.lock();
             refresh_timerfd(&mut state);
             state.expirations > 0
         }
-        FdKind::Socket(state) => crate::kernel::abi::net::socket_readable(&state),
+        FdKind::Socket(state) => {
+            // L'anneau e1000 est en `static mut` sans verrou : le pompage n'est
+            // serialise que par le gros verrou. Voir le commentaire ci-dessus.
+            let _kernel = crate::kernel::smp_lock::enter();
+            crate::kernel::abi::net::socket_readable(&state)
+        }
         FdKind::SocketPair(inbox, _) => !inbox.lock().octets.is_empty(),
         _ => false,
     }
@@ -2342,7 +2417,7 @@ fn readable(fd: i32) -> bool {
 /// un coup de pompe court car le pilote e1000 masque encore ses IRQ RX; les
 /// pipes, socketpair, eventfd et GUI restent, eux, purement event-driven.
 fn readiness_deadline_ns(fd: i32) -> Option<u64> {
-    let process = task::current_process();
+    let process = processus_local()?;
     let kind = process.files.lock().get(fd).map(|desc| desc.kind.clone())?;
     match kind {
         FdKind::TimerFd(state) => {

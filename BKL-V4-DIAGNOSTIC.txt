@@ -1,0 +1,48 @@
+# Bouchaud OS — BKL V4 diagnostic
+
+Ce patch part du BKL fragmenté V3.1.
+
+## Ce que le log actuel prouve
+
+Au démarrage de `/bo-navigateur`, le BKL n'est plus le candidat principal au
+gel visible :
+
+- aucune ligne `SMP-STALL`;
+- `reprise_max_ns` reste autour de 17 ms au premier relevé navigateur;
+- `reveils_sans_acq=0`;
+- `parks` et `wake_ipis` restent minuscules;
+- pendant l'écran de chargement, CPU1 progresse dans des sites de faute de page
+  (`212`, `242/243`) et les compteurs `SMP-PF` montent rapidement.
+
+Le navigateur paraît donc figé, mais le noyau est en train de servir une rafale
+de demand-faults du gros exécutable / de ses bibliothèques. Ce patch ne modifie
+pas agressivement la Memory Fabric sans preuve supplémentaire.
+
+## Ajouts BKL V4
+
+- âge et bitmap des continuations `resume_after_schedule`;
+- pic de waiters resume;
+- compte des publications/migrations;
+- compte des nouveaux entrants différés par anti-barging;
+- compte de la course CAS->rollback fermée par V3;
+- compte des wakeups prioritaires et wakeups volontairement supprimés;
+- compte des parkings avec `OWNER=FREE` dus uniquement à une reprise prioritaire;
+- validation `OWNER/DEPTH` à chaque snapshot;
+- `[BKL-HEALTH]`, `[BKL-CPU]` et `[BKL-ALERTE]` automatiquement au même rythme
+  que `[BKL-COMPTES]`.
+
+Aucune réservation stale n'est effacée automatiquement : ce serait dangereux.
+Le patch préfère rendre la panne observable avant de changer la sémantique.
+
+## Ce qu'on cherchera au prochain run
+
+Si l'écran reste figé avec :
+
+    [BKL-HEALTH] owner=0 ... resume=0x0 ...
+    [BKL-CPU] cpu=1 ... site=212/242/243 ...
+
+alors le P0 suivant n'est plus le BKL : il faut optimiser le demand paging
+(fault-around / préchargement des pages chaudes du navigateur).
+
+Si au contraire `resume_oldest_ns` dépasse 50 ms ou `owner_depth_ok=0`, le patch
+émettra `[BKL-ALERTE]` et on aura une preuve BKL directement exploitable.

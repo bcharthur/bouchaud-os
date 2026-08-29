@@ -67,6 +67,8 @@
 #include <QtGui/QTransform>
 #include <QtCore/QTimer>
 #include <QtCore/QFile>
+#include <QtCore/QSet>
+#include <QtCore/QStringList>
 #include <QtCore/QtPlugin>
 
 #include <brotli/decode.h>
@@ -523,57 +525,122 @@ private:
     QImage image_;
 };
 
-/// S'assure que Qt a des polices, et les charge lui-meme sinon.
+/// La famille de repli, celle dont on sait qu'elle couvre le Latin accentue.
+static const char *const FAMILLE_REPLI = "DejaVu Sans";
+static const char *const FAMILLE_REPLI_FIXE = "DejaVu Sans Mono";
+
+/// Les familles que Qt connait, en minuscules. Reconstruit a la demande.
+///
+/// `QFontDatabase::families()` reconstruit une liste a chaque appel ; la
+/// consulter une fois par glyphe couterait plus cher que de peindre. Le cache
+/// est vide par `bo.police()`, la seule chose qui puisse en ajouter.
+static QSet<QString> g_familles;
+static bool g_familles_a_jour = false;
+
+void oublieFamilles() { g_familles_a_jour = false; }
+
+bool familleConnue(const QString &nom)
+{
+    if (nom.isEmpty())
+        return false;
+    if (!g_familles_a_jour) {
+        g_familles.clear();
+        const QStringList liste = QFontDatabase().families();
+        for (const QString &famille : liste)
+            g_familles.insert(famille.toLower());
+        g_familles_a_jour = true;
+    }
+    return g_familles.contains(nom.toLower());
+}
+
+/// S'assure que Qt a de VRAIES polices, et les charge lui-meme sinon.
+///
+/// # Le defaut que cette fonction avait
+///
+/// Elle se contentait de compter : `if (familles > 0) return;`. Or Qt rend
+/// toujours au moins une famille -- son repli interne, une bitmap ASCII sans
+/// aucune lettre accentuee. Le compte etait donc satisfait, DejaVu n'etait
+/// JAMAIS chargee, et toute page s'affichait dans cette bitmap : des lettres
+/// carrees, et un `.notdef` -- le fameux carre vide -- a la place de chaque
+/// `e` accentue. C'est ce que montraient les captures d'ecran.
+///
+/// Compter ne dit rien. Il faut demander la police par son NOM.
+///
+/// # Ce que Qt fait, et ce qu'il ne fait pas
 ///
 /// Ce Qt est construit sans fontconfig : c'est `QBasicFontDatabase` qui cherche
 /// les fichiers, en balayant `QT_QPA_FONTDIR`. Quand ce balayage ne donne rien —
 /// repertoire absent, format refuse, variable perdue en route — il n'y a **aucun
-/// message** : `QPainter::drawText` continue de reussir et ne dessine rien. Une
-/// page entiere s'affiche alors avec ses cadres, ses fonds et ses bordures, mais
-/// pas un caractere, et rien dans le journal ne le dit.
+/// message** : `QPainter::drawText` continue de reussir et peint dans le repli.
 ///
-/// On ne se contente donc pas d'esperer : on demande a Qt ce qu'il a trouve, on
-/// le journalise, et s'il n'a rien on lui donne les fichiers a la main —
 /// `addApplicationFontFromData` ne depend d'aucun balayage. Les polices sont
 /// deposees par le noyau (`src/kernel/sysroot.rs`), elles sont donc toujours la.
 void assurePolices()
 {
-    QFontDatabase base;
-    int familles = base.families().size();
-    if (familles > 0) {
-        std::printf("[bo] polices : %d familles trouvees par Qt\n", familles);
+    oublieFamilles();
+    if (!familleConnue(QString::fromLatin1(FAMILLE_REPLI))) {
+        const char *dossier = std::getenv("QT_QPA_FONTDIR");
+        if (!dossier || !*dossier)
+            dossier = "/usr/share/fonts/truetype/dejavu";
+
+        int charges = 0;
+        if (DIR *repertoire = opendir(dossier)) {
+            while (struct dirent *entree = readdir(repertoire)) {
+                const size_t longueur = std::strlen(entree->d_name);
+                if (longueur < 5)
+                    continue;
+                const char *extension = entree->d_name + longueur - 4;
+                if (std::strcmp(extension, ".ttf") && std::strcmp(extension, ".otf"))
+                    continue;
+                char chemin[512];
+                std::snprintf(chemin, sizeof chemin, "%s/%s", dossier, entree->d_name);
+                QFile fichier(QString::fromUtf8(chemin));
+                if (!fichier.open(QIODevice::ReadOnly))
+                    continue;
+                if (QFontDatabase::addApplicationFontFromData(fichier.readAll()) >= 0)
+                    ++charges;
+            }
+            closedir(repertoire);
+        }
+        oublieFamilles();
+        std::printf("[bo] polices : %s absente, %d fichier(s) charge(s) depuis %s\n",
+                    FAMILLE_REPLI, charges, dossier);
+    }
+
+    const QStringList liste = QFontDatabase().families();
+    const bool repli = familleConnue(QString::fromLatin1(FAMILLE_REPLI));
+    std::printf("[bo] polices : %d famille(s), %s=%s\n", liste.size(),
+                FAMILLE_REPLI, repli ? "presente" : "ABSENTE");
+    for (int index = 0; index < liste.size() && index < 8; ++index)
+        std::printf("[bo] police %d : %s\n", index,
+                    liste.at(index).toUtf8().constData());
+
+    if (!repli) {
+        std::fprintf(stderr, "[bo] AUCUNE POLICE LATINE : les lettres accentuees "
+                             "s'afficheront en carres\n");
         return;
     }
 
-    const char *dossier = std::getenv("QT_QPA_FONTDIR");
-    if (!dossier || !*dossier)
-        dossier = "/usr/share/fonts/truetype/dejavu";
-
-    int charges = 0;
-    if (DIR *repertoire = opendir(dossier)) {
-        while (struct dirent *entree = readdir(repertoire)) {
-            const size_t longueur = std::strlen(entree->d_name);
-            if (longueur < 5)
-                continue;
-            const char *extension = entree->d_name + longueur - 4;
-            if (std::strcmp(extension, ".ttf") && std::strcmp(extension, ".otf"))
-                continue;
-            char chemin[512];
-            std::snprintf(chemin, sizeof chemin, "%s/%s", dossier, entree->d_name);
-            QFile fichier(QString::fromUtf8(chemin));
-            if (!fichier.open(QIODevice::ReadOnly))
-                continue;
-            if (QFontDatabase::addApplicationFontFromData(fichier.readAll()) >= 0)
-                ++charges;
-        }
-        closedir(repertoire);
-    }
-
-    familles = QFontDatabase().families().size();
-    std::printf("[bo] polices : Qt n'a rien trouve dans %s, %d fichiers charges a la main, %d familles\n",
-                dossier, charges, familles);
-    if (familles == 0)
-        std::fprintf(stderr, "[bo] AUCUNE POLICE : la page s'affichera sans texte\n");
+    // La police par defaut de l'application, et les substitutions des familles
+    // generiques du web. Sans elles, une page qui demande « Google Sans » ou
+    // « -apple-system » -- c'est-a-dire presque toutes -- retombait sur le repli
+    // interne de Qt, pas sur DejaVu.
+    QApplication::setFont(QFont(QString::fromLatin1(FAMILLE_REPLI), 12));
+    static const char *const generiques[] = {
+        "sans-serif", "serif", "system-ui", "-apple-system", "BlinkMacSystemFont",
+        "Segoe UI", "Roboto", "Helvetica", "Helvetica Neue", "Arial",
+        "Google Sans", "Noto Sans", "Liberation Sans", "Ubuntu", "Cantarell",
+    };
+    for (const char *nom : generiques)
+        QFont::insertSubstitution(QString::fromLatin1(nom),
+                                  QString::fromLatin1(FAMILLE_REPLI));
+    static const char *const fixes[] = {
+        "monospace", "ui-monospace", "Courier", "Courier New", "Consolas",
+        "Menlo", "Monaco", "Roboto Mono", "Liberation Mono",
+    };
+    for (const char *nom : fixes)
+        QFont::insertSubstitution(QString::fromLatin1(nom),
+                                  QString::fromLatin1(FAMILLE_REPLI_FIXE));
 }
 
 void diagnostiqueRasterQt()
@@ -633,11 +700,18 @@ QFont fabriqueFonte(double taille, bool gras, bool italique, bool fixe,
     QFont f;
     // La famille demandee par la page passe avant tout : c'est elle que
     // `@font-face` a chargee, et sans elle un site s'affichait toujours dans la
-    // police du systeme. Qt substitue de lui-meme si elle est absente.
-    if (!famille.isEmpty())
+    // police du systeme.
+    //
+    // Mais seulement si Qt la CONNAIT. Laisser une famille inconnue a la
+    // substitution de Qt, c'est ce qui ramenait le repli interne -- une bitmap
+    // ASCII sans lettres accentuees -- au lieu de DejaVu. La resolution est
+    // donc faite ici, ou l'on sait ce que la base contient.
+    if (!famille.isEmpty() && familleConnue(famille))
         f.setFamily(famille);
     else if (fixe)
-        f.setFamily(QStringLiteral("DejaVu Sans Mono"));
+        f.setFamily(QString::fromLatin1(FAMILLE_REPLI_FIXE));
+    else
+        f.setFamily(QString::fromLatin1(FAMILLE_REPLI));
     f.setPixelSize(qMax(1, int(taille + 0.5)));
     f.setBold(gras);
     f.setItalic(italique);
@@ -1469,6 +1543,10 @@ PyObject *bo_police(PyObject *, PyObject *args)
     const int identifiant = QFontDatabase::addApplicationFontFromData(octets);
     if (identifiant < 0)
         Py_RETURN_FALSE;
+    // La base vient de changer : `familleConnue` doit la relire, sinon la
+    // police que la page vient de livrer serait jugee inconnue et remplacee par
+    // le repli — c'est-a-dire jamais utilisee.
+    oublieFamilles();
     Py_RETURN_TRUE;
 }
 

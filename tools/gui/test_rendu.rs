@@ -119,16 +119,30 @@ fn ecran() -> Rect {
     Rect::neuf(0, 0, L as u32, H as u32)
 }
 
-/// Debordement de l'ombre portee, comme `widgets::DEBORD_OMBRE`.
-const DEBORD_OMBRE: u32 = 4;
+/// Debordement de l'ombre portee, comme `disposition::DEBORD_OMBRE`.
+const DEBORD_OMBRE: u32 = 8;
 
-/// Ce qu'une fenetre ou un menu OCCUPE a l'ecran, ombre comprise.
+/// Ce qu'une FENETRE occupe a l'ecran : son cadre plus l'anneau d'ombre.
 ///
-/// C'est la meme fonction que `window_manager::empreinte_fenetre`, et c'est
-/// tout l'enjeu : les bornes du calque ET le rectangle invalide doivent en
-/// venir. Quand ils divergeaient, la bande d'ombre de l'ancienne position
-/// n'etait jamais invalidee, et le rectangle sombre restait a l'ecran.
-fn avec_ombre(cadre: Rect) -> Rect {
+/// `paint_window_shape` peint `SHADOW_EXTENT` contours AUTOUR du cadre : le
+/// debord existe des quatre cotes. C'est `disposition::empreinte_fenetre_peinte`.
+///
+/// Les bornes du calque ET le rectangle invalide doivent venir d'ici. Quand ils
+/// divergeaient, la bande d'ombre de l'ancienne position n'etait jamais
+/// invalidee, et le rectangle sombre restait a l'ecran.
+fn avec_ombre_fenetre(cadre: Rect) -> Rect {
+    Rect::neuf(
+        cadre.x - DEBORD_OMBRE as i32,
+        cadre.y - DEBORD_OMBRE as i32,
+        cadre.largeur + DEBORD_OMBRE * 2,
+        cadre.hauteur + DEBORD_OMBRE * 2,
+    )
+}
+
+/// Ce qu'un MENU occupe : `draw_menu` peint une copie du cadre translatee vers
+/// le bas et la droite, donc le debord n'existe que de ces deux cotes.
+/// C'est `disposition::empreinte_avec_ombre`.
+fn avec_ombre_menu(cadre: Rect) -> Rect {
     Rect::neuf(
         cadre.x,
         cadre.y,
@@ -140,7 +154,7 @@ fn avec_ombre(cadre: Rect) -> Rect {
 /// Le degat qu'un deplacement de fenetre doit produire : l'union des deux
 /// EMPREINTES, pas des deux cadres.
 fn degats_deplacement(avant: Rect, apres: Rect) -> Vec<Rect> {
-    vec![avec_ombre(avant), avec_ombre(apres)]
+    vec![avec_ombre_fenetre(avant), avec_ombre_fenetre(apres)]
 }
 
 /// Couleur deterministe d'un element : elle doit differer d'un element a
@@ -178,7 +192,14 @@ impl Scene {
                     .find(|(e, _)| *e == calque.element)
                     .map(|(_, r)| *r)
                     .expect("cadre plein manquant pour un calque a ombre");
-                let ombre = Rect::neuf(cadre.x + 4, cadre.y + 4, cadre.largeur, cadre.hauteur);
+                // Chaque calque a ombre peint SA forme : anneau pour une
+                // fenetre, copie decalee pour le menu. Le modele doit suivre le
+                // peintre, sinon l'oracle valide un degat trop etroit.
+                let ombre = if calque.element == Element::Menu {
+                    avec_ombre_menu(cadre)
+                } else {
+                    avec_ombre_fenetre(cadre)
+                };
                 tampon.remplit(&ombre, OMBRE, clip);
                 tampon.remplit(&cadre, c, clip);
             }
@@ -240,14 +261,14 @@ impl Constructeur {
     fn fenetre(mut self, index: usize, cadre: Rect) -> Self {
         let element = Element::Fenetre(index);
         self.calques
-            .push(Calque::avec_ombre(element, avec_ombre(cadre), cadre));
+            .push(Calque::avec_ombre(element, avec_ombre_fenetre(cadre), cadre));
         self.fenetres.push((element, cadre));
         self
     }
 
     fn menu(mut self, cadre: Rect) -> Self {
         self.calques
-            .push(Calque::avec_ombre(Element::Menu, avec_ombre(cadre), cadre));
+            .push(Calque::avec_ombre(Element::Menu, avec_ombre_menu(cadre), cadre));
         self.fenetres.push((Element::Menu, cadre));
         self
     }
@@ -383,7 +404,7 @@ fn cas_5_ouverture_du_menu() {
     let menu = Rect::neuf(2, 60, 60, 44);
     let a = bureau((120, 40));
     let b = Constructeur::neuf().menu(menu).finit((120, 40));
-    verifie("ouverture du menu", &a, &b, &[avec_ombre(menu)]);
+    verifie("ouverture du menu", &a, &b, &[avec_ombre_menu(menu)]);
 }
 
 #[test]
@@ -391,7 +412,7 @@ fn cas_6_fermeture_du_menu() {
     let menu = Rect::neuf(2, 60, 60, 44);
     let a = Constructeur::neuf().menu(menu).finit((120, 40));
     let b = bureau((120, 40));
-    verifie("fermeture du menu", &a, &b, &[avec_ombre(menu)]);
+    verifie("fermeture du menu", &a, &b, &[avec_ombre_menu(menu)]);
 }
 
 #[test]
@@ -453,45 +474,48 @@ fn cas_10_degats_sparse_eloignes() {
     );
 }
 
-/// LES COINS DE L'OMBRE PORTEE.
+/// LES COINS DE L'OMBRE DECALEE DU MENU.
 ///
-/// L'ombre est dessinee decalee de 4 pixels : l'union du cadre et de l'ombre
-/// n'est PAS leur boite englobante. Deux bandes de coin -- en bas a gauche et
-/// en haut a droite -- ne sont peintes par AUCUN des deux, et laissent donc
-/// voir le fond.
+/// L'ombre du menu est une copie du cadre translatee de `DEBORD_OMBRE` : leur
+/// union n'est PAS leur boite englobante. Deux bandes de coin -- en bas a
+/// gauche et en haut a droite -- ne sont peintes par AUCUN des deux, et
+/// laissent donc voir le fond.
 ///
 /// C'est precisement la ou une opacite declaree trop large fait des degats :
-/// `premier_calque` ecarte le fond, la fenetre ne peint pas ces pixels, et
-/// l'image precedente y reste. Sans ce cas, l'oracle laissait passer une
-/// fenetre declarant `opaque_sur == bornes_dessin` -- verifie.
+/// `premier_calque` ecarte le fond, le menu ne peint pas ces pixels, et
+/// l'image precedente y reste. Sans ce cas, l'oracle laissait passer un calque
+/// declarant `opaque_sur == bornes_dessin` -- verifie.
+///
+/// Le cas porte sur le MENU depuis que l'ombre des fenetres est un anneau :
+/// une fenetre n'a plus de coin decouvert, le menu si.
 #[test]
 fn cas_11_les_coins_de_l_ombre_portee_montrent_le_fond() {
-    let cadre = Rect::neuf(20, 20, 80, 50);
+    let menu = Rect::neuf(20, 20, 80, 50);
     // Les deux bandes que ni le cadre ni l'ombre ne couvrent.
-    let coin_bas_gauche = Rect::neuf(cadre.x, cadre.bas() as i32, 4, 4);
-    let coin_haut_droite = Rect::neuf(cadre.droite() as i32, cadre.y, 4, 4);
+    let coin_bas_gauche = Rect::neuf(menu.x, menu.bas() as i32, DEBORD_OMBRE, DEBORD_OMBRE);
+    let coin_haut_droite = Rect::neuf(menu.droite() as i32, menu.y, DEBORD_OMBRE, DEBORD_OMBRE);
 
-    // A et B different SOUS la fenetre : le curseur bouge sur le fond, donc les
+    // A et B different SOUS le menu : le curseur bouge sur le fond, donc les
     // pixels perimes seraient visibles.
-    let a = bureau_fenetre(cadre, (18, 68));
-    let b = bureau_fenetre(cadre, (150, 100));
+    let a = Constructeur::neuf().menu(menu).finit((18, 72));
+    let b = Constructeur::neuf().menu(menu).finit((150, 100));
 
     verifie(
         "coins de l'ombre portee",
         &a,
         &b,
-        &[coin_bas_gauche, coin_haut_droite, empreinte_curseur((18, 68))],
+        &[coin_bas_gauche, coin_haut_droite, empreinte_curseur((18, 72))],
     );
 }
 
 /// La contrepartie mesurable : ces bandes de coin ne doivent PAS etre
-/// considerees comme recouvertes par la fenetre. Si elles l'etaient, le fond
+/// considerees comme recouvertes par le menu. Si elles l'etaient, le fond
 /// serait ecarte et les pixels resteraient perimes.
 #[test]
-fn les_coins_de_l_ombre_ne_sont_pas_recouverts_par_la_fenetre() {
-    let cadre = Rect::neuf(20, 20, 80, 50);
-    let scene = bureau_fenetre(cadre, (150, 100));
-    let coin = Rect::neuf(cadre.x, cadre.bas() as i32, 4, 4);
+fn les_coins_de_l_ombre_ne_sont_pas_recouverts_par_le_menu() {
+    let menu = Rect::neuf(20, 20, 80, 50);
+    let scene = Constructeur::neuf().menu(menu).finit((150, 100));
+    let coin = Rect::neuf(menu.x, menu.bas() as i32, DEBORD_OMBRE, DEBORD_OMBRE);
 
     let debut = premier_calque(&scene.calques, &coin);
     assert_eq!(
@@ -499,6 +523,34 @@ fn les_coins_de_l_ombre_ne_sont_pas_recouverts_par_la_fenetre() {
         Element::Fond,
         "le coin de l'ombre laisse voir le fond : on doit repartir de lui"
     );
+}
+
+/// Le pendant pour les FENETRES : leur ombre etant un anneau, le calque doit
+/// deborder du cadre des QUATRE cotes. Un debord qui n'existerait qu'en bas et
+/// a droite -- l'ancienne forme -- laisserait la bande gauche et la bande haute
+/// hors des bornes du calque, donc jamais repeintes.
+#[test]
+fn l_anneau_d_ombre_d_une_fenetre_est_dans_les_bornes_du_calque() {
+    let cadre = Rect::neuf(30, 30, 80, 50);
+    let scene = bureau_fenetre(cadre, (150, 100));
+    let calque = scene
+        .calques
+        .iter()
+        .find(|c| c.element == Element::Fenetre(0))
+        .expect("le calque de la fenetre");
+
+    for (nom, bande) in [
+        ("gauche", Rect::neuf(cadre.x - DEBORD_OMBRE as i32, cadre.y, DEBORD_OMBRE, cadre.hauteur)),
+        ("haute", Rect::neuf(cadre.x, cadre.y - DEBORD_OMBRE as i32, cadre.largeur, DEBORD_OMBRE)),
+        ("droite", Rect::neuf(cadre.droite() as i32, cadre.y, DEBORD_OMBRE, cadre.hauteur)),
+        ("basse", Rect::neuf(cadre.x, cadre.bas() as i32, cadre.largeur, DEBORD_OMBRE)),
+    ] {
+        assert_eq!(
+            calque.bornes_dessin.intersecte(&bande),
+            bande,
+            "la bande d'ombre {nom} sort des bornes du calque"
+        );
+    }
 }
 
 /// LE DEGAT DOIT COUVRIR CE QUI EST PEINT, PAS SEULEMENT LE CADRE.
@@ -517,19 +569,22 @@ fn le_degat_d_un_deplacement_couvre_l_ombre_laissee_derriere() {
     let a = bureau_fenetre(avant, (150, 15));
     let b = bureau_fenetre(apres, (150, 15));
 
-    // La bande d'ombre que l'ancienne position laisse derriere elle.
-    let bande_basse = Rect::neuf(
-        avant.x + DEBORD_OMBRE as i32,
-        avant.bas() as i32,
-        avant.largeur,
-        DEBORD_OMBRE,
-    );
+    // Les quatre bandes d'ombre que l'ancienne position laisse derriere elle.
+    // La gauche et la haute sont celles qui manquaient : l'ombre etait modelee
+    // comme une copie decalee alors que le peintre trace un anneau.
     let degats = degats_deplacement(avant, apres);
-    assert!(
-        degats.iter().any(|d| scene::recouvre(d, &bande_basse)),
-        "le degat doit inclure la bande d'ombre de l'ancienne position, \
-         sinon personne ne la repeint"
-    );
+    for (nom, bande) in [
+        ("gauche", Rect::neuf(avant.x - DEBORD_OMBRE as i32, avant.y, DEBORD_OMBRE, avant.hauteur)),
+        ("haute", Rect::neuf(avant.x, avant.y - DEBORD_OMBRE as i32, avant.largeur, DEBORD_OMBRE)),
+        ("droite", Rect::neuf(avant.droite() as i32, avant.y, DEBORD_OMBRE, avant.hauteur)),
+        ("basse", Rect::neuf(avant.x, avant.bas() as i32, avant.largeur, DEBORD_OMBRE)),
+    ] {
+        assert!(
+            degats.iter().any(|d| scene::recouvre(d, &bande)),
+            "le degat doit inclure la bande d'ombre {nom} de l'ancienne \
+             position, sinon personne ne la repeint"
+        );
+    }
 
     verifie("deplacement, ombre comprise", &a, &b, &degats);
 }
@@ -547,7 +602,7 @@ fn le_degat_du_menu_couvre_son_ombre() {
         menu.largeur,
         DEBORD_OMBRE,
     );
-    let degat = avec_ombre(menu);
+    let degat = avec_ombre_menu(menu);
     assert!(
         scene::recouvre(&degat, &bande),
         "le degat du menu doit inclure son ombre"
@@ -665,22 +720,139 @@ fn aucune_invalidation_ne_repart_du_cadre_seul() {
     );
 }
 
-/// Le debordement de l'ombre n'a qu'UNE definition, dans `widgets`, parce que
-/// trois endroits doivent s'accorder : ce qui est peint, ce qui est declare, ce
-/// qui est invalide.
+/// Le debordement de l'ombre n'a qu'UNE definition, dans `disposition`, parce
+/// que quatre endroits doivent s'accorder : ce que `draw_window` peint (via
+/// `SHADOW_EXTENT`), ce que `draw_menu` peint, les bornes que `plan_de_scene`
+/// declare et le rectangle que le compositeur invalide.
+///
+/// Le systeme de fenetrage fusionne apportait sa propre constante et
+/// `widgets::DEBORD_OMBRE` valait encore 4 pendant que le peintre en utilisait
+/// 8 : les deux bandes d'ombre du menu n'etaient plus invalidees. Ce test
+/// verifie qu'aucune des trois n'est redeclaree en dur.
 #[test]
 fn le_debordement_de_l_ombre_n_a_qu_une_definition() {
     const WIDGETS: &str = include_str!("../../src/gui/widgets.rs");
+    const DISPOSITION: &str = include_str!("../../src/gui/disposition.rs");
+    const WINDOW: &str = include_str!("../../src/gui/window.rs");
+
     assert!(
-        WIDGETS.contains("pub(crate) const DEBORD_OMBRE: i32 = 4;"),
-        "DEBORD_OMBRE doit rester declare une seule fois dans widgets"
+        DISPOSITION.contains("pub const DEBORD_OMBRE: u32 = 8;"),
+        "DEBORD_OMBRE doit rester declare une seule fois, dans disposition"
     );
     assert!(
-        !WIDGETS.contains("fill_rect_rgb(x + 4, y + 4, ww, wh"),
-        "l'ombre de fenetre doit passer par DEBORD_OMBRE, pas par un 4 en dur"
+        WIDGETS.contains(
+            "pub(crate) const DEBORD_OMBRE: i32 = crate::gui::disposition::DEBORD_OMBRE as i32;"
+        ),
+        "widgets doit relayer disposition::DEBORD_OMBRE, pas en redeclarer un"
+    );
+    // Le peintre de fenetres part de `SHADOW_EXTENT` : rien dans le typage ne
+    // l'oblige a valoir la meme chose, d'ou l'assertion de compilation.
+    assert!(
+        WINDOW.contains("crate::gui::windowing::manager::SHADOW_EXTENT")
+            && WINDOW.contains("crate::gui::disposition::DEBORD_OMBRE"),
+        "window doit refuser de compiler si SHADOW_EXTENT s'ecarte de DEBORD_OMBRE"
+    );
+
+    for motif in [
+        "fill_rect_rgb(x + 4, y + 4, ww, wh",
+        "fill_rect_rgb(mxi + 4, myi + 4, mw, mh",
+    ] {
+        assert!(
+            !WIDGETS.contains(motif),
+            "l'ombre doit passer par DEBORD_OMBRE, pas par un 4 en dur : `{motif}`"
+        );
+    }
+}
+
+/// Les degats de fenetre ne repassent pas deux fois par l'ombre.
+///
+/// `transition::fenetre_bougee` et `transition::focus_transfere` recoivent des
+/// CADRES et ajoutent le debord elles-memes -- c'est ce qui empeche un appelant
+/// de l'oublier. Leur donner `empreinte_fenetre`, qui est deja dilatee, la
+/// dilaterait une seconde fois : seize pixels de trop tout autour, a chaque
+/// deplacement, pour rien.
+#[test]
+fn les_transitions_de_fenetre_recoivent_des_cadres() {
+    const SOURCE: &str = include_str!("../../src/gui/window_manager.rs");
+
+    for (nom, appel) in [
+        ("fenetre_bougee", "transition::fenetre_bougee("),
+        ("focus_transfere", "transition::focus_transfere("),
+    ] {
+        let mut reste = SOURCE;
+        while let Some(position) = reste.find(appel) {
+            let apres = &reste[position + appel.len()..];
+            let fin = apres.find(");").unwrap_or(apres.len());
+            let arguments = &apres[..fin];
+            assert!(
+                !arguments.contains("empreinte_fenetre"),
+                "{nom} recoit une empreinte deja dilatee : `{arguments}`. \
+                 Passer `cadre_fenetre`, la transition ajoute l'ombre."
+            );
+            reste = apres;
+        }
+    }
+
+    // La variable qui traverse la fonction de clic compte aussi.
+    assert!(
+        SOURCE.contains("let cadre_avant = cadre_fenetre(top);"),
+        "cadre_avant doit rester un cadre : il alimente fenetre_bougee"
+    );
+}
+
+/// UN LIBELLE QUI DEBORDE DE SA BOITE REND LE CULLING FAUX.
+///
+/// Le compositeur, et desormais les peintres eux-memes, ecartent le travail
+/// dont la boite ne croise pas le degat. Cette decision n'est correcte que si
+/// chaque boite MAJORE ce que son contenu peint.
+///
+/// Deux libelles ne la respectaient pas, parce qu'ils etaient tronques a un
+/// nombre de CARACTERES : la police est proportionnelle, sept caracteres font
+/// quarante pixels ou soixante selon le mot. Un bouton de barre des taches
+/// ecrivait donc chez son voisin, et le titre d'une fenetre passait sous ses
+/// boutons. Ecartez le voisin, et la moitie de libelle disparait.
+#[test]
+fn aucun_libelle_n_est_tronque_au_nombre_de_caracteres() {
+    const WIDGETS: &str = include_str!("../../src/gui/widgets.rs");
+
+    assert!(
+        WIDGETS.contains("fn tronque_a_largeur("),
+        "la troncature a la largeur reelle doit rester la seule facon de \
+         faire tenir un libelle dans sa boite"
+    );
+    for motif in ["clip(&w.title, 7)", "clip(&w.title, (ww / 8)"] {
+        assert!(
+            !WIDGETS.contains(motif),
+            "`{motif}` tronque au nombre de caracteres : le libelle deborde de \
+             sa boite, et le culling par rectangle en perd la moitie"
+        );
+    }
+}
+
+/// Le culling amont doit rester ECRIT, pas seulement souhaite.
+///
+/// La decoupe rejette les pixels ; elle ne peut rien contre le parcours qui les
+/// produit. `apps::draw_app` etait rappele pour chaque rectangle de degat
+/// touchant la fenetre -- l'explorateur y reparcourait le RAMFS, le moniteur y
+/// relisait l'horloge par ports d'E/S, sous le gros verrou du noyau.
+#[test]
+fn les_peintres_couteux_sont_precedes_d_un_test_de_decoupe() {
+    const APPS: &str = include_str!("../../src/gui/apps/mod.rs");
+    const EXPLORATEUR: &str = include_str!("../../src/gui/apps/file_explorer.rs");
+    const WIDGETS: &str = include_str!("../../src/gui/widgets.rs");
+
+    assert!(
+        APPS.contains("decoupe_touche("),
+        "draw_app doit sortir quand le degat ne touche pas la zone utile"
     );
     assert!(
-        !WIDGETS.contains("fill_rect_rgb(mxi + 4, myi + 4, mw, mh"),
-        "l'ombre de menu doit passer par DEBORD_OMBRE, pas par un 4 en dur"
+        EXPLORATEUR.matches("decoupe_touche(").count() >= 4,
+        "les trois bandes de l'explorateur et ses cellules doivent chacune \
+         etre gardees : chacune coute un parcours du RAMFS ou une allocation"
+    );
+    assert!(
+        WIDGETS.contains("decoupe_touche("),
+        "un bouton de la barre des taches ne doit pas etre peint pour un degat \
+         qui vise son voisin"
     );
 }
