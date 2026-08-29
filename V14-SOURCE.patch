@@ -1,0 +1,138 @@
+diff --git a/src/compat/linux/bkl.rs b/src/compat/linux/bkl.rs
+--- a/src/compat/linux/bkl.rs
++++ b/src/compat/linux/bkl.rs
+@@ -82,3 +82,9 @@
+     (nr::MPROTECT, "metadonnees Mm + protocole TLB, aucun etat global"),
+     (nr::BRK, "metadonnees Mm + protocole TLB, aucun etat global"),
++    // V14: munmap/madvise are now fully domain-owned: Mm serialises VMA/PTE
++    // metadata, the shared/clean caches own their locks, and TLB ACK waits run
++    // with no Mm guard. RAMFS writeback already takes a short internal BKL in
++    // `memory/shared.rs`; neither syscall needs an outer global lock.
++    (nr::MUNMAP, "V14: Mm + TLB + caches auto-synchronises; no outer BKL"),
++    (nr::MADVISE, "V14: Mm + TLB + clean-cache; no outer BKL"),
+     // --- Identite : domaine CPU-local (`task::identite_courante`) -----------
+@@ -158,3 +158,10 @@
+     (nr::POLL, "table des descripteurs + verrou par objet ; l'attente prend le verrou elle-meme"),
+     (nr::PPOLL, "table des descripteurs + verrou par objet ; l'attente prend le verrou elle-meme"),
++    // V14: copyin and iovec walking execute with no outer BKL. `ecrit_octets`
++    // uses per-object locks for pipe/eventfd/socketpair, and takes a short
++    // internal BKL only for legacy global console/RAMFS/audio/inet branches.
++    // This prevents a demand fault during write/writev copyin from owning the
++    // global lock -- the exact site=212 / ~239 ms stall seen on V13.3.1.
++    (nr::WRITE, "V14: copyin sans BKL; legacy global sinks lock internally"),
++    (nr::WRITEV, "V14: iovec/copyin sans BKL; sys_write preserves sink domains"),
+     (nr::GETPID, "domaine CPU-local, aucune lecture de TASKS"),
+diff --git a/src/compat/linux/file.rs b/src/compat/linux/file.rs
+--- a/src/compat/linux/file.rs
++++ b/src/compat/linux/file.rs
+@@ -128,5 +128,5 @@
+ fn fd_flags(fd: i32) -> u32 {
+-    task::current_process()
++    crate::kernel::abi::processus_courant()
+         .files.lock()
+         .get(fd)
+         .map(|desc| desc.flags)
+@@ -390,4 +390,6 @@
+-    let process = task::current_process();
++    // V14: no TASKS/BKL lookup on the hot write path. The Process Arc is
++    // CPU-local and each descriptor/object supplies its own synchronisation.
++    let process = crate::kernel::abi::processus_courant();
+     let kind = match process.files.lock().get(fd) {
+         Some(desc) => desc.kind.clone(),
+         None => return -errno::EBADF,
+@@ -395,6 +397,7 @@
+ 
+     match kind {
+         FdKind::Console => {
++            let _kernel = crate::kernel::smp_lock::enter();
+             console_write(&data);
+             count as i64
+         }
+@@ -410,2 +410,5 @@
+         FdKind::Audio => {
++            // AC97 still has legacy global driver state. Keep its safety domain
++            // local to this rare branch instead of serialising every write.
++            let _kernel = crate::kernel::smp_lock::enter();
+             if !crate::drivers::ac97::pret() && !crate::drivers::ac97::init() {
+@@ -446,4 +446,7 @@
+             if backing::is_disk_backed(node) {
+                 return -errno::EROFS;
+             }
++            // RAMFS metadata/content is still a legacy global domain. User
++            // copyin has already finished, so no demand fault occurs under it.
++            let _kernel = crate::kernel::smp_lock::enter();
+             let (offset, append) = {
+@@ -510,3 +510,8 @@
+         FdKind::TimerFd(_) => -errno::EINVAL,
+-        FdKind::Socket(_) => crate::kernel::abi::net::envoie_octets(fd, data, 0, 0, 0),
++        FdKind::Socket(_) => {
++            // Inet/e1000 is not yet fully object-owned. Constrain the BKL to
++            // the network mutation itself; copyin and fd lookup stay parallel.
++            let _kernel = crate::kernel::smp_lock::enter();
++            crate::kernel::abi::net::envoie_octets(fd, data, 0, 0, 0)
++        }
+         FdKind::SocketPair(_, outbox) => {
+diff --git a/src/compat/linux/mem.rs b/src/compat/linux/mem.rs
+--- a/src/compat/linux/mem.rs
++++ b/src/compat/linux/mem.rs
+@@ -430,3 +430,4 @@
+-    let process = task::current_process();
++    // V14: the VM/caches have their own domains; avoid a TASKS/BKL lookup.
++    let process = super::processus_courant();
+     let (retirement, liberes, clean_liberes, pml4) = {
+         let mut process = process.mm.lock();
+@@ -625,4 +625,6 @@
+-    let process = task::current_process();
++    // V14: madvise no longer owns the outer BKL. Mm and clean-page cache
++    // serialise their own state; the shootdown helper already tolerates depth 0.
++    let process = super::processus_courant();
+     // BOUCHAUD_P2_VM_PHASE_V1 : les quatre etapes n'ont pas le meme profil, et
+     // une tenue de plusieurs secondes vient forcement de l'une des trois qui
+     // restent sous le gros verrou. Voir `task::vm_phase_set`.
+diff --git a/src/kernel/memory/page_cache.rs b/src/kernel/memory/page_cache.rs
+--- a/src/kernel/memory/page_cache.rs
++++ b/src/kernel/memory/page_cache.rs
+@@ -35,5 +35,8 @@
+ /// Maximum number of reclaimable (zero-mapping) pages. Live mapped entries are
+ /// not evictable and may exceed this number by design.
+-const MAX_RECLAIMABLE_PAGES: usize = 2048;
++/// V14: 16,384 pages = 64 MiB of clean reusable ELF/library data. The current
++/// Ladybird profile has several GiB free, so evicting at 8 MiB only creates
++/// avoidable ATA rereads and repeated loader stalls.
++const MAX_RECLAIMABLE_PAGES: usize = 16_384;
+ 
+ #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+diff --git a/src/fs/backing.rs b/src/fs/backing.rs
+--- a/src/fs/backing.rs
++++ b/src/fs/backing.rs
+@@ -29,7 +29,9 @@
+ static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+ static READAHEAD_HITS: AtomicU64 = AtomicU64::new(0);
+-const READAHEAD_MIN: usize = 16 * 1024;
+-const READAHEAD_MAX: usize = 64 * 1024;
+-const CACHE_ENTRIES_MAX: usize = 256;
++// V14: amortise ATA/TCG overhead aggressively but keep a hard memory bound.
++const READAHEAD_MIN: usize = 64 * 1024;
++const READAHEAD_MID: usize = 128 * 1024;
++const READAHEAD_MAX: usize = 256 * 1024;
++const CACHE_ENTRIES_MAX: usize = 512;
+ 
+ struct ReadCacheEntry {
+@@ -218,5 +218,5 @@
+         let fenetre = match pattern.sequential {
+             0 | 1 => READAHEAD_MIN,
+-            2 | 3 => 32 * 1024,
++            2 | 3 => READAHEAD_MID,
+             _ => READAHEAD_MAX,
+         };
+diff --git a/tools/verifie-verrouillage.py b/tools/verifie-verrouillage.py
+--- a/tools/verifie-verrouillage.py
++++ b/tools/verifie-verrouillage.py
+@@ -76,3 +76,7 @@
+     "POLL": "A1 lot 3 -- table des descripteurs + verrou par objet",
+     "PPOLL": "A1 lot 3 -- table des descripteurs + verrou par objet",
++    "WRITE": "V14 -- copyin sans BKL + domaines locaux; sinks legacy verrouillent en interne",
++    "WRITEV": "V14 -- iovec/copyin sans BKL + chemin WRITE audite",
++    "MUNMAP": "V14 -- Mm + TLB + caches SMP-safe, aucun writeback sous verrou externe",
++    "MADVISE": "V14 -- Mm + TLB + clean-cache SMP-safe",
+     "GETPID": "A1 lot 2 -- domaine CPU-local, aucune lecture de TASKS",

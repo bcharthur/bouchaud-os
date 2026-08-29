@@ -1,0 +1,11 @@
+{
+  "version": "V15.1",
+  "name": "Runner Fix",
+  "date": "2026-08-29",
+  "files": [
+    "BOUCHAUD-V15.1-RUNNER-FIX.md",
+    "tools/perf/run-ladybird-v15.ps1",
+    "CHECKSUMS.sha256"
+  ],
+  "fix": "Use named hashtable splatting when invoking run.ps1; avoid automatic $args collision."
+}

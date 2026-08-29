@@ -1,0 +1,16 @@
+{
+  "name": "Bouchaud Native Core Game-Changer V11B",
+  "date": "2026-08-29",
+  "base_expected": "V11A + V10 + V9.1 + V8 + V7 + V6 + V5.1",
+  "goal": "Créer les primitives natives fragmentées qui permettent de sortir progressivement poll/futex/readiness du BKL sans dépendre d'un autre OS",
+  "semantic_change": [
+    "gui/interface wake now uses generic WaitSource",
+    "new per-object ReadinessSource available"
+  ],
+  "independence_rule": "compat/linux translates to kernel/native; kernel/native never depends on Linux ABI constants",
+  "modified": [
+    "src/kernel/mod.rs",
+    "src/kernel/sync/mod.rs",
+    "src/kernel/sync/reveil.rs"
+  ]
+}

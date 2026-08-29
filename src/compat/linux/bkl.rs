@@ -93,6 +93,12 @@ pub const SANS_BKL: &[(u64, &str)] = &[
     // MAP_SHARED vers le RAMFS, dont le coeur est encore sous BKL.
     (nr::MPROTECT, "metadonnees Mm + protocole TLB, aucun etat global"),
     (nr::BRK, "metadonnees Mm + protocole TLB, aucun etat global"),
+    // V14: munmap/madvise are now fully domain-owned: Mm serialises VMA/PTE
+    // metadata, the shared/clean caches own their locks, and TLB ACK waits run
+    // with no Mm guard. RAMFS writeback already takes a short internal BKL in
+    // `memory/shared.rs`; neither syscall needs an outer global lock.
+    (nr::MUNMAP, "V14: Mm + TLB + caches auto-synchronises; no outer BKL"),
+    (nr::MADVISE, "V14: Mm + TLB + clean-cache; no outer BKL"),
     // --- Identite : domaine CPU-local (`task::identite_courante`) -----------
     //
     // Lu :    `usermode::per_cpu().current` (le tid, bloc par-CPU adresse par
@@ -142,6 +148,13 @@ pub const SANS_BKL: &[(u64, &str)] = &[
     //         coeurs.
     (nr::POLL, "table des descripteurs + verrou par objet ; l'attente prend le verrou elle-meme"),
     (nr::PPOLL, "table des descripteurs + verrou par objet ; l'attente prend le verrou elle-meme"),
+    // V14: copyin and iovec walking execute with no outer BKL. `ecrit_octets`
+    // uses per-object locks for pipe/eventfd/socketpair, and takes a short
+    // internal BKL only for legacy global console/RAMFS/audio/inet branches.
+    // This prevents a demand fault during write/writev copyin from owning the
+    // global lock -- the exact site=212 / ~239 ms stall seen on V13.3.1.
+    (nr::WRITE, "V14: copyin sans BKL; legacy global sinks lock internally"),
+    (nr::WRITEV, "V14: iovec/copyin sans BKL; sys_write preserves sink domains"),
     (nr::GETPID, "domaine CPU-local, aucune lecture de TASKS"),
     (nr::GETTID, "domaine CPU-local, aucune lecture de TASKS"),
     (nr::GETUID, "domaine CPU-local + verrou metadata du Process"),

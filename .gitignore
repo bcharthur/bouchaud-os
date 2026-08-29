@@ -121,3 +121,21 @@ third_party/native-browser-bouchaud/
 # Il decrit la confiance de LA machine qui l'a produit : le versionner
 # diffuserait une decision de confiance, et la diffuserait perimee.
 tools/ladybird/certs/cacert.pem
+
+
+# ============================================================
+# Ladybird runtime / build artifacts
+# Binaires regenerables : ne doivent pas etre versionnes
+# ============================================================
+
+/ladybird-browser.img
+
+/scenario-m9/bo-navigateur
+
+/scenario-m9/usr/libexec/ladybird/BouchaudBrowserHost
+/scenario-m9/usr/libexec/ladybird/Compositor
+/scenario-m9/usr/libexec/ladybird/ImageDecoder
+/scenario-m9/usr/libexec/ladybird/RequestServer
+/scenario-m9/usr/libexec/ladybird/WebContent
+/scenario-m9/usr/libexec/ladybird/WebDriver
+/scenario-m9/usr/libexec/ladybird/WebWorker

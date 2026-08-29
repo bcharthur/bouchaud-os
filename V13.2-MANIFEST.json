@@ -1,0 +1,14 @@
+{
+  "name": "Bouchaud OS V13.2 compile fix",
+  "date": "2026-08-29",
+  "base": "V13.1 compile fix on V13 Grand Saut Native Performance",
+  "compile_fix_only": true,
+  "root_cause": "E0596: AddressSpace::translate requires mutable SpinLockGuard",
+  "changed_files": [
+    "src/kernel/sync/wait_word/cle.rs",
+    "tools/dev/verifie-v13.py",
+    "tools/dev/verifie-v13.1.py",
+    "tools/dev/verifie-v13.2.py"
+  ],
+  "behavior_change": false
+}

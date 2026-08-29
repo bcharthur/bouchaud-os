@@ -1,0 +1,17 @@
+{
+  "base": "Bouchaud BKL P0 V3 drop-in generated 2026-08-28",
+  "refactor_type": "physical fragmentation only via include!",
+  "public_api_changed": false,
+  "logic_rewritten": false,
+  "source_v3_sha256": "98f2801ddef3d7b6e491e41b810ba26b10180ad8192d50d0264066a8f7c9f52c",
+  "fragments": [
+    "etat.rs",
+    "metriques.rs",
+    "attente.rs",
+    "acquisition.rs",
+    "ordonnanceur.rs",
+    "enregistreur.rs"
+  ],
+  "version": "V3.1",
+  "fix": "remove duplicate cpu()/token() definitions from attente.rs"
+}

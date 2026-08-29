@@ -1,0 +1,56 @@
+pub fn enter() -> KernelGuard {
+    let mut active_spins = 0usize;
+    let wait_start = crate::kernel::timer::monotonic_ns();
+
+    loop {
+        // Ne masquer les IRQ que pour le snapshot + la transition locale.
+        {
+            let _irq = LocalIrqGuard::acquire();
+            // BOUCHAUD_P0_BKL_CPU_SOUS_MASQUE_V1
+            //
+            // L'index du CPU est relu a CHAQUE tour, sous interruptions
+            // masquees, et non capture une fois avant la boucle. Entre deux
+            // tours les interruptions sont actives : une IPI de preemption
+            // peut commuter, et cette pile noyau reprendre sur un autre coeur.
+            // L'index capture designerait alors un CPU etranger -- `OWNER`
+            // recevrait SON jeton pendant que `DEPTH` serait pose sur le
+            // notre. Les deux moities de l'etat du verrou parleraient de deux
+            // coeurs differents, et la liberation suivante trouverait
+            // « release sans acquisition ».
+            let cpu = cpu();
+            let mine = token(cpu);
+            let owner = OWNER.load(Ordering::Acquire);
+
+            if owner == mine {
+                let avant = DEPTH[cpu].fetch_add(1, Ordering::Relaxed);
+                probe_note_reenter();
+                enregistreur::note(
+                    enregistreur::REENTER, cpu, owner, owner,
+                    avant, avant + 1, usize::MAX, 0,
+                );
+                return KernelGuard { cpu, active: true };
+            }
+
+            if owner == FREE && essaie_prendre_nouvel_entrant(cpu, mine) {
+                // Aucun handler local ne peut voir OWNER=mine avec DEPTH=0.
+                let avant = DEPTH[cpu].load(Ordering::Relaxed);
+                DEPTH[cpu].store(1, Ordering::Relaxed);
+                probe_note_acquire(cpu, 1);
+                enregistreur::note(
+                    enregistreur::ENTER, cpu, FREE, mine, avant, 1, usize::MAX, 0,
+                );
+                solde_parkings(cpu);
+                note_attente(
+                    TENUE_SYSCALL[cpu].load(Ordering::Relaxed),
+                    crate::kernel::timer::monotonic_ns().saturating_sub(wait_start),
+                    1,
+                    cpu,
+                );
+                return KernelGuard { cpu, active: true };
+            }
+        }
+
+        // Spin court puis HLT : ne plus bruler un coeur entier sur contention.
+        wait_for_owner_change(&mut active_spins, false);
+    }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "Bouchaud OS V16 Typography / Fluidity / SMP",
+  "date": "2026-08-29",
+  "incremental_on": [
+    "V14",
+    "V15",
+    "V15.1"
+  ],
+  "features": [
+    "V16 artifact freshness gate + dedicated CI workflow",
+    "FontConfig/FreeType browser chrome",
+    "strong DejaVu CSS aliases",
+    "SVG chrome assets",
+    "nested desktop BKL detach",
+    "zero-page adaptive clustering",
+    "file cluster 16",
+    "readahead 16",
+    "V16 analyzer"
+  ]
+}

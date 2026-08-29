@@ -1,0 +1,14 @@
+warning: in the working copy of 'src/arch/x86_64/cpu.rs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/arch/x86_64/idt.rs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/drivers/input/ps2_mouse.rs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/fs/persistance.rs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/gui/client.rs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/gui/mod.rs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/kernel/debug/panic.rs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/kernel/debug/perf.rs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/kernel/mod.rs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/kernel/process/thread.rs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/kernel/sync/bkl.rs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/kernel/sync/mod.rs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/kernel/sync/reveil.rs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/kernel/sync/wait_queue.rs', LF will be replaced by CRLF the next time Git touches it

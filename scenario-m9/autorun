@@ -1,0 +1,11 @@
+uname
+df
+echo "=== Bouchaud OS : bureau, navigateur au double-clic ==="
+echo "Navigateur : double-clic sur l icone, ou menu Demarrer"
+export BOUCHAUD_M9=1
+export BOUCHAUD_M9_URL='https://www.google.com/'
+export BOUCHAUD_M11=1
+export BOUCHAUD_BROWSER_HOST=1
+export BOUCHAUD_TIME_ZONE=Europe/Paris
+export BOUCHAUD_ALLOW_POPUPS=1
+desktop

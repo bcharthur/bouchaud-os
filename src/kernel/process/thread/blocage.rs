@@ -1,0 +1,172 @@
+/// Reveille les taches d'un processus qui dorment, pour qu'elles constatent
+/// un signal en attente.
+pub fn wake_for_signal(pid: u32) {
+    for index in 0..tasks().len() {
+        if tasks()[index].state == TaskState::Blocked
+            && tasks()[index].process.pid == pid
+        {
+            tasks()[index].futex_key = 0;
+            tasks()[index].wait_queue_key = 0;
+            tasks()[index].wake_deadline_ns = 0;
+            tasks()[index].waiting_for_child = false;
+            tasks()[index].state = TaskState::Ready;
+            publish_ready(index);
+        }
+    }
+}
+
+// BOUCHAUD_FINAL_V12_DETACHED_WAIT
+//
+// Preparation is under the WaitQueue BKL guard. Finish starts only after that
+// guard has been dropped, so no WaitQueue-owned KernelGuard spans schedule().
+
+pub(crate) fn prepare_park_current_on_detached(
+    wait_queue_key: usize,
+    deadline_ns: Option<u64>,
+) {
+    debug_assert!(
+        smp_lock::held_by_current_cpu(),
+        "task: detached wait prepare sans BKL"
+    );
+
+    {
+        let task = current();
+        task.wait_queue_key = wait_queue_key;
+        task.wake_deadline_ns = deadline_ns.unwrap_or(0);
+        task.state = TaskState::Blocked;
+    }
+
+    if let Some(deadline) = deadline_ns {
+        arme_echeance(deadline);
+    }
+}
+
+/// Returns `(notified_before_deadline, number_of_schedule_loops)`.
+pub(crate) fn finish_park_current_on_detached(
+    deadline_ns: Option<u64>,
+) -> (bool, u64) {
+    #[cfg(debug_assertions)]
+    debug_assert_eq!(
+        smp_lock::profondeur_locale(),
+        0,
+        "task: detached wait doit commencer sans BKL"
+    );
+
+    let mut loops = 0u64;
+
+    loop {
+        let blocked = {
+            let _kernel = smp_lock::enter();
+            current().state == TaskState::Blocked
+        };
+
+        if !blocked {
+            break;
+        }
+
+        loops = loops.saturating_add(1);
+        schedule();
+    }
+
+    let notified = match deadline_ns {
+        Some(deadline) => crate::kernel::timer::monotonic_ns() < deadline,
+        None => true,
+    };
+
+    {
+        let _kernel = smp_lock::enter();
+        let task = current();
+        task.wait_queue_key = 0;
+        task.wake_deadline_ns = 0;
+    }
+
+    #[cfg(debug_assertions)]
+    debug_assert_eq!(
+        smp_lock::profondeur_locale(),
+        0,
+        "task: detached wait a rendu le BKL"
+    );
+
+    (notified, loops)
+}
+
+/// Endort la tache courante sur une WaitQueue. L'appelant doit avoir valide la
+/// generation sous le BKL juste avant cet appel pour fermer le lost wakeup.
+pub(crate) fn park_current_on(wait_queue_key: usize) {
+    {
+        let task = current();
+        task.wait_queue_key = wait_queue_key;
+        task.state = TaskState::Blocked;
+    }
+    let profondeur_entree = smp_lock::profondeur_locale();
+    while current().state == TaskState::Blocked {
+        schedule();
+    }
+    verifie_profondeur_rendue("park_current_on", profondeur_entree);
+    current().wait_queue_key = 0;
+}
+
+/// Endort la tache sur une WaitQueue jusqu'a notification ou echeance.
+///
+/// Le deadline partage le mecanisme de `sleep_ticks`: l'IRQ timer remet la
+/// tache Ready. La cle de queue reste posee jusqu'au reveil, de sorte qu'une
+/// notification et l'echeance puissent courir sans perdre le reveil.
+pub(crate) fn park_current_on_until(wait_queue_key: usize, deadline_ns: u64) -> bool {
+    {
+        let task = current();
+        task.wait_queue_key = wait_queue_key;
+        task.wake_deadline_ns = deadline_ns;
+        task.state = TaskState::Blocked;
+    }
+    arme_echeance(deadline_ns);
+    let profondeur_entree = smp_lock::profondeur_locale();
+    while current().state == TaskState::Blocked {
+        schedule();
+    }
+    verifie_profondeur_rendue("park_current_on_until", profondeur_entree);
+    let notified = crate::kernel::timer::monotonic_ns() < deadline_ns;
+    let task = current();
+    task.wait_queue_key = 0;
+    task.wake_deadline_ns = 0;
+    notified
+}
+
+/// Reveille au plus `limit` taches inscrites sur la queue.
+pub(crate) fn wake_wait_queue(wait_queue_key: usize, limit: usize) -> usize {
+    let _kernel = smp_lock::enter();
+    let mut woke = 0;
+    for index in 0..tasks().len() {
+        if woke == limit {
+            break;
+        }
+        if tasks()[index].state == TaskState::Blocked
+            && tasks()[index].wait_queue_key == wait_queue_key
+        {
+            tasks()[index].wait_queue_key = 0;
+            tasks()[index].state = TaskState::Ready;
+            publish_ready(index);
+            woke += 1;
+        }
+    }
+    woke
+}
+
+/// Y a-t-il un signal livrable pour la tache courante ?
+///
+/// Consulte par les attentes bloquantes (`poll`, `wait4`, futex) : une attente
+/// sans limite de temps doit pouvoir etre interrompue par un signal.
+pub fn signal_pending() -> bool {
+    match try_current() {
+        Some(task) => task.process.signals.lock().next_deliverable().is_some(),
+        None => false,
+    }
+}
+
+/// Termine de force toutes les taches (utilise apres une faute fatale).
+pub fn kill_all(code: i32) {
+    for task in tasks().iter_mut() {
+        marque_zombie(task);
+        task.process.lifecycle.lock().exit_code = code;
+    }
+}
+

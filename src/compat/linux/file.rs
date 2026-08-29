@@ -125,7 +125,7 @@ fn console_read(max: usize) -> Vec<u8> {
 /// basculer un descripteur en non bloquant depuis un autre thread pendant
 /// qu'on attend dessus.
 fn fd_flags(fd: i32) -> u32 {
-    task::current_process()
+    crate::kernel::abi::processus_courant()
         .files.lock()
         .get(fd)
         .map(|desc| desc.flags)
@@ -385,7 +385,9 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
     if count == 0 {
         return 0;
     }
-    let process = task::current_process();
+    // V14: no TASKS/BKL lookup on the hot write path. The Process Arc is
+    // CPU-local and each descriptor/object supplies its own synchronisation.
+    let process = crate::kernel::abi::processus_courant();
     let kind = match process.files.lock().get(fd) {
         Some(desc) => desc.kind.clone(),
         None => return -errno::EBADF,
@@ -393,6 +395,7 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
 
     match kind {
         FdKind::Console => {
+            let _kernel = crate::kernel::smp_lock::enter();
             console_write(&data);
             count as i64
         }
@@ -402,6 +405,9 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
         // `/proc/self/maps` decrit un etat, il ne le recoit pas.
         FdKind::Instantane(_) => -errno::EBADF,
         FdKind::Audio => {
+            // AC97 still has legacy global driver state. Keep its safety domain
+            // local to this rare branch instead of serialising every write.
+            let _kernel = crate::kernel::smp_lock::enter();
             if !crate::drivers::ac97::pret() && !crate::drivers::ac97::init() {
                 return -errno::ENODEV;
             }
@@ -440,6 +446,9 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
             if backing::is_disk_backed(node) {
                 return -errno::EROFS;
             }
+            // RAMFS metadata/content is still a legacy global domain. User
+            // copyin has already finished, so no demand fault occurs under it.
+            let _kernel = crate::kernel::smp_lock::enter();
             let (offset, append) = {
                 let borrowed = process.files.lock();
                 let desc = borrowed.get(fd).unwrap();
@@ -513,7 +522,12 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
             8
         }
         FdKind::TimerFd(_) => -errno::EINVAL,
-        FdKind::Socket(_) => crate::kernel::abi::net::envoie_octets(fd, data, 0, 0, 0),
+        FdKind::Socket(_) => {
+            // Inet/e1000 is not yet fully object-owned. Constrain the BKL to
+            // the network mutation itself; copyin and fd lookup stay parallel.
+            let _kernel = crate::kernel::smp_lock::enter();
+            crate::kernel::abi::net::envoie_octets(fd, data, 0, 0, 0)
+        }
         FdKind::SocketPair(_, outbox) => {
             let non_bloquant = fd_flags(fd) & O_NONBLOCK != 0;
             let place = match attends_place(

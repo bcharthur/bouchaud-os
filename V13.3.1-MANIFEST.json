@@ -1,0 +1,13 @@
+{
+  "name": "Bouchaud OS V13.3.1 runner fix",
+  "date": "2026-08-29",
+  "base": "V13.3 / V13.2 kernel",
+  "kernel_change": false,
+  "root_cause": "V13.3 run.ps1.patch had an invalid '@@' hunk header with no line ranges",
+  "files": [
+    "tools/run/cargo-bootimage-safe.cmd",
+    "run.ps1.patch",
+    "tools/dev/verifie-v13.3.1.ps1",
+    "BOUCHAUD-V13.3.1-RUNNER-FIX.md"
+  ]
+}

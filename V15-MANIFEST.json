@@ -1,0 +1,25 @@
+{
+  "version": "V15",
+  "base": "V14.1 FPS/Hz telemetry",
+  "date": "2026-08-29",
+  "purpose": "Browser real text, SVG-derived icons, loading indicator, FPS-only telemetry/topbar, SMP 1/4/8 runner",
+  "files": [
+    "BOUCHAUD-V15-BROWSER-UI-FPS-SMP.md",
+    "docs/perf/V15-FPS-SMP.md",
+    "src/gui/frame_clock.rs",
+    "src/gui/mod.rs",
+    "src/gui/reveil_v9.rs",
+    "src/gui/widgets_v15.rs",
+    "src/kernel/debug/journal.rs",
+    "tools/dev/verifie-v15.py",
+    "tools/ladybird/chrome/BouchaudChromeV15Assets.h",
+    "tools/ladybird/chrome/assets/back.svg",
+    "tools/ladybird/chrome/assets/forward.svg",
+    "tools/ladybird/chrome/assets/reload.svg",
+    "tools/ladybird/chrome/assets/stop.svg",
+    "tools/ladybird/chrome/modernise-v15.py",
+    "tools/ladybird/verifie-chrome.sh",
+    "tools/perf/analyse-v15.py",
+    "tools/perf/run-ladybird-v15.ps1"
+  ]
+}

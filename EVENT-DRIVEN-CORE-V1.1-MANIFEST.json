@@ -1,0 +1,19 @@
+{
+  "name": "Bouchaud Event-Driven Core V1.1",
+  "date": "2026-08-29",
+  "base": "Event-Driven Core initial patch",
+  "compile_fix_only": true,
+  "root_cause": "cpu/idle/etat.rs helper functions were accidentally removed while extracting BSP policy",
+  "restored": [
+    "idle_trace_phase",
+    "idle_next_seq",
+    "idle_enter",
+    "idle_exit",
+    "idle_ns_at",
+    "idle_ns",
+    "is_idle",
+    "idle_mask",
+    "note_pit_tick"
+  ],
+  "behavior_changed": false
+}

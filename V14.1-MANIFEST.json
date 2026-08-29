@@ -1,0 +1,25 @@
+{
+  "name": "Bouchaud OS V14.1 FPS/Hz telemetry",
+  "date": "2026-08-29",
+  "base_expected": "V14 Fluidite / Performance",
+  "drop_in": true,
+  "git_apply_required": false,
+  "metrics": {
+    "FPS": "useful compositor frames per second, 500 ms sampled",
+    "Hz": "effective compositor frame cadence, 500 ms sampled",
+    "target_hz": "derived from gui::politique::PERIODE_TRAME_MS",
+    "physical_refresh": "not available yet on QEMU BGA/no vblank"
+  },
+  "changed": [
+    "src/gui/mod.rs",
+    "src/gui/reveil_v9.rs",
+    "src/kernel/debug/journal.rs"
+  ],
+  "new": [
+    "src/gui/frame_clock.rs",
+    "tools/dev/verifie-v14.1.py",
+    "tools/perf/analyse-fps-hz.py",
+    "docs/perf/V14.1-FPS-HZ.md"
+  ],
+  "behavior_change": "telemetry only; compositor target remains 16 ms (~62.5 Hz)"
+}

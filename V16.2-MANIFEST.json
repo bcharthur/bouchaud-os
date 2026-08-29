@@ -1,0 +1,18 @@
+{
+  "version": "V16.2",
+  "date": "2026-08-29",
+  "scope": [
+    "kernel lifecycle",
+    "serial telemetry",
+    "GUI report cadence"
+  ],
+  "files": [
+    "src/kernel/process/thread/lifecycle.rs",
+    "src/drivers/serial/uart16550.rs",
+    "src/kernel/debug/journal.rs",
+    "src/gui/politique.rs",
+    "tools/dev/verifie-v16.2.py",
+    "tools/perf/analyse-v16.2.py",
+    "BOUCHAUD-V16.2-KERNEL-FLUIDITY.md"
+  ]
+}

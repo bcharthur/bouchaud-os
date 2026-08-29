@@ -1,0 +1,29 @@
+{
+  "name": "Bouchaud BKL Scheduler Fragmentation V5",
+  "date": "2026-08-28",
+  "base": "Performance Observatory V1 / BKL V4",
+  "goal": "isolate suspend/switch/resume and distinguish resume wait from post-resume BKL hold",
+  "semantics_changed": false,
+  "observability_added": true,
+  "new_files": [
+    "src/kernel/sync/bkl/ordonnanceur/etat.rs",
+    "src/kernel/sync/bkl/ordonnanceur/priorite.rs",
+    "src/kernel/sync/bkl/ordonnanceur/trace.rs",
+    "src/kernel/sync/bkl/ordonnanceur/suspend.rs",
+    "src/kernel/sync/bkl/ordonnanceur/resume.rs"
+  ],
+  "modified_files": [
+    "src/kernel/sync/bkl.rs",
+    "src/kernel/sync/bkl/attente.rs",
+    "src/kernel/sync/bkl/diagnostic.rs",
+    "src/kernel/sync/bkl/enregistreur.rs",
+    "src/kernel/sync/bkl/ordonnanceur.rs"
+  ],
+  "does_not_touch": [
+    "src/fs/persistance.rs",
+    "src/gui/client.rs",
+    "src/kernel/process/thread.rs"
+  ],
+  "version": "V5.1",
+  "fix": "E0753: convert inner rustdoc comments //! to ordinary // in include!-expanded scheduler fragments"
+}

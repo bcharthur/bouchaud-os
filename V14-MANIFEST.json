@@ -1,0 +1,52 @@
+{
+  "name": "Bouchaud OS V14 Fluidité / Performance",
+  "date": "2026-08-29",
+  "base": "V13.3.1 + V13.2 kernel",
+  "goals": [
+    "reduce page-fault count",
+    "amortize backing I/O",
+    "remove hot outer BKL domains",
+    "reduce diagnostic overhead",
+    "provide hardware-accelerated UX profile"
+  ],
+  "direct_dropin_files": [
+    "src/kernel/memory/readahead.rs",
+    "src/kernel/memory/readahead/etat.rs",
+    "src/kernel/memory/readahead/politique.rs",
+    "src/kernel/memory/readahead/observe.rs",
+    "src/kernel/memory/readahead/prefetch.rs",
+    "src/kernel/memory/readahead/diagnostic.rs",
+    "src/kernel/process/thread/faute_cluster.rs",
+    "src/kernel/process/thread/faute_memoire.rs",
+    "src/kernel/process/thread/metriques.rs",
+    "src/kernel/process/thread/diagnostic_stall.rs",
+    "tools/perf/run-ladybird-v14.ps1",
+    "tools/perf/analyse-v14.py",
+    "tools/dev/verifie-v14.py"
+  ],
+  "source_patch_files": [
+    "src/compat/linux/bkl.rs",
+    "src/compat/linux/file.rs",
+    "src/compat/linux/mem.rs",
+    "src/kernel/memory/page_cache.rs",
+    "src/fs/backing.rs",
+    "tools/verifie-verrouillage.py"
+  ],
+  "qemu_default": {
+    "ram_mib": 12288,
+    "cpu": 1,
+    "accel": "auto (WHPX -> TCG fallback)",
+    "audio": "none"
+  },
+  "tcg_smp_validation": {
+    "cpu": 4,
+    "accel": "tcg"
+  },
+  "cluster_pages": 8,
+  "clean_cache_reclaimable_pages": 16384,
+  "backing_readahead_kib": [
+    64,
+    128,
+    256
+  ]
+}

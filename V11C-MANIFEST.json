@@ -1,0 +1,38 @@
+{
+  "name": "Bouchaud OS Final V11C Deep Fragmentation",
+  "date": "2026-08-29",
+  "last_v11": true,
+  "base_expected": "V11B applied on V10/V9.1/V8/V7/V6/V5.1; V11A NOT required",
+  "base_git_short": "91023f8",
+  "absorbs_v11a": true,
+  "thread_source_blob": "a66c5b5478eedc349fe3a0126cf5ea09a00b3273",
+  "intent": "structural fragmentation + acquisition observability; no intentional scheduler/futex policy rewrite",
+  "thread_fragments": [
+    "modeles.rs",
+    "faute_memoire.rs",
+    "processus.rs",
+    "tache.rs",
+    "etat_global.rs",
+    "diagnostic_stall.rs",
+    "courant.rs",
+    "creation.rs",
+    "commutation.rs",
+    "comptabilite.rs",
+    "ordonnancement.rs",
+    "lifecycle.rs",
+    "blocage.rs",
+    "preemption.rs",
+    "metriques.rs",
+    "sommeil.rs",
+    "futex.rs",
+    "diagnostic.rs"
+  ],
+  "next_version": "V12",
+  "v12_targets": [
+    "native wait-word / futex buckets",
+    "per-object poll/readiness migration",
+    "network event-driven readiness",
+    "compat/linux as thin translation only",
+    "further BKL removal"
+  ]
+}

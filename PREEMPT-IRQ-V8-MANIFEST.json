@@ -1,0 +1,33 @@
+{
+  "name": "Bouchaud Preempt IRQ V8",
+  "date": "2026-08-29",
+  "expects": [
+    "Mouse IRQ V7",
+    "Idle/IRQ V6",
+    "BKL Scheduler V5.1"
+  ],
+  "goal": "isolate BSP hard-IRQ preemption and remove stale site=41 attribution",
+  "behavior": {
+    "cpu0_direct_irq_preempt": false,
+    "cpu0_preempt": "deferred via existing NEED_RESCHED path",
+    "cpu1_to_cpu3_direct_irq_preempt": true,
+    "site41_clear_at_idt_boundary": true
+  },
+  "modified": [
+    "src/arch/x86_64/idt.rs",
+    "src/arch/x86_64/cpu/idle/trace.rs"
+  ],
+  "new": [
+    "src/arch/x86_64/idt/preemption.rs",
+    "src/arch/x86_64/idt/timer.rs",
+    "src/arch/x86_64/idt/reschedule.rs",
+    "tools/perf/analyse-preempt-v8.py"
+  ],
+  "does_not_touch": [
+    "src/kernel/process/thread.rs",
+    "src/kernel/sync/bkl.rs",
+    "src/drivers/input/ps2_mouse.rs",
+    "src/fs/persistance.rs",
+    "src/gui/client.rs"
+  ]
+}

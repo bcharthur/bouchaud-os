@@ -28,9 +28,11 @@ static DISK_READ_OPS: AtomicU64 = AtomicU64::new(0);
 static DISK_READ_BYTES: AtomicU64 = AtomicU64::new(0);
 static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
 static READAHEAD_HITS: AtomicU64 = AtomicU64::new(0);
-const READAHEAD_MIN: usize = 16 * 1024;
-const READAHEAD_MAX: usize = 64 * 1024;
-const CACHE_ENTRIES_MAX: usize = 256;
+// V14: amortise ATA/TCG overhead aggressively but keep a hard memory bound.
+const READAHEAD_MIN: usize = 64 * 1024;
+const READAHEAD_MID: usize = 128 * 1024;
+const READAHEAD_MAX: usize = 256 * 1024;
+const CACHE_ENTRIES_MAX: usize = 512;
 
 struct ReadCacheEntry {
     node: usize,
@@ -228,7 +230,7 @@ pub fn read_at(node: usize, offset: usize, out: &mut [u8]) -> usize {
         pattern.last_end = offset.saturating_add(out.len());
         let fenetre = match pattern.sequential {
             0 | 1 => READAHEAD_MIN,
-            2 | 3 => 32 * 1024,
+            2 | 3 => READAHEAD_MID,
             _ => READAHEAD_MAX,
         };
         (fenetre, pattern.sequential >= 2)

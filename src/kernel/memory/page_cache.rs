@@ -37,7 +37,10 @@ use crate::kernel::vmm::{self, PAGE_SIZE};
 
 /// Maximum number of reclaimable (zero-mapping) pages. Live mapped entries are
 /// not evictable and may exceed this number by design.
-const MAX_RECLAIMABLE_PAGES: usize = 2048;
+/// V14: 16,384 pages = 64 MiB of clean reusable ELF/library data. The current
+/// Ladybird profile has several GiB free, so evicting at 8 MiB only creates
+/// avoidable ATA rereads and repeated loader stalls.
+const MAX_RECLAIMABLE_PAGES: usize = 16_384;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Key {

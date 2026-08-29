@@ -293,7 +293,7 @@ Write-Section "Construction du noyau"
 
 Ensure-Cargo
 
-cargo bootimage
+& "$RepoRoot\tools\run\cargo-bootimage-safe.cmd"
 
 if ($LASTEXITCODE -ne 0) {
 

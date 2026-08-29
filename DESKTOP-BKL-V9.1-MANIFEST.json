@@ -1,0 +1,16 @@
+{
+  "name": "Bouchaud Desktop BKL Scoped V9.1",
+  "date": "2026-08-29",
+  "base": "Desktop BKL Scoped V9",
+  "fix": "E0753 inner doc comments from include! expansion",
+  "behavior_changed": false,
+  "compile_fix_only": true,
+  "modified": [
+    "src/gui/framebuffer_v9.rs",
+    "src/gui/reveil_v9.rs"
+  ],
+  "mechanism": {
+    "old": "mod legacy { include!(...) }",
+    "new": "#[path = \"...\"] mod legacy;"
+  }
+}

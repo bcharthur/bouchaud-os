@@ -1,0 +1,34 @@
+{
+  "name": "Bouchaud Idle/IRQ Fragmentation V6",
+  "date": "2026-08-28",
+  "base_commit_for_cpu_rs": "91023f8854c7a6356938f59665c8c6bdde95fa8b",
+  "expects_previous_patch": "BKL Scheduler V5.1 / Performance Observatory V1",
+  "goal": "isolate BSP HLT/wakeup from BKL and browser",
+  "diagnostic_behavior_change": {
+    "cpu0_scheduler_hlt": "disabled",
+    "cpu0_lock_park_hlt": "disabled",
+    "cpu0_wait_for_interrupt_hlt": "disabled",
+    "cpu1_to_cpu3": "unchanged sti;hlt",
+    "safe_relax_pause_count": 64
+  },
+  "does_not_touch": [
+    "src/fs/persistance.rs",
+    "src/gui/client.rs",
+    "src/kernel/process/thread.rs"
+  ],
+  "modified": [
+    "src/arch/x86_64/cpu.rs",
+    "src/kernel/sync/bkl/diagnostic.rs"
+  ],
+  "new": [
+    "src/arch/x86_64/cpu/etat.rs",
+    "src/arch/x86_64/cpu/accounting.rs",
+    "src/arch/x86_64/cpu/time.rs",
+    "src/arch/x86_64/cpu/info.rs",
+    "src/arch/x86_64/cpu/idle/etat.rs",
+    "src/arch/x86_64/cpu/idle/scheduler.rs",
+    "src/arch/x86_64/cpu/idle/lock_park.rs",
+    "src/arch/x86_64/cpu/idle/trace.rs",
+    "tools/perf/analyse-idle-v6.py"
+  ]
+}

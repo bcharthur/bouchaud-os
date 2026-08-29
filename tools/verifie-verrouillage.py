@@ -71,6 +71,10 @@ AUDITS_NOMMES = {
     # trois branches a etat global qui prennent le verrou elles-memes.
     "POLL": "A1 lot 3 -- table des descripteurs + verrou par objet",
     "PPOLL": "A1 lot 3 -- table des descripteurs + verrou par objet",
+    "WRITE": "V14 -- copyin sans BKL + domaines locaux; sinks legacy verrouillent en interne",
+    "WRITEV": "V14 -- iovec/copyin sans BKL + chemin WRITE audite",
+    "MUNMAP": "V14 -- Mm + TLB + caches SMP-safe, aucun writeback sous verrou externe",
+    "MADVISE": "V14 -- Mm + TLB + clean-cache SMP-safe",
     "GETPID": "A1 lot 2 -- domaine CPU-local, aucune lecture de TASKS",
     "GETTID": "A1 lot 2 -- domaine CPU-local, aucune lecture de TASKS",
     "GETUID": "A1 lot 2 -- domaine CPU-local + verrou metadata du Process",

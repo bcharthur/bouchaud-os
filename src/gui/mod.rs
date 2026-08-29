@@ -32,15 +32,31 @@ pub mod transition;
 pub mod protocole;
 pub mod surface;
 pub mod desktop;
+pub mod desktop_bkl;
 pub mod event;
+
+// V15: FPS utile + frame-gap, atomique et sans verrou.
+pub mod frame_clock;
+
+// V9: wrappers de compatibilite. Les anciens fichiers restent intacts dans le
+// depot et sont inclus comme "legacy" par les wrappers.
+#[path = "framebuffer_v9.rs"]
 pub mod framebuffer;
+
 pub mod mouse;
 pub mod polices;
 pub mod politique;
+
+#[path = "reveil_v9.rs"]
 pub mod reveil;
+
 pub mod scene;
 pub mod silence;
+
+// V15 superpose les FPS au rendu historique sans remplacer le gros widgets.rs.
+#[path = "widgets_v15.rs"]
 pub mod widgets;
+
 pub mod window;
 pub mod window_manager;
 pub mod windowing;

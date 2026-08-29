@@ -437,7 +437,8 @@ pub fn sys_munmap(addr: u64, length: u64) -> i64 {
         None => return -errno::EINVAL,
     };
 
-    let process = task::current_process();
+    // V14: the VM/caches have their own domains; avoid a TASKS/BKL lookup.
+    let process = super::processus_courant();
     let (retirement, liberes, clean_liberes, pml4) = {
         let mut process = process.mm.lock();
         let liberes = process.retire_partages(addr, length);
@@ -651,7 +652,9 @@ pub fn sys_madvise(addr: u64, length: u64, advice: i32) -> i64 {
         None => return -errno::EINVAL,
     };
 
-    let process = task::current_process();
+    // V14: madvise no longer owns the outer BKL. Mm and clean-page cache
+    // serialise their own state; the shootdown helper already tolerates depth 0.
+    let process = super::processus_courant();
     // BOUCHAUD_P2_VM_PHASE_V1 : les quatre etapes n'ont pas le meme profil, et
     // une tenue de plusieurs secondes vient forcement de l'une des trois qui
     // restent sous le gros verrou. Voir `task::vm_phase_set`.

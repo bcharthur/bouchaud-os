@@ -1,0 +1,12 @@
+diff --git a/run.ps1 b/run.ps1
+--- a/run.ps1
++++ b/run.ps1
+@@ -292,7 +292,7 @@
+ Write-Section "Construction du noyau"
+
+ Ensure-Cargo
+
+-cargo bootimage
++& "$RepoRoot\tools\run\cargo-bootimage-safe.cmd"
+
+ if ($LASTEXITCODE -ne 0) {
