@@ -1,5 +1,5 @@
-// Rapport synthétique déclenché depuis le journal du client GUI.
-// Il remplace des dizaines de logs événementiels par une vue périodique dense.
+// Rapport synthetique declenche depuis le journal du client GUI.
+// Il remplace des dizaines de logs evenementiels par une vue periodique dense.
 
 static REPORT_PREV_FRAMES: AtomicU64 = AtomicU64::new(0);
 static REPORT_PREV_INPUTS: AtomicU64 = AtomicU64::new(0);
@@ -31,4 +31,14 @@ pub fn browser_report(pid: u32, silence_ms: u64) {
         pf_delta,
         bottleneck_name(bottleneck),
     );
+
+    // P0-NG1.1 observability. These are compact cumulative snapshots emitted at
+    // the already-existing browser report cadence, never from a hard IRQ.
+    crate::kernel::sync::lockdep::log_stats();
+    crate::kernel::scheduler::preempt::log_stats();
+    crate::kernel::scheduler::latency::log_stats();
+    crate::kernel::heap::log_ng_stats();
+    crate::kernel::frame_cache::log_stats();
+    crate::kernel::memory_pressure::log_stats();
+    crate::kernel::clean_page_cache::log_ng_stats();
 }
