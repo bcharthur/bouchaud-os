@@ -1,0 +1,197 @@
+name: Nightly Full
+
+# Campagne lourde: jamais sur chaque commit. Elle valide le noyau courant de
+# main et le dernier artefact Ladybird canonique reussi de main.
+on:
+  schedule:
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+    inputs:
+      ladybird_run_id:
+        description: 'Run Ladybird a utiliser; vide = dernier succes sur main'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: nightly-full
+  cancel-in-progress: true
+
+jobs:
+  kernel-build:
+    name: nightly / kernel once
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: nightly-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            nightly-cargo-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - run: tools/ci/build_kernel.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nightly-bootimage
+          path: target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          if-no-files-found: error
+          retention-days: 14
+
+  qemu-core:
+    name: nightly / qemu core
+    needs: kernel-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [health, primitives, mm]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependances
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 curl musl-tools build-essential file
+      - uses: actions/download-artifact@v4
+        with:
+          name: nightly-bootimage
+          path: image
+      - name: Executer ${{ matrix.suite }}
+        run: |
+          case '${{ matrix.suite }}' in
+            health) tools/ci/run_system_health.sh image/bootimage-bouchaud-os.bin ;;
+            primitives) tools/ci/run_os_primitives.sh image/bootimage-bouchaud-os.bin ;;
+            mm) tools/ci/run_mm_ng6.sh image/bootimage-bouchaud-os.bin ;;
+          esac
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nightly-${{ matrix.suite }}-logs
+          path: |
+            health.log
+            health-report.json
+            fixture.log
+            serie-primitives.log
+            mm-ng6.log
+            mmstress.readelf.txt
+            mmstress.sha256
+          if-no-files-found: ignore
+
+  dns:
+    name: nightly / dns ring3
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: nightly-dns-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            nightly-dns-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - run: tools/net/verifie-dns.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nightly-dns-log
+          path: target/verifie-dns/serie.log
+          if-no-files-found: warn
+
+  resolve-ladybird:
+    name: nightly / resolve Ladybird
+    runs-on: ubuntu-latest
+    outputs:
+      run_id: ${{ steps.resolve.outputs.run_id }}
+      found: ${{ steps.resolve.outputs.found }}
+    steps:
+      - name: Trouver artefact canonique
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED: ${{ inputs.ladybird_run_id }}
+        run: |
+          RUN="$REQUESTED"
+          if [ -z "$RUN" ]; then
+            RUN=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ladybird-native-browser.yml --branch main --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          fi
+          if [ -n "$RUN" ]; then
+            echo "run_id=$RUN" >> "$GITHUB_OUTPUT"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "Ladybird run=$RUN"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo 'Aucun artefact Ladybird main disponible.'
+          fi
+
+  ladybird-smoke:
+    name: nightly / Ladybird product
+    needs: [kernel-build, resolve-ladybird]
+    if: needs.resolve-ladybird.outputs.found == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + file
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 file
+      - uses: actions/download-artifact@v4
+        with:
+          name: nightly-bootimage
+          path: image
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+          run-id: ${{ needs.resolve-ladybird.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - run: tools/ci/run_ladybird_browser_host.sh image/bootimage-bouchaud-os.bin native-browser
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nightly-ladybird-logs
+          path: |
+            serie-browser-host.log
+            fixture-browser-host.log
+          if-no-files-found: warn
+
+  nightly-gate:
+    name: nightly-gate
+    if: always()
+    needs: [kernel-build, qemu-core, dns, resolve-ladybird, ladybird-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verdict
+        env:
+          KERNEL: ${{ needs.kernel-build.result }}
+          CORE: ${{ needs.qemu-core.result }}
+          DNS: ${{ needs.dns.result }}
+          RESOLVE: ${{ needs.resolve-ladybird.result }}
+          LADYBIRD: ${{ needs.ladybird-smoke.result }}
+        run: |
+          printf '%-12s %s\n' kernel "$KERNEL" core "$CORE" dns "$DNS" resolve "$RESOLVE" ladybird "$LADYBIRD"
+          for r in "$KERNEL" "$CORE" "$DNS" "$RESOLVE"; do
+            [ "$r" != failure ] && [ "$r" != cancelled ] || exit 1
+          done
+          # Si aucun artefact Ladybird n'existe, le smoke est skipped; sinon un echec est bloquant.
+          [ "$LADYBIRD" != failure ] && [ "$LADYBIRD" != cancelled ] || exit 1
+          echo NIGHTLY_GATE_OK

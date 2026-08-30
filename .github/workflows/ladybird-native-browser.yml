@@ -1,37 +1,39 @@
 name: ladybird-native-browser
 
+# Producteur CANONIQUE de l'artefact consomme par run.ps1.
+# Un commit de branche avec PR ne declenche que pull_request, jamais un doublon push.
 on:
-  workflow_dispatch:
-  push:
-    branches:
-      - "feat/ladybird-platform-smp4"
-    paths:
-      - "tools/ladybird/**"
-      - "third_party/UPSTREAM.md"
-      - ".github/workflows/ladybird-native-browser.yml"
   pull_request:
     paths:
-      - "tools/ladybird/**"
-      - "third_party/UPSTREAM.md"
-      - ".github/workflows/ladybird-native-browser.yml"
+      - 'tools/ladybird/**'
+      - 'third_party/UPSTREAM.md'
+      - '.github/workflows/ladybird-native-browser.yml'
+      - 'tools/ci/run_ladybird_browser_host.sh'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/ladybird/**'
+      - 'third_party/UPSTREAM.md'
+      - '.github/workflows/ladybird-native-browser.yml'
+      - 'tools/ci/run_ladybird_browser_host.sh'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ladybird-native-browser-${{ github.ref }}
+  group: ladybird-native-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
-    name: Ladybird-fast-build
+    name: ladybird / build once
     runs-on: ubuntu-latest
     timeout-minutes: 180
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Outils de construction
+      - name: Toolchain C/C++
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -39,7 +41,6 @@ jobs:
             clang lld ccache cmake ninja-build git curl wget gnupg lsb-release zip unzip tar xz-utils file \
             autoconf autoconf-archive automake libtool libltdl-dev gettext m4 \
             nasm bison flex libssl-dev libedit-dev linux-libc-dev mesa-common-dev ca-certificates
-
           LLVM_VERSION=20
           if ! command -v "clang-${LLVM_VERSION}" >/dev/null 2>&1; then
             CODENAME="$(lsb_release -sc)"
@@ -48,25 +49,22 @@ jobs:
             echo "deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg.gpg] https://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-${LLVM_VERSION} main" \
               | sudo tee /etc/apt/sources.list.d/llvm-${LLVM_VERSION}.list
             sudo apt-get update
-            sudo apt-get install -y --no-install-recommends \
-              "clang-${LLVM_VERSION}" "lld-${LLVM_VERSION}" "llvm-${LLVM_VERSION}"
+            sudo apt-get install -y --no-install-recommends "clang-${LLVM_VERSION}" "lld-${LLVM_VERSION}" "llvm-${LLVM_VERSION}"
           fi
-
           clang-20 --version
           ld.lld-20 --version
           ccache --version
 
-      - name: Cache cargo Ladybird
+      - name: Cache Cargo Ladybird
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ladybird-browser-cargo-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md', 'tools/ladybird/native-browser-final.sh') }}
-          restore-keys: |
-            ladybird-browser-cargo-${{ runner.os }}-
+          key: ladybird-cargo-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md', 'tools/ladybird/native-browser-final.sh') }}
+          restore-keys: ladybird-cargo-${{ runner.os }}-
 
-      - name: Cache arbre Ladybird
+      - name: Cache source Ladybird
         uses: actions/cache@v4
         with:
           path: third_party/ladybird
@@ -81,36 +79,38 @@ jobs:
             third_party/vcpkg-browser-manifest
             third_party/vcpkg-browser-installed
             ~/.cache/vcpkg
-          key: ladybird-browser-vcpkg-v2-${{ runner.os }}-${{ hashFiles('tools/ladybird/browser-vcpkg.sh', 'third_party/UPSTREAM.md') }}
+          key: ladybird-vcpkg-v3-${{ runner.os }}-${{ hashFiles('tools/ladybird/browser-vcpkg.sh', 'third_party/UPSTREAM.md', 'tools/ladybird/patches/**') }}
           restore-keys: |
+            ladybird-vcpkg-v3-${{ runner.os }}-
             ladybird-browser-vcpkg-v2-${{ runner.os }}-
-            ladybird-browser-vcpkg-${{ runner.os }}-
-            ladybird-gfx-vcpkg-${{ runner.os }}-
 
       - name: Dependances navigateur
         run: tools/ladybird/browser-vcpkg.sh
 
-      - name: Cache build Ladybird
-        uses: actions/cache@v4
-        with:
-          path: |
-            third_party/build-ladybird-browser-bouchaud
-            third_party/native-browser-bouchaud
-          key: ladybird-browser-build-v3-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md') }}-${{ github.sha }}
-          restore-keys: |
-            ladybird-browser-build-v3-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md') }}-
-
-      - name: Cache ccache Ladybird
+      # ccache est le cache incremental principal. Contrairement au build tree
+      # complet, il reste compact et reutilisable quand quelques TU changent.
+      - name: Cache ccache
         uses: actions/cache@v4
         with:
           path: ~/.cache/ccache
-          key: ladybird-browser-ccache-v1-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md') }}-${{ github.sha }}
+          key: ladybird-ccache-v2-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md') }}-${{ github.sha }}
           restore-keys: |
-            ladybird-browser-ccache-v1-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md') }}-
-            ladybird-browser-ccache-v1-${{ runner.os }}-
+            ladybird-ccache-v2-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md') }}-
+            ladybird-ccache-v2-${{ runner.os }}-
 
-      - name: Construire Ladybird une seule fois
+      - name: Statistiques ccache avant
+        run: ccache -s || true
+
+      - name: Construire Ladybird
         run: tools/ladybird/native-browser-final.sh --cible
+
+      - name: Marquer la capacite UI V16
+        run: |
+          printf 'Bouchaud V16 chrome=fontconfig+svg loading=1\n' > third_party/native-browser-bouchaud/V16_UI_CAPABLE
+
+      - name: Statistiques ccache apres
+        if: always()
+        run: ccache -s || true
 
       - name: Verifier les artefacts runtime
         run: |
@@ -124,7 +124,9 @@ jobs:
           test -x "$OUT/webcontent-bootstrap"
           test -f "$OUT/M9_CAPABLE"
           test -d "$OUT/resources"
-          ls -lh "$OUT"
+          # V16 n'est plus un workflow: c'est une capacite de l'artefact canonique.
+          if [ -f "$OUT/V16_UI_CAPABLE" ]; then cat "$OUT/V16_UI_CAPABLE"; fi
+          du -sh "$OUT"
 
       - name: Publier Ladybird natif
         uses: actions/upload-artifact@v4
@@ -133,3 +135,44 @@ jobs:
           path: third_party/native-browser-bouchaud/
           if-no-files-found: error
           retention-days: 14
+
+  browser-host-smoke:
+    name: ladybird / browser-host smoke
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + outils
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 file
+      - name: Cache Cargo noyau
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Smoke BrowserHost sur Bouchaud OS
+        run: tools/ci/run_ladybird_browser_host.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
+      - name: Journaux
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-browser-host-smoke-logs
+          path: |
+            serie-browser-host.log
+            fixture-browser-host.log
+          if-no-files-found: warn
