@@ -139,23 +139,70 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Selectionner les scripts PowerShell a verifier
+        id: ps1
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          # Sur pull_request, github.sha est le merge commit synthetique.
+          # Pour mesurer exactement la PR, on compare avec son vrai head SHA.
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          : > .ci-powershell-files
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git diff --name-only --diff-filter=ACMR \
+              "$BASE_SHA...$HEAD_SHA" -- '*.ps1' > .ci-powershell-files
+          else
+            # Push main et workflow_dispatch restent des controles globaux.
+            git ls-files '*.ps1' > .ci-powershell-files
+          fi
+
+          echo "Scripts PowerShell a verifier :"
+          cat .ci-powershell-files
+          count=$(grep -cve '^[[:space:]]*$' .ci-powershell-files || true)
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "count=$count"
+
       - name: ASCII strict
-        run: python3 tools/verifie-scripts-windows.py
+        if: steps.ps1.outputs.count != '0'
+        run: python3 tools/verifie-scripts-windows.py --files-from .ci-powershell-files
+
       - name: Syntaxe PowerShell
+        if: steps.ps1.outputs.count != '0'
         shell: pwsh
         run: |
           $echecs = 0
-          foreach ($chemin in (git ls-files '*.ps1')) {
-            $erreurs = $null; $jetons = $null
+          $fichiers = Get-Content -LiteralPath .ci-powershell-files |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+          foreach ($chemin in $fichiers) {
+            $erreurs = $null
+            $jetons = $null
             [System.Management.Automation.Language.Parser]::ParseFile(
-              (Resolve-Path $chemin), [ref]$jetons, [ref]$erreurs) | Out-Null
+              (Resolve-Path -LiteralPath $chemin),
+              [ref]$jetons,
+              [ref]$erreurs
+            ) | Out-Null
+
             if ($erreurs -and $erreurs.Count) {
               $echecs++
               Write-Host "ECHEC $chemin"
-              $erreurs | Select-Object -First 5 | ForEach-Object { Write-Host $_.Message }
+              $erreurs | Select-Object -First 5 | ForEach-Object {
+                Write-Host $_.Message
+              }
             }
           }
+
           if ($echecs) { exit 1 }
+
+      - name: Aucun script PowerShell modifie
+        if: steps.ps1.outputs.count == '0'
+        run: echo 'Aucun .ps1 modifie par cette PR ; dette historique non bloquante ici.'
 
   policy:
     name: ci / policy

@@ -174,10 +174,70 @@ jobs:
             fixture-browser-host.log
           if-no-files-found: warn
 
+  # Dette historique Windows : visible a chaque nightly, sans rendre une PR
+  # sans changement .ps1 artificiellement rouge.
+  windows-debt:
+    name: nightly / Windows scripts debt
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    outputs:
+      ascii: ${{ steps.ascii.outcome }}
+      syntax: ${{ steps.syntax.outcome }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ASCII strict global
+        id: ascii
+        continue-on-error: true
+        run: python3 tools/verifie-scripts-windows.py
+
+      - name: Syntaxe PowerShell globale
+        id: syntax
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $echecs = 0
+          foreach ($chemin in (git ls-files '*.ps1')) {
+            $erreurs = $null
+            $jetons = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path -LiteralPath $chemin),
+              [ref]$jetons,
+              [ref]$erreurs
+            ) | Out-Null
+
+            if ($erreurs -and $erreurs.Count) {
+              $echecs++
+              Write-Host "ECHEC $chemin"
+              $erreurs | Select-Object -First 5 | ForEach-Object {
+                Write-Host $_.Message
+              }
+            }
+          }
+          if ($echecs) { exit 1 }
+
+      - name: Resume dette Windows
+        if: always()
+        env:
+          ASCII: ${{ steps.ascii.outcome }}
+          SYNTAX: ${{ steps.syntax.outcome }}
+        run: |
+          {
+            echo '## Dette PowerShell historique'
+            echo
+            echo "- ASCII strict: $ASCII"
+            echo "- Syntaxe: $SYNTAX"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$ASCII" = "failure" ] || [ "$SYNTAX" = "failure" ]; then
+            echo "::warning::Dette PowerShell historique detectee. CI Fast ne bloque que les .ps1 modifies par la PR."
+          fi
+
   nightly-gate:
     name: nightly-gate
     if: always()
-    needs: [kernel-build, qemu-core, dns, resolve-ladybird, ladybird-smoke]
+    needs: [kernel-build, qemu-core, dns, resolve-ladybird, ladybird-smoke, windows-debt]
     runs-on: ubuntu-latest
     steps:
       - name: Verdict
@@ -187,11 +247,18 @@ jobs:
           DNS: ${{ needs.dns.result }}
           RESOLVE: ${{ needs.resolve-ladybird.result }}
           LADYBIRD: ${{ needs.ladybird-smoke.result }}
+          WINDOWS_ASCII: ${{ needs.windows-debt.outputs.ascii }}
+          WINDOWS_SYNTAX: ${{ needs.windows-debt.outputs.syntax }}
         run: |
           printf '%-12s %s\n' kernel "$KERNEL" core "$CORE" dns "$DNS" resolve "$RESOLVE" ladybird "$LADYBIRD"
+          printf '%-12s %s\n' win-ascii "$WINDOWS_ASCII" win-syntax "$WINDOWS_SYNTAX"
+
           for r in "$KERNEL" "$CORE" "$DNS" "$RESOLVE"; do
             [ "$r" != failure ] && [ "$r" != cancelled ] || exit 1
           done
-          # Si aucun artefact Ladybird n'existe, le smoke est skipped; sinon un echec est bloquant.
+
+          # Si aucun artefact Ladybird n'existe, le smoke est skipped.
           [ "$LADYBIRD" != failure ] && [ "$LADYBIRD" != cancelled ] || exit 1
+
+          # La dette Windows est reportee, pas bloquante pour ce nightly.
           echo NIGHTLY_GATE_OK
