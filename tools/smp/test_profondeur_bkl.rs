@@ -157,6 +157,26 @@ fn reentrance_profondeur_nulle_diagnostique_la_valeur_avant_mutation() {
     assert_eq!(v.profondeur(0), 0, "le diagnostic ne doit pas reparer la faute");
 }
 
+#[test]
+fn schedule_detached_profondeur_zero_revient_a_zero() {
+    let mut v = Verrou::neuf(4);
+    let avant = v.profondeur(0);
+    assert_eq!(avant, 0);
+
+    // `schedule`: garde externe, garde interne de `switch_to`, suspension de
+    // toute la profondeur, puis restauration et Drop des deux gardes.
+    v.entre(0);
+    v.entre(0);
+    let sauvee = v.suspend(0);
+    assert_eq!(sauvee, 2);
+    v.reprend(2, sauvee); // la continuation peut avoir migre
+    assert_eq!(v.relache(2), Relache::Ok); // garde switch_to
+    assert_eq!(v.relache(2), Relache::Ok); // garde schedule
+
+    assert_eq!(v.profondeur(2), avant);
+    assert_eq!(v.owner, LIBRE);
+}
+
 /// La post-condition du noyau : `verifie_profondeur_rendue`.
 ///
 /// Rend le nom du site fautif, ou `None` si le contrat est tenu.
