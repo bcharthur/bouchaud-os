@@ -56,12 +56,24 @@ impl Verrou {
 
     fn entre(&mut self, cpu: usize) {
         if self.owner == Self::token(cpu) {
-            self.depth[cpu] += 1;
+            self.reentre_verifie(cpu)
+                .expect("modele : reentrance avec profondeur nulle");
             return;
         }
         assert_eq!(self.owner, LIBRE, "modele : entree sur un verrou tenu ailleurs");
         self.owner = Self::token(cpu);
         self.depth[cpu] = 1;
+    }
+
+    /// Modele exact du chemin reentrant du noyau : lire et verifier la valeur
+    /// PRECEDENTE, puis seulement effectuer l'unique increment.
+    fn reentre_verifie(&mut self, cpu: usize) -> Result<usize, usize> {
+        let avant = self.depth[cpu];
+        if avant == 0 {
+            return Err(avant);
+        }
+        self.depth[cpu] = avant + 1;
+        Ok(avant)
     }
 
     fn relache(&mut self, cpu: usize) -> Relache {
@@ -103,6 +115,46 @@ impl Verrou {
     fn profondeur(&self, cpu: usize) -> usize {
         self.depth[cpu]
     }
+}
+
+// ------------------------------------------------------------ reentrance BKL
+
+#[test]
+fn une_reentrance_incremente_exactement_une_fois() {
+    let mut v = Verrou::neuf(4);
+    v.entre(0);
+    assert_eq!(v.profondeur(0), 1);
+
+    v.entre(0);
+    // Cette assertion vaut 3 avec le schema fautif fetch_add + load + store.
+    assert_eq!(v.profondeur(0), 2);
+}
+
+#[test]
+fn prises_reentrantes_et_relaches_sont_exactement_equilibrees() {
+    let mut v = Verrou::neuf(4);
+    v.entre(0);
+    v.entre(0);
+    v.entre(0);
+    assert_eq!(v.profondeur(0), 3);
+
+    assert_eq!(v.relache(0), Relache::Ok);
+    assert_eq!(v.profondeur(0), 2);
+    assert_eq!(v.relache(0), Relache::Ok);
+    assert_eq!(v.profondeur(0), 1);
+    assert_eq!(v.relache(0), Relache::Ok);
+    assert_eq!(v.profondeur(0), 0);
+    assert_eq!(v.owner, LIBRE);
+}
+
+#[test]
+fn reentrance_profondeur_nulle_diagnostique_la_valeur_avant_mutation() {
+    let mut v = Verrou::neuf(4);
+    // Etat impossible observe par l'enregistreur : OWNER local, DEPTH nul.
+    v.owner = Verrou::token(0);
+
+    assert_eq!(v.reentre_verifie(0), Err(0));
+    assert_eq!(v.profondeur(0), 0, "le diagnostic ne doit pas reparer la faute");
 }
 
 /// La post-condition du noyau : `verifie_profondeur_rendue`.

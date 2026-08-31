@@ -22,7 +22,16 @@ pub fn enter() -> KernelGuard {
             let owner = OWNER.load(Ordering::Acquire);
 
             if owner == mine {
-                let avant = DEPTH[cpu].fetch_add(1, Ordering::Relaxed);
+                let avant = DEPTH[cpu].load(Ordering::Relaxed);
+                if avant == 0 {
+                    crate::serial_println_brut!(
+                        "[BKL-FR] VIOLATION reenter cpu={} owner={} depth=0", cpu, owner,
+                    );
+                    vide_enregistreur();
+                }
+                debug_assert!(avant > 0,
+                    "smp_lock: OWNER local sans profondeur a la reentrance");
+                DEPTH[cpu].store(avant + 1, Ordering::Relaxed);
                 probe_note_reenter();
                 enregistreur::note(
                     enregistreur::REENTER, cpu, owner, owner,

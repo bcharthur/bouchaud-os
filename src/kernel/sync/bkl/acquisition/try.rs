@@ -12,7 +12,16 @@ pub fn try_enter() -> Option<KernelGuard> {
     let owner = OWNER.load(Ordering::Acquire);
     if owner == mine {
         try_diag_step(cpu, 630, DEPTH[cpu].load(Ordering::Relaxed) as u64);
-        let avant = DEPTH[cpu].fetch_add(1, Ordering::Relaxed);
+        let avant = DEPTH[cpu].load(Ordering::Relaxed);
+        if avant == 0 {
+            crate::serial_println_brut!(
+                "[BKL-FR] VIOLATION try_reenter cpu={} owner={} depth=0", cpu, owner,
+            );
+            vide_enregistreur();
+        }
+        debug_assert!(avant > 0,
+            "smp_lock: OWNER local sans profondeur dans try_enter");
+        DEPTH[cpu].store(avant + 1, Ordering::Relaxed);
         probe_note_reenter();
         try_diag_step(cpu, 631, (avant + 1) as u64);
         enregistreur::note(

@@ -123,4 +123,3 @@ fn essaie_prendre_nouvel_entrant(cpu: usize, mine: usize) -> bool {
     try_diag_step(cpu, 617, HANDOFF_TARGET.load(Ordering::Relaxed) as u64);
     true
 }
-
