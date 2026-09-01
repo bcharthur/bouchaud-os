@@ -146,19 +146,37 @@ unsafe extern "C" fn syscall_entry() {
 unsafe fn execute_syscall(frame: *mut TrapFrame, native: bool) {
     crate::kernel::task::account_kernel_enter();
 
-    if native {
-        crate::kernel::native::abi::handle(&mut *frame);
+    // BOUCHAUD_SECURITY_V1
+    // Security is a mandatory boundary in front of BOTH ABIs. It can reject or
+    // fully handle an operation, but it never bypasses the common ring3 tail.
+    let (number, args) = (*frame).syscall_args();
+    let decision = crate::kernel::security::syscall::gate(number, args, native);
 
-        // The Linux dispatcher normally owns this common ring3 tail. Native
-        // syscalls bypass that dispatcher, so perform the two architecture-wide
-        // actions here without making the native object model depend on Linux.
-        if crate::kernel::task::take_need_resched() {
-            crate::kernel::task::yield_now();
+    match decision {
+        crate::kernel::security::syscall::GateDecision::Allow => {
+            if native {
+                crate::kernel::native::abi::handle(&mut *frame);
+
+                // The Linux dispatcher normally owns this common ring3 tail.
+                if crate::kernel::task::take_need_resched() {
+                    crate::kernel::task::yield_now();
+                }
+                crate::kernel::abi::proc::deliver_pending(&mut *frame);
+            } else {
+                crate::kernel::abi::handle(&mut *frame);
+            }
         }
-        crate::kernel::abi::proc::deliver_pending(&mut *frame);
-    } else {
-        crate::kernel::abi::handle(&mut *frame);
+        crate::kernel::security::syscall::GateDecision::Return(result) => {
+            (*frame).rax = result as u64;
+            if crate::kernel::task::take_need_resched() {
+                crate::kernel::task::yield_now();
+            }
+            crate::kernel::abi::proc::deliver_pending(&mut *frame);
+        }
     }
+
+    let result = (*frame).rax as i64;
+    crate::kernel::security::syscall::after_syscall(number, result, native);
 
     crate::kernel::task::account_kernel_exit();
     crate::kernel::task::retire_current_if_zombie();

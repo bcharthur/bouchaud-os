@@ -249,7 +249,7 @@ impl FileSystem {
 
         // /tmp est ouvert a tous (comme sous Unix).
         if tmp != 0 {
-            self.nodes[tmp].mode = 0o777;
+            self.nodes[tmp].mode = 0o1777;
         }
     }
 

@@ -134,7 +134,10 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
     // Tout doit etre lu **avant** de detruire l'ancien espace d'adressage :
     // le chemin, les arguments et l'environnement y vivent encore.
     let path = match crate::kernel::abi::resolve_user_path(path_addr) {
-        Some(path) => path,
+        Some(path) => crate::kernel::security::filesystem::canonical_at(
+            crate::kernel::security::filesystem::AT_FDCWD,
+            path.as_str(),
+        ).unwrap_or(path),
         None => return -errno::EFAULT,
     };
     let argv = match read_string_array(argv_addr) {

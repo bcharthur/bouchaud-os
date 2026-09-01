@@ -436,10 +436,10 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         GETDENTS64 => file::sys_getdents64(args[0] as i32, args[1], args[2] as usize),
         GETCWD => file::sys_getcwd(args[0], args[1] as usize),
         CHDIR => file::sys_chdir(args[0]),
-        MKDIR => file::sys_mkdir(args[0]),
-        MKDIRAT => file::sys_mkdir(args[1]),
+        MKDIR => file::sys_mkdir(args[0], args[1] as u32),
+        MKDIRAT => file::sys_mkdirat(args[0] as i32, args[1], args[2] as u32),
         UNLINK => file::sys_unlink(args[0]),
-        UNLINKAT => file::sys_unlink(args[1]),
+        UNLINKAT => file::sys_unlinkat(args[0] as i32, args[1], args[2] as u32),
         RENAME => file::sys_rename(args[0], args[1]),
         // Le RAMFS actuel fusionne entree de repertoire et inode : il ne peut
         // pas representer deux noms pointant vers le meme inode sans refonte

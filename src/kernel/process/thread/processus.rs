@@ -219,6 +219,7 @@ impl Drop for Process {
     /// mort brutale — un `SIGKILL`, une faute de page fatale, un `exit` sans
     /// menage. Sans lui, tuer un renderer suffirait a faire fuir ses surfaces.
     fn drop(&mut self) {
+        crate::kernel::security::policy::forget(self.pid);
         let (pml4, clean, shared) = {
             let mut mm = self.mm.lock();
             let pml4 = mm.space.pml4();

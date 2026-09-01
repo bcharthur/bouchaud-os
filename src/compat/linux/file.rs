@@ -69,6 +69,86 @@ fn resolve(path: &str) -> Option<usize> {
     ramfs::fs().resolve(path, cwd)
 }
 
+/// Construit la cible absolue d'un appel *at(2) a partir de l'identite du
+/// repertoire capturee sous le verrou de la table de fichiers.
+///
+/// SECURITY_DIRFD_BACKEND_V21 : un fichier ordinaire n'est jamais une base de
+/// chemin.  Une fois le noeud copie, fermer/reutiliser le fd dans un autre thread
+/// ne change plus la cible de CET appel.
+fn absolute_at(dirfd: i32, path: &str) -> Result<String, i64> {
+    if path.starts_with('/') {
+        return Ok(crate::kernel::security::path::normalize_absolute(path));
+    }
+
+    let base_node = if dirfd == AT_FDCWD {
+        task::current_process().metadata.lock().cwd
+    } else {
+        let process = task::current_process();
+        let files = process.files.lock();
+        let Some(desc) = files.get(dirfd) else {
+            return Err(-errno::EBADF);
+        };
+        match desc.kind {
+            FdKind::Dir(node) => node,
+            _ => return Err(-errno::ENOTDIR),
+        }
+    };
+
+    let base = ramfs::path_string(&ramfs::fs(), base_node);
+    Ok(crate::kernel::security::path::canonical_from_base(
+        base.as_str(),
+        path,
+    ))
+}
+
+/// Recheck the RESOLVED backend target, not only the raw syscall arguments.
+/// This closes the dirfd close/reuse window between the architecture gate and
+/// the filesystem backend: if another thread changes the fd, the second check
+/// sees the path this syscall will actually use.
+fn security_recheck_open(path: &str, flags: u32) -> Result<(), i64> {
+    let security = crate::kernel::security::policy::current();
+    match crate::kernel::security::filesystem::open_allowed(
+        security, AT_FDCWD, path, flags,
+    ) {
+        Ok(()) => Ok(()),
+        Err(reason) => {
+            crate::kernel::security::audit::deny_path(
+                security.pid,
+                security.credentials.euid,
+                "open-path-backend",
+                crate::kernel::security::filesystem::detail(reason),
+                path,
+                crate::kernel::security::filesystem::reason(reason),
+            );
+            Err(-errno::EACCES)
+        }
+    }
+}
+
+fn security_recheck_mutation(
+    path: &str,
+    kind: crate::kernel::security::filesystem::Mutation,
+    operation: &'static str,
+) -> Result<(), i64> {
+    let security = crate::kernel::security::policy::current();
+    match crate::kernel::security::filesystem::mutation_allowed(
+        security, AT_FDCWD, path, kind,
+    ) {
+        Ok(()) => Ok(()),
+        Err(reason) => {
+            crate::kernel::security::audit::deny_path(
+                security.pid,
+                security.credentials.euid,
+                operation,
+                crate::kernel::security::filesystem::detail(reason),
+                path,
+                crate::kernel::security::filesystem::reason(reason),
+            );
+            Err(-errno::EACCES)
+        }
+    }
+}
+
 // --- Lecture / ecriture ------------------------------------------------------
 
 /// Ecrit sur la console : ecran (VGA ou bureau) et port serie de debug.
@@ -780,6 +860,14 @@ pub fn sys_memfd_create(nom_addr: u64, _flags: u32) -> i64 {
         Ok(idx) => idx,
         Err(_) => return -errno::ENFILE,
     };
+    {
+        // SECURITY_OWNER_MEMFD
+        let (owner_uid, owner_gid) =
+            crate::kernel::security::policy::filesystem_owner();
+        let mut fs = crate::fs::ramfs::fs();
+        fs.nodes[idx].uid = owner_uid;
+        fs.nodes[idx].gid = owner_gid;
+    }
     let process = task::current_process();
     let mut borrowed = process.files.lock();
     // `MFD_CLOEXEC` vaut 1 : c'est le seul drapeau que les appelants posent en
@@ -813,34 +901,17 @@ fn errno_creation(raison: &'static str) -> i64 {
 }
 
 pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
-    let path = match crate::kernel::abi::resolve_user_path(path_addr) {
+    let raw_path = match crate::kernel::abi::resolve_user_path(path_addr) {
         Some(path) => path,
         None => return -errno::EFAULT,
     };
-    let path = if dirfd != AT_FDCWD && !path.starts_with('/') {
-        // Chemin relatif a un descripteur de repertoire ouvert.
-        let process = task::current_process();
-        let node = match process.files.lock().get(dirfd) {
-            Some(desc) => match desc.kind {
-                FdKind::Dir(node) | FdKind::File(node) => Some(node),
-                _ => None,
-            },
-            None => return -errno::EBADF,
-        };
-        match node {
-            Some(node) => {
-                let mut base = ramfs::path_string(&ramfs::fs(), node);
-                if !base.ends_with('/') {
-                    base.push('/');
-                }
-                base.push_str(&path);
-                base
-            }
-            None => absolute(&path),
-        }
-    } else {
-        absolute(&path)
+    let path = match absolute_at(dirfd, raw_path.as_str()) {
+        Ok(path) => path,
+        Err(code) => return code,
     };
+    if let Err(code) = security_recheck_open(path.as_str(), flags) {
+        return code;
+    }
 
     let process = task::current_process();
 
@@ -908,7 +979,12 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
             };
             match fs.touch_at(parent, name) {
                 Ok(node) => {
+                    // SECURITY_OWNER_OPEN
+                    let (owner_uid, owner_gid) =
+                        crate::kernel::security::policy::filesystem_owner();
                     fs.nodes[node].mode = (mode & 0o777) as u16;
+                    fs.nodes[node].uid = owner_uid;
+                    fs.nodes[node].gid = owner_gid;
                     node
                 }
                 Err(raison) => return -errno_creation(raison),
@@ -1571,14 +1647,29 @@ pub fn sys_chdir(path_addr: u64) -> i64 {
 }
 
 /// `mkdir` / `mkdirat`.
-pub fn sys_mkdir(path_addr: u64) -> i64 {
-    let path = match crate::kernel::abi::resolve_user_path(path_addr) {
-        Some(path) => absolute(&path),
+pub fn sys_mkdir(path_addr: u64, mode: u32) -> i64 {
+    sys_mkdirat(AT_FDCWD, path_addr, mode)
+}
+
+pub fn sys_mkdirat(dirfd: i32, path_addr: u64, mode: u32) -> i64 {
+    let raw_path = match crate::kernel::abi::resolve_user_path(path_addr) {
+        Some(path) => path,
         None => return -errno::EFAULT,
     };
-    let cwd = task::current_process().metadata.lock().cwd;
+    let path = match absolute_at(dirfd, raw_path.as_str()) {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    if let Err(code) = security_recheck_mutation(
+        path.as_str(),
+        crate::kernel::security::filesystem::Mutation::Create,
+        "fs-at-create-backend",
+    ) {
+        return code;
+    }
+
     let mut fs = ramfs::fs();
-    let (parent, name) = match fs.resolve_parent_name(&path, cwd) {
+    let (parent, name) = match fs.resolve_parent_name(&path, 0) {
         Some(value) => value,
         None => return -errno::ENOENT,
     };
@@ -1586,18 +1677,45 @@ pub fn sys_mkdir(path_addr: u64) -> i64 {
         return -errno::EEXIST;
     }
     match fs.mkdir_at(parent, name) {
-        Ok(_) => 0,
+        Ok(node) => {
+            // SECURITY_OWNER_MKDIR
+            let (owner_uid, owner_gid) =
+                crate::kernel::security::policy::filesystem_owner();
+            fs.nodes[node].mode = (mode & 0o777) as u16;
+            fs.nodes[node].uid = owner_uid;
+            fs.nodes[node].gid = owner_gid;
+            0
+        }
         Err(raison) => -errno_creation(raison),
     }
 }
 
 /// `unlink` / `unlinkat`.
 pub fn sys_unlink(path_addr: u64) -> i64 {
-    let path = match crate::kernel::abi::resolve_user_path(path_addr) {
-        Some(path) => absolute(&path),
+    sys_unlinkat(AT_FDCWD, path_addr, 0)
+}
+
+pub fn sys_unlinkat(dirfd: i32, path_addr: u64, _flags: u32) -> i64 {
+    let raw_path = match crate::kernel::abi::resolve_user_path(path_addr) {
+        Some(path) => path,
         None => return -errno::EFAULT,
     };
-    match resolve(&path) {
+    let path = match absolute_at(dirfd, raw_path.as_str()) {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    if let Err(code) = security_recheck_mutation(
+        path.as_str(),
+        crate::kernel::security::filesystem::Mutation::Remove,
+        "fs-at-remove-backend",
+    ) {
+        return code;
+    }
+    let resolved = {
+        let fs = ramfs::fs();
+        fs.resolve(&path, 0)
+    };
+    match resolved {
         Some(node) if node != 0 => {
             if backing::is_disk_backed(node) {
                 return -errno::EROFS;

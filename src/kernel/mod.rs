@@ -68,6 +68,7 @@ pub mod frames_libres;
 #[path = "memory/virtual.rs"]
 pub mod vmm;
 
+pub mod security;
 pub mod native;
 #[path = "object/readiness.rs"]
 pub mod readiness;

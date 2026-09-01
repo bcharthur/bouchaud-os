@@ -85,12 +85,19 @@ pub fn shell_environment() -> Vec<String> {
 
 /// Resout un executable sans recopier son contenu.
 fn resolve_file_node(path: &str, cwd: usize) -> Result<usize, String> {
-    let fs = crate::fs::ramfs::fs();
-    match fs.resolve(path, cwd) {
-        Some(node) if fs.nodes[node].kind == crate::fs::ramfs::NodeKind::File => Ok(node),
-        Some(_) => Err(alloc::format!("{} : est un repertoire", path)),
-        None => Err(alloc::format!("{} : fichier introuvable", path)),
-    }
+    let node = {
+        let fs = crate::fs::ramfs::fs();
+        match fs.resolve(path, cwd) {
+            Some(node) if fs.nodes[node].kind == crate::fs::ramfs::NodeKind::File => node,
+            Some(_) => return Err(alloc::format!("{} : est un repertoire", path)),
+            None => return Err(alloc::format!("{} : fichier introuvable", path)),
+        }
+    };
+
+    crate::kernel::security::execution::authorize_node(path, node, cwd)
+        .map_err(|reason| alloc::format!("{} : {}", path, reason))?;
+
+    Ok(node)
 }
 
 #[derive(Clone, Copy)]
