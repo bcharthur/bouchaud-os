@@ -52,6 +52,8 @@ use crate::kernel::fd::FdTable;
 use crate::kernel::smp_lock;
 use crate::kernel::vmm::AddressSpace;
 use crate::kernel::sync::{SpinLock, SpinLockGuard, SpinLockIrq};
+use crate::kernel::sync::{RankedSpinLock, RankedSpinLockGuard};
+use crate::kernel::sync::lockdep::LockClass;
 pub use crate::kernel::vma::{Backing as PromesseBacking, Vma as Promesse};
 
 // BOUCHAUD_FINAL_V11C_DEEP_FRAGMENTATION

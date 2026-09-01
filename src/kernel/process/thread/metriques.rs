@@ -195,12 +195,12 @@ anomalies={}/{}/{} proprietaire={}{}",
     let (clean_entries, clean_reclaimable) = crate::kernel::clean_page_cache::lifetime_stats();
     let (shared_nodes, shared_pages, shared_orphans) = crate::kernel::partage::lifetime_stats();
     crate::kernel::dmesg::log_fmt(format_args!(
-        "[MM-NG6] fault_resolved={} fault_retry={} fault_invalid={} fault_io_error={} fault_retired={} fault_retry_yields={} fault_retry_max_chain={} fault_registry_current={} fault_registry_peak={} clean_cache_entries={} clean_cache_reclaimable={} shared_cache_nodes={} shared_cache_pages={} shared_cache_orphans={} pf_bkl_enters={} waitq_bkl_enters={} waitq_bkl_wait_ns={} waitq_wake_sans_verrou={} ramfs_bkl_enters={} exec_wait_ns={} exec_max_ns={} ata_acquires={} ata_wait_ns={} ata_max_ns={}",
+        "[MM-NG6] fault_resolved={} fault_retry={} fault_invalid={} fault_io_error={} fault_retired={} fault_retry_yields={} fault_retry_max_chain={} fault_registry_current={} fault_registry_peak={} clean_cache_entries={} clean_cache_reclaimable={} shared_cache_nodes={} shared_cache_pages={} shared_cache_orphans={} pf_bkl_enters={} waitq_bkl_enters={} waitq_bkl_wait_ns={} waitq_wake_sans_verrou={} exec_wait_ns={} exec_max_ns={} ata_acquires={} ata_wait_ns={} ata_max_ns={}",
         resolved, retry, invalid, io_error, retired, retry_yields, retry_max_chain,
         fault_registry_current, fault_registry_peak,
         clean_entries, clean_reclaimable, shared_nodes, shared_pages, shared_orphans,
         pf_bkl_enters(), waitq_bkl, waitq_bkl_ns, waitq_sans_verrou,
-        crate::fs::backing::ramfs_bkl_enters(), exec_wait_ns,
+        exec_wait_ns,
         exec_max_ns, ata_acquires, ata_wait_ns, ata_max_ns,
     ));
     let (cluster_attempts, cluster_mapped, cluster_miss, cluster_already, cluster_aborts, cluster_max_batch) = fault_cluster_stats();

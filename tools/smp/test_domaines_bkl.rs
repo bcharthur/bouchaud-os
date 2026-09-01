@@ -29,17 +29,23 @@ use std::sync::Arc;
 
 #[test]
 fn c_est_le_domaine_le_plus_interieur_qui_paie() {
-    // Un appel systeme entre dans `Fd`, qui appelle le systeme de fichiers.
-    // C'est `Fs` qui a eu besoin du verrou, et c'est lui qu'il faudra
+    // Un appel systeme entre dans `Fd`, qui ecrit sur un peripherique. C'est
+    // `Pilote` qui a eu besoin du verrou, et c'est lui qu'il faudra
     // instrumenter -- pas `Fd`, qui n'a fait que passer.
+    //
+    // L'exemple etait `Fs` tant que le systeme de fichiers prenait encore le
+    // gros verrou. Il a son propre verrou depuis, donc son contrat est `Migre`
+    // et `note_acquisition` rendrait `Some(Fs)` : ce test-ci mesure QUI PAIE,
+    // pas qui a promis, et il lui faut un domaine encore Legacy pour ne pas
+    // confondre les deux proprietes.
     let r = Registre::neuf();
     r.entre(0, Domaine::Syscall);
     r.entre(0, Domaine::Fd);
-    r.entre(0, Domaine::Fs);
+    r.entre(0, Domaine::Pilote);
 
-    assert_eq!(r.courant(0), Domaine::Fs);
-    assert_eq!(r.note_acquisition(0), None, "Fs n'est pas declare sorti");
-    assert_eq!(r.acquisitions(Domaine::Fs), 1);
+    assert_eq!(r.courant(0), Domaine::Pilote);
+    assert_eq!(r.note_acquisition(0), None, "Pilote n'est pas declare sorti");
+    assert_eq!(r.acquisitions(Domaine::Pilote), 1);
     assert_eq!(r.acquisitions(Domaine::Fd), 0);
     assert_eq!(r.acquisitions(Domaine::Syscall), 0);
 
@@ -102,7 +108,7 @@ fn on_garde_la_premiere_regression_pas_la_derniere() {
 #[test]
 fn un_domaine_non_migre_compte_sans_accuser() {
     let r = Registre::neuf();
-    for domaine in [Domaine::Vm, Domaine::Fd, Domaine::Ordonnanceur, Domaine::Fs] {
+    for domaine in [Domaine::Vm, Domaine::Fd, Domaine::Ordonnanceur, Domaine::Pilote] {
         r.entre(0, domaine);
         assert_eq!(r.note_acquisition(0), None, "{:?} n'a rien promis", domaine);
         r.sort(0);
@@ -144,7 +150,12 @@ fn tout_domaine_a_un_contrat_et_les_migres_sont_ceux_qu_on_croit() {
     }
     assert_eq!(
         migres,
-        vec![Domaine::RegistreProcessus, Domaine::VerrouEnregistrement],
+        vec![
+            Domaine::Vfs,
+            Domaine::Fs,
+            Domaine::RegistreProcessus,
+            Domaine::VerrouEnregistrement,
+        ],
         "la liste des domaines sortis est le CONTRAT du chantier : elle ne \
          change qu'avec une migration reelle",
     );
@@ -244,7 +255,7 @@ fn le_compte_est_exact_sous_concurrence() {
         fils.push(std::thread::spawn(move || {
             for _ in 0..tours {
                 r.entre(cpu, Domaine::Syscall);
-                r.entre(cpu, Domaine::Fs);
+                r.entre(cpu, Domaine::Pilote);
                 r.note_acquisition(cpu);
                 r.sort(cpu);
                 r.sort(cpu);
@@ -256,7 +267,7 @@ fn le_compte_est_exact_sous_concurrence() {
     }
 
     assert_eq!(
-        r.acquisitions(Domaine::Fs), tours * coeurs as u64,
+        r.acquisitions(Domaine::Pilote), tours * coeurs as u64,
         "aucune acquisition ne doit se perdre : le chiffre sert de critere",
     );
     assert_eq!(r.acquisitions(Domaine::Syscall), 0);

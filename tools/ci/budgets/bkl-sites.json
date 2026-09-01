@@ -3,8 +3,7 @@
   "architecture": {
     "_lisez_moi": "Nombre de sites prenant encore le gros verrou, par domaine. La direction attendue est vers le bas, domaine par domaine. Un domaine declare `Migre` dans src/kernel/sync/domaine.rs doit valoir zero -- et n'apparait donc pas ici.",
     "sites_bkl_par_domaine": {
-      "Fd": 5,
-      "Fs": 6,
+      "Fd": 4,
       "Ordonnanceur": 10,
       "Panique": 6,
       "Processus": 4,

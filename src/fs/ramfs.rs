@@ -162,10 +162,20 @@ pub struct FileSystem {
 // en nommant le CPU, au lieu de boucler en silence. C'est ce qui rend cette
 // migration conduisible : une chaine d'appels qui rentre deux fois se signale
 // tout de suite, a l'endroit exact, plutot que de figer la machine.
-static FS: crate::kernel::sync::SpinLock<FileSystem> =
-    crate::kernel::sync::SpinLock::new(FileSystem {
-        nodes: [const { Node::empty() }; MAX_NODES],
-    });
+//
+// Le verrou porte en plus un RANG. Le systeme de fichiers se prend APRES la
+// table des descripteurs (`FdTable`) et AVANT le cache de pages : un chemin qui
+// tiendrait le RAMFS puis redescendrait vers un descripteur formerait, avec
+// `openat` qui va dans l'autre sens, le cycle classique AB/BA. Le gros verrou
+// masquait ce cycle en serialisant tout ; `lockdep` le transforme maintenant en
+// panique attribuee, a l'endroit exact de la seconde prise.
+static FS: crate::kernel::sync::RankedSpinLock<FileSystem> =
+    crate::kernel::sync::RankedSpinLock::new(
+        crate::kernel::sync::lockdep::LockClass::Vfs,
+        FileSystem {
+            nodes: [const { Node::empty() }; MAX_NODES],
+        },
+    );
 /// Lock-free mirror used by interrupt/panic-safe journal prefixes.
 static USED_NODES_RELAXED: AtomicUsize = AtomicUsize::new(0);
 
@@ -184,7 +194,7 @@ pub fn used_nodes_relaxed() -> usize {
 /// La duree de vie du garde est celle de l'expression qui l'utilise. Un
 /// `let fs = fs();` le retient donc pour tout le bloc -- ce qui est correct
 /// tant que ce bloc ne rappelle pas `fs()`.
-pub fn fs() -> crate::kernel::sync::SpinLockGuard<'static, FileSystem> {
+pub fn fs() -> crate::kernel::sync::RankedSpinLockGuard<'static, FileSystem> {
     FS.lock()
 }
 

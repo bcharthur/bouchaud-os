@@ -252,8 +252,6 @@ fn writeback_pages(node: usize, pages: &[(u64, u64)]) {
     // n'est pas la memoire partagee -- son cache a deja son propre verrou --
     // mais le RAMFS, dont l'etat reste un `static mut`. Compter cette prise
     // dans `Vm` designerait le mauvais sous-systeme a migrer.
-    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fs);
-    let _kernel = crate::kernel::smp_lock::enter();
     let mut fs = crate::fs::ramfs::fs();
     for &(numero, frame) in pages {
         let debut = (numero * PAGE_SIZE) as usize;
@@ -314,8 +312,6 @@ fn evince_si_orphelin(node: usize) {
     };
 
     let anonyme = {
-        let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fs);
-        let _kernel = crate::kernel::smp_lock::enter();
         crate::fs::ramfs::fs().est_anonyme(node)
     };
     let pages: Vec<(u64, u64)> = pages
@@ -332,8 +328,6 @@ fn evince_si_orphelin(node: usize) {
         vmm::free_frame(frame);
     }
     if anonyme {
-        let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fs);
-        let _kernel = crate::kernel::smp_lock::enter();
         crate::fs::ramfs::fs().libere_anonyme(node);
     }
     {

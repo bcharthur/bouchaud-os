@@ -528,29 +528,36 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
             if backing::is_disk_backed(node) {
                 return -errno::EROFS;
             }
-            // RAMFS metadata/content is still a legacy global domain. User
-            // copyin has already finished, so no demand fault occurs under it.
-            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fd);
-            let _kernel = crate::kernel::smp_lock::enter();
+            // Le gros verrou ne protegeait plus ici que le RAMFS, qui a
+            // desormais le sien. Ce qu'il masquait EN PLUS, c'est un ordre :
+            // la table des descripteurs (rang `FdTable`) se prend AVANT le
+            // systeme de fichiers (rang `Vfs`), jamais pendant. Le report de
+            // l'offset attend donc que le systeme de fichiers soit rendu.
+            //
+            // L'ajout en fin de fichier reste atomique : `start` se lit et
+            // s'ecrit sous le meme garde `fs`.
             let (offset, append) = {
                 let borrowed = process.files.lock();
                 let desc = borrowed.get(fd).unwrap();
                 (desc.offset, desc.flags & O_APPEND != 0)
             };
-            let mut fs = ramfs::fs();
-            let content = &mut fs.nodes[node].content;
-            let start = if append { content.len() } else { offset };
-            if start + data.len() > ramfs::MAX_FILE_SIZE {
-                return -errno::EFBIG;
-            }
-            if content.len() < start {
-                content.resize(start, 0);
-            }
-            let end = start + data.len();
-            if content.len() < end {
-                content.resize(end, 0);
-            }
-            content[start..end].copy_from_slice(&data);
+            let end = {
+                let mut fs = ramfs::fs();
+                let content = &mut fs.nodes[node].content;
+                let start = if append { content.len() } else { offset };
+                if start + data.len() > ramfs::MAX_FILE_SIZE {
+                    return -errno::EFBIG;
+                }
+                if content.len() < start {
+                    content.resize(start, 0);
+                }
+                let end = start + data.len();
+                if content.len() < end {
+                    content.resize(end, 0);
+                }
+                content[start..end].copy_from_slice(&data);
+                end
+            };
             if let Some(desc) = process.files.lock().get_mut(fd) {
                 desc.offset = end;
             }
@@ -992,24 +999,31 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
         }
     };
 
-    let mut fs = ramfs::fs();
-    let is_dir = fs.nodes[node].kind == NodeKind::Dir;
-    if flags & O_DIRECTORY != 0 && !is_dir {
-        return -errno::ENOTDIR;
-    }
-    let access = flags & O_ACCMODE;
-    if is_dir && (access == O_WRONLY || access == O_RDWR) {
-        return -errno::EISDIR;
-    }
-    if !is_dir
-        && backing::is_disk_backed(node)
-        && (access == O_WRONLY || access == O_RDWR || flags & O_TRUNC != 0)
-    {
-        return -errno::EROFS;
-    }
-    if flags & O_TRUNC != 0 && !is_dir {
-        fs.nodes[node].content.clear();
-    }
+    // `Vfs` se rend avant de prendre `FdTable` : l'ordre des rangs va de la
+    // table des descripteurs vers le systeme de fichiers, et `insert` ci-dessous
+    // prend la premiere. Tout ce que le noeud doit fournir est donc lu ici, et
+    // le garde meurt avec ce bloc.
+    let (is_dir, longueur) = {
+        let mut fs = ramfs::fs();
+        let is_dir = fs.nodes[node].kind == NodeKind::Dir;
+        if flags & O_DIRECTORY != 0 && !is_dir {
+            return -errno::ENOTDIR;
+        }
+        let access = flags & O_ACCMODE;
+        if is_dir && (access == O_WRONLY || access == O_RDWR) {
+            return -errno::EISDIR;
+        }
+        if !is_dir
+            && backing::is_disk_backed(node)
+            && (access == O_WRONLY || access == O_RDWR || flags & O_TRUNC != 0)
+        {
+            return -errno::EROFS;
+        }
+        if flags & O_TRUNC != 0 && !is_dir {
+            fs.nodes[node].content.clear();
+        }
+        (is_dir, fs.nodes[node].content.len())
+    };
 
     let mut desc = FileDesc::new(if is_dir {
         FdKind::Dir(node)
@@ -1019,7 +1033,7 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
     desc.flags = flags;
     desc.cloexec = flags & O_CLOEXEC != 0;
     if flags & O_APPEND != 0 {
-        desc.offset = backing::disk_len(node).unwrap_or(fs.nodes[node].content.len());
+        desc.offset = backing::disk_len(node).unwrap_or(longueur);
     }
     let fd = process.files.lock().insert(desc);
     fd as i64
@@ -1570,18 +1584,25 @@ pub fn sys_getdents64(fd: i32, buffer: u64, size: usize) -> i64 {
         None => return -errno::EBADF,
     };
 
-    let fs = ramfs::fs();
-    let mut children: Vec<(usize, String, bool)> = Vec::new();
-    for index in 0..ramfs::MAX_NODES {
-        if fs.nodes[index].used && fs.nodes[index].parent == node && index != node {
-            let entry = &fs.nodes[index];
-            children.push((
-                index,
-                entry.name_str().to_string(),
-                entry.kind == NodeKind::Dir,
-            ));
+    // Le garde du systeme de fichiers ne couvre que le releve. Le tenir plus
+    // loin serait faux deux fois : `user_write` ci-dessous peut declencher une
+    // faute de demande, donc rentrer a nouveau dans le RAMFS, et le report de
+    // l'offset prend `FdTable`, de rang inferieur a `Vfs`.
+    let children: Vec<(usize, String, bool)> = {
+        let fs = ramfs::fs();
+        let mut children = Vec::new();
+        for index in 0..ramfs::MAX_NODES {
+            if fs.nodes[index].used && fs.nodes[index].parent == node && index != node {
+                let entry = &fs.nodes[index];
+                children.push((
+                    index,
+                    entry.name_str().to_string(),
+                    entry.kind == NodeKind::Dir,
+                ));
+            }
         }
-    }
+        children
+    };
 
     let mut out: Vec<u8> = Vec::new();
     let mut consumed = start;

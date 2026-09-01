@@ -136,6 +136,13 @@ impl Domaine {
         match self {
             // Sortis, et verifies comme tels.
             Self::RegistreProcessus | Self::VerrouEnregistrement => Contrat::Migre,
+            // Le systeme de fichiers porte son propre verrou, de rang `Vfs`, et
+            // la table des descripteurs celui de rang `FdTable`. Plus aucun
+            // chemin normal n'a besoin du gros verrou pour y toucher : le
+            // declarer `Migre` fait desormais compter toute reprise comme une
+            // REGRESSION, mesuree par `[BKL-DOMAINES] regressions=` et bornee a
+            // zero par le budget `bkl_regressions_domaine`.
+            Self::Fs | Self::Vfs => Contrat::Migre,
             // Legitimes : pas de concurrence a proteger.
             Self::BootPrecoce | Self::Panique => Contrat::Exempte,
             // Le chantier en cours.

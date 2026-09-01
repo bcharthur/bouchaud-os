@@ -41,10 +41,19 @@ impl Mm {
     }
 }
 
-pub struct FileTable { inner: SpinLock<FdTable> }
+/// La table des descripteurs d'un processus.
+///
+/// Elle porte le rang `FdTable`, en amont de `Vfs` : un appel systeme resout
+/// son descripteur PUIS touche le systeme de fichiers. L'ordre inverse existait
+/// -- `write`, `openat` et `getdents` tenaient le RAMFS pendant qu'ils
+/// reportaient un offset -- et seul le gros verrou empechait les deux sens de
+/// se croiser. Le rang rend l'inversion detectable sans attendre l'entrelacement.
+pub struct FileTable { inner: RankedSpinLock<FdTable> }
 impl FileTable {
-    pub fn new(table: FdTable) -> Self { Self { inner: SpinLock::new(table) } }
-    pub fn lock(&self) -> SpinLockGuard<'_, FdTable> { self.inner.lock() }
+    pub fn new(table: FdTable) -> Self {
+        Self { inner: RankedSpinLock::new(LockClass::FdTable, table) }
+    }
+    pub fn lock(&self) -> RankedSpinLockGuard<'_, FdTable> { self.inner.lock() }
 }
 
 pub struct ProcessMetadata {

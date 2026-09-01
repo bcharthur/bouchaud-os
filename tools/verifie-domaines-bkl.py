@@ -50,15 +50,22 @@ def exempt(relatif: str) -> bool:
 
 
 def domaines_migres(source: str) -> set[str]:
-    """Les domaines dont le contrat est `Migre`, lus dans `domaine.rs`."""
-    bloc = re.search(r"Contrat::Migre\s*,", source)
-    if not bloc:
-        return set()
-    # La forme est : `Self::A | Self::B => Contrat::Migre,`
-    ligne = re.search(r"((?:Self::\w+\s*\|?\s*)+)=>\s*Contrat::Migre", source)
-    if not ligne:
-        return set()
-    return set(re.findall(r"Self::(\w+)", ligne.group(1)))
+    """Les domaines dont le contrat est `Migre`, lus dans `domaine.rs`.
+
+    TOUTES les branches, pas seulement la premiere. Le contrat s'ecrit
+    `Self::A | Self::B => Contrat::Migre,` et rien n'oblige a n'en avoir
+    qu'une : un domaine sorti plus tard s'ajoute naturellement sur sa propre
+    ligne, avec le commentaire qui explique ce qui l'a rendu possible.
+
+    Ce verificateur n'en lisait qu'une. Un domaine declare sorti dans une
+    seconde branche n'etait donc verifie par rien -- le contrat existait dans
+    le noyau, et le garde-fou passait a cote sans rien dire.
+    """
+    branches = re.findall(r"((?:Self::\w+\s*\|?\s*)+)=>\s*Contrat::Migre", source)
+    migres: set[str] = set()
+    for branche in branches:
+        migres |= set(re.findall(r"Self::(\w+)", branche))
+    return migres
 
 
 def main() -> int:

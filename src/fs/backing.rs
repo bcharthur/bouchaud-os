@@ -46,7 +46,6 @@ struct ReadPattern { node: usize, last_end: usize, sequential: u8 }
 static READ_PATTERNS: SpinLock<Vec<ReadPattern>> = SpinLock::new(Vec::new());
 static READAHEAD_PAGES: AtomicU64 = AtomicU64::new(0);
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
-static RAMFS_BKL_ENTERS: AtomicU64 = AtomicU64::new(0);
 
 pub fn reset() {
     EXTENTS.lock().clear();
@@ -98,9 +97,6 @@ pub fn logical_len(node: usize) -> usize {
     if let Some(size) = disk_len(node) {
         return size;
     }
-    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fs);
-    let _kernel = crate::kernel::smp_lock::enter();
-    RAMFS_BKL_ENTERS.fetch_add(1, Ordering::Relaxed);
     crate::fs::ramfs::fs().nodes[node].content.len()
 }
 
@@ -122,9 +118,6 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
     let extent = EXTENTS.lock().iter().find(|extent| extent.node == node).copied();
 
     let Some(extent) = extent else {
-        let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fs);
-        let _kernel = crate::kernel::smp_lock::enter();
-        RAMFS_BKL_ENTERS.fetch_add(1, Ordering::Relaxed);
         let fs = crate::fs::ramfs::fs();
         let content = &fs.nodes[node].content;
         if offset >= content.len() {
@@ -286,10 +279,6 @@ pub fn cache_stats() -> (u64, u64) {
 
 pub fn readahead_pages() -> u64 {
     READAHEAD_PAGES.load(Ordering::Relaxed)
-}
-
-pub fn ramfs_bkl_enters() -> u64 {
-    RAMFS_BKL_ENTERS.load(Ordering::Relaxed)
 }
 
 /// (fichiers paresseux, octets logiques, operations disque, octets lus).
