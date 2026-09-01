@@ -494,6 +494,7 @@ pub fn stall_probe_from_timer() {
     );
 
     signale_taches_orphelines();
+    signale_etat_ordonnancement();
 
     // Un CPU qui tourne sur un verrou tournant ne laisse aucune autre trace :
     // pas d'acquisition BKL, pas de faute, pas de changement de tache. Cette
@@ -686,6 +687,58 @@ jetees_generation={} jetees_non_eligibles={}",
             "[SCHED-ORPHELINE] total={} -- une tache prete hors de toute file ne \
 sera jamais elue",
             orphelines,
+        );
+    }
+}
+
+// L'ETAT COMPLET DE L'ORDONNANCEMENT, AU MOMENT DU BLOCAGE
+//
+// `signale_taches_orphelines` ne voit qu'une tache `Ready`. Elle a rendu
+// ZERO ligne sur le blocage mm-ng6 : l'invariant « prete donc en file » n'est
+// donc PAS viole. Mais cela laisse deux lectures possibles, et une seule est
+// vraie :
+//
+//   * la tache est en file et son coeur dort -- reveil perdu ;
+//   * la tache n'est pas `Ready`, et attend quelque chose qui ne vient pas.
+//
+// Aucune sonde existante ne les distingue : `[SMP-TASK]` ne sort qu'a la
+// CREATION, et l'instantane ne montre que les CPU. On imprime donc l'etat
+// reel de chaque tache vivante, et la longueur de chaque file.
+fn signale_etat_ordonnancement() {
+    let coeurs = smp::schedulable_cpus().min(MAX_CPUS);
+    for cpu in 0..coeurs {
+        let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu) else { continue };
+        let (jetees_gen, jetees_non_eligibles) = pick_jetees(cpu);
+        crate::serial_println!(
+            "[SCHED-FILE] cpu={} len={} idle={} jetees_generation={} jetees_non_eligibles={}",
+            cpu,
+            crate::arch::x86_64::cpu_local::local(id).run_queue_len(),
+            cpu::is_idle(cpu),
+            jetees_gen,
+            jetees_non_eligibles,
+        );
+    }
+    for emplacement in 0..registre_longueur() {
+        let Some(identite) = registre_id(emplacement) else { continue };
+        let Some(tache) = registre_tache_id(identite) else { continue };
+        if tache.state == TaskState::Zombie {
+            continue;
+        }
+        let rq = tache.runq_cpu.charge() as usize;
+        let en_file = crate::arch::x86_64::cpu_local::CpuId::from_index(rq)
+            .and_then(|id| crate::arch::x86_64::cpu_local::local(id).file_contient(identite.en_mot()));
+        crate::serial_println!(
+            "[SCHED-TACHE] tid={} slot={} gen={} etat={:?} on_cpu={} rq={} en_file={:?} \
+cle_attente={} echeance={}",
+            tache.tid,
+            identite.emplacement(),
+            identite.generation(),
+            tache.state.charge(),
+            tache.on_cpu.charge(),
+            rq,
+            en_file,
+            tache.wait_queue_key.charge(),
+            tache.wake_deadline_ns.charge(),
         );
     }
 }
