@@ -710,12 +710,16 @@ fn signale_etat_ordonnancement() {
         let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu) else { continue };
         let (jetees_gen, jetees_non_eligibles) = pick_jetees(cpu);
         crate::serial_println!(
-            "[SCHED-FILE] cpu={} len={} idle={} jetees_generation={} jetees_non_eligibles={}",
+            "[SCHED-FILE] cpu={} len={} idle={} jetees_generation={} jetees_non_eligibles={} \
+sommeils_abandonnes={} rip={:#x} rip_noyau={:#x}",
             cpu,
             crate::arch::x86_64::cpu_local::local(id).run_queue_len(),
             cpu::is_idle(cpu),
             jetees_gen,
             jetees_non_eligibles,
+            cpu::sched_abandons(cpu),
+            rips_timer(cpu).0,
+            rips_timer(cpu).1,
         );
     }
     for emplacement in 0..registre_longueur() {
@@ -741,4 +745,42 @@ cle_attente={} echeance={}",
             tache.wake_deadline_ns.charge(),
         );
     }
+}
+
+// OU TOURNE UN COEUR QUI NE PROGRESSE PLUS
+//
+// Le blocage mm-ng6 laisse UNE tache vivante, `Ready`, `on_cpu=0`, dans
+// aucune file, sans une seule faute de page pendant 285 secondes. Les files
+// sont vides et les trois autres coeurs dorment : rien n'est perdu, rien
+// n'attend un reveil. Le coeur 0 tourne donc dans une boucle du noyau qui ne
+// se termine pas.
+//
+// Aucune sonde ne dit laquelle. `STALL_IPI_RIP` n'est rafraichi qu'a la
+// reception d'un IPI, et il n'en circule plus aucun -- c'est justement le
+// symptome. Le PIT, lui, continue de battre sur le BSP : son cadre
+// d'interruption porte l'adresse exacte du code interrompu.
+static RIP_TIMER: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static RIP_TIMER_NOYAU: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// Enregistre l'adresse interrompue par le timer.
+///
+/// Deux cases : la derniere vue, et la derniere vue EN MODE NOYAU. La seconde
+/// est celle qui compte quand on cherche une boucle qui ne rend jamais la
+/// main a l'espace utilisateur.
+pub fn note_rip_timer(rip: u64, depuis_utilisateur: bool) {
+    let cpu = local_cpu().min(MAX_CPUS - 1);
+    RIP_TIMER[cpu].store(rip, Ordering::Relaxed);
+    if !depuis_utilisateur {
+        RIP_TIMER_NOYAU[cpu].store(rip, Ordering::Relaxed);
+    }
+}
+
+pub fn rips_timer(cpu: usize) -> (u64, u64) {
+    if cpu >= MAX_CPUS {
+        return (0, 0);
+    }
+    (
+        RIP_TIMER[cpu].load(Ordering::Relaxed),
+        RIP_TIMER_NOYAU[cpu].load(Ordering::Relaxed),
+    )
 }

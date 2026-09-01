@@ -8,6 +8,10 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
     let idle = crate::arch::x86_64::cpu::account_timer_tick(interrupted_user);
     notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
 
+    crate::kernel::task::note_rip_timer(
+        stack.instruction_pointer.as_u64(),
+        interrupted_user,
+    );
     crate::kernel::task::stall_probe_from_timer();
     let quantum = timer::ticks() % smp::SCHED_QUANTUM_TICKS == 0;
 
