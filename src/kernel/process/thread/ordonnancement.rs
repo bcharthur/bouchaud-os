@@ -33,6 +33,27 @@ fn runnable_steal(task: &Task, cpu: usize) -> bool {
         && allowed_on(task, cpu)
 }
 
+// Ce que l'election JETTE, par CPU.
+//
+// `pick_next` consomme une entree de file et peut la rejeter pour deux raisons
+// tres differentes. Aucune des deux ne laissait la moindre trace, alors que la
+// seconde -- une entree valide rejetee -- retire definitivement la tache de
+// toute file : personne ne la republie.
+static PICK_JETEE_GENERATION: [AtomicU64; MAX_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_CPUS];
+static PICK_JETEE_NON_ELIGIBLE: [AtomicU64; MAX_CPUS] =
+    [const { AtomicU64::new(0) }; MAX_CPUS];
+
+pub fn pick_jetees(cpu: usize) -> (u64, u64) {
+    if cpu >= MAX_CPUS {
+        return (0, 0);
+    }
+    (
+        PICK_JETEE_GENERATION[cpu].load(Ordering::Relaxed),
+        PICK_JETEE_NON_ELIGIBLE[cpu].load(Ordering::Relaxed),
+    )
+}
+
 fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
     let len = tasks().len();
     if len == 0 { return None; }
@@ -45,10 +66,18 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
             // ordonnancerait la tache suivante, qui n'a rien demande : on la
             // jette.
             let identite = TacheId::depuis_mot(mot);
-            let Some(tache) = registre_tache_id(identite) else { continue };
+            let Some(tache) = registre_tache_id(identite) else {
+                PICK_JETEE_GENERATION[cpu.min(MAX_CPUS - 1)]
+                    .fetch_add(1, Ordering::Relaxed);
+                continue;
+            };
             if identite.emplacement() < len && runnable_local(tache, cpu) {
                 return Some(identite.emplacement());
             }
+            // L'entree vient d'etre CONSOMMEE et n'est pas servie. La tache
+            // n'est plus dans aucune file : si elle etait encore eligible,
+            // elle vient d'etre perdue.
+            PICK_JETEE_NON_ELIGIBLE[cpu.min(MAX_CPUS - 1)].fetch_add(1, Ordering::Relaxed);
         }
     }
 

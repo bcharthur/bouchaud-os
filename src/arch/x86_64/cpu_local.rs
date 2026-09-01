@@ -303,6 +303,16 @@ impl CpuLocal {
         true
     }
 
+    /// La file contient-elle cette identite ? `None` si elle est verrouillee.
+    ///
+    /// `try_lock` et non `lock` : cette sonde s'execute depuis l'IRQ du timer,
+    /// qui peut avoir interrompu le porteur de ce meme verrou sur ce meme CPU.
+    /// Attendre y serait un interblocage certain ; ne pas conclure est la
+    /// seule reponse honnete.
+    pub fn file_contient(&self, identite: u64) -> Option<bool> {
+        self.run_queue.try_lock().map(|file| file.contains(&identite))
+    }
+
     pub fn run_queue_len(&self) -> usize {
         self.run_queue.lock().len()
     }

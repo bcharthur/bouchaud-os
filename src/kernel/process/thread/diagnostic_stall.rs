@@ -493,6 +493,8 @@ pub fn stall_probe_from_timer() {
         EtatSyscall { nr: nr3, phase: ph3, age_ticks: age3 },
     );
 
+    signale_taches_orphelines();
+
     // Un CPU qui tourne sur un verrou tournant ne laisse aucune autre trace :
     // pas d'acquisition BKL, pas de faute, pas de changement de tache. Cette
     // ligne est la seule qui distingue un noyau bloque d'un noyau occupe, et
@@ -626,3 +628,64 @@ pub fn stall_probe_from_timer() {
     );
 }
 
+
+// BOUCHAUD_C1_TACHE_ORPHELINE_V1
+//
+// UNE TACHE PRETE QUI N'EST DANS AUCUNE FILE EST PERDUE
+// -----------------------------------------------------
+// Le noyau s'est fige pendant cinq minutes en n'imprimant rien : pas de
+// panique, pas d'assertion, pas de violation `lockdep`, pas d'attente longue
+// de verrou tournant. Le journal montrait un fil cree, publie sur `rq=1`, et
+// un CPU 1 qui restait `cur=NO_TASK` jusqu'a la fin. Rien ne disait pourquoi.
+//
+// C'est l'angle mort exact de toute la sonde existante : elle mesure ce que
+// les CPU FONT. Quand le defaut est qu'une tache n'est nulle part, il n'y a
+// rien a mesurer -- il faut aller le CHERCHER dans le registre.
+//
+// L'invariant est simple et local : une tache `Ready`, sur aucun coeur, et qui
+// ne commute pas, DOIT figurer dans la file du coeur que designe son
+// `runq_cpu`. Sinon aucun `pick_next` ne la trouvera jamais, et personne ne la
+// republiera : elle est perdue definitivement.
+fn signale_taches_orphelines() {
+    let mut orphelines = 0usize;
+    for emplacement in 0..registre_longueur() {
+        let Some(identite) = registre_id(emplacement) else { continue };
+        let Some(tache) = registre_tache_id(identite) else { continue };
+        if tache.state != TaskState::Ready
+            || tache.on_cpu >= 0
+            || tache.switching_out.charge()
+        {
+            continue;
+        }
+        let rq = tache.runq_cpu.charge() as usize;
+        let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(rq) else { continue };
+        // `None` = file verrouillee a cet instant : on ne conclut pas.
+        if crate::arch::x86_64::cpu_local::local(id).file_contient(identite.en_mot())
+            != Some(false)
+        {
+            continue;
+        }
+        orphelines += 1;
+        let (jetees_gen, jetees_non_eligibles) = pick_jetees(rq);
+        crate::serial_println!(
+            "[SCHED-ORPHELINE] tid={} slot={} gen={} rq={} aff={:#x} idle={} file_len={} \
+jetees_generation={} jetees_non_eligibles={}",
+            tache.tid,
+            identite.emplacement(),
+            identite.generation(),
+            rq,
+            tache.affinity_mask,
+            cpu::is_idle(rq),
+            crate::arch::x86_64::cpu_local::local(id).run_queue_len(),
+            jetees_gen,
+            jetees_non_eligibles,
+        );
+    }
+    if orphelines != 0 {
+        crate::serial_println!(
+            "[SCHED-ORPHELINE] total={} -- une tache prete hors de toute file ne \
+sera jamais elue",
+            orphelines,
+        );
+    }
+}
