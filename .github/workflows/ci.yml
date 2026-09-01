@@ -69,24 +69,40 @@ jobs:
           rustc --version
       - name: Compiler le noyau
         run: cargo build
-      - name: Protocole GUI
-        run: tools/gui/test-protocole.sh
-      - name: Decodage clavier
-        run: tools/gui/test-clavier.sh
-      - name: Politique de degat
-        run: tools/gui/test-degats.sh
-      - name: Manifeste des polices
-        run: python3 tools/gui/verifie-polices.py
-      - name: Maximum de tenue BKL
-        run: tools/smp/test-bkl-max.sh
-      - name: Formats executables
-        run: tools/exec/test-format.sh
+
+      # Clippy n'est PAS un controle de style ici : les 220 avertissements de
+      # confort ne font rien echouer. Ce qui echoue, ce sont ses lints
+      # « deny par defaut » -- les fautes de correction, comme une comparaison
+      # dont un cote est toujours faux. Le depot en portait deux.
+      #
+      # `cargo fmt --check` n'est deliberement PAS ici : l'arbre en est a
+      # 25 000 lignes d'ecart, et le rendre vert demanderait un reformatage
+      # massif qui detruirait une mise en page voulue et tout le `git blame`.
+      # Un controle qu'on ne peut pas rendre vert sans casser le depot n'est
+      # pas une barriere, c'est une alarme qu'on apprend a ignorer.
+      - name: Lints de correction (clippy)
+        run: |
+          rustup component add clippy
+          cargo clippy
+
+      # DECOUVERTS, pas enumeres. Cinq garde-fous avaient cesse de fonctionner
+      # sans que personne le voie, parce que la liste du workflow ne suivait
+      # pas celle du depot. Une regle ajoutee est desormais executee le jour
+      # meme.
+      - name: Garde-fous d'architecture
+        run: tools/ci/run_architecture_guards.sh
+
+      - name: Suites de tests hote
+        run: tools/ci/run_host_tests.sh
+
+      # Ce qui a ete gagne ne doit pas se reperdre : un site d'acquisition du
+      # gros verrou rajoute dans un sous-systeme qu'on venait d'alleger
+      # n'echoue a aucun test, et annule pourtant le travail.
+      - name: Budgets d'architecture
+        run: python3 tools/ci/check_budgets.py
+
       - name: Ownership des entrees Ladybird
         run: tools/ladybird/test-input-ownership.sh
-      - name: Verrouillage syscalls
-        run: python3 tools/verifie-verrouillage.py
-      - name: Verrous tournants
-        run: python3 tools/verifie-verrous-tournants.py
 
   browser-engine:
     name: browser / engine tests

@@ -48,6 +48,34 @@ FAMILLES_ATTENDUES = [
 ]
 
 
+def substitutions_de(conf: str, famille: str) -> list[str] | None:
+    """Vers quoi `famille` est redirigee, quelle que soit la forme employee.
+
+    Rend `None` si aucune regle ne la mentionne, et la liste des familles
+    cibles sinon -- la premiere etant celle qui decide.
+    """
+    alias = re.search(
+        r"<family>\s*" + re.escape(famille) + r"\s*</family>\s*<prefer>(.*?)</prefer>",
+        conf, re.S | re.I)
+    if alias:
+        return re.findall(r"<family>([^<]+)</family>", alias.group(1))
+
+    correspondance = re.search(
+        r"<match[^>]*target=\"pattern\"[^>]*>(?:(?!</match>).)*?"
+        r"<test[^>]*name=\"family\"[^>]*>\s*<string>\s*"
+        + re.escape(famille) +
+        r"\s*</string>\s*</test>(?:(?!</match>).)*?</match>",
+        conf, re.S | re.I)
+    if not correspondance:
+        return None
+    bloc = correspondance.group(0)
+    edition = re.search(
+        r"<edit[^>]*name=\"family\"[^>]*>(.*?)</edit>", bloc, re.S | re.I)
+    if not edition:
+        return []
+    return re.findall(r"<string>([^<]+)</string>", edition.group(1))
+
+
 def main() -> int:
     fautes = []
 
@@ -106,22 +134,32 @@ def main() -> int:
                 f"(declares : {', '.join(dirs) or 'aucun'})"
             )
 
-    # --- 3. les alias -------------------------------------------------------
+    # --- 3. les substitutions ----------------------------------------------
+    #
+    # Fontconfig sait exprimer une substitution de DEUX facons, et les deux
+    # marchent :
+    #
+    #   <alias><family>X</family><prefer><family>Y</family></prefer></alias>
+    #   <match target="pattern">
+    #     <test name="family" compare="eq"><string>X</string></test>
+    #     <edit name="family" mode="assign"><string>Y</string></edit>
+    #   </match>
+    #
+    # Ce garde-fou n'en connaissait qu'une. Le passage a la seconde -- plus
+    # forte, parce que `binding="strong"` gagne contre la liste CSS du site --
+    # l'a fait declarer absents des alias qui existaient bel et bien. Un
+    # garde-fou qui accuse a tort finit desactive ; il doit donc lire les deux.
     for famille in FAMILLES_ATTENDUES:
-        motif = re.search(
-            r"<family>\s*" + re.escape(famille) + r"\s*</family>\s*"
-            r"<prefer>(.*?)</prefer>",
-            conf, re.S | re.I)
-        if not motif:
+        cibles = substitutions_de(conf, famille)
+        if cibles is None:
             fautes.append(
-                f"  fonts.conf  `{famille}` n'a pas d'alias : une page qui la "
-                f"demande tombera sur la police par defaut"
+                f"  fonts.conf  `{famille}` n'a aucune substitution : une page "
+                f"qui la demande tombera sur la police par defaut"
             )
             continue
-        premiers = re.findall(r"<family>([^<]+)</family>", motif.group(1))
-        if not premiers:
-            fautes.append(f"  fonts.conf  l'alias de `{famille}` est vide")
-        elif "serenity" in premiers[0].lower():
+        if not cibles:
+            fautes.append(f"  fonts.conf  la substitution de `{famille}` est vide")
+        elif "serenity" in cibles[0].lower():
             fautes.append(
                 f"  fonts.conf  `{famille}` designe SerenitySans en PREMIER : "
                 f"c'est la police sans lettres accentuees"

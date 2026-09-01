@@ -7,7 +7,9 @@ checks = {
     'src/gui/frame_clock.rs': [
         'pub fn note_frame(horloge_seule: bool)',
         'pub fn snapshot() -> Snapshot',
-        '[FRAME-CLOCK]',
+        # Renomme en [FRAME-PERF] : le journal distingue desormais ce que
+        # sort le compositeur Bouchaud de ce que produit Ladybird.
+        '[FRAME-PERF]',
         'SAMPLE_MIN_TICKS: u64 = 500',
     ],
     'src/gui/mod.rs': ['pub mod frame_clock;'],
@@ -17,7 +19,9 @@ checks = {
     ],
     'src/kernel/debug/journal.rs': [
         '[FPS:',
-        '[Hz:',
+        # `[Hz:` a ete retire du prefixe du journal : la cadence utile est
+        # desormais portee par [FRAME-PERF], et la repeter sur chaque ligne
+        # coutait de la largeur sans rien apprendre.
         'crate::gui::frame_clock::snapshot()',
     ],
 }

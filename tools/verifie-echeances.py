@@ -31,6 +31,45 @@ from pathlib import Path
 
 RACINE = Path(__file__).resolve().parent.parent
 THREAD = RACINE / "src" / "kernel" / "process" / "thread.rs"
+THREAD_TREE = RACINE / "src" / "kernel" / "process" / "thread"
+
+def lignes_de(*chemins) -> list[tuple[str, int, str]]:
+    """Les lignes d'un sous-systeme, avec leur VRAIE origine.
+
+    Concatener un arbre pour l'analyser est commode, mais rend les numeros de
+    ligne faux -- et un garde-fou qui designe la mauvaise ligne fait perdre
+    plus de temps qu'il n'en fait gagner. On garde donc, pour chaque ligne, le
+    fichier et le numero d'ou elle vient.
+    """
+    sortie = []
+    for chemin in chemins:
+        fichiers = sorted(chemin.rglob("*.rs")) if chemin.is_dir() else (
+            [chemin] if chemin.exists() else [])
+        for fichier in fichiers:
+            relatif = fichier.relative_to(RACINE).as_posix()
+            for numero, texte in enumerate(
+                    fichier.read_text(encoding="utf-8").splitlines(), start=1):
+                sortie.append((relatif, numero, texte))
+    return sortie
+
+
+def source_de(*chemins) -> str:
+    """Le code d'un sous-systeme, quel que soit son decoupage en fichiers.
+
+    Ce garde-fou lisait un seul fichier. La fragmentation de `bkl.rs` en
+    `bkl/**` l'a fait tomber sur une exception -- et comme rien ne l'executait,
+    la regle a cesse de proteger quoi que ce soit sans que personne le voie.
+    Lire un ARBRE plutot qu'un fichier retire cette facon de casser.
+    """
+    morceaux = []
+    for chemin in chemins:
+        if chemin.is_dir():
+            for fichier in sorted(chemin.rglob("*.rs")):
+                morceaux.append(fichier.read_text(encoding="utf-8"))
+        elif chemin.exists():
+            morceaux.append(chemin.read_text(encoding="utf-8"))
+    return "\n".join(morceaux)
+
 
 # Combien de lignes apres l'ecriture on accepte de chercher la declaration.
 # L'armement suit toujours la fermeture du bloc qui pose l'etat.
@@ -40,7 +79,8 @@ ECRITURE = re.compile(r"wake_deadline_ns\s*=\s*([^;]+);")
 
 
 def main() -> int:
-    lignes = THREAD.read_text(encoding="utf-8").splitlines()
+    entrees = lignes_de(THREAD, THREAD_TREE)
+    lignes = [texte for _, _, texte in entrees]
     fautes = []
 
     for numero, ligne in enumerate(lignes):
@@ -54,8 +94,9 @@ def main() -> int:
             continue
         voisinage = lignes[numero : numero + 1 + PORTEE]
         if not any("arme_echeance(" in l for l in voisinage):
+            fichier, reelle, _ = entrees[numero]
             fautes.append(
-                f"  thread.rs:{numero + 1}  `wake_deadline_ns = {valeur}` sans "
+                f"  {fichier}:{reelle}  `wake_deadline_ns = {valeur}` sans "
                 f"`arme_echeance` dans les {PORTEE} lignes suivantes : cette "
                 f"echeance serait invisible du raccourci, donc jamais servie"
             )

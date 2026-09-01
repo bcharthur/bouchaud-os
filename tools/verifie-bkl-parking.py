@@ -33,6 +33,25 @@ from pathlib import Path
 
 RACINE = Path(__file__).resolve().parent.parent
 BKL = RACINE / "src" / "kernel" / "sync" / "bkl.rs"
+BKL_TREE = RACINE / "src" / "kernel" / "sync" / "bkl"
+
+def source_de(*chemins) -> str:
+    """Le code d'un sous-systeme, quel que soit son decoupage en fichiers.
+
+    Ce garde-fou lisait un seul fichier. La fragmentation de `bkl.rs` en
+    `bkl/**` l'a fait tomber sur une exception -- et comme rien ne l'executait,
+    la regle a cesse de proteger quoi que ce soit sans que personne le voie.
+    Lire un ARBRE plutot qu'un fichier retire cette facon de casser.
+    """
+    morceaux = []
+    for chemin in chemins:
+        if chemin.is_dir():
+            for fichier in sorted(chemin.rglob("*.rs")):
+                morceaux.append(fichier.read_text(encoding="utf-8"))
+        elif chemin.exists():
+            morceaux.append(chemin.read_text(encoding="utf-8"))
+    return "\n".join(morceaux)
+
 
 
 def corps(source: str, signature: str) -> str:
@@ -49,7 +68,7 @@ def corps(source: str, signature: str) -> str:
 
 
 def main() -> int:
-    source = BKL.read_text(encoding="utf-8")
+    source = source_de(BKL, BKL_TREE)
     fautes = []
 
     resume = corps(source, "pub fn resume_after_schedule(")

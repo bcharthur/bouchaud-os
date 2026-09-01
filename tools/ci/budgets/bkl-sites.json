@@ -1,0 +1,22 @@
+{
+  "_lisez_moi": "Budgets versionnes. Depasser une valeur echoue la barriere ; faire mieux est signale et s'adopte avec `python3 tools/ci/check_budgets.py --adopte`. Les valeurs d'architecture se calculent sur la source ; celles d'execution se lisent dans un journal QEMU passe par --journal.",
+  "architecture": {
+    "_lisez_moi": "Nombre de sites prenant encore le gros verrou, par domaine. La direction attendue est vers le bas, domaine par domaine. Un domaine declare `Migre` dans src/kernel/sync/domaine.rs doit valoir zero -- et n'apparait donc pas ici.",
+    "sites_bkl_par_domaine": {
+      "Fd": 7,
+      "Fs": 3,
+      "Ordonnanceur": 16,
+      "Pilote": 4,
+      "Processus": 4,
+      "Readiness": 1,
+      "Syscall": 2,
+      "Vm": 11
+    }
+  },
+  "execution": {
+    "_lisez_moi": "Mesures pires-cas d'une trace QEMU. `bkl_regressions_domaine` doit rester a zero pour toujours : c'est le contrat des chemins declares sortis.",
+    "bkl_attente_max_ms": 50.0,
+    "bkl_max_hold_ms": 50.0,
+    "bkl_regressions_domaine": 0
+  }
+}
