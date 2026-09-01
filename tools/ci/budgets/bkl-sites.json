@@ -13,9 +13,12 @@
     }
   },
   "execution": {
-    "_lisez_moi": "Mesures pires-cas d'une trace QEMU. `bkl_regressions_domaine` doit rester a zero pour toujours : c'est le contrat des chemins declares sortis.",
+    "_lisez_moi": "Mesures pires-cas d'une trace QEMU. `bkl_regressions_domaine` doit rester a zero pour toujours : c'est le contrat des chemins declares sortis. Les valeurs de latence sont des PLAFONDS de depart, choisis pour bloquer les figements de plusieurs secondes ; elles se resserrent en les adoptant apres une amelioration mesuree, jamais en les relachant apres une regression.",
     "bkl_attente_max_ms": 50.0,
     "bkl_max_hold_ms": 50.0,
-    "bkl_regressions_domaine": 0
+    "bkl_regressions_domaine": 0,
+    "preempt_max_defer_ms": 100.0,
+    "ready_latency_interactive_max_ms": 100.0,
+    "ready_latency_max_ms": 250.0
   }
 }

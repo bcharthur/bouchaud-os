@@ -80,6 +80,27 @@ EXECUTION = {
         lambda v: v,
         "chemins declares sortis ayant repris le verrou",
     ),
+    # --- ordonnanceur ------------------------------------------------------
+    #
+    # Ces deux-la mesurent ce que l'utilisateur RESSENT. Une preemption
+    # differee trop longtemps, ou une tache prete qui attend son coeur, sont
+    # exactement ce qui se voit comme une interface qui ne repond pas -- et
+    # aucune des deux ne fait echouer un test.
+    "preempt_max_defer_ms": (
+        re.compile(r"\[SCHED-NG-PREEMPT\].*?max_defer_ns=(\d+)"),
+        lambda v: v / 1_000_000,
+        "plus long report d'une preemption demandee",
+    ),
+    "ready_latency_max_ms": (
+        re.compile(r"\[SCHED-NG-LAT\].*?\bmax_ns=(\d+)"),
+        lambda v: v / 1_000_000,
+        "plus longue attente entre « prete » et « sur un coeur »",
+    ),
+    "ready_latency_interactive_max_ms": (
+        re.compile(r"\[SCHED-NG-LAT\].*?interactive_max_ns=(\d+)"),
+        lambda v: v / 1_000_000,
+        "la meme, pour les taches interactives",
+    ),
 }
 
 
