@@ -118,20 +118,29 @@ jobs:
       # De quel commit vient cette image, et est-ce bien celle qui a ete
       # testee. Une image qui boote sans qu'on sache CE qui a ete construit
       # n'est pas une publication, c'est un artefact.
-      - name: Manifeste de publication
+      #
+      # Les deux fichiers sont rassembles dans UN SEUL repertoire avant
+      # l'envoi. `upload-artifact` conserve l'arborescence commune a tous les
+      # chemins fournis : deux chemins sans ancetre commun produisent une
+      # archive qui reproduit `target/x86_64-bouchaud_os/debug/...`, et les
+      # jobs suivants ne trouvent plus l'image la ou ils l'attendent. C'est
+      # exactement ce qui vient d'arriver -- « Could not open
+      # image/bootimage-bouchaud-os.bin » sur les quatre suites QEMU.
+      - name: Rassembler l'image et son manifeste
         run: |
+          mkdir -p publication
+          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin publication/
           python3 tools/ci/release_manifest.py \
-            target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
-            --sortie release-manifest.json
-          cat release-manifest.json
+            publication/bootimage-bouchaud-os.bin \
+            --sortie publication/release-manifest.json
+          cat publication/release-manifest.json
+          ls -l publication
 
       - name: Publier le bootimage partage
         uses: actions/upload-artifact@v4
         with:
           name: integration-bootimage
-          path: |
-            target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
-            release-manifest.json
+          path: publication/
           if-no-files-found: error
           retention-days: 7
 
