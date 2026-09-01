@@ -194,12 +194,10 @@ pub fn init() {
         IRQ_COUNT.store(0, core::sync::atomic::Ordering::Relaxed);
         DROPPED_COUNT.store(0, core::sync::atomic::Ordering::Relaxed);
         LAST_SCANCODE.store(0, core::sync::atomic::Ordering::Relaxed);
-        unsafe {
-            // Reconfigurer le 8042 fait perdre des octets : un Shift enfonce
-            // avant la reconfiguration n'aura jamais son relachement. Repartir
-            // d'un etat neuf est la seule position honnete.
-            ETAT = EtatClavier::neuf();
-        }
+        // Reconfigurer le 8042 fait perdre des octets : un Shift enfonce
+        // avant la reconfiguration n'aura jamais son relachement. Repartir
+        // d'un etat neuf est la seule position honnete.
+        *ETAT.lock() = EtatClavier::neuf();
 
         for _ in 0..64 {
             if unsafe { inb(0x64) } & 0x01 == 0 {
@@ -354,13 +352,25 @@ pub use decodeur::{EtatClavier, Key, KeyEvent, Modificateurs};
 ///
 /// Le decodage lui-meme vit dans `clavier_decodeur.rs`, sans etat global, ce
 /// qui le rend exercable sur l'hote. Ici il n'y a plus qu'un porteur.
-static mut ETAT: EtatClavier = EtatClavier::neuf();
+///
+/// Ce porteur etait un `static mut`, et le gros verrou etait tout ce qui le
+/// serialisait : `read` s'executait sous BKL, donc deux CPU ne decodaient
+/// jamais en meme temps. Liberer `read` retire cette protection accidentelle
+/// -- les modificateurs (shift, ctrl, alt, prefixe 0xE0) sont un etat REL,
+/// pas un compteur, et deux decodages entrelaces produisent une touche fausse
+/// plutot qu'un chiffre approximatif. Il porte donc maintenant son verrou.
+///
+/// Un `SpinLock` ordinaire suffit : l'IRQ clavier ne fait que deposer des
+/// scancodes dans `FILE` (un `SpinLockIrq`), elle ne decode jamais. Aucun
+/// porteur de ce verrou-ci n'est interrompu par un autre qui le voudrait.
+static ETAT: crate::kernel::sync::SpinLock<EtatClavier> =
+    crate::kernel::sync::SpinLock::new(EtatClavier::neuf());
 
 /// Lit la prochaine touche logique (bloquant).
 pub fn read_key() -> Key {
     loop {
         let sc = read_scancode();
-        if let Some(k) = unsafe { ETAT.decode_touche(sc) } { return k; }
+        if let Some(k) = ETAT.lock().decode_touche(sc) { return k; }
     }
 }
 
@@ -368,7 +378,7 @@ pub fn read_key() -> Key {
 pub fn try_key() -> Option<Key> {
     loop {
         let sc = try_scancode()?;
-        if let Some(k) = unsafe { ETAT.decode_touche(sc) } { return Some(k); }
+        if let Some(k) = ETAT.lock().decode_touche(sc) { return Some(k); }
     }
 }
 
@@ -379,7 +389,7 @@ pub fn try_key() -> Option<Key> {
 pub fn try_key_event() -> Option<KeyEvent> {
     loop {
         let sc = try_scancode()?;
-        if let Some(evenement) = unsafe { ETAT.decode(sc) } { return Some(evenement); }
+        if let Some(evenement) = ETAT.lock().decode(sc) { return Some(evenement); }
     }
 }
 

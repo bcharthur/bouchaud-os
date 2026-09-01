@@ -195,7 +195,21 @@ fn console_read(max: usize) -> Vec<u8> {
             return out;
         }
         // Rien a lire : on rend la main plutot que de monopoliser le CPU.
-        task::attends_un_tick();
+        //
+        // C'etait `attends_un_tick()`, qui EXIGE le gros verrou -- son
+        // `debug_assert` le dit -- parce qu'elle le suspend pendant le sommeil.
+        // Tant que `read` s'executait sous BKL, cela passait ; la console
+        // dormait donc en le tenant, a chaque lecture sans touche en attente.
+        //
+        // L'attente de readiness, elle, choisit son chemin selon la profondeur
+        // reelle : detachee a zero, ancienne au-dessus. Elle convient donc aux
+        // deux, et l'echeance d'un tick reproduit exactement l'ancien rythme de
+        // reveil -- le clavier signale le compositeur, pas cette file, donc
+        // c'est l'echeance qui ramene ici pour relire.
+        let ticket = crate::kernel::fd::readiness_ticket();
+        let echeance = crate::kernel::timer::monotonic_ns()
+            .saturating_add(1_000_000_000 / crate::kernel::timer::TICKS_PER_SECOND);
+        crate::kernel::fd::wait_readiness(ticket, Some(echeance));
     }
 }
 
@@ -384,7 +398,21 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
                 -errno::EFAULT
             }
         }
-        FdKind::Socket(_) => crate::kernel::abi::net::sys_recvfrom(fd, buffer, count, 0, 0, 0),
+        FdKind::Socket(_) => {
+            // Le seul puits de `read` dont l'etat reste global sans verrou :
+            // l'anneau e1000 et la pile inet. Le domaine est borne a la
+            // mutation reseau elle-meme, exactement comme la branche
+            // symetrique de `ecrit_octets` -- la resolution du descripteur et
+            // la recopie vers l'utilisateur restent paralleles.
+            //
+            // Le domaine est `Reseau` et non `Fd` : ce n'est pas la couche des
+            // descripteurs qui a besoin du verrou, c'est l'anneau. L'attribuer
+            // a `Fd` faisait porter au sous-systeme des descripteurs une dette
+            // qui n'est pas la sienne, et cachait la seule qui reste ici.
+            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Reseau);
+            let _kernel = crate::kernel::smp_lock::enter();
+            crate::kernel::abi::net::sys_recvfrom(fd, buffer, count, 0, 0, 0)
+        }
         FdKind::SocketPair(inbox, _) => {
             // Une lecture bloquante attend que l'autre bout ecrive. Rendre
             // `EAGAIN` tout de suite, comme on le faisait, obligeait chaque
@@ -615,7 +643,8 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
         FdKind::Socket(_) => {
             // Inet/e1000 is not yet fully object-owned. Constrain the BKL to
             // the network mutation itself; copyin and fd lookup stay parallel.
-            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fd);
+            // Domaine `Reseau` : c'est l'anneau qui a la dette, pas `Fd`.
+            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Reseau);
             let _kernel = crate::kernel::smp_lock::enter();
             crate::kernel::abi::net::envoie_octets(fd, data, 0, 0, 0)
         }
@@ -2541,7 +2570,8 @@ fn readable(fd: i32) -> bool {
         FdKind::Socket(state) => {
             // L'anneau e1000 est en `static mut` sans verrou : le pompage n'est
             // serialise que par le gros verrou. Voir le commentaire ci-dessus.
-            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fd);
+            // Domaine `Reseau` : c'est l'anneau qui a la dette, pas `Fd`.
+            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Reseau);
             let _kernel = crate::kernel::smp_lock::enter();
             crate::kernel::abi::net::socket_readable(&state)
         }

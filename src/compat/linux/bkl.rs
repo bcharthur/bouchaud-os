@@ -156,6 +156,41 @@ pub const SANS_BKL: &[(u64, &str)] = &[
     // global lock -- the exact site=212 / ~239 ms stall seen on V13.3.1.
     (nr::WRITE, "V14: copyin sans BKL; legacy global sinks lock internally"),
     (nr::WRITEV, "V14: iovec/copyin sans BKL; sys_write preserves sink domains"),
+    // --- Lecture : la symetrique de WRITE, liberee une fois ses sources
+    //     verrouillees --------------------------------------------------------
+    //
+    // `WRITE` etait libere depuis V14 et `READ` ne l'etait pas. Sur un
+    // navigateur, c'est l'appel le plus frequent du noyau : chaque `read` de
+    // chaque `WebContent` prenait le verrou global, et le tenait pendant la
+    // recopie vers l'utilisateur -- donc pendant une eventuelle faute de
+    // demande, exactement le blocage que V14 avait retire du cote ecriture.
+    //
+    // Il le tenait AUSSI pendant les attentes bloquantes : `console_read`
+    // tourne sur `attends_un_tick` jusqu'a la premiere touche, et la branche
+    // tube attend `wait_readiness`. Dormir en tenant le verrou global est ce
+    // qu'il ne faut jamais faire ; c'etait le cas ici a chaque lecture de
+    // console ou de tube vide.
+    //
+    // Ce que chaque branche possede maintenant :
+    //   File        RAMFS (rang `Vfs`) et cache de lecture pour le
+    //               contenu, `CONTROLLER` de l'ATA pour le disque.
+    //   Console     la file de scancodes (`SpinLockIrq`) et l'etat du
+    //               decodeur, qui portait encore un `static mut`.
+    //   Random      le generateur, dont `compteur` etait lu et incremente
+    //               sans atomicite : deux CPU pouvaient produire le MEME
+    //               bloc d'alea.
+    //   Input       le sous-systeme d'entree, deja verrouille.
+    //   Pipe, SocketPair, EventFd, TimerFd  leur propre verrou d'objet.
+    //   Instantane  le contenu vit dans le descripteur.
+    //   Socket      SEULE branche encore globale : l'anneau e1000 et la pile
+    //               inet. Elle prend le verrou elle-meme, borne a la mutation
+    //               reseau, comme la branche symetrique de `ecrit_octets`.
+    //
+    // Memoire utilisateur : oui, en ecriture, par `user_write` -- hors verrou,
+    //               ce qui est le but.
+    // Duree de vie : `user_write` tient une part d'`Arc` sur le `Process`.
+    (nr::READ, "sources verrouillees par objet ; seule la branche socket prend le verrou, en interne"),
+    (nr::READV, "boucle sur `sys_read`, audite ci-dessus ; l'iovec se lit depuis l'utilisateur"),
     (nr::GETPID, "domaine CPU-local, aucune lecture de TASKS"),
     (nr::GETTID, "domaine CPU-local, aucune lecture de TASKS"),
     (nr::GETUID, "domaine CPU-local + verrou metadata du Process"),

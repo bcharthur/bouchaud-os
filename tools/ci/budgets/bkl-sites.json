@@ -3,13 +3,15 @@
   "architecture": {
     "_lisez_moi": "Nombre de sites prenant encore le gros verrou, par domaine. La direction attendue est vers le bas, domaine par domaine. Un domaine declare `Migre` dans src/kernel/sync/domaine.rs doit valoir zero -- et n'apparait donc pas ici.",
     "sites_bkl_par_domaine": {
-      "Fd": 4,
+      "Fd": 2,
       "Ordonnanceur": 10,
       "Panique": 6,
       "Processus": 4,
       "Readiness": 1,
+      "Reseau": 3,
       "Syscall": 1
-    }
+    },
+    "_note_reseau": "Reseau apparait a 3 sans qu'aucun site n'ait ete cree : les trois prises de l'anneau e1000 (lecture, ecriture, sonde de readiness) etaient attribuees a `Fd`, qui payait une dette qui n'est pas la sienne. Fd passe de 5 a 2 -- il ne lui reste que la console et l'audio. La dette reseau est celle du chantier 9 ; elle est maintenant nommee au bon endroit."
   },
   "execution": {
     "_lisez_moi": "Mesures pires-cas d'une trace QEMU. `bkl_regressions_domaine` doit rester a zero pour toujours : c'est le contrat des chemins declares sortis. Les valeurs de latence sont des PLAFONDS de depart, choisis pour bloquer les figements de plusieurs secondes ; elles se resserrent en les adoptant apres une amelioration mesuree, jamais en les relachant apres une regression.",
