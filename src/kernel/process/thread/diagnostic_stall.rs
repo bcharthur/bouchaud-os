@@ -711,7 +711,7 @@ fn signale_etat_ordonnancement() {
         let (jetees_gen, jetees_non_eligibles) = pick_jetees(cpu);
         crate::serial_println!(
             "[SCHED-FILE] cpu={} len={} idle={} jetees_generation={} jetees_non_eligibles={} \
-sommeils_abandonnes={} rip={:#x} rip_noyau={:#x}",
+sommeils_abandonnes={} rip={:#x} rip_noyau={:#x} tlb_seq={} tlb_cibles={:#x} tlb_acks={:#x}",
             cpu,
             crate::arch::x86_64::cpu_local::local(id).run_queue_len(),
             cpu::is_idle(cpu),
@@ -720,6 +720,9 @@ sommeils_abandonnes={} rip={:#x} rip_noyau={:#x}",
             cpu::sched_abandons(cpu),
             rips_timer(cpu).0,
             rips_timer(cpu).1,
+            smp::tlb_slot_etat(cpu).0,
+            smp::tlb_slot_etat(cpu).1,
+            smp::tlb_slot_etat(cpu).2,
         );
     }
     for emplacement in 0..registre_longueur() {

@@ -387,6 +387,25 @@ pub fn handle_tlb_shootdown() {
     eoi_local();
 }
 
+/// L'etat du creneau de shootdown d'un CPU : (sequence, cibles, acquittements).
+///
+/// L'attente d'acquittement de `demande_shootdown` est un `spin_loop` SANS
+/// borne : si un seul CPU cible n'acquitte jamais, l'emetteur y reste pour
+/// toujours. C'est ce que montre le blocage mm-ng6 -- `munmap` immobile
+/// pendant 285 secondes, sans faute de page et sans gros verrou. Ces trois
+/// nombres disent QUEL CPU manque a l'appel.
+pub fn tlb_slot_etat(cpu: usize) -> (u64, u64, u64) {
+    if cpu >= MAX_CPUS {
+        return (0, 0, 0);
+    }
+    let slot = &TLB_SLOTS[cpu];
+    (
+        slot.sequence.load(Ordering::Relaxed),
+        slot.targets.load(Ordering::Relaxed),
+        slot.acknowledgements.load(Ordering::Relaxed),
+    )
+}
+
 pub fn tlb_shootdown_count() -> u64 {
     TLB_SHOOTDOWN_COUNT.load(Ordering::Relaxed)
 }
