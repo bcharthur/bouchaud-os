@@ -204,6 +204,46 @@ unsafe fn send_all_excluding_self(low: u32) {
     }
 }
 
+/// Renvoie le vecteur de shootdown a UN seul CPU.
+///
+/// `send_all_excluding_self` est une diffusion, envoyee une seule fois. Elle
+/// suppose que l'IPI arrive toujours -- ce qui est faux : un CPU dans sa
+/// fenetre `cli` d'endormissement, ou un APIC qui fusionne deux IPI de meme
+/// vecteur, la perd sans que rien ne le signale. Reemettre demande de viser
+/// precisement ceux qui manquent, comme le fait `reschedule_cpu`.
+fn renvoie_shootdown(cpu: usize) {
+    if cpu >= schedulable_cpus() || cpu == cpu_index() {
+        return;
+    }
+    let Some(id) = cpu_local::CpuId::from_index(cpu) else { return; };
+    let Some(target) = cpu_local::descriptor(id) else { return; };
+    unsafe {
+        let (x2, lapic) = local_apic();
+        if x2 {
+            usermode::write_msr(
+                X2APIC_ICR,
+                ((target.apic_id as u64) << 32) | TLB_SHOOTDOWN_VECTOR as u64,
+            );
+        } else {
+            lapic_write(lapic, LAPIC_ICR_HIGH, (target.legacy_apic_id as u32) << 24);
+            lapic_write(lapic, LAPIC_ICR_LOW, TLB_SHOOTDOWN_VECTOR as u32);
+            wait_xapic_delivery(lapic);
+        }
+    }
+}
+
+/// Shootdowns ayant exige au moins une reemission.
+static TLB_RELANCES: AtomicU64 = AtomicU64::new(0);
+/// IPI de shootdown reemis, tous CPU confondus.
+static TLB_IPI_REEMIS: AtomicU64 = AtomicU64::new(0);
+
+pub fn tlb_relances() -> (u64, u64) {
+    (
+        TLB_RELANCES.load(Ordering::Relaxed),
+        TLB_IPI_REEMIS.load(Ordering::Relaxed),
+    )
+}
+
 pub fn eoi_local() {
     unsafe {
         let (x2, lapic) = local_apic();
@@ -217,6 +257,11 @@ pub fn eoi_local() {
 
 /// Reveille les CPU secondaires et leur demande un point d'ordonnancement.
 /// Vecteur d'arret de panique : le CPU qui le recoit s'arrete definitivement.
+/// Delai avant de reemettre un IPI de shootdown a un CPU qui n'a pas encore
+/// acquitte. Assez long pour qu'un acquittement normal arrive largement
+/// avant, assez court pour qu'un IPI perdu ne coute qu'un sursaut.
+const RELANCE_SHOOTDOWN_NS: u64 = 2_000_000;
+
 pub const PANIC_STOP_VECTOR: u8 = 0xF3;
 
 /// Arrete tous les autres CPU apres une faute fatale.
@@ -348,7 +393,53 @@ pub fn shootdown_tlb(pml4: u64, active_cpus: u64, start: u64, len: u64) {
 
     unsafe { send_all_excluding_self(TLB_SHOOTDOWN_VECTOR as u32) };
 
-    while slot.acknowledgements.load(Ordering::Acquire) & targets != targets {
+    // BOUCHAUD_C1_SHOOTDOWN_REEMISSION_V1
+    //
+    // L'attente etait un `spin_loop` NU : une diffusion envoyee une fois, puis
+    // une boucle sans borne, sans reemission et sans trace. Elle suppose que
+    // l'IPI arrive toujours. Le blocage mm-ng6 a montre que non :
+    //
+    //     cpu=0 tlb_cibles=0x2 tlb_acks=0x0 idle=false   <- attend le CPU 1
+    //     cpu=1                             idle=true    <- en hlt, muet
+    //
+    // 285 secondes dans le meme `munmap`, sans gros verrou, sans faute de page,
+    // sans un seul message. Un IPI perdu -- un CPU dans sa fenetre `cli`
+    // d'endormissement, ou deux IPI de meme vecteur fusionnes par l'APIC --
+    // suffisait a figer la machine pour toujours.
+    //
+    // Reemettre est SUR : le gestionnaire ignore un creneau qu'il a deja
+    // acquitte, donc un IPI de trop ne coute qu'une interruption. Ne pas
+    // reemettre, lui, coute la machine. On vise precisement les manquants
+    // plutot que de rediffuser a tous, pour ne pas reveiller ceux qui ont
+    // deja repondu.
+    //
+    // Il n'y a volontairement PAS d'abandon apres N essais : le shootdown est
+    // une exigence de correction, pas un service rendu au mieux. Renoncer
+    // laisserait un CPU avec une traduction perimee, ce qui est pire qu'une
+    // attente. Ce qui change est qu'elle progresse et qu'elle se voit.
+    let mut prochaine_relance =
+        crate::kernel::timer::monotonic_ns().saturating_add(RELANCE_SHOOTDOWN_NS);
+    let mut relance_comptee = false;
+    loop {
+        let acquittements = slot.acknowledgements.load(Ordering::Acquire);
+        if acquittements & targets == targets {
+            break;
+        }
+        if crate::kernel::timer::monotonic_ns() >= prochaine_relance {
+            let manquants = targets & !acquittements;
+            if !relance_comptee {
+                TLB_RELANCES.fetch_add(1, Ordering::Relaxed);
+                relance_comptee = true;
+            }
+            for cpu in 0..MAX_CPUS.min(64) {
+                if manquants & (1u64 << cpu) != 0 {
+                    TLB_IPI_REEMIS.fetch_add(1, Ordering::Relaxed);
+                    renvoie_shootdown(cpu);
+                }
+            }
+            prochaine_relance = crate::kernel::timer::monotonic_ns()
+                .saturating_add(RELANCE_SHOOTDOWN_NS);
+        }
         spin_loop();
     }
     slot.sequence.store(0, Ordering::Release);
