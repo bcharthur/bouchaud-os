@@ -79,7 +79,7 @@ pub unsafe fn write_msr(msr: u32, value: u64) {
 }
 
 pub fn state() -> &'static str {
-    if READY.load(Ordering::Acquire) { "active (syscall/sysretq, ring3, GS/TSS per-CPU, SSE)" } else { "inactive" }
+    if READY.load(Ordering::Acquire) { "active (syscall/sysretq, ring3, GS/TSS per-CPU, SSE, ABI natif)" } else { "inactive" }
 }
 pub fn ready() -> bool { READY.load(Ordering::Acquire) }
 pub fn init() { init_cpu(0, true); }
@@ -105,7 +105,7 @@ fn init_cpu(cpu: usize, log: bool) {
         enable_sse();
     }
     READY.store(true, Ordering::Release);
-    if log { crate::kernel::dmesg::log("usermode: syscall/sysret armes, GS/TSS per-CPU, SSE actif"); }
+    if log { crate::kernel::dmesg::log("usermode: syscall/sysret armes, GS/TSS per-CPU, SSE actif, ABI Bouchaud natif v1"); }
 }
 
 unsafe fn enable_sse() {
@@ -142,30 +142,51 @@ unsafe extern "C" fn syscall_entry() {
     )
 }
 
+#[inline]
+unsafe fn execute_syscall(frame: *mut TrapFrame, native: bool) {
+    crate::kernel::task::account_kernel_enter();
+
+    if native {
+        crate::kernel::native::abi::handle(&mut *frame);
+
+        // The Linux dispatcher normally owns this common ring3 tail. Native
+        // syscalls bypass that dispatcher, so perform the two architecture-wide
+        // actions here without making the native object model depend on Linux.
+        if crate::kernel::task::take_need_resched() {
+            crate::kernel::task::yield_now();
+        }
+        crate::kernel::abi::proc::deliver_pending(&mut *frame);
+    } else {
+        crate::kernel::abi::handle(&mut *frame);
+    }
+
+    crate::kernel::task::account_kernel_exit();
+    crate::kernel::task::retire_current_if_zombie();
+}
+
 unsafe extern "C" fn syscall_dispatch(frame: *mut TrapFrame) {
-    crate::kernel::task::stall_syscall_enter((*frame).rax);
-    let sans_verrou = !crate::kernel::abi::bkl::exige_bkl((*frame).rax)
-        && !crate::kernel::abi::trace_enabled();
+    let number = (*frame).rax;
+    crate::kernel::task::stall_syscall_enter(number);
+
+    // BOUCHAUD_NATIVE_ABI_V1
+    // Native calls are recognized BEFORE Linux compatibility. They never
+    // acquire the BKL: each native object owns its synchronization domain.
+    let native = crate::kernel::native::abi::is_native_syscall(number);
+    let sans_verrou = native
+        || (!crate::kernel::abi::bkl::exige_bkl(number)
+            && !crate::kernel::abi::trace_enabled());
 
     if sans_verrou {
         crate::kernel::task::stall_syscall_sans_verrou();
-        crate::kernel::task::account_kernel_enter();
-        crate::kernel::abi::handle(&mut *frame);
-        crate::kernel::task::account_kernel_exit();
-        crate::kernel::task::retire_current_if_zombie();
+        execute_syscall(frame, native);
     } else {
         let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Syscall);
         let kernel = crate::kernel::smp_lock::enter();
         crate::kernel::task::stall_syscall_bkl_acquired();
-        crate::kernel::task::account_kernel_enter();
-        crate::kernel::abi::handle(&mut *frame);
-        crate::kernel::task::account_kernel_exit();
-        crate::kernel::task::retire_current_if_zombie();
+        execute_syscall(frame, false);
         drop(kernel);
     }
 
-    // P0-NG1: the ABI call and any outer BKL are gone. This is a real kernel
-    // preemption boundary: IF=1, no syscall-local guard may survive here.
     let _ = crate::kernel::scheduler::preempt::safe_point();
     crate::kernel::task::stall_syscall_exit();
 }

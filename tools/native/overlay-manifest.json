@@ -1,0 +1,48 @@
+{
+  "overlay": "bouchaud-os-chantier-7-native-abi-ipc-v1",
+  "base_commit": "96e8a1241e2c2d82a41851529d83c5701bfcb5f0",
+  "compatible_with_previous_overlay": "bouchaud-os-chantier-11-reliability-v3",
+  "replaces": [
+    "src/kernel/native/mod.rs",
+    "src/kernel/object/handle.rs",
+    "src/arch/x86_64/usermode.rs"
+  ],
+  "adds": [
+    "src/kernel/native/abi/dispatch.rs",
+    "src/kernel/native/abi/mod.rs",
+    "src/kernel/native/abi/numbers.rs",
+    "src/kernel/native/abi/types.rs",
+    "src/kernel/native/abi/usercopy.rs",
+    "src/kernel/native/abi/wire.rs",
+    "src/kernel/native/event.rs",
+    "src/kernel/native/handle/mod.rs",
+    "src/kernel/native/handle/registry.rs",
+    "src/kernel/native/handle/table.rs",
+    "src/kernel/native/ipc/channel.rs",
+    "src/kernel/native/ipc/message.rs",
+    "src/kernel/native/ipc/mod.rs",
+    "src/kernel/native/object.rs",
+    "src/kernel/native/shm.rs",
+    "src/kernel/native/waitset.rs",
+    "tools/native/test_native_abi.rs",
+    "tools/userland/include/bouchaud/native.h",
+    "tools/userland/native-ipc-probe.c",
+    "tools/verifie-abi-native.py"
+  ],
+  "features": [
+    "native syscall namespace 0x424f0000",
+    "generational process-local handles",
+    "rights enforcement",
+    "channels",
+    "handle passing",
+    "events",
+    "waitsets",
+    "shared regions",
+    "native usercopy",
+    "ring3 routing before Linux compatibility",
+    "legacy static-mut handle removal",
+    "host ABI tests",
+    "architecture guard",
+    "public C header and ring3 probe"
+  ]
+}
