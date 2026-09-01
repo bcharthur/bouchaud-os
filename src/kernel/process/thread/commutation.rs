@@ -11,6 +11,7 @@ unsafe extern "C" fn switch_context(from: *mut u64, to: u64) {
 
 extern "C" fn task_trampoline() -> ! {
     let frame = {
+        let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
         let _kernel = smp_lock::enter();
         complete_switch_handoff();
         let task = current();
@@ -21,6 +22,7 @@ extern "C" fn task_trampoline() -> ! {
 }
 
 extern "C" fn kernel_task_trampoline() -> ! {
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
     let _kernel = smp_lock::enter();
     complete_switch_handoff();
     let task = current();

@@ -68,6 +68,7 @@ pub(crate) fn finish_park_current_on_detached(
 
     loop {
         let blocked = {
+            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
             let _kernel = smp_lock::enter();
             current().state == TaskState::Blocked
         };
@@ -108,6 +109,7 @@ pub(crate) fn finish_park_current_on_detached(
     };
 
     {
+        let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
         let _kernel = smp_lock::enter();
         let task = current();
         task.wait_queue_key = 0;
@@ -178,6 +180,7 @@ pub(crate) fn park_current_on_until(wait_queue_key: usize, deadline_ns: u64) -> 
 
 /// Reveille au plus `limit` taches inscrites sur la queue.
 pub(crate) fn wake_wait_queue(wait_queue_key: usize, limit: usize) -> usize {
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
     let _kernel = smp_lock::enter();
     let mut woke = 0;
     for index in 0..tasks().len() {

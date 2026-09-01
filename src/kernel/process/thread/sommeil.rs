@@ -90,6 +90,7 @@ pub fn sleep_ticks(ticks: u64) {
         // schedule() fait deja HLT si la tache est bloquee et seule.
         schedule();
         let ready = {
+            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
             let _kernel = smp_lock::enter();
             current().state == TaskState::Ready
         };

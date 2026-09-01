@@ -248,6 +248,7 @@ fn writeback_pages(node: usize, pages: &[(u64, u64)]) {
     if crate::fs::backing::is_disk_backed(node) || pages.is_empty() {
         return;
     }
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Vm);
     let _kernel = crate::kernel::smp_lock::enter();
     let fs = crate::fs::ramfs::fs();
     for &(numero, frame) in pages {
@@ -309,6 +310,7 @@ fn evince_si_orphelin(node: usize) {
     };
 
     let anonyme = {
+        let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Vm);
         let _kernel = crate::kernel::smp_lock::enter();
         crate::fs::ramfs::fs().est_anonyme(node)
     };
@@ -326,6 +328,7 @@ fn evince_si_orphelin(node: usize) {
         vmm::free_frame(frame);
     }
     if anonyme {
+        let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Vm);
         let _kernel = crate::kernel::smp_lock::enter();
         crate::fs::ramfs::fs().libere_anonyme(node);
     }

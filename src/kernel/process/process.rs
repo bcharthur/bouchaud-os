@@ -6,7 +6,7 @@
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use crate::kernel::sync::{lockdep::LockClass, RankedSpinLock};
+use crate::kernel::sync::{lockdep::LockClass, portee, Domaine, RankedSpinLock};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum State { Running, Sleeping, Zombie }
@@ -29,6 +29,7 @@ static TABLE: RankedSpinLock<Registry> =
     RankedSpinLock::new(LockClass::ProcessTable, Registry { rows: Vec::new(), next_pid: 1 });
 
 pub fn init() {
+    let _domaine = portee(Domaine::RegistreProcessus);
     {
         let mut t = TABLE.lock();
         t.rows.clear();
@@ -40,6 +41,7 @@ pub fn init() {
 }
 
 pub fn spawn(name: &str, uid: u16) -> u32 {
+    let _domaine = portee(Domaine::RegistreProcessus);
     let mut t = TABLE.lock();
     let pid = t.next_pid;
     t.next_pid = t.next_pid.wrapping_add(1).max(1);
@@ -48,6 +50,7 @@ pub fn spawn(name: &str, uid: u16) -> u32 {
 }
 
 pub fn kill(pid: u32) -> bool {
+    let _domaine = portee(Domaine::RegistreProcessus);
     if pid <= 1 { return false; }
     let mut t = TABLE.lock();
     let before = t.rows.len();
@@ -56,13 +59,18 @@ pub fn kill(pid: u32) -> bool {
 }
 
 pub fn set_state(pid: u32, state: State) {
+    let _domaine = portee(Domaine::RegistreProcessus);
     let mut t = TABLE.lock();
     if let Some(p) = t.rows.iter_mut().find(|p| p.pid == pid) { p.state = state; }
 }
 
-pub fn count() -> usize { TABLE.lock().rows.len() }
+pub fn count() -> usize {
+    let _domaine = portee(Domaine::RegistreProcessus);
+    TABLE.lock().rows.len()
+}
 
 pub fn print_table() {
+    let _domaine = portee(Domaine::RegistreProcessus);
     let snapshot = TABLE.lock().rows.clone();
     crate::println!("  PID  UID  ETAT      NOM");
     for p in snapshot.iter() {

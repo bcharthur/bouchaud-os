@@ -1,6 +1,7 @@
 /// Snapshot SMP-NG2: charge physique, pression de runqueue, tache courante,
 /// steals et migrations par CPU.
 pub fn log_smp_load() {
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
     let _kernel = smp_lock::enter();
     let online = smp::schedulable_cpus().max(1).min(MAX_CPUS);
     let mut line = alloc::string::String::from("[SMP-LOAD]");
@@ -112,6 +113,50 @@ anomalies={}/{}/{} proprietaire={}{}",
         Absent(c.proprietaire as u64),
         ventilation,
     ));
+    // BOUCHAUD_C1_ATTRIBUTION_DOMAINE_V1
+    //
+    // Le chiffre du chantier « sortie du gros verrou ». `normaux` exclut le
+    // boot precoce et la panique, ou le verrou reste legitime : les inclure
+    // rendrait l'objectif inatteignable par construction, donc inutile.
+    //
+    // `regressions` doit valoir zero POUR TOUJOURS. Non nul, un chemin declare
+    // sorti l'a repris, et le domaine fautif est NOMME -- ce qu'aucun total
+    // d'acquisitions ne pouvait dire.
+    {
+        use crate::kernel::sync::{domaine, registre_domaines, Contrat, Domaine};
+        let registre = registre_domaines();
+        let mut ligne = alloc::string::String::from("[BKL-DOMAINES]");
+        let _ = core::fmt::Write::write_fmt(
+            &mut ligne,
+            format_args!(
+                " normaux={} regressions={} debordements={} premiere_regression={}",
+                registre.acquisitions_chemins_normaux(),
+                registre.total_violations(),
+                registre.debordements(),
+                match registre.premiere_regression() {
+                    Some(fautif) => fautif.nom(),
+                    None => "aucune",
+                },
+            ),
+        );
+        for code in 0..domaine::NOMBRE as u8 {
+            let d = Domaine::depuis_code(code);
+            let acquisitions = registre.acquisitions(d);
+            // Un domaine a zero n'apprend rien tant qu'il n'a rien promis ;
+            // un domaine SORTI a zero est au contraire la preuve recherchee.
+            if acquisitions == 0 && !matches!(d.contrat(), Contrat::Migre) {
+                continue;
+            }
+            let _ = core::fmt::Write::write_fmt(
+                &mut ligne,
+                format_args!(
+                    " {}=[{} acq={} regressions={}]",
+                    d.nom(), d.contrat().nom(), acquisitions, registre.violations(d),
+                ),
+            );
+        }
+        crate::kernel::dmesg::log_fmt(format_args!("{}", ligne));
+    }
     let (_, _, backing_reads, backing_bytes) = crate::fs::backing::stats();
     let (cache_hits, readahead_hits) = crate::fs::backing::cache_stats();
     let readahead_pages = crate::fs::backing::readahead_pages();

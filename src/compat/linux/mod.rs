@@ -850,6 +850,7 @@ fn sys_clock_gettime(clock: i32, out: u64) -> i64 {
             // fils du processus. Elle prend donc le gros verrou, ici et nulle
             // part ailleurs. Le reste de `clock_gettime` -- c'est-a-dire tout
             // ce qu'emet une boucle d'evenements -- s'en passe.
+            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Syscall);
             let _kernel = crate::kernel::smp_lock::enter();
             let pid = crate::kernel::task::current_process().pid;
             crate::kernel::task::cpu_time_ms(pid)

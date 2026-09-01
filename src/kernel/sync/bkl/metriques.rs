@@ -290,6 +290,20 @@ fn probe_note_acquire(cpu: usize, kind: u32) {
         cpu,
         kind,
     );
+
+    // BOUCHAUD_C1_ATTRIBUTION_DOMAINE_V1
+    //
+    // A QUEL CHEMIN cette prise appartient-elle. Un total ne dit pas lesquelles
+    // restent legitimes ; or la sortie du gros verrou se fait chemin par
+    // chemin, et un chemin sorti doit ensuite le RESTER. Sans attribution, un
+    // appelant qui reprend le verrou dans un sous-systeme deja migre est
+    // indiscernable du bruit de fond des chemins non encore traites.
+    //
+    // Rien de plus qu'un `fetch_add` : on s'execute interruptions masquees, et
+    // le journal se fabrique une fois par seconde, ailleurs.
+    if let Some(fautif) = crate::kernel::sync::registre_domaines().note_acquisition(cpu) {
+        crate::kernel::sync::signale_regression_domaine(fautif);
+    }
 }
 
 #[inline]

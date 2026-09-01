@@ -251,6 +251,7 @@ impl Drop for ControleProfondeur {
 /// l'appelant, qui doit reevaluer sa condition d'attente.
 pub fn schedule() -> bool {
     let profondeur_entree = smp_lock::profondeur_locale();
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
     let _kernel = smp_lock::enter();
     let _controle = ControleProfondeur { site: "schedule", attendue: profondeur_entree };
     complete_switch_handoff();
@@ -290,6 +291,7 @@ pub fn schedule() -> bool {
 }
 
 fn switch_to(from: usize, to: usize) {
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
     let _kernel = smp_lock::enter();
     complete_switch_handoff();
     let cpu_id = local_cpu();
@@ -322,6 +324,7 @@ fn switch_to(from: usize, to: usize) {
 
 /// Retour definitif au fil noyau appelant (la tache courante est terminee).
 fn switch_to_kernel() -> ! {
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
     let _kernel = smp_lock::enter();
     complete_switch_handoff();
     let cpu_id = local_cpu();
@@ -366,6 +369,7 @@ pub fn secondary_cpu_loop() -> ! {
     usermode::per_cpu().current = 0;
 
     loop {
+        let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
         let _kernel = smp_lock::enter();
         stall_site_set(50, current_index_raw() as u64);
         // Avant le premier register() du BSP, ne meme pas materialiser TASKS :

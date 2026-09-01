@@ -207,6 +207,7 @@ pub fn exit_group(code: i32) -> ! {
 /// effacerait l'identite de la tache appelante. Les appelants verifient
 /// [`in_user_task`] avant d'arriver ici — voir `exec::exec_image`.
 pub fn run(mut first: Box<Task>) -> i32 {
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Processus);
     let _kernel = smp_lock::enter();
     // Le thread racine d'un lancement synchrone doit revenir sur la pile
     // noyau de son CPU appelant. Lui seul est pince; les pthreads qu'il cree
@@ -251,6 +252,7 @@ pub fn run(mut first: Box<Task>) -> i32 {
 }
 
 pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Processus);
     let _kernel = smp_lock::enter();
     if in_user_task() {
         crate::kernel::dmesg::log("task: run_noyau imbrique refuse");
@@ -456,6 +458,7 @@ pub fn retire_current_if_zombie() {
     if !RETRAITE_DEMANDEE[cpu].load(Ordering::Acquire) {
         return;
     }
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Processus);
     let _kernel = smp_lock::enter();
     RETRAITE_DEMANDEE[cpu].store(false, Ordering::Release);
     if in_user_task() && current().state == TaskState::Zombie {

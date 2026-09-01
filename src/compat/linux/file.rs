@@ -395,6 +395,7 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
 
     match kind {
         FdKind::Console => {
+            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fd);
             let _kernel = crate::kernel::smp_lock::enter();
             console_write(&data);
             count as i64
@@ -407,6 +408,7 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
         FdKind::Audio => {
             // AC97 still has legacy global driver state. Keep its safety domain
             // local to this rare branch instead of serialising every write.
+            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fd);
             let _kernel = crate::kernel::smp_lock::enter();
             if !crate::drivers::ac97::pret() && !crate::drivers::ac97::init() {
                 return -errno::ENODEV;
@@ -448,6 +450,7 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
             }
             // RAMFS metadata/content is still a legacy global domain. User
             // copyin has already finished, so no demand fault occurs under it.
+            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fd);
             let _kernel = crate::kernel::smp_lock::enter();
             let (offset, append) = {
                 let borrowed = process.files.lock();
@@ -525,6 +528,7 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
         FdKind::Socket(_) => {
             // Inet/e1000 is not yet fully object-owned. Constrain the BKL to
             // the network mutation itself; copyin and fd lookup stay parallel.
+            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fd);
             let _kernel = crate::kernel::smp_lock::enter();
             crate::kernel::abi::net::envoie_octets(fd, data, 0, 0, 0)
         }
@@ -2387,10 +2391,12 @@ fn readable(fd: i32) -> bool {
         // balayage -- tubes, paires de sockets, eventfd, timerfd, console,
         // fichiers, ce qu'utilise l'IPC de Ladybird -- s'en passe entierement.
         FdKind::InputKeyboard => {
+            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fd);
             let _kernel = crate::kernel::smp_lock::enter();
             input::keyboard_pending()
         }
         FdKind::InputMouse => {
+            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fd);
             let _kernel = crate::kernel::smp_lock::enter();
             input::mouse_pending()
         }
@@ -2403,6 +2409,7 @@ fn readable(fd: i32) -> bool {
         FdKind::Socket(state) => {
             // L'anneau e1000 est en `static mut` sans verrou : le pompage n'est
             // serialise que par le gros verrou. Voir le commentaire ci-dessus.
+            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fd);
             let _kernel = crate::kernel::smp_lock::enter();
             crate::kernel::abi::net::socket_readable(&state)
         }

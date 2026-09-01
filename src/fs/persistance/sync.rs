@@ -6,6 +6,7 @@ pub fn synchronise() -> i64 {
     let _transaction = TRANSACTION.lock();
 
     let original_depth = crate::kernel::smp_lock::profondeur_locale();
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fs);
     let owned = if original_depth == 0 { Some(crate::kernel::smp_lock::enter()) } else { None };
     let snapshot_start = crate::kernel::timer::monotonic_ns();
     let snapshot = rassemble_snapshot();

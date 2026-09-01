@@ -31,6 +31,7 @@ pub fn preempt_from_irq() {
     // (`from_user`), donc un contexte qui ne peut rien detenir. Le refus est
     // donc la ceinture, pas le comportement nominal -- et s'il se declenche, il
     // se compte et se DIFFERE au lieu de casser silencieusement.
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
     let Some(kernel) = smp_lock::try_enter_depuis_zero() else {
         stall_site_clear();
         if smp_lock::held_by_current_cpu() {
@@ -106,6 +107,7 @@ pub fn preempt_from_irq() {
 
     // Ne jamais bloquer ici. Nettoyage opportuniste uniquement.
     stall_site_set(42, 0);
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
     if let Some(_kernel) = smp_lock::try_enter() {
         stall_site_set(43, 0);
         complete_switch_handoff();

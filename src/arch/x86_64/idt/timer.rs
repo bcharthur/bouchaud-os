@@ -24,6 +24,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
     let mut preempt_now = false;
     {
         let _site = crate::kernel::task::SiteIrq::enter(60, 0);
+        let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
         let Some(_kernel) = crate::kernel::smp_lock::try_enter() else {
             if quantum && crate::kernel::task::in_user_task() {
                 // The IRQ cannot safely switch while the global compatibility

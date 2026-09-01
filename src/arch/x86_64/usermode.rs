@@ -154,6 +154,7 @@ unsafe extern "C" fn syscall_dispatch(frame: *mut TrapFrame) {
         crate::kernel::task::account_kernel_exit();
         crate::kernel::task::retire_current_if_zombie();
     } else {
+        let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Syscall);
         let kernel = crate::kernel::smp_lock::enter();
         crate::kernel::task::stall_syscall_bkl_acquired();
         crate::kernel::task::account_kernel_enter();

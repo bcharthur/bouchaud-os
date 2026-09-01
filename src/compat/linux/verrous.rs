@@ -6,7 +6,7 @@
 //! un RankedSpinLock, ce qui ferme aussi la course check-then-insert.
 
 use alloc::vec::Vec;
-use crate::kernel::sync::{lockdep::LockClass, RankedSpinLock};
+use crate::kernel::sync::{lockdep::LockClass, portee, Domaine, RankedSpinLock};
 
 pub const F_RDLCK: i16 = 0;
 pub const F_WRLCK: i16 = 1;
@@ -67,6 +67,7 @@ fn retire_plage_dans(verrous: &mut Vec<Verrou>, noeud: usize, pid: u32, debut: u
 pub enum Pose { Accorde, Occupe }
 
 pub fn pose(noeud: usize, pid: u32, genre: i16, debut: u64, longueur: u64) -> Pose {
+    let _domaine = portee(Domaine::VerrouEnregistrement);
     let fin = borne(debut, longueur);
     let mut table = VERROUS.lock();
     if genre == F_UNLCK {
@@ -84,6 +85,7 @@ pub fn pose(noeud: usize, pid: u32, genre: i16, debut: u64, longueur: u64) -> Po
 pub fn interroge(
     noeud: usize, pid: u32, genre: i16, debut: u64, longueur: u64,
 ) -> Option<(i16, u64, u64, u32)> {
+    let _domaine = portee(Domaine::VerrouEnregistrement);
     let fin = borne(debut, longueur);
     let table = VERROUS.lock();
     conflit_dans(&table, noeud, pid, genre, debut, fin).map(|v| {
@@ -97,11 +99,14 @@ fn borne(debut: u64, longueur: u64) -> u64 {
 }
 
 pub fn libere_fichier(noeud: usize, pid: u32) {
+    let _domaine = portee(Domaine::VerrouEnregistrement);
     VERROUS.lock().retain(|v| !(v.noeud == noeud && v.pid == pid));
 }
 
 pub fn libere_processus(pid: u32) {
+    let _domaine = portee(Domaine::VerrouEnregistrement);
     VERROUS.lock().retain(|v| v.pid != pid);
 }
 
-pub fn compte() -> usize { VERROUS.lock().len() }
+pub fn compte() -> usize {
+    let _domaine = portee(Domaine::VerrouEnregistrement); VERROUS.lock().len() }

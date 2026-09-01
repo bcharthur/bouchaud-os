@@ -7,6 +7,7 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(stack: InterruptStackFrame)
 
     if status & 0x20 == 0 {
         // Keyboard path unchanged for V7.
+        let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Pilote);
         let _kernel = crate::kernel::smp_lock::enter();
         keyboard::push_scancode(data);
     } else {

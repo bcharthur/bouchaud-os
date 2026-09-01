@@ -145,6 +145,7 @@ fn publish_ready(index: usize) {
 }
 
 pub fn register(mut task: Box<Task>) -> usize {
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Processus);
     let _kernel = smp_lock::enter();
     if task.noyau {
         task.affinity_mask = 1;

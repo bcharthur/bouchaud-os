@@ -248,6 +248,7 @@ pub fn try_current() -> Option<&'static mut Task> {
 
 /// Processus de la tache courante.
 pub fn current_process() -> Arc<Process> {
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
     let _kernel = smp_lock::enter();
     current().process.clone()
 }

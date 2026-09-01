@@ -16,6 +16,7 @@ extern "x86-interrupt" fn mouse_interrupt_handler(stack: InterruptStackFrame) {
     } else {
         // Defensive 8042 reroute. Only the keyboard fallback keeps its legacy
         // BKL path; normal IRQ12 mouse traffic never enters it.
+        let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Pilote);
         let _kernel = crate::kernel::smp_lock::enter();
         keyboard::push_scancode(byte);
     }

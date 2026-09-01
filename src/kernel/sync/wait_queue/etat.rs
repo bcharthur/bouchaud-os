@@ -24,6 +24,7 @@ fn waitq_update_max(atom: &AtomicU64, value: u64) {
 
 fn enter_bkl() -> crate::kernel::smp_lock::KernelGuard {
     let start = crate::kernel::timer::monotonic_ns();
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Readiness);
     let guard = crate::kernel::smp_lock::enter();
     WAITQ_BKL_ENTERS.fetch_add(1, Ordering::Relaxed);
     WAITQ_BKL_WAIT_NS.fetch_add(
