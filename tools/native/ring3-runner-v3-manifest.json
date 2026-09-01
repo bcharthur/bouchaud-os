@@ -1,0 +1,9 @@
+{
+  "overlay": "bouchaud-os-chantier-7-ring3-runner-v3",
+  "base": "ring3 runtime proof v2",
+  "fix": "accept clean QEMU shutdown after success markers; final log scan after child exit",
+  "replaces": [
+    "tools/native/run-native-ipc-ring3.ps1",
+    "tools/ci/run_native_ipc_probe.sh"
+  ]
+}
