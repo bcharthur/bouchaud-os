@@ -144,6 +144,16 @@ fn publish_ready(index: usize) {
         crate::arch::x86_64::cpu_local::local(id).enqueue(identite.en_mot());
         crate::kernel::scheduler::preempt::request_cpu(target);
     }
+    // Seconde moitie du motif croise (voir `idle_enter`). La mise en file
+    // ci-dessus se termine par une liberation de verrou -- une simple ecriture
+    // sur x86 --, et `is_idle` est une lecture. Sans barriere, le processeur
+    // peut executer la lecture AVANT que l'ecriture ne quitte le tampon : nous
+    // lirions « pas idle » alors que le coeur s'endort, et lui lirait une file
+    // vide alors que nous venons de la remplir. Personne n'envoie l'IPI.
+    //
+    // Une lecture SeqCst ne suffirait pas : sur x86 elle reste un `mov` et ne
+    // vide pas le tampon d'ecriture. Il faut la barriere.
+    core::sync::atomic::fence(Ordering::SeqCst);
     if cpu::is_idle(target) { smp::reschedule_cpu(target); }
 }
 

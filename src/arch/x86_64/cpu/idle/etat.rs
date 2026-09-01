@@ -38,6 +38,15 @@ static SCHED_WAKES: [AtomicU64; smp::MAX_CPUS] =
     [const { AtomicU64::new(0) }; smp::MAX_CPUS];
 static SCHED_SAFE_RETURNS: [AtomicU64; smp::MAX_CPUS] =
     [const { AtomicU64::new(0) }; smp::MAX_CPUS];
+/// Endormissements PREPARES puis abandonnes parce que la file s'etait remplie
+/// entre-temps. Chaque unite est un reveil qui aurait ete perdu.
+static SCHED_ABANDONS: [AtomicU64; smp::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; smp::MAX_CPUS];
+
+pub fn sched_abandons(cpu: usize) -> u64 {
+    if cpu >= smp::MAX_CPUS { return 0; }
+    SCHED_ABANDONS[cpu].load(Ordering::Relaxed)
+}
 
 static LOCK_PREPARES: [AtomicU64; smp::MAX_CPUS] =
     [const { AtomicU64::new(0) }; smp::MAX_CPUS];
@@ -79,7 +88,21 @@ fn idle_next_seq(cpu: usize) -> u64 {
 fn idle_enter(cpu: usize) {
     let now = crate::kernel::timer::monotonic_ns();
     IDLE_SINCE_NS[cpu].store(now, Ordering::Release);
-    IDLE[cpu].store(true, Ordering::Release);
+    // SeqCst, et non Release : cette ecriture est la premiere moitie d'un
+    // motif CROISE. Nous publions « je dors » puis nous relisons la file ; le
+    // reveilleur remplit la file puis relit « dort-il ? ». Deux ecritures
+    // suivies de deux lectures croisees, sur DEUX objets differents.
+    //
+    // `Release` n'ordonne une ecriture qu'avec la lecture qui la suit chez
+    // l'autre. Il ne dit rien de ce motif -- et sur x86 le seul reordonnancement
+    // permis est justement store -> load : le tampon d'ecriture laisse notre
+    // relecture de la file passer AVANT cette publication. Les deux cotes se
+    // manqueraient, et la tache dormirait pour toujours.
+    //
+    // SeqCst place les deux ecritures dans un ordre total unique : au moins
+    // l'un des deux voit l'autre. C'est le meme argument que
+    // `kernel::sync::rendezvous`, et pour la meme raison.
+    IDLE[cpu].store(true, Ordering::SeqCst);
 }
 
 #[inline]

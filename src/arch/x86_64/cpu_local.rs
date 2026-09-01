@@ -313,6 +313,15 @@ impl CpuLocal {
         self.run_queue.try_lock().map(|file| file.contains(&identite))
     }
 
+    /// La file a-t-elle du travail ? `None` si elle est verrouillee.
+    ///
+    /// L'appelant doit traiter `None` comme « peut-etre du travail » : perdre
+    /// un `hlt` ne coute qu'un tour de boucle, perdre un reveil fige la
+    /// machine. L'incertitude se resout donc toujours du meme cote.
+    pub fn file_non_vide_essai(&self) -> Option<bool> {
+        self.run_queue.try_lock().map(|file| !file.is_empty())
+    }
+
     pub fn run_queue_len(&self) -> usize {
         self.run_queue.lock().len()
     }
