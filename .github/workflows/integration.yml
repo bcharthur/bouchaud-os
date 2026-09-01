@@ -1,0 +1,290 @@
+name: Integration
+
+# Integration automatique uniquement apres merge/push sur main.
+# Sur une PR, ajouter le label `ci:integration` pour la demander explicitement.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tools/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'targets/**'
+      - '.cargo/**'
+      - '.github/workflows/integration.yml'
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: 'auto, kernel ou all'
+        required: false
+        default: auto
+        type: choice
+        options: [auto, kernel, all]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: integration / gate
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+      health: ${{ steps.classify.outputs.health }}
+      mm: ${{ steps.classify.outputs.mm }}
+      primitives: ${{ steps.classify.outputs.primitives }}
+      kernel: ${{ steps.classify.outputs.kernel }}
+      userland: ${{ steps.classify.outputs.userland }}
+      browser_engine: ${{ steps.classify.outputs.browser_engine }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Autorisation du niveau integration
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          run=false
+          if [ "$EVENT" = push ] || [ "$EVENT" = workflow_dispatch ]; then run=true; fi
+          case ",$LABELS," in *,ci:integration,*) run=true ;; esac
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "integration enabled=$run"
+      - name: Classer les changements
+        id: classify
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          SUITE: ${{ inputs.suite || 'auto' }}
+        run: |
+          if [ "$SUITE" = all ] || [ "$SUITE" = kernel ]; then
+            python3 tools/ci/classify_changes.py --head "$HEAD_SHA" --all
+          else
+            python3 tools/ci/classify_changes.py --base "$BASE_SHA" --head "$HEAD_SHA"
+          fi
+
+  kernel-build:
+    name: kernel / bootimage once
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: integration-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            integration-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-
+      - name: Construire l'image une seule fois
+        run: tools/ci/build_kernel.sh
+      - name: Publier le bootimage partage
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-bootimage
+          path: target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          if-no-files-found: error
+          retention-days: 7
+
+  qemu-smoke:
+    name: qemu / boot smoke
+    needs: [gate, kernel-build]
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+      - uses: actions/download-artifact@v4
+        with:
+          name: integration-bootimage
+          path: image
+      - name: Boot minimal
+        run: tools/ci/run_qemu_smoke.sh image/bootimage-bouchaud-os.bin qemu-smoke.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-qemu-smoke
+          path: qemu-smoke.log
+          if-no-files-found: warn
+
+  system-health:
+    name: qemu / system health
+    needs: [gate, kernel-build]
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + curl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 curl
+      - uses: actions/download-artifact@v4
+        with:
+          name: integration-bootimage
+          path: image
+      - name: Health bare-metal
+        run: tools/ci/run_system_health.sh image/bootimage-bouchaud-os.bin
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-system-health
+          path: |
+            health.log
+            health-report.json
+            fixture.log
+          if-no-files-found: warn
+
+  os-primitives:
+    name: qemu / os primitives
+    needs: [gate, kernel-build]
+    if: needs.gate.outputs.run == 'true' && (needs.gate.outputs.primitives == 'true' || inputs.suite == 'all')
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + musl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 musl-tools build-essential file
+      - uses: actions/download-artifact@v4
+        with:
+          name: integration-bootimage
+          path: image
+      - name: Sondes ABI/FS/disque
+        run: tools/ci/run_os_primitives.sh image/bootimage-bouchaud-os.bin
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-os-primitives
+          path: serie-primitives.log
+          if-no-files-found: warn
+
+  mm-ng6:
+    name: qemu / mm-ng6 smp4
+    needs: [gate, kernel-build]
+    if: needs.gate.outputs.run == 'true' && (needs.gate.outputs.mm == 'true' || inputs.suite == 'all')
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + musl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 musl-tools file
+      - uses: actions/download-artifact@v4
+        with:
+          name: integration-bootimage
+          path: image
+      - name: Stress memoire SMP4
+        run: tools/ci/run_mm_ng6.sh image/bootimage-bouchaud-os.bin
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-mm-ng6
+          path: |
+            mm-ng6.log
+            mmstress.readelf.txt
+            mmstress.sha256
+          if-no-files-found: warn
+
+  qt-pixel:
+    name: host / qt pixel
+    needs: gate
+    if: needs.gate.outputs.run == 'true' && (needs.gate.outputs.userland == 'true' || needs.gate.outputs.browser_engine == 'true' || inputs.suite == 'all')
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Qt hote
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qtbase5-dev qtbase5-dev-tools libbrotli-dev python3-dev
+      - name: Pixels reels
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: tools/userland/verifie-hote.sh
+
+  dns-udp:
+    name: qemu / dns udp ring3
+    needs: gate
+    if: needs.gate.outputs.run == 'true' && (needs.gate.outputs.kernel == 'true' || inputs.suite == 'all')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+      - name: Cache Cargo de la sonde specialisee
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: dns-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            dns-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-
+      - name: DNS depuis ring3
+        run: tools/net/verifie-dns.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-dns-udp
+          path: target/verifie-dns/serie.log
+          if-no-files-found: warn
+
+  integration-gate:
+    name: integration-gate
+    if: always()
+    needs: [gate, kernel-build, qemu-smoke, system-health, os-primitives, mm-ng6, qt-pixel, dns-udp]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Synthese
+        env:
+          ENABLED: ${{ needs.gate.outputs.run }}
+          KERNEL: ${{ needs.kernel-build.result }}
+          BOOT: ${{ needs.qemu-smoke.result }}
+          HEALTH: ${{ needs.system-health.result }}
+          PRIMITIVES: ${{ needs.os-primitives.result }}
+          MM: ${{ needs.mm-ng6.result }}
+          QT: ${{ needs.qt-pixel.result }}
+          DNS: ${{ needs.dns-udp.result }}
+        run: |
+          if [ "$ENABLED" != true ]; then
+            echo 'Integration non demandee sur cette PR.'
+            exit 0
+          fi
+          printf '%-12s %s\n' kernel "$KERNEL" boot "$BOOT" health "$HEALTH" primitives "$PRIMITIVES" mm "$MM" qt "$QT" dns "$DNS"
+          # qt-pixel est informatif. Les jobs skipped sont normaux.
+          for r in "$KERNEL" "$BOOT" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS"; do
+            [ "$r" != failure ] && [ "$r" != cancelled ] || exit 1
+          done
+          echo INTEGRATION_GATE_OK

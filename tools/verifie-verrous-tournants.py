@@ -40,10 +40,12 @@ ATTENTE = re.compile(
 SUJET = re.compile(r"^\s*(?:\}\s*)?(?:let\s+.*?=\s*)?(match|if\s+let|while\s+let)\b")
 LIAISON = re.compile(r"^\s*let\s+(?:mut\s+)?(\w+)\s*=\s*.+\.lock\(\)\s*;\s*$")
 
-# Exception relue et nommee : TRANSACTION est declare dans
-# src/fs/persistance/transaction.rs comme SleepMutex<()>. sync.rs est include!
-# dans le meme module ; le controle syntaxique ne voit donc pas le type du
-# receveur et le classait a tort comme verrou tournant.
+# Exceptions relues et nommees : cle -> raison.
+#
+# TRANSACTION est declare dans src/fs/persistance/transaction.rs comme
+# SleepMutex<()>. Le fragment sync.rs est include! dans le meme module : le
+# controle syntaxique ne voit donc pas le type du receveur lorsqu'il analyse
+# sync.rs et le classait a tort comme verrou tournant.
 AUDITS_NOMMES: dict[str, str] = {
     "src/fs/persistance/sync.rs:_transaction": (
         "TRANSACTION est un SleepMutex<()>, pas un SpinLock ; "
@@ -53,10 +55,12 @@ AUDITS_NOMMES: dict[str, str] = {
 
 
 def code(ligne: str) -> str:
+    """La ligne sans son commentaire de fin, pour ne pas lire une prose."""
     return ligne.split("//")[0]
 
 
 def est_audite(relatif: str, numero: int, garde: str | None = None) -> bool:
+    """Vrai si le cas est une exception nommee et relue."""
     cles = [f"{relatif}:{numero}"]
     if garde:
         cles.append(f"{relatif}:{garde}")
@@ -64,6 +68,7 @@ def est_audite(relatif: str, numero: int, garde: str | None = None) -> bool:
 
 
 def fin_de_bloc(lignes: list[str], depart: int) -> int | None:
+    """Indice de la ligne qui ferme le bloc ouvert a partir de `depart`."""
     profondeur = 0
     ouvert = False
     for i in range(depart, len(lignes)):
@@ -83,6 +88,8 @@ def examine(chemin: Path) -> list[str]:
 
     for i, ligne in enumerate(lignes):
         c = code(ligne)
+
+        # Forme 1 : le sujet prend un verrou, un bras attend.
         sujet = SUJET.match(c)
         if sujet and ".lock()" in c:
             fin = fin_de_bloc(lignes, i)
@@ -101,6 +108,7 @@ def examine(chemin: Path) -> list[str]:
                         break
             continue
 
+        # Forme 2 : un garde nomme traverse une attente sans avoir ete rendu.
         liaison = LIAISON.match(c)
         if not liaison:
             continue
@@ -111,8 +119,10 @@ def examine(chemin: Path) -> list[str]:
 
         for j in range(i + 1, len(lignes)):
             cj = code(lignes[j])
+
             if rendu.search(cj):
                 break
+
             if ATTENTE.search(cj):
                 if est_audite(relatif, i + 1, nom):
                     break
@@ -122,6 +132,7 @@ def examine(chemin: Path) -> list[str]:
                     f"    Rends-le par `drop({nom})` avant, ou restreins sa portee."
                 )
                 break
+
             profondeur += cj.count("{") - cj.count("}")
             if profondeur < 0:
                 break

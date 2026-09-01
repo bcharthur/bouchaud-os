@@ -1,186 +1,44 @@
-name: os-primitives
-
-# Les primitives systeme dont Ladybird depend, verifiees dans Bouchaud OS.
-#
-# Ces sondes ont chacune ete ecrite pour un defaut reel, et chacune est d'abord
-# validee sur Linux -- une sonde qui echouerait des deux cotes ne prouverait
-# rien. Elles n'etaient jusqu'ici lancees qu'a la main : rien n'empechait une
-# regression de passer.
-#
-# Le declenchement est etroit : ce qui touche a l'ABI, au pilote de disque, au
-# systeme de fichiers ou aux sondes elles-memes.
+name: os-primitives (debug)
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - "feat/ladybird-platform-smp4"
-    paths:
-      - "tools/userland/**"
-      - "src/kernel/abi/**"
-      - "src/drivers/ata.rs"
-      - "src/fs/**"
-      - ".github/workflows/os-primitives.yml"
 
 permissions:
   contents: read
 
 concurrency:
-  group: os-primitives-${{ github.ref }}
+  group: os-primitives-debug-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  sondes:
-    name: sondes-primitives
+  probes:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
-
-      - name: Outils
+      - name: QEMU + musl
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            qemu-system-x86 musl-tools build-essential file
-
-      - name: Cache cargo noyau
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 musl-tools build-essential file
+      - name: Cache Cargo
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.cargo/bin
             target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          key: primitives-debug-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
           restore-keys: |
+            primitives-debug-${{ runner.os }}-
             cargo-${{ runner.os }}-
-
-      - name: Construire le noyau
-        run: |
-          rustup show active-toolchain || rustup toolchain install
-          cargo install bootimage --locked
-          cargo bootimage
-
-      - name: Construire les sondes
-        run: |
-          set -eux
-          (cd tools/userland && OUT=out-sondes ./build.sh musl)
-          ls -la tools/userland/out-sondes
-
-      # Chaque sonde doit rendre zero echec SUR LINUX avant qu'on la croie sous
-      # Bouchaud. Une sonde qui echoue des deux cotes ne mesure pas l'OS : elle
-      # est cassee.
-      - name: Reference Linux
-        run: |
-          set -eux
-          cd tools/userland/out-sondes
-          ./verrous-probe
-          ./exec-fd-probe
-          ./wal-probe
-          ./nom-long-probe
-          ./sendfile-probe
-
-      - name: Fabriquer l'image
-        run: |
-          set -eux
-          SCENARIO=scenario-primitives
-          mkdir -p "$SCENARIO/bin"
-          cp tools/userland/out-sondes/verrous-probe "$SCENARIO/bin/"
-          cp tools/userland/out-sondes/exec-fd-probe "$SCENARIO/bin/"
-          cp tools/userland/out-sondes/wal-probe "$SCENARIO/bin/"
-          cp tools/userland/out-sondes/disque-probe "$SCENARIO/bin/"
-          cp tools/userland/out-sondes/nom-long-probe "$SCENARIO/bin/"
-          cp tools/userland/out-sondes/session-probe "$SCENARIO/bin/"
-          cp tools/userland/out-sondes/sendfile-probe "$SCENARIO/bin/"
-
-          # Un gros fichier a paginer : disque-probe a besoin d'une charge de
-          # lecture concurrente pour valoir quelque chose.
-          python3 - <<'PY'
-          bloc = (b"B" * 63 + b"\n") * 16384
-          with open("scenario-primitives/bin/gros.bin", "wb") as f:
-              for _ in range(96):
-                  f.write(bloc)
-          PY
-
-          cat > "$SCENARIO/autorun" <<'AUTORUN'
-          strace echecs
-          /bin/verrous-probe
-          /bin/exec-fd-probe
-          /bin/wal-probe
-          /bin/disque-probe /bin/gros.bin
-          /bin/nom-long-probe
-          /bin/sendfile-probe
-          /bin/session-probe 4
-          echo SESSION_INVITE_REVENUE
-          strace off
-          echo PRIMITIVES_FIN
-          AUTORUN
-
-          (cd tools/userland && IMAGE="$GITHUB_WORKSPACE/primitives.img" \
-             ./mkdisk.sh "$GITHUB_WORKSPACE/$SCENARIO")
-
-      - name: Executer sous Bouchaud OS
-        run: |
-          set -u
-          LOG=serie-primitives.log
-          : > "$LOG"
-          DEADLINE=$((SECONDS + 600))
-
-          qemu-system-x86_64 \
-            -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
-            -drive format=raw,file=primitives.img \
-            -m 4096 -smp 4 -display none -no-reboot \
-            -netdev user,id=net0 -device e1000,netdev=net0 \
-            -serial file:"$LOG" &
-          PID=$!
-
-          while kill -0 "$PID" 2>/dev/null; do
-            if (( SECONDS >= DEADLINE )); then
-              echo "ECHEANCE atteinte" >&2
-              break
-            fi
-            sleep 0.5
-          done
-
-          kill -TERM "$PID" 2>/dev/null || true
-          sleep 1
-          kill -KILL "$PID" 2>/dev/null || true
-          wait "$PID" 2>/dev/null || true
-          tail -c 262144 "$LOG"
-
-      - name: Verdict
-        run: |
-          set -e
-          grep -aF "VERROUS_POSIX_OK" serie-primitives.log
-          grep -aF "EXEC_FD_OK" serie-primitives.log
-          grep -aF "WAL_PROBE_OK" serie-primitives.log
-          grep -aF "DISQUE_PROBE_OK" serie-primitives.log
-          grep -aF "NOM_LONG_OK" serie-primitives.log
-          grep -aF "SENDFILE_OK" serie-primitives.log
-          # L'invite doit revenir APRES un programme qui laisse des fils
-          # vivants : sans cela l'autorun ne se termine pas, `power::shutdown`
-          # n'est jamais appele, et /persist n'est pas ecrit a l'extinction.
-          grep -aF "SESSION_PERE_SORT fils=4" serie-primitives.log
-          grep -aF "SESSION_INVITE_REVENUE" serie-primitives.log
-          grep -aF "PRIMITIVES_FIN" serie-primitives.log
-
-          # Le pilote de disque ne doit signaler aucune commande en echec.
-          # Une seule suffit a rendre EIO a `fsync`, et SQLite n'a alors plus
-          # que « disk I/O error » a dire -- c'est ainsi que le BrowserHost est
-          # mort au run 32426569316.
-          # `ata: hda ... secteurs` est la ligne de geometrie, annoncee a
-          # chaque demarrage : elle est normale. Seules les commandes en echec
-          # se disent « lecture » ou « ecriture ».
-          if grep -aqE "ata: (lecture|ecriture) " serie-primitives.log; then
-            echo "Le pilote ATA a signale au moins une commande en echec :" >&2
-            grep -aE "ata: (lecture|ecriture) " serie-primitives.log >&2
-            exit 1
-          fi
-
-      - name: Journal
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - name: Primitives sur Bouchaud OS
+        run: tools/ci/run_os_primitives.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: os-primitives-log
+          name: os-primitives-debug
           path: serie-primitives.log
           if-no-files-found: warn
