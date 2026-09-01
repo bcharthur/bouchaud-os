@@ -94,11 +94,24 @@ jobs:
             cargo-${{ runner.os }}-
       - name: Construire l'image une seule fois
         run: tools/ci/build_kernel.sh
+
+      # De quel commit vient cette image, et est-ce bien celle qui a ete
+      # testee. Une image qui boote sans qu'on sache CE qui a ete construit
+      # n'est pas une publication, c'est un artefact.
+      - name: Manifeste de publication
+        run: |
+          python3 tools/ci/release_manifest.py \
+            target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            --sortie release-manifest.json
+          cat release-manifest.json
+
       - name: Publier le bootimage partage
         uses: actions/upload-artifact@v4
         with:
           name: integration-bootimage
-          path: target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          path: |
+            target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+            release-manifest.json
           if-no-files-found: error
           retention-days: 7
 
@@ -198,6 +211,15 @@ jobs:
           path: image
       - name: Stress memoire SMP4
         run: tools/ci/run_mm_ng6.sh image/bootimage-bouchaud-os.bin
+
+      # Les budgets d'EXECUTION ne peuvent se verifier que la ou une trace
+      # existe. Celle-ci est la plus longue et la plus chargee de
+      # l'integration : c'est donc ici qu'un figement du gros verrou se voit.
+      # Trois valeurs bloquent -- tenue maximale, attente maximale avant
+      # acquisition, et regressions de domaine, qui doit rester a zero.
+      - name: Budgets d'execution
+        run: python3 tools/ci/check_budgets.py --journal mm-ng6.log
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
