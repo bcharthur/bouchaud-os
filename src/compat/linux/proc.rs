@@ -267,13 +267,18 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
     // pile noyau courante (celle de cet appel systeme) est abandonnee telle
     // quelle — c'est sans consequence, elle repart du sommet a la prochaine
     // entree.
-    let task = task::current();
+    // Contenu PRIVE de la tache : acces exclusif pris explicitement.
+    let mut task = task::current_exclusif();
     task.fs_base = 0;
     task.clear_child_tid = 0;
     usermode::set_fs_base(0);
     usermode::set_kernel_stack(task.kstack_top);
     let frame = TrapFrame::new_user(entry, stack);
     task.frame = frame;
+    // Le garde est rendu ICI : la reprise en ring 3 ne revient jamais, et le
+    // conserver laisserait l'emplacement marque exclusif pour toujours --
+    // aucun recyclage ne pourrait plus le reprendre.
+    drop(task);
 
     // BOUCHAUD_EXECVE_NORETURN_BKL_FIX_V1
     //
@@ -297,7 +302,7 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
         "execve: chemin no-return sans BKL syscall actif"
     );
 
-    unsafe { usermode::resume_usermode(&task.frame) }
+    unsafe { usermode::resume_usermode(&frame) }
 }
 
 /// `wait4` : attend la fin d'un processus fils.

@@ -124,7 +124,7 @@ pub fn identite_pour_faute() -> Option<(usize, u32, u32, u64, u64, bool)> {
         task.tid,
         task.kstack_top,
         task.kstack_top.saturating_sub(KSTACK_SIZE as u64),
-        task.in_kernel,
+        task.in_kernel.charge(),
     ))
 }
 

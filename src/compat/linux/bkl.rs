@@ -29,12 +29,13 @@
 //! « Cet appel a l'air simple » n'en est pas une. Les deux pieges rencontres
 //! jusqu'ici dans ce noyau :
 //!
-//!  * [`crate::kernel::task::current`] rend un `&'static mut Task` obtenu en
+//!  * [`crate::kernel::task::current`] rendait un `&'static mut Task` obtenu en
 //!    indexant `TASKS`, un `static mut Vec<Box<Task>>` qu'aucun verrou ne
-//!    protege. Tout appel qui passe par la n'est pas liberable tant que cette
-//!    table n'a pas son propre domaine de synchronisation. Cela couvre
-//!    aujourd'hui `getpid`, `gettid`, `getuid`, `set_tid_address` et tout le
-//!    reste de la famille identite.
+//!    protegeait. Ce n'est plus le cas : la table est un registre a
+//!    emplacements generationnels, `current` rend une reference PARTAGEE, et
+//!    les champs que d'autres coeurs touchent sont atomiques. La famille
+//!    identite -- `getpid`, `gettid`, `getuid`, `set_tid_address` -- n'a donc
+//!    plus besoin du gros verrou pour cette raison-la.
 //!  * `user_read`/`user_write` passent par
 //!    [`crate::kernel::task::current_process`], qui **reprend** le BKL. Liberer
 //!    un appel qui ecrit en memoire utilisateur ne le rend donc pas parallele :

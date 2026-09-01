@@ -89,7 +89,7 @@ fn complete_switch_handoff() {
     );
 
     let publish = {
-        let task = &mut tasks()[outgoing];
+        let task = &tasks()[outgoing];
 
         assert!(
             task.switching_out.charge(),
@@ -119,7 +119,7 @@ fn complete_switch_handoff() {
             );
         }
 
-        task.last_cpu = cpu as u8;
+        task.last_cpu.range(cpu as u8);
         task.runq_cpu.range(cpu as u8);
         task.on_cpu.range(-1);
         task.switching_out.range(false);
@@ -195,18 +195,15 @@ impl VueRegistre {
     pub fn iter(&self) -> impl Iterator<Item = &'static Task> { registre_iter() }
 
     #[inline]
-    pub fn iter_mut(&self) -> impl Iterator<Item = &'static mut Task> {
-        registre_iter_mut()
-    }
-
-    #[inline]
     pub fn get(&self, index: usize) -> Option<&'static Task> {
         registre_tache(index)
     }
 
+    /// Acces EXCLUSIF, pris en exclusion mutuelle. Remplace l'ancien
+    /// `get_mut`, qui fabriquait un `&mut` depuis une lecture partagee.
     #[inline]
-    pub fn get_mut(&self, index: usize) -> Option<&'static mut Task> {
-        registre_tache_mut(index)
+    pub fn exclusif(&self, index: usize) -> Option<GardeTache> {
+        registre_exclusif_attente(index)
     }
 }
 
@@ -215,13 +212,6 @@ impl core::ops::Index<usize> for VueRegistre {
     #[inline]
     fn index(&self, index: usize) -> &Task {
         registre_tache(index).expect("registre: indice de tache invalide")
-    }
-}
-
-impl core::ops::IndexMut<usize> for VueRegistre {
-    #[inline]
-    fn index_mut(&mut self, index: usize) -> &mut Task {
-        registre_tache_mut(index).expect("registre: indice de tache invalide")
     }
 }
 
@@ -278,14 +268,39 @@ pub fn running_user_cpu_mask() -> u64 {
 }
 
 /// Tache courante du CPU local.
-pub fn current() -> &'static mut Task {
+/// La tache courante de ce CPU, en lecture PARTAGEE.
+///
+/// Rendait `&'static mut Task`. Ce n'etait pas tenable : n'importe quel
+/// appelant obtenait une reference exclusive sur une tache que d'autres coeurs
+/// observent -- l'ordonnanceur qui l'elit, le reveilleur qui la debloque.
+///
+/// Tous les champs qu'un autre coeur touche sont atomiques : les ecrire par une
+/// reference partagee est correct, et c'est ce que font tous les appelants. Le
+/// contenu prive -- pile noyau, contexte, zone FPU -- ne s'atteint plus par ici.
+pub fn current() -> &'static Task {
     let index = current_index_raw();
     assert!(index != NO_TASK, "task: aucune tache active sur ce CPU");
-    unsafe { &mut *(tasks().get_mut(index).unwrap() as *mut Task) }
+    registre_tache(index).expect("registre: tache courante absente")
+}
+
+/// Acces EXCLUSIF au contenu prive de la tache courante.
+///
+/// Pour les champs qui ne sont pas atomiques -- base FS, adresse de
+/// `clear_child_tid`, trame de retour, drapeau de fraicheur. Ce sont des
+/// donnees privees a la tache, ecrites par le coeur qui l'execute.
+///
+/// L'exclusivite est PRISE, pas supposee. Elle n'est jamais contestee en
+/// pratique -- la tache est sur ce coeur, et le recyclage exige le meme
+/// drapeau -- mais la prendre est ce qui rend le `&mut` legitime plutot que
+/// simplement plausible.
+pub fn current_exclusif() -> GardeTache {
+    let index = current_index_raw();
+    assert!(index != NO_TASK, "task: aucune tache active sur ce CPU");
+    registre_exclusif_attente(index).expect("registre: tache courante absente")
 }
 
 /// Tache courante, si elle existe.
-pub fn try_current() -> Option<&'static mut Task> {
+pub fn try_current() -> Option<&'static Task> {
     if in_user_task() {
         Some(current())
     } else {
@@ -366,12 +381,13 @@ pub struct IdentiteCourante {
 /// `per_cpu().current = 0`) AVANT de quitter la pile de la tache. Un CPU au
 /// repos rend donc `None`, il ne rend pas l'identite du dernier occupant.
 ///
-/// # Pourquoi pas un `&'static mut Task`
+/// # Pourquoi une identite copiee, et non une reference
 ///
-/// Parce qu'il ne serait pas sur. `register` recycle un emplacement zombie par
-/// `tasks()[index] = task`, ce qui **detruit** l'ancienne `Box<Task>` : toute
-/// reference qui lui aurait survecu pendrait dans le vide. La regle est donc
-/// qu'aucune reference vers une `Task` ne sorte de ce module par ce chemin.
+/// Parce qu'un emplacement se RECYCLE. Une reference conservee designerait
+/// l'emplacement, pas la tache : apres recyclage elle decrirait la suivante,
+/// qui n'a rien demande. Une identite copiee ne peut pas mentir de cette
+/// facon -- et quand il faut retrouver la tache, `TacheId` porte la
+/// generation, qui refuse l'ancienne incarnation.
 pub fn identite_courante() -> Option<IdentiteCourante> {
     let identite = interrupts::without_interrupts(|| {
         let cpu = local_cpu();

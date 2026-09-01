@@ -39,9 +39,15 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
 
     if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu) {
         let local = crate::arch::x86_64::cpu_local::local(id);
-        while let Some(index) = local.dequeue() {
-            if index < len && runnable_local(&tasks()[index], cpu) {
-                return Some(index);
+        while let Some(mot) = local.dequeue() {
+            // Une entree dont la generation ne correspond plus designe une
+            // tache MORTE dont l'emplacement a ete recycle. La servir
+            // ordonnancerait la tache suivante, qui n'a rien demande : on la
+            // jette.
+            let identite = TacheId::depuis_mot(mot);
+            let Some(tache) = registre_tache_id(identite) else { continue };
+            if identite.emplacement() < len && runnable_local(tache, cpu) {
+                return Some(identite.emplacement());
             }
         }
     }
@@ -79,7 +85,7 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
         return None;
     };
     let donor_queue = crate::arch::x86_64::cpu_local::local(donor_id);
-    let Some(index) = donor_queue.steal() else {
+    let Some(mot) = donor_queue.steal() else {
         // La pression lue n'existait deja plus : la file s'est videe entre le
         // scan et le vol. Meme conclusion, meme temporisation.
         STEAL_REJECT_BALANCE[cpu].fetch_add(1, Ordering::Relaxed);
@@ -87,18 +93,24 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
             .store(now.saturating_add(STEAL_BACKOFF_STERILE_NS), Ordering::Relaxed);
         return None;
     };
-    let candidate = &tasks()[index];
+    let identite = TacheId::depuis_mot(mot);
+    // Meme controle que ci-dessus : ne jamais voler une incarnation perimee.
+    let Some(candidate) = registre_tache_id(identite) else {
+        STEAL_REJECT_BALANCE[cpu].fetch_add(1, Ordering::Relaxed);
+        return None;
+    };
+    let index = identite.emplacement();
     if !runnable_steal(candidate, cpu) || candidate.runq_cpu.charge() as usize != donor {
-        donor_queue.enqueue(index);
+        donor_queue.enqueue(mot);
         STEAL_RETRY_AFTER_NS[cpu].store(now.saturating_add(2_000_000), Ordering::Relaxed);
         return None;
     }
     {
         if candidate.last_migration_ns != 0
-            && now.saturating_sub(candidate.last_migration_ns) < MIN_MIGRATION_RESIDENCY_NS
+            && now.saturating_sub(candidate.last_migration_ns.charge()) < MIN_MIGRATION_RESIDENCY_NS
         {
             STEAL_REJECT_AFFINITY[cpu].fetch_add(1, Ordering::Relaxed);
-            donor_queue.enqueue(index);
+            donor_queue.enqueue(mot);
             STEAL_RETRY_AFTER_NS[cpu].store(
                 now.saturating_add(MIN_MIGRATION_RESIDENCY_NS), Ordering::Relaxed,
             );
@@ -119,10 +131,10 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
 /// une fois sur deux.
 pub fn pose_priorite(priorite: Priorite) -> Priorite {
     let pid = current().process.pid;
-    let ancienne = current().priorite;
-    for task in tasks().iter_mut() {
+    let ancienne = current().priorite.charge();
+    for task in tasks().iter() {
         if task.process.pid == pid {
-            task.priorite = priorite;
+            task.priorite.range(priorite);
         }
     }
     ancienne
@@ -130,7 +142,7 @@ pub fn pose_priorite(priorite: Priorite) -> Priorite {
 
 /// La classe d'ordonnancement du processus courant.
 pub fn priorite() -> Priorite {
-    current().priorite
+    current().priorite.charge()
 }
 
 /// Second invariant du meme point de passage : **on ne commute jamais
@@ -297,8 +309,8 @@ fn switch_to(from: usize, to: usize) {
     let cpu_id = local_cpu();
     let (from_ptr, to_ptr) = unsafe {
         let list = tasks();
-        let from_ptr = list.get_mut(from).unwrap() as *mut Task;
-        let to_ptr = list.get_mut(to).unwrap() as *mut Task;
+        let from_ptr = unsafe { registre_pointeur_ordonnanceur(from) }.expect("registre: tache absente");
+        let to_ptr = unsafe { registre_pointeur_ordonnanceur(to) }.expect("registre: tache absente");
 
         CONTEXT_SWITCHES.fetch_add(1, Ordering::Relaxed);
         account_slice_end(&mut *from_ptr);
@@ -331,7 +343,7 @@ fn switch_to_kernel() -> ! {
     let cur = current_index_raw();
     let from_ptr = unsafe {
         let list = tasks();
-        let ptr = list.get_mut(cur).unwrap() as *mut Task;
+        let ptr = unsafe { registre_pointeur_ordonnanceur(cur) }.expect("registre: tache absente");
         // Replier AVANT de rendre `on_cpu` negatif : depuis que la
         // comptabilite d'appel systeme vit par CPU, c'est ici -- et non plus a
         // chaque `account_kernel_exit` -- que la derniere tranche de cette
@@ -391,7 +403,7 @@ pub fn secondary_cpu_loop() -> ! {
         if let Some(next) = pick_next(NO_TASK, cpu_id) {
             let to_ptr = unsafe {
                 let list = tasks();
-                let ptr = list.get_mut(next).unwrap() as *mut Task;
+                let ptr = unsafe { registre_pointeur_ordonnanceur(next) }.expect("registre: tache absente");
                 mark_task_running(&mut *ptr, cpu_id);
                 ptr
             };

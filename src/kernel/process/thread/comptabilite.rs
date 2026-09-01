@@ -3,7 +3,8 @@
 /// Toutes les frontières (syscall, préemption, blocage) utilisent le même
 /// curseur. Une seconde frontière au même instant voit donc un delta nul au
 /// lieu de recompter la tranche précédente.
-fn account_until(task: &mut Task, now: u64) {
+// Ne touche plus que des atomiques : une reference partagee suffit.
+fn account_until(task: &Task, now: u64) {
     if task.last_account_ns == 0 {
         return;
     }
@@ -25,24 +26,30 @@ fn account_until(task: &mut Task, now: u64) {
     }
     let elapsed = user.saturating_add(noyau);
 
-    task.user_cpu_ns = task.user_cpu_ns.saturating_add(user);
-    task.kernel_cpu_ns = task.kernel_cpu_ns.saturating_add(noyau);
-    task.cpu_ns[cpu] = task.cpu_ns[cpu].saturating_add(elapsed);
+    task.user_cpu_ns.range(task.user_cpu_ns.charge().saturating_add(user));
+    task.kernel_cpu_ns.range(task.kernel_cpu_ns.charge().saturating_add(noyau));
+    task.cpu_ns[cpu].range(task.cpu_ns[cpu].charge().saturating_add(elapsed));
     // EWMA 7/8 historique + 1/8 dernière tranche: stable mais réactif en
     // quelques quanta, sans utiliser les ticks comme unité.
-    task.recent_runtime_ns = task
-        .recent_runtime_ns
-        .saturating_mul(7)
-        .saturating_add(elapsed)
-        / 8;
+    // Moyenne glissante : sept huitiemes de l'ancienne, un huitieme de la
+    // derniere tranche. Lire puis ecrire n'a pas besoin d'etre atomique dans
+    // son ensemble -- seule la tache elle-meme met a jour son temps recent, et
+    // les lecteurs ne s'en servent que pour une heuristique de vol.
+    task.recent_runtime_ns.range(
+        task.recent_runtime_ns
+            .charge()
+            .saturating_mul(7)
+            .saturating_add(elapsed)
+            / 8,
+    );
     // `in_kernel` doit survivre a un changement de contexte AU MILIEU d'un
     // appel systeme : une tache qui se bloque dans un `futex` repart du cote
     // noyau. On le range donc dans la tache au repli, et `mark_task_running` le
     // ressort au reveil.
-    task.in_kernel = COMPTA_EN_NOYAU[cpu].load(Ordering::Relaxed);
+    task.in_kernel.range(COMPTA_EN_NOYAU[cpu].load(Ordering::Relaxed));
     COMPTA_DEBUT_NS[cpu].store(now, Ordering::Relaxed);
-    task.last_account_ns = now;
-    task.slice_start_ns = now;
+    task.last_account_ns.range(now);
+    task.slice_start_ns.range(now);
 }
 
 /// Marque une tache zombie, et previent le CPU sur lequel elle tourne.
@@ -55,7 +62,8 @@ fn account_until(task: &mut Task, now: u64) {
 /// tenir une `&mut Task` -- et `on_cpu` designe le CPU ou la tache s'execute,
 /// ou -1 si elle n'est nulle part. Une tache qui n'est sur aucun CPU n'a
 /// personne a prevenir : elle ne reviendra pas en espace utilisateur.
-fn marque_zombie(task: &mut Task) {
+// Ne touche plus que des atomiques : une reference PARTAGEE suffit.
+fn marque_zombie(task: &Task) {
     task.state.range(TaskState::Zombie);
     if task.on_cpu >= 0 && !task.switching_out.charge() {
         let cpu = task.on_cpu.charge() as usize;
@@ -97,7 +105,7 @@ fn suspend_compta_pour_idle() -> bool {
     if index == NO_TASK {
         return false;
     }
-    let Some(task) = tasks().get_mut(index) else {
+    let Some(task) = tasks().get(index) else {
         return false;
     };
     if task.last_account_ns == 0 {
@@ -118,23 +126,23 @@ fn rearme_compta_apres_idle() {
     }
     let now = crate::kernel::timer::monotonic_ns();
     let cpu = local_cpu();
-    let Some(task) = tasks().get_mut(index) else {
+    let Some(task) = tasks().get(index) else {
         return;
     };
-    task.last_account_ns = now;
-    task.slice_start_ns = now;
-    let en_noyau = task.in_kernel;
+    task.last_account_ns.range(now);
+    task.slice_start_ns.range(now);
+    let en_noyau = task.in_kernel.charge();
     COMPTA_DEBUT_NS[cpu].store(now, Ordering::Relaxed);
     COMPTA_USER_NS[cpu].store(0, Ordering::Relaxed);
     COMPTA_NOYAU_NS[cpu].store(0, Ordering::Relaxed);
     COMPTA_EN_NOYAU[cpu].store(en_noyau, Ordering::Relaxed);
 }
 
-fn account_slice_end(task: &mut Task) {
+fn account_slice_end(task: &Task) {
     let now = crate::kernel::timer::monotonic_ns();
     account_until(task, now);
-    task.last_account_ns = 0;
-    task.slice_start_ns = 0;
+    task.last_account_ns.range(0);
+    task.slice_start_ns.range(0);
     // Le CPU n'a plus de tache a qui imputer le temps : on desarme, sinon le
     // premier repli de la tache SUIVANTE lui attribuerait le temps passe entre
     // les deux.

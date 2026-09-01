@@ -16,23 +16,23 @@ impl Task {
             tid: alloc_tid(),
             process,
             state: EtatAtomique::neuf(TaskState::Ready),
-            priorite: Priorite::Normale,
+            priorite: PrioriteAtomique::neuve(Priorite::Normale),
             affinity_mask: 0,
             runq_cpu: CoeurAtomique::neuf(u8::MAX),
-            last_cpu: u8::MAX,
+            last_cpu: CoeurAtomique::neuf(u8::MAX),
             on_cpu: CoeurSigneAtomique::neuf(-1),
             switching_out: DrapeauAtomique::neuf(false),
-            last_migration_ns: 0,
-            recent_runtime_ns: 0,
-            slice_start_ns: 0,
+            last_migration_ns: EcheanceAtomique::neuf(0),
+            recent_runtime_ns: EcheanceAtomique::neuf(0),
+            slice_start_ns: EcheanceAtomique::neuf(0),
             ready_since_ns: EcheanceAtomique::neuf(0),
-            last_account_ns: 0,
-            user_cpu_ns: 0,
-            kernel_cpu_ns: 0,
-            cpu_ns: [0; MAX_CPUS],
-            in_kernel: false,
-            context_switches: 0,
-            migrations: 0,
+            last_account_ns: EcheanceAtomique::neuf(0),
+            user_cpu_ns: EcheanceAtomique::neuf(0),
+            kernel_cpu_ns: EcheanceAtomique::neuf(0),
+            cpu_ns: [const { EcheanceAtomique::neuf(0) }; MAX_CPUS],
+            in_kernel: DrapeauAtomique::neuf(false),
+            context_switches: EcheanceAtomique::neuf(0),
+            migrations: EcheanceAtomique::neuf(0),
             frame,
             ctx: Context::default(),
             kstack,
@@ -59,7 +59,7 @@ impl Task {
         task.noyau = true;
         task.affinity_mask = 1;
         task.runq_cpu.range(0);
-        task.last_cpu = 0;
+        task.last_cpu.range(0);
         task.entree_noyau = Some(entree);
         amorce_pile(&mut task, kernel_task_trampoline, 0x0000_0202);
         task
@@ -138,7 +138,10 @@ fn publish_ready(index: usize) {
     };
     tasks()[index].runq_cpu.range(target as u8);
     if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(target) {
-        crate::arch::x86_64::cpu_local::local(id).enqueue(index);
+        // L'IDENTITE, pas l'indice : un emplacement recycle ne doit pas
+        // heriter de l'entree laissee par son occupant precedent.
+        let Some(identite) = registre_id(index) else { return };
+        crate::arch::x86_64::cpu_local::local(id).enqueue(identite.en_mot());
         crate::kernel::scheduler::preempt::request_cpu(target);
     }
     if cpu::is_idle(target) { smp::reschedule_cpu(target); }
@@ -150,7 +153,7 @@ pub fn register(mut task: Box<Task>) -> usize {
     if task.noyau {
         task.affinity_mask = 1;
         task.runq_cpu.range(0);
-        task.last_cpu = 0;
+        task.last_cpu.range(0);
     } else {
         if task.affinity_mask == 0 {
             task.affinity_mask = online_affinity_mask();
@@ -170,12 +173,13 @@ pub fn register(mut task: Box<Task>) -> usize {
     // ce qu'est un emplacement recyclable -- une tache morte, sur aucun coeur,
     // et qui n'est pas en train de commuter. Une tache qui commute encore
     // possede sa pile noyau ; la reecrire la ferait reprendre sur une autre.
-    let index = registre_ajoute(task, |ancienne| {
+    let identite = registre_ajoute(task, |ancienne| {
         ancienne.state == TaskState::Zombie
             && ancienne.on_cpu < 0
             && !ancienne.switching_out.charge()
     })
     .expect("registre des taches plein");
+    let index = identite.emplacement();
 
     {
         let registered = &tasks()[index];
@@ -193,9 +197,9 @@ pub fn register(mut task: Box<Task>) -> usize {
 }
 
 fn index_of(tid: u32) -> Option<usize> { tasks().iter().position(|t| t.tid == tid) }
-pub fn by_tid(tid: u32) -> Option<&'static mut Task> {
-    let index = index_of(tid)?;
-    Some(unsafe { &mut *(tasks().get_mut(index).unwrap() as *mut Task) })
+/// Une tache par son identifiant de fil, en lecture PARTAGEE.
+pub fn by_tid(tid: u32) -> Option<&'static Task> {
+    registre_tache(index_of(tid)?)
 }
 pub fn live_count() -> usize {
     tasks().iter().filter(|t| t.state != TaskState::Zombie).count()

@@ -554,7 +554,7 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
             None => task::current().tid as i64,
         },
         SET_TID_ADDRESS => {
-            task::current().clear_child_tid = args[0];
+            task::current_exclusif().clear_child_tid = args[0];
             task::current().tid as i64
         }
         // `set_robust_list` peut legitimement etre accepte sans effet : la glibc
@@ -994,7 +994,7 @@ fn sys_arch_prctl(code: i32, addr: u64) -> i64 {
     match code {
         ARCH_SET_FS => {
             usermode::set_fs_base(addr);
-            task::current().fs_base = addr;
+            task::current_exclusif().fs_base = addr;
             0
         }
         ARCH_GET_FS => {

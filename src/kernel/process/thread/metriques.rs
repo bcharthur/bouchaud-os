@@ -437,10 +437,17 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
         // Inclure la tranche actuellement en cours sans modifier le curseur :
         // le delta du prochain snapshot soustraira exactement ce même préfixe.
         let live = if task.last_account_ns != 0 {
-            now.saturating_sub(task.last_account_ns)
+            now.saturating_sub(task.last_account_ns.charge())
         } else { 0 };
-        let runtime = task.user_cpu_ns.saturating_add(task.kernel_cpu_ns).saturating_add(live);
-        let mut cpu_map_snapshot = task.cpu_ns;
+        let runtime = task.user_cpu_ns.charge()
+            .saturating_add(task.kernel_cpu_ns.charge())
+            .saturating_add(live);
+        // Instantane du temps par coeur. Les cases sont atomiques ; on les
+        // recopie en valeurs pour le calcul qui suit.
+        let mut cpu_map_snapshot = [0u64; MAX_CPUS];
+        for cpu in 0..MAX_CPUS {
+            cpu_map_snapshot[cpu] = task.cpu_ns[cpu].charge();
+        }
         if live != 0 && task.on_cpu >= 0 {
             let cpu = task.on_cpu.charge() as usize;
             if cpu < MAX_CPUS { cpu_map_snapshot[cpu] = cpu_map_snapshot[cpu].saturating_add(live); }
@@ -454,14 +461,14 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
         match cumuls.iter_mut().find(|(autre, _, _, _, _)| *autre == pid) {
             Some((_, total, cpu_map, migrations, switches)) => {
                 *total = total.saturating_add(runtime);
-                *migrations = migrations.saturating_add(task.migrations);
-                *switches = switches.saturating_add(task.context_switches);
+                *migrations = migrations.saturating_add(task.migrations.charge());
+                *switches = switches.saturating_add(task.context_switches.charge());
                 for cpu in 0..MAX_CPUS {
                     cpu_map[cpu] = cpu_map[cpu].saturating_add(cpu_map_snapshot[cpu]);
                 }
             }
             None => {
-                cumuls.push((pid, runtime, cpu_map_snapshot, task.migrations, task.context_switches));
+                cumuls.push((pid, runtime, cpu_map_snapshot, task.migrations.charge(), task.context_switches.charge()));
                 mesures.push(Mesure {
                     pid,
                     nom,
@@ -481,8 +488,9 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
         }
         if let Some(mesure) = mesures.iter_mut().find(|m| m.pid == pid) {
             mesure.taches += 1;
-            mesure.migrations = mesure.migrations.saturating_add(task.migrations);
-            mesure.context_switches = mesure.context_switches.saturating_add(task.context_switches);
+            mesure.migrations = mesure.migrations.saturating_add(task.migrations.charge());
+            mesure.context_switches =
+                mesure.context_switches.saturating_add(task.context_switches.charge());
             if task.state == TaskState::Ready {
                 mesure.runnable_threads += 1;
             }

@@ -14,8 +14,9 @@ extern "C" fn task_trampoline() -> ! {
         let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
         let _kernel = smp_lock::enter();
         complete_switch_handoff();
-        let task = current();
-        install(task);
+        // `install` ecrit la trame de la tache : contenu prive, acces exclusif.
+        let mut task = current_exclusif();
+        install(&mut task);
         task.frame
     };
     unsafe { usermode::resume_usermode(&frame) }
@@ -25,9 +26,11 @@ extern "C" fn kernel_task_trampoline() -> ! {
     let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
     let _kernel = smp_lock::enter();
     complete_switch_handoff();
-    let task = current();
-    task.fresh = false;
-    let entree = task.entree_noyau.expect("task: fil noyau sans point d'entree");
+    let entree = {
+        let mut task = current_exclusif();
+        task.fresh = false;
+        task.entree_noyau.expect("task: fil noyau sans point d'entree")
+    };
     entree()
 }
 
@@ -74,24 +77,24 @@ fn mark_task_running(task: &mut Task, cpu_id: usize) {
         task.ready_since_ns.range(0);
     }
 
-    if task.last_cpu != u8::MAX && task.last_cpu as usize != cpu_id {
+    if task.last_cpu != u8::MAX && task.last_cpu.charge() as usize != cpu_id {
         CPU_MIGRATIONS[cpu_id].fetch_add(1, Ordering::Relaxed);
-        task.migrations = task.migrations.saturating_add(1);
-        task.last_migration_ns = now;
+        task.migrations.range(task.migrations.charge().saturating_add(1));
+        task.last_migration_ns.range(now);
         if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu_id) {
             crate::arch::x86_64::cpu_local::local(id).note_migration();
         }
     }
-    task.last_cpu = cpu_id as u8;
+    task.last_cpu.range(cpu_id as u8);
     task.runq_cpu.range(cpu_id as u8);
     task.on_cpu.range(cpu_id as i8);
     task.switching_out.range(false);
-    task.slice_start_ns = now;
-    task.last_account_ns = now;
-    task.context_switches = task.context_switches.saturating_add(1);
+    task.slice_start_ns.range(now);
+    task.last_account_ns.range(now);
+    task.context_switches.range(task.context_switches.charge().saturating_add(1));
     COMPTA_DEBUT_NS[cpu_id].store(now, Ordering::Relaxed);
     COMPTA_USER_NS[cpu_id].store(0, Ordering::Relaxed);
     COMPTA_NOYAU_NS[cpu_id].store(0, Ordering::Relaxed);
-    COMPTA_EN_NOYAU[cpu_id].store(task.in_kernel, Ordering::Relaxed);
+    COMPTA_EN_NOYAU[cpu_id].store(task.in_kernel.charge(), Ordering::Relaxed);
     RETRAITE_DEMANDEE[cpu_id].store(task.state == TaskState::Zombie, Ordering::Release);
 }

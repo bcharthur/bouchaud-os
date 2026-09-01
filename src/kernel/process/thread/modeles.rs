@@ -21,6 +21,64 @@ pub enum Priorite {
     Normale,
 }
 
+impl Priorite {
+    #[inline]
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Interactive => 0,
+            Self::Normale => 1,
+        }
+    }
+
+    #[inline]
+    pub const fn depuis_code(code: u8) -> Self {
+        // Un code inconnu ne peut venir que d'une ecriture corrompue.
+        // `Normale` est le choix sur : une tache trop prioritaire affamerait
+        // le reste, une tache normale de trop ne fait que passer apres.
+        match code {
+            0 => Self::Interactive,
+            _ => Self::Normale,
+        }
+    }
+}
+
+// La priorite se lit depuis n'importe quel coeur -- l'election de la
+// prochaine tache la consulte -- et s'ecrit depuis un autre, quand
+// `setpriority` la change pour tout un processus. C'est le meme motif que
+// l'etat d'ordonnancement, et elle devient atomique pour la meme raison :
+// sans cela, la changer demanderait un acces exclusif a la tache, donc de
+// serialiser une simple ecriture d'octet.
+#[repr(transparent)]
+pub struct PrioriteAtomique(core::sync::atomic::AtomicU8);
+
+impl PrioriteAtomique {
+    #[inline]
+    pub const fn neuve(priorite: Priorite) -> Self {
+        Self(core::sync::atomic::AtomicU8::new(priorite.code()))
+    }
+    #[inline]
+    pub fn charge(&self) -> Priorite {
+        Priorite::depuis_code(self.0.load(core::sync::atomic::Ordering::Acquire))
+    }
+    #[inline]
+    pub fn range(&self, priorite: Priorite) {
+        self.0.store(priorite.code(), core::sync::atomic::Ordering::Release);
+    }
+}
+
+impl PartialEq<Priorite> for PrioriteAtomique {
+    #[inline]
+    fn eq(&self, autre: &Priorite) -> bool {
+        self.charge() == *autre
+    }
+}
+
+impl core::fmt::Debug for PrioriteAtomique {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(&self.charge(), f)
+    }
+}
+
 /// Nombre maximal de tours consecutifs accordes aux taches interactives.
 ///
 /// Sans cette borne, une tache interactive qui calcule sans jamais se bloquer

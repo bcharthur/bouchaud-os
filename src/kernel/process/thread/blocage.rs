@@ -254,7 +254,7 @@ pub fn signal_pending() -> bool {
 
 /// Termine de force toutes les taches (utilise apres une faute fatale).
 pub fn kill_all(code: i32) {
-    for task in tasks().iter_mut() {
+    for task in tasks().iter() {
         marque_zombie(task);
         task.process.lifecycle.lock().exit_code = code;
     }

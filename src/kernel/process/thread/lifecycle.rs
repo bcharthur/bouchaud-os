@@ -55,7 +55,7 @@ pub fn exit_current(code: i32) -> ! {
                 }
                 let pid = tasks()[index].process.pid;
                 if descend_de(pid, racine) {
-                    marque_zombie(&mut tasks()[index]);
+                    marque_zombie(&tasks()[index]);
                     emportes += 1;
                 }
             }
@@ -98,7 +98,7 @@ pub fn exit_current(code: i32) -> ! {
         if tasks().iter().all(|t| t.state == TaskState::Zombie) { break; }
         if crate::kernel::timer::ticks().wrapping_sub(idle_since) > patience {
             crate::kernel::dmesg::log("task: aucune tache executable CPU0 depuis 30 s, interblocage suppose");
-            for task in tasks().iter_mut() {
+            for task in tasks().iter() {
                 if task.runq_cpu == 0 && allowed_on(task, 0) { marque_zombie(task); }
             }
             break;
@@ -182,7 +182,7 @@ pub fn exit_group(code: i32) -> ! {
         let task = current();
         (task.process.pid, task.tid, task.process.clone())
     };
-    for task in tasks().iter_mut() {
+    for task in tasks().iter() {
         if task.tid != tid && task.process.pid == pid {
             marque_zombie(task);
         }
@@ -215,7 +215,7 @@ pub fn run(mut first: Box<Task>) -> i32 {
     let caller_cpu = local_cpu();
     first.affinity_mask = 1u64 << caller_cpu;
     first.runq_cpu.range(caller_cpu as u8);
-    first.last_cpu = caller_cpu as u8;
+    first.last_cpu.range(caller_cpu as u8);
     let process = first.process.clone();
     let racine = process.pid;
     let index = register(first);
@@ -223,7 +223,7 @@ pub fn run(mut first: Box<Task>) -> i32 {
     let to_ptr = unsafe {
         RACINE_PREMIER_PLAN.store(racine, Ordering::Release);
         let list = tasks();
-        let ptr = list.get_mut(index).unwrap() as *mut Task;
+        let ptr = unsafe { registre_pointeur_ordonnanceur(index) }.expect("registre: tache absente");
         mark_task_running(&mut *ptr, cpu_id);
         ptr
     };
@@ -263,14 +263,14 @@ pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
         None => return -1,
     };
     let mut task = Task::new_kernel(process.clone(), entree);
-    task.priorite = Priorite::Interactive;
+    task.priorite.range(Priorite::Interactive);
     task.affinity_mask = 1;
     task.runq_cpu.range(0);
-    task.last_cpu = 0;
+    task.last_cpu.range(0);
     let index = register(task);
     let to_ptr = unsafe {
         let list = tasks();
-        let ptr = list.get_mut(index).unwrap() as *mut Task;
+        let ptr = unsafe { registre_pointeur_ordonnanceur(index) }.expect("registre: tache absente");
         mark_task_running(&mut *ptr, 0);
         ptr
     };
@@ -331,9 +331,9 @@ pub fn nettoie_zombies() {
 /// le gestionnaire de fenetres declare interactif le navigateur qu'il vient de
 /// lancer, sans que celui-ci ait a le demander.
 pub fn pose_priorite_de(pid: u32, priorite: Priorite) {
-    for task in tasks().iter_mut() {
+    for task in tasks().iter() {
         if task.process.pid == pid {
-            task.priorite = priorite;
+            task.priorite.range(priorite);
         }
     }
 }
@@ -377,7 +377,7 @@ pub fn arbre_de(racine: u32) -> Vec<u32> {
 /// vivre laisserait aussi vivante la surface qu'il projette.
 pub fn tue_processus(pid: u32, code: i32) {
     let courant = try_current().map(|t| t.tid);
-    for task in tasks().iter_mut() {
+    for task in tasks().iter() {
         if Some(task.tid) == courant {
             continue;
         }
@@ -403,7 +403,7 @@ pub fn terminate_sibling_threads() {
         let task = current();
         (task.process.pid, task.tid)
     };
-    for task in tasks().iter_mut() {
+    for task in tasks().iter() {
         if task.tid != tid && task.process.pid == pid {
             marque_zombie(task);
         }

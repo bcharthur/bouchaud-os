@@ -69,8 +69,8 @@ pub fn preempt_from_irq() {
 
     let (from_ptr, to_ptr) = unsafe {
         let list = tasks();
-        let from_ptr = list.get_mut(cur).unwrap() as *mut Task;
-        let to_ptr = list.get_mut(next).unwrap() as *mut Task;
+        let from_ptr = unsafe { registre_pointeur_ordonnanceur(cur) }.expect("registre: tache absente");
+        let to_ptr = unsafe { registre_pointeur_ordonnanceur(next) }.expect("registre: tache absente");
 
         IRQ_PREEMPTIONS.fetch_add(1, Ordering::Relaxed);
         CONTEXT_SWITCHES.fetch_add(1, Ordering::Relaxed);
@@ -118,7 +118,7 @@ pub fn preempt_from_irq() {
 fn add_current_ticks(delta: u64) {
     let index = current_index_raw();
     if index == NO_TASK { return; }
-    if let Some(task) = tasks().get_mut(index) {
+    if let Some(task) = tasks().get(index) {
         task.ticks_cpu.range(task.ticks_cpu.charge().wrapping_add(delta));
     }
 }
