@@ -1,8 +1,11 @@
 /// Snapshot SMP-NG2: charge physique, pression de runqueue, tache courante,
 /// steals et migrations par CPU.
 pub fn log_smp_load() {
-    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
-    let _kernel = smp_lock::enter();
+    // Releve de DIAGNOSTIC. Il lisait toute la table sous gros verrou, une fois
+    // par seconde, en bloquant les quatre coeurs pendant qu'il formatait du
+    // texte. Le registre se lit sans verrou, et un compteur observe une
+    // nanoseconde trop tot ne change aucune conclusion -- alors qu'un releve
+    // qui fige la machine en change beaucoup.
     let online = smp::schedulable_cpus().max(1).min(MAX_CPUS);
     let mut line = alloc::string::String::from("[SMP-LOAD]");
     line.push_str(&alloc::format!(

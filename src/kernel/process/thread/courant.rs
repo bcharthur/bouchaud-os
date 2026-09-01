@@ -295,8 +295,10 @@ pub fn try_current() -> Option<&'static mut Task> {
 
 /// Processus de la tache courante.
 pub fn current_process() -> Arc<Process> {
-    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
-    let _kernel = smp_lock::enter();
+    // Sans gros verrou. Le champ `process` d'une tache est pose a sa creation
+    // et ne change plus ; l'emplacement, lui, ne peut pas etre recycle sous nos
+    // pieds : le recyclage exige `on_cpu < 0`, et cette tache est justement
+    // celle qui tourne. Cloner un `Arc` est atomique par construction.
     current().process.clone()
 }
 

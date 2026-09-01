@@ -2377,27 +2377,20 @@ fn readable(fd: i32) -> bool {
         }
         // Interroger sans consommer : `poll` ne doit pas voler l'evenement au
         // `read` qui va suivre.
-        // BOUCHAUD_P3_POLL_SANS_BKL_V1
+        // BOUCHAUD_C1_ENTREES_SANS_GROS_VERROU_V1
         //
-        // Ces trois branches sont les SEULES du balayage a toucher un etat
-        // global que rien ne protege :
+        // Les deux branches d'entree prenaient le gros verrou : leur etat
+        // vivait dans des `static mut` que rien d'autre ne protegeait. Il vit
+        // maintenant derriere le verrou propre au sous-systeme d'entree, dont
+        // la section critique est une traduction de scancode -- pas la machine
+        // entiere pendant qu'un client interroge son clavier.
         //
-        //   * `input::keyboard_pending` draine dans un tampon `static mut` ;
-        //   * `input::mouse_pending` compare a des `static mut LAST_*` ;
-        //   * `socket_readable` pompe l'anneau e1000, dont tout l'etat est en
-        //     `static mut` sans verrou -- il ne tient QUE par le gros verrou.
-        //
-        // Elles le prennent donc elles-memes, au plus court. Le reste du
-        // balayage -- tubes, paires de sockets, eventfd, timerfd, console,
-        // fichiers, ce qu'utilise l'IPC de Ladybird -- s'en passe entierement.
+        // `socket_readable` reste la seule branche du balayage a le prendre :
+        // l'anneau e1000 est encore un etat global sans verrou.
         FdKind::InputKeyboard => {
-            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fd);
-            let _kernel = crate::kernel::smp_lock::enter();
             input::keyboard_pending()
         }
         FdKind::InputMouse => {
-            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fd);
-            let _kernel = crate::kernel::smp_lock::enter();
             input::mouse_pending()
         }
         FdKind::EventFd(state) => state.lock().counter > 0,

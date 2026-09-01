@@ -89,11 +89,9 @@ pub fn sleep_ticks(ticks: u64) {
     while crate::kernel::timer::monotonic_ns() < deadline {
         // schedule() fait deja HLT si la tache est bloquee et seule.
         schedule();
-        let ready = {
-            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
-            let _kernel = smp_lock::enter();
-            current().state == TaskState::Ready
-        };
+        // Meme lecture atomique que la boucle d'attente detachee : le gros
+        // verrou etait pris et relache a chaque tour pour un seul chargement.
+        let ready = current().state == TaskState::Ready;
         if ready {
             break;
         }

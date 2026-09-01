@@ -85,11 +85,11 @@ pub(crate) fn finish_park_current_on_detached(
     }
 
     loop {
-        let blocked = {
-            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
-            let _kernel = smp_lock::enter();
-            current().state == TaskState::Blocked
-        };
+        // Lecture d'un champ ATOMIQUE de notre PROPRE tache : le gros verrou
+        // n'y apportait rien. Il etait pris, relache, et repris a chaque tour
+        // de cette boucle d'attente -- des milliers de fois par seconde, pour
+        // une seule instruction de chargement.
+        let blocked = current().state == TaskState::Blocked;
 
         if !blocked {
             break;
@@ -127,8 +127,9 @@ pub(crate) fn finish_park_current_on_detached(
     };
 
     {
-        let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
-        let _kernel = smp_lock::enter();
+        // Deux ecritures atomiques sur notre propre tache. Personne d'autre ne
+        // les lit pour decider quoi que ce soit a cet instant : la tache est en
+        // train de reprendre la main, donc elle n'est plus candidate au reveil.
         let task = current();
         task.wait_queue_key.range(0);
         task.wake_deadline_ns.range(0);
