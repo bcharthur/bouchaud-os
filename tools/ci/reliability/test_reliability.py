@@ -35,6 +35,21 @@ class ReliabilityTests(unittest.TestCase):
         findings, _ = scan_text("use-after-free detected in task registry\n")
         self.assertEqual(findings[0].kind, "use_after_free")
 
+    def test_scheduler_orphan_is_fatal(self):
+        findings, _ = scan_text(
+            "[SCHED-ORPHELINE] tid=109 slot=1 gen=4 rq=1 aff=0xf idle=true "
+            "file_len=0 jetees_generation=3 jetees_non_eligibles=1\n"
+        )
+        self.assertEqual(findings[0].kind, "scheduler_orphan")
+
+    def test_scheduler_healthy_snapshot_is_benign(self):
+        # La ligne de releve ordinaire ne doit pas etre confondue avec le
+        # marqueur d'orpheline : elle sort a chaque instantane sain.
+        findings, _ = scan_text(
+            "[SMP-SNAPSHOT] t=5000 owner=0 depth=[0,0,0,0] cur=[0,1,2,3]\n"
+        )
+        self.assertEqual(findings, ())
+
     def test_required_marker(self):
         findings, missing = scan_text("hello\n", required_markers=["READY"])
         self.assertEqual(findings, ())

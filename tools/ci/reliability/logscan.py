@@ -38,6 +38,13 @@ FATAL_PATTERNS = (
         re.I,
     )),
     ("assertion", re.compile(r"\bassertion .* failed\b", re.I)),
+    # Une tache `Ready`, sur aucun coeur, absente de la file de son propre
+    # `runq_cpu`, n'est dans AUCUNE file : aucun `pick_next` ne la trouvera et
+    # personne ne la republiera. Le noyau se fige alors sans rien imprimer --
+    # c'est exactement la regression mm-ng6 SMP4, restee cinq minutes muette.
+    # Le marqueur n'est emis que lorsque l'invariant est deja rompu : sa seule
+    # presence est la faute.
+    ("scheduler_orphan", re.compile(r"\[SCHED-ORPHELINE\]")),
 )
 
 @dataclass(frozen=True)
