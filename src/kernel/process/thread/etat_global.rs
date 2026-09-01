@@ -1,4 +1,7 @@
-static mut TASKS: Option<Vec<Box<Task>>> = None;
+// La table des taches vit desormais dans `registre.rs` : un tableau
+// d'emplacements a adresse stable, lisibles sans verrou. `static mut TASKS`
+// etait un `Vec` que rien ne protegeait -- c'est le gros verrou, pris par tous
+// ses appelants, qui le rendait sur, et c'est precisement ce dont on sort.
 /// Tous les processus vivants ou zombies.
 static PROCESSES: SpinLock<Vec<Arc<Process>>> = SpinLock::new(Vec::new());
 

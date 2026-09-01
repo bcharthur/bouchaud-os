@@ -5,7 +5,7 @@
     "sites_bkl_par_domaine": {
       "Fd": 7,
       "Fs": 3,
-      "Ordonnanceur": 16,
+      "Ordonnanceur": 15,
       "Pilote": 4,
       "Processus": 4,
       "Readiness": 1,

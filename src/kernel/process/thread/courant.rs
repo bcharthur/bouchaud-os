@@ -172,14 +172,61 @@ fn descend_de(pid: u32, racine: u32) -> bool {
     false
 }
 
-fn tasks() -> &'static mut Vec<Box<Task>> {
-    unsafe {
-        if TASKS.is_none() {
-            TASKS = Some(Vec::new());
-        }
-        TASKS.as_mut().unwrap()
+/// Vue du registre des taches conservant les usages du `Vec` d'origine.
+///
+/// `tasks()` rendait `&'static mut Vec<Box<Task>>` : la table entiere, en
+/// acces exclusif, a qui la demandait. Rien ne la protegeait -- c'est le gros
+/// verrou, pris par tous les appelants, qui rendait l'ensemble sur.
+///
+/// Cette vue s'appuie sur `registre`, dont les emplacements ont une adresse
+/// stable et se lisent sans verrou. Elle garde les memes methodes pour que la
+/// migration se fasse sous-systeme par sous-systeme plutot qu'en une fois : un
+/// changement de cette taille, fait d'un coup, ne se relit pas.
+pub struct VueRegistre;
+
+impl VueRegistre {
+    #[inline]
+    pub fn len(&self) -> usize { registre_longueur() }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool { self.len() == 0 }
+
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = &'static Task> { registre_iter() }
+
+    #[inline]
+    pub fn iter_mut(&self) -> impl Iterator<Item = &'static mut Task> {
+        registre_iter_mut()
+    }
+
+    #[inline]
+    pub fn get(&self, index: usize) -> Option<&'static Task> {
+        registre_tache(index)
+    }
+
+    #[inline]
+    pub fn get_mut(&self, index: usize) -> Option<&'static mut Task> {
+        registre_tache_mut(index)
     }
 }
+
+impl core::ops::Index<usize> for VueRegistre {
+    type Output = Task;
+    #[inline]
+    fn index(&self, index: usize) -> &Task {
+        registre_tache(index).expect("registre: indice de tache invalide")
+    }
+}
+
+impl core::ops::IndexMut<usize> for VueRegistre {
+    #[inline]
+    fn index_mut(&mut self, index: usize) -> &mut Task {
+        registre_tache_mut(index).expect("registre: indice de tache invalide")
+    }
+}
+
+#[inline]
+fn tasks() -> VueRegistre { VueRegistre }
 
 /// Table des processus.
 pub fn processes() -> Vec<Arc<Process>> {
@@ -234,7 +281,7 @@ pub fn running_user_cpu_mask() -> u64 {
 pub fn current() -> &'static mut Task {
     let index = current_index_raw();
     assert!(index != NO_TASK, "task: aucune tache active sur ce CPU");
-    unsafe { &mut *(&mut **tasks().get_mut(index).unwrap() as *mut Task) }
+    unsafe { &mut *(tasks().get_mut(index).unwrap() as *mut Task) }
 }
 
 /// Tache courante, si elle existe.

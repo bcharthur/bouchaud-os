@@ -106,13 +106,24 @@ impl EtatAtomique {
 
     /// Publie un nouvel etat.
     ///
-    /// `Release` : tout ce que ce CPU a ecrit dans la tache AVANT doit etre
-    /// visible par celui qui observera l'etat. Reveiller une tache dont
-    /// l'echeance n'est pas encore visible la ferait repartir sur une valeur
-    /// perimee.
+    /// # Pourquoi `SeqCst` et non `Release`
+    ///
+    /// `Release` suffirait a rendre visibles les ecritures precedentes -- une
+    /// tache reveillee ne doit pas repartir sur une echeance perimee. Il ne
+    /// suffit PAS au protocole de reveil perdu, qui est un motif
+    /// ecriture-puis-lecture CROISE :
+    ///
+    ///   le dormeur  ecrit `Blocked`, puis lit la generation ;
+    ///   le reveilleur ecrit la generation, puis lit l'etat.
+    ///
+    /// Sans ordre total, les deux lectures peuvent remonter avant les deux
+    /// ecritures : le dormeur ne voit pas le reveil, le reveilleur ne voit pas
+    /// le dormeur, et la tache ne repart jamais. Sur x86 cela coute une
+    /// instruction verrouillee -- au prix d'un changement d'etat, pas d'une
+    /// boucle chaude.
     #[inline]
     pub fn range(&self, etat: TaskState) {
-        self.0.store(etat.code(), core::sync::atomic::Ordering::Release);
+        self.0.store(etat.code(), core::sync::atomic::Ordering::SeqCst);
     }
 
     /// Transition CONDITIONNELLE : ne passe a `nouveau` que si l'etat vaut

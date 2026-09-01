@@ -223,7 +223,7 @@ pub fn run(mut first: Box<Task>) -> i32 {
     let to_ptr = unsafe {
         RACINE_PREMIER_PLAN.store(racine, Ordering::Release);
         let list = tasks();
-        let ptr = &mut **list.get_mut(index).unwrap() as *mut Task;
+        let ptr = list.get_mut(index).unwrap() as *mut Task;
         mark_task_running(&mut *ptr, cpu_id);
         ptr
     };
@@ -270,7 +270,7 @@ pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
     let index = register(task);
     let to_ptr = unsafe {
         let list = tasks();
-        let ptr = &mut **list.get_mut(index).unwrap() as *mut Task;
+        let ptr = list.get_mut(index).unwrap() as *mut Task;
         mark_task_running(&mut *ptr, 0);
         ptr
     };
@@ -304,12 +304,18 @@ pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
 /// la table est un `Vec` et `CURRENT` en est un indice. Depuis une tache,
 /// utiliser [`nettoie_zombies`].
 pub fn reap() {
-    // Les CURRENT per-CPU sont des indices stables. En SMP on ne compacte donc
-    // jamais le Vec ; `register` recycle les slots zombies. En UP, conserver le
-    // comportement historique est sans risque.
-    if smp::schedulable_cpus() <= 1 {
-        tasks().retain(|t| t.state != TaskState::Zombie);
-    }
+    // Le compactage a disparu, et c'est le registre qui l'a rendu inutile.
+    //
+    // `retain` supprimait les zombies en UP, ce qui DECALE les indices. Les
+    // `CURRENT` par CPU en sont, et ce n'etait tolerable que parce qu'un seul
+    // coeur tournait. Les emplacements du registre ayant maintenant une adresse
+    // ET un indice stables a vie, compacter serait faux dans tous les cas.
+    //
+    // La memoire n'est pas perdue pour autant : `registre_ajoute` reutilise
+    // l'emplacement d'une tache morte en ECRASANT son contenu, ce qui libere
+    // au passage sa pile noyau et sa zone FPU. La reclamation a simplement lieu
+    // au moment ou quelqu'un en a besoin, plutot qu'a intervalle regulier --
+    // et elle ne coute plus un balayage de toute la table.
 }
 
 pub fn nettoie_zombies() {

@@ -24,9 +24,14 @@ pub(crate) fn prepare_park_current_on_detached(
     wait_queue_key: usize,
     deadline_ns: Option<u64>,
 ) {
+    // L'assertion « sous gros verrou » a disparu parce que la PRECONDITION a
+    // disparu, non pour faire passer un controle : ce chemin est justement
+    // celui qu'on sort du verrou. Ce qui reste vrai, et qui compte, est que
+    // seule la tache COURANTE se gare elle-meme -- personne d'autre n'a le
+    // droit de la declarer bloquee.
     debug_assert!(
-        smp_lock::held_by_current_cpu(),
-        "task: detached wait prepare sans BKL"
+        current_index_raw() != NO_TASK,
+        "task: parking demande hors de toute tache"
     );
 
     {
@@ -39,6 +44,19 @@ pub(crate) fn prepare_park_current_on_detached(
     if let Some(deadline) = deadline_ns {
         arme_echeance(deadline);
     }
+}
+
+/// Annule un parking publie mais pas encore effectif.
+///
+/// Le protocole sans gros verrou publie `Blocked` AVANT de relire la
+/// generation de la file. Quand cette relecture montre qu'un reveil est deja
+/// passe, il faut defaire la publication -- sinon la tache resterait bloquee
+/// en attendant un reveil qui a deja eu lieu.
+pub(crate) fn annule_park_courant() {
+    let task = current();
+    task.wait_queue_key.range(0);
+    task.wake_deadline_ns.range(0);
+    task.state.range(TaskState::Ready);
 }
 
 /// Returns `(notified_before_deadline, number_of_schedule_loops)`.
@@ -179,22 +197,45 @@ pub(crate) fn park_current_on_until(wait_queue_key: usize, deadline_ns: u64) -> 
 }
 
 /// Reveille au plus `limit` taches inscrites sur la queue.
+/// Reveille jusqu'a `limit` taches arretees sur cette file. SANS GROS VERROU.
+///
+/// # Ce qui a rendu le verrou inutile
+///
+/// Cette boucle le prenait pour deux raisons, et les deux ont disparu.
+///
+/// La table pouvait se REALLOUER sous les pieds du lecteur : le registre a
+/// maintenant des emplacements a adresse stable, lus sans verrou.
+///
+/// Le « lire l'etat, decider, ecrire l'etat » n'etait atomique que grace a
+/// lui : deux CPU reveillant la meme tache l'auraient vue bloquee tous les
+/// deux, et l'auraient mise deux fois en file d'execution. C'est desormais un
+/// `compare_exchange` -- exactement un gagnant, par construction.
+///
+/// # Reveil superflu, et pourquoi il est acceptable
+///
+/// La cle est lue avant la transition. Une tache qui changerait de file entre
+/// les deux serait reveillee pour rien. C'est sans danger : toute attente du
+/// noyau reverifie sa condition en reprenant la main -- c'est la forme
+/// `while etat == Blocked { schedule() }`. Rendre ce cas impossible couterait
+/// un verrou par tache, pour supprimer un reveil rare et inoffensif.
 pub(crate) fn wake_wait_queue(wait_queue_key: usize, limit: usize) -> usize {
-    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
-    let _kernel = smp_lock::enter();
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Readiness);
     let mut woke = 0;
-    for index in 0..tasks().len() {
+    for index in 0..registre_longueur() {
         if woke == limit {
             break;
         }
-        if tasks()[index].state == TaskState::Blocked
-            && tasks()[index].wait_queue_key == wait_queue_key
-        {
-            tasks()[index].wait_queue_key.range(0);
-            tasks()[index].state.range(TaskState::Ready);
-            publish_ready(index);
-            woke += 1;
+        let Some(tache) = registre_tache(index) else { continue };
+        if tache.wait_queue_key != wait_queue_key {
+            continue;
         }
+        // Le gagnant du compare_exchange est le seul a poursuivre.
+        if !tache.state.echange(TaskState::Blocked, TaskState::Ready) {
+            continue;
+        }
+        tache.wait_queue_key.range(0);
+        publish_ready(index);
+        woke += 1;
     }
     woke
 }

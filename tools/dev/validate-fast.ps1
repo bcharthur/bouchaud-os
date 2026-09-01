@@ -76,6 +76,7 @@ try {
     Invoke-RustTest "BKL max/provenance" "tools\smp\test_bkl_max.rs"
     Invoke-RustTest "comptabilite du gros verrou" "tools\smp\test_bkl_comptes.rs"
     Invoke-RustTest "domaines du gros verrou" "tools\smp\test_domaines_bkl.rs"
+    Invoke-RustTest "protocole de parking" "tools\smp\test_rendezvous.rs"
     Invoke-RustTest "empreintes de mots de passe" "tools\securite\test_motdepasse.rs"
     Invoke-RustTest "commutation SMP" "tools\smp\test_commutation.rs"
     Invoke-RustTest "profondeur BKL" "tools\smp\test_profondeur_bkl.rs"

@@ -165,17 +165,17 @@ pub fn register(mut task: Box<Task>) -> usize {
     task.on_cpu.range(-1);
     task.switching_out.range(false);
 
-    let reuse = tasks().iter().position(|old| {
-        old.state == TaskState::Zombie && old.on_cpu < 0 && !old.switching_out.charge()
-    });
-    let index = if let Some(index) = reuse {
-        tasks()[index] = task;
-        index
-    } else {
-        let list = tasks();
-        list.push(task);
-        list.len() - 1
-    };
+    // Le registre choisit l'emplacement lui-meme, sous son propre verrou :
+    // c'est la SEULE section critique qui reste sur ce chemin. Le predicat dit
+    // ce qu'est un emplacement recyclable -- une tache morte, sur aucun coeur,
+    // et qui n'est pas en train de commuter. Une tache qui commute encore
+    // possede sa pile noyau ; la reecrire la ferait reprendre sur une autre.
+    let index = registre_ajoute(task, |ancienne| {
+        ancienne.state == TaskState::Zombie
+            && ancienne.on_cpu < 0
+            && !ancienne.switching_out.charge()
+    })
+    .expect("registre des taches plein");
 
     {
         let registered = &tasks()[index];
@@ -195,7 +195,7 @@ pub fn register(mut task: Box<Task>) -> usize {
 fn index_of(tid: u32) -> Option<usize> { tasks().iter().position(|t| t.tid == tid) }
 pub fn by_tid(tid: u32) -> Option<&'static mut Task> {
     let index = index_of(tid)?;
-    Some(unsafe { &mut *(&mut **tasks().get_mut(index).unwrap() as *mut Task) })
+    Some(unsafe { &mut *(tasks().get_mut(index).unwrap() as *mut Task) })
 }
 pub fn live_count() -> usize {
     tasks().iter().filter(|t| t.state != TaskState::Zombie).count()

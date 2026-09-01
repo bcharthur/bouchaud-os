@@ -69,8 +69,8 @@ pub fn preempt_from_irq() {
 
     let (from_ptr, to_ptr) = unsafe {
         let list = tasks();
-        let from_ptr = &mut **list.get_mut(cur).unwrap() as *mut Task;
-        let to_ptr = &mut **list.get_mut(next).unwrap() as *mut Task;
+        let from_ptr = list.get_mut(cur).unwrap() as *mut Task;
+        let to_ptr = list.get_mut(next).unwrap() as *mut Task;
 
         IRQ_PREEMPTIONS.fetch_add(1, Ordering::Relaxed);
         CONTEXT_SWITCHES.fetch_add(1, Ordering::Relaxed);

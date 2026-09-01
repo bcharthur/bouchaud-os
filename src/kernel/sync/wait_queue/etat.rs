@@ -38,8 +38,10 @@ fn enter_bkl() -> crate::kernel::smp_lock::KernelGuard {
 pub struct WaitTicket(u64);
 
 pub struct WaitQueue {
-    generation: AtomicU64,
-    waiters: AtomicU64,
+    /// Le protocole de parking vit dans `sync::rendezvous`, et c'est LE MEME
+    /// code que `tools/smp/test_rendezvous.rs` met a l'epreuve. Le dupliquer
+    /// ici rendrait le test decoratif : il prouverait une copie.
+    point: crate::kernel::sync::rendezvous::Rendezvous,
 }
 
 struct Inscription<'a> {
@@ -48,23 +50,20 @@ struct Inscription<'a> {
 
 impl<'a> Inscription<'a> {
     fn nouvelle(queue: &'a WaitQueue) -> Self {
-        queue.waiters.fetch_add(1, Ordering::SeqCst);
+        queue.point.inscrit();
         Self { queue }
     }
 }
 
 impl Drop for Inscription<'_> {
     fn drop(&mut self) {
-        self.queue.waiters.fetch_sub(1, Ordering::SeqCst);
+        self.queue.point.desinscrit();
     }
 }
 
 impl WaitQueue {
     pub const fn new() -> Self {
-        Self {
-            generation: AtomicU64::new(1),
-            waiters: AtomicU64::new(0),
-        }
+        Self { point: crate::kernel::sync::rendezvous::Rendezvous::neuf() }
     }
 
     #[inline]

@@ -297,8 +297,8 @@ fn switch_to(from: usize, to: usize) {
     let cpu_id = local_cpu();
     let (from_ptr, to_ptr) = unsafe {
         let list = tasks();
-        let from_ptr = &mut **list.get_mut(from).unwrap() as *mut Task;
-        let to_ptr = &mut **list.get_mut(to).unwrap() as *mut Task;
+        let from_ptr = list.get_mut(from).unwrap() as *mut Task;
+        let to_ptr = list.get_mut(to).unwrap() as *mut Task;
 
         CONTEXT_SWITCHES.fetch_add(1, Ordering::Relaxed);
         account_slice_end(&mut *from_ptr);
@@ -331,7 +331,7 @@ fn switch_to_kernel() -> ! {
     let cur = current_index_raw();
     let from_ptr = unsafe {
         let list = tasks();
-        let ptr = &mut **list.get_mut(cur).unwrap() as *mut Task;
+        let ptr = list.get_mut(cur).unwrap() as *mut Task;
         // Replier AVANT de rendre `on_cpu` negatif : depuis que la
         // comptabilite d'appel systeme vit par CPU, c'est ici -- et non plus a
         // chaque `account_kernel_exit` -- que la derniere tranche de cette
@@ -375,7 +375,7 @@ pub fn secondary_cpu_loop() -> ! {
         // Avant le premier register() du BSP, ne meme pas materialiser TASKS :
         // cela permet d'activer les AP juste avant l'autorun sans mettre le boot
         // historique en concurrence avec une allocation secondaire.
-        let aucune_tache = unsafe { TASKS.as_ref().map_or(true, |list| list.is_empty()) };
+        let aucune_tache = registre_longueur() == 0;
         if aucune_tache {
             // BOUCHAUD_P0_IDLE_WAKE_HANDSHAKE_V14
             cpu::prepare_scheduler_idle();
@@ -391,7 +391,7 @@ pub fn secondary_cpu_loop() -> ! {
         if let Some(next) = pick_next(NO_TASK, cpu_id) {
             let to_ptr = unsafe {
                 let list = tasks();
-                let ptr = &mut **list.get_mut(next).unwrap() as *mut Task;
+                let ptr = list.get_mut(next).unwrap() as *mut Task;
                 mark_task_running(&mut *ptr, cpu_id);
                 ptr
             };
