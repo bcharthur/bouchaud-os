@@ -54,6 +54,18 @@ pub(crate) fn finish_park_current_on_detached(
 
     let mut loops = 0u64;
 
+    #[inline]
+    fn trace_detached_schedule(moment: &str, boucle: u64, depth: usize) {
+        let cpu = local_cpu();
+        let (index, _, _, _, _) = stall_probe_context_pour(cpu);
+        let tid = usermode::per_cpu_for(cpu).current;
+        let pid = pid_pour_sonde(cpu);
+        crate::serial_println_brut!(
+            "[BKL-DETACHED] {} cpu={} task={} tid={} pid={} depth={} loop={}",
+            moment, cpu, index, tid, pid, depth, boucle,
+        );
+    }
+
     loop {
         let blocked = {
             let _kernel = smp_lock::enter();
@@ -65,7 +77,29 @@ pub(crate) fn finish_park_current_on_detached(
         }
 
         loops = loops.saturating_add(1);
+        let depth_before = smp_lock::profondeur_locale();
+        smp_lock::note_detached_check(1, loops, depth_before);
+        trace_detached_schedule("before_schedule", loops, depth_before);
         schedule();
+        let depth_after = smp_lock::profondeur_locale();
+        smp_lock::note_detached_check(2, loops, depth_after);
+        if depth_before == 0 && depth_after != 0 {
+            // Geler AVANT tout formatage : les autres CPU ne peuvent plus
+            // ecraser la transition fautive pendant l'impression du contexte.
+            smp_lock::vide_enregistreur();
+        }
+        trace_detached_schedule("after_schedule", loops, depth_after);
+        if depth_before == 0 && depth_after != 0 {
+            crate::serial_println_brut!(
+                "[BKL-DETACHED] VIOLATION schedule depth {}->{} loop={}",
+                depth_before, depth_after, loops,
+            );
+        }
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(
+            depth_after, depth_before,
+            "task: detached wait schedule a change la profondeur BKL"
+        );
     }
 
     let notified = match deadline_ns {
@@ -80,9 +114,20 @@ pub(crate) fn finish_park_current_on_detached(
         task.wake_deadline_ns = 0;
     }
 
+    let depth_final = smp_lock::profondeur_locale();
+    smp_lock::note_detached_check(3, loops, depth_final);
+    if depth_final != 0 {
+        smp_lock::vide_enregistreur();
+    }
+    trace_detached_schedule("before_final_assert", loops, depth_final);
+    if depth_final != 0 {
+        crate::serial_println_brut!(
+            "[BKL-DETACHED] VIOLATION final depth={} loops={}", depth_final, loops,
+        );
+    }
     #[cfg(debug_assertions)]
     debug_assert_eq!(
-        smp_lock::profondeur_locale(),
+        depth_final,
         0,
         "task: detached wait a rendu le BKL"
     );
@@ -169,4 +214,3 @@ pub fn kill_all(code: i32) {
         task.process.lifecycle.lock().exit_code = code;
     }
 }
-

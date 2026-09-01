@@ -1,7 +1,4 @@
-// PIT handler V8.
-//
-// Mouse V7 bottom-half remains unchanged. Only the final preemption dispatch is
-// routed through the V8 gate.
+// PIT handler V8 + P0-NG1 deferred kernel preemption request.
 
 extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
     let _gs = GsGuard::enter(&stack);
@@ -18,11 +15,8 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
         let targets = crate::kernel::task::running_user_cpu_mask();
         let online = smp::schedulable_cpus().min(64);
         let mut cpu = 1usize;
-
         while cpu < online {
-            if targets & (1u64 << cpu) != 0 {
-                smp::reschedule_cpu(cpu);
-            }
+            if targets & (1u64 << cpu) != 0 { smp::reschedule_cpu(cpu); }
             cpu += 1;
         }
     }
@@ -32,30 +26,29 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
         let _site = crate::kernel::task::SiteIrq::enter(60, 0);
         let Some(_kernel) = crate::kernel::smp_lock::try_enter() else {
             if quantum && crate::kernel::task::in_user_task() {
+                // The IRQ cannot safely switch while the global compatibility
+                // lock is busy. Arm both the legacy deferred path and the NG
+                // safe-point flag; the next clean kernel boundary will consume it.
+                crate::kernel::scheduler::preempt::request_local();
                 crate::kernel::task::request_deferred_preempt();
             }
             return;
         };
         crate::kernel::task::stall_site_set(61, 0);
 
-        // Mouse V7 bottom-half.
         crate::kernel::sync::reveil::flush_interface_irq_bkl_held();
-
-        if !idle {
-            crate::kernel::task::echantillonne_tache_bsp();
-        }
+        if !idle { crate::kernel::task::echantillonne_tache_bsp(); }
         crate::kernel::task::watchdog_from_timer();
 
         if quantum && crate::kernel::task::in_user_task() {
             if interrupted_user {
                 preempt_now = true;
             } else if !crate::kernel::task::current_is_kernel_task() {
+                crate::kernel::scheduler::preempt::request_local();
                 crate::kernel::task::request_deferred_preempt();
             }
         }
     }
 
-    if preempt_now {
-        dispatch_irq_preempt(PREEMPT_SOURCE_TIMER);
-    }
+    if preempt_now { dispatch_irq_preempt(PREEMPT_SOURCE_TIMER); }
 }

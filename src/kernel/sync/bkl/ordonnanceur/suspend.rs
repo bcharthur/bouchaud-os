@@ -41,4 +41,3 @@ pub fn suspend_for_schedule() -> usize {
     wake_parked_waiters(cpu);
     depth
 }
-

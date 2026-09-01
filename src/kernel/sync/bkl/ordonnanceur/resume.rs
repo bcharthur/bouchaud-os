@@ -111,4 +111,3 @@ pub fn resume_after_schedule(depth: usize) {
         wait_for_owner_change(&mut spins, true);
     }
 }
-

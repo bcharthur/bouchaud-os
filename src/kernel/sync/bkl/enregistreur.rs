@@ -44,6 +44,7 @@ pub mod enregistreur {
     pub const RESUME_OK: u8 = 8;
     pub const SWITCH_BEFORE: u8 = 9;
     pub const SWITCH_AFTER: u8 = 10;
+    pub const DETACHED_CHECK: u8 = 11;
 
     fn nom(kind: u8) -> &'static str {
         match kind {
@@ -57,15 +58,17 @@ pub mod enregistreur {
             RESUME_OK => "RESUME_OK",
             SWITCH_BEFORE => "SWITCH_BEFORE",
             SWITCH_AFTER => "SWITCH_AFTER",
+            DETACHED_CHECK => "DETACHED_CHECK",
             _ => "?",
         }
     }
 
-    /// 256 transitions gardees, 64 videes. La marge sert a ne pas perdre le
-    /// contexte quand la violation est precedee d'une rafale d'IRQ.
+    /// 256 transitions gardees et videes. Sous SMP4, 64 transitions globales
+    /// ne suffisaient pas toujours a conserver la derniere sequence complete
+    /// du CPU fautif entre deux retours de `schedule()` detached.
     const TAILLE: usize = 256;
     /// Nombre de transitions imprimees sur violation.
-    const VIDAGE: usize = 64;
+    const VIDAGE: usize = TAILLE;
 
     /// Une case de l'anneau. Huit `u64` = 64 octets, soit une ligne de cache :
     /// deux cases voisines ne se disputent jamais la meme.
@@ -255,6 +258,7 @@ pub mod enregistreur {
     pub const RESUME_OK: u8 = 8;
     pub const SWITCH_BEFORE: u8 = 9;
     pub const SWITCH_AFTER: u8 = 10;
+    pub const DETACHED_CHECK: u8 = 11;
 
     #[inline(always)]
     pub fn note(
@@ -271,4 +275,22 @@ pub mod enregistreur {
 /// Vide l'enregistreur de vol du gros verrou. Appele par le `panic_handler`.
 pub fn vide_enregistreur() {
     enregistreur::vide();
+}
+
+/// Marque le point exact avant/apres `schedule()` d'une attente detached.
+/// `phase`: 1=avant, 2=apres, 3=assertion finale. `aux` conserve la boucle.
+pub fn note_detached_check(phase: u8, boucle: u64, depth: usize) {
+    let _irq = LocalIrqGuard::acquire();
+    let cpu = cpu();
+    let owner = OWNER.load(Ordering::Acquire);
+    enregistreur::note(
+        enregistreur::DETACHED_CHECK,
+        cpu,
+        owner,
+        owner,
+        depth,
+        depth,
+        usize::MAX,
+        (boucle << 8) | phase as u64,
+    );
 }
