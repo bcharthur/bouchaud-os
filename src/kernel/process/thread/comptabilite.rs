@@ -56,9 +56,9 @@ fn account_until(task: &mut Task, now: u64) {
 /// ou -1 si elle n'est nulle part. Une tache qui n'est sur aucun CPU n'a
 /// personne a prevenir : elle ne reviendra pas en espace utilisateur.
 fn marque_zombie(task: &mut Task) {
-    task.state = TaskState::Zombie;
-    if task.on_cpu >= 0 && !task.switching_out {
-        let cpu = task.on_cpu as usize;
+    task.state.range(TaskState::Zombie);
+    if task.on_cpu >= 0 && !task.switching_out.charge() {
+        let cpu = task.on_cpu.charge() as usize;
         if cpu < MAX_CPUS {
             RETRAITE_DEMANDEE[cpu].store(true, Ordering::Release);
         }

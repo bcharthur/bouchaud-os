@@ -145,9 +145,9 @@ fn notify_parent_of_exit() {
                 false
             }
         };
-        if matches && tasks()[index].waiting_for_child {
-            tasks()[index].waiting_for_child = false;
-            tasks()[index].state = TaskState::Ready;
+        if matches && tasks()[index].waiting_for_child.charge() {
+            tasks()[index].waiting_for_child.range(false);
+            tasks()[index].state.range(TaskState::Ready);
             publish_ready(index);
         }
     }
@@ -214,7 +214,7 @@ pub fn run(mut first: Box<Task>) -> i32 {
     // naissent avec une affinite machine complete et peuvent etre balances.
     let caller_cpu = local_cpu();
     first.affinity_mask = 1u64 << caller_cpu;
-    first.runq_cpu = caller_cpu as u8;
+    first.runq_cpu.range(caller_cpu as u8);
     first.last_cpu = caller_cpu as u8;
     let process = first.process.clone();
     let racine = process.pid;
@@ -265,7 +265,7 @@ pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
     let mut task = Task::new_kernel(process.clone(), entree);
     task.priorite = Priorite::Interactive;
     task.affinity_mask = 1;
-    task.runq_cpu = 0;
+    task.runq_cpu.range(0);
     task.last_cpu = 0;
     let index = register(task);
     let to_ptr = unsafe {

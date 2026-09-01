@@ -12,7 +12,7 @@ pub fn print_table() {
         let process = &task.process;
         let metadata = process.metadata.lock();
         let pages = process.mm.lock().space.mapped_pages();
-        let state = match task.state {
+        let state = match task.state.charge() {
             TaskState::Ready => "ready",
             TaskState::Blocked => "blocked",
             TaskState::Zombie => "zombie",

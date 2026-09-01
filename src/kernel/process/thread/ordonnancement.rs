@@ -19,17 +19,17 @@
 fn runnable_local(task: &Task, cpu: usize) -> bool {
     task.state == TaskState::Ready
         && task.on_cpu < 0
-        && !task.switching_out
-        && task.runq_cpu as usize == cpu
+        && !task.switching_out.charge()
+        && task.runq_cpu.charge() as usize == cpu
         && allowed_on(task, cpu)
 }
 
 fn runnable_steal(task: &Task, cpu: usize) -> bool {
     task.state == TaskState::Ready
         && task.on_cpu < 0
-        && !task.switching_out
+        && !task.switching_out.charge()
         && !task.noyau
-        && task.runq_cpu as usize != cpu
+        && task.runq_cpu.charge() as usize != cpu
         && allowed_on(task, cpu)
 }
 
@@ -88,7 +88,7 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
         return None;
     };
     let candidate = &tasks()[index];
-    if !runnable_steal(candidate, cpu) || candidate.runq_cpu as usize != donor {
+    if !runnable_steal(candidate, cpu) || candidate.runq_cpu.charge() as usize != donor {
         donor_queue.enqueue(index);
         STEAL_RETRY_AFTER_NS[cpu].store(now.saturating_add(2_000_000), Ordering::Relaxed);
         return None;
@@ -105,7 +105,7 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
             return None;
         }
     }
-    tasks()[index].runq_cpu = cpu as u8;
+    tasks()[index].runq_cpu.range(cpu as u8);
     RUNQ_STEALS[cpu].fetch_add(1, Ordering::Relaxed);
     STEAL_RETRY_AFTER_NS[cpu].store(0, Ordering::Relaxed);
     Some(index)

@@ -15,17 +15,17 @@ impl Task {
         let mut task = Box::new(Task {
             tid: alloc_tid(),
             process,
-            state: TaskState::Ready,
+            state: EtatAtomique::neuf(TaskState::Ready),
             priorite: Priorite::Normale,
             affinity_mask: 0,
-            runq_cpu: u8::MAX,
+            runq_cpu: CoeurAtomique::neuf(u8::MAX),
             last_cpu: u8::MAX,
-            on_cpu: -1,
-            switching_out: false,
+            on_cpu: CoeurSigneAtomique::neuf(-1),
+            switching_out: DrapeauAtomique::neuf(false),
             last_migration_ns: 0,
             recent_runtime_ns: 0,
             slice_start_ns: 0,
-            ready_since_ns: 0,
+            ready_since_ns: EcheanceAtomique::neuf(0),
             last_account_ns: 0,
             user_cpu_ns: 0,
             kernel_cpu_ns: 0,
@@ -41,10 +41,10 @@ impl Task {
             fpu_area,
             fs_base: 0,
             clear_child_tid: 0,
-            futex_key: 0,
-            wait_queue_key: 0,
-            wake_deadline_ns: 0,
-            waiting_for_child: false,
+            futex_key: EcheanceAtomique::neuf(0),
+            wait_queue_key: CleAtomique::neuf(0),
+            wake_deadline_ns: EcheanceAtomique::neuf(0),
+            waiting_for_child: DrapeauAtomique::neuf(false),
             fresh: true,
             ticks_cpu: 0,
             noyau: false,
@@ -58,7 +58,7 @@ impl Task {
         let mut task = Task::new(process, TrapFrame::new_user(0, 0));
         task.noyau = true;
         task.affinity_mask = 1;
-        task.runq_cpu = 0;
+        task.runq_cpu.range(0);
         task.last_cpu = 0;
         task.entree_noyau = Some(entree);
         amorce_pile(&mut task, kernel_task_trampoline, 0x0000_0202);
@@ -90,7 +90,7 @@ fn allowed_on(task: &Task, cpu: usize) -> bool {
 
 fn running_count_cpu(cpu: usize) -> usize {
     tasks().iter().filter(|t| {
-        t.state != TaskState::Zombie && t.on_cpu == cpu as i8 && !t.switching_out
+        t.state != TaskState::Zombie && t.on_cpu == cpu as i8 && !t.switching_out.charge()
     }).count()
 }
 
@@ -125,18 +125,18 @@ fn choose_runq_cpu(mask: u64) -> u8 {
 /// running CPU consumes `need_resched` at its next safe kernel boundary.
 fn publish_ready(index: usize) {
     if index >= tasks().len() || tasks()[index].state != TaskState::Ready
-        || tasks()[index].on_cpu >= 0 || tasks()[index].switching_out
+        || tasks()[index].on_cpu >= 0 || tasks()[index].switching_out.charge()
     { return; }
 
     if tasks()[index].ready_since_ns == 0 {
-        tasks()[index].ready_since_ns = crate::kernel::timer::monotonic_ns();
+        tasks()[index].ready_since_ns.range(crate::kernel::timer::monotonic_ns());
     }
-    let target = if allowed_on(&tasks()[index], tasks()[index].runq_cpu as usize) {
-        tasks()[index].runq_cpu as usize
+    let target = if allowed_on(&tasks()[index], tasks()[index].runq_cpu.charge() as usize) {
+        tasks()[index].runq_cpu.charge() as usize
     } else {
         choose_runq_cpu(tasks()[index].affinity_mask) as usize
     };
-    tasks()[index].runq_cpu = target as u8;
+    tasks()[index].runq_cpu.range(target as u8);
     if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(target) {
         crate::arch::x86_64::cpu_local::local(id).enqueue(index);
         crate::kernel::scheduler::preempt::request_cpu(target);
@@ -149,7 +149,7 @@ pub fn register(mut task: Box<Task>) -> usize {
     let _kernel = smp_lock::enter();
     if task.noyau {
         task.affinity_mask = 1;
-        task.runq_cpu = 0;
+        task.runq_cpu.range(0);
         task.last_cpu = 0;
     } else {
         if task.affinity_mask == 0 {
@@ -158,15 +158,15 @@ pub fn register(mut task: Box<Task>) -> usize {
             task.affinity_mask &= online_affinity_mask();
             if task.affinity_mask == 0 { task.affinity_mask = online_affinity_mask(); }
         }
-        if task.runq_cpu == u8::MAX || !allowed_on(&task, task.runq_cpu as usize) {
-            task.runq_cpu = choose_runq_cpu(task.affinity_mask);
+        if task.runq_cpu == u8::MAX || !allowed_on(&task, task.runq_cpu.charge() as usize) {
+            task.runq_cpu.range(choose_runq_cpu(task.affinity_mask));
         }
     }
-    task.on_cpu = -1;
-    task.switching_out = false;
+    task.on_cpu.range(-1);
+    task.switching_out.range(false);
 
     let reuse = tasks().iter().position(|old| {
-        old.state == TaskState::Zombie && old.on_cpu < 0 && !old.switching_out
+        old.state == TaskState::Zombie && old.on_cpu < 0 && !old.switching_out.charge()
     });
     let index = if let Some(index) = reuse {
         tasks()[index] = task;
@@ -203,14 +203,14 @@ pub fn live_count() -> usize {
 fn ready_count() -> usize { tasks().iter().filter(|t| t.state == TaskState::Ready).count() }
 fn ready_count_cpu(cpu: usize) -> usize {
     tasks().iter().filter(|t| {
-        t.state == TaskState::Ready && t.on_cpu < 0 && !t.switching_out
-            && t.runq_cpu as usize == cpu && allowed_on(t, cpu)
+        t.state == TaskState::Ready && t.on_cpu < 0 && !t.switching_out.charge()
+            && t.runq_cpu.charge() as usize == cpu && allowed_on(t, cpu)
     }).count()
 }
 fn stealable_count_cpu(cpu: usize) -> usize {
     tasks().iter().filter(|t| {
-        t.state == TaskState::Ready && t.on_cpu < 0 && !t.switching_out && !t.noyau
-            && t.runq_cpu as usize != cpu && allowed_on(t, cpu)
+        t.state == TaskState::Ready && t.on_cpu < 0 && !t.switching_out.charge() && !t.noyau
+            && t.runq_cpu.charge() as usize != cpu && allowed_on(t, cpu)
     }).count()
 }
 fn running_count() -> usize {

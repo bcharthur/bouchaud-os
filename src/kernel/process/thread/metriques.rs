@@ -425,7 +425,7 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
         let runtime = task.user_cpu_ns.saturating_add(task.kernel_cpu_ns).saturating_add(live);
         let mut cpu_map_snapshot = task.cpu_ns;
         if live != 0 && task.on_cpu >= 0 {
-            let cpu = task.on_cpu as usize;
+            let cpu = task.on_cpu.charge() as usize;
             if cpu < MAX_CPUS { cpu_map_snapshot[cpu] = cpu_map_snapshot[cpu].saturating_add(live); }
         }
         if let Some((_, before)) = previous_tasks.iter().find(|(tid, _)| *tid == task.tid) {

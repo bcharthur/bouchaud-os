@@ -45,7 +45,7 @@ fn prepare_switch_handoff(index: usize, task: &mut Task, cpu: usize) {
         task.tid
     );
     assert!(
-        !task.switching_out,
+        !task.switching_out.charge(),
         "task: double preparation de passation tid={}",
         task.tid
     );
@@ -56,7 +56,7 @@ fn prepare_switch_handoff(index: usize, task: &mut Task, cpu: usize) {
         Ordering::AcqRel,
         Ordering::Acquire,
     ) {
-        Ok(_) => task.switching_out = true,
+        Ok(_) => task.switching_out.range(true),
         Err(previous) => panic!(
             "task: passation precedente non terminee cpu={} pending={} nouveau={}",
             cpu, previous, index
@@ -92,7 +92,7 @@ fn complete_switch_handoff() {
         let task = &mut tasks()[outgoing];
 
         assert!(
-            task.switching_out,
+            task.switching_out.charge(),
             "task: passation pending sans switching_out tid={}",
             task.tid
         );
@@ -120,9 +120,9 @@ fn complete_switch_handoff() {
         }
 
         task.last_cpu = cpu as u8;
-        task.runq_cpu = cpu as u8;
-        task.on_cpu = -1;
-        task.switching_out = false;
+        task.runq_cpu.range(cpu as u8);
+        task.on_cpu.range(-1);
+        task.switching_out.range(false);
         task.state == TaskState::Ready
     };
 

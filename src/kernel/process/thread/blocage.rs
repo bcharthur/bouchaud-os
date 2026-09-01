@@ -5,11 +5,11 @@ pub fn wake_for_signal(pid: u32) {
         if tasks()[index].state == TaskState::Blocked
             && tasks()[index].process.pid == pid
         {
-            tasks()[index].futex_key = 0;
-            tasks()[index].wait_queue_key = 0;
-            tasks()[index].wake_deadline_ns = 0;
-            tasks()[index].waiting_for_child = false;
-            tasks()[index].state = TaskState::Ready;
+            tasks()[index].futex_key.range(0);
+            tasks()[index].wait_queue_key.range(0);
+            tasks()[index].wake_deadline_ns.range(0);
+            tasks()[index].waiting_for_child.range(false);
+            tasks()[index].state.range(TaskState::Ready);
             publish_ready(index);
         }
     }
@@ -31,9 +31,9 @@ pub(crate) fn prepare_park_current_on_detached(
 
     {
         let task = current();
-        task.wait_queue_key = wait_queue_key;
-        task.wake_deadline_ns = deadline_ns.unwrap_or(0);
-        task.state = TaskState::Blocked;
+        task.wait_queue_key.range(wait_queue_key);
+        task.wake_deadline_ns.range(deadline_ns.unwrap_or(0));
+        task.state.range(TaskState::Blocked);
     }
 
     if let Some(deadline) = deadline_ns {
@@ -112,8 +112,8 @@ pub(crate) fn finish_park_current_on_detached(
         let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
         let _kernel = smp_lock::enter();
         let task = current();
-        task.wait_queue_key = 0;
-        task.wake_deadline_ns = 0;
+        task.wait_queue_key.range(0);
+        task.wake_deadline_ns.range(0);
     }
 
     let depth_final = smp_lock::profondeur_locale();
@@ -142,15 +142,15 @@ pub(crate) fn finish_park_current_on_detached(
 pub(crate) fn park_current_on(wait_queue_key: usize) {
     {
         let task = current();
-        task.wait_queue_key = wait_queue_key;
-        task.state = TaskState::Blocked;
+        task.wait_queue_key.range(wait_queue_key);
+        task.state.range(TaskState::Blocked);
     }
     let profondeur_entree = smp_lock::profondeur_locale();
     while current().state == TaskState::Blocked {
         schedule();
     }
     verifie_profondeur_rendue("park_current_on", profondeur_entree);
-    current().wait_queue_key = 0;
+    current().wait_queue_key.range(0);
 }
 
 /// Endort la tache sur une WaitQueue jusqu'a notification ou echeance.
@@ -161,9 +161,9 @@ pub(crate) fn park_current_on(wait_queue_key: usize) {
 pub(crate) fn park_current_on_until(wait_queue_key: usize, deadline_ns: u64) -> bool {
     {
         let task = current();
-        task.wait_queue_key = wait_queue_key;
-        task.wake_deadline_ns = deadline_ns;
-        task.state = TaskState::Blocked;
+        task.wait_queue_key.range(wait_queue_key);
+        task.wake_deadline_ns.range(deadline_ns);
+        task.state.range(TaskState::Blocked);
     }
     arme_echeance(deadline_ns);
     let profondeur_entree = smp_lock::profondeur_locale();
@@ -173,8 +173,8 @@ pub(crate) fn park_current_on_until(wait_queue_key: usize, deadline_ns: u64) -> 
     verifie_profondeur_rendue("park_current_on_until", profondeur_entree);
     let notified = crate::kernel::timer::monotonic_ns() < deadline_ns;
     let task = current();
-    task.wait_queue_key = 0;
-    task.wake_deadline_ns = 0;
+    task.wait_queue_key.range(0);
+    task.wake_deadline_ns.range(0);
     notified
 }
 
@@ -190,8 +190,8 @@ pub(crate) fn wake_wait_queue(wait_queue_key: usize, limit: usize) -> usize {
         if tasks()[index].state == TaskState::Blocked
             && tasks()[index].wait_queue_key == wait_queue_key
         {
-            tasks()[index].wait_queue_key = 0;
-            tasks()[index].state = TaskState::Ready;
+            tasks()[index].wait_queue_key.range(0);
+            tasks()[index].state.range(TaskState::Ready);
             publish_ready(index);
             woke += 1;
         }

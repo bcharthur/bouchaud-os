@@ -339,14 +339,14 @@ pub fn sys_wait4(pid: i64, status_addr: u64, options: u32, _rusage: u64) -> i64 
         // remettra cette tache en etat pret.
         {
             let task = task::current();
-            task.waiting_for_child = true;
-            task.state = task::TaskState::Blocked;
+            task.waiting_for_child.range(true);
+            task.state.range(task::TaskState::Blocked);
         }
         // schedule() effectue deja HLT avec le BKL suspendu si necessaire.
         let _ = task::schedule();
         let task = task::current();
-        task.waiting_for_child = false;
-        task.state = task::TaskState::Ready;
+        task.waiting_for_child.range(false);
+        task.state.range(task::TaskState::Ready);
     }
 }
 

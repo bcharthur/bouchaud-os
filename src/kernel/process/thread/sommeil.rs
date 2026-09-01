@@ -74,8 +74,8 @@ pub fn sleep_ticks(ticks: u64) {
     let deadline = crate::kernel::timer::monotonic_ns().saturating_add(duration_ns);
     {
         let task = current();
-        task.wake_deadline_ns = deadline;
-        task.state = TaskState::Blocked;
+        task.wake_deadline_ns.range(deadline);
+        task.state.range(TaskState::Blocked);
     }
     arme_echeance(deadline);
 
@@ -101,8 +101,8 @@ pub fn sleep_ticks(ticks: u64) {
     smp_lock::resume_after_schedule(outer_depth);
     verifie_profondeur_rendue("sleep_ticks", profondeur_entree);
     let task = current();
-    task.wake_deadline_ns = 0;
-    task.state = TaskState::Ready;
+    task.wake_deadline_ns.range(0);
+    task.state.range(TaskState::Ready);
 }
 
 /// Reveille les taches dont le sommeil est echu, et declenche les `SIGALRM`.
@@ -146,7 +146,7 @@ pub(crate) fn arme_echeance(deadline_ns: u64) {
 fn recalcule_echeance() {
     let mut minimum = crate::kernel::echeances::JAMAIS;
     for index in 0..tasks().len() {
-        let echeance = tasks()[index].wake_deadline_ns;
+        let echeance = tasks()[index].wake_deadline_ns.charge();
         if tasks()[index].state == TaskState::Blocked && echeance != 0 && echeance < minimum {
             minimum = echeance;
         }
@@ -173,11 +173,11 @@ fn wake_sleepers() {
     for index in 0..tasks().len() {
         if tasks()[index].state == TaskState::Blocked
             && tasks()[index].wake_deadline_ns != 0
-            && now >= tasks()[index].wake_deadline_ns
+            && now >= tasks()[index].wake_deadline_ns.charge()
         {
-            tasks()[index].wake_deadline_ns = 0;
-            tasks()[index].futex_key = 0;
-            tasks()[index].state = TaskState::Ready;
+            tasks()[index].wake_deadline_ns.range(0);
+            tasks()[index].futex_key.range(0);
+            tasks()[index].state.range(TaskState::Ready);
             publish_ready(index);
         }
     }

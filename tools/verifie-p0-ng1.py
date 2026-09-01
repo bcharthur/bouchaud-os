@@ -28,7 +28,11 @@ checks = {
     "src/arch/x86_64/usermode.rs": ["scheduler::preempt::safe_point"],
     "src/kernel/process/thread/tache.rs": ["ready_since_ns"],
     "src/kernel/process/thread/creation.rs": ["ready_since_ns", "preempt::request_cpu"],
-    "src/kernel/process/thread/commutation.rs": ["scheduler::latency::record", "ready_since_ns = 0"],
+    # `ready_since_ns` est devenu atomique : la remise a zero s'ecrit
+    # `range(0)`. Ce que la regle protege est inchange -- la latence
+    # ready-to-run doit etre consommee au moment ou la tache prend le CPU,
+    # sans quoi la mesure suivante la compterait deux fois.
+    "src/kernel/process/thread/commutation.rs": ["scheduler::latency::record", "ready_since_ns.range(0)"],
     "src/kernel/memory/heap.rs": ["struct NgHeap", "CLASS_SIZES", "[MEM-NG-HEAP]"],
     "src/kernel/memory/frame_cache.rs": ["LOCAL_CAPACITY", "free_frame_global", "[MEM-NG-FRAMECACHE]"],
     "src/kernel/memory/pressure.rs": ["enum Level", "reclaim_now", "note_oom", "[MEM-NG-PRESSURE]"],

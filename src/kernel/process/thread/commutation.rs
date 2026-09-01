@@ -61,17 +61,17 @@ fn deactivate_task_space(task: &Task, cpu_id: usize) {
 fn mark_task_running(task: &mut Task, cpu_id: usize) {
     let now = crate::kernel::timer::monotonic_ns();
     assert!(task.on_cpu < 0, "task: tentative de double execution tid={}", task.tid);
-    assert!(!task.switching_out,
+    assert!(!task.switching_out.charge(),
         "task: tentative de reprendre une tache dont la passation n'est pas terminee tid={}", task.tid);
     debug_assert_eq!(task.last_account_ns, 0,
         "task: cursor CPU encore arme hors CPU tid={}", task.tid);
 
     if task.ready_since_ns != 0 {
         crate::kernel::scheduler::latency::record(
-            now.saturating_sub(task.ready_since_ns),
+            now.saturating_sub(task.ready_since_ns.charge()),
             task.priorite == Priorite::Interactive,
         );
-        task.ready_since_ns = 0;
+        task.ready_since_ns.range(0);
     }
 
     if task.last_cpu != u8::MAX && task.last_cpu as usize != cpu_id {
@@ -83,9 +83,9 @@ fn mark_task_running(task: &mut Task, cpu_id: usize) {
         }
     }
     task.last_cpu = cpu_id as u8;
-    task.runq_cpu = cpu_id as u8;
-    task.on_cpu = cpu_id as i8;
-    task.switching_out = false;
+    task.runq_cpu.range(cpu_id as u8);
+    task.on_cpu.range(cpu_id as i8);
+    task.switching_out.range(false);
     task.slice_start_ns = now;
     task.last_account_ns = now;
     task.context_switches = task.context_switches.saturating_add(1);
