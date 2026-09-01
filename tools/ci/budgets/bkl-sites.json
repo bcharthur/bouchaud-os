@@ -6,11 +6,11 @@
       "Fd": 5,
       "Fs": 3,
       "Ordonnanceur": 10,
-      "Pilote": 4,
+      "Panique": 6,
       "Processus": 4,
       "Readiness": 1,
       "Syscall": 2,
-      "Vm": 11
+      "Vm": 3
     }
   },
   "execution": {

@@ -76,7 +76,9 @@ pub enum Domaine {
     VerrouEnregistrement = 13,
     /// Avant que le SMP ne soit demarre : un seul coeur, rien a serialiser.
     BootPrecoce = 14,
-    /// Chemin de panique : la coherence prime sur la concurrence.
+    /// Faute fatale ou panique : la tache est demontee, ou la machine
+    /// s'arrete. Il n'y a plus de concurrence a preserver, et la coherence du
+    /// diagnostic prime.
     Panique = 15,
 }
 
