@@ -160,6 +160,20 @@ anomalies={}/{}/{} proprietaire={}{}",
         }
         crate::kernel::dmesg::log_fmt(format_args!("{}", ligne));
     }
+    // BOUCHAUD_C2_LATENCE_DANS_CHAQUE_TRACE_V1
+    //
+    // Ces deux releves n'etaient emis que par le rapport du navigateur, donc
+    // uniquement quand un navigateur tournait. Les traces de stress -- memoire
+    // SMP4, primitives, boot -- n'en portaient aucun, et les budgets de
+    // latence n'avaient rien a verifier : ils ressortaient « absent du
+    // journal », ce qui est honnete mais inutile.
+    //
+    // Ils sortent maintenant avec le reste du releve periodique. Ce sont les
+    // deux chiffres qui mesurent ce que l'utilisateur RESSENT -- une
+    // preemption reportee, une tache prete qui attend son coeur -- et ils
+    // doivent exister dans toute trace ou l'on cherche un figement.
+    crate::kernel::scheduler::preempt::log_stats();
+    crate::kernel::scheduler::latency::log_stats();
     let (_, _, backing_reads, backing_bytes) = crate::fs::backing::stats();
     let (cache_hits, readahead_hits) = crate::fs::backing::cache_stats();
     let readahead_pages = crate::fs::backing::readahead_pages();
