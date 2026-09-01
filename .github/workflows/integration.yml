@@ -53,10 +53,30 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           run=false
           if [ "$EVENT" = push ] || [ "$EVENT" = workflow_dispatch ]; then run=true; fi
           case ",$LABELS," in *,ci:integration,*) run=true ;; esac
+
+          # Certains changements ne se VERIFIENT que sous QEMU.
+          #
+          # Une modification du verrouillage, de l'ordonnanceur ou de la table
+          # des taches compile parfaitement et passe toutes les suites hote
+          # tout en produisant un noyau qui se fige ou ne demarre pas : la
+          # propriete en cause est une course entre coeurs, et aucun test
+          # d'hote ne la voit. Attendre un label pour ces chemins-la revient a
+          # ne jamais les valider, puisque c'est justement la ou l'on croit le
+          # moins en avoir besoin.
+          if [ "$run" != true ] && [ -n "$BASE_SHA" ]; then
+            if git diff --name-only "$BASE_SHA...$HEAD_SHA" \
+                 | grep -qE '^src/(kernel/(sync|process|scheduler)|arch/x86_64/(smp|cpu_local|idt))'; then
+              echo "chemin critique touche : integration forcee"
+              run=true
+            fi
+          fi
+
           echo "run=$run" >> "$GITHUB_OUTPUT"
           echo "integration enabled=$run"
       - name: Classer les changements
@@ -301,11 +321,29 @@ jobs:
           DNS: ${{ needs.dns-udp.result }}
         run: |
           if [ "$ENABLED" != true ]; then
-            echo 'Integration non demandee sur cette PR.'
+            echo 'INTEGRATION NON DEMANDEE : aucune suite QEMU n a tourne.'
+            echo 'Ce resultat vert ne dit RIEN du comportement a l execution.'
             exit 0
           fi
           printf '%-12s %s\n' kernel "$KERNEL" boot "$BOOT" health "$HEALTH" primitives "$PRIMITIVES" mm "$MM" qt "$QT" dns "$DNS"
-          # qt-pixel est informatif. Les jobs skipped sont normaux.
+
+          # Un job SAUTE n est pas un job REUSSI.
+          #
+          # Le classement peut legitimement sauter une suite sans rapport avec
+          # le changement. Mais si l integration a ete demandee et que
+          # RIEN n a tourne, le vert obtenu est exactement celui d une suite
+          # qui passe -- et c est ainsi qu on croit valider ce qu on ne valide
+          # pas. On le dit, et on echoue.
+          a_tourne=0
+          for r in "$KERNEL" "$BOOT" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS"; do
+            [ "$r" = skipped ] || a_tourne=1
+          done
+          if [ "$a_tourne" -eq 0 ]; then
+            echo 'ECHEC: integration demandee, mais toutes les suites ont ete sautees.'
+            exit 1
+          fi
+
+          # qt-pixel reste informatif.
           for r in "$KERNEL" "$BOOT" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS"; do
             [ "$r" != failure ] && [ "$r" != cancelled ] || exit 1
           done
