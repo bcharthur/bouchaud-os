@@ -35,7 +35,7 @@ pub struct Task {
     pub wake_deadline_ns: EcheanceAtomique,
     pub waiting_for_child: DrapeauAtomique,
     pub fresh: bool,
-    pub ticks_cpu: u64,
+    pub ticks_cpu: EcheanceAtomique,
     pub noyau: bool,
     entree_noyau: Option<fn() -> !>,
 }

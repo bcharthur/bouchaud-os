@@ -46,7 +46,7 @@ impl Task {
             wake_deadline_ns: EcheanceAtomique::neuf(0),
             waiting_for_child: DrapeauAtomique::neuf(false),
             fresh: true,
-            ticks_cpu: 0,
+            ticks_cpu: EcheanceAtomique::neuf(0),
             noyau: false,
             entree_noyau: None,
         });

@@ -440,7 +440,7 @@ pub fn cpu_time_ms(pid: u32) -> u64 {
     let mut total = 0u64;
     for task in tasks().iter() {
         if task.process.pid == pid {
-            total = total.saturating_add(task.ticks_cpu);
+            total = total.saturating_add(task.ticks_cpu.charge());
         }
     }
     total * (1000 / crate::kernel::timer::TICKS_PER_SECOND).max(1)

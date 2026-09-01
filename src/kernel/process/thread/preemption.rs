@@ -119,7 +119,7 @@ fn add_current_ticks(delta: u64) {
     let index = current_index_raw();
     if index == NO_TASK { return; }
     if let Some(task) = tasks().get_mut(index) {
-        task.ticks_cpu = task.ticks_cpu.wrapping_add(delta);
+        task.ticks_cpu.range(task.ticks_cpu.charge().wrapping_add(delta));
     }
 }
 

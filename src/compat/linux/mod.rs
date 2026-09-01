@@ -845,13 +845,10 @@ fn sys_clock_gettime(clock: i32, out: u64) -> i64 {
     let ms = match clock {
         CLOCK_REALTIME | CLOCK_REALTIME_COARSE | CLOCK_REALTIME_ALARM => realtime_ms(),
         CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
-            // Seule branche de cet appel qui touche la table des taches :
-            // `cpu_time_ms` la parcourt pour additionner les ticks de tous les
-            // fils du processus. Elle prend donc le gros verrou, ici et nulle
-            // part ailleurs. Le reste de `clock_gettime` -- c'est-a-dire tout
-            // ce qu'emet une boucle d'evenements -- s'en passe.
-            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Syscall);
-            let _kernel = crate::kernel::smp_lock::enter();
+            // Seule branche de cet appel qui parcourt la table des taches.
+            // Elle prenait le gros verrou pour cela ; elle n'en a plus besoin :
+            // le registre se lit sans verrou, et `ticks_cpu` est atomique comme
+            // les autres champs qu'un CPU ecrit et qu'un autre lit.
             let pid = crate::kernel::task::current_process().pid;
             crate::kernel::task::cpu_time_ms(pid)
         }
