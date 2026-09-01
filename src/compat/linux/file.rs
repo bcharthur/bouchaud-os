@@ -55,7 +55,7 @@ fn absolute(path: &str) -> String {
         return path.to_string();
     }
     let cwd = task::current_process().metadata.lock().cwd;
-    let mut base = ramfs::path_string(ramfs::fs(), cwd);
+    let mut base = ramfs::path_string(&ramfs::fs(), cwd);
     if !base.ends_with('/') {
         base.push('/');
     }
@@ -457,7 +457,7 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
                 let desc = borrowed.get(fd).unwrap();
                 (desc.offset, desc.flags & O_APPEND != 0)
             };
-            let fs = ramfs::fs();
+            let mut fs = ramfs::fs();
             let content = &mut fs.nodes[node].content;
             let start = if append { content.len() } else { offset };
             if start + data.len() > ramfs::MAX_FILE_SIZE {
@@ -829,7 +829,7 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
         };
         match node {
             Some(node) => {
-                let mut base = ramfs::path_string(ramfs::fs(), node);
+                let mut base = ramfs::path_string(&ramfs::fs(), node);
                 if !base.ends_with('/') {
                     base.push('/');
                 }
@@ -901,7 +901,7 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
                 return -errno::ENOENT;
             }
             let cwd = process.metadata.lock().cwd;
-            let fs = ramfs::fs();
+            let mut fs = ramfs::fs();
             let (parent, name) = match fs.resolve_parent_name(&path, cwd) {
                 Some(value) => value,
                 None => return -errno::ENOENT,
@@ -916,7 +916,7 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
         }
     };
 
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let is_dir = fs.nodes[node].kind == NodeKind::Dir;
     if flags & O_DIRECTORY != 0 && !is_dir {
         return -errno::ENOTDIR;
@@ -1539,7 +1539,7 @@ pub fn sys_getdents64(fd: i32, buffer: u64, size: usize) -> i64 {
 /// `getcwd`.
 pub fn sys_getcwd(buffer: u64, size: usize) -> i64 {
     let cwd = task::current_process().metadata.lock().cwd;
-    let mut path = ramfs::path_string(ramfs::fs(), cwd);
+    let mut path = ramfs::path_string(&ramfs::fs(), cwd);
     if path.is_empty() {
         path = "/".to_string();
     }
@@ -1577,7 +1577,7 @@ pub fn sys_mkdir(path_addr: u64) -> i64 {
         None => return -errno::EFAULT,
     };
     let cwd = task::current_process().metadata.lock().cwd;
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let (parent, name) = match fs.resolve_parent_name(&path, cwd) {
         Some(value) => value,
         None => return -errno::ENOENT,
@@ -1602,7 +1602,7 @@ pub fn sys_unlink(path_addr: u64) -> i64 {
             if backing::is_disk_backed(node) {
                 return -errno::EROFS;
             }
-            let fs = ramfs::fs();
+            let mut fs = ramfs::fs();
             if fs.nodes[node].kind == NodeKind::Dir && !fs.is_empty_dir(node) {
                 return -errno::ENOTEMPTY;
             }
@@ -1632,7 +1632,7 @@ pub fn sys_rename(from_addr: u64, to_addr: u64) -> i64 {
         None => return -errno::ENOENT,
     };
     let cwd = task::current_process().metadata.lock().cwd;
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let (parent, name) = match fs.resolve_parent_name(&to, cwd) {
         Some(value) => value,
         None => return -errno::ENOENT,

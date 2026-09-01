@@ -8,7 +8,7 @@ pub fn monte() -> usize {
     // empreinte tiree d'une lecture ne prouverait donc pas ce que le disque
     // porte apres coup.
     oublie_le_disque();
-    let systeme = fs();
+    let mut systeme = fs();
     let racine = match systeme.resolve(RACINE, 0) {
         Some(idx) => idx,
         None => match systeme.mkdir_at(0, "persist") {

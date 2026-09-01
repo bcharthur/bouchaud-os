@@ -151,9 +151,21 @@ pub struct FileSystem {
     pub nodes: [Node; MAX_NODES],
 }
 
-static mut FS: FileSystem = FileSystem {
-    nodes: [const { Node::empty() }; MAX_NODES],
-};
+// BOUCHAUD_C1_RAMFS_VERROU_PROPRE_V1
+//
+// Le systeme de fichiers etait un `static mut`. Rien ne le protegeait : c'est
+// le gros verrou, pris par ses appelants, qui le rendait sur -- et c'est de lui
+// qu'on sort. Il a maintenant le sien.
+//
+// `SpinLock` refuse la reprise par le meme coeur, et le dit : en construction
+// de debogage -- celle de l'integration -- une reacquisition recursive PANIQUE
+// en nommant le CPU, au lieu de boucler en silence. C'est ce qui rend cette
+// migration conduisible : une chaine d'appels qui rentre deux fois se signale
+// tout de suite, a l'endroit exact, plutot que de figer la machine.
+static FS: crate::kernel::sync::SpinLock<FileSystem> =
+    crate::kernel::sync::SpinLock::new(FileSystem {
+        nodes: [const { Node::empty() }; MAX_NODES],
+    });
 /// Lock-free mirror used by interrupt/panic-safe journal prefixes.
 static USED_NODES_RELAXED: AtomicUsize = AtomicUsize::new(0);
 
@@ -162,8 +174,18 @@ pub fn used_nodes_relaxed() -> usize {
 }
 
 /// Accede au systeme de fichiers global.
-pub fn fs() -> &'static mut FileSystem {
-    unsafe { &mut FS }
+/// Le systeme de fichiers, sous son propre verrou.
+///
+/// Rend un GARDE, et non plus `&'static mut FileSystem`. La difference n'est
+/// pas cosmetique : la reference precedente promettait une exclusivite que
+/// seul le gros verrou faisait respecter, et elle la promettait a tout le
+/// monde en meme temps.
+///
+/// La duree de vie du garde est celle de l'expression qui l'utilise. Un
+/// `let fs = fs();` le retient donc pour tout le bloc -- ce qui est correct
+/// tant que ce bloc ne rappelle pas `fs()`.
+pub fn fs() -> crate::kernel::sync::SpinLockGuard<'static, FileSystem> {
+    FS.lock()
 }
 
 impl FileSystem {

@@ -63,7 +63,7 @@ fn draw_toolbar(cur: usize, _scroll: i32, bx: usize, by: usize, bw: usize) {
 
     // Chemin courant
     let fs = ramfs::fs();
-    let path = ramfs::path_string(fs, cur);
+    let path = ramfs::path_string(&fs, cur);
     let px = bx + 46;
     let pw = bw.saturating_sub(50);
     fb::fill_rect_rgb(px, by + 3, pw, 10, 0xffffff);

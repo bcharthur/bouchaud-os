@@ -254,7 +254,7 @@ fn writeback_pages(node: usize, pages: &[(u64, u64)]) {
     // dans `Vm` designerait le mauvais sous-systeme a migrer.
     let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fs);
     let _kernel = crate::kernel::smp_lock::enter();
-    let fs = crate::fs::ramfs::fs();
+    let mut fs = crate::fs::ramfs::fs();
     for &(numero, frame) in pages {
         let debut = (numero * PAGE_SIZE) as usize;
         if debut >= fs.nodes[node].content.len() {

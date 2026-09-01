@@ -19,7 +19,7 @@ pub(crate) fn draw(sb: &[String], input: &str, cwd: usize, bx: usize, by: usize,
         fb::draw_text(bx, yy, clip(line, cols), fb::C_GREEN);
         yy += 8;
     }
-    let prompt = format!("{}:{}$ ", users::session().username(), ramfs::path_string(ramfs::fs(), cwd));
+    let prompt = format!("{}:{}$ ", users::session().username(), ramfs::path_string(&ramfs::fs(), cwd));
     let cur = format!("{}{}_", prompt, input);
     fb::draw_text(bx, yy, clip(&cur, cols), fb::C_WHITE);
 }

@@ -34,7 +34,7 @@ use crate::fs::ramfs;
 
 /// Cree (ou retrouve) un repertoire par son chemin absolu.
 fn mkdir_path(path: &str) -> usize {
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let mut current = 0usize;
     for segment in path.split('/') {
         if segment.is_empty() {
@@ -56,7 +56,7 @@ fn write_file(parent: usize, name: &str, content: &str, mode: u16) {
     if parent == 0 && name.is_empty() {
         return;
     }
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let node = match fs.find_child(parent, name) {
         Some(existing) => existing,
         None => match fs.touch_at(parent, name) {
@@ -70,7 +70,7 @@ fn write_file(parent: usize, name: &str, content: &str, mode: u16) {
 
 /// Ecrit un fichier binaire (police).
 fn write_binary(parent: usize, name: &str, content: &[u8], mode: u16) {
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let node = match fs.find_child(parent, name) {
         Some(existing) => existing,
         None => match fs.touch_at(parent, name) {

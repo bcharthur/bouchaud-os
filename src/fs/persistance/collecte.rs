@@ -49,7 +49,7 @@ fn collecte(dossier: usize, prefixe: &str, entrees: &mut Vec<Entree>) {
 
 /// Cree (dossiers compris) puis remplit un fichier sous `/persist`.
 fn depose(racine: usize, chemin: &str, contenu: &[u8]) -> bool {
-    let systeme = fs();
+    let mut systeme = fs();
     let mut parent = racine;
     let mut morceaux = chemin.split('/').filter(|m| !m.is_empty()).peekable();
 

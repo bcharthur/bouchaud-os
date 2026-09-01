@@ -331,7 +331,7 @@ fn print_prompt(cwd: usize) {
     vga::set_color(COLOR_GREEN);
     print!("{}@bouchaud-os:", users::session().username());
     vga::set_color(COLOR_CYAN);
-    ramfs::print_path(ramfs::fs(), cwd);
+    ramfs::print_path(&ramfs::fs(), cwd);
     vga::set_color(COLOR_GREEN);
     print!("$ ");
     vga::set_color(COLOR_DEFAULT);
@@ -803,7 +803,7 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "su" => { c::su(argc, &argv, cwd); 0 }
 
         // Fichiers
-        "pwd" => { ramfs::print_path(ramfs::fs(), *cwd); println!(""); 0 }
+        "pwd" => { ramfs::print_path(&ramfs::fs(), *cwd); println!(""); 0 }
         "ls" => c::ls(argc, &argv, *cwd),
         "tree" => { c::tree(argc, &argv, *cwd); 0 }
         "cd" => c::cd(argc, &argv, cwd),

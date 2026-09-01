@@ -100,7 +100,7 @@ fn is_ustar(header: &[u8]) -> bool {
 
 /// Cree (ou retrouve) un repertoire par son chemin, en creant les parents.
 fn mkdir_path(path: &str) -> usize {
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let mut current = 0usize;
     for segment in path.split('/') {
         if segment.is_empty() || segment == "." {
@@ -142,7 +142,7 @@ fn write_file(path: &str, content: &[u8], mode: u16) -> bool {
         mkdir_path(parent_path)
     };
 
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let node = match fs.find_child(parent, name) {
         Some(existing) => existing,
         None => match fs.touch_at(parent, name) {
@@ -375,7 +375,7 @@ fn index_data_disk() -> Option<Unpacked> {
                         mkdir_path(parent_path)
                     };
 
-                    let fs = ramfs::fs();
+                    let mut fs = ramfs::fs();
                     let node = match fs.find_child(parent, file_name) {
                         Some(existing) => existing,
                         None => match fs.touch_at(parent, file_name) {

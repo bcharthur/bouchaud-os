@@ -285,7 +285,7 @@ pub fn list() {
 
 /// Cree dans le RAMFS les repertoires d'accueil manquants (mode 700).
 pub fn create_home_dirs() {
-    let fs = crate::fs::ramfs::fs();
+    let mut fs = crate::fs::ramfs::fs();
     unsafe {
         for i in 0..MAX_USERS {
             if !USERS[i].used { continue; }

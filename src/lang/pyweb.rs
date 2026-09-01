@@ -29,7 +29,7 @@ static BROWSER_PY: &str = include_str!("../assets/python/browser.py");
 pub fn install() {
     let dev = mkdir_path("/dev");
     let lib = mkdir_path("/usr/lib/python");
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
 
     if dev != 0 {
         let node = match fs.find_child(dev, "web") {
@@ -56,7 +56,7 @@ pub fn install() {
 }
 
 fn mkdir_path(path: &str) -> usize {
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let mut current = 0usize;
     for segment in path.split('/') {
         if segment.is_empty() {
