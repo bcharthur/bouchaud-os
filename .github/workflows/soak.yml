@@ -1,0 +1,66 @@
+name: Long Soak
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'Duree de la campagne'
+        required: true
+        default: '8h'
+        type: choice
+        options: ['8h', '24h', '72h']
+      cpus:
+        description: 'Topologie SMP'
+        required: true
+        default: '4'
+        type: choice
+        options: ['1', '2', '4', '8']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: long-soak
+  cancel-in-progress: false
+
+jobs:
+  soak:
+    name: soak / ${{ inputs.profile }} / SMP${{ inputs.cpus }}
+    # Les runners GitHub heberges ne sont pas adaptes a 8/24/72 h.
+    # Ce job est volontairement reserve au runner de soak du projet.
+    runs-on: [self-hosted, bouchaud-soak]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Construire le noyau
+        run: tools/ci/build_kernel.sh
+
+      - name: Resoudre la duree
+        id: duration
+        shell: bash
+        run: |
+          case '${{ inputs.profile }}' in
+            8h)  seconds=28800 ;;
+            24h) seconds=86400 ;;
+            72h) seconds=259200 ;;
+            *) exit 2 ;;
+          esac
+          echo "seconds=$seconds" >> "$GITHUB_OUTPUT"
+
+      - name: Campagne
+        run: |
+          python3 tools/ci/reliability/soak.py \
+            target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            --cpus '${{ inputs.cpus }}' \
+            --duration-seconds '${{ steps.duration.outputs.seconds }}' \
+            --cycle-seconds 300 \
+            --memory-mb 4096 \
+            --out-dir reliability-long-soak
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: long-soak-${{ inputs.profile }}-smp${{ inputs.cpus }}
+          path: reliability-long-soak/
+          if-no-files-found: error
+          retention-days: 30
