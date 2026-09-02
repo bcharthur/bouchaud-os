@@ -105,7 +105,8 @@ fn suspend_compta_pour_idle() -> bool {
     if index == NO_TASK {
         return false;
     }
-    let Some(task) = tasks().get(index) else {
+    let table = tasks();
+    let Some(task) = table.get(index) else {
         return false;
     };
     if task.last_account_ns == 0 {
@@ -126,7 +127,8 @@ fn rearme_compta_apres_idle() {
     }
     let now = crate::kernel::timer::monotonic_ns();
     let cpu = local_cpu();
-    let Some(task) = tasks().get(index) else {
+    let table = tasks();
+    let Some(task) = table.get(index) else {
         return;
     };
     task.last_account_ns.range(now);
@@ -190,4 +192,3 @@ fn frontiere_compta(vers_noyau: bool) {
 pub fn account_resume_user_noreturn() {
     account_kernel_exit();
 }
-

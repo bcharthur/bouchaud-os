@@ -282,7 +282,7 @@ pub fn vide_enregistreur() {
 pub fn note_detached_check(phase: u8, boucle: u64, depth: usize) {
     let _irq = LocalIrqGuard::acquire();
     let cpu = cpu();
-    let owner = OWNER.load(Ordering::Acquire);
+    let owner = owner_load(Ordering::Acquire);
     enregistreur::note(
         enregistreur::DETACHED_CHECK,
         cpu,

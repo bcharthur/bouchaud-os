@@ -71,7 +71,7 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
                     .fetch_add(1, Ordering::Relaxed);
                 continue;
             };
-            if identite.emplacement() < len && runnable_local(tache, cpu) {
+            if identite.emplacement() < len && runnable_local(&tache, cpu) {
                 return Some(identite.emplacement());
             }
             // L'entree vient d'etre CONSOMMEE et n'est pas servie. La tache
@@ -129,7 +129,7 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
         return None;
     };
     let index = identite.emplacement();
-    if !runnable_steal(candidate, cpu) || candidate.runq_cpu.charge() as usize != donor {
+    if !runnable_steal(&candidate, cpu) || candidate.runq_cpu.charge() as usize != donor {
         donor_queue.enqueue(mot);
         STEAL_RETRY_AFTER_NS[cpu].store(now.saturating_add(2_000_000), Ordering::Relaxed);
         return None;
@@ -467,4 +467,3 @@ pub fn secondary_cpu_loop() -> ! {
         }
     }
 }
-

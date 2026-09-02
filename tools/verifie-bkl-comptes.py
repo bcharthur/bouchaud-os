@@ -177,14 +177,18 @@ def main() -> int:
 
     # --- 4. la liberation qui deverrouille doit rester ordonnee --------------
     #
-    # `ferme` avant `OWNER <- FREE` : c'est CE qui rend les intervalles
+    # `ferme` avant la transition atomique vers FREE : c'est CE qui rend les intervalles
     # disjoints. Inverse, un autre coeur pourrait ouvrir le sien avant que
     # celui-ci ne soit clos, et les deux se recouvriraient.
-    for fonction, nom in [("fn release_one(", "release_one"),
-                          ("pub fn suspend_for_schedule(", "suspend_for_schedule")]:
+    for fonction, nom, transition in [
+        ("fn release_one(", "release_one", "remplace_profondeur_possedee(cpu, 1, 0"),
+        ("pub fn suspend_for_schedule(", "suspend_for_schedule", "remplace_profondeur_possedee(cpu, depth, 0"),
+    ]:
         texte = corps(code, fonction)
         sonde = texte.find("probe_note_release(")
-        libere = texte.find("OWNER.store(FREE")
+        # Depuis l'etat BKL empaquete, cette primitive est l'unique chemin qui
+        # publie simultanement OWNER=FREE et DEPTH=0.
+        libere = texte.find(transition)
         if sonde == -1 or libere == -1 or sonde > libere:
             fautes.append(
                 f"  {nom}  ferme l'intervalle APRES avoir rendu le verrou : "

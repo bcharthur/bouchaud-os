@@ -9,25 +9,26 @@ pub fn try_enter() -> Option<KernelGuard> {
     try_diag_begin(cpu, 1);
 
     try_diag_step(cpu, 601, mine as u64);
-    let owner = OWNER.load(Ordering::Acquire);
+    let owner = owner_load(Ordering::Acquire);
     if owner == mine {
-        try_diag_step(cpu, 630, DEPTH[cpu].load(Ordering::Relaxed) as u64);
-        let avant = DEPTH[cpu].load(Ordering::Relaxed);
-        if avant == 0 {
+        let courant = etat_charge(Ordering::Acquire);
+        try_diag_step(cpu, 630, courant.depth as u64);
+        if courant.depth == 0 {
             crate::serial_println_brut!(
                 "[BKL-FR] VIOLATION try_reenter cpu={} owner={} depth=0", cpu, owner,
             );
             vide_enregistreur();
         }
-        debug_assert!(avant > 0,
+        debug_assert!(courant.depth > 0,
             "smp_lock: OWNER local sans profondeur dans try_enter");
-        DEPTH[cpu].store(avant + 1, Ordering::Relaxed);
+        let (avant, apres) = augmente_profondeur(cpu)
+            .expect("smp_lock: reentrance perdue dans try_enter");
         probe_note_reenter();
-        try_diag_step(cpu, 631, (avant + 1) as u64);
+        try_diag_step(cpu, 631, apres as u64);
         enregistreur::note(
-            enregistreur::REENTER, cpu, owner, owner, avant, avant + 1, usize::MAX, 1,
+            enregistreur::REENTER, cpu, owner, owner, avant, apres, usize::MAX, 1,
         );
-        try_diag_end(cpu, 639, (avant + 1) as u64);
+        try_diag_end(cpu, 639, apres as u64);
         return Some(KernelGuard { cpu, active: true });
     }
 
@@ -38,14 +39,12 @@ pub fn try_enter() -> Option<KernelGuard> {
 
     try_diag_step(cpu, 602, owner as u64);
     if !essaie_prendre_nouvel_entrant(cpu, mine) {
-        try_diag_end(cpu, 641, OWNER.load(Ordering::Relaxed) as u64);
+        try_diag_end(cpu, 641, owner_load(Ordering::Relaxed) as u64);
         return None;
     }
 
-    try_diag_step(cpu, 620, OWNER.load(Ordering::Relaxed) as u64);
-    let avant = DEPTH[cpu].load(Ordering::Relaxed);
-    try_diag_step(cpu, 621, avant as u64);
-    DEPTH[cpu].store(1, Ordering::Relaxed);
+    try_diag_step(cpu, 620, owner_load(Ordering::Relaxed) as u64);
+    try_diag_step(cpu, 621, 0);
     try_diag_step(cpu, 622, 1);
 
     try_diag_step(cpu, 623, 0);
@@ -54,7 +53,7 @@ pub fn try_enter() -> Option<KernelGuard> {
 
     try_diag_step(cpu, 625, 0);
     enregistreur::note(
-        enregistreur::TRY_ENTER, cpu, FREE, mine, avant, 1, usize::MAX, 1,
+        enregistreur::TRY_ENTER, cpu, FREE, mine, 0, 1, usize::MAX, 1,
     );
     try_diag_step(cpu, 626, 0);
     try_diag_end(cpu, 627, 0);
@@ -93,7 +92,7 @@ pub fn try_enter_depuis_zero() -> Option<KernelGuard> {
     // qu'il ne faut pas approfondir. Une continuation en reprise a egalement
     // priorite sur cette acquisition depuis zero.
     try_diag_step(cpu, 650, mine as u64);
-    let owner = OWNER.load(Ordering::Acquire);
+    let owner = owner_load(Ordering::Acquire);
     if owner != FREE {
         try_diag_end(cpu, 651, owner as u64);
         return None;
@@ -101,18 +100,16 @@ pub fn try_enter_depuis_zero() -> Option<KernelGuard> {
 
     try_diag_step(cpu, 652, 0);
     if !essaie_prendre_nouvel_entrant(cpu, mine) {
-        try_diag_end(cpu, 653, OWNER.load(Ordering::Relaxed) as u64);
+        try_diag_end(cpu, 653, owner_load(Ordering::Relaxed) as u64);
         return None;
     }
 
-    try_diag_step(cpu, 660, OWNER.load(Ordering::Relaxed) as u64);
-    let avant = DEPTH[cpu].load(Ordering::Relaxed);
-    DEPTH[cpu].store(1, Ordering::Relaxed);
+    try_diag_step(cpu, 660, owner_load(Ordering::Relaxed) as u64);
     try_diag_step(cpu, 661, 1);
     probe_note_acquire(cpu, 2);
     try_diag_step(cpu, 662, 0);
     enregistreur::note(
-        enregistreur::TRY_ENTER, cpu, FREE, mine, avant, 1, usize::MAX, 2,
+        enregistreur::TRY_ENTER, cpu, FREE, mine, 0, 1, usize::MAX, 2,
     );
     try_diag_end(cpu, 663, 0);
     Some(KernelGuard { cpu, active: true })

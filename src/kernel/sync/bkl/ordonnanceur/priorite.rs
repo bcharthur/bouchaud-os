@@ -83,11 +83,8 @@ fn essaie_prendre_nouvel_entrant(cpu: usize, mine: usize) -> bool {
         return false;
     }
 
-    try_diag_step(cpu, 612, OWNER.load(Ordering::Relaxed) as u64);
-    if OWNER
-        .compare_exchange(FREE, mine, Ordering::SeqCst, Ordering::Acquire)
-        .is_err()
-    {
+    try_diag_step(cpu, 612, owner_load(Ordering::Relaxed) as u64);
+    if essaie_acquerir_etat(cpu, 1, Ordering::SeqCst, Ordering::Acquire).is_err() {
         try_diag_step(cpu, 618, 3);
         return false;
     }
@@ -98,7 +95,8 @@ fn essaie_prendre_nouvel_entrant(cpu: usize, mine: usize) -> bool {
     try_diag_step(cpu, 614, RESUME_WAITERS.load(Ordering::Relaxed));
     if reprise_prioritaire_en_attente() {
         PRIORITY_ROLLBACKS.fetch_add(1, Ordering::Relaxed);
-        OWNER.store(FREE, Ordering::SeqCst);
+        remplace_profondeur_possedee(cpu, 1, 0, Ordering::SeqCst)
+            .expect("smp_lock: rollback prioritaire sans ownership");
         // La reprise peut deja etre garee. Le reveil cible privilegie
         // RESUME_WAITERS ; si elle tourne encore, aucun IPI n'est necessaire.
         wake_parked_waiters(cpu);
@@ -112,7 +110,8 @@ fn essaie_prendre_nouvel_entrant(cpu: usize, mine: usize) -> bool {
     try_diag_step(cpu, 615, HANDOFF_TARGET.load(Ordering::Relaxed) as u64);
     if !handoff_permet_nouvel_entrant(cpu) {
         HANDOFF_ROLLBACKS.fetch_add(1, Ordering::Relaxed);
-        OWNER.store(FREE, Ordering::SeqCst);
+        remplace_profondeur_possedee(cpu, 1, 0, Ordering::SeqCst)
+            .expect("smp_lock: rollback handoff sans ownership");
         handoff_reveille_apres_rollback(cpu);
         try_diag_step(cpu, 618, 5);
         return false;

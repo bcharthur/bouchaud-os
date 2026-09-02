@@ -9,13 +9,12 @@
 pub fn profondeur_locale() -> usize {
     let _irq = LocalIrqGuard::acquire();
     let cpu = cpu();
-    DEPTH[cpu].load(Ordering::Relaxed)
+    depth_load(cpu, Ordering::Relaxed)
 }
 
 pub fn held_by_current_cpu() -> bool {
     let _irq = LocalIrqGuard::acquire();
     let cpu = cpu();
-    OWNER.load(Ordering::Acquire) == token(cpu)
-        && DEPTH[cpu].load(Ordering::Relaxed) > 0
+    let etat = etat_charge(Ordering::Acquire);
+    etat.owner == token(cpu) && etat.depth > 0
 }
-

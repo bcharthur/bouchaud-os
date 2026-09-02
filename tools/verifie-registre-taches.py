@@ -19,10 +19,10 @@ test.
      passe par un garde, et le garde par un drapeau pris en exclusion mutuelle.
   2. Chaque emplacement porte une GENERATION, incrementee a chaque
      installation. C'est ce qui rend un ancien handle detectable.
-  3. La lecture par identite compare la generation AVANT de rendre la tache.
-  4. Le recyclage prend l'exclusivite et incremente la generation AVANT
-     d'ecrire : personne ne doit observer un contenu a moitie remplace en
-     croyant lire l'ancienne tache.
+  3. Toute reference porte un garde de lecture ; la lecture par identite
+     compare la generation sous ce garde.
+  4. Le recyclage prend l'ecriture, attend tous les lecteurs et incremente la
+     generation AVANT d'ecrire.
 
 Et une cinquieme, ailleurs : la file d'execution porte des identites, pas des
 indices. Un indice conserve par une file designerait la tache suivante apres
@@ -38,6 +38,7 @@ RACINE = Path(__file__).resolve().parent.parent
 REGISTRE = RACINE / "src" / "kernel" / "process" / "thread" / "registre.rs"
 CPU_LOCAL = RACINE / "src" / "arch" / "x86_64" / "cpu_local.rs"
 ORDO = RACINE / "src" / "kernel" / "process" / "thread" / "ordonnancement.rs"
+COURANT = RACINE / "src" / "kernel" / "process" / "thread" / "courant.rs"
 
 
 def sans_commentaires(source: str) -> str:
@@ -83,6 +84,11 @@ def main() -> int:
             "  registre.rs  l'exclusivite n'est plus prise en exclusion "
             "mutuelle : deux gardes pourraient coexister"
         )
+    if re.search(r"pub fn registre_tache(?:_id)?\([^)]*\)\s*->\s*Option<&'static Task>", code):
+        fautes.append(
+            "  registre.rs  une lecture rend encore `&'static Task` sans garde : "
+            "la generation ne protege pas une reference deja obtenue"
+        )
 
     # --- 2. la generation existe et s'incremente ----------------------------
     if "generation" not in code:
@@ -107,29 +113,74 @@ def main() -> int:
             "  registre.rs  `registre_tache_id` ne compare plus la generation : "
             "il rendrait la nouvelle incarnation a un ancien handle"
         )
+    if lecture and not (
+        "RegistreLecture::acquire()" in lecture
+        and lecture.find("RegistreLecture::acquire()") < lecture.find("generation")
+    ):
+        fautes.append(
+            "  registre_tache_id  compare la generation hors d'un garde de "
+            "lecture : le recycleur peut encore ecraser la reference rendue"
+        )
 
-    # --- 4. le recyclage : exclusivite, puis generation, puis ecriture ------
+    if "struct GardeLectureTache" not in code or "lecture: RegistreLecture" not in code:
+        fautes.append(
+            "  registre.rs  la reference partagee ne conserve plus son garde "
+            "de lecture jusqu'au Drop"
+        )
+
+    try:
+        ecriture = corps(code, "fn acquire() -> Self {")
+    except SystemExit:
+        ecriture = ""
+    # Le fichier contient deux `acquire`; cibler explicitement le bloc ecrivain.
+    debut_ecrivain = code.find("impl RegistreEcriture")
+    ecriture = corps(code[debut_ecrivain:], "fn acquire() -> Self {") if debut_ecrivain >= 0 else ""
+    if not ecriture:
+        fautes.append("  registre.rs  le garde d'ecriture du recycleur a disparu")
+    else:
+        masque = ecriture.find("interrupts::disable()")
+        publie = ecriture.find("compare_exchange(false, true")
+        attend = ecriture.find("LECTEURS.load(Ordering::Acquire) != 0")
+        if not (0 <= masque < publie < attend):
+            fautes.append(
+                "  RegistreEcriture  ordre invalide : masquer IRQ -> publier "
+                "ecrivain -> attendre lecteurs est obligatoire"
+            )
+
+    # --- 4. le recyclage : ecriture, puis generation, puis remplacement -----
     try:
         ajoute = corps(code, "pub fn registre_ajoute(")
     except SystemExit:
         ajoute = ""
         fautes.append("  registre.rs  `registre_ajoute` a disparu")
     if ajoute:
-        exclusivite = ajoute.find("registre_exclusif(")
+        exclusivite = ajoute.find("RegistreEcriture::acquire()")
         generation = ajoute.find("prochaine_generation(")
-        ecriture = ajoute.find("*garde =")
+        ecriture = ajoute.find("*ancienne =")
         if exclusivite == -1:
             fautes.append(
-                "  registre_ajoute  recycle sans prendre l'exclusivite : un "
-                "lecteur exclusif verrait son contenu remplace sous lui"
+                "  registre_ajoute  recycle sans garde d'ecriture : une "
+                "reference partagee peut voir son contenu remplace sous elle"
             )
         elif generation == -1:
             fautes.append("  registre_ajoute  n'incremente plus la generation")
         elif ecriture != -1 and not (exclusivite < generation < ecriture):
             fautes.append(
-                "  registre_ajoute  l'ordre exclusivite -> generation -> "
-                "ecriture n'est pas respecte : c'est cet ordre qui empeche "
+                "  registre_ajoute  l'ordre ecriture -> generation -> "
+                "remplacement n'est pas respecte : c'est cet ordre qui empeche "
                 "d'observer un contenu a moitie remplace"
+            )
+
+    if COURANT.exists():
+        courant = sans_commentaires(COURANT.read_text(encoding="utf-8"))
+        try:
+            vue = corps(courant, "pub struct VueRegistre")
+        except SystemExit:
+            vue = ""
+        if "RegistreLecture" not in vue:
+            fautes.append(
+                "  courant.rs  VueRegistre ne conserve plus le garde de lecture "
+                "pendant ses indexations et iterations"
             )
 
     # --- 5. la file d'execution porte des identites -------------------------
@@ -156,7 +207,8 @@ def main() -> int:
 
     print(
         "ok  src/kernel/process/thread/registre.rs : aucun `&mut` partage, "
-        "generations par emplacement, recyclage ordonne, file generationnelle"
+        "generations par emplacement, lecteurs quiescents avant recyclage, "
+        "file generationnelle"
     )
     return 0
 

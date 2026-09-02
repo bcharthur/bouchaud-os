@@ -182,7 +182,9 @@ fn descend_de(pid: u32, racine: u32) -> bool {
 /// stable et se lisent sans verrou. Elle garde les memes methodes pour que la
 /// migration se fasse sous-systeme par sous-systeme plutot qu'en une fois : un
 /// changement de cette taille, fait d'un coup, ne se relit pas.
-pub struct VueRegistre;
+pub struct VueRegistre {
+    lecture: RegistreLecture,
+}
 
 impl VueRegistre {
     #[inline]
@@ -192,11 +194,15 @@ impl VueRegistre {
     pub fn is_empty(&self) -> bool { self.len() == 0 }
 
     #[inline]
-    pub fn iter(&self) -> impl Iterator<Item = &'static Task> { registre_iter() }
+    pub fn iter(&self) -> impl Iterator<Item = &Task> {
+        (0..self.len()).filter_map(|index| {
+            registre_tache_sous_lecture(&self.lecture, index)
+        })
+    }
 
     #[inline]
-    pub fn get(&self, index: usize) -> Option<&'static Task> {
-        registre_tache(index)
+    pub fn get(&self, index: usize) -> Option<&Task> {
+        registre_tache_sous_lecture(&self.lecture, index)
     }
 
     /// Acces EXCLUSIF, pris en exclusion mutuelle. Remplace l'ancien
@@ -211,12 +217,15 @@ impl core::ops::Index<usize> for VueRegistre {
     type Output = Task;
     #[inline]
     fn index(&self, index: usize) -> &Task {
-        registre_tache(index).expect("registre: indice de tache invalide")
+        registre_tache_sous_lecture(&self.lecture, index)
+            .expect("registre: indice de tache invalide")
     }
 }
 
 #[inline]
-fn tasks() -> VueRegistre { VueRegistre }
+fn tasks() -> VueRegistre {
+    VueRegistre { lecture: RegistreLecture::acquire() }
+}
 
 /// Table des processus.
 pub fn processes() -> Vec<Arc<Process>> {
@@ -280,7 +289,11 @@ pub fn running_user_cpu_mask() -> u64 {
 pub fn current() -> &'static Task {
     let index = current_index_raw();
     assert!(index != NO_TASK, "task: aucune tache active sur ce CPU");
-    registre_tache(index).expect("registre: tache courante absente")
+    // Le recycleur exige `on_cpu < 0`; la tache courante est donc stable tant
+    // que cette continuation s'execute.
+    let pointeur = EMPLACEMENTS[index].tache.load(Ordering::Acquire);
+    assert!(!pointeur.is_null(), "registre: tache courante absente");
+    unsafe { &*pointeur }
 }
 
 /// Acces EXCLUSIF au contenu prive de la tache courante.
@@ -461,4 +474,3 @@ pub fn cpu_time_ms(pid: u32) -> u64 {
     }
     total * (1000 / crate::kernel::timer::TICKS_PER_SECOND).max(1)
 }
-

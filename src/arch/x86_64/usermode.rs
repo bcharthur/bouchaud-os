@@ -3,7 +3,7 @@
 use core::arch::{asm, naked_asm};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::arch::x86_64::{gdt, smp};
+use crate::arch::x86_64::{cpu_local, gdt, smp};
 
 const MSR_EFER: u32 = 0xC000_0080;
 const MSR_STAR: u32 = 0xC000_0081;
@@ -53,12 +53,48 @@ static READY: AtomicBool = AtomicBool::new(false);
 pub fn per_cpu_for(cpu: usize) -> &'static mut PerCpu {
     unsafe { &mut *core::ptr::addr_of_mut!(PER_CPU[cpu.min(smp::MAX_CPUS - 1)]) }
 }
-pub fn per_cpu() -> &'static mut PerCpu {
-    let base = read_msr(MSR_GS_BASE);
-    if base == 0 { return per_cpu_for(0); }
-    unsafe { &mut *(base as *mut PerCpu) }
+
+/// Identite GS validee. `GS_BASE == 0` ne signifie jamais « CPU0 » : c'est la
+/// valeur userland entre deux `swapgs`, ou la preuve qu'une entree noyau a
+/// oublie sa bascule. La convertir silencieusement en zero ferait partager les
+/// tableaux per-CPU du BSP a un AP.
+pub fn cpu_index_from_gs() -> Option<usize> {
+    let base = read_msr(MSR_GS_BASE) as usize;
+    if base == 0 {
+        return None;
+    }
+    let debut = core::ptr::addr_of_mut!(PER_CPU) as *mut PerCpu as usize;
+    let taille = core::mem::size_of::<PerCpu>();
+    let fin = debut.saturating_add(taille.saturating_mul(smp::MAX_CPUS));
+    if base < debut || base >= fin || (base - debut) % taille != 0 {
+        return None;
+    }
+    let index = (base - debut) / taille;
+    let publie = unsafe { (*(base as *const PerCpu)).cpu_index as usize };
+    if publie != index {
+        return None;
+    }
+    // Une adresse de slot valide ne suffit pas si un AP a recu par erreur le
+    // slot du BSP. Lorsque la topologie est deja publiee, le CpuId derive de
+    // l'APIC materiel doit confirmer GS. Pendant l'amorcage precoce, l'absence
+    // de mapping laisse GS faire foi jusqu'a l'enregistrement du CPU.
+    if let Some(materiel) = cpu_local::logical_for_apic(cpu_local::hardware_apic_id()) {
+        if materiel.as_usize() != index {
+            return None;
+        }
+    }
+    Some(index)
 }
-pub fn cpu_index() -> usize { per_cpu().cpu_index as usize }
+
+pub fn per_cpu() -> &'static mut PerCpu {
+    per_cpu_for(cpu_index())
+}
+pub fn cpu_index() -> usize {
+    cpu_index_from_gs()
+        .or_else(|| cpu_local::logical_for_apic(cpu_local::hardware_apic_id()).map(|id| id.as_usize()))
+        .unwrap_or(0)
+        .min(smp::MAX_CPUS - 1)
+}
 pub fn set_kernel_stack(top: u64) {
     let cpu = cpu_index().min(smp::MAX_CPUS - 1);
     per_cpu_for(cpu).kernel_rsp = top;

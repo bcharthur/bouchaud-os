@@ -20,9 +20,8 @@
 //!
 //! `registre.rs` ne se compile pas sur l'hote : il touche le SMP, le verrou
 //! noyau et le type `Task`. On rejoue donc ici sa STRUCTURE -- emplacements a
-//! adresse stable, generation par emplacement, drapeau d'exclusivite -- avec
-//! les memes ordres memoire et les memes transitions, et on falsifie les
-//! protections pour verifier qu'elles portent bien ce qu'on leur attribue.
+//! adresse stable, generation, rendez-vous lecteurs/ecrivain et drapeau
+//! d'exclusivite -- avec les memes ordres memoire et les memes transitions.
 //!
 //! Un garde-fou source verifie separement que le vrai module garde ces
 //! elements ; ce test verifie que ces elements suffisent.
@@ -77,6 +76,8 @@ struct Emplacement {
 struct Registre {
     emplacements: Vec<Emplacement>,
     longueur: AtomicUsize,
+    lecteurs: AtomicUsize,
+    ecrivain: AtomicBool,
     /// Falsification : quand faux, le recyclage n'incremente plus la
     /// generation. Sert a prouver que les tests dependent bien d'elle.
     generations_actives: AtomicBool,
@@ -84,8 +85,39 @@ struct Registre {
 
 struct Garde<'a> {
     registre: &'a Registre,
+    _lecture: Lecture<'a>,
     emplacement: usize,
     tache: *mut Tache,
+}
+
+struct Lecture<'a> {
+    registre: &'a Registre,
+}
+
+impl Drop for Lecture<'_> {
+    fn drop(&mut self) {
+        self.registre.lecteurs.fetch_sub(1, Ordering::Release);
+    }
+}
+
+struct LectureTache<'a> {
+    _lecture: Lecture<'a>,
+    tache: *const Tache,
+}
+
+impl std::ops::Deref for LectureTache<'_> {
+    type Target = Tache;
+    fn deref(&self) -> &Tache { unsafe { &*self.tache } }
+}
+
+struct Ecriture<'a> {
+    registre: &'a Registre,
+}
+
+impl Drop for Ecriture<'_> {
+    fn drop(&mut self) {
+        self.registre.ecrivain.store(false, Ordering::Release);
+    }
 }
 
 impl Garde<'_> {
@@ -116,24 +148,50 @@ impl Registre {
                 })
                 .collect(),
             longueur: AtomicUsize::new(0),
+            lecteurs: AtomicUsize::new(0),
+            ecrivain: AtomicBool::new(false),
             generations_actives: AtomicBool::new(true),
         }
+    }
+
+    fn lecture(&self) -> Lecture<'_> {
+        loop {
+            while self.ecrivain.load(Ordering::Acquire) { std::hint::spin_loop(); }
+            self.lecteurs.fetch_add(1, Ordering::AcqRel);
+            if !self.ecrivain.load(Ordering::Acquire) {
+                return Lecture { registre: self };
+            }
+            self.lecteurs.fetch_sub(1, Ordering::Release);
+        }
+    }
+
+    fn ecriture(&self) -> Ecriture<'_> {
+        while self.ecrivain
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            std::hint::spin_loop();
+        }
+        while self.lecteurs.load(Ordering::Acquire) != 0 { std::hint::spin_loop(); }
+        Ecriture { registre: self }
     }
 
     fn longueur(&self) -> usize {
         self.longueur.load(Ordering::Acquire)
     }
 
-    fn tache(&self, emplacement: usize) -> Option<&Tache> {
+    fn tache(&self, emplacement: usize) -> Option<LectureTache<'_>> {
+        let lecture = self.lecture();
         if emplacement >= MAX_TACHES {
             return None;
         }
         let p = self.emplacements[emplacement].tache.load(Ordering::Acquire);
-        if p.is_null() { None } else { Some(unsafe { &*p }) }
+        if p.is_null() { None } else { Some(LectureTache { _lecture: lecture, tache: p }) }
     }
 
     /// Lecture PAR IDENTITE : refuse une incarnation perimee.
-    fn tache_id(&self, id: TacheId) -> Option<&Tache> {
+    fn tache_id(&self, id: TacheId) -> Option<LectureTache<'_>> {
+        let lecture = self.lecture();
         let emplacement = id.emplacement as usize;
         if emplacement >= MAX_TACHES {
             return None;
@@ -141,7 +199,8 @@ impl Registre {
         if self.emplacements[emplacement].generation.load(Ordering::Acquire) != id.generation {
             return None;
         }
-        self.tache(emplacement)
+        let p = self.emplacements[emplacement].tache.load(Ordering::Acquire);
+        if p.is_null() { None } else { Some(LectureTache { _lecture: lecture, tache: p }) }
     }
 
     fn id(&self, emplacement: usize) -> Option<TacheId> {
@@ -153,6 +212,7 @@ impl Registre {
     }
 
     fn exclusif(&self, emplacement: usize) -> Option<Garde<'_>> {
+        let lecture = self.lecture();
         if emplacement >= MAX_TACHES {
             return None;
         }
@@ -168,7 +228,7 @@ impl Registre {
             self.emplacements[emplacement].exclusif.store(false, Ordering::Release);
             return None;
         }
-        Some(Garde { registre: self, emplacement, tache: p })
+        Some(Garde { registre: self, _lecture: lecture, emplacement, tache: p })
     }
 
     fn prochaine_generation(&self, emplacement: usize) -> u32 {
@@ -193,16 +253,19 @@ impl Registre {
     }
 
     fn ajoute(&self, tid: u32) -> Option<TacheId> {
+        let _ecriture = self.ecriture();
         let longueur = self.longueur();
         for emplacement in 0..longueur {
-            let Some(mut garde) = self.exclusif(emplacement) else { continue };
-            if garde.tache().etat.load(Ordering::Acquire) != ZOMBIE {
+            let p = self.emplacements[emplacement].tache.load(Ordering::Acquire);
+            if p.is_null() { continue; }
+            let tache = unsafe { &mut *p };
+            if tache.etat.load(Ordering::Acquire) != ZOMBIE {
                 continue;
             }
             let generation = self.prochaine_generation(emplacement);
-            garde.tache().etat.store(PRET, Ordering::Release);
-            garde.tache().tid.store(tid, Ordering::Release);
-            *garde.prive() = 0;
+            tache.etat.store(PRET, Ordering::Release);
+            tache.tid.store(tid, Ordering::Release);
+            unsafe { *tache.prive.get() = 0; }
             return Some(TacheId { emplacement: emplacement as u32, generation });
         }
         if longueur >= MAX_TACHES {
@@ -427,23 +490,37 @@ fn le_champ_prive_ne_perd_aucune_ecriture() {
 }
 
 #[test]
-fn le_recyclage_exige_l_exclusivite() {
-    // Un recyclage pendant qu'un lecteur exclusif travaille remplacerait le
-    // contenu sous ses pieds.
-    let registre = Registre::neuf();
+fn le_recyclage_attend_tous_les_lecteurs() {
+    // La generation ne peut rien pour une reference DEJA rendue. L'ecrivain
+    // doit rester bloque jusqu'au Drop du lecteur, puis seulement remplacer.
+    let registre = Arc::new(Registre::neuf());
     let id = registre.ajoute(71).unwrap();
     let emplacement = id.emplacement as usize;
     registre.tache_id(id).unwrap().etat.store(ZOMBIE, Ordering::Release);
 
-    let garde = registre.exclusif(emplacement).unwrap();
-    // Le registre est plein d'un seul emplacement zombie, mais il est tenu :
-    // `ajoute` doit en ouvrir un NOUVEAU plutot que de le voler.
-    let autre = registre.ajoute(72).unwrap();
-    assert_ne!(
-        autre.emplacement as usize, emplacement,
-        "un emplacement tenu en exclusivite a ete recycle",
-    );
-    drop(garde);
+    let lecture = registre.tache_id(id).unwrap();
+    let fini = Arc::new(AtomicBool::new(false));
+    let registre_fils = Arc::clone(&registre);
+    let fini_fils = Arc::clone(&fini);
+    let fils = std::thread::spawn(move || {
+        let autre = registre_fils.ajoute(72).unwrap();
+        fini_fils.store(true, Ordering::Release);
+        autre
+    });
+
+    for _ in 0..1_000_000 {
+        if registre.ecrivain.load(Ordering::Acquire) { break; }
+        std::hint::spin_loop();
+    }
+    assert!(registre.ecrivain.load(Ordering::Acquire), "le recycleur ne s'est pas publie");
+    assert!(!fini.load(Ordering::Acquire), "le recycleur a depasse un lecteur vivant");
+    assert_eq!(lecture.tid.load(Ordering::Acquire), 71,
+        "une reference existante a vu l'incarnation suivante");
+    drop(lecture);
+
+    let autre = fils.join().unwrap();
+    assert_eq!(autre.emplacement as usize, emplacement);
+    assert_ne!(autre.generation, id.generation);
 }
 
 // ---------------------------------------------------------------------------
@@ -469,20 +546,31 @@ fn i_l_epuisement_est_propre() {
 
 #[test]
 fn j_la_reutilisation_ne_laisse_aucune_reference_pendante() {
-    // L'adresse d'un emplacement ne change JAMAIS : c'est ce qui garantit
-    // qu'aucune reference ne pend. La generation, elle, garantit qu'aucune
-    // reference perimee ne soit PRISE POUR une reference valide.
+    // L'adresse de l'allocation ne change pas, mais le contenu n'est remplace
+    // qu'apres le Drop de tous les lecteurs. La generation, elle, garantit
+    // qu'un ancien handle n'est pas pris pour l'incarnation suivante.
     let registre = Registre::neuf();
     let premier = registre.ajoute(81).unwrap();
-    let adresse_premiere = registre.tache(0).unwrap() as *const Tache;
+    let adresse_premiere = {
+        let lecture = registre.tache(0).unwrap();
+        let adresse = &*lecture as *const Tache;
+        drop(lecture);
+        adresse
+    };
 
     for tour in 0..50u32 {
         let identite = registre.id(0).unwrap();
         registre.tache_id(identite).unwrap().etat.store(ZOMBIE, Ordering::Release);
         let suivante = registre.ajoute(100 + tour).unwrap();
         assert_eq!(suivante.emplacement, 0);
+        let adresse_courante = {
+            let lecture = registre.tache(0).unwrap();
+            let adresse = &*lecture as *const Tache;
+            drop(lecture);
+            adresse
+        };
         assert_eq!(
-            registre.tache(0).unwrap() as *const Tache, adresse_premiere,
+            adresse_courante, adresse_premiere,
             "l'adresse de l'emplacement a change : une reference pendrait",
         );
         assert!(

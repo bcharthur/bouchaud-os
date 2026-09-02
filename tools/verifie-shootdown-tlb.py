@@ -30,10 +30,9 @@ CE QUI EST VERIFIE
   2. La reemission VISE un CPU precis. Rediffuser a tous reveillerait ceux
      qui ont deja repondu, et masquerait quel coeur manque.
 
-Il n'y a deliberement pas de troisieme regle « abandonner apres N essais » :
-le shootdown est une exigence de correction. Renoncer laisserait un coeur
-avec une traduction perimee, ce qui est pire qu'une attente. Ce qui doit
-changer est qu'elle progresse et qu'elle se voie.
+  3. Une panne persistante est FAIL-CLOSED : panique explicite avec le masque
+     manquant. Le noyau ne continue jamais avec une traduction perimee, mais il
+     ne se fige pas non plus sans diagnostic pendant des minutes.
 
 Code de retour : 0 si l'attente peut progresser.
 """
@@ -82,6 +81,16 @@ def main() -> int:
             "    Un seul IPI perdu et l'emetteur y reste pour toujours, en\n"
             "    silence. C'est exactement la regression mm-ng6."
         )
+    if not (
+        "ECHEC_SHOOTDOWN_NS" in texte
+        and "[TLB-SHOOTDOWN-ECHEC]" in texte
+        and "panic!(" in corps
+    ):
+        fautes.append(
+            "l'absence persistante d'ACK n'est plus fail-closed.\n"
+            "    Il faut paniquer avec le masque manquant, jamais continuer\n"
+            "    avec un TLB perime ni tourner indefiniment en silence."
+        )
 
     emission = re.search(r"fn renvoie_shootdown\(cpu: usize\)(.*?)\n}", texte, re.S)
     if not emission:
@@ -98,7 +107,7 @@ def main() -> int:
             print(f"  {faute}\n")
         return 1
 
-    print("ok  attente du shootdown TLB : reemission ciblee vers les cibles manquantes")
+    print("ok  shootdown TLB : reemission ciblee et echec persistant fail-closed")
     return 0
 
 

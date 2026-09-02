@@ -124,7 +124,7 @@ fn wait_for_owner_change(active_spins: &mut usize, reprise_prioritaire: bool) {
     let bit = 1u64 << cpu;
     PARKED.fetch_or(bit, Ordering::SeqCst);
 
-    let owner = OWNER.load(Ordering::SeqCst);
+    let owner = owner_load(Ordering::SeqCst);
     let reprises = RESUME_WAITERS.load(Ordering::SeqCst);
     let priorite_bloque = !reprise_prioritaire && reprises != 0;
     let handoff_bloque = !reprise_prioritaire
@@ -260,4 +260,3 @@ fn wake_parked_waiters(releasing_cpu: usize) {
     // AVANT l'IPI. Les autres entrants le voient et se retirent.
     handoff_prepare_and_wake(target);
 }
-

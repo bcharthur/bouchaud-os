@@ -12,41 +12,39 @@ pub fn enter() -> KernelGuard {
             // masquees, et non capture une fois avant la boucle. Entre deux
             // tours les interruptions sont actives : une IPI de preemption
             // peut commuter, et cette pile noyau reprendre sur un autre coeur.
-            // L'index capture designerait alors un CPU etranger -- `OWNER`
-            // recevrait SON jeton pendant que `DEPTH` serait pose sur le
-            // notre. Les deux moities de l'etat du verrou parleraient de deux
-            // coeurs differents, et la liberation suivante trouverait
-            // « release sans acquisition ».
+            // L'index capture designerait alors un CPU etranger. Meme si
+            // OWNER+DEPTH sont maintenant indivisibles, le mot atomique
+            // porterait le jeton du mauvais coeur et sa liberation serait
+            // attribuee a une autre continuation.
             let cpu = cpu();
             let mine = token(cpu);
-            let owner = OWNER.load(Ordering::Acquire);
+            let owner = owner_load(Ordering::Acquire);
 
             if owner == mine {
-                let avant = DEPTH[cpu].load(Ordering::Relaxed);
-                if avant == 0 {
+                let courant = etat_charge(Ordering::Acquire);
+                if courant.depth == 0 {
                     crate::serial_println_brut!(
                         "[BKL-FR] VIOLATION reenter cpu={} owner={} depth=0", cpu, owner,
                     );
                     vide_enregistreur();
                 }
-                debug_assert!(avant > 0,
+                debug_assert!(courant.depth > 0,
                     "smp_lock: OWNER local sans profondeur a la reentrance");
-                DEPTH[cpu].store(avant + 1, Ordering::Relaxed);
+                let (avant, apres) = augmente_profondeur(cpu)
+                    .expect("smp_lock: reentrance perdue dans enter");
                 probe_note_reenter();
                 enregistreur::note(
                     enregistreur::REENTER, cpu, owner, owner,
-                    avant, avant + 1, usize::MAX, 0,
+                    avant, apres, usize::MAX, 0,
                 );
                 return KernelGuard { cpu, active: true };
             }
 
             if owner == FREE && essaie_prendre_nouvel_entrant(cpu, mine) {
                 // Aucun handler local ne peut voir OWNER=mine avec DEPTH=0.
-                let avant = DEPTH[cpu].load(Ordering::Relaxed);
-                DEPTH[cpu].store(1, Ordering::Relaxed);
                 probe_note_acquire(cpu, 1);
                 enregistreur::note(
-                    enregistreur::ENTER, cpu, FREE, mine, avant, 1, usize::MAX, 0,
+                    enregistreur::ENTER, cpu, FREE, mine, 0, 1, usize::MAX, 0,
                 );
                 solde_parkings(cpu);
                 note_attente(

@@ -103,7 +103,7 @@ def main() -> int:
     etapes = [
         ("prepare_lock_park", "armement"),
         ("PARKED.fetch_or", "publication de l'attente"),
-        ("OWNER.load(Ordering::SeqCst)", "relecture du proprietaire"),
+        ("owner_load(Ordering::SeqCst)", "relecture atomique du proprietaire"),
         ("commit_lock_park", "sommeil"),
     ]
     positions = []

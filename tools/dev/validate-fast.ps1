@@ -78,6 +78,8 @@ try {
     Invoke-RustTest "domaines du gros verrou" "tools\smp\test_domaines_bkl.rs"
     Invoke-RustTest "protocole de parking" "tools\smp\test_rendezvous.rs"
     Invoke-RustTest "registre des taches" "tools\smp\test_registre.rs"
+    Invoke-RustTest "etat BKL atomique" "tools\smp\test_etat_bkl_atomique.rs"
+    Invoke-RustTest "shootdown TLB" "tools\smp\test_shootdown_tlb.rs"
     Invoke-RustTest "empreintes de mots de passe" "tools\securite\test_motdepasse.rs"
     Invoke-RustTest "commutation SMP" "tools\smp\test_commutation.rs"
     Invoke-RustTest "profondeur BKL" "tools\smp\test_profondeur_bkl.rs"
@@ -157,6 +159,14 @@ try {
 
     Invoke-Step "registre des taches (source)" {
         & python .\tools\verifie-registre-taches.py
+    }
+
+    Invoke-Step "etat BKL atomique (source)" {
+        & python .\tools\verifie-etat-bkl-atomique.py
+    }
+
+    Invoke-Step "shootdown TLB (source)" {
+        & python .\tools\verifie-shootdown-tlb.py
     }
 
     Invoke-Step "mots de passe (source)" {

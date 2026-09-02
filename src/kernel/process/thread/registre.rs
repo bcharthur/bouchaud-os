@@ -27,24 +27,25 @@
 // # Ce que cette version etablit
 //
 //   * une INCARNATION par emplacement. `TacheId` porte l'emplacement ET sa
-//     generation ; toute reference obtenue par identite est refusee des que
-//     l'emplacement a ete reattribue ;
-//   * la lecture partagee ne rend QUE `&Task`. Les champs disputes sont
-//     atomiques et se lisent par cette reference ; le reste ne s'atteint plus
-//     par la ;
+//     generation ; un ancien handle est donc refuse apres reattribution ;
+//   * une generation ne peut pas invalider une reference Rust deja rendue.
+//     Toute lecture conserve donc un garde, et le recycleur attend la
+//     quiescence de tous les lecteurs avant d'ecraser le contenu ;
+//   * la lecture partagee ne rend QUE `&Task` sous ce garde. Les champs
+//     disputes sont atomiques ; le reste ne s'atteint plus par cette voie ;
 //   * l'acces exclusif au contenu non atomique passe par un DRAPEAU par
 //     emplacement, pris en exclusion mutuelle. Le `&mut` n'existe que derriere
 //     ce drapeau, et il est alors reellement exclusif ;
-//   * le recyclage exige ce meme drapeau, et incremente la generation AVANT
-//     d'ecrire. Aucun lecteur ne peut donc observer un contenu a moitie
-//     remplace en croyant lire l'ancienne tache.
+//   * le recyclage prend le rendez-vous d'ecriture, attend lecteurs ET gardes
+//     exclusifs, puis incremente la generation AVANT d'ecrire. Aucun lecteur
+//     ne peut donc observer un contenu remplace sous sa reference.
 //
 // # Ce que cette version n'essaie pas de faire
 //
 // Elle ne separe pas physiquement les champs atomiques des autres dans le type
 // `Task`. Ce serait plus fort, et cela demanderait de reecrire les quatre-vingt
-// dix sites qui manipulent une tache. Le drapeau d'exclusivite donne la meme
-// garantie a l'execution, et il est verifiable -- un test le falsifie.
+// dix sites qui manipulent une tache. Le rendez-vous de quiescence et le
+// drapeau d'exclusivite rendent la transition verifiable sans ce grand saut.
 
 use core::sync::atomic::AtomicPtr;
 
@@ -111,6 +112,69 @@ static EMPLACEMENTS: [Emplacement; MAX_TACHES] = [const {
 /// stables a vie.
 static LONGUEUR: AtomicUsize = AtomicUsize::new(0);
 
+// Une generation invalide un HANDLE, pas une reference Rust deja obtenue.
+// Ce rendez-vous empeche donc le recycleur d'ecraser une `Task` tant qu'une
+// reference partagee ou exclusive existe encore.
+static LECTEURS: AtomicUsize = AtomicUsize::new(0);
+static ECRIVAIN: AtomicBool = AtomicBool::new(false);
+
+struct RegistreLecture;
+
+impl RegistreLecture {
+    #[inline]
+    fn acquire() -> Self {
+        loop {
+            while ECRIVAIN.load(Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
+            LECTEURS.fetch_add(1, Ordering::AcqRel);
+            if !ECRIVAIN.load(Ordering::Acquire) {
+                return Self;
+            }
+            LECTEURS.fetch_sub(1, Ordering::Release);
+        }
+    }
+}
+
+impl Drop for RegistreLecture {
+    #[inline]
+    fn drop(&mut self) {
+        LECTEURS.fetch_sub(1, Ordering::Release);
+    }
+}
+
+struct RegistreEcriture {
+    restaure_irq: bool,
+}
+
+impl RegistreEcriture {
+    fn acquire() -> Self {
+        // Masquer AVANT de publier l'ecrivain : un handler local ne peut pas
+        // interrompre le recycleur puis attendre ce meme recycleur.
+        let restaure_irq = interrupts::are_enabled();
+        interrupts::disable();
+        while ECRIVAIN
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        while LECTEURS.load(Ordering::Acquire) != 0 {
+            core::hint::spin_loop();
+        }
+        Self { restaure_irq }
+    }
+}
+
+impl Drop for RegistreEcriture {
+    fn drop(&mut self) {
+        ECRIVAIN.store(false, Ordering::Release);
+        if self.restaure_irq {
+            interrupts::enable();
+        }
+    }
+}
+
 /// Serialise le CHOIX d'un emplacement. Ni la lecture ni la modification d'une
 /// tache ne passent par la.
 static STRUCTURE: crate::kernel::sync::SpinLock<()> =
@@ -134,13 +198,11 @@ pub fn registre_id(emplacement: usize) -> Option<TacheId> {
     Some(TacheId { emplacement: emplacement as u32, generation })
 }
 
-/// Lecture PARTAGEE d'une tache.
-///
-/// Rend `&Task`, jamais `&mut`. Les champs que plusieurs coeurs se disputent
-/// sont atomiques et se lisent ou s'ecrivent par cette reference ; le reste ne
-/// s'atteint que par [`registre_exclusif`].
 #[inline]
-pub fn registre_tache(emplacement: usize) -> Option<&'static Task> {
+fn registre_tache_sous_lecture<'a>(
+    _lecture: &'a RegistreLecture,
+    emplacement: usize,
+) -> Option<&'a Task> {
     if emplacement >= MAX_TACHES {
         return None;
     }
@@ -152,31 +214,56 @@ pub fn registre_tache(emplacement: usize) -> Option<&'static Task> {
     }
 }
 
+/// Reference partagee dont le garde interdit le recyclage de son allocation.
+pub struct GardeLectureTache {
+    lecture: RegistreLecture,
+    tache: *const Task,
+}
+
+impl core::ops::Deref for GardeLectureTache {
+    type Target = Task;
+
+    #[inline]
+    fn deref(&self) -> &Task {
+        let _ = &self.lecture;
+        unsafe { &*self.tache }
+    }
+}
+
+/// Lecture partagee d'une tache. La reference ne peut pas survivre a son garde.
+#[inline]
+pub fn registre_tache(emplacement: usize) -> Option<GardeLectureTache> {
+    let lecture = RegistreLecture::acquire();
+    let tache = registre_tache_sous_lecture(&lecture, emplacement)? as *const Task;
+    Some(GardeLectureTache { lecture, tache })
+}
+
 /// Lecture partagee PAR IDENTITE.
 ///
 /// Rend `None` si l'emplacement a ete reattribue depuis que l'identite a ete
 /// obtenue. C'est ce qui empeche un ancien ticket d'agir sur une tache neuve.
 #[inline]
-pub fn registre_tache_id(id: TacheId) -> Option<&'static Task> {
+pub fn registre_tache_id(id: TacheId) -> Option<GardeLectureTache> {
     let emplacement = id.emplacement();
     if emplacement >= MAX_TACHES {
         return None;
     }
-    // La generation est relue AVANT le pointeur : si elle correspond encore,
-    // le pointeur lu ensuite designe bien cette incarnation.
+    let lecture = RegistreLecture::acquire();
+    // La generation et le pointeur restent la meme incarnation jusqu'au Drop.
     if EMPLACEMENTS[emplacement].generation.load(Ordering::Acquire) != id.generation {
         return None;
     }
-    registre_tache(emplacement)
+    let tache = registre_tache_sous_lecture(&lecture, emplacement)? as *const Task;
+    Some(GardeLectureTache { lecture, tache })
 }
 
 /// Acces EXCLUSIF au contenu d'une tache.
 ///
 /// Le `&mut` n'existe qu'ici, derriere un drapeau pris en exclusion mutuelle.
-/// Deux appelants ne peuvent pas l'obtenir en meme temps, et le recyclage de
-/// l'emplacement l'exige aussi -- personne ne peut donc voir un contenu
-/// remplace a moitie.
+/// Deux appelants ne peuvent pas l'obtenir en meme temps. Son garde de lecture
+/// fait en plus attendre le recycleur jusqu'a la fin de cet acces exclusif.
 pub struct GardeTache {
+    lecture: RegistreLecture,
     emplacement: usize,
     tache: *mut Task,
 }
@@ -209,6 +296,7 @@ pub fn registre_exclusif(emplacement: usize) -> Option<GardeTache> {
     if emplacement >= MAX_TACHES {
         return None;
     }
+    let lecture = RegistreLecture::acquire();
     if EMPLACEMENTS[emplacement]
         .exclusif
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -221,7 +309,7 @@ pub fn registre_exclusif(emplacement: usize) -> Option<GardeTache> {
         EMPLACEMENTS[emplacement].exclusif.store(false, Ordering::Release);
         return None;
     }
-    Some(GardeTache { emplacement, tache: pointeur })
+    Some(GardeTache { lecture, emplacement, tache: pointeur })
 }
 
 /// Prend l'acces exclusif, en attendant qu'il se libere.
@@ -263,7 +351,8 @@ pub fn registre_exclusif_attente(emplacement: usize) -> Option<GardeTache> {
 ///
 /// Voir ci-dessus : propriete garantie par l'ordonnanceur.
 pub unsafe fn registre_pointeur_ordonnanceur(emplacement: usize) -> Option<*mut Task> {
-    let tache = registre_tache(emplacement)?;
+    let lecture = RegistreLecture::acquire();
+    let tache = registre_tache_sous_lecture(&lecture, emplacement)?;
     #[cfg(debug_assertions)]
     {
         let coeur = tache.on_cpu.charge();
@@ -281,9 +370,9 @@ pub unsafe fn registre_pointeur_ordonnanceur(emplacement: usize) -> Option<*mut 
 /// Enregistre une tache et rend son identite.
 ///
 /// Reutilise l'emplacement d'une tache morte quand il y en a un. Le contenu est
-/// remplace SUR PLACE, ce qui garde l'adresse valide a vie -- mais la
-/// generation est incrementee AVANT l'ecriture, de sorte qu'aucune identite
-/// ancienne ne designe plus cet emplacement pendant qu'on le remplit.
+/// remplace SUR PLACE seulement apres la quiescence de toutes les references.
+/// La generation est ensuite incrementee AVANT l'ecriture, de sorte qu'aucune
+/// identite ancienne ne designe l'incarnation installee.
 ///
 /// Rend `None` si le registre est plein.
 pub fn registre_ajoute(
@@ -291,6 +380,7 @@ pub fn registre_ajoute(
     recyclable: impl Fn(&Task) -> bool,
 ) -> Option<TacheId> {
     let _structure = STRUCTURE.lock();
+    let _ecriture = RegistreEcriture::acquire();
     let longueur = LONGUEUR.load(Ordering::Acquire);
 
     for emplacement in 0..longueur {
@@ -298,18 +388,17 @@ pub fn registre_ajoute(
         if pointeur.is_null() {
             continue;
         }
-        // L'exclusivite AVANT le predicat : un lecteur exclusif en cours
-        // examinerait sinon un contenu qu'on s'apprete a remplacer.
-        let Some(mut garde) = registre_exclusif(emplacement) else { continue };
-        if !recyclable(&garde) {
+        // `_ecriture` a attendu tous les gardes. Il n'existe donc plus aucune
+        // reference partagee ou exclusive vers le contenu remplace.
+        let ancienne = unsafe { &mut *pointeur };
+        if !recyclable(ancienne) {
             continue;
         }
         // La generation d'abord : a partir d'ici, toute identite ancienne est
         // refusee, et personne ne peut plus prendre cet emplacement pour
         // l'ancienne tache.
         let generation = prochaine_generation(emplacement);
-        *garde = *tache;
-        drop(garde);
+        *ancienne = *tache;
         return Some(TacheId { emplacement: emplacement as u32, generation });
     }
 
@@ -339,14 +428,4 @@ fn prochaine_generation(emplacement: usize) -> u32 {
     let suivante = if suivante == 0 { 1 } else { suivante };
     EMPLACEMENTS[emplacement].generation.store(suivante, Ordering::Release);
     suivante
-}
-
-/// Parcourt les taches enregistrees, en lecture partagee.
-pub fn registre_iter() -> impl Iterator<Item = &'static Task> {
-    (0..registre_longueur()).filter_map(registre_tache)
-}
-
-/// Indice de la premiere tache satisfaisant le predicat.
-pub fn registre_position(predicat: impl Fn(&Task) -> bool) -> Option<usize> {
-    (0..registre_longueur()).find(|&index| registre_tache(index).is_some_and(&predicat))
 }

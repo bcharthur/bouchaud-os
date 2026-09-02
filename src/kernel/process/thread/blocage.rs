@@ -98,7 +98,6 @@ pub(crate) fn finish_park_current_on_detached(
         loops = loops.saturating_add(1);
         let depth_before = smp_lock::profondeur_locale();
         smp_lock::note_detached_check(1, loops, depth_before);
-        trace_detached_schedule("before_schedule", loops, depth_before);
         schedule();
         let depth_after = smp_lock::profondeur_locale();
         smp_lock::note_detached_check(2, loops, depth_after);
@@ -107,8 +106,8 @@ pub(crate) fn finish_park_current_on_detached(
             // ecraser la transition fautive pendant l'impression du contexte.
             smp_lock::vide_enregistreur();
         }
-        trace_detached_schedule("after_schedule", loops, depth_after);
         if depth_before == 0 && depth_after != 0 {
+            trace_detached_schedule("violation_after_schedule", loops, depth_after);
             crate::serial_println_brut!(
                 "[BKL-DETACHED] VIOLATION schedule depth {}->{} loop={}",
                 depth_before, depth_after, loops,
@@ -140,8 +139,8 @@ pub(crate) fn finish_park_current_on_detached(
     if depth_final != 0 {
         smp_lock::vide_enregistreur();
     }
-    trace_detached_schedule("before_final_assert", loops, depth_final);
     if depth_final != 0 {
+        trace_detached_schedule("violation_final", loops, depth_final);
         crate::serial_println_brut!(
             "[BKL-DETACHED] VIOLATION final depth={} loops={}", depth_final, loops,
         );

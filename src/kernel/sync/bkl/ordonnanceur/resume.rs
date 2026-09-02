@@ -16,14 +16,14 @@ pub fn resume_after_schedule(depth: usize) {
         let _irq = LocalIrqGuard::acquire();
         let cpu = cpu();
         publie_attente_reprise(&mut cpu_reserve, cpu);
-        let owner = OWNER.load(Ordering::Relaxed);
+        let owner = owner_load(Ordering::Relaxed);
         note_schedule_resume_begin(cpu, depth, owner);
         enregistreur::note(
             enregistreur::RESUME_BEGIN,
             cpu,
             owner,
             owner,
-            DEPTH[cpu].load(Ordering::Relaxed),
+            depth_load(cpu, Ordering::Relaxed),
             depth,
             usize::MAX,
             depth as u64,
@@ -38,19 +38,13 @@ pub fn resume_after_schedule(depth: usize) {
             // avant la boucle, alors que l'attente ci-dessous peut a son tour
             // etre preemptee, est la faute la plus facile a commettre ici.
             let cpu = cpu();
-            let mine = token(cpu);
             publie_attente_reprise(&mut cpu_reserve, cpu);
             RESUME_ACTIVE_DEPTH[cpu].store(depth, Ordering::Relaxed);
             RESUME_ACTIVE_ATTEMPTS[cpu].store(tentatives, Ordering::Relaxed);
 
-            if OWNER
-                .compare_exchange(FREE, mine, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
+            if essaie_acquerir_etat(cpu, depth, Ordering::AcqRel, Ordering::Acquire).is_ok() {
                 // Aucun handler local ne peut observer OWNER=mine avant que
                 // la profondeur de la pile reprise soit restauree.
-                let avant = DEPTH[cpu].load(Ordering::Relaxed);
-                DEPTH[cpu].store(depth, Ordering::Relaxed);
                 // Une continuation scheduler reste plus prioritaire que tout
                 // handoff ordinaire. OWNER est déjà à nous : l'annulation ne
                 // crée aucune fenêtre de barging.
@@ -58,8 +52,8 @@ pub fn resume_after_schedule(depth: usize) {
                 retire_attente_reprise(&mut cpu_reserve);
                 probe_note_acquire(cpu, 3);
                 enregistreur::note(
-                    enregistreur::RESUME_OK, cpu, FREE, mine,
-                    avant, depth, usize::MAX, depth as u64,
+                    enregistreur::RESUME_OK, cpu, FREE, token(cpu),
+                    0, depth, usize::MAX, depth as u64,
                 );
                 solde_parkings(cpu);
                 let attente =

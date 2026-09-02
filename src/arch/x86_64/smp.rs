@@ -117,8 +117,7 @@ pub fn hardware_apic_id() -> usize {
 /// GS carries the logical CpuId after usermode::init_cpu(). The APIC fallback is
 /// used only during early bring-up and is translated through the CPU registry.
 pub fn cpu_index() -> usize {
-    let via_gs = usermode::cpu_index();
-    if via_gs < MAX_CPUS {
+    if let Some(via_gs) = usermode::cpu_index_from_gs() {
         return via_gs;
     }
 
@@ -207,9 +206,9 @@ unsafe fn send_all_excluding_self(low: u32) {
 /// Renvoie le vecteur de shootdown a UN seul CPU.
 ///
 /// `send_all_excluding_self` est une diffusion, envoyee une seule fois. Elle
-/// suppose que l'IPI arrive toujours -- ce qui est faux : un CPU dans sa
-/// fenetre `cli` d'endormissement, ou un APIC qui fusionne deux IPI de meme
-/// vecteur, la perd sans que rien ne le signale. Reemettre demande de viser
+/// suppose que chaque envoi produise un passage distinct dans le handler. Ce
+/// contrat n'est pas garanti face a une livraison APIC retardee ou a plusieurs
+/// occurrences pendantes du meme vecteur. Reemettre demande de viser
 /// precisement ceux qui manquent, comme le fait `reschedule_cpu`.
 fn renvoie_shootdown(cpu: usize) {
     if cpu >= schedulable_cpus() || cpu == cpu_index() {
@@ -236,6 +235,8 @@ fn renvoie_shootdown(cpu: usize) {
 static TLB_RELANCES: AtomicU64 = AtomicU64::new(0);
 /// IPI de shootdown reemis, tous CPU confondus.
 static TLB_IPI_REEMIS: AtomicU64 = AtomicU64::new(0);
+/// Shootdowns arretes fail-closed apres absence persistante d'ACK.
+static TLB_ECHECS: AtomicU64 = AtomicU64::new(0);
 
 pub fn tlb_relances() -> (u64, u64) {
     (
@@ -261,6 +262,9 @@ pub fn eoi_local() {
 /// acquitte. Assez long pour qu'un acquittement normal arrive largement
 /// avant, assez court pour qu'un IPI perdu ne coute qu'un sursaut.
 const RELANCE_SHOOTDOWN_NS: u64 = 2_000_000;
+/// Une traduction perimee ne doit jamais etre acceptee. Apres cette borne on
+/// panique donc explicitement au lieu de boucler pour toujours ou de continuer.
+const ECHEC_SHOOTDOWN_NS: u64 = 2_000_000_000;
 
 pub const PANIC_STOP_VECTOR: u8 = 0xF3;
 
@@ -413,19 +417,34 @@ pub fn shootdown_tlb(pml4: u64, active_cpus: u64, start: u64, len: u64) {
     // plutot que de rediffuser a tous, pour ne pas reveiller ceux qui ont
     // deja repondu.
     //
-    // Il n'y a volontairement PAS d'abandon apres N essais : le shootdown est
-    // une exigence de correction, pas un service rendu au mieux. Renoncer
-    // laisserait un CPU avec une traduction perimee, ce qui est pire qu'une
-    // attente. Ce qui change est qu'elle progresse et qu'elle se voit.
-    let mut prochaine_relance =
-        crate::kernel::timer::monotonic_ns().saturating_add(RELANCE_SHOOTDOWN_NS);
+    // Il n'existe aucun chemin de continuation apres une absence persistante
+    // d'ACK : cela accepterait une traduction perimee. La borne ci-dessous est
+    // donc FAIL-CLOSED (panic explicite), pas un abandon du shootdown.
+    let debut_attente = crate::kernel::timer::monotonic_ns();
+    let mut prochaine_relance = debut_attente.saturating_add(RELANCE_SHOOTDOWN_NS);
+    let echeance = debut_attente.saturating_add(ECHEC_SHOOTDOWN_NS);
     let mut relance_comptee = false;
     loop {
         let acquittements = slot.acknowledgements.load(Ordering::Acquire);
         if acquittements & targets == targets {
             break;
         }
-        if crate::kernel::timer::monotonic_ns() >= prochaine_relance {
+        let maintenant = crate::kernel::timer::monotonic_ns();
+        if maintenant >= echeance {
+            let manquants = targets & !acquittements;
+            TLB_ECHECS.fetch_add(1, Ordering::Relaxed);
+            crate::serial_println_brut!(
+                "[TLB-SHOOTDOWN-ECHEC] cpu={} sequence={} cibles={:#x} acks={:#x} manquants={:#x} attente_ns={}",
+                current,
+                sequence,
+                targets,
+                acquittements,
+                manquants,
+                maintenant.saturating_sub(debut_attente),
+            );
+            panic!("TLB shootdown: acquittement manquant, arret fail-closed");
+        }
+        if maintenant >= prochaine_relance {
             let manquants = targets & !acquittements;
             if !relance_comptee {
                 TLB_RELANCES.fetch_add(1, Ordering::Relaxed);
@@ -437,8 +456,7 @@ pub fn shootdown_tlb(pml4: u64, active_cpus: u64, start: u64, len: u64) {
                     renvoie_shootdown(cpu);
                 }
             }
-            prochaine_relance = crate::kernel::timer::monotonic_ns()
-                .saturating_add(RELANCE_SHOOTDOWN_NS);
+            prochaine_relance = maintenant.saturating_add(RELANCE_SHOOTDOWN_NS);
         }
         spin_loop();
     }

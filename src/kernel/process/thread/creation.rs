@@ -208,7 +208,7 @@ pub fn register(mut task: Box<Task>) -> usize {
 
 fn index_of(tid: u32) -> Option<usize> { tasks().iter().position(|t| t.tid == tid) }
 /// Une tache par son identifiant de fil, en lecture PARTAGEE.
-pub fn by_tid(tid: u32) -> Option<&'static Task> {
+pub fn by_tid(tid: u32) -> Option<GardeLectureTache> {
     registre_tache(index_of(tid)?)
 }
 pub fn live_count() -> usize {
