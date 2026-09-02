@@ -1,7 +1,11 @@
 /// Snapshot SMP-NG2: charge physique, pression de runqueue, tache courante,
 /// steals et migrations par CPU.
 pub fn log_smp_load() {
-    let _kernel = smp_lock::enter();
+    // Releve de DIAGNOSTIC. Il lisait toute la table sous gros verrou, une fois
+    // par seconde, en bloquant les quatre coeurs pendant qu'il formatait du
+    // texte. Le registre se lit sans verrou, et un compteur observe une
+    // nanoseconde trop tot ne change aucune conclusion -- alors qu'un releve
+    // qui fige la machine en change beaucoup.
     let online = smp::schedulable_cpus().max(1).min(MAX_CPUS);
     let mut line = alloc::string::String::from("[SMP-LOAD]");
     line.push_str(&alloc::format!(
@@ -112,6 +116,64 @@ anomalies={}/{}/{} proprietaire={}{}",
         Absent(c.proprietaire as u64),
         ventilation,
     ));
+    // BOUCHAUD_C1_ATTRIBUTION_DOMAINE_V1
+    //
+    // Le chiffre du chantier « sortie du gros verrou ». `normaux` exclut le
+    // boot precoce et la panique, ou le verrou reste legitime : les inclure
+    // rendrait l'objectif inatteignable par construction, donc inutile.
+    //
+    // `regressions` doit valoir zero POUR TOUJOURS. Non nul, un chemin declare
+    // sorti l'a repris, et le domaine fautif est NOMME -- ce qu'aucun total
+    // d'acquisitions ne pouvait dire.
+    {
+        use crate::kernel::sync::{domaine, registre_domaines, Contrat, Domaine};
+        let registre = registre_domaines();
+        let mut ligne = alloc::string::String::from("[BKL-DOMAINES]");
+        let _ = core::fmt::Write::write_fmt(
+            &mut ligne,
+            format_args!(
+                " normaux={} regressions={} debordements={} premiere_regression={}",
+                registre.acquisitions_chemins_normaux(),
+                registre.total_violations(),
+                registre.debordements(),
+                match registre.premiere_regression() {
+                    Some(fautif) => fautif.nom(),
+                    None => "aucune",
+                },
+            ),
+        );
+        for code in 0..domaine::NOMBRE as u8 {
+            let d = Domaine::depuis_code(code);
+            let acquisitions = registre.acquisitions(d);
+            // Un domaine a zero n'apprend rien tant qu'il n'a rien promis ;
+            // un domaine SORTI a zero est au contraire la preuve recherchee.
+            if acquisitions == 0 && !matches!(d.contrat(), Contrat::Migre) {
+                continue;
+            }
+            let _ = core::fmt::Write::write_fmt(
+                &mut ligne,
+                format_args!(
+                    " {}=[{} acq={} regressions={}]",
+                    d.nom(), d.contrat().nom(), acquisitions, registre.violations(d),
+                ),
+            );
+        }
+        crate::kernel::dmesg::log_fmt(format_args!("{}", ligne));
+    }
+    // BOUCHAUD_C2_LATENCE_DANS_CHAQUE_TRACE_V1
+    //
+    // Ces deux releves n'etaient emis que par le rapport du navigateur, donc
+    // uniquement quand un navigateur tournait. Les traces de stress -- memoire
+    // SMP4, primitives, boot -- n'en portaient aucun, et les budgets de
+    // latence n'avaient rien a verifier : ils ressortaient « absent du
+    // journal », ce qui est honnete mais inutile.
+    //
+    // Ils sortent maintenant avec le reste du releve periodique. Ce sont les
+    // deux chiffres qui mesurent ce que l'utilisateur RESSENT -- une
+    // preemption reportee, une tache prete qui attend son coeur -- et ils
+    // doivent exister dans toute trace ou l'on cherche un figement.
+    crate::kernel::scheduler::preempt::log_stats();
+    crate::kernel::scheduler::latency::log_stats();
     let (_, _, backing_reads, backing_bytes) = crate::fs::backing::stats();
     let (cache_hits, readahead_hits) = crate::fs::backing::cache_stats();
     let readahead_pages = crate::fs::backing::readahead_pages();
@@ -133,18 +195,18 @@ anomalies={}/{}/{} proprietaire={}{}",
     let (clean_entries, clean_reclaimable) = crate::kernel::clean_page_cache::lifetime_stats();
     let (shared_nodes, shared_pages, shared_orphans) = crate::kernel::partage::lifetime_stats();
     crate::kernel::dmesg::log_fmt(format_args!(
-        "[MM-NG6] fault_resolved={} fault_retry={} fault_invalid={} fault_io_error={} fault_retired={} fault_retry_yields={} fault_retry_max_chain={} fault_registry_current={} fault_registry_peak={} clean_cache_entries={} clean_cache_reclaimable={} shared_cache_nodes={} shared_cache_pages={} shared_cache_orphans={} pf_bkl_enters={} waitq_bkl_enters={} waitq_bkl_wait_ns={} waitq_wake_sans_verrou={} ramfs_bkl_enters={} exec_wait_ns={} exec_max_ns={} ata_acquires={} ata_wait_ns={} ata_max_ns={}",
+        "[MM-NG6] fault_resolved={} fault_retry={} fault_invalid={} fault_io_error={} fault_retired={} fault_retry_yields={} fault_retry_max_chain={} fault_registry_current={} fault_registry_peak={} clean_cache_entries={} clean_cache_reclaimable={} shared_cache_nodes={} shared_cache_pages={} shared_cache_orphans={} pf_bkl_enters={} waitq_bkl_enters={} waitq_bkl_wait_ns={} waitq_wake_sans_verrou={} exec_wait_ns={} exec_max_ns={} ata_acquires={} ata_wait_ns={} ata_max_ns={}",
         resolved, retry, invalid, io_error, retired, retry_yields, retry_max_chain,
         fault_registry_current, fault_registry_peak,
         clean_entries, clean_reclaimable, shared_nodes, shared_pages, shared_orphans,
         pf_bkl_enters(), waitq_bkl, waitq_bkl_ns, waitq_sans_verrou,
-        crate::fs::backing::ramfs_bkl_enters(), exec_wait_ns,
+        exec_wait_ns,
         exec_max_ns, ata_acquires, ata_wait_ns, ata_max_ns,
     ));
-    let (cluster_attempts, cluster_mapped, cluster_miss, cluster_already, cluster_aborts, cluster_max_batch) = fault_cluster_stats();
+    let (cluster_attempts, cluster_mapped, cluster_miss, cluster_already, cluster_aborts, cluster_max_batch, cluster_mm_locks) = fault_cluster_stats();
     crate::kernel::dmesg::log_fmt(format_args!(
-        "[MM-CLUSTER] attempts={} mapped={} cache_miss={} already={} aborts={} max_batch={}",
-        cluster_attempts, cluster_mapped, cluster_miss, cluster_already, cluster_aborts, cluster_max_batch,
+        "[MM-CLUSTER] attempts={} mapped={} cache_miss={} already={} aborts={} max_batch={} mm_locks={}",
+        cluster_attempts, cluster_mapped, cluster_miss, cluster_already, cluster_aborts, cluster_max_batch, cluster_mm_locks,
     ));
     let (zero_faults, zero_triggered, zero_mapped, zero_already, zero_aborts, zero_max_batch) = zero_fault_cluster_stats();
     crate::kernel::dmesg::log_fmt(format_args!(
@@ -365,22 +427,23 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
         if task.state == TaskState::Zombie {
             continue;
         }
-        let (pid, nom, group_id, group_name, rss_octets, vss_octets) = {
-            let process = &task.process;
-            let usage = crate::kernel::resource::memory_usage(process);
-            let name = process.metadata.lock().name.clone();
-            (process.pid, name, process.resource_group_id,
-                process.resource_group_name.clone(), usage.rss, usage.vss)
-        };
+        let pid = task.process.pid;
         // Inclure la tranche actuellement en cours sans modifier le curseur :
         // le delta du prochain snapshot soustraira exactement ce même préfixe.
         let live = if task.last_account_ns != 0 {
-            now.saturating_sub(task.last_account_ns)
+            now.saturating_sub(task.last_account_ns.charge())
         } else { 0 };
-        let runtime = task.user_cpu_ns.saturating_add(task.kernel_cpu_ns).saturating_add(live);
-        let mut cpu_map_snapshot = task.cpu_ns;
+        let runtime = task.user_cpu_ns.charge()
+            .saturating_add(task.kernel_cpu_ns.charge())
+            .saturating_add(live);
+        // Instantane du temps par coeur. Les cases sont atomiques ; on les
+        // recopie en valeurs pour le calcul qui suit.
+        let mut cpu_map_snapshot = [0u64; MAX_CPUS];
+        for cpu in 0..MAX_CPUS {
+            cpu_map_snapshot[cpu] = task.cpu_ns[cpu].charge();
+        }
         if live != 0 && task.on_cpu >= 0 {
-            let cpu = task.on_cpu as usize;
+            let cpu = task.on_cpu.charge() as usize;
             if cpu < MAX_CPUS { cpu_map_snapshot[cpu] = cpu_map_snapshot[cpu].saturating_add(live); }
         }
         if let Some((_, before)) = previous_tasks.iter().find(|(tid, _)| *tid == task.tid) {
@@ -392,23 +455,29 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
         match cumuls.iter_mut().find(|(autre, _, _, _, _)| *autre == pid) {
             Some((_, total, cpu_map, migrations, switches)) => {
                 *total = total.saturating_add(runtime);
-                *migrations = migrations.saturating_add(task.migrations);
-                *switches = switches.saturating_add(task.context_switches);
+                *migrations = migrations.saturating_add(task.migrations.charge());
+                *switches = switches.saturating_add(task.context_switches.charge());
                 for cpu in 0..MAX_CPUS {
                     cpu_map[cpu] = cpu_map[cpu].saturating_add(cpu_map_snapshot[cpu]);
                 }
             }
             None => {
-                cumuls.push((pid, runtime, cpu_map_snapshot, task.migrations, task.context_switches));
+                // Un espace Mm appartient au processus, pas a chacun de ses
+                // threads. WebContent avait 18 threads dans le run de preuve :
+                // le releve lui faisait donc payer 18 fois le meme RSS.
+                let process = &task.process;
+                let usage = crate::kernel::resource::memory_usage(process);
+                let nom = process.metadata.lock().name.clone();
+                cumuls.push((pid, runtime, cpu_map_snapshot, task.migrations.charge(), task.context_switches.charge()));
                 mesures.push(Mesure {
                     pid,
                     nom,
-                    resource_group_id: group_id,
-                    resource_group_name: group_name,
+                    resource_group_id: process.resource_group_id,
+                    resource_group_name: process.resource_group_name.clone(),
                     ticks: 0,
-                    octets: rss_octets,
-                    rss_octets,
-                    vss_octets,
+                    octets: usage.rss,
+                    rss_octets: usage.rss,
+                    vss_octets: usage.vss,
                     taches: 0,
                     cpu_map_ns: [0; MAX_CPUS],
                     migrations: 0,
@@ -419,13 +488,23 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
         }
         if let Some(mesure) = mesures.iter_mut().find(|m| m.pid == pid) {
             mesure.taches += 1;
-            mesure.migrations = mesure.migrations.saturating_add(task.migrations);
-            mesure.context_switches = mesure.context_switches.saturating_add(task.context_switches);
+            mesure.migrations = mesure.migrations.saturating_add(task.migrations.charge());
+            mesure.context_switches =
+                mesure.context_switches.saturating_add(task.context_switches.charge());
             if task.state == TaskState::Ready {
                 mesure.runnable_threads += 1;
             }
         }
     }
+
+    let (rss_snapshots, rss_pages) = crate::kernel::resource::rss_o1_stats();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "[MM-RSS-O1] snapshots={} pages_observed={} processes={} live_tasks={}",
+        rss_snapshots,
+        rss_pages,
+        mesures.len(),
+        current_tasks.len(),
+    ));
 
     let precedents = unsafe {
         let pointeur = &raw mut MESURE_PRECEDENTE;
@@ -534,6 +613,9 @@ pub struct OrdonnanceurStats {
     pub switches: u64,
     pub irq_preemptions: u64,
     pub deferred_preemptions: u64,
+    pub transitions: u64,
+    pub transitions_refusees: u64,
+    pub detach_bkl_legacy: u64,
     pub wm_age_ms: u64,
     pub ready: usize,
     pub live: usize,
@@ -546,10 +628,12 @@ pub fn diagnostic_ordonnanceur() -> OrdonnanceurStats {
         switches: CONTEXT_SWITCHES.load(Ordering::Relaxed),
         irq_preemptions: IRQ_PREEMPTIONS.load(Ordering::Relaxed),
         deferred_preemptions: DEFERRED_PREEMPTIONS.load(Ordering::Relaxed),
+        transitions: TRANSITIONS_ORDONNANCEUR.load(Ordering::Relaxed),
+        transitions_refusees: TRANSITIONS_ORDONNANCEUR_REFUSEES.load(Ordering::Relaxed),
+        detach_bkl_legacy: DETACHEMENTS_BKL_LEGACY.load(Ordering::Relaxed),
         wm_age_ms: now.saturating_sub(heartbeat).saturating_mul(1000)
             / crate::kernel::timer::TICKS_PER_SECOND,
         ready: ready_count(),
         live: live_count(),
     }
 }
-

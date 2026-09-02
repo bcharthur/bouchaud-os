@@ -290,6 +290,20 @@ fn probe_note_acquire(cpu: usize, kind: u32) {
         cpu,
         kind,
     );
+
+    // BOUCHAUD_C1_ATTRIBUTION_DOMAINE_V1
+    //
+    // A QUEL CHEMIN cette prise appartient-elle. Un total ne dit pas lesquelles
+    // restent legitimes ; or la sortie du gros verrou se fait chemin par
+    // chemin, et un chemin sorti doit ensuite le RESTER. Sans attribution, un
+    // appelant qui reprend le verrou dans un sous-systeme deja migre est
+    // indiscernable du bruit de fond des chemins non encore traites.
+    //
+    // Rien de plus qu'un `fetch_add` : on s'execute interruptions masquees, et
+    // le journal se fabrique une fois par seconde, ailleurs.
+    if let Some(fautif) = crate::kernel::sync::registre_domaines().note_acquisition(cpu) {
+        crate::kernel::sync::signale_regression_domaine(fautif);
+    }
 }
 
 #[inline]
@@ -512,7 +526,7 @@ pub fn contention_stats() -> (u64, u64, u64) {
 }
 
 pub fn owner_cpu() -> Option<usize> {
-    match OWNER.load(Ordering::Acquire) {
+    match owner_load(Ordering::Acquire) {
         FREE => None,
         value => Some(value - 1),
     }
@@ -545,7 +559,7 @@ pub struct StallBklProvenance {
 pub fn stall_probe_provenance() -> StallBklProvenance {
     for _ in 0..4 {
         let g1 = PROBE_OWNER_GEN.load(Ordering::Acquire);
-        let owner = OWNER.load(Ordering::Acquire);
+        let owner = owner_load(Ordering::Acquire);
         let snapshot = StallBklProvenance {
             owner_token: owner,
             generation: g1,
@@ -566,13 +580,13 @@ pub fn stall_probe_provenance() -> StallBklProvenance {
             last_release_gen: PROBE_LAST_RELEASE_GEN.load(Ordering::Acquire),
         };
         let g2 = PROBE_OWNER_GEN.load(Ordering::Acquire);
-        let owner2 = OWNER.load(Ordering::Acquire);
+        let owner2 = owner_load(Ordering::Acquire);
         if g1 == g2 && owner == owner2 && (owner == FREE || g1 != 0) {
             return StallBklProvenance { coherent: true, ..snapshot };
         }
     }
     StallBklProvenance {
-        owner_token: OWNER.load(Ordering::Acquire),
+        owner_token: owner_load(Ordering::Acquire),
         generation: PROBE_OWNER_GEN.load(Ordering::Acquire),
         coherent: false,
         since_tick: PROBE_OWNER_SINCE.load(Ordering::Acquire),
@@ -599,10 +613,9 @@ pub fn stall_probe_acquire_seq() -> u64 {
 }
 
 pub fn stall_probe_owner_token() -> usize {
-    OWNER.load(Ordering::Acquire)
+    owner_load(Ordering::Acquire)
 }
 
 pub fn stall_probe_depth(cpu: usize) -> usize {
-    DEPTH[cpu.min(MAX_CPUS - 1)].load(Ordering::Acquire)
+    depth_load(cpu.min(MAX_CPUS - 1), Ordering::Acquire)
 }
-

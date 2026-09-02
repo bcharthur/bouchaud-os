@@ -1,4 +1,11 @@
 extern "x86-interrupt" fn breakpoint_handler(stack: InterruptStackFrame) {
+    // Chemin de faute FATALE : ce gestionnaire tue la tache fautive ou
+    // panique. Le gros verrou y reste legitime -- il n'y a plus de
+    // concurrence a preserver quand on demonte la tache qui a fait la faute,
+    // et la coherence du diagnostic prime. Ce n'est pas un chemin normal, et
+    // le compter comme tel rendrait l'objectif « zero » inatteignable pour de
+    // mauvaises raisons.
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Panique);
     let _kernel = crate::kernel::smp_lock::enter();
     println!("exception: breakpoint (int3) capturee, on continue");
     serial_println!("[cpu] breakpoint at {:?}", stack.instruction_pointer);
@@ -159,6 +166,13 @@ impl Drop for GsGuard {
 }
 
 fn kill_faulting_task(reason: &str, stack: &InterruptStackFrame) -> ! {
+    // Chemin de faute FATALE : ce gestionnaire tue la tache fautive ou
+    // panique. Le gros verrou y reste legitime -- il n'y a plus de
+    // concurrence a preserver quand on demonte la tache qui a fait la faute,
+    // et la coherence du diagnostic prime. Ce n'est pas un chemin normal, et
+    // le compter comme tel rendrait l'objectif « zero » inatteignable pour de
+    // mauvaises raisons.
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Panique);
     let _kernel = crate::kernel::smp_lock::enter();
     let cr2 = x86_64::registers::control::Cr2::read().as_u64();
     crate::println!(
@@ -179,6 +193,13 @@ fn kill_faulting_task(reason: &str, stack: &InterruptStackFrame) -> ! {
 
 extern "x86-interrupt" fn general_protection_handler(stack: InterruptStackFrame, code: u64) {
     let _gs = GsGuard::enter(&stack);
+    // Chemin de faute FATALE : ce gestionnaire tue la tache fautive ou
+    // panique. Le gros verrou y reste legitime -- il n'y a plus de
+    // concurrence a preserver quand on demonte la tache qui a fait la faute,
+    // et la coherence du diagnostic prime. Ce n'est pas un chemin normal, et
+    // le compter comme tel rendrait l'objectif « zero » inatteignable pour de
+    // mauvaises raisons.
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Panique);
     let _kernel = crate::kernel::smp_lock::enter();
     if from_user(&stack) && crate::kernel::task::in_user_task() {
         kill_faulting_task("faute de protection generale", &stack);
@@ -189,6 +210,13 @@ extern "x86-interrupt" fn general_protection_handler(stack: InterruptStackFrame,
 
 extern "x86-interrupt" fn invalid_opcode_handler(stack: InterruptStackFrame) {
     let _gs = GsGuard::enter(&stack);
+    // Chemin de faute FATALE : ce gestionnaire tue la tache fautive ou
+    // panique. Le gros verrou y reste legitime -- il n'y a plus de
+    // concurrence a preserver quand on demonte la tache qui a fait la faute,
+    // et la coherence du diagnostic prime. Ce n'est pas un chemin normal, et
+    // le compter comme tel rendrait l'objectif « zero » inatteignable pour de
+    // mauvaises raisons.
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Panique);
     let _kernel = crate::kernel::smp_lock::enter();
     if from_user(&stack) && crate::kernel::task::in_user_task() {
         kill_faulting_task("instruction illegale", &stack);
@@ -198,6 +226,13 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack: InterruptStackFrame) {
 
 extern "x86-interrupt" fn divide_error_handler(stack: InterruptStackFrame) {
     let _gs = GsGuard::enter(&stack);
+    // Chemin de faute FATALE : ce gestionnaire tue la tache fautive ou
+    // panique. Le gros verrou y reste legitime -- il n'y a plus de
+    // concurrence a preserver quand on demonte la tache qui a fait la faute,
+    // et la coherence du diagnostic prime. Ce n'est pas un chemin normal, et
+    // le compter comme tel rendrait l'objectif « zero » inatteignable pour de
+    // mauvaises raisons.
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Panique);
     let _kernel = crate::kernel::smp_lock::enter();
     if from_user(&stack) && crate::kernel::task::in_user_task() {
         kill_faulting_task("division par zero", &stack);
@@ -207,6 +242,13 @@ extern "x86-interrupt" fn divide_error_handler(stack: InterruptStackFrame) {
 
 extern "x86-interrupt" fn stack_segment_handler(stack: InterruptStackFrame, code: u64) {
     let _gs = GsGuard::enter(&stack);
+    // Chemin de faute FATALE : ce gestionnaire tue la tache fautive ou
+    // panique. Le gros verrou y reste legitime -- il n'y a plus de
+    // concurrence a preserver quand on demonte la tache qui a fait la faute,
+    // et la coherence du diagnostic prime. Ce n'est pas un chemin normal, et
+    // le compter comme tel rendrait l'objectif « zero » inatteignable pour de
+    // mauvaises raisons.
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Panique);
     let _kernel = crate::kernel::smp_lock::enter();
     if from_user(&stack) && crate::kernel::task::in_user_task() {
         kill_faulting_task("faute de pile", &stack);
@@ -250,13 +292,16 @@ extern "x86-interrupt" fn page_fault_handler(
 
         if outcome == crate::kernel::task::FaultOutcome::Resolved {
             crate::kernel::task::stall_pf_done(addr.as_u64());
-            let _kernel = crate::kernel::smp_lock::enter();
+            // `retire_current_if_zombie` prend elle-meme ce qu'il lui faut, et
+            // seulement lorsqu'une retraite est reellement demandee -- ce qui
+            // est faux presque toujours. L'envelopper ici prenait le gros
+            // verrou sur le chemin NORMAL d'une faute de page resolue, c'est-a-
+            // dire a chaque page peuplee a la demande.
             crate::kernel::task::retire_current_if_zombie();
             return;
         }
 
         if outcome == crate::kernel::task::FaultOutcome::Retired {
-            let _kernel = crate::kernel::smp_lock::enter();
             crate::kernel::task::retire_current_if_zombie();
         }
 

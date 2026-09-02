@@ -113,5 +113,5 @@ def summarize(path):
         "fault_retry_yields", "fault_retry_max_chain", "fault_registry_current",
         "fault_registry_peak", "clean_cache_entries", "clean_cache_reclaimable",
         "shared_cache_nodes", "shared_cache_pages", "shared_cache_orphans",
-        "pf_bkl_enters", "waitq_bkl_enters", "waitq_bkl_wait_ns", "ramfs_bkl_enters",
+        "pf_bkl_enters", "waitq_bkl_enters", "waitq_bkl_wait_ns",
         "exec_wait_ns", "exec_max_ns", "ata_acquires", "ata_wait_ns", "ata_max_ns")}}

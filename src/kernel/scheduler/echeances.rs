@@ -71,9 +71,41 @@ impl Echeances {
         maintenant_ns >= self.prochaine.load(Ordering::Relaxed)
     }
 
-    /// Recale la borne sur le minimum EXACT, apres un balayage complet.
+    /// Revendique le balayage arrive a echeance.
+    ///
+    /// Plusieurs CPU peuvent entrer dans l'ordonnanceur en meme temps depuis
+    /// C1.1. Un seul remplace donc la borne due par `JAMAIS`; les autres voient
+    /// que le balayage est deja pris. Toute echeance armee pendant le scan fait
+    /// ensuite un `fetch_min` contre `JAMAIS` et ne peut pas etre ecrasee par
+    /// le recalage final.
+    pub fn commence_balayage(&self, maintenant_ns: u64) -> bool {
+        loop {
+            let courante = self.prochaine.load(Ordering::Acquire);
+            if maintenant_ns < courante {
+                return false;
+            }
+            if self
+                .prochaine
+                .compare_exchange(
+                    courante,
+                    JAMAIS,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    }
+
+    /// Recale la borne apres un balayage complet.
+    ///
+    /// La valeur calculee etait exacte au debut du scan, mais une autre tache
+    /// a pu armer une echeance plus proche entre-temps. `fetch_min` preserve
+    /// cette publication concurrente ; un `store` la perdrait.
     pub fn recale(&self, minimum_ns: u64) {
-        self.prochaine.store(minimum_ns, Ordering::Relaxed);
+        self.prochaine.fetch_min(minimum_ns, Ordering::AcqRel);
     }
 
     /// La borne courante. Pour les diagnostics et les tests.

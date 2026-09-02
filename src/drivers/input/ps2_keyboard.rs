@@ -9,15 +9,50 @@ use x86_64::instructions::interrupts;
 const QUEUE_SIZE: usize = 128;
 
 /// File circulaire de scancodes alimentee par l'IRQ clavier.
-static mut QUEUE: [u8; QUEUE_SIZE] = [0; QUEUE_SIZE];
-static mut Q_HEAD: usize = 0;
-static mut Q_TAIL: usize = 0;
+// BOUCHAUD_C1_FILE_SCANCODES_SANS_GROS_VERROU_V1
+//
+// La file etait trois `static mut` : un tableau, une tete, une queue. Rien ne
+// les protegeait. Le producteur est le gestionnaire d'IRQ1, les consommateurs
+// sont des taches sur n'importe quel coeur -- et c'est le gros verrou, pris
+// par le gestionnaire, qui empechait les deux de se marcher dessus.
+//
+// Un `SpinLockIrq` propre a la file remplace cela. Le choix d'IRQ plutot que
+// d'un verrou tournant nu est OBLIGATOIRE ici : le producteur s'execute en
+// contexte d'interruption. Si un consommateur tenait le verrou quand l'IRQ
+// arrive sur le meme coeur, le gestionnaire tournerait a vide en attendant un
+// verrou que seule la tache interrompue peut rendre -- un interblocage
+// definitif. Masquer les interruptions le temps de la section critique, qui
+// fait quelques instructions, ferme cela.
+static FILE: crate::kernel::sync::SpinLockIrq<FileScancodes> =
+    crate::kernel::sync::SpinLockIrq::new(FileScancodes {
+        tampon: [0; QUEUE_SIZE],
+        tete: 0,
+        queue: 0,
+    });
+
+struct FileScancodes {
+    tampon: [u8; QUEUE_SIZE],
+    tete: usize,
+    queue: usize,
+}
+
+impl FileScancodes {
+    fn en_attente(&self) -> usize {
+        if self.queue >= self.tete {
+            self.queue - self.tete
+        } else {
+            QUEUE_SIZE - self.tete + self.queue
+        }
+    }
+}
 
 /// Compteurs de diagnostic. La machine est mono-coeur et ces champs ne sont
 /// modifies que depuis IRQ1 (interruptions coupees) ou pendant l'initialisation.
-static mut IRQ_COUNT: u64 = 0;
-static mut DROPPED_COUNT: u64 = 0;
-static mut LAST_SCANCODE: u8 = 0;
+// Compteurs de diagnostic : atomiques, sans verrou. Ils ne participent a
+// aucune decision, seulement au journal.
+static IRQ_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static DROPPED_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static LAST_SCANCODE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 static mut INIT_CONFIG: u8 = 0;
 static mut INIT_ACK_DEFAULTS: u8 = 0;
 static mut INIT_ACK_ENABLE: u8 = 0;
@@ -39,23 +74,15 @@ pub struct Stats {
 
 pub fn stats() -> Stats {
     use crate::arch::x86_64::ports::inb;
-    let (head, tail, irq, dropped, last, config, ack_defaults, ack_enable) = unsafe {
-        (
-            Q_HEAD,
-            Q_TAIL,
-            IRQ_COUNT,
-            DROPPED_COUNT,
-            LAST_SCANCODE,
-            INIT_CONFIG,
-            INIT_ACK_DEFAULTS,
-            INIT_ACK_ENABLE,
-        )
+    let (head, tail, pending) = {
+        let file = FILE.lock();
+        (file.tete, file.queue, file.en_attente())
     };
-    let pending = if tail >= head {
-        tail - head
-    } else {
-        QUEUE_SIZE - head + tail
-    };
+    let irq = IRQ_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+    let dropped = DROPPED_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+    let last = LAST_SCANCODE.load(core::sync::atomic::Ordering::Relaxed);
+    let (config, ack_defaults, ack_enable) =
+        unsafe { (INIT_CONFIG, INIT_ACK_DEFAULTS, INIT_ACK_ENABLE) };
     let (master, _) = crate::arch::x86_64::interrupts::mask_snapshot();
     Stats {
         irq,
@@ -159,17 +186,18 @@ pub fn init() {
 
         let mut config = 0u8;
 
-        unsafe {
-            Q_HEAD = 0;
-            Q_TAIL = 0;
-            IRQ_COUNT = 0;
-            DROPPED_COUNT = 0;
-            LAST_SCANCODE = 0;
-            // Reconfigurer le 8042 fait perdre des octets : un Shift enfonce
-            // avant la reconfiguration n'aura jamais son relachement. Repartir
-            // d'un etat neuf est la seule position honnete.
-            ETAT = EtatClavier::neuf();
+        {
+            let mut file = FILE.lock();
+            file.tete = 0;
+            file.queue = 0;
         }
+        IRQ_COUNT.store(0, core::sync::atomic::Ordering::Relaxed);
+        DROPPED_COUNT.store(0, core::sync::atomic::Ordering::Relaxed);
+        LAST_SCANCODE.store(0, core::sync::atomic::Ordering::Relaxed);
+        // Reconfigurer le 8042 fait perdre des octets : un Shift enfonce
+        // avant la reconfiguration n'aura jamais son relachement. Repartir
+        // d'un etat neuf est la seule position honnete.
+        *ETAT.lock() = EtatClavier::neuf();
 
         for _ in 0..64 {
             if unsafe { inb(0x64) } & 0x01 == 0 {
@@ -245,16 +273,18 @@ pub fn rearm_after_8042_reconfigure() {
 
 pub fn push_scancode(sc: u8) {
     let mut range = false;
-    unsafe {
-        IRQ_COUNT = IRQ_COUNT.wrapping_add(1);
-        LAST_SCANCODE = sc;
-        let next = (Q_TAIL + 1) % QUEUE_SIZE;
-        if next != Q_HEAD {
-            QUEUE[Q_TAIL] = sc;
-            Q_TAIL = next;
+    IRQ_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    LAST_SCANCODE.store(sc, core::sync::atomic::Ordering::Relaxed);
+    {
+        let mut file = FILE.lock();
+        let suivant = (file.queue + 1) % QUEUE_SIZE;
+        if suivant != file.tete {
+            let position = file.queue;
+            file.tampon[position] = sc;
+            file.queue = suivant;
             range = true;
         } else {
-            DROPPED_COUNT = DROPPED_COUNT.wrapping_add(1);
+            DROPPED_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
     }
     // BOUCHAUD_GUI_EVENT_DRIVEN_V1
@@ -273,14 +303,13 @@ pub fn push_scancode(sc: u8) {
 
 /// Retire un scancode si disponible (interruptions deja desactivees).
 fn pop_scancode() -> Option<u8> {
-    unsafe {
-        if Q_HEAD == Q_TAIL {
-            None
-        } else {
-            let sc = QUEUE[Q_HEAD];
-            Q_HEAD = (Q_HEAD + 1) % QUEUE_SIZE;
-            Some(sc)
-        }
+    let mut file = FILE.lock();
+    if file.tete == file.queue {
+        None
+    } else {
+        let sc = file.tampon[file.tete];
+        file.tete = (file.tete + 1) % QUEUE_SIZE;
+        Some(sc)
     }
 }
 
@@ -290,7 +319,8 @@ fn pop_scancode() -> Option<u8> {
 /// doit pas retirer l'evenement de la file, sinon la lecture qui suit ne
 /// trouverait plus rien.
 pub fn has_pending() -> bool {
-    unsafe { core::ptr::read_volatile(&Q_HEAD) != core::ptr::read_volatile(&Q_TAIL) }
+    let file = FILE.lock();
+    file.tete != file.queue
 }
 
 /// Lecture non bloquante d'un scancode brut (None si rien). Utile pour le GUI.
@@ -322,13 +352,25 @@ pub use decodeur::{EtatClavier, Key, KeyEvent, Modificateurs};
 ///
 /// Le decodage lui-meme vit dans `clavier_decodeur.rs`, sans etat global, ce
 /// qui le rend exercable sur l'hote. Ici il n'y a plus qu'un porteur.
-static mut ETAT: EtatClavier = EtatClavier::neuf();
+///
+/// Ce porteur etait un `static mut`, et le gros verrou etait tout ce qui le
+/// serialisait : `read` s'executait sous BKL, donc deux CPU ne decodaient
+/// jamais en meme temps. Liberer `read` retire cette protection accidentelle
+/// -- les modificateurs (shift, ctrl, alt, prefixe 0xE0) sont un etat REL,
+/// pas un compteur, et deux decodages entrelaces produisent une touche fausse
+/// plutot qu'un chiffre approximatif. Il porte donc maintenant son verrou.
+///
+/// Un `SpinLock` ordinaire suffit : l'IRQ clavier ne fait que deposer des
+/// scancodes dans `FILE` (un `SpinLockIrq`), elle ne decode jamais. Aucun
+/// porteur de ce verrou-ci n'est interrompu par un autre qui le voudrait.
+static ETAT: crate::kernel::sync::SpinLock<EtatClavier> =
+    crate::kernel::sync::SpinLock::new(EtatClavier::neuf());
 
 /// Lit la prochaine touche logique (bloquant).
 pub fn read_key() -> Key {
     loop {
         let sc = read_scancode();
-        if let Some(k) = unsafe { ETAT.decode_touche(sc) } { return k; }
+        if let Some(k) = ETAT.lock().decode_touche(sc) { return k; }
     }
 }
 
@@ -336,7 +378,7 @@ pub fn read_key() -> Key {
 pub fn try_key() -> Option<Key> {
     loop {
         let sc = try_scancode()?;
-        if let Some(k) = unsafe { ETAT.decode_touche(sc) } { return Some(k); }
+        if let Some(k) = ETAT.lock().decode_touche(sc) { return Some(k); }
     }
 }
 
@@ -347,7 +389,7 @@ pub fn try_key() -> Option<Key> {
 pub fn try_key_event() -> Option<KeyEvent> {
     loop {
         let sc = try_scancode()?;
-        if let Some(evenement) = unsafe { ETAT.decode(sc) } { return Some(evenement); }
+        if let Some(evenement) = ETAT.lock().decode(sc) { return Some(evenement); }
     }
 }
 

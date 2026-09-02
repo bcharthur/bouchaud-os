@@ -75,11 +75,19 @@ try {
     Invoke-RustTest "verdict protocole client" "tools\gui\test_silence.rs"
     Invoke-RustTest "BKL max/provenance" "tools\smp\test_bkl_max.rs"
     Invoke-RustTest "comptabilite du gros verrou" "tools\smp\test_bkl_comptes.rs"
+    Invoke-RustTest "domaines du gros verrou" "tools\smp\test_domaines_bkl.rs"
+    Invoke-RustTest "protocole de parking" "tools\smp\test_rendezvous.rs"
+    Invoke-RustTest "registre des taches" "tools\smp\test_registre.rs"
+    Invoke-RustTest "etat BKL atomique" "tools\smp\test_etat_bkl_atomique.rs"
+    Invoke-RustTest "shootdown TLB" "tools\smp\test_shootdown_tlb.rs"
+    Invoke-RustTest "empreintes de mots de passe" "tools\securite\test_motdepasse.rs"
     Invoke-RustTest "commutation SMP" "tools\smp\test_commutation.rs"
+    Invoke-RustTest "ordonnanceur sans BKL" "tools\smp\test_scheduler_sans_bkl.rs"
     Invoke-RustTest "profondeur BKL" "tools\smp\test_profondeur_bkl.rs"
     Invoke-RustTest "re-entree IRQ runqueue" "tools\smp\test_runqueue_irq.rs"
     Invoke-RustTest "cout des frames libres" "tools\smp\test_frames_libres.rs"
     Invoke-RustTest "cout des frames possedees" "tools\smp\test_pages_possedees.rs"
+    Invoke-RustTest "RSS incremental et grappes MM" "tools\smp\test_rss_incremental.rs"
     Invoke-RustTest "cache de pages propres" "tools\smp\test_cache_pages.rs"
     Invoke-RustTest "discipline du gros verrou" "tools\smp\test_discipline_bkl.rs"
     Invoke-RustTest "ordre des verrous du cache" "tools\smp\test_ordre_verrous.rs"
@@ -145,6 +153,38 @@ try {
 
     Invoke-Step "comptabilite du gros verrou (source)" {
         & python .\tools\verifie-bkl-comptes.py
+    }
+
+    Invoke-Step "RSS incremental et grappes MM (source)" {
+        & python .\tools\verifie-rss-incremental.py
+    }
+
+    Invoke-Step "domaines du gros verrou (source)" {
+        & python .\tools\verifie-domaines-bkl.py
+    }
+
+    Invoke-Step "ordonnanceur sans BKL (source)" {
+        & python .\tools\verifie-ordonnanceur-sans-bkl.py
+    }
+
+    Invoke-Step "registre des taches (source)" {
+        & python .\tools\verifie-registre-taches.py
+    }
+
+    Invoke-Step "etat BKL atomique (source)" {
+        & python .\tools\verifie-etat-bkl-atomique.py
+    }
+
+    Invoke-Step "shootdown TLB (source)" {
+        & python .\tools\verifie-shootdown-tlb.py
+    }
+
+    Invoke-Step "mots de passe (source)" {
+        & python .\tools\verifie-motdepasse.py
+    }
+
+    Invoke-Step "descripteurs partages inscriptibles (source)" {
+        & python .\tools\verifie-descripteurs-partages.py
     }
 
     if (Test-Path ".\tools\verifie-protocole-gui.py") {

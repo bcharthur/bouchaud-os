@@ -436,10 +436,10 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         GETDENTS64 => file::sys_getdents64(args[0] as i32, args[1], args[2] as usize),
         GETCWD => file::sys_getcwd(args[0], args[1] as usize),
         CHDIR => file::sys_chdir(args[0]),
-        MKDIR => file::sys_mkdir(args[0]),
-        MKDIRAT => file::sys_mkdir(args[1]),
+        MKDIR => file::sys_mkdir(args[0], args[1] as u32),
+        MKDIRAT => file::sys_mkdirat(args[0] as i32, args[1], args[2] as u32),
         UNLINK => file::sys_unlink(args[0]),
-        UNLINKAT => file::sys_unlink(args[1]),
+        UNLINKAT => file::sys_unlinkat(args[0] as i32, args[1], args[2] as u32),
         RENAME => file::sys_rename(args[0], args[1]),
         // Le RAMFS actuel fusionne entree de repertoire et inode : il ne peut
         // pas representer deux noms pointant vers le meme inode sans refonte
@@ -554,7 +554,7 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
             None => task::current().tid as i64,
         },
         SET_TID_ADDRESS => {
-            task::current().clear_child_tid = args[0];
+            task::current_exclusif().clear_child_tid = args[0];
             task::current().tid as i64
         }
         // `set_robust_list` peut legitimement etre accepte sans effet : la glibc
@@ -845,12 +845,10 @@ fn sys_clock_gettime(clock: i32, out: u64) -> i64 {
     let ms = match clock {
         CLOCK_REALTIME | CLOCK_REALTIME_COARSE | CLOCK_REALTIME_ALARM => realtime_ms(),
         CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
-            // Seule branche de cet appel qui touche la table des taches :
-            // `cpu_time_ms` la parcourt pour additionner les ticks de tous les
-            // fils du processus. Elle prend donc le gros verrou, ici et nulle
-            // part ailleurs. Le reste de `clock_gettime` -- c'est-a-dire tout
-            // ce qu'emet une boucle d'evenements -- s'en passe.
-            let _kernel = crate::kernel::smp_lock::enter();
+            // Seule branche de cet appel qui parcourt la table des taches.
+            // Elle prenait le gros verrou pour cela ; elle n'en a plus besoin :
+            // le registre se lit sans verrou, et `ticks_cpu` est atomique comme
+            // les autres champs qu'un CPU ecrit et qu'un autre lit.
             let pid = crate::kernel::task::current_process().pid;
             crate::kernel::task::cpu_time_ms(pid)
         }
@@ -996,7 +994,7 @@ fn sys_arch_prctl(code: i32, addr: u64) -> i64 {
     match code {
         ARCH_SET_FS => {
             usermode::set_fs_base(addr);
-            task::current().fs_base = addr;
+            task::current_exclusif().fs_base = addr;
             0
         }
         ARCH_GET_FS => {

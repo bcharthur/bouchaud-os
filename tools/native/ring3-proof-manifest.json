@@ -1,0 +1,20 @@
+{
+  "overlay": "bouchaud-os-chantier-7-ring3-runtime-proof",
+  "base_commit": "cbde619c04bfbb81871c5cb7974590aad09a83dd",
+  "purpose": "Direct ring3 runtime proof for Bouchaud native ABI/IPC V1",
+  "local_windows": "tools/native/run-native-ipc-ring3.ps1",
+  "ci": ".github/workflows/native-ipc-runtime.yml",
+  "required_runtime_markers": [
+    "[NATIVE-IPC-RING3] ABI=1.0",
+    "[NATIVE-IPC-RING3] CHANNEL_OK",
+    "[NATIVE-IPC-RING3] HANDLE_TRANSFER_OK",
+    "[NATIVE-IPC-RING3] EVENT_WAITSET_OK",
+    "[NATIVE-IPC-RING3] RIGHTS_OK",
+    "[NATIVE-IPC-RING3] SHM_OK",
+    "[NATIVE-IPC-RING3] OK",
+    "[NATIVE-IPC] ABI=1.0",
+    "[NATIVE-IPC] OK"
+  ],
+  "revision": 2,
+  "fix": "Raw ELF entry stack alignment: _start is now a naked shim that aligns RSP and CALLs probe_main, so GCC-generated SSE movaps stores obey SysV ABI."
+}

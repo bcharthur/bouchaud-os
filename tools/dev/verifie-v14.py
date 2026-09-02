@@ -23,7 +23,7 @@ for p in [root/'src/kernel/process/thread/faute_cluster.rs']:
  if '//!' in p.read_text(encoding='utf-8'):
   raise SystemExit(f"nested include has //!: {p}")
 policy=(root/'src/kernel/memory/readahead/politique.rs').read_text(encoding='utf-8')
-assert 'RA_START_AFTER: u64 = 2' in policy and 'RA_MAX_PAGES: u64 = 8' in policy
+assert 'RA_START_AFTER: u64 = 2' in policy and 'RA_MAX_PAGES: u64 = 16' in policy
 fault=(root/'src/kernel/process/thread/faute_memoire.rs').read_text(encoding='utf-8')
 assert 'include!("faute_cluster.rs")' in fault and 'fault_cluster_after_clean' in fault
 stall=(root/'src/kernel/process/thread/diagnostic_stall.rs').read_text(encoding='utf-8')

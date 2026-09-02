@@ -103,8 +103,8 @@ pub fn note_switch(avant: bool, from: usize, to: usize) {
     }
 
     let cpu = cpu();
-    let owner = OWNER.load(Ordering::Relaxed);
-    let depth = DEPTH[cpu].load(Ordering::Relaxed);
+    let owner = owner_load(Ordering::Relaxed);
+    let depth = depth_load(cpu, Ordering::Relaxed);
     let kind = if avant {
         enregistreur::SWITCH_BEFORE
     } else {
@@ -161,7 +161,7 @@ pub fn log_schedule_snapshot() {
             RESUME_ACTIVE_DEPTH[c].load(Ordering::Relaxed),
             RESUME_ACTIVE_ATTEMPTS[c].load(Ordering::Relaxed),
             ((PARKED.load(Ordering::SeqCst) >> c) & 1),
-            OWNER.load(Ordering::Acquire),
+            owner_load(Ordering::Acquire),
         );
     }
 

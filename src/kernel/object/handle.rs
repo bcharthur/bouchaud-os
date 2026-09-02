@@ -1,9 +1,14 @@
-//! Table de handles (descripteurs) — socle pour les futurs syscalls.
+//! Legacy handle catalogue.
 //!
-//! Un handle est un entier opaque rendu a une application pour designer une
-//! ressource noyau (fichier, fenetre, socket...). Modele minimal pour l'instant.
+//! New native applications use `kernel::native::handle`, whose handles are
+//! process-local, generational and rights-bearing.  This module keeps the old
+//! shell/debug API source-compatible while removing its historical `static mut`
+//! data race.
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, Ordering};
+
+use crate::kernel::sync::SpinLock;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum HandleKind {
@@ -20,29 +25,25 @@ pub struct Handle {
     pub owner_pid: u32,
 }
 
-static mut TABLE: Option<Vec<Handle>> = None;
-static mut NEXT_ID: u32 = 1;
+static TABLE: SpinLock<Vec<Handle>> = SpinLock::new(Vec::new());
+static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 
-fn table() -> &'static mut Vec<Handle> {
-    unsafe {
-        if TABLE.is_none() { TABLE = Some(Vec::new()); }
-        TABLE.as_mut().unwrap()
-    }
-}
-
-/// Ouvre un nouveau handle pour un processus.
+/// Ouvre un handle legacy. Les nouveaux chemins doivent preferer
+/// `kernel::native::handle`.
 pub fn open(kind: HandleKind, owner_pid: u32) -> u32 {
-    let id = unsafe { let i = NEXT_ID; NEXT_ID += 1; i };
-    table().push(Handle { id, kind, owner_pid });
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed).max(1);
+    TABLE.lock().push(Handle { id, kind, owner_pid });
     id
 }
 
-/// Ferme un handle.
 pub fn close(id: u32) {
-    table().retain(|h| h.id != id);
+    TABLE.lock().retain(|handle| handle.id != id);
 }
 
-/// Nombre de handles ouverts.
+pub fn close_owner(owner_pid: u32) {
+    TABLE.lock().retain(|handle| handle.owner_pid != owner_pid);
+}
+
 pub fn count() -> usize {
-    table().len()
+    TABLE.lock().len()
 }

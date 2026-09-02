@@ -7,7 +7,7 @@ required={
     "src/gui/widgets_v15.rs":["FPS:{:3}","legacy::draw_barre_haute"],
     "src/gui/mod.rs":["widgets_v15.rs","pub mod frame_clock"],
     "src/kernel/debug/journal.rs":["[FPS:","trames utiles"],
-    "tools/ladybird/chrome/modernise-v15.py":["draw_browser_text","draw_svg_icon","BOUCHAUD_CHROME_V15_REAL_TEXT_SVG_LOADING"],
+    "tools/ladybird/chrome/modernise-v15.py":["draw_browser_text","draw_svg_icon","BOUCHAUD_CHROME_V15_REAL_TEXT_SVG_LOADING","target_link_libraries(webcontentservice PRIVATE skia)"],
     "tools/ladybird/chrome/BouchaudChromeV15Assets.h":["ICON_SIZE","BACK","RELOAD","STOP"],
     "tools/ladybird/verifie-chrome.sh":["modernise-v15.py","BouchaudChromeV15Assets"],
     "tools/perf/run-ladybird-v15.ps1":["ValidateSet(1,4,8)","CpuCount"],
@@ -17,8 +17,11 @@ for rel,tokens in required.items():
     if not p.is_file(): raise SystemExit(f"ABSENT {rel}")
     b=p.read_bytes()
     if b.startswith(b"\xef\xbb\xbf"): raise SystemExit(f"BOM interdit {rel}")
-    if b"\r\n" in b: raise SystemExit(f"CRLF interdit {rel}")
-    s=b.decode('utf-8')
+    # Git peut materialiser certains arbres de travail en CRLF (core.autocrlf) alors
+    # que le blob indexe reste en LF. Le contrat porte sur le texte versionne,
+    # pas sur la convention locale de fin de ligne de l'arbre de travail.
+    s=b.decode('utf-8').replace('\r\n', '\n')
+    if '\r' in s: raise SystemExit(f"CR isole interdit {rel}")
     for token in tokens:
         if token not in s: raise SystemExit(f"TOKEN absent {rel}: {token}")
 

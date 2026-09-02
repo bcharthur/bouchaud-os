@@ -420,7 +420,7 @@ fn wasi_fd_write(caller: &mut Caller<'_, HostState>, fd: i32, iovs: i32, iovs_le
         return errno::SUCCESS;
     }
     {
-        let fs = ramfs::fs();
+        let mut fs = ramfs::fs();
         if !fs.can(node, PERM_W) {
             return errno::ACCES;
         }
@@ -469,7 +469,7 @@ fn wasi_path_open(
         }
         Err(errno::NOENT) if oflags & O_CREAT != 0 => {
             let (parent, name) = resolve_parent_at(caller.data(), dirfd, path)?;
-            let fs = ramfs::fs();
+            let mut fs = ramfs::fs();
             if fs.nodes[parent].kind != NodeKind::Dir {
                 return Err(errno::NOTDIR);
             }
@@ -485,7 +485,7 @@ fn wasi_path_open(
         Err(e) => return Err(e),
     };
 
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let is_dir = fs.nodes[node].kind == NodeKind::Dir;
     if oflags & O_DIRECTORY != 0 && !is_dir {
         return Err(errno::NOTDIR);
@@ -834,7 +834,7 @@ fn build_linker(engine: &Engine) -> Linker<HostState> {
             if size > ramfs::MAX_FILE_SIZE {
                 return errno::NOSPC;
             }
-            let fs = ramfs::fs();
+            let mut fs = ramfs::fs();
             if !fs.can(node, PERM_W) {
                 return errno::ACCES;
             }
@@ -977,7 +977,7 @@ fn build_linker(engine: &Engine) -> Linker<HostState> {
                 Ok(v) => v,
                 Err(e) => return e,
             };
-            let fs = ramfs::fs();
+            let mut fs = ramfs::fs();
             if !fs.can(parent, PERM_W) {
                 return errno::ACCES;
             }
@@ -1003,7 +1003,7 @@ fn build_linker(engine: &Engine) -> Linker<HostState> {
                 Ok(n) => n,
                 Err(e) => return e,
             };
-            let fs = ramfs::fs();
+            let mut fs = ramfs::fs();
             if fs.nodes[node].kind == NodeKind::Dir {
                 return errno::ISDIR;
             }
@@ -1028,7 +1028,7 @@ fn build_linker(engine: &Engine) -> Linker<HostState> {
                 Ok(n) => n,
                 Err(e) => return e,
             };
-            let fs = ramfs::fs();
+            let mut fs = ramfs::fs();
             if node == 0 {
                 return errno::ACCES;
             }
@@ -1062,7 +1062,7 @@ fn build_linker(engine: &Engine) -> Linker<HostState> {
                 Ok(v) => v,
                 Err(e) => return e,
             };
-            let fs = ramfs::fs();
+            let mut fs = ramfs::fs();
             if !fs.can(fs.nodes[node].parent, PERM_W) || !fs.can(new_parent, PERM_W) {
                 return errno::ACCES;
             }

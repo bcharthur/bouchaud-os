@@ -49,30 +49,17 @@ fn oldest_resume_age_ns(now: u64, mask: u64) -> u64 {
 }
 
 pub fn health_snapshot() -> BklHealth {
-    let owner_token = OWNER.load(Ordering::Acquire);
+    let etat = etat_charge(Ordering::Acquire);
+    let owner_token = etat.owner;
     let owner_cpu = if owner_token == FREE {
         usize::MAX
     } else {
         owner_token.saturating_sub(1)
     };
 
-    let mut depth_nonzero = 0usize;
-    let mut owner_depth = 0usize;
-    for cpu in 0..MAX_CPUS {
-        let depth = DEPTH[cpu].load(Ordering::Acquire);
-        if depth != 0 {
-            depth_nonzero += 1;
-        }
-        if cpu == owner_cpu {
-            owner_depth = depth;
-        }
-    }
-
-    let owner_depth_ok = if owner_token == FREE {
-        depth_nonzero == 0
-    } else {
-        owner_cpu < MAX_CPUS && owner_depth > 0 && depth_nonzero == 1
-    };
+    let owner_depth = etat.depth;
+    let owner_depth_ok = (owner_token == FREE && owner_depth == 0)
+        || (owner_token != FREE && owner_cpu < MAX_CPUS && owner_depth > 0);
 
     let resume_mask = RESUME_WAITERS.load(Ordering::SeqCst);
     let now = crate::kernel::timer::monotonic_ns();
@@ -93,7 +80,7 @@ pub fn health_snapshot() -> BklHealth {
         priority_wake_suppressed: PRIORITY_WAKE_SUPPRESSED.load(Ordering::Relaxed),
         priority_park_free_owner: PRIORITY_PARK_FREE_OWNER.load(Ordering::Relaxed),
         owner_depth_ok,
-        multiple_depth_owners: depth_nonzero > 1,
+        multiple_depth_owners: false,
     }
 }
 
@@ -143,7 +130,7 @@ pub fn log_health_snapshot() {
                 phase,
                 site,
                 aux,
-                DEPTH[cpu].load(Ordering::Acquire),
+                depth_load(cpu, Ordering::Acquire),
             );
         }
     }

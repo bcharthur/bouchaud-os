@@ -124,7 +124,7 @@ pub fn identite_pour_faute() -> Option<(usize, u32, u32, u64, u64, bool)> {
         task.tid,
         task.kstack_top,
         task.kstack_top.saturating_sub(KSTACK_SIZE as u64),
-        task.in_kernel,
+        task.in_kernel.charge(),
     ))
 }
 
@@ -493,6 +493,9 @@ pub fn stall_probe_from_timer() {
         EtatSyscall { nr: nr3, phase: ph3, age_ticks: age3 },
     );
 
+    signale_taches_orphelines();
+    signale_etat_ordonnancement();
+
     // Un CPU qui tourne sur un verrou tournant ne laisse aucune autre trace :
     // pas d'acquisition BKL, pas de faute, pas de changement de tache. Cette
     // ligne est la seule qui distingue un noyau bloque d'un noyau occupe, et
@@ -626,3 +629,163 @@ pub fn stall_probe_from_timer() {
     );
 }
 
+
+// BOUCHAUD_C1_TACHE_ORPHELINE_V1
+//
+// UNE TACHE PRETE QUI N'EST DANS AUCUNE FILE EST PERDUE
+// -----------------------------------------------------
+// Le noyau s'est fige pendant cinq minutes en n'imprimant rien : pas de
+// panique, pas d'assertion, pas de violation `lockdep`, pas d'attente longue
+// de verrou tournant. Le journal montrait un fil cree, publie sur `rq=1`, et
+// un CPU 1 qui restait `cur=NO_TASK` jusqu'a la fin. Rien ne disait pourquoi.
+//
+// C'est l'angle mort exact de toute la sonde existante : elle mesure ce que
+// les CPU FONT. Quand le defaut est qu'une tache n'est nulle part, il n'y a
+// rien a mesurer -- il faut aller le CHERCHER dans le registre.
+//
+// L'invariant est simple et local : une tache `Ready`, sur aucun coeur, et qui
+// ne commute pas, DOIT figurer dans la file du coeur que designe son
+// `runq_cpu`. Sinon aucun `pick_next` ne la trouvera jamais, et personne ne la
+// republiera : elle est perdue definitivement.
+fn signale_taches_orphelines() {
+    let mut orphelines = 0usize;
+    for emplacement in 0..registre_longueur() {
+        let Some(identite) = registre_id(emplacement) else { continue };
+        let Some(tache) = registre_tache_id(identite) else { continue };
+        if tache.state != TaskState::Ready
+            || tache.on_cpu >= 0
+            || tache.switching_out.charge()
+        {
+            continue;
+        }
+        let rq = tache.runq_cpu.charge() as usize;
+        let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(rq) else { continue };
+        // `None` = file verrouillee a cet instant : on ne conclut pas.
+        if crate::arch::x86_64::cpu_local::local(id).file_contient(identite.en_mot())
+            != Some(false)
+        {
+            continue;
+        }
+        orphelines += 1;
+        let (jetees_gen, jetees_non_eligibles) = pick_jetees(rq);
+        crate::serial_println!(
+            "[SCHED-ORPHELINE] tid={} slot={} gen={} rq={} aff={:#x} idle={} file_len={} \
+jetees_generation={} jetees_non_eligibles={}",
+            tache.tid,
+            identite.emplacement(),
+            identite.generation(),
+            rq,
+            tache.affinity_mask,
+            cpu::is_idle(rq),
+            crate::arch::x86_64::cpu_local::local(id).run_queue_len(),
+            jetees_gen,
+            jetees_non_eligibles,
+        );
+    }
+    if orphelines != 0 {
+        crate::serial_println!(
+            "[SCHED-ORPHELINE] total={} -- une tache prete hors de toute file ne \
+sera jamais elue",
+            orphelines,
+        );
+    }
+}
+
+// L'ETAT COMPLET DE L'ORDONNANCEMENT, AU MOMENT DU BLOCAGE
+//
+// `signale_taches_orphelines` ne voit qu'une tache `Ready`. Elle a rendu
+// ZERO ligne sur le blocage mm-ng6 : l'invariant « prete donc en file » n'est
+// donc PAS viole. Mais cela laisse deux lectures possibles, et une seule est
+// vraie :
+//
+//   * la tache est en file et son coeur dort -- reveil perdu ;
+//   * la tache n'est pas `Ready`, et attend quelque chose qui ne vient pas.
+//
+// Aucune sonde existante ne les distingue : `[SMP-TASK]` ne sort qu'a la
+// CREATION, et l'instantane ne montre que les CPU. On imprime donc l'etat
+// reel de chaque tache vivante, et la longueur de chaque file.
+fn signale_etat_ordonnancement() {
+    let coeurs = smp::schedulable_cpus().min(MAX_CPUS);
+    for cpu in 0..coeurs {
+        let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu) else { continue };
+        let (jetees_gen, jetees_non_eligibles) = pick_jetees(cpu);
+        crate::serial_println!(
+            "[SCHED-FILE] cpu={} len={} idle={} jetees_generation={} jetees_non_eligibles={} \
+sommeils_abandonnes={} rip={:#x} rip_noyau={:#x} tlb_seq={} tlb_cibles={:#x} tlb_acks={:#x} tlb_relances={} tlb_ipi_reemis={}",
+            cpu,
+            crate::arch::x86_64::cpu_local::local(id).run_queue_len(),
+            cpu::is_idle(cpu),
+            jetees_gen,
+            jetees_non_eligibles,
+            cpu::sched_abandons(cpu),
+            rips_timer(cpu).0,
+            rips_timer(cpu).1,
+            smp::tlb_slot_etat(cpu).0,
+            smp::tlb_slot_etat(cpu).1,
+            smp::tlb_slot_etat(cpu).2,
+            smp::tlb_relances().0,
+            smp::tlb_relances().1,
+        );
+    }
+    for emplacement in 0..registre_longueur() {
+        let Some(identite) = registre_id(emplacement) else { continue };
+        let Some(tache) = registre_tache_id(identite) else { continue };
+        if tache.state == TaskState::Zombie {
+            continue;
+        }
+        let rq = tache.runq_cpu.charge() as usize;
+        let en_file = crate::arch::x86_64::cpu_local::CpuId::from_index(rq)
+            .and_then(|id| crate::arch::x86_64::cpu_local::local(id).file_contient(identite.en_mot()));
+        crate::serial_println!(
+            "[SCHED-TACHE] tid={} slot={} gen={} etat={:?} on_cpu={} rq={} en_file={:?} \
+cle_attente={} echeance={}",
+            tache.tid,
+            identite.emplacement(),
+            identite.generation(),
+            tache.state.charge(),
+            tache.on_cpu.charge(),
+            rq,
+            en_file,
+            tache.wait_queue_key.charge(),
+            tache.wake_deadline_ns.charge(),
+        );
+    }
+}
+
+// OU TOURNE UN COEUR QUI NE PROGRESSE PLUS
+//
+// Le blocage mm-ng6 laisse UNE tache vivante, `Ready`, `on_cpu=0`, dans
+// aucune file, sans une seule faute de page pendant 285 secondes. Les files
+// sont vides et les trois autres coeurs dorment : rien n'est perdu, rien
+// n'attend un reveil. Le coeur 0 tourne donc dans une boucle du noyau qui ne
+// se termine pas.
+//
+// Aucune sonde ne dit laquelle. `STALL_IPI_RIP` n'est rafraichi qu'a la
+// reception d'un IPI, et il n'en circule plus aucun -- c'est justement le
+// symptome. Le PIT, lui, continue de battre sur le BSP : son cadre
+// d'interruption porte l'adresse exacte du code interrompu.
+static RIP_TIMER: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static RIP_TIMER_NOYAU: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// Enregistre l'adresse interrompue par le timer.
+///
+/// Deux cases : la derniere vue, et la derniere vue EN MODE NOYAU. La seconde
+/// est celle qui compte quand on cherche une boucle qui ne rend jamais la
+/// main a l'espace utilisateur.
+pub fn note_rip_timer(rip: u64, depuis_utilisateur: bool) {
+    let cpu = local_cpu().min(MAX_CPUS - 1);
+    RIP_TIMER[cpu].store(rip, Ordering::Relaxed);
+    if !depuis_utilisateur {
+        RIP_TIMER_NOYAU[cpu].store(rip, Ordering::Relaxed);
+    }
+}
+
+pub fn rips_timer(cpu: usize) -> (u64, u64) {
+    if cpu >= MAX_CPUS {
+        return (0, 0);
+    }
+    (
+        RIP_TIMER[cpu].load(Ordering::Relaxed),
+        RIP_TIMER_NOYAU[cpu].load(Ordering::Relaxed),
+    )
+}

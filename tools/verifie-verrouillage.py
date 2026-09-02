@@ -73,6 +73,10 @@ AUDITS_NOMMES = {
     "PPOLL": "A1 lot 3 -- table des descripteurs + verrou par objet",
     "WRITE": "V14 -- copyin sans BKL + domaines locaux; sinks legacy verrouillent en interne",
     "WRITEV": "V14 -- iovec/copyin sans BKL + chemin WRITE audite",
+    "READ": "c1 -- audit branche par branche au-dessus de la ligne READ dans SANS_BKL ; "
+            "decodeur clavier et generateur d'alea verrouillees par ce meme lot, "
+            "branche socket bornee en interne",
+    "READV": "c1 -- boucle sur `sys_read`, meme audit",
     "MUNMAP": "V14 -- Mm + TLB + caches SMP-safe, aucun writeback sous verrou externe",
     "MADVISE": "V14 -- Mm + TLB + clean-cache SMP-safe",
     "GETPID": "A1 lot 2 -- domaine CPU-local, aucune lecture de TASKS",

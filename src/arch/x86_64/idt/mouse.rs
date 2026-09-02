@@ -14,9 +14,8 @@ extern "x86-interrupt" fn mouse_interrupt_handler(stack: InterruptStackFrame) {
     if status & 0x20 != 0 {
         mouse::handle_byte(byte);
     } else {
-        // Defensive 8042 reroute. Only the keyboard fallback keeps its legacy
-        // BKL path; normal IRQ12 mouse traffic never enters it.
-        let _kernel = crate::kernel::smp_lock::enter();
+        // Reroutage defensif du 8042. Ce chemin de repli n'a plus besoin du
+        // gros verrou non plus : la file de scancodes porte le sien.
         keyboard::push_scancode(byte);
     }
 

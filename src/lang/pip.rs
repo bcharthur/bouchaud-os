@@ -354,7 +354,7 @@ fn unzip_into(zip: &[u8], site: usize, metadata: &mut String) -> Result<usize, (
 
 /// Cree les repertoires intermediaires et ecrit le fichier `rel` sous `base`.
 fn write_path(base: usize, rel: &str, data: &[u8]) -> bool {
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let mut dir = base;
     let mut parts = rel.split('/').peekable();
     while let Some(part) = parts.next() {
@@ -380,7 +380,7 @@ fn write_path(base: usize, rel: &str, data: &[u8]) -> bool {
 
 /// Cree `/usr/lib/python/site-packages` si besoin et renvoie son inode.
 pub fn ensure_site_packages() -> Option<usize> {
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let mut dir = 0usize;
     for part in ["usr", "lib", "python", "site-packages"] {
         dir = match fs.find_child(dir, part) {

@@ -2,47 +2,37 @@ impl Task {
     /// Cree une tache prete a demarrer en ring 3 avec la trame donnee.
     pub fn new(process: Arc<Process>, frame: TrapFrame) -> Box<Task> {
         let kstack = vec![0u8; KSTACK_SIZE];
-        // Sommet aligne 16 : l'ABI System V l'exige avant chaque `call`, et le
-        // stub d'entree syscall empile un nombre pair de quadmots.
         let kstack_top = (kstack.as_ptr() as u64 + KSTACK_SIZE as u64) & !0xF;
-        // Le tampon vit sur le tas : son adresse ne bouge pas quand la `Task`
-        // est deplacee dans son `Box`.
         let fpu = vec![0u8; 512 + 16];
         let fpu_area = (fpu.as_ptr() as u64 + 15) & !0xF;
-        // Etat FPU initial valide : une zone `fxsave` toute a zero donnerait
-        // MXCSR = 0, c'est-a-dire toutes les exceptions SSE demasquees — la
-        // premiere division flottante du programme leverait alors #XF.
         unsafe {
             let area = fpu_area as *mut u8;
-            core::ptr::copy_nonoverlapping(0x037Fu16.to_le_bytes().as_ptr(), area, 2); // FCW
-            core::ptr::copy_nonoverlapping(0x1F80u32.to_le_bytes().as_ptr(), area.add(24), 4); // MXCSR
+            core::ptr::copy_nonoverlapping(0x037Fu16.to_le_bytes().as_ptr(), area, 2);
+            core::ptr::copy_nonoverlapping(0x1F80u32.to_le_bytes().as_ptr(), area.add(24), 4);
             core::ptr::copy_nonoverlapping(0x0000_FFBFu32.to_le_bytes().as_ptr(), area.add(28), 4);
-            // MXCSR_MASK
         }
 
         let mut task = Box::new(Task {
             tid: alloc_tid(),
             process,
-            state: TaskState::Ready,
-            // Toute tache nait normale. C'est a elle de se declarer
-            // interactive — un programme qui ne demande rien ne doit pas
-            // pouvoir prendre le pas sur l'interface par accident.
-            priorite: Priorite::Normale,
+            state: EtatAtomique::neuf(TaskState::Ready),
+            priorite: PrioriteAtomique::neuve(Priorite::Normale),
             affinity_mask: 0,
-            runq_cpu: u8::MAX,
-            last_cpu: u8::MAX,
-            on_cpu: -1,
-            switching_out: false,
-            last_migration_ns: 0,
-            recent_runtime_ns: 0,
-            slice_start_ns: 0,
-            last_account_ns: 0,
-            user_cpu_ns: 0,
-            kernel_cpu_ns: 0,
-            cpu_ns: [0; MAX_CPUS],
-            in_kernel: false,
-            context_switches: 0,
-            migrations: 0,
+            runq_cpu: CoeurAtomique::neuf(u8::MAX),
+            last_cpu: CoeurAtomique::neuf(u8::MAX),
+            on_cpu: CoeurSigneAtomique::neuf(-1),
+            switching_out: DrapeauAtomique::neuf(false),
+            last_migration_ns: EcheanceAtomique::neuf(0),
+            recent_runtime_ns: EcheanceAtomique::neuf(0),
+            slice_start_ns: EcheanceAtomique::neuf(0),
+            ready_since_ns: EcheanceAtomique::neuf(0),
+            last_account_ns: EcheanceAtomique::neuf(0),
+            user_cpu_ns: EcheanceAtomique::neuf(0),
+            kernel_cpu_ns: EcheanceAtomique::neuf(0),
+            cpu_ns: [const { EcheanceAtomique::neuf(0) }; MAX_CPUS],
+            in_kernel: DrapeauAtomique::neuf(false),
+            context_switches: EcheanceAtomique::neuf(0),
+            migrations: EcheanceAtomique::neuf(0),
             frame,
             ctx: Context::default(),
             kstack,
@@ -51,72 +41,43 @@ impl Task {
             fpu_area,
             fs_base: 0,
             clear_child_tid: 0,
-            futex_key: 0,
-            wait_queue_key: 0,
-            wake_deadline_ns: 0,
-            waiting_for_child: false,
+            futex_key: EcheanceAtomique::neuf(0),
+            wait_queue_key: CleAtomique::neuf(0),
+            wake_deadline_ns: EcheanceAtomique::neuf(0),
+            waiting_for_child: DrapeauAtomique::neuf(false),
             fresh: true,
-            ticks_cpu: 0,
+            ticks_cpu: EcheanceAtomique::neuf(0),
             noyau: false,
             entree_noyau: None,
         });
-
-        // RFLAGS de depart : bit 1 reserve a 1, `IF` a 0. Le trampoline n'a
-        // pas besoin des interruptions — `resume_usermode` commence par un
-        // `cli` — et l'`iretq` qui l'acheve rendra a la tache le RFLAGS de
-        // sa trame ring 3.
         amorce_pile(&mut task, task_trampoline, 0x0000_0002);
         task
     }
 
-    /// Cree un fil noyau : meme ordonnancement, mais il execute `entree` en
-    /// ring 0 au lieu de partir en ring 3.
-    ///
-    /// `process` n'est la que pour les champs que tout le noyau consulte sans
-    /// se demander qui les porte (pid, table de descripteurs). Son espace
-    /// d'adressage n'est jamais active : [`install`] bascule sur celui du noyau
-    /// pour un fil noyau.
     pub fn new_kernel(process: Arc<Process>, entree: fn() -> !) -> Box<Task> {
-        // La trame ring 3 n'a aucun sens ici ; elle reste a zero et n'est jamais
-        // restauree, puisque le trampoline noyau ne fait pas d'`iretq`.
         let mut task = Task::new(process, TrapFrame::new_user(0, 0));
         task.noyau = true;
         task.affinity_mask = 1;
-        task.runq_cpu = 0;
-        task.last_cpu = 0;
+        task.runq_cpu.range(0);
+        task.last_cpu.range(0);
         task.entree_noyau = Some(entree);
-        // Un fil noyau demarre **interruptions actives** : rien ne les
-        // retablira pour lui plus tard. Sans `IF`, sa premiere attente
-        // s'arreterait sur un `hlt` que plus aucun tick ne pourrait lever.
         amorce_pile(&mut task, kernel_task_trampoline, 0x0000_0202);
         task
     }
 
-    /// Adresse de la zone `fxsave` (alignee 16, dans `self.fpu`).
-    fn fpu_ptr(&self) -> u64 {
-        self.fpu_area
-    }
+    fn fpu_ptr(&self) -> u64 { self.fpu_area }
 }
 
-/// Amorce de pile noyau : le premier `switch_context` vers cette tache depile
-/// six registres callee-saved et un RFLAGS, puis fait `ret` sur `trampoline`.
-/// La disposition doit etre le miroir exact des `push` de `switch_context`.
 fn amorce_pile(task: &mut Task, trampoline: extern "C" fn() -> !, rflags: u64) {
     unsafe {
         let mut sp = task.kstack_top as *mut u64;
-        sp = sp.sub(1);
-        *sp = trampoline as *const () as usize as u64; // adresse de retour
-        sp = sp.sub(1);
-        *sp = rflags;
-        for _ in 0..6 {
-            sp = sp.sub(1);
-            *sp = 0; // rbp, rbx, r12, r13, r14, r15
-        }
+        sp = sp.sub(1); *sp = trampoline as *const () as usize as u64;
+        sp = sp.sub(1); *sp = rflags;
+        for _ in 0..6 { sp = sp.sub(1); *sp = 0; }
         task.ctx.rsp = sp as u64;
     }
 }
 
-/// Masque des CPU logiques actuellement utilisables.
 fn online_affinity_mask() -> u64 {
     let online = smp::schedulable_cpus().max(1).min(MAX_CPUS).min(64);
     if online >= 64 { u64::MAX } else { (1u64 << online) - 1 }
@@ -128,13 +89,9 @@ fn allowed_on(task: &Task, cpu: usize) -> bool {
 }
 
 fn running_count_cpu(cpu: usize) -> usize {
-    tasks().iter()
-        .filter(|t| {
-            t.state != TaskState::Zombie
-                && t.on_cpu == cpu as i8
-                && !t.switching_out
-        })
-        .count()
+    tasks().iter().filter(|t| {
+        t.state != TaskState::Zombie && t.on_cpu == cpu as i8 && !t.switching_out.charge()
+    }).count()
 }
 
 fn queue_pressure(cpu_id: usize) -> usize {
@@ -143,18 +100,12 @@ fn queue_pressure(cpu_id: usize) -> usize {
         .unwrap_or(0)
 }
 
-/// Placement initial d'un THREAD. Le score combine pression de runqueue,
-/// nombre de taches deja running et charge mesuree. CPU0 recoit une petite
-/// penalite car il porte le desktop/PIC, sans devenir interdit au userland.
 fn choose_runq_cpu(mask: u64) -> u8 {
     let online = smp::schedulable_cpus().max(1).min(MAX_CPUS);
     let mut best_cpu = 0usize;
     let mut best_score = usize::MAX;
-
     for cpu_id in 0..online {
-        if cpu_id >= 64 || mask & (1u64 << cpu_id) == 0 {
-            continue;
-        }
+        if cpu_id >= 64 || mask & (1u64 << cpu_id) == 0 { continue; }
         let rq = queue_pressure(cpu_id);
         let running = running_count_cpu(cpu_id);
         let measured = cpu::load_percent_cpu(cpu_id) as usize;
@@ -163,71 +114,82 @@ fn choose_runq_cpu(mask: u64) -> u8 {
             .saturating_add(running.saturating_mul(16))
             .saturating_add(measured)
             .saturating_add(bsp_penalty);
-        if score < best_score {
-            best_score = score;
-            best_cpu = cpu_id;
-        }
+        if score < best_score { best_score = score; best_cpu = cpu_id; }
     }
     best_cpu as u8
 }
 
-/// Publish a Ready task exactly once to its owning physical runqueue and wake
-/// only that CPU when it is halted.
+/// Publish a Ready task exactly once to its owning physical runqueue.
+/// P0-NG1 additionally timestamps the ready edge and requests a safe-point on
+/// the target CPU. The target IPI is still sent only when that CPU is idle; a
+/// running CPU consumes `need_resched` at its next safe kernel boundary.
 fn publish_ready(index: usize) {
     if index >= tasks().len() || tasks()[index].state != TaskState::Ready
-        || tasks()[index].on_cpu >= 0
-        || tasks()[index].switching_out
-    {
-        return;
+        || tasks()[index].on_cpu >= 0 || tasks()[index].switching_out.charge()
+    { return; }
+
+    if tasks()[index].ready_since_ns == 0 {
+        tasks()[index].ready_since_ns.range(crate::kernel::timer::monotonic_ns());
     }
-    let target = if allowed_on(&tasks()[index], tasks()[index].runq_cpu as usize) {
-        tasks()[index].runq_cpu as usize
+    let target = if allowed_on(&tasks()[index], tasks()[index].runq_cpu.charge() as usize) {
+        tasks()[index].runq_cpu.charge() as usize
     } else {
         choose_runq_cpu(tasks()[index].affinity_mask) as usize
     };
-    tasks()[index].runq_cpu = target as u8;
+    tasks()[index].runq_cpu.range(target as u8);
     if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(target) {
-        crate::arch::x86_64::cpu_local::local(id).enqueue(index);
+        // L'IDENTITE, pas l'indice : un emplacement recycle ne doit pas
+        // heriter de l'entree laissee par son occupant precedent.
+        let Some(identite) = registre_id(index) else { return };
+        crate::arch::x86_64::cpu_local::local(id).enqueue(identite.en_mot());
+        crate::kernel::scheduler::preempt::request_cpu(target);
     }
+    // Seconde moitie du motif croise (voir `idle_enter`). La mise en file
+    // ci-dessus se termine par une liberation de verrou -- une simple ecriture
+    // sur x86 --, et `is_idle` est une lecture. Sans barriere, le processeur
+    // peut executer la lecture AVANT que l'ecriture ne quitte le tampon : nous
+    // lirions « pas idle » alors que le coeur s'endort, et lui lirait une file
+    // vide alors que nous venons de la remplir. Personne n'envoie l'IPI.
+    //
+    // Une lecture SeqCst ne suffirait pas : sur x86 elle reste un `mov` et ne
+    // vide pas le tampon d'ecriture. Il faut la barriere.
+    core::sync::atomic::fence(Ordering::SeqCst);
     if cpu::is_idle(target) { smp::reschedule_cpu(target); }
 }
 
-/// Ajoute une tache a la table et renvoie son indice. En SMP les indices ne
-/// bougent jamais : un slot zombie est recycle au lieu de compacter le Vec.
 pub fn register(mut task: Box<Task>) -> usize {
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Processus);
     let _kernel = smp_lock::enter();
-
     if task.noyau {
         task.affinity_mask = 1;
-        task.runq_cpu = 0;
-        task.last_cpu = 0;
+        task.runq_cpu.range(0);
+        task.last_cpu.range(0);
     } else {
         if task.affinity_mask == 0 {
             task.affinity_mask = online_affinity_mask();
         } else {
             task.affinity_mask &= online_affinity_mask();
-            if task.affinity_mask == 0 {
-                task.affinity_mask = online_affinity_mask();
-            }
+            if task.affinity_mask == 0 { task.affinity_mask = online_affinity_mask(); }
         }
-        if task.runq_cpu == u8::MAX || !allowed_on(&task, task.runq_cpu as usize) {
-            task.runq_cpu = choose_runq_cpu(task.affinity_mask);
+        if task.runq_cpu == u8::MAX || !allowed_on(&task, task.runq_cpu.charge() as usize) {
+            task.runq_cpu.range(choose_runq_cpu(task.affinity_mask));
         }
     }
-    task.on_cpu = -1;
-    task.switching_out = false;
+    task.on_cpu.range(-1);
+    task.switching_out.range(false);
 
-    let reuse = tasks().iter().position(|old| {
-        old.state == TaskState::Zombie && old.on_cpu < 0 && !old.switching_out
-    });
-    let index = if let Some(index) = reuse {
-        tasks()[index] = task;
-        index
-    } else {
-        let list = tasks();
-        list.push(task);
-        list.len() - 1
-    };
+    // Le registre choisit l'emplacement lui-meme, sous son propre verrou :
+    // c'est la SEULE section critique qui reste sur ce chemin. Le predicat dit
+    // ce qu'est un emplacement recyclable -- une tache morte, sur aucun coeur,
+    // et qui n'est pas en train de commuter. Une tache qui commute encore
+    // possede sa pile noyau ; la reecrire la ferait reprendre sur une autre.
+    let identite = registre_ajoute(task, |ancienne| {
+        ancienne.state == TaskState::Zombie
+            && ancienne.on_cpu < 0
+            && !ancienne.switching_out.charge()
+    })
+    .expect("registre des taches plein");
+    let index = identite.emplacement();
 
     {
         let registered = &tasks()[index];
@@ -235,69 +197,36 @@ pub fn register(mut task: Box<Task>) -> usize {
         let metadata = process.metadata.lock();
         crate::serial_println!(
             "[SMP-TASK] idx={} tid={} pid={} rq={} last={} aff={:#x} on={} kernel={} prio={:?} name={}",
-            index,
-            registered.tid,
-            process.pid,
-            registered.runq_cpu,
-            registered.last_cpu,
-            registered.affinity_mask,
-            registered.on_cpu,
-            registered.noyau,
-            registered.priorite,
-            metadata.name.as_str(),
+            index, registered.tid, process.pid, registered.runq_cpu,
+            registered.last_cpu, registered.affinity_mask, registered.on_cpu,
+            registered.noyau, registered.priorite, metadata.name.as_str(),
         );
     }
-
     publish_ready(index);
     index
 }
 
-/// Indice d'une tache par son tid.
-fn index_of(tid: u32) -> Option<usize> {
-    tasks().iter().position(|t| t.tid == tid)
+fn index_of(tid: u32) -> Option<usize> { tasks().iter().position(|t| t.tid == tid) }
+/// Une tache par son identifiant de fil, en lecture PARTAGEE.
+pub fn by_tid(tid: u32) -> Option<GardeLectureTache> {
+    registre_tache(index_of(tid)?)
 }
-
-/// Tache par tid.
-pub fn by_tid(tid: u32) -> Option<&'static mut Task> {
-    let index = index_of(tid)?;
-    Some(unsafe { &mut *(&mut **tasks().get_mut(index).unwrap() as *mut Task) })
-}
-
-/// Nombre de taches vivantes (non zombies).
 pub fn live_count() -> usize {
-    tasks()
-        .iter()
-        .filter(|t| t.state != TaskState::Zombie)
-        .count()
+    tasks().iter().filter(|t| t.state != TaskState::Zombie).count()
 }
-
-/// Nombre de taches pretes.
-fn ready_count() -> usize {
-    tasks().iter().filter(|t| t.state == TaskState::Ready).count()
-}
-
+fn ready_count() -> usize { tasks().iter().filter(|t| t.state == TaskState::Ready).count() }
 fn ready_count_cpu(cpu: usize) -> usize {
     tasks().iter().filter(|t| {
-        t.state == TaskState::Ready
-            && t.on_cpu < 0
-            && !t.switching_out
-            && t.runq_cpu as usize == cpu
-            && allowed_on(t, cpu)
+        t.state == TaskState::Ready && t.on_cpu < 0 && !t.switching_out.charge()
+            && t.runq_cpu.charge() as usize == cpu && allowed_on(t, cpu)
     }).count()
 }
-
 fn stealable_count_cpu(cpu: usize) -> usize {
     tasks().iter().filter(|t| {
-        t.state == TaskState::Ready
-            && t.on_cpu < 0
-            && !t.switching_out
-            && !t.noyau
-            && t.runq_cpu as usize != cpu
-            && allowed_on(t, cpu)
+        t.state == TaskState::Ready && t.on_cpu < 0 && !t.switching_out.charge() && !t.noyau
+            && t.runq_cpu.charge() as usize != cpu && allowed_on(t, cpu)
     }).count()
 }
-
 fn running_count() -> usize {
     tasks().iter().filter(|t| t.state != TaskState::Zombie && t.on_cpu >= 0).count()
 }
-

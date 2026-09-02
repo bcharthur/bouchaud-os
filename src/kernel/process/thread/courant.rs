@@ -27,16 +27,51 @@ fn rsp_courant_passation() -> u64 {
     rsp
 }
 
+/// Tente d'ouvrir une transition du scheduler sur le CPU local.
+///
+/// Une IRQ peut interrompre `schedule()` entre l'election et le changement de
+/// pile. Elle ne doit alors ni elire une seconde tache ni ecraser
+/// `SWITCH_PENDING`. Le BKL rendait ce cas impossible en serialisant tout le
+/// noyau ; cette porte atomique fournit exactement la propriete locale dont le
+/// scheduler a besoin, sans bloquer les autres CPU.
+#[inline]
+fn commence_transition_ordonnanceur() -> bool {
+    let cpu = local_cpu();
+    if TRANSITION_ORDONNANCEUR[cpu]
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        TRANSITIONS_ORDONNANCEUR_REFUSEES.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    crate::kernel::sync::lockdep::before_acquire(LockClass::SchedulerTransition);
+    crate::kernel::sync::lockdep::acquired(LockClass::SchedulerTransition);
+    TRANSITIONS_ORDONNANCEUR.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+/// Rend la porte locale si cette continuation est celle qui termine la
+/// transition. L'appel est idempotent : plusieurs chemins de reprise peuvent
+/// verifier une passation deja acquittee.
+#[inline]
+fn termine_transition_ordonnanceur() {
+    let cpu = local_cpu();
+    if TRANSITION_ORDONNANCEUR[cpu].swap(false, Ordering::AcqRel) {
+        crate::kernel::sync::lockdep::released(LockClass::SchedulerTransition);
+    }
+}
+
 /// Prepare la sortie d'une tache SANS la publier.
 ///
-/// Le BKL est tenu. La tache reste `on_cpu == cpu` et n'est pas mise en file.
-/// C'est volontaire : `switch_context` sauvegarde d'abord son RSP puis change
-/// de pile ; entre ces deux instructions, l'ancien CPU utilise encore la pile.
+/// La transition locale du scheduler est tenue. La tache reste
+/// `on_cpu == cpu` et n'est pas mise en file. C'est volontaire :
+/// `switch_context` sauvegarde d'abord son RSP puis change de pile ; entre ces
+/// deux instructions, l'ancien CPU utilise encore la pile.
 #[inline]
 fn prepare_switch_handoff(index: usize, task: &mut Task, cpu: usize) {
     debug_assert!(
-        smp_lock::held_by_current_cpu(),
-        "task: preparation de passation sans BKL"
+        TRANSITION_ORDONNANCEUR[cpu].load(Ordering::Acquire),
+        "task: preparation de passation hors transition scheduler"
     );
     assert_eq!(
         task.on_cpu,
@@ -45,7 +80,7 @@ fn prepare_switch_handoff(index: usize, task: &mut Task, cpu: usize) {
         task.tid
     );
     assert!(
-        !task.switching_out,
+        !task.switching_out.charge(),
         "task: double preparation de passation tid={}",
         task.tid
     );
@@ -56,7 +91,7 @@ fn prepare_switch_handoff(index: usize, task: &mut Task, cpu: usize) {
         Ordering::AcqRel,
         Ordering::Acquire,
     ) {
-        Ok(_) => task.switching_out = true,
+        Ok(_) => task.switching_out.range(true),
         Err(previous) => panic!(
             "task: passation precedente non terminee cpu={} pending={} nouveau={}",
             cpu, previous, index
@@ -74,12 +109,15 @@ fn complete_switch_handoff() {
     let cpu = local_cpu();
     let outgoing = SWITCH_PENDING[cpu].load(Ordering::Acquire);
     if outgoing == NO_TASK {
+        // Une transition noyau -> tache n'a pas de sortante dans le registre,
+        // mais elle doit tout de meme rendre la porte depuis la pile entrante.
+        termine_transition_ordonnanceur();
         return;
     }
 
     debug_assert!(
-        smp_lock::held_by_current_cpu(),
-        "task: completion de passation sans BKL"
+        TRANSITION_ORDONNANCEUR[cpu].load(Ordering::Acquire),
+        "task: completion de passation hors transition scheduler"
     );
     assert!(
         outgoing < tasks().len(),
@@ -89,10 +127,10 @@ fn complete_switch_handoff() {
     );
 
     let publish = {
-        let task = &mut tasks()[outgoing];
+        let task = &tasks()[outgoing];
 
         assert!(
-            task.switching_out,
+            task.switching_out.charge(),
             "task: passation pending sans switching_out tid={}",
             task.tid
         );
@@ -119,10 +157,10 @@ fn complete_switch_handoff() {
             );
         }
 
-        task.last_cpu = cpu as u8;
-        task.runq_cpu = cpu as u8;
-        task.on_cpu = -1;
-        task.switching_out = false;
+        task.last_cpu.range(cpu as u8);
+        task.runq_cpu.range(cpu as u8);
+        task.on_cpu.range(-1);
+        task.switching_out.range(false);
         task.state == TaskState::Ready
     };
 
@@ -131,6 +169,7 @@ fn complete_switch_handoff() {
     if publish {
         publish_ready(outgoing);
     }
+    termine_transition_ordonnanceur();
 }
 
 /// PID du programme lance au premier plan par [`run`], 0 si aucun.
@@ -172,13 +211,59 @@ fn descend_de(pid: u32, racine: u32) -> bool {
     false
 }
 
-fn tasks() -> &'static mut Vec<Box<Task>> {
-    unsafe {
-        if TASKS.is_none() {
-            TASKS = Some(Vec::new());
-        }
-        TASKS.as_mut().unwrap()
+/// Vue du registre des taches conservant les usages du `Vec` d'origine.
+///
+/// `tasks()` rendait `&'static mut Vec<Box<Task>>` : la table entiere, en
+/// acces exclusif, a qui la demandait. Rien ne la protegeait -- c'est le gros
+/// verrou, pris par tous les appelants, qui rendait l'ensemble sur.
+///
+/// Cette vue s'appuie sur `registre`, dont les emplacements ont une adresse
+/// stable et se lisent sans verrou. Elle garde les memes methodes pour que la
+/// migration se fasse sous-systeme par sous-systeme plutot qu'en une fois : un
+/// changement de cette taille, fait d'un coup, ne se relit pas.
+pub struct VueRegistre {
+    lecture: RegistreLecture,
+}
+
+impl VueRegistre {
+    #[inline]
+    pub fn len(&self) -> usize { registre_longueur() }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool { self.len() == 0 }
+
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = &Task> {
+        (0..self.len()).filter_map(|index| {
+            registre_tache_sous_lecture(&self.lecture, index)
+        })
     }
+
+    #[inline]
+    pub fn get(&self, index: usize) -> Option<&Task> {
+        registre_tache_sous_lecture(&self.lecture, index)
+    }
+
+    /// Acces EXCLUSIF, pris en exclusion mutuelle. Remplace l'ancien
+    /// `get_mut`, qui fabriquait un `&mut` depuis une lecture partagee.
+    #[inline]
+    pub fn exclusif(&self, index: usize) -> Option<GardeTache> {
+        registre_exclusif_attente(index)
+    }
+}
+
+impl core::ops::Index<usize> for VueRegistre {
+    type Output = Task;
+    #[inline]
+    fn index(&self, index: usize) -> &Task {
+        registre_tache_sous_lecture(&self.lecture, index)
+            .expect("registre: indice de tache invalide")
+    }
+}
+
+#[inline]
+fn tasks() -> VueRegistre {
+    VueRegistre { lecture: RegistreLecture::acquire() }
 }
 
 /// Table des processus.
@@ -231,14 +316,43 @@ pub fn running_user_cpu_mask() -> u64 {
 }
 
 /// Tache courante du CPU local.
-pub fn current() -> &'static mut Task {
+/// La tache courante de ce CPU, en lecture PARTAGEE.
+///
+/// Rendait `&'static mut Task`. Ce n'etait pas tenable : n'importe quel
+/// appelant obtenait une reference exclusive sur une tache que d'autres coeurs
+/// observent -- l'ordonnanceur qui l'elit, le reveilleur qui la debloque.
+///
+/// Tous les champs qu'un autre coeur touche sont atomiques : les ecrire par une
+/// reference partagee est correct, et c'est ce que font tous les appelants. Le
+/// contenu prive -- pile noyau, contexte, zone FPU -- ne s'atteint plus par ici.
+pub fn current() -> &'static Task {
     let index = current_index_raw();
     assert!(index != NO_TASK, "task: aucune tache active sur ce CPU");
-    unsafe { &mut *(&mut **tasks().get_mut(index).unwrap() as *mut Task) }
+    // Le recycleur exige `on_cpu < 0`; la tache courante est donc stable tant
+    // que cette continuation s'execute.
+    let pointeur = EMPLACEMENTS[index].tache.load(Ordering::Acquire);
+    assert!(!pointeur.is_null(), "registre: tache courante absente");
+    unsafe { &*pointeur }
+}
+
+/// Acces EXCLUSIF au contenu prive de la tache courante.
+///
+/// Pour les champs qui ne sont pas atomiques -- base FS, adresse de
+/// `clear_child_tid`, trame de retour, drapeau de fraicheur. Ce sont des
+/// donnees privees a la tache, ecrites par le coeur qui l'execute.
+///
+/// L'exclusivite est PRISE, pas supposee. Elle n'est jamais contestee en
+/// pratique -- la tache est sur ce coeur, et le recyclage exige le meme
+/// drapeau -- mais la prendre est ce qui rend le `&mut` legitime plutot que
+/// simplement plausible.
+pub fn current_exclusif() -> GardeTache {
+    let index = current_index_raw();
+    assert!(index != NO_TASK, "task: aucune tache active sur ce CPU");
+    registre_exclusif_attente(index).expect("registre: tache courante absente")
 }
 
 /// Tache courante, si elle existe.
-pub fn try_current() -> Option<&'static mut Task> {
+pub fn try_current() -> Option<&'static Task> {
     if in_user_task() {
         Some(current())
     } else {
@@ -248,7 +362,10 @@ pub fn try_current() -> Option<&'static mut Task> {
 
 /// Processus de la tache courante.
 pub fn current_process() -> Arc<Process> {
-    let _kernel = smp_lock::enter();
+    // Sans gros verrou. Le champ `process` d'une tache est pose a sa creation
+    // et ne change plus ; l'emplacement, lui, ne peut pas etre recycle sous nos
+    // pieds : le recyclage exige `on_cpu < 0`, et cette tache est justement
+    // celle qui tourne. Cloner un `Arc` est atomique par construction.
     current().process.clone()
 }
 
@@ -316,12 +433,13 @@ pub struct IdentiteCourante {
 /// `per_cpu().current = 0`) AVANT de quitter la pile de la tache. Un CPU au
 /// repos rend donc `None`, il ne rend pas l'identite du dernier occupant.
 ///
-/// # Pourquoi pas un `&'static mut Task`
+/// # Pourquoi une identite copiee, et non une reference
 ///
-/// Parce qu'il ne serait pas sur. `register` recycle un emplacement zombie par
-/// `tasks()[index] = task`, ce qui **detruit** l'ancienne `Box<Task>` : toute
-/// reference qui lui aurait survecu pendrait dans le vide. La regle est donc
-/// qu'aucune reference vers une `Task` ne sorte de ce module par ce chemin.
+/// Parce qu'un emplacement se RECYCLE. Une reference conservee designerait
+/// l'emplacement, pas la tache : apres recyclage elle decrirait la suivante,
+/// qui n'a rien demande. Une identite copiee ne peut pas mentir de cette
+/// facon -- et quand il faut retrouver la tache, `TacheId` porte la
+/// generation, qui refuse l'ancienne incarnation.
 pub fn identite_courante() -> Option<IdentiteCourante> {
     let identite = interrupts::without_interrupts(|| {
         let cpu = local_cpu();
@@ -390,9 +508,8 @@ pub fn cpu_time_ms(pid: u32) -> u64 {
     let mut total = 0u64;
     for task in tasks().iter() {
         if task.process.pid == pid {
-            total = total.saturating_add(task.ticks_cpu);
+            total = total.saturating_add(task.ticks_cpu.charge());
         }
     }
     total * (1000 / crate::kernel::timer::TICKS_PER_SECOND).max(1)
 }
-

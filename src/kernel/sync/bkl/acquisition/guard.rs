@@ -40,8 +40,8 @@ impl Drop for KernelGuard {
         let _irq = LocalIrqGuard::acquire();
         let release_cpu = cpu();
         {
-            let owner = OWNER.load(Ordering::Relaxed);
-            let depth = DEPTH[release_cpu].load(Ordering::Relaxed);
+            let owner = owner_load(Ordering::Relaxed);
+            let depth = depth_load(release_cpu, Ordering::Relaxed);
             enregistreur::note(
                 enregistreur::GUARD_DROP,
                 release_cpu,

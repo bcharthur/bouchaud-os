@@ -782,7 +782,10 @@ pub fn blend_rgb(x: usize, y: usize, rgb: u32, alpha: u8) {
     let buf = back();
     if buf.is_empty() { return; }
     let idx = y * WIDTH + x;
-    if alpha >= 255 { buf[idx] = rgb & 0x00ff_ffff; return; }
+    // `alpha` est un u8 : `>= 255` ne peut valoir que `== 255`. Clippy le
+    // refuse a juste titre -- une comparaison dont un cote est toujours faux
+    // se lit comme une borne, alors que c'est une egalite.
+    if alpha == 255 { buf[idx] = rgb & 0x00ff_ffff; return; }
     let a = alpha as u32;
     let inv = 255 - a;
     let dst = buf[idx];
@@ -830,7 +833,10 @@ pub fn blend_span(x: usize, y: usize, rgb: u32, couverture: &[u8], gras: bool) {
 /// Melange source sur destination a l'index deja verifie.
 #[inline]
 fn melange_pixel(buf: &mut [u32], idx: usize, rgb: u32, alpha: u8) {
-    if alpha >= 255 { buf[idx] = rgb & 0x00ff_ffff; return; }
+    // `alpha` est un u8 : `>= 255` ne peut valoir que `== 255`. Clippy le
+    // refuse a juste titre -- une comparaison dont un cote est toujours faux
+    // se lit comme une borne, alors que c'est une egalite.
+    if alpha == 255 { buf[idx] = rgb & 0x00ff_ffff; return; }
     let a = alpha as u32;
     let inv = 255 - a;
     let dst = buf[idx];

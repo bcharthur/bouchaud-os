@@ -189,7 +189,17 @@ pub struct CpuLocal {
     // `SpinLockIrq` masque les interruptions pour la duree de la section
     // critique. L'IRQ ne disparait pas : elle reste en attente dans l'APIC
     // local et est delivree des le relachement. Aucun reveil n'est perdu.
-    run_queue: SpinLockIrq<Vec<usize>>,
+    // BOUCHAUD_C1_FILE_GENERATIONNELLE_V1
+    //
+    // La file portait des INDICES d'emplacement. Un emplacement se recycle :
+    // une entree laissee par une tache morte designait alors la tache
+    // suivante, qui n'a jamais demande a etre ordonnancee. C'est le probleme
+    // ABA, et il se manifeste comme une tache fantome qui prend des quantums.
+    //
+    // Elle porte desormais des IDENTITES empaquetees -- emplacement plus
+    // generation. Le consommateur refuse celles dont la generation ne
+    // correspond plus.
+    run_queue: SpinLockIrq<Vec<u64>>,
 
     context_switches: AtomicU64,
     migrations: AtomicU64,
@@ -267,29 +277,49 @@ impl CpuLocal {
         self.preempt_count.load(Ordering::Relaxed)
     }
 
-    pub fn enqueue(&self, task: usize) {
+    /// Met une IDENTITE en file. `identite` est un `TacheId` empaquete.
+    pub fn enqueue(&self, identite: u64) {
         let mut queue = self.run_queue.lock();
-        if !queue.contains(&task) {
-            queue.push(task);
+        if !queue.contains(&identite) {
+            queue.push(identite);
         }
     }
 
-    pub fn dequeue(&self) -> Option<usize> {
+    pub fn dequeue(&self) -> Option<u64> {
         let mut queue = self.run_queue.lock();
         if queue.is_empty() { None } else { Some(queue.remove(0)) }
     }
 
-    pub fn steal(&self) -> Option<usize> {
+    pub fn steal(&self) -> Option<u64> {
         self.run_queue.lock().pop()
     }
 
-    pub fn remove(&self, task: usize) -> bool {
+    pub fn remove(&self, task: u64) -> bool {
         let mut queue = self.run_queue.lock();
         let Some(index) = queue.iter().position(|candidate| *candidate == task) else {
             return false;
         };
         queue.remove(index);
         true
+    }
+
+    /// La file contient-elle cette identite ? `None` si elle est verrouillee.
+    ///
+    /// `try_lock` et non `lock` : cette sonde s'execute depuis l'IRQ du timer,
+    /// qui peut avoir interrompu le porteur de ce meme verrou sur ce meme CPU.
+    /// Attendre y serait un interblocage certain ; ne pas conclure est la
+    /// seule reponse honnete.
+    pub fn file_contient(&self, identite: u64) -> Option<bool> {
+        self.run_queue.try_lock().map(|file| file.contains(&identite))
+    }
+
+    /// La file a-t-elle du travail ? `None` si elle est verrouillee.
+    ///
+    /// L'appelant doit traiter `None` comme « peut-etre du travail » : perdre
+    /// un `hlt` ne coute qu'un tour de boucle, perdre un reveil fige la
+    /// machine. L'incertitude se resout donc toujours du meme cote.
+    pub fn file_non_vide_essai(&self) -> Option<bool> {
+        self.run_queue.try_lock().map(|file| !file.is_empty())
     }
 
     pub fn run_queue_len(&self) -> usize {

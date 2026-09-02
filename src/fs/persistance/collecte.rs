@@ -1,23 +1,39 @@
 /// Tous les fichiers sous `/persist`, chemins relatifs a cette racine.
+///
+/// Le verrou RAMFS est pris UNE SEULE FOIS pour tout le parcours.  La version
+/// precedente gardait `systeme = fs()` ici puis rappelait `fs()` dans
+/// `collecte()`. Depuis que RAMFS possede son propre SpinLock non reentrant,
+/// le premier sous-repertoire de `/persist` provoquait donc une acquisition
+/// recursive sur le meme CPU (observee pendant `fsync`, syscall 74).
 fn rassemble() -> Vec<Entree> {
     let systeme = fs();
     let racine = match systeme.resolve(RACINE, 0) {
         Some(idx) => idx,
         None => return Vec::new(),
     };
+
     let mut entrees = Vec::new();
-    collecte(racine, &String::new(), &mut entrees);
+    collecte_sous_garde(&systeme, racine, &String::new(), &mut entrees);
     entrees
 }
 
-fn collecte(dossier: usize, prefixe: &str, entrees: &mut Vec<Entree>) {
-    let systeme = fs();
-    // Les indices sont releves d'abord : la collecte n'ecrit pas, mais elle
-    // emprunte le systeme de fichiers a chaque tour, et garder un iterateur
-    // ouvert par-dessus serait fragile.
+/// Parcours recursif d'un instantane coherent du RAMFS.
+///
+/// Cette fonction ne prend JAMAIS le verrou elle-meme : elle emprunte le
+/// `FileSystem` deja protege par l'appelant. C'est a la fois plus sur et plus
+/// coherent : toute une collecte de persistance voit le meme etat du RAMFS.
+fn collecte_sous_garde(
+    systeme: &crate::fs::ramfs::FileSystem,
+    dossier: usize,
+    prefixe: &str,
+    entrees: &mut Vec<Entree>,
+) {
+    // Relever d'abord les indices permet de ne conserver aucune reference vers
+    // un Node au travers de l'appel recursif.
     let mut enfants = Vec::new();
     for index in 0..systeme.nodes.len() {
-        if systeme.nodes[index].used && systeme.nodes[index].parent == dossier
+        if systeme.nodes[index].used
+            && systeme.nodes[index].parent == dossier
             && index != dossier
         {
             enfants.push(index);
@@ -31,17 +47,25 @@ fn collecte(dossier: usize, prefixe: &str, entrees: &mut Vec<Entree>) {
         } else {
             format!("{}/{}", prefixe, nom)
         };
+
         match systeme.nodes[index].kind {
-            NodeKind::Dir => collecte(index, &chemin, entrees),
+            NodeKind::Dir => {
+                collecte_sous_garde(systeme, index, &chemin, entrees);
+            }
             NodeKind::File => {
                 let longueur = systeme.nodes[index].content_len();
                 if longueur == 0 || chemin.len() >= CHEMIN_MAX {
                     continue;
                 }
-                // Le contenu reste ou il est : `synchronise` le lit dans le
-                // RAMFS au moment d'ecrire, et pour les entrees inchangees il
-                // ne le lit que pour en calculer le sceau.
-                entrees.push(Entree { chemin, noeud: index, longueur });
+
+                // Le contenu reste dans RAMFS. `rassemble_snapshot` le recopie
+                // ensuite apres que cette collecte de metadonnees a rendu son
+                // garde. Aucun appel a `fs()` n'est imbrique.
+                entrees.push(Entree {
+                    chemin,
+                    noeud: index,
+                    longueur,
+                });
             }
         }
     }
@@ -49,7 +73,7 @@ fn collecte(dossier: usize, prefixe: &str, entrees: &mut Vec<Entree>) {
 
 /// Cree (dossiers compris) puis remplit un fichier sous `/persist`.
 fn depose(racine: usize, chemin: &str, contenu: &[u8]) -> bool {
-    let systeme = fs();
+    let mut systeme = fs();
     let mut parent = racine;
     let mut morceaux = chemin.split('/').filter(|m| !m.is_empty()).peekable();
 
@@ -64,6 +88,7 @@ fn depose(racine: usize, chemin: &str, contenu: &[u8]) -> bool {
             };
             return systeme.write_node_bytes(noeud, contenu);
         }
+
         parent = match systeme.find_child(parent, morceau) {
             Some(idx) => idx,
             None => match systeme.mkdir_at(parent, morceau) {
@@ -72,5 +97,6 @@ fn depose(racine: usize, chemin: &str, contenu: &[u8]) -> bool {
             },
         };
     }
+
     false
 }

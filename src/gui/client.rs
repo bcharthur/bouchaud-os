@@ -84,7 +84,8 @@ impl Client {
         let mut prepare = move |processus: &task::Process| -> Vec<String> {
             processus.metadata.lock().ecran = Some(ecran);
             let mut files = processus.files.lock();
-            let fd_surface = files.insert(FileDesc::new(FdKind::File(surface_node)));
+            let fd_surface =
+                files.insert(FileDesc::fichier_partage_inscriptible(surface_node));
             let fd_gui = files.insert(FileDesc::new(FdKind::SocketPair(
                 canal_client.clone(),
                 canal_wm.clone(),

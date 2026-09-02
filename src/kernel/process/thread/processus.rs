@@ -41,10 +41,19 @@ impl Mm {
     }
 }
 
-pub struct FileTable { inner: SpinLock<FdTable> }
+/// La table des descripteurs d'un processus.
+///
+/// Elle porte le rang `FdTable`, en amont de `Vfs` : un appel systeme resout
+/// son descripteur PUIS touche le systeme de fichiers. L'ordre inverse existait
+/// -- `write`, `openat` et `getdents` tenaient le RAMFS pendant qu'ils
+/// reportaient un offset -- et seul le gros verrou empechait les deux sens de
+/// se croiser. Le rang rend l'inversion detectable sans attendre l'entrelacement.
+pub struct FileTable { inner: RankedSpinLock<FdTable> }
 impl FileTable {
-    pub fn new(table: FdTable) -> Self { Self { inner: SpinLock::new(table) } }
-    pub fn lock(&self) -> SpinLockGuard<'_, FdTable> { self.inner.lock() }
+    pub fn new(table: FdTable) -> Self {
+        Self { inner: RankedSpinLock::new(LockClass::FdTable, table) }
+    }
+    pub fn lock(&self) -> RankedSpinLockGuard<'_, FdTable> { self.inner.lock() }
 }
 
 pub struct ProcessMetadata {
@@ -219,6 +228,7 @@ impl Drop for Process {
     /// mort brutale — un `SIGKILL`, une faute de page fatale, un `exit` sans
     /// menage. Sans lui, tuer un renderer suffirait a faire fuir ses surfaces.
     fn drop(&mut self) {
+        crate::kernel::security::policy::forget(self.pid);
         let (pml4, clean, shared) = {
             let mut mm = self.mm.lock();
             let pml4 = mm.space.pml4();

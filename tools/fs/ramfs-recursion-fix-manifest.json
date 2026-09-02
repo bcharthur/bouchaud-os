@@ -1,0 +1,12 @@
+{
+  "overlay": "bouchaud-os-chantier-7-v1.1-ramfs-recursion-fix",
+  "base_runtime": "chantier-7 native ABI/IPC v1 on c11",
+  "root_cause": "fsync -> persistance::synchronise -> rassemble -> collecte recursively reacquired ramfs::FS SpinLock",
+  "replaces": [
+    "src/fs/persistance/collecte.rs"
+  ],
+  "adds": [
+    "tools/fs/verifie_collecte_ramfs.py"
+  ],
+  "expected_runtime_effect": "no recursive RAMFS SpinLock acquisition during fsync persistence traversal"
+}

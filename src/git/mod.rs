@@ -65,14 +65,14 @@ fn short_sha(b: &[u8; 20]) -> String { hex40(b)[..7].to_string() }
 const GIT_ROOT: &str = ".git-repos";   // sous la racine RAMFS
 
 fn ensure_git_root() -> Option<usize> {
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     if let Some(idx) = fs.find_child(0, GIT_ROOT) { return Some(idx); }
     fs.mkdir_at(0, GIT_ROOT).ok()
 }
 
 fn get_or_create_repo(name: &str) -> Option<usize> {
     let root = ensure_git_root()?;
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     if let Some(idx) = fs.find_child(root, name) { return Some(idx); }
     fs.mkdir_at(root, name).ok()
 }
@@ -91,7 +91,7 @@ fn read_child(dir_idx: usize, name: &str) -> String {
 }
 
 fn write_child(dir_idx: usize, name: &str, content: &str) {
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     if let Ok(fidx) = fs.touch_at(dir_idx, name) {
         fs.write_node(fidx, content);
     }

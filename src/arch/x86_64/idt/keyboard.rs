@@ -6,8 +6,8 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(stack: InterruptStackFrame)
     let data = unsafe { ports::inb(0x60) };
 
     if status & 0x20 == 0 {
-        // Keyboard path unchanged for V7.
-        let _kernel = crate::kernel::smp_lock::enter();
+        // Plus de gros verrou : la file de scancodes a le sien, un
+        // `SpinLockIrq` dont la section critique fait quelques instructions.
         keyboard::push_scancode(data);
     } else {
         // 8042 can route an auxiliary byte through IRQ1. Keep that mouse byte

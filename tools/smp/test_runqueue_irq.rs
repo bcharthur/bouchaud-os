@@ -258,8 +258,13 @@ fn la_re_entree_est_detectee_des_le_premier_niveau() {
 fn la_file_d_execution_reste_un_verrou_masquant() {
     const SOURCE: &str = include_str!("../../src/arch/x86_64/cpu_local.rs");
 
+    // On epingle le TYPE DE VERROU, pas le type d'element. La file porte
+    // desormais des identites generationnelles (`Vec<u64>`) et non des indices
+    // nus ; ce changement-la est voulu, et epingler la declaration entiere
+    // faisait echouer le test pour une raison qui n'a rien a voir avec la
+    // regle qu'il protege.
     assert!(
-        SOURCE.contains("run_queue: SpinLockIrq<Vec<usize>>"),
+        SOURCE.contains("run_queue: SpinLockIrq<"),
         "la file d'execution doit rester un SpinLockIrq : elle est atteignable \
          depuis l'IRQ 8042 via le reveil du compositeur"
     );

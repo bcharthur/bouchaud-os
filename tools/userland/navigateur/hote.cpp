@@ -1410,12 +1410,16 @@ void PontFenetre::traite(uint16_t genre, const unsigned char *charge, size_t tai
         // PS/2 suit Shift, Ctrl, Alt et AltGr et le champ n'est plus toujours
         // nul. Les valeurs sont nommees des deux cotes, et la barriere du
         // protocole verifie qu'elles concordent.
+        // `Modificateur` vit dans `namespace protocole` ; ce pont est dans le
+        // namespace anonyme. Sans qualification, la compilation echoue --
+        // « `Modificateur` has not been declared » -- et c'est ce qui laissait
+        // le job `qt pixel` rouge.
         int qtMods = 0;
-        if (modificateurs & Modificateur::ModShift)
+        if (modificateurs & protocole::Modificateur::ModShift)
             qtMods |= Qt::ShiftModifier;
-        if (modificateurs & Modificateur::ModCtrl)
+        if (modificateurs & protocole::Modificateur::ModCtrl)
             qtMods |= Qt::ControlModifier;
-        if (modificateurs & Modificateur::ModAlt)
+        if (modificateurs & protocole::Modificateur::ModAlt)
             qtMods |= Qt::AltModifier;
         appelle("touche", "(isi)", qtKey, texte.toUtf8().constData(), qtMods);
         if (g_toile)

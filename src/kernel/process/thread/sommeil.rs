@@ -74,8 +74,8 @@ pub fn sleep_ticks(ticks: u64) {
     let deadline = crate::kernel::timer::monotonic_ns().saturating_add(duration_ns);
     {
         let task = current();
-        task.wake_deadline_ns = deadline;
-        task.state = TaskState::Blocked;
+        task.wake_deadline_ns.range(deadline);
+        task.state.range(TaskState::Blocked);
     }
     arme_echeance(deadline);
 
@@ -89,10 +89,9 @@ pub fn sleep_ticks(ticks: u64) {
     while crate::kernel::timer::monotonic_ns() < deadline {
         // schedule() fait deja HLT si la tache est bloquee et seule.
         schedule();
-        let ready = {
-            let _kernel = smp_lock::enter();
-            current().state == TaskState::Ready
-        };
+        // Meme lecture atomique que la boucle d'attente detachee : le gros
+        // verrou etait pris et relache a chaque tour pour un seul chargement.
+        let ready = current().state == TaskState::Ready;
         if ready {
             break;
         }
@@ -100,8 +99,8 @@ pub fn sleep_ticks(ticks: u64) {
     smp_lock::resume_after_schedule(outer_depth);
     verifie_profondeur_rendue("sleep_ticks", profondeur_entree);
     let task = current();
-    task.wake_deadline_ns = 0;
-    task.state = TaskState::Ready;
+    task.wake_deadline_ns.range(0);
+    task.state.range(TaskState::Ready);
 }
 
 /// Reveille les taches dont le sommeil est echu, et declenche les `SIGALRM`.
@@ -145,7 +144,7 @@ pub(crate) fn arme_echeance(deadline_ns: u64) {
 fn recalcule_echeance() {
     let mut minimum = crate::kernel::echeances::JAMAIS;
     for index in 0..tasks().len() {
-        let echeance = tasks()[index].wake_deadline_ns;
+        let echeance = tasks()[index].wake_deadline_ns.charge();
         if tasks()[index].state == TaskState::Blocked && echeance != 0 && echeance < minimum {
             minimum = echeance;
         }
@@ -154,7 +153,8 @@ fn recalcule_echeance() {
     // et non comparer les deux tels quels, ce qui est precisement l'erreur que
     // `fire_alarms` portait.
     let par_tick = 1_000_000_000 / crate::kernel::timer::TICKS_PER_SECOND;
-    for (_, echeance_ticks) in alarms().iter() {
+    let alarmes = ALARMES.lock();
+    for (_, echeance_ticks) in alarmes.iter() {
         let echeance = echeance_ticks.saturating_mul(par_tick);
         if echeance < minimum {
             minimum = echeance;
@@ -166,17 +166,18 @@ fn recalcule_echeance() {
 fn wake_sleepers() {
     let now = crate::kernel::timer::monotonic_ns();
     // Le raccourci : une charge atomique au lieu d'un balayage complet.
-    if !PROCHAINE_ECHEANCE.doit_balayer(now) {
+    if !PROCHAINE_ECHEANCE.commence_balayage(now) {
         return;
     }
     for index in 0..tasks().len() {
-        if tasks()[index].state == TaskState::Blocked
-            && tasks()[index].wake_deadline_ns != 0
-            && now >= tasks()[index].wake_deadline_ns
+        let registre = tasks();
+        let task = &registre[index];
+        if task.wake_deadline_ns != 0
+            && now >= task.wake_deadline_ns.charge()
+            && task.state.echange(TaskState::Blocked, TaskState::Ready)
         {
-            tasks()[index].wake_deadline_ns = 0;
-            tasks()[index].futex_key = 0;
-            tasks()[index].state = TaskState::Ready;
+            task.wake_deadline_ns.range(0);
+            task.futex_key.range(0);
             publish_ready(index);
         }
     }
@@ -185,22 +186,14 @@ fn wake_sleepers() {
 }
 
 /// Echeance du prochain `SIGALRM` par processus : (pid, tick).
-static mut ALARMS: Option<Vec<(u32, u64)>> = None;
-
-fn alarms() -> &'static mut Vec<(u32, u64)> {
-    unsafe {
-        if ALARMS.is_none() {
-            ALARMS = Some(Vec::new());
-        }
-        ALARMS.as_mut().unwrap()
-    }
-}
+static ALARMES: RankedSpinLock<Vec<(u32, u64)>> =
+    RankedSpinLock::new(LockClass::SchedulerAlarms, Vec::new());
 
 /// Programme (ou annule, avec 0) l'alarme du processus courant.
 /// Renvoie l'echeance precedente, 0 s'il n'y en avait pas.
 pub fn set_alarm(deadline: u64) -> u64 {
     let pid = current().process.pid;
-    let list = alarms();
+    let mut list = ALARMES.lock();
     let previous = list
         .iter()
         .find(|(p, _)| *p == pid)
@@ -219,7 +212,7 @@ pub fn set_alarm(deadline: u64) -> u64 {
 /// Echeance de l'alarme du processus courant (0 s'il n'y en a pas).
 pub fn peek_alarm() -> u64 {
     let pid = current().process.pid;
-    alarms()
+    ALARMES.lock()
         .iter()
         .find(|(p, _)| *p == pid)
         .map(|(_, t)| *t)
@@ -238,15 +231,19 @@ pub fn peek_alarm() -> u64 {
 // Rien ne le signalait : un signal livre trop tot ressemble a un signal livre.
 // La fonction prend desormais des ticks, comme les valeurs qu'elle compare.
 fn fire_alarms(maintenant_ticks: u64) {
-    let expired: Vec<u32> = alarms()
-        .iter()
-        .filter(|(_, deadline)| maintenant_ticks >= *deadline)
-        .map(|(pid, _)| *pid)
-        .collect();
+    let expired: Vec<u32> = {
+        let mut alarmes = ALARMES.lock();
+        let expired = alarmes
+            .iter()
+            .filter(|(_, deadline)| maintenant_ticks >= *deadline)
+            .map(|(pid, _)| *pid)
+            .collect();
+        alarmes.retain(|(_, deadline)| maintenant_ticks < *deadline);
+        expired
+    };
     if expired.is_empty() {
         return;
     }
-    alarms().retain(|(_, deadline)| maintenant_ticks < *deadline);
     for pid in expired {
         if let Some(process) = process_by_pid(pid) {
             process.signals.lock().raise(crate::kernel::signal::SIGALRM);
@@ -259,4 +256,3 @@ fn fire_alarms(maintenant_ticks: u64) {
 pub fn yield_now() {
     schedule();
 }
-

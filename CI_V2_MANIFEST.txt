@@ -1,0 +1,26 @@
+Bouchaud OS CI/CD V2 - manifest
+Generated 2026-08-29
+
+.github/workflows/ci.yml
+.github/workflows/integration.yml
+.github/workflows/ladybird-browser-host.yml
+.github/workflows/ladybird-native-browser-v16.yml
+.github/workflows/ladybird-native-browser.yml
+.github/workflows/ladybird-platform-smp4.yml
+.github/workflows/ladybird-sync.yml
+.github/workflows/mm-ng6-smp4.yml
+.github/workflows/nightly.yml
+.github/workflows/os-primitives.yml
+.github/workflows/system-health.yml
+.github/workflows/userland.yml
+README_CI_V2.md
+tools/ci/README.md
+tools/ci/build_kernel.sh
+tools/ci/check_pipeline_policy.py
+tools/ci/classify_changes.py
+tools/ci/run_ladybird_browser_host.sh
+tools/ci/run_mm_ng6.sh
+tools/ci/run_os_primitives.sh
+tools/ci/run_platform_boot.sh
+tools/ci/run_qemu_smoke.sh
+tools/ci/run_system_health.sh

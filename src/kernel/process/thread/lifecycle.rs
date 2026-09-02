@@ -55,7 +55,7 @@ pub fn exit_current(code: i32) -> ! {
                 }
                 let pid = tasks()[index].process.pid;
                 if descend_de(pid, racine) {
-                    marque_zombie(&mut tasks()[index]);
+                    marque_zombie(&tasks()[index]);
                     emportes += 1;
                 }
             }
@@ -68,17 +68,19 @@ pub fn exit_current(code: i32) -> ! {
         }
     }
 
+    // Cette continuation est terminee : le garde de l'appel systeme restera
+    // sur sa pile condamnee et ne pourra jamais executer son Drop. Rendre sa
+    // profondeur maintenant garantit que le choix final et `switch_to`
+    // entrent bien dans le coeur scheduler sans BKL.
+    abandonne_bkl_avant_sortie_definitive();
+
     // Sur un AP, le contexte noyau appelant est la boucle idle : si ce CPU
     // n'a plus rien de runnable, on y revient immediatement. Les autres CPU
     // continuent independamment.
     let cpu_id = local_cpu();
     if cpu_id != 0 {
         let cur = current_index_raw();
-        wake_sleepers();
-        if let Some(next) = pick_next(cur, cpu_id) {
-            switch_to(cur, next);
-            unreachable!("task: reprise d'une tache terminee sur AP");
-        }
+        commute_sortie_definitive_si_possible(cur, cpu_id);
         switch_to_kernel();
     }
 
@@ -88,17 +90,11 @@ pub fn exit_current(code: i32) -> ! {
     let patience = 30 * crate::kernel::timer::TICKS_PER_SECOND;
     let mut idle_since = crate::kernel::timer::ticks();
     loop {
-        wake_sleepers();
-        if let Some(next) = pick_next(cur, 0) {
-            if next != cur {
-                switch_to(cur, next);
-                unreachable!("task: reprise d'une tache terminee");
-            }
-        }
+        commute_sortie_definitive_si_possible(cur, 0);
         if tasks().iter().all(|t| t.state == TaskState::Zombie) { break; }
         if crate::kernel::timer::ticks().wrapping_sub(idle_since) > patience {
             crate::kernel::dmesg::log("task: aucune tache executable CPU0 depuis 30 s, interblocage suppose");
-            for task in tasks().iter_mut() {
+            for task in tasks().iter() {
                 if task.runq_cpu == 0 && allowed_on(task, 0) { marque_zombie(task); }
             }
             break;
@@ -145,9 +141,15 @@ fn notify_parent_of_exit() {
                 false
             }
         };
-        if matches && tasks()[index].waiting_for_child {
-            tasks()[index].waiting_for_child = false;
-            tasks()[index].state = TaskState::Ready;
+        if matches
+            && tasks()[index]
+                .waiting_for_child
+                .compare_exchange(true, false)
+                .is_ok()
+            && tasks()[index]
+                .state
+                .echange(TaskState::Blocked, TaskState::Ready)
+        {
             publish_ready(index);
         }
     }
@@ -182,7 +184,7 @@ pub fn exit_group(code: i32) -> ! {
         let task = current();
         (task.process.pid, task.tid, task.process.clone())
     };
-    for task in tasks().iter_mut() {
+    for task in tasks().iter() {
         if task.tid != tid && task.process.pid == pid {
             marque_zombie(task);
         }
@@ -207,14 +209,15 @@ pub fn exit_group(code: i32) -> ! {
 /// effacerait l'identite de la tache appelante. Les appelants verifient
 /// [`in_user_task`] avant d'arriver ici — voir `exec::exec_image`.
 pub fn run(mut first: Box<Task>) -> i32 {
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Processus);
     let _kernel = smp_lock::enter();
     // Le thread racine d'un lancement synchrone doit revenir sur la pile
     // noyau de son CPU appelant. Lui seul est pince; les pthreads qu'il cree
     // naissent avec une affinite machine complete et peuvent etre balances.
     let caller_cpu = local_cpu();
     first.affinity_mask = 1u64 << caller_cpu;
-    first.runq_cpu = caller_cpu as u8;
-    first.last_cpu = caller_cpu as u8;
+    first.runq_cpu.range(caller_cpu as u8);
+    first.last_cpu.range(caller_cpu as u8);
     let process = first.process.clone();
     let racine = process.pid;
     let index = register(first);
@@ -222,7 +225,7 @@ pub fn run(mut first: Box<Task>) -> i32 {
     let to_ptr = unsafe {
         RACINE_PREMIER_PLAN.store(racine, Ordering::Release);
         let list = tasks();
-        let ptr = &mut **list.get_mut(index).unwrap() as *mut Task;
+        let ptr = unsafe { registre_pointeur_ordonnanceur(index) }.expect("registre: tache absente");
         mark_task_running(&mut *ptr, cpu_id);
         ptr
     };
@@ -251,6 +254,7 @@ pub fn run(mut first: Box<Task>) -> i32 {
 }
 
 pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Processus);
     let _kernel = smp_lock::enter();
     if in_user_task() {
         crate::kernel::dmesg::log("task: run_noyau imbrique refuse");
@@ -261,14 +265,14 @@ pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
         None => return -1,
     };
     let mut task = Task::new_kernel(process.clone(), entree);
-    task.priorite = Priorite::Interactive;
+    task.priorite.range(Priorite::Interactive);
     task.affinity_mask = 1;
-    task.runq_cpu = 0;
-    task.last_cpu = 0;
+    task.runq_cpu.range(0);
+    task.last_cpu.range(0);
     let index = register(task);
     let to_ptr = unsafe {
         let list = tasks();
-        let ptr = &mut **list.get_mut(index).unwrap() as *mut Task;
+        let ptr = unsafe { registre_pointeur_ordonnanceur(index) }.expect("registre: tache absente");
         mark_task_running(&mut *ptr, 0);
         ptr
     };
@@ -302,12 +306,18 @@ pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
 /// la table est un `Vec` et `CURRENT` en est un indice. Depuis une tache,
 /// utiliser [`nettoie_zombies`].
 pub fn reap() {
-    // Les CURRENT per-CPU sont des indices stables. En SMP on ne compacte donc
-    // jamais le Vec ; `register` recycle les slots zombies. En UP, conserver le
-    // comportement historique est sans risque.
-    if smp::schedulable_cpus() <= 1 {
-        tasks().retain(|t| t.state != TaskState::Zombie);
-    }
+    // Le compactage a disparu, et c'est le registre qui l'a rendu inutile.
+    //
+    // `retain` supprimait les zombies en UP, ce qui DECALE les indices. Les
+    // `CURRENT` par CPU en sont, et ce n'etait tolerable que parce qu'un seul
+    // coeur tournait. Les emplacements du registre ayant maintenant une adresse
+    // ET un indice stables a vie, compacter serait faux dans tous les cas.
+    //
+    // La memoire n'est pas perdue pour autant : `registre_ajoute` reutilise
+    // l'emplacement d'une tache morte en ECRASANT son contenu, ce qui libere
+    // au passage sa pile noyau et sa zone FPU. La reclamation a simplement lieu
+    // au moment ou quelqu'un en a besoin, plutot qu'a intervalle regulier --
+    // et elle ne coute plus un balayage de toute la table.
 }
 
 pub fn nettoie_zombies() {
@@ -323,9 +333,9 @@ pub fn nettoie_zombies() {
 /// le gestionnaire de fenetres declare interactif le navigateur qu'il vient de
 /// lancer, sans que celui-ci ait a le demander.
 pub fn pose_priorite_de(pid: u32, priorite: Priorite) {
-    for task in tasks().iter_mut() {
+    for task in tasks().iter() {
         if task.process.pid == pid {
-            task.priorite = priorite;
+            task.priorite.range(priorite);
         }
     }
 }
@@ -369,7 +379,7 @@ pub fn arbre_de(racine: u32) -> Vec<u32> {
 /// vivre laisserait aussi vivante la surface qu'il projette.
 pub fn tue_processus(pid: u32, code: i32) {
     let courant = try_current().map(|t| t.tid);
-    for task in tasks().iter_mut() {
+    for task in tasks().iter() {
         if Some(task.tid) == courant {
             continue;
         }
@@ -395,7 +405,7 @@ pub fn terminate_sibling_threads() {
         let task = current();
         (task.process.pid, task.tid)
     };
-    for task in tasks().iter_mut() {
+    for task in tasks().iter() {
         if task.tid != tid && task.process.pid == pid {
             marque_zombie(task);
         }
@@ -438,13 +448,12 @@ fn retire_exec_zombie_current() -> ! {
     let cpu_id = local_cpu();
     let cur = current_index_raw();
 
-    wake_sleepers();
-    if let Some(next) = pick_next(cur, cpu_id) {
-        if next != cur {
-            switch_to(cur, next);
-            unreachable!("task: reprise d'un sibling zombie apres exec");
-        }
-    }
+    // `retire_current_if_zombie` a pris le BKL pour confirmer l'etat. Cette
+    // pile ne reprendra jamais : abandonner le verrou avant le dernier choix
+    // d'ordonnancement, sans tenter de le restaurer.
+    abandonne_bkl_avant_sortie_definitive();
+
+    commute_sortie_definitive_si_possible(cur, cpu_id);
 
     // Aucun runnable local à cet instant. Le contexte noyau/AP idle reprendra
     // le scheduling. La pile de ce sibling ne doit plus jamais être réactivée.
@@ -456,10 +465,10 @@ pub fn retire_current_if_zombie() {
     if !RETRAITE_DEMANDEE[cpu].load(Ordering::Acquire) {
         return;
     }
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Processus);
     let _kernel = smp_lock::enter();
     RETRAITE_DEMANDEE[cpu].store(false, Ordering::Release);
     if in_user_task() && current().state == TaskState::Zombie {
         retire_exec_zombie_current();
     }
 }
-

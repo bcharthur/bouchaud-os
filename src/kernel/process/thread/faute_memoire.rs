@@ -290,7 +290,12 @@ fn peuple_page_loader(
             stall_pf_phase(220, page);
             let zero_id = effective.id;
             let zero_flags = effective.drapeaux;
-            if !p.space.map_alloc(page, crate::kernel::vmm::PAGE_SIZE, zero_flags) {
+            if !p.space.map_alloc_accounted(
+                page,
+                crate::kernel::vmm::PAGE_SIZE,
+                zero_flags,
+                crate::kernel::vmm::ResidentKind::Anonymous,
+            ) {
                 return FaultOutcome::IoError;
             }
             FAULTS_ZERO.fetch_add(1, Ordering::Relaxed);
@@ -305,7 +310,12 @@ fn peuple_page_loader(
         PromesseBacking::Framebuffer { phys_base, mapping_start, phys_offset } => {
             let phys = phys_base.saturating_add(phys_offset)
                 .saturating_add(page.saturating_sub(mapping_start));
-            if p.space.map_foreign(page, phys, effective.drapeaux) {
+            if p.space.map_foreign_accounted(
+                page,
+                phys,
+                effective.drapeaux,
+                crate::kernel::vmm::ResidentKind::Device,
+            ) {
                 FaultOutcome::Resolved
             } else {
                 FaultOutcome::IoError
@@ -329,7 +339,12 @@ fn peuple_page_loader(
             if p.space.translate(page).is_some() {
                 return FaultOutcome::Resolved;
             }
-            if !p.space.map_foreign(page, lease.frame(), effective.drapeaux) {
+            if !p.space.map_foreign_accounted(
+                page,
+                lease.frame(),
+                effective.drapeaux,
+                crate::kernel::vmm::ResidentKind::Shared,
+            ) {
                 return FaultOutcome::IoError;
             }
             FAULTS_FILE.fetch_add(1, Ordering::Relaxed);
@@ -373,7 +388,12 @@ fn peuple_page_loader(
                         FaultOutcome::Retry
                     } else if mm.space.translate(page).is_some() {
                         FaultOutcome::Resolved
-                    } else if mm.space.map_foreign(page, frame, current_flags) {
+                    } else if mm.space.map_foreign_accounted(
+                        page,
+                        frame,
+                        current_flags,
+                        crate::kernel::vmm::ResidentKind::FilePrivate,
+                    ) {
                         mm.clean_pages.push(CleanPageMapping { virt: page, key });
                         FAULTS_FILE.fetch_add(1, Ordering::Relaxed);
                         // The current mapping reference now owns `key`. Publish
@@ -425,7 +445,12 @@ fn peuple_page_loader(
                 return FaultOutcome::Retry;
             }
             if mm.space.translate(page).is_some() { return FaultOutcome::Resolved; }
-            if !mm.space.map_alloc(page, crate::kernel::vmm::PAGE_SIZE, effective.drapeaux) {
+            if !mm.space.map_alloc_accounted(
+                page,
+                crate::kernel::vmm::PAGE_SIZE,
+                effective.drapeaux,
+                crate::kernel::vmm::ResidentKind::FilePrivate,
+            ) {
                 return FaultOutcome::IoError;
             }
             if !mm.space.write(page, &page_data) {
@@ -530,7 +555,6 @@ pub fn log_fault_mapping(adresse: u64) {
         }
     }
 }
-
 
 
 

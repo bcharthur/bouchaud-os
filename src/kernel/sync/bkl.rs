@@ -10,10 +10,11 @@
 //! Le scheduler peut relacher temporairement le verrou autour d'un changement de
 //! contexte. Le nombre de prises reentrantes est restaure lorsque la tache reprend.
 //!
-//! IMPORTANT SMP/IRQ : OWNER et DEPTH forment ensemble l'etat du verrou.
-//! Une IRQ locale ne doit jamais observer l'etat intermediaire entre leur mise a
-//! jour. On masque donc les IRQ uniquement pendant ces tres courtes transitions.
-//! On ne garde jamais les IRQ masquees pendant l'attente d'un OWNER distant.
+//! IMPORTANT SMP/IRQ : OWNER et DEPTH sont encodes dans un meme mot atomique.
+//! Aucun observateur ne peut donc voir `OWNER=local` avec une profondeur nulle.
+//! Les IRQ restent masquees pendant les tres courtes transitions locales afin
+//! de garder les metriques et la discipline de migration coherentes. Elles ne
+//! le sont jamais pendant l'attente d'un proprietaire distant.
 
 use core::hint::spin_loop;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};

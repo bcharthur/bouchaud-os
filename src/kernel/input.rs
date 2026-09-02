@@ -75,7 +75,29 @@ fn event(kind: u16, code: u16, value: i32) -> [u8; EVENT_SIZE] {
 // --- Clavier -----------------------------------------------------------------
 
 /// Un octet 0xE0 a ete lu : le scancode suivant appartient au jeu etendu.
-static mut EXTENDED: bool = false;
+// BOUCHAUD_C1_ENTREES_SANS_GROS_VERROU_V1
+//
+// Ces etats etaient des `static mut`. Rien ne les protegeait : c'est le gros
+// verrou, pris par les descripteurs `/dev/input/*`, qui les rendait surs -- et
+// c'est de lui qu'on sort. Deux CPU lisant la file de scancodes en meme temps
+// la corrompraient.
+//
+// Un verrou tournant PROPRE a ce sous-systeme suffit, et sa section critique
+// est minuscule : une traduction de scancode, un ajout en file. C'est tout
+// l'ecart avec le verrou global, qui immobilisait la machine entiere pour la
+// meme chose.
+static ETAT_CLAVIER: crate::kernel::sync::SpinLock<EtatClavier> =
+    crate::kernel::sync::SpinLock::new(EtatClavier {
+        prefixe_etendu: false,
+        en_attente: Vec::new(),
+    });
+
+struct EtatClavier {
+    /// Le scancode precedent etait le prefixe 0xE0.
+    prefixe_etendu: bool,
+    /// Evenements evdev deja traduits, pas encore lus.
+    en_attente: Vec<u8>,
+}
 
 /// Traduit un scancode etendu (prefixe 0xE0) en code de touche Linux.
 fn extended_keycode(scancode: u8) -> Option<u16> {
@@ -109,27 +131,22 @@ fn extended_keycode(scancode: u8) -> Option<u16> {
 /// voudrait pas dire « il y a quelque chose a lire », et un client verrait son
 /// `poll` revenir aussitot puis son `read` echouer en `EAGAIN` — une boucle
 /// qui consomme un cœur entier sans rien faire.
-static mut PENDING: Option<Vec<u8>> = None;
 
-fn pending() -> &'static mut Vec<u8> {
-    unsafe {
-        if PENDING.is_none() {
-            PENDING = Some(Vec::new());
-        }
-        PENDING.as_mut().unwrap()
-    }
-}
 
 /// Traduit tous les scancodes disponibles en evenements evdev.
 fn drain_scancodes() {
+    // Un seul verrouillage pour toute la vidange : le prendre par scancode
+    // ferait entrelacer deux lecteurs au milieu d'une sequence 0xE0, et le
+    // prefixe se retrouverait applique a la mauvaise touche.
+    let mut etat = ETAT_CLAVIER.lock();
     while let Some(scancode) = keyboard::try_scancode() {
         if scancode == 0xE0 {
-            unsafe { EXTENDED = true };
+            etat.prefixe_etendu = true;
             continue;
         }
         let released = scancode & 0x80 != 0;
         let base = scancode & 0x7F;
-        let extended = unsafe { core::mem::replace(&mut EXTENDED, false) };
+        let extended = core::mem::replace(&mut etat.prefixe_etendu, false);
 
         let keycode = if extended {
             match extended_keycode(base) {
@@ -143,16 +160,17 @@ fn drain_scancodes() {
             continue;
         };
 
-        let buffer = pending();
-        buffer.extend_from_slice(&event(EV_KEY, keycode, if released { 0 } else { 1 }));
-        buffer.extend_from_slice(&event(EV_SYN, SYN_REPORT, 0));
+        let evenement = event(EV_KEY, keycode, if released { 0 } else { 1 });
+        let synchro = event(EV_SYN, SYN_REPORT, 0);
+        etat.en_attente.extend_from_slice(&evenement);
+        etat.en_attente.extend_from_slice(&synchro);
     }
 }
 
 /// Y a-t-il un evenement clavier a lire ? (pour `poll`/`select`)
 pub fn keyboard_pending() -> bool {
     drain_scancodes();
-    !pending().is_empty()
+    !ETAT_CLAVIER.lock().en_attente.is_empty()
 }
 
 /// Retire jusqu'a `max` octets d'evenements clavier.
@@ -161,17 +179,25 @@ pub fn keyboard_pending() -> bool {
 /// traduit cela en `EAGAIN`, ce qu'attend un descripteur non bloquant).
 pub fn read_keyboard(max: usize) -> Vec<u8> {
     drain_scancodes();
-    let buffer = pending();
+    let mut etat = ETAT_CLAVIER.lock();
     // On ne coupe jamais un evenement en deux.
-    let len = core::cmp::min(buffer.len(), max - max % EVENT_SIZE);
-    buffer.drain(..len).collect()
+    let len = core::cmp::min(etat.en_attente.len(), max - max % EVENT_SIZE);
+    etat.en_attente.drain(..len).collect()
 }
 
 // --- Souris ------------------------------------------------------------------
 
-static mut LAST_X: i32 = 0;
-static mut LAST_Y: i32 = 0;
-static mut LAST_BUTTONS: u8 = 0;
+/// Dernier etat de souris publie. Meme raison que pour le clavier : c'etait un
+/// `static mut` que seul le gros verrou rendait sur.
+static ETAT_SOURIS: crate::kernel::sync::SpinLock<EtatSouris> =
+    crate::kernel::sync::SpinLock::new(EtatSouris { x: 0, y: 0, boutons: 0 });
+
+#[derive(Clone, Copy)]
+struct EtatSouris {
+    x: i32,
+    y: i32,
+    boutons: u8,
+}
 
 /// Prend un instantane de l'etat de la souris sans produire d'evenement.
 ///
@@ -182,11 +208,7 @@ static mut LAST_BUTTONS: u8 = 0;
 /// au lieu de la laisser dormir.
 pub fn sync_mouse() {
     let (x, y) = mouse::pos();
-    unsafe {
-        LAST_X = x as i32;
-        LAST_Y = y as i32;
-        LAST_BUTTONS = mouse::buttons();
-    }
+    *ETAT_SOURIS.lock() = EtatSouris { x: x as i32, y: y as i32, boutons: mouse::buttons() };
     let _ = mouse::take_wheel();
 }
 
@@ -197,22 +219,20 @@ pub fn read_mouse(max: usize) -> Vec<u8> {
     let (x, y) = (x as i32, y as i32);
     let buttons = mouse::buttons();
 
-    let (last_x, last_y, last_buttons) = unsafe { (LAST_X, LAST_Y, LAST_BUTTONS) };
-
-    let dx = x - last_x;
-    let dy = y - last_y;
+    // Le verrou couvre la comparaison ET la publication : deux lecteurs
+    // simultanes produiraient sinon deux fois le meme deplacement, ou aucun.
+    let mut etat = ETAT_SOURIS.lock();
+    let dx = x - etat.x;
+    let dy = y - etat.y;
     let wheel = mouse::take_wheel();
-    let changed = buttons ^ last_buttons;
+    let changed = buttons ^ etat.boutons;
 
     if dx == 0 && dy == 0 && wheel == 0 && changed == 0 {
         return Vec::new();
     }
 
-    unsafe {
-        LAST_X = x;
-        LAST_Y = y;
-        LAST_BUTTONS = buttons;
-    }
+    *etat = EtatSouris { x, y, boutons: buttons };
+    drop(etat);
 
     let mut out: Vec<u8> = Vec::new();
     let push = |bytes: [u8; EVENT_SIZE], out: &mut Vec<u8>| {
@@ -245,12 +265,11 @@ pub fn read_mouse(max: usize) -> Vec<u8> {
 /// Y a-t-il des evenements souris en attente ? (pour `poll`/`select`)
 pub fn mouse_pending() -> bool {
     let (x, y) = mouse::pos();
-    unsafe {
-        x as i32 != LAST_X
-            || y as i32 != LAST_Y
-            || mouse::buttons() != LAST_BUTTONS
-            || mouse::wheel_pending()
-    }
+    let etat = *ETAT_SOURIS.lock();
+    x as i32 != etat.x
+        || y as i32 != etat.y
+        || mouse::buttons() != etat.boutons
+        || mouse::wheel_pending()
 }
 
 // --- Capacites (EVIOCGBIT) ---------------------------------------------------

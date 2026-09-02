@@ -14,7 +14,8 @@ pub fn suspend_for_schedule() -> usize {
     let cpu = cpu();
     let mine = token(cpu);
 
-    let depth = DEPTH[cpu].load(Ordering::Relaxed);
+    let etat = etat_charge(Ordering::Acquire);
+    let depth = if etat.owner == mine { etat.depth } else { 0 };
     note_schedule_suspend(cpu, depth);
     if depth == 0 {
         return 0;
@@ -23,7 +24,7 @@ pub fn suspend_for_schedule() -> usize {
     #[cfg(debug_assertions)]
 
     debug_assert_eq!(
-        OWNER.load(Ordering::Acquire),
+        etat.owner,
         mine,
         "smp_lock: suspend sans ownership"
     );
@@ -31,9 +32,11 @@ pub fn suspend_for_schedule() -> usize {
     enregistreur::note(
         enregistreur::SUSPEND, cpu, mine, FREE, depth, 0, usize::MAX, depth as u64,
     );
-    DEPTH[cpu].store(0, Ordering::Relaxed);
+    // Comme dans release_one, la comptabilite doit etre fermee avant que FREE
+    // soit visible : un acquereur distant peut repartir des le CAS suivant.
     probe_note_release(cpu, 2);
-    OWNER.store(FREE, Ordering::SeqCst);
+    remplace_profondeur_possedee(cpu, depth, 0, Ordering::SeqCst)
+        .expect("smp_lock: etat modifie pendant suspend_for_schedule");
     note_schedule_owner_released(cpu, depth);
     // Un changement de contexte libere le verrou aussi reellement qu'un Drop :
     // l'oublier ici laisserait dormir un CPU jusqu'a la prochaine liberation
@@ -41,4 +44,3 @@ pub fn suspend_for_schedule() -> usize {
     wake_parked_waiters(cpu);
     depth
 }
-

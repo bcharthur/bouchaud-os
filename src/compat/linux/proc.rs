@@ -134,7 +134,10 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
     // Tout doit etre lu **avant** de detruire l'ancien espace d'adressage :
     // le chemin, les arguments et l'environnement y vivent encore.
     let path = match crate::kernel::abi::resolve_user_path(path_addr) {
-        Some(path) => path,
+        Some(path) => crate::kernel::security::filesystem::canonical_at(
+            crate::kernel::security::filesystem::AT_FDCWD,
+            path.as_str(),
+        ).unwrap_or(path),
         None => return -errno::EFAULT,
     };
     let argv = match read_string_array(argv_addr) {
@@ -267,13 +270,18 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
     // pile noyau courante (celle de cet appel systeme) est abandonnee telle
     // quelle — c'est sans consequence, elle repart du sommet a la prochaine
     // entree.
-    let task = task::current();
+    // Contenu PRIVE de la tache : acces exclusif pris explicitement.
+    let mut task = task::current_exclusif();
     task.fs_base = 0;
     task.clear_child_tid = 0;
     usermode::set_fs_base(0);
     usermode::set_kernel_stack(task.kstack_top);
     let frame = TrapFrame::new_user(entry, stack);
     task.frame = frame;
+    // Le garde est rendu ICI : la reprise en ring 3 ne revient jamais, et le
+    // conserver laisserait l'emplacement marque exclusif pour toujours --
+    // aucun recyclage ne pourrait plus le reprendre.
+    drop(task);
 
     // BOUCHAUD_EXECVE_NORETURN_BKL_FIX_V1
     //
@@ -297,7 +305,7 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
         "execve: chemin no-return sans BKL syscall actif"
     );
 
-    unsafe { usermode::resume_usermode(&task.frame) }
+    unsafe { usermode::resume_usermode(&frame) }
 }
 
 /// `wait4` : attend la fin d'un processus fils.
@@ -339,14 +347,14 @@ pub fn sys_wait4(pid: i64, status_addr: u64, options: u32, _rusage: u64) -> i64 
         // remettra cette tache en etat pret.
         {
             let task = task::current();
-            task.waiting_for_child = true;
-            task.state = task::TaskState::Blocked;
+            task.waiting_for_child.range(true);
+            task.state.range(task::TaskState::Blocked);
         }
         // schedule() effectue deja HLT avec le BKL suspendu si necessaire.
         let _ = task::schedule();
         let task = task::current();
-        task.waiting_for_child = false;
-        task.state = task::TaskState::Ready;
+        task.waiting_for_child.range(false);
+        task.state.range(task::TaskState::Ready);
     }
 }
 

@@ -1,0 +1,23 @@
+{
+  "_lisez_moi": "Contrats du chantier 11. Ces valeurs ne remplacent pas bkl-sites.json; elles bornent la campagne de fiabilite elle-meme.",
+  "schema": 1,
+  "smp_topologies_required": [
+    1,
+    2,
+    4,
+    8
+  ],
+  "qemu_smoke_seconds": 45,
+  "nightly_soak_seconds": 1200,
+  "long_soak_profiles_seconds": {
+    "8h": 28800,
+    "24h": 86400,
+    "72h": 259200
+  },
+  "powercut_default_iterations": 8,
+  "fatal_serial_findings_allowed": 0,
+  "required_release_artifacts": [
+    "bootimage-bouchaud-os.bin",
+    "release-manifest.json"
+  ]
+}

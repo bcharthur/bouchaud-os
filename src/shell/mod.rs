@@ -227,10 +227,74 @@ pub fn run() -> ! {
     }
 }
 
+/// Premier demarrage : aucun compte n'a de mot de passe.
+///
+/// # Pourquoi cet ecran existe
+///
+/// Les comptes naissaient avec leur nom comme mot de passe -- `root:root`.
+/// C'est le meme sur toutes les installations, presque jamais change, et il
+/// suffit a lui seul pour prendre l'uid 0. Ils naissent desormais verrouilles.
+///
+/// Mais « verrouille » et « inaccessible » ne doivent pas se confondre : sans
+/// mot de passe par defaut ET sans enrolement, plus personne n'ouvrirait la
+/// machine. On demande donc le mot de passe de `root` au premier demarrage,
+/// une fois, avant toute connexion. C'est l'endroit exact ou l'utilisateur
+/// decide du secret, au lieu d'en heriter un.
+fn premiere_configuration() {
+    let mut premier = [0u8; 64];
+    let mut second = [0u8; 64];
+    loop {
+        vga::set_color(COLOR_CYAN);
+        println!("");
+        println!("=== Bouchaud OS - premier demarrage ===");
+        vga::set_color(COLOR_DEFAULT);
+        println!("Aucun mot de passe n'est defini. Choisissez celui de root.");
+
+        print!("Nouveau mot de passe: ");
+        let n1 = keyboard::read_secret(&mut premier);
+        println!("");
+        if n1 == 0 {
+            vga::set_color(COLOR_RED);
+            println!("Un mot de passe vide n'ouvrirait rien : recommencez.");
+            vga::set_color(COLOR_DEFAULT);
+            continue;
+        }
+
+        print!("Confirmer: ");
+        let n2 = keyboard::read_secret(&mut second);
+        println!("");
+        if premier[..n1] != second[..n2] {
+            vga::set_color(COLOR_RED);
+            println!("Les deux saisies different : recommencez.");
+            vga::set_color(COLOR_DEFAULT);
+            continue;
+        }
+
+        let mot = unsafe { core::str::from_utf8_unchecked(&premier[..n1]) };
+        match users::set_password("root", mot) {
+            Ok(()) => {
+                vga::set_color(COLOR_GREEN);
+                println!("Mot de passe de root enregistre.");
+                vga::set_color(COLOR_DEFAULT);
+                dmesg::log("users: mot de passe root defini au premier demarrage");
+                return;
+            }
+            Err(raison) => {
+                vga::set_color(COLOR_RED);
+                println!("passwd: {}", raison);
+                vga::set_color(COLOR_DEFAULT);
+            }
+        }
+    }
+}
+
 /// Ecran de connexion : demande utilisateur + mot de passe jusqu'a reussite.
 fn login_screen() -> u16 {
     let mut name_buf = [0u8; 64];
     let mut pass_buf = [0u8; 64];
+    if users::aucun_mot_de_passe_defini() {
+        premiere_configuration();
+    }
     loop {
         vga::set_color(COLOR_CYAN);
         println!("");
@@ -267,7 +331,7 @@ fn print_prompt(cwd: usize) {
     vga::set_color(COLOR_GREEN);
     print!("{}@bouchaud-os:", users::session().username());
     vga::set_color(COLOR_CYAN);
-    ramfs::print_path(ramfs::fs(), cwd);
+    ramfs::print_path(&ramfs::fs(), cwd);
     vga::set_color(COLOR_GREEN);
     print!("$ ");
     vga::set_color(COLOR_DEFAULT);
@@ -739,7 +803,7 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "su" => { c::su(argc, &argv, cwd); 0 }
 
         // Fichiers
-        "pwd" => { ramfs::print_path(ramfs::fs(), *cwd); println!(""); 0 }
+        "pwd" => { ramfs::print_path(&ramfs::fs(), *cwd); println!(""); 0 }
         "ls" => c::ls(argc, &argv, *cwd),
         "tree" => { c::tree(argc, &argv, *cwd); 0 }
         "cd" => c::cd(argc, &argv, cwd),

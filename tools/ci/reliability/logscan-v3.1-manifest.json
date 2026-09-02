@@ -1,0 +1,11 @@
+{
+  "overlay": "bouchaud-os-reliability-logscan-v3.1",
+  "reason": [
+    "LOCKDEP violations=0 was incorrectly classified as fatal",
+    "BKL diagnostic token uaf= was incorrectly classified as use-after-free"
+  ],
+  "replaces": [
+    "tools/ci/reliability/logscan.py",
+    "tools/ci/reliability/test_reliability.py"
+  ]
+}

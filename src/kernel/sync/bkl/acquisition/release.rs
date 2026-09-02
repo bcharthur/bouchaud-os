@@ -2,8 +2,9 @@ fn release_one(cpu: usize) {
     // OWNER + DEPTH doivent changer atomiquement vis-a-vis d'une IRQ locale.
     let _irq = LocalIrqGuard::acquire();
 
-    let depth = DEPTH[cpu].load(Ordering::Relaxed);
-    let owner = OWNER.load(Ordering::Acquire);
+    let etat = etat_charge(Ordering::Acquire);
+    let depth = if etat.owner == token(cpu) { etat.depth } else { 0 };
+    let owner = etat.owner;
 
     // Enregistrer AVANT les assertions : c'est cette transition-la qui explique
     // la violation, et une assertion qui panique n'y reviendrait jamais.
@@ -42,14 +43,18 @@ fn release_one(cpu: usize) {
     );
 
     if depth > 1 {
-        DEPTH[cpu].store(depth - 1, Ordering::Relaxed);
+        remplace_profondeur_possedee(cpu, depth, depth - 1, Ordering::AcqRel)
+            .expect("smp_lock: etat modifie pendant release reentrant");
         return;
     }
 
-    DEPTH[cpu].store(0, Ordering::Relaxed);
+    // Fermer l'intervalle AVANT de publier FREE. Apres le CAS, un autre CPU
+    // peut ouvrir son propre intervalle immediatement ; inverser ces deux
+    // operations ferait se chevaucher deux tenues d'un verrou exclusif.
     probe_note_release(cpu, 1);
-    // SeqCst, et non Release : c'est l'ordre total avec la lecture de PARKED
-    // ci-dessous qui interdit le reveil perdu. Voir wait_for_owner_change.
-    OWNER.store(FREE, Ordering::SeqCst);
+    remplace_profondeur_possedee(cpu, 1, 0, Ordering::SeqCst)
+        .expect("smp_lock: etat modifie pendant release final");
+    // Le CAS ci-dessus est SeqCst : c'est l'ordre total avec PARKED qui ferme
+    // le reveil perdu. Voir wait_for_owner_change.
     wake_parked_waiters(cpu);
 }

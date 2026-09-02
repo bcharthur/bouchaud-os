@@ -41,6 +41,25 @@ from pathlib import Path
 RACINE = Path(__file__).resolve().parent.parent
 BKL = RACINE / "src" / "kernel" / "sync" / "bkl.rs"
 COMPTE = RACINE / "src" / "kernel" / "sync" / "bkl_compte.rs"
+BKL_TREE = RACINE / "src" / "kernel" / "sync" / "bkl"
+
+def source_de(*chemins) -> str:
+    """Le code d'un sous-systeme, quel que soit son decoupage en fichiers.
+
+    Ce garde-fou lisait un seul fichier. La fragmentation de `bkl.rs` en
+    `bkl/**` l'a fait tomber sur une exception -- et comme rien ne l'executait,
+    la regle a cesse de proteger quoi que ce soit sans que personne le voie.
+    Lire un ARBRE plutot qu'un fichier retire cette facon de casser.
+    """
+    morceaux = []
+    for chemin in chemins:
+        if chemin.is_dir():
+            for fichier in sorted(chemin.rglob("*.rs")):
+                morceaux.append(fichier.read_text(encoding="utf-8"))
+        elif chemin.exists():
+            morceaux.append(chemin.read_text(encoding="utf-8"))
+    return "\n".join(morceaux)
+
 
 # Chaque chemin qui touche l'etat du verrou, avec la signature qui l'ouvre.
 CHEMINS_SOUS_MASQUE = [
@@ -78,7 +97,7 @@ def corps(source: str, signature: str) -> str:
 
 
 def main() -> int:
-    source = BKL.read_text(encoding="utf-8")
+    source = source_de(BKL, BKL_TREE)
     code = sans_commentaires(source)
     fautes = []
 
@@ -158,14 +177,18 @@ def main() -> int:
 
     # --- 4. la liberation qui deverrouille doit rester ordonnee --------------
     #
-    # `ferme` avant `OWNER <- FREE` : c'est CE qui rend les intervalles
+    # `ferme` avant la transition atomique vers FREE : c'est CE qui rend les intervalles
     # disjoints. Inverse, un autre coeur pourrait ouvrir le sien avant que
     # celui-ci ne soit clos, et les deux se recouvriraient.
-    for fonction, nom in [("fn release_one(", "release_one"),
-                          ("pub fn suspend_for_schedule(", "suspend_for_schedule")]:
+    for fonction, nom, transition in [
+        ("fn release_one(", "release_one", "remplace_profondeur_possedee(cpu, 1, 0"),
+        ("pub fn suspend_for_schedule(", "suspend_for_schedule", "remplace_profondeur_possedee(cpu, depth, 0"),
+    ]:
         texte = corps(code, fonction)
         sonde = texte.find("probe_note_release(")
-        libere = texte.find("OWNER.store(FREE")
+        # Depuis l'etat BKL empaquete, cette primitive est l'unique chemin qui
+        # publie simultanement OWNER=FREE et DEPTH=0.
+        libere = texte.find(transition)
         if sonde == -1 or libere == -1 or sonde > libere:
             fautes.append(
                 f"  {nom}  ferme l'intervalle APRES avoir rendu le verrou : "

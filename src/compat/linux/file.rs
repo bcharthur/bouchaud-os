@@ -55,7 +55,7 @@ fn absolute(path: &str) -> String {
         return path.to_string();
     }
     let cwd = task::current_process().metadata.lock().cwd;
-    let mut base = ramfs::path_string(ramfs::fs(), cwd);
+    let mut base = ramfs::path_string(&ramfs::fs(), cwd);
     if !base.ends_with('/') {
         base.push('/');
     }
@@ -67,6 +67,86 @@ fn absolute(path: &str) -> String {
 fn resolve(path: &str) -> Option<usize> {
     let cwd = task::current_process().metadata.lock().cwd;
     ramfs::fs().resolve(path, cwd)
+}
+
+/// Construit la cible absolue d'un appel *at(2) a partir de l'identite du
+/// repertoire capturee sous le verrou de la table de fichiers.
+///
+/// SECURITY_DIRFD_BACKEND_V21 : un fichier ordinaire n'est jamais une base de
+/// chemin.  Une fois le noeud copie, fermer/reutiliser le fd dans un autre thread
+/// ne change plus la cible de CET appel.
+fn absolute_at(dirfd: i32, path: &str) -> Result<String, i64> {
+    if path.starts_with('/') {
+        return Ok(crate::kernel::security::path::normalize_absolute(path));
+    }
+
+    let base_node = if dirfd == AT_FDCWD {
+        task::current_process().metadata.lock().cwd
+    } else {
+        let process = task::current_process();
+        let files = process.files.lock();
+        let Some(desc) = files.get(dirfd) else {
+            return Err(-errno::EBADF);
+        };
+        match desc.kind {
+            FdKind::Dir(node) => node,
+            _ => return Err(-errno::ENOTDIR),
+        }
+    };
+
+    let base = ramfs::path_string(&ramfs::fs(), base_node);
+    Ok(crate::kernel::security::path::canonical_from_base(
+        base.as_str(),
+        path,
+    ))
+}
+
+/// Recheck the RESOLVED backend target, not only the raw syscall arguments.
+/// This closes the dirfd close/reuse window between the architecture gate and
+/// the filesystem backend: if another thread changes the fd, the second check
+/// sees the path this syscall will actually use.
+fn security_recheck_open(path: &str, flags: u32) -> Result<(), i64> {
+    let security = crate::kernel::security::policy::current();
+    match crate::kernel::security::filesystem::open_allowed(
+        security, AT_FDCWD, path, flags,
+    ) {
+        Ok(()) => Ok(()),
+        Err(reason) => {
+            crate::kernel::security::audit::deny_path(
+                security.pid,
+                security.credentials.euid,
+                "open-path-backend",
+                crate::kernel::security::filesystem::detail(reason),
+                path,
+                crate::kernel::security::filesystem::reason(reason),
+            );
+            Err(-errno::EACCES)
+        }
+    }
+}
+
+fn security_recheck_mutation(
+    path: &str,
+    kind: crate::kernel::security::filesystem::Mutation,
+    operation: &'static str,
+) -> Result<(), i64> {
+    let security = crate::kernel::security::policy::current();
+    match crate::kernel::security::filesystem::mutation_allowed(
+        security, AT_FDCWD, path, kind,
+    ) {
+        Ok(()) => Ok(()),
+        Err(reason) => {
+            crate::kernel::security::audit::deny_path(
+                security.pid,
+                security.credentials.euid,
+                operation,
+                crate::kernel::security::filesystem::detail(reason),
+                path,
+                crate::kernel::security::filesystem::reason(reason),
+            );
+            Err(-errno::EACCES)
+        }
+    }
 }
 
 // --- Lecture / ecriture ------------------------------------------------------
@@ -115,7 +195,21 @@ fn console_read(max: usize) -> Vec<u8> {
             return out;
         }
         // Rien a lire : on rend la main plutot que de monopoliser le CPU.
-        task::attends_un_tick();
+        //
+        // C'etait `attends_un_tick()`, qui EXIGE le gros verrou -- son
+        // `debug_assert` le dit -- parce qu'elle le suspend pendant le sommeil.
+        // Tant que `read` s'executait sous BKL, cela passait ; la console
+        // dormait donc en le tenant, a chaque lecture sans touche en attente.
+        //
+        // L'attente de readiness, elle, choisit son chemin selon la profondeur
+        // reelle : detachee a zero, ancienne au-dessus. Elle convient donc aux
+        // deux, et l'echeance d'un tick reproduit exactement l'ancien rythme de
+        // reveil -- le clavier signale le compositeur, pas cette file, donc
+        // c'est l'echeance qui ramene ici pour relire.
+        let ticket = crate::kernel::fd::readiness_ticket();
+        let echeance = crate::kernel::timer::monotonic_ns()
+            .saturating_add(1_000_000_000 / crate::kernel::timer::TICKS_PER_SECOND);
+        crate::kernel::fd::wait_readiness(ticket, Some(echeance));
     }
 }
 
@@ -304,7 +398,21 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
                 -errno::EFAULT
             }
         }
-        FdKind::Socket(_) => crate::kernel::abi::net::sys_recvfrom(fd, buffer, count, 0, 0, 0),
+        FdKind::Socket(_) => {
+            // Le seul puits de `read` dont l'etat reste global sans verrou :
+            // l'anneau e1000 et la pile inet. Le domaine est borne a la
+            // mutation reseau elle-meme, exactement comme la branche
+            // symetrique de `ecrit_octets` -- la resolution du descripteur et
+            // la recopie vers l'utilisateur restent paralleles.
+            //
+            // Le domaine est `Reseau` et non `Fd` : ce n'est pas la couche des
+            // descripteurs qui a besoin du verrou, c'est l'anneau. L'attribuer
+            // a `Fd` faisait porter au sous-systeme des descripteurs une dette
+            // qui n'est pas la sienne, et cachait la seule qui reste ici.
+            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Reseau);
+            let _kernel = crate::kernel::smp_lock::enter();
+            crate::kernel::abi::net::sys_recvfrom(fd, buffer, count, 0, 0, 0)
+        }
         FdKind::SocketPair(inbox, _) => {
             // Une lecture bloquante attend que l'autre bout ecrive. Rendre
             // `EAGAIN` tout de suite, comme on le faisait, obligeait chaque
@@ -395,6 +503,7 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
 
     match kind {
         FdKind::Console => {
+            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fd);
             let _kernel = crate::kernel::smp_lock::enter();
             console_write(&data);
             count as i64
@@ -407,6 +516,7 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
         FdKind::Audio => {
             // AC97 still has legacy global driver state. Keep its safety domain
             // local to this rare branch instead of serialising every write.
+            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fd);
             let _kernel = crate::kernel::smp_lock::enter();
             if !crate::drivers::ac97::pret() && !crate::drivers::ac97::init() {
                 return -errno::ENODEV;
@@ -446,28 +556,36 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
             if backing::is_disk_backed(node) {
                 return -errno::EROFS;
             }
-            // RAMFS metadata/content is still a legacy global domain. User
-            // copyin has already finished, so no demand fault occurs under it.
-            let _kernel = crate::kernel::smp_lock::enter();
+            // Le gros verrou ne protegeait plus ici que le RAMFS, qui a
+            // desormais le sien. Ce qu'il masquait EN PLUS, c'est un ordre :
+            // la table des descripteurs (rang `FdTable`) se prend AVANT le
+            // systeme de fichiers (rang `Vfs`), jamais pendant. Le report de
+            // l'offset attend donc que le systeme de fichiers soit rendu.
+            //
+            // L'ajout en fin de fichier reste atomique : `start` se lit et
+            // s'ecrit sous le meme garde `fs`.
             let (offset, append) = {
                 let borrowed = process.files.lock();
                 let desc = borrowed.get(fd).unwrap();
                 (desc.offset, desc.flags & O_APPEND != 0)
             };
-            let fs = ramfs::fs();
-            let content = &mut fs.nodes[node].content;
-            let start = if append { content.len() } else { offset };
-            if start + data.len() > ramfs::MAX_FILE_SIZE {
-                return -errno::EFBIG;
-            }
-            if content.len() < start {
-                content.resize(start, 0);
-            }
-            let end = start + data.len();
-            if content.len() < end {
-                content.resize(end, 0);
-            }
-            content[start..end].copy_from_slice(&data);
+            let end = {
+                let mut fs = ramfs::fs();
+                let content = &mut fs.nodes[node].content;
+                let start = if append { content.len() } else { offset };
+                if start + data.len() > ramfs::MAX_FILE_SIZE {
+                    return -errno::EFBIG;
+                }
+                if content.len() < start {
+                    content.resize(start, 0);
+                }
+                let end = start + data.len();
+                if content.len() < end {
+                    content.resize(end, 0);
+                }
+                content[start..end].copy_from_slice(&data);
+                end
+            };
             if let Some(desc) = process.files.lock().get_mut(fd) {
                 desc.offset = end;
             }
@@ -525,6 +643,8 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
         FdKind::Socket(_) => {
             // Inet/e1000 is not yet fully object-owned. Constrain the BKL to
             // the network mutation itself; copyin and fd lookup stay parallel.
+            // Domaine `Reseau` : c'est l'anneau qui a la dette, pas `Fd`.
+            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Reseau);
             let _kernel = crate::kernel::smp_lock::enter();
             crate::kernel::abi::net::envoie_octets(fd, data, 0, 0, 0)
         }
@@ -776,11 +896,19 @@ pub fn sys_memfd_create(nom_addr: u64, _flags: u32) -> i64 {
         Ok(idx) => idx,
         Err(_) => return -errno::ENFILE,
     };
+    {
+        // SECURITY_OWNER_MEMFD
+        let (owner_uid, owner_gid) =
+            crate::kernel::security::policy::filesystem_owner();
+        let mut fs = crate::fs::ramfs::fs();
+        fs.nodes[idx].uid = owner_uid;
+        fs.nodes[idx].gid = owner_gid;
+    }
     let process = task::current_process();
     let mut borrowed = process.files.lock();
     // `MFD_CLOEXEC` vaut 1 : c'est le seul drapeau que les appelants posent en
     // pratique, et le respecter evite qu'un tampon fuie dans un `execve`.
-    let mut desc = FileDesc::new(FdKind::File(idx));
+    let mut desc = FileDesc::fichier_partage_inscriptible(idx);
     desc.cloexec = _flags & 1 != 0;
     let fd = borrowed.insert(desc);
     if fd < 0 {
@@ -809,34 +937,17 @@ fn errno_creation(raison: &'static str) -> i64 {
 }
 
 pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
-    let path = match crate::kernel::abi::resolve_user_path(path_addr) {
+    let raw_path = match crate::kernel::abi::resolve_user_path(path_addr) {
         Some(path) => path,
         None => return -errno::EFAULT,
     };
-    let path = if dirfd != AT_FDCWD && !path.starts_with('/') {
-        // Chemin relatif a un descripteur de repertoire ouvert.
-        let process = task::current_process();
-        let node = match process.files.lock().get(dirfd) {
-            Some(desc) => match desc.kind {
-                FdKind::Dir(node) | FdKind::File(node) => Some(node),
-                _ => None,
-            },
-            None => return -errno::EBADF,
-        };
-        match node {
-            Some(node) => {
-                let mut base = ramfs::path_string(ramfs::fs(), node);
-                if !base.ends_with('/') {
-                    base.push('/');
-                }
-                base.push_str(&path);
-                base
-            }
-            None => absolute(&path),
-        }
-    } else {
-        absolute(&path)
+    let path = match absolute_at(dirfd, raw_path.as_str()) {
+        Ok(path) => path,
+        Err(code) => return code,
     };
+    if let Err(code) = security_recheck_open(path.as_str(), flags) {
+        return code;
+    }
 
     let process = task::current_process();
 
@@ -897,14 +1008,19 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
                 return -errno::ENOENT;
             }
             let cwd = process.metadata.lock().cwd;
-            let fs = ramfs::fs();
+            let mut fs = ramfs::fs();
             let (parent, name) = match fs.resolve_parent_name(&path, cwd) {
                 Some(value) => value,
                 None => return -errno::ENOENT,
             };
             match fs.touch_at(parent, name) {
                 Ok(node) => {
+                    // SECURITY_OWNER_OPEN
+                    let (owner_uid, owner_gid) =
+                        crate::kernel::security::policy::filesystem_owner();
                     fs.nodes[node].mode = (mode & 0o777) as u16;
+                    fs.nodes[node].uid = owner_uid;
+                    fs.nodes[node].gid = owner_gid;
                     node
                 }
                 Err(raison) => return -errno_creation(raison),
@@ -912,24 +1028,31 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
         }
     };
 
-    let fs = ramfs::fs();
-    let is_dir = fs.nodes[node].kind == NodeKind::Dir;
-    if flags & O_DIRECTORY != 0 && !is_dir {
-        return -errno::ENOTDIR;
-    }
-    let access = flags & O_ACCMODE;
-    if is_dir && (access == O_WRONLY || access == O_RDWR) {
-        return -errno::EISDIR;
-    }
-    if !is_dir
-        && backing::is_disk_backed(node)
-        && (access == O_WRONLY || access == O_RDWR || flags & O_TRUNC != 0)
-    {
-        return -errno::EROFS;
-    }
-    if flags & O_TRUNC != 0 && !is_dir {
-        fs.nodes[node].content.clear();
-    }
+    // `Vfs` se rend avant de prendre `FdTable` : l'ordre des rangs va de la
+    // table des descripteurs vers le systeme de fichiers, et `insert` ci-dessous
+    // prend la premiere. Tout ce que le noeud doit fournir est donc lu ici, et
+    // le garde meurt avec ce bloc.
+    let (is_dir, longueur) = {
+        let mut fs = ramfs::fs();
+        let is_dir = fs.nodes[node].kind == NodeKind::Dir;
+        if flags & O_DIRECTORY != 0 && !is_dir {
+            return -errno::ENOTDIR;
+        }
+        let access = flags & O_ACCMODE;
+        if is_dir && (access == O_WRONLY || access == O_RDWR) {
+            return -errno::EISDIR;
+        }
+        if !is_dir
+            && backing::is_disk_backed(node)
+            && (access == O_WRONLY || access == O_RDWR || flags & O_TRUNC != 0)
+        {
+            return -errno::EROFS;
+        }
+        if flags & O_TRUNC != 0 && !is_dir {
+            fs.nodes[node].content.clear();
+        }
+        (is_dir, fs.nodes[node].content.len())
+    };
 
     let mut desc = FileDesc::new(if is_dir {
         FdKind::Dir(node)
@@ -939,7 +1062,7 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
     desc.flags = flags;
     desc.cloexec = flags & O_CLOEXEC != 0;
     if flags & O_APPEND != 0 {
-        desc.offset = backing::disk_len(node).unwrap_or(fs.nodes[node].content.len());
+        desc.offset = backing::disk_len(node).unwrap_or(longueur);
     }
     let fd = process.files.lock().insert(desc);
     fd as i64
@@ -1490,18 +1613,25 @@ pub fn sys_getdents64(fd: i32, buffer: u64, size: usize) -> i64 {
         None => return -errno::EBADF,
     };
 
-    let fs = ramfs::fs();
-    let mut children: Vec<(usize, String, bool)> = Vec::new();
-    for index in 0..ramfs::MAX_NODES {
-        if fs.nodes[index].used && fs.nodes[index].parent == node && index != node {
-            let entry = &fs.nodes[index];
-            children.push((
-                index,
-                entry.name_str().to_string(),
-                entry.kind == NodeKind::Dir,
-            ));
+    // Le garde du systeme de fichiers ne couvre que le releve. Le tenir plus
+    // loin serait faux deux fois : `user_write` ci-dessous peut declencher une
+    // faute de demande, donc rentrer a nouveau dans le RAMFS, et le report de
+    // l'offset prend `FdTable`, de rang inferieur a `Vfs`.
+    let children: Vec<(usize, String, bool)> = {
+        let fs = ramfs::fs();
+        let mut children = Vec::new();
+        for index in 0..ramfs::MAX_NODES {
+            if fs.nodes[index].used && fs.nodes[index].parent == node && index != node {
+                let entry = &fs.nodes[index];
+                children.push((
+                    index,
+                    entry.name_str().to_string(),
+                    entry.kind == NodeKind::Dir,
+                ));
+            }
         }
-    }
+        children
+    };
 
     let mut out: Vec<u8> = Vec::new();
     let mut consumed = start;
@@ -1535,7 +1665,7 @@ pub fn sys_getdents64(fd: i32, buffer: u64, size: usize) -> i64 {
 /// `getcwd`.
 pub fn sys_getcwd(buffer: u64, size: usize) -> i64 {
     let cwd = task::current_process().metadata.lock().cwd;
-    let mut path = ramfs::path_string(ramfs::fs(), cwd);
+    let mut path = ramfs::path_string(&ramfs::fs(), cwd);
     if path.is_empty() {
         path = "/".to_string();
     }
@@ -1567,14 +1697,29 @@ pub fn sys_chdir(path_addr: u64) -> i64 {
 }
 
 /// `mkdir` / `mkdirat`.
-pub fn sys_mkdir(path_addr: u64) -> i64 {
-    let path = match crate::kernel::abi::resolve_user_path(path_addr) {
-        Some(path) => absolute(&path),
+pub fn sys_mkdir(path_addr: u64, mode: u32) -> i64 {
+    sys_mkdirat(AT_FDCWD, path_addr, mode)
+}
+
+pub fn sys_mkdirat(dirfd: i32, path_addr: u64, mode: u32) -> i64 {
+    let raw_path = match crate::kernel::abi::resolve_user_path(path_addr) {
+        Some(path) => path,
         None => return -errno::EFAULT,
     };
-    let cwd = task::current_process().metadata.lock().cwd;
-    let fs = ramfs::fs();
-    let (parent, name) = match fs.resolve_parent_name(&path, cwd) {
+    let path = match absolute_at(dirfd, raw_path.as_str()) {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    if let Err(code) = security_recheck_mutation(
+        path.as_str(),
+        crate::kernel::security::filesystem::Mutation::Create,
+        "fs-at-create-backend",
+    ) {
+        return code;
+    }
+
+    let mut fs = ramfs::fs();
+    let (parent, name) = match fs.resolve_parent_name(&path, 0) {
         Some(value) => value,
         None => return -errno::ENOENT,
     };
@@ -1582,23 +1727,50 @@ pub fn sys_mkdir(path_addr: u64) -> i64 {
         return -errno::EEXIST;
     }
     match fs.mkdir_at(parent, name) {
-        Ok(_) => 0,
+        Ok(node) => {
+            // SECURITY_OWNER_MKDIR
+            let (owner_uid, owner_gid) =
+                crate::kernel::security::policy::filesystem_owner();
+            fs.nodes[node].mode = (mode & 0o777) as u16;
+            fs.nodes[node].uid = owner_uid;
+            fs.nodes[node].gid = owner_gid;
+            0
+        }
         Err(raison) => -errno_creation(raison),
     }
 }
 
 /// `unlink` / `unlinkat`.
 pub fn sys_unlink(path_addr: u64) -> i64 {
-    let path = match crate::kernel::abi::resolve_user_path(path_addr) {
-        Some(path) => absolute(&path),
+    sys_unlinkat(AT_FDCWD, path_addr, 0)
+}
+
+pub fn sys_unlinkat(dirfd: i32, path_addr: u64, _flags: u32) -> i64 {
+    let raw_path = match crate::kernel::abi::resolve_user_path(path_addr) {
+        Some(path) => path,
         None => return -errno::EFAULT,
     };
-    match resolve(&path) {
+    let path = match absolute_at(dirfd, raw_path.as_str()) {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    if let Err(code) = security_recheck_mutation(
+        path.as_str(),
+        crate::kernel::security::filesystem::Mutation::Remove,
+        "fs-at-remove-backend",
+    ) {
+        return code;
+    }
+    let resolved = {
+        let fs = ramfs::fs();
+        fs.resolve(&path, 0)
+    };
+    match resolved {
         Some(node) if node != 0 => {
             if backing::is_disk_backed(node) {
                 return -errno::EROFS;
             }
-            let fs = ramfs::fs();
+            let mut fs = ramfs::fs();
             if fs.nodes[node].kind == NodeKind::Dir && !fs.is_empty_dir(node) {
                 return -errno::ENOTEMPTY;
             }
@@ -1628,7 +1800,7 @@ pub fn sys_rename(from_addr: u64, to_addr: u64) -> i64 {
         None => return -errno::ENOENT,
     };
     let cwd = task::current_process().metadata.lock().cwd;
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let (parent, name) = match fs.resolve_parent_name(&to, cwd) {
         Some(value) => value,
         None => return -errno::ENOENT,
@@ -2373,25 +2545,20 @@ fn readable(fd: i32) -> bool {
         }
         // Interroger sans consommer : `poll` ne doit pas voler l'evenement au
         // `read` qui va suivre.
-        // BOUCHAUD_P3_POLL_SANS_BKL_V1
+        // BOUCHAUD_C1_ENTREES_SANS_GROS_VERROU_V1
         //
-        // Ces trois branches sont les SEULES du balayage a toucher un etat
-        // global que rien ne protege :
+        // Les deux branches d'entree prenaient le gros verrou : leur etat
+        // vivait dans des `static mut` que rien d'autre ne protegeait. Il vit
+        // maintenant derriere le verrou propre au sous-systeme d'entree, dont
+        // la section critique est une traduction de scancode -- pas la machine
+        // entiere pendant qu'un client interroge son clavier.
         //
-        //   * `input::keyboard_pending` draine dans un tampon `static mut` ;
-        //   * `input::mouse_pending` compare a des `static mut LAST_*` ;
-        //   * `socket_readable` pompe l'anneau e1000, dont tout l'etat est en
-        //     `static mut` sans verrou -- il ne tient QUE par le gros verrou.
-        //
-        // Elles le prennent donc elles-memes, au plus court. Le reste du
-        // balayage -- tubes, paires de sockets, eventfd, timerfd, console,
-        // fichiers, ce qu'utilise l'IPC de Ladybird -- s'en passe entierement.
+        // `socket_readable` reste la seule branche du balayage a le prendre :
+        // l'anneau e1000 est encore un etat global sans verrou.
         FdKind::InputKeyboard => {
-            let _kernel = crate::kernel::smp_lock::enter();
             input::keyboard_pending()
         }
         FdKind::InputMouse => {
-            let _kernel = crate::kernel::smp_lock::enter();
             input::mouse_pending()
         }
         FdKind::EventFd(state) => state.lock().counter > 0,
@@ -2403,6 +2570,8 @@ fn readable(fd: i32) -> bool {
         FdKind::Socket(state) => {
             // L'anneau e1000 est en `static mut` sans verrou : le pompage n'est
             // serialise que par le gros verrou. Voir le commentaire ci-dessus.
+            // Domaine `Reseau` : c'est l'anneau qui a la dette, pas `Fd`.
+            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Reseau);
             let _kernel = crate::kernel::smp_lock::enter();
             crate::kernel::abi::net::socket_readable(&state)
         }

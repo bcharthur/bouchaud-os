@@ -30,7 +30,7 @@ impl WaitSource {
     /// Advance the native generation without touching the scheduler.
     ///
     /// Designed for hard IRQ publication. A bottom half must later call
-    /// `flush_deferred_bkl_held`.
+    /// `flush_deferred`.
     #[inline]
     pub fn publish_deferred(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
@@ -38,14 +38,15 @@ impl WaitSource {
         self.deferred_publications.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Flush a previously published deferred signal.
+    /// Flush a previously published deferred signal without the BKL.
     ///
-    /// Caller MUST already hold the BKL. This mirrors the V7 mouse bottom-half
-    /// contract and avoids recursive global-lock acquisition.
+    /// `WaitQueue::wake_all` now resolves task identities through the
+    /// generation registry and arbitrates Blocked -> Ready with a CAS. The
+    /// global lock no longer protects anything on this path.
     #[inline]
-    pub fn flush_deferred_bkl_held(&self) -> usize {
+    pub fn flush_deferred(&self) -> usize {
         self.deferred_flushes.fetch_add(1, Ordering::Relaxed);
-        let woke = self.queue.wake_all_bkl_held();
+        let woke = self.queue.wake_all();
         self.tasks_woken.fetch_add(woke as u64, Ordering::Relaxed);
         woke
     }

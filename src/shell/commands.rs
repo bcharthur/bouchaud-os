@@ -464,7 +464,7 @@ pub fn ls(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
         }
     };
     if fs.nodes[idx].kind == NodeKind::File {
-        ramfs::print_node_line(fs, idx, long);
+        ramfs::print_node_line(&fs, idx, long);
     } else {
         // Lister un repertoire demande le droit de lecture sur celui-ci.
         if !fs.can(idx, PERM_R) {
@@ -473,7 +473,7 @@ pub fn ls(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
         }
         for i in 0..MAX_NODES {
             if fs.nodes[i].used && i != idx && fs.nodes[i].parent == idx {
-                ramfs::print_node_line(fs, i, long);
+                ramfs::print_node_line(&fs, i, long);
             }
         }
     }
@@ -490,7 +490,7 @@ pub fn tree(argc: usize, argv: &[&str; 12], cwd: usize) {
             return;
         }
     };
-    ramfs::print_path(fs, idx);
+    ramfs::print_path(&fs, idx);
     println!("");
     tree_rec(idx, 0);
 }
@@ -556,7 +556,7 @@ pub fn mkdir(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
         println!("usage: mkdir <path>");
         return 1;
     }
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let (parent, name) = match fs.resolve_parent_name_checked(argv[1], cwd) {
         Ok(v) => v,
         Err(e) => {
@@ -580,7 +580,7 @@ pub fn touch(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
         println!("usage: touch <file>");
         return 1;
     }
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let (parent, name) = match fs.resolve_parent_name_checked(argv[1], cwd) {
         Ok(v) => v,
         Err(e) => {
@@ -654,7 +654,7 @@ pub fn write(line: &str, argc: usize, argv: &[&str; 12], cwd: usize) {
         return;
     }
     let text = remainder_after_tokens(line, 2);
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let idx = match fs.resolve_checked(argv[1], cwd) {
         Ok(i) => i,
         Err(e) => {
@@ -679,7 +679,7 @@ pub fn append(line: &str, argc: usize, argv: &[&str; 12], cwd: usize) {
         return;
     }
     let text = remainder_after_tokens(line, 2);
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let idx = match fs.resolve_checked(argv[1], cwd) {
         Ok(i) => i,
         Err(e) => {
@@ -708,7 +708,7 @@ pub fn nano(argc: usize, argv: &[&str; 12], cwd: usize) {
     let mut buf = [0u8; 256];
     let len = keyboard::read_line(&mut buf);
     let text = unsafe { core::str::from_utf8_unchecked(&buf[..len]) };
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let idx = match fs.resolve_checked(argv[1], cwd) {
         Ok(idx) => idx,
         Err("introuvable") => {
@@ -753,7 +753,7 @@ pub fn rm(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
         println!("usage: rm <file>");
         return 1;
     }
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let idx = match fs.resolve_checked(argv[1], cwd) {
         Ok(i) => i,
         Err(e) => {
@@ -779,7 +779,7 @@ pub fn rmdir(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
         println!("usage: rmdir <dir>");
         return 1;
     }
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let idx = match fs.resolve_checked(argv[1], cwd) {
         Ok(i) => i,
         Err(e) => {
@@ -808,7 +808,7 @@ pub fn cp(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
         println!("usage: cp <src> <dst>");
         return 1;
     }
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let src = match fs.resolve_checked(argv[1], cwd) {
         Ok(idx) if fs.nodes[idx].kind == NodeKind::File => idx,
         Ok(_) => {
@@ -852,7 +852,7 @@ pub fn mv(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
         println!("usage: mv <src> <dst>");
         return 1;
     }
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let src = match fs.resolve_checked(argv[1], cwd) {
         Ok(idx) if idx != 0 => idx,
         Ok(_) => {
@@ -906,7 +906,7 @@ pub fn stat(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
     };
     let n = &fs.nodes[idx];
     print!("path: ");
-    ramfs::print_path(fs, idx);
+    ramfs::print_path(&fs, idx);
     println!("");
     print!("type: ");
     println!(
@@ -1026,7 +1026,7 @@ pub fn chmod(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
         println!("usage: chmod <octal|+x|u+w|go-r|...> <path>");
         return 1;
     }
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let idx = match fs.resolve_checked(argv[2], cwd) {
         Ok(i) => i,
         Err(e) => {
@@ -1093,7 +1093,7 @@ pub fn chown(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
             }
         },
     };
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let idx = match fs.resolve_checked(argv[2], cwd) {
         Ok(i) => i,
         Err(e) => {
@@ -1113,7 +1113,7 @@ pub fn redirect(path: &str, data: &str, append: bool, cwd: usize) -> i32 {
         println!("redirection: fichier cible manquant");
         return 1;
     }
-    let fs = ramfs::fs();
+    let mut fs = ramfs::fs();
     let idx = match fs.resolve_checked(path, cwd) {
         Ok(i) => i,
         Err("introuvable") => {
@@ -1393,7 +1393,7 @@ fn find_rec(idx: usize, filter: Option<&str>) {
         if fs.nodes[i].used && i != idx && fs.nodes[i].parent == idx {
             let name = fs.nodes[i].name_str();
             if filter.map_or(true, |f| name.contains(f)) {
-                ramfs::print_path(fs, i);
+                ramfs::print_path(&fs, i);
                 println!("");
             }
             if fs.nodes[i].kind == NodeKind::Dir {
@@ -1553,7 +1553,7 @@ pub fn rust_selftest() {
 /// `python` : REPL interactif sans argument, `python -c "code"`, ou
 /// `python <fichier.py> [args...]`. Voir `lang::python`.
 pub fn python_run(line: &str, argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
-    let cwd_path = ramfs::path_string(ramfs::fs(), cwd);
+    let cwd_path = ramfs::path_string(&ramfs::fs(), cwd);
 
     if argc < 2 {
         // REPL : lecture clavier bloquante, disponible dans le shell texte.
@@ -1592,7 +1592,7 @@ pub fn python_run(line: &str, argc: usize, argv: &[&str; 12], cwd: usize) -> i32
         println!("python: permission denied");
         return 1;
     }
-    let abs = ramfs::path_string(fs, idx);
+    let abs = ramfs::path_string(&fs, idx);
     let mut extra: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
     for i in 2..argc {
         extra.push(argv[i]);
@@ -1606,7 +1606,7 @@ pub fn python_run(line: &str, argc: usize, argv: &[&str; 12], cwd: usize) -> i32
 /// -> RAMFS -> pile TCP/TLS du noyau -> console. Le script vit dans
 /// `/usr/lib/python/browser.py`, installe au demarrage par `lang::pyweb`.
 pub fn pybrowser_cmd(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
-    let cwd_path = ramfs::path_string(ramfs::fs(), cwd);
+    let cwd_path = ramfs::path_string(&ramfs::fs(), cwd);
 
     // Liste d'arguments Python, construite depuis argv.
     let mut args = String::from("[");

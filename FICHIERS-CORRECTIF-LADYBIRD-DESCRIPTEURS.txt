@@ -1,0 +1,11 @@
+COMMENTAIRE-COMMIT-LADYBIRD-DESCRIPTEURS.txt
+CORRECTIF-LADYBIRD-DESCRIPTEURS-PARTAGES.md
+FICHIERS-CORRECTIF-LADYBIRD-DESCRIPTEURS.txt
+VALIDER-CORRECTIF-LADYBIRD-DESCRIPTEURS.ps1
+src/compat/linux/file.rs
+src/gui/client.rs
+src/gui/surface.rs
+src/kernel/object/fd.rs
+tools/dev/validate-fast.ps1
+tools/userland/shm-probe.c
+tools/verifie-descripteurs-partages.py

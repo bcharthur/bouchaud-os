@@ -4,9 +4,12 @@
 //! et modifier des comptes a l'execution (`useradd`, `userdel`, `passwd`...).
 //! Par defaut deux comptes existent : `root` (uid 0) et `guest` (uid 1000).
 
+pub mod motdepasse;
+
+use motdepasse::{Empreinte, ITERATIONS_DEFAUT, LONGUEUR_SEL};
+
 const MAX_USERS: usize = 16;
 const NAME_LEN: usize = 32;
-const PASS_LEN: usize = 32;
 const HOME_LEN: usize = 48;
 
 #[derive(Copy, Clone)]
@@ -14,8 +17,8 @@ struct UserRec {
     used: bool,
     name: [u8; NAME_LEN],
     name_len: usize,
-    pass: [u8; PASS_LEN],
-    pass_len: usize,
+    /// L'empreinte du mot de passe, JAMAIS le mot de passe.
+    empreinte: Empreinte,
     home: [u8; HOME_LEN],
     home_len: usize,
     uid: u16,
@@ -27,7 +30,7 @@ impl UserRec {
         Self {
             used: false,
             name: [0; NAME_LEN], name_len: 0,
-            pass: [0; PASS_LEN], pass_len: 0,
+            empreinte: Empreinte::verrouille(),
             home: [0; HOME_LEN], home_len: 0,
             uid: 0, gid: 0,
         }
@@ -41,8 +44,8 @@ impl UserRec {
         unsafe { core::str::from_utf8_unchecked(&self.home[..self.home_len]) }
     }
 
-    fn pass_eq(&self, pass: &str) -> bool {
-        self.pass_len == pass.len() && &self.pass[..self.pass_len] == pass.as_bytes()
+    fn mot_de_passe_correct(&self, pass: &str) -> bool {
+        self.empreinte.verifie(pass)
     }
 }
 
@@ -95,6 +98,25 @@ fn free_slot() -> Option<usize> {
 
 /// Cree un compte de bas niveau (sans verification de droits).
 fn create(name: &str, pass: &str, uid: u16, home: &str) -> Result<u16, &'static str> {
+    let empreinte = Empreinte::nouvelle(pass, sel_neuf(), ITERATIONS_DEFAUT);
+    installe(name, empreinte, uid, home)
+}
+
+/// Cree un compte SANS mot de passe utilisable.
+///
+/// C'est l'etat des comptes du systeme au demarrage : ils existent, ils ont un
+/// uid et un repertoire, et rien ne les ouvre tant que `passwd` n'a pas pose
+/// de mot de passe.
+fn create_verrouille(name: &str, uid: u16, home: &str) -> Result<u16, &'static str> {
+    installe(name, Empreinte::verrouille(), uid, home)
+}
+
+fn installe(
+    name: &str,
+    empreinte: Empreinte,
+    uid: u16,
+    home: &str,
+) -> Result<u16, &'static str> {
     if name.is_empty() { return Err("nom vide"); }
     if name.len() > NAME_LEN { return Err("nom trop long"); }
     if slot_by_name(name).is_some() { return Err("utilisateur deja existant"); }
@@ -106,17 +128,28 @@ fn create(name: &str, pass: &str, uid: u16, home: &str) -> Result<u16, &'static 
         u.uid = uid;
         u.gid = uid;
         u.name_len = copy_into(&mut u.name, name);
-        u.pass_len = copy_into(&mut u.pass, pass);
+        u.empreinte = empreinte;
         u.home_len = copy_into(&mut u.home, home);
     }
     Ok(uid)
 }
 
 /// Initialise la base avec les comptes par defaut : root et guest.
+///
+/// # Aucun mot de passe par defaut
+///
+/// Les deux comptes naissaient avec leur propre nom comme mot de passe --
+/// `root:root`, `guest:guest`. Un identifiant par defaut connu n'est pas une
+/// commodite, c'est une porte : il est le meme sur toutes les installations, il
+/// n'est presque jamais change, et il suffit a lui seul pour prendre l'uid 0.
+///
+/// Les comptes naissent donc VERROUILLES. Aucun mot de passe ne les ouvre, pas
+/// meme la chaine vide, tant que `passwd` n'en a pas pose un. C'est un etat sur
+/// par defaut : refuser est toujours recuperable, accepter ne l'est pas.
 pub fn init() {
     unsafe { USERS = [UserRec::empty(); MAX_USERS]; }
-    let _ = create("root", "root", 0, "/");
-    let _ = create("guest", "guest", 1000, "/home/guest");
+    let _ = create_verrouille("root", 0, "/");
+    let _ = create_verrouille("guest", 1000, "/home/guest");
     unsafe { SESSION.uid = 0; }
 }
 
@@ -152,19 +185,64 @@ pub fn remove_user(name: &str) -> Result<(), &'static str> {
 }
 
 /// Change le mot de passe d'un utilisateur.
+///
+/// Un sel NEUF a chaque changement : reutiliser l'ancien laisserait un
+/// attaquant qui a vu les deux empreintes savoir que le mot de passe a change
+/// sans changer de sel, et reutiliser le travail deja fait sur le premier.
 pub fn set_password(name: &str, pass: &str) -> Result<(), &'static str> {
     let slot = slot_by_name(name).ok_or("utilisateur inconnu")?;
+    let empreinte = Empreinte::nouvelle(pass, sel_neuf(), ITERATIONS_DEFAUT);
     unsafe {
-        USERS[slot].pass_len = copy_into(&mut USERS[slot].pass, pass);
+        USERS[slot].empreinte = empreinte;
     }
     Ok(())
+}
+
+/// Verrouille un compte : plus aucun mot de passe ne l'ouvre.
+pub fn verrouille(name: &str) -> Result<(), &'static str> {
+    let slot = slot_by_name(name).ok_or("utilisateur inconnu")?;
+    unsafe {
+        USERS[slot].empreinte = Empreinte::verrouille();
+    }
+    Ok(())
+}
+
+/// Ce compte est-il sans mot de passe utilisable ?
+pub fn est_verrouille(name: &str) -> bool {
+    match slot_by_name(name) {
+        Some(slot) => unsafe { USERS[slot].empreinte.est_verrouille() },
+        None => true,
+    }
+}
+
+/// Aucun compte n'a de mot de passe utilisable.
+///
+/// Vrai au tout premier demarrage. L'ecran de connexion s'en sert pour
+/// proposer l'enrolement plutot que de refuser indefiniment : sans mot de
+/// passe par defaut ET sans enrolement, la machine serait inaccessible.
+pub fn aucun_mot_de_passe_defini() -> bool {
+    unsafe {
+        for index in 0..MAX_USERS {
+            if USERS[index].used && !USERS[index].empreinte.est_verrouille() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Un sel tire de la source d'aleas du noyau.
+fn sel_neuf() -> [u8; LONGUEUR_SEL] {
+    let mut sel = [0u8; LONGUEUR_SEL];
+    crate::net::security::tls::rng::fill(&mut sel);
+    sel
 }
 
 /// Verifie un couple (nom, mot de passe). Renvoie l'uid en cas de succes.
 pub fn authenticate(name: &str, pass: &str) -> Option<u16> {
     let slot = slot_by_name(name)?;
     unsafe {
-        if USERS[slot].pass_eq(pass) { Some(USERS[slot].uid) } else { None }
+        if USERS[slot].mot_de_passe_correct(pass) { Some(USERS[slot].uid) } else { None }
     }
 }
 
@@ -207,7 +285,7 @@ pub fn list() {
 
 /// Cree dans le RAMFS les repertoires d'accueil manquants (mode 700).
 pub fn create_home_dirs() {
-    let fs = crate::fs::ramfs::fs();
+    let mut fs = crate::fs::ramfs::fs();
     unsafe {
         for i in 0..MAX_USERS {
             if !USERS[i].used { continue; }

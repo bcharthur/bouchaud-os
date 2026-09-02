@@ -1,0 +1,187 @@
+name: Reliability V3
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tools/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/**'
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tools/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/**'
+  schedule:
+    - cron: '20 1 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reliability-v3-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host:
+    name: reliability / host
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+      - name: Architecture + host properties
+        run: |
+          tools/ci/run_architecture_guards.sh
+          tools/ci/run_host_tests.sh
+          python3 tools/ci/check_budgets.py
+          python3 tools/ci/check_pipeline_policy.py
+
+  property-fuzz:
+    name: reliability / rendezvous property fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compiler le test contre le module de production
+        run: rustc --edition 2021 --test -O -o /tmp/test-rendezvous-property tools/smp/test_rendezvous_property.rs
+      - name: 64 graines
+        run: |
+          set -euo pipefail
+          for seed in $(seq 1 64); do
+            echo "seed=$seed"
+            BOUCHAUD_PROP_SEED="$seed" /tmp/test-rendezvous-property --test-threads=1
+          done
+
+  build:
+    name: reliability / bootimage
+    needs: host
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: reliability-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            reliability-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-
+      - name: Construire
+        run: tools/ci/build_kernel.sh
+      - name: Publication intermediaire
+        run: |
+          mkdir -p publication
+          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin publication/
+          python3 tools/ci/release_manifest.py \
+            publication/bootimage-bouchaud-os.bin \
+            --sortie publication/release-manifest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reliability-bootimage
+          path: publication/
+          if-no-files-found: error
+          retention-days: 7
+
+  smp:
+    name: reliability / qemu SMP${{ matrix.cpu }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        cpu: [1, 2, 4, 8]
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+      - uses: actions/download-artifact@v4
+        with:
+          name: reliability-bootimage
+          path: image
+      - name: Boot + scan fail-closed
+        run: |
+          python3 tools/ci/reliability/qemu_matrix.py \
+            image/bootimage-bouchaud-os.bin \
+            --cpus ${{ matrix.cpu }} \
+            --seconds 45 \
+            --out-dir reliability-qemu
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reliability-smp${{ matrix.cpu }}
+          path: reliability-qemu/
+          if-no-files-found: error
+
+  nightly-soak:
+    name: reliability / hosted soak 20m
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 28
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+      - uses: actions/download-artifact@v4
+        with:
+          name: reliability-bootimage
+          path: image
+      - name: Soak SMP4
+        run: |
+          python3 tools/ci/reliability/soak.py \
+            image/bootimage-bouchaud-os.bin \
+            --cpus 4 \
+            --duration-seconds 1200 \
+            --cycle-seconds 120 \
+            --out-dir reliability-soak
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reliability-hosted-soak
+          path: reliability-soak/
+          if-no-files-found: error
+          retention-days: 14
+
+  reliability-gate:
+    name: reliability-gate
+    if: always()
+    needs: [host, property-fuzz, build, smp, nightly-soak]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verdict
+        env:
+          HOST: ${{ needs.host.result }}
+          PROP: ${{ needs.property-fuzz.result }}
+          BUILD: ${{ needs.build.result }}
+          SMP: ${{ needs.smp.result }}
+          SOAK: ${{ needs.nightly-soak.result }}
+        run: |
+          printf '%-10s %s\n' host "$HOST" property "$PROP" build "$BUILD" smp "$SMP" soak "$SOAK"
+          for r in "$HOST" "$PROP" "$BUILD" "$SMP"; do
+            [ "$r" = success ] || exit 1
+          done
+          if [ "$SOAK" != skipped ] && [ "$SOAK" != success ]; then
+            exit 1
+          fi
+          echo RELIABILITY_GATE_OK

@@ -40,7 +40,7 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
         App::Terminal { sb, input, cwd } => match k {
             Key::Enter => {
                 let prompt = format!("{}:{}$ ", users::session().username(),
-                    ramfs::path_string(ramfs::fs(), *cwd));
+                    ramfs::path_string(&ramfs::fs(), *cwd));
                 sb.push(format!("{}{}", prompt, input));
                 let cmd = input.trim().to_string();
                 input.clear();

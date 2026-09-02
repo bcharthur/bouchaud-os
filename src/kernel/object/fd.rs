@@ -20,6 +20,14 @@ use crate::kernel::sync::SpinLock;
 use crate::kernel::sync::{WaitQueue, WaitTicket};
 use core::ops::{Deref, DerefMut};
 
+/// Mode d'acces d'un descripteur ouvert en lecture et en ecriture.
+///
+/// Ce nombre appartient au contrat de l'ABI utilisateur de Bouchaud. Le
+/// conserver ici evite que les producteurs de memoire partagee fabriquent un
+/// fichier inscriptible tout en publiant, par oubli, un descripteur en lecture
+/// seule.
+const ACCES_LECTURE_ECRITURE: u32 = 2;
+
 /// Nature d'un descripteur ouvert.
 #[derive(Clone)]
 pub enum FdKind {
@@ -348,6 +356,18 @@ impl FileDesc {
             crate::kernel::partage::ouvre(node);
         }
         FileDesc { kind, offset: 0, flags: 0, cloexec: false }
+    }
+
+    /// Descripteur d'un fichier destine a une projection partagee inscriptible.
+    ///
+    /// Le droit du nœud et le mode porte par le descripteur sont deux choses
+    /// distinctes. Une projection partagee en ecriture exige les deux ; ce
+    /// constructeur rend impossible l'oubli du second sur les surfaces et les
+    /// tampons anonymes crees par Bouchaud.
+    pub fn fichier_partage_inscriptible(node: usize) -> Self {
+        let mut desc = Self::new(FdKind::File(node));
+        desc.flags = ACCES_LECTURE_ECRITURE;
+        desc
     }
 }
 

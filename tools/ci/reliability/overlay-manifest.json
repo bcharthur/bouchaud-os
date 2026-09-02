@@ -1,0 +1,41 @@
+{
+  "overlay": "bouchaud-os-chantier-11-reliability-v3",
+  "base_commit": "96e8a1241e2c2d82a41851529d83c5701bfcb5f0",
+  "purpose": "Chantier 11 - reliability / CI / release engineering",
+  "files": [
+    ".github/workflows/release.yml",
+    ".github/workflows/reliability-v3.yml",
+    ".github/workflows/soak.yml",
+    "tools/ci/budgets/reliability.json",
+    "tools/ci/check_pipeline_policy.py",
+    "tools/ci/configure_protection.ps1",
+    "tools/ci/reliability/__init__.py",
+    "tools/ci/reliability/logscan.py",
+    "tools/ci/reliability/powercut.py",
+    "tools/ci/reliability/qemu_matrix.py",
+    "tools/ci/reliability/reproducibility.py",
+    "tools/ci/reliability/soak.py",
+    "tools/ci/reliability/test_reliability.py",
+    "tools/ci/run_host_tests.sh",
+    "tools/smp/test_rendezvous_property.rs"
+  ],
+  "replaces_existing": [
+    "tools/ci/run_host_tests.sh",
+    "tools/ci/check_pipeline_policy.py"
+  ],
+  "adds": [
+    ".github/workflows/release.yml",
+    ".github/workflows/reliability-v3.yml",
+    ".github/workflows/soak.yml",
+    "tools/ci/budgets/reliability.json",
+    "tools/ci/configure_protection.ps1",
+    "tools/ci/reliability/__init__.py",
+    "tools/ci/reliability/logscan.py",
+    "tools/ci/reliability/powercut.py",
+    "tools/ci/reliability/qemu_matrix.py",
+    "tools/ci/reliability/reproducibility.py",
+    "tools/ci/reliability/soak.py",
+    "tools/ci/reliability/test_reliability.py",
+    "tools/smp/test_rendezvous_property.rs"
+  ]
+}

@@ -1,0 +1,80 @@
+name: Security Runtime
+
+on:
+  pull_request:
+    paths:
+      - 'src/kernel/security/**'
+      - 'src/kernel/mod.rs'
+      - 'src/arch/x86_64/usermode.rs'
+      - 'src/kernel/process/exec.rs'
+      - 'src/kernel/process/thread/processus.rs'
+      - 'src/compat/linux/proc.rs'
+      - 'src/compat/linux/file.rs'
+      - 'src/compat/linux/mod.rs'
+      - 'src/fs/ramfs.rs'
+      - 'tools/security/**'
+      - 'tools/ci/run_security_runtime.sh'
+      - '.github/workflows/security-runtime.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/kernel/security/**'
+      - 'src/kernel/mod.rs'
+      - 'src/arch/x86_64/usermode.rs'
+      - 'src/kernel/process/exec.rs'
+      - 'src/kernel/process/thread/processus.rs'
+      - 'src/compat/linux/proc.rs'
+      - 'src/compat/linux/file.rs'
+      - 'src/compat/linux/mod.rs'
+      - 'src/fs/ramfs.rs'
+      - 'tools/security/**'
+      - 'tools/ci/run_security_runtime.sh'
+      - '.github/workflows/security-runtime.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-runtime-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security-runtime:
+    name: security-runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Security structural guard
+        run: python3 tools/security/verifie-security.py
+
+      - name: Security policy host tests
+        run: |
+          mkdir -p target/security-host
+          rustc --test tools/security/test_security_policy.rs \
+            -o target/security-host/security-policy-tests
+          target/security-host/security-policy-tests
+
+      - name: QEMU + probe toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 build-essential binutils file
+
+      - name: Build Bouchaud OS
+        run: tools/ci/build_kernel.sh
+
+      - name: Security ring3 proof
+        run: |
+          bash tools/ci/run_security_runtime.sh \
+            target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-runtime-proof
+          path: target/security-runtime-ci/security-ring3.log
+          if-no-files-found: error
+          retention-days: 14

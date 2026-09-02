@@ -27,7 +27,7 @@
 
 use alloc::vec::Vec;
 
-use crate::kernel::fd::{FdKind, FileDesc};
+use crate::kernel::fd::FileDesc;
 use crate::kernel::memory;
 use crate::kernel::partage;
 use crate::kernel::task::Process;
@@ -101,7 +101,10 @@ impl Surface {
     /// graphique passera en ring 3, c'est cette fonction — et elle seule — qui
     /// deviendra un `sendmsg`.
     pub fn descripteur(&self, processus: &Process) -> i32 {
-        processus.files.lock().insert(FileDesc::new(FdKind::File(self.node)))
+        processus
+            .files
+            .lock()
+            .insert(FileDesc::fichier_partage_inscriptible(self.node))
     }
 
     /// Adresse noyau du premier octet d'une page, si elle existe.

@@ -1,11 +1,12 @@
 //! Facade de l'ordonnanceur reel de Bouchaud OS.
 //!
-//! L'ancien fichier de ce nom etait reste un prototype cooperatif alors que
-//! l'ordonnanceur reel vit desormais dans `kernel::task` : threads, piles
-//! noyau, sauvegarde FPU/SSE, preemption IRQ0, priorites et blocage.
-//!
-//! Cette facade existe pour fournir un point d'entree stable aux diagnostics et
-//! aux futurs backends SMP sans maintenir deux implementations concurrentes.
+//! P0-NG1 ajoute deux briques au scheduler SMP existant : la preemption noyau
+//! differee aux safe-points et l'observatoire ready-to-run. L'election et les
+//! runqueues restent celles de `kernel::task`, ce qui preserve les invariants
+//! Gate0 de passation de pile.
+
+pub mod latency;
+pub mod preempt;
 
 pub use crate::kernel::task::OrdonnanceurStats;
 
@@ -16,9 +17,6 @@ pub fn current() -> u32 {
     }
 }
 
-/// Compatibilite avec l'ancienne API. Le processus courant est maintenant une
-/// consequence du contexte ordonnance ; il ne peut plus etre force par un
-/// simple entier.
 pub fn set_current(_pid: u32) {}
 
 pub fn yield_now() {
@@ -32,5 +30,5 @@ pub fn stats() -> OrdonnanceurStats {
 }
 
 pub fn state() -> &'static str {
-    "preemptif SMP: affinite processus, runqueue multi-CPU, quantum IPI, BKL reentrant"
+    "preemptif SMP-NG: affinite, runqueues per-CPU, work-steal, safe-points noyau, latence ready-to-run"
 }

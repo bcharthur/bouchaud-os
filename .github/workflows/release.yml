@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version explicite (optionnelle)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    name: release / reproducible + attested
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+          key: release-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            release-cargo-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+
+      - name: Construction A
+        run: |
+          tools/ci/build_kernel.sh
+          mkdir -p repro publication
+          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin repro/build-a.bin
+
+      - name: Construction B independante
+        run: |
+          cargo clean
+          tools/ci/build_kernel.sh
+          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin repro/build-b.bin
+
+      - name: Reproductibilite bit-for-bit
+        run: |
+          python3 tools/ci/reliability/reproducibility.py \
+            repro/build-a.bin repro/build-b.bin \
+            --json repro/reproducibility.json
+
+      - name: Manifeste versionne
+        env:
+          VERSION: ${{ inputs.version || github.ref_name }}
+        run: |
+          cp repro/build-a.bin publication/bootimage-bouchaud-os.bin
+          python3 tools/ci/release_manifest.py \
+            publication/bootimage-bouchaud-os.bin \
+            --version "$VERSION" \
+            --sortie publication/release-manifest.json
+          cat publication/release-manifest.json
+
+      - name: Attestation Sigstore/GitHub OIDC du bootimage
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: publication/bootimage-bouchaud-os.bin
+
+      - name: Attestation du manifeste
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: publication/release-manifest.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bouchaud-os-release-${{ github.ref_name }}
+          path: |
+            publication/
+            repro/reproducibility.json
+          if-no-files-found: error
+          retention-days: 30
