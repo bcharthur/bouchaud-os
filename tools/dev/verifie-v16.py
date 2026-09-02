@@ -5,7 +5,15 @@ root=Path(__file__).resolve().parents[2]
 need={
 "src/kernel/sync/reveil/attente.rs":["expected_depth","INTERFACE_DETACHED_NESTED","profondeur_locale() > 0"],
 "src/gui/desktop_bkl/scope.rs":["accepte_imbrique","NESTED_SCOPES","suspend_for_schedule"],
-"src/kernel/process/thread/faute_cluster.rs":["ZERO_CLUSTER_MAX_PAGES","zero_fault_cluster_stats","FAULT_CLUSTER_MAX_PAGES: u64 = 16","let window: u64 ="],
+"src/kernel/process/thread/faute_cluster.rs":[
+    "ZERO_CLUSTER_MAX_PAGES",
+    "zero_fault_cluster_stats",
+    "FAULT_CLUSTER_MAX_PAGES: u64 = 16",
+    "fn zero_cluster_window(",
+    "let adaptive: u64 =",
+    "let pressure_cap = match",
+    "let window = adaptive.min(pressure_cap)",
+],
 "src/kernel/process/thread/faute_memoire.rs":["fault_cluster_after_zero"],
 "tools/ladybird/chrome/modernise-v16.py":["BOUCHAUD_CHROME_V16_FONTCONFIG_TYPEFACE","SkFontMgr_New_FontConfig"],
 "tools/ladybird/prepare-v16-fonts.py":["FONTS_V16_FORCE_FONTCONFIG","BOUCHAUD_V16_PATH_FONT_ALIAS","nearest_distance","DejaVu Sans"],

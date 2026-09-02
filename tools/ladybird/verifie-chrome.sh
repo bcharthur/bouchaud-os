@@ -11,6 +11,11 @@ CHROME="$SRC/Services/WebContent/BouchaudChrome.h"
 CMAKE="$SRC/Services/WebContent/CMakeLists.txt"
 grep -q 'BOUCHAUD_CHROME_V15_REAL_TEXT_SVG_LOADING' "$CHROME"
 grep -q 'BOUCHAUD_CHROME_V16_FONTCONFIG_TYPEFACE' "$CHROME"
+grep -Fq 'mask & (Modificateur::Alt | Modificateur::AltGr)' "$CHROME"
+if grep -Fq 'KeyModifier::Mod_AltGr' "$CHROME"; then
+    echo 'chrome Bouchaud: API Ladybird inexistante KeyModifier::Mod_AltGr' >&2
+    exit 1
+fi
 grep -q 'BouchaudChromeV15Assets::STOP' "$CHROME"
 grep -q 'target_link_libraries(webcontentservice PRIVATE skia)' "$CMAKE"
 grep -q 'FONTS_V16_FORCE_FONTCONFIG' "$SRC/Services/WebContent/main.cpp"
