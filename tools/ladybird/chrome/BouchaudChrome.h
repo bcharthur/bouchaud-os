@@ -1276,10 +1276,13 @@ inline Web::UIEvents::KeyModifier modifiers_from_mask(u32 mask)
         modifiers |= Web::UIEvents::KeyModifier::Mod_Shift;
     if (mask & Modificateur::Ctrl)
         modifiers |= Web::UIEvents::KeyModifier::Mod_Ctrl;
-    if (mask & Modificateur::Alt)
+    // LibWeb distingue la touche physique AltGr (`Key_AltGr`) mais son masque
+    // de modificateurs ne possede qu'un bit Alt generique. Bouchaud a deja
+    // compose le caractere de la couche AltGr avant ce pont ; conserver le bit
+    // Alt transmet donc la meilleure metadonnee disponible sans inventer une
+    // valeur que l'API amont ne sait pas representer.
+    if (mask & (Modificateur::Alt | Modificateur::AltGr))
         modifiers |= Web::UIEvents::KeyModifier::Mod_Alt;
-    if (mask & Modificateur::AltGr)
-        modifiers |= Web::UIEvents::KeyModifier::Mod_AltGr;
     return modifiers;
 }
 

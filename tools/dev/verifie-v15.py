@@ -8,6 +8,7 @@ required={
     "src/gui/mod.rs":["widgets_v15.rs","pub mod frame_clock"],
     "src/kernel/debug/journal.rs":["[FPS:","trames utiles"],
     "tools/ladybird/chrome/modernise-v15.py":["draw_browser_text","draw_svg_icon","BOUCHAUD_CHROME_V15_REAL_TEXT_SVG_LOADING","target_link_libraries(webcontentservice PRIVATE skia)"],
+    "tools/ladybird/chrome/BouchaudChrome.h":["mask & (Modificateur::Alt | Modificateur::AltGr)","KeyModifier::Mod_Alt"],
     "tools/ladybird/chrome/BouchaudChromeV15Assets.h":["ICON_SIZE","BACK","RELOAD","STOP"],
     "tools/ladybird/verifie-chrome.sh":["modernise-v15.py","BouchaudChromeV15Assets"],
     "tools/perf/run-ladybird-v15.ps1":["ValidateSet(1,4,8)","CpuCount"],
@@ -37,4 +38,8 @@ for rel in ["tools/ladybird/chrome/modernise-v15.py","tools/perf/analyse-v15.py"
 for name in ("back.svg","forward.svg","reload.svg","stop.svg"):
     s=(root/'tools/ladybird/chrome/assets'/name).read_text(encoding='utf-8')
     if '<svg' not in s or '<path' not in s: raise SystemExit(f"SVG invalide {name}")
+
+chrome=(root/'tools/ladybird/chrome/BouchaudChrome.h').read_text(encoding='utf-8')
+if 'KeyModifier::Mod_AltGr' in chrome:
+    raise SystemExit("API Ladybird inexistante encore utilisee: KeyModifier::Mod_AltGr")
 print("V15 browser UI / FPS / SMP contracts: OK")
