@@ -17,8 +17,11 @@ for rel,tokens in required.items():
     if not p.is_file(): raise SystemExit(f"ABSENT {rel}")
     b=p.read_bytes()
     if b.startswith(b"\xef\xbb\xbf"): raise SystemExit(f"BOM interdit {rel}")
-    if b"\r\n" in b: raise SystemExit(f"CRLF interdit {rel}")
-    s=b.decode('utf-8')
+    # Git peut materialiser certains arbres de travail en CRLF (core.autocrlf) alors
+    # que le blob indexe reste en LF. Le contrat porte sur le texte versionne,
+    # pas sur la convention locale de fin de ligne de l'arbre de travail.
+    s=b.decode('utf-8').replace('\r\n', '\n')
+    if '\r' in s: raise SystemExit(f"CR isole interdit {rel}")
     for token in tokens:
         if token not in s: raise SystemExit(f"TOKEN absent {rel}: {token}")
 
