@@ -203,10 +203,10 @@ anomalies={}/{}/{} proprietaire={}{}",
         exec_wait_ns,
         exec_max_ns, ata_acquires, ata_wait_ns, ata_max_ns,
     ));
-    let (cluster_attempts, cluster_mapped, cluster_miss, cluster_already, cluster_aborts, cluster_max_batch) = fault_cluster_stats();
+    let (cluster_attempts, cluster_mapped, cluster_miss, cluster_already, cluster_aborts, cluster_max_batch, cluster_mm_locks) = fault_cluster_stats();
     crate::kernel::dmesg::log_fmt(format_args!(
-        "[MM-CLUSTER] attempts={} mapped={} cache_miss={} already={} aborts={} max_batch={}",
-        cluster_attempts, cluster_mapped, cluster_miss, cluster_already, cluster_aborts, cluster_max_batch,
+        "[MM-CLUSTER] attempts={} mapped={} cache_miss={} already={} aborts={} max_batch={} mm_locks={}",
+        cluster_attempts, cluster_mapped, cluster_miss, cluster_already, cluster_aborts, cluster_max_batch, cluster_mm_locks,
     ));
     let (zero_faults, zero_triggered, zero_mapped, zero_already, zero_aborts, zero_max_batch) = zero_fault_cluster_stats();
     crate::kernel::dmesg::log_fmt(format_args!(
@@ -427,13 +427,7 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
         if task.state == TaskState::Zombie {
             continue;
         }
-        let (pid, nom, group_id, group_name, rss_octets, vss_octets) = {
-            let process = &task.process;
-            let usage = crate::kernel::resource::memory_usage(process);
-            let name = process.metadata.lock().name.clone();
-            (process.pid, name, process.resource_group_id,
-                process.resource_group_name.clone(), usage.rss, usage.vss)
-        };
+        let pid = task.process.pid;
         // Inclure la tranche actuellement en cours sans modifier le curseur :
         // le delta du prochain snapshot soustraira exactement ce même préfixe.
         let live = if task.last_account_ns != 0 {
@@ -468,16 +462,22 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
                 }
             }
             None => {
+                // Un espace Mm appartient au processus, pas a chacun de ses
+                // threads. WebContent avait 18 threads dans le run de preuve :
+                // le releve lui faisait donc payer 18 fois le meme RSS.
+                let process = &task.process;
+                let usage = crate::kernel::resource::memory_usage(process);
+                let nom = process.metadata.lock().name.clone();
                 cumuls.push((pid, runtime, cpu_map_snapshot, task.migrations.charge(), task.context_switches.charge()));
                 mesures.push(Mesure {
                     pid,
                     nom,
-                    resource_group_id: group_id,
-                    resource_group_name: group_name,
+                    resource_group_id: process.resource_group_id,
+                    resource_group_name: process.resource_group_name.clone(),
                     ticks: 0,
-                    octets: rss_octets,
-                    rss_octets,
-                    vss_octets,
+                    octets: usage.rss,
+                    rss_octets: usage.rss,
+                    vss_octets: usage.vss,
                     taches: 0,
                     cpu_map_ns: [0; MAX_CPUS],
                     migrations: 0,
@@ -496,6 +496,15 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
             }
         }
     }
+
+    let (rss_snapshots, rss_pages) = crate::kernel::resource::rss_o1_stats();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "[MM-RSS-O1] snapshots={} pages_observed={} processes={} live_tasks={}",
+        rss_snapshots,
+        rss_pages,
+        mesures.len(),
+        current_tasks.len(),
+    ));
 
     let precedents = unsafe {
         let pointeur = &raw mut MESURE_PRECEDENTE;

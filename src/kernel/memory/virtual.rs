@@ -133,6 +133,13 @@ pub const PTE_DIRTY: u64 = 1 << 6;
 pub const PTE_HUGE: u64 = 1 << 7;
 pub const PTE_NO_EXEC: u64 = 1 << 63;
 
+// Les bits 9..11 d'une PTE x86-64 sont reserves au logiciel. Bouchaud y
+// conserve la classe RSS de chaque mapping. Ce petit tag rend le compte
+// resident incremental : le moniteur n'a plus a reparcourir des centaines de
+// milliers de PTE, sous le verrou Mm, a chaque releve du navigateur.
+const PTE_RSS_KIND_SHIFT: u64 = 9;
+const PTE_RSS_KIND_MASK: u64 = 0b111 << PTE_RSS_KIND_SHIFT;
+
 /// Masque de l'adresse physique dans une entree (bits 12..51).
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 const FREE_LIST_END: u64 = u64::MAX;
@@ -493,6 +500,9 @@ pub struct AddressSpace {
     // occurrence, laissant fuir les autres.
     /// Frames de donnees mappees pour l'utilisateur.
     pages: BTreeSet<u64>,
+    /// Compteurs exacts mis a jour lors de la publication/retrait des PTE.
+    /// Une lecture de RSS est ainsi O(1), quel que soit le nombre de pages.
+    resident: ResidentStats,
 }
 
 /// Stable CR3 identity shared with `Mm`'s context-switch fast path.
@@ -615,6 +625,76 @@ pub struct ResidentStats {
     pub untracked_pages: u64,
 }
 
+/// Origine comptable d'une page residente.
+///
+/// La valeur voyage dans les bits logiciels de la PTE. Elle survit donc a
+/// `mprotect`, a `fork` et n'exige aucune table auxiliaire par page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResidentKind {
+    Untracked,
+    Anonymous,
+    FilePrivate,
+    Shared,
+    Device,
+}
+
+impl ResidentKind {
+    #[inline]
+    const fn bits(self) -> u64 {
+        let code = match self {
+            Self::Untracked => 0,
+            Self::Anonymous => 1,
+            Self::FilePrivate => 2,
+            Self::Shared => 3,
+            Self::Device => 4,
+        };
+        code << PTE_RSS_KIND_SHIFT
+    }
+
+    #[inline]
+    const fn from_entry(entry: u64) -> Self {
+        match (entry & PTE_RSS_KIND_MASK) >> PTE_RSS_KIND_SHIFT {
+            1 => Self::Anonymous,
+            2 => Self::FilePrivate,
+            3 => Self::Shared,
+            4 => Self::Device,
+            _ => Self::Untracked,
+        }
+    }
+}
+
+impl ResidentStats {
+    #[inline]
+    fn mapped(&mut self, entry: u64) {
+        self.total_pages = self.total_pages.checked_add(1)
+            .expect("vmm: resident page counter overflow");
+        let counter = match ResidentKind::from_entry(entry) {
+            ResidentKind::Anonymous => &mut self.anonymous_pages,
+            ResidentKind::FilePrivate => &mut self.file_private_pages,
+            ResidentKind::Shared => &mut self.shared_pages,
+            ResidentKind::Device => &mut self.device_pages,
+            ResidentKind::Untracked => &mut self.untracked_pages,
+        };
+        *counter = counter.checked_add(1)
+            .expect("vmm: resident class counter overflow");
+    }
+
+    #[inline]
+    fn unmapped(&mut self, entry: u64) {
+        self.total_pages = self.total_pages.checked_sub(1)
+            .expect("vmm: resident page counter underflow");
+        let counter = match ResidentKind::from_entry(entry) {
+            ResidentKind::Anonymous => &mut self.anonymous_pages,
+            ResidentKind::FilePrivate => &mut self.file_private_pages,
+            ResidentKind::Shared => &mut self.shared_pages,
+            ResidentKind::Device => &mut self.device_pages,
+            ResidentKind::Untracked => &mut self.untracked_pages,
+        };
+        *counter = counter.checked_sub(1)
+            .expect("vmm: resident class counter underflow");
+    }
+}
+
 impl AddressSpace {
     /// Cree un espace d'adressage : entrees noyau reprises telles quelles,
     /// creneau utilisateur vierge et exclusif.
@@ -642,6 +722,7 @@ impl AddressSpace {
             }),
             tables: Vec::new(),
             pages: BTreeSet::new(),
+            resident: ResidentStats::default(),
         })
     }
 
@@ -718,7 +799,7 @@ impl AddressSpace {
 
     /// Mappe `virt` (aligne page) sur la frame physique `phys`.
     pub fn map(&mut self, virt: u64, phys: u64, flags: u64) -> bool {
-        match self.entry_mut(virt, true) {
+        let inserted = match self.entry_mut(virt, true) {
             Some(entry) => {
                 let old = *entry;
                 let new = (phys & ADDR_MASK) | flags | PTE_PRESENT;
@@ -730,15 +811,41 @@ impl AddressSpace {
                 }
                 *entry = new;
                 flush(virt);
-                true
+                old & PTE_PRESENT == 0
             }
-            None => false,
+            None => return false,
+        };
+        if inserted {
+            self.resident.mapped((phys & ADDR_MASK) | flags | PTE_PRESENT);
         }
+        true
+    }
+
+    /// Mappe une page en portant sa classe RSS dans la PTE.
+    pub fn map_accounted(
+        &mut self,
+        virt: u64,
+        phys: u64,
+        flags: u64,
+        kind: ResidentKind,
+    ) -> bool {
+        self.map(virt, phys, (flags & !PTE_RSS_KIND_MASK) | kind.bits())
     }
 
     /// Alloue et mappe `len` octets a partir de `virt` (arrondi a la page).
     /// Les pages deja presentes sont conservees (mmap peut recouvrir).
     pub fn map_alloc(&mut self, virt: u64, len: u64, flags: u64) -> bool {
+        self.map_alloc_accounted(virt, len, flags, ResidentKind::Untracked)
+    }
+
+    /// Alloue une plage dont chaque PTE porte la meme classe RSS.
+    pub fn map_alloc_accounted(
+        &mut self,
+        virt: u64,
+        len: u64,
+        flags: u64,
+        kind: ResidentKind,
+    ) -> bool {
         let start = virt & !(PAGE_SIZE - 1);
         let end = (virt + len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         let mut page = start;
@@ -749,7 +856,7 @@ impl AddressSpace {
                     None => return false,
                 };
                 self.pages.insert(frame);
-                if !self.map(page, frame, flags) {
+                if !self.map_accounted(page, frame, flags, kind) {
                     return false;
                 }
             }
@@ -767,7 +874,9 @@ impl AddressSpace {
         while page < end {
             if let Some(entry) = self.entry_mut(page, false) {
                 if *entry & PTE_PRESENT != 0 {
-                    let new = (*entry & ADDR_MASK) | flags | PTE_PRESENT;
+                    // Les droits changent, pas l'origine comptable de la page.
+                    let new = (*entry & (ADDR_MASK | PTE_RSS_KIND_MASK))
+                        | flags | PTE_PRESENT;
                     if *entry != new {
                         *entry = new;
                         flush(page);
@@ -789,14 +898,23 @@ impl AddressSpace {
         let mut page = start;
         let mut retired: Vec<u64> = Vec::new();
         while page < end {
-            if let Some(entry) = self.entry_mut(page, false) {
-                let phys = *entry & ADDR_MASK;
-                if *entry & PTE_PRESENT != 0 {
+            let removed = if let Some(entry) = self.entry_mut(page, false) {
+                let old = *entry;
+                if old & PTE_PRESENT != 0 {
                     *entry = 0;
                     flush(page);
-                    if self.pages.contains(&phys) {
-                        retired.push(phys);
-                    }
+                    Some(old)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let Some(old) = removed {
+                self.resident.unmapped(old);
+                let phys = old & ADDR_MASK;
+                if self.pages.contains(&phys) {
+                    retired.push(phys);
                 }
             }
             page += PAGE_SIZE;
@@ -842,64 +960,10 @@ impl AddressSpace {
         self.pages.len()
     }
 
-    /// Compte les PTE utilisateur reellement presentes et les classe selon
-    /// leur VMA. C'est le RSS reel, y compris MAP_SHARED et device mappings.
-    pub fn resident_stats(
-        &self,
-        regions: &[crate::kernel::vma::Vma],
-    ) -> ResidentStats {
-        let mut stats = ResidentStats::default();
-        let pml4 = table_at(self.pml4);
-
-        for creneau in 0..USER_SLOTS {
-            let slot = user_slot() + creneau;
-            let entry4 = pml4[slot];
-            if entry4 & PTE_PRESENT == 0 {
-                continue;
-            }
-            let pdpt = table_at(entry4 & ADDR_MASK);
-            for (i3, &entry3) in pdpt.iter().enumerate() {
-                if entry3 & PTE_PRESENT == 0 {
-                    continue;
-                }
-                let pd = table_at(entry3 & ADDR_MASK);
-                for (i2, &entry2) in pd.iter().enumerate() {
-                    if entry2 & PTE_PRESENT == 0 || entry2 & PTE_HUGE != 0 {
-                        continue;
-                    }
-                    let pt = table_at(entry2 & ADDR_MASK);
-                    for (i1, &entry1) in pt.iter().enumerate() {
-                        if entry1 & PTE_PRESENT == 0 {
-                            continue;
-                        }
-                        let virt = ((slot as u64) << 39)
-                            | ((i3 as u64) << 30)
-                            | ((i2 as u64) << 21)
-                            | ((i1 as u64) << 12);
-                        stats.total_pages += 1;
-                        match crate::kernel::vma::trouve(regions, virt)
-                            .map(|region| region.backing)
-                        {
-                            Some(crate::kernel::vma::Backing::Zero) => {
-                                stats.anonymous_pages += 1;
-                            }
-                            Some(crate::kernel::vma::Backing::File { .. }) => {
-                                stats.file_private_pages += 1;
-                            }
-                            Some(crate::kernel::vma::Backing::SharedFile { .. }) => {
-                                stats.shared_pages += 1;
-                            }
-                            Some(crate::kernel::vma::Backing::Framebuffer { .. }) => {
-                                stats.device_pages += 1;
-                            }
-                            None => stats.untracked_pages += 1,
-                        }
-                    }
-                }
-            }
-        }
-
-        stats
+    /// Rend le RSS exact en O(1). Le cout ne depend ni du RSS, ni du nombre de
+    /// threads qui partagent cet espace.
+    pub fn resident_stats(&self) -> ResidentStats {
+        self.resident
     }
 
     /// Enumere les pages utilisateur mappees : (adresse virtuelle, entree).
@@ -961,6 +1025,17 @@ impl AddressSpace {
     /// de pages partage) : elle ne sera ni liberee ni dupliquee avec l'espace.
     pub fn map_foreign(&mut self, virt: u64, phys: u64, flags: u64) -> bool {
         self.map(virt, phys, flags)
+    }
+
+    /// Variante comptabilisee pour framebuffer et caches partages.
+    pub fn map_foreign_accounted(
+        &mut self,
+        virt: u64,
+        phys: u64,
+        flags: u64,
+        kind: ResidentKind,
+    ) -> bool {
+        self.map_accounted(virt, phys, flags, kind)
     }
 
     /// Duplique le contenu utilisateur de `self` dans un espace neuf.

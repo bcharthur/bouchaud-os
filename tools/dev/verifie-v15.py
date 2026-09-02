@@ -7,7 +7,7 @@ required={
     "src/gui/widgets_v15.rs":["FPS:{:3}","legacy::draw_barre_haute"],
     "src/gui/mod.rs":["widgets_v15.rs","pub mod frame_clock"],
     "src/kernel/debug/journal.rs":["[FPS:","trames utiles"],
-    "tools/ladybird/chrome/modernise-v15.py":["draw_browser_text","draw_svg_icon","BOUCHAUD_CHROME_V15_REAL_TEXT_SVG_LOADING"],
+    "tools/ladybird/chrome/modernise-v15.py":["draw_browser_text","draw_svg_icon","BOUCHAUD_CHROME_V15_REAL_TEXT_SVG_LOADING","target_link_libraries(webcontentservice PRIVATE skia)"],
     "tools/ladybird/chrome/BouchaudChromeV15Assets.h":["ICON_SIZE","BACK","RELOAD","STOP"],
     "tools/ladybird/verifie-chrome.sh":["modernise-v15.py","BouchaudChromeV15Assets"],
     "tools/perf/run-ladybird-v15.ps1":["ValidateSet(1,4,8)","CpuCount"],

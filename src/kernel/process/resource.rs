@@ -7,6 +7,10 @@
 
 use crate::kernel::task::Process;
 use crate::kernel::vmm::PAGE_SIZE;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+static RSS_O1_SNAPSHOTS: AtomicU64 = AtomicU64::new(0);
+static RSS_O1_PAGES: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MemoryUsage {
@@ -22,11 +26,19 @@ pub struct MemoryUsage {
 }
 
 pub fn memory_usage(process: &Process) -> MemoryUsage {
-    let mm = process.mm.lock();
-    let promises = mm.promesses.clone();
-    let resident = mm.space.resident_stats(&promises);
+    // Sous Mm, on ne fait plus que deux lectures bornees : les compteurs RSS
+    // et une copie des metadonnees VMA. Le tri necessaire au VSS se fait APRES
+    // avoir rendu le verrou ; un grand espace ne bloque donc pas ses fautes de
+    // pages pendant le travail de diagnostic.
+    let (resident, promises) = {
+        let mm = process.mm.lock();
+        (mm.space.resident_stats(), mm.promesses.clone())
+    };
+    let vss = crate::kernel::vma::octets_virtuels(&promises);
+    RSS_O1_SNAPSHOTS.fetch_add(1, Ordering::Relaxed);
+    RSS_O1_PAGES.fetch_add(resident.total_pages, Ordering::Relaxed);
     MemoryUsage {
-        vss: crate::kernel::vma::octets_virtuels(&promises),
+        vss,
         rss: resident.total_pages * PAGE_SIZE,
         anonymous: resident.anonymous_pages * PAGE_SIZE,
         file_private: resident.file_private_pages * PAGE_SIZE,
@@ -34,6 +46,13 @@ pub fn memory_usage(process: &Process) -> MemoryUsage {
         device: resident.device_pages * PAGE_SIZE,
         untracked: resident.untracked_pages * PAGE_SIZE,
     }
+}
+
+pub fn rss_o1_stats() -> (u64, u64) {
+    (
+        RSS_O1_SNAPSHOTS.load(Ordering::Relaxed),
+        RSS_O1_PAGES.load(Ordering::Relaxed),
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

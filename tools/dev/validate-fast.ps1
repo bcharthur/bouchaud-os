@@ -87,6 +87,7 @@ try {
     Invoke-RustTest "re-entree IRQ runqueue" "tools\smp\test_runqueue_irq.rs"
     Invoke-RustTest "cout des frames libres" "tools\smp\test_frames_libres.rs"
     Invoke-RustTest "cout des frames possedees" "tools\smp\test_pages_possedees.rs"
+    Invoke-RustTest "RSS incremental et grappes MM" "tools\smp\test_rss_incremental.rs"
     Invoke-RustTest "cache de pages propres" "tools\smp\test_cache_pages.rs"
     Invoke-RustTest "discipline du gros verrou" "tools\smp\test_discipline_bkl.rs"
     Invoke-RustTest "ordre des verrous du cache" "tools\smp\test_ordre_verrous.rs"
@@ -152,6 +153,10 @@ try {
 
     Invoke-Step "comptabilite du gros verrou (source)" {
         & python .\tools\verifie-bkl-comptes.py
+    }
+
+    Invoke-Step "RSS incremental et grappes MM (source)" {
+        & python .\tools\verifie-rss-incremental.py
     }
 
     Invoke-Step "domaines du gros verrou (source)" {

@@ -24,8 +24,31 @@ asset_dst = header.with_name("BouchaudChromeV15Assets.h")
 shutil.copyfile(asset_src, asset_dst)
 
 data = header.read_text(encoding="utf-8")
+
+# BouchaudChrome est un en-tete inclus directement par les objets du service
+# WebContent. LibGfx utilise deja Skia, mais le lien est PRIVATE : ses chemins
+# d'inclusion ne se propagent donc pas au consommateur. Declarer Skia sur le
+# vrai target qui compile l'en-tete fournit a la fois include/skia et la
+# dependance de lien statique, sans injecter un chemin propre au runner.
+cmake = root / "Services/WebContent/CMakeLists.txt"
+cmake_data = cmake.read_text(encoding="utf-8")
+skia_link = "target_link_libraries(webcontentservice PRIVATE skia)"
+if skia_link not in cmake_data:
+    cmake_anchor = "target_link_libraries(webcontentservice PRIVATE SDL3::SDL3)\n"
+    if cmake_anchor not in cmake_data:
+        raise SystemExit("V15: ancre CMake webcontentservice/SDL3 introuvable")
+    cmake_data = cmake_data.replace(
+        cmake_anchor,
+        cmake_anchor
+        + "if (BOUCHAUD_PORT)\n"
+        + f"    {skia_link}\n"
+        + "endif()\n",
+        1,
+    )
+    cmake.write_text(cmake_data, encoding="utf-8", newline="\n")
+
 if "BOUCHAUD_CHROME_V15_REAL_TEXT_SVG_LOADING" in data:
-    print("V15 chrome deja modernise")
+    print("V15 chrome deja modernise; dependance Skia WebContent verifiee")
     raise SystemExit(0)
 
 # 1) Skia + image assets. Ils restent sous BOUCHAUD_PORT : le chrome n'existe

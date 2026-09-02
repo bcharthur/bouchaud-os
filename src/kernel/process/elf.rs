@@ -381,7 +381,12 @@ pub fn load(
                 // On mappe d'abord en ecriture pour pouvoir recopier le contenu,
                 // les droits definitifs sont appliques ensuite.
                 let writable = vmm::PTE_PRESENT | vmm::PTE_USER | vmm::PTE_WRITE;
-                if !space.map_alloc(page_start, page_end - page_start, writable) {
+                if !space.map_alloc_accounted(
+                    page_start,
+                    page_end - page_start,
+                    writable,
+                    vmm::ResidentKind::FilePrivate,
+                ) {
                     return Err("memoire physique insuffisante pour le segment");
                 }
 
@@ -474,7 +479,12 @@ pub fn build_stack(space: &mut AddressSpace, layout: &StackLayout) -> Result<u64
     let top = vmm::user_stack_top();
     let size = vmm::USER_STACK_SIZE;
     let flags = vmm::PTE_PRESENT | vmm::PTE_USER | vmm::PTE_WRITE | vmm::PTE_NO_EXEC;
-    if !space.map_alloc(top - size, size, flags) {
+    if !space.map_alloc_accounted(
+        top - size,
+        size,
+        flags,
+        vmm::ResidentKind::Anonymous,
+    ) {
         return Err("memoire physique insuffisante pour la pile utilisateur");
     }
 

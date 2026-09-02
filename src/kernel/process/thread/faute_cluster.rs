@@ -12,6 +12,7 @@ static FAULT_CLUSTER_CACHE_MISS: AtomicU64 = AtomicU64::new(0);
 static FAULT_CLUSTER_ALREADY: AtomicU64 = AtomicU64::new(0);
 static FAULT_CLUSTER_ABORTS: AtomicU64 = AtomicU64::new(0);
 static FAULT_CLUSTER_MAX_BATCH: AtomicU64 = AtomicU64::new(0);
+static FAULT_CLUSTER_MM_LOCKS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 struct FaultClusterCandidate {
@@ -95,49 +96,69 @@ fn fault_cluster_after_clean(
 ) {
     let candidates = fault_cluster_candidates(regions, current_page);
     if candidates.is_empty() { return; }
-    let mut mapped_batch = 0u64;
+
+    // Phase 1, sans Mm : prendre toutes les references du cache. Sur le run
+    // Ladybird elles sont deja chaudes grace au readahead (cache_miss=0).
+    // L'ancienne boucle reprenait pourtant Mm une fois PAR page, jusqu'a seize
+    // fois, et mettait les autres threads du renderer en rotation.
+    let mut ready = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         FAULT_CLUSTER_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
         let Some(frame) = crate::kernel::clean_page_cache::acquire(candidate.key) else {
             FAULT_CLUSTER_CACHE_MISS.fetch_add(1, Ordering::Relaxed);
             break;
         };
+        ready.push((candidate, frame));
+    }
+    if ready.is_empty() { return; }
 
-        let mut abort_mapping = false;
-        let mapped = {
-            let mut mm = processus.mm.lock();
+    // Phase 2 : une seule transaction Mm publie toute la grappe. Chaque token
+    // reste revalide individuellement ; mmap/munmap/mprotect peuvent donc
+    // toujours invalider proprement le reste de la grappe.
+    let mut mapped_batch = 0u64;
+    let mut releases = Vec::with_capacity(ready.len());
+    let mut aborted = false;
+    FAULT_CLUSTER_MM_LOCKS.fetch_add(1, Ordering::Relaxed);
+    {
+        let mut mm = processus.mm.lock();
+        for (candidate, frame) in ready {
+            if aborted {
+                releases.push(candidate.key);
+                continue;
+            }
             if mm.space.pml4() != fault_pml4
                 || mapping_token(&mm.promesses, candidate.page).as_ref() != Some(&candidate.token)
             {
-                abort_mapping = true;
-                false
+                aborted = true;
+                releases.push(candidate.key);
             } else if mm.space.translate(candidate.page).is_some() {
                 FAULT_CLUSTER_ALREADY.fetch_add(1, Ordering::Relaxed);
-                false
-            } else if mm.space.map_foreign(candidate.page, frame, candidate.drapeaux) {
+                releases.push(candidate.key);
+            } else if mm.space.map_foreign_accounted(
+                candidate.page,
+                frame,
+                candidate.drapeaux,
+                crate::kernel::vmm::ResidentKind::FilePrivate,
+            ) {
                 mm.clean_pages.push(CleanPageMapping { virt: candidate.page, key: candidate.key });
-                true
+                FAULT_CLUSTER_MAPPED.fetch_add(1, Ordering::Relaxed);
+                mapped_batch += 1;
             } else {
-                abort_mapping = true;
-                false
+                aborted = true;
+                releases.push(candidate.key);
             }
-        };
-
-        if mapped {
-            FAULT_CLUSTER_MAPPED.fetch_add(1, Ordering::Relaxed);
-            mapped_batch += 1;
-        } else {
-            crate::kernel::clean_page_cache::release(candidate.key);
-        }
-        if abort_mapping {
-            FAULT_CLUSTER_ABORTS.fetch_add(1, Ordering::Relaxed);
-            break;
         }
     }
+    // Ne jamais prendre le cache de pages sous Mm : on rend les references
+    // non publiees apres la transaction.
+    for key in releases {
+        crate::kernel::clean_page_cache::release(key);
+    }
+    if aborted { FAULT_CLUSTER_ABORTS.fetch_add(1, Ordering::Relaxed); }
     FAULT_CLUSTER_MAX_BATCH.fetch_max(mapped_batch, Ordering::Relaxed);
 }
 
-pub fn fault_cluster_stats() -> (u64, u64, u64, u64, u64, u64) {
+pub fn fault_cluster_stats() -> (u64, u64, u64, u64, u64, u64, u64) {
     (
         FAULT_CLUSTER_ATTEMPTS.load(Ordering::Relaxed),
         FAULT_CLUSTER_MAPPED.load(Ordering::Relaxed),
@@ -145,6 +166,7 @@ pub fn fault_cluster_stats() -> (u64, u64, u64, u64, u64, u64) {
         FAULT_CLUSTER_ALREADY.load(Ordering::Relaxed),
         FAULT_CLUSTER_ABORTS.load(Ordering::Relaxed),
         FAULT_CLUSTER_MAX_BATCH.load(Ordering::Relaxed),
+        FAULT_CLUSTER_MM_LOCKS.load(Ordering::Relaxed),
     )
 }
 
@@ -155,9 +177,10 @@ pub fn fault_cluster_stats() -> (u64, u64, u64, u64, u64, u64) {
 // nombre total de faults continue de monter par dizaines de milliers : le gros
 // volume restant est l'allocation Zero (heap/arenas/stacks). On ne pre-peuple
 // PAS un VMA entier. La fenetre ne s'ouvre qu'apres une vraie sequence de faults
-// et reste bornee a 2/4/8 pages, soit 32 KiB maximum d'anticipation.
+// et reste bornee. Apres une longue sequence confirmee elle peut atteindre 32
+// pages (128 KiB), mais la pression memoire la rabat immediatement a 8 ou 2.
 const ZERO_CLUSTER_CPUS: usize = 64;
-const ZERO_CLUSTER_MAX_PAGES: u64 = 8;
+const ZERO_CLUSTER_MAX_PAGES: u64 = 32;
 static ZERO_EXPECTED_PML4: [AtomicU64; ZERO_CLUSTER_CPUS] =
     [const { AtomicU64::new(u64::MAX) }; ZERO_CLUSTER_CPUS];
 static ZERO_EXPECTED_PAGE: [AtomicU64; ZERO_CLUSTER_CPUS] =
@@ -185,7 +208,18 @@ fn zero_cluster_window(fault_pml4: u64, page: u64) -> u64 {
         1
     };
     ZERO_EXPECTED_PML4[cpu].store(fault_pml4, Ordering::Relaxed);
-    let window: u64 = if run < 2 { 0 } else if run < 4 { 2 } else if run < 8 { 4 } else { 8 };
+    let adaptive: u64 = if run < 2 { 0 }
+        else if run < 4 { 2 }
+        else if run < 8 { 4 }
+        else if run < 16 { 8 }
+        else if run < 32 { 16 }
+        else { 32 };
+    let pressure_cap = match crate::kernel::memory_pressure::level() {
+        crate::kernel::memory_pressure::Level::Normal => ZERO_CLUSTER_MAX_PAGES,
+        crate::kernel::memory_pressure::Level::Low => 8,
+        crate::kernel::memory_pressure::Level::Critical => 2,
+    };
+    let window = adaptive.min(pressure_cap);
     let step = crate::kernel::vmm::PAGE_SIZE;
     ZERO_EXPECTED_PAGE[cpu].store(
         page.saturating_add(step.saturating_mul(window.saturating_add(1))),
@@ -224,7 +258,12 @@ fn fault_cluster_after_zero(
             ZERO_CLUSTER_ALREADY.fetch_add(1, Ordering::Relaxed);
             continue;
         }
-        if !mm.space.map_alloc(next, step, candidate_flags) {
+        if !mm.space.map_alloc_accounted(
+            next,
+            step,
+            candidate_flags,
+            crate::kernel::vmm::ResidentKind::Anonymous,
+        ) {
             ZERO_CLUSTER_ABORTS.fetch_add(1, Ordering::Relaxed);
             break;
         }
