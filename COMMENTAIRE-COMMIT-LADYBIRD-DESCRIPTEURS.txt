@@ -1,0 +1,9 @@
+fix(ladybird): restaurer les descripteurs partages inscriptibles
+
+Les fichiers anonymes et les surfaces GUI etaient crees avec un descripteur
+dont le mode d'acces restait en lecture seule. Le controle mmap refusait alors
+les projections partagees en ecriture utilisees par Ladybird.
+
+Centralise la creation de ces descripteurs, couvre les trois producteurs et
+ajoute un garde-fou source ainsi qu'une verification dans shm-probe, sans
+relacher la politique de securite.

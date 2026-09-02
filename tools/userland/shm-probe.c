@@ -309,6 +309,13 @@ int main(void)
         return 1;
     }
 
+    // Le nœud peut etre inscriptible alors que son descripteur ne l'est pas.
+    // Une projection partagee en ecriture doit donc verifier explicitement le
+    // mode publie par le noyau, avant meme de tenter le mmap.
+    int drapeaux = fcntl(fd, F_GETFL);
+    verifie("le descripteur autorise lecture et ecriture",
+            drapeaux >= 0 && (drapeaux & O_ACCMODE) == O_RDWR, NULL);
+
     // Il ne doit apparaitre nulle part dans l'arborescence : c'est ce qui le
     // distingue d'un fichier ordinaire, et ce qui le rend sur.
     struct stat etat;

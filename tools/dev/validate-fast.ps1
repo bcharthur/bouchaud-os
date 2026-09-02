@@ -178,6 +178,10 @@ try {
         & python .\tools\verifie-motdepasse.py
     }
 
+    Invoke-Step "descripteurs partages inscriptibles (source)" {
+        & python .\tools\verifie-descripteurs-partages.py
+    }
+
     if (Test-Path ".\tools\verifie-protocole-gui.py") {
         Invoke-Step "coherence protocole GUI" {
             & python .\tools\verifie-protocole-gui.py
