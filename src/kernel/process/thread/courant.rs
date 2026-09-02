@@ -27,16 +27,51 @@ fn rsp_courant_passation() -> u64 {
     rsp
 }
 
+/// Tente d'ouvrir une transition du scheduler sur le CPU local.
+///
+/// Une IRQ peut interrompre `schedule()` entre l'election et le changement de
+/// pile. Elle ne doit alors ni elire une seconde tache ni ecraser
+/// `SWITCH_PENDING`. Le BKL rendait ce cas impossible en serialisant tout le
+/// noyau ; cette porte atomique fournit exactement la propriete locale dont le
+/// scheduler a besoin, sans bloquer les autres CPU.
+#[inline]
+fn commence_transition_ordonnanceur() -> bool {
+    let cpu = local_cpu();
+    if TRANSITION_ORDONNANCEUR[cpu]
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        TRANSITIONS_ORDONNANCEUR_REFUSEES.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    crate::kernel::sync::lockdep::before_acquire(LockClass::SchedulerTransition);
+    crate::kernel::sync::lockdep::acquired(LockClass::SchedulerTransition);
+    TRANSITIONS_ORDONNANCEUR.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+/// Rend la porte locale si cette continuation est celle qui termine la
+/// transition. L'appel est idempotent : plusieurs chemins de reprise peuvent
+/// verifier une passation deja acquittee.
+#[inline]
+fn termine_transition_ordonnanceur() {
+    let cpu = local_cpu();
+    if TRANSITION_ORDONNANCEUR[cpu].swap(false, Ordering::AcqRel) {
+        crate::kernel::sync::lockdep::released(LockClass::SchedulerTransition);
+    }
+}
+
 /// Prepare la sortie d'une tache SANS la publier.
 ///
-/// Le BKL est tenu. La tache reste `on_cpu == cpu` et n'est pas mise en file.
-/// C'est volontaire : `switch_context` sauvegarde d'abord son RSP puis change
-/// de pile ; entre ces deux instructions, l'ancien CPU utilise encore la pile.
+/// La transition locale du scheduler est tenue. La tache reste
+/// `on_cpu == cpu` et n'est pas mise en file. C'est volontaire :
+/// `switch_context` sauvegarde d'abord son RSP puis change de pile ; entre ces
+/// deux instructions, l'ancien CPU utilise encore la pile.
 #[inline]
 fn prepare_switch_handoff(index: usize, task: &mut Task, cpu: usize) {
     debug_assert!(
-        smp_lock::held_by_current_cpu(),
-        "task: preparation de passation sans BKL"
+        TRANSITION_ORDONNANCEUR[cpu].load(Ordering::Acquire),
+        "task: preparation de passation hors transition scheduler"
     );
     assert_eq!(
         task.on_cpu,
@@ -74,12 +109,15 @@ fn complete_switch_handoff() {
     let cpu = local_cpu();
     let outgoing = SWITCH_PENDING[cpu].load(Ordering::Acquire);
     if outgoing == NO_TASK {
+        // Une transition noyau -> tache n'a pas de sortante dans le registre,
+        // mais elle doit tout de meme rendre la porte depuis la pile entrante.
+        termine_transition_ordonnanceur();
         return;
     }
 
     debug_assert!(
-        smp_lock::held_by_current_cpu(),
-        "task: completion de passation sans BKL"
+        TRANSITION_ORDONNANCEUR[cpu].load(Ordering::Acquire),
+        "task: completion de passation hors transition scheduler"
     );
     assert!(
         outgoing < tasks().len(),
@@ -131,6 +169,7 @@ fn complete_switch_handoff() {
     if publish {
         publish_ready(outgoing);
     }
+    termine_transition_ordonnanceur();
 }
 
 /// PID du programme lance au premier plan par [`run`], 0 si aucun.

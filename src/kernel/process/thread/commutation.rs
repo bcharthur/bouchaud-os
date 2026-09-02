@@ -11,8 +11,6 @@ unsafe extern "C" fn switch_context(from: *mut u64, to: u64) {
 
 extern "C" fn task_trampoline() -> ! {
     let frame = {
-        let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
-        let _kernel = smp_lock::enter();
         complete_switch_handoff();
         // `install` ecrit la trame de la tache : contenu prive, acces exclusif.
         let mut task = current_exclusif();
@@ -23,8 +21,6 @@ extern "C" fn task_trampoline() -> ! {
 }
 
 extern "C" fn kernel_task_trampoline() -> ! {
-    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
-    let _kernel = smp_lock::enter();
     complete_switch_handoff();
     let entree = {
         let mut task = current_exclusif();
@@ -62,8 +58,26 @@ fn deactivate_task_space(task: &Task, cpu_id: usize) {
 
 #[inline]
 fn mark_task_running(task: &mut Task, cpu_id: usize) {
+    assert_eq!(
+        task.on_cpu.compare_exchange(-1, cpu_id as i8),
+        Ok(-1),
+        "task: tentative de double execution tid={} on_cpu={}",
+        task.tid,
+        task.on_cpu,
+    );
+    finalise_task_running(task, cpu_id);
+}
+
+/// Finalise les donnees privees apres une revendication CAS deja acquise par
+/// `pick_next` (ou par `mark_task_running` pour les lancements noyau legacy).
+fn finalise_task_running(task: &mut Task, cpu_id: usize) {
     let now = crate::kernel::timer::monotonic_ns();
-    assert!(task.on_cpu < 0, "task: tentative de double execution tid={}", task.tid);
+    assert_eq!(
+        task.on_cpu,
+        cpu_id as i8,
+        "task: finalisation sans propriete CPU tid={}",
+        task.tid,
+    );
     assert!(!task.switching_out.charge(),
         "task: tentative de reprendre une tache dont la passation n'est pas terminee tid={}", task.tid);
     debug_assert_eq!(task.last_account_ns, 0,
@@ -87,7 +101,6 @@ fn mark_task_running(task: &mut Task, cpu_id: usize) {
     }
     task.last_cpu.range(cpu_id as u8);
     task.runq_cpu.range(cpu_id as u8);
-    task.on_cpu.range(cpu_id as i8);
     task.switching_out.range(false);
     task.slice_start_ns.range(now);
     task.last_account_ns.range(now);

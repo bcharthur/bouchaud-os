@@ -106,10 +106,10 @@ def main() -> int:
 
     # Et le raccourci lui-meme doit rester en place : sans lui, la regle
     # ci-dessus est inutile, mais la verifier ne coute rien.
-    if "doit_balayer(" not in "\n".join(lignes):
+    if "commence_balayage(" not in "\n".join(lignes):
         fautes.append(
-            "  thread.rs  `wake_sleepers` ne consulte plus la borne : le "
-            "balayage complet est revenu"
+            "  thread.rs  `wake_sleepers` ne revendique plus la borne : le "
+            "balayage complet concurrent est revenu"
         )
 
     if fautes:

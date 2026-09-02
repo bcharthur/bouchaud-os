@@ -28,20 +28,11 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
     let mut preempt_now = false;
     {
         let _site = crate::kernel::task::SiteIrq::enter(60, 0);
-        let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
-        let Some(_kernel) = crate::kernel::smp_lock::try_enter() else {
-            if quantum && crate::kernel::task::in_user_task() {
-                // The IRQ cannot safely switch while the global compatibility
-                // lock is busy. Arm both the legacy deferred path and the NG
-                // safe-point flag; the next clean kernel boundary will consume it.
-                crate::kernel::scheduler::preempt::request_local();
-                crate::kernel::task::request_deferred_preempt();
-            }
-            return;
-        };
         crate::kernel::task::stall_site_set(61, 0);
 
-        crate::kernel::sync::reveil::flush_interface_irq_bkl_held();
+        // Bottom-half sans BKL : WaitQueue arbitre les reveils par identite
+        // generationnelle et CAS Blocked -> Ready.
+        crate::kernel::sync::reveil::flush_interface_irq();
         if !idle { crate::kernel::task::echantillonne_tache_bsp(); }
         crate::kernel::task::watchdog_from_timer();
 

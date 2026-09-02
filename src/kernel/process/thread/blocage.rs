@@ -2,14 +2,15 @@
 /// un signal en attente.
 pub fn wake_for_signal(pid: u32) {
     for index in 0..tasks().len() {
-        if tasks()[index].state == TaskState::Blocked
-            && tasks()[index].process.pid == pid
+        let registre = tasks();
+        let task = &registre[index];
+        if task.process.pid == pid
+            && task.state.echange(TaskState::Blocked, TaskState::Ready)
         {
-            tasks()[index].futex_key.range(0);
-            tasks()[index].wait_queue_key.range(0);
-            tasks()[index].wake_deadline_ns.range(0);
-            tasks()[index].waiting_for_child.range(false);
-            tasks()[index].state.range(TaskState::Ready);
+            task.futex_key.range(0);
+            task.wait_queue_key.range(0);
+            task.wake_deadline_ns.range(0);
+            task.waiting_for_child.range(false);
             publish_ready(index);
         }
     }

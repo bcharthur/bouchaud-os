@@ -142,11 +142,11 @@ impl Domaine {
             // declarer `Migre` fait desormais compter toute reprise comme une
             // REGRESSION, mesuree par `[BKL-DOMAINES] regressions=` et bornee a
             // zero par le budget `bkl_regressions_domaine`.
-            Self::Fs | Self::Vfs => Contrat::Migre,
+            Self::Fs | Self::Vfs | Self::Ordonnanceur => Contrat::Migre,
             // Legitimes : pas de concurrence a proteger.
             Self::BootPrecoce | Self::Panique => Contrat::Exempte,
             // Le chantier en cours.
-            Self::Ordonnanceur | Self::Processus | Self::Readiness | Self::Futex => {
+            Self::Processus | Self::Readiness | Self::Futex => {
                 Contrat::EnMigration
             }
             _ => Contrat::Legacy,

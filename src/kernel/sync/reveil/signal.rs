@@ -16,14 +16,14 @@ impl Reveil {
         self.irq_pending.store(true, Ordering::Release);
     }
 
-    /// Bottom-half flush. Caller MUST hold the BKL.
+    /// Bottom-half flush : atomiques + WaitQueue sans BKL.
     #[inline]
-    pub fn flush_irq_bkl_held(&self) -> usize {
+    pub fn flush_irq(&self) -> usize {
         if !self.irq_pending.swap(false, Ordering::AcqRel) {
             return 0;
         }
         self.irq_flushes.fetch_add(1, Ordering::Relaxed);
-        let woken = self.source.flush_deferred_bkl_held();
+        let woken = self.source.flush_deferred();
         self.irq_woken.fetch_add(woken as u64, Ordering::Relaxed);
         woken
     }

@@ -604,6 +604,9 @@ pub struct OrdonnanceurStats {
     pub switches: u64,
     pub irq_preemptions: u64,
     pub deferred_preemptions: u64,
+    pub transitions: u64,
+    pub transitions_refusees: u64,
+    pub detach_bkl_legacy: u64,
     pub wm_age_ms: u64,
     pub ready: usize,
     pub live: usize,
@@ -616,10 +619,12 @@ pub fn diagnostic_ordonnanceur() -> OrdonnanceurStats {
         switches: CONTEXT_SWITCHES.load(Ordering::Relaxed),
         irq_preemptions: IRQ_PREEMPTIONS.load(Ordering::Relaxed),
         deferred_preemptions: DEFERRED_PREEMPTIONS.load(Ordering::Relaxed),
+        transitions: TRANSITIONS_ORDONNANCEUR.load(Ordering::Relaxed),
+        transitions_refusees: TRANSITIONS_ORDONNANCEUR_REFUSEES.load(Ordering::Relaxed),
+        detach_bkl_legacy: DETACHEMENTS_BKL_LEGACY.load(Ordering::Relaxed),
         wm_age_ms: now.saturating_sub(heartbeat).saturating_mul(1000)
             / crate::kernel::timer::TICKS_PER_SECOND,
         ready: ready_count(),
         live: live_count(),
     }
 }
-

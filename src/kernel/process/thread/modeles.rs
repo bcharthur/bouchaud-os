@@ -264,6 +264,25 @@ macro_rules! champ_atomique {
             pub fn echange(&self, valeur: $valeur) -> $valeur {
                 self.0.swap(valeur, core::sync::atomic::Ordering::AcqRel)
             }
+            /// Remplace `attendu` par `nouveau` si aucun autre CPU n'a
+            /// modifie le champ entre-temps.
+            ///
+            /// Le scheduler l'utilise pour revendiquer une tache : deux CPU
+            /// peuvent observer une entree prete, mais un seul peut faire
+            /// passer `on_cpu` de -1 a son identifiant logique.
+            #[inline]
+            pub fn compare_exchange(
+                &self,
+                attendu: $valeur,
+                nouveau: $valeur,
+            ) -> Result<$valeur, $valeur> {
+                self.0.compare_exchange(
+                    attendu,
+                    nouveau,
+                    core::sync::atomic::Ordering::AcqRel,
+                    core::sync::atomic::Ordering::Acquire,
+                )
+            }
         }
 
         impl PartialEq<$valeur> for $nom {

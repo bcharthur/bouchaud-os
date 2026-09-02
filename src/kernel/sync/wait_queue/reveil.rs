@@ -21,12 +21,4 @@ impl WaitQueue {
         crate::kernel::task::wake_wait_queue(self.key(), usize::MAX)
     }
 
-    pub fn wake_all_bkl_held(&self) -> usize {
-        self.point.signale_seul();
-        if self.point.dormeurs() == 0 {
-            WAITQ_WAKE_SANS_VERROU.fetch_add(1, Ordering::Relaxed);
-            return 0;
-        }
-        crate::kernel::task::wake_wait_queue(self.key(), usize::MAX)
-    }
 }

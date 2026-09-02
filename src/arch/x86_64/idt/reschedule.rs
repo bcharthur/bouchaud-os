@@ -18,13 +18,6 @@ extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFram
     let mut preempt_now = false;
     {
         let _site = crate::kernel::task::SiteIrq::enter(30, 0);
-        let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
-        let Some(_kernel) = crate::kernel::smp_lock::try_enter() else {
-            crate::kernel::task::stall_ipi_bkl_result(false);
-            crate::kernel::task::set_need_resched();
-            return;
-        };
-        crate::kernel::task::stall_ipi_bkl_result(true);
         crate::kernel::task::stall_site_set(31, 0);
 
         crate::kernel::task::echantillonne_quantum(

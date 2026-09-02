@@ -6,48 +6,27 @@
 /// changements de contexte par tick.
 
 pub fn preempt_from_irq() {
-    // BOUCHAUD_SMP4_DEADLOCK_FIX
-    //
-    // Une IRQ ne doit jamais attendre le BKL avec IF=0. Si le verrou est
-    // occupe, on differe simplement la preemption.
     debug_assert!(
         !cpu::interrupts_enabled(),
         "task: preempt_from_irq appelee hors contexte IRQ"
     );
 
     stall_site_set(40, 0);
-    // Le BKL appartient au CPU, pas a la tache. Commuter alors que `OWNER`
-    // designe encore ce CPU donnerait le verrou a la tache ENTRANTE, qui ne l'a
-    // jamais demande, pendant que la pile sortante croirait toujours le tenir.
-    //
-    // `try_enter` est REENTRANTE : si le contexte interrompu detenait deja le
-    // verrou, elle aurait rendu un garde de profondeur N+1, et le `drop`
-    // ci-dessous ne serait redescendu qu'a N -- `OWNER` reste nous, et l'on
-    // commute quand meme. Le commentaire « le BKL est libere AVANT le switch
-    // IRQ » n'aurait alors ete vrai que par accident.
-    //
-    // Cet appel-ci refuse la reentrance. Ce n'est pas une regression : sur ce
-    // chemin, `preempt_now` n'est arme que si l'IRQ a interrompu du RING 3
-    // (`from_user`), donc un contexte qui ne peut rien detenir. Le refus est
-    // donc la ceinture, pas le comportement nominal -- et s'il se declenche, il
-    // se compte et se DIFFERE au lieu de casser silencieusement.
-    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
-    let Some(kernel) = smp_lock::try_enter_depuis_zero() else {
+    debug_assert_eq!(smp_lock::profondeur_locale(), 0, "preemption ring3 avec BKL");
+    complete_switch_handoff();
+    if !commence_transition_ordonnanceur() {
         stall_site_clear();
-        if smp_lock::held_by_current_cpu() {
-            PREEMPT_IRQ_BKL_TENU.fetch_add(1, Ordering::Relaxed);
-        }
         request_deferred_preempt();
         return;
-    };
+    }
     stall_site_set(41, 0);
 
     let cur = current_index_raw();
     if cur == NO_TASK {
+        termine_transition_ordonnanceur();
         return;
     }
 
-    complete_switch_handoff();
     wake_sleepers();
 
     let cpu_id = local_cpu();
@@ -57,13 +36,16 @@ pub fn preempt_from_irq() {
     // Le pull distant reste réservé au chemin schedule() lorsque la tâche
     // courante s'est réellement bloquée.
     if ready_count_cpu(cpu_id) == 0 {
+        termine_transition_ordonnanceur();
         return;
     }
 
     let Some(next) = pick_next(cur, cpu_id) else {
+        termine_transition_ordonnanceur();
         return;
     };
     if next == cur {
+        termine_transition_ordonnanceur();
         return;
     }
 
@@ -81,37 +63,25 @@ pub fn preempt_from_irq() {
         deactivate_task_space(&*from_ptr, cpu_id);
         prepare_switch_handoff(cur, &mut *from_ptr, cpu_id);
         // Meme si drop(kernel) precede le switch, l'outgoing reste resident.
-        mark_task_running(&mut *to_ptr, cpu_id);
+        finalise_task_running(&mut *to_ptr, cpu_id);
 
         set_current_index(next);
         install(&mut *to_ptr);
         (from_ptr, to_ptr)
     };
 
-    // Le BKL est libere AVANT le switch IRQ. Quand cette pile IRQ sera reprise
-    // plus tard avec IF=0, elle n'aura aucun BKL a reacquerir avant IRETQ.
-    //
-    // Le garde vient de `try_enter_depuis_zero` : sa profondeur est donc 1, et
-    // ce `drop` libere reellement `OWNER`. L'assertion ci-dessous le verifie au
-    // lieu de le supposer -- c'est l'invariant central de ce chemin.
-    drop(kernel);
-    debug_assert!(
-        !smp_lock::held_by_current_cpu(),
-        "task: changement de contexte IRQ alors que ce CPU detient encore le BKL"
-    );
-    // Le nouveau contexte ne doit pas heriter d'un tag "preempt kernel".
+    // La porte locale reste publiee pendant le `mov rsp`. La continuation
+    // entrante la rend dans `complete_switch_handoff`, avant toute execution
+    // normale de la tache.
     stall_site_clear();
     smp_lock::note_switch(true, cur, next);
     unsafe { switch_context(&mut (*from_ptr).ctx.rsp, (*to_ptr).ctx.rsp); }
     smp_lock::note_switch(false, cur, next);
 
-    // Ne jamais bloquer ici. Nettoyage opportuniste uniquement.
+    // Quand cette pile IRQ reprend plus tard, la passation qui vient de la
+    // remettre en service est deja acquittee par la continuation precedente.
     stall_site_set(42, 0);
-    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
-    if let Some(_kernel) = smp_lock::try_enter() {
-        stall_site_set(43, 0);
-        complete_switch_handoff();
-    }
+    complete_switch_handoff();
     stall_site_clear();
 }
 
@@ -139,4 +109,3 @@ pub fn echantillonne_tache_bsp() {
 pub fn echantillonne_quantum(_interrupted_user: bool, ticks: u64) {
     add_current_ticks(ticks.max(1));
 }
-

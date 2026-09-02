@@ -82,6 +82,7 @@ try {
     Invoke-RustTest "shootdown TLB" "tools\smp\test_shootdown_tlb.rs"
     Invoke-RustTest "empreintes de mots de passe" "tools\securite\test_motdepasse.rs"
     Invoke-RustTest "commutation SMP" "tools\smp\test_commutation.rs"
+    Invoke-RustTest "ordonnanceur sans BKL" "tools\smp\test_scheduler_sans_bkl.rs"
     Invoke-RustTest "profondeur BKL" "tools\smp\test_profondeur_bkl.rs"
     Invoke-RustTest "re-entree IRQ runqueue" "tools\smp\test_runqueue_irq.rs"
     Invoke-RustTest "cout des frames libres" "tools\smp\test_frames_libres.rs"
@@ -155,6 +156,10 @@ try {
 
     Invoke-Step "domaines du gros verrou (source)" {
         & python .\tools\verifie-domaines-bkl.py
+    }
+
+    Invoke-Step "ordonnanceur sans BKL (source)" {
+        & python .\tools\verifie-ordonnanceur-sans-bkl.py
     }
 
     Invoke-Step "registre des taches (source)" {

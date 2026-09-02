@@ -33,6 +33,30 @@ fn runnable_steal(task: &Task, cpu: usize) -> bool {
         && allowed_on(task, cpu)
 }
 
+/// Revendique une incarnation pendant que son garde generationnel est encore
+/// vivant. Renvoyer seulement l'indice puis revendiquer plus tard rouvrirait
+/// une fenetre ABA : le recycleur pourrait installer une nouvelle tache dans
+/// le meme emplacement entre les deux operations.
+fn revendique_candidate(task: &Task, cpu: usize) -> bool {
+    if task
+        .on_cpu
+        .compare_exchange(-1, cpu as i8)
+        .is_err()
+    {
+        return false;
+    }
+
+    // Un kill concurrent peut gagner juste apres la premiere lecture Ready.
+    // Dans ce cas, rendre la revendication sans republier : un zombie n'entre
+    // jamais dans une runqueue.
+    if task.state != TaskState::Ready || task.switching_out.charge() {
+        let rendu = task.on_cpu.compare_exchange(cpu as i8, -1);
+        debug_assert_eq!(rendu, Ok(cpu as i8));
+        return false;
+    }
+    true
+}
+
 // Ce que l'election JETTE, par CPU.
 //
 // `pick_next` consomme une entree de file et peut la rejeter pour deux raisons
@@ -71,7 +95,10 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
                     .fetch_add(1, Ordering::Relaxed);
                 continue;
             };
-            if identite.emplacement() < len && runnable_local(&tache, cpu) {
+            if identite.emplacement() < len
+                && runnable_local(&tache, cpu)
+                && revendique_candidate(&tache, cpu)
+            {
                 return Some(identite.emplacement());
             }
             // L'entree vient d'etre CONSOMMEE et n'est pas servie. La tache
@@ -100,7 +127,7 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
         // compte -- `rej_bal` etait publie et n'etait jamais incremente, donc
         // toujours nul -- et il se temporise : rescaner tous les CPU au
         // prochain `pick_next` ne repondra pas autre chose tant que personne
-        // ne s'est charge, et ce scan a lieu le gros verrou en main.
+        // ne s'est charge, et ce scan allonge la transition locale.
         STEAL_REJECT_BALANCE[cpu].fetch_add(1, Ordering::Relaxed);
         STEAL_RETRY_AFTER_NS[cpu]
             .store(now.saturating_add(STEAL_BACKOFF_STERILE_NS), Ordering::Relaxed);
@@ -146,7 +173,13 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
             return None;
         }
     }
-    tasks()[index].runq_cpu.range(cpu as u8);
+    if !revendique_candidate(&candidate, cpu) {
+        // La tache a ete revendiquee ou retiree pendant le vol. L'identite
+        // consommee ne doit pas etre remise dans la file du donneur.
+        STEAL_REJECT_BALANCE[cpu].fetch_add(1, Ordering::Relaxed);
+        return None;
+    }
+    candidate.runq_cpu.range(cpu as u8);
     RUNQ_STEALS[cpu].fetch_add(1, Ordering::Relaxed);
     STEAL_RETRY_AFTER_NS[cpu].store(0, Ordering::Relaxed);
     Some(index)
@@ -266,38 +299,95 @@ fn verifie_profondeur_rendue(site: &str, attendue: usize) {
     let _ = (site, attendue);
 }
 
-/// Meme controle, mais applique a la SORTIE d'une portee, quelle qu'elle soit.
+/// Abandonne le BKL d'une continuation qui ne reviendra jamais.
 ///
-/// `schedule()` a plusieurs retours -- pas de tache courante, rien a elire,
-/// commutation effective. Un controle ecrit a la main sur chacun d'eux se
-/// serait desynchronise au premier retour ajoute ; celui-ci ne le peut pas.
-struct ControleProfondeur {
-    site: &'static str,
-    attendue: usize,
+/// `exit_current` et la retraite d'un sibling tue par `execve` arrivent encore
+/// depuis des appels systeme legacy : leur garde BKL vit sur la pile de la
+/// tache. Cette pile etant condamnee, personne ne repassera par le `Drop` du
+/// garde. La profondeur doit donc etre rendue AVANT le dernier `switch_to`,
+/// exactement comme `schedule` la suspend avant d'entrer dans son coeur sans
+/// verrou, mais sans reprise symetrique.
+#[inline]
+fn abandonne_bkl_avant_sortie_definitive() {
+    let abandonnee = smp_lock::suspend_for_schedule();
+    #[cfg(debug_assertions)]
+    debug_assert_eq!(
+        smp_lock::profondeur_locale(),
+        0,
+        "task: sortie definitive entree dans le scheduler sous BKL (profondeur abandonnee={})",
+        abandonnee,
+    );
+    #[cfg(not(debug_assertions))]
+    let _ = abandonnee;
 }
 
-impl Drop for ControleProfondeur {
-    fn drop(&mut self) {
-        // Le garde de `schedule()` n'est pas encore relache quand ce Drop
-        // s'execute : la profondeur attendue est donc celle d'entree, PLUS le
-        // niveau que `schedule()` detient encore.
-        verifie_profondeur_rendue(self.site, self.attendue.saturating_add(1));
+/// Elit et commute depuis une pile qui ne doit plus jamais reprendre.
+///
+/// Ce chemin ne peut pas utiliser l'enveloppe `schedule()`: son appelant est
+/// deja Zombie et tout retour apres une commutation serait une corruption.
+/// Il doit neanmoins respecter exactement la meme porte locale que le coeur
+/// ordinaire. La porte est ouverte AVANT `wake_sleepers` et `pick_next`, reste
+/// publiee pendant le changement physique de pile, puis sera rendue par la
+/// continuation entrante dans `complete_switch_handoff`.
+///
+/// Si aucune autre tache n'est prete, la porte est rendue et l'appelant peut
+/// dormir ou revenir au contexte noyau.
+fn commute_sortie_definitive_si_possible(cur: usize, cpu_id: usize) {
+    debug_assert_eq!(smp_lock::profondeur_locale(), 0);
+    complete_switch_handoff();
+    assert!(
+        commence_transition_ordonnanceur(),
+        "task: transition scheduler deja active pendant une sortie definitive"
+    );
+
+    wake_sleepers();
+    if let Some(next) = pick_next(cur, cpu_id) {
+        if next != cur {
+            switch_to(cur, next);
+            unreachable!("task: reprise d'une tache definitivement sortie");
+        }
     }
+
+    termine_transition_ordonnanceur();
 }
 
 /// Rend la main : bascule sur une autre tache prete s'il y en a une.
+///
+/// Le coeur du scheduler s'execute TOUJOURS a profondeur BKL nulle. Les
+/// appelants legacy qui entrent encore avec une profondeur non nulle sont
+/// detaches a la frontiere, puis retrouvent exactement leur profondeur au
+/// retour. Le chemin normal depth=0 ne suspend ni ne reprend le gros verrou.
 ///
 /// Renvoie `true` si un changement de tache a eu lieu. Si la tache courante est
 /// la seule prete, la fonction attend une interruption (`hlt`) et rend la main a
 /// l'appelant, qui doit reevaluer sa condition d'attente.
 pub fn schedule() -> bool {
     let profondeur_entree = smp_lock::profondeur_locale();
-    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
-    let _kernel = smp_lock::enter();
-    let _controle = ControleProfondeur { site: "schedule", attendue: profondeur_entree };
+    if profondeur_entree == 0 {
+        return schedule_sans_bkl();
+    }
+
+    DETACHEMENTS_BKL_LEGACY.fetch_add(1, Ordering::Relaxed);
+    let profondeur = smp_lock::suspend_for_schedule();
+    debug_assert_eq!(profondeur, profondeur_entree);
+    let commute = schedule_sans_bkl();
+    smp_lock::resume_after_schedule(profondeur);
+    verifie_profondeur_rendue("schedule/legacy", profondeur_entree);
+    commute
+}
+
+fn schedule_sans_bkl() -> bool {
+    debug_assert_eq!(smp_lock::profondeur_locale(), 0, "scheduler execute sous BKL");
     complete_switch_handoff();
+    if !commence_transition_ordonnanceur() {
+        request_deferred_preempt();
+        return false;
+    }
     let cur = current_index_raw();
-    if cur == NO_TASK { return false; }
+    if cur == NO_TASK {
+        termine_transition_ordonnanceur();
+        return false;
+    }
     debug_assert_interrupts_enabled();
     wake_sleepers();
     let cpu_id = local_cpu();
@@ -312,17 +402,13 @@ pub fn schedule() -> bool {
                 let rearmer = suspend_compta_pour_idle();
                 // BOUCHAUD_P0_IDLE_WAKE_HANDSHAKE_V14
                 cpu::prepare_scheduler_idle();
-                let depth = smp_lock::suspend_for_schedule();
-                #[cfg(debug_assertions)]
-                debug_assert!(
-                    !smp_lock::held_by_current_cpu(),
-                    "task: schedule HLT interdit tant que le BKL est detenu"
-                );
+                termine_transition_ordonnanceur();
                 cpu::commit_scheduler_idle();
-                smp_lock::resume_after_schedule(depth);
                 if rearmer {
                     rearme_compta_apres_idle();
                 }
+            } else {
+                termine_transition_ordonnanceur();
             }
             return false;
         }
@@ -332,9 +418,8 @@ pub fn schedule() -> bool {
 }
 
 fn switch_to(from: usize, to: usize) {
-    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
-    let _kernel = smp_lock::enter();
-    complete_switch_handoff();
+    debug_assert_eq!(smp_lock::profondeur_locale(), 0);
+    debug_assert!(TRANSITION_ORDONNANCEUR[local_cpu()].load(Ordering::Acquire));
     let cpu_id = local_cpu();
     let (from_ptr, to_ptr) = unsafe {
         let list = tasks();
@@ -348,26 +433,31 @@ fn switch_to(from: usize, to: usize) {
         deactivate_task_space(&*from_ptr, cpu_id);
         prepare_switch_handoff(from, &mut *from_ptr, cpu_id);
         // PAS de on_cpu=-1, PAS d'enqueue ici. Cette pile est encore active.
-        mark_task_running(&mut *to_ptr, cpu_id);
+        finalise_task_running(&mut *to_ptr, cpu_id);
 
         set_current_index(to);
         install(&mut *to_ptr);
         (from_ptr, to_ptr)
     };
 
-    let depth = smp_lock::suspend_for_schedule();
     smp_lock::note_switch(true, from, to);
     unsafe { switch_context(&mut (*from_ptr).ctx.rsp, (*to_ptr).ctx.rsp); }
     smp_lock::note_switch(false, from, to);
-    smp_lock::resume_after_schedule(depth);
     complete_switch_handoff();
 }
 
 /// Retour definitif au fil noyau appelant (la tache courante est terminee).
 fn switch_to_kernel() -> ! {
-    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
-    let _kernel = smp_lock::enter();
+    // La continuation sortante ne reviendra jamais : sa profondeur legacy est
+    // abandonnee avant d'entrer dans le coeur sans BKL. La pile noyau entrante
+    // restaure sa propre profondeur dans le chemin qui l'avait lancee.
+    let profondeur = smp_lock::profondeur_locale();
+    if profondeur != 0 {
+        let abandonnee = smp_lock::suspend_for_schedule();
+        debug_assert_eq!(abandonnee, profondeur);
+    }
     complete_switch_handoff();
+    assert!(commence_transition_ordonnanceur(), "transition scheduler deja active");
     let cpu_id = local_cpu();
     let cur = current_index_raw();
     let from_ptr = unsafe {
@@ -390,11 +480,8 @@ fn switch_to_kernel() -> ! {
     usermode::per_cpu().current = 0;
     crate::kernel::vmm::activate_kernel();
     let target_rsp = kernel_ctx().rsp;
-    let depth = smp_lock::suspend_for_schedule();
     smp_lock::note_switch(true, cur, NO_TASK);
     unsafe { switch_context(&mut (*from_ptr).ctx.rsp, target_rsp); }
-    smp_lock::note_switch(false, cur, NO_TASK);
-    smp_lock::resume_after_schedule(depth);
     unreachable!("task: reprise d'une tache terminee")
 }
 
@@ -410,8 +497,12 @@ pub fn secondary_cpu_loop() -> ! {
     usermode::per_cpu().current = 0;
 
     loop {
-        let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Ordonnanceur);
-        let _kernel = smp_lock::enter();
+        debug_assert_eq!(smp_lock::profondeur_locale(), 0);
+        complete_switch_handoff();
+        if !commence_transition_ordonnanceur() {
+            core::hint::spin_loop();
+            continue;
+        }
         stall_site_set(50, current_index_raw() as u64);
         // Avant le premier register() du BSP, ne meme pas materialiser TASKS :
         // cela permet d'activer les AP juste avant l'autorun sans mettre le boot
@@ -420,11 +511,10 @@ pub fn secondary_cpu_loop() -> ! {
         if aucune_tache {
             // BOUCHAUD_P0_IDLE_WAKE_HANDSHAKE_V14
             cpu::prepare_scheduler_idle();
-            let depth = smp_lock::suspend_for_schedule();
+            termine_transition_ordonnanceur();
             stall_site_clear();
             cpu::commit_scheduler_idle();
             stall_site_set(52, current_index_raw() as u64);
-            smp_lock::resume_after_schedule(depth);
             stall_site_set(53, current_index_raw() as u64);
             continue;
         }
@@ -433,17 +523,15 @@ pub fn secondary_cpu_loop() -> ! {
             let to_ptr = unsafe {
                 let list = tasks();
                 let ptr = unsafe { registre_pointeur_ordonnanceur(next) }.expect("registre: tache absente");
-                mark_task_running(&mut *ptr, cpu_id);
+                finalise_task_running(&mut *ptr, cpu_id);
                 ptr
             };
             set_current_index(next);
             unsafe { install(&mut *to_ptr); }
             let kernel_rsp = &mut kernel_ctx().rsp as *mut u64;
-            let depth = smp_lock::suspend_for_schedule();
             stall_site_clear();
             unsafe { switch_context(kernel_rsp, (*to_ptr).ctx.rsp); }
             stall_site_set(52, current_index_raw() as u64);
-            smp_lock::resume_after_schedule(depth);
             stall_site_set(53, current_index_raw() as u64);
             stall_site_set(54, SWITCH_PENDING[cpu_id].load(Ordering::Acquire) as u64);
             complete_switch_handoff();
@@ -458,11 +546,10 @@ pub fn secondary_cpu_loop() -> ! {
         } else {
             // BOUCHAUD_P0_IDLE_WAKE_HANDSHAKE_V14
             cpu::prepare_scheduler_idle();
-            let depth = smp_lock::suspend_for_schedule();
+            termine_transition_ordonnanceur();
             stall_site_clear();
             cpu::commit_scheduler_idle();
             stall_site_set(52, current_index_raw() as u64);
-            smp_lock::resume_after_schedule(depth);
             stall_site_set(53, current_index_raw() as u64);
         }
     }

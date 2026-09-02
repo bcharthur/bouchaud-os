@@ -13,6 +13,6 @@ pub fn signale_interface_irq(source: Source) {
 }
 
 #[inline]
-pub fn flush_interface_irq_bkl_held() -> usize {
-    INTERFACE.flush_irq_bkl_held()
+pub fn flush_interface_irq() -> usize {
+    INTERFACE.flush_irq()
 }

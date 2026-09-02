@@ -110,7 +110,7 @@ fn un_balayage_saute_ne_saute_jamais_un_reveil() {
                 }
                 // Balayer, comme `wake_sleepers`.
                 _ => {
-                    if borne.doit_balayer(maintenant) {
+                    if borne.commence_balayage(maintenant) {
                         modele.balaie(maintenant);
                         borne.recale(modele.minimum());
                     }
@@ -180,9 +180,52 @@ fn la_borne_garde_la_plus_proche() {
     assert_eq!(borne.borne(), 500);
     borne.arme(100);
     assert_eq!(borne.borne(), 100);
-    // Et seul un recalage explicite peut la repousser.
+    // Et seul un balayage revendique peut la repousser.
+    assert!(borne.commence_balayage(100));
     borne.recale(900);
     assert_eq!(borne.borne(), 900);
+}
+
+/// Une echeance armee pendant le balayage ne doit jamais etre ecrasee par le
+/// recalage calcule avant elle.
+#[test]
+fn un_armement_concurrent_survit_au_recalage() {
+    let borne = Echeances::neuve();
+    borne.arme(100);
+    assert!(borne.commence_balayage(100));
+
+    // Publication concurrente pendant que le scanner calcule son minimum.
+    borne.arme(150);
+    borne.recale(900);
+    assert_eq!(borne.borne(), 150);
+}
+
+#[test]
+fn un_seul_cpu_revendique_un_balayage_du() {
+    use std::sync::{Arc, Barrier};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
+
+    let borne = Arc::new(Echeances::neuve());
+    borne.arme(100);
+    let depart = Arc::new(Barrier::new(4));
+    let gagnants = Arc::new(AtomicUsize::new(0));
+    let mut fils = Vec::new();
+    for _ in 0..4 {
+        let borne = Arc::clone(&borne);
+        let depart = Arc::clone(&depart);
+        let gagnants = Arc::clone(&gagnants);
+        fils.push(thread::spawn(move || {
+            depart.wait();
+            if borne.commence_balayage(100) {
+                gagnants.fetch_add(1, Ordering::Relaxed);
+            }
+        }));
+    }
+    for fil in fils {
+        fil.join().unwrap();
+    }
+    assert_eq!(gagnants.load(Ordering::Relaxed), 1);
 }
 
 /// L'echeance exacte compte comme due : `>=`, pas `>`. Un `poll` de zero

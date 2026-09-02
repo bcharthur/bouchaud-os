@@ -34,9 +34,9 @@ static CURRENT: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(NO_TASK) }; 
 ///
 /// # Quand cela redevient durable
 ///
-/// Au changement de contexte, qui tient deja le gros verrou et a deja la
-/// `&mut Task` en main : [`account_slice_end`] replie les compteurs dans la
-/// tache sortante, [`mark_task_running`] les rearme pour l'entrante. Les
+/// Au changement de contexte, sous la transition locale qui garantit la
+/// propriete des deux taches : [`account_slice_end`] replie les compteurs dans
+/// la tache sortante, [`finalise_task_running`] les rearme pour l'entrante. Les
 /// totaux `user_cpu_ns`, `kernel_cpu_ns` et `cpu_ns[cpu]` restent donc EXACTS ;
 /// seule leur cadence de mise a jour change.
 ///
@@ -105,6 +105,18 @@ static CURRENT_PROCESS: [SpinLockIrq<Option<Arc<Process>>>; MAX_CPUS] =
 /// `mov rsp, rsi` de switch_context, jamais apres le seul `mov [rdi], rsp`.
 static SWITCH_PENDING: [AtomicUsize; MAX_CPUS] =
     [const { AtomicUsize::new(NO_TASK) }; MAX_CPUS];
+/// Porte locale du changement de contexte.
+///
+/// Le BKL serialisait aussi, par accident, une tache et l'IRQ qui l'interrompt
+/// sur le MEME CPU. Une porte par CPU suffit pour cette propriete : elle est
+/// prise avant l'election, reste publiee pendant le changement de pile, puis
+/// est rendue par la continuation entrante. Aucun verrou RAII ne traverse
+/// `switch_context`.
+static TRANSITION_ORDONNANCEUR: [AtomicBool; MAX_CPUS] =
+    [const { AtomicBool::new(false) }; MAX_CPUS];
+static TRANSITIONS_ORDONNANCEUR: AtomicU64 = AtomicU64::new(0);
+static TRANSITIONS_ORDONNANCEUR_REFUSEES: AtomicU64 = AtomicU64::new(0);
+static DETACHEMENTS_BKL_LEGACY: AtomicU64 = AtomicU64::new(0);
 static NEXT_TID: AtomicU32 = AtomicU32::new(100);
 static mut KERNEL_CTX: [Context; MAX_CPUS] = [Context { rsp: 0 }; MAX_CPUS];
 static NEED_RESCHED: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
@@ -121,7 +133,7 @@ static STEAL_RETRY_AFTER_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) 
 
 /// Temporisation apres un scan de donneurs qui n'avait rien a prendre.
 ///
-/// Ce scan est en O(nombre de CPU) et se fait **le gros verrou en main**, a
+/// Ce scan est en O(nombre de CPU) et se fait sous la transition locale a
 /// chaque `pick_next` dont la file locale est vide -- c'est-a-dire en
 /// permanence sur un CPU peu charge. Deux millisecondes, la meme valeur que le
 /// refus de candidat qui existait deja : assez pour ne pas rescaner a chaque
@@ -228,4 +240,3 @@ static STALL_PF_FILE_BEGIN: [AtomicU64; MAX_CPUS] =
     [const { AtomicU64::new(0) }; MAX_CPUS];
 static STALL_PF_FILE_DONE: [AtomicU64; MAX_CPUS] =
     [const { AtomicU64::new(0) }; MAX_CPUS];
-

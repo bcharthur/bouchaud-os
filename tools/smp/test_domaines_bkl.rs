@@ -108,7 +108,7 @@ fn on_garde_la_premiere_regression_pas_la_derniere() {
 #[test]
 fn un_domaine_non_migre_compte_sans_accuser() {
     let r = Registre::neuf();
-    for domaine in [Domaine::Vm, Domaine::Fd, Domaine::Ordonnanceur, Domaine::Pilote] {
+    for domaine in [Domaine::Vm, Domaine::Fd, Domaine::Reseau, Domaine::Pilote] {
         r.entre(0, domaine);
         assert_eq!(r.note_acquisition(0), None, "{:?} n'a rien promis", domaine);
         r.sort(0);
@@ -151,6 +151,7 @@ fn tout_domaine_a_un_contrat_et_les_migres_sont_ceux_qu_on_croit() {
     assert_eq!(
         migres,
         vec![
+            Domaine::Ordonnanceur,
             Domaine::Vfs,
             Domaine::Fs,
             Domaine::RegistreProcessus,

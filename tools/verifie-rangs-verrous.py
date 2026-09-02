@@ -61,6 +61,8 @@ SOURCES = RACINE / "src"
 # `RankedSpinLock::new(LockClass::…)` reelle : une classe qui perdrait son
 # verrou rendrait ce fichier rouge au lieu de le rendre silencieux.
 ACCES = {
+    "SchedulerTransition": re.compile(r"\bcommence_transition_ordonnanceur\s*\(\)"),
+    "SchedulerAlarms": re.compile(r"\bALARMES\s*\.\s*lock\s*\(\)"),
     "FdTable": re.compile(r"[\w.]*\bfiles\s*\.\s*lock\s*\(\)"),
     "Vfs": re.compile(r"\b(?:crate::fs::)?ramfs::fs\s*\(\)"),
     "ProcessTable": re.compile(r"\bTABLE\s*\.\s*lock\s*\(\)"),
@@ -70,6 +72,10 @@ ACCES = {
 # L'expression liee doit ETRE la prise pour que le garde soit tenu au-dela de
 # l'instruction.
 LIAISON_EXACTE = {
+    # La transition est un verrou manuel dont la duree traverse volontairement
+    # `switch_context`; elle n'a donc pas de garde Rust lie a une variable.
+    "SchedulerTransition": re.compile(r"^commence_transition_ordonnanceur\(\)$"),
+    "SchedulerAlarms": re.compile(r"^ALARMES\.lock\(\)$"),
     "FdTable": re.compile(r"^[\w.]*files\s*\.\s*lock\(\)$"),
     "Vfs": re.compile(r"^(?:crate::fs::)?ramfs::fs\(\)$"),
     "ProcessTable": re.compile(r"^TABLE\.lock\(\)$"),
@@ -96,6 +102,9 @@ LIAISON = re.compile(r"\blet\s+(?:mut\s+)?(\w+)\s*=\s*([^;]*?)\s*;")
 LIBERATION = re.compile(r"\bdrop\s*\(\s*(\w+)\s*\)")
 DECLARATION = re.compile(r"RankedSpinLock::new\(\s*(?:crate::kernel::sync::)?"
                          r"(?:lockdep::)?LockClass::(\w+)")
+DECLARATION_MANUELLE = re.compile(
+    r"lockdep::acquired\(\s*LockClass::(\w+)\s*\)"
+)
 
 
 def rangs() -> dict[str, int]:
@@ -191,15 +200,19 @@ def main() -> int:
         print(f"ECHEC  classes inconnues de lockdep.rs : {', '.join(sorted(inconnues))}")
         return 1
 
-    # Chaque classe cablee doit l'etre par une vraie declaration.
+    # Chaque classe cablee doit l'etre par un RankedSpinLock ou par une prise
+    # lockdep manuelle explicite. Le second cas couvre la porte du scheduler :
+    # son etat doit survivre au changement de pile et ne peut donc pas etre un
+    # garde RAII.
     declarees = set()
     for chemin in SOURCES.rglob("*.rs"):
-        declarees |= set(DECLARATION.findall(
-            chemin.read_text(encoding="utf-8", errors="replace")))
+        source = chemin.read_text(encoding="utf-8", errors="replace")
+        declarees |= set(DECLARATION.findall(source))
+        declarees |= set(DECLARATION_MANUELLE.findall(source))
 
     sans_verrou = set(ACCES) - declarees
     if sans_verrou:
-        print("ECHEC  classes suivies ici mais qu'aucun RankedSpinLock ne porte : "
+        print("ECHEC  classes suivies ici mais sans verrou range ni prise manuelle : "
               f"{', '.join(sorted(sans_verrou))}")
         print("       Un rang declare sans verrou ne protege rien. Voir l'en-tete.")
         return 1

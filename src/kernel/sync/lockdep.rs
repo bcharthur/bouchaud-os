@@ -13,6 +13,12 @@ const MAX_HELD: usize = 16;
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LockClass {
+    /// Transition locale de l'ordonnanceur. Elle ne protege aucune donnee
+    /// globale : elle interdit seulement qu'une IRQ reprenne le changement de
+    /// contexte du CPU qu'elle vient d'interrompre.
+    SchedulerTransition = 1,
+    /// Alarmes POSIX consultees par le scheduler apres la transition locale.
+    SchedulerAlarms = 5,
     TaskTable = 10,
     ProcessTable = 20,
     Process = 30,
@@ -30,6 +36,8 @@ impl LockClass {
     pub const fn rank(self) -> u16 { self as u16 }
     pub const fn name(self) -> &'static str {
         match self {
+            Self::SchedulerTransition => "scheduler-transition",
+            Self::SchedulerAlarms => "scheduler-alarms",
             Self::TaskTable => "task-table",
             Self::ProcessTable => "process-table",
             Self::Process => "process",

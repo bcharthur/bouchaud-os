@@ -68,17 +68,19 @@ pub fn exit_current(code: i32) -> ! {
         }
     }
 
+    // Cette continuation est terminee : le garde de l'appel systeme restera
+    // sur sa pile condamnee et ne pourra jamais executer son Drop. Rendre sa
+    // profondeur maintenant garantit que le choix final et `switch_to`
+    // entrent bien dans le coeur scheduler sans BKL.
+    abandonne_bkl_avant_sortie_definitive();
+
     // Sur un AP, le contexte noyau appelant est la boucle idle : si ce CPU
     // n'a plus rien de runnable, on y revient immediatement. Les autres CPU
     // continuent independamment.
     let cpu_id = local_cpu();
     if cpu_id != 0 {
         let cur = current_index_raw();
-        wake_sleepers();
-        if let Some(next) = pick_next(cur, cpu_id) {
-            switch_to(cur, next);
-            unreachable!("task: reprise d'une tache terminee sur AP");
-        }
+        commute_sortie_definitive_si_possible(cur, cpu_id);
         switch_to_kernel();
     }
 
@@ -88,13 +90,7 @@ pub fn exit_current(code: i32) -> ! {
     let patience = 30 * crate::kernel::timer::TICKS_PER_SECOND;
     let mut idle_since = crate::kernel::timer::ticks();
     loop {
-        wake_sleepers();
-        if let Some(next) = pick_next(cur, 0) {
-            if next != cur {
-                switch_to(cur, next);
-                unreachable!("task: reprise d'une tache terminee");
-            }
-        }
+        commute_sortie_definitive_si_possible(cur, 0);
         if tasks().iter().all(|t| t.state == TaskState::Zombie) { break; }
         if crate::kernel::timer::ticks().wrapping_sub(idle_since) > patience {
             crate::kernel::dmesg::log("task: aucune tache executable CPU0 depuis 30 s, interblocage suppose");
@@ -145,9 +141,15 @@ fn notify_parent_of_exit() {
                 false
             }
         };
-        if matches && tasks()[index].waiting_for_child.charge() {
-            tasks()[index].waiting_for_child.range(false);
-            tasks()[index].state.range(TaskState::Ready);
+        if matches
+            && tasks()[index]
+                .waiting_for_child
+                .compare_exchange(true, false)
+                .is_ok()
+            && tasks()[index]
+                .state
+                .echange(TaskState::Blocked, TaskState::Ready)
+        {
             publish_ready(index);
         }
     }
@@ -446,13 +448,12 @@ fn retire_exec_zombie_current() -> ! {
     let cpu_id = local_cpu();
     let cur = current_index_raw();
 
-    wake_sleepers();
-    if let Some(next) = pick_next(cur, cpu_id) {
-        if next != cur {
-            switch_to(cur, next);
-            unreachable!("task: reprise d'un sibling zombie apres exec");
-        }
-    }
+    // `retire_current_if_zombie` a pris le BKL pour confirmer l'etat. Cette
+    // pile ne reprendra jamais : abandonner le verrou avant le dernier choix
+    // d'ordonnancement, sans tenter de le restaurer.
+    abandonne_bkl_avant_sortie_definitive();
+
+    commute_sortie_definitive_si_possible(cur, cpu_id);
 
     // Aucun runnable local à cet instant. Le contexte noyau/AP idle reprendra
     // le scheduling. La pile de ce sibling ne doit plus jamais être réactivée.
@@ -471,4 +472,3 @@ pub fn retire_current_if_zombie() {
         retire_exec_zombie_current();
     }
 }
-
