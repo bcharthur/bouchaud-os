@@ -13,6 +13,20 @@
   },
   "execution": {
     "_lisez_moi": "Mesures pires-cas d'une trace QEMU. `bkl_regressions_domaine` doit rester a zero pour toujours : c'est le contrat des chemins declares sortis. Les valeurs de latence sont des PLAFONDS de depart, choisis pour bloquer les figements de plusieurs secondes ; elles se resserrent en les adoptant apres une amelioration mesuree, jamais en les relachant apres une regression. Les centiles du chantier 2 (`ready_latency_*_p99_ms`) mesurent ce que l'utilisateur RESSENT la ou un maximum unique peut venir du boot ; celui de la classe normale borne la FAMINE que la priorite interactive pourrait creer.",
+    "_requis": [
+      "bkl_attente_max_ms",
+      "bkl_max_hold_ms",
+      "bkl_regressions_domaine",
+      "futex_bkl_herites_max",
+      "preempt_max_defer_ms",
+      "ready_latency_interactive_max_ms",
+      "ready_latency_interactive_p99_ms",
+      "ready_latency_max_ms",
+      "ready_latency_normale_p99_ms",
+      "runqueue_doublons_max",
+      "tcp_busy_poll_tours_max"
+    ],
+    "_requis_lisez_moi": "Grandeurs qui DOIVENT figurer dans un journal passe par --journal. Toutes sortent inconditionnellement du releve periodique (`smpstat`, soit crate::kernel::task::log_smp_load) : leur absence ne veut pas dire \u00ab le scenario ne les a pas produites \u00bb mais \u00ab le scenario n'emet aucun releve \u00bb, donc que la barriere ne peut pas rougir. Les autres grandeurs dependent legitimement du scenario -- pas de navigateur, pas de volume bloc, pas de commit de persistance -- et restent simplement non verifiees.",
     "bkl_attente_max_ms": 50.0,
     "bkl_max_hold_ms": 50.0,
     "bkl_regressions_domaine": 0,

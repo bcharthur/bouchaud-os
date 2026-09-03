@@ -222,13 +222,35 @@ def main() -> int:
             gains.append(f"  sites BKL / {domaine} : {mesure} < {budget}")
 
     # --- execution ----------------------------------------------------------
+    #
+    # Une grandeur REQUISE absente est une FAUTE, pas une non-verification.
+    # C'est la difference entre « le scenario n'a pas produit ce chiffre » et
+    # « le scenario n'emet aucun releve, donc cette barriere ne peut pas
+    # rougir ». Le second cas s'etait installe sans bruit : la trace ne portait
+    # aucun releve periodique, les treize grandeurs sortaient « absent du
+    # journal », et la barriere annoncait quand meme « budgets tenus ».
+    #
+    # Ne sont PAS requises les grandeurs qui dependent legitimement du
+    # scenario : un compteur de navigateur quand aucun navigateur ne tourne,
+    # un volume bloc absent, un commit de persistance jamais declenche.
+    requis = set(reference["execution"].get("_requis", []))
+    budgets = [(nom, valeur) for nom, valeur in reference["execution"].items()
+               if not nom.startswith("_")]
+    mesures: dict[str, float] = {}
+
     if options.journal and options.journal.exists():
         mesures = mesures_execution(options.journal)
-        for nom, budget in reference["execution"].items():
-            if nom.startswith("_"):
-                continue
+        for nom, budget in budgets:
             if nom not in mesures:
-                non_verifies.append(f"  {nom} : absent du journal")
+                if nom in requis:
+                    fautes.append(
+                        f"  {nom} : REQUIS mais absent de {options.journal}. "
+                        f"Le releve periodique n'a pas ete emis par ce scenario "
+                        f"(`smpstat`), donc ce budget n'a rien verifie. Une "
+                        f"barriere qui ne peut pas rougir ne protege rien."
+                    )
+                else:
+                    non_verifies.append(f"  {nom} : absent du journal")
                 continue
             mesure = mesures[nom]
             libelle = EXECUTION[nom][2] if nom in EXECUTION else nom
@@ -237,9 +259,7 @@ def main() -> int:
             elif mesure < budget:
                 gains.append(f"  {nom} : {mesure:.3f} < {budget}")
     else:
-        non_verifies = [f"  {nom} : aucun journal fourni"
-                        for nom in sorted(reference["execution"])
-                        if not nom.startswith("_")]
+        non_verifies = [f"  {nom} : aucun journal fourni" for nom, _ in sorted(budgets)]
 
     if gains:
         print("budgets ameliores (adopter avec --adopte) :")
@@ -254,9 +274,16 @@ def main() -> int:
         print("\n".join(fautes))
         return 1
 
+    # Le compte des mesures fait PARTIE du verdict. « budgets tenus » sans lui
+    # se lit comme « tout a ete verifie » alors que la trace pouvait n'avoir
+    # rien porte du tout -- exactement ce que cette barriere doit empecher.
     total = sum(courant.values())
+    mesures_faites = sum(1 for nom, _ in budgets if nom in mesures)
     print(f"ok  budgets tenus ; {total} site(s) d'acquisition du gros verrou "
-          f"dans {len(courant)} domaine(s)")
+          f"dans {len(courant)} domaine(s) ; execution : "
+          f"{mesures_faites}/{len(budgets)} grandeur(s) mesuree(s)"
+          + (f", {len(budgets) - mesures_faites} absente(s)"
+             if mesures_faites < len(budgets) else ""))
     return 0
 
 
