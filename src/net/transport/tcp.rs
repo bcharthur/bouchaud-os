@@ -1,10 +1,32 @@
 //! Client TCP minimal (suffisant pour un GET HTTP).
 //!
 //! Implemente la poignee de main (SYN/SYN-ACK/ACK), l'envoi d'une requete et la
-//! reception/ack des segments jusqu'au FIN. Pas de retransmission ni de controle
-//! de congestion : suffisant pour de petites pages via SLIRP.
+//! reception/ack des segments jusqu'au FIN.
+//!
+//! # Chantier 9 : ce qui vient d'apparaitre
+//!
+//! Cet en-tete disait « Pas de retransmission ni de controle de congestion ».
+//! La premiere moitie n'est plus vraie : `transport::retransmission` tient la
+//! file des segments ENVOYES ET NON ACQUITTES, mesure le RTT (algorithme de
+//! Karn), calcule le RTO (RFC 6298) et le double a chaque expiration. Le SYN et
+//! la requete y sont enregistres, et sont RENVOYES quand ils expirent -- avant,
+//! un `GET` perdu faisait attendre les trente secondes du delai d'inactivite.
+//!
+//! La seconde moitie reste vraie : il n'y a toujours pas de controle de
+//! congestion. `cwnd` demande de decider quand REDUIRE le debit, et cette
+//! decision se prend sur des mesures qu'on n'a pas encore ; la file d'emission
+//! est ce qui la rendra possible.
+//!
+//! # Le busy-poll
+//!
+//! L'attente etait un `pause` en boucle pendant huit secondes, choisi parce
+//! qu'on ne savait pas combien de temps attendre. Le RTO le dit maintenant :
+//! l'attente active est bornee par lui, ce qui la ramene a l'ordre du RTT reel
+//! au lieu d'une constante. Elle est aussi COMPTEE -- `[NET-TCP] busy_poll_ms=`
+//! --, sans quoi « le busy-poll a disparu » resterait une affirmation.
 
 use crate::arch::x86_64::cpu;
+use crate::net::transport::retransmission::{self, Emission, Expiration};
 use crate::net::ipv4::Ipv4Addr;
 use crate::net;
 use alloc::vec::Vec;
@@ -152,15 +174,34 @@ fn drain_ooo(ooo: &mut Vec<(u32, Vec<u8>)>, ack: &mut u32, out: &mut Vec<u8>) {
     }
 }
 
+/// Millisecondes ecoulees, telles que la retransmission les compte.
+fn maintenant_ms() -> u64 {
+    use crate::kernel::timer;
+    let par_seconde = timer::TICKS_PER_SECOND.max(1) as u64;
+    (timer::ticks() as u64).saturating_mul(1000) / par_seconde
+}
+
 pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> bool {
     let sport = 0xC000u16 | (cpu::rdtsc() as u16 & 0x0FFF);
     let isn = cpu::rdtsc() as u32;
     let mut seg = [0u8; 1600];
     let mut rb = [0u8; 2048];
 
+    // La file des segments non acquittes. Le SYN et la requete y entrent ; sans
+    // elle, un `GET` perdu n'etait jamais renvoye et la connexion attendait ses
+    // trente secondes d'inactivite avant d'abandonner.
+    let mut emission = Emission::neuve(isn);
+    let mut busy_poll_ms = 0u64;
+    let mut attentes_dormies = 0u64;
+
     // --- SYN (avec option MSS) ---
     let l = build_syn(&mut seg, &dst, sport, port, isn);
     net::send_ip(dst, 6, &seg[..l]);
+    // Le SYN consomme un numero de sequence sans porter d'octet : c'est
+    // exactement ce que `controle` decrit, et c'est ce qui permet a l'ACK du
+    // SYN-ACK de le retirer de la file et d'en tirer le PREMIER echantillon de
+    // RTT -- celui qui remplace le RTO initial d'une seconde.
+    let syn_index = emission.enregistre(isn, &[], true, maintenant_ms());
 
     // --- attend SYN-ACK ---
     let mut their_seq = 0u32;
@@ -172,14 +213,28 @@ pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> boo
                     if h.flags & RST != 0 { return false; }
                     if h.flags & SYN != 0 && h.flags & ACK != 0 {
                         their_seq = h.seq;
+                        emission.acquitte(h.ack, maintenant_ms());
                         established = true;
                         break;
                     }
                 }
             }
         }
+        // Le SYN peut se perdre. Sans retransmission, la boucle tournait ses
+        // huit millions de tours puis rendait `false` : une connexion refusee
+        // pour un paquet perdu.
+        if let Expiration::Retransmettre(index) = emission.expire(maintenant_ms()) {
+            if Some(index) == syn_index {
+                let l = build_syn(&mut seg, &dst, sport, port, isn);
+                net::send_ip(dst, 6, &seg[..l]);
+                emission.note_retransmission(index, maintenant_ms());
+            }
+        }
     }
-    if !established { return false; }
+    if !established {
+        retransmission::note_connexion(&emission, busy_poll_ms, attentes_dormies);
+        return false;
+    }
 
     let my_seq = isn.wrapping_add(1);
     let mut my_ack = their_seq.wrapping_add(1);
@@ -189,6 +244,14 @@ pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> boo
     net::send_ip(dst, 6, &seg[..l]);
     let l = build(&mut seg, &dst, sport, port, my_seq, my_ack, PSH | ACK, WINDOW, request);
     net::send_ip(dst, 6, &seg[..l]);
+    // La requete tient dans un segment (un `GET` fait quelques centaines
+    // d'octets). Elle entre dans la file : c'est elle qui, perdue, coutait le
+    // plus cher.
+    let requete_index = if request.len() <= retransmission::CHARGE_MAX {
+        emission.enregistre(my_seq, request, false, maintenant_ms())
+    } else {
+        None
+    };
     let mut my_seq = my_seq.wrapping_add(request.len() as u32);
 
     // --- reception ---
@@ -217,6 +280,26 @@ pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> boo
                     if let Some(h) = parse(&rb[..n]) {
                         if h.dport != sport { continue; }
                         got = true;
+                        // Tout ACK nourrit la file d'emission : c'est de la
+                        // qu'on tire le RTT, et c'est la que les doublons se
+                        // comptent.
+                        if h.flags & ACK != 0 {
+                            emission.acquitte(h.ack, maintenant_ms());
+                            if let Some(index) = emission.retransmission_rapide() {
+                                if let Some(perdu) = emission.segment(index) {
+                                    let (pseq, pdata, pctrl) =
+                                        (perdu.seq, perdu.charge().to_vec(), perdu.controle);
+                                    let l = if pctrl {
+                                        build_syn(&mut seg, &dst, sport, port, pseq)
+                                    } else {
+                                        build(&mut seg, &dst, sport, port, pseq, my_ack,
+                                              PSH | ACK, WINDOW, &pdata)
+                                    };
+                                    net::send_ip(dst, 6, &seg[..l]);
+                                    emission.note_retransmission(index, maintenant_ms());
+                                }
+                            }
+                        }
                         let plen = n - h.data_off;
                         if plen > 0 {
                             let rel = h.seq.wrapping_sub(my_ack) as i32;
@@ -244,9 +327,15 @@ pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> boo
                             net::send_ip(dst, 6, &seg[..a]);
                             let f = build(&mut seg, &dst, sport, port, my_seq, my_ack, FIN | ACK, WINDOW, &[]);
                             net::send_ip(dst, 6, &seg[..f]);
+                            retransmission::note_connexion(
+                                &emission, busy_poll_ms, attentes_dormies);
                             return true;
                         }
-                        if h.flags & RST != 0 { return true; }
+                        if h.flags & RST != 0 {
+                            retransmission::note_connexion(
+                                &emission, busy_poll_ms, attentes_dormies);
+                            return true;
+                        }
                     }
                 }
                 None => break, // plus rien a lire pour l'instant
@@ -269,19 +358,55 @@ pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> boo
             // en veille pour ne pas chauffer un coeur inutilement.
             let idle = timer::ticks().wrapping_sub(last);
             if idle > deadline { break; }
-            // Busy-poll (ACK a la microseconde) tant que le transfert n'est pas
-            // clairement termine. Le pair (SLIRP) fait grossir sa fenetre de
-            // congestion en fonction du RTT qu'il mesure sur NOS ACK : si on
-            // dort (`hlt`, reveil au tick timer ~55 ms) ses ACK sont retardes,
-            // il garde cwnd=1 et espace ses envois de plusieurs secondes. En
-            // occupant le CPU on ACKe instantanement -> cwnd grossit -> le corps
-            // arrive en rafale. Seuil genereux (8 s) car le proxy de rendu peut
-            // mettre quelques secondes entre la requete et le premier octet.
-            if idle < 8 * timer::TICKS_PER_SECOND.max(1) {
+
+            // Un segment expire se renvoie, meme au milieu de la reception :
+            // c'est le cas d'une requete perdue apres que le pair a commence a
+            // repondre a une precedente.
+            let ms = maintenant_ms();
+            match emission.expire(ms) {
+                Expiration::Retransmettre(index) => {
+                    if let Some(perdu) = emission.segment(index) {
+                        let (pseq, pdata, pctrl) =
+                            (perdu.seq, perdu.charge().to_vec(), perdu.controle);
+                        let l = if pctrl {
+                            build_syn(&mut seg, &dst, sport, port, pseq)
+                        } else {
+                            build(&mut seg, &dst, sport, port, pseq, my_ack,
+                                  PSH | ACK, WINDOW, &pdata)
+                        };
+                        net::send_ip(dst, 6, &seg[..l]);
+                        emission.note_retransmission(index, ms);
+                    }
+                }
+                Expiration::Abandon(_) => break,
+                Expiration::Rien => {}
+            }
+
+            // BOUCHAUD_C9_BUSY_POLL_BORNE_PAR_LE_RTO_V1
+            //
+            // L'attente active durait huit secondes, en dur, parce qu'on ne
+            // savait pas combien de temps attendre. Le RTO le dit maintenant.
+            //
+            // Elle n'est pas supprimee, et c'est deliberе : le pair (SLIRP)
+            // fait grossir sa fenetre de congestion sur le RTT qu'il mesure sur
+            // NOS ACK. Dormir jusqu'au prochain tick timer (~55 ms) les retarde
+            // d'autant, il garde cwnd=1 et espace ses envois de plusieurs
+            // secondes -- un transfert de 44 Ko passait alors a plus de deux
+            // minutes. Ce qui change, c'est qu'elle est BORNEE PAR UNE MESURE et
+            // COMPTEE : `[NET-TCP] busy_poll_ms=` face a `sommeils=` dit ce qui
+            // reste a gagner, la ou une constante ne disait rien.
+            let fenetre_active_ticks = {
+                let rto_ticks = emission.rto_ms().saturating_mul(
+                    timer::TICKS_PER_SECOND.max(1) as u64) / 1000;
+                rto_ticks.max(1).min(8 * timer::TICKS_PER_SECOND.max(1) as u64)
+            };
+            if (idle as u64) < fenetre_active_ticks {
+                busy_poll_ms += 1;
                 for _ in 0..1000 {
                     unsafe { core::arch::asm!("pause", options(nomem, nostack)); }
                 }
             } else {
+                attentes_dormies += 1;
                 x86_64::instructions::interrupts::enable_and_hlt();
             }
         }
@@ -291,6 +416,8 @@ pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> boo
     let f = build(&mut seg, &dst, sport, port, my_seq, my_ack, FIN | ACK, WINDOW, &[]);
     net::send_ip(dst, 6, &seg[..f]);
     let _ = &mut my_seq;
+    let _ = requete_index;
+    retransmission::note_connexion(&emission, busy_poll_ms, attentes_dormies);
     true
 }
 

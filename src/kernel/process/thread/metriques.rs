@@ -177,6 +177,12 @@ anomalies={}/{}/{} proprietaire={}{}",
     log_files_execution();
     crate::kernel::heap::log_ng_stats();
     crate::kernel::memory::log_dma_stats();
+    let (tcp_rtx, tcp_rapides, tcp_rtt, tcp_srtt, tcp_rto, tcp_busy, tcp_sommeils) =
+        crate::net::transport::retransmission::stats();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "[NET-TCP] retransmissions={} rapides={} echantillons_rtt={} srtt_ms={} rto_ms={} busy_poll_ms={} sommeils={}",
+        tcp_rtx, tcp_rapides, tcp_rtt, tcp_srtt, tcp_rto, tcp_busy, tcp_sommeils,
+    ));
     let (futex_attentes, futex_reveils, futex_herites, futex_profondeur) = futex_bkl_stats();
     crate::kernel::dmesg::log_fmt(format_args!(
         "[BKL-FUTEX] attentes={} reveils={} herites={} profondeur_max={}",
