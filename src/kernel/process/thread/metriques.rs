@@ -175,6 +175,11 @@ anomalies={}/{}/{} proprietaire={}{}",
     crate::kernel::scheduler::preempt::log_stats();
     crate::kernel::scheduler::latency::log_stats();
     log_files_execution();
+    let (futex_attentes, futex_reveils, futex_herites, futex_profondeur) = futex_bkl_stats();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "[BKL-FUTEX] attentes={} reveils={} herites={} profondeur_max={}",
+        futex_attentes, futex_reveils, futex_herites, futex_profondeur,
+    ));
     let (_, _, backing_reads, backing_bytes) = crate::fs::backing::stats();
     let (cache_hits, readahead_hits) = crate::fs::backing::cache_stats();
     let readahead_pages = crate::fs::backing::readahead_pages();

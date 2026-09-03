@@ -143,12 +143,26 @@ impl Domaine {
             // REGRESSION, mesuree par `[BKL-DOMAINES] regressions=` et bornee a
             // zero par le budget `bkl_regressions_domaine`.
             Self::Fs | Self::Vfs | Self::Ordonnanceur => Contrat::Migre,
+            // La readiness -- files d'attente, parking, reveil -- ne prend plus
+            // le gros verrou nulle part. Le cote reveilleur en etait deja sorti
+            // (`wake_wait_queue` tranche chaque reveil par `compare_exchange`
+            // sur un registre a emplacements stables) ; le cote dormeur gardait
+            // une DERNIERE reprise, sur sa branche legacy, la ou l'appelant
+            // tenait deja le verrou. Reprendre un verrou reentrant que ce CPU
+            // detient deja n'ajoute aucune exclusion : elle a ete supprimee, et
+            // la portee reste ouverte sur toute la branche pour que la moindre
+            // reapparition soit comptee comme une REGRESSION plutot que noyee
+            // dans « indetermine ».
+            //
+            // Ce que cela ne dit PAS : que plus aucune attente ne s'execute
+            // sous un gros verrou. Certaines en HERITENT encore un de leur
+            // appelant -- c'est la dette des domaines `Syscall` et `Fd`, pas
+            // celle de la readiness, et `[MM-NG6] waitq_bkl_enters=` la compte.
+            Self::Readiness => Contrat::Migre,
             // Legitimes : pas de concurrence a proteger.
             Self::BootPrecoce | Self::Panique => Contrat::Exempte,
             // Le chantier en cours.
-            Self::Processus | Self::Readiness | Self::Futex => {
-                Contrat::EnMigration
-            }
+            Self::Processus | Self::Futex => Contrat::EnMigration,
             _ => Contrat::Legacy,
         }
     }

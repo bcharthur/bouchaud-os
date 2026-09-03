@@ -68,7 +68,18 @@ impl WaitQueue {
         // Chemin LEGACY : l'appelant tenait deja le gros verrou en entrant.
         // On le conserve tel quel, avec l'ancien ordre -- il est correct sous
         // verrou, et le migrer demande de migrer d'abord ses appelants.
-        let _kernel = enter_bkl();
+        //
+        // Ce qu'on ne fait plus, c'est le REPRENDRE. Le gros verrou est
+        // reentrant et appartient au CPU : le reprendre ici n'ajoutait aucune
+        // exclusion, seulement un compteur et une paire enter/Drop par
+        // attente.
+        //
+        // Et pas de portee de domaine sur cette branche : elle enjamberait le
+        // parking, donc une COMMUTATION. La pile de domaines est PAR CPU ; une
+        // portee ouverte avant un changement de tache est refermee par une
+        // autre pile, parfois sur un autre coeur. La regle est verifiee par
+        // `tools/verifie-portee-sans-commutation.py`.
+        note_attente_sous_bkl_herite();
         let _inscrit = Inscription::nouvelle(self);
         if self.point.ticket() != ticket.0 {
             return;
@@ -113,7 +124,7 @@ impl WaitQueue {
             return notified;
         }
 
-        let _kernel = enter_bkl();
+        note_attente_sous_bkl_herite();
         let _inscrit = Inscription::nouvelle(self);
         if self.point.ticket() != ticket.0 {
             return true;

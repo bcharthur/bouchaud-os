@@ -448,9 +448,10 @@ fn retire_exec_zombie_current() -> ! {
     let cpu_id = local_cpu();
     let cur = current_index_raw();
 
-    // `retire_current_if_zombie` a pris le BKL pour confirmer l'etat. Cette
-    // pile ne reprendra jamais : abandonner le verrou avant le dernier choix
-    // d'ordonnancement, sans tenter de le restaurer.
+    // Cette pile ne reprendra jamais. Toute profondeur de gros verrou encore
+    // detenue -- celle de l'appel systeme qui nous a amenes ici -- est
+    // abandonnee avant le dernier choix d'ordonnancement, sans tentative de
+    // restauration : il n'y aura pas de retour pour la rendre.
     abandonne_bkl_avant_sortie_definitive();
 
     commute_sortie_definitive_si_possible(cur, cpu_id);
@@ -460,13 +461,39 @@ fn retire_exec_zombie_current() -> ! {
     switch_to_kernel()
 }
 
+// BOUCHAUD_C1_RETRAITE_SANS_REPRISE_V1
+//
+// CE QUE LE GROS VERROU CONFIRMAIT ICI, ET CE QUI LE CONFIRME MAINTENANT
+//
+// Cette fonction le prenait pour « confirmer l'etat » avant de demonter la
+// tache. Les trois choses qu'elle lit sont pourtant deja atomiques et deja
+// LOCALES a ce CPU :
+//
+//   * `RETRAITE_DEMANDEE[cpu]` est un drapeau par CPU, pose par la commutation
+//     de CE CPU et efface par CE CPU ; aucun autre coeur ne le touche ;
+//   * `in_user_task()` lit l'indice courant de CE CPU ;
+//   * `current().state` est un `EtatAtomique`.
+//
+// Il n'y avait donc rien a serialiser. Et la prise avait un cout reel : elle
+// est sur le chemin de sortie de CHAQUE appel systeme et de chaque faute de
+// page resolue -- ce n'est que le test du drapeau, faux presque toujours, qui
+// l'evitait.
+//
+// La profondeur, elle, est inchangee. Sur le chemin qui demonte la tache,
+// `abandonne_bkl_avant_sortie_definitive` remet la profondeur a zero et la
+// pile ne reprend jamais : elle abandonnait deja celle de l'appelant en plus
+// de celle-ci. Sur le chemin qui ne demonte rien, il n'y a plus ni prise ni
+// relachement au lieu d'une paire equilibree.
 pub fn retire_current_if_zombie() {
     let cpu = interrupts::without_interrupts(local_cpu);
     if !RETRAITE_DEMANDEE[cpu].load(Ordering::Acquire) {
         return;
     }
-    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Processus);
-    let _kernel = smp_lock::enter();
+    // Aucune portee de domaine ici. Elle n'aurait plus rien a attribuer, et
+    // elle FUIRAIT : `retire_exec_zombie_current` commute sans retour, donc le
+    // `Drop` qui referme la portee ne s'executerait jamais et la pile de
+    // domaines de ce CPU garderait une entree morte -- toute acquisition
+    // ulterieure non etiquetee lui serait attribuee.
     RETRAITE_DEMANDEE[cpu].store(false, Ordering::Release);
     if in_user_task() && current().state == TaskState::Zombie {
         retire_exec_zombie_current();
