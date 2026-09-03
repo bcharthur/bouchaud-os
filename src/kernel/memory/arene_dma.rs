@@ -258,11 +258,33 @@ impl AreneDma {
 
         let n = self.regions.load(Ordering::Relaxed);
         if n >= REGIONS_MAX {
-            // La liste est pleine. La region n'est pas rendue -- mais elle est
-            // COMPTEE : sans ce compteur, la fuite se lirait comme une fuite de
-            // pilote, et on la chercherait pendant des jours au mauvais
-            // endroit.
+            // La liste est pleine. Une region va etre perdue, et le seul choix
+            // qui reste est LAQUELLE.
+            //
+            // Perdre la nouvelle serait le choix par defaut, et c'est le
+            // mauvais : sous fragmentation, c'est justement la grande region
+            // qui vient d'etre rendue -- celle qui pourrait reloger un anneau
+            // -- et on garderait a la place une poussiere d'une page. La plus
+            // PETITE est donc evincee quand la nouvelle est plus grande.
+            //
+            // Dans les deux cas la perte est COMPTEE : sans ce compteur, elle
+            // se lirait comme une fuite de pilote, et on la chercherait
+            // pendant des jours au mauvais endroit.
             self.debordements.fetch_add(1, Ordering::Relaxed);
+            let mut plus_petite = 0usize;
+            let mut taille_min = u64::MAX;
+            for index in 0..REGIONS_MAX {
+                let t = self.tailles[index].load(Ordering::Relaxed);
+                if t < taille_min {
+                    taille_min = t;
+                    plus_petite = index;
+                }
+            }
+            if taille < taille_min {
+                return;
+            }
+            self.bases[plus_petite].store(base, Ordering::Relaxed);
+            self.tailles[plus_petite].store(taille, Ordering::Relaxed);
             return;
         }
         self.bases[n].store(base, Ordering::Relaxed);

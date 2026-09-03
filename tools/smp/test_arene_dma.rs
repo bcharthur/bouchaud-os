@@ -296,9 +296,69 @@ fn allouer_et_liberer_en_meme_temps_reste_coherent() {
     }
 
     let etat: EtatDma = a.etat();
-    assert_eq!(
-        etat.utilise, 0,
-        "tout a ete rendu : l'arene doit etre entierement disponible ({etat:?})"
+    // L'invariant n'est PAS « utilise == 0 ». Sous une fragmentation assez
+    // forte, la liste de regions -- bornee, et elle doit l'etre -- deborde, et
+    // une region est alors perdue. C'est un choix assume : une liste sans
+    // plafond serait une fuite deguisee en cache.
+    //
+    // Ce qui doit rester vrai est plus fort et plus utile : TOUTE perte est
+    // COMPTEE. Une fuite silencieuse se chercherait dans le pilote pendant des
+    // jours ; une fuite comptee dit qu'il faut agrandir la liste.
+    assert!(
+        etat.debordements as u64 * 2 * PAGE >= etat.utilise,
+        "de la memoire a disparu sans qu'un debordement le dise : {etat:?}"
     );
-    assert_eq!(etat.debordements, 0, "aucune region n'a du etre abandonnee");
+    if etat.debordements == 0 {
+        assert_eq!(
+            etat.utilise, 0,
+            "sans debordement, tout ce qui a ete rendu doit etre disponible ({etat:?})"
+        );
+    }
+    assert_eq!(etat.echecs, 0, "l'arene ne doit jamais avoir manque de place");
+}
+
+/// La regle du debordement : la region evincee est la PLUS PETITE.
+///
+/// Perdre la nouvelle serait le choix par defaut, et c'est le mauvais : sous
+/// fragmentation, c'est justement la grande region qui vient d'etre rendue --
+/// celle qui pourrait reloger un anneau -- et on garderait a la place une
+/// poussiere d'une page.
+#[test]
+fn un_debordement_evince_la_plus_petite_region() {
+    let a = arene(4 * (REGIONS_MAX as u64 + 16));
+    // TOUT allouer d'abord, puis liberer une page sur deux. Liberer au fur et a
+    // mesure ne remplirait rien : le meilleur ajustement resservirait aussitot
+    // le trou qu'on vient de creer, et la liste resterait a une entree.
+    let mut pages = Vec::new();
+    for _ in 0..(2 * REGIONS_MAX) {
+        pages.push(a.alloue(PAGE as usize).unwrap());
+    }
+    for (index, base) in pages.iter().enumerate() {
+        if index % 2 == 0 {
+            a.libere(*base, PAGE as usize);
+        }
+    }
+    assert_eq!(
+        a.etat().regions, REGIONS_MAX as u64,
+        "la liste doit etre pleine de regions d'une page"
+    );
+
+    // Une grande region est rendue alors que la liste est pleine. Elle est
+    // prise a la FRONTIERE -- aucune region libre ne fait huit pages -- et un
+    // garde de DEUX pages l'empeche d'y etre repliee.
+    //
+    // Deux pages, et pas une : un garde d'une page serait servi par le
+    // meilleur ajustement depuis la liste, la frontiere ne bougerait pas, et la
+    // grande region rendue y serait simplement repliee sans jamais atteindre le
+    // debordement qu'on veut observer.
+    let grand = a.alloue(8 * PAGE as usize).unwrap();
+    let _garde = a.alloue(2 * PAGE as usize).unwrap();
+    a.libere(grand, 8 * PAGE as usize);
+    assert!(a.etat().debordements >= 1, "le debordement doit etre compte");
+
+    // Elle doit avoir pris la place d'une petite, donc etre servable.
+    assert_eq!(
+        a.alloue(8 * PAGE as usize), Some(grand),
+        "la grande region doit avoir survecu au debordement, pas une poussiere"
+    );
 }
