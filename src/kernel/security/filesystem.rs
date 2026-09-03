@@ -160,15 +160,16 @@ pub fn canonical_at(dirfd: i32, raw_path: &str) -> Option<String> {
 }
 
 fn sandbox_path_allowed(security: Snapshot, canonical: &str, write: bool) -> bool {
-    match security.profile {
-        SecurityProfile::BrowserContent | SecurityProfile::Untrusted => {
-            if write {
-                sandbox_write_path(canonical)
-            } else {
-                sandbox_read_path(canonical)
-            }
+    // Le predicat vient du profil lui-meme : reconstruire la liste ici ferait
+    // qu'un profil ajoute plus tard serait oublie dans l'un des controles.
+    if super::profile::sandboxe(security.profile) {
+        if write {
+            sandbox_write_path(canonical)
+        } else {
+            sandbox_read_path(canonical)
         }
-        _ => true,
+    } else {
+        true
     }
 }
 

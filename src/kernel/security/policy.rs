@@ -39,7 +39,13 @@ fn make_entry(pid: u32, image: &str, uid: u32, gid: u32) -> Entry {
         credentials: Credentials::new(uid, gid),
         capabilities: profile::initial_capabilities(image, uid),
         profile,
-        no_new_privs: false,
+        // BOUCHAUD_C6_NO_NEW_PRIVS_IMPLICITE_V1
+        //
+        // Un role sandboxe ne doit pas avoir a DEMANDER `no_new_privs` : il
+        // faudrait qu'il le fasse lui-meme, or c'est precisement le processus
+        // dont on suppose qu'il peut etre compromis. Le drapeau est donc pose
+        // par le profil, avant que le programme ne tourne.
+        no_new_privs: profile::sandboxe(profile),
     }
 }
 
@@ -87,6 +93,10 @@ fn ensure_entry<'a>(
         entry.capabilities =
             profile::transition_capabilities(entry.capabilities, new_profile);
         entry.profile = new_profile;
+        // Un exec vers un role sandboxe pose le drapeau ; il ne le retire
+        // JAMAIS. `no_new_privs` est monotone, sinon un exec suffirait a s'en
+        // debarrasser -- ce qui serait exactement le contraire de son objet.
+        entry.no_new_privs = entry.no_new_privs || profile::sandboxe(new_profile);
         entry.image.clear();
         entry.image.push_str(image);
     }

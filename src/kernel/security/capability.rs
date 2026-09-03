@@ -15,6 +15,19 @@ impl Capabilities {
     pub const IPC_TRANSFER: Self = Self(1 << 8);
     pub const DEBUG: Self = Self(1 << 9);
     pub const SYSTEM_ADMIN: Self = Self(1 << 10);
+    /// Ouvrir une socket, quelle qu'elle soit.
+    ///
+    /// BOUCHAUD_C6_RESEAU_AU_SEUL_PROPRIETAIRE_V1
+    ///
+    /// `NETWORK_ADMIN` ne gardait que les sockets BRUTES ; toute autre socket
+    /// etait ouverte a tout le monde. Un moteur de rendu compromis pouvait donc
+    /// parler a n'importe quel hote, ce qui vide de son sens l'architecture ou
+    /// le reseau appartient a RequestServer.
+    ///
+    /// Ce droit est celui d'ouvrir une socket TOUT COURT. Il est donne a tout
+    /// ce qui en a legitimement besoin -- systeme, utilisateur, courtier,
+    /// serveur de requetes -- et refuse aux roles de RENDU.
+    pub const NET_CONNECT: Self = Self(1 << 11);
 
     pub const ALL: Self = Self(
         Self::EXEC.0
@@ -27,7 +40,8 @@ impl Capabilities {
             | Self::NETWORK_ADMIN.0
             | Self::IPC_TRANSFER.0
             | Self::DEBUG.0
-            | Self::SYSTEM_ADMIN.0,
+            | Self::SYSTEM_ADMIN.0
+            | Self::NET_CONNECT.0,
     );
 
     #[inline]

@@ -259,6 +259,10 @@ fn gate_native(number: u64, args: [u64; 6]) -> GateDecision {
             super::profile::SecurityProfile::System => 64 * 1024 * 1024u64,
             super::profile::SecurityProfile::BrowserBroker => 32 * 1024 * 1024u64,
             super::profile::SecurityProfile::BrowserContent => 16 * 1024 * 1024u64,
+            // RequestServer tamponne des reponses HTTP : le meme plafond que
+            // le rendu, pour la meme raison -- il traite des donnees venues du
+            // reseau.
+            super::profile::SecurityProfile::BrowserNetwork => 16 * 1024 * 1024u64,
             super::profile::SecurityProfile::User => 16 * 1024 * 1024u64,
             super::profile::SecurityProfile::Untrusted => 4 * 1024 * 1024u64,
         };
