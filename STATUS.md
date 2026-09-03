@@ -1,6 +1,6 @@
 # Bouchaud OS — Current Status
 
-Dernière mise à jour : 27 août 2026
+Dernière mise à jour : 3 septembre 2026
 
 Ce document sépare le code présent, les validations hors cible et les résultats
 observés sur la cible. La vision ne constitue jamais une preuve d'exécution.
@@ -11,6 +11,37 @@ observés sur la cible. La vision ne constitue jamais une preuve d'exécution.
 - 🟡 **Implemented / validation in progress** — code/tests présents, preuve runtime finale insuffisante.
 - 🔵 **In progress** — chantier actif, sans checkpoint de clôture.
 - ⚪ **Planned** — direction ou fonctionnalité non réalisée.
+
+## Modernisation — état après la passe des 12 chantiers
+
+**Aucune ligne de cette section n'est déclarative.** Chaque état renvoie à un
+test hôte exécutable ou à un garde-fou qui devient rouge si l'affirmation cesse
+d'être vraie. Ce qui n'a pas de preuve porte 🔵 ou ⚪, jamais ✅.
+
+La distinction qui compte : ✅ ici signifie « l'architecture cible est utilisée
+PAR DÉFAUT et couverte par des tests ». 🟡 signifie « le code existe et tourne,
+la preuve runtime QEMU manque ». Aucun chantier n'est déclaré terminé.
+
+| Chantier | État | Preuve exécutable |
+|---|---:|---|
+| 1 — BKL / concurrence | 🔵 | `Readiness` → `Migre` ; 17 → 15 sites ; `test_domaines_bkl.rs`, `verifie-domaines-bkl.py`, `verifie-portee-sans-commutation.py`, budget `sites_bkl_par_domaine` |
+| 2 — Scheduler NG | 🟡 | Runqueue O(1) à deux bandes, sans verrou ni allocation, utilisée par défaut ; `test_runqueue_ng.rs` (15), `test_latence_centiles.rs` (8), `test_runqueue_irq.rs` (9) |
+| 3 — Memory NG | 🟡 | Dépôt de magasins + arène DMA avec libération ; `test_magasin_depot.rs` (10), `test_arene_dma.rs` (14) |
+| 4 — Graphics NG / composited | 🔵 | Contrat + tranchant vertical ring 3 ; `test_composited.rs` (48), `composited-slice.c` construit en CI, `verifie-protocole-composited.py`. Le compositeur noyau reste le chemin par défaut. |
+| 5 — FS crash-safe | 🟡 | Commit A/B, génération, sommes de contrôle ; `test_commit_crash.rs` (13), injection de coupure **exhaustive** |
+| 6 — Sécurité | 🟡 | `BrowserNetwork` séparé, `NET_CONNECT`, exec côté appelant, `no_new_privs` d'office ; `test_bac_a_sable_navigateur.rs` (15) |
+| 7 — ABI Bouchaud / IPC | 🟡 | Atténuation au transfert ; `test_abi_droits.rs` (19), `verifie-abi-native.py` |
+| 8 — Ladybird produit | 🔵 | Supervision multi-processus, isolation des pannes, budget de relance ; `test_supervision.rs` (10) |
+| 9 — Network NG | 🔵 | File des segments non acquittés, RTO, Karn, retransmission rapide ; `test_tcp_retransmission.rs` (21) |
+| 10 — Hardware de référence | 🔵 | Topologie PCIe, BAR 64 bits, MSI/MSI-X, détection NVMe ; `test_pci_decodage.rs` (16), `verifie-matrice-materielle.py`, `tools/ci/plateforme.sh` |
+| 11 — Reliability / CI | 🟡 | `verifie-barrieres-ci.py`, `endurance.yml`, budgets d'exécution du chantier ; 42 garde-fous, 49 suites hôte |
+| 12 — Product polish | 🟡 | Échelle fractionnaire + coordonnées logiques, rétrocompatibles ; `test_protocole.rs` (25) |
+
+**Ce que cette passe ne prouve pas.** Aucune campagne QEMU n'a été exécutée :
+l'environnement de développement n'a ni QEMU ni `bootimage`. Les budgets
+d'exécution (`ready_latency_*`, `tcp_busy_poll_tours_max`, `bkl_regressions_domaine`)
+sont donc rapportés « non vérifiés » et non « tenus » — c'est le comportement
+voulu de `check_budgets.py`, et c'est la seule lecture honnête.
 
 ## Checkpoints de référence
 
