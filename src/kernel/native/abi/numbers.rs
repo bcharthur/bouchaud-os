@@ -9,6 +9,15 @@ pub const HANDLE_COUNT: u64 = NATIVE_BASE + 0x04;
 pub const CHANNEL_CREATE: u64 = NATIVE_BASE + 0x10;
 pub const CHANNEL_SEND: u64 = NATIVE_BASE + 0x11;
 pub const CHANNEL_RECV: u64 = NATIVE_BASE + 0x12;
+/// Envoi avec ATTENUATION des droits transferes.
+///
+/// `CHANNEL_SEND` reste inchange -- il transfere les droits tels quels --
+/// parce qu'un appelant deja compile ne peut pas deviner qu'un sixieme
+/// argument est apparu. Le nouveau numero porte un tableau de masques, un par
+/// handle : chaque capacite franchit la frontiere avec l'intersection de ses
+/// droits et de son masque. C'est ce qui permet a un courtier de donner une
+/// vue en LECTURE SEULE d'une region qu'il detient en lecture-ecriture.
+pub const CHANNEL_SEND_ATTENUE: u64 = NATIVE_BASE + 0x13;
 
 pub const EVENT_CREATE: u64 = NATIVE_BASE + 0x20;
 pub const EVENT_SIGNAL: u64 = NATIVE_BASE + 0x21;
@@ -40,6 +49,7 @@ pub const fn name(number: u64) -> &'static str {
         CHANNEL_CREATE => "bo_channel_create",
         CHANNEL_SEND => "bo_channel_send",
         CHANNEL_RECV => "bo_channel_recv",
+        CHANNEL_SEND_ATTENUE => "bo_channel_send_attenue",
         EVENT_CREATE => "bo_event_create",
         EVENT_SIGNAL => "bo_event_signal",
         EVENT_RESET => "bo_event_reset",

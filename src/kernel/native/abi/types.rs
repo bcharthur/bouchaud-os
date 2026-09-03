@@ -95,6 +95,16 @@ impl Rights {
     pub const INSPECT: Self = Self(1 << 6);
     pub const WAIT: Self = Self(1 << 7);
 
+    /// Tous les droits definis.
+    ///
+    /// Sert de masque « ne rien attenuer » : c'est la valeur qui reproduit
+    /// exactement le comportement d'avant l'attenuation de transfert, et donc
+    /// celle qu'un appelant non migre doit pouvoir passer sans y penser.
+    pub const TOUS: Self = Self(
+        Self::READ.0 | Self::WRITE.0 | Self::SIGNAL.0 | Self::MAP.0 |
+        Self::DUP.0 | Self::TRANSFER.0 | Self::INSPECT.0 | Self::WAIT.0
+    );
+
     pub const CHANNEL_DEFAULT: Self = Self(
         Self::READ.0 | Self::WRITE.0 | Self::DUP.0 | Self::TRANSFER.0 |
         Self::INSPECT.0 | Self::WAIT.0
