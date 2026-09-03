@@ -101,6 +101,32 @@ EXECUTION = {
         lambda v: v / 1_000_000,
         "la meme, pour les taches interactives",
     ),
+    # --- centiles de latence, chantier 2 ------------------------------------
+    #
+    # Un maximum peut venir d'un seul evenement de boot ; une moyenne noie les
+    # quelques pour cent de reveils lents qui font qu'une interface accroche.
+    # Le p99 interactif est le chiffre qui correspond a ce qui se voit : un
+    # clic sur cent qui repond en retard.
+    "ready_latency_interactive_p99_ms": (
+        re.compile(r"\[SCHED-NG-CENTILES\] classe=interactive .*?p99_ns=(\d+)"),
+        lambda v: v / 1_000_000,
+        "p99 de l'attente entre « prete » et « sur un coeur », classe interactive",
+    ),
+    "ready_latency_normale_p99_ms": (
+        re.compile(r"\[SCHED-NG-CENTILES\] classe=normale .*?p99_ns=(\d+)"),
+        lambda v: v / 1_000_000,
+        "la meme, classe normale -- borne la FAMINE du travail de fond",
+    ),
+    # --- runqueue du chantier 2 ---------------------------------------------
+    #
+    # `anti_famine` compte les tours rendus a la bande normale. Ce n'est pas une
+    # faute : c'est la preuve que la borne existe. Ce qui serait une faute est
+    # qu'elle n'existe pas, et cela ne se voit qu'en la mesurant.
+    "runqueue_doublons_max": (
+        re.compile(r"\[SCHED-NG-FILE\].*?doublons=(\d+)"),
+        lambda v: v,
+        "mises en file dedupliquees -- une tache publiee alors qu'elle y etait deja",
+    ),
 }
 
 

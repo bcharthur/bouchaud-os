@@ -174,6 +174,7 @@ anomalies={}/{}/{} proprietaire={}{}",
     // doivent exister dans toute trace ou l'on cherche un figement.
     crate::kernel::scheduler::preempt::log_stats();
     crate::kernel::scheduler::latency::log_stats();
+    log_files_execution();
     let (_, _, backing_reads, backing_bytes) = crate::fs::backing::stats();
     let (cache_hits, readahead_hits) = crate::fs::backing::cache_stats();
     let readahead_pages = crate::fs::backing::readahead_pages();
@@ -635,5 +636,26 @@ pub fn diagnostic_ordonnanceur() -> OrdonnanceurStats {
             / crate::kernel::timer::TICKS_PER_SECOND,
         ready: ready_count(),
         live: live_count(),
+    }
+}
+
+
+/// L'etat des runqueues per-CPU du chantier 2.
+///
+/// `interactives`/`normales` sont les deux BANDES : c'est la mesure directe de
+/// ce que la file precedente ne pouvait pas exprimer. `doublons` compte les
+/// mises en file deduupliquees sans parcourir la file -- l'operation qui etait
+/// un `contains()` lineaire --, et `anti_famine` les tours rendus a la bande
+/// normale, donc la preuve que la priorite n'est pas une famine.
+fn log_files_execution() {
+    let online = smp::schedulable_cpus().min(MAX_CPUS);
+    for cpu in 0..online {
+        let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu) else { continue };
+        let c = crate::arch::x86_64::cpu_local::local(id).compteurs_file();
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "[SCHED-NG-FILE] cpu={} interactives={} normales={} enfilees={} doublons={} defilees={} volees={} anti_famine={}",
+            cpu, c.interactives, c.normales, c.enfilees, c.doublons,
+            c.defilees, c.volees, c.anti_famine,
+        ));
     }
 }

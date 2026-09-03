@@ -247,35 +247,86 @@ fn la_re_entree_est_detectee_des_le_premier_niveau() {
 // Garde sur le code reel
 // ===========================================================================
 
-/// Les tests ci-dessus expliquent POURQUOI la file doit masquer les
-/// interruptions ; ils ne peuvent pas verifier qu'elle le fait, parce que
-/// `cpu_local.rs` ne se compile pas sur l'hote -- il touche l'APIC, le GDT et
-/// le gros verrou.
+/// Les tests ci-dessus expliquent POURQUOI un verrou tournant ordinaire ne peut
+/// pas proteger la file d'execution ; ils ne peuvent pas verifier ce que le
+/// code fait, parce que `cpu_local.rs` ne se compile pas sur l'hote -- il
+/// touche l'APIC, le GDT et le gros verrou.
 ///
-/// Celui-ci lit la declaration reelle. Revenir a un `SpinLock` ordinaire
-/// reintroduirait exactement le panic observe, et ce test echouerait.
+/// # Ce que ce garde exigeait, et ce qu'il exige maintenant
+///
+/// Il exigeait `run_queue: SpinLockIrq<...>` : masquer les interruptions etait
+/// LA reponse au panic reproduit plus haut. Le chantier 2 a supprime la
+/// question au lieu d'y repondre -- la file est devenue des bitmaps et des
+/// compteurs atomiques (`FileCpu`), il n'y a plus de section critique a
+/// reentrer.
+///
+/// Exiger encore `SpinLockIrq` ferait donc echouer une amelioration STRICTE.
+/// La regle protegee reste pourtant la meme, et elle se formule mieux : la
+/// file d'execution ne doit jamais etre gardee par un verrou tournant qui ne
+/// masque pas les interruptions. Sans verrou du tout, c'est vrai par
+/// construction ; si un verrou revenait un jour, il devrait masquer.
 #[test]
-fn la_file_d_execution_reste_un_verrou_masquant() {
+fn la_file_d_execution_ne_prend_jamais_de_verrou_non_masquant() {
     const SOURCE: &str = include_str!("../../src/arch/x86_64/cpu_local.rs");
 
-    // On epingle le TYPE DE VERROU, pas le type d'element. La file porte
-    // desormais des identites generationnelles (`Vec<u64>`) et non des indices
-    // nus ; ce changement-la est voulu, et epingler la declaration entiere
-    // faisait echouer le test pour une raison qui n'a rien a voir avec la
-    // regle qu'il protege.
-    assert!(
-        SOURCE.contains("run_queue: SpinLockIrq<"),
-        "la file d'execution doit rester un SpinLockIrq : elle est atteignable \
-         depuis l'IRQ 8042 via le reveil du compositeur"
-    );
     assert!(
         !SOURCE.contains("run_queue: SpinLock<"),
-        "un SpinLock ordinaire sur la file rouvre la re-entree par interruption"
+        "un SpinLock ordinaire sur la file rouvre la re-entree par interruption \
+         observee au runtime (voir l'en-tete de ce fichier)"
     );
+
+    let sans_verrou = SOURCE.contains("run_queue: FileCpu");
+    let verrou_masquant = SOURCE.contains("run_queue: SpinLockIrq<");
     assert!(
-        SOURCE.contains("run_queue: SpinLockIrq::new(Vec::new())"),
-        "et sa construction doit suivre la declaration"
+        sans_verrou || verrou_masquant,
+        "la file doit etre soit sans verrou (`FileCpu`), soit gardee par un \
+         `SpinLockIrq` : elle est atteignable depuis l'IRQ 8042 via le reveil \
+         du compositeur"
     );
+
+    if sans_verrou {
+        assert!(
+            SOURCE.contains("run_queue: FileCpu::neuve()"),
+            "et sa construction doit suivre la declaration"
+        );
+    }
+}
+
+/// La file sans verrou ne doit pas ALLOUER : le chemin y est atteint
+/// interruptions masquees et depuis un gestionnaire d'interruption.
+///
+/// `Vec::push` pouvait reallouer, donc allouer, sous le verrou de la file. Le
+/// remplacement n'a de sens que si le nouveau chemin, lui, ne le fait jamais.
+#[test]
+fn la_file_sans_verrou_n_alloue_jamais() {
+    const SOURCE: &str = include_str!("../../src/kernel/scheduler/runqueue.rs");
+    // Le CODE, pas les commentaires : l'en-tete du module cite `Vec<u64>` pour
+    // dire ce qu'il remplace, et l'interdire dans une phrase interdirait
+    // d'expliquer le changement.
+    let code: String = SOURCE
+        .lines()
+        .filter(|ligne| !ligne.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let code = code.as_str();
+
+    for interdit in [
+        "alloc::", "Vec<", "Vec::", "Box<", "Box::", "String", "BTreeMap", "vec!",
+    ] {
+        assert!(
+            !code.contains(interdit),
+            "`{interdit}` dans la runqueue : le chemin chaud allouerait, \
+             interruptions masquees, depuis une IRQ"
+        );
+    }
+
+    // Et pas de verrou non plus : c'est ce qui rend la reentrance sans objet.
+    for interdit in ["SpinLock", "Mutex", "RwLock"] {
+        assert!(
+            !code.contains(interdit),
+            "`{interdit}` dans la runqueue : le chantier 2 la veut sans verrou"
+        );
+    }
 }
 
 /// L'assertion de recursion de `SpinLock` doit rester en place : c'est elle qui

@@ -1,12 +1,17 @@
 //! Facade de l'ordonnanceur reel de Bouchaud OS.
 //!
 //! P0-NG1 ajoute deux briques au scheduler SMP existant : la preemption noyau
-//! differee aux safe-points et l'observatoire ready-to-run. L'election et les
-//! runqueues restent celles de `kernel::task`, ce qui preserve les invariants
-//! Gate0 de passation de pile.
+//! differee aux safe-points et l'observatoire ready-to-run. L'election reste
+//! celle de `kernel::task`, ce qui preserve les invariants Gate0 de passation
+//! de pile.
+//!
+//! Le chantier 2 ajoute la STRUCTURE des runqueues elles-memes : `runqueue`
+//! remplace le `SpinLockIrq<Vec<u64>>` par deux bandes de bitmaps par CPU,
+//! sans verrou et sans allocation.
 
 pub mod latency;
 pub mod preempt;
+pub mod runqueue;
 
 pub use crate::kernel::task::OrdonnanceurStats;
 

@@ -52,6 +52,15 @@ use core::sync::atomic::AtomicPtr;
 /// Nombre maximal de taches simultanement enregistrees.
 pub const MAX_TACHES: usize = 1024;
 
+// Les bitmaps des runqueues indexent les EMPLACEMENTS de ce registre. Un
+// emplacement au-dela de leur couverture ne serait jamais mis en file : la
+// tache serait prete et ne s'executerait jamais. Le desaccord se voit ici, a la
+// compilation, et pas au bout de mille processus.
+const _: () = assert!(
+    MAX_TACHES == crate::kernel::scheduler::runqueue::EMPLACEMENTS,
+    "runqueue::EMPLACEMENTS doit couvrir exactement MAX_TACHES",
+);
+
 /// Identite d'une tache : son emplacement, et QUELLE incarnation.
 ///
 /// Un simple indice ne suffit pas. Les emplacements se recyclent, et un indice

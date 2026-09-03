@@ -2,6 +2,7 @@
   "_lisez_moi": "Budgets versionnes. Depasser une valeur echoue la barriere ; faire mieux est signale et s'adopte avec `python3 tools/ci/check_budgets.py --adopte`. Les valeurs d'architecture se calculent sur la source ; celles d'execution se lisent dans un journal QEMU passe par --journal.",
   "architecture": {
     "_lisez_moi": "Nombre de sites prenant encore le gros verrou, par domaine. La direction attendue est vers le bas, domaine par domaine. Un domaine declare `Migre` dans src/kernel/sync/domaine.rs doit valoir zero -- et n'apparait donc pas ici.",
+    "_note_reseau": "Reseau apparait a 3 sans qu'aucun site n'ait ete cree : les trois prises de l'anneau e1000 (lecture, ecriture, sonde de readiness) etaient attribuees a `Fd`, qui payait une dette qui n'est pas la sienne. Fd passe de 5 a 2 -- il ne lui reste que la console et l'audio. La dette reseau est celle du chantier 9 ; elle est maintenant nommee au bon endroit.",
     "sites_bkl_par_domaine": {
       "Fd": 2,
       "Panique": 6,
@@ -9,16 +10,18 @@
       "Readiness": 1,
       "Reseau": 3,
       "Syscall": 1
-    },
-    "_note_reseau": "Reseau apparait a 3 sans qu'aucun site n'ait ete cree : les trois prises de l'anneau e1000 (lecture, ecriture, sonde de readiness) etaient attribuees a `Fd`, qui payait une dette qui n'est pas la sienne. Fd passe de 5 a 2 -- il ne lui reste que la console et l'audio. La dette reseau est celle du chantier 9 ; elle est maintenant nommee au bon endroit."
+    }
   },
   "execution": {
-    "_lisez_moi": "Mesures pires-cas d'une trace QEMU. `bkl_regressions_domaine` doit rester a zero pour toujours : c'est le contrat des chemins declares sortis. Les valeurs de latence sont des PLAFONDS de depart, choisis pour bloquer les figements de plusieurs secondes ; elles se resserrent en les adoptant apres une amelioration mesuree, jamais en les relachant apres une regression.",
+    "_lisez_moi": "Mesures pires-cas d'une trace QEMU. `bkl_regressions_domaine` doit rester a zero pour toujours : c'est le contrat des chemins declares sortis. Les valeurs de latence sont des PLAFONDS de depart, choisis pour bloquer les figements de plusieurs secondes ; elles se resserrent en les adoptant apres une amelioration mesuree, jamais en les relachant apres une regression. Les centiles du chantier 2 (`ready_latency_*_p99_ms`) mesurent ce que l'utilisateur RESSENT la ou un maximum unique peut venir du boot ; celui de la classe normale borne la FAMINE que la priorite interactive pourrait creer.",
     "bkl_attente_max_ms": 50.0,
     "bkl_max_hold_ms": 50.0,
     "bkl_regressions_domaine": 0,
     "preempt_max_defer_ms": 100.0,
     "ready_latency_interactive_max_ms": 100.0,
-    "ready_latency_max_ms": 250.0
+    "ready_latency_interactive_p99_ms": 50.0,
+    "ready_latency_max_ms": 250.0,
+    "ready_latency_normale_p99_ms": 250.0,
+    "runqueue_doublons_max": 5000000
   }
 }
