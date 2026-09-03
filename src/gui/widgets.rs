@@ -226,15 +226,28 @@ fn fond_de_barre(sommet: usize, filet_en_bas: bool) {
     fb::fill_rect_rgb(0, filet, fb::WIDTH, 1, crate::gui::theme::COLOR_BORDER);
 }
 
-/// Remplit un rectangle arrondi par SEGMENTS, comme le chrome des fenetres.
+/// Remplit un rectangle arrondi par SEGMENTS, ANTI-CRENELE.
+///
+/// BOUCHAUD_C12_CHROME_SANS_MARCHE_V1
+///
+/// Ce remplisseur dessine les fonds arrondis du chrome -- barre d'URL, boutons,
+/// onglets, pastilles. Il utilisait `spans_rounded_rect`, dont les segments
+/// sont binaires : chaque coin sortait en marche d'escalier, et c'est ce que
+/// l'oeil lit comme « des pixels ».
+///
+/// `spans_rounded_rect_aa` rend les memes segments avec leur COUVERTURE. Les
+/// lignes hors des bandes de coins sortent pleines et retombent sur
+/// `fill_rect_rgb` : l'interieur ne paie donc rien de plus qu'avant. Seule la
+/// frange des coins est melangee, et elle ne fait que quelques courses par
+/// ligne.
 fn pave_arrondi(rect: crate::gui::windowing::Rect, rayon: u32, couleur: u32) {
     let (cx0, cy0, cx1, cy1) = fb::clip_rect();
     let decoupe = crate::gui::windowing::Rect::new(cx0 as i32, cy0 as i32,
         cx1.saturating_sub(cx0) as u32, cy1.saturating_sub(cy0) as u32);
-    crate::gui::graphics::spans_rounded_rect(rect, rayon, decoupe,
-        |x, y, largeur| {
-            fb::fill_rect_rgb(x.max(0) as usize, y.max(0) as usize,
-                largeur as usize, 1, couleur)
+    crate::gui::graphics::spans_rounded_rect_aa(rect, rayon, decoupe,
+        |x, y, largeur, couverture| {
+            fb::blend_rect_rgb(x.max(0) as usize, y.max(0) as usize,
+                largeur as usize, couleur, couverture)
         });
 }
 
@@ -426,10 +439,12 @@ fn draw_window(w: &Win, focused: bool) {
         else { crate::gui::theme::COLOR_SURFACE };
     let title = crate::gui::windowing::titlebar_rect(outer,
         crate::gui::windowing::WINDOW_CHROME);
-    crate::gui::graphics::spans_rounded_rect(title, crate::gui::theme::RADIUS_WINDOW,
-        damage, |px, py, largeur| {
-            fb::fill_rect_rgb(px.max(0) as usize, py.max(0) as usize,
-                largeur as usize, 1, title_color)
+    // Les coins HAUTS de la barre de titre sont le bord le plus regarde d'une
+    // fenetre : c'est la que la marche d'escalier se voyait le mieux.
+    crate::gui::graphics::spans_rounded_rect_aa(title, crate::gui::theme::RADIUS_WINDOW,
+        damage, |px, py, largeur, couverture| {
+            fb::blend_rect_rgb(px.max(0) as usize, py.max(0) as usize,
+                largeur as usize, title_color, couverture)
         });
     fb::fill_rect_rgb(x + 1, y + title_h - 1, ww.saturating_sub(2), 1,
         crate::gui::theme::COLOR_BORDER);

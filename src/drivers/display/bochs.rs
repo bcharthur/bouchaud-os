@@ -880,6 +880,36 @@ pub fn blit_argb_span(x: usize, y: usize, ligne: &[u32]) {
     if ecrits != 0 { PIXELS_DESSINES.fetch_add(ecrits, Ordering::Relaxed); }
 }
 
+/// Melange une COULEUR UNIFORME sur un segment horizontal, a couverture fixe.
+///
+/// BOUCHAUD_C12_MELANGE_PAR_SEGMENT_V1
+///
+/// `blend_rgb` melange un pixel et refait sa decoupe a chaque appel. L'anti-
+/// crenelage des formes arrondies produit au contraire des SEGMENTS de
+/// couverture constante -- la frange d'un coin est une poignee de courses, pas
+/// une nuee de pixels isoles. Les traiter un par un rendrait au rasteriseur le
+/// cout que son architecture par segments existe pour supprimer.
+///
+/// Ici la decoupe est faite UNE fois pour le segment, puis la boucle ne fait
+/// plus que du melange. Une couverture pleine retombe sur `fill_rect_rgb`, donc
+/// l'interieur des formes ne paie rien.
+pub fn blend_rect_rgb(x: usize, y: usize, w: usize, rgb: u32, alpha: u8) {
+    if alpha == 0 || w == 0 { return; }
+    if alpha == 255 { fill_rect_rgb(x, y, w, 1, rgb); return; }
+    let buf = back();
+    if buf.is_empty() { return; }
+    let (cx0, cy0, cx1, cy1) = clip();
+    if y < cy0 || y >= cy1 { return; }
+    let x0 = x.max(cx0);
+    let x1 = (x + w).min(cx1);
+    if x1 <= x0 { return; }
+    let row = y * WIDTH;
+    for px in x0..x1 {
+        melange_pixel(buf, row + px, rgb, alpha);
+    }
+    note_pixels_dessines((x1 - x0) as u64);
+}
+
 pub fn fill_rect_rgb(x: usize, y: usize, w: usize, h: usize, rgb: u32) {
     let buf = back();
     if buf.is_empty() { return; }

@@ -240,3 +240,159 @@ pub fn ligne_conforme(largeur: i32, hauteur: i32, radius: i32, y: i32) -> bool {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_C12_ANTICRENELAGE_V1 -- la couverture, et non plus l'appartenance
+// ---------------------------------------------------------------------------
+//
+// `bornes_ligne` rend un segment BINAIRE : un pixel est dedans ou dehors. Un
+// coin arrondi devient donc un escalier, et cet escalier se voit sur tout ce
+// que le chrome dessine -- barre d'URL, boutons, onglets, bords de fenetre --
+// parce que tout passe par ce rasteriseur.
+//
+// La reparation ne change pas la forme : elle change ce qu'on mesure. Au lieu
+// de demander « ce pixel est-il dedans ? », on demande « quelle FRACTION de ce
+// pixel la forme couvre-t-elle ? ». Le bord cesse alors d'etre une marche pour
+// devenir une rampe, et l'oeil ne voit plus de pixel.
+//
+// La couverture est analytique, pas echantillonnee : pour un pixel dont le
+// centre est a distance `d` du centre de l'arc de rayon `r`, la fraction
+// couverte vaut `clamp(r - d + 1/2, 0, 1)`. C'est la surface du demi-plan
+// tangent, exacte au premier ordre et sans le cout d'un sur-echantillonnage.
+//
+// Tout est en entiers. Les centres de pixels tombent sur des demis, donc on
+// travaille en DEMI-PIXELS : le centre du pixel `x` est `2x + 1`, et le rayon
+// `r` vaut `2r`. La formule devient `(2r - d2 + 1) / 2`, exprimee en 255emes.
+
+/// Couverture de la forme sur le pixel `(x, y)`, de 0 (dehors) a 255 (dedans).
+///
+/// Les coordonnees sont LOCALES a la forme. `radius` est borne comme dans
+/// `bornes_ligne`, pour que les deux decrivent le meme objet.
+pub fn couverture_pixel(x: i32, y: i32, largeur: i32, hauteur: i32, radius: i32) -> u8 {
+    if largeur <= 0 || hauteur <= 0 { return 0 }
+    if x < 0 || y < 0 || x >= largeur || y >= hauteur { return 0 }
+    let radius = radius.max(0).min(largeur.min(hauteur) / 2);
+    if radius == 0 { return 255 }
+
+    // MEMES centres que `inside_rounded`, et memes indices de pixel. Les deux
+    // doivent decrire le meme cercle : un fond anti-crenele et une bordure
+    // binaire dessines sur la meme forme ne doivent pas se decaler.
+    let cx = if x < radius { radius - 1 }
+        else if x >= largeur - radius { largeur - radius }
+        else { return 255 };
+    let cy = if y < radius { radius - 1 }
+        else if y >= hauteur - radius { hauteur - radius }
+        else { return 255 };
+
+    let dx = x - cx;
+    let dy = y - cy;
+
+    // `racine` tronque, donc on l'appelle sur une distance MISE A L'ECHELLE :
+    // en seiziemes de pixel, l'erreur de troncature vaut 1/16 de pixel au lieu
+    // d'un pixel entier -- assez fin pour que la rampe n'ait pas de marche.
+    let distance = racine((dx * dx + dy * dy).saturating_mul(ECHELLE * ECHELLE));
+
+    // couverture = radius - d + 1/2, borne a [0, 1].
+    //
+    // Au bord exact de la forme binaire (`d == radius`) elle vaut 1/2 : le
+    // pixel que l'ancien rasteriseur allumait entierement est desormais a
+    // moitie couvert, ce qui est precisement ce qui efface la marche.
+    let numerateur = ECHELLE * radius - distance + ECHELLE / 2;
+    if numerateur <= 0 { return 0 }
+    let couverture = (numerateur * 255) / ECHELLE;
+    if couverture >= 255 { 255 } else { couverture as u8 }
+}
+
+/// Seiziemes de pixel : la finesse a laquelle la rampe est calculee.
+const ECHELLE: i32 = 16;
+
+/// Segments de `rect ∩ clip` AVEC leur couverture.
+///
+/// Les lignes hors des bandes de coins sortent en un seul segment pleinement
+/// couvert : le cout par ligne reste celui du chemin binaire. Seules les deux
+/// bandes de coins sont parcourues pixel par pixel, et les couvertures egales
+/// y sont regroupees -- un bord franc y redonne donc un segment unique.
+///
+/// Rend le nombre de pixels touches, pour que les tests d'hote puissent
+/// affirmer que la decoupe borne bien le travail.
+pub fn spans_rounded_rect_aa<F: FnMut(i32, i32, u32, u8)>(rect: Rect, radius: u32,
+    clip: Rect, mut segment: F) -> usize {
+    let Some(area) = intersection(rect, clip) else { return 0 };
+    let largeur = rect.width as i32;
+    let hauteur = rect.height as i32;
+    let radius = (radius as i32).max(0).min(largeur.min(hauteur) / 2);
+    let mut touches = 0usize;
+
+    for y in area.y..area.bottom() {
+        let ly = y - rect.y;
+
+        // Bande centrale : aucun arc ne la traverse, donc aucune couverture
+        // partielle a calculer.
+        if radius == 0 || (ly >= radius && ly < hauteur - radius) {
+            let x0 = area.x;
+            let x1 = area.right();
+            if x1 > x0 {
+                touches += (x1 - x0) as usize;
+                segment(x0, y, (x1 - x0) as u32, 255);
+            }
+            continue;
+        }
+
+        // Bande de coin : on part de l'extension binaire elargie d'un pixel de
+        // chaque cote -- la rampe deborde d'exactement un pixel -- puis on
+        // regroupe les couvertures egales.
+        let Some((debut, fin)) = bornes_ligne(largeur, hauteur, radius, ly) else { continue };
+        let x0 = (rect.x + debut - 1).max(area.x);
+        let x1 = (rect.x + fin + 1).min(area.right());
+
+        let mut course_debut = x0;
+        let mut course_valeur = 0u8;
+        let mut course_active = false;
+        for x in x0..x1 {
+            let c = couverture_pixel(x - rect.x, ly, largeur, hauteur, radius);
+            if course_active && c == course_valeur { continue }
+            if course_active && course_valeur != 0 {
+                touches += (x - course_debut) as usize;
+                segment(course_debut, y, (x - course_debut) as u32, course_valeur);
+            }
+            course_debut = x;
+            course_valeur = c;
+            course_active = true;
+        }
+        if course_active && course_valeur != 0 && x1 > course_debut {
+            touches += (x1 - course_debut) as usize;
+            segment(course_debut, y, (x1 - course_debut) as u32, course_valeur);
+        }
+    }
+    touches
+}
+
+/// Melange `dessus` sur `fond` selon `couverture` (0 = fond, 255 = dessus).
+///
+/// Par canal, sur 8 bits, sans flottant. `255` doit rendre `dessus` EXACTEMENT
+/// -- sans quoi une surface pleine deriverait en teinte a chaque recomposition.
+pub fn melange(fond: u32, dessus: u32, couverture: u8) -> u32 {
+    if couverture == 0 { return fond }
+    if couverture == 255 { return dessus }
+    let a = couverture as u32;
+    let inv = 255 - a;
+    let canal = |decalage: u32| {
+        let f = (fond >> decalage) & 0xff;
+        let d = (dessus >> decalage) & 0xff;
+        // +127 : arrondi au plus proche plutot que troncature, sinon un degrade
+        // se decale systematiquement vers le fond.
+        (((d * a + f * inv) + 127) / 255) & 0xff
+    };
+    (canal(16) << 16) | (canal(8) << 8) | canal(0)
+}
+
+/// Version pixel de `spans_rounded_rect_aa`, pour les tests d'hote.
+///
+/// Ecrite SUR les segments : elle ne peut donc pas dessiner autre chose que ce
+/// que le compositeur dessine.
+pub fn fill_rounded_rect_aa<F: FnMut(i32, i32, u8)>(rect: Rect, radius: u32, clip: Rect,
+    mut paint: F) -> usize {
+    spans_rounded_rect_aa(rect, radius, clip, |x, y, largeur, couverture| {
+        for dx in 0..largeur as i32 { paint(x + dx, y, couverture) }
+    })
+}
