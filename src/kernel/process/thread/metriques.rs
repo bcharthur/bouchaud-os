@@ -178,6 +178,7 @@ anomalies={}/{}/{} proprietaire={}{}",
     crate::kernel::heap::log_ng_stats();
     crate::kernel::memory::log_dma_stats();
     crate::drivers::bloc::log_stats();
+    crate::kernel::navigateur::supervision::log_stats();
     let (tcp_rtx, tcp_rapides, tcp_rtt, tcp_srtt, tcp_rto, tcp_busy, tcp_sommeils) =
         crate::net::transport::retransmission::stats();
     crate::kernel::dmesg::log_fmt(format_args!(

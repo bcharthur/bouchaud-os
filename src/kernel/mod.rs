@@ -7,6 +7,8 @@
 #[path = "../compat/linux/mod.rs"]
 pub mod abi;
 pub mod autorun;
+#[path = "navigateur/mod.rs"]
+pub mod navigateur;
 #[path = "memory/page_cache.rs"]
 pub mod clean_page_cache;
 #[path = "memory/readahead.rs"]

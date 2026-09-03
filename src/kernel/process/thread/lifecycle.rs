@@ -28,6 +28,12 @@ pub fn exit_current(code: i32) -> ! {
             // Un WebContent qui plante ne doit pas laisser la base SQL du
             // navigateur verrouillee pour le reste de la session.
             crate::kernel::abi::verrous::libere_processus(process.pid);
+            // Et la supervision apprend la mort du processus. C'est ici, et
+            // seulement ici, que la difference entre « un rendu est mort » et
+            // « le navigateur est mort » se decide : le courtier emporte ses
+            // enfants, un rendu n'emporte que lui-meme.
+            crate::kernel::navigateur::supervision::note_sortie(
+                process.pid, code, crate::kernel::timer::monotonic_ns());
         }
     }
 
