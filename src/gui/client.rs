@@ -161,6 +161,13 @@ impl Client {
             hauteur: self.surface.hauteur as u32,
             pas: self.surface.pas as u32,
             format: 0,
+            // Le compositeur noyau presente encore un pixel logique pour un
+            // pixel physique. Annoncer l'echelle EXPLICITEMENT plutot que de
+            // laisser le champ a zero est ce qui rend la valeur lisible : un
+            // client ne peut pas distinguer « pas d'echelle » de « echelle
+            // absente » si le compositeur ne dit rien.
+            echelle: crate::gui::echelle_affichage(),
+            reserve: 0,
         }
         .encode();
         self.envoie(Genre::Surface, &charge);
@@ -172,6 +179,8 @@ impl Client {
             largeur: self.surface.largeur as u32,
             hauteur: self.surface.hauteur as u32,
             focus: focus as u32,
+            echelle: crate::gui::echelle_affichage(),
+            reserve: 0,
         }
         .encode();
         self.envoie(Genre::Configure, &charge);
