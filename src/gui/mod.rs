@@ -30,6 +30,7 @@ pub mod degats;
 pub mod disposition;
 pub mod transition;
 pub mod protocole;
+pub mod composited;
 
 // BOUCHAUD_C12_ECHELLE_V1
 //

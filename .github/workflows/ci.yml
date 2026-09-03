@@ -104,6 +104,14 @@ jobs:
       - name: Ownership des entrees Ladybird
         run: tools/ladybird/test-input-ownership.sh
 
+      # Le service ring 3 est freestanding : le compiler ici coute quelques
+      # secondes et attrape ce qu'aucun test hote ne verra -- un en-tete qui ne
+      # compile plus pour la cible ring 3, une charge utile dont la taille a
+      # bouge d'un cote seulement. Le tranchant complet tourne sous QEMU dans
+      # `native-ipc-runtime`.
+      - name: Compositeur ring 3 (compilation freestanding)
+        run: bash userland/services/composited/build.sh
+
   browser-engine:
     name: browser / engine tests
     needs: changes
