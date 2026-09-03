@@ -8,15 +8,24 @@
 use bootloader::bootinfo::MemoryRegionType;
 use bootloader::BootInfo;
 use crate::kernel::heap;
+use crate::kernel::arene_dma::AreneDma;
+use x86_64::instructions::interrupts;
 
 static mut PHYS_OFFSET: u64 = 0;
-static mut DMA_START: u64 = 0;
-static mut DMA_NEXT: u64 = 0;
-static mut DMA_END: u64 = 0;
-static mut DMA_ALLOCATIONS: u64 = 0;
-static mut DMA_FAILURES: u64 = 0;
 static mut USER_START: u64 = 0;
 static mut USER_END: u64 = 0;
+
+// BOUCHAUD_C3_ARENE_DMA_V1
+//
+// L'arene etait trois `static mut` et un pointeur qui monte. Elle ne rendait
+// RIEN -- un anneau reseau reinitialise perdait sa memoire jusqu'au
+// redemarrage -- et c'etait une COURSE : deux pilotes s'initialisant en
+// parallele pouvaient recevoir la meme adresse physique et se marcher dessus
+// dans un tampon que le materiel lit.
+//
+// `memory::arene_dma` porte maintenant la frontiere ET une liste de regions
+// rendues, fusionnante et bornee, sous son propre verrou.
+static ARENE: AreneDma = AreneDma::neuve();
 
 /// Reserve en fin de la plus grande region pour l'arene DMA (pilotes).
 const DMA_RESERVE: u64 = 32 * 1024 * 1024;
@@ -84,28 +93,20 @@ pub fn init(boot: &'static BootInfo) {
             // Bascule le tas sur la grande arene physique (avant toute
             // allocation persistante : seul le bootstrap statique a servi).
             heap::switch_arena(phys_to_virt(heap_start), heap_size);
-            DMA_START = dma_start;
-            DMA_NEXT = dma_start;
-            DMA_END = region_end;
             USER_START = user_start;
             USER_END = dma_start;
         }
+        ARENE.configure(dma_start, region_end);
     } else if best_len > DMA_RESERVE + 16 * 1024 * 1024 {
         let dma_start = (region_end - DMA_RESERVE) & !0xFFF;
         let heap_size = (dma_start - heap_start) as usize;
         unsafe {
             heap::switch_arena(phys_to_virt(heap_start), heap_size);
-            DMA_START = dma_start;
-            DMA_NEXT = dma_start;
-            DMA_END = region_end;
         }
+        ARENE.configure(dma_start, region_end);
     } else {
         // Region trop petite : DMA seule, tas bootstrap conserve.
-        unsafe {
-            DMA_START = heap_start;
-            DMA_NEXT = heap_start;
-            DMA_END = region_end;
-        }
+        ARENE.configure(heap_start, region_end);
     }
     crate::kernel::dmesg::log("memory: acces physique + tas etendu + arene DMA prets");
 
@@ -145,19 +146,26 @@ pub fn phys_to_virt(phys: u64) -> *mut u8 {
 /// Alloue un bloc DMA (aligne page, mis a zero). Renvoie (adresse physique,
 /// pointeur virtuel). `None` si l'arene est epuisee.
 pub fn alloc_dma(size: usize) -> Option<(u64, *mut u8)> {
-    unsafe {
-        let base = (DMA_NEXT + 0xFFF) & !0xFFF;
-        let end = base + (((size as u64) + 0xFFF) & !0xFFF);
-        if DMA_END == 0 || end > DMA_END {
-            DMA_FAILURES = DMA_FAILURES.wrapping_add(1);
-            return None;
-        }
-        DMA_NEXT = end;
-        DMA_ALLOCATIONS = DMA_ALLOCATIONS.wrapping_add(1);
-        let virt = phys_to_virt(base);
-        core::ptr::write_bytes(virt, 0, size);
-        Some((base, virt))
-    }
+    // Interruptions masquees : l'arene est atteignable depuis l'initialisation
+    // d'un pilote comme depuis un gestionnaire, et son verrou est un verrou
+    // tournant simple.
+    let base = interrupts::without_interrupts(|| ARENE.alloue(size))?;
+    let virt = phys_to_virt(base);
+    // La remise a zero reste HORS du verrou : elle peut porter sur plusieurs
+    // centaines de kilooctets, et la tenir sous le verrou de l'arene
+    // serialiserait l'initialisation de tous les pilotes derriere le plus gros
+    // tampon.
+    unsafe { core::ptr::write_bytes(virt, 0, size) };
+    Some((base, virt))
+}
+
+/// Rend un bloc DMA a l'arene.
+///
+/// `base` et `size` doivent etre ceux rendus par [`alloc_dma`]. Rendre une
+/// region hors arene est compte (`debordements`) et ignore : l'ajouter a la
+/// liste corromprait les allocations suivantes.
+pub fn free_dma(base: u64, size: usize) {
+    interrupts::without_interrupts(|| ARENE.libere(base, size));
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -170,17 +178,28 @@ pub struct DmaStats {
 }
 
 pub fn dma_stats() -> DmaStats {
-    unsafe {
-        let total = DMA_END.saturating_sub(DMA_START);
-        let used = DMA_NEXT.saturating_sub(DMA_START).min(total);
-        DmaStats {
-            used,
-            free: total.saturating_sub(used),
-            total,
-            allocations: DMA_ALLOCATIONS,
-            failures: DMA_FAILURES,
-        }
+    let etat = ARENE.etat();
+    DmaStats {
+        used: etat.utilise,
+        free: etat.libre,
+        total: etat.total,
+        allocations: etat.allocations,
+        failures: etat.echecs,
     }
+}
+
+/// L'etat complet de l'arene, pour le releve periodique.
+pub fn dma_etat() -> crate::kernel::arene_dma::EtatDma {
+    ARENE.etat()
+}
+
+pub fn log_dma_stats() {
+    let e = ARENE.etat();
+    crate::serial_println!(
+        "[MEM-NG-DMA] total={} utilise={} rendu={} regions={} pic={} allocations={} liberations={} reutilisations={} fusions={} debordements={} echecs={}",
+        e.total, e.utilise, e.rendu, e.regions, e.pic, e.allocations,
+        e.liberations, e.reutilisations, e.fusions, e.debordements, e.echecs
+    );
 }
 
 /// Octets de tas utilises.

@@ -175,6 +175,8 @@ anomalies={}/{}/{} proprietaire={}{}",
     crate::kernel::scheduler::preempt::log_stats();
     crate::kernel::scheduler::latency::log_stats();
     log_files_execution();
+    crate::kernel::heap::log_ng_stats();
+    crate::kernel::memory::log_dma_stats();
     let (futex_attentes, futex_reveils, futex_herites, futex_profondeur) = futex_bkl_stats();
     crate::kernel::dmesg::log_fmt(format_args!(
         "[BKL-FUTEX] attentes={} reveils={} herites={} profondeur_max={}",

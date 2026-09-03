@@ -29,6 +29,10 @@ pub mod fd;
 pub mod handle;
 #[path = "memory/heap.rs"]
 pub mod heap;
+#[path = "memory/magasin.rs"]
+pub mod magasin;
+#[path = "memory/arene_dma.rs"]
+pub mod arene_dma;
 pub mod input;
 #[path = "debug/journal.rs"]
 pub mod journal;

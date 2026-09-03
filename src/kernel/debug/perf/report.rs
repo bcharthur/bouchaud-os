@@ -38,6 +38,7 @@ pub fn browser_report(pid: u32, silence_ms: u64) {
     crate::kernel::scheduler::preempt::log_stats();
     crate::kernel::scheduler::latency::log_stats();
     crate::kernel::heap::log_ng_stats();
+    crate::kernel::memory::log_dma_stats();
     crate::kernel::frame_cache::log_stats();
     crate::kernel::memory_pressure::log_stats();
     crate::kernel::clean_page_cache::log_ng_stats();
