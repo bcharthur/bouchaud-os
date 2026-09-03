@@ -13,6 +13,7 @@
   },
   "execution": {
     "_lisez_moi": "Mesures pires-cas d'une trace QEMU. `bkl_regressions_domaine` doit rester a zero pour toujours : c'est le contrat des chemins declares sortis. Les valeurs de latence sont des PLAFONDS de depart, choisis pour bloquer les figements de plusieurs secondes ; elles se resserrent en les adoptant apres une amelioration mesuree, jamais en les relachant apres une regression. Les centiles du chantier 2 (`ready_latency_*_p99_ms`) mesurent ce que l'utilisateur RESSENT la ou un maximum unique peut venir du boot ; celui de la classe normale borne la FAMINE que la priorite interactive pourrait creer.",
+    "_note_preempt": "preempt_max_defer_ms borne le report SUBI : du premier REFUS d'un point sur au service effectif. Il a d'abord mesure l'ecart demande->service, ce qui incluait l'inactivite : une trace SMP4 a rendu 2100 ms avec blocked_*=0 -- pas un seul refus -- pendant que la latence prete->coeur plafonnait a 19,8 ms. Le chiffre ne mesurait pas un figement mais un coeur au repos. Le plafond de 100 ms est CONSERVE et non relache : il porte desormais sur la grandeur que les chantiers 1 et 2 doivent faire baisser. L'ancienne mesure reste emise en diagnostic sous attente_service_max_ns, sans budget, parce qu'elle ne borne rien.",
     "_requis": [
       "bkl_attente_max_ms",
       "bkl_max_hold_ms",

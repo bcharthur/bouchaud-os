@@ -45,7 +45,7 @@ attente_max=[origine=enter cpu=1 appel=x] reprise_ns=0 reprise_max_ns=0 \
 spins=12 spins_irq_masquees=0 parks=3 wake_ipis=3 reveils_sans_acq=0 liberations_migrees=0 \
 anomalies=0/0/0 proprietaire=-
 [kernel] [BKL-DOMAINES] normaux=8123 regressions=0 debordements=0 premiere_regression=aucune
-[SCHED-NG-PREEMPT] requests=900 safe=880 switches=870 blocked_bkl=4 blocked_preempt=2 blocked_ctx=1 max_defer_ns=3100000
+[SCHED-NG-PREEMPT] requests=900 safe=880 switches=870 blocked_bkl=4 blocked_preempt=2 blocked_ctx=1 max_defer_ns=3100000 attente_service_max_ns=2100011617
 [SCHED-NG-LAT] count=5000 avg_ns=41000 max_ns=9100000 interactive_count=1800 interactive_max_ns=2700000 buckets_lt100us=10,lt500us=20,lt2ms=30,lt8ms=40,lt16ms=5,ge16ms=0
 [SCHED-NG-CENTILES] classe=interactive count=1800 p50_ns=21000 p95_ns=310000 p99_ns=1400000 max_ns=2700000
 [SCHED-NG-CENTILES] classe=normale count=3200 p50_ns=52000 p95_ns=900000 p99_ns=4100000 max_ns=9100000

@@ -89,7 +89,7 @@ EXECUTION = {
     "preempt_max_defer_ms": (
         re.compile(r"\[SCHED-NG-PREEMPT\].*?max_defer_ns=(\d+)"),
         lambda v: v / 1_000_000,
-        "plus long report d'une preemption demandee",
+        "plus long report SUBI d'une preemption -- du premier refus au service",
     ),
     "ready_latency_max_ms": (
         re.compile(r"\[SCHED-NG-LAT\].*?\bmax_ns=(\d+)"),
