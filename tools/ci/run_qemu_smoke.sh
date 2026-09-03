@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# La plateforme de reference vit dans un seul fichier : voir tools/ci/plateforme.sh.
+. "$(dirname "$0")/plateforme.sh"
 BOOT=${1:?usage: run_qemu_smoke.sh BOOTIMAGE}
 LOG=${2:-qemu-smoke.log}
 
@@ -7,6 +9,7 @@ echo "=== QEMU smoke: $BOOT ==="
 rm -f "$LOG"
 set +e
 timeout 45 qemu-system-x86_64 \
+  $(bouchaud_machine_args) \
   -drive format=raw,file="$BOOT" \
   -display none -serial file:"$LOG" -no-reboot
 code=$?

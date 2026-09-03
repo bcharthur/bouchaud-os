@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# La plateforme de reference vit dans un seul fichier : voir tools/ci/plateforme.sh.
+. "$(dirname "$0")/plateforme.sh"
 BOOT=${1:?usage: run_platform_boot.sh BOOT DISK LOG}
 DISK=${2:?usage: run_platform_boot.sh BOOT DISK LOG}
 LOG=${3:?usage: run_platform_boot.sh BOOT DISK LOG}
@@ -11,6 +13,7 @@ GRACE=240
 VERDICT_VU=0
 
 qemu-system-x86_64 \
+  $(bouchaud_machine_args) \
   -drive format=raw,file="$BOOT" \
   -drive format=raw,file="$DISK" \
   -m 12288 -smp 4 -cpu max -display none -no-reboot \
