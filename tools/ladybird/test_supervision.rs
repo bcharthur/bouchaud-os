@@ -93,6 +93,34 @@ fn chaque_image_du_navigateur_a_son_role() {
     );
 }
 
+/// LE DEFAUT, verrouille : le courtier se reconnait a son NOM, pas a son
+/// repertoire.
+///
+/// La reconnaissance exigeait `/usr/bin/bo-navigateur`. Or le bureau lance
+/// `client::CHEMIN_NAVIGATEUR`, qui vaut `/bo-navigateur` -- le binaire est
+/// deplie a la racine du RAMFS. Aucun lancement reel n'etait donc reconnu, et
+/// le registre restait vide : la supervision existait et ne supervisait rien.
+#[test]
+fn le_courtier_se_reconnait_quel_que_soit_son_repertoire() {
+    for chemin in [
+        "/bo-navigateur",
+        "/usr/bin/bo-navigateur",
+        "/usr/libexec/ladybird/BrowserHost",
+        "/BrowserHost",
+    ] {
+        assert_eq!(
+            Role::depuis_image(chemin), Some(Role::Courtier),
+            "{chemin} doit etre reconnu : le repertoire a deja change une fois"
+        );
+    }
+    // Les roles enfants aussi, quel que soit l'emplacement.
+    assert_eq!(Role::depuis_image("/WebContent"), Some(Role::Rendu));
+    assert_eq!(Role::depuis_image("/opt/l/RequestServer"), Some(Role::Reseau));
+    // Et un nom qui CONTIENT le mot n'est pas le mot.
+    assert_eq!(Role::depuis_image("/usr/bin/mon-WebContent-a-moi"), None);
+    assert_eq!(Role::depuis_image("/bo-navigateur-test"), None);
+}
+
 /// Seul le courtier emporte ses enfants. C'est LA regle d'isolation.
 #[test]
 fn seul_le_courtier_emporte_ses_enfants() {

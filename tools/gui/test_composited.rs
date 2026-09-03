@@ -295,16 +295,57 @@ fn un_degat_hostile_est_rogne_avant_d_etre_accumule() {
 
 /// Une trame sans degat ne declenche aucune composition : recomposer pour rien
 /// est exactement ce que la composition par region existe pour eviter.
+///
+/// Mais elle DOIT rendre son tampon. Ce test n'affirmait que la premiere
+/// moitie, et c'est ce qui a laissé passer le blocage : le tampon livre
+/// appartenait deja au compositeur, l'election s'en allait sans le rendre, et
+/// le client se retrouvait sans aucun tampon inscriptible.
 #[test]
-fn une_trame_sans_degat_ne_declenche_pas_de_composition() {
+fn une_trame_sans_degat_rend_son_tampon_sans_composer() {
     let mut registre = registre();
     let surface = registre.accorde(CLIENT, 100, 100).unwrap();
     registre.trame_livree(CLIENT, &TrameLivree {
         surface: surface.id, tampon: 0, trame: 1, degat: Rect::default(),
     }).unwrap();
-    assert!(registre.compose(1000, 0).is_empty());
-    assert_eq!(registre.mesures.trames_composees, 0);
+
+    let rendus = registre.compose(1000, 0);
+    assert_eq!(registre.mesures.trames_composees, 0, "rien a composer");
     assert_eq!(registre.mesures.trames_presentees, 0);
+    assert_eq!(
+        rendus, vec![(surface.id, 0, 1)],
+        "le tampon livre sans degat doit revenir au client tout de suite"
+    );
+    assert_eq!(registre.mesures.trames_sans_degat, 1);
+
+    let apres = registre.surface(surface.id).unwrap();
+    assert_eq!(apres.proprietaires[0], Proprietaire::Client);
+}
+
+/// LE BLOCAGE, reproduit : plusieurs trames vides d'affilee ne doivent pas
+/// epuiser les tampons du client.
+///
+/// Sans la restitution, la premiere suffisait : le tampon livre restait au
+/// compositeur, l'autre lui appartenait deja, et toutes les trames suivantes
+/// etaient refusees pour tampon non possede.
+#[test]
+fn des_trames_vides_repetees_n_epuisent_pas_les_tampons() {
+    let mut registre = registre();
+    let surface = registre.accorde(CLIENT, 100, 100).unwrap();
+
+    for trame in 1..=8u32 {
+        registre.trame_livree(CLIENT, &TrameLivree {
+            surface: surface.id, tampon: 0, trame, degat: Rect::default(),
+        }).unwrap_or_else(|e| panic!("trame vide {trame} refusee : {e:?}"));
+        registre.compose(1000 + trame as u64, 0);
+    }
+
+    // Et une vraie trame passe toujours ensuite.
+    registre.trame_livree(CLIENT, &TrameLivree {
+        surface: surface.id, tampon: 0, trame: 9, degat: Rect::neuf(0, 0, 10, 10),
+    }).expect("une trame utile doit encore etre acceptee");
+    assert!(!registre.compose(2000, 0).is_empty());
+    assert_eq!(registre.mesures.trames_composees, 1);
+    assert_eq!(registre.mesures.trames_sans_degat, 8);
 }
 
 /// Le taux de degat est ce qui dit si la composition par region sert a quelque

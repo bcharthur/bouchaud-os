@@ -424,6 +424,103 @@ fn le_disque_reste_montable_a_travers_des_coupures_repetees() {
 }
 
 // ---------------------------------------------------------------------------
+// LA MIGRATION V1 -> V2 : la premiere ecriture ne doit pas detruire la V1.
+// ---------------------------------------------------------------------------
+//
+// Sur un disque V1, `superbloc_courant` rend `None`, donc `prochain(None)`
+// choisit la demi-zone 0. Avec la geometrie reelle, elle commence au secteur 2
+// et recouvre la table V1 (1..1024) DES sa premiere ecriture -- alors que
+// l'en-tete V1, au secteur 0, dit toujours « valide ».
+//
+// Une coupure a ce moment laissait exactement l'etat que ce format existe pour
+// interdire : une magie valide qui designe une table dechiquetee. Le repli V1
+// montait des donnees corrompues.
+
+/// La geometrie REELLE de `persistance.rs`, reproduite ici.
+///
+/// Les valeurs sont recopiees et non importees : le module de production touche
+/// ATA. Le premier test verifie que le RECOUVREMENT est bien celui qu'on croit
+/// -- si la geometrie bouge, c'est le raisonnement qu'il faut refaire, pas la
+/// constante qu'il faut mettre a jour en silence.
+mod migration {
+    pub const SECTEURS_TABLE: u64 = 1024;
+    pub const SECTEUR_CONTENU: u64 = 1 + SECTEURS_TABLE;
+    pub const SECTEURS_ZONE: u64 = 262144;
+    pub const SUPERBLOCS: u64 = 2;
+    pub const DEMI: u64 = (SECTEURS_ZONE - SUPERBLOCS) / 2;
+
+    pub const fn debut_demi(demi: u32) -> u64 {
+        SUPERBLOCS + demi as u64 * DEMI
+    }
+
+    /// La regle de `demi_sure`, sans le disque.
+    pub fn demi_sure(demi_prevue: u32, fin_v1: u64) -> Option<u32> {
+        let recouvre = |demi: u32| fin_v1 != 0 && debut_demi(demi) <= fin_v1;
+        if !recouvre(demi_prevue) {
+            return Some(demi_prevue);
+        }
+        let autre = 1 - demi_prevue;
+        if !recouvre(autre) {
+            return Some(autre);
+        }
+        None
+    }
+}
+
+/// LE DEFAUT, reproduit : la demi-zone 0 recouvre la table V1.
+#[test]
+fn la_demi_zone_zero_recouvre_la_table_v1() {
+    use migration::*;
+    assert!(
+        debut_demi(0) <= SECTEURS_TABLE,
+        "la demi-zone 0 commence a {} et la table V1 finit a {} : elles se \
+         recouvrent, et c'est le defaut que ce test verrouille",
+        debut_demi(0), SECTEURS_TABLE
+    );
+    assert!(
+        debut_demi(1) > SECTEUR_CONTENU,
+        "la demi-zone 1, elle, commence au-dela de la table V1"
+    );
+}
+
+/// Un disque V1 dont le contenu tient dans une demi-zone migre vers celle qui
+/// ne le recouvre PAS.
+#[test]
+fn la_migration_choisit_la_demi_zone_qui_ne_recouvre_pas_la_v1() {
+    use migration::*;
+    let fin_v1 = SECTEUR_CONTENU + 8192;
+    assert_eq!(
+        demi_sure(0, fin_v1), Some(1),
+        "la demi-zone 0 prevue recouvre la V1 : la migration doit basculer sur \
+         la 1, qui commence a {}",
+        debut_demi(1)
+    );
+}
+
+/// Un disque deja en V2 n'a aucune V1 a preserver : l'alternance A/B du format
+/// reste intacte.
+#[test]
+fn sans_v1_vivante_l_alternance_reste_intacte() {
+    use migration::*;
+    assert_eq!(demi_sure(0, 0), Some(0));
+    assert_eq!(demi_sure(1, 0), Some(1));
+}
+
+/// Une V1 qui deborde des DEUX demi-zones : la migration est refusee AVANT
+/// d'avoir rien detruit.
+///
+/// Ce n'est pas un nouveau mode d'echec : un tel contenu ne tiendrait pas dans
+/// une demi-zone de toute facon, et la synchronisation echouerait plus loin. La
+/// difference est qu'elle echoue avant d'avoir ecrase la V1.
+#[test]
+fn une_v1_trop_grande_refuse_la_migration_avant_de_detruire() {
+    use migration::*;
+    let fin_v1 = debut_demi(1) + 1;
+    assert_eq!(demi_sure(0, fin_v1), None);
+    assert_eq!(demi_sure(1, fin_v1), None);
+}
+
+// ---------------------------------------------------------------------------
 // La somme de controle elle-meme.
 // ---------------------------------------------------------------------------
 

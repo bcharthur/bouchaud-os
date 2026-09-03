@@ -41,19 +41,29 @@ impl Role {
     /// La meme source que `security::profile::classify` : les deux doivent
     /// s'accorder, et un role connu ici mais pas la-bas serait un processus
     /// supervise sans etre sandboxe.
+    ///
+    /// BOUCHAUD_C8_RECONNAITRE_LE_VRAI_CHEMIN_V1
+    ///
+    /// La reconnaissance du courtier exigeait `/usr/bin/bo-navigateur`. Or le
+    /// bureau lance `client::CHEMIN_NAVIGATEUR`, qui vaut `/bo-navigateur` --
+    /// le binaire est deplie a la racine du RAMFS, pas dans `/usr/bin`. Aucun
+    /// lancement reel n'etait donc reconnu, et le registre restait vide : la
+    /// supervision existait et ne supervisait rien.
+    ///
+    /// La comparaison porte desormais sur le NOM du fichier, ce qui rend le
+    /// repertoire sans importance -- il a deja change une fois.
     pub fn depuis_image(image: &str) -> Option<Role> {
-        if image.ends_with("/WebContent") {
-            Some(Role::Rendu)
-        } else if image.ends_with("/RequestServer") {
-            Some(Role::Reseau)
-        } else if image.ends_with("/ImageDecoder") {
-            Some(Role::Decodeur)
-        } else if image.ends_with("/WebWorker") {
-            Some(Role::Travailleur)
-        } else if image.ends_with("/BrowserHost") || image == "/usr/bin/bo-navigateur" {
-            Some(Role::Courtier)
-        } else {
-            None
+        let nom = match image.rsplit_once('/') {
+            Some((_, nom)) => nom,
+            None => image,
+        };
+        match nom {
+            "WebContent" => Some(Role::Rendu),
+            "RequestServer" => Some(Role::Reseau),
+            "ImageDecoder" => Some(Role::Decodeur),
+            "WebWorker" => Some(Role::Travailleur),
+            "BrowserHost" | "bo-navigateur" => Some(Role::Courtier),
+            _ => None,
         }
     }
 

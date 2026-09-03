@@ -232,6 +232,24 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
     EXEC_QUIESCE_MAX_NS.fetch_max(waited, Ordering::Relaxed);
     crate::kernel::smp_lock::resume_after_schedule(depth);
 
+    // BOUCHAUD_C8_SUPERVISION_SUR_EXECVE_V1
+    //
+    // Les enfants du navigateur -- WebContent, RequestServer, ImageDecoder --
+    // ne naissent pas par `lance_detache` : le courtier les cree par `fork` +
+    // `execve`, donc par ICI. Sans ce point, la supervision ne voyait aucun
+    // d'eux, et le registre restait vide quel que soit le nombre d'onglets.
+    //
+    // Le pid ne change pas a l'execve ; c'est l'IMAGE qui change. Le
+    // reenregistrement remplace donc l'entree precedente, ce que
+    // `note_lancement` fait deja pour un pid recycle -- un processus qui passe
+    // de courtier a moteur de rendu ne doit pas garder l'ancien role.
+    if let Some(role) = crate::kernel::navigateur::supervision::Role::depuis_image(&path) {
+        let courtier = process.parent;
+        crate::kernel::navigateur::supervision::note_lancement(
+            process.pid, role, courtier, process.pid,
+            crate::kernel::timer::monotonic_ns(),
+        );
+    }
     process.metadata.lock().name = path;
     process.files.lock().close_on_exec();
     process.signals.lock().reset_for_exec();

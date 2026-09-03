@@ -32,6 +32,9 @@ pub fn monte() -> usize {
     let (nombre, secteur_table, premier_contenu, somme_attendue) =
         match superbloc_courant(base) {
             Some((_, superbloc)) => {
+                // Le disque est deja en V2 : il n'y a plus d'etat V1 a
+                // preserver.
+                oublie_la_v1();
                 let nombre = superbloc.entrees as usize;
                 if nombre == 0 || nombre > ENTREES_MAX {
                     crate::kernel::dmesg::log("persistance: superbloc vide");
@@ -50,10 +53,12 @@ pub fn monte() -> usize {
                 let mut entete = vec![0u8; SECTOR_SIZE];
                 if ata::read(Drive::Slave, base, 1, &mut entete) != 1 {
                     crate::kernel::dmesg::log("persistance: zone illisible");
+                    oublie_la_v1();
                     return 0;
                 }
                 if &entete[0..8] != MAGIE {
                     crate::kernel::dmesg::log("persistance: zone vierge");
+                    oublie_la_v1();
                     return 0;
                 }
                 let nombre = lit_u32(&entete[12..16]) as usize;
@@ -108,6 +113,13 @@ pub fn monte() -> usize {
             }
         }
         secteur += secteurs;
+    }
+
+    // L'ETENDUE de l'etat V1, retenue pour que la premiere ecriture V2 ne la
+    // recouvre pas. Le parcours ci-dessus l'a deja calculee : `secteur` pointe
+    // juste apres le dernier octet du dernier fichier.
+    if somme_attendue.is_none() {
+        note_etendue_v1(secteur.saturating_sub(base));
     }
 
     crate::kernel::dmesg::log_fmt(format_args!(

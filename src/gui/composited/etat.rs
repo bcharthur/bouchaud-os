@@ -105,6 +105,10 @@ pub struct Mesures {
     /// Trames livrees et jamais composees : le client a livre deux fois avant
     /// une presentation.
     pub trames_ecrasees: u64,
+    /// Trames livrees avec un degat VIDE : rien a presenter, tampon rendu tout
+    /// de suite. Compte, parce qu'un client qui n'en produit que de celles-la
+    /// tourne pour rien.
+    pub trames_sans_degat: u64,
     /// Compositions terminees apres l'echeance de la trame.
     pub echeances_manquees: u64,
     /// Intervalle de presentation le plus long observe.
@@ -158,6 +162,7 @@ impl Registre {
                 trames_composees: 0,
                 trames_presentees: 0,
                 trames_ecrasees: 0,
+                trames_sans_degat: 0,
                 echeances_manquees: 0,
                 intervalle_max_ns: 0,
                 pixels_sales: 0,
@@ -285,7 +290,23 @@ impl Registre {
                 .iter()
                 .position(|p| *p == Proprietaire::Compositeur)
             else { continue };
-            if surface.degat.vide() { continue; }
+            // BOUCHAUD_C4_TAMPON_SANS_DEGAT_V1
+            //
+            // Un tampon livre avec un degat VIDE n'a rien a montrer -- et il
+            // appartient deja au compositeur, puisque `trame_livree` l'a
+            // transfere. S'en aller ici le laissait au compositeur POUR
+            // TOUJOURS : a la premiere trame sans degat, l'autre tampon lui
+            // appartenait aussi, le client se retrouvait sans aucun tampon
+            // inscriptible, et toutes les trames suivantes etaient refusees.
+            //
+            // Le rendre tout de suite est la seule reponse : il n'y a rien a
+            // presenter, donc rien qui justifie de le retenir.
+            if surface.degat.vide() {
+                surface.proprietaires[pret] = Proprietaire::Client;
+                rendus.push((surface.id, pret as u32, surface.derniere_trame));
+                self.mesures.trames_sans_degat += 1;
+                continue;
+            }
 
             let pixels = surface.degat.largeur as u64 * surface.degat.hauteur as u64;
             self.mesures.pixels_sales += pixels;

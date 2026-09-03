@@ -28,12 +28,6 @@ on:
     - cron: '15 3 * * 0'
   workflow_dispatch:
     inputs:
-      tranches:
-        description: 'Nombre de tranches (chacune sous la limite de job)'
-        required: true
-        default: '4'
-        type: choice
-        options: ['1', '2', '4', '6']
       minutes_par_tranche:
         description: 'Duree de chaque tranche, en minutes'
         required: true
@@ -75,8 +69,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Les quatre topologies restent couvertes : une regression SMP se
-        # manifeste rarement au meme nombre de coeurs qu'on l'a introduite.
+        # QUATRE TRANCHES, ET LE NOMBRE N'EST PAS REGLABLE.
+        #
+        # Une premiere version offrait un choix « nombre de tranches » que la
+        # matrice ne lisait pas : demander une tranche en lancait quatre,
+        # demander six n'en lancait jamais six. Un reglage qui ne regle rien est
+        # pire qu'un reglage absent -- on croit avoir agi.
+        #
+        # Il n'a pas ete cable, il a ete RETIRE : les quatre tranches ne sont
+        # pas une duree, ce sont les quatre TOPOLOGIES SMP. Une regression SMP
+        # se manifeste rarement au meme nombre de coeurs qu'on l'a introduite,
+        # et en retirer une ne raccourcirait pas la campagne -- elles tournent
+        # en parallele -- elle creerait seulement un angle mort.
+        #
+        # La duree, elle, se regle : c'est `minutes_par_tranche`.
         include:
           - { tranche: 1, cpus: 1 }
           - { tranche: 2, cpus: 2 }

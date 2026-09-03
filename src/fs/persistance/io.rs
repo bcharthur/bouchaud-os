@@ -13,7 +13,16 @@ fn synchronise_snapshot(entrees: &[SnapshotEntree]) -> i64 {
     // n'est pas touchee : une coupure ici n'abime que du contenu dont personne
     // ne depend, et le superbloc courant continue de designer l'ancien etat.
     let courant = superbloc_courant(base);
-    let (emplacement, demi, generation) = prochain(courant);
+    let (emplacement, demi_prevue, generation) = prochain(courant);
+    // La demi-zone doit preserver un eventuel etat V1 encore vivant : sur un
+    // disque V1, la demi-zone 0 recouvre sa table des sa premiere ecriture,
+    // alors que l'en-tete V1 dit toujours « valide ».
+    let Some(demi) = demi_sure(demi_prevue) else {
+        crate::kernel::dmesg::log(
+            "persistance: contenu V1 trop grand pour une demi-zone, migration refusee");
+        oublie_le_disque();
+        return -1;
+    };
 
     let secteurs_table = secteurs_table_utiles(entrees.len());
     let mut table = vec![0u8; secteurs_table * SECTOR_SIZE];
@@ -89,6 +98,9 @@ fn synchronise_snapshot(entrees: &[SnapshotEntree]) -> i64 {
         Drive::Slave, base + emplacement as u64, 1, &secteur_superbloc) == 1;
     TX_IO_NS.fetch_add(crate::kernel::timer::monotonic_ns().saturating_sub(io_start), Ordering::Relaxed);
     if !commit_ok { oublie_le_disque(); return -1; }
+    // Le commit a eu lieu : l'etat V1 vient d'etre remplace d'un seul secteur,
+    // et il n'y a plus rien a preserver.
+    oublie_la_v1();
     TX_COMMITS.fetch_add(1, Ordering::Relaxed);
     TX_GENERATION.store(generation, Ordering::Relaxed);
 
