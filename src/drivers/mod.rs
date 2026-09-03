@@ -9,8 +9,12 @@
 pub mod ac97;
 #[path = "block/ata.rs"]
 pub mod ata;
+#[path = "block/ata_bloc.rs"]
+pub mod ata_bloc;
 #[path = "api/block.rs"]
 pub mod block;
+#[path = "api/bloc.rs"]
+pub mod bloc;
 #[path = "block/disk.rs"]
 pub mod disk;
 #[path = "api/display.rs"]
