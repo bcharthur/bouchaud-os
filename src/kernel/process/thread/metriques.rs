@@ -23,7 +23,8 @@ pub fn log_smp_load() {
             (0, 0)
         };
         line.push_str(&alloc::format!(
-            " c{}={} rq={} cur={}:{} steal={}/{} rej_bal={} rej_aff={} mig={}",
+            " c{}={} rq={} cur={}:{} steal={}/{} rej_bal={} rej_aff={} \
+rej_inel={} rej_crs={} mig={}",
             cpu_id,
             cpu::load_percent_cpu(cpu_id),
             ready_count_cpu(cpu_id),
@@ -33,6 +34,10 @@ pub fn log_smp_load() {
             STEAL_ATTEMPTS[cpu_id].load(Ordering::Relaxed),
             STEAL_REJECT_BALANCE[cpu_id].load(Ordering::Relaxed),
             STEAL_REJECT_AFFINITY[cpu_id].load(Ordering::Relaxed),
+            // `rej_inel` est l'ecart entre les taches RETIREES et les vols
+            // aboutis : le gaspillage du vol, jusqu'ici invisible.
+            STEAL_REJECT_INELIGIBLE[cpu_id].load(Ordering::Relaxed),
+            STEAL_REJECT_COURSE[cpu_id].load(Ordering::Relaxed),
             CPU_MIGRATIONS[cpu_id].load(Ordering::Relaxed),
         ));
     }

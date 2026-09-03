@@ -158,6 +158,9 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
 
     const MIN_MIGRATION_RESIDENCY_NS: u64 = 20_000_000;
     let Some(donor_id) = crate::arch::x86_64::cpu_local::CpuId::from_index(donor) else {
+        // Sortie muette jusqu'ici. Un donneur designe mais introuvable est un
+        // desaccord de topologie : il doit se voir, pas disparaitre.
+        STEAL_REJECT_BALANCE[cpu].fetch_add(1, Ordering::Relaxed);
         return None;
     };
     let donor_queue = crate::arch::x86_64::cpu_local::local(donor_id);
@@ -172,11 +175,17 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
     let identite = TacheId::depuis_mot(mot);
     // Meme controle que ci-dessus : ne jamais voler une incarnation perimee.
     let Some(candidate) = registre_tache_id(identite) else {
-        STEAL_REJECT_BALANCE[cpu].fetch_add(1, Ordering::Relaxed);
+        // Une incarnation perimee : il y avait du travail, il a disparu sous
+        // nos doigts. C'est une COURSE, pas un defaut d'equilibre.
+        STEAL_REJECT_COURSE[cpu].fetch_add(1, Ordering::Relaxed);
         return None;
     };
     let index = identite.emplacement();
     if !runnable_steal(&candidate, cpu) || candidate.runq_cpu.charge() as usize != donor {
+        // Retirer, examiner, remettre : le seul chemin de `try_steal` qui
+        // rendait la tache au donneur SANS rien compter. Il est desormais
+        // nomme, parce que c'est lui qui mesure le gaspillage du vol.
+        STEAL_REJECT_INELIGIBLE[cpu].fetch_add(1, Ordering::Relaxed);
         donor_queue.enqueue_bande(mot, bande_de(&candidate));
         STEAL_RETRY_AFTER_NS[cpu].store(now.saturating_add(2_000_000), Ordering::Relaxed);
         return None;
@@ -196,7 +205,7 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
     if !revendique_candidate(&candidate, cpu) {
         // La tache a ete revendiquee ou retiree pendant le vol. L'identite
         // consommee ne doit pas etre remise dans la file du donneur.
-        STEAL_REJECT_BALANCE[cpu].fetch_add(1, Ordering::Relaxed);
+        STEAL_REJECT_COURSE[cpu].fetch_add(1, Ordering::Relaxed);
         return None;
     }
     candidate.runq_cpu.range(cpu as u8);
