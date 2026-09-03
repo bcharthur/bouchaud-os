@@ -6,7 +6,7 @@
     "sites_bkl_par_domaine": {
       "Fd": 2,
       "Panique": 6,
-      "Processus": 4,
+      "Processus": 3,
       "Reseau": 3,
       "Syscall": 1
     }
@@ -16,11 +16,16 @@
     "bkl_attente_max_ms": 50.0,
     "bkl_max_hold_ms": 50.0,
     "bkl_regressions_domaine": 0,
+    "bloc_erreurs": 0,
+    "futex_bkl_herites_max": 200000,
+    "ladybird_relances_refusees": 0,
+    "persistance_superblocs_rejetes": 0,
     "preempt_max_defer_ms": 100.0,
     "ready_latency_interactive_max_ms": 100.0,
     "ready_latency_interactive_p99_ms": 50.0,
     "ready_latency_max_ms": 250.0,
     "ready_latency_normale_p99_ms": 250.0,
-    "runqueue_doublons_max": 5000000
+    "runqueue_doublons_max": 5000000,
+    "tcp_busy_poll_tours_max": 20000000
   }
 }

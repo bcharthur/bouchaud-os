@@ -127,6 +127,47 @@ EXECUTION = {
         lambda v: v,
         "mises en file dedupliquees -- une tache publiee alors qu'elle y etait deja",
     ),
+    # --- reseau, chantier 9 -------------------------------------------------
+    #
+    # Un TOUR vaut mille instructions `pause`, donc quelques microsecondes.
+    # Le chiffre doit BAISSER : c'est la mesure de ce que le chantier 9 doit
+    # retirer au coeur occupe a interroger l'anneau.
+    "tcp_busy_poll_tours_max": (
+        re.compile(r"\[NET-TCP\].*?busy_poll_tours=(\d+)"),
+        lambda v: v,
+        "tours d'attente active TCP -- le coeur occupe a interroger l'anneau",
+    ),
+    # --- BKL herite, chantier 1 ---------------------------------------------
+    #
+    # Le futex ne PREND plus le gros verrou ; il en HERITE encore un de son
+    # appelant. Tant que ce chiffre n'est pas nul, le domaine reste
+    # `EnMigration`, et le voir monter serait une regression de ses appelants.
+    "futex_bkl_herites_max": (
+        re.compile(r"\[BKL-FUTEX\].*?herites=(\d+)"),
+        lambda v: v,
+        "operations futex entrees avec un gros verrou herite de leur appelant",
+    ),
+    # --- ce qui doit rester A ZERO ------------------------------------------
+    #
+    # Ces trois-la ne sont pas des plafonds a resserrer : ce sont des fautes.
+    # Un superbloc rejete hors coupure de courant veut dire qu'une ecriture a
+    # ete dechiree ; une erreur de volume veut dire que le stockage ment ; une
+    # relance refusee veut dire qu'un moteur de rendu plante en boucle.
+    "persistance_superblocs_rejetes": (
+        re.compile(r"\[PERSIST-COMMIT\].*?superblocs_rejetes=(\d+)"),
+        lambda v: v,
+        "superblocs rejetes au montage -- une ecriture de commit dechiree",
+    ),
+    "bloc_erreurs": (
+        re.compile(r"\[BLOC-NG\].*?erreurs=(\d+)"),
+        lambda v: v,
+        "requetes bloc refusees ou echouees",
+    ),
+    "ladybird_relances_refusees": (
+        re.compile(r"\[LADYBIRD-SUP\].*?relances_refusees=(\d+)"),
+        lambda v: v,
+        "relances de moteur de rendu refusees -- une boucle de plantage",
+    ),
 }
 
 

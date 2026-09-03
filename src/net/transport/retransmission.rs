@@ -400,26 +400,27 @@ static TCP_RETRANSMISSIONS_RAPIDES: AtomicU64 = AtomicU64::new(0);
 static TCP_ECHANTILLONS_RTT: AtomicU64 = AtomicU64::new(0);
 static TCP_SRTT_DERNIER_MS: AtomicU64 = AtomicU64::new(0);
 static TCP_RTO_DERNIER_MS: AtomicU64 = AtomicU64::new(0);
-/// Millisecondes passees a interroger l'anneau sans dormir.
+/// TOURS d'attente active : un tour vaut mille instructions `pause`,
+/// donc quelques microsecondes, pas une milliseconde.
 ///
 /// C'est le chiffre que le chantier 9 doit faire baisser. Il n'existait pas :
 /// le busy-poll etait une constante de huit secondes dans une boucle, et rien
 /// ne disait combien de temps on y restait reellement.
-static TCP_BUSY_POLL_MS: AtomicU64 = AtomicU64::new(0);
+static TCP_BUSY_POLL_TOURS: AtomicU64 = AtomicU64::new(0);
 static TCP_ATTENTES_DORMIES: AtomicU64 = AtomicU64::new(0);
 
-pub fn note_connexion(emission: &Emission, busy_poll_ms: u64, attentes_dormies: u64) {
+pub fn note_connexion(emission: &Emission, busy_poll_tours: u64, attentes_dormies: u64) {
     TCP_RETRANSMISSIONS.fetch_add(emission.segments_retransmis, Ordering::Relaxed);
     TCP_RETRANSMISSIONS_RAPIDES
         .fetch_add(emission.retransmissions_rapides, Ordering::Relaxed);
     TCP_ECHANTILLONS_RTT.fetch_add(emission.echantillons_rtt, Ordering::Relaxed);
     TCP_SRTT_DERNIER_MS.store(emission.srtt_ms, Ordering::Relaxed);
     TCP_RTO_DERNIER_MS.store(emission.rto_ms, Ordering::Relaxed);
-    TCP_BUSY_POLL_MS.fetch_add(busy_poll_ms, Ordering::Relaxed);
+    TCP_BUSY_POLL_TOURS.fetch_add(busy_poll_tours, Ordering::Relaxed);
     TCP_ATTENTES_DORMIES.fetch_add(attentes_dormies, Ordering::Relaxed);
 }
 
-/// retransmissions, rapides, echantillons RTT, SRTT, RTO, busy-poll ms, sommeils
+/// retransmissions, rapides, echantillons RTT, SRTT, RTO, tours de busy-poll, sommeils
 pub fn stats() -> (u64, u64, u64, u64, u64, u64, u64) {
     (
         TCP_RETRANSMISSIONS.load(Ordering::Relaxed),
@@ -427,7 +428,7 @@ pub fn stats() -> (u64, u64, u64, u64, u64, u64, u64) {
         TCP_ECHANTILLONS_RTT.load(Ordering::Relaxed),
         TCP_SRTT_DERNIER_MS.load(Ordering::Relaxed),
         TCP_RTO_DERNIER_MS.load(Ordering::Relaxed),
-        TCP_BUSY_POLL_MS.load(Ordering::Relaxed),
+        TCP_BUSY_POLL_TOURS.load(Ordering::Relaxed),
         TCP_ATTENTES_DORMIES.load(Ordering::Relaxed),
     )
 }

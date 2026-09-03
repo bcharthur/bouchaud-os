@@ -22,7 +22,7 @@
 //! L'attente etait un `pause` en boucle pendant huit secondes, choisi parce
 //! qu'on ne savait pas combien de temps attendre. Le RTO le dit maintenant :
 //! l'attente active est bornee par lui, ce qui la ramene a l'ordre du RTT reel
-//! au lieu d'une constante. Elle est aussi COMPTEE -- `[NET-TCP] busy_poll_ms=`
+//! au lieu d'une constante. Elle est aussi COMPTEE -- `[NET-TCP] busy_poll_tours=`
 //! --, sans quoi « le busy-poll a disparu » resterait une affirmation.
 
 use crate::arch::x86_64::cpu;
@@ -191,7 +191,7 @@ pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> boo
     // elle, un `GET` perdu n'etait jamais renvoye et la connexion attendait ses
     // trente secondes d'inactivite avant d'abandonner.
     let mut emission = Emission::neuve(isn);
-    let mut busy_poll_ms = 0u64;
+    let mut busy_poll_tours = 0u64;
     let mut attentes_dormies = 0u64;
 
     // --- SYN (avec option MSS) ---
@@ -232,7 +232,7 @@ pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> boo
         }
     }
     if !established {
-        retransmission::note_connexion(&emission, busy_poll_ms, attentes_dormies);
+        retransmission::note_connexion(&emission, busy_poll_tours, attentes_dormies);
         return false;
     }
 
@@ -328,12 +328,12 @@ pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> boo
                             let f = build(&mut seg, &dst, sport, port, my_seq, my_ack, FIN | ACK, WINDOW, &[]);
                             net::send_ip(dst, 6, &seg[..f]);
                             retransmission::note_connexion(
-                                &emission, busy_poll_ms, attentes_dormies);
+                                &emission, busy_poll_tours, attentes_dormies);
                             return true;
                         }
                         if h.flags & RST != 0 {
                             retransmission::note_connexion(
-                                &emission, busy_poll_ms, attentes_dormies);
+                                &emission, busy_poll_tours, attentes_dormies);
                             return true;
                         }
                     }
@@ -393,7 +393,7 @@ pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> boo
             // d'autant, il garde cwnd=1 et espace ses envois de plusieurs
             // secondes -- un transfert de 44 Ko passait alors a plus de deux
             // minutes. Ce qui change, c'est qu'elle est BORNEE PAR UNE MESURE et
-            // COMPTEE : `[NET-TCP] busy_poll_ms=` face a `sommeils=` dit ce qui
+            // COMPTEE : `[NET-TCP] busy_poll_tours=` face a `sommeils=` dit ce qui
             // reste a gagner, la ou une constante ne disait rien.
             let fenetre_active_ticks = {
                 let rto_ticks = emission.rto_ms().saturating_mul(
@@ -401,7 +401,7 @@ pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> boo
                 rto_ticks.max(1).min(8 * timer::TICKS_PER_SECOND.max(1) as u64)
             };
             if (idle as u64) < fenetre_active_ticks {
-                busy_poll_ms += 1;
+                busy_poll_tours += 1;
                 for _ in 0..1000 {
                     unsafe { core::arch::asm!("pause", options(nomem, nostack)); }
                 }
@@ -417,7 +417,7 @@ pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> boo
     net::send_ip(dst, 6, &seg[..f]);
     let _ = &mut my_seq;
     let _ = requete_index;
-    retransmission::note_connexion(&emission, busy_poll_ms, attentes_dormies);
+    retransmission::note_connexion(&emission, busy_poll_tours, attentes_dormies);
     true
 }
 

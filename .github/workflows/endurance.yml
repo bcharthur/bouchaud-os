@@ -1,0 +1,142 @@
+name: Endurance hebdomadaire
+
+# LES QUATRE NIVEAUX DE CAMPAGNE, ET CE QUE CELUI-CI AJOUTE
+#
+#   1. PR courte     -- `ci.yml`, quelques minutes, bloquante ;
+#   2. main          -- `integration.yml` + `reliability-v3.yml`, bloquantes ;
+#   3. nightly       -- `nightly.yml`, une campagne plus longue chaque nuit ;
+#   4. ENDURANCE     -- celui-ci, hebdomadaire.
+#
+# Le niveau 4 manquait sur les runners HEBERGES. `soak.yml` existe, et il est
+# reserve a un runner auto-heberge : c'est le bon endroit pour 24 ou 72 heures,
+# et cela veut dire qu'un depot sans ce runner n'a AUCUNE campagne longue.
+#
+# POURQUOI DES TRANCHES, ET PAS UN SEUL LONG JOB
+#
+# Un job GitHub heberge est coupe a six heures. Une campagne de huit heures
+# ecrite en un seul job ne rend pas un echec : elle rend une ANNULATION, a
+# l'heure exacte de la limite, tous les runs, ce qui ressemble a un blocage du
+# noyau et n'en est pas un.
+#
+# La campagne est donc decoupee en TRANCHES independantes, chacune bien sous la
+# limite. Chaque tranche est un run complet de `soak.py`, avec son propre
+# verdict et ses propres artefacts ; l'agregat est la barriere.
+
+on:
+  schedule:
+    # Dimanche 03:15 UTC : apres les nightly de la semaine, avant le lundi.
+    - cron: '15 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      tranches:
+        description: 'Nombre de tranches (chacune sous la limite de job)'
+        required: true
+        default: '4'
+        type: choice
+        options: ['1', '2', '4', '6']
+      minutes_par_tranche:
+        description: 'Duree de chaque tranche, en minutes'
+        required: true
+        default: '90'
+        type: choice
+        options: ['30', '60', '90', '150']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: endurance-hebdomadaire
+  cancel-in-progress: false
+
+jobs:
+  construire:
+    name: endurance / noyau
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Construire le noyau
+        run: tools/ci/build_kernel.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: endurance-bootimage
+          path: target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          retention-days: 7
+
+  tranche:
+    name: endurance / tranche ${{ matrix.tranche }} / SMP${{ matrix.cpus }}
+    needs: construire
+    runs-on: ubuntu-latest
+    # Bien sous la limite de six heures : une tranche qui la frole rendrait une
+    # annulation, pas un verdict.
+    timeout-minutes: 200
+    strategy:
+      fail-fast: false
+      matrix:
+        # Les quatre topologies restent couvertes : une regression SMP se
+        # manifeste rarement au meme nombre de coeurs qu'on l'a introduite.
+        include:
+          - { tranche: 1, cpus: 1 }
+          - { tranche: 2, cpus: 2 }
+          - { tranche: 3, cpus: 4 }
+          - { tranche: 4, cpus: 8 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: endurance-bootimage
+          path: target/x86_64-bouchaud_os/debug/
+      - name: QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+      - name: Campagne
+        shell: bash
+        run: |
+          chmod +x target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || true
+          minutes='${{ github.event.inputs.minutes_par_tranche || 90 }}'
+          PYTHONPATH=tools/ci/reliability python3 tools/ci/reliability/soak.py \
+            target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            --cpus '${{ matrix.cpus }}' \
+            --duration-seconds "$(( minutes * 60 ))" \
+            --cycle-seconds 300 \
+            --memory-mb 4096 \
+            --out-dir endurance-tranche-${{ matrix.tranche }}
+      - name: Budgets d'execution sur la trace
+        if: always()
+        shell: bash
+        run: |
+          # Les budgets du chantier 11 se lisent sur la trace la plus longue :
+          # c'est celle ou une derive lente finit par se voir.
+          trace=$(ls -S endurance-tranche-${{ matrix.tranche }}/cycle-*/serial.log 2>/dev/null | head -1 || true)
+          if [ -n "$trace" ]; then
+            python3 tools/ci/check_budgets.py --journal "$trace"
+          else
+            echo "aucune trace serie produite" >&2
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: endurance-tranche-${{ matrix.tranche }}
+          path: endurance-tranche-${{ matrix.tranche }}
+          retention-days: 14
+
+  endurance-gate:
+    name: endurance-gate
+    if: always()
+    needs: [construire, tranche]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verdict agrege
+        env:
+          BUILD: ${{ needs.construire.result }}
+          TRANCHES: ${{ needs.tranche.result }}
+        run: |
+          printf '%-12s %s\n' construire "$BUILD" tranches "$TRANCHES"
+          for r in "$BUILD" "$TRANCHES"; do
+            [ "$r" != failure ] && [ "$r" != cancelled ] || exit 1
+          done
+          echo ENDURANCE_GATE_OK
