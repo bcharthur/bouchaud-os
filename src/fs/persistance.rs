@@ -32,15 +32,40 @@
 //! fichiers. Un vrai systeme de fichiers viendra quand le besoin sera d'ecrire
 //! souvent et beaucoup — ce n'est pas celui du navigateur.
 //!
+//! ## Le format V2 : deux demi-zones, deux superblocs
+//!
+//! Le format V1 ci-dessus ecrivait le contenu, puis la table, puis l'en-tete.
+//! L'ordre etait le bon, et il ne suffisait pas -- pour une raison qui n'a rien
+//! a voir avec l'ordre. L'en-tete vit a un secteur FIXE : l'ecrire ecrase le
+//! precedent. Le contenu vit aux memes secteurs d'une synchronisation a
+//! l'autre : le reecrire ecrase le precedent. Une coupure pendant l'ecriture du
+//! contenu laissait donc l'ANCIEN en-tete -- valide, magie correcte -- pointant
+//! vers un contenu a moitie neuf, et ce melange etait monte comme coherent.
+//!
+//! ```text
+//! secteur 0            superbloc A
+//! secteur 1            superbloc B
+//! secteurs 2 ..        demi-zone 0 : table puis contenu
+//! secteurs 2+D ..      demi-zone 1 : table puis contenu
+//! ```
+//!
+//! Une synchronisation ecrit dans la demi-zone INACTIVE, puis commit en
+//! ecrivant un seul secteur : le superbloc de l'autre emplacement, portant une
+//! generation plus haute et une somme de controle. Le contenu committe n'est
+//! jamais touche par l'ecriture en cours ; le point de commit tient dans un
+//! secteur ; et meme ce secteur peut etre dechire sans consequence, puisque sa
+//! somme de controle le rejette et que l'autre superbloc reste valide.
+//!
+//! Une coupure laisse donc TOUJOURS soit l'ancien etat, soit le nouveau.
+//!
 //! ## Ce qui est garanti, et ce qui ne l'est pas
 //!
-//! Une zone dont la magie ne correspond pas est traitee comme vide : un disque
+//! Une zone dont aucune magie ne correspond est traitee comme vide : un disque
 //! neuf, ou un disque dont l'archive a grandi jusqu'a mordre sur la zone, ne
-//! font pas echouer le demarrage. En revanche l'ecriture n'est pas atomique :
-//! une coupure de courant au milieu d'un `sync` laisse la zone incoherente, et
-//! le prochain demarrage la trouvera vide plutot que corrompue seulement si
-//! l'en-tete n'a pas encore ete ecrit — c'est pourquoi il est ecrit **en
-//! dernier**.
+//! font pas echouer le demarrage. Un disque au format V1 reste LISIBLE -- le
+//! montage se replie dessus --, et la premiere synchronisation le fait passer
+//! en V2. Ce qui n'est pas garanti : la duree d'une synchronisation, qui reste
+//! proportionnelle a ce qui a change.
 
 use alloc::format;
 use alloc::string::String;
@@ -52,7 +77,7 @@ use crate::fs::ramfs::{fs, NodeKind};
 use crate::kernel::sync::{SleepMutex, SpinLock};
 use core::sync::atomic::{AtomicU64, Ordering};
 
-/// Reconnait une zone deja formatee.
+/// Reconnait une zone au format V1. Conserve pour la LIRE.
 const MAGIE: &[u8; 8] = b"BOPERSI1";
 
 /// Nombre maximal de fichiers retenus.
@@ -87,6 +112,7 @@ pub const RACINE: &str = "/persist";
 // BOUCHAUD_DEEP_FRAGMENTATION_V11A
 // Façade de persistance. Les fragments sont inclus dans CE module :
 // format disque, statiques privées et API publique restent identiques.
+include!("persistance/superbloc.rs");
 include!("persistance/format.rs");
 include!("persistance/transaction.rs");
 include!("persistance/arbre.rs");
