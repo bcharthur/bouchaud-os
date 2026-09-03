@@ -12,6 +12,7 @@
 pub mod latency;
 pub mod preempt;
 pub mod runqueue;
+pub mod equilibrage;
 
 pub use crate::kernel::task::OrdonnanceurStats;
 

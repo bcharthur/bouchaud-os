@@ -130,14 +130,17 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
     // migration -- cache froid, residence qui recommence -- au moment precis ou
     // elles doivent repondre. Le travail de fond est ce qui se deplace bien, et
     // c'est le seul que `FileCpu::vole` sert en premier.
-    let donor = (0..online)
-        .filter(|&candidate| candidate != cpu)
-        .map(|candidate| (candidate, pression_volable(candidate)))
-        // Garder une tache au donneur: en dessous de deux elements le vol ne
-        // cree aucun parallelisme et ne fait que deplacer le prochain quantum.
-        .filter(|(_, pressure)| *pressure > 1)
-        .max_by_key(|(_, pressure)| *pressure)
-        .map(|(candidate, _)| candidate);
+    // La regle vit dans `scheduler::equilibrage`, ou un test hote peut la
+    // contredire sans demarrer le systeme. Elle s'y ecrivait `pression > 1`
+    // alors que `pression_volable` ne compte QUE les taches EN ATTENTE : il
+    // fallait donc deux taches en attente EN PLUS de celle qui tourne, et un
+    // coeur charge n'etait jamais deleste face a trois coeurs au repos. La
+    // campagne SMP4 l'a mesure -- `steal=0/0`, zero tentative, `rej_bal`=2852.
+    let donor = crate::kernel::scheduler::equilibrage::choisit_donneur(
+        cpu,
+        online,
+        pression_volable,
+    );
     let Some(donor) = donor else {
         // BOUCHAUD_P1_STEAL_STERILE_BACKOFF_V1
         // Personne n'est assez charge : c'est un refus d'EQUILIBRE. Il se
