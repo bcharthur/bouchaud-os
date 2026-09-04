@@ -58,9 +58,18 @@ pub fn paint_window_shape<F: FnMut(i32, i32, u32)>(
 ///
 /// C'est ce chemin qu'emprunte le compositeur : `remplit(x, y, largeur, couleur)`
 /// recoit des segments horizontaux, jamais des pixels isoles.
+/// `opaque` : rectangle que l'appelant GARANTIT repeindre opaque plus tard
+/// dans la trame. Le fond de surface ne l'ecrit pas. Voir
+/// `BOUCHAUD_C13_PAS_DEUX_FOIS_LE_MEME_PIXEL_V1`.
+///
+/// Il ne concerne QUE le fond : les anneaux d'ombre sont hors de la fenetre et
+/// le filet de bordure est en dehors de la zone utile (`client_rect` est
+/// retrait de `WINDOW_BORDER` de chaque cote), donc aucun des deux ne peut
+/// tomber dans l'exclusion.
 pub fn paint_window_shape_spans<F: FnMut(i32, i32, u32, u32)>(
     geometry: crate::gui::windowing::WindowRenderGeometry,
     radius: u32, shadow_extent: u32, clip: Rect, surface: u32, border: u32,
+    opaque: Option<Rect>,
     mut remplit: F,
 ) {
     for extent in (1..=shadow_extent).rev() {
@@ -69,8 +78,12 @@ pub fn paint_window_shape_spans<F: FnMut(i32, i32, u32, u32)>(
         spans_stroke_rounded_rect(shadow, radius + extent, 1, clip,
             |x, y, largeur| remplit(x, y, largeur, shade));
     }
-    spans_rounded_rect(geometry.outer, radius, clip,
-        |x, y, largeur| remplit(x, y, largeur, surface));
+    match opaque {
+        Some(exclusion) => spans_rounded_rect_sauf(geometry.outer, radius, clip, exclusion,
+            |x, y, largeur| remplit(x, y, largeur, surface)),
+        None => spans_rounded_rect(geometry.outer, radius, clip,
+            |x, y, largeur| remplit(x, y, largeur, surface)),
+    };
     spans_stroke_rounded_rect(geometry.outer, radius, 1, clip,
         |x, y, largeur| remplit(x, y, largeur, border));
 }
@@ -153,6 +166,73 @@ pub fn spans_rounded_rect<F: FnMut(i32, i32, u32)>(rect: Rect, radius: u32, clip
         if x1 <= x0 { continue }
         couverts += (x1 - x0) as usize;
         segment(x0, y, (x1 - x0) as u32);
+    }
+    couverts
+}
+
+// BOUCHAUD_C13_PAS_DEUX_FOIS_LE_MEME_PIXEL_V1
+//
+// LE PIXEL PEINT DEUX FOIS, ET POURQUOI IL NE SE VOYAIT PAS
+// ---------------------------------------------------------
+// `[GUI-DAMAGE]` annonce `drawn_pixels` proche du TRIPLE de
+// `presented_pixels` : chaque pixel presente a l'ecran a ete ecrit environ
+// trois fois. Une des trois est structurelle et evitable.
+//
+// `paint_window_shape_spans` remplit la forme ENTIERE de la fenetre en couleur
+// de surface -- zone de contenu comprise. Puis `compose_client` recopie
+// par-dessus la surface du client, integralement et de facon opaque. Le
+// remplissage n'a donc jamais ete vu : il a ete recouvert a cent pour cent, a
+// chaque trame, pour une fenetre de navigateur de 1100x604, soit 664 400
+// pixels ecrits pour rien.
+//
+// C'est le genre de depense qu'aucune capture d'ecran ne revele -- le resultat
+// est rigoureusement identique -- et que seul le rapport entre pixels dessines
+// et pixels presentes met en evidence.
+//
+// La reparation ne change pas la forme peinte : elle lui retire un rectangle
+// dont on sait qu'il sera recouvert. Une ligne qui traverse ce rectangle rend
+// alors deux segments au lieu d'un, exactement comme le fait deja le contour
+// autour de son trou.
+//
+// L'exclusion est une PROMESSE de l'appelant : « ce rectangle sera repeint
+// opaque avant la fin de la trame ». Seul `draw_window` la formule, et
+// seulement pour une fenetre de client ring 3, dont la surface recouvre la
+// zone utile. Une application native qui ne peint pas tous ses pixels
+// continue, elle, de recevoir son fond.
+
+/// Segments de `rect ∩ clip`, PRIVES de `exclusion`.
+///
+/// Meme contrat que [`spans_rounded_rect`] : le nombre de pixels reellement
+/// couverts est rendu, ce qui permet a un test d'hote de prouver le gain sans
+/// regarder l'ecran.
+pub fn spans_rounded_rect_sauf<F: FnMut(i32, i32, u32)>(rect: Rect, radius: u32, clip: Rect,
+    exclusion: Rect, mut segment: F) -> usize {
+    let Some(area) = intersection(rect, clip) else { return 0 };
+    let mut couverts = 0usize;
+    for y in area.y..area.bottom() {
+        let Some((debut, fin)) = bornes_ligne(rect.width as i32, rect.height as i32,
+            radius as i32, y - rect.y) else { continue };
+        let x0 = (rect.x + debut).max(area.x);
+        let x1 = (rect.x + fin).min(area.right());
+        if x1 <= x0 { continue }
+
+        // Hors des lignes de l'exclusion, rien ne change.
+        let coupe = exclusion.width > 0 && exclusion.height > 0
+            && y >= exclusion.y && y < exclusion.bottom();
+        if !coupe {
+            couverts += (x1 - x0) as usize;
+            segment(x0, y, (x1 - x0) as u32);
+            continue;
+        }
+
+        let mut pose = |a: i32, b: i32| {
+            if b > a {
+                couverts += (b - a) as usize;
+                segment(a, y, (b - a) as u32);
+            }
+        };
+        pose(x0, x1.min(exclusion.x));
+        pose(x0.max(exclusion.right()), x1);
     }
     couverts
 }

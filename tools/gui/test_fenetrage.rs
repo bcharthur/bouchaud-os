@@ -327,3 +327,143 @@ fn un_contour_sans_rayon_est_un_cadre_exact() {
         assert!(x == 0 || x == 9 || y == 0 || y == 5, "({x},{y}) n'est pas sur le bord");
     }
 }
+
+// ===========================================================================
+// BOUCHAUD_C13_PAS_DEUX_FOIS_LE_MEME_PIXEL_V1
+// ===========================================================================
+//
+// `[GUI-DAMAGE]` annonce trois pixels DESSINES pour un pixel PRESENTE. Une des
+// trois passes etait structurelle : le fond de fenetre etait peint sous la
+// surface du client, qui le recouvrait integralement juste apres.
+//
+// Le resultat a l'ecran est rigoureusement identique avec et sans cette passe,
+// donc aucune capture ne peut la reveler -- et aucune ne peut non plus
+// reveler qu'on en a retire un pixel de trop. Ces tests sont le seul endroit
+// ou la difference est visible.
+
+/// Pixels du fond de fenetre, par couleur, pour une trame complete.
+fn fond_peint(opaque: Option<Rect>) -> alloc::collections::BTreeSet<(i32, i32)> {
+    let cadre = Rect::new(120, 80, 400, 300);
+    let geometrie = window_render_geometry(cadre, TITLEBAR_HEIGHT, WINDOW_RADIUS,
+        manager::SHADOW_EXTENT);
+    let decoupe = Rect::new(0, 0, 1280, 720);
+    let mut pixels = alloc::collections::BTreeSet::new();
+    graphics::paint_window_shape_spans(geometrie, WINDOW_RADIUS, manager::SHADOW_EXTENT,
+        decoupe, 0x171b21, 0x454c58, opaque, |x, y, largeur, couleur| {
+            if couleur != 0x171b21 { return }
+            for dx in 0..largeur as i32 { pixels.insert((x + dx, y)); }
+        });
+    pixels
+}
+
+/// Tout ce qui n'est PAS le fond -- ombre et filet de bordure.
+fn ornement_peint(opaque: Option<Rect>) -> alloc::vec::Vec<(i32, i32, u32)> {
+    let cadre = Rect::new(120, 80, 400, 300);
+    let geometrie = window_render_geometry(cadre, TITLEBAR_HEIGHT, WINDOW_RADIUS,
+        manager::SHADOW_EXTENT);
+    let decoupe = Rect::new(0, 0, 1280, 720);
+    let mut pixels = alloc::vec::Vec::new();
+    graphics::paint_window_shape_spans(geometrie, WINDOW_RADIUS, manager::SHADOW_EXTENT,
+        decoupe, 0x171b21, 0x454c58, opaque, |x, y, largeur, couleur| {
+            if couleur == 0x171b21 { return }
+            for dx in 0..largeur as i32 { pixels.push((x + dx, y, couleur)); }
+        });
+    pixels
+}
+
+/// La zone utile telle que `draw_window` la calcule pour un client.
+fn zone_client() -> Rect {
+    client_rect(Rect::new(120, 80, 400, 300), TITLEBAR_HEIGHT)
+}
+
+#[test]
+fn l_exclusion_retire_exactement_la_zone_recouverte_et_rien_d_autre() {
+    let zone = zone_client();
+    let complet = fond_peint(None);
+    let ampute = fond_peint(Some(zone));
+
+    let dans_zone = |(x, y): &(i32, i32)| {
+        *x >= zone.x && *x < zone.right() && *y >= zone.y && *y < zone.bottom()
+    };
+
+    assert!(
+        !ampute.iter().any(dans_zone),
+        "aucun pixel de fond ne doit etre peint sous la surface du client"
+    );
+    let attendu: alloc::collections::BTreeSet<(i32, i32)> =
+        complet.iter().copied().filter(|p| !dans_zone(p)).collect();
+    assert_eq!(
+        ampute, attendu,
+        "et TOUT le reste doit etre peint a l'identique -- un pixel de fond \
+         manquant hors de la zone laisserait voir le bureau au travers"
+    );
+}
+
+#[test]
+fn l_exclusion_ne_touche_ni_a_l_ombre_ni_a_la_bordure() {
+    // La garantie de securite du changement. Le filet de bordure et les
+    // anneaux d'ombre ne passent pas par le fond ; si l'exclusion pouvait les
+    // manger, la fenetre perdrait son cadre sans qu'aucun test de forme ne
+    // s'en apercoive.
+    assert_eq!(ornement_peint(Some(zone_client())), ornement_peint(None));
+}
+
+#[test]
+fn l_economie_vaut_la_quasi_totalite_du_fond() {
+    let zone = zone_client();
+    let complet = fond_peint(None);
+    let economie = complet.len() - fond_peint(Some(zone)).len();
+
+    // Pas tout a fait l'aire du rectangle : la zone utile n'est retraite que
+    // de `WINDOW_BORDER` (1 px) alors que les coins BAS sont arrondis sur
+    // `WINDOW_RADIUS` (10 px). Quelques pixels de la zone tombent donc hors de
+    // la forme et n'etaient de toute facon pas peints.
+    let dans_zone = complet.iter().filter(|(x, y)| {
+        *x >= zone.x && *x < zone.right() && *y >= zone.y && *y < zone.bottom()
+    }).count();
+    assert_eq!(economie, dans_zone, "on retire exactement le fond recouvert");
+    assert!(
+        economie < (zone.width * zone.height) as usize,
+        "et strictement moins que l'aire du rectangle, a cause des coins bas"
+    );
+
+    // La mesure qui justifie le changement : sur une fenetre de 400x300, neuf
+    // dixiemes du fond etaient peints pour etre immediatement recouverts.
+    let proportion = economie * 100 / complet.len();
+    assert!(
+        proportion >= 85,
+        "au moins 85 % du fond etait invisible, mesure {proportion} %"
+    );
+}
+
+#[test]
+fn une_exclusion_hors_de_la_forme_ne_change_rien() {
+    assert_eq!(fond_peint(Some(Rect::new(2000, 2000, 50, 50))), fond_peint(None));
+    assert_eq!(fond_peint(Some(Rect::new(0, 0, 0, 0))), fond_peint(None));
+}
+
+#[test]
+fn l_exclusion_conserve_le_cout_par_ligne() {
+    // La propriete qui rend le gain reel : couper une ligne en deux ne doit
+    // pas la faire degenerer en un appel par pixel. Au plus deux segments par
+    // ligne, comme le contour autour de son trou.
+    let rect = Rect::new(0, 0, 1280, 698);
+    let mut segments = 0usize;
+    let couverts = graphics::spans_rounded_rect_sauf(rect, 10, rect,
+        Rect::new(1, 40, 1278, 600), |_, _, _| segments += 1);
+    assert!(segments <= 698 * 2, "au plus deux segments par ligne, obtenu {segments}");
+    assert!(segments >= 698, "et aucune ligne perdue");
+    assert!(couverts > 0);
+    assert!(
+        couverts < 200_000,
+        "la grande majorite de l'aire n'est plus peinte ({couverts} pixels)"
+    );
+}
+
+#[test]
+fn une_exclusion_qui_couvre_tout_ne_peint_aucun_fond() {
+    let rect = Rect::new(0, 0, 200, 150);
+    let couverts = graphics::spans_rounded_rect_sauf(rect, 10, rect, rect,
+        |_, _, _| panic!("aucun segment ne doit sortir"));
+    assert_eq!(couverts, 0);
+}

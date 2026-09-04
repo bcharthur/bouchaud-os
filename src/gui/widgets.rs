@@ -425,10 +425,31 @@ fn draw_window(w: &Win, focused: bool) {
     // BOUCHAUD_GUI_RASTER_SEGMENTS_V1 : par SEGMENTS, pas par pixels. Une
     // fenetre maximisee coutait huit millions d'iterations et autant de
     // `fetch_add` atomiques par trame ; elle en coute maintenant ~700.
+    // BOUCHAUD_C13_PAS_DEUX_FOIS_LE_MEME_PIXEL_V1
+    //
+    // La promesse : ce rectangle sera repeint OPAQUE avant la fin de la trame.
+    // Elle n'est tenable que pour un client ring 3 -- `compose_client` recopie
+    // sa surface ligne par ligne, sans transparence, et son ecran d'attente
+    // remplit la zone entiere. Une application native peint ce qu'elle veut :
+    // elle garde son fond.
+    //
+    // Le rectangle est borne par la surface REELLE du client, pas par la zone :
+    // si un jour la surface est plus petite que la fenetre, la difference doit
+    // continuer de recevoir un fond, sinon elle montrerait le bureau.
+    let opaque = match &w.app {
+        App::Navigateur { client } => {
+            let zone = crate::gui::window::zone_utile(w);
+            let largeur = (zone.largeur.max(0) as usize).min(client.surface.largeur) as u32;
+            let hauteur = (zone.hauteur.max(0) as usize).min(client.surface.hauteur) as u32;
+            (largeur > 0 && hauteur > 0)
+                .then(|| crate::gui::windowing::Rect::new(zone.x, zone.y, largeur, hauteur))
+        }
+        _ => None,
+    };
     crate::gui::graphics::paint_window_shape_spans(geometry,
         crate::gui::theme::RADIUS_WINDOW,
         crate::gui::windowing::manager::SHADOW_EXTENT, damage,
-        crate::gui::theme::COLOR_SURFACE, border,
+        crate::gui::theme::COLOR_SURFACE, border, opaque,
         |px, py, largeur, color| {
             fb::fill_rect_rgb(px.max(0) as usize, py.max(0) as usize,
                 largeur as usize, 1, color)
