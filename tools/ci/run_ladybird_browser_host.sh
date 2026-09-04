@@ -193,8 +193,18 @@ for jalon in "${JALONS[@]}"; do
     printf '  JAMAIS ATTEINT     %s\n' "$jalon"
     motif=$(motif_echec "$jalon")
     if [ -n "$motif" ]; then
-      raison=$(grep -aF "$motif" "$LOG" | head -1 | tr -d '\r')
-      [ -n "$raison" ] && printf '                     la page a dit : %s\n' "$raison"
+      # `|| true` sur les DEUX : le script tourne sous `set -e` avec
+      # `pipefail`. `grep` rend 1 quand il ne trouve rien, et un
+      # `[ ... ] && printf` rend 1 quand le test est faux. L'un ou l'autre
+      # tuait le rapport en plein milieu -- il s'est arrete sur
+      # « JAMAIS ATTEINT HOST_IFRAME OK », emportant la ligne de verdict et
+      # le compte des jalons manquants, c'est-a-dire ce qui explique
+      # l'echec. Un rapport de diagnostic ne doit jamais pouvoir se taire
+      # parce qu'il n'a rien trouve a dire sur une ligne.
+      raison=$(grep -aF "$motif" "$LOG" | head -1 | sed 's/\r//g; s/\x1b\[[0-9;]*m//g') || true
+      if [ -n "$raison" ]; then
+        printf '                     la page a dit : %s\n' "$raison"
+      fi
     fi
     manquants=$((manquants + 1))
   fi
