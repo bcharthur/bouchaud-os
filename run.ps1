@@ -465,17 +465,76 @@ if ($LadybirdMode) {
                 Fail "impossible de determiner la branche pour trouver l'artefact Ladybird"
             }
 
-            $latest = (& gh run list `
+            # BOUCHAUD_ARTEFACT_PRODUCTEUR_V1
+            #
+            # Le critere etait `--status success` : le dernier run dont TOUS
+            # les jobs sont verts. Or `ladybird-native-browser.yml` a deux
+            # jobs, et un seul PRODUIT l'artefact :
+            #
+            #   ladybird / build once     -> upload-artifact  (producteur)
+            #   ladybird / browser-host smoke -> download-artifact (consommateur)
+            #
+            # Le smoke fait tourner le navigateur dans QEMU sans acceleration.
+            # Quand il echoue, la conclusion du RUN passe au rouge alors que
+            # l'artefact est publie, intact, et telechargeable. `--status
+            # success` le sautait : l'image Ladybird de la machine cessait de
+            # se mettre a jour a cause d'un job qui ne la fabrique pas.
+            #
+            # Le critere est donc l'ARTEFACT LUI-MEME. Il subsume l'ancien --
+            # `if-no-files-found: error` garantit qu'il n'existe que si le
+            # producteur a reussi -- et il ajoute ce que l'ancien ignorait :
+            # la retention. Un run vert de plus de quatorze jours etait choisi,
+            # puis `gh run download` echouait sans dire pourquoi.
+            $runsJson = (& gh run list `
                 --workflow "ladybird-native-browser.yml" `
                 --branch $CurrentBranch `
-                --status success `
-                --limit 1 `
+                --limit 20 `
                 --json databaseId `
-                --jq '.[0].databaseId').Trim()
+                --jq '.[].databaseId') -split "`n" |
+                Where-Object { $_.Trim() }
+
+            if (-not $runsJson) {
+                Fail (
+                    ("aucun run de ladybird-native-browser pour '{0}'. " -f $CurrentBranch) +
+                    "Pousse la branche et attends le workflow."
+                )
+            }
+
+            $latest = $null
+            $examines = 0
+
+            foreach ($candidat in $runsJson) {
+
+                $candidat = $candidat.Trim()
+                $examines += 1
+
+                # `expired` est le seul champ qui distingue un artefact encore
+                # telechargeable d'une simple trace dans l'historique.
+                $present = (& gh api `
+                    "repos/{owner}/{repo}/actions/runs/$candidat/artifacts" `
+                    --jq '[.artifacts[] | select(.name == "bouchaud-ladybird-native-browser" and .expired == false)] | length' `
+                    2>$null)
+
+                if ($LASTEXITCODE -eq 0 -and $present -and ([int]$present.Trim()) -gt 0) {
+
+                    $latest = $candidat
+
+                    break
+                }
+            }
 
             if (-not $latest) {
-                Fail "aucun build Ladybird reussi pour '$CurrentBranch'. Pousse la branche et attends le workflow ladybird-native-browser."
+                Fail (
+                    ("aucun artefact Ladybird telechargeable sur les {0} derniers " -f $examines) +
+                    ("runs de '{0}'. Le job \"ladybird / build once\" a-t-il abouti, " -f $CurrentBranch) +
+                    "ou les artefacts ont-ils expire (retention 14 jours) ?"
+                )
             }
+
+            Write-Host (
+                "Ladybird : run {0} retenu (artefact publie par build once)" -f `
+                    $latest
+            ) -ForegroundColor DarkGray
 
             $EffectiveLadybirdRunId = [long]$latest
         }
