@@ -524,13 +524,41 @@ if ($LadybirdMode) {
             # producteur a reussi -- et il ajoute ce que l'ancien ignorait :
             # la retention. Un run vert de plus de quatorze jours etait choisi,
             # puis `gh run download` echouait sans dire pourquoi.
-            $runsJson = (& gh run list `
+            # BOUCHAUD_SANS_JQ_V1
+            #
+            # Le filtrage se fait en PowerShell, jamais par `--jq`.
+            #
+            # Windows PowerShell 5.1 reconstruit une LIGNE DE COMMANDE pour
+            # lancer un programme natif, et mange les guillemets doubles
+            # contenus dans un argument. Un programme jq comme
+            #
+            #     select(.name == "bouchaud-ladybird-native-browser")
+            #
+            # arrivait donc a `gh` sans ses guillemets, et jq lisait
+            # `bouchaud - ladybird - native - browser` : quatre soustractions
+            # et un appel a une fonction inexistante. D'ou, sur la machine de
+            # l'utilisateur, un "function not defined: browser/0" qui
+            # n'accusait ni gh ni PowerShell mais laissait croire a une panne
+            # de l'outil.
+            #
+            # `ConvertFrom-Json` supprime la classe entiere : plus aucun
+            # guillemet ne traverse la frontiere des arguments natifs.
+            $ArtefactNavigateur = "bouchaud-ladybird-native-browser"
+
+            $runsBrut = (& gh run list `
                 --workflow "ladybird-native-browser.yml" `
                 --branch $CurrentBranch `
                 --limit 20 `
-                --json databaseId `
-                --jq '.[].databaseId') -split "`n" |
-                Where-Object { $_.Trim() }
+                --json databaseId) -join "`n"
+
+            $runsJson = @()
+
+            if ($LASTEXITCODE -eq 0 -and $runsBrut.Trim()) {
+
+                $runsJson = @(
+                    (ConvertFrom-Json $runsBrut) | ForEach-Object { $_.databaseId }
+                )
+            }
 
             if (-not $runsJson) {
                 Fail (
@@ -549,12 +577,23 @@ if ($LadybirdMode) {
 
                 # `expired` est le seul champ qui distingue un artefact encore
                 # telechargeable d'une simple trace dans l'historique.
-                $present = (& gh api `
+                $brut = (& gh api `
                     "repos/{owner}/{repo}/actions/runs/$candidat/artifacts" `
-                    --jq '[.artifacts[] | select(.name == "bouchaud-ladybird-native-browser" and .expired == false)] | length' `
-                    2>$null)
+                    2>$null) -join "`n"
 
-                if ($LASTEXITCODE -eq 0 -and $present -and ([int]$present.Trim()) -gt 0) {
+                $vivants = 0
+
+                if ($LASTEXITCODE -eq 0 -and $brut.Trim()) {
+
+                    $vivants = @(
+                        (ConvertFrom-Json $brut).artifacts |
+                            Where-Object {
+                                $_.name -eq $ArtefactNavigateur -and -not $_.expired
+                            }
+                    ).Count
+                }
+
+                if ($vivants -gt 0) {
 
                     $latest = $candidat
 
@@ -600,7 +639,7 @@ if ($LadybirdMode) {
 
 
         gh run download $EffectiveLadybirdRunId `
-            -n "bouchaud-ladybird-native-browser" `
+            -n $ArtefactNavigateur `
             -D $NativeBrowserDir
 
 

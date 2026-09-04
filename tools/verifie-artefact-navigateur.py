@@ -22,7 +22,7 @@ strict ».
 
 LA REGLE
 --------
-Quatre choses doivent rester vraies ensemble. Aucune ne suffit seule.
+Cinq choses doivent rester vraies ensemble. Aucune ne suffit seule.
 
 1. La selection ne gate PAS sur la conclusion du run. C'est le defaut lui-meme.
 
@@ -38,7 +38,16 @@ Quatre choses doivent rester vraies ensemble. Aucune ne suffit seule.
    aucune correction de l'interface n'atteignait la machine. Un marqueur de
    capacite qui n'est jamais lu ne protege de rien.
 
-4. Le producteur televerse avec `if-no-files-found: error`. C'est CE reglage
+4. `run.ps1` filtre le JSON en PowerShell, JAMAIS par `--jq`.
+   Windows PowerShell 5.1 reconstruit une ligne de commande pour lancer un
+   programme natif et mange les guillemets doubles d'un argument. Un
+   programme jq contenant `select(.name == "...")` arrivait a `gh` sans ses
+   guillemets, et jq lisait une suite de soustractions suivie d'un appel a
+   une fonction inexistante : "function not defined: browser/0". L'erreur
+   n'accusait ni gh ni PowerShell -- elle ressemblait a une panne de
+   l'outil. `ConvertFrom-Json` supprime la classe entiere.
+
+5. Le producteur televerse avec `if-no-files-found: error`. C'est CE reglage
    qui autorise la regle 1 : sans lui, un artefact pourrait exister en etant
    vide, et « l'artefact est la » cesserait de valoir « la construction a
    abouti ». Relacher ce reglage rendrait la selection permissive sans que rien
@@ -50,7 +59,7 @@ Qu'un troisieme job soit ajoute au workflow et devienne, lui aussi, producteur.
 Il verifie la forme qui a produit le defaut : un consommateur ne doit pas
 decider a la place d'un producteur.
 
-Code de retour : 0 si les quatre regles sont respectees.
+Code de retour : 0 si les cinq regles sont respectees.
 """
 
 import re
@@ -151,8 +160,22 @@ def regle_capacite(source, workflow, fautes):
         )
 
 
+def regle_sans_jq(source, fautes):
+    """4. Aucun `--jq` dans run.ps1 : le filtrage se fait en PowerShell."""
+    for numero, ligne in enumerate(source.splitlines(), start=1):
+        # Le commentaire qui explique la regle a le droit de nommer `--jq`.
+        nue = ligne.split("#", 1)[0]
+        if "--jq" in nue:
+            fautes.append(
+                "run.ps1:%d : `--jq` passe un programme jq a un programme "
+                "natif. Windows PowerShell 5.1 mange les guillemets doubles "
+                "d'un tel argument. Filtrer avec ConvertFrom-Json.\n"
+                "           %s" % (numero, ligne.strip())
+            )
+
+
 def regle_televersement(workflow, fautes):
-    """4. Le producteur refuse de televerser du vide."""
+    """5. Le producteur refuse de televerser du vide."""
     # On cherche le bloc `upload-artifact` qui porte NOTRE nom, pas les autres
     # (le smoke televerse aussi des journaux, et lui a le droit d'etre laxiste).
     blocs = workflow.split("uses: actions/upload-artifact")
@@ -184,6 +207,7 @@ def main():
     regle_selection(source, fautes)
     regle_nom(source, workflow, fautes)
     regle_capacite(source, workflow, fautes)
+    regle_sans_jq(source, fautes)
     regle_televersement(workflow, fautes)
 
     if fautes:
@@ -192,7 +216,7 @@ def main():
         return 1
 
     print("artefact navigateur : selection sur le producteur, nom accorde, "
-          "capacite UI lue, televersement strict")
+          "capacite UI lue, sans --jq, televersement strict")
     return 0
 
 
