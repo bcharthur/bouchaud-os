@@ -22,7 +22,7 @@ strict ».
 
 LA REGLE
 --------
-Trois choses doivent rester vraies ensemble. Aucune ne suffit seule.
+Quatre choses doivent rester vraies ensemble. Aucune ne suffit seule.
 
 1. La selection ne gate PAS sur la conclusion du run. C'est le defaut lui-meme.
 
@@ -30,7 +30,15 @@ Trois choses doivent rester vraies ensemble. Aucune ne suffit seule.
    televerse. Une derive de nom ne casse rien a la construction : elle se voit
    des mois plus tard, sur un poste, sous la forme d'un telechargement vide.
 
-3. Le producteur televerse avec `if-no-files-found: error`. C'est CE reglage
+3. Le marqueur de capacite que le producteur ECRIT est LU par `run.ps1`.
+   Le workflow stampe `V16_UI_CAPABLE` dans l'artefact pour dire qu'il porte
+   le chrome moderne. Personne ne le lisait : la completude se jugeait sur
+   `M9_CAPABLE`, present dans un artefact d'avant ce chantier. Un artefact
+   telecharge il y a des mois passait donc le controle indefiniment, et
+   aucune correction de l'interface n'atteignait la machine. Un marqueur de
+   capacite qui n'est jamais lu ne protege de rien.
+
+4. Le producteur televerse avec `if-no-files-found: error`. C'est CE reglage
    qui autorise la regle 1 : sans lui, un artefact pourrait exister en etant
    vide, et « l'artefact est la » cesserait de valoir « la construction a
    abouti ». Relacher ce reglage rendrait la selection permissive sans que rien
@@ -42,7 +50,7 @@ Qu'un troisieme job soit ajoute au workflow et devienne, lui aussi, producteur.
 Il verifie la forme qui a produit le defaut : un consommateur ne doit pas
 decider a la place d'un producteur.
 
-Code de retour : 0 si les trois regles sont respectees.
+Code de retour : 0 si les quatre regles sont respectees.
 """
 
 import re
@@ -55,6 +63,7 @@ WORKFLOW = RACINE / ".github" / "workflows" / "ladybird-native-browser.yml"
 
 ARTEFACT = "bouchaud-ladybird-native-browser"
 WORKFLOW_NOM = "ladybird-native-browser.yml"
+CAPACITE = "V16_UI_CAPABLE"
 
 # La selection s'etend sur plusieurs lignes continuees par un accent grave.
 # On la reconstitue avant de la lire, sinon `--status success` sur sa propre
@@ -114,8 +123,36 @@ def regle_nom(source, workflow, fautes):
         )
 
 
+def regle_capacite(source, workflow, fautes):
+    """3. Le marqueur ecrit par le producteur est lu par le consommateur."""
+    if CAPACITE not in workflow:
+        fautes.append(
+            "%s : le producteur n'ecrit plus le marqueur de capacite %r."
+            % (WORKFLOW_NOM, CAPACITE)
+        )
+    if CAPACITE not in source:
+        fautes.append(
+            "run.ps1 : le marqueur %r n'est pas lu. Un artefact anterieur au "
+            "chrome V16 passerait le controle de completude, et resterait en "
+            "place indefiniment avec ses fleches en pixels." % CAPACITE
+        )
+        return
+    # Le lire ne suffit pas : il doit conditionner le RETELECHARGEMENT, donc
+    # figurer dans la liste des fichiers exiges.
+    if "$RequiredLadybirdFiles" not in source:
+        fautes.append("run.ps1 : la liste des fichiers requis a disparu.")
+        return
+    bloc = source[source.index("$RequiredLadybirdFiles"):]
+    bloc = bloc[: bloc.find("# =========")] if "# =========" in bloc else bloc
+    if CAPACITE not in bloc and "$CapaciteUi" not in bloc:
+        fautes.append(
+            "run.ps1 : %r est mentionne mais ne figure pas parmi les fichiers "
+            "requis ; il ne declenche donc aucun retelechargement." % CAPACITE
+        )
+
+
 def regle_televersement(workflow, fautes):
-    """3. Le producteur refuse de televerser du vide."""
+    """4. Le producteur refuse de televerser du vide."""
     # On cherche le bloc `upload-artifact` qui porte NOTRE nom, pas les autres
     # (le smoke televerse aussi des journaux, et lui a le droit d'etre laxiste).
     blocs = workflow.split("uses: actions/upload-artifact")
@@ -146,6 +183,7 @@ def main():
     fautes = []
     regle_selection(source, fautes)
     regle_nom(source, workflow, fautes)
+    regle_capacite(source, workflow, fautes)
     regle_televersement(workflow, fautes)
 
     if fautes:
@@ -154,7 +192,7 @@ def main():
         return 1
 
     print("artefact navigateur : selection sur le producteur, nom accorde, "
-          "televersement strict")
+          "capacite UI lue, televersement strict")
     return 0
 
 

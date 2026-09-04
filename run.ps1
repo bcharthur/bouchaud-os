@@ -381,6 +381,30 @@ if ($LadybirdMode) {
     #   docs/ladybird/AUDIT_INTEGRATION.md.
     # -------------------------------------------------------------------------
 
+    # BOUCHAUD_ARTEFACT_PERIME_V1
+    #
+    # `V16_UI_CAPABLE` est ecrit dans l'artefact par le job producteur, a
+    # l'etape "Marquer la capacite UI V16", precisement pour dire : cet
+    # artefact porte le chrome moderne -- fleches SVG antialiasees, barre
+    # d'adresse en texte Skia, polices Web par FontConfig.
+    #
+    # Personne ne le lisait. La completude d'un artefact se jugeait sur
+    # `M9_CAPABLE` et quelques binaires, tous presents dans un artefact
+    # d'AVANT ces chantiers. Un artefact telecharge il y a des mois passait
+    # donc le controle indefiniment, `run.ps1` annoncait "artefact local
+    # deja present", et aucune correction de l'interface n'atteignait
+    # jamais la machine.
+    #
+    # Le symptome ne ressemblait pas du tout a sa cause : on voyait des
+    # fleches en pixels et une URL en police bitmap, et on cherchait le
+    # defaut dans le code du chrome -- qui etait corrige depuis longtemps.
+    #
+    # Un marqueur de capacite qui n'est jamais lu ne protege de rien.
+    #
+    # M8 en est exempt : il affiche une page locale fixe, sans barre
+    # d'adresse ni boutons, et sa liste est deliberement minimale.
+    $CapaciteUi = "V16_UI_CAPABLE"
+
     if ($IsLadybirdM8) {
         $RequiredLadybirdFiles = @(
             "WebContent",
@@ -398,7 +422,8 @@ if ($LadybirdMode) {
             "WebWorker",
             "WebDriver",
             "webcontent-bootstrap",
-            "M9_CAPABLE"
+            "M9_CAPABLE",
+            $CapaciteUi
         )
     }
     else {
@@ -407,7 +432,8 @@ if ($LadybirdMode) {
             "RequestServer",
             "ImageDecoder",
             "webcontent-bootstrap",
-            "M9_CAPABLE"
+            "M9_CAPABLE",
+            $CapaciteUi
         )
     }
 
@@ -434,6 +460,19 @@ if ($LadybirdMode) {
             if (-not (Test-Path $candidate)) {
 
                 $artifactMissing = $true
+
+                if ($file -eq $CapaciteUi) {
+                    Write-Host (
+                        ("Ladybird : artefact anterieur au chrome V16 ({0} absent) " -f $file) +
+                        "-> retelechargement"
+                    ) -ForegroundColor Yellow
+                }
+                else {
+                    Write-Host (
+                        "Ladybird : artefact incomplet ({0} absent) -> retelechargement" -f `
+                            $file
+                    ) -ForegroundColor Yellow
+                }
 
                 break
             }
