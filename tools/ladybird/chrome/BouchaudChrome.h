@@ -275,12 +275,26 @@ struct State {
     // Descripteurs et geometrie fournis par le gestionnaire de fenetres.
     int gui_fd { -1 };
     int surface_fd { -1 };
+    // Taille LOGIQUE : la zone utile courante de la fenetre. Elle change quand
+    // l'utilisateur maximise, restaure ou ancre la fenetre -- voir le
+    // `Configure` de `handle_message`.
     int surface_width { 0 };
     int surface_height { 0 };
     int surface_stride { 0 };
-    // La surface GUI garde le même fd et la même géométrie pendant la vie du
-    // client. La mapper une fois évite mmap/munmap et les shootdowns TLB à
-    // chaque frame chrome/page.
+    // Taille ALLOUEE : ce que le compositeur a reserve, une fois pour toutes,
+    // pour la plus grande fenetre possible. C'est elle -- et jamais la taille
+    // logique -- qui dimensionne le mappage.
+    //
+    // BOUCHAUD_CHROME_V17_SURFACE_REDIMENSIONNABLE : les deux etaient un seul
+    // champ. `mapped_surface` comparait donc la taille du mappage a la taille
+    // de la fenetre, et refusait de peindre des que celle-ci changeait
+    // (M11_SURFACE_GEOMETRY_CHANGED). Les separer est ce qui rend le
+    // redimensionnement possible sans remapper : le mappage ne bouge plus,
+    // seule la partie qu'on en peint bouge.
+    int surface_alloc_width { 0 };
+    int surface_alloc_height { 0 };
+    // La surface GUI garde le même fd pendant la vie du client. La mapper une
+    // fois évite mmap/munmap et les shootdowns TLB à chaque frame chrome/page.
     u8* surface_mapping { nullptr };
     size_t surface_mapping_bytes { 0 };
 
@@ -588,7 +602,10 @@ inline Optional<Canvas> mapped_surface()
     if (s.surface_fd < 0 || s.gui_fd < 0 || s.surface_width <= 0 || s.surface_height <= 0)
         return {};
     auto stride_bytes = static_cast<size_t>(s.surface_stride);
-    auto height_rows = static_cast<size_t>(s.surface_height);
+    // L'ALLOCATION, pas la fenetre : une fenetre plus petite ne retrecit pas la
+    // memoire partagee, et une fenetre agrandie ne doit pas declencher un
+    // remappage que le compositeur n'a pas demande.
+    auto height_rows = static_cast<size_t>(s.surface_alloc_height);
     if (height_rows != 0 && stride_bytes > SIZE_MAX / height_rows)
         return {};
     auto bytes = stride_bytes * height_rows;
@@ -1441,11 +1458,23 @@ inline void handle_message(u16 kind, u8 const* payload, u32 size)
         if (size >= 16) {
             auto width = static_cast<int>(read_u32(payload, 4));
             auto height = static_cast<int>(read_u32(payload, 8));
-            // La surface n'est pas reallouee par ce jalon (§11 du protocole) :
-            // on note la geometrie sans y croire davantage que la surface.
+            // BOUCHAUD_CHROME_V17_SURFACE_REDIMENSIONNABLE
+            //
+            // La geometrie etait NOTEE et non adoptee : le chrome journalisait
+            // la nouvelle taille puis continuait de peindre l'ancienne. Le
+            // bouton plein ecran de la barre de titre etait donc inerte des
+            // deux cotes a la fois.
+            //
+            // Elle est bornee a l'allocation. Le compositeur la borne deja,
+            // mais un client ne doit pas dependre de la prudence de son
+            // serveur pour ne pas ecrire hors de sa propre projection.
+            width = min(width, s.surface_alloc_width);
+            height = min(height, s.surface_alloc_height);
             if (width > 0 && height > 0 && (width != s.surface_width || height != s.surface_height)) {
-                outln("[ladybird-bouchaud] M11_CONFIGURE {}x{} (surface {}x{})",
-                    width, height, s.surface_width, s.surface_height);
+                outln("[ladybird-bouchaud] M11_CONFIGURE {}x{} (alloue {}x{})",
+                    width, height, s.surface_alloc_width, s.surface_alloc_height);
+                s.surface_width = width;
+                s.surface_height = height;
                 // Le seul cas ou le chrome sait avant le moteur qu'il faut
                 // repeindre la page : la geometrie a change, et rien dans le
                 // document ne s'en est apercu.
@@ -1578,9 +1607,16 @@ inline void initialize_from_environment()
     auto* surface = getenv("BO_SURFACE_FD");
     s.gui_fd = gui ? atoi(gui) : -1;
     s.surface_fd = surface ? atoi(surface) : -1;
-    s.surface_width = environment_int("BO_SURFACE_WIDTH", 1100);
-    s.surface_height = environment_int("BO_SURFACE_HEIGHT", 604);
-    s.surface_stride = environment_int("BO_SURFACE_STRIDE", s.surface_width * 4);
+    // `BO_SURFACE_*` decrit l'ALLOCATION : c'est ce que le client projette.
+    // La zone utile, elle, arrive par le premier `Configure`, que le
+    // compositeur envoie des l'ouverture de la fenetre. Tant qu'il n'est pas
+    // arrive, peindre toute l'allocation est sans danger -- le compositeur ne
+    // recopie que la zone qu'il a annoncee.
+    s.surface_alloc_width = environment_int("BO_SURFACE_WIDTH", 1100);
+    s.surface_alloc_height = environment_int("BO_SURFACE_HEIGHT", 604);
+    s.surface_width = s.surface_alloc_width;
+    s.surface_height = s.surface_alloc_height;
+    s.surface_stride = environment_int("BO_SURFACE_STRIDE", s.surface_alloc_width * 4);
 
     if (s.gui_fd >= 0) {
         auto flags = fcntl(s.gui_fd, F_GETFL, 0);

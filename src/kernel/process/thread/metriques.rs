@@ -23,7 +23,8 @@ pub fn log_smp_load() {
             (0, 0)
         };
         line.push_str(&alloc::format!(
-            " c{}={} rq={} cur={}:{} steal={}/{} rej_bal={} rej_aff={} mig={}",
+            " c{}={} rq={} cur={}:{} steal={}/{} rej_bal={} rej_aff={} \
+rej_inel={} rej_crs={} mig={}",
             cpu_id,
             cpu::load_percent_cpu(cpu_id),
             ready_count_cpu(cpu_id),
@@ -33,6 +34,10 @@ pub fn log_smp_load() {
             STEAL_ATTEMPTS[cpu_id].load(Ordering::Relaxed),
             STEAL_REJECT_BALANCE[cpu_id].load(Ordering::Relaxed),
             STEAL_REJECT_AFFINITY[cpu_id].load(Ordering::Relaxed),
+            // `rej_inel` est l'ecart entre les taches RETIREES et les vols
+            // aboutis : le gaspillage du vol, jusqu'ici invisible.
+            STEAL_REJECT_INELIGIBLE[cpu_id].load(Ordering::Relaxed),
+            STEAL_REJECT_COURSE[cpu_id].load(Ordering::Relaxed),
             CPU_MIGRATIONS[cpu_id].load(Ordering::Relaxed),
         ));
     }
@@ -174,6 +179,30 @@ anomalies={}/{}/{} proprietaire={}{}",
     // doivent exister dans toute trace ou l'on cherche un figement.
     crate::kernel::scheduler::preempt::log_stats();
     crate::kernel::scheduler::latency::log_stats();
+    log_files_execution();
+    crate::kernel::heap::log_ng_stats();
+    crate::kernel::memory::log_dma_stats();
+    crate::drivers::bloc::log_stats();
+    crate::kernel::navigateur::supervision::log_stats();
+    let (tcp_rtx, tcp_rapides, tcp_rtt, tcp_srtt, tcp_rto, tcp_busy, tcp_sommeils) =
+        crate::net::transport::retransmission::stats();
+    // BOUCHAUD_C13_RTT_DE_POIGNEE_V1 : `srtt_ms` et `rto_ms` decrivent la
+    // DERNIERE connexion de `tcp::fetch`, le recuperateur HTTP du noyau. Un
+    // navigateur ring 3 n'y passe pas : ses sockets descendent par
+    // `TcpConn::connect`. Les grandeurs de poignee, elles, couvrent ce
+    // chemin-la -- c'est-a-dire celui que l'utilisateur emprunte reellement.
+    let (poignees, syn_rtx, rtt_min, rtt_max, rtt_moyen) =
+        crate::net::transport::retransmission::stats_poignee();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "[NET-TCP] retransmissions={} rapides={} echantillons_rtt={} srtt_ms={} rto_ms={} busy_poll_tours={} sommeils={} poignees={} syn_retransmis={} rtt_min_ms={} rtt_moyen_ms={} rtt_max_ms={}",
+        tcp_rtx, tcp_rapides, tcp_rtt, tcp_srtt, tcp_rto, tcp_busy, tcp_sommeils,
+        poignees, syn_rtx, rtt_min, rtt_moyen, rtt_max,
+    ));
+    let (futex_attentes, futex_reveils, futex_herites, futex_profondeur) = futex_bkl_stats();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "[BKL-FUTEX] attentes={} reveils={} herites={} profondeur_max={}",
+        futex_attentes, futex_reveils, futex_herites, futex_profondeur,
+    ));
     let (_, _, backing_reads, backing_bytes) = crate::fs::backing::stats();
     let (cache_hits, readahead_hits) = crate::fs::backing::cache_stats();
     let readahead_pages = crate::fs::backing::readahead_pages();
@@ -635,5 +664,26 @@ pub fn diagnostic_ordonnanceur() -> OrdonnanceurStats {
             / crate::kernel::timer::TICKS_PER_SECOND,
         ready: ready_count(),
         live: live_count(),
+    }
+}
+
+
+/// L'etat des runqueues per-CPU du chantier 2.
+///
+/// `interactives`/`normales` sont les deux BANDES : c'est la mesure directe de
+/// ce que la file precedente ne pouvait pas exprimer. `doublons` compte les
+/// mises en file deduupliquees sans parcourir la file -- l'operation qui etait
+/// un `contains()` lineaire --, et `anti_famine` les tours rendus a la bande
+/// normale, donc la preuve que la priorite n'est pas une famine.
+fn log_files_execution() {
+    let online = smp::schedulable_cpus().min(MAX_CPUS);
+    for cpu in 0..online {
+        let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu) else { continue };
+        let c = crate::arch::x86_64::cpu_local::local(id).compteurs_file();
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "[SCHED-NG-FILE] cpu={} interactives={} normales={} enfilees={} doublons={} defilees={} volees={} anti_famine={}",
+            cpu, c.interactives, c.normales, c.enfilees, c.doublons,
+            c.defilees, c.volees, c.anti_famine,
+        ));
     }
 }

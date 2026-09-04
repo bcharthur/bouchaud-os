@@ -94,9 +94,19 @@ fn running_count_cpu(cpu: usize) -> usize {
     }).count()
 }
 
+/// La charge d'une file. Deux lectures atomiques depuis le chantier 2 : cette
+/// fonction est appelee une fois PAR CPU a chaque reveil, et prenait jusqu'ici
+/// un verrou masquant les interruptions sur chacun des coeurs interroges.
 fn queue_pressure(cpu_id: usize) -> usize {
     crate::arch::x86_64::cpu_local::CpuId::from_index(cpu_id)
         .map(|id| crate::arch::x86_64::cpu_local::local(id).run_queue_len())
+        .unwrap_or(0)
+}
+
+/// Ce qu'un voleur peut prendre a ce CPU sans deplacer une tache interactive.
+fn pression_volable(cpu_id: usize) -> usize {
+    crate::arch::x86_64::cpu_local::CpuId::from_index(cpu_id)
+        .map(|id| crate::arch::x86_64::cpu_local::local(id).pression_volable())
         .unwrap_or(0)
 }
 
@@ -141,7 +151,16 @@ fn publish_ready(index: usize) {
         // L'IDENTITE, pas l'indice : un emplacement recycle ne doit pas
         // heriter de l'entree laissee par son occupant precedent.
         let Some(identite) = registre_id(index) else { return };
-        crate::arch::x86_64::cpu_local::local(id).enqueue(identite.en_mot());
+        // La BANDE, pas seulement la file. La classe d'ordonnancement etait
+        // lue par l'election et par rien d'autre : la file etait une seule
+        // FIFO, et une tache interactive attendait derriere le rendu. Elle est
+        // desormais materialisee dans la structure -- deux bandes, servies
+        // dans l'ordre, la normale garantie par la borne anti-famine.
+        let bande = match tasks()[index].priorite.charge() {
+            Priorite::Interactive => crate::kernel::scheduler::runqueue::Bande::Interactive,
+            Priorite::Normale => crate::kernel::scheduler::runqueue::Bande::Normale,
+        };
+        crate::arch::x86_64::cpu_local::local(id).enqueue_bande(identite.en_mot(), bande);
         crate::kernel::scheduler::preempt::request_cpu(target);
     }
     // Seconde moitie du motif croise (voir `idle_enter`). La mise en file

@@ -149,6 +149,20 @@ pub fn lance_detache(
     )?;
     let pid = process.pid;
     task::register(task);
+    // BOUCHAUD_C8_SUPERVISION_V1
+    //
+    // Le noyau ne connaissait qu'UN client graphique. Ladybird en a plusieurs,
+    // et le passage a plusieurs onglets demande de savoir lequel est mort. Le
+    // role se deduit du chemin de l'image, comme la classification de securite
+    // -- les deux doivent s'accorder, sinon un processus serait supervise sans
+    // etre sandboxe, ou l'inverse.
+    if let Some(role) = crate::kernel::navigateur::supervision::Role::depuis_image(path) {
+        let courtier = task::try_current().map(|t| t.process.pid).unwrap_or(0);
+        crate::kernel::navigateur::supervision::note_lancement(
+            pid, role, courtier, pid,
+            crate::kernel::timer::monotonic_ns(),
+        );
+    }
     Ok(pid)
 }
 

@@ -73,6 +73,30 @@ pub(crate) const KIND_NAVIGATEUR: usize = 6;
 /// reellement, ce qui evite de faire croire a un moteur maison.
 pub(crate) const TITRE_NAVIGATEUR: &str = "Ladybird";
 
+/// Le rectangle d'une fenetre maximisee : tout l'ecran entre les deux barres.
+///
+/// LA definition. Elle etait ecrite trois fois -- dans `toggle_max`, dans le
+/// `Maximize` de `route_window_command`, et dans le `Snap` juste dessous. Trois
+/// copies d'une expression que personne ne relit ensemble, et dont la surface
+/// partagee d'un client depend maintenant pour sa taille : une divergence d'un
+/// pixel se serait vue comme une bande sale au bord d'une fenetre maximisee, et
+/// aurait ete cherchee dans le compositeur.
+pub(crate) const fn rect_maximise() -> crate::gui::windowing::Rect {
+    crate::gui::windowing::Rect::new(0, BAR_H as i32, WIDTH as u32,
+        (HEIGHT - 2 * BAR_H) as u32)
+}
+
+/// Plus grande zone utile que le bureau puisse donner : celle d'une fenetre
+/// maximisee.
+///
+/// BOUCHAUD_C14_SURFACE_ALLOUEE_AU_MAXIMUM_V1 : c'est la taille a laquelle la
+/// surface d'un client est allouee, une fois pour toutes. Elle est CALCULEE a
+/// partir de `rect_maximise`, et non recopiee.
+pub(crate) const fn zone_maximale() -> (usize, usize) {
+    let rect = crate::gui::windowing::client_rect(rect_maximise(), TITLE_H as u32);
+    (rect.width as usize, rect.height as usize)
+}
+
 pub(crate) const NAV_LARGEUR: i32 = 1100;
 pub(crate) const NAV_HAUTEUR: i32 = 604;
 
@@ -245,6 +269,30 @@ pub(crate) fn zone_utile(w: &Win) -> crate::gui::protocole::Rect {
     crate::gui::protocole::Rect::neuf(rect.x, rect.y, rect.width, rect.height)
 }
 
+/// Rectangle a rafraichir pour animer la jauge de chargement d'un client.
+///
+/// Pendant le DEMARRAGE, la jauge vit dans la carte d'attente au centre de la
+/// zone utile : il faut la zone entiere. Une fois le client actif, elle se
+/// reduit a la barre de titre -- ou s'ecrit la duree -- et aux trois premieres
+/// lignes du contenu. Rafraichir la fenetre entiere dix fois par seconde pour
+/// animer trois lignes serait exactement l'inverse de ce que le compositeur
+/// passe son temps a eviter.
+///
+/// BOUCHAUD_C13_JAUGE_DE_CHARGEMENT_V1
+pub(crate) fn zone_jauge(w: &Win) -> crate::gui::protocole::Rect {
+    let zone = zone_utile(w);
+    let demarre = matches!(&w.app,
+        App::Navigateur { client } if client.etat == crate::gui::client::Etat::Demarrage);
+    if demarre {
+        return zone;
+    }
+    let haut = w.rect();
+    let bas = zone.y.saturating_add(crate::gui::widgets::JAUGE_H as i32);
+    crate::gui::protocole::Rect::neuf(
+        haut.x, haut.y, haut.width, bas.saturating_sub(haut.y).max(0) as u32,
+    )
+}
+
 /// Geometrie d'une fenetre dont la zone utile doit faire `largeur` x `hauteur`.
 pub(crate) fn fenetre_pour_zone(largeur: i32, hauteur: i32) -> (i32, i32) {
     let rect = crate::gui::windowing::outer_rect_for_client_size(
@@ -259,13 +307,14 @@ pub(crate) fn est_client(w: &Win) -> bool {
 }
 
 /// Bascule maximiser / restaurer une fenetre.
+///
+/// BOUCHAUD_C14_SURFACE_ALLOUEE_AU_MAXIMUM_V1 : un client ring 3 etait refuse
+/// ici. Sa surface avait la taille exacte de sa fenetre ; l'agrandir n'aurait
+/// agrandi que le cadre, et le contenu aurait flotte dans un coin. La surface
+/// est desormais allouee a `zone_maximale()` et le client apprend sa zone par
+/// `Configure` : le refus n'a plus d'objet, et le bouton du milieu cesse
+/// d'etre un bouton qui ne fait rien.
 pub(crate) fn toggle_max(w: &mut Win) {
-    // Un client ring 3 a une surface de taille fixe : l'agrandir n'agrandirait
-    // que le cadre, et le contenu flotterait dans un coin. Tant que la surface
-    // n'est pas reallouable, ne rien faire est la seule reponse honnete.
-    if est_client(w) {
-        return;
-    }
     if w.placement == crate::gui::windowing::WindowPlacement::Maximized {
         if let Some(rect) = w.restore_rect.take() { w.set_rect(rect); }
         w.placement = crate::gui::windowing::WindowPlacement::Normal;
@@ -273,8 +322,7 @@ pub(crate) fn toggle_max(w: &mut Win) {
         if w.placement == crate::gui::windowing::WindowPlacement::Normal {
             w.restore_rect = Some(w.rect());
         }
-        w.set_rect(crate::gui::windowing::Rect::new(0, BAR_H as i32,
-            WIDTH as u32, (HEIGHT - 2 * BAR_H) as u32));
+        w.set_rect(rect_maximise());
         w.placement = crate::gui::windowing::WindowPlacement::Maximized;
     }
 }
@@ -314,14 +362,14 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
         match crate::gui::client::Client::lance(
             crate::gui::client::CHEMIN_NAVIGATEUR,
             home,
-            NAV_LARGEUR as usize,
-            NAV_HAUTEUR as usize,
+            (NAV_LARGEUR as usize, NAV_HAUTEUR as usize),
+            zone_maximale(),
         ) {
             Ok(client) => {
                 let (w, h) = fenetre_pour_zone(NAV_LARGEUR, NAV_HAUTEUR);
                 crate::serial_println!("[gui] BO_AUTOSTART_BROWSER=1 -> /bo-navigateur");
                 return Win::new(TITRE_NAVIGATEUR.to_string(), x, y, w, h,
-                    crate::gui::windowing::WindowFlags::FIXED_SURFACE,
+                    crate::gui::windowing::WindowFlags::STANDARD,
                     App::Navigateur { client: alloc::boxed::Box::new(client) });
             }
             Err(error) => {

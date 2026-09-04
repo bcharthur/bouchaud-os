@@ -9,6 +9,7 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use crate::gui::jauge::Jauge;
 use crate::gui::protocole::{self as proto, Genre, Lecture, Rect};
 use crate::gui::silence::VerdictProtocole;
 use crate::gui::surface::Surface;
@@ -30,6 +31,13 @@ pub struct Client {
     pub etat: Etat,
     pub titre: String,
     pub surface: Surface,
+    /// Les trois tailles de la surface : allouee, logique, peinte.
+    ///
+    /// BOUCHAUD_C14_SURFACE_ALLOUEE_AU_MAXIMUM_V1 : `surface` est allouee une
+    /// fois pour toutes a la plus grande zone utile que le bureau puisse
+    /// donner. Ce n'est donc plus elle qui dit la taille de la fenetre -- c'est
+    /// `geometrie`, et elle seule.
+    geometrie: proto::Geometrie,
     vers_client: Arc<SpinLock<Canal>>,
     vers_wm: Arc<SpinLock<Canal>>,
     tampon: Vec<u8>,
@@ -43,15 +51,29 @@ pub struct Client {
     pub evenements_perdus: u64,
     pub derniere_trame: u64,
     debut: u64,
+    /// Lancement du client, sur l'horloge monotone.
+    naissance_ms: u64,
+    /// Chronometre de chargement affiche dans la fenetre. Voir `gui::jauge`.
+    ///
+    /// BOUCHAUD_C13_JAUGE_DE_CHARGEMENT_V1
+    pub jauge: Jauge,
 }
 
 impl Client {
+    /// `zone` est la zone utile de DEPART ; `allocation` est la plus grande
+    /// que le bureau puisse jamais demander.
+    ///
+    /// Les deux sont distinctes depuis que la fenetre du navigateur peut etre
+    /// maximisee : la surface est allouee a `allocation` et n'est plus jamais
+    /// reallouee, ce qui rend le redimensionnement gratuit du cote memoire. Le
+    /// client projette `allocation` et n'en peint que `zone`.
     pub fn lance(
         chemin: &str,
         cwd: usize,
-        largeur: usize,
-        hauteur: usize,
+        zone: (usize, usize),
+        allocation: (usize, usize),
     ) -> Result<Client, String> {
+        let (largeur, hauteur) = (allocation.0.max(zone.0), allocation.1.max(zone.1));
         if crate::fs::ramfs::fs().resolve_checked(chemin, cwd).is_err() {
             return Err(alloc::format!(
                 "{} absent — voir tools/userland/build-navigateur.sh",
@@ -114,11 +136,20 @@ impl Client {
             chemin, pid, largeur_px, hauteur_px
         ));
 
+        // Une seule lecture d'horloge : le journal et la jauge doivent dater le
+        // lancement du MEME instant, sinon les deux durees de demarrage
+        // publiees ne coincident pas.
+        let naissance = crate::kernel::timer::monotonic_ms();
+        let geometrie = proto::Geometrie::neuve(
+            (surface.largeur as u32, surface.hauteur as u32),
+            (zone.0 as u32, zone.1 as u32),
+        );
         let mut client = Client {
             pid,
             etat: Etat::Demarrage,
             titre: crate::gui::window::TITRE_NAVIGATEUR.to_string(),
             surface,
+            geometrie,
             vers_client,
             vers_wm,
             tampon: Vec::new(),
@@ -131,6 +162,8 @@ impl Client {
             evenements_envoyes: 0,
             evenements_perdus: 0,
             derniere_trame: 0,
+            naissance_ms: naissance,
+            jauge: Jauge::neuve(naissance),
             debut: crate::kernel::timer::ticks(),
         };
         client.annonce_surface();
@@ -150,6 +183,10 @@ impl Client {
         drop(canal);
         crate::kernel::fd::notify_readiness();
         self.evenements_envoyes += 1;
+        if matches!(genre, Genre::Key | Genre::Pointer | Genre::Wheel) {
+            // Ce qui distingue un chargement d'un defilement. Voir `gui::jauge`.
+            self.jauge.note_entree(crate::kernel::timer::monotonic_ms());
+        }
         true
     }
 
@@ -161,17 +198,31 @@ impl Client {
             hauteur: self.surface.hauteur as u32,
             pas: self.surface.pas as u32,
             format: 0,
+            // Le compositeur noyau presente encore un pixel logique pour un
+            // pixel physique. Annoncer l'echelle EXPLICITEMENT plutot que de
+            // laisser le champ a zero est ce qui rend la valeur lisible : un
+            // client ne peut pas distinguer « pas d'echelle » de « echelle
+            // absente » si le compositeur ne dit rien.
+            echelle: crate::gui::echelle_affichage(),
+            reserve: 0,
         }
         .encode();
         self.envoie(Genre::Surface, &charge);
     }
 
     pub fn envoie_configuration(&mut self, focus: bool) {
+        // La taille LOGIQUE, et non l'allocation : c'est la zone utile
+        // courante que le client doit mettre en page. L'allocation, elle, a
+        // ete annoncee une fois par `Surface` -- avec le pas, qui ne bouge
+        // jamais, et qui est ce dont le mappage depend.
+        let (largeur, hauteur) = self.geometrie.logique();
         let charge = proto::Configure {
             fenetre: proto::FENETRE_PRINCIPALE,
-            largeur: self.surface.largeur as u32,
-            hauteur: self.surface.hauteur as u32,
+            largeur,
+            hauteur,
             focus: focus as u32,
+            echelle: crate::gui::echelle_affichage(),
+            reserve: 0,
         }
         .encode();
         self.envoie(Genre::Configure, &charge);
@@ -372,7 +423,14 @@ impl Client {
             }
             Genre::SetTitle => {
                 if let Ok(titre) = core::str::from_utf8(charge) {
-                    self.titre = titre.chars().take(96).collect();
+                    let nouveau: String = titre.chars().take(96).collect();
+                    // Un titre REPETE n'est pas une navigation. Ladybird
+                    // reannonce le sien a chaque changement d'onglet interne ;
+                    // sans ce test, chacun aurait remis le chronometre a zero.
+                    if nouveau != self.titre {
+                        self.titre = nouveau;
+                        self.jauge.note_titre(crate::kernel::timer::monotonic_ms());
+                    }
                 }
                 false
             }
@@ -397,11 +455,20 @@ impl Client {
                 }
 
                 self.degat = self.degat.union(&degat);
+                // Ce que le client vient de peindre devient composable. Sans
+                // cela, une fenetre qu'on agrandit garderait indefiniment le
+                // fond de la bande exposee.
+                self.geometrie.note_degat(&degat);
                 self.marque_protocole_actif();
                 if self.derniere_trame == 0 {
+                    // La duree de demarrage, chiffree, dans le journal. « Lent
+                    // a demarrer » est une phrase ; ceci est une mesure, et
+                    // c'est elle qu'une optimisation future devra deplacer.
+                    let demarrage = crate::kernel::timer::monotonic_ms()
+                        .saturating_sub(self.naissance_ms);
                     crate::kernel::dmesg::log_fmt(format_args!(
-                        "gui: premiere trame du client pid={} ({}x{})",
-                        self.pid, degat.largeur, degat.hauteur
+                        "gui: premiere trame du client pid={} ({}x{}) apres {} ms",
+                        self.pid, degat.largeur, degat.hauteur, demarrage
                     ));
                 }
                 if self.trames == 0 {
@@ -416,6 +483,12 @@ impl Client {
                 self.etat = Etat::Actif;
                 self.trames += 1;
                 self.derniere_trame = crate::kernel::timer::ticks();
+                // La jauge lit l'horloge MONOTONE, pas le tick PIT. Sous TCG,
+                // IRQ0 est retardee precisement quand un vCPU sature le
+                // traducteur -- c'est-a-dire quand la page charge le plus mal.
+                // Un chronometre sur le tick sous-estimerait donc la lenteur au
+                // moment exact ou l'utilisateur la constate.
+                self.jauge.note_trame(crate::kernel::timer::monotonic_ms());
                 true
             }
             Genre::Close => {
@@ -424,6 +497,19 @@ impl Client {
             }
             _ => false,
         }
+    }
+
+    /// Fait avancer le chronometre de chargement.
+    ///
+    /// Rend vrai si la jauge doit etre redessinee. La FIN d'une rafale de
+    /// trames est un non-evenement : personne ne l'annonce, il faut donc venir
+    /// la constater.
+    pub fn tic_jauge(&mut self, maintenant_ms: u64) -> bool {
+        let visible_avant = self.jauge.visible();
+        self.jauge.tic(maintenant_ms);
+        // Un chronometre qui tourne change a chaque trame ; une jauge qui
+        // s'allume ou s'eteint change une fois.
+        self.jauge.en_cours() || self.jauge.visible() != visible_avant
     }
 
     const PATIENCE_MS: u64 = 6000;
@@ -445,6 +531,7 @@ impl Client {
             Self::PATIENCE_MS / 1000
         ));
         self.verdict.declare_muet();
+        self.jauge.abandonne_demarrage();
         self.etat = Etat::Actif;
         self.abime_tout();
         true
@@ -490,12 +577,31 @@ impl Client {
     }
 
     pub fn abime_tout(&mut self) {
-        self.degat = Rect::neuf(
-            0,
-            0,
-            self.surface.largeur as u32,
-            self.surface.hauteur as u32,
-        );
+        let (largeur, hauteur) = self.geometrie.logique();
+        self.degat = Rect::neuf(0, 0, largeur, hauteur);
+    }
+
+    /// Ce que le compositeur a le droit de recopier de la surface.
+    ///
+    /// BOUCHAUD_C14_SURFACE_ALLOUEE_AU_MAXIMUM_V1 : ni la zone utile, ni
+    /// l'allocation. Juste apres un agrandissement, la fenetre est plus grande
+    /// que ce que le client a peint, et la difference n'est pas de la matiere.
+    pub fn composable(&self) -> (usize, usize) {
+        let (largeur, hauteur) = self.geometrie.composable();
+        (largeur as usize, hauteur as usize)
+    }
+
+    /// Annonce une nouvelle zone utile au client. Rend `true` si elle a change.
+    ///
+    /// Le `Configure` part ICI et nulle part ailleurs : c'est ce qui garantit
+    /// qu'un client n'apprend jamais une taille que le compositeur n'a pas
+    /// enregistree, et donc que les deux ne peuvent pas diverger.
+    pub fn redimensionne(&mut self, largeur: usize, hauteur: usize, focus: bool) -> bool {
+        if !self.geometrie.redimensionne(largeur as u32, hauteur as u32) {
+            return false;
+        }
+        self.envoie_configuration(focus);
+        true
     }
 
     pub fn vivant(&mut self) -> bool {

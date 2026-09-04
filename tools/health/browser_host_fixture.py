@@ -47,8 +47,29 @@ HTML = r'''<!doctype html>
     const source = `onmessage = e => { if (e.data === "ping") postMessage("pong"); };`;
     const blob = new Blob([source], { type: "text/javascript" });
     const worker = new Worker(URL.createObjectURL(blob));
+    // BOUCHAUD_SMOKE_GARDE_WORKER_V1
+    //
+    // Ce delai n'est pas un budget de performance : c'est un garde-fou contre
+    // un blocage, et il etait mal calibre pour CE sous-test.
+    //
+    // Les trois autres attendent un travail qui se fait DANS WebContent, deja
+    // demarre ; ils passent tres bien a dix secondes. Celui-ci attend qu'un
+    // PROCESSUS de plus soit lance -- WebWorker est un binaire Ladybird
+    // complet, avec son edition de liens dynamique et son initialisation ICU.
+    // Sur la machine emulee de la CI, le navigateur lui-meme met vingt-huit
+    // secondes a s'initialiser ; en accorder dix a un processus frere revenait
+    // a transformer « lent » en « casse ».
+    //
+    // Sur le run 33905891936, la minuterie a tire a 168,461 s pour un canvas
+    // a 158 s : dix secondes d'horloge invitee, exactement. Le worker n'a donc
+    // pas ete vole de son temps -- il n'en avait simplement pas assez.
+    //
+    // L'ASSERTION ne bouge pas : `HOST_WORKER OK pong` reste exige pour que la
+    // suite passe. Si le worker ne repond toujours pas en soixante secondes,
+    // c'est un vrai defaut, et le rapport de jalons le nommera.
+    const GARDE_WORKER_MS = 60000;
     const answer = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("worker timeout")), 10000);
+      const timer = setTimeout(() => reject(new Error("worker timeout")), GARDE_WORKER_MS);
       worker.onmessage = e => { clearTimeout(timer); resolve(e.data); };
       worker.onerror = () => { clearTimeout(timer); reject(new Error("worker error")); };
       worker.postMessage("ping");

@@ -2,23 +2,45 @@
   "_lisez_moi": "Budgets versionnes. Depasser une valeur echoue la barriere ; faire mieux est signale et s'adopte avec `python3 tools/ci/check_budgets.py --adopte`. Les valeurs d'architecture se calculent sur la source ; celles d'execution se lisent dans un journal QEMU passe par --journal.",
   "architecture": {
     "_lisez_moi": "Nombre de sites prenant encore le gros verrou, par domaine. La direction attendue est vers le bas, domaine par domaine. Un domaine declare `Migre` dans src/kernel/sync/domaine.rs doit valoir zero -- et n'apparait donc pas ici.",
+    "_note_reseau": "Reseau apparait a 3 sans qu'aucun site n'ait ete cree : les trois prises de l'anneau e1000 (lecture, ecriture, sonde de readiness) etaient attribuees a `Fd`, qui payait une dette qui n'est pas la sienne. Fd passe de 5 a 2 -- il ne lui reste que la console et l'audio. La dette reseau est celle du chantier 9 ; elle est maintenant nommee au bon endroit.",
     "sites_bkl_par_domaine": {
       "Fd": 2,
       "Panique": 6,
-      "Processus": 4,
-      "Readiness": 1,
+      "Processus": 3,
       "Reseau": 3,
       "Syscall": 1
-    },
-    "_note_reseau": "Reseau apparait a 3 sans qu'aucun site n'ait ete cree : les trois prises de l'anneau e1000 (lecture, ecriture, sonde de readiness) etaient attribuees a `Fd`, qui payait une dette qui n'est pas la sienne. Fd passe de 5 a 2 -- il ne lui reste que la console et l'audio. La dette reseau est celle du chantier 9 ; elle est maintenant nommee au bon endroit."
+    }
   },
   "execution": {
-    "_lisez_moi": "Mesures pires-cas d'une trace QEMU. `bkl_regressions_domaine` doit rester a zero pour toujours : c'est le contrat des chemins declares sortis. Les valeurs de latence sont des PLAFONDS de depart, choisis pour bloquer les figements de plusieurs secondes ; elles se resserrent en les adoptant apres une amelioration mesuree, jamais en les relachant apres une regression.",
+    "_lisez_moi": "Mesures pires-cas d'une trace QEMU. `bkl_regressions_domaine` doit rester a zero pour toujours : c'est le contrat des chemins declares sortis. Les valeurs de latence sont des PLAFONDS de depart, choisis pour bloquer les figements de plusieurs secondes ; elles se resserrent en les adoptant apres une amelioration mesuree, jamais en les relachant apres une regression. Les centiles du chantier 2 (`ready_latency_*_p99_ms`) mesurent ce que l'utilisateur RESSENT la ou un maximum unique peut venir du boot ; celui de la classe normale borne la FAMINE que la priorite interactive pourrait creer.",
+    "_note_preempt": "preempt_max_defer_ms borne le report SUBI : du premier REFUS d'un point sur au service effectif. Il a d'abord mesure l'ecart demande->service, ce qui incluait l'inactivite : une trace SMP4 a rendu 2100 ms avec blocked_*=0 -- pas un seul refus -- pendant que la latence prete->coeur plafonnait a 19,8 ms. Le chiffre ne mesurait pas un figement mais un coeur au repos. Le plafond de 100 ms est CONSERVE et non relache : il porte desormais sur la grandeur que les chantiers 1 et 2 doivent faire baisser. L'ancienne mesure reste emise en diagnostic sous attente_service_max_ns, sans budget, parce qu'elle ne borne rien.",
+    "_requis": [
+      "bkl_attente_max_ms",
+      "bkl_max_hold_ms",
+      "bkl_regressions_domaine",
+      "futex_bkl_herites_max",
+      "preempt_max_defer_ms",
+      "ready_latency_interactive_max_ms",
+      "ready_latency_interactive_p99_ms",
+      "ready_latency_max_ms",
+      "ready_latency_normale_p99_ms",
+      "runqueue_doublons_max",
+      "tcp_busy_poll_tours_max"
+    ],
+    "_requis_lisez_moi": "Grandeurs qui DOIVENT figurer dans un journal passe par --journal. Toutes sortent inconditionnellement du releve periodique (`smpstat`, soit crate::kernel::task::log_smp_load) : leur absence ne veut pas dire \u00ab le scenario ne les a pas produites \u00bb mais \u00ab le scenario n'emet aucun releve \u00bb, donc que la barriere ne peut pas rougir. Les autres grandeurs dependent legitimement du scenario -- pas de navigateur, pas de volume bloc, pas de commit de persistance -- et restent simplement non verifiees.",
     "bkl_attente_max_ms": 50.0,
     "bkl_max_hold_ms": 50.0,
     "bkl_regressions_domaine": 0,
+    "bloc_erreurs": 0,
+    "futex_bkl_herites_max": 200000,
+    "ladybird_relances_refusees": 0,
+    "persistance_superblocs_rejetes": 0,
     "preempt_max_defer_ms": 100.0,
     "ready_latency_interactive_max_ms": 100.0,
-    "ready_latency_max_ms": 250.0
+    "ready_latency_interactive_p99_ms": 50.0,
+    "ready_latency_max_ms": 250.0,
+    "ready_latency_normale_p99_ms": 250.0,
+    "runqueue_doublons_max": 5000000,
+    "tcp_busy_poll_tours_max": 20000000
   }
 }

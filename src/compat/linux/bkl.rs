@@ -191,6 +191,35 @@ pub const SANS_BKL: &[(u64, &str)] = &[
     // Duree de vie : `user_write` tient une part d'`Arc` sur le `Process`.
     (nr::READ, "sources verrouillees par objet ; seule la branche socket prend le verrou, en interne"),
     (nr::READV, "boucle sur `sys_read`, audite ci-dessus ; l'iovec se lit depuis l'utilisateur"),
+    // --- Alea : le generateur porte son propre verrou depuis c1 -------------
+    //
+    // BOUCHAUD_C13_GETRANDOM_SANS_BKL_V1
+    //
+    // Lu :    rien de global. `rng::fill` prend `GENERATEUR`, un `SpinLock` qui
+    //         couvre ensemble la lecture de l'etat et l'INCREMENT du compteur.
+    //         C'est leur atomicite conjointe qui garantit qu'aucun bloc ne sort
+    //         deux fois ; le lot c1 l'a mise en place en liberant `read`, dont
+    //         la branche `Random` appelle exactement ce chemin.
+    // Ecrit : la memoire utilisateur, par `user_write`, et rien d'autre.
+    // Verrou : `GENERATEUR` pour l'alea ; `Mm` pour la traduction et l'ecriture
+    //         -- le domaine deja audite au jalon SMP4. La route vers le
+    //         processus est `processus_courant()`, qui prefere
+    //         `current_process_local()` : `TASKS` n'est pas touchee.
+    // Duree de vie : `user_write` tient une part d'`Arc` sur le `Process`
+    //         pendant toute l'operation.
+    // Faute de demande : `fault_in_user_range` peut en declencher une. Le
+    //         gestionnaire de faute s'execute deja sans gros verrou sur tous
+    //         les CPU ; c'est le meme chemin que `read` et `clock_gettime`.
+    // Allocation : un tampon de 4 Kio au plus, par l'allocateur global, deja
+    //         SMP-sur -- `read` et `write` en allouent a chaque appel.
+    // Pourquoi le liberer : mesure. Sur une session de navigateur,
+    //         `[BKL-SYSCALL]` donne `getrandom` a 473 444 acquisitions, avec
+    //         une attente maximale de 218 ms relevee a l'entree du verrou sur
+    //         le CPU 1. Un demi-million de fois, quatre coeurs se sont
+    //         serialises pour lire un generateur qui possede son propre
+    //         verrou -- et c'est le JS d'un CAPTCHA, celui-la meme dont
+    //         l'utilisateur dit qu'il n'en voit pas la fin, qui en emet le plus.
+    (nr::GETRANDOM, "generateur a verrou propre depuis c1 + Mm ; aucune lecture de TASKS"),
     (nr::GETPID, "domaine CPU-local, aucune lecture de TASKS"),
     (nr::GETTID, "domaine CPU-local, aucune lecture de TASKS"),
     (nr::GETUID, "domaine CPU-local + verrou metadata du Process"),

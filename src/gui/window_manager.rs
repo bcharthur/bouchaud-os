@@ -481,6 +481,7 @@ fn boucle() {
     // « aveugle » : ensemble, ils donnent sa cadence a un client muet.
     let mut derniere_entree = 0u64;
     let mut dernier_aveugle = 0u64;
+    let mut derniere_jauge = 0u64;
     // BOUCHAUD_GUI_CHAINE_ENTREE_LFB_V1 : voir `gui::chaine`.
     let mut veilleur = Veilleur::neuf();
 
@@ -791,6 +792,40 @@ fn boucle() {
             dernier_aveugle = maintenant;
             reveil::note_recomposition_aveugle();
         }
+        // ---- Jauge de chargement ----
+        //
+        // BOUCHAUD_C13_JAUGE_DE_CHARGEMENT_V1
+        //
+        // La FIN d'une rafale de trames est un non-evenement : personne ne
+        // l'annonce, il faut venir la constater. C'est ce tic qui arrete le
+        // chronometre, et c'est lui aussi qui fait avancer la barre -- une
+        // barre de progression est la seule chose du bureau qui bouge sans
+        // qu'aucune entree ne l'ait demande.
+        //
+        // Il ne salit QUE la barre de titre et les trois premieres lignes du
+        // contenu, et seulement quand quelque chose a change. Une jauge
+        // terminee est immobile : elle ne coute plus rien jusqu'a son
+        // effacement.
+        let mut jauge_visible = false;
+        if maintenant.wrapping_sub(derniere_jauge) >= politique::PERIODE_JAUGE_MS {
+            derniere_jauge = maintenant;
+            for w in wins.iter_mut() {
+                if w.min || !window::est_client(w) {
+                    continue;
+                }
+                let zone = window::zone_jauge(w);
+                let App::Navigateur { client } = &mut w.app else { continue };
+                if client.tic_jauge(maintenant) {
+                    degats.ajoute(Origine::Client, zone);
+                    sale = true;
+                }
+                jauge_visible |= client.jauge.visible();
+            }
+        } else {
+            jauge_visible = wins.iter().any(|w| !w.min
+                && matches!(&w.app, App::Navigateur { client } if client.jauge.visible()));
+        }
+
         let (degat_clients, perte_fenetre) = pompe_clients(&mut wins, recompose_aveugle);
         if !degat_clients.vide() {
             sale = true;
@@ -976,6 +1011,8 @@ fn boucle() {
             dernier_releve_ms: dernier_releve,
             dernier_aveugle_ms: dernier_aveugle,
             derniere_entree_ms: derniere_entree,
+            jauge_visible,
+            derniere_jauge_ms: derniere_jauge,
         };
 
         // Pas de traitement particulier du glisser. Il serait tentant de
@@ -1215,10 +1252,34 @@ fn fenetre_active(wins: &[Win]) -> Option<usize> {
 fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> (Rect, bool) {
     let mut degat_ecran = Rect::default();
     let mut morts: Vec<usize> = Vec::new();
+    // BOUCHAUD_C14_SURFACE_ALLOUEE_AU_MAXIMUM_V1
+    //
+    // Le `Configure` d'un redimensionnement part d'ICI, et non de chaque
+    // endroit qui deplace une fenetre. Il y en a six -- maximiser, restaurer,
+    // ancrer a gauche, ancrer a droite, tirer un bord, double-cliquer le
+    // titre -- et il en apparaitra d'autres. Instrumenter les six, c'est
+    // s'engager a instrumenter le septieme, et c'est le septieme qu'on oublie.
+    //
+    // `zone_utile` est deja lue a chaque tour pour convertir les degats : la
+    // comparer a ce que le client croit posseder ne coute rien de plus, et
+    // aucun chemin ne peut y echapper puisque c'est la geometrie EFFECTIVE de
+    // la fenetre qui est lue, pas l'intention de celui qui l'a bougee.
+    let focus = crate::gui::widgets::indice_focus(wins);
     for (index, w) in wins.iter_mut().enumerate() {
         let zone_fenetre = zone_utile(w);
         let visible = !w.window.min;
+        let a_le_focus = focus == Some(index);
         if let App::Navigateur { client } = &mut w.app {
+            if client.redimensionne(
+                zone_fenetre.largeur.max(0) as usize,
+                zone_fenetre.hauteur.max(0) as usize,
+                a_le_focus,
+            ) {
+                // La fenetre a change de taille : ce qu'elle montrait a
+                // l'ancienne ne vaut plus, et le fond doit couvrir la bande
+                // que le client n'a pas encore peinte.
+                degat_ecran = degat_ecran.union(&zone_fenetre);
+            }
             if client.verifie_silence() {
                 degat_ecran = degat_ecran.union(&zone_fenetre);
             }
@@ -1362,8 +1423,8 @@ fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
     let client = match Client::lance(
         client::CHEMIN_NAVIGATEUR,
         cwd,
-        NAV_LARGEUR as usize,
-        NAV_HAUTEUR as usize,
+        (NAV_LARGEUR as usize, NAV_HAUTEUR as usize),
+        window::zone_maximale(),
     ) {
         Ok(client) => client,
         Err(message) => {
@@ -1375,7 +1436,7 @@ fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
     let mut w = Win::new(String::from(window::TITRE_NAVIGATEUR),
         (fb::WIDTH as i32 - largeur_fenetre) / 2, BAR_H as i32 + 8,
         largeur_fenetre, hauteur_fenetre,
-        crate::gui::windowing::WindowFlags::FIXED_SURFACE,
+        crate::gui::windowing::WindowFlags::STANDARD,
         App::Navigateur { client: alloc::boxed::Box::new(client) });
     clamp_win(&mut w);
     ouvre_fenetre(wins, w, degats);
@@ -1759,8 +1820,7 @@ fn route_window_command(window: &mut Win, command: crate::gui::windowing::Window
         }
         WindowCommand::Maximize(id) if id == window.id && window.flags.maximizable => {
             if window.placement == WindowPlacement::Normal { window.restore_rect = Some(window.rect()); }
-            window.set_rect(crate::gui::windowing::Rect::new(0, BAR_H as i32,
-                fb::WIDTH as u32, (fb::HEIGHT - 2 * BAR_H) as u32));
+            window.set_rect(window::rect_maximise());
             window.placement = WindowPlacement::Maximized; true
         }
         WindowCommand::Restore(id) if id == window.id => {
@@ -1770,8 +1830,7 @@ fn route_window_command(window: &mut Win, command: crate::gui::windowing::Window
         }
         WindowCommand::Snap(id, zone) if id == window.id && window.flags.snappable => {
             if window.placement == WindowPlacement::Normal { window.restore_rect = Some(window.rect()); }
-            let work = crate::gui::windowing::WorkArea(crate::gui::windowing::Rect::new(
-                0, BAR_H as i32, fb::WIDTH as u32, (fb::HEIGHT - 2 * BAR_H) as u32));
+            let work = crate::gui::windowing::WorkArea(window::rect_maximise());
             match zone { SnapZone::Left => { window.set_rect(work.snap_left()); window.placement=WindowPlacement::SnappedLeft; }
                 SnapZone::Right => { window.set_rect(work.snap_right()); window.placement=WindowPlacement::SnappedRight; } }
             true

@@ -139,6 +139,108 @@ impl Entete {
 /// minuscule devant la memoire de la machine.
 pub const CHARGE_MAX: u32 = 4096;
 
+// --- Echelle et coordonnees logiques -----------------------------------------
+//
+// BOUCHAUD_C12_ECHELLE_V1
+//
+// POURQUOI DEUX REPERES, ET POURQUOI MAINTENANT
+//
+// Le protocole ne connaissait qu'une unite : le pixel de la dalle. Cela tient
+// tant que l'echelle vaut un. Des qu'elle ne la vaut plus -- un ecran dense, un
+// bureau agrandi --, tout ce qui est exprime en pixels devient ambigu : une
+// fenetre de 800 est-elle 800 pixels de dalle, ou 800 unites de mise en page
+// que le compositeur multipliera ?
+//
+// Les deux reperes sont donc nommes :
+//
+//   * PHYSIQUE  -- pixels de la surface partagee, ce que le compositeur copie ;
+//   * LOGIQUE   -- unites de mise en page, ce dont un client raisonne.
+//
+// L'echelle relie les deux. Elle est FRACTIONNAIRE, exprimee en cent-vingtiemes
+// comme le fait Wayland (`wp_fractional_scale_v1`) : 120 = 1,0 ; 180 = 1,5 ;
+// 240 = 2,0. Les cent-vingtiemes ne sont pas un caprice -- 120 se divise par 2,
+// 3, 4, 5, 6 et 8, donc les echelles usuelles (1,25 / 1,5 / 2 / 3) tombent
+// juste et n'accumulent aucune derive d'arrondi.
+//
+// # Retrocompatibilite
+//
+// Aucun genre de message n'est ajoute, et aucun champ n'est deplace. `Surface`
+// et `Configure` s'ALLONGENT, et leurs decodeurs acceptent l'ancienne longueur
+// en supposant l'echelle unite. Un client d'avant ce commit lit les champs
+// qu'il connait et ignore la queue ; un client d'apres, face a un vieux
+// compositeur, se comporte comme si l'echelle valait un -- ce qui etait
+// exactement le cas.
+//
+// # La regle d'arrondi
+//
+// Une conversion de RECTANGLE arrondit toujours VERS L'EXTERIEUR. Un degat
+// converti trop petit laisse a l'ecran une bande de pixels perimee jusqu'a la
+// trame suivante ; un degat converti trop grand recopie quelques pixels
+// inchanges. Les deux erreurs ne se valent pas, et le sens de l'arrondi est le
+// seul endroit ou cela se decide.
+
+/// Valeur de l'echelle qui signifie « un pixel logique = un pixel physique ».
+pub const ECHELLE_UNITE: u32 = 120;
+
+/// Echelle minimale acceptee. Zero ferait une division par zero, et une echelle
+/// plus petite que 1/4 rendrait une fenetre illisible avant de rendre un bogue
+/// visible.
+pub const ECHELLE_MIN: u32 = 30;
+
+/// Echelle maximale acceptee (8,0). Au-dela, une fenetre logique de taille
+/// ordinaire demanderait une surface que l'arene ne sait pas donner.
+pub const ECHELLE_MAX: u32 = 960;
+
+/// Ramene une echelle recue dans les bornes, en repliant sur l'unite ce qui n'a
+/// aucun sens.
+///
+/// Un client ou un compositeur peuvent se tromper ; les deux se traitent
+/// pareil. Zero est le cas qui compte : il vient d'un champ absent d'un vieux
+/// message, et il doit se lire « echelle unite », jamais « division par zero ».
+pub const fn echelle_valide(echelle: u32) -> u32 {
+    if echelle < ECHELLE_MIN || echelle > ECHELLE_MAX {
+        ECHELLE_UNITE
+    } else {
+        echelle
+    }
+}
+
+/// Longueur logique -> longueur physique, arrondie vers le HAUT.
+///
+/// Vers le haut : une surface d'un pixel trop courte laisse la derniere colonne
+/// de la mise en page hors de la fenetre.
+pub const fn longueur_physique(logique: u32, echelle: u32) -> u32 {
+    let e = echelle_valide(echelle) as u64;
+    let produit = logique as u64 * e + (ECHELLE_UNITE as u64 - 1);
+    let valeur = produit / ECHELLE_UNITE as u64;
+    if valeur > u32::MAX as u64 { u32::MAX } else { valeur as u32 }
+}
+
+/// Longueur physique -> longueur logique, arrondie vers le BAS.
+///
+/// Vers le bas : la taille logique annoncee a un client doit tenir dans la
+/// surface qu'on lui donne. L'arrondir vers le haut lui ferait dessiner une
+/// colonne qui n'existe pas.
+pub const fn longueur_logique(physique: u32, echelle: u32) -> u32 {
+    let e = echelle_valide(echelle) as u64;
+    ((physique as u64 * ECHELLE_UNITE as u64) / e) as u32
+}
+
+/// Coordonnee logique -> physique, arrondie vers zero pour un POINT.
+///
+/// Un point n'a pas d'epaisseur : l'arrondir vers l'exterieur le deplacerait.
+/// C'est la conversion des evenements d'entree, pas celle des rectangles.
+pub const fn point_physique(logique: i32, echelle: u32) -> i32 {
+    let e = echelle_valide(echelle) as i64;
+    ((logique as i64 * e) / ECHELLE_UNITE as i64) as i32
+}
+
+/// Coordonnee physique -> logique, arrondie vers zero.
+pub const fn point_logique(physique: i32, echelle: u32) -> i32 {
+    let e = echelle_valide(echelle) as i64;
+    ((physique as i64 * ECHELLE_UNITE as i64) / e) as i32
+}
+
 // --- Rectangles --------------------------------------------------------------
 
 /// Rectangle en coordonnees entieres, largeur/hauteur non signees.
@@ -222,6 +324,52 @@ impl Rect {
             && (y as i64) < self.bas()
     }
 
+    /// Rectangle logique -> rectangle physique, arrondi VERS L'EXTERIEUR.
+    ///
+    /// Le bord gauche descend, le bord droit monte. Un degat converti trop
+    /// petit laisse a l'ecran une bande de pixels perimee jusqu'a la trame
+    /// suivante ; converti trop grand, il recopie quelques pixels inchanges.
+    /// Les deux erreurs ne se valent pas.
+    pub fn vers_physique(&self, echelle: u32) -> Rect {
+        if self.vide() {
+            return Rect::default();
+        }
+        let e = echelle_valide(echelle) as i64;
+        let u = ECHELLE_UNITE as i64;
+        let x0 = div_plancher(self.x as i64 * e, u);
+        let y0 = div_plancher(self.y as i64 * e, u);
+        let x1 = div_plafond(self.droite() * e, u);
+        let y1 = div_plafond(self.bas() * e, u);
+        Rect {
+            x: borne_i32(x0),
+            y: borne_i32(y0),
+            largeur: borne_u32(x1 - x0),
+            hauteur: borne_u32(y1 - y0),
+        }
+    }
+
+    /// Rectangle physique -> rectangle logique, arrondi VERS L'EXTERIEUR.
+    ///
+    /// Meme raison, sens inverse : un client qui apprend qu'un rectangle
+    /// logique est sale doit redessiner au moins ce qui l'est.
+    pub fn vers_logique(&self, echelle: u32) -> Rect {
+        if self.vide() {
+            return Rect::default();
+        }
+        let e = echelle_valide(echelle) as i64;
+        let u = ECHELLE_UNITE as i64;
+        let x0 = div_plancher(self.x as i64 * u, e);
+        let y0 = div_plancher(self.y as i64 * u, e);
+        let x1 = div_plafond(self.droite() * u, e);
+        let y1 = div_plafond(self.bas() * u, e);
+        Rect {
+            x: borne_i32(x0),
+            y: borne_i32(y0),
+            largeur: borne_u32(x1 - x0),
+            hauteur: borne_u32(y1 - y0),
+        }
+    }
+
     pub fn encode(&self) -> [u8; 16] {
         let mut octets = [0u8; 16];
         octets[0..4].copy_from_slice(&self.x.to_le_bytes());
@@ -292,32 +440,80 @@ pub fn molette_depuis_ps2(brut: i32) -> i32 {
 
 /// `Surface` : le gestionnaire de fenetres decrit au client la memoire qu'il
 /// vient de lui donner. Envoye une fois, avant la premiere trame.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Surface {
     pub fenetre: u32,
     pub tampon: u32,
+    /// Largeur PHYSIQUE, en pixels de la surface partagee.
     pub largeur: u32,
+    /// Hauteur PHYSIQUE.
     pub hauteur: u32,
     pub pas: u32,
     /// 0 = XRGB8888 (le seul format du jalon 2).
     pub format: u32,
+    /// Echelle, en cent-vingtiemes (120 = 1,0). Voir [`ECHELLE_UNITE`].
+    ///
+    /// Le champ est en QUEUE de charge utile : un decodeur d'avant le
+    /// chantier 12 lit les vingt-quatre premiers octets et ignore le reste,
+    /// ce qui est exactement le comportement voulu -- il travaillait deja a
+    /// l'echelle unite.
+    pub echelle: u32,
+    /// Reserve, zero. Garde la charge sur un multiple de huit octets et evite
+    /// d'avoir a rallonger de nouveau pour le prochain champ.
+    pub reserve: u32,
+}
+
+/// Taille de la charge `Surface` avant le chantier 12.
+pub const TAILLE_SURFACE_V1: usize = 24;
+/// Taille de la charge `Surface` avec l'echelle.
+pub const TAILLE_SURFACE: usize = 32;
+
+impl Default for Surface {
+    /// L'echelle par defaut est l'UNITE, pas zero : une structure construite
+    /// par defaut doit decrire une surface utilisable.
+    fn default() -> Self {
+        Self {
+            fenetre: 0,
+            tampon: 0,
+            largeur: 0,
+            hauteur: 0,
+            pas: 0,
+            format: 0,
+            echelle: ECHELLE_UNITE,
+            reserve: 0,
+        }
+    }
 }
 
 impl Surface {
-    pub fn encode(&self) -> [u8; 24] {
-        let mut o = [0u8; 24];
+    pub fn encode(&self) -> [u8; TAILLE_SURFACE] {
+        let mut o = [0u8; TAILLE_SURFACE];
         o[0..4].copy_from_slice(&self.fenetre.to_le_bytes());
         o[4..8].copy_from_slice(&self.tampon.to_le_bytes());
         o[8..12].copy_from_slice(&self.largeur.to_le_bytes());
         o[12..16].copy_from_slice(&self.hauteur.to_le_bytes());
         o[16..20].copy_from_slice(&self.pas.to_le_bytes());
         o[20..24].copy_from_slice(&self.format.to_le_bytes());
+        o[24..28].copy_from_slice(&echelle_valide(self.echelle).to_le_bytes());
+        o[28..32].copy_from_slice(&self.reserve.to_le_bytes());
         o
     }
+
+    /// Decode une charge `Surface`, ancienne longueur comprise.
+    ///
+    /// Une charge de vingt-quatre octets vient d'un compositeur d'avant le
+    /// chantier 12 : elle decrit une surface a l'echelle unite, et c'est ce
+    /// qu'on en conclut. Refuser cette longueur casserait le seul client C++
+    /// qui existe.
     pub fn decode(o: &[u8]) -> Option<Surface> {
-        if o.len() < 24 {
+        if o.len() < TAILLE_SURFACE_V1 {
             return None;
         }
+        let echelle = if o.len() >= TAILLE_SURFACE {
+            echelle_valide(lit_u32(o, 24))
+        } else {
+            ECHELLE_UNITE
+        };
         Some(Surface {
             fenetre: lit_u32(o, 0),
             tampon: lit_u32(o, 4),
@@ -325,31 +521,72 @@ impl Surface {
             hauteur: lit_u32(o, 12),
             pas: lit_u32(o, 16),
             format: lit_u32(o, 20),
+            echelle,
+            reserve: if o.len() >= TAILLE_SURFACE { lit_u32(o, 28) } else { 0 },
         })
+    }
+
+    /// La taille LOGIQUE de cette surface : ce dont le client raisonne.
+    pub fn taille_logique(&self) -> (u32, u32) {
+        (
+            longueur_logique(self.largeur, self.echelle),
+            longueur_logique(self.hauteur, self.echelle),
+        )
     }
 }
 
 /// `Configure` : nouvelle geometrie de la zone utile.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+///
+/// `largeur`/`hauteur` restent la geometrie PHYSIQUE -- c'est ce que le champ
+/// voulait dire avant le chantier 12, et le changer de sens aurait casse le
+/// client C++ en silence. L'echelle et la geometrie LOGIQUE s'ajoutent en
+/// queue, la ou un vieux decodeur ne les lit pas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Configure {
     pub fenetre: u32,
+    /// Largeur PHYSIQUE de la zone utile.
     pub largeur: u32,
+    /// Hauteur PHYSIQUE.
     pub hauteur: u32,
     /// 1 = la fenetre a le focus clavier, 0 sinon.
     pub focus: u32,
+    /// Echelle en cent-vingtiemes (120 = 1,0).
+    pub echelle: u32,
+    /// Reserve, zero.
+    pub reserve: u32,
+}
+
+/// Taille de la charge `Configure` avant le chantier 12.
+pub const TAILLE_CONFIGURE_V1: usize = 16;
+/// Taille de la charge `Configure` avec l'echelle.
+pub const TAILLE_CONFIGURE: usize = 24;
+
+impl Default for Configure {
+    fn default() -> Self {
+        Self {
+            fenetre: 0,
+            largeur: 0,
+            hauteur: 0,
+            focus: 0,
+            echelle: ECHELLE_UNITE,
+            reserve: 0,
+        }
+    }
 }
 
 impl Configure {
-    pub fn encode(&self) -> [u8; 16] {
-        let mut o = [0u8; 16];
+    pub fn encode(&self) -> [u8; TAILLE_CONFIGURE] {
+        let mut o = [0u8; TAILLE_CONFIGURE];
         o[0..4].copy_from_slice(&self.fenetre.to_le_bytes());
         o[4..8].copy_from_slice(&self.largeur.to_le_bytes());
         o[8..12].copy_from_slice(&self.hauteur.to_le_bytes());
         o[12..16].copy_from_slice(&self.focus.to_le_bytes());
+        o[16..20].copy_from_slice(&echelle_valide(self.echelle).to_le_bytes());
+        o[20..24].copy_from_slice(&self.reserve.to_le_bytes());
         o
     }
     pub fn decode(o: &[u8]) -> Option<Configure> {
-        if o.len() < 16 {
+        if o.len() < TAILLE_CONFIGURE_V1 {
             return None;
         }
         Some(Configure {
@@ -357,7 +594,21 @@ impl Configure {
             largeur: lit_u32(o, 4),
             hauteur: lit_u32(o, 8),
             focus: lit_u32(o, 12),
+            echelle: if o.len() >= TAILLE_CONFIGURE {
+                echelle_valide(lit_u32(o, 16))
+            } else {
+                ECHELLE_UNITE
+            },
+            reserve: if o.len() >= TAILLE_CONFIGURE { lit_u32(o, 20) } else { 0 },
         })
+    }
+
+    /// La geometrie LOGIQUE de la zone utile.
+    pub fn taille_logique(&self) -> (u32, u32) {
+        (
+            longueur_logique(self.largeur, self.echelle),
+            longueur_logique(self.hauteur, self.echelle),
+        )
     }
 }
 
@@ -570,6 +821,156 @@ fn lit_i32(octets: &[u8], decalage: usize) -> i32 {
     lit_u32(octets, decalage) as i32
 }
 
+/// Division entiere arrondie vers moins l'infini.
+///
+/// `/` en Rust tronque VERS ZERO : `-1 / 2` vaut 0, pas -1. Pour un bord
+/// gauche negatif -- une fenetre qui deborde a gauche de l'ecran --, tronquer
+/// vers zero DECALE le rectangle vers la droite et laisse une colonne perimee.
+const fn div_plancher(numerateur: i64, denominateur: i64) -> i64 {
+    let quotient = numerateur / denominateur;
+    if numerateur % denominateur != 0 && (numerateur < 0) != (denominateur < 0) {
+        quotient - 1
+    } else {
+        quotient
+    }
+}
+
+/// Division entiere arrondie vers plus l'infini.
+const fn div_plafond(numerateur: i64, denominateur: i64) -> i64 {
+    let quotient = numerateur / denominateur;
+    if numerateur % denominateur != 0 && (numerateur < 0) == (denominateur < 0) {
+        quotient + 1
+    } else {
+        quotient
+    }
+}
+
+const fn borne_i32(valeur: i64) -> i32 {
+    if valeur < i32::MIN as i64 {
+        i32::MIN
+    } else if valeur > i32::MAX as i64 {
+        i32::MAX
+    } else {
+        valeur as i32
+    }
+}
+
+const fn borne_u32(valeur: i64) -> u32 {
+    if valeur < 0 {
+        0
+    } else if valeur > u32::MAX as i64 {
+        u32::MAX
+    } else {
+        valeur as u32
+    }
+}
+
+// --- Geometrie d'une surface qui ne bouge pas -------------------------------
+//
+// BOUCHAUD_C14_SURFACE_ALLOUEE_AU_MAXIMUM_V1
+//
+// # Le defaut
+//
+// La fenetre du navigateur portait `WindowFlags::FIXED_SURFACE`. Le bouton du
+// milieu de sa barre de titre etait donc DESSINE, survolable, et inerte : le
+// clic arrivait bien jusqu'a `route_window_command`, qui refusait `Maximize`
+// parce que `maximizable` valait faux.
+//
+// Le drapeau n'etait pas arbitraire. La surface partagee etait allouee une
+// fois, a la taille exacte de la fenetre, et le client la projetait a cette
+// taille. Agrandir le cadre n'aurait agrandi que le cadre : le contenu serait
+// reste dans un coin, avec du vide autour. Ne rien faire etait la reponse
+// honnete tant que la surface ne pouvait pas suivre.
+//
+// # Ce qui change
+//
+// La surface est allouee au MAXIMUM que le bureau puisse jamais demander --
+// la zone utile d'une fenetre maximisee. Elle n'est plus jamais reallouee, et
+// le mappage du client ne bouge donc jamais : redimensionner cesse d'etre une
+// operation de memoire pour devenir une operation d'arithmetique.
+//
+// Trois tailles cohabitent alors, et les confondre est le seul vrai risque :
+//
+//   * ALLOUEE  -- ce que le client projette. Fixe. Elle donne le pas.
+//   * LOGIQUE  -- ce que `Configure` annonce, c'est-a-dire la zone utile
+//                 courante. Elle change a chaque maximisation.
+//   * PEINTE   -- ce que le client a REELLEMENT peint. Elle borne la recopie.
+//
+// La troisieme est celle qu'on oublie. Au moment ou la fenetre grandit, la
+// bande nouvellement exposee de la surface ne contient rien : le client n'a pas
+// encore recu son `Configure`, encore moins repeint. La recopier afficherait
+// de la memoire qui n'a jamais ete dessinee. Le compositeur s'arrete donc a
+// `composable()`, et le fond de fenetre couvre le reste jusqu'a la trame
+// suivante -- une bande de fond pendant une trame, plutot qu'une bande de
+// hasard.
+
+/// Les trois tailles d'une surface partagee, et la seule regle qui les lie.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Geometrie {
+    allouee: (u32, u32),
+    logique: (u32, u32),
+    peinte: (u32, u32),
+}
+
+impl Geometrie {
+    /// `logique` est rognee a `allouee` : le compositeur ne peut pas promettre
+    /// une zone plus grande que ce que la memoire porte.
+    pub fn neuve(allouee: (u32, u32), logique: (u32, u32)) -> Geometrie {
+        let logique = (logique.0.min(allouee.0), logique.1.min(allouee.1));
+        // `peinte` demarre a la taille logique et non a zero. Un client qui
+        // n'annonce que des degats partiels -- l'hote Qt en est un -- doit
+        // continuer d'etre recopie en entier tant que rien n'a grandi. Partir
+        // de zero aurait fait de ce chantier une regression pour lui.
+        Geometrie { allouee, logique, peinte: logique }
+    }
+
+    pub const fn allouee(&self) -> (u32, u32) {
+        self.allouee
+    }
+
+    pub const fn logique(&self) -> (u32, u32) {
+        self.logique
+    }
+
+    /// Ce que le compositeur a le droit de recopier : jamais plus que ce que le
+    /// client a peint, jamais plus que ce qu'il croit posseder.
+    pub fn composable(&self) -> (u32, u32) {
+        (self.peinte.0.min(self.logique.0), self.peinte.1.min(self.logique.1))
+    }
+
+    /// Annonce une nouvelle zone utile. Rend `true` si elle a change, c'est-a-
+    /// dire s'il faut envoyer un `Configure`.
+    ///
+    /// Retrecir preserve la garantie de `peinte` -- les pixels restants ont
+    /// bien ete peints. Agrandir ne la preserve pas, et `peinte` reste donc ou
+    /// elle etait jusqu'a ce qu'une trame la fasse avancer.
+    pub fn redimensionne(&mut self, largeur: u32, hauteur: u32) -> bool {
+        let voulue = (largeur.min(self.allouee.0), hauteur.min(self.allouee.1));
+        if voulue == self.logique {
+            return false;
+        }
+        self.logique = voulue;
+        self.peinte = (self.peinte.0.min(voulue.0), self.peinte.1.min(voulue.1));
+        true
+    }
+
+    /// Un degat recu du client etend l'etendue peinte.
+    ///
+    /// Le degat est deja rogne a la surface par `rogne_degat` ; on ne lit donc
+    /// que son coin bas-droit, et jamais au-dela du logique.
+    pub fn note_degat(&mut self, degat: &Rect) {
+        if degat.vide() {
+            return;
+        }
+        let droite = borne_u32(degat.droite());
+        let bas = borne_u32(degat.bas());
+        self.peinte = (
+            self.peinte.0.max(droite).min(self.logique.0),
+            self.peinte.1.max(bas).min(self.logique.1),
+        );
+    }
+}
+
 // --- Contrat de taille -------------------------------------------------------
 //
 // Ces assertions sont evaluees a la compilation : `cargo build` echoue si l'une
@@ -577,15 +978,157 @@ fn lit_i32(octets: &[u8], decalage: usize) -> i32 {
 // cote de partir en production sans son equivalent dans `hote.cpp`.
 
 const _: () = assert!(TAILLE_ENTETE == 16);
+// Les charges rallongees par le chantier 12. Leur PREFIXE doit rester celui de
+// la version 1 : c'est ce qui permet a `hote.cpp`, qui ne lit pas la queue, de
+// continuer a fonctionner sans etre recompile.
+const _: () = assert!(TAILLE_SURFACE > TAILLE_SURFACE_V1);
+const _: () = assert!(TAILLE_CONFIGURE > TAILLE_CONFIGURE_V1);
+const _: () = assert!(TAILLE_SURFACE_V1 == 24);
+const _: () = assert!(TAILLE_CONFIGURE_V1 == 16);
+const _: () = assert!(ECHELLE_UNITE == 120);
 // Les charges utiles sont encodees dans des tableaux de taille fixe : leur
 // longueur est donc deja verifiee par le typage. Ce qui ne l'est pas, c'est que
 // les deux cotes se soient mis d'accord sur ces longueurs — d'ou le tableau du
 // document de protocole, et ces bornes-ci pour ce que le fil ne peut pas dire.
-const _: () = assert!(CHARGE_MAX >= 24);
+const _: () = assert!(CHARGE_MAX as usize >= TAILLE_SURFACE);
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Geometrie d'une surface allouee au maximum -------------------------
+    //
+    // BOUCHAUD_C14_SURFACE_ALLOUEE_AU_MAXIMUM_V1
+
+    /// Les tailles reelles : surface d'une fenetre maximisee, zone de depart.
+    const ALLOUEE: (u32, u32) = (1278, 627);
+    const DEPART: (u32, u32) = (1098, 570);
+
+    fn geometrie() -> Geometrie {
+        Geometrie::neuve(ALLOUEE, DEPART)
+    }
+
+    #[test]
+    fn une_zone_plus_grande_que_l_allocation_est_rognee() {
+        // C'est la seule protection contre une recopie hors des frames de la
+        // surface : le compositeur lit `composable()` et rien d'autre.
+        let geo = Geometrie::neuve(ALLOUEE, (4000, 4000));
+        assert_eq!(geo.logique(), ALLOUEE);
+        assert_eq!(geo.composable(), ALLOUEE);
+    }
+
+    #[test]
+    fn au_depart_tout_le_logique_est_composable() {
+        // Sans cela, un client qui n'annonce que des degats partiels verrait sa
+        // fenetre recopiee en partie seulement -- une regression pour l'hote Qt.
+        assert_eq!(geometrie().composable(), DEPART);
+    }
+
+    #[test]
+    fn agrandir_n_autorise_pas_a_recopier_ce_qui_n_est_pas_peint() {
+        let mut geo = geometrie();
+        assert!(geo.redimensionne(ALLOUEE.0, ALLOUEE.1));
+        assert_eq!(geo.logique(), ALLOUEE);
+        // Le coeur du chantier : la zone a grandi, la matiere non.
+        assert_eq!(geo.composable(), DEPART);
+    }
+
+    #[test]
+    fn une_trame_pleine_rend_le_nouveau_format_composable() {
+        let mut geo = geometrie();
+        geo.redimensionne(ALLOUEE.0, ALLOUEE.1);
+        geo.note_degat(&Rect::neuf(0, 0, ALLOUEE.0, ALLOUEE.1));
+        assert_eq!(geo.composable(), ALLOUEE);
+    }
+
+    #[test]
+    fn un_degat_partiel_ne_fait_avancer_que_ce_qu_il_couvre() {
+        let mut geo = geometrie();
+        geo.redimensionne(ALLOUEE.0, ALLOUEE.1);
+        // Une bande large mais courte : la largeur avance, la hauteur non.
+        geo.note_degat(&Rect::neuf(0, 0, ALLOUEE.0, 100));
+        assert_eq!(geo.composable(), (ALLOUEE.0, DEPART.1));
+    }
+
+    #[test]
+    fn retrecir_preserve_la_garantie_puis_reagrandir_la_perd() {
+        let mut geo = geometrie();
+        assert!(geo.redimensionne(400, 300));
+        // Retrecir ne rend rien douteux : ces pixels-la ont ete peints.
+        assert_eq!(geo.composable(), (400, 300));
+        assert!(geo.redimensionne(DEPART.0, DEPART.1));
+        // Reagrandir, si : on est revenu a la taille de depart, mais le client
+        // n'a repeint que 400x300 depuis.
+        assert_eq!(geo.composable(), (400, 300));
+    }
+
+    #[test]
+    fn redimensionner_a_la_meme_taille_ne_declenche_aucun_configure() {
+        let mut geo = geometrie();
+        assert!(!geo.redimensionne(DEPART.0, DEPART.1));
+        // Rogner puis comparer, et non comparer puis rogner : une demande plus
+        // grande que l'allocation retombe sur la taille deja en vigueur.
+        let mut geo = Geometrie::neuve(ALLOUEE, ALLOUEE);
+        assert!(!geo.redimensionne(9000, 9000));
+    }
+
+    #[test]
+    fn le_composable_ne_depasse_jamais_l_allocation() {
+        // Propriete, sur tous les chemins : c'est elle qui borne la recopie.
+        let mut geo = geometrie();
+        for (l, h) in [(4000u32, 4000u32), (0, 0), (1, 9000), (ALLOUEE.0, 1)] {
+            geo.redimensionne(l, h);
+            geo.note_degat(&Rect::neuf(0, 0, u32::MAX, u32::MAX));
+            let (cl, ch) = geo.composable();
+            assert!(cl <= ALLOUEE.0 && ch <= ALLOUEE.1,
+                "composable {}x{} deborde l'allocation apres {}x{}", cl, ch, l, h);
+            let (ll, lh) = geo.logique();
+            assert!(cl <= ll && ch <= lh,
+                "composable {}x{} deborde le logique {}x{}", cl, ch, ll, lh);
+        }
+    }
+
+    #[test]
+    fn un_degat_vide_ne_fait_rien_avancer() {
+        let mut geo = geometrie();
+        geo.redimensionne(ALLOUEE.0, ALLOUEE.1);
+        geo.note_degat(&Rect::neuf(0, 0, 0, 400));
+        geo.note_degat(&Rect::neuf(0, 0, 400, 0));
+        assert_eq!(geo.composable(), DEPART);
+    }
+
+    #[test]
+    fn un_degat_trop_grand_ne_credite_pas_une_taille_future() {
+        // `rogne_degat` borne les degats a l'ALLOCATION, pas au logique. Un
+        // client peut donc annoncer, alors que sa fenetre est petite, un degat
+        // aussi large que la surface -- et il en annonce, puisque le chrome
+        // repeint `{0, 0, surface_width, surface_height}`.
+        //
+        // Sans le rognage au logique, ce degat cr\u00e9diterait `peinte` d'une
+        // etendue peinte a une AUTRE taille. La fenetre reagrandie, le
+        // compositeur recopierait alors des pixels qui n'ont jamais existe a
+        // cette taille-la : la bande de hasard que tout ce chantier evite.
+        let mut geo = geometrie();
+        geo.redimensionne(400, 300);
+        geo.note_degat(&Rect::neuf(0, 0, ALLOUEE.0, ALLOUEE.1));
+        assert_eq!(geo.composable(), (400, 300));
+
+        geo.redimensionne(ALLOUEE.0, ALLOUEE.1);
+        assert_eq!(geo.composable(), (400, 300),
+            "un degat annonce a 400x300 ne rend pas 1278x627 composable");
+    }
+
+    #[test]
+    fn un_degat_a_coordonnees_hostiles_ne_deborde_pas() {
+        // `droite()` et `bas()` calculent en i64 exactement pour ce cas : un
+        // client qui envoie x = i32::MAX ne doit pas obtenir un composable qui
+        // sort de la surface par debordement d'addition.
+        let mut geo = geometrie();
+        geo.redimensionne(ALLOUEE.0, ALLOUEE.1);
+        geo.note_degat(&Rect::neuf(i32::MAX, i32::MAX, u32::MAX, u32::MAX));
+        let (cl, ch) = geo.composable();
+        assert!(cl <= ALLOUEE.0 && ch <= ALLOUEE.1);
+    }
 
     #[test]
     fn entete_aller_retour() {
@@ -632,7 +1175,7 @@ mod tests {
 
     #[test]
     fn les_charges_font_un_aller_retour() {
-        let surface = Surface { fenetre: 1, tampon: 0, largeur: 800, hauteur: 600, pas: 3200, format: 0 };
+        let surface = Surface { fenetre: 1, tampon: 0, largeur: 800, hauteur: 600, pas: 3200, format: 0, echelle: ECHELLE_UNITE, reserve: 0 };
         assert_eq!(Surface::decode(&surface.encode()), Some(surface));
 
         let pointeur = Pointeur { fenetre: 1, x: -3, y: 42, boutons: 0b101 };
@@ -647,7 +1190,7 @@ mod tests {
         let trame = Trame { fenetre: 1, tampon: 0, degat: Rect::neuf(10, 20, 30, 40) };
         assert_eq!(Trame::decode(&trame.encode()), Some(trame));
 
-        let configure = Configure { fenetre: 1, largeur: 1100, hauteur: 604, focus: 1 };
+        let configure = Configure { fenetre: 1, largeur: 1100, hauteur: 604, focus: 1, echelle: ECHELLE_UNITE, reserve: 0 };
         assert_eq!(Configure::decode(&configure.encode()), Some(configure));
     }
 
@@ -694,6 +1237,284 @@ mod tests {
         // `Rect::default()` et d'accumuler sans cas particulier.
         assert_eq!(Rect::default().union(&a), a);
         assert_eq!(a.union(&Rect::default()), a);
+    }
+
+    // --- Chantier 12 : echelle et coordonnees logiques ----------------------
+
+    #[test]
+    fn une_echelle_absurde_se_replie_sur_l_unite() {
+        // Zero vient d'un champ ABSENT d'un vieux message : il doit se lire
+        // « echelle unite », jamais provoquer une division par zero.
+        assert_eq!(echelle_valide(0), ECHELLE_UNITE);
+        assert_eq!(echelle_valide(1), ECHELLE_UNITE);
+        assert_eq!(echelle_valide(u32::MAX), ECHELLE_UNITE);
+        // Les valeurs raisonnables passent telles quelles.
+        assert_eq!(echelle_valide(ECHELLE_UNITE), ECHELLE_UNITE);
+        assert_eq!(echelle_valide(180), 180);
+        assert_eq!(echelle_valide(240), 240);
+        assert_eq!(echelle_valide(ECHELLE_MIN), ECHELLE_MIN);
+        assert_eq!(echelle_valide(ECHELLE_MAX), ECHELLE_MAX);
+    }
+
+    /// Les echelles usuelles tombent JUSTE en cent-vingtiemes. C'est la raison
+    /// d'etre de cette unite : 120 se divise par 2, 3, 4, 5, 6 et 8.
+    #[test]
+    fn les_echelles_usuelles_ne_derivent_pas() {
+        for (echelle, logique, physique) in [
+            (120u32, 800u32, 800u32),   // 1,0
+            (150, 800, 1000),           // 1,25
+            (180, 800, 1200),           // 1,5
+            (240, 800, 1600),           // 2,0
+            (360, 800, 2400),           // 3,0
+        ] {
+            assert_eq!(
+                longueur_physique(logique, echelle), physique,
+                "echelle {echelle} : {logique} logiques devraient faire {physique} physiques"
+            );
+            assert_eq!(
+                longueur_logique(physique, echelle), logique,
+                "et le retour doit etre exact"
+            );
+        }
+    }
+
+    /// Une longueur logique arrondit vers le HAUT, une longueur physique vers le
+    /// BAS. Ce n'est pas une symetrie ratee : c'est la seule paire qui garantit
+    /// qu'une surface contient toujours la mise en page qu'on y dessine.
+    #[test]
+    fn les_longueurs_arrondissent_du_bon_cote() {
+        // 100 logiques a 1,5 = 125 exactement.
+        assert_eq!(longueur_physique(100, 180), 150);
+        // 7 logiques a 1,25 = 8,75 -> 9 physiques, pas 8.
+        assert_eq!(longueur_physique(7, 150), 9);
+        // 9 physiques a 1,25 = 7,2 logiques -> 7, pas 8 : le client ne doit pas
+        // croire qu'il dispose d'une colonne qui n'existe pas.
+        assert_eq!(longueur_logique(9, 150), 7);
+    }
+
+    /// Un POINT n'a pas d'epaisseur : l'arrondir vers l'exterieur le
+    /// deplacerait. C'est la conversion des evenements d'entree.
+    #[test]
+    fn un_point_ne_se_deplace_pas() {
+        assert_eq!(point_physique(0, 240), 0);
+        assert_eq!(point_physique(10, 240), 20);
+        assert_eq!(point_logique(20, 240), 10);
+        assert_eq!(point_logique(21, 240), 10);
+        // Coordonnees negatives : un pointeur peut sortir de la zone utile,
+        // et le message le dit avec un nombre negatif.
+        assert_eq!(point_physique(-10, 240), -20);
+        assert_eq!(point_logique(-20, 240), -10);
+    }
+
+    /// Un RECTANGLE arrondit vers l'exterieur, dans les deux sens.
+    ///
+    /// Un degat converti trop petit laisse a l'ecran une bande de pixels
+    /// perimee jusqu'a la trame suivante ; converti trop grand, il recopie
+    /// quelques pixels inchanges. Les deux erreurs ne se valent pas.
+    #[test]
+    fn un_rectangle_de_degat_arrondit_vers_l_exterieur() {
+        // 1,25 : un rectangle logique dont les bords ne tombent pas juste.
+        let logique = Rect::neuf(1, 1, 3, 3); // bords logiques 1..4
+        let physique = logique.vers_physique(150);
+        // 1 * 1,25 = 1,25 -> 1 (plancher) ; 4 * 1,25 = 5 -> 5 (plafond).
+        assert_eq!(physique, Rect::neuf(1, 1, 4, 4));
+        assert!(
+            physique.droite() >= 5,
+            "le bord droit physique doit couvrir tout le bord logique"
+        );
+
+        // Et le retour recouvre au moins le rectangle de depart.
+        let retour = physique.vers_logique(150);
+        assert!(retour.x <= logique.x);
+        assert!(retour.droite() >= logique.droite());
+        assert!(retour.y <= logique.y);
+        assert!(retour.bas() >= logique.bas());
+    }
+
+    /// Un bord GAUCHE NEGATIF -- une fenetre qui deborde a gauche de l'ecran --
+    /// doit descendre, pas remonter.
+    ///
+    /// `/` tronque vers zero en Rust : `-1 / 2` vaut 0, pas -1. Sans division
+    /// plancher, le rectangle se decalerait vers la droite et laisserait une
+    /// colonne perimee sur son bord gauche.
+    #[test]
+    fn un_bord_negatif_ne_se_decale_pas_vers_la_droite() {
+        let logique = Rect::neuf(-1, -1, 3, 3);
+        let physique = logique.vers_physique(150); // 1,25
+        assert!(
+            physique.x <= -2,
+            "-1 logique a 1,25 vaut -1,25 : le bord physique doit etre -2, pas -1 ({physique:?})"
+        );
+        assert!(
+            physique.droite() >= 3,
+            "le bord droit doit couvrir 2 * 1,25 = 2,5 -> 3 ({physique:?})"
+        );
+    }
+
+    /// Une conversion a l'echelle unite ne doit RIEN changer.
+    #[test]
+    fn l_echelle_unite_est_l_identite() {
+        for rect in [
+            Rect::neuf(0, 0, 100, 100),
+            Rect::neuf(-5, 7, 13, 29),
+            Rect::neuf(1920, 1080, 1, 1),
+        ] {
+            assert_eq!(rect.vers_physique(ECHELLE_UNITE), rect);
+            assert_eq!(rect.vers_logique(ECHELLE_UNITE), rect);
+            // Et l'echelle absente se comporte pareil.
+            assert_eq!(rect.vers_physique(0), rect);
+        }
+    }
+
+    /// Un rectangle vide reste vide : c'est ce qui permet d'accumuler des
+    /// degats depuis `Rect::default()` sans cas particulier.
+    #[test]
+    fn un_rectangle_vide_reste_vide_a_toute_echelle() {
+        for echelle in [0u32, ECHELLE_UNITE, 240, ECHELLE_MAX] {
+            assert!(Rect::default().vers_physique(echelle).vide());
+            assert!(Rect::default().vers_logique(echelle).vide());
+        }
+    }
+
+    /// Le rognage doit s'appliquer APRES la conversion, et la conversion ne
+    /// doit jamais fabriquer un rectangle qui deborde la surface.
+    #[test]
+    fn un_degat_logique_converti_puis_rogne_reste_dans_la_surface() {
+        // Une surface physique de 1000x1000 a 1,25, donc 800x800 logiques.
+        let echelle = 150u32;
+        let (lw, lh) = (longueur_logique(1000, echelle), longueur_logique(1000, echelle));
+        assert_eq!((lw, lh), (800, 800));
+
+        // Un client qui salit tout son espace logique, et meme au-dela.
+        let degat_logique = Rect::neuf(-10, -10, 5000, 5000);
+        let physique = degat_logique.vers_physique(echelle);
+        let rogne = rogne_degat(physique, 1000, 1000);
+        assert_eq!(
+            rogne, Rect::neuf(0, 0, 1000, 1000),
+            "le degat doit couvrir toute la surface, et pas un pixel de plus"
+        );
+        assert!(rogne.droite() <= 1000);
+        assert!(rogne.bas() <= 1000);
+    }
+
+    /// Un client hostile ne doit pas obtenir un rectangle qui deborde par
+    /// l'arithmetique de l'echelle.
+    #[test]
+    fn une_echelle_maximale_ne_fait_pas_deborder() {
+        let enorme = Rect::neuf(i32::MAX - 1, i32::MAX - 1, u32::MAX, u32::MAX);
+        let physique = enorme.vers_physique(ECHELLE_MAX);
+        // Bornage, pas debordement : le rectangle reste representable, et le
+        // rognage le ramene ensuite a la surface.
+        assert!(rogne_degat(physique, 800, 600).largeur <= 800);
+        assert!(rogne_degat(physique, 800, 600).hauteur <= 600);
+    }
+
+    // --- Retrocompatibilite du fil ------------------------------------------
+
+    /// Une charge `Surface` d'AVANT le chantier 12 doit se decoder, et se lire
+    /// comme une surface a l'echelle unite.
+    #[test]
+    fn une_surface_de_l_ancien_format_se_decode_a_l_echelle_unite() {
+        let mut ancienne = [0u8; TAILLE_SURFACE_V1];
+        ancienne[0..4].copy_from_slice(&1u32.to_le_bytes());
+        ancienne[8..12].copy_from_slice(&800u32.to_le_bytes());
+        ancienne[12..16].copy_from_slice(&600u32.to_le_bytes());
+        ancienne[16..20].copy_from_slice(&3200u32.to_le_bytes());
+
+        let surface = Surface::decode(&ancienne).expect("l'ancien format doit rester lisible");
+        assert_eq!(surface.largeur, 800);
+        assert_eq!(surface.hauteur, 600);
+        assert_eq!(
+            surface.echelle, ECHELLE_UNITE,
+            "sans champ d'echelle, la surface est a l'echelle unite"
+        );
+        assert_eq!(surface.taille_logique(), (800, 600));
+    }
+
+    /// Le PREFIXE de la nouvelle charge doit etre bit pour bit celui de
+    /// l'ancienne : c'est ce qui permet a `hote.cpp`, qui lit les
+    /// vingt-quatre premiers octets et ignore la queue, de continuer sans etre
+    /// recompile.
+    #[test]
+    fn la_nouvelle_surface_commence_par_l_ancienne() {
+        let surface = Surface {
+            fenetre: 1, tampon: 0, largeur: 1100, hauteur: 604,
+            pas: 4400, format: 0, echelle: 240, reserve: 0,
+        };
+        let encode = surface.encode();
+        assert_eq!(encode.len(), TAILLE_SURFACE);
+
+        // Ce qu'un vieux decodeur lit.
+        let vieux = Surface::decode(&encode[..TAILLE_SURFACE_V1]).unwrap();
+        assert_eq!(vieux.largeur, 1100);
+        assert_eq!(vieux.hauteur, 604);
+        assert_eq!(vieux.pas, 4400);
+        assert_eq!(vieux.echelle, ECHELLE_UNITE);
+
+        // Ce qu'un decodeur a jour lit.
+        let neuf = Surface::decode(&encode).unwrap();
+        assert_eq!(neuf, surface);
+        assert_eq!(neuf.taille_logique(), (550, 302));
+    }
+
+    #[test]
+    fn une_configure_de_l_ancien_format_se_decode_a_l_echelle_unite() {
+        let mut ancienne = [0u8; TAILLE_CONFIGURE_V1];
+        ancienne[0..4].copy_from_slice(&1u32.to_le_bytes());
+        ancienne[4..8].copy_from_slice(&1100u32.to_le_bytes());
+        ancienne[8..12].copy_from_slice(&604u32.to_le_bytes());
+        ancienne[12..16].copy_from_slice(&1u32.to_le_bytes());
+
+        let conf = Configure::decode(&ancienne).expect("l'ancien format doit rester lisible");
+        assert_eq!(conf.largeur, 1100);
+        assert_eq!(conf.focus, 1);
+        assert_eq!(conf.echelle, ECHELLE_UNITE);
+        assert_eq!(conf.taille_logique(), (1100, 604));
+    }
+
+    #[test]
+    fn la_nouvelle_configure_commence_par_l_ancienne() {
+        let conf = Configure {
+            fenetre: 1, largeur: 1600, hauteur: 1200, focus: 1,
+            echelle: 240, reserve: 0,
+        };
+        let encode = conf.encode();
+        let vieux = Configure::decode(&encode[..TAILLE_CONFIGURE_V1]).unwrap();
+        assert_eq!(vieux.largeur, 1600);
+        assert_eq!(vieux.focus, 1);
+        assert_eq!(vieux.echelle, ECHELLE_UNITE);
+        assert_eq!(Configure::decode(&encode).unwrap(), conf);
+        assert_eq!(conf.taille_logique(), (800, 600));
+    }
+
+    /// Une charge trop courte reste refusee : la tolerance porte sur la QUEUE,
+    /// pas sur le prefixe.
+    #[test]
+    fn une_charge_tronquee_reste_refusee() {
+        let surface = Surface::default().encode();
+        for coupe in 0..TAILLE_SURFACE_V1 {
+            assert!(
+                Surface::decode(&surface[..coupe]).is_none(),
+                "une charge de {coupe} octets ne decrit pas une surface"
+            );
+        }
+        let conf = Configure::default().encode();
+        for coupe in 0..TAILLE_CONFIGURE_V1 {
+            assert!(Configure::decode(&conf[..coupe]).is_none());
+        }
+    }
+
+    /// Une echelle absurde recue sur le FIL est repliee au decodage, pas
+    /// propagee.
+    #[test]
+    fn une_echelle_absurde_recue_sur_le_fil_est_repliee() {
+        let mut octets = Surface::default().encode();
+        octets[24..28].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(Surface::decode(&octets).unwrap().echelle, ECHELLE_UNITE);
+
+        let mut octets = Configure::default().encode();
+        octets[16..20].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(Configure::decode(&octets).unwrap().echelle, ECHELLE_UNITE);
     }
 
     #[test]

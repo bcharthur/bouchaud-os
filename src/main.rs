@@ -88,6 +88,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // programme sans reconstruire le noyau. Le pilote est sonde juste avant,
     // pour que le journal montre les disques avant ce qu'on en a tire.
     drivers::ata::probe();
+    // La couche bloc generique, juste apres la detection : le systeme de
+    // fichiers peut alors parler a un VOLUME plutot qu'a une nappe, et un
+    // pilote NVMe s'ajoutera en s'enregistrant, sans qu'un appelant change.
+    drivers::ata_bloc::installe();
     fs::tar::mount_data_disk();
     // Ce que la machine a retenu du demarrage precedent. Vient apres l'archive :
     // un fichier persistant doit pouvoir remplacer celui que l'archive depose,

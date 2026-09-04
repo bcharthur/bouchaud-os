@@ -5,6 +5,7 @@ use crate::kernel::sync::SpinLock;
 
 use super::super::abi::types::{Error, HandleId, ObjectKind, Result, Rights};
 use super::super::object::Object;
+use super::politique;
 
 pub const MAX_HANDLES_PER_PROCESS: usize = 4096;
 
@@ -91,15 +92,15 @@ impl HandleTable {
         let inner = self.inner.lock();
         let index = Self::index(id)?;
         let slot = inner.slots.get(index).ok_or(Error::BadHandle)?;
-        if slot.generation != id.generation() { return Err(Error::BadHandle); }
+        politique::verifie_generation(slot.generation, id.generation())?;
         let entry = slot.entry.as_ref().ok_or(Error::BadHandle)?;
-        if !entry.rights.contains(required) { return Err(Error::AccessDenied); }
+        politique::verifie_acces(entry.rights, required)?;
         Ok(entry.clone())
     }
 
     pub fn lookup_kind(&self, id: HandleId, required: Rights, kind: ObjectKind) -> Result<Entry> {
         let entry = self.lookup(id, required)?;
-        if entry.object.kind() != kind { return Err(Error::WrongType); }
+        politique::verifie_genre(entry.object.kind(), kind)?;
         Ok(entry)
     }
 
@@ -120,16 +121,33 @@ impl HandleTable {
 
     pub fn duplicate(&self, id: HandleId, requested: Rights) -> Result<HandleId> {
         let source = self.lookup(id, Rights::DUP)?;
-        if !requested.subset_of(source.rights) { return Err(Error::AccessDenied); }
-        self.insert(Arc::clone(&source.object), requested)
+        let accordes = politique::verifie_duplication(source.rights, requested)?;
+        self.insert(Arc::clone(&source.object), accordes)
     }
 
-    pub fn export(&self, id: HandleId) -> Result<Entry> {
+    /// Prepare un handle a franchir la frontiere du processus, en ATTENUANT
+    /// ses droits au masque demande.
+    ///
+    /// BOUCHAUD_C7_ATTENUATION_TRANSFERT_V1
+    ///
+    /// Cette fonction portait ceci :
+    ///
+    ///     entry.rights = entry.rights.intersection(entry.rights);
+    ///
+    /// avec un commentaire expliquant qu'aucun droit n'est jamais gagne par
+    /// IPC. L'intersection d'un ensemble avec lui-meme est cet ensemble : la
+    /// ligne ne faisait rien, et le commentaire decrivait une intention.
+    ///
+    /// Ce n'etait pas seulement inutile. Il n'existait AUCUN moyen d'attenuer :
+    /// un courtier qui possede une region partagee en lecture-ecriture ne
+    /// pouvait pas en donner une vue en lecture seule a un moteur de rendu. Il
+    /// donnait tout, ou rien -- et « tout » est ce qu'une sandbox ne peut pas
+    /// se permettre.
+    ///
+    /// `Rights::TOUS` comme masque reproduit exactement l'ancien comportement.
+    pub fn export(&self, id: HandleId, masque: Rights) -> Result<Entry> {
         let mut entry = self.lookup(id, Rights::TRANSFER)?;
-        // The receiver may pass the object onward only if the sender was itself
-        // allowed to transfer it; that bit is therefore preserved. No rights
-        // are ever gained by IPC.
-        entry.rights = entry.rights.intersection(entry.rights);
+        entry.rights = politique::verifie_transfert(entry.rights, masque)?;
         Ok(entry)
     }
 

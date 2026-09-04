@@ -225,8 +225,23 @@ fn signal_thread_allowed(target_tid: u32) -> GateDecision {
 fn gate_native(number: u64, args: [u64; 6]) -> GateDecision {
     let security = policy::current();
 
-    if number == crate::kernel::native::abi::numbers::CHANNEL_SEND
-        && args[4] != 0
+    // BOUCHAUD_C7_PORTE_IPC_LES_DEUX_ENVOIS_V1
+    //
+    // Cette porte ne connaissait que `CHANNEL_SEND`. `CHANNEL_SEND_ATTENUE`,
+    // ajoute pour ATTENUER les droits transferes, la contournait entierement :
+    // un processus sandboxe sans `IPC_TRANSFER` pouvait transferer des handles
+    // par le nouveau numero.
+    //
+    // L'attenuation et la porte ne se remplacent PAS. L'attenuation borne ce
+    // que le RECEVEUR obtient ; la porte decide si l'emetteur a le droit de
+    // transferer quoi que ce soit. Un moteur de rendu qui cree lui-meme un
+    // canal obtient `TRANSFER` par defaut sur ses propres objets -- c'est la
+    // porte, et elle seule, qui l'empeche de les faire sortir.
+    let envoi_avec_handles = (number
+        == crate::kernel::native::abi::numbers::CHANNEL_SEND
+        || number == crate::kernel::native::abi::numbers::CHANNEL_SEND_ATTENUE)
+        && args[4] != 0;
+    if envoi_avec_handles
         && !security.capabilities.contains(Capabilities::IPC_TRANSFER)
     {
         audit::deny(
@@ -259,6 +274,10 @@ fn gate_native(number: u64, args: [u64; 6]) -> GateDecision {
             super::profile::SecurityProfile::System => 64 * 1024 * 1024u64,
             super::profile::SecurityProfile::BrowserBroker => 32 * 1024 * 1024u64,
             super::profile::SecurityProfile::BrowserContent => 16 * 1024 * 1024u64,
+            // RequestServer tamponne des reponses HTTP : le meme plafond que
+            // le rendu, pour la meme raison -- il traite des donnees venues du
+            // reseau.
+            super::profile::SecurityProfile::BrowserNetwork => 16 * 1024 * 1024u64,
             super::profile::SecurityProfile::User => 16 * 1024 * 1024u64,
             super::profile::SecurityProfile::Untrusted => 4 * 1024 * 1024u64,
         };

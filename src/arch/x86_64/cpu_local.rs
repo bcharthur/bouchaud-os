@@ -9,14 +9,13 @@
 //! logical [`CpuId`] and the rest of the kernel can stop assuming
 //! `logical_cpu == APIC_ID`.
 
-use alloc::vec::Vec;
 use core::arch::x86_64::{__cpuid, __cpuid_count};
 use core::sync::atomic::{
     AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering,
 };
 
 use crate::arch::x86_64::smp::MAX_CPUS;
-use crate::kernel::sync::SpinLockIrq;
+use crate::kernel::scheduler::runqueue::{self, Bande, CompteursFile, FileCpu};
 
 /// No task is currently attached to a CPU-local slot.
 pub const NO_TASK: usize = usize::MAX;
@@ -153,9 +152,9 @@ pub struct CpuLocal {
     need_resched: AtomicBool,
     irq_depth: AtomicU32,
     preempt_count: AtomicU32,
-// BOUCHAUD_RUNQ_IRQ_V1
+// BOUCHAUD_C2_FILE_O1_V1
     //
-    // POURQUOI `SpinLockIrq` ET NON `SpinLock`
+    // POURQUOI PLUS AUCUN VERROU ICI
     //
     // Cette file est atteignable depuis un GESTIONNAIRE D'INTERRUPTION. Le
     // chemin exact, observe au runtime :
@@ -168,38 +167,27 @@ pub struct CpuLocal {
     //       -> task::publish_ready
     //       -> CpuLocal::enqueue        <-- reprend cette meme file
     //
-    // Un `SpinLock` ordinaire ne masque pas les interruptions. Si l'IRQ tombe
-    // pendant qu'une tache du MEME CPU est a l'interieur d'un accesseur --
-    // `enqueue`, `dequeue`, `steal`, `run_queue_len` --, le gestionnaire
-    // reprend le verrou que le contexte interrompu detient deja. Le
-    // `debug_assert!` de recursion de `SpinLock` le voit et panique :
+    // La version precedente repondait a cette reentrance par un `SpinLockIrq` :
+    // masquer les interruptions pendant la section critique. Cela FONCTIONNAIT,
+    // et cela coutait exactement ce que le chantier 2 devait supprimer -- un
+    // `contains()` lineaire, un `remove(0)` qui deplace le vecteur, un `push()`
+    // qui peut ALLOUER, le tout interruptions coupees.
     //
-    //     SpinLock recursive acquisition on CPU 0
+    // `FileCpu` supprime la question au lieu d'y repondre : ce sont des
+    // bitmaps et des compteurs atomiques, il n'y a plus de section critique a
+    // proteger. Un gestionnaire d'interruption qui met une tache en file
+    // execute un `fetch_or`. La reentrance devient sans objet, et les
+    // interruptions n'ont plus besoin d'etre masquees pour ordonnancer.
     //
-    // La fenetre n'est pas theorique : `queue.contains()` est lineaire,
-    // `queue.remove(0)` deplace tout le vecteur, et `queue.push()` peut
-    // reallouer -- donc allouer -- sous le verrou.
+    // BOUCHAUD_C1_FILE_GENERATIONNELLE_V1 (conserve)
     //
-    // Le gros verrou ne protege PAS de ce cas : il appartient a un CPU, pas a
-    // une tache, et `smp_lock::enter()` est REENTRANTE. Un gestionnaire
-    // d'interruption qui le reprend sur un CPU qui le detient deja obtient donc
-    // un garde valide et continue -- c'est le comportement voulu, et c'est
-    // precisement ce qui amene le handler jusqu'ici.
-    //
-    // `SpinLockIrq` masque les interruptions pour la duree de la section
-    // critique. L'IRQ ne disparait pas : elle reste en attente dans l'APIC
-    // local et est delivree des le relachement. Aucun reveil n'est perdu.
-    // BOUCHAUD_C1_FILE_GENERATIONNELLE_V1
-    //
-    // La file portait des INDICES d'emplacement. Un emplacement se recycle :
-    // une entree laissee par une tache morte designait alors la tache
-    // suivante, qui n'a jamais demande a etre ordonnancee. C'est le probleme
-    // ABA, et il se manifeste comme une tache fantome qui prend des quantums.
-    //
-    // Elle porte desormais des IDENTITES empaquetees -- emplacement plus
-    // generation. Le consommateur refuse celles dont la generation ne
-    // correspond plus.
-    run_queue: SpinLockIrq<Vec<u64>>,
+    // La file porte des IDENTITES -- emplacement plus generation --, non des
+    // indices : un emplacement recycle designerait sinon la tache suivante,
+    // qui n'a jamais demande a etre ordonnancee. Le bitmap ne porte que
+    // l'emplacement ; la generation vit dans `runqueue::IDENTITES`, une case
+    // par emplacement pour toute la machine, publiee avant le bit et relue
+    // apres son retrait.
+    run_queue: FileCpu,
 
     context_switches: AtomicU64,
     migrations: AtomicU64,
@@ -222,7 +210,7 @@ impl CpuLocal {
             need_resched: AtomicBool::new(false),
             irq_depth: AtomicU32::new(0),
             preempt_count: AtomicU32::new(0),
-            run_queue: SpinLockIrq::new(Vec::new()),
+            run_queue: FileCpu::neuve(),
             context_switches: AtomicU64::new(0),
             migrations: AtomicU64::new(0),
             ipi_rx: AtomicU64::new(0),
@@ -277,53 +265,78 @@ impl CpuLocal {
         self.preempt_count.load(Ordering::Relaxed)
     }
 
-    /// Met une IDENTITE en file. `identite` est un `TacheId` empaquete.
-    pub fn enqueue(&self, identite: u64) {
-        let mut queue = self.run_queue.lock();
-        if !queue.contains(&identite) {
-            queue.push(identite);
-        }
+    /// Met une IDENTITE en file, dans la bande donnee.
+    ///
+    /// `identite` est un `TacheId` empaquete : emplacement dans les 32 bits
+    /// bas, generation au-dessus. L'identite complete est publiee AVANT le
+    /// bit, pour qu'un consommateur qui gagne la course sur le bit ne puisse
+    /// pas lire l'identite d'une incarnation precedente.
+    pub fn enqueue_bande(&self, identite: u64, bande: Bande) -> bool {
+        let emplacement = (identite & 0xffff_ffff) as usize;
+        runqueue::publie_identite(emplacement, identite);
+        self.run_queue.enfile(emplacement, bande)
     }
 
+    /// Mise en file sans classe declaree : la bande normale.
+    pub fn enqueue(&self, identite: u64) -> bool {
+        self.enqueue_bande(identite, Bande::Normale)
+    }
+
+    /// Elit une identite : interactive d'abord, normale jamais affamee.
     pub fn dequeue(&self) -> Option<u64> {
-        let mut queue = self.run_queue.lock();
-        if queue.is_empty() { None } else { Some(queue.remove(0)) }
+        let emplacement = self.run_queue.defile()?;
+        Some(runqueue::identite_en_file(emplacement))
     }
 
+    /// Prend une identite a voler : la bande normale d'abord.
     pub fn steal(&self) -> Option<u64> {
-        self.run_queue.lock().pop()
+        let emplacement = self.run_queue.vole()?;
+        Some(runqueue::identite_en_file(emplacement))
     }
 
-    pub fn remove(&self, task: u64) -> bool {
-        let mut queue = self.run_queue.lock();
-        let Some(index) = queue.iter().position(|candidate| *candidate == task) else {
-            return false;
-        };
-        queue.remove(index);
-        true
+    pub fn remove(&self, identite: u64) -> bool {
+        let emplacement = (identite & 0xffff_ffff) as usize;
+        self.run_queue.retire(emplacement)
     }
 
-    /// La file contient-elle cette identite ? `None` si elle est verrouillee.
+    /// La file contient-elle cette identite ?
     ///
-    /// `try_lock` et non `lock` : cette sonde s'execute depuis l'IRQ du timer,
-    /// qui peut avoir interrompu le porteur de ce meme verrou sur ce meme CPU.
-    /// Attendre y serait un interblocage certain ; ne pas conclure est la
-    /// seule reponse honnete.
+    /// `Option` conserve par compatibilite avec les sondes de diagnostic : la
+    /// reponse est desormais TOUJOURS connue. L'ancienne version repondait
+    /// `None` quand le verrou etait pris -- elle s'executait depuis l'IRQ du
+    /// timer, qui pouvait avoir interrompu le porteur de ce meme verrou. Sans
+    /// verrou, l'incertitude disparait.
     pub fn file_contient(&self, identite: u64) -> Option<bool> {
-        self.run_queue.try_lock().map(|file| file.contains(&identite))
+        let emplacement = (identite & 0xffff_ffff) as usize;
+        if !self.run_queue.contient(emplacement) {
+            return Some(false);
+        }
+        // Le bit est pose ; il ne designe cette INCARNATION que si l'identite
+        // publiee est la sienne.
+        Some(runqueue::identite_en_file(emplacement) == identite)
     }
 
-    /// La file a-t-elle du travail ? `None` si elle est verrouillee.
-    ///
-    /// L'appelant doit traiter `None` comme « peut-etre du travail » : perdre
-    /// un `hlt` ne coute qu'un tour de boucle, perdre un reveil fige la
-    /// machine. L'incertitude se resout donc toujours du meme cote.
+    /// La file a-t-elle du travail ? Toujours une reponse.
     pub fn file_non_vide_essai(&self) -> Option<bool> {
-        self.run_queue.try_lock().map(|file| !file.is_empty())
+        Some(!self.run_queue.est_vide())
     }
 
+    /// Longueur de la file : deux lectures atomiques, aucun verrou.
+    ///
+    /// `choose_runq_cpu` l'appelle une fois par CPU a chaque reveil. Sous
+    /// l'ancienne file, chacun de ces appels prenait un verrou masquant les
+    /// interruptions sur un AUTRE coeur.
     pub fn run_queue_len(&self) -> usize {
-        self.run_queue.lock().len()
+        self.run_queue.longueur()
+    }
+
+    /// Ce qu'un voleur peut prendre sans deplacer une tache interactive.
+    pub fn pression_volable(&self) -> usize {
+        self.run_queue.pression_volable()
+    }
+
+    pub fn compteurs_file(&self) -> CompteursFile {
+        self.run_queue.compteurs()
     }
 
     pub fn note_context_switch(&self) {

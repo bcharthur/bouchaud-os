@@ -69,7 +69,7 @@ pub fn outer_rect_for_client_size(origin: Point, width: u32, height: u32, titleb
         height + titlebar + WINDOW_BORDER * 2)
 }
 
-pub fn client_rect(outer: Rect, titlebar: u32) -> Rect {
+pub const fn client_rect(outer: Rect, titlebar: u32) -> Rect {
     Rect::new(outer.x + WINDOW_BORDER as i32,
         outer.y + titlebar as i32 + WINDOW_BORDER as i32,
         outer.width.saturating_sub(WINDOW_BORDER * 2),

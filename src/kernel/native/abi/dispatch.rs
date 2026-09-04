@@ -54,7 +54,13 @@ fn pair_to_user(out: u64) -> Result<u64> {
     Ok(0)
 }
 
-fn channel_send(args: [u64; 6]) -> Result<u64> {
+/// Envoi, avec ou sans attenuation des droits transferes.
+///
+/// `masques` est vide pour l'envoi ordinaire : chaque handle franchit alors la
+/// frontiere avec `Rights::TOUS` comme plafond, c'est-a-dire tel quel. Sinon il
+/// porte exactement un masque par handle, et chaque capacite arrive attenuee a
+/// l'intersection de ses droits et de son masque.
+fn channel_send_avec_masques(args: [u64; 6], masques_ptr: u64) -> Result<u64> {
     let handle_id = HandleId::from_raw(args[0]);
     let data_len = args[2] as usize;
     let handle_count = args[4] as usize;
@@ -65,13 +71,27 @@ fn channel_send(args: [u64; 6]) -> Result<u64> {
 
     let bytes = super::usercopy::read(args[1], data_len)?;
     let ids = super::usercopy::read_handles(args[3], handle_count)?;
-    let table = handle::current_table();
+    // Les masques sont lus AVANT toute mutation : un tableau illisible doit
+    // faire echouer l'envoi sans avoir rien transfere.
+    let masques = if masques_ptr == 0 {
+        Vec::new()
+    } else {
+        let brut = super::usercopy::read(masques_ptr, handle_count * 4)?;
+        brut.chunks_exact(4)
+            .map(|mot| Rights(u32::from_le_bytes([mot[0], mot[1], mot[2], mot[3]])))
+            .collect()
+    };
+    if !masques.is_empty() && masques.len() != ids.len() {
+        return Err(Error::InvalidArgument);
+    }
 
+    let table = handle::current_table();
     let endpoint = table.lookup_kind(handle_id, Rights::WRITE, ObjectKind::Channel)?;
 
     let mut transferred = Vec::with_capacity(ids.len());
-    for id in ids {
-        let entry = table.export(id)?;
+    for (index, id) in ids.iter().enumerate() {
+        let masque = masques.get(index).copied().unwrap_or(Rights::TOUS);
+        let entry = table.export(*id, masque)?;
         transferred.push(TransferredHandle { object: entry.object, rights: entry.rights });
     }
 
@@ -79,6 +99,10 @@ fn channel_send(args: [u64; 6]) -> Result<u64> {
         Object::Channel(channel) => channel.send(Message::new(bytes, transferred)).map(|n| n as u64),
         _ => Err(Error::WrongType),
     }
+}
+
+fn channel_send(args: [u64; 6]) -> Result<u64> {
+    channel_send_avec_masques(args, 0)
 }
 
 fn channel_recv(args: [u64; 6]) -> Result<u64> {
@@ -195,6 +219,7 @@ fn dispatch_inner(number: u64, args: [u64; 6]) -> Result<u64> {
 
         numbers::CHANNEL_CREATE => pair_to_user(args[0]),
         numbers::CHANNEL_SEND => channel_send(args),
+        numbers::CHANNEL_SEND_ATTENUE => channel_send_avec_masques(args, args[5]),
         numbers::CHANNEL_RECV => channel_recv(args),
 
         numbers::EVENT_CREATE => {

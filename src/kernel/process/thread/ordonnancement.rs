@@ -1,15 +1,18 @@
-/// Choisit la prochaine tache prete apres `after`.
-///
-/// Un tourniquet a deux etages. On cherche d'abord une tache **interactive**
-/// prete, en repartant de `after` pour que plusieurs taches interactives se
-/// relaient equitablement entre elles. A defaut, on prend la premiere prete,
-/// quelle qu'elle soit.
-///
-/// La borne `TOURS_INTERACTIFS_MAX` est ce qui separe une priorite d'une
-/// famine : passe ce nombre de tours consecutifs, l'etage interactif est
-/// ignore pour un tour et le tourniquet ordinaire reprend. Une tache normale
-/// avance donc toujours, meme face a une tache interactive qui ne se bloque
-/// jamais.
+// Election de la prochaine tache prete.
+//
+// LE TOURNIQUET A DEUX ETAGES VIT MAINTENANT DANS LA STRUCTURE
+//
+// Cet en-tete decrivait deja un tourniquet a deux etages -- interactive
+// d'abord, normale garantie par une borne anti-famine. Il n'existait pas :
+// la file etait une seule FIFO (`Vec<u64>`), et `pick_next` en tirait la tete
+// sans jamais consulter la classe. Une tache interactive attendait derriere le
+// rendu, et la promesse ne tenait que dans ce commentaire.
+//
+// Le chantier 2 la deplace dans `kernel::scheduler::runqueue` : deux BANDES de
+// bitmaps par CPU, `defile()` sert l'interactive tant que
+// `TOURS_INTERACTIFS_MAX` n'est pas atteint, puis rend un tour a la normale.
+// Ce fichier ne fait plus qu'appeler ce contrat -- et le vol, lui, prend
+// d'abord dans la bande normale.
 // BOUCHAUD_GATE0_POST_SWITCH_HANDOFF_V2
 //
 // La tache sortante n'est plus publiee au moment ou `ctx.rsp` change.
@@ -31,6 +34,15 @@ fn runnable_steal(task: &Task, cpu: usize) -> bool {
         && !task.noyau
         && task.runq_cpu.charge() as usize != cpu
         && allowed_on(task, cpu)
+}
+
+/// La bande d'une tache : sa classe d'ordonnancement, materialisee.
+#[inline]
+fn bande_de(task: &Task) -> crate::kernel::scheduler::runqueue::Bande {
+    match task.priorite.charge() {
+        Priorite::Interactive => crate::kernel::scheduler::runqueue::Bande::Interactive,
+        Priorite::Normale => crate::kernel::scheduler::runqueue::Bande::Normale,
+    }
 }
 
 /// Revendique une incarnation pendant que son garde generationnel est encore
@@ -113,14 +125,22 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
         return None;
     }
     let online = smp::schedulable_cpus().min(MAX_CPUS);
-    let donor = (0..online)
-        .filter(|&candidate| candidate != cpu)
-        .map(|candidate| (candidate, queue_pressure(candidate)))
-        // Garder une tache au donneur: en dessous de deux elements le vol ne
-        // cree aucun parallelisme et ne fait que deplacer le prochain quantum.
-        .filter(|(_, pressure)| *pressure > 1)
-        .max_by_key(|(_, pressure)| *pressure)
-        .map(|(candidate, _)| candidate);
+    // La pression VOLABLE, pas la pression totale. Un coeur charge de trois
+    // taches interactives n'a rien a offrir : les lui prendre leur coute une
+    // migration -- cache froid, residence qui recommence -- au moment precis ou
+    // elles doivent repondre. Le travail de fond est ce qui se deplace bien, et
+    // c'est le seul que `FileCpu::vole` sert en premier.
+    // La regle vit dans `scheduler::equilibrage`, ou un test hote peut la
+    // contredire sans demarrer le systeme. Elle s'y ecrivait `pression > 1`
+    // alors que `pression_volable` ne compte QUE les taches EN ATTENTE : il
+    // fallait donc deux taches en attente EN PLUS de celle qui tourne, et un
+    // coeur charge n'etait jamais deleste face a trois coeurs au repos. La
+    // campagne SMP4 l'a mesure -- `steal=0/0`, zero tentative, `rej_bal`=2852.
+    let donor = crate::kernel::scheduler::equilibrage::choisit_donneur(
+        cpu,
+        online,
+        pression_volable,
+    );
     let Some(donor) = donor else {
         // BOUCHAUD_P1_STEAL_STERILE_BACKOFF_V1
         // Personne n'est assez charge : c'est un refus d'EQUILIBRE. Il se
@@ -138,6 +158,9 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
 
     const MIN_MIGRATION_RESIDENCY_NS: u64 = 20_000_000;
     let Some(donor_id) = crate::arch::x86_64::cpu_local::CpuId::from_index(donor) else {
+        // Sortie muette jusqu'ici. Un donneur designe mais introuvable est un
+        // desaccord de topologie : il doit se voir, pas disparaitre.
+        STEAL_REJECT_BALANCE[cpu].fetch_add(1, Ordering::Relaxed);
         return None;
     };
     let donor_queue = crate::arch::x86_64::cpu_local::local(donor_id);
@@ -152,12 +175,18 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
     let identite = TacheId::depuis_mot(mot);
     // Meme controle que ci-dessus : ne jamais voler une incarnation perimee.
     let Some(candidate) = registre_tache_id(identite) else {
-        STEAL_REJECT_BALANCE[cpu].fetch_add(1, Ordering::Relaxed);
+        // Une incarnation perimee : il y avait du travail, il a disparu sous
+        // nos doigts. C'est une COURSE, pas un defaut d'equilibre.
+        STEAL_REJECT_COURSE[cpu].fetch_add(1, Ordering::Relaxed);
         return None;
     };
     let index = identite.emplacement();
     if !runnable_steal(&candidate, cpu) || candidate.runq_cpu.charge() as usize != donor {
-        donor_queue.enqueue(mot);
+        // Retirer, examiner, remettre : le seul chemin de `try_steal` qui
+        // rendait la tache au donneur SANS rien compter. Il est desormais
+        // nomme, parce que c'est lui qui mesure le gaspillage du vol.
+        STEAL_REJECT_INELIGIBLE[cpu].fetch_add(1, Ordering::Relaxed);
+        donor_queue.enqueue_bande(mot, bande_de(&candidate));
         STEAL_RETRY_AFTER_NS[cpu].store(now.saturating_add(2_000_000), Ordering::Relaxed);
         return None;
     }
@@ -166,7 +195,7 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
             && now.saturating_sub(candidate.last_migration_ns.charge()) < MIN_MIGRATION_RESIDENCY_NS
         {
             STEAL_REJECT_AFFINITY[cpu].fetch_add(1, Ordering::Relaxed);
-            donor_queue.enqueue(mot);
+            donor_queue.enqueue_bande(mot, bande_de(&candidate));
             STEAL_RETRY_AFTER_NS[cpu].store(
                 now.saturating_add(MIN_MIGRATION_RESIDENCY_NS), Ordering::Relaxed,
             );
@@ -176,7 +205,7 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
     if !revendique_candidate(&candidate, cpu) {
         // La tache a ete revendiquee ou retiree pendant le vol. L'identite
         // consommee ne doit pas etre remise dans la file du donneur.
-        STEAL_REJECT_BALANCE[cpu].fetch_add(1, Ordering::Relaxed);
+        STEAL_REJECT_COURSE[cpu].fetch_add(1, Ordering::Relaxed);
         return None;
     }
     candidate.runq_cpu.range(cpu as u8);

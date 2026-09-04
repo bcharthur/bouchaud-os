@@ -152,6 +152,13 @@ fn tout_domaine_a_un_contrat_et_les_migres_sont_ceux_qu_on_croit() {
         migres,
         vec![
             Domaine::Ordonnanceur,
+            // La readiness a rejoint la liste au chantier 1 : sa DERNIERE
+            // reprise vivait sur la branche legacy de `WaitQueue::wait`, la ou
+            // l'appelant tenait deja le verrou. Reprendre un verrou reentrant
+            // que ce CPU detient deja n'ajoute aucune exclusion ; la reprise a
+            // ete supprimee, et `[MM-NG6] waitq_bkl_wait_ns=0` en est la
+            // mesure.
+            Domaine::Readiness,
             Domaine::Vfs,
             Domaine::Fs,
             Domaine::RegistreProcessus,

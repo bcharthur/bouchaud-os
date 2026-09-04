@@ -9,6 +9,11 @@ on:
       - 'third_party/UPSTREAM.md'
       - '.github/workflows/ladybird-native-browser.yml'
       - 'tools/ci/run_ladybird_browser_host.sh'
+      # La page que le smoke charge. Elle porte ses quatre sous-tests et leurs
+      # gardes-fous : la modifier change ce que le job mesure, et ne pas la
+      # declencher laissait cette modification invisible jusqu'au prochain
+      # commit qui touchait, lui, un chemin declencheur.
+      - 'tools/health/browser_host_fixture.py'
   push:
     branches: [main]
     paths:
@@ -16,6 +21,11 @@ on:
       - 'third_party/UPSTREAM.md'
       - '.github/workflows/ladybird-native-browser.yml'
       - 'tools/ci/run_ladybird_browser_host.sh'
+      # La page que le smoke charge. Elle porte ses quatre sous-tests et leurs
+      # gardes-fous : la modifier change ce que le job mesure, et ne pas la
+      # declencher laissait cette modification invisible jusqu'au prochain
+      # commit qui touchait, lui, un chemin declencheur.
+      - 'tools/health/browser_host_fixture.py'
   workflow_dispatch:
 
 permissions:

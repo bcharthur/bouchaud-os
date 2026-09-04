@@ -17,6 +17,7 @@ pub use legacy::{
     fill_rect_rgb,
     blit_rgb,
     blend_rgb,
+    blend_rect_rgb,
     blend_span,
     blit_argb_span,
     pixel_rgb,

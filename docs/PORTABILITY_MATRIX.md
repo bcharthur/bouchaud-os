@@ -70,3 +70,57 @@ Classees par ce qu'elles bloquent, pas par difficulte :
 
 Aucune n'est un obstacle de conception. La premiere est la seule qui puisse
 remettre en cause le calendrier.
+
+## Matrice materielle — chantier 10
+
+**La regle est la meme que ci-dessus, et elle est plus dure a tenir ici :
+aucune valeur n'est declaree, chacune renvoie a un test ou a une trace.** Un
+tableau materiel se remplit de bonnes intentions plus vite que n'importe quel
+autre : « NVMe : prevu » ne coute rien a ecrire et fait croire a un support.
+
+La colonne « Verifie par » dit ce qui rendrait la ligne ROUGE si elle devenait
+fausse. Une ligne sans verification porte **inconnu**, jamais « partiel ».
+
+### La plateforme de reference
+
+**x86_64 + QEMU q35.** Le choix est dans `tools/ci/plateforme.sh`, en un seul
+endroit, parce qu'il y en avait huit auparavant — un par script de campagne —
+et que rien ne disait lequel comptait.
+
+i440fx est un chipset de 1996. Tout ce qui est moderne — NVMe, MSI-X, PCIe,
+AHCI — suppose q35, et l'y tester revient a ne jamais rencontrer les cas que le
+materiel reel produit : sur q35, les peripheriques sont derriere des **ponts
+racine PCIe**, donc sur d'autres bus que le zero.
+
+`BOUCHAUD_MACHINE` choisit le profil. Le defaut reste `pc` tant que le boot q35
+n'est pas demontre sous QEMU : basculer huit campagnes d'un coup sans pouvoir
+les executer serait un pari, pas une migration. Le jour ou q35 boote, le defaut
+change dans ce fichier, une fois.
+
+| Materiel | Etat | Verifie par |
+|---|---|---|
+| Enumeration PCI bus 0 | oui | `pci::count`, trace `[PCI-NG]` |
+| Enumeration derriere les ponts PCIe | oui | `test_pci_decodage.rs` (`est_pont`, `bus_secondaire`), `pci::parcours` |
+| BAR memoire 64 bits | oui | `test_pci_decodage.rs` (`un_bar_64_bits_compose_ses_deux_moities`) |
+| Liste de capacites PCI | oui | `test_pci_decodage.rs`, y compris une liste **qui boucle** |
+| Decouverte MSI / MSI-X | oui (lecture) | `capacites_de`, `vecteurs_msi`, `vecteurs_msix` |
+| Programmation MSI / MSI-X | **absent** | — |
+| Detection d'un controleur NVMe | oui | `pci::find_nvme`, `test_pci_decodage.rs`, trace `[PCI-NG] nvme` |
+| Pilote NVMe (reset, files admin, Identify) | **absent** | — |
+| Couche bloc independante d'ATA | oui | `drivers::bloc`, `verifie-couche-bloc.py` |
+| Stockage ATA PIO | oui | campagnes QEMU existantes |
+| Vidange de cache disque (FLUSH CACHE) | **absent** | `Descripteur::vidange_reelle = false` |
+| xHCI / USB | **absent** | — |
+| HD Audio (AC97 uniquement) | partiel | `pci::find_audio` |
+| Wi-Fi | **absent** | — |
+| GPU accelere | **absent** | — |
+| ACPI (tables, extinction) | **inconnu** | a mesurer |
+
+### Ce que le chantier 10 a change, et ce qu'il n'a pas change
+
+Ce qui a change : l'enumeration voit la topologie entiere, sait lire un BAR
+64 bits, sait trouver MSI-X, et sait dire qu'un NVMe est present. La couche
+bloc permet d'ajouter un pilote sans toucher au systeme de fichiers.
+
+Ce qui n'a pas change : **il n'y a toujours aucun pilote NVMe.** Le detecter
+n'est pas le piloter, et la ligne ci-dessus dit « absent » parce qu'il l'est.

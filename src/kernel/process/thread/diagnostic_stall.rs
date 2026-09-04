@@ -647,8 +647,61 @@ pub fn stall_probe_from_timer() {
 // ne commute pas, DOIT figurer dans la file du coeur que designe son
 // `runq_cpu`. Sinon aucun `pick_next` ne la trouvera jamais, et personne ne la
 // republiera : elle est perdue definitivement.
+// BOUCHAUD_C13_ORPHELINE_CONFIRMEE_V1
+//
+// LA FENETRE DE PUBLICATION, ET POURQUOI CETTE SONDE CRIAIT AU LOUP
+// -----------------------------------------------------------------
+// L'invariant ci-dessus est juste. Sa VERIFICATION, elle, etait fausse : elle
+// concluait sur un instantane, alors que la mise en file d'une tache reveillee
+// n'est pas atomique.
+//
+// `wake_wait_queue` publie `Ready` par `compare_exchange`, PUIS appelle
+// `publish_ready`, qui relit la tache, evalue son affinite, choisit un coeur,
+// resout son identite et prend enfin le verrou de la file cible. Entre les
+// deux, la tache est exactement ce que la sonde cherche : `Ready`, sur aucun
+// coeur, hors de toute file -- et parfaitement saine. Un echantillon pris sur
+// un autre CPU pendant ces quelques microsecondes produisait une ligne
+// alarmante decrivant un fonctionnement normal.
+//
+// Le journal du navigateur le montre : deux `total=1`, sur deux `tid`
+// differents, a quarante secondes d'intervalle, sans aucune consequence
+// observable. Une tache REELLEMENT perdue ne serait pas apparue deux fois :
+// elle serait apparue a CHAQUE passe, pour toujours, puisque personne ne la
+// republiera jamais.
+//
+// C'est precisement ce qui les separe, et la sonde s'en sert desormais : elle
+// ne signale une orpheline qu'apres l'avoir vue deux passes de suite, soit
+// cinq secondes. Une fenetre de publication a disparu bien avant ; une tache
+// perdue est toujours la. Le retard de cinq secondes ne coute rien -- la
+// condition signalee est definitive.
+//
+// Une sonde qui produit des faux positifs finit par faire ignorer le vrai.
+
+/// Combien d'orphelines peuvent etre suivies d'une passe a l'autre.
+const ORPHELINES_SUIVIES: usize = 16;
+
+/// Identites vues orphelines a la passe precedente. Zero = emplacement libre ;
+/// une identite valide porte toujours une generation non nulle.
+static ORPHELINES_SUSPECTES: [AtomicU64; ORPHELINES_SUIVIES] =
+    [const { AtomicU64::new(0) }; ORPHELINES_SUIVIES];
+
+/// Une seule passe a la fois : deux passes concurrentes se voleraient leurs
+/// suspects et recreeraient le faux positif qu'on vient de supprimer.
+static ORPHELINES_EN_COURS: AtomicBool = AtomicBool::new(false);
+
+fn etait_suspecte(mot: u64) -> bool {
+    ORPHELINES_SUSPECTES
+        .iter()
+        .any(|suspecte| suspecte.load(Ordering::Relaxed) == mot)
+}
+
 fn signale_taches_orphelines() {
-    let mut orphelines = 0usize;
+    if ORPHELINES_EN_COURS.swap(true, Ordering::Acquire) {
+        return;
+    }
+    let mut vues = [0u64; ORPHELINES_SUIVIES];
+    let mut nombre_vues = 0usize;
+    let mut confirmees = 0usize;
     for emplacement in 0..registre_longueur() {
         let Some(identite) = registre_id(emplacement) else { continue };
         let Some(tache) = registre_tache_id(identite) else { continue };
@@ -666,7 +719,16 @@ fn signale_taches_orphelines() {
         {
             continue;
         }
-        orphelines += 1;
+        let mot = identite.en_mot();
+        if nombre_vues < ORPHELINES_SUIVIES {
+            vues[nombre_vues] = mot;
+            nombre_vues += 1;
+        }
+        // Premiere observation : on la retient, on ne l'annonce pas.
+        if !etait_suspecte(mot) {
+            continue;
+        }
+        confirmees += 1;
         let (jetees_gen, jetees_non_eligibles) = pick_jetees(rq);
         crate::serial_println!(
             "[SCHED-ORPHELINE] tid={} slot={} gen={} rq={} aff={:#x} idle={} file_len={} \
@@ -682,13 +744,20 @@ jetees_generation={} jetees_non_eligibles={}",
             jetees_non_eligibles,
         );
     }
-    if orphelines != 0 {
-        crate::serial_println!(
-            "[SCHED-ORPHELINE] total={} -- une tache prete hors de toute file ne \
-sera jamais elue",
-            orphelines,
+    for (indice, suspecte) in ORPHELINES_SUSPECTES.iter().enumerate() {
+        suspecte.store(
+            if indice < nombre_vues { vues[indice] } else { 0 },
+            Ordering::Relaxed,
         );
     }
+    if confirmees != 0 {
+        crate::serial_println!(
+            "[SCHED-ORPHELINE] total={} -- prete hors de toute file DEUX passes de \
+suite : elle ne sera jamais elue",
+            confirmees,
+        );
+    }
+    ORPHELINES_EN_COURS.store(false, Ordering::Release);
 }
 
 // L'ETAT COMPLET DE L'ORDONNANCEMENT, AU MOMENT DU BLOCAGE

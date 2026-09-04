@@ -127,6 +127,18 @@ static CPU_MIGRATIONS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX
 static STEAL_ATTEMPTS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static STEAL_REJECT_BALANCE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static STEAL_REJECT_AFFINITY: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+// BOUCHAUD_C2_REFUS_DE_VOL_DISTINCTS_V1
+//
+// Une tache RETIREE de la file du donneur puis REMISE : elle n'etait plus
+// eligible, ou avait deja change de coeur. C'est du travail pur perdu -- le
+// retrait, l'examen et la remise -- et ce chemin n'incrementait RIEN. La
+// campagne qui a suivi l'abaissement du seuil montre 22 retraits pour 4 vols
+// aboutis : les 18 autres etaient donc invisibles.
+static STEAL_REJECT_INELIGIBLE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+// Course perdue : identite perimee entre le retrait et la lecture, ou tache
+// revendiquee par un autre coeur. Distinct d'un refus d'EQUILIBRE -- ici il y
+// avait bien du travail a prendre, quelqu'un a ete plus rapide.
+static STEAL_REJECT_COURSE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 /// Echeance avant laquelle un CPU ne rescane pas les donneurs apres un echec.
 /// Le reveil d'une tache locale contourne naturellement ce chemin.
 static STEAL_RETRY_AFTER_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];

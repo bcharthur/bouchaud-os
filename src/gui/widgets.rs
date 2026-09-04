@@ -3,7 +3,7 @@
 use crate::gui::apps;
 use crate::gui::framebuffer as fb;
 use crate::gui::window::{
-    self, icon_rect, menu_rect, start_btn, taskbar_btn, Win,
+    self, icon_rect, menu_rect, start_btn, taskbar_btn, App, Win,
     BAR_H, ICONS, MENU, MENU_HEADER_H, MENU_ITEM_H, TITLE_H,
 };
 use crate::arch::x86_64::{cpu, rtc, smp};
@@ -226,15 +226,28 @@ fn fond_de_barre(sommet: usize, filet_en_bas: bool) {
     fb::fill_rect_rgb(0, filet, fb::WIDTH, 1, crate::gui::theme::COLOR_BORDER);
 }
 
-/// Remplit un rectangle arrondi par SEGMENTS, comme le chrome des fenetres.
+/// Remplit un rectangle arrondi par SEGMENTS, ANTI-CRENELE.
+///
+/// BOUCHAUD_C12_CHROME_SANS_MARCHE_V1
+///
+/// Ce remplisseur dessine les fonds arrondis du chrome -- barre d'URL, boutons,
+/// onglets, pastilles. Il utilisait `spans_rounded_rect`, dont les segments
+/// sont binaires : chaque coin sortait en marche d'escalier, et c'est ce que
+/// l'oeil lit comme « des pixels ».
+///
+/// `spans_rounded_rect_aa` rend les memes segments avec leur COUVERTURE. Les
+/// lignes hors des bandes de coins sortent pleines et retombent sur
+/// `fill_rect_rgb` : l'interieur ne paie donc rien de plus qu'avant. Seule la
+/// frange des coins est melangee, et elle ne fait que quelques courses par
+/// ligne.
 fn pave_arrondi(rect: crate::gui::windowing::Rect, rayon: u32, couleur: u32) {
     let (cx0, cy0, cx1, cy1) = fb::clip_rect();
     let decoupe = crate::gui::windowing::Rect::new(cx0 as i32, cy0 as i32,
         cx1.saturating_sub(cx0) as u32, cy1.saturating_sub(cy0) as u32);
-    crate::gui::graphics::spans_rounded_rect(rect, rayon, decoupe,
-        |x, y, largeur| {
-            fb::fill_rect_rgb(x.max(0) as usize, y.max(0) as usize,
-                largeur as usize, 1, couleur)
+    crate::gui::graphics::spans_rounded_rect_aa(rect, rayon, decoupe,
+        |x, y, largeur, couverture| {
+            fb::blend_rect_rgb(x.max(0) as usize, y.max(0) as usize,
+                largeur as usize, couleur, couverture)
         });
 }
 
@@ -412,13 +425,42 @@ fn draw_window(w: &Win, focused: bool) {
     // BOUCHAUD_GUI_RASTER_SEGMENTS_V1 : par SEGMENTS, pas par pixels. Une
     // fenetre maximisee coutait huit millions d'iterations et autant de
     // `fetch_add` atomiques par trame ; elle en coute maintenant ~700.
+    // BOUCHAUD_C13_PAS_DEUX_FOIS_LE_MEME_PIXEL_V1
+    //
+    // La promesse : ce rectangle sera repeint OPAQUE avant la fin de la trame.
+    // Elle n'est tenable que pour un client ring 3 -- `compose_client` recopie
+    // sa surface ligne par ligne, sans transparence, et son ecran d'attente
+    // remplit la zone entiere. Une application native peint ce qu'elle veut :
+    // elle garde son fond.
+    //
+    // Le rectangle est borne par la surface REELLE du client, pas par la zone :
+    // si un jour la surface est plus petite que la fenetre, la difference doit
+    // continuer de recevoir un fond, sinon elle montrerait le bureau.
+    let opaque = match &w.app {
+        App::Navigateur { client } => {
+            let zone = crate::gui::window::zone_utile(w);
+            // `composable`, et non la surface allouee : depuis que celle-ci est
+            // dimensionnee pour une fenetre MAXIMISEE, elle est plus grande que
+            // la zone dans le cas ordinaire, et promettre de peindre ce que le
+            // client n'a pas dessine laisserait une bande de fond sale.
+            let (peinte_l, peinte_h) = client.composable();
+            let largeur = (zone.largeur.max(0) as usize).min(peinte_l) as u32;
+            let hauteur = (zone.hauteur.max(0) as usize).min(peinte_h) as u32;
+            (largeur > 0 && hauteur > 0)
+                .then(|| crate::gui::windowing::Rect::new(zone.x, zone.y, largeur, hauteur))
+        }
+        _ => None,
+    };
     crate::gui::graphics::paint_window_shape_spans(geometry,
         crate::gui::theme::RADIUS_WINDOW,
         crate::gui::windowing::manager::SHADOW_EXTENT, damage,
-        crate::gui::theme::COLOR_SURFACE, border,
-        |px, py, largeur, color| {
-            fb::fill_rect_rgb(px.max(0) as usize, py.max(0) as usize,
-                largeur as usize, 1, color)
+        crate::gui::theme::COLOR_SURFACE, border, opaque,
+        |px, py, largeur, color, couverture| {
+            // `blend_rect_rgb` court-circuite vers `fill_rect_rgb` a 255 : les
+            // anneaux d'ombre et les bandes centrales ne paient rien de plus
+            // qu'avant, seules les bandes de coins melangent.
+            fb::blend_rect_rgb(px.max(0) as usize, py.max(0) as usize,
+                largeur as usize, color, couverture)
         });
 
     let title_h = TITLE_H as usize;
@@ -426,10 +468,12 @@ fn draw_window(w: &Win, focused: bool) {
         else { crate::gui::theme::COLOR_SURFACE };
     let title = crate::gui::windowing::titlebar_rect(outer,
         crate::gui::windowing::WINDOW_CHROME);
-    crate::gui::graphics::spans_rounded_rect(title, crate::gui::theme::RADIUS_WINDOW,
-        damage, |px, py, largeur| {
-            fb::fill_rect_rgb(px.max(0) as usize, py.max(0) as usize,
-                largeur as usize, 1, title_color)
+    // Les coins HAUTS de la barre de titre sont le bord le plus regarde d'une
+    // fenetre : c'est la que la marche d'escalier se voyait le mieux.
+    crate::gui::graphics::spans_rounded_rect_aa(title, crate::gui::theme::RADIUS_WINDOW,
+        damage, |px, py, largeur, couverture| {
+            fb::blend_rect_rgb(px.max(0) as usize, py.max(0) as usize,
+                largeur as usize, title_color, couverture)
         });
     fb::fill_rect_rgb(x + 1, y + title_h - 1, ww.saturating_sub(2), 1,
         crate::gui::theme::COLOR_BORDER);
@@ -455,6 +499,8 @@ fn draw_window(w: &Win, focused: bool) {
     let title_clipped = tronque_a_largeur(&w.title, place, 12.0);
     fb::draw_text_prop(origine_titre, y + (title_h - 12) / 2, title_clipped,
         crate::gui::theme::COLOR_TEXT_PRIMARY, 12.0, false);
+    dessine_duree_chargement(w, origine_titre, fb::text_width(title_clipped, 12.0, false),
+        premier_bouton, y + (title_h - 11) / 2);
 
     let mouse = crate::gui::mouse::pos();
     let hovered = crate::gui::windowing::hit_test(outer,
@@ -517,14 +563,19 @@ pub(crate) fn compose_client(w: &Win, client: &crate::gui::client::Client) {
     if zone.largeur == 0 || zone.hauteur == 0 {
         return;
     }
+    let maintenant = crate::kernel::timer::monotonic_ms();
     if client.etat == Etat::Demarrage {
-        dessine_demarrage(&zone, &client.titre);
+        dessine_demarrage(&zone, &client.titre, &client.jauge, maintenant);
         return;
     }
 
     let surface = &client.surface;
-    let hauteur = (zone.hauteur as usize).min(surface.hauteur);
-    let largeur = (zone.largeur as usize).min(surface.largeur);
+    // La meme borne que la promesse d'opacite de `draw_window` : les deux
+    // doivent decrire le MEME rectangle, sinon l'un peint un fond que l'autre
+    // recouvre, ou pire, laisse a decouvert ce que personne ne peint.
+    let (peinte_l, peinte_h) = client.composable();
+    let hauteur = (zone.hauteur as usize).min(peinte_h);
+    let largeur = (zone.largeur as usize).min(peinte_l);
     let (zx, zy) = (zone.x.max(0) as usize, zone.y.max(0) as usize);
 
     // BOUCHAUD_GUI_CLIP_V1
@@ -557,6 +608,90 @@ pub(crate) fn compose_client(w: &Win, client: &crate::gui::client::Client) {
         surface.copie_ligne(y - zy, colonne, pris, destination);
     }
     fb::note_pixels_dessines(((x_fin - x_debut) * (y_fin - y_debut)) as u64);
+
+    // La jauge se pose APRES la recopie : c'est ce qui la fait disparaitre
+    // toute seule. Quand elle cesse d'etre visible, la surface du client
+    // reprend ces trois lignes sans qu'aucun effacement soit necessaire.
+    dessine_jauge(&zone, &client.jauge, maintenant);
+}
+
+// ─── Jauge de chargement ───────────────────────────────────────────────────
+//
+// BOUCHAUD_C13_JAUGE_DE_CHARGEMENT_V1
+//
+// « Au bout de combien de temps la page charge-t-elle ? » n'avait aucune
+// reponse a l'ecran : ni barre, ni chiffre, ni meme un signe que quelque chose
+// se passait. La seule facon de le savoir etait de chronometrer l'ecran a la
+// main.
+//
+// Deux traits, dessines par ce module :
+//
+//   * une barre de trois pixels en haut de la zone utile, qui avance ;
+//   * la duree, en clair, dans la barre de titre (voir `draw_window`).
+//
+// La machine a etats qui decide de tout cela est `gui::jauge`, pure et testee
+// sur l'hote. Ici il n'y a que du dessin.
+
+/// Hauteur de la barre, en pixels.
+pub(crate) const JAUGE_H: usize = 3;
+
+fn dessine_jauge(zone: &crate::gui::protocole::Rect, jauge: &crate::gui::jauge::Jauge,
+    maintenant: u64) {
+    use crate::gui::jauge::Phase;
+    if !jauge.visible() {
+        return;
+    }
+    let largeur = zone.largeur.max(0) as usize;
+    if largeur == 0 || zone.hauteur as usize <= JAUGE_H {
+        return;
+    }
+    let x = zone.x.max(0) as usize;
+    let y = zone.y.max(0) as usize;
+
+    // Le rail. Une page blanche et une barre bleue sur un fond blanc : sans
+    // rail, la partie NON remplie serait invisible et la barre paraitrait
+    // toujours pleine.
+    fb::fill_rect_rgb(x, y, largeur, JAUGE_H, crate::gui::theme::COLOR_BORDER);
+
+    let progression = jauge.progression(maintenant) as usize;
+    // Arrondi vers le HAUT d'un pixel minimum : a 1 % sur une fenetre etroite,
+    // la division rendait zero et la barre restait eteinte pendant que la page
+    // chargeait -- exactement le contraire de ce qu'elle doit dire.
+    let remplie = (largeur * progression / 100).max(1).min(largeur);
+    let couleur = if jauge.phase() == Phase::Termine {
+        crate::gui::theme::COLOR_SUCCESS
+    } else {
+        crate::gui::theme::COLOR_ACCENT
+    };
+    fb::fill_rect_rgb(x, y, remplie, JAUGE_H, couleur);
+}
+
+/// La duree de chargement, en clair, a droite du titre de la fenetre.
+///
+/// Rendue dans la barre de titre et non sur la page : un indicateur qui
+/// recouvre le contenu pendant qu'on essaie de le lire est un defaut, pas une
+/// fonctionnalite.
+fn dessine_duree_chargement(w: &Win, origine: usize, apres_titre: usize,
+    premier_bouton: usize, ligne: usize) {
+    let App::Navigateur { client } = &w.app else { return };
+    if !client.jauge.visible() {
+        return;
+    }
+    let maintenant = crate::kernel::timer::monotonic_ms();
+    let duree = crate::gui::jauge::formate_duree(client.jauge.duree_affichee_ms(maintenant));
+    let texte = duree.as_str();
+    let debut = (origine + apres_titre).max(origine) + 10;
+    // On n'ecrit RIEN plutot que d'ecrire sous les boutons : un debord interdit
+    // tout culling par rectangle, et la duree passerait sous la croix.
+    if debut + fb::text_width(texte, 11.0, false) + 6 > premier_bouton {
+        return;
+    }
+    let couleur = if client.jauge.phase() == crate::gui::jauge::Phase::Termine {
+        crate::gui::theme::COLOR_SUCCESS
+    } else {
+        crate::gui::theme::COLOR_TEXT_SECONDARY
+    };
+    fb::draw_text_prop(debut, ligne, texte, couleur, 11.0, false);
 }
 
 /// Ecran d'attente dessine **dans la fenetre** du client.
@@ -565,7 +700,8 @@ pub(crate) fn compose_client(w: &Win, client: &crate::gui::client::Client) {
 /// change tout : il ne recouvre plus le bureau. La fenetre existe des le double
 /// clic, la barre des taches et l'horloge continuent, et le contenu Web viendra
 /// remplacer ce dessin sans qu'aucune transition ne soit visible ailleurs.
-fn dessine_demarrage(zone: &crate::gui::protocole::Rect, titre: &str) {
+fn dessine_demarrage(zone: &crate::gui::protocole::Rect, titre: &str,
+    jauge: &crate::gui::jauge::Jauge, maintenant: u64) {
     let zx = zone.x.max(0) as usize;
     let zy = zone.y.max(0) as usize;
     let zl = zone.largeur as usize;
@@ -574,7 +710,7 @@ fn dessine_demarrage(zone: &crate::gui::protocole::Rect, titre: &str) {
     fb::fill_rect_rgb(zx, zy, zl, zh, 0x000B_1220);
 
     let largeur = 540usize.min(zl);
-    let hauteur = 170usize.min(zh);
+    let hauteur = 190usize.min(zh);
     let x = zx + (zl - largeur) / 2;
     let y = zy + (zh - hauteur) / 2;
 
@@ -589,9 +725,28 @@ fn dessine_demarrage(zone: &crate::gui::protocole::Rect, titre: &str) {
         16.0,
         false,
     );
+
+    // Le chronometre du demarrage.
+    //
+    // Il ne cache pas la lenteur, il la CHIFFRE. Un ecran d'attente qui ne
+    // montre rien laisse croire que la machine est bloquee ; le meme ecran
+    // avec « 8,40 s » qui defile dit qu'elle travaille, et donne d'un coup
+    // d'oeil le nombre qu'une optimisation devra faire baisser.
+    if largeur > 80 && hauteur > 150 {
+        let rail_l = largeur - 68;
+        let rail_x = x + 34;
+        let rail_y = y + 118;
+        fb::fill_rect_rgb(rail_x, rail_y, rail_l, 4, 0x001E_2E4A);
+        let remplie = (rail_l * jauge.progression(maintenant) as usize / 100).max(2);
+        fb::fill_rect_rgb(rail_x, rail_y, remplie.min(rail_l), 4, 0x003D_8BFF);
+
+        let ecoule = crate::gui::jauge::formate_duree(jauge.duree_affichee_ms(maintenant));
+        fb::draw_text_prop(rail_x, y + 140, ecoule.as_str(), 0x00B8_C4D9, 14.0, false);
+    }
+
     fb::draw_text_prop(
         x + 34,
-        y + 121,
+        y + 164,
         "Le bureau reste actif pendant le chargement.",
         0x007F_93B8,
         14.0,

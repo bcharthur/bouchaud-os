@@ -1,3 +1,4 @@
+pub mod politique;
 pub mod registry;
 pub mod table;
 

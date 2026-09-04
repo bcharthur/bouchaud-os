@@ -65,9 +65,17 @@ lat = [int(x) for x in re.findall(r"\[SCHED-NG-LAT\].*?interactive_max_ns=(\d+)"
 if lat:
     print(f"interactive_ready_to_run_max_ns={max(lat)}")
 
+# `max_defer_ns` est le report SUBI : du premier refus d'un point sur au
+# service. `attente_service_max_ns` est l'ecart demande->service, inactivite
+# comprise -- diagnostic seul, il grandit sur un coeur au repos.
 pre = [int(x) for x in re.findall(r"\[SCHED-NG-PREEMPT\].*?max_defer_ns=(\d+)", text)]
 if pre:
     print(f"kernel_preempt_defer_max_ns={max(pre)}")
+
+att = [int(x) for x in
+       re.findall(r"\[SCHED-NG-PREEMPT\].*?attente_service_max_ns=(\d+)", text)]
+if att:
+    print(f"kernel_preempt_attente_service_max_ns={max(att)}")
 
 repairs = [int(x) for x in re.findall(r"\[BKL-NG1\.1\].*?stale_self_repairs=(\d+)", text)]
 mismatches = [int(x) for x in re.findall(r"\[BKL-NG1\.1\].*?identity_mismatches=(\d+)", text)]

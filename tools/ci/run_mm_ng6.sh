@@ -16,11 +16,21 @@ sha256sum mmstress > mmstress.sha256
 
 mkdir -p scenario/bin
 cp mmstress scenario/bin/mmstress
+# `smpstat` encadre la charge. C'est ce qui rend les budgets d'EXECUTION
+# verifiables : sans lui, le releve periodique ne sort jamais dans cette trace,
+# les treize grandeurs ressortent « absent du journal », et
+# `check_budgets.py --journal` passe au vert sans avoir rien mesure.
+#
+# Deux appels, pas un : le premier donne la ligne de base du boot, le second
+# l'etat apres la charge. Les budgets se jugent sur le pire des deux, donc sur
+# ce que le stress a reellement produit.
 cat > scenario/autorun <<'AUTORUN'
+smpstat
 echo MMSTRESS_BASIC_BEGIN && /bin/mmstress 4 512 4 && echo MMSTRESS_BASIC_OK
 echo MMSTRESS_UNRELATED_BEGIN && /bin/mmstress unrelated && echo MMSTRESS_UNRELATED_OK
 echo MMSTRESS_ABA_BEGIN && /bin/mmstress aba && echo MMSTRESS_ABA_OK
 echo MMSTRESS_CHURN_BEGIN && /bin/mmstress churn && echo MMSTRESS_CHURN_OK_GUEST
+smpstat
 echo MMSTRESS_NG6_ALL_DONE
 AUTORUN
 (cd tools/userland && IMAGE="$PWD/../../mm-ng6.img" ./mkdisk.sh "$PWD/../../scenario")
@@ -48,6 +58,16 @@ for marker in \
   grep -aF "$marker" mm-ng6.log
  done
 grep -aF '=== AUTORUN FIN === statut=0' mm-ng6.log
+
+# Le releve doit avoir atteint le port serie, sinon les budgets d'execution qui
+# suivent n'auraient rien a lire. On le verifie ICI, ou l'echec nomme sa cause,
+# plutot que de laisser `check_budgets.py` annoncer treize absences.
+for tag in '[BKL-DOMAINES]' '[SCHED-NG-LAT]' '[SCHED-NG-CENTILES]' '[SCHED-NG-FILE]'; do
+  grep -aqF "$tag" mm-ng6.log || {
+    echo "releve periodique absent de la trace : $tag -- smpstat n'a rien emis" >&2
+    exit 1
+  }
+done
 if grep -aqE '\*\*\* KERNEL PANIC \*\*\*|DOUBLE FAULT|FAULT_FATAL|faute de page utilisateur|assertion failed|panicked at' mm-ng6.log; then
   echo 'fatal kernel or user fault in MM stress log' >&2
   exit 1

@@ -7,6 +7,12 @@
 
 use crate::kernel::dmesg;
 
+// Le decodage pur vit dans son propre fichier, dans le MEME module : il ne
+// touche ni 0xCF8 ni 0xCFC, ce qui permet de le mettre a l'epreuve sur l'hote
+// avec un espace de configuration fabrique -- y compris une liste de capacites
+// qui boucle sur elle-meme.
+include!("pci/decodage.rs");
+
 const CONFIG_ADDRESS: u16 = 0xCF8;
 const CONFIG_DATA: u16 = 0xCFC;
 
@@ -20,6 +26,12 @@ pub struct PciDevice {
     pub device: u16,
     pub class: u8,
     pub subclass: u8,
+    /// Interface de programmation. C'est elle qui distingue un NVM Express
+    /// d'un autre controleur de stockage de la meme sous-classe.
+    pub prog_if: u8,
+    /// Type d'en-tete. Le bit 7 dit « multifonction », les bits bas
+    /// distinguent un peripherique (0) d'un PONT (1).
+    pub header_type: u8,
 }
 
 fn config_read32(bus: u8, slot: u8, func: u8, offset: u8) -> u32 {
@@ -80,17 +92,124 @@ fn read_device(bus: u8, slot: u8, func: u8) -> Option<PciDevice> {
     let class_reg = config_read32(bus, slot, func, 0x08);
     let class = (class_reg >> 24) as u8;
     let subclass = (class_reg >> 16) as u8;
-    Some(PciDevice { bus, slot, func, vendor, device, class, subclass })
+    let prog_if = (class_reg >> 8) as u8;
+    let header_type = (config_read32(bus, slot, func, 0x0C) >> 16) as u8;
+    Some(PciDevice {
+        bus, slot, func, vendor, device, class, subclass, prog_if, header_type,
+    })
 }
 
-/// Compte les peripheriques PCI presents (bus 0, suffisant sous QEMU).
-pub fn count() -> usize {
-    let mut n = 0;
+// BOUCHAUD_C10_ENUMERATION_RECURSIVE_V1
+//
+// CE QUE LE BALAYAGE DU BUS 0 NE VOYAIT PAS
+//
+// Il balayait le bus 0, et rien d'autre. C'est suffisant sur i440fx, ou tout
+// est branche sur le bus unique -- et c'est exactement faux sur Q35, la
+// plateforme de reference moderne : les peripheriques y sont derriere des PONTS
+// RACINE PCIe, donc sur les bus 1, 2, 3... Un controleur NVMe attache a un port
+// racine est INVISIBLE a un balayage du bus 0, et le systeme conclut « pas de
+// disque » alors que le disque est la.
+//
+// La recursion suit les ponts par leur registre de bus secondaire. Elle est
+// BORNEE par une profondeur et par un compte de bus visites : une topologie
+// abimee peut chainer un pont sur lui-meme, et un parcours naif y tournerait
+// pour toujours -- au boot, sans console.
+
+/// Profondeur de ponts suivie. Une machine reelle en a deux ou trois.
+const PROFONDEUR_PONTS_MAX: u8 = 8;
+
+/// Applique `visite` a chaque fonction PCI atteignable depuis `bus`.
+///
+/// `visite` rend `false` pour arreter le parcours -- ce qui evite de balayer
+/// toute la topologie quand on cherche le PREMIER peripherique d'une classe.
+fn parcours_bus(bus: u8, profondeur: u8, visite: &mut dyn FnMut(&PciDevice) -> bool) -> bool {
+    if profondeur > PROFONDEUR_PONTS_MAX {
+        return true;
+    }
     for slot in 0..32u8 {
-        for func in 0..8u8 {
-            if read_device(0, slot, func).is_some() { n += 1; }
+        let Some(fonction_zero) = read_device(bus, slot, 0) else { continue };
+        // Une fonction unique ne demande pas huit acces de configuration.
+        let fonctions = if multifonction(fonction_zero.header_type) { 8 } else { 1 };
+        for func in 0..fonctions {
+            let Some(d) = read_device(bus, slot, func) else { continue };
+            if !visite(&d) {
+                return false;
+            }
+            if est_pont(d.class, d.subclass, d.header_type) {
+                let mot = config_read32(d.bus, d.slot, d.func, 0x18);
+                let secondaire = bus_secondaire(mot);
+                // Un pont dont le bus secondaire vaut le sien -- ou zero --
+                // est mal configure : le suivre serait une boucle.
+                if secondaire != 0 && secondaire != bus
+                    && !parcours_bus(secondaire, profondeur + 1, visite)
+                {
+                    return false;
+                }
+            }
         }
     }
+    true
+}
+
+/// Applique `visite` a toute la topologie, ponts compris.
+pub fn parcours(visite: &mut dyn FnMut(&PciDevice) -> bool) {
+    parcours_bus(0, 0, visite);
+}
+
+/// Les capacites d'un peripherique, dans `sortie`. Rend combien ont ete lues.
+///
+/// MSI et MSI-X y vivent : sans cette liste, un controleur moderne ne peut
+/// delivrer ses interruptions que par la ligne heritee -- partagee, lente, et
+/// absente de certaines topologies PCIe. C'est la premiere brique que NVMe
+/// demande.
+pub fn capacites_de(d: &PciDevice, sortie: &mut [Capacite]) -> usize {
+    let statut_commande = config_read32(d.bus, d.slot, d.func, 0x04);
+    capacites(
+        statut_commande,
+        |decalage| config_read32(d.bus, d.slot, d.func, decalage),
+        sortie,
+    )
+}
+
+/// Le BAR `index`, en tenant compte des BAR memoire 64 bits.
+///
+/// `bar()` lisait des mots de 32 bits. Le BAR0 d'un NVMe est un BAR MEMOIRE
+/// 64 BITS : lu sur 32 bits, il donne la moitie basse d'une adresse, ce qui est
+/// pire qu'une erreur -- c'est une adresse plausible qui pointe ailleurs.
+pub fn bar_decode(d: &PciDevice, index: u8) -> Bar {
+    if index >= 6 {
+        return Bar::Absent;
+    }
+    let bas = config_read32(d.bus, d.slot, d.func, 0x10 + index * 4);
+    let haut = if index < 5 {
+        config_read32(d.bus, d.slot, d.func, 0x10 + (index + 1) * 4)
+    } else {
+        0
+    };
+    decode_bar(bas, haut)
+}
+
+/// Le premier controleur NVM Express de la machine, ou `None`.
+///
+/// Aucun pilote ne le programme encore. Le DETECTER est ce qui manquait : tant
+/// que l'enumeration ne voyait pas au-dela du bus 0, on ne pouvait meme pas
+/// savoir s'il y en avait un.
+pub fn find_nvme() -> Option<PciDevice> {
+    let mut trouve = None;
+    parcours(&mut |d| {
+        if est_nvme(d.class, d.subclass, d.prog_if) {
+            trouve = Some(*d);
+            return false;
+        }
+        true
+    });
+    trouve
+}
+
+/// Compte les peripheriques PCI presents, PONTS COMPRIS.
+pub fn count() -> usize {
+    let mut n = 0;
+    parcours(&mut |_| { n += 1; true });
     n
 }
 
@@ -149,14 +268,12 @@ pub fn print_devices() {
 /// Cherche le premier controleur graphique PCI (classe 0x03), p.ex. la carte
 /// VGA `std`/Bochs de QEMU (1234:1111) dont le BAR0 est le framebuffer lineaire.
 pub fn find_display() -> Option<PciDevice> {
-    for slot in 0..32u8 {
-        for func in 0..8u8 {
-            if let Some(d) = read_device(0, slot, func) {
-                if d.class == 0x03 { return Some(d); }
-            }
-        }
-    }
-    None
+    let mut trouve = None;
+    parcours(&mut |d| {
+        if d.class == 0x03 { trouve = Some(*d); return false; }
+        true
+    });
+    trouve
 }
 
 /// Cherche le premier peripherique audio PCI (classe 0x04, sous-classe 0x01).
@@ -165,16 +282,15 @@ pub fn find_display() -> Option<PciDevice> {
 /// d'Ensoniq ; le pilote verifie ensuite qu'il sait parler a celui qu'il a
 /// trouve.
 pub fn find_audio() -> Option<PciDevice> {
-    for slot in 0..32u8 {
-        for func in 0..8u8 {
-            if let Some(d) = read_device(0, slot, func) {
-                if d.class == 0x04 && (d.subclass == 0x01 || d.subclass == 0x03) {
-                    return Some(d);
-                }
-            }
+    let mut trouve = None;
+    parcours(&mut |d| {
+        if d.class == 0x04 && (d.subclass == 0x01 || d.subclass == 0x03) {
+            trouve = Some(*d);
+            return false;
         }
-    }
-    None
+        true
+    });
+    trouve
 }
 
 /// Ligne d'interruption affectee au peripherique (registre 0x3C).
@@ -182,22 +298,52 @@ pub fn interrupt_line(d: &PciDevice) -> u8 {
     (config_read32(d.bus, d.slot, d.func, 0x3C) & 0xFF) as u8
 }
 
-/// Cherche la premiere carte reseau PCI presente.
+/// Cherche la premiere carte reseau PCI presente, ponts compris.
 pub fn find_network() -> Option<PciDevice> {
-    for slot in 0..32u8 {
-        for func in 0..8u8 {
-            if let Some(d) = read_device(0, slot, func) {
-                if is_network(&d) { return Some(d); }
-            }
-        }
-    }
-    None
+    let mut trouve = None;
+    parcours(&mut |d| {
+        if is_network(d) { trouve = Some(*d); return false; }
+        true
+    });
+    trouve
 }
 
-/// Scan de boot : journalise le nombre de peripheriques et la carte reseau.
+/// Scan de boot : inventaire de la topologie, ponts compris.
 pub fn init() {
     let n = count();
-    dmesg::log("pci: scan du bus 0 effectue");
+    let mut bus_vus = 0usize;
+    let mut ponts = 0usize;
+    let mut dernier_bus = u16::MAX;
+    parcours(&mut |d| {
+        if d.bus as u16 != dernier_bus {
+            dernier_bus = d.bus as u16;
+            bus_vus += 1;
+        }
+        if est_pont(d.class, d.subclass, d.header_type) { ponts += 1; }
+        true
+    });
+    // Ce que le scan sait DIRE, et rien de plus. « scan du bus 0 effectue »
+    // etait vrai et trompeur : sur Q35, ce qui compte est justement ce qui est
+    // derriere les ponts.
+    crate::serial_println!(
+        "[PCI-NG] peripheriques={} bus={} ponts={}", n, bus_vus, ponts
+    );
+    if let Some(nvme) = find_nvme() {
+        let mut capacites = [Capacite { identifiant: 0, decalage: 0 }; 16];
+        let trouvees = capacites_de(&nvme, &mut capacites);
+        let msix = trouve_capacite(&capacites[..trouvees], CAP_MSIX).is_some();
+        let msi = trouve_capacite(&capacites[..trouvees], CAP_MSI).is_some();
+        crate::serial_println!(
+            "[PCI-NG] nvme {:04x}:{:04x} bus={} bar0={:#x} msi={} msix={}",
+            nvme.vendor, nvme.device, nvme.bus,
+            bar_decode(&nvme, 0).adresse(), msi, msix
+        );
+        // Aucun pilote ne le programme encore. Le DETECTER est ce qui manquait :
+        // tant que l'enumeration s'arretait au bus 0, on ne pouvait meme pas
+        // savoir s'il y en avait un.
+        dmesg::log("pci: controleur NVMe detecte (pilote absent)");
+    }
+    dmesg::log("pci: topologie parcourue, ponts compris");
     match find_network() {
         Some(d) => {
             // Trace lisible cote serie sans format complexe dans dmesg.

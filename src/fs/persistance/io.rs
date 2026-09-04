@@ -7,10 +7,27 @@ fn synchronise_snapshot(entrees: &[SnapshotEntree]) -> i64 {
     };
     if entrees.len() > ENTREES_MAX { oublie_le_disque(); return -1; }
 
+    // BOUCHAUD_C5_COMMIT_AB_V1
+    //
+    // On ecrit dans la demi-zone INACTIVE. Celle dont depend le systeme monte
+    // n'est pas touchee : une coupure ici n'abime que du contenu dont personne
+    // ne depend, et le superbloc courant continue de designer l'ancien etat.
+    let courant = superbloc_courant(base);
+    let (emplacement, demi_prevue, generation) = prochain(courant);
+    // La demi-zone doit preserver un eventuel etat V1 encore vivant : sur un
+    // disque V1, la demi-zone 0 recouvre sa table des sa premiere ecriture,
+    // alors que l'en-tete V1 dit toujours « valide ».
+    let Some(demi) = demi_sure(demi_prevue) else {
+        crate::kernel::dmesg::log(
+            "persistance: contenu V1 trop grand pour une demi-zone, migration refusee");
+        oublie_le_disque();
+        return -1;
+    };
+
     let secteurs_table = secteurs_table_utiles(entrees.len());
     let mut table = vec![0u8; secteurs_table * SECTOR_SIZE];
-    let mut secteur = base + SECTEUR_CONTENU;
-    let fin_zone = base + SECTEURS_ZONE;
+    let mut secteur = base + contenu_demi(demi);
+    let fin_zone = base + fin_demi(demi);
     let mut nouveau: Vec<SurDisque> = Vec::with_capacity(entrees.len());
     let mut ecrites = 0usize;
     let mut sautees = 0usize;
@@ -31,6 +48,10 @@ fn synchronise_snapshot(entrees: &[SnapshotEntree]) -> i64 {
         TX_HASH_NS.fetch_add(crate::kernel::timer::monotonic_ns().saturating_sub(hash_start), Ordering::Relaxed);
 
         if secteurs != 0 {
+            // La demi-zone alterne : un contenu ecrit au tour precedent n'est
+            // PAS a la meme place. Le cache d'ecriture ne peut donc sauter une
+            // ecriture que si la demi-zone n'a pas change, ce que `deja_ecrite`
+            // verifie par le secteur.
             if deja_ecrite(index, &entree.chemin, secteur, longueur, sceau_courant) {
                 sautees += 1;
             } else {
@@ -50,19 +71,38 @@ fn synchronise_snapshot(entrees: &[SnapshotEntree]) -> i64 {
 
     if secteurs_table != 0 {
         let io_start = crate::kernel::timer::monotonic_ns();
-        let ok = ata::write(Drive::Slave, base + 1, secteurs_table, &table) == secteurs_table;
+        let ok = ata::write(Drive::Slave, base + debut_demi(demi), secteurs_table, &table)
+            == secteurs_table;
         TX_IO_NS.fetch_add(crate::kernel::timer::monotonic_ns().saturating_sub(io_start), Ordering::Relaxed);
         if !ok { oublie_le_disque(); return -1; }
     }
 
-    let mut entete = vec![0u8; SECTOR_SIZE];
-    entete[0..8].copy_from_slice(MAGIE);
-    ecrit_u32(&mut entete[8..12], 1);
-    ecrit_u32(&mut entete[12..16], entrees.len() as u32);
+    // LE COMMIT. Un seul secteur, ecrit dans l'emplacement de superbloc que le
+    // montage courant n'utilise PAS. Tant qu'il n'a pas ete ecrit, le systeme
+    // monte reste l'ancien -- entierement, jamais a moitie. Et s'il est
+    // dechire, sa somme de controle le rejette et l'ancien reste le bon.
+    let mut secteur_superbloc = vec![0u8; SECTOR_SIZE];
+    let nouveau_superbloc = Superbloc {
+        generation,
+        demi,
+        entrees: entrees.len() as u32,
+        secteurs_contenu: secteur.saturating_sub(base + contenu_demi(demi)),
+        somme_table: somme_controle(&table),
+    };
+    if !nouveau_superbloc.encode(&mut secteur_superbloc) {
+        oublie_le_disque();
+        return -1;
+    }
     let io_start = crate::kernel::timer::monotonic_ns();
-    let header_ok = ata::write(Drive::Slave, base, 1, &entete) == 1;
+    let commit_ok = ata::write(
+        Drive::Slave, base + emplacement as u64, 1, &secteur_superbloc) == 1;
     TX_IO_NS.fetch_add(crate::kernel::timer::monotonic_ns().saturating_sub(io_start), Ordering::Relaxed);
-    if !header_ok { oublie_le_disque(); return -1; }
+    if !commit_ok { oublie_le_disque(); return -1; }
+    // Le commit a eu lieu : l'etat V1 vient d'etre remplace d'un seul secteur,
+    // et il n'y a plus rien a preserver.
+    oublie_la_v1();
+    TX_COMMITS.fetch_add(1, Ordering::Relaxed);
+    TX_GENERATION.store(generation, Ordering::Relaxed);
 
     *DISQUE.lock() = nouveau;
     TX_WRITTEN.fetch_add(ecrites as u64, Ordering::Relaxed);
