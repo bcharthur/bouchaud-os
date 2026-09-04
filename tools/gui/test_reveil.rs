@@ -27,9 +27,9 @@
 mod politique;
 
 use politique::{
-    doit_composer, doit_rafraichir_horloge, doit_recomposer_aveugle, duree_sommeil_ms,
-    prochaine_echeance, Etat, PERIODE_HORLOGE_MS, PERIODE_RELEVE_MS, PERIODE_TRAME_MS,
-    REACTIVITE_MUETTE_MS, REPOS_MUET_MS,
+    doit_animer_jauge, doit_composer, doit_rafraichir_horloge, doit_recomposer_aveugle,
+    duree_sommeil_ms, prochaine_echeance, Etat, PERIODE_HORLOGE_MS, PERIODE_JAUGE_MS,
+    PERIODE_RELEVE_MS, PERIODE_TRAME_MS, REACTIVITE_MUETTE_MS, REPOS_MUET_MS,
 };
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -519,4 +519,71 @@ fn un_mouvement_de_curseur_demande_une_composition() {
         Some(8_000),
         "le creneau de trame est deja atteint : composer maintenant"
     );
+}
+
+
+// ===========================================================================
+// 4. La jauge de chargement
+// ===========================================================================
+//
+// Une barre de progression est la SEULE chose du bureau qui bouge sans qu'une
+// entree l'ait demandee. Elle doit donc porter sa propre echeance de reveil --
+// et, tout aussi important, la retirer des qu'elle disparait : le bureau au
+// repos ne doit pas se reveiller huit fois par seconde pour rien.
+
+#[test]
+fn une_jauge_visible_reveille_le_bureau_a_sa_cadence() {
+    let etat = Etat {
+        maintenant_ms: 10_000,
+        horloge_visible: false,
+        dernier_releve_ms: u64::MAX - PERIODE_RELEVE_MS,
+        jauge_visible: true,
+        derniere_jauge_ms: 10_000,
+        ..Default::default()
+    };
+    assert_eq!(duree_sommeil_ms(&etat), Some(PERIODE_JAUGE_MS));
+    assert!(!doit_animer_jauge(&etat), "elle vient d'etre animee");
+
+    let plus_tard = Etat { maintenant_ms: 10_000 + PERIODE_JAUGE_MS, ..etat };
+    assert!(doit_animer_jauge(&plus_tard));
+    assert_eq!(duree_sommeil_ms(&plus_tard), Some(0), "echeance atteinte");
+}
+
+#[test]
+fn une_jauge_eteinte_ne_reveille_rien() {
+    // La propriete qui evite qu'une fonctionnalite d'affichage ne devienne un
+    // reveil permanent : sans elle, le bureau au repos aurait paye huit
+    // reveils par seconde pour une barre invisible.
+    let etat = Etat {
+        maintenant_ms: 10_000,
+        horloge_visible: false,
+        dernier_releve_ms: u64::MAX - PERIODE_RELEVE_MS,
+        jauge_visible: false,
+        derniere_jauge_ms: 10_000,
+        ..Default::default()
+    };
+    assert!(!doit_animer_jauge(&etat));
+    let echeance = prochaine_echeance(&etat);
+    assert!(
+        echeance.is_none() || echeance.unwrap() > etat.maintenant_ms + 1_000_000,
+        "une jauge eteinte ne doit poser aucune echeance, obtenu {echeance:?}"
+    );
+}
+
+#[test]
+fn la_jauge_ne_retarde_jamais_une_trame_en_attente() {
+    // Deux echeances concurrentes : la plus PROCHE gagne. Une jauge ne doit
+    // pas pouvoir faire attendre un degat deja pret a etre compose.
+    let etat = Etat {
+        maintenant_ms: 10_000,
+        sale: true,
+        derniere_trame_ms: 10_000,
+        horloge_visible: false,
+        dernier_releve_ms: u64::MAX - PERIODE_RELEVE_MS,
+        jauge_visible: true,
+        derniere_jauge_ms: 10_000,
+        ..Default::default()
+    };
+    assert!(PERIODE_TRAME_MS < PERIODE_JAUGE_MS);
+    assert_eq!(duree_sommeil_ms(&etat), Some(PERIODE_TRAME_MS));
 }

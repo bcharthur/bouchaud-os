@@ -9,6 +9,17 @@ pub const PERIODE_TRAME_MS: u64 = 16;
 /// Rafraîchissement de l'horloge/indicateurs visibles.
 pub const PERIODE_HORLOGE_MS: u64 = 1000;
 
+/// Cadence d'animation de la jauge de chargement d'un client.
+///
+/// Elle ne redessine QUE la barre de titre et les trois premières lignes du
+/// contenu (voir `window::zone_jauge`), jamais la fenêtre entière — et
+/// seulement tant qu'une jauge est visible. Huit rafraîchissements par seconde
+/// suffisent à faire avancer une barre de façon continue à l'œil ; la période
+/// de trame en donnerait soixante pour rien.
+///
+/// BOUCHAUD_C13_JAUGE_DE_CHARGEMENT_V1
+pub const PERIODE_JAUGE_MS: u64 = 125;
+
 // BOUCHAUD_V16_2_TELEMETRY_CADENCE
 //
 // Le relevé détaillé produit plusieurs kilo-octets de diagnostics série. Sous
@@ -38,6 +49,9 @@ pub struct Etat {
     pub dernier_releve_ms: u64,
     pub dernier_aveugle_ms: u64,
     pub derniere_entree_ms: u64,
+    /// Une jauge de chargement est affichée quelque part.
+    pub jauge_visible: bool,
+    pub derniere_jauge_ms: u64,
 }
 
 impl Etat {
@@ -68,6 +82,13 @@ pub fn prochaine_echeance(etat: &Etat) -> Option<u64> {
     if etat.client_muet_visible {
         retiens(etat.dernier_aveugle_ms.wrapping_add(etat.periode_aveugle()));
     }
+    // Une jauge qui charge doit avancer, et une jauge terminée doit finir par
+    // s'effacer : les deux sont des échéances que personne d'autre n'annonce.
+    // Sans cette ligne, le compositeur dormait une seconde entière et la barre
+    // avançait par à-coups d'un dixième.
+    if etat.jauge_visible {
+        retiens(etat.derniere_jauge_ms.wrapping_add(PERIODE_JAUGE_MS));
+    }
     retiens(etat.dernier_releve_ms.wrapping_add(PERIODE_RELEVE_MS));
 
     echeance
@@ -81,6 +102,11 @@ pub fn doit_composer(etat: &Etat) -> bool {
 pub fn doit_recomposer_aveugle(etat: &Etat) -> bool {
     etat.client_muet_visible
         && etat.maintenant_ms.wrapping_sub(etat.dernier_aveugle_ms) >= etat.periode_aveugle()
+}
+
+pub fn doit_animer_jauge(etat: &Etat) -> bool {
+    etat.jauge_visible
+        && etat.maintenant_ms.wrapping_sub(etat.derniere_jauge_ms) >= PERIODE_JAUGE_MS
 }
 
 pub fn doit_rafraichir_horloge(etat: &Etat) -> bool {

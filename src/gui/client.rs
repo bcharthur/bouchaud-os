@@ -9,6 +9,7 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use crate::gui::jauge::Jauge;
 use crate::gui::protocole::{self as proto, Genre, Lecture, Rect};
 use crate::gui::silence::VerdictProtocole;
 use crate::gui::surface::Surface;
@@ -43,6 +44,12 @@ pub struct Client {
     pub evenements_perdus: u64,
     pub derniere_trame: u64,
     debut: u64,
+    /// Lancement du client, sur l'horloge monotone.
+    naissance_ms: u64,
+    /// Chronometre de chargement affiche dans la fenetre. Voir `gui::jauge`.
+    ///
+    /// BOUCHAUD_C13_JAUGE_DE_CHARGEMENT_V1
+    pub jauge: Jauge,
 }
 
 impl Client {
@@ -114,6 +121,10 @@ impl Client {
             chemin, pid, largeur_px, hauteur_px
         ));
 
+        // Une seule lecture d'horloge : le journal et la jauge doivent dater le
+        // lancement du MEME instant, sinon les deux durees de demarrage
+        // publiees ne coincident pas.
+        let naissance = crate::kernel::timer::monotonic_ms();
         let mut client = Client {
             pid,
             etat: Etat::Demarrage,
@@ -131,6 +142,8 @@ impl Client {
             evenements_envoyes: 0,
             evenements_perdus: 0,
             derniere_trame: 0,
+            naissance_ms: naissance,
+            jauge: Jauge::neuve(naissance),
             debut: crate::kernel::timer::ticks(),
         };
         client.annonce_surface();
@@ -150,6 +163,10 @@ impl Client {
         drop(canal);
         crate::kernel::fd::notify_readiness();
         self.evenements_envoyes += 1;
+        if matches!(genre, Genre::Key | Genre::Pointer | Genre::Wheel) {
+            // Ce qui distingue un chargement d'un defilement. Voir `gui::jauge`.
+            self.jauge.note_entree(crate::kernel::timer::monotonic_ms());
+        }
         true
     }
 
@@ -381,7 +398,14 @@ impl Client {
             }
             Genre::SetTitle => {
                 if let Ok(titre) = core::str::from_utf8(charge) {
-                    self.titre = titre.chars().take(96).collect();
+                    let nouveau: String = titre.chars().take(96).collect();
+                    // Un titre REPETE n'est pas une navigation. Ladybird
+                    // reannonce le sien a chaque changement d'onglet interne ;
+                    // sans ce test, chacun aurait remis le chronometre a zero.
+                    if nouveau != self.titre {
+                        self.titre = nouveau;
+                        self.jauge.note_titre(crate::kernel::timer::monotonic_ms());
+                    }
                 }
                 false
             }
@@ -408,9 +432,14 @@ impl Client {
                 self.degat = self.degat.union(&degat);
                 self.marque_protocole_actif();
                 if self.derniere_trame == 0 {
+                    // La duree de demarrage, chiffree, dans le journal. « Lent
+                    // a demarrer » est une phrase ; ceci est une mesure, et
+                    // c'est elle qu'une optimisation future devra deplacer.
+                    let demarrage = crate::kernel::timer::monotonic_ms()
+                        .saturating_sub(self.naissance_ms);
                     crate::kernel::dmesg::log_fmt(format_args!(
-                        "gui: premiere trame du client pid={} ({}x{})",
-                        self.pid, degat.largeur, degat.hauteur
+                        "gui: premiere trame du client pid={} ({}x{}) apres {} ms",
+                        self.pid, degat.largeur, degat.hauteur, demarrage
                     ));
                 }
                 if self.trames == 0 {
@@ -425,6 +454,12 @@ impl Client {
                 self.etat = Etat::Actif;
                 self.trames += 1;
                 self.derniere_trame = crate::kernel::timer::ticks();
+                // La jauge lit l'horloge MONOTONE, pas le tick PIT. Sous TCG,
+                // IRQ0 est retardee precisement quand un vCPU sature le
+                // traducteur -- c'est-a-dire quand la page charge le plus mal.
+                // Un chronometre sur le tick sous-estimerait donc la lenteur au
+                // moment exact ou l'utilisateur la constate.
+                self.jauge.note_trame(crate::kernel::timer::monotonic_ms());
                 true
             }
             Genre::Close => {
@@ -433,6 +468,19 @@ impl Client {
             }
             _ => false,
         }
+    }
+
+    /// Fait avancer le chronometre de chargement.
+    ///
+    /// Rend vrai si la jauge doit etre redessinee. La FIN d'une rafale de
+    /// trames est un non-evenement : personne ne l'annonce, il faut donc venir
+    /// la constater.
+    pub fn tic_jauge(&mut self, maintenant_ms: u64) -> bool {
+        let visible_avant = self.jauge.visible();
+        self.jauge.tic(maintenant_ms);
+        // Un chronometre qui tourne change a chaque trame ; une jauge qui
+        // s'allume ou s'eteint change une fois.
+        self.jauge.en_cours() || self.jauge.visible() != visible_avant
     }
 
     const PATIENCE_MS: u64 = 6000;
@@ -454,6 +502,7 @@ impl Client {
             Self::PATIENCE_MS / 1000
         ));
         self.verdict.declare_muet();
+        self.jauge.abandonne_demarrage();
         self.etat = Etat::Actif;
         self.abime_tout();
         true

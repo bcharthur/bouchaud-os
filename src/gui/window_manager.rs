@@ -481,6 +481,7 @@ fn boucle() {
     // « aveugle » : ensemble, ils donnent sa cadence a un client muet.
     let mut derniere_entree = 0u64;
     let mut dernier_aveugle = 0u64;
+    let mut derniere_jauge = 0u64;
     // BOUCHAUD_GUI_CHAINE_ENTREE_LFB_V1 : voir `gui::chaine`.
     let mut veilleur = Veilleur::neuf();
 
@@ -791,6 +792,40 @@ fn boucle() {
             dernier_aveugle = maintenant;
             reveil::note_recomposition_aveugle();
         }
+        // ---- Jauge de chargement ----
+        //
+        // BOUCHAUD_C13_JAUGE_DE_CHARGEMENT_V1
+        //
+        // La FIN d'une rafale de trames est un non-evenement : personne ne
+        // l'annonce, il faut venir la constater. C'est ce tic qui arrete le
+        // chronometre, et c'est lui aussi qui fait avancer la barre -- une
+        // barre de progression est la seule chose du bureau qui bouge sans
+        // qu'aucune entree ne l'ait demande.
+        //
+        // Il ne salit QUE la barre de titre et les trois premieres lignes du
+        // contenu, et seulement quand quelque chose a change. Une jauge
+        // terminee est immobile : elle ne coute plus rien jusqu'a son
+        // effacement.
+        let mut jauge_visible = false;
+        if maintenant.wrapping_sub(derniere_jauge) >= politique::PERIODE_JAUGE_MS {
+            derniere_jauge = maintenant;
+            for w in wins.iter_mut() {
+                if w.min || !window::est_client(w) {
+                    continue;
+                }
+                let zone = window::zone_jauge(w);
+                let App::Navigateur { client } = &mut w.app else { continue };
+                if client.tic_jauge(maintenant) {
+                    degats.ajoute(Origine::Client, zone);
+                    sale = true;
+                }
+                jauge_visible |= client.jauge.visible();
+            }
+        } else {
+            jauge_visible = wins.iter().any(|w| !w.min
+                && matches!(&w.app, App::Navigateur { client } if client.jauge.visible()));
+        }
+
         let (degat_clients, perte_fenetre) = pompe_clients(&mut wins, recompose_aveugle);
         if !degat_clients.vide() {
             sale = true;
@@ -976,6 +1011,8 @@ fn boucle() {
             dernier_releve_ms: dernier_releve,
             dernier_aveugle_ms: dernier_aveugle,
             derniere_entree_ms: derniere_entree,
+            jauge_visible,
+            derniere_jauge_ms: derniere_jauge,
         };
 
         // Pas de traitement particulier du glisser. Il serait tentant de

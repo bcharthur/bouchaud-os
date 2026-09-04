@@ -6,6 +6,7 @@
 //!   - `window` : fenetres et types partages ;
 //!   - `widgets` : rendu (fenetres, barre des taches, menu, curseur, icones) ;
 //!   - `politique` : quand composer, quand dormir -- arithmetique pure ;
+//!   - `jauge` : chronometre de chargement d'une page -- machine a etats pure ;
 //!   - `reveil` : comptabilite du reveil evenementiel du compositeur ;
 //!   - `scene` : quels calques dessiner pour un rectangle -- geometrie pure ;
 //!   - `silence` : ce client annonce-t-il ses trames, ou faut-il deviner ;
@@ -31,6 +32,9 @@ pub mod disposition;
 pub mod transition;
 pub mod protocole;
 pub mod composited;
+
+// C13 : « au bout de combien de temps la page est-elle affichee ? »
+pub mod jauge;
 
 // BOUCHAUD_C12_ECHELLE_V1
 //

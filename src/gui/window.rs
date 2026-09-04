@@ -245,6 +245,30 @@ pub(crate) fn zone_utile(w: &Win) -> crate::gui::protocole::Rect {
     crate::gui::protocole::Rect::neuf(rect.x, rect.y, rect.width, rect.height)
 }
 
+/// Rectangle a rafraichir pour animer la jauge de chargement d'un client.
+///
+/// Pendant le DEMARRAGE, la jauge vit dans la carte d'attente au centre de la
+/// zone utile : il faut la zone entiere. Une fois le client actif, elle se
+/// reduit a la barre de titre -- ou s'ecrit la duree -- et aux trois premieres
+/// lignes du contenu. Rafraichir la fenetre entiere dix fois par seconde pour
+/// animer trois lignes serait exactement l'inverse de ce que le compositeur
+/// passe son temps a eviter.
+///
+/// BOUCHAUD_C13_JAUGE_DE_CHARGEMENT_V1
+pub(crate) fn zone_jauge(w: &Win) -> crate::gui::protocole::Rect {
+    let zone = zone_utile(w);
+    let demarre = matches!(&w.app,
+        App::Navigateur { client } if client.etat == crate::gui::client::Etat::Demarrage);
+    if demarre {
+        return zone;
+    }
+    let haut = w.rect();
+    let bas = zone.y.saturating_add(crate::gui::widgets::JAUGE_H as i32);
+    crate::gui::protocole::Rect::neuf(
+        haut.x, haut.y, haut.width, bas.saturating_sub(haut.y).max(0) as u32,
+    )
+}
+
 /// Geometrie d'une fenetre dont la zone utile doit faire `largeur` x `hauteur`.
 pub(crate) fn fenetre_pour_zone(largeur: i32, hauteur: i32) -> (i32, i32) {
     let rect = crate::gui::windowing::outer_rect_for_client_size(
