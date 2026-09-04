@@ -77,6 +77,9 @@ AUDITS_NOMMES = {
             "decodeur clavier et generateur d'alea verrouillees par ce meme lot, "
             "branche socket bornee en interne",
     "READV": "c1 -- boucle sur `sys_read`, meme audit",
+    "GETRANDOM": "c13 -- audit au-dessus de la ligne GETRANDOM dans SANS_BKL ; "
+                 "le generateur porte son SpinLock depuis c1, `user_write` passe "
+                 "par `current_process_local`, aucune lecture de TASKS",
     "MUNMAP": "V14 -- Mm + TLB + caches SMP-safe, aucun writeback sous verrou externe",
     "MADVISE": "V14 -- Mm + TLB + clean-cache SMP-safe",
     "GETPID": "A1 lot 2 -- domaine CPU-local, aucune lecture de TASKS",
