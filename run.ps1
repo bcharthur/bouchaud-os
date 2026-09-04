@@ -504,101 +504,35 @@ if ($LadybirdMode) {
                 Fail "impossible de determiner la branche pour trouver l'artefact Ladybird"
             }
 
-            # BOUCHAUD_ARTEFACT_PRODUCTEUR_V1
+            # BOUCHAUD_ARTEFACT_PRODUCTEUR_V1 / BOUCHAUD_SANS_JQ_V1
             #
-            # Le critere etait `--status success` : le dernier run dont TOUS
-            # les jobs sont verts. Or `ladybird-native-browser.yml` a deux
-            # jobs, et un seul PRODUIT l'artefact :
+            # Le critere de selection -- l'ARTEFACT lui-meme, jamais la
+            # conclusion du run -- est explique la ou il s'applique, dans
+            # `tools/ladybird/selection-artefact.ps1`.
             #
-            #   ladybird / build once     -> upload-artifact  (producteur)
-            #   ladybird / browser-host smoke -> download-artifact (consommateur)
-            #
-            # Le smoke fait tourner le navigateur dans QEMU sans acceleration.
-            # Quand il echoue, la conclusion du RUN passe au rouge alors que
-            # l'artefact est publie, intact, et telechargeable. `--status
-            # success` le sautait : l'image Ladybird de la machine cessait de
-            # se mettre a jour a cause d'un job qui ne la fabrique pas.
-            #
-            # Le critere est donc l'ARTEFACT LUI-MEME. Il subsume l'ancien --
-            # `if-no-files-found: error` garantit qu'il n'existe que si le
-            # producteur a reussi -- et il ajoute ce que l'ancien ignorait :
-            # la retention. Un run vert de plus de quatorze jours etait choisi,
-            # puis `gh run download` echouait sans dire pourquoi.
-            # BOUCHAUD_SANS_JQ_V1
-            #
-            # Le filtrage se fait en PowerShell, jamais par `--jq`.
-            #
-            # Windows PowerShell 5.1 reconstruit une LIGNE DE COMMANDE pour
-            # lancer un programme natif, et mange les guillemets doubles
-            # contenus dans un argument. Un programme jq comme
-            #
-            #     select(.name == "bouchaud-ladybird-native-browser")
-            #
-            # arrivait donc a `gh` sans ses guillemets, et jq lisait
-            # `bouchaud - ladybird - native - browser` : quatre soustractions
-            # et un appel a une fonction inexistante. D'ou, sur la machine de
-            # l'utilisateur, un "function not defined: browser/0" qui
-            # n'accusait ni gh ni PowerShell mais laissait croire a une panne
-            # de l'outil.
-            #
-            # `ConvertFrom-Json` supprime la classe entiere : plus aucun
-            # guillemet ne traverse la frontiere des arguments natifs.
+            # Il vit dans un fichier separe pour une raison precise :
+            # `run.ps1` s'execute de bout en bout des qu'on le charge --
+            # noyau, disque, QEMU --, donc aucun test ne peut en appeler une
+            # partie. La CI ne faisait qu'ANALYSER ce fichier, et trois
+            # defauts d'EXECUTION sont passes par ce trou, tous dans ce
+            # bloc-ci. `tools/ci/test-selection-artefact.ps1` l'execute
+            # maintenant avec un `gh` simule.
+            . (Join-Path $RepoRoot "tools/ladybird/selection-artefact.ps1")
+
             $ArtefactNavigateur = "bouchaud-ladybird-native-browser"
 
-            $runsBrut = (& gh run list `
-                --workflow "ladybird-native-browser.yml" `
-                --branch $CurrentBranch `
-                --limit 20 `
-                --json databaseId) -join "`n"
+            $selection = Get-RunAvecArtefact `
+                -Branche $CurrentBranch `
+                -Artefact $ArtefactNavigateur
 
-            $runsJson = @()
+            $latest = $selection.RunId
+            $examines = $selection.Examines
 
-            if ($LASTEXITCODE -eq 0 -and $runsBrut.Trim()) {
-
-                $runsJson = @(
-                    (ConvertFrom-Json $runsBrut) | ForEach-Object { $_.databaseId }
-                )
-            }
-
-            if (-not $runsJson) {
+            if ($examines -eq 0) {
                 Fail (
                     ("aucun run de ladybird-native-browser pour '{0}'. " -f $CurrentBranch) +
                     "Pousse la branche et attends le workflow."
                 )
-            }
-
-            $latest = $null
-            $examines = 0
-
-            foreach ($candidat in $runsJson) {
-
-                $candidat = $candidat.Trim()
-                $examines += 1
-
-                # `expired` est le seul champ qui distingue un artefact encore
-                # telechargeable d'une simple trace dans l'historique.
-                $brut = (& gh api `
-                    "repos/{owner}/{repo}/actions/runs/$candidat/artifacts" `
-                    2>$null) -join "`n"
-
-                $vivants = 0
-
-                if ($LASTEXITCODE -eq 0 -and $brut.Trim()) {
-
-                    $vivants = @(
-                        (ConvertFrom-Json $brut).artifacts |
-                            Where-Object {
-                                $_.name -eq $ArtefactNavigateur -and -not $_.expired
-                            }
-                    ).Count
-                }
-
-                if ($vivants -gt 0) {
-
-                    $latest = $candidat
-
-                    break
-                }
             }
 
             if (-not $latest) {

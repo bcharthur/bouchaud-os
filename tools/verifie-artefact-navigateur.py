@@ -67,7 +67,13 @@ import sys
 from pathlib import Path
 
 RACINE = Path(__file__).resolve().parent.parent
-SCRIPT = RACINE / "run.ps1"
+# La selection a demenage dans son propre fichier pour devenir testable. Le
+# verificateur lit les DEUX : une regle qui ne regarde plus le code qu'elle
+# protege ne protege plus rien, et rien ne l'aurait signale.
+SCRIPTS = [
+    RACINE / "run.ps1",
+    RACINE / "tools" / "ladybird" / "selection-artefact.ps1",
+]
 WORKFLOW = RACINE / ".github" / "workflows" / "ladybird-native-browser.yml"
 
 ARTEFACT = "bouchaud-ladybird-native-browser"
@@ -97,24 +103,20 @@ def appels_gh_run_list(source):
     ]
 
 
-def regle_selection(source, fautes):
+def regle_selection(nom, source, fautes):
     """1. Aucun `gh run list` sur le workflow navigateur ne filtre sur --status."""
     appels = appels_gh_run_list(source)
     vises = [appel for appel in appels if WORKFLOW_NOM in appel]
 
     if not vises:
-        fautes.append(
-            "run.ps1 : aucun `gh run list --workflow %s`. La selection de "
-            "l'artefact a-t-elle ete deplacee ?" % WORKFLOW_NOM
-        )
         return
 
     for appel in vises:
         if "--status" in appel:
             fautes.append(
-                "run.ps1 : la selection de l'artefact filtre sur --status, "
-                "donc sur la conclusion du RUN. Un job consommateur rouge "
-                "cacherait un producteur sain.\n           %s" % appel
+                "%s : la selection de l'artefact filtre sur --status, donc "
+                "sur la conclusion du RUN. Un job consommateur rouge "
+                "cacherait un producteur sain.\n           %s" % (nom, appel)
             )
 
 
@@ -122,8 +124,8 @@ def regle_nom(source, workflow, fautes):
     """2. Le nom telecharge est le nom televerse."""
     if ARTEFACT not in source:
         fautes.append(
-            "run.ps1 : le nom d'artefact %r n'apparait pas ; il ne peut plus "
-            "correspondre a ce que le workflow televerse." % ARTEFACT
+            "le nom d'artefact %r n'apparait dans aucun script ; il ne peut "
+            "plus correspondre a ce que le workflow televerse." % ARTEFACT
         )
     if ARTEFACT not in workflow:
         fautes.append(
@@ -160,17 +162,17 @@ def regle_capacite(source, workflow, fautes):
         )
 
 
-def regle_sans_jq(source, fautes):
-    """4. Aucun `--jq` dans run.ps1 : le filtrage se fait en PowerShell."""
+def regle_sans_jq(nom, source, fautes):
+    """4. Aucun `--jq` : le filtrage se fait en PowerShell."""
     for numero, ligne in enumerate(source.splitlines(), start=1):
         # Le commentaire qui explique la regle a le droit de nommer `--jq`.
         nue = ligne.split("#", 1)[0]
         if "--jq" in nue:
             fautes.append(
-                "run.ps1:%d : `--jq` passe un programme jq a un programme "
-                "natif. Windows PowerShell 5.1 mange les guillemets doubles "
-                "d'un tel argument. Filtrer avec ConvertFrom-Json.\n"
-                "           %s" % (numero, ligne.strip())
+                "%s:%d : `--jq` passe un programme jq a un programme natif. "
+                "Windows PowerShell 5.1 mange les guillemets doubles d'un tel "
+                "argument. Filtrer avec ConvertFrom-Json.\n"
+                "           %s" % (nom, numero, ligne.strip())
             )
 
 
@@ -198,16 +200,34 @@ def regle_televersement(workflow, fautes):
 
 
 def main():
-    source = texte(SCRIPT)
     workflow = texte(WORKFLOW)
-    if source is None or workflow is None:
+    if workflow is None:
         return 1
 
+    sources = {}
+    for chemin in SCRIPTS:
+        contenu = texte(chemin)
+        if contenu is None:
+            return 1
+        sources[chemin.relative_to(RACINE).as_posix()] = contenu
+
+    ensemble = "\n".join(sources.values())
+
     fautes = []
-    regle_selection(source, fautes)
-    regle_nom(source, workflow, fautes)
-    regle_capacite(source, workflow, fautes)
-    regle_sans_jq(source, fautes)
+    for nom, source in sources.items():
+        regle_selection(nom, source, fautes)
+        regle_sans_jq(nom, source, fautes)
+
+    # `gh run list` doit exister QUELQUE PART : c'est la selection elle-meme.
+    if not any(appels_gh_run_list(source) for source in sources.values()):
+        fautes.append(
+            "aucun `gh run list --workflow %s` dans %s. La selection de "
+            "l'artefact a-t-elle ete deplacee ?"
+            % (WORKFLOW_NOM, " ni ".join(sources))
+        )
+
+    regle_nom(ensemble, workflow, fautes)
+    regle_capacite(ensemble, workflow, fautes)
     regle_televersement(workflow, fautes)
 
     if fautes:

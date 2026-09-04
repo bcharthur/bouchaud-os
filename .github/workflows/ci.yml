@@ -192,6 +192,16 @@ jobs:
           echo "count=$count" >> "$GITHUB_OUTPUT"
           echo "count=$count"
 
+      # ANALYSER un script ne dit pas qu'il FONCTIONNE. Trois defauts
+      # d'execution -- un guillemet echappe a la mode du C, un programme jq
+      # dont PowerShell 5.1 mange les guillemets, un `.Trim()` sur un Int64 --
+      # sont passes par ce trou : le fichier se parsait a chaque fois. Ce test
+      # execute la selection d'artefact avec un `gh` simule et exige un flux
+      # d'erreur vide.
+      - name: Selection d'artefact Ladybird (execution)
+        shell: pwsh
+        run: ./tools/ci/test-selection-artefact.ps1
+
       - name: ASCII strict
         if: steps.ps1.outputs.count != '0'
         run: python3 tools/verifie-scripts-windows.py --files-from .ci-powershell-files
