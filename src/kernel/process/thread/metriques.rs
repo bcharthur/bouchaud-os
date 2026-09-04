@@ -186,9 +186,17 @@ anomalies={}/{}/{} proprietaire={}{}",
     crate::kernel::navigateur::supervision::log_stats();
     let (tcp_rtx, tcp_rapides, tcp_rtt, tcp_srtt, tcp_rto, tcp_busy, tcp_sommeils) =
         crate::net::transport::retransmission::stats();
+    // BOUCHAUD_C13_RTT_DE_POIGNEE_V1 : `srtt_ms` et `rto_ms` decrivent la
+    // DERNIERE connexion de `tcp::fetch`, le recuperateur HTTP du noyau. Un
+    // navigateur ring 3 n'y passe pas : ses sockets descendent par
+    // `TcpConn::connect`. Les grandeurs de poignee, elles, couvrent ce
+    // chemin-la -- c'est-a-dire celui que l'utilisateur emprunte reellement.
+    let (poignees, syn_rtx, rtt_min, rtt_max, rtt_moyen) =
+        crate::net::transport::retransmission::stats_poignee();
     crate::kernel::dmesg::log_fmt(format_args!(
-        "[NET-TCP] retransmissions={} rapides={} echantillons_rtt={} srtt_ms={} rto_ms={} busy_poll_tours={} sommeils={}",
+        "[NET-TCP] retransmissions={} rapides={} echantillons_rtt={} srtt_ms={} rto_ms={} busy_poll_tours={} sommeils={} poignees={} syn_retransmis={} rtt_min_ms={} rtt_moyen_ms={} rtt_max_ms={}",
         tcp_rtx, tcp_rapides, tcp_rtt, tcp_srtt, tcp_rto, tcp_busy, tcp_sommeils,
+        poignees, syn_rtx, rtt_min, rtt_moyen, rtt_max,
     ));
     let (futex_attentes, futex_reveils, futex_herites, futex_profondeur) = futex_bkl_stats();
     crate::kernel::dmesg::log_fmt(format_args!(

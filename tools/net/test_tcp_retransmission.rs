@@ -420,3 +420,68 @@ fn le_scenario_complet_d_une_perte_au_milieu() {
     // Et cela s'est fait bien avant le RTO complet.
     assert!(13 < RTO_INITIAL_MS, "la retransmission rapide a evite l'attente du RTO");
 }
+
+// ===========================================================================
+// BOUCHAUD_C13_RTT_DE_POIGNEE_V1 -- la sonde qui ne mesurait rien
+// ===========================================================================
+//
+// `[NET-TCP]` rendait `echantillons_rtt=0 srtt_ms=0 rto_ms=0` sur toutes les
+// sessions. `rto_ms=0` trahissait le reste : `Emission::neuf` part de
+// `RTO_INITIAL_MS`, jamais de zero -- donc `note_connexion` n'avait jamais ete
+// appelee. L'estimateur vivait dans `tcp::fetch`, que le navigateur ring 3
+// n'execute pas : ses sockets descendent par `TcpConn::connect`.
+//
+// Ces tests portent sur la mesure qui couvre CE chemin : le RTT de poignee de
+// main, et les SYN perdus.
+//
+// Ils sont les seuls du fichier a toucher des compteurs GLOBAUX. Ils
+// s'enchainent donc dans un unique test, et raisonnent sur des DIFFERENCES
+// plutot que sur des valeurs absolues : le harnais de test execute les cas en
+// parallele, et un test qui suppose un compteur global a zero est un test qui
+// echoue le jour ou on en ajoute un autre a cote.
+
+#[test]
+fn les_poignees_de_main_alimentent_la_sonde_reseau() {
+    use retransmission::{note_poignee, stats_poignee};
+
+    let (p0, syn0, _, _, _) = stats_poignee();
+
+    // Une poignee propre : un echantillon exploitable.
+    note_poignee(Some(40), 0);
+    let (p1, syn1, min1, max1, moyen1) = stats_poignee();
+    assert_eq!(p1, p0 + 1, "la poignee est comptee");
+    assert_eq!(syn1, syn0, "aucun SYN perdu");
+    assert!(min1 > 0 && max1 > 0 && moyen1 > 0, "un echantillon existe desormais");
+    assert!(min1 <= 40 && max1 >= 40, "40 ms est dans l'intervalle observe");
+
+    // Une poignee dont le SYN a ete retransmis : Karn ECARTE l'echantillon,
+    // mais la perte est comptee. C'est la regle qui compte le plus ici : un
+    // RTT mesure apres retransmission ne dit pas de quel SYN il est la
+    // reponse, et le retenir gonflerait la latence apparente d'un RTO entier.
+    note_poignee(None, 2);
+    let (p2, syn2, min2, max2, moyen2) = stats_poignee();
+    assert_eq!(p2, p1 + 1, "elle est comptee comme poignee");
+    assert_eq!(syn2, syn1 + 2, "et ses deux SYN perdus sont comptes");
+    assert_eq!(
+        (min2, max2, moyen2), (min1, max1, moyen1),
+        "l'echantillon ambigu ne doit RIEN changer aux RTT"
+    );
+
+    // Le maximum suit une poignee lente, le minimum ne bouge pas.
+    note_poignee(Some(900), 0);
+    let (_, _, min3, max3, _) = stats_poignee();
+    assert_eq!(min3, min2, "un RTT plus grand ne change pas le minimum");
+    assert!(max3 >= 900, "le maximum retient la poignee lente");
+
+    // Minimum et maximum ensemble disent la DISPERSION -- ce qui distingue un
+    // lien lent d'un lien irregulier, et qu'une moyenne seule effacerait.
+    assert!(max3 > min3, "l'ecart entre 40 ms et 900 ms doit rester visible");
+
+    // Cinq SYN partis, aucune reponse : la connexion a echoue. Elle ne doit
+    // produire AUCUN RTT -- surtout pas un zero, qui se lirait comme un reseau
+    // instantane et ferait mentir le minimum.
+    let (_, _, min4, max4, moyen4) = stats_poignee();
+    note_poignee(None, 4);
+    let (_, _, min5, max5, moyen5) = stats_poignee();
+    assert_eq!((min4, max4, moyen4), (min5, max5, moyen5));
+}

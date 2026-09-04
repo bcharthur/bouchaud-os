@@ -409,6 +409,88 @@ static TCP_RTO_DERNIER_MS: AtomicU64 = AtomicU64::new(0);
 static TCP_BUSY_POLL_TOURS: AtomicU64 = AtomicU64::new(0);
 static TCP_ATTENTES_DORMIES: AtomicU64 = AtomicU64::new(0);
 
+// BOUCHAUD_C13_RTT_DE_POIGNEE_V1
+//
+// LA SONDE RESEAU QUI NE MESURAIT RIEN
+// ------------------------------------
+// Le journal d'une session de navigateur rend, invariablement :
+//
+//     [NET-TCP] retransmissions=0 echantillons_rtt=0 srtt_ms=0 rto_ms=0
+//
+// `rto_ms=0` est le detail qui trahit tout le reste : `Emission::neuf` part de
+// `RTO_INITIAL_MS`, jamais de zero. Un zero ici ne veut donc pas dire « RTO
+// nul », il veut dire que `note_connexion` n'a JAMAIS ete appelee. On ne
+// pouvait rien conclure du reseau depuis cette trace -- ni pour l'accuser, ni
+// pour l'innocenter.
+//
+// La raison : cet estimateur vit dans `tcp::fetch`, le recuperateur HTTP du
+// noyau. Or un navigateur ring 3 n'y passe pas. Ses sockets descendent par
+// `sys_connect` -> `TcpConn::connect`, un chemin qui n'a ni suivi de segments,
+// ni estimation de RTT. La sonde etait branchee sur le code que Ladybird
+// n'execute pas.
+//
+// Ce qui est mesurable sur CE chemin, et qui est mesure ici : la poignee de
+// main. L'intervalle entre le SYN et son SYN-ACK est un aller-retour complet
+// sur le chemin reseau -- la definition meme du RTT, et la premiere chose
+// qu'un navigateur paie a chaque connexion.
+//
+// L'algorithme de Karn s'applique tel quel : `TcpConn::connect` retransmet son
+// SYN jusqu'a cinq fois, et si le SYN-ACK arrive apres une retransmission on
+// ne sait pas AUQUEL des SYN il repond. L'echantillon est alors ecarte, et
+// seule la perte est comptee.
+//
+// Ce qui est publie est ce qui est exactement maintenable sous concurrence :
+// un minimum, un maximum, une somme et un compte -- tous par operation
+// atomique unique, donc sans mise a jour perdue quand deux coeurs ouvrent une
+// connexion en meme temps. Une moyenne lissee a la RFC 6298 aurait demande de
+// lire-modifier-ecrire deux valeurs liees, et un RTO global n'aurait de toute
+// facon aucun sens : le RTO est une commande par connexion, pas une
+// statistique. Le minimum et le maximum disent d'ailleurs plus que ne dirait
+// une moyenne : ils montrent la DISPERSION, c'est-a-dire ce qui distingue un
+// lien lent d'un lien irregulier.
+
+static TCP_POIGNEES: AtomicU64 = AtomicU64::new(0);
+static TCP_SYN_RETRANSMIS: AtomicU64 = AtomicU64::new(0);
+/// `u64::MAX` = aucun echantillon. Zero serait un minimum plausible.
+static TCP_RTT_MIN_MS: AtomicU64 = AtomicU64::new(u64::MAX);
+static TCP_RTT_MAX_MS: AtomicU64 = AtomicU64::new(0);
+static TCP_RTT_SOMME_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Une poignee de main achevee ou abandonnee.
+///
+/// `rtt_ms` vaut `None` quand l'echantillon est ambigu au sens de Karn -- le
+/// SYN a ete retransmis -- ou quand la connexion a echoue. `syn_retransmis`
+/// compte les SYN renvoyes, qu'il y ait eu echantillon ou non : c'est un signal
+/// de PERTE, et il vaut d'etre compte meme quand la mesure ne l'est pas.
+pub fn note_poignee(rtt_ms: Option<u64>, syn_retransmis: u64) {
+    TCP_POIGNEES.fetch_add(1, Ordering::Relaxed);
+    if syn_retransmis != 0 {
+        TCP_SYN_RETRANSMIS.fetch_add(syn_retransmis, Ordering::Relaxed);
+    }
+    let Some(rtt) = rtt_ms else { return };
+    TCP_ECHANTILLONS_RTT.fetch_add(1, Ordering::Relaxed);
+    TCP_RTT_SOMME_MS.fetch_add(rtt, Ordering::Relaxed);
+    TCP_RTT_MIN_MS.fetch_min(rtt, Ordering::Relaxed);
+    TCP_RTT_MAX_MS.fetch_max(rtt, Ordering::Relaxed);
+}
+
+/// poignees, SYN retransmis, RTT min, RTT max, RTT moyen -- tous en ms.
+///
+/// Sans aucun echantillon, les trois RTT valent zero : c'est le meme « rien a
+/// dire » que le compte d'echantillons annonce deja, pas un RTT nul.
+pub fn stats_poignee() -> (u64, u64, u64, u64, u64) {
+    let poignees = TCP_POIGNEES.load(Ordering::Relaxed);
+    let syn = TCP_SYN_RETRANSMIS.load(Ordering::Relaxed);
+    let minimum = TCP_RTT_MIN_MS.load(Ordering::Relaxed);
+    let maximum = TCP_RTT_MAX_MS.load(Ordering::Relaxed);
+    let somme = TCP_RTT_SOMME_MS.load(Ordering::Relaxed);
+    let compte = TCP_ECHANTILLONS_RTT.load(Ordering::Relaxed);
+    if compte == 0 || minimum == u64::MAX {
+        return (poignees, syn, 0, 0, 0);
+    }
+    (poignees, syn, minimum, maximum, somme / compte)
+}
+
 pub fn note_connexion(emission: &Emission, busy_poll_tours: u64, attentes_dormies: u64) {
     TCP_RETRANSMISSIONS.fetch_add(emission.segments_retransmis, Ordering::Relaxed);
     TCP_RETRANSMISSIONS_RAPIDES

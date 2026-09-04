@@ -454,8 +454,23 @@ impl TcpConn {
         // echouer toute premiere connexion. Le navigateur y echappait sans le
         // savoir, parce qu'il commencait toujours par une requete DNS — laquelle
         // resolvait l'ARP au passage.
+        // BOUCHAUD_C13_RTT_DE_POIGNEE_V1
+        //
+        // L'intervalle SYN -> SYN-ACK est un aller-retour complet sur le
+        // chemin reseau : c'est la definition du RTT, et c'est la seule mesure
+        // que ce chemin -- celui qu'empruntent les sockets ring 3 du
+        // navigateur -- puisse produire aujourd'hui.
+        //
+        // L'horloge est la MONOTONE, jamais le tick PIT. Sous TCG, IRQ0 est
+        // retardee quand un vCPU sature le traducteur ; un RTT mesure sur le
+        // tick sous-estimerait la latence exactement quand la machine peine.
+        let mut envoi_ms = 0u64;
+        let mut syn_retransmis = 0u64;
+
         for tentative in 0..5u32 {
             let l = build(&mut seg, &dst, sport, port, isn, 0, SYN, WINDOW, &[]);
+            envoi_ms = crate::kernel::timer::monotonic_ms();
+            if tentative != 0 { syn_retransmis += 1; }
             net::send_ip(dst, 6, &seg[..l]);
 
             // Attente croissante d'une tentative a l'autre, comme le veut la
@@ -479,6 +494,18 @@ impl TcpConn {
             }
             if ok || refuse { break; }
         }
+
+        // Algorithme de Karn : apres une retransmission, on ne sait pas AUQUEL
+        // des SYN le SYN-ACK repond. L'echantillon est ecarte -- mais la perte,
+        // elle, est comptee. C'est meme la mesure la plus parlante des deux :
+        // un SYN retransmis est une perte constatee, pas une estimation.
+        let echantillon = if ok && syn_retransmis == 0 {
+            Some(crate::kernel::timer::monotonic_ms().saturating_sub(envoi_ms))
+        } else {
+            None
+        };
+        retransmission::note_poignee(echantillon, syn_retransmis);
+
         if !ok { return None; }
 
         let seq = isn.wrapping_add(1);
