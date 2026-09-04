@@ -439,8 +439,13 @@ fn draw_window(w: &Win, focused: bool) {
     let opaque = match &w.app {
         App::Navigateur { client } => {
             let zone = crate::gui::window::zone_utile(w);
-            let largeur = (zone.largeur.max(0) as usize).min(client.surface.largeur) as u32;
-            let hauteur = (zone.hauteur.max(0) as usize).min(client.surface.hauteur) as u32;
+            // `composable`, et non la surface allouee : depuis que celle-ci est
+            // dimensionnee pour une fenetre MAXIMISEE, elle est plus grande que
+            // la zone dans le cas ordinaire, et promettre de peindre ce que le
+            // client n'a pas dessine laisserait une bande de fond sale.
+            let (peinte_l, peinte_h) = client.composable();
+            let largeur = (zone.largeur.max(0) as usize).min(peinte_l) as u32;
+            let hauteur = (zone.hauteur.max(0) as usize).min(peinte_h) as u32;
             (largeur > 0 && hauteur > 0)
                 .then(|| crate::gui::windowing::Rect::new(zone.x, zone.y, largeur, hauteur))
         }
@@ -565,8 +570,12 @@ pub(crate) fn compose_client(w: &Win, client: &crate::gui::client::Client) {
     }
 
     let surface = &client.surface;
-    let hauteur = (zone.hauteur as usize).min(surface.hauteur);
-    let largeur = (zone.largeur as usize).min(surface.largeur);
+    // La meme borne que la promesse d'opacite de `draw_window` : les deux
+    // doivent decrire le MEME rectangle, sinon l'un peint un fond que l'autre
+    // recouvre, ou pire, laisse a decouvert ce que personne ne peint.
+    let (peinte_l, peinte_h) = client.composable();
+    let hauteur = (zone.hauteur as usize).min(peinte_h);
+    let largeur = (zone.largeur as usize).min(peinte_l);
     let (zx, zy) = (zone.x.max(0) as usize, zone.y.max(0) as usize);
 
     // BOUCHAUD_GUI_CLIP_V1

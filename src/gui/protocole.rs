@@ -865,6 +865,112 @@ const fn borne_u32(valeur: i64) -> u32 {
     }
 }
 
+// --- Geometrie d'une surface qui ne bouge pas -------------------------------
+//
+// BOUCHAUD_C14_SURFACE_ALLOUEE_AU_MAXIMUM_V1
+//
+// # Le defaut
+//
+// La fenetre du navigateur portait `WindowFlags::FIXED_SURFACE`. Le bouton du
+// milieu de sa barre de titre etait donc DESSINE, survolable, et inerte : le
+// clic arrivait bien jusqu'a `route_window_command`, qui refusait `Maximize`
+// parce que `maximizable` valait faux.
+//
+// Le drapeau n'etait pas arbitraire. La surface partagee etait allouee une
+// fois, a la taille exacte de la fenetre, et le client la projetait a cette
+// taille. Agrandir le cadre n'aurait agrandi que le cadre : le contenu serait
+// reste dans un coin, avec du vide autour. Ne rien faire etait la reponse
+// honnete tant que la surface ne pouvait pas suivre.
+//
+// # Ce qui change
+//
+// La surface est allouee au MAXIMUM que le bureau puisse jamais demander --
+// la zone utile d'une fenetre maximisee. Elle n'est plus jamais reallouee, et
+// le mappage du client ne bouge donc jamais : redimensionner cesse d'etre une
+// operation de memoire pour devenir une operation d'arithmetique.
+//
+// Trois tailles cohabitent alors, et les confondre est le seul vrai risque :
+//
+//   * ALLOUEE  -- ce que le client projette. Fixe. Elle donne le pas.
+//   * LOGIQUE  -- ce que `Configure` annonce, c'est-a-dire la zone utile
+//                 courante. Elle change a chaque maximisation.
+//   * PEINTE   -- ce que le client a REELLEMENT peint. Elle borne la recopie.
+//
+// La troisieme est celle qu'on oublie. Au moment ou la fenetre grandit, la
+// bande nouvellement exposee de la surface ne contient rien : le client n'a pas
+// encore recu son `Configure`, encore moins repeint. La recopier afficherait
+// de la memoire qui n'a jamais ete dessinee. Le compositeur s'arrete donc a
+// `composable()`, et le fond de fenetre couvre le reste jusqu'a la trame
+// suivante -- une bande de fond pendant une trame, plutot qu'une bande de
+// hasard.
+
+/// Les trois tailles d'une surface partagee, et la seule regle qui les lie.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Geometrie {
+    allouee: (u32, u32),
+    logique: (u32, u32),
+    peinte: (u32, u32),
+}
+
+impl Geometrie {
+    /// `logique` est rognee a `allouee` : le compositeur ne peut pas promettre
+    /// une zone plus grande que ce que la memoire porte.
+    pub fn neuve(allouee: (u32, u32), logique: (u32, u32)) -> Geometrie {
+        let logique = (logique.0.min(allouee.0), logique.1.min(allouee.1));
+        // `peinte` demarre a la taille logique et non a zero. Un client qui
+        // n'annonce que des degats partiels -- l'hote Qt en est un -- doit
+        // continuer d'etre recopie en entier tant que rien n'a grandi. Partir
+        // de zero aurait fait de ce chantier une regression pour lui.
+        Geometrie { allouee, logique, peinte: logique }
+    }
+
+    pub const fn allouee(&self) -> (u32, u32) {
+        self.allouee
+    }
+
+    pub const fn logique(&self) -> (u32, u32) {
+        self.logique
+    }
+
+    /// Ce que le compositeur a le droit de recopier : jamais plus que ce que le
+    /// client a peint, jamais plus que ce qu'il croit posseder.
+    pub fn composable(&self) -> (u32, u32) {
+        (self.peinte.0.min(self.logique.0), self.peinte.1.min(self.logique.1))
+    }
+
+    /// Annonce une nouvelle zone utile. Rend `true` si elle a change, c'est-a-
+    /// dire s'il faut envoyer un `Configure`.
+    ///
+    /// Retrecir preserve la garantie de `peinte` -- les pixels restants ont
+    /// bien ete peints. Agrandir ne la preserve pas, et `peinte` reste donc ou
+    /// elle etait jusqu'a ce qu'une trame la fasse avancer.
+    pub fn redimensionne(&mut self, largeur: u32, hauteur: u32) -> bool {
+        let voulue = (largeur.min(self.allouee.0), hauteur.min(self.allouee.1));
+        if voulue == self.logique {
+            return false;
+        }
+        self.logique = voulue;
+        self.peinte = (self.peinte.0.min(voulue.0), self.peinte.1.min(voulue.1));
+        true
+    }
+
+    /// Un degat recu du client etend l'etendue peinte.
+    ///
+    /// Le degat est deja rogne a la surface par `rogne_degat` ; on ne lit donc
+    /// que son coin bas-droit, et jamais au-dela du logique.
+    pub fn note_degat(&mut self, degat: &Rect) {
+        if degat.vide() {
+            return;
+        }
+        let droite = borne_u32(degat.droite());
+        let bas = borne_u32(degat.bas());
+        self.peinte = (
+            self.peinte.0.max(droite).min(self.logique.0),
+            self.peinte.1.max(bas).min(self.logique.1),
+        );
+    }
+}
+
 // --- Contrat de taille -------------------------------------------------------
 //
 // Ces assertions sont evaluees a la compilation : `cargo build` echoue si l'une
@@ -889,6 +995,140 @@ const _: () = assert!(CHARGE_MAX as usize >= TAILLE_SURFACE);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Geometrie d'une surface allouee au maximum -------------------------
+    //
+    // BOUCHAUD_C14_SURFACE_ALLOUEE_AU_MAXIMUM_V1
+
+    /// Les tailles reelles : surface d'une fenetre maximisee, zone de depart.
+    const ALLOUEE: (u32, u32) = (1278, 627);
+    const DEPART: (u32, u32) = (1098, 570);
+
+    fn geometrie() -> Geometrie {
+        Geometrie::neuve(ALLOUEE, DEPART)
+    }
+
+    #[test]
+    fn une_zone_plus_grande_que_l_allocation_est_rognee() {
+        // C'est la seule protection contre une recopie hors des frames de la
+        // surface : le compositeur lit `composable()` et rien d'autre.
+        let geo = Geometrie::neuve(ALLOUEE, (4000, 4000));
+        assert_eq!(geo.logique(), ALLOUEE);
+        assert_eq!(geo.composable(), ALLOUEE);
+    }
+
+    #[test]
+    fn au_depart_tout_le_logique_est_composable() {
+        // Sans cela, un client qui n'annonce que des degats partiels verrait sa
+        // fenetre recopiee en partie seulement -- une regression pour l'hote Qt.
+        assert_eq!(geometrie().composable(), DEPART);
+    }
+
+    #[test]
+    fn agrandir_n_autorise_pas_a_recopier_ce_qui_n_est_pas_peint() {
+        let mut geo = geometrie();
+        assert!(geo.redimensionne(ALLOUEE.0, ALLOUEE.1));
+        assert_eq!(geo.logique(), ALLOUEE);
+        // Le coeur du chantier : la zone a grandi, la matiere non.
+        assert_eq!(geo.composable(), DEPART);
+    }
+
+    #[test]
+    fn une_trame_pleine_rend_le_nouveau_format_composable() {
+        let mut geo = geometrie();
+        geo.redimensionne(ALLOUEE.0, ALLOUEE.1);
+        geo.note_degat(&Rect::neuf(0, 0, ALLOUEE.0, ALLOUEE.1));
+        assert_eq!(geo.composable(), ALLOUEE);
+    }
+
+    #[test]
+    fn un_degat_partiel_ne_fait_avancer_que_ce_qu_il_couvre() {
+        let mut geo = geometrie();
+        geo.redimensionne(ALLOUEE.0, ALLOUEE.1);
+        // Une bande large mais courte : la largeur avance, la hauteur non.
+        geo.note_degat(&Rect::neuf(0, 0, ALLOUEE.0, 100));
+        assert_eq!(geo.composable(), (ALLOUEE.0, DEPART.1));
+    }
+
+    #[test]
+    fn retrecir_preserve_la_garantie_puis_reagrandir_la_perd() {
+        let mut geo = geometrie();
+        assert!(geo.redimensionne(400, 300));
+        // Retrecir ne rend rien douteux : ces pixels-la ont ete peints.
+        assert_eq!(geo.composable(), (400, 300));
+        assert!(geo.redimensionne(DEPART.0, DEPART.1));
+        // Reagrandir, si : on est revenu a la taille de depart, mais le client
+        // n'a repeint que 400x300 depuis.
+        assert_eq!(geo.composable(), (400, 300));
+    }
+
+    #[test]
+    fn redimensionner_a_la_meme_taille_ne_declenche_aucun_configure() {
+        let mut geo = geometrie();
+        assert!(!geo.redimensionne(DEPART.0, DEPART.1));
+        // Rogner puis comparer, et non comparer puis rogner : une demande plus
+        // grande que l'allocation retombe sur la taille deja en vigueur.
+        let mut geo = Geometrie::neuve(ALLOUEE, ALLOUEE);
+        assert!(!geo.redimensionne(9000, 9000));
+    }
+
+    #[test]
+    fn le_composable_ne_depasse_jamais_l_allocation() {
+        // Propriete, sur tous les chemins : c'est elle qui borne la recopie.
+        let mut geo = geometrie();
+        for (l, h) in [(4000u32, 4000u32), (0, 0), (1, 9000), (ALLOUEE.0, 1)] {
+            geo.redimensionne(l, h);
+            geo.note_degat(&Rect::neuf(0, 0, u32::MAX, u32::MAX));
+            let (cl, ch) = geo.composable();
+            assert!(cl <= ALLOUEE.0 && ch <= ALLOUEE.1,
+                "composable {}x{} deborde l'allocation apres {}x{}", cl, ch, l, h);
+            let (ll, lh) = geo.logique();
+            assert!(cl <= ll && ch <= lh,
+                "composable {}x{} deborde le logique {}x{}", cl, ch, ll, lh);
+        }
+    }
+
+    #[test]
+    fn un_degat_vide_ne_fait_rien_avancer() {
+        let mut geo = geometrie();
+        geo.redimensionne(ALLOUEE.0, ALLOUEE.1);
+        geo.note_degat(&Rect::neuf(0, 0, 0, 400));
+        geo.note_degat(&Rect::neuf(0, 0, 400, 0));
+        assert_eq!(geo.composable(), DEPART);
+    }
+
+    #[test]
+    fn un_degat_trop_grand_ne_credite_pas_une_taille_future() {
+        // `rogne_degat` borne les degats a l'ALLOCATION, pas au logique. Un
+        // client peut donc annoncer, alors que sa fenetre est petite, un degat
+        // aussi large que la surface -- et il en annonce, puisque le chrome
+        // repeint `{0, 0, surface_width, surface_height}`.
+        //
+        // Sans le rognage au logique, ce degat cr\u00e9diterait `peinte` d'une
+        // etendue peinte a une AUTRE taille. La fenetre reagrandie, le
+        // compositeur recopierait alors des pixels qui n'ont jamais existe a
+        // cette taille-la : la bande de hasard que tout ce chantier evite.
+        let mut geo = geometrie();
+        geo.redimensionne(400, 300);
+        geo.note_degat(&Rect::neuf(0, 0, ALLOUEE.0, ALLOUEE.1));
+        assert_eq!(geo.composable(), (400, 300));
+
+        geo.redimensionne(ALLOUEE.0, ALLOUEE.1);
+        assert_eq!(geo.composable(), (400, 300),
+            "un degat annonce a 400x300 ne rend pas 1278x627 composable");
+    }
+
+    #[test]
+    fn un_degat_a_coordonnees_hostiles_ne_deborde_pas() {
+        // `droite()` et `bas()` calculent en i64 exactement pour ce cas : un
+        // client qui envoie x = i32::MAX ne doit pas obtenir un composable qui
+        // sort de la surface par debordement d'addition.
+        let mut geo = geometrie();
+        geo.redimensionne(ALLOUEE.0, ALLOUEE.1);
+        geo.note_degat(&Rect::neuf(i32::MAX, i32::MAX, u32::MAX, u32::MAX));
+        let (cl, ch) = geo.composable();
+        assert!(cl <= ALLOUEE.0 && ch <= ALLOUEE.1);
+    }
 
     #[test]
     fn entete_aller_retour() {

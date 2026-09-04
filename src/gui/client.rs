@@ -31,6 +31,13 @@ pub struct Client {
     pub etat: Etat,
     pub titre: String,
     pub surface: Surface,
+    /// Les trois tailles de la surface : allouee, logique, peinte.
+    ///
+    /// BOUCHAUD_C14_SURFACE_ALLOUEE_AU_MAXIMUM_V1 : `surface` est allouee une
+    /// fois pour toutes a la plus grande zone utile que le bureau puisse
+    /// donner. Ce n'est donc plus elle qui dit la taille de la fenetre -- c'est
+    /// `geometrie`, et elle seule.
+    geometrie: proto::Geometrie,
     vers_client: Arc<SpinLock<Canal>>,
     vers_wm: Arc<SpinLock<Canal>>,
     tampon: Vec<u8>,
@@ -53,12 +60,20 @@ pub struct Client {
 }
 
 impl Client {
+    /// `zone` est la zone utile de DEPART ; `allocation` est la plus grande
+    /// que le bureau puisse jamais demander.
+    ///
+    /// Les deux sont distinctes depuis que la fenetre du navigateur peut etre
+    /// maximisee : la surface est allouee a `allocation` et n'est plus jamais
+    /// reallouee, ce qui rend le redimensionnement gratuit du cote memoire. Le
+    /// client projette `allocation` et n'en peint que `zone`.
     pub fn lance(
         chemin: &str,
         cwd: usize,
-        largeur: usize,
-        hauteur: usize,
+        zone: (usize, usize),
+        allocation: (usize, usize),
     ) -> Result<Client, String> {
+        let (largeur, hauteur) = (allocation.0.max(zone.0), allocation.1.max(zone.1));
         if crate::fs::ramfs::fs().resolve_checked(chemin, cwd).is_err() {
             return Err(alloc::format!(
                 "{} absent — voir tools/userland/build-navigateur.sh",
@@ -125,11 +140,16 @@ impl Client {
         // lancement du MEME instant, sinon les deux durees de demarrage
         // publiees ne coincident pas.
         let naissance = crate::kernel::timer::monotonic_ms();
+        let geometrie = proto::Geometrie::neuve(
+            (surface.largeur as u32, surface.hauteur as u32),
+            (zone.0 as u32, zone.1 as u32),
+        );
         let mut client = Client {
             pid,
             etat: Etat::Demarrage,
             titre: crate::gui::window::TITRE_NAVIGATEUR.to_string(),
             surface,
+            geometrie,
             vers_client,
             vers_wm,
             tampon: Vec::new(),
@@ -191,10 +211,15 @@ impl Client {
     }
 
     pub fn envoie_configuration(&mut self, focus: bool) {
+        // La taille LOGIQUE, et non l'allocation : c'est la zone utile
+        // courante que le client doit mettre en page. L'allocation, elle, a
+        // ete annoncee une fois par `Surface` -- avec le pas, qui ne bouge
+        // jamais, et qui est ce dont le mappage depend.
+        let (largeur, hauteur) = self.geometrie.logique();
         let charge = proto::Configure {
             fenetre: proto::FENETRE_PRINCIPALE,
-            largeur: self.surface.largeur as u32,
-            hauteur: self.surface.hauteur as u32,
+            largeur,
+            hauteur,
             focus: focus as u32,
             echelle: crate::gui::echelle_affichage(),
             reserve: 0,
@@ -430,6 +455,10 @@ impl Client {
                 }
 
                 self.degat = self.degat.union(&degat);
+                // Ce que le client vient de peindre devient composable. Sans
+                // cela, une fenetre qu'on agrandit garderait indefiniment le
+                // fond de la bande exposee.
+                self.geometrie.note_degat(&degat);
                 self.marque_protocole_actif();
                 if self.derniere_trame == 0 {
                     // La duree de demarrage, chiffree, dans le journal. « Lent
@@ -548,12 +577,31 @@ impl Client {
     }
 
     pub fn abime_tout(&mut self) {
-        self.degat = Rect::neuf(
-            0,
-            0,
-            self.surface.largeur as u32,
-            self.surface.hauteur as u32,
-        );
+        let (largeur, hauteur) = self.geometrie.logique();
+        self.degat = Rect::neuf(0, 0, largeur, hauteur);
+    }
+
+    /// Ce que le compositeur a le droit de recopier de la surface.
+    ///
+    /// BOUCHAUD_C14_SURFACE_ALLOUEE_AU_MAXIMUM_V1 : ni la zone utile, ni
+    /// l'allocation. Juste apres un agrandissement, la fenetre est plus grande
+    /// que ce que le client a peint, et la difference n'est pas de la matiere.
+    pub fn composable(&self) -> (usize, usize) {
+        let (largeur, hauteur) = self.geometrie.composable();
+        (largeur as usize, hauteur as usize)
+    }
+
+    /// Annonce une nouvelle zone utile au client. Rend `true` si elle a change.
+    ///
+    /// Le `Configure` part ICI et nulle part ailleurs : c'est ce qui garantit
+    /// qu'un client n'apprend jamais une taille que le compositeur n'a pas
+    /// enregistree, et donc que les deux ne peuvent pas diverger.
+    pub fn redimensionne(&mut self, largeur: usize, hauteur: usize, focus: bool) -> bool {
+        if !self.geometrie.redimensionne(largeur as u32, hauteur as u32) {
+            return false;
+        }
+        self.envoie_configuration(focus);
+        true
     }
 
     pub fn vivant(&mut self) -> bool {
