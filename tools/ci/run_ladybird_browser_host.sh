@@ -66,9 +66,19 @@ JALONS=(
   'HOST_IFRAME OK'
   'HOST_SMOKE_OK canvas=1 worker=1 image=1 frame=1'
 )
-# Les trois qui suffisent a conclure : le verdict JavaScript, plus les deux
-# jalons cote Ladybird que le JavaScript n'implique pas.
-FINAL='HOST_SMOKE_OK canvas=1 worker=1 image=1 frame=1'
+# Ce qui suffit a conclure : le verdict de la page, plus les deux jalons cote
+# Ladybird que le JavaScript n'implique pas.
+#
+# BOUCHAUD_SMOKE_VERDICT_RENDU_V1 : on attendait la ligne de SUCCES. Une page
+# qui echoue ecrit `HOST_SMOKE_FAIL`, une reponse tout aussi definitive -- mais
+# la boucle continuait de guetter une ligne qui ne viendrait jamais. Sur le run
+# 33901806167 la page avait conclu a T+236 s ; le script a tourne jusqu'a
+# 901 s, soit onze minutes a attendre une reponse deja donnee.
+#
+# La conclusion, c'est le PREFIXE. Ce que la page a repondu se lit ensuite dans
+# le rapport, ou les jalons manquants deviennent alors de vrais echecs et non
+# un manque de temps.
+VERDICT='HOST_SMOKE_'
 DOCUMENT='[ladybird-bouchaud] M11_DOCUMENT_LOADED'
 TRAME='[ladybird-bouchaud] BROWSER_HOST_M11_FRAME_PRESENTED'
 
@@ -119,8 +129,9 @@ while kill -0 "$PID" 2>/dev/null; do
     fi
   done
 
-  if [ -n "${VU[$FINAL]:-}" ] && [ -n "${VU[$DOCUMENT]:-}" ] && [ -n "${VU[$TRAME]:-}" ]; then
-    verdict=succes
+  if [ -n "${VU[$DOCUMENT]:-}" ] && [ -n "${VU[$TRAME]:-}" ] \
+     && grep -aFq "$VERDICT" "$LOG"; then
+    verdict=rendu
     break
   fi
 
@@ -158,6 +169,18 @@ for jalon in "${JALONS[@]}"; do
   fi
 done
 
+# La page ecrit ses echecs dans la meme forme que ses reussites : « X OK ... »
+# devient « X FAIL <raison> ». Le rapport disait « JAMAIS ATTEINT » et taisait
+# la raison, alors qu'elle etait dans le journal deux lignes plus haut -- c'est
+# la difference entre « le worker n'a pas repondu » et « worker timeout ».
+motif_echec() {
+  case "$1" in
+    HOST_SMOKE_OK*) printf 'HOST_SMOKE_FAIL' ;;
+    *' OK '*|*' OK') printf '%s FAIL' "${1%% OK*}" ;;
+    *) printf '' ;;
+  esac
+}
+
 echo
 echo "== jalons apres ${ECOULE}s (verdict: $verdict) =="
 manquants=0
@@ -168,6 +191,11 @@ for jalon in "${JALONS[@]}"; do
     printf '  atteint a T+%-4ss %s\n' "${VU[$jalon]}" "$jalon"
   else
     printf '  JAMAIS ATTEINT     %s\n' "$jalon"
+    motif=$(motif_echec "$jalon")
+    if [ -n "$motif" ]; then
+      raison=$(grep -aF "$motif" "$LOG" | head -1 | tr -d '\r')
+      [ -n "$raison" ] && printf '                     la page a dit : %s\n' "$raison"
+    fi
     manquants=$((manquants + 1))
   fi
 done
@@ -181,6 +209,10 @@ if [ "$manquants" -ne 0 ]; then
     plafond)
       echo "plafond de ${PLAFOND}s atteint alors que l'invite ecrivait encore :" >&2
       echo "le navigateur progressait trop lentement, il n'etait pas bloque." >&2
+      ;;
+    rendu)
+      echo "la page a rendu son verdict en ${ECOULE}s : les jalons manquants" >&2
+      echo "ci-dessus sont de vrais echecs, pas un manque de temps." >&2
       ;;
     *)
       echo "QEMU s'est arrete de lui-meme apres ${ECOULE}s." >&2
