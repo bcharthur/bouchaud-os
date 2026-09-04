@@ -66,7 +66,21 @@ pub fn paint_window_shape<F: FnMut(i32, i32, u32)>(
 /// le filet de bordure est en dehors de la zone utile (`client_rect` est
 /// retrait de `WINDOW_BORDER` de chaque cote), donc aucun des deux ne peut
 /// tomber dans l'exclusion.
-pub fn paint_window_shape_spans<F: FnMut(i32, i32, u32, u32)>(
+/// `remplit` recoit `(x, y, largeur, couleur, couverture)`.
+///
+/// # Ce qui est anti-crenele, et ce qui ne l'est pas
+///
+/// Le fond de la fenetre et son filet de bordure le sont : ce sont eux qui se
+/// detachent du bureau, et leurs quatre coins etaient la derniere marche
+/// d'escalier visible du systeme.
+///
+/// Les huit anneaux d'ombre restent binaires, et c'est un choix mesure. Leurs
+/// couleurs vont de `0x080a0e` a `0x0f1115` ; le fond du bureau vaut
+/// `COLOR_BACKGROUND` = `0x0e1116`. L'ecart tient dans un pas de quantification
+/// par canal : une rampe y serait rigoureusement invisible. Elle couterait en
+/// revanche NEUF formes parcourues pixel par pixel dans leurs bandes de coins
+/// au lieu de deux -- pour rien.
+pub fn paint_window_shape_spans<F: FnMut(i32, i32, u32, u32, u8)>(
     geometry: crate::gui::windowing::WindowRenderGeometry,
     radius: u32, shadow_extent: u32, clip: Rect, surface: u32, border: u32,
     opaque: Option<Rect>,
@@ -76,16 +90,13 @@ pub fn paint_window_shape_spans<F: FnMut(i32, i32, u32, u32)>(
         let shadow = geometry.outer.outset(extent);
         let shade = 0x07090d + extent * 0x010101;
         spans_stroke_rounded_rect(shadow, radius + extent, 1, clip,
-            |x, y, largeur| remplit(x, y, largeur, shade));
+            |x, y, largeur| remplit(x, y, largeur, shade, 255));
     }
-    match opaque {
-        Some(exclusion) => spans_rounded_rect_sauf(geometry.outer, radius, clip, exclusion,
-            |x, y, largeur| remplit(x, y, largeur, surface)),
-        None => spans_rounded_rect(geometry.outer, radius, clip,
-            |x, y, largeur| remplit(x, y, largeur, surface)),
-    };
-    spans_stroke_rounded_rect(geometry.outer, radius, 1, clip,
-        |x, y, largeur| remplit(x, y, largeur, border));
+    spans_rounded_rect_aa_sauf(geometry.outer, radius, clip,
+        opaque.unwrap_or(Rect::new(0, 0, 0, 0)),
+        |x, y, largeur, couverture| remplit(x, y, largeur, surface, couverture));
+    spans_stroke_rounded_rect_aa(geometry.outer, radius, 1, clip,
+        |x, y, largeur, couverture| remplit(x, y, largeur, border, couverture));
 }
 
 fn intersection(a: Rect, b: Rect) -> Option<Rect> {
@@ -396,8 +407,23 @@ const ECHELLE: i32 = 16;
 /// Rend le nombre de pixels touches, pour que les tests d'hote puissent
 /// affirmer que la decoupe borne bien le travail.
 pub fn spans_rounded_rect_aa<F: FnMut(i32, i32, u32, u8)>(rect: Rect, radius: u32,
-    clip: Rect, mut segment: F) -> usize {
+    clip: Rect, segment: F) -> usize {
+    spans_rounded_rect_aa_sauf(rect, radius, clip, Rect::new(0, 0, 0, 0), segment)
+}
+
+/// [`spans_rounded_rect_aa`], prive de `exclusion`.
+///
+/// Meme promesse que [`spans_rounded_rect_sauf`] : l'appelant garantit que ce
+/// rectangle sera repeint opaque avant la fin de la trame. Voir
+/// `BOUCHAUD_C13_PAS_DEUX_FOIS_LE_MEME_PIXEL_V1`.
+pub fn spans_rounded_rect_aa_sauf<F: FnMut(i32, i32, u32, u8)>(rect: Rect, radius: u32,
+    clip: Rect, exclusion: Rect, mut segment: F) -> usize {
     let Some(area) = intersection(rect, clip) else { return 0 };
+    let exclue = |x: i32, y: i32| {
+        exclusion.width > 0 && exclusion.height > 0
+            && x >= exclusion.x && x < exclusion.right()
+            && y >= exclusion.y && y < exclusion.bottom()
+    };
     let largeur = rect.width as i32;
     let hauteur = rect.height as i32;
     let radius = (radius as i32).max(0).min(largeur.min(hauteur) / 2);
@@ -411,10 +437,22 @@ pub fn spans_rounded_rect_aa<F: FnMut(i32, i32, u32, u8)>(rect: Rect, radius: u3
         if radius == 0 || (ly >= radius && ly < hauteur - radius) {
             let x0 = area.x;
             let x1 = area.right();
-            if x1 > x0 {
+            if x1 <= x0 { continue }
+            let coupe = exclusion.width > 0 && exclusion.height > 0
+                && y >= exclusion.y && y < exclusion.bottom();
+            if !coupe {
                 touches += (x1 - x0) as usize;
                 segment(x0, y, (x1 - x0) as u32, 255);
+                continue;
             }
+            let mut pose = |a: i32, b: i32| {
+                if b > a {
+                    touches += (b - a) as usize;
+                    segment(a, y, (b - a) as u32, 255);
+                }
+            };
+            pose(x0, x1.min(exclusion.x));
+            pose(x0.max(exclusion.right()), x1);
             continue;
         }
 
@@ -429,7 +467,108 @@ pub fn spans_rounded_rect_aa<F: FnMut(i32, i32, u32, u8)>(rect: Rect, radius: u3
         let mut course_valeur = 0u8;
         let mut course_active = false;
         for x in x0..x1 {
-            let c = couverture_pixel(x - rect.x, ly, largeur, hauteur, radius);
+            // Un pixel exclu se comporte comme un pixel de couverture nulle :
+            // il interrompt la course en cours et n'en ouvre aucune.
+            let c = if exclue(x, y) { 0 }
+                else { couverture_pixel(x - rect.x, ly, largeur, hauteur, radius) };
+            if course_active && c == course_valeur { continue }
+            if course_active && course_valeur != 0 {
+                touches += (x - course_debut) as usize;
+                segment(course_debut, y, (x - course_debut) as u32, course_valeur);
+            }
+            course_debut = x;
+            course_valeur = c;
+            course_active = true;
+        }
+        if course_active && course_valeur != 0 && x1 > course_debut {
+            touches += (x1 - course_debut) as usize;
+            segment(course_debut, y, (x1 - course_debut) as u32, course_valeur);
+        }
+    }
+    touches
+}
+
+// BOUCHAUD_C13_CONTOUR_SANS_MARCHE_V1
+//
+// LE DERNIER CRENELAGE
+// --------------------
+// Le chrome (barre d'URL, boutons, onglets, barre de titre) est anti-crenele
+// depuis `BOUCHAUD_C12_CHROME_SANS_MARCHE_V1`. Le texte l'a toujours ete. Il
+// restait UNE forme binaire, et c'est la plus regardee : la silhouette de la
+// fenetre elle-meme -- son fond arrondi et le filet qui l'entoure --, dont les
+// quatre coins montraient encore un escalier sur le fond du bureau.
+//
+// Un contour est une DIFFERENCE de deux formes. Sa couverture aussi : ce que
+// couvre la forme exterieure, moins ce que couvre la forme interieure. Un
+// pixel au milieu du filet est dans l'une et pas dans l'autre (255 - 0), un
+// pixel du trou est dans les deux (255 - 255 = 0), et les deux bords rendent
+// leur rampe sans qu'aucun cas particulier ne soit ecrit.
+
+/// Couverture du CONTOUR sur le pixel `(x, y)`, de 0 a 255.
+///
+/// Coordonnees LOCALES a la forme exterieure. Le rayon interieur suit la meme
+/// regle que `spans_stroke_rounded_rect` : `radius - epaisseur`.
+pub fn couverture_contour(x: i32, y: i32, largeur: i32, hauteur: i32,
+    radius: i32, epaisseur: i32) -> u8 {
+    let dehors = couverture_pixel(x, y, largeur, hauteur, radius);
+    if dehors == 0 || epaisseur <= 0 { return dehors }
+    let dedans = couverture_pixel(
+        x - epaisseur, y - epaisseur,
+        largeur - epaisseur * 2, hauteur - epaisseur * 2,
+        radius - epaisseur,
+    );
+    dehors.saturating_sub(dedans)
+}
+
+/// Segments du CONTOUR avec leur couverture.
+///
+/// Hors des bandes de coins, les deux bords sont des rectangles a angle droit :
+/// aucune couverture partielle a calculer, et la ligne rend ses deux segments
+/// pleins comme le chemin binaire. Seules les deux bandes de coins sont
+/// parcourues pixel par pixel, avec regroupement des couvertures egales.
+pub fn spans_stroke_rounded_rect_aa<F: FnMut(i32, i32, u32, u8)>(rect: Rect, radius: u32,
+    thickness: u32, clip: Rect, mut segment: F) -> usize {
+    let Some(area) = intersection(rect, clip) else { return 0 };
+    let largeur = rect.width as i32;
+    let hauteur = rect.height as i32;
+    let epaisseur = thickness as i32;
+    let radius = (radius as i32).max(0).min(largeur.min(hauteur) / 2);
+    let mut touches = 0usize;
+
+    for y in area.y..area.bottom() {
+        let ly = y - rect.y;
+
+        // Bande centrale : le bord gauche et le bord droit, francs.
+        if radius == 0 || (ly >= radius && ly < hauteur - radius) {
+            let mut pose = |a: i32, b: i32| {
+                let x0 = (rect.x + a).max(area.x);
+                let x1 = (rect.x + b).min(area.right());
+                if x1 > x0 {
+                    touches += (x1 - x0) as usize;
+                    segment(x0, y, (x1 - x0) as u32, 255);
+                }
+            };
+            if epaisseur * 2 >= largeur {
+                pose(0, largeur);
+            } else {
+                pose(0, epaisseur);
+                pose(largeur - epaisseur, largeur);
+            }
+            continue;
+        }
+
+        // Bande de coin. Meme extension d'un pixel que le remplissage : la
+        // rampe deborde d'exactement un pixel de part et d'autre de la forme
+        // binaire.
+        let Some((debut, fin)) = bornes_ligne(largeur, hauteur, radius, ly) else { continue };
+        let x0 = (rect.x + debut - 1).max(area.x);
+        let x1 = (rect.x + fin + 1).min(area.right());
+
+        let mut course_debut = x0;
+        let mut course_valeur = 0u8;
+        let mut course_active = false;
+        for x in x0..x1 {
+            let c = couverture_contour(x - rect.x, ly, largeur, hauteur, radius, epaisseur);
             if course_active && c == course_valeur { continue }
             if course_active && course_valeur != 0 {
                 touches += (x - course_debut) as usize;

@@ -21,7 +21,8 @@ extern crate alloc;
 mod gui { pub mod windowing { pub use crate::windowing::*; } }
 #[path="../../src/gui/graphics.rs"] mod graphics;
 
-use graphics::{couverture_pixel, fill_rounded_rect_aa, melange, spans_rounded_rect_aa,
+use graphics::{couverture_contour, couverture_pixel, fill_rounded_rect_aa, melange,
+    spans_rounded_rect_aa, spans_stroke_rounded_rect, spans_stroke_rounded_rect_aa,
     fill_rounded_rect};
 use windowing::Rect;
 
@@ -239,4 +240,196 @@ fn les_formes_degenerees_ne_couvrent_rien() {
     assert_eq!(couverture_pixel(-1, 0, 10, 10, 4), 0);
     assert_eq!(couverture_pixel(0, 99, 10, 10, 4), 0);
     assert_eq!(spans_rounded_rect_aa(Rect::new(0, 0, 0, 0), 4, GRAND, |_, _, _, _| {}), 0);
+}
+
+
+// ===========================================================================
+// BOUCHAUD_C13_CONTOUR_SANS_MARCHE_V1 -- la silhouette de la fenetre
+// ===========================================================================
+//
+// Le dernier crenelage du systeme : le fond arrondi de la fenetre et le filet
+// qui l'entoure. Un contour est une DIFFERENCE de deux formes, et sa
+// couverture aussi. Ces tests exigent la meme fidelite que pour le
+// remplissage -- plein au milieu du filet, nul dans le trou et dehors, borne
+// par la forme binaire, et de meme aire.
+
+/// Le contour d'une fenetre reelle : 400x300, rayon 10, filet d'un pixel.
+const CADRE: (i32, i32, i32, i32) = (400, 300, 10, 1);
+
+/// Pixels du contour binaire, pour comparaison.
+fn contour_binaire(l: i32, h: i32, r: i32, e: i32) -> alloc::collections::BTreeSet<(i32, i32)> {
+    let mut pixels = alloc::collections::BTreeSet::new();
+    spans_stroke_rounded_rect(Rect::new(0, 0, l as u32, h as u32), r as u32, e as u32,
+        GRAND, |x, y, largeur| {
+            for dx in 0..largeur as i32 { pixels.insert((x + dx, y)); }
+        });
+    pixels
+}
+
+#[test]
+fn le_milieu_du_filet_est_plein_et_le_trou_est_vide() {
+    // Un filet epais, pour qu'il y ait un « milieu » a tester.
+    let (l, h, r, e) = (200, 160, 30, 8);
+    // Milieu du bord haut : dans le filet, loin des deux rampes.
+    assert_eq!(couverture_contour(100, e / 2, l, h, r, e), 255);
+    // Milieu du bord gauche.
+    assert_eq!(couverture_contour(e / 2, 80, l, h, r, e), 255);
+    // Coeur de la forme : dans le trou.
+    assert_eq!(couverture_contour(100, 80, l, h, r, e), 0);
+    // Franchement dehors.
+    assert_eq!(couverture_contour(-5, 80, l, h, r, e), 0);
+    assert_eq!(couverture_contour(l + 5, 80, l, h, r, e), 0);
+}
+
+#[test]
+fn chaque_pixel_du_filet_binaire_recoit_de_la_matiere() {
+    // L'INVARIANT D'ALIGNEMENT, et le bug qu'il attrape.
+    //
+    // Le test precedent borne la rampe PAR le filet binaire ; celui-ci exige
+    // la reciproque. Ensemble, ils enferment la rampe sur le filet.
+    //
+    // Sans lui, une rampe decalee d'un pixel resterait dans la dilatation du
+    // filet binaire -- donc passerait le premier test -- tout en laissant des
+    // pixels binaires a zero. Le filet paraitrait DEPLACE, pas adouci, et le
+    // fond anti-crenele qu'il borde ne coinciderait plus avec lui. C'est
+    // exactement l'erreur commise une premiere fois sur le remplissage :
+    // placer le centre d'arc en coordonnees continues alors que
+    // `inside_rounded` le place sur un INDICE de pixel.
+    for (l, h, r, e) in [CADRE, (200, 160, 30, 8), (64, 64, 20, 3)] {
+        for (x, y) in contour_binaire(l, h, r, e) {
+            assert!(
+                couverture_contour(x, y, l, h, r, e) > 0,
+                "{l}x{h} r={r} e={e} : ({x},{y}) est dans le filet binaire et \
+                 la rampe ne l'allume pas du tout"
+            );
+        }
+    }
+}
+
+#[test]
+fn le_fond_et_le_filet_decrivent_le_meme_cercle() {
+    // Les deux sont dessines l'un sur l'autre a chaque trame. Leur bord
+    // EXTERIEUR est le meme arc : la ou le filet allume un pixel, le fond doit
+    // l'allumer au moins autant, sinon la bordure baverait d'un pixel tout
+    // autour de la fenetre.
+    for (l, h, r, e) in [CADRE, (200, 160, 30, 8), (1280, 698, 10, 1)] {
+        for y in -1..h + 1 {
+            for x in -1..l + 1 {
+                let filet = couverture_contour(x, y, l, h, r, e);
+                let fond = couverture_pixel(x, y, l, h, r);
+                assert!(
+                    filet <= fond,
+                    "{l}x{h} r={r} e={e} : en ({x},{y}) le filet ({filet}) \
+                     depasse le fond ({fond})"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn la_rampe_du_contour_ne_deborde_pas_du_contour_binaire() {
+    let (l, h, r, e) = CADRE;
+    let binaire = contour_binaire(l, h, r, e);
+    let voisin_du_binaire = |x: i32, y: i32| {
+        (-1..=1).any(|dy| (-1..=1).any(|dx| binaire.contains(&(x + dx, y + dy))))
+    };
+    for y in -2..h + 2 {
+        for x in -2..l + 2 {
+            if couverture_contour(x, y, l, h, r, e) == 0 { continue }
+            assert!(
+                voisin_du_binaire(x, y),
+                "({x},{y}) est allume a plus d'un pixel du filet binaire"
+            );
+        }
+    }
+}
+
+#[test]
+fn les_quatre_coins_du_contour_sont_symetriques() {
+    let (l, h, r, e) = CADRE;
+    for y in 0..r + 2 {
+        for x in 0..r + 2 {
+            let a = couverture_contour(x, y, l, h, r, e);
+            let b = couverture_contour(l - 1 - x, y, l, h, r, e);
+            let c = couverture_contour(x, h - 1 - y, l, h, r, e);
+            let d = couverture_contour(l - 1 - x, h - 1 - y, l, h, r, e);
+            assert_eq!(a, b, "coins haut gauche/droit desaccordes en ({x},{y})");
+            assert_eq!(a, c, "coins haut/bas desaccordes en ({x},{y})");
+            assert_eq!(a, d, "coins diagonaux desaccordes en ({x},{y})");
+        }
+    }
+}
+
+#[test]
+fn le_contour_anti_crenele_conserve_l_aire() {
+    // Une rampe qui ajouterait ou retirerait de la matiere epaissirait ou
+    // amincirait visiblement le filet.
+    for (l, h, r, e) in [CADRE, (200, 160, 30, 8), (64, 64, 20, 3), (1280, 698, 10, 1)] {
+        let binaire = contour_binaire(l, h, r, e).len() as i64;
+        let mut somme = 0i64;
+        for y in -1..h + 1 {
+            for x in -1..l + 1 {
+                somme += couverture_contour(x, y, l, h, r, e) as i64;
+            }
+        }
+        let aire_aa = (somme + 127) / 255;
+        let ecart = (aire_aa - binaire).abs();
+        assert!(
+            ecart * 100 <= binaire * 5,
+            "{l}x{h} r={r} e={e} : aire {aire_aa} contre {binaire} binaire, \
+             ecart {ecart} au-dela de 5 %"
+        );
+    }
+}
+
+#[test]
+fn le_rasteriseur_de_contour_n_emet_aucun_segment_vide() {
+    let (l, h, r, e) = CADRE;
+    let mut segments = 0usize;
+    let touches = spans_stroke_rounded_rect_aa(Rect::new(0, 0, l as u32, h as u32),
+        r as u32, e as u32, GRAND, |_, _, largeur, couverture| {
+            segments += 1;
+            assert!(largeur > 0, "un segment de largeur nulle");
+            assert!(couverture > 0, "un segment de couverture nulle coute sans rien peindre");
+        });
+    assert!(touches > 0);
+    assert!(segments > 0);
+}
+
+#[test]
+fn le_contour_anti_crenele_reste_dans_la_decoupe() {
+    let (l, h, r, e) = CADRE;
+    let decoupe = Rect::new(30, 40, 25, 18);
+    spans_stroke_rounded_rect_aa(Rect::new(0, 0, l as u32, h as u32), r as u32, e as u32,
+        decoupe, |x, y, largeur, _| {
+            assert!(x >= decoupe.x && x + largeur as i32 <= decoupe.right(),
+                "segment hors decoupe en x");
+            assert!(y >= decoupe.y && y < decoupe.bottom(), "segment hors decoupe en y");
+        });
+}
+
+#[test]
+fn le_contour_garde_deux_segments_par_ligne_hors_des_coins() {
+    // La propriete de cout. Une bande centrale ne doit produire que le bord
+    // gauche et le bord droit : anti-creneler ne doit pas transformer un
+    // contour en balayage d'aire.
+    let (l, h, r, e) = (1280, 698, 10, 1);
+    let mut segments = 0usize;
+    spans_stroke_rounded_rect_aa(Rect::new(0, 0, l as u32, h as u32), r as u32, e as u32,
+        // Une bande strictement au milieu, hors des deux bandes de coins.
+        Rect::new(0, 300, l as u32, 100), |_, _, _, _| segments += 1);
+    assert_eq!(segments, 200, "deux segments par ligne sur cent lignes");
+}
+
+#[test]
+fn un_contour_degenere_ne_panique_pas() {
+    assert_eq!(spans_stroke_rounded_rect_aa(Rect::new(0, 0, 0, 0), 4, 1, GRAND,
+        |_, _, _, _| {}), 0);
+    // Une epaisseur plus grande que la moitie de la forme : le filet mange
+    // tout, et il n'y a plus de trou.
+    let mut vu = 0usize;
+    spans_stroke_rounded_rect_aa(Rect::new(0, 0, 10, 10), 3, 9, GRAND,
+        |_, _, largeur, _| vu += largeur as usize);
+    assert!(vu > 0, "une forme entierement pleine doit tout de meme se peindre");
 }

@@ -450,9 +450,12 @@ fn draw_window(w: &Win, focused: bool) {
         crate::gui::theme::RADIUS_WINDOW,
         crate::gui::windowing::manager::SHADOW_EXTENT, damage,
         crate::gui::theme::COLOR_SURFACE, border, opaque,
-        |px, py, largeur, color| {
-            fb::fill_rect_rgb(px.max(0) as usize, py.max(0) as usize,
-                largeur as usize, 1, color)
+        |px, py, largeur, color, couverture| {
+            // `blend_rect_rgb` court-circuite vers `fill_rect_rgb` a 255 : les
+            // anneaux d'ombre et les bandes centrales ne paient rien de plus
+            // qu'avant, seules les bandes de coins melangent.
+            fb::blend_rect_rgb(px.max(0) as usize, py.max(0) as usize,
+                largeur as usize, color, couverture)
         });
 
     let title_h = TITLE_H as usize;

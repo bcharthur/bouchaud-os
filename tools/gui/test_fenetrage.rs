@@ -349,7 +349,7 @@ fn fond_peint(opaque: Option<Rect>) -> alloc::collections::BTreeSet<(i32, i32)> 
     let decoupe = Rect::new(0, 0, 1280, 720);
     let mut pixels = alloc::collections::BTreeSet::new();
     graphics::paint_window_shape_spans(geometrie, WINDOW_RADIUS, manager::SHADOW_EXTENT,
-        decoupe, 0x171b21, 0x454c58, opaque, |x, y, largeur, couleur| {
+        decoupe, 0x171b21, 0x454c58, opaque, |x, y, largeur, couleur, _couverture| {
             if couleur != 0x171b21 { return }
             for dx in 0..largeur as i32 { pixels.insert((x + dx, y)); }
         });
@@ -357,16 +357,16 @@ fn fond_peint(opaque: Option<Rect>) -> alloc::collections::BTreeSet<(i32, i32)> 
 }
 
 /// Tout ce qui n'est PAS le fond -- ombre et filet de bordure.
-fn ornement_peint(opaque: Option<Rect>) -> alloc::vec::Vec<(i32, i32, u32)> {
+fn ornement_peint(opaque: Option<Rect>) -> alloc::vec::Vec<(i32, i32, u32, u8)> {
     let cadre = Rect::new(120, 80, 400, 300);
     let geometrie = window_render_geometry(cadre, TITLEBAR_HEIGHT, WINDOW_RADIUS,
         manager::SHADOW_EXTENT);
     let decoupe = Rect::new(0, 0, 1280, 720);
     let mut pixels = alloc::vec::Vec::new();
     graphics::paint_window_shape_spans(geometrie, WINDOW_RADIUS, manager::SHADOW_EXTENT,
-        decoupe, 0x171b21, 0x454c58, opaque, |x, y, largeur, couleur| {
+        decoupe, 0x171b21, 0x454c58, opaque, |x, y, largeur, couleur, couverture| {
             if couleur == 0x171b21 { return }
-            for dx in 0..largeur as i32 { pixels.push((x + dx, y, couleur)); }
+            for dx in 0..largeur as i32 { pixels.push((x + dx, y, couleur, couverture)); }
         });
     pixels
 }
