@@ -526,7 +526,7 @@ if ($LadybirdMode) {
             if (-not $latest) {
                 Fail (
                     ("aucun artefact Ladybird telechargeable sur les {0} derniers " -f $examines) +
-                    ("runs de '{0}'. Le job \"ladybird / build once\" a-t-il abouti, " -f $CurrentBranch) +
+                    ("runs de '{0}'. Le job 'ladybird / build once' a-t-il abouti, " -f $CurrentBranch) +
                     "ou les artefacts ont-ils expire (retention 14 jours) ?"
                 )
             }
