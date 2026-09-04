@@ -46,40 +46,149 @@ AUTORUN
 
 LOG=serie-browser-host.log
 : > "$LOG"
-DEADLINE=$((SECONDS + 300))
+
+# Les jalons du navigateur, dans l'ordre ou il les franchit.
+#
+# UNE seule liste. Elle servait deux fois -- trois markers cables dans la
+# condition d'arret, dix dans la verification finale -- et les deux ne
+# pouvaient pas etre lues ensemble. Elle sert maintenant aussi a DATER
+# l'avancee, ce qui est le seul moyen de distinguer un invite lent d'un
+# invite bloque.
+JALONS=(
+  '[ladybird-bouchaud] BROWSER_HOST_START'
+  '[ladybird-bouchaud] BROWSER_HOST_INITIALIZED'
+  '[ladybird-bouchaud] M11_GUI_HANDSHAKE_OK'
+  '[ladybird-bouchaud] M11_DOCUMENT_LOADED'
+  '[ladybird-bouchaud] BROWSER_HOST_M11_FRAME_PRESENTED'
+  'HOST_CANVAS OK'
+  'HOST_WORKER OK pong'
+  'HOST_IMAGE OK 1x1'
+  'HOST_IFRAME OK'
+  'HOST_SMOKE_OK canvas=1 worker=1 image=1 frame=1'
+)
+# Les trois qui suffisent a conclure : le verdict JavaScript, plus les deux
+# jalons cote Ladybird que le JavaScript n'implique pas.
+FINAL='HOST_SMOKE_OK canvas=1 worker=1 image=1 frame=1'
+DOCUMENT='[ladybird-bouchaud] M11_DOCUMENT_LOADED'
+TRAME='[ladybird-bouchaud] BROWSER_HOST_M11_FRAME_PRESENTED'
+
+# BOUCHAUD_SMOKE_BUDGET_MESURE_V1
+#
+# Le plafond valait 300 s. Sur le run 33681042470, l'invite a mis 124,7 s
+# pour atteindre HOST_CANVAS OK -- soit 42 % du budget consomme avant le
+# premier des quatre sous-tests. Les trois suivants demandent, entre autres,
+# de LANCER UN PROCESSUS de plus : WebWorker est un binaire Ladybird complet,
+# et il est arrive a 7 fils et 48 Mio residents avant que le delai ne tombe.
+# Le test ne mesurait donc pas si le navigateur fonctionne, mais s'il tient
+# dans une enveloppe que personne n'avait rapportee a son cout reel.
+#
+# Le plafond est desormais large et ce n'est PAS lui qui decide : c'est le
+# silence. Un invite qui progresse a le temps qu'il lui faut ; un invite
+# bloque echoue vite, et le rapport dit ou. Le job dispose de 35 minutes et
+# la construction du noyau en consomme deux.
+PLAFOND=${BO_SMOKE_PLAFOND_S:-900}
+SILENCE_MAX=${BO_SMOKE_SILENCE_S:-120}
+
+# `-smp 4` : tous les autres lanceurs de CI en donnent quatre, et `run.ps1`
+# aussi. Celui-ci etait le seul a n'en donner aucun, donc un. Le journal du
+# run 33681042470 le montre sans ambiguite -- `load=[97]` a une seule case,
+# `[SMP-PF] c1=0 c2=0 c3=0` -- : le navigateur saturait un coeur pendant que
+# trois autres n'existaient pas. Un test qui fait tourner le produit dans une
+# configuration que personne n'expedie ne mesure pas le produit.
 qemu-system-x86_64 \
   -drive format=raw,file="$BOOT" \
   -drive format=raw,file=ladybird-browser-host.img \
-  -m 8192 -cpu max -display none -no-reboot \
+  -m 8192 -smp 4 -cpu max -display none -no-reboot \
   -netdev user,id=net0 -device e1000,netdev=net0 \
   -audiodev none,id=muet -device AC97,audiodev=muet \
   -serial file:"$LOG" &
 PID=$!
+
+declare -A VU=()
+DEBUT=$SECONDS
+taille_vue=0
+derniere_avancee=$SECONDS
+verdict=inconnu
+
+echo "== avancee de l'invite (plafond ${PLAFOND}s, silence max ${SILENCE_MAX}s) =="
 while kill -0 "$PID" 2>/dev/null; do
-  if grep -aFq "HOST_SMOKE_OK canvas=1 worker=1 image=1 frame=1" "$LOG" \
-     && grep -aFq "BROWSER_HOST_M11_FRAME_PRESENTED" "$LOG" \
-     && grep -aFq "M11_DOCUMENT_LOADED" "$LOG"; then
+  for jalon in "${JALONS[@]}"; do
+    if [ -z "${VU[$jalon]:-}" ] && grep -aFq "$jalon" "$LOG"; then
+      VU[$jalon]=$((SECONDS - DEBUT))
+      printf '  T+%-4ss %s\n' "${VU[$jalon]}" "$jalon"
+    fi
+  done
+
+  if [ -n "${VU[$FINAL]:-}" ] && [ -n "${VU[$DOCUMENT]:-}" ] && [ -n "${VU[$TRAME]:-}" ]; then
+    verdict=succes
     break
   fi
-  if (( SECONDS >= DEADLINE )); then break; fi
-  sleep 0.5
+
+  # Le noyau emet ses releves periodiques tant qu'il vit : un journal qui
+  # cesse de grossir n'est pas un navigateur lent, c'est une machine morte.
+  taille=$(wc -c < "$LOG")
+  if [ "$taille" -ne "$taille_vue" ]; then
+    taille_vue=$taille
+    derniere_avancee=$SECONDS
+  elif (( SECONDS - derniere_avancee >= SILENCE_MAX )); then
+    verdict=muet
+    break
+  fi
+
+  if (( SECONDS - DEBUT >= PLAFOND )); then
+    verdict=plafond
+    break
+  fi
+  sleep 2
 done
+ECOULE=$((SECONDS - DEBUT))
 kill -TERM "$PID" 2>/dev/null || true
 sleep 1
 kill -KILL "$PID" 2>/dev/null || true
 wait "$PID" 2>/dev/null || true
 cat "$LOG"
 
-for marker in \
-  '[ladybird-bouchaud] BROWSER_HOST_START' \
-  '[ladybird-bouchaud] BROWSER_HOST_INITIALIZED' \
-  '[ladybird-bouchaud] M11_GUI_HANDSHAKE_OK' \
-  '[ladybird-bouchaud] M11_DOCUMENT_LOADED' \
-  '[ladybird-bouchaud] BROWSER_HOST_M11_FRAME_PRESENTED' \
-  'HOST_CANVAS OK' 'HOST_WORKER OK pong' 'HOST_IMAGE OK 1x1' 'HOST_IFRAME OK' \
-  'HOST_SMOKE_OK canvas=1 worker=1 image=1 frame=1'; do
-  grep -aF "$marker" "$LOG"
+# Relecture finale. La boucle s'arrete des que QEMU meurt, et les jalons
+# ecrits juste avant sa mort n'ont alors jamais ete cherches. Sans cette
+# passe, le rapport declarerait « JAMAIS ATTEINT » des lignes qui sont dans
+# le journal -- il l'a fait, sur le banc d'essai de cette boucle.
+for jalon in "${JALONS[@]}"; do
+  if [ -z "${VU[$jalon]:-}" ] && grep -aFq "$jalon" "$LOG"; then
+    VU[$jalon]=tardif
+  fi
 done
+
+echo
+echo "== jalons apres ${ECOULE}s (verdict: $verdict) =="
+manquants=0
+for jalon in "${JALONS[@]}"; do
+  if [ "${VU[$jalon]:-}" = tardif ]; then
+    printf '  atteint (dernier souffle) %s\n' "$jalon"
+  elif [ -n "${VU[$jalon]:-}" ]; then
+    printf '  atteint a T+%-4ss %s\n' "${VU[$jalon]}" "$jalon"
+  else
+    printf '  JAMAIS ATTEINT     %s\n' "$jalon"
+    manquants=$((manquants + 1))
+  fi
+done
+
+if [ "$manquants" -ne 0 ]; then
+  case "$verdict" in
+    muet)
+      echo "l'invite a cesse d'ecrire sur la console serie pendant ${SILENCE_MAX}s :" >&2
+      echo "la machine est bloquee, pas lente. Le dernier jalon atteint dit ou." >&2
+      ;;
+    plafond)
+      echo "plafond de ${PLAFOND}s atteint alors que l'invite ecrivait encore :" >&2
+      echo "le navigateur progressait trop lentement, il n'etait pas bloque." >&2
+      ;;
+    *)
+      echo "QEMU s'est arrete de lui-meme apres ${ECOULE}s." >&2
+      ;;
+  esac
+  echo "$manquants jalon(s) manquant(s)." >&2
+  exit 1
+fi
 grep -F "BROWSER_HOST_FIXTURE_OK path=/browser-host.html" fixture-browser-host.log
 grep -F "BROWSER_HOST_FIXTURE_IMAGE_OK path=/pixel.png" fixture-browser-host.log
 grep -F "BROWSER_HOST_FIXTURE_FRAME_OK path=/frame.html" fixture-browser-host.log
