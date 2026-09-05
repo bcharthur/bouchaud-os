@@ -51,6 +51,14 @@
 // entiere sans dependance, donc verifiable sur l'hote par `test_zoom.cpp`.
 #include "BouchaudZoom.h"
 
+// BOUCHAUD_CHROME_V19_CALQUES
+//
+// Le degat des surfaces flottantes -- bulle de survol, barre de recherche,
+// menu contextuel -- que le moteur ne connait pas et ne signalera donc jamais.
+// Meme raison d'etre que les deux precedents : `test_calques.cpp` l'execute sur
+// l'hote.
+#include "BouchaudCalques.h"
+
 #if defined(BOUCHAUD_PORT)
 
 #    include <AK/ByteString.h>
@@ -115,6 +123,18 @@ inline constexpr u32 color_glyph_off = 0x00'6b'71'78;
 inline constexpr u32 color_secure = 0x00'1e'8e'3e;
 inline constexpr u32 color_insecure = 0x00'c5'39'29;
 inline constexpr u32 color_page_backdrop = 0x00'ff'ff'ff;
+
+// BOUCHAUD_CHROME_V19_CALQUES : les surfaces flottantes.
+inline constexpr u32 color_calque_fond = 0x00'23'27'2b;
+inline constexpr u32 color_calque_bord = 0x00'11'13'15;
+inline constexpr u32 color_calque_texte = 0x00'e8'ea'ed;
+
+/// Hauteur d'une ligne de texte d'interface, celle que Skia recoit en V15.
+inline constexpr int ui_text_height = 22;
+/// Marge horizontale a l'interieur d'un calque.
+inline constexpr int calque_marge = 8;
+/// Hauteur de la bulle de survol : une ligne de texte et deux pixels d'air.
+inline constexpr int survol_hauteur = ui_text_height + 2;
 
 // ----------------------------------------------------------------------------
 // Protocole GUI
@@ -394,6 +414,17 @@ struct State {
 
     /// Le cran de zoom courant. Voir BouchaudZoom.h.
     int zoom_cran { BouchaudZoom::cran_neutre };
+
+    /// Ce que la surface porte des calques. Voir BouchaudCalques.h.
+    BouchaudCalques::Suivi calques;
+
+    /// L'adresse du lien sous le pointeur, vide quand il n'y en a pas.
+    ///
+    /// C'est la seule chose qu'un navigateur montre avant qu'on clique, et
+    /// c'est ce qui permet de voir ou mene un lien dont le texte ment. Sur un
+    /// systeme dont le but est de tenir devant un attaquant, la retirer serait
+    /// une regression de securite, pas un manque de confort.
+    ByteString survol_url;
 
     // Rendu M11: compteurs cumulatifs, journalises par paquets de 16 trames.
     u64 chrome_full_frames { 0 };
@@ -938,6 +969,26 @@ inline bool point_in_address_field(int x, int y)
         && y >= button_top && y < button_top + button_height;
 }
 
+/// Le texte d'interface du chrome, en UN SEUL point de passage.
+///
+/// `y` est le HAUT de la ligne, et sa hauteur est `ui_text_height`.
+///
+/// Ce point unique existe pour une raison precise :
+/// `tools/ladybird/chrome/modernise-v15.py` remplace ce corps par le rendu
+/// Skia et garde l'atlas en secours. Tant qu'il n'y avait qu'un seul texte
+/// dans le chrome -- l'URL --, la substitution pouvait viser cette ligne-la ;
+/// des qu'il y en a plusieurs, viser chacune serait un moyen sur d'en oublier
+/// une, et une bulle de survol en police bitmap a cote d'une barre d'adresse
+/// en DejaVu se verrait tout de suite.
+///
+/// La MESURE, elle, reste celle de l'atlas (`text_width(..., 2)`) dans les deux
+/// cas : c'est deja ce que V15 fait pour le caret, et deux mesures differentes
+/// pour un meme texte donneraient deux boites differentes.
+inline void draw_ui_text(Canvas const& canvas, int x, int y, StringView texte, u32 couleur, int largeur_max)
+{
+    draw_text(canvas, x, y + 1, texte, couleur, 2, largeur_max);
+}
+
 inline void draw_toolbar(Canvas const& canvas)
 {
     auto& s = state();
@@ -972,7 +1023,7 @@ inline void draw_toolbar(Canvas const& canvas)
         s.secure ? color_secure : color_insecure);
 
     auto text_x = field_x + 14;
-    auto text_y = button_top + (button_height - glyph_height * 2) / 2;
+    auto text_y = button_top + 3;
     auto available = field_w - 20;
 
     StringBuilder builder;
@@ -1037,7 +1088,7 @@ inline void draw_toolbar(Canvas const& canvas)
             color_field_selection);
     }
 
-    draw_text(canvas, text_x, text_y, visible.view(), color_field_text, 2, available);
+    draw_ui_text(canvas, text_x, text_y, visible.view(), color_field_text, available);
 
     if (s.address_focused) {
         auto caret = min(s.caret, address_text.length());
@@ -1053,6 +1104,110 @@ inline void draw_toolbar(Canvas const& canvas)
     auto status_x = canvas.width - margin - status_width;
     if (status_x > field_x + field_w + 4)
         draw_text(canvas, status_x, toolbar_height - glyph_height - 3, status_text.view(), color_glyph_off, 1, status_width);
+}
+
+// ----------------------------------------------------------------------------
+// Calques — les surfaces flottantes au-dessus de la page
+// ----------------------------------------------------------------------------
+//
+// BOUCHAUD_CHROME_V19_CALQUES
+//
+// Un calque est peint PAR-DESSUS les pixels de page, dans la meme surface
+// partagee. Ces pixels-la n'appartiennent a personne : le moteur ne les connait
+// pas, donc il ne les signalera jamais comme changes, et la surface les porte
+// encore quand le calque disparait. BouchaudCalques.h decide ce qu'il faut
+// reecrire ; ce qui suit decide ce qu'on y dessine.
+//
+// La discipline tient en trois appels, et compose_page() est le seul endroit
+// qui les enchaine :
+//
+//     mesure_calques()      ou chaque calque doit etre a cette trame
+//     ... plan, effacement, copie de la page ...
+//     dessine_calques()     tout calque que le rectangle publie touche
+//     acter la trame        la surface porte maintenant ce qui etait voulu
+
+/// Les calques du chrome, nommes.
+///
+/// L'enumeration vit ICI et non dans BouchaudCalques.h : ce fichier-la ne sait
+/// pas ce qu'est une bulle de survol, et le lui apprendre obligerait a modifier
+/// son banc d'essai a chaque element d'interface ajoute. Elle grandit avec ce
+/// qui est reellement dessine -- `tools/verifie-calques-chrome.py` refuse un
+/// calque declare que `mesure_calques()` ne pose pas ou que
+/// `dessine_calques()` ne peint pas.
+enum Calque : int {
+    /// Bulle d'adresse du lien survole, en bas a gauche.
+    Survol = 0,
+    Nombre,
+};
+
+// Un calque de plus que le suivi n'en porte serait silencieusement ignore :
+// `place()` refuse un indice hors bornes, et rien ne le dirait avant que la
+// bulle manquante se voie a l'ecran.
+static_assert(Nombre <= BouchaudCalques::maximum,
+    "plus de calques que BouchaudCalques::Suivi n'en porte");
+
+/// La boite de la bulle de survol, en coordonnees de SURFACE.
+///
+/// En bas a gauche, contre le bord, comme dans tous les navigateurs de bureau :
+/// c'est le coin ou elle recouvre le moins souvent ce qu'on est en train de
+/// lire, et l'endroit ou l'oeil va la chercher.
+inline BouchaudDegat::Rect boite_survol()
+{
+    auto& s = state();
+    if (s.survol_url.is_empty() || s.surface_width <= 0 || s.surface_height <= 0)
+        return {};
+
+    auto const y = s.surface_height - survol_hauteur;
+    // Une fenetre trop courte n'a pas de place sous la barre d'outils. Peindre
+    // quand meme ecrirait la bulle DANS la barre, et le suivi de degat de page
+    // ne restaurerait jamais ces pixels-la.
+    if (y < page_origin_y())
+        return {};
+
+    auto largeur = text_width(s.survol_url.view(), 2) + 2 * calque_marge;
+    largeur = min(largeur, max(0, s.surface_width * 3 / 4));
+    if (largeur <= 0)
+        return {};
+    return { 0, y, largeur, survol_hauteur };
+}
+
+inline void dessine_survol(Canvas const& canvas)
+{
+    auto& s = state();
+    auto const boite = s.calques.boite(Survol);
+    if (boite.vide())
+        return;
+
+    fill_rect(canvas, boite.x, boite.y, boite.w, boite.h, color_calque_fond);
+    // Deux aretes seulement : celles qui touchent la page. Les deux autres
+    // touchent le bord de la fenetre, ou un trait ne separerait rien.
+    fill_rect(canvas, boite.x, boite.y, boite.w, 1, color_calque_bord);
+    fill_rect(canvas, boite.x + boite.w - 1, boite.y, 1, boite.h, color_calque_bord);
+    draw_ui_text(canvas, boite.x + calque_marge, boite.y,
+        s.survol_url.view(), color_calque_texte, boite.w - 2 * calque_marge);
+}
+
+/// Ou chaque calque doit se trouver a la trame qui vient.
+///
+/// Un seul endroit calcule les boites, et il les calcule TOUTES : une boite
+/// posee ailleurs, au moment ou l'etat change, se serait desynchronisee du
+/// premier redimensionnement de fenetre venu -- la bulle est ancree au bas de
+/// la surface, et ce bas bouge.
+inline void mesure_calques()
+{
+    state().calques.place(Survol, boite_survol());
+}
+
+/// Dessine les calques que `publie` recouvre, en coordonnees de SURFACE.
+///
+/// La question se pose pour tous les calques VISIBLES et pas seulement pour
+/// ceux qui ont bouge : une capture de page qui repeint sous un calque immobile
+/// vient d'effacer ses pixels.
+inline void dessine_calques(Canvas const& canvas, BouchaudDegat::Rect publie)
+{
+    auto& s = state();
+    if (BouchaudCalques::doit_redessiner(s.calques.boite(Survol), publie))
+        dessine_survol(canvas);
 }
 
 // ----------------------------------------------------------------------------
@@ -1099,6 +1254,27 @@ inline bool compose_page(BouchaudDegat::Rect degat)
         bitmap ? bitmap->width() : 0,
         bitmap ? bitmap->height() : 0,
     };
+
+    // BOUCHAUD_CHROME_V19_CALQUES
+    //
+    // Un calque qui bouge oblige a restaurer la page LA OU IL ETAIT, et cette
+    // restauration n'existe qu'ici : c'est la seule fonction qui sait recopier
+    // `last_page`. Son degat rejoint donc celui du moteur avant le plan, et
+    // non apres -- apres, le plan aurait deja decide de ne rien recopier.
+    //
+    // Les deux reperes different : les calques flottent sur la SURFACE, le
+    // degat du moteur porte sur la PAGE.
+    mesure_calques();
+    auto const degat_calques = s.calques.degat();
+    if (!degat_calques.vide()) {
+        degat = degat.englobe(BouchaudDegat::Rect {
+            degat_calques.x,
+            degat_calques.y - geometrie.page_haut,
+            degat_calques.w,
+            degat_calques.h,
+        });
+    }
+
     auto plan = s.suivi_page.planifie(geometrie, degat);
 
     auto page_top = geometrie.page_haut;
@@ -1114,17 +1290,33 @@ inline bool compose_page(BouchaudDegat::Rect degat)
         return true;
     }
 
-    // La barre d'outils ne bouge pas quand la page bouge. On ne la redessine
-    // que sur une trame complete -- premiere trame, fenetre redimensionnee --
-    // parce que c'est la que la surface a cesse de la porter.
+    // Le rectangle reellement annonce au compositeur. Il part du plan de page
+    // et grandit de ce que le chrome ajoute par-dessus : la barre d'outils si
+    // elle est repeinte, la surface entiere sur une trame complete.
+    auto publie = plan.publie;
+
+    // La barre d'outils ne bouge pas quand la page bouge. Sur une trame
+    // complete -- premiere trame, fenetre redimensionnee -- la surface a cesse
+    // de la porter et il faut la repeindre.
     if (plan.complet) {
         draw_toolbar(canvas);
         // Elle vient d'etre repeinte : une recomposition de chrome en attente
-        // serait redondante. Ce compteur ne s'efface QUE la, et pas a chaque
-        // capture : une lettre tapee dans la barre d'adresse pendant qu'une
-        // trame partielle passait serait sinon perdue jusqu'a la frappe
-        // suivante.
+        // serait redondante.
         s.chrome_frames_pending = 0;
+        publie = BouchaudDegat::Rect { 0, 0, s.surface_width, s.surface_height };
+    } else if (s.chrome_frames_pending > 0) {
+        // Elle attend une recomposition et une trame partielle passe : la
+        // peindre ici plutot que de laisser `tick()` publier un second message
+        // pour les memes trente-six lignes. C'est aussi ce qui garantit qu'une
+        // lettre tapee dans la barre pendant une capture n'attend pas la
+        // frappe suivante pour s'afficher.
+        draw_toolbar(canvas);
+        s.chrome_frames_pending = 0;
+        ++s.chrome_toolbar_frames;
+        s.chrome_pixels_written += static_cast<u64>(s.surface_width)
+            * static_cast<u64>(min(toolbar_height, s.surface_height));
+        publie = publie.englobe(BouchaudDegat::Rect {
+            0, 0, s.surface_width, min(toolbar_height, s.surface_height) });
     }
 
     if (plan.efface_necessaire) {
@@ -1143,6 +1335,15 @@ inline bool compose_page(BouchaudDegat::Rect degat)
         painted = static_cast<size_t>(plan.copie.w) * static_cast<size_t>(plan.copie.h);
     }
 
+    // Les calques passent APRES la copie : ils flottent au-dessus de la page,
+    // et les dessiner avant reviendrait a les recouvrir de ce qu'ils cachent.
+    dessine_calques(canvas, publie);
+    // La trame va etre publiee : ce qui etait voulu est desormais porte par la
+    // surface. Acter avant l'envoi et non apres n'a aucune importance ici --
+    // `send_frame_ready` ne peut pas echouer a moitie -- mais acter sur une
+    // trame ABANDONNEE en aurait : le suivi croirait la surface a jour.
+    s.calques.acte();
+
     send_handshake();
     if (plan.complet)
         ++s.chrome_full_frames;
@@ -1154,12 +1355,10 @@ inline bool compose_page(BouchaudDegat::Rect degat)
     }
     s.chrome_pixels_written += static_cast<u64>(painted);
 
-    // Une trame complete vient de reecrire la barre d'outils : le rectangle
-    // annonce doit la couvrir, sinon le compositeur garderait l'ancienne.
-    if (plan.complet)
-        send_frame_ready({ 0, 0, s.surface_width, s.surface_height });
-    else
-        send_frame_ready({ plan.publie.x, plan.publie.y, plan.publie.w, plan.publie.h });
+    // `publie` couvre deja tout ce que cette trame a reecrit : la page, la
+    // barre d'outils si elle a ete repeinte, les calques. Un rectangle plus
+    // petit laisserait le compositeur afficher l'ancien contenu.
+    send_frame_ready({ publie.x, publie.y, publie.w, publie.h });
 
     // Le temoin dit « la premiere trame de PAGE », pas « la premiere trame ».
     // Depuis qu'un `Configure` recompose immediatement, la toute premiere trame
@@ -1972,6 +2171,20 @@ inline void tick()
     drain();
 
     auto& s = state();
+
+    // BOUCHAUD_CHROME_V19_CALQUES
+    //
+    // Les calques d'abord. Un calque qui apparait, se deplace ou disparait
+    // oblige a restaurer la page dessous, et `compose_toolbar_only()` ne sait
+    // pas faire cela : il ne touche pas un pixel de page. La composition de
+    // page peint aussi la barre d'outils si elle attend, donc le compteur est
+    // traite au passage et rien n'est publie deux fois.
+    mesure_calques();
+    if (!s.calques.degat().vide()) {
+        compose_page({});
+        return;
+    }
+
     if (s.chrome_frames_pending <= 0)
         return;
 
@@ -2011,6 +2224,25 @@ inline void initialize_from_environment()
         s.gui_fd, s.surface_fd, s.surface_width, s.surface_height, toolbar_height);
 }
 
+/// L'adresse du lien sous le pointeur, ou une chaine vide pour l'effacer.
+///
+/// Pas de `request_chrome_frame()` : la bulle n'est pas la barre d'outils, et
+/// une recomposition de barre ne restaurerait pas la page sous l'ancienne
+/// bulle. C'est `tick()` qui verra le calque bouger, au prochain tic de seize
+/// millisecondes.
+inline void set_survol_url(ByteString const& url)
+{
+    auto& s = state();
+    if (s.survol_url == url)
+        return;
+    s.survol_url = url;
+}
+
+inline void clear_survol_url()
+{
+    set_survol_url(ByteString {});
+}
+
 /// Prend une `ByteString` et non une `StringView` : les appelants passent
 /// `url.to_byte_string()`, un temporaire dont AK **supprime** `view()` pour
 /// empecher exactement la vue pendante que cela produirait. La reference lie le
@@ -2028,6 +2260,13 @@ inline void set_committed_url(ByteString const& url)
 inline void set_loading(bool loading, StringView status)
 {
     auto& s = state();
+    // Un document qui commence a charger n'a plus de lien survole : celui
+    // qu'on affichait appartenait au document precedent, et LibWeb n'enverra
+    // pas de `unhover` pour un element qui n'existe plus. Sans cela la bulle
+    // resterait, et montrerait une adresse sans rapport avec ce qui est a
+    // l'ecran -- exactement ce contre quoi elle existe.
+    if (loading && !s.loading)
+        clear_survol_url();
     s.loading = loading;
     s.status = status;
     request_chrome_frame();

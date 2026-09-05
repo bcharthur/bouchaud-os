@@ -57,6 +57,30 @@ struct Rect {
         return x == autre.x && y == autre.y && w == autre.w && h == autre.h;
     }
 
+    /// Le plus petit rectangle qui contient les deux.
+    ///
+    /// Le chrome ne tient pas de liste de rectangles : un degat qui en reunit
+    /// plusieurs est reduit a leur boite englobante. C'est deliberement
+    /// pessimiste -- deux petits changements aux deux coins opposes de la
+    /// fenetre font recopier toute la fenetre -- mais cela garde le plan a un
+    /// seul rectangle, donc la publication a un seul message, et cela ne peut
+    /// jamais laisser un pixel perime a l'ecran. Une liste serait plus fine et
+    /// il faudrait alors prouver qu'elle ne perd rien.
+    constexpr Rect englobe(Rect const& autre) const
+    {
+        if (vide() && autre.vide())
+            return {};
+        if (vide())
+            return autre;
+        if (autre.vide())
+            return *this;
+        auto const x0 = x < autre.x ? x : autre.x;
+        auto const y0 = y < autre.y ? y : autre.y;
+        auto const x1 = (x + w) > (autre.x + autre.w) ? (x + w) : (autre.x + autre.w);
+        auto const y1 = (y + h) > (autre.y + autre.h) ? (y + h) : (autre.y + autre.h);
+        return Rect { x0, y0, x1 - x0, y1 - y0 };
+    }
+
     constexpr Rect intersecte(Rect const& autre) const
     {
         if (vide() || autre.vide())

@@ -104,6 +104,32 @@ def corps(source, signature):
     return None
 
 
+def etendue(source, signature):
+    """Les bornes du bloc accolade qui suit `signature`, ou None.
+
+    `corps()` rend le TEXTE du bloc, ce qui ne suffit pas ici : une ligne
+    identique ecrite en dehors du bloc y apparait aussi comme sous-chaine. La
+    premiere version de la regle ci-dessous s'y est laissee prendre -- une
+    publication de toute la surface deplacee AVANT `if (plan.complet)` passait,
+    parce que la meme ligne existait aussi a l'interieur.
+    """
+    debut = source.find(signature)
+    if debut < 0:
+        return None
+    ouvrante = source.find("{", debut)
+    if ouvrante < 0:
+        return None
+    profondeur = 0
+    for index in range(ouvrante, len(source)):
+        if source[index] == "{":
+            profondeur += 1
+        elif source[index] == "}":
+            profondeur -= 1
+            if profondeur == 0:
+                return (ouvrante, index + 1)
+    return None
+
+
 def regle_present(chrome, fautes):
     """1. `present()` compose par degat."""
     bloc = corps(chrome, "inline bool present(Gfx::ShareableBitmap const& screenshot, int degat_x")
@@ -132,21 +158,58 @@ def regle_present(chrome, fautes):
             "d'essai hote ne garderait plus rien."
         )
         return
-    # Le rectangle publie doit dependre du plan. Une publication de la surface
-    # entiere n'a le droit d'exister que dans la branche « trame complete ».
-    for numero, ligne in enumerate(plan.splitlines(), start=1):
-        nue = ligne.split("//", 1)[0]
-        if "send_frame_ready" in nue and "plan.publie" not in nue and "plan.complet" not in nue:
-            if "s.surface_width, s.surface_height" in nue:
-                continue  # la branche complete, verifiee ci-dessous
-            fautes.append(
-                "BouchaudChrome.h : `compose_page()` publie un rectangle qui ne "
-                "vient pas du plan.\n           %s" % ligne.strip()
-            )
-    if "send_frame_ready({ plan.publie.x" not in plan:
+    # Le rectangle publie doit DEPENDRE du plan.
+    #
+    # Il n'est plus `plan.publie` tel quel : depuis les calques
+    # (BOUCHAUD_CHROME_V19_CALQUES), il part du plan puis grandit de ce que le
+    # chrome ajoute par-dessus -- la barre d'outils repeinte sur une trame
+    # partielle. La regle porte donc sur les deux bouts de cette chaine :
+    #
+    #   * il PART du plan, et d'aucune autre valeur ;
+    #   * il ne peut grandir que par `englobe()`, sauf dans la branche « trame
+    #     complete », la seule qui a le droit de publier toute la surface ;
+    #   * une seule publication par trame, et c'est lui qu'elle annonce.
+    #
+    # Ce que cela interdit reste ce qu'on veut interdire : republier la fenetre
+    # entiere a chaque capture, qui est le defaut d'origine.
+    if "auto publie = plan.publie;" not in plan:
         fautes.append(
-            "BouchaudChrome.h : `compose_page()` ne publie plus le rectangle "
-            "partiel calcule par le plan."
+            "BouchaudChrome.h : `compose_page()` ne fait plus partir le "
+            "rectangle publie du plan. C'est la seule chose qui garantit "
+            "qu'une trame partielle publie un rectangle partiel."
+        )
+
+    complet = etendue(plan, "if (plan.complet)")
+    position = 0
+    for ligne in plan.splitlines(keepends=True):
+        debut = position
+        position += len(ligne)
+        nue = ligne.split("//", 1)[0].strip()
+        if not nue.startswith("publie = ") or ".englobe(" in nue:
+            continue
+        if complet is not None and complet[0] <= debut < complet[1]:
+            continue
+        fautes.append(
+            "BouchaudChrome.h : `compose_page()` reecrit le rectangle publie "
+            "hors de la branche « trame complete » et sans `englobe()`.\n"
+            "           %s" % ligne.strip()
+        )
+
+    appels = [
+        ligne.strip()
+        for ligne in plan.splitlines()
+        if "send_frame_ready" in ligne.split("//", 1)[0]
+    ]
+    if len(appels) != 1:
+        fautes.append(
+            "BouchaudChrome.h : `compose_page()` publie %d fois. Une trame, une "
+            "publication : deux messages pour la meme trame font recopier deux "
+            "fois au compositeur." % len(appels)
+        )
+    elif "publie" not in appels[0]:
+        fautes.append(
+            "BouchaudChrome.h : `compose_page()` publie un rectangle qui ne "
+            "vient pas du plan.\n           %s" % appels[0]
         )
 
 

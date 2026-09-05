@@ -17,6 +17,11 @@ if grep -Fq 'KeyModifier::Mod_AltGr' "$CHROME"; then
     exit 1
 fi
 grep -q 'BouchaudChromeV15Assets::STOP' "$CHROME"
+# Le texte d'interface passe par un point unique, et c'est ce point que V15
+# modernise. L'ancre peut correspondre sans que le corps soit celui qu'on
+# croit : verifier le RESULTAT et pas seulement l'ancre est ce qui distingue
+# « la substitution a eu lieu » de « le chrome est bien en DejaVu ».
+grep -Fq 'if (draw_browser_text(canvas, x, y, texte, couleur, largeur_max))' "$CHROME"
 grep -q 'target_link_libraries(webcontentservice PRIVATE skia)' "$CMAKE"
 grep -q 'FONTS_V16_FORCE_FONTCONFIG' "$SRC/Services/WebContent/main.cpp"
 grep -q 'BOUCHAUD_V16_DEJAVU_GENERIC' "$SRC/Libraries/LibWeb/Platform/FontPlugin.cpp"
