@@ -26,10 +26,13 @@
  *
  * ## Ce qu'il ne fait pas
  *
- * Pas d'onglets (M13), pas de bac a sable (M14), pas de rendu de texte vectoriel
- * dans le chrome : la barre d'outils utilise la police bitmap 8x8 du noyau, la
- * meme que `src/drivers/gfx/font.rs`, pour ne dependre d'aucune API de dessin
- * susceptible de bouger chez upstream.
+ * Pas d'onglets (M13), pas de bac a sable (M14).
+ *
+ * Le texte, lui, n'est plus en police bitmap : `modernise-v15.py` remplace le
+ * corps de `draw_ui_text` par le rendu Skia du meme moteur que la page, et
+ * l'atlas 8x8 reste le secours et la MESURE. C'est pour cela que tout le texte
+ * d'interface passe par cette seule fonction : une seconde voie de dessin
+ * echapperait a la modernisation sans que rien ne le signale.
  */
 
 #pragma once
@@ -135,6 +138,9 @@ inline constexpr int ui_text_height = 22;
 inline constexpr int calque_marge = 8;
 /// Hauteur de la bulle de survol : une ligne de texte et deux pixels d'air.
 inline constexpr int survol_hauteur = ui_text_height + 2;
+/// Barre de recherche : assez large pour une requete et son compteur.
+inline constexpr int recherche_largeur = 320;
+inline constexpr int recherche_hauteur = ui_text_height + 10;
 
 // ----------------------------------------------------------------------------
 // Protocole GUI
@@ -321,6 +327,156 @@ inline constexpr int glyph_width = 8;
 inline constexpr int glyph_height = 8;
 
 // ----------------------------------------------------------------------------
+// Champ de saisie
+// ----------------------------------------------------------------------------
+
+/// Un champ de saisie a une ligne : le texte, le curseur, la selection totale.
+///
+/// # Pourquoi il existe plutot qu'une seconde copie de la meme table
+///
+/// Le chrome en a deux -- la barre d'adresse et la barre de recherche -- et il
+/// en aura d'autres. Une table de touches de champ de saisie a l'air triviale
+/// et ne l'est pas : la selection totale se defait a la premiere touche qui
+/// deplace ou modifie, Suppr efface a DROITE quand Retour arriere efface a
+/// gauche, et le curseur se borne au texte a chaque operation parce qu'un
+/// `pose()` a pu le laisser derriere. Recopiee, elle diverge -- la copie qui
+/// sert le plus gagne le collage de Ctrl+V, l'autre pas -- et rien ne le
+/// signale avant qu'on essaie.
+///
+/// Le texte est conserve en octets ASCII : le pilote clavier du bureau n'expose
+/// pas encore de disposition non latine, et pretendre le contraire ici ne
+/// rendrait pas la saisie plus juste.
+struct Champ {
+    Vector<u8> texte;
+    size_t caret { 0 };
+    /// Tout le texte est selectionne : la premiere frappe le remplace.
+    bool tout_selectionne { false };
+
+    ByteString vers_chaine() const
+    {
+        StringBuilder builder;
+        for (auto octet : texte)
+            builder.append(static_cast<char>(octet));
+        return builder.to_byte_string();
+    }
+
+    bool est_vide() const { return texte.is_empty(); }
+
+    /// Remplace le contenu et pose le curseur a la fin.
+    void pose(StringView valeur)
+    {
+        texte.clear_with_capacity();
+        for (size_t index = 0; index < valeur.length(); ++index)
+            texte.append(static_cast<u8>(valeur[index]));
+        caret = texte.size();
+        tout_selectionne = false;
+    }
+
+    void selectionne_tout()
+    {
+        tout_selectionne = true;
+        caret = texte.size();
+    }
+
+    void deselectionne() { tout_selectionne = false; }
+
+    /// Pose le curseur a la fin sans rien selectionner : ce que fait un clic.
+    void pose_curseur_a_la_fin()
+    {
+        tout_selectionne = false;
+        caret = texte.size();
+    }
+
+    /// Applique UNE touche de saisie. Rend true si le champ l'a consommee.
+    ///
+    /// `ToucheEntree` et `ToucheEchap` ne sont volontairement PAS consommees :
+    /// elles ne veulent pas dire la meme chose dans une barre d'adresse -- qui
+    /// navigue et qui abandonne -- et dans une barre de recherche -- qui passe
+    /// a la correspondance suivante et qui ferme. C'est a l'appelant de le
+    /// decider, et lui seul le sait.
+    bool applique(u32 code, u32 code_point);
+};
+
+inline bool Champ::applique(u32 code, u32 code_point)
+{
+    // La selection totale est resolue UNE fois, ici, avant la table. Chaque
+    // branche ci-dessous suppose donc qu'elle n'existe plus -- ce qui evite
+    // d'avoir a la reexaminer dans chacune, et d'en oublier une.
+    auto const selectionne = tout_selectionne;
+    auto const remplace_tout = [this] {
+        texte.clear_with_capacity();
+        caret = 0;
+    };
+
+    switch (code) {
+    case ToucheCaractere:
+        // Hors de l'ASCII imprimable, la touche n'est pas pour ce champ : la
+        // rendre non consommee laisse l'appelant en faire autre chose.
+        if (code_point < 0x20 || code_point >= 0x7f)
+            return false;
+        tout_selectionne = false;
+        if (selectionne)
+            remplace_tout();
+        if (caret > texte.size())
+            caret = texte.size();
+        texte.insert(caret, static_cast<u8>(code_point));
+        ++caret;
+        return true;
+
+    case ToucheRetour:
+        tout_selectionne = false;
+        if (selectionne)
+            remplace_tout();
+        else if (caret > 0 && !texte.is_empty()) {
+            --caret;
+            texte.remove(caret);
+        }
+        return true;
+
+    case ToucheSupprimer:
+        // Suppr efface a DROITE. La touche existait deja cote materiel, mais le
+        // decodeur la traduisait en Retour arriere : elle effacait donc le
+        // caractere de gauche, ce qui est la seule chose qu'elle ne doit pas
+        // faire.
+        tout_selectionne = false;
+        if (selectionne)
+            remplace_tout();
+        else if (caret < texte.size())
+            texte.remove(caret);
+        return true;
+
+    case ToucheGauche:
+        tout_selectionne = false;
+        if (selectionne)
+            caret = 0;
+        else if (caret > 0)
+            --caret;
+        return true;
+
+    case ToucheDroite:
+        tout_selectionne = false;
+        if (selectionne)
+            caret = texte.size();
+        else if (caret < texte.size())
+            ++caret;
+        return true;
+
+    case ToucheDebut:
+        tout_selectionne = false;
+        caret = 0;
+        return true;
+
+    case ToucheFin:
+        tout_selectionne = false;
+        caret = texte.size();
+        return true;
+
+    default:
+        return false;
+    }
+}
+
+// ----------------------------------------------------------------------------
 // Etat
 // ----------------------------------------------------------------------------
 
@@ -351,21 +507,38 @@ struct State {
     u8* surface_mapping { nullptr };
     size_t surface_mapping_bytes { 0 };
 
-    // Barre d'adresse. Le texte est conserve en octets ASCII : le pilote clavier
-    // du bureau n'expose pas encore de disposition non latine, et pretendre le
-    // contraire ici ne rendrait pas la saisie plus juste.
-    Vector<u8> address;
-    size_t caret { 0 };
-    bool address_focused { false };
-    /// Tout le texte du champ est selectionne.
+    /// Barre d'adresse.
     ///
-    /// Le seul etat de selection que ce chrome modelise, et c'est le seul dont
-    /// depend un raccourci : Ctrl+L veut dire « je vais taper une autre
-    /// adresse », et laisser le curseur au bout du texte obligerait a effacer
-    /// l'URL caractere par caractere avant de pouvoir s'en servir. La premiere
-    /// frappe remplace, comme partout ailleurs ; Echap restaure l'URL commitee,
-    /// donc rien n'est perdu.
-    bool address_all_selected { false };
+    /// Sa selection totale -- `address.tout_selectionne` -- est le seul etat de
+    /// selection dont depende un raccourci : Ctrl+L veut dire « je vais taper
+    /// une autre adresse », et laisser le curseur au bout du texte obligerait a
+    /// effacer l'URL caractere par caractere avant de pouvoir s'en servir. La
+    /// premiere frappe remplace, comme partout ailleurs ; Echap restaure l'URL
+    /// commitee, donc rien n'est perdu.
+    Champ address;
+    bool address_focused { false };
+
+    // BOUCHAUD_CHROME_V19_RECHERCHE
+    //
+    // La recherche dans la page. LibWeb la sait faire depuis toujours --
+    // `Page::find_in_page()` cherche, surligne et compte -- et rien ne
+    // l'appelait : sur un document long, la seule facon de trouver un mot
+    // etait de le lire.
+    Champ recherche;
+    bool recherche_ouverte { false };
+    /// La barre est ouverte ET recoit les frappes.
+    ///
+    /// Les deux etats sont distincts parce qu'ils le sont dans tout
+    /// navigateur : un clic dans la page rend le foyer au document sans fermer
+    /// la barre, et F3 continue d'y parcourir les correspondances. Les
+    /// confondre ferait taper dans la barre de recherche a qui vient de
+    /// cliquer dans un champ de la page.
+    bool recherche_focus { false };
+    /// Le rang de la correspondance courante, tel que le moteur le rend.
+    size_t recherche_rang { 0 };
+    size_t recherche_total { 0 };
+    /// Le moteur ne connait pas toujours le total ; ne pas l'inventer.
+    bool recherche_total_connu { false };
 
     // Ce que la page dit d'elle-meme.
     ByteString committed_url;
@@ -453,6 +626,10 @@ struct State {
     Function<void(int, int)> on_resize;
     /// Le zoom a change : nouveau facteur, en POURCENTS.
     Function<void(int)> on_zoom;
+    /// Nouvelle requete de recherche. Une chaine vide efface le surlignage.
+    Function<void(ByteString)> on_find;
+    Function<void()> on_find_next;
+    Function<void()> on_find_previous;
     Function<void()> on_close;
 };
 
@@ -1027,7 +1204,7 @@ inline void draw_toolbar(Canvas const& canvas)
     auto available = field_w - 20;
 
     StringBuilder builder;
-    for (auto byte : s.address)
+    for (auto byte : s.address.texte)
         builder.append(static_cast<char>(byte));
     auto address_text = builder.to_byte_string();
 
@@ -1059,7 +1236,7 @@ inline void draw_toolbar(Canvas const& canvas)
             --first;
 
         if (s.address_focused) {
-            auto caret = min(s.caret, address_text.length());
+            auto caret = min(s.address.caret, address_text.length());
             if (caret < first) {
                 first = caret;
             } else {
@@ -1082,7 +1259,7 @@ inline void draw_toolbar(Canvas const& canvas)
     // l'appel a `draw_text` ci-dessous pour passer au rendu Skia, et une
     // surbrillance melee a cette ligne disparaitrait a la modernisation
     // suivante sans que rien ne le signale.
-    if (s.address_focused && s.address_all_selected && !visible.is_empty()) {
+    if (s.address_focused && s.address.tout_selectionne && !visible.is_empty()) {
         auto largeur = min(text_width(visible.view(), 2), available);
         fill_rect(canvas, text_x - 1, button_top + 3, largeur + 2, button_height - 6,
             color_field_selection);
@@ -1091,7 +1268,7 @@ inline void draw_toolbar(Canvas const& canvas)
     draw_ui_text(canvas, text_x, text_y, visible.view(), color_field_text, available);
 
     if (s.address_focused) {
-        auto caret = min(s.caret, address_text.length());
+        auto caret = min(s.address.caret, address_text.length());
         auto caret_offset = caret > first ? caret - first : 0;
         auto avant = address_text.substring(first, caret_offset);
         auto caret_x = text_x + text_width(avant.view(), 2);
@@ -1137,6 +1314,8 @@ inline void draw_toolbar(Canvas const& canvas)
 enum Calque : int {
     /// Bulle d'adresse du lien survole, en bas a gauche.
     Survol = 0,
+    /// Barre de recherche dans la page, en haut a droite.
+    Recherche,
     Nombre,
 };
 
@@ -1187,6 +1366,102 @@ inline void dessine_survol(Canvas const& canvas)
         s.survol_url.view(), color_calque_texte, boite.w - 2 * calque_marge);
 }
 
+/// Le compteur de correspondances, tel qu'on l'affiche.
+///
+/// Le moteur ne connait pas toujours le total -- `total_match_count` est un
+/// `Optional` -- et l'inventer serait pire que de ne rien dire : un « 3/12 »
+/// faux fait chercher neuf correspondances qui n'existent pas.
+inline ByteString texte_compteur_recherche()
+{
+    auto& s = state();
+    // Rien tant que le moteur n'a pas repondu : un compteur qui affiche « 0 »
+    // avant la premiere reponse se lit comme « aucun resultat », et c'est faux.
+    if (s.recherche.est_vide() || !s.recherche_total_connu)
+        return {};
+    if (s.recherche_total == 0)
+        return "aucun";
+    return ByteString::formatted("{}/{}", s.recherche_rang, s.recherche_total);
+}
+
+/// La boite de la barre de recherche, en coordonnees de SURFACE.
+///
+/// En haut a droite de la zone de page : le coin oppose a la bulle de survol,
+/// pour que les deux ne se recouvrent jamais, et celui ou elle masque le moins
+/// de texte sur une page alignee a gauche.
+inline BouchaudDegat::Rect boite_recherche()
+{
+    auto& s = state();
+    if (!s.recherche_ouverte || s.surface_width <= 0 || s.surface_height <= 0)
+        return {};
+
+    auto const y = page_origin_y() + calque_marge;
+    if (y + recherche_hauteur > s.surface_height)
+        return {};
+    auto const largeur = min(recherche_largeur, s.surface_width - 2 * calque_marge);
+    if (largeur <= 0)
+        return {};
+    return { s.surface_width - calque_marge - largeur, y, largeur, recherche_hauteur };
+}
+
+inline void dessine_recherche(Canvas const& canvas)
+{
+    auto& s = state();
+    auto const boite = s.calques.boite(Recherche);
+    if (boite.vide())
+        return;
+
+    fill_rect(canvas, boite.x, boite.y, boite.w, boite.h, color_calque_fond);
+    // Un cadre complet, contrairement a la bulle de survol : ce calque flotte
+    // au milieu de la page et se confondrait sans cela avec un bloc sombre du
+    // document.
+    fill_rect(canvas, boite.x, boite.y, boite.w, 1, color_calque_bord);
+    fill_rect(canvas, boite.x, boite.y + boite.h - 1, boite.w, 1, color_calque_bord);
+    fill_rect(canvas, boite.x, boite.y, 1, boite.h, color_calque_bord);
+    fill_rect(canvas, boite.x + boite.w - 1, boite.y, 1, boite.h, color_calque_bord);
+
+    auto const compteur = texte_compteur_recherche();
+    auto const compteur_largeur = compteur.is_empty()
+        ? 0
+        : text_width(compteur.view(), 2) + calque_marge;
+
+    auto const champ_x = boite.x + calque_marge;
+    auto const champ_y = boite.y + (boite.h - ui_text_height) / 2;
+    auto const champ_largeur = boite.w - 2 * calque_marge - compteur_largeur;
+    if (champ_largeur <= 0)
+        return;
+
+    auto const requete = s.recherche.vers_chaine();
+
+    if (s.recherche.tout_selectionne && !requete.is_empty()) {
+        auto const largeur = min(text_width(requete.view(), 2), champ_largeur);
+        fill_rect(canvas, champ_x - 1, boite.y + 4, largeur + 2, boite.h - 8, color_button);
+    }
+
+    // Une requete sans correspondance se dit par la COULEUR, pas seulement par
+    // le compteur : c'est le retour le plus rapide, et celui qu'on lit sans
+    // deplacer le regard vers le bord du calque.
+    auto const introuvable = s.recherche_total_connu && s.recherche_total == 0
+        && !requete.is_empty();
+    draw_ui_text(canvas, champ_x, champ_y, requete.view(),
+        introuvable ? color_insecure : color_calque_texte, champ_largeur);
+
+    // Le curseur ne se dessine que si la barre a le foyer : sinon il clignote
+    // dans un champ ou les frappes ne vont pas, ce qui est exactement le
+    // contraire de ce qu'un curseur signifie.
+    if (s.recherche_focus) {
+        auto const caret = min(s.recherche.caret, requete.length());
+        auto const avant = requete.substring(0, caret);
+        auto const caret_x = champ_x + min(text_width(avant.view(), 2), champ_largeur);
+        fill_rect(canvas, caret_x, boite.y + 5, 2, boite.h - 10, color_calque_texte);
+    }
+
+    if (!compteur.is_empty()) {
+        auto const largeur = text_width(compteur.view(), 2);
+        draw_ui_text(canvas, boite.x + boite.w - calque_marge - largeur, champ_y,
+            compteur.view(), color_glyph_off, largeur);
+    }
+}
+
 /// Ou chaque calque doit se trouver a la trame qui vient.
 ///
 /// Un seul endroit calcule les boites, et il les calcule TOUTES : une boite
@@ -1195,7 +1470,9 @@ inline void dessine_survol(Canvas const& canvas)
 /// la surface, et ce bas bouge.
 inline void mesure_calques()
 {
-    state().calques.place(Survol, boite_survol());
+    auto& s = state();
+    s.calques.place(Survol, boite_survol());
+    s.calques.place(Recherche, boite_recherche());
 }
 
 /// Dessine les calques que `publie` recouvre, en coordonnees de SURFACE.
@@ -1208,6 +1485,8 @@ inline void dessine_calques(Canvas const& canvas, BouchaudDegat::Rect publie)
     auto& s = state();
     if (BouchaudCalques::doit_redessiner(s.calques.boite(Survol), publie))
         dessine_survol(canvas);
+    if (BouchaudCalques::doit_redessiner(s.calques.boite(Recherche), publie))
+        dessine_recherche(canvas);
 }
 
 // ----------------------------------------------------------------------------
@@ -1446,10 +1725,7 @@ inline bool present_complet(Gfx::ShareableBitmap const& screenshot)
 
 inline ByteString address_text()
 {
-    StringBuilder builder;
-    for (auto byte : state().address)
-        builder.append(static_cast<char>(byte));
-    return builder.to_byte_string();
+    return state().address.vers_chaine();
 }
 
 /// Rend le foyer au document.
@@ -1462,16 +1738,12 @@ inline void defocus_address()
 {
     auto& s = state();
     s.address_focused = false;
-    s.address_all_selected = false;
+    s.address.deselectionne();
 }
 
 inline void set_address_text(StringView text)
 {
-    auto& s = state();
-    s.address.clear_with_capacity();
-    for (size_t index = 0; index < text.length(); ++index)
-        s.address.append(static_cast<u8>(text[index]));
-    s.caret = s.address.size();
+    state().address.pose(text);
 }
 
 /// Complete une saisie humaine en URL.
@@ -1532,6 +1804,101 @@ inline void commit_address()
     outln("[ladybird-bouchaud] M11_NAVIGATE url={}", target);
     if (s.on_navigate)
         s.on_navigate(target);
+}
+
+// ----------------------------------------------------------------------------
+// Recherche dans la page
+// ----------------------------------------------------------------------------
+//
+// BOUCHAUD_CHROME_V19_RECHERCHE
+//
+// LibWeb sait chercher dans un document depuis toujours : `Page::find_in_page()`
+// parcourt le texte, deplace la selection sur la correspondance, la fait
+// defiler a l'ecran et rend le rang et le total. Rien ne l'appelait. Sur un
+// document long, la seule facon de trouver un mot etait de le lire.
+//
+// Tout est SYNCHRONE : les trois entrees du moteur rendent leur resultat, il
+// n'y a donc aucun rappel a attendre et aucun etat a reconcilier. C'est ce qui
+// permet au compteur de ne jamais afficher le resultat d'une requete
+// precedente.
+
+inline void lance_recherche()
+{
+    auto& s = state();
+    s.calques.salit(Recherche);
+    if (s.on_find)
+        s.on_find(s.recherche.vers_chaine());
+}
+
+/// Ouvre la barre de recherche et lui donne le foyer, tout selectionne.
+///
+/// Ctrl+F sur une barre deja ouverte reselectionne : c'est ce que fait tout
+/// navigateur, et c'est ce qu'on veut quand on cherche un second mot.
+inline void ouvre_recherche()
+{
+    auto& s = state();
+    // Le foyer est unique. Deux champs qui recoivent la meme frappe est le
+    // genre de defaut qu'on ne decouvre qu'en tapant.
+    defocus_address();
+    s.recherche_ouverte = true;
+    s.recherche_focus = true;
+    s.recherche.selectionne_tout();
+    s.calques.salit(Recherche);
+    // La barre d'adresse vient de perdre le foyer : son cadre change.
+    request_chrome_frame();
+}
+
+inline void ferme_recherche()
+{
+    auto& s = state();
+    if (!s.recherche_ouverte)
+        return;
+    s.recherche_ouverte = false;
+    s.recherche_focus = false;
+    s.recherche_rang = 0;
+    s.recherche_total = 0;
+    s.recherche_total_connu = false;
+    // Le surlignage appartient au DOCUMENT, pas au calque : fermer la barre
+    // sans l'effacer laisserait la page marquee par une recherche qui n'existe
+    // plus, et rien dans le chrome ne dirait pourquoi.
+    if (s.on_find)
+        s.on_find(ByteString {});
+}
+
+inline void recherche_suivante()
+{
+    auto& s = state();
+    if (s.recherche.est_vide())
+        return;
+    if (s.on_find_next)
+        s.on_find_next();
+}
+
+inline void recherche_precedente()
+{
+    auto& s = state();
+    if (s.recherche.est_vide())
+        return;
+    if (s.on_find_previous)
+        s.on_find_previous();
+}
+
+/// Ce que le moteur a trouve.
+///
+/// `total_connu` distingue « zero correspondance » de « je ne sais pas », que
+/// `Optional<size_t>` distingue cote LibWeb et qu'un simple entier
+/// confondrait : la seconde reponse arrive quand aucune requete n'est encore
+/// enregistree, et l'afficher comme « aucun » serait mentir.
+inline void set_resultat_recherche(size_t index, bool total_connu, size_t total)
+{
+    auto& s = state();
+    // LibWeb compte a partir de zero -- `current_match_index` est un indice
+    // dans son tableau de correspondances. Un humain compte a partir de un, et
+    // « 0/12 » se lirait comme un echec.
+    s.recherche_rang = total > 0 ? index + 1 : 0;
+    s.recherche_total_connu = total_connu;
+    s.recherche_total = total;
+    s.calques.salit(Recherche);
 }
 
 // ----------------------------------------------------------------------------
@@ -1599,6 +1966,13 @@ inline void handle_pointer(int x, int y, unsigned buttons)
         }
 
         if (pressed & 1u) {
+            // Le foyer suit le clic. Sans cela les touches suivantes iraient
+            // encore dans la barre de recherche, restee ouverte sous la barre
+            // d'outils qu'on vient d'utiliser.
+            if (s.recherche_focus) {
+                s.recherche_focus = false;
+                s.calques.salit(Recherche);
+            }
             if (point_in_button(back_button(), x, y)) {
                 outln("[ladybird-bouchaud] M11_HISTORY delta=-1");
                 if (s.on_history_delta)
@@ -1618,8 +1992,7 @@ inline void handle_pointer(int x, int y, unsigned buttons)
                 // la pour cela, et confondre les deux ferait effacer l'URL a
                 // qui voulait seulement corriger sa fin.
                 s.address_focused = true;
-                s.address_all_selected = false;
-                s.caret = s.address.size();
+                s.address.pose_curseur_a_la_fin();
             } else {
                 defocus_address();
             }
@@ -1631,11 +2004,41 @@ inline void handle_pointer(int x, int y, unsigned buttons)
         return;
     }
 
-    // Clic dans la page : la barre d'adresse rend le foyer au document, sinon
-    // les touches suivantes continueraient d'aller dans la barre.
-    if (pressed != 0 && s.address_focused) {
-        defocus_address();
-        request_chrome_frame();
+    // Un clic dans un calque appartient au calque. Sans cela il traverse la
+    // barre de recherche et va selectionner du texte dans la page qu'elle
+    // recouvre -- la faute la plus visible qu'une surface flottante puisse
+    // commettre. L'evenement entier est consomme, appui comme relachement : ne
+    // consommer que l'appui enverrait au document un `mouseup` sans
+    // `mousedown`.
+    //
+    // La bulle de survol, elle, ne prend rien : elle n'a rien a cliquer, et
+    // elle s'efface des que le pointeur quitte le lien.
+    if (BouchaudCalques::contient(s.calques.boite(Recherche), x, y)) {
+        if (pressed != 0) {
+            defocus_address();
+            s.recherche_focus = true;
+            s.recherche.pose_curseur_a_la_fin();
+            s.calques.salit(Recherche);
+            request_chrome_frame();
+        }
+        s.last_x = x;
+        s.last_y = y;
+        return;
+    }
+
+    // Clic dans la page : les barres du chrome rendent le foyer au document,
+    // sinon les touches suivantes continueraient d'aller dans une barre. La
+    // barre de recherche RESTE ouverte -- F3 doit continuer d'y parcourir les
+    // correspondances pendant qu'on lit la page.
+    if (pressed != 0) {
+        if (s.address_focused) {
+            defocus_address();
+            request_chrome_frame();
+        }
+        if (s.recherche_focus) {
+            s.recherche_focus = false;
+            s.calques.salit(Recherche);
+        }
     }
 
     auto page_x = x;
@@ -1728,8 +2131,7 @@ inline void focus_address_bar()
 {
     auto& s = state();
     s.address_focused = true;
-    s.address_all_selected = true;
-    s.caret = s.address.size();
+    s.address.selectionne_tout();
     request_chrome_frame();
 }
 
@@ -1779,8 +2181,17 @@ inline bool raccourci_navigateur(u32 code, u32 code_point, u32 modifiers, bool a
     auto const zoom_moins = ctrl && caractere && code_point == static_cast<u32>('-');
     auto const zoom_neutre = ctrl && caractere && code_point == static_cast<u32>('0');
 
+    // BOUCHAUD_CHROME_V19_RECHERCHE
+    //
+    // Ctrl+F ouvre, F3 repete. Les deux existent partout, et la seconde vaut
+    // la peine : elle permet de parcourir les correspondances sans garder le
+    // foyer dans la barre, donc en continuant a faire defiler la page.
+    auto const recherche = ctrl && caractere && lettre('f');
+    auto const recherche_repetee = code == ToucheFonction && code_point == 3u && !ctrl && !alt;
+
     if (!rechargement && !historique && !barre_adresse
-        && !zoom_plus && !zoom_moins && !zoom_neutre)
+        && !zoom_plus && !zoom_moins && !zoom_neutre
+        && !recherche && !recherche_repetee)
         return false;
 
     // Consomme dans les DEUX sens, agit sur l'appui seul.
@@ -1826,6 +2237,23 @@ inline bool raccourci_navigateur(u32 code, u32 code_point, u32 modifiers, bool a
         return true;
     }
 
+    if (recherche) {
+        ouvre_recherche();
+        return true;
+    }
+
+    if (recherche_repetee) {
+        // F3 sur une barre fermee l'ouvre : c'est ce qu'attend quelqu'un qui
+        // vient de la fermer par Echap et se ravise.
+        if (!s.recherche_ouverte)
+            ouvre_recherche();
+        else if ((modifiers & Modificateur::Shift) != 0)
+            recherche_precedente();
+        else
+            recherche_suivante();
+        return true;
+    }
+
     focus_address_bar();
     return true;
 }
@@ -1838,83 +2266,68 @@ inline void handle_key(u32 code, u32 code_point, u32 modifiers, u32 pressed)
     if (raccourci_navigateur(code, code_point, modifiers, appui))
         return;
 
+    // BOUCHAUD_CHROME_V19_RECHERCHE
+    //
+    // La barre de recherche a le foyer avant la barre d'adresse : elle est
+    // ouverte par-dessus, et c'est elle que l'utilisateur regarde. Comme la
+    // barre d'adresse, c'est un widget du chrome et non un document : elle
+    // n'agit que sur l'appui.
+    if (s.recherche_focus) {
+        if (!appui)
+            return;
+        if (s.recherche.applique(code, code_point)) {
+            // La requete a change : relancer. LibWeb repart du debut du
+            // document a chaque requete nouvelle, ce qui est ce qu'on veut --
+            // « exampl » et « example » n'ont pas les memes correspondances.
+            lance_recherche();
+            return;
+        }
+        switch (code) {
+        case ToucheEntree:
+            // Entree passe a la correspondance suivante, Maj+Entree a la
+            // precedente : la convention de tous les navigateurs.
+            if ((modifiers & Modificateur::Shift) != 0)
+                recherche_precedente();
+            else
+                recherche_suivante();
+            break;
+        case ToucheEchap:
+            ferme_recherche();
+            break;
+        default:
+            s.recherche.deselectionne();
+            s.calques.salit(Recherche);
+            break;
+        }
+        return;
+    }
+
     // La barre d'adresse est un widget du chrome, pas un document : elle
     // n'agit que sur l'appui. La page, elle, recoit les deux transitions.
     if (s.address_focused) {
         if (!appui)
             return;
-        // La selection totale se defait a la premiere touche qui deplace ou
-        // modifie. Toute la table ci-dessous suppose donc qu'elle n'existe
-        // plus : la resoudre ici, une fois, evite de la reexaminer dans chaque
-        // branche -- et d'en oublier une.
-        auto const tout_selectionne = s.address_all_selected;
-        s.address_all_selected = false;
-
-        switch (code) {
-        case ToucheCaractere:
-            if (code_point >= 0x20 && code_point < 0x7f) {
-                if (tout_selectionne) {
-                    s.address.clear_with_capacity();
-                    s.caret = 0;
-                }
-                if (s.caret > s.address.size())
-                    s.caret = s.address.size();
-                s.address.insert(s.caret, static_cast<u8>(code_point));
-                ++s.caret;
+        if (!s.address.applique(code, code_point)) {
+            switch (code) {
+            case ToucheEntree:
+                commit_address();
+                break;
+            case ToucheEchap:
+                // Echap rend le foyer a la page et restaure l'URL affichee :
+                // une saisie abandonnee ne doit pas laisser un texte qui ne
+                // correspond plus a ce qui est a l'ecran.
+                defocus_address();
+                set_address_text(s.committed_url.view());
+                break;
+            case ToucheTabulation:
+            default:
+                // Une touche que le champ n'a pas prise defait quand meme la
+                // selection totale : sinon une surbrillance survivrait a une
+                // touche qui ne l'a pas remplacee, et la frappe suivante
+                // effacerait l'URL sans prevenir.
+                s.address.deselectionne();
+                break;
             }
-            break;
-        case ToucheRetour:
-            if (tout_selectionne) {
-                s.address.clear_with_capacity();
-                s.caret = 0;
-            } else if (s.caret > 0 && !s.address.is_empty()) {
-                --s.caret;
-                s.address.remove(s.caret);
-            }
-            break;
-        case ToucheGauche:
-            if (tout_selectionne)
-                s.caret = 0;
-            else if (s.caret > 0)
-                --s.caret;
-            break;
-        case ToucheDroite:
-            if (tout_selectionne)
-                s.caret = s.address.size();
-            else if (s.caret < s.address.size())
-                ++s.caret;
-            break;
-        case ToucheEntree:
-            commit_address();
-            break;
-        case ToucheSupprimer:
-            // Suppr efface a DROITE. La touche existait deja cote materiel,
-            // mais le decodeur la traduisait en Retour arriere : elle effacait
-            // donc le caractere de gauche, ce qui est la seule chose qu'elle ne
-            // doit pas faire.
-            if (tout_selectionne) {
-                s.address.clear_with_capacity();
-                s.caret = 0;
-            } else if (s.caret < s.address.size()) {
-                s.address.remove(s.caret);
-            }
-            break;
-        case ToucheDebut:
-            s.caret = 0;
-            break;
-        case ToucheFin:
-            s.caret = s.address.size();
-            break;
-        case ToucheEchap:
-            // Echap rend le foyer a la page et restaure l'URL affichee : une
-            // saisie abandonnee ne doit pas laisser un texte qui ne correspond
-            // plus a ce qui est a l'ecran.
-            defocus_address();
-            set_address_text(s.committed_url.view());
-            break;
-        case ToucheTabulation:
-        default:
-            break;
         }
         request_chrome_frame();
         return;

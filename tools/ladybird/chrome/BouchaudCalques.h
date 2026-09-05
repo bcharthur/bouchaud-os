@@ -144,4 +144,18 @@ constexpr bool doit_redessiner(Rect boite, Rect publie)
     return !boite.intersecte(publie).vide();
 }
 
+/// Le point (x, y) tombe-t-il dans ce calque ?
+///
+/// Un calque visible prend les clics qui le touchent : sans cela le clic
+/// traverse et va selectionner du texte dans la page qu'il recouvre, ce qui est
+/// la faute la plus visible qu'une surface flottante puisse commettre. Un
+/// calque absent -- boite vide -- ne prend rien, et c'est ce que le premier
+/// terme garantit.
+constexpr bool contient(Rect boite, int x, int y)
+{
+    return !boite.vide()
+        && x >= boite.x && x < boite.x + boite.w
+        && y >= boite.y && y < boite.y + boite.h;
+}
+
 }

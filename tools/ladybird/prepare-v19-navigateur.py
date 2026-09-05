@@ -8,7 +8,9 @@ deja, et `bouchaud_m11_start()` existe deja.
 Ce que ce script branche, et rien de plus :
 
   * le survol de lien -- `page_did_hover_link` / `page_did_unhover_link` --
-    sur la bulle d'etat du chrome.
+    sur la bulle d'etat du chrome ;
+  * la recherche dans la page -- `Page::find_in_page()` et ses deux
+    repetitions -- sur la barre Ctrl+F du chrome.
 
 Pourquoi un script separe de `prepare-m11-chrome.py` : celui-la construit le
 chrome, celui-ci lui donne ce que le MOTEUR sait et qu'il ignorait. Les deux
@@ -84,6 +86,69 @@ substitute(
 }""",
     "survol de lien",
 )
+
+# ---------------------------------------------------------------------------
+# Recherche dans la page
+# ---------------------------------------------------------------------------
+#
+# L'ancre est du texte que `prepare-m11-chrome.py` a ecrit juste avant, et non
+# du texte upstream : elle ne peut donc pas diverger d'un SHA a l'autre sans que
+# nous l'ayons voulu. C'est le meme choix que M11 fait pour ses propres ancres,
+# et pour la meme raison.
+connection_cpp = root / "Services/WebContent/ConnectionFromClient.cpp"
+
+recherche = r'''    // BOUCHAUD_CHROME_V19_RECHERCHE
+    //
+    // `Page::find_in_page()` cherche, deplace la selection sur la
+    // correspondance, la fait defiler a l'ecran et rend le rang et le total.
+    // Tout cela existait ; rien ne l'appelait. Les trois entrees rendent leur
+    // resultat SUR PLACE : il n'y a aucun rappel a attendre, donc le compteur
+    // du chrome ne peut jamais afficher celui d'une requete precedente.
+    auto rapporte_recherche = [this, page_id](Web::Page::FindInPageResult const& resultat) {
+        BouchaudChrome::set_resultat_recherche(
+            resultat.current_match_index,
+            resultat.total_match_count.has_value(),
+            resultat.total_match_count.value_or(0));
+
+        // La selection a bouge et le document a pu defiler. Le moteur
+        // invalidera de lui-meme dans ce cas ; la capture explicite couvre
+        // celui ou il ne change aucun pixel -- une requete sans correspondance
+        // -- et ou le compteur du chrome est le seul a avoir change.
+        if (auto page = this->page(page_id); page.has_value())
+            page->page().top_level_traversable()->bouchaud_schedule_interactive_frame_capture();
+    };
+
+    chrome.on_find = [this, page_id, rapporte_recherche](ByteString requete) {
+        auto page = this->page(page_id);
+        if (!page.has_value())
+            return;
+        // `from_utf8` exige une entree valide. Le champ du chrome n'accepte que
+        // de l'ASCII imprimable (voir `Champ::applique`), donc elle l'est.
+        rapporte_recherche(page->page().find_in_page({
+            .string = Utf16String::from_utf8(requete.view()),
+            .case_sensitivity = CaseSensitivity::CaseInsensitive,
+        }));
+    };
+
+    chrome.on_find_next = [this, page_id, rapporte_recherche] {
+        if (auto page = this->page(page_id); page.has_value())
+            rapporte_recherche(page->page().find_in_page_next_match());
+    };
+
+    chrome.on_find_previous = [this, page_id, rapporte_recherche] {
+        if (auto page = this->page(page_id); page.has_value())
+            rapporte_recherche(page->page().find_in_page_previous_match());
+    };
+
+'''
+
+substitute(
+    connection_cpp,
+    """    chrome.on_close = [] {""",
+    recherche + """    chrome.on_close = [] {""",
+    "recherche dans la page",
+)
+
 
 substitute(
     page_cpp,

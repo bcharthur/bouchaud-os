@@ -56,6 +56,8 @@ RACINE = Path(__file__).resolve().parent.parent
 CHROME = RACINE / "tools" / "ladybird" / "chrome" / "BouchaudChrome.h"
 DECODEUR = RACINE / "src" / "drivers" / "input" / "clavier_decodeur.rs"
 M11 = RACINE / "tools" / "ladybird" / "prepare-m11-chrome.py"
+V19 = RACINE / "tools" / "ladybird" / "prepare-v19-navigateur.py"
+UPSTREAM = RACINE / "tools" / "ladybird" / "browser-upstream.sh"
 
 
 def corps_fonction(source, signature):
@@ -155,14 +157,14 @@ def regle_avant_le_foyer(chrome, fautes):
 
 def regle_selection(chrome, fautes):
     """4. La selection totale ne survit pas au foyer."""
-    if "address_all_selected" not in chrome:
+    if "tout_selectionne" not in chrome:
         fautes.append(
-            "BouchaudChrome.h : la selection totale du champ d'adresse a "
+            "BouchaudChrome.h : la selection totale d'un champ de saisie a "
             "disparu ; Ctrl+L obligerait a effacer l'URL a la main."
         )
         return
     corps = corps_fonction(chrome, "inline void defocus_address()")
-    if corps is None or "address_all_selected = false" not in corps:
+    if corps is None or "deselectionne()" not in corps:
         fautes.append(
             "BouchaudChrome.h : rendre le foyer au document ne defait plus la "
             "selection. Une surbrillance survivante ferait effacer l'URL a la "
@@ -176,6 +178,133 @@ def regle_selection(chrome, fautes):
             "BouchaudChrome.h : %d assignations directes de `address_focused = "
             "false` ; elles contournent `defocus_address()` et laisseraient la "
             "selection derriere elles." % directes
+        )
+
+
+def regle_champ_unique(chrome, fautes):
+    """5. Les champs de saisie partagent UNE table de touches.
+
+    Le chrome en a deux -- la barre d'adresse et la barre de recherche -- et il
+    en aura d'autres. Une table de touches recopiee diverge : la copie qui sert
+    le plus gagne le collage, l'autre pas, et rien ne le signale avant qu'on
+    essaie. `handle_key` ne doit donc jamais modifier le texte d'un champ
+    lui-meme ; il delegue a `Champ::applique`.
+    """
+    if corps_fonction(chrome, "struct Champ {") is None:
+        fautes.append(
+            "BouchaudChrome.h : `struct Champ` a disparu. Chaque champ de "
+            "saisie du chrome reimplementerait sa propre table de touches."
+        )
+        return
+
+    corps = corps_fonction(chrome, "inline void handle_key(")
+    if corps is None:
+        return
+    if "applique(code, code_point)" not in corps:
+        fautes.append(
+            "BouchaudChrome.h : `handle_key` n'appelle plus `Champ::applique`. "
+            "Il edite donc le texte lui-meme, et la seconde barre divergera de "
+            "la premiere."
+        )
+    for motif, quoi in (
+        (r"\.texte\.insert\(", "insere du texte"),
+        (r"\.texte\.remove\(", "efface du texte"),
+        (r"\.caret = ", "deplace un curseur"),
+    ):
+        if re.search(motif, corps):
+            fautes.append(
+                "BouchaudChrome.h : `handle_key` %s directement. C'est le "
+                "travail de `Champ::applique`, sinon les deux champs "
+                "divergent." % quoi
+            )
+
+
+def regle_ancres_v19(v19, m11, upstream, fautes):
+    """Les ancres de `prepare-v19-navigateur.py` existent la ou il les cherche.
+
+    Deux familles, et elles ne se cassent pas de la meme facon :
+
+      * celles qui visent notre propre texte -- ce que `prepare-m11-chrome.py`
+        vient d'ecrire -- ne peuvent bouger que si nous les bougeons ;
+      * celles qui visent du texte upstream peuvent disparaitre a la montee de
+        SHA suivante.
+
+    Les premieres se verifient ici, tout de suite. Les secondes ne se
+    verifient qu'avec l'arbre epingle sous la main : `browser-upstream.sh`
+    echoue alors avec le nom de l'ancre, ce qui est deja beaucoup mieux qu'une
+    erreur de compilation vingt minutes plus tard.
+    """
+    if "prepare-v19-navigateur.py" not in upstream:
+        fautes.append(
+            "browser-upstream.sh : `prepare-v19-navigateur.py` n'est plus "
+            "lance. Le chrome garderait ses raccourcis, et aucun n'atteindrait "
+            "le moteur."
+        )
+    for ancre in re.findall(r'^    """(    chrome\.[a-z_]+ = \[\] \{)""",$', v19, re.M):
+        if ancre not in m11:
+            fautes.append(
+                "prepare-v19-navigateur.py vise une ancre absente de "
+                "prepare-m11-chrome.py :\n    %r\n"
+                "La substitution echouera au milieu de la construction." % ancre
+            )
+
+
+def regle_recherche(chrome, v19, fautes):
+    """6. La recherche dans la page atteint le moteur.
+
+    `Page::find_in_page()` cherche, surligne, fait defiler et compte depuis
+    toujours. Ce qui manquait, c'est que quelqu'un l'appelle : un raccourci qui
+    ouvre une barre sans rien chercher serait pire que pas de barre du tout.
+    """
+    corps = corps_fonction(chrome, "inline bool raccourci_navigateur(")
+    if corps is not None:
+        if "lettre('f')" not in corps:
+            fautes.append(
+                "BouchaudChrome.h : Ctrl+F n'est plus reconnu comme raccourci "
+                "de recherche ; la lettre irait a la page."
+            )
+        # La BRANCHE, et pas seulement le nom de la fonction : `ouvre_recherche()`
+        # apparait aussi dans la branche F3, qui ouvre la barre quand elle est
+        # fermee. Une regle qui se contente du nom se laisse donc satisfaire par
+        # F3 seule, et Ctrl+F peut disparaitre sans que rien ne le dise -- c'est
+        # exactement la mutation qui a echappe a la premiere version.
+        branche = corps_fonction(corps, "if (recherche) {")
+        if branche is None:
+            fautes.append(
+                "BouchaudChrome.h : la branche `if (recherche) {` de "
+                "`raccourci_navigateur` a disparu ou a change de nom ; le "
+                "verificateur ne peut plus dire ce que Ctrl+F declenche."
+            )
+        elif "ouvre_recherche()" not in branche:
+            fautes.append(
+                "BouchaudChrome.h : Ctrl+F n'ouvre plus la barre de recherche."
+            )
+    lance = corps_fonction(chrome, "inline void lance_recherche()")
+    if lance is None or "on_find(" not in lance:
+        fautes.append(
+            "BouchaudChrome.h : la requete de recherche n'atteint plus le "
+            "moteur. La barre se remplirait sans rien chercher."
+        )
+    ferme = corps_fonction(chrome, "inline void ferme_recherche()")
+    if ferme is None or "on_find(" not in ferme:
+        fautes.append(
+            "BouchaudChrome.h : fermer la barre n'efface plus le surlignage. "
+            "La page resterait marquee par une recherche qui n'existe plus."
+        )
+    for symbole, quoi in (
+        ("chrome.on_find = [", "la requete"),
+        ("chrome.on_find_next = [", "la correspondance suivante"),
+        ("chrome.on_find_previous = [", "la correspondance precedente"),
+    ):
+        if symbole not in v19:
+            fautes.append(
+                "prepare-v19-navigateur.py : %s n'est plus branchee sur "
+                "LibWeb." % quoi
+            )
+    if "set_resultat_recherche(" not in v19:
+        fautes.append(
+            "prepare-v19-navigateur.py : le resultat du moteur ne revient plus "
+            "au chrome ; le compteur afficherait toujours zero."
         )
 
 
@@ -240,6 +369,11 @@ def main():
     regle_raccourcis(chrome, fautes)
     regle_avant_le_foyer(chrome, fautes)
     regle_selection(chrome, fautes)
+    regle_champ_unique(chrome, fautes)
+    v19 = V19.read_text(encoding="utf-8")
+    regle_recherche(chrome, v19, fautes)
+    regle_ancres_v19(v19, M11.read_text(encoding="utf-8"),
+        UPSTREAM.read_text(encoding="utf-8"), fautes)
     regle_zoom(chrome, M11.read_text(encoding="utf-8"), fautes)
     regle_suppr(decodeur, fautes)
 
@@ -249,7 +383,8 @@ def main():
         return 1
 
     print("clavier navigateur : chaque code traite, raccourcis avant le foyer, "
-          "zoom branche, selection liee au foyer, Suppr distincte de Retour arriere")
+          "zoom et recherche branches, une seule table de touches pour les "
+          "champs, selection liee au foyer, Suppr distincte de Retour arriere")
     return 0
 
 

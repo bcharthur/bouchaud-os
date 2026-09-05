@@ -177,7 +177,24 @@ int main()
     }
 
     // -----------------------------------------------------------------
-    // 7. Un indice hors bornes ne corrompt rien.
+    // 7. Un calque visible prend les clics qui le touchent.
+    // -----------------------------------------------------------------
+    {
+        Rect barre { 950, 44, 320, 32 };
+        verifie(contient(barre, 950, 44), "coin haut-gauche inclus",
+            "le premier pixel du calque n'a pas pris le clic");
+        verifie(contient(barre, 1269, 75), "coin bas-droit inclus",
+            "le dernier pixel du calque n'a pas pris le clic");
+        verifie(!contient(barre, 1270, 60), "un pixel a droite : dehors",
+            "le calque a pris un clic hors de sa boite");
+        verifie(!contient(barre, 960, 43), "un pixel au-dessus : dehors",
+            "le calque a pris un clic hors de sa boite");
+        verifie(!contient(Rect {}, 0, 0), "un calque absent ne prend rien",
+            "un calque vide a pris un clic, qui n'irait donc pas a la page");
+    }
+
+    // -----------------------------------------------------------------
+    // 8. Un indice hors bornes ne corrompt rien.
     //
     //    Les indices viennent de l'enumeration et non d'une entree, mais un
     //    tableau ecrit hors bornes ne se voit pas la ou la faute est commise.
