@@ -55,36 +55,34 @@ def ensure_include(path: Path, include: str, anchor: str, label: str) -> None:
 # 1. Le chrome, copie tel quel.
 # ---------------------------------------------------------------------------
 
-source_header = here / "chrome" / "BouchaudChrome.h"
-if not source_header.is_file():
-    raise SystemExit(f"M11 : {source_header} absent")
-
-destination = root / "Services/WebContent/BouchaudChrome.h"
-shutil.copyfile(source_header, destination)
-
-# BOUCHAUD_CHROME_ATLAS_V1
+# Les en-tetes du chrome sont DECOUVERTS, pas enumeres.
 #
-# Le chrome inclut son atlas de glyphes, qui doit donc voyager avec lui.
-# L'oublier ne se voit pas ici : cela echoue a la compilation de WebContent,
-# c'est-a-dire vingt minutes plus tard.
-source_atlas = here / "chrome" / "BouchaudAtlas.h"
-if not source_atlas.is_file():
-    raise SystemExit(
-        f"M11 : {source_atlas} absent -- lancer "
-        f"tools/ladybird/chrome/fabrique-atlas.py")
-shutil.copyfile(source_atlas, root / "Services/WebContent/BouchaudAtlas.h")
-
-# BOUCHAUD_CHROME_V18_DEGAT_PARTIEL
+# Ils l'etaient : `BouchaudChrome.h`, puis son atlas de glyphes, puis ses
+# ressources V15, puis l'arithmetique de degat, puis l'echelle de zoom. Chaque
+# piece extraite dans son propre fichier -- parce qu'elle ne depend de rien et
+# devient donc verifiable sur l'hote -- demandait une ligne de plus ici. En
+# oublier une ne se voit pas au moment ou on ecrit le code : cela echoue a la
+# compilation de WebContent, vingt minutes plus tard, sur un `#include`
+# introuvable.
 #
-# L'arithmetique qui decide quels pixels une capture doit reecrire. Elle vit
-# dans son propre fichier parce qu'elle ne depend de rien et se verifie donc sur
-# l'hote (`tools/ladybird/chrome/test_degat.cpp`), la ou le reste du chrome ne
-# s'execute que dans QEMU. Comme l'atlas, elle voyage avec le chrome : l'oublier
-# ne se voit qu'a la compilation de WebContent, vingt minutes plus tard.
-source_degat = here / "chrome" / "BouchaudDegat.h"
-if not source_degat.is_file():
-    raise SystemExit(f"M11 : {source_degat} absent")
-shutil.copyfile(source_degat, root / "Services/WebContent/BouchaudDegat.h")
+# Le chrome n'est pas ajoute a `Services/WebContent/CMakeLists.txt` : il est
+# entierement en-tete, et c'est ce qui evite une divergence de construction de
+# plus avec l'arbre epingle.
+sources = sorted((here / "chrome").glob("Bouchaud*.h"))
+if not sources:
+    raise SystemExit(f"M11 : aucun en-tete Bouchaud*.h dans {here / 'chrome'}")
+
+noms = {chemin.name for chemin in sources}
+for requis in ("BouchaudChrome.h", "BouchaudAtlas.h"):
+    if requis not in noms:
+        # L'atlas est GENERE, et son absence a un remede precis : le dire ici
+        # vaut mieux qu'un `#include` introuvable vingt minutes plus tard.
+        raise SystemExit(
+            f"M11 : {requis} absent -- pour l'atlas, lancer "
+            f"tools/ladybird/chrome/fabrique-atlas.py")
+
+for source_header in sources:
+    shutil.copyfile(source_header, root / "Services/WebContent" / source_header.name)
 
 # En-tete seul : aucune modification de `Services/WebContent/CMakeLists.txt`,
 # donc aucune divergence de construction de plus avec l'arbre epingle.
@@ -245,6 +243,26 @@ void ConnectionFromClient::bouchaud_m11_start()
         // La remise en page va invalider et le moteur demandera sa trame. La
         // capture explicite couvre le cas ou rien du document ne change --
         // une page plus etroite que la fenetre, par exemple.
+        page->page().top_level_traversable()->bouchaud_schedule_interactive_frame_capture();
+    };
+
+    // BOUCHAUD_CHROME_V18_ZOOM
+    //
+    // Le moteur savait deja zoomer : `set_zoom_level()` refait la mise en page
+    // et le compositeur suit. Personne ne l'appelait. Sur une fenetre de
+    // 1278 pixels qui affiche des sites concus pour 1920, c'est la premiere
+    // chose qui manque.
+    chrome.on_zoom = [this, page_id](int pourcent) {
+        auto page = this->page(page_id);
+        if (!page.has_value())
+            return;
+
+        outln("[ladybird-bouchaud] M11_ZOOM {}", pourcent);
+        page->set_zoom_level(static_cast<double>(pourcent) / 100.0);
+
+        // La remise en page invalide et le moteur demandera sa trame. La
+        // capture explicite couvre le cas ou le document ne change pas de
+        // pixels -- une page plus etroite que la fenetre, par exemple.
         page->page().top_level_traversable()->bouchaud_schedule_interactive_frame_capture();
     };
 

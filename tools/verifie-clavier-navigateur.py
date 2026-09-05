@@ -55,6 +55,7 @@ from pathlib import Path
 RACINE = Path(__file__).resolve().parent.parent
 CHROME = RACINE / "tools" / "ladybird" / "chrome" / "BouchaudChrome.h"
 DECODEUR = RACINE / "src" / "drivers" / "input" / "clavier_decodeur.rs"
+M11 = RACINE / "tools" / "ladybird" / "prepare-m11-chrome.py"
 
 
 def corps_fonction(source, signature):
@@ -117,6 +118,7 @@ def regle_raccourcis(chrome, fautes):
         ("on_reload(", "rechargement (F5, Ctrl+R)"),
         ("on_history_delta(", "historique (Alt+fleche)"),
         ("focus_address_bar(", "barre d'adresse (Ctrl+L)"),
+        ("on_zoom(", "zoom (Ctrl+ +, Ctrl+-, Ctrl+0)"),
     ):
         if symbole not in corps:
             fautes.append(
@@ -177,6 +179,36 @@ def regle_selection(chrome, fautes):
         )
 
 
+def regle_zoom(chrome, m11, fautes):
+    """Le zoom atteint le moteur, et son echelle reste bornee.
+
+    Le moteur savait deja zoomer -- `set_zoom_level()` refait la mise en page --
+    et personne ne l'appelait. Sur une fenetre de 1278 pixels qui affiche des
+    sites concus pour 1920, c'est la premiere chose qui manque.
+    """
+    if "BouchaudZoom::" not in chrome:
+        fautes.append(
+            "BouchaudChrome.h : l'echelle de zoom n'est plus utilisee. Un "
+            "facteur calcule sur place accumulerait ses erreurs, et Ctrl+0 "
+            "cesserait de rendre exactement la taille d'origine."
+        )
+    if "chrome.on_zoom = [" not in m11:
+        fautes.append(
+            "prepare-m11-chrome.py : `on_zoom` n'est plus branche ; les "
+            "raccourcis de zoom ne changeraient rien du tout."
+        )
+        return
+    # L'APPEL, pas la mention : le commentaire qui explique la regle nomme
+    # `set_zoom_level()`, et une regle qui se contente du nom se laisse
+    # satisfaire par sa propre explication.
+    if "->set_zoom_level(" not in m11:
+        fautes.append(
+            "prepare-m11-chrome.py : le zoom n'atteint plus le moteur. C'est "
+            "`set_zoom_level()` qui refait la mise en page ; sans lui la page "
+            "garderait sa taille."
+        )
+
+
 def regle_suppr(decodeur, fautes):
     """Suppr n'est pas Retour arriere. Le defaut le plus vicieux des trois."""
     bloc = re.search(r"if etendue \{(.*?)\n            \}", decodeur, re.S)
@@ -208,6 +240,7 @@ def main():
     regle_raccourcis(chrome, fautes)
     regle_avant_le_foyer(chrome, fautes)
     regle_selection(chrome, fautes)
+    regle_zoom(chrome, M11.read_text(encoding="utf-8"), fautes)
     regle_suppr(decodeur, fautes)
 
     if fautes:
@@ -216,7 +249,7 @@ def main():
         return 1
 
     print("clavier navigateur : chaque code traite, raccourcis avant le foyer, "
-          "selection liee au foyer, Suppr distincte de Retour arriere")
+          "zoom branche, selection liee au foyer, Suppr distincte de Retour arriere")
     return 0
 
 

@@ -45,6 +45,12 @@
 // a chaque CI, alors que le reste de ce fichier ne tourne que dans QEMU.
 #include "BouchaudDegat.h"
 
+// BOUCHAUD_CHROME_V18_ZOOM
+//
+// Les crans de zoom. Meme raison d'etre que BouchaudDegat.h : de l'arithmetique
+// entiere sans dependance, donc verifiable sur l'hote par `test_zoom.cpp`.
+#include "BouchaudZoom.h"
+
 #if defined(BOUCHAUD_PORT)
 
 #    include <AK/ByteString.h>
@@ -386,6 +392,9 @@ struct State {
     /// reecrire. Voir BouchaudDegat.h.
     BouchaudDegat::Suivi suivi_page;
 
+    /// Le cran de zoom courant. Voir BouchaudZoom.h.
+    int zoom_cran { BouchaudZoom::cran_neutre };
+
     // Rendu M11: compteurs cumulatifs, journalises par paquets de 16 trames.
     u64 chrome_full_frames { 0 };
     u64 chrome_partial_frames { 0 };
@@ -411,6 +420,8 @@ struct State {
     /// La fenetre a change de taille : nouveau viewport de PAGE (largeur de la
     /// surface, hauteur sous la barre d'outils).
     Function<void(int, int)> on_resize;
+    /// Le zoom a change : nouveau facteur, en POURCENTS.
+    Function<void(int)> on_zoom;
     Function<void()> on_close;
 };
 
@@ -1556,7 +1567,21 @@ inline bool raccourci_navigateur(u32 code, u32 code_point, u32 modifiers, bool a
     auto const historique = alt && (code == ToucheGauche || code == ToucheDroite);
     auto const barre_adresse = ctrl && code == ToucheCaractere && lettre('l');
 
-    if (!rechargement && !historique && !barre_adresse)
+    // BOUCHAUD_CHROME_V18_ZOOM
+    //
+    // Sur un clavier AZERTY, `+` et `=` sont la MEME touche -- l'une est
+    // l'autre avec Maj -- et les deux doivent donc agrandir : demander a
+    // l'utilisateur laquelle il a « vraiment » tapee n'aurait aucun sens.
+    // Le chiffre 0, lui, exige deja Maj sur cette disposition ; c'est ce que
+    // fait quiconque tape un zero, et rien de plus n'est a inventer.
+    auto const caractere = code == ToucheCaractere;
+    auto const zoom_plus = ctrl && caractere
+        && (code_point == static_cast<u32>('+') || code_point == static_cast<u32>('='));
+    auto const zoom_moins = ctrl && caractere && code_point == static_cast<u32>('-');
+    auto const zoom_neutre = ctrl && caractere && code_point == static_cast<u32>('0');
+
+    if (!rechargement && !historique && !barre_adresse
+        && !zoom_plus && !zoom_moins && !zoom_neutre)
         return false;
 
     // Consomme dans les DEUX sens, agit sur l'appui seul.
@@ -1582,6 +1607,23 @@ inline bool raccourci_navigateur(u32 code, u32 code_point, u32 modifiers, bool a
     if (historique) {
         if (s.on_history_delta)
             s.on_history_delta(code == ToucheGauche ? -1 : 1);
+        return true;
+    }
+
+    if (zoom_plus || zoom_moins || zoom_neutre) {
+        auto const avant = s.zoom_cran;
+        if (zoom_plus)
+            s.zoom_cran = BouchaudZoom::agrandit(s.zoom_cran);
+        else if (zoom_moins)
+            s.zoom_cran = BouchaudZoom::reduit(s.zoom_cran);
+        else
+            s.zoom_cran = BouchaudZoom::cran_neutre;
+
+        // Aux extremites de l'echelle, la touche ne change rien : refaire la
+        // mise en page pour le meme facteur couterait une trame complete pour
+        // afficher exactement la meme chose.
+        if (s.zoom_cran != avant && s.on_zoom)
+            s.on_zoom(BouchaudZoom::pourcent(s.zoom_cran));
         return true;
     }
 

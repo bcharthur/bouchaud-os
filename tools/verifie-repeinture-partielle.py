@@ -241,12 +241,25 @@ def regle_cible_reutilisee(repaint, fautes):
 
 
 def regle_entete_voyage(m11, fautes):
-    """5. BouchaudDegat.h voyage avec le chrome."""
-    if "BouchaudDegat.h" not in m11:
+    """5. Les en-tetes du chrome voyagent avec lui, et sont DECOUVERTS.
+
+    Ils etaient enumeres, un `shutil.copyfile` par fichier. Chaque piece
+    extraite dans son propre en-tete -- parce qu'elle ne depend de rien et
+    devient donc verifiable sur l'hote -- demandait une ligne de plus, et en
+    oublier une ne se voit qu'a la compilation de WebContent, vingt minutes
+    plus tard, sur un `#include` introuvable.
+    """
+    if 'glob("Bouchaud*.h")' not in m11:
         fautes.append(
-            "prepare-m11-chrome.py : `BouchaudDegat.h` n'est plus copie dans "
-            "l'arbre Ladybird. Cela ne se verrait qu'a la compilation de "
-            "WebContent, vingt minutes plus tard."
+            "prepare-m11-chrome.py : les en-tetes du chrome ne sont plus "
+            "decouverts. Un en-tete ajoute serait oublie, et cela ne se "
+            "verrait qu'a la compilation de WebContent."
+        )
+        return
+    if "shutil.copyfile(source_header" not in m11:
+        fautes.append(
+            "prepare-m11-chrome.py : les en-tetes decouverts ne sont plus "
+            "copies dans l'arbre Ladybird."
         )
 
 
