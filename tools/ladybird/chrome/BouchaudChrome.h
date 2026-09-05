@@ -62,6 +62,13 @@
 // l'hote.
 #include "BouchaudCalques.h"
 
+// BOUCHAUD_C20_TELECHARGEMENTS
+//
+// Le nom sous lequel un telechargement est ecrit, forme d'un nom que le
+// SERVEUR propose. Entree hostile, arithmetique pure, banc d'essai hote :
+// `test_nom_fichier.cpp`.
+#include "BouchaudNomFichier.h"
+
 #if defined(BOUCHAUD_PORT)
 
 #    include <AK/ByteString.h>
@@ -85,6 +92,7 @@
 #    include <cstring>
 #    include <fcntl.h>
 #    include <sys/mman.h>
+#    include <sys/stat.h>
 #    include <unistd.h>
 
 namespace WebContent::BouchaudChrome {
@@ -141,6 +149,14 @@ inline constexpr int survol_hauteur = ui_text_height + 2;
 /// Barre de recherche : assez large pour une requete et son compteur.
 inline constexpr int recherche_largeur = 320;
 inline constexpr int recherche_hauteur = ui_text_height + 10;
+/// Panneau des telechargements.
+inline constexpr int telechargement_largeur = 300;
+inline constexpr int telechargement_hauteur_ligne = ui_text_height + 6;
+/// Combien de lignes le panneau montre au plus.
+inline constexpr int telechargements_affiches = 3;
+/// Combien de tics de seize millisecondes le panneau reste apres le dernier
+/// evenement. Six secondes : le temps de lire un nom de fichier.
+inline constexpr int telechargements_duree_tics = 375;
 /// Menu contextuel.
 inline constexpr int menu_largeur = 232;
 inline constexpr int menu_hauteur_entree = ui_text_height + 6;
@@ -645,6 +661,34 @@ struct State {
     // ete au premier plan -- c'est-a-dire la derniere fois ou l'utilisateur a
     // pu copier quoi que ce soit ailleurs.
     ByteString presse_papiers;
+
+    // BOUCHAUD_C20_TELECHARGEMENTS
+    //
+    // Ce que le navigateur est en train d'enregistrer.
+    //
+    // Le compte est celui de LibWeb : c'est lui qui attribue les identifiants,
+    // pousse les octets et annonce la fin. Le chrome tient le descripteur de
+    // fichier et ce qu'il faut pour l'afficher, rien de plus.
+    struct Telechargement {
+        u64 identifiant { 0 };
+        int fd { -1 };
+        ByteString nom;
+        u64 recus { 0 };
+        u64 total { 0 };
+        bool total_connu { false };
+        /// 0 en cours, 1 termine, 2 echoue.
+        int etat { 0 };
+    };
+    Vector<Telechargement> telechargements;
+    u64 prochain_telechargement { 1 };
+    /// Tics restants avant que le panneau s'efface. Zero = cache.
+    ///
+    /// Un panneau qui ne s'efface jamais finit par etre ignore ; un panneau
+    /// qui s'efface pendant le telechargement fait croire a un echec. Le
+    /// compteur est donc remis a plein a CHAQUE evenement -- y compris a
+    /// chaque bloc d'octets recu --, ce qui le garde visible tant que quelque
+    /// chose arrive et le laisse partir six secondes apres la fin.
+    int telechargements_tics { 0 };
 
     // BOUCHAUD_CHROME_V19_MENU_CONTEXTUEL
     //
@@ -1395,6 +1439,8 @@ enum Calque : int {
     Survol = 0,
     /// Barre de recherche dans la page, en haut a droite.
     Recherche,
+    /// Panneau des telechargements, en bas a droite.
+    Telechargements,
     /// Menu contextuel, la ou on a clique.
     Menu,
     Nombre,
@@ -1681,6 +1727,89 @@ inline void dessine_menu(Canvas const& canvas)
     }
 }
 
+/// Combien de telechargements le panneau montre, et donc sa hauteur.
+inline int lignes_de_telechargement()
+{
+    auto& s = state();
+    if (s.telechargements_tics <= 0)
+        return 0;
+    auto const nombre = static_cast<int>(s.telechargements.size());
+    return min(nombre, telechargements_affiches);
+}
+
+inline BouchaudDegat::Rect boite_telechargements()
+{
+    auto& s = state();
+    auto const lignes = lignes_de_telechargement();
+    if (lignes <= 0 || s.surface_width <= 0 || s.surface_height <= 0)
+        return {};
+
+    auto const hauteur = lignes * telechargement_hauteur_ligne + 2 * menu_marge_verticale;
+    auto const largeur = min(telechargement_largeur, s.surface_width - 2 * calque_marge);
+    if (largeur <= 0)
+        return {};
+    auto const y = s.surface_height - calque_marge - hauteur;
+    // La bulle de survol occupe le bas GAUCHE ; ce panneau le bas droit. Ils
+    // ne se rencontrent que sur une fenetre tres etroite, et le panneau cede
+    // alors -- ce qu'il montre se retrouve dans le journal, l'adresse d'un
+    // lien nulle part ailleurs.
+    if (y < page_origin_y() || largeur + survol_hauteur > s.surface_width)
+        return {};
+    return { s.surface_width - calque_marge - largeur, y, largeur, hauteur };
+}
+
+/// « 45 % », « 1.2 Mo », « termine », « echec ».
+inline ByteString etat_de_telechargement(State::Telechargement const& t)
+{
+    if (t.etat == 1)
+        return "termine";
+    if (t.etat == 2)
+        return "echec";
+    if (t.total_connu && t.total > 0) {
+        auto const pourcent = static_cast<u64>((t.recus * 100) / t.total);
+        return ByteString::formatted("{} %", min(pourcent, static_cast<u64>(100)));
+    }
+    // Sans `Content-Length`, on ne peut pas donner de pourcentage. Montrer les
+    // kibioctits recus est exact ; inventer une barre qui progresse ne le
+    // serait pas.
+    return ByteString::formatted("{} Kio", t.recus / 1024);
+}
+
+inline void dessine_telechargements(Canvas const& canvas)
+{
+    auto& s = state();
+    auto const boite = s.calques.boite(Telechargements);
+    if (boite.vide())
+        return;
+
+    fill_rect(canvas, boite.x, boite.y, boite.w, boite.h, color_calque_fond);
+    fill_rect(canvas, boite.x, boite.y, boite.w, 1, color_calque_bord);
+    fill_rect(canvas, boite.x, boite.y + boite.h - 1, boite.w, 1, color_calque_bord);
+    fill_rect(canvas, boite.x, boite.y, 1, boite.h, color_calque_bord);
+    fill_rect(canvas, boite.x + boite.w - 1, boite.y, 1, boite.h, color_calque_bord);
+
+    auto const lignes = lignes_de_telechargement();
+    // Le plus RECENT en haut : c'est celui qu'on vient de lancer, donc celui
+    // qu'on regarde.
+    auto const dernier = static_cast<int>(s.telechargements.size()) - 1;
+    for (int ligne = 0; ligne < lignes; ++ligne) {
+        auto const& t = s.telechargements[static_cast<size_t>(dernier - ligne)];
+        auto const haut = boite.y + menu_marge_verticale
+            + ligne * telechargement_hauteur_ligne
+            + (telechargement_hauteur_ligne - ui_text_height) / 2;
+
+        auto const etat = etat_de_telechargement(t);
+        auto const largeur_etat = text_width(etat.view(), 2);
+        auto const largeur_nom = boite.w - 2 * calque_marge - largeur_etat - calque_marge;
+        if (largeur_nom > 0) {
+            draw_ui_text(canvas, boite.x + calque_marge, haut, t.nom.view(),
+                t.etat == 2 ? color_insecure : color_calque_texte, largeur_nom);
+        }
+        draw_ui_text(canvas, boite.x + boite.w - calque_marge - largeur_etat, haut,
+            etat.view(), color_glyph_off, largeur_etat);
+    }
+}
+
 /// Ou chaque calque doit se trouver a la trame qui vient.
 ///
 /// Un seul endroit calcule les boites, et il les calcule TOUTES : une boite
@@ -1692,6 +1821,7 @@ inline void mesure_calques()
     auto& s = state();
     s.calques.place(Survol, boite_survol());
     s.calques.place(Recherche, boite_recherche());
+    s.calques.place(Telechargements, boite_telechargements());
     s.calques.place(Menu, boite_menu());
 }
 
@@ -1707,6 +1837,8 @@ inline void dessine_calques(Canvas const& canvas, BouchaudDegat::Rect publie)
         dessine_survol(canvas);
     if (BouchaudCalques::doit_redessiner(s.calques.boite(Recherche), publie))
         dessine_recherche(canvas);
+    if (BouchaudCalques::doit_redessiner(s.calques.boite(Telechargements), publie))
+        dessine_telechargements(canvas);
     // Le menu EN DERNIER : il s'ouvre par-dessus tout, y compris par-dessus la
     // barre de recherche, et l'ordre de dessin est ce qui le decide.
     if (BouchaudCalques::doit_redessiner(s.calques.boite(Menu), publie))
@@ -2250,6 +2382,200 @@ inline void set_presse_papiers_du_document(ByteString const& texte)
     copie_vers_le_presse_papiers(texte);
 }
 
+
+
+// ----------------------------------------------------------------------------
+// Telechargements
+// ----------------------------------------------------------------------------
+//
+// BOUCHAUD_C20_TELECHARGEMENTS
+//
+// Le corps de la reponse est lu par WebContent -- `LocalNavigable` le pousse
+// bloc par bloc -- et c'est donc WebContent qui ecrit le fichier. Ce n'est pas
+// le decoupage d'upstream, ou l'hote reprend la requete a RequestServer : ce
+// portage n'a pas de processus qui puisse le faire, le chrome vivant DANS
+// WebContent. Le role qui tient les octets est celui qui ecrit, et c'est ce
+// que `src/kernel/security/chemins.rs` autorise -- ce sous-arbre-la et rien
+// d'autre.
+//
+// Le nom propose vient du SERVEUR. Il passe par `BouchaudNomFichier::assainit`
+// avant de toucher un chemin ; le noyau refuse en plus tout ce qui sortirait du
+// depot, sur le chemin canonique. Deux lignes, parce que la premiere est a
+// quatre couches de l'endroit ou la donnee entre.
+
+/// Ou deposer. La couche plateforme du portage a deja calcule la reponse.
+///
+/// `XDG_DOWNLOAD_DIR` vaut `/persist/Downloads`, ou `/tmp` quand le profil est
+/// ephemere (`tools/ladybird/prepare-platform-complete.py`). La lire plutot que
+/// de la reecrire evite deux verites pour une seule decision -- et le repli
+/// n'est la que pour un binaire lance a la main.
+inline ByteString dossier_de_telechargement()
+{
+    char const* dossier = getenv("XDG_DOWNLOAD_DIR");
+    if (dossier == nullptr || *dossier == '\0')
+        dossier = "/persist/Downloads";
+    return dossier;
+}
+
+/// Un chemin libre dans le depot, forme du nom assaini.
+///
+/// Un nom deja pris est NUMEROTE et non ecrase : deux fois le meme fichier
+/// depuis deux sites differents est courant, et perdre le premier serait une
+/// surprise desagreable.
+inline ByteString chemin_de_telechargement(StringView nom)
+{
+    auto const dossier = dossier_de_telechargement();
+
+    // Le numero s'insere AVANT l'extension : `archive-2.zip` s'ouvre, pas
+    // `archive.zip-2`.
+    auto point = nom.length();
+    for (size_t index = nom.length(); index > 0; --index) {
+        if (nom[index - 1] == '.') {
+            point = index - 1;
+            break;
+        }
+    }
+    auto const tige = nom.substring_view(0, point);
+    auto const extension = nom.substring_view(point, nom.length() - point);
+
+    for (int suffixe = 1; suffixe <= 999; ++suffixe) {
+        auto const candidat = suffixe == 1
+            ? ByteString::formatted("{}/{}", dossier, nom)
+            : ByteString::formatted("{}/{}-{}{}", dossier, tige, suffixe, extension);
+        if (access(candidat.characters(), F_OK) != 0)
+            return candidat;
+    }
+    // Mille homonymes : on ecrase le premier plutot que de refuser. Ce n'est
+    // pas un cas qu'on rencontre, et refuser silencieusement serait pire.
+    return ByteString::formatted("{}/{}", dossier, nom);
+}
+
+/// Ouvre le fichier et enregistre le telechargement. Rend son identifiant, ou
+/// rien si le depot n'est pas ecrivable -- auquel cas LibWeb arrete la requete
+/// au lieu de lire un corps que personne ne garde.
+inline Optional<u64> demarre_telechargement(ByteString const& nom_propose, bool total_connu, u64 total)
+{
+    auto& s = state();
+
+    auto const dossier = dossier_de_telechargement();
+    // 0755 et non 0777 : ce depot appartient a l'utilisateur, et un droit
+    // d'ecriture pour tout le monde sur un dossier ou atterrit ce que le
+    // reseau envoie n'a aucune raison d'exister.
+    mkdir(dossier.characters(), 0755);
+
+    auto const sur = BouchaudNomFichier::assainit(
+        nom_propose.characters(), static_cast<int>(nom_propose.length()));
+    StringView nom { sur.c_str(), static_cast<size_t>(sur.taille) };
+    auto const chemin = chemin_de_telechargement(nom);
+
+    // O_EXCL : `chemin_de_telechargement` vient de constater que le fichier
+    // n'existe pas, mais entre les deux il a pu apparaitre. Sans O_EXCL on
+    // ecraserait alors le fichier de quelqu'un d'autre, et c'est le genre de
+    // course qu'on ne reproduit jamais en la cherchant.
+    auto const fd = open(chemin.characters(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (fd < 0) {
+        warnln("[ladybird-bouchaud] M11_DOWNLOAD_REFUSED path={} errno={}", chemin, errno);
+        return {};
+    }
+
+    State::Telechargement t;
+    t.identifiant = s.prochain_telechargement++;
+    t.fd = fd;
+    t.nom = ByteString { nom };
+    t.total = total;
+    t.total_connu = total_connu;
+    s.telechargements.append(move(t));
+    s.telechargements_tics = telechargements_duree_tics;
+
+    outln("[ladybird-bouchaud] M11_DOWNLOAD_START id={} path={} total={}",
+        s.telechargements.last().identifiant, chemin, total_connu ? total : 0);
+    return s.telechargements.last().identifiant;
+}
+
+inline State::Telechargement* telechargement_par_identifiant(u64 identifiant)
+{
+    auto& s = state();
+    for (auto& t : s.telechargements) {
+        if (t.identifiant == identifiant)
+            return &t;
+    }
+    return nullptr;
+}
+
+inline void recoit_telechargement(u64 identifiant, u8 const* octets, size_t taille)
+{
+    auto* t = telechargement_par_identifiant(identifiant);
+    if (t == nullptr || t->fd < 0)
+        return;
+
+    size_t ecrits = 0;
+    while (ecrits < taille) {
+        auto const n = write(t->fd, octets + ecrits, taille - ecrits);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            // Une ecriture qui echoue au milieu laisse un fichier tronque. Le
+            // dire tout de suite vaut mieux que de le decouvrir en l'ouvrant :
+            // le panneau passe en rouge et le journal porte l'errno.
+            warnln("[ladybird-bouchaud] M11_DOWNLOAD_WRITE_FAILED id={} errno={}",
+                identifiant, errno);
+            close(t->fd);
+            t->fd = -1;
+            t->etat = 2;
+            state().telechargements_tics = telechargements_duree_tics;
+            return;
+        }
+        ecrits += static_cast<size_t>(n);
+    }
+    t->recus += taille;
+    state().telechargements_tics = telechargements_duree_tics;
+}
+
+inline void termine_telechargement(u64 identifiant)
+{
+    auto* t = telechargement_par_identifiant(identifiant);
+    if (t == nullptr)
+        return;
+    if (t->fd >= 0) {
+        // `fsync` avant `close` : `/persist` est adosse au RAMFS, et ce qui
+        // n'est pas synchronise n'atteint le disque qu'a l'extinction. Un
+        // telechargement annonce comme termine doit avoir survecu a une coupure
+        // qui arrive juste apres.
+        fsync(t->fd);
+        close(t->fd);
+        t->fd = -1;
+    }
+    if (t->etat == 0)
+        t->etat = 1;
+    state().telechargements_tics = telechargements_duree_tics;
+    outln("[ladybird-bouchaud] M11_DOWNLOAD_DONE id={} name={} bytes={}",
+        identifiant, t->nom, t->recus);
+}
+
+inline void echoue_telechargement(u64 identifiant, ByteString const& raison)
+{
+    auto* t = telechargement_par_identifiant(identifiant);
+    if (t == nullptr)
+        return;
+    if (t->fd >= 0) {
+        close(t->fd);
+        t->fd = -1;
+    }
+    t->etat = 2;
+    state().telechargements_tics = telechargements_duree_tics;
+    warnln("[ladybird-bouchaud] M11_DOWNLOAD_FAILED id={} name={} raison={}",
+        identifiant, t->nom, raison);
+}
+
+/// Ce chrome n'a pas encore de bouton pour annuler.
+///
+/// La reponse est donc toujours « non ». Elle est ECRITE plutot que laissee au
+/// defaut d'upstream parce que le jour ou le bouton existera, c'est ici qu'il
+/// se branchera, et non dans un `return false` perdu ailleurs.
+inline bool telechargement_annule(u64)
+{
+    return false;
+}
 
 // ----------------------------------------------------------------------------
 // Menu contextuel
@@ -3150,6 +3476,13 @@ inline void tick()
     // pas faire cela : il ne touche pas un pixel de page. La composition de
     // page peint aussi la barre d'outils si elle attend, donc le compteur est
     // traite au passage et rien n'est publie deux fois.
+    // Le panneau des telechargements s'efface tout seul. Le compteur descend
+    // ICI et nulle part ailleurs : c'est le seul endroit qui bat a intervalle
+    // connu, et l'ecriture d'un fichier n'a aucune raison de connaitre
+    // l'horloge.
+    if (s.telechargements_tics > 0)
+        --s.telechargements_tics;
+
     mesure_calques();
     if (!s.calques.degat().vide()) {
         compose_page({});

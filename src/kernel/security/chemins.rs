@@ -59,6 +59,41 @@ use super::profile::SecurityProfile;
 /// verite pour une seule arborescence.
 pub const PROFIL_NAVIGATEUR: &str = "/persist/ladybird";
 
+/// Ou le navigateur depose ce que l'utilisateur telecharge.
+///
+/// BOUCHAUD_C20_TELECHARGEMENTS
+///
+/// # Ce que ce droit ouvre, et pourquoi il est accorde quand meme
+///
+/// Il est accorde a `BrowserContent` -- WebContent, WebWorker, ImageDecoder --
+/// c'est-a-dire aux roles qui executent le script d'un site. C'est un
+/// elargissement reel, et le nier serait malhonnete : un rendu compromis peut
+/// desormais deposer un fichier qui survit au redemarrage.
+///
+/// Trois choses le bornent, et la troisieme est la vraie raison.
+///
+/// D'abord le sous-arbre : le controle porte sur le chemin CANONIQUE
+/// (`path::normalize_absolute` a deja resolu les `..`), donc un
+/// `Content-Disposition: filename="../ladybird/profile/cookies.sqlite"` ne
+/// sort pas d'ici. Le chrome assainit en plus le nom propose -- la ceinture
+/// et les bretelles, parce que ce nom vient du SERVEUR.
+///
+/// Ensuite le statut de ce qui y atterrit : `security::profile` classe tout
+/// binaire lance depuis un chemin contenant `/Downloads/` comme `Untrusted`.
+/// Un fichier depose la ne peut donc pas servir a gagner des droits ; il peut
+/// au pire etre execute avec moins de droits que tout le reste.
+///
+/// Enfin, l'alternative. Sans ce droit, le navigateur ne peut ecrire que dans
+/// `/tmp`, qui est en RAMFS : un telechargement disparaitrait au redemarrage.
+/// « Le navigateur ne sait pas enregistrer un fichier » n'est pas une
+/// propriete de securite, c'est une fonction absente -- et l'utilisateur qui
+/// la contourne le fera par un chemin que personne n'a examine.
+///
+/// La frontiere qui compte ne bouge pas : le PROFIL du navigateur
+/// (`/persist/ladybird` : cookies, HSTS, cache) reste ferme aux roles de
+/// rendu. Ce qu'ils gagnent est un depot, pas une memoire.
+pub const DOSSIER_TELECHARGEMENTS: &str = "/persist/Downloads";
+
 /// `path` est-il `root` lui-meme, ou un descendant ?
 ///
 /// La comparaison va jusqu'au SEPARATEUR : sans cela, `/tmpfoo` passerait pour
@@ -96,8 +131,26 @@ const fn possede_le_profil(profile: SecurityProfile) -> bool {
     matches!(profile, SecurityProfile::BrowserNetwork)
 }
 
+/// Ce role depose-t-il les telechargements ?
+///
+/// C'est `BrowserContent` et non `BrowserNetwork` parce que c'est WebContent
+/// qui lit le corps de la reponse : dans ce portage, le chrome vit DANS
+/// WebContent et aucun processus hote ne peut reprendre la requete a
+/// RequestServer. Le role qui ecrit est celui qui tient les octets.
+const fn depose_les_telechargements(profile: SecurityProfile) -> bool {
+    matches!(profile, SecurityProfile::BrowserContent)
+}
+
 pub fn lecture_permise(profile: SecurityProfile, path: &str) -> bool {
     if lecture_commune(path) {
+        return true;
+    }
+    // Le role qui depose relit son propre depot : c'est ainsi qu'il decouvre
+    // qu'un fichier du meme nom existe deja, et qu'il numerote le suivant au
+    // lieu de l'ecraser. Lui refuser la lecture ferait perdre le precedent.
+    if depose_les_telechargements(profile)
+        && sous_arbre(path, DOSSIER_TELECHARGEMENTS)
+    {
         return true;
     }
     if !possede_le_profil(profile) {
@@ -113,6 +166,11 @@ pub fn lecture_permise(profile: SecurityProfile, path: &str) -> bool {
 
 pub fn ecriture_permise(profile: SecurityProfile, path: &str) -> bool {
     if ecriture_commune(path) {
+        return true;
+    }
+    if depose_les_telechargements(profile)
+        && sous_arbre(path, DOSSIER_TELECHARGEMENTS)
+    {
         return true;
     }
     possede_le_profil(profile) && sous_arbre(path, PROFIL_NAVIGATEUR)

@@ -35,7 +35,7 @@ mod chemins {
 }
 
 use capability::Capabilities;
-use chemins::{ecriture_permise, lecture_permise, PROFIL_NAVIGATEUR};
+use chemins::{ecriture_permise, lecture_permise, DOSSIER_TELECHARGEMENTS, PROFIL_NAVIGATEUR};
 use profile::{
     capabilities, classify, initial_capabilities, sandboxe, transition_capabilities,
     SecurityProfile,
@@ -383,7 +383,9 @@ fn un_moteur_de_rendu_n_ecrit_rien_de_persistant() {
         "/persist/ladybird/data/cookies.sqlite",
         PROFIL_NAVIGATEUR,
         "/persist",
-        "/persist/Downloads/charge.exe",
+        // Voisin de nom du dossier de telechargement, qui lui EST ouvert :
+        // c'est exactement la ou un prefixe mal compare ferait un trou.
+        "/persist/Downloads-vole/charge.exe",
     ] {
         assert!(
             !ecriture_permise(SecurityProfile::BrowserContent, chemin),
@@ -393,6 +395,71 @@ fn un_moteur_de_rendu_n_ecrit_rien_de_persistant() {
         assert!(
             !lecture_permise(SecurityProfile::BrowserContent, chemin),
             "un role de rendu ne doit meme pas pouvoir lire {}",
+            chemin
+        );
+    }
+}
+
+#[test]
+fn un_moteur_de_rendu_depose_ses_telechargements_et_rien_d_autre() {
+    // BOUCHAUD_C20_TELECHARGEMENTS
+    //
+    // Ce droit est un ELARGISSEMENT, et le test le dit dans les deux sens : ce
+    // qu'il ouvre, et ce qu'il n'ouvre pas. Le second compte davantage --
+    // c'est lui qui echouera le jour ou quelqu'un elargira le predicat en
+    // croyant simplifier.
+    assert!(ecriture_permise(
+        SecurityProfile::BrowserContent,
+        "/persist/Downloads/rapport.pdf"
+    ));
+    assert!(lecture_permise(
+        SecurityProfile::BrowserContent,
+        "/persist/Downloads/rapport.pdf"
+    ));
+    // Le dossier lui-meme : le portage y fait un `mkdir` au demarrage, et un
+    // sous-arbre qui exclurait sa propre racine echouerait a la creer.
+    assert!(ecriture_permise(
+        SecurityProfile::BrowserContent,
+        DOSSIER_TELECHARGEMENTS
+    ));
+
+    // La frontiere qui compte : le PROFIL du navigateur -- cookies, HSTS,
+    // cache -- reste ferme au rendu. Ce qu'il gagne est un depot, pas une
+    // memoire.
+    for chemin in [
+        CACHE_ALT_SVC,
+        "/persist/ladybird/data/cookies.sqlite",
+        PROFIL_NAVIGATEUR,
+        "/persist",
+        "/persist/autre/charge",
+    ] {
+        assert!(
+            !ecriture_permise(SecurityProfile::BrowserContent, chemin),
+            "le depot de telechargement a elargi {} au passage",
+            chemin
+        );
+    }
+
+    // Le droit est attache au ROLE. RequestServer lit et ecrit le profil, pas
+    // le depot : c'est WebContent qui tient les octets du corps de reponse.
+    assert!(!ecriture_permise(
+        SecurityProfile::BrowserNetwork,
+        "/persist/Downloads/rapport.pdf"
+    ));
+    assert!(!ecriture_permise(
+        SecurityProfile::Untrusted,
+        "/persist/Downloads/rapport.pdf"
+    ));
+    assert!(!lecture_permise(
+        SecurityProfile::Untrusted,
+        "/persist/Downloads/rapport.pdf"
+    ));
+
+    // Et le reste du bac a sable n'a pas bouge.
+    for chemin in ["/usr/bin/sh", "/etc/passwd", "/root/.ssh/id_rsa", "/dev/fb0"] {
+        assert!(
+            !ecriture_permise(SecurityProfile::BrowserContent, chemin),
+            "{} ne doit pas devenir inscriptible",
             chemin
         );
     }

@@ -15,7 +15,9 @@ Ce que ce script branche, et rien de plus :
     `cut_selected_text`, `paste`, et les deux entrees de l'API Clipboard --
     sur le presse-papiers du bureau ;
   * le menu contextuel -- les trois `page_did_request_*_context_menu` -- sur
-    le calque du chrome.
+    le calque du chrome ;
+  * les telechargements -- `page_did_start_download` et ses trois suites --
+    sur le depot `/persist/Downloads`.
 
 Pourquoi un script separe de `prepare-m11-chrome.py` : celui-la construit le
 chrome, celui-ci lui donne ce que le MOTEUR sait et qu'il ignorait. Les deux
@@ -356,6 +358,158 @@ substitute(
 #endif
     Optional<Gfx::ShareableBitmap> bitmap;""",
     "menu contextuel d'image",
+)
+
+
+
+# ---------------------------------------------------------------------------
+# Telechargements
+# ---------------------------------------------------------------------------
+#
+# Upstream a DEUX chemins. Quand la reponse porte une requete RequestServer --
+# le cas d'une navigation ordinaire vers un contenu non affichable --, il
+# transfere la requete au processus hote, qui lit le corps a la place de
+# WebContent. Sinon -- `<a download>` --, WebContent lit le corps lui-meme et
+# le pousse par `page_did_receive_download_data`.
+#
+# Ce portage n'a personne pour reprendre la requete : le chrome vit DANS
+# WebContent, et `BouchaudBrowserHost` n'instancie aucune vue. Le premier
+# chemin menait donc a un `Optional` vide, c'est-a-dire a un telechargement qui
+# n'arrive jamais -- et LibWeb arretait la requete sans un mot.
+#
+# On force donc le second chemin, qui aboutit aux memes trois rappels. C'est
+# une ligne, elle est ecrite ci-dessous, et c'est elle qui rend les
+# telechargements possibles du tout.
+
+local_navigable = root / "Libraries/LibWeb/HTML/LocalNavigable.cpp"
+
+substitute(
+    local_navigable,
+    """    auto download_url = response->url().value_or(navigation_params->request ? navigation_params->request->current_url() : URL::about_blank());
+    if (auto const& request_server_request = response->request_server_request(); request_server_request.has_value()) {""",
+    """    auto download_url = response->url().value_or(navigation_params->request ? navigation_params->request->current_url() : URL::about_blank());
+#if defined(BOUCHAUD_PORT)
+    // BOUCHAUD_C20_TELECHARGEMENTS
+    //
+    // Le transfert de la requete a l'hote n'existe pas ici : aucun processus ne
+    // peut la reprendre a RequestServer, le chrome vivant dans WebContent. On
+    // prend donc toujours le chemin ou WebContent lit lui-meme le corps --
+    // celui de `<a download>` --, qui aboutit exactement aux memes rappels.
+    constexpr bool bouchaud_hote_reprend_la_requete = false;
+#else
+    constexpr bool bouchaud_hote_reprend_la_requete = true;
+#endif
+    if (auto const& request_server_request = response->request_server_request();
+        bouchaud_hote_reprend_la_requete && request_server_request.has_value()) {""",
+    "chemin de telechargement en processus",
+)
+
+# Le refus pose par `prepare-browser-host.py` reste : il protege le cas M9 sans
+# chrome, ou un `send_sync` vers un hote absent gelerait la page. Le chrome, lui,
+# passe devant.
+substitute(
+    page_cpp,
+    """        warnln("[ladybird-bouchaud] HOTE_ABSENT DidStartDownloadWithoutRequest : aucun telechargement possible sans processus hote");
+        return {};""",
+    """        if (BouchaudChrome::enabled()) {
+            // Le nom vient du SERVEUR : `BouchaudNomFichier::assainit` le
+            // ramene a quelque chose qui ne peut pas designer un autre
+            // repertoire, et le bac a sable du noyau refuse en plus tout ce
+            // qui sortirait du depot.
+            return BouchaudChrome::demarre_telechargement(
+                suggested_filename, total_size.has_value(), total_size.value_or(0));
+        }
+        warnln("[ladybird-bouchaud] HOTE_ABSENT DidStartDownloadWithoutRequest : aucun telechargement possible sans processus hote");
+        return {};""",
+    "demarrage de telechargement",
+)
+
+substitute(
+    page_cpp,
+    """void PageClient::page_did_receive_download_data(u64 download_id, ByteBuffer data)
+{
+    if (m_canceled_downloads.contains(download_id))
+        return;
+""",
+    """void PageClient::page_did_receive_download_data(u64 download_id, ByteBuffer data)
+{
+    if (m_canceled_downloads.contains(download_id))
+        return;
+
+#if defined(BOUCHAUD_PORT)
+    if (bouchaud_m9_enabled() && BouchaudChrome::enabled()) {
+        // Pas de decoupage en blocs de seize mebioctets ici : ce decoupage
+        // existe parce qu'un message IPC est borne, et il n'y a pas de message
+        // -- l'ecriture est un `write` dans le meme processus.
+        BouchaudChrome::recoit_telechargement(download_id, data.data(), data.size());
+        return;
+    }
+#endif
+""",
+    "octets de telechargement",
+)
+
+substitute(
+    page_cpp,
+    """void PageClient::page_did_finish_download(u64 download_id)
+{
+    page_did_unregister_download(download_id);
+    client().async_did_finish_download(m_id, download_id);
+}""",
+    """void PageClient::page_did_finish_download(u64 download_id)
+{
+    page_did_unregister_download(download_id);
+#if defined(BOUCHAUD_PORT)
+    if (bouchaud_m9_enabled() && BouchaudChrome::enabled()) {
+        BouchaudChrome::termine_telechargement(download_id);
+        return;
+    }
+#endif
+    client().async_did_finish_download(m_id, download_id);
+}""",
+    "fin de telechargement",
+)
+
+substitute(
+    page_cpp,
+    """void PageClient::page_did_fail_download(u64 download_id, String const& error)
+{
+    page_did_unregister_download(download_id);
+    client().async_did_fail_download(m_id, download_id, error);
+}""",
+    """void PageClient::page_did_fail_download(u64 download_id, String const& error)
+{
+    page_did_unregister_download(download_id);
+#if defined(BOUCHAUD_PORT)
+    if (bouchaud_m9_enabled() && BouchaudChrome::enabled()) {
+        BouchaudChrome::echoue_telechargement(download_id, error.to_byte_string());
+        return;
+    }
+#endif
+    client().async_did_fail_download(m_id, download_id, error);
+}""",
+    "echec de telechargement",
+)
+
+substitute(
+    page_cpp,
+    """bool PageClient::page_is_download_canceled(u64 download_id) const
+{
+    return m_canceled_downloads.contains(download_id);
+}""",
+    """bool PageClient::page_is_download_canceled(u64 download_id) const
+{
+#if defined(BOUCHAUD_PORT)
+    // Ce chrome n'a pas encore de bouton pour annuler. La reponse est ecrite
+    // plutot que laissee au defaut d'upstream -- `m_canceled_downloads` reste
+    // vide de toute facon -- parce que le jour ou le bouton existera, c'est
+    // ici que la question se posera.
+    if (bouchaud_m9_enabled() && BouchaudChrome::enabled())
+        return BouchaudChrome::telechargement_annule(download_id);
+#endif
+    return m_canceled_downloads.contains(download_id);
+}""",
+    "annulation de telechargement",
 )
 
 
