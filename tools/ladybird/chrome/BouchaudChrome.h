@@ -1608,7 +1608,16 @@ inline void draw_onglets(Canvas const& canvas)
             auto const& onglet = s.onglets[rang];
             // Le TITRE si le document en a un, l'adresse sinon : une page qui
             // charge encore n'a pas de titre, et un onglet vide n'apprend rien.
-            auto const libelle = onglet.titre.is_empty() ? onglet.url : onglet.titre;
+            //
+            // L'onglet ACTIF se lit dans les champs plats du chrome, pas dans
+            // sa propre copie : celle-ci n'est ecrite qu'a la bascule, et le
+            // premier onglet -- celui que `initialize` cree -- recoit son URL
+            // APRES avoir ete enregistre. Sa ligne serait restee vide jusqu'a
+            // ce qu'on change d'onglet, ce qui est exactement le moment ou on
+            // ne la regarde plus.
+            auto const titre = est_actif ? s.title : onglet.titre;
+            auto const adresse = est_actif ? s.committed_url : onglet.url;
+            auto const libelle = titre.is_empty() ? adresse : titre;
             draw_ui_text(canvas, boite.x + calque_marge,
                 boite.y + (onglets_hauteur - ui_text_height) / 2 + 1,
                 libelle.view(), est_actif ? color_glyph : color_glyph_off, largeur_texte);
