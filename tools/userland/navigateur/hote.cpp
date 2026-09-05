@@ -319,6 +319,16 @@ enum CodeTouche : uint32_t {
     ToucheGauche = 6,
     ToucheDroite = 7,
     ToucheEchap = 8,
+    // Pave de navigation. Voir `src/gui/window_manager.rs::touche` : ces codes
+    // n'existent que pour que les trois implementations du protocole
+    // s'accordent, et `tools/verifie-protocole-gui.py` refuse un desaccord.
+    ToucheDebut = 9,
+    ToucheFin = 10,
+    TouchePageHaut = 11,
+    TouchePageBas = 12,
+    ToucheSupprimer = 13,
+    ToucheInserer = 14,
+    ToucheFonction = 15,
 };
 
 inline uint32_t litU32(const unsigned char *o, size_t d)
@@ -1397,6 +1407,19 @@ void PontFenetre::traite(uint16_t genre, const unsigned char *charge, size_t tai
         case protocole::ToucheGauche: qtKey = Qt::Key_Left; break;
         case protocole::ToucheDroite: qtKey = Qt::Key_Right; break;
         case protocole::ToucheEchap: qtKey = Qt::Key_Escape; break;
+        case protocole::ToucheDebut: qtKey = Qt::Key_Home; break;
+        case protocole::ToucheFin: qtKey = Qt::Key_End; break;
+        case protocole::TouchePageHaut: qtKey = Qt::Key_PageUp; break;
+        case protocole::TouchePageBas: qtKey = Qt::Key_PageDown; break;
+        case protocole::ToucheSupprimer: qtKey = Qt::Key_Delete; break;
+        case protocole::ToucheInserer: qtKey = Qt::Key_Insert; break;
+        // Qt numerote F1..F35 consecutivement a partir de Key_F1 : le numero
+        // porte par `unicode` s'y traduit par une addition, sans table.
+        case protocole::ToucheFonction:
+            qtKey = (unicode >= 1 && unicode <= 12)
+                ? (Qt::Key_F1 + static_cast<int>(unicode) - 1)
+                : 0;
+            break;
         default:
             if (!unicode)
                 return;

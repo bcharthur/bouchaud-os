@@ -125,6 +125,22 @@ faux code Linux serait pire qu'un code a nous, parce que le client le croirait.
 | 3 | Tabulation |
 | 4-7 | Haut, Bas, Gauche, Droite |
 | 8 | Echap |
+| 9-10 | Origine, Fin |
+| 11-12 | Page precedente, Page suivante |
+| 13-14 | Suppr, Inser |
+| 15 | Touche de fonction - le NUMERO (1 a 12) est dans `unicode` |
+
+Les codes 9 a 15 sont arrives avec le navigateur. Ils manquaient parce que le
+decodeur clavier ne reconnaissait, parmi les sequences etendues, que les quatre
+fleches : le pave de navigation etait perdu entre le controleur PS/2 et le
+client. Sans consequence visible sur le bureau -- un octet inconnu ne produit
+rien, et rien est ce qu'on attend d'un octet inconnu -- mais une page ne se
+faisait alors defiler qu'a la molette. Suppr etait pire que perdue : elle
+arrivait comme Retour arriere, et effacait donc le caractere de gauche.
+
+Une touche de fonction par code aurait demande douze lignes a chaque
+implementation, et douze occasions de se tromper : le numero voyage donc dans
+`unicode`, comme le point de code d'un caractere.
 
 Echap va au client quand celui-ci a le focus : un navigateur en a besoin, et le
 lui confisquer pour fermer sa fenetre detruirait le travail en cours. Sans client

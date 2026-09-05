@@ -413,6 +413,26 @@ mod touche {
     pub const GAUCHE: u32 = 6;
     pub const DROITE: u32 = 7;
     pub const ECHAP: u32 = 8;
+
+    // Le pave de navigation, arrive avec le navigateur.
+    //
+    // Sans lui, une page ne se faisait defiler qu'a la molette : le decodeur
+    // clavier reconnaissait quatre fleches et jetait tout le reste des
+    // sequences etendues. Ces codes ne sont pas des scancodes -- le bureau
+    // produit une touche deja interpretee -- et leur valeur n'a d'importance
+    // que parce que trois implementations du protocole doivent s'accorder
+    // dessus. `tools/verifie-protocole-gui.py` refuse un desaccord.
+    pub const DEBUT: u32 = 9;
+    pub const FIN: u32 = 10;
+    pub const PAGE_HAUT: u32 = 11;
+    pub const PAGE_BAS: u32 = 12;
+    pub const SUPPRIMER: u32 = 13;
+    pub const INSERER: u32 = 14;
+    /// F1 a F12. Le NUMERO voyage dans le champ `unicode`, pas dans le code :
+    /// douze codes de touche pour douze touches qui ne different que par un
+    /// entier auraient demande douze lignes a chaque implementation, et douze
+    /// occasions de se tromper.
+    pub const FONCTION: u32 = 15;
 }
 
 /// Bits du champ `modificateurs` d'un message `Key`.
@@ -1476,6 +1496,13 @@ fn envoie_touche(client: &mut Client, evenement: KeyEvent) {
         Key::Down => (touche::BAS, 0),
         Key::Left => (touche::GAUCHE, 0),
         Key::Right => (touche::DROITE, 0),
+        Key::Home => (touche::DEBUT, 0),
+        Key::End => (touche::FIN, 0),
+        Key::PageUp => (touche::PAGE_HAUT, 0),
+        Key::PageDown => (touche::PAGE_BAS, 0),
+        Key::Delete => (touche::SUPPRIMER, 0),
+        Key::Insert => (touche::INSERER, 0),
+        Key::Fonction(numero) => (touche::FONCTION, numero as u32),
         Key::Other => (touche::ECHAP, 0),
     };
     let m = evenement.modificateurs;

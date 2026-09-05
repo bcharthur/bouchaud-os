@@ -100,6 +100,10 @@ inline constexpr u32 color_button_off = 0x00'2b'2f'34;
 inline constexpr u32 color_field = 0x00'ff'ff'ff;
 inline constexpr u32 color_field_idle = 0x00'e3'e6'ea;
 inline constexpr u32 color_field_text = 0x00'16'1a'1e;
+// Selection du champ d'adresse : bleu pale, texte inchange. C'est la convention
+// des champs clairs, et cela evite de dependre de la couleur du texte -- que
+// `tools/ladybird/chrome/modernise-v15.py` reecrit pour passer au rendu Skia.
+inline constexpr u32 color_field_selection = 0x00'ac'ce'f7;
 inline constexpr u32 color_glyph = 0x00'e8'ea'ed;
 inline constexpr u32 color_glyph_off = 0x00'6b'71'78;
 inline constexpr u32 color_secure = 0x00'1e'8e'3e;
@@ -162,6 +166,22 @@ enum CodeTouche : u32 {
     ToucheGauche = 6,
     ToucheDroite = 7,
     ToucheEchap = 8,
+    // Le pave de navigation, arrive avec le navigateur.
+    //
+    // Ces touches etaient PERDUES entre le controleur et le client : le
+    // decodeur clavier ne reconnaissait que les quatre fleches parmi les
+    // sequences etendues. Sur le bureau, aucune consequence visible ; ici,
+    // l'impossibilite de faire defiler une page sans molette. Suppr etait pire
+    // que perdue -- elle arrivait comme Retour arriere, et effacait donc le
+    // caractere de gauche.
+    ToucheDebut = 9,
+    ToucheFin = 10,
+    TouchePageHaut = 11,
+    TouchePageBas = 12,
+    ToucheSupprimer = 13,
+    ToucheInserer = 14,
+    /// F1 a F12 : le NUMERO arrive dans le champ `unicode`, pas dans le code.
+    ToucheFonction = 15,
 };
 
 // ----------------------------------------------------------------------------
@@ -311,6 +331,15 @@ struct State {
     Vector<u8> address;
     size_t caret { 0 };
     bool address_focused { false };
+    /// Tout le texte du champ est selectionne.
+    ///
+    /// Le seul etat de selection que ce chrome modelise, et c'est le seul dont
+    /// depend un raccourci : Ctrl+L veut dire « je vais taper une autre
+    /// adresse », et laisser le curseur au bout du texte obligerait a effacer
+    /// l'URL caractere par caractere avant de pouvoir s'en servir. La premiere
+    /// frappe remplace, comme partout ailleurs ; Echap restaure l'URL commitee,
+    /// donc rien n'est perdu.
+    bool address_all_selected { false };
 
     // Ce que la page dit d'elle-meme.
     ByteString committed_url;
@@ -985,6 +1014,18 @@ inline void draw_toolbar(Canvas const& canvas)
     }
 
     auto visible = address_text.substring(first, address_text.length() - first);
+
+    // La surbrillance se dessine AVANT le texte, et sur une ligne distincte de
+    // celle qui le dessine : `tools/ladybird/chrome/modernise-v15.py` reecrit
+    // l'appel a `draw_text` ci-dessous pour passer au rendu Skia, et une
+    // surbrillance melee a cette ligne disparaitrait a la modernisation
+    // suivante sans que rien ne le signale.
+    if (s.address_focused && s.address_all_selected && !visible.is_empty()) {
+        auto largeur = min(text_width(visible.view(), 2), available);
+        fill_rect(canvas, text_x - 1, button_top + 3, largeur + 2, button_height - 6,
+            color_field_selection);
+    }
+
     draw_text(canvas, text_x, text_y, visible.view(), color_field_text, 2, available);
 
     if (s.address_focused) {
@@ -1201,6 +1242,19 @@ inline ByteString address_text()
     return builder.to_byte_string();
 }
 
+/// Rend le foyer au document.
+///
+/// Une seule fonction pour les quatre endroits qui le faisaient, parce que la
+/// selection totale doit disparaitre avec le foyer : une surbrillance survivant
+/// a un clic dans la page reapparaitrait a la frappe suivante, et la premiere
+/// lettre tapee effacerait une URL que plus rien ne montrait comme selectionnee.
+inline void defocus_address()
+{
+    auto& s = state();
+    s.address_focused = false;
+    s.address_all_selected = false;
+}
+
 inline void set_address_text(StringView text)
 {
     auto& s = state();
@@ -1262,7 +1316,7 @@ inline void commit_address()
     if (target.is_empty())
         return;
 
-    s.address_focused = false;
+    defocus_address();
     s.loading = true;
     s.status = "chargement...";
     outln("[ladybird-bouchaud] M11_NAVIGATE url={}", target);
@@ -1350,10 +1404,14 @@ inline void handle_pointer(int x, int y, unsigned buttons)
                 if (s.on_reload)
                     s.on_reload();
             } else if (point_in_address_field(x, y)) {
+                // Un clic POSE un curseur ; il ne selectionne pas. Ctrl+L est
+                // la pour cela, et confondre les deux ferait effacer l'URL a
+                // qui voulait seulement corriger sa fin.
                 s.address_focused = true;
+                s.address_all_selected = false;
                 s.caret = s.address.size();
             } else {
-                s.address_focused = false;
+                defocus_address();
             }
             request_chrome_frame();
         }
@@ -1366,7 +1424,7 @@ inline void handle_pointer(int x, int y, unsigned buttons)
     // Clic dans la page : la barre d'adresse rend le foyer au document, sinon
     // les touches suivantes continueraient d'aller dans la barre.
     if (pressed != 0 && s.address_focused) {
-        s.address_focused = false;
+        defocus_address();
         request_chrome_frame();
     }
 
@@ -1455,19 +1513,109 @@ inline void dispatch_key_to_page(
     // pas le chrome. Le moteur demandera un repaint si le DOM visuel change.
 }
 
+/// Donne le foyer a la barre d'adresse avec tout le texte selectionne.
+inline void focus_address_bar()
+{
+    auto& s = state();
+    s.address_focused = true;
+    s.address_all_selected = true;
+    s.caret = s.address.size();
+    request_chrome_frame();
+}
+
+/// Les raccourcis du NAVIGATEUR, ceux qui appartiennent au chrome et jamais au
+/// document. Rend `true` si la touche a ete consommee.
+///
+/// # Pourquoi ils arrivent apres le reste
+///
+/// Le chrome avait des boutons et une barre d'adresse, et rien pour les
+/// atteindre au clavier. Ce n'est pas un manque de confort : les touches qui
+/// les servent -- F5, Ctrl+L, Alt+fleche -- etaient PERDUES avant le protocole
+/// (voir `src/drivers/input/clavier_decodeur.rs`), et il n'y avait donc rien a
+/// brancher.
+///
+/// Ils sont examines avant la barre d'adresse comme avant la page : un
+/// raccourci qui ne fonctionne que lorsque le foyer est au bon endroit n'est
+/// pas un raccourci. Seul l'APPUI declenche ; le relachement d'un raccourci ne
+/// veut rien dire, et le traiter le declencherait deux fois.
+inline bool raccourci_navigateur(u32 code, u32 code_point, u32 modifiers, bool appui)
+{
+    auto& s = state();
+
+    auto const ctrl = (modifiers & Modificateur::Ctrl) != 0;
+    auto const alt = (modifiers & Modificateur::Alt) != 0;
+    auto const lettre = [code_point](char attendue) {
+        return code_point == static_cast<u32>(attendue)
+            || code_point == static_cast<u32>(attendue - 32);
+    };
+
+    // Rechargement : F5 seule, et Ctrl+R.
+    auto const rechargement = (code == ToucheFonction && code_point == 5u && !ctrl && !alt)
+        || (code == ToucheCaractere && ctrl && lettre('r'));
+    // Historique : Alt+fleche, la convention de tous les navigateurs de bureau.
+    auto const historique = alt && (code == ToucheGauche || code == ToucheDroite);
+    auto const barre_adresse = ctrl && code == ToucheCaractere && lettre('l');
+
+    if (!rechargement && !historique && !barre_adresse)
+        return false;
+
+    // Consomme dans les DEUX sens, agit sur l'appui seul.
+    //
+    // Laisser passer le relachement enverrait a la page un `keyup` sans
+    // `keydown` : une page qui compte les deux -- un jeu, un raccourci maintenu
+    // -- verrait une touche relachee qu'elle n'a jamais vue enfoncee. C'est
+    // exactement le defaut que le pilote PS/2 avait deja corrige en cessant de
+    // fabriquer des relachements synthetiques ; le reintroduire ici serait
+    // dommage.
+    if (!appui)
+        return true;
+
+    if (rechargement) {
+        s.loading = true;
+        s.status = "chargement...";
+        if (s.on_reload)
+            s.on_reload();
+        request_chrome_frame();
+        return true;
+    }
+
+    if (historique) {
+        if (s.on_history_delta)
+            s.on_history_delta(code == ToucheGauche ? -1 : 1);
+        return true;
+    }
+
+    focus_address_bar();
+    return true;
+}
+
 inline void handle_key(u32 code, u32 code_point, u32 modifiers, u32 pressed)
 {
     auto& s = state();
     auto const appui = pressed != 0;
+
+    if (raccourci_navigateur(code, code_point, modifiers, appui))
+        return;
 
     // La barre d'adresse est un widget du chrome, pas un document : elle
     // n'agit que sur l'appui. La page, elle, recoit les deux transitions.
     if (s.address_focused) {
         if (!appui)
             return;
+        // La selection totale se defait a la premiere touche qui deplace ou
+        // modifie. Toute la table ci-dessous suppose donc qu'elle n'existe
+        // plus : la resoudre ici, une fois, evite de la reexaminer dans chaque
+        // branche -- et d'en oublier une.
+        auto const tout_selectionne = s.address_all_selected;
+        s.address_all_selected = false;
+
         switch (code) {
         case ToucheCaractere:
             if (code_point >= 0x20 && code_point < 0x7f) {
+                if (tout_selectionne) {
+                    s.address.clear_with_capacity();
+                    s.caret = 0;
+                }
                 if (s.caret > s.address.size())
                     s.caret = s.address.size();
                 s.address.insert(s.caret, static_cast<u8>(code_point));
@@ -1475,27 +1623,52 @@ inline void handle_key(u32 code, u32 code_point, u32 modifiers, u32 pressed)
             }
             break;
         case ToucheRetour:
-            if (s.caret > 0 && !s.address.is_empty()) {
+            if (tout_selectionne) {
+                s.address.clear_with_capacity();
+                s.caret = 0;
+            } else if (s.caret > 0 && !s.address.is_empty()) {
                 --s.caret;
                 s.address.remove(s.caret);
             }
             break;
         case ToucheGauche:
-            if (s.caret > 0)
+            if (tout_selectionne)
+                s.caret = 0;
+            else if (s.caret > 0)
                 --s.caret;
             break;
         case ToucheDroite:
-            if (s.caret < s.address.size())
+            if (tout_selectionne)
+                s.caret = s.address.size();
+            else if (s.caret < s.address.size())
                 ++s.caret;
             break;
         case ToucheEntree:
             commit_address();
             break;
+        case ToucheSupprimer:
+            // Suppr efface a DROITE. La touche existait deja cote materiel,
+            // mais le decodeur la traduisait en Retour arriere : elle effacait
+            // donc le caractere de gauche, ce qui est la seule chose qu'elle ne
+            // doit pas faire.
+            if (tout_selectionne) {
+                s.address.clear_with_capacity();
+                s.caret = 0;
+            } else if (s.caret < s.address.size()) {
+                s.address.remove(s.caret);
+            }
+            break;
+        case ToucheDebut:
+            s.caret = 0;
+            break;
+        case ToucheFin:
+            s.caret = s.address.size();
+            break;
         case ToucheEchap:
             // Echap rend le foyer a la page et restaure l'URL affichee : une
             // saisie abandonnee ne doit pas laisser un texte qui ne correspond
             // plus a ce qui est a l'ecran.
-            s.address_focused = false;
+            defocus_address();
             set_address_text(s.committed_url.view());
             break;
         case ToucheTabulation:
@@ -1530,6 +1703,37 @@ inline void handle_key(u32 code, u32 code_point, u32 modifiers, u32 pressed)
         break;
     case ToucheDroite:
         dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Right, 0, false, modifiers, appui, false);
+        break;
+    // Le pave de navigation. Rien de special a faire : LibWeb sait deja faire
+    // defiler un document, un cadre, une zone en `overflow:auto`, et respecter
+    // un `preventDefault`. Ce qui manquait, c'etait que les touches arrivent.
+    case TouchePageHaut:
+        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_PageUp, 0, false, modifiers, appui, false);
+        break;
+    case TouchePageBas:
+        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_PageDown, 0, false, modifiers, appui, false);
+        break;
+    case ToucheDebut:
+        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Home, 0, false, modifiers, appui, false);
+        break;
+    case ToucheFin:
+        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_End, 0, false, modifiers, appui, false);
+        break;
+    case ToucheSupprimer:
+        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Delete, 0, false, modifiers, appui, false);
+        break;
+    case ToucheInserer:
+        dispatch_key_to_page(Web::UIEvents::KeyCode::Key_Insert, 0, false, modifiers, appui, false);
+        break;
+    case ToucheFonction:
+        // F5 a deja ete consommee par `raccourci_navigateur`. Les autres
+        // appartiennent au document : une page a le droit d'ecouter F1 ou F12,
+        // et les avaler ici en ferait des touches mortes.
+        if (code_point >= 1u && code_point <= 12u) {
+            auto const touche = static_cast<Web::UIEvents::KeyCode>(
+                static_cast<int>(Web::UIEvents::KeyCode::Key_F1) + static_cast<int>(code_point) - 1);
+            dispatch_key_to_page(touche, 0, false, modifiers, appui, false);
+        }
         break;
     case ToucheEchap:
         // Echap arrete le chargement en cours, comme dans tout navigateur. Le
