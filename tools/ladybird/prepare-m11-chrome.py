@@ -132,6 +132,16 @@ ensure_include(
     "include BouchaudChrome ConnectionFromClient.cpp",
 )
 
+# BOUCHAUD_C22_ONGLETS : `create_a_fresh_top_level_traversable` donne un
+# document au nouvel onglet. Sans elle, la page n'aurait pas de navigable de
+# sommet et le premier `set_viewport` tomberait sur rien.
+ensure_include(
+    connection_cpp,
+    "#include <LibWeb/HTML/LocalTraversableNavigable.h>",
+    "#include <WebContent/PageClient.h>",
+    "include LocalTraversableNavigable ConnectionFromClient.cpp",
+)
+
 # Le viewport de la page s'arrete au-dessus de la barre d'outils. La conversion
 # vit dans le chrome : si la hauteur de la barre change un jour, elle change a
 # un seul endroit, et le clic continue de tomber ou le pixel a ete peint.
@@ -164,7 +174,12 @@ substitute(
     """    outln("[ladybird-bouchaud] M9_BOOTSTRAP page={} viewport={}x{}", page_id, width, page_height);
 
     if (BouchaudChrome::enabled()) {
-        BouchaudChrome::set_committed_url(url->to_byte_string());
+        // BOUCHAUD_C22_ONGLETS : la page que `initialize` a creee devient le
+        // premier onglet. Il est enregistre AVANT que la moindre URL soit
+        // annoncee : sans onglet, `page_active()` repond par defaut, et le
+        // chrome rangerait l'etat de la page 1 dans un onglet qui n'existe pas.
+        BouchaudChrome::ajoute_onglet(page_id, url->to_byte_string(), true);
+        BouchaudChrome::set_committed_url(page_id, url->to_byte_string());
         bouchaud_m11_start();
     }
 
@@ -175,46 +190,53 @@ substitute(
 m11_start = r'''
 void ConnectionFromClient::bouchaud_m11_start()
 {
-    constexpr u64 page_id = 1;
+    // BOUCHAUD_C22_ONGLETS
+    //
+    // L'identifiant de page n'est plus une constante. Chaque rappel agit sur
+    // l'onglet ACTIF, et il change quand l'utilisateur en change : une valeur
+    // capturee aurait fige le premier onglet dans chacune de ces lambdas, et
+    // le defaut ne se serait vu qu'en ouvrant le second -- ou plus tard, sous
+    // la forme d'un clic qui agit sur la page d'a cote.
+    auto const page_id = [] { return BouchaudChrome::page_active(); };
     auto& chrome = BouchaudChrome::state();
 
-    // Les rappels traversent l'objet global du chrome et capturent `this`. Sous
-    // M9/M11, WebContent n'a qu'une `ConnectionFromClient` et elle vit aussi
-    // longtemps que le processus : la capture est sure tant que ce jalon ne cree
-    // pas de second onglet, ce que M13 fera en introduisant un vrai Browser.
+    // Les rappels traversent l'objet global du chrome et capturent `this`.
+    // WebContent n'a qu'une `ConnectionFromClient` et elle vit aussi longtemps
+    // que le processus : la capture est sure, y compris avec plusieurs onglets,
+    // puisque tous les onglets sont des pages de CETTE connexion.
     chrome.on_mouse_event = [this, page_id](Web::MouseEvent event) {
-        mouse_event(page_id, move(event));
+        mouse_event(page_id(), move(event));
     };
 
     chrome.on_key_event = [this, page_id](Web::KeyEvent event) {
-        key_event(page_id, move(event));
+        key_event(page_id(), move(event));
     };
 
     chrome.on_navigate = [this, page_id](ByteString target) {
         auto url = URL::create_with_url_or_path(target);
         if (!url.has_value()) {
             warnln("[ladybird-bouchaud] M11_URL_INVALID {}", target);
-            BouchaudChrome::set_loading(false, "URL invalide"sv);
+            BouchaudChrome::set_loading(page_id(), false, "URL invalide"sv);
             return;
         }
-        load_url(page_id, *url, Web::Bindings::NavigationHistoryBehavior::Auto);
+        load_url(page_id(), *url, Web::Bindings::NavigationHistoryBehavior::Auto);
     };
 
     chrome.on_history_delta = [this, page_id](int delta) {
-        if (auto page = this->page(page_id); page.has_value())
+        if (auto page = this->page(page_id()); page.has_value())
             page->page().traverse_the_history_by_delta(delta);
     };
 
     chrome.on_reload = [this, page_id] {
-        reload(page_id);
+        reload(page_id());
     };
 
     chrome.on_stop = [this, page_id] {
-        stop_loading(page_id);
+        stop_loading(page_id());
     };
 
     chrome.on_repaint = [this, page_id] {
-        if (auto page = this->page(page_id); page.has_value())
+        if (auto page = this->page(page_id()); page.has_value())
             page->page().top_level_traversable()->bouchaud_schedule_interactive_frame_capture();
     };
 
@@ -227,7 +249,7 @@ void ConnectionFromClient::bouchaud_m11_start()
     // fond autour. Le viewport est ce qui manquait : c'est LibWeb qui decide de
     // la largeur de ligne, pas nous.
     chrome.on_resize = [this, page_id](int largeur, int hauteur) {
-        auto page = this->page(page_id);
+        auto page = this->page(page_id());
         if (!page.has_value())
             return;
         if (largeur <= 0 || hauteur <= 0)
@@ -235,10 +257,10 @@ void ConnectionFromClient::bouchaud_m11_start()
 
         outln("[ladybird-bouchaud] M11_VIEWPORT {}x{}", largeur, hauteur);
         auto viewport = Gfx::IntSize { largeur, hauteur }.to_type<Web::DevicePixels>();
-        set_viewport(page_id, viewport, 1.0, Web::ViewportIsFullscreen::No);
+        set_viewport(page_id(), viewport, 1.0, Web::ViewportIsFullscreen::No);
         // La fenetre du document, au sens de `window.innerWidth`, est le
         // viewport : la barre d'outils appartient au chrome, pas a la page.
-        set_window_size(page_id, viewport);
+        set_window_size(page_id(), viewport);
 
         // La remise en page va invalider et le moteur demandera sa trame. La
         // capture explicite couvre le cas ou rien du document ne change --
@@ -253,7 +275,7 @@ void ConnectionFromClient::bouchaud_m11_start()
     // 1278 pixels qui affiche des sites concus pour 1920, c'est la premiere
     // chose qui manque.
     chrome.on_zoom = [this, page_id](int pourcent) {
-        auto page = this->page(page_id);
+        auto page = this->page(page_id());
         if (!page.has_value())
             return;
 
@@ -264,6 +286,33 @@ void ConnectionFromClient::bouchaud_m11_start()
         // capture explicite couvre le cas ou le document ne change pas de
         // pixels -- une page plus etroite que la fenetre, par exemple.
         page->page().top_level_traversable()->bouchaud_schedule_interactive_frame_capture();
+    };
+
+    // BOUCHAUD_C22_ONGLETS
+    //
+    // Un onglet EST une page du moteur. `PageHost` sait en tenir plusieurs
+    // depuis toujours -- il les indexe par identifiant --, et `create_page` en
+    // fabrique une. Ce qui manquait, c'est que personne n'en demandait une
+    // seconde : le chrome connaissait la page 1, en dur.
+    chrome.on_nouvel_onglet = [this]() -> u64 {
+        auto const nouveau = BouchaudChrome::prochaine_page();
+        auto& client = page_host().create_page(nouveau, page_host().allocate_navigable_id());
+        // Un onglet ouvert par l'utilisateur porte un document : c'est ce qui
+        // le distingue d'une fenetre surgissante, dont l'ouvreur fournira le
+        // sien. Sans ce document, la page n'aurait pas de navigable de sommet
+        // et le premier `set_viewport` tomberait sur rien.
+        Web::HTML::LocalTraversableNavigable::create_a_fresh_top_level_traversable(
+            client.page(), URL::about_blank());
+        client.set_maximum_frames_per_second(30.0);
+        outln("[ladybird-bouchaud] M11_TAB_CREATED page={}", nouveau);
+        return nouveau;
+    };
+
+    chrome.on_fermer_onglet = [this](u64 ferme) {
+        // C'est le MOTEUR qui ferme : `beforeunload` a poser, des ressources a
+        // rendre. Il rappellera `retire_onglet` par
+        // `page_did_close_top_level_traversable` quand ce sera fait.
+        request_close(ferme);
     };
 
     chrome.on_close = [] {
@@ -283,7 +332,7 @@ void ConnectionFromClient::bouchaud_m11_start()
     // un defilement fluide et laissent la moitie du cœur au reste — analyse,
     // script, reseau. C'est LibWeb qui fait respecter ce plafond, dans
     // `PageClient::request_frame()`.
-    if (auto page = this->page(page_id); page.has_value())
+    if (auto page = this->page(page_id()); page.has_value())
         page->set_maximum_frames_per_second(30.0);
 
     // 16 ms : la cadence du bureau (`docs/GUI_USERLAND_PROTOCOL.md` §7). Ce
@@ -339,7 +388,7 @@ substitute(
         outln("[ladybird-bouchaud] M9_CPU_SCREENSHOT_RENDERED");""",
     """    if (bouchaud_m9_enabled()) {
         if (BouchaudChrome::enabled()) {
-            if (!BouchaudChrome::present_complet(screenshot))
+            if (!BouchaudChrome::present_complet(m_id, screenshot))
                 Core::Process::terminate_immediately(70);
             return;
         }
@@ -367,8 +416,8 @@ substitute(
             outln("[ladybird-bouchaud] M11_DOCUMENT_SKIPPED url={}", chargee);
             return;
         }
-        BouchaudChrome::set_committed_url(chargee);
-        BouchaudChrome::set_loading(false, "pret"sv);
+        BouchaudChrome::set_committed_url(m_id, chargee);
+        BouchaudChrome::set_loading(m_id, false, "pret"sv);
         outln("[ladybird-bouchaud] M11_DOCUMENT_LOADED page={} url={}", m_id, chargee);
         page().top_level_traversable()->bouchaud_schedule_interactive_frame_capture();
         return;
@@ -387,8 +436,8 @@ substitute(
     """    if (bouchaud_m9_enabled()) {
         outln("[ladybird-bouchaud] M9_NAVIGATION_STARTED page={} url={} redirect={}", m_id, url, is_redirect);
         if (BouchaudChrome::enabled()) {
-            BouchaudChrome::set_committed_url(url.to_byte_string());
-            BouchaudChrome::set_loading(true, "chargement..."sv);
+            BouchaudChrome::set_committed_url(m_id, url.to_byte_string());
+            BouchaudChrome::set_loading(m_id, true, "chargement..."sv);
             page().top_level_traversable()->bouchaud_schedule_interactive_frame_capture();
         }
         return;
@@ -405,7 +454,7 @@ substitute(
     """    if (bouchaud_m9_enabled()) {
         outln("[ladybird-bouchaud] M9_NAVIGATION_COMMITTED page={} url={}", m_id, url);
         if (BouchaudChrome::enabled()) {
-            BouchaudChrome::set_committed_url(url.to_byte_string());
+            BouchaudChrome::set_committed_url(m_id, url.to_byte_string());
             page().top_level_traversable()->bouchaud_schedule_interactive_frame_capture();
         }
         return;
@@ -423,7 +472,7 @@ substitute(
     """    if (bouchaud_m9_enabled()) {
         outln("[ladybird-bouchaud] M9_NAVIGATION_CANCELLED page={} url={}", m_id, url);
         if (BouchaudChrome::enabled()) {
-            BouchaudChrome::set_loading(false, "chargement interrompu"sv);
+            BouchaudChrome::set_loading(m_id, false, "chargement interrompu"sv);
             page().top_level_traversable()->bouchaud_schedule_interactive_frame_capture();
         }
     }""",
@@ -441,7 +490,7 @@ substitute(
 #if defined(BOUCHAUD_PORT)
     if (bouchaud_m9_enabled()) {
         if (BouchaudChrome::enabled())
-            BouchaudChrome::set_title(ByteString::formatted("{}", title));
+            BouchaudChrome::set_title(m_id, ByteString::formatted("{}", title));
         return;
     }
 #endif

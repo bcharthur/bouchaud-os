@@ -86,13 +86,27 @@ def texte(chemin, fautes):
 
 
 def corps(source, signature):
-    """Le corps d'une fonction, des accolades equilibrees."""
-    debut = source.find(signature)
-    if debut < 0:
-        return None
-    ouvrante = source.find("{", debut)
-    if ouvrante < 0:
-        return None
+    """Le corps qui suit `signature`, accolades equilibrees.
+
+    Une DECLARATION anticipee -- `inline void f();` -- contient la meme chaine
+    qu'une signature partielle de la definition. Prendre la premiere occurrence
+    rendrait alors le corps de la fonction SUIVANTE, et la regle porterait sur
+    du code sans rapport : ce qui distingue les deux est le point-virgule, une
+    declaration en portant un AVANT la prochaine accolade.
+    """
+    debut = 0
+    while True:
+        trouve = source.find(signature, debut)
+        if trouve < 0:
+            return None
+        ouvrante = source.find("{", trouve)
+        if ouvrante < 0:
+            return None
+        point_virgule = source.find(";", trouve)
+        if point_virgule < 0 or point_virgule > ouvrante:
+            break
+        debut = point_virgule + 1
+
     profondeur = 0
     for index in range(ouvrante, len(source)):
         if source[index] == "{":
@@ -102,7 +116,6 @@ def corps(source, signature):
             if profondeur == 0:
                 return source[ouvrante : index + 1]
     return None
-
 
 def etendue(source, signature):
     """Les bornes du bloc accolade qui suit `signature`, ou None.
@@ -132,7 +145,7 @@ def etendue(source, signature):
 
 def regle_present(chrome, fautes):
     """1. `present()` compose par degat."""
-    bloc = corps(chrome, "inline bool present(Gfx::ShareableBitmap const& screenshot, int degat_x")
+    bloc = corps(chrome, "inline bool present(u64 page_id, Gfx::ShareableBitmap const& screenshot, int degat_x")
     if bloc is None:
         fautes.append(
             "BouchaudChrome.h : `present()` ne prend plus de degat. Une capture "
@@ -148,6 +161,16 @@ def regle_present(chrome, fautes):
         fautes.append(
             "BouchaudChrome.h : `present()` appelle `compose_full()`. C'est le "
             "defaut d'origine : un curseur qui clignote repeint 1 554 048 pixels."
+        )
+    # BOUCHAUD_C22_ONGLETS : une capture d'onglet INACTIF est rangee, pas
+    # composee. Les pages d'arriere-plan continuent de tourner -- un chargement
+    # se termine, une animation avance -- et composer leur capture ferait
+    # clignoter la page qu'on regarde avec celle d'a cote.
+    if "page_active()" not in bloc:
+        fautes.append(
+            "BouchaudChrome.h : `present()` ne regarde plus de quel onglet "
+            "vient la capture. Une page d'arriere-plan qui finit de charger "
+            "s'afficherait par-dessus celle qu'on regarde."
         )
 
     plan = corps(chrome, "inline bool compose_page(")

@@ -536,7 +536,7 @@ screenshot_route = """void PageClient::page_did_take_screenshot(Gfx::ShareableBi
         // curseur qui clignote repeignait 1 554 048 pixels deux fois par
         // seconde.
         auto const degat = page().top_level_traversable()->bouchaud_last_frame_damage();
-        if (!BouchaudChrome::present(screenshot, degat.x(), degat.y(), degat.width(), degat.height()))
+        if (!BouchaudChrome::present(m_id, screenshot, degat.x(), degat.y(), degat.width(), degat.height()))
             Core::Process::terminate_immediately(70);
 
         static bool first_frame_reported = false;
@@ -632,29 +632,15 @@ replace_once(
 
 
 # 7. M11 s'attache a la page creee par Application au lieu d'en creer une autre.
-connection_h = root / "Services/WebContent/ConnectionFromClient.h"
-replace_once(
-    connection_h,
-    "    void bouchaud_m11_start();",
-    "    void bouchaud_m11_start(u64 page_id);",
-    "signature M11",
-)
-
+#
+# BOUCHAUD_C22_ONGLETS : `bouchaud_m11_start()` ne prend plus d'identifiant de
+# page. Il en prenait un parce qu'il n'y en avait qu'un et qu'il fallait bien le
+# choisir ; depuis les onglets, chaque rappel demande au chrome quel onglet est
+# ACTIF, et un identifiant fige a l'attache serait justement le defaut qu'on
+# cherche a eviter. Ce qui reste a faire ici est d'enregistrer la page de
+# depart comme premier onglet.
 connection_cpp = root / "Services/WebContent/ConnectionFromClient.cpp"
 data = connection_cpp.read_text()
-if "void ConnectionFromClient::bouchaud_m11_start(u64 page_id)" not in data:
-    old_def = '''void ConnectionFromClient::bouchaud_m11_start()
-{
-    constexpr u64 page_id = 1;
-    auto& chrome = BouchaudChrome::state();'''
-    new_def = '''void ConnectionFromClient::bouchaud_m11_start(u64 page_id)
-{
-    auto& chrome = BouchaudChrome::state();'''
-    if old_def not in data:
-        raise SystemExit("BrowserHost: definition bouchaud_m11_start introuvable")
-    data = data.replace(old_def, new_def, 1)
-
-data = data.replace("        bouchaud_m11_start();", "        bouchaud_m11_start(page_id);", 1)
 
 old_init = '''void ConnectionFromClient::initialize(u64 initial_page_id, Web::HTML::CrossProcessId root_navigable_id, Web::HTML::CrossProcessIdAllocator cross_process_id_allocator)
 {
@@ -667,9 +653,17 @@ new_init = '''void ConnectionFromClient::initialize(u64 initial_page_id, Web::HT
 #if defined(BOUCHAUD_PORT)
     if (getenv("BOUCHAUD_BROWSER_HOST") && getenv("BOUCHAUD_M11")) {
         BouchaudChrome::initialize_from_environment();
-        if (auto* requested_url = getenv("BOUCHAUD_M9_URL"); requested_url && *requested_url)
-            BouchaudChrome::set_committed_url(ByteString { requested_url });
-        bouchaud_m11_start(initial_page_id);
+        auto* requested_url = getenv("BOUCHAUD_M9_URL");
+        auto const url_de_depart = (requested_url && *requested_url)
+            ? ByteString { requested_url }
+            : ByteString { "about:blank" };
+        // La page que `Application` vient de creer devient le premier onglet.
+        // Elle est enregistree AVANT toute annonce d'URL : sans onglet,
+        // `page_active()` repond par defaut et le chrome rangerait l'etat de
+        // cette page dans un onglet qui n'existe pas.
+        BouchaudChrome::ajoute_onglet(initial_page_id, url_de_depart, true);
+        BouchaudChrome::set_committed_url(initial_page_id, url_de_depart);
+        bouchaud_m11_start();
         outln("[ladybird-bouchaud] BROWSER_HOST_M11_ATTACHED page={}", initial_page_id);
     }
 #endif

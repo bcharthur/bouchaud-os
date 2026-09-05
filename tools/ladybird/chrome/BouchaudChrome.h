@@ -26,7 +26,12 @@
  *
  * ## Ce qu'il ne fait pas
  *
- * Pas d'onglets (M13), pas de bac a sable (M14).
+ * Il vit DANS WebContent, et c'est sa limite de fond : le processus qui execute
+ * le script des sites est aussi celui qui tient la barre d'adresse, les
+ * favoris, l'historique et les fichiers telecharges. Les deux droits d'ecriture
+ * persistants que cela demande sont accordes, nommes et bornes dans
+ * `src/kernel/security/chemins.rs` -- et ils repartiront ensemble le jour ou le
+ * chrome sortira d'ici (`docs/ladybird/AUDIT_INTEGRATION.md` §5).
  *
  * Le texte, lui, n'est plus en police bitmap : `modernise-v15.py` remplace le
  * corps de `draw_ui_text` par le rendu Skia du meme moteur que la page, et
@@ -121,7 +126,29 @@ inline constexpr int button_top = 6;
 inline constexpr int button_gap = 4;
 inline constexpr int margin = 6;
 
-inline constexpr int page_origin_y() { return toolbar_height; }
+// BOUCHAUD_C22_ONGLETS
+//
+// La bande d'onglets est SOUS la barre d'outils, et non au-dessus.
+//
+// Au-dessus aurait ete la disposition la plus courante. En dessous ne coute
+// pas une coordonnee : la barre d'outils continue de se peindre de zero a
+// `toolbar_height`, et `tools/ladybird/chrome/modernise-v15.py` -- qui
+// remplace deux blocs de `draw_toolbar` par du rendu Skia et des icones --
+// continue de trouver ses ancres au mot pres. Au-dessus, il aurait fallu
+// decaler chaque `button_top`, chaque `fill_rect`, et la modernisation aurait
+// echoue au milieu de la construction, vingt minutes plus tard.
+inline constexpr int onglets_hauteur = 30;
+/// Largeurs d'un onglet : il retrecit quand il y en a beaucoup, jusqu'a un
+/// point ou il ne montrerait plus rien de lisible.
+inline constexpr int onglet_largeur_max = 200;
+inline constexpr int onglet_largeur_min = 72;
+/// Le bouton « nouvel onglet », au bout de la bande.
+inline constexpr int onglet_plus_largeur = 28;
+/// Au-dela, un onglet de plus ne serait plus qu'un trait.
+inline constexpr size_t onglets_max = 12;
+
+/// Le haut de la ZONE DE PAGE : sous la barre d'outils et sous les onglets.
+inline constexpr int page_origin_y() { return toolbar_height + onglets_hauteur; }
 
 // Couleurs XRGB8888 (l'octet de poids fort est ignore par le compositeur).
 inline constexpr u32 color_toolbar = 0x00'23'27'2b;
@@ -588,6 +615,40 @@ struct State {
     u8* surface_mapping { nullptr };
     size_t surface_mapping_bytes { 0 };
 
+    // BOUCHAUD_C22_ONGLETS
+    //
+    // Un onglet garde ce que la barre d'outils montre quand il est ACTIF, et
+    // sa derniere capture.
+    //
+    // Les champs de l'onglet actif sont RECOPIES dans les champs plats du
+    // chrome -- `committed_url`, `title`, `secure`, `loading`, `last_page`,
+    // `zoom_cran` -- plutot que lus depuis l'onglet. C'est une duplication, et
+    // elle est deliberee : `modernise-v15.py` reecrit deux blocs de
+    // `draw_toolbar` qui nomment `s.loading`, et son texte de remplacement le
+    // nomme aussi. Renommer ces champs ferait echouer la modernisation au
+    // milieu de la construction -- ou, pire, la ferait porter sur autre chose.
+    // La recopie tient en un seul endroit : `bascule_onglet()`.
+    struct Onglet {
+        u64 page_id { 0 };
+        ByteString url;
+        ByteString titre;
+        ByteString status { "pret" };
+        bool secure { false };
+        bool loading { false };
+        int zoom_cran { BouchaudZoom::cran_neutre };
+        Gfx::ShareableBitmap last_page;
+    };
+    Vector<Onglet> onglets;
+    size_t onglet_actif { 0 };
+    /// Le prochain identifiant de page libre.
+    ///
+    /// Il commence a 2 : la page 1 est celle que `initialize` cree. Les
+    /// identifiants ne sont jamais REUTILISES -- un onglet ferme laisse le
+    /// sien derriere lui --, et c'est ce qui garantit qu'une capture partie
+    /// avant la fermeture, et il y en a toujours une en vol, ne soit pas prise
+    /// pour celle du nouvel onglet.
+    u64 prochaine_page { 2 };
+
     /// Barre d'adresse.
     ///
     /// Sa selection totale -- `address.tout_selectionne` -- est le seul etat de
@@ -789,6 +850,11 @@ struct State {
     Function<void(int, int)> on_resize;
     /// Le zoom a change : nouveau facteur, en POURCENTS.
     Function<void(int)> on_zoom;
+    /// Ouvrir un onglet vide. Rend l'identifiant de page cree, ou zero.
+    Function<u64()> on_nouvel_onglet;
+    /// Fermer la page d'un onglet. Le chrome retire l'onglet quand le moteur
+    /// annonce la fermeture, pas ici.
+    Function<void(u64)> on_fermer_onglet;
     /// Nouvelle requete de recherche. Une chaine vide efface le surlignage.
     Function<void(ByteString)> on_find;
     Function<void()> on_find_next;
@@ -819,8 +885,53 @@ inline State& state()
 /// Hauteur utile pour la page, une fois la barre d'outils retiree.
 inline int viewport_height()
 {
-    auto height = state().surface_height - toolbar_height;
+    auto height = state().surface_height - page_origin_y();
     return height > 0 ? height : state().surface_height;
+}
+
+// BOUCHAUD_C22_ONGLETS : acces a l'onglet courant.
+//
+// Ces trois fonctions vivent ici, tout pres de `state()`, parce que presque
+// tout le reste du fichier en depend -- le dessin, l'entree, la composition,
+// et les rappels vers le moteur.
+
+/// Le rang de l'onglet actif, toujours valide s'il y a au moins un onglet.
+inline size_t rang_actif()
+{
+    auto& s = state();
+    if (s.onglets.is_empty())
+        return 0;
+    return min(s.onglet_actif, s.onglets.size() - 1);
+}
+
+/// L'identifiant de page de l'onglet actif.
+///
+/// Rend 1 tant qu'aucun onglet n'est enregistre : c'est la page que
+/// `initialize` cree, et le chrome recoit ses evenements avant d'avoir eu
+/// l'occasion d'en faire un onglet.
+inline u64 page_active()
+{
+    auto& s = state();
+    if (s.onglets.is_empty())
+        return 1;
+    return s.onglets[rang_actif()].page_id;
+}
+
+/// Le prochain identifiant de page libre. Voir `State::prochaine_page`.
+inline u64 prochaine_page()
+{
+    return state().prochaine_page++;
+}
+
+/// L'onglet qui porte cette page, ou `nullptr`.
+inline State::Onglet* onglet_de_la_page(u64 page_id)
+{
+    auto& s = state();
+    for (auto& onglet : s.onglets) {
+        if (onglet.page_id == page_id)
+            return &onglet;
+    }
+    return nullptr;
 }
 
 /// M11 est actif seulement si le lanceur l'a demande. Sans la variable, le
@@ -1387,6 +1498,134 @@ inline void draw_ui_text(Canvas const& canvas, int x, int y, StringView texte, u
     draw_text(canvas, x, y + 1, texte, couleur, 2, largeur_max);
 }
 
+// ----------------------------------------------------------------------------
+// Bande d'onglets
+// ----------------------------------------------------------------------------
+
+/// La largeur d'un onglet, la meme pour tous.
+///
+/// Les onglets se PARTAGENT la place et ne defilent pas : une bande qui defile
+/// demande une barre de defilement, une position, et le soin de ne jamais
+/// laisser l'onglet actif hors champ. Partager est plus simple et donne le
+/// meme resultat jusqu'a la douzaine d'onglets que ce chrome accepte.
+inline int largeur_onglet()
+{
+    auto& s = state();
+    auto const nombre = static_cast<int>(s.onglets.size());
+    if (nombre <= 0)
+        return 0;
+    auto const disponible = s.surface_width - onglet_plus_largeur - 2 * margin;
+    if (disponible <= 0)
+        return 0;
+    return max(onglet_largeur_min, min(onglet_largeur_max, disponible / nombre));
+}
+
+inline BouchaudDegat::Rect boite_onglet(int rang)
+{
+    auto& s = state();
+    if (rang < 0 || static_cast<size_t>(rang) >= s.onglets.size())
+        return {};
+    auto const largeur = largeur_onglet();
+    if (largeur <= 0)
+        return {};
+    auto const x = margin + rang * largeur;
+    // Un onglet qui deborderait la fenetre n'est pas dessine : mieux vaut ne
+    // pas le montrer que le montrer coupe sous le bouton « plus ».
+    if (x + largeur > s.surface_width - onglet_plus_largeur - margin)
+        return {};
+    return { x, toolbar_height, largeur, onglets_hauteur };
+}
+
+/// La croix de fermeture, dans le coin droit d'un onglet.
+inline BouchaudDegat::Rect boite_fermeture_onglet(int rang)
+{
+    auto const onglet = boite_onglet(rang);
+    // Sur un onglet retreci, la croix mangerait tout le titre. Elle disparait,
+    // et il reste Ctrl+W -- et le clic du milieu, que ce chrome n'a pas encore.
+    if (onglet.vide() || onglet.w < onglet_largeur_min + 24)
+        return {};
+    return { onglet.x + onglet.w - 22, onglet.y + (onglets_hauteur - 12) / 2, 12, 12 };
+}
+
+inline BouchaudDegat::Rect boite_nouvel_onglet()
+{
+    auto& s = state();
+    if (s.surface_width <= onglet_plus_largeur + 2 * margin)
+        return {};
+    return { s.surface_width - margin - onglet_plus_largeur, toolbar_height,
+        onglet_plus_largeur, onglets_hauteur };
+}
+
+/// Le rang de l'onglet sous ce point, ou -1.
+inline int onglet_au_point(int x, int y)
+{
+    auto& s = state();
+    for (size_t rang = 0; rang < s.onglets.size(); ++rang) {
+        if (BouchaudCalques::contient(boite_onglet(static_cast<int>(rang)), x, y))
+            return static_cast<int>(rang);
+    }
+    return -1;
+}
+
+inline void draw_croix(Canvas const& canvas, BouchaudDegat::Rect boite, u32 couleur)
+{
+    if (boite.vide())
+        return;
+    auto const cote = min(boite.w, boite.h);
+    for (int index = 3; index < cote - 3; ++index) {
+        fill_rect(canvas, boite.x + index, boite.y + index, 1, 1, couleur);
+        fill_rect(canvas, boite.x + cote - 1 - index, boite.y + index, 1, 1, couleur);
+    }
+}
+
+inline void draw_onglets(Canvas const& canvas)
+{
+    auto& s = state();
+    auto const haut = toolbar_height;
+    fill_rect(canvas, 0, haut, canvas.width, onglets_hauteur, color_toolbar);
+    fill_rect(canvas, 0, haut + onglets_hauteur - 1, canvas.width, 1, color_toolbar_edge);
+
+    auto const actif = rang_actif();
+    for (size_t rang = 0; rang < s.onglets.size(); ++rang) {
+        auto const boite = boite_onglet(static_cast<int>(rang));
+        if (boite.vide())
+            continue;
+
+        auto const est_actif = rang == actif;
+        fill_rect(canvas, boite.x, boite.y + 2, boite.w - 2, boite.h - 2,
+            est_actif ? color_button : color_button_off);
+        if (est_actif) {
+            // Un trait clair sur l'arete haute : c'est ce qui distingue
+            // l'onglet actif au premier coup d'oeil, meme en vision
+            // peripherique, la ou deux gris proches ne se distinguent pas.
+            fill_rect(canvas, boite.x, boite.y + 2, boite.w - 2, 2, color_glyph);
+        }
+
+        auto const fermeture = boite_fermeture_onglet(static_cast<int>(rang));
+        auto const reserve = fermeture.vide() ? calque_marge : (fermeture.w + 2 * calque_marge);
+        auto const largeur_texte = boite.w - calque_marge - reserve;
+        if (largeur_texte > 0) {
+            auto const& onglet = s.onglets[rang];
+            // Le TITRE si le document en a un, l'adresse sinon : une page qui
+            // charge encore n'a pas de titre, et un onglet vide n'apprend rien.
+            auto const libelle = onglet.titre.is_empty() ? onglet.url : onglet.titre;
+            draw_ui_text(canvas, boite.x + calque_marge,
+                boite.y + (onglets_hauteur - ui_text_height) / 2 + 1,
+                libelle.view(), est_actif ? color_glyph : color_glyph_off, largeur_texte);
+        }
+        draw_croix(canvas, fermeture, est_actif ? color_glyph : color_glyph_off);
+    }
+
+    auto const plus = boite_nouvel_onglet();
+    if (!plus.vide()) {
+        fill_rect(canvas, plus.x, plus.y + 2, plus.w, plus.h - 2, color_button_off);
+        auto const centre_x = plus.x + plus.w / 2;
+        auto const centre_y = plus.y + onglets_hauteur / 2;
+        fill_rect(canvas, centre_x - 5, centre_y, 11, 1, color_glyph);
+        fill_rect(canvas, centre_x, centre_y - 5, 1, 11, color_glyph);
+    }
+}
+
 inline void draw_toolbar(Canvas const& canvas)
 {
     auto& s = state();
@@ -1504,6 +1743,18 @@ inline void draw_toolbar(Canvas const& canvas)
     auto status_x = canvas.width - margin - status_width;
     if (status_x > field_x + field_w + 4)
         draw_text(canvas, status_x, toolbar_height - glyph_height - 3, status_text.view(), color_glyph_off, 1, status_width);
+}
+
+/// Tout ce que le chrome peint au-dessus de la page : barre et onglets.
+///
+/// Un seul appel pour les deux. Les deux se salissent ensemble -- une
+/// navigation change l'URL de la barre ET le titre de l'onglet -- et les
+/// separer voudrait dire tenir deux compteurs de recomposition pour trente-six
+/// et trente lignes adjacentes.
+inline void draw_chrome(Canvas const& canvas)
+{
+    draw_toolbar(canvas);
+    draw_onglets(canvas);
 }
 
 // ----------------------------------------------------------------------------
@@ -2149,7 +2400,7 @@ inline bool compose_page(BouchaudDegat::Rect degat)
     // complete -- premiere trame, fenetre redimensionnee -- la surface a cesse
     // de la porter et il faut la repeindre.
     if (plan.complet) {
-        draw_toolbar(canvas);
+        draw_chrome(canvas);
         // Elle vient d'etre repeinte : une recomposition de chrome en attente
         // serait redondante.
         s.chrome_frames_pending = 0;
@@ -2160,13 +2411,13 @@ inline bool compose_page(BouchaudDegat::Rect degat)
         // pour les memes trente-six lignes. C'est aussi ce qui garantit qu'une
         // lettre tapee dans la barre pendant une capture n'attend pas la
         // frappe suivante pour s'afficher.
-        draw_toolbar(canvas);
+        draw_chrome(canvas);
         s.chrome_frames_pending = 0;
         ++s.chrome_toolbar_frames;
         s.chrome_pixels_written += static_cast<u64>(s.surface_width)
-            * static_cast<u64>(min(toolbar_height, s.surface_height));
+            * static_cast<u64>(min(page_origin_y(), s.surface_height));
         publie = publie.englobe(BouchaudDegat::Rect {
-            0, 0, s.surface_width, min(toolbar_height, s.surface_height) });
+            0, 0, s.surface_width, min(page_origin_y(), s.surface_height) });
     }
 
     if (plan.efface_necessaire) {
@@ -2246,11 +2497,11 @@ inline bool compose_toolbar_only()
     if (!canvas_or_error.has_value())
         return false;
     auto canvas = canvas_or_error.release_value();
-    draw_toolbar(canvas);
+    draw_chrome(canvas);
 
     send_handshake();
     ++s.chrome_toolbar_frames;
-    auto damage_height = min(toolbar_height, s.surface_height);
+    auto damage_height = min(page_origin_y(), s.surface_height);
     s.chrome_pixels_written += static_cast<u64>(s.surface_width) * static_cast<u64>(damage_height);
     send_frame_ready({ 0, 0, s.surface_width, damage_height });
     return true;
@@ -2266,11 +2517,23 @@ inline bool compose_toolbar_only()
 /// recalcule, accumulees depuis la capture precedente. Voir BouchaudDegat.h et
 /// tools/ladybird/prepare-repaint.py : l'accumulation est ce qui rend le
 /// partiel sur, puisque le pump ne capture pas toutes les etapes de rendu.
-inline bool present(Gfx::ShareableBitmap const& screenshot, int degat_x, int degat_y,
+inline bool present(u64 page_id, Gfx::ShareableBitmap const& screenshot, int degat_x, int degat_y,
     int degat_largeur, int degat_hauteur)
 {
     auto& s = state();
     auto const valid = screenshot.is_valid() && screenshot.bitmap();
+
+    // BOUCHAUD_C22_ONGLETS
+    //
+    // Une capture qui vient d'un onglet INACTIF est rangee, pas affichee. Les
+    // pages d'arriere-plan continuent de tourner -- un chargement se termine,
+    // une animation avance --, et composer leur capture ferait clignoter la
+    // page qu'on regarde avec celle d'a cote.
+    if (page_id != page_active()) {
+        if (auto* onglet = onglet_de_la_page(page_id); onglet != nullptr && valid)
+            onglet->last_page = screenshot;
+        return true;
+    }
     if (s.frame_after_wheel_pending)
         outln("[ladybird-bouchaud] WEB_SCREENSHOT_READY after_wheel=1 valid={}", valid ? 1 : 0);
     if (valid)
@@ -2284,10 +2547,10 @@ inline bool present(Gfx::ShareableBitmap const& screenshot, int degat_x, int deg
 /// et sans calcul de degat -- n'a aucun rectangle a offrir. Chaque capture y
 /// est une trame complete. Le dire explicitement vaut mieux que de passer un
 /// degat par defaut, qui aurait l'air d'un vrai et recopierait un coin de page.
-inline bool present_complet(Gfx::ShareableBitmap const& screenshot)
+inline bool present_complet(u64 page_id, Gfx::ShareableBitmap const& screenshot)
 {
     state().suivi_page.invalide();
-    return present(screenshot, 0, 0, 0, 0);
+    return present(page_id, screenshot, 0, 0, 0, 0);
 }
 
 // ----------------------------------------------------------------------------
@@ -2392,6 +2655,203 @@ inline void commit_address()
         s.on_navigate(target);
 }
 
+
+
+// ----------------------------------------------------------------------------
+// Onglets — gestion
+// ----------------------------------------------------------------------------
+//
+// BOUCHAUD_C22_ONGLETS
+//
+// Un onglet EST une page du moteur. WebContent sait en tenir plusieurs depuis
+// toujours -- `PageHost` les indexe par identifiant, `create_page` en fabrique
+// une -- et ce chrome n'en connaissait qu'une, en dur, parce que rien n'en
+// demandait une seconde.
+//
+// L'etat affiche -- URL, titre, chargement, zoom, derniere capture -- est
+// RECOPIE entre l'onglet et les champs plats du chrome a chaque bascule. Voir
+// `struct Onglet` pour pourquoi ce n'est pas une lecture directe.
+
+/// Declarees ici, definies plus bas.
+///
+/// Une bascule d'onglet ferme ce qui appartient au document qu'on quitte -- le
+/// menu contextuel, la barre de recherche -- et donne le foyer a la barre
+/// d'adresse d'un onglet vide. Ces trois-la vivent plus loin dans le fichier,
+/// avec le reste de leur sujet ; les remonter melerait tout.
+inline void ferme_menu();
+inline void ferme_recherche();
+inline void focus_address_bar();
+
+inline void sauve_onglet_actif()
+{
+    auto& s = state();
+    if (s.onglets.is_empty())
+        return;
+    auto& onglet = s.onglets[rang_actif()];
+    onglet.url = s.committed_url;
+    onglet.titre = s.title;
+    onglet.status = s.status;
+    onglet.secure = s.secure;
+    onglet.loading = s.loading;
+    onglet.zoom_cran = s.zoom_cran;
+    onglet.last_page = s.last_page;
+}
+
+inline void charge_onglet_actif()
+{
+    auto& s = state();
+    if (s.onglets.is_empty())
+        return;
+    auto const& onglet = s.onglets[rang_actif()];
+    s.committed_url = onglet.url;
+    s.title = onglet.titre;
+    s.status = onglet.status;
+    s.secure = onglet.secure;
+    s.loading = onglet.loading;
+    s.zoom_cran = onglet.zoom_cran;
+    s.last_page = onglet.last_page;
+}
+
+/// Ce qu'il faut faire APRES que l'onglet actif a change.
+inline void apres_changement_d_onglet()
+{
+    auto& s = state();
+    // Ce qui appartenait au document qu'on quitte s'en va avec lui : un menu
+    // contextuel ancre a un point de l'ancienne page, une recherche dont les
+    // correspondances etaient dans l'ancien document.
+    ferme_menu();
+    ferme_recherche();
+    s.completion_choix = -1;
+    defocus_address();
+    set_address_text(s.committed_url.view());
+
+    // La surface porte les pixels de l'AUTRE onglet : rien de ce qu'elle
+    // contient n'est encore valable.
+    compose_full();
+
+    // Le viewport et le zoom appartiennent a la page, pas a la fenetre : le
+    // moteur du nouvel onglet n'a peut-etre jamais entendu parler de la taille
+    // courante, ni du facteur que cet onglet-la utilisait.
+    if (s.on_resize)
+        s.on_resize(s.surface_width, viewport_height());
+    if (s.on_zoom)
+        s.on_zoom(BouchaudZoom::pourcent(s.zoom_cran));
+}
+
+inline void bascule_onglet(size_t rang)
+{
+    auto& s = state();
+    if (rang >= s.onglets.size() || rang == rang_actif())
+        return;
+    sauve_onglet_actif();
+    s.onglet_actif = rang;
+    charge_onglet_actif();
+    outln("[ladybird-bouchaud] M11_TAB_ACTIVE page={} rang={}", page_active(), rang);
+    apres_changement_d_onglet();
+}
+
+/// Enregistre une page comme onglet.
+///
+/// Le PREMIER onglet est particulier : la page 1 existe avant lui -- c'est
+/// `initialize` qui la cree -- et son URL comme son titre sont peut-etre deja
+/// arrives. Il ADOPTE donc ce que le chrome affiche, au lieu de l'ecraser.
+inline void ajoute_onglet(u64 page_id, ByteString const& url, bool activer)
+{
+    auto& s = state();
+    if (page_id == 0 || onglet_de_la_page(page_id) != nullptr)
+        return;
+    if (s.onglets.size() >= onglets_max) {
+        warnln("[ladybird-bouchaud] M11_TAB_REFUSED page={} deja={} au maximum",
+            page_id, s.onglets.size());
+        return;
+    }
+
+    auto const premier = s.onglets.is_empty();
+    State::Onglet onglet;
+    onglet.page_id = page_id;
+    onglet.url = url;
+    s.onglets.append(move(onglet));
+    outln("[ladybird-bouchaud] M11_TAB_OPEN page={} total={}", page_id, s.onglets.size());
+
+    if (premier) {
+        s.onglet_actif = 0;
+        sauve_onglet_actif();
+        request_chrome_frame();
+        return;
+    }
+    if (activer)
+        bascule_onglet(s.onglets.size() - 1);
+    else
+        request_chrome_frame();
+}
+
+/// Retire l'onglet d'une page que le moteur vient de fermer.
+inline void retire_onglet(u64 page_id)
+{
+    auto& s = state();
+    for (size_t rang = 0; rang < s.onglets.size(); ++rang) {
+        if (s.onglets[rang].page_id != page_id)
+            continue;
+
+        auto const etait_actif = rang == rang_actif();
+        s.onglets.remove(rang);
+        outln("[ladybird-bouchaud] M11_TAB_CLOSED page={} reste={}", page_id, s.onglets.size());
+
+        if (s.onglets.is_empty()) {
+            // Fermer le dernier onglet ferme la fenetre. Un cadre sans page
+            // n'offre plus rien -- pas meme de quoi ouvrir un onglet, puisque
+            // la bande serait vide.
+            outln("[ladybird-bouchaud] M11_EXIT dernier onglet ferme");
+            if (s.on_close)
+                s.on_close();
+            return;
+        }
+
+        if (etait_actif) {
+            // Le voisin de DROITE prend la main, celui de gauche s'il n'y en a
+            // pas : sauter a l'autre bout de la bande obligerait a retrouver ou
+            // l'on etait.
+            s.onglet_actif = min(rang, s.onglets.size() - 1);
+            charge_onglet_actif();
+            apres_changement_d_onglet();
+        } else {
+            if (rang < s.onglet_actif)
+                --s.onglet_actif;
+            request_chrome_frame();
+        }
+        return;
+    }
+}
+
+inline void nouvel_onglet()
+{
+    auto& s = state();
+    if (!s.on_nouvel_onglet || s.onglets.size() >= onglets_max)
+        return;
+    auto const page_id = s.on_nouvel_onglet();
+    if (page_id == 0)
+        return;
+    ajoute_onglet(page_id, ByteString { "about:blank" }, true);
+    // Un onglet vide attend une adresse : la barre prend le foyer, comme
+    // partout ailleurs.
+    focus_address_bar();
+}
+
+inline void ferme_onglet(size_t rang)
+{
+    auto& s = state();
+    if (rang >= s.onglets.size())
+        return;
+    auto const page_id = s.onglets[rang].page_id;
+    if (s.on_fermer_onglet) {
+        // C'est le MOTEUR qui ferme : il a `beforeunload` a poser, des
+        // ressources a rendre, et il rappellera `retire_onglet` quand ce sera
+        // fait. Retirer l'onglet ici laisserait une page vivante sans onglet.
+        s.on_fermer_onglet(page_id);
+        return;
+    }
+    retire_onglet(page_id);
+}
 
 // ----------------------------------------------------------------------------
 // Magasin : historique et favoris
@@ -3254,8 +3714,11 @@ inline void handle_pointer(int x, int y, unsigned buttons)
     }
 
     auto in_toolbar = y < toolbar_height;
+    // BOUCHAUD_C22_ONGLETS : la bande est du chrome, comme la barre. La page
+    // n'y a jamais le pointeur.
+    auto in_onglets = !in_toolbar && y < page_origin_y();
 
-    if (in_toolbar) {
+    if (in_toolbar || in_onglets) {
         // La page perd le pointeur des qu'il entre dans la barre : sans cela,
         // un survol reste allume sous une barre d'outils que la page ne voit pas.
         if (s.pointer_in_page && s.on_mouse_event) {
@@ -3275,7 +3738,19 @@ inline void handle_pointer(int x, int y, unsigned buttons)
                 s.recherche_focus = false;
                 s.calques.salit(Recherche);
             }
-            if (point_in_button(back_button(), x, y)) {
+            if (in_onglets) {
+                auto const rang = onglet_au_point(x, y);
+                if (rang >= 0) {
+                    // La croix d'abord : elle est DANS l'onglet, et tester
+                    // l'onglet en premier fermerait ce qu'on voulait activer.
+                    if (BouchaudCalques::contient(boite_fermeture_onglet(rang), x, y))
+                        ferme_onglet(static_cast<size_t>(rang));
+                    else
+                        bascule_onglet(static_cast<size_t>(rang));
+                } else if (BouchaudCalques::contient(boite_nouvel_onglet(), x, y)) {
+                    nouvel_onglet();
+                }
+            } else if (point_in_button(back_button(), x, y)) {
                 outln("[ladybird-bouchaud] M11_HISTORY delta=-1");
                 if (s.on_history_delta)
                     s.on_history_delta(-1);
@@ -3535,10 +4010,20 @@ inline bool raccourci_navigateur(u32 code, u32 code_point, u32 modifiers, bool a
     // BOUCHAUD_C21_HISTORIQUE_ET_FAVORIS : Ctrl+D met de cote, et retire.
     auto const favori = ctrl && caractere && lettre('d');
 
+    // BOUCHAUD_C22_ONGLETS
+    //
+    // Ctrl+Tab circule, Maj+Ctrl+Tab revient. Ce sont les seuls raccourcis
+    // d'onglet qui ne soient pas une lettre, et c'est pour cela que
+    // `ToucheTabulation` devait exister avant eux.
+    auto const onglet_neuf = ctrl && caractere && lettre('t');
+    auto const onglet_ferme = ctrl && caractere && lettre('w');
+    auto const onglet_circule = ctrl && code == ToucheTabulation;
+
     if (!rechargement && !historique && !barre_adresse
         && !zoom_plus && !zoom_moins && !zoom_neutre
         && !recherche && !recherche_repetee
-        && !tout_selectionner && !copier && !couper && !coller && !favori)
+        && !tout_selectionner && !copier && !couper && !coller && !favori
+        && !onglet_neuf && !onglet_ferme && !onglet_circule)
         return false;
 
     // Consomme dans les DEUX sens, agit sur l'appui seul.
@@ -3581,6 +4066,28 @@ inline bool raccourci_navigateur(u32 code, u32 code_point, u32 modifiers, bool a
         // afficher exactement la meme chose.
         if (s.zoom_cran != avant && s.on_zoom)
             s.on_zoom(BouchaudZoom::pourcent(s.zoom_cran));
+        return true;
+    }
+
+    if (onglet_neuf) {
+        nouvel_onglet();
+        return true;
+    }
+
+    if (onglet_ferme) {
+        ferme_onglet(rang_actif());
+        return true;
+    }
+
+    if (onglet_circule) {
+        auto const nombre = s.onglets.size();
+        if (nombre > 1) {
+            auto const courant = rang_actif();
+            auto const cible = (modifiers & Modificateur::Shift) != 0
+                ? (courant == 0 ? nombre - 1 : courant - 1)
+                : (courant + 1) % nombre;
+            bascule_onglet(cible);
+        }
         return true;
     }
 
@@ -4123,9 +4630,19 @@ inline void clear_survol_url()
 /// `url.to_byte_string()`, un temporaire dont AK **supprime** `view()` pour
 /// empecher exactement la vue pendante que cela produirait. La reference lie le
 /// temporaire jusqu'a la fin de l'appel.
-inline void set_committed_url(ByteString const& url)
+inline void set_committed_url(u64 page_id, ByteString const& url)
 {
     auto& s = state();
+    // Un onglet d'arriere-plan met a jour SA ligne, et rien d'autre : la barre
+    // d'adresse montre l'onglet qu'on regarde, pas le dernier qui a bouge.
+    if (page_id != page_active()) {
+        if (auto* onglet = onglet_de_la_page(page_id)) {
+            onglet->url = url;
+            onglet->secure = url.starts_with("https://"sv);
+            request_chrome_frame();
+        }
+        return;
+    }
     s.committed_url = url;
     s.secure = url.starts_with("https://"sv);
     if (!s.address_focused)
@@ -4134,9 +4651,17 @@ inline void set_committed_url(ByteString const& url)
     request_chrome_frame();
 }
 
-inline void set_loading(bool loading, StringView status)
+inline void set_loading(u64 page_id, bool loading, StringView status)
 {
     auto& s = state();
+    if (page_id != page_active()) {
+        if (auto* onglet = onglet_de_la_page(page_id)) {
+            onglet->loading = loading;
+            onglet->status = status;
+            request_chrome_frame();
+        }
+        return;
+    }
     // Un document qui commence a charger n'a plus de lien survole : celui
     // qu'on affichait appartenait au document precedent, et LibWeb n'enverra
     // pas de `unhover` pour un element qui n'existe plus. Sans cela la bulle
@@ -4149,11 +4674,23 @@ inline void set_loading(bool loading, StringView status)
     request_chrome_frame();
 }
 
-inline void set_title(ByteString const& title)
+inline void set_title(u64 page_id, ByteString const& title)
 {
-    state().title = title;
+    auto& s = state();
+    if (page_id != page_active()) {
+        if (auto* onglet = onglet_de_la_page(page_id)) {
+            onglet->titre = title;
+            // La bande porte le titre : un onglet d'arriere-plan qui finit de
+            // charger doit cesser de montrer son adresse.
+            request_chrome_frame();
+        }
+        return;
+    }
+    s.title = title;
     note_titre(title);
     send_title();
+    // Le titre de l'onglet actif est aussi celui de sa ligne dans la bande.
+    request_chrome_frame();
 }
 
 }

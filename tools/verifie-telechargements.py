@@ -91,22 +91,36 @@ def sans_commentaires(source):
 
 
 def corps(source, signature):
-    debut = source.find(signature)
-    if debut < 0:
-        return None
-    ouvre = source.find("{", debut)
-    if ouvre < 0:
-        return None
+    """Le corps qui suit `signature`, accolades equilibrees.
+
+    Une DECLARATION anticipee -- `inline void f();` -- contient la meme chaine
+    qu'une signature partielle de la definition. Prendre la premiere occurrence
+    rendrait alors le corps de la fonction SUIVANTE, et la regle porterait sur
+    du code sans rapport : ce qui distingue les deux est le point-virgule, une
+    declaration en portant un AVANT la prochaine accolade.
+    """
+    debut = 0
+    while True:
+        trouve = source.find(signature, debut)
+        if trouve < 0:
+            return None
+        ouvrante = source.find("{", trouve)
+        if ouvrante < 0:
+            return None
+        point_virgule = source.find(";", trouve)
+        if point_virgule < 0 or point_virgule > ouvrante:
+            break
+        debut = point_virgule + 1
+
     profondeur = 0
-    for index in range(ouvre, len(source)):
+    for index in range(ouvrante, len(source)):
         if source[index] == "{":
             profondeur += 1
         elif source[index] == "}":
             profondeur -= 1
             if profondeur == 0:
-                return source[ouvre : index + 1]
+                return source[ouvrante : index + 1]
     return None
-
 
 def regle_assainissement(chrome, fautes):
     """1 et 2."""

@@ -364,8 +364,8 @@ patch(
 # --- 6. Declarations ---------------------------------------------------------
 patch(
     "Services/WebContent/ConnectionFromClient.h",
-    "    void bouchaud_m11_start(u64 page_id);",
-    """    void bouchaud_m11_start(u64 page_id);
+    "    void bouchaud_m11_start();",
+    """    void bouchaud_m11_start();
 
     // BOUCHAUD : injection locale du chrome M11. Voir
     // tools/ladybird/prepare-m11-input-ownership.py.
@@ -379,21 +379,21 @@ patch(
 # --- 7. Le chrome utilise l'injection ---------------------------------------
 patch(
     "Services/WebContent/ConnectionFromClient.cpp",
-    "        mouse_event(page_id, move(event));",
-    "        bouchaud_inject_mouse_event(page_id, move(event));",
+    "        mouse_event(page_id(), move(event));",
+    "        bouchaud_inject_mouse_event(page_id(), move(event));",
     "rappel souris du chrome",
 )
 patch(
     "Services/WebContent/ConnectionFromClient.cpp",
-    "        key_event(page_id, move(event));",
-    "        bouchaud_inject_key_event(page_id, move(event));",
+    "        key_event(page_id(), move(event));",
+    "        bouchaud_inject_key_event(page_id(), move(event));",
     "rappel clavier du chrome",
 )
 
 # --- 8. Un seul proprietaire du pont M11 ------------------------------------
 patch(
     "Services/WebContent/ConnectionFromClient.cpp",
-    """        bouchaud_m11_start(initial_page_id);
+    """        bouchaud_m11_start();
         outln("[ladybird-bouchaud] BROWSER_HOST_M11_ATTACHED page={}", initial_page_id);""",
     """        // BOUCHAUD : un seul pont M11 par processus. `initialize()` est
         // appele dans CHAQUE WebContent, et les descripteurs du canal GUI et
@@ -408,7 +408,7 @@ patch(
         } else {
             s_m11_owned = true;
             s_m11_owner_page = initial_page_id;
-            bouchaud_m11_start(initial_page_id);
+            bouchaud_m11_start();
             outln("[ladybird-bouchaud] BROWSER_HOST_M11_ATTACHED page={}", initial_page_id);
         }""",
     "propriete M11",

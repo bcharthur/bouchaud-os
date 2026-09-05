@@ -17,7 +17,9 @@ Ce que ce script branche, et rien de plus :
   * le menu contextuel -- les trois `page_did_request_*_context_menu` -- sur
     le calque du chrome ;
   * les telechargements -- `page_did_start_download` et ses trois suites --
-    sur le depot `/persist/Downloads`.
+    sur le depot `/persist/Downloads` ;
+  * les onglets -- `page_did_request_new_web_view` et
+    `page_did_close_top_level_traversable` -- sur la bande du chrome.
 
 Pourquoi un script separe de `prepare-m11-chrome.py` : celui-la construit le
 chrome, celui-ci lui donne ce que le MOTEUR sait et qu'il ignorait. Les deux
@@ -121,12 +123,12 @@ recherche = r'''    // BOUCHAUD_CHROME_V19_RECHERCHE
         // invalidera de lui-meme dans ce cas ; la capture explicite couvre
         // celui ou il ne change aucun pixel -- une requete sans correspondance
         // -- et ou le compteur du chrome est le seul a avoir change.
-        if (auto page = this->page(page_id); page.has_value())
+        if (auto page = this->page(page_id()); page.has_value())
             page->page().top_level_traversable()->bouchaud_schedule_interactive_frame_capture();
     };
 
     chrome.on_find = [this, page_id, rapporte_recherche](ByteString requete) {
-        auto page = this->page(page_id);
+        auto page = this->page(page_id());
         if (!page.has_value())
             return;
         // `from_utf8` exige une entree valide. Le champ du chrome n'accepte que
@@ -138,12 +140,12 @@ recherche = r'''    // BOUCHAUD_CHROME_V19_RECHERCHE
     };
 
     chrome.on_find_next = [this, page_id, rapporte_recherche] {
-        if (auto page = this->page(page_id); page.has_value())
+        if (auto page = this->page(page_id()); page.has_value())
             rapporte_recherche(page->page().find_in_page_next_match());
     };
 
     chrome.on_find_previous = [this, page_id, rapporte_recherche] {
-        if (auto page = this->page(page_id); page.has_value())
+        if (auto page = this->page(page_id()); page.has_value())
             rapporte_recherche(page->page().find_in_page_previous_match());
     };
 
@@ -153,17 +155,17 @@ recherche = r'''    // BOUCHAUD_CHROME_V19_RECHERCHE
     // appeler : il est le seul a savoir si le foyer est dans la page ou dans
     // une de ses barres.
     chrome.on_select_all = [this, page_id] {
-        select_all(page_id);
+        select_all(page_id());
     };
 
     chrome.on_copy = [this, page_id]() -> ByteString {
-        if (auto page = this->page(page_id); page.has_value())
+        if (auto page = this->page(page_id()); page.has_value())
             return page->page().focused_navigable().selected_text().to_utf8().to_byte_string();
         return ByteString {};
     };
 
     chrome.on_cut = [this, page_id]() -> ByteString {
-        if (auto page = this->page(page_id); page.has_value())
+        if (auto page = this->page(page_id()); page.has_value())
             return page->page().focused_navigable().cut_selected_text().to_utf8().to_byte_string();
         return ByteString {};
     };
@@ -174,7 +176,7 @@ recherche = r'''    // BOUCHAUD_CHROME_V19_RECHERCHE
         // ce n'est pas une entree dont ce processus peut garantir la forme, et
         // une affirmation fausse est une panne. Le caractere de remplacement
         // est la reponse juste -- montrer un losange plutot que s'arreter.
-        paste(page_id, Utf16String::from_utf8_with_replacement_character(texte.view()));
+        paste(page_id(), Utf16String::from_utf8_with_replacement_character(texte.view()));
     };
 
 '''
@@ -510,6 +512,70 @@ substitute(
     return m_canceled_downloads.contains(download_id);
 }""",
     "annulation de telechargement",
+)
+
+
+
+# ---------------------------------------------------------------------------
+# Onglets
+# ---------------------------------------------------------------------------
+#
+# BOUCHAUD_C22_ONGLETS
+#
+# Un onglet EST une page du moteur. `PageHost` sait en tenir plusieurs depuis
+# toujours -- il les indexe par identifiant, et `create_page` en fabrique une.
+# Ce qui manquait, c'est que personne n'en demandait une seconde.
+#
+# Le refus pose par `prepare-browser-host.py` reste : sans chrome, il n'y a pas
+# de bande ou montrer un second onglet, et un `send_sync` vers un hote absent
+# gelerait la page. Le chrome passe devant.
+
+substitute(
+    page_cpp,
+    """        warnln("[ladybird-bouchaud] HOTE_ABSENT DidRequestNewWebView : un seul onglet, la fenetre surgissante est refusee");
+        return {};""",
+    """        if (BouchaudChrome::enabled()) {
+            // La page est creee ICI, dans ce processus, et SANS document :
+            // c'est la page qui ouvre qui fournira le sien. Upstream fait la
+            // meme chose apres la reponse de l'hote -- a ceci pres qu'il n'y a
+            // pas d'hote.
+            auto const nouveau = BouchaudChrome::prochaine_page();
+            auto& nouvelle = m_owner.create_page(nouveau, m_owner.allocate_navigable_id());
+            nouvelle.set_maximum_frames_per_second(30.0);
+            // `ActivateTab::No` veut dire « ouvre derriere » : c'est ce que
+            // demande un `target=_blank` avec Ctrl, et l'honorer est la
+            // difference entre un navigateur et une fenetre qui saute.
+            BouchaudChrome::ajoute_onglet(nouveau, ByteString {},
+                activate_tab == Web::HTML::ActivateTab::Yes);
+            outln("[ladybird-bouchaud] M11_TAB_POPUP page={} active={}",
+                nouveau, activate_tab == Web::HTML::ActivateTab::Yes ? 1 : 0);
+            return { &nouvelle.page(), String {} };
+        }
+        warnln("[ladybird-bouchaud] HOTE_ABSENT DidRequestNewWebView : un seul onglet, la fenetre surgissante est refusee");
+        return {};""",
+    "nouvelle vue",
+)
+
+# La fermeture vient du MOTEUR, jamais du chrome : `window.close()`, un onglet
+# ferme par l'utilisateur, une page qui se termine. Le chrome retire sa ligne
+# quand la page est reellement partie, et pas avant -- retirer l'onglet au clic
+# laisserait une page vivante que plus rien n'atteint.
+substitute(
+    page_cpp,
+    """void PageClient::page_did_close_top_level_traversable()
+{
+    page().top_level_traversable()->compositor_context().stop_presenting_to_client();""",
+    """void PageClient::page_did_close_top_level_traversable()
+{
+#if defined(BOUCHAUD_PORT)
+    // AVANT `remove_page`, qui lache la derniere reference forte a cette
+    // PageClient : apres, `m_id` designerait un onglet dont la page n'existe
+    // plus, et le chrome enverrait ses evenements dans le vide.
+    if (bouchaud_m9_enabled() && BouchaudChrome::enabled())
+        BouchaudChrome::retire_onglet(m_id);
+#endif
+    page().top_level_traversable()->compositor_context().stop_presenting_to_client();""",
+    "fermeture d'onglet",
 )
 
 
