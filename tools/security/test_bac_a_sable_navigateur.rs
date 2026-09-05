@@ -30,8 +30,12 @@ mod credentials {
 mod profile {
     include!("../../src/kernel/security/profile.rs");
 }
+mod chemins {
+    include!("../../src/kernel/security/chemins.rs");
+}
 
 use capability::Capabilities;
+use chemins::{ecriture_permise, lecture_permise, PROFIL_NAVIGATEUR};
 use profile::{
     capabilities, classify, initial_capabilities, sandboxe, transition_capabilities,
     SecurityProfile,
@@ -337,4 +341,122 @@ fn une_transition_ne_fabrique_jamais_de_reseau() {
 fn le_droit_reseau_fait_partie_de_toute_l_autorite() {
     assert!(Capabilities::ALL.contains(Capabilities::NET_CONNECT));
     assert!(capabilities(SecurityProfile::System).contains(Capabilities::NET_CONNECT));
+}
+
+// ---------------------------------------------------------------------------
+// Le profil persistant : qui y ecrit, et surtout qui n'y ecrit pas
+//
+// BOUCHAUD_C19_PROFIL_PERSISTANT_DU_NAVIGATEUR
+//
+// La couche plateforme du portage demandait un profil sur `/persist`, et le bac
+// a sable ne connaissait que `/tmp`. RequestServer se voyait donc refuser son
+// propre magasin -- soixante-cinq refus par session, aucun cache HTTP, aucun
+// HSTS conserve d'un demarrage a l'autre.
+//
+// Ce que ces tests gardent n'est pas l'autorisation. C'est le REFUS : que
+// l'ouverture faite pour RequestServer ne s'etende pas au moteur de rendu, qui
+// est le processus qu'un site hostile atteint en premier. Un rendu compromis
+// qui pourrait ecrire sur `/persist` survivrait a un redemarrage.
+// ---------------------------------------------------------------------------
+
+const CACHE_ALT_SVC: &str = "/persist/ladybird/profile/cache/alt-svc-cache.txt";
+
+#[test]
+fn le_serveur_de_requetes_possede_son_profil_persistant() {
+    // Le chemin exact que le journal montrait refuse, soixante-cinq fois.
+    assert!(lecture_permise(SecurityProfile::BrowserNetwork, CACHE_ALT_SVC));
+    assert!(ecriture_permise(SecurityProfile::BrowserNetwork, CACHE_ALT_SVC));
+    assert!(ecriture_permise(
+        SecurityProfile::BrowserNetwork,
+        "/persist/ladybird/data/cookies.sqlite"
+    ));
+    assert!(ecriture_permise(SecurityProfile::BrowserNetwork, PROFIL_NAVIGATEUR));
+}
+
+#[test]
+fn un_moteur_de_rendu_n_ecrit_rien_de_persistant() {
+    // LE test de ce chantier. WebContent, WebWorker et ImageDecoder analysent
+    // ce qui vient du reseau : leur donner un octet d'ecriture persistante
+    // transformerait une faille d'analyse en implantation durable.
+    for chemin in [
+        CACHE_ALT_SVC,
+        "/persist/ladybird/data/cookies.sqlite",
+        PROFIL_NAVIGATEUR,
+        "/persist",
+        "/persist/Downloads/charge.exe",
+    ] {
+        assert!(
+            !ecriture_permise(SecurityProfile::BrowserContent, chemin),
+            "un role de rendu ne doit pas pouvoir ecrire {}",
+            chemin
+        );
+        assert!(
+            !lecture_permise(SecurityProfile::BrowserContent, chemin),
+            "un role de rendu ne doit meme pas pouvoir lire {}",
+            chemin
+        );
+    }
+}
+
+#[test]
+fn un_binaire_non_fiable_reste_dehors() {
+    for chemin in [CACHE_ALT_SVC, PROFIL_NAVIGATEUR, "/persist"] {
+        assert!(!lecture_permise(SecurityProfile::Untrusted, chemin));
+        assert!(!ecriture_permise(SecurityProfile::Untrusted, chemin));
+    }
+}
+
+#[test]
+fn la_racine_du_volume_persistant_n_est_inscriptible_par_personne() {
+    // `/persist` est LISIBLE pour RequestServer -- un magasin qui verifie
+    // d'abord que son volume existe echouerait sinon avant d'atteindre son
+    // propre sous-arbre -- mais sa racine appartient a la couche plateforme,
+    // qui n'est pas sandboxee.
+    assert!(lecture_permise(SecurityProfile::BrowserNetwork, "/persist"));
+    assert!(!ecriture_permise(SecurityProfile::BrowserNetwork, "/persist"));
+    assert!(!ecriture_permise(SecurityProfile::BrowserNetwork, "/persist/Downloads"));
+    assert!(!ecriture_permise(SecurityProfile::BrowserNetwork, "/persist/autre"));
+}
+
+#[test]
+fn un_voisin_de_nom_n_est_pas_un_descendant() {
+    // La comparaison va jusqu'au separateur. Sans cela, `/persist/ladybird-vole`
+    // passerait pour un descendant de `/persist/ladybird`, et le prefixe
+    // accorde ouvrirait ses voisins de nom -- la facon classique de
+    // transformer une autorisation en trou.
+    assert!(!ecriture_permise(
+        SecurityProfile::BrowserNetwork,
+        "/persist/ladybird-vole/charge"
+    ));
+    assert!(!lecture_permise(
+        SecurityProfile::BrowserNetwork,
+        "/persist/ladybird-vole/charge"
+    ));
+    // Et la reciproque, pour que le test ne passe pas en refusant tout.
+    assert!(ecriture_permise(
+        SecurityProfile::BrowserNetwork,
+        "/persist/ladybird/x"
+    ));
+}
+
+#[test]
+fn le_profil_persistant_n_ouvre_rien_d_autre() {
+    // Le droit accorde a RequestServer porte sur UN sous-arbre. Il ne doit pas
+    // avoir elargi le reste du bac a sable au passage.
+    for chemin in ["/usr/bin/sh", "/etc/passwd", "/root/.ssh/id_rsa", "/dev/fb0"] {
+        assert!(
+            !ecriture_permise(SecurityProfile::BrowserNetwork, chemin),
+            "{} ne doit pas devenir inscriptible",
+            chemin
+        );
+    }
+    // Ce qui etait deja lisible le reste, pour tous les roles sandboxes.
+    for profil in [
+        SecurityProfile::BrowserNetwork,
+        SecurityProfile::BrowserContent,
+        SecurityProfile::Untrusted,
+    ] {
+        assert!(lecture_permise(profil, "/usr/share/ladybird/fonts"));
+        assert!(ecriture_permise(profil, "/tmp/ladybird-runtime/socket"));
+    }
 }
