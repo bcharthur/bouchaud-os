@@ -288,6 +288,11 @@ enum Genre : uint16_t {
     Damage = 4,
     Close = 5,
     FrameReady = 6,
+    // Le presse-papiers du bureau. Cet hote ne s'en sert pas encore, mais les
+    // trois implementations du protocole doivent enumerer les MEMES genres :
+    // un numero absent d'un cote est exactement ce que
+    // `tools/verifie-protocole-gui.py` existe pour attraper.
+    PressePapiersEcrit = 7,
     Surface = 0x100,
     Configure = 0x101,
     Focus = 0x102,
@@ -295,6 +300,7 @@ enum Genre : uint16_t {
     Pointer = 0x104,
     Wheel = 0x105,
     CloseRequest = 0x106,
+    PressePapiers = 0x107,
 };
 
 /// Bits du champ `modificateurs` d'un message `Key`. Definis cote noyau dans

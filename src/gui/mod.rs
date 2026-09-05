@@ -31,6 +31,7 @@ pub mod degats;
 pub mod disposition;
 pub mod transition;
 pub mod protocole;
+pub mod presse_papiers;
 pub mod composited;
 
 // C13 : « au bout de combien de temps la page est-elle affichee ? »

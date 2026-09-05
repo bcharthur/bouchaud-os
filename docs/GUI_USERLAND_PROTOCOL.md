@@ -87,6 +87,7 @@ Tout est en petit-boutiste explicite. En-tete de 16 octets devant chaque charge 
 | `Damage` | 4 | `fenetre:u32`, `Rect` |
 | `Close` | 5 | `fenetre:u32` |
 | `FrameReady` | 6 | `fenetre:u32`, `tampon:u32`, `Rect` |
+| `PressePapiersEcrit` | 7 | les octets du nouveau contenu |
 
 ### Gestionnaire de fenetres -> client
 
@@ -107,9 +108,41 @@ Ladybird) et `tools/verifie-protocole-gui.py` refuse un desaccord.
 | `Pointer` | 0x104 | `fenetre`, `x:i32`, `y:i32`, `boutons` |
 | `Wheel` | 0x105 | `fenetre`, `delta:i32`, `x:i32`, `y:i32` (coordonnées client) |
 | `CloseRequest` | 0x106 | `fenetre:u32` |
+| `PressePapiers` | 0x107 | les octets du contenu courant |
 
 `Rect` fait 16 octets : `x:i32`, `y:i32`, `largeur:u32`, `hauteur:u32`, exprime
 dans le repere de la **surface** (origine en haut a gauche de la zone utile).
+
+### Le presse-papiers
+
+Deux messages, et l'asymetrie entre les deux est le fond de la conception.
+
+`PressePapiersEcrit` va du client au bureau. Il n'est accepte **que du client
+qui a le foyer** : un programme en arriere-plan qui pourrait ecrire
+remplacerait silencieusement ce que l'utilisateur vient de copier -- l'adresse
+d'un virement, par exemple, par une autre --, et rien a l'ecran ne le
+montrerait. Un refus est journalise, pas repondu : le client n'a rien a
+apprendre d'un droit qu'il n'a pas.
+
+`PressePapiers` va du bureau au client. Il est **pousse**, jamais demande : il
+n'existe aucun message de lecture dans ce protocole. C'est la faiblesse
+historique de X11 que cette absence ferme -- la ou n'importe quel client peut y
+interroger la selection a tout moment, donc recolter en arriere-plan tout ce
+que l'utilisateur copie (un mot de passe sorti d'un gestionnaire, une phrase de
+recuperation, un jeton), ici un client sans foyer ne recoit rien et n'a aucun
+moyen d'en obtenir. Il n'y a pas de chemin de lecture a garder, parce qu'il n'y
+en a pas.
+
+Le bureau ne pousse que ce qui a CHANGE pour ce client-la : le contenu porte un
+numero de generation, et chaque client se souvient de celui qu'il possede.
+Comparer deux entiers a chaque tour de composition et par client est gratuit ;
+recopier quatre kibioctets ne l'est pas.
+
+Le contenu est borne a `CHARGE_MAX` (4096 octets) : il voyage dans **un**
+message, et ce qui ne tient pas dans un message ne pourrait pas etre remis.
+`gui::presse_papiers` tronque au-dela plutot que de refuser -- c'est la defense
+en profondeur, celle qui tient encore le jour ou les deux bornes divergent.
+`tools/gui/test_presse_papiers.rs` exerce cette borne sur l'hote.
 
 ### Codes de touche
 

@@ -1290,6 +1290,12 @@ fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> (Rect, bool) {
         let visible = !w.window.min;
         let a_le_focus = focus == Some(index);
         if let App::Navigateur { client } = &mut w.app {
+            // Le presse-papiers suit le FOYER, et le foyer est connu ici et
+            // nulle part ailleurs. C'est aussi le seul endroit qui voit tous
+            // les clients a chaque tour : le brancher plus pres du clavier
+            // obligerait a instrumenter chaque chemin qui donne le foyer, et
+            // il y en a six.
+            client.synchronise_presse_papiers(a_le_focus);
             if client.redimensionne(
                 zone_fenetre.largeur.max(0) as usize,
                 zone_fenetre.hauteur.max(0) as usize,

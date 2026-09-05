@@ -167,6 +167,8 @@ enum Genre : u16 {
     Damage = 4,
     Close = 5,
     FrameReady = 6,
+    /// Le chrome remplace le presse-papiers du bureau. Charge : les octets.
+    PressePapiersEcrit = 7,
     Surface = 0x100,
     Configure = 0x101,
     Focus = 0x102,
@@ -174,6 +176,12 @@ enum Genre : u16 {
     Pointer = 0x104,
     Wheel = 0x105,
     CloseRequest = 0x106,
+    /// Le contenu courant du presse-papiers du bureau. Charge : les octets.
+    ///
+    /// Pousse par le gestionnaire de fenetres au seul client qui a le foyer, et
+    /// seulement quand il a change. Il n'existe pas de message de LECTURE :
+    /// voir `src/gui/presse_papiers.rs` pour ce que cette absence ferme.
+    PressePapiers = 0x107,
 };
 
 // Bits du champ `modificateurs` d'un message `Key`. Definis cote noyau dans
@@ -387,6 +395,34 @@ struct Champ {
         caret = texte.size();
     }
 
+    /// Insere un texte a la position du curseur, en remplacant la selection.
+    ///
+    /// Les octets non imprimables sont IGNORES, et c'est la seule chose non
+    /// evidente de cette fonction. Le presse-papiers vient du bureau, donc
+    /// possiblement d'une autre application, donc d'un contenu que ce
+    /// programme ne controle pas. Une chaine qui porte un saut de ligne puis
+    /// une seconde adresse, collee dans une barre qui accepterait les deux,
+    /// montre une adresse et en visite une autre : c'est un tour connu, et le
+    /// filtre est ici plutot que chez l'appelant parce qu'un appelant, on
+    /// l'oublie.
+    void colle(StringView valeur)
+    {
+        if (tout_selectionne) {
+            texte.clear_with_capacity();
+            caret = 0;
+            tout_selectionne = false;
+        }
+        if (caret > texte.size())
+            caret = texte.size();
+        for (size_t index = 0; index < valeur.length(); ++index) {
+            auto const octet = static_cast<u8>(valeur[index]);
+            if (octet < 0x20 || octet >= 0x7f)
+                continue;
+            texte.insert(caret, octet);
+            ++caret;
+        }
+    }
+
     /// Applique UNE touche de saisie. Rend true si le champ l'a consommee.
     ///
     /// `ToucheEntree` et `ToucheEchap` ne sont volontairement PAS consommees :
@@ -591,6 +627,21 @@ struct State {
     /// Ce que la surface porte des calques. Voir BouchaudCalques.h.
     BouchaudCalques::Suivi calques;
 
+    // BOUCHAUD_CHROME_V19_PRESSE_PAPIERS
+    //
+    // La copie locale du presse-papiers du bureau.
+    //
+    // Le coller doit etre SYNCHRONE -- Ctrl+V insere un texte a l'instant ou on
+    // le tape -- et le contenu vit dans le gestionnaire de fenetres. Demander
+    // puis attendre obligerait a suspendre une frappe le temps d'un aller-retour
+    // de protocole, ou a coller « plus tard », ce qui n'est pas coller.
+    //
+    // Le bureau POUSSE donc le contenu a chaque prise de foyer, et cette copie
+    // est toujours celle qui etait a jour la derniere fois que cette fenetre a
+    // ete au premier plan -- c'est-a-dire la derniere fois ou l'utilisateur a
+    // pu copier quoi que ce soit ailleurs.
+    ByteString presse_papiers;
+
     /// L'adresse du lien sous le pointeur, vide quand il n'y en a pas.
     ///
     /// C'est la seule chose qu'un navigateur montre avant qu'on clique, et
@@ -630,6 +681,14 @@ struct State {
     Function<void(ByteString)> on_find;
     Function<void()> on_find_next;
     Function<void()> on_find_previous;
+    /// Selectionne tout le document.
+    Function<void()> on_select_all;
+    /// Le texte selectionne dans le document, vide s'il n'y en a pas.
+    Function<ByteString()> on_copy;
+    /// Le texte selectionne, retire du document au passage.
+    Function<ByteString()> on_cut;
+    /// Insere un texte a la place de la selection du document.
+    Function<void(ByteString)> on_paste;
     Function<void()> on_close;
 };
 
@@ -1901,6 +1960,131 @@ inline void set_resultat_recherche(size_t index, bool total_connu, size_t total)
     s.calques.salit(Recherche);
 }
 
+
+// ----------------------------------------------------------------------------
+// Presse-papiers
+// ----------------------------------------------------------------------------
+//
+// BOUCHAUD_CHROME_V19_PRESSE_PAPIERS
+//
+// Le contenu vit dans le gestionnaire de fenetres, pas ici : copier dans le
+// navigateur et coller dans une autre application est ce qui distingue un
+// presse-papiers d'un tampon interne. Voir `src/gui/presse_papiers.rs` pour le
+// modele -- pousse au client qui a le foyer, jamais lu a la demande -- et pour
+// ce que ce choix ferme.
+//
+// Ce que le chrome garde est une COPIE, mise a jour par le bureau a chaque
+// prise de foyer. C'est ce qui permet a Ctrl+V d'etre synchrone : demander
+// puis attendre obligerait a suspendre une frappe le temps d'un aller-retour.
+
+inline void copie_vers_le_presse_papiers(ByteString const& texte)
+{
+    auto& s = state();
+    // Un message ne porte que `CHARGE_MAX` octets, et le decodeur du noyau
+    // REJETTE le flux entier au-dela -- il ne tronque pas, il se resynchronise.
+    // Une selection de six kibioctets couperait donc le canal GUI de la
+    // fenetre, ce qui est un tres mauvais prix pour un Ctrl+C.
+    auto const longueur = min(texte.length(), static_cast<size_t>(CHARGE_MAX));
+    if (longueur < texte.length()) {
+        outln("[ladybird-bouchaud] M11_CLIPBOARD_TRUNCATED {} -> {}",
+            texte.length(), longueur);
+    }
+    // La copie locale ET le bureau. Le bureau seul obligerait a attendre la
+    // poussee de retour pour coller ce qu'on vient de copier ; la copie locale
+    // seule ferait un presse-papiers qui ne sort pas de la fenetre.
+    s.presse_papiers = texte.substring(0, longueur);
+    send_message(Genre::PressePapiersEcrit, s.presse_papiers.characters(),
+        static_cast<u32>(longueur));
+}
+
+/// Ctrl+A : selectionne tout, la ou est le foyer.
+inline void selectionne_tout_le_foyer()
+{
+    auto& s = state();
+    if (s.recherche_focus) {
+        s.recherche.selectionne_tout();
+        s.calques.salit(Recherche);
+        return;
+    }
+    if (s.address_focused) {
+        s.address.selectionne_tout();
+        request_chrome_frame();
+        return;
+    }
+    if (s.on_select_all)
+        s.on_select_all();
+}
+
+/// Ctrl+C et Ctrl+X, la ou est le foyer.
+inline void copie_la_selection(bool coupe)
+{
+    auto& s = state();
+    if (s.recherche_focus || s.address_focused) {
+        auto& champ = s.recherche_focus ? s.recherche : s.address;
+        // Un champ du chrome ne modelise qu'une selection : tout ou rien. Sans
+        // selection, ne rien faire -- ecraser le presse-papiers avec le texte
+        // entier serait une surprise, et l'ecraser avec du vide perdrait ce que
+        // l'utilisateur avait copie.
+        if (!champ.tout_selectionne)
+            return;
+        copie_vers_le_presse_papiers(champ.vers_chaine());
+        if (!coupe)
+            return;
+        champ.pose({});
+        if (s.recherche_focus)
+            lance_recherche();
+        else
+            request_chrome_frame();
+        return;
+    }
+
+    ByteString texte;
+    if (coupe) {
+        if (s.on_cut)
+            texte = s.on_cut();
+    } else if (s.on_copy) {
+        texte = s.on_copy();
+    }
+    // Une selection vide n'efface pas le presse-papiers. Ctrl+C sans rien de
+    // selectionne est presque toujours une frappe pour rien, et repondre en
+    // effacant ce qu'on avait copie serait la pire reponse possible.
+    if (!texte.is_empty())
+        copie_vers_le_presse_papiers(texte);
+}
+
+/// Ctrl+V, la ou est le foyer.
+inline void colle_le_presse_papiers()
+{
+    auto& s = state();
+    if (s.presse_papiers.is_empty())
+        return;
+    if (s.recherche_focus) {
+        s.recherche.colle(s.presse_papiers.view());
+        lance_recherche();
+        return;
+    }
+    if (s.address_focused) {
+        s.address.colle(s.presse_papiers.view());
+        request_chrome_frame();
+        return;
+    }
+    if (s.on_paste)
+        s.on_paste(s.presse_papiers);
+}
+
+/// Ce que le DOCUMENT vient de mettre dans le presse-papiers.
+///
+/// `navigator.clipboard.writeText()` et `document.execCommand('copy')`
+/// aboutissent ici. LibWeb exige deja une activation transitoire de
+/// l'utilisateur avant d'y arriver -- c'est la specification Clipboard qui le
+/// demande, et c'est ce qui empeche une page d'ecrire le presse-papiers a
+/// l'improviste. Ce que ce chrome ajoute est la borne de taille, appliquee
+/// comme pour une copie humaine.
+inline void set_presse_papiers_du_document(ByteString const& texte)
+{
+    copie_vers_le_presse_papiers(texte);
+}
+
 // ----------------------------------------------------------------------------
 // Entrees
 // ----------------------------------------------------------------------------
@@ -2189,9 +2373,22 @@ inline bool raccourci_navigateur(u32 code, u32 code_point, u32 modifiers, bool a
     auto const recherche = ctrl && caractere && lettre('f');
     auto const recherche_repetee = code == ToucheFonction && code_point == 3u && !ctrl && !alt;
 
+    // BOUCHAUD_CHROME_V19_PRESSE_PAPIERS
+    //
+    // Les quatre raccourcis d'edition appartiennent au CHROME et non au
+    // document, comme dans tout navigateur : c'est lui qui sait ou est le
+    // foyer -- barre d'adresse, barre de recherche, ou page -- et lui seul qui
+    // parle au presse-papiers du bureau. Les laisser au document ferait
+    // fonctionner Ctrl+C dans la page et nulle part ailleurs.
+    auto const tout_selectionner = ctrl && caractere && lettre('a');
+    auto const copier = ctrl && caractere && lettre('c');
+    auto const couper = ctrl && caractere && lettre('x');
+    auto const coller = ctrl && caractere && lettre('v');
+
     if (!rechargement && !historique && !barre_adresse
         && !zoom_plus && !zoom_moins && !zoom_neutre
-        && !recherche && !recherche_repetee)
+        && !recherche && !recherche_repetee
+        && !tout_selectionner && !copier && !couper && !coller)
         return false;
 
     // Consomme dans les DEUX sens, agit sur l'appui seul.
@@ -2234,6 +2431,21 @@ inline bool raccourci_navigateur(u32 code, u32 code_point, u32 modifiers, bool a
         // afficher exactement la meme chose.
         if (s.zoom_cran != avant && s.on_zoom)
             s.on_zoom(BouchaudZoom::pourcent(s.zoom_cran));
+        return true;
+    }
+
+    if (tout_selectionner) {
+        selectionne_tout_le_foyer();
+        return true;
+    }
+
+    if (copier || couper) {
+        copie_la_selection(couper);
+        return true;
+    }
+
+    if (coller) {
+        colle_le_presse_papiers();
         return true;
     }
 
@@ -2489,6 +2701,16 @@ inline void handle_message(u16 kind, u8 const* payload, u32 size)
     case Genre::Wheel:
         if (size >= 16)
             handle_wheel(read_i32(payload, 4), read_i32(payload, 8), read_i32(payload, 12));
+        break;
+    case Genre::PressePapiers:
+        // Le contenu arrive sans que rien ne l'ait demande : c'est le bureau
+        // qui pousse, a la prise de foyer. Voir `src/gui/presse_papiers.rs`.
+        {
+            StringBuilder builder;
+            for (u32 index = 0; index < size; ++index)
+                builder.append(static_cast<char>(payload[index]));
+            s.presse_papiers = builder.to_byte_string();
+        }
         break;
     case Genre::CloseRequest:
         outln("[ladybird-bouchaud] M11_CLOSE_REQUEST");

@@ -51,6 +51,15 @@ pub enum Genre {
     Damage = 4,
     Close = 5,
     FrameReady = 6,
+    /// Le client remplace le presse-papiers du bureau. Charge : les octets.
+    ///
+    /// Il n'existe volontairement AUCUN message symetrique de LECTURE. Le
+    /// contenu est POUSSE par `PressePapiers` au client qui a le foyer, et a
+    /// lui seul : la ou X11 laisse n'importe quel client interroger la
+    /// selection a tout moment -- donc recolter en arriere-plan tout ce que
+    /// l'utilisateur copie --, ici il n'y a pas de chemin de lecture a garder,
+    /// puisqu'il n'y en a pas. Voir `gui::presse_papiers`.
+    PressePapiersEcrit = 7,
     // --- gestionnaire de fenetres -> client ---
     Surface = 0x100,
     Configure = 0x101,
@@ -59,6 +68,11 @@ pub enum Genre {
     Pointer = 0x104,
     Wheel = 0x105,
     CloseRequest = 0x106,
+    /// Le contenu courant du presse-papiers. Charge : les octets.
+    ///
+    /// Envoye au seul client qui a le foyer, et seulement quand le contenu a
+    /// change depuis celui qu'il a deja recu.
+    PressePapiers = 0x107,
 }
 
 impl Genre {
@@ -70,6 +84,7 @@ impl Genre {
             4 => Genre::Damage,
             5 => Genre::Close,
             6 => Genre::FrameReady,
+            7 => Genre::PressePapiersEcrit,
             0x100 => Genre::Surface,
             0x101 => Genre::Configure,
             0x102 => Genre::Focus,
@@ -77,6 +92,7 @@ impl Genre {
             0x104 => Genre::Pointer,
             0x105 => Genre::Wheel,
             0x106 => Genre::CloseRequest,
+            0x107 => Genre::PressePapiers,
             _ => return None,
         })
     }
