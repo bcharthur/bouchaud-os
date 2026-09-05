@@ -195,6 +195,7 @@ substitute(
     // provoque exactement une capture de rattrapage a la completion.
     void bouchaud_enqueue_interactive_frame_capture_from_rendering();
     void bouchaud_schedule_interactive_frame_capture();
+    void bouchaud_request_interactive_frame_capture();
 
     // Le degat que `paint_next_frame()` vient de calculer, accumule jusqu'a la
     // prochaine capture, puis lu par PageClient quand l'image revient.
@@ -315,9 +316,25 @@ void LocalTraversableNavigable::bouchaud_enqueue_interactive_frame_capture_from_
 
 void LocalTraversableNavigable::bouchaud_schedule_interactive_frame_capture()
 {
-    // Les callbacks M11 (navigation commencee/commitee/terminee, chrome) peuvent
-    // se telescoper. Une capture deja en file sera faite APRES le prochain
-    // paint, donc elle verra deja l'etat le plus recent.
+    // L'entree EXPLICITE : molette, navigation, changement de zoom,
+    // redimensionnement, chrome. Elle veut dire « quelque chose a change que
+    // la liste d'affichage ne decrira peut-etre pas ».
+    //
+    // Le degat est donc marque COMPLET. Une capture demandee de l'exterieur
+    // qui repartirait avec un rectangle vide ne publierait aucun pixel : la
+    // page serait restee sur place alors que l'utilisateur vient de faire
+    // quelque chose. Ce n'est pas une economie qu'on veut ici -- ces
+    // evenements-la changent de toute facon presque toujours toute la
+    // fenetre, et une trame complete de plus par navigation ne se mesure pas.
+    m_bouchaud_frame_damage_full = true;
+    bouchaud_request_interactive_frame_capture();
+}
+
+void LocalTraversableNavigable::bouchaud_request_interactive_frame_capture()
+{
+    // Les callbacks M11 peuvent se telescoper. Une capture deja en file sera
+    // faite APRES le prochain paint, donc elle verra deja l'etat le plus
+    // recent.
     if (m_bouchaud_frame_capture_queued)
         return;
 
@@ -350,8 +367,12 @@ void LocalTraversableNavigable::bouchaud_interactive_frame_capture_completed()
     // Des changements sont arrives pendant le screenshot. En demander
     // exactement un autre via la boucle de rendu normale. Pas de timer, pas de
     // capture recursive depuis le callback IPC.
+    // `bouchaud_request_...` et non `bouchaud_schedule_...` : le degat des
+    // etapes de rendu tombees pendant la capture a ete accumule normalement.
+    // Forcer le complet ici jetterait ce travail et rendrait chaque trame de
+    // rattrapage entiere.
     m_bouchaud_frame_capture_dirty = false;
-    bouchaud_schedule_interactive_frame_capture();
+    bouchaud_request_interactive_frame_capture();
 }
 
 void LocalTraversableNavigable::bouchaud_accumulate_frame_damage(Gfx::IntRect const& damage)
