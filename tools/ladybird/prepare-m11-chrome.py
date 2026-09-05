@@ -74,6 +74,18 @@ if not source_atlas.is_file():
         f"tools/ladybird/chrome/fabrique-atlas.py")
 shutil.copyfile(source_atlas, root / "Services/WebContent/BouchaudAtlas.h")
 
+# BOUCHAUD_CHROME_V18_DEGAT_PARTIEL
+#
+# L'arithmetique qui decide quels pixels une capture doit reecrire. Elle vit
+# dans son propre fichier parce qu'elle ne depend de rien et se verifie donc sur
+# l'hote (`tools/ladybird/chrome/test_degat.cpp`), la ou le reste du chrome ne
+# s'execute que dans QEMU. Comme l'atlas, elle voyage avec le chrome : l'oublier
+# ne se voit qu'a la compilation de WebContent, vingt minutes plus tard.
+source_degat = here / "chrome" / "BouchaudDegat.h"
+if not source_degat.is_file():
+    raise SystemExit(f"M11 : {source_degat} absent")
+shutil.copyfile(source_degat, root / "Services/WebContent/BouchaudDegat.h")
+
 # En-tete seul : aucune modification de `Services/WebContent/CMakeLists.txt`,
 # donc aucune divergence de construction de plus avec l'arbre epingle.
 
@@ -208,6 +220,34 @@ void ConnectionFromClient::bouchaud_m11_start()
             page->page().top_level_traversable()->bouchaud_schedule_interactive_frame_capture();
     };
 
+    // BOUCHAUD_CHROME_V18_VIEWPORT_SUIT_LA_FENETRE
+    //
+    // Le gestionnaire de fenetres annonce la nouvelle taille par `Configure`.
+    // Le chrome l'adoptait et repeignait plus grand -- mais le moteur, lui,
+    // continuait de mettre en page a la largeur du demarrage. Agrandir la
+    // fenetre donnait donc une page inchangee, coupee au meme endroit, avec du
+    // fond autour. Le viewport est ce qui manquait : c'est LibWeb qui decide de
+    // la largeur de ligne, pas nous.
+    chrome.on_resize = [this, page_id](int largeur, int hauteur) {
+        auto page = this->page(page_id);
+        if (!page.has_value())
+            return;
+        if (largeur <= 0 || hauteur <= 0)
+            return;
+
+        outln("[ladybird-bouchaud] M11_VIEWPORT {}x{}", largeur, hauteur);
+        auto viewport = Gfx::IntSize { largeur, hauteur }.to_type<Web::DevicePixels>();
+        set_viewport(page_id, viewport, 1.0, Web::ViewportIsFullscreen::No);
+        // La fenetre du document, au sens de `window.innerWidth`, est le
+        // viewport : la barre d'outils appartient au chrome, pas a la page.
+        set_window_size(page_id, viewport);
+
+        // La remise en page va invalider et le moteur demandera sa trame. La
+        // capture explicite couvre le cas ou rien du document ne change --
+        // une page plus etroite que la fenetre, par exemple.
+        page->page().top_level_traversable()->bouchaud_schedule_interactive_frame_capture();
+    };
+
     chrome.on_close = [] {
         outln("[ladybird-bouchaud] M11_EXIT demande du gestionnaire de fenetres");
         Core::Process::terminate_immediately(0);
@@ -281,7 +321,7 @@ substitute(
         outln("[ladybird-bouchaud] M9_CPU_SCREENSHOT_RENDERED");""",
     """    if (bouchaud_m9_enabled()) {
         if (BouchaudChrome::enabled()) {
-            if (!BouchaudChrome::present(screenshot))
+            if (!BouchaudChrome::present_complet(screenshot))
                 Core::Process::terminate_immediately(70);
             return;
         }

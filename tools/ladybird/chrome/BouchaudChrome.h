@@ -38,6 +38,13 @@
 // C'est de la donnee : ce fichier ne gagne aucune dependance de dessin.
 #include "BouchaudAtlas.h"
 
+// BOUCHAUD_CHROME_V18_DEGAT_PARTIEL
+//
+// Quels pixels une nouvelle capture doit reecrire. Arithmetique entiere pure,
+// sans dependance : `tools/ladybird/chrome/test_degat.cpp` l'execute sur l'hote
+// a chaque CI, alors que le reste de ce fichier ne tourne que dans QEMU.
+#include "BouchaudDegat.h"
+
 #if defined(BOUCHAUD_PORT)
 
 #    include <AK/ByteString.h>
@@ -346,12 +353,23 @@ struct State {
     bool frame_after_wheel_pending { false };
     bool wheel_input_pending { false };
 
+    /// Ce que la surface partagee porte deja, et donc ce qu'une capture doit
+    /// reecrire. Voir BouchaudDegat.h.
+    BouchaudDegat::Suivi suivi_page;
+
     // Rendu M11: compteurs cumulatifs, journalises par paquets de 16 trames.
     u64 chrome_full_frames { 0 };
+    u64 chrome_partial_frames { 0 };
     u64 chrome_toolbar_frames { 0 };
     u64 page_frames { 0 };
     u64 chrome_pixels_written { 0 };
     u64 published_frames { 0 };
+    /// Degats que le moteur a signales sans qu'aucun pixel ne soit a reecrire.
+    ///
+    /// Le compteur qui dit si le travail a disparu ou s'il a seulement change
+    /// de place : une page qui invalide hors fenetre n'a plus a reveiller le
+    /// compositeur.
+    u64 page_frames_sans_effet { 0 };
 
     // Rappels vers WebContent. Poses par `ConnectionFromClient::bouchaud_m11_start`.
     Function<void(Web::MouseEvent)> on_mouse_event;
@@ -361,6 +379,9 @@ struct State {
     Function<void()> on_reload;
     Function<void()> on_stop;
     Function<void()> on_repaint;
+    /// La fenetre a change de taille : nouveau viewport de PAGE (largeur de la
+    /// surface, hauteur sous la barre d'outils).
+    Function<void(int, int)> on_resize;
     Function<void()> on_close;
 };
 
@@ -374,6 +395,13 @@ inline State& state()
     // l'ecrit.
     static State* the_state = new State {};
     return *the_state;
+}
+
+/// Hauteur utile pour la page, une fois la barre d'outils retiree.
+inline int viewport_height()
+{
+    auto height = state().surface_height - toolbar_height;
+    return height > 0 ? height : state().surface_height;
 }
 
 /// M11 est actif seulement si le lanceur l'a demande. Sans la variable, le
@@ -544,8 +572,10 @@ inline void log_render_stats_if_due()
     auto& s = state();
     if (s.published_frames == 0 || (s.published_frames % 16) != 0)
         return;
-    outln("[ladybird-bouchaud] M11_RENDER_STATS full={} toolbar={} page={} pixels={}",
-        s.chrome_full_frames, s.chrome_toolbar_frames, s.page_frames, s.chrome_pixels_written);
+    outln("[ladybird-bouchaud] M11_RENDER_STATS full={} partiel={} toolbar={} page={} "
+          "sans_effet={} pixels={}",
+        s.chrome_full_frames, s.chrome_partial_frames, s.chrome_toolbar_frames,
+        s.page_frames, s.page_frames_sans_effet, s.chrome_pixels_written);
 }
 
 inline void send_frame_ready(DamageRect damage)
@@ -577,7 +607,14 @@ inline void send_frame_ready(DamageRect damage)
         warnln("[ladybird-bouchaud] M11_FRAME_READY_FAILED errno={}", errno);
     ++s.published_frames;
     log_render_stats_if_due();
-    if (s.frame_after_wheel_pending && damage.y == 0 && damage.height == s.surface_height) {
+    // BOUCHAUD_CHROME_V18_DEGAT_PARTIEL
+    //
+    // Le temoin cherchait une trame couvrant toute la surface, ce qui etait la
+    // seule sorte de trame qui existait. Une molette qui ne deplace que le bas
+    // d'un cadre defilant produit maintenant un rectangle partiel, et le
+    // temoin ne se serait plus jamais arme. Ce qu'il veut dire est « une trame
+    // a suivi la molette » : c'est la trame qui compte, pas sa taille.
+    if (s.frame_after_wheel_pending && damage.y + damage.height > page_origin_y()) {
         s.frame_after_wheel_pending = false;
         outln("[ladybird-bouchaud] M11_FRAME_AFTER_SCROLL");
     }
@@ -970,13 +1007,22 @@ inline void draw_toolbar(Canvas const& canvas)
 // Composition
 // ----------------------------------------------------------------------------
 
-/// Compose la barre d'outils et la derniere page connue dans la surface
-/// partagee, puis annonce la trame au compositeur.
+/// Compose la derniere page connue dans la surface partagee, en ne touchant
+/// que ce que le moteur a signale comme change, puis annonce ce rectangle-la.
 ///
 /// Ne demande rien au moteur : c'est une copie de pixels deja rasterises.
 /// C'est ce qui permet a une lettre tapee dans la barre d'adresse de ne pas
 /// declencher une mise en page complete du document.
-inline bool compose_full()
+///
+/// BOUCHAUD_CHROME_V18_DEGAT_PARTIEL
+///
+/// `degat` arrive en coordonnees de PAGE et vient de
+/// `LocalNavigable::paint_next_frame()`, qui le calcule en comparant la liste
+/// d'affichage a celle de la trame precedente. Il etait calcule puis jete :
+/// chaque capture recopiait 1 554 048 pixels et annoncait toute la surface,
+/// meme pour un curseur qui clignote. Le choix des rectangles vit dans
+/// BouchaudDegat.h, ou il est verifie sur l'hote.
+inline bool compose_page(BouchaudDegat::Rect degat)
 {
     auto& s = state();
     if (s.surface_fd < 0 || s.gui_fd < 0 || s.surface_width <= 0 || s.surface_height <= 0) {
@@ -990,39 +1036,101 @@ inline bool compose_full()
         return false;
     auto canvas = canvas_or_error.release_value();
 
-    draw_toolbar(canvas);
+    auto const* bitmap = (s.last_page.is_valid() && s.last_page.bitmap())
+        ? s.last_page.bitmap()
+        : nullptr;
 
-    auto page_top = page_origin_y();
-    auto page_height = s.surface_height - page_top;
-    fill_rect(canvas, 0, page_top, s.surface_width, page_height, color_page_backdrop);
+    BouchaudDegat::Geometrie geometrie {
+        s.surface_width,
+        s.surface_height,
+        page_origin_y(),
+        bitmap ? bitmap->width() : 0,
+        bitmap ? bitmap->height() : 0,
+    };
+    auto plan = s.suivi_page.planifie(geometrie, degat);
+
+    auto page_top = geometrie.page_haut;
+    auto page_height = geometrie.zone_page().h;
+
+    if (plan.rien_a_faire()) {
+        // Le moteur a repeint quelque chose qui ne touche pas cette fenetre.
+        // Ne pas reveiller le compositeur pour rien est la moitie du gain :
+        // l'autre moitie est de ne pas recopier ce qui n'a pas change.
+        ++s.page_frames;
+        ++s.page_frames_sans_effet;
+        send_handshake();
+        return true;
+    }
+
+    // La barre d'outils ne bouge pas quand la page bouge. On ne la redessine
+    // que sur une trame complete -- premiere trame, fenetre redimensionnee --
+    // parce que c'est la que la surface a cesse de la porter.
+    if (plan.complet) {
+        draw_toolbar(canvas);
+        // Elle vient d'etre repeinte : une recomposition de chrome en attente
+        // serait redondante. Ce compteur ne s'efface QUE la, et pas a chaque
+        // capture : une lettre tapee dans la barre d'adresse pendant qu'une
+        // trame partielle passait serait sinon perdue jusqu'a la frappe
+        // suivante.
+        s.chrome_frames_pending = 0;
+    }
+
+    if (plan.efface_necessaire) {
+        fill_rect(canvas, plan.efface.x, page_top + plan.efface.y,
+            plan.efface.w, plan.efface.h, color_page_backdrop);
+    }
 
     size_t painted = 0;
-    if (s.last_page.is_valid() && s.last_page.bitmap()) {
-        auto const& bitmap = *s.last_page.bitmap();
-        auto copy_width = min(bitmap.width(), s.surface_width);
-        auto copy_height = min(bitmap.height(), page_height);
-        for (int y = 0; y < copy_height; ++y) {
-            auto const* source = bitmap.scanline(y);
-            auto* destination = canvas.row(page_top + y);
-            for (int x = 0; x < copy_width; ++x)
+    if (bitmap && !plan.copie.vide()) {
+        for (int y = 0; y < plan.copie.h; ++y) {
+            auto const* source = bitmap->scanline(plan.copie.y + y) + plan.copie.x;
+            auto* destination = canvas.row(page_top + plan.copie.y + y) + plan.copie.x;
+            for (int x = 0; x < plan.copie.w; ++x)
                 destination[x] = source[x] & 0x00ffffffu;
         }
-        painted = static_cast<size_t>(copy_width) * static_cast<size_t>(copy_height);
+        painted = static_cast<size_t>(plan.copie.w) * static_cast<size_t>(plan.copie.h);
     }
 
     send_handshake();
-    ++s.chrome_full_frames;
+    if (plan.complet)
+        ++s.chrome_full_frames;
+    else
+        ++s.chrome_partial_frames;
     ++s.page_frames;
-    s.chrome_pixels_written += static_cast<u64>(s.surface_width) * static_cast<u64>(s.surface_height)
-        + static_cast<u64>(painted);
-    send_frame_ready({ 0, 0, s.surface_width, s.surface_height });
+    if (plan.efface_necessaire) {
+        s.chrome_pixels_written += static_cast<u64>(plan.efface.w) * static_cast<u64>(plan.efface.h);
+    }
+    s.chrome_pixels_written += static_cast<u64>(painted);
 
-    if (!s.frame_seen) {
+    // Une trame complete vient de reecrire la barre d'outils : le rectangle
+    // annonce doit la couvrir, sinon le compositeur garderait l'ancienne.
+    if (plan.complet)
+        send_frame_ready({ 0, 0, s.surface_width, s.surface_height });
+    else
+        send_frame_ready({ plan.publie.x, plan.publie.y, plan.publie.w, plan.publie.h });
+
+    // Le temoin dit « la premiere trame de PAGE », pas « la premiere trame ».
+    // Depuis qu'un `Configure` recompose immediatement, la toute premiere trame
+    // publiee peut ne porter que la barre d'outils et du fond : l'annoncer comme
+    // premier rendu ferait mesurer a `tools/perf/analyse-fps-hz.py` un temps de
+    // premier affichage qui n'affiche rien.
+    if (!s.frame_seen && painted > 0) {
         s.frame_seen = true;
         outln("[ladybird-bouchaud] M11_FIRST_FRAME pixels={} viewport={}x{}",
             painted, s.surface_width, page_height);
     }
     return true;
+}
+
+/// Recompose toute la fenetre : barre d'outils et page entiere.
+///
+/// La surface a cesse de porter la trame precedente pour une raison que le
+/// degat du moteur ne dit pas -- premiere trame, remappage, geometrie changee
+/// par le gestionnaire de fenetres.
+inline bool compose_full()
+{
+    state().suivi_page.invalide();
+    return compose_page({});
 }
 
 /// Met a jour uniquement les pixels du chrome. Les pixels de page resident deja
@@ -1052,7 +1160,13 @@ inline bool compose_toolbar_only()
 /// C'est le seul point ou `last_page` change. Une capture invalide n'ecrase
 /// pas la precedente : mieux vaut reafficher la page d'avant qu'un rectangle
 /// vide.
-inline bool present(Gfx::ShareableBitmap const& screenshot)
+///
+/// `degat_*` sont les coordonnees de PAGE du rectangle que le moteur a
+/// recalcule, accumulees depuis la capture precedente. Voir BouchaudDegat.h et
+/// tools/ladybird/prepare-repaint.py : l'accumulation est ce qui rend le
+/// partiel sur, puisque le pump ne capture pas toutes les etapes de rendu.
+inline bool present(Gfx::ShareableBitmap const& screenshot, int degat_x, int degat_y,
+    int degat_largeur, int degat_hauteur)
 {
     auto& s = state();
     auto const valid = screenshot.is_valid() && screenshot.bitmap();
@@ -1060,10 +1174,19 @@ inline bool present(Gfx::ShareableBitmap const& screenshot)
         outln("[ladybird-bouchaud] WEB_SCREENSHOT_READY after_wheel=1 valid={}", valid ? 1 : 0);
     if (valid)
         s.last_page = screenshot;
-    // La page vient d'etre recomposee : une recomposition de chrome encore en
-    // attente serait redondante.
-    s.chrome_frames_pending = 0;
-    return compose_full();
+    return compose_page({ degat_x, degat_y, degat_largeur, degat_hauteur });
+}
+
+/// Recoit une capture dont rien ne dit ce qui a change.
+///
+/// Le chemin M9+M11 -- chrome sans BrowserHost, donc sans processus Compositor
+/// et sans calcul de degat -- n'a aucun rectangle a offrir. Chaque capture y
+/// est une trame complete. Le dire explicitement vaut mieux que de passer un
+/// degat par defaut, qui aurait l'air d'un vrai et recopierait un coin de page.
+inline bool present_complet(Gfx::ShareableBitmap const& screenshot)
+{
+    state().suivi_page.invalide();
+    return present(screenshot, 0, 0, 0, 0);
 }
 
 // ----------------------------------------------------------------------------
@@ -1475,10 +1598,24 @@ inline void handle_message(u16 kind, u8 const* payload, u32 size)
                     width, height, s.surface_alloc_width, s.surface_alloc_height);
                 s.surface_width = width;
                 s.surface_height = height;
-                // Le seul cas ou le chrome sait avant le moteur qu'il faut
-                // repeindre la page : la geometrie a change, et rien dans le
-                // document ne s'en est apercu.
-                if (s.on_repaint)
+
+                // La zone nouvellement decouverte n'a jamais ete peinte : elle
+                // porte ce que l'allocation contenait. Recomposer tout de suite
+                // avec la derniere capture connue evite de montrer cela pendant
+                // le temps -- une remise en page complete -- que le moteur met a
+                // produire une trame a la nouvelle taille.
+                compose_full();
+
+                // BOUCHAUD_CHROME_V18_VIEWPORT_SUIT_LA_FENETRE
+                //
+                // La fenetre s'agrandissait, le chrome peignait plus grand, et
+                // le moteur continuait de mettre en page a l'ancienne largeur :
+                // la page restait coupee au meme endroit dans une fenetre plus
+                // large. Le bouton plein ecran redimensionnait le cadre sans
+                // rien changer a ce qu'il encadre.
+                if (s.on_resize)
+                    s.on_resize(s.surface_width, viewport_height());
+                else if (s.on_repaint)
                     s.on_repaint();
             }
         }
@@ -1626,13 +1763,6 @@ inline void initialize_from_environment()
 
     outln("[ladybird-bouchaud] M11_CHROME gui_fd={} surface_fd={} surface={}x{} toolbar={}",
         s.gui_fd, s.surface_fd, s.surface_width, s.surface_height, toolbar_height);
-}
-
-/// Hauteur utile pour la page, une fois la barre d'outils retiree.
-inline int viewport_height()
-{
-    auto height = state().surface_height - toolbar_height;
-    return height > 0 ? height : state().surface_height;
 }
 
 /// Prend une `ByteString` et non une `StringView` : les appelants passent

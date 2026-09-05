@@ -530,7 +530,13 @@ screenshot_route = """void PageClient::page_did_take_screenshot(Gfx::ShareableBi
 {
 #if defined(BOUCHAUD_PORT)
     if (getenv(\"BOUCHAUD_BROWSER_HOST\") != nullptr && BouchaudChrome::enabled()) {
-        if (!BouchaudChrome::present(screenshot))
+        // Le rectangle que `paint_next_frame()` a calcule pour CETTE capture,
+        // accumule depuis la precedente. Voir tools/ladybird/prepare-repaint.py :
+        // sans lui le chrome recopiait la fenetre entiere a chaque trame, et un
+        // curseur qui clignote repeignait 1 554 048 pixels deux fois par
+        // seconde.
+        auto const degat = page().top_level_traversable()->bouchaud_last_frame_damage();
+        if (!BouchaudChrome::present(screenshot, degat.x(), degat.y(), degat.width(), degat.height()))
             Core::Process::terminate_immediately(70);
 
         static bool first_frame_reported = false;
