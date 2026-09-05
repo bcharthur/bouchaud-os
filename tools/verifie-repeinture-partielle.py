@@ -216,6 +216,18 @@ def regle_config_identique(repaint, fautes):
             "prepare-repaint.py : la conversion alignee n'est plus reservee a "
             "la trame interactive, ou elle ne s'y applique plus."
         )
+    # `Gfx::Rect::to_type<U>()` et `Gfx::Size::to_type<U>()` portent tous deux
+    # `requires(!IsSame<T, U>)`. Convertir `rect` en entiers DES ICI a donc
+    # fait echouer les quatre `.to_type<int>()` que le code d'origine applique
+    # plus bas -- sur des lignes qu'on n'avait pas touchees, et avec un message
+    # qui ne parlait pas de la ligne fautive.
+    if "css_to_device_rect(this->viewport_rect()).to_type<int>()" in compact:
+        fautes.append(
+            "prepare-repaint.py : la taille de capture est convertie en "
+            "entiers des sa definition. `to_type<U>()` exige U != T : les "
+            "conversions que le code d'origine applique plus bas cesseraient "
+            "de compiler. Laisser `rect` en DevicePixelRect."
+        )
 
 
 def regle_cible_reutilisee(repaint, fautes):

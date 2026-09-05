@@ -150,9 +150,16 @@ substitute(
             //    lieu d'un -- et interdisait a `paint_next_frame()` de calculer
             //    le moindre degat, puisque son calcul exige que la config
             //    memorisee soit deja la sienne.
+            //    `rect` reste un DevicePixelRect, comme avant, et n'est PAS
+            //    converti ici : `Gfx::Rect::to_type<U>()` et
+            //    `Gfx::Size::to_type<U>()` portent tous deux
+            //    `requires(!IsSame<T, U>)`. Le convertir des maintenant
+            //    ferait echouer les quatre `.to_type<int>()` que le code
+            //    d'origine applique plus bas -- « pas de fonction membre
+            //    correspondante », sur des lignes qu'on n'a pas touchees.
             auto rect = task.bouchaud_interactive_frame
-                ? page().css_to_device_rect(this->viewport_rect()).to_type<int>()
-                : page().enclosing_device_rect(active_document()->viewport_rect()).to_type<int>();
+                ? page().css_to_device_rect(this->viewport_rect())
+                : page().enclosing_device_rect(active_document()->viewport_rect());
             rect.set_location({});
 #else
             auto scrollable_overflow_rect = active_document()->layout_node()->paintable_box()->scrollable_overflow_rect();
