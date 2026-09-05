@@ -197,8 +197,8 @@ viendra jamais — et il n'a pas de délai d'expiration.
 | `DidRequestStorageUsage` | **blocage définitif** | idem |
 | `DidClearStorage` | **blocage définitif** | idem |
 | `StartWorkerAgent` | blocage définitif | ❌ toujours ouvert |
-| `DidRequestNewWebView` | blocage définitif | ❌ toujours ouvert |
-| `DidStartDownload` | blocage définitif | ❌ toujours ouvert |
+| `DidRequestNewWebView` | blocage définitif | répondu **dans** WebContent (onglets) |
+| `DidStartDownload` | blocage définitif | répondu **dans** WebContent (téléchargements) |
 
 Les six blocages de stockage n'avaient jamais été atteints parce qu'aucun test
 n'exécutait de JavaScript touchant `localStorage`. Wikipedia et Google le font
@@ -211,10 +211,35 @@ processus UI d'upstream sont des délégations d'une ligne vers ces mêmes class
 (`LibWebView/WebContentClient.cpp` lignes 1354-1437) ; nous appelons les mêmes
 méthodes des mêmes classes.
 
+### Deux des trois questions ont trouvé un répondant, et il n'est pas un hôte
+
+`DidRequestNewWebView` et `DidStartDownload` demandent de **créer** quelque
+chose — une vue, un fichier. Un pot en mémoire ne remplace pas cela, mais un
+hôte n'est pas la seule façon de le fournir : les deux sont désormais répondues
+**dans WebContent**, parce que WebContent en a déjà tout ce qu'il faut.
+
+Pour une vue : `PageHost` indexe plusieurs pages par identifiant depuis
+toujours, et `create_page` en fabrique une. Le chrome tient la bande d'onglets,
+route l'entrée vers l'onglet actif et range les captures des autres. Voir
+`BOUCHAUD_C22_ONGLETS`.
+
+Pour un fichier : quand la réponse porte une requête RequestServer, upstream
+transfère cette requête à l'hôte, qui lit le corps. Ce portage force l'autre
+chemin — celui de `<a download>` —, où WebContent lit le corps lui-même et le
+pousse bloc par bloc. Voir `BOUCHAUD_C20_TELECHARGEMENTS`.
+
+**Ce que cela coûte, et c'est un coût réel.** Les deux demandent un droit
+d'écriture persistant à un processus qui exécute le script des sites :
+`/persist/Downloads` pour les fichiers, `/persist/ladybird-chrome` pour
+l'historique et les favoris. Les deux sont bornés à leur sous-arbre, nommés et
+argumentés dans `src/kernel/security/chemins.rs`, et le profil du navigateur —
+cookies, HSTS, cache — reste fermé au rendu. Ils repartiront **ensemble** le
+jour où le chrome sortira de WebContent, parce qu'ils existent tous deux pour
+cette seule raison.
+
 ### Ce qu'il reste à faire : un vrai hôte
 
-Les trois questions encore ouvertes demandent de **créer** quelque chose — un
-processus, une vue, un fichier — ce qu'un pot en mémoire ne remplace pas.
+Une question demande encore un hôte, et un seul pot ne la remplace pas.
 
 `WebWorker` en dépend entièrement : `PageClient::start_worker_agent` envoie
 `StartWorkerAgent` à l'UI, qui appelle
@@ -229,7 +254,12 @@ fige WebContent. Ce n'est pas théorique — c'est le prochain mur.
 La forme que doit prendre l'hôte est claire, parce qu'upstream l'a déjà écrite :
 un processus liant `LibWebView`, implémentant l'interface `WebContentClient`,
 et appelant `launch_web_worker_process`. Il remplacerait
-`webcontent-bootstrap.c` et reprendrait à son compte les trois pots ci-dessus.
+`webcontent-bootstrap.c` et reprendrait à son compte les pots ci-dessus.
+
+Il reprendrait aussi le chrome — et c'est le vrai gain. Les deux droits
+d'écriture persistants accordés au rendu partiraient avec lui : un moteur
+compromis cesserait de pouvoir déposer un fichier qui survit au redémarrage, ou
+de relire ce que l'utilisateur a visité.
 
 ---
 
@@ -382,7 +412,9 @@ Légende : ✅ intégré et prouvé · 🟡 intégré, non prouvé ou incomplet 
 | IndexedDB | `LibWeb/IndexedDB` | 🟡 | compilé ; dépend de `StorageJar`, donc débloqué mais non vérifié |
 | Cache API, Service Worker | `LibWeb/ServiceWorker` | ❌ | exige le service `WebWorker` |
 | Historique de session | `LibWeb/HTML` + `LibWebView/SessionHistory` | 🟡 | `M9_HISTORY_LOCAL_COMMIT` ; `traverse_the_history_by_delta` câblé au chrome |
-| Téléchargements | `DidStartDownload` | ❌ | question synchrone sans répondant — fige le moteur |
+| Historique de navigation | `WebView::HistoryStore` | 🟡 | magasin texte du chrome dans `/persist/ladybird-chrome`, relu et **vérifié** ligne à ligne (`BouchaudUrl`) ; alimente la complétion |
+| Favoris | `WebView::BookmarkStore` | 🟡 | même magasin ; Ctrl+D, étoile de la barre, entrée de menu |
+| Téléchargements | `DidStartDownload` | 🟡 | répondu dans WebContent ; écrit dans `/persist/Downloads`, nom du serveur assaini (`BouchaudNomFichier`), `fsync` avant la fin annoncée |
 
 ### Interaction
 
@@ -393,9 +425,15 @@ Légende : ✅ intégré et prouvé · 🟡 intégré, non prouvé ou incomplet 
 | Molette / défilement | `Web::MouseEvent` + `wheel_delta` | 🟡 | acheminé ; le défilement dépend maintenant du modèle d'invalidation |
 | Liens | navigation locale | 🟡 | `decide_navigation_process` forcé sur `Local` |
 | Formulaires | `LibWeb/HTML` | 🟡 | jamais exercé |
-| Presse-papiers | `LibWeb/Clipboard` | ❌ | aucun pont vers le presse-papiers Bouchaud |
+| Presse-papiers | `LibWeb/Clipboard` | 🟡 | presse-papiers du **bureau** (protocole GUI v1, `PressePapiersEcrit` / `PressePapiers`) ; Ctrl+A/C/X/V dans la page et dans les barres, API Clipboard branchée |
+| Sélection de texte | `Page::focused_navigable().selected_text()` | 🟡 | `select_all`, `selected_text`, `cut_selected_text`, `paste` câblés au chrome |
+| Recherche dans la page | `Page::find_in_page` | 🟡 | Ctrl+F, F3, Maj+F3, compteur de correspondances ; réponse synchrone du moteur |
+| Menu contextuel | `page_did_request_context_menu` | 🟡 | ouvert par le **moteur**, donc `preventDefault()` respecté ; entrées selon le contexte |
+| Survol de lien | `page_did_hover_link` | 🟡 | bulle d'adresse en bas à gauche |
+| Onglets | `DidRequestNewWebView` + `PageHost` | 🟡 | plusieurs pages dans **ce** WebContent ; Ctrl+T / Ctrl+W / Ctrl+Tab, bande cliquable, `target=_blank` honoré |
 | Plein écran | `LibWeb/Fullscreen` | ❌ | `page_did_request_fullscreen_window` part vers un hôte absent |
 | Barre d'adresse, boutons | chrome Bouchaud | ✅ | `M11_READY`, `M11_FIRST_FRAME` |
+| Zoom | `Page::set_zoom_level` | 🟡 | Ctrl+ +, Ctrl+-, Ctrl+0 ; échelle par onglet |
 
 ### Multimédia et divers
 
@@ -481,10 +519,15 @@ mesure qui départagera.
    demande pas de GPU. C'est le plus gros gain restant, et le plus risqué :
    il réécrit ce que quatre scénarios verts valident aujourd'hui.
 2. **Lire la trace TLS de Google** et corriger la vraie cause.
-3. **Un hôte navigateur.** C'est ce qui débloque `WebWorker`, les
-   téléchargements, les nouvelles vues, le plein écran — et c'est la forme
-   finale voulue : `Bouchaud Browser Host` engendrant les services, plutôt qu'un
-   lanceur en C qui ne sait pas répondre.
+3. **Un hôte navigateur.** Ce qu'il débloque a change : les téléchargements et
+   les nouvelles vues sont répondus depuis WebContent (§5), et il reste
+   `WebWorker` et le plein écran. Mais sa vraie valeur est ailleurs, et elle a
+   grandi : sortir le chrome du processus de rendu rendrait leurs deux droits
+   d'écriture persistants — `/persist/Downloads` et
+   `/persist/ladybird-chrome` — au seul processus qui n'exécute pas de script
+   de site. C'est la forme finale voulue : `Bouchaud Browser Host` engendrant
+   les services et tenant l'interface, plutôt qu'un lanceur en C qui ne sait
+   pas répondre.
 4. **Confirmer les appelants de `inotify_init1` et `link`**, maintenant que le
    message les nomme, puis implémenter ou documenter.
 5. **Empaqueter de vraies polices** si l'on veut que les sites ressemblent à ce
