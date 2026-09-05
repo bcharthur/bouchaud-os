@@ -142,6 +142,21 @@ jobs:
         run: |
           printf 'Bouchaud V16 chrome=fontconfig+svg loading=1\n' > third_party/native-browser-bouchaud/V16_UI_CAPABLE
 
+      # BOUCHAUD_ARTEFACT_PERIME_V2
+      #
+      # Un marqueur PAR generation, et non un marqueur unique qu'on reecrit.
+      # `V16_UI_CAPABLE` dit « ce chrome a des icones SVG et du texte Skia » ;
+      # il continue de le dire, et un artefact d'aujourd'hui le porte encore.
+      # Ce qu'il ne peut pas dire, c'est « ce chrome a des onglets » -- et un
+      # artefact d'avant ce lot passerait le controle de completude avec ses
+      # seuls anciens marqueurs, resterait en place, et l'utilisateur
+      # chercherait le defaut dans le code des onglets, qui est ecrit.
+      #
+      # C'est exactement le defaut que V16 avait deja coute une fois.
+      - name: Marquer la capacite UI V19
+        run: |
+          printf 'Bouchaud V19 onglets=1 recherche=1 presse-papiers=1 menu=1 telechargements=1 favoris=1\n' > third_party/native-browser-bouchaud/V19_UI_CAPABLE
+
       - name: Statistiques ccache apres
         if: always()
         run: ccache -s || true
@@ -160,6 +175,7 @@ jobs:
           test -d "$OUT/resources"
           # V16 n'est plus un workflow: c'est une capacite de l'artefact canonique.
           if [ -f "$OUT/V16_UI_CAPABLE" ]; then cat "$OUT/V16_UI_CAPABLE"; fi
+          if [ -f "$OUT/V19_UI_CAPABLE" ]; then cat "$OUT/V19_UI_CAPABLE"; fi
           du -sh "$OUT"
 
       - name: Publier Ladybird natif

@@ -403,7 +403,17 @@ if ($LadybirdMode) {
     #
     # M8 en est exempt : il affiche une page locale fixe, sans barre
     # d'adresse ni boutons, et sa liste est deliberement minimale.
+    #
+    # BOUCHAUD_ARTEFACT_PERIME_V2 : un marqueur PAR generation.
+    #
+    # `V16_UI_CAPABLE` dit "icones SVG, texte Skia, polices FontConfig". Il ne
+    # peut rien dire des onglets, de la recherche dans la page, du
+    # presse-papiers, du menu contextuel, des telechargements ni des favoris --
+    # et un artefact d'avant ce lot le porte quand meme. Exiger les DEUX est ce
+    # qui fait qu'une correction d'interface atteint la machine ; c'est
+    # precisement la lecon que V16 avait deja coutee une fois.
     $CapaciteUi = "V16_UI_CAPABLE"
+    $CapaciteOnglets = "V19_UI_CAPABLE"
 
     if ($IsLadybirdM8) {
         $RequiredLadybirdFiles = @(
@@ -423,7 +433,8 @@ if ($LadybirdMode) {
             "WebDriver",
             "webcontent-bootstrap",
             "M9_CAPABLE",
-            $CapaciteUi
+            $CapaciteUi,
+            $CapaciteOnglets
         )
     }
     else {
@@ -433,7 +444,8 @@ if ($LadybirdMode) {
             "ImageDecoder",
             "webcontent-bootstrap",
             "M9_CAPABLE",
-            $CapaciteUi
+            $CapaciteUi,
+            $CapaciteOnglets
         )
     }
 

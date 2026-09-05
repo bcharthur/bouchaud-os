@@ -78,7 +78,14 @@ WORKFLOW = RACINE / ".github" / "workflows" / "ladybird-native-browser.yml"
 
 ARTEFACT = "bouchaud-ladybird-native-browser"
 WORKFLOW_NOM = "ladybird-native-browser.yml"
-CAPACITE = "V16_UI_CAPABLE"
+# Les marqueurs de capacite sont DECOUVERTS dans le workflow, pas enumeres ici.
+#
+# Il y en avait un. Il y en a deux, et il y en aura d'autres : chaque
+# generation d'interface en ajoute un, parce qu'un marqueur ne peut dire que ce
+# qu'il savait au moment ou il a ete ecrit. Une liste tenue ici serait la
+# premiere chose qu'on oublierait de completer -- et le defaut qu'elle laisse
+# passer est exactement celui que ce fichier existe pour attraper.
+MARQUEUR = re.compile(r"> third_party/native-browser-bouchaud/(\w+_UI_CAPABLE)")
 
 # La selection s'etend sur plusieurs lignes continuees par un accent grave.
 # On la reconstitue avant de la lire, sinon `--status success` sur sa propre
@@ -134,31 +141,76 @@ def regle_nom(source, workflow, fautes):
         )
 
 
+def listes_requises(source):
+    """Chaque `$RequiredLadybirdFiles = @( ... )` du script, une par branche."""
+    return re.findall(r"\$RequiredLadybirdFiles\s*=\s*@\((.*?)\)", source, re.S)
+
+
 def regle_capacite(source, workflow, fautes):
-    """3. Le marqueur ecrit par le producteur est lu par le consommateur."""
-    if CAPACITE not in workflow:
+    """3. Chaque marqueur ecrit par le producteur est exige par le consommateur.
+
+    Et reciproquement. Les deux sens comptent, et ils echouent differemment :
+
+      * un marqueur ECRIT que personne n'exige laisse un artefact perime passer
+        pour complet -- l'interface d'avant reste en place, et le symptome ne
+        ressemble pas a sa cause ;
+      * un marqueur EXIGE que personne n'ecrit rend tout artefact incomplet,
+        donc retelecharge a chaque lancement, indefiniment.
+
+    La verification porte sur CHAQUE branche de la liste des fichiers requis,
+    et non sur leur reunion : `run.ps1` en a plusieurs, et un marqueur present
+    dans l'une seulement laisse les autres sans protection. Seule la branche M8
+    est exempte -- elle affiche une page locale fixe, sans barre d'adresse ni
+    boutons --, et elle se reconnait a ce qu'elle n'exige pas `M9_CAPABLE`.
+    """
+    marqueurs = sorted(set(MARQUEUR.findall(workflow)))
+    if not marqueurs:
         fautes.append(
-            "%s : le producteur n'ecrit plus le marqueur de capacite %r."
-            % (WORKFLOW_NOM, CAPACITE)
-        )
-    if CAPACITE not in source:
-        fautes.append(
-            "run.ps1 : le marqueur %r n'est pas lu. Un artefact anterieur au "
-            "chrome V16 passerait le controle de completude, et resterait en "
-            "place indefiniment avec ses fleches en pixels." % CAPACITE
+            "%s : le producteur n'ecrit plus aucun marqueur de capacite. Un "
+            "artefact d'une generation quelconque passerait le controle de "
+            "completude." % WORKFLOW_NOM
         )
         return
-    # Le lire ne suffit pas : il doit conditionner le RETELECHARGEMENT, donc
-    # figurer dans la liste des fichiers exiges.
-    if "$RequiredLadybirdFiles" not in source:
+
+    listes = listes_requises(source)
+    if not listes:
         fautes.append("run.ps1 : la liste des fichiers requis a disparu.")
         return
-    bloc = source[source.index("$RequiredLadybirdFiles"):]
-    bloc = bloc[: bloc.find("# =========")] if "# =========" in bloc else bloc
-    if CAPACITE not in bloc and "$CapaciteUi" not in bloc:
+
+    # Un marqueur peut etre exige par son nom ou par la variable qui le porte.
+    variables = dict(
+        re.findall(r'\$(\w+)\s*=\s*"(\w+_UI_CAPABLE)"', source)
+    )
+
+    def exiges_par(liste):
+        noms = set(re.findall(r"\w+_UI_CAPABLE", liste))
+        for variable in re.findall(r"\$(\w+)", liste):
+            if variable in variables:
+                noms.add(variables[variable])
+        return noms
+
+    tous_exiges = set()
+    for liste in listes:
+        exiges = exiges_par(liste)
+        tous_exiges |= exiges
+        if "M9_CAPABLE" not in liste:
+            continue  # la branche M8, exemptee et documentee
+        for marqueur in marqueurs:
+            if marqueur in exiges:
+                continue
+            fautes.append(
+                "run.ps1 : le producteur ecrit %r, et une des listes de "
+                "fichiers requis ne l'exige pas. Un artefact anterieur a cette "
+                "generation passerait le controle de completude et resterait "
+                "en place -- avec l'interface d'avant, et sans que rien ne le "
+                "dise." % marqueur
+            )
+
+    for marqueur in sorted(tous_exiges - set(marqueurs)):
         fautes.append(
-            "run.ps1 : %r est mentionne mais ne figure pas parmi les fichiers "
-            "requis ; il ne declenche donc aucun retelechargement." % CAPACITE
+            "run.ps1 : %r est exige, et le producteur ne l'ecrit pas. Aucun "
+            "artefact ne passerait jamais le controle de completude : "
+            "`run.ps1` retelechargerait a chaque lancement." % marqueur
         )
 
 
