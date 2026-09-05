@@ -69,6 +69,12 @@
 // `test_nom_fichier.cpp`.
 #include "BouchaudNomFichier.h"
 
+// BOUCHAUD_C21_HISTORIQUE_ET_FAVORIS
+//
+// Ce qu'une adresse relue d'un fichier a le droit d'etre. Meme raison d'etre
+// que les precedents : aucune dependance, banc d'essai hote (`test_url.cpp`).
+#include "BouchaudUrl.h"
+
 #if defined(BOUCHAUD_PORT)
 
 #    include <AK/ByteString.h>
@@ -134,6 +140,8 @@ inline constexpr u32 color_glyph_off = 0x00'6b'71'78;
 inline constexpr u32 color_secure = 0x00'1e'8e'3e;
 inline constexpr u32 color_insecure = 0x00'c5'39'29;
 inline constexpr u32 color_page_backdrop = 0x00'ff'ff'ff;
+/// Etoile des favoris : doree quand l'adresse est mise de cote.
+inline constexpr u32 color_favori = 0x00'f5'a6'23;
 
 // BOUCHAUD_CHROME_V19_CALQUES : les surfaces flottantes.
 inline constexpr u32 color_calque_fond = 0x00'23'27'2b;
@@ -149,6 +157,23 @@ inline constexpr int survol_hauteur = ui_text_height + 2;
 /// Barre de recherche : assez large pour une requete et son compteur.
 inline constexpr int recherche_largeur = 320;
 inline constexpr int recherche_hauteur = ui_text_height + 10;
+/// Magasin du chrome : combien d'entrees on garde, et ou.
+///
+/// Le chemin est ecrit ici ET dans `src/kernel/security/chemins.rs`, qui
+/// accorde le droit d'y ecrire. `tools/verifie-historique-favoris.py` refuse
+/// que les deux divergent -- sinon le chrome ouvrirait un chemin que le bac a
+/// sable refuse, et l'historique disparaitrait sans un mot.
+inline constexpr char const* magasin_dossier = "/persist/ladybird-chrome";
+inline constexpr size_t historique_max = 500;
+inline constexpr size_t favoris_max = 200;
+/// Longueur retenue pour un titre. Ce qui depasse ne tient dans aucune liste.
+inline constexpr size_t titre_max = 160;
+/// Tics avant d'ecrire le magasin. Une seconde : une rafale de navigations --
+/// une redirection en chaine, par exemple -- n'ecrit qu'une fois.
+inline constexpr int magasin_delai_tics = 60;
+/// Liste de completion sous la barre d'adresse.
+inline constexpr int completion_lignes_max = 5;
+inline constexpr int completion_hauteur_ligne = ui_text_height + 6;
 /// Panneau des telechargements.
 inline constexpr int telechargement_largeur = 300;
 inline constexpr int telechargement_hauteur_ligne = ui_text_height + 6;
@@ -661,6 +686,29 @@ struct State {
     // ete au premier plan -- c'est-a-dire la derniere fois ou l'utilisateur a
     // pu copier quoi que ce soit ailleurs.
     ByteString presse_papiers;
+
+    // BOUCHAUD_C21_HISTORIQUE_ET_FAVORIS
+    //
+    // Ce que l'utilisateur a visite, et ce qu'il a mis de cote.
+    //
+    // Les deux vivent dans la meme structure parce qu'ils servent la meme
+    // chose -- retrouver une adresse sans la retaper -- et se distinguent par
+    // ce qui les cree : l'historique par une navigation, un favori par un
+    // geste. La completion les lit tous les deux, les favoris d'abord.
+    struct Entree {
+        ByteString url;
+        ByteString titre;
+    };
+    /// Le plus recent en DERNIER : c'est l'ordre dans lequel on ecrit, et
+    /// l'inverse de celui dans lequel on affiche.
+    Vector<Entree> historique;
+    Vector<Entree> favoris;
+    /// Le magasin a change et n'est pas encore ecrit.
+    bool magasin_sale { false };
+    /// Tics restants avant l'ecriture. Voir `magasin_delai_tics`.
+    int magasin_tics { 0 };
+    /// L'entree de completion selectionnee, -1 si aucune.
+    int completion_choix { -1 };
 
     // BOUCHAUD_C20_TELECHARGEMENTS
     //
@@ -1263,6 +1311,56 @@ inline bool point_in_button(Button const& button, int x, int y)
         && y >= button_top && y < button_top + button_height;
 }
 
+/// BOUCHAUD_C21_HISTORIQUE_ET_FAVORIS : l'etoile, au bout du champ d'adresse.
+///
+/// Un DESSIN et non un calcul : neuf lignes de neuf pixels, lisibles telles
+/// quelles. Une etoile calculee -- cinq branches, un rayon, un angle -- aurait
+/// coute vingt lignes de trigonometrie pour un resultat moins net a cette
+/// taille.
+inline constexpr u16 masque_etoile[9] = {
+    0b000010000,
+    0b000010000,
+    0b000111000,
+    0b111111111,
+    0b011111110,
+    0b001111100,
+    0b011111110,
+    0b011000110,
+    0b010000010,
+};
+
+inline BouchaudDegat::Rect boite_favori()
+{
+    auto const largeur = address_field_width();
+    if (largeur < 60)
+        return {};
+    // A gauche de la pastille d'etat que la modernisation V15 pose au bout du
+    // champ : deux marqueurs au meme endroit se recouvriraient.
+    return { address_field_x() + largeur - 30, button_top + 7, 9, 9 };
+}
+
+/// Declaree ici, definie avec le reste du magasin.
+///
+/// La barre d'outils se dessine bien avant que le magasin soit ecrit dans ce
+/// fichier, et deplacer le magasin au-dessus melerait ses entrees-sorties aux
+/// primitives de dessin. Une declaration coute une ligne ; l'ordre du fichier
+/// vaut mieux qu'elle.
+inline bool est_favori(ByteString const& url);
+
+inline void draw_favori(Canvas const& canvas)
+{
+    auto const boite = boite_favori();
+    if (boite.vide())
+        return;
+    auto const couleur = est_favori(state().committed_url) ? color_favori : color_glyph_off;
+    for (int ligne = 0; ligne < 9; ++ligne) {
+        for (int colonne = 0; colonne < 9; ++colonne) {
+            if ((masque_etoile[ligne] >> (8 - colonne)) & 1u)
+                fill_rect(canvas, boite.x + colonne, boite.y + ligne, 1, 1, couleur);
+        }
+    }
+}
+
 inline bool point_in_address_field(int x, int y)
 {
     return x >= address_field_x() && x < address_field_x() + address_field_width()
@@ -1398,6 +1496,8 @@ inline void draw_toolbar(Canvas const& canvas)
         fill_rect(canvas, caret_x, button_top + 4, 2, button_height - 8, color_field_text);
     }
 
+    draw_favori(canvas);
+
     // Etat du chargement, a droite, en petit.
     auto status_text = s.loading ? ByteString { "chargement..." } : s.status;
     auto status_width = text_width(status_text.view(), 1);
@@ -1439,6 +1539,8 @@ enum Calque : int {
     Survol = 0,
     /// Barre de recherche dans la page, en haut a droite.
     Recherche,
+    /// Liste de completion, sous la barre d'adresse.
+    Completion,
     /// Panneau des telechargements, en bas a droite.
     Telechargements,
     /// Menu contextuel, la ou on a clique.
@@ -1606,6 +1708,7 @@ enum EntreeMenu : int {
     MenuColler,
     MenuToutSelectionner,
     MenuRechercher,
+    MenuFavori,
     MenuNombre,
 };
 
@@ -1630,6 +1733,12 @@ inline StringView libelle_menu(int entree)
         return "Tout selectionner"sv;
     case MenuRechercher:
         return "Rechercher dans la page"sv;
+    case MenuFavori:
+        // Le libelle DIT ce que l'entree fera, et non ce qu'elle est. Un
+        // « Favori » qui retire est la surprise la plus facile a eviter.
+        return est_favori(state().committed_url)
+            ? "Retirer des favoris"sv
+            : "Ajouter aux favoris"sv;
     default:
         return ""sv;
     }
@@ -1652,6 +1761,7 @@ inline int entrees_menu(int (&sortie)[MenuNombre])
     ajoute(MenuColler);
     ajoute(MenuToutSelectionner);
     ajoute(MenuRechercher);
+    ajoute(MenuFavori);
     return nombre;
 }
 
@@ -1810,6 +1920,108 @@ inline void dessine_telechargements(Canvas const& canvas)
     }
 }
 
+/// Les entrees proposees pour la saisie courante, favoris d'abord.
+///
+/// Les pointeurs designent des elements de `historique` et `favoris` : ils ne
+/// survivent pas a une modification de ces listes, et personne n'en modifie
+/// entre le calcul et le dessin. Un appelant qui NAVIGUE depuis une entree
+/// copie l'adresse avant, parce que la navigation, elle, en ajoute une.
+inline int entrees_de_completion(State::Entree const** sortie, int capacite)
+{
+    auto& s = state();
+    if (!s.address_focused || s.address.tout_selectionne || capacite <= 0)
+        return 0;
+
+    auto const saisie = s.address.vers_chaine();
+    // Une seule lettre propose tout ce qui la contient, c'est-a-dire rien
+    // d'utile, et cache la page sous une liste des le premier caractere.
+    if (saisie.length() < 2)
+        return 0;
+
+    int nombre = 0;
+    auto correspond = [&saisie](State::Entree const& entree) {
+        return entree.url.contains(saisie.view(), CaseSensitivity::CaseInsensitive)
+            || entree.titre.contains(saisie.view(), CaseSensitivity::CaseInsensitive);
+    };
+    auto ajoute = [&](State::Entree const& entree) {
+        if (nombre >= capacite)
+            return;
+        for (int index = 0; index < nombre; ++index) {
+            if (sortie[index]->url == entree.url)
+                return;
+        }
+        sortie[nombre++] = &entree;
+    };
+
+    // Les favoris d'abord : ils ont ete choisis, l'historique ne l'a pas ete.
+    for (auto const& favori : s.favoris) {
+        if (correspond(favori))
+            ajoute(favori);
+    }
+    // Puis l'historique, du plus recent au plus ancien.
+    for (size_t index = s.historique.size(); index > 0 && nombre < capacite; --index) {
+        auto const& entree = s.historique[index - 1];
+        if (correspond(entree))
+            ajoute(entree);
+    }
+    return nombre;
+}
+
+inline BouchaudDegat::Rect boite_completion()
+{
+    auto& s = state();
+    State::Entree const* entrees[completion_lignes_max] {};
+    auto const nombre = entrees_de_completion(entrees, completion_lignes_max);
+    if (nombre <= 0)
+        return {};
+
+    auto const hauteur = nombre * completion_hauteur_ligne + 2 * menu_marge_verticale;
+    auto const largeur = address_field_width();
+    if (largeur <= 0 || page_origin_y() + hauteur > s.surface_height)
+        return {};
+    // Sous le champ, aligne dessus : c'est la que l'oeil est deja.
+    return { address_field_x(), page_origin_y(), largeur, hauteur };
+}
+
+inline void dessine_completion(Canvas const& canvas)
+{
+    auto& s = state();
+    auto const boite = s.calques.boite(Completion);
+    if (boite.vide())
+        return;
+
+    State::Entree const* entrees[completion_lignes_max] {};
+    auto const nombre = entrees_de_completion(entrees, completion_lignes_max);
+    if (nombre <= 0)
+        return;
+
+    fill_rect(canvas, boite.x, boite.y, boite.w, boite.h, color_calque_fond);
+    fill_rect(canvas, boite.x, boite.y + boite.h - 1, boite.w, 1, color_calque_bord);
+    fill_rect(canvas, boite.x, boite.y, 1, boite.h, color_calque_bord);
+    fill_rect(canvas, boite.x + boite.w - 1, boite.y, 1, boite.h, color_calque_bord);
+
+    for (int rang = 0; rang < nombre; ++rang) {
+        auto const haut = boite.y + menu_marge_verticale + rang * completion_hauteur_ligne;
+        if (rang == s.completion_choix)
+            fill_rect(canvas, boite.x + 1, haut, boite.w - 2, completion_hauteur_ligne, color_button);
+
+        auto const y = haut + (completion_hauteur_ligne - ui_text_height) / 2;
+        auto const& entree = *entrees[rang];
+        auto const largeur_url = text_width(entree.url.view(), 2);
+        auto const disponible = boite.w - 2 * calque_marge;
+        draw_ui_text(canvas, boite.x + calque_marge, y, entree.url.view(),
+            color_calque_texte, min(largeur_url, disponible));
+
+        // Le titre suit l'adresse, en gris, s'il reste de la place. Il n'est
+        // jamais tronque au point de mentir : sous cette largeur, il disparait.
+        auto const reste = disponible - largeur_url - calque_marge;
+        if (!entree.titre.is_empty() && reste > 40) {
+            draw_ui_text(canvas, boite.x + calque_marge + largeur_url + calque_marge, y,
+                entree.titre.view(), color_glyph_off, reste);
+        }
+    }
+}
+
 /// Ou chaque calque doit se trouver a la trame qui vient.
 ///
 /// Un seul endroit calcule les boites, et il les calcule TOUTES : une boite
@@ -1821,6 +2033,7 @@ inline void mesure_calques()
     auto& s = state();
     s.calques.place(Survol, boite_survol());
     s.calques.place(Recherche, boite_recherche());
+    s.calques.place(Completion, boite_completion());
     s.calques.place(Telechargements, boite_telechargements());
     s.calques.place(Menu, boite_menu());
 }
@@ -1837,6 +2050,8 @@ inline void dessine_calques(Canvas const& canvas, BouchaudDegat::Rect publie)
         dessine_survol(canvas);
     if (BouchaudCalques::doit_redessiner(s.calques.boite(Recherche), publie))
         dessine_recherche(canvas);
+    if (BouchaudCalques::doit_redessiner(s.calques.boite(Completion), publie))
+        dessine_completion(canvas);
     if (BouchaudCalques::doit_redessiner(s.calques.boite(Telechargements), publie))
         dessine_telechargements(canvas);
     // Le menu EN DERNIER : il s'ouvre par-dessus tout, y compris par-dessus la
@@ -2113,12 +2328,27 @@ inline ByteString normalize_input(ByteString const& raw)
     if (trimmed.is_empty())
         return {};
 
-    if (trimmed.starts_with("http://"sv) || trimmed.starts_with("https://"sv)
-        || trimmed.starts_with("about:"sv) || trimmed.starts_with("data:"sv)
-        || trimmed.starts_with("file://"sv))
+    // BOUCHAUD_C21_HISTORIQUE_ET_FAVORIS
+    //
+    // La liste des schemas navigables vit dans BouchaudUrl.h, ou elle est
+    // exercee sur l'hote. Elle etait ecrite ici, et `data:` en faisait partie :
+    // un document `data:` de premier niveau a une origine opaque et execute le
+    // script qu'on vient de coller dans la barre. C'est l'auto-XSS classique,
+    // celui qu'on fait coller a quelqu'un au telephone, et tous les
+    // navigateurs ont fini par le bloquer. `javascript:` n'y a jamais ete.
+    if (BouchaudUrl::schema_navigable(trimmed.characters(), static_cast<int>(trimmed.length())))
         return trimmed;
 
-    auto looks_like_host = !trimmed.contains(' ') && trimmed.contains('.');
+    // Une entree qui porte un schema -- deux-points avant la premiere barre --
+    // sans que ce schema soit navigable n'est JAMAIS completee en hote :
+    // `https://javascript:document.cookie` serait une adresse absurde, et la
+    // seule reponse honnete est de la chercher comme du texte.
+    auto const deux_points = trimmed.find(':');
+    auto const barre = trimmed.find('/');
+    auto const porte_un_schema = deux_points.has_value()
+        && (!barre.has_value() || *deux_points < *barre);
+
+    auto looks_like_host = !porte_un_schema && !trimmed.contains(' ') && trimmed.contains('.');
     if (looks_like_host)
         return ByteString::formatted("https://{}", trimmed);
 
@@ -2160,6 +2390,267 @@ inline void commit_address()
     outln("[ladybird-bouchaud] M11_NAVIGATE url={}", target);
     if (s.on_navigate)
         s.on_navigate(target);
+}
+
+
+// ----------------------------------------------------------------------------
+// Magasin : historique et favoris
+// ----------------------------------------------------------------------------
+//
+// BOUCHAUD_C21_HISTORIQUE_ET_FAVORIS
+//
+// Deux fichiers texte, une ligne par entree, `url<TAB>titre`. Pas de base de
+// donnees : upstream en utilise une (`WebView::HistoryStore`), qui vit dans le
+// processus hote et n'existe pas ici. Cinq cents lignes se relisent en une
+// fraction de milliseconde, et un format qu'on peut ouvrir avec un editeur est
+// un format qu'on peut reparer.
+//
+// # Ce que ce magasin ne suppose pas
+//
+// Qu'il soit intact. Il vit dans un sous-arbre auquel le moteur de rendu a
+// acces (voir `src/kernel/security/chemins.rs`), et le moteur de rendu est ce
+// qui execute le script des sites. Chaque ligne relue est donc VERIFIEE :
+// `BouchaudUrl::acceptable_pour_le_magasin` refuse les schemas qui executent
+// et tout octet de controle. Une ligne qui ne passe pas est jetee sans bruit,
+// et le reste du fichier est lu quand meme -- une seule ligne abimee ne doit
+// pas couter tout l'historique.
+
+inline ByteString chemin_du_magasin(StringView nom)
+{
+    return ByteString::formatted("{}/{}", magasin_dossier, nom);
+}
+
+/// Lit au plus `maximum` octets. Rend une chaine vide si le fichier manque.
+inline ByteString lit_fichier(ByteString const& chemin, size_t maximum)
+{
+    auto const fd = open(chemin.characters(), O_RDONLY);
+    if (fd < 0)
+        return {};
+
+    StringBuilder builder;
+    char tampon[4096];
+    size_t total = 0;
+    while (total < maximum) {
+        auto const recu = read(fd, tampon, sizeof(tampon));
+        if (recu < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        if (recu == 0)
+            break;
+        auto const pris = min(static_cast<size_t>(recu), maximum - total);
+        builder.append(StringView { tampon, pris });
+        total += pris;
+    }
+    close(fd);
+    return builder.to_byte_string();
+}
+
+inline bool ecrit_fichier(ByteString const& chemin, ByteString const& contenu)
+{
+    // Ecriture DIRECTE, sans le detour par un fichier temporaire suivi d'un
+    // `rename`. Ce detour n'apporterait rien ici : `sys_rename` de ce noyau
+    // reparente le nœud source sans retirer la cible existante, donc un
+    // remplacement laisserait deux entrees du meme nom dans le repertoire.
+    // Une ecriture directe perd le magasin sur une coupure au mauvais moment ;
+    // le detour, lui, corromprait le repertoire. Entre les deux, on choisit.
+    auto const fd = open(chemin.characters(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0)
+        return false;
+
+    size_t ecrits = 0;
+    while (ecrits < contenu.length()) {
+        auto const n = write(fd, contenu.characters() + ecrits, contenu.length() - ecrits);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            close(fd);
+            return false;
+        }
+        ecrits += static_cast<size_t>(n);
+    }
+    // `/persist` est adosse au RAMFS : sans cela, rien n'atteint le disque
+    // avant l'extinction, et une coupure perdrait tout l'historique.
+    fsync(fd);
+    close(fd);
+    return true;
+}
+
+/// Un titre reduit a ce qu'une liste peut afficher.
+inline ByteString titre_propre(StringView brut)
+{
+    StringBuilder builder;
+    for (size_t index = 0; index < brut.length() && builder.length() < titre_max; ++index) {
+        auto const octet = static_cast<unsigned char>(brut[index]);
+        // Meme regle que pour l'URL : ce qui vient d'un fichier peut porter un
+        // saut de ligne, une tabulation ou un marqueur de direction.
+        if (octet < 0x20 || octet >= 0x7f)
+            continue;
+        builder.append(static_cast<char>(octet));
+    }
+    return builder.to_byte_string();
+}
+
+/// Adopte une ligne relue, si elle est acceptable.
+inline void adopte_entree(Vector<State::Entree>& liste, StringView ligne, size_t maximum)
+{
+    if (liste.size() >= maximum)
+        return;
+    auto const separateur = ligne.find('\t');
+    auto const url = separateur.has_value()
+        ? ligne.substring_view(0, *separateur)
+        : ligne;
+    if (!BouchaudUrl::acceptable_pour_le_magasin(
+            url.characters_without_null_termination(), static_cast<int>(url.length()))) {
+        return;
+    }
+    auto const titre = separateur.has_value()
+        ? ligne.substring_view(*separateur + 1, ligne.length() - *separateur - 1)
+        : StringView {};
+    liste.append(State::Entree { ByteString { url }, titre_propre(titre) });
+}
+
+inline void charge_le_magasin()
+{
+    auto& s = state();
+    // Une borne de lecture, pas seulement une borne d'entrees : un fichier
+    // enorme couterait sa lecture avant meme qu'on decide de le rejeter.
+    constexpr size_t lecture_max = 512 * 1024;
+
+    // Le contenu est NOMME avant d'etre decoupe. `split_view` rend des vues
+    // sur la chaine, et une chaine temporaire meurt a la fin de l'instruction
+    // -- avant la premiere iteration de la boucle qui la parcourt. C'est
+    // exactement le genre de defaut qui passe les tests et corrompt une
+    // lecture sur deux.
+    auto const brut_historique = lit_fichier(chemin_du_magasin("historique"sv), lecture_max);
+    for (auto ligne : brut_historique.split_view('\n'))
+        adopte_entree(s.historique, ligne, historique_max);
+
+    auto const brut_favoris = lit_fichier(chemin_du_magasin("favoris"sv), lecture_max);
+    for (auto ligne : brut_favoris.split_view('\n'))
+        adopte_entree(s.favoris, ligne, favoris_max);
+
+    outln("[ladybird-bouchaud] M11_STORE_LOADED historique={} favoris={}",
+        s.historique.size(), s.favoris.size());
+}
+
+inline void ecrit_le_magasin()
+{
+    auto& s = state();
+    s.magasin_sale = false;
+    // 0700 : c'est ce que l'utilisateur a visite. Personne d'autre n'a a le
+    // lire, et un droit par defaut plus large serait un droit que personne
+    // n'a decide.
+    mkdir(magasin_dossier, 0700);
+
+    auto formate = [](Vector<State::Entree> const& liste) {
+        StringBuilder builder;
+        for (auto const& entree : liste)
+            builder.appendff("{}\t{}\n", entree.url, entree.titre);
+        return builder.to_byte_string();
+    };
+
+    if (!ecrit_fichier(chemin_du_magasin("historique"sv), formate(s.historique))
+        || !ecrit_fichier(chemin_du_magasin("favoris"sv), formate(s.favoris))) {
+        warnln("[ladybird-bouchaud] M11_STORE_WRITE_FAILED errno={}", errno);
+    }
+}
+
+inline void salit_le_magasin()
+{
+    auto& s = state();
+    s.magasin_sale = true;
+    // L'ecriture est REPOUSSEE, pas annulee : une redirection en chaine
+    // produit trois navigations en une seconde, et trois reecritures du
+    // fichier pour un seul geste de l'utilisateur.
+    s.magasin_tics = magasin_delai_tics;
+}
+
+inline void note_visite(ByteString const& url)
+{
+    auto& s = state();
+    if (!BouchaudUrl::acceptable_pour_le_magasin(
+            url.characters(), static_cast<int>(url.length()))) {
+        return;
+    }
+    if (!s.historique.is_empty() && s.historique.last().url == url)
+        return;
+
+    // Une adresse deja connue REMONTE plutot que d'etre dupliquee : son titre
+    // est deja la, et c'est la recence qui classe la completion.
+    for (size_t index = 0; index < s.historique.size(); ++index) {
+        if (s.historique[index].url != url)
+            continue;
+        auto entree = s.historique[index];
+        s.historique.remove(index);
+        s.historique.append(move(entree));
+        salit_le_magasin();
+        return;
+    }
+
+    s.historique.append(State::Entree { url, ByteString {} });
+    while (s.historique.size() > historique_max)
+        s.historique.remove(0);
+    salit_le_magasin();
+}
+
+/// Attache un titre a la derniere adresse visitee.
+///
+/// LibWeb annonce le titre APRES l'URL commitee, et parfois plusieurs fois
+/// pour un meme document. On ecrit donc sur la derniere entree, et seulement
+/// si c'est bien celle du document courant.
+inline void note_titre(ByteString const& titre)
+{
+    auto& s = state();
+    if (s.historique.is_empty() || s.historique.last().url != s.committed_url)
+        return;
+    auto propre = titre_propre(titre.view());
+    if (s.historique.last().titre == propre)
+        return;
+    s.historique.last().titre = move(propre);
+    salit_le_magasin();
+}
+
+inline bool est_favori(ByteString const& url)
+{
+    for (auto const& favori : state().favoris) {
+        if (favori.url == url)
+            return true;
+    }
+    return false;
+}
+
+/// Ctrl+D : met de cote l'adresse courante, ou la retire.
+inline void bascule_favori()
+{
+    auto& s = state();
+    auto const url = s.committed_url;
+    if (!BouchaudUrl::acceptable_pour_le_magasin(
+            url.characters(), static_cast<int>(url.length()))) {
+        return;
+    }
+
+    for (size_t index = 0; index < s.favoris.size(); ++index) {
+        if (s.favoris[index].url != url)
+            continue;
+        s.favoris.remove(index);
+        salit_le_magasin();
+        request_chrome_frame();
+        outln("[ladybird-bouchaud] M11_BOOKMARK_REMOVED url={}", url);
+        return;
+    }
+
+    if (s.favoris.size() >= favoris_max) {
+        // Le plus ancien part. Refuser serait plus honnete, mais obligerait a
+        // dire non a un geste qui n'a aucune raison d'echouer -- et personne
+        // ne relit ses deux cents premiers favoris.
+        s.favoris.remove(0);
+    }
+    s.favoris.append(State::Entree { url, s.title });
+    salit_le_magasin();
+    request_chrome_frame();
+    outln("[ladybird-bouchaud] M11_BOOKMARK_ADDED url={}", url);
 }
 
 // ----------------------------------------------------------------------------
@@ -2680,6 +3171,9 @@ inline void active_entree_menu(int rang)
     case MenuRechercher:
         ouvre_recherche();
         break;
+    case MenuFavori:
+        bascule_favori();
+        break;
     default:
         break;
     }
@@ -2795,6 +3289,8 @@ inline void handle_pointer(int x, int y, unsigned buttons)
                 s.status = "chargement...";
                 if (s.on_reload)
                     s.on_reload();
+            } else if (BouchaudCalques::contient(boite_favori(), x, y)) {
+                bascule_favori();
             } else if (point_in_address_field(x, y)) {
                 // Un clic POSE un curseur ; il ne selectionne pas. Ctrl+L est
                 // la pour cela, et confondre les deux ferait effacer l'URL a
@@ -2821,6 +3317,28 @@ inline void handle_pointer(int x, int y, unsigned buttons)
     //
     // La bulle de survol, elle, ne prend rien : elle n'a rien a cliquer, et
     // elle s'efface des que le pointeur quitte le lien.
+    // Un clic dans la liste de completion NAVIGUE. Elle recouvre le haut de la
+    // page, et laisser passer le clic ferait cliquer dans un document qu'on ne
+    // voyait pas.
+    if (BouchaudCalques::contient(boite_completion(), x, y)) {
+        if (pressed != 0) {
+            State::Entree const* propositions[completion_lignes_max] {};
+            auto const proposees = entrees_de_completion(propositions, completion_lignes_max);
+            auto const boite = boite_completion();
+            auto const rang = (y - boite.y - menu_marge_verticale) / completion_hauteur_ligne;
+            if (rang >= 0 && rang < proposees) {
+                auto const cible = propositions[rang]->url;
+                s.completion_choix = -1;
+                set_address_text(cible.view());
+                commit_address();
+            }
+            request_chrome_frame();
+        }
+        s.last_x = x;
+        s.last_y = y;
+        return;
+    }
+
     if (BouchaudCalques::contient(boite_recherche(), x, y)) {
         if (pressed != 0) {
             defocus_address();
@@ -3014,11 +3532,13 @@ inline bool raccourci_navigateur(u32 code, u32 code_point, u32 modifiers, bool a
     auto const copier = ctrl && caractere && lettre('c');
     auto const couper = ctrl && caractere && lettre('x');
     auto const coller = ctrl && caractere && lettre('v');
+    // BOUCHAUD_C21_HISTORIQUE_ET_FAVORIS : Ctrl+D met de cote, et retire.
+    auto const favori = ctrl && caractere && lettre('d');
 
     if (!rechargement && !historique && !barre_adresse
         && !zoom_plus && !zoom_moins && !zoom_neutre
         && !recherche && !recherche_repetee
-        && !tout_selectionner && !copier && !couper && !coller)
+        && !tout_selectionner && !copier && !couper && !coller && !favori)
         return false;
 
     // Consomme dans les DEUX sens, agit sur l'appui seul.
@@ -3061,6 +3581,11 @@ inline bool raccourci_navigateur(u32 code, u32 code_point, u32 modifiers, bool a
         // afficher exactement la meme chose.
         if (s.zoom_cran != avant && s.on_zoom)
             s.on_zoom(BouchaudZoom::pourcent(s.zoom_cran));
+        return true;
+    }
+
+    if (favori) {
+        bascule_favori();
         return true;
     }
 
@@ -3181,7 +3706,39 @@ inline void handle_key(u32 code, u32 code_point, u32 modifiers, u32 pressed)
     if (s.address_focused) {
         if (!appui)
             return;
-        if (!s.address.applique(code, code_point)) {
+
+        // BOUCHAUD_C21_HISTORIQUE_ET_FAVORIS
+        //
+        // La liste de completion passe avant la table du champ : les fleches
+        // haut et bas y choisissent une ligne, alors qu'elles deplacent le
+        // curseur quand il n'y a pas de liste. Sans cette priorite, une liste
+        // ouverte serait purement decorative.
+        State::Entree const* propositions[completion_lignes_max] {};
+        auto const proposees = entrees_de_completion(propositions, completion_lignes_max);
+        if (proposees > 0 && (code == ToucheBas || code == ToucheHaut)) {
+            s.completion_choix = code == ToucheBas
+                ? (s.completion_choix + 1) % proposees
+                : (s.completion_choix <= 0 ? proposees - 1 : s.completion_choix - 1);
+            request_chrome_frame();
+            return;
+        }
+        if (proposees > 0 && code == ToucheEntree
+            && s.completion_choix >= 0 && s.completion_choix < proposees) {
+            // L'adresse est COPIEE avant de naviguer : la navigation ajoute une
+            // entree a l'historique, et le pointeur ne survivrait pas.
+            auto const cible = propositions[s.completion_choix]->url;
+            s.completion_choix = -1;
+            set_address_text(cible.view());
+            commit_address();
+            request_chrome_frame();
+            return;
+        }
+
+        if (s.address.applique(code, code_point)) {
+            // La saisie a change, donc la liste aussi : un rang retenu
+            // designerait une autre adresse que celle qu'on regardait.
+            s.completion_choix = -1;
+        } else {
             switch (code) {
             case ToucheEntree:
                 commit_address();
@@ -3190,6 +3747,7 @@ inline void handle_key(u32 code, u32 code_point, u32 modifiers, u32 pressed)
                 // Echap rend le foyer a la page et restaure l'URL affichee :
                 // une saisie abandonnee ne doit pas laisser un texte qui ne
                 // correspond plus a ce qui est a l'ecran.
+                s.completion_choix = -1;
                 defocus_address();
                 set_address_text(s.committed_url.view());
                 break;
@@ -3483,6 +4041,16 @@ inline void tick()
     if (s.telechargements_tics > 0)
         --s.telechargements_tics;
 
+    // Le magasin s'ecrit ICI, apres un delai, et jamais depuis la navigation
+    // elle-meme : une redirection en chaine produit trois navigations en une
+    // seconde, donc trois reecritures du fichier pour un seul geste.
+    if (s.magasin_sale) {
+        if (s.magasin_tics > 0)
+            --s.magasin_tics;
+        else
+            ecrit_le_magasin();
+    }
+
     mesure_calques();
     if (!s.calques.degat().vide()) {
         compose_page({});
@@ -3526,6 +4094,10 @@ inline void initialize_from_environment()
 
     outln("[ladybird-bouchaud] M11_CHROME gui_fd={} surface_fd={} surface={}x{} toolbar={}",
         s.gui_fd, s.surface_fd, s.surface_width, s.surface_height, toolbar_height);
+
+    // Le magasin est relu ICI, une fois, avant la premiere navigation : la
+    // premiere URL commitee doit deja pouvoir se comparer aux favoris.
+    charge_le_magasin();
 }
 
 /// L'adresse du lien sous le pointeur, ou une chaine vide pour l'effacer.
@@ -3558,6 +4130,7 @@ inline void set_committed_url(ByteString const& url)
     s.secure = url.starts_with("https://"sv);
     if (!s.address_focused)
         set_address_text(url.view());
+    note_visite(url);
     request_chrome_frame();
 }
 
@@ -3579,6 +4152,7 @@ inline void set_loading(bool loading, StringView status)
 inline void set_title(ByteString const& title)
 {
     state().title = title;
+    note_titre(title);
     send_title();
 }
 

@@ -35,7 +35,10 @@ mod chemins {
 }
 
 use capability::Capabilities;
-use chemins::{ecriture_permise, lecture_permise, DOSSIER_TELECHARGEMENTS, PROFIL_NAVIGATEUR};
+use chemins::{
+    ecriture_permise, lecture_permise, DOSSIER_TELECHARGEMENTS, MAGASIN_DU_CHROME,
+    PROFIL_NAVIGATEUR,
+};
 use profile::{
     capabilities, classify, initial_capabilities, sandboxe, transition_capabilities,
     SecurityProfile,
@@ -463,6 +466,51 @@ fn un_moteur_de_rendu_depose_ses_telechargements_et_rien_d_autre() {
             chemin
         );
     }
+}
+
+#[test]
+fn le_magasin_du_chrome_est_un_voisin_de_nom_et_pas_un_descendant() {
+    // BOUCHAUD_C21_HISTORIQUE_ET_FAVORIS
+    //
+    // `/persist/ladybird-chrome` est volontairement voisin de
+    // `/persist/ladybird`. C'est le cas exact ou une comparaison de prefixe
+    // sans separateur transforme un droit en trou -- dans les DEUX sens.
+    assert!(ecriture_permise(
+        SecurityProfile::BrowserContent,
+        "/persist/ladybird-chrome/favoris"
+    ));
+    assert!(lecture_permise(
+        SecurityProfile::BrowserContent,
+        "/persist/ladybird-chrome/historique"
+    ));
+
+    // Le rendu ne gagne pas le profil au passage.
+    assert!(!ecriture_permise(
+        SecurityProfile::BrowserContent,
+        "/persist/ladybird/data/cookies.sqlite"
+    ));
+    assert!(!lecture_permise(
+        SecurityProfile::BrowserContent,
+        "/persist/ladybird/data/cookies.sqlite"
+    ));
+
+    // Et RequestServer ne gagne pas le magasin du chrome : le profil et le
+    // magasin sont deux sous-arbres, deux roles, deux droits.
+    assert!(!ecriture_permise(
+        SecurityProfile::BrowserNetwork,
+        "/persist/ladybird-chrome/favoris"
+    ));
+    assert!(!lecture_permise(
+        SecurityProfile::Untrusted,
+        "/persist/ladybird-chrome/favoris"
+    ));
+
+    // Un troisieme voisin n'existe pas.
+    assert!(!ecriture_permise(
+        SecurityProfile::BrowserContent,
+        "/persist/ladybird-chrome-vole/favoris"
+    ));
+    assert!(!ecriture_permise(SecurityProfile::BrowserContent, MAGASIN_DU_CHROME.trim_end_matches("-chrome")));
 }
 
 #[test]

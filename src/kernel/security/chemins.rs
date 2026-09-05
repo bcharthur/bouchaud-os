@@ -94,6 +94,39 @@ pub const PROFIL_NAVIGATEUR: &str = "/persist/ladybird";
 /// rendu. Ce qu'ils gagnent est un depot, pas une memoire.
 pub const DOSSIER_TELECHARGEMENTS: &str = "/persist/Downloads";
 
+/// Ou le chrome du navigateur garde l'historique et les favoris.
+///
+/// BOUCHAUD_C21_HISTORIQUE_ET_FAVORIS
+///
+/// Voisin de nom du profil -- `/persist/ladybird-chrome` a cote de
+/// `/persist/ladybird` -- et deliberement : la comparaison de `sous_arbre` va
+/// jusqu'au separateur, donc l'un n'ouvre pas l'autre, et le voir dans un `ls`
+/// dit tout de suite que ce sont deux choses.
+///
+/// # Ce que ce droit coute
+///
+/// Il est accorde au meme role que le depot de telechargement, et pour la meme
+/// raison de fond : dans ce portage, le chrome vit DANS WebContent. Mais ce
+/// qu'il expose n'est pas de la meme nature, et il faut le dire :
+///
+///   * l'historique est une donnee PRIVEE. Un rendu compromis y lit ce que
+///     l'utilisateur a visite avant, et pas seulement pendant sa session ;
+///   * un favori est une cible de NAVIGATION que l'utilisateur a choisie. Le
+///     reecrire est un hameconnage durable -- un signet vers sa banque qui
+///     mene ailleurs.
+///
+/// Ce que le chrome oppose : rien n'est relu tel quel. Toute adresse rechargee
+/// passe par `BouchaudUrl::acceptable_pour_le_magasin` -- liste blanche de
+/// schemas, donc pas de `javascript:` ni de `data:`, et aucun octet de
+/// controle. Cela ferme l'execution ; cela ne ferme pas la substitution d'un
+/// `https://` par un autre, et rien ici ne le peut.
+///
+/// Ce qui la fermera est nomme : sortir le chrome de WebContent
+/// (`docs/ladybird/AUDIT_INTEGRATION.md` §5). Ce jour-la, ce droit et celui du
+/// depot de telechargement partent ensemble, parce qu'ils existent tous deux
+/// pour la meme raison.
+pub const MAGASIN_DU_CHROME: &str = "/persist/ladybird-chrome";
+
 /// `path` est-il `root` lui-meme, ou un descendant ?
 ///
 /// La comparaison va jusqu'au SEPARATEUR : sans cela, `/tmpfoo` passerait pour
@@ -131,12 +164,16 @@ const fn possede_le_profil(profile: SecurityProfile) -> bool {
     matches!(profile, SecurityProfile::BrowserNetwork)
 }
 
-/// Ce role depose-t-il les telechargements ?
+/// Ce role porte-t-il le chrome du navigateur ?
 ///
-/// C'est `BrowserContent` et non `BrowserNetwork` parce que c'est WebContent
-/// qui lit le corps de la reponse : dans ce portage, le chrome vit DANS
-/// WebContent et aucun processus hote ne peut reprendre la requete a
-/// RequestServer. Le role qui ecrit est celui qui tient les octets.
+/// C'est `BrowserContent` -- WebContent -- et non `BrowserNetwork`, parce que
+/// dans ce portage la barre d'outils, l'historique, les favoris et la lecture
+/// du corps d'un telechargement vivent tous dans le processus de rendu.
+///
+/// Les deux sous-arbres qui en dependent -- le depot de telechargement et le
+/// magasin du chrome -- existent pour cette seule raison, et repartiront
+/// ensemble le jour ou le chrome sortira de WebContent. Un seul predicat le
+/// dit, plutot que deux identiques : ce n'est pas deux decisions, c'est une.
 const fn depose_les_telechargements(profile: SecurityProfile) -> bool {
     matches!(profile, SecurityProfile::BrowserContent)
 }
@@ -149,7 +186,7 @@ pub fn lecture_permise(profile: SecurityProfile, path: &str) -> bool {
     // qu'un fichier du meme nom existe deja, et qu'il numerote le suivant au
     // lieu de l'ecraser. Lui refuser la lecture ferait perdre le precedent.
     if depose_les_telechargements(profile)
-        && sous_arbre(path, DOSSIER_TELECHARGEMENTS)
+        && (sous_arbre(path, DOSSIER_TELECHARGEMENTS) || sous_arbre(path, MAGASIN_DU_CHROME))
     {
         return true;
     }
@@ -169,7 +206,7 @@ pub fn ecriture_permise(profile: SecurityProfile, path: &str) -> bool {
         return true;
     }
     if depose_les_telechargements(profile)
-        && sous_arbre(path, DOSSIER_TELECHARGEMENTS)
+        && (sous_arbre(path, DOSSIER_TELECHARGEMENTS) || sous_arbre(path, MAGASIN_DU_CHROME))
     {
         return true;
     }
