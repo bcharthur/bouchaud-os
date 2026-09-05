@@ -13,7 +13,9 @@ Ce que ce script branche, et rien de plus :
     repetitions -- sur la barre Ctrl+F du chrome ;
   * la selection et le presse-papiers -- `select_all`, `selected_text`,
     `cut_selected_text`, `paste`, et les deux entrees de l'API Clipboard --
-    sur le presse-papiers du bureau.
+    sur le presse-papiers du bureau ;
+  * le menu contextuel -- les trois `page_did_request_*_context_menu` -- sur
+    le calque du chrome.
 
 Pourquoi un script separe de `prepare-m11-chrome.py` : celui-la construit le
 chrome, celui-ci lui donne ce que le MOTEUR sait et qu'il ignorait. Les deux
@@ -276,5 +278,85 @@ substitute(
 }""",
     "lecture du presse-papiers par le document",
 )
+
+
+# ---------------------------------------------------------------------------
+# Menu contextuel
+# ---------------------------------------------------------------------------
+#
+# Le menu ne s'ouvre PAS sur le clic droit : il s'ouvre quand LibWeb le
+# demande, apres avoir distribue l'evenement `contextmenu` au document. C'est
+# ce detour qui fait qu'une page qui appelle `preventDefault()` -- un editeur
+# de texte, une carte, un terminal web -- garde son propre menu. Ouvrir depuis
+# le chrome, sur le bouton, aurait ete plus court et aurait casse ces pages-la
+# sans qu'aucun test ne le dise.
+#
+# `content_position` est relatif au VIEWPORT (`top_level_viewport_position`
+# dans EventHandler), converti ici en pixels de peripherique comme le fait
+# upstream. Le chrome y ajoute la hauteur de sa barre d'outils : c'est la seule
+# difference entre le repere de page et celui de la surface.
+
+substitute(
+    page_cpp,
+    """void PageClient::page_did_request_context_menu(Web::CSSPixelPoint content_position, Web::ContextMenuForInputEventsTarget for_input_events_target)
+{
+    client().async_did_request_context_menu(m_id, page().css_to_device_point(content_position).to_type<int>(), for_input_events_target);
+}""",
+    """void PageClient::page_did_request_context_menu(Web::CSSPixelPoint content_position, Web::ContextMenuForInputEventsTarget for_input_events_target)
+{
+#if defined(BOUCHAUD_PORT)
+    if (bouchaud_m9_enabled() && BouchaudChrome::enabled()) {
+        auto const point = page().css_to_device_point(content_position).to_type<int>();
+        BouchaudChrome::ouvre_menu_contextuel(point.x(), point.y(), ByteString {});
+        return;
+    }
+#endif
+    client().async_did_request_context_menu(m_id, page().css_to_device_point(content_position).to_type<int>(), for_input_events_target);
+}""",
+    "menu contextuel de page",
+)
+
+substitute(
+    page_cpp,
+    """void PageClient::page_did_request_link_context_menu(Web::CSSPixelPoint content_position, URL::URL const& url, ByteString const& target, unsigned modifiers)
+{
+    client().async_did_request_link_context_menu(m_id, page().css_to_device_point(content_position).to_type<int>(), url, target, modifiers);
+}""",
+    """void PageClient::page_did_request_link_context_menu(Web::CSSPixelPoint content_position, URL::URL const& url, ByteString const& target, unsigned modifiers)
+{
+#if defined(BOUCHAUD_PORT)
+    if (bouchaud_m9_enabled() && BouchaudChrome::enabled()) {
+        auto const point = page().css_to_device_point(content_position).to_type<int>();
+        BouchaudChrome::ouvre_menu_contextuel(point.x(), point.y(), url.to_byte_string());
+        return;
+    }
+#endif
+    client().async_did_request_link_context_menu(m_id, page().css_to_device_point(content_position).to_type<int>(), url, target, modifiers);
+}""",
+    "menu contextuel de lien",
+)
+
+# Une image porte une adresse comme un lien : « copier l'adresse » y a le meme
+# sens, et « ouvrir » y ouvre l'image. La vignette que le message d'origine
+# transporte n'est pas reprise : le menu de ce chrome n'affiche pas d'apercu, et
+# rasteriser une image pour ne pas la montrer serait du travail pur.
+substitute(
+    page_cpp,
+    """void PageClient::page_did_request_image_context_menu(Web::CSSPixelPoint content_position, URL::URL const& url, ByteString const& target, unsigned modifiers, Optional<Gfx::Bitmap const*> bitmap_pointer)
+{
+    Optional<Gfx::ShareableBitmap> bitmap;""",
+    """void PageClient::page_did_request_image_context_menu(Web::CSSPixelPoint content_position, URL::URL const& url, ByteString const& target, unsigned modifiers, Optional<Gfx::Bitmap const*> bitmap_pointer)
+{
+#if defined(BOUCHAUD_PORT)
+    if (bouchaud_m9_enabled() && BouchaudChrome::enabled()) {
+        auto const point = page().css_to_device_point(content_position).to_type<int>();
+        BouchaudChrome::ouvre_menu_contextuel(point.x(), point.y(), url.to_byte_string());
+        return;
+    }
+#endif
+    Optional<Gfx::ShareableBitmap> bitmap;""",
+    "menu contextuel d'image",
+)
+
 
 print("Bouchaud V19 navigateur applique a", root)

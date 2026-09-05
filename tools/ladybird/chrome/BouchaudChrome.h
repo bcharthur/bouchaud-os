@@ -141,6 +141,10 @@ inline constexpr int survol_hauteur = ui_text_height + 2;
 /// Barre de recherche : assez large pour une requete et son compteur.
 inline constexpr int recherche_largeur = 320;
 inline constexpr int recherche_hauteur = ui_text_height + 10;
+/// Menu contextuel.
+inline constexpr int menu_largeur = 232;
+inline constexpr int menu_hauteur_entree = ui_text_height + 6;
+inline constexpr int menu_marge_verticale = 4;
 
 // ----------------------------------------------------------------------------
 // Protocole GUI
@@ -641,6 +645,22 @@ struct State {
     // ete au premier plan -- c'est-a-dire la derniere fois ou l'utilisateur a
     // pu copier quoi que ce soit ailleurs.
     ByteString presse_papiers;
+
+    // BOUCHAUD_CHROME_V19_MENU_CONTEXTUEL
+    //
+    // Le menu contextuel. Il ne s'ouvre pas sur le clic droit : il s'ouvre
+    // quand LIBWEB le demande, apres avoir distribue l'evenement `contextmenu`
+    // au document. C'est ce detour qui fait qu'une page qui appelle
+    // `preventDefault()` -- un editeur de texte, une carte, un terminal web --
+    // garde son propre menu, et c'est la seule facon correcte de le brancher.
+    bool menu_ouvert { false };
+    /// Position d'ouverture, en coordonnees de SURFACE.
+    int menu_x { 0 };
+    int menu_y { 0 };
+    /// L'adresse du lien sous le pointeur au moment du clic, si c'en etait un.
+    ByteString menu_lien;
+    /// Le RANG de l'entree survolee dans la liste visible, -1 si aucune.
+    int menu_survole { -1 };
 
     /// L'adresse du lien sous le pointeur, vide quand il n'y en a pas.
     ///
@@ -1375,6 +1395,8 @@ enum Calque : int {
     Survol = 0,
     /// Barre de recherche dans la page, en haut a droite.
     Recherche,
+    /// Menu contextuel, la ou on a clique.
+    Menu,
     Nombre,
 };
 
@@ -1521,6 +1543,144 @@ inline void dessine_recherche(Canvas const& canvas)
     }
 }
 
+/// Les entrees du menu contextuel.
+///
+/// L'ordre de cette enumeration N'EST PAS celui du menu : `entrees_menu()`
+/// decide de ce qui est visible et dans quel ordre, parce que cela depend du
+/// contexte -- il n'y a pas d'entree « copier l'adresse du lien » quand on n'a
+/// pas clique sur un lien. Un menu qui montre une entree inerte apprend a
+/// l'utilisateur a s'en mefier.
+enum EntreeMenu : int {
+    MenuOuvrirLien = 0,
+    MenuCopierLien,
+    MenuReculer,
+    MenuAvancer,
+    MenuRecharger,
+    MenuCopier,
+    MenuColler,
+    MenuToutSelectionner,
+    MenuRechercher,
+    MenuNombre,
+};
+
+inline StringView libelle_menu(int entree)
+{
+    switch (entree) {
+    case MenuOuvrirLien:
+        return "Ouvrir le lien"sv;
+    case MenuCopierLien:
+        return "Copier l'adresse du lien"sv;
+    case MenuReculer:
+        return "Reculer"sv;
+    case MenuAvancer:
+        return "Avancer"sv;
+    case MenuRecharger:
+        return "Recharger"sv;
+    case MenuCopier:
+        return "Copier"sv;
+    case MenuColler:
+        return "Coller"sv;
+    case MenuToutSelectionner:
+        return "Tout selectionner"sv;
+    case MenuRechercher:
+        return "Rechercher dans la page"sv;
+    default:
+        return ""sv;
+    }
+}
+
+/// Remplit `sortie` des entrees visibles, dans l'ordre, et rend leur nombre.
+inline int entrees_menu(int (&sortie)[MenuNombre])
+{
+    auto& s = state();
+    int nombre = 0;
+    auto ajoute = [&](int entree) { sortie[nombre++] = entree; };
+    if (!s.menu_lien.is_empty()) {
+        ajoute(MenuOuvrirLien);
+        ajoute(MenuCopierLien);
+    }
+    ajoute(MenuReculer);
+    ajoute(MenuAvancer);
+    ajoute(MenuRecharger);
+    ajoute(MenuCopier);
+    ajoute(MenuColler);
+    ajoute(MenuToutSelectionner);
+    ajoute(MenuRechercher);
+    return nombre;
+}
+
+inline BouchaudDegat::Rect boite_menu()
+{
+    auto& s = state();
+    if (!s.menu_ouvert || s.surface_width <= 0 || s.surface_height <= 0)
+        return {};
+
+    int entrees[MenuNombre] {};
+    auto const nombre = entrees_menu(entrees);
+    if (nombre <= 0)
+        return {};
+
+    auto const hauteur = nombre * menu_hauteur_entree + 2 * menu_marge_verticale;
+    auto const largeur = min(menu_largeur, s.surface_width);
+    if (largeur <= 0 || page_origin_y() + hauteur > s.surface_height)
+        return {};
+
+    // Le menu s'ouvre au pointeur, puis RENTRE dans la fenetre. Un menu qui
+    // deborde perd ses dernieres entrees, et un clic droit pres du bord bas
+    // est exactement le cas ou cela arrive.
+    auto const x = max(0, min(s.menu_x, s.surface_width - largeur));
+    auto const y = max(page_origin_y(), min(s.menu_y, s.surface_height - hauteur));
+    return { x, y, largeur, hauteur };
+}
+
+/// Le rang de l'entree que ce point survole, ou -1.
+///
+/// Elle interroge `boite_menu()` et non la boite deja posee dans le suivi :
+/// celle-ci n'est mise a jour qu'a la composition suivante, et un clic arrive
+/// entre les deux. DESSINER suit le suivi -- c'est de lui que le degat a ete
+/// calcule -- mais VISER suit l'etat.
+inline int entree_menu_au_point(int x, int y)
+{
+    auto const boite = boite_menu();
+    if (!BouchaudCalques::contient(boite, x, y))
+        return -1;
+    auto const dans = y - boite.y - menu_marge_verticale;
+    if (dans < 0)
+        return -1;
+    auto const rang = dans / menu_hauteur_entree;
+    int entrees[MenuNombre] {};
+    auto const nombre = entrees_menu(entrees);
+    return rang < nombre ? rang : -1;
+}
+
+inline void dessine_menu(Canvas const& canvas)
+{
+    auto& s = state();
+    auto const boite = s.calques.boite(Menu);
+    if (boite.vide())
+        return;
+
+    fill_rect(canvas, boite.x, boite.y, boite.w, boite.h, color_calque_fond);
+    fill_rect(canvas, boite.x, boite.y, boite.w, 1, color_calque_bord);
+    fill_rect(canvas, boite.x, boite.y + boite.h - 1, boite.w, 1, color_calque_bord);
+    fill_rect(canvas, boite.x, boite.y, 1, boite.h, color_calque_bord);
+    fill_rect(canvas, boite.x + boite.w - 1, boite.y, 1, boite.h, color_calque_bord);
+
+    int entrees[MenuNombre] {};
+    auto const nombre = entrees_menu(entrees);
+    for (int rang = 0; rang < nombre; ++rang) {
+        auto const haut = boite.y + menu_marge_verticale + rang * menu_hauteur_entree;
+        if (rang == s.menu_survole) {
+            fill_rect(canvas, boite.x + 1, haut, boite.w - 2, menu_hauteur_entree,
+                color_button);
+        }
+        draw_ui_text(canvas, boite.x + calque_marge,
+            haut + (menu_hauteur_entree - ui_text_height) / 2,
+            libelle_menu(entrees[rang]), color_calque_texte,
+            boite.w - 2 * calque_marge);
+    }
+}
+
 /// Ou chaque calque doit se trouver a la trame qui vient.
 ///
 /// Un seul endroit calcule les boites, et il les calcule TOUTES : une boite
@@ -1532,6 +1692,7 @@ inline void mesure_calques()
     auto& s = state();
     s.calques.place(Survol, boite_survol());
     s.calques.place(Recherche, boite_recherche());
+    s.calques.place(Menu, boite_menu());
 }
 
 /// Dessine les calques que `publie` recouvre, en coordonnees de SURFACE.
@@ -1546,6 +1707,10 @@ inline void dessine_calques(Canvas const& canvas, BouchaudDegat::Rect publie)
         dessine_survol(canvas);
     if (BouchaudCalques::doit_redessiner(s.calques.boite(Recherche), publie))
         dessine_recherche(canvas);
+    // Le menu EN DERNIER : il s'ouvre par-dessus tout, y compris par-dessus la
+    // barre de recherche, et l'ordre de dessin est ce qui le decide.
+    if (BouchaudCalques::doit_redessiner(s.calques.boite(Menu), publie))
+        dessine_menu(canvas);
 }
 
 // ----------------------------------------------------------------------------
@@ -2085,6 +2250,116 @@ inline void set_presse_papiers_du_document(ByteString const& texte)
     copie_vers_le_presse_papiers(texte);
 }
 
+
+// ----------------------------------------------------------------------------
+// Menu contextuel
+// ----------------------------------------------------------------------------
+//
+// BOUCHAUD_CHROME_V19_MENU_CONTEXTUEL
+//
+// Il ne s'ouvre pas sur le clic droit. Il s'ouvre quand LIBWEB le demande,
+// apres avoir distribue l'evenement `contextmenu` au document : c'est ce
+// detour qui fait qu'une page qui appelle `preventDefault()` -- un editeur de
+// texte, une carte, un terminal web -- garde son propre menu. L'ouvrir depuis
+// le chrome, sur le bouton, aurait ete plus court et aurait casse ces pages-la
+// sans qu'aucun test ne le dise.
+//
+// Aucune de ses entrees n'a de rappel a elle : elles appellent ce que les
+// raccourcis clavier appellent deja. Un menu qui ferait les choses par un
+// second chemin finirait par les faire differemment.
+
+inline void ferme_menu()
+{
+    auto& s = state();
+    if (!s.menu_ouvert)
+        return;
+    s.menu_ouvert = false;
+    s.menu_lien = ByteString {};
+    s.menu_survole = -1;
+}
+
+/// `page_x` et `page_y` sont dans le repere de PAGE : ils viennent du moteur.
+inline void ouvre_menu_contextuel(int page_x, int page_y, ByteString const& lien)
+{
+    auto& s = state();
+    s.menu_x = page_x;
+    s.menu_y = page_y + page_origin_y();
+    s.menu_lien = lien;
+    s.menu_survole = -1;
+    s.menu_ouvert = true;
+    // Le menu prend le foyer : les fleches et Entree lui appartiennent tant
+    // qu'il est ouvert, et deux widgets qui recoivent la meme frappe est le
+    // genre de defaut qu'on ne voit qu'en tapant.
+    defocus_address();
+    if (s.recherche_focus) {
+        s.recherche_focus = false;
+        s.calques.salit(Recherche);
+    }
+    request_chrome_frame();
+}
+
+inline void active_entree_menu(int rang)
+{
+    auto& s = state();
+    int entrees[MenuNombre] {};
+    auto const nombre = entrees_menu(entrees);
+    if (rang < 0 || rang >= nombre) {
+        ferme_menu();
+        return;
+    }
+
+    auto const entree = entrees[rang];
+    // Le lien est copie AVANT la fermeture, qui l'efface.
+    auto const lien = s.menu_lien;
+    // Fermer avant d'agir : plusieurs entrees ouvrent autre chose -- la barre
+    // de recherche -- ou naviguent, et un menu ferme apres coup effacerait ce
+    // que l'action vient de mettre a l'ecran.
+    ferme_menu();
+
+    switch (entree) {
+    case MenuOuvrirLien:
+        if (!lien.is_empty() && s.on_navigate) {
+            s.loading = true;
+            s.status = "chargement...";
+            s.on_navigate(lien);
+        }
+        break;
+    case MenuCopierLien:
+        if (!lien.is_empty())
+            copie_vers_le_presse_papiers(lien);
+        break;
+    case MenuReculer:
+        if (s.on_history_delta)
+            s.on_history_delta(-1);
+        break;
+    case MenuAvancer:
+        if (s.on_history_delta)
+            s.on_history_delta(1);
+        break;
+    case MenuRecharger:
+        s.loading = true;
+        s.status = "chargement...";
+        if (s.on_reload)
+            s.on_reload();
+        break;
+    case MenuCopier:
+        copie_la_selection(false);
+        break;
+    case MenuColler:
+        colle_le_presse_papiers();
+        break;
+    case MenuToutSelectionner:
+        selectionne_tout_le_foyer();
+        break;
+    case MenuRechercher:
+        ouvre_recherche();
+        break;
+    default:
+        break;
+    }
+    request_chrome_frame();
+}
+
 // ----------------------------------------------------------------------------
 // Entrees
 // ----------------------------------------------------------------------------
@@ -2134,6 +2409,29 @@ inline void handle_pointer(int x, int y, unsigned buttons)
     auto pressed = buttons & ~previous;
     auto released = previous & ~buttons;
     s.last_buttons = buttons;
+
+    // BOUCHAUD_CHROME_V19_MENU_CONTEXTUEL
+    //
+    // Le menu prend TOUT le pointeur tant qu'il est ouvert, y compris au-dessus
+    // de la barre d'outils. Un clic ailleurs le ferme et ne va pas plus loin :
+    // c'est ce que fait tout menu, et laisser passer ce premier clic ferait
+    // agir sur ce qu'on voulait seulement quitter des yeux.
+    if (s.menu_ouvert) {
+        auto const survole = entree_menu_au_point(x, y);
+        if (survole != s.menu_survole) {
+            s.menu_survole = survole;
+            s.calques.salit(Menu);
+        }
+        if (pressed != 0) {
+            if (survole >= 0)
+                active_entree_menu(survole);
+            else
+                ferme_menu();
+        }
+        s.last_x = x;
+        s.last_y = y;
+        return;
+    }
 
     auto in_toolbar = y < toolbar_height;
 
@@ -2197,7 +2495,7 @@ inline void handle_pointer(int x, int y, unsigned buttons)
     //
     // La bulle de survol, elle, ne prend rien : elle n'a rien a cliquer, et
     // elle s'efface des que le pointeur quitte le lien.
-    if (BouchaudCalques::contient(s.calques.boite(Recherche), x, y)) {
+    if (BouchaudCalques::contient(boite_recherche(), x, y)) {
         if (pressed != 0) {
             defocus_address();
             s.recherche_focus = true;
@@ -2244,6 +2542,12 @@ inline void handle_pointer(int x, int y, unsigned buttons)
 inline void handle_wheel(int delta, int x, int y)
 {
     auto& s = state();
+    // Un menu est ancre a un point de la PAGE, et la molette deplace la page
+    // sous lui. Le laisser ouvert le ferait pointer autre chose que ce sur
+    // quoi on a clique -- et « ouvrir le lien » ouvrirait alors un lien qui
+    // n'est plus la.
+    if (s.menu_ouvert)
+        ferme_menu();
     outln("[ladybird-bouchaud] M11_WHEEL_RX dx=0 dy={} client_x={} client_y={}", delta, x, y);
     if (y < toolbar_height) {
         outln("[ladybird-bouchaud] WEB_WHEEL_DROP reason=toolbar client_x={} client_y={}", x, y);
@@ -2477,6 +2781,38 @@ inline void handle_key(u32 code, u32 code_point, u32 modifiers, u32 pressed)
 
     if (raccourci_navigateur(code, code_point, modifiers, appui))
         return;
+
+    // Le menu contextuel passe avant tout le reste : il est ouvert PAR-DESSUS,
+    // et c'est lui que l'utilisateur regarde.
+    if (s.menu_ouvert) {
+        if (!appui)
+            return;
+        int entrees[MenuNombre] {};
+        auto const nombre = entrees_menu(entrees);
+        switch (code) {
+        case ToucheBas:
+            // Depuis « rien de survole », la premiere fleche vers le bas
+            // designe la premiere entree : `-1 + 1 == 0`.
+            s.menu_survole = nombre > 0 ? (s.menu_survole + 1) % nombre : -1;
+            s.calques.salit(Menu);
+            break;
+        case ToucheHaut:
+            s.menu_survole = nombre > 0
+                ? (s.menu_survole <= 0 ? nombre - 1 : s.menu_survole - 1)
+                : -1;
+            s.calques.salit(Menu);
+            break;
+        case ToucheEntree:
+            active_entree_menu(s.menu_survole);
+            break;
+        case ToucheEchap:
+            ferme_menu();
+            break;
+        default:
+            break;
+        }
+        return;
+    }
 
     // BOUCHAUD_CHROME_V19_RECHERCHE
     //
