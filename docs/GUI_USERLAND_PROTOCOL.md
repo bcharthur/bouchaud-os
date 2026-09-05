@@ -281,9 +281,12 @@ ni le reseau.
 
 ## 11. Ce que ce jalon ne fait pas
 
-- **Pas de redimensionnement.** La surface est allouee une fois et Qt dimensionne
-  son ecran dessus au demarrage. Le bouton maximiser est donc inerte sur la
-  fenetre du navigateur, et la poignee de redimensionnement absente.
+- **Pas de redimensionnement cote hote Qt.** La surface est allouee une fois, a
+  la plus grande zone utile possible, et Qt dimensionne son ecran dessus au
+  demarrage : il ne suit pas `Configure`. Le chrome Ladybird, lui, le suit --
+  il adopte la nouvelle taille, recompose et transmet le viewport au moteur --,
+  donc le bouton maximiser agit sur la fenetre du navigateur et pas sur celle
+  de l'hote Qt.
 - **Pas de double tampon.** Voir la section 2 : inutile tant que le compositeur
   ne peut pas etre preempte.
 - **Pas de repetition annoncee.** Le pilote distingue une touche maintenue

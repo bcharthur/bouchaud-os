@@ -70,13 +70,20 @@ boucle d'evenements de LibWeb — tout cela est celui d'upstream, non reecrit.
 
 ## Geometrie
 
-La barre fait 36 pixels. Le viewport de la page vaut donc
-`hauteur_surface - 36`, et un clic a l'ordonnee `y` de la surface arrive a
-`y - 36` dans la page. La conversion vit a **un seul endroit**,
-`BouchaudChrome::page_origin_y()`, utilisee par la composition comme par le
-routage des entrees : c'est ce qui garantit qu'un clic tombe la ou le pixel a
-ete peint. Deux constantes auraient fini par diverger d'un pixel, et un lien sur
-deux aurait manque.
+La barre d'outils fait 36 pixels, la bande d'onglets 30 : le haut de la page
+est donc a 66. Le viewport vaut `hauteur_surface - 66`, et un clic a l'ordonnee
+`y` de la surface arrive a `y - 66` dans la page.
+
+La conversion vit a **un seul endroit**, `BouchaudChrome::page_origin_y()`,
+utilisee par la composition comme par le routage des entrees : c'est ce qui
+garantit qu'un clic tombe la ou le pixel a ete peint. Deux constantes auraient
+fini par diverger d'un pixel, et un lien sur deux aurait manque. C'est aussi ce
+qui a permis d'ajouter la bande sans toucher au reste.
+
+La bande est **sous** la barre, et non au-dessus. Au-dessus aurait ete plus
+courant ; en dessous, `draw_toolbar` continue de peindre de zero a 36, et
+`modernise-v15.py` -- qui en remplace deux blocs par du rendu Skia et des
+icones -- retrouve ses ancres au mot pres.
 
 ## Le rythme des trames, et pourquoi il n'est pas immediat
 
@@ -127,19 +134,44 @@ inutile.
 
 ## Clavier
 
-Le gestionnaire de fenetres n'envoie que des **appuis** : il n'a pas de source
-de relachements a transmettre. Le chrome emet donc le `keyup` juste apres le
-`keydown`, sans quoi une page qui compte les deux resterait persuadee qu'une
-touche est enfoncee.
+Le gestionnaire de fenetres envoie les deux transitions -- le pilote PS/2
+connaissait les codes make/break depuis toujours, ils etaient jetes avant le
+protocole. Une touche maintenue existe donc, et la repetition automatique se
+distingue d'une rafale de frappes.
+
+Le foyer est unique, et il se prend dans cet ordre : le menu contextuel s'il
+est ouvert, puis la barre de recherche, puis la barre d'adresse, puis le
+document.
 
 | Touche | Barre d'adresse au foyer | Page au foyer |
 |---|---|---|
 | caractere | insere | envoye au document |
-| Entree | navigue | envoye au document |
-| Retour arriere | efface | envoye au document |
+| Entree | navigue, ou ouvre la proposition choisie | envoye au document |
+| Retour arriere / Suppr | efface a gauche / a droite | envoye au document |
 | Gauche / Droite | deplace le curseur | envoye au document |
-| Haut / Bas | ignore | defilement / document |
+| Haut / Bas | parcourt les propositions | defilement / document |
+| Debut / Fin | debut / fin de la saisie | envoye au document |
+| Page haut / bas | ignore | defilement |
+| F1..F12 | ignorees sauf F3 et F5 | envoyees au document |
 | Echap | rend le foyer, restaure l'URL | arrete le chargement |
+
+### Raccourcis du navigateur
+
+Ils sont examines **avant** le foyer : un raccourci qui ne fonctionne que
+lorsque le foyer est au bon endroit n'est pas un raccourci.
+
+| Raccourci | Effet |
+|---|---|
+| F5, Ctrl+R | recharge |
+| Alt+Gauche / Alt+Droite | historique |
+| Ctrl+L | barre d'adresse, tout selectionne |
+| Ctrl+ + / Ctrl+- / Ctrl+0 | zoom, par onglet |
+| Ctrl+F | recherche dans la page |
+| F3 / Maj+F3 | correspondance suivante / precedente |
+| Ctrl+A / Ctrl+C / Ctrl+X / Ctrl+V | selection et presse-papiers du bureau |
+| Ctrl+D | ajoute ou retire des favoris |
+| Ctrl+T / Ctrl+W | ouvre / ferme un onglet |
+| Ctrl+Tab / Maj+Ctrl+Tab | onglet suivant / precedent |
 
 Echap arrive au client parce que le gestionnaire de fenetres le lui laisse
 quand il a le focus (`docs/GUI_USERLAND_PROTOCOL.md` §4) : la croix de la barre
@@ -170,6 +202,13 @@ manque — voir `tools/ladybird/certs/README.md`.
 [ladybird-bouchaud] M11_DOCUMENT_LOADED page=1 url=https://example.com/
 [ladybird-bouchaud] M11_NAVIGATE url=…            (barre d'adresse)
 [ladybird-bouchaud] M11_HISTORY delta=-1          (bouton reculer)
+[ladybird-bouchaud] M11_TAB_OPEN page=2 total=2
+[ladybird-bouchaud] M11_TAB_ACTIVE page=2 rang=1
+[ladybird-bouchaud] M11_TAB_CLOSED page=2 reste=1
+[ladybird-bouchaud] M11_DOWNLOAD_START id=1 path=/persist/Downloads/… total=…
+[ladybird-bouchaud] M11_DOWNLOAD_DONE id=1 name=… bytes=…
+[ladybird-bouchaud] M11_STORE_LOADED historique=… favoris=…
+[ladybird-bouchaud] M11_BOOKMARK_ADDED url=…
 ```
 
 `M11_DOCUMENT_SKIPPED url=about:blank` est normal : le document vide initial se
@@ -178,13 +217,20 @@ clignoter une URL que personne n'a demandee.
 
 ## Ce que M11 ne fait toujours pas
 
-- **Pas de redimensionnement.** La surface est allouee une fois
-  (`docs/GUI_USERLAND_PROTOCOL.md` §11) ; `Configure` est journalise, pas suivi.
-- **Pas d'onglets** — M13.
 - **Pas d'ecran d'avertissement de certificat.** Une chaine invalide fait
   echouer la requete, et le statut affiche l'echec ; il n'y a pas encore
   d'interface pour porter une decision de l'utilisateur.
-- **Pas de modificateurs clavier.** Le pilote du bureau n'expose pas encore
-  Ctrl/Alt separement, donc pas de Ctrl+L ni de Ctrl+R : la barre se prend a la
-  souris.
-- **Pas de menu contextuel, pas de telechargements, pas de favoris.**
+- **Pas de `Worker`.** `StartWorkerAgent` est la derniere question synchrone
+  sans repondant : elle demande un processus, et creer un processus depuis
+  WebContent n'aurait aucun sens. Voir `AUDIT_INTEGRATION.md` §5.
+- **Pas de plein ecran de document.** `page_did_request_fullscreen_window` part
+  vers un hote absent.
+- **Pas d'annulation de telechargement.** La question est posee au chrome
+  (`telechargement_annule`), et il repond toujours non : le bouton n'existe pas
+  encore, et c'est la que la reponse changera.
+- **Le chrome vit dans WebContent**, et c'est la limite qui compte. Le
+  processus qui execute le script des sites est aussi celui qui tient la barre
+  d'adresse, les favoris, l'historique et les fichiers telecharges. Les deux
+  droits d'ecriture persistants que cela demande sont accordes, nommes et
+  bornes dans `src/kernel/security/chemins.rs` -- et ils repartiront ensemble
+  le jour ou le chrome sortira d'ici.
