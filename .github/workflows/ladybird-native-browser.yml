@@ -111,8 +111,32 @@ jobs:
       - name: Statistiques ccache avant
         run: ccache -s || true
 
+      # Le journal de ninja fait cinq mille lignes, et une erreur de
+      # compilation tombe AU MILIEU : les cibles encore en vol continuent de
+      # s'afficher apres elle, sur des centaines de lignes. Une interface qui
+      # ne rend que la fin du journal -- l'API des journaux de job en est une --
+      # ne montre donc jamais le diagnostic, seulement
+      # « ninja: build stopped: cannot make progress ».
+      #
+      # C'est arrive : une construction rouge dont l'erreur etait litteralement
+      # illisible. Le journal est donc conserve, et les diagnostics recopies A
+      # LA FIN, la ou on les lira.
       - name: Construire Ladybird
-        run: tools/ladybird/native-browser-final.sh --cible
+        run: |
+          set -o pipefail
+          tools/ladybird/native-browser-final.sh --cible 2>&1 \
+            | tee /tmp/ladybird-build.log
+
+      - name: Diagnostics de compilation
+        if: failure()
+        run: |
+          set +e
+          echo "=== blocs FAILED, recopies depuis le milieu du journal ==="
+          grep -n -A 40 '^FAILED:' /tmp/ladybird-build.log | head -250
+          echo
+          echo "=== toutes les lignes d'erreur ==="
+          grep -n -E 'error:|Error [0-9]+' /tmp/ladybird-build.log | head -80
+          exit 0
 
       - name: Marquer la capacite UI V16
         run: |

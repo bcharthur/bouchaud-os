@@ -437,9 +437,16 @@ substitute(
             // repeignait que le degat au lieu de toute la surface, un tampon
             // unique resterait coherent -- il porte deja la trame precedente --
             // la ou deux tampons alternes porteraient l'avant-derniere.
-            auto bitmap_or_error = bouchaud_interactive_frame
-                ? bouchaud_interactive_frame_bitmap(rect.size().to_type<int>())
-                : Gfx::Bitmap::create(Gfx::BitmapFormat::BGRA8888, rect.size().to_type<int>());
+            //
+            // Une lambda, et non un `?:` : `ErrorOr` ne se copie pas, et deux
+            // appels dans un operateur ternaire demandent au compilateur un
+            // raisonnement d'elision que rien n'oblige a faire ici. La forme
+            // explicite ne coute rien et ne pose pas la question.
+            auto bitmap_or_error = [&]() -> ErrorOr<NonnullRefPtr<Gfx::Bitmap>> {
+                if (bouchaud_interactive_frame)
+                    return bouchaud_interactive_frame_bitmap(rect.size().to_type<int>());
+                return Gfx::Bitmap::create(Gfx::BitmapFormat::BGRA8888, rect.size().to_type<int>());
+            }();
             if (bouchaud_interactive_frame) {
                 bouchaud_interactive_frame_capture_started();
                 // La capture et son degat partent ensemble : PageClient lira ce
@@ -504,7 +511,11 @@ substitute(
     // Voir tools/ladybird/prepare-repaint.py.
     if (page().top_level_traversable_is_initialized()) {
         auto traversable = page().top_level_traversable();
-        if (traversable.ptr() == this) {
+        // `is_top_level_traversable()` plutot qu'une comparaison de pointeurs
+        // entre une classe derivee et sa base : le predicat existe, il est
+        // deja utilise plus haut dans cette meme fonction, et il ne demande
+        // aucune conversion.
+        if (is_top_level_traversable()) {
             traversable->bouchaud_accumulate_frame_damage(damage_rect);
         } else {
             // Un navigable imbrique peint dans le contexte de son parent : son
