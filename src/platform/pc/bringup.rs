@@ -35,6 +35,55 @@ pub fn announce(boot: &BootInfo) {
 /// ou audio.
 ///
 /// Le marqueur est volontairement LEGACY. Il ne prouve ni UEFI ni GOP.
+fn framebuffer_format_label(format: crate::boot::FramebufferPixelFormat) -> &'static str {
+    match format {
+        crate::boot::FramebufferPixelFormat::Rgb => "rgb",
+        crate::boot::FramebufferPixelFormat::Bgr => "bgr",
+        crate::boot::FramebufferPixelFormat::U8 => "u8",
+        crate::boot::FramebufferPixelFormat::Unknown => "unknown",
+    }
+}
+
+/// Preuve UEFI Lot 2A. Elle exige un framebuffer firmware valide mais ne
+/// dessine pas encore dedans : l'ecriture GOP sera le Lot 2B.
+pub fn complete_uefi_bootinfo_and_halt(boot: &BootInfo) -> ! {
+    if boot.firmware != FirmwareKind::Uefi {
+        panic!("bringup UEFI appele sur un firmware non UEFI");
+    }
+    if !boot.memory_regions_complete {
+        panic!("bringup UEFI: carte memoire tronquee");
+    }
+    if boot.physical_memory_offset.is_none() {
+        panic!("bringup UEFI: mapping physique absent");
+    }
+
+    let framebuffer = boot
+        .framebuffer
+        .expect("bringup UEFI: framebuffer GOP absent ou invalide");
+
+    crate::serial_println!(
+        "[BRINGUP] uefi phys_offset={:#x} rsdp={}",
+        boot.physical_memory_offset.unwrap_or(0),
+        boot.rsdp_address.is_some() as u8,
+    );
+    crate::serial_println!(
+        "[BRINGUP] uefi framebuffer=1 addr={:#x} bytes={} {}x{} stride={} bpp={} format={}",
+        framebuffer.address,
+        framebuffer.byte_len,
+        framebuffer.width,
+        framebuffer.height,
+        framebuffer.stride,
+        framebuffer.bytes_per_pixel,
+        framebuffer_format_label(framebuffer.pixel_format),
+    );
+    crate::serial_println!("BOUCHAUD_UEFI_BOOTINFO_OK");
+
+    x86_64::instructions::interrupts::disable();
+    loop {
+        x86_64::instructions::hlt();
+    }
+}
+
 pub fn complete_legacy_foundation_and_halt(boot: &BootInfo) -> ! {
     crate::serial_println!(
         "[BRINGUP] phys_offset={:#x} rsdp={} framebuffer={}",

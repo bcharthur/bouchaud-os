@@ -20,7 +20,14 @@
 
 extern crate alloc;
 
+#[cfg(feature = "legacy-boot")]
 use bootloader::{entry_point, BootInfo as LegacyBootInfo};
+
+#[cfg(all(feature = "legacy-boot", feature = "uefi-boot"))]
+compile_error!("legacy-boot et uefi-boot sont mutuellement exclusifs");
+
+#[cfg(not(any(feature = "legacy-boot", feature = "uefi-boot")))]
+compile_error!("un chemin de boot doit etre selectionne");
 
 #[macro_use]
 mod macros;
@@ -46,11 +53,33 @@ pub const VERSION: &str = "0.35.0";
 /// Nom du systeme.
 pub const OS_NAME: &str = "Bouchaud OS";
 
+#[cfg(feature = "legacy-boot")]
 entry_point!(legacy_boot_entry);
 
 /// Frontiere temporaire du chargeur historique.
+#[cfg(feature = "legacy-boot")]
 fn legacy_boot_entry(legacy: &'static LegacyBootInfo) -> ! {
     let boot_info = boot::from_bootloader_09(legacy);
+    kernel_main(boot_info)
+}
+
+#[cfg(feature = "uefi-boot")]
+static UEFI_BOOTLOADER_CONFIG: bootloader_api::BootloaderConfig = {
+    let mut config = bootloader_api::BootloaderConfig::new_default();
+    config.mappings.physical_memory =
+        Some(bootloader_api::config::Mapping::Dynamic);
+    config
+};
+
+#[cfg(feature = "uefi-boot")]
+bootloader_api::entry_point!(
+    uefi_boot_entry,
+    config = &UEFI_BOOTLOADER_CONFIG
+);
+
+#[cfg(feature = "uefi-boot")]
+fn uefi_boot_entry(api: &'static mut bootloader_api::BootInfo) -> ! {
+    let boot_info = boot::from_bootloader_api(api);
     kernel_main(boot_info)
 }
 
@@ -58,6 +87,9 @@ fn legacy_boot_entry(legacy: &'static LegacyBootInfo) -> ! {
 fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // 1. Sorties de base : serie d'abord (pour tracer le boot), puis VGA.
     drivers::serial::init();
+    if boot_info.firmware == boot::FirmwareKind::Uefi {
+        crate::serial_println!("BOUCHAUD_UEFI_ENTRY_OK");
+    }
     if boot_info.firmware == boot::FirmwareKind::LegacyBios {
         drivers::vga::clear();
     }
@@ -72,13 +104,24 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     }
     kernel::memory::init(boot_info);
     kernel::dmesg::log("kernel: boot Bouchaud OS");
-    kernel::dmesg::log("vga: text mode initialise");
+    if boot_info.firmware == boot::FirmwareKind::LegacyBios {
+        kernel::dmesg::log("vga: text mode initialise");
+    } else {
+        kernel::dmesg::log("boot: framebuffer firmware transmis");
+    }
     kernel::dmesg::log("serial: COM1 initialise (debug QEMU)");
 
     // 3. Briques architecture. La pagination par processus doit etre prete
     //    avant `usermode::init` (appele par `arch::init`) : c'est elle qui
     //    fournit les frames et le creneau d'adressage du ring 3.
     kernel::vmm::init();
+
+    // Le premier boot UEFI s'arrete volontairement AVANT GDT/IDT/PIC/PCI.
+    // On veut d'abord prouver le chargeur, sa carte memoire et son GOP.
+    if reference_bringup && boot_info.firmware == boot::FirmwareKind::Uefi {
+        platform::pc::bringup::complete_uefi_bootinfo_and_halt(boot_info);
+    }
+
     arch::x86_64::init();
     if reference_bringup {
         kernel::dmesg::log("bringup: SMP/AP startup volontairement ignore");

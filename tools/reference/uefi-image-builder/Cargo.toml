@@ -1,0 +1,13 @@
+[package]
+name = "bouchaud-reference-uefi-image-builder"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+bootloader = { version = "=0.11.15", default-features = false, features = ["uefi"] }
+# Pins de compatibilite Windows-GNU. Sans lockfile, bootloader 0.11.15
+# accepte des transitives 2026 plus recentes qui utilisent raw-dylib et
+# declenchent dlltool.exe sur x86_64-pc-windows-gnu.
+tempfile = "=3.10.1"
+uuid = "=1.12.1"

@@ -31,13 +31,25 @@ pub struct MemoryRegion {
     pub kind: MemoryRegionKind,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FramebufferPixelFormat {
+    Rgb,
+    Bgr,
+    U8,
+    Unknown,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct FramebufferInfo {
+    /// Adresse virtuelle CPU-accessible fournie par le chargeur.
+    /// Ce champ ne doit jamais etre interprete comme le BAR0 du GPU.
     pub address: u64,
+    pub byte_len: usize,
     pub width: u32,
     pub height: u32,
     pub stride: u32,
     pub bytes_per_pixel: u8,
+    pub pixel_format: FramebufferPixelFormat,
 }
 
 pub struct BootInfo {
