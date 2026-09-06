@@ -44,9 +44,9 @@ fn framebuffer_format_label(format: crate::boot::FramebufferPixelFormat) -> &'st
     }
 }
 
-/// Preuve UEFI Lot 2A. Elle exige un framebuffer firmware valide mais ne
-/// dessine pas encore dedans : l'ecriture GOP sera le Lot 2B.
-pub fn complete_uefi_bootinfo_and_halt(boot: &BootInfo) -> ! {
+/// Preuve UEFI Stage 1 : BootInfo valide puis vraie ecriture framebuffer.
+/// Le marqueur GOP n'est emis qu'apres readback du pixel temoin.
+pub fn complete_uefi_stage1_and_halt(boot: &BootInfo) -> ! {
     if boot.firmware != FirmwareKind::Uefi {
         panic!("bringup UEFI appele sur un firmware non UEFI");
     }
@@ -77,6 +77,17 @@ pub fn complete_uefi_bootinfo_and_halt(boot: &BootInfo) -> ! {
         framebuffer_format_label(framebuffer.pixel_format),
     );
     crate::serial_println!("BOUCHAUD_UEFI_BOOTINFO_OK");
+
+    let proof = super::reference_gop::render_stage1(boot, framebuffer)
+        .expect("bringup UEFI: ecriture/readback GOP en echec");
+    crate::serial_println!(
+        "[BRINGUP] gop pixels_written={} readback={} vector_font={}",
+        proof.pixels_written,
+        proof.readback_ok as u8,
+        proof.vector_font_ok as u8,
+    );
+    crate::serial_println!("BOUCHAUD_GOP_OK");
+    crate::serial_println!("BOUCHAUD_REFERENCE_BOOT_STAGE1_OK");
 
     x86_64::instructions::interrupts::disable();
     loop {

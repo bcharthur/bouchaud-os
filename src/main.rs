@@ -116,10 +116,10 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     //    fournit les frames et le creneau d'adressage du ring 3.
     kernel::vmm::init();
 
-    // Le premier boot UEFI s'arrete volontairement AVANT GDT/IDT/PIC/PCI.
-    // On veut d'abord prouver le chargeur, sa carte memoire et son GOP.
+    // Stage 1 UEFI: preuve memoire + vraie ecriture framebuffer, toujours
+    // AVANT GDT/IDT/PIC/PCI et avant tout pilote a effets de bord.
     if reference_bringup && boot_info.firmware == boot::FirmwareKind::Uefi {
-        platform::pc::bringup::complete_uefi_bootinfo_and_halt(boot_info);
+        platform::pc::bringup::complete_uefi_stage1_and_halt(boot_info);
     }
 
     arch::x86_64::init();

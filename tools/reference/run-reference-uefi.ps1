@@ -91,7 +91,7 @@ Write-Host "  [BRINGUP] mode=reference-stage1 firmware=uefi ..."
 Write-Host "  [BRINGUP] uefi framebuffer=..."
 Write-Host "  BOUCHAUD_UEFI_BOOTINFO_OK"
 Write-Host ""
-Write-Host "Lot 2A: pas encore de dessin GOP Bouchaud. La preuve est serie." -ForegroundColor Yellow
+Write-Host "Mode regression serie/headless: le noyau Stage 1 dessine bien le GOP, mais -display none masque volontairement la fenetre." -ForegroundColor Yellow
 
 $Args = @(
     "-machine", "q35",

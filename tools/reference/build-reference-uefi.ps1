@@ -12,7 +12,7 @@ function Fail([string]$Message) {
     exit 1
 }
 
-Write-Host "=== Bouchaud Reference Device - build UEFI Lot 2A ===" -ForegroundColor Cyan
+Write-Host "=== Bouchaud Reference Device - build UEFI Stage 1 ===" -ForegroundColor Cyan
 
 & cargo build --no-default-features --features "uefi-boot,reference-bringup"
 if ($LASTEXITCODE -ne 0) {
