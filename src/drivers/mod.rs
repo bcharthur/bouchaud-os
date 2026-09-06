@@ -21,6 +21,8 @@ pub mod disk;
 pub mod display;
 #[path = "network/e1000.rs"]
 pub mod e1000;
+#[path = "network/rtl8168.rs"]
+pub mod rtl8168;
 #[path = "display/bochs.rs"]
 pub mod gfx;
 #[path = "api/gpu.rs"]

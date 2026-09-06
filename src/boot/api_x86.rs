@@ -13,7 +13,7 @@ use crate::arch::api::Architecture;
 
 use super::{
     BootInfo, FirmwareKind, FramebufferInfo, FramebufferPixelFormat,
-    MemoryRegion, MemoryRegionKind, PlatformKind,
+    MemoryRegion, MemoryRegionKind, PlatformKind, RamdiskInfo,
 };
 
 const MAX_MEMORY_REGIONS: usize = 512;
@@ -34,6 +34,7 @@ static mut NORMALIZED_BOOT_INFO: BootInfo = BootInfo {
     memory_regions: &[],
     memory_regions_complete: false,
     framebuffer: None,
+    ramdisk: None,
     physical_memory_offset: None,
     rsdp_address: None,
     device_tree: None,
@@ -82,6 +83,17 @@ fn framebuffer_info(api: &mut ApiBootInfo) -> Option<FramebufferInfo> {
     })
 }
 
+fn ramdisk_info(api: &ApiBootInfo) -> Option<RamdiskInfo> {
+    let address = api.ramdisk_addr.as_ref().copied()?;
+    let byte_len = usize::try_from(api.ramdisk_len).ok()?;
+    if address == 0 || byte_len == 0 {
+        return None;
+    }
+    // bootloader_api mappe le ramdisk selon mappings.ramdisk_memory puis place
+    // cette adresse VIRTUELLE dans BootInfo::ramdisk_addr.
+    Some(RamdiskInfo { address, byte_len })
+}
+
 /// Convertit le BootInfo UEFI en contrat Bouchaud avant d'entrer dans le
 /// noyau générique.
 pub fn from_bootloader_api(api: &'static mut ApiBootInfo) -> &'static BootInfo {
@@ -115,6 +127,7 @@ pub fn from_bootloader_api(api: &'static mut ApiBootInfo) -> &'static BootInfo {
 
     let physical_memory_offset = api.physical_memory_offset.as_ref().copied();
     let rsdp_address = api.rsdp_addr.as_ref().copied();
+    let ramdisk = ramdisk_info(api);
     let framebuffer = framebuffer_info(api);
 
     unsafe {
@@ -130,6 +143,7 @@ pub fn from_bootloader_api(api: &'static mut ApiBootInfo) -> &'static BootInfo {
             memory_regions: regions,
             memory_regions_complete: complete,
             framebuffer,
+            ramdisk,
             physical_memory_offset,
             rsdp_address,
             device_tree: None,

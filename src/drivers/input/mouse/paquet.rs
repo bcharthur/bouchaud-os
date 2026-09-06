@@ -75,8 +75,10 @@ unsafe fn apply_packet(with_wheel: bool) {
     let old_btn = BTN.load(Ordering::Relaxed);
     let old_wheel = WHEEL_DELTA.load(Ordering::Relaxed);
 
-    let new_x = old_x.saturating_add(dx).clamp(0, WIDTH as i32 - 1);
-    let new_y = old_y.saturating_sub(dy).clamp(0, HEIGHT as i32 - 1);
+    let max_x = crate::drivers::gfx::width().saturating_sub(1) as i32;
+    let max_y = crate::drivers::gfx::height().saturating_sub(1) as i32;
+    let new_x = old_x.saturating_add(dx).clamp(0, max_x);
+    let new_y = old_y.saturating_sub(dy).clamp(0, max_y);
     let new_btn = flags & 0x07;
 
     MX.store(new_x, Ordering::Release);

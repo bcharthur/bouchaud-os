@@ -4,5 +4,6 @@
 //! seront extraits progressivement du code x86_64.
 
 pub mod bringup;
+pub mod stage2;
 pub mod reference_gop;
 pub mod reference_metrics;

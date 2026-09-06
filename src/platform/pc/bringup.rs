@@ -44,9 +44,9 @@ fn framebuffer_format_label(format: crate::boot::FramebufferPixelFormat) -> &'st
     }
 }
 
-/// Preuve UEFI Stage 1 : BootInfo valide puis vraie ecriture framebuffer.
-/// Le marqueur GOP n'est emis qu'apres readback du pixel temoin.
-pub fn complete_uefi_stage1_and_halt(boot: &BootInfo) -> ! {
+/// Valide le contrat UEFI commun aux Stage 1 et Stage 2.
+/// Ne dessine rien et ne stoppe pas la machine.
+pub fn validate_uefi_stage1(boot: &BootInfo) -> crate::boot::FramebufferInfo {
     if boot.firmware != FirmwareKind::Uefi {
         panic!("bringup UEFI appele sur un firmware non UEFI");
     }
@@ -77,6 +77,13 @@ pub fn complete_uefi_stage1_and_halt(boot: &BootInfo) -> ! {
         framebuffer_format_label(framebuffer.pixel_format),
     );
     crate::serial_println!("BOUCHAUD_UEFI_BOOTINFO_OK");
+    framebuffer
+}
+
+/// Preuve UEFI Stage 1 : BootInfo valide puis vraie ecriture framebuffer.
+/// Le marqueur GOP n'est emis qu'apres readback du pixel temoin.
+pub fn complete_uefi_stage1_and_halt(boot: &BootInfo) -> ! {
+    let framebuffer = validate_uefi_stage1(boot);
 
     let proof = super::reference_gop::render_stage1(boot, framebuffer)
         .expect("bringup UEFI: ecriture/readback GOP en echec");

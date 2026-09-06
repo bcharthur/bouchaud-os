@@ -41,6 +41,8 @@ pub use legacy::{
     dernier_present_rect,
     lfb_present_generation,
     trace_present,
+    height,
+    width,
     HEIGHT,
     WIDTH,
     C_BLACK,

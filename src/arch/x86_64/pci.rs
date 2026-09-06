@@ -298,6 +298,20 @@ pub fn interrupt_line(d: &PciDevice) -> u8 {
     (config_read32(d.bus, d.slot, d.func, 0x3C) & 0xFF) as u8
 }
 
+/// Cherche le premier controleur xHCI (USB 3.x), ponts compris.
+/// Stage 2 V1 se contente de l'inventorier : aucun registre xHCI n'est ecrit.
+pub fn find_xhci() -> Option<PciDevice> {
+    let mut trouve = None;
+    parcours(&mut |d| {
+        if d.class == 0x0C && d.subclass == 0x03 && d.prog_if == 0x30 {
+            trouve = Some(*d);
+            return false;
+        }
+        true
+    });
+    trouve
+}
+
 /// Cherche la premiere carte reseau PCI presente, ponts compris.
 pub fn find_network() -> Option<PciDevice> {
     let mut trouve = None;

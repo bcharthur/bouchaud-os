@@ -11,6 +11,7 @@ default = ["legacy-boot"]
 legacy-boot = ["dep:bootloader"]
 uefi-boot = ["dep:bootloader_api"]
 reference-bringup = []
+reference-desktop = ["reference-bringup"]
 
 [dependencies]
 # Allocateur de tas pour activer `alloc` (Vec/String/BTreeMap).

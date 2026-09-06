@@ -29,6 +29,9 @@ compile_error!("legacy-boot et uefi-boot sont mutuellement exclusifs");
 #[cfg(not(any(feature = "legacy-boot", feature = "uefi-boot")))]
 compile_error!("un chemin de boot doit etre selectionne");
 
+#[cfg(all(feature = "reference-desktop", not(feature = "uefi-boot")))]
+compile_error!("reference-desktop exige le chemin uefi-boot");
+
 #[macro_use]
 mod macros;
 
@@ -119,7 +122,14 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // Stage 1 UEFI: preuve memoire + vraie ecriture framebuffer, toujours
     // AVANT GDT/IDT/PIC/PCI et avant tout pilote a effets de bord.
     if reference_bringup && boot_info.firmware == boot::FirmwareKind::Uefi {
-        platform::pc::bringup::complete_uefi_stage1_and_halt(boot_info);
+        #[cfg(feature = "reference-desktop")]
+        {
+            platform::pc::stage2::run(boot_info);
+        }
+        #[cfg(not(feature = "reference-desktop"))]
+        {
+            platform::pc::bringup::complete_uefi_stage1_and_halt(boot_info);
+        }
     }
 
     arch::x86_64::init();

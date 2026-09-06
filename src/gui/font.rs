@@ -543,7 +543,7 @@ fn blit_glyph(g: &Glyph, gx0: i32, gy0: i32, rgb: u32, bold: bool) {
     if g.w == 0 || g.h == 0 { return; }
     let debord = if bold { 1 } else { 0 };
     let Some(((x0, x1), (y0, y1))) = crate::gui::texte::portion_visible(
-        gx0, gy0, g.w, g.h, debord, (fb::WIDTH, fb::HEIGHT), fb::clip_rect(),
+        gx0, gy0, g.w, g.h, debord, (fb::width(), fb::height()), fb::clip_rect(),
     ) else { return };
 
     for ry in y0..y1 {

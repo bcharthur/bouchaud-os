@@ -11,6 +11,7 @@ use crate::shell::remainder_after_tokens;
 use crate::users;
 use crate::{serial_println, OS_NAME, VERSION};
 use alloc::string::String;
+use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------
 // Aide et informations
@@ -480,50 +481,77 @@ pub fn ls(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
     0
 }
 
+// BOUCHAUD_STAGE2_TREE_LOCK_SAFE
 pub fn tree(argc: usize, argv: &[&str; 12], cwd: usize) {
     let path = if argc >= 2 { argv[1] } else { "." };
-    let fs = ramfs::fs();
-    let idx = match fs.resolve_checked(path, cwd) {
-        Ok(i) => i,
-        Err(e) => {
-            println!("tree: {}", e);
-            return;
-        }
+
+    // Resolve et affiche la racine sous un seul emprunt VFS, puis le relache
+    // AVANT la recursion. Le precedent code gardait ce verrou vivant pendant
+    // `tree_rec()`, qui tentait de reprendre ramfs::fs() : LOCKDEP detectait
+    // alors une inversion rank 50 -> rank 50 et paniquait le noyau.
+    let idx = {
+        let fs = ramfs::fs();
+        let idx = match fs.resolve_checked(path, cwd) {
+            Ok(i) => i,
+            Err(e) => {
+                println!("tree: {}", e);
+                return;
+            }
+        };
+        ramfs::print_path(&fs, idx);
+        idx
     };
-    ramfs::print_path(&fs, idx);
     println!("");
+
     tree_rec(idx, 0);
 }
 
 fn tree_rec(idx: usize, depth: usize) {
-    let fs = ramfs::fs();
-    if fs.nodes[idx].kind != NodeKind::Dir {
-        return;
-    }
-    // On n'explore un repertoire que si on a le droit de le lire.
-    if !fs.can(idx, PERM_R) {
-        for _ in 0..depth {
-            print!("  ");
+    // Snapshot minimal des enfants. Aucun appel recursif ni println! n'est fait
+    // tant que le garde VFS est detenu.
+    let children: Vec<(usize, bool, String)> = {
+        let fs = ramfs::fs();
+        if fs.nodes[idx].kind != NodeKind::Dir {
+            return;
         }
-        println!("|- [permission denied]");
-        return;
-    }
-    for i in 0..MAX_NODES {
-        if fs.nodes[i].used && i != idx && fs.nodes[i].parent == idx {
+
+        if !fs.can(idx, PERM_R) {
+            drop(fs);
             for _ in 0..depth {
                 print!("  ");
             }
-            if fs.nodes[i].kind == NodeKind::Dir {
-                vga::set_color(COLOR_CYAN);
-                println!("|- {}/", fs.nodes[i].name_str());
-                vga::set_color(COLOR_DEFAULT);
-                tree_rec(i, depth + 1);
-            } else {
-                println!("|- {}", fs.nodes[i].name_str());
+            println!("|- [permission denied]");
+            return;
+        }
+
+        let mut children = Vec::new();
+        for i in 0..MAX_NODES {
+            if fs.nodes[i].used && i != idx && fs.nodes[i].parent == idx {
+                children.push((
+                    i,
+                    fs.nodes[i].kind == NodeKind::Dir,
+                    String::from(fs.nodes[i].name_str()),
+                ));
             }
+        }
+        children
+    };
+
+    for (child, is_dir, name) in children {
+        for _ in 0..depth {
+            print!("  ");
+        }
+        if is_dir {
+            vga::set_color(COLOR_CYAN);
+            println!("|- {}/", name);
+            vga::set_color(COLOR_DEFAULT);
+            tree_rec(child, depth + 1);
+        } else {
+            println!("|- {}", name);
         }
     }
 }
+
 
 pub fn cd(argc: usize, argv: &[&str; 12], cwd: &mut usize) -> i32 {
     if argc < 2 {

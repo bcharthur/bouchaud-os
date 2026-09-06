@@ -9,6 +9,7 @@
 
 use core::ptr::{read_volatile, write_volatile};
 use crate::arch::x86_64::pci;
+use crate::drivers::rtl8168;
 use crate::kernel::{dmesg, memory};
 
 // Registres e1000 (offsets en octets).
@@ -63,7 +64,29 @@ const ATTENTE_TX: u32 = 20_000;
 
 /// Nombre d'emissions abandonnees faute de descripteur libre.
 pub fn tx_anneau_plein() -> u64 {
-    unsafe { TX_ANNEAU_PLEIN }
+    unsafe { TX_ANNEAU_PLEIN }.saturating_add(rtl8168::tx_anneau_plein())
+}
+
+fn supported_network_device() -> Option<pci::PciDevice> {
+    let mut intel_qemu = None;
+    let mut realtek = None;
+    pci::parcours(&mut |device| {
+        if rtl8168::is_supported(device) {
+            realtek = Some(*device);
+            return false;
+        }
+        // Le pilote historique est un 82540EM, pas un pilote Intel generique.
+        // L'AX200 Wi-Fi du TRIGKEY ne doit jamais recevoir ses registres e1000.
+        if device.vendor == 0x8086 && device.device == 0x100E {
+            intel_qemu = Some(*device);
+        }
+        true
+    });
+    realtek.or(intel_qemu)
+}
+
+pub fn using_rtl8168() -> bool {
+    rtl8168::is_ready()
 }
 
 unsafe fn reg_read(off: u32) -> u32 {
@@ -98,12 +121,12 @@ fn delay(loops: u32) {
 
 /// Indique si la carte est initialisee.
 pub fn is_ready() -> bool {
-    unsafe { READY }
+    rtl8168::is_ready() || unsafe { READY }
 }
 
 /// Adresse MAC lue sur la carte.
 pub fn mac() -> [u8; 6] {
-    unsafe { MAC }
+    if rtl8168::is_ready() { rtl8168::mac() } else { unsafe { MAC } }
 }
 
 /// Initialise la carte e1000 (idempotent). Renvoie false si absente/echec.
@@ -111,13 +134,18 @@ pub fn init() -> bool {
     unsafe {
         if READY { return true; }
     }
-    let dev = match pci::find_network() {
+    let dev = match supported_network_device() {
         Some(d) => d,
-        None => { dmesg::log("e1000: aucune carte reseau PCI"); return false; }
+        None => {
+            dmesg::log("netdev: aucune carte filaire supportee (8086:100e ou 10ec:8168)");
+            return false;
+        }
     };
-    // Seules les cartes Intel sont gerees ici.
-    if dev.vendor != 0x8086 {
-        dmesg::log("e1000: carte non Intel, driver non charge");
+    if rtl8168::is_supported(&dev) {
+        return rtl8168::init_with_device(&dev);
+    }
+    if dev.vendor != 0x8086 || dev.device != 0x100E {
+        dmesg::log("e1000: identifiant Intel non supporte");
         return false;
     }
 
@@ -209,6 +237,7 @@ pub fn init() -> bool {
 
 /// Lien physique etabli ?
 pub fn link_up() -> bool {
+    if rtl8168::is_ready() { return rtl8168::link_up(); }
     unsafe {
         if !READY { return false; }
         reg_read(REG_STATUS) & 0x2 != 0 // STATUS.LU
@@ -217,6 +246,7 @@ pub fn link_up() -> bool {
 
 /// Emet une trame Ethernet complete. Renvoie false si non prete/trop grande.
 pub fn send(frame: &[u8]) -> bool {
+    if rtl8168::is_ready() { return rtl8168::send(frame); }
     unsafe {
         if !READY || frame.is_empty() || frame.len() > BUF { return false; }
         let i = TX_CUR;
@@ -262,6 +292,7 @@ pub fn send(frame: &[u8]) -> bool {
 
 /// Tente de recevoir une trame ; copie dans `out`, renvoie sa longueur.
 pub fn receive(out: &mut [u8]) -> Option<usize> {
+    if rtl8168::is_ready() { return rtl8168::receive(out); }
     unsafe {
         if !READY { return None; }
         let i = RX_CUR;
@@ -280,8 +311,12 @@ pub fn receive(out: &mut [u8]) -> Option<usize> {
 
 /// Affiche l'etat de la carte (commande `ethinfo`).
 pub fn print_info() {
+    if rtl8168::is_ready() {
+        rtl8168::print_info();
+        return;
+    }
     if !is_ready() {
-        crate::println!("e1000: non initialise (lance 'ifup')");
+        crate::println!("netdev: non initialise (lance 'ifup')");
         return;
     }
     let m = mac();

@@ -31,7 +31,7 @@ fn draw_circle(cx: usize, cy: usize, r: i32, color: u32) {
             if dx*dx + dy*dy <= r*r {
                 let px = cx as i32 + dx;
                 let py = cy as i32 + dy;
-                if px >= 0 && py >= 0 && (px as usize) < fb::WIDTH && (py as usize) < fb::HEIGHT {
+                if px >= 0 && py >= 0 && (px as usize) < fb::width() && (py as usize) < fb::height() {
                     fb::pixel_rgb(px as usize, py as usize, color);
                 }
             }
@@ -45,7 +45,7 @@ fn draw_circle_highlight(cx: usize, cy: usize, r: i32, base: u32) {
     for dx in -(r-1)..=(r-1) {
         let dy = -r + 1;
         let px = cx as i32 + dx; let py = cy as i32 + dy;
-        if px >= 0 && py >= 0 && (px as usize) < fb::WIDTH && (py as usize) < fb::HEIGHT {
+        if px >= 0 && py >= 0 && (px as usize) < fb::width() && (py as usize) < fb::height() {
             fb::pixel_rgb(px as usize, py as usize, lerp_color(base, 0xffffff, 60, 100));
         }
     }
@@ -90,8 +90,8 @@ const FILIGRANE_HAUTEUR: usize = 44;
 fn filigrane_origine() -> (usize, usize) {
     let largeur = fb::text_width(FILIGRANE, FILIGRANE_CORPS, false);
     (
-        (fb::WIDTH / 2).saturating_sub(largeur / 2),
-        fb::HEIGHT.saturating_sub(FILIGRANE_HAUTEUR + 22),
+        (fb::width() / 2).saturating_sub(largeur / 2),
+        fb::height().saturating_sub(FILIGRANE_HAUTEUR + 22),
     )
 }
 
@@ -220,10 +220,10 @@ fn fond_de_barre(sommet: usize, filet_en_bas: bool) {
             if filet_en_bas { ligne } else { BAR_H - 1 - ligne },
             BAR_H,
         );
-        fb::fill_rect_rgb(0, sommet + ligne, fb::WIDTH, 1, couleur);
+        fb::fill_rect_rgb(0, sommet + ligne, fb::width(), 1, couleur);
     }
     let filet = if filet_en_bas { sommet + BAR_H - 1 } else { sommet };
-    fb::fill_rect_rgb(0, filet, fb::WIDTH, 1, crate::gui::theme::COLOR_BORDER);
+    fb::fill_rect_rgb(0, filet, fb::width(), 1, crate::gui::theme::COLOR_BORDER);
 }
 
 /// Remplit un rectangle arrondi par SEGMENTS, ANTI-CRENELE.
@@ -262,7 +262,7 @@ fn draw_topbar() {
     // Statistiques CPU/RAM/Disque, au centre.
     let stats = sys_stats_str();
     let largeur = fb::text_width(&stats, CORPS_BARRE - 1.0, false);
-    let x = (fb::WIDTH / 2).saturating_sub(largeur / 2);
+    let x = (fb::width() / 2).saturating_sub(largeur / 2);
     fb::draw_text_prop(x, ligne, &stats,
         crate::gui::theme::COLOR_TEXT_SECONDARY, CORPS_BARRE - 1.0, false);
 
@@ -270,7 +270,7 @@ fn draw_topbar() {
     let dt = rtc::now();
     let heure = format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second);
     let largeur = fb::text_width(&heure, CORPS_BARRE, true);
-    fb::draw_text_prop(fb::WIDTH - largeur - window::MARGE_BARRE as usize * 2 - 2,
+    fb::draw_text_prop(fb::width() - largeur - window::MARGE_BARRE as usize * 2 - 2,
         ligne, &heure, crate::gui::theme::COLOR_TEXT_PRIMARY, CORPS_BARRE, true);
 }
 
@@ -313,11 +313,11 @@ fn draw_wallpaper() {
     // exactement la meme image. Sans ce bornage, un degat de curseur de 22
     // lignes faisait quand meme 720 tours de boucle -- et 720 lectures de la
     // decoupe, une par appel a `fill_rect_rgb`, pour 698 lignes jetees.
-    let h = fb::HEIGHT.max(1);
+    let h = fb::height().max(1);
     let (_, cy0, _, cy1) = fb::clip_rect();
-    for y in cy0..cy1.min(fb::HEIGHT) {
+    for y in cy0..cy1.min(fb::height()) {
         let c = lerp_color(0x080e1c, 0x1a2f50, y, h);
-        fb::fill_rect_rgb(0, y, fb::WIDTH, 1, c);
+        fb::fill_rect_rgb(0, y, fb::width(), 1, c);
     }
     // Subtiles étoiles (pixels clairs fixes, déterministes)
     let stars: &[(usize, usize)] = &[
@@ -326,7 +326,7 @@ fn draw_wallpaper() {
         (50, 350), (420, 400), (700, 380), (950, 420), (1150, 500),
     ];
     for &(sx, sy) in stars {
-        if sx < fb::WIDTH && sy < fb::HEIGHT {
+        if sx < fb::width() && sy < fb::height() {
             fb::pixel_rgb(sx, sy, 0x4a6fa5);
         }
     }
@@ -779,7 +779,7 @@ fn tronque_a_largeur(s: &str, largeur: usize, px: f32) -> &str {
 }
 
 pub(crate) fn draw_taskbar(wins: &[Win], menu_open: bool) {
-    let sommet = fb::HEIGHT - BAR_H;
+    let sommet = fb::height() - BAR_H;
     fond_de_barre(sommet, false);
 
     let focus = indice_focus(wins);
@@ -807,7 +807,7 @@ pub(crate) fn draw_taskbar(wins: &[Win], menu_open: bool) {
     // Boutons des fenetres.
     for (i, w) in wins.iter().enumerate() {
         let b = taskbar_btn(i);
-        if b.x + b.w > fb::WIDTH as i32 { break; }
+        if b.x + b.w > fb::width() as i32 { break; }
         let bx = b.x as usize; let by = b.y as usize;
         let bw = b.w as usize; let bh = b.h as usize;
         // BOUCHAUD_GFX_CULLING_AMONT_V1 : un degat sur un bouton n'a aucune
@@ -969,8 +969,8 @@ pub(crate) fn draw_cursor(mx: usize, my: usize) {
         0b0000000001100000,
         0b0000000001000000,
     ];
-    let px = mx.min(fb::WIDTH.saturating_sub(1));
-    let py = my.min(fb::HEIGHT.saturating_sub(1));
+    let px = mx.min(fb::width().saturating_sub(1));
+    let py = my.min(fb::height().saturating_sub(1));
     let bg = fb::get_pixel_rgb(px, py);
     let lum = ((bg >> 16 & 0xff) * 299 + (bg >> 8 & 0xff) * 587 + (bg & 0xff) * 114) / 1000;
     let (fill, outline) = if lum > 140 { (0x000000u32, 0xffffffu32) } else { (0xffffffu32, 0x000000u32) };
@@ -987,7 +987,7 @@ pub(crate) fn draw_cursor(mx: usize, my: usize) {
                         if nr < CUR.len() && CUR[nr] & (1 << nx) == 0 {
                             let px2 = mx + col;
                             let py2 = my + row;
-                            if px2 < fb::WIDTH && py2 < fb::HEIGHT {
+                            if px2 < fb::width() && py2 < fb::height() {
                                 fb::pixel_rgb(px2, py2, outline);
                             }
                         }
@@ -999,7 +999,7 @@ pub(crate) fn draw_cursor(mx: usize, my: usize) {
     // Fill
     for (row, &bits) in CUR.iter().enumerate() {
         for col in 0..12usize {
-            if bits & (1 << col) != 0 && mx + col < fb::WIDTH && my + row < fb::HEIGHT {
+            if bits & (1 << col) != 0 && mx + col < fb::width() && my + row < fb::height() {
                 fb::pixel_rgb(mx + col, my + row, fill);
             }
         }

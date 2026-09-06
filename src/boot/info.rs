@@ -40,6 +40,14 @@ pub enum FramebufferPixelFormat {
 }
 
 #[derive(Clone, Copy, Debug)]
+pub struct RamdiskInfo {
+    /// Adresse virtuelle CPU-accessible fournie par bootloader_api.
+    /// Elle est deja mappee et ne doit jamais recevoir physical_memory_offset.
+    pub address: u64,
+    pub byte_len: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct FramebufferInfo {
     /// Adresse virtuelle CPU-accessible fournie par le chargeur.
     /// Ce champ ne doit jamais etre interprete comme le BAR0 du GPU.
@@ -61,6 +69,8 @@ pub struct BootInfo {
     /// Les allocateurs refusent alors de continuer.
     pub memory_regions_complete: bool,
     pub framebuffer: Option<FramebufferInfo>,
+    /// Archive de donnees UEFI chargee par le bootloader, si presente.
+    pub ramdisk: Option<RamdiskInfo>,
     pub physical_memory_offset: Option<u64>,
     /// Adresse physique du RSDP lorsqu'un chargeur sait la fournir.
     pub rsdp_address: Option<u64>,

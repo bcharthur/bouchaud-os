@@ -17,9 +17,42 @@ use crate::arch::x86_64::ports::{inb, outb};
 use crate::arch::x86_64::pci;
 use crate::kernel::memory;
 
-/// Resolution HD du bureau.
+/// Resolution logique du bureau.
+/// Le reference device Stage 2 utilise le mode GOP physiquement prouve 800x600.
+/// Le chemin normal conserve 1280x720.
+#[cfg(feature = "reference-desktop")]
+pub const WIDTH: usize = 800;
+#[cfg(feature = "reference-desktop")]
+pub const HEIGHT: usize = 600;
+#[cfg(not(feature = "reference-desktop"))]
 pub const WIDTH: usize = 1280;
+#[cfg(not(feature = "reference-desktop"))]
 pub const HEIGHT: usize = 720;
+
+/// Dimensions logiques ACTIVES du bureau.
+///
+/// Hors `reference-desktop`, elles gardent le mode BGA historique.
+/// En Stage 2 UEFI, elles sont remplacees par la taille GOP validee AVANT
+/// l'allocation du backbuffer et AVANT tout rendu. Le bureau travaille donc
+/// directement dans le repere physique du firmware : aucun etirement global.
+static CANVAS_WIDTH: AtomicUsize = AtomicUsize::new(WIDTH);
+static CANVAS_HEIGHT: AtomicUsize = AtomicUsize::new(HEIGHT);
+
+#[inline]
+pub fn width() -> usize {
+    CANVAS_WIDTH.load(Ordering::Acquire).max(1)
+}
+
+#[inline]
+pub fn height() -> usize {
+    CANVAS_HEIGHT.load(Ordering::Acquire).max(1)
+}
+
+#[inline]
+fn set_canvas_size(width: usize, height: usize) {
+    CANVAS_WIDTH.store(width.max(1), Ordering::Release);
+    CANVAS_HEIGHT.store(height.max(1), Ordering::Release);
+}
 
 // Index de palette (API stable). Les valeurs RGB associees sont dans PALETTE.
 pub const C_BLACK: u8 = 0;
@@ -71,6 +104,236 @@ static mut USERLAND_OWNS_DISPLAY: bool = false;
 /// Adresse *physique* du framebuffer lineaire, memorisee pour pouvoir le
 /// remapper dans un espace d'adressage utilisateur (`mmap` de `/dev/fb0`).
 static mut LFB_PHYS: u64 = 0;
+
+// BOUCHAUD_STAGE2_GOP_BACKEND
+#[derive(Clone, Copy)]
+struct FirmwareFramebuffer {
+    address: u64,
+    byte_len: usize,
+    width: usize,
+    height: usize,
+    stride: usize,
+    format: crate::boot::FramebufferPixelFormat,
+}
+
+static mut FIRMWARE_FB: Option<FirmwareFramebuffer> = None;
+static FIRMWARE_PRESENT_OK: AtomicUsize = AtomicUsize::new(0);
+
+pub fn install_firmware_framebuffer(info: crate::boot::FramebufferInfo) -> bool {
+    // BOUCHAUD_STAGE2_RESPONSIVE_INPUT_V1
+    // La taille physique vient du GOP UEFI, avant tout rendu GUI.
+    // Le backend accepte aussi un ecran plus petit que le canvas logique :
+    // la projection runtime sait agrandir OU reduire.
+    if info.address == 0
+        || info.bytes_per_pixel != 4
+        || (info.width as usize) < 320
+        || (info.height as usize) < 200
+        || info.stride < info.width
+    {
+        return false;
+    }
+    if !matches!(
+        info.pixel_format,
+        crate::boot::FramebufferPixelFormat::Rgb
+            | crate::boot::FramebufferPixelFormat::Bgr
+    ) {
+        return false;
+    }
+    let Some(required) = (info.stride as usize)
+        .checked_mul(info.height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+    else {
+        return false;
+    };
+    if required > info.byte_len {
+        return false;
+    }
+
+    let native_width = info.width as usize;
+    let native_height = info.height as usize;
+    unsafe {
+        FIRMWARE_FB = Some(FirmwareFramebuffer {
+            address: info.address,
+            byte_len: info.byte_len,
+            width: native_width,
+            height: native_height,
+            stride: info.stride as usize,
+            format: info.pixel_format,
+        });
+    }
+
+    // Invariant Stage 2 final : le repere GUI EST le repere GOP.
+    set_canvas_size(native_width, native_height);
+    FIRMWARE_PRESENT_OK.store(0, Ordering::Release);
+    true
+}
+
+fn firmware_fb() -> Option<FirmwareFramebuffer> {
+    unsafe { FIRMWARE_FB }
+}
+
+fn firmware_backend_installed() -> bool {
+    firmware_fb().is_some()
+}
+
+pub fn firmware_present_verified() -> bool {
+    FIRMWARE_PRESENT_OK.load(Ordering::Acquire) == 1
+}
+
+
+/// Resolution PHYSIQUE du GOP firmware installe.
+pub fn firmware_resolution() -> Option<(usize, usize)> {
+    firmware_fb().map(|fb| (fb.width, fb.height))
+}
+
+/// Echelle du viewport en milli-unites, utile pour les diagnostics.
+/// 1000 = 1.0x.
+pub fn firmware_scale_milli() -> Option<(usize, usize)> {
+    let fb = firmware_fb()?;
+    Some((
+        fb.width.saturating_mul(1000) / width().max(1),
+        fb.height.saturating_mul(1000) / height().max(1),
+    ))
+}
+
+fn firmware_pixel_offset(fb: FirmwareFramebuffer, x: usize, y: usize) -> Option<usize> {
+    if x >= fb.width || y >= fb.height {
+        return None;
+    }
+    let pixel = y.checked_mul(fb.stride)?.checked_add(x)?;
+    let byte = pixel.checked_mul(4)?;
+    (byte.checked_add(4)? <= fb.byte_len).then_some(byte)
+}
+
+fn firmware_write_pixel(fb: FirmwareFramebuffer, x: usize, y: usize, rgb: u32) -> bool {
+    let Some(offset) = firmware_pixel_offset(fb, x, y) else { return false; };
+    let r = ((rgb >> 16) & 0xff) as u8;
+    let g = ((rgb >> 8) & 0xff) as u8;
+    let b = (rgb & 0xff) as u8;
+    let bytes = match fb.format {
+        crate::boot::FramebufferPixelFormat::Rgb => [r, g, b, 0],
+        crate::boot::FramebufferPixelFormat::Bgr => [b, g, r, 0],
+        _ => return false,
+    };
+    let base = fb.address as *mut u8;
+    unsafe {
+        for (i, byte) in bytes.iter().enumerate() {
+            core::ptr::write_volatile(base.add(offset + i), *byte);
+        }
+    }
+    true
+}
+
+fn firmware_read_pixel(fb: FirmwareFramebuffer, x: usize, y: usize) -> Option<u32> {
+    let offset = firmware_pixel_offset(fb, x, y)?;
+    let base = fb.address as *const u8;
+    let p0 = unsafe { core::ptr::read_volatile(base.add(offset)) };
+    let p1 = unsafe { core::ptr::read_volatile(base.add(offset + 1)) };
+    let p2 = unsafe { core::ptr::read_volatile(base.add(offset + 2)) };
+    let (r, g, b) = match fb.format {
+        crate::boot::FramebufferPixelFormat::Rgb => (p0, p1, p2),
+        crate::boot::FramebufferPixelFormat::Bgr => (p2, p1, p0),
+        _ => return None,
+    };
+    Some(((r as u32) << 16) | ((g as u32) << 8) | b as u32)
+}
+
+fn firmware_encode_pixel(fb: FirmwareFramebuffer, rgb: u32) -> Option<u32> {
+    let r = ((rgb >> 16) & 0xff) as u8;
+    let g = ((rgb >> 8) & 0xff) as u8;
+    let b = (rgb & 0xff) as u8;
+    match fb.format {
+        // 0x00RRGGBB en u32 little-endian donne [B,G,R,0] en memoire.
+        crate::boot::FramebufferPixelFormat::Bgr => Some(rgb & 0x00ff_ffff),
+        // GOP RGB attend [R,G,B,0] : on inverse R/B dans la valeur u32.
+        crate::boot::FramebufferPixelFormat::Rgb => {
+            Some(((b as u32) << 16) | ((g as u32) << 8) | r as u32)
+        }
+        _ => None,
+    }
+}
+
+fn present_firmware_rect(x: usize, y: usize, rect_width: usize, rect_height: usize) {
+    let Some(fb) = firmware_fb() else { return; };
+    if userland_owns_display() {
+        REFUS_USERLAND.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+
+    let canvas_width = width();
+    let canvas_height = height();
+    if fb.width != canvas_width || fb.height != canvas_height {
+        FIRMWARE_PRESENT_OK.store(0, Ordering::Release);
+        REFUS_LFB.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+
+    let buf = back();
+    if buf.len() < canvas_width.saturating_mul(canvas_height) {
+        FIRMWARE_PRESENT_OK.store(0, Ordering::Release);
+        REFUS_TAMPON.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+
+    let x1 = x.saturating_add(rect_width).min(canvas_width);
+    let y1 = y.saturating_add(rect_height).min(canvas_height);
+    if x >= x1 || y >= y1 {
+        REFUS_RECT_VIDE.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+
+    let base = fb.address as *mut u8;
+    let count = x1 - x;
+    let rows = y1 - y;
+
+    for row in y..y1 {
+        let src_row = row.saturating_mul(canvas_width);
+        let dst_row = row.saturating_mul(fb.stride);
+        for col in x..x1 {
+            let rgb = buf[src_row + col] & 0x00ff_ffff;
+            let Some(encoded) = firmware_encode_pixel(fb, rgb) else {
+                FIRMWARE_PRESENT_OK.store(0, Ordering::Release);
+                REFUS_LFB.fetch_add(1, Ordering::Relaxed);
+                return;
+            };
+            let pixel_index = dst_row + col;
+            let Some(byte_offset) = pixel_index.checked_mul(4) else {
+                FIRMWARE_PRESENT_OK.store(0, Ordering::Release);
+                REFUS_LFB.fetch_add(1, Ordering::Relaxed);
+                return;
+            };
+            if byte_offset.saturating_add(4) > fb.byte_len {
+                FIRMWARE_PRESENT_OK.store(0, Ordering::Release);
+                REFUS_LFB.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+            unsafe {
+                core::ptr::write_volatile(base.add(byte_offset) as *mut u32, encoded);
+            }
+        }
+    }
+
+    // Le readback est un invariant d'initialisation, pas une taxe par damage.
+    // Une fois un pixel CPU->GOP relu correctement, les presentations suivantes
+    // gardent le chemin chaud sans lecture MMIO supplementaire.
+    if FIRMWARE_PRESENT_OK.load(Ordering::Acquire) != 1 {
+        let sample_x = x + count / 2;
+        let sample_y = y + rows / 2;
+        let expected = buf[sample_y * canvas_width + sample_x] & 0x00ff_ffff;
+        let observed = firmware_read_pixel(fb, sample_x, sample_y);
+        FIRMWARE_PRESENT_OK.store((observed == Some(expected)) as usize, Ordering::Release);
+    }
+
+    PRESENTS_COPIES.fetch_add(1, Ordering::Relaxed);
+    PIXELS_COPIES_LFB.fetch_add((count * rows) as u64, Ordering::Relaxed);
+    DERNIER_PRESENT_RECT.store(empaquete_rect(x, y, count, rows), Ordering::Relaxed);
+    DERNIER_PRESENT_NS.store(crate::kernel::timer::monotonic_ns(), Ordering::Relaxed);
+    crate::drivers::gpu::note_present(count * rows * core::mem::size_of::<u32>());
+}
+
+fn present_firmware_full() {
+    present_firmware_rect(0, 0, width(), height());
+}
 
 // --- Interface DISPI (Bochs VBE Extensions / BGA) ---------------------------
 
@@ -142,6 +405,9 @@ fn locate_lfb() -> Option<*mut u32> {
 /// l'espace utilisateur, ce qui evite toute copie entre un serveur graphique
 /// en ring 3 et l'ecran.
 pub fn lfb_phys() -> Option<u64> {
+    if firmware_backend_installed() {
+        return None;
+    }
     let phys = unsafe { LFB_PHYS };
     if phys == 0 {
         // Le mode HD n'a pas encore ete active : on interroge le PCI.
@@ -157,7 +423,7 @@ pub fn lfb_phys() -> Option<u64> {
 
 /// Resolution courante du framebuffer (largeur, hauteur) en pixels.
 pub fn resolution() -> (usize, usize) {
-    (WIDTH, HEIGHT)
+    (width(), height())
 }
 
 // --- Entree / sortie du mode graphique --------------------------------------
@@ -180,6 +446,9 @@ pub fn userland_owns_display() -> bool {
 /// handoff est actif, `present()` devient un no-op ; le client peut donc mapper
 /// `/dev/fb0` et peindre le LFB sans etre ecrase par une trame du bureau.
 pub fn handoff_to_userland() -> bool {
+    if firmware_backend_installed() {
+        return false;
+    }
     if !is_active() {
         enter();
     }
@@ -210,17 +479,38 @@ pub fn resume_from_userland() {
 /// Si la carte BGA est absente, le double-buffer existe quand meme mais
 /// `present()` est sans effet (le shell texte reste accessible via Echap).
 pub fn enter() {
+    if firmware_backend_installed() {
+        let canvas_width = width();
+        let canvas_height = height();
+        unsafe {
+            BACK = Some(vec![0u32; canvas_width * canvas_height]);
+            LFB = core::ptr::null_mut();
+            LFB_PHYS = 0;
+            USERLAND_OWNS_DISPLAY = false;
+            HD_ACTIVE = true;
+        }
+        reset_clip();
+        FIRMWARE_PRESENT_OK.store(0, Ordering::Release);
+        crate::serial_println!(
+            "[gfx] GOP firmware natif actif ({}x{}, no scaling, no PCI/BGA)",
+            canvas_width,
+            canvas_height
+        );
+        return;
+    }
+
+    set_canvas_size(WIDTH, HEIGHT);
     let id = dispi_read(DISPI_INDEX_ID);
     let lfb = locate_lfb();
     unsafe {
-        BACK = Some(vec![0u32; WIDTH * HEIGHT]);
+        BACK = Some(vec![0u32; width() * height()]);
         USERLAND_OWNS_DISPLAY = false;
         match (id >= 0xB0C0 && id <= 0xB0C5, lfb) {
             (true, Some(p)) => {
-                bga_set_mode(WIDTH as u16, HEIGHT as u16);
+                bga_set_mode(width() as u16, height() as u16);
                 LFB = p;
                 HD_ACTIVE = true;
-                crate::drivers::gpu::activate_bga(WIDTH, HEIGHT, 32, LFB_PHYS);
+                crate::drivers::gpu::activate_bga(width(), height(), 32, LFB_PHYS);
                 crate::serial_println!("[gfx] BGA HD actif (1280x720x32, id={:#x})", id);
             }
             _ => {
@@ -231,11 +521,23 @@ pub fn enter() {
             }
         }
     }
+    reset_clip();
 }
 
 /// Restaure le mode texte 80x25 (mode 03h) pour rendre la main au shell, apres
 /// avoir desactive BGA et recharge la police texte (detruite par le graphique).
 pub fn leave() {
+    if firmware_backend_installed() {
+        unsafe {
+            BACK = None;
+            LFB = core::ptr::null_mut();
+            HD_ACTIVE = false;
+            USERLAND_OWNS_DISPLAY = false;
+        }
+        FIRMWARE_PRESENT_OK.store(0, Ordering::Release);
+        return;
+    }
+
     dispi_write(DISPI_INDEX_ENABLE, DISPI_DISABLED);
     const CRTC_03H: [u8; 25] = [
         0x5F, 0x4F, 0x50, 0x82, 0x55, 0x81, 0xBF, 0x1F, 0x00, 0x4F, 0x0D, 0x0E, 0x00,
@@ -341,8 +643,8 @@ pub fn clear(color: u8) {
 /// exactement le message qu'on a besoin de lire.
 #[inline]
 pub fn pixel(x: usize, y: usize, color: u8) {
-    if x < WIDTH && y < HEIGHT {
-        back()[y * WIDTH + x] = rgb(color);
+    if x < width() && y < height() {
+        back()[y * width() + x] = rgb(color);
     }
 }
 
@@ -350,11 +652,11 @@ pub fn fill_rect(x: usize, y: usize, w: usize, h: usize, color: u8) {
     let c = rgb(color);
     let buf = back();
     if buf.is_empty() { return; }
-    let x1 = (x + w).min(WIDTH);
-    let y1 = (y + h).min(HEIGHT);
+    let x1 = (x + w).min(width());
+    let y1 = (y + h).min(height());
     let mut yy = y;
     while yy < y1 {
-        let row = yy * WIDTH;
+        let row = yy * width();
         let mut xx = x;
         while xx < x1 { buf[row + xx] = c; xx += 1; }
         yy += 1;
@@ -372,14 +674,18 @@ pub fn rect(x: usize, y: usize, w: usize, h: usize, color: u8) {
 /// Copie le double-buffer vers le framebuffer lineaire (sans effet si BGA off).
 pub fn present() {
     if userland_owns_display() { return; }
+    if firmware_backend_installed() {
+        present_firmware_full();
+        return;
+    }
     let buf = back();
     if buf.is_empty() { return; }
     let lfb = unsafe { LFB };
     if lfb.is_null() { return; }
     unsafe {
-        core::ptr::copy_nonoverlapping(buf.as_ptr(), lfb, WIDTH * HEIGHT);
+        core::ptr::copy_nonoverlapping(buf.as_ptr(), lfb, width() * height());
     }
-    crate::drivers::gpu::note_present(WIDTH * HEIGHT * core::mem::size_of::<u32>());
+    crate::drivers::gpu::note_present(width() * height() * core::mem::size_of::<u32>());
 }
 
 /// Copie uniquement une region du double-buffer vers le scanout lineaire.
@@ -460,8 +766,12 @@ pub fn lfb_present_generation() -> u64 {
     PRESENTS_COPIES.load(Ordering::Relaxed)
 }
 
-pub fn present_rect(x: usize, y: usize, width: usize, height: usize) {
+pub fn present_rect(x: usize, y: usize, rect_width: usize, rect_height: usize) {
     PRESENTS_DEMANDES.fetch_add(1, Ordering::Relaxed);
+    if firmware_backend_installed() {
+        present_firmware_rect(x, y, rect_width, rect_height);
+        return;
+    }
     if userland_owns_display() {
         REFUS_USERLAND.fetch_add(1, Ordering::Relaxed);
         return;
@@ -476,8 +786,8 @@ pub fn present_rect(x: usize, y: usize, width: usize, height: usize) {
         REFUS_LFB.fetch_add(1, Ordering::Relaxed);
         return;
     }
-    let x1 = x.saturating_add(width).min(WIDTH);
-    let y1 = y.saturating_add(height).min(HEIGHT);
+    let x1 = x.saturating_add(rect_width).min(width());
+    let y1 = y.saturating_add(rect_height).min(height());
     if x >= x1 || y >= y1 {
         REFUS_RECT_VIDE.fetch_add(1, Ordering::Relaxed);
         return;
@@ -493,15 +803,15 @@ pub fn present_rect(x: usize, y: usize, width: usize, height: usize) {
     // chaque seconde -- `last_present_rect=0,0,1280,30` --, la barre des taches
     // a chaque changement de fenetre, et l'ecran entier a chaque apparition.
     // Trente appels deviennent un, sept cent vingt deviennent un.
-    if count == WIDTH {
-        let offset = y * WIDTH;
+    if count == width() {
+        let offset = y * width();
         unsafe {
             core::ptr::copy_nonoverlapping(
                 buf.as_ptr().add(offset), lfb.add(offset), count * (y1 - y));
         }
     } else {
         for row in y..y1 {
-            let offset = row * WIDTH + x;
+            let offset = row * width() + x;
             unsafe {
                 core::ptr::copy_nonoverlapping(buf.as_ptr().add(offset), lfb.add(offset), count);
             }
@@ -618,8 +928,8 @@ pub mod font;
 // copie, et ce qui est copie vient d'etre dessine.
 static CLIP_X0: AtomicUsize = AtomicUsize::new(0);
 static CLIP_Y0: AtomicUsize = AtomicUsize::new(0);
-static CLIP_X1: AtomicUsize = AtomicUsize::new(WIDTH);
-static CLIP_Y1: AtomicUsize = AtomicUsize::new(HEIGHT);
+static CLIP_X1: AtomicUsize = AtomicUsize::new(0);
+static CLIP_Y1: AtomicUsize = AtomicUsize::new(0);
 static PIXELS_DESSINES: AtomicU64 = AtomicU64::new(0);
 
 // BOUCHAUD_GFX_TEXTE_SEGMENT_V1
@@ -636,18 +946,18 @@ static PIXELS_TEXTE: AtomicU64 = AtomicU64::new(0);
 
 /// Borne le dessin a ce rectangle jusqu'au prochain [`reset_clip`].
 pub fn set_clip(x: usize, y: usize, w: usize, h: usize) {
-    CLIP_X0.store(x.min(WIDTH), Ordering::Relaxed);
-    CLIP_Y0.store(y.min(HEIGHT), Ordering::Relaxed);
-    CLIP_X1.store((x + w).min(WIDTH), Ordering::Relaxed);
-    CLIP_Y1.store((y + h).min(HEIGHT), Ordering::Relaxed);
+    CLIP_X0.store(x.min(width()), Ordering::Relaxed);
+    CLIP_Y0.store(y.min(height()), Ordering::Relaxed);
+    CLIP_X1.store((x + w).min(width()), Ordering::Relaxed);
+    CLIP_Y1.store((y + h).min(height()), Ordering::Relaxed);
 }
 
 /// Rend le dessin a l'ecran entier.
 pub fn reset_clip() {
     CLIP_X0.store(0, Ordering::Relaxed);
     CLIP_Y0.store(0, Ordering::Relaxed);
-    CLIP_X1.store(WIDTH, Ordering::Relaxed);
-    CLIP_Y1.store(HEIGHT, Ordering::Relaxed);
+    CLIP_X1.store(width(), Ordering::Relaxed);
+    CLIP_Y1.store(height(), Ordering::Relaxed);
 }
 
 #[inline]
@@ -741,7 +1051,7 @@ pub fn pixels_dessines() -> u64 {
 #[inline]
 pub fn pixel_rgb(x: usize, y: usize, rgb: u32) {
     if dans_clip(x, y) {
-        back()[y * WIDTH + x] = rgb;
+        back()[y * width() + x] = rgb;
         PIXELS_DESSINES.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -755,23 +1065,23 @@ pub fn pixel_rgb(x: usize, y: usize, rgb: u32) {
 /// ce qui laisse l'appelant ecrire `if dst.is_empty() { continue }` plutot que
 /// de refaire le rognage de son cote.
 pub fn ligne_mut(x: usize, y: usize, n: usize) -> &'static mut [u32] {
-    if y >= HEIGHT || x >= WIDTH {
+    if y >= height() || x >= width() {
         return &mut [];
     }
-    let n = n.min(WIDTH - x);
+    let n = n.min(width() - x);
     let buf = back();
     if buf.is_empty() {
         return &mut [];
     }
-    let debut = y * WIDTH + x;
+    let debut = y * width() + x;
     &mut buf[debut..debut + n]
 }
 
 /// Lit la couleur RGB du pixel (x,y) dans le backbuffer.
 pub fn get_pixel_rgb(x: usize, y: usize) -> u32 {
-    if x < WIDTH && y < HEIGHT {
+    if x < width() && y < height() {
         let b = back();
-        if !b.is_empty() { b[y * WIDTH + x] } else { 0 }
+        if !b.is_empty() { b[y * width() + x] } else { 0 }
     } else { 0 }
 }
 
@@ -781,7 +1091,7 @@ pub fn blend_rgb(x: usize, y: usize, rgb: u32, alpha: u8) {
     if alpha == 0 || !dans_clip(x, y) { return; }
     let buf = back();
     if buf.is_empty() { return; }
-    let idx = y * WIDTH + x;
+    let idx = y * width() + x;
     // `alpha` est un u8 : `>= 255` ne peut valoir que `== 255`. Clippy le
     // refuse a juste titre -- une comparaison dont un cote est toujours faux
     // se lit comme une borne, alors que c'est une egalite.
@@ -813,7 +1123,7 @@ pub fn blend_span(x: usize, y: usize, rgb: u32, couverture: &[u8], gras: bool) {
     if buf.is_empty() { return; }
     let (cx0, cy0, cx1, cy1) = clip();
     if y < cy0 || y >= cy1 { return; }
-    let row = y * WIDTH;
+    let row = y * width();
     let mut ecrits = 0u64;
     for (index, &alpha) in couverture.iter().enumerate() {
         if alpha == 0 { continue }
@@ -869,7 +1179,7 @@ pub fn blit_argb_span(x: usize, y: usize, ligne: &[u32]) {
     let debut = cx0.saturating_sub(x).min(ligne.len());
     let fin = cx1.saturating_sub(x).min(ligne.len());
     if fin <= debut { return }
-    let base = y * WIDTH + x;
+    let base = y * width() + x;
     let mut ecrits = 0u64;
     for (decalage, &source) in ligne[debut..fin].iter().enumerate() {
         let alpha = (source >> 24) as u8;
@@ -903,7 +1213,7 @@ pub fn blend_rect_rgb(x: usize, y: usize, w: usize, rgb: u32, alpha: u8) {
     let x0 = x.max(cx0);
     let x1 = (x + w).min(cx1);
     if x1 <= x0 { return; }
-    let row = y * WIDTH;
+    let row = y * width();
     for px in x0..x1 {
         melange_pixel(buf, row + px, rgb, alpha);
     }
@@ -936,7 +1246,7 @@ pub fn fill_rect_rgb(x: usize, y: usize, w: usize, h: usize, rgb: u32) {
     // de pixels.
     let mut yy = y0;
     while yy < y1 {
-        let row = yy * WIDTH;
+        let row = yy * width();
         buf[row + x0..row + x1].fill(rgb);
         yy += 1;
     }
@@ -963,7 +1273,7 @@ pub fn blit_rgb(x: usize, y: usize, iw: usize, ih: usize, pix: &[u32],
     // decoupe [10, 20) recadree par un global commencant a 15 devenait
     // [15, 25) et non [15, 20). Le rectangle gagnait a droite ce qu'il perdait
     // a gauche. Les ecritures restaient dans l'ecran -- `gx1` est borne par
-    // `WIDTH` -- donc ce n'etait pas une faute memoire, mais un widget pouvait
+    // `width()` -- donc ce n'etait pas une faute memoire, mais un widget pouvait
     // peindre cinq pixels hors de la zone qu'il avait demandee.
     let (gx0, gy0, gx1, gy1) = clip();
     let origine_x1 = clip_x.saturating_add(clip_w);
@@ -989,7 +1299,7 @@ pub fn blit_rgb(x: usize, y: usize, iw: usize, ih: usize, pix: &[u32],
             };
             if px < clip_x || px >= cx1 { continue; }
             if base + col < pix.len() {
-                buf[py * WIDTH + px] = pix[base + col];
+                buf[py * width() + px] = pix[base + col];
             }
         }
     }
