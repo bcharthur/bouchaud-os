@@ -10,6 +10,13 @@ pub enum PlatformKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FirmwareKind {
+    LegacyBios,
+    Uefi,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MemoryRegionKind {
     Usable,
     Reserved,
@@ -36,8 +43,14 @@ pub struct FramebufferInfo {
 pub struct BootInfo {
     pub architecture: Architecture,
     pub platform: PlatformKind,
+    pub firmware: FirmwareKind,
     pub memory_regions: &'static [MemoryRegion],
+    /// Faux si l'adaptateur n'a pas pu représenter toute la carte mémoire.
+    /// Les allocateurs refusent alors de continuer.
+    pub memory_regions_complete: bool,
     pub framebuffer: Option<FramebufferInfo>,
     pub physical_memory_offset: Option<u64>,
+    /// Adresse physique du RSDP lorsqu'un chargeur sait la fournir.
+    pub rsdp_address: Option<u64>,
     pub device_tree: Option<usize>,
 }

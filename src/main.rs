@@ -20,13 +20,14 @@
 
 extern crate alloc;
 
-use bootloader::{entry_point, BootInfo};
+use bootloader::{entry_point, BootInfo as LegacyBootInfo};
 
 #[macro_use]
 mod macros;
 
 mod app;
 mod arch;
+mod boot;
 mod diag;
 mod drivers;
 mod fs;
@@ -35,6 +36,7 @@ mod gui;
 mod kernel;
 mod lang;
 mod net;
+mod platform;
 mod shell;
 mod users;
 mod wasm;
@@ -44,18 +46,30 @@ pub const VERSION: &str = "0.35.0";
 /// Nom du systeme.
 pub const OS_NAME: &str = "Bouchaud OS";
 
-entry_point!(kernel_main);
+entry_point!(legacy_boot_entry);
 
-/// Point d'entree appele par le bootloader une fois en long mode 64 bits.
-fn kernel_main(boot_info: &'static BootInfo) -> ! {
+/// Frontiere temporaire du chargeur historique.
+fn legacy_boot_entry(legacy: &'static LegacyBootInfo) -> ! {
+    let boot_info = boot::from_bootloader_09(legacy);
+    kernel_main(boot_info)
+}
+
+/// Entree generique du noyau, independante du chargeur.
+fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // 1. Sorties de base : serie d'abord (pour tracer le boot), puis VGA.
     drivers::serial::init();
-    drivers::vga::clear();
+    if boot_info.firmware == boot::FirmwareKind::LegacyBios {
+        drivers::vga::clear();
+    }
 
     // 2. Horloge, journal noyau, puis tas (alloc).
     kernel::timer::init();
     kernel::dmesg::init();
     kernel::heap::init();
+    let reference_bringup = platform::pc::bringup::enabled();
+    if reference_bringup {
+        platform::pc::bringup::announce(boot_info);
+    }
     kernel::memory::init(boot_info);
     kernel::dmesg::log("kernel: boot Bouchaud OS");
     kernel::dmesg::log("vga: text mode initialise");
@@ -66,12 +80,20 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     //    fournit les frames et le creneau d'adressage du ring 3.
     kernel::vmm::init();
     arch::x86_64::init();
-    arch::x86_64::smp::init_probe();
+    if reference_bringup {
+        kernel::dmesg::log("bringup: SMP/AP startup volontairement ignore");
+    } else {
+        arch::x86_64::smp::init_probe();
+    }
 
     // Calibre le TSC (cycles -> ms reels) maintenant que IRQ0 fait avancer les
     // ticks PIT : necessaire pour que les logs de diagnostic (reseau, layout,
     // peinture) affichent un temps reel exploitable, pas juste des "Mc" bruts.
     kernel::timer::calibrate();
+
+    if reference_bringup {
+        platform::pc::bringup::complete_legacy_foundation_and_halt(boot_info);
+    }
 
     // 4. Pilotes et sous-systemes.
     drivers::keyboard::init();

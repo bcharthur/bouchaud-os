@@ -6,6 +6,10 @@ authors = ["Arthur Bouchaud"]
 description = "Bouchaud OS - noyau expérimental from scratch en Rust"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = []
+reference-bringup = []
+
 [dependencies]
 # Allocateur de tas pour activer `alloc` (Vec/String/BTreeMap).
 linked_list_allocator = "0.10"

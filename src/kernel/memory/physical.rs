@@ -5,10 +5,9 @@
 //!   feature `map_physical_memory`) et petit allocateur de frames DMA pour les
 //!   pilotes (e1000). A terme : frames physiques generiques + pagination.
 
-use bootloader::bootinfo::MemoryRegionType;
-use bootloader::BootInfo;
-use crate::kernel::heap;
+use crate::boot::{BootInfo, MemoryRegionKind};
 use crate::kernel::arene_dma::AreneDma;
+use crate::kernel::heap;
 use x86_64::instructions::interrupts;
 
 static mut PHYS_OFFSET: u64 = 0;
@@ -49,15 +48,25 @@ const USER_RESERVE_MAX: u64 = 4 * 1024 * 1024 * 1024;
 /// de RAM libre, et reserve une arene DMA. La memoire physique est entierement
 /// mappee a `PHYS_OFFSET` (feature `map_physical_memory` du bootloader).
 pub fn init(boot: &'static BootInfo) {
-    unsafe { PHYS_OFFSET = boot.physical_memory_offset; }
+    if !boot.memory_regions_complete {
+        panic!("memory: carte memoire de boot tronquee, refus de continuer");
+    }
+
+    let physical_memory_offset = boot
+        .physical_memory_offset
+        .expect("memory: aucun mapping de memoire physique fourni par le chargeur");
+
+    unsafe {
+        PHYS_OFFSET = physical_memory_offset;
+    }
 
     // Choisit la plus grande region RAM libre (>= 1 MiB).
     let mut best_start = 0u64;
     let mut best_len = 0u64;
-    for region in boot.memory_map.iter() {
-        if region.region_type == MemoryRegionType::Usable {
-            let start = region.range.start_addr();
-            let end = region.range.end_addr();
+    for region in boot.memory_regions.iter() {
+        if region.kind == MemoryRegionKind::Usable {
+            let start = region.start;
+            let end = region.start.saturating_add(region.len);
             if end > start && start >= 0x100000 && (end - start) > best_len {
                 best_len = end - start;
                 best_start = start;
@@ -117,12 +126,12 @@ pub fn init(boot: &'static BootInfo) {
             crate::kernel::vmm::add_region(USER_START, USER_END);
         }
     }
-    for region in boot.memory_map.iter() {
-        if region.region_type != MemoryRegionType::Usable {
+    for region in boot.memory_regions.iter() {
+        if region.kind != MemoryRegionKind::Usable {
             continue;
         }
-        let start = region.range.start_addr();
-        let end = region.range.end_addr();
+        let start = region.start;
+        let end = region.start.saturating_add(region.len);
         // La grande region est deja repartie (tas / user / DMA).
         if start == best_start {
             continue;
