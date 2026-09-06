@@ -28,11 +28,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         fs::create_dir_all(parent)?;
     }
 
+    // BOUCHAUD_STAGE1_PHYSICAL_INTEGRATION_V1
+    // Configuration prouvee sur TRIGKEY: pas de dependance COM1 bootloader.
     let mut config = BootConfig::default();
-    config.serial_logging = true;
-    // Le Lot 2A prouve le chemin UEFI par la serie. On garde l'ecran propre
-    // pour que le Lot 2B puisse prouver notre propre écriture GOP.
-    config.frame_buffer_logging = false;
+    config.serial_logging = false;
+    config.frame_buffer_logging = true;
 
     let mut image = UefiBoot::new(&kernel);
     image.set_boot_config(&config);

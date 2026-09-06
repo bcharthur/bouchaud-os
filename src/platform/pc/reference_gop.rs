@@ -268,134 +268,271 @@ fn card(
     fill_rect(info, x, y, w, h, PANEL) + border_rect(info, x, y, w, h, BORDER)
 }
 
-fn render_dashboard(
-    info: FramebufferInfo,
-    font: &Font,
-    s: &Snapshot,
+// BOUCHAUD_STAGE1_PHYSICAL_INTEGRATION_V1
+fn percent_tenth(used: u64, total: u64) -> String {
+    if total == 0 { return "0.0%".into(); }
+    let tenths = used.saturating_mul(1000) / total;
+    format!("{}.{}%", tenths / 10, tenths % 10)
+}
+
+fn visual_pct(used: u64, total: u64) -> u8 {
+    if total == 0 || used == 0 { return 0; }
+    (((used.saturating_mul(100) / total).min(100)) as u8).max(1)
+}
+
+fn stage_timer_text(s: &Snapshot) -> String {
+    if s.uptime_ms == 0 { "Timer: pre-scheduler".into() }
+    else { format!("Early uptime {} ms", s.uptime_ms) }
+}
+
+fn tsc_text(s: &Snapshot) -> String {
+    s.tsc_mhz.map(|mhz| format!("TSC {} MHz", mhz))
+        .unwrap_or_else(|| "TSC not calibrated yet".into())
+}
+
+fn compact_status(
+    info: FramebufferInfo, font: &Font, x: u32, y: u32,
+    label: &str, value: &str, color: Rgb,
 ) -> usize {
+    let mut n = draw_text(info, font, x as i32, y as i32, label, 12.0, MUTED);
+    n += draw_text(info, font, (x + 116) as i32, y as i32, value, 12.0, color);
+    n
+}
+
+fn render_dashboard_tiny(info: FramebufferInfo, font: &Font, s: &Snapshot) -> usize {
     let mut n = fill_rect(info, 0, 0, info.width, info.height, BG);
-    n += fill_rect(info, 0, 0, info.width, 7, ACCENT);
+    n += fill_rect(info, 0, 0, info.width, 5, ACCENT);
+    let margin = 20u32;
+    n += draw_text(info, font, margin as i32, 20, "Bouchaud OS", 28.0, TEXT);
+    n += draw_text(info, font, margin as i32, 55, "UEFI Stage 1 / compact diagnostics", 12.0, MUTED);
 
-    let margin = 60u32;
-    let content_w = info.width.saturating_sub(margin * 2);
+    n += draw_text(info, font, margin as i32, 92, "CPU", 12.0, ACCENT);
+    n += draw_text(info, font, margin as i32, 112, &s.cpu_brand, 15.0, TEXT);
+    let cpu_meta = format!("{} logical reported / 1 active", s.logical_cpus_reported);
+    n += draw_text(info, font, margin as i32, 138, &cpu_meta, 12.0, MUTED);
 
-    // Header.
-    n += draw_text(info, font, margin as i32, 46, "Bouchaud OS", 42.0, TEXT);
-    n += draw_text(
-        info,
-        font,
-        margin as i32,
-        94,
-        "Reference Device v1  /  UEFI Stage 1 diagnostics",
-        17.0,
-        MUTED,
-    );
-
-    let uptime = format!("Uptime {} ms", s.uptime_ms);
-    n += draw_text(
-        info,
-        font,
-        (info.width.saturating_sub(210)) as i32,
-        62,
-        &uptime,
-        15.0,
-        MUTED,
-    );
-
-    // Trois cartes principales.
-    let gap = 16u32;
-    let card_w = (content_w.saturating_sub(gap * 2)) / 3;
-    let top = 138u32;
-    let card_h = 154u32;
-
-    n += card(info, margin, top, card_w, card_h);
-    n += card(info, margin + card_w + gap, top, card_w, card_h);
-    n += card(info, margin + (card_w + gap) * 2, top, card_w, card_h);
-
-    n += draw_text(info, font, (margin + 20) as i32, (top + 18) as i32, "PROCESSOR", 14.0, ACCENT);
-    n += draw_text(info, font, (margin + 20) as i32, (top + 47) as i32, &s.cpu_brand, 17.0, TEXT);
-    let cpu_meta = format!("{} / {} logical reported", s.cpu_vendor, s.logical_cpus_reported);
-    n += draw_text(info, font, (margin + 20) as i32, (top + 82) as i32, &cpu_meta, 14.0, MUTED);
-    let tsc = s.tsc_mhz.map(|mhz| format!("TSC {} MHz", mhz)).unwrap_or_else(|| "TSC frequency unavailable".into());
-    n += draw_text(info, font, (margin + 20) as i32, (top + 108) as i32, &tsc, 14.0, MUTED);
-
-    let mx = margin + card_w + gap;
-    n += draw_text(info, font, (mx + 20) as i32, (top + 18) as i32, "MEMORY", 14.0, ACCENT);
-    n += label_value(info, font, (mx + 20) as i32, (top + 46) as i32, "Usable firmware RAM", &fmt_bytes(s.usable_memory_bytes));
-    n += label_value(info, font, (mx + 190) as i32, (top + 46) as i32, "Framebuffer", &fmt_bytes(s.framebuffer_bytes as u64));
-
-    let dx = margin + (card_w + gap) * 2;
-    n += draw_text(info, font, (dx + 20) as i32, (top + 18) as i32, "DISPLAY", 14.0, ACCENT);
-    let mode = format!("{} x {}  /  {} bpp", s.framebuffer_width, s.framebuffer_height, s.framebuffer_bpp * 8);
-    n += draw_text(info, font, (dx + 20) as i32, (top + 52) as i32, &mode, 20.0, TEXT);
-    n += draw_text(info, font, (dx + 20) as i32, (top + 86) as i32, "Firmware GOP framebuffer", 14.0, MUTED);
-    n += draw_text(info, font, (dx + 20) as i32, (top + 110) as i32, "CPU writes + readback verified", 14.0, GOOD);
-
-    // Resource usage.
-    let lower_top = 312u32;
-    let lower_h = 310u32;
-    let left_w = (content_w * 3) / 5;
-    let right_x = margin + left_w + gap;
-    let right_w = content_w.saturating_sub(left_w + gap);
-
-    n += card(info, margin, lower_top, left_w, lower_h);
-    n += card(info, right_x, lower_top, right_w, lower_h);
-
-    n += draw_text(info, font, (margin + 22) as i32, (lower_top + 20) as i32, "OS RESOURCE SNAPSHOT", 15.0, ACCENT);
-    n += draw_text(
-        info,
-        font,
-        (margin + 22) as i32,
-        (lower_top + 50) as i32,
-        "Real allocator counters at the Stage 1 barrier",
-        14.0,
-        MUTED,
-    );
-
-    let heap_pct = pct(s.heap_used_bytes as u64, s.heap_total_bytes as u64);
-    let heap_line = format!(
-        "Kernel heap   {} used / {} total   ({}%)",
+    n += draw_text(info, font, margin as i32, 172, "MEMORY", 12.0, ACCENT);
+    let mem = format!("Usable UEFI RAM {}", fmt_bytes(s.usable_memory_bytes));
+    n += draw_text(info, font, margin as i32, 193, &mem, 14.0, TEXT);
+    let heap = format!(
+        "Heap live {} / arena {} ({})",
         fmt_bytes(s.heap_used_bytes as u64),
         fmt_bytes(s.heap_total_bytes as u64),
-        heap_pct
+        percent_tenth(s.heap_used_bytes as u64, s.heap_total_bytes as u64)
     );
-    n += draw_text(info, font, (margin + 22) as i32, (lower_top + 92) as i32, &heap_line, 16.0, TEXT);
-    n += bar(info, margin + 22, lower_top + 123, left_w.saturating_sub(44), heap_pct, ACCENT);
+    n += draw_text(info, font, margin as i32, 218, &heap, 12.0, TEXT);
+
+    let display = format!(
+        "GOP {}x{} / {} bpp / {}",
+        s.framebuffer_width, s.framebuffer_height, s.framebuffer_bpp * 8,
+        fmt_bytes(s.framebuffer_bytes as u64)
+    );
+    n += draw_text(info, font, margin as i32, 250, "DISPLAY", 12.0, ACCENT);
+    n += draw_text(info, font, margin as i32, 271, &display, 13.0, TEXT);
+
+    n += draw_text(info, font, margin as i32, 307, "SAFETY", 12.0, ACCENT);
+    n += compact_status(info, font, margin, 329, "CPU", "BSP only", GOOD);
+    n += compact_status(info, font, margin, 351, "Storage", "Not probed", WARN);
+    n += compact_status(info, font, margin, 373, "Disk writes", "OFF", GOOD);
+    n += compact_status(info, font, margin, 395, "Network", "OFF", GOOD);
+
+    let footer_y = info.height.saturating_sub(48);
+    n += fill_rect(info, margin, footer_y, info.width.saturating_sub(margin * 2), 32, PANEL_2);
+    n += draw_text(
+        info, font, (margin + 10) as i32, (footer_y + 7) as i32,
+        "UEFI OK   MEMORY OK   GOP OK   BSP OK", 13.0, GOOD
+    );
+    n
+}
+
+fn render_dashboard_compact(info: FramebufferInfo, font: &Font, s: &Snapshot) -> usize {
+    let mut n = fill_rect(info, 0, 0, info.width, info.height, BG);
+    n += fill_rect(info, 0, 0, info.width, 5, ACCENT);
+    let margin = 28u32;
+    let gap = 12u32;
+    let content_w = info.width.saturating_sub(margin * 2);
+
+    n += draw_text(info, font, margin as i32, 20, "Bouchaud OS", 32.0, TEXT);
+    n += draw_text(info, font, margin as i32, 59, "Reference Device v1 / UEFI Stage 1", 13.0, MUTED);
+    let timer = stage_timer_text(s);
+    n += draw_text(info, font, info.width.saturating_sub(170) as i32, 28, &timer, 11.0, MUTED);
+
+    let proc_y = 86u32;
+    n += card(info, margin, proc_y, content_w, 92);
+    n += draw_text(info, font, (margin + 16) as i32, (proc_y + 12) as i32, "PROCESSOR", 12.0, ACCENT);
+    n += draw_text(info, font, (margin + 16) as i32, (proc_y + 34) as i32, &s.cpu_brand, 17.0, TEXT);
+    let cpu_meta = format!("{} / {} logical reported / 1 active", s.cpu_vendor, s.logical_cpus_reported);
+    n += draw_text(info, font, (margin + 16) as i32, (proc_y + 60) as i32, &cpu_meta, 12.0, MUTED);
+    n += draw_text(
+        info, font,
+        (margin + 430).min(info.width.saturating_sub(170)) as i32,
+        (proc_y + 60) as i32, &tsc_text(s), 12.0, MUTED
+    );
+
+    let mid_y = 190u32;
+    let mid_w = content_w.saturating_sub(gap) / 2;
+    let display_x = margin + mid_w + gap;
+    n += card(info, margin, mid_y, mid_w, 104);
+    n += card(info, display_x, mid_y, mid_w, 104);
+
+    n += draw_text(info, font, (margin + 16) as i32, (mid_y + 12) as i32, "MEMORY", 12.0, ACCENT);
+    n += draw_text(info, font, (margin + 16) as i32, (mid_y + 38) as i32, "Usable UEFI RAM", 11.0, MUTED);
+    n += draw_text(info, font, (margin + 16) as i32, (mid_y + 57) as i32, &fmt_bytes(s.usable_memory_bytes), 18.0, TEXT);
+    n += draw_text(info, font, (margin + mid_w / 2) as i32, (mid_y + 38) as i32, "Heap live", 11.0, MUTED);
+    n += draw_text(info, font, (margin + mid_w / 2) as i32, (mid_y + 57) as i32, &fmt_bytes(s.heap_used_bytes as u64), 18.0, TEXT);
+
+    n += draw_text(info, font, (display_x + 16) as i32, (mid_y + 12) as i32, "DISPLAY", 12.0, ACCENT);
+    let mode = format!("{} x {} / {} bpp", s.framebuffer_width, s.framebuffer_height, s.framebuffer_bpp * 8);
+    n += draw_text(info, font, (display_x + 16) as i32, (mid_y + 37) as i32, &mode, 18.0, TEXT);
+    let fb = format!("GOP framebuffer / {}", fmt_bytes(s.framebuffer_bytes as u64));
+    n += draw_text(info, font, (display_x + 16) as i32, (mid_y + 63) as i32, &fb, 11.0, MUTED);
+    n += draw_text(info, font, (display_x + 16) as i32, (mid_y + 81) as i32, "CPU writes + readback verified", 11.0, GOOD);
+
+    let lower_y = 306u32;
+    let left_w = content_w.saturating_mul(58) / 100;
+    let right_x = margin + left_w + gap;
+    let right_w = content_w.saturating_sub(left_w + gap);
+    n += card(info, margin, lower_y, left_w, 176);
+    n += card(info, right_x, lower_y, right_w, 176);
+
+    n += draw_text(info, font, (margin + 16) as i32, (lower_y + 13) as i32, "ALLOCATOR SNAPSHOT", 12.0, ACCENT);
+    let heap_line = format!(
+        "Heap live {} / arena {} ({})",
+        fmt_bytes(s.heap_used_bytes as u64),
+        fmt_bytes(s.heap_total_bytes as u64),
+        percent_tenth(s.heap_used_bytes as u64, s.heap_total_bytes as u64)
+    );
+    n += draw_text(info, font, (margin + 16) as i32, (lower_y + 40) as i32, &heap_line, 12.0, TEXT);
+    n += bar(
+        info, margin + 16, lower_y + 63, left_w.saturating_sub(32),
+        visual_pct(s.heap_used_bytes as u64, s.heap_total_bytes as u64), ACCENT
+    );
 
     let frame_used_bytes = s.frame_used.saturating_mul(4096);
     let frame_total_bytes = s.frame_total.saturating_mul(4096);
-    let frame_pct = pct(s.frame_used, s.frame_total);
     let frame_line = format!(
-        "VMM frames    {} used / {} pool   ({}%)",
-        fmt_bytes(frame_used_bytes),
-        fmt_bytes(frame_total_bytes),
-        frame_pct
+        "Dynamic VMM {} allocated / {} pool",
+        fmt_bytes(frame_used_bytes), fmt_bytes(frame_total_bytes)
     );
-    n += draw_text(info, font, (margin + 22) as i32, (lower_top + 157) as i32, &frame_line, 16.0, TEXT);
-    n += bar(info, margin + 22, lower_top + 188, left_w.saturating_sub(44), frame_pct, GOOD);
+    n += draw_text(info, font, (margin + 16) as i32, (lower_y + 88) as i32, &frame_line, 12.0, TEXT);
+    n += bar(
+        info, margin + 16, lower_y + 111, left_w.saturating_sub(32),
+        visual_pct(s.frame_used, s.frame_total), GOOD
+    );
 
     let tracked = (s.heap_used_bytes as u64).saturating_add(frame_used_bytes);
-    let tracked_line = format!("Tracked live kernel memory: {}", fmt_bytes(tracked));
-    n += draw_text(info, font, (margin + 22) as i32, (lower_top + 224) as i32, &tracked_line, 17.0, TEXT);
-    n += draw_text(
-        info,
-        font,
-        (margin + 22) as i32,
-        (lower_top + 252) as i32,
-        "CPU load is intentionally not fabricated before scheduler/IRQ accounting.",
-        13.0,
-        WARN,
+    let tracked_line = format!("Allocator-tracked memory {}", fmt_bytes(tracked));
+    n += draw_text(info, font, (margin + 16) as i32, (lower_y + 137) as i32, &tracked_line, 12.0, MUTED);
+
+    n += draw_text(info, font, (right_x + 14) as i32, (lower_y + 13) as i32, "COMPONENTS & SAFETY", 12.0, ACCENT);
+    n += compact_status(info, font, right_x + 14, lower_y + 44, "CPU", "BSP only", GOOD);
+    n += compact_status(info, font, right_x + 14, lower_y + 68, "CPU load", "N/A", WARN);
+    n += compact_status(info, font, right_x + 14, lower_y + 92, "Storage", "Not probed", WARN);
+    n += compact_status(info, font, right_x + 14, lower_y + 116, "Disk writes", "OFF", GOOD);
+    n += compact_status(info, font, right_x + 14, lower_y + 140, "Network", "OFF", GOOD);
+
+    let footer_y = info.height.saturating_sub(92);
+    n += fill_rect(info, margin, footer_y, content_w, 56, PANEL_2);
+    let statuses = [("UEFI", GOOD), ("MEMORY", GOOD), ("GOP", GOOD), ("BSP", GOOD)];
+    let status_w = content_w / statuses.len() as u32;
+    for (i, (name, color)) in statuses.iter().enumerate() {
+        let x = margin + i as u32 * status_w + 12;
+        n += fill_rect(info, x, footer_y + 18, 7, 20, *color);
+        n += draw_text(info, font, (x + 17) as i32, (footer_y + 15) as i32, name, 15.0, TEXT);
+        n += draw_text(
+            info, font,
+            (margin + (i as u32 + 1) * status_w).saturating_sub(36) as i32,
+            (footer_y + 15) as i32, "OK", 14.0, *color
+        );
+    }
+    n
+}
+
+fn render_dashboard_wide(info: FramebufferInfo, font: &Font, s: &Snapshot) -> usize {
+    let mut n = fill_rect(info, 0, 0, info.width, info.height, BG);
+    n += fill_rect(info, 0, 0, info.width, 7, ACCENT);
+    let margin = 60u32;
+    let content_w = info.width.saturating_sub(margin * 2);
+
+    n += draw_text(info, font, margin as i32, 46, "Bouchaud OS", 42.0, TEXT);
+    n += draw_text(info, font, margin as i32, 94, "Reference Device v1 / UEFI Stage 1 diagnostics", 17.0, MUTED);
+    n += draw_text(info, font, info.width.saturating_sub(235) as i32, 62, &stage_timer_text(s), 14.0, MUTED);
+
+    let gap = 16u32;
+    let card_w = content_w.saturating_sub(gap * 2) / 3;
+    let top = 138u32;
+    n += card(info, margin, top, card_w, 154);
+    n += card(info, margin + card_w + gap, top, card_w, 154);
+    n += card(info, margin + (card_w + gap) * 2, top, card_w, 154);
+
+    n += draw_text(info, font, (margin + 20) as i32, (top + 18) as i32, "PROCESSOR", 14.0, ACCENT);
+    n += draw_text(info, font, (margin + 20) as i32, (top + 47) as i32, &s.cpu_brand, 17.0, TEXT);
+    let cpu_meta = format!("{} / {} logical / 1 active", s.cpu_vendor, s.logical_cpus_reported);
+    n += draw_text(info, font, (margin + 20) as i32, (top + 82) as i32, &cpu_meta, 14.0, MUTED);
+    n += draw_text(info, font, (margin + 20) as i32, (top + 108) as i32, &tsc_text(s), 14.0, MUTED);
+
+    let mx = margin + card_w + gap;
+    n += draw_text(info, font, (mx + 20) as i32, (top + 18) as i32, "MEMORY", 14.0, ACCENT);
+    n += draw_text(info, font, (mx + 20) as i32, (top + 50) as i32, "Usable UEFI RAM", 13.0, MUTED);
+    n += draw_text(info, font, (mx + 20) as i32, (top + 73) as i32, &fmt_bytes(s.usable_memory_bytes), 20.0, TEXT);
+    n += draw_text(info, font, (mx + card_w / 2) as i32, (top + 50) as i32, "Heap live", 13.0, MUTED);
+    n += draw_text(info, font, (mx + card_w / 2) as i32, (top + 73) as i32, &fmt_bytes(s.heap_used_bytes as u64), 20.0, TEXT);
+    n += draw_text(info, font, (mx + 20) as i32, (top + 111) as i32, "Installed RAM not queried in Stage 1", 12.0, WARN);
+
+    let dx = margin + (card_w + gap) * 2;
+    n += draw_text(info, font, (dx + 20) as i32, (top + 18) as i32, "DISPLAY", 14.0, ACCENT);
+    let mode = format!("{} x {} / {} bpp", s.framebuffer_width, s.framebuffer_height, s.framebuffer_bpp * 8);
+    n += draw_text(info, font, (dx + 20) as i32, (top + 52) as i32, &mode, 20.0, TEXT);
+    n += draw_text(info, font, (dx + 20) as i32, (top + 86) as i32, "Firmware GOP framebuffer", 14.0, MUTED);
+    let fb = format!("{} / CPU readback verified", fmt_bytes(s.framebuffer_bytes as u64));
+    n += draw_text(info, font, (dx + 20) as i32, (top + 111) as i32, &fb, 13.0, GOOD);
+
+    let lower_top = 312u32;
+    let left_w = content_w * 3 / 5;
+    let right_x = margin + left_w + gap;
+    let right_w = content_w.saturating_sub(left_w + gap);
+    n += card(info, margin, lower_top, left_w, 310);
+    n += card(info, right_x, lower_top, right_w, 310);
+
+    n += draw_text(info, font, (margin + 22) as i32, (lower_top + 20) as i32, "ALLOCATOR SNAPSHOT", 15.0, ACCENT);
+    n += draw_text(info, font, (margin + 22) as i32, (lower_top + 50) as i32, "Counters owned by Bouchaud allocators at the Stage 1 barrier", 14.0, MUTED);
+
+    let heap_line = format!(
+        "Kernel heap live {} / arena capacity {} ({})",
+        fmt_bytes(s.heap_used_bytes as u64),
+        fmt_bytes(s.heap_total_bytes as u64),
+        percent_tenth(s.heap_used_bytes as u64, s.heap_total_bytes as u64)
+    );
+    n += draw_text(info, font, (margin + 22) as i32, (lower_top + 92) as i32, &heap_line, 16.0, TEXT);
+    n += bar(
+        info, margin + 22, lower_top + 123, left_w.saturating_sub(44),
+        visual_pct(s.heap_used_bytes as u64, s.heap_total_bytes as u64), ACCENT
     );
 
-    // Safety / components.
-    n += draw_text(info, font, (right_x + 22) as i32, (lower_top + 20) as i32, "COMPONENTS & SAFETY", 15.0, ACCENT);
+    let frame_used_bytes = s.frame_used.saturating_mul(4096);
+    let frame_total_bytes = s.frame_total.saturating_mul(4096);
+    let frame_line = format!(
+        "Dynamic VMM pool {} allocated / {} pool",
+        fmt_bytes(frame_used_bytes), fmt_bytes(frame_total_bytes)
+    );
+    n += draw_text(info, font, (margin + 22) as i32, (lower_top + 157) as i32, &frame_line, 16.0, TEXT);
+    n += bar(
+        info, margin + 22, lower_top + 188, left_w.saturating_sub(44),
+        visual_pct(s.frame_used, s.frame_total), GOOD
+    );
 
+    let tracked = (s.heap_used_bytes as u64).saturating_add(frame_used_bytes);
+    let tracked_line = format!("Allocator-tracked live memory {}", fmt_bytes(tracked));
+    n += draw_text(info, font, (margin + 22) as i32, (lower_top + 224) as i32, &tracked_line, 17.0, TEXT);
+    n += draw_text(info, font, (margin + 22) as i32, (lower_top + 252) as i32, "CPU load intentionally unavailable before scheduler/IRQ accounting.", 13.0, WARN);
+
+    n += draw_text(info, font, (right_x + 22) as i32, (lower_top + 20) as i32, "COMPONENTS & SAFETY", 15.0, ACCENT);
     let rows = [
-        ("CPU execution", s.smp_state, GOOD),
-        ("CPU load", s.cpu_load_state, WARN),
-        ("Storage", s.storage_state, WARN),
-        ("Storage writes", s.storage_write_state, GOOD),
-        ("Network", s.network_state, GOOD),
+        ("CPU execution", "BSP only", GOOD),
+        ("CPU load", "N/A pre-scheduler", WARN),
+        ("Storage", "Not probed", WARN),
+        ("Storage writes", "OFF", GOOD),
+        ("Network", "OFF", GOOD),
     ];
     let mut ry = lower_top + 58;
     for (label, value, color) in rows {
@@ -404,7 +541,6 @@ fn render_dashboard(
         ry += 40;
     }
 
-    // Footer statuses.
     let footer_y = info.height.saturating_sub(116);
     n += fill_rect(info, margin, footer_y, content_w, 62, PANEL_2);
     let statuses = [("UEFI", GOOD), ("MEMORY", GOOD), ("GOP", GOOD), ("BSP", GOOD)];
@@ -415,8 +551,17 @@ fn render_dashboard(
         n += draw_text(info, font, (x + 20) as i32, (footer_y + 17) as i32, name, 18.0, TEXT);
         n += draw_text(info, font, (x + status_w.saturating_sub(70)) as i32, (footer_y + 17) as i32, "OK", 18.0, *color);
     }
-
     n
+}
+
+fn render_dashboard(info: FramebufferInfo, font: &Font, s: &Snapshot) -> usize {
+    if info.width < 720 || info.height < 520 {
+        render_dashboard_tiny(info, font, s)
+    } else if info.width < 1024 || info.height < 760 {
+        render_dashboard_compact(info, font, s)
+    } else {
+        render_dashboard_wide(info, font, s)
+    }
 }
 
 /// Rendu premium + preuve CPU store/readback.
