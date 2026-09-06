@@ -32,6 +32,25 @@ function Write-Utf8NoBom([string]$Path, [string]$Content) {
     [System.IO.File]::WriteAllText($full, $Content, $Utf8NoBom)
 }
 
+# BOUCHAUD_C20_JETON_D_ENCODAGE_SANS_ENCODAGE
+#
+# Le jeton UTF-8 de controle et ses deux formes MOJIBAKE, construits par POINT
+# DE CODE plutot qu'ecrits en clair.
+#
+# Ces trois chaines sont le SUJET du controle : elles disent que le source Rust
+# porte bien l'identifiant `n<oe>uds` et qu'il n'a pas ete relu avec une page de
+# codes ANSI. Les ecrire litteralement mettait donc dans ce fichier exactement
+# les octets contre lesquels il met en garde -- et Windows PowerShell 5.1, qui
+# decode un script sans BOM avec la page de codes ANSI, pouvait les abimer avant
+# meme la comparaison. Un controle d'encodage ne doit pas dependre de son propre
+# encodage.
+$JetonNoeuds = "let n" + [char]0x0153 + "uds:"
+# Ce que devient `<oe>` quand un fichier UTF-8 est relu en ANSI : deux octets,
+# dont le premier se lit `A` rond en chef.
+$MojibakeOe = "n" + [char]0x00C5
+# Et ce que devient un tiret cadratin dans la meme conversion.
+$MojibakeTiret = [char]0x00E2 + [char]0x20AC
+
 Write-Host "=== Bouchaud OS P0 #1 v1.1 : repair UTF-8 + targeted IPI ===" -ForegroundColor Cyan
 
 # Le script v1 a heureusement fait un Copy-Item binaire AVANT la conversion.
@@ -64,13 +83,13 @@ Copy-Item -LiteralPath $backupIdt -Destination $IdtPath -Force
 $thread = Read-Utf8Strict $ThreadPath
 $idt    = Read-Utf8Strict $IdtPath
 
-if (-not $thread.Contains("let nœuds:")) {
-    Fail "Le backup restaure ne contient pas le token UTF-8 attendu 'nœuds'. Arret sans reappliquer."
+if (-not $thread.Contains($JetonNoeuds)) {
+    Fail "Le backup restaure ne contient pas le token UTF-8 attendu '$JetonNoeuds'. Arret sans reappliquer."
 }
-if ($thread.Contains("nÅ") -or $thread.Contains("â€")) {
+if ($thread.Contains($MojibakeOe) -or $thread.Contains($MojibakeTiret)) {
     Fail "Mojibake encore present apres restauration. Arret."
 }
-Write-Host "[OK] UTF-8 source restaure (nœuds lisible)" -ForegroundColor Green
+Write-Host "[OK] UTF-8 source restaure (jeton lisible)" -ForegroundColor Green
 
 # ---------------------------------------------------------------------------
 # Reapplication du patch, mais avec lecture/ecriture UTF-8 explicite.
@@ -166,10 +185,10 @@ Write-Utf8NoBom $IdtPath $newIdt
 $checkThread = Read-Utf8Strict $ThreadPath
 $checkIdt = Read-Utf8Strict $IdtPath
 
-if (-not $checkThread.Contains("let nœuds:")) {
+if (-not $checkThread.Contains($JetonNoeuds)) {
     Fail "Regression UTF-8 apres patch."
 }
-if ($checkThread.Contains("nÅ") -or $checkThread.Contains("â€")) {
+if ($checkThread.Contains($MojibakeOe) -or $checkThread.Contains($MojibakeTiret)) {
     Fail "Mojibake detecte apres patch."
 }
 if (-not $checkThread.Contains($Marker) -or -not $checkIdt.Contains($Marker)) {

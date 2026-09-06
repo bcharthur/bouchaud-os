@@ -87,6 +87,7 @@ Tout est en petit-boutiste explicite. En-tete de 16 octets devant chaque charge 
 | `Damage` | 4 | `fenetre:u32`, `Rect` |
 | `Close` | 5 | `fenetre:u32` |
 | `FrameReady` | 6 | `fenetre:u32`, `tampon:u32`, `Rect` |
+| `PressePapiersEcrit` | 7 | les octets du nouveau contenu |
 
 ### Gestionnaire de fenetres -> client
 
@@ -107,9 +108,41 @@ Ladybird) et `tools/verifie-protocole-gui.py` refuse un desaccord.
 | `Pointer` | 0x104 | `fenetre`, `x:i32`, `y:i32`, `boutons` |
 | `Wheel` | 0x105 | `fenetre`, `delta:i32`, `x:i32`, `y:i32` (coordonnées client) |
 | `CloseRequest` | 0x106 | `fenetre:u32` |
+| `PressePapiers` | 0x107 | les octets du contenu courant |
 
 `Rect` fait 16 octets : `x:i32`, `y:i32`, `largeur:u32`, `hauteur:u32`, exprime
 dans le repere de la **surface** (origine en haut a gauche de la zone utile).
+
+### Le presse-papiers
+
+Deux messages, et l'asymetrie entre les deux est le fond de la conception.
+
+`PressePapiersEcrit` va du client au bureau. Il n'est accepte **que du client
+qui a le foyer** : un programme en arriere-plan qui pourrait ecrire
+remplacerait silencieusement ce que l'utilisateur vient de copier -- l'adresse
+d'un virement, par exemple, par une autre --, et rien a l'ecran ne le
+montrerait. Un refus est journalise, pas repondu : le client n'a rien a
+apprendre d'un droit qu'il n'a pas.
+
+`PressePapiers` va du bureau au client. Il est **pousse**, jamais demande : il
+n'existe aucun message de lecture dans ce protocole. C'est la faiblesse
+historique de X11 que cette absence ferme -- la ou n'importe quel client peut y
+interroger la selection a tout moment, donc recolter en arriere-plan tout ce
+que l'utilisateur copie (un mot de passe sorti d'un gestionnaire, une phrase de
+recuperation, un jeton), ici un client sans foyer ne recoit rien et n'a aucun
+moyen d'en obtenir. Il n'y a pas de chemin de lecture a garder, parce qu'il n'y
+en a pas.
+
+Le bureau ne pousse que ce qui a CHANGE pour ce client-la : le contenu porte un
+numero de generation, et chaque client se souvient de celui qu'il possede.
+Comparer deux entiers a chaque tour de composition et par client est gratuit ;
+recopier quatre kibioctets ne l'est pas.
+
+Le contenu est borne a `CHARGE_MAX` (4096 octets) : il voyage dans **un**
+message, et ce qui ne tient pas dans un message ne pourrait pas etre remis.
+`gui::presse_papiers` tronque au-dela plutot que de refuser -- c'est la defense
+en profondeur, celle qui tient encore le jour ou les deux bornes divergent.
+`tools/gui/test_presse_papiers.rs` exerce cette borne sur l'hote.
 
 ### Codes de touche
 
@@ -125,6 +158,22 @@ faux code Linux serait pire qu'un code a nous, parce que le client le croirait.
 | 3 | Tabulation |
 | 4-7 | Haut, Bas, Gauche, Droite |
 | 8 | Echap |
+| 9-10 | Origine, Fin |
+| 11-12 | Page precedente, Page suivante |
+| 13-14 | Suppr, Inser |
+| 15 | Touche de fonction - le NUMERO (1 a 12) est dans `unicode` |
+
+Les codes 9 a 15 sont arrives avec le navigateur. Ils manquaient parce que le
+decodeur clavier ne reconnaissait, parmi les sequences etendues, que les quatre
+fleches : le pave de navigation etait perdu entre le controleur PS/2 et le
+client. Sans consequence visible sur le bureau -- un octet inconnu ne produit
+rien, et rien est ce qu'on attend d'un octet inconnu -- mais une page ne se
+faisait alors defiler qu'a la molette. Suppr etait pire que perdue : elle
+arrivait comme Retour arriere, et effacait donc le caractere de gauche.
+
+Une touche de fonction par code aurait demande douze lignes a chaque
+implementation, et douze occasions de se tromper : le numero voyage donc dans
+`unicode`, comme le point de code d'un caractere.
 
 Echap va au client quand celui-ci a le focus : un navigateur en a besoin, et le
 lui confisquer pour fermer sa fenetre detruirait le travail en cours. Sans client
@@ -232,9 +281,12 @@ ni le reseau.
 
 ## 11. Ce que ce jalon ne fait pas
 
-- **Pas de redimensionnement.** La surface est allouee une fois et Qt dimensionne
-  son ecran dessus au demarrage. Le bouton maximiser est donc inerte sur la
-  fenetre du navigateur, et la poignee de redimensionnement absente.
+- **Pas de redimensionnement cote hote Qt.** La surface est allouee une fois, a
+  la plus grande zone utile possible, et Qt dimensionne son ecran dessus au
+  demarrage : il ne suit pas `Configure`. Le chrome Ladybird, lui, le suit --
+  il adopte la nouvelle taille, recompose et transmet le viewport au moteur --,
+  donc le bouton maximiser agit sur la fenetre du navigateur et pas sur celle
+  de l'hote Qt.
 - **Pas de double tampon.** Voir la section 2 : inutile tant que le compositeur
   ne peut pas etre preempte.
 - **Pas de repetition annoncee.** Le pilote distingue une touche maintenue

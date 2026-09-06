@@ -115,6 +115,21 @@ fn scancode_to_char(sc: u8, shift: bool, altgr: bool) -> Option<char> {
     }
 }
 
+/// Numero d'une touche de fonction, ou `None`.
+///
+/// F1 a F10 se suivent (0x3b..0x44), puis F11 et F12 ont ete ajoutees plus tard
+/// a la fin du jeu 1 (0x57, 0x58) : c'est de l'histoire du materiel, pas une
+/// regle, et l'ecrire en table plutot qu'en arithmetique evite d'avoir a s'en
+/// souvenir.
+fn touche_de_fonction(sc: u8) -> Option<u8> {
+    match sc {
+        0x3b..=0x44 => Some(sc - 0x3b + 1),
+        0x57 => Some(11),
+        0x58 => Some(12),
+        _ => None,
+    }
+}
+
 /// Touche logique, apres application de la disposition.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Key {
@@ -126,6 +141,30 @@ pub enum Key {
     Down,
     Left,
     Right,
+    /// Le pave de navigation, et la touche Suppr.
+    ///
+    /// # Pourquoi elles arrivent si tard
+    ///
+    /// Le decodeur ne reconnaissait que les quatre fleches parmi les sequences
+    /// etendues, et rendait `None` pour tout le reste. Origine, Fin, Page
+    /// precedente et Page suivante etaient donc PERDUES entre le controleur et
+    /// le client : sur le bureau, aucune consequence visible ; dans un
+    /// navigateur, l'impossibilite de faire defiler une page sans molette.
+    ///
+    /// Suppr etait pire que perdue. `0xE0 0x53` etait traduit en
+    /// [`Key::Backspace`], si bien que la touche effacait le caractere de
+    /// GAUCHE. Ce n'est pas une touche manquante, c'est une touche qui fait
+    /// autre chose que ce qu'elle annonce.
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Delete,
+    Insert,
+    /// F1 a F12. Le numero, pas le scancode : c'est ce que tout le reste de la
+    /// chaine manipule, et le traduire une seule fois evite que chaque
+    /// consommateur refasse la table.
+    Fonction(u8),
     Other,
 }
 
@@ -268,14 +307,30 @@ impl EtatClavier {
         let repeat = self.marque(base, etendue, appui);
 
         let (logique, unicode) = if etendue {
+            // Le pave de navigation d'un clavier 104 touches. Le pave numerique
+            // porte les MEMES scancodes sans le prefixe 0xE0, mais sa
+            // signification depend de Verr.Num, que ce decodeur ne suit pas :
+            // le traiter ici ferait taper « 7 » a qui appuie sur Origine, ou
+            // l'inverse, une fois sur deux. Le bloc etendu, lui, ne veut dire
+            // qu'une chose.
             match base {
+                0x47 => (Key::Home, 0),
                 0x48 => (Key::Up, 0),
-                0x50 => (Key::Down, 0),
+                0x49 => (Key::PageUp, 0),
                 0x4b => (Key::Left, 0),
                 0x4d => (Key::Right, 0),
-                0x53 => (Key::Backspace, 0),
+                0x4f => (Key::End, 0),
+                0x50 => (Key::Down, 0),
+                0x51 => (Key::PageDown, 0),
+                0x52 => (Key::Insert, 0),
+                // Suppr, et non Retour arriere : voir [`Key::Delete`].
+                0x53 => (Key::Delete, 0),
+                // Entree du pave numerique.
+                0x1c => (Key::Enter, 0),
                 _ => return None,
             }
+        } else if let Some(numero) = touche_de_fonction(base) {
+            (Key::Fonction(numero), numero as u32)
         } else {
             match scancode_to_char(base, self.shift, self.altgr)? {
                 '\n' => (Key::Enter, 0),

@@ -403,7 +403,17 @@ if ($LadybirdMode) {
     #
     # M8 en est exempt : il affiche une page locale fixe, sans barre
     # d'adresse ni boutons, et sa liste est deliberement minimale.
+    #
+    # BOUCHAUD_ARTEFACT_PERIME_V2 : un marqueur PAR generation.
+    #
+    # `V16_UI_CAPABLE` dit "icones SVG, texte Skia, polices FontConfig". Il ne
+    # peut rien dire des onglets, de la recherche dans la page, du
+    # presse-papiers, du menu contextuel, des telechargements ni des favoris --
+    # et un artefact d'avant ce lot le porte quand meme. Exiger les DEUX est ce
+    # qui fait qu'une correction d'interface atteint la machine ; c'est
+    # precisement la lecon que V16 avait deja coutee une fois.
     $CapaciteUi = "V16_UI_CAPABLE"
+    $CapaciteOnglets = "V19_UI_CAPABLE"
 
     if ($IsLadybirdM8) {
         $RequiredLadybirdFiles = @(
@@ -423,7 +433,8 @@ if ($LadybirdMode) {
             "WebDriver",
             "webcontent-bootstrap",
             "M9_CAPABLE",
-            $CapaciteUi
+            $CapaciteUi,
+            $CapaciteOnglets
         )
     }
     else {
@@ -433,7 +444,8 @@ if ($LadybirdMode) {
             "ImageDecoder",
             "webcontent-bootstrap",
             "M9_CAPABLE",
-            $CapaciteUi
+            $CapaciteUi,
+            $CapaciteOnglets
         )
     }
 
@@ -504,62 +516,35 @@ if ($LadybirdMode) {
                 Fail "impossible de determiner la branche pour trouver l'artefact Ladybird"
             }
 
-            # BOUCHAUD_ARTEFACT_PRODUCTEUR_V1
+            # BOUCHAUD_ARTEFACT_PRODUCTEUR_V1 / BOUCHAUD_SANS_JQ_V1
             #
-            # Le critere etait `--status success` : le dernier run dont TOUS
-            # les jobs sont verts. Or `ladybird-native-browser.yml` a deux
-            # jobs, et un seul PRODUIT l'artefact :
+            # Le critere de selection -- l'ARTEFACT lui-meme, jamais la
+            # conclusion du run -- est explique la ou il s'applique, dans
+            # `tools/ladybird/selection-artefact.ps1`.
             #
-            #   ladybird / build once     -> upload-artifact  (producteur)
-            #   ladybird / browser-host smoke -> download-artifact (consommateur)
-            #
-            # Le smoke fait tourner le navigateur dans QEMU sans acceleration.
-            # Quand il echoue, la conclusion du RUN passe au rouge alors que
-            # l'artefact est publie, intact, et telechargeable. `--status
-            # success` le sautait : l'image Ladybird de la machine cessait de
-            # se mettre a jour a cause d'un job qui ne la fabrique pas.
-            #
-            # Le critere est donc l'ARTEFACT LUI-MEME. Il subsume l'ancien --
-            # `if-no-files-found: error` garantit qu'il n'existe que si le
-            # producteur a reussi -- et il ajoute ce que l'ancien ignorait :
-            # la retention. Un run vert de plus de quatorze jours etait choisi,
-            # puis `gh run download` echouait sans dire pourquoi.
-            $runsJson = (& gh run list `
-                --workflow "ladybird-native-browser.yml" `
-                --branch $CurrentBranch `
-                --limit 20 `
-                --json databaseId `
-                --jq '.[].databaseId') -split "`n" |
-                Where-Object { $_.Trim() }
+            # Il vit dans un fichier separe pour une raison precise :
+            # `run.ps1` s'execute de bout en bout des qu'on le charge --
+            # noyau, disque, QEMU --, donc aucun test ne peut en appeler une
+            # partie. La CI ne faisait qu'ANALYSER ce fichier, et trois
+            # defauts d'EXECUTION sont passes par ce trou, tous dans ce
+            # bloc-ci. `tools/ci/test-selection-artefact.ps1` l'execute
+            # maintenant avec un `gh` simule.
+            . (Join-Path $RepoRoot "tools/ladybird/selection-artefact.ps1")
 
-            if (-not $runsJson) {
+            $ArtefactNavigateur = "bouchaud-ladybird-native-browser"
+
+            $selection = Get-RunAvecArtefact `
+                -Branche $CurrentBranch `
+                -Artefact $ArtefactNavigateur
+
+            $latest = $selection.RunId
+            $examines = $selection.Examines
+
+            if ($examines -eq 0) {
                 Fail (
                     ("aucun run de ladybird-native-browser pour '{0}'. " -f $CurrentBranch) +
                     "Pousse la branche et attends le workflow."
                 )
-            }
-
-            $latest = $null
-            $examines = 0
-
-            foreach ($candidat in $runsJson) {
-
-                $candidat = $candidat.Trim()
-                $examines += 1
-
-                # `expired` est le seul champ qui distingue un artefact encore
-                # telechargeable d'une simple trace dans l'historique.
-                $present = (& gh api `
-                    "repos/{owner}/{repo}/actions/runs/$candidat/artifacts" `
-                    --jq '[.artifacts[] | select(.name == "bouchaud-ladybird-native-browser" and .expired == false)] | length' `
-                    2>$null)
-
-                if ($LASTEXITCODE -eq 0 -and $present -and ([int]$present.Trim()) -gt 0) {
-
-                    $latest = $candidat
-
-                    break
-                }
             }
 
             if (-not $latest) {
@@ -600,7 +585,7 @@ if ($LadybirdMode) {
 
 
         gh run download $EffectiveLadybirdRunId `
-            -n "bouchaud-ladybird-native-browser" `
+            -n $ArtefactNavigateur `
             -D $NativeBrowserDir
 
 

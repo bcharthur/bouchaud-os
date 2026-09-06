@@ -22,7 +22,7 @@ strict ».
 
 LA REGLE
 --------
-Quatre choses doivent rester vraies ensemble. Aucune ne suffit seule.
+Cinq choses doivent rester vraies ensemble. Aucune ne suffit seule.
 
 1. La selection ne gate PAS sur la conclusion du run. C'est le defaut lui-meme.
 
@@ -38,7 +38,16 @@ Quatre choses doivent rester vraies ensemble. Aucune ne suffit seule.
    aucune correction de l'interface n'atteignait la machine. Un marqueur de
    capacite qui n'est jamais lu ne protege de rien.
 
-4. Le producteur televerse avec `if-no-files-found: error`. C'est CE reglage
+4. `run.ps1` filtre le JSON en PowerShell, JAMAIS par `--jq`.
+   Windows PowerShell 5.1 reconstruit une ligne de commande pour lancer un
+   programme natif et mange les guillemets doubles d'un argument. Un
+   programme jq contenant `select(.name == "...")` arrivait a `gh` sans ses
+   guillemets, et jq lisait une suite de soustractions suivie d'un appel a
+   une fonction inexistante : "function not defined: browser/0". L'erreur
+   n'accusait ni gh ni PowerShell -- elle ressemblait a une panne de
+   l'outil. `ConvertFrom-Json` supprime la classe entiere.
+
+5. Le producteur televerse avec `if-no-files-found: error`. C'est CE reglage
    qui autorise la regle 1 : sans lui, un artefact pourrait exister en etant
    vide, et « l'artefact est la » cesserait de valoir « la construction a
    abouti ». Relacher ce reglage rendrait la selection permissive sans que rien
@@ -50,7 +59,7 @@ Qu'un troisieme job soit ajoute au workflow et devienne, lui aussi, producteur.
 Il verifie la forme qui a produit le defaut : un consommateur ne doit pas
 decider a la place d'un producteur.
 
-Code de retour : 0 si les quatre regles sont respectees.
+Code de retour : 0 si les cinq regles sont respectees.
 """
 
 import re
@@ -58,12 +67,25 @@ import sys
 from pathlib import Path
 
 RACINE = Path(__file__).resolve().parent.parent
-SCRIPT = RACINE / "run.ps1"
+# La selection a demenage dans son propre fichier pour devenir testable. Le
+# verificateur lit les DEUX : une regle qui ne regarde plus le code qu'elle
+# protege ne protege plus rien, et rien ne l'aurait signale.
+SCRIPTS = [
+    RACINE / "run.ps1",
+    RACINE / "tools" / "ladybird" / "selection-artefact.ps1",
+]
 WORKFLOW = RACINE / ".github" / "workflows" / "ladybird-native-browser.yml"
 
 ARTEFACT = "bouchaud-ladybird-native-browser"
 WORKFLOW_NOM = "ladybird-native-browser.yml"
-CAPACITE = "V16_UI_CAPABLE"
+# Les marqueurs de capacite sont DECOUVERTS dans le workflow, pas enumeres ici.
+#
+# Il y en avait un. Il y en a deux, et il y en aura d'autres : chaque
+# generation d'interface en ajoute un, parce qu'un marqueur ne peut dire que ce
+# qu'il savait au moment ou il a ete ecrit. Une liste tenue ici serait la
+# premiere chose qu'on oublierait de completer -- et le defaut qu'elle laisse
+# passer est exactement celui que ce fichier existe pour attraper.
+MARQUEUR = re.compile(r"> third_party/native-browser-bouchaud/(\w+_UI_CAPABLE)")
 
 # La selection s'etend sur plusieurs lignes continuees par un accent grave.
 # On la reconstitue avant de la lire, sinon `--status success` sur sa propre
@@ -88,24 +110,20 @@ def appels_gh_run_list(source):
     ]
 
 
-def regle_selection(source, fautes):
+def regle_selection(nom, source, fautes):
     """1. Aucun `gh run list` sur le workflow navigateur ne filtre sur --status."""
     appels = appels_gh_run_list(source)
     vises = [appel for appel in appels if WORKFLOW_NOM in appel]
 
     if not vises:
-        fautes.append(
-            "run.ps1 : aucun `gh run list --workflow %s`. La selection de "
-            "l'artefact a-t-elle ete deplacee ?" % WORKFLOW_NOM
-        )
         return
 
     for appel in vises:
         if "--status" in appel:
             fautes.append(
-                "run.ps1 : la selection de l'artefact filtre sur --status, "
-                "donc sur la conclusion du RUN. Un job consommateur rouge "
-                "cacherait un producteur sain.\n           %s" % appel
+                "%s : la selection de l'artefact filtre sur --status, donc "
+                "sur la conclusion du RUN. Un job consommateur rouge "
+                "cacherait un producteur sain.\n           %s" % (nom, appel)
             )
 
 
@@ -113,8 +131,8 @@ def regle_nom(source, workflow, fautes):
     """2. Le nom telecharge est le nom televerse."""
     if ARTEFACT not in source:
         fautes.append(
-            "run.ps1 : le nom d'artefact %r n'apparait pas ; il ne peut plus "
-            "correspondre a ce que le workflow televerse." % ARTEFACT
+            "le nom d'artefact %r n'apparait dans aucun script ; il ne peut "
+            "plus correspondre a ce que le workflow televerse." % ARTEFACT
         )
     if ARTEFACT not in workflow:
         fautes.append(
@@ -123,36 +141,95 @@ def regle_nom(source, workflow, fautes):
         )
 
 
+def listes_requises(source):
+    """Chaque `$RequiredLadybirdFiles = @( ... )` du script, une par branche."""
+    return re.findall(r"\$RequiredLadybirdFiles\s*=\s*@\((.*?)\)", source, re.S)
+
+
 def regle_capacite(source, workflow, fautes):
-    """3. Le marqueur ecrit par le producteur est lu par le consommateur."""
-    if CAPACITE not in workflow:
+    """3. Chaque marqueur ecrit par le producteur est exige par le consommateur.
+
+    Et reciproquement. Les deux sens comptent, et ils echouent differemment :
+
+      * un marqueur ECRIT que personne n'exige laisse un artefact perime passer
+        pour complet -- l'interface d'avant reste en place, et le symptome ne
+        ressemble pas a sa cause ;
+      * un marqueur EXIGE que personne n'ecrit rend tout artefact incomplet,
+        donc retelecharge a chaque lancement, indefiniment.
+
+    La verification porte sur CHAQUE branche de la liste des fichiers requis,
+    et non sur leur reunion : `run.ps1` en a plusieurs, et un marqueur present
+    dans l'une seulement laisse les autres sans protection. Seule la branche M8
+    est exempte -- elle affiche une page locale fixe, sans barre d'adresse ni
+    boutons --, et elle se reconnait a ce qu'elle n'exige pas `M9_CAPABLE`.
+    """
+    marqueurs = sorted(set(MARQUEUR.findall(workflow)))
+    if not marqueurs:
         fautes.append(
-            "%s : le producteur n'ecrit plus le marqueur de capacite %r."
-            % (WORKFLOW_NOM, CAPACITE)
-        )
-    if CAPACITE not in source:
-        fautes.append(
-            "run.ps1 : le marqueur %r n'est pas lu. Un artefact anterieur au "
-            "chrome V16 passerait le controle de completude, et resterait en "
-            "place indefiniment avec ses fleches en pixels." % CAPACITE
+            "%s : le producteur n'ecrit plus aucun marqueur de capacite. Un "
+            "artefact d'une generation quelconque passerait le controle de "
+            "completude." % WORKFLOW_NOM
         )
         return
-    # Le lire ne suffit pas : il doit conditionner le RETELECHARGEMENT, donc
-    # figurer dans la liste des fichiers exiges.
-    if "$RequiredLadybirdFiles" not in source:
+
+    listes = listes_requises(source)
+    if not listes:
         fautes.append("run.ps1 : la liste des fichiers requis a disparu.")
         return
-    bloc = source[source.index("$RequiredLadybirdFiles"):]
-    bloc = bloc[: bloc.find("# =========")] if "# =========" in bloc else bloc
-    if CAPACITE not in bloc and "$CapaciteUi" not in bloc:
+
+    # Un marqueur peut etre exige par son nom ou par la variable qui le porte.
+    variables = dict(
+        re.findall(r'\$(\w+)\s*=\s*"(\w+_UI_CAPABLE)"', source)
+    )
+
+    def exiges_par(liste):
+        noms = set(re.findall(r"\w+_UI_CAPABLE", liste))
+        for variable in re.findall(r"\$(\w+)", liste):
+            if variable in variables:
+                noms.add(variables[variable])
+        return noms
+
+    tous_exiges = set()
+    for liste in listes:
+        exiges = exiges_par(liste)
+        tous_exiges |= exiges
+        if "M9_CAPABLE" not in liste:
+            continue  # la branche M8, exemptee et documentee
+        for marqueur in marqueurs:
+            if marqueur in exiges:
+                continue
+            fautes.append(
+                "run.ps1 : le producteur ecrit %r, et une des listes de "
+                "fichiers requis ne l'exige pas. Un artefact anterieur a cette "
+                "generation passerait le controle de completude et resterait "
+                "en place -- avec l'interface d'avant, et sans que rien ne le "
+                "dise." % marqueur
+            )
+
+    for marqueur in sorted(tous_exiges - set(marqueurs)):
         fautes.append(
-            "run.ps1 : %r est mentionne mais ne figure pas parmi les fichiers "
-            "requis ; il ne declenche donc aucun retelechargement." % CAPACITE
+            "run.ps1 : %r est exige, et le producteur ne l'ecrit pas. Aucun "
+            "artefact ne passerait jamais le controle de completude : "
+            "`run.ps1` retelechargerait a chaque lancement." % marqueur
         )
+
+
+def regle_sans_jq(nom, source, fautes):
+    """4. Aucun `--jq` : le filtrage se fait en PowerShell."""
+    for numero, ligne in enumerate(source.splitlines(), start=1):
+        # Le commentaire qui explique la regle a le droit de nommer `--jq`.
+        nue = ligne.split("#", 1)[0]
+        if "--jq" in nue:
+            fautes.append(
+                "%s:%d : `--jq` passe un programme jq a un programme natif. "
+                "Windows PowerShell 5.1 mange les guillemets doubles d'un tel "
+                "argument. Filtrer avec ConvertFrom-Json.\n"
+                "           %s" % (nom, numero, ligne.strip())
+            )
 
 
 def regle_televersement(workflow, fautes):
-    """4. Le producteur refuse de televerser du vide."""
+    """5. Le producteur refuse de televerser du vide."""
     # On cherche le bloc `upload-artifact` qui porte NOTRE nom, pas les autres
     # (le smoke televerse aussi des journaux, et lui a le droit d'etre laxiste).
     blocs = workflow.split("uses: actions/upload-artifact")
@@ -175,15 +252,34 @@ def regle_televersement(workflow, fautes):
 
 
 def main():
-    source = texte(SCRIPT)
     workflow = texte(WORKFLOW)
-    if source is None or workflow is None:
+    if workflow is None:
         return 1
 
+    sources = {}
+    for chemin in SCRIPTS:
+        contenu = texte(chemin)
+        if contenu is None:
+            return 1
+        sources[chemin.relative_to(RACINE).as_posix()] = contenu
+
+    ensemble = "\n".join(sources.values())
+
     fautes = []
-    regle_selection(source, fautes)
-    regle_nom(source, workflow, fautes)
-    regle_capacite(source, workflow, fautes)
+    for nom, source in sources.items():
+        regle_selection(nom, source, fautes)
+        regle_sans_jq(nom, source, fautes)
+
+    # `gh run list` doit exister QUELQUE PART : c'est la selection elle-meme.
+    if not any(appels_gh_run_list(source) for source in sources.values()):
+        fautes.append(
+            "aucun `gh run list --workflow %s` dans %s. La selection de "
+            "l'artefact a-t-elle ete deplacee ?"
+            % (WORKFLOW_NOM, " ni ".join(sources))
+        )
+
+    regle_nom(ensemble, workflow, fautes)
+    regle_capacite(ensemble, workflow, fautes)
     regle_televersement(workflow, fautes)
 
     if fautes:
@@ -192,7 +288,7 @@ def main():
         return 1
 
     print("artefact navigateur : selection sur le producteur, nom accorde, "
-          "capacite UI lue, televersement strict")
+          "capacite UI lue, sans --jq, televersement strict")
     return 0
 
 

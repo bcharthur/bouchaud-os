@@ -1,6 +1,7 @@
 pub mod access;
 pub mod audit;
 pub mod capability;
+pub mod chemins;
 pub mod credentials;
 pub mod execution;
 pub mod filesystem;

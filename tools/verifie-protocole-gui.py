@@ -164,17 +164,38 @@ CONSTANTES = {
     "FENETRE_PRINCIPALE": "FENETRE",
 }
 
-TOUCHES = {
-    "CARACTERE": "ToucheCaractere",
-    "ENTREE": "ToucheEntree",
-    "RETOUR": "ToucheRetour",
-    "TABULATION": "ToucheTabulation",
-    "HAUT": "ToucheHaut",
-    "BAS": "ToucheBas",
-    "GAUCHE": "ToucheGauche",
-    "DROITE": "ToucheDroite",
-    "ECHAP": "ToucheEchap",
-}
+def nom_cpp_de_touche(nom_rust):
+    """`PAGE_HAUT` -> `TouchePageHaut`.
+
+    La correspondance etait ECRITE, code par code. Elle avait donc le defaut de
+    toute liste : les neuf touches d'origine y figuraient, et les sept ajoutees
+    pour le navigateur -- Origine, Fin, Page precedente, Page suivante, Suppr,
+    Inser, les touches de fonction -- n'y figuraient pas. Le verificateur les
+    ignorait en silence tout en affichant « trois implementations d'accord ».
+
+    La deriver de la convention de nommage retire cette facon de casser : un
+    code ajoute est immediatement compare, et `correspondance_touches()`
+    ci-dessous verifie en plus que les deux cotes declarent le MEME ensemble.
+    """
+    return "Touche" + "".join(mot.capitalize() for mot in nom_rust.split("_"))
+
+
+def correspondance_touches(touches_rust, touches_client, quoi, echecs):
+    """Le dictionnaire a comparer, et les orphelins de chaque cote.
+
+    Un code declare d'un seul cote n'est pas une difference de valeur : c'est
+    une touche qui n'arrivera jamais, ou qui arrivera sans etre reconnue. Ni
+    l'un ni l'autre ne se voit autrement qu'a l'usage.
+    """
+    correspondances = {nom: nom_cpp_de_touche(nom) for nom in touches_rust}
+    attendus = set(correspondances.values())
+    for nom in sorted(set(touches_client) - attendus):
+        echecs.append(
+            f"{quoi} : {nom} declare cote client sans equivalent noyau ; "
+            f"aucune touche ne portera jamais ce code."
+        )
+    return correspondances
+
 
 
 MODIFICATEURS_QT = {
@@ -226,7 +247,13 @@ def main():
         for nom in sorted(set(genres_rust) | set(genres)):
             compare("genre", genres_rust, genres, {nom: nom}, echecs)
 
-        compare("touche", touches_rust, touches, TOUCHES, echecs)
+        compare(
+            "touche",
+            touches_rust,
+            touches,
+            correspondance_touches(touches_rust, touches, "touche", echecs),
+            echecs,
+        )
         # Un bit de modificateur mal aligne ne casse rien visiblement : il
         # rend seulement Ctrl+F ou Alt+fleche inoperants, dans une seule des
         # implementations, et sans aucun message.

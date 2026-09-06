@@ -5,6 +5,7 @@ use crate::kernel::fd::FdKind;
 use crate::kernel::task;
 
 use super::access::{self, AccessMask};
+use super::chemins;
 use super::capability::Capabilities;
 use super::path;
 use super::policy::Snapshot;
@@ -80,32 +81,6 @@ fn privileged_device(path: &str) -> bool {
         || path.starts_with("/dev/pci")
 }
 
-fn path_prefix(path: &str, root: &str) -> bool {
-    path == root
-        || (path.starts_with(root)
-            && path.as_bytes().get(root.len()).copied() == Some(b'/'))
-}
-
-fn sandbox_read_path(path: &str) -> bool {
-    path_prefix(path, "/usr")
-        || path_prefix(path, "/lib")
-        || path_prefix(path, "/etc")
-        || path_prefix(path, "/tmp")
-        || path_prefix(path, "/var/tmp")
-        || path_prefix(path, "/proc/self")
-        || path_prefix(path, "/dev/shm")
-        || path == "/dev/null"
-        || path == "/dev/zero"
-        || path == "/dev/urandom"
-}
-
-fn sandbox_write_path(path: &str) -> bool {
-    path_prefix(path, "/tmp")
-        || path_prefix(path, "/var/tmp")
-        || path_prefix(path, "/dev/shm")
-        || path == "/dev/null"
-}
-
 fn wants_write(flags: u32) -> bool {
     matches!(flags & O_ACCMODE, O_WRONLY | O_RDWR)
         || flags & (O_CREAT | O_TRUNC) != 0
@@ -163,10 +138,13 @@ fn sandbox_path_allowed(security: Snapshot, canonical: &str, write: bool) -> boo
     // Le predicat vient du profil lui-meme : reconstruire la liste ici ferait
     // qu'un profil ajoute plus tard serait oublie dans l'un des controles.
     if super::profile::sandboxe(security.profile) {
+        // Les predicats dependent du PROFIL, et pas seulement du chemin : le
+        // profil persistant du navigateur appartient a RequestServer et a lui
+        // seul. Voir `chemins.rs`.
         if write {
-            sandbox_write_path(canonical)
+            chemins::ecriture_permise(security.profile, canonical)
         } else {
-            sandbox_read_path(canonical)
+            chemins::lecture_permise(security.profile, canonical)
         }
     } else {
         true

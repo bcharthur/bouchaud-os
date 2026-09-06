@@ -72,10 +72,16 @@ skia = r'''#    include <LibGfx/Bitmap.h>
 '''
 data = data.replace(needle, skia, 1)
 
-# 2) Helpers juste avant draw_toolbar, une fois Canvas/fill_rect definis.
-anchor = 'inline void draw_toolbar(Canvas const& canvas)\n'
+# 2) Helpers juste avant draw_ui_text, une fois Canvas/fill_rect definis.
+#
+# L'ancre etait `draw_toolbar`. Elle ne peut plus l'etre : `draw_ui_text` est
+# desormais le point unique par lequel passe TOUT le texte d'interface du
+# chrome -- barre d'adresse, bulle de survol, barre de recherche, menu -- et
+# c'est son corps que l'etape 4 remplace par le rendu Skia. Les aides doivent
+# donc etre definies avant lui, pas seulement avant `draw_toolbar`.
+anchor = '/// Le texte d\'interface du chrome, en UN SEUL point de passage.\n'
 if anchor not in data:
-    raise SystemExit("V15: draw_toolbar introuvable")
+    raise SystemExit("V15: draw_ui_text introuvable")
 helpers = r'''// BOUCHAUD_CHROME_V15_REAL_TEXT_SVG_LOADING
 //
 // Le document et le chrome utilisent desormais le meme rasteriseur Skia pour
@@ -169,11 +175,21 @@ data, n = pattern.subn(replacement, data, count=1)
 if n != 1:
     raise SystemExit(f"V15: bloc draw_button inattendu ({n})")
 
-# 4) URL : vrai texte Skia, avec fallback atlas en cas de police absente.
-old = '    draw_text(canvas, text_x, text_y, visible.view(), color_field_text, 2, available);\n'
-new = '''    if (!draw_browser_text(canvas, text_x, button_top + 3, visible.view(), color_field_text, available))\n        draw_text(canvas, text_x, text_y, visible.view(), color_field_text, 2, available);\n'''
+# 4) Tout le texte d'interface : vrai texte Skia, avec repli sur l'atlas si la
+# police est absente. Un seul corps a remplacer, donc un seul endroit ou une
+# substitution peut manquer sa cible -- voir le commentaire de `draw_ui_text`.
+old = '''inline void draw_ui_text(Canvas const& canvas, int x, int y, StringView texte, u32 couleur, int largeur_max)
+{
+    draw_text(canvas, x, y + 1, texte, couleur, 2, largeur_max);
+}'''
+new = '''inline void draw_ui_text(Canvas const& canvas, int x, int y, StringView texte, u32 couleur, int largeur_max)
+{
+    if (draw_browser_text(canvas, x, y, texte, couleur, largeur_max))
+        return;
+    draw_text(canvas, x, y + 1, texte, couleur, 2, largeur_max);
+}'''
 if old not in data:
-    raise SystemExit("V15: rendu URL introuvable")
+    raise SystemExit("V15: corps de draw_ui_text introuvable")
 data = data.replace(old, new, 1)
 
 # 5) Etat de chargement : stop dans le bouton + ligne bleue et point d'etat.

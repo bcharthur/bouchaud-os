@@ -57,6 +57,15 @@ pub struct Client {
     ///
     /// BOUCHAUD_C13_JAUGE_DE_CHARGEMENT_V1
     pub jauge: Jauge,
+    /// Ce client a le foyer du clavier.
+    ///
+    /// Note a chaque tour de composition, et lue par le seul chemin qui en
+    /// depende : le presse-papiers. Un client sans foyer ne peut ni l'ecrire
+    /// ni le recevoir -- voir `gui::presse_papiers` pour ce que cette regle
+    /// ferme.
+    a_le_focus: bool,
+    /// La generation du presse-papiers que ce client possede deja.
+    generation_presse_papiers: u64,
 }
 
 impl Client {
@@ -165,6 +174,8 @@ impl Client {
             naissance_ms: naissance,
             jauge: Jauge::neuve(naissance),
             debut: crate::kernel::timer::ticks(),
+            a_le_focus: false,
+            generation_presse_papiers: 0,
         };
         client.annonce_surface();
         Ok(client)
@@ -491,6 +502,26 @@ impl Client {
                 self.jauge.note_trame(crate::kernel::timer::monotonic_ms());
                 true
             }
+            Genre::PressePapiersEcrit => {
+                // Seul le client qui a le FOYER peut ecrire. Un client
+                // d'arriere-plan qui le pourrait remplacerait silencieusement
+                // ce que l'utilisateur vient de copier -- l'adresse d'un
+                // virement, par exemple, par une autre --, et rien a l'ecran
+                // ne le montrerait. C'est la moitie ecriture de la regle que
+                // `gui::presse_papiers` explique ; la moitie lecture n'a pas
+                // de code, parce qu'il n'existe aucun message de lecture.
+                if self.a_le_focus {
+                    self.generation_presse_papiers =
+                        crate::gui::presse_papiers::ecrit(charge);
+                } else {
+                    crate::kernel::dmesg::log_fmt(format_args!(
+                        "gui: presse-papiers refuse au client pid={} sans foyer ({} octets)",
+                        self.pid,
+                        charge.len()
+                    ));
+                }
+                false
+            }
             Genre::Close => {
                 self.fermeture_demandee = true;
                 false
@@ -602,6 +633,33 @@ impl Client {
         }
         self.envoie_configuration(focus);
         true
+    }
+
+    /// Note le foyer et pousse le presse-papiers si ce client l'a manque.
+    ///
+    /// Appelee a chaque tour de composition, avant `pompe()`. Elle ne copie le
+    /// contenu que lorsqu'il a REELLEMENT change pour ce client-la : comparer
+    /// deux entiers soixante fois par seconde et par client est gratuit,
+    /// recopier quatre kibioctets ne l'est pas.
+    ///
+    /// Rien n'est pousse a un client sans foyer. C'est la moitie lecture de la
+    /// regle expliquee dans `gui::presse_papiers` : un programme en
+    /// arriere-plan ne voit jamais passer ce que l'utilisateur copie ailleurs.
+    pub fn synchronise_presse_papiers(&mut self, focus: bool) {
+        self.a_le_focus = focus;
+        if !focus {
+            return;
+        }
+        if crate::gui::presse_papiers::generation() == self.generation_presse_papiers {
+            return;
+        }
+        let (octets, generation) = crate::gui::presse_papiers::lit();
+        if self.envoie(Genre::PressePapiers, &octets) {
+            // La generation ne s'enregistre QUE si le message est parti : un
+            // canal plein le perdrait, et le client collerait alors un contenu
+            // perime sans que rien ne le rattrape.
+            self.generation_presse_papiers = generation;
+        }
     }
 
     pub fn vivant(&mut self) -> bool {
