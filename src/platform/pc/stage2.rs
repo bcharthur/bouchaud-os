@@ -143,6 +143,17 @@ pub fn run(boot: &'static BootInfo) -> ! {
     crate::shell::set_exported_for_boot("BOUCHAUD_TIME_ZONE", "Europe/Paris");
     crate::shell::set_exported_for_boot("BOUCHAUD_ALLOW_POPUPS", "1");
 
+    // Stage 2 single-USB : aucun stockage persistant writable n'est requis.
+    // Le BrowserHost platform-complete sait basculer nativement vers son
+    // profil/cache RAM-only via ces variables.
+    crate::shell::set_exported_for_boot("BOUCHAUD_LADYBIRD_EPHEMERAL", "1");
+    crate::shell::set_exported_for_boot("BOUCHAUD_DISABLE_SQL", "1");
+    crate::shell::set_exported_for_boot("BOUCHAUD_DISABLE_DISK_CACHE", "1");
+    crate::shell::set_exported_for_boot("BOUCHAUD_DISABLE_ASYNC_SCROLLING", "1");
+    crate::shell::set_exported_for_boot("BOUCHAUD_DISABLE_AUDIO", "1");
+
+    crate::serial_println!("BOUCHAUD_STAGE2_LADYBIRD_RAMONLY_ENV_OK");
+
     let browser_present = {
         let fs = crate::fs::ramfs::fs();
         fs.resolve("/bo-navigateur", 0).is_some()

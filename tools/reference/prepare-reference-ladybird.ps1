@@ -15,6 +15,7 @@ function Fail([string]$Message) {
 $Image = Join-Path $RepoRoot "ladybird-browser.img"
 $Verify = Join-Path $RepoRoot "tools\reference\verify-reference-ladybird-image.py"
 $Make = Join-Path $RepoRoot "tools\reference\make-reference-ladybird-image.py"
+$ArtifactVerify = Join-Path $RepoRoot "tools\reference\verify-ladybird-ramonly-artifact.py"
 $Native = Join-Path $RepoRoot "native-browser-m9"
 $Scenario = Join-Path $RepoRoot "scenario-stage2-ladybird"
 
@@ -55,6 +56,14 @@ foreach ($Name in $Required) {
     if (-not (Test-Path -LiteralPath $Path)) {
         Fail "artefact Ladybird incomplet : $Name absent dans native-browser-m9"
     }
+}
+
+& python $ArtifactVerify (Join-Path $Native "BouchaudBrowserHost")
+if ($LASTEXITCODE -ne 0) {
+    Fail (
+        "native-browser-m9 est une ancienne generation BrowserHost (persist/sql/cache disque). " +
+        "Lance .\tools\reference\refresh-ladybird-ramonly-ci.ps1"
+    )
 }
 
 $Resources = Join-Path $Native "resources"

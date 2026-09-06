@@ -31,6 +31,13 @@ EXECUTABLES = {
     "usr/libexec/ladybird/webcontent-bootstrap",
 }
 
+RAMONLY_MARKERS = (
+    b"BROWSER_HOST_INITIALIZED",
+    b"/tmp/ladybird-profile",
+    b"--disable-http-disk-cache",
+    b"--disable-sql-database",
+)
+
 def normalize(name: str) -> str:
     while name.startswith("./"):
         name = name[2:]
@@ -49,13 +56,41 @@ def main() -> int:
         raise SystemExit("image trop petite pour contenir archive + persistance")
 
     members = {}
+    marker_missing = set(RAMONLY_MARKERS)
+    marker_tail = b""
+    marker_max = max(map(len, RAMONLY_MARKERS))
+
     with tarfile.open(image, mode="r:*") as archive:
         for member in archive:
-            members[normalize(member.name)] = member
+            name = normalize(member.name)
+            members[name] = member
+
+            if name == "usr/libexec/ladybird/BouchaudBrowserHost":
+                stream = archive.extractfile(member)
+                if stream is not None:
+                    while marker_missing:
+                        chunk = stream.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        blob = marker_tail + chunk
+                        for marker in tuple(marker_missing):
+                            if marker in blob:
+                                marker_missing.remove(marker)
+                        marker_tail = blob[-(marker_max - 1):]
 
     missing = sorted(REQUIRED_FILES - set(members))
     if missing:
         raise SystemExit("image Ladybird incomplete: " + ", ".join(missing))
+
+    if marker_missing:
+        names = ", ".join(
+            marker.decode("ascii", errors="replace")
+            for marker in sorted(marker_missing)
+        )
+        raise SystemExit(
+            "image Ladybird perimee: BrowserHost non RAM-only; marqueurs absents: "
+            + names
+        )
 
     for name in EXECUTABLES:
         member = members[name]
