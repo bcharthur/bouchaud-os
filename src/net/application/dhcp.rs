@@ -113,8 +113,14 @@ pub const ATTENTE_DEMARRAGE_MS: u64 = 700;
 /// code ne dise laquelle des deux etait voulue.
 fn recv_avant(xid: u32, want_type: u8, budget_ms: u64) -> Option<Lease> {
     let mut buf = [0u8; 2048];
-    let limite = crate::kernel::timer::monotonic_ms() + budget_ms;
-    while crate::kernel::timer::monotonic_ms() < limite {
+    let debut = crate::kernel::timer::monotonic_ms();
+    let limite = debut.saturating_add(budget_ms);
+    let mut fallback_spins = 0usize;
+
+    while crate::kernel::timer::monotonic_ms() < limite
+        && fallback_spins < 10_000_000
+    {
+        fallback_spins = fallback_spins.saturating_add(1);
         let n = match e1000::receive(&mut buf) { Some(n) => n, None => continue };
         let h = match ethernet::parse_header(&buf[..n]) { Some(h) => h, None => continue };
         if h.ethertype != ethernet::ETHERTYPE_IPV4 { continue; }

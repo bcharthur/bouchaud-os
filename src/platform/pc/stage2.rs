@@ -4,6 +4,13 @@
 
 use crate::boot::{BootInfo, FirmwareKind};
 
+static LEGACY_PS2_ALLOWED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(true);
+
+pub fn legacy_ps2_allowed() -> bool {
+    LEGACY_PS2_ALLOWED.load(core::sync::atomic::Ordering::Acquire)
+}
+
 fn prepare_ram_persist() -> bool {
     let mut fs = crate::fs::ramfs::fs();
     let root = 0usize;
@@ -40,6 +47,13 @@ pub fn run(boot: &'static BootInfo) -> ! {
     }
 
     let framebuffer = super::bringup::validate_uefi_stage1(boot);
+
+    // Breadcrumb physique : reutilise le renderer GOP du Stage 1 deja
+    // prouve sur le TRIGKEY. Si cet ecran apparait, le noyau a bien atteint
+    // Stage 2 et le blocage est necessairement apres ce point.
+    let _ = super::reference_gop::render_stage1(boot, framebuffer);
+    crate::serial_println!("BOUCHAUD_TRIGKEY_STAGE2_EARLY_GOP_OK");
+
     if !crate::drivers::gfx::install_firmware_framebuffer(framebuffer) {
         panic!("stage2: framebuffer GOP incompatible avec le bureau");
     }
@@ -63,7 +77,7 @@ pub fn run(boot: &'static BootInfo) -> ! {
     }
     crate::serial_println!("BOUCHAUD_STAGE2_NATIVE_VIEWPORT_OK");
     crate::serial_println!(
-        "[STAGE2] smp=off audio=off storage=read-mostly network=auto pci=scan"
+        "[STAGE2] smp=physical-probe-v31 audio=off storage=read-mostly network=auto pci=scan"
     );
 
     // CPU0 uniquement. Aucun AP n'est demarre.
@@ -77,7 +91,9 @@ pub fn run(boot: &'static BootInfo) -> ! {
     crate::arch::x86_64::usermode::init();
     crate::kernel::timer::calibrate();
 
-    crate::drivers::keyboard::init();
+    // Le clavier n'est plus initialise ici. Sur le TRIGKEY les
+    // peripheriques utilisateur sont USB/xHCI ; on decide apres le scan PCI
+    // s'il existe reellement un chemin legacy 8042 a utiliser.
 
     // Base userspace du vrai window manager et de Ladybird.
     crate::users::init();
@@ -122,15 +138,39 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // driver e1000 que sur une carte Intel ; un Realtek physique est refuse
     // proprement par le driver e1000.
     crate::arch::x86_64::pci::init();
-    if let Some(xhci) = crate::arch::x86_64::pci::find_xhci() {
+
+    // Inventaire physique read-only. Les rapports sont crees dans
+    // /diagnostics avant les pilotes reseau/USB actifs.
+    crate::platform::pc::hardware_probe::run(boot, framebuffer);
+    let xhci_present =
+        if let Some(xhci) = crate::arch::x86_64::pci::find_xhci() {
+            crate::serial_println!(
+                "BOUCHAUD_TRIGKEY_XHCI_PRESENT pci={:04x}:{:04x} bus={:02x}:{:02x}.{} bar0={:#x}",
+                xhci.vendor, xhci.device, xhci.bus, xhci.slot, xhci.func,
+                crate::arch::x86_64::pci::bar_decode(&xhci, 0).adresse(),
+            );
+            true
+        } else {
+            crate::serial_println!("BOUCHAUD_TRIGKEY_XHCI_ABSENT");
+            false
+        };
+
+    LEGACY_PS2_ALLOWED.store(
+        !xhci_present,
+        core::sync::atomic::Ordering::Release,
+    );
+
+    if xhci_present {
         crate::serial_println!(
-            "BOUCHAUD_TRIGKEY_XHCI_PRESENT pci={:04x}:{:04x} bus={:02x}:{:02x}.{} bar0={:#x}",
-            xhci.vendor, xhci.device, xhci.bus, xhci.slot, xhci.func,
-            crate::arch::x86_64::pci::bar_decode(&xhci, 0).adresse(),
+            "BOUCHAUD_TRIGKEY_PS2_SKIPPED_XHCI_PRESENT"
         );
     } else {
-        crate::serial_println!("BOUCHAUD_TRIGKEY_XHCI_ABSENT");
+        crate::drivers::keyboard::init();
+        crate::serial_println!(
+            "BOUCHAUD_STAGE2_LEGACY_PS2_KEYBOARD_READY"
+        );
     }
+
     let _network_state = crate::net::demarre();
 
     // Le run historique posait ces variables via /autorun. Le Stage 2 entre
@@ -183,6 +223,27 @@ pub fn run(boot: &'static BootInfo) -> ! {
             network_ready as u8,
         );
     }
+
+    // BOUCHAUD_STAGE2_VISIBLE_DIAG_SMP_V31
+    // First expose the USB evidence while the machine is still BSP-only. If the
+    // AP bootstrap itself regresses on physical hardware, the xHCI photos are
+    // still obtainable and the two investigations remain separable.
+    crate::platform::pc::physical_diag::show_usb();
+
+    crate::serial_println!("BOUCHAUD_STAGE2_SMP_PROBE_V31_BEGIN");
+    crate::arch::x86_64::smp::init_probe();
+    crate::platform::pc::physical_diag::show_smp();
+
+    // The APs have waited behind SCHEDULER_ENABLED throughout boot/diagnostic.
+    // Release them only now, once process/runtime initialization is complete.
+    if !crate::arch::x86_64::smp::scheduler_enabled() {
+        crate::arch::x86_64::smp::enable_scheduler();
+    }
+    crate::serial_println!(
+        "BOUCHAUD_STAGE2_SMP_WIRED_V31 online={} detected={}",
+        crate::arch::x86_64::smp::schedulable_cpus(),
+        crate::arch::x86_64::smp::discovered_cpus(),
+    );
 
     // Vrai desktop -> vrai window_manager -> vrai handle_click.
     crate::serial_println!("[STAGE2] entering real Bouchaud window manager");

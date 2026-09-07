@@ -275,26 +275,30 @@ fn draw_topbar() {
 }
 
 fn sys_stats_str() -> String {
-    // BOUCHAUD_SMP_NG2_TOPBAR_PERCPU_V1
     let total_cpu = timer::cpu_load_pct();
     let online = smp::schedulable_cpus().max(1).min(smp::MAX_CPUS);
-    let mut cores = String::new();
-    for index in 0..online.min(8) {
-        if index != 0 { cores.push('/'); }
-        cores.push_str(&format!("{}", cpu::load_percent_cpu(index)));
-    }
-    if online > 8 { cores.push_str("/+"); }
-
-    let (used, _free, total) = crate::kernel::heap::stats();
-    let ram_pct = if total > 0 { (used * 100 / total) as u8 } else { 0 };
-    let ram_used_str = human_bytes(used);
-    let ram_total_str = human_bytes(total);
+    let reported = crate::platform::pc::hardware_facts::reported_cpus().max(online);
+    let (heap_used, _heap_free, _heap_pool) = crate::kernel::heap::stats();
+    let usable_ram = crate::platform::pc::hardware_facts::usable_ram_bytes()
+        .min(usize::MAX as u64) as usize;
     let fs = ramfs::fs();
-    let disk_used = fs.used_nodes();
-    let disk_total = crate::fs::ramfs::MAX_NODES;
-    let disk_pct = if disk_total > 0 { (disk_used * 100 / disk_total) as u8 } else { 0 };
+    let nodes = fs.used_nodes();
+    drop(fs);
+    let usb = if crate::platform::pc::hardware_facts::xhci_active() {
+        format!(
+            "USB:{}p K{} M{}",
+            crate::platform::pc::hardware_facts::xhci_connected_ports(),
+            crate::drivers::xhci_active::hid_keyboards(),
+            crate::drivers::xhci_active::hid_mice(),
+        )
+    } else if crate::platform::pc::hardware_facts::xhci_present() {
+        String::from("xHCI:probe")
+    } else {
+        String::from("xHCI:none")
+    };
     format!(
-        "CPU:{total_cpu:3}% [{cores}]  RAM:{ram_used_str}/{ram_total_str} {ram_pct:3}%  Disk:{disk_used}/{disk_total} {disk_pct:3}%"
+        "CPU:{total_cpu:3}% cores:{online}/{reported}  Heap:{}/RAM:{}  RAMFS:{}nodes  {}",
+        human_bytes(heap_used), human_bytes(usable_ram), nodes, usb
     )
 }
 

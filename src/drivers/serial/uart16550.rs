@@ -10,11 +10,43 @@
 //!   formateur série.
 
 use core::fmt;
+use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use crate::arch::x86_64::ports::{inb, outb};
 
 const COM1: u16 = 0x3F8;
 const PROFONDEUR_FIFO: usize = 16;
 const FORMAT_BUFFER_SIZE: usize = 2048;
+
+// BOUCHAUD_PHYSICAL_SERIAL_TRACE_V31
+// A mini-PC rarely exposes COM1. Keep the serial stream, but mirror the most
+// recent bytes into a bounded atomic ring so the GOP diagnostic screen can show
+// exactly the same xHCI/SMP markers after ExitBootServices.
+const TRACE_BYTES: usize = 64 * 1024;
+static TRACE_WRITE: AtomicUsize = AtomicUsize::new(0);
+static TRACE: [AtomicU8; TRACE_BYTES] = [const { AtomicU8::new(0) }; TRACE_BYTES];
+
+#[inline]
+fn trace_capture(bytes: &[u8]) {
+    for &byte in bytes {
+        let sequence = TRACE_WRITE.fetch_add(1, Ordering::AcqRel);
+        TRACE[sequence % TRACE_BYTES].store(byte, Ordering::Release);
+    }
+}
+
+pub fn trace_total_bytes() -> usize {
+    TRACE_WRITE.load(Ordering::Acquire)
+}
+
+pub fn trace_snapshot() -> alloc::vec::Vec<u8> {
+    let end = TRACE_WRITE.load(Ordering::Acquire);
+    let len = end.min(TRACE_BYTES);
+    let start = end.saturating_sub(len);
+    let mut out = alloc::vec::Vec::with_capacity(len);
+    for sequence in start..end {
+        out.push(TRACE[sequence % TRACE_BYTES].load(Ordering::Acquire));
+    }
+    out
+}
 
 /// État global du port série, pour éviter d'écrire avant l'init.
 static mut INITIALISED: bool = false;
@@ -69,6 +101,9 @@ fn attends_place() {
 }
 
 fn write_lot(octets: &[u8]) {
+    // Capture at the actual UART sink so prefixes and payload remain in the
+    // same order as the bytes emitted on COM1.
+    trace_capture(octets);
     let mut pose = 0usize;
     while pose < octets.len() {
         attends_place();

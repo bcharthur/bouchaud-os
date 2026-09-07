@@ -132,3 +132,39 @@ pub fn wheel_pending() -> bool {
 pub fn take_wheel() -> i32 {
     WHEEL_DELTA.swap(0, Ordering::AcqRel)
 }
+
+// BOUCHAUD_USB_HID_MOUSE_BRIDGE_V3
+/// Injecte un rapport HID boot mouse dans le MEME etat que le chemin PS/2.
+/// HID utilise +Y vers le bas, contrairement aux paquets PS/2 (+Y vers le haut).
+pub fn inject_usb_report(buttons: u8, dx: i8, dy: i8, wheel: i8) {
+    PACKETS.fetch_add(1, Ordering::Relaxed);
+    LAST_PACKET_NS.store(crate::kernel::timer::monotonic_ns(), Ordering::Release);
+
+    let old_x = MX.load(Ordering::Relaxed);
+    let old_y = MY.load(Ordering::Relaxed);
+    let old_btn = BTN.load(Ordering::Relaxed);
+    let old_wheel = WHEEL_DELTA.load(Ordering::Relaxed);
+    let max_x = crate::drivers::gfx::width().saturating_sub(1) as i32;
+    let max_y = crate::drivers::gfx::height().saturating_sub(1) as i32;
+    let new_x = old_x.saturating_add(dx as i32).clamp(0, max_x);
+    let new_y = old_y.saturating_add(dy as i32).clamp(0, max_y);
+    let new_btn = buttons & 0x07;
+
+    MX.store(new_x, Ordering::Release);
+    MY.store(new_y, Ordering::Release);
+    BTN.store(new_btn, Ordering::Release);
+    if wheel != 0 {
+        let wheel = wheel as i32;
+        let _ = WHEEL_DELTA.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+            Some(v.saturating_add(wheel))
+        });
+    }
+    let new_wheel = WHEEL_DELTA.load(Ordering::Acquire);
+    if (new_x, new_y, new_btn, new_wheel) != (old_x, old_y, old_btn, old_wheel) {
+        PACKETS_CHANGED.fetch_add(1, Ordering::Relaxed);
+        DEFERRED_SIGNALS.fetch_add(1, Ordering::Relaxed);
+        crate::kernel::sync::reveil::signale_interface_irq(
+            crate::kernel::sync::reveil::Source::Souris,
+        );
+    }
+}

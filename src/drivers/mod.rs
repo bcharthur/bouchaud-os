@@ -23,6 +23,10 @@ pub mod display;
 pub mod e1000;
 #[path = "network/rtl8168.rs"]
 pub mod rtl8168;
+#[path = "usb/xhci_probe.rs"]
+pub mod xhci_probe;
+#[path = "usb/xhci_active.rs"]
+pub mod xhci_active;
 #[path = "display/bochs.rs"]
 pub mod gfx;
 #[path = "api/gpu.rs"]

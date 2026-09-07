@@ -1,6 +1,10 @@
 param(
     [string]$Output = "",
-    [switch]$ForceLadybird
+    [switch]$ForceLadybird,
+    [ValidateRange(640, 8192)]
+    [int]$MinWidth = 1920,
+    [ValidateRange(480, 4320)]
+    [int]$MinHeight = 1080
 )
 $ErrorActionPreference="Stop"
 $RepoRoot=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -15,7 +19,12 @@ if(-not (Test-Path -LiteralPath $Ramdisk -PathType Leaf)){ Fail "ladybird-browse
 & python ".\tools\reference\verify-reference-ladybird-image.py" $Ramdisk
 if($LASTEXITCODE -ne 0){ Fail "ladybird-browser.img invalide" }
 if(-not $Output){ $Output=Join-Path $RepoRoot "target\reference\bouchaud-trigkey-stage2-ladybird.img" }
-& ".\tools\reference\build-reference-stage2.ps1" -Output $Output -Ramdisk $Ramdisk
+Write-Host "TRIGKEY_GOP_MIN_REQUEST=${MinWidth}x${MinHeight}"
+& ".\tools\reference\build-reference-stage2.ps1" `
+    -Output $Output `
+    -Ramdisk $Ramdisk `
+    -MinWidth $MinWidth `
+    -MinHeight $MinHeight
 if($LASTEXITCODE -ne 0){ exit $LASTEXITCODE }
 $Output=[System.IO.Path]::GetFullPath($Output)
 $Bytes=(Get-Item -LiteralPath $Output).Length

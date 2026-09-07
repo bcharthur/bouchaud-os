@@ -456,10 +456,23 @@ mod modificateur {
 
 fn boucle() {
     fb::enter();
-    mouse::init();
+
+    let legacy_ps2 =
+        crate::platform::pc::stage2::legacy_ps2_allowed();
+
+    if legacy_ps2 {
+        mouse::init();
+    }
+
     #[cfg(feature = "reference-desktop")]
     {
-        crate::serial_println!("BOUCHAUD_STAGE2_INPUT_READY");
+        if legacy_ps2 {
+            crate::serial_println!("BOUCHAUD_STAGE2_INPUT_READY");
+        } else {
+            crate::serial_println!(
+                "BOUCHAUD_STAGE2_INPUT_XHCI_PENDING"
+            );
+        }
         crate::serial_println!("BOUCHAUD_STAGE2_WINDOW_MANAGER_READY");
     }
     crate::serial_println!("[gui] window manager demarre (fil noyau)");
@@ -526,6 +539,8 @@ fn boucle() {
         let billet = INTERFACE.billet();
         reveil::note_tour();
         task::note_wm_heartbeat();
+        // BOUCHAUD_XHCI_HID_POLL_V3: polling bootstrap, remplace plus tard par MSI-X.
+        crate::drivers::xhci_active::poll();
         let maintenant = crate::kernel::timer::monotonic_ms();
 
         // ---- Clavier (non bloquant) ----
@@ -1060,6 +1075,13 @@ fn boucle() {
             // payer deux changements de contexte pour un sommeil nul.
             Some(date) if date <= maintenant => {}
             Some(date) => {
+                // Sans interruption xHCI V3, le polling HID impose une petite
+                // echeance. Le bureau reste evenementiel hors presence HID USB.
+                let date = if crate::drivers::xhci_active::hid_polling() {
+                    date.min(maintenant.saturating_add(2))
+                } else {
+                    date
+                };
                 let attente_ns = date
                     .saturating_sub(maintenant)
                     .saturating_mul(1_000_000);
@@ -1259,6 +1281,19 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
         clavier.ack_defaults,
         clavier.ack_enable
     );
+
+    crate::serial_println!(
+        "[USB-HID-V3] xhci={} ports={} devices={} keyboards={} mice={} polling={}",
+        crate::drivers::xhci_active::is_active() as u8,
+        crate::drivers::xhci_active::connected_ports(),
+        crate::drivers::xhci_active::usb_devices(),
+        crate::drivers::xhci_active::hid_keyboards(),
+        crate::drivers::xhci_active::hid_mice(),
+        crate::drivers::xhci_active::hid_polling() as u8,
+    );
+    if crate::drivers::xhci_active::hid_ready() {
+        crate::serial_println!("BOUCHAUD_INPUT_GREEN keyboard=1 mouse=1");
+    }
 
     for w in wins.iter_mut() {
         if let App::Navigateur { client } = &mut w.app {

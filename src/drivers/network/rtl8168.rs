@@ -337,8 +337,25 @@ pub fn init_with_device(device: &PciDevice) -> bool {
     // Une autonegociation cuivre gigabit prend couramment plus d'une seconde.
     // `net::demarre()` teste le lien juste apres `init()`, donc on lui laisse
     // une fenetre BORNEE avant de conclure que le cable est debranche.
-    let deadline = crate::kernel::timer::monotonic_ms().saturating_add(LINK_WAIT_MS);
-    while !link_up() && crate::kernel::timer::monotonic_ms() < deadline {
+    let start_ms = crate::kernel::timer::monotonic_ms();
+    let deadline_ms = start_ms.saturating_add(LINK_WAIT_MS);
+    let mut fallback_spins = 0usize;
+
+    while !link_up() {
+        let now_ms = crate::kernel::timer::monotonic_ms();
+
+        if now_ms != start_ms && now_ms >= deadline_ms {
+            break;
+        }
+
+        fallback_spins = fallback_spins.saturating_add(1);
+        if fallback_spins >= 20_000_000 {
+            crate::serial_println!(
+                "BOUCHAUD_TRIGKEY_RTL8168_LINK_WAIT_FALLBACK_TIMEOUT"
+            );
+            break;
+        }
+
         core::hint::spin_loop();
     }
 

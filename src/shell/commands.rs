@@ -640,22 +640,27 @@ pub fn cat(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
         println!("usage: cat <file>");
         return 1;
     }
-    let fs = ramfs::fs();
-    let idx = match fs.resolve_checked(argv[1], cwd) {
-        Ok(i) => i,
-        Err(e) => {
-            println!("cat: {}", e);
+    // Le backing peut reprendre RAMFS : ne pas conserver le verrou VFS
+    // pendant logical_len()/read_at().
+    let idx = {
+        let fs = ramfs::fs();
+        let idx = match fs.resolve_checked(argv[1], cwd) {
+            Ok(i) => i,
+            Err(e) => {
+                println!("cat: {}", e);
+                return 1;
+            }
+        };
+        if fs.nodes[idx].kind != NodeKind::File {
+            println!("cat: dossier");
             return 1;
         }
+        if !fs.can(idx, PERM_R) {
+            println!("cat: permission denied");
+            return 1;
+        }
+        idx
     };
-    if fs.nodes[idx].kind != NodeKind::File {
-        println!("cat: dossier");
-        return 1;
-    }
-    if !fs.can(idx, PERM_R) {
-        println!("cat: permission denied");
-        return 1;
-    }
     // `cat` diffuse par tranches : il n'a aucune raison de tenir en memoire un
     // fichier de 190 Mio, et il doit fonctionner qu'il soit resident ou adosse
     // au disque. `fs.nodes[idx].content` etait vide dans le second cas.
@@ -1300,22 +1305,26 @@ fn lit_noeud(idx: usize, who: &str) -> Option<String> {
 fn input_text(path: Option<&str>, cwd: usize, who: &str) -> Option<String> {
     match path {
         Some(p) => {
-            let fs = ramfs::fs();
-            let idx = match fs.resolve_checked(p, cwd) {
-                Ok(i) => i,
-                Err(e) => {
-                    println!("{}: {}", who, e);
+            // grep/wc/head/tail passent aussi par le backing : meme invariant.
+            let idx = {
+                let fs = ramfs::fs();
+                let idx = match fs.resolve_checked(p, cwd) {
+                    Ok(i) => i,
+                    Err(e) => {
+                        println!("{}: {}", who, e);
+                        return None;
+                    }
+                };
+                if fs.nodes[idx].kind != NodeKind::File {
+                    println!("{}: pas un fichier", who);
                     return None;
                 }
+                if !fs.can(idx, PERM_R) {
+                    println!("{}: permission denied", who);
+                    return None;
+                }
+                idx
             };
-            if fs.nodes[idx].kind != NodeKind::File {
-                println!("{}: pas un fichier", who);
-                return None;
-            }
-            if !fs.can(idx, PERM_R) {
-                println!("{}: permission denied", who);
-                return None;
-            }
             lit_noeud(idx, who)
         }
         None => Some(crate::shell::take_stdin().unwrap_or_default()),

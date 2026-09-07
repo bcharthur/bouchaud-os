@@ -41,6 +41,7 @@ pub fn interactive_loop() -> ! {
     let mut last_frame_ms = crate::kernel::timer::monotonic_ms();
 
     loop {
+        crate::drivers::xhci_active::poll();
         let pos = crate::drivers::mouse::pos();
         let buttons = crate::drivers::mouse::buttons();
 

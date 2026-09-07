@@ -153,7 +153,31 @@ fn parcours_bus(bus: u8, profondeur: u8, visite: &mut dyn FnMut(&PciDevice) -> b
 
 /// Applique `visite` a toute la topologie, ponts compris.
 pub fn parcours(visite: &mut dyn FnMut(&PciDevice) -> bool) {
-    parcours_bus(0, 0, visite);
+    // Bring-up physique : chaque numero de bus PCI est teste exactement
+    // une fois. Cela evite les revisites/explosions de la recursion par ponts
+    // sur les topologies PCIe reelles.
+    for bus_num in 0u16..=255u16 {
+        let bus = bus_num as u8;
+
+        for slot in 0..32u8 {
+            let Some(function_zero) = read_device(bus, slot, 0) else {
+                continue;
+            };
+
+            let functions =
+                if multifonction(function_zero.header_type) { 8 } else { 1 };
+
+            for func in 0..functions {
+                let Some(device) = read_device(bus, slot, func) else {
+                    continue;
+                };
+
+                if !visite(&device) {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 /// Les capacites d'un peripherique, dans `sortie`. Rend combien ont ete lues.

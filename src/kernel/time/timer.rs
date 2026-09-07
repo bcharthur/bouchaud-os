@@ -4,7 +4,7 @@ use core::arch::x86_64::{__cpuid, __cpuid_count};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::arch::x86_64::cpu;
 use crate::arch::x86_64::interrupts;
-use crate::arch::x86_64::ports::outb;
+use crate::arch::x86_64::ports::{inb, outb};
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
 static BOOT_TSC: AtomicU64 = AtomicU64::new(0);
@@ -12,9 +12,86 @@ static TSC_HZ: AtomicU64 = AtomicU64::new(0);
 static LAST_MONOTONIC_NS: AtomicU64 = AtomicU64::new(0);
 static INVARIANT_TSC: AtomicBool = AtomicBool::new(false);
 static HAS_RDTSCP: AtomicBool = AtomicBool::new(false);
+static HPET_BASE_VIRT: AtomicU64 = AtomicU64::new(0);
+static HPET_PERIOD_FS: AtomicU64 = AtomicU64::new(0);
+static HPET_BOOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Frequence de base du PIT 8253/8254, en hertz.
 const PIT_BASE_HZ: u32 = 1_193_182;
+
+/// Calibre le TSC sans aucune interruption.
+///
+/// Le canal 2 du PIT n'est pas raccorde a IRQ0 : on programme un one-shot
+/// d'environ 50 ms puis on POLL son bit OUT2 sur le port 0x61.
+/// Cela fonctionne meme si le firmware/ACPI ne route pas le vieux PIT
+/// vers le PIC 8259.
+fn calibrate_tsc_hz_pit2(rdtscp: bool) -> Option<u64> {
+    const COUNT: u16 = 59_659; // ~50 ms a 1_193_182 Hz
+    const MAX_POLLS: usize = 5_000_000;
+
+    unsafe {
+        let original = inb(0x61);
+
+        // Haut-parleur coupe + gate 2 basse.
+        outb(0x61, original & !0x03);
+
+        // Channel 2, lobyte/hibyte, mode 0, binaire.
+        outb(0x43, 0xB0);
+        outb(0x42, (COUNT & 0xff) as u8);
+        outb(0x42, (COUNT >> 8) as u8);
+
+        // En mode 0, OUT2 doit etre bas pendant le comptage.
+        let mut armed = false;
+        for _ in 0..10_000 {
+            if inb(0x61) & 0x20 == 0 {
+                armed = true;
+                break;
+            }
+            core::hint::spin_loop();
+        }
+
+        if !armed {
+            outb(0x61, original);
+            return None;
+        }
+
+        let start = cpu::read_tsc_ordered(rdtscp);
+
+        // Front montant de gate => demarrage.
+        outb(0x61, (original & !0x02) | 0x01);
+
+        let mut completed = false;
+        for _ in 0..MAX_POLLS {
+            if inb(0x61) & 0x20 != 0 {
+                completed = true;
+                break;
+            }
+            core::hint::spin_loop();
+        }
+
+        let end = cpu::read_tsc_ordered(rdtscp);
+        outb(0x61, original);
+
+        if !completed {
+            return None;
+        }
+
+        let cycles = end.wrapping_sub(start);
+        if cycles == 0 {
+            return None;
+        }
+
+        let hz = ((cycles as u128) * PIT_BASE_HZ as u128 / COUNT as u128)
+            .min(u64::MAX as u128) as u64;
+
+        // Filtre une mesure manifestement impossible.
+        if !(100_000_000..=10_000_000_000).contains(&hz) {
+            return None;
+        }
+
+        Some(hz)
+    }
+}
 
 pub fn init() {
     let (invariant, rdtscp) = detect_tsc_features();
@@ -25,15 +102,60 @@ pub fn init() {
     // Un TSC dont la frequence varie avec P-state n'est pas une horloge. Dans
     // ce cas on force la calibration/fallback au lieu de publier des deadlines
     // architecturales trompeuses.
-    TSC_HZ.store(
-        if invariant { detect_tsc_hz().unwrap_or(0) } else { 0 },
-        Ordering::Release,
-    );
+    let tsc_hz = if invariant {
+        detect_tsc_hz()
+            .or_else(|| calibrate_tsc_hz_pit2(rdtscp))
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    TSC_HZ.store(tsc_hz, Ordering::Release);
+
+    // Rend immediatement utilisables les budgets en cycles, meme avant IRQ0.
+    if tsc_hz != 0 {
+        unsafe {
+            CYCLES_PER_MS = tsc_hz / 1000;
+        }
+        crate::serial_println!(
+            "BOUCHAUD_TSC_EARLY_CALIBRATION_OK hz={}",
+            tsc_hz
+        );
+    }
     unsafe {
         LAST_FRAME_TSC = boot_tsc;
         RENDER_START_TSC = boot_tsc;
     }
     program_pit(TICKS_PER_SECOND as u32);
+}
+
+
+pub fn install_hpet_source(phys_base: u64) -> bool {
+    if phys_base == 0 { return false; }
+    let base = crate::kernel::memory::phys_to_virt(phys_base);
+    unsafe {
+        let caps = core::ptr::read_volatile(base as *const u64);
+        let period_fs = caps >> 32;
+        if period_fs == 0 || period_fs > 100_000_000 { return false; }
+        let config = base.add(0x10) as *mut u64;
+        let current = core::ptr::read_volatile(config);
+        core::ptr::write_volatile(config, current | 1);
+        let counter = core::ptr::read_volatile(base.add(0xF0) as *const u64);
+        HPET_BASE_VIRT.store(base as u64, Ordering::Release);
+        HPET_PERIOD_FS.store(period_fs, Ordering::Release);
+        HPET_BOOT_COUNTER.store(counter, Ordering::Release);
+        crate::serial_println!("BOUCHAUD_HPET_MONOTONIC_READY base={:#x} period_fs={}", phys_base, period_fs);
+        true
+    }
+}
+
+fn hpet_monotonic_ns() -> Option<u64> {
+    let base = HPET_BASE_VIRT.load(Ordering::Acquire);
+    let period_fs = HPET_PERIOD_FS.load(Ordering::Acquire);
+    if base == 0 || period_fs == 0 { return None; }
+    let now = unsafe { core::ptr::read_volatile((base as *mut u8).add(0xF0) as *const u64) };
+    let delta = now.wrapping_sub(HPET_BOOT_COUNTER.load(Ordering::Acquire));
+    Some(((delta as u128).saturating_mul(period_fs as u128) / 1_000_000u128).min(u64::MAX as u128) as u64)
 }
 
 /// Programme le canal 0 du PIT a la frequence demandee.
@@ -86,6 +208,8 @@ pub fn monotonic_ns() -> u64 {
             .wrapping_sub(BOOT_TSC.load(Ordering::Acquire));
         ((cycles as u128).saturating_mul(1_000_000_000) / hz as u128)
             .min(u64::MAX as u128) as u64
+    } else if let Some(hpet_ns) = hpet_monotonic_ns() {
+        hpet_ns
     } else {
         ticks().saturating_mul(1_000_000_000 / TICKS_PER_SECOND)
     };
@@ -172,7 +296,13 @@ pub fn calibrate() {
         spins += 1;
         // Garde-fou : abandonne (calibration a 0) plutot que de bloquer le boot
         // si les interruptions ne tournent pas encore pour une raison quelconque.
-        if spins > 500_000_000 { return; }
+        if spins > 20_000_000 {
+            crate::serial_println!(
+                "BOUCHAUD_TIMER_PIT_CALIBRATION_TIMEOUT ticks={}",
+                ticks().wrapping_sub(start_tick)
+            );
+            return;
+        }
     }
     let elapsed_ticks = ticks().wrapping_sub(start_tick).max(1);
     let elapsed_tsc = cpu::rdtsc().wrapping_sub(start_tsc);
