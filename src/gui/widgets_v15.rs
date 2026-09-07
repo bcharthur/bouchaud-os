@@ -29,7 +29,7 @@ pub(crate) fn draw_barre_haute() {
     const CORPS: f32 = 12.0;
     let largeur = fb::text_width(&valeur, CORPS, false);
     let marge_droite = 104usize;
-    let x = fb::WIDTH.saturating_sub(marge_droite + largeur + 18);
+    let x = fb::width().saturating_sub(marge_droite + largeur + 18);
     let y = 8usize;
 
     fb::fill_rect_rgb(

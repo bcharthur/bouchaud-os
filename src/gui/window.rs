@@ -1,6 +1,6 @@
 //! Fenetres et types partages du gestionnaire de fenetres.
 
-use crate::gui::framebuffer::{HEIGHT, WIDTH};
+use crate::gui::framebuffer::{height, width};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -81,9 +81,9 @@ pub(crate) const TITRE_NAVIGATEUR: &str = "Ladybird";
 /// partagee d'un client depend maintenant pour sa taille : une divergence d'un
 /// pixel se serait vue comme une bande sale au bord d'une fenetre maximisee, et
 /// aurait ete cherchee dans le compositeur.
-pub(crate) const fn rect_maximise() -> crate::gui::windowing::Rect {
-    crate::gui::windowing::Rect::new(0, BAR_H as i32, WIDTH as u32,
-        (HEIGHT - 2 * BAR_H) as u32)
+pub(crate) fn rect_maximise() -> crate::gui::windowing::Rect {
+    crate::gui::windowing::Rect::new(0, BAR_H as i32, width() as u32,
+        (height() - 2 * BAR_H) as u32)
 }
 
 /// Plus grande zone utile que le bureau puisse donner : celle d'une fenetre
@@ -92,7 +92,7 @@ pub(crate) const fn rect_maximise() -> crate::gui::windowing::Rect {
 /// BOUCHAUD_C14_SURFACE_ALLOUEE_AU_MAXIMUM_V1 : c'est la taille a laquelle la
 /// surface d'un client est allouee, une fois pour toutes. Elle est CALCULEE a
 /// partir de `rect_maximise`, et non recopiee.
-pub(crate) const fn zone_maximale() -> (usize, usize) {
+pub(crate) fn zone_maximale() -> (usize, usize) {
     let rect = crate::gui::windowing::client_rect(rect_maximise(), TITLE_H as u32);
     (rect.width as usize, rect.height as usize)
 }
@@ -199,7 +199,7 @@ pub(crate) const TACHE_X0: i32 = MARGE_BARRE + DEMARRER_W + 10;
 pub(crate) fn start_btn() -> Rect {
     Rect {
         x: MARGE_BARRE,
-        y: HEIGHT as i32 - BAR_H as i32 + MARGE_BARRE,
+        y: height() as i32 - BAR_H as i32 + MARGE_BARRE,
         w: DEMARRER_W,
         h: BOUTON_BARRE_H,
     }
@@ -207,7 +207,7 @@ pub(crate) fn start_btn() -> Rect {
 
 pub(crate) fn menu_rect() -> Rect {
     let h = MENU.len() as i32 * MENU_ITEM_H + MENU_HEADER_H + 8;
-    Rect { x: 2, y: HEIGHT as i32 - BAR_H as i32 - h, w: MENU_W, h }
+    Rect { x: 2, y: height() as i32 - BAR_H as i32 - h, w: MENU_W, h }
 }
 
 /// Le menu, dans le systeme de coordonnees du compositeur.
@@ -242,7 +242,7 @@ pub(crate) fn rect_ligne_menu(index: usize) -> crate::gui::protocole::Rect {
 pub(crate) fn taskbar_btn(i: usize) -> Rect {
     Rect {
         x: TACHE_X0 + i as i32 * TACHE_PAS,
-        y: HEIGHT as i32 - BAR_H as i32 + MARGE_BARRE,
+        y: height() as i32 - BAR_H as i32 + MARGE_BARRE,
         w: TACHE_W,
         h: BOUTON_BARRE_H,
     }
@@ -330,8 +330,8 @@ pub(crate) fn toggle_max(w: &mut Win) {
 pub(crate) fn clamp_win(w: &mut Win) {
     if w.x < 0 { w.x = 0; }
     if w.y < BAR_H as i32 { w.y = BAR_H as i32; }
-    if w.x + w.w > WIDTH as i32 { w.x = WIDTH as i32 - w.w; }
-    if w.y + w.h > HEIGHT as i32 - BAR_H as i32 { w.y = HEIGHT as i32 - BAR_H as i32 - w.h; }
+    if w.x + w.w > width() as i32 { w.x = width() as i32 - w.w; }
+    if w.y + w.h > height() as i32 - BAR_H as i32 { w.y = height() as i32 - BAR_H as i32 - w.h; }
 }
 
 /// Le scenario automatise M8 demande au bureau d'ouvrir directement le

@@ -46,6 +46,15 @@ fn env_set(name: &str, val: &str) {
     env.push((name.to_string(), val.to_string()));
 }
 
+/// Pose une variable exportee avant l'entree dans le bureau.
+///
+/// Le Stage 2 n'execute pas `/autorun`, contrairement au chemin historique.
+/// Cette API volontairement etroite permet au boot de fournir a Ladybird le
+/// meme environnement sans exposer les details internes du shell.
+pub fn set_exported_for_boot(name: &str, value: &str) {
+    env_set(name, value);
+}
+
 fn env_get(name: &str) -> Option<String> {
     for (k, v) in env_mut().iter() {
         if k == name { return Some(v.clone()); }

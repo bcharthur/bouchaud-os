@@ -1,0 +1,8 @@
+[package]
+name = "bouchaud-uefi-preboot-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+uefi = { version = "=0.37.0", features = ["alloc", "global_allocator", "panic_handler"] }

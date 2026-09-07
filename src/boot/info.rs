@@ -10,6 +10,13 @@ pub enum PlatformKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FirmwareKind {
+    LegacyBios,
+    Uefi,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MemoryRegionKind {
     Usable,
     Reserved,
@@ -24,20 +31,48 @@ pub struct MemoryRegion {
     pub kind: MemoryRegionKind,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FramebufferPixelFormat {
+    Rgb,
+    Bgr,
+    U8,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RamdiskInfo {
+    /// Adresse virtuelle CPU-accessible fournie par bootloader_api.
+    /// Elle est deja mappee et ne doit jamais recevoir physical_memory_offset.
+    pub address: u64,
+    pub byte_len: usize,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct FramebufferInfo {
+    /// Adresse virtuelle CPU-accessible fournie par le chargeur.
+    /// Ce champ ne doit jamais etre interprete comme le BAR0 du GPU.
     pub address: u64,
+    pub byte_len: usize,
     pub width: u32,
     pub height: u32,
     pub stride: u32,
     pub bytes_per_pixel: u8,
+    pub pixel_format: FramebufferPixelFormat,
 }
 
 pub struct BootInfo {
     pub architecture: Architecture,
     pub platform: PlatformKind,
+    pub firmware: FirmwareKind,
     pub memory_regions: &'static [MemoryRegion],
+    /// Faux si l'adaptateur n'a pas pu représenter toute la carte mémoire.
+    /// Les allocateurs refusent alors de continuer.
+    pub memory_regions_complete: bool,
     pub framebuffer: Option<FramebufferInfo>,
+    /// Archive de donnees UEFI chargee par le bootloader, si presente.
+    pub ramdisk: Option<RamdiskInfo>,
     pub physical_memory_offset: Option<u64>,
+    /// Adresse physique du RSDP lorsqu'un chargeur sait la fournir.
+    pub rsdp_address: Option<u64>,
     pub device_tree: Option<usize>,
 }

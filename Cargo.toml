@@ -6,6 +6,13 @@ authors = ["Arthur Bouchaud"]
 description = "Bouchaud OS - noyau expérimental from scratch en Rust"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = ["legacy-boot"]
+legacy-boot = ["dep:bootloader"]
+uefi-boot = ["dep:bootloader_api"]
+reference-bringup = []
+reference-desktop = ["reference-bringup"]
+
 [dependencies]
 # Allocateur de tas pour activer `alloc` (Vec/String/BTreeMap).
 linked_list_allocator = "0.10"
@@ -25,7 +32,8 @@ hashbrown = { version = "0.15", default-features = false, features = ["default-h
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 # Dépendances du backend x86_64 uniquement. Elles ne doivent pas contaminer
 # le futur graphe de compilation AArch64.
-bootloader = { version = "0.9.31", features = ["map_physical_memory"] }
+bootloader = { version = "0.9.31", features = ["map_physical_memory"], optional = true }
+bootloader_api = { version = "=0.11.15", optional = true }
 x86_64 = "0.14.2"
 pic8259 = "0.10.1"
 

@@ -452,3 +452,153 @@ pub fn mount_data_disk() {
         lazy_bytes / 1024
     ));
 }
+
+// BOUCHAUD_TRIGKEY_UEFI_RAMDISK_V1
+/// Indexe l'USTAR charge par le bootloader UEFI sans recopier les gros binaires.
+/// Les petits fichiers restent residents; les gros ELF pointent directement
+/// dans la plage virtuelle du ramdisk et sont lus a la demande par backing::read_at.
+fn index_boot_ramdisk(address: u64, byte_len: usize) -> Option<Unpacked> {
+    if address == 0 || byte_len < BLOCK * 2 || byte_len > MAX_ARCHIVE_DISK_SIZE {
+        return None;
+    }
+
+    // SAFETY: bootloader_api reserve les frames du ramdisk et maintient leur
+    // mapping virtuel apres ExitBootServices. `byte_len` vient du meme BootInfo.
+    let archive = unsafe { core::slice::from_raw_parts(address as *const u8, byte_len) };
+    crate::fs::backing::reset();
+
+    let mut result = Unpacked {
+        files: 0,
+        directories: 0,
+        bytes: 0,
+        skipped: 0,
+        truncated: false,
+    };
+    let mut offset = 0usize;
+
+    while offset + BLOCK <= archive.len() {
+        let header = &archive[offset..offset + BLOCK];
+        if header.iter().all(|&byte| byte == 0) {
+            break;
+        }
+        if !is_ustar(header) {
+            if offset == 0 { return None; }
+            break;
+        }
+
+        let prefix = field(header, PREFIX, 155);
+        let name = field(header, NAME, 100);
+        let path = if prefix.is_empty() {
+            String::from(name)
+        } else {
+            alloc::format!("{}/{}", prefix, name)
+        };
+        let path = path.trim_start_matches("./").trim_start_matches('/');
+        let size = octal(header, SIZE, 12) as usize;
+        let mode = octal(header, MODE, 8) as u16 & 0o7777;
+        let kind = header[TYPEFLAG];
+        let data_offset = offset + BLOCK;
+        let end = match data_offset.checked_add(size) {
+            Some(end) if end <= archive.len() => end,
+            _ => {
+                result.skipped += 1;
+                result.truncated = true;
+                break;
+            }
+        };
+
+        match kind {
+            TYPE_DIR => {
+                if !path.is_empty() && mkdir_path(path) != 0 {
+                    result.directories += 1;
+                }
+            }
+            TYPE_FILE | TYPE_FILE_ALT => {
+                if !path.is_empty() {
+                    let (parent_path, file_name) = match path.rfind('/') {
+                        Some(index) => (&path[..index], &path[index + 1..]),
+                        None => ("", path),
+                    };
+                    let parent = if parent_path.is_empty() { 0 } else { mkdir_path(parent_path) };
+                    let mut fs = ramfs::fs();
+                    let node = match fs.find_child(parent, file_name) {
+                        Some(existing) => existing,
+                        None => match fs.touch_at(parent, file_name) {
+                            Ok(created) => created,
+                            Err(_) => {
+                                result.skipped += 1;
+                                let padded = size.saturating_add(BLOCK - 1) / BLOCK * BLOCK;
+                                offset = data_offset.saturating_add(padded);
+                                continue;
+                            }
+                        },
+                    };
+                    fs.nodes[node].mode = if mode == 0 { 0o644 } else { mode };
+
+                    if size <= INLINE_BOOT_FILE_SIZE {
+                        crate::fs::backing::unregister(node);
+                        fs.nodes[node].content = archive[data_offset..end].to_vec();
+                    } else {
+                        let data_address = match address.checked_add(data_offset as u64) {
+                            Some(value) => value,
+                            None => {
+                                result.skipped += 1;
+                                result.truncated = true;
+                                break;
+                            }
+                        };
+                        fs.nodes[node].content.clear();
+                        crate::fs::backing::register_memory(node, data_address, size);
+                    }
+                    result.files += 1;
+                    result.bytes += size;
+                }
+            }
+            _ => result.skipped += 1,
+        }
+
+        let padded = match size.checked_add(BLOCK - 1) {
+            Some(value) => value / BLOCK * BLOCK,
+            None => {
+                result.truncated = true;
+                break;
+            }
+        };
+        offset = match data_offset.checked_add(padded) {
+            Some(next) => next,
+            None => {
+                result.truncated = true;
+                break;
+            }
+        };
+    }
+    Some(result)
+}
+
+/// Monte le ramdisk UEFI comme source de userland Ladybird.
+/// Retourne faux sans modifier MOUNTED si l'archive est invalide/tronquee.
+pub fn mount_boot_ramdisk(address: u64, byte_len: usize) -> bool {
+    let result = match index_boot_ramdisk(address, byte_len) {
+        Some(result) if result.files > 0 && !result.truncated => result,
+        Some(result) => {
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "tar: ramdisk UEFI refuse files={} skipped={} truncated={}",
+                result.files, result.skipped, result.truncated
+            ));
+            return false;
+        }
+        None => {
+            crate::kernel::dmesg::log("tar: ramdisk UEFI absent ou USTAR invalide");
+            return false;
+        }
+    };
+
+    unsafe { MOUNTED = Some((result.files, result.directories, result.bytes)); }
+    let (lazy_files, lazy_bytes, _, _) = crate::fs::backing::stats();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "tar: ramdisk UEFI indexe -> {} fichiers, {} repertoires, {} Kio ({} lazy, {} Kio sans copie)",
+        result.files, result.directories, result.bytes / 1024,
+        lazy_files, lazy_bytes / 1024,
+    ));
+    true
+}

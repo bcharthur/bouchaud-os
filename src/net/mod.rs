@@ -61,7 +61,7 @@ pub fn set_config(ip: Ipv4Addr, gw: Ipv4Addr, dns: Ipv4Addr) {
 
 /// Indique si une interface routable vers l'exterieur est active.
 pub fn external_enabled() -> bool {
-    e1000::is_ready()
+    matches!(etat_demarrage(), Demarrage::Pret | Demarrage::SansBail)
 }
 
 // ---------------------------------------------------------------------------
@@ -81,6 +81,9 @@ pub enum Demarrage {
     /// Carte prete, lien monte, pas de bail DHCP. La configuration statique de
     /// repli s'applique — c'est ce qui fait marcher SLIRP sans serveur DHCP.
     SansBail,
+    /// Lien physique monte mais aucune configuration IPv4 n'a ete obtenue.
+    /// Sur materiel reel on ne fabrique jamais les adresses SLIRP de QEMU.
+    SansConfiguration,
     /// Interface configuree : adresse, passerelle, resolveur.
     Pret,
 }
@@ -121,9 +124,12 @@ pub fn demarre() -> Demarrage {
         Demarrage::CarteRefusee => String::from("net: lo actif ; carte presente mais non geree"),
         Demarrage::LienBas => String::from("net: lo actif ; eth0 initialisee, lien bas"),
         Demarrage::SansBail => format!(
-            "net: eth0 {} (statique, pas de bail DHCP) gw {} dns {}",
+            "net: eth0 {} (repli QEMU SLIRP) gw {} dns {}",
             ipv4::format_addr(&our_ip()), ipv4::format_addr(&gateway()),
             ipv4::format_addr(&dns_server())),
+        Demarrage::SansConfiguration => String::from(
+            "net: eth0 lien UP mais DHCP absent ; pas de fausse configuration QEMU"
+        ),
         Demarrage::Pret => format!(
             "net: eth0 {} gw {} dns {} — pret",
             ipv4::format_addr(&our_ip()), ipv4::format_addr(&gateway()),
@@ -145,9 +151,10 @@ fn demarre_interne() -> Demarrage {
     }
     match dhcp::negocie() {
         Some(_) => Demarrage::Pret,
-        // Pas de bail, mais une carte et un lien : la configuration statique
-        // de repli reste posee, et elle suffit sous SLIRP. On declare donc
-        // l'interface utilisable plutot que de la declarer morte.
+        // 10.0.2.x est une convention SLIRP QEMU, pas une configuration
+        // universelle. Sur le RTL8168 physique, un DHCP absent signifie
+        // simplement "hors ligne" jusqu'a configuration manuelle.
+        None if e1000::using_rtl8168() => Demarrage::SansConfiguration,
         None => Demarrage::SansBail,
     }
 }

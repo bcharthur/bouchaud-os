@@ -3,8 +3,8 @@
 // Les coordonnées/boutons/molette sont atomiques : le hard IRQ publie, la GUI
 // lit hors IRQ. Le décodeur de paquet (CYCLE/PKT) reste privé à IRQ12.
 
-static MX: AtomicI32 = AtomicI32::new((WIDTH / 2) as i32);
-static MY: AtomicI32 = AtomicI32::new((HEIGHT / 2) as i32);
+static MX: AtomicI32 = AtomicI32::new(0);
+static MY: AtomicI32 = AtomicI32::new(0);
 static BTN: AtomicU8 = AtomicU8::new(0);
 static HAS_WHEEL: AtomicBool = AtomicBool::new(false);
 static WHEEL_DELTA: AtomicI32 = AtomicI32::new(0);

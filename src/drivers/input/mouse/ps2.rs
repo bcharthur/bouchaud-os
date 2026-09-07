@@ -49,8 +49,8 @@ pub fn init() {
         crate::arch::x86_64::interrupts::unmask_irq(1);
         crate::arch::x86_64::interrupts::unmask_irq(12);
 
-        MX.store((WIDTH / 2) as i32, Ordering::Release);
-        MY.store((HEIGHT / 2) as i32, Ordering::Release);
+        MX.store((crate::drivers::gfx::width() / 2) as i32, Ordering::Release);
+        MY.store((crate::drivers::gfx::height() / 2) as i32, Ordering::Release);
         BTN.store(0, Ordering::Release);
         WHEEL_DELTA.store(0, Ordering::Release);
         CYCLE = 0;

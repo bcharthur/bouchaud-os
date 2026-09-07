@@ -1,4 +1,4 @@
-//! Backing de fichiers : contenu resident ou etendue immutable sur disque.
+//! Backing de fichiers : contenu resident ou etendue immutable disque/RAM UEFI.
 //!
 //! Etape de migration entre le RAMFS historique et un VFS complet.
 //!
@@ -15,15 +15,21 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Copy)]
-struct DiskExtent {
+enum BackingSource {
+    Disk { drive: Drive, data_lba: u64 },
+    /// Adresse VIRTUELLE stable d'un fichier dans le ramdisk UEFI.
+    Memory { address: u64 },
+}
+
+#[derive(Clone, Copy)]
+struct BackingExtent {
     node: usize,
-    drive: Drive,
-    data_lba: u64,
+    source: BackingSource,
     size: usize,
     generation: u64,
 }
 
-static EXTENTS: SpinLock<Vec<DiskExtent>> = SpinLock::new(Vec::new());
+static EXTENTS: SpinLock<Vec<BackingExtent>> = SpinLock::new(Vec::new());
 static DISK_READ_OPS: AtomicU64 = AtomicU64::new(0);
 static DISK_READ_BYTES: AtomicU64 = AtomicU64::new(0);
 static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
@@ -60,13 +66,30 @@ pub fn reset() {
 
 pub fn register_disk(node: usize, drive: Drive, data_lba: u64, size: usize) {
     unregister(node);
-    EXTENTS.lock().push(DiskExtent {
+    EXTENTS.lock().push(BackingExtent {
         node,
-        drive,
-        data_lba,
+        source: BackingSource::Disk { drive, data_lba },
         size,
         generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
     });
+}
+
+/// Enregistre une etendue immutable situee dans le ramdisk UEFI deja mappe.
+/// L'adresse est virtuelle et reste valide pendant toute la vie du noyau.
+pub fn register_memory(node: usize, address: u64, size: usize) {
+    unregister(node);
+    EXTENTS.lock().push(BackingExtent {
+        node,
+        source: BackingSource::Memory { address },
+        size,
+        generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
+    });
+}
+
+pub fn is_memory_backed(node: usize) -> bool {
+    EXTENTS.lock().iter().any(|extent| {
+        extent.node == node && matches!(extent.source, BackingSource::Memory { .. })
+    })
 }
 
 pub fn unregister(node: usize) {
@@ -75,6 +98,8 @@ pub fn unregister(node: usize) {
     READ_PATTERNS.lock().retain(|entry| entry.node != node);
 }
 
+/// Nom historique: signifie maintenant "fichier externe immutable".
+/// Les etendues ramdisk doivent suivre les memes regles RO/COW que les etendues ATA.
 pub fn is_disk_backed(node: usize) -> bool {
     disk_len(node).is_some()
 }
@@ -133,14 +158,33 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
     }
 
     let wanted = core::cmp::min(out.len(), extent.size - offset);
+
+    if let BackingSource::Memory { address } = extent.source {
+        let source = match address.checked_add(offset as u64) {
+            Some(value) => value,
+            None => return 0,
+        };
+        // SAFETY: register_memory n'est appele que pour une plage entierement
+        // incluse dans le ramdisk mappe par bootloader_api. `wanted` est borne
+        // par extent.size ci-dessus.
+        unsafe {
+            core::ptr::copy_nonoverlapping(source as *const u8, out.as_mut_ptr(), wanted);
+        }
+        return wanted;
+    }
+
+    let (drive, data_lba) = match extent.source {
+        BackingSource::Disk { drive, data_lba } => (drive, data_lba),
+        BackingSource::Memory { .. } => unreachable!(),
+    };
     let mut done = 0usize;
     let mut absolute = offset;
 
     let intra = absolute % SECTOR_SIZE;
     if intra != 0 && done < wanted {
         let mut sector = [0u8; SECTOR_SIZE];
-        let lba = extent.data_lba + (absolute / SECTOR_SIZE) as u64;
-        if block::read_blocks(extent.drive, lba, 1, &mut sector) != 1 {
+        let lba = data_lba + (absolute / SECTOR_SIZE) as u64;
+        if block::read_blocks(drive, lba, 1, &mut sector) != 1 {
             return done;
         }
         let take = core::cmp::min(SECTOR_SIZE - intra, wanted - done);
@@ -152,9 +196,9 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
     let full_sectors = (wanted - done) / SECTOR_SIZE;
     if full_sectors > 0 {
         let bytes = full_sectors * SECTOR_SIZE;
-        let lba = extent.data_lba + (absolute / SECTOR_SIZE) as u64;
+        let lba = data_lba + (absolute / SECTOR_SIZE) as u64;
         let read = block::read_blocks(
-            extent.drive,
+            drive,
             lba,
             full_sectors,
             &mut out[done..done + bytes],
@@ -171,8 +215,8 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
 
     if done < wanted {
         let mut sector = [0u8; SECTOR_SIZE];
-        let lba = extent.data_lba + (absolute / SECTOR_SIZE) as u64;
-        if block::read_blocks(extent.drive, lba, 1, &mut sector) == 1 {
+        let lba = data_lba + (absolute / SECTOR_SIZE) as u64;
+        if block::read_blocks(drive, lba, 1, &mut sector) == 1 {
             let take = wanted - done;
             out[done..done + take].copy_from_slice(&sector[..take]);
             done += take;
@@ -192,7 +236,12 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
 /// identité de nœud; les processus Ladybird relisant les mêmes pages propres
 /// réutilisent donc les octets déjà lus.
 pub fn read_at(node: usize, offset: usize, out: &mut [u8]) -> usize {
-    if out.is_empty() || !is_disk_backed(node) || out.len() > READAHEAD_MAX {
+    // Un ramdisk est deja de la memoire: inutile d'allouer un cache read-ahead
+    // pour recopier une zone qui se lit directement. Le page-cache du MM prend
+    // ensuite le relais pour partager les pages ELF propres entre processus.
+    if out.is_empty() || !is_disk_backed(node) || is_memory_backed(node)
+        || out.len() > READAHEAD_MAX
+    {
         return read_at_uncached(node, offset, out);
     }
     {

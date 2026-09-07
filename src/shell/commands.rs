@@ -11,6 +11,7 @@ use crate::shell::remainder_after_tokens;
 use crate::users;
 use crate::{serial_println, OS_NAME, VERSION};
 use alloc::string::String;
+use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------
 // Aide et informations
@@ -480,50 +481,77 @@ pub fn ls(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
     0
 }
 
+// BOUCHAUD_STAGE2_TREE_LOCK_SAFE
 pub fn tree(argc: usize, argv: &[&str; 12], cwd: usize) {
     let path = if argc >= 2 { argv[1] } else { "." };
-    let fs = ramfs::fs();
-    let idx = match fs.resolve_checked(path, cwd) {
-        Ok(i) => i,
-        Err(e) => {
-            println!("tree: {}", e);
-            return;
-        }
+
+    // Resolve et affiche la racine sous un seul emprunt VFS, puis le relache
+    // AVANT la recursion. Le precedent code gardait ce verrou vivant pendant
+    // `tree_rec()`, qui tentait de reprendre ramfs::fs() : LOCKDEP detectait
+    // alors une inversion rank 50 -> rank 50 et paniquait le noyau.
+    let idx = {
+        let fs = ramfs::fs();
+        let idx = match fs.resolve_checked(path, cwd) {
+            Ok(i) => i,
+            Err(e) => {
+                println!("tree: {}", e);
+                return;
+            }
+        };
+        ramfs::print_path(&fs, idx);
+        idx
     };
-    ramfs::print_path(&fs, idx);
     println!("");
+
     tree_rec(idx, 0);
 }
 
 fn tree_rec(idx: usize, depth: usize) {
-    let fs = ramfs::fs();
-    if fs.nodes[idx].kind != NodeKind::Dir {
-        return;
-    }
-    // On n'explore un repertoire que si on a le droit de le lire.
-    if !fs.can(idx, PERM_R) {
-        for _ in 0..depth {
-            print!("  ");
+    // Snapshot minimal des enfants. Aucun appel recursif ni println! n'est fait
+    // tant que le garde VFS est detenu.
+    let children: Vec<(usize, bool, String)> = {
+        let fs = ramfs::fs();
+        if fs.nodes[idx].kind != NodeKind::Dir {
+            return;
         }
-        println!("|- [permission denied]");
-        return;
-    }
-    for i in 0..MAX_NODES {
-        if fs.nodes[i].used && i != idx && fs.nodes[i].parent == idx {
+
+        if !fs.can(idx, PERM_R) {
+            drop(fs);
             for _ in 0..depth {
                 print!("  ");
             }
-            if fs.nodes[i].kind == NodeKind::Dir {
-                vga::set_color(COLOR_CYAN);
-                println!("|- {}/", fs.nodes[i].name_str());
-                vga::set_color(COLOR_DEFAULT);
-                tree_rec(i, depth + 1);
-            } else {
-                println!("|- {}", fs.nodes[i].name_str());
+            println!("|- [permission denied]");
+            return;
+        }
+
+        let mut children = Vec::new();
+        for i in 0..MAX_NODES {
+            if fs.nodes[i].used && i != idx && fs.nodes[i].parent == idx {
+                children.push((
+                    i,
+                    fs.nodes[i].kind == NodeKind::Dir,
+                    String::from(fs.nodes[i].name_str()),
+                ));
             }
+        }
+        children
+    };
+
+    for (child, is_dir, name) in children {
+        for _ in 0..depth {
+            print!("  ");
+        }
+        if is_dir {
+            vga::set_color(COLOR_CYAN);
+            println!("|- {}/", name);
+            vga::set_color(COLOR_DEFAULT);
+            tree_rec(child, depth + 1);
+        } else {
+            println!("|- {}", name);
         }
     }
 }
+
 
 pub fn cd(argc: usize, argv: &[&str; 12], cwd: &mut usize) -> i32 {
     if argc < 2 {
@@ -612,22 +640,27 @@ pub fn cat(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
         println!("usage: cat <file>");
         return 1;
     }
-    let fs = ramfs::fs();
-    let idx = match fs.resolve_checked(argv[1], cwd) {
-        Ok(i) => i,
-        Err(e) => {
-            println!("cat: {}", e);
+    // Le backing peut reprendre RAMFS : ne pas conserver le verrou VFS
+    // pendant logical_len()/read_at().
+    let idx = {
+        let fs = ramfs::fs();
+        let idx = match fs.resolve_checked(argv[1], cwd) {
+            Ok(i) => i,
+            Err(e) => {
+                println!("cat: {}", e);
+                return 1;
+            }
+        };
+        if fs.nodes[idx].kind != NodeKind::File {
+            println!("cat: dossier");
             return 1;
         }
+        if !fs.can(idx, PERM_R) {
+            println!("cat: permission denied");
+            return 1;
+        }
+        idx
     };
-    if fs.nodes[idx].kind != NodeKind::File {
-        println!("cat: dossier");
-        return 1;
-    }
-    if !fs.can(idx, PERM_R) {
-        println!("cat: permission denied");
-        return 1;
-    }
     // `cat` diffuse par tranches : il n'a aucune raison de tenir en memoire un
     // fichier de 190 Mio, et il doit fonctionner qu'il soit resident ou adosse
     // au disque. `fs.nodes[idx].content` etait vide dans le second cas.
@@ -1272,22 +1305,26 @@ fn lit_noeud(idx: usize, who: &str) -> Option<String> {
 fn input_text(path: Option<&str>, cwd: usize, who: &str) -> Option<String> {
     match path {
         Some(p) => {
-            let fs = ramfs::fs();
-            let idx = match fs.resolve_checked(p, cwd) {
-                Ok(i) => i,
-                Err(e) => {
-                    println!("{}: {}", who, e);
+            // grep/wc/head/tail passent aussi par le backing : meme invariant.
+            let idx = {
+                let fs = ramfs::fs();
+                let idx = match fs.resolve_checked(p, cwd) {
+                    Ok(i) => i,
+                    Err(e) => {
+                        println!("{}: {}", who, e);
+                        return None;
+                    }
+                };
+                if fs.nodes[idx].kind != NodeKind::File {
+                    println!("{}: pas un fichier", who);
                     return None;
                 }
+                if !fs.can(idx, PERM_R) {
+                    println!("{}: permission denied", who);
+                    return None;
+                }
+                idx
             };
-            if fs.nodes[idx].kind != NodeKind::File {
-                println!("{}: pas un fichier", who);
-                return None;
-            }
-            if !fs.can(idx, PERM_R) {
-                println!("{}: permission denied", who);
-                return None;
-            }
             lit_noeud(idx, who)
         }
         None => Some(crate::shell::take_stdin().unwrap_or_default()),

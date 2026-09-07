@@ -48,11 +48,22 @@ impl VgaWriter {
     }
 
     fn write_cell(&self, row: usize, col: usize, byte: u8, color: u8) {
-        let offset = (row * VGA_WIDTH + col) * 2;
-        unsafe {
-            let ptr = (VGA_BUFFER + offset) as *mut u8;
-            core::ptr::write_volatile(ptr, byte);
-            core::ptr::write_volatile(ptr.add(1), color);
+        #[cfg(feature = "reference-desktop")]
+        {
+            // BOUCHAUD_STAGE2_NO_LEGACY_VGA_MMIO
+            // UEFI/GOP: 0xb8000 n'est pas un backend valide du reference device.
+            let _ = (row, col, byte, color);
+            return;
+        }
+
+        #[cfg(not(feature = "reference-desktop"))]
+        {
+            let offset = (row * VGA_WIDTH + col) * 2;
+            unsafe {
+                let ptr = (VGA_BUFFER + offset) as *mut u8;
+                core::ptr::write_volatile(ptr, byte);
+                core::ptr::write_volatile(ptr.add(1), color);
+            }
         }
     }
 
@@ -123,7 +134,19 @@ impl fmt::Write for VgaWriter {
 
 /// Efface l'ecran et replace le curseur en haut a gauche.
 pub fn clear() {
-    unsafe { VGA.clear(); }
+    #[cfg(feature = "reference-desktop")]
+    {
+        unsafe {
+            VGA.row = 0;
+            VGA.col = 0;
+        }
+        return;
+    }
+
+    #[cfg(not(feature = "reference-desktop"))]
+    unsafe {
+        VGA.clear();
+    }
 }
 
 /// Change la couleur d'affichage courante.
@@ -136,11 +159,15 @@ pub fn set_cursor(row: usize, col: usize) {
     unsafe {
         VGA.row = if row >= VGA_HEIGHT { VGA_HEIGHT - 1 } else { row };
         VGA.col = if col >= VGA_WIDTH { VGA_WIDTH - 1 } else { col };
-        let pos = VGA.row * VGA_WIDTH + VGA.col;
-        outb(0x3D4, 0x0F);
-        outb(0x3D5, (pos & 0xFF) as u8);
-        outb(0x3D4, 0x0E);
-        outb(0x3D5, ((pos >> 8) & 0xFF) as u8);
+
+        #[cfg(not(feature = "reference-desktop"))]
+        {
+            let pos = VGA.row * VGA_WIDTH + VGA.col;
+            outb(0x3D4, 0x0F);
+            outb(0x3D5, (pos & 0xFF) as u8);
+            outb(0x3D4, 0x0E);
+            outb(0x3D5, ((pos >> 8) & 0xFF) as u8);
+        }
     }
 }
 
@@ -184,6 +211,9 @@ pub fn serial_mirror() -> bool {
 /// Implementation reelle derriere les macros `print!` / `println!`.
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
+
+    // Les captures du shell restent prioritaires : les commandes du terminal
+    // graphique continuent a reutiliser println! sans toucher au VGA physique.
     unsafe {
         if let Some(stack) = CAPTURE_STACK.as_mut() {
             if let Some(top) = stack.last_mut() {
@@ -191,9 +221,17 @@ pub fn _print(args: fmt::Arguments) {
                 return;
             }
         }
-        // Seul ce qui atteint reellement l'ecran est recopie : une sortie
-        // capturee part vers un pipe ou un fichier, la dupliquer sur COM1
-        // ferait apparaitre deux fois ce que l'utilisateur n'a vu qu'une.
+    }
+
+    #[cfg(feature = "reference-desktop")]
+    {
+        // UEFI/GOP: sortie texte de secours vers COM1 uniquement.
+        crate::drivers::serial::_print(args);
+        return;
+    }
+
+    #[cfg(not(feature = "reference-desktop"))]
+    unsafe {
         if SERIAL_MIRROR {
             crate::drivers::serial::_print(args);
         }

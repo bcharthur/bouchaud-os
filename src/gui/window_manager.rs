@@ -109,7 +109,7 @@ use politique::PERIODE_RELEVE_MS;
 /// que payait le repos.
 
 fn plein_ecran() -> Rect {
-    Rect::neuf(0, 0, fb::WIDTH as u32, fb::HEIGHT as u32)
+    Rect::neuf(0, 0, fb::width() as u32, fb::height() as u32)
 }
 
 // BOUCHAUD_UX_KEY_DAMAGE_V1
@@ -291,7 +291,7 @@ fn origine_de(cible: transition::Cible) -> Origine {
 ///
 /// Bouton Demarrer et boutons de fenetres. Rien n'y change avec le temps.
 fn barre_taches_rect() -> Rect {
-    disposition::barre_taches(fb::WIDTH as u32, fb::HEIGHT as u32)
+    disposition::barre_taches(fb::width() as u32, fb::height() as u32)
 }
 
 // BOUCHAUD_GUI_TOPBAR_DAMAGE_V1
@@ -323,7 +323,7 @@ fn barre_taches_rect() -> Rect {
 
 /// Rectangle de la barre du HAUT : horloge, CPU, RAM, disque.
 fn barre_haute_rect() -> Rect {
-    disposition::barre_haute(fb::WIDTH as u32)
+    disposition::barre_haute(fb::width() as u32)
 }
 
 // BOUCHAUD_GUI_EMPREINTE_OMBRE_V1
@@ -388,11 +388,16 @@ fn degat_curseur(x: usize, y: usize) -> Rect {
 
 /// Lance le bureau (bloquant jusqu'a Quitter).
 pub fn run() {
+    // Le desktop est un vrai fil noyau. Le faire tourner directement depuis
+    // le fil de boot laisse CURRENT=NO_TASK et rend toute WaitQueue illegale.
     task::run_noyau(fil_bureau, "desktop");
 }
 
 /// Corps du fil noyau du bureau.
 fn fil_bureau() -> ! {
+    #[cfg(feature = "reference-desktop")]
+    crate::serial_println!("BOUCHAUD_STAGE2_DESKTOP_TASK_ENTER");
+
     boucle();
     task::exit_current(0)
 }
@@ -451,7 +456,25 @@ mod modificateur {
 
 fn boucle() {
     fb::enter();
-    mouse::init();
+
+    let legacy_ps2 =
+        crate::platform::pc::stage2::legacy_ps2_allowed();
+
+    if legacy_ps2 {
+        mouse::init();
+    }
+
+    #[cfg(feature = "reference-desktop")]
+    {
+        if legacy_ps2 {
+            crate::serial_println!("BOUCHAUD_STAGE2_INPUT_READY");
+        } else {
+            crate::serial_println!(
+                "BOUCHAUD_STAGE2_INPUT_XHCI_PENDING"
+            );
+        }
+        crate::serial_println!("BOUCHAUD_STAGE2_WINDOW_MANAGER_READY");
+    }
     crate::serial_println!("[gui] window manager demarre (fil noyau)");
     crate::serial_println!(
         "[GUI-RENDER-CONTRACT] mode={} titlebar={} shadow={} rounded={} window_bounds=outer+shadow",
@@ -516,6 +539,8 @@ fn boucle() {
         let billet = INTERFACE.billet();
         reveil::note_tour();
         task::note_wm_heartbeat();
+        // BOUCHAUD_XHCI_HID_POLL_V3: polling bootstrap, remplace plus tard par MSI-X.
+        crate::drivers::xhci_active::poll();
         let maintenant = crate::kernel::timer::monotonic_ms();
 
         // ---- Clavier (non bloquant) ----
@@ -664,8 +689,8 @@ fn boucle() {
                                 let bottom = w.y + w.h; w.y = my.min(bottom - MIN_H); w.h = bottom - w.y;
                             }
                             if matches!(edge, Bottom | SouthWest | SouthEast) { w.h = (my - w.y).max(MIN_H); }
-                            if w.x + w.w > fb::WIDTH as i32 { w.w = fb::WIDTH as i32 - w.x; }
-                            if w.y + w.h > fb::HEIGHT as i32 - BAR_H as i32 { w.h = fb::HEIGHT as i32 - BAR_H as i32 - w.y; }
+                            if w.x + w.w > fb::width() as i32 { w.w = fb::width() as i32 - w.x; }
+                            if w.y + w.h > fb::height() as i32 - BAR_H as i32 { w.h = fb::height() as i32 - BAR_H as i32 - w.y; }
                         }
                     }
                     clamp_win(w);
@@ -697,7 +722,7 @@ fn boucle() {
                             let id = window.id;
                             route_window_command(window, crate::gui::windowing::WindowCommand::Snap(
                                 id, crate::gui::windowing::SnapZone::Left));
-                        } else if mx >= fb::WIDTH as i32 - crate::gui::windowing::SNAP_THRESHOLD && window.flags.snappable {
+                        } else if mx >= fb::width() as i32 - crate::gui::windowing::SNAP_THRESHOLD && window.flags.snappable {
                             let id = window.id;
                             route_window_command(window, crate::gui::windowing::WindowCommand::Snap(
                                 id, crate::gui::windowing::SnapZone::Right));
@@ -740,6 +765,11 @@ fn boucle() {
         }
 
         if click {
+            #[cfg(feature = "reference-desktop")]
+            crate::serial_println!(
+                "BOUCHAUD_STAGE2_CLICK_DISPATCHED x={} y={} buttons={:#x}",
+                mx, my, crate::drivers::mouse::buttons(),
+            );
             handle_click(mx, my, maintenant, &mut title_clicks, &mut wins, &mut menu_open,
                 &mut drag, &mut quit, home, &mut spawn_n, &mut icon_drag, &mut degats);
             sale = true;
@@ -870,7 +900,7 @@ fn boucle() {
             sale = true; // horloge, charge CPU, memoire : ils bougent seuls
             // BOUCHAUD_GUI_TOPBAR_DAMAGE_V1 : la barre du HAUT. Voir
             // `barre_haute_rect`. La barre du bas n'a rien qui bouge tout seul.
-            for (rect, cible) in transition::tic_horloge(fb::WIDTH as u32).iter() {
+            for (rect, cible) in transition::tic_horloge(fb::width() as u32).iter() {
                 degats.ajoute(origine_de(cible), rect);
             }
         }
@@ -1045,6 +1075,13 @@ fn boucle() {
             // payer deux changements de contexte pour un sommeil nul.
             Some(date) if date <= maintenant => {}
             Some(date) => {
+                // Sans interruption xHCI V3, le polling HID impose une petite
+                // echeance. Le bureau reste evenementiel hors presence HID USB.
+                let date = if crate::drivers::xhci_active::hid_polling() {
+                    date.min(maintenant.saturating_add(2))
+                } else {
+                    date
+                };
                 let attente_ns = date
                     .saturating_sub(maintenant)
                     .saturating_mul(1_000_000);
@@ -1245,6 +1282,19 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
         clavier.ack_enable
     );
 
+    crate::serial_println!(
+        "[USB-HID-V3] xhci={} ports={} devices={} keyboards={} mice={} polling={}",
+        crate::drivers::xhci_active::is_active() as u8,
+        crate::drivers::xhci_active::connected_ports(),
+        crate::drivers::xhci_active::usb_devices(),
+        crate::drivers::xhci_active::hid_keyboards(),
+        crate::drivers::xhci_active::hid_mice(),
+        crate::drivers::xhci_active::hid_polling() as u8,
+    );
+    if crate::drivers::xhci_active::hid_ready() {
+        crate::serial_println!("BOUCHAUD_INPUT_GREEN keyboard=1 mouse=1");
+    }
+
     for w in wins.iter_mut() {
         if let App::Navigateur { client } = &mut w.app {
             crate::serial_println!("[gui] client {}", client.etat_journal(periode_ms));
@@ -1348,7 +1398,7 @@ fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> (Rect, bool) {
 }
 
 fn proto_rect_ecran(rect: Rect) -> Rect {
-    crate::gui::protocole::rogne_degat(rect, fb::WIDTH as u32, fb::HEIGHT as u32)
+    crate::gui::protocole::rogne_degat(rect, fb::width() as u32, fb::height() as u32)
 }
 
 /// Ferme une fenetre, en terminant son client s'il y en a un.
@@ -1459,8 +1509,16 @@ fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
         }
     };
 
+    #[cfg(feature = "reference-desktop")]
+    crate::serial_println!(
+        "BOUCHAUD_STAGE2_LADYBIRD_LAUNCHED pid={} zone={}x{}",
+        client.pid,
+        NAV_LARGEUR,
+        NAV_HAUTEUR,
+    );
+
     let mut w = Win::new(String::from(window::TITRE_NAVIGATEUR),
-        (fb::WIDTH as i32 - largeur_fenetre) / 2, BAR_H as i32 + 8,
+        (fb::width() as i32 - largeur_fenetre) / 2, BAR_H as i32 + 8,
         largeur_fenetre, hauteur_fenetre,
         crate::gui::windowing::WindowFlags::STANDARD,
         App::Navigateur { client: alloc::boxed::Box::new(client) });

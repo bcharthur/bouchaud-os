@@ -153,7 +153,31 @@ fn parcours_bus(bus: u8, profondeur: u8, visite: &mut dyn FnMut(&PciDevice) -> b
 
 /// Applique `visite` a toute la topologie, ponts compris.
 pub fn parcours(visite: &mut dyn FnMut(&PciDevice) -> bool) {
-    parcours_bus(0, 0, visite);
+    // Bring-up physique : chaque numero de bus PCI est teste exactement
+    // une fois. Cela evite les revisites/explosions de la recursion par ponts
+    // sur les topologies PCIe reelles.
+    for bus_num in 0u16..=255u16 {
+        let bus = bus_num as u8;
+
+        for slot in 0..32u8 {
+            let Some(function_zero) = read_device(bus, slot, 0) else {
+                continue;
+            };
+
+            let functions =
+                if multifonction(function_zero.header_type) { 8 } else { 1 };
+
+            for func in 0..functions {
+                let Some(device) = read_device(bus, slot, func) else {
+                    continue;
+                };
+
+                if !visite(&device) {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 /// Les capacites d'un peripherique, dans `sortie`. Rend combien ont ete lues.
@@ -296,6 +320,20 @@ pub fn find_audio() -> Option<PciDevice> {
 /// Ligne d'interruption affectee au peripherique (registre 0x3C).
 pub fn interrupt_line(d: &PciDevice) -> u8 {
     (config_read32(d.bus, d.slot, d.func, 0x3C) & 0xFF) as u8
+}
+
+/// Cherche le premier controleur xHCI (USB 3.x), ponts compris.
+/// Stage 2 V1 se contente de l'inventorier : aucun registre xHCI n'est ecrit.
+pub fn find_xhci() -> Option<PciDevice> {
+    let mut trouve = None;
+    parcours(&mut |d| {
+        if d.class == 0x0C && d.subclass == 0x03 && d.prog_if == 0x30 {
+            trouve = Some(*d);
+            return false;
+        }
+        true
+    });
+    trouve
 }
 
 /// Cherche la premiere carte reseau PCI presente, ponts compris.
