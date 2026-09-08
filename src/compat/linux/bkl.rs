@@ -380,6 +380,42 @@ pub const SANS_BKL: &[(u64, &str)] = &[
     //         refutable.
     (nr::FUTEX, "c5: wait-word a seaux verrouilles + Mm + horloges atomiques ; le chemin suspendait deja le verrou lui-meme"),
 
+    // --- Lot c6 : la famille de la boucle d'evenements -----------------------
+    //
+    // BOUCHAUD_C6_BOUCLE_EVENEMENTS_SANS_BKL_V1
+    //
+    // Huit appels du meme domaine, et c'est celui sur lequel `POLL` repose
+    // depuis le lot A1/3 : la table des descripteurs, plus le verrou propre de
+    // chaque objet. Un navigateur les emet en rafale -- creation des tubes de
+    // ses processus de rendu, minuteries de sa boucle Qt, inscription des
+    // descripteurs a surveiller -- et chacun serialisait les autres coeurs.
+    //
+    // Lu :    `task::current_process()`, puis `process.files.lock()`, puis le
+    //         verrou de l'objet vise (`EventFdState`, `TimerFdState`, la liste
+    //         epoll, l'etat de tube). Les horloges atomiques pour les
+    //         minuteries. La memoire utilisateur pour les descripteurs rendus
+    //         et les `epoll_event`.
+    // Ecrit : le seul objet vise, sous son propre verrou ; la table des
+    //         descripteurs, sous le sien ; la memoire utilisateur par
+    //         `user_write` (domaine `Mm`).
+    // Verrou : aucun etat partage entre processus n'est touche. Les objets sont
+    //         des `Arc<SpinLock<...>>` crees par l'appel lui-meme, ou atteints
+    //         par un descripteur du processus courant.
+    //
+    // Ce qui a change depuis que l'en-tete de ce fichier deconseillait ce lot :
+    // `current_process()` ne reprend PLUS le gros verrou. Il lit le champ
+    // `process` de la tache courante -- pose a la creation, jamais modifie --
+    // et clone un `Arc`, ce qui est atomique par construction. C'etait la
+    // seule raison pour laquelle ces huit appels le reprenaient.
+    (nr::EVENTFD, "c6: table des descripteurs + objet cree sur place ; current_process() ne reprend plus le verrou"),
+    (nr::EVENTFD2, "c6: identique a EVENTFD, avec les drapeaux"),
+    (nr::TIMERFD_CREATE, "c6: table des descripteurs + objet cree sur place"),
+    (nr::TIMERFD_SETTIME, "c6: verrou de l'objet minuterie + horloges atomiques + Mm"),
+    (nr::TIMERFD_GETTIME, "c6: verrou de l'objet minuterie + horloges atomiques + Mm"),
+    (nr::PIPE, "c6: table des descripteurs + etat de tube cree sur place + Mm pour les deux descripteurs rendus"),
+    (nr::PIPE2, "c6: identique a PIPE, avec les drapeaux"),
+    (nr::EPOLL_CTL, "c6: table des descripteurs + verrou de la liste epoll + Mm"),
+
     // --- Constantes : le bras d'aiguillage ne lit ni n'ecrit rien ------------
     //
     // Ces appels rendent une valeur litterale. Ils ne touchent ni la table des

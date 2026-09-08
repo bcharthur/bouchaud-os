@@ -82,9 +82,31 @@ fn les_retraits_deja_mesures_ne_regressent_pas() {
         nr::FUTEX,               // lot c5
         nr::CLOCK_GETTIME,       // tete de liste d'une boucle d'evenements
         nr::SCHED_YIELD,         // relachait deja le verrou pour commuter
+        // lot c6 : la famille de la boucle d'evenements, meme domaine que POLL
+        nr::EVENTFD, nr::EVENTFD2,
+        nr::TIMERFD_CREATE, nr::TIMERFD_SETTIME, nr::TIMERFD_GETTIME,
+        nr::PIPE, nr::PIPE2, nr::EPOLL_CTL,
     ] {
         assert!(!exige_bkl(numero), "l'appel {} est retombe sous le gros verrou", numero);
     }
+}
+
+/// `NANOSLEEP` et `CLOCK_NANOSLEEP` restent sous le gros verrou, et ce n'est
+/// pas un oubli.
+///
+/// Ils descendent dans `task::sleep_ticks`, qui porte un `debug_assert!` sans
+/// ambiguite : « requiert le BKL externe de l'appelant ». Le chemin suspend
+/// puis reprend ce verrou externe autour de la commutation, et la profondeur
+/// rendue est verifiee. Les liberer sans changer d'abord ce contrat ferait
+/// suspendre une profondeur nulle et reprendre une profondeur nulle -- ce qui
+/// passerait les tests et romprait l'invariant que l'assertion protege.
+///
+/// Ce cas existe pour que le prochain qui parcourt la liste des appels encore
+/// verrouilles trouve la raison ici, plutot que de refaire l'analyse.
+#[test]
+fn le_sommeil_reste_sous_verrou_tant_que_son_contrat_l_exige() {
+    assert!(exige_bkl(nr::NANOSLEEP));
+    assert!(exige_bkl(nr::CLOCK_NANOSLEEP));
 }
 
 /// Chaque ligne porte une justification NON VIDE. Une justification qu'on ne

@@ -67,6 +67,17 @@ AUDITS_NOMMES = {
     # parcours de la table des taches. Le compteur `[BKL-FUTEX] herites=` doit
     # rester nul : c'est la falsification runtime de cet audit.
     "FUTEX": "c5 -- wait-word a seaux verrouilles ; le chemin suspendait deja le verrou",
+    # c6 -- audit ecrit au-dessus du lot dans SANS_BKL. Meme domaine que POLL :
+    # table des descripteurs + verrou par objet. Le point qui a change :
+    # `current_process()` ne reprend plus le gros verrou.
+    "EVENTFD": "c6 -- table des descripteurs + objet cree sur place",
+    "EVENTFD2": "c6 -- table des descripteurs + objet cree sur place",
+    "TIMERFD_CREATE": "c6 -- table des descripteurs + objet cree sur place",
+    "TIMERFD_SETTIME": "c6 -- verrou de l'objet minuterie + horloges atomiques + Mm",
+    "TIMERFD_GETTIME": "c6 -- verrou de l'objet minuterie + horloges atomiques + Mm",
+    "PIPE": "c6 -- table des descripteurs + etat de tube + Mm",
+    "PIPE2": "c6 -- table des descripteurs + etat de tube + Mm",
+    "EPOLL_CTL": "c6 -- table des descripteurs + verrou de la liste epoll + Mm",
     "MPROTECT": "jalon SMP4 -- domaine Arc<Process>::Mm + protocole TLB sur IRQ",
     "BRK": "jalon SMP4 -- domaine Arc<Process>::Mm + protocole TLB sur IRQ",
     # A1 lot 2 -- voir l'en-tete de bkl.rs et la preuve de duree de vie sur
