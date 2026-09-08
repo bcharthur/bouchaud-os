@@ -226,10 +226,36 @@ fn un_descripteur_qui_n_en_est_pas_un_est_refuse() {
         descripteur(&descripteur_usb2(0, 0, 10)).is_none(),
         "un concentrateur sans port n'est pas un concentrateur"
     );
-    assert!(
-        descripteur(&[200, 0x29, 4, 0, 0, 10, 0, 0, 0]).is_none(),
-        "une longueur annoncee plus grande que ce qu'on a lu"
-    );
+    // La partie FIXE d'un descripteur de concentrateur fait sept octets. En
+    // annoncer moins veut dire que les champs qu'on lit n'existent pas.
+    assert!(descripteur(&[6, 0x29, 4, 0, 0, 10, 0, 0, 0]).is_none());
+}
+
+#[test]
+fn une_longueur_annoncee_plus_grande_que_ce_qu_on_a_lu_est_normale() {
+    // C'EST LE CAS COURANT, et l'avoir pris pour une erreur a rejete tous les
+    // concentrateurs de plus d'un port.
+    //
+    // Un descripteur de concentrateur se termine par deux tableaux dont la
+    // taille depend du nombre de ports : `bDescLength` vaut 13 pour huit
+    // ports. On n'en lit que la partie fixe, donc on n'en demande que neuf
+    // octets -- et le peripherique repond neuf octets en annoncant treize.
+    let neuf_octets_lus_sur_treize = [13u8, 0x29, 8, 0x0a, 0x00, 0x01, 0x00, 0x00, 0xff];
+    let d = descripteur(&neuf_octets_lus_sur_treize)
+        .expect("un concentrateur a huit ports doit etre accepte");
+    assert_eq!(d.ports, 8);
+    assert_eq!(d.temps_reflexion, 0);
+    assert_eq!(d.delai_alimentation_ms, 2);
+}
+
+#[test]
+fn le_concentrateur_de_qemu_est_accepte_tel_quel() {
+    // Les octets exacts que `usb-hub` a rendus en integration : huit ports,
+    // caracteristiques 0x000a, `bPwrOn2PwrGood` a un. C'est cette entree-la
+    // qui etait refusee.
+    let d = descripteur(&[13, 0x29, 8, 0x0a, 0x00, 0x01, 0x00, 0x00, 0xff])
+        .expect("le concentrateur de QEMU doit etre traverse");
+    assert_eq!(d.ports, 8);
 }
 
 // ---------------------------------------------------------------------------

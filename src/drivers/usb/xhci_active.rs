@@ -1632,6 +1632,20 @@ fn traverse_concentrateur(
     )?;
     let octets = unsafe { core::slice::from_raw_parts(device.control_virt as *const u8, recu) };
     let Some(descripteur) = concentrateur::descripteur(octets) else {
+        // LES OCTETS, PAS SEULEMENT LE VERDICT.
+        //
+        // « descripteur invalide » ne dit pas lequel des champs a ete refuse,
+        // et un concentrateur refuse a tort est indiscernable d'un
+        // concentrateur reellement casse. Les six premiers octets suffisent a
+        // trancher, et ils tiennent sur une ligne.
+        let mut apercu = [0u8; 6];
+        for (index, octet) in apercu.iter_mut().enumerate() {
+            *octet = if index < octets.len() { octets[index] } else { 0 };
+        }
+        crate::serial_println!(
+            "BOUCHAUD_USB_CONCENTRATEUR_DESCRIPTEUR slot={} lu={} octets={:02x?}",
+            device.slot_id, recu, apercu,
+        );
         return Err("descripteur-concentrateur-invalide");
     };
 

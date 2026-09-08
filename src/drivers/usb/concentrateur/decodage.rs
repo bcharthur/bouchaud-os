@@ -179,7 +179,21 @@ pub fn descripteur(octets: &[u8]) -> Option<Descripteur> {
     if genre != DESCRIPTEUR_CONCENTRATEUR && genre != DESCRIPTEUR_CONCENTRATEUR_SUPER {
         return None;
     }
-    if longueur < 6 || longueur > octets.len() {
+    // LA LONGUEUR ANNONCEE EST PLUS GRANDE QUE CE QU'ON A LU, ET C'EST NORMAL.
+    //
+    // Un descripteur de concentrateur se termine par deux tableaux dont la
+    // taille depend du nombre de ports : `bDescLength` vaut 13 pour huit
+    // ports, 9 pour un seul. On n'en lit que la partie fixe -- c'est tout ce
+    // dont on se sert -- donc exiger que la longueur ANNONCEE tienne dans ce
+    // qu'on a LU rejette tous les concentrateurs de plus d'un port.
+    //
+    // C'est exactement ce qui est arrive : le concentrateur etait reconnu,
+    // configure, et sa traversee refusee sur ce seul motif.
+    //
+    // Ce qu'il faut verifier, c'est que la partie FIXE est complete -- sept
+    // octets, USB 2.0 §11.23.2.1 -- et que nos six premiers octets sont la.
+    // On ne lit rien au-dela.
+    if longueur < 7 {
         return None;
     }
     let ports = octets[2];
