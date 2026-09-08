@@ -16,16 +16,16 @@ preuve executable porte 🔵 ou ⚪, jamais ✅.
 | 🔵 | Chantier engage : une tranche verticale existe, le chemin par defaut reste l'ancien. |
 | ⚪ | Rien de ce qui compte n'est ecrit. |
 
-L'inventaire actuel : **68 garde-fous**, **58 suites de tests hote Rust**,
+L'inventaire actuel : **68 garde-fous**, **59 suites de tests hote Rust**,
 5 suites C++, 12 tests de fiabilite Python, ~88 000 lignes de noyau.
 
 ## Tableau d'ensemble
 
 | # | Chantier | Etat | Ce qui manque, en une phrase |
 |---|---|---:|---|
-| 1 | BKL → noyau concurrent | 🔵 | 15 acquisitions restent ; le chemin normal en a encore besoin. |
+| 1 | BKL → noyau concurrent | 🔵 | 61 appels sur 165 liberes ; les sockets, `futex`, `openat` et `ioctl` restent. |
 | 2 | Scheduler NG + preemption | 🔵 | Preemption depuis l'IRQ seulement ; pas de points surs, pas de tickless. |
-| 3 | Memoire NG | 🔵 | `LockedHeap` reste l'allocateur de fond ; ni buddy, ni slab, ni caches par CPU. |
+| 3 | Memoire NG | 🔵 | Compagnon pour le DMA ; `LockedHeap` reste le fond du tas noyau, pas de slab. |
 | 4 | Graphique NG / compositeur ring 3 | 🔵 | Le contrat existe et le compositeur noyau reste le chemin par defaut. |
 | 5 | Systeme de fichiers + E/S moderne | 🟡 | Commit A/B et barriere reelle ; pas d'extents, pas d'E/S asynchrone. |
 | 6 | Architecture de securite | 🟡 | Mots de passe sales et haches, profils separes ; pas de W^X, pas de sandbox M14. |
@@ -50,14 +50,32 @@ d'etat par CPU existent.
 *Preuve :* `tools/verifie-domaines-bkl.py`, `tools/verifie-portee-sans-commutation.py`,
 `tools/fs/test_commit_crash.rs`, budget `sites_bkl_par_domaine`.
 
-**Ce qui manque.** Les 15 sites restants sont sur le chemin normal, pas sur
-des chemins rares. Il n'y a pas de lockdep runtime : l'ordre est verifie par
-lecture de source, pas par le noyau qui tourne. Le but final -- « le chemin
-normal n'en a plus besoin » -- n'est pas atteint.
+**Ce que cette session a change.** Dix-sept appels systeme de plus ont quitte
+le gros verrou : 44 liberes au depart, **61 sur 165** maintenant. Les plus
+chauds y sont passes -- `mmap` (chaque arene glibc, chaque `dlopen`, chaque
+pile de fil), `close`, `fstat` (chaque `fopen`), `arch_prctl` (chaque fil
+cree), `lseek`, `dup`, `sched_yield`.
 
-**Ce qui bloque.** Chaque site restant demande un verrou par objet et une
-reflexion sur l'ordre. C'est du travail incremental, sans obstacle
-architectural.
+`sched_yield` etait le cas absurde : il prenait le verrou, puis `schedule()`
+le RELACHAIT pour commuter et le reprenait au retour -- une acquisition
+globale, une liberation et une reacquisition pour un appel dont tout l'objet
+est de rendre la main.
+
+Le point qui a debloque `mmap` merite d'etre retenu : il appelle
+`peuple_a_la_demande`, qui est le gestionnaire de FAUTE DE PAGE. Une faute
+peut survenir a tout instant, y compris pendant qu'un autre coeur tient le
+verrou. S'il en avait besoin, le systeme serait deja casse.
+
+**Ce qui manque.** Les sockets (`recvfrom`, `sendto`, `recvmsg`, `sendmsg`),
+`futex`, `openat`, `ioctl`, `execve`, `clone`. Il n'y a toujours pas de
+lockdep runtime : l'ordre est verifie par lecture de source, pas par le noyau
+qui tourne. Le but final -- « le chemin normal n'en a plus besoin » -- n'est
+pas atteint.
+
+**Ce qui bloque.** Rien d'architectural. Chaque appel restant demande son
+propre audit, et un appel libere par optimisme ne se voit ni a la compilation
+ni au boot : il se voit un jour, sous charge, a quatre coeurs, sous la forme
+d'une corruption qu'on ne saura pas relier a sa cause.
 
 ## 2 — Scheduler NG + preemption noyau 🔵
 
@@ -88,14 +106,26 @@ Un depot de magasins et une arene DMA avec liberation. Un page-cache avec
 *Preuve :* `test_magasin_depot.rs` (10), `test_arene_dma.rs` (14),
 `test_frames_libres.rs`.
 
-**Ce qui manque, et c'est l'essentiel.** `src/kernel/memory/heap.rs` le dit
-lui-meme : *« The old `LockedHeap` remains the proven backing allocator »*.
-`NgHeap` l'enveloppe, il ne le remplace pas. Il n'y a **ni buddy allocator, ni
-slab, ni classes de taille, ni caches de pages par CPU**. Pas de politique de
-working-set, pas d'OOM propre.
+**Ce que cette session a change.** Un **allocateur compagnon** existe et sert
+le DMA. Il remplace `AreneDma`, qui suivait au plus soixante-quatre regions
+rendues et **perdait** la memoire au-dela -- pas corrompue, perdue. Ce plafond
+etait atteint par la fragmentation, c'est-a-dire par un pilote de stockage
+sous charge : la machine finissait par ne plus pouvoir allouer de DMA sans
+qu'aucune erreur ne dise pourquoi.
 
-La philosophie du bitmap -- remplacer un parcours par un calcul -- n'a ete
-appliquee qu'a un endroit. C'est exactement ce qu'il faut generaliser.
+Il apporte aussi ce qui manquait vraiment : l'allocation CONTIGUE d'ordre N.
+Sans elle, un pilote qui voulait seize pages contigues ne pouvait pas les
+demander, et c'est pour cela que le DMA avait du se faire une arene a part.
+
+*Preuve :* `test_compagnon.rs` (21), `verifie-compagnon.py` (9 regles).
+
+**Ce qui manque, et c'est encore l'essentiel.** `src/kernel/memory/heap.rs` le
+dit toujours : *« The old `LockedHeap` remains the proven backing allocator »*.
+`NgHeap` l'enveloppe pour six classes de taille jusqu'a 1024 octets ; au-dela,
+tout descend dans le verrou global. Il n'y a **ni slab, ni caches de pages par
+CPU pour les frames**, pas de politique de working-set, pas d'OOM propre. Le
+compagnon ne sert que le DMA : le faire servir le tas noyau et l'allocateur de
+frames est la suite.
 
 ## 4 — Graphique NG / compositeur ring 3 🔵
 
@@ -277,9 +307,10 @@ Il dit ou se trouve le levier. Par ordre de rapport entre cout et effet :
    soixante-huit regles ecrites. Elle demande un jeton portant
    `administration:write`, que l'environnement d'integration n'a pas : c'est
    au proprietaire du depot de la lancer une fois.
-2. **Generaliser la memoire NG** (chantier 3). Le bitmap a montre la methode ;
-   `LockedHeap` reste le fond, et c'est lui qu'on paie a chaque allocation.
-3. **Finir la sortie du BKL** (chantier 1). Quinze sites, et c'est ce qui
-   debloque la preemption aux points surs (chantier 2).
+2. **Generaliser la memoire NG** (chantier 3). Le compagnon existe et ne sert
+   que le DMA ; `LockedHeap` reste le fond du tas noyau au-dela de 1024
+   octets, et c'est lui qu'on paie a chaque grosse allocation.
+3. **Finir la sortie du BKL** (chantier 1). Les sockets, `futex`, `openat` et
+   `ioctl` ; c'est ce qui debloque la preemption aux points surs (chantier 2).
 4. **Sortir le compositeur** (chantier 4). Le plus cher, et celui qui produit
    le « 60/120 Hz feel ».
