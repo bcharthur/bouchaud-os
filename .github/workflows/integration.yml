@@ -85,8 +85,21 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.sha }}
           SUITE: ${{ inputs.suite || 'auto' }}
+          EVENT: ${{ github.event_name }}
         run: |
-          if [ "$SUITE" = all ] || [ "$SUITE" = kernel ]; then
+          # UN LANCEMENT MANUEL VERIFIE L'ETAT, PAS LE DERNIER COMMIT.
+          #
+          # Sans base de comparaison, le classificateur retombe sur `HEAD^` :
+          # un `workflow_dispatch` ne classait donc que les fichiers du DERNIER
+          # commit. Un lot ou le dernier commit ne touche que la table du gros
+          # verrou faisait sauter les sondes memoire, alors que le lot entier
+          # changeait l'allocateur -- et le vert obtenu ne disait rien de ce
+          # qu'on croyait avoir verifie.
+          #
+          # `ci.yml` forcait deja tout sur un lancement manuel. L'asymetrie
+          # entre les deux etait le defaut : c'est celle qui fait croire qu'on
+          # a verifie la meme chose des deux cotes.
+          if [ "$EVENT" = workflow_dispatch ] || [ "$SUITE" = all ] || [ "$SUITE" = kernel ]; then
             python3 tools/ci/classify_changes.py --head "$HEAD_SHA" --all
           else
             python3 tools/ci/classify_changes.py --base "$BASE_SHA" --head "$HEAD_SHA"

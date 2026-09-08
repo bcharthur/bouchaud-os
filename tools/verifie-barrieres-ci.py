@@ -92,6 +92,47 @@ def main() -> int:
                 f"workflow : meme consequence, toute fusion bloquee"
             )
 
+    # UN LANCEMENT MANUEL DOIT VERIFIER L'ETAT, PAS LE DERNIER COMMIT.
+    #
+    # Sans base de comparaison, `classify_changes.py` retombe sur `HEAD^` : un
+    # `workflow_dispatch` ne classe alors que les fichiers du DERNIER commit.
+    # Un lot dont le dernier commit ne touche qu'un fichier de compatibilite
+    # fait sauter les sondes memoire, alors que le lot entier a change
+    # l'allocateur -- et le vert obtenu ne dit rien de ce qu'on croyait avoir
+    # verifie.
+    #
+    # C'est un defaut qui ne se voit pas : la CI est VERTE. Il ne se decouvre
+    # qu'en relisant quels jobs ont vraiment tourne.
+    for nom in ("ci.yml", "integration.yml"):
+        chemin = WORKFLOWS / nom
+        if not chemin.exists():
+            fautes.append("  `%s` a disparu." % nom)
+            continue
+        source = chemin.read_text(encoding="utf-8")
+        if "classify_changes.py" not in source:
+            continue
+        if "workflow_dispatch" not in source:
+            continue
+        # La ligne qui force doit citer l'evenement, pas seulement une entree.
+        # On cherche la ligne de decision et la commande qui la suit :
+        # citer l'evenement, et forcer toutes les categories.
+        decision = None
+        for numero, ligne in enumerate(source.split("\n")):
+            if "classify_changes.py" not in ligne or "--all" not in ligne:
+                continue
+            avant = source.split("\n")[max(0, numero - 3):numero]
+            if any("workflow_dispatch" in l and l.strip().startswith("if ") for l in avant):
+                decision = ligne
+                break
+        force = decision is not None
+        if not force:
+            fautes.append(
+                "  `%s` ne force pas toutes les categories sur un lancement "
+                "manuel. Sans base de comparaison, le classificateur ne voit "
+                "que le DERNIER commit : des sondes seront sautees et la CI "
+                "sera verte quand meme." % nom
+            )
+
     if fautes:
         print("barrieres de CI : regle violee")
         print("\n".join(fautes))
