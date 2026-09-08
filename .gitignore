@@ -1,4 +1,7 @@
 /target/
+# Les outils d'image sont des applications Rust autonomes : leur arbre de
+# construction n'a rien a faire dans le depot.
+tools/reference/uefi-image-builder/target/
 # Cette sonde est une application Rust autonome. Cargo regenere son verrou a
 # chaque build; seule la chaine principale verrouille ses dependances ici.
 tools/python-wasm/Cargo.lock
