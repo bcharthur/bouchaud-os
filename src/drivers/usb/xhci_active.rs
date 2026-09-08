@@ -330,6 +330,47 @@ fn max_scratchpads(hcs2: u32) -> usize {
     (hi << 5) | lo
 }
 
+/// Decalage de `USBLEGCTLSTS` depuis la capacite de support hérite.
+const LEGACY_CONTROLE: usize = 0x04;
+
+/// Bits RESERVES de `USBLEGCTLSTS`, ceux qu'il faut PRESERVER.
+///
+/// Tout le reste est soit une autorisation de SMI -- qu'on veut a zero --,
+/// soit un evenement RW1C -- qu'on efface en y ecrivant un.
+const LEGACY_BITS_RESERVES: u32 = (0x7 << 1) | (0xff << 5) | (0x7 << 17);
+
+/// Evenements SMI, effaces en y ecrivant un.
+const LEGACY_EVENEMENTS_SMI: u32 = 0x7 << 29;
+
+/// Prend le controleur au micrologiciel, et desarme ses interruptions systeme.
+///
+/// # Les deux moities de cette fonction
+///
+/// **Prendre la main.** Le micrologiciel possede le controleur pendant tout
+/// l'amorcage : c'est ainsi qu'un clavier USB marche dans le menu du BIOS. La
+/// remise se fait par un semaphore -- on pose « OS possede », on attend que
+/// « BIOS possede » tombe.
+///
+/// **Desarmer les SMI, et c'est la moitie qui manquait.** Prendre le
+/// controleur ne suffit pas : tant que les autorisations de SMI de
+/// `USBLEGCTLSTS` restent posees, le micrologiciel continue d'etre APPELE sur
+/// chaque evenement USB, par une interruption de gestion systeme que le noyau
+/// ne voit pas et ne peut pas masquer.
+///
+/// Le symptome est celui-la meme qu'on cherche : un clavier qui marche dans le
+/// BIOS et pas dans le systeme. Le micrologiciel intercepte l'evenement, le
+/// traite pour son emulation PS/2, et le noyau ne recoit rien -- ou recoit un
+/// anneau d'evenements dans lequel quelqu'un d'autre a avance la tete.
+///
+/// Sur une machine AMD dont le BIOS propose « USB legacy emulation », c'est le
+/// cas NORMAL, pas le cas rare.
+///
+/// # Un micrologiciel qui ne rend jamais la main
+///
+/// Certains ne baissent jamais leur bit. Attendre indefiniment donnerait une
+/// machine sans clavier et sans explication ; on force alors la reprise en
+/// effacant le bit nous-memes. Ce n'est pas elegant, et c'est ce que fait
+/// n'importe quel systeme qui demarre sur du materiel reel.
 unsafe fn legacy_handoff(base: usize, hccparams1: u32) -> bool {
     let mut off = (((hccparams1 >> 16) & 0xffff) as usize) * 4;
     for _ in 0..64 {
@@ -342,10 +383,36 @@ unsafe fn legacy_handoff(base: usize, hccparams1: u32) -> bool {
         if cap_id == 1 {
             // OS Owned Semaphore. Wait until BIOS Owned is released.
             w32(base, off, header | (1 << 24));
-            if header & (1 << 16) == 0 {
-                return true;
+            let rendu = header & (1 << 16) == 0
+                || wait_until(|| r32(base, off) & (1 << 16) == 0);
+            if !rendu {
+                // Reprise forcee. Un micrologiciel qui ne rend pas la main
+                // laisserait sinon la machine sans clavier, et sans rien pour
+                // le dire.
+                let courant = r32(base, off);
+                w32(base, off, courant & !(1 << 16));
+                crate::serial_println!(
+                    "BOUCHAUD_XHCI_HANDOFF_FORCE etat={:#010x} raison=micrologiciel-ne-rend-pas-la-main",
+                    courant
+                );
             }
-            return wait_until(|| r32(base, off) & (1 << 16) == 0);
+
+            // LES SMI, MAINTENANT.
+            //
+            // On garde les bits reserves, on met a zero toutes les
+            // autorisations, et on ecrit un dans les evenements pour les
+            // effacer. Les faire dans cet ordre compte : effacer un evenement
+            // dont l'autorisation est encore posee le fait revenir.
+            let controle = r32(base, off + LEGACY_CONTROLE);
+            let desarme = (controle & LEGACY_BITS_RESERVES) | LEGACY_EVENEMENTS_SMI;
+            w32(base, off + LEGACY_CONTROLE, desarme);
+            crate::serial_println!(
+                "BOUCHAUD_XHCI_SMI_DESARMES avant={:#010x} apres={:#010x} rendu={}",
+                controle,
+                r32(base, off + LEGACY_CONTROLE),
+                rendu as u8
+            );
+            return true;
         }
         if next == 0 {
             return true;

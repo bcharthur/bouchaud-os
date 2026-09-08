@@ -457,22 +457,27 @@ mod modificateur {
 fn boucle() {
     fb::enter();
 
-    let legacy_ps2 =
-        crate::platform::pc::stage2::legacy_ps2_allowed();
+    // La souris PS/2 suit SA propre decision : une machine dont le clavier USB
+    // est reconnu et la souris non doit garder un pointeur, et une machine
+    // dont la souris USB repond ne doit pas recevoir chaque mouvement deux
+    // fois.
+    let legacy_souris = crate::platform::pc::stage2::legacy_ps2_souris();
 
-    if legacy_ps2 {
+    if legacy_souris {
         mouse::init();
     }
 
     #[cfg(feature = "reference-desktop")]
     {
-        if legacy_ps2 {
-            crate::serial_println!("BOUCHAUD_STAGE2_INPUT_READY");
-        } else {
-            crate::serial_println!(
-                "BOUCHAUD_STAGE2_INPUT_XHCI_PENDING"
-            );
-        }
+        // Le journal dit d'ou vient CHAQUE genre d'entree. « prete » sans
+        // preciser laquelle ne permettait pas de distinguer un bureau qui a un
+        // clavier et pas de souris d'un bureau qui a les deux.
+        let legacy_clavier = crate::platform::pc::stage2::legacy_ps2_clavier();
+        crate::serial_println!(
+            "BOUCHAUD_STAGE2_INPUT_READY clavier={} souris={}",
+            if legacy_clavier { "ps2" } else { "usb" },
+            if legacy_souris { "ps2" } else { "usb" },
+        );
         crate::serial_println!("BOUCHAUD_STAGE2_WINDOW_MANAGER_READY");
     }
     crate::serial_println!("[gui] window manager demarre (fil noyau)");

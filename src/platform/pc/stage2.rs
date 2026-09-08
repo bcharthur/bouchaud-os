@@ -4,11 +4,34 @@
 
 use crate::boot::{BootInfo, FirmwareKind};
 
-static LEGACY_PS2_ALLOWED: core::sync::atomic::AtomicBool =
+// DEUX DRAPEAUX, ET NON UN.
+//
+// Un seul drapeau force a choisir entre « tout le PS/2 » et « rien ». Une
+// machine dont le clavier USB est reconnu et la souris non se retrouvait alors
+// sans pointeur : un bureau ou l'on peut taper et rien cliquer.
+//
+// Et l'inverse compte tout autant : initialiser le PS/2 alors qu'un
+// peripherique USB du meme genre repond deja ferait arriver chaque frappe DEUX
+// FOIS, si le micrologiciel emule encore un 8042 par-dessus l'USB. On decide
+// donc genre par genre.
+static LEGACY_PS2_CLAVIER: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(true);
+static LEGACY_PS2_SOURIS: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(true);
 
+/// Le clavier PS/2 doit-il etre initialise ?
+pub fn legacy_ps2_clavier() -> bool {
+    LEGACY_PS2_CLAVIER.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// La souris PS/2 doit-elle etre initialisee ?
+pub fn legacy_ps2_souris() -> bool {
+    LEGACY_PS2_SOURIS.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Conserve pour les appelants qui ne distinguent pas les deux.
 pub fn legacy_ps2_allowed() -> bool {
-    LEGACY_PS2_ALLOWED.load(core::sync::atomic::Ordering::Acquire)
+    legacy_ps2_clavier() || legacy_ps2_souris()
 }
 
 fn prepare_ram_persist() -> bool {
@@ -192,21 +215,56 @@ pub fn run(boot: &'static BootInfo) -> ! {
             false
         };
 
-    LEGACY_PS2_ALLOWED.store(
-        !xhci_present,
-        core::sync::atomic::Ordering::Release,
-    );
+    // CE QUI DECIDE, C'EST UN CLAVIER TROUVE -- PAS UN CONTROLEUR PRESENT.
+    //
+    // La regle etait « un xHCI existe, donc on saute le PS/2 ». Elle est vraie
+    // quand l'enumeration USB reussit, et elle transforme un echec en machine
+    // SANS AUCUNE ENTREE : ni clavier USB, parce que l'enumeration a echoue,
+    // ni clavier PS/2, parce qu'on ne l'a pas essaye. L'utilisateur voit alors
+    // un bureau sur lequel il ne peut rien faire, et rien ne lui dit pourquoi.
+    //
+    // On regarde donc ce qui a ete TROUVE. Le repli ne coute qu'une sonde du
+    // controleur 8042, qui n'existe simplement pas sur une machine qui n'en a
+    // pas -- et beaucoup de mini-PC en gardent un, emule par le micrologiciel
+    // ou porte par leur puce d'entree-sortie.
+    //
+    // Une reserve, et il faut la dire : nous venons de desarmer les SMI du
+    // micrologiciel. Si son 8042 etait une EMULATION de nos peripheriques USB,
+    // elle ne repondra plus. Le repli ne rattrape donc que les machines dont
+    // le 8042 est reel. C'est peu, et c'est plus que rien.
+    let claviers_usb = crate::drivers::xhci_active::hid_keyboards();
+    let souris_usb = crate::drivers::xhci_active::hid_mice();
 
-    if xhci_present {
+    LEGACY_PS2_CLAVIER.store(claviers_usb == 0, core::sync::atomic::Ordering::Release);
+    LEGACY_PS2_SOURIS.store(souris_usb == 0, core::sync::atomic::Ordering::Release);
+
+    if claviers_usb == 0 {
+        crate::drivers::keyboard::init();
+        if xhci_present {
+            // Le cas qui compte : un controleur existe, aucun clavier n'en est
+            // sorti. Le dire nommement evite de chercher le defaut ailleurs.
+            crate::serial_println!(
+                "BOUCHAUD_TRIGKEY_REPLI_PS2 raison=xhci-present-sans-clavier concentrateurs_non_traverses={}",
+                crate::drivers::xhci_active::concentrateurs_non_traverses(),
+            );
+        }
         crate::serial_println!(
-            "BOUCHAUD_TRIGKEY_PS2_SKIPPED_XHCI_PRESENT"
+            "BOUCHAUD_STAGE2_LEGACY_PS2_KEYBOARD_READY xhci_present={}",
+            xhci_present as u8,
         );
     } else {
-        crate::drivers::keyboard::init();
         crate::serial_println!(
-            "BOUCHAUD_STAGE2_LEGACY_PS2_KEYBOARD_READY"
+            "BOUCHAUD_TRIGKEY_PS2_CLAVIER_SAUTE claviers_usb={}",
+            claviers_usb,
         );
     }
+    crate::serial_println!(
+        "BOUCHAUD_STAGE2_ENTREE_DECIDEE claviers_usb={} souris_usb={} ps2_clavier={} ps2_souris={}",
+        claviers_usb,
+        souris_usb,
+        (claviers_usb == 0) as u8,
+        (souris_usb == 0) as u8,
+    );
 
     let _network_state = crate::net::demarre();
 
