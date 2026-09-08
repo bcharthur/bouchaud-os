@@ -1,0 +1,285 @@
+# Audit des douze chantiers centraux
+
+Date : 8 septembre 2026. Base : `claude/bouchaud-os-modernization-f9zj01`,
+apres l'integration NVMe / GPT / ESP / installateur.
+
+## Comment lire ce document
+
+**Aucun etat n'est declaratif.** Chaque ligne renvoie a un artefact qu'on peut
+executer : un test hote, un garde-fou, un journal de machine. Ce qui n'a pas de
+preuve executable porte 🔵 ou ⚪, jamais ✅.
+
+| Marque | Ce que cela veut dire |
+|---|---|
+| ✅ | L'architecture cible est utilisee **par defaut**, et une preuve executable echoue si elle cesse de l'etre. |
+| 🟡 | Le code existe, tourne, et est couvert sur l'hote. La preuve sur materiel ou sous QEMU manque. |
+| 🔵 | Chantier engage : une tranche verticale existe, le chemin par defaut reste l'ancien. |
+| ⚪ | Rien de ce qui compte n'est ecrit. |
+
+L'inventaire actuel : **68 garde-fous**, **58 suites de tests hote Rust**,
+5 suites C++, 12 tests de fiabilite Python, ~88 000 lignes de noyau.
+
+## Tableau d'ensemble
+
+| # | Chantier | Etat | Ce qui manque, en une phrase |
+|---|---|---:|---|
+| 1 | BKL → noyau concurrent | 🔵 | 15 acquisitions restent ; le chemin normal en a encore besoin. |
+| 2 | Scheduler NG + preemption | 🔵 | Preemption depuis l'IRQ seulement ; pas de points surs, pas de tickless. |
+| 3 | Memoire NG | 🔵 | `LockedHeap` reste l'allocateur de fond ; ni buddy, ni slab, ni caches par CPU. |
+| 4 | Graphique NG / compositeur ring 3 | 🔵 | Le contrat existe et le compositeur noyau reste le chemin par defaut. |
+| 5 | Systeme de fichiers + E/S moderne | 🟡 | Commit A/B et barriere reelle ; pas d'extents, pas d'E/S asynchrone. |
+| 6 | Architecture de securite | 🟡 | Mots de passe sales et haches, profils separes ; pas de W^X, pas de sandbox M14. |
+| 7 | ABI Bouchaud + IPC natif | 🟡 | Les primitives existent ; Linux reste la personnalite dominante. |
+| 8 | Ladybird comme produit | 🔵 | Un renderer, pas de sandbox, pas de WPT. |
+| 9 | Reseau NG | 🔵 | Retransmission et RTO prouves ; pas d'IPv6, pas de zero-copie. |
+| 10 | Plateforme materielle de reference | 🟡 | **Le plus avance de tous** : UEFI, xHCI, NVMe, installation. Pas d'audio, pas de Wi-Fi, pas de suspend. |
+| 11 | Fiabilite / CI / release | 🔵 | **`main` n'est pas protege** ; fuzzing sur un seul objet ; budgets non tenus faute de campagne. |
+| 12 | Polish produit | ⚪ | Ni HiDPI, ni IME, ni accessibilite, ni glisser-deposer, ni mise a jour atomique. |
+
+---
+
+## 1 — BKL → noyau reellement concurrent 🔵
+
+**Ce qui existe.** Le gros verrou est passe de dizaines de sites a **15
+acquisitions**, toutes attribuees a un domaine nomme. Six domaines sont
+declares SORTIS et le restent sous garde-fou : `Fs`, `Ordonnanceur`,
+`Readiness`, `RegistreProcessus`, `VerrouEnregistrement`, `Vfs`. L'ordre de
+verrouillage est ecrit (`docs/architecture/SMP_LOCK_ORDER.md`) et 78 usages
+d'etat par CPU existent.
+
+*Preuve :* `tools/verifie-domaines-bkl.py`, `tools/verifie-portee-sans-commutation.py`,
+`tools/fs/test_commit_crash.rs`, budget `sites_bkl_par_domaine`.
+
+**Ce qui manque.** Les 15 sites restants sont sur le chemin normal, pas sur
+des chemins rares. Il n'y a pas de lockdep runtime : l'ordre est verifie par
+lecture de source, pas par le noyau qui tourne. Le but final -- « le chemin
+normal n'en a plus besoin » -- n'est pas atteint.
+
+**Ce qui bloque.** Chaque site restant demande un verrou par objet et une
+reflexion sur l'ordre. C'est du travail incremental, sans obstacle
+architectural.
+
+## 2 — Scheduler NG + preemption noyau 🔵
+
+**Ce qui existe.** Runqueue O(1) a deux bandes, sans verrou ni allocation,
+**utilisee par defaut**. Runqueues multi-CPU, affinites, vol de travail.
+Preemption depuis l'IRQ (`preempt_from_irq`) et preemption differee
+(`request_deferred_preempt`).
+
+*Preuve :* `test_runqueue_ng.rs` (15), `test_latence_centiles.rs` (8),
+`test_runqueue_irq.rs` (9).
+
+**Ce qui manque.** La preemption existe depuis l'interruption, pas aux
+**points surs** d'un appel systeme long. Aucun timer tickless (`0` occurrence).
+Le scheduler n'a pas de notion de charge UI : renderer, compositeur, reseau et
+entree ont le meme profil, alors que ce sont eux qui font ou defont la
+fluidite percue.
+
+**Ce qui bloque.** Rien d'architectural. Le point dur est le chantier 1 : un
+noyau preemptible aux points surs demande que ces points ne tiennent pas le
+gros verrou.
+
+## 3 — Memoire NG 🔵
+
+**Ce qui existe.** Le scan O(n) des frames libres est devenu un bitmap O(1).
+Un depot de magasins et une arene DMA avec liberation. Un page-cache avec
+`reclaim_pages`. 32 usages de shootdown TLB.
+
+*Preuve :* `test_magasin_depot.rs` (10), `test_arene_dma.rs` (14),
+`test_frames_libres.rs`.
+
+**Ce qui manque, et c'est l'essentiel.** `src/kernel/memory/heap.rs` le dit
+lui-meme : *« The old `LockedHeap` remains the proven backing allocator »*.
+`NgHeap` l'enveloppe, il ne le remplace pas. Il n'y a **ni buddy allocator, ni
+slab, ni classes de taille, ni caches de pages par CPU**. Pas de politique de
+working-set, pas d'OOM propre.
+
+La philosophie du bitmap -- remplacer un parcours par un calcul -- n'a ete
+appliquee qu'a un endroit. C'est exactement ce qu'il faut generaliser.
+
+## 4 — Graphique NG / compositeur ring 3 🔵
+
+**Ce qui existe.** Un contrat de composition et une tranche verticale ring 3
+(`userland/services/composited`), construite en CI. `test_composited.rs` (48
+preuves), `verifie-protocole-composited.py`.
+
+**Ce qui manque.** `src/gui/window_manager.rs` fait **89 Ko** -- il a GROSSI
+depuis le constat des 82 Ko. Le compositeur noyau reste le chemin par defaut ;
+la tranche ring 3 est une preuve de faisabilite, pas le produit. Pas de triple
+buffering, pas de frame pacing explicite, pas d'acceleration GPU.
+
+**Ce qui bloque.** Le deplacement est massif et touche a tout : c'est le
+chantier le plus couteux des douze, et celui qui rendrait le plus.
+
+## 5 — Systeme de fichiers + E/S moderne 🟡
+
+**Ce qui existe.** Commit A/B a deux demi-zones, generation, sommes de
+controle, injection de coupure **exhaustive**. Depuis ce lot : la persistance
+passe par la couche bloc generique et non plus par la nappe ATA, et le commit
+pose une **vraie barriere** avant et apres le superbloc -- avec un aveu
+explicite quand le disque n'en offre pas.
+
+Cote materiel : **NVMe est pilote** (files admin et E/S, PRP, vidange), GPT est
+lu et ecrit, FAT32 est ecrit et **valide par `fsck.fat` et `mtools`**.
+
+*Preuve :* `test_commit_crash.rs` (13), `test_nvme_decodage.rs` (31),
+`test_gpt.rs` (29), `test_fat32.rs` (25), `verifie-fat32-reel.py`,
+`verifie-nvme.py`, `verifie-partitionnement.py`.
+
+**Ce qui manque.** Pas d'allocation par extents. Pas de cache d'ecriture
+propre. **Aucune E/S asynchrone** (`0` occurrence dans `src/fs/`) : la couche
+bloc a la forme d'un achevement differe, et aucun pilote ne le rend. Pas
+d'AHCI.
+
+## 6 — Architecture de securite 🟡
+
+**Ce qui existe.** Les mots de passe sont **sales et haches**, le sel vient de
+la source d'aleas du noyau. Cinq profils separes, dont `BrowserNetwork` isole
+du rendu. `NET_CONNECT`, `no_new_privs` d'office, exec cote appelant. Les
+droits d'ecriture persistants sont bornes par sous-arbre canonique.
+
+*Preuve :* `test_bac_a_sable_navigateur.rs` (15), `test_abi_droits.rs` (19),
+`verifie-telechargements.py`, `verifie-installation.py`.
+
+**Ce qui manque.** **Aucun W^X / NX** : la recherche de `NO_EXECUTE` ne rend
+rien. Pas de randomisation d'adresses. La sandbox du plan M14 -- seccomp-like,
+`pledge`/`unveil` -- n'existe pas (2 mentions, aucune implementation). Les
+capabilities existent en type mais ne gouvernent pas encore tous les appels.
+
+**Ce qui bloque.** W^X demande de reprendre le mappage des segments ELF et la
+pagination : c'est faisable et ce n'est pas petit.
+
+## 7 — ABI Bouchaud + IPC natif 🟡
+
+**Ce qui existe.** L'arbre `src/kernel/native/` porte handles, objets,
+evenements, IPC, memoire partagee, waitset, readiness, reseau, temps. Les
+droits s'attenuent au transfert.
+
+*Preuve :* `test_abi_droits.rs` (19), `verifie-abi-native.py`,
+`native-ipc-runtime.yml`.
+
+**Ce qui manque.** Linux reste la **personnalite dominante** : la compat n'est
+pas ecrite au-dessus des primitives natives, elle definit encore implicitement
+le systeme. Les erreurs ne sont pas versionnees. Les surfaces graphiques ne
+sont pas des objets natifs.
+
+## 8 — Ladybird comme vrai produit navigateur 🔵
+
+**Ce qui existe.** WebContent reel, HTTP/HTTPS, chrome complet (onglets,
+Ctrl+F, menu contextuel, telechargements, historique, favoris, presse-papiers,
+survol de lien), supervision multi-processus avec budget de relance.
+
+*Preuve :* `test_supervision.rs` (13), `test_calques`, `test_degat`,
+`test_nom_fichier`, `test_url`, sept garde-fous de chrome, smoke QEMU en CI.
+
+**Ce qui manque.** **Un seul renderer** : le multi-renderer est M13 et n'est
+pas fait. **Aucune sandbox** (M14). Aucune campagne WPT. Le chrome vit encore
+DANS WebContent, ce qui est la dette centrale du portage et la raison pour
+laquelle deux droits d'ecriture persistants ont du etre accordes au rendu.
+
+## 9 — Reseau NG 🔵
+
+**Ce qui existe.** TCP avec file des segments non acquittes, RTO, Karn,
+retransmission rapide, echantillonnage du RTT. DNS, TLS, HTTP/HTTPS. Deux
+pilotes : e1000 et **rtl8168** -- ce dernier etant celui de la machine de
+reference.
+
+*Preuve :* `test_tcp_retransmission.rs` (23 preuves).
+
+**Ce qui manque.** **Aucun IPv6** (`0` occurrence dans `src/net/`). **Aucun
+zero-copie**. Pas de backpressure explicite. La readiness asynchrone existe
+cote ABI native (9 usages) mais n'irrigue pas la pile.
+
+## 10 — Plateforme materielle de reference 🟡
+
+**C'est le chantier le plus avance des douze**, et le seul qui ait progresse
+sur du materiel physique.
+
+**Ce qui existe.** Cible choisie : **TRIGKEY Speed S5**, Ryzen 7 5700U, 32 Go,
+NVMe. Amorcage **UEFI** prouve sur la machine, framebuffer GOP natif, ACPI
+(HPET, MCFG, MADT, FADT), PCIe avec BAR 64 bits et MSI/MSI-X, **xHCI avec HID
+clavier et souris**, **NVMe pilote**, reseau rtl8168, et depuis ce lot une
+**installation reelle sur le disque interne** -- table GPT, ESP FAT32 validee
+par des outils etrangers, partition systeme persistante.
+
+*Preuve :* `test_pci_decodage.rs` (16), `test_nvme_decodage.rs` (31),
+`test_hid.rs` (26), `test_installation.rs` (16), `test_gpt.rs`, `test_fat32.rs`,
+`verifie-matrice-materielle.py`, dix garde-fous `tools/reference/`.
+
+**Ce qui manque.** Audio : seulement AC97, pas de HDA. **Pas de Wi-Fi.** Pas de
+batterie, pas de temperatures, **pas de suspend/resume**. Pas de GPU. Les
+peripheriques derriere un concentrateur USB ne sont pas enumeres -- le manque
+est desormais **nomme dans le journal** plutot que silencieux.
+
+## 11 — Fiabilite / CI / release engineering 🔵
+
+**Ce qui existe.** L'observabilite est la meilleure partie du projet :
+instrumentation du BKL, du GUI, du scheduler, des trames, des blocages, et des
+tests qui falsifient volontairement les invariants. 67 garde-fous, 58 suites
+hote, 18 workflows dont `soak.yml`, `endurance.yml`, `reliability-v3.yml`.
+`release.yml` demande des attestations.
+
+**Ce qui manque, et c'est grave.** **`main` n'est pas protege.** L'API GitHub
+rend `"protected": false` sur les trois branches. `tools/ci/configure_protection.ps1`
+existe et n'a jamais ete applique : il y a un script pour poser la protection,
+et aucune protection. **Aucun required status check** : tout ce travail de
+garde-fous peut etre contourne par un `git push` direct.
+
+**Le fuzzing existe, sur un seul objet.** `reliability / rendezvous property
+fuzz` rejoue `test_rendezvous_property.rs` sur 64 graines a chaque PR. C'est un
+vrai test de propriete, et il ne couvre qu'un objet : ni le decodage des
+paquets, ni les descripteurs USB, ni les tables de partitions, ni les entrees
+de systeme de fichiers -- c'est-a-dire aucune des surfaces qui recoivent des
+octets qu'on n'a pas ecrits.
+
+Les budgets d'execution (`ready_latency_*`, `tcp_busy_poll_tours_max`) sont
+rapportes « non verifies » faute de campagne QEMU, ce qui est le comportement
+voulu de `check_budgets.py` et la seule lecture honnete.
+
+**Le remede le moins cher du projet, et il est pret.** Les trois verdicts
+`fast-gate`, `integration-gate` et `reliability-gate` existent deja, portent
+`if: always()` -- donc rapportent meme quand le reste est saute -- et se
+declenchent sur `pull_request`. Il ne manque que la commande qui les rend
+obligatoires.
+
+`tools/ci/configure-protection.sh` la porte, sans dependre de PowerShell.
+`tools/verifie-protection-main.py` verifie que les noms exiges correspondent
+toujours a des verdicts qui existent : une protection qui exige un check
+disparu ne casse pas bruyamment, elle bloque TOUTES les PR pour toujours, et
+le remede evident est alors de la retirer en entier.
+
+## 12 — Polish produit ⚪
+
+**Ce qui existe.** L'echelle fractionnaire et les coordonnees logiques sont
+dans le protocole (`test_protocole.rs`, 25 preuves), retrocompatibles. Le
+presse-papiers de bureau existe. Les animations de fenetre existent.
+
+**Ce qui manque.** La recherche rend **zero** occurrence pour HiDPI, **zero**
+pour glisser-deposer. L'accessibilite et l'IME n'existent pas. Pas de
+notifications, pas de reglages, **pas de mise a jour atomique ni de recovery**.
+Les modes Work/Focus/Gaming ne sont pas ecrits.
+
+C'est le seul chantier qu'on peut honnetement declarer **non commence**, et
+c'est normal : il se pose sur les onze autres.
+
+---
+
+## Ce que cet audit ne dit pas
+
+Il ne dit pas combien de temps chaque chantier demande. Il ne dit pas non plus
+qu'aucun n'est termine par accident : **aucun des douze n'est termine**, et
+deux d'entre eux (4 et 12) n'ont pas de chemin par defaut du tout.
+
+Il dit ou se trouve le levier. Par ordre de rapport entre cout et effet :
+
+1. **Proteger `main`** (chantier 11). Une commande --
+   `tools/ci/configure-protection.sh` --, et elle rend executoires les
+   soixante-huit regles ecrites. Elle demande un jeton portant
+   `administration:write`, que l'environnement d'integration n'a pas : c'est
+   au proprietaire du depot de la lancer une fois.
+2. **Generaliser la memoire NG** (chantier 3). Le bitmap a montre la methode ;
+   `LockedHeap` reste le fond, et c'est lui qu'on paie a chaque allocation.
+3. **Finir la sortie du BKL** (chantier 1). Quinze sites, et c'est ce qui
+   debloque la preemption aux points surs (chantier 2).
+4. **Sortir le compositeur** (chantier 4). Le plus cher, et celui qui produit
+   le « 60/120 Hz feel ».
