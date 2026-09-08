@@ -358,12 +358,63 @@ pub fn init() {
 /// no persistent bootstrap allocation may exist when this is called.
 pub unsafe fn switch_arena(start: *mut u8, size: usize) {
     CACHE_READY.store(false, Ordering::Release);
+
+    // LES CACHES SONT VIDES AVANT LE CHANGEMENT, ET C'EST OBLIGATOIRE.
+    //
+    // L'invariant historique -- « aucune allocation bootstrap persistante ne
+    // doit exister ici » -- parlait des allocations VIVANTES. Il oubliait les
+    // blocs LIBRES : ceux qui dorment dans les listes per-CPU et dans les
+    // magasins du depot. Ces blocs-la pointent dans l'arene bootstrap, un
+    // tableau statique de l'image noyau, et rien ne les suivait a travers le
+    // changement.
+    //
+    // Le tas etait donc reinitialise sur une region entierement differente,
+    // puis les caches reactives -- et le premier `cache_pop` rendait un
+    // pointeur de l'ANCIENNE arene comme s'il venait de la nouvelle. Les deux
+    // regions se melangeaient ensuite dans les memes listes libres, et toute
+    // la comptabilite du tas portait sur un ensemble de blocs qui n'etaient
+    // pas ceux qu'elle croyait decrire.
+    //
+    // Les blocs abandonnes ne fuient pas : ils vivent dans un statique de
+    // l'image, qui n'est ni rendu ni reutilise. C'est le prix d'un unique
+    // changement d'arene au demarrage, et il est nul.
+    vide_les_caches();
+
     ALLOCATOR.inner.lock().init(start, size);
     HEAP_TOTAL.store(size, Ordering::Release);
     ARENE_DEBUT.store(start as usize, Ordering::Release);
     ARENE_FIN.store(start as usize + size, Ordering::Release);
     CACHE_READY.store(true, Ordering::Release);
-    crate::kernel::dmesg::log("heap-ng: arene physique active + caches per-CPU");
+    crate::kernel::dmesg::log("heap-ng: arene physique active + caches per-CPU vides");
+}
+
+/// Abandonne tout ce que les listes per-CPU et le depot retiennent.
+///
+/// A n'appeler que caches DESARMES (`CACHE_READY` faux) : sans cela, un autre
+/// coeur pourrait pousser un bloc dans une liste qu'on vient de vider, et ce
+/// bloc survivrait au changement d'arene -- exactement ce qu'on cherche a
+/// empecher.
+unsafe fn vide_les_caches() {
+    for cpu in 0..smp::MAX_CPUS {
+        for classe in 0..CLASS_COUNT {
+            let cache = &CACHES[cpu].classes[classe];
+            cache.head.store(0, Ordering::Release);
+            cache.count.store(0, Ordering::Relaxed);
+        }
+    }
+    let mut abandonnes = 0u64;
+    for depot in DEPOTS.iter() {
+        // `retire` depile un magasin a la fois ; la boucle s'arrete quand le
+        // depot est vide, et `MAGASINS_MAX` la borne de toute facon.
+        while let Some(magasin) = depot.retire() {
+            abandonnes = abandonnes.saturating_add(magasin.compte as u64);
+        }
+    }
+    CACHE_BYTES.store(0, Ordering::Relaxed);
+    crate::serial_println!(
+        "BOUCHAUD_HEAP_ARENE_CACHES_VIDES blocs_abandonnes={}",
+        abandonnes
+    );
 }
 
 /// (used, free, total). Cached free blocks are reported as free, not as live use.

@@ -331,3 +331,40 @@ fn une_classe_de_taille_nulle_est_refusee() {
 fn un_bloc_qui_deborde_l_espace_est_refuse() {
     assert!(!lien_plausible(usize::MAX - 8, 64, 0, 0));
 }
+
+// ---------------------------------------------------------------------------
+// La vidange : ce que le changement d'arene exige du depot.
+// ---------------------------------------------------------------------------
+
+/// Le depot se vide COMPLETEMENT par `retire()` repete.
+///
+/// C'est la propriete sur laquelle `heap::vide_les_caches` repose. Le tas
+/// bascule une fois au demarrage de l'arene bootstrap -- un statique de
+/// l'image noyau -- vers l'arene physique. Tout bloc encore retenu par le
+/// depot a cet instant pointe dans l'ANCIENNE region, et serait rendu apres le
+/// changement comme s'il venait de la nouvelle.
+///
+/// Si `retire()` pouvait laisser un magasin derriere lui, la vidange serait
+/// incomplete et le melange des deux arenes resterait possible.
+#[test]
+fn le_depot_se_vide_entierement() {
+    let arene = Arene::neuve(MAGASINS_MAX * LOT);
+    let depot = Depot::neuf();
+    for i in 0..MAGASINS_MAX {
+        let tete = arene.chaine(i * LOT, LOT);
+        assert!(depot.depose(Magasin { tete, compte: LOT }));
+    }
+
+    let mut blocs = 0usize;
+    let mut tours = 0usize;
+    while let Some(magasin) = depot.retire() {
+        blocs += magasin.compte;
+        tours += 1;
+        assert!(tours <= MAGASINS_MAX, "la vidange ne se termine pas");
+    }
+    assert_eq!(tours, MAGASINS_MAX);
+    assert_eq!(blocs, MAGASINS_MAX * LOT);
+    // Vide, et il le reste.
+    assert!(depot.retire().is_none());
+    assert!(depot.retire().is_none());
+}
