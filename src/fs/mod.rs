@@ -8,6 +8,8 @@
 //! blocs — est documentee dans `docs/ROADMAP.md`.
 
 pub mod backing;
+pub mod fat32;
+pub mod gpt;
 pub mod persistance;
 pub mod ramfs;
 pub mod tar;

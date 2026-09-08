@@ -59,22 +59,44 @@ def sans_commentaires(source):
 def corps(source, signature):
     """Le corps de la FONCTION dont la signature est donnee.
 
-    Une signature peut apparaitre d'abord comme DECLARATION anticipee. La
-    distinguer par le point-virgule evite qu'une regle porte, sans le dire,
-    sur la fonction suivante.
+    Une signature peut apparaitre d'abord comme DECLARATION anticipee. On les
+    distingue par le point-virgule qui la termine -- mais SEULEMENT celui qui
+    est a profondeur nulle : `-> [u8; 16]` en contient un, et une regle qui le
+    prenait pour une fin de declaration cherchait la fonction suivante sans le
+    dire, puis rapportait « introuvable » sur une fonction bien presente.
     """
     debut = 0
     while True:
         trouve = source.find(signature, debut)
         if trouve < 0:
             return None
-        ouvrante = source.find("{", trouve)
-        if ouvrante < 0:
-            return None
-        point_virgule = source.find(";", trouve)
-        if point_virgule < 0 or point_virgule > ouvrante:
+        ouvrante = -1
+        declaration = -1
+        profondeur = 0
+        # On repart du DEBUT de la signature : certaines « signatures »
+        # recherchees incluent deja leur accolade (`struct Champ {`), et
+        # repartir apres elle ferait manquer la seule accolade qui compte.
+        i = trouve
+        while i < len(source):
+            c = source[i]
+            if c in "([<":
+                profondeur += 1
+            elif c in ")]>":
+                if profondeur > 0:
+                    profondeur -= 1
+            elif profondeur == 0:
+                if c == "{":
+                    ouvrante = i
+                    break
+                if c == ";":
+                    declaration = i
+                    break
+            i += 1
+        if ouvrante >= 0:
             break
-        debut = point_virgule + 1
+        if declaration < 0:
+            return None
+        debut = declaration + 1
     profondeur = 0
     i = ouvrante
     while i < len(source):

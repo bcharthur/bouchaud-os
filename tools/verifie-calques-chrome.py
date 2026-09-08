@@ -133,35 +133,56 @@ def sans_commentaires(source):
 
 
 def corps(source, signature):
-    """Le corps qui suit `signature`, accolades equilibrees.
+    """Le corps de la FONCTION dont la signature est donnee.
 
-    Une DECLARATION anticipee -- `inline void f();` -- contient la meme chaine
-    qu'une signature partielle de la definition. Prendre la premiere occurrence
-    rendrait alors le corps de la fonction SUIVANTE, et la regle porterait sur
-    du code sans rapport : ce qui distingue les deux est le point-virgule, une
-    declaration en portant un AVANT la prochaine accolade.
+    Une signature peut apparaitre d'abord comme DECLARATION anticipee. On les
+    distingue par le point-virgule qui la termine -- mais SEULEMENT celui qui
+    est a profondeur nulle : `-> [u8; 16]` en contient un, et une regle qui le
+    prenait pour une fin de declaration cherchait la fonction suivante sans le
+    dire, puis rapportait « introuvable » sur une fonction bien presente.
     """
     debut = 0
     while True:
         trouve = source.find(signature, debut)
         if trouve < 0:
             return None
-        ouvrante = source.find("{", trouve)
-        if ouvrante < 0:
-            return None
-        point_virgule = source.find(";", trouve)
-        if point_virgule < 0 or point_virgule > ouvrante:
+        ouvrante = -1
+        declaration = -1
+        profondeur = 0
+        # On repart du DEBUT de la signature : certaines « signatures »
+        # recherchees incluent deja leur accolade (`struct Champ {`), et
+        # repartir apres elle ferait manquer la seule accolade qui compte.
+        i = trouve
+        while i < len(source):
+            c = source[i]
+            if c in "([<":
+                profondeur += 1
+            elif c in ")]>":
+                if profondeur > 0:
+                    profondeur -= 1
+            elif profondeur == 0:
+                if c == "{":
+                    ouvrante = i
+                    break
+                if c == ";":
+                    declaration = i
+                    break
+            i += 1
+        if ouvrante >= 0:
             break
-        debut = point_virgule + 1
-
+        if declaration < 0:
+            return None
+        debut = declaration + 1
     profondeur = 0
-    for index in range(ouvrante, len(source)):
-        if source[index] == "{":
+    i = ouvrante
+    while i < len(source):
+        if source[i] == "{":
             profondeur += 1
-        elif source[index] == "}":
+        elif source[i] == "}":
             profondeur -= 1
             if profondeur == 0:
-                return source[ouvrante : index + 1]
+                return source[ouvrante : i + 1]
+        i += 1
     return None
 
 def calques_declares(code, fautes):
