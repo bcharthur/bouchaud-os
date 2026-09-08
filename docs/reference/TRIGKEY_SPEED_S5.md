@@ -91,14 +91,49 @@ une prise bleue apparait sur le NUMERO DE PORT USB2, pas sur celui qu'on
 regarde. Le pilote lit la capacite « Supported Protocol » pour savoir lequel
 est lequel, au lieu de deviner.
 
-**4. Les peripheriques derriere un concentrateur ne sont pas enumeres.**
-L'enumeration ne descend pas : cela demande la chaine de route, le
-transactionneur pour les peripheriques lents et les requetes de classe du
-concentrateur. Un clavier branche sur un hub — ou sur les prises USB d'un
-ecran — **ne repondra pas**. Le manque est nomme, pas silencieux :
-`BOUCHAUD_USB_CONCENTRATEUR ... non_traverse=1`, et si aucun clavier n'est
-trouve alors qu'un concentrateur est present,
-`BOUCHAUD_HID_ABSENT_DERRIERE_CONCENTRATEUR remede=brancher-le-clavier-sur-un-port-de-la-machine`.
+**4. Un concentrateur se traverse, et rien de ce qu'il faut pour cela ne se
+voit.** Un clavier branche sur un hub — ou sur les prises USB d'un ecran, ou
+d'un clavier qui en integre un — n'est pas sur un port du controleur. Pour
+l'atteindre il faut quatre choses, dont aucune ne produit de message d'erreur
+quand elle est fausse :
+
+* la **chaine de route**, cinq etages de quatre bits, ou le numero de port du
+  concentrateur va a l'etage de SA profondeur. Un etage de decalage designe un
+  autre sous-arbre — et l'adressage y reussit, sur le mauvais peripherique ;
+* le **bit `Hub`** du contexte de slot, pose par une commande *Configure
+  Endpoint*. Sans lui, le controleur ne sait pas qu'il y a un « derriere » et
+  refuse d'adresser quoi que ce soit ;
+* le **transactionneur** : un bus haute vitesse ne transporte pas directement
+  une transaction basse vitesse, et la quasi-totalite des claviers filaires
+  sont basse vitesse. Sans le slot et le port du concentrateur qui traduit, le
+  clavier est adresse et ne repond a rien. Il **s'herite** : un concentrateur
+  pleine vitesse derriere un concentrateur haute vitesse garde celui de son
+  ancetre ;
+* les **requetes de classe** du concentrateur, adressees au PORT et non au
+  peripherique — un `SET_FEATURE(RESET)` adresse au peripherique
+  reinitialiserait le concentrateur entier.
+
+Le pilote fait les quatre. La descente est **en largeur** : chaque
+peripherique trouve est mis en file et enumere a plat, jamais par recursion —
+cinq etages de tampons de descripteurs sur une pile de noyau deborderaient
+sans rien dire. `BOUCHAUD_USB_CONCENTRATEUR_TRAVERSE ... occupes=N` dit ce qui
+a ete trouve, `BOUCHAUD_USB_ADDRESS_OK ... profondeur=1` dit qu'un
+peripherique a ete atteint derriere.
+
+Ce qui reste hors de portee, et se dit : au-dela de **cinq** concentrateurs en
+cascade la chaine de route est pleine
+(`BOUCHAUD_USB_CONCENTRATEUR_TROP_PROFOND`) — c'est une limite du champ xHCI,
+pas du code. Un concentrateur SuperSpeed n'est traverse que par sa moitie USB
+2.0, ce qui suffit : un clavier ou une souris y est toujours basse ou pleine
+vitesse. Et une traversee qui echoue est comptee et nommee
+(`BOUCHAUD_USB_CONCENTRATEUR_ECHEC`), parce qu'un clavier absent et un
+concentrateur en echec se ressemblent trop.
+
+La commande **`lsusb`** rejoue l'arbre depuis l'etat, a n'importe quel moment.
+L'indentation dit la profondeur. C'est ce qui repond a la seule question qui
+compte en premier quand un clavier ne marche pas : a-t-il ete VU ? Un clavier
+absent de la liste est un probleme d'enumeration, un clavier present mais muet
+un probleme de transport — deux enquetes differentes.
 
 ### Clavier et souris
 
@@ -177,7 +212,10 @@ marqueurs retenus.
 | `controllers=0/2` | Les deux controleurs ont refuse de demarrer. Regarder `BOUCHAUD_XHCI_CONTROLLER_FAIL error=...`. |
 | `ports=0` | Le controleur demarre, aucun port ne voit de connexion. Le peripherique est peut-etre derriere un concentrateur. |
 | `usb=N keyboards=0` | Des peripheriques repondent, aucun n'est un clavier d'amorcage. Un clavier « gaming » en mode rapport seul tombe ici. |
-| `BOUCHAUD_USB_CONCENTRATEUR` | Un concentrateur est branche. Ce qui est derriere n'existe pas pour le noyau. |
+| `BOUCHAUD_USB_CONCENTRATEUR` | Un concentrateur est branche. Lire la ligne `_TRAVERSE` qui suit : `occupes=0` veut dire qu'il est vide, son absence veut dire que la traversee a echoue. |
+| `BOUCHAUD_USB_CONCENTRATEUR_ECHEC` | La descente a echoue. Ce qui est derriere n'existe pas pour le noyau. Brancher le clavier sur une prise de la machine. |
+| `BOUCHAUD_USB_CONCENTRATEUR_TROP_PROFOND` | Plus de cinq concentrateurs en cascade. La chaine de route xHCI ne va pas plus loin ; il faut rapprocher le peripherique. |
+| `BOUCHAUD_USB_ARBRE_TRONQUE` | Plus de 32 peripheriques en attente d'enumeration. Les suivants sont ignores. |
 | `BOUCHAUD_TRIGKEY_REPLI_PS2` | Le controleur existe, aucun clavier n'en est sorti, on a essaye le 8042. |
 
 ---

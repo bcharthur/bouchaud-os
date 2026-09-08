@@ -208,7 +208,7 @@ pub const COMMANDS: &[&str] = &[
     "serial-test", "panic-test", "roadmap", "whoami", "id", "users", "useradd",
     "userdel", "passwd", "su", "pwd", "ls", "tree", "cd", "mkdir", "touch", "cat",
     "write", "append", "nano", "edit", "rm", "rmdir", "cp", "mv", "stat", "chmod", "chown",
-    "echo", "date", "expr-selftest", "wasm", "wasm-selftest", "grep", "wc", "head", "tail", "find", "lspci", "ping", "ifconfig",
+    "echo", "date", "expr-selftest", "wasm", "wasm-selftest", "grep", "wc", "head", "tail", "find", "lspci", "lsusb", "ping", "ifconfig",
     "ip", "route", "arp", "dhcp", "dns", "wget", "curl", "mount", "df", "sync",
     "installer", "mkfs.bfs", "true", "false", "logout", "exit", "poweroff", "halt", "shutdown",
     "export", "env", "unset", "run",
@@ -838,6 +838,10 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "tail" => c::tail(argc, &argv, *cwd),
         "find" => { c::find(argc, &argv, *cwd); 0 }
         "lspci" => { crate::arch::x86_64::pci::print_devices(); 0 }
+        // L'arbre USB, concentrateurs compris. « Le clavier ne marche pas »
+        // commence par « a-t-il ete vu ? » -- deux enquetes differentes selon
+        // la reponse, et rien d'autre ne permet de les distinguer.
+        "lsusb" => { crate::drivers::xhci_active::lsusb(); 0 }
 
         // Reseau : loopback actif, eth0/Internet en attente du driver NIC.
         "ping" => { crate::net::ping(argc, &argv); 0 }

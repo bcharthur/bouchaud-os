@@ -62,6 +62,12 @@ const CC_SHORT_PACKET: u8 = 13;
 
 const MAX_PORTS_PER_CONTROLLER: usize = 32;
 const MAX_HID_ENDPOINTS_PER_CONTROLLER: usize = 16;
+/// Temps maximal accorde a la reinitialisation d'un port de concentrateur.
+///
+/// Bornee, et c'est le point : un port qui ne sort jamais de reinitialisation
+/// -- un peripherique defectueux, un cable a moitie enfonce -- ne doit pas
+/// suspendre le demarrage de la machine.
+const REINITIALISATION_MAX_MS: u32 = 800;
 const MAX_CONFIG_DESCRIPTOR: usize = 4096;
 const MAX_EVENTS_PER_POLL: usize = 64;
 const MAX_RUNTIME_DEVICES: usize = 32;
@@ -80,8 +86,14 @@ static HID_MICE: AtomicUsize = AtomicUsize::new(0);
 #[path = "hid/decodage.rs"]
 mod hid;
 
-/// Classe d'un concentrateur USB, dans le descripteur de peripherique.
-const CLASSE_CONCENTRATEUR: u8 = 0x09;
+// La traversee d'un concentrateur est de l'arithmetique de champs de bits :
+// chaine de route, contexte de slot, descripteur, etat d'un port. Une faute
+// n'y produit aucun message -- le controleur adresse un peripherique qui n'est
+// pas la. Elle vit donc a part, et une machine la relit.
+#[path = "concentrateur/decodage.rs"]
+mod concentrateur;
+
+use concentrateur::CLASSE_CONCENTRATEUR;
 
 // BOUCHAUD_XHCI_HID_TRANSPORT_V33
 static HID_POLLS: AtomicUsize = AtomicUsize::new(0);
@@ -92,8 +104,14 @@ static HID_MOUSE_REPORTS: AtomicUsize = AtomicUsize::new(0);
 static HID_TRANSFER_ERRORS: AtomicUsize = AtomicUsize::new(0);
 static HID_REARMS: AtomicUsize = AtomicUsize::new(0);
 static HID_KICKS: AtomicUsize = AtomicUsize::new(0);
-/// Concentrateurs vus et NON traverses.
+/// Concentrateurs trouves, traverses ou non.
 static CONCENTRATEURS: AtomicUsize = AtomicUsize::new(0);
+/// Concentrateurs qu'on n'a PAS pu traverser -- et c'est le compteur qui
+/// compte : un clavier branche derriere l'un d'eux ne repondra pas, et sans ce
+/// chiffre on chercherait le defaut dans le code du clavier, qui marche.
+static CONCENTRATEURS_ECHOUES: AtomicUsize = AtomicUsize::new(0);
+/// Peripheriques atteints DERRIERE un concentrateur.
+static PERIPHERIQUES_DERRIERE: AtomicUsize = AtomicUsize::new(0);
 static HID_CONTROL_POLLS: AtomicUsize = AtomicUsize::new(0);
 static HID_CONTROL_REPORTS: AtomicUsize = AtomicUsize::new(0);
 static HID_CONTROL_FAILS: AtomicUsize = AtomicUsize::new(0);
@@ -252,6 +270,8 @@ struct Controller {
     dcbaa_phys: u64,
     dcbaa_virt: usize,
     hids: [HidEndpoint; MAX_HID_ENDPOINTS_PER_CONTROLLER],
+    arbre: [Option<NoeudUsb>; NOEUDS_MAX],
+    compte_noeuds: usize,
     hid_count: usize,
     devices: [Option<Device>; MAX_RUNTIME_DEVICES],
     connected_ports: usize,
@@ -262,6 +282,108 @@ struct Controller {
 struct Runtime {
     controllers: Vec<Controller>,
 }
+
+/// OU un peripherique est branche dans l'arbre USB.
+///
+/// # Pourquoi une structure, et non deux entiers
+///
+/// Adresser un peripherique derriere un concentrateur demande quatre choses
+/// qui vont ensemble et qu'on ne peut pas retrouver l'une sans l'autre : le
+/// port du concentrateur RACINE (jamais celui du concentrateur intermediaire),
+/// la chaine de route qui dit le chemin, la profondeur qui dit ou ecrire le
+/// prochain etage, et le transactionneur du plus proche concentrateur haute
+/// vitesse. Les passer separement, c'est se tromper d'un tot ou tard.
+#[derive(Clone, Copy)]
+struct Chemin {
+    /// Port du concentrateur racine, numerote a partir de un.
+    port_racine: u8,
+    /// Chaine de route xHCI. Zero pour un peripherique branche a la racine.
+    route: u32,
+    /// Zero a la racine, un derriere un concentrateur, et ainsi de suite.
+    profondeur: usize,
+    /// Identifiant de vitesse xHCI du peripherique lui-meme.
+    vitesse: u8,
+    /// Slot du concentrateur haute vitesse qui traduit pour ce peripherique,
+    /// ou zero s'il n'en a pas besoin.
+    tt_slot: u8,
+    /// Port de ce concentrateur ou le peripherique est branche.
+    tt_port: u8,
+}
+
+impl Chemin {
+    const fn racine(port: u8, vitesse: u8) -> Self {
+        Self { port_racine: port, route: 0, profondeur: 0, vitesse, tt_slot: 0, tt_port: 0 }
+    }
+}
+
+/// Combien de peripheriques peuvent attendre leur tour d'etre enumeres.
+const CHEMINS_EN_ATTENTE: usize = 32;
+
+/// La traversee est en LARGEUR, et non en profondeur.
+///
+/// Une descente recursive empilerait, a chaque etage, le tampon de
+/// descripteurs et la table des points de terminaison de cet etage. Cinq
+/// etages de cela sur une pile de noyau, c'est un debordement qu'on ne
+/// diagnostique pas -- la machine redemarre, sans rien dire.
+///
+/// Une file bornee retire cette facon d'echouer : la pile reste plate, et un
+/// arbre plus grand que la file se DIT au lieu de deborder.
+struct FileChemins {
+    entrees: [Chemin; CHEMINS_EN_ATTENTE],
+    tete: usize,
+    queue: usize,
+    debordements: usize,
+}
+
+impl FileChemins {
+    fn neuve() -> Self {
+        Self {
+            entrees: [Chemin::racine(0, 0); CHEMINS_EN_ATTENTE],
+            tete: 0,
+            queue: 0,
+            debordements: 0,
+        }
+    }
+
+    fn pousse(&mut self, chemin: Chemin) {
+        if self.queue >= CHEMINS_EN_ATTENTE {
+            self.debordements = self.debordements.saturating_add(1);
+            return;
+        }
+        self.entrees[self.queue] = chemin;
+        self.queue += 1;
+    }
+
+    fn tire(&mut self) -> Option<Chemin> {
+        if self.tete >= self.queue {
+            return None;
+        }
+        let chemin = self.entrees[self.tete];
+        self.tete += 1;
+        Some(chemin)
+    }
+}
+
+/// Ce qu'on garde d'un peripherique une fois enumere, pour pouvoir le DIRE.
+///
+/// Sans cette table, la seule trace de l'arbre USB est une suite de lignes de
+/// journal emises au demarrage. Sur une machine sans console serie, elles sont
+/// perdues. `lsusb` les rejoue depuis l'etat, a n'importe quel moment.
+#[derive(Clone, Copy)]
+struct NoeudUsb {
+    port_racine: u8,
+    route: u32,
+    profondeur: u8,
+    vitesse: u8,
+    slot: u8,
+    vendeur: u16,
+    produit: u16,
+    classe: u8,
+    /// 0 aucun, 1 clavier, 2 souris.
+    genre_hid: u8,
+}
+
+const NOEUDS_MAX: usize = 32;
 
 #[derive(Clone, Copy)]
 struct Device {
@@ -619,15 +741,21 @@ fn initial_ep0_mps(speed: u8) -> u16 {
     }
 }
 
-fn fill_slot_context(ctx: usize, speed: u8, root_port: u8, context_entries: u8) {
+fn fill_slot_context(ctx: usize, chemin: &Chemin, context_entries: u8) {
     unsafe {
         ctx_w32(
             ctx,
             0,
-            ((speed as u32) << 20) | ((context_entries as u32) << 27),
+            concentrateur::slot_dw0(chemin.route, chemin.vitesse, context_entries, false, false),
         );
-        ctx_w32(ctx, 1, (root_port as u32) << 16);
-        ctx_w32(ctx, 2, 0);
+        // Le PORT RACINE, toujours -- pas le port du concentrateur
+        // intermediaire, qui est deja dans la chaine de route. Y mettre le
+        // port intermediaire designe un autre sous-arbre.
+        ctx_w32(ctx, 1, concentrateur::slot_dw1(0, chemin.port_racine, 0));
+        // Le transactionneur, s'il en faut un. Sans lui, un clavier basse
+        // vitesse derriere un concentrateur haute vitesse est adresse et ne
+        // repond a rien -- et c'est le cas COURANT, pas l'exception.
+        ctx_w32(ctx, 2, concentrateur::slot_dw2(chemin.tt_slot, chemin.tt_port, 0));
         ctx_w32(ctx, 3, 0);
     }
 }
@@ -653,7 +781,9 @@ fn clear_input(device: &Device) {
     unsafe { write_bytes(device.in_ctx_virt as *mut u8, 0, 4096) };
 }
 
-fn address_device(controller: &mut Controller, root_port: u8, speed: u8) -> Result<Device, &'static str> {
+fn address_device(controller: &mut Controller, chemin: &Chemin) -> Result<Device, &'static str> {
+    let root_port = chemin.port_racine;
+    let speed = chemin.vitesse;
     let slot_id = enable_slot(controller, root_port)?;
     let Some((out_ctx_phys, out_ctx_virt)) = alloc_zeroed(4096) else {
         disable_slot(controller, slot_id);
@@ -683,7 +813,7 @@ fn address_device(controller: &mut Controller, root_port: u8, speed: u8) -> Resu
     let slot_ctx = context_ptr(in_ctx_virt, controller.context_size, 1);
     let ep0_ctx = context_ptr(in_ctx_virt, controller.context_size, 2);
     let ep0_mps = initial_ep0_mps(speed);
-    fill_slot_context(slot_ctx, speed, root_port, 1);
+    fill_slot_context(slot_ctx, chemin, 1);
     fill_endpoint_context(ep0_ctx, 4, ep0_mps, 0, &ep0);
 
     if let Err(error) = command(
@@ -699,8 +829,9 @@ fn address_device(controller: &mut Controller, root_port: u8, speed: u8) -> Resu
     wait_ms(2);
     ADDRESS_OK.fetch_add(1, Ordering::Relaxed);
     crate::serial_println!(
-        "BOUCHAUD_USB_ADDRESS_OK port={} slot={} speed={} ep0_mps={}",
-        root_port, slot_id, speed, ep0_mps
+        "BOUCHAUD_USB_ADDRESS_OK port={} route={:#07x} profondeur={} slot={} speed={} ep0_mps={} tt_slot={} tt_port={}",
+        root_port, chemin.route, chemin.profondeur, slot_id, speed, ep0_mps,
+        chemin.tt_slot, chemin.tt_port,
     );
 
     Ok(Device {
@@ -1289,7 +1420,296 @@ fn arm_all_hids(controller: &mut Controller) {
     }
 }
 
-fn enumerate_port(controller: &mut Controller, port_index: usize) {
+/// Note ce peripherique dans l'arbre du controleur.
+fn note_noeud(
+    controller: &mut Controller,
+    chemin: &Chemin,
+    slot: u8,
+    vendeur: u16,
+    produit: u16,
+    classe: u8,
+    genre_hid: u8,
+) {
+    if controller.compte_noeuds >= NOEUDS_MAX {
+        return;
+    }
+    let index = controller.compte_noeuds;
+    controller.arbre[index] = Some(NoeudUsb {
+        port_racine: chemin.port_racine,
+        route: chemin.route,
+        profondeur: chemin.profondeur.min(u8::MAX as usize) as u8,
+        vitesse: chemin.vitesse,
+        slot,
+        vendeur,
+        produit,
+        classe,
+        genre_hid,
+    });
+    controller.compte_noeuds = index + 1;
+}
+
+/// `bConfigurationValue` de la premiere configuration.
+///
+/// Un concentrateur non configure refuse les requetes de ses ports et se
+/// comporte comme s'il n'avait aucun port occupe -- c'est-a-dire exactement
+/// comme un concentrateur vide. Rien ne distingue les deux cas dans le
+/// journal, d'ou l'importance de ne pas sauter cette etape.
+fn valeur_de_configuration(controller: &mut Controller, device: &mut Device) -> Option<u8> {
+    let recu = get_descriptor(controller, device, 2, 0, 9).ok()?;
+    if recu < 9 {
+        return None;
+    }
+    let valeur = unsafe { read_volatile((device.control_virt + 5) as *const u8) };
+    if valeur == 0 {
+        None
+    } else {
+        Some(valeur)
+    }
+}
+
+/// Declare au controleur que ce peripherique EST un concentrateur.
+///
+/// # Sans cette commande, la traversee ne sert a rien
+///
+/// Le controleur refuse d'adresser quoi que ce soit derriere un slot dont le
+/// bit `Hub` n'est pas pose : il ne sait pas qu'il y a un « derriere ». La
+/// commande echoue avec un code de parametre invalide, et le journal dit
+/// « adresse impossible » sans jamais nommer la cause.
+///
+/// Le nombre de ports et le temps de reflexion vont dans la meme commande :
+/// le controleur s'en sert pour dimensionner ses fenetres de transaction. Un
+/// temps de reflexion faux ne casse rien tout de suite -- il fait perdre des
+/// paquets sous charge, ce qui se manifeste par une souris qui saute.
+fn declare_concentrateur(
+    controller: &mut Controller,
+    device: &mut Device,
+    ports: u8,
+    temps_reflexion: u8,
+) -> Result<(), &'static str> {
+    clear_input(device);
+    let slot_out = context_ptr(device.out_ctx_virt, controller.context_size, 0);
+    let slot_in = context_ptr(device.in_ctx_virt, controller.context_size, 1);
+    unsafe {
+        // On part du contexte de SORTIE, celui que le controleur tient a jour :
+        // les champs qu'on ne change pas doivent rester identiques, sans quoi
+        // on ecraserait l'etat du slot avec des zeros.
+        copy_nonoverlapping(slot_out as *const u8, slot_in as *mut u8, controller.context_size);
+        // A0 seul : on ne touche a aucun point de terminaison.
+        write_volatile((device.in_ctx_virt + 4) as *mut u32, 1 << 0);
+        let dw0 = ctx_r32(slot_in, 0);
+        ctx_w32(slot_in, 0, dw0 | (1 << 26));
+        let dw1 = ctx_r32(slot_in, 1);
+        ctx_w32(slot_in, 1, (dw1 & 0x00ff_ffff) | ((ports as u32) << 24));
+        let dw2 = ctx_r32(slot_in, 2);
+        ctx_w32(slot_in, 2, (dw2 & !(0x3 << 16)) | (((temps_reflexion & 0x3) as u32) << 16));
+    }
+    command(
+        controller,
+        device.in_ctx_phys,
+        CMD_CONFIGURE_ENDPOINT,
+        device.slot_id,
+    )?;
+    Ok(())
+}
+
+/// Lit les quatre octets d'etat d'un port de concentrateur.
+fn etat_port_concentrateur(
+    controller: &mut Controller,
+    device: &mut Device,
+    port: u8,
+    superspeed: bool,
+) -> Option<concentrateur::EtatPort> {
+    let recu = control_transfer(
+        controller,
+        device,
+        concentrateur::requete_etat_port(port),
+        4,
+        true,
+    )
+    .ok()?;
+    if recu < 4 {
+        return None;
+    }
+    let octets = unsafe { core::slice::from_raw_parts(device.control_virt as *const u8, 4) };
+    concentrateur::etat_port(octets, superspeed)
+}
+
+/// Efface les bits de changement d'un port, un par un.
+///
+/// Un changement qu'on laisse pose est re-signale sans fin : le concentrateur
+/// le repete, et une traversee qui le relit rebranche indefiniment le meme
+/// peripherique.
+fn efface_changements(
+    controller: &mut Controller,
+    device: &mut Device,
+    port: u8,
+    changements: u16,
+) {
+    for (bit, fonctionnalite) in concentrateur::CHANGEMENTS {
+        if changements & bit != 0 {
+            let _ = control_transfer(
+                controller,
+                device,
+                concentrateur::requete_efface_port(fonctionnalite, port),
+                0,
+                false,
+            );
+        }
+    }
+}
+
+/// Reinitialise un port de concentrateur et rend la vitesse negociee.
+///
+/// La vitesse n'est lisible qu'APRES la reinitialisation : les bits qui la
+/// portent ne veulent rien dire tant que le port n'est pas actif. La lire
+/// avant programme une taille de paquet fausse, donc un peripherique qui ne
+/// repond jamais.
+fn reinitialise_port_concentrateur(
+    controller: &mut Controller,
+    device: &mut Device,
+    port: u8,
+    superspeed: bool,
+) -> Option<u8> {
+    if control_transfer(
+        controller,
+        device,
+        concentrateur::requete_pose_port(concentrateur::PORT_REINITIALISATION, port),
+        0,
+        false,
+    )
+    .is_err()
+    {
+        return None;
+    }
+    // Bornee : un port qui ne sort jamais de reinitialisation ne doit pas
+    // suspendre le demarrage de la machine.
+    let mut restant = REINITIALISATION_MAX_MS / 10;
+    loop {
+        wait_ms(10);
+        let etat = etat_port_concentrateur(controller, device, port, superspeed)?;
+        if !etat.en_reinitialisation && etat.active {
+            efface_changements(controller, device, port, etat.changements);
+            // Intervalle de reprise apres reinitialisation, USB 2.0 §7.1.7.5.
+            wait_ms(10);
+            return Some(etat.vitesse);
+        }
+        if !etat.connecte {
+            efface_changements(controller, device, port, etat.changements);
+            return None;
+        }
+        restant = restant.saturating_sub(1);
+        if restant == 0 {
+            crate::serial_println!(
+                "BOUCHAUD_USB_CONCENTRATEUR_PORT_TIMEOUT slot={} port={}",
+                device.slot_id, port,
+            );
+            return None;
+        }
+    }
+}
+
+/// Descend d'un etage : alimente, reinitialise, et met en file ce qui repond.
+///
+/// # Ce que cette fonction ne fait PAS
+///
+/// Elle n'enumere rien elle-meme. Chaque peripherique trouve est POUSSE dans
+/// la file, et enumere plus tard, a plat. C'est ce qui garde la pile du noyau
+/// constante quelle que soit la profondeur de l'arbre.
+fn traverse_concentrateur(
+    controller: &mut Controller,
+    device: &mut Device,
+    chemin: &Chemin,
+    file: &mut FileChemins,
+) -> Result<usize, &'static str> {
+    let superspeed = chemin.vitesse >= concentrateur::VITESSE_SUPER;
+    let longueur = if superspeed { 12 } else { 9 };
+    let recu = control_transfer(
+        controller,
+        device,
+        concentrateur::requete_descripteur(superspeed, longueur as u16),
+        longueur,
+        true,
+    )?;
+    let octets = unsafe { core::slice::from_raw_parts(device.control_virt as *const u8, recu) };
+    let Some(descripteur) = concentrateur::descripteur(octets) else {
+        return Err("descripteur-concentrateur-invalide");
+    };
+
+    declare_concentrateur(
+        controller,
+        device,
+        descripteur.ports,
+        descripteur.temps_reflexion,
+    )?;
+
+    // Alimenter TOUS les ports d'abord, puis attendre UNE fois : le delai
+    // d'etablissement court en parallele sur tous les ports.
+    for port in 1..=descripteur.ports {
+        let _ = control_transfer(
+            controller,
+            device,
+            concentrateur::requete_pose_port(concentrateur::PORT_ALIMENTATION, port),
+            0,
+            false,
+        );
+    }
+    wait_ms(descripteur.delai_alimentation_ms.max(20).min(600) as u64);
+
+    let mut trouves = 0usize;
+    for port in 1..=descripteur.ports {
+        let Some(etat) = etat_port_concentrateur(controller, device, port, superspeed) else {
+            continue;
+        };
+        if etat.changements != 0 {
+            efface_changements(controller, device, port, etat.changements);
+        }
+        if !etat.connecte {
+            continue;
+        }
+        let Some(vitesse) = reinitialise_port_concentrateur(controller, device, port, superspeed)
+        else {
+            continue;
+        };
+        let Some(route) = concentrateur::route_enfant(chemin.route, chemin.profondeur, port) else {
+            CONCENTRATEURS_ECHOUES.fetch_add(1, Ordering::Relaxed);
+            crate::serial_println!(
+                "BOUCHAUD_USB_CONCENTRATEUR_TROP_PROFOND slot={} port={} profondeur={} \
+                 cause=la-chaine-de-route-xhci-ne-compte-que-cinq-etages",
+                device.slot_id, port, chemin.profondeur,
+            );
+            continue;
+        };
+        // Le transactionneur s'HERITE : un concentrateur pleine vitesse
+        // derriere un concentrateur haute vitesse garde celui de son ancetre.
+        // Ne le recalculer qu'au premier saut donnerait, plus bas, un
+        // transactionneur nul et un peripherique muet.
+        let (tt_slot, tt_port) = if chemin.tt_slot != 0 {
+            (chemin.tt_slot, chemin.tt_port)
+        } else if concentrateur::requiert_transactionneur(chemin.vitesse, vitesse) {
+            (device.slot_id, port)
+        } else {
+            (0, 0)
+        };
+        file.pousse(Chemin {
+            port_racine: chemin.port_racine,
+            route,
+            profondeur: chemin.profondeur + 1,
+            vitesse,
+            tt_slot,
+            tt_port,
+        });
+        trouves += 1;
+    }
+    crate::serial_println!(
+        "BOUCHAUD_USB_CONCENTRATEUR_TRAVERSE slot={} ports={} occupes={} \
+         temps_reflexion={} delai_alimentation_ms={}",
+        device.slot_id, descripteur.ports, trouves, descripteur.temps_reflexion,
+        descripteur.delai_alimentation_ms,
+    );
+    Ok(trouves)
+}
+
+fn enumerate_port(controller: &mut Controller, port_index: usize, file: &mut FileChemins) {
     let port = (port_index + 1) as u8;
     let portsc = unsafe { r32(controller.op, 0x400 + port_index * 0x10) };
     if portsc & PORTSC_CCS == 0 { return; }
@@ -1301,14 +1721,28 @@ fn enumerate_port(controller: &mut Controller, port_index: usize) {
         return;
     }
     let speed = ((portsc >> PORTSC_SPEED_SHIFT) & 0x0f) as u8;
-    let mut device = match address_device(controller, port, speed) {
+    enumerate_device(controller, Chemin::racine(port, speed), file);
+}
+
+/// Enumere UN peripherique, ou qu'il soit dans l'arbre.
+///
+/// Un peripherique branche a la racine et un peripherique branche derriere
+/// trois concentrateurs suivent exactement la meme suite d'etapes ; seul le
+/// `Chemin` change. Avoir deux chemins de code pour les deux cas, c'est
+/// garantir qu'un seul des deux sera corrige quand un defaut apparaitra.
+fn enumerate_device(controller: &mut Controller, chemin: Chemin, file: &mut FileChemins) {
+    let port = chemin.port_racine;
+    let speed = chemin.vitesse;
+    let mut device = match address_device(controller, &chemin) {
         Ok(device) => device,
         Err(error) => {
             crate::serial_println!(
-                "BOUCHAUD_USB_ENUM_FAIL port={} phase=address error={}",
-                port,
-                error
+                "BOUCHAUD_USB_ENUM_FAIL port={} route={:#07x} phase=address error={}",
+                port, chemin.route, error
             );
+            if chemin.profondeur != 0 {
+                CONCENTRATEURS_ECHOUES.fetch_add(1, Ordering::Relaxed);
+            }
             return;
         }
     };
@@ -1364,28 +1798,52 @@ fn enumerate_port(controller: &mut Controller, port_index: usize) {
         ])
     };
 
-    // UN CONCENTRATEUR N'EST PAS UN PERIPHERIQUE QU'ON IGNORE EN SILENCE
+    // UN CONCENTRATEUR SE TRAVERSE, ET S'IL NE SE TRAVERSE PAS, IL SE DIT
     //
-    // L'enumeration ne descend pas derriere un concentrateur : cela demande la
-    // chaine de route dans le contexte de slot, le transactionneur pour les
-    // peripheriques lents, et les requetes de classe du concentrateur --
-    // c'est-a-dire du code qu'on ne peut ni exercer ici ni verifier sans le
-    // materiel qui produit chaque cas.
-    //
-    // Ce qu'on peut faire, et qui compte, c'est ne pas laisser ce manque
-    // INVISIBLE. Un clavier branche sur un concentrateur ne repond pas, et
-    // sans cette ligne le journal ne dit rien : on chercherait le defaut dans
-    // le code du clavier, qui marche. Avec elle, la cause est nommee.
+    // Un clavier branche derriere un concentrateur ne repond pas tant que
+    // personne n'est descendu chercher ses ports. Et un echec de descente ne
+    // ressemble a rien : le clavier est simplement absent. Les deux moities
+    // comptent donc -- descendre, et nommer l'echec quand on ne peut pas.
     let classe_peripherique =
         unsafe { read_volatile((device.control_virt + 4) as *const u8) };
     if classe_peripherique == CLASSE_CONCENTRATEUR {
         CONCENTRATEURS.fetch_add(1, Ordering::Relaxed);
         crate::serial_println!(
-            "BOUCHAUD_USB_CONCENTRATEUR port={} slot={} vid={:04x} pid={:04x} \
-             non_traverse=1 consequence=les-peripheriques-derriere-ce-\
-             concentrateur-ne-sont-pas-enumeres",
-            port, device.slot_id, vendor, product,
+            "BOUCHAUD_USB_CONCENTRATEUR port={} route={:#07x} profondeur={} slot={} \
+             vid={:04x} pid={:04x}",
+            port, chemin.route, chemin.profondeur, device.slot_id, vendor, product,
         );
+        // Un concentrateur doit etre CONFIGURE avant de repondre aux requetes
+        // de ses ports : non configure, il refuse `GET_STATUS` et se comporte
+        // comme s'il n'avait aucun port occupe.
+        let configuration = valeur_de_configuration(controller, &mut device);
+        match configuration
+            .ok_or("configuration-introuvable")
+            .and_then(|valeur| {
+                set_configuration(controller, &mut device, valeur)?;
+                wait_ms(10);
+                traverse_concentrateur(controller, &mut device, &chemin, file)
+            }) {
+            Ok(_) => {}
+            Err(error) => {
+                CONCENTRATEURS_ECHOUES.fetch_add(1, Ordering::Relaxed);
+                crate::serial_println!(
+                    "BOUCHAUD_USB_CONCENTRATEUR_ECHEC port={} slot={} error={} \
+                     consequence=les-peripheriques-derriere-ce-concentrateur-\
+                     ne-sont-pas-enumeres",
+                    port, device.slot_id, error,
+                );
+            }
+        }
+        if (device.slot_id as usize) < controller.devices.len() {
+            controller.devices[device.slot_id as usize] = Some(device);
+        }
+        note_noeud(controller, &chemin, device.slot_id, vendor, product, classe_peripherique, 0);
+        controller.usb_devices += 1;
+        return;
+    }
+    if chemin.profondeur != 0 {
+        PERIPHERIQUES_DERRIERE.fetch_add(1, Ordering::Relaxed);
     }
 
     let config_head = match get_descriptor(controller, &mut device, 2, 0, 9) {
@@ -1419,6 +1877,14 @@ fn enumerate_port(controller: &mut Controller, port_index: usize) {
         core::slice::from_raw_parts(device.control_virt as *const u8, config_len)
     };
     let (configuration_value, hid_count) = parse_hid_descriptors(config_slice, &mut descriptors);
+    let genre_hid = descriptors[..hid_count]
+        .iter()
+        .map(|d| d.kind)
+        .find(|k| *k != 0)
+        .unwrap_or(0);
+    note_noeud(
+        controller, &chemin, device.slot_id, vendor, product, classe_peripherique, genre_hid,
+    );
     controller.usb_devices += 1;
     crate::serial_println!(
         "BOUCHAUD_USB_ENUM_OK port={} slot={} speed={} vid={:04x} pid={:04x} hid_in_endpoints={}",
@@ -1730,6 +2196,8 @@ fn init_controller(dev: PciDevice) -> Result<(Controller, usize), &'static str> 
             dcbaa_phys,
             dcbaa_virt,
             hids: [EMPTY_HID_ENDPOINT; MAX_HID_ENDPOINTS_PER_CONTROLLER],
+            arbre: [None; NOEUDS_MAX],
+            compte_noeuds: 0,
             hid_count: 0,
             devices: [None; MAX_RUNTIME_DEVICES],
             connected_ports: 0,
@@ -1983,7 +2451,17 @@ pub fn hid_mice() -> usize {
 /// Un nombre non nul explique a lui seul un clavier qui ne repond pas : il est
 /// derriere, et l'enumeration ne descend pas.
 pub fn concentrateurs_non_traverses() -> usize {
+    CONCENTRATEURS_ECHOUES.load(Ordering::Acquire)
+}
+
+/// Concentrateurs trouves, traverses ou non.
+pub fn concentrateurs() -> usize {
     CONCENTRATEURS.load(Ordering::Acquire)
+}
+
+/// Peripheriques atteints derriere un concentrateur.
+pub fn peripheriques_derriere_concentrateur() -> usize {
+    PERIPHERIQUES_DERRIERE.load(Ordering::Acquire)
 }
 
 pub fn hid_polling() -> bool {
@@ -2058,6 +2536,95 @@ pub fn poll() {
     RUNTIME_BUSY.store(false, Ordering::Release);
 }
 
+/// Nom lisible d'une vitesse xHCI.
+fn nom_vitesse(vitesse: u8) -> &'static str {
+    match vitesse {
+        concentrateur::VITESSE_PLEINE => "full",
+        concentrateur::VITESSE_BASSE => "low",
+        concentrateur::VITESSE_HAUTE => "high",
+        concentrateur::VITESSE_SUPER => "super",
+        concentrateur::VITESSE_SUPER_PLUS => "super+",
+        _ => "?",
+    }
+}
+
+/// L'arbre USB, tel qu'il a ete enumere.
+///
+/// # Pourquoi cette commande existe
+///
+/// Sur une machine sans console serie, « le clavier ne marche pas » n'a
+/// aucune information attachee. Voir l'arbre repond a la seule question qui
+/// compte en premier : le peripherique a-t-il ete VU ? Un clavier absent de
+/// cette liste est un probleme d'enumeration ; un clavier present mais muet
+/// est un probleme de transport. Ce sont deux enquetes differentes, et sans
+/// cette liste on ne sait pas laquelle mener.
+///
+/// Si l'arbre n'a jamais ete parcouru -- le cas hors du bureau de reference --
+/// la commande le parcourt maintenant.
+pub fn lsusb() {
+    if !ACTIVE.load(Ordering::Acquire) && CONTROLLERS.load(Ordering::Acquire) == 0 {
+        let _ = bring_up();
+    }
+    if RUNTIME_BUSY.swap(true, Ordering::Acquire) {
+        crate::println!("lsusb: enumeration en cours, reessayer");
+        return;
+    }
+    let mut total = 0usize;
+    unsafe {
+        if let Some(runtime) = RUNTIME.as_ref() {
+            for (numero, controller) in runtime.controllers.iter().enumerate() {
+                crate::println!(
+                    "controleur {} : {} port(s) racine, {} peripherique(s)",
+                    numero, controller.max_ports, controller.compte_noeuds,
+                );
+                for noeud in controller.arbre[..controller.compte_noeuds].iter().flatten() {
+                    total += 1;
+                    // L'indentation DIT la profondeur : un clavier decale de
+                    // deux crans est derriere un concentrateur, et c'est
+                    // l'information qu'on cherche quand il ne repond pas.
+                    let mut marge = 0;
+                    while marge < noeud.profondeur {
+                        crate::print!("  ");
+                        marge += 1;
+                    }
+                    let genre = match noeud.genre_hid {
+                        1 => "clavier",
+                        2 => "souris",
+                        _ if noeud.classe == CLASSE_CONCENTRATEUR => "concentrateur",
+                        _ => "-",
+                    };
+                    crate::println!(
+                        "  port {} route {:#07x} slot {} {:04x}:{:04x} {} classe {:#04x} {}",
+                        noeud.port_racine, noeud.route, noeud.slot,
+                        noeud.vendeur, noeud.produit, nom_vitesse(noeud.vitesse),
+                        noeud.classe, genre,
+                    );
+                }
+            }
+        }
+    }
+    RUNTIME_BUSY.store(false, Ordering::Release);
+    if total == 0 {
+        crate::println!("lsusb: aucun peripherique USB enumere");
+    }
+    crate::println!(
+        "lsusb: {} peripherique(s), {} concentrateur(s) dont {} non traverse(s), {} derriere un concentrateur",
+        total,
+        CONCENTRATEURS.load(Ordering::Acquire),
+        CONCENTRATEURS_ECHOUES.load(Ordering::Acquire),
+        PERIPHERIQUES_DERRIERE.load(Ordering::Acquire),
+    );
+    crate::serial_println!(
+        "BOUCHAUD_LSUSB peripheriques={} concentrateurs={} non_traverses={} derriere_concentrateur={} claviers={} souris={}",
+        total,
+        CONCENTRATEURS.load(Ordering::Acquire),
+        CONCENTRATEURS_ECHOUES.load(Ordering::Acquire),
+        PERIPHERIQUES_DERRIERE.load(Ordering::Acquire),
+        HID_KEYBOARDS.load(Ordering::Acquire),
+        HID_MICE.load(Ordering::Acquire),
+    );
+}
+
 pub fn bring_up() -> ActiveSummary {
     ACTIVE.store(false, Ordering::Release);
     CONNECTED.store(0, Ordering::Release);
@@ -2076,6 +2643,8 @@ pub fn bring_up() -> ActiveSummary {
     HID_REARMS.store(0, Ordering::Release);
     HID_KICKS.store(0, Ordering::Release);
     CONCENTRATEURS.store(0, Ordering::Release);
+    CONCENTRATEURS_ECHOUES.store(0, Ordering::Release);
+    PERIPHERIQUES_DERRIERE.store(0, Ordering::Release);
     HID_CONTROL_POLLS.store(0, Ordering::Release);
     HID_CONTROL_REPORTS.store(0, Ordering::Release);
     HID_CONTROL_FAILS.store(0, Ordering::Release);
@@ -2133,8 +2702,22 @@ pub fn bring_up() -> ActiveSummary {
                 }
                 scratchpads_total = scratchpads_total.saturating_add(scratchpads);
                 let ports = controller.max_ports.min(MAX_PORTS_PER_CONTROLLER as u8) as usize;
+                // Les ports racine d'abord, puis ce que la traversee des
+                // concentrateurs a mis en file -- a plat, sans recursion.
+                let mut file = FileChemins::neuve();
                 for port in 0..ports {
-                    enumerate_port(&mut controller, port);
+                    enumerate_port(&mut controller, port, &mut file);
+                }
+                while let Some(chemin) = file.tire() {
+                    enumerate_device(&mut controller, chemin, &mut file);
+                }
+                if file.debordements != 0 {
+                    crate::serial_println!(
+                        "BOUCHAUD_USB_ARBRE_TRONQUE en_attente_max={} ignores={} \
+                         consequence=des-peripheriques-branches-derriere-un-\
+                         concentrateur-ne-sont-pas-enumeres",
+                        CHEMINS_EN_ATTENTE, file.debordements,
+                    );
                 }
                 arm_all_hids(&mut controller);
                 connected_total = connected_total.saturating_add(controller.connected_ports);
@@ -2187,7 +2770,7 @@ pub fn bring_up() -> ActiveSummary {
         crate::serial_println!("BOUCHAUD_HID_MOUSE_GREEN count={}", mouse_total);
     }
     crate::serial_println!(
-        "BOUCHAUD_XHCI_V34_SUMMARY controllers={}/{} ports={} enabled={} addressed={} control_ok={} usb={} keyboards={} mice={} polling={} concentrateurs_non_traverses={}",
+        "BOUCHAUD_XHCI_V34_SUMMARY controllers={}/{} ports={} enabled={} addressed={} control_ok={} usb={} keyboards={} mice={} polling={} concentrateurs={} concentrateurs_non_traverses={} derriere_concentrateur={}",
         active_controllers,
         seen,
         connected_total,
@@ -2199,10 +2782,13 @@ pub fn bring_up() -> ActiveSummary {
         mouse_total,
         (keyboard_total + mouse_total != 0) as u8,
         CONCENTRATEURS.load(Ordering::Acquire),
+        CONCENTRATEURS_ECHOUES.load(Ordering::Acquire),
+        PERIPHERIQUES_DERRIERE.load(Ordering::Acquire),
     );
-    // Un clavier absent ALORS QU'un concentrateur est branche a une cause
-    // nommee. Le dire ici evite de chercher le defaut dans le code du clavier.
-    if keyboard_total == 0 && CONCENTRATEURS.load(Ordering::Acquire) != 0 {
+    // Un clavier absent ALORS QU'un concentrateur n'a pas pu etre traverse a
+    // une cause nommee. Le dire ici evite de chercher le defaut dans le code
+    // du clavier, qui marche.
+    if keyboard_total == 0 && CONCENTRATEURS_ECHOUES.load(Ordering::Acquire) != 0 {
         crate::serial_println!(
             "BOUCHAUD_HID_ABSENT_DERRIERE_CONCENTRATEUR remede=brancher-le-\
              clavier-sur-un-port-de-la-machine"
