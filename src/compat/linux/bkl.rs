@@ -274,6 +274,44 @@ pub const SANS_BKL: &[(u64, &str)] = &[
     (nr::SCHED_GETAFFINITY, "masque constant + user_write (verrou mm) ; ne lit pas la table des taches"),
     (nr::GETPRIORITY, "lit `current().priorite`, un atomique par tache ; aucune table parcourue"),
 
+    // --- Lot c3 : la table des descripteurs, et rien de plus -----------------
+    //
+    // Ces cinq appels prennent `process.files.lock()` -- la table des
+    // descripteurs, dont le domaine est celui sur lequel `POLL` repose depuis
+    // le lot A1/3 -- et rien d'autre qui soit partage entre processus.
+    //
+    // `LSEEK` et `FSTAT` descendent en plus dans `backing` et `ramfs`, dont les
+    // domaines `Fs` et `Vfs` sont declares SORTIS et verifies comme tels : leur
+    // reprise du gros verrou serait comptee comme une regression par
+    // `[BKL-DOMAINES] regressions=`, que le budget borne a zero.
+    //
+    // `FSTAT` est le plus chaud des cinq et le moins evident : la glibc l'emet
+    // a chaque `fopen` pour dimensionner son tampon. Un navigateur qui ouvre
+    // ses polices, ses certificats et ses ressources en emet des centaines au
+    // demarrage, et chacun prenait le gros verrou pour lire une taille.
+    (nr::FSTAT, "table des descripteurs + ramfs/backing, domaines Fs et Vfs declares sortis"),
+    (nr::LSEEK, "table des descripteurs + `backing::logical_len`, domaine Fs declare sorti"),
+    (nr::DUP, "table des descripteurs seule ; le descripteur est clone puis insere sous le meme verrou"),
+    (nr::DUP2, "table des descripteurs seule ; meme chemin que DUP"),
+    (nr::DUP3, "table des descripteurs seule ; meme chemin que DUP"),
+
+    // --- Lot c3 : l'ordonnanceur, qui n'a jamais eu besoin du verrou ---------
+    //
+    // `SCHED_YIELD` etait le cas le plus absurde du lot. Il prenait le gros
+    // verrou, puis appelait `schedule()`, qui appelle `suspend_for_schedule()`
+    // -- lequel RELACHE le verrou pour la duree du changement de contexte et le
+    // reprend au retour. On payait donc une acquisition globale, une liberation
+    // et une reacquisition pour un appel dont tout l'objet est de rendre la
+    // main. `suspend_for_schedule()` gere deja la profondeur zero : une tache
+    // qui cede sans tenir le verrou suit exactement le meme chemin, en moins.
+    //
+    // `SETPRIORITY` parcourt la table des taches, mais sous `VueRegistre`, qui
+    // tient une LECTURE du registre -- le domaine `RegistreProcessus`, sorti du
+    // gros verrou et servi par son propre verrou de rang. Ce qu'il ecrit est un
+    // atomique porte par chaque tache.
+    (nr::SCHED_YIELD, "`schedule()` relache deja le verrou pour commuter ; le prendre avant ne sert qu'a le rendre"),
+    (nr::SETPRIORITY, "lecture du registre (domaine RegistreProcessus, sorti) + atomique par tache"),
+
     // --- Constantes : le bras d'aiguillage ne lit ni n'ecrit rien ------------
     //
     // Ces appels rendent une valeur litterale. Ils ne touchent ni la table des

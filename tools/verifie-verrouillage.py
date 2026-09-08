@@ -99,6 +99,15 @@ AUDITS_NOMMES = {
     "SET_TID_ADDRESS": "c2 -- champ de la tache courante, par garde d'emplacement",
     "SCHED_GETAFFINITY": "c2 -- masque constant + verrou mm ; aucune table parcourue",
     "GETPRIORITY": "c2 -- atomique par tache ; aucune table parcourue",
+    # c3 -- audit ecrit au-dessus des deux lots dans SANS_BKL : table des
+    # descripteurs pour les cinq premiers, ordonnanceur pour les deux derniers.
+    "FSTAT": "c3 -- table des descripteurs + domaines Fs/Vfs declares sortis",
+    "LSEEK": "c3 -- table des descripteurs + domaine Fs declare sorti",
+    "DUP": "c3 -- table des descripteurs seule",
+    "DUP2": "c3 -- table des descripteurs seule",
+    "DUP3": "c3 -- table des descripteurs seule",
+    "SCHED_YIELD": "c3 -- `schedule()` relache deja le verrou pour commuter",
+    "SETPRIORITY": "c3 -- lecture du registre (domaine sorti) + atomique par tache",
 }
 
 # Une constante rendue directement : `0`, `1`, `0o022`, `-errno::ENOSYS`.
