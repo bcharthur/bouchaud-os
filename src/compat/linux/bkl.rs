@@ -312,6 +312,36 @@ pub const SANS_BKL: &[(u64, &str)] = &[
     (nr::SCHED_YIELD, "`schedule()` relache deja le verrou pour commuter ; le prendre avant ne sert qu'a le rendre"),
     (nr::SETPRIORITY, "lecture du registre (domaine RegistreProcessus, sorti) + atomique par tache"),
 
+    // --- Lot c4 : les deux plus chauds qui restaient -------------------------
+    //
+    // `MMAP` etait l'anomalie du groupe memoire : `MUNMAP`, `MPROTECT`, `BRK`
+    // et `MADVISE` sont liberes depuis V14, et lui seul prenait encore le
+    // verrou. Il ne touche pourtant rien que ces quatre-la ne touchent :
+    //
+    //   * `mm.lock()` -- le domaine dont V14 depend deja ;
+    //   * `files.lock()` -- la table des descripteurs, domaine du lot A1/3 ;
+    //   * `metadata.lock()` -- le verrou du `Process`, domaine du lot A1/2 ;
+    //   * `backing::logical_len` et `is_disk_backed` -- domaine `Fs`, sorti ;
+    //   * `partage::mappe` -- son propre `CACHE.lock()` dans `memory/shared.rs` ;
+    //   * `finish_mapping_replacement`, le MEME chemin de remplacement que
+    //     `munmap` utilise, et que son audit couvre deja.
+    //
+    // Reste `peuple_a_la_demande`, appele quand `MAP_POPULATE` est demande.
+    // C'est le gestionnaire de FAUTE DE PAGE, et c'est ce qui tranche : une
+    // faute de page peut survenir a tout instant, y compris pendant qu'un autre
+    // coeur tient le gros verrou. S'il en avait besoin, le systeme serait deja
+    // casse. Il prend d'ailleurs `current_process_local()`, l'accesseur sans
+    // verrou que le lot A1/3 exige.
+    //
+    // `CLOSE` ne touche que trois domaines, tous DECLARES SORTIS et verifies
+    // comme tels : la table des descripteurs, les verrous d'enregistrement
+    // POSIX (`VerrouEnregistrement`, servi par un verrou de rang `PosixRecord`)
+    // et la readiness (`Readiness`). Le verrou de la table est relache avant
+    // `notify_readiness` -- le commentaire du code le dit deja, et c'est ce qui
+    // evite de tenir deux domaines a la fois.
+    (nr::MMAP, "mm + table des descripteurs + metadata + Fs, et la faute de page qui n'a jamais eu le verrou"),
+    (nr::CLOSE, "table des descripteurs, verrous d'enregistrement et readiness : trois domaines declares sortis"),
+
     // --- Constantes : le bras d'aiguillage ne lit ni n'ecrit rien ------------
     //
     // Ces appels rendent une valeur litterale. Ils ne touchent ni la table des

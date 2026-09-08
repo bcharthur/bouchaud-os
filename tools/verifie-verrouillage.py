@@ -108,6 +108,11 @@ AUDITS_NOMMES = {
     "DUP3": "c3 -- table des descripteurs seule",
     "SCHED_YIELD": "c3 -- `schedule()` relache deja le verrou pour commuter",
     "SETPRIORITY": "c3 -- lecture du registre (domaine sorti) + atomique par tache",
+    # c4 -- audit ecrit au-dessus du lot dans SANS_BKL. Le point qui tranche
+    # pour `mmap` : `peuple_a_la_demande` est le gestionnaire de faute de page,
+    # qui n'a jamais pu dependre du gros verrou.
+    "MMAP": "c4 -- mm + descripteurs + metadata + Fs, et la faute de page sans verrou",
+    "CLOSE": "c4 -- descripteurs, verrous d'enregistrement et readiness : trois domaines sortis",
 }
 
 # Une constante rendue directement : `0`, `1`, `0o022`, `-errno::ENOSYS`.
