@@ -55,6 +55,10 @@ const _: () = {
 /// peint dans une surface partagee que le gestionnaire de fenetres compose dans
 /// sa fenetre. Voir `gui::client`.
 pub(crate) const KIND_NAVIGATEUR: usize = 6;
+/// Le journal noyau. Il n'a pas d'icone de bureau : c'est un outil de
+/// diagnostic, pas une application qu'on lance tous les jours, et le menu
+/// Demarrer est exactement l'endroit ou on va le chercher quand on en a besoin.
+pub(crate) const KIND_JOURNAL: usize = 7;
 
 /// Taille de la zone utile du navigateur, en pixels.
 ///
@@ -104,10 +108,11 @@ pub(crate) const NAV_HAUTEUR: i32 = 604;
 ///
 /// Le `kind` est explicite et non deduit de la position : retirer une entree ne
 /// doit pas decaler silencieusement les autres vers la mauvaise application.
-pub(crate) const MENU: [(&str, usize); 7] = [
+pub(crate) const MENU: [(&str, usize); 8] = [
     ("Ladybird", KIND_NAVIGATEUR),
     ("Terminal", 0), ("Fichiers", 1), ("Moniteur", 3),
-    ("Calculatrice", 4), ("Rustpad", 5), ("Quitter", usize::MAX),
+    ("Calculatrice", 4), ("Rustpad", 5), ("Journal", KIND_JOURNAL),
+    ("Quitter", usize::MAX),
 ];
 
 /// Icones du bureau : (libelle, kind). Cliquables pour lancer l'application.
@@ -128,6 +133,8 @@ pub(crate) enum App {
     Calc { expr: String },
     Monitor,
     Rustpad { state: crate::gui::apps::rustpad::RustpadState },
+    /// La trace du noyau, lisible sur la machine elle-meme.
+    Journal { state: crate::gui::apps::journal::JournalState },
     /// Fenetre d'un client ring 3 : le contenu vient de sa surface partagee.
     Navigateur { client: alloc::boxed::Box<crate::gui::client::Client> },
 }
@@ -390,6 +397,9 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
         5 => Win::new("Rustpad — Hello World".to_string(), x, y, 560, 400,
             crate::gui::windowing::WindowFlags::STANDARD,
             App::Rustpad { state: crate::gui::apps::rustpad::RustpadState::new() }),
+        KIND_JOURNAL => Win::new("Journal — TOUT".to_string(), x, y, 760, 460,
+            crate::gui::windowing::WindowFlags::STANDARD,
+            App::Journal { state: crate::gui::apps::journal::JournalState::neuf() }),
         _ => Win::new("Moniteur".to_string(), x, y, 300, 200,
             crate::gui::windowing::WindowFlags::STANDARD, App::Monitor),
     }

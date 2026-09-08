@@ -174,6 +174,6 @@ pub fn pour_app(app: &crate::gui::window::App) -> Option<usize> {
         App::Terminal { .. } => 2,
         App::Files { .. } => 3,
         App::Rustpad { .. } => 4,
-        App::Monitor => return None,
+        App::Monitor | App::Journal { .. } => return None,
     })
 }

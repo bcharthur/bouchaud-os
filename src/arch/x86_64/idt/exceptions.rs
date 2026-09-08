@@ -76,6 +76,8 @@ fn releve_faute_fatale(nom: &str, stack: &InterruptStackFrame, code: u64) {
         stack.cpu_flags,
         code,
         cr2_si_faute_de_page(nom),
+        stack.code_segment,
+        stack.stack_segment,
     );
 
     serial_println!("");

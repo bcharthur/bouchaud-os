@@ -115,6 +115,10 @@ const CADRE: u32 = 0x00C8_3232;
 const TITRE: u32 = 0x00FF_6B6B;
 const TEXTE: u32 = 0x00EF_F3F8;
 const ETIQUETTE: u32 = 0x009D_A8B8;
+const MUTED: u32 = 0x0078_8496;
+
+/// Lignes de trace noyau affichees sous le releve, au plus.
+const TRACE_LIGNES: usize = 12;
 
 #[inline]
 unsafe fn pose_pixel(x: u32, y: u32, couleur: u32) {
@@ -224,6 +228,8 @@ pub fn affiche(
     rflags: u64,
     code: u64,
     cr2: Option<u64>,
+    cs: u64,
+    ss: u64,
 ) {
     if !ecran_disponible() {
         return;
@@ -260,7 +266,37 @@ pub fn affiche(
         y += pas;
 
         texte(marge, y, "RSP       ", echelle, ETIQUETTE);
-        hexa(x, y, rsp, echelle, TEXTE);
+        let fin = hexa(x, y, rsp, echelle, TEXTE);
+        // CANONIQUE ou non : une adresse non canonique n'est pas une pile un
+        // peu fausse, c'est une valeur qui n'a jamais pu etre une adresse.
+        if !canonique(rsp) {
+            texte(fin + 8 * echelle, y, "NON CANONIQUE", echelle, TITRE);
+        }
+        y += pas;
+
+        // CS ET SS TRANCHENT L'ENQUETE EN DEUX.
+        //
+        // Les deux bits de poids faible de CS portent l'anneau. Anneau 0, la
+        // faute est dans le noyau -- debordement de pile, commutation de
+        // contexte, corruption. Anneau 3, un processus utilisateur avait une
+        // pile impossible et c'est la LIVRAISON de sa faute qui a echoue.
+        // Ce sont deux enquetes qui n'ont rien a voir, et sans ces deux
+        // registres il fallait deviner laquelle mener.
+        texte(marge, y, "CS / SS   ", echelle, ETIQUETTE);
+        let fin = hexa(x, y, cs, echelle, TEXTE);
+        let fin = texte(fin + 8 * echelle, y, "/", echelle, ETIQUETTE);
+        hexa(fin + 8 * echelle, y, ss, echelle, TEXTE);
+        y += pas;
+
+        texte(marge, y, "ANNEAU    ", echelle, ETIQUETTE);
+        let fin = hexa(x, y, cs & 3, echelle, TEXTE);
+        texte(
+            fin + 8 * echelle,
+            y,
+            if cs & 3 == 3 { "UTILISATEUR" } else { "NOYAU" },
+            echelle,
+            TEXTE,
+        );
         y += pas;
 
         texte(marge, y, "RFLAGS    ", echelle, ETIQUETTE);
@@ -311,6 +347,96 @@ pub fn affiche(
             echelle,
             ETIQUETTE,
         );
+        y += pas + pas;
+
+        dessine_trace(marge, y, largeur, hauteur, echelle, pas);
+    }
+}
+
+/// Une adresse est-elle canonique en x86-64 ?
+///
+/// Les bits 63:47 doivent tous valoir le bit 47. Une valeur qui viole cette
+/// regle ne peut PAS etre une adresse : le processeur la refuse avant meme de
+/// consulter la pagination. Le dire nommement evite de chercher une page
+/// manquante pour une valeur qui n'a jamais designe de page.
+fn canonique(adresse: u64) -> bool {
+    let haut = adresse >> 47;
+    haut == 0 || haut == 0x1FFFF
+}
+
+/// Les dernieres lignes de la trace noyau, lues SANS allouer.
+///
+/// # Pourquoi elles valent le detour
+///
+/// Les registres disent ou la machine est tombee. Ils ne disent pas ce
+/// qu'elle FAISAIT. Sur une machine sans cable serie, ces quelques lignes sont
+/// la seule facon de savoir si la faute suit une scrutation USB, un
+/// achevement NVMe ou un lancement de processus.
+///
+/// La lecture se fait octet par octet dans l'anneau atomique du port serie :
+/// aucune allocation, aucun verrou. `trace_snapshot` aurait alloue soixante-
+/// quatre kilooctets sur un tas peut-etre deja corrompu.
+fn dessine_trace(marge: u32, mut y: u32, largeur: u32, hauteur: u32, echelle: u32, pas: u32) {
+    let colonnes = ((largeur.saturating_sub(marge * 2)) / (8 * echelle)) as usize;
+    if colonnes == 0 {
+        return;
+    }
+    // Ce qui reste de hauteur decide du nombre de lignes : mieux vaut en
+    // montrer moins que d'ecrire hors de l'ecran.
+    let disponibles = hauteur.saturating_sub(y + marge) / pas;
+    let lignes = (disponibles as usize).min(TRACE_LIGNES);
+    if lignes == 0 {
+        return;
+    }
+
+    let (debut, fin) = crate::drivers::serial::trace_bornes();
+    if fin == debut {
+        return;
+    }
+
+    // Remonter l'anneau a l'envers jusqu'a avoir compte `lignes` retours a la
+    // ligne, puis reafficher dans l'ordre.
+    let mut depart = fin;
+    let mut comptees = 0usize;
+    while depart > debut && comptees <= lignes {
+        depart -= 1;
+        if crate::drivers::serial::trace_octet(depart) == b'\n' {
+            comptees += 1;
+        }
+    }
+
+    unsafe {
+        texte(marge, y, "DERNIERES LIGNES DU NOYAU", echelle, ETIQUETTE);
+        y += pas;
+
+        let mut colonne = 0usize;
+        let mut restantes = lignes;
+        for sequence in depart..fin {
+            if restantes == 0 {
+                break;
+            }
+            let octet = crate::drivers::serial::trace_octet(sequence);
+            match octet {
+                b'\n' => {
+                    y += pas;
+                    colonne = 0;
+                    restantes -= 1;
+                }
+                b'\r' => {}
+                0x20..=0x7E => {
+                    if colonne < colonnes {
+                        glyphe(marge + colonne as u32 * 8 * echelle, y, octet, echelle, MUTED);
+                        colonne += 1;
+                    }
+                }
+                _ => {
+                    if colonne < colonnes {
+                        glyphe(marge + colonne as u32 * 8 * echelle, y, b'?', echelle, MUTED);
+                        colonne += 1;
+                    }
+                }
+            }
+        }
     }
 }
 

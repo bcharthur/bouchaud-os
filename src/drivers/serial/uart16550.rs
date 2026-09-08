@@ -48,6 +48,33 @@ pub fn trace_snapshot() -> alloc::vec::Vec<u8> {
     out
 }
 
+/// Bornes de la trace : premiere et derniere sequence encore presentes.
+///
+/// Les sequences sont des compteurs ABSOLUS, pas des indices : elles ne
+/// bouclent pas, et l'appelant les convertit avec [`trace_octet`]. Rendre des
+/// indices obligerait chaque lecteur a refaire le modulo, et l'un d'eux le
+/// referait mal.
+pub fn trace_bornes() -> (usize, usize) {
+    let fin = TRACE_WRITE.load(Ordering::Acquire);
+    (fin.saturating_sub(fin.min(TRACE_BYTES)), fin)
+}
+
+/// Un octet de la trace, par sequence absolue.
+///
+/// # Pourquoi cet acces existe a cote de `trace_snapshot`
+///
+/// `trace_snapshot` alloue un `Vec` de soixante-quatre kilooctets. C'est le
+/// bon outil pour une fenetre du bureau ; c'en est le pire pour un
+/// gestionnaire de double faute, ou le tas peut etre precisement ce qui vient
+/// d'etre corrompu -- et ou une allocation transformerait un diagnostic en
+/// triple faute muette.
+///
+/// Cet acces-ci ne fait qu'une lecture atomique. Il n'alloue pas, ne prend
+/// aucun verrou, et reste utilisable quand plus rien d'autre ne l'est.
+pub fn trace_octet(sequence: usize) -> u8 {
+    TRACE[sequence % TRACE_BYTES].load(Ordering::Acquire)
+}
+
 /// État global du port série, pour éviter d'écrire avant l'init.
 static mut INITIALISED: bool = false;
 

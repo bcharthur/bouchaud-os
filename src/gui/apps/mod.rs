@@ -8,6 +8,7 @@
 
 pub mod calculator;
 pub mod file_explorer;
+pub mod journal;
 pub mod rustpad;
 pub mod system_info;
 pub mod terminal;
@@ -71,6 +72,7 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
             _ => false,
         },
         App::Rustpad { state } => rustpad::on_key(state, k),
+        App::Journal { state } => journal::on_key(state, k),
 
         _ => false,
     };
@@ -155,6 +157,10 @@ pub(crate) fn wheel_to_app(w: &mut Win, _mx: i32, _my: i32, delta: i32) {
         *scroll = (*scroll - delta).max(0);
         return;
     }
+    if let App::Journal { state } = &mut w.app {
+        journal::on_wheel(state, delta);
+        return;
+    }
     if let App::Rustpad { state } = &mut w.app {
         rustpad::on_wheel(state, delta);
     }
@@ -197,6 +203,7 @@ pub(crate) fn draw_app(w: &Win) {
         App::Calc { expr }                  => calculator::draw(expr, bx, by, bw, bh),
         App::Monitor                        => system_info::draw(bx, by, bw, bh),
         App::Rustpad { state }              => rustpad::draw(state, bx, by, bw, bh),
+        App::Journal { state }              => journal::draw(state, bx, by, bw, bh),
         // Le contenu d'un client ring 3 n'est pas dessine : il est *compose*.
         // Les pixels existent deja, dans la surface partagee.
         App::Navigateur { client }          => crate::gui::widgets::compose_client(w, client),
