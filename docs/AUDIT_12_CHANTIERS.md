@@ -67,7 +67,15 @@ peut survenir a tout instant, y compris pendant qu'un autre coeur tient le
 verrou. S'il en avait besoin, le systeme serait deja casse.
 
 **Ce qui manque.** Les sockets (`recvfrom`, `sendto`, `recvmsg`, `sendmsg`),
-`futex`, `openat`, `ioctl`, `execve`, `clone`. Il n'y a toujours pas de
+`futex`, `openat`, `ioctl`, `execve`, `clone`.
+
+Un cas merite d'etre nomme, parce qu'il aurait ete libere par ressemblance :
+`recvfrom` sur une paire de sockets TESTE si le tampon est vide, puis entre
+dans `sys_read` -- lequel est deja libere. Ce qui rend ces deux etapes
+atomiques a plusieurs coeurs est le gros verrou, et rien d'autre. Le liberer
+sans porter l'intention « non bloquant » jusque dans `sys_read` ferait bloquer
+DEUX SECONDES une lecture declaree non bloquante, et seulement sous charge.
+La dependance est maintenant ecrite dans `net.rs`, a l'endroit ou elle vit. Il n'y a toujours pas de
 lockdep runtime : l'ordre est verifie par lecture de source, pas par le noyau
 qui tourne. Le but final -- « le chemin normal n'en a plus besoin » -- n'est
 pas atteint.
@@ -255,12 +263,23 @@ existe et n'a jamais ete applique : il y a un script pour poser la protection,
 et aucune protection. **Aucun required status check** : tout ce travail de
 garde-fous peut etre contourne par un `git push` direct.
 
-**Le fuzzing existe, sur un seul objet.** `reliability / rendezvous property
-fuzz` rejoue `test_rendezvous_property.rs` sur 64 graines a chaque PR. C'est un
-vrai test de propriete, et il ne couvre qu'un objet : ni le decodage des
-paquets, ni les descripteurs USB, ni les tables de partitions, ni les entrees
-de systeme de fichiers -- c'est-a-dire aucune des surfaces qui recoivent des
-octets qu'on n'a pas ecrits.
+**Le fuzzing couvre desormais les decodeurs d'octets etrangers.**
+`tools/fuzz/test_decodeurs_fuzz.rs` (18 proprietes) rejoue sur 64 graines les
+decodeurs qui lisent ce que le noyau ne controle pas : table de partitions
+GPT, secteur d'amorcage FAT32, `Identify` NVMe, rapports HID, et des suites
+d'operations quelconques sur l'allocateur compagnon.
+
+C'est la difference entre un defaut et une surface d'attaque : brancher une
+cle USB fabriquee ne demande aucun privilege. Le fuzzing a immediatement
+trouve un cas reel -- `fat32::ouvre` acceptait un volume a ZERO amas, et le
+premier acces calculait alors un secteur que personne n'avait choisi.
+
+Le job de CI ne connaissait qu'une suite ; il les DECOUVRE maintenant. Une
+suite de fuzzing qui n'est pas lancee ne protege rien tout en donnant
+l'impression du contraire.
+
+Ce qui reste sans fuzzing : le decodage des paquets reseau, les descripteurs
+USB de configuration, et les entrees du systeme de fichiers persistant.
 
 Les budgets d'execution (`ready_latency_*`, `tcp_busy_poll_tours_max`) sont
 rapportes « non verifies » faute de campagne QEMU, ce qui est le comportement

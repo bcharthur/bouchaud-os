@@ -853,13 +853,33 @@ pub fn ouvre<'a, S: Support>(
     if !support.lit(decalage, &mut s) {
         return Err(Erreur::LectureRefusee);
     }
+    // CE SECTEUR VIENT DU DISQUE, ET LE DISQUE VIENT DE QUELQU'UN D'AUTRE.
+    //
+    // Une ESP fabriquee sur une cle qu'on branche est la voie la plus courte
+    // vers ce decodeur : brancher une cle ne demande aucun privilege. Chaque
+    // champ ci-dessous est donc verifie AVANT d'etre utilise pour calculer une
+    // adresse, et non apres.
+    //
+    // Le fuzzing a montre que ce n'etait pas une precaution theorique : sans
+    // ces controles, un volume a ZERO amas etait accepte, et
+    // `secteur_de_l_amas(racine)` soustrayait alors deux d'un compte nul.
     let octets_par_secteur = u16::from_le_bytes([s[11], s[12]]) as u32;
-    if !matches!(octets_par_secteur, 512 | 1024 | 2048 | 4096) || s[13] == 0 {
+    if !matches!(octets_par_secteur, 512 | 1024 | 2048 | 4096) {
+        return Err(Erreur::SecteurInvalide);
+    }
+    let secteurs_par_amas = s[13] as u32;
+    // Un amas est une puissance de deux de secteurs, plafonnee a 64 Kio. Une
+    // valeur de trois ou de sept n'est pas du FAT : les adresses calculees
+    // dessus ne designeraient rien.
+    if secteurs_par_amas == 0
+        || !secteurs_par_amas.is_power_of_two()
+        || secteurs_par_amas * octets_par_secteur > 65_536
+    {
         return Err(Erreur::SecteurInvalide);
     }
     let params = Parametres {
         octets_par_secteur,
-        secteurs_par_amas: s[13] as u32,
+        secteurs_par_amas,
         secteurs_reserves: u16::from_le_bytes([s[14], s[15]]) as u32,
         fats: s[16] as u32,
         secteurs_par_fat: u32::from_le_bytes([s[36], s[37], s[38], s[39]]),
@@ -868,15 +888,41 @@ pub fn ouvre<'a, S: Support>(
         premier_secteur_donnees: 0,
         amas_racine: u32::from_le_bytes([s[44], s[45], s[46], s[47]]),
     };
-    if params.secteurs_par_fat == 0 || params.fats == 0 {
+    if params.secteurs_par_fat == 0 || params.fats == 0 || params.secteurs_reserves == 0 {
         return Err(Erreur::SecteurInvalide);
     }
-    let premier_secteur_donnees =
-        params.secteurs_reserves + params.secteurs_par_fat * params.fats;
-    if premier_secteur_donnees >= params.secteurs_total {
+    // La zone reservee plus les FAT peut deborder d'un `u32` sur des valeurs
+    // fabriquees. Un debordement donnerait un premier secteur de donnees
+    // PLUS PETIT que la zone reservee, et tout ce qui suit lirait la FAT en
+    // croyant lire des donnees.
+    let Some(occupe) = params
+        .secteurs_par_fat
+        .checked_mul(params.fats)
+        .and_then(|total| total.checked_add(params.secteurs_reserves))
+    else {
+        return Err(Erreur::SecteurInvalide);
+    };
+    if occupe >= params.secteurs_total {
         return Err(Erreur::SecteurInvalide);
     }
-    let amas = (params.secteurs_total - premier_secteur_donnees) / params.secteurs_par_amas;
+    let premier_secteur_donnees = occupe;
+    let amas = (params.secteurs_total - premier_secteur_donnees) / secteurs_par_amas;
+    // UN VOLUME A ZERO AMAS N'EST PAS UN VOLUME.
+    //
+    // Il etait accepte, et `secteur_de_l_amas(2)` soustrayait alors deux d'un
+    // compte nul. Le premier acces lisait -- ou ecrivait -- a un secteur que
+    // personne n'avait choisi.
+    if amas == 0 {
+        return Err(Erreur::SecteurInvalide);
+    }
+    // La racine doit designer un amas QUI EXISTE. Les amas zero et un sont
+    // reserves ; au-dela du dernier, `secteur_de_l_amas` calcule un secteur
+    // hors de la partition.
+    if params.amas_racine < PREMIER_AMAS
+        || params.amas_racine >= amas.saturating_add(PREMIER_AMAS)
+    {
+        return Err(Erreur::SecteurInvalide);
+    }
     let params = Parametres { amas, premier_secteur_donnees, ..params };
     Ok(Volume { support, decalage, params, curseur: PREMIER_AMAS, libres: None })
 }

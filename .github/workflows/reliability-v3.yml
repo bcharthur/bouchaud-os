@@ -48,20 +48,52 @@ jobs:
           python3 tools/ci/check_pipeline_policy.py
 
   property-fuzz:
-    name: reliability / rendezvous property fuzz
+    name: reliability / property fuzz
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Compiler le test contre le module de production
-        run: rustc --edition 2021 --test -O -o /tmp/test-rendezvous-property tools/smp/test_rendezvous_property.rs
-      - name: 64 graines
+      # DECOUVERTES, et non enumerees.
+      #
+      # Ce job ne connaissait qu'une suite : `test_rendezvous_property.rs`. En
+      # ajouter une seconde demandait de modifier ce fichier, ce que personne
+      # ne pense a faire -- et une suite de fuzzing qui n'est pas lancee ne
+      # protege rien tout en donnant l'impression du contraire.
+      #
+      # Toute suite nommee `test_*_property.rs` ou `test_*_fuzz.rs` est
+      # desormais compilee et rejouee sur soixante-quatre graines. La graine
+      # d'un echec est imprimee : il se rejoue a l'identique.
+      - name: 64 graines par suite de propriete
         run: |
-          set -euo pipefail
-          for seed in $(seq 1 64); do
-            echo "seed=$seed"
-            BOUCHAUD_PROP_SEED="$seed" /tmp/test-rendezvous-property --test-threads=1
+          set -uo pipefail
+          suites=$(find tools -name 'test_*_property.rs' -o -name 'test_*_fuzz.rs' | sort)
+          if [ -z "$suites" ]; then
+            echo "aucune suite de propriete : ce job ne verifie rien"
+            exit 1
+          fi
+          echecs=0
+          for source in $suites; do
+            nom=$(basename "$source" .rs)
+            echo "=== $nom"
+            if ! rustc --edition 2021 --test -O -o "/tmp/$nom" "$source"; then
+              echo "COMPILATION $nom"
+              echecs=$((echecs + 1))
+              continue
+            fi
+            for seed in $(seq 1 64); do
+              if ! BOUCHAUD_PROP_SEED="$seed" "/tmp/$nom" --test-threads=1 >"/tmp/$nom.out" 2>&1; then
+                echo "ECHEC $nom graine=$seed"
+                echo "  rejouable par : BOUCHAUD_PROP_SEED=$seed /tmp/$nom"
+                sed 's/^/    /' "/tmp/$nom.out" | head -30
+                echecs=$((echecs + 1))
+                break
+              fi
+            done
+            echo "  64 graines vertes"
           done
+          echo
+          echo "suites de propriete en echec : $echecs"
+          [ "$echecs" -eq 0 ]
 
   build:
     name: reliability / bootimage
