@@ -373,3 +373,67 @@ pub fn render_load_pct() -> u8 {
 pub fn cpu_load_pct() -> u8 {
     cpu::load_percent()
 }
+
+// ---------------------------------------------------------------------------
+// Attentes bornees
+// ---------------------------------------------------------------------------
+
+/// Frequence PLAFOND supposee du TSC, pour le garde-fou en cycles.
+///
+/// Elle est volontairement trop haute. Le garde-fou n'est pas une horloge :
+/// c'est la garantie qu'une boucle d'attente FINIT. Surestimer la frequence
+/// allonge le pire cas ; la sous-estimer couperait des attentes legitimes.
+const TSC_PLAFOND_HZ: u64 = 8_000_000_000;
+
+/// La source monotone est-elle independante de la livraison des IRQ ?
+///
+/// # Pourquoi cette question decide de tout
+///
+/// [`monotonic_ns`] a trois sources, et elles ne se valent pas. Le TSC et le
+/// HPET se lisent avec une instruction ou un acces memoire : ils avancent
+/// meme quand les interruptions sont masquees. Le repli, lui, compte des
+/// ticks PIT -- et un tick n'arrive que par IRQ0.
+///
+/// Une attente qui tourne sous `cli` et qui expire sur ce repli n'expire
+/// JAMAIS : son horloge est arretee precisement parce qu'elle tourne. C'est
+/// la forme exacte que prend un gel de demarrage, et rien dans le code de
+/// l'appelant ne la laisse deviner.
+pub fn source_monotone_fiable() -> bool {
+    TSC_HZ.load(Ordering::Acquire) != 0 || HPET_BASE_VIRT.load(Ordering::Acquire) != 0
+}
+
+/// Attend qu'un predicat devienne vrai, au plus `limite_ms` -- et TOUJOURS un
+/// temps fini.
+///
+/// Deux bornes, et les deux comptent :
+///
+///   * la borne de TEMPS, quand [`source_monotone_fiable`] le permet. C'est
+///     elle qui donne le delai demande ;
+///   * la borne de CYCLES, lue par `rdtsc` sans calibration ni registre de
+///     plateforme. C'est elle qui garantit la sortie quand l'horloge est
+///     arretee -- interruptions masquees, TSC non calibre, HPET absent.
+///
+/// Un pilote qui attend sous `cli` doit passer par ici. Une boucle `while
+/// !pret {}` bornee par une horloge qui depend des IRQ est un gel, pas une
+/// attente.
+pub fn attente_bornee(limite_ms: u64, mut predicat: impl FnMut() -> bool) -> bool {
+    let fiable = source_monotone_fiable();
+    let debut_ns = monotonic_ns();
+    let limite_ns = limite_ms.saturating_mul(1_000_000);
+
+    let debut_tsc = cpu::rdtsc();
+    let plafond_cycles = limite_ms.saturating_mul(TSC_PLAFOND_HZ / 1000).max(1_000_000);
+
+    loop {
+        if predicat() {
+            return true;
+        }
+        if fiable && monotonic_ns().wrapping_sub(debut_ns) > limite_ns {
+            return false;
+        }
+        if cpu::rdtsc().wrapping_sub(debut_tsc) > plafond_cycles {
+            return false;
+        }
+        core::hint::spin_loop();
+    }
+}

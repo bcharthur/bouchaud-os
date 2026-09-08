@@ -35,9 +35,48 @@ pub fn arret_definitif() -> ! {
     }
 }
 
+/// Le numero de vecteur d'une faute, deduit du nom qu'on lui donne.
+///
+/// Les gestionnaires n'ont pas leur vecteur sous la main -- `x86-interrupt`
+/// ne le passe pas. Le deduire ici evite de changer sept signatures pour un
+/// seul chiffre affiche.
+fn vecteur_du_nom(nom: &str) -> u8 {
+    match nom {
+        "DOUBLE FAULT" => 8,
+        "GENERAL PROTECTION FAULT" => 13,
+        "PAGE FAULT" => 14,
+        "INVALID OPCODE" => 6,
+        "STACK SEGMENT FAULT" => 12,
+        "DIVIDE ERROR" => 0,
+        _ => 0xFF,
+    }
+}
+
+/// `CR2` ne veut dire quelque chose que pour une faute de page.
+fn cr2_si_faute_de_page(nom: &str) -> Option<u64> {
+    if nom == "PAGE FAULT" {
+        Some(x86_64::registers::control::Cr2::read().as_u64())
+    } else {
+        None
+    }
+}
+
 fn releve_faute_fatale(nom: &str, stack: &InterruptStackFrame, code: u64) {
     let cpu = smp::cpu_index();
     let rsp_frame = stack.stack_pointer.as_u64();
+
+    // L'ecran AVANT le releve serie. Sur la machine de reference il n'y a pas
+    // de cable serie : si le releve fautait a son tour, la seule sortie
+    // visible n'aurait jamais ete ecrite.
+    crate::platform::pc::ecran_faute::affiche(
+        vecteur_du_nom(nom),
+        nom,
+        stack.instruction_pointer.as_u64(),
+        rsp_frame,
+        stack.cpu_flags,
+        code,
+        cr2_si_faute_de_page(nom),
+    );
 
     serial_println!("");
     serial_println!("======== [{}] ========", nom);
@@ -221,6 +260,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack: InterruptStackFrame) {
     if from_user(&stack) && crate::kernel::task::in_user_task() {
         kill_faulting_task("instruction illegale", &stack);
     }
+    releve_faute_fatale("INVALID OPCODE", &stack, 0);
     panic!("EXCEPTION: instruction illegale\n{:#?}", stack);
 }
 
@@ -237,6 +277,7 @@ extern "x86-interrupt" fn divide_error_handler(stack: InterruptStackFrame) {
     if from_user(&stack) && crate::kernel::task::in_user_task() {
         kill_faulting_task("division par zero", &stack);
     }
+    releve_faute_fatale("DIVIDE ERROR", &stack, 0);
     panic!("EXCEPTION: division par zero\n{:#?}", stack);
 }
 
@@ -316,6 +357,7 @@ extern "x86-interrupt" fn page_fault_handler(
     }
 
     serial_println!("[cpu] page fault @ {:?} code {:?}", addr, code);
+    releve_faute_fatale("PAGE FAULT", &stack, code.bits());
     panic!(
         "EXCEPTION: page fault @ {:?}\ncode: {:?}\n{:#?}",
         addr, code, stack

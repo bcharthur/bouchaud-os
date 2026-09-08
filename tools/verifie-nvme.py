@@ -18,6 +18,7 @@ RACINE = Path(__file__).resolve().parents[1]
 PILOTE = RACINE / "src/drivers/block/nvme.rs"
 DECODAGE = RACINE / "src/drivers/block/nvme/decodage.rs"
 TEST = RACINE / "tools/platform/test_nvme_decodage.rs"
+MINUTERIE = RACINE / "src/kernel/time/timer.rs"
 
 
 def sans_commentaires(source):
@@ -280,26 +281,51 @@ def regle_vidange_honnete(pilote, fautes):
         )
 
 
-def regle_attente_hors_irq(pilote, fautes):
-    """L'attente compte du TSC, pas des ticks PIT.
+def regle_attente_hors_irq(pilote, minuterie, fautes):
+    """L'attente est BORNEE, et sa borne ne depend d'aucune IRQ.
 
     Le pilote tourne avec les interruptions masquees. Une attente qui
     compterait des ticks livres par IRQ n'expirerait jamais : le noyau
     tournerait en rond pour toujours au lieu de rapporter un delai.
+
+    Compter du TSC ne suffit pas non plus, parce que le TSC peut ne pas etre
+    calibre -- CPUID muet, canal 2 du PIT absent -- et `monotonic_ns` retombe
+    alors sur les ticks. La regle exige donc les DEUX : l'attente passe par
+    `timer::attente_bornee`, et cette primitive porte un garde-fou en cycles
+    `rdtsc` qui ne depend ni d'une IRQ ni d'une calibration reussie.
     """
     bloc = corps(pilote, "fn attend(")
     if bloc is None:
         fautes.append("nvme.rs : la fonction d'attente a disparu.")
         return
-    if "monotonic_ns" not in bloc:
+    if "attente_bornee" not in bloc:
         fautes.append(
-            "nvme.rs : l'attente ne compte plus une horloge independante des "
-            "IRQ ; masquees, elle ne pourrait plus expirer."
+            "nvme.rs : l'attente ne passe plus par timer::attente_bornee ; "
+            "rien ne garantit plus qu'elle se termine quand les interruptions "
+            "sont masquees."
         )
     if "ticks()" in bloc:
         fautes.append(
             "nvme.rs : l'attente compte des ticks PIT, qui n'arrivent pas "
             "quand les interruptions sont masquees."
+        )
+
+    primitive = corps(minuterie, "pub fn attente_bornee(")
+    if primitive is None:
+        fautes.append(
+            "timer.rs : attente_bornee a disparu ; le pilote NVMe n'a plus de "
+            "borne independante des IRQ."
+        )
+        return
+    if "rdtsc" not in primitive:
+        fautes.append(
+            "timer.rs : attente_bornee n'a plus de garde-fou en cycles ; une "
+            "horloge non calibree la rendrait infinie."
+        )
+    if "source_monotone_fiable" not in primitive:
+        fautes.append(
+            "timer.rs : attente_bornee ne verifie plus que l'horloge est "
+            "independante des IRQ avant de s'y fier."
         )
 
 
@@ -405,7 +431,7 @@ def regle_preuve_hote(test, fautes):
 
 def main():
     fautes = []
-    for chemin in (PILOTE, DECODAGE, TEST):
+    for chemin in (PILOTE, DECODAGE, TEST, MINUTERIE):
         if not chemin.exists():
             fautes.append("fichier absent : %s" % chemin.relative_to(RACINE).as_posix())
     if fautes:
@@ -416,6 +442,7 @@ def main():
     pilote = sans_commentaires(PILOTE.read_text(encoding="utf-8"))
     decodage = sans_commentaires(DECODAGE.read_text(encoding="utf-8"))
     test = TEST.read_text(encoding="utf-8")
+    minuterie = sans_commentaires(MINUTERIE.read_text(encoding="utf-8"))
 
     regle_foulee_sonnette(pilote, decodage, fautes)
     regle_blocs_decales(decodage, fautes)
@@ -423,7 +450,7 @@ def main():
     regle_taille_de_bloc(decodage, pilote, fautes)
     regle_bornes(pilote, fautes)
     regle_vidange_honnete(pilote, fautes)
-    regle_attente_hors_irq(pilote, fautes)
+    regle_attente_hors_irq(pilote, minuterie, fautes)
     regle_phase(pilote, decodage, fautes)
     regle_interruption_non_armee(decodage, fautes)
     regle_tampon_de_rebond(pilote, fautes)

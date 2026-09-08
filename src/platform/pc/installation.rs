@@ -617,6 +617,90 @@ pub fn monte_le_systeme_installe() -> bool {
     true
 }
 
+// ---------------------------------------------------------------------------
+// Le montage DIFFERE
+// ---------------------------------------------------------------------------
+
+/// Un montage a-t-il ete demande, et pas encore tente ?
+static MONTAGE_DEMANDE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+/// Le montage differe a-t-il deja ete tente ? Il ne l'est qu'une fois.
+static MONTAGE_TENTE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Demande le montage du systeme installe SANS le faire maintenant.
+///
+/// # Pourquoi la persistance ne peut plus etre une etape d'amorcage
+///
+/// Sonder le disque interne au demarrage, c'est faire dependre l'arrivee au
+/// bureau d'un peripherique dont on ne sait rien. Un NVMe muet -- un modele
+/// que le pilote ne mene pas jusqu'a l'achevement, un controleur laisse dans
+/// un etat batard par le micrologiciel -- n'echouait pas : il faisait ATTENDRE.
+/// Et une attente placee avant le premier affichage est, vue de l'utilisateur,
+/// un ecran fige, sans clavier ni souris, sans rien qui dise pourquoi.
+///
+/// Or rien de ce que le bureau affiche ne vient de ce disque. L'archive
+/// Ladybird voyage dans l'image UEFI et vit en RAM ; la persistance n'ajoute
+/// que la survie des fichiers a une coupure. C'est un CONFORT, et un confort
+/// ne prend pas le systeme en otage.
+///
+/// Le montage est donc demande ici et execute apres le premier rendu du
+/// bureau, par [`execute_le_montage_differe`]. Le pire cas devient : le bureau
+/// apparait, la souris bouge, et la persistance reste absente -- ce qui se lit
+/// dans le journal au lieu de se deviner devant un ecran arrete.
+pub fn differe_le_montage() {
+    MONTAGE_DEMANDE.store(true, core::sync::atomic::Ordering::Release);
+    crate::serial_println!(
+        "BOUCHAUD_NVME_PERSISTENCE_DEFERRED raison=arrivee-au-bureau-prioritaire"
+    );
+}
+
+/// Le montage differe reste-t-il a faire ?
+pub fn montage_differe_en_attente() -> bool {
+    MONTAGE_DEMANDE.load(core::sync::atomic::Ordering::Acquire)
+        && !MONTAGE_TENTE.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Execute le montage differe, une seule fois.
+///
+/// Rend `true` quand une partition systeme a ete montee. Rend `false` dans
+/// tous les autres cas -- y compris quand il n'y avait rien a faire --, et
+/// n'attend jamais plus que ce que le pilote bloc s'autorise.
+///
+/// L'appelant est le bureau, pas l'amorcage : voir [`differe_le_montage`].
+pub fn execute_le_montage_differe() -> bool {
+    if !MONTAGE_DEMANDE.load(core::sync::atomic::Ordering::Acquire) {
+        return false;
+    }
+    if MONTAGE_TENTE.swap(true, core::sync::atomic::Ordering::AcqRel) {
+        return false;
+    }
+
+    if !nvme::present() {
+        crate::serial_println!(
+            "BOUCHAUD_NVME_PERSISTENCE_ABSENTE raison={}",
+            if nvme::hors_service() { "disque-hors-service" } else { "aucun-disque" }
+        );
+        return false;
+    }
+
+    crate::serial_println!("BOUCHAUD_NVME_PERSISTENCE_PROBE_BEGIN");
+    if !monte_le_systeme_installe() {
+        crate::serial_println!(
+            "BOUCHAUD_NVME_PERSISTENCE_ABSENTE raison=aucune-partition-bouchaud hors_service={}",
+            nvme::hors_service() as u8
+        );
+        return false;
+    }
+    let restaures = crate::fs::persistance::monte();
+    crate::serial_println!(
+        "BOUCHAUD_STAGE2_PERSIST_NVME fichiers={} (differe)",
+        restaures
+    );
+    crate::kernel::dmesg::log("nvme: persistance montee apres l'arrivee au bureau");
+    true
+}
+
 /// Le disque interne porte-t-il un GUID de partition ESP a nous ?
 pub fn esp_installee() -> bool {
     examine()

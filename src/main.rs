@@ -97,8 +97,18 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
         drivers::vga::clear();
     }
 
+    // L'ecran de faute AVANT l'horloge et le tas : une exception noyau
+    // pendant l'initialisation doit s'afficher, pas laisser un ecran arrete.
+    // Le chemin de faute n'alloue pas et ne prend aucun verrou ; il n'a besoin
+    // que de l'adresse du framebuffer, que le chargeur a deja mappee.
+    if let Some(fb) = boot_info.framebuffer {
+        platform::pc::ecran_faute::installe_framebuffer(fb);
+    }
+    platform::pc::ecran_faute::point("kernel-main");
+
     // 2. Horloge, journal noyau, puis tas (alloc).
     kernel::timer::init();
+    platform::pc::ecran_faute::point("horloge");
     kernel::dmesg::init();
     kernel::heap::init();
     let reference_bringup = platform::pc::bringup::enabled();

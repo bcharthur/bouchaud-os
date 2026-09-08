@@ -17,6 +17,16 @@ fn panic(info: &PanicInfo) -> ! {
         idt::arret_definitif();
     }
 
+    // L'ecran GOP d'abord. `println!` va dans le tampon texte VGA, que le
+    // materiel de reference -- demarre en UEFI, sans mode texte -- n'affiche
+    // pas : sans cet appel, une panique noyau y est indiscernable d'un gel.
+    match info.location() {
+        Some(lieu) => {
+            crate::platform::pc::ecran_faute::affiche_panique(lieu.file(), lieu.line())
+        }
+        None => crate::platform::pc::ecran_faute::affiche_panique("?", 0),
+    }
+
     vga::set_color(vga::COLOR_RED);
     println!("");
     println!("*** KERNEL PANIC ***");

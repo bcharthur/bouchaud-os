@@ -64,12 +64,26 @@ fn prepare_ram_persist() -> bool {
     true
 }
 
+/// Note l'etape de demarrage en cours, pour l'ecran de faute.
+///
+/// Une faute noyau affiche le dernier point franchi : c'est la difference
+/// entre « le systeme s'est arrete quelque part » et « le systeme s'est
+/// arrete APRES le bring-up NVMe et AVANT l'entree ».
+fn point_de_controle(nom: &str) {
+    super::ecran_faute::point(nom);
+}
+
 pub fn run(boot: &'static BootInfo) -> ! {
     if boot.firmware != FirmwareKind::Uefi {
         panic!("stage2: firmware UEFI requis");
     }
 
     let framebuffer = super::bringup::validate_uefi_stage1(boot);
+
+    // L'ecran de faute AVANT tout le reste : a partir d'ici, une exception
+    // noyau a de quoi s'afficher au lieu de laisser un ecran arrete.
+    super::ecran_faute::installe_framebuffer(framebuffer);
+    point_de_controle("stage2-entree");
 
     // Breadcrumb physique : reutilise le renderer GOP du Stage 1 deja
     // prouve sur le TRIGKEY. Si cet ecran apparait, le noyau a bien atteint
@@ -127,6 +141,7 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // donnees peut ensuite remplacer/ajouter ses fichiers sans perdre /proc,
     // /sys, /tmp et les polices systeme.
     crate::kernel::sysroot::install();
+    point_de_controle("sysroot");
 
     // Chemin physique TRIGKEY: l'archive Ladybird est dans la MEME image UEFI.
     // Aucun acces au NVMe interne n'est necessaire. L'ancien hdb ATA reste un
@@ -160,6 +175,7 @@ pub fn run(boot: &'static BootInfo) -> ! {
         };
 
     crate::kernel::journal::demarre();
+    point_de_controle("journal");
     crate::kernel::process::init();
 
     // PCI est maintenant autorise au Stage 2 FINAL V2 pour une seule raison :
@@ -167,10 +183,12 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // driver e1000 que sur une carte Intel ; un Realtek physique est refuse
     // proprement par le driver e1000.
     crate::arch::x86_64::pci::init();
+    point_de_controle("pci");
 
     // Inventaire physique read-only. Les rapports sont crees dans
     // /diagnostics avant les pilotes reseau/USB actifs.
     crate::platform::pc::hardware_probe::run(boot, framebuffer);
+    point_de_controle("hardware-probe-xhci");
 
     // Le disque interne. C'est lui, et rien d'autre, qui separe un systeme
     // LIVE d'un systeme INSTALLE : tant que le NVMe n'etait pas pilote, aucune
@@ -182,26 +200,28 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // doit continuer de demarrer en live. C'est l'installateur, et lui seul,
     // qui exige un disque.
     let nvme_pret = crate::drivers::nvme::bring_up();
+    point_de_controle("nvme-bring-up");
 
-    // Le disque interne porte-t-il DEJA une installation ? Si oui, sa
-    // partition systeme devient le volume des donnees, et la persistance
-    // ecrit dessus au lieu de disparaitre a l'extinction.
+    // LA PERSISTANCE N'EST PLUS UNE ETAPE D'AMORCAGE.
     //
-    // Cela se decide APRES la preparation de `/persist` en RAM, et c'est le
-    // bon ordre : l'arborescence existe d'abord, le contenu sauvegarde vient
-    // se poser dessus. L'inverse donnerait un montage qui restaure des
-    // fichiers dans des repertoires qui n'existent pas encore.
-    let persist_disque = if nvme_pret
-        && crate::platform::pc::installation::monte_le_systeme_installe()
-    {
-        let restaures = crate::fs::persistance::monte();
-        crate::serial_println!(
-            "BOUCHAUD_STAGE2_PERSIST_NVME fichiers={}", restaures
-        );
-        Some(restaures)
+    // Sonder la table de partitions du disque interne ici faisait dependre le
+    // premier affichage du bureau d'un peripherique dont on ne sait rien. Un
+    // controleur qui n'acheve pas ses commandes n'echouait pas : il faisait
+    // attendre, interruptions masquees, une commande apres l'autre -- et un
+    // probe GPT en emet des dizaines. Vu de la machine, c'est un ecran fige
+    // sans clavier ni souris.
+    //
+    // Rien de ce que le bureau affiche ne vient de ce disque : l'archive
+    // Ladybird voyage dans l'image UEFI et vit en RAM. La persistance n'ajoute
+    // que la survie a une coupure. Elle est donc DEMANDEE ici et executee par
+    // le bureau, une fois la premiere image rendue.
+    if nvme_pret {
+        crate::platform::pc::installation::differe_le_montage();
     } else {
-        None
-    };
+        crate::serial_println!(
+            "BOUCHAUD_NVME_PERSISTENCE_DEFERRED raison=aucun-disque-interne"
+        );
+    }
     let xhci_present =
         if let Some(xhci) = crate::arch::x86_64::pci::find_xhci() {
             crate::serial_println!(
@@ -267,6 +287,7 @@ pub fn run(boot: &'static BootInfo) -> ! {
     );
 
     let _network_state = crate::net::demarre();
+    point_de_controle("reseau");
 
     // Le run historique posait ces variables via /autorun. Le Stage 2 entre
     // directement dans le bureau, donc il doit fournir le meme contrat avant
@@ -305,12 +326,13 @@ pub fn run(boot: &'static BootInfo) -> ! {
         if crate::drivers::e1000::using_rtl8168() { "rtl8168" } else { "e1000" },
         nvme_pret as u8,
     );
-    match persist_disque {
-        Some(restaures) => crate::serial_println!(
-            "BOUCHAUD_STAGE2_INSTALLE persist=nvme restaures={}", restaures
-        ),
-        None => crate::serial_println!("BOUCHAUD_STAGE2_LIVE persist=ram"),
-    }
+    // Le systeme demarre TOUJOURS en live. La persistance, si le disque en
+    // porte une, s'ajoute apres le premier rendu du bureau et le dit
+    // elle-meme (`BOUCHAUD_STAGE2_PERSIST_NVME ... (differe)`).
+    crate::serial_println!(
+        "BOUCHAUD_STAGE2_LIVE persist=ram montage_differe={}",
+        crate::platform::pc::installation::montage_differe_en_attente() as u8,
+    );
     crate::serial_println!("BOUCHAUD_STAGE2_WM_RUNTIME_READY");
 
     if browser_present && data_mounted && network_ready {
@@ -330,11 +352,24 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // First expose the USB evidence while the machine is still BSP-only. If the
     // AP bootstrap itself regresses on physical hardware, the xHCI photos are
     // still obtainable and the two investigations remain separable.
-    crate::platform::pc::physical_diag::show_usb();
+    // LES PAGES DE DIAGNOSTIC NE SONT PLUS SUR LE CHEMIN DU BUREAU.
+    //
+    // Elles retenaient l'amorcage vingt-quatre secondes, et le retenaient avec
+    // `hlt` : sans IRQ0, la derniere page devenait l'ecran definitif de la
+    // machine. Les marqueurs serie et les rapports `/diagnostics` restent
+    // ecrits ; seul l'affichage bloquant est conditionnel.
+    // `physical_diag::montre_les_pages(true)` les rend pour une session de
+    // bring-up.
+    if crate::platform::pc::physical_diag::pages_visibles() {
+        crate::platform::pc::physical_diag::show_usb();
+    }
 
     crate::serial_println!("BOUCHAUD_STAGE2_SMP_PROBE_V31_BEGIN");
     crate::arch::x86_64::smp::init_probe();
-    crate::platform::pc::physical_diag::show_smp();
+    point_de_controle("smp");
+    if crate::platform::pc::physical_diag::pages_visibles() {
+        crate::platform::pc::physical_diag::show_smp();
+    }
 
     // The APs have waited behind SCHEDULER_ENABLED throughout boot/diagnostic.
     // Release them only now, once process/runtime initialization is complete.
@@ -349,6 +384,7 @@ pub fn run(boot: &'static BootInfo) -> ! {
 
     // Vrai desktop -> vrai window_manager -> vrai handle_click.
     crate::serial_println!("[STAGE2] entering real Bouchaud window manager");
+    point_de_controle("bureau");
     crate::gui::desktop::run();
 
     crate::serial_println!("[STAGE2] window manager exited");

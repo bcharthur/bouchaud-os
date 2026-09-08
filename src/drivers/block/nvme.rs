@@ -78,6 +78,28 @@ const FILE_ES: u16 = 1;
 /// c'est-a-dire un transfert de 256 blocs de 512 octets d'un seul coup.
 const REBOND_OCTETS: usize = 128 * 1024;
 
+/// Delai d'une commande d'entree-sortie ordinaire, en millisecondes.
+///
+/// # Pourquoi deux secondes, et non trente
+///
+/// Ce delai n'est pas une patience : c'est la duree pendant laquelle la
+/// machine ENTIERE est arretee. `ETAT` masque les interruptions, donc pendant
+/// l'attente il n'y a ni tick, ni scrutation xHCI, ni clavier, ni souris,
+/// ni rafraichissement de l'ecran. Trente secondes par commande faisaient
+/// d'un disque muet un gel indiscernable d'un plantage -- et le probe GPT
+/// emet des dizaines de commandes.
+///
+/// Un NVMe sain acheve une lecture de secteur en moins d'une milliseconde.
+/// Deux secondes couvrent trois ordres de grandeur de marge ; au-dela, le
+/// disque ne repond pas, et l'attendre plus longtemps n'apprend rien.
+const LIMITE_ES_MS: u64 = 2_000;
+
+/// Delai d'une vidange de cache. Une vidange reelle peut etre longue.
+const LIMITE_VIDANGE_MS: u64 = 5_000;
+
+/// Nombre de delais consecutifs apres lequel le disque est mis hors service.
+const DELAIS_AVANT_HORS_SERVICE: u64 = 2;
+
 /// Volume attribue au disque interne.
 pub const VOLUME_INTERNE: Volume = Volume(2);
 
@@ -87,6 +109,10 @@ static ECRITURES: AtomicU64 = AtomicU64::new(0);
 static VIDANGES: AtomicU64 = AtomicU64::new(0);
 static ERREURS: AtomicU64 = AtomicU64::new(0);
 static DELAIS: AtomicU64 = AtomicU64::new(0);
+/// Delais consecutifs sur le chemin d'entree-sortie.
+static DELAIS_SUITE: AtomicU64 = AtomicU64::new(0);
+/// Le disque a-t-il ete retire du service apres des delais repetes ?
+static HORS_SERVICE: AtomicBool = AtomicBool::new(false);
 
 /// Une file, vue du pilote.
 struct File {
@@ -168,21 +194,15 @@ unsafe fn ecrit64(base: usize, decalage: usize, valeur: u64) {
 
 /// Attend qu'un predicat devienne vrai, au plus `limite_ms`.
 ///
-/// L'horloge vient du TSC et non des IRQ : ce pilote tourne avec les
-/// interruptions masquees, et une attente qui compterait des ticks PIT
-/// n'expirerait jamais.
-fn attend(limite_ms: u64, mut predicat: impl FnMut() -> bool) -> bool {
-    let debut = crate::kernel::timer::monotonic_ns();
-    let limite_ns = limite_ms.saturating_mul(1_000_000);
-    loop {
-        if predicat() {
-            return true;
-        }
-        if crate::kernel::timer::monotonic_ns().wrapping_sub(debut) > limite_ns {
-            return false;
-        }
-        core::hint::spin_loop();
-    }
+/// # L'horloge de ce pilote n'est pas celle des IRQ
+///
+/// Tout ce fichier tourne sous `ETAT`, un `SpinLockIrq` : les interruptions
+/// sont MASQUEES pendant l'attente. Une borne qui compterait des ticks PIT
+/// compterait donc une horloge que l'attente elle-meme a arretee, et la
+/// boucle ne sortirait jamais. `attente_bornee` porte une seconde borne, en
+/// cycles `rdtsc`, qui ne depend ni des IRQ ni d'une calibration reussie.
+fn attend(limite_ms: u64, predicat: impl FnMut() -> bool) -> bool {
+    crate::kernel::timer::attente_bornee(limite_ms, predicat)
 }
 
 // ---------------------------------------------------------------------------
@@ -340,7 +360,7 @@ impl Etat {
         let (prp1, prp2) = self.prp(octets);
         let id = self.identifiant();
         let sqe = commande_transfert(ecriture, id, self.nsid, lba, blocs, prp1, prp2);
-        self.es(&sqe, 30_000).map(|_| ())
+        self.es(&sqe, LIMITE_ES_MS).map(|_| ())
     }
 }
 
@@ -559,6 +579,9 @@ static PILOTE: PiloteNvme = PiloteNvme;
 
 impl PiloteBloc for PiloteNvme {
     fn descripteur(&self) -> Descripteur {
+        if hors_service() {
+            return Descripteur::absent();
+        }
         let garde = ETAT.lock();
         match garde.as_ref() {
             Some(e) => Descripteur {
@@ -576,6 +599,12 @@ impl PiloteBloc for PiloteNvme {
         if requete.genre != Genre::Lecture {
             return Achevement::Erreur;
         }
+        // Le controle vient AVANT le verrou. Prendre `ETAT` masque les
+        // interruptions ; le prendre pour constater qu'on ne s'en servira pas
+        // arreterait la machine le temps de ne rien faire.
+        if hors_service() {
+            return Achevement::Absent;
+        }
         let mut garde = ETAT.lock();
         let Some(etat) = garde.as_mut() else { return Achevement::Absent };
         let taille = etat.format.taille_bloc;
@@ -588,7 +617,11 @@ impl PiloteBloc for PiloteNvme {
             let lot = ((etat.transfert_max / taille).max(1)).min(requete.blocs - faits);
             let octets = lot * taille;
             unsafe {
-                if etat.transfert(false, requete.lba + faits as u64, lot as u32).is_err() {
+                if let Err(raison) = etat.transfert(false, requete.lba + faits as u64, lot as u32)
+                {
+                    if raison == "delai" {
+                        note_delai_es();
+                    }
                     return if faits == 0 { Achevement::Erreur } else { Achevement::Fait(faits) };
                 }
                 core::ptr::copy_nonoverlapping(
@@ -599,11 +632,15 @@ impl PiloteBloc for PiloteNvme {
             }
             faits += lot;
         }
+        note_reussite_es();
         LECTURES.fetch_add(faits as u64, Ordering::Relaxed);
         Achevement::Fait(faits)
     }
 
     fn soumet_ecriture(&self, requete: Requete, donnees: &[u8]) -> Achevement {
+        if hors_service() {
+            return Achevement::Absent;
+        }
         let mut garde = ETAT.lock();
         let Some(etat) = garde.as_mut() else { return Achevement::Absent };
 
@@ -615,12 +652,18 @@ impl PiloteBloc for PiloteNvme {
             let id = etat.identifiant();
             let nsid = etat.nsid;
             let sqe = commande_vidange(id, nsid);
-            return match unsafe { etat.es(&sqe, 30_000) } {
+            return match unsafe { etat.es(&sqe, LIMITE_VIDANGE_MS) } {
                 Ok(_) => {
+                    note_reussite_es();
                     VIDANGES.fetch_add(1, Ordering::Relaxed);
                     Achevement::Fait(0)
                 }
-                Err(_) => Achevement::Erreur,
+                Err(raison) => {
+                    if raison == "delai" {
+                        note_delai_es();
+                    }
+                    Achevement::Erreur
+                }
             };
         }
         if requete.genre != Genre::Ecriture {
@@ -642,12 +685,16 @@ impl PiloteBloc for PiloteNvme {
                     etat.rebond_virt,
                     octets,
                 );
-                if etat.transfert(true, requete.lba + faits as u64, lot as u32).is_err() {
+                if let Err(raison) = etat.transfert(true, requete.lba + faits as u64, lot as u32) {
+                    if raison == "delai" {
+                        note_delai_es();
+                    }
                     return if faits == 0 { Achevement::Erreur } else { Achevement::Fait(faits) };
                 }
             }
             faits += lot;
         }
+        note_reussite_es();
         ECRITURES.fetch_add(faits as u64, Ordering::Relaxed);
         Achevement::Fait(faits)
     }
@@ -730,7 +777,41 @@ pub fn bring_up() -> bool {
 
 /// Le disque interne est-il utilisable ?
 pub fn present() -> bool {
-    PRESENT.load(Ordering::Acquire)
+    PRESENT.load(Ordering::Acquire) && !hors_service()
+}
+
+/// Le disque a-t-il ete retire du service ?
+///
+/// # Pourquoi un disque muet doit cesser d'etre interroge
+///
+/// Un controleur qui ne repond pas ne repond pas UNE fois : il ne repond a
+/// aucune des commandes suivantes. Sans cet etat, chaque lecture repayait le
+/// delai entier, interruptions masquees -- et un probe de table de partitions,
+/// qui lit trente-quatre blocs, multipliait ce delai par trente-quatre.
+///
+/// Deux delais consecutifs suffisent a conclure. Le disque est alors declare
+/// absent, immediatement et pour toutes les requetes suivantes ; le systeme
+/// continue sans persistance au lieu de s'arreter dessus.
+pub fn hors_service() -> bool {
+    HORS_SERVICE.load(Ordering::Acquire)
+}
+
+/// Compte un delai sur le chemin d'entree-sortie, et retire le disque du
+/// service quand ils s'enchainent.
+fn note_delai_es() {
+    let suite = DELAIS_SUITE.fetch_add(1, Ordering::AcqRel) + 1;
+    if suite >= DELAIS_AVANT_HORS_SERVICE && !HORS_SERVICE.swap(true, Ordering::AcqRel) {
+        crate::serial_println!(
+            "BOUCHAUD_NVME_HORS_SERVICE delais_consecutifs={} raison=aucun-achevement",
+            suite
+        );
+        crate::kernel::dmesg::log("nvme: disque interne muet, retire du service");
+    }
+}
+
+/// Une commande d'entree-sortie a abouti : la serie de delais est rompue.
+fn note_reussite_es() {
+    DELAIS_SUITE.store(0, Ordering::Release);
 }
 
 /// Compteurs, pour le diagnostic.
@@ -746,6 +827,9 @@ pub fn stats() -> (u64, u64, u64, u64, u64) {
 
 /// Capacite du disque interne en blocs et taille de bloc.
 pub fn geometrie() -> Option<(u64, usize)> {
+    if hors_service() {
+        return None;
+    }
     let garde = ETAT.lock();
     garde.as_ref().map(|e| (e.blocs, e.format.taille_bloc))
 }

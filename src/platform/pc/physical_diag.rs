@@ -14,15 +14,47 @@ const SMP_PAGE_MS: u64 = 8_000;
 const MAX_LOG_LINES: usize = 55;
 const MAX_COLS: usize = 118;
 
+/// Les pages de diagnostic sont-elles affichees pendant l'amorcage ?
+///
+/// # Pourquoi elles ne le sont plus par defaut
+///
+/// Ces pages retenaient l'amorcage vingt-quatre secondes avant le bureau, et
+/// elles le retenaient avec `hlt`. Un `hlt` ne rend la main que sur une
+/// interruption : le jour ou IRQ0 n'est pas delivree -- PIC masque par le
+/// micrologiciel, minuterie routee ailleurs --, la boucle ne se reveille
+/// jamais et la machine reste sur la page de diagnostic, definitivement.
+///
+/// L'instrumentation reste entiere : les marqueurs serie sont ecrits dans
+/// tous les cas, et les rapports sont deposes dans `/diagnostics`. Seul
+/// l'affichage bloquant est retire du chemin du bureau. `montre_les_pages`
+/// le rend a la demande pour une session de bring-up.
+static PAGES_VISIBLES: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Redonne les pages de diagnostic bloquantes a l'amorcage.
+pub fn montre_les_pages(oui: bool) {
+    PAGES_VISIBLES.store(oui, core::sync::atomic::Ordering::Release);
+}
+
+/// Les pages bloquantes sont-elles demandees ?
+pub fn pages_visibles() -> bool {
+    PAGES_VISIBLES.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Attend jusqu'a une echeance, sans jamais pouvoir attendre indefiniment.
+///
+/// Le `hlt` a disparu : il ne se reveille que sur interruption, et une page
+/// de diagnostic n'a pas a dependre de la livraison d'IRQ0 pour se terminer.
+/// La scrutation xHCI reste dans la boucle -- c'est elle qui garde le clavier
+/// et la souris vivants pendant l'affichage.
 fn wait_until(deadline_ms: u64, poll_usb: bool) {
-    while crate::kernel::timer::monotonic_ms() < deadline_ms {
+    let restant = deadline_ms.saturating_sub(crate::kernel::timer::monotonic_ms());
+    crate::kernel::timer::attente_bornee(restant, || {
         if poll_usb {
             crate::drivers::xhci_active::poll();
         }
-        // PIT/HPET IRQ wakes us; on an active HID this also keeps the transfer
-        // ring serviced without burning a full core in a spin loop.
-        x86_64::instructions::hlt();
-    }
+        crate::kernel::timer::monotonic_ms() >= deadline_ms
+    });
 }
 
 fn ascii_line(input: &str, max: usize) -> String {
@@ -232,7 +264,7 @@ pub fn show_usb() {
     let start = crate::kernel::timer::monotonic_ms();
     let deadline = start.saturating_add(USB_LIVE_MS);
     let mut next_redraw = start;
-    while crate::kernel::timer::monotonic_ms() < deadline {
+    crate::kernel::timer::attente_bornee(USB_LIVE_MS, || {
         crate::drivers::xhci_active::poll();
         let now = crate::kernel::timer::monotonic_ms();
         if now >= next_redraw {
@@ -240,8 +272,8 @@ pub fn show_usb() {
             gfx::present();
             next_redraw = now.saturating_add(200);
         }
-        x86_64::instructions::hlt();
-    }
+        now >= deadline
+    });
 
     let lines = filtered_lines(relevant_usb);
     draw_log_page(

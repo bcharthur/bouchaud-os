@@ -532,8 +532,18 @@ fn boucle() {
     let mut derniere_jauge = 0u64;
     // BOUCHAUD_GUI_CHAINE_ENTREE_LFB_V1 : voir `gui::chaine`.
     let mut veilleur = Veilleur::neuf();
+    // Tours du bureau. Il sert au montage DIFFERE du disque interne : la
+    // persistance ne doit pas etre tentee avant que l'utilisateur ait vu son
+    // bureau -- voir `installation::differe_le_montage`.
+    let mut tours: u64 = 0;
 
     while !quit {
+        tours = tours.saturating_add(1);
+        // Le bureau est peint depuis deux tours : la persistance peut etre
+        // tentee. Une seule fois, et bornee par le pilote bloc.
+        if tours == 3 {
+            crate::platform::pc::installation::execute_le_montage_differe();
+        }
         // BOUCHAUD_GUI_EVENT_DRIVEN_V1
         //
         // Le billet est pris AVANT toute lecture d'etat, et c'est tout

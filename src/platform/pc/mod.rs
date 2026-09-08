@@ -12,3 +12,4 @@ pub mod hardware_probe;
 pub mod hardware_facts;
 pub mod installation;
 pub mod physical_diag;
+pub mod ecran_faute;

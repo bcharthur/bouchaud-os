@@ -25,6 +25,7 @@ DISPOSITION = RACINE / "src/platform/pc/installation/disposition.rs"
 PERSISTANCE = RACINE / "src/fs/persistance.rs"
 COMMANDES = RACINE / "src/shell/commands.rs"
 STAGE2 = RACINE / "src/platform/pc/stage2.rs"
+BUREAU = RACINE / "src/gui/window_manager.rs"
 BUILDER = RACINE / "tools/reference/uefi-image-builder/src/main.rs"
 STAGE_PS = RACINE / "tools/reference/stage-install-payload.ps1"
 PREPARE_PS = RACINE / "tools/reference/prepare-reference-ladybird.ps1"
@@ -362,16 +363,54 @@ def regle_chaine_de_construction(builder, stage_ps, prepare_ps, fautes):
         )
 
 
-def regle_montage_au_demarrage(stage2, fautes):
-    """Une machine installee monte sa persistance sur le disque."""
-    if "monte_le_systeme_installe()" not in stage2:
+def regle_montage_differe(stage2, install, bureau, fautes):
+    """Une machine installee monte sa persistance -- APRES le bureau.
+
+    La regle a change de forme, pas d'objectif. Elle exigeait que l'amorcage
+    monte lui-meme le systeme installe ; c'est ce qui faisait dependre le
+    premier affichage d'un disque dont on ne sait rien. Un NVMe qui n'acheve
+    pas ses commandes n'echouait pas, il faisait ATTENDRE, interruptions
+    masquees, une commande apres l'autre -- et l'utilisateur voyait un ecran
+    fige, sans clavier ni souris, avant tout bureau.
+
+    Ce qui reste exige : la persistance EST montee. Elle l'est simplement
+    depuis le bureau, une fois la premiere image rendue. Les trois maillons
+    sont verifies, parce qu'en casser un seul rendrait la machine RAM-only
+    apres installation sans qu'aucun test ne le dise.
+    """
+    if "monte_le_systeme_installe()" in stage2:
         fautes.append(
-            "stage2.rs : le systeme installe n'est plus monte au demarrage ; la "
-            "machine resterait en RAM-only apres l'installation."
+            "stage2.rs : le systeme installe est de nouveau monte PENDANT "
+            "l'amorcage ; un disque muet y bloque le premier affichage."
         )
-    if "persistance::monte()" not in stage2:
+    if "differe_le_montage()" not in stage2:
         fautes.append(
-            "stage2.rs : la persistance n'est plus montee sur le disque interne."
+            "stage2.rs : le montage du systeme installe n'est plus demande ; "
+            "la machine resterait en RAM-only apres l'installation."
+        )
+
+    differe = corps(install, "pub fn execute_le_montage_differe(")
+    if differe is None:
+        fautes.append(
+            "installation.rs : execute_le_montage_differe() a disparu ; plus "
+            "rien ne monte le systeme installe."
+        )
+    else:
+        if "monte_le_systeme_installe()" not in differe:
+            fautes.append(
+                "installation.rs : le montage differe ne monte plus le systeme "
+                "installe."
+            )
+        if "persistance::monte()" not in differe:
+            fautes.append(
+                "installation.rs : le montage differe ne restaure plus la "
+                "persistance."
+            )
+
+    if "execute_le_montage_differe()" not in bureau:
+        fautes.append(
+            "window_manager.rs : le bureau n'execute plus le montage differe ; "
+            "il serait demande et jamais fait."
         )
 
 
@@ -449,6 +488,7 @@ def regle_verification_externe(fautes):
 def main():
     fautes = []
     for chemin in (
+        BUREAU,
         INSTALL, DISPOSITION, PERSISTANCE, COMMANDES, STAGE2, BUILDER,
         STAGE_PS, PREPARE_PS, TEST,
     ):
@@ -467,6 +507,7 @@ def main():
     builder = sans_commentaires(BUILDER.read_text(encoding="utf-8"))
     stage_ps = STAGE_PS.read_text(encoding="utf-8")
     prepare_ps = PREPARE_PS.read_text(encoding="utf-8")
+    bureau = sans_commentaires(BUREAU.read_text(encoding="utf-8"))
 
     regle_zone_de_persistance(disposition, persistance, fautes)
     regle_esp_plafonnee(disposition, fautes)
@@ -477,7 +518,7 @@ def main():
     regle_fenetre_avant_enregistrement(install, fautes)
     regle_fenetre_bornee(install, fautes)
     regle_chaine_de_construction(builder, stage_ps, prepare_ps, fautes)
-    regle_montage_au_demarrage(stage2, fautes)
+    regle_montage_differe(stage2, install, bureau, fautes)
     regle_verification_externe(fautes)
 
     if fautes:

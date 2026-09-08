@@ -520,6 +520,12 @@ fn ecrit_zone<S: Support>(
 /// c'est exactement ce pour quoi elle existe -- et le DIT dans le second
 /// membre du couple, parce qu'un disque qui ne demarre que par sa secours est
 /// un disque abime dont il faut savoir qu'il l'est.
+/// Entrees de table qu'un probe accepte de lire.
+///
+/// La specification en garantit 128. Le plafond est genereux et FINI : sans
+/// lui, un champ corrompu decide seul du cout du demarrage.
+pub const ENTREES_MAX: u32 = 512;
+
 pub fn lit_table<S: Support>(support: &mut S) -> Result<(Vec<Partition>, bool), Erreur> {
     let taille_bloc = support.taille_bloc();
     let blocs_disque = support.blocs();
@@ -545,6 +551,21 @@ pub fn lit_table<S: Support>(support: &mut S) -> Result<(Vec<Partition>, bool), 
     };
 
     if entete.taille_entree as usize != TAILLE_ENTREE || entete.entrees == 0 {
+        return Err(Erreur::SecoursIncoherente);
+    }
+    // ENTREES_MAX borne ce que la table peut couter.
+    //
+    // `entrees` vient du DISQUE. Une en-tete dont la somme de controle est
+    // juste peut malgre tout annoncer quatre milliards d'entrees -- un disque
+    // d'une autre machine, une table a moitie ecrite. Sans borne, la ligne
+    // suivante demande une allocation de plusieurs gigaoctets, puis emet
+    // autant de lectures qu'il faut de blocs pour la remplir.
+    //
+    // La specification UEFI en garantit 128 ; personne n'en publie plus de
+    // quelques centaines. Au-dela, la table est refusee -- ce qui est le bon
+    // resultat : une table qu'on ne sait pas lire n'est pas une table qu'on
+    // doit lire lentement.
+    if entete.entrees > ENTREES_MAX {
         return Err(Erreur::SecoursIncoherente);
     }
     let octets = entete.entrees as usize * TAILLE_ENTREE;
