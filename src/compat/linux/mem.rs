@@ -73,7 +73,46 @@ pub const MAP_NORESERVE: u32 = 0x4000;
 pub const MAP_POPULATE: u32 = 0x8000;
 pub const MAP_FIXED_NOREPLACE: u32 = 0x100000;
 
+/// Demandes refusees parce qu'elles violaient W^X.
+///
+/// Un compteur, et pas seulement un refus : une machine qui en accumule dit
+/// qu'un programme du systeme demande une page inscriptible et executable, et
+/// c'est une chose qu'on veut SAVOIR, pas seulement empecher.
+static WX_REFUSES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Combien de demandes ont ete refusees pour violation de W^X.
+pub fn wx_refuses() -> u64 {
+    WX_REFUSES.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Traduit `PROT_*` en drapeaux de table de pages.
+///
+/// Rend `None` quand la demande viole W^X : une page a la fois inscriptible et
+/// executable est exactement ce dont une injection de code a besoin, et rien
+/// de plus. La sequence « ecrire, puis rendre executable » reste possible ;
+/// c'est la COEXISTENCE des deux droits qui est refusee.
+///
+/// Le refus est explicite, et pas une correction silencieuse : retirer
+/// discretement l'execution rendrait une page qui n'est pas celle qu'on a
+/// demandee, et l'appelant s'en apercevrait par une faute loin de la cause.
+pub fn prot_to_flags_verifie(prot: u32) -> Option<u64> {
+    if crate::kernel::security::wx::prot_viole_wx(prot, PROT_WRITE, PROT_EXEC) {
+        WX_REFUSES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        crate::serial_println!(
+            "BOUCHAUD_WX_REFUSE prot={:#x} raison=inscriptible-et-executable",
+            prot
+        );
+        return None;
+    }
+    Some(prot_to_flags(prot))
+}
+
+/// Traduit `PROT_*` en drapeaux de table de pages, sans controle W^X.
+///
+/// Reserve aux appelants qui composent eux-memes une demande dont ils
+/// savent qu'elle ne porte pas les deux droits -- `PROT_READ | PROT_WRITE`
+/// pour une pile, par exemple. Tout ce qui vient de l'utilisateur passe par
+/// [`prot_to_flags_verifie`].
 pub fn prot_to_flags(prot: u32) -> u64 {
     if prot == PROT_NONE {
         return vmm::PTE_PRESENT | vmm::PTE_NO_EXEC;
@@ -280,7 +319,9 @@ pub fn sys_mmap(
     };
     let fixed = flags & MAP_FIXED != 0;
 
-    let drapeaux = prot_to_flags(prot);
+    let Some(drapeaux) = prot_to_flags_verifie(prot) else {
+        return -errno::EACCES;
+    };
 
     if flags & MAP_ANONYMOUS == 0 && fd >= 0 {
         if let Some(FdKind::Framebuffer) = &fd_kind {
@@ -488,6 +529,14 @@ pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> i64 {
     if !plage_user_valide(addr, length) {
         return -errno::ENOMEM;
     }
+
+    // W^X, avant toute modification. `mprotect` est la voie la plus directe :
+    // une page deja ecrite qu'on rendrait executable SANS retirer l'ecriture
+    // donne le meme resultat qu'un `mmap` inscriptible et executable, en une
+    // etape de moins.
+    let Some(_) = prot_to_flags_verifie(prot) else {
+        return -errno::EACCES;
+    };
 
     let process_rc = task::current_process();
     let mut process = process_rc.mm.lock();

@@ -1,3 +1,4 @@
+pub mod wx;
 pub mod access;
 pub mod audit;
 pub mod capability;

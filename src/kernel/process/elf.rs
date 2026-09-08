@@ -273,11 +273,17 @@ pub fn load_node_lazy(
                 let vaddr = base + ph.vaddr;
                 let page_start = vaddr & !(PAGE_SIZE - 1);
                 let page_end = (vaddr + ph.memsz + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+                // Un segment inscriptible ET executable arrete le chargement.
+                // Le laisser passer ici offrirait la page dont une injection a
+                // besoin, avant meme que le programme demarre.
+                let Some(drapeaux) = page_flags(ph.flags) else {
+                    return Err("segment inscriptible et executable refuse (W^X)");
+                };
                 crate::kernel::vma::overlay(promises, crate::kernel::task::Promesse {
                     id: crate::kernel::vma::nouvelle_identite(),
                     debut: page_start,
                     fin: page_end,
-                    drapeaux: page_flags(ph.flags),
+                    drapeaux,
                     backing: crate::kernel::task::PromesseBacking::File {
                         node,
                         mapping_start: vaddr,
@@ -312,7 +318,19 @@ pub fn load_node_lazy(
 }
 
 /// Traduit les droits `PF_*` d'un segment en drapeaux de table de pages.
-fn page_flags(flags: u32) -> u64 {
+///
+/// Rend `None` pour un segment declare a la fois INSCRIPTIBLE et EXECUTABLE.
+/// Aucune chaine de compilation moderne n'en emet : un binaire qui en porte
+/// un a ete fabrique pour cela, et le charger reviendrait a offrir la page
+/// dont une injection de code a besoin, avant meme que le programme demarre.
+fn page_flags(flags: u32) -> Option<u64> {
+    if crate::kernel::security::wx::segment_viole_wx(flags, PF_W, PF_X) {
+        crate::serial_println!(
+            "BOUCHAUD_WX_REFUSE_SEGMENT flags={:#x} raison=segment-inscriptible-et-executable",
+            flags
+        );
+        return None;
+    }
     let mut value = vmm::PTE_PRESENT | vmm::PTE_USER;
     if flags & PF_W != 0 {
         value |= vmm::PTE_WRITE;
@@ -320,7 +338,7 @@ fn page_flags(flags: u32) -> u64 {
     if flags & PF_X == 0 {
         value |= vmm::PTE_NO_EXEC;
     }
-    value
+    Some(value)
 }
 
 /// Charge une image ELF dans `space`.
@@ -413,10 +431,13 @@ pub fn load(
                     }
                 }
 
+                let Some(drapeaux) = page_flags(ph.flags) else {
+                    return Err("segment inscriptible et executable refuse (W^X)");
+                };
                 if let Some(invalidation) = space.prepare_protect(
                     page_start,
                     page_end - page_start,
-                    page_flags(ph.flags),
+                    drapeaux,
                 ) {
                     // L'espace ELF est encore inactif: execute() ne cible
                     // aucun CPU et n'attend donc jamais sous le borrow appelant.
