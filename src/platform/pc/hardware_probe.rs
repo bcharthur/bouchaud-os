@@ -31,7 +31,7 @@ fn driver_binding(dev: &crate::arch::x86_64::pci::PciDevice) -> &'static str {
         (0x8086, 0x100E, _, _, _) => "e1000: implemented",
         (_, _, 0x0C, 0x03, 0x30) => "xhci: probe-only foundation; runtime driver missing",
         (_, _, 0x03, _, _) => "display: UEFI GOP firmware framebuffer",
-        (_, _, 0x01, 0x08, _) => "nvme: detected, runtime driver missing",
+        (_, _, 0x01, 0x08, _) => "nvme: pilote actif (files admin + ES, scrutation)",
         (_, _, 0x04, _, _) => "audio: disabled in physical Stage2",
         _ => "unbound / generic",
     }

@@ -17,6 +17,8 @@ pub mod block;
 pub mod bloc;
 #[path = "block/disk.rs"]
 pub mod disk;
+#[path = "block/nvme.rs"]
+pub mod nvme;
 #[path = "api/display.rs"]
 pub mod display;
 #[path = "network/e1000.rs"]

@@ -142,6 +142,17 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // Inventaire physique read-only. Les rapports sont crees dans
     // /diagnostics avant les pilotes reseau/USB actifs.
     crate::platform::pc::hardware_probe::run(boot, framebuffer);
+
+    // Le disque interne. C'est lui, et rien d'autre, qui separe un systeme
+    // LIVE d'un systeme INSTALLE : tant que le NVMe n'etait pas pilote, aucune
+    // ecriture ne survivait a une coupure, et le runtime ne POUVAIT etre que
+    // RAM-only. La sonde le detectait deja et ecrivait « runtime driver
+    // missing » ; c'etait un constat, pas une fatalite.
+    //
+    // L'echec n'est pas fatal : une machine sans NVMe -- QEMU, une cle seule --
+    // doit continuer de demarrer en live. C'est l'installateur, et lui seul,
+    // qui exige un disque.
+    let nvme_pret = crate::drivers::nvme::bring_up();
     let xhci_present =
         if let Some(xhci) = crate::arch::x86_64::pci::find_xhci() {
             crate::serial_println!(
@@ -202,12 +213,13 @@ pub fn run(boot: &'static BootInfo) -> ! {
     let network_ready = crate::net::external_enabled();
 
     crate::serial_println!(
-        "[STAGE2] runtime users=ready ramfs=ready process=ready bsp=1 data={} source={} persist={} net={} nic={}",
+        "[STAGE2] runtime users=ready ramfs=ready process=ready bsp=1 data={} source={} persist={} net={} nic={} nvme={}",
         data_mounted as u8,
         data_source,
         persist_restored,
         network_ready as u8,
         if crate::drivers::e1000::using_rtl8168() { "rtl8168" } else { "e1000" },
+        nvme_pret as u8,
     );
     crate::serial_println!("BOUCHAUD_STAGE2_WM_RUNTIME_READY");
 
