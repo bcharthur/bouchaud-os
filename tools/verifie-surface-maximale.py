@@ -55,7 +55,12 @@ RECT_MAXIMISE = re.compile(
     r"Rect::new\(\s*0\s*,\s*BAR_H as i32\s*,[^)]*(?:WIDTH|fb::WIDTH)[^)]*\)",
     re.S,
 )
-DEFINITION = "pub(crate) const fn rect_maximise()"
+# On cherche la FONCTION, pas ses modificateurs. Elle a cesse d'etre `const`
+# le jour ou elle a du lire la resolution du micrologiciel, et la regle est
+# restee sur l'ancienne forme : elle rapportait « defini 0 fois » sur une
+# fonction bien presente, donc elle etait rouge, donc ignoree. Ce qu'elle
+# protege est l'UNICITE de la definition, et cela n'a pas change.
+DEFINITION = "fn rect_maximise()"
 
 LANCE = re.compile(r"Client::lance\((.*?)\)\s*\{", re.S)
 

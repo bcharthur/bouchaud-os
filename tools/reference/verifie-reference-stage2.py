@@ -228,14 +228,38 @@ for call in required_ladybird_calls:
     req(rust_call_present(stage2_code, call),
         f"Stage 2 FINAL V2 n'initialise pas Ladybird: {call}()")
 
+# `arch::x86_64::init()` reste interdit : Stage 2 en fait un SOUS-ENSEMBLE a la
+# main -- GDT, IDT, interruptions, usermode -- et l'appeler en entier
+# rappellerait `pci::init()` a un moment ou le contrat ne le veut pas.
 forbidden_calls = (
     "arch::x86_64::init",
-    "smp::init_probe",
-    "smp::enable_scheduler",
 )
 for call in forbidden_calls:
     req(not rust_call_present(stage2_code, call),
         f"Stage 2 FINAL V2 appelle un sous-systeme hors contrat: {call}()")
+
+# LE SMP N'EST PLUS INTERDIT, IL EST ORDONNE
+#
+# Cette regle interdisait `smp::init_probe()` et `smp::enable_scheduler()`.
+# Elle datait d'un Stage 2 strictement BSP-only, et le code l'a depassee : la
+# sonde SMP et la liberation des AP y sont maintenant voulues.
+#
+# Une regle qui interdit ce que le code fait exprès ne protege plus rien -- et
+# elle etait rouge, donc ignoree, donc elle ne protegeait plus rien du tout.
+# Ce qui reste vrai, en revanche, et qui compte davantage : les AP attendent
+# derriere `SCHEDULER_ENABLED` pendant tout l'amorcage, et ne sont liberes
+# qu'une fois le runtime pret. Liberes plus tot, ils entreraient dans un
+# ordonnanceur dont les processus n'existent pas encore.
+#
+# L'interdiction devient donc un ORDRE, qui est la propriete qu'on voulait.
+_ancre_runtime = stage2_code.find("kernel::process::init()")
+for call in ("smp::init_probe", "smp::enable_scheduler"):
+    position = stage2_code.find(call)
+    req(position >= 0,
+        f"Stage 2 ne demarre plus le SMP: {call}() a disparu")
+    req(_ancre_runtime >= 0 and position > _ancre_runtime,
+        f"Stage 2 appelle {call}() AVANT que le runtime soit pret ; les AP "
+        f"entreraient dans un ordonnanceur dont les processus n'existent pas")
 print("BOUCHAUD_STAGE2_LADYBIRD_CALL_SCAN_OK")
 
 req("stage2_preview::interactive_loop" not in stage2_code,
