@@ -428,6 +428,22 @@ pub fn load(
                         let chunk = core::cmp::min(zeros.len() as u64, bss_len - written);
                         space.write(bss_start + written, &zeros[..chunk as usize]);
                         written += chunk;
+                        // POINT SUR DE PREEMPTION.
+                        //
+                        // Un `.bss` de plusieurs dizaines de mebioctets --
+                        // Ladybird en a un -- se met a zero mebioctet par
+                        // mebioctet, a l'interieur d'un seul `execve`. Sans ce
+                        // point, la tache tient son coeur pendant toute la
+                        // remise a zero : c'est precisement l'instant ou
+                        // l'utilisateur vient de double-cliquer, donc celui ou
+                        // le bureau doit rester vivant.
+                        //
+                        // L'espace d'adressage construit ici est celui du
+                        // FUTUR processus, pas du notre : personne d'autre ne
+                        // le regarde. Et `safe_point()` refuse de commuter si
+                        // un verrou est tenu -- il ne peut rendre la main qu'a
+                        // un moment ou elle etait deja rendable.
+                        let _ = crate::kernel::scheduler::preempt::safe_point();
                     }
                 }
 

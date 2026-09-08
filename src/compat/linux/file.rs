@@ -698,6 +698,20 @@ pub fn sys_readv(fd: i32, iov: u64, count: usize) -> i64 {
         if len == 0 {
             continue;
         }
+        // POINT SUR DE PREEMPTION.
+        //
+        // Un `readv`/`writev` de trente vecteurs est UN appel systeme, et le
+        // noyau n'en avait qu'un seul point de preemption : son retour. Une
+        // tache pouvait donc tenir son coeur pendant la totalite du transfert,
+        // et c'est exactement ce que fait un navigateur qui vide ses tampons.
+        //
+        // `safe_point()` est auto-garde : il REFUSE de commuter si le gros
+        // verrou est tenu, si une section critique de rang est ouverte, si la
+        // preemption est desactivee, si les interruptions sont coupees ou si
+        // l'on est en contexte d'interruption. L'appeler entre deux vecteurs ne
+        // peut donc pas rendre la main au mauvais moment ; il ne peut que la
+        // rendre a un moment ou elle etait deja rendable.
+        let _ = crate::kernel::scheduler::preempt::safe_point();
         let result = sys_read(fd, base, len);
         if result < 0 {
             return if total > 0 { total } else { result };
@@ -725,6 +739,20 @@ pub fn sys_writev(fd: i32, iov: u64, count: usize) -> i64 {
         if len == 0 {
             continue;
         }
+        // POINT SUR DE PREEMPTION.
+        //
+        // Un `readv`/`writev` de trente vecteurs est UN appel systeme, et le
+        // noyau n'en avait qu'un seul point de preemption : son retour. Une
+        // tache pouvait donc tenir son coeur pendant la totalite du transfert,
+        // et c'est exactement ce que fait un navigateur qui vide ses tampons.
+        //
+        // `safe_point()` est auto-garde : il REFUSE de commuter si le gros
+        // verrou est tenu, si une section critique de rang est ouverte, si la
+        // preemption est desactivee, si les interruptions sont coupees ou si
+        // l'on est en contexte d'interruption. L'appeler entre deux vecteurs ne
+        // peut donc pas rendre la main au mauvais moment ; il ne peut que la
+        // rendre a un moment ou elle etait deja rendable.
+        let _ = crate::kernel::scheduler::preempt::safe_point();
         let result = sys_write(fd, base, len);
         if result < 0 {
             return if total > 0 { total } else { result };
