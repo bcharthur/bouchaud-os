@@ -32,7 +32,7 @@ L'inventaire actuel : **68 garde-fous**, **59 suites de tests hote Rust**,
 | 7 | ABI Bouchaud + IPC natif | 🟡 | Les primitives existent ; Linux reste la personnalite dominante. |
 | 8 | Ladybird comme produit | 🔵 | Un renderer, pas de sandbox, pas de WPT. |
 | 9 | Reseau NG | 🔵 | Retransmission et RTO prouves ; pas d'IPv6, pas de zero-copie. |
-| 10 | Plateforme materielle de reference | 🟡 | **Le plus avance de tous** : UEFI, xHCI, NVMe, installation. Pas d'audio, pas de Wi-Fi, pas de suspend. |
+| 10 | Plateforme materielle de reference | 🟡 | **Le plus avance de tous** : UEFI, xHCI (concentrateurs traverses), NVMe, installation. Pas d'audio HDA, pas de Wi-Fi, pas de suspend. |
 | 11 | Fiabilite / CI / release | 🔵 | **`main` n'est pas protege** ; fuzzing sur un seul objet ; budgets non tenus faute de campagne. |
 | 12 | Polish produit | ⚪ | Ni HiDPI, ni IME, ni accessibilite, ni glisser-deposer, ni mise a jour atomique. |
 
@@ -244,10 +244,25 @@ par des outils etrangers, partition systeme persistante.
 `test_hid.rs` (26), `test_installation.rs` (16), `test_gpt.rs`, `test_fat32.rs`,
 `verifie-matrice-materielle.py`, dix garde-fous `tools/reference/`.
 
+Depuis ce lot, l'entree est **complete de bout en bout** : les SMI du
+micrologiciel sont desarmes apres la prise du semaphore -- sans quoi le BIOS
+continue d'intercepter chaque evenement USB et le clavier « marche dans le
+BIOS, pas dans le systeme » --, le repli PS/2 se decide genre par genre sur ce
+qui a REPONDU et non sur la presence d'un controleur, et **les concentrateurs
+sont traverses** : chaine de route, bit `Hub`, transactionneur, requetes de
+classe. Un clavier branche sur un hub repond. La commande `lsusb` rejoue
+l'arbre depuis l'etat, indentation comprise.
+
+*Preuve supplementaire :* `test_concentrateur.rs` (35), `verifie-entree-trigkey.py`
+(12 mutations attrapees), `verifie-concentrateurs-usb.py` (17 mutations
+attrapees), et surtout `tools/ci/run_usb_arbre.sh` -- un clavier ET une souris
+branches DERRIERE un concentrateur sous QEMU, rien en direct, dans
+`integration-gate`.
+
 **Ce qui manque.** Audio : seulement AC97, pas de HDA. **Pas de Wi-Fi.** Pas de
-batterie, pas de temperatures, **pas de suspend/resume**. Pas de GPU. Les
-peripheriques derriere un concentrateur USB ne sont pas enumeres -- le manque
-est desormais **nomme dans le journal** plutot que silencieux.
+batterie, pas de temperatures, **pas de suspend/resume**. Pas de GPU. Au-dela
+de cinq concentrateurs en cascade la chaine de route xHCI est pleine -- limite
+du materiel, nommee dans le journal.
 
 ## 11 — Fiabilite / CI / release engineering 🔵
 
