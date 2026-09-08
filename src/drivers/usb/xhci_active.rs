@@ -75,6 +75,14 @@ static CONTROL_OK: AtomicUsize = AtomicUsize::new(0);
 static USB_DEVICES: AtomicUsize = AtomicUsize::new(0);
 static HID_KEYBOARDS: AtomicUsize = AtomicUsize::new(0);
 static HID_MICE: AtomicUsize = AtomicUsize::new(0);
+// Le decodage pur -- tables de touches, differences de rapports,
+// disposition de la souris -- vit a part et est mis a l'epreuve sur l'hote.
+#[path = "hid/decodage.rs"]
+mod hid;
+
+/// Classe d'un concentrateur USB, dans le descripteur de peripherique.
+const CLASSE_CONCENTRATEUR: u8 = 0x09;
+
 // BOUCHAUD_XHCI_HID_TRANSPORT_V33
 static HID_POLLS: AtomicUsize = AtomicUsize::new(0);
 static HID_TRANSFER_EVENTS: AtomicUsize = AtomicUsize::new(0);
@@ -84,6 +92,8 @@ static HID_MOUSE_REPORTS: AtomicUsize = AtomicUsize::new(0);
 static HID_TRANSFER_ERRORS: AtomicUsize = AtomicUsize::new(0);
 static HID_REARMS: AtomicUsize = AtomicUsize::new(0);
 static HID_KICKS: AtomicUsize = AtomicUsize::new(0);
+/// Concentrateurs vus et NON traverses.
+static CONCENTRATEURS: AtomicUsize = AtomicUsize::new(0);
 static HID_CONTROL_POLLS: AtomicUsize = AtomicUsize::new(0);
 static HID_CONTROL_REPORTS: AtomicUsize = AtomicUsize::new(0);
 static HID_CONTROL_FAILS: AtomicUsize = AtomicUsize::new(0);
@@ -197,8 +207,8 @@ struct HidEndpoint {
     buffer_phys: u64,
     buffer_virt: usize,
     buffer_len: usize,
-    last_modifiers: u8,
-    last_keys: [u8; 6],
+    /// L'etat du clavier entre deux rapports, tenu par le decodeur pur.
+    clavier: hid::EtatClavier,
 }
 
 const EMPTY_RING: ProducerRing = ProducerRing {
@@ -221,8 +231,7 @@ const EMPTY_HID_ENDPOINT: HidEndpoint = HidEndpoint {
     buffer_phys: 0,
     buffer_virt: 0,
     buffer_len: 0,
-    last_modifiers: 0,
-    last_keys: [0; 6],
+    clavier: hid::EtatClavier { modificateurs: 0, touches: [0; 6] },
 };
 
 struct Controller {
@@ -983,11 +992,7 @@ fn parse_hid_descriptors(bytes: &[u8], output: &mut [HidDescriptor]) -> (u8, usi
                 let address = bytes[offset + 2];
                 let attributes = bytes[offset + 3] & 0x03;
                 if address & 0x80 != 0 && attributes == 3 {
-                    let kind = match (current_subclass, current_protocol) {
-                        (1, 1) => 1,
-                        (1, 2) => 2,
-                        _ => 0,
-                    };
+                    let kind = hid::genre_interface(current_subclass, current_protocol);
                     output[count] = HidDescriptor {
                         interface: current_interface,
                         subclass: current_subclass,
@@ -1123,8 +1128,7 @@ fn configure_hids(
             buffer_phys,
             buffer_virt,
             buffer_len,
-            last_modifiers: 0,
-            last_keys: [0; 6],
+            clavier: hid::EtatClavier { modificateurs: 0, touches: [0; 6] },
         };
         installed += 1;
     }
@@ -1292,6 +1296,30 @@ fn enumerate_port(controller: &mut Controller, port_index: usize) {
             read_volatile((device.control_virt + 11) as *const u8),
         ])
     };
+
+    // UN CONCENTRATEUR N'EST PAS UN PERIPHERIQUE QU'ON IGNORE EN SILENCE
+    //
+    // L'enumeration ne descend pas derriere un concentrateur : cela demande la
+    // chaine de route dans le contexte de slot, le transactionneur pour les
+    // peripheriques lents, et les requetes de classe du concentrateur --
+    // c'est-a-dire du code qu'on ne peut ni exercer ici ni verifier sans le
+    // materiel qui produit chaque cas.
+    //
+    // Ce qu'on peut faire, et qui compte, c'est ne pas laisser ce manque
+    // INVISIBLE. Un clavier branche sur un concentrateur ne repond pas, et
+    // sans cette ligne le journal ne dit rien : on chercherait le defaut dans
+    // le code du clavier, qui marche. Avec elle, la cause est nommee.
+    let classe_peripherique =
+        unsafe { read_volatile((device.control_virt + 4) as *const u8) };
+    if classe_peripherique == CLASSE_CONCENTRATEUR {
+        CONCENTRATEURS.fetch_add(1, Ordering::Relaxed);
+        crate::serial_println!(
+            "BOUCHAUD_USB_CONCENTRATEUR port={} slot={} vid={:04x} pid={:04x} \
+             non_traverse=1 consequence=les-peripheriques-derriere-ce-\
+             concentrateur-ne-sont-pas-enumeres",
+            port, device.slot_id, vendor, product,
+        );
+    }
 
     let config_head = match get_descriptor(controller, &mut device, 2, 0, 9) {
         Ok(len) if len >= 9 => len,
@@ -1662,68 +1690,38 @@ fn init_controller(dev: PciDevice) -> Result<(Controller, usize), &'static str> 
     }
 }
 
-fn report_payload<'a>(endpoint: &HidEndpoint, data: &'a [u8]) -> Option<&'a [u8]> {
-    if endpoint.report_id == 0 {
-        return Some(data);
-    }
-    if data.first().copied()? != endpoint.report_id {
-        return None;
-    }
-    Some(&data[1..])
-}
 
+
+/// Traduit un rapport de clavier et pousse les codes PS/2.
+///
+/// La difference entre deux rapports, la table des touches et l'ordre des
+/// evenements vivent dans `hid::decodage`, qui ne touche rien et que
+/// `tools/platform/test_hid.rs` met a l'epreuve touche par touche. Ici il ne
+/// reste que la remise a la pile d'entree.
 fn process_keyboard_report(endpoint: &mut HidEndpoint, data: &[u8]) -> bool {
-    let Some(data) = report_payload(endpoint, data) else { return false; };
-    if data.len() < 8 {
+    let mut sortie = [hid::Evenement { code: 0, etendu: false, appui: false };
+        hid::EVENEMENTS_MAX];
+    let Some(n) = hid::evenements_clavier(
+        &mut endpoint.clavier,
+        endpoint.report_id,
+        data,
+        &mut sortie,
+    ) else {
         return false;
+    };
+    for evenement in sortie.iter().take(n) {
+        push_ps2(evenement.code, evenement.etendu, evenement.appui);
     }
-    let modifiers = data[0];
-    let mut keys = [0u8; 6];
-    keys.copy_from_slice(&data[2..8]);
-
-    for bit in 0..8u8 {
-        let mask = 1u8 << bit;
-        let old = endpoint.last_modifiers & mask != 0;
-        let new = modifiers & mask != 0;
-        if old != new {
-            if let Some((code, extended)) = modifier_ps2(bit) {
-                push_ps2(code, extended, new);
-            }
-        }
-    }
-
-    for old in endpoint.last_keys.iter().copied() {
-        if old >= 4 && !keys.contains(&old) {
-            if let Some((code, extended)) = usage_ps2(old) {
-                push_ps2(code, extended, false);
-            }
-        }
-    }
-    for key in keys.iter().copied() {
-        if key >= 4 && !endpoint.last_keys.contains(&key) {
-            if let Some((code, extended)) = usage_ps2(key) {
-                push_ps2(code, extended, true);
-            }
-        }
-    }
-
-    endpoint.last_modifiers = modifiers;
-    endpoint.last_keys = keys;
     true
 }
 
 fn process_mouse_report(endpoint: &HidEndpoint, data: &[u8]) -> bool {
-    let Some(data) = report_payload(endpoint, data) else { return false; };
-    if data.len() < 3 {
+    let Some(souris) = hid::decode_souris(endpoint.report_id, data) else {
         return false;
-    }
-    // Boot layout and the overwhelming majority of report-only desktop mice:
-    // buttons, X, Y, optional wheel. Report-ID wrappers are stripped above.
-    let buttons = data[0] & 0x07;
-    let dx = data[1] as i8;
-    let dy = data[2] as i8;
-    let wheel = if data.len() >= 4 { data[3] as i8 } else { 0 };
-    crate::drivers::mouse::inject_usb_report(buttons, dx, dy, wheel);
+    };
+    crate::drivers::mouse::inject_usb_report(
+        souris.boutons, souris.dx, souris.dy, souris.roue,
+    );
     true
 }
 
@@ -1877,60 +1875,9 @@ fn push_ps2(code: u8, extended: bool, pressed: bool) {
     crate::drivers::keyboard::push_scancode(if pressed { code } else { code | 0x80 });
 }
 
-fn modifier_ps2(bit: u8) -> Option<(u8, bool)> {
-    Some(match bit {
-        0 => (0x1d, false), // Left Ctrl
-        1 => (0x2a, false), // Left Shift
-        2 => (0x38, false), // Left Alt
-        3 => (0x5b, true),  // Left GUI
-        4 => (0x1d, true),  // Right Ctrl
-        5 => (0x36, false), // Right Shift
-        6 => (0x38, true),  // Right Alt / AltGr
-        7 => (0x5c, true),  // Right GUI
-        _ => return None,
-    })
-}
 
-fn usage_ps2(usage: u8) -> Option<(u8, bool)> {
-    let result = match usage {
-        0x04 => (0x1e, false), 0x05 => (0x30, false), 0x06 => (0x2e, false),
-        0x07 => (0x20, false), 0x08 => (0x12, false), 0x09 => (0x21, false),
-        0x0a => (0x22, false), 0x0b => (0x23, false), 0x0c => (0x17, false),
-        0x0d => (0x24, false), 0x0e => (0x25, false), 0x0f => (0x26, false),
-        0x10 => (0x32, false), 0x11 => (0x31, false), 0x12 => (0x18, false),
-        0x13 => (0x19, false), 0x14 => (0x10, false), 0x15 => (0x13, false),
-        0x16 => (0x1f, false), 0x17 => (0x14, false), 0x18 => (0x16, false),
-        0x19 => (0x2f, false), 0x1a => (0x11, false), 0x1b => (0x2d, false),
-        0x1c => (0x15, false), 0x1d => (0x2c, false),
-        0x1e => (0x02, false), 0x1f => (0x03, false), 0x20 => (0x04, false),
-        0x21 => (0x05, false), 0x22 => (0x06, false), 0x23 => (0x07, false),
-        0x24 => (0x08, false), 0x25 => (0x09, false), 0x26 => (0x0a, false),
-        0x27 => (0x0b, false),
-        0x28 => (0x1c, false), 0x29 => (0x01, false), 0x2a => (0x0e, false),
-        0x2b => (0x0f, false), 0x2c => (0x39, false), 0x2d => (0x0c, false),
-        0x2e => (0x0d, false), 0x2f => (0x1a, false), 0x30 => (0x1b, false),
-        0x31 | 0x32 => (0x2b, false), 0x33 => (0x27, false), 0x34 => (0x28, false),
-        0x35 => (0x29, false), 0x36 => (0x33, false), 0x37 => (0x34, false),
-        0x38 => (0x35, false), 0x39 => (0x3a, false),
-        0x3a => (0x3b, false), 0x3b => (0x3c, false), 0x3c => (0x3d, false),
-        0x3d => (0x3e, false), 0x3e => (0x3f, false), 0x3f => (0x40, false),
-        0x40 => (0x41, false), 0x41 => (0x42, false), 0x42 => (0x43, false),
-        0x43 => (0x44, false), 0x44 => (0x57, false), 0x45 => (0x58, false),
-        0x47 => (0x46, false),
-        0x49 => (0x52, true), 0x4a => (0x47, true), 0x4b => (0x49, true),
-        0x4c => (0x53, true), 0x4d => (0x4f, true), 0x4e => (0x51, true),
-        0x4f => (0x4d, true), 0x50 => (0x4b, true), 0x51 => (0x50, true),
-        0x52 => (0x48, true),
-        0x53 => (0x45, false), 0x54 => (0x35, true), 0x55 => (0x37, false),
-        0x56 => (0x4a, false), 0x57 => (0x4e, false), 0x58 => (0x1c, true),
-        0x59 => (0x4f, false), 0x5a => (0x50, false), 0x5b => (0x51, false),
-        0x5c => (0x4b, false), 0x5d => (0x4c, false), 0x5e => (0x4d, false),
-        0x5f => (0x47, false), 0x60 => (0x48, false), 0x61 => (0x49, false),
-        0x62 => (0x52, false), 0x63 => (0x53, false),
-        _ => return None,
-    };
-    Some(result)
-}
+
+
 
 pub fn is_active() -> bool {
     ACTIVE.load(Ordering::Acquire)
@@ -1962,6 +1909,14 @@ pub fn hid_keyboards() -> usize {
 
 pub fn hid_mice() -> usize {
     HID_MICE.load(Ordering::Acquire)
+}
+
+/// Concentrateurs vus sur les ports racine et non traverses.
+///
+/// Un nombre non nul explique a lui seul un clavier qui ne repond pas : il est
+/// derriere, et l'enumeration ne descend pas.
+pub fn concentrateurs_non_traverses() -> usize {
+    CONCENTRATEURS.load(Ordering::Acquire)
 }
 
 pub fn hid_polling() -> bool {
@@ -2053,6 +2008,7 @@ pub fn bring_up() -> ActiveSummary {
     HID_TRANSFER_ERRORS.store(0, Ordering::Release);
     HID_REARMS.store(0, Ordering::Release);
     HID_KICKS.store(0, Ordering::Release);
+    CONCENTRATEURS.store(0, Ordering::Release);
     HID_CONTROL_POLLS.store(0, Ordering::Release);
     HID_CONTROL_REPORTS.store(0, Ordering::Release);
     HID_CONTROL_FAILS.store(0, Ordering::Release);
@@ -2164,7 +2120,7 @@ pub fn bring_up() -> ActiveSummary {
         crate::serial_println!("BOUCHAUD_HID_MOUSE_GREEN count={}", mouse_total);
     }
     crate::serial_println!(
-        "BOUCHAUD_XHCI_V34_SUMMARY controllers={}/{} ports={} enabled={} addressed={} control_ok={} usb={} keyboards={} mice={} polling={}",
+        "BOUCHAUD_XHCI_V34_SUMMARY controllers={}/{} ports={} enabled={} addressed={} control_ok={} usb={} keyboards={} mice={} polling={} concentrateurs_non_traverses={}",
         active_controllers,
         seen,
         connected_total,
@@ -2174,8 +2130,17 @@ pub fn bring_up() -> ActiveSummary {
         usb_total,
         keyboard_total,
         mouse_total,
-        (keyboard_total + mouse_total != 0) as u8
+        (keyboard_total + mouse_total != 0) as u8,
+        CONCENTRATEURS.load(Ordering::Acquire),
     );
+    // Un clavier absent ALORS QU'un concentrateur est branche a une cause
+    // nommee. Le dire ici evite de chercher le defaut dans le code du clavier.
+    if keyboard_total == 0 && CONCENTRATEURS.load(Ordering::Acquire) != 0 {
+        crate::serial_println!(
+            "BOUCHAUD_HID_ABSENT_DERRIERE_CONCENTRATEUR remede=brancher-le-\
+             clavier-sur-un-port-de-la-machine"
+        );
+    }
 
     ActiveSummary {
         present: true,
