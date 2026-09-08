@@ -105,17 +105,17 @@ pub fn init(boot: &'static BootInfo) {
             USER_START = user_start;
             USER_END = dma_start;
         }
-        ARENE.configure(dma_start, region_end);
+        configure_dma(dma_start, region_end);
     } else if best_len > DMA_RESERVE + 16 * 1024 * 1024 {
         let dma_start = (region_end - DMA_RESERVE) & !0xFFF;
         let heap_size = (dma_start - heap_start) as usize;
         unsafe {
             heap::switch_arena(phys_to_virt(heap_start), heap_size);
         }
-        ARENE.configure(dma_start, region_end);
+        configure_dma(dma_start, region_end);
     } else {
         // Region trop petite : DMA seule, tas bootstrap conserve.
-        ARENE.configure(heap_start, region_end);
+        configure_dma(heap_start, region_end);
     }
     crate::kernel::dmesg::log("memory: acces physique + tas etendu + arene DMA prets");
 
@@ -152,13 +152,34 @@ pub fn phys_to_virt(phys: u64) -> *mut u8 {
     (unsafe { PHYS_OFFSET } + phys) as *mut u8
 }
 
+/// Choisit l'allocateur DMA : le compagnon, ou l'arene s'il ne peut pas.
+///
+/// UN SEUL des deux est configure. Les avoir tous les deux sur la meme memoire
+/// donnerait deux allocateurs qui distribuent les memes pages -- exactement le
+/// defaut qu'aucun des deux ne peut detecter, puisque chacun croit etre seul.
+///
+/// L'arene reste le repli parce qu'un allocateur eprouve vaut mieux que pas
+/// d'allocateur : une region trop petite pour porter le bitmap du compagnon
+/// doit encore pouvoir servir du DMA.
+fn configure_dma(debut: u64, fin: u64) {
+    if crate::kernel::dma_compagnon::configure(debut, fin) {
+        return;
+    }
+    crate::kernel::dmesg::log("memory: compagnon DMA refuse, repli sur l'arene");
+    ARENE.configure(debut, fin);
+}
+
 /// Alloue un bloc DMA (aligne page, mis a zero). Renvoie (adresse physique,
 /// pointeur virtuel). `None` si l'arene est epuisee.
 pub fn alloc_dma(size: usize) -> Option<(u64, *mut u8)> {
     // Interruptions masquees : l'arene est atteignable depuis l'initialisation
     // d'un pilote comme depuis un gestionnaire, et son verrou est un verrou
     // tournant simple.
-    let base = interrupts::without_interrupts(|| ARENE.alloue(size))?;
+    let base = if crate::kernel::dma_compagnon::configure_ok() {
+        interrupts::without_interrupts(|| crate::kernel::dma_compagnon::alloue(size))?
+    } else {
+        interrupts::without_interrupts(|| ARENE.alloue(size))?
+    };
     let virt = phys_to_virt(base);
     // La remise a zero reste HORS du verrou : elle peut porter sur plusieurs
     // centaines de kilooctets, et la tenir sous le verrou de l'arene
@@ -174,7 +195,11 @@ pub fn alloc_dma(size: usize) -> Option<(u64, *mut u8)> {
 /// region hors arene est compte (`debordements`) et ignore : l'ajouter a la
 /// liste corromprait les allocations suivantes.
 pub fn free_dma(base: u64, size: usize) {
-    interrupts::without_interrupts(|| ARENE.libere(base, size));
+    if crate::kernel::dma_compagnon::configure_ok() {
+        interrupts::without_interrupts(|| crate::kernel::dma_compagnon::libere(base, size));
+    } else {
+        interrupts::without_interrupts(|| ARENE.libere(base, size));
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -187,7 +212,7 @@ pub struct DmaStats {
 }
 
 pub fn dma_stats() -> DmaStats {
-    let etat = ARENE.etat();
+    let etat = dma_etat();
     DmaStats {
         used: etat.utilise,
         free: etat.libre,
@@ -199,11 +224,15 @@ pub fn dma_stats() -> DmaStats {
 
 /// L'etat complet de l'arene, pour le releve periodique.
 pub fn dma_etat() -> crate::kernel::arene_dma::EtatDma {
-    ARENE.etat()
+    if crate::kernel::dma_compagnon::configure_ok() {
+        crate::kernel::dma_compagnon::etat()
+    } else {
+        ARENE.etat()
+    }
 }
 
 pub fn log_dma_stats() {
-    let e = ARENE.etat();
+    let e = dma_etat();
     crate::serial_println!(
         "[MEM-NG-DMA] total={} utilise={} rendu={} regions={} pic={} allocations={} liberations={} reutilisations={} fusions={} debordements={} echecs={}",
         e.total, e.utilise, e.rendu, e.regions, e.pic, e.allocations,

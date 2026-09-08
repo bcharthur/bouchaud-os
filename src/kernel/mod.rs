@@ -33,6 +33,10 @@ pub mod handle;
 pub mod heap;
 #[path = "memory/magasin.rs"]
 pub mod magasin;
+#[path = "memory/compagnon.rs"]
+pub mod compagnon;
+#[path = "memory/dma_compagnon.rs"]
+pub mod dma_compagnon;
 #[path = "memory/arene_dma.rs"]
 pub mod arene_dma;
 pub mod input;
