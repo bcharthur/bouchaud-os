@@ -20,15 +20,11 @@ fn secteurs_table_utiles(nombre: usize) -> usize {
 /// pas de quoi ecrire une table complete. `mkdisk.sh` complete donc la region
 /// d'archive jusqu'a ce plancher avant d'ajouter la zone.
 fn debut() -> Option<u64> {
-    // La capacite vient du VOLUME, pas de la nappe. C'est le premier appelant
-    // du systeme de fichiers a passer par la couche bloc generique : le jour ou
-    // le volume 1 sera servi par NVMe, cette fonction ne changera pas.
-    //
-    // Les lectures et ecritures elles-memes passent encore par `ata::` : les
-    // migrer demande de traiter les chemins d'erreur un par un, et ce commit
-    // n'en fait qu'un a la fois.
-    let secteurs = crate::drivers::bloc::descripteur(
-        crate::drivers::bloc::Volume::DONNEES).blocs;
+    // La capacite vient du VOLUME, pas de la nappe -- et les lectures et
+    // ecritures aussi, desormais. Ce jour annonce est arrive : le volume des
+    // donnees est servi par le NVMe sur une machine installee, ou il n'y a
+    // aucune nappe ATA, et cette fonction n'a pas eu a changer.
+    let secteurs = volume_secteurs();
     if secteurs <= SECTEURS_ZONE + SECTEUR_CONTENU {
         return None;
     }
@@ -143,7 +139,7 @@ fn superbloc_courant(base: u64) -> Option<(usize, Superbloc)> {
     let mut secteur = vec![0u8; SECTOR_SIZE];
     let mut lus = [None, None];
     for emplacement in 0..2usize {
-        if ata::read(Drive::Slave, base + emplacement as u64, 1, &mut secteur) == 1 {
+        if volume_lit(base + emplacement as u64, 1, &mut secteur) == 1 {
             lus[emplacement] = Superbloc::decode(&secteur);
         }
     }

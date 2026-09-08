@@ -137,6 +137,11 @@ New-Item -ItemType Directory -Path $MarkerDir -Force | Out-Null
     [System.Text.UTF8Encoding]::new($false)
 )
 
+# La charge d'installation part dans la MEME archive : c'est elle que
+# l'installateur du noyau lira pour ecrire l'ESP du disque interne.
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot "tools\reference\stage-install-payload.ps1") -Scenario $Scenario
+if ($LASTEXITCODE -ne 0) { Fail "charge d'installation en echec" }
+
 & python $Make $Scenario $Image
 if ($LASTEXITCODE -ne 0) {
     Fail "fabrication ladybird-browser.img en echec"

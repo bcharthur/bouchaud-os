@@ -10,4 +10,5 @@ pub mod reference_metrics;
 pub mod acpi_probe;
 pub mod hardware_probe;
 pub mod hardware_facts;
+pub mod installation;
 pub mod physical_diag;

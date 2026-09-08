@@ -210,7 +210,7 @@ pub const COMMANDS: &[&str] = &[
     "write", "append", "nano", "edit", "rm", "rmdir", "cp", "mv", "stat", "chmod", "chown",
     "echo", "date", "expr-selftest", "wasm", "wasm-selftest", "grep", "wc", "head", "tail", "find", "lspci", "ping", "ifconfig",
     "ip", "route", "arp", "dhcp", "dns", "wget", "curl", "mount", "df", "sync",
-    "mkfs.bfs", "true", "false", "logout", "exit", "poweroff", "halt", "shutdown",
+    "installer", "mkfs.bfs", "true", "false", "logout", "exit", "poweroff", "halt", "shutdown",
     "export", "env", "unset", "run",
     "source", "desktop", "gui", "ps", "kill", "free", "syscalls", "apps", "launch",
     "ifup", "arping", "ethinfo", "nslookup", "http", "https", "tls-selftest", "tls",
@@ -860,6 +860,7 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
 
         // Disque
         "df" => { crate::drivers::disk::print_df(); 0 }
+        "installer" => c::installer(argc, &argv),
         "sync" => c::sync_persistant(),
         "mount" | "mkfs.bfs" => { c::disk_placeholder(argv[0]); 0 }
 

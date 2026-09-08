@@ -1914,3 +1914,113 @@ pub fn strace(argc: usize, argv: &[&str; 12]) {
         _ => println!("usage: strace on|echecs|off"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Installation sur le disque interne
+// ---------------------------------------------------------------------------
+
+/// `installer` : pose le systeme sur le disque interne.
+///
+/// # Pourquoi c'est une commande et pas une etape d'amorcage
+///
+/// Un systeme live qui partitionnerait le disque interne au demarrage
+/// detruirait la machine sur laquelle on voulait juste l'essayer, et ce n'est
+/// pas rattrapable. Ecrire sur le disque doit donc etre demande, une fois,
+/// explicitement.
+///
+/// Sans argument, la commande ne fait que REGARDER. C'est le comportement par
+/// defaut le plus sur : la faute de frappe qui coute cher est celle qui lance
+/// une action destructrice, pas celle qui affiche un etat.
+pub fn installer(argc: usize, argv: &[&str; 12]) -> i32 {
+    let mut ecrase = false;
+    let mut demande = false;
+    for arg in argv.iter().take(argc).skip(1) {
+        match *arg {
+            "--ecrase" => ecrase = true,
+            "--go" | "--installe" => demande = true,
+            "--aide" | "-h" | "--help" => {
+                println!("installer                  regarde le disque interne, n'ecrit rien");
+                println!("installer --go             installe le systeme sur le disque interne");
+                println!("installer --go --ecrase    ... en detruisant les partitions etrangeres");
+                return 0;
+            }
+            autre => {
+                println!("installer: argument inconnu « {} » (voir --aide)", autre);
+                return 1;
+            }
+        }
+    }
+
+    let etat = crate::platform::pc::installation::examine();
+    if !etat.present {
+        println!("installer: aucun disque interne detecte.");
+        println!("  Le pilote NVMe n'a pas demarre, ou la machine n'a pas de NVMe.");
+        return 1;
+    }
+    let gio = etat.blocs.saturating_mul(etat.taille_bloc as u64) / (1024 * 1024 * 1024);
+    println!(
+        "Disque interne : {} blocs de {} octets ({} Gio)",
+        etat.blocs, etat.taille_bloc, gio
+    );
+    if etat.degradee {
+        println!("  ATTENTION : la table n'a pu etre lue que par sa copie de secours.");
+    }
+    if etat.partitions.is_empty() {
+        println!("  Aucune table de partitions.");
+    } else {
+        for (nom, premier, blocs) in &etat.partitions {
+            let mio = blocs.saturating_mul(etat.taille_bloc as u64) / (1024 * 1024);
+            println!("  {:<24} bloc {:>12}  {} Mio", nom, premier, mio);
+        }
+    }
+    println!(
+        "  Installation Bouchaud presente : {}",
+        if etat.bouchaud { "oui" } else { "non" }
+    );
+
+    if !demande {
+        println!("");
+        println!("Rien n'a ete ecrit. « installer --go » pose le systeme sur ce disque.");
+        return 0;
+    }
+
+    println!("");
+    println!("Installation en cours. Ne coupez pas la machine.");
+    match crate::platform::pc::installation::installe(ecrase) {
+        Ok(rapport) => {
+            println!(
+                "  partition EFI     bloc {:>12}  {} Mio",
+                rapport.esp_premier,
+                rapport.esp_blocs.saturating_mul(etat.taille_bloc as u64) / (1024 * 1024)
+            );
+            println!(
+                "  partition systeme bloc {:>12}  {} Mio",
+                rapport.systeme_premier,
+                rapport.systeme_blocs.saturating_mul(etat.taille_bloc as u64) / (1024 * 1024)
+            );
+            println!(
+                "  {} fichiers ecrits, {} Mio",
+                rapport.fichiers,
+                rapport.octets / (1024 * 1024)
+            );
+            if !rapport.barriere_reelle {
+                // Le dire, plutot que de laisser croire a une garantie qu'on
+                // n'a pas : ce disque n'a pas confirme que ses octets sont sur
+                // le plateau.
+                println!(
+                    "  NOTE : ce disque n'offre pas de barriere d'ecriture ; attendez"
+                );
+                println!(
+                    "         quelques secondes avant de couper l'alimentation."
+                );
+            }
+            println!("");
+            println!("Termine. Retirez la cle et redemarrez pour partir du disque interne.");
+            0
+        }
+        Err(erreur) => {
+            println!("installer: {}", erreur.phrase());
+            1
+        }
+    }
+}

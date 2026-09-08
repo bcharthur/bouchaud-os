@@ -72,7 +72,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::drivers::ata::{self, Drive, SECTOR_SIZE};
+// L'acces disque passe par la couche bloc : voir `persistance/volume.rs`.
 use crate::fs::ramfs::{fs, NodeKind};
 use crate::kernel::sync::{SleepMutex, SpinLock};
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -112,6 +112,7 @@ pub const RACINE: &str = "/persist";
 // BOUCHAUD_DEEP_FRAGMENTATION_V11A
 // Façade de persistance. Les fragments sont inclus dans CE module :
 // format disque, statiques privées et API publique restent identiques.
+include!("persistance/volume.rs");
 include!("persistance/superbloc.rs");
 include!("persistance/format.rs");
 include!("persistance/transaction.rs");

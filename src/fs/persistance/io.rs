@@ -58,7 +58,7 @@ fn synchronise_snapshot(entrees: &[SnapshotEntree]) -> i64 {
                 let mut tampon = vec![0u8; secteurs as usize * SECTOR_SIZE];
                 tampon[..longueur].copy_from_slice(&entree.contenu);
                 let io_start = crate::kernel::timer::monotonic_ns();
-                let ecrits = ata::write(Drive::Slave, secteur, secteurs as usize, &tampon);
+                let ecrits = volume_ecrit(secteur, secteurs as usize, &tampon);
                 TX_IO_NS.fetch_add(crate::kernel::timer::monotonic_ns().saturating_sub(io_start), Ordering::Relaxed);
                 if ecrits != secteurs as usize { oublie_le_disque(); return -1; }
                 TX_BYTES.fetch_add(longueur as u64, Ordering::Relaxed);
@@ -71,11 +71,24 @@ fn synchronise_snapshot(entrees: &[SnapshotEntree]) -> i64 {
 
     if secteurs_table != 0 {
         let io_start = crate::kernel::timer::monotonic_ns();
-        let ok = ata::write(Drive::Slave, base + debut_demi(demi), secteurs_table, &table)
+        let ok = volume_ecrit(base + debut_demi(demi), secteurs_table, &table)
             == secteurs_table;
         TX_IO_NS.fetch_add(crate::kernel::timer::monotonic_ns().saturating_sub(io_start), Ordering::Relaxed);
         if !ok { oublie_le_disque(); return -1; }
     }
+
+    // LA BARRIERE. L'ordre -- contenu, table, superbloc -- est le bon, et il ne
+    // vaut rien face a un cache d'ecriture : un disque a le droit de rendre la
+    // main avant que les octets soient sur le plateau. Une coupure pourrait
+    // alors laisser le SUPERBLOC sur le plateau et le contenu qu'il designe
+    // encore en cache, c'est-a-dire un etat coherent en apparence qui pointe
+    // vers des secteurs jamais ecrits.
+    //
+    // Un disque qui n'offre pas de barriere n'est pas une erreur : il rend
+    // `false`, on continue avec la garantie d'ordre seule -- celle qu'on avait
+    // avant --, et le compteur permet de le SAVOIR autrement qu'apres une
+    // coupure de courant.
+    volume_barriere();
 
     // LE COMMIT. Un seul secteur, ecrit dans l'emplacement de superbloc que le
     // montage courant n'utilise PAS. Tant qu'il n'a pas ete ecrit, le systeme
@@ -94,10 +107,14 @@ fn synchronise_snapshot(entrees: &[SnapshotEntree]) -> i64 {
         return -1;
     }
     let io_start = crate::kernel::timer::monotonic_ns();
-    let commit_ok = ata::write(
-        Drive::Slave, base + emplacement as u64, 1, &secteur_superbloc) == 1;
+    let commit_ok = volume_ecrit(base + emplacement as u64, 1, &secteur_superbloc) == 1;
     TX_IO_NS.fetch_add(crate::kernel::timer::monotonic_ns().saturating_sub(io_start), Ordering::Relaxed);
     if !commit_ok { oublie_le_disque(); return -1; }
+    // Et une seconde barriere APRES : sans elle, le superbloc lui-meme peut
+    // rester en cache, et `fsync` rendrait la main en annoncant durable un
+    // etat qui ne l'est pas encore. C'est la promesse que `fsync` fait a son
+    // appelant, pas une precaution supplementaire.
+    volume_barriere();
     // Le commit a eu lieu : l'etat V1 vient d'etre remplace d'un seul secteur,
     // et il n'y a plus rien a preserver.
     oublie_la_v1();

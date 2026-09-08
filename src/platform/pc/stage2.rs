@@ -122,6 +122,12 @@ pub fn run(boot: &'static BootInfo) -> ! {
             crate::serial_println!(
                 "BOUCHAUD_TRIGKEY_LADYBIRD_RAMDISK_OK bytes={}", ramdisk.byte_len
             );
+            // L'installateur recopiera CETTE archive sur le disque : le
+            // systeme installe recoit donc, octet pour octet, celle qui vient
+            // de tourner.
+            crate::platform::pc::installation::note_archive(
+                ramdisk.address, ramdisk.byte_len,
+            );
             ("uefi-ramdisk", 0usize)
         } else {
             crate::drivers::ata::probe();
@@ -153,6 +159,26 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // doit continuer de demarrer en live. C'est l'installateur, et lui seul,
     // qui exige un disque.
     let nvme_pret = crate::drivers::nvme::bring_up();
+
+    // Le disque interne porte-t-il DEJA une installation ? Si oui, sa
+    // partition systeme devient le volume des donnees, et la persistance
+    // ecrit dessus au lieu de disparaitre a l'extinction.
+    //
+    // Cela se decide APRES la preparation de `/persist` en RAM, et c'est le
+    // bon ordre : l'arborescence existe d'abord, le contenu sauvegarde vient
+    // se poser dessus. L'inverse donnerait un montage qui restaure des
+    // fichiers dans des repertoires qui n'existent pas encore.
+    let persist_disque = if nvme_pret
+        && crate::platform::pc::installation::monte_le_systeme_installe()
+    {
+        let restaures = crate::fs::persistance::monte();
+        crate::serial_println!(
+            "BOUCHAUD_STAGE2_PERSIST_NVME fichiers={}", restaures
+        );
+        Some(restaures)
+    } else {
+        None
+    };
     let xhci_present =
         if let Some(xhci) = crate::arch::x86_64::pci::find_xhci() {
             crate::serial_println!(
@@ -221,6 +247,12 @@ pub fn run(boot: &'static BootInfo) -> ! {
         if crate::drivers::e1000::using_rtl8168() { "rtl8168" } else { "e1000" },
         nvme_pret as u8,
     );
+    match persist_disque {
+        Some(restaures) => crate::serial_println!(
+            "BOUCHAUD_STAGE2_INSTALLE persist=nvme restaures={}", restaures
+        ),
+        None => crate::serial_println!("BOUCHAUD_STAGE2_LIVE persist=ram"),
+    }
     crate::serial_println!("BOUCHAUD_STAGE2_WM_RUNTIME_READY");
 
     if browser_present && data_mounted && network_ready {

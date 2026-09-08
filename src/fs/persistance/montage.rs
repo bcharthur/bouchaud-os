@@ -51,7 +51,7 @@ pub fn monte() -> usize {
                 // Repli V1 : un disque cree avant le chantier 5 reste lisible.
                 // La premiere synchronisation le fera passer en V2.
                 let mut entete = vec![0u8; SECTOR_SIZE];
-                if ata::read(Drive::Slave, base, 1, &mut entete) != 1 {
+                if volume_lit(base, 1, &mut entete) != 1 {
                     crate::kernel::dmesg::log("persistance: zone illisible");
                     oublie_la_v1();
                     return 0;
@@ -74,7 +74,7 @@ pub fn monte() -> usize {
 
     let secteurs_table = secteurs_table_utiles(nombre);
     let mut table = vec![0u8; secteurs_table * SECTOR_SIZE];
-    if ata::read(Drive::Slave, secteur_table, secteurs_table, &mut table)
+    if volume_lit(secteur_table, secteurs_table, &mut table)
         != secteurs_table
     {
         return 0;
@@ -103,7 +103,7 @@ pub fn monte() -> usize {
 
         if !chemin.is_empty() && taille > 0 {
             let mut tampon = vec![0u8; (secteurs as usize) * SECTOR_SIZE];
-            if ata::read(Drive::Slave, secteur, secteurs as usize, &mut tampon)
+            if volume_lit(secteur, secteurs as usize, &mut tampon)
                 == secteurs as usize
             {
                 tampon.truncate(taille);

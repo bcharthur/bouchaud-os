@@ -107,11 +107,128 @@ fn create_large_ramdisk_image(image: &UefiBoot, ramdisk: &Path, preboot_shim: Op
     Ok(())
 }
 
+/// Depose, dans un dossier, les fichiers que l'ESP d'une machine INSTALLEE
+/// doit porter -- sous les noms exacts que l'installateur du noyau cherche.
+///
+/// # Pourquoi cette correspondance est decidee ici
+///
+/// `bootx64.efi` n'est pas toujours le meme fichier : c'est le shim de preboot
+/// quand il y en a un, et le chargeur sinon. Ecrire cette regle a deux
+/// endroits -- ici pour la cle, ailleurs pour l'installation -- garantit qu'un
+/// jour les deux divergeront, et la machine installee demarrera sur autre
+/// chose que la cle. Un seul endroit la connait donc, et l'installation
+/// recopie ce que ce dossier contient.
+/// La configuration d'amorcage, decidee EN UN SEUL ENDROIT.
+///
+/// L'image de la cle et la charge d'installation doivent porter le meme
+/// `boot.json`. Deux constructions separees de cette configuration finiraient
+/// par diverger, et la machine installee demarrerait avec des reglages que
+/// personne n'a choisis -- un mode video different, par exemple, sur une
+/// machine ou l'on ne peut plus rien lire pour s'en apercevoir.
+fn configuration(min: Option<(u64, u64)>, avec_shim: bool) -> BootConfig {
+    let mut config = BootConfig::default();
+    config.serial_logging = false;
+    config.frame_buffer_logging = true;
+    if let Some((width, height)) = min {
+        if width != 0 && height != 0 && !avec_shim {
+            config.frame_buffer.minimum_framebuffer_width = Some(width as _);
+            config.frame_buffer.minimum_framebuffer_height = Some(height as _);
+        }
+    }
+    config
+}
+
+fn emet_charge_installation(
+    kernel: &Path,
+    shim: Option<&Path>,
+    min: Option<(u64, u64)>,
+    sortie: &Path,
+) -> Result<(), Box<dyn Error>> {
+    fs::create_dir_all(sortie)?;
+    let temp = tempfile::tempdir()?;
+    let tftp = temp.path().join("tftp");
+    fs::create_dir_all(&tftp)?;
+    let mut image = UefiBoot::new(kernel);
+    image.set_boot_config(&configuration(min, shim.is_some()));
+    image.create_pxe_tftp_folder(&tftp)?;
+
+    let bootloader = tftp.join("bootloader");
+    let noyau = tftp.join("kernel-x86_64");
+    let config = tftp.join("boot.json");
+    for chemin in [&bootloader, &noyau, &config] {
+        if !chemin.is_file() {
+            return Err(format!("source absente: {}", chemin.display()).into());
+        }
+    }
+
+    // La MEME regle que `create_large_uefi_fat` : le shim prend la place de
+    // `bootx64.efi`, et le chargeur devient le second etage.
+    match shim {
+        Some(shim) => {
+            fs::copy(shim, sortie.join("bootx64.efi"))?;
+            fs::copy(&bootloader, sortie.join("bouchaud-loader.efi"))?;
+        }
+        None => {
+            fs::copy(&bootloader, sortie.join("bootx64.efi"))?;
+        }
+    }
+    fs::copy(&noyau, sortie.join("kernel-x86_64"))?;
+    fs::copy(&config, sortie.join("boot.json"))?;
+
+    let mut total = 0u64;
+    for entree in fs::read_dir(sortie)? {
+        total += entree?.metadata()?.len();
+    }
+    println!(
+        "BOUCHAUD_INSTALL_PAYLOAD_OK dir={} bytes={}",
+        sortie.display(),
+        total
+    );
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = env::args_os();
     let _program = args.next();
-    let usage = "usage: image-builder <kernel-elf> <output-image> [min-width min-height] [ramdisk] [preboot-shim]";
-    let kernel = PathBuf::from(args.next().ok_or(usage)?);
+    let usage = "usage: image-builder <kernel-elf> <output-image> [min-width min-height] [ramdisk] [preboot-shim]\n       image-builder --charge-installation <kernel-elf> <dossier> [min-width min-height] [preboot-shim]";
+    let premier = args.next().ok_or(usage)?;
+    if premier == *"--charge-installation" {
+        let kernel = PathBuf::from(args.next().ok_or(usage)?);
+        let sortie = PathBuf::from(args.next().ok_or(usage)?);
+        let reste: Vec<_> = args.collect();
+        // Memes arguments, meme ordre et meme sens que le mode image : c'est
+        // ce qui permet a l'appelant de passer exactement ce qu'il a passe
+        // pour la cle.
+        let (min, shim): (Option<(u64, u64)>, Option<PathBuf>) = match reste.as_slice() {
+            [] => (None, None),
+            [shim] => (None, Some(PathBuf::from(shim))),
+            [w, h] => (
+                Some((
+                    w.to_string_lossy().parse()?,
+                    h.to_string_lossy().parse()?,
+                )),
+                None,
+            ),
+            [w, h, shim] => (
+                Some((
+                    w.to_string_lossy().parse()?,
+                    h.to_string_lossy().parse()?,
+                )),
+                Some(PathBuf::from(shim)),
+            ),
+            _ => return Err(usage.into()),
+        };
+        if !kernel.is_file() {
+            return Err(format!("kernel ELF introuvable: {}", kernel.display()).into());
+        }
+        if let Some(chemin) = shim.as_ref() {
+            if !chemin.is_file() {
+                return Err(format!("preboot shim absent: {}", chemin.display()).into());
+            }
+        }
+        return emet_charge_installation(&kernel, shim.as_deref(), min, &sortie);
+    }
+    let kernel = PathBuf::from(premier);
     let output = PathBuf::from(args.next().ok_or(usage)?);
     let rest: Vec<_> = args.collect();
 
@@ -129,22 +246,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(path) = preboot_shim.as_ref() { if !path.is_file() { return Err(format!("preboot shim introuvable: {}", path.display()).into()); } }
     if let Some(parent) = output.parent() { fs::create_dir_all(parent)?; }
 
-    let mut config = BootConfig::default();
-    config.serial_logging = false;
-    config.frame_buffer_logging = true;
-
     if let (Some(width), Some(height)) = (min_width, min_height) {
-        if width != 0 || height != 0 {
-            if width == 0 || height == 0 { return Err("min-width et min-height doivent etre tous deux nuls ou non nuls".into()); }
+        if (width != 0 || height != 0) && (width == 0 || height == 0) {
+            return Err("min-width et min-height doivent etre tous deux nuls ou non nuls".into());
+        }
+        if width != 0 && height != 0 {
             if preboot_shim.is_none() {
-                config.frame_buffer.minimum_framebuffer_width = Some(width as _);
-                config.frame_buffer.minimum_framebuffer_height = Some(height as _);
                 println!("BOUCHAUD_UEFI_FB_REQUEST min={}x{}", width, height);
             } else {
                 println!("BOUCHAUD_UEFI_FB_PREBOOT_OWNS_MODE fallback_min={}x{}", width, height);
             }
         }
     }
+    let config = configuration(
+        min_width.zip(min_height),
+        preboot_shim.is_some(),
+    );
 
     let mut image = UefiBoot::new(&kernel);
     image.set_boot_config(&config);
