@@ -60,6 +60,13 @@ for _chemin in (NR, BKL, DISPATCH):
 # l'audit est donc humain. Chaque entree nomme ou lire cet audit ; sans cela, la
 # ligne n'a pas sa place ici.
 AUDITS_NOMMES = {
+    # c5 -- audit ecrit au-dessus de la ligne FUTEX dans SANS_BKL. Le point qui
+    # tranche : `futex_wait`/`futex_wake` appelaient DEJA
+    # `smp_lock::suspend_for_schedule()` pour rendre le verrou que l'aiguilleur
+    # venait de prendre. Le coeur `wait_word` est a seaux verrouilles, sans
+    # parcours de la table des taches. Le compteur `[BKL-FUTEX] herites=` doit
+    # rester nul : c'est la falsification runtime de cet audit.
+    "FUTEX": "c5 -- wait-word a seaux verrouilles ; le chemin suspendait deja le verrou",
     "MPROTECT": "jalon SMP4 -- domaine Arc<Process>::Mm + protocole TLB sur IRQ",
     "BRK": "jalon SMP4 -- domaine Arc<Process>::Mm + protocole TLB sur IRQ",
     # A1 lot 2 -- voir l'en-tete de bkl.rs et la preuve de duree de vie sur

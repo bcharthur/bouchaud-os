@@ -342,6 +342,44 @@ pub const SANS_BKL: &[(u64, &str)] = &[
     (nr::MMAP, "mm + table des descripteurs + metadata + Fs, et la faute de page qui n'a jamais eu le verrou"),
     (nr::CLOSE, "table des descripteurs, verrous d'enregistrement et readiness : trois domaines declares sortis"),
 
+    // --- Lot c5 : le futex, qui relachait deja le verrou qu'on lui donnait ---
+    //
+    // BOUCHAUD_C5_FUTEX_SANS_BKL_V1
+    //
+    // C'est le meme cas que `SCHED_YIELD`, en plus cher. L'aiguilleur prenait
+    // le gros verrou parce que la table le disait ; `futex_wait` et
+    // `futex_wake` appelaient aussitot `smp_lock::suspend_for_schedule()` pour
+    // s'en debarrasser, faisaient leur travail, puis le REPRENAIENT pour que
+    // l'aiguilleur puisse le relacher. Une acquisition globale, une
+    // liberation, une reacquisition et une seconde liberation, autour d'un
+    // chemin qui n'en voulait pas.
+    //
+    // Et c'est l'appel le plus cher a laisser ainsi. Un navigateur multifil
+    // emet un futex a CHAQUE contention de verrou de sa libc : chaque attente
+    // d'un fil de rendu serialisait les autres coeurs le temps d'entrer dans
+    // une primitive qui, elle, ne partage rien.
+    //
+    // Lu :    la memoire utilisateur, pour la duree (`timespec_ms`), par le
+    //         domaine `Mm` -- celui dont `MMAP`, `BRK` et `MPROTECT` dependent
+    //         depuis V14 ; et les horloges atomiques (`monotonic_ms`,
+    //         `unix_time`), deja auditees pour `TIME` et `GETTIMEOFDAY`.
+    // Ecrit : rien hors du coeur wait-word.
+    // Verrou : `wait_word` est a domaines propres et le montre -- soixante-
+    //         quatre seaux, chacun un `SpinLock<Vec<Arc<WaitWordEntry>>>`,
+    //         chaque entree portant sa propre `WaitSource` et ses compteurs
+    //         atomiques. Aucun parcours de la table des taches : la recherche
+    //         est locale au seau, par cle physique.
+    // Attente : `wait_word_wait` parque la tache. Elle ne dort donc PAS en
+    //         tenant le gros verrou -- c'est precisement ce que le
+    //         `suspend_for_schedule` interne garantissait deja, et ce que ce
+    //         retrait rend inutile.
+    // Falsification : `[BKL-FUTEX] herites=` compte les operations entrees avec
+    //         un verrou HERITE. Ce compteur doit desormais rester a zero ; s'il
+    //         monte, c'est qu'un appelant redonne le verrou au futex, et
+    //         l'invariant est faux. La preuve est runtime, et elle est
+    //         refutable.
+    (nr::FUTEX, "c5: wait-word a seaux verrouilles + Mm + horloges atomiques ; le chemin suspendait deja le verrou lui-meme"),
+
     // --- Constantes : le bras d'aiguillage ne lit ni n'ecrit rien ------------
     //
     // Ces appels rendent une valeur litterale. Ils ne touchent ni la table des
