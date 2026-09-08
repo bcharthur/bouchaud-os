@@ -92,10 +92,24 @@ AUDITS_NOMMES = {
     "CLOCK_GETRES": "A1 lot 2 -- constante calculee + Mm",
     "GETTIMEOFDAY": "A1 lot 2 -- ancre d'epoque atomique + Mm",
     "TIME": "A1 lot 2 -- ancre d'epoque atomique + Mm",
+    # c2 -- audit ecrit au-dessus du lot dans SANS_BKL : registre du CPU
+    # courant, champ de la tache courante par garde d'emplacement, et
+    # `user_write` qui prend le verrou `mm` du processus.
+    "ARCH_PRCTL": "c2 -- FS_BASE du CPU courant + champ de la tache courante + verrou mm",
+    "SET_TID_ADDRESS": "c2 -- champ de la tache courante, par garde d'emplacement",
+    "SCHED_GETAFFINITY": "c2 -- masque constant + verrou mm ; aucune table parcourue",
+    "GETPRIORITY": "c2 -- atomique par tache ; aucune table parcourue",
 }
 
-# Une constante rendue directement : `0`, `1`, `-errno::ENOSYS`.
-CONSTANTE = re.compile(r"^-?(?:\d+|errno::[A-Z0-9_]+)$")
+# Une constante rendue directement : `0`, `1`, `0o022`, `-errno::ENOSYS`.
+#
+# Les bases OCTALE et HEXADECIMALE comptent : `umask` rend `0o022`, qui est
+# aussi litteral que `0`. Ne pas les reconnaitre obligeait a inscrire un audit
+# HUMAIN pour une constante -- et un audit humain pour ce qui n'en demande pas
+# use la liste des audits, qui ne vaut que par ce qu'elle contient vraiment.
+CONSTANTE = re.compile(
+    r"^-?(?:0[oObBxX][0-9a-fA-F_]+|\d[\d_]*|errno::[A-Z0-9_]+)$"
+)
 
 # BOUCHAUD_P3_POLL_SANS_BKL_V1
 #

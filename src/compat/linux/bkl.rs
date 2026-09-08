@@ -251,6 +251,29 @@ pub const SANS_BKL: &[(u64, &str)] = &[
     (nr::CLOCK_GETRES, "constante calculee + Mm"),
     (nr::GETTIMEOFDAY, "ancre d'epoque atomique + Mm"),
     (nr::TIME, "ancre d'epoque atomique + Mm"),
+    // --- Lot c2 : ce qui ne touche que la tache courante ---------------------
+    //
+    // Ces quatre appels ne lisent ni la table des taches, ni le systeme de
+    // fichiers, ni aucun etat partage entre processus. Ils touchent :
+    //
+    //   * un REGISTRE du CPU courant (`FS_BASE`), ecrit par `wrmsr` -- il n'y a
+    //     rien de plus local qu'un registre de modele specifique ;
+    //   * un CHAMP de la tache courante, pris par `current_exclusif()`, qui est
+    //     un garde par EMPLACEMENT : il attend l'emplacement de cette tache-ci,
+    //     pas un verrou global ;
+    //   * la memoire utilisateur, par `user_write`, qui prend le verrou `mm` du
+    //     processus -- le meme domaine dont `WRITE`, `BRK` et `MPROTECT`
+    //     dependent depuis V14.
+    //
+    // `ARCH_PRCTL` est le plus important des quatre : la glibc l'emet a la
+    // creation de CHAQUE fil pour poser sa zone de stockage local. Un
+    // navigateur qui demarre ses processus de rendu en emet donc autant qu'il
+    // cree de fils, et chacun prenait le gros verrou pour ecrire un registre.
+    (nr::ARCH_PRCTL, "registre FS_BASE du CPU courant + champ de la tache courante + user_write (verrou mm)"),
+    (nr::SET_TID_ADDRESS, "champ `clear_child_tid` de la tache courante, par garde d'emplacement"),
+    (nr::SCHED_GETAFFINITY, "masque constant + user_write (verrou mm) ; ne lit pas la table des taches"),
+    (nr::GETPRIORITY, "lit `current().priorite`, un atomique par tache ; aucune table parcourue"),
+
     // --- Constantes : le bras d'aiguillage ne lit ni n'ecrit rien ------------
     //
     // Ces appels rendent une valeur litterale. Ils ne touchent ni la table des
@@ -281,6 +304,10 @@ pub const SANS_BKL: &[(u64, &str)] = &[
     (nr::SCHED_SETPARAM, "constante : 0, une seule classe de priorite"),
     (nr::SCHED_SETSCHEDULER, "constante : 0, une seule politique"),
     (nr::SCHED_SETAFFINITY, "constante : 0, affinite non honoree ici"),
+    (nr::PRCTL, "constante : 0, aucune operation de controle de processus n'est honoree"),
+    (nr::SCHED_GETSCHEDULER, "constante : 0, une seule politique"),
+    (nr::SIGALTSTACK, "constante : 0, pas de pile de signal alternative"),
+    (nr::UMASK, "constante : 0o022, le RAMFS n'a pas de masque de creation"),
 ];
 
 /// Ce que cet appel systeme exige du gros verrou.
