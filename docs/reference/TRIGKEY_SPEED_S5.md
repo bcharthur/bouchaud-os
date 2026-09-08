@@ -129,6 +129,17 @@ vitesse. Et une traversee qui echoue est comptee et nommee
 (`BOUCHAUD_USB_CONCENTRATEUR_ECHEC`), parce qu'un clavier absent et un
 concentrateur en echec se ressemblent trop.
 
+**Brancher apres le demarrage marche.** C'est le premier geste sur cette
+machine : elle demarre, puis on branche le clavier. Les ports sont surveilles
+toutes les 200 ms **meme quand aucun peripherique USB n'a repondu** -- gater
+cette surveillance sur « un clavier USB est present » la rendrait inoperante
+precisement dans le cas qui compte. Un debranchement rend le slot au
+controleur ET la memoire DMA a l'arene, y compris pour ce qui pendait derriere
+un concentrateur, que le controleur ne signale pas.
+
+`lsusb --attends 20000` rend la main des que quelque chose arrive : c'est la
+reponse a « je viens de le brancher, est-ce qu'il est vu ? ».
+
 La commande **`lsusb`** rejoue l'arbre depuis l'etat, a n'importe quel moment.
 L'indentation dit la profondeur. C'est ce qui repond a la seule question qui
 compte en premier quand un clavier ne marche pas : a-t-il ete VU ? Un clavier
@@ -217,6 +228,9 @@ marqueurs retenus.
 | `BOUCHAUD_USB_CONCENTRATEUR_TROP_PROFOND` | Plus de cinq concentrateurs en cascade. La chaine de route xHCI ne va pas plus loin ; il faut rapprocher le peripherique. |
 | `BOUCHAUD_USB_ARBRE_TRONQUE` | Plus de 32 peripheriques en attente d'enumeration. Les suivants sont ignores. |
 | `BOUCHAUD_TRIGKEY_REPLI_PS2` | Le controleur existe, aucun clavier n'en est sorti, on a essaye le 8042. |
+| `BOUCHAUD_USB_BRANCHEMENT port=N` | Quelque chose vient d'etre branche sur le port N. La ligne `_OK` qui suit dit ce qui en est sorti. |
+| `BOUCHAUD_USB_DEBRANCHEMENT` | Un peripherique a ete retire ; son slot et sa memoire sont rendus. |
+| `evenements_perdus=N` non nul | Des rapports HID ont ete jetes faute de place : des frappes ont ete perdues. Ce compteur doit rester a zero. |
 
 ---
 

@@ -352,10 +352,38 @@ jobs:
           path: usb-arbre.log
           if-no-files-found: warn
 
+  usb-branchement:
+    name: qemu / branchement a chaud
+    needs: [gate, kernel-build]
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+      - uses: actions/download-artifact@v4
+        with:
+          name: integration-bootimage
+          path: image
+      # La machine demarre SANS aucun peripherique USB ; le clavier et la
+      # souris sont ajoutes a chaud par QMP pendant qu'elle tourne. C'est le
+      # premier geste d'un utilisateur, et aucune autre campagne ne le couvre.
+      - name: Clavier branche apres le demarrage
+        run: tools/ci/run_usb_branchement.sh image/bootimage-bouchaud-os.bin usb-branchement.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-usb-branchement
+          path: usb-branchement.log
+          if-no-files-found: warn
+
   integration-gate:
     name: integration-gate
     if: always()
-    needs: [gate, kernel-build, qemu-smoke, system-health, os-primitives, mm-ng6, qt-pixel, dns-udp, usb-arbre]
+    needs: [gate, kernel-build, qemu-smoke, system-health, os-primitives, mm-ng6, qt-pixel, dns-udp, usb-arbre, usb-branchement]
     runs-on: ubuntu-latest
     steps:
       - name: Synthese
@@ -369,13 +397,14 @@ jobs:
           QT: ${{ needs.qt-pixel.result }}
           DNS: ${{ needs.dns-udp.result }}
           USB: ${{ needs.usb-arbre.result }}
+          PLUG: ${{ needs.usb-branchement.result }}
         run: |
           if [ "$ENABLED" != true ]; then
             echo 'INTEGRATION NON DEMANDEE : aucune suite QEMU n a tourne.'
             echo 'Ce resultat vert ne dit RIEN du comportement a l execution.'
             exit 0
           fi
-          printf '%-12s %s\n' kernel "$KERNEL" boot "$BOOT" health "$HEALTH" primitives "$PRIMITIVES" mm "$MM" qt "$QT" dns "$DNS" usb "$USB"
+          printf '%-12s %s\n' kernel "$KERNEL" boot "$BOOT" health "$HEALTH" primitives "$PRIMITIVES" mm "$MM" qt "$QT" dns "$DNS" usb "$USB" plug "$PLUG"
 
           # Un job SAUTE n est pas un job REUSSI.
           #
@@ -385,7 +414,7 @@ jobs:
           # qui passe -- et c est ainsi qu on croit valider ce qu on ne valide
           # pas. On le dit, et on echoue.
           a_tourne=0
-          for r in "$KERNEL" "$BOOT" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$USB"; do
+          for r in "$KERNEL" "$BOOT" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$USB" "$PLUG"; do
             [ "$r" = skipped ] || a_tourne=1
           done
           if [ "$a_tourne" -eq 0 ]; then
@@ -394,7 +423,7 @@ jobs:
           fi
 
           # qt-pixel reste informatif.
-          for r in "$KERNEL" "$BOOT" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$USB"; do
+          for r in "$KERNEL" "$BOOT" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$USB" "$PLUG"; do
             [ "$r" != failure ] && [ "$r" != cancelled ] || exit 1
           done
           echo INTEGRATION_GATE_OK

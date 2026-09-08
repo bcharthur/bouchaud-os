@@ -70,6 +70,22 @@ const MAX_HID_ENDPOINTS_PER_CONTROLLER: usize = 16;
 const REINITIALISATION_MAX_MS: u32 = 800;
 const MAX_CONFIG_DESCRIPTOR: usize = 4096;
 const MAX_EVENTS_PER_POLL: usize = 64;
+
+/// Combien de rapports HID peuvent etre mis de cote pendant un transfert de
+/// controle.
+///
+/// Seize suffisent largement : un transfert de controle dure quelques
+/// millisecondes, et un clavier n'emet qu'a chaque frappe. La borne existe
+/// pour que le tampon ne puisse pas grandir, pas parce qu'on s'attend a le
+/// remplir -- et un debordement se COMPTE, il ne se tait pas.
+const EVENEMENTS_DIFFERES: usize = 16;
+
+/// Combien de peripheriques branches a chaud on enumere par tour de scrutation.
+///
+/// Un seul. Enumerer prend une trentaine de millisecondes -- adressage, lecture
+/// des descripteurs, configuration --, et le bureau appelle `poll()` depuis sa
+/// boucle de dessin. En faire plusieurs d'affilee ferait sauter l'image.
+const BRANCHEMENTS_PAR_TOUR: usize = 1;
 const MAX_RUNTIME_DEVICES: usize = 32;
 const WAIT_SPINS: usize = 30_000_000;
 
@@ -112,6 +128,12 @@ static CONCENTRATEURS: AtomicUsize = AtomicUsize::new(0);
 static CONCENTRATEURS_ECHOUES: AtomicUsize = AtomicUsize::new(0);
 /// Peripheriques atteints DERRIERE un concentrateur.
 static PERIPHERIQUES_DERRIERE: AtomicUsize = AtomicUsize::new(0);
+/// Evenements qu'on n'a pas pu mettre de cote -- donc des frappes perdues.
+static EVENEMENTS_PERDUS: AtomicUsize = AtomicUsize::new(0);
+/// Peripheriques branches apres le demarrage.
+static BRANCHEMENTS: AtomicUsize = AtomicUsize::new(0);
+/// Peripheriques debranches apres le demarrage.
+static DEBRANCHEMENTS: AtomicUsize = AtomicUsize::new(0);
 static HID_CONTROL_POLLS: AtomicUsize = AtomicUsize::new(0);
 static HID_CONTROL_REPORTS: AtomicUsize = AtomicUsize::new(0);
 static HID_CONTROL_FAILS: AtomicUsize = AtomicUsize::new(0);
@@ -270,6 +292,25 @@ struct Controller {
     dcbaa_phys: u64,
     dcbaa_virt: usize,
     hids: [HidEndpoint; MAX_HID_ENDPOINTS_PER_CONTROLLER],
+    // UN RAPPORT DE CLAVIER N'EST PAS UN EVENEMENT QU'ON JETTE.
+    //
+    // L'anneau d'evenements est unique : les achevements de commande, les
+    // achevements de transfert de controle et les rapports HID y arrivent
+    // melanges. `wait_event` attend UN evenement precis -- et jetait tous les
+    // autres. Un rapport de clavier qui arrive pendant un transfert de
+    // controle disparaissait donc, et la frappe avec lui.
+    //
+    // Personne ne le voyait : au demarrage les points de terminaison HID ne
+    // sont armes qu'apres l'enumeration, precisement pour eviter ce
+    // croisement. Mais le branchement a chaud rend le croisement NORMAL --
+    // enumerer un peripherique pendant qu'un autre envoie des rapports --, et
+    // la solution « armer plus tard » n'y marche plus.
+    //
+    // On les met donc de cote au lieu de les perdre.
+    differes: [Trb; EVENEMENTS_DIFFERES],
+    differes_len: usize,
+    /// Ports dont l'etat a change et qu'il reste a traiter, un bit par port.
+    ports_a_traiter: u32,
     arbre: [Option<NoeudUsb>; NOEUDS_MAX],
     compte_noeuds: usize,
     hid_count: usize,
@@ -550,6 +591,28 @@ fn alloc_zeroed(bytes: usize) -> Option<(u64, usize)> {
     Some((phys, virt as usize))
 }
 
+/// Rend a l'arene tout ce qu'un peripherique occupait.
+///
+/// # Ce que le branchement a chaud a change
+///
+/// Tant que l'enumeration n'avait lieu qu'au demarrage, ne rien rendre ne
+/// coutait rien : ce qui etait pris l'etait une fois pour toutes. Brancher et
+/// debrancher fait de la meme omission une FUITE -- quatre pages plus deux
+/// anneaux par branchement -- et une arene DMA epuisee ne se manifeste pas par
+/// un message clair : les enumerations suivantes echouent avec « dma-* » et le
+/// peripherique qu'on vient de brancher ne repond pas.
+fn abandonne_device(controller: &mut Controller, device: &Device) {
+    disable_slot(controller, device.slot_id);
+    libere_device(device);
+}
+
+fn libere_device(device: &Device) {
+    memory::free_dma(device.out_ctx_phys, 4096);
+    memory::free_dma(device.in_ctx_phys, 4096);
+    memory::free_dma(device.control_phys, 4096);
+    memory::free_dma(device.ep0.phys, RING_BYTES);
+}
+
 fn trb_type(control: u32) -> u32 {
     (control >> 10) & 0x3f
 }
@@ -639,11 +702,26 @@ fn next_event(controller: &mut Controller) -> Option<Trb> {
     }
 }
 
+/// Met un evenement de cote, ou compte sa perte.
+fn differe(controller: &mut Controller, event: Trb) {
+    if controller.differes_len >= EVENEMENTS_DIFFERES {
+        EVENEMENTS_PERDUS.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    let index = controller.differes_len;
+    controller.differes[index] = event;
+    controller.differes_len = index + 1;
+}
+
 fn wait_event(controller: &mut Controller, wanted_type: u32, slot: Option<u8>, dci: Option<u8>) -> Option<Trb> {
     for _ in 0..WAIT_SPINS {
         if let Some(event) = next_event(controller) {
             let ty = trb_type(event.control);
             if ty == EVT_PORT_STATUS_CHANGE {
+                // Un changement de port pendant un transfert de controle : on
+                // note le port et on continue. Enumerer ICI reentrerait dans
+                // le transfert en cours.
+                note_port_a_traiter(controller, port_de_l_evenement(event));
                 continue;
             }
             if ty == wanted_type
@@ -652,10 +730,32 @@ fn wait_event(controller: &mut Controller, wanted_type: u32, slot: Option<u8>, d
             {
                 return Some(event);
             }
+            // CE QUI NE NOUS ETAIT PAS DESTINE N'EST PAS A JETER.
+            //
+            // Un rapport de clavier qui arrive pendant ce transfert est une
+            // FRAPPE. Le jeter la perd, et rien ne le dit.
+            if ty == EVT_TRANSFER {
+                differe(controller, event);
+            }
         }
         core::hint::spin_loop();
     }
     None
+}
+
+/// Numero de port porte par un evenement de changement d'etat de port.
+///
+/// xHCI 1.2 §6.4.2.3 : le champ est dans les bits 31:24 du PARAMETRE, et non
+/// dans le mot de controle ou vivent le slot et le type.
+fn port_de_l_evenement(event: Trb) -> u8 {
+    ((event.parameter >> 24) & 0xff) as u8
+}
+
+fn note_port_a_traiter(controller: &mut Controller, port: u8) {
+    if port == 0 || port as usize > MAX_PORTS_PER_CONTROLLER {
+        return;
+    }
+    controller.ports_a_traiter |= 1u32 << (port - 1);
 }
 
 fn ring_doorbell(controller: &Controller, slot: u8, target: u8) {
@@ -1778,13 +1878,13 @@ fn enumerate_device(controller: &mut Controller, chemin: Chemin, file: &mut File
                             port,
                             error
                         );
-                        disable_slot(controller, device.slot_id);
+                        abandonne_device(controller, &device);
                         return;
                     }
                 }
             }
             _ => {
-                disable_slot(controller, device.slot_id);
+                abandonne_device(controller, &device);
                 return;
             }
         }
@@ -1794,7 +1894,7 @@ fn enumerate_device(controller: &mut Controller, chemin: Chemin, file: &mut File
         Ok(len) if len >= 18 => len,
         _ => {
             crate::serial_println!("BOUCHAUD_USB_ENUM_FAIL port={} phase=device-descriptor", port);
-            disable_slot(controller, device.slot_id);
+            abandonne_device(controller, &device);
             return;
         }
     };
@@ -1864,7 +1964,7 @@ fn enumerate_device(controller: &mut Controller, chemin: Chemin, file: &mut File
         Ok(len) if len >= 9 => len,
         _ => {
             crate::serial_println!("BOUCHAUD_USB_ENUM_FAIL port={} phase=config-header", port);
-            disable_slot(controller, device.slot_id);
+            abandonne_device(controller, &device);
             return;
         }
     };
@@ -1881,7 +1981,7 @@ fn enumerate_device(controller: &mut Controller, chemin: Chemin, file: &mut File
         Ok(len) if len >= 9 => len,
         _ => {
             crate::serial_println!("BOUCHAUD_USB_ENUM_FAIL port={} phase=config-descriptor", port);
-            disable_slot(controller, device.slot_id);
+            abandonne_device(controller, &device);
             return;
         }
     };
@@ -1910,6 +2010,20 @@ fn enumerate_device(controller: &mut Controller, chemin: Chemin, file: &mut File
         hid_count
     );
 
+    // LE PERIPHERIQUE EST ENREGISTRE MEME QUAND IL N'A RIEN QUI NOUS SERVE.
+    //
+    // Une cle USB, une carte son, un lecteur d'empreintes : rien a piloter,
+    // mais un slot pris et quatre pages de contextes. Sans enregistrement, le
+    // debranchement ne rend ni l'un ni les autres -- et le journal ne dit rien
+    // non plus, puisque l'arbre ne le connait pas.
+    //
+    // L'enregistrement est REFAIT plus bas apres la configuration : l'anneau
+    // de controle avance a chaque transfert, et garder une copie perimee
+    // ferait ecrire au mauvais endroit.
+    if (device.slot_id as usize) < controller.devices.len() {
+        controller.devices[device.slot_id as usize] = Some(device);
+    }
+
     if hid_count == 0 || configuration_value == 0 {
         // Device enumeration is green, but there is no HID endpoint to own.
         return;
@@ -1921,6 +2035,9 @@ fn enumerate_device(controller: &mut Controller, chemin: Chemin, file: &mut File
             port,
             error
         );
+        if (device.slot_id as usize) < controller.devices.len() {
+            controller.devices[device.slot_id as usize] = Some(device);
+        }
         return;
     }
     wait_ms(10);
@@ -1943,6 +2060,177 @@ fn enumerate_device(controller: &mut Controller, chemin: Chemin, file: &mut File
     }
     if (device.slot_id as usize) < controller.devices.len() {
         controller.devices[device.slot_id as usize] = Some(device);
+    }
+}
+
+/// Retire du systeme tout ce qui appartenait a un slot.
+///
+/// # Ce qu'un debranchement laisse derriere lui, si on ne fait rien
+///
+/// Le point de terminaison reste ARME : chaque tour de scrutation sonne sa
+/// cloche pour un peripherique qui n'est plus la, le controleur repond par une
+/// erreur, et le journal se remplit. Pire, le slot n'est jamais rendu -- une
+/// dizaine de branchements-debranchements et il n'y a plus de slot libre,
+/// donc plus rien de branchable.
+///
+/// Le tableau est COMPACTE plutot que troue : `hid_count` borne les boucles,
+/// et une entree morte au milieu ferait sauter celles d'apres.
+fn retire_slot(controller: &mut Controller, slot: u8) -> usize {
+    let mut retires = 0usize;
+    let mut index = 0usize;
+    while index < controller.hid_count {
+        if controller.hids[index].slot_id == slot {
+            // L'anneau et le tampon de cette extremite, rendus eux aussi : ils
+            // sont alloues PAR EXTREMITE, pas par peripherique, et un clavier
+            // composite en a deux.
+            memory::free_dma(controller.hids[index].ring.phys, RING_BYTES);
+            memory::free_dma(controller.hids[index].buffer_phys, 4096);
+            let dernier = controller.hid_count - 1;
+            controller.hids[index] = controller.hids[dernier];
+            controller.hids[dernier] = EMPTY_HID_ENDPOINT;
+            controller.hid_count = dernier;
+            retires += 1;
+            continue;
+        }
+        index += 1;
+    }
+    let mut noeud = 0usize;
+    while noeud < controller.compte_noeuds {
+        let appartient = controller.arbre[noeud]
+            .map(|n| n.slot == slot)
+            .unwrap_or(false);
+        if appartient {
+            let dernier = controller.compte_noeuds - 1;
+            controller.arbre[noeud] = controller.arbre[dernier];
+            controller.arbre[dernier] = None;
+            controller.compte_noeuds = dernier;
+            continue;
+        }
+        noeud += 1;
+    }
+    // Le slot est rendu au controleur AVANT la memoire : il ne doit plus
+    // pouvoir ecrire dans des contextes qu'on vient de rendre a l'arene.
+    disable_slot(controller, slot);
+    if (slot as usize) < controller.devices.len() {
+        if let Some(device) = controller.devices[slot as usize].take() {
+            libere_device(&device);
+        }
+    }
+    retires
+}
+
+/// Tout ce qui pend au port racine `port`, y compris derriere un concentrateur.
+///
+/// Debrancher un concentrateur emporte ce qui etait branche dessus, et le
+/// controleur ne l'annonce PAS : il ne signale que le port racine. Ne retirer
+/// que le concentrateur laisserait ses enfants armes sur un chemin qui n'existe
+/// plus.
+fn retire_sous_arbre(controller: &mut Controller, port: u8) -> usize {
+    let mut slots = [0u8; NOEUDS_MAX];
+    let mut combien = 0usize;
+    for noeud in controller.arbre[..controller.compte_noeuds].iter().flatten() {
+        if noeud.port_racine == port && combien < slots.len() {
+            slots[combien] = noeud.slot;
+            combien += 1;
+        }
+    }
+    let mut retires = 0usize;
+    for slot in slots[..combien].iter().copied() {
+        retires += retire_slot(controller, slot);
+        DEBRANCHEMENTS.fetch_add(1, Ordering::Relaxed);
+    }
+    if combien != 0 {
+        crate::serial_println!(
+            "BOUCHAUD_USB_DEBRANCHEMENT port={} peripheriques={} extremites_hid={}",
+            port, combien, retires,
+        );
+    }
+    retires
+}
+
+/// Traite UN port dont l'etat a change depuis le demarrage.
+///
+/// # Pourquoi cela ne peut pas se faire dans la boucle des evenements
+///
+/// Enumerer emet des transferts de controle, qui attendent leurs propres
+/// evenements. Le faire depuis la boucle qui draine l'anneau reentrerait
+/// dedans. Les ports sont donc NOTES pendant le drainage et traites apres.
+fn traite_port_change(controller: &mut Controller, port_index: usize) {
+    let off = 0x400 + port_index * 0x10;
+    let portsc = unsafe { r32(controller.op, off) };
+    let port = (port_index + 1) as u8;
+
+    // Les bits de changement s'effacent en y ecrivant un, et les autres champs
+    // ne doivent pas etre rejoues -- `neutral_port_state` s'en charge.
+    if portsc & PORTSC_CHANGE_BITS != 0 {
+        unsafe {
+            w32(
+                controller.op,
+                off,
+                neutral_port_state(portsc) | (portsc & PORTSC_PP) | (portsc & PORTSC_CHANGE_BITS),
+            )
+        };
+    }
+
+    if portsc & PORTSC_CCS == 0 {
+        retire_sous_arbre(controller, port);
+        return;
+    }
+
+    // Deja enumere : un changement sur un port occupe qu'on connait
+    // (surintensite, reprise) ne demande pas de reenumeration.
+    let deja = controller
+        .arbre[..controller.compte_noeuds]
+        .iter()
+        .flatten()
+        .any(|n| n.port_racine == port);
+    if deja {
+        return;
+    }
+
+    if portsc & PORTSC_PED == 0 && !reset_root_port(controller, port_index) {
+        crate::serial_println!(
+            "BOUCHAUD_USB_BRANCHEMENT_ECHEC port={} phase=reset portsc={:#010x}",
+            port, portsc,
+        );
+        return;
+    }
+
+    BRANCHEMENTS.fetch_add(1, Ordering::Relaxed);
+    crate::serial_println!("BOUCHAUD_USB_BRANCHEMENT port={}", port);
+    let mut file = FileChemins::neuve();
+    enumerate_port(controller, port_index, &mut file);
+    while let Some(chemin) = file.tire() {
+        enumerate_device(controller, chemin, &mut file);
+    }
+    // Les extremites nouvellement installees ne sont armees qu'ICI, une fois
+    // toute l'enumeration finie : armer plus tot ferait arriver des rapports
+    // au milieu des transferts de controle qui restent a faire.
+    arm_all_hids(controller);
+    crate::serial_println!(
+        "BOUCHAUD_USB_BRANCHEMENT_OK port={} claviers={} souris={}",
+        port,
+        controller.hids[..controller.hid_count].iter().filter(|e| e.kind == 1).count(),
+        controller.hids[..controller.hid_count].iter().filter(|e| e.kind == 2).count(),
+    );
+}
+
+/// Scrute les ports a la recherche d'un changement que l'anneau n'a pas dit.
+///
+/// # Pourquoi ne pas se fier aux seuls evenements
+///
+/// Les interruptions sont desactivees : l'anneau n'est lu que lorsqu'on le
+/// draine, et un evenement de changement de port peut avoir ete consomme par
+/// un `wait_event` d'une version anterieure, ou ne jamais avoir ete poste par
+/// un controleur avare. Relire les bits de changement coute une lecture par
+/// port et ferme ce trou-la.
+fn releve_ports_changes(controller: &mut Controller) {
+    let ports = controller.max_ports.min(MAX_PORTS_PER_CONTROLLER as u8) as usize;
+    for port_index in 0..ports {
+        let portsc = unsafe { r32(controller.op, 0x400 + port_index * 0x10) };
+        if portsc & PORTSC_CHANGE_BITS != 0 {
+            controller.ports_a_traiter |= 1u32 << port_index;
+        }
     }
 }
 
@@ -2210,6 +2498,9 @@ fn init_controller(dev: PciDevice) -> Result<(Controller, usize), &'static str> 
             dcbaa_phys,
             dcbaa_virt,
             hids: [EMPTY_HID_ENDPOINT; MAX_HID_ENDPOINTS_PER_CONTROLLER],
+            differes: [Trb { parameter: 0, status: 0, control: 0 }; EVENEMENTS_DIFFERES],
+            differes_len: 0,
+            ports_a_traiter: 0,
             arbre: [None; NOEUDS_MAX],
             compte_noeuds: 0,
             hid_count: 0,
@@ -2507,8 +2798,36 @@ pub fn hid_transport_stats() -> (usize, usize, usize, usize, usize, usize, usize
     )
 }
 
+/// Y a-t-il un controleur xHCI dont il faille surveiller les ports ?
+///
+/// # Pourquoi ce n'est pas `hid_polling()`
+///
+/// `hid_polling()` dit « un clavier ou une souris USB a repondu ». Le cas qui
+/// compte pour le branchement a chaud est exactement l'INVERSE : demarrer sans
+/// clavier, puis en brancher un. Gater la surveillance sur la presence d'un
+/// HID rendrait le branchement a chaud inoperant precisement quand on en a
+/// besoin.
+pub fn surveille_branchements() -> bool {
+    ACTIVE.load(Ordering::Acquire) && CONTROLLERS.load(Ordering::Acquire) != 0
+}
+
+/// Periode de relecture des bits de changement des ports, en millisecondes.
+///
+/// Deux cents millisecondes : assez court pour qu'un branchement paraisse
+/// immediat -- personne ne mesure un cinquieme de seconde entre la prise et le
+/// curseur --, assez long pour que huit lectures de registre par controleur ne
+/// pesent rien. La periode est en TEMPS et non en nombre de tours : le bureau
+/// scrute toutes les deux millisecondes quand un HID repond et toutes les
+/// deux cent cinquante quand aucun ne repond, et une borne en tours donnerait
+/// deux comportements tres differents.
+const PERIODE_SCRUTATION_PORTS_MS: u64 = 200;
+
+static DERNIERE_SCRUTATION_PORTS_NS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
 pub fn poll() {
-    if !hid_polling() {
+    let hid = hid_polling();
+    if !hid && !surveille_branchements() {
         return;
     }
     HID_POLLS.fetch_add(1, Ordering::Relaxed);
@@ -2519,15 +2838,56 @@ pub fn poll() {
         return;
     }
 
+    // L'heure de la prochaine relecture des ports, decidee UNE fois pour tous
+    // les controleurs : la calculer par controleur ferait scruter le second
+    // deux fois plus souvent que le premier.
+    let maintenant_ns = crate::kernel::timer::monotonic_ns();
+    let echue = maintenant_ns.saturating_sub(
+        DERNIERE_SCRUTATION_PORTS_NS.load(Ordering::Relaxed),
+    ) >= PERIODE_SCRUTATION_PORTS_MS.saturating_mul(1_000_000);
+    if echue {
+        DERNIERE_SCRUTATION_PORTS_NS.store(maintenant_ns, Ordering::Relaxed);
+    }
+
     unsafe {
         if let Some(runtime) = RUNTIME.as_mut() {
             let poll_no = HID_POLLS.load(Ordering::Relaxed);
             for controller in runtime.controllers.iter_mut() {
+                // LES RAPPORTS MIS DE COTE D'ABORD.
+                //
+                // Ils sont ARRIVES AVANT ceux qui sont encore dans l'anneau :
+                // les traiter apres inverserait l'ordre des frappes, et une
+                // touche relachee avant d'etre appuyee reste enfoncee.
+                let differes = controller.differes_len;
+                controller.differes_len = 0;
+                for index in 0..differes {
+                    let event = controller.differes[index];
+                    process_hid_event(controller, event);
+                }
                 for _ in 0..MAX_EVENTS_PER_POLL {
                     let Some(event) = next_event(controller) else { break };
-                    if trb_type(event.control) == EVT_TRANSFER {
-                        process_hid_event(controller, event);
+                    match trb_type(event.control) {
+                        EVT_TRANSFER => process_hid_event(controller, event),
+                        EVT_PORT_STATUS_CHANGE => {
+                            note_port_a_traiter(controller, port_de_l_evenement(event))
+                        }
+                        _ => {}
                     }
+                }
+
+                // LE BRANCHEMENT A CHAUD, APRES le drainage et jamais dedans :
+                // enumerer emet des transferts de controle qui attendent leurs
+                // propres evenements, ce qui reentrerait dans la boucle qu'on
+                // vient de quitter.
+                if echue {
+                    releve_ports_changes(controller);
+                }
+                let mut traites = 0usize;
+                while traites < BRANCHEMENTS_PAR_TOUR && controller.ports_a_traiter != 0 {
+                    let port_index = controller.ports_a_traiter.trailing_zeros() as usize;
+                    controller.ports_a_traiter &= !(1u32 << port_index);
+                    traite_port_change(controller, port_index);
+                    traites += 1;
                 }
                 // Some physical controllers are conservative about periodic
                 // scheduling after Configure Endpoint. Re-kicking an endpoint
@@ -2575,9 +2935,44 @@ fn nom_vitesse(vitesse: u8) -> &'static str {
 ///
 /// Si l'arbre n'a jamais ete parcouru -- le cas hors du bureau de reference --
 /// la commande le parcourt maintenant.
-pub fn lsusb() {
+pub fn lsusb(attente_ms: u64) {
     if !ACTIVE.load(Ordering::Acquire) && CONTROLLERS.load(Ordering::Acquire) == 0 {
         let _ = bring_up();
+    }
+    // ATTENDRE QU'UN PERIPHERIQUE ARRIVE.
+    //
+    // Le branchement a chaud n'est decouvert que par une scrutation, et la
+    // scrutation vient de la boucle du bureau. Depuis un interpreteur de
+    // commandes, personne ne scrute -- `lsusb` afficherait l'etat du
+    // demarrage, pas l'etat present.
+    //
+    // C'est aussi la reponse a « je viens de brancher le clavier, est-ce qu'il
+    // est vu ? » : la commande rend la main des qu'il l'est, et au plus tard a
+    // l'echeance.
+    if attente_ms != 0 {
+        let debut = crate::kernel::timer::monotonic_ns();
+        let limite = debut.saturating_add(attente_ms.saturating_mul(1_000_000));
+        let depart = hid_keyboards() + hid_mice();
+        loop {
+            // Chaque tour force la relecture des ports : sans cela on
+            // attendrait la periode de scrutation, qui n'avance que si
+            // quelqu'un d'autre appelle `poll()`.
+            DERNIERE_SCRUTATION_PORTS_NS.store(0, Ordering::Relaxed);
+            poll();
+            if hid_keyboards() + hid_mice() > depart {
+                break;
+            }
+            if crate::kernel::timer::monotonic_ns() >= limite {
+                break;
+            }
+            wait_ms(10);
+        }
+    } else {
+        // Meme sans attente, un tour de scrutation : afficher l'etat du
+        // demarrage alors qu'on peut afficher l'etat present serait un
+        // mensonge poli.
+        DERNIERE_SCRUTATION_PORTS_NS.store(0, Ordering::Relaxed);
+        poll();
     }
     if RUNTIME_BUSY.swap(true, Ordering::Acquire) {
         crate::println!("lsusb: enumeration en cours, reessayer");
@@ -2629,13 +3024,16 @@ pub fn lsusb() {
         PERIPHERIQUES_DERRIERE.load(Ordering::Acquire),
     );
     crate::serial_println!(
-        "BOUCHAUD_LSUSB peripheriques={} concentrateurs={} non_traverses={} derriere_concentrateur={} claviers={} souris={}",
+        "BOUCHAUD_LSUSB peripheriques={} concentrateurs={} non_traverses={} derriere_concentrateur={} claviers={} souris={} branchements={} debranchements={} evenements_perdus={}",
         total,
         CONCENTRATEURS.load(Ordering::Acquire),
         CONCENTRATEURS_ECHOUES.load(Ordering::Acquire),
         PERIPHERIQUES_DERRIERE.load(Ordering::Acquire),
         HID_KEYBOARDS.load(Ordering::Acquire),
         HID_MICE.load(Ordering::Acquire),
+        BRANCHEMENTS.load(Ordering::Acquire),
+        DEBRANCHEMENTS.load(Ordering::Acquire),
+        EVENEMENTS_PERDUS.load(Ordering::Acquire),
     );
 }
 
@@ -2659,6 +3057,9 @@ pub fn bring_up() -> ActiveSummary {
     CONCENTRATEURS.store(0, Ordering::Release);
     CONCENTRATEURS_ECHOUES.store(0, Ordering::Release);
     PERIPHERIQUES_DERRIERE.store(0, Ordering::Release);
+    EVENEMENTS_PERDUS.store(0, Ordering::Release);
+    BRANCHEMENTS.store(0, Ordering::Release);
+    DEBRANCHEMENTS.store(0, Ordering::Release);
     HID_CONTROL_POLLS.store(0, Ordering::Release);
     HID_CONTROL_REPORTS.store(0, Ordering::Release);
     HID_CONTROL_FAILS.store(0, Ordering::Release);

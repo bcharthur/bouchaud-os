@@ -1084,6 +1084,18 @@ fn boucle() {
                 // echeance. Le bureau reste evenementiel hors presence HID USB.
                 let date = if crate::drivers::xhci_active::hid_polling() {
                     date.min(maintenant.saturating_add(2))
+                } else if crate::drivers::xhci_active::surveille_branchements() {
+                    // AUCUN HID USB, MAIS UN CONTROLEUR QUI EN ATTEND UN.
+                    //
+                    // C'est le cas du branchement a chaud : demarrer sans
+                    // clavier puis en brancher un. Sans cette borne le bureau
+                    // dort jusqu'a trente secondes, et le clavier parait mort
+                    // pendant tout ce temps -- l'utilisateur le debranche et
+                    // le rebranche, ce qui ne change rien.
+                    //
+                    // Un quart de seconde : personne ne le mesure, et cela ne
+                    // coute que huit lectures de registre par reveil.
+                    date.min(maintenant.saturating_add(250))
                 } else {
                     date
                 };

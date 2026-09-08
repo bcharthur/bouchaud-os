@@ -841,7 +841,18 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         // L'arbre USB, concentrateurs compris. « Le clavier ne marche pas »
         // commence par « a-t-il ete vu ? » -- deux enquetes differentes selon
         // la reponse, et rien d'autre ne permet de les distinguer.
-        "lsusb" => { crate::drivers::xhci_active::lsusb(); 0 }
+        "lsusb" => {
+            // `lsusb --attends <ms>` rend la main des qu'un clavier ou une
+            // souris arrive : c'est la reponse a « je viens de le brancher,
+            // est-ce qu'il est vu ? ».
+            let attente = if argc >= 3 && argv[1] == "--attends" {
+                argv[2].parse::<u64>().unwrap_or(0).min(60_000)
+            } else {
+                0
+            };
+            crate::drivers::xhci_active::lsusb(attente);
+            0
+        }
 
         // Reseau : loopback actif, eth0/Internet en attente du driver NIC.
         "ping" => { crate::net::ping(argc, &argv); 0 }
