@@ -19,7 +19,7 @@
 #[path = "../../src/kernel/memory/magasin.rs"]
 mod magasin;
 
-use magasin::{detache, longueur_chaine, Depot, Magasin, LOT, MAGASINS_MAX};
+use magasin::{detache, lien_plausible, longueur_chaine, Depot, Magasin, LOT, MAGASINS_MAX};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -271,4 +271,63 @@ fn le_magasin_le_plus_chaud_ressort_en_premier() {
     for attendu in tetes.iter().rev() {
         assert_eq!(depot.retire().unwrap().tete, *attendu);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Validation des liens : ce qui separe une corruption reperee d'une ecriture
+// sauvage.
+// ---------------------------------------------------------------------------
+
+/// Zero est une FIN DE CHAINE, jamais un bloc. Le confondre avec une adresse
+/// faisait ecrire un pointeur du tas a l'adresse nulle.
+#[test]
+fn le_lien_nul_n_est_jamais_un_bloc() {
+    assert!(!lien_plausible(0, 64, 0x1000, 0x9000));
+    assert!(!lien_plausible(0, 64, 0, 0));
+}
+
+/// Un bloc d'une classe est aligne sur sa taille : l'allocateur le decoupe avec
+/// `Layout::from_size_align(taille, taille)`. Une adresse qui ne l'est pas ne
+/// vient pas de cette classe, et la suivre lirait a cote.
+#[test]
+fn un_bloc_est_aligne_sur_sa_classe() {
+    assert!(lien_plausible(0x2000, 64, 0x1000, 0x9000));
+    assert!(!lien_plausible(0x2001, 64, 0x1000, 0x9000));
+    assert!(!lien_plausible(0x2020, 64, 0x1000, 0x9000));
+}
+
+/// Un bloc du tas est DANS le tas, et il y tient en entier : un bloc qui
+/// commence avant la fin mais deborde n'est pas dans l'arene.
+#[test]
+fn un_bloc_tient_entierement_dans_l_arene() {
+    assert!(lien_plausible(0x1000, 64, 0x1000, 0x9000));
+    assert!(lien_plausible(0x8FC0, 64, 0x1000, 0x9000));
+    // Commence dans l'arene, se termine apres : refuse.
+    assert!(!lien_plausible(0x9000, 64, 0x1000, 0x9000));
+    // Avant l'arene.
+    assert!(!lien_plausible(0x0FC0, 64, 0x1000, 0x9000));
+}
+
+/// Une arene inconnue (`debut == fin`) ne doit pas TOUT refuser : le tas
+/// bootstrap fonctionne avant que ses bornes soient enregistrees. Alignement et
+/// non-nullite restent verifies.
+#[test]
+fn une_arene_inconnue_ne_refuse_pas_tout() {
+    assert!(lien_plausible(0x2000, 64, 0, 0));
+    assert!(!lien_plausible(0x2001, 64, 0, 0));
+    assert!(!lien_plausible(0, 64, 0, 0));
+}
+
+/// Une taille nulle ne decrit aucune classe : le modulo serait une division
+/// par zero, et la question n'a pas de sens.
+#[test]
+fn une_classe_de_taille_nulle_est_refusee() {
+    assert!(!lien_plausible(0x2000, 0, 0x1000, 0x9000));
+}
+
+/// Une adresse dont la fin deborde l'espace d'adressage ne peut pas etre un
+/// bloc : le calcul de son bout n'a pas de resultat.
+#[test]
+fn un_bloc_qui_deborde_l_espace_est_refuse() {
+    assert!(!lien_plausible(usize::MAX - 8, 64, 0, 0));
 }

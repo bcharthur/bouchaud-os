@@ -37,6 +37,50 @@ static mut HEAP_SPACE: [u8; BOOTSTRAP_SIZE] = [0; BOOTSTRAP_SIZE];
 static HEAP_TOTAL: AtomicUsize = AtomicUsize::new(BOOTSTRAP_SIZE);
 static CACHE_READY: AtomicBool = AtomicBool::new(false);
 
+/// Bornes de l'arene du tas. Elles servent a valider les liens de la liste
+/// libre AVANT de les dereferencer -- voir `magasin::lien_plausible`.
+static ARENE_DEBUT: AtomicUsize = AtomicUsize::new(0);
+static ARENE_FIN: AtomicUsize = AtomicUsize::new(0);
+/// Liens refuses parce qu'ils ne pouvaient pas designer un bloc.
+static LIENS_REFUSES: AtomicU64 = AtomicU64::new(0);
+/// La corruption a-t-elle deja ete signalee ? Une fois suffit.
+static CORRUPTION_DITE: AtomicBool = AtomicBool::new(false);
+
+/// Les bornes de l'arene du tas, ou `(0, 0)` si elle n'est pas connue.
+///
+/// Le chemin de faute s'en sert pour dire si `RSP` designe encore le tas :
+/// toutes les piles noyau y sont allouees, donc un `RSP` hors de ces bornes
+/// n'est pas une pile un peu trop pleine, c'est une pile qui n'existe pas.
+pub fn arene_bornes() -> (usize, usize) {
+    (ARENE_DEBUT.load(Ordering::Acquire), ARENE_FIN.load(Ordering::Acquire))
+}
+
+/// Compteur de liens refuses, pour le diagnostic.
+pub fn liens_refuses() -> u64 {
+    LIENS_REFUSES.load(Ordering::Relaxed)
+}
+
+/// Un lien de liste libre peut-il etre suivi ?
+///
+/// Le refus est COMPTE et signale une fois. Une liste libre corrompue est un
+/// usage-apres-liberation quelque part ; le taire reviendrait a transformer un
+/// bug reperable en corruption silencieuse.
+#[inline]
+fn lien_suivable(bloc: usize, taille: usize) -> bool {
+    let (debut, fin) = arene_bornes();
+    if magasin::lien_plausible(bloc, taille, debut, fin) {
+        return true;
+    }
+    LIENS_REFUSES.fetch_add(1, Ordering::Relaxed);
+    if !CORRUPTION_DITE.swap(true, Ordering::Release) {
+        crate::serial_println!(
+            "BOUCHAUD_HEAP_LISTE_LIBRE_CORROMPUE bloc={:#x} taille={} arene={:#x}..{:#x}",
+            bloc, taille, debut, fin
+        );
+    }
+    false
+}
+
 struct CacheClass {
     head: AtomicUsize,
     count: AtomicUsize,
@@ -111,6 +155,13 @@ unsafe fn cache_pop(index: usize, size: usize) -> *mut u8 {
         let cache = &CACHES[cpu_index()].classes[index];
         let head = cache.head.load(Ordering::Acquire);
         if head == 0 { return core::ptr::null_mut(); }
+        if !lien_suivable(head, size) {
+            // La liste de ce CPU ne veut plus rien dire. L'abandonner coute au
+            // pire quelques blocs ; la suivre ecrirait n'importe ou.
+            cache.head.store(0, Ordering::Release);
+            cache.count.store(0, Ordering::Relaxed);
+            return core::ptr::null_mut();
+        }
         let next = *(head as *const usize);
         cache.head.store(next, Ordering::Release);
         cache.count.fetch_sub(1, Ordering::Relaxed);
@@ -147,8 +198,21 @@ unsafe fn recharge_depuis_depot(index: usize, size: usize) -> *mut u8 {
         };
         let cache = &CACHES[cpu_index()].classes[index];
         let servi = magasin.tete;
+        // LE MAGASIN VIENT DU DEPOT, PAS D'UNE PREUVE.
+        //
+        // Sa tete est une adresse lue dans une structure partagee, et le mot
+        // qu'on s'apprete a lire vit dans de la memoire LIBEREE -- donc dans de
+        // la memoire qu'un usage-apres-liberation a pu reecrire. La suivre sans
+        // la valider etait le chemin par lequel une corruption d'un octet
+        // devenait une ecriture a une adresse arbitraire, plus bas.
+        if !lien_suivable(servi, size) {
+            return core::ptr::null_mut();
+        }
         let reste = magasin::lien_lit(servi);
-        let restants = magasin.compte - 1;
+        // `compte` vaut au moins un -- `Depot::depose` refuse zero -- mais le
+        // soustraire sans garde ferait de la seule violation possible un
+        // `usize::MAX`, c'est-a-dire une marche de liste sans fin.
+        let restants = magasin.compte.saturating_sub(1);
 
         // La liste etait vide quand `cache_pop` a echoue -- mais elle a pu se
         // remplir depuis. `cache_pop` ne masque les interruptions QUE pour sa
@@ -159,12 +223,27 @@ unsafe fn recharge_depuis_depot(index: usize, size: usize) -> *mut u8 {
         //
         // Le magasin se RACCORDE donc a ce qui est la. La marche jusqu'a sa
         // queue est bornee par `LOT`, sur des blocs qui viennent d'etre lus.
+        // Le reste de la chaine doit exister avant qu'on pretende le raccorder.
+        // `restants != 0` avec un `reste` nul est une incoherence du depot, et
+        // la traiter comme « chaine vide » vaut mieux que d'ecrire a zero.
+        let restants = if restants != 0 && !lien_suivable(reste, size) {
+            0
+        } else {
+            restants
+        };
+
         let ancienne = cache.head.load(Ordering::Acquire);
         if ancienne != 0 && restants != 0 {
             let mut queue = reste;
-            for _ in 1..restants {
+            // La marche est bornee par `LOT` : un magasin n'en contient jamais
+            // plus, et un `compte` menteur ne doit pas pouvoir faire tourner
+            // cette boucle plus longtemps que la structure ne l'autorise.
+            for _ in 1..restants.min(magasin::LOT) {
                 let suivant = magasin::lien_lit(queue);
                 if suivant == 0 { break; }
+                if !lien_suivable(suivant, size) {
+                    break;
+                }
                 queue = suivant;
             }
             magasin::lien_ecrit(queue, ancienne);
@@ -267,10 +346,10 @@ unsafe impl GlobalAlloc for NgHeap {
 
 pub fn init() {
     unsafe {
-        ALLOCATOR.inner.lock().init(
-            core::ptr::addr_of_mut!(HEAP_SPACE) as *mut u8,
-            BOOTSTRAP_SIZE,
-        );
+        let debut = core::ptr::addr_of_mut!(HEAP_SPACE) as *mut u8;
+        ALLOCATOR.inner.lock().init(debut, BOOTSTRAP_SIZE);
+        ARENE_DEBUT.store(debut as usize, Ordering::Release);
+        ARENE_FIN.store(debut as usize + BOOTSTRAP_SIZE, Ordering::Release);
     }
     crate::kernel::dmesg::log("heap-ng: bootstrap 8 MiB initialise");
 }
@@ -281,6 +360,8 @@ pub unsafe fn switch_arena(start: *mut u8, size: usize) {
     CACHE_READY.store(false, Ordering::Release);
     ALLOCATOR.inner.lock().init(start, size);
     HEAP_TOTAL.store(size, Ordering::Release);
+    ARENE_DEBUT.store(start as usize, Ordering::Release);
+    ARENE_FIN.store(start as usize + size, Ordering::Release);
     CACHE_READY.store(true, Ordering::Release);
     crate::kernel::dmesg::log("heap-ng: arene physique active + caches per-CPU");
 }

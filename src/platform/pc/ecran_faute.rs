@@ -271,6 +271,12 @@ pub fn affiche(
         // peu fausse, c'est une valeur qui n'a jamais pu etre une adresse.
         if !canonique(rsp) {
             texte(fin + 8 * echelle, y, "NON CANONIQUE", echelle, TITRE);
+        } else if !dans_le_tas(rsp) {
+            // TOUTES les piles noyau sont allouees dans le tas. Un `RSP` hors
+            // de ces bornes n'est donc pas une pile trop pleine : c'est une
+            // adresse qui n'a jamais ete une pile, et cela separe « la pile a
+            // deborde » de « quelque chose a ecrase RSP ».
+            texte(fin + 8 * echelle, y, "HORS TAS NOYAU", echelle, TITRE);
         }
         y += pas;
 
@@ -338,6 +344,20 @@ pub fn affiche(
             echelle,
             TEXTE,
         );
+        y += pas;
+
+        // Un lien refuse est la preuve d'un usage-apres-liberation. S'il est
+        // non nul, la piste n'est plus a chercher : la liste libre du tas a ete
+        // reecrite par quelqu'un qui avait deja rendu sa memoire.
+        let refuses = crate::kernel::heap::liens_refuses();
+        texte(marge, y, "LIENS REFUSES   ", echelle, ETIQUETTE);
+        hexa(
+            marge + 16 * 8 * echelle,
+            y,
+            refuses,
+            echelle,
+            if refuses == 0 { TEXTE } else { TITRE },
+        );
         y += pas + pas;
 
         texte(
@@ -359,6 +379,19 @@ pub fn affiche(
 /// regle ne peut PAS etre une adresse : le processeur la refuse avant meme de
 /// consulter la pagination. Le dire nommement evite de chercher une page
 /// manquante pour une valeur qui n'a jamais designe de page.
+/// L'adresse tombe-t-elle dans l'arene du tas noyau ?
+///
+/// Les piles noyau des taches sont des allocations de 64 Kio du tas. La
+/// question n'a de sens que si l'arene est connue ; tant qu'elle ne l'est pas,
+/// on ne conclut rien plutot que de crier au loup.
+fn dans_le_tas(adresse: u64) -> bool {
+    let (debut, fin) = crate::kernel::heap::arene_bornes();
+    if debut == fin {
+        return true;
+    }
+    adresse >= debut as u64 && adresse < fin as u64
+}
+
 fn canonique(adresse: u64) -> bool {
     let haut = adresse >> 47;
     haut == 0 || haut == 0x1FFFF

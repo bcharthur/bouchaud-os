@@ -75,6 +75,49 @@ pub unsafe fn lien_ecrit(bloc: usize, suivant: usize) {
     *(bloc as *mut usize) = suivant;
 }
 
+/// Une adresse peut-elle etre celle d'un bloc libre de cette classe ?
+///
+/// # Pourquoi cette question doit etre posee AVANT chaque dereferencement
+///
+/// Le lien vers le bloc suivant vit DANS le bloc libre. C'est ce qui rend un
+/// magasin gratuit -- et c'est aussi ce qui fait que la liste libre est de la
+/// memoire rendue, donc de la memoire que n'importe quel usage-apres-liberation
+/// peut reecrire. Un seul mot corrompu, et la marche de la chaine lit une
+/// adresse arbitraire, puis y ECRIT : `lien_ecrit(queue, ancienne)` pose un
+/// pointeur du tas a une adresse que plus rien ne contraint.
+///
+/// Cette primitive ne repare pas la corruption. Elle l'empeche de se propager
+/// en ecriture sauvage, et permet a l'appelant de la SIGNALER au lieu de
+/// dessiner un cratere ailleurs en memoire, dont le symptome apparaitra dans
+/// un tout autre sous-systeme.
+///
+/// Trois conditions, et les trois comptent :
+///
+///   * non nul -- zero est la marque de fin de chaine, jamais un bloc ;
+///   * aligne sur la taille de classe -- l'allocateur decoupe avec
+///     `Layout::from_size_align(taille, taille)`, donc tout bloc de cette
+///     classe l'est, et une adresse qui ne l'est pas n'en vient pas ;
+///   * dans l'arene -- un bloc du tas est dans le tas.
+///
+/// `debut == fin` veut dire « arene inconnue » : le controle de bornes est
+/// alors saute plutot que de tout refuser. Un tas non encore enregistre doit
+/// continuer de fonctionner.
+pub fn lien_plausible(bloc: usize, taille: usize, debut: usize, fin: usize) -> bool {
+    if bloc == 0 {
+        return false;
+    }
+    if taille == 0 || bloc % taille != 0 {
+        return false;
+    }
+    if debut == fin {
+        return true;
+    }
+    match bloc.checked_add(taille) {
+        Some(bout) => bloc >= debut && bout <= fin,
+        None => false,
+    }
+}
+
 /// Une chaine de blocs libres, et sa longueur.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Magasin {
