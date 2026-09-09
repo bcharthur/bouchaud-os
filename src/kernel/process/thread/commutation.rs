@@ -39,7 +39,7 @@ pub fn piles_corrompues() -> u64 {
     PILES_CORROMPUES.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-/// Verifie le canari de la pile d'une tache qu'on remet sur un coeur.
+/// Verifie le haut de la page de garde d'une tache qu'on remet sur un coeur.
 ///
 /// # Pourquoi ici, et pourquoi c'est assez
 ///
@@ -60,17 +60,24 @@ fn verifie_le_canari(task: &Task) {
         return;
     }
     PILES_CORROMPUES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    // La page entiere n'est relue qu'ICI, une fois la rupture constatee : la
+    // profondeur atteinte distingue « quelques centaines d'octets de trop »
+    // d'un `RSP` qui s'est perdu, et ces deux-la ne se cherchent pas au meme
+    // endroit.
+    let profondeur = task.profondeur_dans_la_garde();
     crate::serial_println!(
-        "BOUCHAUD_PILE_NOYAU_DEBORDEE tid={} pid={} base={:#x} sommet={:#x} taille={}",
+        "BOUCHAUD_PILE_NOYAU_DEBORDEE tid={} pid={} base={:#x} sommet={:#x} taille={} garde_entamee={} garde={}",
         task.tid,
         task.process.pid,
         task.kstack_base(),
         task.kstack_top,
         task.kstack_top - task.kstack_base(),
+        profondeur,
+        GARDE_PILE,
     );
     panic!(
-        "pile noyau debordee : tid={} pid={} base={:#x}",
-        task.tid, task.process.pid, task.kstack_base()
+        "pile noyau debordee : tid={} pid={} base={:#x} garde_entamee={}",
+        task.tid, task.process.pid, task.kstack_base(), profondeur
     );
 }
 

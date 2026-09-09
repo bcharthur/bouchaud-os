@@ -3,8 +3,8 @@ impl Task {
     pub fn new(process: Arc<Process>, frame: TrapFrame) -> Box<Task> {
         let kstack = vec![0u8; KSTACK_SIZE];
         let kstack_top = (kstack.as_ptr() as u64 + KSTACK_SIZE as u64) & !0xF;
-        // Le canari est pose AU PIED de la pile -- les adresses basses, celles
-        // que la pile atteint en dernier en descendant. Voir `CANARI_PILE`.
+        // La page de garde occupe le PIED de l'allocation ; la pile utilisable
+        // commence apres elle. Voir `GARDE_PILE` et `CANARI_PILE`.
         unsafe { pose_le_canari(kstack.as_ptr() as u64) };
         let fpu = vec![0u8; 512 + 16];
         let fpu_area = (fpu.as_ptr() as u64 + 15) & !0xF;
@@ -72,44 +72,93 @@ impl Task {
 
     /// La pile noyau de cette tache est-elle intacte ?
     ///
-    /// Rend `false` des qu'un mot du canari a bouge. Un debordement de pile
-    /// noyau n'a pas d'autre symptome que celui-la : il ecrit dans le tas
-    /// voisin, silencieusement, et la faute apparait ailleurs -- ou nulle part,
-    /// jusqu'a ce qu'un `RSP` sorte de toute region valide.
+    /// Rend `false` des que l'un des `CANARI_MOTS` mots situes JUSTE SOUS le
+    /// premier octet utilisable a bouge. C'est le premier endroit qu'une pile
+    /// qui deborde atteint, puisqu'elle descend.
+    ///
+    /// Un debordement de pile noyau n'a pas d'autre symptome : il ecrit dans le
+    /// tas voisin, silencieusement, et la faute apparait ailleurs -- ou nulle
+    /// part, jusqu'a ce qu'un `RSP` sorte de toute region valide.
     pub fn pile_intacte(&self) -> bool {
         unsafe { canari_intact(self.kstack.as_ptr() as u64) }
     }
 
-    /// Adresse du pied de pile, pour le diagnostic.
+    /// De combien d'octets la garde a-t-elle ete entamee ?
+    ///
+    /// Relit la page entiere, ce que `pile_intacte` ne fait pas : cette
+    /// reponse-la n'est utile qu'une fois, quand la rupture est deja constatee.
+    /// Zero veut dire que la garde est intacte ; `GARDE_PILE` veut dire qu'elle
+    /// a ete traversee de part en part, et le debordement est alors plus
+    /// profond que ce que la garde peut mesurer.
+    pub fn profondeur_dans_la_garde(&self) -> usize {
+        unsafe { garde_entamee(self.kstack.as_ptr() as u64) }
+    }
+
+    /// Adresse du premier octet UTILISABLE de la pile.
+    ///
+    /// Le diagnostic de faute soustrait `RSP` de cette valeur : la difference
+    /// est alors la profondeur du debordement, et non un decalage qui inclut la
+    /// garde.
     pub fn kstack_base(&self) -> u64 {
-        self.kstack.as_ptr() as u64
+        self.kstack.as_ptr() as u64 + GARDE_PILE as u64
     }
 }
 
-/// Ecrit le canari au pied d'une pile fraiche.
+/// Mots que porte la page de garde.
+const GARDE_MOTS: usize = GARDE_PILE / 8;
+
+/// Remplit la page de garde d'une pile fraiche.
 ///
 /// # Securite
-/// `base` doit etre le premier octet d'une allocation d'au moins
-/// `CANARI_MOTS * 8` octets.
+/// `base` doit etre le premier octet d'une allocation d'au moins `GARDE_PILE`
+/// octets, alignee sur `u64`.
 unsafe fn pose_le_canari(base: u64) {
     let mots = base as *mut u64;
-    for index in 0..CANARI_MOTS {
+    for index in 0..GARDE_MOTS {
         core::ptr::write_volatile(mots.add(index), CANARI_PILE);
     }
 }
 
-/// Le canari d'une pile est-il encore celui qu'on y a mis ?
+/// Le HAUT de la garde est-il encore intact ?
+///
+/// Relit les `CANARI_MOTS` derniers mots de la page -- ceux qu'une pile qui
+/// descend touche en premier. C'est le controle du chemin chaud : huit
+/// lectures a chaque election, la ou la page entiere en couterait cinq cent
+/// douze.
 ///
 /// # Securite
 /// Voir [`pose_le_canari`].
 unsafe fn canari_intact(base: u64) -> bool {
     let mots = base as *const u64;
-    for index in 0..CANARI_MOTS {
+    for index in (GARDE_MOTS - CANARI_MOTS)..GARDE_MOTS {
         if core::ptr::read_volatile(mots.add(index)) != CANARI_PILE {
             return false;
         }
     }
     true
+}
+
+/// Octets de garde reecrits, mesures depuis le HAUT de la page.
+///
+/// Parcourt la page du haut vers le bas et s'arrete au premier mot intact :
+/// une pile qui deborde ecrit de facon contigue en descendant, et le premier
+/// mot encore vivant marque donc la profondeur atteinte. Un motif retrouve
+/// plus bas serait une coincidence, pas une preuve que la garde tient.
+///
+/// # Securite
+/// Voir [`pose_le_canari`].
+unsafe fn garde_entamee(base: u64) -> usize {
+    let mots = base as *const u64;
+    let mut entames = 0usize;
+    let mut index = GARDE_MOTS;
+    while index > 0 {
+        index -= 1;
+        if core::ptr::read_volatile(mots.add(index)) == CANARI_PILE {
+            break;
+        }
+        entames += 1;
+    }
+    entames * 8
 }
 
 fn amorce_pile(task: &mut Task, trampoline: extern "C" fn() -> !, rflags: u64) {

@@ -123,7 +123,10 @@ pub fn identite_pour_faute() -> Option<(usize, u32, u32, u64, u64, bool)> {
         task.process.pid,
         task.tid,
         task.kstack_top,
-        task.kstack_top.saturating_sub(KSTACK_SIZE as u64),
+        // La base UTILISABLE, pas celle de l'allocation : `exceptions.rs`
+        // publie `base - rsp`, qui devient ainsi la profondeur du debordement
+        // et non un ecart qui inclut la page de garde.
+        task.kstack_base(),
         task.in_kernel.charge(),
     ))
 }

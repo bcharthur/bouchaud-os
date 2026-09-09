@@ -1,5 +1,32 @@
-/// Taille de la pile noyau d'une tache (64 KiB).
+/// Taille de l'ALLOCATION d'une pile noyau (64 Kio).
+///
+/// Ce n'est pas la taille utilisable : la page du pied est une garde. Voir
+/// [`GARDE_PILE`].
 const KSTACK_SIZE: usize = 64 * 1024;
+
+/// Octets reserves au PIED de chaque pile noyau, jamais utilisables.
+///
+/// # Pourquoi une page entiere, et pourquoi elle tient dans les memes 64 Kio
+///
+/// Le canari de huit mots ne temoigne que de ce qui touche ces huit mots. Une
+/// pile qui deborde de quelques centaines d'octets ecrit dans le tas voisin
+/// SANS les toucher, et le debordement reste silencieux jusqu'a ce que le
+/// symptome apparaisse dans un sous-systeme sans rapport.
+///
+/// Une page entiere couvre quatre kibioctets de debordement. Elle est prise
+/// DANS l'allocation existante plutot qu'ajoutee a cote : les piles viennent
+/// du tas, dont les grandes allocations sont desormais servies par le
+/// compagnon, et 64 Kio + une page demanderaient un bloc de 128 Kio -- deux
+/// fois la memoire par tache pour une page de garde. Soixante kibioctets
+/// utilisables restent tres au-dessus de ce qu'une pile noyau consomme.
+///
+/// Ce n'est pas une page NON MAPPEE : elle ne piege pas l'ecriture au moment ou
+/// elle se produit. La faire piegeante demanderait de demapper une page de la
+/// fenetre a decalage physique, qui est partagee par tout `phys_to_virt`, avec
+/// division d'une grande page et invalidation croisee sur seize coeurs. Ce
+/// qu'on gagne ici -- un debordement de moins de quatre kibioctets devient
+/// visible a la prochaine election de la tache -- ne le justifie pas encore.
+pub const GARDE_PILE: usize = 4096;
 
 /// Classe d'ordonnancement d'une tache.
 ///
