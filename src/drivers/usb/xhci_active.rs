@@ -3006,16 +3006,56 @@ pub fn lsusb(attente_ms: u64) {
         let debut = crate::kernel::timer::monotonic_ns();
         let limite = debut.saturating_add(attente_ms.saturating_mul(1_000_000));
         let depart = hid_keyboards() + hid_mice();
+
+        // ON ATTEND QUE CA SE STABILISE, PAS QUE LE PREMIER ARRIVE.
+        //
+        // Cette boucle sortait des qu'UN peripherique de plus etait compte. Or
+        // brancher un clavier et une souris est un geste unique du point de vue
+        // de l'utilisateur, et leurs enumerations ne se terminent pas au meme
+        // instant : rendre la main au premier montre un arbre a moitie
+        // decouvert, et fait conclure « la souris n'est pas vue » alors qu'elle
+        // arrivait.
+        //
+        // Le defaut etait MASQUE par un autre : tant que les compteurs HID
+        // n'etaient pas mis a jour sur branchement a chaud, la condition de
+        // sortie ne devenait jamais vraie et la boucle tournait l'echeance
+        // entiere -- ce qui laissait, par accident, le temps a tout d'arriver.
+        // Reparer les compteurs a donc revele ce second defaut, ce qui est
+        // exactement ce que doit faire une correction.
+        //
+        // La reponse est un temps de CALME : une fois qu'au moins un
+        // peripherique est arrive, on continue de scruter tant que le total
+        // bouge, et on rend la main quand il a cesse de bouger. L'echeance
+        // globale reste le plafond.
+        const CALME_MS: u64 = 400;
+        let mut dernier_total = depart;
+        let mut stable_depuis: Option<u64> = None;
+
         loop {
             // Chaque tour force la relecture des ports : sans cela on
             // attendrait la periode de scrutation, qui n'avance que si
             // quelqu'un d'autre appelle `poll()`.
             DERNIERE_SCRUTATION_PORTS_NS.store(0, Ordering::Relaxed);
             poll();
-            if hid_keyboards() + hid_mice() > depart {
-                break;
+            let maintenant = crate::kernel::timer::monotonic_ns();
+            let total = hid_keyboards() + hid_mice();
+            if total != dernier_total {
+                dernier_total = total;
+                stable_depuis = None;
             }
-            if crate::kernel::timer::monotonic_ns() >= limite {
+            if total > depart {
+                match stable_depuis {
+                    None => stable_depuis = Some(maintenant),
+                    Some(depuis)
+                        if maintenant.saturating_sub(depuis)
+                            >= CALME_MS.saturating_mul(1_000_000) =>
+                    {
+                        break;
+                    }
+                    Some(_) => {}
+                }
+            }
+            if maintenant >= limite {
                 break;
             }
             wait_ms(10);
