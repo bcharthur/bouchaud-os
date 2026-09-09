@@ -57,6 +57,31 @@ static DEPTH: [AtomicUsize; smp::MAX_CPUS] =
     [const { AtomicUsize::new(0) }; smp::MAX_CPUS];
 static STACK: [[AtomicU32; MAX_HELD]; smp::MAX_CPUS] =
     [const { [const { AtomicU32::new(0) }; MAX_HELD] }; smp::MAX_CPUS];
+/// Instant de prise, par emplacement de pile. Sert a la duree de DETENTION.
+static DEBUT_DETENTION_NS: [[AtomicU64; MAX_HELD]; smp::MAX_CPUS] =
+    [const { [const { AtomicU64::new(0) }; MAX_HELD] }; smp::MAX_CPUS];
+/// Les interruptions etaient-elles masquees a la prise de cet emplacement ?
+static IRQ_MASQUEES: [[AtomicU32; MAX_HELD]; smp::MAX_CPUS] =
+    [const { [const { AtomicU32::new(0) }; MAX_HELD] }; smp::MAX_CPUS];
+/// Instant du dernier `before_acquire` de ce CPU. Sert a la duree d'ATTENTE.
+static DEBUT_ATTENTE_NS: [AtomicU64; smp::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; smp::MAX_CPUS];
+
+/// Plus longue attente observee entre `before_acquire` et `acquired`.
+static ATTENTE_MAX_NS: AtomicU64 = AtomicU64::new(0);
+/// Plus longue detention observee, toutes classes confondues.
+static DETENTION_MAX_NS: AtomicU64 = AtomicU64::new(0);
+/// Classe qui a produit `DETENTION_MAX_NS`. Un maximum sans coupable oblige a
+/// le chercher ; avec, il se lit.
+static DETENTION_MAX_CLASSE: AtomicU32 = AtomicU32::new(0);
+/// Plus longue detention INTERRUPTIONS MASQUEES.
+///
+/// C'est la mesure qui compte le plus pour la reactivite : pendant ce temps, ce
+/// coeur ne prend ni tick, ni entree, ni achevement. Une detention ordinaire
+/// ralentit ceux qui attendent le verrou ; une detention IRQ-off ralentit tout
+/// ce que le coeur aurait du servir.
+static DETENTION_IRQ_OFF_MAX_NS: AtomicU64 = AtomicU64::new(0);
+
 static ACQUISITIONS: AtomicU64 = AtomicU64::new(0);
 static VIOLATIONS: AtomicU64 = AtomicU64::new(0);
 static MAX_DEPTH: AtomicUsize = AtomicUsize::new(0);
@@ -74,6 +99,10 @@ fn cpu() -> usize { smp::cpu_index().min(smp::MAX_CPUS - 1) }
 #[track_caller]
 pub fn before_acquire(class: LockClass) {
     let c = cpu();
+    // La date est posee AVANT le retour anticipe : une prise sans verrou deja
+    // tenu est justement celle qui peut attendre le plus longtemps, et la
+    // manquer viderait la mesure de son cas le plus interessant.
+    DEBUT_ATTENTE_NS[c].store(maintenant_ns(), Ordering::Release);
     let depth = DEPTH[c].load(Ordering::Acquire);
     if depth == 0 { return; }
     let previous = STACK[c][depth.min(MAX_HELD) - 1].load(Ordering::Acquire) as u16;
@@ -102,7 +131,14 @@ pub fn acquired(class: LockClass) {
         #[cfg(not(debug_assertions))]
         return;
     }
+    let maintenant = maintenant_ns();
+    let debut_attente = DEBUT_ATTENTE_NS[c].swap(0, Ordering::AcqRel);
+    if debut_attente != 0 {
+        ATTENTE_MAX_NS.fetch_max(maintenant.saturating_sub(debut_attente), Ordering::Relaxed);
+    }
     STACK[c][depth].store(class.rank() as u32, Ordering::Release);
+    DEBUT_DETENTION_NS[c][depth].store(maintenant, Ordering::Release);
+    IRQ_MASQUEES[c][depth].store(!interruptions_actives() as u32, Ordering::Release);
     DEPTH[c].store(depth + 1, Ordering::Release);
     ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
     MAX_DEPTH.fetch_max(depth + 1, Ordering::Relaxed);
@@ -128,8 +164,44 @@ pub fn released(class: LockClass) {
             c, actual, class.rank()
         );
     }
+    let debut = DEBUT_DETENTION_NS[c][index].swap(0, Ordering::AcqRel);
+    if debut != 0 {
+        let tenue = maintenant_ns().saturating_sub(debut);
+        if tenue > DETENTION_MAX_NS.fetch_max(tenue, Ordering::AcqRel) {
+            // La classe est publiee APRES le maximum : un lecteur qui les voit
+            // desaccordes lit un maximum plus recent que sa classe, jamais une
+            // classe qui n'a jamais tenu ce maximum.
+            DETENTION_MAX_CLASSE.store(class.rank() as u32, Ordering::Release);
+        }
+        if IRQ_MASQUEES[c][index].swap(0, Ordering::AcqRel) != 0 {
+            DETENTION_IRQ_OFF_MAX_NS.fetch_max(tenue, Ordering::Relaxed);
+        }
+    }
     STACK[c][index].store(0, Ordering::Relaxed);
     DEPTH[c].store(index, Ordering::Release);
+}
+
+/// L'horloge, isolee pour que la preuve hote puisse la remplacer.
+#[inline]
+fn maintenant_ns() -> u64 {
+    crate::kernel::timer::monotonic_ns()
+}
+
+/// Les interruptions sont-elles actives sur ce coeur ?
+#[inline]
+fn interruptions_actives() -> bool {
+    crate::arch::x86_64::cpu::interrupts_enabled()
+}
+
+/// Attente maximale, detention maximale, sa classe, et detention IRQ-off
+/// maximale -- en nanosecondes.
+pub fn temps() -> (u64, u64, u16, u64) {
+    (
+        ATTENTE_MAX_NS.load(Ordering::Relaxed),
+        DETENTION_MAX_NS.load(Ordering::Relaxed),
+        DETENTION_MAX_CLASSE.load(Ordering::Relaxed) as u16,
+        DETENTION_IRQ_OFF_MAX_NS.load(Ordering::Relaxed),
+    )
 }
 
 pub fn depth() -> usize { DEPTH[cpu()].load(Ordering::Acquire) }
@@ -151,7 +223,10 @@ pub fn reinitialise_pour_preuve() {
     let c = cpu();
     for index in 0..MAX_HELD {
         STACK[c][index].store(0, Ordering::Relaxed);
+        DEBUT_DETENTION_NS[c][index].store(0, Ordering::Relaxed);
+        IRQ_MASQUEES[c][index].store(0, Ordering::Relaxed);
     }
+    DEBUT_ATTENTE_NS[c].store(0, Ordering::Relaxed);
     DEPTH[c].store(0, Ordering::Release);
 }
 
@@ -165,8 +240,12 @@ pub fn stats() -> Stats {
 
 pub fn log_stats() {
     let s = stats();
+    let (attente, detention, classe, irq_off) = temps();
     crate::serial_println!(
-        "[LOCKDEP] acquisitions={} violations={} max_depth={}",
-        s.acquisitions, s.violations, s.max_depth
+        "[LOCKDEP] acquisitions={} violations={} max_depth={} \
+         attente_max_ns={} detention_max_ns={} detention_max_rang={} \
+         detention_irq_off_max_ns={}",
+        s.acquisitions, s.violations, s.max_depth,
+        attente, detention, classe, irq_off
     );
 }
