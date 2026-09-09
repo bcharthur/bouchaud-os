@@ -227,8 +227,17 @@ def verifie_c8_receive_side():
         if marqueur not in net:
             echec(f"C8/V2 net.rs : marqueur absent `{marqueur}`")
 
-    if net.count("Domaine::Reseau") < 3:
-        echec("C8/V2 net.rs : moins de trois sections Domaine::Reseau")
+    # C8 : trois pumps partagent UNE frontiere legacy.
+    # Le nombre de sites BKL est lui-meme un budget d'architecture.
+    if "BOUCHAUD_C8_RESEAU_BKL_BORNE_V1" not in net:
+        echec("C8/CI net.rs : frontiere reseau bornee absente")
+    if net.count("fn avec_domaine_reseau") != 1:
+        echec("C8/CI net.rs : la frontiere reseau doit avoir une seule definition")
+    if net.count("avec_domaine_reseau(||") != 3:
+        echec(
+            "C8/CI net.rs : attendu 3 usages de la frontiere "
+            "(TCP + deux pumps UDP)"
+        )
 
     if "BOUCHAUD_C8_READ_SOCKET_SANS_BKL_EXTERNE_V2" not in file:
         echec("C8/V2 file.rs : marqueur read socket absent")

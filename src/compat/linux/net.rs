@@ -546,6 +546,20 @@ fn pump_udp(state: &Arc<SpinLock<SocketState>>) {
     }
 }
 
+/// C8 : frontiere unique du legacy inet encore serialise.
+///
+/// Le receive-side n'herite plus du BKL. Seul le pump de la pile historique
+/// reprend temporairement le domaine Reseau. L'operation fournie doit rester
+/// courte et ne jamais dormir.
+///
+/// BOUCHAUD_C8_RESEAU_BKL_BORNE_V1
+#[inline]
+fn avec_domaine_reseau<R>(operation: impl FnOnce() -> R) -> R {
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Reseau);
+    let _kernel = crate::kernel::smp_lock::enter();
+    operation()
+}
+
 /// `recvfrom` / `recv` / `read` sur un socket.
 pub fn sys_recvfrom(
     fd: i32,
@@ -618,28 +632,31 @@ pub fn sys_recvfrom(
             let echeance = crate::kernel::timer::ticks()
                 + 3 * crate::kernel::timer::TICKS_PER_SECOND.max(1);
             loop {
-                let pret = {
-                    // C8/V2 : le legacy inet n'est pas encore concurrent.
-                    // Le domaine est borne au pump et acquis avant SocketState
-                    // pour conserver l'ordre historique BKL -> socket.
-                    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Reseau);
-                    let _kernel = crate::kernel::smp_lock::enter();
+                let pret = avec_domaine_reseau(|| {
+                    // Le helper prend BKL/Domaine::Reseau AVANT SocketState :
+                    // l'ordre historique reste BKL -> socket.
                     let mut borrowed = state.lock();
                     let conn = match borrowed.conn.as_mut() {
                         Some(conn) => conn,
-                        None => return -errno::ENOTCONN,
+                        None => return Err(-errno::ENOTCONN),
                     };
                     if conn.rx.is_empty() && !conn.peer_fin && !conn.closed {
                         conn.pump(50_000);
                     }
                     if !conn.rx.is_empty() {
-                        Some(conn.take(len))
+                        Ok(Some(conn.take(len)))
                     } else if conn.peer_fin || conn.closed {
-                        return 0;
+                        Err(0)
                     } else {
-                        None
+                        Ok(None)
                     }
+                });
+
+                let pret = match pret {
+                    Ok(pret) => pret,
+                    Err(code) => return code,
                 };
+
                 if let Some(data) = pret {
                     let read = data.len();
                     return if user_write(buffer, &data) {
@@ -659,11 +676,7 @@ pub fn sys_recvfrom(
         }
         SocketKind::Udp => {
             if state.lock().datagrams.is_empty() {
-                {
-                    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Reseau);
-                    let _kernel = crate::kernel::smp_lock::enter();
-                    pump_udp(&state);
-                }
+                avec_domaine_reseau(|| pump_udp(&state))
             }
             // Attente bloquante : sur le temps, et en rendant le processeur.
             //
@@ -682,11 +695,7 @@ pub fn sys_recvfrom(
                     // prochaine interruption materielle. Meme raison que dans
                     // `sys_poll`.
                     task::attends_un_tick();
-                    {
-                    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Reseau);
-                    let _kernel = crate::kernel::smp_lock::enter();
-                    pump_udp(&state);
-                }
+                    avec_domaine_reseau(|| pump_udp(&state))
                 }
             }
             let datagram = state.lock().datagrams.pop();
