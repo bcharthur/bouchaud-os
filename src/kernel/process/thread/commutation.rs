@@ -30,7 +30,52 @@ extern "C" fn kernel_task_trampoline() -> ! {
     entree()
 }
 
+/// Piles noyau trouvees corrompues. Zero est l'invariant.
+static PILES_CORROMPUES: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Nombre de debordements de pile noyau detectes depuis le demarrage.
+pub fn piles_corrompues() -> u64 {
+    PILES_CORROMPUES.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Verifie le canari de la pile d'une tache qu'on remet sur un coeur.
+///
+/// # Pourquoi ici, et pourquoi c'est assez
+///
+/// `install` est l'entonnoir : toute tache qui reprend un coeur y passe. Un
+/// debordement survenu pendant son quantum precedent est donc vu au plus tard
+/// a sa prochaine election -- avant qu'elle ne recommence a ecrire.
+///
+/// Le controle coute huit lectures. C'est negligeable face a un changement de
+/// contexte, qui recharge CR3, le TSS, FS_BASE et l'etat FPU.
+///
+/// La panique est deliberee. Une pile noyau qui a deborde a DEJA ecrit dans le
+/// tas voisin ; continuer reviendrait a propager une corruption dont le
+/// symptome apparaitra ailleurs, dans un sous-systeme sans rapport. L'ecran de
+/// faute GOP porte le releve, et le journal nomme la tache.
+#[inline]
+fn verifie_le_canari(task: &Task) {
+    if task.pile_intacte() {
+        return;
+    }
+    PILES_CORROMPUES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    crate::serial_println!(
+        "BOUCHAUD_PILE_NOYAU_DEBORDEE tid={} pid={} base={:#x} sommet={:#x} taille={}",
+        task.tid,
+        task.process.pid,
+        task.kstack_base(),
+        task.kstack_top,
+        task.kstack_top - task.kstack_base(),
+    );
+    panic!(
+        "pile noyau debordee : tid={} pid={} base={:#x}",
+        task.tid, task.process.pid, task.kstack_base()
+    );
+}
+
 fn install(task: &mut Task) {
+    verifie_le_canari(task);
     unsafe {
         set_current_is_kernel(task.noyau);
         *CURRENT_PROCESS[local_cpu()].lock() = if task.noyau { None } else { Some(Arc::clone(&task.process)) };

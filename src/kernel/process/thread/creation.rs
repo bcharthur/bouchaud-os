@@ -3,6 +3,9 @@ impl Task {
     pub fn new(process: Arc<Process>, frame: TrapFrame) -> Box<Task> {
         let kstack = vec![0u8; KSTACK_SIZE];
         let kstack_top = (kstack.as_ptr() as u64 + KSTACK_SIZE as u64) & !0xF;
+        // Le canari est pose AU PIED de la pile -- les adresses basses, celles
+        // que la pile atteint en dernier en descendant. Voir `CANARI_PILE`.
+        unsafe { pose_le_canari(kstack.as_ptr() as u64) };
         let fpu = vec![0u8; 512 + 16];
         let fpu_area = (fpu.as_ptr() as u64 + 15) & !0xF;
         unsafe {
@@ -66,6 +69,47 @@ impl Task {
     }
 
     fn fpu_ptr(&self) -> u64 { self.fpu_area }
+
+    /// La pile noyau de cette tache est-elle intacte ?
+    ///
+    /// Rend `false` des qu'un mot du canari a bouge. Un debordement de pile
+    /// noyau n'a pas d'autre symptome que celui-la : il ecrit dans le tas
+    /// voisin, silencieusement, et la faute apparait ailleurs -- ou nulle part,
+    /// jusqu'a ce qu'un `RSP` sorte de toute region valide.
+    pub fn pile_intacte(&self) -> bool {
+        unsafe { canari_intact(self.kstack.as_ptr() as u64) }
+    }
+
+    /// Adresse du pied de pile, pour le diagnostic.
+    pub fn kstack_base(&self) -> u64 {
+        self.kstack.as_ptr() as u64
+    }
+}
+
+/// Ecrit le canari au pied d'une pile fraiche.
+///
+/// # Securite
+/// `base` doit etre le premier octet d'une allocation d'au moins
+/// `CANARI_MOTS * 8` octets.
+unsafe fn pose_le_canari(base: u64) {
+    let mots = base as *mut u64;
+    for index in 0..CANARI_MOTS {
+        core::ptr::write_volatile(mots.add(index), CANARI_PILE);
+    }
+}
+
+/// Le canari d'une pile est-il encore celui qu'on y a mis ?
+///
+/// # Securite
+/// Voir [`pose_le_canari`].
+unsafe fn canari_intact(base: u64) -> bool {
+    let mots = base as *const u64;
+    for index in 0..CANARI_MOTS {
+        if core::ptr::read_volatile(mots.add(index)) != CANARI_PILE {
+            return false;
+        }
+    }
+    true
 }
 
 fn amorce_pile(task: &mut Task, trampoline: extern "C" fn() -> !, rflags: u64) {

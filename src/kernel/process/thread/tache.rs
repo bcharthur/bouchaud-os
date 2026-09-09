@@ -1,3 +1,29 @@
+/// Le motif ecrit au PIED de chaque pile noyau.
+///
+/// # Pourquoi un canari plutot qu'une page de garde
+///
+/// Une page de garde est meilleure : elle transforme le debordement en faute
+/// AU MOMENT ou il se produit, sur l'instruction fautive. Elle exige en
+/// revanche que les piles viennent du gestionnaire de memoire virtuelle, avec
+/// une page non mappee en dessous -- ce que ce noyau ne fait pas encore : ses
+/// piles sont des allocations de 64 Kio du tas.
+///
+/// Le canari ne coute rien et repond a la question qui manquait. Un double
+/// fault a ete observe sur la machine de reference avec un `RSP` qui ne
+/// designait aucune pile ; sans ce motif, rien ne permet de distinguer « la
+/// pile a deborde » de « quelqu'un a ecrase RSP ». Le canari le dit.
+///
+/// La valeur est volontairement non nulle et non repetitive : une zone remise a
+/// zero, ou remplie d'un octet unique, ressemblerait au canari par accident.
+pub const CANARI_PILE: u64 = 0xB0C4_0D5A_FEED_1E55;
+
+/// Octets du pied de pile couverts par le canari.
+///
+/// Huit mots plutot qu'un : un debordement n'ecrit pas forcement le tout
+/// premier mot, et une ecriture qui saute par-dessus un seul temoin passerait
+/// inapercue.
+pub const CANARI_MOTS: usize = 8;
+
 /// Un fil d'execution utilisateur.
 pub struct Task {
     pub tid: u32,

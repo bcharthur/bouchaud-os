@@ -358,6 +358,21 @@ pub fn affiche(
             echelle,
             if refuses == 0 { TEXTE } else { TITRE },
         );
+        y += pas;
+
+        // Le second champ qui designe une cause au lieu de la faire chercher.
+        // Non nul, une pile noyau a deborde : le canari pose a son pied a
+        // bouge, et `RSP` n'a pas ete ecrase par un tiers -- il est sorti tout
+        // seul, par le bas.
+        let piles = crate::kernel::task::piles_corrompues();
+        texte(marge, y, "PILES DEBORDEES ", echelle, ETIQUETTE);
+        hexa(
+            marge + 16 * 8 * echelle,
+            y,
+            piles,
+            echelle,
+            if piles == 0 { TEXTE } else { TITRE },
+        );
         y += pas + pas;
 
         texte(
