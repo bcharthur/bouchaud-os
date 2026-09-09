@@ -3,8 +3,20 @@ name: Integration
 # Integration automatique uniquement apres merge/push sur main.
 # Sur une PR, ajouter le label `ci:integration` pour la demander explicitement.
 on:
+      # Les branches de travail Claude declenchent la meme barriere que `main`.
+      #
+      # Sans cette ligne, un push sur `claude/**` ne lancait AUCUN workflow :
+      # les suites hote et les garde-fous tournaient sur la machine de
+      # developpement, et rien ne le confirmait cote GitHub. Un « tout est
+      # vert » qu'aucun run ne montre n'est pas une preuve, c'est une
+      # affirmation.
+      #
+      # Le declencheur est sur, et c'est pourquoi il est ajoute ici plutot que
+      # d'ouvrir la barriere : ces workflows sont en lecture seule
+      # (`permissions: contents: read`), ils ne publient rien et ne touchent ni
+      # `main` ni sa protection.
   push:
-    branches: [main]
+    branches: [main, 'claude/**']
     paths:
       - 'src/**'
       - 'tools/**'
