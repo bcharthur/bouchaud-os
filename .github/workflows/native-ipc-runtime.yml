@@ -15,7 +15,7 @@ on:
       - 'tools/ci/reliability/**'
       - '.github/workflows/native-ipc-runtime.yml'
   push:
-    branches: [main]
+    branches: [main, 'claude/**']
     paths:
       - 'src/arch/x86_64/usermode.rs'
       - 'src/kernel/native/**'

@@ -8,6 +8,7 @@ LOG="$OUT/native-ipc-runtime.log"
 IMAGE="$OUT/native-ipc-probe.img"
 RING3="$OUT/native-ipc-ring3-probe"
 LIBC="$OUT/native-ipc-probe"
+COMPOSITED="$OUT/composited-slice"
 
 rm -rf "$OUT"
 mkdir -p "$OUT"
@@ -18,6 +19,15 @@ echo "=== build freestanding native ring3 probe ==="
   OUT="$PWD/../../$OUT" bash ./build-native-ipc-ring3-probe.sh
 )
 
+echo "=== build compositeur ring3 (tranchant vertical) ==="
+# Il etait COMPILE en CI Fast et jamais EXECUTE, alors qu'un commentaire
+# affirmait le contraire. Un contrat qu'aucun processus n'exerce ne prouve rien
+# de plus que sa syntaxe.
+(
+  cd userland/services/composited
+  OUT="$PWD/../../../$OUT" bash ./build.sh
+)
+
 echo "=== build libc/header integration probe ==="
 musl-gcc \
   -O2 -Wall -Wextra -fno-stack-protector \
@@ -25,11 +35,12 @@ musl-gcc \
   tools/userland/native-ipc-probe.c \
   -o "$LIBC"
 
-file "$RING3" "$LIBC"
+file "$RING3" "$LIBC" "$COMPOSITED"
 
 python3 tools/native/make_native_ipc_probe_image.py \
   --ring3-probe "$RING3" \
   --libc-probe "$LIBC" \
+  --composited "$COMPOSITED" \
   --image "$IMAGE"
 
 : > "$LOG"
@@ -66,8 +77,15 @@ while :; do
     exit 1
   fi
 
+  if grep -aFq 'COMPOSITED_SLICE_FAIL' "$LOG"; then
+    echo "tranchant composited en echec" >&2
+    grep -aF '[COMPOSITED]' "$LOG" >&2 || true
+    exit 1
+  fi
+
   if grep -aFq '[NATIVE-IPC-RING3] OK' "$LOG" \
-     && grep -aFq '[NATIVE-IPC] OK' "$LOG"; then
+     && grep -aFq '[NATIVE-IPC] OK' "$LOG" \
+     && grep -aFq 'COMPOSITED_SLICE_OK' "$LOG"; then
     break
   fi
 
@@ -114,6 +132,11 @@ required=(
   '[NATIVE-IPC-RING3] OK'
   '[NATIVE-IPC] ABI=1.0'
   '[NATIVE-IPC] OK'
+  '[COMPOSITED] ok   surface accordee, region transferee attenuee'
+  '[COMPOSITED] ok   les pixels ecrits par le client sont ceux que le compositeur compose'
+  '[COMPOSITED] ok   un tampon est rendu au client apres la presentation'
+  '[COMPOSITED] echecs=0'
+  'COMPOSITED_SLICE_OK'
 )
 
 for marker in "${required[@]}"; do
@@ -123,5 +146,5 @@ for marker in "${required[@]}"; do
   fi
 done
 
-grep -aE 'NATIVE_IPC_AUTORUN|\[NATIVE-IPC' "$LOG" | tail -n 80
+grep -aE 'NATIVE_IPC_AUTORUN|\[NATIVE-IPC|\[COMPOSITED\]|COMPOSITED_SLICE' "$LOG" | tail -n 120
 echo "NATIVE_IPC_RUNTIME_OK"

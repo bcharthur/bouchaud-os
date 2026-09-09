@@ -35,6 +35,11 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--ring3-probe", required=True, type=Path)
     p.add_argument("--libc-probe", type=Path)
+    p.add_argument(
+        "--composited",
+        type=Path,
+        help="tranchant vertical du compositeur ring 3, execute apres les sondes",
+    )
     p.add_argument("--image", required=True, type=Path)
     args = p.parse_args()
 
@@ -42,6 +47,8 @@ def main() -> int:
         raise SystemExit(f"probe ring3 absent: {args.ring3_probe}")
     if args.libc_probe is not None and not args.libc_probe.is_file():
         raise SystemExit(f"probe libc absent: {args.libc_probe}")
+    if args.composited is not None and not args.composited.is_file():
+        raise SystemExit(f"tranchant composited absent: {args.composited}")
 
     args.image.parent.mkdir(parents=True, exist_ok=True)
     autorun = [
@@ -50,6 +57,8 @@ def main() -> int:
     ]
     if args.libc_probe is not None:
         autorun.append("/bin/native-ipc-probe")
+    if args.composited is not None:
+        autorun.append("/bin/composited-slice")
     autorun.append("echo NATIVE_IPC_AUTORUN_END")
     autorun_data = ("\n".join(autorun) + "\n").encode("ascii")
 
@@ -65,6 +74,13 @@ def main() -> int:
                 tar,
                 "bin/native-ipc-probe",
                 args.libc_probe.read_bytes(),
+                0o755,
+            )
+        if args.composited is not None:
+            add_bytes(
+                tar,
+                "bin/composited-slice",
+                args.composited.read_bytes(),
                 0o755,
             )
         add_bytes(tar, "autorun", autorun_data, 0o644)

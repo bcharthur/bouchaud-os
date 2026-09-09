@@ -37,7 +37,7 @@ lui fait confiance.
 | Appels hors gros verrou | **72** |
 | Appels encore sous gros verrou | **87** |
 | Fichiers portant un point sur de preemption | **3** |
-| Garde-fous d'architecture | **56** |
+| Garde-fous d'architecture | **57** |
 | Suites de test hote | **66** |
 | W^X applique au chargement ELF | **oui** |
 | Canari de pile noyau | **oui** |

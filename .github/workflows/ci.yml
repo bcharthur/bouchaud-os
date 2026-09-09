@@ -119,8 +119,13 @@ jobs:
       # Le service ring 3 est freestanding : le compiler ici coute quelques
       # secondes et attrape ce qu'aucun test hote ne verra -- un en-tete qui ne
       # compile plus pour la cible ring 3, une charge utile dont la taille a
-      # bouge d'un cote seulement. Le tranchant complet tourne sous QEMU dans
-      # `native-ipc-runtime`.
+      # bouge d'un cote seulement.
+      #
+      # Le tranchant complet tourne sous QEMU dans `native-ipc-runtime`, ou il
+      # est EXECUTE en ring 3 sur l'ABI native. Ce ne fut pas toujours vrai :
+      # ce commentaire l'affirmait alors que le workflow ne lancait que les deux
+      # sondes IPC. `tools/verifie-execution-composited.py` empeche desormais
+      # cette affirmation de redevenir fausse.
       - name: Compositeur ring 3 (compilation freestanding)
         run: bash userland/services/composited/build.sh
 
