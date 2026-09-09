@@ -2747,6 +2747,44 @@ pub fn hid_keyboards() -> usize {
     HID_KEYBOARDS.load(Ordering::Acquire)
 }
 
+/// Recompte les extremites HID de TOUS les controleurs et publie le total.
+///
+/// # Pourquoi ce recompte existe
+///
+/// `HID_KEYBOARDS` et `HID_MICE` n'etaient ecrits qu'a la fin de `bring_up`,
+/// avec ce que l'enumeration du DEMARRAGE avait trouve. Un clavier branche
+/// APRES le demarrage etait donc enumere, adresse, configure, arme -- la table
+/// des ports le montrait nommement -- et les compteurs restaient a zero.
+///
+/// Ce n'est pas cosmetique. `stage2` decide du repli PS/2 sur ces compteurs, la
+/// barre du bureau les affiche, et le scenario d'integration « branchement a
+/// chaud » les interroge pour savoir si le clavier repond : il echouait sur une
+/// machine ou le clavier fonctionnait, ce qui est la pire forme de test -- il
+/// accuse le sous-systeme qui marche.
+///
+/// Le recompte porte sur l'ensemble des controleurs, et pas sur celui qui vient
+/// de changer : le total est un total. Il tient dans une passe sur les
+/// extremites deja en memoire.
+///
+/// # Securite
+/// A n'appeler que depuis un contexte qui tient deja `RUNTIME_BUSY`, comme
+/// `poll`, ou pendant `bring_up` avant publication.
+unsafe fn recompte_les_hid(runtime: &Runtime) {
+    let mut claviers = 0usize;
+    let mut souris = 0usize;
+    for controller in runtime.controllers.iter() {
+        for index in 0..controller.hid_count {
+            match controller.hids[index].kind {
+                1 => claviers += 1,
+                2 => souris += 1,
+                _ => {}
+            }
+        }
+    }
+    HID_KEYBOARDS.store(claviers, Ordering::Release);
+    HID_MICE.store(souris, Ordering::Release);
+}
+
 pub fn hid_mice() -> usize {
     HID_MICE.load(Ordering::Acquire)
 }
@@ -2852,6 +2890,10 @@ pub fn poll() {
     unsafe {
         if let Some(runtime) = RUNTIME.as_mut() {
             let poll_no = HID_POLLS.load(Ordering::Relaxed);
+            // Un branchement ou un debranchement a-t-il eu lieu pendant ce
+            // tour ? Le recompte se fait UNE fois, apres la boucle, et non par
+            // controleur : le total est un total.
+            let mut changement_hid = false;
             for controller in runtime.controllers.iter_mut() {
                 // LES RAPPORTS MIS DE COTE D'ABORD.
                 //
@@ -2889,6 +2931,9 @@ pub fn poll() {
                     traite_port_change(controller, port_index);
                     traites += 1;
                 }
+                if traites != 0 {
+                    changement_hid = true;
+                }
                 // Some physical controllers are conservative about periodic
                 // scheduling after Configure Endpoint. Re-kicking an endpoint
                 // with an already pending TD is harmless and gives us a robust
@@ -2904,6 +2949,14 @@ pub fn poll() {
                     }
                 }
                 poll_control_fallback(controller, poll_no);
+            }
+            if changement_hid {
+                recompte_les_hid(runtime);
+                crate::serial_println!(
+                    "BOUCHAUD_USB_HID_RECOMPTE claviers={} souris={}",
+                    HID_KEYBOARDS.load(Ordering::Acquire),
+                    HID_MICE.load(Ordering::Acquire),
+                );
             }
         }
     }
