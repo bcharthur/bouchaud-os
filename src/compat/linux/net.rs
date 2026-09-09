@@ -549,44 +549,24 @@ pub fn sys_recvfrom(
     // cotes, et Linux ne remplit rien non plus.
     if est_paire(fd) {
         // `MSG_DONTWAIT` est local a cet appel. Il ne faut surtout pas poser
-        // `O_NONBLOCK` temporairement sur le descripteur : les autres threads
+        // `O_NONBLOCK` temporairement sur le descripteur : les autres fils
         // verraient alors un etat qui ne leur appartient pas.
         //
-        // Tester le tampon puis entrer dans `sys_read` doit etre atomique
-        // vis-a-vis des autres taches : si le canal est vide ici, une lecture
-        // non bloquante doit rendre `EAGAIN` immediatement au lieu d'entrer
-        // dans l'attente de deux secondes de `sys_read(SocketPair)`.
+        // L'INTENTION EST DONC PORTEE, ET NON PLUS DEVINEE.
         //
-        // CETTE ATOMICITE VIENT DU GROS VERROU, ET C'EST LE SEUL ENDROIT DU
-        // CHEMIN RESEAU QUI EN DEPEND ENCORE.
+        // Ce chemin TESTAIT le tampon avant d'entrer dans `sys_read`, et ce
+        // test devait etre atomique vis-a-vis des autres taches : sans cela, un
+        // autre coeur vidant le tampon entre le test et l'entree faisait
+        // bloquer deux secondes une lecture declaree non bloquante. C'est le
+        // gros verrou qui donnait cette atomicite -- et c'etait la derniere
+        // raison pour laquelle `RECVFROM` restait hors de `SANS_BKL` alors que
+        // `READ`, qu'il appelle, y est depuis le lot c1.
         //
-        // Le noyau n'est pas preempte au milieu d'un appel systeme, ce qui
-        // suffit sur un seul coeur. Sur quatre, c'est le gros verrou qui
-        // empeche une autre tache de vider le tampon ENTRE le test et l'entree
-        // dans `sys_read` -- auquel cas une lecture declaree non bloquante
-        // bloquerait deux secondes.
-        //
-        // C'est pour cela que `RECVFROM` n'est pas dans `SANS_BKL` alors que
-        // `READ`, qu'il appelle, y est depuis le lot c1. Le liberer demande
-        // d'abord de porter l'intention « non bloquant » JUSQUE DANS
-        // `sys_read`, au lieu de la deviner par un test prealable. Tant que ce
-        // test prealable existe, retirer le verrou introduirait une attente de
-        // deux secondes sur un descripteur non bloquant, et elle ne se
-        // manifesterait que sous charge, a plusieurs coeurs.
-        if fd_non_bloquant(fd) || flags & MSG_DONTWAIT != 0 {
-            let vide = {
-                let process = task::current_process();
-                let borrowed = process.files.lock();
-                match borrowed.get(fd).map(|desc| &desc.kind) {
-                    Some(FdKind::SocketPair(inbox, _)) => inbox.lock().octets.is_empty(),
-                    _ => return -errno::ENOTSOCK,
-                }
-            };
-            if vide {
-                return -errno::EAGAIN;
-            }
-        }
-        let lu = crate::kernel::abi::file::sys_read(fd, buffer, len);
+        // `lit_octets` prend l'intention en parametre. Il n'y a plus de fenetre
+        // entre deux decisions, parce qu'il n'y a plus qu'une decision -- et
+        // donc plus rien a serialiser.
+        let non_bloquant = fd_non_bloquant(fd) || flags & MSG_DONTWAIT != 0;
+        let lu = crate::kernel::abi::file::lit_octets(fd, buffer, len, non_bloquant);
         if lu >= 0 && addr_len != 0 {
             user_write(addr_len, &0u32.to_le_bytes());
         }

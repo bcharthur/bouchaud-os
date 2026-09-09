@@ -227,7 +227,36 @@ fn fd_flags(fd: i32) -> u32 {
 }
 
 /// `read`.
+///
+/// Le mode bloquant est lu sur le descripteur, comme le veut POSIX. Un appelant
+/// qui porte une intention PLUS FORTE que le descripteur -- `recvfrom` avec
+/// `MSG_DONTWAIT`, par exemple -- passe par [`lit_octets`] et la dit
+/// explicitement.
 pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
+    let non_bloquant = fd_flags(fd) & O_NONBLOCK != 0;
+    lit_octets(fd, buffer, count, non_bloquant)
+}
+
+/// `read`, avec l'intention bloquante DITE plutot que devinee.
+///
+/// # Pourquoi ce parametre existe
+///
+/// `recvfrom` avec `MSG_DONTWAIT` sur une paire de sockets ne pouvait pas se
+/// contenter d'appeler `sys_read` : le drapeau est local a l'appel, et poser
+/// `O_NONBLOCK` sur le descripteur le temps de la lecture aurait montre aux
+/// autres fils un etat qui ne leur appartient pas.
+///
+/// Il TESTAIT donc le tampon avant d'entrer dans `sys_read`, et ce test devait
+/// etre atomique vis-a-vis des autres taches : sans cela, un autre coeur vidant
+/// le tampon entre le test et l'entree faisait bloquer deux secondes une
+/// lecture declaree non bloquante. C'est le gros verrou qui donnait cette
+/// atomicite -- et c'etait la DERNIERE raison pour laquelle le chemin socket le
+/// prenait encore.
+///
+/// Porter l'intention jusqu'ici supprime le test, donc le besoin d'atomicite,
+/// donc le verrou. Il n'y a plus de fenetre entre deux decisions : il n'y a
+/// qu'une decision.
+pub fn lit_octets(fd: i32, buffer: u64, count: usize, non_bloquant: bool) -> i64 {
     if count == 0 {
         return 0;
     }
@@ -419,7 +448,7 @@ pub fn sys_read(fd: i32, buffer: u64, count: usize) -> i64 {
             // appelant a boucler lui-meme — et surtout, cela faisait echouer le
             // premier `recvmsg` d'un dialogue entre deux processus, celui qui
             // arrive avant que le pair ait eu la main.
-            if inbox.lock().octets.is_empty() && fd_flags(fd) & O_NONBLOCK == 0 {
+            if inbox.lock().octets.is_empty() && !non_bloquant {
                 let echeance = crate::kernel::timer::monotonic_ns().saturating_add(2_000_000_000);
                 loop {
                     let ticket = crate::kernel::fd::readiness_ticket();
