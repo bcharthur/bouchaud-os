@@ -26,6 +26,7 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU16, Ordering};
 use crate::kernel::sync::SpinLock;
 
 use crate::kernel::abi::{errno, user_read, user_write};
@@ -89,14 +90,27 @@ impl SocketState {
 }
 
 /// Alloue un port local ephemere.
+// BOUCHAUD_C8_RECV_SANS_BKL_V2
+//
+// BIND pouvait s'appuyer sur le BKL pour masquer la course sur NEXT.
+// Maintenant que BIND sort du verrou global, l'etat devient explicitement
+// atomique.
 fn ephemeral_port() -> u16 {
-    static mut NEXT: u16 = 0;
-    unsafe {
-        if NEXT == 0 {
-            NEXT = 0xC000 | (crate::arch::x86_64::cpu::rdtsc() as u16 & 0x0FFF);
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    let seed = 0xC000 | (crate::arch::x86_64::cpu::rdtsc() as u16 & 0x0FFF);
+    let mut courant = NEXT.load(Ordering::Acquire);
+    loop {
+        let base = if courant == 0 { seed } else { courant };
+        let suivant = base.wrapping_add(1) | 0xC000;
+        match NEXT.compare_exchange_weak(
+            courant,
+            suivant,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return suivant,
+            Err(observe) => courant = observe,
         }
-        NEXT = NEXT.wrapping_add(1) | 0xC000;
-        NEXT
     }
 }
 
@@ -532,6 +546,20 @@ fn pump_udp(state: &Arc<SpinLock<SocketState>>) {
     }
 }
 
+/// C8 : frontiere unique du legacy inet encore serialise.
+///
+/// Le receive-side n'herite plus du BKL. Seul le pump de la pile historique
+/// reprend temporairement le domaine Reseau. L'operation fournie doit rester
+/// courte et ne jamais dormir.
+///
+/// BOUCHAUD_C8_RESEAU_BKL_BORNE_V1
+#[inline]
+fn avec_domaine_reseau<R>(operation: impl FnOnce() -> R) -> R {
+    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Reseau);
+    let _kernel = crate::kernel::smp_lock::enter();
+    operation()
+}
+
 /// `recvfrom` / `recv` / `read` sur un socket.
 pub fn sys_recvfrom(
     fd: i32,
@@ -604,23 +632,31 @@ pub fn sys_recvfrom(
             let echeance = crate::kernel::timer::ticks()
                 + 3 * crate::kernel::timer::TICKS_PER_SECOND.max(1);
             loop {
-                let pret = {
+                let pret = avec_domaine_reseau(|| {
+                    // Le helper prend BKL/Domaine::Reseau AVANT SocketState :
+                    // l'ordre historique reste BKL -> socket.
                     let mut borrowed = state.lock();
                     let conn = match borrowed.conn.as_mut() {
                         Some(conn) => conn,
-                        None => return -errno::ENOTCONN,
+                        None => return Err(-errno::ENOTCONN),
                     };
                     if conn.rx.is_empty() && !conn.peer_fin && !conn.closed {
                         conn.pump(50_000);
                     }
                     if !conn.rx.is_empty() {
-                        Some(conn.take(len))
+                        Ok(Some(conn.take(len)))
                     } else if conn.peer_fin || conn.closed {
-                        return 0;
+                        Err(0)
                     } else {
-                        None
+                        Ok(None)
                     }
+                });
+
+                let pret = match pret {
+                    Ok(pret) => pret,
+                    Err(code) => return code,
                 };
+
                 if let Some(data) = pret {
                     let read = data.len();
                     return if user_write(buffer, &data) {
@@ -640,7 +676,7 @@ pub fn sys_recvfrom(
         }
         SocketKind::Udp => {
             if state.lock().datagrams.is_empty() {
-                pump_udp(&state);
+                avec_domaine_reseau(|| pump_udp(&state))
             }
             // Attente bloquante : sur le temps, et en rendant le processeur.
             //
@@ -659,7 +695,7 @@ pub fn sys_recvfrom(
                     // prochaine interruption materielle. Meme raison que dans
                     // `sys_poll`.
                     task::attends_un_tick();
-                    pump_udp(&state);
+                    avec_domaine_reseau(|| pump_udp(&state))
                 }
             }
             let datagram = state.lock().datagrams.pop();
@@ -1250,6 +1286,10 @@ pub fn sys_recvmmsg(fd: i32, msgvec: u64, vlen: u32, flags: u32, _timeout: u64) 
         }
         crate::kernel::abi::user_write(entree + MMSG_LEN, &(resultat as u32).to_le_bytes());
         recus += 1;
+
+        // C8/V2 : une rafale recvmmsg peut etre longue. Ce point est hors
+        // SocketState, hors domaine Reseau et, apres cette tranche, hors BKL.
+        let _ = crate::kernel::scheduler::preempt::safe_point();
     }
     recus
 }

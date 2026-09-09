@@ -82,6 +82,16 @@ AUDITS_NOMMES = {
     # plus le gros verrou de son appelant, parce qu'il ne s'en servait pas.
     "NANOSLEEP": "c7 -- stores atomiques + Mm ; la boucle tournait deja sans verrou",
     "CLOCK_NANOSLEEP": "c7 -- identique a NANOSLEEP, avec l'echeance absolue",
+    # c8/v2 -- objets locaux + receive-side ; pump inet interne.
+    "SOCKET": "c8v2 -- creation locale + table FD",
+    "SOCKETPAIR": "c8v2 -- Canaux + table FD + Mm",
+    "BIND": "c8v2 -- SocketState + AtomicU16",
+    "GETPEERNAME": "c8v2 -- SocketState + Mm",
+    "SETSOCKOPT": "c8v2 -- no-op",
+    "GETSOCKOPT": "c8v2 -- SocketState/Canal + Mm",
+    "RECVFROM": "c8v2 -- pump inet interne + attente hors BKL",
+    "RECVMSG": "c8v2 -- canaux/FD + RECVFROM",
+    "RECVMMSG": "c8v2 -- RECVMSG + safe point",
     "MPROTECT": "jalon SMP4 -- domaine Arc<Process>::Mm + protocole TLB sur IRQ",
     "BRK": "jalon SMP4 -- domaine Arc<Process>::Mm + protocole TLB sur IRQ",
     # A1 lot 2 -- voir l'en-tete de bkl.rs et la preuve de duree de vie sur
@@ -156,6 +166,7 @@ CONSTANTE = re.compile(
 # couterait plus qu'elle ne rapporte, sans que rien ne le signale.
 SONDES_READINESS = ("readable", "writable", "etat_pair", "readiness_deadline_ns")
 FICHIER_SONDES = "src/compat/linux/file.rs"
+FICHIER_NET = "src/compat/linux/net.rs"
 
 erreurs = []
 
@@ -195,6 +206,46 @@ def verifie_sondes_readiness():
         profondeur += ligne.count("{") - ligne.count("}")
         if profondeur <= 0 and "}" in ligne:
             courante = None
+
+
+def verifie_c8_receive_side():
+    net_path = RACINE / FICHIER_NET
+    file_path = RACINE / FICHIER_SONDES
+    if not net_path.exists() or not file_path.exists():
+        echec("C8/V2 : net.rs ou file.rs introuvable")
+        return
+
+    net = net_path.read_text(encoding="utf-8")
+    file = file_path.read_text(encoding="utf-8")
+
+    for marqueur in [
+        "BOUCHAUD_C8_RECV_SANS_BKL_V2",
+        "static NEXT: AtomicU16",
+        "Domaine::Reseau",
+        "crate::kernel::scheduler::preempt::safe_point()",
+    ]:
+        if marqueur not in net:
+            echec(f"C8/V2 net.rs : marqueur absent `{marqueur}`")
+
+    # C8 : trois pumps partagent UNE frontiere legacy.
+    # Le nombre de sites BKL est lui-meme un budget d'architecture.
+    if "BOUCHAUD_C8_RESEAU_BKL_BORNE_V1" not in net:
+        echec("C8/CI net.rs : frontiere reseau bornee absente")
+    if net.count("fn avec_domaine_reseau") != 1:
+        echec("C8/CI net.rs : la frontiere reseau doit avoir une seule definition")
+    if net.count("avec_domaine_reseau(||") != 3:
+        echec(
+            "C8/CI net.rs : attendu 3 usages de la frontiere "
+            "(TCP + deux pumps UDP)"
+        )
+
+    if "BOUCHAUD_C8_READ_SOCKET_SANS_BKL_EXTERNE_V2" not in file:
+        echec("C8/V2 file.rs : marqueur read socket absent")
+    debut = file.find("FdKind::Socket(_) =>")
+    fin = file.find("FdKind::SocketPair", debut)
+    branche = file[debut:fin if fin > debut else len(file)]
+    if "smp_lock::enter()" in branche:
+        echec("C8/V2 file.rs : read(socket) reprend encore un BKL externe")
 
 
 def numeros_syscalls():
@@ -271,6 +322,7 @@ def main():
             )
 
     verifie_sondes_readiness()
+    verifie_c8_receive_side()
 
     for nom in AUDITS_NOMMES:
         if nom not in vus.values():

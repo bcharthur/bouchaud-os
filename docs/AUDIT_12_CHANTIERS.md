@@ -34,9 +34,9 @@ lui fait confiance.
 | Mesure | Valeur |
 |---|---|
 | Appels systeme aiguilles | **159** |
-| Appels hors gros verrou | **72** |
-| Appels encore sous gros verrou | **87** |
-| Fichiers portant un point sur de preemption | **3** |
+| Appels hors gros verrou | **81** |
+| Appels encore sous gros verrou | **78** |
+| Fichiers portant un point sur de preemption | **4** |
 | Garde-fous d'architecture | **57** |
 | Suites de test hote | **66** |
 | W^X applique au chargement ELF | **oui** |

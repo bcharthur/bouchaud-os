@@ -87,8 +87,29 @@ fn les_retraits_deja_mesures_ne_regressent_pas() {
         nr::EVENTFD, nr::EVENTFD2,
         nr::TIMERFD_CREATE, nr::TIMERFD_SETTIME, nr::TIMERFD_GETTIME,
         nr::PIPE, nr::PIPE2, nr::EPOLL_CTL,
+        nr::SOCKET, nr::SOCKETPAIR, nr::BIND,
+        nr::GETPEERNAME, nr::SETSOCKOPT, nr::GETSOCKOPT,
+        nr::RECVFROM, nr::RECVMSG, nr::RECVMMSG,
     ] {
         assert!(!exige_bkl(numero), "l'appel {} est retombe sous le gros verrou", numero);
+    }
+}
+
+
+/// C8/V2 : receive-side socket sans BKL externe.
+#[test]
+fn receive_side_socket_reste_hors_bkl_externe() {
+    for numero in [
+        nr::SOCKET, nr::SOCKETPAIR, nr::BIND,
+        nr::GETPEERNAME, nr::SETSOCKOPT, nr::GETSOCKOPT,
+        nr::RECVFROM, nr::RECVMSG, nr::RECVMMSG,
+    ] {
+        assert!(!exige_bkl(numero), "C8/V2 : syscall {} sous BKL", numero);
+    }
+    for numero in [
+        nr::CONNECT, nr::SENDTO, nr::SENDMSG, nr::SENDMMSG, nr::SHUTDOWN
+    ] {
+        assert!(exige_bkl(numero), "C8/V2 : syscall TX {} libere trop tot", numero);
     }
 }
 
