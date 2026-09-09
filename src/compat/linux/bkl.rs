@@ -416,6 +416,30 @@ pub const SANS_BKL: &[(u64, &str)] = &[
     (nr::PIPE2, "c6: identique a PIPE, avec les drapeaux"),
     (nr::EPOLL_CTL, "c6: table des descripteurs + verrou de la liste epoll + Mm"),
 
+    // --- Lot c7 : le sommeil, dont le contrat exigeait ce dont il se defaisait
+    //
+    // BOUCHAUD_C7_SOMMEIL_SANS_BKL_V1
+    //
+    // `sleep_ticks` portait `debug_assert!(held_by_current_cpu())`. L'exigence
+    // ne decrivait rien de ce que la fonction fait : tout ce qu'elle touche est
+    // atomique -- `wake_deadline_ns` et `state` sont des stores ordonnes,
+    // `arme_echeance` un `fetch_min` -- et sa boucle d'attente tourne SANS le
+    // verrou, que `suspend_for_schedule()` rend des la premiere ligne.
+    //
+    // L'assertion forcait donc ses appelants a prendre un verrou global pour le
+    // lui rendre aussitot. Le contrat a ete change a la source plutot que
+    // contourne : la profondeur d'entree est relevee quelle qu'elle soit, et
+    // `verifie_profondeur_rendue` exige toujours qu'on la retrouve. Zero est
+    // une profondeur comme une autre.
+    //
+    // Lu :    la memoire utilisateur pour la duree (`timespec_ms`, domaine
+    //         `Mm`) et les horloges atomiques.
+    // Ecrit : `remain` en memoire utilisateur, et les deux champs atomiques de
+    //         la tache courante.
+    // Verrou : aucun. `schedule()` s'execute deja sans le gros verrou.
+    (nr::NANOSLEEP, "c7: contrat de sleep_ticks corrige ; stores atomiques + Mm, la boucle tournait deja sans verrou"),
+    (nr::CLOCK_NANOSLEEP, "c7: identique a NANOSLEEP, avec l'echeance absolue"),
+
     // --- Constantes : le bras d'aiguillage ne lit ni n'ecrit rien ------------
     //
     // Ces appels rendent une valeur litterale. Ils ne touchent ni la table des

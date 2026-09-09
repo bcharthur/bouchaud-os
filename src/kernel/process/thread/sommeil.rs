@@ -62,11 +62,36 @@ pub fn attends_un_tick() {
     sleep_ticks(1);
 }
 
+/// Dort `ticks` ticks, que l'appelant tienne le gros verrou ou non.
+///
+/// # Le contrat a change, et voici ce qu'il etait
+///
+/// Cette fonction exigeait le gros verrou de son appelant :
+///
+/// ```ignore
+/// debug_assert!(smp_lock::held_by_current_cpu(),
+///               "task: sleep_ticks requiert le BKL externe de l'appelant");
+/// ```
+///
+/// L'exigence ne decrivait rien de ce que le corps fait. Tout ce qu'il touche
+/// est atomique -- `wake_deadline_ns` et `state` sont des stores ordonnes,
+/// `arme_echeance` est un `fetch_min` -- et la boucle d'attente tourne de toute
+/// facon SANS le verrou : `suspend_for_schedule()` le rend des la premiere
+/// ligne, precisement parce qu'on ne dort jamais en le tenant.
+///
+/// L'assertion ne protegeait donc pas le sommeil. Elle FORCAIT ses appelants a
+/// prendre un verrou global pour le lui rendre aussitot -- et c'est a ce titre
+/// qu'elle maintenait `nanosleep` et `clock_nanosleep` sous le gros verrou,
+/// alors qu'ils n'en avaient aucun usage.
+///
+/// # Ce qui reste garanti
+///
+/// La profondeur d'entree est relevee, quelle qu'elle soit, et
+/// `verifie_profondeur_rendue` exige qu'on la retrouve a la sortie. Un appelant
+/// qui tenait le verrou le retrouve ; un appelant qui n'en avait pas n'en
+/// gagne pas. Zero est une profondeur comme une autre, et c'est desormais la
+/// plus courante.
 pub fn sleep_ticks(ticks: u64) {
-    debug_assert!(
-        smp_lock::held_by_current_cpu(),
-        "task: sleep_ticks requiert le BKL externe de l'appelant"
-    );
     // BOUCHAUD_P0_CONTRAT_PROFONDEUR_V1 : voir `verifie_profondeur_rendue`.
     let profondeur_entree = smp_lock::profondeur_locale();
     let duration_ns = ticks.max(1)

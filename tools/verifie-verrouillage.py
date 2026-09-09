@@ -78,6 +78,10 @@ AUDITS_NOMMES = {
     "PIPE": "c6 -- table des descripteurs + etat de tube + Mm",
     "PIPE2": "c6 -- table des descripteurs + etat de tube + Mm",
     "EPOLL_CTL": "c6 -- table des descripteurs + verrou de la liste epoll + Mm",
+    # c7 -- le contrat de `sleep_ticks` a ete change a la source : il n'exige
+    # plus le gros verrou de son appelant, parce qu'il ne s'en servait pas.
+    "NANOSLEEP": "c7 -- stores atomiques + Mm ; la boucle tournait deja sans verrou",
+    "CLOCK_NANOSLEEP": "c7 -- identique a NANOSLEEP, avec l'echeance absolue",
     "MPROTECT": "jalon SMP4 -- domaine Arc<Process>::Mm + protocole TLB sur IRQ",
     "BRK": "jalon SMP4 -- domaine Arc<Process>::Mm + protocole TLB sur IRQ",
     # A1 lot 2 -- voir l'en-tete de bkl.rs et la preuve de duree de vie sur

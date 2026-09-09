@@ -83,6 +83,7 @@ fn les_retraits_deja_mesures_ne_regressent_pas() {
         nr::CLOCK_GETTIME,       // tete de liste d'une boucle d'evenements
         nr::SCHED_YIELD,         // relachait deja le verrou pour commuter
         // lot c6 : la famille de la boucle d'evenements, meme domaine que POLL
+        nr::NANOSLEEP, nr::CLOCK_NANOSLEEP,  // lot c7
         nr::EVENTFD, nr::EVENTFD2,
         nr::TIMERFD_CREATE, nr::TIMERFD_SETTIME, nr::TIMERFD_GETTIME,
         nr::PIPE, nr::PIPE2, nr::EPOLL_CTL,
@@ -91,22 +92,25 @@ fn les_retraits_deja_mesures_ne_regressent_pas() {
     }
 }
 
-/// `NANOSLEEP` et `CLOCK_NANOSLEEP` restent sous le gros verrou, et ce n'est
-/// pas un oubli.
+/// `NANOSLEEP` et `CLOCK_NANOSLEEP` sont sortis du gros verrou -- apres que
+/// leur contrat a ete change a la source.
 ///
-/// Ils descendent dans `task::sleep_ticks`, qui porte un `debug_assert!` sans
-/// ambiguite : « requiert le BKL externe de l'appelant ». Le chemin suspend
-/// puis reprend ce verrou externe autour de la commutation, et la profondeur
-/// rendue est verifiee. Les liberer sans changer d'abord ce contrat ferait
-/// suspendre une profondeur nulle et reprendre une profondeur nulle -- ce qui
-/// passerait les tests et romprait l'invariant que l'assertion protege.
+/// Ils descendaient dans `task::sleep_ticks`, qui portait
+/// `debug_assert!(held_by_current_cpu())`. Le lot precedent les avait laisses
+/// verrouilles pour cette raison, et c'etait le bon choix a ce moment-la : les
+/// liberer sans toucher au contrat aurait fait suspendre une profondeur nulle
+/// et en reprendre une nulle, ce qui passe les tests et rompt l'invariant.
 ///
-/// Ce cas existe pour que le prochain qui parcourt la liste des appels encore
-/// verrouilles trouve la raison ici, plutot que de refaire l'analyse.
+/// La bonne correction n'etait pas de contourner l'assertion mais de constater
+/// qu'elle ne decrivait rien : le corps de `sleep_ticks` n'utilise que des
+/// stores atomiques, et sa boucle d'attente rend le verrou des la premiere
+/// ligne. L'assertion a donc ete retiree, et `verifie_profondeur_rendue`
+/// continue d'exiger que la profondeur d'entree -- zero comprise -- soit
+/// retrouvee a la sortie.
 #[test]
-fn le_sommeil_reste_sous_verrou_tant_que_son_contrat_l_exige() {
-    assert!(exige_bkl(nr::NANOSLEEP));
-    assert!(exige_bkl(nr::CLOCK_NANOSLEEP));
+fn le_sommeil_est_sorti_du_gros_verrou() {
+    assert!(!exige_bkl(nr::NANOSLEEP));
+    assert!(!exige_bkl(nr::CLOCK_NANOSLEEP));
 }
 
 /// Chaque ligne porte une justification NON VIDE. Une justification qu'on ne
