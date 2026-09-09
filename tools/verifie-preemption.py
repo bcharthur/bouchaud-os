@@ -44,7 +44,8 @@ GARDES = [
 
 # Le noyau doit garder au moins ce nombre de sites d'appel HORS du module de
 # preemption lui-meme. Le seuil monte quand on en ajoute ; il ne redescend pas.
-SITES_MINIMUM = 3
+# C8/V2 ajoute src/compat/linux/net.rs via recvmmsg.
+SITES_MINIMUM = 4
 
 
 def corps_de_safe_point(source: str) -> str:

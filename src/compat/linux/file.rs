@@ -438,8 +438,10 @@ pub fn lit_octets(fd: i32, buffer: u64, count: usize, non_bloquant: bool) -> i64
             // descripteurs qui a besoin du verrou, c'est l'anneau. L'attribuer
             // a `Fd` faisait porter au sous-systeme des descripteurs une dette
             // qui n'est pas la sienne, et cachait la seule qui reste ici.
-            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Reseau);
-            let _kernel = crate::kernel::smp_lock::enter();
+            // BOUCHAUD_C8_READ_SOCKET_SANS_BKL_EXTERNE_V2
+            // `sys_recvfrom` borne maintenant lui-meme le legacy inet autour
+            // des pumps TCP/UDP ; aucune attente ne doit rester sous un BKL
+            // englobant depuis read(2).
             crate::kernel::abi::net::sys_recvfrom(fd, buffer, count, 0, 0, 0)
         }
         FdKind::SocketPair(inbox, _) => {

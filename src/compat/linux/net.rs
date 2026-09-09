@@ -26,6 +26,7 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU16, Ordering};
 use crate::kernel::sync::SpinLock;
 
 use crate::kernel::abi::{errno, user_read, user_write};
@@ -89,14 +90,27 @@ impl SocketState {
 }
 
 /// Alloue un port local ephemere.
+// BOUCHAUD_C8_RECV_SANS_BKL_V2
+//
+// BIND pouvait s'appuyer sur le BKL pour masquer la course sur NEXT.
+// Maintenant que BIND sort du verrou global, l'etat devient explicitement
+// atomique.
 fn ephemeral_port() -> u16 {
-    static mut NEXT: u16 = 0;
-    unsafe {
-        if NEXT == 0 {
-            NEXT = 0xC000 | (crate::arch::x86_64::cpu::rdtsc() as u16 & 0x0FFF);
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    let seed = 0xC000 | (crate::arch::x86_64::cpu::rdtsc() as u16 & 0x0FFF);
+    let mut courant = NEXT.load(Ordering::Acquire);
+    loop {
+        let base = if courant == 0 { seed } else { courant };
+        let suivant = base.wrapping_add(1) | 0xC000;
+        match NEXT.compare_exchange_weak(
+            courant,
+            suivant,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return suivant,
+            Err(observe) => courant = observe,
         }
-        NEXT = NEXT.wrapping_add(1) | 0xC000;
-        NEXT
     }
 }
 
@@ -605,6 +619,11 @@ pub fn sys_recvfrom(
                 + 3 * crate::kernel::timer::TICKS_PER_SECOND.max(1);
             loop {
                 let pret = {
+                    // C8/V2 : le legacy inet n'est pas encore concurrent.
+                    // Le domaine est borne au pump et acquis avant SocketState
+                    // pour conserver l'ordre historique BKL -> socket.
+                    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Reseau);
+                    let _kernel = crate::kernel::smp_lock::enter();
                     let mut borrowed = state.lock();
                     let conn = match borrowed.conn.as_mut() {
                         Some(conn) => conn,
@@ -640,7 +659,11 @@ pub fn sys_recvfrom(
         }
         SocketKind::Udp => {
             if state.lock().datagrams.is_empty() {
-                pump_udp(&state);
+                {
+                    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Reseau);
+                    let _kernel = crate::kernel::smp_lock::enter();
+                    pump_udp(&state);
+                }
             }
             // Attente bloquante : sur le temps, et en rendant le processeur.
             //
@@ -659,7 +682,11 @@ pub fn sys_recvfrom(
                     // prochaine interruption materielle. Meme raison que dans
                     // `sys_poll`.
                     task::attends_un_tick();
+                    {
+                    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Reseau);
+                    let _kernel = crate::kernel::smp_lock::enter();
                     pump_udp(&state);
+                }
                 }
             }
             let datagram = state.lock().datagrams.pop();
@@ -1250,6 +1277,10 @@ pub fn sys_recvmmsg(fd: i32, msgvec: u64, vlen: u32, flags: u32, _timeout: u64) 
         }
         crate::kernel::abi::user_write(entree + MMSG_LEN, &(resultat as u32).to_le_bytes());
         recus += 1;
+
+        // C8/V2 : une rafale recvmmsg peut etre longue. Ce point est hors
+        // SocketState, hors domaine Reseau et, apres cette tranche, hors BKL.
+        let _ = crate::kernel::scheduler::preempt::safe_point();
     }
     recus
 }

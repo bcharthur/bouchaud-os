@@ -440,6 +440,23 @@ pub const SANS_BKL: &[(u64, &str)] = &[
     (nr::NANOSLEEP, "c7: contrat de sleep_ticks corrige ; stores atomiques + Mm, la boucle tournait deja sans verrou"),
     (nr::CLOCK_NANOSLEEP, "c7: identique a NANOSLEEP, avec l'echeance absolue"),
 
+
+    // --- Lot c8/v2 : receive-side socket sans BKL externe --------------------
+    // BOUCHAUD_C8_RECV_SANS_BKL_V2
+    //
+    // Le pump inet legacy reprend Domaine::Reseau + BKL en interne, en
+    // conservant l'ordre BKL -> SocketState. Les attentes se font hors BKL.
+    // CONNECT/SEND*/SHUTDOWN restent volontairement sous le verrou.
+    (nr::SOCKET, "c8v2: creation locale + table des descripteurs"),
+    (nr::SOCKETPAIR, "c8v2: Canaux + table des descripteurs + Mm"),
+    (nr::BIND, "c8v2: SocketState + port ephemere AtomicU16"),
+    (nr::GETPEERNAME, "c8v2: SocketState + Mm"),
+    (nr::SETSOCKOPT, "c8v2: no-op explicite"),
+    (nr::GETSOCKOPT, "c8v2: SocketState/Canal + Mm"),
+    (nr::RECVFROM, "c8v2: pump inet borne en interne, attente sans BKL"),
+    (nr::RECVMSG, "c8v2: canaux/FD + RECVFROM audite"),
+    (nr::RECVMMSG, "c8v2: boucle RECVMSG + safe point"),
+
     // --- Constantes : le bras d'aiguillage ne lit ni n'ecrit rien ------------
     //
     // Ces appels rendent une valeur litterale. Ils ne touchent ni la table des
