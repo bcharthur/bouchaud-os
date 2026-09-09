@@ -134,6 +134,27 @@ pub fn released(class: LockClass) {
 
 pub fn depth() -> usize { DEPTH[cpu()].load(Ordering::Acquire) }
 
+/// Remet la pile de ce CPU a zero.
+///
+/// # Pourquoi cette fonction existe
+///
+/// Une violation detectee panique en construction de debogage, et la panique
+/// laisse la pile du CPU dans l'etat ou elle etait -- c'est voulu : le releve
+/// de faute doit pouvoir la lire.
+///
+/// La preuve hote, elle, enchaine plusieurs cas dans un MEME binaire, donc sur
+/// les memes statiques. Sans remise a zero, le premier cas qui panique
+/// fausserait tous les suivants, et la suite ne prouverait plus ce qu'elle
+/// annonce. C'est le seul appelant, et le nom le dit.
+#[doc(hidden)]
+pub fn reinitialise_pour_preuve() {
+    let c = cpu();
+    for index in 0..MAX_HELD {
+        STACK[c][index].store(0, Ordering::Relaxed);
+    }
+    DEPTH[c].store(0, Ordering::Release);
+}
+
 pub fn stats() -> Stats {
     Stats {
         acquisitions: ACQUISITIONS.load(Ordering::Relaxed),
