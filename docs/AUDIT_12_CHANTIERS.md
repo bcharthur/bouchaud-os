@@ -19,16 +19,42 @@ preuve executable porte 🔵 ou ⚪, jamais ✅.
 L'inventaire actuel : **68 garde-fous**, **59 suites de tests hote Rust**,
 5 suites C++, 12 tests de fiabilite Python, ~88 000 lignes de noyau.
 
+## Mesures — recalculees sur le code, jamais recopiees
+
+Ce bloc est produit par `tools/mesure-chantiers.py`. Il n'est pas ecrit a la
+main, et `--verifie` le compare a l'arbre dans la barriere d'architecture : un
+document dont les chiffres ont peri fait echouer la CI.
+
+C'est la reponse a la facon dont ce document avait peri une premiere fois. Il
+affirmait « futex reste sous BKL » et « pas de W^X » plusieurs commits apres que
+le code eut dit l'inverse. Un document faux est pire qu'un document absent : on
+lui fait confiance.
+
+<!-- MESURE-CHANTIERS:DEBUT -->
+| Mesure | Valeur |
+|---|---|
+| Appels systeme aiguilles | **159** |
+| Appels hors gros verrou | **72** |
+| Appels encore sous gros verrou | **87** |
+| Fichiers portant un point sur de preemption | **3** |
+| Garde-fous d'architecture | **56** |
+| Suites de test hote | **64** |
+| W^X applique au chargement ELF | **oui** |
+| Canari de pile noyau | **oui** |
+<!-- MESURE-CHANTIERS:FIN -->
+
+Regenerer : `python3 tools/mesure-chantiers.py --ecris`
+
 ## Tableau d'ensemble
 
 | # | Chantier | Etat | Ce qui manque, en une phrase |
 |---|---|---:|---|
-| 1 | BKL → noyau concurrent | 🔵 | 61 appels sur 165 liberes ; les sockets, `futex`, `openat` et `ioctl` restent. |
+| 1 | BKL → noyau concurrent | 🔵 | Voir le bloc mesure ci-dessus. `futex`, la famille boucle d'evenements et le sommeil sont sortis ; les **sockets**, `openat`/coeur FS, `ioctl`, les signaux, `clone` et `execve` restent. |
 | 2 | Scheduler NG + preemption | 🔵 | Preemption depuis l'IRQ seulement ; pas de points surs, pas de tickless. |
 | 3 | Memoire NG | 🔵 | Compagnon pour le DMA ; `LockedHeap` reste le fond du tas noyau, pas de slab. |
 | 4 | Graphique NG / compositeur ring 3 | 🔵 | Le contrat existe et le compositeur noyau reste le chemin par defaut. |
 | 5 | Systeme de fichiers + E/S moderne | 🟡 | Commit A/B et barriere reelle ; pas d'extents, pas d'E/S asynchrone. |
-| 6 | Architecture de securite | 🟡 | Mots de passe sales et haches, profils separes ; pas de W^X, pas de sandbox M14. |
+| 6 | Architecture de securite | 🟡 | Mots de passe sales et haches, profils separes, **W^X applique** (`security/wx.rs`, refuse au chargement ELF et dans `mmap`/`mprotect`) ; pas d'ASLR, pas de sandbox M14. |
 | 7 | ABI Bouchaud + IPC natif | 🟡 | Les primitives existent ; Linux reste la personnalite dominante. |
 | 8 | Ladybird comme produit | 🔵 | Un renderer, pas de sandbox, pas de WPT. |
 | 9 | Reseau NG | 🔵 | Retransmission et RTO prouves ; pas d'IPv6, pas de zero-copie. |
@@ -179,7 +205,13 @@ droits d'ecriture persistants sont bornes par sous-arbre canonique.
 *Preuve :* `test_bac_a_sable_navigateur.rs` (15), `test_abi_droits.rs` (19),
 `verifie-telechargements.py`, `verifie-installation.py`.
 
-**Ce qui manque.** **Aucun W^X / NX** : la recherche de `NO_EXECUTE` ne rend
+**Corrige depuis.** W^X existe : `src/kernel/security/wx.rs`, applique au
+chargement ELF (« segment inscriptible et executable refuse (W^X) ») comme dans
+`mmap`/`mprotect`, avec sa suite hote `tools/platform/test_wx.rs` et son
+garde-fou `tools/verifie-wx.py`. Le paragraphe ci-dessous decrit l'etat
+*anterieur* et est conserve pour l'historique.
+
+**Ce qui manquait alors.** **Aucun W^X / NX** : la recherche de `NO_EXECUTE` ne rend
 rien. Pas de randomisation d'adresses. La sandbox du plan M14 -- seccomp-like,
 `pledge`/`unveil` -- n'existe pas (2 mentions, aucune implementation). Les
 capabilities existent en type mais ne gouvernent pas encore tous les appels.

@@ -1,7 +1,32 @@
 # TRIGKEY Speed S5 — ce que la machine porte, et ce que le noyau en fait
 
-Machine de reference de Bouchaud OS. Ryzen 7 5700U (Zen 2 « Lucienne »,
-8 cœurs / 16 fils, FP6), 32 Gio DDR4, NVMe M.2 de 500 Go.
+Machine de reference de Bouchaud OS, **telle que le noyau la detecte
+reellement** — et non telle qu'une fiche produit la decrit.
+
+| Ce que le noyau mesure | Valeur observee | Ou cela se lit |
+|---|---|---|
+| CPU | **AMD Ryzen 7 5800H with Radeon Graphics** | `/diagnostics/hardware.txt` — `cpu.brand` |
+| Fils logiques | **16** | barre du bureau — `cores:16/16` |
+| RAM utilisable UEFI | **~11,5 Gio** | barre du bureau — `RAM:11Go` |
+| Affichage | **GOP 1920×1080, 32 bpp** | `/diagnostics/display.txt` |
+| Ethernet | **Realtek `10ec:8168`** (RTL8111/8168) | `/diagnostics/pci.txt` — `01:00.0` |
+| Wi-Fi | **Intel `8086:2723`** (AX200, Wi-Fi 6) | `/diagnostics/pci.txt` — `02:00.0` |
+| NVMe | contrôleur `2646:*` (Kingston), classe `01:08:02` | `/diagnostics/pci.txt` — `03:00.0` |
+| xHCI | **deux contrôleurs** AMD `1022:1639`, classe `0c:03:30` | `/diagnostics/pci.txt` — `04:00.3` et `04:00.4` |
+| Graphique | AMD `1002:1638` (iGPU Cezanne) | `/diagnostics/pci.txt` — `04:00.0` |
+| Pont LPC/ISA | AMD `1022:790b` | `/diagnostics/pci.txt` — `00:14.0` |
+
+> **Correction.** Ce document annoncait « Ryzen 7 5700U (Zen 2 « Lucienne »),
+> 32 Gio DDR4 ». Aucun releve de la machine physiquement utilisee ne le
+> confirme : elle rapporte un **5800H** (Zen 3 « Cezanne »), 16 fils logiques
+> et **~11,5 Gio** utilisables. Une documentation qui decrit une autre machine
+> que celle sur laquelle on debogue coute plus qu'elle ne rapporte — chaque
+> hypothese qu'on en tire est fausse d'un cran.
+>
+> La difference RAM peut venir de la reservation UEFI/iGPU ou d'une
+> configuration memoire differente ; le chiffre retenu ici est celui que le
+> noyau **compte** apres `ExitBootServices`, parce que c'est celui dont
+> l'allocateur dispose.
 
 Ce document ne decrit pas ce qu'on voudrait. Il decrit, composant par
 composant, **comment le noyau le trouve**, **ce qu'il en fait**, et **ce qu'on
