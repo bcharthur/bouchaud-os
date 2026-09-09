@@ -39,6 +39,8 @@ pub mod compagnon;
 pub mod dma_compagnon;
 #[path = "memory/pages_tas.rs"]
 pub mod pages_tas;
+#[path = "memory/dalles_tas.rs"]
+pub mod dalles_tas;
 #[path = "memory/arene_dma.rs"]
 pub mod arene_dma;
 pub mod input;

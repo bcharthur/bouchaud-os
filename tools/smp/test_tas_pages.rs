@@ -234,8 +234,8 @@ pub mod kernel {
     // se resout a travers un repertoire `tools/smp/kernel/` qui n'existe pas,
     // et le systeme de fichiers refuse de traverser ce qui n'existe pas.
     pub use crate::{
-        compagnon_prod as compagnon, heap_prod as heap, magasin_prod as magasin,
-        pages_tas_prod as pages_tas,
+        compagnon_prod as compagnon, dalles_tas_prod as dalles_tas,
+        heap_prod as heap, magasin_prod as magasin, pages_tas_prod as pages_tas,
     };
 }
 
@@ -245,6 +245,8 @@ pub mod compagnon_prod;
 pub mod magasin_prod;
 #[path = "../../src/kernel/memory/pages_tas.rs"]
 pub mod pages_tas_prod;
+#[path = "../../src/kernel/memory/dalles_tas.rs"]
+pub mod dalles_tas_prod;
 #[path = "../../src/kernel/memory/heap.rs"]
 pub mod heap_prod;
 
@@ -670,4 +672,79 @@ fn l_etat_publie_reste_coherent() {
     for (bloc, layout) in vivants.drain(..) {
         libere(bloc, layout);
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// C9.1 : metadonnees des dalles
+// ---------------------------------------------------------------------------
+
+#[test]
+fn c9_les_dalles_comptent_les_objets_vivants() {
+    tas_pret();
+    let avant = heap::ng_stats();
+    let backing_avant = avant.backing_allocs;
+
+    const N: usize = 2048;
+    let mut blocs = Vec::new();
+    for _ in 0..N {
+        blocs.push(alloue(128, 8));
+    }
+
+    let pendant = heap::ng_stats();
+    assert!(
+        pendant.objets_dalles_vivants >= avant.objets_dalles_vivants + N,
+        "C9 ne voit pas les objets vivants"
+    );
+
+    for (bloc, layout) in blocs.drain(..) {
+        libere(bloc, layout);
+    }
+
+    let apres = heap::ng_stats();
+    assert_eq!(
+        apres.objets_dalles_vivants,
+        avant.objets_dalles_vivants,
+        "les objets rendus restent comptes vivants"
+    );
+    assert_eq!(
+        apres.backing_allocs,
+        backing_avant,
+        "le suivi C9 a fait redescendre dans LockedHeap"
+    );
+    assert_eq!(
+        apres.dalles_tracking_sous_flux, avant.dalles_tracking_sous_flux,
+        "le comptage C9 est passe sous zero"
+    );
+    assert_eq!(
+        apres.dalles_tracking_surallocations, avant.dalles_tracking_surallocations,
+        "le comptage C9 depasse la capacite"
+    );
+}
+
+#[test]
+fn c9_une_dalle_vide_devient_candidate_sans_reclaim_premature() {
+    tas_pret();
+    let avant = heap::ng_stats();
+    let (_, rendues_avant, _, _, _, _) = pages_tas::stats();
+
+    let mut blocs = Vec::new();
+    for _ in 0..4096 {
+        blocs.push(alloue(256, 8));
+    }
+    for (bloc, layout) in blocs.drain(..) {
+        libere(bloc, layout);
+    }
+
+    let apres = heap::ng_stats();
+    let (_, rendues_apres, _, _, _, _) = pages_tas::stats();
+    assert!(
+        apres.candidats_dalles_vides > avant.candidats_dalles_vides,
+        "aucun passage de dalle a zero n'a ete detecte"
+    );
+    assert!(apres.dalles_vides > 0, "aucune dalle vide visible");
+    assert_eq!(
+        rendues_apres, rendues_avant,
+        "C9.1 a reclaim des pages avant le drainage des caches"
+    );
 }
