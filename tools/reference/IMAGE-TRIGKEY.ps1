@@ -106,6 +106,14 @@ Write-Host "--- MARQUEURS ATTENDUS (console serie / diagnostic) ---" -Foreground
     "BOUCHAUD_TAS_BACKING compagnon=pages     le backing normal est le compagnon",
     "BOUCHAUD_HEAP_ARENE_CACHES_VIDES         basculement d'arene propre",
     "BOUCHAUD_NVME_PERSISTENCE_DEFERRED       la persistance ne bloque plus le demarrage",
+    "BOUCHAUD_NVME_PERSISTENCE_FIL_LANCE      le montage part dans son propre fil",
+    "BOUCHAUD_NVME_GREEN                      le disque interne repond et se decrit",
+    "NVME_IO_READ_ENTER                       la premiere lecture reelle entre",
+    "NVME_IO_DOORBELL                         la sonnette d'entree-sortie est ecrite",
+    "NVME_IO_CQE_OK                           l'achevement revient",
+    "NVME_IO_COPY_END                         les octets arrivent chez l'appelant",
+    "BOUCHAUD_INSTALL_SYSTEME_MONTE           la partition Bouchaud est montee",
+    "BOUCHAUD_USB_STOCKAGE_PRET               une cle USB est lisible",
     "BOUCHAUD_TRIGKEY_RTL8168_DETECTED        carte reseau vue (cable branche)",
     "BOUCHAUD_TRIGKEY_RTL8168_LINK_UP         lien Ethernet monte"
 ) | ForEach-Object { Write-Host "  $_" }
@@ -116,7 +124,9 @@ Write-Host "--- MARQUEURS QUI DOIVENT RESTER ABSENTS ---" -ForegroundColor Cyan
     "BOUCHAUD_TAS_OOM                         le tas n'a plus rien pu servir",
     "BOUCHAUD_HEAP_LISTE_LIBRE_CORROMPUE      usage-apres-liberation dans le tas",
     "BOUCHAUD_PILE_NOYAU_DEBORDEE             pile noyau entree dans sa page de garde",
-    "BOUCHAUD_NVME_HORS_SERVICE               le NVMe a ete mis en quarantaine"
+    "BOUCHAUD_NVME_HORS_SERVICE               le NVMe a ete mis en quarantaine",
+    "NVME_IO_DELAI                            une commande n'a pas ete achevee a temps",
+    "BOUCHAUD_NVME_PERSISTENCE_FIL_REFUSE     le fil de montage n'a pas pu etre cree"
 ) | ForEach-Object { Write-Host "  $_" }
 
 Write-Host ""
@@ -127,7 +137,8 @@ Write-Host "--- SI L'ECRAN DE FAUTE APPARAIT, RELEVER CES LIGNES ---" -Foregroun
     "POINTS FRANCHIS         dernier point de controle atteint",
     "LIENS REFUSES           non nul = liste libre du tas corrompue",
     "PILES DEBORDEES         non nul = une pile noyau est entree dans sa garde",
-    "les 12 dernieres lignes serie, en bas de l'ecran"
+    "les 12 dernieres lignes serie, en bas de l'ecran",
+    "le DERNIER marqueur NVME_IO_* imprime : il nomme l'etape atteinte"
 ) | ForEach-Object { Write-Host "  $_" }
 
 Write-Host ""
